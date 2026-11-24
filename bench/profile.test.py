@@ -4,6 +4,7 @@ import os
 import signal
 import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -171,6 +172,19 @@ class Runtime(unittest.TestCase):
                 self.assertEqual(result.returncode, 1, result.stdout)
                 self.assertIn(diagnostic, result.stderr)
 
+    @unittest.skipIf(sys.platform == "linux", "Linux can profile")
+    def test_profile_refuses_off_linux_before_evidence(self):
+        root = Path(__file__).resolve().parent.parent
+        result = subprocess.run(
+            ["bash", str(root / "bench/run.sh"), "--profile"],
+            env=dict(os.environ, BENCH_PROFILE_MODES="cpu"),
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertEqual(result.stderr, "relay profiling needs Linux for perf and /proc\n")
+        self.assertNotIn("Benchmark evidence", result.stdout)
+
 
 FIXTURE = Path(__file__).with_name("profile.test.txt").read_text()
 IDLE, MUTEX, ALLOCATOR = "2152705", "2152709", "2152707"
@@ -178,6 +192,7 @@ IDLE, MUTEX, ALLOCATOR = "2152705", "2152709", "2152707"
 END = 271707 * 1_000_000_000
 
 
+@unittest.skipUnless(sys.platform == "linux", "relay profiling needs Linux for perf and /proc")
 class Orchestration(unittest.TestCase):
     def harness(self, directory, sampler_binary):
         """A checkout whose committed revision has the old harness and, when
@@ -493,6 +508,7 @@ class Cpu(unittest.TestCase):
 
 
 class Heap(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "linux", "reads /proc")
     def test_usr1_handler_detected(self):
         previous = signal.signal(signal.SIGUSR1, signal.SIG_DFL)
         try:

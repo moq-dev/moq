@@ -8,7 +8,7 @@
 use kio::clock::Instant;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
-#[cfg(feature = "aec")]
+#[cfg(all(feature = "capture", feature = "playback"))]
 use std::sync::mpsc::TrySendError;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -59,10 +59,6 @@ const COMMAND_QUEUE: usize = 2 * mixer::MAX_SINKS;
 const SYNC_ATTEMPTS: u32 = 8;
 const SYNC_DELAY: Duration = Duration::from_millis(4);
 
-/// Frames the sample-format conversion buffer holds. Comfortably more than any
-/// host's period, so the loop over it almost always runs once.
-const SCRATCH_FRAMES: usize = 2048;
-
 /// State shared between the caller's [`Engine`](super::Engine) handles, their
 /// sinks, and the driver thread.
 ///
@@ -96,18 +92,18 @@ struct State {
 	next_id: u64,
 	/// The echo-cancellation tap, rebuilt alongside the sinks. At most one:
 	/// there is one mix, and one microphone hearing it.
-	#[cfg(feature = "aec")]
+	#[cfg(all(feature = "capture", feature = "playback"))]
 	reference: Option<crate::aec::Reference>,
 	/// Set when the mixer has not been told to drop the tap yet, because its
 	/// command queue was full. Retried by [`Shared::sync`].
-	#[cfg(feature = "aec")]
+	#[cfg(all(feature = "capture", feature = "playback"))]
 	detaching_reference: bool,
 	/// Posts a driver sync so a retry actually happens. A plain sender, not
 	/// a [`Handle`](super::Handle): a canceller must not keep the output device
 	/// open, and shutdown is explicit state rather than a disconnect.
 	///
 	/// `None` in tests that drive [`Shared`] without a driver behind it.
-	#[cfg(feature = "aec")]
+	#[cfg(all(feature = "capture", feature = "playback"))]
 	waker: Option<Commands>,
 }
 
@@ -164,7 +160,7 @@ impl Shared {
 
 	/// Remember the channel that posts a driver sync, so a send the mixer's
 	/// command queue was too full to take gets retried.
-	#[cfg(feature = "aec")]
+	#[cfg(all(feature = "capture", feature = "playback"))]
 	pub(super) fn wake_with(&self, waker: Commands) {
 		self.state.lock().unwrap().waker = Some(waker);
 	}
@@ -174,7 +170,7 @@ impl Shared {
 	/// The sink paths do this from [`Engine::sink`](super::Engine::sink) and
 	/// `Sink::drop`, which hold a [`Handle`](super::Handle). A canceller holds
 	/// no handle by design, so its retries are posted from here instead.
-	#[cfg(feature = "aec")]
+	#[cfg(all(feature = "capture", feature = "playback"))]
 	fn wake(state: &State) {
 		if let Some(waker) = &state.waker {
 			waker.sync();
@@ -186,7 +182,7 @@ impl Shared {
 	/// Registers with no device open too: the tap waits for the next restart,
 	/// exactly as a sink does. Refuses a second live reference rather than
 	/// silently disconnecting the first microphone.
-	#[cfg(feature = "aec")]
+	#[cfg(all(feature = "capture", feature = "playback"))]
 	pub(crate) fn set_reference(&self, mut reference: crate::aec::Reference) -> Result<(), Error> {
 		let mut state = self.state.lock().unwrap();
 		if state.reference.is_some() {
@@ -213,7 +209,7 @@ impl Shared {
 	/// Stop feeding the canceller with this id, called when its last clone drops.
 	///
 	/// A no-op when the slot is already empty or belongs to another registration.
-	#[cfg(feature = "aec")]
+	#[cfg(all(feature = "capture", feature = "playback"))]
 	pub(crate) fn clear_reference(&self, id: u64) {
 		let mut state = self.state.lock().unwrap();
 		if !state.reference.as_ref().is_some_and(|r| r.owned_by(id)) {
@@ -249,7 +245,7 @@ impl Shared {
 			// No stream to talk to. Registrations stay pending and `rebind`
 			// picks them up when one opens.
 			state.detaching.clear();
-			#[cfg(feature = "aec")]
+			#[cfg(all(feature = "capture", feature = "playback"))]
 			{
 				state.detaching_reference = false;
 			}
@@ -263,7 +259,7 @@ impl Shared {
 			sink.attach(&mixer);
 		}
 
-		#[cfg(feature = "aec")]
+		#[cfg(all(feature = "capture", feature = "playback"))]
 		{
 			if state.detaching_reference {
 				state.detaching_reference = mixer.try_send(mixer::Command::Reference(None)).is_err();
@@ -274,7 +270,7 @@ impl Shared {
 		}
 
 		let done = state.detaching.is_empty() && state.sinks.iter().all(|s| s.attached());
-		#[cfg(feature = "aec")]
+		#[cfg(all(feature = "capture", feature = "playback"))]
 		let done = done && !state.detaching_reference && state.reference.as_ref().is_none_or(|r| r.attached());
 		done
 	}
@@ -288,7 +284,7 @@ impl Shared {
 			sink.attach(&mixer);
 		}
 
-		#[cfg(feature = "aec")]
+		#[cfg(all(feature = "capture", feature = "playback"))]
 		if let Some(reference) = &mut state.reference {
 			if reference.rebuild(rate) {
 				attach_reference(reference, &mixer);
@@ -303,7 +299,7 @@ impl Shared {
 		state.mixer = Some(mixer);
 		// The old mixer is gone, and with it every sink it was told about.
 		state.detaching.clear();
-		#[cfg(feature = "aec")]
+		#[cfg(all(feature = "capture", feature = "playback"))]
 		{
 			state.detaching_reference = false;
 		}
@@ -316,7 +312,7 @@ impl Shared {
 	}
 
 	/// Whether an echo canceller is registered, for the tests in [`crate::aec`].
-	#[cfg(all(test, feature = "aec"))]
+	#[cfg(all(test, feature = "capture", feature = "playback"))]
 	pub(crate) fn has_reference(&self) -> bool {
 		self.state.lock().unwrap().reference.is_some()
 	}
@@ -325,7 +321,7 @@ impl Shared {
 /// Hand the tap's producer to a running mixer, keeping it if the mixer is
 /// backed up so the next attach retries. The sink-side equivalent lives on
 /// [`Registration::attach`].
-#[cfg(feature = "aec")]
+#[cfg(all(feature = "capture", feature = "playback"))]
 fn attach_reference(reference: &mut crate::aec::Reference, mixer: &SyncSender<mixer::Command>) {
 	let Some(prod) = reference.take() else { return };
 	if let Err(err) = mixer.try_send(mixer::Command::Reference(Some(prod))) {
@@ -863,14 +859,8 @@ impl Driver {
 	where
 		T: cpal::SizedSample + cpal::FromSample<f32>,
 	{
-		// The mixer works in `f32`, so anything else needs a staging buffer.
-		// Allocated once and a whole number of frames long, so however big a
-		// buffer the device asks for, the callback loops over this rather than
-		// resizing (allocating on the audio thread is the one thing it must
-		// never do).
 		let channels = config.channels as usize;
 		let sample_rate = config.sample_rate as f64;
-		let mut scratch = vec![0.0f32; SCRATCH_FRAMES * channels];
 		let mut epoch = None;
 
 		device
@@ -883,14 +873,11 @@ impl Driver {
 					let played_at = timestamp.playback.saturating_duration_since(epoch)
 						+ Duration::from_secs_f64((data.len() / channels) as f64 / sample_rate);
 					mixer.complete(now);
-					mixer.latency(timestamp.playback.checked_duration_since(timestamp.callback));
-					for chunk in data.chunks_mut(scratch.len()) {
-						let scratch = &mut scratch[..chunk.len()];
-						mixer.fill(scratch, played_at);
-						for (out, sample) in chunk.iter_mut().zip(scratch.iter()) {
-							*out = T::from_sample(*sample);
-						}
-					}
+					// Audio is placed on the clock where it is heard: the buffer's first
+					// frame sounds this long after the callback.
+					let delay = timestamp.playback.checked_duration_since(timestamp.callback);
+					mixer.latency(delay, data.len() / channels);
+					mixer.fill(data, played_at, crate::ring::host() + delay.unwrap_or_default());
 				},
 				move |error| {
 					failures.report(&error);
@@ -1066,11 +1053,11 @@ mod tests {
 		let (retired, _rx) = sync_channel(8);
 		let mut mixer = Mixer::new(wired.mixer, retired, 48_000, Layout::Stereo, Default::default()).unwrap();
 		let mut out = vec![0.0; 4096 * 2];
-		mixer.fill(&mut out, Duration::ZERO);
+		mixer.fill(&mut out, Duration::ZERO, crate::ring::host());
 		let samples: Vec<_> = [0.25f32; 123 * 2].iter().flat_map(|s| s.to_le_bytes()).collect();
 		assert_eq!(sink.write(&samples).unwrap().accepted_sample_frames, 123);
 		let mut drain = std::pin::pin!(sink.finish());
-		mixer.fill(&mut out, Duration::from_millis(100));
+		mixer.fill(&mut out, Duration::from_millis(100), crate::ring::host());
 		mixer.complete(Duration::from_millis(100));
 		wired.shared.unbind();
 		assert!(wired.shared.sync());

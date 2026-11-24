@@ -5,13 +5,15 @@
 //! Deterministic: paused time and a single-threaded runtime over the mock transport.
 
 use crate::support;
+use support::AppendNext;
+use support::AtStart;
 
 use std::time::Duration;
 
 use futures::StreamExt;
 
+use moq_net::Version;
 use moq_net::transport::poll::{RecvStream as _, SendStream as _, Session as _};
-use moq_net::{Timestamp, Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -33,10 +35,11 @@ const SUBSCRIBE_TRACKS: &[u8] = &[
 ];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// A client publishing one track to a server subscribed to it, plus the payloads the
@@ -93,8 +96,8 @@ async fn setup(version: Version) -> Setup {
 }
 
 async fn deliver(setup: &mut Setup, payload: &'static [u8]) {
-	let mut group = setup.track.append_group().unwrap();
-	group.write_frame(Timestamp::ZERO, payload).unwrap();
+	let mut group = setup.track.append_next().unwrap();
+	group.write_frame(group.at_start(), payload).unwrap();
 	group.finish().unwrap();
 	let got = kio::clock::timeout(TIMEOUT, setup.frames.next())
 		.await
@@ -129,6 +132,7 @@ async fn subscribe_tracks(pair: &MockPair) -> Vec<u8> {
 /// stream, and the subscription already on the session keeps going.
 #[kio::test]
 async fn subscribe_tracks_is_refused_per_request() {
+	// The request is a hand-built frame with a 16-bit length, so draft-23 is left out.
 	for version in ["moq-transport-18", "moq-transport-20", "moq-transport-22"] {
 		let mut setup = setup(version.parse().unwrap()).await;
 		deliver(&mut setup, b"before").await;

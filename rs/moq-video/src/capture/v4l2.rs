@@ -51,8 +51,7 @@ pub(super) fn cameras() -> Result<Vec<super::Camera>, Error> {
 			{
 				return None;
 			}
-			// A device with no YUYV or MJPEG would list an id `open` refuses, and
-			// hide the PipeWire entry for the same path that could still open it.
+			// A device with no YUYV or MJPEG would list an id `open` refuses.
 			match convertible(&device) {
 				Ok(true) => {}
 				Ok(false) => {
@@ -334,7 +333,7 @@ impl Source {
 }
 
 pub(crate) struct Camera {
-	stream: MmapStream<'static>,
+	stream: MmapStream,
 	source: Source,
 	width: u32,
 	height: u32,

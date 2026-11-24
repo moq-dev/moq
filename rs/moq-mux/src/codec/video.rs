@@ -8,6 +8,104 @@
 
 use crate::catalog::VideoHint;
 
+/// Mark an H.264 or H.265 config in band when the first keyframe after its record carries any
+/// parameter set.
+///
+/// The record's parameter sets seed every keyframe; any one in band (an SPS, a PPS, or an H.265
+/// VPS) means a keyframe may also change or supply them, which only the `avc3`/`hev1` codec string
+/// allows. `keyframe` is length-prefixed by the record's length size. A config without a record is
+/// left alone.
+pub(crate) fn detect_in_band(config: &mut hang::catalog::VideoConfig, keyframe: &[u8]) -> crate::Result<()> {
+	let mut scan = InBand::new(config)?;
+	scan.scan(keyframe);
+	scan.apply(config);
+	Ok(())
+}
+
+/// [`detect_in_band`] over a keyframe that arrives in pieces, holding only the current NAL unit's
+/// length prefix and how much of it is left.
+pub(crate) struct InBand {
+	/// How the record frames the keyframe, or `None` for a config this leaves alone.
+	framing: Option<Framing>,
+	/// The length prefix read so far, and how many of its bytes.
+	length: usize,
+	read: usize,
+	/// The bytes left in the current NAL unit, whose first is its header when `header` is set.
+	remaining: usize,
+	header: bool,
+	found: bool,
+}
+
+/// A record's NALU length size and its codec's check for a parameter-set NAL header.
+#[derive(Clone, Copy)]
+struct Framing {
+	length_size: usize,
+	is_parameter_set: fn(u8) -> bool,
+}
+
+impl InBand {
+	/// A scan for the record `config` carries.
+	pub(crate) fn new(config: &hang::catalog::VideoConfig) -> crate::Result<Self> {
+		let codec = match (&config.codec, config.description.as_deref()) {
+			(hang::catalog::VideoCodec::H264(_), Some(record)) => Some(Framing {
+				length_size: super::h264::Avcc::parse(record)?.length_size,
+				is_parameter_set: super::h264::is_parameter_set,
+			}),
+			(hang::catalog::VideoCodec::H265(_), Some(record)) => Some(Framing {
+				length_size: super::h265::Hvcc::parse(record)?.length_size,
+				is_parameter_set: super::h265::is_parameter_set,
+			}),
+			_ => None,
+		};
+		Ok(Self {
+			framing: codec,
+			length: 0,
+			read: 0,
+			remaining: 0,
+			header: false,
+			found: false,
+		})
+	}
+
+	/// Read the next bytes of the keyframe.
+	pub(crate) fn scan(&mut self, mut bytes: &[u8]) {
+		let Some(Framing {
+			length_size,
+			is_parameter_set,
+		}) = self.framing
+		else {
+			return;
+		};
+		while !self.found && !bytes.is_empty() {
+			if self.remaining > 0 {
+				if std::mem::take(&mut self.header) {
+					self.found = is_parameter_set(bytes[0]);
+				}
+				let skip = self.remaining.min(bytes.len());
+				self.remaining -= skip;
+				bytes = &bytes[skip..];
+			} else {
+				self.length = (self.length << 8) | usize::from(bytes[0]);
+				self.read += 1;
+				bytes = &bytes[1..];
+				if self.read == length_size {
+					(self.remaining, self.header) = (self.length, self.length > 0);
+					(self.length, self.read) = (0, 0);
+				}
+			}
+		}
+	}
+
+	/// Mark `config` in band if the bytes read so far carried a parameter set.
+	pub(crate) fn apply(&self, config: &mut hang::catalog::VideoConfig) {
+		match &mut config.codec {
+			hang::catalog::VideoCodec::H264(codec) => codec.inline |= self.found,
+			hang::catalog::VideoCodec::H265(codec) => codec.in_band |= self.found,
+			_ => {}
+		}
+	}
+}
+
 /// The predefined sample aspects shared by H.264 and H.265 (their VUI Table E-1).
 pub(super) fn sample_aspect(idc: u8) -> Option<(u32, u32)> {
 	Some(match idc {
@@ -180,14 +278,6 @@ pub(crate) struct Hrd {
 	pub cpb_size: u64,
 }
 
-/// A sequence header that reorders deeper than the track already declared.
-#[derive(Debug, thiserror::Error)]
-#[error("video reorder depth {reorder} exceeds the {declared} the track declared")]
-struct Deepened {
-	declared: u8,
-	reorder: u8,
-}
-
 /// The catalog-publishing state a video importer overlays onto every config it resolves.
 ///
 /// Holds the caller's hint and the last config published (to dedupe re-publishes). Not generic
@@ -244,6 +334,11 @@ impl Catalog {
 		self.last.is_some()
 	}
 
+	/// The out-of-band record the last published config carries, if any.
+	pub(crate) fn description(&self) -> Option<&[u8]> {
+		self.last.as_ref()?.description.as_deref()
+	}
+
 	/// Overlay the hint onto `config` and publish it to `rendition`, unless it matches the last
 	/// publish. A decoder identity change finishes the previous track and mints a fresh name;
 	/// anything else updates the rendition in place.
@@ -265,7 +360,7 @@ impl Catalog {
 		if let Some(declared) = declared {
 			match config.reorder {
 				Some(reorder) if reorder > declared => {
-					return Err(anyhow::Error::new(Deepened { declared, reorder }).into());
+					return Err(crate::container::ReorderError::Deepened { declared, reorder }.into());
 				}
 				_ => config.reorder = Some(declared),
 			}
@@ -309,6 +404,49 @@ impl Catalog {
 
 #[cfg(test)]
 mod tests {
+	/// The in-band scan reads NAL headers only, never their bodies, and finds the same answer however
+	/// the keyframe is split.
+	#[test]
+	fn in_band_scan_matches_across_any_split() {
+		use crate::codec::h264::fixtures::{PPS, SPS_BT709};
+		use bytes::Bytes;
+
+		let avcc =
+			crate::codec::h264::build_avcc(&[Bytes::from_static(SPS_BT709)], &[Bytes::from_static(PPS)]).unwrap();
+		let config = crate::codec::h264::config(&avcc).unwrap();
+		// An IDR whose body is full of bytes that would read as an SPS header.
+		let idr: &[u8] = &[0x65, 0x67, 0x67, 0x68, 0x67];
+		let au = |nals: &[&[u8]]| -> Vec<u8> {
+			nals.iter()
+				.flat_map(|nal| [&(nal.len() as u32).to_be_bytes()[..], nal].concat())
+				.collect()
+		};
+		for (keyframe, expected) in [
+			(au(&[idr]), false),
+			(au(&[idr, idr]), false),
+			(au(&[SPS_BT709, PPS, idr]), true),
+			(au(&[idr, PPS]), true),
+			(au(&[&[], idr]), false),
+		] {
+			let detected = |pieces: &[&[u8]]| {
+				let mut scan = InBand::new(&config).unwrap();
+				for piece in pieces {
+					scan.scan(piece);
+				}
+				let mut config = config.clone();
+				scan.apply(&mut config);
+				config.codec.to_string().starts_with("avc3")
+			};
+			assert_eq!(detected(&[&keyframe]), expected, "{keyframe:?}");
+			for at in 0..=keyframe.len() {
+				let (head, tail) = keyframe.split_at(at);
+				assert_eq!(detected(&[head, tail]), expected, "{keyframe:?} split at {at}");
+			}
+			let bytes: Vec<&[u8]> = keyframe.chunks(1).collect();
+			assert_eq!(detected(&bytes), expected, "{keyframe:?} byte at a time");
+		}
+	}
+
 	use super::*;
 	use crate::container::Frame;
 
@@ -373,6 +511,6 @@ mod tests {
 		publishing.publish(&mut track, config).unwrap();
 		assert_ne!(track.name(), "video");
 		assert_ne!(track.name(), second);
-		track.finish().unwrap();
+		let _finished = track.finish().unwrap();
 	}
 }

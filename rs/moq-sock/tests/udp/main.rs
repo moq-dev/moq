@@ -1,6 +1,6 @@
 #[cfg(apple)]
 use std::io::{self, IoSlice};
-#[cfg(not(any(target_os = "openbsd", target_os = "netbsd", target_os = "wasi", solarish)))]
+#[cfg(not(any(target_os = "openbsd", target_os = "netbsd", solarish)))]
 use std::net::{SocketAddr, SocketAddrV6};
 #[cfg(apple)]
 use std::os::fd::AsRawFd;
@@ -12,9 +12,7 @@ use std::{
 	slice,
 };
 
-#[cfg(not(target_os = "wasi"))]
-use moq_sock::udp::EcnCodepoint;
-use moq_sock::udp::{RecvMeta, Transmit, UdpSockRef, UdpSocketState};
+use moq_sock::udp::{EcnCodepoint, RecvMeta, Transmit, UdpSockRef, UdpSocketState};
 #[cfg(apple)]
 use socket2::MsgHdr;
 use socket2::Socket;
@@ -95,11 +93,6 @@ fn ipv4_source_address_override() {
 	let recv = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
 	recv.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
 	let send_state = UdpSocketState::new((&send).into()).unwrap();
-	#[cfg(apple_fast)]
-	// SAFETY: sendmsg_x is available on the macOS test host.
-	unsafe {
-		send_state.set_apple_fast_path();
-	}
 	UdpSockRef::from(&send).set_nonblocking(false).unwrap();
 
 	let contents = b"hello";
@@ -122,9 +115,7 @@ fn ipv4_source_address_override() {
 	assert_eq!(source.ip(), src_ip);
 }
 
-// The WASI backend sets no ECN codepoint and always reports `None`.
 #[test]
-#[cfg(not(target_os = "wasi"))]
 fn ecn_v6() {
 	let send = Socket::from(UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).unwrap());
 	let recv = Socket::from(UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).unwrap());
@@ -144,7 +135,7 @@ fn ecn_v6() {
 }
 
 #[test]
-#[cfg(not(any(target_os = "openbsd", target_os = "netbsd", target_os = "wasi", solarish)))]
+#[cfg(not(any(target_os = "openbsd", target_os = "netbsd", solarish)))]
 fn ecn_v4() {
 	let send = Socket::from(UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap());
 	let recv = Socket::from(UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap());
@@ -164,7 +155,7 @@ fn ecn_v4() {
 }
 
 #[test]
-#[cfg(not(any(target_os = "openbsd", target_os = "netbsd", target_os = "wasi", solarish)))]
+#[cfg(not(any(target_os = "openbsd", target_os = "netbsd", solarish)))]
 fn ecn_v6_dualstack() {
 	let recv = Socket::new(
 		socket2::Domain::IPV6,
@@ -208,7 +199,7 @@ fn ecn_v6_dualstack() {
 }
 
 #[test]
-#[cfg(not(any(target_os = "openbsd", target_os = "netbsd", target_os = "wasi", solarish)))]
+#[cfg(not(any(target_os = "openbsd", target_os = "netbsd", solarish)))]
 fn ecn_v4_mapped_v6() {
 	let send = Socket::new(
 		socket2::Domain::IPV6,
@@ -381,76 +372,6 @@ fn gso_stale_batch_is_resent() {
 	}
 }
 
-#[test]
-fn socket_buffers() {
-	const BUFFER_SIZE: usize = 123456;
-	const FACTOR: usize = if cfg!(any(target_os = "linux", target_os = "android")) {
-		2 // Linux and Android set the buffer to double the requested size
-	} else {
-		1 // Everyone else is sane.
-	};
-
-	let send = Socket::new(
-		socket2::Domain::IPV4,
-		socket2::Type::DGRAM,
-		Some(socket2::Protocol::UDP),
-	)
-	.unwrap();
-	let recv = Socket::new(
-		socket2::Domain::IPV4,
-		socket2::Type::DGRAM,
-		Some(socket2::Protocol::UDP),
-	)
-	.unwrap();
-	for sock in [&send, &recv] {
-		sock.bind(&socket2::SockAddr::from(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)))
-			.unwrap();
-
-		let socket_state = UdpSocketState::new(sock.into()).expect("created socket state");
-
-		// Change the send buffer size.
-		let buffer_before = socket_state.send_buffer_size(sock.into()).unwrap();
-		assert_ne!(
-			buffer_before,
-			BUFFER_SIZE * FACTOR,
-			"make sure buffer is not already desired size"
-		);
-		socket_state
-			.set_send_buffer_size(sock.into(), BUFFER_SIZE)
-			.expect("set send buffer size {buffer_before} -> {BUFFER_SIZE}");
-		let buffer_after = socket_state.send_buffer_size(sock.into()).unwrap();
-		assert_eq!(
-			buffer_after,
-			BUFFER_SIZE * FACTOR,
-			"setting send buffer size to {BUFFER_SIZE} resulted in {buffer_before} -> {buffer_after}",
-		);
-
-		// Change the receive buffer size.
-		let buffer_before = socket_state.recv_buffer_size(sock.into()).unwrap();
-		socket_state
-			.set_recv_buffer_size(sock.into(), BUFFER_SIZE)
-			.expect("set recv buffer size {buffer_before} -> {BUFFER_SIZE}");
-		let buffer_after = socket_state.recv_buffer_size(sock.into()).unwrap();
-		assert_eq!(
-			buffer_after,
-			BUFFER_SIZE * FACTOR,
-			"setting recv buffer size to {BUFFER_SIZE} resulted in {buffer_before} -> {buffer_after}",
-		);
-	}
-
-	test_send_recv(
-		&send,
-		&recv,
-		Transmit {
-			destination: recv.local_addr().unwrap().as_socket().unwrap(),
-			ecn: None,
-			contents: b"hello",
-			segment_size: None,
-			src_ip: None,
-		},
-	);
-}
-
 fn test_send_recv(send: &Socket, recv: &Socket, transmit: Transmit<'_>) {
 	let send_state = UdpSocketState::new(send.into()).unwrap();
 	let recv_state = UdpSocketState::new(recv.into()).unwrap();
@@ -554,98 +475,6 @@ fn ip_to_v6_mapped(x: IpAddr) -> IpAddr {
 	}
 }
 
-/// Test Apple fast datapath enable/disable functionality.
-///
-/// This test verifies that:
-/// 1. `max_gso_segments()` returns 1 by default (fast path disabled)
-/// 2. After calling `set_apple_fast_path()`, `max_gso_segments()` returns `BATCH_SIZE`
-/// 3. Send/recv still works correctly with the fast path enabled
-#[test]
-#[cfg(apple_fast)]
-fn apple_fast_datapath() {
-	let send = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-	let recv = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-	let dst_addr = recv.local_addr().unwrap();
-
-	let send_state = UdpSocketState::new((&send).into()).unwrap();
-	let recv_state = UdpSocketState::new((&recv).into()).unwrap();
-
-	// Initially, fast path should be disabled and max_gso_segments should be 1
-	assert!(
-		!send_state.is_apple_fast_path_enabled(),
-		"fast path should be disabled initially"
-	);
-	assert_eq!(
-		send_state.max_gso_segments(),
-		1,
-		"max_gso_segments should be 1 before enabling fast path"
-	);
-
-	// Enable the fast path
-	// SAFETY: Assume that sendmsg_x/recvmsg_x are available on the macOS test host.
-	unsafe {
-		send_state.set_apple_fast_path();
-		recv_state.set_apple_fast_path();
-	}
-
-	// After enabling, fast path should be enabled and max_gso_segments should be BATCH_SIZE
-	assert!(
-		send_state.is_apple_fast_path_enabled(),
-		"fast path should be enabled after calling set_apple_fast_path()"
-	);
-	assert_eq!(
-		send_state.max_gso_segments(),
-		moq_sock::udp::BATCH_SIZE,
-		"max_gso_segments should be BATCH_SIZE after enabling fast path"
-	);
-
-	// Verify send/recv still works with fast path enabled
-	recv.set_nonblocking(false).unwrap();
-
-	const SEGMENT_SIZE: usize = 128;
-	let segments = send_state.max_gso_segments();
-	let msg = vec![0xAB; SEGMENT_SIZE * segments];
-
-	send_state
-		.try_send(
-			(&send).into(),
-			&Transmit {
-				destination: dst_addr,
-				ecn: None,
-				contents: &msg,
-				segment_size: Some(SEGMENT_SIZE),
-				src_ip: None,
-			},
-		)
-		.unwrap();
-
-	// Receive all segments
-	let mut buf = [0u8; u16::MAX as usize];
-	let mut total_received = 0;
-	while total_received < segments {
-		let mut meta = RecvMeta::default();
-		let n = recv_state
-			.recv(
-				(&recv).into(),
-				&mut [IoSliceMut::new(&mut buf)],
-				slice::from_mut(&mut meta),
-			)
-			.unwrap();
-		assert_eq!(n, 1);
-		let received_segments = meta.len / meta.stride;
-		for i in 0..received_segments {
-			assert_eq!(
-				&buf[i * meta.stride..(i + 1) * meta.stride],
-				&msg[(total_received + i) * SEGMENT_SIZE..(total_received + i + 1) * SEGMENT_SIZE],
-				"segment {} content mismatch",
-				total_received + i
-			);
-		}
-		total_received += received_segments;
-	}
-	assert_eq!(total_received, segments, "should receive all segments");
-}
-
 #[test]
 #[cfg(apple)]
 fn sndbuf_cmsg_boundary() {
@@ -672,26 +501,10 @@ fn sndbuf_cmsg_boundary() {
 	assert_min_sndbuf_enforced(&state, &send, dst, clen);
 }
 
-/// Asserts `UdpSocketState`'s `SO_SNDBUF` floor holds on `sendmsg_x`.
-#[test]
-#[cfg(apple_fast)]
-fn sndbuf_cmsg_boundary_fast_path() {
-	let send = Socket::from(UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).unwrap());
-	let recv = UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).unwrap();
-	let dst = recv.local_addr().unwrap();
-	send.set_nonblocking(true).unwrap();
-
-	let state = UdpSocketState::new((&send).into()).unwrap();
-	// SAFETY: assumes sendmsg_x is available on the macOS test host.
-	unsafe { state.set_apple_fast_path() };
-	assert_min_sndbuf_enforced(&state, &send, dst, tclass_cmsg_space());
-}
-
 /// Asserts `UdpSocketState`'s `SO_SNDBUF` floor holds on `send`.
 #[cfg(apple)]
 fn assert_min_sndbuf_enforced(state: &UdpSocketState, send: &Socket, dst: SocketAddr, clen: usize) {
-	let _ = state.set_send_buffer_size(send.into(), 1);
-	let sndbuf = state.send_buffer_size(send.into()).unwrap();
+	let sndbuf = send.send_buffer_size().unwrap();
 	assert!(sndbuf >= 65535 + clen);
 
 	let transmit = Transmit {
@@ -759,181 +572,3 @@ fn tclass_cmsg_space() -> usize {
 #[cfg(apple)]
 #[repr(align(8))]
 struct AlignedCmsgBuf([u8; 32]);
-
-#[test]
-#[cfg(any(target_os = "linux", target_os = "android"))]
-fn recv_transport_error() {
-	let sock = Socket::from(UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap());
-
-	let state = UdpSocketState::new((&sock).into()).unwrap();
-	state
-		.enable_transport_errors((&sock).into())
-		.expect("failed to enable transport error recv");
-
-	// Pick an unused port by binding then dropping.
-	let unused_port = {
-		let tmp = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-		tmp.local_addr().unwrap().port()
-	};
-
-	let dst = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, unused_port));
-
-	state
-		.try_send(
-			(&sock).into(),
-			&Transmit {
-				destination: dst,
-				ecn: None,
-				contents: b"hello",
-				segment_size: None,
-				src_ip: None,
-			},
-		)
-		.unwrap();
-
-	wait_for_error(&sock);
-	let err = state
-		.recv_transport_error((&sock).into())
-		.expect("failed to read the error queue")
-		.expect("ICMP Port Unreachable was not received");
-
-	assert!(
-		matches!(err.payload, moq_sock::udp::TransportErrorPayload::Unreachable),
-		"expected ICMP destination unreachable transport error"
-	);
-	assert_eq!(
-		err.raw_errno,
-		libc::ECONNREFUSED,
-		"unexpected errno decoded from MSG_ERRQUEUE"
-	);
-	// Linux may report port 0 in SO_EE_OFFENDER for ICMP errors.
-	if let Some(addr) = err.addr {
-		assert_eq!(addr.ip(), dst.ip(), "decoded offender IP does not match destination");
-	}
-}
-
-#[test]
-#[cfg(any(target_os = "linux", target_os = "android"))]
-fn recv_transport_error_ipv6() {
-	let sock = Socket::from(UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).unwrap());
-
-	let state = UdpSocketState::new((&sock).into()).unwrap();
-	state
-		.enable_transport_errors((&sock).into())
-		.expect("failed to enable transport error recv");
-
-	let unused_port = {
-		let tmp = UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).unwrap();
-		tmp.local_addr().unwrap().port()
-	};
-
-	let dst = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, unused_port, 0, 0));
-
-	state
-		.try_send(
-			(&sock).into(),
-			&Transmit {
-				destination: dst,
-				ecn: None,
-				contents: b"hello",
-				segment_size: None,
-				src_ip: None,
-			},
-		)
-		.unwrap();
-
-	wait_for_error(&sock);
-	let err = state
-		.recv_transport_error((&sock).into())
-		.expect("failed to read the error queue")
-		.expect("ICMPv6 Port Unreachable not received");
-
-	assert!(matches!(err.payload, moq_sock::udp::TransportErrorPayload::Unreachable));
-
-	assert_eq!(err.raw_errno, libc::ECONNREFUSED);
-
-	if let Some(addr) = err.addr {
-		assert_eq!(addr.ip(), dst.ip());
-	}
-}
-
-/// Draining the error queue prevents queued ICMP errors from absorbing unrelated sends
-///
-/// When `enable_transport_errors` is active, callers are expected to drain pending
-/// errors via `recv_transport_error` before transmitting. This test confirms that
-/// doing so allows a subsequent send to succeed and deliver its payload.
-#[test]
-#[cfg(any(target_os = "linux", target_os = "android"))]
-fn draining_error_queue_before_send_prevents_absorption() {
-	let sock = Socket::from(UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap());
-
-	let state = UdpSocketState::new((&sock).into()).unwrap();
-	state
-		.enable_transport_errors((&sock).into())
-		.expect("failed to enable transport error recv");
-
-	// Pick an unused port by binding then dropping.
-	let unused_port = {
-		let tmp = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-		tmp.local_addr().unwrap().port()
-	};
-
-	// Enqueue an ICMP port-unreachable error
-	let dst = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, unused_port));
-	state
-		.try_send(
-			(&sock).into(),
-			&Transmit {
-				destination: dst,
-				ecn: None,
-				contents: b"hello",
-				segment_size: None,
-				src_ip: None,
-			},
-		)
-		.unwrap();
-
-	// Drain the error queue before sending - this is the intended usage pattern
-	wait_for_error(&sock);
-	state
-		.recv_transport_error((&sock).into())
-		.expect("failed to read the error queue")
-		.expect("expected one queued error");
-
-	let receiver = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-	receiver.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-
-	state
-		.try_send(
-			(&sock).into(),
-			&Transmit {
-				destination: receiver.local_addr().unwrap(),
-				ecn: None,
-				contents: b"connection close",
-				segment_size: None,
-				src_ip: None,
-			},
-		)
-		.expect("send failed after draining the error queue");
-
-	let mut buf = [0u8; 64];
-	let n = receiver
-		.recv(&mut buf)
-		.expect("packet was not delivered after draining the error queue");
-	assert_eq!(&buf[..n], b"connection close");
-}
-
-/// Block until `sock` has an error queued, which the kernel reports as `POLLERR`.
-#[cfg(any(target_os = "linux", target_os = "android"))]
-fn wait_for_error(sock: &Socket) {
-	use std::os::fd::AsRawFd;
-
-	let mut pfd = libc::pollfd {
-		fd: sock.as_raw_fd(),
-		events: 0,
-		revents: 0,
-	};
-	let n = unsafe { libc::poll(&mut pfd, 1, 5_000) };
-	assert_eq!(n, 1, "no error was queued");
-	assert_ne!(pfd.revents & libc::POLLERR, 0, "revents {:#x}", pfd.revents);
-}

@@ -7,8 +7,6 @@
 //! live QUIC subscriber, then stops the owner through its shutdown trigger
 //! and proves `run` returned with its sockets closed.
 
-#![cfg(feature = "_quic")]
-
 #[cfg(not(target_os = "linux"))]
 use std::net::SocketAddr;
 use std::net::TcpListener;
@@ -44,7 +42,7 @@ fn certificate(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf
 }
 
 fn public_auth(config: &mut Config) {
-	config.auth.public = vec![moq_auth::Pattern::all()];
+	config.auth.public = vec![moq_auth::Prefix::all()];
 }
 
 fn client() -> moq_tokio::Client {
@@ -173,7 +171,7 @@ async fn embed_and_stop(mut config: Config) {
 		relay.config().quic.max_streams,
 		Some(moq_tokio::quic::DEFAULT_MAX_STREAMS)
 	);
-	assert_eq!(relay.cluster().id(), relay.cluster().origin.hop().get());
+	assert_eq!(relay.cluster().id(), relay.cluster().origin.node().get());
 
 	// The application handles: in-process workers publish into the origin the
 	// QUIC sessions see, and the trigger stops the owner from any task. Both
@@ -281,9 +279,11 @@ async fn embed_and_stop(mut config: Config) {
 		.broadcast()
 		.create_track("video", timed())
 		.expect("create track");
-	let mut group = track.append_group().expect("append group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("append group");
 	group
-		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
+		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("write frame");
 	group.finish().expect("finish group");
 
@@ -420,10 +420,8 @@ async fn worker_tokio_custom_route_and_quic() {
 	embed_and_stop(config).await;
 }
 
-/// io_uring workers. Off the default feature set; the Linux gate's test build,
-/// `just rs uring`, and nightly `--all-features` compile it. Skips below the
-/// 6.12 floor unless CI_STRICT.
-#[cfg(all(target_os = "linux", feature = "_uring"))]
+/// io_uring workers. Skips below the 6.12 floor unless CI_STRICT.
+#[cfg(uring)]
 #[tokio::test]
 async fn uring_custom_route_and_quic() {
 	match moq_uring::Worker::new(Default::default()) {
@@ -603,10 +601,13 @@ async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net
 			kind:
 				moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update | moq_net::origin::RouteKind::Restart,
 			announce: route,
+			..
 		} => Some((route, true)),
 		moq_net::origin::RouteEvent {
 			kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 			announce: route,
+			..
 		} => Some((route, false)),
+		other => panic!("unexpected route event {other:?}"),
 	}
 }

@@ -31,16 +31,16 @@ const local = new Local({
     user: { name: "Alice" },
 });
 local.enabled.set(true);
-local.cameraEnabled.set(true);
+local.camera.enabled.set(true);
 
 const room = new Room({ connection, identity: Path.from("alice") });
 ```
 
 `Local` publishes through `Publish.Broadcast`, which
-[encodes while enabled](/lib/js/publish#encoding): while `cameraEnabled` is on,
+[encodes while enabled](/lib/js/publish#encoding): while `camera.enabled` is on,
 the camera's hd and sd renditions encode even when nobody in the room watches,
 so a member who arrives late can fetch the last few seconds. While
-`microphoneEnabled` is on, the microphone keeps raw audio and encodes it once
+`microphone.enabled` is on, the microphone keeps raw audio and encodes it once
 someone listens. Turn either off to stop that capture. Turning the microphone
 off mutes it rather than removing it, so listeners stay subscribed and hear
 the next word at once.
@@ -58,8 +58,6 @@ short retained history.
 Under a CSP that refuses `blob:`, host the worklets and worker as described
 for [watch](/lib/js/watch#strict-csp) and [publish](/lib/js/publish#strict-csp),
 then call both `Watch.assets()` and `Publish.assets()`.
-
-The native twin is [`moq-room`](/lib/rs/moq-room).
 
 See the package [README](https://github.com/moq-dev/moq/blob/main/js/room/README.md)
 for the full API.

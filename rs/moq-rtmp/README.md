@@ -15,13 +15,6 @@ or ffmpeg dependency.
 
 ## Library
 
-RTMPS (`Server::with_tls`) is the only optional piece; drop it with
-`default-features = false` for a plaintext-only build:
-
-```toml
-moq-rtmp = { version = "0.0.1", default-features = false }
-```
-
 ### `Server` / `Request`
 
 Drive the `Server` against your own origin. `accept` runs the handshake and the
@@ -45,11 +38,11 @@ while let Some(request) = server.accept().await {
         // per token with `with_root` / `scope`.
         match request {
             moq_rtmp::Request::Publish(publish) => match authorize(publish.app(), publish.stream_key()).await {
-                Ok(path) => { let _ = publish.accept(&origin, &path, &moq_mux::Ingest::default()).await; }
+                Ok(path) => { let _ = publish.accept(moq_rtmp::Import::new(&origin, path)).await; }
                 Err(err) => { let _ = publish.reject(&err.to_string()).await; }
             },
             moq_rtmp::Request::Play(play) => match authorize(play.app(), play.stream_key()).await {
-                Ok(path) => { let _ = play.accept(&consumer, &path).await; }
+                Ok(path) => { let _ = play.accept(moq_rtmp::Export::new(&consumer, path)).await; }
                 Err(err) => { let _ = play.reject(&err.to_string()).await; }
             },
         }
@@ -98,7 +91,7 @@ Two ways to serve `rtmps://`:
   When the transport is a `TcpStream` you own, call `configure_socket` on it
   first; `Server` does this for every socket it accepts. Its keepalive is the
   only thing that reaps a **play** session whose viewer vanished without a FIN:
-  publishers are bounded by `PUBLISH_IDLE_TIMEOUT`, but a play session sitting on
+  a publisher that sends no media for 30 seconds is dropped, but a play session sitting on
   a quiet broadcast neither reads nor writes, so nothing else would notice.
 
 ## CLI

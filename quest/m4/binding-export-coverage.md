@@ -11,8 +11,16 @@ record without an alias still passes. Parity depends on review.
 ## Plan
 
 Found by the 2026-11-07 API shape audit (bindings). Generate the list of
-FFI items from UniFFI's metadata once, and have each wrapper's test check
-it against the wrapper's public types, with an explicit allowlist for items
-a wrapper deliberately hides. Kotlin's
-fixed list moves to the shared one. When [the exporter](/quest/m3/ffi-exporter.md) replaces UniFFI,
-the list comes from it.
+FFI items from [the exporter](/quest/m3/ffi-exporter.md), and have each
+wrapper's test check it against the wrapper's public types, with an explicit
+allowlist for items a wrapper deliberately hides. Kotlin's fixed list moves
+to the shared one.
+
+Decided 2026-11-15 (maintainer, /quest-complete): ✅ build the list only from
+the exporter, so this waits on it (rejected: from UniFFI's metadata now,
+rebuilt once the exporter lands). The exporter's switch keeps every
+wrapper's API, so a UniFFI version would be written twice.
+
+## Required
+
+- [Switch moq's bindings to rust2's exporter](/quest/m3/ffi-exporter.md) - the exporter the FFI item list is generated from

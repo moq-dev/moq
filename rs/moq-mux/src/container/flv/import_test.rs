@@ -95,7 +95,7 @@ async fn import_populates_catalog() {
 	let mut importer = Import::new(producer, catalog.reserve());
 	let buf = bytes::BytesMut::from(synth_flv().as_slice());
 	importer.decode(&buf).unwrap();
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 
 	let snap = catalog.snapshot();
 	assert_eq!(snap.video.renditions.len(), 1);
@@ -121,7 +121,7 @@ async fn import_emits_frames() {
 	let mut importer = Import::new(producer, catalog.reserve());
 	let buf = bytes::BytesMut::from(synth_flv().as_slice());
 	importer.decode(&buf).unwrap();
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 
 	let snap = catalog.snapshot();
 	let video_name = snap.video.renditions.keys().next().unwrap().clone();
@@ -131,8 +131,12 @@ async fn import_emits_frames() {
 		.track(&video_name)
 		.unwrap()
 		.subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+				moq_net::track::Start::Live {
+					min: Some(Duration::from_secs(1)),
+					max: Some(Duration::from_secs(1)),
+				},
+			)]),
 		)
 		.await
 		.unwrap();
@@ -155,7 +159,7 @@ async fn public_container_preserves_loc_for_flv() {
 	let reserved = catalog.reserve();
 	let mut import = super::Import::new(broadcast, reserved).with_container(hang::catalog::Container::Loc);
 	import.decode(&data).unwrap();
-	import.finish().unwrap();
+	let _finished = import.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
 	let (name, config) = snapshot.video.renditions.iter().next().unwrap();
@@ -186,7 +190,7 @@ async fn import_handles_split_input() {
 	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(head)).unwrap();
 	importer.decode(&bytes::BytesMut::from(tail)).unwrap();
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 
 	let snap = catalog.snapshot();
 	assert_eq!(snap.video.renditions.len(), 1);
@@ -218,7 +222,7 @@ async fn import_enhanced_vp9() {
 	let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
 	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 
 	let snap = catalog.snapshot();
 	assert_eq!(snap.video.renditions.len(), 1);
@@ -258,7 +262,7 @@ async fn import_enhanced_opus() {
 	let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
 	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 
 	let snap = catalog.snapshot();
 	assert_eq!(snap.audio.renditions.len(), 1);
@@ -293,7 +297,7 @@ async fn import_legacy_mp3() {
 	let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
 	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 
 	let snap = catalog.snapshot();
 	assert_eq!(snap.audio.renditions.len(), 1);
@@ -343,7 +347,7 @@ async fn legacy_mp3_channel_change_starts_a_new_track() {
 	let (name, a) = snap.audio.renditions.iter().next().unwrap();
 	assert_ne!(name, &first, "the mono frames publish under a new name");
 	assert_eq!(a.channel_count, 1);
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 }
 
 /// A minimal avcC like [`avcc`], but with a caller-chosen level byte so two video
@@ -423,7 +427,7 @@ async fn import_multitrack_video_many_tracks() {
 	let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
 	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 
 	let snap = catalog.snapshot();
 	assert_eq!(snap.video.renditions.len(), 2, "one rendition per multitrack track id");
@@ -459,13 +463,100 @@ async fn import_multitrack_video_many_codecs() {
 	);
 	write_tag(&mut out, super::TAG_VIDEO, 0, &seq);
 
+	// A record publishes at its track's first keyframe.
+	let idr = vec![0, 0, 0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00];
+	let frames = multitrack_video_body(
+		super::FRAME_TYPE_KEY,
+		super::MULTITRACK_MANY_TRACKS_MANY_CODECS,
+		super::VIDEO_PACKET_CODED_FRAMES,
+		None,
+		&[(0, *b"avc1", idr.clone()), (1, *b"avc1", idr)],
+	);
+	write_tag(&mut out, super::TAG_VIDEO, 0, &frames);
+
 	let mut producer = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
 	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 
 	assert_eq!(catalog.snapshot().video.renditions.len(), 2);
+}
+
+/// FLV video tags: an AVC sequence header carrying `avcc()`, then one keyframe of `nalus`.
+fn avc_session(nalus: &[u8]) -> (Vec<u8>, Vec<u8>) {
+	let mut headers = flv_header(0x05);
+	let mut vseq = vec![
+		(super::FRAME_TYPE_KEY << 4) | super::VIDEO_CODEC_AVC,
+		super::AVC_SEQUENCE_HEADER,
+		0,
+		0,
+		0,
+	];
+	vseq.extend_from_slice(&avcc());
+	write_tag(&mut headers, super::TAG_VIDEO, 0, &vseq);
+	let mut aseq = vec![super::AAC_AUDIO_TAG_HEADER, super::AAC_SEQUENCE_HEADER];
+	aseq.extend_from_slice(&ASC);
+	write_tag(&mut headers, super::TAG_AUDIO, 0, &aseq);
+
+	let mut keyframe = Vec::new();
+	let mut vframe = vec![
+		(super::FRAME_TYPE_KEY << 4) | super::VIDEO_CODEC_AVC,
+		super::AVC_NALU,
+		0,
+		0,
+		0,
+	];
+	vframe.extend_from_slice(nalus);
+	write_tag(&mut keyframe, super::TAG_VIDEO, 0, &vframe);
+	(headers, keyframe)
+}
+
+/// An avcC whose keyframes repeat the SPS in band lands as `avc3`; one whose keyframes don't stays
+/// `avc1`. The record holds the catalog until the keyframe, even past an earlier audio frame.
+#[tokio::test(start_paused = true)]
+async fn avc_keyframe_decides_where_parameter_sets_live() {
+	let idr = [0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00];
+	let mut in_band = vec![0, 0, 0, 4, 0x67, 0x42, 0xc0, 0x1f];
+	in_band.extend_from_slice(&idr);
+
+	for (nalus, inline) in [(idr.to_vec(), false), (in_band, true)] {
+		let (headers, keyframe) = avc_session(&nalus);
+		let mut audio = Vec::new();
+		write_tag(
+			&mut audio,
+			super::TAG_AUDIO,
+			0,
+			&[super::AAC_AUDIO_TAG_HEADER, super::AAC_RAW, 0xde, 0xad],
+		);
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
+		let mut importer = Import::new(broadcast, catalog.reserve());
+
+		importer.decode(&headers).unwrap();
+		importer.decode(&audio).unwrap();
+		assert_eq!(
+			clocks.drain(),
+			vec![],
+			"the record withholds the catalog until its keyframe"
+		);
+
+		importer.decode(&keyframe).unwrap();
+		assert!(!clocks.drain().is_empty(), "the keyframe publishes the catalog");
+		let _finished = importer.finish().unwrap();
+
+		let snap = catalog.snapshot();
+		assert_eq!(snap.audio.renditions.len(), 1);
+		let video = snap.video.renditions.values().next().expect("a video rendition");
+		let VideoCodec::H264(codec) = &video.codec else {
+			panic!("{:?}", video.codec);
+		};
+		assert_eq!(codec.inline, inline, "{}", video.codec);
+		assert_eq!(video.description.as_deref(), Some(avcc().as_slice()));
+	}
 }
 
 /// A publisher that keeps changing its audio and video config replaces each track under a fresh
@@ -511,8 +602,12 @@ async fn config_churn_keeps_flat_state() {
 		.track(&replaced)
 		.unwrap()
 		.subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+				moq_net::track::Start::Live {
+					min: Some(Duration::from_secs(1)),
+					max: Some(Duration::from_secs(1)),
+				},
+			)]),
 		)
 		.await
 		.unwrap();
@@ -528,8 +623,12 @@ async fn config_churn_keeps_flat_state() {
 		.track(snap.video.renditions.keys().next().unwrap())
 		.unwrap()
 		.subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+				moq_net::track::Start::Live {
+					min: Some(Duration::from_secs(1)),
+					max: Some(Duration::from_secs(1)),
+				},
+			)]),
 		)
 		.await
 		.unwrap();
@@ -566,7 +665,7 @@ async fn import_enhanced_av1() {
 	let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
 	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 
 	let snap = catalog.snapshot();
 	let (name, v) = snap.video.renditions.iter().next().unwrap();
@@ -577,8 +676,12 @@ async fn import_enhanced_av1() {
 		.track(name)
 		.unwrap()
 		.subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+				moq_net::track::Start::Live {
+					min: Some(Duration::from_secs(1)),
+					max: Some(Duration::from_secs(1)),
+				},
+			)]),
 		)
 		.await
 		.unwrap();
@@ -605,7 +708,7 @@ async fn import_explicit_sbr_names_its_output() {
 		let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
 		let mut importer = Import::new(producer, catalog.reserve());
 		importer.decode(&bytes::BytesMut::from(data)).unwrap();
-		importer.finish().unwrap();
+		let _finished = importer.finish().unwrap();
 
 		let snap = catalog.snapshot();
 		let a = snap.audio.renditions.values().next().expect("an AAC track");
@@ -627,7 +730,7 @@ async fn import_enhanced_ac3() {
 	let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
 	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 
 	let snap = catalog.snapshot();
 	let a = snap.audio.renditions.values().next().unwrap();
@@ -649,7 +752,7 @@ async fn import_enhanced_eac3() {
 	let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
 	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 
 	let snap = catalog.snapshot();
 	let a = snap.audio.renditions.values().next().unwrap();
@@ -706,7 +809,7 @@ async fn import_reports_negative_pts_and_can_resume() {
 		}
 	));
 	importer.decode(&[]).unwrap();
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 
 	let snap = catalog.snapshot();
 	let name = snap.video.renditions.keys().next().unwrap();
@@ -714,8 +817,12 @@ async fn import_reports_negative_pts_and_can_resume() {
 		.track(name)
 		.unwrap()
 		.subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+				moq_net::track::Start::Live {
+					min: Some(Duration::from_secs(1)),
+					max: Some(Duration::from_secs(1)),
+				},
+			)]),
 		)
 		.await
 		.unwrap();
@@ -724,7 +831,7 @@ async fn import_reports_negative_pts_and_can_resume() {
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
 	let frame = decoder.read_frame().await.unwrap().expect("the good frame");
-	assert_eq!(frame.timestamp.as_millis(), 10);
+	assert_eq!(frame.timestamp.as_millis().unwrap(), 10);
 }
 
 #[tokio::test(start_paused = true)]
@@ -749,7 +856,7 @@ async fn import_enhanced_hvc1_applies_composition_time() {
 	let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
 	let mut importer = Import::new(producer, catalog.reserve());
 	importer.decode(&bytes::BytesMut::from(out.as_slice())).unwrap();
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 
 	let snap = catalog.snapshot();
 	let name = snap.video.renditions.keys().next().unwrap();
@@ -757,8 +864,12 @@ async fn import_enhanced_hvc1_applies_composition_time() {
 		.track(name)
 		.unwrap()
 		.subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+				moq_net::track::Start::Live {
+					min: Some(Duration::from_secs(1)),
+					max: Some(Duration::from_secs(1)),
+				},
+			)]),
 		)
 		.await
 		.unwrap();
@@ -767,7 +878,7 @@ async fn import_enhanced_hvc1_applies_composition_time() {
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
 	let frame = decoder.read_frame().await.unwrap().expect("a video frame");
-	assert_eq!(frame.timestamp.as_millis(), 17);
+	assert_eq!(frame.timestamp.as_millis().unwrap(), 17);
 }
 
 #[tokio::test(start_paused = true)]
@@ -854,13 +965,13 @@ async fn import(chunks: &[Vec<u8>]) -> Imported {
 			after = kio::clock::wall();
 		}
 	}
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
 	Imported {
 		published: crate::container::test_util::published(&consumer, &snapshot).await,
 		video: snapshot.video.renditions.keys().next().unwrap().clone(),
-		clock: snapshot.media.clock.expect("the catalog advertises a clock"),
+		clock: snapshot.sync.clock.expect("the catalog advertises a clock"),
 		arrival: before..=after,
 		refused,
 	}
@@ -914,7 +1025,7 @@ async fn first_catalog_carries_the_anchored_clock() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-	let provisional = catalog.snapshot().media.clock.expect("a clock");
+	let provisional = catalog.snapshot().sync.clock.expect("a clock");
 	let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
 	let mut importer = Import::new(broadcast, catalog.reserve());
 
@@ -922,13 +1033,13 @@ async fn first_catalog_carries_the_anchored_clock() {
 	assert_eq!(clocks.drain(), vec![], "the sequence headers alone publish nothing");
 
 	importer.decode(frames).unwrap();
-	let anchored = catalog.snapshot().media.clock.expect("a clock");
+	let anchored = catalog.snapshot().sync.clock.expect("a clock");
 	assert_ne!(anchored, provisional, "the first frame anchors the clock");
 	let published = clocks.drain();
 	assert!(!published.is_empty(), "the first frame publishes the catalog");
 	assert!(published.iter().all(|clock| *clock == Some(anchored)), "{published:?}");
 
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 	assert!(clocks.drain().iter().all(|clock| *clock == Some(anchored)));
 }
 
@@ -948,8 +1059,8 @@ fn script_metadata_drops_warn_once() {
 		);
 	}
 	import.decode(&data).unwrap();
-	import.finish().unwrap();
 	assert_eq!(import.dropped_metadata(), 2);
+	let _import = import.finish().unwrap();
 	assert_eq!(catalog.snapshot().audio.renditions.len(), 1);
 	logs_assert(|lines| {
 		let warnings = lines
@@ -1000,7 +1111,7 @@ fn unsupported_codecs_fail_at_the_public_importer_boundary() {
 						import.decode(chunk)?;
 					}
 				}
-				import.finish()
+				import.finish().map(drop)
 			})();
 			assert!(
 				matches!(result, Err(crate::Error::UnknownFormat(_))),
@@ -1010,16 +1121,173 @@ fn unsupported_codecs_fail_at_the_public_importer_boundary() {
 	}
 }
 
-/// Input after finish is refused, as every importer refuses it, rather than publishing new tracks.
-#[test]
-fn input_after_finish_is_refused() {
+/// A restart that cannot shift onto a shared catalog clock, because another source anchored it
+/// behind this one, is a publish failure like a rewind: it refuses all later input.
+#[tokio::test]
+async fn an_unmappable_restart_refuses_later_input() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	catalog
+		.timebase()
+		.anchor(moq_net::Timestamp::from_secs(1).unwrap())
+		.unwrap();
+	let mut importer = Import::new(broadcast, catalog.reserve());
+
+	importer.decode(&session(true, 3_600_000, 5)).unwrap();
+	// The sequence headers and first video frame of a session: a tag header, a 14-byte body, and
+	// its trailing size.
+	let first_frame = |start_ms| {
+		let mut data = session(false, start_ms, 1);
+		data.truncate(session(false, start_ms, 0).len() + 11 + 14 + 4);
+		data
+	};
+	let err = importer.decode(&first_frame(0)).unwrap_err();
+	assert!(matches!(err, crate::Error::UnmappableTimestamp(_)), "{err:?}");
+	let err = importer.decode(&first_frame(3_700_000)).unwrap_err();
+	assert!(
+		matches!(err, crate::Error::UnmappableTimestamp(_)),
+		"refused with the cause: {err:?}"
+	);
+}
+
+/// A newer sequence header replaces an AVC record still waiting for its keyframe, so the stale
+/// record never claims the new codec's keyframe.
+#[tokio::test(start_paused = true)]
+async fn a_newer_sequence_header_supersedes_a_held_record() {
+	let (mut out, _) = avc_session(&[]);
+	let mut seq = vec![super::VIDEO_EX_HEADER | (super::FRAME_TYPE_KEY << 4) | super::VIDEO_PACKET_SEQUENCE_START];
+	seq.extend_from_slice(b"av01");
+	seq.extend_from_slice(&AV1C);
+	write_tag(&mut out, super::TAG_VIDEO, 0, &seq);
+	let mut frame = vec![super::VIDEO_EX_HEADER | (super::FRAME_TYPE_KEY << 4) | super::VIDEO_PACKET_CODED_FRAMES_X];
+	frame.extend_from_slice(b"av01");
+	frame.extend_from_slice(&[0x12, 0x00, 0x34, 0x56]);
+	write_tag(&mut out, super::TAG_VIDEO, 0, &frame);
+
 	let mut producer = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
 	let mut importer = Import::new(producer, catalog.reserve());
-	importer.finish().unwrap();
-	importer.finish().unwrap();
+	importer.decode(&out).unwrap();
+	let _finished = importer.finish().unwrap();
 
-	let err = importer.decode(&synth_flv()).unwrap_err();
-	assert!(matches!(err, crate::Error::Finished), "{err:?}");
-	assert!(catalog.snapshot().video.renditions.is_empty(), "no track was declared");
+	let codecs: Vec<_> = catalog
+		.snapshot()
+		.video
+		.renditions
+		.into_values()
+		.map(|v| v.codec)
+		.collect();
+	assert!(matches!(codecs[..], [VideoCodec::AV1(_)]), "{codecs:?}");
+}
+
+/// A seek made while a record waits for its keyframe keys the group that keyframe opens, even when
+/// the sequence header repeats in between.
+#[tokio::test(start_paused = true)]
+async fn a_seek_reaches_a_track_waiting_for_its_keyframe() {
+	let (headers, keyframe) = avc_session(&[0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00]);
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = Import::new(broadcast, catalog.reserve());
+	importer.decode(&headers).unwrap();
+	importer.seek(100).unwrap();
+	// The same sequence headers again, past the FLV file header.
+	importer.decode(&headers[flv_header(0).len()..]).unwrap();
+	importer.decode(&keyframe).unwrap();
+	let _finished = importer.finish().unwrap();
+
+	let snapshot = catalog.snapshot();
+	let name = snapshot.video.renditions.keys().next().unwrap();
+	let replay = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+		moq_net::track::Start::Live {
+			min: Some(Duration::from_secs(3600)),
+			max: Some(Duration::from_secs(3600)),
+		},
+	)]);
+	let mut track = consumer.track(name).unwrap().subscribe(replay).await.unwrap();
+	let mut starts = Vec::new();
+	while let Some(group) = track.recv_group().await.unwrap() {
+		starts.push(group.start);
+	}
+	assert_eq!(starts, [100]);
+}
+
+/// A changed sequence header on a live track skips the deltas before its keyframe, which can't
+/// decode against the old record and whose timestamps the old track never checks, and a seek in
+/// between keys the group that keyframe opens.
+#[tokio::test(start_paused = true)]
+async fn a_changed_sequence_header_waits_for_its_keyframe() {
+	let video = |frame_type: u8, nalus: &[u8], ms: u32, cts: i32| {
+		let cts = cts.to_be_bytes();
+		let mut body = vec![
+			(frame_type << 4) | super::VIDEO_CODEC_AVC,
+			super::AVC_NALU,
+			cts[1],
+			cts[2],
+			cts[3],
+		];
+		body.extend_from_slice(nalus);
+		let mut out = Vec::new();
+		write_tag(&mut out, super::TAG_VIDEO, ms, &body);
+		out
+	};
+	let idr = [0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00];
+	let delta = [0, 0, 0, 5, 0x41, 0x9a, 0x02, 0x03, 0x04];
+	let (headers, keyframe) = avc_session(&idr);
+	let mut changed = vec![
+		(super::FRAME_TYPE_KEY << 4) | super::VIDEO_CODEC_AVC,
+		super::AVC_SEQUENCE_HEADER,
+		0,
+		0,
+		0,
+	];
+	changed.extend_from_slice(&avcc_level(0x28));
+	let mut header = Vec::new();
+	write_tag(&mut header, super::TAG_VIDEO, 133, &changed);
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = Import::new(broadcast, catalog.reserve());
+	let replay = || {
+		moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+			moq_net::track::Start::Live {
+				min: Some(Duration::from_secs(3600)),
+				max: Some(Duration::from_secs(3600)),
+			},
+		)])
+	};
+	importer.decode(&headers).unwrap();
+	importer.decode(&keyframe).unwrap();
+	importer.decode(&video(2, &delta, 33, 0)).unwrap();
+	importer.decode(&video(super::FRAME_TYPE_KEY, &idr, 80, 0)).unwrap();
+	importer.decode(&video(super::FRAME_TYPE_KEY, &idr, 100, 0)).unwrap();
+	let old = catalog.snapshot().video.renditions.keys().next().unwrap().clone();
+	let mut old = consumer.track(&old).unwrap().subscribe(replay()).await.unwrap();
+
+	importer.decode(&header).unwrap();
+	// Presented before the old track's 80 ms group, the floor a delta is checked against, which
+	// would refuse it as a rewind.
+	importer.decode(&video(2, &delta, 133, -60)).unwrap();
+	importer.seek(200).unwrap();
+	importer.decode(&video(super::FRAME_TYPE_KEY, &idr, 200, 0)).unwrap();
+	let _finished = importer.finish().unwrap();
+
+	let mut deltas = 0;
+	while let Some(mut group) = old.recv_group().await.unwrap() {
+		while let Some(frame) = group.read_frame().await.unwrap() {
+			deltas += usize::from(frame.payload.ends_with(&delta));
+		}
+	}
+	assert_eq!(deltas, 1, "the delta after the new header never reaches the old track");
+
+	let snapshot = catalog.snapshot();
+	let name = snapshot.video.renditions.keys().next().unwrap();
+	let mut track = consumer.track(name).unwrap().subscribe(replay()).await.unwrap();
+	let mut starts = Vec::new();
+	while let Some(group) = track.recv_group().await.unwrap() {
+		starts.push(group.start);
+	}
+	assert_eq!(starts, [200]);
 }

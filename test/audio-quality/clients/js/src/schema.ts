@@ -34,8 +34,8 @@ export type Ms = number;
  * - `publisher`, `relay`: other processes, often other machines. A timestamp taken there is reduced
  *   to `viewer` by an offset measured over the same session, NTP style: the offset at the midpoint of
  *   a round trip, with half the round trip as its uncertainty. A stage whose uncertainty exceeds
- *   {@link identityTolerance} is reported unmeasured rather than guessed. The browser lane carries no
- *   such timestamp yet, so every stage that needs one is null here.
+ *   the identity tolerance (see {@link STAGES}) is reported unmeasured rather than guessed. The
+ *   browser lane carries no such timestamp yet, so every stage that needs one is null here.
  */
 export type Clock = "viewer" | "render" | "media" | "publisher" | "relay";
 
@@ -109,28 +109,14 @@ export const METRICS = {
 		clock: "render",
 		aggregations: ["total", "per_min"],
 		description:
-			"The player's own count of skips: each jump that dropped buffered audio rather than playing it faster. `skip_aheads` infers them from the playhead, which reads a sustained time stretch as one too.",
-	},
-	skip_aheads: {
-		unit: "count",
-		clock: "viewer",
-		aggregations: ["total", "per_min"],
-		description:
-			"Re-anchors that discarded buffered audio: a forward step in the lag between the viewer clock and the playhead.",
-	},
-	discarded_ms: {
-		unit: "ms",
-		clock: "media",
-		aggregations: ["total", "per_min"],
-		description:
-			"Media time the skip-aheads jumped over without playing. Audio dropped before it reached the ring moves no playhead and is not counted.",
+			"The player's own count of skips: each jump that dropped buffered audio rather than playing it faster.",
 	},
 	trimmed_ms: {
 		unit: "ms",
 		clock: "media",
 		aggregations: ["total", "per_min"],
 		description:
-			"The player's own count of media its skips dropped unplayed. Unlike `discarded_ms`, a time stretch's accelerate is not in it.",
+			"The player's own count of media its skips dropped unplayed: the audio a listener lost. A time stretch's accelerate is not in it.",
 	},
 	accelerated_ms: {
 		unit: "ms",
@@ -157,7 +143,14 @@ export const METRICS = {
 		clock: "media",
 		aggregations: ["p50", "p95"],
 		description:
-			"How far the audio playhead trails the shared clock video plays from (`sync.now()`), sampled while playing: latency audio adds beyond the resolved target. Negative is audio ahead. Unset natively.",
+			"How far the audio playhead trails the shared clock video plays from (`sync.now()`), sampled while playing: latency audio adds beyond the resolved target. Negative is audio ahead.",
+	},
+	recover_ms: {
+		unit: "ms",
+		clock: "viewer",
+		aggregations: ["max"],
+		description:
+			"The longest audio took to return after a disturbance: from the ring stalling, or audio more than one codec frame off the median lag of the 5 s before, to audio back within a frame of it.",
 	},
 	target_ms: {
 		unit: "ms",
@@ -180,9 +173,6 @@ export const METRICS = {
 			"Chromium's render capacity: the share of each quantum's budget the graph used. High says the runner, not the player, was short of time.",
 	},
 } as const satisfies Record<string, MetricSpec>;
-
-/** One of the {@link METRICS} names. */
-export type Metric = keyof typeof METRICS;
 
 /** Every `<metric>_<aggregation>` key, in schema order, so tables read the same every run. */
 export const METRIC_KEYS: string[] = Object.entries(METRICS).flatMap(([name, spec]) =>
@@ -227,7 +217,8 @@ export const MAX_RENDER_DRIFT = 0.01;
  * - `device`: leaving the graph to the speaker (`outputLatency` plus `baseLatency`).
  * - `unaccounted`: end-to-end minus the sum of the rest. Named because a large one is the finding.
  *
- * The identity is `sum(stages) == end-to-end`, within {@link identityTolerance}.
+ * The identity is `sum(stages) == end-to-end`, within the identity tolerance: 2 ms or 2% of the
+ * total, whichever is larger.
  */
 export const STAGES = [
 	"capture",
@@ -251,9 +242,6 @@ export type StageSpan = {
 	/** `measured` on the viewer clock, `declared` by the publisher, or `unmeasured`. */
 	source: "measured" | "declared" | "unmeasured";
 };
-
-/** The tolerance on the sum-to-end-to-end identity: the larger of 2 ms or 2% of the total. */
-export const identityTolerance = (endToEnd: Ms): Ms => Math.max(2, endToEnd * 0.02);
 
 /** What reducing one clock to `viewer` took. */
 export type Drift = {
@@ -323,7 +311,7 @@ export type Arrival = [at: Ms, timestamp: Ms, group: number, duration: Ms];
 /** A recorded arrival trace, as checked in under `traces/`. The file name is its profile. */
 export type Trace = {
 	/** Bumped when a field's meaning changes. */
-	version: 3;
+	version: 4;
 	/** Where it was recorded: the relay, the broadcast, its publisher, the date. */
 	source: string;
 	/** The shape it carries, and why it is kept. */
@@ -332,6 +320,11 @@ export type Trace = {
 	transport: string;
 	/** The smallest round trip the connection's PROBE reported, retained as a diagnostic. */
 	rtt: Ms | null;
+	/**
+	 * The publisher's largest group as the subscription began, which a wire subscriber learns from the
+	 * publisher's answer: the replay's consumer judges a group it skips unread as join backlog against it.
+	 */
+	largest: number;
 	/** The audio rendition, as the catalog advertised it. */
 	config: {
 		codec: string;
@@ -400,8 +393,10 @@ export type Sample = {
 	render?: Ms;
 
 	/**
-	 * `audio.out.timestamp`: the playhead on the `media` clock. Undefined while there is none.
-	 * Natively, projected from the last write into the speaker at the wall rate, held at its end.
+	 * The playhead sounding at the speaker, on the `media` clock. Undefined while there is none. In
+	 * the browser `audio.out.timestamp`, projected at the wall rate from when the player last reported
+	 * it, and held while stalled. Natively, projected from the last write into the speaker at the wall
+	 * rate, held at its end.
 	 */
 	timestamp?: Ms;
 	/**
@@ -410,7 +405,7 @@ export type Sample = {
 	 * is only a sink with nothing written yet, or none at all.
 	 */
 	stalled?: boolean;
-	/** `sync.now()`: where the shared clock puts video, on the `media` clock. Unset natively. */
+	/** `sync.now()`: where the shared clock puts video, on the `media` clock. Natively, `sync::Consumer::position`. */
 	clock?: Ms;
 	/** `sync.out.delay`: the resolved playout target. Natively, the target the speaker is held on. */
 	delay?: Ms;
@@ -472,6 +467,8 @@ export type Environment = {
 	jitter?: Ms;
 	/** The full audio configuration needed to replay a captured live row. */
 	config?: Trace["config"];
+	/** With `--capture`, the publisher's largest group as the observer's subscription began, which a replayed row needs. */
+	largest?: number;
 	/** The AudioContext's rate, Hz, which the render clock counts in. Natively, the output device's. */
 	contextRate?: number;
 };

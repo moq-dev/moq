@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { Duration, Instant, Manual, sleep, yieldNow } from "@moq/clock";
-import { hostTime } from "@moq/clock/test";
+import { Duration, Instant, sleep, yieldNow } from "@moq/clock";
+import { hostTime, Manual } from "@moq/clock/test";
 import { Session as Qmux, selectSubprotocol, type WebSocketLike } from "@moq/qmux";
 import { ConnectTimeout, SessionCode, SessionError } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
@@ -88,6 +88,9 @@ test("WebTransport offers lite-06 first by default", async () => {
 	const { protocols } = await offered(ALPN_06);
 	expect(protocols?.[0]).toBe("moq-lite-06");
 	expect(protocols).not.toContain(ALPN_07_WIP);
+	// The draft-23 port is partial, so it is offered only when named.
+	expect(protocols).not.toContain(Ietf.ALPN.DRAFT_23);
+	expect(protocols).toContain(Ietf.ALPN.DRAFT_22);
 });
 
 test("WebTransport negotiates lite-07-wip only when explicitly offered", async () => {
@@ -539,6 +542,13 @@ test("the removed per-transport protocols fail loudly", async () => {
 	}
 });
 
+test("urlAuth cannot reach a supplied transport, which never dials the URL", async () => {
+	const pair = createMockTransportPair(ALPN_05);
+	await expect(connect(url, { transport: pair.client, urlAuth: true, tokens: ["a"] })).rejects.toThrow(
+		"urlAuth cannot reach a supplied transport",
+	);
+});
+
 test("a peer cannot select outside the explicit versions", async () => {
 	const pair = createMockTransportPair(ALPN_05);
 	const restore = stubWebTransport(pair.client);
@@ -707,6 +717,11 @@ test("the WebSocket fallback offers the same versions", async () => {
 	const defaults = await websocketOffer({});
 	expect(defaults.some((protocol) => protocol.endsWith(ALPN_06))).toBe(true);
 	expect(defaults.some((protocol) => protocol.endsWith(ALPN_07_WIP))).toBe(false);
+	expect(defaults.some((protocol) => protocol.endsWith(Ietf.ALPN.DRAFT_23))).toBe(false);
+
+	// Named, draft-23 rides qmux-01 like the other moq-transport drafts.
+	const named = await websocketOffer({ versions: ["moq-transport-23"] });
+	expect(named.filter((protocol) => protocol.includes("."))).toEqual([`qmux-01.${Ietf.ALPN.DRAFT_23}`]);
 
 	const asked = await websocketOffer({ versions: ["moq-lite-07-wip", "moq-lite-06"] });
 	expect(asked[0]?.endsWith(ALPN_07_WIP)).toBe(true);
@@ -818,9 +833,9 @@ test("the WebSocket fallback grants stream limits and receive windows", async ()
 		uni: 10_000,
 		params: {
 			initialMaxData: 4_194_304n,
-			initialMaxStreamDataBidiLocal: 1_048_576n,
-			initialMaxStreamDataBidiRemote: 1_048_576n,
-			initialMaxStreamDataUni: 1_048_576n,
+			initialMaxStreamDataBidiLocal: 4_194_304n,
+			initialMaxStreamDataBidiRemote: 4_194_304n,
+			initialMaxStreamDataUni: 4_194_304n,
 		},
 	});
 	expect(

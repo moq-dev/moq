@@ -3,8 +3,10 @@
 // relay case lives with the Rust relay (rs/moq-net/tests/integration/subscribe_priority.rs).
 
 import { expect, spyOn, test } from "bun:test";
-import { Manual, yieldNow } from "@moq/clock";
+import { yieldNow } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { accept, connect, type Session } from "./connection/index.ts";
+import { defined } from "./defined.test-util.ts";
 import * as Ietf from "./ietf/index.ts";
 import { SubscribeUpdate } from "./ietf/subscribe.ts";
 import * as Lite from "./lite/index.ts";
@@ -62,7 +64,7 @@ test.each([Lite.ALPN_07_WIP, ...Object.values(Ietf.ALPN)])(
 		const origin = new OriginProducer();
 		const broadcastRoute = origin.route(path);
 		const broadcast = broadcastRoute.broadcast;
-		const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		const video = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 		const [client, server] = await session(protocol, origin);
 
 		const remote = wireOf(client).consume(path);
@@ -101,7 +103,7 @@ test.each(Object.values(Ietf.ALPN))("%s ends a subscription mid-update without a
 	const origin = new OriginProducer();
 	const broadcastRoute = origin.route(path);
 	const broadcast = broadcastRoute.broadcast;
-	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const video = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const [client, server] = await session(protocol, origin);
 	let closed: Error | null | undefined;
 	void client.closed.then((err) => {
@@ -137,7 +139,7 @@ test.each(Object.values(Ietf.ALPN))("%s sends no update when the last subscriber
 	const origin = new OriginProducer();
 	const broadcastRoute = origin.route(path);
 	const broadcast = broadcastRoute.broadcast;
-	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const video = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const [client, server] = await session(protocol, origin);
 	try {
 		const remote = wireOf(client).consume(path);
@@ -163,7 +165,7 @@ test.each(Object.values(Ietf.ALPN))("%s ends the track when an update fails to e
 	const origin = new OriginProducer();
 	const broadcastRoute = origin.route(path);
 	const broadcast = broadcastRoute.broadcast;
-	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const video = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const [client, server] = await session(protocol, origin);
 	let closed: Error | null | undefined;
 	void client.closed.then((err) => {

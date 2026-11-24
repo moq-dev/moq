@@ -60,18 +60,20 @@ async fn prepare(tracks: usize, frames: usize, live: bool) -> (moq_mux::Source, 
 				})
 				.unwrap();
 		}
-		if !live {
-			track.finish().unwrap();
+	}
+	let tracks: Box<dyn std::any::Any> = match live {
+		true => Box::new(publishers),
+		false => {
+			let finished: Vec<_> = publishers.into_iter().map(|track| track.finish().unwrap()).collect();
+			catalog.finish().unwrap();
+			Box::new(finished)
 		}
-	}
-	if !live {
-		catalog.finish().unwrap();
-	}
+	};
 	broadcast.announce().unwrap();
 	let resolved = origin.consume().request("bench", None).await.unwrap();
 	let source = moq_mux::Source::new(origin.consume(), resolved);
 	let fixture = Fixture {
-		_published: Box::new((broadcast, catalog, publishers)),
+		_published: Box::new((broadcast, catalog, tracks)),
 		_origin: origin,
 		driver,
 	};
@@ -143,11 +145,19 @@ fn profiled_export(runtime: &tokio::runtime::Runtime, opened: Export) -> usize {
 	runtime.block_on(export(opened))
 }
 
-fn bench_export(c: &mut Criterion) {
-	let runtime = tokio::runtime::Builder::new_current_thread()
+/// A runtime whose clock stands still between setup and the timed drain. A finished track's last
+/// group ages out of a live-edge export once its span passes on the clock, so a host slow
+/// enough to spend that long between the two would export nothing.
+fn paused() -> tokio::runtime::Runtime {
+	tokio::runtime::Builder::new_current_thread()
 		.enable_all()
+		.start_paused(true)
 		.build()
-		.unwrap();
+		.unwrap()
+}
+
+fn bench_export(c: &mut Criterion) {
+	let runtime = paused();
 	let mut group = c.benchmark_group("container-export");
 	group.sample_size(10);
 	group.measurement_time(Duration::from_secs(1));
@@ -289,7 +299,7 @@ async fn prepare_video(
 			})
 			.unwrap();
 	}
-	video.finish().unwrap();
+	let video = video.finish().unwrap();
 	catalog.finish().unwrap();
 	broadcast.announce().unwrap();
 	let resolved = origin.consume().request("bench", None).await.unwrap();
@@ -306,10 +316,7 @@ async fn prepare_video(
 }
 
 fn video_reorder(c: &mut Criterion) {
-	let runtime = tokio::runtime::Builder::new_current_thread()
-		.enable_all()
-		.build()
-		.unwrap();
+	let runtime = paused();
 	let mut group = c.benchmark_group("video-reorder");
 	group.sample_size(10);
 	group.warm_up_time(Duration::from_millis(50));

@@ -1,10 +1,12 @@
 import { expect, test } from "bun:test";
 import { Producer as BroadcastProducer } from "./broadcast";
+import { defined } from "./defined.test-util.ts";
 import { StreamCode, StreamError } from "./error";
 import { WireRoute } from "./hop";
 import * as Instance from "./instance.ts";
 import { type Following, Producer, type Requesting } from "./origin";
 import * as Path from "./path";
+import { Timestamp } from "./time.ts";
 import { wireOf } from "./wire";
 
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
@@ -89,7 +91,7 @@ test.each(["request", "follow"] as const)(
 	(method) => {
 		const origin = new Producer();
 		expect(() => origin[method](Path.from("camera*main"))).toThrow();
-		const scoped = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("pool/job/cam"))]));
+		const scoped = origin.scope(Path.empty(), new Path.Prefixes([Path.Prefix.parse(Path.from("pool/job/cam"))]));
 		expect(() => scoped[method](Path.from("pool/job"))).toThrow();
 		expect(wireOf(origin).requests.peek()?.size).toBe(0);
 		origin.close();
@@ -195,7 +197,7 @@ test("followers track the serving prefix, ignoring descendants and re-prices", a
 
 test("a follower ignores a covering route whose scope excludes its path", async () => {
 	const origin = new Producer();
-	const scoped = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("room/*/chat")]));
+	const scoped = origin.scope(Path.empty(), Path.Prefixes.parse(["room/alice/chat"]));
 	const prefix = scoped.claim(Path.from("room/alice"));
 	const exactRoute = origin.route(Path.from("room/alice"), { cost: 5n });
 	const exact = exactRoute.broadcast;
@@ -402,7 +404,10 @@ test("an application serves held content without an exact route", async () => {
 	const pending = (await requests.next()).value;
 	if (!pending) throw new Error("expected a request");
 	const source = new BroadcastProducer();
-	source.createTrack("data").writeFrame({ payload: new TextEncoder().encode("held") });
+	defined(source.createTrack("data")).writeFrame({
+		payload: new TextEncoder().encode("held"),
+		timestamp: Timestamp.unscaled(0n),
+	});
 	pending.serve(source.consume());
 	await settle();
 	const reader = request.active.peek()?.track("data").subscribe().ordered();
@@ -527,7 +532,7 @@ test("a throwing handler disposes its job route and leaves the claim answerable"
 	const failed = (async () => {
 		for await (const request of claim.requested()) {
 			using job = request.route({ hidden: true });
-			job.broadcast.createTrack("video");
+			defined(job.broadcast.createTrack("video"));
 			throw new Error("handler failed");
 		}
 	})();
@@ -558,7 +563,9 @@ test("announcing a job route again keeps it answering under one instance", async
 	const pending = (await requests.next()).value;
 	if (!pending) throw new Error("expected a request");
 	const job = pending.route({ hidden: true });
-	job.broadcast.createTrack("data").writeFrame({ payload: new TextEncoder().encode("published") });
+	job.broadcast
+		.createTrack("data")
+		.writeFrame({ payload: new TextEncoder().encode("published"), timestamp: Timestamp.unscaled(0n) });
 	job.announce();
 	job.announce();
 	await settle();
@@ -595,7 +602,9 @@ for (const cleanup of ["close", "dispose", "broadcast", "announce"] as const) {
 		await settle();
 		expect(later.closed.peek()).toBeUndefined();
 		using job = next.route({ hidden: true });
-		job.broadcast.createTrack("data").writeFrame({ payload: new TextEncoder().encode(cleanup) });
+		job.broadcast
+			.createTrack("data")
+			.writeFrame({ payload: new TextEncoder().encode(cleanup), timestamp: Timestamp.unscaled(0n) });
 		job.announce();
 		await settle();
 		expect(later.active.peek()?.instance).toBe(job.instance);
@@ -753,6 +762,122 @@ test("a pending request fails Unroutable once its discovery syncs without a rout
 	origin.close();
 });
 
+test("awaiting a request's broadcast for a missing path rejects Unroutable", async () => {
+	const origin = new Producer();
+	const wire = wireOf(origin);
+	const detach = wire.attach(true);
+	const initialSets: (() => void)[] = [];
+	const stop = wire.interests((prefix, wanted) => {
+		if (wanted) initialSets.push(wire.snapshot(prefix));
+	});
+	const request = origin.request(Path.from("room/missing"));
+	const answer = request.broadcast();
+	await settle();
+	for (const synced of initialSets) synced();
+	await expect(answer).rejects.toMatchObject({ code: StreamCode.Unroutable });
+	expect(await request.closed).toBeInstanceOf(StreamError);
+
+	request.close();
+	stop();
+	detach();
+	origin.close();
+});
+
+test("awaiting a request's broadcast resolves, now or once routed", async () => {
+	const origin = new Producer();
+	const routed = origin.route(Path.from("room/now"));
+	const now = origin.request(Path.from("room/now"));
+	expect((await now.broadcast()).instance).toBe(routed.instance);
+	expect(await now.broadcast()).toBe(now.active.peek() as NonNullable<ReturnType<typeof now.active.peek>>);
+
+	const later = origin.request(Path.from("room/later"));
+	let resolved = false;
+	const answer = later.broadcast().then((broadcast) => {
+		resolved = true;
+		return broadcast;
+	});
+	await settle();
+	expect(resolved).toBe(false);
+	const route = origin.route(Path.from("room/later"));
+	expect((await answer).instance).toBe(route.instance);
+
+	for (const handle of [now, later, routed, route]) handle.close();
+	origin.close();
+});
+
+test("closing a pending request rejects its await with a cancellation", async () => {
+	const origin = new Producer();
+	const request = origin.request(Path.from("room/missing"));
+	const answer = request.broadcast();
+	await settle();
+	request.close();
+	await expect(answer).rejects.toMatchObject({ code: StreamCode.Cancel });
+	expect(await request.closed).toBeNull();
+
+	// Closing the origin ends a pending request, with its abort or cleanly, and a resolved one.
+	const pending = origin.request(Path.from("room/pending"));
+	const aborted = new Producer();
+	const blocked = aborted.request(Path.from("room/pending"));
+	const route = aborted.route(Path.from("room/served"));
+	const served = aborted.request(Path.from("room/served"));
+	await served.broadcast();
+	const pendingAnswer = pending.broadcast();
+	const blockedAnswer = blocked.broadcast();
+	await settle();
+	const abort = new StreamError(StreamCode.Internal, { message: "shutdown" });
+	aborted.close(abort);
+	await expect(blockedAnswer).rejects.toBe(abort);
+	expect(served.closed.peek()).toBe(abort);
+	route.close();
+
+	// A closed origin answers a new request at once, the same way.
+	origin.close();
+	await expect(pendingAnswer).rejects.toMatchObject({ code: StreamCode.Cancel });
+	expect(await pending.closed).toBeNull();
+	await expect(origin.request(Path.from("room/late")).broadcast()).rejects.toMatchObject({
+		code: StreamCode.Cancel,
+	});
+});
+
+// A handle that is not a thenable survives an async return or a promise resolution, which would
+// otherwise take the broadcast out from under the request that owns it.
+test("a request is not awaitable, so an async return keeps the handle", async () => {
+	const origin = new Producer();
+	const route = origin.route(Path.from("room"));
+	const request = origin.request(Path.from("room"));
+	const returned = await (async () => request)();
+	expect(returned).toBe(request);
+	expect("then" in request).toBe(false);
+	request.close();
+	route.close();
+	origin.close();
+});
+
+test("the first call fixes a request's answer", async () => {
+	const origin = new Producer();
+	const route = origin.route(Path.from("room"));
+	const request = origin.request(Path.from("room"));
+	const broadcast = await request.broadcast();
+	route.close();
+	await settle();
+	// The instance ended, so the request closed, yet a later await keeps the first answer.
+	expect(request.closed.peek()).not.toBeUndefined();
+	expect(await request.broadcast()).toBe(broadcast);
+
+	// Awaited only after it ended, the same request would have rejected.
+	const again = origin.route(Path.from("room"));
+	const late = origin.request(Path.from("room"));
+	await settle();
+	again.close();
+	await settle();
+	expect(late.closed.peek()).not.toBeUndefined();
+	await expect(late.broadcast()).rejects.toBeDefined();
+
+	request.close();
+	late.close();
+	origin.close();
+});
+
 // Unlike a Rust origin, which answers for its own table at once, a JS origin usually fronts a
 // reconnecting connection: no session yet means nothing has synced.
 test("a pending request waits for a session before concluding absence", async () => {
@@ -887,6 +1012,46 @@ test.each(["request", "follow"] as const)("a %s pinned to a losing instance reso
 	origin.close();
 });
 
+// A detached request follows its instance's cheapest route, as Rust's does, rather than stay on
+// the route it first resolved while that one still serves.
+test("a pinned request moves to a cheaper route of its instance", async () => {
+	const origin = new Producer();
+	const path = Path.from("room/audio");
+	const pinned = Instance.random();
+	const far = origin.claim(path, { instance: { id: pinned, epoch: 0n }, cost: 9n });
+	const winning = origin.claim(path, { instance: { id: Instance.random(), epoch: 0n }, cost: 1n });
+	const requested = origin.request(path, { instance: pinned });
+	const first = (await far.requested().next()).value;
+	if (!first) throw new Error("the pinned instance's route was not asked");
+	const farSource = new BroadcastProducer();
+	first.serve(farSource.consume());
+	await settle();
+	expect(requested.active.peek()?.instance).toBe(pinned);
+
+	// A cheaper route of the same instance, still above the winner: the request moves to it.
+	const near = origin.claim(path, { instance: { id: pinned, epoch: 0n }, cost: 5n });
+	const asked = near.requested().next();
+	const moved = await Promise.race([asked, settle().then(() => undefined)]);
+	if (!moved?.value) throw new Error("the cheaper route of the instance was not asked");
+	const nearSource = new BroadcastProducer();
+	moved.value.serve(nearSource.consume());
+	await settle();
+	expect(requested.closed.peek()).toBeUndefined();
+	expect(requested.active.peek()?.instance).toBe(pinned);
+
+	// The far route leaving no longer touches it.
+	far.close();
+	farSource.close();
+	await settle();
+	expect(requested.closed.peek()).toBeUndefined();
+
+	requested.close();
+	nearSource.close();
+	near.close();
+	winning.close();
+	origin.close();
+});
+
 test("a peer's pin is served by a local broadcast that loses the path", async () => {
 	const origin = new Producer();
 	const wire = wireOf(origin.consume());
@@ -950,7 +1115,7 @@ test.each(["request", "follow"] as const)("a %s through a claim continues on its
 	if (!pending) throw new Error("expected a request");
 	const job = pending.route({ hidden: true });
 	const data = job.broadcast.createTrack("data");
-	data.writeFrame({ payload: new TextEncoder().encode("first") });
+	data.writeFrame({ payload: new TextEncoder().encode("first"), timestamp: Timestamp.unscaled(0n) });
 	expect(job.instance).toBe(minted);
 	job.announce();
 	await settle();
@@ -960,7 +1125,7 @@ test.each(["request", "follow"] as const)("a %s through a claim continues on its
 	expect(active?.instance).toBe(minted);
 	const track = active?.track("data").subscribe().ordered();
 	expect(await track?.readString()).toBe("first");
-	data.writeFrame({ payload: new TextEncoder().encode("second") });
+	data.writeFrame({ payload: new TextEncoder().encode("second"), timestamp: Timestamp.unscaled(1n) });
 	expect(await track?.readString()).toBe("second");
 	expect(handed).toEqual([active]);
 	expect(reader.closed.peek()).toBeUndefined();
@@ -1148,7 +1313,10 @@ test("a claim moving on keeps its held answers", async () => {
 	const minted = claim.instance;
 	const requests = claim.requested();
 	const held = new BroadcastProducer();
-	held.createTrack("data").writeFrame({ payload: new TextEncoder().encode("held") });
+	defined(held.createTrack("data")).writeFrame({
+		payload: new TextEncoder().encode("held"),
+		timestamp: Timestamp.unscaled(0n),
+	});
 	const reader = origin.request(Path.from("room/held"));
 	const asked = (await requests.next()).value;
 	if (!asked) throw new Error("expected a request");
@@ -1177,5 +1345,132 @@ test("a claim moving on keeps its held answers", async () => {
 	for (const request of [reader, alice, later]) request.close();
 	claim.close();
 	held.close();
+	origin.close();
+});
+
+// Whether `request` reported that nobody waits on it, by the next turn.
+function unwanted(request: { unwanted(): Promise<void> }): () => boolean {
+	let done = false;
+	void request.unwanted().then(() => {
+		done = true;
+	});
+	return () => done;
+}
+
+test("a held request is unwanted once its requester leaves, and stays so", async () => {
+	const origin = new Producer();
+	const path = Path.from("room/alice");
+	const claim = origin.claim(Path.from("room"));
+	const requested = claim.requested();
+	const requester = origin.request(path);
+	const held = defined((await requested.next()).value);
+	const left = unwanted(held);
+	await settle();
+	expect(left()).toBe(false);
+
+	requester.close();
+	await settle();
+	expect(left()).toBe(true);
+
+	// A new requester gets a new request rather than reviving the skipped one.
+	const again = origin.request(path);
+	const fresh = defined((await requested.next()).value);
+	expect(fresh).not.toBe(held);
+	const freshLeft = unwanted(fresh);
+	await settle();
+	expect(freshLeft()).toBe(false);
+	again.close();
+	claim.close();
+	origin.close();
+});
+
+test("a coalesced request is unwanted only once the last requester leaves", async () => {
+	const origin = new Producer();
+	const path = Path.from("room/alice");
+	const claim = origin.claim(Path.from("room"));
+	const requested = claim.requested();
+	const first = origin.request(path);
+	const held = defined((await requested.next()).value);
+	const hold = new AbortController();
+	const second = wireOf(origin.consume())
+		.demand(path, undefined, hold.signal)
+		.catch(() => undefined);
+	const left = unwanted(held);
+
+	first.close();
+	await settle();
+	expect(left()).toBe(false);
+
+	hold.abort();
+	await second;
+	await settle();
+	expect(left()).toBe(true);
+	claim.close();
+	origin.close();
+});
+
+test("a held request is unwanted once its requester moves to a cheaper route", async () => {
+	const origin = new Producer();
+	const path = Path.from("room/alice");
+	const pool = origin.claim(Path.from("room"), { cost: 5n });
+	const requester = origin.request(path);
+	const held = defined((await pool.requested().next()).value);
+	const left = unwanted(held);
+
+	const node = origin.claim(Path.from("room"), { cost: 1n });
+	const moved = defined((await node.requested().next()).value);
+	await settle();
+	expect(left()).toBe(true);
+	const source = new BroadcastProducer();
+	moved.serve(source.consume());
+	expect((await requester.broadcast()).closed.peek()).toBeUndefined();
+	requester.close();
+	source.close();
+	node.close();
+	pool.close();
+	origin.close();
+});
+
+test("a held request is unwanted once a direct route takes over", async () => {
+	const origin = new Producer();
+	const path = Path.from("room/alice");
+	const pool = origin.claim(Path.from("room"), { cost: 5n });
+	const requester = origin.request(path);
+	const held = defined((await pool.requested().next()).value);
+	const left = unwanted(held);
+
+	const direct = origin.route(path, { cost: 1n });
+	await settle();
+	expect(left()).toBe(true);
+	expect((await requester.broadcast()).closed.peek()).toBeUndefined();
+	requester.close();
+	direct.close();
+	pool.close();
+	origin.close();
+});
+
+test("a held request is unwanted once its requester gives up the switch", async () => {
+	const origin = new Producer();
+	const path = Path.from("room/alice");
+	const id = Instance.random();
+	const serving = origin.claim(Path.from("room"), { instance: { id, epoch: 0n }, cost: 5n });
+	const requester = origin.request(path);
+	const source = new BroadcastProducer();
+	defined((await serving.requested().next()).value).serve(source.consume());
+	await requester.broadcast();
+
+	const cheaper = origin.claim(Path.from("room"), { instance: { id, epoch: 0n }, cost: 1n });
+	const held = defined((await cheaper.requested().next()).value);
+	const left = unwanted(held);
+	await settle();
+	expect(left()).toBe(false);
+
+	cheaper.setCost(10n);
+	await settle();
+	expect(left()).toBe(true);
+	requester.close();
+	source.close();
+	cheaper.close();
+	serving.close();
 	origin.close();
 });

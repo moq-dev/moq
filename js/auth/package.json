@@ -18,18 +18,19 @@
 	},
 	"scripts": {
 		"build": "rm -rf dist && tsc -b tsconfig.build.json && bun ../common/package.ts",
-		"check": "tsc --noEmit && tsc -b examples/tsconfig.json",
+		"check": "bun check --no-script && bun check --no-script -p examples/tsconfig.json",
 		"test": "bun test --only-failures",
 		"release": "bun ../common/release.ts"
 	},
 	"dependencies": {
 		"@moq/clock": "workspace:^",
 		"@moq/pattern": "workspace:^",
-		"commander": "^15.0.0",
-		"jose": "^6.2.14",
+		"commander": "^15.1.0",
+		"jose": "^6.2.17",
 		"zod": "^4.6.7"
 	},
 	"devDependencies": {
+		"@moq/net": "workspace:*",
 		"@types/bun": "^1.4.4",
 		"@types/node": "^26.6.6",
 		"typescript": "7.0.2"

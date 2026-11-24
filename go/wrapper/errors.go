@@ -77,7 +77,7 @@ var (
 	ErrUnsupported = ffi.ErrMoqErrorUnsupported
 	// ErrUnsupportedConfig is returned when media setup refuses a rendition or decoder output.
 	ErrUnsupportedConfig = ffi.ErrMoqErrorUnsupportedConfig
-	// ErrAlreadyCommitted is returned when a track already reading one way (arrival order, sequence order, or a typed reader) is asked to read another; subscribe again for a second cursor.
+	// ErrAlreadyCommitted is returned when a track already reading one way (arrival order, start order, or a typed reader) is asked to read another; subscribe again for a second cursor.
 	ErrAlreadyCommitted = ffi.ErrMoqErrorAlreadyCommitted
 	// ErrInvalidInstance is returned when an instance is empty.
 	ErrInvalidInstance = ffi.ErrMoqErrorInvalidInstance
@@ -99,18 +99,22 @@ var (
 // (Cancelled or Closed) rather than an actual failure. It's the value to check
 // when a stream ends because its consumer was cancelled or the session closed.
 func IsShutdown(err error) bool {
-	return errors.Is(err, ErrCancelled) || errors.Is(err, ErrClosed)
+	native, ok := nativeError(err)
+	return ok && ffi.MoqErrorIsShutdown(native)
 }
 
 // IsAuthError reports whether err is an authentication/authorization failure
-// (HTTP 401/403, an expired token, a protocol Unauthorized or Expired session
-// close, or a track revocation).
+// (HTTP 401/403, an expired or malformed token, a protocol Unauthorized or
+// Expired session close, or a track revocation).
 func IsAuthError(err error) bool {
-	if errors.Is(err, ErrUnauthorized) || errors.Is(err, ErrForbidden) || errors.Is(err, ErrExpired) {
-		return true
-	}
-	protocol, ok := ProtocolError(err)
-	return ok && (protocol.Kind == ffi.MoqProtocolKindUnauthorized || protocol.Kind == ffi.MoqProtocolKindExpired)
+	native, ok := nativeError(err)
+	return ok && ffi.MoqErrorIsAuth(native)
+}
+
+// nativeError finds the error moq-ffi returned in err's chain, for moq-ffi to classify.
+func nativeError(err error) (*ffi.MoqError, bool) {
+	var native *ffi.MoqError
+	return native, errors.As(err, &native) && native != nil
 }
 
 // ProtocolError reports the structured protocol failure, if err is one.

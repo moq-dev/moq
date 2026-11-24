@@ -11,6 +11,7 @@ const BUILTIN: &[(&str, &str)] = &[
 	("mild", include_str!("../profiles/mild.toml")),
 	("bursty", include_str!("../profiles/bursty.toml")),
 	("step", include_str!("../profiles/step.toml")),
+	("congestion", include_str!("../profiles/congestion.toml")),
 	("cellular-step", include_str!("../profiles/cellular-step.toml")),
 	("cellular-bursty", include_str!("../profiles/cellular-bursty.toml")),
 	("cellular-deep", include_str!("../profiles/cellular-deep.toml")),

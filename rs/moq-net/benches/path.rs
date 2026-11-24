@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures::FutureExt;
 use moq_net::{
-	Path, Pattern, Patterns,
+	Path, Prefixes,
 	fuzz::{Announced, Messages, decode_announces, decode_namespaces, encode_announces, encode_namespaces},
 	origin,
 };
@@ -102,12 +102,20 @@ fn decode() {
 	];
 	for (name, shape) in shapes {
 		let paths: Vec<Path> = (0..1000).map(|i| moq_net::Path::try_from(shape(i)).unwrap()).collect();
-		let stream: Vec<Announced> = paths
-			.iter()
-			.enumerate()
-			.map(|(i, path)| Announced::Start(path.clone(), vec![0x1111 + i as u64, 0x2222]))
-			.collect();
 		for compress in [false, true] {
+			// Lite-07 names a claim's route in place of its hop chain.
+			let stream: Vec<Announced> = paths
+				.iter()
+				.enumerate()
+				.map(|(i, path)| {
+					let hops = if compress {
+						vec![]
+					} else {
+						vec![0x1111 + i as u64, 0x2222]
+					};
+					Announced::Start(path.clone(), hops)
+				})
+				.collect();
 			let data = encode_announces(&stream, compress);
 			let version = if compress { "lite07" } else { "lite06" };
 			allocs(&format!("decode/announce_{version}/{name}"), 50, 1000, || {
@@ -152,7 +160,7 @@ fn requests() {
 
 		// A rooted handle joins its root onto every path it is given.
 		let (root, rest) = s.split_once('/').unwrap();
-		let rooted = consumer.scope(root, &Patterns::from(Pattern::all())).unwrap();
+		let rooted = consumer.scope(root, &Prefixes::all()).unwrap();
 		let rooted_target = format!("{rest}/0");
 		allocs(&format!("origin/request_rooted_str/{name}"), 2_000, 1, || {
 			local(&|| rooted.request(rooted_target.as_str(), None))

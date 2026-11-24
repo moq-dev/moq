@@ -10,6 +10,7 @@ export class Duration {
 	asMillis(): number;
 	asNanos(): number;
 	asSecs(): number;
+	checkedAdd(other: Duration): Duration | undefined;
 	clamp(lo: Duration, hi: Duration): Duration;
 	cmp(other: Duration): -1 | 0 | 1;
 	div(divisor: number): Duration;
@@ -26,6 +27,7 @@ export class Duration {
 	min(other: Duration): Duration;
 	mul(factor: number): Duration;
 	static nanos(value: number): Duration;
+	saturatingAdd(other: Duration): Duration;
 	saturatingSub(other: Duration): Duration;
 	static secs(value: number): Duration;
 	sub(other: Duration): Duration;
@@ -45,7 +47,8 @@ export interface Installed {
 export class Instant {
 	static readonly ZERO: Instant;
 	[Symbol.toPrimitive](hint: string): string;
-	add(duration: Duration): Instant;
+	checkedAdd(duration: Duration): Instant | undefined;
+	checkedSub(duration: Duration): Instant | undefined;
 	cmp(other: Instant): -1 | 0 | 1;
 	eq(other: Instant): boolean;
 	ge(other: Instant): boolean;
@@ -54,8 +57,9 @@ export class Instant {
 	lt(other: Instant): boolean;
 	max(other: Instant): Instant;
 	min(other: Instant): Instant;
+	saturatingAdd(duration: Duration): Instant;
+	saturatingSub(duration: Duration): Instant;
 	since(earlier: Instant): Duration;
-	sub(duration: Duration): Instant;
 	toJSON(): never;
 	toString(): string;
 	valueOf(): never;
@@ -69,19 +73,6 @@ export class Interval {
 	tick(): Promise<Instant>;
 }
 
-export class Manual {
-	constructor();
-	static readonly WALL_START: Wall;
-	advance(duration: Duration): Promise<void>;
-	drive<T>(work: PromiseLike<T>): Promise<T>;
-	fire(): Promise<Instant>;
-	install(): Installed;
-	jump(duration: Duration): void;
-	now(): Instant;
-	stepWall(wall: Wall): void;
-	wall(): Wall;
-}
-
 export const MissedTickBehavior: {
 	readonly Burst: "burst";
 	readonly Delay: "delay";
@@ -89,6 +80,18 @@ export const MissedTickBehavior: {
 };
 
 export type MissedTickBehavior = typeof MissedTickBehavior[keyof typeof MissedTickBehavior];
+
+export class Unsettled<T> extends Error {
+	constructor(watchdog: Duration, last: T | undefined, cause?: unknown);
+	readonly last: T | undefined;
+}
+
+export interface Wait<T> {
+	every?: Duration;
+	read: (left: Duration) => Promise<T>;
+	ready: (state: T) => boolean;
+	watchdog: Duration;
+}
 
 export class Wall {
 	static readonly UNIX_EPOCH: Wall;
@@ -131,6 +134,8 @@ export function timeoutSignal(duration: Duration, options?: {
 	ref?: boolean;
 	signal?: AbortSignal;
 }): AbortSignal;
+
+export function until<T>(wait: Wait<T>): Promise<T | Unsettled<T>>;
 
 export function wall(): Wall;
 

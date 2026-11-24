@@ -8,7 +8,10 @@ const HIGH: u64 = 1_000_000;
 const BOUNDARY: u64 = (HIGH + 2 * LOW) / 3;
 const NARROW: Duration = Duration::from_secs(8);
 const BELOW_LOWEST: Duration = Duration::from_secs(20);
-const RECOVER: Duration = Duration::from_secs(32);
+// BBR3's two-cycle max-bw filter forgets the 500 kbit/s samples only after the
+// cycle the drop landed in and one more retire: up to three ProbeBW cycles of a
+// 3s probe wait plus probe rounds at the 500ms queue's RTT, about 15s.
+const RECOVER: Duration = Duration::from_secs(40);
 const END: Duration = Duration::from_secs(110);
 const FRAME: Duration = Duration::from_nanos(1_000_000_000 / 30);
 
@@ -43,7 +46,7 @@ async fn shaped_uplink_disables_and_resumes() {
 		tls: insecure_tls(),
 		once: true,
 		quic: MoqQuicConfig {
-			congestion_control: Some(MoqCongestionControl::Delay),
+			congestion_control: Some(MoqCongestionControl::bbr()),
 			..Default::default()
 		},
 		websocket: MoqWebSocketConfig {
@@ -78,7 +81,7 @@ async fn shaped_uplink_disables_and_resumes() {
 					.first()
 					.cloned()
 					.map(|producer| MoqMediaProducer::Track { producer }),
-				..video_init(MoqVideoFormat::Avc3, h264_init())
+				..video_init(MoqVideoFormat::h264(), h264_init())
 			},
 		)
 		.unwrap();
@@ -90,7 +93,9 @@ async fn shaped_uplink_disables_and_resumes() {
 		tracks.push(track);
 	}
 	let remote = await_announced(&receiver.consume(), "ladder").await;
-	let catalog = MoqMediaCatalogConsumer::subscribe(&remote).await.unwrap();
+	let catalog = MoqMediaCatalogConsumer::subscribe(&remote, Duration::ZERO)
+		.await
+		.unwrap();
 	let first = catalog.next().await.unwrap().expect("catalog ended");
 	let low = MoqMediaTrackConsumer::subscribe(
 		&remote,
@@ -163,7 +168,7 @@ async fn shaped_uplink_disables_and_resumes() {
 						let mut payload = if idr { h264_init() } else { Vec::new() };
 						payload.extend_from_slice(&[0, 0, 0, 1, if idr { 0x65 } else { 0x41 }, 0x88, 0x84, 0x21]);
 						payload.resize((bitrate_bps / 8 / 30) as usize, 0xff);
-						track.write_frame(MoqFrame { payload, timestamp: Some(us(timestamp)) }).unwrap();
+						track.write_frame(MoqFrame { payload, timestamp: us(timestamp) }).unwrap();
 						keyframe[i] = false;
 						sent[i] += 1;
 					}

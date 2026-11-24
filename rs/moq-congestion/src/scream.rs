@@ -1,6 +1,9 @@
 //! SCReAMv2's delay-based congestion control, ported from draft-ietf-ccwg-rfc8298bis-screamv2-01.
 //! <https://www.ietf.org/archive/id/draft-ietf-ccwg-rfc8298bis-screamv2-01.html>
 //!
+//! A candidate under test, compiled only with the `lab` test-support feature: no session can
+//! select it until the realtime bake-off picks it.
+//!
 //! A reference window caps the bytes in flight. It grows with every byte acknowledged, and shrinks
 //! on loss, on classic ECN-CE, and as the averaged queue delay passes half the target, in
 //! proportion to how far past it is ("virtual L4S" marking). The queue delay is each packet's
@@ -865,7 +868,6 @@ mod tests {
             sent,
             bytes: MTU,
             packet: Packet::default(),
-            new_burst: true,
         }];
         scream.on_loss(Loss {
             now,

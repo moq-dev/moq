@@ -12,7 +12,7 @@ pub(crate) fn depth(config: &VideoConfig) -> crate::Result<Option<usize>> {
 	};
 	let max = crate::codec::video::max_reorder(config);
 	if u32::from(reorder) > max {
-		return Err(ClockError::Depth {
+		return Err(ReorderError::Depth {
 			reorder,
 			max,
 			codec: config.codec.to_string(),
@@ -32,6 +32,10 @@ pub(crate) fn depth(config: &VideoConfig) -> crate::Result<Option<usize>> {
 /// slot, which needs no frame spacing, so a DTS can fall before the timeline's zero. A tick is the
 /// caller's timescale, the finest its container writes: 90 kHz for MPEG-TS, 1 ms for FLV.
 ///
+/// Distinct source timestamps can round onto one tick. A frame then moves up to the tick after
+/// every frame presented before it, so each keeps its own presentation slot and order; identical
+/// source timestamps fail, since no order between them is known.
+///
 /// A clock lives for one group, so its DTS depends on nothing read before the group, and a frame
 /// reordered deeper than declared fails rather than move the timeline.
 pub(crate) struct DeclaredClock<T> {
@@ -44,8 +48,9 @@ pub(crate) struct DeclaredClock<T> {
 	held: VecDeque<(T, u64)>,
 	/// Presentation slots not yet taken, ascending.
 	slots: Vec<u64>,
-	/// The largest depth + 1 PTS read, ascending: all a deeper reorder is checked against.
-	highest: Vec<u64>,
+	/// The largest depth + 1 PTS read, ascending, with their source timestamps in nanoseconds:
+	/// all a deeper reorder or a tie is checked against.
+	highest: Vec<(u64, u128)>,
 	/// The last DTS released.
 	last: Option<i128>,
 }
@@ -78,19 +83,30 @@ impl<T> DeclaredClock<T> {
 	/// Whether a frame presented at `pts` would follow more than the depth frames read before it
 	/// in presentation order, which [`Self::push`] refuses.
 	pub(crate) fn reorders_past(&self, pts: u64) -> bool {
-		self.highest.len() - self.highest.partition_point(|&prior| prior <= pts) > self.depth
+		self.highest.len() - self.highest.partition_point(|&(prior, _)| prior <= pts) > self.depth
 	}
 
-	/// Hold the group's next frame in decode order, presented at `pts`.
-	pub(crate) fn push(&mut self, item: T, pts: u64) -> crate::Result<()> {
+	/// Hold the group's next frame in decode order, presented at `pts` ticks, read from `source`.
+	pub(crate) fn push(&mut self, item: T, pts: u64, source: moq_net::Timestamp) -> crate::Result<()> {
 		if self.held.len() > self.depth {
-			return Err(ClockError::Undrained.into());
+			return Err(ReorderError::Undrained.into());
+		}
+		let source = source.as_nanos()?;
+		// Only `highest` matters: a frame below all of it reorders past the depth.
+		let mut pts = pts;
+		for &(tick, prior) in &self.highest {
+			if prior < source && tick >= pts {
+				pts = tick.checked_add(1).ok_or(ReorderError::Tie)?;
+			}
+		}
+		if (self.highest.iter()).any(|&(tick, prior)| prior >= source && tick <= pts) {
+			return Err(ReorderError::Tie.into());
 		}
 		if self.reorders_past(pts) {
-			return Err(ClockError::Reordered(self.depth).into());
+			return Err(ReorderError::Reordered(self.depth).into());
 		}
-		let at = self.highest.partition_point(|&prior| prior <= pts);
-		self.highest.insert(at, pts);
+		let at = self.highest.partition_point(|&(prior, _)| prior <= pts);
+		self.highest.insert(at, (pts, source));
 		if self.highest.len() > self.depth + 1 {
 			self.highest.remove(0);
 		}
@@ -100,9 +116,10 @@ impl<T> DeclaredClock<T> {
 		Ok(())
 	}
 
-	/// The next frame and its DTS in signed ticks, once the group's earliest slot is known,
-	/// or at once when `flush` because the group ended.
-	pub(crate) fn pop(&mut self, flush: bool) -> crate::Result<Option<(T, i128)>> {
+	/// The next frame with its DTS in signed ticks and its PTS, past the tick it was pushed at if a
+	/// tie moved it, once the group's earliest slot is known, or at once when `flush` because the
+	/// group ended.
+	pub(crate) fn pop(&mut self, flush: bool) -> crate::Result<Option<(T, i128, u64)>> {
 		if self.held.is_empty() || (self.earliest.is_none() && !flush && self.held.len() <= self.depth) {
 			return Ok(None);
 		}
@@ -116,29 +133,48 @@ impl<T> DeclaredClock<T> {
 		};
 		let (item, pts) = self.held.pop_front().expect("the held queue is nonempty");
 		if dts > i128::from(pts) || self.last.is_some_and(|last| dts <= last) {
-			return Err(ClockError::Presentation.into());
+			return Err(ReorderError::Presentation.into());
 		}
 		self.last = Some(dts);
-		Ok(Some((item, dts)))
+		Ok(Some((item, dts, pts)))
 	}
 }
 
-#[derive(Debug, thiserror::Error)]
-enum ClockError {
+/// Video whose frames do not fit the reorder depth it declares, so no decode clock can be
+/// authored for it.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum ReorderError {
+	/// The declared depth is deeper than the codec and level allow.
 	#[error("video reorder depth {reorder} exceeds the {max} that {codec} can reach")]
-	Depth { reorder: u8, max: u32, codec: String },
+	Depth {
+		/// The declared depth.
+		reorder: u8,
+		/// The deepest the codec and level allow.
+		max: u32,
+		/// The codec string.
+		codec: String,
+	},
+	/// A sequence header declares a deeper reorder than the track already declared.
+	#[error("video reorder depth {reorder} exceeds the {declared} the track declared")]
+	Deepened {
+		/// The depth the track declared.
+		declared: u8,
+		/// The deeper depth the sequence header declares.
+		reorder: u8,
+	},
+	/// A frame presents earlier than the declared depth lets it.
 	#[error("video reorders past its declared depth {0}")]
 	Reordered(usize),
+	/// The presentation slots leave no decode time at or before a frame's presentation.
 	#[error("video presentation slots cannot author increasing DTS at or before PTS")]
 	Presentation,
+	/// Two frames present at one timestamp.
+	#[error("video presents two frames at one timestamp")]
+	Tie,
+	/// A frame was read before the clock released the ones ahead of it.
 	#[error("the decode clock must be drained before reading another frame")]
 	Undrained,
-}
-
-impl From<ClockError> for crate::Error {
-	fn from(err: ClockError) -> Self {
-		anyhow::Error::new(err).into()
-	}
 }
 
 #[cfg(test)]
@@ -149,19 +185,24 @@ mod tests {
 	const PYRAMID: [u64; 9] = [0, 4, 2, 1, 3, 8, 6, 5, 7];
 	const FRAME: u64 = 3_600;
 
+	/// A source timestamp exactly on 90 kHz tick `pts`.
+	fn at(pts: u64) -> moq_net::Timestamp {
+		moq_net::Timestamp::from_scale(pts, 90_000).unwrap()
+	}
+
 	/// The DTS of one group read through a declared clock of `depth`, released as each frame is
 	/// read, checking it never holds more than `depth` frames between reads.
 	fn declared_dts(depth: usize, read: &[u64]) -> Vec<i128> {
 		let mut clock = DeclaredClock::new(depth);
 		let mut out = Vec::new();
 		for &pts in read {
-			clock.push((), pts).unwrap();
-			while let Some(((), dts)) = clock.pop(false).unwrap() {
+			clock.push((), pts, at(pts)).unwrap();
+			while let Some(((), dts, _)) = clock.pop(false).unwrap() {
 				out.push(dts);
 			}
 			assert!(clock.len() <= depth);
 		}
-		while let Some(((), dts)) = clock.pop(true).unwrap() {
+		while let Some(((), dts, _)) = clock.pop(true).unwrap() {
 			out.push(dts);
 		}
 		out
@@ -193,12 +234,63 @@ mod tests {
 	#[test]
 	fn a_zero_depth_releases_each_frame_at_its_pts() {
 		let mut clock = DeclaredClock::new(0);
-		for pts in [0, 1, 90_000, u64::MAX] {
-			clock.push(pts, pts).unwrap();
-			assert_eq!(clock.pop(false).unwrap(), Some((pts, i128::from(pts))));
+		for (index, pts) in [0, 1, 90_000, u64::MAX].into_iter().enumerate() {
+			let source = moq_net::Timestamp::from_nanos(index as u64).unwrap();
+			clock.push(pts, pts, source).unwrap();
+			assert_eq!(clock.pop(false).unwrap(), Some((pts, i128::from(pts), pts)));
 			assert_eq!(clock.len(), 0);
 		}
-		clock.push(0, 0).unwrap_err();
+		clock.push(0, 0, at(0)).unwrap_err();
+	}
+
+	/// Distinct source timestamps that round onto one millisecond tick, as FLV clocks them, move
+	/// the later frame up to the next free tick; identical ones still fail.
+	#[test]
+	fn sub_tick_ties_move_to_the_next_free_tick() {
+		let micros = |micros: u64| moq_net::Timestamp::from_micros(micros).unwrap();
+		let released = |depth: usize, read: &[u64]| {
+			let mut clock = DeclaredClock::new(depth);
+			let mut out = Vec::new();
+			for &source in read {
+				let source = micros(source);
+				clock.push((), source.as_millis().unwrap() as u64, source)?;
+				while let Some(((), dts, pts)) = clock.pop(false)? {
+					out.push((dts, pts));
+				}
+			}
+			while let Some(((), dts, pts)) = clock.pop(true)? {
+				out.push((dts, pts));
+			}
+			crate::Result::Ok(out)
+		};
+		// MPEG-TS can carry a repeated timestamp one 90 kHz tick (11 µs) later.
+		assert_eq!(
+			released(0, &[182_815_000, 182_856_000, 182_856_011, 182_897_000]).unwrap(),
+			[
+				(182_815, 182_815),
+				(182_856, 182_856),
+				(182_857, 182_857),
+				(182_897, 182_897)
+			]
+		);
+		// A tie moved onto the next frame's tick moves that frame up in turn, however many share
+		// the tick.
+		assert_eq!(
+			released(0, &[10_000, 10_400, 11_000, 13_000]).unwrap(),
+			[(10, 10), (11, 11), (12, 12), (13, 13)]
+		);
+		assert_eq!(
+			released(0, &[40_000, 40_011, 40_022, 40_033, 80_000]).unwrap(),
+			[(40, 40), (41, 41), (42, 42), (43, 43), (80, 80)]
+		);
+		// Reordered frames tie the same way: the later-presented one moves.
+		assert_eq!(
+			released(1, &[0, 3_000, 1_000, 1_400, 4_000]).unwrap(),
+			[(-1, 0), (0, 3), (1, 1), (2, 2), (3, 4)]
+		);
+		released(0, &[10_000, 10_000]).unwrap_err();
+		// A frame presented below one already on its tick has nowhere to go.
+		released(1, &[0, 10_400, 10_000]).unwrap_err();
 	}
 
 	/// Flat or backward PTS read past the declared depth fail within depth + 1 frames, however
@@ -211,7 +303,7 @@ mod tests {
 					let mut clock = DeclaredClock::new(2);
 					let refused = (0..count).position(|index| {
 						let pts = 90_000 - if backwards { index } else { 0 };
-						let refused = clock.push(vec![0u8; size], pts).is_err()
+						let refused = clock.push(vec![0u8; size], pts, at(pts)).is_err()
 							|| std::iter::from_fn(|| clock.pop(false).transpose()).any(|popped| popped.is_err());
 						assert!(clock.len() <= 2);
 						refused

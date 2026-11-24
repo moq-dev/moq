@@ -105,7 +105,9 @@ impl Config {
 		let rng = &mut crate::entropy::rng();
 		let mut master_key = [0u8; 64];
 		rng.fill_bytes(&mut master_key);
-		let token_key = hkdf::Salt::new(&hkdf::HKDF_SHA256, &[]).extract(&master_key);
+		let token_key = hkdf::Salt::new(&hkdf::HKDF_SHA256, &[])
+			.extract(&master_key)
+			.expect("rind's HKDF never fails");
 
 		Self {
 			transport: transport::Config::default(),

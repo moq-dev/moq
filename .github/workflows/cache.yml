@@ -1,6 +1,6 @@
 name: Cache
 
-# Publish dev shells and Smoke's runtime packages independently of the landing worker's local caches.
+# Publish dev shells and the packages Smoke and deploys pin independently of the landing worker's local caches.
 permissions:
   contents: read
 
@@ -37,8 +37,8 @@ jobs:
   runtime:
     name: Runtime (ubuntu-24.04)
     if: github.ref == 'refs/heads/main'
-    # Smoke's only current nix platform. Keep its Rust builds independent of
-    # the dev-shell matrix and use Smoke's cold-build budget.
+    # The only nix platform Smoke and deploys pin. Keep their Rust builds
+    # independent of the dev-shell matrix and use Smoke's cold-build budget.
     runs-on: ubuntu-24.04
     timeout-minutes: 75
     environment: cache-write
@@ -54,7 +54,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/nix
       - uses: ./.github/actions/just
-      - name: Cache runtime packages and dependencies
+      - name: Cache pinned packages and dependencies
         env:
           NIX_SIGNING_KEY: ${{ secrets.NIX_SIGNING_KEY }}
           AWS_ACCESS_KEY_ID: ${{ secrets.NIX_R2_ACCESS_KEY_ID }}

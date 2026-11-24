@@ -52,6 +52,8 @@ pub(in crate::model) struct Content {
 	plain: Mutex<Option<Arc<Plain>>>,
 	views: AtomicUsize,
 	index: Mutex<Option<(Arc<Index>, u64)>>,
+	// Every copy attached, which bill one another's frames to the session together.
+	pub(super) siblings: cache::Siblings,
 }
 
 impl Content {
@@ -65,6 +67,7 @@ impl Content {
 			plain: Mutex::new(plain),
 			views: AtomicUsize::new(0),
 			index: Mutex::default(),
+			siblings: cache::Siblings::default(),
 		})
 	}
 
@@ -156,6 +159,7 @@ impl Content {
 	}
 
 	pub(super) fn attach(&self, charge: &cache::Charge) -> Option<Arc<Plain>> {
+		self.siblings.update(charge);
 		let mut plain = self.plain.lock().unwrap_or_else(PoisonError::into_inner);
 		self.views.fetch_add(1, Ordering::Relaxed);
 		if plain.as_ref().is_some_and(|plain| plain.lock().released.is_some()) {
@@ -213,17 +217,10 @@ impl Drop for Content {
 		{
 			plain.release(Error::Dropped);
 		}
-		if let Some((index, sequence)) = self.index.get_mut().unwrap_or_else(PoisonError::into_inner).take() {
+		if let Some((index, key)) = self.index.get_mut().unwrap_or_else(PoisonError::into_inner).take() {
 			let mut state = index.state.lock().unwrap_or_else(PoisonError::into_inner);
-			if state
-				.get(&sequence)
-				.is_some_and(|owner| std::ptr::eq(owner.as_ptr(), self))
-			{
-				remove(
-					&mut state,
-					&sequence,
-					index.bill.get().expect("registered index is billed"),
-				);
+			if state.get(&key).is_some_and(|owner| std::ptr::eq(owner.as_ptr(), self)) {
+				remove(&mut state, &key, index.bill.get().expect("registered index is billed"));
 			}
 		}
 	}
@@ -241,25 +238,21 @@ struct Index {
 }
 
 impl Contents {
-	pub(in crate::model) fn get(&self, sequence: u64) -> Option<Arc<Content>> {
+	pub(in crate::model) fn get(&self, key: u64) -> Option<Arc<Content>> {
 		let index = self.0.lock().unwrap_or_else(PoisonError::into_inner).upgrade()?;
 		let state = index.state.lock().unwrap_or_else(PoisonError::into_inner);
-		state.get(&sequence).and_then(Weak::upgrade)
+		state.get(&key).and_then(Weak::upgrade)
 	}
 
-	pub(in crate::model) fn remove(&self, sequence: u64) {
+	pub(in crate::model) fn remove(&self, key: u64) {
 		let Some(index) = self.0.lock().unwrap_or_else(PoisonError::into_inner).upgrade() else {
 			return;
 		};
 		let mut state = index.state.lock().unwrap_or_else(PoisonError::into_inner);
-		remove(
-			&mut state,
-			&sequence,
-			index.bill.get().expect("registered index is billed"),
-		);
+		remove(&mut state, &key, index.bill.get().expect("registered index is billed"));
 	}
 
-	pub(in crate::model) fn insert(&self, sequence: u64, content: &Arc<Content>, charge: &cache::Charge) {
+	pub(in crate::model) fn insert(&self, key: u64, content: &Arc<Content>, charge: &cache::Charge) {
 		let index = {
 			let mut current = self.0.lock().unwrap_or_else(PoisonError::into_inner);
 			match current.upgrade() {
@@ -277,9 +270,9 @@ impl Contents {
 			bill.add((2 * size_of::<usize>() + size_of::<Index>()) as u64);
 			bill
 		});
-		insert(&mut state, sequence, Arc::downgrade(content), bill);
+		insert(&mut state, key, Arc::downgrade(content), bill);
 		drop(state);
-		*content.index.lock().unwrap_or_else(PoisonError::into_inner) = Some((index, sequence));
+		*content.index.lock().unwrap_or_else(PoisonError::into_inner) = Some((index, key));
 	}
 }
 
@@ -294,7 +287,12 @@ pub(crate) struct StorageBench {
 #[cfg(all(feature = "async", any(test, feature = "fuzz")))]
 impl StorageBench {
 	pub(crate) fn new(frames: usize, views: usize) -> Self {
-		let account = cache::Track::new(cache::Pool::unbounded(), Default::default(), kio::Weak::new());
+		let account = cache::Track::new(
+			cache::Pool::unbounded(),
+			Default::default(),
+			Default::default(),
+			kio::Weak::new(),
+		);
 		let charge = account.charge();
 		let content = Content::new(&charge, None);
 		let mut owners = Vec::with_capacity(frames);
@@ -334,7 +332,7 @@ mod tests {
 	#[test]
 	fn weak_indexes_remove_final_owners_without_losing_replacements() {
 		let pool = cache::Pool::unbounded();
-		let account = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let account = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		let charge = account.charge();
 		let baseline = pool.used();
 		let contents = Contents::default();

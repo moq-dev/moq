@@ -8,7 +8,6 @@
 //!
 //! Long headers are never forwarded: a client picks the destination ID of its handshake, so the
 //! handshake relies on the front end keeping a flow on one server.
-#![cfg_attr(not(feature = "quic"), allow(dead_code, reason = "only the QUIC backend forwards"))]
 
 use std::{
 	collections::{HashMap, HashSet},

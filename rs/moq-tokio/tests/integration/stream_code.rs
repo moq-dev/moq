@@ -6,8 +6,6 @@
 //! subscription it never made with STOP_SENDING, and the client reads that code off the
 //! wire. moq-transport codes take the same raw session.
 
-#![cfg(feature = "quic")]
-
 use std::{sync::Arc, time::Duration};
 
 use moq_tokio::quic::driver;

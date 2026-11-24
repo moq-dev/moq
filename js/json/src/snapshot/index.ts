@@ -13,8 +13,8 @@
  * following frames are RFC 7396 JSON Merge Patch deltas applied in order. Interoperable with the
  * Rust `moq_json::snapshot`.
  *
- * A group of deltas runs until a joiner wants a fresh one: once the deltas outweigh the track's
- * `refresh` ratio times the snapshot, a join asks for a group past the largest, and the
+ * A group of deltas runs until a reader asks for a fresh one, judged by the track's `refresh`: a
+ * join once the deltas outweigh its ratio times the snapshot, or a subscriber's `refresh()`. The
  * {@link Producer} restates the value there. The encoder also rolls at its frame and byte caps.
  * A caller can roll one for its own reasons with
  * {@link Producer.cut}: it closes the open group and leaves the next update to open the replacement
@@ -40,4 +40,4 @@ export { MissingSnapshot } from "../error.ts";
 export { Consumer } from "./consumer.ts";
 export { Decoder } from "./decoder.ts";
 export { type Config, type Encoded, Encoder, type Pending } from "./encoder.ts";
-export { Producer } from "./producer.ts";
+export { type Finished, Producer } from "./producer.ts";

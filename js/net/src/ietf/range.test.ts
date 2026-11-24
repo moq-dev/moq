@@ -4,9 +4,10 @@ import { hooks } from "../internal.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
+import { withMax } from "../subscription.test-util.ts";
 import { type Subscription, Producer as TrackProducer } from "../track.ts";
 import { Fetch, FetchOk } from "./fetch.ts";
-import { EndOfRange, FetchEndOfRange, FetchFrame, Group } from "./object.ts";
+import { EndOfRange, FetchEndOfRange, FetchFrame } from "./object.ts";
 import { RequestError } from "./request.ts";
 import { NativeSession } from "./session.ts";
 import { Subscribe, SubscribeOk } from "./subscribe.ts";
@@ -14,17 +15,19 @@ import { Subscriber } from "./subscriber.ts";
 import { TrackStatusOk, TrackStatusRequest } from "./track.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
 
-const VERSIONS = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22] as const;
+const VERSIONS = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22, Version.DRAFT_23] as const;
 const ALPNS = {
 	[Version.DRAFT_18]: ALPN.DRAFT_18,
 	[Version.DRAFT_20]: ALPN.DRAFT_20,
 	[Version.DRAFT_22]: ALPN.DRAFT_22,
+	[Version.DRAFT_23]: ALPN.DRAFT_23,
 };
-const ranges = (start: bigint, end: bigint): Subscription => ({
-	ranges: [{ start: { absolute: start }, end: { absolute: end } }],
-	delay: { max: null },
-	order: "ascending",
-});
+const ranges = (start: bigint, end: bigint): Subscription =>
+	withMax({
+		ranges: [{ start: start, end: end - 1n }],
+		delay: { max: null },
+		order: "ascending",
+	});
 
 function fixture(version: IetfVersion) {
 	const pair = createMockTransportPair(ALPNS[version]);
@@ -67,11 +70,14 @@ function fixture(version: IetfVersion) {
 		expect(type).toBe(Fetch.id);
 		return { stream, request: await Fetch.decode(stream.reader, version) };
 	};
+	// Draft-23 names the answer's end as its LARGEST_OBJECT, inclusive like draft-22's End Location.
 	const answer = async (stream: Stream, group: bigint, object = 2n, ended = false) => {
-		await stream.writer.u53(FetchOk.id);
+		const end = { group, object: version === Version.DRAFT_18 ? object + 1n : object };
+		await stream.writer.u53(FetchOk.idFor(version));
 		await new FetchOk({
 			endOfTrack: ended,
-			endLocation: { group, object: version === Version.DRAFT_18 ? object + 1n : object },
+			endLocation: end,
+			largest: version === Version.DRAFT_23 ? end : undefined,
 		}).encode(stream.writer, version);
 	};
 	const data = async (id: bigint, groups: bigint[], objects = ["a", "", "c"]) => {
@@ -91,7 +97,6 @@ function fixture(version: IetfVersion) {
 							first: previousGroup === undefined && object === 0,
 							previousGroup: object === 0 ? previousGroup : undefined,
 						},
-						undefined,
 						version,
 					);
 				previousGroup = group;
@@ -158,15 +163,15 @@ for (const version of VERSIONS) {
 		await fx.answer(stream, 4n);
 		await fx.data(request.requestId, [1n, 3n, 4n]);
 		const first = await read;
-		expect(first?.sequence).toBe(1n);
+		expect(first?.start).toBe(1n);
 		if (!first) throw new Error("missing first group");
 		expect(await payloads(first)).toEqual(["1a", "", "1c"]);
 		first.close();
-		for (const sequence of [3n, 4n]) {
+		for (const key of [3n, 4n]) {
 			const group = await ordered.nextGroup();
-			expect(group?.sequence).toBe(sequence);
+			expect(group?.start).toBe(key);
 			if (!group) throw new Error("missing group");
-			expect(await payloads(group)).toEqual([`${sequence}a`, "", `${sequence}c`]);
+			expect(await payloads(group)).toEqual([`${key}a`, "", `${key}c`]);
 			group.close();
 		}
 		expect(await ordered.nextGroup()).toBeUndefined();
@@ -178,11 +183,11 @@ for (const version of VERSIONS) {
 		await fx.answer(backfill.stream, 0n);
 		await fx.data(backfill.request.requestId, [0n]);
 		const zero = await missing;
-		expect(zero?.sequence).toBe(0n);
+		expect(zero?.start).toBe(0n);
 		zero?.close();
-		for (const sequence of [1n, 3n, 4n]) {
+		for (const key of [1n, 3n, 4n]) {
 			const group = await overlap.nextGroup();
-			expect(group?.sequence).toBe(sequence);
+			expect(group?.start).toBe(key);
 			group?.close();
 		}
 		expect(await overlap.nextGroup()).toBeUndefined();
@@ -193,7 +198,7 @@ for (const version of VERSIONS) {
 		await fx.answer(second.stream, 5n);
 		await fx.data(second.request.requestId, [5n]);
 		const group = await more;
-		expect(group?.sequence).toBe(5n);
+		expect(group?.start).toBe(5n);
 		group?.close();
 	});
 
@@ -236,7 +241,6 @@ for (const version of VERSIONS) {
 			await new FetchFrame({ payload: new Uint8Array([42]), priority: 0 }).encode(
 				writer,
 				{ group: 1n, object: 0, first: true },
-				undefined,
 				version,
 			);
 		});
@@ -268,7 +272,6 @@ for (const version of VERSIONS) {
 			await new FetchFrame({ payload: new Uint8Array([42]), priority: 0 }).encode(
 				writer,
 				{ group: 1n, object: 0, first: true },
-				undefined,
 				version,
 			);
 		});
@@ -328,9 +331,7 @@ for (const version of VERSIONS) {
 		await fx.status();
 		const fetching = await fx.fetch();
 		await fx.answer(fetching.stream, 2n);
-		const live = fx.broadcast
-			.track("video")
-			.subscribe({ ranges: [{ start: { absolute: 6n } }], delay: { max: null } });
+		const live = fx.broadcast.track("video").subscribe(withMax({ ranges: [{ start: 6n }], delay: { max: null } }));
 		fx.readers.push(live);
 		const failed = live.recvGroup().catch((error) => error);
 		const widening = await fx.next();
@@ -341,12 +342,12 @@ for (const version of VERSIONS) {
 		expect(await failed).toBeInstanceOf(Error);
 		await fx.data(fetching.request.requestId, [1n, 2n]);
 		const group = await first;
-		expect(group?.sequence).toBe(1n);
+		expect(group?.start).toBe(1n);
 		if (!group) throw new Error("missing history group");
 		expect(await payloads(group)).toEqual(["1a", "", "1c"]);
 		group?.close();
 		const second = await ordered.nextGroup();
-		expect(second?.sequence).toBe(2n);
+		expect(second?.start).toBe(2n);
 		if (!second) throw new Error("missing history group");
 		expect(await payloads(second)).toEqual(["2a", "", "2c"]);
 		second?.close();
@@ -365,9 +366,7 @@ for (const version of VERSIONS) {
 		await fx.status();
 		const fetching = await fx.fetch();
 		await fx.answer(fetching.stream, 2n);
-		const live = fx.broadcast
-			.track("video")
-			.subscribe({ ranges: [{ start: { absolute: 6n } }], delay: { max: null } });
+		const live = fx.broadcast.track("video").subscribe(withMax({ ranges: [{ start: 6n }], delay: { max: null } }));
 		const widening = await fx.next();
 		expect(await widening.reader.u53()).toBe(Subscribe.id);
 		await Subscribe.decode(widening.reader, version);
@@ -388,49 +387,6 @@ for (const version of VERSIONS) {
 		expect(await ordered.nextGroup()).toBeUndefined();
 	});
 
-	test(`${version}: a relative end on an empty track subscribes for the first group`, async () => {
-		const fx = fixture(version);
-		const reader = fx.broadcast.track("video").subscribe({
-			ranges: [{ start: { absolute: 0n }, end: { relative: 0n } }],
-			delay: { max: null },
-			order: "ascending",
-		});
-		fx.readers.push(reader);
-		const ordered = reader.ordered();
-		const first = ordered.nextGroup();
-		await fx.status(null);
-		const live = await fx.next();
-		expect(await live.reader.u53()).toBe(Subscribe.id);
-		await Subscribe.decode(live.reader, version);
-		await live.writer.u53(SubscribeOk.id);
-		await new SubscribeOk({ trackAlias: 7n }).encode(live.writer, version);
-		const payload = new TextEncoder().encode("0a");
-		const header = new Group({
-			trackAlias: 7n,
-			groupId: 0n,
-			subGroupId: 0n,
-			publisherPriority: 0,
-			flags: {
-				hasExtensions: false,
-				hasSubgroup: false,
-				hasSubgroupObject: false,
-				hasEnd: true,
-				hasPriority: true,
-				firstObject: true,
-			},
-		});
-		await fx.subscriber.handleGroup(
-			header,
-			new Reader(undefined, new Uint8Array([0, payload.byteLength, ...payload]), version),
-		);
-		const group = await first;
-		expect(group?.sequence).toBe(0n);
-		if (!group) throw new Error("missing first group");
-		expect(await payloads(group)).toEqual(["0a"]);
-		group.close();
-		expect(await ordered.nextGroup()).toBeUndefined();
-	});
-
 	test(`${version}: a nonexistent trailing object range preserves the group's payloads`, async () => {
 		const fx = fixture(version);
 		const pending = fx.broadcast.track("video").fetchGroup(1n);
@@ -443,19 +399,54 @@ for (const version of VERSIONS) {
 				await new FetchFrame({ payload: new Uint8Array([value]), priority: 0 }).encode(
 					writer,
 					{ group: 1n, object, first: object === 0 },
-					undefined,
 					version,
 				);
-			await new FetchEndOfRange({ reason: EndOfRange.NonExistent, group: 1n, object: 5n }).encode(
-				writer,
-				version,
-			);
+			// Draft-23 encodes it against the prior object: the same group, and object 2 + 2 + 1.
+			const at = version === Version.DRAFT_23 ? { group: 0n, object: 2n } : { group: 1n, object: 5n };
+			await new FetchEndOfRange({ reason: EndOfRange.NonExistent, ...at }).encode(writer, version);
 		});
 		await fx.subscriber.handleFetch(new Reader(undefined, bytes, version));
 		const group = await pending;
 		for (const value of [1, 2, 3]) expect((await group.readFrame())?.payload).toEqual(new Uint8Array([value]));
 		expect(await group.readFrame()).toBeUndefined();
 		group.close();
+	});
+
+	test(`${version}: an End of Range may name a 62-bit Object ID`, async () => {
+		const fx = fixture(version);
+		const reader = fx.broadcast.track("video").subscribe(ranges(1n, 3n));
+		fx.readers.push(reader);
+		const ordered = reader.ordered();
+		const read = ordered.nextGroup();
+		await fx.status();
+		const { stream, request } = await fx.fetch();
+		await fx.answer(stream, 2n);
+		const frame = (payload: string) => new FetchFrame({ payload: new TextEncoder().encode(payload), priority: 0 });
+		const bytes = await Writer.collect(version, async (writer) => {
+			await writer.u62(request.requestId);
+			await frame("1a").encode(writer, { group: 1n, object: 0, first: true }, version);
+			// The rest of group 1, through the largest Object ID, does not exist.
+			const object = (1n << 62n) - 1n;
+			// Draft-23 encodes it against object 0: the same group, and object 0 + delta + 1.
+			const at = version === Version.DRAFT_23 ? { group: 0n, object: object - 1n } : { group: 1n, object };
+			await new FetchEndOfRange({ reason: EndOfRange.NonExistent, ...at }).encode(writer, version);
+			for (const [object, payload] of ["2a", "2b", "2c"].entries())
+				await frame(payload).encode(
+					writer,
+					// After an End of Range the next object states its priority, and its group as a delta.
+					{ group: 2n, object, first: object === 0, previousGroup: object === 0 ? 1n : undefined },
+					version,
+				);
+		});
+		await fx.subscriber.handleFetch(new Reader(undefined, bytes, version));
+		const first = await read;
+		if (!first) throw new Error("missing group 1");
+		expect(await payloads(first)).toEqual(["1a"]);
+		first.close();
+		const second = await ordered.nextGroup();
+		if (!second) throw new Error("missing group 2");
+		expect(await payloads(second)).toEqual(["2a", "2b", "2c"]);
+		second.close();
 	});
 }
 
@@ -475,3 +466,59 @@ for (const ietf of [undefined, Version.DRAFT_18]) {
 		hooks.releaseTrack(producer);
 	});
 }
+
+/** A draft-23 answer with no LARGEST_OBJECT, which covers the whole requested range. */
+async function answerRequested(stream: Stream) {
+	const version = Version.DRAFT_23;
+	await stream.writer.u53(FetchOk.idFor(version));
+	await new FetchOk({ endOfTrack: false, endLocation: { group: 0n, object: 0n } }).encode(stream.writer, version);
+}
+
+/** Group 1's objects "a" and "b" on a draft-23 fetch stream, then `tail`. */
+async function groupThen(requestId: bigint, tail: number[]) {
+	const version = Version.DRAFT_23;
+	return Writer.collect(version, async (writer) => {
+		await writer.u62(requestId);
+		for (const [object, payload] of ["a", "b"].entries())
+			await new FetchFrame({ payload: new TextEncoder().encode(payload), priority: 0 }).encode(
+				writer,
+				{ group: 1n, object, first: object === 0 },
+				version,
+			);
+		await writer.write(Uint8Array.from(tail));
+	});
+}
+
+// Draft-23 has no End Of Track in the answer: the fetch stream follows the track's last object
+// with End of Track, which ends the track as FETCH_OK's flag did. End of Group says nothing of it.
+test("draft-23: an End of Track on the fetch stream ends the track", async () => {
+	for (const track of [false, true]) {
+		const fx = fixture(Version.DRAFT_23);
+		const reader = fx.broadcast.track("video").subscribe(ranges(1n, 2n));
+		fx.readers.push(reader);
+		const read = reader.ordered().nextGroup();
+		await fx.status();
+		const { stream, request } = await fx.fetch();
+		await answerRequested(stream);
+		const bytes = await groupThen(request.requestId, [0x80, track ? 0x81 : 0x80]);
+		await fx.subscriber.handleFetch(new Reader(undefined, bytes, Version.DRAFT_23));
+		const group = await read;
+		if (!group) throw new Error("missing group");
+		expect(await payloads(group)).toEqual(["a", "b"]);
+		expect(hooks.subscriberEnd(reader)).toEqual(track ? { group: 2n, frame: 0 } : undefined);
+	}
+});
+
+// Past an End of Group the prior Object ID is 2^64-1, so only an object naming another group
+// follows. The violation fails the stream, but End of Group already finished its group whole.
+test("draft-23: a stream failing after an End of Group keeps the finished group", async () => {
+	const fx = fixture(Version.DRAFT_23);
+	const pending = fx.broadcast.track("video").fetchGroup(1n);
+	await fx.status();
+	const { stream, request } = await fx.fetch();
+	await answerRequested(stream);
+	// End of Group, then an object that inherits group 1: flags 0, an empty payload.
+	const bytes = await groupThen(request.requestId, [0x80, 0x80, 0x00, 0x00]);
+	await fx.subscriber.handleFetch(new Reader(undefined, bytes, Version.DRAFT_23));
+	expect(await payloads(await pending)).toEqual(["a", "b"]);
+});

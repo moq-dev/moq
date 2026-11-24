@@ -1,7 +1,7 @@
 // Subscribe-only cross-language interop client for the interop test, linked
-// against the workspace moq-c (the C bindings, built by `cargo build -p moq-c`).
+// against the workspace libmoq (the C bindings, built by `cargo build -p libmoq`).
 //
-// moq-c is a handle + callback API: connect, consume a broadcast, get a
+// libmoq is a handle + callback API: connect, consume a broadcast, get a
 // catalog snapshot via callback, start the video track and a decoder per audio
 // rendition, and a callback fires as each frame arrives. Once a non-empty video
 // frame has landed and --audio-ms of every audio rendition has been decoded to
@@ -83,13 +83,13 @@ struct ctx {
 
     // One flag per registration handed &ctx, set by that registration's terminal
     // (<= 0) callback. main returns only once every registration is done: that terminal is
-    // moq-c's documented last touch of user_data, so it is what makes main's
+    // libmoq's documented last touch of user_data, so it is what makes main's
     // frame safe to destroy.
     int done_status, done_broadcast, done_catalog, done_frame;
 };
 
-// Callbacks run on moq-c's runtime thread; main waits on the condvar. ctx lives
-// on main's stack and moq-c keeps the pointer until each registration's
+// Callbacks run on libmoq's runtime thread; main waits on the condvar. ctx lives
+// on main's stack and libmoq keeps the pointer until each registration's
 // terminal (<= 0) callback fires, so main must not return until every one of
 // them has. Closing the session ends its state registration alone;
 // moq_origin_follow, moq_consume_catalog and moq_consume_video each
@@ -159,7 +159,7 @@ static void on_frame(void *ud, int32_t frame) {
 
 // Writes each decoded audio frame to its rendition's files for tone.py, until enough has arrived.
 // A gap or an encoder end before then fails the run, as the Rust client does.
-// Runs on moq-c's runtime thread, the only writer, so the files need no lock.
+// Runs on libmoq's runtime thread, the only writer, so the files need no lock.
 static void on_audio(void *ud, int32_t id) {
     audio_t *a = (audio_t *)ud;
     ctx_t *c = a->ctx;
@@ -259,6 +259,13 @@ static void start_audio(ctx_t *c, int32_t catalog) {
         moq_audio_decoder_output out;
         memset(&out, 0, sizeof(out));
         out.format = MOQ_AUDIO_SAMPLE_FORMAT_F32;
+        // moq-audio waits on a missing group for its playout delay, measured from arrival timing
+        // at tens of ms, so a runtime starved longer than that skips a group that is only late.
+        // This reader checks delivery between implementations, not a real-time deadline: it holds
+        // a playout delay of the max delay, waiting on a hole for the same budget it grants a late
+        // group.
+        out.delay.min_us = MAX_DELAY_US;
+        out.delay.min_stated = true;
         out.delay.max_us = MAX_DELAY_US;
         int32_t track = moq_decode_audio((uint32_t)catalog, i, &out, on_audio, &c->audio[i]);
         pthread_mutex_lock(&c->mu);
@@ -401,7 +408,7 @@ static void on_finish_health_frame(void *ud, int32_t frame) {
     int32_t read = moq_consume_track_frame((uint32_t)frame, &info);
     const char payload[] = "session-alive";
     pthread_mutex_lock(&c->mu);
-    // Its timestamp goes unchecked: lite-05/06 carry an untimed track's send time.
+    // Its timestamp goes unchecked: lite-05/06 declare an untimed track in milliseconds.
     if (read < 0 || info.payload_size != sizeof(payload) - 1 ||
         memcmp(info.payload, payload, sizeof(payload) - 1) != 0 ||
         ++c->finish.health_frames != 1) c->finish.failed = 1;
@@ -448,7 +455,7 @@ static void on_finish_health(void *ud, moq_follow_event event, int32_t broadcast
 // The context whose session a failure closes, once connected.
 static ctx_t *failing;
 
-// Report a failure and exit 1, for the paths where moq-c still holds &ctx.
+// Report a failure and exit 1, for the paths where libmoq still holds &ctx.
 //
 // _exit rather than a return: it leaves main's frame (and so ctx) intact for the
 // callbacks still pointing at it, which is what the failure paths want. Only the
@@ -506,8 +513,13 @@ static void finish(ctx_t *c, const struct timespec *deadline) {
     }
     ok = !c->finish.failed && !c->done_status && c->finish.done_health &&
          c->finish.health_end == 0 && c->finish.health_frames == 1;
+    unsigned health_frames = c->finish.health_frames;
+    int32_t health_end = c->finish.health_end;
+    int health_done = c->finish.done_health;
     pthread_mutex_unlock(&c->mu);
-    if (!ok) fail("error: session health failed after broadcast finish\n");
+    if (!ok)
+        fail("error: session health failed after broadcast finish (frames=%u end=%d done=%d)\n", health_frames,
+             health_end, health_done);
     fprintf(stderr, "finish clean frames=%u catalog=eof announce=end health=ok\n", frames);
 }
 
@@ -616,7 +628,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // moq-c reads the config during the call alone.
+    // libmoq reads the config during the call alone.
     moq_client_config config;
     memset(&config, 0, sizeof(config));
     moq_string versions[1];
@@ -626,9 +638,15 @@ int main(int argc, char **argv) {
         config.versions = versions;
         config.versions_len = 1;
     }
+    // The finish case checks one session end to end, so it stays on QUIC: leaving a
+    // WebSocket fallback that won a slow race would open a second session.
+    if (c.finish.enabled) {
+        config.has_websocket_enabled = true;
+        config.websocket_enabled = false;
+    }
 
     // origin_publish = 0 disables publishing; consume via our origin.
-    c.session = moq_session_connect(url, strlen(url), version ? &config : NULL, 0, (uint32_t)c.origin, on_state, &c);
+    c.session = moq_session_connect(url, strlen(url), &config, 0, (uint32_t)c.origin, on_state, &c);
     if (c.session <= 0) {
         // A registration that fails never invokes its callback, so &c isn't held
         // yet and returning is still safe here.
@@ -687,7 +705,7 @@ int main(int argc, char **argv) {
         fail("error: broadcast never announced\n");
     }
 
-    c.catalog = moq_consume_catalog((uint32_t)bc, on_catalog, &c);
+    c.catalog = moq_consume_catalog((uint32_t)bc, 0, on_catalog, &c);
     if (c.catalog <= 0) {
         fail("error: moq_consume_catalog failed: %d\n", c.catalog);
     }
@@ -712,7 +730,7 @@ int main(int argc, char **argv) {
 
     // The data path succeeded, which is all this interop client verifies. Returning
     // (rather than _exit) is the other half of what it verifies: an embedder that
-    // closes and drains gets a clean process exit, with moq-c's runtime thread
+    // closes and drains gets a clean process exit, with libmoq's runtime thread
     // still live behind its LazyLock.
     drain(&c);
     if (finish_mode) moq_consume_close((uint32_t)c.finish.health_broadcast);

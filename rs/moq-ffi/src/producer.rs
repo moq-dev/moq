@@ -9,12 +9,12 @@ use crate::consumer::{MoqBroadcastConsumer, MoqGroupConsumer, MoqOrder, MoqSubsc
 use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
 use crate::ffi::{Background, OneShot, Polled};
-use crate::media::MoqFrame;
+use crate::media::{MoqFrame, MoqTimestamp};
 
 /// A location within a track, mirroring [`moq_net::track::Position`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct MoqPosition {
-	/// The group sequence.
+	/// The group start.
 	pub group: u64,
 	/// The frame index within the group, numbered from 0 in write order.
 	pub frame: u64,
@@ -32,49 +32,96 @@ impl From<moq_net::track::Position> for MoqPosition {
 /// Publisher-side track properties, mirroring [`moq_net::track::Info`].
 ///
 /// Construct with the fields you care about; the rest use raw-track defaults
-/// (priority 0, a zero max age, untimed).
+/// (priority 0, untimed, uncompressed). A null record uses moq-net's zero `max_age` too.
+/// Uniffi can't default a duration, so Kotlin and Swift name `max_age`, the Python, Go, and
+/// Dart wrappers default an omitted one to zero, and a bare C++ record leaves it unset, as
+/// [`MoqDelay`](crate::consumer::MoqDelay) does.
 #[derive(Clone, uniffi::Record)]
 pub struct MoqTrackInfo {
 	/// Priority, used only to break ties between subscriptions of equal subscriber priority.
 	/// Higher is more urgent; the default 0 is the midpoint.
 	#[uniffi(default = 0)]
 	pub priority: i8,
-	/// How long a superseded group stays fresh, or null for the default, zero: only the live
-	/// edge is served. The publisher-side half of
-	/// [`MoqDelay::max`](crate::consumer::MoqDelay::max). Ignored when `max_age_unlimited` is
-	/// set. Uniffi can't default a duration, hence null rather than zero.
-	#[uniffi(default = None)]
+	/// How long a superseded group stays fresh, or null for no publisher limit, leaving only
+	/// the cache to bound how long one is served. Zero serves only the live edge. The
+	/// publisher-side half of [`MoqDelay::max`](crate::consumer::MoqDelay::max), which reads
+	/// null the same way.
 	pub max_age: Option<std::time::Duration>,
-	/// Set no publisher age limit, ignoring `max_age` and leaving only the cache to bound how
-	/// long a superseded group is served. A received track that advertised none reports this.
-	#[uniffi(default = false)]
-	pub max_age_unlimited: bool,
-	/// How many times its first frame a group's later bytes may grow before a joining
-	/// subscriber asks for a new group, or null to never ask. See
-	/// [`MoqTrackDemand::wanted`](crate::demand::MoqTrackDemand::wanted).
-	#[uniffi(default = None)]
-	pub refresh: Option<u32>,
+	/// When a subscriber asks for a new group, which the publisher hears through
+	/// [`MoqTrackDemand::refresh`](crate::demand::MoqTrackDemand::refresh). The default never
+	/// asks.
+	#[uniffi(default)]
+	pub refresh: MoqTrackRefresh,
 	/// Per-frame timescale in ticks per second, or null for an untimed track.
 	#[uniffi(default = None)]
 	pub timescale: Option<u64>,
 	/// How each group is compressed on the wire to peers that support it, or null to send
 	/// frames as written. Readers always see the original frames.
 	#[uniffi(default = None)]
-	pub compression: Option<MoqCompression>,
+	pub compression: Option<Arc<MoqCompression>>,
+}
+
+/// When a subscriber asks a track's publisher for a new group, mirroring
+/// [`moq_net::track::Refresh`]. The default asks for nothing.
+///
+/// A track opting in starts each group with an independent frame (a keyframe or a snapshot), so
+/// a new group is something the publisher can make on request. A live join asks once the newest
+/// group outweighs `ratio`, or on any join without one. Either way the request waits out
+/// `interval`, which caps how often the publisher makes groups however many subscribers ask.
+#[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
+pub struct MoqTrackRefresh {
+	/// How many times its first frame a group's later bytes may grow before a joining subscriber
+	/// asks for a new group. Zero asks on any join once a frame follows the first; null leaves
+	/// joins to `interval` alone.
+	#[uniffi(default = None)]
+	pub ratio: Option<u32>,
+	/// How long after the newest group arrived a request may ask for another, or null for no
+	/// wait. A request made sooner takes effect then. Sent as milliseconds.
+	#[uniffi(default = None)]
+	pub interval: Option<std::time::Duration>,
+}
+
+impl From<MoqTrackRefresh> for moq_net::track::Refresh {
+	fn from(refresh: MoqTrackRefresh) -> Self {
+		moq_net::track::Refresh::default()
+			.with_ratio(refresh.ratio)
+			.with_interval(refresh.interval)
+	}
+}
+
+impl From<moq_net::track::Refresh> for MoqTrackRefresh {
+	fn from(refresh: moq_net::track::Refresh) -> Self {
+		Self {
+			ratio: refresh.ratio,
+			interval: refresh.interval.map(crate::ffi::duration),
+		}
+	}
 }
 
 /// How a track's frames are compressed, mirroring [`moq_net::track::Compression`]; an
 /// uncompressed track has none.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
-pub enum MoqCompression {
-	/// Each group is one DEFLATE stream, which suits small, repetitive frames like JSON.
-	Deflate,
-}
+///
+/// An immutable object so adding a compression later does not break callers switching over a
+/// closed enum. Compare a received one by [`name`](Self::name).
+#[derive(Debug, PartialEq, Eq, Hash, uniffi::Object)]
+#[uniffi::export(Debug, Eq, Hash)]
+pub struct MoqCompression(moq_net::track::Compression);
 
-fn compression(compression: Option<MoqCompression>) -> moq_net::track::Compression {
-	match compression {
-		None => moq_net::track::Compression::None,
-		Some(MoqCompression::Deflate) => moq_net::track::Compression::Deflate,
+#[uniffi::export]
+impl MoqCompression {
+	/// Each group is one DEFLATE stream, which suits small, repetitive frames like JSON.
+	#[uniffi::constructor]
+	pub fn deflate() -> Arc<Self> {
+		Arc::new(Self(moq_net::track::Compression::Deflate))
+	}
+
+	/// The compression's lowercase name, such as `deflate`.
+	pub fn name(&self) -> String {
+		match self.0 {
+			moq_net::track::Compression::Deflate => "deflate".into(),
+			// A compression added to moq-net before this binding names it.
+			other => format!("{other:?}").to_lowercase(),
+		}
 	}
 }
 
@@ -84,19 +131,18 @@ impl TryFrom<MoqTrackInfo> for moq_net::track::Info {
 	fn try_from(info: MoqTrackInfo) -> Result<Self, MoqError> {
 		let mut out = moq_net::track::Info::default()
 			.with_priority(info.priority)
-			.with_refresh(info.refresh);
-		if info.max_age_unlimited {
-			out = out.with_max_age(None);
-		} else if let Some(max_age) = info.max_age {
-			out = out.with_max_age(max_age);
-		}
+			.with_refresh(info.refresh.into())
+			.with_max_age(info.max_age);
 		if let Some(ticks) = info.timescale {
 			let scale = moq_net::Timescale::new(ticks).map_err(|_| MoqError::Codec {
 				reason: format!("invalid timescale: {ticks}"),
 			})?;
 			out = out.with_timescale(scale);
 		}
-		Ok(out.with_compression(compression(info.compression)))
+		let compression = info
+			.compression
+			.map_or(moq_net::track::Compression::None, |compression| compression.0);
+		Ok(out.with_compression(compression))
 	}
 }
 
@@ -111,11 +157,10 @@ impl From<&moq_net::track::Info> for MoqTrackInfo {
 		Self {
 			priority: info.priority,
 			max_age: info.max_age.map(crate::ffi::duration),
-			max_age_unlimited: info.max_age.is_none(),
-			refresh: info.refresh,
+			refresh: info.refresh.into(),
 			timescale: info.timescale.map(|timescale| timescale.as_u64()),
-			// A codec this binding cannot name yet reads as uncompressed, as its frames do.
-			compression: (info.compression == moq_net::track::Compression::Deflate).then_some(MoqCompression::Deflate),
+			compression: (info.compression != moq_net::track::Compression::None)
+				.then(|| Arc::new(MoqCompression(info.compression))),
 		}
 	}
 }
@@ -372,13 +417,15 @@ impl MoqBroadcastProducer {
 	///
 	/// Use it for local pub/sub via [`consume`](Self::consume). To publish at a path, use
 	/// [`MoqOriginProducer::route`](crate::origin::MoqOriginProducer::route) instead.
+	///
+	/// No origin collects its cache, so it drives its own until it closes: that is what fires a
+	/// refresh deferred by its track's interval.
 	#[uniffi::constructor]
 	pub fn new() -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::enter();
-		Ok(Arc::new(Self::from_inner(
-			moq_net::broadcast::Info::new().produce(),
-			Background::default(),
-		)?))
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let driver = Background::driver(PoolDriver(broadcast.info().pool.downgrade()));
+		Ok(Arc::new(Self::from_inner(broadcast, driver)?))
 	}
 
 	/// Create a track for arbitrary byte payloads, no codec or container.
@@ -390,7 +437,10 @@ impl MoqBroadcastProducer {
 		let _guard = crate::ffi::enter();
 		self.with_state(|state| {
 			let info = raw_track_info(info)?;
-			let track = state.broadcast.create_track(name, Some(info))?;
+			let track = state
+				.broadcast
+				.create_track(name, Some(info))
+				.ok_or(moq_net::Error::Duplicate)?;
 			MoqTrackProducer::child(track, &state.children)
 		})
 	}
@@ -417,6 +467,25 @@ impl MoqBroadcastProducer {
 		};
 		state.driver.check()?;
 		result
+	}
+}
+
+/// Collects a standalone broadcast's cache pool, which no origin drives, so its wall-clock
+/// deadlines fire.
+///
+/// Runs while anything still caches into the pool: the broadcast, a track it released when its
+/// handle dropped without a close, or a reader. Holding it weakly, it ends at the first poll
+/// after the last of them drops, which the pool's periodic sweep bounds.
+struct PoolDriver(moq_net::cache::PoolWeak);
+
+impl moq_net::time::Driver for PoolDriver {
+	fn poll(
+		&mut self,
+		now: moq_net::time::Instant,
+		waiter: &kio::Waiter,
+	) -> Result<Option<moq_net::time::Instant>, moq_net::Error> {
+		let pool = self.0.upgrade().ok_or(moq_net::Error::Closed)?;
+		Ok(pool.poll(now, waiter))
 	}
 }
 
@@ -473,11 +542,12 @@ impl MoqTrackRequests {
 	/// Wait for the next run of groups readers miss: a fetch of an uncached group, or
 	/// history a subscription reads that the cache no longer holds.
 	///
-	/// Cached groups are served without reaching this method.
+	/// Cached groups are served without reaching this method. A reader's time start that no
+	/// cached group places asks for the group starting at that time, as any other.
 	pub async fn requested_fill(&self) -> Result<Arc<MoqFill>, MoqError> {
 		let fill = self
 			.reads
-			.wait(|requests, waiter| Poll::Ready(Ok(ready!(requests.poll_requested_fill(waiter))?)))
+			.wait(|requests, waiter| requests.poll_requested_fill(waiter).map_err(Into::into))
 			.await?;
 		Ok(Arc::new(MoqFill::new(fill)))
 	}
@@ -491,7 +561,7 @@ impl MoqTrackRequests {
 	}
 }
 
-/// A run of groups readers miss, mirroring [`moq_net::track::Fill`].
+/// A run of groups readers miss, mirroring [`moq_net::track::FillGroups`].
 ///
 /// Call [`accept`](Self::accept) for each group you have and [`drop_groups`](Self::drop_groups)
 /// for the rest, one group at a time as [`wanted_changed`](Self::wanted_changed) yields them;
@@ -502,13 +572,13 @@ impl MoqTrackRequests {
 /// fills you take concurrently: each waits on its own readers.
 #[derive(uniffi::Object)]
 pub struct MoqFill {
-	inner: moq_net::track::Fill,
+	inner: moq_net::track::FillGroups,
 	/// The watcher `wanted_changed` advances, kept apart from `inner` so its cursor is its own.
-	changes: Polled<moq_net::track::Fill>,
+	changes: Polled<moq_net::track::FillGroups>,
 }
 
 impl MoqFill {
-	fn new(inner: moq_net::track::Fill) -> Self {
+	fn new(inner: moq_net::track::FillGroups) -> Self {
 		let changes = Polled::new(inner.clone());
 		Self { inner, changes }
 	}
@@ -529,12 +599,6 @@ impl MoqFill {
 	/// The most urgent delivery priority among the readers waiting on it.
 	pub fn priority(&self) -> i8 {
 		self.inner.priority()
-	}
-
-	/// The most tolerant age budget among the readers waiting on it, or null for the
-	/// publisher's max age alone.
-	pub fn max_delay(&self) -> Option<std::time::Duration> {
-		self.inner.max_delay().map(crate::ffi::duration)
 	}
 
 	/// Which end to fill first.
@@ -560,11 +624,11 @@ impl MoqFill {
 			.await
 	}
 
-	/// Insert group `sequence` and return a producer for filling it. The first group starts
+	/// Insert group `start` and return a producer for filling it. The first group starts
 	/// at [`start`](Self::start)'s frame, so its frames keep their indices.
-	pub fn accept(&self, sequence: u64) -> Result<Arc<MoqGroupProducer>, MoqError> {
+	pub fn accept(&self, start: u64) -> Result<Arc<MoqGroupProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let group = self.inner.accept(sequence, None)?;
+		let group = self.inner.accept(start, None)?.ok_or(moq_net::Error::Duplicate)?;
 		Ok(Arc::new(MoqGroupProducer::from_inner(group)))
 	}
 
@@ -574,16 +638,16 @@ impl MoqFill {
 		self.inner.drop_groups(start..end);
 	}
 
-	/// Whether a reader still waits for group `sequence` from this fill: false once every
+	/// Whether a reader still waits for group `start` from this fill: false once every
 	/// reader took it or narrowed past it, or nobody waits on the fill.
-	pub fn is_wanted(&self, sequence: u64) -> bool {
-		self.inner.is_wanted(sequence)
+	pub fn is_wanted(&self, start: u64) -> bool {
+		self.inner.is_wanted(start)
 	}
 
-	/// Wait until no reader waits for group `sequence` from this fill, so stop serving it.
-	pub async fn unwanted(&self, sequence: u64) -> Result<(), MoqError> {
+	/// Wait until no reader waits for group `start` from this fill, so stop serving it.
+	pub async fn unwanted(&self, start: u64) -> Result<(), MoqError> {
 		crate::ffi::run(async {
-			self.inner.unwanted(sequence).await;
+			self.inner.unwanted(start).await;
 			Ok::<_, MoqError>(())
 		})
 		.await
@@ -678,8 +742,9 @@ impl MoqTrackRequest {
 
 /// A stream track to which groups and frames can be published.
 ///
-/// Released before its finish, or still open when its broadcast closes, it ends its track with
-/// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
+/// Released before its finish, it ends its track with `Dropped`, which readers elsewhere see as
+/// `Internal`. Still open when its broadcast closes, it ends it with `Unroutable`, which a
+/// moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqTrackProducer {
 	phase: std::sync::Mutex<TrackPhase>,
@@ -688,10 +753,10 @@ pub struct MoqTrackProducer {
 /// How far a track binding got.
 #[derive(Default)]
 enum TrackPhase {
-	/// Publishing, as a child of `family` unless it has none, as a socket's track does.
+	/// Publishing, as a child of `family`.
 	Open {
 		raw: moq_net::track::Producer,
-		family: Option<Children>,
+		family: Children,
 	},
 	/// Finished, and kept by its family until the broadcast closes. It may still take groups
 	/// below its end, and abort.
@@ -731,24 +796,17 @@ impl Drop for MoqTrackProducer {
 	fn drop(&mut self) {
 		let _guard = crate::ffi::enter();
 		// A finished track lives on in its broadcast, and may still take groups below its end.
-		std::mem::take(self.phase.get_mut().unwrap()).abort(moq_net::Error::Unroutable);
+		std::mem::take(self.phase.get_mut().unwrap()).abort(moq_net::Error::Dropped);
 	}
 }
 
 impl MoqTrackProducer {
-	/// Wrap a socket's track without a broadcast family.
-	pub(crate) fn from_socket(raw: moq_net::track::Producer) -> Self {
-		Self {
-			phase: std::sync::Mutex::new(TrackPhase::Open { raw, family: None }),
-		}
-	}
-
 	/// Wrap `raw` as a child of the broadcast `children` belongs to.
 	fn child(raw: moq_net::track::Producer, children: &Children) -> Result<Arc<Self>, MoqError> {
 		children.adopt(Arc::new(Self {
 			phase: std::sync::Mutex::new(TrackPhase::Open {
 				raw,
-				family: Some(children.clone()),
+				family: children.clone(),
 			}),
 		}))
 	}
@@ -759,27 +817,28 @@ impl MoqTrackProducer {
 
 	/// Hand the track to a typed writer that `f` builds (a JSON producer, say), closing this
 	/// handle once `f` succeeds so the writer is the track's only producer. The writer takes this
-	/// handle's place among its broadcast's children. On failure the handle stays open.
+	/// handle's place among its broadcast's children, which `f` also receives so a writer that
+	/// finishes can [`keep`](Children::keep) its track; a finished track has none. On failure the
+	/// handle stays open.
 	pub(crate) fn adopt<T: Child + 'static>(
 		&self,
-		f: impl FnOnce(moq_net::track::Producer) -> Result<T, MoqError>,
+		f: impl FnOnce(moq_net::track::Producer, Option<&Children>) -> Result<T, MoqError>,
 	) -> Result<Arc<T>, MoqError> {
 		// Taken for the whole construction, so a racing adopt finds the handle closed. `f` runs
 		// outside the lock: it may take the broadcast's, which a close holds while it takes this one.
 		let mut phase = std::mem::take(&mut *self.phase.lock().unwrap());
 		let raw = phase.raw()?.clone();
-		match (f(raw), phase) {
-			(
-				Ok(writer),
-				TrackPhase::Open {
-					family: Some(family), ..
-				},
-			) => family.adopt(Arc::new(writer)),
+		let family = match &phase {
+			TrackPhase::Open { family, .. } => Some(family),
+			TrackPhase::Finished(_) | TrackPhase::Closed => None,
+		};
+		match (f(raw, family), phase) {
+			(Ok(writer), TrackPhase::Open { family, .. }) => family.adopt(Arc::new(writer)),
 			// A finished track has no family left to join, and ends at its declared end.
 			(Ok(writer), _) => Ok(Arc::new(writer)),
 			(Err(err), phase) => {
 				let family = match &phase {
-					TrackPhase::Open { family, .. } => family.clone(),
+					TrackPhase::Open { family, .. } => Some(family.clone()),
 					TrackPhase::Finished(_) | TrackPhase::Closed => None,
 				};
 				*self.phase.lock().unwrap() = phase;
@@ -825,24 +884,30 @@ impl MoqTrackProducer {
 		Ok(Arc::new(MoqTrackConsumer::new(track, Background::default())))
 	}
 
-	/// Append a new group to the track, returning a producer for writing frames into it.
-	pub fn append_group(&self) -> Result<Arc<MoqGroupProducer>, MoqError> {
+	/// Append the next group, starting at `start`, returning a producer for writing frames into it.
+	///
+	/// A timed track converts `start` into its timescale, as [`write_frame`](Self::write_frame)
+	/// does; a scale-less track takes the [unscaled](MoqTimestamp::unscaled) group key. A start
+	/// at or before a group the track holds, or one that doesn't match the track, is refused with
+	/// [`MoqProtocolKind::TimestampMismatch`](crate::error::MoqProtocolKind::TimestampMismatch).
+	pub fn append_group(&self, start: MoqTimestamp) -> Result<Arc<MoqGroupProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
+		let start: moq_net::Timestamp = start.try_into()?;
 		let mut phase = self.phase.lock().unwrap();
 		let raw = phase.raw()?;
-		let group = raw.append_group()?;
+		let group = raw.append_group(start)?;
 		Ok(Arc::new(MoqGroupProducer::from_inner(group)))
 	}
 
-	/// Create a group with an explicit sequence number.
+	/// Create a group starting at `start`, in the track's timescale, which names it.
 	///
-	/// Use this for sparse or replayed tracks. [`append_group`](Self::append_group)
-	/// remains the convenient live-stream path.
-	pub fn create_group(&self, sequence: u64) -> Result<Arc<MoqGroupProducer>, MoqError> {
+	/// Use this for sparse or replayed tracks: unlike [`append_group`](Self::append_group), it
+	/// declares nothing below it skipped.
+	pub fn create_group(&self, start: u64) -> Result<Arc<MoqGroupProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut phase = self.phase.lock().unwrap();
 		let raw = phase.raw()?;
-		let group = raw.create_group(moq_net::group::Info { sequence })?;
+		let group = raw.create_group(moq_net::group::Info { start })?;
 		Ok(Arc::new(MoqGroupProducer::from_inner(group)))
 	}
 
@@ -866,10 +931,10 @@ impl MoqTrackProducer {
 	/// [`MoqProtocolKind::TimestampMismatch`](crate::error::MoqProtocolKind::TimestampMismatch).
 	pub fn write_frame(&self, frame: MoqFrame) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
-		let timestamp = frame.timestamp.map(TryInto::try_into).transpose()?;
+		let timestamp: moq_net::Timestamp = frame.timestamp.try_into()?;
 		let mut phase = self.phase.lock().unwrap();
-		let raw = phase.raw()?;
-		raw.write_frame(timestamp, frame.payload)?;
+		// The group starts at its frame's time, or its unscaled key on a scale-less track.
+		phase.raw()?.write_frame(timestamp, frame.payload)?;
 		Ok(())
 	}
 
@@ -896,6 +961,33 @@ impl MoqTrackProducer {
 		Ok(())
 	}
 
+	/// Abort this track with an application error code, but only while nobody wants it.
+	///
+	/// This is how an on-demand publisher ends a track once [`MoqTrackDemand::wanted_changed`]
+	/// returns null. Releasing or [`abort`](Self::abort)ing it instead fails a reader that
+	/// joined in between. Returns true once the track is closed, including when it already
+	/// was, and this handle's later calls fail with `Closed`. Returns false, leaving the track
+	/// unchanged, when a reader wants it again, so keep serving and wait for the next null
+	/// on a fresh `demand()`: one that already returned null misses a reader that came and
+	/// went, and waits on.
+	pub fn abort_unwanted(&self, error_code: u16) -> Result<bool, MoqError> {
+		let _guard = crate::ffi::enter();
+		let mut phase = self.phase.lock().unwrap();
+		let err = moq_net::Error::App(error_code);
+		*phase = match std::mem::take(&mut *phase) {
+			TrackPhase::Open { raw, family } => match raw.abort_unwanted(err) {
+				Ok(()) => return Ok(true),
+				Err(raw) => TrackPhase::Open { raw, family },
+			},
+			TrackPhase::Finished(raw) => match raw.abort_unwanted(err) {
+				Ok(()) => return Ok(true),
+				Err(raw) => TrackPhase::Finished(raw),
+			},
+			TrackPhase::Closed => return Err(MoqError::Closed),
+		};
+		Ok(false)
+	}
+
 	/// End the track at the live edge.
 	///
 	/// [`finish_at`](Self::finish_at) declares the boundary ahead of time, so this keeps
@@ -913,9 +1005,7 @@ impl MoqTrackProducer {
 					*phase = TrackPhase::Open { raw, family };
 					return Err(err.into());
 				}
-				if let Some(family) = family {
-					family.keep(raw.clone());
-				}
+				family.keep(raw.clone());
 				TrackPhase::Finished(raw)
 			}
 			finished @ TrackPhase::Finished(_) => finished,
@@ -924,16 +1014,16 @@ impl MoqTrackProducer {
 		Ok(())
 	}
 
-	/// Declare the exclusive final group sequence, possibly ahead of the live edge.
+	/// Declare the exclusive final group start, possibly ahead of the live edge.
 	///
-	/// Groups below `final_sequence` may still be created afterwards. Groups at or
+	/// Groups below `final_start` may still be created afterwards. Groups at or
 	/// above it are rejected. The producer remains open for groups below the boundary;
 	/// call [`finish`](Self::finish) after producing the remaining groups.
-	pub fn finish_at(&self, final_sequence: u64) -> Result<(), MoqError> {
+	pub fn finish_at(&self, final_start: u64) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut phase = self.phase.lock().unwrap();
 		let raw = phase.raw()?;
-		raw.finish_at(moq_net::track::Position::group(final_sequence), None)?;
+		raw.finish_at(moq_net::track::Position::group(final_start))?;
 		Ok(())
 	}
 }
@@ -941,7 +1031,7 @@ impl MoqTrackProducer {
 /// A group to which frames can be published.
 #[derive(uniffi::Object)]
 pub struct MoqGroupProducer {
-	sequence: u64,
+	start: u64,
 	/// The group keeps one writer waker, so every [`ready`](Self::ready) call polls it with the
 	/// bridge's, which wakes them all. Every other call locks it through the bridge too, so a
 	/// wake it causes reaches a foreign continuation only after the lock is released.
@@ -963,16 +1053,16 @@ impl Drop for MoqGroupProducer {
 		if let GroupPhase::Writing(group) = std::mem::take(self.inner.get_mut())
 			&& group.poll_closed(&kio::Waiter::noop()).is_pending()
 		{
-			let _ = group.abort(moq_net::Error::Unroutable);
+			let _ = group.abort(moq_net::Error::Dropped);
 		}
 	}
 }
 
 impl MoqGroupProducer {
-	/// Wrap `group`, for a track's writer or a socket's write half.
+	/// Wrap `group`, for a track's writer.
 	pub(crate) fn from_inner(group: moq_net::group::Producer) -> Self {
 		Self {
-			sequence: group.sequence,
+			start: group.start,
 			inner: kio::Bridge::new(GroupPhase::Writing(group)),
 		}
 	}
@@ -980,9 +1070,9 @@ impl MoqGroupProducer {
 
 #[uniffi::export]
 impl MoqGroupProducer {
-	/// The sequence number of this group within the track.
-	pub fn sequence(&self) -> u64 {
-		self.sequence
+	/// The start of this group, in its track's timescale, which names it within the track.
+	pub fn start(&self) -> u64 {
+		self.start
 	}
 
 	/// Create a consumer that reads frames from this group.
@@ -1003,7 +1093,7 @@ impl MoqGroupProducer {
 	/// [`MoqProtocolKind::TimestampMismatch`](crate::error::MoqProtocolKind::TimestampMismatch).
 	pub fn write_frame(&self, frame: MoqFrame) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
-		let timestamp = frame.timestamp.map(TryInto::try_into).transpose()?;
+		let timestamp = frame.timestamp.try_into()?;
 		let mut guard = self.inner.lock();
 		let GroupPhase::Writing(group) = &mut *guard else {
 			return Err(MoqError::Closed);
@@ -1022,11 +1112,17 @@ impl MoqGroupProducer {
 	/// once while a reader has taken every frame, and once the group is closed, so the next
 	/// write reports why. Fails with `Closed` after [`abort`](Self::abort).
 	pub async fn ready(&self, size: u64) -> Result<(), MoqError> {
-		let frame = moq_net::frame::Info { size, timestamp: None };
 		let mut park = kio::Park::default();
 		crate::ffi::run(kio::wait(|waiter| {
 			self.inner.poll(waiter, |group, cx| match group {
-				GroupPhase::Writing(group) => group.poll_ready(park.hold(cx), &frame).map(Ok),
+				GroupPhase::Writing(group) => {
+					// Only the size paces; the timestamp is checked by the write.
+					let frame = moq_net::frame::Info {
+						size,
+						timestamp: moq_net::Timestamp::unscaled(group.start),
+					};
+					group.poll_ready(park.hold(cx), &frame).map(Ok)
+				}
 				// The next write reports why.
 				GroupPhase::Finished(_) => Poll::Ready(Ok(())),
 				GroupPhase::Closed => Poll::Ready(Err(MoqError::Closed)),
@@ -1083,13 +1179,13 @@ mod metadata_tests {
 	fn dropping_a_group_binding_ends_its_unfinished_group() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast.create_track("test", moq_net::track::Info::default()).unwrap();
-		let group = track.append_group().unwrap();
+		let group = track.append_group(moq_net::Timestamp::unscaled(0)).unwrap();
 		let mut consumer = group.consume();
 		let binding = MoqGroupProducer::from_inner(group);
 		drop(binding);
 		assert!(matches!(
 			consumer.poll_read_frame(&kio::Waiter::noop()),
-			std::task::Poll::Ready(Err(moq_net::Error::Unroutable))
+			std::task::Poll::Ready(Err(moq_net::Error::Dropped))
 		));
 	}
 
@@ -1119,30 +1215,38 @@ mod metadata_tests {
 
 	#[test]
 	fn max_age_survives_binding_conversion() {
-		let info = |max_age, max_age_unlimited| MoqTrackInfo {
+		let info = |max_age| MoqTrackInfo {
 			priority: 0,
 			max_age,
-			max_age_unlimited,
-			refresh: None,
+			refresh: MoqTrackRefresh::default(),
 			timescale: None,
 			compression: None,
 		};
 		let zero = Some(std::time::Duration::ZERO);
-		let five = Some(std::time::Duration::from_secs(5));
 		assert_eq!(raw_track_info(None).unwrap().max_age, zero);
-		for (max_age, unlimited, want) in [
-			(None, false, zero),
-			(five, false, five),
-			(None, true, None),
-			// The flag wins over a stated age.
-			(five, true, None),
-		] {
-			let model = moq_net::track::Info::try_from(info(max_age, unlimited)).unwrap();
-			assert_eq!(model.max_age, want);
+		// Null is no limit, as `MoqDelay.max` reads it, and zero is the live edge only.
+		for max_age in [None, zero, Some(std::time::Duration::from_secs(5))] {
+			let model = moq_net::track::Info::try_from(info(max_age)).unwrap();
+			assert_eq!(model.max_age, max_age);
 			// A received record republishes unchanged.
 			let back = MoqTrackInfo::from(&model);
-			assert_eq!(moq_net::track::Info::try_from(back).unwrap().max_age, want);
+			assert_eq!(back.max_age, max_age);
 		}
+	}
+
+	#[test]
+	fn compression_survives_binding_conversion() {
+		let model = moq_net::track::Info::default();
+		assert!(MoqTrackInfo::from(&model).compression.is_none());
+		let deflate = model.with_compression(moq_net::track::Compression::Deflate);
+		let info = MoqTrackInfo::from(&deflate);
+		let read = info.compression.clone().unwrap();
+		assert_eq!(*read, *MoqCompression::deflate());
+		assert_eq!(read.name(), "deflate");
+		assert_eq!(
+			moq_net::track::Info::try_from(info).unwrap().compression,
+			moq_net::track::Compression::Deflate
+		);
 	}
 
 	/// C and C++ abort on a duration past `i64::MAX` nanoseconds, so a peer's longer age saturates.

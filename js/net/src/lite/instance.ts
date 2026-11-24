@@ -1,11 +1,10 @@
 import * as Instance from "../instance.ts";
 import * as Mint from "../mint.ts";
 import type { Reader, Writer } from "../stream.ts";
-import { hasInstance, type Version } from "./version.ts";
+import { decodeUtf8 } from "../util/utf8.ts";
+import { hasInstance, hasRoutes, type Version } from "./version.ts";
 
 const encoder = new TextEncoder();
-// `ignoreBOM` keeps a leading U+FEFF, which is instance text like any other, as Rust does.
-const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 /** Encode the instance a request pins as its UTF-8 bytes and minted flag, or empty and unminted
  * for none. Older versions carry nothing, so the peer resolves whichever instance wins the path.
@@ -25,6 +24,20 @@ export async function decodePin(r: Reader, version: Version): Promise<Instance.V
 	const minted = await r.bool();
 	if (bytes.byteLength === 0 && !minted) return undefined;
 	return decode(bytes, minted);
+}
+
+/** Encode the forwarding node a request names. An endpoint knows none, so it always sends Node
+ * ID 0, which lets the publisher select one. Only lite-07 carries it. Mirrors rs/moq-net. */
+export async function encodeNode(w: Writer, version: Version): Promise<void> {
+	if (hasRoutes(version)) await w.u62(0n);
+}
+
+/** Decode the forwarding node a request names: a Node ID, and its Marked unless the ID is 0. An
+ * endpoint forwards nothing, so whichever node the request names, it serves the request itself. */
+export async function decodeNode(r: Reader, version: Version): Promise<void> {
+	if (!hasRoutes(version)) return;
+	if ((await r.u62()) === 0n) return;
+	await r.bool();
 }
 
 /** Encode the instance, its minted flag, and the epoch an announcement serves. Every route
@@ -57,6 +70,6 @@ async function encode(w: Writer, instance: Instance.Valid): Promise<void> {
 }
 
 function decode(bytes: Uint8Array, minted: boolean): Instance.Valid {
-	const named = Instance.parse(decoder.decode(bytes));
+	const named = Instance.parse(decodeUtf8(bytes));
 	return minted ? Mint.mint(named) : named;
 }

@@ -38,10 +38,6 @@ impl std::str::FromStr for PositiveDuration {
 /// Sample CPU, memory, context-switch and UDP socket counters for a running process.
 #[derive(usage_rs::Args, Clone, Debug)]
 #[usage(unknown_flags = "error", args_override_self = false)]
-#[cfg_attr(
-	not(target_os = "linux"),
-	expect(dead_code, reason = "only the Linux sampler reads the arguments")
-)]
 pub struct Args {
 	/// Sample these PIDs. When set, --name is ignored.
 	#[usage(long)]

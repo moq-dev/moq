@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `encode::publish_capture` keeps captured audio on the host clock its video is
+  stamped on: it resamples by up to 2000 ppm to follow each buffer's capture
+  time, where the PTS used to advance by the device's sample count and drift by
+  its clock error (0.36 s an hour at 100 ppm). A capture at the codec's rate
+  slips a crossfaded frame now and then rather than filtering every sample.
+  Stamps that stay over 100 ms behind for a second, such as a suspended host,
+  re-anchor so the gap lands in the PTS; over 100 ms ahead, input is dropped
+  until they catch up.
+- A microphone stream error capture survives, such as an overrun, marks a gap
+  on the next buffer, so an encode re-anchors rather than closing over the audio
+  it lost and shifting everything after it earlier.
 - **Breaking:** `Bus::channel` and `bus::Channel` are renamed `Bus::live` and
   `bus::Live`, pairing with `Bus::positioned` and `bus::Positioned`. See
   `MIGRATE.md`.
@@ -14,7 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its first frame plays at, for audio scheduled against video on the bus's
   clock. A write that would land where the bus already mixed, overlap the
   channel's own audio, or end past `bus::REACH` (200 ms) fails whole instead of
-  moving. It takes the bus's sample rate.
+  moving. It takes the bus's sample rate. Given a nonzero stretch bound, at
+  most `bus::MAX_STRETCH` (2 s), it instead plays each write after the audio
+  it holds and time-stretches onto the positions, as the playback sink does
+  onto its clock, so a playout target's step glides rather than writing
+  silence or failing.
 - A bus `Strip` has a pan, `set_pan` and `pan`, that places its source between
   left and right in every mix: constant power for a mono source, at -3 dB per
   side when centered (so a mono source now plays 3 dB quieter by default), and

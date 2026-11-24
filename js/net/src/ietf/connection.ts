@@ -3,21 +3,21 @@ import { type GetPromise, type Getter, Once, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type * as Auth from "../auth.ts";
 import { AuthSession } from "../auth_session.ts";
-import type { Drain } from "../connection/goaway.ts";
+import type { Goaway } from "../connection/goaway.ts";
 import type { Session } from "../connection/session.ts";
 import { detect, type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
-import { error, fromClose, ProtocolViolation, SessionCode, StreamCode, StreamError, sessionClosed } from "../error.ts";
+import { closeReason, error, fromClose, ProtocolViolation, StreamCode, StreamError, sessionClosed } from "../error.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, type Stream } from "../stream.ts";
 import { withTimeout } from "../util/timeout.ts";
 import { registerWire } from "../wire.ts";
-import { AuthMessage, IetfAuthWire } from "./auth.ts";
 import * as Cluster from "./cluster.ts";
-import type { RequestKind } from "./error.ts";
+import { IetfSessionCode, type RequestKind } from "./error.ts";
 import { Fetch, FetchHeader } from "./fetch.ts";
 import { GoAway } from "./goaway.ts";
+import * as Message from "./message.ts";
 import { Group } from "./object.ts";
 import { Publish } from "./publish.ts";
 import { PublishNamespace } from "./publish_namespace.ts";
@@ -26,7 +26,6 @@ import { malformed, refuse } from "./request_stream.ts";
 import { NativeSession } from "./session.ts";
 import { Subscribe, SubscribeUpdate } from "./subscribe.ts";
 import { SUBSCRIBE_TRACKS_ID, SubscribeNamespace } from "./subscribe_namespace.ts";
-import { SubscribeTracks } from "./subscribe_tracks.ts";
 import { Subscriber } from "./subscriber.ts";
 import { MalformedAuthToken } from "./token.ts";
 import { TrackStatusRequest } from "./track.ts";
@@ -64,12 +63,12 @@ export class Connection implements Session {
 	/** moq-transport has no PROBE, so this stays empty; see {@link Session.probe}. */
 	readonly probe: Getter<Probe> = new Signal<Probe>({});
 
-	/** Our tokens and grants, when the peer negotiated MoQ Auth; see {@link Session.auth}. */
+	/** Our tokens, which requests carry; see {@link Session.auth}. */
 	get auth(): Auth.Handle {
 		return this.#auth.handle;
 	}
 
-	// Our tokens and grants, and the answers to the peer's (MoQ Auth).
+	// Our tokens, for the requests that carry them.
 	#auth: AuthSession;
 
 	// The established WebTransport session.
@@ -97,7 +96,10 @@ export class Connection implements Session {
 	#cluster?: Cluster.Hops;
 
 	// The peer's GOAWAY, read off its SETUP stream.
-	#goaway = new Once<Drain>();
+	#goaway = new Once<Goaway>();
+
+	// How the session ended: `fromClose` of the transport's close, settled after auth lets go of it.
+	#closed = new Once<Error | null>();
 
 	/** The implementation the peer advertised; see {@link Session.peerImplementation}. */
 	readonly peerImplementation: Promise<string | undefined>;
@@ -122,14 +124,12 @@ export class Connection implements Session {
 		client,
 		publish,
 		solicit,
+		declaredSolicit = true,
 		hidden = false,
-		maxAge = false,
 		activeCount = false,
 		cluster,
-		auth = false,
 		handle,
 		early = [],
-		extensions,
 		peerImplementation,
 	}: {
 		url: URL;
@@ -145,10 +145,10 @@ export class Connection implements Session {
 		 * nothing, which is the one case where announcing at us unasked is not a bug.
 		 */
 		solicit?: boolean;
+		/** Whether our own SETUP declared MoQ Solicit; `false` only in a test acting as a peer without it. */
+		declaredSolicit?: boolean;
 		/** Whether the peer understands the HIDDEN parameter (MoQ Hidden). */
 		hidden?: boolean;
-		/** Whether the peer accepts subscriber max age. */
-		maxAge?: boolean;
 		/** Whether both SETUPs declared MoQ Active Count. */
 		activeCount?: boolean;
 		/**
@@ -156,14 +156,10 @@ export class Connection implements Session {
 		 * cannot negotiate the extension, as is a `peer` the peer never declared.
 		 */
 		cluster?: Cluster.Hops;
-		/** Whether MoQ Auth is negotiated: offered by both SETUPs. */
-		auth?: boolean;
 		/** The auth handle to build the session on, or undefined for one of its own. */
 		handle?: Auth.Handle;
 		/** Uni streams that arrived before the peer's SETUP, type unread. */
 		early?: Reader[];
-		/** What our own SETUP offered; every extension when omitted. */
-		extensions?: { solicit: boolean };
 		/** The implementation the peer's SETUP advertised, read before the session starts. */
 		peerImplementation?: string;
 	}) {
@@ -181,13 +177,11 @@ export class Connection implements Session {
 
 		// What the peer's connection credential earns by default: publishing anything to us,
 		// since we consume on demand, and subscribing to whatever we publish.
-		const session = this.#session;
 		this.#auth = new AuthSession({
-			wire: auth ? new IetfAuthWire(session) : undefined,
 			requests: true,
 			peerGrant: {
-				publish: new Path.Patterns([Path.Pattern.all()]),
-				subscribe: new Path.Patterns(publish ? [Path.Pattern.all()] : []),
+				publish: Path.Prefixes.all(),
+				subscribe: publish ? Path.Prefixes.all() : new Path.Prefixes(),
 			},
 			handle,
 			draining: () => this.#goaway.peek() !== undefined || this.#phase.kind !== "open",
@@ -196,6 +190,10 @@ export class Connection implements Session {
 		// finds this session still active.
 		const leave = () => this.#auth.close();
 		void quic.closed.then(leave, leave);
+		void quic.closed.then(
+			(info) => this.#closed.set(fromClose(info)),
+			(err: unknown) => this.#closed.set(error(err)),
+		);
 		this.#client = client;
 
 		this.#auth.violated.subscribe((err) => {
@@ -212,13 +210,11 @@ export class Connection implements Session {
 			cluster,
 			grant: this.#auth.scope,
 			auth: this.#auth,
-			ready: this.#auth.setupAnswered(),
 		});
 		this.#solicit = solicit;
-		this.#declaredSolicit = extensions?.solicit ?? true;
+		this.#declaredSolicit = declaredSolicit;
 		this.#cluster = cluster;
 		this.#subscriber = new Subscriber({
-			maxAge,
 			session: this.#session,
 			quic,
 			cluster,
@@ -294,7 +290,7 @@ export class Connection implements Session {
 	// The peer broke the protocol, so losing the stream is not enough: nothing stops it
 	// repeating the violation on the next one.
 	#violated(err: ProtocolViolation) {
-		this.#close({ closeCode: err.code, reason: err.message });
+		this.#close({ closeCode: err.code, reason: closeReason(err.message) });
 	}
 
 	async #run(early: Reader[]): Promise<void> {
@@ -326,14 +322,14 @@ export class Connection implements Session {
 		}
 	}
 
-	/** The paths announced matching `scope`, each present or absent; see {@link Session.announced}. */
-	announced(scope?: Path.Pattern, options?: announce.Options): announce.Consumer {
-		return announce.list(this.#subscriber.routes(scope, options));
+	/** The paths announced matching `filter`, each present or absent; see {@link Session.announced}. */
+	announced(filter?: Path.Pattern, options?: announce.Options): announce.Consumer {
+		return announce.list(this.#subscriber.routes(filter, options));
 	}
 
-	/** Every route change matching `scope`, for code that forwards routes. @internal */
-	routes(scope?: Path.Pattern, options?: announce.Options): announce.Routes {
-		return this.#subscriber.routes(scope, options);
+	/** Every route change matching `filter`, for code that forwards routes. @internal */
+	routes(filter?: Path.Pattern, options?: announce.Options): announce.Routes {
+		return this.#subscriber.routes(filter, options);
 	}
 
 	/** Accepts request streams and dispatches them. */
@@ -377,9 +373,19 @@ export class Connection implements Session {
 				break;
 			}
 			case BigInt(SUBSCRIBE_TRACKS_ID): {
-				const decoded = SubscribeTracks.decode(stream.reader, this.#session.version);
-				const msg = await this.#request(stream, "subscribe_namespace", decoded);
-				if (msg) await handed(this.#publisher.runSubscribeTracks(msg, stream));
+				// We list no tracks by PUBLISH, so each listing is refused on its own. Only its
+				// Request ID is read; the rest of the body goes unread.
+				const requestId = await Message.decode(stream.reader, async (body) => {
+					const id = await body.u62();
+					await body.discard();
+					return id;
+				}).catch((err: unknown) => {
+					throw malformed(err, "subscribe_tracks");
+				});
+				this.#spend(requestId);
+				await handed(
+					this.#refuseUnsupported(stream, "subscribe_namespace", "SUBSCRIBE_TRACKS is not supported"),
+				);
 				break;
 			}
 			case BigInt(TrackStatusRequest.id): {
@@ -391,7 +397,8 @@ export class Connection implements Session {
 			case BigInt(Fetch.id): {
 				const decoded = Fetch.decode(stream.reader, this.#session.version);
 				const msg = await this.#request(stream, "fetch", decoded);
-				if (msg) await handed(this.#publisher.runFetch(msg, stream));
+				// Only a relay answers a FETCH, from its cache.
+				if (msg) await handed(this.#refuseUnsupported(stream, "fetch", "FETCH is not supported"));
 				break;
 			}
 
@@ -403,7 +410,7 @@ export class Connection implements Session {
 				const msg = await this.#request(stream, "publish_namespace", decoded);
 				if (!msg) break;
 
-				// Unless we declined it, we declare that advertisements to us must be
+				// Unless a test declined it, we declare that advertisements to us must be
 				// solicited (MoQ Solicit), and writing the option at all proves the peer
 				// implements the extension, whichever value it chose. It also cannot have
 				// advertised before reading our SETUP, since our SETUP is what says whether
@@ -417,12 +424,6 @@ export class Connection implements Session {
 				}
 
 				await handed(this.#subscriber.runPublishNamespace(msg, stream));
-				break;
-			}
-			case BigInt(AuthMessage.id): {
-				// Only a peer that negotiated MoQ Auth may send one.
-				if (!this.#auth.negotiated) throw new ProtocolViolation("AUTH without MoQ Auth");
-				await this.#auth.serve(stream);
 				break;
 			}
 			case BigInt(Publish.id): {
@@ -464,6 +465,11 @@ export class Connection implements Session {
 	/** Spend a request's ID, closing the session if it was already used. */
 	#spend(requestId: bigint) {
 		this.#session.checkRequestId(requestId);
+	}
+
+	/** Refuse a request we never serve NOT_SUPPORTED, ending its stream. */
+	async #refuseUnsupported(stream: Stream, kind: RequestKind, reasonPhrase: string) {
+		await refuse(stream, this.#session.version, kind, { condition: "not_supported", reasonPhrase });
 	}
 
 	/** Refuse a request MALFORMED_AUTH_TOKEN, ending its stream. Mirrors Rust's `token::reject`. */
@@ -572,7 +578,7 @@ export class Connection implements Session {
 					}
 					if (msg.requestId !== undefined && msg.requestId % 2n !== (this.#client ? 0n : 1n)) {
 						throw new ProtocolViolation("GOAWAY Request ID has the wrong parity", {
-							code: SessionCode.InvalidRequestId,
+							code: IetfSessionCode.InvalidRequestId,
 						});
 					}
 					// Reject bytes already behind GOAWAY before a caller can close on the drain.
@@ -607,12 +613,12 @@ export class Connection implements Session {
 	}
 
 	/** Settles with the peer's GOAWAY; see {@link Session.draining}. */
-	get draining(): GetPromise<Drain> {
+	get draining(): GetPromise<Goaway> {
 		return this.#goaway;
 	}
 
-	/** Resolves when the session closes, decoding the peer's close code; see {@link Session.closed}. */
-	get closed(): Promise<Error | null> {
-		return this.#quic.closed.then(fromClose, (err: unknown) => error(err));
+	/** Settles when the session closes, decoding the peer's close code; see {@link Session.closed}. */
+	get closed(): GetPromise<Error | null> {
+		return this.#closed;
 	}
 }

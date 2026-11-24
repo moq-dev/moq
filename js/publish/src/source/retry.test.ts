@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
-import { Duration, Manual } from "@moq/clock";
+import { Duration } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { Signal } from "@moq/signals";
 import { Camera } from "./camera";
 import { Microphone } from "./microphone";

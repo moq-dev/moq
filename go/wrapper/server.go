@@ -19,10 +19,14 @@ const (
 	TransportWebSocket = ffi.MoqTransportWebSocket
 	// TransportTCP is a session that arrived over a plaintext TCP connection.
 	TransportTCP = ffi.MoqTransportTcp
+	// TransportTLS is a session that arrived over a TCP connection inside TLS (a tls:// link).
+	TransportTLS = ffi.MoqTransportTls
 	// TransportUnix is a session that arrived over a Unix domain socket.
 	TransportUnix = ffi.MoqTransportUnix
 	// TransportWebTransport is a session that arrived over WebTransport (HTTP/3).
 	TransportWebTransport = ffi.MoqTransportWebTransport
+	// TransportUnknown is a session that arrived over a transport this version cannot name yet.
+	TransportUnknown = ffi.MoqTransportUnknown
 )
 
 // Request is an incoming session that can be accepted (Accept) or rejected (Reject).

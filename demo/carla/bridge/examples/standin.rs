@@ -3,7 +3,7 @@
 //! the worker's bridge client, a relay and the player by hand.
 //!
 //! ```sh
-//! cargo run -p moq-carla-bridge --example standin -- /tmp/carla-bridge.sock truck1/front
+//! cargo run --manifest-path demo/carla/bridge/Cargo.toml --example standin -- /tmp/carla-bridge.sock truck1/front
 //! ```
 //!
 //! Needs the host NVIDIA driver on the loader path, as `just carla bridge-gpu`

@@ -163,8 +163,11 @@ mod threaded {
 					let _ = resp.send(decoded);
 				}
 				Request::Flush { resp } => {
-					let flushed = decoder.flush().and_then(|()| collect(&mut decoder, &queue));
-					let _ = resp.send(flushed);
+					// Collected even when the flush failed, so the pictures it readied come out
+					// ahead of whatever the caller queues behind the drain.
+					let flushed = decoder.flush();
+					let collected = collect(&mut decoder, &queue);
+					let _ = resp.send(flushed.and(collected));
 				}
 			}
 		}
@@ -294,7 +297,7 @@ mod tests {
 	/// Regression: the Windows decoder opens a COM apartment on the thread that
 	/// builds it and closes it on the thread that drops it. Every owner holds the
 	/// codec across `.await` in a spawned task (`decode::Consumer`'s read loop,
-	/// which moq-c drives; moq-transcode's feed and fetch pipeline), so the
+	/// which libmoq drives; moq-transcode's feed and fetch pipeline), so the
 	/// future migrates between executor workers and the apartment is opened on
 	/// one and closed on another.
 	#[test]

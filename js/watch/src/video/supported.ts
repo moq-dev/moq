@@ -1,8 +1,7 @@
 import * as Catalog from "@moq/hang/catalog";
 import * as Util from "@moq/hang/util";
 import { base64ToBytes } from "../base64";
-import { supportCacheKey } from "../support-probe";
-import { decoderConfigKey, hardwareAcceleration } from "./config";
+import { hardwareAcceleration } from "./config";
 
 /** Whether the WebCodecs video decoder can play this config. */
 export async function supported(config: Catalog.VideoConfig): Promise<boolean> {
@@ -56,5 +55,3 @@ export async function accepted(config: Catalog.VideoConfig): Promise<string | un
 	}
 	return undefined;
 }
-
-Object.assign(supported, { [supportCacheKey]: decoderConfigKey });

@@ -8,19 +8,22 @@ use std::time::Duration;
 use bytes::Bytes;
 use moq_net::{Timestamp, Version, frame, origin, track};
 
+use crate::support::AppendNext;
 use crate::support::harness::{MockConnectOptions, connect_mock, spawn, subscribed};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"];
+const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip", "moq-transport-22", "moq-transport-23"];
 
 /// Past two segments, so the chain has a full middle and a short tail.
 const SIZE: usize = 5 * 1024 * 1024 / 2;
 
 fn origin(hop: u64) -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (origin, driver) = origin::Producer::new(config);
 	spawn(driver);
-	origin.with_proxy(true)
+	origin
 }
 
 #[kio::test]
@@ -51,12 +54,12 @@ async fn a_segmented_frame_crosses_whole() {
 		subscribed(&track).await;
 
 		// Two frames: one read whole, one streamed.
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_next().unwrap();
 		for _ in 0..2 {
 			let mut frame = group
 				.create_frame(frame::Info {
 					size: SIZE as u64,
-					timestamp: Some(Timestamp::ZERO),
+					timestamp: Timestamp::ZERO,
 				})
 				.unwrap();
 			for chunk in payload.chunks(300_000) {

@@ -1,6 +1,6 @@
 [package]
 name = "moq-hls"
-description = "HLS / LL-HLS / DASH gateway for Media over QUIC"
+description = "HLS and DASH gateway for Media over QUIC"
 authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
@@ -9,13 +9,13 @@ version = "0.5.11"
 edition = "2024"
 rust-version.workspace = true
 
-keywords = ["hls", "ll-hls", "moq", "media", "cmaf"]
+keywords = ["hls", "dash", "moq", "media", "cmaf"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
 [features]
 default = ["server"]
 # The import and export gateways, which drive HTTP fetches and background watchers as async code.
-async = ["kio/async", "moq-mux/async", "moq-crypto/provider"]
+async = ["kio/async", "moq-mux/async", "dep:moq-crypto", "moq-crypto/provider"]
 server = ["async", "dep:axum", "dep:http-body"]
 
 [dependencies]
@@ -27,7 +27,7 @@ http-body = { workspace = true, optional = true }
 humantime = { workspace = true }
 kio = { workspace = true, features = ["runtime"] }
 m3u8-rs = "6"
-moq-crypto = { workspace = true, features = ["cpu"] }
+moq-crypto = { workspace = true, optional = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 percent-encoding = { workspace = true }
@@ -49,7 +49,7 @@ moq-archive = { path = "../moq-archive" }
 # Compile the gateways for the tests, with or without the `server` feature.
 moq-hls = { path = ".", default-features = false, features = ["async"] }
 moq-json = { path = "../moq-json" }
-moq-tokio = { path = "../moq-tokio", default-features = false, features = ["tcp", "quic"] }
+moq-tokio = { path = "../moq-tokio" }
 mp4-atom = { workspace = true }
 object_store = { workspace = true }
 tempfile = { workspace = true }

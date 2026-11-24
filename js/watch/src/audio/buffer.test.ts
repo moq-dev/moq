@@ -1,10 +1,39 @@
 import { describe, expect, it } from "bun:test";
-import { Duration } from "@moq/clock";
+import { Duration, Instant, now } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
+import { type Getter, Signal } from "@moq/signals";
 import { AudioBuffer, Backpressure } from "./buffer";
 import type { Init, Message, State } from "./render";
 import { AudioRingBuffer } from "./ring-buffer";
 
 const HOUR = 60 * 60 * 1000;
+
+// A manual clock moved past the page's origin, where a performance time of zero means none.
+function started(): { close(): void } {
+	const manual = new Manual();
+	const installed = manual.install();
+	manual.jump(Duration.secs(1));
+	return installed;
+}
+
+// A context that reports its output position as sounding `sounding` now, or nothing until it is set.
+function silent(): {
+	currentTime: number;
+	baseLatency: number;
+	outputLatency: number;
+	sounding?: number;
+	getOutputTimestamp(): AudioTimestamp;
+} {
+	return {
+		currentTime: 0,
+		baseLatency: 0,
+		outputLatency: 0,
+		getOutputTimestamp() {
+			if (this.sounding === undefined) return { contextTime: 0, performanceTime: 0 };
+			return { contextTime: this.sounding, performanceTime: now().since(Instant.ZERO).asMillis() };
+		},
+	};
+}
 const ms = (value: number) => value * 1000;
 
 // A buffered buffer over a real port, with the worklet's end of it left to the test.
@@ -15,7 +44,7 @@ function open(): {
 	close: () => void;
 } {
 	const channel = new MessageChannel();
-	const buffer = new AudioBuffer({ port: channel.port1 } as unknown as AudioWorkletNode, {
+	const buffer = new AudioBuffer({ port: channel.port1, context: silent() } as unknown as AudioWorkletNode, {
 		channels: 1,
 		rate: 48_000,
 		delay: Duration.millis(100),
@@ -29,6 +58,7 @@ function open(): {
 			const msg: State = {
 				type: "state",
 				timestamp: timestamp ?? 0,
+				time: 0,
 				stalled,
 				anchored: timestamp !== undefined,
 				underruns: 0,
@@ -55,7 +85,7 @@ function open(): {
 describe("AudioBuffer", () => {
 	it("transfers PCM ownership and orders control messages after the data they change", async () => {
 		const channel = new MessageChannel();
-		const buffer = new AudioBuffer({ port: channel.port1 } as unknown as AudioWorkletNode, {
+		const buffer = new AudioBuffer({ port: channel.port1, context: silent() } as unknown as AudioWorkletNode, {
 			channels: 2,
 			rate: 48_000,
 			delay: Duration.millis(100),
@@ -79,13 +109,13 @@ describe("AudioBuffer", () => {
 			buffer.reset();
 			await received;
 			expect(messages).toEqual([
-				{ type: "init", channels: 2, rate: 48_000, latency: 100, buffered: true },
+				{ type: "init", channels: 2, rate: 48_000, latency: 100, bound: 0 },
 				{
 					type: "data",
 					timestamp: 500_000,
 					data: [new Float32Array([1, 2, 3]), new Float32Array([4, 5, 6])],
 				},
-				{ type: "latency", latency: 200 },
+				{ type: "latency", latency: 200, bound: 0 },
 				{ type: "truncate", timestamp: 502_000 },
 				{ type: "reset", epoch: 1 },
 			]);
@@ -114,6 +144,7 @@ describe("AudioBuffer", () => {
 		const { buffer, state, close } = open();
 		try {
 			await state(100_000, false, 0);
+			buffer.insert(100_000, [new Float32Array(9600)]);
 			const held = buffer.wait(10_000_000, new AbortController().signal);
 			expect(Bun.peek.status(held)).toBe("pending");
 			buffer.close();
@@ -132,6 +163,7 @@ describe("AudioBuffer", () => {
 		const { buffer, state, close } = open();
 		try {
 			await state(0, false, 0);
+			buffer.insert(0, [new Float32Array(9600)]);
 			const controller = new AbortController();
 			const wait = buffer.wait(10_000_000, controller.signal);
 			await Promise.resolve();
@@ -146,21 +178,21 @@ describe("AudioBuffer", () => {
 	});
 
 	// Media timestamps are absolute microseconds, so they pass 2^31 after ~36 minutes of broadcast
-	// and 2^32 after ~72. The gate has to hold a frame ahead of the playhead at any of them.
-	it("holds a frame one second ahead at any timestamp", async () => {
+	// and 2^32 after ~72. The gate has to hold a playing ring to its floor and a window at any of them.
+	it("holds a playing ring to its floor and a stretch window at any timestamp", async () => {
 		for (const base of [0, 2 ** 31, 2 ** 32, 3_600_000_000]) {
 			const { buffer, state, close } = open();
 			try {
 				await state(base, false, 0);
-				const wait = buffer.wait(base + 1_000_000, new AbortController().signal);
+				buffer.insert(base, [new Float32Array(9600)]);
+				const wait = buffer.wait(base + 200_000, new AbortController().signal);
 				expect(Bun.peek.status(wait)).toBe("pending");
 
-				// Still more than the floor behind the frame.
-				await state(base + 800_000, false, 0);
+				// The ring still holds the 100 ms floor and a 30 ms window.
+				await state(base + 70_000, false, 0);
 				expect(Bun.peek.status(wait)).toBe("pending");
 
-				// Within the floor of the frame.
-				await state(base + 900_000, false, 0);
+				await state(base + 80_000, false, 0);
 				expect(Bun.peek.status(wait)).toBe("fulfilled");
 			} finally {
 				close();
@@ -168,21 +200,21 @@ describe("AudioBuffer", () => {
 		}
 	});
 
-	// The decoder's output reaches the ring after the decode loop has moved on, so a stalled ring
-	// still looks stalled while the loop releases frame after frame. Releasing all of them pushes
-	// the whole lookahead into a floor-sized ring, which drops the oldest unplayed audio.
-	it("holds the lookahead while a stalled ring refills", async () => {
+	// The decoder's output reaches the ring after the decode loop has moved on, so the frames still
+	// decoding count toward what the ring holds. Counting only the PCM that landed would push the
+	// whole lookahead into a floor-sized ring, which drops the oldest unplayed audio.
+	it("counts the frames still decoding toward the floor and window", async () => {
 		const { buffer, state, close } = open();
 		const signal = new AbortController().signal;
 		try {
-			expect(Bun.peek.status(buffer.wait(0, signal))).toBe("fulfilled");
-			expect(Bun.peek.status(buffer.wait(100_000, signal))).toBe("fulfilled");
-			const ahead = buffer.wait(120_000, signal);
+			await state(0, false, 0);
+			buffer.insert(0, [new Float32Array(960)]);
+			for (let t = 20_000; t <= 120_000; t += 20_000)
+				expect(Bun.peek.status(buffer.wait(t, signal))).toBe("fulfilled");
+			const ahead = buffer.wait(140_000, signal);
 			expect(Bun.peek.status(ahead)).toBe("pending");
 
-			// The floor lands and plays past the frame's headroom.
-			await state(60_000, false, 0);
-			expect(Bun.peek.status(buffer.wait(170_000, signal))).toBe("pending");
+			await state(20_000, false, 0);
 			expect(Bun.peek.status(ahead)).toBe("fulfilled");
 		} finally {
 			close();
@@ -222,11 +254,13 @@ describe("AudioBuffer", () => {
 			const next = buffer.wait(10_020_000, signal);
 			expect(Bun.peek.status(next)).toBe("pending");
 
-			// The frame past the gap un-stalls the ring, which plays the gap out up to it.
+			// The frame past the gap un-stalls the ring, which plays the gap out up to it and refills to
+			// its floor and a window.
 			await state(10_000_000, false, 0);
 			expect(Bun.peek.status(next)).toBe("fulfilled");
-			expect(Bun.peek.status(buffer.wait(10_090_000, signal))).toBe("fulfilled");
-			expect(Bun.peek.status(buffer.wait(10_110_000, signal))).toBe("pending");
+			for (let t = 10_040_000; t <= 10_120_000; t += 20_000)
+				expect(Bun.peek.status(buffer.wait(t, signal))).toBe("fulfilled");
+			expect(Bun.peek.status(buffer.wait(10_140_000, signal))).toBe("pending");
 		} finally {
 			close();
 		}
@@ -271,26 +305,69 @@ describe("AudioBuffer", () => {
 });
 
 describe("Backpressure", () => {
-	it("releases every live frame when the whole target fits the floor", () => {
-		const gate = new Backpressure(1000, false, Duration.millis(100));
-		gate.observe(ms(0), false);
-		expect(Bun.peek.status(gate.wait(ms(10_000), new AbortController().signal))).toBe("fulfilled");
-	});
+	// Two seconds is a 500 ms floor and 1.5 s held encoded. Once playing, whatever is queued, the ring
+	// holds its floor and a 30 ms window: the rest waits upstream.
+	for (const buffered of [false, true]) {
+		it(`holds a playing ${buffered ? "buffered" : "live"} ring to its floor and a window`, () => {
+			const gate = new Backpressure(1000, buffered, Duration.millis(2000));
+			gate.queued(ms(60_000));
+			gate.observe(ms(0), false);
+			for (let t = 0; t < 1000; t += 20) gate.inserted(ms(t), ms(t + 20));
+			const wait = gate.wait(ms(1000), new AbortController().signal);
+			gate.observe(ms(470), false);
+			expect(Bun.peek.status(wait)).toBe("pending");
+			gate.observe(ms(471), false);
+			expect(Bun.peek.status(wait)).toBe("fulfilled");
+			expect(Bun.peek.status(gate.wait(ms(1020), new AbortController().signal))).toBe("pending");
+		});
+	}
 
-	it("holds buffered playback to the floor ahead of the playhead", () => {
-		const gate = new Backpressure(1000, true, Duration.millis(200));
-		gate.observe(ms(0), false);
-		const wait = gate.wait(ms(1000), new AbortController().signal);
-		gate.observe(ms(799), false);
+	// A ring re-anchored on a retained backlog trails the clock, which a live picture moved on, and
+	// skips onto it. Metered by its playhead, the backlog would come one floor and window per state
+	// report, each skipped as late on arrival.
+	it("releases at once what a ring trailing the clock past its bound skips", () => {
+		const gate = new Backpressure(1000, false, Duration.millis(200), Duration.millis(200));
+		const signal = new AbortController().signal;
+		gate.observe(ms(0), false, ms(0));
+		for (let t = 0; t < 240; t += 20) gate.inserted(ms(t), ms(t + 20));
+		const wait = gate.wait(ms(240), signal);
 		expect(Bun.peek.status(wait)).toBe("pending");
-		gate.observe(ms(800), false);
+		// Within the bound the ring stretches onto the clock, playing everything from its playhead.
+		gate.observe(ms(0), false, ms(200));
+		expect(Bun.peek.status(wait)).toBe("pending");
+		gate.observe(ms(0), true, ms(2000));
 		expect(Bun.peek.status(wait)).toBe("fulfilled");
+		// Released up to a floor and window past the clock, where the ring skips to.
+		for (let t = 260; t <= 2220; t += 20) expect(Bun.peek.status(gate.wait(ms(t), signal))).toBe("fulfilled");
+		expect(Bun.peek.status(gate.wait(ms(2240), signal))).toBe("pending");
 	});
 
-	// Two seconds is a 500 ms floor and 1.5 s held encoded.
-	it("releases a live frame once the queued media covers the hold behind it", () => {
-		const gate = new Backpressure(1000, false, Duration.millis(2000));
+	// The ring skips all the way onto the clock, not to the bound behind it, so a floor short of the
+	// bound must still be released past the clock or the skip lands on an empty ring and stalls.
+	it("releases past the clock with a floor short of the bound", () => {
+		// At 48 kHz the floor is the 50 ms asked for, not a render quantum's 128 ms at 1 kHz.
+		const gate = new Backpressure(48_000, false, Duration.millis(50), Duration.millis(200));
+		const signal = new AbortController().signal;
+		gate.observe(ms(0), false, ms(0));
+		for (let t = 0; t < 80; t += 20) gate.inserted(ms(t), ms(t + 20));
+		gate.observe(ms(0), true, ms(2000));
+		for (let t = 80; t <= 2060; t += 20) expect(Bun.peek.status(gate.wait(ms(t), signal))).toBe("fulfilled");
+		expect(Bun.peek.status(gate.wait(ms(2080), signal))).toBe("pending");
+	});
+
+	// The next frame past a hole lies far ahead of the playhead, which never nears it while the ring
+	// drains, so it is released by what the ring holds and the hole plays as silence.
+	it("releases the frame past a hole once the ring runs short", () => {
+		const gate = new Backpressure(1000, false, Duration.millis(200));
 		gate.observe(ms(0), false);
+		gate.inserted(ms(0), ms(100));
+		const signal = new AbortController().signal;
+		expect(Bun.peek.status(gate.wait(ms(10_000), signal))).toBe("fulfilled");
+		expect(Bun.peek.status(gate.wait(ms(10_100), signal))).toBe("pending");
+	});
+
+	it("starts a live ring once the queued media covers the hold behind its first frame", () => {
+		const gate = new Backpressure(1000, false, Duration.millis(2000));
 		const wait = gate.wait(ms(1000), new AbortController().signal);
 		gate.queued(ms(2499));
 		expect(Bun.peek.status(wait)).toBe("pending");
@@ -298,60 +375,36 @@ describe("Backpressure", () => {
 		expect(Bun.peek.status(wait)).toBe("fulfilled");
 	});
 
-	it("plays buffered media through instead of releasing it ahead of the floor", () => {
-		const gate = new Backpressure(1000, true, Duration.millis(2000));
-		gate.observe(ms(0), false);
-		const wait = gate.wait(ms(1000), new AbortController().signal);
-		gate.queued(ms(60_000));
-		expect(Bun.peek.status(wait)).toBe("pending");
-		gate.observe(ms(500), false);
-		expect(Bun.peek.status(wait)).toBe("fulfilled");
-	});
-
-	it("starts a stalled ring only once the queued media covers the hold", () => {
-		const gate = new Backpressure(1000, true, Duration.millis(2000));
-		const wait = gate.wait(ms(0), new AbortController().signal);
-		gate.queued(ms(1499));
-		expect(Bun.peek.status(wait)).toBe("pending");
-		gate.queued(ms(1500));
-		expect(Bun.peek.status(wait)).toBe("fulfilled");
-	});
+	// A finished track shorter than the hold has queued everything it will send.
+	for (const finished of [false, true]) {
+		it(`starts a stalled ring only once the queued media covers the hold${finished ? ", or its track finished" : ""}`, () => {
+			const gate = new Backpressure(1000, true, Duration.millis(2000));
+			const wait = gate.wait(ms(0), new AbortController().signal);
+			gate.queued(ms(1499));
+			expect(Bun.peek.status(wait)).toBe("pending");
+			if (finished) gate.complete(true);
+			else gate.queued(ms(1500));
+			expect(Bun.peek.status(wait)).toBe("fulfilled");
+		});
+	}
 
 	// The ring un-stalls only once the decoder's output reaches it, so covered media released
-	// outright would overflow the fixed ring before the worklet reports it playing.
-	it("refills a covered buffered ring only to its floor", () => {
-		const gate = new Backpressure(1000, true, Duration.millis(2000));
-		gate.queued(ms(60_000));
-		const signal = new AbortController().signal;
-		expect(Bun.peek.status(gate.wait(ms(0), signal))).toBe("fulfilled");
-		expect(Bun.peek.status(gate.wait(ms(500), signal))).toBe("fulfilled");
-		expect(Bun.peek.status(gate.wait(ms(520), signal))).toBe("pending");
-	});
-
-	// A refill that released its floor before the ring reported playing holds the next frame back, so
-	// no write could end the park. The queued media covering the hold is what ends it, once.
-	it("resumes a park once the queued media covers the hold", () => {
-		const gate = new Backpressure(1000, true, Duration.millis(1000));
-		expect(gate.queued(ms(1000))).toBe(false);
-		const signal = new AbortController().signal;
-		for (let t = 0; t <= 500; t += 20) expect(Bun.peek.status(gate.wait(ms(t), signal))).toBe("fulfilled");
-		gate.observe(ms(0), true);
-		expect(gate.setLatency(Duration.millis(2000))).toBe(true);
-		expect(gate.queued(ms(1999))).toBe(false);
-		expect(gate.queued(ms(2000))).toBe(true);
-		expect(gate.queued(ms(3000))).toBe(false);
-	});
-
-	// The ring starts playing a report interval before the gate learns its playhead, so a rise in that
-	// window parks from the frame the ring anchors on.
-	it("parks a ring that started before reporting its playhead", () => {
-		const gate = new Backpressure(1000, false, Duration.millis(1000));
-		gate.queued(ms(1000));
-		const signal = new AbortController().signal;
-		for (let t = 0; t <= 500; t += 20) expect(Bun.peek.status(gate.wait(ms(t), signal))).toBe("fulfilled");
-		expect(gate.setLatency(Duration.millis(2000))).toBe(true);
-		expect(gate.queued(ms(2000))).toBe(true);
-	});
+	// outright would overflow the fixed ring before the worklet reports it playing. A finished track
+	// covers all of itself, live or buffered.
+	for (const [name, buffered, finished] of [
+		["buffered", true, false],
+		["finished live", false, true],
+	] as const) {
+		it(`refills a covered ${name} ring only to its floor`, () => {
+			const gate = new Backpressure(1000, buffered, Duration.millis(2000));
+			if (finished) gate.complete(true);
+			else gate.queued(ms(60_000));
+			const signal = new AbortController().signal;
+			expect(Bun.peek.status(gate.wait(ms(0), signal))).toBe("fulfilled");
+			expect(Bun.peek.status(gate.wait(ms(500), signal))).toBe("fulfilled");
+			expect(Bun.peek.status(gate.wait(ms(520), signal))).toBe("pending");
+		});
+	}
 
 	// A warmup longer than the floor discards everything the refill releases toward it, so the ring
 	// would never anchor and report the playhead the gate waits on.
@@ -385,18 +438,18 @@ describe("Backpressure", () => {
 		expect(Bun.peek.status(gate.wait(ms(2040), signal))).toBe("pending");
 	});
 
-	// Opus pre-skip stamps the PCM behind the input it was decoded from, so a playing ring compares a
-	// frame to its playhead where its output lands, or a pre-skip past the floor would drain it.
-	it("releases a playing frame by where its output lands", () => {
+	// Opus pre-skip stamps the PCM behind the input it was decoded from, so a playing ring counts a
+	// frame still decoding where its output lands, or a pre-skip past the floor would drain it.
+	it("counts a frame still decoding where its output lands", () => {
 		const gate = new Backpressure(1000, true, Duration.millis(2000));
-		gate.queued(ms(60_000));
 		gate.observe(ms(0), false);
+		gate.decoded(ms(520), ms(20));
+		gate.inserted(ms(480), ms(500));
 		const signal = new AbortController().signal;
-		const wait = gate.wait(ms(1500), signal);
-		expect(Bun.peek.status(wait)).toBe("pending");
-		gate.decoded(ms(1020), ms(20));
-		expect(Bun.peek.status(wait)).toBe("fulfilled");
-		expect(Bun.peek.status(gate.wait(ms(1520), signal))).toBe("pending");
+		expect(Bun.peek.status(gate.wait(ms(520), signal))).toBe("fulfilled");
+		// Its output lands at 520 ms, short of the 530 ms floor and window, not at 540 ms.
+		expect(Bun.peek.status(gate.wait(ms(540), signal))).toBe("fulfilled");
+		expect(Bun.peek.status(gate.wait(ms(560), signal))).toBe("pending");
 	});
 
 	// A replacement rendition keeps the ring, and the decoder it replaced never answers its frames.
@@ -423,22 +476,33 @@ describe("Backpressure", () => {
 });
 
 // A worklet whose port records what the buffer posts and delivers state reports synchronously.
-function fake(delay: number, buffered = false) {
+function fake(
+	delay: number,
+	props: {
+		bound?: number;
+		clock?: { position(): number | undefined; out: { reference: Getter<number | undefined> } };
+	} = {},
+) {
 	const sent: Message[] = [];
 	const port = Object.assign(new EventTarget(), {
 		postMessage: (msg: Message) => sent.push(msg),
 		start() {},
 	});
-	const buffer = new AudioBuffer({ port } as unknown as AudioWorkletNode, {
+	// The context's time in seconds, which the test advances.
+	const context = silent();
+	const buffer = new AudioBuffer({ port, context } as unknown as AudioWorkletNode, {
 		channels: 1,
 		rate: 1000,
 		delay: Duration.millis(delay),
-		buffered,
+		buffered: false,
+		...(props.bound !== undefined && { bound: Duration.millis(props.bound) }),
+		clock: props.clock,
 	});
-	const state = (timestamp: number, stalled: boolean, epoch: number) => {
+	const state = (timestamp: number, stalled: boolean, epoch: number, time = 0) => {
 		const data: State = {
 			type: "state",
 			timestamp,
+			time,
 			stalled,
 			anchored: true,
 			underruns: 0,
@@ -450,7 +514,7 @@ function fake(delay: number, buffered = false) {
 		};
 		port.dispatchEvent(new MessageEvent("message", { data }));
 	};
-	return { buffer, sent, state };
+	return { buffer, sent, state, context };
 }
 
 describe("AudioBuffer past its decoded floor", () => {
@@ -462,7 +526,7 @@ describe("AudioBuffer past its decoded floor", () => {
 				postMessage: (msg: Message) => sent.push(msg),
 				start() {},
 			});
-			new AudioBuffer({ port } as unknown as AudioWorkletNode, {
+			new AudioBuffer({ port, context: silent() } as unknown as AudioWorkletNode, {
 				channels: 2,
 				rate: 48_000,
 				delay: Duration.millis(delay),
@@ -489,65 +553,307 @@ describe("AudioBuffer past its decoded floor", () => {
 			buffer.close();
 		}
 	});
+});
 
-	// One second is a 500 ms floor and 500 ms held encoded. Playing 100 ms in, a rise to 1.5 s needs
-	// queued media through 1600 ms to keep playing. A report of a stall may be stale, so it parks
-	// regardless: parking a ring that is still stalled changes nothing.
-	for (const stalled of [false, true]) {
-		for (const [queued, parked] of [
-			[1599, true],
-			[1600, false],
-		] as const) {
-			it(`${parked ? "parks" : "keeps playing"} on a rise with ${queued} ms queued, reported ${stalled ? "stalled" : "playing"}`, () => {
-				const { buffer, sent, state } = fake(1000);
-				try {
-					state(ms(100), stalled, 0);
-					buffer.queued(ms(queued));
-					buffer.setLatency(Duration.millis(1500));
-					expect(sent.slice(1)).toEqual([{ type: "latency", latency: 500, ...(parked ? { park: 1 } : {}) }]);
-				} finally {
-					buffer.close();
-				}
-			});
-		}
-	}
-
-	// The ring resumes on any floor update without a park, so a fall that leaves the remaining hold
-	// uncovered parks again, and the queued media covering it resumes the ring.
-	it("keeps a park across a fall until the queued media covers the hold", () => {
-		const { buffer, sent, state } = fake(1000);
+describe("AudioBuffer steering", () => {
+	// A moved delay moves the clock, which the ring plays onto by stretching, so every move only sends
+	// the new terms: nothing parks on a rise or skips on a fall.
+	it("sends the terms on every move of the delay", () => {
+		const { buffer, sent, state } = fake(1000, { bound: 1000 });
 		try {
-			state(ms(0), false, 0);
-			buffer.queued(ms(1000));
-			buffer.setLatency(Duration.millis(2000));
-			buffer.setLatency(Duration.millis(1800));
-			buffer.queued(ms(1800));
-			buffer.setLatency(Duration.millis(1600));
-			expect(sent.slice(1)).toEqual([
-				{ type: "latency", latency: 500, park: 1 },
-				{ type: "latency", latency: 500, park: 2 },
-				{ type: "latency", latency: 500 },
-				{ type: "latency", latency: 500 },
+			state(ms(100), false, 0);
+			buffer.setLatency(Duration.millis(1500));
+			buffer.setLatency(Duration.millis(200), Duration.millis(1800));
+			expect(sent).toEqual([
+				{ type: "init", channels: 1, rate: 1000, latency: 500, bound: 1000 },
+				{ type: "latency", latency: 500, bound: 1000 },
+				{ type: "latency", latency: 200, bound: 1800 },
 			]);
 		} finally {
 			buffer.close();
 		}
 	});
 
-	// A report the worklet posted before it applied the park still says the ring is playing.
-	it("ignores state from before a park", () => {
-		const { buffer, state } = fake(1000);
+	// Pre-skip lands output behind the frame it was decoded from, so what arrived is placed where it
+	// will land in the ring.
+	it("places received media on the ring's timeline", () => {
+		const { buffer, sent } = fake(100);
 		try {
-			state(ms(200), false, 0);
-			buffer.queued(ms(1599));
-			buffer.setLatency(Duration.millis(1500));
-			const wait = buffer.wait(ms(700), new AbortController().signal);
-			state(ms(200), false, 0);
-			expect(Bun.peek.status(wait)).toBe("pending");
-			state(ms(200), false, 1);
-			expect(Bun.peek.status(wait)).toBe("fulfilled");
+			buffer.received(Duration.millis(1000));
+			buffer.decoded(ms(1020), ms(6));
+			buffer.received(Duration.millis(1040));
+			expect(sent.slice(1)).toEqual([
+				{ type: "received", end: 1_000_000 },
+				{ type: "received", end: 1_034_000 },
+			]);
 		} finally {
 			buffer.close();
+		}
+	});
+
+	// A browser that reads its output position once per render callback reports it up to a callback
+	// early, so the offset keeps the greatest, falls only as slowly as drift needs, and moves whole when
+	// the delay or the reference moves the clock for real.
+	it("sends the clock against the context time sounding at its greatest offset", () => {
+		let now: Duration | undefined = Duration.millis(1000);
+		const reference = new Signal<number | undefined>(0);
+		const clock = started();
+		const { buffer, sent, state, context } = fake(100, {
+			clock: { position: () => now?.asMillis(), out: { reference } },
+		});
+		const report = (time: number, sounding: number, clock: number | undefined) => {
+			context.currentTime = time;
+			context.sounding = sounding;
+			now = clock === undefined ? undefined : Duration.millis(clock);
+			state(ms(0), false, 0);
+		};
+		try {
+			// The output sounds 100 ms behind the context's time.
+			report(1, 0.9, 1000);
+			// Read 2 ms early: the offset falls by only 100 us.
+			report(1.25, 1.152, 1250);
+			report(1.5, 1.4, 1500);
+			// A delay change moved the clock 50 ms.
+			report(1.75, 1.65, 1800);
+			// The reference moved 5 ms earlier: the offset takes it whole, under the filter's.
+			reference.set(-5);
+			report(2, 1.9, 2055);
+			// A later reference moves it back, though it is no jump.
+			reference.set(0);
+			report(2.25, 2.15, 2300);
+			report(2.5, 2.4, undefined);
+			expect(sent.filter((msg) => msg.type === "clock")).toEqual([
+				{ type: "clock", timestamp: 1_100_000, time: 1 },
+				{ type: "clock", timestamp: 1_349_900, time: 1.25 },
+				{ type: "clock", timestamp: 1_600_000, time: 1.5 },
+				{ type: "clock", timestamp: 1_900_000, time: 1.75 },
+				{ type: "clock", timestamp: 2_155_000, time: 2 },
+				{ type: "clock", timestamp: 2_400_000, time: 2.25 },
+				{ type: "clock", time: 2.5 },
+			]);
+		} finally {
+			buffer.close();
+			clock.close();
+		}
+	});
+
+	// The gate reads the clock where the ring rendered its reported playhead, on the ring's timeline.
+	it("releases the backlog of a ring trailing the clock past its bound", () => {
+		let position = 1000;
+		const clock = started();
+		const { buffer, state, context } = fake(100, {
+			bound: 200,
+			clock: { position: () => position, out: { reference: new Signal<number | undefined>(0) } },
+		});
+		const signal = new AbortController().signal;
+		try {
+			context.currentTime = 1;
+			context.sounding = 1;
+			buffer.insert(ms(1000), [new Float32Array(160)]);
+			state(ms(1000), false, 0, 1);
+			const wait = buffer.wait(ms(1160), signal);
+			expect(Bun.peek.status(wait)).toBe("pending");
+			position = 1200;
+			state(ms(1000), false, 0, 1);
+			expect(Bun.peek.status(wait)).toBe("pending");
+			position = 3000;
+			state(ms(1000), true, 0, 1);
+			expect(Bun.peek.status(wait)).toBe("fulfilled");
+			// Released up to a floor and window past the clock, where the ring skips to.
+			for (const t of [2800, 2950, 3100]) expect(Bun.peek.status(buffer.wait(ms(t), signal))).toBe("fulfilled");
+			expect(Bun.peek.status(buffer.wait(ms(3250), signal))).toBe("pending");
+		} finally {
+			buffer.close();
+			clock.close();
+		}
+	});
+
+	// A rejoin's replayed backlog trails the clock by seconds, and the ring skips it unheard. Held to the
+	// ring's pace, the live edge behind it would arrive only once the ring had drained it all.
+	it("releases at once, and reports stale, what trails the clock past its bound short of a declared end", () => {
+		const clock = started();
+		const { buffer, state } = fake(100, {
+			bound: 200,
+			clock: { position: () => 3000, out: { reference: new Signal<number | undefined>(0) } },
+		});
+		const signal = new AbortController().signal;
+		try {
+			buffer.insert(ms(2900), [new Float32Array(160)]);
+			state(ms(2900), false, 0);
+			// Within the bound the ring plays it, so the gate holds what lies past its floor and window.
+			expect(buffer.stale(ms(2850))).toBe(false);
+			expect(Bun.peek.status(buffer.wait(ms(3300), signal))).toBe("pending");
+			expect(buffer.stale(ms(2700))).toBe(true);
+			expect(Bun.peek.status(buffer.wait(ms(1000), signal))).toBe("fulfilled");
+
+			// A finite tail plays out however far it trails the clock, through the next utterance too.
+			buffer.end(ms(2800));
+			expect(buffer.stale(ms(2700))).toBe(false);
+			// The decoder asks with where its output ends, which for the last packet is the end itself.
+			expect(buffer.stale(ms(2800))).toBe(false);
+			buffer.next();
+			expect(buffer.stale(ms(2700))).toBe(false);
+			expect(buffer.stale(ms(2790))).toBe(false);
+			buffer.reset();
+			expect(buffer.stale(ms(2700))).toBe(true);
+		} finally {
+			buffer.close();
+			clock.close();
+		}
+	});
+
+	// Before media zero's turn, as while an opening waits for its output to sound it, the clock pairs
+	// at its negative position rather than the zero it reads as.
+	it("pairs a clock short of media zero at its negative position", () => {
+		const clock = started();
+		const { buffer, sent, state, context } = fake(100, {
+			clock: { position: () => -120, out: { reference: new Signal<number | undefined>(0) } },
+		});
+		try {
+			context.sounding = 1;
+			state(ms(0), false, 0);
+			expect(sent.filter((msg) => msg.type === "clock")).toEqual([
+				{ type: "clock", timestamp: -1_120_000, time: 0 },
+			]);
+		} finally {
+			buffer.close();
+			clock.close();
+		}
+	});
+
+	// Before the output has played anything there is no position to pair the clock with.
+	it("sends no clock until the output reports a position", () => {
+		const { buffer, sent, state } = fake(100, {
+			clock: { position: () => 1000, out: { reference: new Signal<number | undefined>(0) } },
+		});
+		try {
+			state(ms(0), false, 0);
+			expect(sent.filter((msg) => msg.type === "clock")).toEqual([{ type: "clock", time: 0 }]);
+		} finally {
+			buffer.close();
+		}
+	});
+
+	// The ring renders ahead of the speaker by the output latency, so it holds the delay less that,
+	// decoded floor included, and the delay the clock holds counts the base latency and the output
+	// latency's recent peak.
+	it("holds the delay less the output latency it renders ahead by", () => {
+		const { buffer, sent, state, context } = fake(300);
+		try {
+			context.baseLatency = 0.01;
+			context.outputLatency = 0.12;
+			state(ms(0), false, 0);
+			context.outputLatency = 0.104;
+			state(ms(0), false, 0);
+			expect(buffer.output.peek()).toEqual(Duration.millis(130));
+			buffer.setLatency(Duration.millis(300));
+			// A delay short of the output latency still holds one callback.
+			expect(buffer.held(Duration.millis(50))).toEqual(Duration.millis(10));
+			buffer.setLatency(Duration.millis(50));
+			expect(sent.filter((msg) => msg.type === "latency")).toEqual([
+				{ type: "latency", latency: 180, bound: 0 },
+				{ type: "latency", latency: 128, bound: 0 },
+			]);
+		} finally {
+			buffer.close();
+		}
+	});
+
+	// The ring renders ahead of what sounds by the context's current lead, which a fall in the output
+	// latency shortens at once, where `output` holds its peak for five seconds.
+	it("reports how far the worklet renders ahead of what sounds now", () => {
+		const clock = started();
+		const { buffer, state, context } = fake(300);
+		try {
+			context.baseLatency = 0.01;
+			context.outputLatency = 0.25;
+			context.currentTime = 1;
+			context.sounding = 0.74;
+			state(ms(0), false, 0);
+			expect(buffer.lead.peek()).toEqual(Duration.millis(260));
+			// The output latency fell to 20 ms: the peak stays, and the lead follows.
+			context.outputLatency = 0.02;
+			context.currentTime = 2;
+			context.sounding = 1.97;
+			state(ms(0), false, 0);
+			expect(buffer.output.peek()).toEqual(Duration.millis(260));
+			expect(buffer.lead.peek()).toEqual(Duration.millis(30));
+			// A move of a couple of milliseconds, a render callback's worth of noise, is left alone.
+			context.currentTime = 3;
+			context.sounding = 2.972;
+			state(ms(0), false, 0);
+			expect(buffer.lead.peek()).toEqual(Duration.millis(30));
+		} finally {
+			buffer.close();
+			clock.close();
+		}
+	});
+
+	// Startup holds only what the ring must from the first message, before any state report.
+	it("holds the delay less the output latency the context reports at construction", () => {
+		const sent: Message[] = [];
+		const port = Object.assign(new EventTarget(), { postMessage: (msg: Message) => sent.push(msg), start() {} });
+		const context = silent();
+		context.outputLatency = 0.12;
+		const buffer = new AudioBuffer({ port, context } as unknown as AudioWorkletNode, {
+			channels: 1,
+			rate: 1000,
+			delay: Duration.millis(300),
+			buffered: false,
+		});
+		try {
+			expect(buffer.held(Duration.millis(300))).toEqual(Duration.millis(180));
+			expect(sent[0]).toMatchObject({ type: "init", latency: 180 });
+		} finally {
+			buffer.close();
+		}
+	});
+
+	// The speaker sounds what was rendered an output latency ago, so the playback timestamp is where
+	// the rendered playhead stood then, advancing at real time, and holds through a stall.
+	it("reports the playhead sounding now", () => {
+		const clock = started();
+		const { buffer, state, context } = fake(100);
+		try {
+			context.sounding = 1;
+			state(ms(5000), false, 0, 1.1);
+			// Nothing rendered at or before what is sounding: the first report, back by the difference.
+			expect(buffer.timestamp.peek()).toBe(ms(4900));
+			context.sounding = 1.12;
+			state(ms(5050), false, 0, 1.15);
+			expect(buffer.timestamp.peek()).toBe(ms(5020));
+			// The ring stalled at 5050: what sounds holds there once it has caught up.
+			context.sounding = 1.17;
+			state(ms(5050), true, 0, 1.2);
+			expect(buffer.timestamp.peek()).toBe(ms(5050));
+		} finally {
+			buffer.close();
+			clock.close();
+		}
+	});
+
+	// Opus output lands on the ring a pre-skip before its frame timestamp, at its presentation time, so
+	// the clock maps onto the ring unshifted and the playhead reports the ring's position: only a frame
+	// timestamp, as `received` takes, moves back by the pre-skip.
+	it("plays and reports the ring at presentation time under a pre-skip", () => {
+		const clock = started();
+		const { buffer, sent, state, context } = fake(100, {
+			clock: { position: () => 5000, out: { reference: new Signal<number | undefined>(0) } },
+		});
+		try {
+			buffer.decoded(ms(5020), ms(6.5));
+			buffer.received(Duration.millis(5020));
+			context.currentTime = 1;
+			context.sounding = 1;
+			state(ms(5000), false, 0, 1);
+			expect(sent.filter((msg) => msg.type === "clock")).toEqual([
+				{ type: "clock", timestamp: 5_000_000, time: 1 },
+			]);
+			expect(sent).toContainEqual({ type: "received", end: 5_013_500 });
+			expect(buffer.timestamp.peek()).toBe(ms(5000));
+		} finally {
+			buffer.close();
+			clock.close();
 		}
 	});
 });

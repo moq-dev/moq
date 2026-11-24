@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { yieldNow } from "@moq/clock";
-import { offered } from "../connection/extensions.ts";
 import { exchangeSetup } from "../connection/handshake.ts";
+import { defined } from "../defined.test-util.ts";
 import { SessionCode } from "../error.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
@@ -9,6 +9,8 @@ import * as Path from "../path.ts";
 import { Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import { Connection } from "./connection.ts";
+import { IetfSessionCode } from "./error.ts";
+import { Fetch, type FetchType } from "./fetch.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import { Group } from "./object.ts";
@@ -120,13 +122,16 @@ for (const [version, alpn] of [
 	}
 }
 
-/** We list no tracks by PUBLISH: each SUBSCRIBE_TRACKS gets NOT_SUPPORTED, and the session stays usable. */
+/**
+ * We serve neither FETCH (only a relay answers it, from its cache) nor SUBSCRIBE_TRACKS (we list
+ * no tracks by PUBLISH): each gets NOT_SUPPORTED on its own stream, and the session stays usable.
+ */
 for (const [version, alpn] of [
 	[Version.DRAFT_18, ALPN.DRAFT_18],
 	[Version.DRAFT_20, ALPN.DRAFT_20],
 	[Version.DRAFT_22, ALPN.DRAFT_22],
 ] as const) {
-	test(`SUBSCRIBE_TRACKS is refused on its own stream on ${alpn}`, async () => {
+	test(`FETCH and SUBSCRIBE_TRACKS are refused on their own streams on ${alpn}`, async () => {
 		const pair = createMockTransportPair(alpn);
 		const control = await Stream.open(pair.server, { version });
 		const connection = new Connection({
@@ -137,16 +142,42 @@ for (const [version, alpn] of [
 			client: false,
 		});
 
-		try {
-			// A second listing of the same prefix is refused the same way, each spending its Request ID.
-			for (let i = 0; i < 2; i++) {
-				const stream = await Stream.open(pair.client, { version });
-				await stream.writer.u62(BigInt(SUBSCRIBE_TRACKS_ID));
-				await Message.encode(stream.writer, async (writer) => {
-					await writer.u62(BigInt(i * 2));
-					await Namespace.encode(writer, Path.from("prefix"));
-					await writer.u53(0);
+		const requests: ((writer: Writer, requestId: bigint) => Promise<void>)[] = [
+			async (writer, requestId) => {
+				await writer.u62(BigInt(SUBSCRIBE_TRACKS_ID));
+				await Message.encode(writer, async (body) => {
+					await body.u62(requestId);
+					await Namespace.encode(body, Path.from("prefix"));
+					await body.u53(0);
 				});
+			},
+			async (writer, requestId) => {
+				await writer.u62(BigInt(Fetch.id));
+				const type: FetchType =
+					version === Version.DRAFT_18
+						? {
+								kind: "standalone",
+								trackNamespace: Path.from("room"),
+								trackName: "video",
+								start: { group: 0n, object: 0n },
+								end: { group: 1n, object: 0n },
+							}
+						: {
+								kind: "filtered",
+								trackNamespace: Path.from("room"),
+								trackName: "video",
+								filter: { kind: "unfiltered" },
+							};
+				await new Fetch({ requestId, type }).encode(writer, version);
+			},
+		];
+		try {
+			// Each is refused again on a second request, spending its own Request ID.
+			let requestId = 0n;
+			for (const request of [...requests, ...requests]) {
+				const stream = await Stream.open(pair.client, { version });
+				await request(stream.writer, requestId);
+				requestId += 2n;
 				expect(await stream.reader.u53()).toBe(RequestError.id);
 				expect((await RequestError.decode(stream.reader, version)).errorCode).toBe(0x3);
 				expect(await stream.reader.done()).toBe(true);
@@ -227,7 +258,6 @@ test("uni streams before SETUP are held until it lands", async () => {
 
 	const { control, early, solicit, hidden, cluster } = await exchangeSetup(pair.server, version, "test", {
 		client: false,
-		extensions: offered(),
 	});
 	expect(early.length).toBe(2);
 
@@ -275,7 +305,7 @@ test("truncated uni stream before SETUP is skipped", async () => {
 	parameters.setBytes(SetupOption.Implementation, new TextEncoder().encode("test"));
 	await new Setup({ parameters }).encode(setup, version);
 
-	const { early } = await exchangeSetup(pair.server, version, "test", { client: false, extensions: offered() });
+	const { early } = await exchangeSetup(pair.server, version, "test", { client: false });
 	expect(early.length).toBe(0);
 });
 
@@ -350,11 +380,11 @@ function updateWithTokens(...tokens: (readonly number[])[]): Uint8Array {
  */
 for (const [version, alpn] of [[Version.DRAFT_22, ALPN.DRAFT_22]] as const) {
 	for (const [name, token, code] of [
-		["REGISTER", [0x01, 0x07, 0x00], SessionCode.AuthTokenCacheOverflow],
-		["DELETE", [0x00, 0x07], SessionCode.UnknownAuthTokenAlias],
-		["USE_ALIAS", [0x02, 0x07], SessionCode.UnknownAuthTokenAlias],
-		["USE_VALUE without a type", [0x03], SessionCode.KeyValueFormatting],
-		["an unknown alias type", [0x04, 0x00], SessionCode.KeyValueFormatting],
+		["REGISTER", [0x01, 0x07, 0x00], IetfSessionCode.AuthTokenCacheOverflow],
+		["DELETE", [0x00, 0x07], IetfSessionCode.UnknownAuthTokenAlias],
+		["USE_ALIAS", [0x02, 0x07], IetfSessionCode.UnknownAuthTokenAlias],
+		["USE_VALUE without a type", [0x03], IetfSessionCode.KeyValueFormatting],
+		["an unknown alias type", [0x04, 0x00], IetfSessionCode.KeyValueFormatting],
 	] as const) {
 		test(`a request token with ${name} closes ${alpn}`, async () => {
 			const logged = spyOn(console, "error").mockImplementation(() => void 0);
@@ -388,10 +418,10 @@ for (const [version, alpn] of [[Version.DRAFT_22, ALPN.DRAFT_22]] as const) {
  */
 for (const [version, alpn] of [[Version.DRAFT_22, ALPN.DRAFT_22]] as const) {
 	for (const [name, token, code] of [
-		["REGISTER", [0x01, 0x07, 0x00], SessionCode.AuthTokenCacheOverflow],
-		["DELETE", [0x00, 0x07], SessionCode.UnknownAuthTokenAlias],
-		["USE_ALIAS", [0x02, 0x07], SessionCode.UnknownAuthTokenAlias],
-		["USE_VALUE without a type", [0x03], SessionCode.KeyValueFormatting],
+		["REGISTER", [0x01, 0x07, 0x00], IetfSessionCode.AuthTokenCacheOverflow],
+		["DELETE", [0x00, 0x07], IetfSessionCode.UnknownAuthTokenAlias],
+		["USE_ALIAS", [0x02, 0x07], IetfSessionCode.UnknownAuthTokenAlias],
+		["USE_VALUE without a type", [0x03], IetfSessionCode.KeyValueFormatting],
 	] as const) {
 		test(`an update token with ${name} closes ${alpn}`, async () => {
 			const logged = spyOn(console, "error").mockImplementation(() => void 0);
@@ -400,7 +430,7 @@ for (const [version, alpn] of [[Version.DRAFT_22, ALPN.DRAFT_22]] as const) {
 			const origin = new OriginProducer();
 			const broadcastRoute = origin.route(Path.from("room"));
 			const broadcast = broadcastRoute.broadcast;
-			broadcast.createTrack("video", { timescale: Timescale.MILLI });
+			defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 			const connection = new Connection({
 				url: new URL("https://example.com"),
 				quic: pair.server,
@@ -435,7 +465,7 @@ async function serving(version: IetfVersion, alpn: string) {
 	const origin = new OriginProducer();
 	const broadcastRoute = origin.route(Path.from("room"));
 	const broadcast = broadcastRoute.broadcast;
-	broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const connection = new Connection({
 		url: new URL("https://example.com"),
 		quic: pair.server,

@@ -8,18 +8,19 @@ pub enum Error {
 	#[error("unsupported kernel: {0}")]
 	Unsupported(String),
 
-	/// An io_uring or socket operation failed.
-	#[error("io error: {0}")]
+	/// An io_uring or socket operation failed. The message omits the cause, which
+	/// is the source, so `{:#}` and a source chain each show it once.
+	#[error("io error")]
 	Io(#[from] std::io::Error),
 }
 
 impl Error {
-	/// A failed ring setup or registration, naming the locked-memory limit when
-	/// that is what ran out.
+	/// A failed ring setup or registration, naming what an `ENOMEM` can mean.
 	///
-	/// The kernel charges every ring and provided-buffer ring to the user's
-	/// `RLIMIT_MEMLOCK`, shared with every other io_uring that user runs, so a
-	/// bare `ENOMEM` points at the wrong culprit.
+	/// The kernel cannot tell which ran out, and a stable backport makes the
+	/// version no guide: the memory cgroup, physically contiguous pages on a
+	/// fragmented host, or, from Linux 6.14 until the 7.3 fix, the user's
+	/// `RLIMIT_MEMLOCK`, shared with every other io_uring that user runs.
 	pub(crate) fn ring(err: std::io::Error) -> Self {
 		if err.raw_os_error() != Some(libc::ENOMEM) {
 			return Self::Io(err);
@@ -36,8 +37,9 @@ impl Error {
 		Self::Io(std::io::Error::new(
 			err.kind(),
 			format!(
-				"{err}: io_uring memory counts against RLIMIT_MEMLOCK ({limit}), shared by every process of this user; \
-				 raise it with `ulimit -l` or systemd's `LimitMEMLOCK=`"
+				"{err}: the kernel could not allocate the io_uring ring, from the memory cgroup or from contiguous pages \
+				 on a fragmented host; Linux 6.14 until the 7.3 fix also charges it to RLIMIT_MEMLOCK ({limit}), shared \
+				 by every process of this user, which `ulimit -l` or systemd's `LimitMEMLOCK=` raises"
 			),
 		))
 	}
@@ -48,11 +50,21 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn a_ring_enomem_names_the_memlock_limit() {
-		let err = Error::ring(std::io::Error::from_raw_os_error(libc::ENOMEM));
-		assert!(err.to_string().contains("RLIMIT_MEMLOCK"), "{err}");
+	fn a_ring_enomem_names_each_cause() {
+		let err = anyhow::Error::new(Error::ring(std::io::Error::from_raw_os_error(libc::ENOMEM)));
+		let msg = format!("{err:#}");
+		for cause in ["memory cgroup", "fragmented", "RLIMIT_MEMLOCK"] {
+			assert!(msg.contains(cause), "{msg}");
+		}
 
-		let err = Error::ring(std::io::Error::from_raw_os_error(libc::EBADF));
-		assert!(!err.to_string().contains("RLIMIT_MEMLOCK"), "{err}");
+		let err = anyhow::Error::new(Error::ring(std::io::Error::from_raw_os_error(libc::EBADF)));
+		assert!(!format!("{err:#}").contains("RLIMIT_MEMLOCK"), "{err:#}");
+	}
+
+	#[test]
+	fn an_io_error_names_its_cause_once() {
+		let err = anyhow::Error::new(Error::from(std::io::Error::other("ring refused")));
+		assert_eq!(format!("{err:#}"), "io error: ring refused");
+		assert_eq!(err.chain().count(), 2);
 	}
 }

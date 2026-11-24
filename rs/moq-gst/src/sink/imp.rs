@@ -1333,15 +1333,22 @@ mod tests {
 			.build()
 	}
 
-	struct CatalogRun(super::super::MoqSink);
+	/// A sink whose dial hangs for the whole test: a first dial that failed would end the
+	/// session, and the broadcast with it.
+	struct CatalogRun(
+		super::super::MoqSink,
+		#[allow(dead_code, reason = "held so the dial hangs")] std::net::TcpListener,
+	);
 
 	impl CatalogRun {
 		fn new() -> Self {
 			gst::init().unwrap();
+			// The kernel completes the TCP handshake, but nothing ever answers the session's.
+			let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
 			let sink = sink();
-			sink.set_property("url", "tcp://127.0.0.1:1");
+			sink.set_property("url", format!("tcp://{}", silent.local_addr().unwrap()));
 			sink.set_property("broadcast", "catalog-test");
-			Self(sink)
+			Self(sink, silent)
 		}
 
 		fn pad(&self, name: &str) -> gst::Pad {
@@ -1490,7 +1497,7 @@ mod tests {
 			panic!("first catalog")
 		};
 		assert_eq!(
-			first.media.clock.unwrap().wall.as_micros(),
+			first.sync.clock.unwrap().wall.as_micros().unwrap(),
 			(kio::clock::Wall::UNIX_EPOCH + std::time::Duration::from_secs(1_735_689_600))
 				.saturating_duration_since(kio::clock::Wall::MOQ_EPOCH)
 				.as_micros(),
@@ -1529,11 +1536,11 @@ mod tests {
 				let state = control.live.as_ref().unwrap();
 				(
 					state.route.broadcast().consume(),
-					state.catalog.as_ref().unwrap().snapshot().media.clock.unwrap(),
+					state.catalog.as_ref().unwrap().snapshot().sync.clock.unwrap(),
 				)
 			};
 			assert_eq!(
-				clock.wall.as_micros(),
+				clock.wall.as_micros().unwrap(),
 				(kio::clock::Wall::UNIX_EPOCH + std::time::Duration::from_secs(zero))
 					.saturating_duration_since(kio::clock::Wall::MOQ_EPOCH)
 					.as_micros()
@@ -1551,7 +1558,7 @@ mod tests {
 				let moq_mux::container::Read::Frame { frame, .. } = read else {
 					panic!("media frame")
 				};
-				assert_eq!(frame.timestamp.as_micros(), expected * 1_000_000, "{name}");
+				assert_eq!(frame.timestamp.as_micros().unwrap(), expected * 1_000_000, "{name}");
 			}
 			run.0.set_state(gst::State::Null).unwrap();
 		}
@@ -2463,7 +2470,11 @@ mod tests {
 		};
 		let consumer = broadcast.consume();
 		let track = broadcast.create_track("video", None).unwrap();
-		track.append_group().unwrap().finish().unwrap();
+		track
+			.append_group(moq_net::Timestamp::unscaled(0))
+			.unwrap()
+			.finish()
+			.unwrap();
 		let track = track.finish().unwrap();
 		assert!(session.finish());
 		while bus.pop().is_some() {}
@@ -2578,7 +2589,7 @@ mod tests {
 			"url",
 			"broadcast",
 			"linger",
-			"tls-disable-verify",
+			"connect-tls-insecure",
 			"quic-idle-timeout",
 			"quic-keep-alive",
 			"quic-keylog",
@@ -2654,11 +2665,7 @@ mod tests {
 		sink.set_property("broadcast", "test");
 		let resolved = ResolvedSettings::try_from(sink.imp().settings.lock().unwrap().clone()).unwrap();
 		let config = super::super::session::connect_config(&resolved);
-		assert_eq!(
-			config.backoff.timeout,
-			Some((Duration::ZERO).into()),
-			"zero is unlimited"
-		);
+		assert_eq!(config.backoff.timeout, Some(moq_tokio::cli::Bound::NONE), "no give-up");
 	}
 
 	#[test]

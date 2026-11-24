@@ -2,9 +2,8 @@
 //!
 //! Linux-only, because the mode is: every worker binds the listen address with
 //! `SO_REUSEPORT`, and no other platform load-balances a unicast UDP port
-//! across the group. There is also nothing to serve without a QUIC backend, so
-//! a build without one refuses `runtime.workers` at load.
-#![cfg(all(target_os = "linux", feature = "_quic"))]
+//! across the group.
+#![cfg(target_os = "linux")]
 
 use std::time::Duration;
 
@@ -51,7 +50,7 @@ fn worker_config(cert: &std::path::Path, key: &std::path::Path, workers: u16) ->
 	config.listen.tls.key = vec![key.to_path_buf()];
 	config.runtime.workers = moq_relay::runtime::Workers::Count(std::num::NonZeroU16::new(workers).unwrap());
 	config.runtime.pin = false;
-	config.auth.public = vec![moq_auth::Pattern::all()];
+	config.auth.public = vec![moq_auth::Prefix::all()];
 	config
 }
 
@@ -104,9 +103,11 @@ async fn workers_serve_quic_and_share_one_origin() {
 		.broadcast()
 		.create_track("video", timed())
 		.expect("create track");
-	let mut group = track.append_group().expect("append group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("append group");
 	group
-		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
+		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("write frame");
 	group.finish().expect("finish group");
 
@@ -170,10 +171,13 @@ async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net
 			kind:
 				moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update | moq_net::origin::RouteKind::Restart,
 			announce: route,
+			..
 		} => Some((route, true)),
 		moq_net::origin::RouteEvent {
 			kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 			announce: route,
+			..
 		} => Some((route, false)),
+		other => panic!("unexpected route event {other:?}"),
 	}
 }

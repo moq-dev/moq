@@ -9,13 +9,11 @@ characters.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from importlib import metadata
-from typing import ClassVar, cast
 
 from moq_ffi import (
-    MoqAnchor,
     MoqBackoff,
     MoqClientTls,
     MoqCompression,
@@ -31,6 +29,7 @@ from moq_ffi import (
     MoqSubscription,
     MoqTimestamp,
     MoqTrackInfo,
+    MoqTrackRefresh,
     MoqVideoDecodedFrame,
     MoqVideoPixelFormat,
     MoqVideoSurface,
@@ -64,10 +63,18 @@ class Timestamp:
     ``value`` is at most ``2**61 - 1`` and ``scale`` is non-zero and at most ``2**62 - 1``;
     a write past either bound raises ``moq.Error.TimeOverflow``. A read carries the
     track's timescale, and a write at another scale is floored to it.
+
+    A scale-less track has no time, so there ``scale`` is ``None`` and ``value`` is the
+    frame's group key (a datagram's sequence); build one with :meth:`unscaled`.
     """
 
     value: int
-    scale: int
+    scale: int | None
+
+    @staticmethod
+    def unscaled(key: int) -> Timestamp:
+        """The scale-less timestamp at group key (or datagram sequence) ``key``."""
+        return Timestamp(key, None)
 
     @staticmethod
     def from_timedelta(duration: timedelta) -> Timestamp:
@@ -80,7 +87,13 @@ class Timestamp:
         """This timestamp as a ``timedelta``, rounded down to a whole microsecond.
 
         The timestamp itself is exact; keep it, not the ``timedelta``, to republish a tick such as 90 kHz.
+        Raises ``ValueError`` on an :meth:`unscaled` timestamp, which has no time, or on a
+        scale that is not positive.
         """
+        if self.scale is None:
+            raise ValueError(f"an unscaled timestamp (key {self.value}) has no time")
+        if self.scale <= 0:
+            raise ValueError(f"timestamp scale must be positive: {self.scale}")
         return timedelta(microseconds=self.value * 1_000_000 // self.scale)
 
     def _ffi(self) -> MoqTimestamp:
@@ -91,129 +104,72 @@ class Timestamp:
         return Timestamp(value.value, value.scale)
 
 
-def _opt_ts(value: Timestamp | None) -> MoqTimestamp | None:
-    return None if value is None else value._ffi()
-
-
-def _opt_from_ts(value: MoqTimestamp | None) -> Timestamp | None:
-    return None if value is None else Timestamp._from_ffi(value)
-
-
 @dataclass(frozen=True)
 class Frame:
     """A raw track frame: a payload and its presentation timestamp.
 
-    ``timestamp`` is ``None`` on an untimed track, on both publish and receive.
+    On a scale-less track ``timestamp`` is :meth:`Timestamp.unscaled` at the frame's
+    group key, on both publish and receive.
     """
 
     payload: bytes
-    timestamp: Timestamp | None = None
+    timestamp: Timestamp
 
     def _ffi(self) -> MoqFrame:
-        return MoqFrame(payload=self.payload, timestamp=_opt_ts(self.timestamp))
+        return MoqFrame(payload=self.payload, timestamp=self.timestamp._ffi())
 
     @staticmethod
     def _from_ffi(frame: MoqFrame) -> Frame:
-        return Frame(payload=frame.payload, timestamp=_opt_from_ts(frame.timestamp))
+        return Frame(payload=frame.payload, timestamp=Timestamp._from_ffi(frame.timestamp))
 
 
 @dataclass(frozen=True)
 class Datagram:
-    """A datagram payload with its own sequence and optional timestamp.
+    """A datagram payload with its own sequence and timestamp.
 
-    ``timestamp`` is ``None`` on a datagram read from an untimed track.
+    On a scale-less track ``timestamp`` is :meth:`Timestamp.unscaled` at ``sequence``.
     """
 
     sequence: int
-    timestamp: Timestamp | None
+    timestamp: Timestamp
     payload: bytes
 
     def _ffi(self) -> MoqDatagram:
-        return MoqDatagram(sequence=self.sequence, timestamp=_opt_ts(self.timestamp), payload=self.payload)
+        return MoqDatagram(sequence=self.sequence, timestamp=self.timestamp._ffi(), payload=self.payload)
 
     @staticmethod
     def _from_ffi(datagram: MoqDatagram) -> Datagram:
         return Datagram(
             sequence=datagram.sequence,
-            timestamp=_opt_from_ts(datagram.timestamp),
+            timestamp=Timestamp._from_ffi(datagram.timestamp),
             payload=datagram.payload,
         )
 
 
-class Anchor:
-    """Where one end of a :class:`Range` falls, mirroring moq-net's ``track::Anchor``.
-
-    Build one with ``Anchor.OLDEST()``, ``Anchor.ABSOLUTE(group=...)``,
-    ``Anchor.RELATIVE(groups=...)``, or ``Anchor.TIME(timestamp=...)``.
-    """
-
-    OLDEST: ClassVar[type[_AnchorOldest]]
-    ABSOLUTE: ClassVar[type[_AnchorAbsolute]]
-    RELATIVE: ClassVar[type[_AnchorRelative]]
-    TIME: ClassVar[type[_AnchorTime]]
-
-    def _ffi(self) -> MoqAnchor:
-        raise TypeError("build an Anchor with Anchor.OLDEST, Anchor.ABSOLUTE, Anchor.RELATIVE, or Anchor.TIME")
-
-
-# The generated variants subclass MoqAnchor only at runtime, so each _ffi casts for pyright.
-@dataclass(frozen=True)
-class _AnchorOldest(Anchor):
-    """The oldest group still around, as far back as the max delay allows. A start only."""
-
-    def _ffi(self) -> MoqAnchor:
-        return cast(MoqAnchor, MoqAnchor.OLDEST())
-
-
-@dataclass(frozen=True)
-class _AnchorAbsolute(Anchor):
-    """This group, delivered from its first frame."""
-
-    group: int
-
-    def _ffi(self) -> MoqAnchor:
-        return cast(MoqAnchor, MoqAnchor.ABSOLUTE(group=self.group))
-
-
-@dataclass(frozen=True)
-class _AnchorRelative(Anchor):
-    """The group this many before the latest, clamped to group 0: ``0`` is the latest group."""
-
-    groups: int
-
-    def _ffi(self) -> MoqAnchor:
-        return cast(MoqAnchor, MoqAnchor.RELATIVE(groups=self.groups))
-
-
-@dataclass(frozen=True)
-class _AnchorTime(Anchor):
-    """The group containing this presentation time. An untimed track refuses it."""
-
-    timestamp: Timestamp
-
-    def _ffi(self) -> MoqAnchor:
-        return cast(MoqAnchor, MoqAnchor.TIME(timestamp=self.timestamp._ffi()))
-
-
-Anchor.OLDEST = _AnchorOldest
-Anchor.ABSOLUTE = _AnchorAbsolute
-Anchor.RELATIVE = _AnchorRelative
-Anchor.TIME = _AnchorTime
-
-
 @dataclass(frozen=True)
 class Range:
-    """A span of a track to deliver, from ``start`` to ``end``, ``None`` to keep following the live edge.
+    """A span of a track to deliver, mirroring moq-net's ``track::Range``.
 
-    A relative or time start is the first frame of its group, and a relative or time end
-    includes its whole group. An absolute end is exclusive.
+    It runs from the group containing ``start`` through the group containing ``end``. Both are
+    :meth:`Timestamp.unscaled` in the track's timescale; a scaled one is refused, since the
+    subscription can't check its scale against the track. Every start is the first frame of
+    its group, and every end includes its whole group.
+
+    ``start`` is ``None`` for no start, which the subscription's :class:`Delay` places: a stated
+    ``min`` is a live join that far behind the live edge (zero is the latest group), and an
+    unstated one reaches back as far as ``max`` allows. A range with a ``start`` is history:
+    every group it covers is delivered, bounded only by the publisher's max age, since ``max``
+    applies only to ranges with no start. ``end`` is ``None`` to keep following the live edge.
     """
 
-    start: Anchor
-    end: Anchor | None = None
+    start: Timestamp | None = None
+    end: Timestamp | None = None
 
     def _ffi(self) -> MoqRange:
-        return MoqRange(start=self.start._ffi(), end=None if self.end is None else self.end._ffi())
+        return MoqRange(
+            start=None if self.start is None else self.start._ffi(),
+            end=None if self.end is None else self.end._ffi(),
+        )
 
 
 @dataclass(frozen=True)
@@ -221,17 +177,19 @@ class Delay:
     """How far behind the live edge a subscriber or decoder plays, mirroring moq-net's ``track::Delay``.
 
     ``min`` is the target latency: the playout or jitter-buffer delay held behind the
-    live edge, and where a cold join starts. ``None`` leaves it unstated, which a decoder
-    plays as zero while the subscription keeps it unstated, so it never pulls the
-    aggregate across subscribers to zero. A ``min`` past ``max`` starts at ``max``.
-    ``max`` is how far a non-latest group may fall behind before it is skipped; zero
-    skips at once, ``None`` sets no subscriber limit and leaves the publisher's max age
-    alone to bound it, and it caps every range.
+    live edge. Once stated, zero included, a :class:`Range` with no start is a live join that
+    far behind the live edge. ``None`` leaves it unstated: such a range reaches back as far as
+    ``max`` allows, and a decoder starts it as zero. A ``min`` past ``max`` starts a live join
+    no further back than the group covering the point ``max`` behind the live edge.
+    ``max`` is how far a non-latest group may fall behind before it is skipped, and how far newer
+    media may run past a missing group before a decoder gives it up; zero
+    skips at once, and ``None`` sets no subscriber limit and leaves the publisher's max age
+    alone to bound it. It bounds only ranges with no start; a range with a start is history.
 
-    A bare ``Delay()`` is moq-net's default, zero for both.
+    A bare ``Delay()`` is moq-net's default: no ``min`` and a zero ``max``.
     """
 
-    min: timedelta | None = timedelta(0)
+    min: timedelta | None = None
     max: timedelta | None = timedelta(0)
 
     @classmethod
@@ -247,9 +205,9 @@ class Subscription:
     """Subscriber-side delivery preferences, mirroring moq-net's ``track::Subscription``.
 
     ``priority`` is in ``-128..=127``, higher first, and defaults to 0, the midpoint.
-    ``delay`` is where a cold join starts and how far a non-latest group may fall behind
-    before it is skipped. ``ranges`` are the spans of the track to deliver, ``None`` for
-    everything ``delay.max`` still allows. ``order`` is which pending group the publisher
+    ``delay`` is where a range with no start begins and how far a non-latest group may fall
+    behind before it is skipped. ``ranges`` are the spans of the track to deliver, ``None`` for
+    one :class:`Range` with no start. ``order`` is which pending group the publisher
     sends first, ``None`` for newest first.
 
     A bare ``Subscription()`` has moq-net's defaults, as :meth:`default` does.
@@ -262,7 +220,7 @@ class Subscription:
 
     @classmethod
     def default(cls) -> Subscription:
-        """moq-net's defaults, whose zero ``delay`` starts at the newest group and skips a superseded one at once.
+        """moq-net's defaults: no ``delay.min`` and a zero ``delay.max``, which start at the newest group.
 
         A ``None`` subscription means the same; ``dataclasses.replace`` this one to change
         a field.
@@ -290,6 +248,32 @@ def _subscription(subscription: Subscription | None) -> MoqSubscription | None:
 
 
 @dataclass(frozen=True)
+class TrackRefresh:
+    """When a subscriber asks a track's publisher for a new group, mirroring moq-net's ``track::Refresh``.
+
+    A track opting in starts each group with an independent frame (a keyframe or a snapshot),
+    so a new group is something the publisher can make on request; it hears the request
+    through :meth:`TrackDemand.refresh`. ``ratio`` is how many times its first frame a group's
+    later bytes may grow before a joining subscriber asks; zero asks on any join once a frame
+    follows the first, and ``None`` leaves joins to ``interval`` alone. ``interval`` is how long
+    after the newest group arrived a request may ask for another, ``None`` for no wait; it caps
+    how often the publisher makes groups however many subscribers ask.
+
+    A bare ``TrackRefresh()`` asks for nothing.
+    """
+
+    ratio: int | None = None
+    interval: timedelta | None = None
+
+    @classmethod
+    def _from_ffi(cls, refresh: MoqTrackRefresh) -> TrackRefresh:
+        return cls(ratio=refresh.ratio, interval=refresh.interval)
+
+    def _ffi(self) -> MoqTrackRefresh:
+        return MoqTrackRefresh(ratio=self.ratio, interval=self.interval)
+
+
+@dataclass(frozen=True)
 class TrackInfo:
     """Publisher-side track properties, mirroring moq-net's ``track::Info``.
 
@@ -297,8 +281,7 @@ class TrackInfo:
     ties between subscriptions of equal subscriber priority. ``max_age`` is how long a
     superseded group stays fresh: the default zero serves only the live edge, and
     ``None`` sets no publisher limit, leaving only the cache to bound it. ``refresh`` is
-    how many times its first frame a group's later bytes may grow before a joining
-    subscriber asks for a new group, ``None`` to never ask. ``timescale`` is ticks per second:
+    when a subscriber asks for a new group, never by default. ``timescale`` is ticks per second:
     ``None`` means the track is untimed, on both publish and receive.
     ``compression`` compresses each group on the wire to peers that support it, ``None``
     sending frames as written; readers always see the original frames.
@@ -306,7 +289,7 @@ class TrackInfo:
 
     priority: int = 0
     max_age: timedelta | None = timedelta(0)
-    refresh: int | None = None
+    refresh: TrackRefresh = TrackRefresh()
     timescale: int | None = None
     compression: MoqCompression | None = None
 
@@ -314,8 +297,7 @@ class TrackInfo:
         return MoqTrackInfo(
             priority=self.priority,
             max_age=self.max_age,
-            max_age_unlimited=self.max_age is None,
-            refresh=self.refresh,
+            refresh=self.refresh._ffi(),
             timescale=self.timescale,
             compression=self.compression,
         )
@@ -324,8 +306,8 @@ class TrackInfo:
     def _from_ffi(info: MoqTrackInfo) -> TrackInfo:
         return TrackInfo(
             priority=info.priority,
-            max_age=None if info.max_age_unlimited else (info.max_age or timedelta(0)),
-            refresh=info.refresh,
+            max_age=info.max_age,
+            refresh=TrackRefresh._from_ffi(info.refresh),
             timescale=info.timescale,
             compression=info.compression,
         )
@@ -339,15 +321,22 @@ def _track_info(info: TrackInfo | None) -> MoqTrackInfo | None:
 class Backoff:
     """Retry pacing for the automatic reconnect.
 
+    Until the peer has accepted a session's credential or drained a session with a GOAWAY
+    (or, on moq-lite 03/04, which never answer it, a session stayed up 1s), a failed dial or
+    a closed session, such as a refused credential, ends the connection with its error
+    rather than retrying.
+
     The delay starts at ``initial``, multiplies by ``multiplier`` after each failed
-    attempt, and caps at ``max``. After ``timeout`` of consecutive failures the
-    connection gives up; ``timedelta(0)`` retries forever. ``None`` keeps each
-    default: 1s, x2, 5s, and no give-up.
+    attempt, and caps at ``max``; ``max_unlimited=True`` lifts the cap instead. After
+    ``timeout`` of consecutive failures the connection gives up. ``None`` keeps each
+    default: 1s, x2, 5s, and no give-up. Zero means zero: ``timedelta(0)`` retries
+    at once as ``initial`` or ``max``, and gives up at the first failure as ``timeout``.
     """
 
     initial: timedelta | None = None
     multiplier: int | None = None
     max: timedelta | None = None
+    max_unlimited: bool = field(default=False, kw_only=True)
     timeout: timedelta | None = None
 
     def _ffi(self) -> MoqBackoff:
@@ -355,6 +344,7 @@ class Backoff:
             initial=self.initial,
             multiplier=self.multiplier,
             max=self.max,
+            max_unlimited=self.max_unlimited,
             timeout=self.timeout,
         )
 
@@ -399,9 +389,9 @@ class QuicConfig:
     ``max_streams`` caps the concurrent streams the peer may open toward this endpoint
     (0 is refused); MoQ opens one per group, so a subscriber to many tracks wants it
     raised. ``idle_timeout`` is how long an idle connection survives, and ``keep_alive``
-    the ping interval (zero uses the default). ``gso``, ``mtu_discovery``, and
-    ``congestion_control`` leave the choice to the backend when ``None``. ``qlog`` is a
-    directory, which must exist, for qlog traces when :func:`qlog_supported`.
+    the ping interval (zero uses the default). ``gso`` and ``mtu_discovery`` leave the
+    choice to the backend when ``None``, and a ``None`` ``congestion_control`` runs BBR v3. ``qlog`` is a
+    directory, which must exist, for qlog traces.
     ``keylog=True`` writes TLS session secrets to the file ``SSLKEYLOGFILE`` names, for
     decrypting a capture; without ``SSLKEYLOGFILE`` the client refuses to build.
     ``None`` keeps the library default throughout.
@@ -482,13 +472,14 @@ class ConnectionStats:
 class Grant:
     """What the peer lets this side do, in this side's own paths.
 
-    An empty pattern list grants nothing in that direction; ``**`` grants everything.
+    Each prefix covers its path and everything beneath it. An empty list grants
+    nothing in that direction; the empty prefix ``""`` grants everything.
     """
 
     publish: tuple[str, ...]
-    """The broadcast patterns this side may publish to the peer."""
+    """The broadcast prefixes this side may publish to the peer."""
     subscribe: tuple[str, ...]
-    """The broadcast patterns this side may subscribe to from the peer."""
+    """The broadcast prefixes this side may subscribe to from the peer."""
     expires: timedelta | None = None
     """How long until the grant lapses, measured when it was read, or ``None`` for never."""
 
@@ -525,30 +516,8 @@ class VideoDecodedFrame:
         """The picture converted to tightly packed CPU pixels in ``format``."""
         return self._inner.pixels(format)
 
-    def surface(self) -> VideoSurface | None:
-        """The decoder's platform surface, when the decoder output asked for one."""
-        return _surface(self._inner.surface())
-
-
-class VideoSurface:
-    """A decoded frame's platform surface; match it with a fallback arm, since new platforms add kinds."""
-
-
-@dataclass(frozen=True)
-class VideoSurfacePixelBuffer(VideoSurface):
-    """An Apple ``CVPixelBufferRef`` (IOSurface-backed NV12) address, valid while its frame lives."""
-
-    pointer: int
-
-
-@dataclass(frozen=True)
-class VideoSurfaceUnknown(VideoSurface):
-    """A surface kind this version of the package does not know yet."""
-
-
-def _surface(surface: MoqVideoSurface | None) -> VideoSurface | None:
-    if surface is None:
-        return None
-    if isinstance(surface, MoqVideoSurface.PIXEL_BUFFER):
-        return VideoSurfacePixelBuffer(surface.pointer)
-    return VideoSurfaceUnknown()
+    def surface(self) -> MoqVideoSurface | None:
+        """The decoder's platform surface, when the decoder output asked for one: a
+        ``VideoSurface.PIXEL_BUFFER`` on macOS and iOS, or ``VideoSurface.UNKNOWN`` for a kind
+        this version cannot name yet."""
+        return self._inner.surface()

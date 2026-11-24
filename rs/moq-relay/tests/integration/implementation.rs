@@ -36,7 +36,7 @@ async fn admit_next(admissions: &mut moq_relay::auth::Admissions) -> Option<Stri
 		.expect("admission timeout")
 		.expect("admission");
 	let implementation = admission.request.implementation.clone();
-	let all: moq_auth::Patterns = [moq_auth::Pattern::all()].into_iter().collect();
+	let all = moq_auth::Prefixes::all();
 	admission.grant(moq_auth::lease::Consumer::fixed(moq_auth::Grant::new(all.clone(), all)));
 	implementation
 }

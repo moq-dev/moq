@@ -8,16 +8,18 @@
 //! last until those groups drain: a relay cancels its upstream subscription once nobody
 //! subscribes, and the publisher then resets every group still on the wire.
 
+use crate::WithMax as _;
 use crate::support;
-use moq_net::track::Delay;
+use support::AppendNext;
+use support::AtStart;
 
 use std::time::Duration;
 
 use futures::channel::mpsc::TryRecvError;
 use futures::{SinkExt, StreamExt};
 
-use moq_net::track::Subscription;
-use moq_net::{Timestamp, Version};
+use moq_net::Version;
+use moq_net::track::{Range, Subscription};
 use support::harness::{MockConnectOptions, connect_mock};
 
 /// A millisecond track with no publisher max age: the frames written here carry timestamps,
@@ -42,10 +44,11 @@ const VERSIONS: &[&str] = &[
 ];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// How the publisher's groups reach the relay.
@@ -91,9 +94,9 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 
 	let (mut heads, mut opened) = futures::channel::mpsc::unbounded();
 	let reader = kio::clock::sim::spawn(async move {
-		let subscription = Subscription::default()
-			.with_delay(Delay::default().with_max(MAX_DELAY))
-			.with_range(0..);
+		// Every group still within the max age, as a subscription-wide max delay once asked:
+		// a time start would be history, which lite-03 never ends, declaring no end.
+		let subscription = Subscription::default().with_ranges([Range::ALL]).with_max(MAX_DELAY);
 		let mut sub = remote
 			.track("tail")
 			.unwrap()
@@ -113,18 +116,18 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 				Err(err) => break Err(err),
 			};
 			assert_eq!(&head.payload[..], b"head");
-			heads.send(group.sequence).await.unwrap();
+			heads.send(group.start).await.unwrap();
 			tails.push(kio::clock::sim::spawn(async move {
 				let tail = group.read_frame().await?.expect("tail frame");
 				assert_eq!(&tail.payload[..], b"tail");
 				assert!(group.read_frame().await?.is_none(), "extra frame");
-				Ok::<_, moq_net::Error>(group.sequence)
+				Ok::<_, moq_net::Error>(group.start)
 			}));
 		};
 		let mut seen = Vec::new();
 		for tail in tails {
 			match tail.await.expect("tail reader panicked") {
-				Ok(sequence) => seen.push(sequence),
+				Ok(key) => seen.push(key),
 				Err(err) => return (seen, Err(err)),
 			}
 		}
@@ -140,17 +143,17 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 	// tells the relay where its feed starts; otherwise the outcome rests on whether the
 	// first group is written before SUBSCRIBE_OK.
 	kio::clock::sleep(Duration::from_millis(1)).await;
-	track.finish_at(moq_net::track::Position::group(GROUPS), None).unwrap();
+	track.finish_at(moq_net::track::Position::group(GROUPS)).unwrap();
 	match arrival {
 		Arrival::HeldTails => {
 			let mut groups = Vec::new();
-			for sequence in 0..GROUPS {
-				let mut group = track.append_group().unwrap();
-				group.write_frame(Timestamp::ZERO, &b"head"[..]).unwrap();
+			for key in 0..GROUPS {
+				let mut group = track.append_next().unwrap();
+				group.write_frame(group.at_start(), &b"head"[..]).unwrap();
 				groups.push(group);
 				// IETF requests the live edge, so observe each header before advancing it.
 				match kio::clock::timeout(TIMEOUT, opened.next()).await.expect("head timeout") {
-					Some(head) => assert_eq!(head, sequence, "{name}"),
+					Some(head) => assert_eq!(head, key, "{name}"),
 					None => panic!("{name}: the reader stopped: {:?}", reader.await),
 				}
 			}
@@ -159,16 +162,16 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 			// the subscriber, so the relay's downstream subscription has seen the end.
 			kio::clock::sleep(Duration::from_millis(100)).await;
 			for mut group in groups {
-				group.write_frame(Timestamp::ZERO, &b"tail"[..]).unwrap();
+				group.write_frame(group.at_start(), &b"tail"[..]).unwrap();
 				group.finish().unwrap();
 			}
 		}
 		Arrival::NewestFirst => {
 			upstream.server_transport.hold_unis();
 			for _ in 0..GROUPS {
-				let mut group = track.append_group().unwrap();
-				group.write_frame(Timestamp::ZERO, &b"head"[..]).unwrap();
-				group.write_frame(Timestamp::ZERO, &b"tail"[..]).unwrap();
+				let mut group = track.append_next().unwrap();
+				group.write_frame(group.at_start(), &b"head"[..]).unwrap();
+				group.write_frame(group.at_start(), &b"tail"[..]).unwrap();
 				group.finish().unwrap();
 				// IETF serves from the live edge, so let each group open its stream before
 				// the next one supersedes it.

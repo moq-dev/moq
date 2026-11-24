@@ -39,7 +39,7 @@ effect.close();    // permanent
 The rules that differ from other signal libraries:
 
 - **Nothing is tracked implicitly.** `effect.get(signal)` subscribes; `signal.peek()` doesn't.
-- **Writes coalesce per microtask** and only notify on a real change (deep for plain objects, identity for class instances except clock values, which compare by value).
+- **Writes coalesce per microtask** and only notify on a real change (deep for plain objects, identity for class instances except clock values, which compare by value), whether by `set` or `update`. `mutate` changes a value in place and always notifies; `set(value, true)` notifies for an equal value.
 - **Effects own their resources.** `effect.timer`, `interval`, `animate`, `event`, `spawn`, and `run` (a nested effect) all clean up on rerun or close, so never call `setTimeout` or `addEventListener` inside one directly. Timers take a `Duration` and run on the [`@moq/clock`](./clock) clock, so a `Manual` clock drives them in tests.
 - **Teardown runs last-in, first-out**, like `DisposableStack`.
 - **Race with `race`, not `Promise.race`.** `Promise.race` leaves a listener on every loser, so racing a long-lived promise once per frame grows the heap. `race([...])` and `effect.race(promise)` drop their listeners when they settle.
@@ -49,8 +49,7 @@ Components follow one shape: `in` (wired inputs), `out` (read-only derived
 state), and public writable knobs. An input accepts a raw value, a signal, or
 another component's output interchangeably.
 
-Adapters: `@moq/signals/react` (`useValue`, `useSignal`), `@moq/signals/solid`
-(`createAccessor`, `createPair`), and `@moq/signals/dom` for building reactive
+Adapters: `@moq/signals/react` (`useValue`, `useSignal`) and `@moq/signals/dom` for building reactive
 DOM without a framework, which is what the UI overlays use.
 
 ```tsx

@@ -8,7 +8,7 @@
 //! Thin VA-API H.264 and H.265 encoder built on the vendored libva binding.
 //!
 //! For H.264 it reuses the backend-agnostic bitstream layer
-//! ([`crate::codec::h264`]) from discord/cros-codecs (BSD-3-Clause) for
+//! (`codec::h264`) from discord/cros-codecs (BSD-3-Clause) for
 //! SPS/PPS/slice synthesis, and drives libva directly for surface upload +
 //! slice submission, rather than vendoring cros-codecs's generic multi-backend
 //! encoder framework. The per-frame VA buffer population is ported from
@@ -34,6 +34,7 @@
 //! The low-power entrypoint is untested, since those devices expose the full
 //! one.
 
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -46,14 +47,15 @@ use crate::dmabuf::DmaBuf;
 use crate::vpp::Processor;
 use crate::{
 	BufferType, Color, Config as VaConfig, Context, Display, EncCodedBuffer, EncMiscParameter,
-	EncMiscParameterFrameRate, EncMiscParameterRateControl, EncPackedHeaderParameter, EncPackedHeaderType,
-	EncPictureParameter, EncPictureParameterBufferH264, EncSequenceParameter, EncSequenceParameterBufferH264,
-	EncSliceParameter, EncSliceParameterBufferH264, H264EncFrameCropOffsets, H264EncPicFields, H264EncSeqFields,
-	H264VuiFields, Image, MappedCodedBuffer, Picture, PictureH264, RcFlags, Surface, SurfaceMemoryDescriptor,
-	UsageHint, VAConfigAttrib, VAConfigAttribType, VAEntrypoint, VAProfile, VA_ATTRIB_NOT_SUPPORTED,
-	VA_ENC_PACKED_HEADER_PICTURE, VA_ENC_PACKED_HEADER_SEQUENCE, VA_ENC_PACKED_HEADER_SLICE, VA_FOURCC_ARGB,
-	VA_FOURCC_BGRA, VA_FOURCC_BGRX, VA_FOURCC_NV12, VA_FOURCC_RGBA, VA_FOURCC_RGBX, VA_FOURCC_XRGB, VA_INVALID_ID,
-	VA_PICTURE_H264_INVALID, VA_PICTURE_H264_SHORT_TERM_REFERENCE, VA_RC_CBR, VA_RT_FORMAT_YUV420,
+	EncMiscParameterFrameRate, EncMiscParameterHRD, EncMiscParameterRateControl, EncPackedHeaderParameter,
+	EncPackedHeaderType, EncPictureParameter, EncPictureParameterBufferH264, EncSequenceParameter,
+	EncSequenceParameterBufferH264, EncSliceParameter, EncSliceParameterBufferH264, H264EncFrameCropOffsets,
+	H264EncPicFields, H264EncSeqFields, H264VuiFields, ImageMut, MappedCodedBuffer, Picture, PictureH264, RcFlags,
+	Surface, SurfaceMemoryDescriptor, UsageHint, VAConfigAttrib, VAConfigAttribType, VAEntrypoint, VAImageFormat,
+	VAProfile, VA_ATTRIB_NOT_SUPPORTED, VA_ENC_PACKED_HEADER_PICTURE, VA_ENC_PACKED_HEADER_SEQUENCE,
+	VA_ENC_PACKED_HEADER_SLICE, VA_FOURCC_ARGB, VA_FOURCC_BGRA, VA_FOURCC_BGRX, VA_FOURCC_NV12, VA_FOURCC_RGBA,
+	VA_FOURCC_RGBX, VA_FOURCC_XRGB, VA_INVALID_ID, VA_PICTURE_H264_INVALID, VA_PICTURE_H264_SHORT_TERM_REFERENCE,
+	VA_RC_CBR, VA_RC_VBR, VA_RT_FORMAT_YUV420,
 };
 
 mod h265;
@@ -61,7 +63,7 @@ mod h265;
 /// Whether a frame is used as a reference, and for how long.
 /// (Vendored from discord/cros-codecs, BSD-3-Clause; used by the slice synthesizer.)
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub enum IsReference {
+pub(crate) enum IsReference {
 	No,
 	ShortTerm,
 	LongTerm,
@@ -69,13 +71,25 @@ pub enum IsReference {
 
 /// Quantizer bounds for the rate controller.
 ///
-/// The floor keeps an IDR on easy content from taking a large share of the
-/// rate. The ceiling is the codecs' own: iHD and radeonsi both honor it, so a
-/// lower one sets a smallest picture, and a stream asked for less overshoots
-/// its rate several times over. A lower ceiling does steady iHD's H.264 IDRs,
-/// but under congestion missing the rate costs more than that.
-const MIN_QP: u8 = 18;
+/// The floor is the quality: the rate controller holds the stream to
+/// [`Config::bitrate`], and a calm scene the floor already codes cleanly spends
+/// less instead of buying a finer quantizer than anyone can see. 24 is the
+/// coarsest that kept a 720p30 talking head at VMAF 95, the usual mark for
+/// transparent, on both iHD (Arrow Lake: 95.8 at 2.9 Mbit/s under a 4 Mbit/s
+/// cap, H.265 95.7 at 1.6 under 2.8) and radeonsi (RX 9070: 95.4 at 1.7, H.265
+/// 95.4 at 1.5). It also keeps an IDR on easy content from taking a large share
+/// of the rate. The ceiling is the codecs' own: iHD and radeonsi both honor it,
+/// so a lower one sets a smallest picture, and a stream asked for less
+/// overshoots its rate several times over. A lower ceiling does steady iHD's
+/// H.264 IDRs, but under congestion missing the rate costs more than that.
+const MIN_QP: u8 = 24;
 const MAX_QP: u8 = 51;
+/// The HRD buffer, in frames of the bitrate, sent with every picture. The
+/// driver's own default is a second of the rate, which let a second of high
+/// motion run half again over the bitrate on radeonsi. It is also what a still
+/// scene banks: the first busy frames after one spend all of it, so that second
+/// runs this many frames over the bitrate.
+pub const HRD_FRAMES: u32 = 3;
 /// Window over which libva's rate controller targets the configured bitrate.
 ///
 /// This matches cros-codecs. The old `framerate * 1000` value confused frames
@@ -92,10 +106,11 @@ pub struct Config {
 	pub width: u32,
 	pub height: u32,
 	pub framerate: u32,
-	/// Target bitrate in bits per second (CBR).
+	/// The bitrate in bits per second the stream is held to. A calm scene
+	/// spends less; see [`RateControl`].
 	pub bitrate: u32,
 	/// Keyframe interval in frames.
-	pub gop: u32,
+	pub gop: NonZeroU32,
 	/// DRM render node to open (e.g. `/dev/dri/renderD128`).
 	///
 	/// `None`, the default, opens the first node whose driver can encode
@@ -111,7 +126,7 @@ pub struct Config {
 
 impl Config {
 	/// Returns an H.264 configuration; set [`codec`](Self::codec) for another format.
-	pub fn new(width: u32, height: u32, framerate: u32, bitrate: u32, gop: u32) -> Self {
+	pub fn new(width: u32, height: u32, framerate: u32, bitrate: u32, gop: NonZeroU32) -> Self {
 		Self {
 			codec: Codec::H264,
 			width,
@@ -121,6 +136,46 @@ impl Config {
 			gop,
 			device: None,
 			color: Color::infer(height),
+		}
+	}
+}
+
+/// The rate control mode that holds a stream to [`Config::bitrate`], picked at
+/// open for the driver.
+///
+/// Either way the bitrate is the ceiling the driver's rate controller aims to
+/// hold the stream under, through the [`HRD_FRAMES`] buffer, and the quantizer
+/// floor is its quality, so a calm scene falls below the bitrate. It is a
+/// target, not a guarantee: a busy second can still overshoot it by a few
+/// percent (iHD's H.264 peaked at 4.36 Mbit/s in one second under 4 Mbit/s). Neither driver's
+/// `VA_RC_QVBR` gets there: on iHD it held a high-motion clip to 59% of the
+/// bitrate whatever the quality factor, and on radeonsi it scored 93.3 VMAF at
+/// the full bitrate where CBR and the floor scored 95.4 at 43% of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RateControl {
+	/// `VA_RC_VBR` with the bitrate as both target and peak, for iHD, whose CBR
+	/// ignores the floor and spends the bitrate on a still picture.
+	Variable,
+	/// `VA_RC_CBR` without filler, for every other driver. radeonsi honors the
+	/// floor and the HRD here, where its VBR let a high-motion second run half
+	/// again over the bitrate.
+	Constant,
+}
+
+impl RateControl {
+	/// The mode for the driver named `vendor` (`vaQueryVendorString`), whose
+	/// `VAConfigAttribRateControl` reads `offered`.
+	fn pick(vendor: &str, offered: u32) -> Self {
+		match vendor.starts_with("Intel iHD driver") && offered & VA_RC_VBR != 0 {
+			true => Self::Variable,
+			false => Self::Constant,
+		}
+	}
+
+	fn va(self) -> u32 {
+		match self {
+			Self::Variable => VA_RC_VBR,
+			Self::Constant => VA_RC_CBR,
 		}
 	}
 }
@@ -192,6 +247,8 @@ pub struct Encoder {
 	// Source surface (reused; NV12 re-uploaded per frame) and a 2-deep
 	// reconstructed surface ring (current + previous reference for IPPP).
 	input: Option<Surface<()>>,
+	/// The driver's NV12 image format, which [`Encoder::encode_nv12`] uploads through; `None` when it has none.
+	nv12: Option<VAImageFormat>,
 	recon: Vec<Surface<()>>,
 	/// Reference from the previous encoded frame: (recon index, pictures after the IDR).
 	reference: Option<(usize, u32)>,
@@ -206,6 +263,7 @@ pub struct Encoder {
 	/// Set by a bitrate change, and cleared by the next frame, which asks the
 	/// driver to restart its rate controller at the new target.
 	reset_rate_control: bool,
+	rate_control: RateControl,
 
 	// Drop order: encode resources before the display they belong to.
 	coded: EncCodedBuffer,
@@ -220,12 +278,16 @@ impl Encoder {
 	///
 	/// # Errors
 	///
-	/// Fails when libva cannot be loaded, when the named node cannot be opened
+	/// Fails when the frame size is zero or odd, when libva cannot be loaded, when the named node cannot be opened
 	/// or does not encode the codec (a named node is never swapped for
 	/// another), when no node encodes it, and when the driver refuses the
 	/// session or, for H.265, requires a coding tool this encoder does not write
 	/// or takes no packed sequence header.
 	pub fn new(mut config: Config) -> anyhow::Result<Self> {
+		let (width, height) = (config.width, config.height);
+		if width == 0 || height == 0 || !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+			anyhow::bail!("a {width}x{height} frame, which 4:2:0 chroma needs nonzero and even");
+		}
 		let codec = config.codec;
 		let (device, display) = match config.device.take() {
 			Some(device) => {
@@ -238,6 +300,15 @@ impl Encoder {
 		};
 
 		let entrypoint = encode_entrypoint(&display, codec)?;
+		let rate_control = RateControl::pick(
+			&display.query_vendor_string().unwrap_or_default(),
+			config_attribute(
+				&display,
+				codec,
+				entrypoint,
+				VAConfigAttribType::VAConfigAttribRateControl,
+			),
+		);
 		let mut attrs = vec![
 			VAConfigAttrib {
 				type_: VAConfigAttribType::VAConfigAttribRTFormat,
@@ -245,7 +316,7 @@ impl Encoder {
 			},
 			VAConfigAttrib {
 				type_: VAConfigAttribType::VAConfigAttribRateControl,
-				value: VA_RC_CBR,
+				value: rate_control.va(),
 			},
 		];
 		// The parameter sets go out as packed headers, so the VUI (color, frame
@@ -306,15 +377,21 @@ impl Encoder {
 			.map_err(|e| anyhow::anyhow!("create coded buffer: {e:?}"))?;
 
 		let input = make_surface(&display, (config.width, config.height))?;
+		let nv12 = display
+			.query_image_formats()
+			.map_err(|e| anyhow::anyhow!("query image formats: {e:?}"))?
+			.into_iter()
+			.find(|format| format.fourcc == VA_FOURCC_NV12);
 		let recon = vec![make_surface(&display, size)?, make_surface(&display, size)?];
 
 		tracing::info!(
-			"opened VA-API {codec:?} encoder on {:?}: {}x{} @ {}fps, {} bps, low power: {}",
+			"opened VA-API {codec:?} encoder on {:?}: {}x{} @ {}fps, {} bps, {:?} rate control, low power: {}",
 			device,
 			config.width,
 			config.height,
 			config.framerate,
 			config.bitrate,
+			rate_control,
 			entrypoint == VAEntrypoint::VAEntrypointEncSliceLP,
 		);
 		config.device = Some(device);
@@ -322,12 +399,14 @@ impl Encoder {
 			config,
 			syntax,
 			input: Some(input),
+			nv12,
 			recon,
 			reference: None,
 			counter: 0,
 			idrs: 0,
 			processor: None,
 			reset_rate_control: false,
+			rate_control,
 			coded,
 			coded_size,
 			context,
@@ -341,16 +420,14 @@ impl Encoder {
 	///
 	/// # Errors
 	///
-	/// Fails when `nv12` is shorter than a frame at the encoder's size, and when
-	/// the upload or the encode fails.
+	/// Fails when `nv12` is shorter than a frame at the encoder's size, when the
+	/// driver has no NV12 image format, and when the upload or the encode fails.
 	pub fn encode_nv12(&mut self, nv12: &[u8], keyframe: bool) -> anyhow::Result<Vec<u8>> {
-		let (width, height) = (self.config.width as usize, self.config.height as usize);
-		let expected = width * height + width * height.div_ceil(2);
-		if nv12.len() < expected {
-			anyhow::bail!("NV12 frame is {} bytes, {width}x{height} needs {expected}", nv12.len());
-		}
-		let input = self.input.take().expect("input surface present");
-		let result = upload_nv12(&self.display, &input, self.config.width, self.config.height, nv12)
+		let format = self
+			.nv12
+			.ok_or_else(|| anyhow::anyhow!("driver has no NV12 image format"))?;
+		let mut input = self.input.take().expect("input surface present");
+		let result = upload_nv12(format, &mut input, self.config.width, self.config.height, nv12)
 			.and_then(|()| self.encode_surface(&input, keyframe));
 		self.input = Some(input);
 		result
@@ -416,7 +493,7 @@ impl Encoder {
 		result
 	}
 
-	/// Changes the target bitrate, in bits per second, from the next frame on.
+	/// Changes [`Config::bitrate`], in bits per second, from the next frame on.
 	///
 	/// The rate control parameters go out with every frame, so this neither
 	/// forces an IDR nor rebuilds the session; the next frame also asks the
@@ -451,6 +528,11 @@ impl Encoder {
 		Ok(())
 	}
 
+	/// Returns how the bitrate is spent, picked at open from what the driver offers.
+	pub fn rate_control(&self) -> RateControl {
+		self.rate_control
+	}
+
 	/// Returns the configuration in effect, including a bitrate changed since opening and the render node picked when none was named.
 	pub fn config(&self) -> &Config {
 		&self.config
@@ -470,7 +552,7 @@ impl Encoder {
 		source: &Surface<D>,
 		keyframe: bool,
 	) -> anyhow::Result<Vec<u8>> {
-		let is_idr = keyframe || self.counter % self.config.gop == 0;
+		let is_idr = keyframe || self.counter % self.config.gop.get() == 0;
 		if is_idr {
 			// An IDR restarts the picture count and drops the reference.
 			self.counter = 0;
@@ -511,20 +593,26 @@ impl Encoder {
 		let bits_per_second = self.config.bitrate;
 		let rc = EncMiscParameterRateControl::new(
 			bits_per_second,
-			100,                    // target_percentage (CBR)
+			100,                    // target_percentage: VBR's target is its peak
 			RATE_CONTROL_WINDOW_MS, // window_size (ms)
 			u32::from((MIN_QP + MAX_QP) / 2),
 			MIN_QP as u32,
 			0, // basic_unit_size
 			// Do not let rate control drop a frame to meet the bitrate. A live
 			// encoder has already admitted this frame into the media timeline.
-			RcFlags::new(u32::from(self.reset_rate_control), 1, 0, 0, 0, 0, 0, 0, 0),
+			// Nor pad a cheap one up to it: filler bits carry no picture.
+			RcFlags::new(u32::from(self.reset_rate_control), 1, 1, 0, 0, 0, 0, 0, 0),
 			0, // icq_quality_factor
 			MAX_QP as u32,
 			0, // quality_factor
 			0, // target_frame_size
 		);
 		picture.add_buffer(self.create(BufferType::EncMiscParameter(EncMiscParameter::RateControl(rc)))?);
+		// After the rate control parameters, which radeonsi reads as resetting the buffer.
+		let hrd = hrd_size(bits_per_second, self.config.framerate);
+		picture.add_buffer(self.create(BufferType::EncMiscParameter(EncMiscParameter::HRD(
+			EncMiscParameterHRD::new(hrd, hrd),
+		)))?);
 
 		let framerate = EncMiscParameterFrameRate::new(self.config.framerate, 0);
 		picture.add_buffer(self.create(BufferType::EncMiscParameter(EncMiscParameter::FrameRate(framerate)))?);
@@ -603,10 +691,22 @@ fn pick_entrypoint(offered: &[VAEntrypoint::Type]) -> Option<VAEntrypoint::Type>
 ///
 /// Zero when it takes none, or when asking fails.
 fn packed_headers(display: &Display, codec: Codec, entrypoint: VAEntrypoint::Type) -> u32 {
-	let mut attrs = [VAConfigAttrib {
-		type_: VAConfigAttribType::VAConfigAttribEncPackedHeaders,
-		value: 0,
-	}];
+	config_attribute(
+		display,
+		codec,
+		entrypoint,
+		VAConfigAttribType::VAConfigAttribEncPackedHeaders,
+	)
+}
+
+/// Returns the bits of attribute `type_` the driver offers for encoding `codec`, or none when it does not say.
+fn config_attribute(
+	display: &Display,
+	codec: Codec,
+	entrypoint: VAEntrypoint::Type,
+	type_: VAConfigAttribType::Type,
+) -> u32 {
+	let mut attrs = [VAConfigAttrib { type_, value: 0 }];
 	if display
 		.get_config_attributes(profile(codec), entrypoint, &mut attrs)
 		.is_err()
@@ -646,6 +746,11 @@ fn level(width: u32, height: u32, framerate: u32) -> Level {
 		.unwrap_or(Level::L6_2)
 }
 
+/// Returns the HRD buffer in bits for `bitrate`: [`HRD_FRAMES`] frames of it.
+fn hrd_size(bitrate: u32, framerate: u32) -> u32 {
+	(u64::from(bitrate) * u64::from(HRD_FRAMES) / u64::from(framerate.max(1))).min(u64::from(u32::MAX)) as u32
+}
+
 /// Returns the coded buffer size in bytes for `bitrate`: two seconds of it, and at least 1.5 MB.
 fn coded_size(bitrate: u32) -> usize {
 	(bitrate as usize / 4).max(1_500_000)
@@ -674,48 +779,60 @@ fn make_surface(display: &Arc<Display>, (width, height): (u32, u32)) -> anyhow::
 	surfaces.pop().ok_or_else(|| anyhow::anyhow!("no surface created"))
 }
 
-/// Upload tightly-packed NV12 into a surface. Ported from cros-codecs
-/// `upload_nv12_img` (honors the image's per-plane offsets + pitches).
+/// Uploads tightly-packed NV12 into `surface` through an image in `format`,
+/// honoring the image's per-plane offsets and pitches, without reading the
+/// surface back first.
 fn upload_nv12(
-	display: &Arc<Display>,
-	surface: &Surface<()>,
+	format: VAImageFormat,
+	surface: &mut Surface<()>,
 	width: u32,
 	height: u32,
 	data: &[u8],
 ) -> anyhow::Result<()> {
-	let formats = display
-		.query_image_formats()
-		.map_err(|e| anyhow::anyhow!("query image formats: {e:?}"))?;
-	let format = formats
-		.into_iter()
-		.find(|f| f.fourcc == VA_FOURCC_NV12)
-		.ok_or_else(|| anyhow::anyhow!("driver has no NV12 image format"))?;
+	let (w, h) = (width as usize, height as usize);
+	let luma = w * h;
+	let expected = luma + w * (h / 2);
+	if data.len() < expected {
+		anyhow::bail!("NV12 frame is {} bytes, {width}x{height} needs {expected}", data.len());
+	}
 
-	let mut image = Image::create_from(surface, format, surface.size(), surface.size())
-		.map_err(|e| anyhow::anyhow!("create image: {e:?}"))?;
+	let mut image =
+		ImageMut::create_uninitialized(surface, format).map_err(|e| anyhow::anyhow!("create image: {e:?}"))?;
 	let va_image = *image.image();
 	let dest: &mut [u8] = image.as_mut();
-	let (w, h) = (width as usize, height as usize);
-
-	// Luma plane.
-	let mut src = data;
-	let mut dst = &mut dest[va_image.offsets[0] as usize..];
-	for _ in 0..h {
-		dst[..w].copy_from_slice(&src[..w]);
-		dst = &mut dst[va_image.pitches[0] as usize..];
-		src = &src[w..];
+	let planes = [(&data[..luma], h), (&data[luma..expected], h / 2)];
+	for (plane, (src, rows)) in planes.into_iter().enumerate() {
+		let (offset, pitch) = (va_image.offsets[plane] as usize, va_image.pitches[plane] as usize);
+		fill_plane(dest, offset, pitch, src, w, rows)?;
 	}
-	// Interleaved chroma plane (h/2 rows of w bytes).
-	let mut src = &data[w * h..];
-	let mut dst = &mut dest[va_image.offsets[1] as usize..];
-	for _ in 0..h / 2 {
-		dst[..w].copy_from_slice(&src[..w]);
-		dst = &mut dst[va_image.pitches[1] as usize..];
-		src = &src[w..];
-	}
+	image.put().map_err(|e| anyhow::anyhow!("put image: {e:?}"))
+}
 
-	drop(image);
-	surface.sync().map_err(|e| anyhow::anyhow!("surface sync: {e:?}"))?;
+/// Copies `rows` rows of `width` bytes from tightly packed `src` into the image
+/// plane at `offset` with `pitch` bytes per row, failing when the plane does
+/// not hold them.
+fn fill_plane(
+	dst: &mut [u8],
+	offset: usize,
+	pitch: usize,
+	src: &[u8],
+	width: usize,
+	rows: usize,
+) -> anyhow::Result<()> {
+	if rows == 0 || width == 0 {
+		return Ok(());
+	}
+	// The last row needs only `width` bytes, not a whole pitch.
+	let end = (rows - 1)
+		.checked_mul(pitch)
+		.and_then(|start| start.checked_add(offset)?.checked_add(width));
+	if pitch < width || end.is_none_or(|end| end > dst.len()) {
+		anyhow::bail!("VA image plane (offset {offset}, pitch {pitch}) does not hold {rows} rows of {width} bytes");
+	}
+	for (row, src) in src.chunks_exact(width).take(rows).enumerate() {
+		let start = offset + row * pitch;
+		dst[start..start + width].copy_from_slice(src);
+	}
 	Ok(())
 }
 
@@ -1032,7 +1149,7 @@ mod tests {
 	fn config(codec: Codec) -> Config {
 		Config {
 			codec,
-			..Config::new(WIDTH, HEIGHT, 30, 2_000_000, 30)
+			..Config::new(WIDTH, HEIGHT, 30, 2_000_000, NonZeroU32::new(30).unwrap())
 		}
 	}
 
@@ -1182,15 +1299,9 @@ mod tests {
 		types
 	}
 
-	/// Returns a driver surface of `fourcc` on `display`, filled through an image.
-	fn surface_with(
-		display: &Arc<Display>,
-		fourcc: u32,
-		rt_format: u32,
-		(width, height): (u32, u32),
-		fill: impl FnOnce(&mut [u8], &crate::bindings::VAImage),
-	) -> Surface<()> {
-		let surface = display
+	/// Returns a driver surface of `fourcc` on `display` whose pixels are unspecified.
+	fn blank_surface(display: &Arc<Display>, fourcc: u32, rt_format: u32, (width, height): (u32, u32)) -> Surface<()> {
+		display
 			.create_surfaces(
 				rt_format,
 				Some(fourcc),
@@ -1201,26 +1312,42 @@ mod tests {
 			)
 			.expect("allocate a surface")
 			.pop()
-			.expect("one surface");
-		let format = display
+			.expect("one surface")
+	}
+
+	/// Returns the driver's image format for `fourcc`.
+	fn image_format(display: &Display, fourcc: u32) -> VAImageFormat {
+		display
 			.query_image_formats()
 			.expect("query image formats")
 			.into_iter()
 			.find(|f| f.fourcc == fourcc)
-			.expect("the driver has an image format for the surface format");
+			.expect("the driver has an image format for the surface format")
+	}
+
+	/// Returns a driver surface of `fourcc` on `display`, every pixel written by `fill` through an image.
+	fn surface_with(
+		display: &Arc<Display>,
+		fourcc: u32,
+		rt_format: u32,
+		size: (u32, u32),
+		fill: impl FnOnce(&mut [u8], &crate::bindings::VAImage),
+	) -> Surface<()> {
+		let mut surface = blank_surface(display, fourcc, rt_format, size);
 		let mut image =
-			Image::create_from(&surface, format, (width, height), (width, height)).expect("create an image");
+			ImageMut::create_uninitialized(&mut surface, image_format(display, fourcc)).expect("create an image");
 		let va_image = *image.image();
 		fill(image.as_mut(), &va_image);
-		drop(image);
+		image.put().expect("put the image");
 		surface.sync().expect("sync the filled surface");
 		surface
 	}
 
 	/// Returns an NV12 surface holding `nv12_frame`, exported as a DMA-BUF.
 	fn nv12_dmabuf(display: &Arc<Display>, (width, height): (u32, u32), step: u32) -> DmaBuf {
-		let surface = surface_with(display, VA_FOURCC_NV12, VA_RT_FORMAT_YUV420, (width, height), |_, _| {});
-		upload_nv12(display, &surface, width, height, &nv12_frame(width, height, step)).expect("upload");
+		let mut surface = blank_surface(display, VA_FOURCC_NV12, VA_RT_FORMAT_YUV420, (width, height));
+		let format = image_format(display, VA_FOURCC_NV12);
+		upload_nv12(format, &mut surface, width, height, &nv12_frame(width, height, step)).expect("upload");
 		DmaBuf::from_prime(surface.export_prime().expect("export the surface")).expect("one object")
 	}
 
@@ -1307,12 +1434,74 @@ mod tests {
 		}
 	}
 
+	/// A plane fills when its last row holds just the frame's width, not a
+	/// whole pitch, and fails rather than panics when it holds less.
+	#[test]
+	fn a_plane_fills_up_to_its_last_byte_and_no_further() {
+		let src = [1, 2, 3, 4, 5, 6];
+		// Three rows of two bytes at a pitch of four, starting at offset one:
+		// the last row ends at byte 1 + 2 * 4 + 2 = 11.
+		let mut tight = [0; 11];
+		fill_plane(&mut tight, 1, 4, &src, 2, 3).expect("the last row fits");
+		assert_eq!(tight, [0, 1, 2, 0, 0, 3, 4, 0, 0, 5, 6]);
+
+		assert!(fill_plane(&mut [0; 10], 1, 4, &src, 2, 3).is_err(), "a byte short");
+		assert!(
+			fill_plane(&mut [0; 16], 0, 1, &src, 2, 3).is_err(),
+			"a pitch narrower than a row"
+		);
+		assert!(
+			fill_plane(&mut [0; 4], 0, usize::MAX, &src, 2, 3).is_err(),
+			"a pitch that overflows"
+		);
+		fill_plane(&mut [], 0, 4, &[], 2, 0).expect("no rows need no room");
+	}
+
+	/// A size 4:2:0 chroma cannot halve is refused before any device opens.
+	#[test]
+	fn an_odd_or_empty_size_is_refused() {
+		for (width, height) in [(641, 480), (640, 479), (0, 480), (640, 0)] {
+			let err = Encoder::new(Config::new(width, height, 30, 1_000_000, NonZeroU32::MIN))
+				.err()
+				.expect("refused");
+			assert!(err.to_string().contains("even"), "{width}x{height}: {err:#}");
+		}
+	}
+
+	/// The write-only upload puts exactly the frame's pixels into the surface,
+	/// as a `vaGetImage` read-back of it sees them.
+	#[test]
+	fn an_upload_reads_back_as_the_same_pixels() {
+		let Some(display) = Display::open() else {
+			eprintln!("skipping: no VA-API display");
+			return;
+		};
+		for (width, height) in [(WIDTH, HEIGHT), (852, 478)] {
+			let frame = nv12_frame(width, height, 3);
+			let mut surface = blank_surface(&display, VA_FOURCC_NV12, VA_RT_FORMAT_YUV420, (width, height));
+			let format = image_format(&display, VA_FOURCC_NV12);
+			upload_nv12(format, &mut surface, width, height, &frame).expect("upload");
+
+			let image =
+				crate::Image::create_from(&surface, format, (width, height), (width, height)).expect("read back");
+			let (va_image, data) = (*image.image(), image.as_ref());
+			let (w, h) = (width as usize, height as usize);
+			for (plane, rows, src) in [(0, h, &frame[..w * h]), (1, h / 2, &frame[w * h..])] {
+				let (offset, pitch) = (va_image.offsets[plane] as usize, va_image.pitches[plane] as usize);
+				for (row, src) in src.chunks_exact(w).take(rows).enumerate() {
+					let at = offset + row * pitch;
+					assert_eq!(&data[at..at + w], src, "{width}x{height} plane {plane} row {row}");
+				}
+			}
+		}
+	}
+
 	/// An IDR opens every group, and only there, carrying the parameter sets.
 	#[test]
 	fn keyframes_follow_the_group_length() {
 		for codec in CODECS {
 			let Some(mut encoder) = encoder(Config {
-				gop: 10,
+				gop: NonZeroU32::new(10).unwrap(),
 				..config(codec)
 			}) else {
 				continue;
@@ -1398,7 +1587,7 @@ mod tests {
 		for (codec, (width, height)) in [(Codec::H264, (1920, 1080)), (Codec::H265, (1920, 1076))] {
 			let Some(mut encoder) = encoder(Config {
 				codec,
-				..Config::new(width, height, 30, 4_000_000, 30)
+				..Config::new(width, height, 30, 4_000_000, NonZeroU32::new(30).unwrap())
 			}) else {
 				continue;
 			};
@@ -1668,7 +1857,7 @@ mod tests {
 	fn bitrate_change_takes_effect_without_a_keyframe(codec: Codec) {
 		let Some(mut encoder) = encoder(Config {
 			codec,
-			..Config::new(WIDTH, HEIGHT, 30, 2_000_000, 1_000)
+			..Config::new(WIDTH, HEIGHT, 30, 2_000_000, NonZeroU32::new(1_000).unwrap())
 		}) else {
 			return;
 		};

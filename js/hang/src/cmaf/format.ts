@@ -1,8 +1,8 @@
 import { Duration } from "@moq/clock";
 import type { Time } from "@moq/net";
-import type { Format as ContainerFormat } from "../container/format";
-import type { Frame } from "../container/types";
-import { decodeDataSegment, type InitSegment } from "./decode";
+import type { Format as ContainerFormat } from "../container/format.ts";
+import type { Frame } from "../container/types.ts";
+import { decodeDataSegment, type InitSegment } from "./decode.ts";
 
 /** CMAF container format: decodes each MoQ frame as a moof+mdat fragment using the parsed init segment. */
 export class Format implements ContainerFormat {
@@ -13,8 +13,8 @@ export class Format implements ContainerFormat {
 		this.#init = init;
 	}
 
-	/** Decode one CMAF fragment, presenting its earliest sample at the moq-net `timestamp`, or at `tfdt` if untimed. */
-	decode(payload: Uint8Array, timestamp: Time.Timestamp | undefined): Frame[] {
+	/** Decode one CMAF fragment, presenting its earliest sample at the moq-net `timestamp`, or at `tfdt` if it is unscaled. */
+	decode(payload: Uint8Array, timestamp: Time.Timestamp): Frame[] {
 		return decodeDataSegment(payload, this.#init, timestamp).map((s) => ({
 			payload: s.data,
 			timestamp: Duration.micros(s.timestamp),

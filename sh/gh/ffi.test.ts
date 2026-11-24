@@ -43,8 +43,33 @@ test("shared default builds cover each consumer exactly once", async () => {
 	}
 	expect([...new Set(all)].sort()).toEqual(targets.toSorted());
 	expect(shared.on.push?.tags).toEqual(["moq-ffi-v*"]);
+});
+
+test("Dart reuses the shared libraries and builds only what they lack", async () => {
+	const shared = await read("release-shared-ffi");
 	const dart = await read("release-dart-ffi");
-	expect(dart.on.push?.tags).toEqual(["moq-ffi-v*"]);
+	expect(dart.on.push).toBeUndefined();
+	expect(dart.on.workflow_call).toBeDefined();
+	expect(shared.jobs.dart.uses).toBe("./.github/workflows/release-dart-ffi.yml");
+	expect(shared.jobs.dart.with?.["reuse-native"]).toBe(true);
+	expect(shared.jobs.dart.if).toContain("always()");
+	expect(shared.jobs.dart.if).toContain("!cancelled()");
+	// The shared run checks out as the tag, which pub.dev's trusted publishing admits.
+	expect(shared.jobs.dart.permissions).toEqual({ contents: "write", "id-token": "write" });
+	const env = dart.jobs.plan.steps?.find((step) => step.name === "Plan")?.env ?? {};
+	const reused = JSON.parse(env.SHARED) as string[];
+	const all = JSON.parse(env.ALL) as string[];
+	expect(reused.toSorted()).toEqual(JSON.parse(shared.jobs.native.with?.targets as string).toSorted());
+	for (const target of reused) expect(all).toContain(target);
+	expect(new Set(all).size).toBe(all.length);
+	// The staging step fails on a missing library, so a reused artifact cannot silently drop a platform.
+	const stage = dart.jobs.assets.steps?.find((step) => step.name === "Stage");
+	expect(stage?.env?.TARGETS).toBe("${{ needs.plan.outputs.all }}");
+	expect(stage?.run).toContain("missing native library artifact");
+	const nightly = await read("nightly");
+	// Nightly dry-runs Dart through the coordinator; a second call would upload the same artifacts again.
+	expect(nightly.jobs["release-dart-ffi"]).toBeUndefined();
+	expect(nightly.jobs["release-shared-ffi"].permissions).toEqual({ contents: "write", "id-token": "write" });
 });
 
 test("wrapper gates preserve trusted tag inputs and inspect only their publisher", async () => {
@@ -53,14 +78,13 @@ test("wrapper gates preserve trusted tag inputs and inspect only their publisher
 		["swift-lib", "swift", "build"],
 	]) {
 		const wrapper = await read(`release-${file}`);
-		expect(wrapper.on.workflow_run?.workflows).toContain("Release FFI");
+		expect(wrapper.on.workflow_run?.workflows).toEqual(["Release FFI"]);
 		expect(wrapper.permissions).toEqual({ contents: "read" });
 		const gate = wrapper.jobs["ffi-release"];
 		expect(gate.permissions).toEqual({ contents: "read", actions: "read" });
 		expect(gate.if).toContain("github.repository_owner == 'moq-dev'");
 		expect(gate.if).toContain("github.event.workflow_run.event == 'push'");
 		expect(gate.if).toContain("startsWith(github.event.workflow_run.head_branch, 'moq-ffi-v')");
-		expect(gate.if).toContain("github.event.workflow_run.name == 'Release FFI'");
 		expect(gate.steps?.[0]?.with?.ref).toBe("${{ github.sha }}");
 		expect(gate.steps?.at(-1)?.run).toBe(`just gh ffi completed ${language}`);
 		expect(gate.steps?.at(-1)?.env?.UPSTREAM_RUN_STARTED_AT).toBe(
@@ -107,7 +131,6 @@ test("Nightly and alert chains retain packaged outputs with one shared producer"
 	expect(nightly.jobs["release-shared-ffi"].uses).toBe("./.github/workflows/release-shared-ffi.yml");
 	expect(nightly.jobs.sizes.needs).toContain("release-shared-ffi");
 	expect(nightly.jobs["release-py-ffi"]).toBeDefined();
-	expect(nightly.jobs["release-dart-ffi"]).toBeDefined();
 	// A called workflow's jobs cannot exceed the caller's grant, so a dry-run
 	// of a gated wrapper must pass on the gate's permissions.
 	for (const [name, job] of Object.entries(nightly.jobs)) {
@@ -118,4 +141,16 @@ test("Nightly and alert chains retain packaged outputs with one shared producer"
 			expect([name, scope, job.permissions?.[scope]]).toEqual([name, scope, level]);
 	}
 	expect((await read("alert")).on.workflow_run?.workflows).toContain("Release FFI");
+});
+
+test("C and C++ stop when the build they consume failed", async () => {
+	const nightly = await read("nightly");
+	// Without `always()`, a failed shared build skips them instead of failing every target again.
+	for (const job of ["release-cpp", "release-c"]) {
+		expect(nightly.jobs[job].needs).toEqual(["release-shared-ffi"]);
+		expect(nightly.jobs[job].if).toBeUndefined();
+	}
+	// `native` is skipped outside the prebuilt-test dispatch, which must still build.
+	const build = (await read("release-cpp")).jobs.build;
+	expect(build.if).toContain("needs.native.result != 'failure'");
 });

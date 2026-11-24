@@ -68,7 +68,7 @@ for (const [name, list, known] of selectors) {
 
 const rows: { row: Row; trace: Trace }[] = [];
 for (const { profile, trace } of traces) {
-	if (trace.version !== 3) throw new Error(`${profile}: trace version ${trace.version}, expected 3`);
+	if (trace.version !== 4) throw new Error(`${profile}: trace version ${trace.version}, expected 4`);
 	const codec = traceCodec(trace);
 	if (profiles && !profiles.includes(profile)) continue;
 	if (!codecs.includes(codec)) continue;

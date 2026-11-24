@@ -16,6 +16,7 @@ interface Case {
 	arrival: number[];
 	media: number[];
 	ends?: number[];
+	skipped?: number[];
 	target: [number, number][];
 }
 
@@ -35,13 +36,17 @@ describe("audio jitter conformance", () => {
 		expect(cases.map((c) => c.name).sort()).toEqual([
 			"advertised",
 			"backlog",
+			"batches",
 			"buildup",
 			"fixed",
 			"flush",
 			"idle",
+			"join",
+			"outage",
 			"paced",
 			"reorder",
 			"silence",
+			"skipped",
 			"spike",
 			"straggler",
 			"tunein",
@@ -53,10 +58,12 @@ describe("audio jitter conformance", () => {
 			const jitter = new Jitter();
 			const expected = new Map(c.target);
 			const ends = new Set(c.ends);
+			const skipped = new Set(c.skipped);
 			let current: number | undefined;
 			for (let i = 0; i < c.arrival.length; i++) {
 				if (ends.has(i)) jitter.end();
-				jitter.observe(c.arrival[i], c.media[i]);
+				if (skipped.has(i)) jitter.backlog(c.arrival[i]);
+				else jitter.observe(c.arrival[i], c.media[i]);
 				const value = target(jitter, c);
 				const listed = expected.get(i);
 				if (listed !== undefined) {
@@ -94,8 +101,45 @@ describe("Jitter", () => {
 		jitter.end();
 		for (let i = 0; i < 500; i++) jitter.observe(50 + i * 20, i * 20);
 		const settled = jitter.measured;
+		// The gap folds once the interval after it closes.
 		jitter.observe(50 + 500 * 20 + 30_000, 500 * 20 + 30_000);
+		jitter.observe(50 + 500 * 20 + 30_500, 500 * 20 + 30_500);
 		expect(jitter.measured).toBeGreaterThan(settled);
+	});
+
+	it("leaves the join where it ended once an interval measured the path", () => {
+		// Every frame of `outage` from its second interval on also reported as a skipped group's
+		// arrival once observed, as a consumer closing groups below its cursor would. Taken as
+		// backlog, each would make its interval fold nothing: the prior would linger, and the
+		// outages that raise the target would go unmeasured.
+		const outage = cases.find((c) => c.name === "outage") as Case;
+		const plain = new Jitter();
+		const reported = new Jitter();
+		for (let i = 0; i < outage.arrival.length; i++) {
+			plain.observe(outage.arrival[i], outage.media[i]);
+			reported.observe(outage.arrival[i], outage.media[i]);
+			if (outage.arrival[i] >= outage.arrival[0] + 500) reported.backlog(outage.arrival[i]);
+			expect(reported.measured).toBe(plain.measured);
+		}
+	});
+
+	it("holds a backlog skipped before the first observation until the join starts", () => {
+		// A newest-first replay lands the newer group first, so the backlog given up before anything was
+		// observed can land after the first observed frame. The join lasts until it did either way, so
+		// the frames held behind it fold nothing.
+		const traces = [undefined, 0, 1].map((at) => {
+			const jitter = new Jitter();
+			const trace: number[] = [];
+			for (let i = 0; i < 100; i++) {
+				if (i === at) jitter.backlog(1000);
+				jitter.observe(500 + i * 20 + (i >= 5 && i < 10 ? 200 : 0), i * 20);
+				trace.push(jitter.measured);
+			}
+			return trace;
+		});
+		const [plain, early, late] = traces;
+		expect(early).toEqual(late);
+		expect(late).not.toEqual(plain);
 	});
 
 	it("does not follow the absolute delay", () => {
@@ -125,6 +169,30 @@ describe("Jitter", () => {
 		// track's frames. Measured against the warm track's arrivals it would read as seconds late.
 		for (let i = 0; i < 100; i++) fork.observe(20_000 + Math.floor(i / 50) * 1000, 8000 + i * 20);
 		expect(fork.measured).toBeLessThanOrEqual(learned);
+		expect(warm.measured).toBe(learned);
+	});
+
+	it("forks an outage still open as its one observation", () => {
+		// A second of steady arrivals, then 3 s of media flushed in two halves, the second still behind
+		// the first: one stall, open in the interval in progress when the switch forks.
+		const feed = (jitter: Jitter) => {
+			for (let i = 0; i < 50; i++) jitter.observe(i * 20 + 50, i * 20);
+			for (let i = 50; i < 125; i++) jitter.observe(4_050, i * 20);
+			for (let i = 125; i < 200; i++) jitter.observe(4_600, i * 20);
+		};
+		const warm = new Jitter();
+		feed(warm);
+		const learned = warm.measured;
+		expect(learned).toBe(100);
+
+		// The 3 s delay folds once, as when a declared end settles the same stall.
+		const fork = warm.fork();
+		const ended = new Jitter();
+		feed(ended);
+		ended.end();
+		ended.observe(5_050, 5_000);
+		expect(fork.measured).toBe(2000);
+		expect(fork.measured).toBe(ended.measured);
 		expect(warm.measured).toBe(learned);
 	});
 });

@@ -24,7 +24,7 @@ const benchmarks: Record<string, { entry: string; rows: number }> = {
 	replay: { entry: "js/net/bench/replay.ts", rows: 72 },
 	"resume-history": { entry: "js/net/bench/resume-history.ts", rows: 72 },
 	buffered: { entry: "js/hang/bench/buffered.ts", rows: 36 },
-	pattern: { entry: "js/pattern/bench/algebra.ts", rows: 12 },
+	pattern: { entry: "js/pattern/bench/algebra.ts", rows: 21 },
 };
 const selected = Object.hasOwn(benchmarks, benchmark) ? benchmarks[benchmark] : undefined;
 if (!selected) throw new Error(`--bench must be one of: ${Object.keys(benchmarks).join(", ")}`);
@@ -107,7 +107,17 @@ const browser = await chromium.launch({
 	headless: true,
 	executablePath: process.env.BROWSER_BIN,
 	// Retention is counted after full collections the page asks for, against an unrounded heap size.
-	args: benchmark === "resume-history" ? ["--js-flags=--expose-gc", "--enable-precise-memory-info"] : [],
+	// Optimizing compiles stay on the main thread: a queued background job holds its closure's
+	// context strongly, so a route a hot closure captured stays reachable until the job lands.
+	// The delay only slows background jobs, so it is inert here, but it fails every cold run
+	// rather than an occasional one if compiles ever go concurrent again.
+	args:
+		benchmark === "resume-history"
+			? [
+					"--js-flags=--expose-gc --no-concurrent-recompilation --concurrent-recompilation-delay=300",
+					"--enable-precise-memory-info",
+				]
+			: [],
 });
 const samples: { round: number; variant: string; rows: string[] }[] = [];
 const traced: { variant: string; rows: string[] }[] = [];
@@ -148,7 +158,8 @@ try {
 		rows.set(variant, []);
 		await pages.get(variant)?.evaluate("globalThis.measure()");
 		const measured = rows.get(variant) ?? [];
-		if (measured.length !== selected.rows) throw new Error(`incomplete rows: ${variant}`);
+		if (measured.length !== selected.rows)
+			throw new Error(`${variant} printed ${measured.length} rows, expected ${selected.rows}`);
 		return measured;
 	};
 	for (let round = 0; round < rounds; round++) {

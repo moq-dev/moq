@@ -6,8 +6,11 @@ import * as Msf from "@moq/msf";
 import * as Moq from "@moq/net";
 import { Origin, Path } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
+import { key } from "../../json/src/key.test-util.ts";
 import * as Mint from "../../net/src/mint.ts";
+import { wireOf } from "../../net/src/wire.ts";
 import { Broadcast } from "./broadcast";
+import { defined } from "./defined.test-util.ts";
 
 function publish(origin: Origin.Producer, path: Path.Valid) {
 	return origin.route(path).broadcast;
@@ -109,19 +112,19 @@ describe("unsupported catalog", () => {
 			const owner = new Origin.Producer();
 			const name = Path.from("room/live.hang");
 			const published = publish(owner, name);
-			const track = published.createTrack(Catalog.TRACK, { compression: compress ? "deflate" : "none" });
+			const track = defined(published.createTrack(Catalog.TRACK, { compression: compress ? "deflate" : "none" }));
 			const producer = new Json.Snapshot.Producer<Catalog.Root>({ track, deltas: false });
 			const enabled = new Signal(true);
 			const source = new Broadcast({ origin: owner, name, catalogFormat: "hang", enabled });
 			try {
 				const ready = source.out.catalog.changed();
-				producer.update({ value: {} });
+				producer.update({}, key());
 				await ready;
 				expect(source.out.status.peek()).toBe("live");
 
 				const rejected = source.out.status.changed();
 				const cleared = source.out.catalog.changed();
-				producer.update({ value: { version: Catalog.VERSION + 1 } });
+				producer.update({ version: Catalog.VERSION + 1 }, key());
 				await rejected;
 				await cleared;
 				expect(source.out.status.peek()).toBe("unsupported");
@@ -143,44 +146,69 @@ describe("unsupported catalog", () => {
 });
 
 // Regression: a finished catalog track dropped the catalog at once, so a publisher finishing its
-// broadcast cut every viewer off before it drained the tail the broadcast still served.
-it("keeps playing a finished catalog until the broadcast ends", async () => {
-	const owner = new Origin.Producer();
-	const name = Path.from("room/live.hang");
-	const published = publish(owner, name);
-	const producer = new Json.Snapshot.Producer<Catalog.Root>({
-		track: published.createTrack(Catalog.TRACK),
-		deltas: false,
+// broadcast cut every viewer off before it drained the tail the broadcast still served. Once nothing
+// is left to play it reads offline, though the broadcast still serves the tail to late subscribers.
+// Without a `tail` to say so, as for a broadcast no player drives, it stays live until it closes.
+for (const driven of [true, false]) {
+	it(`keeps playing a finished catalog until the broadcast ends${driven ? ", and reads offline once the tail played" : " without a tail input"}`, async () => {
+		const owner = new Origin.Producer();
+		// A session that could announce the broadcast, so its absence reads offline.
+		wireOf(owner).attach(true);
+		const name = Path.from("room/live.hang");
+		const published = publish(owner, name);
+		const producer = new Json.Snapshot.Producer<Catalog.Root>({
+			track: defined(published.createTrack(Catalog.TRACK)),
+			deltas: false,
+		});
+		const tail = new Signal(true);
+		const source = new Broadcast({
+			origin: owner,
+			name,
+			catalogFormat: "hang",
+			enabled: true,
+			...(driven ? { tail } : {}),
+		});
+		try {
+			const ready = source.out.catalog.changed();
+			producer.update({ video: { renditions: { hd: video("avc1.640028") } } }, key());
+			await ready;
+			expect(source.out.status.peek()).toBe("live");
+
+			// A live broadcast stays live whatever the tail says.
+			tail.set(false);
+			await settle();
+			expect(source.out.status.peek()).toBe("live");
+			tail.set(true);
+
+			producer.finish();
+			await settle();
+			expect(source.out.status.peek()).toBe("live");
+			expect(videoRenditions(source)).toEqual(["hd"]);
+
+			tail.set(false);
+			await settle();
+			expect(source.out.status.peek()).toBe(driven ? "offline" : "live");
+			expect(videoRenditions(source)).toEqual(["hd"]);
+
+			published.close();
+			await settle();
+			expect(source.out.status.peek()).toBe("offline");
+			expect(source.out.catalog.peek()).toBeUndefined();
+		} finally {
+			source.close();
+			owner.close();
+		}
 	});
-	const source = new Broadcast({ origin: owner, name, catalogFormat: "hang", enabled: true });
-	try {
-		const ready = source.out.catalog.changed();
-		producer.update({ value: { video: { renditions: { hd: video("avc1.640028") } } } });
-		await ready;
-		expect(source.out.status.peek()).toBe("live");
-
-		producer.finish();
-		await settle();
-		expect(source.out.status.peek()).toBe("live");
-		expect(videoRenditions(source)).toEqual(["hd"]);
-
-		published.close();
-		await settle();
-		expect(source.out.status.peek()).toBe("offline");
-		expect(source.out.catalog.peek()).toBeUndefined();
-	} finally {
-		source.close();
-		owner.close();
-	}
-});
+}
 
 // A catalog track that ends before its first snapshot has nothing to play, so it reads as offline.
 it("reports a catalog that ends empty as offline", async () => {
 	const owner = new Origin.Producer();
+	wireOf(owner).attach(true);
 	const name = Path.from("room/live.hang");
 	const published = publish(owner, name);
 	const producer = new Json.Snapshot.Producer<Catalog.Root>({
-		track: published.createTrack(Catalog.TRACK),
+		track: defined(published.createTrack(Catalog.TRACK)),
 		deltas: false,
 	});
 	const source = new Broadcast({ origin: owner, name, catalogFormat: "hang", enabled: true });
@@ -744,7 +772,7 @@ describe("refusal", () => {
 
 	it("refuses a name outside the origin's scope", async () => {
 		const owner = new Origin.Producer();
-		const scoped = owner.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("room"))]));
+		const scoped = owner.scope(Path.empty(), Path.Prefixes.parse(["room"]));
 		const source = new Broadcast({
 			origin: scoped,
 			name: Path.from("lobby/live.hang"),
@@ -765,6 +793,7 @@ describe("refusal", () => {
 	for (const follow of [true, false]) {
 		it(`reports a refusal until a fresh request (follow: ${follow})`, async () => {
 			const owner = new Origin.Producer();
+			wireOf(owner).attach(true);
 			const route = owner.claim(Path.from("room"));
 			const requests = route.requested();
 			const name = new Signal(Path.from("room/refused.hang"));
@@ -864,9 +893,9 @@ describe("cross-broadcast renditions", () => {
 		const owner = new Origin.Producer();
 		const scopes: string[] = [];
 		const announced = owner.announced.bind(owner);
-		owner.announced = (scope, options) => {
-			scopes.push(scope?.text ?? "**");
-			return announced(scope, options);
+		owner.announced = (filter, options) => {
+			scopes.push(filter?.text ?? "**");
+			return announced(filter, options);
 		};
 		const source = new Broadcast({
 			origin: owner,
@@ -1143,9 +1172,15 @@ it("subscribes a cross-broadcast MSF rendition on its namespace", async () => {
 	const owner = new Origin.Producer();
 	const catalogBroadcast = publish(owner, Path.from("room/catalog.msf"));
 	const referenced = publish(owner, Path.from("room/left"));
-	catalogBroadcast.createTrack("video").writeFrame({ payload: new Uint8Array([1]) });
-	referenced.createTrack("video").writeFrame({ payload: new Uint8Array([2]) });
-	catalogBroadcast.createTrack("catalog").writeFrame({
+	defined(catalogBroadcast.createTrack("video")).writeFrame({
+		payload: new Uint8Array([1]),
+		timestamp: Moq.Time.Timestamp.unscaled(0n),
+	});
+	defined(referenced.createTrack("video")).writeFrame({
+		payload: new Uint8Array([2]),
+		timestamp: Moq.Time.Timestamp.unscaled(0n),
+	});
+	defined(catalogBroadcast.createTrack("catalog")).writeFrame({
 		payload: Msf.encode({
 			tracks: [
 				{
@@ -1157,6 +1192,7 @@ it("subscribes a cross-broadcast MSF rendition on its namespace", async () => {
 				},
 			],
 		}),
+		timestamp: Moq.Time.Timestamp.unscaled(0n),
 	});
 	const source = new Broadcast({
 		origin: owner,

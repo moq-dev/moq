@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { Producer as BroadcastProducer } from "./broadcast.ts";
+import { defined } from "./defined.test-util.ts";
 import { Version } from "./lite/version.ts";
 import { Priority, sendOrder } from "./priority.ts";
 import { type SendStream, Writer } from "./stream.ts";
@@ -70,7 +71,7 @@ test("out of range ranks stay inside their own bits", () => {
 // group already on the wire keeps writing after the track stops handing out new ones.
 function ranking(options: Subscription = {}) {
 	const broadcast = new BroadcastProducer();
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const subscriber = track.subscribe(options);
 
 	// The send order lands on the underlying stream, exactly as it would on a real one.
@@ -113,9 +114,9 @@ test("groups still draining are promoted after the subscription closes", () => {
 test("the subscription's order picks which group goes first", async () => {
 	const { priority, subscriber, open, streams, broadcast } = ranking({ priority: 7, order: "ascending" });
 
-	const writers = [5n, 1n, 10n].map((sequence) => {
+	const writers = [5n, 1n, 10n].map((key) => {
 		const writer = open();
-		priority.add(writer, sequence, 0);
+		priority.add(writer, key, 0);
 		return writer;
 	});
 	const at = (...positions: number[]) => positions.map((position) => sendOrder({ priority: 7, position }));
@@ -171,9 +172,9 @@ test.each(["ascending", "descending"] as const)("re-ranking matches rank for eve
 		[1n, 0],
 		[9n, 0],
 	];
-	const writers = starts.map(([sequence, object]) => {
+	const writers = starts.map(([key, object]) => {
 		const writer = open();
-		priority.add(writer, sequence, object);
+		priority.add(writer, key, object);
 		return writer;
 	});
 	const check = (live: number[]) => {

@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { Duration, type Installed, Manual } from "@moq/clock";
+import { Duration, type Installed } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { Signal } from "@moq/signals";
+import { defined } from "../defined.test-util.ts";
 import { SessionCode, SessionError } from "../error.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair, type MockTransport } from "../mock.ts";
@@ -79,6 +81,21 @@ test("two handles on one URL share a connection and an origin", async () => {
 	await advance(linger);
 	expect(second.status.peek()).toBe("connected");
 
+	second.close();
+});
+
+test("urlAuth: false is the default carrier, so it shares; true needs a private loop", async () => {
+	const dials = stubTransports();
+
+	const first = new Connection({ url, urlAuth: false });
+	const second = new Connection({ url, share: true, urlAuth: false });
+	await advance();
+	expect(dials.count()).toBe(1);
+	expect(second.origin.peek()).toBe(first.origin.peek());
+
+	expect(() => new Connection({ url, share: true, urlAuth: true })).toThrow("urlAuth cannot be shared");
+
+	first.close();
 	second.close();
 });
 
@@ -189,15 +206,50 @@ test("switching URLs switches origins", async () => {
 	handle.close();
 });
 
-test("a shared connection outlasts an outage longer than a finite retry window", async () => {
-	let offline = true;
-	const stub = function StubWebTransport() {
-		if (offline) throw new Error("relay is down");
+/**
+ * Accept each dial until `outage` takes the relay down, after which each dial throws or hangs
+ * until `recover`. A URL's first attempt is never retried, so `outage` waits for the handle's
+ * session and holds it past the default healthy bar before severing it: the loop then retries
+ * with a fresh backoff and retry window, both counting from the outage.
+ */
+function stubOutage(down: "throw" | "hang") {
+	let offline = false;
+	let attempts = 0;
+	const servers: Promise<{ abort(): void }>[] = [];
+	class Hung {
+		ready = new Promise<void>(() => {});
+		closed = new Promise<void>(() => {});
+		close() {}
+	}
+	globalThis.WebTransport = function StubWebTransport() {
+		attempts++;
+		if (offline) {
+			if (down === "throw") throw new Error("relay is down");
+			return new Hung();
+		}
 		const pair = createMockTransportPair(Lite.ALPN_05);
-		void accept(pair.server, url);
+		servers.push(accept(pair.server, url));
 		return pair.client;
+	} as unknown as typeof WebTransport;
+	return {
+		attempts: () => attempts,
+		outage: async (handle: Connection) => {
+			await advance();
+			expect(handle.status.peek()).toBe("connected");
+			await advance(1000);
+			offline = true;
+			(await servers.at(-1))?.abort();
+			await advance();
+			expect(handle.status.peek()).not.toBe("connected");
+		},
+		recover: () => {
+			offline = false;
+		},
 	};
-	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+}
+
+test("a shared connection outlasts an outage longer than a finite retry window", async () => {
+	const relay = stubOutage("throw");
 
 	// Keep the fallback local too, so offline attempts are driven entirely by fake time.
 	globalThis.WebSocket = function OfflineWebSocket() {
@@ -206,6 +258,7 @@ test("a shared connection outlasts an outage longer than a finite retry window",
 
 	const handle = new Connection({ url });
 	try {
+		await relay.outage(handle);
 		await advance(500);
 		expect(handle.status.peek()).toBe("disconnected");
 
@@ -213,7 +266,7 @@ test("a shared connection outlasts an outage longer than a finite retry window",
 		await advance(60_000);
 		expect(handle.status.peek()).not.toBe("connected");
 
-		offline = false;
+		relay.recover();
 		await advance(10_000);
 		expect(handle.status.peek()).toBe("connected");
 	} finally {
@@ -232,7 +285,7 @@ test("a publish through one handle resolves locally for another", async () => {
 	const origin = publisher.origin.peek();
 	if (!origin) throw new Error("expected an origin");
 	const broadcast = publish(origin, Path.from("mine"));
-	broadcast.createTrack("chat", { timescale: Time.Timescale.MILLI });
+	defined(broadcast.createTrack("chat", { timescale: Time.Timescale.MILLI }));
 
 	// Loopback: the shared origin serves the page's own publish with no round trip, so the
 	// request resolves synchronously instead of waiting on the relay to announce it back.
@@ -301,7 +354,7 @@ test("connection-specific options infer a private loop and origin", async () => 
 		const options = [
 			{ webtransport: { congestionControl: "throughput" as const } },
 			{ websocket: { enabled: false } },
-			{ delay: { timeout: null } },
+			{ backoff: { timeout: null } },
 			{ timeout: Duration.millis(10_000) },
 			{ publish: origin.consume() },
 			{ consume: origin },
@@ -336,7 +389,7 @@ test("explicit share: true refuses connection-specific options", () => {
 			/share: false/,
 		);
 		expect(() => new Connection({ share: true, websocket: { enabled: false } })).toThrow(/share: false/);
-		expect(() => new Connection({ share: true, delay: { timeout: null } })).toThrow(/share: false/);
+		expect(() => new Connection({ share: true, backoff: { timeout: null } })).toThrow(/share: false/);
 		expect(() => new Connection({ share: true, timeout: Duration.millis(10_000) })).toThrow(/share: false/);
 	} finally {
 		origin.close();
@@ -438,7 +491,7 @@ test("exhausted retries then a new URL recovers a private handle", async () => {
 		url,
 		share: false,
 		websocket: { enabled: false },
-		delay: { initial: Duration.millis(1), multiplier: 1, max: Duration.millis(1), timeout: Duration.millis(1) },
+		backoff: { initial: Duration.millis(1), multiplier: 1, max: Duration.millis(1), timeout: Duration.millis(1) },
 	});
 	try {
 		await advance(2);
@@ -455,23 +508,20 @@ test("exhausted retries then a new URL recovers a private handle", async () => {
 	}
 });
 
-test("a private partial delay keeps the unlimited retry timeout", async () => {
-	let attempts = 0;
-	const stub = function StubWebTransport() {
-		attempts++;
-		throw new Error("relay is down");
-	};
-	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+test("a private partial backoff keeps the unlimited retry timeout", async () => {
+	const relay = stubOutage("throw");
 
 	const handle = new Connection({
 		url,
 		share: false,
 		websocket: { enabled: false },
-		delay: { initial: Duration.millis(1000), multiplier: 1, max: Duration.millis(1000) },
+		backoff: { initial: Duration.millis(1000), multiplier: 1, max: Duration.millis(1000) },
 	});
 	try {
+		await relay.outage(handle);
+		const before = relay.attempts();
 		await advance(60_000);
-		expect(attempts).toBeGreaterThanOrEqual(3);
+		expect(relay.attempts() - before).toBeGreaterThanOrEqual(3);
 		expect(handle.error.peek()).toBeUndefined();
 	} finally {
 		handle.close();
@@ -479,27 +529,25 @@ test("a private partial delay keeps the unlimited retry timeout", async () => {
 });
 
 test("a private handle with an explicitly undefined timeout outlasts the outage", async () => {
-	let offline = true;
-	let attempts = 0;
-	const stub = function StubWebTransport() {
-		attempts++;
-		if (offline) throw new Error("relay is down");
-		const pair = createMockTransportPair(Lite.ALPN_05);
-		void accept(pair.server, url);
-		return pair.client;
-	};
-	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+	const relay = stubOutage("throw");
 
 	// What a caller building options from optional values produces: the undefined means "the
 	// default", which for a Connection is to retry for as long as the handle is held.
-	const handle = new Connection({ url, share: false, websocket: { enabled: false }, delay: { timeout: undefined } });
+	const handle = new Connection({
+		url,
+		share: false,
+		websocket: { enabled: false },
+		backoff: { timeout: undefined },
+	});
 	try {
+		await relay.outage(handle);
+		const before = relay.attempts();
 		// Long enough that any finite fallback window would have given up.
 		await advance(60_000);
-		expect(attempts).toBeGreaterThan(3);
+		expect(relay.attempts() - before).toBeGreaterThan(3);
 		expect(handle.error.peek()).toBeUndefined();
 
-		offline = false;
+		relay.recover();
 		await advance(10_000);
 		expect(handle.status.peek()).toBe("connected");
 	} finally {
@@ -580,6 +628,8 @@ test("pooled probe readers share demand and carry it through reconnects", async 
 		stopFirst();
 		await advance(100);
 		expect(pairs[0].client.sendStreams.bidi).toHaveLength(1);
+		// Past the healthy bar, so the close reconnects rather than stopping the URL.
+		await advance(1_000);
 		pairs[0].server.close({ closeCode: SessionCode.Internal, reason: "reconnect" });
 		await advance(2_000);
 		expect(pairs).toHaveLength(2);
@@ -647,6 +697,8 @@ test("pooled viewers send their summed target to an Increase peer across a recon
 		expect(peers).toHaveLength(1);
 		expect(peers[0].targets.at(-1)).toBe(5_000_000);
 
+		// Past the healthy bar, so the close reconnects rather than stopping the URL.
+		await advance(1_000);
 		peers[0].server.close({ closeCode: SessionCode.Internal, reason: "reconnect" });
 		await advance(2_000);
 		expect(peers).toHaveLength(2);
@@ -830,29 +882,22 @@ test("GOAWAY keeps version pools distinct at the redirected URL", async () => {
 });
 
 test("a private handle's timeout bounds each attempt", async () => {
-	let attempts = 0;
-	class Hung {
-		ready = new Promise<void>(() => {});
-		closed = new Promise<void>(() => {});
-		close() {}
-	}
-	globalThis.WebTransport = function StubWebTransport() {
-		attempts++;
-		return new Hung();
-	} as unknown as typeof WebTransport;
+	const relay = stubOutage("hang");
 
 	const handle = new Connection({
 		url,
 		share: false,
 		websocket: { enabled: false },
 		timeout: Duration.millis(50),
-		delay: { initial: Duration.millis(10), multiplier: 1, max: Duration.millis(10) },
+		backoff: { initial: Duration.millis(10), multiplier: 1, max: Duration.millis(10) },
 	});
 	try {
+		await relay.outage(handle);
+		const before = relay.attempts();
 		// Each hung dial is cut at 50 ms and redialed after the backoff; the default 30 s
 		// timeout would still be holding the first.
 		await advance(1_000);
-		expect(attempts).toBeGreaterThanOrEqual(3);
+		expect(relay.attempts() - before).toBeGreaterThanOrEqual(3);
 	} finally {
 		handle.close();
 	}

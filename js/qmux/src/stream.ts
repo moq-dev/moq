@@ -38,16 +38,14 @@ export class Id {
 		return this.value.value >> 2n;
 	}
 
+	/** Whether an endpoint can send on this stream: false only for the peer's uni streams. */
+	canSend(isServer: boolean): boolean {
+		return this.dir === Dir.Bi || this.serverInitiated === isServer;
+	}
+
 	canRecv(isServer: boolean): boolean {
 		if (this.dir === Dir.Uni) {
 			return this.serverInitiated !== isServer;
-		}
-		return true;
-	}
-
-	canSend(isServer: boolean): boolean {
-		if (this.dir === Dir.Uni) {
-			return this.serverInitiated === isServer;
 		}
 		return true;
 	}

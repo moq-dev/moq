@@ -293,3 +293,58 @@ async fn egress_h264_avc3_passthrough() {
 		"IDR NAL present in egress frame"
 	);
 }
+
+/// An avc1 keyframe goes out as Annex-B with the parameter sets prepended, but counts only
+/// the payload it was read with.
+#[tokio::test(start_paused = true)]
+async fn egress_h264_avc1_counts_the_payload_as_read() {
+	let sps: &[u8] = &[0x67, 0x42, 0xc0, 0x1f, 0xde];
+	let pps: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
+	let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
+	let mut avcc = vec![1, sps[1], sps[2], sps[3], 0xff, 0xe1];
+	avcc.extend_from_slice(&(sps.len() as u16).to_be_bytes());
+	avcc.extend_from_slice(sps);
+	avcc.push(1);
+	avcc.extend_from_slice(&(pps.len() as u16).to_be_bytes());
+	avcc.extend_from_slice(pps);
+	let mut stored = (idr.len() as u32).to_be_bytes().to_vec();
+	stored.extend_from_slice(idr);
+
+	let producer = moq_net::broadcast::Info::new().produce();
+	let mut writer = moq_mux::container::Producer::new(
+		producer.create_track("video", timed()).expect("track"),
+		moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
+	);
+	writer
+		.write(moq_mux::container::Frame {
+			timestamp: moq_net::Timestamp::ZERO,
+			duration: None,
+			payload: Bytes::from(stored.clone()),
+			keyframe: true,
+		})
+		.expect("write");
+
+	let mut config = hang::catalog::VideoConfig::new(hang::catalog::H264 {
+		inline: false,
+		profile: sps[1],
+		constraints: sps[2],
+		level: sps[3],
+	});
+	config.description = Some(Bytes::from(avcc));
+	config.container = hang::catalog::Container::Legacy;
+	let track = producer
+		.consume()
+		.track("video")
+		.expect("track")
+		.subscribe(None)
+		.await
+		.expect("subscribe");
+	let mut track = Track::video(track, &config).expect("h264 track");
+
+	let frame = track.next().await.expect("ok").expect("frame");
+	assert!(
+		frame.payload.windows(sps.len()).any(|w| w == sps),
+		"SPS prepended to the keyframe"
+	);
+	assert_eq!(frame.charge.1, stored.len() as u64);
+}

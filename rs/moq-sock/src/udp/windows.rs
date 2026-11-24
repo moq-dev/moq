@@ -127,28 +127,6 @@ impl UdpSocketState {
 		})
 	}
 
-	/// Enable or disable receive offloading.
-	///
-	/// Also referred to as UDP Receive Segment Coalescing Offload (URO) on Windows.
-	///
-	/// <https://learn.microsoft.com/en-us/windows-hardware/drivers/network/udp-rsc-offload>
-	///
-	/// Disabled by default on Windows due to <https://github.com/quinn-rs/quinn/issues/2041>.
-	pub fn set_gro(&self, socket: UdpSockRef<'_>, enable: bool) -> io::Result<()> {
-		set_socket_option(
-			&*socket.0,
-			WinSock::IPPROTO_UDP,
-			WinSock::UDP_RECV_MAX_COALESCED_SIZE,
-			match enable {
-				// u32 per
-				// https://learn.microsoft.com/en-us/windows/win32/winsock/ipproto-udp-socket-options.
-				// Choice of 2^16 - 1 inspired by msquic.
-				true => u16::MAX as u32,
-				false => 0,
-			},
-		)
-	}
-
 	/// Sends a [`Transmit`] on the given socket without any additional error handling.
 	pub fn try_send(&self, socket: UdpSockRef<'_>, transmit: &Transmit<'_>) -> io::Result<()> {
 		send(socket, transmit, self.ecn_v4_supported, self.ecn_v6_supported)
@@ -258,7 +236,11 @@ impl UdpSocketState {
 				(WinSock::IPPROTO_UDP, UDP_COALESCED_INFO) => {
 					// Has type u32 (aka DWORD) per
 					// https://learn.microsoft.com/en-us/windows/win32/winsock/ipproto-udp-socket-options
-					if let Some(segment) = unsafe { cmsg.decode::<u32>() } {
+					// A zero stride would split the payload into empty datagrams forever, so it keeps
+					// the datagram's own length.
+					if let Some(segment) = unsafe { cmsg.decode::<u32>() }
+						&& segment > 0
+					{
 						stride = segment;
 					}
 				}
@@ -296,30 +278,6 @@ impl UdpSocketState {
 	pub fn gro_segments(&self) -> usize {
 		// Arbitrary reasonable value inspired by Linux and msquic
 		64
-	}
-
-	/// Resize the send buffer of `socket` to `bytes`
-	#[inline]
-	pub fn set_send_buffer_size(&self, socket: UdpSockRef<'_>, bytes: usize) -> io::Result<()> {
-		socket.0.set_send_buffer_size(bytes)
-	}
-
-	/// Resize the receive buffer of `socket` to `bytes`
-	#[inline]
-	pub fn set_recv_buffer_size(&self, socket: UdpSockRef<'_>, bytes: usize) -> io::Result<()> {
-		socket.0.set_recv_buffer_size(bytes)
-	}
-
-	/// Get the size of the `socket` send buffer
-	#[inline]
-	pub fn send_buffer_size(&self, socket: UdpSockRef<'_>) -> io::Result<usize> {
-		socket.0.send_buffer_size()
-	}
-
-	/// Get the size of the `socket` receive buffer
-	#[inline]
-	pub fn recv_buffer_size(&self, socket: UdpSockRef<'_>) -> io::Result<usize> {
-		socket.0.recv_buffer_size()
 	}
 
 	/// Whether transmitted datagrams might get fragmented by the IP layer

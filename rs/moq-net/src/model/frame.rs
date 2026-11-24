@@ -29,15 +29,12 @@ use crate::{Error, IntoBytes, Result, Timestamp, stats};
 pub struct Info {
 	/// Total payload size in bytes. Declared up front so consumers can preallocate.
 	pub size: u64,
-	/// Presentation timestamp, or `None` on an untimed track. It must match the track
-	/// ([`Error::TimestampMismatch`] otherwise).
+	/// Presentation timestamp, or on a scale-less track [`Timestamp::unscaled`] at its
+	/// group's key. It must match the track ([`Error::TimestampMismatch`] otherwise).
 	///
 	/// [`group::Producer::create_frame`] converts it into the parent track's
 	/// timescale, so the scale you build it with doesn't have to match the track.
-	/// No receiver fills one in, so an untimed track stays untimed across hops, except
-	/// over moq-lite 05 and 06, which can't mark a track untimed and carry the encoder's
-	/// send time instead.
-	pub timestamp: Option<Timestamp>,
+	pub timestamp: Timestamp,
 }
 
 /// A completed frame: an optional timestamp, its full, contiguous payload, and when it
@@ -49,8 +46,9 @@ pub struct Info {
 /// [`Consumer::poll_read_chunk`] hands out each segment without a copy.
 #[derive(Clone, Debug)]
 pub struct Frame {
-	/// Presentation timestamp, at the parent track's timescale, or `None` when untimed.
-	pub timestamp: Option<Timestamp>,
+	/// Presentation timestamp, at the parent track's timescale, or on a scale-less track
+	/// [`Timestamp::unscaled`] at its group's key.
+	pub timestamp: Timestamp,
 	/// The full frame payload.
 	pub payload: Bytes,
 	// Stamped as the frame enters a group's cache; see [`Self::arrived`].
@@ -58,10 +56,11 @@ pub struct Frame {
 }
 
 impl Frame {
-	/// A frame of `payload` presented at `timestamp`, or `None` on an untimed track.
-	pub fn new(timestamp: impl Into<Option<Timestamp>>, payload: impl IntoBytes) -> Self {
+	/// A frame of `payload` presented at `timestamp`, or on a scale-less track at
+	/// [`Timestamp::unscaled`] of its group's key.
+	pub fn new(timestamp: Timestamp, payload: impl IntoBytes) -> Self {
 		Self {
-			timestamp: timestamp.into(),
+			timestamp,
 			payload: payload.into_bytes(),
 			// Stamped when written to a group, so building one never reads the clock.
 			arrived: Instant::ZERO,
@@ -246,7 +245,7 @@ impl Buf for Payload {
 /// A completed frame as its group stores it.
 #[derive(Clone, Debug)]
 pub(crate) struct Cached {
-	pub timestamp: Option<Timestamp>,
+	pub timestamp: Timestamp,
 	pub payload: Payload,
 	// When the frame's last byte landed in this node's cache; see [`Frame::arrived`].
 	pub arrived: Instant,
@@ -1350,7 +1349,13 @@ impl Producer {
 	/// segment is the rest of the frame.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn unsealed(&self) -> usize {
-		let written = self.buf.written(Ordering::Acquire);
+		self.unsealed_after(0)
+	}
+
+	/// [`Self::unsealed`] once `more` bytes are written.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn unsealed_after(&self, more: usize) -> usize {
+		let written = self.buf.written(Ordering::Acquire) + more;
 		let end = (written / SEGMENT + 1).saturating_mul(SEGMENT).min(self.buf.size());
 		end - written
 	}
@@ -1389,6 +1394,15 @@ impl Producer {
 	pub(crate) fn poll_ready(&self, waiter: &kio::Waiter, window: u64) -> Poll<()> {
 		self.group()
 			.poll_paced(waiter, self.buf.written(Ordering::Acquire) as u64, window)
+	}
+
+	/// How many more bytes of this frame the group's writer may take before
+	/// [`Self::poll_ready`] holds it at `window`, or `None` while nothing would, once `more`
+	/// bytes are written.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn room(&self, window: u64, more: usize) -> Option<u64> {
+		self.group()
+			.room((self.buf.written(Ordering::Acquire) + more) as u64, window)
 	}
 
 	/// Publish what has been written so far, waking consumers parked on the group.
@@ -1442,10 +1456,7 @@ impl Drop for Producer {
 			&& let Some(group) = self.group.as_mut()
 		{
 			if !group.is_aborted() && !self.cancel_on_drop {
-				tracing::warn!(
-					group = group.sequence,
-					"frame::Producer dropped before writing all bytes"
-				);
+				tracing::warn!(group = group.start, "frame::Producer dropped before writing all bytes");
 			}
 			group.frame_abort(if self.cancel_on_drop {
 				Error::Cancel
@@ -1592,7 +1603,8 @@ impl Consumer {
 			if self.state.read().sparse() {
 				return Poll::Ready(Err(Error::Unsupported));
 			}
-			let mut replacement = match recover.poll(*index, failed.as_ref(), waiter) {
+			let cause = failed.map_or(super::resume::Cause::Stalled, super::resume::Cause::Failed);
+			let mut replacement = match recover.poll(*index, &cause, waiter) {
 				Poll::Ready(Ok(group)) => group,
 				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
 				Poll::Pending => return Poll::Pending,
@@ -1810,7 +1822,7 @@ mod tests {
 	#[test]
 	fn activating_shared_content_transfers_payload_without_recording_it_twice() {
 		let pool = cache::Pool::unbounded();
-		let account = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let account = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		let mut delivery = account.charge();
 		delivery.add(8);
 		let before = pool.used();
@@ -2066,7 +2078,7 @@ mod tests {
 	#[test]
 	fn canonical_and_delivery_charges_follow_their_last_owners() {
 		let pool = cache::Pool::unbounded();
-		let account = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let account = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		let charge = account.charge();
 		let baseline = pool.used();
 		let a = FrameBuf::growing(8);
@@ -2115,7 +2127,7 @@ mod tests {
 	#[test]
 	fn admission_allocates_nothing_and_completed_payload_needs_none() {
 		let pool = cache::Pool::unbounded();
-		let account = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let account = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
 		let charge = account.charge();
 		let baseline = pool.used();
 		let a = FrameBuf::new(8);

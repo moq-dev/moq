@@ -606,6 +606,7 @@ mod tests {
 		broadcast: moq_net::origin::Route,
 		catalog: moq_mux::catalog::Producer,
 		video: Vec<Video>,
+		finished: Vec<moq_mux::container::Finished<moq_mux::catalog::hang::Container, hang::catalog::VideoConfig>>,
 	}
 
 	impl Publisher {
@@ -615,7 +616,7 @@ mod tests {
 			// A join interval declared up front lists every rendition before any media, so each
 			// is recorded from its first segment.
 			let mut seeded = moq_mux::catalog::hang::Catalog::<()>::default();
-			seeded.media.join = hang::catalog::Join::new(Duration::from_secs(2));
+			seeded.sync.interval = Some(Duration::from_secs(2));
 			let config = moq_mux::catalog::Config::default().with_catalog(seeded);
 			let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config).unwrap();
 			let reserved = catalog.reserve();
@@ -637,6 +638,7 @@ mod tests {
 				broadcast,
 				catalog,
 				video,
+				finished: Vec::new(),
 			}
 		}
 
@@ -656,9 +658,7 @@ mod tests {
 		}
 
 		fn finish(&mut self) {
-			for video in &mut self.video {
-				video.finish().unwrap();
-			}
+			self.finished = self.video.drain(..).map(|video| video.finish().unwrap()).collect();
 			self.catalog.finish().unwrap();
 		}
 	}
@@ -872,12 +872,15 @@ mod tests {
 		recorded(dir.path(), "video1").await;
 		let removed = Arc::downgrade(&broadcaster.rendition(Kind::Video, "video1").unwrap());
 		// Finishing bounds its last segment, so the removed instance's cursor drains.
-		publisher.video.remove(1).finish().unwrap();
+		let _finished = publisher.video.remove(1).finish().unwrap();
 		publisher
 			.catalog
-			.mutate(|catalog| {
-				catalog.video.renditions.remove("video1");
-			})
+			.mutate(
+				|catalog| {
+					catalog.video.renditions.remove("video1");
+				},
+				publisher.catalog.next_timestamp(),
+			)
 			.unwrap();
 		publisher.gop(5);
 		publisher.gop(6);

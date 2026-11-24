@@ -1,11 +1,11 @@
 import { Duration } from "@moq/clock";
-import type * as Catalog from "@moq/hang/catalog";
+import * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/net";
 import { Path } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, Signal } from "@moq/signals";
 import * as Audio from "./audio";
 import { Broadcast, type CatalogFormat } from "./broadcast";
-import { type Delay, Sync } from "./sync";
+import { type Delay, STRETCH, Sync } from "./sync";
 import * as Text from "./text";
 import * as Video from "./video";
 import { holdViewer } from "./viewer";
@@ -30,6 +30,8 @@ export type PlayerInput = {
 	delay: Getter<Delay>;
 	/** Future-dated media held beyond the live edge. */
 	lookahead: Getter<Duration>;
+	/** How far audio may trail the clock before it skips onto it; zero turns the time stretch off. */
+	stretch: Getter<Duration>;
 	/** Video rendition and canvas output. */
 	video: {
 		/** Desired video rendition or quality limits. */
@@ -40,6 +42,11 @@ export type PlayerInput = {
 		visible: Getter<Video.Visible>;
 		/** Which graphics API paints the canvas. */
 		backend: Getter<Video.Backend>;
+		/**
+		 * Delivery priority of the video track against the connection's other subscriptions, in
+		 * `-128..=127` with higher sent first.
+		 */
+		priority: Getter<number>;
 	};
 	/** Audio rendition and speaker output. */
 	audio: {
@@ -49,6 +56,11 @@ export type PlayerInput = {
 		volume: Getter<number>;
 		/** Silence audio and stop its download. */
 		muted: Getter<boolean>;
+		/**
+		 * Delivery priority of the audio track against the connection's other subscriptions, in
+		 * `-128..=127` with higher sent first.
+		 */
+		priority: Getter<number>;
 	};
 	/**
 	 * The claim this player holds on its connection's receive estimate while it downloads. Video
@@ -108,6 +120,7 @@ export class Player {
 	#videoRate = new Signal<number | undefined>(undefined);
 	#audioEnabled = new Signal(false);
 	#captionsEnabled = new Signal(false);
+	#tail = new Signal(false);
 	#signals = new Effect();
 
 	constructor(props: PlayerProps = {}) {
@@ -125,16 +138,19 @@ export class Player {
 			paused: getter(props.paused ?? false),
 			delay: getter(props.delay ?? "auto"),
 			lookahead: getter(props.lookahead ?? Duration.ZERO),
+			stretch: getter(props.stretch ?? STRETCH),
 			video: {
 				target: getter<Video.Target | undefined>(props.video?.target),
 				canvas: getter(props.video?.canvas),
 				visible: getter(props.video?.visible ?? "20%"),
 				backend: getter<Video.Backend>(props.video?.backend ?? "auto"),
+				priority: getter(props.video?.priority ?? Catalog.PRIORITY.video),
 			},
 			audio: {
 				target: getter<Audio.Target | undefined>(props.audio?.target),
 				volume: getter(props.audio?.volume ?? 0.5),
 				muted: getter(props.audio?.muted ?? false),
+				priority: getter(props.audio?.priority ?? Catalog.PRIORITY.audio),
 			},
 			viewer: {
 				viewers: getter(props.viewer?.viewers),
@@ -146,19 +162,17 @@ export class Player {
 			},
 		};
 
-		this.broadcast = new Broadcast(this.in);
+		this.broadcast = new Broadcast({ ...this.in, tail: this.#tail });
 		this.#signals.cleanup(() => this.broadcast.close());
 
 		const videoSource = new Video.Source({
 			broadcast: this.broadcast,
 			target: this.in.video.target,
-			supported: Video.Decoder.supported,
 			rate: this.#videoRate,
 		});
 		const audioSource = new Audio.Source({
 			broadcast: this.broadcast,
 			target: this.in.audio.target,
-			supported: Audio.Decoder.supported,
 		});
 		this.#signals.cleanup(() => {
 			videoSource.close();
@@ -168,11 +182,21 @@ export class Player {
 		this.text = new Text.Source({ broadcast: this.broadcast, target: this.in.text.target });
 		this.#signals.cleanup(() => this.text.close());
 
-		this.sync = new Sync({ delay: this.in.delay, lookahead: this.in.lookahead });
+		this.sync = new Sync({ delay: this.in.delay, lookahead: this.in.lookahead, stretch: this.in.stretch });
 		this.#signals.cleanup(() => this.sync.close());
 
-		this.video = new Video.Decoder({ source: videoSource, sync: this.sync, enabled: this.#videoEnabled });
-		this.audio = new Audio.Decoder({ source: audioSource, sync: this.sync, enabled: this.#audioEnabled });
+		this.video = new Video.Decoder({
+			source: videoSource,
+			sync: this.sync,
+			enabled: this.#videoEnabled,
+			priority: this.in.video.priority,
+		});
+		this.audio = new Audio.Decoder({
+			source: audioSource,
+			sync: this.sync,
+			enabled: this.#audioEnabled,
+			priority: this.in.audio.priority,
+		});
 		this.#signals.cleanup(() => {
 			this.video.close();
 			this.audio.close();
@@ -225,6 +249,21 @@ export class Player {
 				this.#videoRate,
 				rate === undefined ? undefined : Math.max(0, rate - (effect.get(audioBitrate) ?? 0)),
 			);
+		});
+
+		// A finished broadcast stays live while the media being played has some of it left, so it reads
+		// offline only once playback reached the end. Media not downloading has nothing to play.
+		this.#signals.run((effect) => {
+			const video =
+				effect.get(this.#videoEnabled) &&
+				effect.get(videoSource.out.config) !== undefined &&
+				!effect.get(this.video.out.ended);
+			const audio =
+				effect.get(this.#audioEnabled) &&
+				!effect.get(this.sync.out.instant) &&
+				effect.get(audioSource.out.config) !== undefined &&
+				!effect.get(this.audio.out.ended);
+			this.#tail.set(video || audio);
 		});
 
 		this.#signals.run((effect) => {

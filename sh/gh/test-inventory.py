@@ -626,8 +626,10 @@ def packages(root: Path) -> list[Package]:
                 entry["name"]: directory / entry.get("path", f"{auto}/{entry['name']}.rs")
                 for entry in manifest.get(kind, [])
             }
-            if kind == "bin" and (directory / "src/main.rs").is_file():
-                explicit.setdefault(package.name, directory / "src/main.rs")
+            # Cargo infers the package-named binary only when no `[[bin]]` claims its file.
+            main = directory / "src/main.rs"
+            if kind == "bin" and main.is_file() and main not in explicit.values():
+                explicit.setdefault(package.name, main)
             if package_settings.get(f"auto{kind}s" if kind != "test" else "autotests", True):
                 for file in sorted((directory / auto).glob("*.rs")):
                     explicit.setdefault(file.stem, file)

@@ -1,0 +1,22 @@
+# A downlink that congests mid-run: 1 Mbit/s behind a one second queue, collapsing to 16 kbit/s at
+# 25 s for a second and a half, then back.
+#
+# The tone needs about 140 kbit/s, so for that spell the queue fills to its second of wait and drops
+# the rest. The stall outlasts any row's target, and once the rate returns the transport delivers
+# the backlog: the queue's and every retransmit. Times are from shaper startup, like `step`.
+name = "congestion"
+seed = 8
+shared = true
+
+[down.rate]
+bits_per_second = 1000000
+burst = 1500
+queue = "1s"
+
+[[down.steps]]
+at = "25s"
+bits_per_second = 16000
+
+[[down.steps]]
+at = "26500ms"
+bits_per_second = 1000000

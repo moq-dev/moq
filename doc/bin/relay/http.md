@@ -13,7 +13,7 @@ operational ones that must stay private.
 | Endpoint | Returns |
 | --- | --- |
 | `GET /announced/<prefix>` | Broadcasts announced under the prefix, named relative to it. |
-| `GET /fetch/<broadcast>/<track>?group=N` | One group from the cache, the latest by default, or `404` if the track has no such group. Useful for catch-up and debugging. |
+| `GET /fetch/<broadcast>/<track>?group=N` | One group from the cache: the one that starts at `N` in the track's timescale, the latest by default, or `404` if the track has no such group. Useful for catch-up and debugging. |
 | `GET /certificate.sha256` | The fingerprint of the first configured TLS certificate, for pinning a self-signed dev certificate. |
 | `GET /health` | `200 ok`, unauthenticated, for load balancers. |
 
@@ -68,11 +68,34 @@ internal sessions and the stats feed. Compare them with payload to spot
 transport overhead and idle traffic. Transports that do not report them
 contribute zero.
 
+`moq_relay_wire_lost_bytes_total`, `moq_relay_cwnd_blocked_microseconds_total`,
+and `moq_relay_pacing_blocked_microseconds_total` sum the per-session
+[congestion counters](/concept/stats#presence) by `tier`: the sent bytes
+declared lost, which over `moq_relay_wire_tx_bytes_total` is the loss rate, and how long data
+ready to send waited on a full congestion window or on the pacer. Wait time
+growing while credit stays flat points at the network rather than connection
+credit; a tier sums many sessions, and stream-level credit is not counted, so
+it cannot rule a peer out.
+
+`moq_relay_credit_stalls_total` and `moq_relay_credit_stalled_microseconds_total`
+sum the per-session [credit stalls](/concept/stats#presence) by `tier`: how often
+and how long a connection's writes waited on the peer's connection-level
+flow-control credit (`MAX_DATA`). Time growing here, while loss stays flat, means
+peers stopped granting credit rather than the network slowing delivery.
+The receiving side says why: `moq_relay_credit_held_readers_microseconds_total`
+and `moq_relay_credit_held_evicted_microseconds_total` sum, by `tier`, how long
+peers had a connection's whole receive window spent while this relay evicted
+nothing, waiting on a reader that had not looked at its data yet (a reader
+behind) or on an evicted reader yet to stop its stream.
+
 `moq_relay_control_tx_bytes_total` and `moq_relay_control_rx_bytes_total`
 count control-message bytes by `tier` and `class` (`session`, `announce`, `track_info`, `subscribe`, `fetch`,
 `probe`, `auth`, `goaway`, `other`) to spot control-heavy sessions. They
 include message size prefixes but leave out media payload and transport
 overhead such as QUIC framing, ACKs, and retransmissions.
+`moq_relay_control_tx_messages_total` and `moq_relay_control_rx_messages_total`
+count the same messages by number, so an announce storm shows as a rate
+rather than as bytes.
 
 `moq_relay_sessions_connected` is a gauge of connected sessions by `tier` and
 `state`: `active` if media payload moved through the session, either way,
@@ -93,10 +116,20 @@ A few worth alerting on:
   `transport`, `application`, `expired`): admitted sessions that ended
   abnormally. A clean close is not a failure. Reported only while
   [stats](/bin/relay/config#stats) are enabled.
+- The moq-lite-07 [route layer](/concept/stats#presence), by `tier`, while
+  [stats](/bin/relay/config#stats) are enabled:
+  `moq_relay_route_changes_total` and `moq_relay_route_rewrites_total` (route
+  changes a peer caused, and the broadcasts each rewrote),
+  `moq_relay_route_withdrawals_total` by `direction` (`sent`, `received`) and
+  `kind` (`dead`, `drain`), `moq_relay_route_refusals_total` by `reason`
+  (`path`, `scope`, `looped`), and `moq_relay_route_sessions_closed_total` by
+  `kind` (`stalled`, `overrun`, `malformed`, `role`, `unasked`,
+  `other`). Compare a canary relay's rates with its neighbours' while rolling
+  out a release.
 - `moq_relay_stale_bytes_total` and friends: content dropped for drifting past
   a subscriber's latency budget.
-- `moq_relay_draining_sessions`: sessions sent a GOAWAY during a
-  [shutdown drain](/bin/relay/config#shutdown) that have not left yet.
+- `moq_relay_draining_sessions`: sessions and dialed cluster links sent a GOAWAY
+  during a [shutdown drain](/bin/relay/config#shutdown) that have not left yet.
 - `moq_relay_panics_total`: bugs that closed one session instead of the
   relay. Each logs an error with the message and the session's span. A panic
   in a long-lived task (the origin, the cache governor, the certificate reload,

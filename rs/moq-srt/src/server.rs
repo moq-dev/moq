@@ -6,12 +6,12 @@
 //! one of two directions. The caller inspects [`Request::resource`] /
 //! [`Request::stream_id`], makes an authorization decision, and either:
 //!
-//! - **[`Request::Publish`]**: [`Publish::accept`] (ingest the connection's
-//!   MPEG-TS into an origin at a path) or [`Publish::reject`]. This is the
-//!   contribution path (OBS, ffmpeg).
-//! - **[`Request::Subscribe`]**: [`Subscribe::accept`] (re-mux a broadcast from
-//!   an origin back to MPEG-TS and stream it down to the caller) or
-//!   [`Subscribe::reject`]. This is the egress path: a player (VLC, ffmpeg) pulls
+//! - **[`Request::Publish`]**: [`Publish::accept`] with an [`Import`] (ingest the
+//!   connection's MPEG-TS into an origin at a path) or [`Publish::reject`]. This
+//!   is the contribution path (OBS, ffmpeg).
+//! - **[`Request::Play`]**: [`Play::accept`] with an [`Export`] (re-mux a broadcast
+//!   from an origin back to MPEG-TS and stream it down to the caller) or
+//!   [`Play::reject`]. This is the egress path: a player (VLC, ffmpeg) pulls
 //!   `srt://host:port?streamid=#!::r=<broadcast>,m=request`.
 //!
 //! This mirrors `moq-tokio`'s `Server` / `Request`, so the gateway stays
@@ -21,13 +21,14 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use futures::{SinkExt, StreamExt};
+use futures::{SinkExt, Stream, StreamExt};
 use moq_mux::container::Frame;
 use moq_net::origin;
 use moq_net::time::Instant;
+use moq_net::transport::Wire;
 use srt_tokio::access::{AccessControlList, ConnectionMode, RejectReason, StandardAccessControlEntry};
 use srt_tokio::options::{PacketCount, SocketOptions, StreamId};
-use srt_tokio::{ConnectionRequest, SrtIncoming, SrtListener, SrtSocket};
+use srt_tokio::{ConnectionRequest, SocketStatistics, SrtIncoming, SrtListener, SrtSocket};
 
 use crate::{Program, Result};
 
@@ -166,11 +167,54 @@ impl Egress {
 /// Match libsrt's standard send-buffer window.
 const SRT_BUFFER_PACKETS: PacketCount = PacketCount(8192);
 
+/// How often a connection reports its statistics, and so how stale its [`Wire`] counts run.
+/// srt-protocol drops the final report when a connection closes, so this also bounds the
+/// bytes of a connection's last moments that go uncounted; 200 ms is the shortest it accepts.
+const STATISTICS_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Size the sender's buffer, and report statistics often enough for [`track`].
+///
 /// srt-tokio defaults its sender to only 32 packets, so one large keyframe can
 /// evict an unsent packet and wedge its send queue behind the missing sequence
 /// number.
-pub(crate) fn configure_buffers(options: &mut SocketOptions) {
+pub(crate) fn configure(options: &mut SocketOptions) {
 	options.sender.buffer_size = SRT_BUFFER_PACKETS * options.session.max_segment_size;
+	options.session.statistics_interval = STATISTICS_INTERVAL;
+}
+
+/// The IPv4 and UDP header bytes srt-protocol adds to every packet it counts, whatever the
+/// address family, so subtracting them leaves the SRT packet.
+const IP_UDP_HEADERS: u64 = 20 + 8;
+
+/// A cumulative byte count of SRT packets, without the IP and UDP headers srt-protocol estimates.
+fn srt_bytes(all_bytes: u64, packets: u64) -> u64 {
+	all_bytes.saturating_sub(packets.saturating_mul(IP_UDP_HEADERS))
+}
+
+/// Record `socket`'s cumulative wire bytes on `wire`, from each statistics report until its
+/// connection ends.
+///
+/// The task holds only the report stream, which ends with the connection, so it outlives
+/// neither the socket nor the wait for the last report.
+pub(crate) fn track(socket: &mut SrtSocket, wire: Wire) -> tokio::task::JoinHandle<()> {
+	tokio::spawn(record(socket.statistics().clone(), wire))
+}
+
+/// Run `serve`, which owns the socket and drops it, then wait for `tracking` to apply the
+/// connection's last report, so an embedder that drops its stats guard once this returns
+/// has every report counted.
+pub(crate) async fn settled<T>(tracking: tokio::task::JoinHandle<()>, serve: impl Future<Output = T>) -> T {
+	let result = serve.await;
+	// The task only copies counters, so it ends with the connection and cannot fail.
+	let _ = tracking.await;
+	result
+}
+
+async fn record(mut reports: impl Stream<Item = SocketStatistics> + Unpin, wire: Wire) {
+	while let Some(stats) = reports.next().await {
+		wire.set_sent_bytes(srt_bytes(stats.tx_all_bytes, stats.tx_all_packets));
+		wire.set_received_bytes(srt_bytes(stats.rx_all_bytes, stats.rx_all_packets));
+	}
 }
 
 /// An SRT server that yields each incoming connection's pending request as a
@@ -185,7 +229,7 @@ pub struct Server {
 	incoming: SrtIncoming,
 	local_addr: SocketAddr,
 	/// The negotiated SRT receive latency, reused as the egress delay (at least a
-	/// second) on each [`Subscribe`] (see [`crate::ts::Subscriber::new`]).
+	/// second) on each [`Play`] (see [`crate::ts::Subscriber::new`]).
 	latency: Duration,
 }
 
@@ -194,7 +238,7 @@ impl Server {
 	///
 	/// `latency` is the SRT receive latency, negotiated at handshake time; pass
 	/// `None` for a sensible default (500ms). It doubles as the egress delay for
-	/// [`Subscribe`] requests, but no less than a second.
+	/// [`Play`] requests, but no less than a second.
 	pub async fn bind(addr: SocketAddr, latency: impl Into<Option<Duration>>) -> Result<Self> {
 		let latency = latency.into().unwrap_or(DEFAULT_LATENCY);
 
@@ -209,7 +253,7 @@ impl Server {
 		let (listener, incoming) = SrtListener::builder()
 			.socket(socket)
 			.latency(latency)
-			.set(configure_buffers)
+			.set(configure)
 			.bind(local_addr)
 			.await?;
 		Ok(Self {
@@ -225,7 +269,7 @@ impl Server {
 		self.local_addr
 	}
 
-	/// Wait for the next connection that wants to publish or subscribe.
+	/// Wait for the next connection that wants to publish or play.
 	///
 	/// Connections whose stream id can't be routed (no usable resource name) are
 	/// rejected internally and skipped, so every [`Request`] returned is
@@ -247,14 +291,11 @@ impl Server {
 				stream_id,
 				peer,
 				latency: self.latency,
-				program: None,
-				follow: Duration::ZERO,
-				stitch: false,
 			};
 
 			// `m=request` reads a broadcast out; everything else publishes one in.
 			return Some(match mode {
-				ConnectionMode::Request => Request::Subscribe(Subscribe(pending)),
+				ConnectionMode::Request => Request::Play(Play(pending)),
 				_ => Request::Publish(Publish(pending)),
 			});
 		}
@@ -274,19 +315,12 @@ struct Pending {
 	/// fields out of it (e.g. a token in `u=` or a custom key).
 	stream_id: Option<String>,
 	peer: SocketAddr,
-	/// The SRT receive latency, reused as the egress delay (at least a second) on a subscribe.
+	/// The SRT receive latency, reused as the egress delay (at least a second) on a play.
 	latency: Duration,
-	/// The programs of a multiplex an ingest publishes. Override with [`Publish::with_program`].
-	program: Option<Program>,
-	/// How long an egress waits for the same instance to return. Override with
-	/// [`Subscribe::with_follow`].
-	follow: Duration,
-	/// Whether an egress follows a replacement. Override with [`Subscribe::with_stitch`].
-	stitch: bool,
 }
 
 /// What an accepted SRT connection wants: to contribute media ([`Publish`]) or to
-/// view it ([`Subscribe`]).
+/// view it ([`Play`]).
 ///
 /// Yielded by [`Server::accept`], classified by the stream id's `m=` mode.
 /// Inspect [`resource`](Self::resource) / [`stream_id`](Self::stream_id), then
@@ -296,8 +330,8 @@ struct Pending {
 pub enum Request {
 	/// A client pushing media in (OBS, ffmpeg). Ingest it with [`Publish::accept`].
 	Publish(Publish),
-	/// A client pulling media out (VLC, ffmpeg). Serve it with [`Subscribe::accept`].
-	Subscribe(Subscribe),
+	/// A client pulling media out (VLC, ffmpeg) with `m=request`. Serve it with [`Play::accept`].
+	Play(Play),
 }
 
 impl Request {
@@ -306,7 +340,7 @@ impl Request {
 	pub fn resource(&self) -> &str {
 		match self {
 			Request::Publish(r) => r.resource(),
-			Request::Subscribe(r) => r.resource(),
+			Request::Play(r) => r.resource(),
 		}
 	}
 
@@ -314,7 +348,7 @@ impl Request {
 	pub fn stream_id(&self) -> Option<&str> {
 		match self {
 			Request::Publish(r) => r.stream_id(),
-			Request::Subscribe(r) => r.stream_id(),
+			Request::Play(r) => r.stream_id(),
 		}
 	}
 
@@ -322,7 +356,7 @@ impl Request {
 	pub fn peer(&self) -> SocketAddr {
 		match self {
 			Request::Publish(r) => r.peer(),
-			Request::Subscribe(r) => r.peer(),
+			Request::Play(r) => r.peer(),
 		}
 	}
 }
@@ -355,17 +389,10 @@ impl Publish {
 		self.0.peer
 	}
 
-	/// Publish one program of a multi-program feed, or each as its own broadcast under the
-	/// accepted path. `None` (the default) fails an ingest whose PAT lists more than one.
-	pub fn with_program(mut self, program: impl Into<Option<Program>>) -> Self {
-		self.0.program = program.into();
-		self
-	}
-
-	/// Accept the publish: announce a broadcast at `path` in `origin` and pump the
-	/// connection's MPEG-TS into it, published as `ingest` says, until the client disconnects.
+	/// Accept the publish: announce the [`Import`]'s broadcast in its publisher and pump the
+	/// connection's MPEG-TS into it, published as its ingest says, until the client disconnects.
 	///
-	/// `origin` is whatever the caller wants the media published into (e.g. a
+	/// The publisher is whatever the caller wants the media published into (e.g. a
 	/// relay's shared origin, optionally scoped per the authenticated token). This
 	/// future resolves when the connection ends, so callers usually run it on its
 	/// own task.
@@ -376,16 +403,22 @@ impl Publish {
 	///
 	/// The ingest's max age is unrelated to the SRT receive latency [`Server::bind`]
 	/// negotiates, which is a transport buffer on this hop.
-	pub async fn accept(
-		self,
-		origin: &origin::Producer,
-		path: impl Into<moq_net::Path>,
-		ingest: &moq_mux::Ingest,
-	) -> Result<()> {
-		let path: moq_net::Path = path.into();
-		let socket = self.0.request.accept(None).await?;
-		tracing::info!(peer = %self.0.peer, %path, "SRT publish accepted");
-		serve_publish(origin, path.as_str(), socket, ingest, self.0.program).await
+	pub async fn accept(self, import: Import<'_>) -> Result<()> {
+		let mut socket = self.0.request.accept(None).await?;
+		tracing::info!(peer = %self.0.peer, path = %import.broadcast, "SRT publish accepted");
+		let Import {
+			publisher,
+			broadcast,
+			ingest,
+			program,
+			wire,
+		} = import;
+		let tracking = track(&mut socket, wire);
+		settled(
+			tracking,
+			serve_publish(publisher, broadcast.as_str(), socket, &ingest, program),
+		)
+		.await
 	}
 
 	/// Reject the publish with a verdict the client can distinguish on the wire.
@@ -398,15 +431,15 @@ impl Publish {
 	}
 }
 
-/// A pending SRT subscribe (egress), waiting on the caller to authorize it.
+/// A pending SRT play (egress, `m=request`), waiting on the caller to authorize it.
 ///
 /// The viewing counterpart of [`Publish`]: inspect [`resource`](Self::resource) /
 /// [`stream_id`](Self::stream_id), then [`accept`](Self::accept) to serve a
 /// broadcast from an origin down to the caller, or [`reject`](Self::reject) it.
 /// Dropping it without either drops the connection.
-pub struct Subscribe(Pending);
+pub struct Play(Pending);
 
-impl Subscribe {
+impl Play {
 	/// The resource name to route on (the stream id's `r=` value, or the raw
 	/// stream id).
 	pub fn resource(&self) -> &str {
@@ -426,46 +459,104 @@ impl Subscribe {
 		self.0.peer
 	}
 
-	/// Wait up to `follow` for the same publisher instance, or when stitching a replacement, to
-	/// come back once the broadcast ends, carrying on with the same stream. Zero (the default)
-	/// follows only an instance already serving, else closes the SRT stream.
-	pub fn with_follow(mut self, follow: Duration) -> Self {
-		self.0.follow = follow;
-		self
-	}
-
-	/// Follow another publisher instance replacing the broadcast, as a full program switch on
-	/// the same SRT connection. Off by default, which ends the stream with
-	/// [`moq_mux::Error::Replaced`].
-	pub fn with_stitch(mut self, stitch: bool) -> Self {
-		self.0.stitch = stitch;
-		self
-	}
-
-	/// Accept the subscribe: resolve the broadcast at `path` in `origin`, re-mux
+	/// Accept the play: resolve the [`Export`]'s broadcast in its subscriber, re-mux
 	/// it to MPEG-TS, and stream it down to the caller until either side ends.
 	///
 	/// Waits for the broadcast to be announced (so a caller may connect before the
 	/// publisher), cancelling cleanly if the caller disconnects first. This future
 	/// resolves when playback ends, so callers usually run it on its own task.
-	pub async fn accept(self, origin: &origin::Consumer, path: impl Into<moq_net::Path>) -> Result<()> {
-		let path: moq_net::Path = path.into();
-		let socket = self.0.request.accept(None).await?;
-		tracing::info!(peer = %self.0.peer, %path, "SRT subscribe accepted");
+	pub async fn accept(self, export: Export<'_>) -> Result<()> {
+		let mut socket = self.0.request.accept(None).await?;
+		let tracking = track(&mut socket, export.wire.clone());
+		tracing::info!(peer = %self.0.peer, path = %export.broadcast, "SRT play accepted");
 		let options = crate::ts::Options {
 			latency: self.0.latency,
-			follow: self.0.follow,
-			stitch: self.0.stitch,
+			follow: export.follow,
+			stitch: export.stitch,
 		};
-		serve_subscribe(origin, path.as_str(), socket, options).await
+		settled(
+			tracking,
+			serve_subscribe(export.subscriber, export.broadcast.as_str(), socket, options),
+		)
+		.await
 	}
 
-	/// Reject the subscribe with a verdict the client can distinguish on the wire.
+	/// Reject the play with a verdict the client can distinguish on the wire.
 	///
 	/// As with a publish, the [`Server`] has to outlive the client's handshake for
 	/// the verdict to reach the wire.
 	pub async fn reject(self, reason: Reject) -> Result<()> {
 		Ok(self.0.request.reject(reason.reason()).await?)
+	}
+}
+
+/// Where and how an SRT ingest publishes: [`Publish::accept`], or [`Client::pull`](crate::Client::pull).
+#[non_exhaustive]
+pub struct Import<'a> {
+	/// The producer the media is published into.
+	pub publisher: &'a origin::Producer,
+	/// The broadcast to publish, relative to the producer's root.
+	pub broadcast: moq_net::Path,
+	/// How the ingested broadcast is published.
+	pub ingest: moq_mux::Ingest,
+	/// Publish one program of a multi-program feed, or each as its own broadcast under
+	/// [`broadcast`](Self::broadcast). `None` (the default) fails an ingest whose PAT lists
+	/// more than one.
+	pub program: Option<Program>,
+	/// Where the connection's wire bytes are counted, which an embedder registers a clone of
+	/// with [`stats::Session::wire`](moq_net::stats::Session::wire) before accepting, and holds the
+	/// guard it returns until the accepting future resolves, since dropping it ends the registration.
+	/// It holds SRT packet bytes, headers and retransmits included, without IP and UDP.
+	pub wire: Wire,
+}
+
+impl<'a> Import<'a> {
+	/// Publish into `publisher` under `broadcast` with the default [`Ingest`](moq_mux::Ingest),
+	/// refusing a multiplex.
+	pub fn new(publisher: &'a origin::Producer, broadcast: impl Into<moq_net::Path>) -> Self {
+		Self {
+			publisher,
+			broadcast: broadcast.into(),
+			ingest: moq_mux::Ingest::default(),
+			program: None,
+			wire: Wire::new(),
+		}
+	}
+}
+
+/// Where and how an SRT egress reads its broadcast: [`Play::accept`], or
+/// [`Client::publish`](crate::Client::publish).
+#[non_exhaustive]
+pub struct Export<'a> {
+	/// The consumer the broadcast is read from.
+	pub subscriber: &'a origin::Consumer,
+	/// The broadcast to send, relative to the consumer's root.
+	pub broadcast: moq_net::Path,
+	/// How long to wait for the same publisher instance, or when [stitching](Self::stitch) a
+	/// replacement, to come back once the broadcast ends, carrying on with the same stream.
+	/// Zero (the default) follows only an instance already serving, else ends the stream.
+	pub follow: Duration,
+	/// Follow another publisher instance replacing the broadcast, as a full program switch on
+	/// the same SRT connection. Off by default, which ends the stream with
+	/// [`moq_mux::Error::Replaced`].
+	pub stitch: bool,
+	/// Where the connection's wire bytes are counted, which an embedder registers a clone of
+	/// with [`stats::Session::wire`](moq_net::stats::Session::wire) before accepting, and holds the
+	/// guard it returns until the accepting future resolves, since dropping it ends the registration.
+	/// It holds SRT packet bytes, headers and retransmits included, without IP and UDP.
+	pub wire: Wire,
+}
+
+impl<'a> Export<'a> {
+	/// Send `broadcast` from `subscriber`, ending the stream when its publisher does.
+	pub fn new(subscriber: &'a origin::Consumer, broadcast: impl Into<moq_net::Path>) -> Self {
+		Self {
+			subscriber,
+			broadcast: broadcast.into(),
+			follow: Duration::ZERO,
+			stitch: false,
+			wire: Wire::new(),
+		}
 	}
 }
 
@@ -668,7 +759,7 @@ mod tests {
 
 	/// Regression: srt-tokio's 32-packet default sender buffer evicts unsent packets
 	/// once a burst overflows it, wedging the connection within the first few messages
-	/// (see [`configure_buffers`]).
+	/// (see [`configure`]).
 	#[tokio::test]
 	async fn accepted_socket_sends_a_burst_larger_than_srt_tokio_default() {
 		// TSBPD holds every payload for the negotiated latency before releasing it, so
@@ -685,10 +776,10 @@ mod tests {
 		});
 
 		let request = server.accept().await.expect("an SRT request");
-		let Request::Subscribe(subscribe) = request else {
-			panic!("m=request must create a subscribe request");
+		let Request::Play(play) = request else {
+			panic!("m=request must create a play request");
 		};
-		let mut sender = subscribe.0.request.accept(None).await.unwrap();
+		let mut sender = play.0.request.accept(None).await.unwrap();
 		let mut receiver = caller.await.unwrap();
 
 		// Several times srt-tokio's 32-packet default, which stalls before the tenth
@@ -715,6 +806,120 @@ mod tests {
 				.unwrap();
 			assert_eq!(payload.as_ref(), sequence.to_be_bytes());
 		}
+	}
+
+	/// A report counting `packets` packets of `payload` SRT payload bytes each, the way
+	/// srt-protocol does: IPv4, UDP, and SRT headers included.
+	fn report(packets: u64, payload: u64) -> SocketStatistics {
+		let mut stats = SocketStatistics::default();
+		stats.tx_all_packets = packets;
+		stats.tx_all_bytes = packets * (payload + 44);
+		stats.rx_all_packets = 2 * packets;
+		stats.rx_all_bytes = 2 * packets * (payload + 44);
+		stats
+	}
+
+	/// Each report replaces the last, a count short of its own headers never underflows, and the
+	/// final report stays after the stream ends.
+	#[tokio::test]
+	async fn wire_counts_srt_packets_without_ip_and_udp() {
+		let wire = Wire::new();
+		let mut short = SocketStatistics::default();
+		short.tx_all_bytes = 10;
+		short.tx_all_packets = 1;
+		record(futures::stream::iter([report(2, 1316), short]), wire.clone()).await;
+		assert_eq!((wire.sent_bytes(), wire.received_bytes()), (0, 0));
+
+		record(futures::stream::iter([report(2, 1316), report(3, 1316)]), wire.clone()).await;
+		// 16 bytes of SRT header per packet, and nothing of IP or UDP.
+		assert_eq!(wire.sent_bytes(), 3 * (1316 + 16));
+		assert_eq!(wire.received_bytes(), 6 * (1316 + 16));
+	}
+
+	/// A play's connection counts at least the SRT packets of the payload it sent.
+	/// srt-protocol's own data-only counters give the ground truth: payload plus a 16 byte SRT
+	/// header, once the 28 byte IP and UDP estimate is gone.
+	#[tokio::test]
+	async fn wire_covers_the_payload_a_connection_carried() {
+		kio::clock::host_time(); // real SRT sockets
+		const MESSAGES: u64 = 64;
+		const PAYLOAD: u64 = SRT_PAYLOAD as u64;
+		let mut server = Server::bind("127.0.0.1:0".parse().unwrap(), Duration::from_millis(50))
+			.await
+			.unwrap();
+		let addr = server.local_addr();
+		let caller = tokio::spawn(async move {
+			SrtSocket::builder()
+				.set(configure)
+				.latency(Duration::from_millis(50))
+				.call(addr, Some("#!::r=wire-test,m=request"))
+				.await
+				.unwrap()
+		});
+		let Some(Request::Play(play)) = server.accept().await else {
+			panic!("m=request must create a play request");
+		};
+		let mut sender = play.0.request.accept(None).await.unwrap();
+		let mut receiver = caller.await.unwrap();
+
+		let (sent, received) = (Wire::new(), Wire::new());
+		let tracking = [track(&mut sender, sent.clone()), track(&mut receiver, received.clone())];
+		let mut sender_reports = sender.statistics().clone();
+		let mut receiver_reports = receiver.statistics().clone();
+		for _ in 0..MESSAGES {
+			sender
+				.send((kio::clock::now().into_std(), Bytes::from(vec![7; SRT_PAYLOAD])))
+				.await
+				.unwrap();
+		}
+		for _ in 0..MESSAGES {
+			kio::clock::timeout(Duration::from_secs(3), receiver.next())
+				.await
+				.expect("the receiver stalled")
+				.expect("the sender closed early")
+				.unwrap();
+		}
+
+		// Wait for a report that has seen every data packet. A tracker holds it, or a later one,
+		// by the time its stream ends.
+		let report = kio::clock::timeout(Duration::from_secs(10), async {
+			loop {
+				let stats = sender_reports.next().await.expect("the sender's connection ended");
+				if stats.tx_data >= MESSAGES {
+					return stats;
+				}
+			}
+		})
+		.await
+		.expect("the sender never reported its data");
+		// Loopback loses nothing, so every data packet went out once.
+		assert_eq!(report.tx_data, MESSAGES);
+		assert_eq!(srt_bytes(report.tx_bytes, report.tx_data), MESSAGES * (PAYLOAD + 16));
+		// The receiver counts the same packets on its own.
+		let report = kio::clock::timeout(Duration::from_secs(10), async {
+			loop {
+				let stats = receiver_reports.next().await.expect("the receiver's connection ended");
+				if stats.rx_data >= MESSAGES {
+					return stats;
+				}
+			}
+		})
+		.await
+		.expect("the receiver never reported its data");
+		assert_eq!(srt_bytes(report.rx_bytes, report.rx_data), MESSAGES * (PAYLOAD + 16));
+
+		drop((sender, receiver));
+		for task in tracking {
+			task.await.unwrap();
+		}
+		assert!(
+			sent.sent_bytes() >= MESSAGES * (PAYLOAD + 16),
+			"sent {} for {MESSAGES} packets of {PAYLOAD} bytes",
+			sent.sent_bytes()
+		);
+		assert!(received.received_bytes() >= MESSAGES * (PAYLOAD + 16));
+		// The receiver answers with control packets alone.
+		assert!(sent.received_bytes() < sent.sent_bytes());
 	}
 
 	/// One muxer frame of `payload` bytes at `micros` of media time.
@@ -868,6 +1073,8 @@ mod tests {
 		use moq_mux::container::{Producer, ts};
 		use moq_net::Timestamp;
 
+		kio::clock::host_time(); // real SRT sockets
+
 		// Short enough to keep the test quick, long enough that the release instants
 		// either side of the marker are separated by more than clock noise.
 		const LATENCY: Duration = Duration::from_millis(300);
@@ -892,7 +1099,7 @@ mod tests {
 			)
 			.unwrap();
 		{
-			let mut guard = catalog.modify().unwrap();
+			let mut guard = catalog.modify(catalog.next_timestamp()).unwrap();
 			let mut config = hang::catalog::AudioConfig::new(hang::catalog::AAC { profile: 2 }, 48_000, 2);
 			config.description = Some(Bytes::from_static(&[0x11, 0x90]));
 			config.container = hang::catalog::Container::Legacy;
@@ -926,12 +1133,14 @@ mod tests {
 				.unwrap()
 		});
 
-		let Request::Subscribe(subscribe) = server.accept().await.expect("an SRT request") else {
-			panic!("m=request must create a subscribe request");
+		let Request::Play(play) = server.accept().await.expect("an SRT request") else {
+			panic!("m=request must create a play request");
 		};
 		let consumer = origin.consume();
-		let egress =
-			tokio::spawn(async move { subscribe.accept(&consumer, moq_net::Path::from_static("marker")).await });
+		let egress = tokio::spawn(async move {
+			play.accept(Export::new(&consumer, moq_net::Path::from_static("marker")))
+				.await
+		});
 		let mut receiver = caller.await.unwrap();
 
 		// Three seconds of program, then wait until the receiver is actually playing it
@@ -945,9 +1154,10 @@ mod tests {
 			.unwrap();
 		received.push(first);
 
-		// The publisher declares a break and continues forward.
+		// The publisher declares a break and continues forward, with half a second written at
+		// once: a longer burst would leave the marker's group stale before the egress reads it.
 		producer.discontinuity().unwrap();
-		write(&mut producer, 30, OFFSET + 3_000_000);
+		write(&mut producer, 5, OFFSET + 3_000_000);
 
 		// Drain until the muxer flags the break, which it does exactly once, on the new
 		// generation's leading clock packet.
@@ -1004,7 +1214,7 @@ mod tests {
 			config.description = Some(Bytes::from_static(&[0x11, 0x90]));
 			config.container = hang::catalog::Container::Legacy;
 			catalog
-				.modify()
+				.modify(catalog.next_timestamp())
 				.unwrap()
 				.audio
 				.renditions
@@ -1039,7 +1249,7 @@ mod tests {
 
 		/// End the broadcast cleanly.
 		fn finish(mut self) {
-			self.audio.finish().unwrap();
+			let _finished = self.audio.finish().unwrap();
 			self.catalog.finish().unwrap();
 		}
 	}
@@ -1061,17 +1271,20 @@ mod tests {
 				.await
 				.unwrap()
 		});
-		let Request::Subscribe(subscribe) = server.accept().await.expect("an SRT request") else {
-			panic!("m=request must create a subscribe request");
+		let Request::Play(play) = server.accept().await.expect("an SRT request") else {
+			panic!("m=request must create a play request");
 		};
 		let consumer = origin.consume();
 		let task = tokio::spawn(async move {
 			let _server = server;
-			subscribe
-				.with_follow(follow)
-				.with_stitch(stitch)
-				.accept(&consumer, moq_net::Path::from_static("live"))
-				.await
+			play.accept(Export {
+				subscriber: &consumer,
+				broadcast: moq_net::Path::from_static("live"),
+				follow,
+				stitch,
+				wire: Wire::new(),
+			})
+			.await
 		});
 		(caller.await.unwrap(), task)
 	}

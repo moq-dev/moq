@@ -15,7 +15,7 @@
 	},
 	"scripts": {
 		"build": "rm -rf dist && tsc -b tsconfig.build.json && bun ../common/package.ts",
-		"check": "tsc --noEmit",
+		"check": "bun check --no-script",
 		"test": "bun test --only-failures",
 		"release": "bun ../common/release.ts"
 	},
@@ -31,7 +31,6 @@
 		"qmux",
 		"webtransport",
 		"websocket",
-		"polyfill",
 		"quic",
 		"streams"
 	]

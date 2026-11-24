@@ -34,7 +34,7 @@ checks that what the fault owned was released.
 | `bursts_cross_a_cluster` | Bursts of one-frame groups cross from an origin relay to a clustered edge relay; the subscriber reads newest-only and FETCHes every group it misses | how many groups missed the live subscription, which live groups were reset, the completed ingress burst and overflow count, and the slowest group's latency | every group arrives, live or by FETCH, within 10s of being written; a lost group fails by name (FETCH failed, FETCH unanswered, live group stalled), and the newest group comes live |
 | `bursts_cross_a_flapping_peer` | The same bursts, with the peer link cut as the second burst is written and restored once the edge withdraws the route | how long the link was down before the withdrawal, and the reads and FETCHes the flap failed | the route comes back and every group still arrives within 10s of being written, or of the route's return when it arrives after it; only a failure the flap caused is retried, on the restored route, so a hang on the dead one past the relays' idle timeout or a withdrawal with the link up still fails |
 | `bursts_cross_a_transport_peer` | The same bursts, with the relays peering over `moq-transport-22`, so the edge recovers gaps with IETF FETCHes | as `bursts_cross_a_cluster` | as `bursts_cross_a_cluster`: a group the origin still holds is served, never refused |
-| `ietf_subscriber_max_age_skips_bufferbloat`, `lite_subscriber_max_age_skips_bufferbloat` | moq-transport-22 or moq-lite-06 media at 5.12Mb/s crosses a 64kb/s link behind a finite 500ms queue, with no random loss | the propagated 100ms budget and forced queue overflow | superseded groups are skipped and the newest catalog snapshot survives its budget |
+| `lite_subscriber_max_age_skips_bufferbloat` | moq-lite-06 media at 5.12Mb/s crosses a 64kb/s link behind a finite 500ms queue, with no random loss | the propagated 100ms budget and forced queue overflow | superseded groups are skipped and the newest catalog snapshot survives its budget |
 | `no_publisher_never_delivers` | none: the negative control | - | with nothing publishing, nothing is announced and no broadcast resolves |
 
 A moq publisher is never blocked by a slow reader: `write_frame` is synchronous
@@ -205,6 +205,20 @@ mutation uses `impaired`, where that fault is armed.
 | `fetch-never-sent` | sending a FETCH for an uncached group, at the subscriber and at the edge relay | `bursts_cross_a_cluster::loopback` |
 | `peer-link-never-redialed` | redialing a cluster peer after its link is lost | `bursts_cross_a_flapping_peer::loopback` |
 
+The `quic-` mutations break one of QUIC's rules in moq-quic while data still
+arrives, and require moq-quic's rule checker (`moq_quic::sim::Rules` and the
+congestion window check in its test `Pair`) to fail the test that shows it.
+Their `# package:` and `# target:` headers point the script at moq-quic's unit
+tests instead of the relay drills.
+
+| Mutation | Breaks | Test that must fail |
+|---|---|---|
+| `quic-amplification-full-datagram` | RFC 9000 §8.1: a server sends an unvalidated address at most three times what it received | `tests::long_header_packets_fit_a_large_mtu` |
+| `quic-client-initial-unpadded` | RFC 9000 §14.1: a client pads each datagram carrying an Initial to 1200 bytes | `tests::sim::random_workloads` |
+| `quic-coalesced-cid-mismatch` | RFC 9000 §12.2: coalesced packets share one connection ID | `tests::sim::random_workloads` |
+| `quic-long-header-length-overrun` | RFC 9000 §17.2: every long header parses within its datagram | `tests::sim::random_workloads` |
+| `quic-congestion-window-ignored` | RFC 9002 §7: bytes in flight stay within the congestion window | `tests::sim::random_workloads` |
+
 A mutated tree that fails to compile is a failure of the proof, not a pass: a
 compile error shows the patch touched something, not that the drill was
 watching. So is a drill that fails for a reason other than the one its mutation
@@ -213,7 +227,7 @@ The script runs every drill through nextest, whose process-level timeout also
 terminates a mutation that wedges outside the drill's own Tokio timeouts.
 
 Adding one: write the patch (a `git diff` of the behavior removed), give it the
-two headers, and add a row above.
+two headers (four for a test outside the drills), and add a row above.
 
 ## What is underneath
 

@@ -2,6 +2,7 @@ mod config;
 mod connection;
 mod host;
 mod range;
+mod replay;
 mod stats;
 
 use std::sync::Arc;
@@ -19,6 +20,7 @@ fn main() -> anyhow::Result<()> {
 	match config.command.take() {
 		// The sampler blocks on the host clock, so it runs outside any runtime.
 		Some(config::Command::Host(args)) => host::run(args),
+		Some(config::Command::Replay(args)) => tokio::runtime::Runtime::new()?.block_on(replay::run(*args)),
 		None => tokio::runtime::Runtime::new()?.block_on(generate(config)),
 	}
 }

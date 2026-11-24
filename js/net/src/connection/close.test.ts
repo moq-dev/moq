@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { Duration, type Installed, Manual } from "@moq/clock";
+import { Duration, type Installed } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import * as Ietf from "../ietf/index.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair, type MockTransport } from "../mock.ts";
@@ -13,25 +14,28 @@ function holdFin(transport: MockTransport) {
 	const reached = Promise.withResolvers<void>();
 	const release = Promise.withResolvers<void>();
 	let enabled = false;
-	const wrap = (stream: WebTransportBidirectionalStream): WebTransportBidirectionalStream => {
-		const writer = stream.writable.getWriter();
-		return {
-			readable: stream.readable,
-			writable: new WritableStream<Uint8Array>({
-				write: (bytes) => writer.write(bytes),
-				abort: (reason) => writer.abort(reason),
-				async close() {
-					await writer.close();
-					if (enabled) {
-						reached.resolve();
-						await release.promise;
-					}
-				},
-			}),
-		} as WebTransportBidirectionalStream;
+	const hold = (writable: WritableStream<Uint8Array>): WritableStream<Uint8Array> => {
+		const writer = writable.getWriter();
+		return new WritableStream<Uint8Array>({
+			write: (bytes) => writer.write(bytes),
+			abort: (reason) => writer.abort(reason),
+			async close() {
+				await writer.close();
+				if (enabled) {
+					reached.resolve();
+					await release.promise;
+				}
+			},
+		});
 	};
+	const wrap = (stream: WebTransportBidirectionalStream): WebTransportBidirectionalStream =>
+		({ readable: stream.readable, writable: hold(stream.writable) }) as WebTransportBidirectionalStream;
 	const create = transport.createBidirectionalStream.bind(transport);
 	transport.createBidirectionalStream = async (options) => wrap(await create(options));
+	// Lite-07 withdraws on its unidirectional Announce Stream.
+	const createUni = transport.createUnidirectionalStream.bind(transport);
+	transport.createUnidirectionalStream = async (options) =>
+		hold(await createUni(options)) as Awaited<ReturnType<typeof createUni>>;
 	Object.defineProperty(transport, "incomingBidirectionalStreams", {
 		value: transport.incomingBidirectionalStreams.pipeThrough(
 			new TransformStream({
@@ -79,9 +83,9 @@ for (const protocol of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18]) {
 				const closing = server.close();
 				await fin.reached;
 				expect(closed).toBe(false);
-				// lite-07 withdraws its claims; moq-transport only ends the stream, which
-				// withdraws nothing without a NAMESPACE_DONE.
-				expect((await announced.next())?.kind).toBe(protocol === Lite.ALPN_07_WIP ? "end" : "offline");
+				// lite-07 lets go of its route with a ROUTE_END, and moq-transport only ends the
+				// stream: neither withdraws the origin's claims, so the path goes offline.
+				expect((await announced.next())?.kind).toBe("offline");
 				if (outcome === "timeout") {
 					// bun's `rejects` blocks on a pending promise, so catch first and advance.
 					const timedOut = closing.catch((err: unknown) => err);

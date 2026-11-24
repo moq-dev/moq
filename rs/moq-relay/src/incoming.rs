@@ -10,7 +10,7 @@ pub trait Incoming: Sealed {}
 
 impl Incoming for moq_tokio::server::Request {}
 
-#[cfg(all(target_os = "linux", feature = "_uring"))]
+#[cfg(uring)]
 impl Incoming for crate::uring::Request {}
 
 #[cfg(feature = "test-support")]
@@ -62,8 +62,9 @@ pub trait Sealed: Sized {
 	/// What the auth decider is asked about this session.
 	fn admission(&self, auth: &auth::Auth) -> moq_auth::Request;
 
-	/// Finish `work` before the handshake deadline, closing the session if it passes.
-	async fn within<T>(&mut self, work: impl std::future::Future<Output = T>) -> anyhow::Result<T>;
+	/// Resolve once the handshake deadline passes, having closed the session with the
+	/// timeout code; never, without a deadline.
+	async fn expired(&mut self);
 
 	/// Refuse the session, closing it with `code`.
 	async fn reject(self, code: moq_net::SessionError);
@@ -84,7 +85,7 @@ pub trait Sealed: Sized {
 	fn requests(&mut self) -> moq_net::auth::Requests;
 	fn role(&self) -> Option<moq_net::setup::Role>;
 	/// The identity the peer declared in its SETUP, if any: its Hop ID, or from moq-lite-07 its Node ID.
-	fn peer_hop(&self) -> Option<std::num::NonZeroU64>;
+	fn peer_node(&self) -> Option<std::num::NonZeroU64>;
 	fn with_stats(self, stats: moq_net::stats::Session) -> Self;
 	fn with_limits(self, limits: moq_net::session::Limits) -> Self;
 	fn with_publisher(self, publish: moq_net::origin::Consumer) -> Self;
@@ -94,7 +95,7 @@ pub trait Sealed: Sized {
 	async fn ok(self) -> anyhow::Result<(moq_net::Session, Self::Driver)>;
 
 	/// Run the session's protocol until it ends, alongside its supervision.
-	fn drive(driver: Self::Driver) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
+	fn drive(driver: Self::Driver) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'static;
 }
 
 impl Sealed for moq_tokio::server::Request {
@@ -113,15 +114,14 @@ impl Sealed for moq_tokio::server::Request {
 		auth::request_for(auth, self)
 	}
 
-	async fn within<T>(&mut self, work: impl std::future::Future<Output = T>) -> anyhow::Result<T> {
-		Ok(moq_tokio::server::Request::within(self, work).await?)
+	async fn expired(&mut self) {
+		moq_tokio::server::Request::expired(self).await
 	}
 
 	async fn reject(self, code: moq_net::SessionError) {
 		let _ = moq_tokio::server::Request::reject(self, code).await;
 	}
 
-	#[cfg(feature = "quic")]
 	fn pacer(&self) -> Option<auth::Pacer> {
 		let quic = moq_tokio::server::Request::quic_limits(self)?;
 		Some(auth::Pacer::new(move |caps| {
@@ -131,7 +131,6 @@ impl Sealed for moq_tokio::server::Request {
 		}))
 	}
 
-	#[cfg(feature = "quic")]
 	fn with_quic_limits(self, limits: moq_quic::Limits) -> anyhow::Result<Self> {
 		Ok(moq_tokio::server::Request::with_quic_limits(self, limits)?)
 	}
@@ -148,8 +147,8 @@ impl Sealed for moq_tokio::server::Request {
 		moq_tokio::server::Request::role(self)
 	}
 
-	fn peer_hop(&self) -> Option<std::num::NonZeroU64> {
-		moq_tokio::server::Request::peer_hop(self)
+	fn peer_node(&self) -> Option<std::num::NonZeroU64> {
+		moq_tokio::server::Request::peer_node(self)
 	}
 
 	fn with_stats(self, stats: moq_net::stats::Session) -> Self {
@@ -198,8 +197,8 @@ impl Sealed for Accepted {
 		auth::request_for_setup(auth, &self.handshake, self.transport)
 	}
 
-	async fn within<T>(&mut self, work: impl std::future::Future<Output = T>) -> anyhow::Result<T> {
-		within(&mut self.handshake, work).await
+	async fn expired(&mut self) {
+		self.handshake.expired().await
 	}
 
 	async fn reject(self, code: moq_net::SessionError) {
@@ -218,8 +217,8 @@ impl Sealed for Accepted {
 		self.handshake.role()
 	}
 
-	fn peer_hop(&self) -> Option<std::num::NonZeroU64> {
-		self.handshake.peer_hop()
+	fn peer_node(&self) -> Option<std::num::NonZeroU64> {
+		self.handshake.peer_node()
 	}
 
 	fn with_stats(mut self, stats: moq_net::stats::Session) -> Self {
@@ -251,18 +250,5 @@ impl Sealed for Accepted {
 		// ending is only the protocol stopping.
 		moq_net::time::run(driver).await;
 		Ok(())
-	}
-}
-
-/// Finish `work` before `handshake`'s accept deadline, which refuses the session if it passes.
-#[cfg(any(feature = "test-support", all(target_os = "linux", feature = "_uring")))]
-pub(crate) async fn within<T>(
-	handshake: &mut moq_net::server::Handshake,
-	work: impl std::future::Future<Output = T>,
-) -> anyhow::Result<T> {
-	let expired = handshake.expired();
-	match futures::future::select(std::pin::pin!(work), std::pin::pin!(expired)).await {
-		futures::future::Either::Left((done, _)) => Ok(done),
-		futures::future::Either::Right(_) => Err(moq_net::Error::Timeout.into()),
 	}
 }

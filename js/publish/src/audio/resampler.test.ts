@@ -17,6 +17,8 @@ function tone(samples: number, rate: number, freq: number, offset: number, chann
 
 describe("Resampler", () => {
 	// The whole point: 44.1kHz is the most common file rate and the one Opus cannot carry.
+	// The whole point: 44.1kHz is the most common file rate and the one Opus cannot carry. What came
+	// out, plus the lookahead still owed, is exactly the input's duration at the new rate.
 	test("converts 44100 to 48000 at the right rate", () => {
 		const resampler = new Resampler({ from: 44_100, to: 48_000, channels: 1 });
 
@@ -25,9 +27,7 @@ describe("Resampler", () => {
 			output += resampler.push(tone(1000, 44_100, 440, chunk * 1000))?.channels[0].length ?? 0;
 		}
 
-		// 44000 input samples at 44.1kHz is ~0.9977s, which is ~47891 samples at 48kHz.
-		expect(output).toBeGreaterThan(47_800);
-		expect(output).toBeLessThanOrEqual(47_891);
+		expect(output + resampler.pending).toBeCloseTo((44_000 * 48_000) / 44_100, 6);
 	});
 
 	test("converts 48000 down to 24000 at half the samples", () => {
@@ -38,8 +38,53 @@ describe("Resampler", () => {
 			output += resampler.push(tone(960, 48_000, 440, chunk * 960))?.channels[0].length ?? 0;
 		}
 
-		expect(output).toBeGreaterThan(4_795);
-		expect(output).toBeLessThanOrEqual(4_800);
+		expect(output + resampler.pending).toBe(4_800);
+	});
+
+	// Converting down filters what the output cannot carry rather than folding it into the band: an
+	// 18kHz tone at 24kHz would alias to 6kHz.
+	test("filters out what a lower rate cannot carry", () => {
+		const resampler = new Resampler({ from: 48_000, to: 24_000, channels: 1 });
+		const output = resampler.push(tone(48_000, 48_000, 18_000, 0))?.channels[0] ?? new Float32Array();
+		const peak = output.subarray(1_000).reduce((max, x) => Math.max(max, Math.abs(x)), 0);
+		expect(peak).toBeLessThan(1e-3);
+	});
+
+	// The drift loop steers a capture's ratio by up to 2000 ppm, which sweeps every fractional
+	// position. Each 10ms of output must keep the tone's level within 0.1 dB to 20kHz, the top of
+	// Opus's fullband: linear interpolation dipped 6 dB at 16kHz and 12 dB at 20kHz here.
+	test("keeps the passband flat while the ratio is steered", () => {
+		const rate = 48_000;
+		for (const relative of [1.00005, 1.002, 1 / 1.002]) {
+			for (const freq of [1_000, 8_000, 16_000, 20_000]) {
+				const resampler = new Resampler({ from: rate, to: rate, channels: 1 });
+				resampler.adjust(relative);
+				const output: number[] = [];
+				for (let offset = 0; offset < rate; offset += 128) {
+					output.push(...(resampler.push(tone(128, rate, freq, offset))?.channels[0] ?? []));
+				}
+
+				// Fit the tone at each output sample's input position, a 10ms window at a time.
+				const window = rate / 100;
+				for (let start = window; start + window <= output.length; start += window) {
+					let [ss, sc, cc, ys, yc] = [0, 0, 0, 0, 0];
+					for (let n = start; n < start + window; n++) {
+						const phase = (2 * Math.PI * freq * (n / relative)) / rate;
+						const [sin, cos] = [Math.sin(phase), Math.cos(phase)];
+						[ss, sc, cc, ys, yc] = [
+							ss + sin * sin,
+							sc + sin * cos,
+							cc + cos * cos,
+							ys + output[n] * sin,
+							yc + output[n] * cos,
+						];
+					}
+					const det = ss * cc - sc * sc;
+					const gain = Math.hypot((ys * cc - yc * sc) / det, (yc * ss - ys * sc) / det);
+					expect(Math.abs(20 * Math.log10(gain))).toBeLessThan(0.1);
+				}
+			}
+		}
 	});
 
 	// The bug this class exists to avoid: resampling each chunk independently leaves a
@@ -64,15 +109,15 @@ describe("Resampler", () => {
 		}
 	});
 
-	// Interpolating a straight line must reproduce that line, which catches an off-by-one in the
-	// sample indexing that a sine wave would hide in its curvature.
-	test("reproduces a linear ramp exactly", () => {
-		const resampler = new Resampler({ from: 2, to: 4, channels: 1 });
+	// Between equal rates at the nominal ratio, every output sits on an input sample: the samples pass
+	// through unchanged, behind the kernel's lookahead.
+	test("passes equal rates through", () => {
+		const resampler = new Resampler({ from: 48_000, to: 48_000, channels: 1 });
+		const input = tone(1_000, 48_000, 440, 0).channels[0];
+		const output = resampler.convert([input])?.[0] ?? new Float32Array();
 
-		const frame = resampler.push({ timestamp: micro(0), channels: [Float32Array.from([0, 1, 2, 3])] });
-
-		// Output positions 0, 0.5, 1, 1.5, 2, 2.5 in input samples; 3.0 needs a 5th input sample.
-		expect([...(frame?.channels[0] ?? [])]).toEqual([0, 0.5, 1, 1.5, 2, 2.5]);
+		expect(output.length + resampler.pending).toBe(1_000);
+		for (let i = 0; i < output.length; i++) expect(output[i]).toBeCloseTo(input[i], 6);
 	});
 
 	test("preserves every channel", () => {
@@ -88,15 +133,16 @@ describe("Resampler", () => {
 		expect(() => resampler.push(tone(100, 44_100, 440, 0, 1))).toThrow("wrong number of channels");
 	});
 
-	// A big upsample ratio means the first chunks can't complete a sample yet; that must not throw
-	// or desync the running counters.
+	// A big upsample ratio means the first chunks can't complete a sample yet, since each output reads
+	// 12 input samples ahead; that must not throw or desync the running counters.
 	test("survives chunks too short to complete a sample", () => {
 		const resampler = new Resampler({ from: 8_000, to: 48_000, channels: 1 });
 
-		const first = resampler.push({ timestamp: micro(0), channels: [Float32Array.from([1])] });
+		const first = resampler.push({ timestamp: micro(0), channels: [new Float32Array(12)] });
 		expect(first).toBeUndefined();
 
-		const second = resampler.push({ timestamp: micro(125), channels: [Float32Array.from([2])] });
+		const second = resampler.push({ timestamp: micro(1_500), channels: [Float32Array.from([2])] });
 		expect(second?.channels[0].length).toBe(6);
+		expect(second?.timestamp.asMicros()).toBe(0);
 	});
 });

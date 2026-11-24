@@ -8,8 +8,9 @@ use std::collections::VecDeque;
 use bytes::{Buf, Bytes, BytesMut};
 use moq_net::Timestamp;
 
-use super::{Pending, Retained, on_clock, reorder_delay, unit_error};
+use super::{Pending, Retained, on_clock, reorder_delay};
 use crate::codec::annexb::{START_CODE, after_start_code, find_start_code};
+use crate::container::ts::error::{Result, ensure, ensure_supported, malformed};
 
 #[derive(Clone, Copy)]
 pub(super) enum Codec {
@@ -27,24 +28,22 @@ impl Codec {
 
 	/// Whether this NAL begins a picture or its leading non-VCL data
 	/// (H.264 7.4.1.2.3, H.265 7.4.2.4.4), and whether it is a slice.
-	fn boundary(self, nal: &[u8]) -> anyhow::Result<(bool, bool)> {
+	fn boundary(self, nal: &[u8]) -> Result<(bool, bool)> {
 		match self {
 			Self::Avc => {
 				let header = *nal
 					.first()
 					.ok_or(crate::codec::h264::Error::NalTooShort)
-					.map_err(crate::Error::from)
-					.map_err(unit_error)?;
+					.map_err(crate::Error::from)?;
 				if header & 0x80 != 0 {
-					return Err(unit_error(crate::codec::h264::Error::ForbiddenZeroBit.into()));
+					return Err(crate::Error::from(crate::codec::h264::Error::ForbiddenZeroBit).into());
 				}
 				let kind = header & 31;
 				let slice = matches!(kind, 1..=5);
 				let first = if slice {
 					*nal.get(1)
 						.ok_or(crate::codec::h264::Error::NalTooShort)
-						.map_err(crate::Error::from)
-						.map_err(unit_error)?
+						.map_err(crate::Error::from)?
 						& 0x80 != 0
 				} else {
 					matches!(kind, 6..=9 | 14..=18)
@@ -55,18 +54,16 @@ impl Codec {
 				let header = *nal
 					.first()
 					.ok_or(crate::codec::h265::Error::NalTooShort)
-					.map_err(crate::Error::from)
-					.map_err(unit_error)?;
+					.map_err(crate::Error::from)?;
 				if header & 0x80 != 0 {
-					return Err(unit_error(crate::codec::h265::Error::ForbiddenZeroBit.into()));
+					return Err(crate::Error::from(crate::codec::h265::Error::ForbiddenZeroBit).into());
 				}
 				let kind = (header >> 1) & 63;
 				let slice = kind <= 31;
 				let first = if slice {
 					*nal.get(2)
 						.ok_or(crate::codec::h265::Error::NalTooShort)
-						.map_err(crate::Error::from)
-						.map_err(unit_error)?
+						.map_err(crate::Error::from)?
 						& 0x80 != 0
 				} else {
 					matches!(kind, 32..=35 | 39 | 41..=44 | 48..=55)
@@ -98,7 +95,6 @@ mod timing;
 
 pub(super) struct Assembly {
 	pub clock: timing::Clock,
-	damage: Option<(u64, anyhow::Error)>,
 	codec: Codec,
 	tail: BytesMut,
 	searched: usize,
@@ -109,13 +105,16 @@ pub(super) struct Assembly {
 	ending: bool,
 	parameters: bool,
 	retained: Option<Retained>,
+	/// No start code has been seen since a join or a break. ISO 13818-1 doesn't align PES to
+	/// NALs, so the first PES after either can open mid-NAL; its bytes before the first start
+	/// code belong to a NAL that began in a PES this stream never got.
+	acquiring: bool,
 }
 
 impl Assembly {
 	pub fn new(codec: Codec) -> Self {
 		Self {
 			clock: timing::Clock::default(),
-			damage: None,
 			codec,
 			tail: BytesMut::new(),
 			searched: 0,
@@ -126,10 +125,11 @@ impl Assembly {
 			ending: false,
 			parameters: false,
 			retained: None,
+			acquiring: true,
 		}
 	}
 
-	pub fn push(&mut self, mut pending: Pending) -> anyhow::Result<()> {
+	pub fn push(&mut self, mut pending: Pending) -> Result<()> {
 		let pts = on_clock(pending.pts, pending.offset)?;
 		let reorder = reorder_delay(pending.pts, pending.dts);
 		if pending.data.is_empty() {
@@ -160,7 +160,7 @@ impl Assembly {
 		self.account()
 	}
 
-	fn account(&mut self) -> anyhow::Result<()> {
+	fn account(&mut self) -> Result<()> {
 		if let Some(retained) = &mut self.retained {
 			retained.resize(
 				self.tail.len() + self.current.len(),
@@ -171,17 +171,29 @@ impl Assembly {
 	}
 
 	/// Return one AU at a time so later parameter sets cannot precede its validation.
-	pub fn next(&mut self, eof: bool) -> anyhow::Result<Option<Unit>> {
+	pub fn next(&mut self, eof: bool) -> Result<Option<Unit>> {
 		loop {
 			if self.tail.is_empty() {
 				return if eof { self.emit() } else { Ok(None) };
 			}
-			let start = after_start_code(&self.tail)
-				.map_err(crate::Error::from)
-				.map_err(unit_error)?;
+			if self.acquiring {
+				match find_start_code(&self.tail) {
+					Some((at, _)) => {
+						self.discard(at)?;
+						self.acquiring = false;
+					}
+					None => {
+						// Keep only what could begin a start code the next PES completes.
+						let keep = if eof { 0 } else { 3 };
+						self.discard(self.tail.len().saturating_sub(keep))?;
+						return Ok(None);
+					}
+				}
+			}
+			let start = after_start_code(&self.tail).map_err(crate::Error::from)?;
 			let Some(start) = start else {
 				if eof {
-					return Err(unit_error(crate::codec::annexb::Error::MissingStartCode.into()));
+					return Err(crate::Error::from(crate::codec::annexb::Error::MissingStartCode).into());
 				}
 				return Ok(None);
 			};
@@ -264,16 +276,7 @@ impl Assembly {
 			};
 			self.current.extend_from_slice(&START_CODE);
 			self.current.extend_from_slice(&nal);
-			let mut remaining = consumed;
-			while remaining > 0 {
-				let span = self.spans.front_mut().expect("consumed bytes have an owner");
-				let take = remaining.min(span.len);
-				span.len -= take;
-				remaining -= take;
-				if span.len == 0 {
-					self.spans.pop_front();
-				}
-			}
+			self.spend(consumed);
 			self.account()?;
 			if self.ending {
 				if self.has_slice {
@@ -288,7 +291,27 @@ impl Assembly {
 		}
 	}
 
-	fn emit(&mut self) -> anyhow::Result<Option<Unit>> {
+	/// Release the ownership of `len` bytes taken from the front of the tail.
+	fn spend(&mut self, mut len: usize) {
+		while len > 0 {
+			let span = self.spans.front_mut().expect("consumed bytes have an owner");
+			let take = len.min(span.len);
+			span.len -= take;
+			len -= take;
+			if span.len == 0 {
+				self.spans.pop_front();
+			}
+		}
+	}
+
+	/// Drop `len` bytes from the front of the tail, with their timestamps and charges.
+	fn discard(&mut self, len: usize) -> Result<()> {
+		self.tail.advance(len);
+		self.spend(len);
+		self.account()
+	}
+
+	fn emit(&mut self) -> Result<Option<Unit>> {
 		if !self.has_slice {
 			return Ok(None);
 		}
@@ -310,15 +333,9 @@ impl Assembly {
 		}))
 	}
 
-	pub fn take_damage(&mut self) -> Option<(u64, anyhow::Error)> {
-		self.damage.take()
-	}
-
-	/// Release everything buffered at end of input, keeping damage the final drain refused.
+	/// Release everything buffered at end of input.
 	pub fn finish(&mut self) {
-		let damage = self.damage.take();
 		*self = Self::new(self.codec);
-		self.damage = damage;
 	}
 
 	pub fn reset(&mut self) {
@@ -332,27 +349,28 @@ impl Assembly {
 		self.ending = false;
 		self.parameters = false;
 		self.retained = None;
+		self.acquiring = true;
 	}
 }
 
 /// One proportional AVC clock must be declared explicitly by the TS descriptor;
 /// an SPS fixed frame rate alone says nothing about numeric POC distance.
-pub(super) fn temporal_poc(descriptors: &[super::catalog::Descriptor]) -> anyhow::Result<bool> {
+pub(super) fn temporal_poc(descriptors: &[super::catalog::Descriptor]) -> Result<bool> {
 	let mut proportional = false;
 	for descriptor in descriptors.iter().filter(|d| d.tag == 0x2a) {
 		let data = &descriptor.data;
 		let first = *data
 			.first()
-			.ok_or_else(|| anyhow::anyhow!("truncated AVC timing descriptor"))?;
+			.ok_or_else(|| malformed!("truncated AVC timing descriptor"))?;
 		let len = if first & 1 == 0 {
 			2
 		} else {
 			let clock = *data
 				.get(1)
-				.ok_or_else(|| anyhow::anyhow!("truncated AVC timing descriptor"))?;
+				.ok_or_else(|| malformed!("truncated AVC timing descriptor"))?;
 			if clock & 0x80 != 0 { 7 } else { 15 }
 		};
-		anyhow::ensure!(data.len() == len, "invalid AVC timing descriptor length");
+		ensure!(data.len() == len, "invalid AVC timing descriptor length");
 		proportional |= data[len - 1] & 0xc0 == 0xc0;
 	}
 	Ok(proportional)
@@ -367,83 +385,44 @@ macro_rules! publish {
 			import: &mut crate::codec::$codec::Import,
 			assembly: &mut Assembly,
 			eof: bool,
-		) -> anyhow::Result<u64> {
+		) -> Result<u64> {
 			let mut published = 0;
-			let result = (|| {
-				while let Some(unit) = assembly.next(eof)? {
-					let params = unit.parameters.then(|| split.params());
-					let result = (|| {
-						// Structural damage is local even when it prevents timing
-						// inference. No provisional timestamp reaches the producer.
-						let provisional = unit.pts.unwrap_or(Timestamp::ZERO);
-						let mut frames = split.decode(&unit.data, provisional).map_err(unit_error)?;
-						frames.extend(split.flush(provisional).map_err(unit_error)?);
-						anyhow::ensure!(frames.len() == 1, "unsupported TS video access-unit framing");
-						for frame in &frames {
-							if frame.keyframe {
-								crate::codec::$codec::config(&frame.payload)
-									.map_err(crate::Error::from)
-									.map_err(unit_error)?;
-							}
-						}
-						let pts = assembly.clock.$name(
-							&unit,
-							params.as_ref().into_iter().flat_map(|params| params.nals()),
-						)?;
-						let mut published = 0;
-						for mut frame in frames {
-							frame.timestamp = pts;
-							published += u64::from(super::skip_missing_keyframe(import.decode([frame]))?);
-						}
-						anyhow::Ok(published)
-					})();
-					match result {
-						Ok(units) => {
-							published += units;
-							assembly.clock.commit();
-						}
-						Err(err) if err.is::<super::Damaged>() => {
-							// This AU has a known end. Keep the next AU's bytes,
-							// which may already be here in the same or following PES.
-							if let Some(params) = params {
-								split.restore(params);
-							}
-							split.reset();
-							assembly.clock.reset();
-							import.cut(None)?;
-							let count = assembly.damage.take().map_or(1, |(count, _)| count + 1);
-							assembly.damage = Some((count, err));
-							continue;
-						}
-						Err(err) => return Err(err),
-					}
-					if let Some(reorder) = unit.reorder {
-						import.observe_reorder(reorder)?;
-					}
-					if unit.end_sequence {
-						assembly.clock.reset();
+			while let Some(unit) = assembly.next(eof)? {
+				let params = unit.parameters.then(|| split.params());
+				// No provisional timestamp reaches the producer: the AU's own replaces it below.
+				let provisional = unit.pts.unwrap_or(Timestamp::ZERO);
+				let mut frames = split
+					.decode(&unit.data, provisional)
+					.map_err(crate::Error::from)?;
+				frames.extend(split.flush(provisional).map_err(crate::Error::from)?);
+				ensure_supported!(frames.len() == 1, "unsupported TS video access-unit framing");
+				for frame in &frames {
+					if frame.keyframe {
+						crate::codec::$codec::config(&frame.payload).map_err(crate::Error::from)?;
 					}
 				}
-				anyhow::Ok(())
-			})();
-			match result {
-				Ok(()) => Ok(published),
-				Err(err) if err.is::<super::Damaged>() => Err(err.context(Published(published))),
-				Err(err) => Err(err),
+				let pts = assembly.clock.$name(
+					&unit,
+					params.as_ref().into_iter().flat_map(|params| params.nals()),
+				)?;
+				for mut frame in frames {
+					frame.timestamp = pts;
+					published += u64::from(super::skip_missing_keyframe(import.decode([frame]))?);
+				}
+				assembly.clock.commit();
+				if let Some(reorder) = unit.reorder {
+					import.observe_reorder(reorder)?;
+				}
+				if unit.end_sequence {
+					assembly.clock.reset();
+				}
 			}
+			Ok(published)
 		}
 	};
 }
 publish!(avc, h264);
 publish!(hevc, h265);
-
-#[derive(Debug, thiserror::Error)]
-#[error("damaged TS video after {0} published access units")]
-struct Published(u64);
-
-pub(super) fn published(err: &anyhow::Error) -> u64 {
-	err.downcast_ref::<Published>().map_or(0, |published| published.0)
-}
 
 #[cfg(test)]
 mod tests {
@@ -495,7 +474,7 @@ mod tests {
 					assert_eq!(units.len(), 1 + usize::from(lead));
 					let unit = units.last().unwrap();
 					let owner = if prefix.len() == 4 && cut == 1 { 2 } else { 1 };
-					assert_eq!(unit.pts.unwrap().as_secs(), owner, "lead {lead} cut {cut}");
+					assert_eq!(unit.pts.unwrap().as_secs().unwrap(), owner, "lead {lead} cut {cut}");
 					assert_eq!(
 						unit.data.as_ref(),
 						[START_CODE.as_ref(), &[0x65, 0x80, 0xab, 0xcd]].concat()
@@ -555,14 +534,51 @@ mod tests {
 			.push(pending(&staging, &[0, 0, 1, 0x65, 0x80], Some(270_000)))
 			.unwrap();
 		let first = assembly.next(false).unwrap().unwrap();
-		assert_eq!(first.pts.unwrap().as_secs(), 1);
+		assert_eq!(first.pts.unwrap().as_secs().unwrap(), 1);
 		assert_eq!(&first.data[4..], &data[3..]);
 		let second = assembly.next(true).unwrap().unwrap();
-		assert_eq!(second.pts.unwrap().as_secs(), 3);
+		assert_eq!(second.pts.unwrap().as_secs().unwrap(), 3);
 		drop((first, second));
 		assembly.reset();
 		assert_eq!(staging.bytes.load(Ordering::Relaxed), 0);
 		assert_eq!(staging.units.load(Ordering::Relaxed), 0);
+	}
+
+	#[test]
+	fn a_pes_opening_mid_nal_is_acquired_at_its_first_start_code() {
+		// The orphan bytes end in a partial start code the next PES completes, at a join and
+		// after a break alike.
+		for reset in [false, true] {
+			let staging = Arc::default();
+			let mut assembly = Assembly::new(Codec::Avc);
+			if reset {
+				assembly
+					.push(pending(&staging, &[0, 0, 1, 0x65, 0x80, 0x11], Some(90_000)))
+					.unwrap();
+				assert!(assembly.next(false).unwrap().is_none());
+				assembly.reset();
+			}
+			assembly
+				.push(pending(&staging, &[0x9a, 0xbc, 0xde, 0xf0, 0, 0, 0], Some(180_000)))
+				.unwrap();
+			assert!(assembly.next(false).unwrap().is_none());
+			assert_eq!(
+				staging.bytes.load(Ordering::Relaxed),
+				3,
+				"only a possible start code is kept"
+			);
+			assembly.push(pending(&staging, &[1, 0x65, 0x80, 0x22], None)).unwrap();
+			let unit = assembly
+				.next(true)
+				.unwrap()
+				.expect("the picture after the orphan bytes");
+			assert_eq!(unit.data.as_ref(), [START_CODE.as_ref(), &[0x65, 0x80, 0x22]].concat());
+			assert_eq!(unit.pts.unwrap().as_secs().unwrap(), 2, "its PES's timestamp");
+			drop(unit);
+			assembly.reset();
+			assert_eq!(staging.bytes.load(Ordering::Relaxed), 0);
+			assert_eq!(staging.units.load(Ordering::Relaxed), 0);
+		}
 	}
 
 	#[test]

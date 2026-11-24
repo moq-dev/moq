@@ -17,15 +17,19 @@ const ESTIMATE_INTERVAL = Duration.millis(1000);
  * application's own sections, e.g. `scte35`) each edit only their own keys, so their sections
  * compose instead of clobbering one another.
  *
- * The `media.clock` is advertised from the first snapshot: every js/publish timestamp is the
+ * The `sync.clock` is advertised from the first snapshot: every js/publish timestamp is the
  * installed clock's instant in microseconds, so PTS zero is the wall time of instant zero. The
  * mapping is fixed when the producer is created, so a later system-clock adjustment never retimes
  * the broadcast. A page whose wall clock reads before 2020 has not set it yet (a device booted
  * before it synced), so it omits `clock` rather than advertise a false one.
  */
 export class CatalogProducer {
+	// The catalog as edited, in its parsed shape, and as written. Only the edited one is encoded,
+	// since encoding is not idempotent: a written unknown container is no longer its parsed wrapper.
 	#value: Catalog.Root = pageRoot();
-	#outputs = new Set<Json.Snapshot.Producer<Catalog.Root>>();
+	#wire: Catalog.Root = Catalog.encode(this.#value);
+	// Each output and the track it writes, whose newest start the next update must pass.
+	#outputs = new Map<Json.Snapshot.Producer<Catalog.Root>, Moq.Track.Producer>();
 	#lastEstimate: Instant | undefined;
 	#pending: Effect | undefined;
 
@@ -37,7 +41,7 @@ export class CatalogProducer {
 		const value = Catalog.encode(draft);
 		// Estimates only rise for a track; a renamed rendition starts its new track over.
 		for (const field of ["jitter", "delay"] as const) {
-			const previous = new Map(advertised(this.#value, field));
+			const previous = new Map(advertised(this.#wire, field));
 			for (const [track, estimate] of advertised(value, field)) {
 				if (estimate === 0) throw new Error(`omit ${field} rather than advertising 0`);
 				const before = previous.get(track);
@@ -46,13 +50,14 @@ export class CatalogProducer {
 				}
 			}
 		}
-		const estimateOnly = Json.deepEqual(structure(this.#value), structure(value));
-		const changed = !Json.deepEqual(this.#value, value);
-		this.#value = value;
+		const estimateOnly = Json.deepEqual(structure(this.#wire), structure(value));
+		const changed = !Json.deepEqual(this.#wire, value);
+		this.#value = draft;
+		this.#wire = value;
 		if (!changed || this.#outputs.size === 0) return;
 
 		const at = now();
-		const next = this.#lastEstimate === undefined ? undefined : this.#lastEstimate.add(ESTIMATE_INTERVAL);
+		const next = this.#lastEstimate === undefined ? undefined : this.#lastEstimate.saturatingAdd(ESTIMATE_INTERVAL);
 		if (!estimateOnly || next === undefined || at.ge(next)) {
 			this.#publish(estimateOnly || this.#pending !== undefined);
 		} else if (!this.#pending) {
@@ -65,8 +70,10 @@ export class CatalogProducer {
 		this.#pending?.close();
 		this.#pending = undefined;
 		if (estimate) this.#lastEstimate = now();
-		const at = Time.Timestamp.now();
-		for (const output of this.#outputs) output.update({ value: this.#value, at });
+		// One timestamp past every output's newest start, so each opens its group at the same time.
+		let at = Time.Timestamp.now();
+		for (const track of this.#outputs.values()) at = Json.next(track, at);
+		for (const output of this.#outputs.keys()) output.update(this.#wire, at);
 	}
 
 	/**
@@ -76,9 +83,9 @@ export class CatalogProducer {
 	 */
 	serve(track: Moq.Track.Producer, effect: Effect): void {
 		const output = new Json.Snapshot.Producer<Catalog.Root>({ track, deltas: false });
-		output.update({ value: this.#value, at: Time.Timestamp.now() });
+		output.update(this.#wire, Json.next(track, Time.Timestamp.now()));
 
-		this.#outputs.add(output);
+		this.#outputs.set(output, track);
 		effect.cleanup(() => {
 			this.#outputs.delete(output);
 			output.finish();
@@ -136,5 +143,5 @@ function advertised(catalog: Catalog.Root, field: "jitter" | "delay"): [string, 
 function pageRoot(): Catalog.Root {
 	const at = Math.round((origin().asUnixMillis() - Catalog.MOQ_EPOCH_UNIX_MILLIS) * 1000);
 	if (at < 0) return {};
-	return { media: { clock: { wall: Catalog.u53(at), timescale: 1_000_000 } } };
+	return { sync: { clock: { wall: Catalog.u53(at), timescale: 1_000_000 } } };
 }

@@ -4,7 +4,7 @@
 /// snapshot and stream producers also advertise it in the broadcast's catalog,
 /// which has no window mode), and a consumer takes over a `TrackConsumer` that
 /// has not read a group yet. Values cross as JSON strings. Compression is the
-/// track's: publish JSON with `MoqTrackInfo(compression: MoqCompression.deflate)`, and a consumer
+/// track's: publish JSON with `TrackInfo(compression: Compression.deflate())`, and a consumer
 /// reads it with no option of its own. Every write (a snapshot update, a stream
 /// append, a window push or pop) takes a timestamp on the broadcast clock, the
 /// epoch every track in the broadcast shares, so the track needs a timescale;
@@ -18,7 +18,7 @@
 ///   broadcast: broadcast,
 ///   track: broadcast.publishTrack(
 ///     name: 'status',
-///     info: MoqTrackInfo(timescale: 1000, compression: MoqCompression.deflate),
+///     info: TrackInfo(timescale: 1000, compression: Compression.deflate()),
 ///   ),
 ///   config: moq_json.SnapshotConfig(),
 /// );
@@ -41,6 +41,9 @@ typedef SnapshotConsumer = MoqJsonSnapshotConsumer;
 /// Configures a lossy latest-value JSON producer.
 typedef SnapshotConfig = MoqJsonSnapshotConfig;
 
+/// A snapshot consumer's subscription priority and playout delay.
+typedef SnapshotConsumerConfig = MoqJsonSnapshotConsumerConfig;
+
 /// Publishes a lossless stream of JSON records on a track it takes over.
 typedef StreamProducer = MoqJsonStreamProducer;
 
@@ -48,7 +51,7 @@ typedef StreamProducer = MoqJsonStreamProducer;
 typedef StreamConsumer = MoqJsonStreamConsumer;
 
 /// A JSON string read from a track, with the timestamp of the frame that
-/// carried it, or null when untimed.
+/// carried it, or its unscaled group key on a scale-less track.
 typedef Value = MoqJsonValue;
 
 /// Publishes a sliding window of JSON records on a track it takes over, pushed
@@ -75,6 +78,6 @@ typedef WindowEventPop = PopMoqJsonWindowEvent;
 /// The records in `[start, end)` will never be delivered to this reader.
 typedef WindowEventSkip = SkipMoqJsonWindowEvent;
 
-/// A [WindowEvent] and the timestamp of the frame that carried it, or null
-/// when untimed.
+/// A [WindowEvent] and the timestamp of the frame that carried it, or its
+/// unscaled group key on a scale-less track.
 typedef WindowTimed = MoqJsonWindowTimed;

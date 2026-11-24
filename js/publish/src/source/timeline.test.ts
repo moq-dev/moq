@@ -4,7 +4,7 @@ import { Timeline } from "./timeline";
 
 const micro = (value: number): Duration => Duration.micros(value);
 // A point on the clock, `value` microseconds past its origin.
-const at = (value: number): Instant => Instant.ZERO.add(micro(value));
+const at = (value: number): Instant => Instant.ZERO.saturatingAdd(micro(value));
 
 const ZERO = at(1_000_000);
 
@@ -61,11 +61,11 @@ describe("Timeline", () => {
 	test("maps a loop boundary of a duration with no exact binary form to the next pass", () => {
 		const timeline = new Timeline(Instant.ZERO, 1.1);
 
-		expect(timeline.position(Instant.ZERO.add(Duration.millis(1100)))).toEqual({
+		expect(timeline.position(Instant.ZERO.saturatingAdd(Duration.millis(1100)))).toEqual({
 			timestamp: Duration.ZERO,
 			loop: 1,
 		});
-		expect(timeline.position(Instant.ZERO.add(Duration.millis(3300)))).toEqual({
+		expect(timeline.position(Instant.ZERO.saturatingAdd(Duration.millis(3300)))).toEqual({
 			timestamp: Duration.ZERO,
 			loop: 3,
 		});

@@ -84,7 +84,6 @@ pub(crate) struct Dial {
 	pub(crate) token: Option<String>,
 	/// The connection credential, held out of band rather than in an AUTH stream.
 	connection: Option<String>,
-	generation: u64,
 }
 
 impl Tokens {
@@ -122,7 +121,6 @@ impl Tokens {
 		let configured = state.configured.as_mut().expect("built by Tokens::new");
 		configured.fresh = fresh;
 		configured.tokens = tokens;
-		configured.generation += 1;
 		configured.answer = None;
 		state.hold();
 	}
@@ -164,11 +162,7 @@ impl Tokens {
 		let state = self.handle.state.read();
 		let configured = state.configured.as_ref().expect("built by Tokens::new");
 		let (token, connection) = credential(url, &configured.tokens);
-		Dial {
-			token,
-			connection,
-			generation: configured.generation,
-		}
+		Dial { token, connection }
 	}
 
 	/// Make `dial` the latest, holding every token but its connection credential in band on the
@@ -189,34 +183,24 @@ impl Tokens {
 	#[cfg(feature = "async")]
 	pub(crate) fn connected(&self, session: &crate::Session) {
 		if session.auth().state.same_channel(&self.handle.state) {
-			self.connect(session.credential());
+			self.connect(session.link().id(), session.credential());
 		}
 	}
 
-	fn connect(&self, credential: Option<&super::Credential>) {
+	/// Bind the session on `link`, even one that already closed: that close may be its answer.
+	fn connect(&self, link: u64, credential: Option<&super::Credential>) {
 		let mut state = self.handle.state.lock();
 		state.record();
 		let connected = match credential {
-			Some(auth) => Some(Connected::Slot {
-				link: auth.presented.link.expect("a session's own credential"),
+			Some(auth) => Connected::Slot {
+				link,
 				id: auth.presented.id,
-			}),
-			// The handle backs one open session at a time: the one just built, unless it ended.
-			None => state
-				.links
-				.iter()
-				.rev()
-				.find(|(_, link)| link.closed.is_none())
-				.map(|(link, _)| Connected::Accepted { link: *link }),
+			},
+			None => Connected::Accepted { link },
 		};
-		state.configured.as_mut().expect("built by Tokens::new").session = connected;
-	}
-
-	/// Whether the tokens changed since `dial` was previewed, so a refusal of its credential earns
-	/// another dial.
-	pub(crate) fn changed(&self, dial: &Dial) -> bool {
-		let state = self.handle.state.read();
-		state.configured.as_ref().expect("built by Tokens::new").generation != dial.generation
+		state.configured.as_mut().expect("built by Tokens::new").session = Some(connected);
+		// A session that closed before this bound it has its answer already.
+		state.record();
 	}
 }
 
@@ -225,7 +209,6 @@ impl Tokens {
 #[derive(Default)]
 pub(super) struct Configured {
 	tokens: Vec<Token>,
-	generation: u64,
 	/// The latest dial's connection credential, never also held in band. `None` before the
 	/// first dial.
 	dialed: Option<Option<String>>,
@@ -246,7 +229,7 @@ pub(super) struct Configured {
 /// How the latest dial's session answers its connection credential.
 enum Connected {
 	/// The version has no AUTH, so the peer accepted it with its handshake, or with its
-	/// SETUP when the session [awaits it](super::Link::await_setup).
+	/// SETUP when the session [awaits it](super::Link::await_acceptance).
 	Accepted { link: u64 },
 	/// Its own AUTH stream on that session.
 	Slot { link: u64, id: u64 },
@@ -268,19 +251,31 @@ impl Configured {
 		let (link, id) = match self.session.as_ref()? {
 			Connected::Slot { link, id } => (link, id),
 			Connected::Accepted { link } => {
-				let link = state.links.get(link).filter(|link| link.closed.is_none())?;
-				return link.accepted.then_some(Ok(()));
+				let link = state.links.get(link)?;
+				let awaiting = link.acceptance == super::Acceptance::Awaiting;
+				return match (awaiting, &link.closed) {
+					// Accepted, or a version that never answers, whose live session counts as accepting it.
+					(false, _) => Some(Ok(())),
+					// Closed before accepting it: the close is the answer, since the connection
+					// keeps redialing with the same credential and nothing else would answer.
+					(true, Some(err)) => Some(Err(err.clone())),
+					(true, None) => None,
+				};
 			}
 		};
-		let link = state.links.get(link).filter(|link| link.closed.is_none())?;
+		let link = state.links.get(link)?;
+		if let Some(err) = &link.closed {
+			// Cut off unanswered, like a session that closed before accepting it.
+			return link.cut.contains(id).then(|| Err(err.clone()));
+		}
 		let slot = link.slots.get(id)?;
-		match (&slot.ended, &slot.answered) {
+		match slot.phase.ended() {
 			// The moq-transport SETUP that carried it accepted it before the peer declined AUTH.
-			(Some(Error::Unsupported), _) => Some(Ok(())),
-			(Some(err), _) => Some(Err(err.clone())),
-			(None, Some(Ok(()))) => Some(Ok(())),
+			Some(Error::Unsupported) => Some(Ok(())),
+			Some(err) => Some(Err(err.clone())),
+			None if slot.phase.answered() => Some(Ok(())),
 			// Unanswered, or waiting out a refusal that may pass.
-			(None, _) => None,
+			None => None,
 		}
 	}
 
@@ -412,7 +407,8 @@ impl State {
 			let granted = self
 				.links
 				.values()
-				.any(|link| link.slots.get(&id).is_some_and(|slot| slot.grant.is_some()));
+				.any(|link| link.slots.get(&id).is_some_and(|slot| slot.phase.grant().is_some()));
+
 			match granted {
 				true => self.configured.as_mut().expect("checked configured").retiring.push(id),
 				false => self.withdraw(id),
@@ -567,7 +563,7 @@ mod tests {
 		set.commit(&presented);
 		let link = Link::attach(&set.handle, supported, requests).unwrap();
 		let credential = supported.then(|| link.present(Bytes::new(), true).unwrap());
-		set.connect(credential.as_ref());
+		set.connect(link.id(), credential.as_ref());
 		Session { link, credential }
 	}
 
@@ -577,13 +573,18 @@ mod tests {
 		}
 
 		fn grant_credential(&self) {
-			self.link.granted(self.credential(), Grant::all());
+			self.link.grant(self.credential(), Grant::all());
 		}
 
 		/// The peer refuses or revokes the token presented as `id`, as the driver reports it.
 		fn refuse(&self, id: u64, code: SessionError) {
+			let reply = crate::lite::AuthError {
+				code: crate::lite::error::to_session_code(&code).into(),
+				reason: String::new(),
+			};
 			let err = Error::Session(code);
-			self.link.refused(id);
+			self.link.open(id);
+			self.link.refused(id, reply.undecided());
 			if self.link.retry(id, &err).is_none() {
 				self.link.ended(id, err);
 			}
@@ -647,14 +648,14 @@ mod tests {
 		let session = dial(&set, true, false);
 		session.grant_credential();
 		let old = id(&set, "old");
-		session.link.granted(old, Grant::all());
+		session.link.grant(old, Grant::all());
 		ok(&set);
 
 		set.set(tokens(&["connection", "new"]));
 		assert!(answered(&set).is_pending(), "answered before the replacement was");
 		assert!(presented(&set, old), "withdrawn before its replacement was answered");
 
-		session.link.granted(id(&set, "new"), Grant::all());
+		session.link.grant(id(&set, "new"), Grant::all());
 		ok(&set);
 		assert!(!presented(&set, old), "the replaced token was never withdrawn");
 	}
@@ -668,7 +669,7 @@ mod tests {
 		session.grant_credential();
 		set.set(tokens(&["second", "extra"]));
 		let second = id(&set, "second");
-		session.link.granted(second, Grant::all());
+		session.link.grant(second, Grant::all());
 
 		let url = "moqt://relay.example.com/".parse().unwrap();
 		let preview = set.preview(&url);
@@ -691,7 +692,7 @@ mod tests {
 		let session = dial(&set, true, false);
 		session.grant_credential();
 		let old = id(&set, "old");
-		session.link.granted(old, Grant::all());
+		session.link.grant(old, Grant::all());
 
 		set.set(tokens(&["connection", "first"]));
 		let first = id(&set, "first");
@@ -701,7 +702,7 @@ mod tests {
 		assert!(presented(&set, old), "the granted token was withdrawn before an answer");
 		assert_eq!(set.handle.state.read().configured.as_ref().unwrap().retiring, [old]);
 
-		session.link.granted(id(&set, "second"), Grant::all());
+		session.link.grant(id(&set, "second"), Grant::all());
 		ok(&set);
 		assert!(!presented(&set, old));
 	}
@@ -716,11 +717,11 @@ mod tests {
 		first.lost();
 		let session = dial(&set, true, false);
 		session.grant_credential();
-		session.link.granted(old, Grant::all());
+		session.link.grant(old, Grant::all());
 
 		set.set(tokens(&["connection", "new"]));
 		assert!(presented(&set, old), "withdrawn before its replacement was answered");
-		session.link.granted(id(&set, "new"), Grant::all());
+		session.link.grant(id(&set, "new"), Grant::all());
 		assert!(!presented(&set, old));
 	}
 
@@ -732,7 +733,7 @@ mod tests {
 		let session = dial(&set, true, false);
 		session.grant_credential();
 		let old = id(&set, "old");
-		session.link.granted(old, Grant::all());
+		session.link.grant(old, Grant::all());
 
 		set.set(tokens(&["connection", "new"]));
 		session.refuse(id(&set, "new"), SessionError::Unauthorized);
@@ -749,7 +750,7 @@ mod tests {
 	fn the_connection_credential_answers_for_itself() {
 		let set = Tokens::new(tokens(&["connection", "a"]));
 		let session = dial(&set, true, false);
-		session.link.granted(id(&set, "a"), Grant::all());
+		session.link.grant(id(&set, "a"), Grant::all());
 		assert!(answered(&set).is_pending(), "answered before the credential was");
 
 		session.refuse(session.credential(), SessionError::Unauthorized);
@@ -777,12 +778,12 @@ mod tests {
 		let set = Tokens::new(tokens(&["connection", "a"]));
 		let session = dial(&set, true, false);
 		session.grant_credential();
-		session.link.granted(id(&set, "a"), Grant::all());
+		session.link.grant(id(&set, "a"), Grant::all());
 		session.refuse(id(&set, "a"), SessionError::Unauthorized);
 		ok(&set);
 
 		set.set(tokens(&["connection", "b"]));
-		session.link.granted(id(&set, "b"), Grant::all());
+		session.link.grant(id(&set, "b"), Grant::all());
 		set.handle().abort(Error::Session(SessionError::Unauthorized));
 		ok(&set);
 	}
@@ -792,8 +793,8 @@ mod tests {
 		let presented = set.preview(&"moqt://relay.example.com/".parse().unwrap());
 		set.commit(&presented);
 		let link = Link::attach(&set.handle, false, false).unwrap();
-		link.await_setup();
-		set.connect(None);
+		link.await_acceptance();
+		set.connect(link.id(), None);
 		link
 	}
 
@@ -814,8 +815,19 @@ mod tests {
 		let set = Tokens::new(tokens(&["connection"]));
 		let link = dial_awaiting_setup(&set);
 		link.close(Error::Session(SessionError::Unauthorized));
-		assert!(answered(&set).is_pending(), "a refused session accepted the credential");
-		set.handle().abort(Error::Session(SessionError::Unauthorized));
+		refused(&set, SessionError::Unauthorized);
+	}
+
+	/// A refusal that closes the session before the reconnect loop binds it still answers.
+	#[test]
+	fn a_credential_refused_before_the_session_is_bound_is_no_grant() {
+		let set = Tokens::new(tokens(&["connection"]));
+		let presented = set.preview(&"moqt://relay.example.com/".parse().unwrap());
+		set.commit(&presented);
+		let link = Link::attach(&set.handle, false, false).unwrap();
+		link.await_acceptance();
+		link.close(Error::Session(SessionError::Unauthorized));
+		set.connect(link.id(), None);
 		refused(&set, SessionError::Unauthorized);
 	}
 
@@ -825,8 +837,8 @@ mod tests {
 		let set = Tokens::new(tokens(&["connection", "a", "b"]));
 		let session = dial(&set, true, false);
 		session.grant_credential();
-		session.link.granted(id(&set, "a"), Grant::all());
-		session.link.granted(id(&set, "b"), Grant::all());
+		session.link.grant(id(&set, "a"), Grant::all());
+		session.link.grant(id(&set, "b"), Grant::all());
 		ok(&set);
 
 		session.refuse(session.credential(), SessionError::Unauthorized);
@@ -840,8 +852,8 @@ mod tests {
 		let set = Tokens::new(tokens(&["connection", "a", "b"]));
 		let session = dial(&set, true, false);
 		session.grant_credential();
-		session.link.granted(id(&set, "a"), Grant::all());
-		session.link.granted(id(&set, "b"), Grant::all());
+		session.link.grant(id(&set, "a"), Grant::all());
+		session.link.grant(id(&set, "b"), Grant::all());
 		ok(&set);
 
 		session.refuse(id(&set, "a"), SessionError::Unauthorized);
@@ -856,8 +868,8 @@ mod tests {
 		let set = Tokens::new(tokens(&["connection", "a", "b"]));
 		let first = dial(&set, true, false);
 		first.grant_credential();
-		first.link.granted(id(&set, "a"), Grant::all());
-		first.link.granted(id(&set, "b"), Grant::all());
+		first.link.grant(id(&set, "a"), Grant::all());
+		first.link.grant(id(&set, "b"), Grant::all());
 		first.lost();
 
 		let _second = dial(&set, false, true);
@@ -880,7 +892,7 @@ mod tests {
 
 		let second = dial(&set, true, false);
 		second.grant_credential();
-		second.link.granted(id(&set, "a"), Grant::all());
+		second.link.grant(id(&set, "a"), Grant::all());
 		set.set(tokens(&["connection", "a"]));
 		ok(&set);
 	}
@@ -910,12 +922,12 @@ mod tests {
 		let first = dial(&set, true, false);
 		first.grant_credential();
 		set.set(tokens(&["new", "pending"]));
-		first.link.granted(id(&set, "new"), Grant::all());
+		first.link.grant(id(&set, "new"), Grant::all());
 		first.lost();
 
 		let second = dial(&set, true, false);
 		assert_eq!(held(&set), ["pending"]);
-		second.link.granted(id(&set, "pending"), Grant::all());
+		second.link.grant(id(&set, "pending"), Grant::all());
 		ok(&set);
 	}
 
@@ -942,16 +954,6 @@ mod tests {
 		assert!(answered(&set).is_pending());
 		set.handle().abort(Error::Session(SessionError::Unauthorized));
 		refused(&set, SessionError::Unauthorized);
-	}
-
-	#[test]
-	fn only_a_change_outdates_a_dial() {
-		let set = Tokens::new(tokens(&["a"]));
-		let dial = set.preview(&"moqt://relay.example.com/".parse().unwrap());
-		set.set(tokens(&["a"]));
-		assert!(!set.changed(&dial));
-		set.set(tokens(&["b"]));
-		assert!(set.changed(&dial));
 	}
 
 	/// The first token is the connection credential, presented in SETUP.

@@ -1,216 +1,315 @@
-/*!
- * Received-PCM adaptation of WebRTC NetEq's accelerate, the shared seams and pitch search
- * doc/concept/audio-jitter.md specifies for this player and moq-audio's. This player never expands:
- * its ring starts on its target, so slowing down only ever settles audio behind the shared clock.
- *
- * Copyright (c) 2012 The WebRTC project authors. All Rights Reserved.
- * Ported from modules/audio_coding/neteq/{time_stretch,accelerate,dsp_helper,
- * audio_vector,decision_logic}.
- * @license BSD-3-Clause, with WebRTC's patent grant: see WEBRTC-LICENSE and WEBRTC-PATENTS in this package.
+/**
+ * The received-audio time stretch doc/concept/audio-jitter.md specifies for this player and
+ * moq-audio's: a rate proportional to the playhead's lag behind the shared clock, played as
+ * waveform-similarity overlap-add (WSOLA) splices, whatever the content.
  */
 
-/** What a window boundary decides, named as the shared corpus names it. */
-export type Decision = "Hold" | "Accelerate" | "Fast";
-
-// NetEq's 48 kHz Q12 FIR. Sampling its taps at fractional positions also admits other device rates
-// without altering the search domain.
-const FILTER = [1019, 390, 427, 440, 427, 390, 1019];
-
-// The 4 kHz analysis: 110 downsampled samples, correlated over 50 at lags 10 through 59.
-const DOWN = 110;
-const LAGS = 50;
-const MIN_LAG = 10;
-
-// NetEq's voice activity bound before it has a background noise model, from signed 16-bit PCM.
-const PASSIVE = (8 * 75000) / (32768 * 32768);
+/** The most the stretch speeds up or slows down, as a fraction of real time. */
+const CAP = 0.1;
 
 /**
- * One window of received PCM and the stretched output staged from it, allocated up front so the
- * render callback never allocates.
+ * The rate is the lag over this many milliseconds: a lag past 50 ms runs at the cap, and a smaller one
+ * decays with this time constant.
+ */
+const GAIN = 500;
+
+/** What a hop boundary decides on, in frames at the device rate. */
+export interface Inputs {
+	/** How far the playhead trails the shared clock: negative when it plays ahead of it. */
+	lag: number;
+	/** Received audio ahead of the playhead, decoded or still encoded. */
+	depth: number;
+	/** How far audio may trail the clock before it snaps onto it. Zero turns the stretch off. */
+	bound: number;
+	/** What the device reads at once. */
+	read: number;
+}
+
+/** How a hop may move the playhead, in frames: a positive shift skips ahead, a negative one repeats. */
+export interface Decision {
+	/** The rate the playhead moves at, less real time: positive plays faster, zero holds. */
+	pace: number;
+	/** The least and most one splice may shift the playhead. */
+	low: number;
+	high: number;
+	/** Splice as soon as the cap allows, rather than once the pace adds up to a hop, as audio about to run out must. */
+	urgent: boolean;
+}
+
+/** Play as received. */
+export const HOLD: Decision = { pace: 0, low: 0, high: 0, urgent: false };
+
+/** The frames of one hop at `rate`: 10 ms, the crossfade a splice plays and the spacing of decisions. */
+function hop(rate: number): number {
+	return Math.max(1, Math.floor((rate * 10) / 1000));
+}
+
+/**
+ * The shared decision rule. Audio about to run out, with less received ahead of the playhead than two
+ * hops and a device read, slows down at the cap, never trailing the clock past the bound. Otherwise a
+ * lag past half a hop moves the playhead toward the clock at a rate proportional to it. A splice moves
+ * the playhead at least half a hop, never carries it more than half a hop past the clock, and never
+ * speeds up into that cushion.
+ */
+export function decide(rate: number, inputs: Inputs): Decision {
+	const { lag, depth, bound, read } = inputs;
+	if (bound <= 0) return HOLD;
+	const frames = hop(rate);
+	const cushion = 2 * frames + read;
+	const least = Math.floor(frames / 2);
+	if (depth < cushion && lag < bound) {
+		return { pace: -CAP, low: Math.ceil(lag - bound), high: -least, urgent: true };
+	}
+	if (Math.abs(lag) <= least) return HOLD;
+	const pace = Math.min(Math.max((lag * 1000) / (rate * GAIN), -CAP), CAP);
+	if (lag > 0) return { pace, low: least, high: Math.floor(Math.min(lag + least, depth - cushion)), urgent: false };
+	return { pace, low: Math.ceil(lag - least), high: -least, urgent: false };
+}
+
+/**
+ * Received PCM on its way out, with the history and lookahead a splice searches, allocated up front
+ * so the render callback never allocates.
+ *
+ * Output copies the input until a hop boundary decides to splice: the next hop then crossfades from
+ * the input's natural continuation into the stretch of it most similar to that continuation, a shift
+ * of at most `span` either way, and continues from there.
  */
 export class Stretch {
-	/** The window to analyse, one array per channel: fill the first `frames` of each before {@link process}. */
-	readonly input: Float32Array[];
-	readonly #output: Float32Array[];
-
-	/** A full processing window: 30 ms of received PCM, in frames. */
+	/** One hop: the crossfade a splice plays, and the output between decisions. */
+	readonly hop: number;
+	/** Two hops: the farthest one splice moves the playhead, and the history kept behind it. */
+	readonly span: number;
+	/** Three hops: the received audio past the playhead a splice can need. */
 	readonly window: number;
 
-	readonly #rate: number;
-	// 15 ms: the seam's position, and the longest pitch period.
-	readonly #middle: number;
-	// 20 ms: NetEq's adjustment granularity. An excess this large fast-accelerates.
-	readonly #band: number;
-	// 50 ms: NetEq's five 10 ms ticks between stretches.
-	readonly #rest: number;
+	readonly #input: Float32Array[];
+	// Input frames held, and the playhead among them. During a crossfade the playhead stays where it
+	// started, and moves on past the shifted hop once the crossfade ends.
+	#filled = 0;
+	#head = 0;
+	// The crossfade in progress, a zero shift for none, and its frames played.
+	#shift = 0;
+	#faded = 0;
+	// How far the pace has moved the playhead that no splice took yet, and which way it moves.
+	#owed = 0;
+	#direction = 0;
+	// How far splices may still move the playhead: refilled at the cap each hop, up to a span.
+	#allowance = 0;
+	// Output frames until the next hop boundary.
+	#until = 0;
 
-	#position = 0;
-	#length = 0;
-
-	/** Frames left to render before an ordinary stretch: NetEq's six startup ticks, then its five. */
-	cooldown: number;
-
-	readonly #down = new Float64Array(DOWN);
-	readonly #correlation = new Float64Array(LAGS);
+	// The crossfade's weights, and the analysis scratch: the running energy across every channel.
+	readonly #weights: Float64Array;
+	readonly #energy: Float64Array;
+	// The coarse search's stride: every shift on an 8 kHz grid.
+	readonly #step: number;
 
 	constructor(rate: number, channels: number) {
-		this.#rate = rate;
-		this.window = Math.max(1, Math.floor((rate * 30) / 1000));
-		this.#middle = Math.floor((rate * 15) / 1000);
-		this.#band = Math.floor((rate * 20) / 1000);
-		this.#rest = Math.floor((rate * 50) / 1000);
-		this.cooldown = Math.floor((rate * 60) / 1000);
-		this.input = Array.from({ length: channels }, () => new Float32Array(this.window));
-		this.#output = Array.from({ length: channels }, () => new Float32Array(this.window));
+		this.hop = hop(rate);
+		this.span = 2 * this.hop;
+		this.window = 3 * this.hop;
+		// The history, the window, and a hop of room to top it up.
+		this.#input = Array.from({ length: channels }, () => new Float32Array(this.span + this.window + this.hop));
+		this.#allowance = this.span;
+		this.#weights = new Float64Array(this.hop);
+		for (let k = 0; k < this.hop; k++)
+			this.#weights[k] = 0.5 - 0.5 * Math.cos((Math.PI * (k + 1)) / (this.hop + 1));
+		this.#energy = new Float64Array(2 * this.span + this.hop + 1);
+		this.#step = Math.max(1, Math.floor(rate / 8000));
 	}
 
-	/** Output frames staged and not yet read. */
+	/** Whether a hop boundary is next, so {@link next} must decide before anything more plays. */
+	get due(): boolean {
+		return this.#until === 0;
+	}
+
+	/** Output frames left in what the stretch holds, as no further splice changes them. */
 	get available(): number {
-		return this.#length - this.#position;
+		return this.#filled - this.#head - this.#shift - this.#faded;
 	}
 
-	/** Output frames the last window produced, read or not. */
-	get length(): number {
-		return this.#length;
+	/** Input frames past the playhead, with a crossfade's played share mapped onto the shifted input. */
+	get ahead(): number {
+		const moved = this.#shift === 0 ? 0 : (this.#faded * (this.hop + this.#shift)) / this.hop;
+		return this.#filled - this.#head - moved;
 	}
 
-	/** Drop whatever is staged. */
-	clear(): void {
-		this.#position = 0;
-		this.#length = 0;
+	/** Input frames past where the playhead, or the crossfade it plays, starts. */
+	get queued(): number {
+		return this.#filled - this.#head;
 	}
 
-	/** Copy staged frames into `output` from `offset`, as many as fit, and return how many. */
-	read(output: Float32Array[], offset: number): number {
-		const frames = Math.min(output[0].length - offset, this.available);
+	/** Input frames the stretch has room for, keeping its history. */
+	room(): number {
+		this.#compact(this.span);
+		return this.#input[0].length - this.#filled;
+	}
+
+	/** Append `frames` from `source`'s planar circular buffers, starting at index `from`. */
+	push(source: Float32Array[], from: number, frames: number): void {
 		// Index loops rather than `set(subarray(...))`, since each `subarray` allocates a view.
-		for (let channel = 0; channel < output.length; channel++) {
-			const src = this.#output[channel];
-			const dst = output[channel];
-			for (let i = 0; i < frames; i++) dst[offset + i] = src[this.#position + i];
+		for (let channel = 0; channel < this.#input.length; channel++) {
+			const src = source[channel];
+			const dst = this.#input[channel];
+			for (let i = 0; i < frames; i++) dst[this.#filled + i] = src[(from + i) % src.length];
 		}
-		this.#position += frames;
-		this.cooldown = Math.max(0, this.cooldown - frames);
-		return frames;
+		this.#filled += frames;
+	}
+
+	/** Drop the history, so no splice reaches back across a boundary in what the ring holds. */
+	forget(): void {
+		this.#compact(0);
+	}
+
+	/** Drop everything held, a crossfade in progress included. */
+	clear(): void {
+		this.#filled = 0;
+		this.#head = 0;
+		this.#shift = 0;
+		this.#faded = 0;
+		this.#owed = 0;
+		this.#direction = 0;
+		this.#allowance = this.span;
+		this.#until = 0;
 	}
 
 	/**
-	 * Stage the first `frames` of {@link input}, accelerated by at most `excess` frames: how far the ring
-	 * sits behind its target. Only a full window of received PCM can stretch, so a short block, or one
-	 * that is not `enabled`, passes unchanged and a finite input never becomes concealment.
+	 * Decide the hop starting now, returning the shift a splice took, or zero. The pace adds up until it
+	 * reaches a hop, or at once when urgent, and a splice then takes the most similar shift within a hop
+	 * of that, inside the decision's range, the cap's allowance, and what the stretch holds.
 	 */
-	process(frames: number, excess: number, enabled: boolean): void {
-		const decision = enabled && frames === this.window ? this.decide(excess) : "Hold";
-		const lag = decision === "Hold" ? 0 : this.#pitch(decision === "Fast", excess);
-		this.#position = 0;
-		this.#length = frames - lag;
-		if (lag === 0) {
-			for (let channel = 0; channel < this.input.length; channel++) {
-				const input = this.input[channel];
-				const output = this.#output[channel];
-				for (let i = 0; i < frames; i++) output[i] = input[i];
-			}
-			return;
+	next(decision: Decision): number {
+		this.#until = this.hop;
+		this.#allowance = Math.min(this.#allowance + CAP * this.hop, this.span);
+		const direction = Math.sign(decision.pace);
+		if (direction !== this.#direction) {
+			this.#direction = direction;
+			this.#owed = 0;
 		}
+		if (direction === 0) return 0;
+		this.#owed = Math.min(Math.max(this.#owed + decision.pace * this.hop, -this.span), this.span);
+		if (!decision.urgent && direction * this.#owed < this.hop) return 0;
 
-		// Remove `lag` frames after the seam, crossfading the period before the middle into the one after.
-		const middle = this.#middle;
-		const seam = middle - lag;
-		for (let channel = 0; channel < this.input.length; channel++) {
-			const input = this.input[channel];
-			const output = this.#output[channel];
-			for (let i = 0; i < seam; i++) output[i] = input[i];
-			// NetEq's AudioVector::CrossFade, in floating point. The endpoints stay inside the seam
-			// rather than duplicating either neighbour.
-			for (let i = 0; i < lag; i++) {
-				const weight = (i + 1) / (lag + 1);
-				output[seam + i] = input[seam + i] * (1 - weight) + input[middle + i] * weight;
-			}
-			for (let i = middle + lag; i < frames; i++) output[i - lag] = input[i];
+		// The crossfade reads a hop of natural continuation and a hop past the shift.
+		const ahead = this.#filled - this.#head - this.hop;
+		if (ahead < 0) return 0;
+		const allowed = Math.floor(this.#allowance);
+		let low = Math.max(decision.low, -allowed, -this.#head);
+		let high = Math.min(decision.high, allowed, ahead);
+		if (!decision.urgent) {
+			low = Math.max(low, Math.ceil(this.#owed) - this.hop);
+			high = Math.min(high, Math.floor(this.#owed) + this.hop);
 		}
-		this.cooldown = this.#rest;
+		const shift = this.#search(low, high, direction);
+		if (shift === 0) return 0;
+		this.#shift = shift;
+		this.#faded = 0;
+		this.#owed = Math.min(Math.max(this.#owed - shift, -this.span), this.span);
+		this.#allowance -= Math.abs(shift);
+		return shift;
 	}
 
-	/**
-	 * What a full window decides given the ring's `excess` frames above its target, measured where a
-	 * frame has just arrived. Any excess accelerates, so the ring rests on its target rather than
-	 * anywhere in a band above it, and one past NetEq's 20 ms granularity fast-accelerates, which
-	 * catches up after a refill about as fast as dropping the backlog would. A ring at or below its
-	 * target holds: that is either audio on the clock or arrivals running late, and slowing down for
-	 * either adds latency.
-	 */
-	decide(excess: number): Decision {
-		if (excess >= this.#band) return "Fast";
-		if (this.cooldown > 0 || excess <= 0) return "Hold";
-		return "Accelerate";
-	}
-
-	// Search the first channel at 4 kHz, then admit the full-rate seam, returning its length or zero.
-	// Fast mode admits a weaker match and takes every whole period that fits before the middle. An
-	// ordinary accelerate removes one period, and only one that fits in the `excess`, so the ring never
-	// lands ahead of its target.
-	#pitch(fast: boolean, excess: number): number {
-		const middle = this.#middle;
-		if (middle === 0) return 0;
-
-		const rate = this.#rate;
-		const down = this.#down;
-		for (let i = 0; i < DOWN; i++) {
-			let value = 0;
-			for (let tap = 0; tap < FILTER.length; tap++) {
-				value += (FILTER[tap] * this.#sample(((10 + 12 * i - tap) * rate) / 48000)) / 4096;
+	/** Play up to `frames` into `output` from `offset`, stopping at the next hop boundary, and return how many. */
+	read(output: Float32Array[], offset: number, frames: number): number {
+		let done = 0;
+		while (done < frames && this.#until > 0) {
+			const at = offset + done;
+			if (this.#shift !== 0) {
+				const count = Math.min(frames - done, this.#until);
+				const from = this.#head + this.#faded;
+				const to = from + this.#shift;
+				for (let channel = 0; channel < output.length; channel++) {
+					const src = this.#input[channel];
+					const dst = output[channel];
+					for (let i = 0; i < count; i++) {
+						const weight = this.#weights[this.#faded + i];
+						dst[at + i] = src[from + i] * (1 - weight) + src[to + i] * weight;
+					}
+				}
+				this.#faded += count;
+				this.#until -= count;
+				done += count;
+				if (this.#faded === this.hop) {
+					this.#head += this.#shift + this.hop;
+					this.#shift = 0;
+					this.#faded = 0;
+				}
+				continue;
 			}
-			down[i] = value;
+			const count = Math.min(frames - done, this.#until, this.#filled - this.#head);
+			if (count === 0) break;
+			for (let channel = 0; channel < output.length; channel++) {
+				const src = this.#input[channel];
+				const dst = output[channel];
+				for (let i = 0; i < count; i++) dst[at + i] = src[this.#head + i];
+			}
+			this.#head += count;
+			this.#until -= count;
+			done += count;
 		}
-
-		const correlation = this.#correlation;
-		for (let index = 0; index < LAGS; index++) {
-			const lag = index + MIN_LAG;
-			let value = 0;
-			for (let t = 60; t < DOWN; t++) value += down[t] * down[t - lag];
-			correlation[index] = value;
-		}
-
-		// The largest sum, the smallest lag on a tie, refined by a parabola through its neighbours.
-		let peak = 0;
-		for (let index = 1; index < LAGS; index++) {
-			if (correlation[index] > correlation[peak]) peak = index;
-		}
-		let offset = 0;
-		if (peak !== 0) {
-			const left = correlation[peak - 1];
-			const center = correlation[peak];
-			const right = peak + 1 < LAGS ? correlation[peak + 1] : 0;
-			const denominator = left - 2 * center + right;
-			if (denominator !== 0) offset = Math.min(Math.max((0.5 * (left - right)) / denominator, -0.5), 0.5);
-		}
-		const lag = Math.min(Math.max(Math.round(((peak + MIN_LAG + offset) * rate) / 4000), 1), middle);
-
-		const input = this.input[0];
-		let energy1 = 0;
-		let energy2 = 0;
-		let cross = 0;
-		for (let i = 0; i < lag; i++) {
-			const a = input[middle - lag + i];
-			const b = input[middle + i];
-			energy1 += a * a;
-			energy2 += b * b;
-			cross += a * b;
-		}
-		const passive = (energy1 + energy2) / (2 * lag) <= PASSIVE;
-		const threshold = (fast ? 8192 : 14746) / 16384;
-		if (!passive && cross <= threshold * Math.sqrt(energy1 * energy2)) return 0;
-		if (fast) return Math.floor(middle / lag) * lag;
-		return lag <= excess ? lag : 0;
+		return done;
 	}
 
-	// The first channel at a fractional frame, linearly interpolated and clamped to the window.
-	#sample(position: number): number {
-		const input = this.input[0];
-		const last = this.window - 1;
-		const clamped = Math.min(Math.max(position, 0), last);
-		const at = Math.floor(clamped);
-		const weight = clamped - at;
-		return input[at] * (1 - weight) + input[Math.min(at + 1, last)] * weight;
+	// Keep at most `history` frames behind the playhead.
+	#compact(history: number): void {
+		const drop = this.#head - history;
+		if (drop <= 0) return;
+		for (const channel of this.#input) channel.copyWithin(0, drop, this.#filled);
+		this.#head -= drop;
+		this.#filled -= drop;
+	}
+
+	// The shift in [low, high] whose hop best matches the natural continuation, by normalized correlation
+	// over every channel's samples together, so channels in opposite phase never cancel. Nearest first,
+	// so a tie keeps the smaller shift: every shift on the coarse grid, then every one within a step of
+	// the best. Zero when the range is empty.
+	#search(low: number, high: number, direction: number): number {
+		if (low > high) return 0;
+		const hop = this.hop;
+		const input = this.#input;
+		const from = this.#head + Math.min(low, 0);
+		const length = Math.max(high, 0) + hop - Math.min(low, 0);
+		const energy = this.#energy;
+		for (let i = 0; i < length; i++) {
+			let sum = 0;
+			for (const channel of input) sum += channel[from + i] * channel[from + i];
+			energy[i + 1] = energy[i] + sum;
+		}
+		const head = this.#head;
+		const natural = head - from;
+		const power = energy[natural + hop] - energy[natural];
+		const similarity = (shift: number) => {
+			const at = natural + shift;
+			let dot = 0;
+			for (let k = 0; k < hop; k++) {
+				for (const channel of input) dot += channel[head + k] * channel[head + shift + k];
+			}
+			const product = power * (energy[at + hop] - energy[at]);
+			return product > 0 ? dot / Math.sqrt(product) : 0;
+		};
+
+		const near = direction > 0 ? low : high;
+		const far = direction > 0 ? high : low;
+		const step = this.#step;
+		let best = near;
+		let score = Number.NEGATIVE_INFINITY;
+		for (let shift = near; direction * (far - shift) >= 0; shift += direction * step) {
+			const value = similarity(shift);
+			if (value > score) {
+				score = value;
+				best = shift;
+			}
+		}
+		const start = direction > 0 ? Math.max(low, best - step + 1) : Math.min(high, best + step - 1);
+		const end = direction > 0 ? Math.min(high, best + step - 1) : Math.max(low, best - step + 1);
+		score = Number.NEGATIVE_INFINITY;
+		for (let shift = start; direction * (end - shift) >= 0; shift += direction) {
+			const value = similarity(shift);
+			if (value > score) {
+				score = value;
+				best = shift;
+			}
+		}
+		return best;
 	}
 }

@@ -26,6 +26,7 @@ const track = broadcast.createTrack("video", {
 	maxAge: Duration.millis(5000),
 	priority: 2,
 });
+if (!track) throw new Error("the track already exists");
 const group = track.createGroup(4n);
 group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(0) });
 group.writeFrame({ payload: new Uint8Array([2]), timestamp: Timestamp.fromMillis(1) });

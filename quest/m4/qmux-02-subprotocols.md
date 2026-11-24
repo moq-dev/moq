@@ -11,23 +11,23 @@ fall back to 01 or 00 as today.
 ## Plan
 
 Decided 2026-11-03 (maintainer, /quest-plan of the follow-ups from
-[moq-dev/moq#7664](https://github.com/moq-dev/moq/pull/7664)): milestone m2.
+[moq-dev/moq#7664](https://github.com/moq-dev/moq/pull/7664)).
 
 - Decision prompt (maintainer, 2026-11-03): what this quest does about
   qmux-02:
   - ✅ Advertise 02 first, in the relay and moq-tokio, from one shared list.
   - Advertise 02 after 01.
   - Leave the choice to this quest.
-- Today `rs/moq-relay/src/websocket.rs:230` lists
+- Today `rs/moq-relay/src/websocket.rs:219` (at 4bf501b535) lists
   `QMUX_VERSIONS = [QMux01, QMux00]`, and qmux-02 is accepted only as a bare
-  fallback. moq-tokio pins `QMux01` in `websocket.rs:548`, `tcp.rs`,
-  `unix.rs:16`, `server.rs`, `connection.rs`, and `webrtc.rs`.
+  fallback. moq-tokio pins `QMux01` in `websocket.rs` (`qmux_versions_for`,
+  `:594`), `tcp.rs:19`, `unix.rs:16`, `server.rs`, and `connection.rs`.
   `js/qmux/src/session.ts` already offers `qmux-02.` pairs first.
-  `Version::QMux02` exists in Rust (`rs/moq-quic/src/connection/mux/tests.rs`).
+  `Version::QMux02` lives in the `rs/qmux` crate (`config.rs` already
+  defaults to it).
 - Keep the per-ALPN floor (`QMUX01_ONLY_ALPNS`: moq-transport-18 and newer
   need qmux-01 or later), and extend it to allow 02.
-- Move the version list into one place that the relay and moq-tokio share,
-  as the comment beside `QMUX01_ONLY_ALPNS` asks.
+- Move the version list into one place that the relay and moq-tokio share.
 - Added 2026-11-08 (maintainer, approved follow-up of
   [moq-dev/moq#8224](https://github.com/moq-dev/moq/pull/8224)): the relay
   now derives its subprotocols from `moq_net::Versions`, keeping every

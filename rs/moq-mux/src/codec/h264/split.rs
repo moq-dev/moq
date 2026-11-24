@@ -1,7 +1,7 @@
 //! H.264 Annex-B stream splitter.
 //!
-//! [`Split`] turns a raw H.264 Annex-B byte stream (inline SPS/PPS, the "avc3"
-//! wire shape) into [`crate::container::Frame`]s. It finds access-unit
+//! [`Split`] turns a raw H.264 Annex-B byte stream (inline SPS/PPS, published
+//! as avc3 with no description) into [`crate::container::Frame`]s. It finds access-unit
 //! boundaries, caches SPS/PPS and re-inserts them ahead of each keyframe so
 //! every keyframe is self-contained, and stamps wall-clock timestamps when the
 //! caller has none (stdin).
@@ -10,8 +10,7 @@
 //! track, catalog, or codec config (no [`VideoConfig`](hang::catalog::VideoConfig)).
 //! The importer parses the codec config out of the frames it emits.
 //!
-//! avc1 (length-prefixed NALU + out-of-band avcC) is not a stream and has no
-//! splitter; wrap one access unit with `super::avc1_frame`.
+//! Length-prefixed NALU (with an avcC) is not a stream and has no splitter; wrap one access unit with `super::avc1_frame`.
 
 use bytes::{Bytes, BytesMut};
 
@@ -269,19 +268,12 @@ impl Split {
 		self.pending.clear();
 	}
 
-	/// The retained parameter sets, for [`restore`](Self::restore) to put back.
+	/// The retained parameter sets, which bootstrap a reset picture clock.
 	pub(crate) fn params(&self) -> Params {
 		Params {
 			sps: self.sps.clone(),
 			pps: self.pps.clone(),
 		}
-	}
-
-	/// Put back parameter sets a refused access unit replaced, so a later bare keyframe
-	/// re-injects the last good ones rather than the refused unit's.
-	pub(crate) fn restore(&mut self, params: Params) {
-		self.sps = params.sps;
-		self.pps = params.pps;
 	}
 
 	fn pts(&mut self, hint: Option<moq_net::Timestamp>) -> Result<moq_net::Timestamp> {

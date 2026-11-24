@@ -1,18 +1,29 @@
 import { expect, test } from "bun:test";
-import { Duration, Manual } from "@moq/clock";
+import { Duration } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { Time, Track } from "@moq/net";
+import { within } from "../subscription.test-util.ts";
 import { Consumer, type Read } from "./consumer.ts";
 import { encodeFrame, Format } from "./legacy.ts";
 
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 
+// A subscription to `track` whose missing groups an unserved fill owes, as a session's feed would, so
+// its ordered read waits `max` for each hole before giving it up.
+function owed(track: Track.Producer, max: Duration): Track.Subscriber {
+	// Accepted, so the live join has a track to place on.
+	track.accept({ timescale: Time.Timescale.MICRO, maxAge: null });
+	track.requests();
+	return track.subscribe(within(max));
+}
+
 test.each([0, 100])("a sequence hole before a paused data marker expires at %sms", async (budget) => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const track = new Track.Producer("data");
-	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
+	const consumer = new Consumer(owed(track, Duration.millis(budget)), {
 		format: new Format("data"),
-		delay: { max: Duration.millis(budget) },
+		delay: { min: null, max: Duration.millis(budget) },
 	});
 	const results: Read[] = [];
 	const reading = (async () => {
@@ -26,13 +37,14 @@ test.each([0, 100])("a sequence hole before a paused data marker expires at %sms
 		const first = track.createGroup(0n);
 		first.writeFrame({
 			payload: encodeFrame(new Uint8Array([1]), Duration.micros(10_000)),
-			timestamp: Time.Timestamp.now(),
+			timestamp: Time.Timestamp.fromMicros(10_000),
 		});
 		first.finish();
 		await flush();
 		expect(results).toHaveLength(1);
 		const marker = track.createGroup(2n);
-		marker.writeFrame({ payload: new Uint8Array(), timestamp: Time.Timestamp.now() });
+		// A data marker carries no container timestamp; its group's start still passes the first's.
+		marker.writeFrame({ payload: new Uint8Array(), timestamp: Time.Timestamp.fromMicros(20_000) });
 		marker.finish();
 		await flush();
 		if (budget > 0) {
@@ -61,9 +73,9 @@ test("a filled hole cancels its timer and the next hole gets a fresh budget", as
 	const clock = new Manual();
 	const installed = clock.install();
 	const track = new Track.Producer("data");
-	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
+	const consumer = new Consumer(owed(track, Duration.millis(100)), {
 		format: new Format("data"),
-		delay: { max: Duration.millis(100) },
+		delay: { min: null, max: Duration.millis(100) },
 	});
 	const results: Read[] = [];
 	const reading = (async () => {
@@ -80,7 +92,8 @@ test("a filled hole cancels its timer and the next hole gets a fresh budget", as
 				timestamp === undefined
 					? new Uint8Array()
 					: encodeFrame(new Uint8Array([1]), Duration.micros(timestamp)),
-			timestamp: Time.Timestamp.fromMicros(timestamp ?? 20_000),
+			// A marker group still starts past the newest group's first frame.
+			timestamp: Time.Timestamp.fromMicros(timestamp ?? 30_000),
 		});
 		group.finish();
 	};
@@ -114,13 +127,15 @@ test("a filled hole cancels its timer and the next hole gets a fresh budget", as
 	}
 });
 
+// The ordered read gives every hole up at once a budget after the first group past it landed, and the
+// groups buffered between the holes with them: by then each one's successor landed a budget ago.
 test("the holes a stalled source left behind share one budget", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const track = new Track.Producer("data");
-	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
+	const consumer = new Consumer(owed(track, Duration.millis(100)), {
 		format: new Format("data"),
-		delay: { max: Duration.millis(100) },
+		delay: { min: null, max: Duration.millis(100) },
 	});
 	const results: Read[] = [];
 	const reading = (async () => {
@@ -144,8 +159,10 @@ test("the holes a stalled source left behind share one budget", async () => {
 		for (const sequence of [2n, 4n, 6n]) write(sequence);
 		await flush();
 		expect(results).toHaveLength(1);
-		await clock.advance(Duration.millis(100));
-		expect(results.map((read) => read.kind)).toEqual(["frame", "gap", "frame", "gap", "frame", "gap", "frame"]);
+		await clock.advance(Duration.millis(99));
+		expect(results).toHaveLength(1);
+		await clock.advance(Duration.millis(1));
+		expect(results.map((read) => read.kind)).toEqual(["frame", "gap", "frame"]);
 	} finally {
 		consumer.close();
 		track.finish();
@@ -158,13 +175,14 @@ test("the holes a stalled source left behind share one budget", async () => {
 	}
 });
 
+// Group 2, landing inside the wait, is given up with the hole: its successor landed a budget ago.
 test("a hole is late from the earliest arrival past it", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const track = new Track.Producer("data");
-	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
+	const consumer = new Consumer(owed(track, Duration.millis(100)), {
 		format: new Format("data"),
-		delay: { max: Duration.millis(100) },
+		delay: { min: null, max: Duration.millis(100) },
 	});
 	const results: Read[] = [];
 	const reading = (async () => {
@@ -190,9 +208,10 @@ test("a hole is late from the earliest arrival past it", async () => {
 		await clock.advance(Duration.millis(50));
 		write(2n);
 		await flush();
+		await clock.advance(Duration.millis(49));
 		expect(results).toHaveLength(1);
-		await clock.advance(Duration.millis(50));
-		expect(results.map((read) => read.kind)).toEqual(["frame", "gap", "frame", "gap", "frame"]);
+		await clock.advance(Duration.millis(1));
+		expect(results.map((read) => read.kind)).toEqual(["frame", "gap", "frame"]);
 	} finally {
 		consumer.close();
 		track.finish();
@@ -229,7 +248,7 @@ test("a hole in a drained backlog is late from the earliest arrival past it, not
 	await clock.advance(Duration.millis(100));
 
 	// Joined now, the backlog drains in sequence order: group 3 before group 5, which landed first.
-	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
+	const consumer = new Consumer(owed(track, Duration.millis(500)), {
 		format: new Format("data"),
 		delay: { max: Duration.millis(500) },
 	});
@@ -243,11 +262,10 @@ test("a hole in a drained backlog is late from the earliest arrival past it, not
 	})();
 	try {
 		await flush();
-		// Group 5 landed a second ago, so the holes before groups 3 and 5 both expired.
+		// Group 5 landed a second ago, so the holes before groups 3 and 5 both expired, and group 3
+		// with them: its successor landed a budget ago.
 		expect(results.map((read) => (read.kind === "end" ? `end ${read.group}` : read.kind))).toEqual([
 			"frame",
-			"gap",
-			"end 3",
 			"gap",
 			"end 5",
 		]);
@@ -269,9 +287,9 @@ test.each([true, false])("the head after a declared end is waited for (arrives: 
 	const clock = new Manual();
 	const installed = clock.install();
 	const track = new Track.Producer("audio");
-	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
+	const consumer = new Consumer(owed(track, Duration.millis(300)), {
 		format: new Format("audio"),
-		delay: { max: Duration.millis(300) },
+		delay: { min: null, max: Duration.millis(300) },
 	});
 	const results: Read[] = [];
 	const reading = (async () => {
@@ -349,9 +367,9 @@ test("a newest-first flush past a hole delivers the groups landing behind its ne
 	const clock = new Manual();
 	const installed = clock.install();
 	const track = new Track.Producer("audio");
-	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
+	const consumer = new Consumer(owed(track, Duration.millis(80)), {
 		format: new Format("audio"),
-		delay: { max: Duration.millis(80) },
+		delay: { min: null, max: Duration.millis(80) },
 	});
 	const results: Read[] = [];
 	const reading = (async () => {
@@ -362,11 +380,13 @@ test("a newest-first flush past a hole delivers the groups landing behind its ne
 		}
 	})();
 	// One 20ms frame per group, as a voice publisher writes them, all sent at once.
-	const sent = Time.Timestamp.now();
 	const write = (sequence: number) => {
 		const group = track.createGroup(BigInt(sequence));
 		const timestamp = Duration.micros(sequence * 20_000);
-		group.writeFrame({ payload: encodeFrame(new Uint8Array([1]), timestamp), timestamp: sent });
+		group.writeFrame({
+			payload: encodeFrame(new Uint8Array([1]), timestamp),
+			timestamp: Time.Timestamp.fromMicros(sequence * 20_000),
+		});
 		group.finish();
 	};
 	try {
@@ -383,6 +403,126 @@ test("a newest-first flush past a hole delivers the groups landing behind its ne
 				frame: expect.objectContaining({ timestamp: Duration.micros(sequence * 20_000) }),
 			})),
 		);
+	} finally {
+		consumer.close();
+		track.finish();
+		track.close();
+		try {
+			await reading;
+		} finally {
+			installed.close();
+		}
+	}
+});
+
+// A hole and a group that did arrive both wait out the max delay: the min delay only sets where the
+// reader starts.
+test("a hole is waited for the max delay, as an arrived group plays up to it", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const track = new Track.Producer("audio");
+	const consumer = new Consumer(owed(track, Duration.millis(1000)), {
+		format: new Format("audio"),
+		delay: { min: Duration.millis(100), max: Duration.millis(1000) },
+	});
+	const results: Read[] = [];
+	const reading = (async () => {
+		for (;;) {
+			const read = await consumer.next();
+			if (!read) return;
+			results.push(read);
+		}
+	})();
+	const write = (sequence: bigint, ms: number, finish = true) => {
+		const group = track.createGroup(sequence);
+		group.writeFrame({
+			payload: encodeFrame(new Uint8Array([1]), Duration.millis(ms)),
+			timestamp: Time.Timestamp.fromMicros(ms * 1000),
+		});
+		if (finish) group.finish();
+		return group;
+	};
+	const reads = () => results.map((read) => (read.kind === "frame" ? read.frame.timestamp.asMillis() : read.kind));
+	try {
+		// A stalled group 500 ms behind the newest content is still within the max delay.
+		const stalled = write(0n, 0, false);
+		write(1n, 500);
+		await flush();
+		await clock.advance(Duration.millis(500));
+		expect(reads()).toEqual([0]);
+		stalled.finish();
+		await flush();
+		expect(reads()).toEqual([0, 500]);
+
+		// A missing group is waited for the max delay after the first group past it arrived, not the min.
+		write(3n, 520);
+		await flush();
+		await clock.advance(Duration.millis(999));
+		expect(reads()).toEqual([0, 500]);
+		await clock.advance(Duration.millis(1));
+		expect(reads()).toEqual([0, 500, "gap", 520]);
+
+		// It skips at once when the newest content is already the max delay past the group after it.
+		write(5n, 900);
+		write(6n, 1900);
+		await flush();
+		expect(reads()).toEqual([0, 500, "gap", 520, "gap", 900, 1900]);
+
+		// A burst past the hole that carries the missing group reads with no gap.
+		write(8n, 2000);
+		write(9n, 2200);
+		await flush();
+		write(7n, 1950);
+		await flush();
+		expect(reads()).toEqual([0, 500, "gap", 520, "gap", 900, 1900, 1950, 2000, 2200]);
+	} finally {
+		consumer.close();
+		track.finish();
+		track.close();
+		try {
+			await reading;
+		} finally {
+			installed.close();
+		}
+	}
+});
+
+// The min delay sets only where the reader starts: a hole waits out the max delay alone.
+test("a hole ends at the max delay, not the min delay", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const track = new Track.Producer("audio");
+	const consumer = new Consumer(owed(track, Duration.millis(2_000)), {
+		format: new Format("audio"),
+		delay: { min: Duration.millis(500), max: Duration.millis(2_000) },
+	});
+	const results: Read[] = [];
+	const reading = (async () => {
+		for (;;) {
+			const read = await consumer.next();
+			if (!read) return;
+			results.push(read);
+		}
+	})();
+	const write = (sequence: bigint, millis: number) => {
+		const group = track.createGroup(sequence);
+		group.writeFrame({
+			payload: encodeFrame(new Uint8Array([1]), Duration.millis(millis)),
+			timestamp: Time.Timestamp.fromMicros(millis * 1000),
+		});
+		group.finish();
+	};
+	try {
+		write(0n, 0);
+		await flush();
+		expect(results).toHaveLength(1);
+		// A resume: the groups past the hole start a second of media later, inside the max delay.
+		write(50n, 1_000);
+		await flush();
+		await clock.advance(Duration.millis(1_999));
+		expect(results).toHaveLength(1);
+		await clock.advance(Duration.millis(1));
+		expect(results.slice(1).map((read) => read.kind)).toEqual(["gap", "frame"]);
 	} finally {
 		consumer.close();
 		track.finish();

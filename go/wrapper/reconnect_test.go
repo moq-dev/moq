@@ -82,9 +82,8 @@ func dialWorker(t *testing.T, ctx context.Context, url string) *moq.Client {
 	client, err := moq.Dial(ctx, url, moq.ClientConfig{
 		TLS: moq.ClientTLS{Insecure: true},
 		Backoff: moq.Backoff{
-			Initial: 50 * time.Millisecond,
-			Max:     time.Second,
-			Timeout: moq.RetryForever,
+			Initial: ptr(50 * time.Millisecond),
+			Max:     ptr(time.Second),
 		},
 	})
 	if err != nil {
@@ -167,7 +166,7 @@ func TestListenKeylogRequiresSSLKEYLOGFILE(t *testing.T) {
 	}
 }
 
-// A Go worker survives a relay restart the way a moq-c worker does: the session
+// A Go worker survives a relay restart the way a libmoq worker does: the session
 // redials with backoff, the publisher re-announces its broadcast to the fresh
 // relay, and the subscriber's subscription receives frames again. The connect count
 // pairs with Status so a worker can log each reconnect.
@@ -230,6 +229,10 @@ func TestReconnectAcrossRelayRestart(t *testing.T) {
 	if frame, err := trackConsumer.ReadFrame(ctx); err != nil || frame == nil {
 		t.Fatalf("frame before restart: frame=%+v err=%v", frame, err)
 	}
+	// Connected once the relay accepted each session, so the drop below redials rather than
+	// ending them as refusals.
+	waitConnects(t, ctx, publisher.Session(), 1)
+	waitConnects(t, ctx, subscriber.Session(), 1)
 	if state := subscriber.Session().State(); !isConnected(state) {
 		t.Fatalf("not serving before any drop: %+v", state)
 	}
@@ -328,7 +331,7 @@ func TestDialConnectionOptions(t *testing.T) {
 			KeepAlive:         ptr(time.Duration(0)),
 			GSO:               ptr(false),
 			MTUDiscovery:      ptr(true),
-			CongestionControl: ptr(moq.CongestionControlLoss),
+			CongestionControl: moq.CubicCongestionControl(),
 		},
 		WebSocket: moq.WebSocketConfig{Enabled: ptr(false)},
 	})
@@ -342,7 +345,8 @@ func TestDialConnectionOptions(t *testing.T) {
 	}
 }
 
-// A public wrapper owns its first dial through Session and observes repeated failures.
+// A public wrapper owns its first dial through Session and observes it fail: a first dial
+// that reaches no session ends the session with its error rather than retrying.
 func TestFirstDialState(t *testing.T) {
 	silent, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
@@ -356,34 +360,36 @@ func TestFirstDialState(t *testing.T) {
 		Timeout:   ptr(100 * time.Millisecond),
 		TLS:       moq.ClientTLS{Insecure: true},
 		WebSocket: moq.WebSocketConfig{Enabled: ptr(false)},
-		Backoff:   moq.Backoff{Initial: 50 * time.Millisecond, Max: 50 * time.Millisecond, Timeout: moq.RetryForever},
+		Backoff:   moq.Backoff{Initial: ptr(50 * time.Millisecond), Max: ptr(50 * time.Millisecond)},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	session := client.Session()
 	defer session.Cancel(0)
-	state := session.State()
-	if _, ok := state.Phase.(moq.ConnectionPhaseConnecting); !ok || state.Connects != 0 {
-		t.Fatalf("initial state: %+v", state)
-	}
-	for i := 0; i < 2; i++ {
-		state, err = session.StateChanged(ctx, state.Revision)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if phase, ok := state.Phase.(moq.ConnectionPhaseConnecting); !ok || phase.Failure == nil || state.Connects != 0 {
-			t.Fatalf("failed dial state: %+v", state)
-		}
+	initial := session.State()
+	if _, ok := initial.Phase.(moq.ConnectionPhaseConnecting); !ok || initial.Connects != 0 {
+		t.Fatalf("initial state: %+v", initial)
 	}
 	// A canceled waiter must leave both the session and another observer live.
 	canceled, stop := context.WithCancel(ctx)
 	stop()
-	if _, err := session.StateChanged(canceled, state.Revision); !errors.Is(err, context.Canceled) {
+	if _, err := session.StateChanged(canceled, initial.Revision); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled waiter: %v", err)
 	}
-	if _, err := session.StateChanged(ctx, state.Revision); err != nil {
+	state, err := session.StateChanged(ctx, initial.Revision)
+	if err != nil {
 		t.Fatalf("independent waiter: %v", err)
+	}
+	if phase, ok := state.Phase.(moq.ConnectionPhaseClosed); !ok || !errors.Is(phase.Failure, moq.ErrConnect) || state.Connects != 0 {
+		t.Fatalf("failed dial state: %+v", state)
+	}
+	// The terminal revision never changes again, so a wait there reports the failure.
+	if _, err := session.StateChanged(ctx, state.Revision); !errors.Is(err, moq.ErrConnect) {
+		t.Fatalf("terminal waiter: %v", err)
+	}
+	if err := session.Closed(ctx); !errors.Is(err, moq.ErrConnect) {
+		t.Fatalf("closed: %v", err)
 	}
 }
 

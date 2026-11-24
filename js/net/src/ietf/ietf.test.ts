@@ -3,10 +3,11 @@ import { expect, test } from "bun:test";
 import { ProtocolViolation } from "../error.ts";
 import * as Path from "../path.ts";
 import { type Cursor, Reader, Writer } from "../stream.ts";
-import { Timescale, Timestamp } from "../time.ts";
+import { Timescale } from "../time.ts";
 import * as Varint from "../varint.ts";
 import { Fetch } from "./fetch.ts";
 import * as GoAway from "./goaway.ts";
+import { framed, unframed } from "./message.test-util.ts";
 import * as Namespace from "./namespace.ts";
 import {
 	EndOfRange,
@@ -74,15 +75,10 @@ async function decodeVersioned<T>(
 	return await decoder(reader, version);
 }
 
-async function encodeFrameVersioned(
-	frame: Frame,
-	flags: GroupFlags,
-	version: IetfVersion,
-	timescale: Timescale = Timescale.MILLI,
-): Promise<Uint8Array> {
+async function encodeFrameVersioned(frame: Frame, flags: GroupFlags, version: IetfVersion): Promise<Uint8Array> {
 	const { stream, written } = createTestWritableStream();
 	const writer = new Writer(stream, version);
-	await frame.encode(writer, flags, timescale, version);
+	await frame.encode(writer, flags, version);
 	writer.close();
 	await writer.closed;
 	return concatChunks(written);
@@ -92,31 +88,30 @@ async function encodeFetchFrameVersioned(
 	frame: FetchFrame,
 	position: FetchPosition,
 	version: IetfVersion,
-	timescale: Timescale = Timescale.MILLI,
 ): Promise<Uint8Array> {
 	const { stream, written } = createTestWritableStream();
 	const writer = new Writer(stream, version);
-	await frame.encode(writer, position, timescale, version);
+	await frame.encode(writer, position, version);
 	writer.close();
 	await writer.closed;
 	return concatChunks(written);
 }
 
 test("DEFAULT_PUBLISHER_PRIORITY has exact SUBSCRIBE_OK bytes per draft", async () => {
-	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22] as const) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22, Version.DRAFT_23] as const) {
 		const baseline = await encodeVersioned(new Subscribe.SubscribeOk({ trackAlias: 42n }), version);
 		const encoded = await encodeVersioned(
 			new Subscribe.SubscribeOk({ trackAlias: 42n, properties: { priority: 37 } }),
 			version,
 		);
-		expect(Array.from(encoded)).toEqual([baseline[0], baseline[1] + 2, ...baseline.slice(2), 0x0e, 37]);
+		expect(encoded).toEqual(framed([...unframed(baseline, version), 0x0e, 37], version));
 		const decoded = await decodeVersioned(encoded, Subscribe.SubscribeOk.decode, version);
 		expect(decoded.properties.priority).toBe(37);
 	}
 });
 
 test("DEFAULT_PUBLISHER_PRIORITY has exact PUBLISH bytes per draft", async () => {
-	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22] as const) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22, Version.DRAFT_23] as const) {
 		const fields = {
 			requestId: 1n,
 			trackNamespace: Path.from("ns"),
@@ -130,15 +125,7 @@ test("DEFAULT_PUBLISHER_PRIORITY has exact PUBLISH bytes per draft", async () =>
 		const baseline = await encodeVersioned(new Publish(fields), version);
 		const encoded = await encodeVersioned(new Publish({ ...fields, priority: 37 }), version);
 		// The new property precedes GROUP_ORDER, so its delta changes 0x22 to 0x14.
-		expect(Array.from(encoded)).toEqual([
-			baseline[0],
-			baseline[1] + 2,
-			...baseline.slice(2, -2),
-			0x0e,
-			37,
-			0x14,
-			2,
-		]);
+		expect(encoded).toEqual(framed([...unframed(baseline, version).slice(0, -2), 0x0e, 37, 0x14, 2], version));
 		const decoded = await decodeVersioned(encoded, Publish.decode, version);
 		expect(decoded.priority).toBe(37);
 	}
@@ -151,7 +138,7 @@ test("Message Parameters: Location preserves bigint precision", async () => {
 
 	expect(params.largest).toEqual(largest);
 
-	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22, Version.DRAFT_23]) {
 		const encoded = await encodeVersioned(params, version);
 		const decoded = await decodeVersioned(encoded, Parameters.decode, version);
 		expect(decoded.largest).toEqual(largest);
@@ -165,7 +152,7 @@ test("Message Parameters: Location preserves full uint64 values", async () => {
 
 	expect(params.largest).toEqual(largest);
 
-	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22, Version.DRAFT_23]) {
 		const encoded = await encodeVersioned(params, version);
 		const decoded = await decodeVersioned(encoded, Parameters.decode, version);
 		expect(decoded.largest).toEqual(largest);
@@ -173,7 +160,7 @@ test("Message Parameters: Location preserves full uint64 values", async () => {
 });
 
 test("PublishDone: preserves unknown statuses across supported versions", async () => {
-	const versions = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22] as const;
+	const versions = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22, Version.DRAFT_23] as const;
 
 	for (const version of versions) {
 		const msg = new PublishDone({
@@ -444,17 +431,32 @@ test("Namespace: literal backslash round trips", async () => {
 	expect(await encodeNamespace(decoded)).toEqual(tuple);
 });
 
-test("Namespace: slashes at tuple part boundaries", async () => {
-	// A leading slash escapes to a non-empty `\` segment.
-	const tuple = await encodeNamespaceTuple(["/foo", "/bar"]);
-	const decoded = await decodeNamespace(tuple);
-	expect(decoded).toBe("\\/foo/\\/bar" as Path.Valid);
-	expect(await encodeNamespace(decoded)).toEqual(tuple);
-
-	// A trailing slash escapes to an empty segment, which every later path operation assumes away.
-	for (const fields of [["/foo", "bar/", "/baz/"], ["foo/", "bar"], ["/"], ["a//"]]) {
-		await expect(decodeNamespace(await encodeNamespaceTuple(fields))).rejects.toThrow(ProtocolViolation);
+test("Namespace: slashes at field boundaries", async () => {
+	// A slash anywhere in a field escapes to content of one segment, never an empty one.
+	for (const fields of [
+		["/foo", "/bar"],
+		["/foo", "b/ar", "/baz"],
+	]) {
+		const tuple = await encodeNamespaceTuple(fields);
+		const decoded = await decodeNamespace(tuple);
+		expect(Path.parts(decoded).map(Path.unescape)).toEqual(fields);
+		expect(await encodeNamespace(decoded)).toEqual(tuple);
 	}
+	expect(await decodeNamespace(await encodeNamespaceTuple(["/a/b", "c"]))).toBe("\\/a\\/b/c" as Path.Valid);
+
+	// TEMPORARY MIGRATION, delete at the next version cut and move these up: a field ending in a
+	// slash, or holding `//`, spells a bare slash beside an escaped one, which the previous release
+	// would trim or collapse into another path, so it is refused until it is gone.
+	for (const fields of [["/foo", "bar/", "/baz/"], ["foo/", "bar"], ["/"], ["a//"], ["//", "/"]]) {
+		await expect(decodeNamespace(await encodeNamespaceTuple(fields))).rejects.toThrow();
+	}
+
+	// A namespace of 32 fields stays 32 segments however many of them hold a slash.
+	const fields = Array.from({ length: Path.MAX_PARTS }, (_, i) => `${i}/${i}`);
+	const tuple = await encodeNamespaceTuple(fields);
+	const decoded = await decodeNamespace(tuple);
+	expect(Path.parts(decoded)).toHaveLength(Path.MAX_PARTS);
+	expect(await encodeNamespace(decoded)).toEqual(tuple);
 });
 
 test("Namespace: Subscribe with empty namespace round trip", async () => {
@@ -610,10 +612,9 @@ test("RequestOk v18: round trip", async () => {
 // A REQUEST_UPDATE_OK or TRACK_STATUS_OK must carry LARGEST_OBJECT once the track has
 // objects, so a REQUEST_OK with one decodes.
 test("RequestOk: accepts LARGEST_OBJECT", async () => {
-	const versions = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22] as const;
+	const versions = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22, Version.DRAFT_23] as const;
 	for (const version of versions) {
-		const body = [0x01, 0x09, 0x05, 0x03];
-		const bytes = new Uint8Array([0x00, body.length, ...body]);
+		const bytes = framed([0x01, 0x09, 0x05, 0x03], version);
 		const decoded = await decodeVersioned(bytes, RequestOk.decode, version);
 		expect(decoded.parameters.largest).toEqual({ groupId: 5n, objectId: 3n });
 	}
@@ -662,7 +663,7 @@ test("SubscribeNamespace: round trip", async () => {
 test("SubscribeNamespace: FORWARD is rejected", async () => {
 	await expect(
 		decodeVersioned(
-			framed([0x01, 0x00, 0x01, 0x10, 0x00]),
+			framed([0x01, 0x00, 0x01, 0x10, 0x00], Version.DRAFT_18),
 			SubscribeNamespace.SubscribeNamespace.decode,
 			Version.DRAFT_18,
 		),
@@ -699,7 +700,7 @@ test("group flags round-trip firstObject", async () => {
 			},
 		});
 
-	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22, Version.DRAFT_23]) {
 		for (const firstObject of [true, false]) {
 			const encoded = await encodeVersioned(makeGroup(firstObject), version);
 			const decoded = await decodeVersioned(encoded, Group.decode, version);
@@ -725,7 +726,7 @@ test("Frame: END_OF_GROUP is accepted whether or not the header marks the end", 
 
 	for (const hasEnd of [false, true]) {
 		const decoded = await new Reader(undefined, wire, Version.DRAFT_22).decode((c) =>
-			Frame.decode(c, makeFlags(hasEnd), Timescale.MILLI),
+			Frame.decode(c, makeFlags(hasEnd)),
 		);
 
 		// No payload is the group-end signal the subscriber breaks its read loop on.
@@ -735,7 +736,7 @@ test("Frame: END_OF_GROUP is accepted whether or not the header marks the end", 
 
 	// Status 0 on a marked stream is still an empty frame, not a group end.
 	const empty = await new Reader(undefined, new Uint8Array([0x00, 0x00, 0x00]), Version.DRAFT_22).decode((c) =>
-		Frame.decode(c, makeFlags(true), Timescale.MILLI),
+		Frame.decode(c, makeFlags(true)),
 	);
 	expect(empty.payload).toEqual(new Uint8Array(0));
 	expect(empty.endOfTrack).toBe(false);
@@ -751,8 +752,8 @@ test("Frame decodes objects split at every byte", async () => {
 		firstObject: true,
 	};
 	const frames = [
-		new Frame({ payload: new Uint8Array([1]), timestamp: new Timestamp(96_000, Timescale.MILLI) }),
-		new Frame({ payload: new Uint8Array(300).fill(2), timestamp: new Timestamp(96_033, Timescale.MILLI) }),
+		new Frame({ payload: new Uint8Array([1]), groupGap: 300n }),
+		new Frame({ payload: new Uint8Array(300).fill(2) }),
 	];
 	const bytes = concatChunks(await Promise.all(frames.map((f) => encodeFrameVersioned(f, flags, Version.DRAFT_22))));
 	const reader = new Reader(
@@ -766,11 +767,11 @@ test("Frame decodes objects split at every byte", async () => {
 		Version.DRAFT_22,
 	);
 
-	const decode = (c: Cursor) => Frame.decode(c, flags, Timescale.MILLI);
+	const decode = (c: Cursor) => Frame.decode(c, flags);
 	for (const frame of frames) {
 		const decoded = await reader.decodeMaybe(decode);
 		expect(decoded?.payload).toEqual(frame.payload);
-		expect(decoded?.timestamp?.value).toBe(frame.timestamp?.value);
+		expect(decoded?.groupGap).toBe(frame.groupGap);
 	}
 	expect(await reader.decodeMaybe(decode)).toBeUndefined();
 });
@@ -789,12 +790,10 @@ test("Frame rejects a property that runs past its block", async () => {
 	// Delta 0, a 2-byte block holding a Timestamp id and the first byte of a 2-byte value, a
 	// 1-byte payload, then bytes the block must not borrow.
 	const reader = new Reader(undefined, new Uint8Array([0, 2, 0x10, 0x80, 1, 0xaa, 0x01]), Version.DRAFT_22);
-	await expect(reader.decode((c) => Frame.decode(c, flags, Timescale.MILLI))).rejects.toThrow(
-		"message is shorter than its fields",
-	);
+	await expect(reader.decode((c) => Frame.decode(c, flags))).rejects.toThrow("message is shorter than its fields");
 });
 
-test("Frame reads only the current LOC Timestamp ID on every draft", async () => {
+test("Frame reads no time from a Timestamp, only a Prior Group ID Gap, on every draft", async () => {
 	const flags: GroupFlags = {
 		hasExtensions: true,
 		hasSubgroup: false,
@@ -803,11 +802,12 @@ test("Frame reads only the current LOC Timestamp ID on every draft", async () =>
 		hasPriority: true,
 		firstObject: true,
 	};
-	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22] as const) {
-		for (const id of [0x06, 0x10]) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22, Version.DRAFT_23] as const) {
+		for (const id of [0x06, 0x10, 0x3c]) {
 			const reader = new Reader(undefined, new Uint8Array([0, 2, id, 42, 1, 0xaa]), version);
-			const frame = await reader.decode((c) => Frame.decode(c, flags, Timescale.MILLI));
-			expect(frame.timestamp?.value).toBe(id === 0x10 ? 42 : undefined);
+			const frame = await reader.decode((c) => Frame.decode(c, flags));
+			expect(frame.payload).toEqual(new Uint8Array([0xaa]));
+			expect(frame.groupGap).toBe(id === 0x3c ? 42n : undefined);
 		}
 	}
 });
@@ -817,35 +817,25 @@ test("Frame reads only the current LOC Timestamp ID on every draft", async () =>
 // for a served fill. Its priority is the track's, as a subgroup header's is: model priority
 // 72 is wire 55, lower first.
 test("FetchFrame: the first object carries its absolute ids and the rest inherit them", async () => {
-	const timestamp = new Timestamp(96_000, Timescale.MILLI);
-	const frame = new FetchFrame({ payload: new Uint8Array([0xaa, 0xbb]), timestamp, priority: 55 });
+	const frame = new FetchFrame({ payload: new Uint8Array([0xaa, 0xbb]), priority: 55 });
 
+	// No properties: a fetch object sends no Timestamp.
 	const first = await encodeFetchFrameVersioned(frame, { group: 7n, object: 3, first: true }, Version.DRAFT_22);
 	expect(Array.from(first)).toEqual([
-		0x3c, // GROUP_ID | OBJECT_ID | PRIORITY | PROPERTIES
+		0x1c, // GROUP_ID | OBJECT_ID | PRIORITY, without PROPERTIES
 		7, // group id
 		3, // object id
 		55, // publisher priority
-		0x04, // properties length
-		0x10, // TIMESTAMP
-		0xc1,
-		0x77,
-		0x00, // 96000 as a three byte leading-ones varint
 		0x02, // payload length
 		0xaa,
 		0xbb,
 	]);
 
 	// Same group and priority, and the object id is the prior one plus one, so only the
-	// properties and the payload go on the wire.
+	// payload goes on the wire.
 	const next = await encodeFetchFrameVersioned(frame, { group: 7n, object: 4, first: false }, Version.DRAFT_22);
 	expect(Array.from(next)).toEqual([
-		0x20, // PROPERTIES
-		0x04,
-		0x10,
-		0xc1,
-		0x77,
-		0x00,
+		0x00, // subgroup zero, no fields present
 		0x02,
 		0xaa,
 		0xbb,
@@ -856,7 +846,7 @@ test("FetchFrame: the first object carries its absolute ids and the rest inherit
 // every implementation reads it (moq-wg/moq-transport#1861). Read as a delta, its group
 // could never name the group it follows.
 test("FetchEndOfRange: absolute ids and nothing after them", async () => {
-	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22] as const) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22, Version.DRAFT_23] as const) {
 		const reason = version === Version.DRAFT_18 ? EndOfRange.Unknown : EndOfRange.TimedOut;
 		const { stream, written } = createTestWritableStream();
 		const writer = new Writer(stream, version);
@@ -893,55 +883,17 @@ test("FetchFrame: the first object after an End of Range", async () => {
 // A fetch object has no status field, unlike a subgroup object: a zero payload length is
 // simply an empty object, and writing a status after it would desync the stream.
 test("FetchFrame: an empty payload is a zero length, with no status byte", async () => {
-	const frame = new FetchFrame({
-		payload: new Uint8Array(),
-		timestamp: new Timestamp(0, Timescale.MILLI),
-		priority: 0,
-	});
+	const frame = new FetchFrame({ payload: new Uint8Array(), priority: 0 });
 	const encoded = await encodeFetchFrameVersioned(frame, { group: 1n, object: 0, first: true }, Version.DRAFT_22);
 
 	expect(Array.from(encoded)).toEqual([
-		0x3c,
+		0x1c,
 		1, // group id
 		0, // object id
 		0, // publisher priority
-		0x02, // properties length
-		0x10, // TIMESTAMP
-		0x00, // 0
 		0x00, // payload length, and nothing follows
 	]);
 });
-
-// A track that declared no timescale opted out of timestamps, so the properties field is
-// omitted rather than carrying a value in units the peer was never told. This is what a
-// subscriber that sent INCLUDE_PROPERTIES=0 gets.
-test("FetchFrame: an unstamped object omits the properties field", async () => {
-	const frame = new FetchFrame({ payload: new Uint8Array([0x01]), priority: 0 });
-	const encoded = await encodeFetchFrameVersioned(frame, { group: 0n, object: 0, first: false }, Version.DRAFT_22);
-
-	// Flags 0 (subgroup zero, no fields present), then the payload.
-	expect(Array.from(encoded)).toEqual([0x00, 0x01, 0x01]);
-});
-
-// The first object still carries its absolute ids and priority; only the properties go.
-test("FetchFrame: an unstamped first object keeps its ids", async () => {
-	const frame = new FetchFrame({ payload: new Uint8Array([0x01]), priority: 0 });
-	const encoded = await encodeFetchFrameVersioned(frame, { group: 4n, object: 2, first: true }, Version.DRAFT_22);
-
-	expect(Array.from(encoded)).toEqual([
-		0x1c, // GROUP_ID | OBJECT_ID | PRIORITY, without PROPERTIES
-		4,
-		2,
-		0,
-		0x01,
-		0x01,
-	]);
-});
-
-/** Frame a control message body with its 16-bit Length, as every draft does. */
-function framed(body: number[]): Uint8Array {
-	return new Uint8Array([body.length >> 8, body.length & 0xff, ...body]);
-}
 
 /** Request ID 1, Track Namespace ("live"), Track Name ("video"): the head of a SUBSCRIBE or draft-22 FETCH. */
 const TRACK_HEAD = [0x01, 0x01, 0x04, ...new TextEncoder().encode("live"), 0x05, ...new TextEncoder().encode("video")];
@@ -949,16 +901,19 @@ const TRACK_HEAD = [0x01, 0x01, 0x04, ...new TextEncoder().encode("live"), 0x05,
 // Every parameter draft-22 lets a SUBSCRIBE carry that we don't act on still decodes, with
 // what we have to refuse recorded rather than failing the stream.
 test("Subscribe draft-22: decodes every legal parameter", async () => {
-	const body = framed([
-		...TRACK_HEAD,
-		0x06, // Number of Parameters
-		...[0x03, 0x03, 0x03, 0x00, 0xaa], // AUTHORIZATION TOKEN
-		...[0x00, 0x03, 0x03, 0x00, 0xbb], // a second one, which the draft allows
-		...[0x0d, 0x00], // FORWARD (0x10) = 0
-		...[0x15, 0x03, 0x00, 0x00, 0x01], // SUBGROUP_FILTER (0x25)
-		...[0x0d, 0x07], // NEW_GROUP_REQUEST (0x32)
-		...[0x03, 0x00], // INCLUDE_PROPERTIES (0x35) = 0, a uint8
-	]);
+	const body = framed(
+		[
+			...TRACK_HEAD,
+			0x06, // Number of Parameters
+			...[0x03, 0x03, 0x03, 0x00, 0xaa], // AUTHORIZATION TOKEN
+			...[0x00, 0x03, 0x03, 0x00, 0xbb], // a second one, which the draft allows
+			...[0x0d, 0x00], // FORWARD (0x10) = 0
+			...[0x15, 0x03, 0x00, 0x00, 0x01], // SUBGROUP_FILTER (0x25)
+			...[0x0d, 0x07], // NEW_GROUP_REQUEST (0x32)
+			...[0x03, 0x00], // INCLUDE_PROPERTIES (0x35) = 0, a uint8
+		],
+		Version.DRAFT_22,
+	);
 
 	const msg = await decodeVersioned(body, Subscribe.Subscribe.decode, Version.DRAFT_22);
 	expect(msg.forward).toBe(false);
@@ -968,8 +923,8 @@ test("Subscribe draft-22: decodes every legal parameter", async () => {
 
 // An omitted SUBSCRIBER_PRIORITY means 128, not the unset 127, so a relay forwards it unchanged.
 test("Subscribe: an omitted SUBSCRIBER_PRIORITY is 128", async () => {
-	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
-		const msg = await decodeVersioned(framed([...TRACK_HEAD, 0x00]), Subscribe.Subscribe.decode, version);
+	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22, Version.DRAFT_23]) {
+		const msg = await decodeVersioned(framed([...TRACK_HEAD, 0x00], version), Subscribe.Subscribe.decode, version);
 		expect(msg.subscriberPriority).toBe(128);
 	}
 });
@@ -990,7 +945,7 @@ test("Subscribe v22: INCLUDE_PROPERTIES is a uint8", async () => {
 
 // FORWARD=0 decodes on every draft, so the request can be refused rather than failing.
 test("Subscribe: FORWARD=0 decodes", async () => {
-	for (const version of [Version.DRAFT_22] as const) {
+	for (const version of [Version.DRAFT_22, Version.DRAFT_23] as const) {
 		const msg = new Subscribe.Subscribe({
 			requestId: 1n,
 			trackNamespace: Path.from("live"),
@@ -1007,34 +962,39 @@ test("Subscribe: FORWARD=0 decodes", async () => {
 // Groups 128 through 130: the group takes two bytes, so a Length (4) and the Location
 // Filter Type (0x03) differ, and reading one as the other misframes every parameter after it.
 test("Fetch draft-22: decodes every legal parameter", async () => {
-	const body = framed([
-		...TRACK_HEAD,
-		0x07, // Number of Parameters
-		...[0x03, 0x03, 0x03, 0x00, 0xaa], // AUTHORIZATION TOKEN
-		...[0x07, 0x64], // FILL_TIMEOUT (0x0A)
-		...[0x16, 0x40], // SUBSCRIBER_PRIORITY (0x20)
-		...[0x01, 0x03, 0x80, 0x80, 0x00, 0x02], // LOCATION_FILTER (0x21)
-		...[0x01, 0x01], // GROUP_ORDER (0x22)
-		...[0x04, 0x02, 0x00, 0x05], // OBJECTID_FILTER (0x26)
-		...[0x0f, 0x00], // INCLUDE_PROPERTIES (0x35)
-	]);
+	const body = framed(
+		[
+			...TRACK_HEAD,
+			0x07, // Number of Parameters
+			...[0x03, 0x03, 0x03, 0x00, 0xaa], // AUTHORIZATION TOKEN
+			...[0x07, 0x64], // FILL_TIMEOUT (0x0A)
+			...[0x16, 0x40], // SUBSCRIBER_PRIORITY (0x20)
+			...[0x01, 0x03, 0x80, 0x80, 0x00, 0x02], // LOCATION_FILTER (0x21)
+			...[0x01, 0x01], // GROUP_ORDER (0x22)
+			...[0x04, 0x02, 0x00, 0x05], // OBJECTID_FILTER (0x26)
+			...[0x0f, 0x00], // INCLUDE_PROPERTIES (0x35)
+		],
+		Version.DRAFT_22,
+	);
 
 	const msg = await decodeVersioned(body, Fetch.decode, Version.DRAFT_22);
 	expect(msg.requestId).toBe(1n);
-	expect(msg.fillTimeout).toBe(100);
 });
 
 // Draft-22's LOCATION_FILTER is a Location Filter Type with no Length, so Next Object is the
 // single byte 0x05 and the parameter after it starts right behind it.
 test("Subscribe draft-22: Next Object is 0x21 0x05", async () => {
-	const body = framed([
-		...TRACK_HEAD,
-		0x04, // Number of Parameters
-		...[0x10, 0x01], // FORWARD (0x10) = 1
-		...[0x10, 0x40], // SUBSCRIBER_PRIORITY (0x20) = 64
-		...[0x01, 0x05], // LOCATION_FILTER (0x21): Next Object
-		...[0x01, 0x02], // GROUP_ORDER (0x22) = Descending
-	]);
+	const body = framed(
+		[
+			...TRACK_HEAD,
+			0x04, // Number of Parameters
+			...[0x10, 0x01], // FORWARD (0x10) = 1
+			...[0x10, 0x40], // SUBSCRIBER_PRIORITY (0x20) = 64
+			...[0x01, 0x05], // LOCATION_FILTER (0x21): Next Object
+			...[0x01, 0x02], // GROUP_ORDER (0x22) = Descending
+		],
+		Version.DRAFT_22,
+	);
 
 	const msg = await decodeVersioned(body, Subscribe.Subscribe.decode, Version.DRAFT_22);
 	expect(msg.filter).toEqual({ kind: "nextObject" });
@@ -1049,7 +1009,11 @@ test("TrackStatusRequest: carries SUBSCRIBE fields", async () => {
 		[Version.DRAFT_22, [0x02, 0x03, 0x03, 0x03, 0x00, 0xaa, 0x32, 0x00]],
 	];
 	for (const [version, rest] of cases) {
-		const msg = await decodeVersioned(framed([...TRACK_HEAD, ...rest]), Track.TrackStatusRequest.decode, version);
+		const msg = await decodeVersioned(
+			framed([...TRACK_HEAD, ...rest], version),
+			Track.TrackStatusRequest.decode,
+			version,
+		);
 		expect(msg.trackName).toBe("video");
 		expect(msg.propertiesWanted).toBe(version !== Version.DRAFT_22);
 	}
@@ -1060,12 +1024,12 @@ test("TrackStatusRequest: carries SUBSCRIBE fields", async () => {
 test("TRACK_PROPERTY_FILTER is rejected on SUBSCRIBE and FETCH", async () => {
 	// One parameter: TRACK_PROPERTY_FILTER (0x29), SetID 0, property type 2, from 0.
 	const params = [0x01, 0x29, 0x03, 0x00, 0x02, 0x00];
-	const body = framed([...TRACK_HEAD, ...params]);
+	const body = framed([...TRACK_HEAD, ...params], Version.DRAFT_22);
 	await expect(decodeVersioned(body, Subscribe.Subscribe.decode, Version.DRAFT_22)).rejects.toThrow();
 	await expect(decodeVersioned(body, Fetch.decode, Version.DRAFT_22)).rejects.toThrow();
 });
 
-for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
+for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22, Version.DRAFT_23]) {
 	for (const kind of [0x20n, 0x21n, 0x9dn, 0x11cn]) {
 		test(`SETUP ${version}: repeated unknown option ${kind}`, async () => {
 			const { stream, written } = createTestWritableStream();
@@ -1086,7 +1050,7 @@ for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 	}
 }
 
-for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
+for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22, Version.DRAFT_23]) {
 	test(`SETUP ${version}: known options cannot repeat`, async () => {
 		for (const bytes of [new Uint8Array([4, 1, 0, 2]), new Uint8Array([7, 1, 97, 0, 1, 98])]) {
 			await expect(SetupOptions.decode(new Reader(undefined, bytes, version))).rejects.toThrow(/duplicate/);

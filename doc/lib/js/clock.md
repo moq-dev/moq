@@ -10,14 +10,15 @@ description: Logical time and timers with a manual clock for deterministic tests
 
 Use `@moq/clock` when a deadline and the elapsed time beside it must come from
 one clock. Its default backend reads the host's monotonic and wall clocks;
-a test installs a `Manual` clock without patching the host's timers.
+a test installs a `Manual` clock from `@moq/clock/test` without patching the host's timers.
 
 ```sh
 bun add @moq/clock
 ```
 
 ```ts
-import { Duration, Manual, now, sleep } from "@moq/clock";
+import { Duration, now, sleep } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 
 const clock = new Manual();
 const installed = clock.install();
@@ -40,11 +41,13 @@ and `JSON.stringify` throw a `TypeError`, so a unit mistake can't hide behind a
 cast. A template string prints one with its unit.
 
 `Instant` counts from its clock's origin: the realm's performance time origin
-on the host, so a DOM timestamp `t` is `Instant.ZERO.add(Duration.millis(t))`,
+on the host, so a DOM timestamp `t` is `Instant.ZERO.saturatingAdd(Duration.millis(t))`,
 or zero for a `Manual` clock. Its nanoseconds are exact for roughly 104
-days, then gradually lose sub-microsecond precision. Compare instants only
-from the same clock. Rust and JS each own their origin: no instant may cross
-that boundary until the backend explicitly shares one.
+days, then gradually lose sub-microsecond precision. Like kio, moving an instant
+by a duration has no throwing form: `checkedAdd`/`checkedSub` return `undefined`
+past the clock's range, and `saturatingAdd`/`saturatingSub` stop at its ends.
+Compare instants only from the same clock. Rust and JS each own their origin:
+no instant may cross that boundary until the backend explicitly shares one.
 
 `Wall` is wall-clock time, separate from monotonic time: `Wall.unixMillis(ms)`
 builds one from Unix milliseconds and `asUnixMillis()` reads them back exactly. Use it for dates, rather than
@@ -82,6 +85,17 @@ handle and call `close()` to cancel it when finished. Sleep accepts an abort
 `signal`, and `ref: false` lets a Node or Bun process exit while only that
 sleep is pending. Timeout cancels its own timer when the operation settles, but does
 not cancel the operation. An already-ready operation wins a zero timeout.
+
+`until({ read, ready, watchdog, every })` waits on an observed state instead of
+a guess of how long a change takes: it calls `read` every `every` (one second by
+default, and never zero) until `ready` accepts the result, and returns it. The watchdog only ends
+a wait that never settles, returning an `Unsettled` error whose `last` is the
+final state read, so the failure says what never arrived. `read` receives the
+remaining budget to bound its own requests, and the watchdog races it, so a
+read that ignores the budget still ends on time. A read that throws before the
+deadline ends the wait with that error; one that throws once the deadline has
+passed counts as the watchdog, its error kept as the `Unsettled`'s `cause`. Use it where no event announces the change; when
+one exists, wait on the event.
 
 In this repository, every workspace whose scripts run `bun test` and whose
 workspace dependencies reach `@moq/clock` loads a preload

@@ -82,7 +82,7 @@ public final class BroadcastRequest: Sendable {
             try ffi.route(options: MoqRouteOptions(hidden: hidden, cost: cost, instance: instance, epoch: epoch)))
     }
 
-    /// Serve held content under the claim's continuous sequence space, without an exact route.
+    /// Serve held content under the claim's continuous group starts, without an exact route.
     public func serve(broadcast: BroadcastConsumer) throws {
         try ffi.serve(broadcast: broadcast.ffi)
     }
@@ -130,6 +130,14 @@ public final class Route: Sendable {
         try ffi.setCost(cost: cost)
     }
 
+    /// Swap the credential the route's announcing request carries, renewing that request in
+    /// place, or `nil` to announce under the session's scope. Only the session it was minted
+    /// on carries it. Throws `Closed` once its broadcast closed, keeping the credential it
+    /// had, and `Cancelled` for a cancelled credential.
+    public func setAuth(_ credential: Credential?) throws {
+        try ffi.setAuth(credential: credential?.ffi)
+    }
+
     /// Retract the route now: later calls throw `Cancelled`. Its broadcast lives on until
     /// closed.
     public func cancel() {
@@ -172,6 +180,13 @@ public final class Claim: AsyncSequence, Sendable {
         try ffi.setCost(cost: cost)
     }
 
+    /// Swap the credential the claim's announcing request carries, renewing that request in
+    /// place, or `nil` to announce under the session's scope. Only the session it was minted
+    /// on carries it. Throws `Cancelled` for a cancelled credential.
+    public func setAuth(_ credential: Credential?) throws {
+        try ffi.setAuth(credential: credential?.ffi)
+    }
+
     /// The next broadcast requested beneath this claim, or `nil` once the claim is retracted
     /// or the origin closes.
     public func requested() async throws -> BroadcastRequest? {
@@ -201,7 +216,7 @@ public final class OriginConsumer: Sendable {
     }
 
     /// List the paths under a literal prefix matching an optional pattern filter, as each
-    /// becomes present, absent, or offline, or changes availability. A new publisher instance keeps its path present, so use
+    /// becomes present or absent. A new publisher instance keeps its path present, so use
     /// `follow` to see it. Paths with a segment starting with `.` below the prefix are left
     /// out unless `hidden`.
     public func announced(prefix: String = "", filter: String? = nil, hidden: Bool = false) throws -> AnnounceConsumer {
@@ -224,7 +239,7 @@ public final class OriginConsumer: Sendable {
     }
 }
 
-/// A listing of paths as each becomes present, absent, or offline, or changes availability.
+/// A listing of paths as each becomes present or absent.
 /// Iterate directly:
 /// `for try await event in announced { ... }`.
 /// The sequence ends when the origin closes; cancelling the consuming task

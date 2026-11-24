@@ -9,7 +9,7 @@ use object_store::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::path::{check_id, decode_track, encode_track, push};
-use crate::{Error, ID_WIDTH, Result, VERSION, VERSION_MIN};
+use crate::{Error, ID_MAX, ID_WIDTH, Result, VERSION};
 
 /// The broadcast's completion marker, beside its track segments.
 pub(crate) const BROADCAST_END: &str = ".end";
@@ -36,11 +36,11 @@ pub(crate) enum Name {
 
 impl Name {
 	/// Parse the last segment of a key under a track's directory, refusing anything else.
-	pub(crate) fn parse(name: &str, timed: bool) -> Result<Self> {
+	pub(crate) fn parse(name: &str) -> Result<Self> {
 		match name {
 			TRACK_INFO => Ok(Self::Info),
 			TRACK_END => Ok(Self::End),
-			name => Ok(Self::Object(Start::parse(name, timed)?)),
+			name => Ok(Self::Object(Start::parse(name)?)),
 		}
 	}
 }
@@ -50,42 +50,27 @@ pub(crate) fn parse_track(segment: &str) -> Result<String> {
 	decode_track(segment)
 }
 
-/// Where an object's content starts, which is its key: the first sequence, the first frame's
-/// index within it, and, on a timed track, that frame's timestamp.
+/// Where an object's content starts, which is its key: its first group's start, and the index
+/// of the first frame within that group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Start {
 	pub group: u64,
 	pub frame: u64,
-	pub pts: Option<u64>,
 }
 
 impl Start {
-	/// `<group>-<frame>-<pts>` on a timed track, `<group>-<frame>` on an untimed one,
-	/// zero-padded so keys sort in content order.
+	/// `<group>-<frame>`, zero-padded so keys sort in content order.
 	pub(crate) fn name(&self) -> Result<String> {
-		let (group, frame) = (id(self.group)?, id(self.frame)?);
-		match self.pts {
-			Some(pts) => Ok(format!("{group}-{frame}-{}", id(pts)?)),
-			None => Ok(format!("{group}-{frame}")),
-		}
+		Ok(format!("{}-{}", id(self.group)?, id(self.frame)?))
 	}
 
-	fn parse(name: &str, timed: bool) -> Result<Self> {
-		let fields: Vec<&str> = name.split('-').collect();
+	fn parse(name: &str) -> Result<Self> {
 		let invalid = || Error::Path(name.to_string());
-		match (timed, fields.as_slice()) {
-			(true, [group, frame, pts]) => Ok(Self {
-				group: parse_id(group).ok_or_else(invalid)??,
-				frame: parse_id(frame).ok_or_else(invalid)??,
-				pts: Some(parse_id(pts).ok_or_else(invalid)??),
-			}),
-			(false, [group, frame]) => Ok(Self {
-				group: parse_id(group).ok_or_else(invalid)??,
-				frame: parse_id(frame).ok_or_else(invalid)??,
-				pts: None,
-			}),
-			_ => Err(invalid()),
-		}
+		let (group, frame) = name.split_once('-').ok_or_else(invalid)?;
+		Ok(Self {
+			group: parse_id(group).ok_or_else(invalid)??,
+			frame: parse_id(frame).ok_or_else(invalid)??,
+		})
 	}
 }
 
@@ -106,9 +91,10 @@ fn parse_id(field: &str) -> Option<Result<u64>> {
 	)
 }
 
-/// How a track's last run ended, stored in its `end` once the broadcast ended.
+/// How a track's last run ended, stored in its `end` once the broadcast ended. An unknown kind
+/// is refused, since skipping it would misreport how the track ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase", deny_unknown_fields)]
+#[serde(rename_all = "lowercase")]
 pub(crate) enum End {
 	/// A clean end at this exclusive position.
 	Finish(At),
@@ -116,9 +102,8 @@ pub(crate) enum End {
 	Error(u32),
 }
 
-/// A [`Position`] as stored.
+/// A [`Position`] as stored, ignoring members it does not know.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct At {
 	pub group: u64,
 	pub frame: u64,
@@ -134,12 +119,26 @@ impl From<Position> for At {
 }
 
 impl End {
+	/// Refused when its position is one the archive can't replay, so a producer fails writing it
+	/// rather than leaving a marker every later read refuses.
 	pub(crate) fn encode(&self) -> Result<Bytes> {
+		self.validate()?;
 		Ok(Bytes::from(serde_json::to_vec(self)?))
 	}
 
 	pub(crate) fn decode(bytes: &[u8]) -> Result<Self> {
-		Ok(serde_json::from_slice(bytes)?)
+		let end: Self = serde_json::from_slice(bytes)?;
+		end.validate()?;
+		Ok(end)
+	}
+
+	/// A finish within the IDs, or just past the last group an ID names.
+	fn validate(&self) -> Result<()> {
+		match *self {
+			Self::Finish(At { group, frame: 0 }) if group == ID_MAX + 1 => Ok(()),
+			Self::Finish(At { group, frame }) => check_id(group).and(check_id(frame)).map(drop),
+			Self::Error(_) => Ok(()),
+		}
 	}
 }
 
@@ -167,9 +166,6 @@ pub(crate) struct Object {
 	pub entries: Vec<Entry>,
 }
 
-/// The form field version 2 and 3 entries carry: 0 for a group, 1 for a datagram.
-const LEGACY_GROUP: u64 = 0;
-
 impl Object {
 	/// The key this object is stored under.
 	pub(crate) fn start(&self) -> Result<Start> {
@@ -177,8 +173,12 @@ impl Object {
 		Ok(Start {
 			group: first.sequence,
 			frame: self.frame_start,
-			pts: first.frames.first().ok_or(Error::Empty)?.timestamp,
 		})
+	}
+
+	/// The first stored frame's timestamp, `None` when empty or untimed.
+	pub(crate) fn timestamp(&self) -> Option<u64> {
+		self.entries.first()?.frames.first()?.timestamp
 	}
 
 	/// Its payload bytes plus a small per-frame overhead, for a byte-bounded cache.
@@ -194,10 +194,10 @@ impl Object {
 			1 => self.frame_start,
 			_ => 0,
 		};
-		Ok(Position {
-			group: last.sequence,
-			frame: first.checked_add(last.frames.len() as u64).ok_or(Error::Overflow)?,
-		})
+		Ok(Position::new(
+			last.sequence,
+			first.checked_add(last.frames.len() as u64).ok_or(Error::Overflow)?,
+		))
 	}
 
 	/// The version, the first frame index, then each entry's sequence (the first absolute, the
@@ -234,18 +234,15 @@ impl Object {
 	}
 
 	/// Decode a whole table before slicing any payload; `timed` is whether the track's `.info`
-	/// declares a timescale, which says whether each frame stores a timestamp. A version 2 or 3
-	/// object's entries each carry a form, and one holding a datagram is refused: an archive
-	/// replays groups only, and skipping the entry would read as a gap the recording never had.
+	/// declares a timescale, which says whether each frame stores a timestamp.
 	pub(crate) fn decode(mut buf: impl Buf, timed: bool) -> Result<Self> {
 		let version = read(&mut buf)?;
-		if !(VERSION_MIN..=VERSION).contains(&version) {
+		if version != VERSION {
 			return Err(Error::Version(version));
 		}
-		let legacy = version < 4;
 		let frame_start = read(&mut buf)?;
-		// Each entry is at least a sequence and a frame count, plus a form when legacy.
-		let count = read_count(&mut buf, if legacy { 3 } else { 2 })?;
+		// Each entry is at least a sequence and a frame count.
+		let count = read_count(&mut buf, 2)?;
 
 		let per_frame = if timed { 2 } else { 1 };
 		let mut lengths = Vec::new();
@@ -262,12 +259,6 @@ impl Object {
 			};
 			check_id(sequence)?;
 			prev = Some(sequence);
-			if legacy {
-				let form = read(&mut buf)?;
-				if form != LEGACY_GROUP {
-					return Err(Error::Form(form));
-				}
-			}
 			let frames = read_count(&mut buf, per_frame)?;
 			let mut timestamps = Vec::with_capacity(frames);
 			for _ in 0..frames {
@@ -316,6 +307,7 @@ impl Object {
 		if self.entries.is_empty() {
 			return Err(Error::Empty);
 		}
+		check_id(self.frame_start)?;
 		let mut prev = None;
 		for entry in &self.entries {
 			let sequence = check_id(entry.sequence)?;
@@ -370,23 +362,15 @@ mod tests {
 	}
 
 	#[test]
-	fn timed_keys_sort_in_content_order() {
-		let names: Vec<String> = [(0, 0, 9), (0, 3, 2), (1, 0, 0), (10, 0, 0)]
+	fn keys_sort_in_content_order() {
+		let names: Vec<String> = [(0, 0), (0, 3), (1, 0), (10, 0), (10, 11)]
 			.into_iter()
-			.map(|(group, frame, pts)| {
-				Start {
-					group,
-					frame,
-					pts: Some(pts),
-				}
-				.name()
-				.unwrap()
-			})
+			.map(|(group, frame)| Start { group, frame }.name().unwrap())
 			.collect();
 		let mut sorted = names.clone();
 		sorted.sort();
 		assert_eq!(names, sorted);
-		assert_eq!(names[1], "0000000000000000000-0000000000000000003-0000000000000000002");
+		assert_eq!(names[1], "0000000000000000000-0000000000000000003");
 		assert!(
 			names
 				.iter()
@@ -395,36 +379,29 @@ mod tests {
 	}
 
 	#[test]
-	fn names_roundtrip_and_refuse_the_other_timing() {
-		let timed = Start {
-			group: 5,
+	fn names_roundtrip() {
+		let start = Start {
+			group: ID_MAX,
 			frame: 2,
-			pts: Some(ID_MAX),
 		};
-		let name = timed.name().unwrap();
-		assert_eq!(Name::parse(&name, true).unwrap(), Name::Object(timed));
-		assert!(matches!(Name::parse(&name, false), Err(Error::Path(_))));
+		let name = start.name().unwrap();
+		assert_eq!(Name::parse(&name).unwrap(), Name::Object(start));
 
-		let untimed = Start {
-			group: 7,
-			frame: 2,
-			pts: None,
-		};
-		let name = untimed.name().unwrap();
-		assert_eq!(name, "0000000000000000007-0000000000000000002");
-		assert_eq!(Name::parse(&name, false).unwrap(), Name::Object(untimed));
-		assert!(matches!(Name::parse(&name, true), Err(Error::Path(_))));
-
-		assert_eq!(Name::parse(".info", true).unwrap(), Name::Info);
-		assert_eq!(Name::parse("end", false).unwrap(), Name::End);
+		assert_eq!(Name::parse(".info").unwrap(), Name::Info);
+		assert_eq!(Name::parse("end").unwrap(), Name::End);
 		for bad in [
 			"7",
 			"segments",
 			"0000000000000000007",
 			"0000000000000000007-x",
 			"0009007199254740992-0000000000000000000",
+			// Main builds before the format shipped added the first frame's timestamp.
+			"0000000000000000007-0000000000000000002-0000000000000000009",
 		] {
-			assert!(Name::parse(bad, false).is_err(), "{bad}");
+			assert!(
+				matches!(Name::parse(bad), Err(Error::Path(_)) | Err(Error::Id(_))),
+				"{bad}"
+			);
 		}
 	}
 
@@ -440,6 +417,12 @@ mod tests {
 		assert_eq!(error.encode().unwrap().as_ref(), br#"{"error":52}"#);
 		assert_eq!(End::decode(br#"{"error":52}"#).unwrap(), error);
 		assert!(End::decode(br#"{"finish":{"group":5}}"#).is_err());
+		assert!(End::decode(br#"{"pause":{"group":5,"frame":3}}"#).is_err());
+		// A member a later writer adds to the position is skipped.
+		assert_eq!(
+			End::decode(br#"{"finish":{"group":5,"frame":3,"at":1}}"#).unwrap(),
+			finish
+		);
 	}
 
 	#[test]
@@ -460,21 +443,15 @@ mod tests {
 		let bytes = object.encode(true).unwrap();
 		assert_eq!(Object::decode(bytes.clone(), true).unwrap(), object);
 		assert!(Object::decode(bytes, false).is_err());
-		assert_eq!(
-			object.start().unwrap(),
-			Start {
-				group: 3,
-				frame: 4,
-				pts: Some(10)
-			}
-		);
-		assert_eq!(object.end().unwrap(), Position { group: 7, frame: 1 });
+		assert_eq!(object.start().unwrap(), Start { group: 3, frame: 4 });
+		assert_eq!(object.timestamp(), Some(10));
+		assert_eq!(object.end().unwrap(), Position::new(7, 1));
 
 		let split = Object {
 			frame_start: 4,
 			entries: vec![object.entries[0].clone()],
 		};
-		assert_eq!(split.end().unwrap(), Position { group: 3, frame: 6 });
+		assert_eq!(split.end().unwrap(), Position::new(3, 6));
 	}
 
 	#[test]
@@ -491,25 +468,6 @@ mod tests {
 		assert_eq!(bytes.as_ref(), &[VERSION as u8, 0, 1, 2, 2, 1, 2, b'x', b'y', b'z']);
 		assert_eq!(Object::decode(bytes.clone(), false).unwrap(), object);
 		assert!(matches!(object.encode(true), Err(Error::Timing)));
-	}
-
-	/// Version 2 and 3 entries carry a form: a group reads as today's entry, and a datagram
-	/// refuses the whole object rather than reading as a gap.
-	#[test]
-	fn older_objects_read_groups_and_refuse_datagrams() {
-		let object = Object {
-			frame_start: 0,
-			entries: vec![Entry {
-				sequence: 2,
-				frames: vec![frame(None, b"x"), frame(None, b"yz")],
-			}],
-		};
-		for version in [2, 3] {
-			let group = [version, 0, 1, 2, 0, 2, 1, 2, b'x', b'y', b'z'];
-			assert_eq!(Object::decode(&group[..], false).unwrap(), object);
-			let datagram = [version, 0, 1, 2, 1, 1, b'x'];
-			assert!(matches!(Object::decode(&datagram[..], false), Err(Error::Form(1))));
-		}
 	}
 
 	#[test]
@@ -559,11 +517,48 @@ mod tests {
 			Object::decode(&[VERSION as u8, 0, 0x7f][..], false),
 			Err(Error::Table)
 		));
-		for version in [1, VERSION as u8 + 1] {
+		// Release wrote version 1, and main builds before the format shipped wrote 3 and 4.
+		for version in [1, 3, 4] {
 			assert!(matches!(
 				Object::decode(&[version, 0, 0][..], false),
-				Err(Error::Version(_))
+				Err(Error::Version(v)) if v == version as u64
 			));
+		}
+
+		// A first frame index past the format's IDs.
+		let mut past = Object {
+			frame_start: ID_MAX,
+			entries: vec![Entry {
+				sequence: 1,
+				frames: vec![frame(None, b"abc")],
+			}],
+		};
+		let at_max = past.encode(false).unwrap();
+		assert_eq!(Object::decode(at_max, false).unwrap(), past);
+		past.frame_start = ID_MAX + 1;
+		assert!(matches!(past.encode(false), Err(Error::Id(_))));
+		let mut table = BytesMut::new();
+		for value in [VERSION, ID_MAX + 1, 1, 1, 1, 3] {
+			write(&mut table, value).unwrap();
+		}
+		table.extend_from_slice(b"abc");
+		assert!(matches!(Object::decode(table.freeze(), false), Err(Error::Id(_))));
+	}
+
+	/// An end position past the format's IDs is refused, so replaying it can't overflow.
+	#[test]
+	fn end_positions_are_ids() {
+		let at = |group: u64, frame: u64| format!(r#"{{"finish":{{"group":{group},"frame":{frame}}}}}"#);
+		// Within the IDs, and the clean end just past a last group at `ID_MAX`.
+		for (group, frame) in [(ID_MAX, ID_MAX), (ID_MAX + 1, 0)] {
+			let end = End::decode(at(group, frame).as_bytes()).unwrap();
+			assert_eq!(End::decode(&end.encode().unwrap()).unwrap(), end);
+		}
+		// Refused both ways, so a producer never writes a marker a replay refuses.
+		for (group, frame) in [(ID_MAX + 1, 1), (ID_MAX + 2, 0), (0, ID_MAX + 1), (u64::MAX, 1)] {
+			assert!(matches!(End::decode(at(group, frame).as_bytes()), Err(Error::Id(_))));
+			let end = End::Finish(At { group, frame });
+			assert!(matches!(end.encode(), Err(Error::Id(_))), "{end:?}");
 		}
 	}
 }

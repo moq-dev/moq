@@ -3,18 +3,7 @@
 set -euo pipefail
 out=$(realpath -m "${1:?usage: collect.sh OUTPUT [RUN]}")
 run=${2:-}
-mkdir -p "$out/native"
-target=$(cargo metadata --locked --format-version 1 --no-deps | jq -r .target_directory)
-case $(uname -s) in Linux) dylib=so ;; Darwin) dylib=dylib ;; *)
-    echo 'native size capture requires Linux or macOS' >&2
-    exit 1
-    ;;
-esac
-# Release jobs ship default features only; this shows what the feature gates save.
-# Its own target directory, since the cdylib would replace the default build's.
-cargo build --locked --release -p moq-ffi --no-default-features --target-dir "$target/minimal"
-cp "$target/minimal/release/libmoq_ffi.$dylib" "$out/native/libmoq_ffi-minimal.$dylib"
-cp "$target/minimal/release/libmoq_ffi.a" "$out/native/libmoq_ffi-minimal.a"
+mkdir -p "$out"
 uv run --no-project python sh/js/install.py frozen
 just js build
 bun sh/size/bundles.ts "$out/js"
@@ -25,9 +14,7 @@ import datetime, json, pathlib, subprocess, sys
 sys.path.insert(0, "sh/size")
 import release
 out, run = pathlib.Path(sys.argv[1]), sys.argv[2]
-host = next(line.split(': ', 1)[1] for line in subprocess.check_output(['rustc', '-vV'], text=True).splitlines() if line.startswith('host: '))
-sizes = {f'native/{host}/{p.name}': p.stat().st_size for p in (out / 'native').iterdir()}
-sizes.update(json.loads((out / 'js/bytes.json').read_text()))
+sizes = json.loads((out / 'js/bytes.json').read_text())
 report = {'version': 1, 'date': datetime.date.today().isoformat(),
           'revision': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
           'bytes': sizes}

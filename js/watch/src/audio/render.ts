@@ -2,18 +2,27 @@
  * Everything the main thread sends the render worklet over its port. Structured clone carries no
  * clock classes, so latencies are plain milliseconds and timestamps plain microseconds.
  */
-export type Message = Init | Data | Latency | Reset | Truncate | Playing | End;
+export type Message = Init | Data | Latency | Reset | Truncate | Playing | End | Clock | Received;
 
 /** Create the worklet's ring. */
-export interface Init {
+export interface Init extends Terms {
 	type: "init";
 	channels: number;
 	rate: number;
-	latency: number;
-	// Buffered mode: anchor to the first frame and play through. The ring holds the floor; the
-	// lookahead above it is held back upstream (the main thread applies the backpressure).
-	buffered: boolean;
 	playing?: boolean;
+}
+
+/**
+ * What the ring holds and how far it lets audio trail the clock. Only the floor is decoded PCM: the
+ * rest of the target, and in buffered mode the lookahead, stays encoded upstream (the main thread
+ * applies the backpressure).
+ */
+export interface Terms {
+	// The floor held as decoded PCM, which playback starts on.
+	latency: number;
+	// How far audio may trail the shared clock before the ring snaps onto it: the `stretch` threshold,
+	// or for a buffered player the larger of it and the lookahead. Zero turns the time stretch off.
+	bound: number;
 }
 
 /** Flush the buffer and re-stall. */
@@ -45,19 +54,41 @@ export interface Data {
 	timestamp: number;
 }
 
-/** Latency update: the floor held as decoded PCM. */
-export interface Latency {
+/** Latency update: new terms, and where the shared clock they move now stands, if there is one. */
+export interface Latency extends Terms {
 	type: "latency";
-	latency: number;
-	// When set, also hold playback, keeping what is buffered, until the next latency message without
-	// it. Echoed like a reset's epoch, so state from before the park cannot report the ring playing.
-	park?: number;
+	clock?: Reading;
+}
+
+/**
+ * Where the shared clock stands, for the ring to time-stretch onto, at the context time the output
+ * sounds then. The clock runs at real time, so one reading maps it onto the worklet's own time until
+ * the next.
+ */
+export interface Reading {
+	// The media time due at context time `time`, in the ring's coordinates, unset while the clock has none.
+	timestamp?: number;
+	// A context time in seconds.
+	time: number;
+}
+
+/** A new reading of the shared clock. */
+export interface Clock extends Reading {
+	type: "clock";
+}
+
+/** Media arrived ending at `end`, in the ring's coordinates, decoded or not. */
+export interface Received {
+	type: "received";
+	end: number;
 }
 
 /** State update from the worklet back to the main thread. */
 export interface State {
 	type: "state";
 	timestamp: number;
+	// The context time `timestamp` was rendered at, in seconds: the end of the quantum just read.
+	time: number;
 	stalled: boolean;
 	// Whether `timestamp` is on the current timeline: it reads 0 until a frame anchors the ring.
 	anchored: boolean;
@@ -71,7 +102,7 @@ export interface State {
 	accelerated: number;
 	// Whether playback is at a declared end, reached or announced before any audio, and nothing has played since.
 	silent: boolean;
-	// The epoch of the last reset or park the worklet applied.
+	// The epoch of the last reset the worklet applied.
 	epoch: number;
 }
 

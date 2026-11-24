@@ -235,7 +235,7 @@ fn end_hears_a_stop() {
 	);
 	assert_eq!(
 		pair.client_send(client_ch, s).poll_write(&write, &mut &b"b"[..]),
-		Poll::Ready(Err(send::Error::Stopped(VarInt(7))))
+		Poll::Ready(Err(send::Error::Stopped))
 	);
 }
 

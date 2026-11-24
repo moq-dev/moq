@@ -1,4 +1,4 @@
-import { type Presentation, texturePresentationTransform } from "./presentation";
+import { type Presentation, texturePresentationTransform } from "./presentation.ts";
 
 // One oversized triangle covers the viewport, so there is no vertex buffer and no diagonal seam.
 // The vertex stage maps each canvas coordinate to the frame coordinate it shows, which handles

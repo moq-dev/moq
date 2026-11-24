@@ -22,8 +22,17 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
+
+/// Return [`Malformed`](super::Error::Malformed), formatted, unless `cond` holds.
+macro_rules! ensure {
+	($cond:expr, $($arg:tt)*) => {
+		if !$cond {
+			return Err(super::Error::Malformed(format!($($arg)*)).into());
+		}
+	};
+}
+
 use hang::catalog::{AAC, AudioCodec, AudioConfig, VideoConfig};
 
 use super::{
@@ -89,11 +98,72 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	input: crate::container::Input,
 }
 
-/// The demuxed video track plus its current catalog config, so a repeated
-/// (identical) sequence header is a no-op rather than a track rebuild.
-struct VideoStream {
+/// A demuxed video track, holding what it was configured from so a repeated (identical) sequence
+/// header is a no-op rather than a track rebuild.
+enum VideoStream {
+	/// H.264 through its importer, which holds the avcC until the next keyframe says whether the
+	/// parameter sets also ride in band.
+	H264 {
+		import: Box<crate::codec::h264::Import>,
+		record: Bytes,
+	},
+	/// H.265 through its importer, which holds the hvcC the same way.
+	H265 {
+		import: Box<crate::codec::h265::Import>,
+		record: Bytes,
+	},
+	/// AV1 or VP9, configured from its av1C or keyframe header.
+	Plain(Box<PlainVideo>),
+}
+
+/// An AV1 or VP9 track plus the config it was built from.
+struct PlainVideo {
 	track: crate::container::Producer<crate::catalog::hang::Container, VideoConfig>,
 	config: VideoConfig,
+}
+
+impl VideoStream {
+	fn write(&mut self, frame: Frame) -> crate::Result<()> {
+		match self {
+			Self::H264 { import, .. } => import.decode([frame]),
+			Self::H265 { import, .. } => import.decode([frame]),
+			Self::Plain(plain) => plain.track.write(frame),
+		}
+	}
+
+	fn seek(&mut self, start: u64) -> crate::Result<()> {
+		match self {
+			Self::H264 { import, .. } => import.seek(start),
+			Self::H265 { import, .. } => import.seek(start),
+			Self::Plain(plain) => plain.track.seek(start),
+		}
+	}
+
+	/// End the track for a successor or a drop, leaving a record no keyframe followed unpublished.
+	fn end(&mut self) -> crate::Result<()> {
+		match self {
+			Self::H264 { import, .. } => import.end(),
+			Self::H265 { import, .. } => import.end(),
+			Self::Plain(plain) => plain.track.end(),
+		}
+	}
+
+	/// End the track as the input ends, publishing a record no keyframe followed as it stands.
+	fn finish(&mut self) -> crate::Result<()> {
+		match self {
+			Self::H264 { import, .. } => import.finish_in_place(),
+			Self::H265 { import, .. } => import.finish_in_place(),
+			Self::Plain(plain) => plain.track.end(),
+		}
+	}
+
+	fn abort(self, err: moq_net::Error) {
+		match self {
+			Self::H264 { import, .. } => import.abort(err),
+			Self::H265 { import, .. } => import.abort(err),
+			Self::Plain(plain) => plain.track.abort(err),
+		}
+	}
 }
 
 /// The demuxed audio track plus its current catalog config.
@@ -140,35 +210,35 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// completes. The buffer is fully consumed; a trailing partial tag is retained
 	/// for the next call.
 	///
+	/// A malformed or unsupported tag leaves the importer usable, since tags are framed
+	/// independently. A failure to publish, such as a
+	/// [`TimestampRewind`](crate::container::TimestampRewind) from a restarted source,
+	/// refuses all later input, so a caller skipping bad tags can tell the two apart by
+	/// whether the next call is refused.
+	///
 	/// Input after [`finish`](Self::finish) is refused with [`Finished`](crate::Error::Finished),
 	/// or with the cause of a finish that failed.
 	pub fn decode(&mut self, data: &[u8]) -> crate::Result<()> {
 		self.input.check()?;
 		self.buffer.extend_from_slice(data);
 
-		match self.drain() {
-			Ok(()) => Ok(()),
-			Err(err) => match err.downcast::<crate::Error>() {
-				Ok(err) => Err(err),
-				Err(err) => Err(err.into()),
-			},
-		}
+		self.drain()
 	}
 
-	fn drain(&mut self) -> anyhow::Result<()> {
+	fn drain(&mut self) -> crate::Result<()> {
 		if !self.header_seen {
 			if self.buffer.len() < FILE_HEADER_LEN {
 				return Ok(());
 			}
-			anyhow::ensure!(&self.buffer[0..3] == b"FLV", "not an FLV stream");
+			ensure!(&self.buffer[0..3] == b"FLV", "not an FLV stream");
 			// data_offset is where the body starts (>= 9). It's followed by the
 			// 4-byte PreviousTagSize0 before the first tag.
 			let data_offset =
 				u32::from_be_bytes([self.buffer[5], self.buffer[6], self.buffer[7], self.buffer[8]]) as usize;
-			anyhow::ensure!(data_offset >= FILE_HEADER_LEN, "invalid FLV data offset");
+			ensure!(data_offset >= FILE_HEADER_LEN, "invalid FLV data offset");
 			// The header is tiny in practice (9 bytes). Cap it so a crafted offset
 			// can't force unbounded buffering before the first tag is reached.
-			anyhow::ensure!(data_offset <= MAX_DATA_OFFSET, "FLV data offset too large");
+			ensure!(data_offset <= MAX_DATA_OFFSET, "FLV data offset too large");
 			if self.buffer.len() < data_offset + PREV_TAG_SIZE_LEN {
 				return Ok(());
 			}
@@ -207,7 +277,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		Ok(())
 	}
 
-	fn handle_video(&mut self, body: &[u8], timestamp: u64) -> anyhow::Result<()> {
+	fn handle_video(&mut self, body: &[u8], timestamp: u64) -> crate::Result<()> {
 		let Some(&first) = body.first() else {
 			return Ok(());
 		};
@@ -220,16 +290,16 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		let frame_type = first >> 4;
 		let codec_id = first & 0x0f;
 		if codec_id != VIDEO_CODEC_AVC {
-			return Err(crate::Error::UnknownFormat(format!("FLV video CodecID {codec_id}")).into());
+			return Err(crate::Error::UnknownFormat(format!("FLV video CodecID {codec_id}")));
 		}
 
-		anyhow::ensure!(body.len() >= 5, "AVC video tag too short");
+		ensure!(body.len() >= 5, "AVC video tag too short");
 		let avc_packet_type = body[1];
 		let composition_time = read_i24(&body[2..5]);
 		let data = &body[5..];
 
 		match avc_packet_type {
-			AVC_SEQUENCE_HEADER => self.init_video(DEFAULT_TRACK_ID, crate::codec::h264::config(data)?),
+			AVC_SEQUENCE_HEADER => self.video_record(DEFAULT_TRACK_ID, b"avc1", data),
 			AVC_NALU => self.write_video(
 				DEFAULT_TRACK_ID,
 				data,
@@ -243,7 +313,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	}
 
 	/// Handle an enhanced-RTMP (FourCC) video tag, single-track or multitrack.
-	fn handle_video_enhanced(&mut self, first: u8, body: &[u8], timestamp: u64) -> anyhow::Result<()> {
+	fn handle_video_enhanced(&mut self, first: u8, body: &[u8], timestamp: u64) -> crate::Result<()> {
 		let keyframe = (first >> 4) & 0x07 == FRAME_TYPE_KEY;
 		let packet_type = first & 0x0f;
 
@@ -251,7 +321,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			return self.handle_video_multitrack(&body[1..], keyframe, timestamp);
 		}
 
-		anyhow::ensure!(body.len() >= 5, "enhanced video tag too short for FourCC");
+		ensure!(body.len() >= 5, "enhanced video tag too short for FourCC");
 		let fourcc: [u8; 4] = body[1..5].try_into().expect("slice is 4 bytes");
 		self.handle_video_track(DEFAULT_TRACK_ID, &fourcc, packet_type, keyframe, &body[5..], timestamp)
 	}
@@ -260,10 +330,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// [`handle_video_track`](Self::handle_video_track).
 	///
 	/// `data` starts at the multitrack framing byte (after the ex-header byte).
-	fn handle_video_multitrack(&mut self, data: &[u8], keyframe: bool, timestamp: u64) -> anyhow::Result<()> {
+	fn handle_video_multitrack(&mut self, data: &[u8], keyframe: bool, timestamp: u64) -> crate::Result<()> {
 		let mut cursor = data;
 		let header = split_multitrack_header(&mut cursor, "video")?;
-		anyhow::ensure!(
+		ensure!(
 			header.packet_type != VIDEO_PACKET_MULTITRACK,
 			"nested multitrack video tag"
 		);
@@ -295,21 +365,20 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		keyframe: bool,
 		payload: &[u8],
 		timestamp: u64,
-	) -> anyhow::Result<()> {
+	) -> crate::Result<()> {
 		if !matches!(fourcc, b"avc1" | b"hvc1" | b"av01" | b"vp09") {
-			return Err(crate::Error::UnknownFormat(format!("FLV video FourCC {fourcc:?}")).into());
+			return Err(crate::Error::UnknownFormat(format!("FLV video FourCC {fourcc:?}")));
 		}
 		match packet_type {
 			VIDEO_PACKET_SEQUENCE_START => {
 				let config = match fourcc {
-					b"avc1" => crate::codec::h264::config(payload)?,
-					b"hvc1" => crate::codec::h265::config_from_hvcc(payload)?,
+					b"avc1" | b"hvc1" => return self.video_record(track_id, fourcc, payload),
 					b"av01" => crate::codec::av1::config_from_av1c(payload)?,
 					// VP9 carries its config in band; the SequenceStart vpcC is
 					// redundant with the key-frame header we configure from.
 					b"vp09" => return Ok(()),
 					other => {
-						return Err(crate::Error::UnknownFormat(format!("FLV video FourCC {other:?}")).into());
+						return Err(crate::Error::UnknownFormat(format!("FLV video FourCC {other:?}")));
 					}
 				};
 				self.init_video(track_id, config)
@@ -319,7 +388,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				// and the always-zero-offset av01/vp09 do not.
 				let has_cts = packet_type == VIDEO_PACKET_CODED_FRAMES && matches!(fourcc, b"hvc1" | b"avc1");
 				let (data, cts) = if has_cts {
-					anyhow::ensure!(payload.len() >= 3, "enhanced CodedFrames missing composition time");
+					ensure!(payload.len() >= 3, "enhanced CodedFrames missing composition time");
 					(&payload[3..], read_i24(&payload[0..3]))
 				} else {
 					(payload, 0)
@@ -347,7 +416,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		}
 	}
 
-	fn handle_audio(&mut self, body: &[u8], timestamp: u64) -> anyhow::Result<()> {
+	fn handle_audio(&mut self, body: &[u8], timestamp: u64) -> crate::Result<()> {
 		let Some(&first) = body.first() else {
 			return Ok(());
 		};
@@ -364,10 +433,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			return self.write_audio(DEFAULT_TRACK_ID, frame, timestamp);
 		}
 		if sound_format != AUDIO_FORMAT_AAC {
-			return Err(crate::Error::UnknownFormat(format!("FLV audio SoundFormat {sound_format}")).into());
+			return Err(crate::Error::UnknownFormat(format!(
+				"FLV audio SoundFormat {sound_format}"
+			)));
 		}
 
-		anyhow::ensure!(body.len() >= 2, "AAC audio tag too short");
+		ensure!(body.len() >= 2, "AAC audio tag too short");
 		let aac_packet_type = body[1];
 		let data = &body[2..];
 
@@ -379,24 +450,24 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	}
 
 	/// Handle an enhanced-RTMP (FourCC) audio tag, single-track or multitrack.
-	fn handle_audio_enhanced(&mut self, first: u8, body: &[u8], timestamp: u64) -> anyhow::Result<()> {
+	fn handle_audio_enhanced(&mut self, first: u8, body: &[u8], timestamp: u64) -> crate::Result<()> {
 		let packet_type = first & 0x0f;
 
 		if packet_type == AUDIO_PACKET_MULTITRACK {
 			return self.handle_audio_multitrack(&body[1..], timestamp);
 		}
 
-		anyhow::ensure!(body.len() >= 5, "enhanced audio tag too short for FourCC");
+		ensure!(body.len() >= 5, "enhanced audio tag too short for FourCC");
 		let fourcc: [u8; 4] = body[1..5].try_into().expect("slice is 4 bytes");
 		self.handle_audio_track(DEFAULT_TRACK_ID, &fourcc, packet_type, &body[5..], timestamp)
 	}
 
 	/// Split a multitrack audio tag into its per-track payloads and route each to
 	/// [`handle_audio_track`](Self::handle_audio_track).
-	fn handle_audio_multitrack(&mut self, data: &[u8], timestamp: u64) -> anyhow::Result<()> {
+	fn handle_audio_multitrack(&mut self, data: &[u8], timestamp: u64) -> crate::Result<()> {
 		let mut cursor = data;
 		let header = split_multitrack_header(&mut cursor, "audio")?;
-		anyhow::ensure!(
+		ensure!(
 			header.packet_type != AUDIO_PACKET_MULTITRACK,
 			"nested multitrack audio tag"
 		);
@@ -426,9 +497,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		packet_type: u8,
 		payload: &[u8],
 		timestamp: u64,
-	) -> anyhow::Result<()> {
+	) -> crate::Result<()> {
 		if !matches!(fourcc, b"Opus" | b"mp4a" | b".mp3" | b"ac-3" | b"ec-3") {
-			return Err(crate::Error::UnknownFormat(format!("FLV audio FourCC {fourcc:?}")).into());
+			return Err(crate::Error::UnknownFormat(format!("FLV audio FourCC {fourcc:?}")));
 		}
 		match packet_type {
 			AUDIO_PACKET_SEQUENCE_START => {
@@ -438,7 +509,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					// MP3 / AC-3 / E-AC-3 are verbatim with no sequence header; they
 					// configure from the first frame. Anything else is unsupported.
 					other => {
-						return Err(crate::Error::UnknownFormat(format!("FLV audio FourCC {other:?}")).into());
+						return Err(crate::Error::UnknownFormat(format!("FLV audio FourCC {other:?}")));
 					}
 				};
 				self.init_audio(track_id, config)
@@ -474,63 +545,144 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		dts: u64,
 		composition_time: i32,
 		keyframe: bool,
-	) -> anyhow::Result<()> {
+	) -> crate::Result<()> {
 		// FLV stores DTS in the tag; PTS is DTS plus the composition offset.
 		let pts_ms = (dts as i64) + (composition_time as i64);
 		if pts_ms < 0 {
 			return Err(crate::Error::NegativeFlvPts {
 				dts_ms: dts,
 				composition_time_ms: composition_time,
-			}
-			.into());
+			});
 		}
 		if !self.video.contains_key(&track_id) {
 			tracing::debug!("video frame before sequence header, dropping");
 			return Ok(());
 		}
 		// The first frame anchors the stream before the reservation below publishes.
-		let timestamp = self.timebase.shift(Timestamp::from_millis(pts_ms as u64)?)?;
+		let shifted = self.timebase.shift(Timestamp::from_millis(pts_ms as u64)?);
+		let timestamp = self.refuse(shifted)?;
 		// A media frame means every sequence header has arrived (FLV sends config before data), so
-		// the track set is declared; release the reservation to publish.
+		// the track set is declared; release the reservation to publish. An H.264/H.265 rendition
+		// still waiting for its first keyframe holds the catalog back on its own.
 		self.initial_reservation = None;
 		let stream = self.video.get_mut(&track_id).expect("checked above");
-		match stream.track.write(Frame {
+		let result = match stream.write(Frame {
 			timestamp,
 			duration: None,
 			payload: Bytes::copy_from_slice(data),
 			keyframe,
 		}) {
-			Ok(()) | Err(crate::Error::MissingKeyframe(_)) => Ok(()),
-			Err(e) => Err(e.into()),
-		}
+			Err(crate::Error::MissingKeyframe(_)) => Ok(()),
+			result => result,
+		};
+		self.refuse(result)
 	}
 
 	/// Write one audio frame as its own group, so the relay can forward it immediately.
-	fn write_audio(&mut self, track_id: u8, data: &[u8], timestamp: u64) -> anyhow::Result<()> {
+	fn write_audio(&mut self, track_id: u8, data: &[u8], timestamp: u64) -> crate::Result<()> {
 		if !self.audio.contains_key(&track_id) {
 			tracing::debug!("audio frame before config, dropping");
 			return Ok(());
 		}
 		// The first frame anchors the stream before the reservation below publishes.
-		let timestamp = self.timebase.shift(Timestamp::from_millis(timestamp)?)?;
+		let shifted = self.timebase.shift(Timestamp::from_millis(timestamp)?);
+		let timestamp = self.refuse(shifted)?;
 		// A media frame means every sequence header has arrived (FLV sends config before data), so
 		// the track set is declared; release the reservation to publish.
 		self.initial_reservation = None;
 		let stream = self.audio.get_mut(&track_id).expect("checked above");
-		stream.track.write(Frame {
-			timestamp,
-			duration: None,
-			payload: Bytes::copy_from_slice(data),
-			keyframe: true,
-		})?;
-		stream.track.cut(None)?;
+		let result = stream
+			.track
+			.write(Frame {
+				timestamp,
+				duration: None,
+				payload: Bytes::copy_from_slice(data),
+				keyframe: true,
+			})
+			.and_then(|()| stream.track.cut(None));
+		self.refuse(result)
+	}
+
+	/// Refuse all later input when publishing failed, so the caller can tell it from a bad tag.
+	fn refuse<T>(&mut self, result: crate::Result<T>) -> crate::Result<T> {
+		result.inspect_err(|err| self.input = crate::container::Input::Refused(err.clone()))
+	}
+
+	/// Hand an H.264 (`avc1`) or H.265 (`hvc1`) sequence header to the track's codec importer,
+	/// which holds it until the next keyframe says whether the parameter sets also ride in band.
+	/// A header for another codec replaces the track.
+	fn video_record(&mut self, track_id: u8, fourcc: &[u8; 4], record: &[u8]) -> crate::Result<()> {
+		// Validate before touching the track, so a malformed header leaves it as it was.
+		match fourcc {
+			b"hvc1" => drop(crate::codec::h265::config_from_hvcc(record)?),
+			_ => drop(crate::codec::h264::config_from_avcc(record)?),
+		}
+		let last = match (self.video.get_mut(&track_id), fourcc) {
+			(Some(VideoStream::H264 { import, record: last }), b"avc1") if last.as_ref() != record => {
+				import.initialize(record)?;
+				last
+			}
+			(Some(VideoStream::H265 { import, record: last }), b"hvc1") if last.as_ref() != record => {
+				import.initialize(record)?;
+				last
+			}
+			// Unchanged, the importer would only re-detect what its last keyframe already settled.
+			(Some(VideoStream::H264 { .. }), b"avc1") | (Some(VideoStream::H265 { .. }), b"hvc1") => return Ok(()),
+			_ => {
+				let result = self.build_record(track_id, fourcc, record);
+				return self.refuse(result);
+			}
+		};
+		*last = Bytes::copy_from_slice(record);
 		Ok(())
 	}
 
-	/// (Re)build the video track `track_id` for `config`, unless it matches the current one.
-	fn init_video(&mut self, track_id: u8, mut config: VideoConfig) -> anyhow::Result<()> {
+	fn build_record(&mut self, track_id: u8, fourcc: &[u8; 4], record: &[u8]) -> crate::Result<()> {
+		let track = self.replace_video(track_id)?;
+		// Past the initial reservation, a fresh one still holds an unpublished catalog for this
+		// track's first keyframe, and holds nothing once the catalog went out.
+		let reserved = match &self.initial_reservation {
+			Some(reserved) => reserved.clone(),
+			None => self.timebase.reserve(),
+		};
+		let hint = crate::catalog::VideoHint {
+			container: self.container.clone(),
+			..Default::default()
+		};
+		let record = Bytes::copy_from_slice(record);
+		let stream = match fourcc {
+			b"hvc1" => {
+				let mut import = crate::codec::h265::Import::new(track, reserved, hint)?;
+				import.initialize(&record)?;
+				VideoStream::H265 {
+					import: Box::new(import),
+					record,
+				}
+			}
+			_ => {
+				let mut import = crate::codec::h264::Import::new(track, reserved, hint)?;
+				import.initialize(&record)?;
+				VideoStream::H264 {
+					import: Box::new(import),
+					record,
+				}
+			}
+		};
+		self.video.insert(track_id, stream);
+		Ok(())
+	}
+
+	/// (Re)build the AV1/VP9 track `track_id` for `config`, unless it matches the current one.
+	fn init_video(&mut self, track_id: u8, config: VideoConfig) -> crate::Result<()> {
+		let result = self.build_video(track_id, config);
+		self.refuse(result)
+	}
+
+	fn build_video(&mut self, track_id: u8, mut config: VideoConfig) -> crate::Result<()> {
 		config.container = self.container.clone();
-		if self.video.get(&track_id).is_some_and(|s| s.config == config) {
+		if let Some(VideoStream::Plain(current)) = self.video.get(&track_id)
+			&& current.config == config
+		{
 			return Ok(());
 		}
 
@@ -545,18 +697,23 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		};
 		self.video.insert(
 			track_id,
-			VideoStream {
+			VideoStream::Plain(Box::new(PlainVideo {
 				// Leading deltas before the first keyframe are skipped at the write
 				// site (the producer reports MissingKeyframe), so a mid-GOP join works.
 				track: media,
 				config,
-			},
+			})),
 		);
 		Ok(())
 	}
 
 	/// (Re)build the audio track `track_id` for `config`, unless it matches the current one.
-	fn init_audio(&mut self, track_id: u8, mut config: AudioConfig) -> anyhow::Result<()> {
+	fn init_audio(&mut self, track_id: u8, config: AudioConfig) -> crate::Result<()> {
+		let result = self.build_audio(track_id, config);
+		self.refuse(result)
+	}
+
+	fn build_audio(&mut self, track_id: u8, mut config: AudioConfig) -> crate::Result<()> {
 		config.container = self.container.clone();
 		if self.audio.get(&track_id).is_some_and(|s| s.config == config) {
 			return Ok(());
@@ -576,71 +733,70 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	}
 
 	/// Retire any existing video track `track_id` and allocate a fresh one.
-	fn replace_video(&mut self, track_id: u8) -> anyhow::Result<moq_net::track::Producer> {
-		if let Some(old) = self.video.remove(&track_id) {
-			self.retire(old.track)?;
+	fn replace_video(&mut self, track_id: u8) -> crate::Result<moq_net::track::Producer> {
+		if let Some(mut old) = self.video.remove(&track_id) {
+			old.end()?;
 		}
 		Ok(self
 			.broadcast
-			.unique_track(".flv-v", self.catalog.track_info(hang::catalog::PRIORITY.video))?)
+			.unique_track(".flv-v", self.catalog.track_info(hang::catalog::PRIORITY.video)))
 	}
 
 	/// Retire any existing audio track `track_id` and allocate a fresh one.
-	fn replace_audio(&mut self, track_id: u8) -> anyhow::Result<moq_net::track::Producer> {
-		if let Some(old) = self.audio.remove(&track_id) {
-			self.retire(old.track)?;
+	fn replace_audio(&mut self, track_id: u8) -> crate::Result<moq_net::track::Producer> {
+		if let Some(mut old) = self.audio.remove(&track_id) {
+			old.track.end()?;
 		}
 		Ok(self
 			.broadcast
-			.unique_track(".flv-a", self.catalog.track_info(hang::catalog::PRIORITY.audio))?)
+			.unique_track(".flv-a", self.catalog.track_info(hang::catalog::PRIORITY.audio)))
 	}
 
-	/// End a track this importer is done with, clearing its catalog rendition. Every track takes a
-	/// fresh name, so a publisher changing its config holds only its live tracks.
-	fn retire<R: Clone + Send + 'static>(
-		&self,
-		mut track: crate::container::Producer<crate::catalog::hang::Container, R>,
-	) -> anyhow::Result<()> {
-		Ok(track.end()?)
-	}
-
-	/// Close the current group on every track and reopen at `sequence`.
-	pub fn seek(&mut self, sequence: u64) -> crate::Result<()> {
+	/// Close the current group on every track and reopen at `start`.
+	pub fn seek(&mut self, start: u64) -> crate::Result<()> {
 		self.input.check()?;
 		for stream in self.video.values_mut() {
-			stream.track.seek(sequence)?;
+			stream.seek(start)?;
 		}
 		for stream in self.audio.values_mut() {
-			stream.track.seek(sequence)?;
+			stream.track.seek(start)?;
 		}
 		Ok(())
 	}
 
-	/// Finish every track, flushing the current group.
+	/// Finish every track, flushing the current group, and return the [`Finished`] import.
 	///
-	/// Every track ends even when one fails to, aborting with the cause, and a finish that failed
-	/// returns the same error to every later call. Calling it again after a success does nothing.
-	pub fn finish(&mut self) -> crate::Result<()> {
+	/// Every track ends even when one fails to, aborting with the cause, so a failed finish can't
+	/// be retried.
+	pub fn finish(mut self) -> crate::Result<Finished<E>> {
+		self.finish_in_place()?;
+		Ok(Finished { import: self })
+	}
+
+	fn finish_in_place(&mut self) -> crate::Result<()> {
 		match &self.input {
-			crate::container::Input::Open => {}
 			crate::container::Input::Finished => return Ok(()),
-			crate::container::Input::Refused(err) | crate::container::Input::Failed(err) => return Err(err.clone()),
+			crate::container::Input::Failed(err) => return Err(err.clone()),
+			crate::container::Input::Open | crate::container::Input::Refused(_) => {}
 		}
 		// No input follows, so the buffer that waited for the rest of a tag is done.
 		self.buffer = BytesMut::new();
-		// No frame follows to anchor the clock, so publish the declared track set now.
+		// No frame follows to anchor the clock, so publish the declared track set now, with a track
+		// whose record no keyframe followed as the record stands.
 		self.initial_reservation = None;
 		let mut result = Ok(());
 		for stream in self.video.values_mut() {
-			result = result.and(stream.track.end());
+			result = result.and(stream.finish());
 		}
 		for stream in self.audio.values_mut() {
 			result = result.and(stream.track.end());
 		}
-		self.input = match &result {
-			Ok(()) => crate::container::Input::Finished,
-			Err(err) => crate::container::Input::Failed(err.clone()),
-		};
+		match &result {
+			// A refusal keeps refusing input with its own cause.
+			Ok(()) if matches!(self.input, crate::container::Input::Refused(_)) => {}
+			Ok(()) => self.input = crate::container::Input::Finished,
+			Err(err) => self.input = crate::container::Input::Failed(err.clone()),
+		}
 		result
 	}
 
@@ -653,7 +809,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// rather than ending them as a complete recording.
 	pub fn abort(mut self, err: moq_net::Error) {
 		for stream in std::mem::take(&mut self.video).into_values() {
-			stream.track.abort(err.clone());
+			stream.abort(err.clone());
 		}
 		for stream in std::mem::take(&mut self.audio).into_values() {
 			stream.track.abort(err.clone());
@@ -661,11 +817,34 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	}
 }
 
+/// An FLV import that [finished](Import::finish): every track has ended, and they can still be
+/// read or aborted, but it takes no more input.
+///
+/// Dropping it retires the tracks and their catalog renditions, as dropping the [`Import`] does.
+///
+/// ```compile_fail,E0599
+/// # fn cannot_decode(mut import: moq_mux::container::flv::Finished) {
+/// import.decode(b"").unwrap();
+/// # }
+/// ```
+#[must_use = "dropping it retires the tracks and their catalog renditions"]
+pub struct Finished<E: crate::catalog::hang::CatalogExt = ()> {
+	import: Import<E>,
+}
+
+impl<E: crate::catalog::hang::CatalogExt> Finished<E> {
+	/// Abort every track with `err`; see [`Import::abort`]. Readers still draining a track get its
+	/// clean end instead once every group below its end finished.
+	pub fn abort(self, err: moq_net::Error) {
+		self.import.abort(err);
+	}
+}
+
 impl<E: crate::catalog::hang::CatalogExt> Drop for Import<E> {
 	fn drop(&mut self) {
 		let (video, audio) = (std::mem::take(&mut self.video), std::mem::take(&mut self.audio));
-		let video = video.into_values().map(|stream| self.retire(stream.track));
-		let audio = audio.into_values().map(|stream| self.retire(stream.track));
+		let video = video.into_values().map(|mut stream| stream.end());
+		let audio = audio.into_values().map(|mut stream| stream.track.end());
 		for result in video.chain(audio) {
 			if let Err(err) = result {
 				tracing::warn!(%err, "failed to end a dropped FLV track");
@@ -692,14 +871,14 @@ struct MultitrackTrack<'a> {
 
 /// Parse the multitrack framing byte and shared FourCC, advancing `cursor` past
 /// them. `cursor` starts at the framing byte (after the ex-header byte).
-fn split_multitrack_header(cursor: &mut &[u8], kind: &str) -> anyhow::Result<MultitrackHeader> {
+fn split_multitrack_header(cursor: &mut &[u8], kind: &str) -> crate::Result<MultitrackHeader> {
 	let (&framing, rest) = cursor
 		.split_first()
-		.with_context(|| format!("multitrack {kind} tag missing framing byte"))?;
+		.ok_or_else(|| super::Error::Malformed(format!("multitrack {kind} tag missing framing byte")))?;
 	*cursor = rest;
 	let multitrack_type = framing >> 4;
 	let packet_type = framing & 0x0f;
-	anyhow::ensure!(
+	ensure!(
 		matches!(
 			multitrack_type,
 			MULTITRACK_ONE_TRACK | MULTITRACK_MANY_TRACKS | MULTITRACK_MANY_TRACKS_MANY_CODECS
@@ -710,7 +889,10 @@ fn split_multitrack_header(cursor: &mut &[u8], kind: &str) -> anyhow::Result<Mul
 	let shared_fourcc = if multitrack_type == MULTITRACK_MANY_TRACKS_MANY_CODECS {
 		None
 	} else {
-		Some(take_fourcc(cursor).with_context(|| format!("multitrack {kind} missing shared FourCC"))?)
+		Some(
+			take_fourcc(cursor)
+				.ok_or_else(|| super::Error::Malformed(format!("multitrack {kind} missing shared FourCC")))?,
+		)
 	};
 
 	Ok(MultitrackHeader {
@@ -729,24 +911,25 @@ fn split_multitrack_track<'a>(
 	cursor: &mut &'a [u8],
 	header: &MultitrackHeader,
 	kind: &str,
-) -> anyhow::Result<MultitrackTrack<'a>> {
+) -> crate::Result<MultitrackTrack<'a>> {
 	let fourcc = match header.shared_fourcc {
 		Some(fourcc) => fourcc,
-		None => take_fourcc(cursor).with_context(|| format!("multitrack {kind} missing per-track FourCC"))?,
+		None => take_fourcc(cursor)
+			.ok_or_else(|| super::Error::Malformed(format!("multitrack {kind} missing per-track FourCC")))?,
 	};
 
 	let (&track_id, rest) = cursor
 		.split_first()
-		.with_context(|| format!("multitrack {kind} missing track id"))?;
+		.ok_or_else(|| super::Error::Malformed(format!("multitrack {kind} missing track id")))?;
 	*cursor = rest;
 
 	let payload = if header.multitrack_type == MULTITRACK_ONE_TRACK {
 		std::mem::take(cursor)
 	} else {
-		anyhow::ensure!(cursor.len() >= 3, "multitrack {kind} missing track size");
+		ensure!(cursor.len() >= 3, "multitrack {kind} missing track size");
 		let size = read_u24(&cursor[0..3]) as usize;
 		*cursor = &cursor[3..];
-		anyhow::ensure!(
+		ensure!(
 			cursor.len() >= size,
 			"multitrack {kind} track size {size} exceeds remaining {}",
 			cursor.len()
@@ -771,7 +954,7 @@ fn take_fourcc(cursor: &mut &[u8]) -> Option<[u8; 4]> {
 }
 
 /// Build an audio config for AAC from an `AudioSpecificConfig`.
-fn config_from_asc(asc_bytes: &[u8]) -> anyhow::Result<AudioConfig> {
+fn config_from_asc(asc_bytes: &[u8]) -> crate::Result<AudioConfig> {
 	let mut cursor = asc_bytes;
 	let cfg = crate::codec::aac::Config::parse(&mut cursor)?;
 	let mut config = AudioConfig::new(AAC { profile: cfg.profile }, cfg.sample_rate, cfg.channel_count);
@@ -780,13 +963,13 @@ fn config_from_asc(asc_bytes: &[u8]) -> anyhow::Result<AudioConfig> {
 }
 
 /// Build an audio config for MP3 from a frame header (config is in band).
-fn config_from_mp3(frame: &[u8]) -> anyhow::Result<AudioConfig> {
+fn config_from_mp3(frame: &[u8]) -> crate::Result<AudioConfig> {
 	let cfg = crate::codec::mp3::Config::parse(frame)?;
 	Ok(AudioConfig::new(AudioCodec::Mp3, cfg.sample_rate, cfg.channel_count))
 }
 
 /// Build an audio config for AC-3 from a sync frame header.
-fn config_from_ac3(frame: &[u8]) -> anyhow::Result<AudioConfig> {
+fn config_from_ac3(frame: &[u8]) -> crate::Result<AudioConfig> {
 	let header = crate::codec::ac3::parse_header(frame)?;
 	Ok(AudioConfig::new(
 		AudioCodec::Ac3,
@@ -796,7 +979,7 @@ fn config_from_ac3(frame: &[u8]) -> anyhow::Result<AudioConfig> {
 }
 
 /// Build an audio config for E-AC-3 from a sync frame header.
-fn config_from_eac3(frame: &[u8]) -> anyhow::Result<AudioConfig> {
+fn config_from_eac3(frame: &[u8]) -> crate::Result<AudioConfig> {
 	let header = crate::codec::eac3::parse_header(frame)?;
 	Ok(AudioConfig::new(
 		AudioCodec::Ec3,

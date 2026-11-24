@@ -1,6 +1,6 @@
 # @moq/qmux
 
-A [WebTransport](https://developer.mozilla.org/en-US/docs/Web/API/WebTransport_API) implementation using WebSockets as the underlying transport with [QMux](https://www.ietf.org/archive/id/draft-ietf-quic-qmux-02.html) (draft-ietf-quic-qmux-02, negotiating down to draft-01 and draft-00) framing: a polyfill in browsers, and a server on any runtime that can accept a WebSocket.
+A [WebTransport](https://developer.mozilla.org/en-US/docs/Web/API/WebTransport_API) implementation using WebSockets as the underlying transport with [QMux](https://www.ietf.org/archive/id/draft-ietf-quic-qmux-02.html) (draft-ietf-quic-qmux-02, negotiating down to draft-01 and draft-00) framing: a WebTransport-compatible client in browsers, and a server on any runtime that can accept a WebSocket.
 
 QMux brings QUIC's multiplexed streams and flow control to reliable, ordered byte-stream transports like WebSockets. This allows WebTransport applications to seamlessly fall back when QUIC/UDP is blocked by network middleboxes.
 
@@ -123,20 +123,6 @@ try {
 The outgoing code comes off the reason passed to `abort()` / `cancel()`, so any `WebTransportError`
 (native or the exported `StreamError`) sends its `streamErrorCode` and anything else sends 0.
 `STOP_SENDING` works the same way, erroring the sender's writable with the code the peer chose.
-
-### Polyfill
-
-Install as a global `WebTransport` polyfill:
-
-```ts
-import { install } from "@moq/qmux"
-
-// Only installs if native WebTransport is unavailable
-install()
-
-// Now use the standard WebTransport API
-const transport = new WebTransport("https://example.com/endpoint")
-```
 
 ## License
 

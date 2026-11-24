@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use futures::FutureExt;
-use moq_auth::{Grant, Pattern, lease};
+use moq_auth::{Grant, Prefix, lease};
 use moq_net::{cache, origin};
 use moq_relay::{Accepted, Connection, auth, cluster, stats};
 use session::{Backend, MockConnectOptions, Pair, mock::create_mock_session_pair};
@@ -55,11 +55,14 @@ struct Node(Arc<State>);
 struct State {
 	cluster: cluster::Cluster,
 	auth: auth::Auth,
+	/// The cluster's driver, which would otherwise run on until its stats publisher next ticks.
+	driver: tokio::task::JoinHandle<anyhow::Result<()>>,
 	decider: tokio::task::JoinHandle<()>,
 }
 
 impl Drop for State {
 	fn drop(&mut self) {
+		self.driver.abort();
 		self.decider.abort();
 	}
 }
@@ -70,6 +73,8 @@ impl Backend for Relay {
 
 	fn relay(id: u64, capacity: Option<u64>) -> (Node, cache::Pool) {
 		let mut config = moq_relay::cache::Config::default();
+		// Only the swept capacity bounds the pool, not the machine's free memory.
+		config.headroom = Some("0".to_string());
 		if std::env::var_os("SESSION_EXPIRY_ONLY").is_none() {
 			config.capacity = capacity.map(|capacity| capacity.to_string());
 		}
@@ -82,18 +87,24 @@ impl Backend for Relay {
 		stats.enabled = true;
 		stats.node = Some(id.to_string());
 		let (cluster, driver) = cluster::Cluster::new(options.with_cache(cache).with_stats(stats)).unwrap();
-		tokio::spawn(driver.run());
+		let driver = tokio::spawn(driver.run());
 
 		let (auth, mut admissions) = auth::Auth::embedded(format!("bench-{id}"));
 		let decider = tokio::spawn(async move {
 			while let Some(admission) = admissions.next().await {
-				let mut grant = Grant::new(Pattern::all(), Pattern::all());
+				let mut grant = Grant::new(Prefix::all(), Prefix::all());
 				grant.root = Some(String::new());
-				grant.peer = admission.request.path == "/peer";
+				grant.link = (admission.request.path == "/peer").then_some(moq_auth::Link::Peer);
 				admission.grant(lease::Consumer::fixed(grant));
 			}
 		});
-		(Node(Arc::new(State { cluster, auth, decider })), pool)
+		let state = State {
+			cluster,
+			auth,
+			driver,
+			decider,
+		};
+		(Node(Arc::new(state)), pool)
 	}
 
 	fn origin(relay: &Node) -> &origin::Producer {
@@ -113,9 +124,10 @@ impl Backend for Relay {
 		let task = tokio::spawn(async move {
 			let server = moq_net::Server::new()
 				.with_versions(version.into())
-				.with_extensions(extensions);
+				.with_solicit(extensions.solicit)
+				.with_ietf(extensions.ietf);
 			let handshake = server
-				.accept_request(moq_net::time::Instant::now(), server_link)
+				.handshake(moq_net::time::Instant::now(), server_link)
 				.await
 				.unwrap();
 			Connection::new(Accepted::new(handshake, moq_auth::Transport::Quic), cluster, auth)
@@ -131,7 +143,8 @@ impl Backend for Relay {
 			.map(|origin| origin.consume().routes());
 		let mut client = moq_net::Client::new()
 			.with_versions(version.into())
-			.with_extensions(options.client_extensions);
+			.with_solicit(options.client_extensions.solicit)
+			.with_ietf(options.client_extensions.ietf);
 		// Older protocols need the peer exemption to discover dot paths.
 		if peer || hidden {
 			client = client.with_url("moql://localhost/peer".parse().unwrap());

@@ -41,24 +41,30 @@ fn frames(sequence: u64, mode: Option<&str>) -> Vec<Vec<u8>> {
 /// Publish every group, cutting group 1 for `drop`.
 fn write(track: &mut moq_net::track::Producer, mode: Option<&str>) -> anyhow::Result<()> {
 	// Declare the end before the final group's payload is even available.
-	track.finish_at(moq_net::track::Position::group(GROUPS), None)?;
+	track.finish_at(moq_net::track::Position::group(GROUPS))?;
 	for sequence in 0..GROUPS {
-		let mut group = track.append_group()?;
+		let mut group = track.append_group(at(sequence))?;
 		if mode == Some("drop") && sequence == 1 {
 			group.abort(moq_net::Error::App(1))?;
 			continue;
 		}
 		for frame in frames(sequence, mode) {
-			group.write_frame(moq_net::Timestamp::ZERO, frame)?;
+			group.write_frame(at(sequence), frame)?;
 		}
 		group.finish()?;
 	}
 	Ok(())
 }
 
+/// Where group `sequence` starts: its key, in the track's milliseconds, which the groups count up
+/// in so every runtime reads the same keys.
+fn at(sequence: u64) -> moq_net::Timestamp {
+	moq_net::Timestamp::from_millis(sequence).expect("a small timestamp")
+}
+
 /// Read one whole group, checking every frame's bytes, and report when the `late` head is in.
 async fn read(group: &mut moq_net::group::Consumer, mode: Option<&str>) -> anyhow::Result<()> {
-	let sequence = group.sequence;
+	let sequence = group.start;
 	for (index, want) in frames(sequence, mode).iter().enumerate() {
 		let frame = group.read_frame().await?.context("short group")?;
 		ensure!(frame.payload[..] == want[..], "wrong frame {index} in group {sequence}");
@@ -110,9 +116,11 @@ async fn main() -> anyhow::Result<()> {
 			let route = origin.route(&args[3], moq_net::origin::RouteOptions::hidden())?;
 			let broadcast = route.broadcast();
 			if datagram {
-				// Untimed: the OBJECT_DATAGRAM carries no timestamp, so the subscriber can
-				// check the payload alone. Stay open until each one is acknowledged.
-				let mut track = broadcast.create_datagrams("tail", moq_net::datagram::Info::default())?;
+				// Untimed: each datagram's timestamp is unscaled at its sequence, which the
+				// OBJECT_DATAGRAM carries as its group ID. Stay open until each one is acknowledged.
+				let mut track = broadcast
+					.create_datagrams("tail", moq_net::datagram::Info::default())
+					.context("the track already exists")?;
 				route.announce()?;
 				let session = client
 					.clone()
@@ -126,7 +134,7 @@ async fn main() -> anyhow::Result<()> {
 						commands.next_line().await?.as_deref() == Some(&format!("datagram {sequence}")),
 						"missing datagram command"
 					);
-					track.append(None, vec![sequence as u8; 900])?;
+					track.append(moq_net::Timestamp::unscaled(sequence), vec![sequence as u8; 900])?;
 				}
 				ensure!(
 					commands.next_line().await?.as_deref() == Some("clean end"),
@@ -137,27 +145,29 @@ async fn main() -> anyhow::Result<()> {
 				session.close().await?;
 				eprintln!("tail acknowledged");
 			} else {
-				let mut track = broadcast.create_track(
-					"tail",
-					moq_net::track::Info::default()
-						.with_timescale(moq_net::Timescale::MILLI)
-						.with_compression(match compress {
-							true => moq_net::track::Compression::Deflate,
-							false => moq_net::track::Compression::None,
-						})
-						// `cached` and `late` read groups a newer one supersedes, which the default
-						// zero max age would leave stale.
-						.with_max_age(None),
-				)?;
+				let mut track = broadcast
+					.create_track(
+						"tail",
+						moq_net::track::Info::default()
+							.with_timescale(moq_net::Timescale::MILLI)
+							.with_compression(match compress {
+								true => moq_net::track::Compression::Deflate,
+								false => moq_net::track::Compression::None,
+							})
+							// `cached` and `late` read groups a newer one supersedes, which the default
+							// zero max age would leave stale.
+							.with_max_age(None),
+					)
+					.context("the track already exists")?;
 				route.announce()?;
 				if cached {
 					write(&mut track, mode)?;
 				}
 				let mut head = None;
 				if late {
-					let mut group = track.append_group()?;
+					let mut group = track.append_group(at(0))?;
 					for frame in frames(0, mode).into_iter().take(LATE_HEAD) {
-						group.write_frame(moq_net::Timestamp::ZERO, frame)?;
+						group.write_frame(at(0), frame)?;
 					}
 					head = Some(group);
 				}
@@ -175,20 +185,20 @@ async fn main() -> anyhow::Result<()> {
 						"subscriber did not read the head"
 					);
 					for frame in frames(0, mode).into_iter().skip(LATE_HEAD) {
-						group.write_frame(moq_net::Timestamp::ZERO, frame)?;
+						group.write_frame(at(0), frame)?;
 					}
 					group.finish()?;
 					for sequence in 1..LATE_GROUPS {
-						let mut group = track.append_group()?;
+						let mut group = track.append_group(at(sequence))?;
 						for frame in frames(sequence, mode) {
-							group.write_frame(moq_net::Timestamp::ZERO, frame)?;
+							group.write_frame(at(sequence), frame)?;
 						}
 						group.finish()?;
 					}
 					_finished = Some(track.finish()?);
 				} else if !cached {
 					let mut demand = track.demand();
-					while demand.wanted_changed().await?.is_none() {}
+					while !demand.wanted_changed().await? {}
 					write(&mut track, mode)?;
 				}
 				// A finished track is not a drained transport. Keep the session alive
@@ -227,7 +237,10 @@ async fn main() -> anyhow::Result<()> {
 						frame.payload.iter().all(|byte| *byte == sequence as u8),
 						"corrupt datagram"
 					);
-					ensure!(frame.timestamp.is_none(), "unexpected IETF timestamp");
+					ensure!(
+						frame.timestamp == moq_net::Timestamp::unscaled(sequence),
+						"datagram timestamp is not its sequence"
+					);
 					println!("datagram {sequence}");
 				}
 				eprintln!("datagram clean groups=0,1,2,3 bytes=3600");
@@ -248,18 +261,18 @@ async fn main() -> anyhow::Result<()> {
 				return Ok(());
 			}
 			if late {
-				// No range: join the latest group as a player does, group 0, whose head predates
-				// the subscription.
-				let options = moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(5)));
+				// Join the latest group as a player does, group 0, whose head predates the
+				// subscription.
+				let options = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(Duration::ZERO),
+						max: Some(Duration::from_secs(5)),
+					},
+				)]);
 				let mut track = remote.subscribe(Some(options)).await?;
 				for sequence in 0..LATE_GROUPS {
 					let mut group = track.recv_group().await?.context("missing group")?;
-					ensure!(
-						group.sequence == sequence,
-						"joined group {} for {sequence}",
-						group.sequence
-					);
+					ensure!(group.start == sequence, "joined group {} for {sequence}", group.start);
 					read(&mut group, mode).await?;
 				}
 				ensure!(track.recv_group().await?.is_none(), "extra group");
@@ -273,8 +286,7 @@ async fn main() -> anyhow::Result<()> {
 				return Ok(());
 			}
 			let options = moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(if drop { 60 } else { 5 })))
-				.with_range(0..);
+				.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Time(0))]);
 			let mut track = remote.subscribe(Some(options)).await?;
 			if compress {
 				ensure!(
@@ -285,7 +297,7 @@ async fn main() -> anyhow::Result<()> {
 			}
 			let mut seen = Vec::new();
 			while let Some(mut group) = track.recv_group().await? {
-				let sequence = group.sequence;
+				let sequence = group.start;
 				ensure!(sequence < GROUPS, "unexpected group {sequence}");
 				read(&mut group, mode).await?;
 				seen.push(sequence);

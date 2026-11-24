@@ -65,9 +65,9 @@ async fn follow(
 	let prefix = prefix.unwrap_or_default();
 
 	// Scoped to the prefix, so the session only asks the relay for what is followed.
-	let pattern = moq_net::Pattern::subtree(prefix).with_context(|| format!("invalid prefix `{prefix}`"))?;
+	let scope = moq_net::Prefix::try_from(prefix).with_context(|| format!("invalid prefix `{prefix}`"))?;
 	let origin = moq_tokio::origin::spawn()
-		.scope("", &moq_net::Patterns::from(pattern))
+		.scope("", &moq_net::Prefixes::from(scope))
 		.with_context(|| format!("failed to scope to `{prefix}`"))?;
 
 	// Subscribe-only: this session reads and never publishes.
@@ -92,9 +92,8 @@ async fn follow(
 
 		let (announce, active) = match event {
 			Event::Present(announce) => (announce, true),
-			Event::Absent(announce) | Event::Offline(announce) => (announce, false),
-			// The set lists presence; a held path stays listed.
-			Event::Available(_) | Event::Unavailable(_) => continue,
+			Event::Absent(announce) => (announce, false),
+			_ => continue,
 		};
 
 		let path = announce.prefix.as_str();

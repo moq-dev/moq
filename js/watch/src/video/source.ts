@@ -1,15 +1,10 @@
 import * as Catalog from "@moq/hang/catalog";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
+import { rotateDimensions } from "@moq/video";
 import type { Broadcast } from "../broadcast";
 import { SupportProbe } from "../support-probe";
-import { supported as decoderSupported } from "./supported";
-
-/**
- * A function that checks if a video configuration can be played.
- *
- * `Decoder.supported` is the WebCodecs probe used by `<moq-watch>`.
- */
-export type Supported = (config: Catalog.VideoConfig) => Promise<boolean>;
+import { decoderConfigKey } from "./config";
+import { supported } from "./supported";
 
 /** What the viewer wants from the video rendition; the source picks the best one within it. */
 export type Target = {
@@ -19,10 +14,12 @@ export type Target = {
 	// Maximum desired pixel area (codedWidth * codedHeight).
 	pixels?: number;
 
-	// Maximum desired coded width in pixels.
+	// Maximum desired width in pixels as shown: the coded width, or the coded height once the
+	// section's rotation turns the picture sideways.
 	width?: number;
 
-	// Maximum desired coded height in pixels.
+	// Maximum desired height in pixels as shown, like `width`. With `width`, the box's shape also prefers the
+	// renditions shown in its orientation, landscape or portrait.
 	height?: number;
 
 	// Maximum desired bitrate in bits per second, a cap rather than a hint: selection picks the
@@ -35,10 +32,6 @@ export type Target = {
 export type SourceInput = {
 	broadcast: Getter<Broadcast | undefined>;
 	target: Getter<Target | undefined>;
-
-	// A function that checks if a video configuration can be played. Renditions that fail the
-	// probe are filtered out. Defaults to `Decoder.supported`, the WebCodecs probe.
-	supported: Getter<Supported | undefined>;
 
 	// The receive rate in bits per second this video may spend, used to auto-select a rendition
 	// when the target has no explicit bitrate. A `Player` wires its viewer grant less its audio.
@@ -119,12 +112,12 @@ function byPixels(target: number): RenditionFilter {
 }
 
 /**
- * Filter and rank renditions by maximum coded dimensions.
- * Returns renditions where codedWidth <= width AND codedHeight <= height
+ * Filter and rank renditions by maximum dimensions as shown, the coded size turned by `rotation`.
+ * Returns renditions whose shown width <= width AND shown height <= height
  * (each cap is optional). Within-budget renditions rank by area (largest first).
  * If nothing fits, falls back to the single smallest over-budget rendition.
  */
-function byDimensions(width?: number, height?: number): RenditionFilter {
+function byDimensions(width: number | undefined, height: number | undefined, rotation?: number): RenditionFilter {
 	return (entries) => {
 		const within: { name: string; size: number }[] = [];
 		const rest: { name: string; size: number }[] = [];
@@ -132,8 +125,9 @@ function byDimensions(width?: number, height?: number): RenditionFilter {
 		for (const [name, config] of entries) {
 			if (!config.codedWidth || !config.codedHeight) continue;
 			const size = config.codedWidth * config.codedHeight;
-			const fitsWidth = width == null || config.codedWidth <= width;
-			const fitsHeight = height == null || config.codedHeight <= height;
+			const shown = rotateDimensions({ width: config.codedWidth, height: config.codedHeight }, rotation);
+			const fitsWidth = width == null || shown.width <= width;
+			const fitsHeight = height == null || shown.height <= height;
 			if (fitsWidth && fitsHeight) {
 				within.push({ name, size });
 			} else {
@@ -209,6 +203,25 @@ function preferredRenditions(renditions: Record<string, Catalog.VideoConfig>): R
 	return Object.fromEntries(entries.filter(([, config]) => (config.preference ?? 0) === top));
 }
 
+/**
+ * Keep the renditions shown in the target box's orientation: a square or unsized one matches
+ * either, and when none match, or the box is square or unsized, every rendition stays.
+ */
+function orientedRenditions(
+	section: Catalog.Video | undefined,
+	renditions: Record<string, Catalog.VideoConfig>,
+	target: Target | undefined,
+): Record<string, Catalog.VideoConfig> {
+	if (target?.width == null || target.height == null) return renditions;
+	const viewport = Catalog.Orientation.of(target.width, target.height);
+	if (!viewport) return renditions;
+	const shape = section ?? { renditions };
+	const kept = Object.entries(renditions).filter(
+		([, config]) => (Catalog.Video.orientation(shape, config) ?? viewport) === viewport,
+	);
+	return kept.length > 0 ? Object.fromEntries(kept) : renditions;
+}
+
 /** Whether the receive rate steers selection: not with nothing to select, or a pinned rendition or bitrate. */
 function steers(available: Record<string, Catalog.VideoConfig>, target: Target | undefined): boolean {
 	if (Object.keys(available).length === 0) return false;
@@ -223,7 +236,8 @@ export class Source {
 	/** The wired inputs, read-only. */
 	readonly in: Readonlys<SourceInput>;
 
-	#probe = new SupportProbe<Catalog.VideoConfig>("video");
+	// Renditions the WebCodecs decoder cannot play are filtered out.
+	#probe = new SupportProbe<Catalog.VideoConfig>("video", { supported, key: decoderConfigKey });
 
 	readonly #out: SourceOutput = {
 		catalog: new Signal<Catalog.Video | undefined>(undefined),
@@ -247,7 +261,6 @@ export class Source {
 		this.in = {
 			broadcast: getter(props?.broadcast),
 			target: getter(props?.target),
-			supported: getter(props?.supported),
 			rate: getter(props?.rate),
 		};
 
@@ -268,11 +281,10 @@ export class Source {
 	}
 
 	#runSupported(effect: Effect): void {
-		const supported = effect.get(this.in.supported) ?? decoderSupported;
 		// Read the catalog from the broadcast itself, so the probe result is tagged with the right one.
 		const broadcast = effect.get(this.in.broadcast);
 		const renditions = (broadcast && effect.get(broadcast.out.catalog)?.video?.renditions) ?? {};
-		this.#probe.run(effect, supported, renditions, (available) => this.#out.available.set(available));
+		this.#probe.run(effect, renditions, (available) => this.#out.available.set(available));
 	}
 
 	#runSelected(effect: Effect): void {
@@ -280,7 +292,7 @@ export class Source {
 		const target = effect.get(this.in.target);
 		// Read the rate only when it steers selection, so a pinned choice doesn't rerun with it.
 		if (steers(available, target)) this.#rate = effect.get(this.in.rate) ?? this.#rate;
-		const selected = this.#choose(available, target, this.#rate);
+		const selected = this.#choose(effect.get(this.#out.catalog), available, target, this.#rate);
 		if (!selected) return;
 
 		effect.set(this.#out.track, selected);
@@ -291,7 +303,7 @@ export class Source {
 		const available = enabledRenditions(effect.get(this.#out.available));
 		const target = effect.get(this.in.target);
 		// An unlimited rate picks the best rendition bandwidth could ever buy.
-		const best = this.#choose(available, target, Number.POSITIVE_INFINITY);
+		const best = this.#choose(effect.get(this.#out.catalog), available, target, Number.POSITIVE_INFINITY);
 		const bitrate = best === undefined ? undefined : available[best].bitrate;
 		if (bitrate === undefined) return;
 		// Only the rate's discounted share counts, so it must reach the bitrate over the margin.
@@ -301,6 +313,7 @@ export class Source {
 
 	// Pick among the enabled renditions, given the receive rate if known.
 	#choose(
+		section: Catalog.Video | undefined,
 		available: Record<string, Catalog.VideoConfig>,
 		target: Target | undefined,
 		rate: number | undefined,
@@ -312,7 +325,13 @@ export class Source {
 			target = { ...target, bitrate: Math.round(rate * MARGIN) };
 		}
 
-		return this.#select(preferredRenditions(available), target);
+		// Orientation first, so a lower preference ranks a broadcast's secondary orientation
+		// rather than dropping it as a decode fallback.
+		return this.#select(
+			preferredRenditions(orientedRenditions(section, available, target)),
+			target,
+			section?.rotation,
+		);
 	}
 
 	/**
@@ -322,7 +341,11 @@ export class Source {
 	 * The first rendition present in every filter's output is selected.
 	 * If the rankings conflict, the first ranking's best rendition is selected.
 	 */
-	#select(renditions: Record<string, Catalog.VideoConfig>, target?: Target): string | undefined {
+	#select(
+		renditions: Record<string, Catalog.VideoConfig>,
+		target: Target | undefined,
+		rotation: number | undefined,
+	): string | undefined {
 		const entries = Object.entries(renditions);
 		if (entries.length === 0) return undefined;
 		if (entries.length === 1) return entries[0][0];
@@ -334,7 +357,7 @@ export class Source {
 			filters.push(byPixels(target.pixels));
 		}
 		if (target?.width != null || target?.height != null) {
-			filters.push(byDimensions(target.width, target.height));
+			filters.push(byDimensions(target.width, target.height, rotation));
 		}
 		if (target?.bitrate != null) {
 			filters.push(byBitrate(target.bitrate));

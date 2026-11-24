@@ -4,4 +4,4 @@ The `/py` uv workspace. Run recipes via `just py <recipe>`. See also `rs/moq-ffi
 - Each layer above the moq-net root is a submodule (`moq.json`) with its own `__all__`, named after the Rust crate it mirrors.
 - `Client`/`Server` are async context managers; iterate announcements and tracks with `async for`.
 - Extend with keyword-only args with defaults (`*, ...`), not options objects.
-- The package ships `py.typed`: document public symbols.
+- The package ships `py.typed`.

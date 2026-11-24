@@ -8,7 +8,7 @@
 //! byte stream (piped Annex-B H.264, ...). A container recovers its own
 //! framing, so [`Container`] takes chunks split anywhere.
 //!
-//! Each importer takes a typed format (parsed from e.g. `"avc3"` or `"fmp4"`)
+//! Each importer takes a typed format (parsed from e.g. `"h264"` or `"fmp4"`)
 //! and errors on a format it doesn't handle; `TrackStream` accepts only the
 //! self-delimiting formats. The concrete importers live with their format
 //! under [`crate::container`] or [`crate::codec`] and own their
@@ -18,15 +18,15 @@
 //! `broadcast.unique_track(suffix, catalog.track_info())`, so the max age the catalog
 //! declares reaches the track.
 
-mod container;
+pub mod container;
 mod format;
 mod init;
-mod track;
+pub mod track;
 
-pub use container::*;
+pub use container::Container;
 pub use format::{AudioFormat, ContainerFormat, Format, Kind, VideoFormat};
 pub use init::{AudioInit, ContainerInit, VideoInit};
-pub use track::*;
+pub use track::{Track, TrackStream};
 
 /// A finished importer keeps its tracks and renditions published, but not its input storage.
 ///
@@ -113,14 +113,13 @@ mod tests {
 	async fn finished_track_releases_its_splitter() {
 		let keyframe = h264_keyframe();
 		assert_released("avc3 track", &|broadcast, catalog| {
-			let init = VideoInit::new(VideoFormat::Avc3, Bytes::new());
+			let init = VideoInit::new(VideoFormat::H264, Bytes::new());
 			let mut track = Track::video(avc3(broadcast), catalog.reserve(), init).unwrap();
 			for pts in [0, 33_333] {
 				let pts = moq_net::Timestamp::from_micros(pts).unwrap();
 				track.decode(keyframe.clone(), Some(pts)).unwrap();
 			}
-			track.finish().unwrap();
-			Box::new(track)
+			Box::new(track.finish().unwrap())
 		});
 	}
 
@@ -129,11 +128,10 @@ mod tests {
 		// Two access units in one write, so the splitter holds the whole write.
 		let stream = [h264_keyframe(), h264_keyframe()].concat();
 		assert_released("avc3 stream", &|broadcast, catalog| {
-			let init = VideoInit::new(VideoFormat::Avc3, Bytes::new());
+			let init = VideoInit::new(VideoFormat::H264, Bytes::new());
 			let mut track = TrackStream::video(avc3(broadcast), catalog.reserve(), init).unwrap();
 			track.decode(&stream).unwrap();
-			track.finish().unwrap();
-			Box::new(track)
+			Box::new(track.finish().unwrap())
 		});
 	}
 
@@ -149,7 +147,7 @@ mod tests {
 			for chunk in data.chunks(chunk) {
 				import.decode(chunk).unwrap();
 			}
-			import.finish().unwrap();
+			let import = import.finish().unwrap();
 			Box::new(import)
 		}
 	}
@@ -169,7 +167,7 @@ mod tests {
 			for chunk in data.chunks(CHUNK) {
 				import.decode(chunk).unwrap();
 			}
-			import.finish().unwrap();
+			let import = import.finish().unwrap();
 			Box::new(import)
 		});
 	}

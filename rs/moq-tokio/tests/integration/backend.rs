@@ -10,7 +10,6 @@ fn timed() -> moq_net::track::Info {
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Inputs for [`connect_test`].
-#[cfg(feature = "quic")]
 struct ConnectTest<'a> {
 	/// URL scheme to dial (`moqt` for raw QUIC, `https` for WebTransport).
 	scheme: &'a str,
@@ -39,7 +38,6 @@ struct ConnectTest<'a> {
 ///
 /// Dials `localhost`, so the client sends an SNI. Use [`no_sni_test`] to cover
 /// the SNI-less path.
-#[cfg(feature = "quic")]
 async fn backend_test(scheme: &str) {
 	connect_test(ConnectTest {
 		scheme,
@@ -60,7 +58,6 @@ async fn backend_test(scheme: &str) {
 /// Raw QUIC (`moqt`/`moql`) has no request URI, so the whole request target has to
 /// ride the SETUP; WebTransport carries it in the CONNECT URL instead. Either way the
 /// server reports the same route and query through [`moq_tokio::server::Request`].
-#[cfg(feature = "quic")]
 async fn path_test(scheme: &str) {
 	connect_test(ConnectTest {
 		scheme,
@@ -80,7 +77,6 @@ async fn path_test(scheme: &str) {
 /// in the server name). Raw QUIC has no in-band request URL, so this exercises
 /// the accept path with an empty server name, which must still establish rather
 /// than reject. Binds the loopback IP directly to avoid dual-stack flakiness.
-#[cfg(feature = "quic")]
 async fn no_sni_test(scheme: &str) {
 	connect_test(ConnectTest {
 		scheme,
@@ -98,7 +94,6 @@ async fn no_sni_test(scheme: &str) {
 
 /// Publish a broadcast on the server bound to `bind`, subscribe on a client that
 /// dials `authority`, and verify the data arrives over the requested scheme.
-#[cfg(feature = "quic")]
 async fn connect_test(config: ConnectTest<'_>) {
 	let ConnectTest {
 		scheme,
@@ -122,9 +117,11 @@ async fn connect_test(config: ConnectTest<'_>) {
 		.create_track("video", timed())
 		.expect("failed to create track");
 
-	let mut group = track.append_group().expect("failed to append group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("failed to append group");
 	group
-		.write_frame(moq_net::Timestamp::ZERO, payload)
+		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), payload)
 		.expect("failed to write frame");
 	group.finish().expect("failed to finish group");
 
@@ -225,7 +222,6 @@ async fn connect_test(config: ConnectTest<'_>) {
 /// Write a self-signed PEM cert + key for `name` to `dir`, prefixed by `stem`.
 ///
 /// Returns the two paths, in the order the `cert` and `key` lists want them.
-#[cfg(feature = "quic")]
 fn write_self_signed(dir: &std::path::Path, stem: &str, name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
 	use std::io::Write;
 
@@ -261,7 +257,6 @@ fn write_self_signed(dir: &std::path::Path, stem: &str, name: &str) -> (std::pat
 /// when the server picked the certificate the SNI asked for. Without SNI
 /// selection every client would get the first configured certificate, so the
 /// `alt.localhost` pin below would never match.
-#[cfg(feature = "quic")]
 async fn sni_test() {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (first_cert, first_key) = write_self_signed(dir.path(), "first", "localhost");
@@ -282,10 +277,13 @@ async fn sni_test() {
 	let fingerprints = server.certificates().fingerprints();
 	assert_eq!(fingerprints.len(), 2, "expected both certificates to be served");
 
-	// Keep accepting so the client handshakes complete, then drop the server.
+	// Keep accepting and holding each session, so the client sees it accepted.
 	let server_handle = tokio::spawn(async move {
 		let mut server = server;
-		while server.accept().await.is_ok() {}
+		let mut sessions = Vec::new();
+		while let Ok(request) = server.accept().await {
+			sessions.push(request.ok().await);
+		}
 	});
 
 	let dial = |host_name: &str, fingerprint: &str| {
@@ -318,7 +316,6 @@ async fn sni_test() {
 }
 
 /// A generated certificate joins the file-backed ones rather than replacing them.
-#[cfg(feature = "quic")]
 async fn cert_sources_test() {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = write_self_signed(dir.path(), "server", "localhost");
@@ -343,7 +340,6 @@ async fn cert_sources_test() {
 
 /// Rotate the certificate files under a running listener and assert the served
 /// set follows, without the listener being rebuilt.
-#[cfg(feature = "quic")]
 async fn reload_test() {
 	let logs = crate::Logs::capture();
 	let dir = tempfile::tempdir().expect("tempdir");
@@ -389,7 +385,6 @@ async fn reload_test() {
 /// Generate a CA, a server cert + key, and a client cert + key (all PEM, the
 /// leaf certs signed by the CA) written to a tempdir. Returns the dir plus the
 /// five paths so the caller can wire them into the TLS configs.
-#[cfg(feature = "quic")]
 fn generate_mtls_certs() -> (tempfile::TempDir, MtlsPaths) {
 	use rcgen::{BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyUsagePurpose};
 	use rind_rcgen::KeyPair;
@@ -462,7 +457,6 @@ fn generate_mtls_certs() -> (tempfile::TempDir, MtlsPaths) {
 }
 
 /// Filesystem paths to the PEM material produced by [`generate_mtls_certs`].
-#[cfg(feature = "quic")]
 struct MtlsPaths {
 	ca: std::path::PathBuf,
 	server_cert: std::path::PathBuf,
@@ -472,9 +466,9 @@ struct MtlsPaths {
 }
 
 /// Connect with a client certificate signed by a CA the server trusts, and
-/// assert the server observes the validated peer certificate via mTLS.
-#[cfg(feature = "quic")]
-async fn mtls_test(scheme: &str, reject: bool) {
+/// assert the server observes the validated peer certificate via mTLS. With
+/// `require`, a client presenting no certificate is then refused at the handshake.
+async fn mtls_test(scheme: &str, require: bool) {
 	let (_dir, paths) = generate_mtls_certs();
 
 	let pub_origin = moq_tokio::origin::spawn();
@@ -484,6 +478,7 @@ async fn mtls_test(scheme: &str, reject: bool) {
 	server_config.tls.cert = vec![paths.server_cert.clone()];
 	server_config.tls.key = vec![paths.server_key.clone()];
 	server_config.tls.root = vec![paths.ca.clone()];
+	server_config.tls.require = require;
 	// One shared tuning, handed to both roles the way a binary would.
 	let mut quic = moq_tokio::quic::Config::default();
 	quic.gso = Some(false);
@@ -493,13 +488,14 @@ async fn mtls_test(scheme: &str, reject: bool) {
 	let mut server = server.listen().await.expect("failed to listen");
 	let addr = server.local_addr().expect("failed to get local addr");
 
-	let mut client_config = moq_tokio::connect::Config::default();
-	client_config.tls.root = vec![paths.ca.clone()];
-	client_config.tls.system_roots = Some(false);
+	let mut anonymous_config = moq_tokio::connect::Config::default();
+	anonymous_config.tls.root = vec![paths.ca.clone()];
+	anonymous_config.tls.system_roots = Some(false);
+	anonymous_config.tls.host_name = Some("localhost".to_string());
+	anonymous_config.bind = Some("0.0.0.0:0".parse().unwrap());
+	let mut client_config = anonymous_config.clone();
 	client_config.tls.cert = Some(paths.client_cert.clone());
 	client_config.tls.key = Some(paths.client_key.clone());
-	client_config.tls.host_name = Some("localhost".to_string());
-	client_config.bind = Some("0.0.0.0:0".parse().unwrap());
 	let client = client_config.init(quic.clone()).expect("failed to init client");
 	// Dial the IP while verifying the certificate's localhost SAN. This covers
 	// the independent TLS hostname override alongside client authentication.
@@ -511,17 +507,15 @@ async fn mtls_test(scheme: &str, reject: bool) {
 		// The peer cert must be visible before we accept the session.
 		let has_cert = request.peer_identity().is_some();
 		let _ = identity_tx.send(has_cert);
-		if reject {
-			request.reject(moq_net::SessionError::Unauthorized).await?;
-			return Ok::<_, anyhow::Error>(has_cert);
-		}
 		let session = request.with_publisher(pub_origin.consume()).ok().await?;
 		let _ = session.closed().await;
-		Ok::<_, anyhow::Error>(has_cert)
+		// Nothing else reaches the application: a certless client never finished
+		// its handshake.
+		Ok::<_, anyhow::Error>(server)
 	});
 
 	// The mTLS cases assert on the connect result itself, so keep it a `Result`.
-	let connection = kio::clock::timeout(TIMEOUT, connect_once(client, url))
+	let connection = kio::clock::timeout(TIMEOUT, connect_once(client, url.clone()))
 		.await
 		.expect("client connect timed out");
 
@@ -530,19 +524,46 @@ async fn mtls_test(scheme: &str, reject: bool) {
 		.expect("identity inspection timed out")
 		.expect("server dropped identity result");
 	assert!(has_cert, "server did not observe the client certificate");
-	if !reject {
-		connection.as_ref().expect("client connect failed");
-	}
+	connection.as_ref().expect("client connect failed");
 	drop(connection);
 
-	if reject {
-		server_handle.abort();
-	} else {
-		kio::clock::timeout(TIMEOUT, server_handle)
-			.await
-			.expect("server task timed out")
-			.expect("server task panicked")
-			.expect("server task failed");
+	let mut server = kio::clock::timeout(TIMEOUT, server_handle)
+		.await
+		.expect("server task timed out")
+		.expect("server task panicked")
+		.expect("server task failed");
+
+	let anonymous = anonymous_config.init(quic).expect("failed to init client");
+	match require {
+		true => {
+			// The accept loop drives handshakes, so it runs beside the dial and must
+			// never hand the application this client.
+			let connected = tokio::select! {
+				connected = kio::clock::timeout(TIMEOUT, connect_once(anonymous, url)) => connected,
+				_ = server.accept() => panic!("a client without a certificate reached the application"),
+			};
+			let connected = connected.expect("anonymous connect timed out");
+			assert!(connected.is_err(), "a client without a certificate was admitted");
+		}
+		false => {
+			let serve = async {
+				let request = server.accept().await.expect("no incoming connection");
+				let identified = request.peer_identity().is_some();
+				let origin = moq_tokio::origin::spawn();
+				let session = request.with_publisher(origin.consume()).ok().await;
+				(identified, session)
+			};
+			let (connected, served) = tokio::join!(
+				kio::clock::timeout(TIMEOUT, connect_once(anonymous, url)),
+				kio::clock::timeout(TIMEOUT, serve),
+			);
+			let _connection = connected
+				.expect("anonymous connect timed out")
+				.expect("an optional certificate refused a client without one");
+			let (identified, session) = served.expect("anonymous accept timed out");
+			session.expect("anonymous session failed");
+			assert!(!identified, "an anonymous client carried an identity");
+		}
 	}
 }
 
@@ -550,7 +571,6 @@ async fn mtls_test(scheme: &str, reject: bool) {
 
 /// A client that closes before its runtime stops tells the server at once, instead of
 /// leaving it to the idle timeout, which is what a process exiting on a signal does.
-#[cfg(feature = "quic")]
 #[tokio::test]
 async fn quic_client_close_reaches_server() {
 	// An idle timeout inside TIMEOUT would hide a lost close.
@@ -611,7 +631,6 @@ async fn quic_client_close_reaches_server() {
 
 /// A client that finishes its track and closes before its runtime stops still delivers
 /// the queued group and the track's finish, retaining its token-only grant through the drain.
-#[cfg(feature = "quic")]
 #[tokio::test]
 async fn quic_client_close_drains_finished_track() {
 	// Several congestion windows, so the token must cover data still in flight
@@ -663,9 +682,13 @@ async fn quic_client_close_drains_finished_track() {
 			while track.subscription().is_none() {
 				track.subscription_changed().await.expect("track closed");
 			}
-			let mut group = track.append_group().expect("failed to append group");
+			let mut group = track
+				.append_group(
+					moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+				)
+				.expect("failed to append group");
 			group
-				.write_frame(moq_net::Timestamp::ZERO, payload)
+				.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), payload)
 				.expect("failed to write frame");
 			group.finish().expect("failed to finish group");
 			let _track = track.finish().expect("failed to finish track");
@@ -750,7 +773,6 @@ async fn quic_client_close_drains_finished_track() {
 
 /// A GOAWAY leaves the old session serving its subscriptions after the replacement
 /// connects, and a close then drains that predecessor too rather than dropping it.
-#[cfg(feature = "quic")]
 #[tokio::test]
 async fn quic_client_close_drains_migrated_predecessor() {
 	// Several congestion windows, so it is still in flight when the close starts.
@@ -792,7 +814,7 @@ async fn quic_client_close_drains_migrated_predecessor() {
 				.init(quic)
 				.expect("failed to init client")
 				.with_publisher(origin.consume());
-			let mut connection = client.connect(url).established().await.expect("client connect failed");
+			let connection = client.connect(url).established().await.expect("client connect failed");
 
 			while track.subscription().is_none() {
 				track.subscription_changed().await.expect("track closed");
@@ -800,14 +822,20 @@ async fn quic_client_close_drains_migrated_predecessor() {
 			subscribed_tx.send(()).unwrap();
 
 			// Once the replacement is live, only the predecessor serves the subscription.
-			while connection.connects() < 2 || !connection.connected() {
-				connection.status().await.expect("connection stopped");
+			let monitor = connection.monitor();
+			let mut seen = monitor.state();
+			while seen.connects < 2 || !matches!(seen.phase, moq_tokio::connection::Phase::Connected { .. }) {
+				seen = monitor.state_changed(seen.revision).await.expect("connection stopped");
 			}
 			migrated_tx.send(()).unwrap();
 
-			let mut group = track.append_group().expect("failed to append group");
+			let mut group = track
+				.append_group(
+					moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+				)
+				.expect("failed to append group");
 			group
-				.write_frame(moq_net::Timestamp::ZERO, payload)
+				.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), payload)
 				.expect("failed to write frame");
 			group.finish().expect("failed to finish group");
 			let _track = track.finish().expect("failed to finish track");
@@ -862,7 +890,7 @@ async fn quic_client_close_drains_migrated_predecessor() {
 		.expect("the subscription never reached the client")
 		.expect("client thread panicked");
 
-	first.drain().send(moq_net::goaway::Goaway::new()).expect("send goaway");
+	first.goaway(moq_net::goaway::Goaway::new()).expect("send goaway");
 	let request = kio::clock::timeout(TIMEOUT, server.accept())
 		.await
 		.expect("the replacement never dialed")
@@ -896,7 +924,6 @@ async fn quic_client_close_drains_migrated_predecessor() {
 
 /// A close cuts a predecessor that cannot drain off at its handover deadline,
 /// rather than holding it for the full one second close window.
-#[cfg(feature = "quic")]
 #[tokio::test]
 async fn quic_client_close_keeps_predecessor_handover() {
 	let quic = moq_tokio::quic::Config::default();
@@ -935,7 +962,7 @@ async fn quic_client_close_keeps_predecessor_handover() {
 				.init(quic)
 				.expect("failed to init client")
 				.with_publisher(origin.consume());
-			let mut connection = client.connect(url).established().await.expect("client connect failed");
+			let connection = client.connect(url).established().await.expect("client connect failed");
 
 			while track.subscription().is_none() {
 				track.subscription_changed().await.expect("track closed");
@@ -943,7 +970,11 @@ async fn quic_client_close_keeps_predecessor_handover() {
 			subscribed_tx.send(()).unwrap();
 
 			// Close while the old session is still inside its handover window.
-			while connection.status().await.expect("connection stopped") != moq_tokio::Status::Migrating {}
+			let monitor = connection.monitor();
+			let mut seen = monitor.state();
+			while !matches!(seen.phase, moq_tokio::connection::Phase::Migrating { .. }) {
+				seen = monitor.state_changed(seen.revision).await.expect("connection stopped");
+			}
 			let start = kio::clock::now();
 			let err = connection.close().await.expect_err("the predecessor cannot drain");
 			let elapsed = start.elapsed();
@@ -984,7 +1015,7 @@ async fn quic_client_close_keeps_predecessor_handover() {
 		.expect("the subscription never reached the client")
 		.expect("client thread panicked");
 
-	first.drain().send(moq_net::goaway::Goaway::new()).expect("send goaway");
+	first.goaway(moq_net::goaway::Goaway::new()).expect("send goaway");
 
 	let (err, elapsed) = tokio::task::spawn_blocking(move || client.join())
 		.await
@@ -1003,61 +1034,56 @@ async fn quic_client_close_keeps_predecessor_handover() {
 	);
 }
 
-#[cfg(feature = "quic")]
 #[tokio::test]
 async fn quic_raw_quic() {
 	backend_test("moqt").await;
 }
 
-#[cfg(feature = "quic")]
 #[tokio::test]
 async fn quic_raw_quic_no_sni() {
 	no_sni_test("moqt").await;
 }
 
-#[cfg(feature = "quic")]
 #[tokio::test]
 async fn quic_raw_quic_path() {
 	path_test("moqt").await;
 }
 
-#[cfg(feature = "quic")]
 #[tokio::test]
 async fn quic_raw_quic_moql_path() {
 	path_test("moql").await;
 }
 
-#[cfg(feature = "quic")]
 #[tokio::test]
 async fn quic_webtransport_path() {
 	path_test("https").await;
 }
 
-#[cfg(feature = "quic")]
 #[tokio::test]
 async fn quic_webtransport() {
 	backend_test("https").await;
 }
 
-#[cfg(feature = "quic")]
 #[tokio::test]
 async fn quic_mtls() {
 	mtls_test("https", false).await;
 }
 
-#[cfg(feature = "quic")]
+#[tokio::test]
+async fn quic_mtls_required() {
+	mtls_test("https", true).await;
+}
+
 #[tokio::test]
 async fn quic_sni_certificate() {
 	sni_test().await;
 }
 
-#[cfg(feature = "quic")]
 #[tokio::test]
 async fn quic_cert_sources() {
 	cert_sources_test().await;
 }
 
-#[cfg(feature = "quic")]
 #[tokio::test]
 async fn quic_cert_reload() {
 	reload_test().await;
@@ -1070,7 +1096,6 @@ async fn quic_cert_reload() {
 ///
 /// Both ends write into one directory, so this covers the client and server paths
 /// at once. Each endpoint writes one file.
-#[cfg(all(feature = "qlog", feature = "quic"))]
 async fn qlog_test(scheme: &str) -> Vec<std::path::PathBuf> {
 	let dir = tempfile::tempdir().expect("failed to create tempdir");
 
@@ -1123,7 +1148,6 @@ async fn qlog_test(scheme: &str) -> Vec<std::path::PathBuf> {
 	traces
 }
 
-#[cfg(all(feature = "qlog", feature = "quic"))]
 #[tokio::test]
 async fn quic_qlog() {
 	let traces = qlog_test("moqt").await;
@@ -1155,7 +1179,6 @@ async fn connect_once(
 ///
 /// The size is the point: a frame that fits inside one window would pass whether or
 /// not the setting ever reached the backend.
-#[cfg(feature = "quic")]
 async fn window_test(scheme: &str) {
 	let mut quic = moq_tokio::quic::Config::default();
 	quic.receive_window = Some(moq_net::transport::MIN_RECEIVE_WINDOW);
@@ -1178,7 +1201,6 @@ async fn window_test(scheme: &str) {
 	.await;
 }
 
-#[cfg(feature = "quic")]
 #[tokio::test]
 async fn quic_windows() {
 	window_test("moqt").await;
@@ -1186,11 +1208,9 @@ async fn quic_windows() {
 
 /// The next route and whether it is active.
 async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
-	loop {
-		return match announced.next().await? {
-			moq_net::announce::Event::Present(route) => Some((route, true)),
-			moq_net::announce::Event::Absent(route) | moq_net::announce::Event::Offline(route) => Some((route, false)),
-			moq_net::announce::Event::Available(_) | moq_net::announce::Event::Unavailable(_) => continue,
-		};
+	match announced.next().await? {
+		moq_net::announce::Event::Present(route) => Some((route, true)),
+		moq_net::announce::Event::Absent(route) => Some((route, false)),
+		event => panic!("unexpected announce event {event:?}"),
 	}
 }

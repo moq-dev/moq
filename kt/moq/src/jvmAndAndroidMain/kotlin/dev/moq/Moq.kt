@@ -27,10 +27,10 @@ internal constructor(
         session.publish().route(path, options)
 
     /**
-     * List the paths matching [config] as each becomes present, absent, or offline, or changes
-     * availability; prefixes stay relative to the origin. Collect `announced(config).updates()` for
-     * a [Flow] of [AnnounceEvent] that cancels the handle when collection ends. A new publisher
-     * instance keeps its path present, so use [follow] to see it.
+     * List the paths matching [config] as each becomes present or absent; prefixes stay relative to
+     * the origin. Collect `announced(config).updates()` for a [Flow] of [AnnounceEvent] that
+     * cancels the handle when collection ends. A new publisher instance keeps its path present, so
+     * use [follow] to see it.
      */
     fun announced(config: AnnounceConfig = AnnounceConfig()): AnnounceConsumer =
         session.consume().announced(config)
@@ -88,11 +88,19 @@ internal constructor(
      *
      * [Tokens.set] replaces them, such as before the current ones expire: the next dial presents
      * them, and a live session with in-band AUTH presents them at once, withdrawing each replaced
-     * token once its replacements are answered, even when one is refused. After an authorization
-     * refusal the session redials only if they changed. An empty token throws
+     * token once its replacements are answered, even when one is refused. An empty token throws
      * `MoqException.Config`. Suspend on [Tokens.answered] for the relay's verdict.
      */
     fun tokens(): Tokens = checkNotNull(session.tokens()) { "a client session presents tokens" }
+
+    /**
+     * Present a request token, for a [Route] or [Claim] to carry with `setAuth`.
+     *
+     * On moq-transport it rides each naming route's announcing request; on moq-lite it needs AUTH,
+     * where it earns a grant. The session presents it again on every reconnect. Suspend on
+     * [Credential.answered] for the peer's verdict. An empty token throws `MoqException.Config`.
+     */
+    fun credential(token: String): Credential = session.credential(token)
 
     /**
      * Request a draining close now; await `session.closed()` for its result, then [close] to

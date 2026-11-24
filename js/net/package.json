@@ -16,7 +16,7 @@
 	},
 	"scripts": {
 		"build": "rm -rf dist && tsc -b tsconfig.build.json && bun ../common/package.ts && tsc --project test-dts/tsconfig.json",
-		"check": "tsc --noEmit && tsc -b examples/tsconfig.json && tsc --noEmit --project bench/tsconfig.json",
+		"check": "bun check --no-script && bun check --no-script -p examples/tsconfig.json && bun check --no-script -p bench/tsconfig.json",
 		"test": "bun test --only-failures",
 		"release": "bun ../common/release.ts"
 	},
@@ -25,8 +25,7 @@
 		"@moq/pattern": "workspace:^",
 		"@moq/qmux": "workspace:^",
 		"@moq/signals": "workspace:*",
-		"pako": "^3.0.3",
-		"sorted-btree": "^2.1.0"
+		"pako": "^3.0.3"
 	},
 	"peerDependencies": {
 		"zod": "^4.5.0"
@@ -36,6 +35,7 @@
 		"@types/node": "^26.6.6",
 		"@typescript/lib-dom": "npm:@types/web@^0.0.358",
 		"fast-check": "^4.10.2",
+		"playwright": "1.64.1",
 		"typescript": "7.0.2"
 	}
 }

@@ -4,7 +4,7 @@ A load generator for benchmarking a remote MoQ relay, plus `moq-bench host`, a
 sampler that records what that load costs on the relay's host.
 
 ```bash
-cargo install moq-bench
+cargo install --git https://github.com/moq-dev/moq moq-bench
 ```
 
 `moq-bench` opens many QUIC connections to a server and drives synthetic media
@@ -295,7 +295,7 @@ to the results.
 
 ### Observation cost
 
-`just rs bench-latency` measures latency recording with 1, 4 and 16 concurrent
+`just rs bench-tests -p moq-bench --run-ignored only -E 'test(benchmark_observation_contention)'` measures latency recording with 1, 4 and 16 concurrent
 writers and 0, 10 and 100 snapshots per run. It checks final sample conservation
 and prints the cost per sample for each case. The nightly workflow runs the same
 matrix and records it on the benchmark table.

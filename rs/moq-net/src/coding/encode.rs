@@ -89,12 +89,6 @@ impl<'a> Encoder<'a> {
 		self.buf.push(v);
 	}
 
-	/// Write a big-endian `u16`.
-	#[cfg(all(test, feature = "async"))]
-	pub fn u16(&mut self, v: u16) {
-		self.buf.extend_from_slice(&v.to_be_bytes());
-	}
-
 	/// Write a bool as a 0 or 1 byte.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn bool(&mut self, v: bool) {

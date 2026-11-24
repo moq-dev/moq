@@ -24,7 +24,7 @@ pub struct Args {
 	/// e.g. `--rung 720:2500000 --rung 360:600000`. Short sides and bitrates must
 	/// increase together; input order does not matter. Rungs above the source
 	/// are dropped; a same-size rung needs a lower known bitrate.
-	/// Defaults to a 240p..1080p ladder.
+	/// Defaults to a 240p..1080p ladder capped by the default video cap formula.
 	#[usage(long = "rung")]
 	rungs: Vec<RungArg>,
 
@@ -43,21 +43,31 @@ pub struct Args {
 	#[usage(long, default = "native")]
 	frames: OutputArg,
 
-	/// The VA-API render node, such as `/dev/dri/renderD129`. Defaults to the
-	/// first that encodes, decodes, and scales.
-	#[cfg(all(target_os = "linux", feature = "vaapi"))]
-	#[usage(long, env = "MOQ_VAAPI_DEVICE", value_hint = usage_rs::ValueHint::FilePath)]
+	/// Encoder sessions that may serve viewers at once, across live rungs and fetched
+	/// groups; one more opens briefly to probe a new rung. Hardware encoders cap sessions
+	/// per device, so leave room for this plus one. Unlimited by default.
+	#[usage(long)]
+	encoder_sessions: Option<std::num::NonZeroUsize>,
+
+	/// The render node the decoder and encoders open, such as
+	/// `/dev/dri/renderD129`: VA-API opens it, and NVDEC and NVENC the NVIDIA
+	/// GPU behind it. Defaults to the first that encodes, decodes, and scales.
+	/// Linux only.
+	#[usage(
+		long,
+		env = "MOQ_VAAPI_DEVICE",
+		value_hint = usage_rs::ValueHint::FilePath,
+		conflicts("--v4l2-encoder", "--v4l2-decoder")
+	)]
 	pub vaapi_device: Option<std::path::PathBuf>,
 
 	/// The V4L2 M2M encoder node, such as `/dev/video11`. Defaults to the first
-	/// that encodes H.264.
-	#[cfg(all(target_os = "linux", feature = "v4l2"))]
+	/// that encodes H.264. Linux only.
 	#[usage(long, env = "MOQ_V4L2_ENCODER", value_hint = usage_rs::ValueHint::FilePath)]
 	pub v4l2_encoder: Option<std::path::PathBuf>,
 
 	/// The V4L2 M2M decoder node, such as `/dev/video10`. Defaults to the first
-	/// that decodes H.264.
-	#[cfg(all(target_os = "linux", feature = "v4l2"))]
+	/// that decodes H.264. Linux only.
 	#[usage(long, env = "MOQ_V4L2_DECODER", value_hint = usage_rs::ValueHint::FilePath)]
 	pub v4l2_decoder: Option<std::path::PathBuf>,
 }
@@ -122,15 +132,11 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 		name => moq_video::decode::Kind::Named(name.to_string()),
 	};
 	config.resize.output = args.frames.0;
-	#[cfg(all(target_os = "linux", feature = "vaapi"))]
-	{
-		config.vaapi = args.vaapi_device.clone();
+	if let Some(serving) = args.encoder_sessions {
+		config.sessions = moq_transcode::Sessions::new(serving);
 	}
-	#[cfg(all(target_os = "linux", feature = "v4l2"))]
-	{
-		config.v4l2_encoder = args.v4l2_encoder.clone();
-		config.v4l2_decoder = args.v4l2_decoder.clone();
-	}
+	config.decoder_device = crate::device(&args.vaapi_device, &args.v4l2_decoder);
+	config.encoder_device = crate::device(&args.vaapi_device, &args.v4l2_encoder);
 
 	let source_path = moq_net::Path::try_from(
 		moq.broadcast
@@ -200,11 +206,13 @@ impl Following {
 			tokio::select! {
 				event = instances.available() => match event? {
 					Some(source) => {
-						// Dropping the old ladder cancels its pending requests and rung tasks.
-						drop(running.take());
 						let output = self.publish.route(&self.output_path, moq_net::origin::RouteOptions::hidden())?;
 						let transcoder = moq_transcode::Transcoder::new(source, output.broadcast().clone(), self.config.clone())?;
 						output.announce()?;
+						// Drop the old ladder, cancelling its pending requests and rung tasks, only
+						// once its successor is announced: the path never goes absent, so followers
+						// see a Restart rather than an End.
+						drop(running.take());
 						tracing::info!(source = %self.source_path, output = %self.output_path, "transcoding");
 						// The ladder holds its route, so the output stays announced while it runs.
 						running = Some(Box::pin(async move {
@@ -262,6 +270,7 @@ mod tests {
 		let old = origin.route("source", options()).unwrap();
 		let _old_dynamic = old.broadcast().requests();
 		let mut derivatives = publish.consume().follow("derived", None).unwrap();
+		let mut routes = publish.consume().routes();
 		let following = Following {
 			origin: origin.consume(),
 			publish: publish.clone(),
@@ -271,6 +280,7 @@ mod tests {
 		};
 		let task = tokio::spawn(following.run());
 		let first = next(&mut derivatives).await;
+		assert_eq!(next_route(&mut routes).await, moq_net::origin::RouteKind::Start);
 		let mut old_catalog = first
 			.track(hang::Catalog::DEFAULT_NAME)
 			.unwrap()
@@ -283,6 +293,11 @@ mod tests {
 		assert!(!first.is_clone(&second));
 		assert_ne!(first.info().instance, second.info().instance);
 		assert!(first.is_closed(), "the superseded ladder is retired");
+		assert_eq!(
+			next_route(&mut routes).await,
+			moq_net::origin::RouteKind::Restart,
+			"the derivative path never goes absent across a source restart"
+		);
 		loop {
 			match old_catalog.recv_group().await {
 				Ok(Some(_)) => continue,
@@ -334,6 +349,16 @@ mod tests {
 		assert!(!first.is_clone(&second));
 		task.abort();
 		assert!(task.await.unwrap_err().is_cancelled());
+	}
+
+	/// How the next change to the output path's route is announced.
+	async fn next_route(routes: &mut moq_net::origin::Routes) -> moq_net::origin::RouteKind {
+		let event = kio::clock::timeout(std::time::Duration::from_secs(1), routes.next())
+			.await
+			.expect("no route change was announced")
+			.expect("the route stream ended");
+		assert_eq!(event.announce.prefix.as_str(), "derived");
+		event.kind
 	}
 
 	/// The next derivative instance announced at the output path.

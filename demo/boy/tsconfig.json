@@ -1,0 +1,12 @@
+{
+	"extends": "../../js/tsconfig.json",
+	"compilerOptions": {
+		"noEmit": true,
+		"jsx": "preserve",
+		"jsxImportSource": "solid-js",
+		"types": ["bun"]
+	},
+	"include": ["src"],
+	// The ROM worker runs on Cloudflare, not in this browser program.
+	"exclude": ["src/worker.ts"]
+}

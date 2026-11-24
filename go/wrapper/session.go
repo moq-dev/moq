@@ -46,7 +46,9 @@ type ConnectionPhaseConnecting struct {
 	Failure error
 }
 
-// ConnectionPhaseConnected means a session is serving.
+// ConnectionPhaseConnected means a session is serving: its peer accepted the
+// credential, or on moq-lite 03/04, which never answer it, the session stayed up 1s.
+// A refused session never reaches this phase.
 type ConnectionPhaseConnected struct {
 	// Version names the live session's negotiated protocol, like "moq-lite-03".
 	Version string
@@ -138,8 +140,7 @@ func (s *Session) Grants() *GrantConsumer {
 // GrantConsumer follows the grant a session's peer gave it: the union of every
 // token the session presented.
 //
-// AUTH is only on moq-lite-07-wip and on moq-transport sessions that negotiate
-// the MoQ Auth extension; elsewhere the grant stays nil.
+// AUTH is only on moq-lite-07-wip; elsewhere the grant stays nil.
 type GrantConsumer struct {
 	inner *ffi.MoqGrantConsumer
 }
@@ -161,6 +162,48 @@ func (g *GrantConsumer) Changed(ctx context.Context) (*Grant, error) {
 // Cancel ends every current and future Changed call.
 func (g *GrantConsumer) Cancel() { g.inner.Cancel() }
 
+// Credential presents a request token on this session, for a [Route] or [Claim]
+// to carry with SetAuth. On moq-transport it rides each naming route's
+// announcing request; on moq-lite it needs AUTH, where it earns a grant. A
+// client session presents it again on every reconnect, and with no session live
+// it waits for the next one. An empty token errors with ErrConfig.
+func (s *Session) Credential(token string) (*Credential, error) {
+	inner, err := s.inner.Credential(token)
+	if err != nil {
+		return nil, err
+	}
+	return &Credential{inner: inner}, nil
+}
+
+// Credential is a request token a session presents. It stays presented until
+// Cancel, or until the collector reclaims it and no route or claim names it,
+// answered or not.
+type Credential struct {
+	inner *ffi.MoqCredential
+}
+
+// Answered blocks until the peer's first verdict on the token: nil once a peer
+// accepts it, at once on moq-transport, where only the requests that name it
+// carry the token. It returns the peer's refusal as a ProtocolError carrying
+// its code, an error for which errors.Is(err, ErrUnsupported) holds when
+// nothing can carry a token (moq-lite without AUTH), and ErrCancelled after
+// Cancel.
+func (c *Credential) Answered(ctx context.Context) error {
+	return bridge.CallErr(ctx, nil, c.inner.Answered)
+}
+
+// Cancel releases the credential now: it is withdrawn at once unless a route or
+// claim still names it, and every Answered call ends with ErrCancelled.
+func (c *Credential) Cancel() { c.inner.Cancel() }
+
+// ffi is the native credential a route or claim names, or none for nil.
+func (c *Credential) ffi() **ffi.MoqCredential {
+	if c == nil {
+		return nil
+	}
+	return &c.inner
+}
+
 // Tokens returns the credentials a native client session presents, to replace
 // while it runs, or nil for a server-accepted session, which presents none.
 func (s *Session) Tokens() *Tokens {
@@ -181,8 +224,7 @@ type Tokens struct {
 // its own ?jwt=; each other one widens the grant over in-band AUTH. The next
 // dial presents them, and a live session with in-band AUTH presents them at
 // once, withdrawing each replaced token once its replacements are answered,
-// even when one is refused. After an authorization refusal the session redials
-// only if they changed. An empty token is refused.
+// even when one is refused. An empty token is refused.
 func (t *Tokens) Set(tokens ...string) error {
 	return t.inner.Set(append([]string(nil), tokens...))
 }

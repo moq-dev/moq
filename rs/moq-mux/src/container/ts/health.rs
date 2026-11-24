@@ -144,6 +144,11 @@ impl Errors {
 		}
 	}
 
+	/// Count `count` more `PMT_error_2` intervals on `pid`.
+	pub(super) fn pmt_error(&mut self, pid: u16, count: u64) {
+		self.pid(pid).pmt_error += count;
+	}
+
 	fn pid(&mut self, pid: u16) -> &mut PidErrors {
 		self.pids.entry(pid).or_default()
 	}
@@ -346,10 +351,10 @@ impl Health {
 				}
 			}
 		} else if let Some(timer) = self.pmt.get_mut(&pid) {
-			if scrambled {
-				self.errors.pid(pid).pmt_error += 1;
-			} else if section_start(pkt) == Some(PMT_TABLE_ID) {
-				timer.reset(now);
+			match PmtPacket::of(pkt, continuation) {
+				PmtPacket::Scrambled => self.errors.pid(pid).pmt_error += 1,
+				PmtPacket::Section => timer.reset(now),
+				PmtPacket::Other => {}
 			}
 		}
 		if self.pcr_pid == Some(pid) && self.pcr(pid, pkt, at.count) {
@@ -661,6 +666,32 @@ impl Delta {
 			Self::Forward(step)
 		} else {
 			Self::Back(wrap - step)
+		}
+	}
+}
+
+/// What a packet on a PMT PID means for its `PMT_error_2` timer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum PmtPacket {
+	/// It starts a PMT section, whatever its CRC, so the timer restarts.
+	Section,
+	/// It is scrambled, itself a `PMT_error_2`.
+	Scrambled,
+	/// Neither, as one continuing a section, or one the [`Multiplex`] graded corrupt or a
+	/// duplicate.
+	Other,
+}
+
+impl PmtPacket {
+	pub(super) fn of(pkt: &[u8; TsPacket::SIZE], continuation: Continuation) -> Self {
+		if matches!(continuation, Continuation::Corrupt | Continuation::Duplicate) {
+			Self::Other
+		} else if pkt[3] & 0xc0 != 0 {
+			Self::Scrambled
+		} else if section_start(pkt) == Some(PMT_TABLE_ID) {
+			Self::Section
+		} else {
+			Self::Other
 		}
 	}
 }
@@ -1284,7 +1315,7 @@ mod test {
 		for packet in CLIP[half..].chunks(188) {
 			import.decode(packet).unwrap();
 		}
-		import.finish().unwrap();
+		let import = import.finish().unwrap();
 		assert_eq!(import.stats().health(), [0; 9]);
 	}
 
@@ -1392,7 +1423,7 @@ mod test {
 				Resume::Stalled => feed.run(100, 200, |t, _| t * MS, |_, part| part != Part::Pcr),
 			}
 			import.decode(&std::mem::take(&mut feed.out)).unwrap();
-			import.finish().unwrap();
+			let import = import.finish().unwrap();
 			let stats = import.stats();
 			let (pat, pts, pcr) = match resume {
 				Resume::Eof | Resume::Delayed => (0, 0, 0),
@@ -1430,7 +1461,7 @@ mod test {
 			assert!(import.held() >= 188, "the step is held");
 			wait(200).await;
 			if eof {
-				import.finish().unwrap();
+				import.finish_in_place().unwrap();
 			} else {
 				// The streams carry on 200 ms later without a PCR, clearing the step: the PCR
 				// is missing from when the held one arrived.

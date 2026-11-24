@@ -1,21 +1,64 @@
 import * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 
-export type { BufferedRange, BufferedRanges, Frame } from "./types";
+export type { BufferedRange, BufferedRanges, Frame } from "./types.ts";
 
 import { Duration } from "@moq/clock";
-import type { AudioConfig, VideoConfig } from "../catalog";
-import type { Format as ContainerFormat } from "./format";
-import type { Frame } from "./types";
+import type { AudioConfig, VideoConfig } from "../catalog/index.ts";
+import * as Aac from "../util/aac.ts";
+import * as Opus from "../util/opus.ts";
+import type { Format as ContainerFormat } from "./format.ts";
+import type { Frame } from "./types.ts";
+
+/**
+ * How long each packet of an audio track plays, as its codec states. Legacy frames carry no duration,
+ * and the hang draft leaves it to the codec. Knowing it, a reader tells a group that ends where the next
+ * one starts from one followed by lost audio, which sparse group sequences can't say. Mirrors Rust's
+ * `legacy::Audio`. Undefined when a packet doesn't state its duration without decoding it.
+ */
+export function packetDuration(config: AudioConfig): ((payload: Uint8Array) => Duration | undefined) | undefined {
+	const rate = config.sampleRate;
+	if (!(rate > 0)) return undefined;
+	if (config.codec === "opus") {
+		return (payload) => {
+			const samples = Opus.packetSamples(payload);
+			return samples === undefined ? undefined : Duration.micros((samples * 1_000_000) / 48_000);
+		};
+	}
+	// AAC-LC codes 1024 samples per packet. SBR and PS packets decode to twice that, at a rate the
+	// catalog may or may not double, so they state nothing here.
+	if (Aac.objectType(config.codec) === 2) {
+		const duration = Duration.micros((1024 * 1_000_000) / rate);
+		return (payload) => (payload.byteLength > 0 ? duration : undefined);
+	}
+	// Layer II codes 1152 samples per frame.
+	if (config.codec === "mp2") {
+		const duration = Duration.micros((1152 * 1_000_000) / rate);
+		return (payload) => (payload.byteLength > 0 ? duration : undefined);
+	}
+	// Interleaved 32-bit samples, so the payload's length says.
+	if (config.codec === "pcm" && config.numberOfChannels > 0) {
+		const frameBytes = 4 * config.numberOfChannels;
+		return (payload) => {
+			if (payload.byteLength === 0 || payload.byteLength % frameBytes !== 0) return undefined;
+			return Duration.micros(((payload.byteLength / frameBytes) * 1_000_000) / rate);
+		};
+	}
+	return undefined;
+}
 
 /** The legacy hang container: a microsecond timestamp varint followed by the raw codec payload. */
 export class Format implements ContainerFormat {
 	/** Configure the format for the track's media kind. */
 	readonly kind: "audio" | "video" | "data";
 
-	/** Configure the format from a catalog entry or an explicit media kind. */
+	// How long each audio packet plays, when built from a catalog entry whose codec states it.
+	readonly #duration?: (payload: Uint8Array) => Duration | undefined;
+
+	/** Configure the format from a catalog entry or an explicit media kind. Only an audio entry states its packets' durations. */
 	constructor(config: AudioConfig | VideoConfig | "audio" | "video" | "data") {
 		this.kind = typeof config === "string" ? config : "sampleRate" in config ? "audio" : "video";
+		if (typeof config !== "string" && "sampleRate" in config) this.#duration = packetDuration(config);
 	}
 
 	/** Write the final video frame's end timestamp before the group closes. */
@@ -36,7 +79,8 @@ export class Format implements ContainerFormat {
 	decode(frame: Uint8Array): Frame[] {
 		if (this.kind === "data" && frame.byteLength === 0) return [];
 		const [timestamp, data] = Moq.Varint.decode(frame);
-		return [{ payload: data, timestamp: Duration.micros(timestamp), keyframe: false }];
+		const duration = data.byteLength > 0 ? this.#duration?.(data) : undefined;
+		return [{ payload: data, timestamp: Duration.micros(timestamp), keyframe: false, duration }];
 	}
 }
 
@@ -63,30 +107,85 @@ export function encodeFrame(source: Uint8Array | Source, timestamp: Duration): U
 	return data;
 }
 
+// `timestamp` microseconds as a group start on `track`: its value in the track's timescale,
+// rounded down as moq-net converts. Legacy frames are timed, so a track whose timescale is unknown
+// or absent refuses it. Mirrors the Rust `moq_mux::start`.
+function keyOf(track: Moq.Track.Producer, timestamp: number): bigint {
+	const scale = track.timescale;
+	if (!scale) throw new Moq.Error.TimestampMismatch();
+	return BigInt(Time.floorAt(Time.Timestamp.fromMicros(timestamp), scale));
+}
+
+// Whether a group starting at `timestamp` microseconds starts past every group on `track`.
+function startsPast(track: Moq.Track.Producer, timestamp: number): boolean {
+	const largest = track.largest();
+	return largest === undefined || keyOf(track, timestamp) > largest.group;
+}
+
+// The first whole microsecond whose start on `track` passes the group starting at `key`.
+function startAfter(track: Moq.Track.Producer, key: bigint): number {
+	// keyOf vouched for the timescale.
+	const scale = track.timescale as Time.Timescale;
+	const at = Time.floorAt(new Time.Timestamp(Number(key + 1n), scale), Time.Timescale.MICRO);
+	return keyOf(track, at) > key ? at : at + 1;
+}
+
 // The wire carries whole microseconds, rounded down as moq-net's timestamps are.
 function micros(timestamp: Duration): number {
 	return Math.floor(timestamp.asMicros());
+}
+
+/**
+ * A track its {@link Producer} finished: every frame is written and it takes no more.
+ * {@link Producer.finish} returns it, mirroring the Rust `container::Finished`; the producer itself
+ * still refuses a frame after the finish.
+ */
+export interface Finished {
+	/**
+	 * Mirrors the Rust `container::Finished::abort`, and like it changes nothing a reader sees: every
+	 * group finished, so readers still draining get the rest of the track and its clean end, not `err`.
+	 */
+	abort(err: Error): void;
 }
 
 /** Writes legacy-container frames into a MoQ track, starting a new group on each keyframe. */
 export class Producer {
 	#track: Moq.Track.Producer;
 	#format: Format;
-	// Timestamps in whole microseconds.
+	// Timestamps in whole microseconds: the previous frame's source and written ones.
 	#previous?: number;
+	#previousWritten?: number;
 	#reordered = false;
 	#group?: Moq.Group.Producer;
 	// The newest timestamp written in the current group, which estimates its end.
 	#end?: number;
 	// Furthest timestamp in finished groups, used only for discontinuity markers.
 	#liveEdge?: number;
-	// The current group start and the previous group start, which bounds its frames.
+	// The source timestamps of the current group's keyframe and the previous group's: a frame
+	// below it is a restart.
 	#start?: number;
+	// The source and written timestamps of the keyframe that opened the current group, when its
+	// start moved it past a marker. A frame at that source timestamp, such as the picture its
+	// parameter sets precede, is written with it.
+	#moved?: [number, number];
 	#floor?: number;
+	// The newest frame of every group before the current one: every frame of the current group
+	// presents after it.
+	#ceiling?: number;
+	// A keyframe was dropped with no group open, so the frames decoding from it go too, until a
+	// keyframe opens a group.
+	#skipping = false;
+	// The latest keyframe written, whose leading pictures are the frames after it presenting before it.
+	#keyframe?: number;
+	// A leading picture of #keyframe was dropped, so its later leading pictures go too: they may
+	// reference it, and pictures presenting after the keyframe never reference a leading picture.
+	#tainted = false;
 	// Gap between consecutive timestamps, used to close the last group when no successor exists.
 	#interval?: number;
 	// A discontinuity's marker is the newest group, so another one would say nothing new.
 	#marked = false;
+	// The newest frame timestamp written in any group, which a marker never starts below.
+	#newest?: number;
 
 	/** Wrap a track to publish legacy-container frames into it. */
 	constructor(track: Moq.Track.Producer, format: Format) {
@@ -94,37 +193,93 @@ export class Producer {
 		this.#track = track;
 	}
 
-	/** Encode and append a frame; a keyframe starts a new group. Throws if the first frame is not a keyframe, a group start goes backwards, or a frame is below the previous group start. */
+	/**
+	 * Encode and append a frame; a keyframe starts a new group. Every frame of a group presents after
+	 * every frame of the groups before it, so a keyframe that doesn't start after the newest frame
+	 * continues the open group (a splice), and a later frame presenting at or before the groups before
+	 * its own (a leading picture after a splice) is dropped, as is a keyframe at or before the newest
+	 * frame with no group open, with the frames after it until a keyframe opens a group. With no group
+	 * open, a keyframe landing on the latest group's start (media resuming right at a discontinuity's
+	 * marker) is stamped one unit of the track's timescale later, and so is a frame at its timestamp
+	 * after it, such as the picture its parameter sets precede. Throws if the first frame is not a
+	 * keyframe, a group start goes backwards, or a frame is below the previous group start.
+	 */
 	encode(data: Uint8Array | Source, pts: Duration, keyframe: boolean) {
-		const timestamp = micros(pts);
+		const source = micros(pts);
+		let timestamp = this.#group && this.#moved?.[0] === source ? this.#moved[1] : source;
 		const floor = keyframe ? this.#start : this.#floor;
 		if (floor !== undefined && timestamp < floor) {
 			throw new Error("frame timestamp is below the previous group start");
 		}
-		this.#marked = false;
+		// A keyframe opens a group starting at its timestamp, which has to start after every frame
+		// written and every group the track holds. One that doesn't, such as parameter sets and the
+		// picture they precede written as two keyframes at one timestamp, or a splice dipping below
+		// the old content's last frames, continues the open group instead. With none open it is
+		// refused, before anything changes.
+		const behind = this.#newest !== undefined && timestamp <= this.#newest;
+		// With no group open, one landing on the latest group's start, such as media resuming right
+		// at a discontinuity's marker, starts at the first start past it instead.
+		const largest = this.#track.largest()?.group;
+		if (keyframe && !behind && !this.#group && largest !== undefined && keyOf(this.#track, timestamp) === largest) {
+			timestamp = startAfter(this.#track, largest);
+		}
+		const opens = keyframe && !behind && startsPast(this.#track, timestamp);
+		// Dropped: a keyframe with no group to continue, and a frame presenting with the groups
+		// before its own, such as a leading picture after a splice.
+		if (keyframe && behind && !this.#group) {
+			this.#skipping = true;
+			return;
+		}
+		if (!keyframe && !this.#group && this.#skipping) return;
+		if (keyframe && !opens && !this.#group) throw new Error("a keyframe must start after the previous group");
+		if (!opens && this.#group && !keyframe) {
+			if (this.#ceiling !== undefined && timestamp <= this.#ceiling) {
+				this.#tainted = true;
+				return;
+			}
+			if (this.#tainted && this.#keyframe !== undefined && timestamp < this.#keyframe) return;
+		}
 		if (keyframe) {
-			const rewound = this.#previous !== undefined && timestamp < this.#previous;
-			this.#close(rewound ? undefined : timestamp);
-			if (rewound) this.#interval = undefined;
-			this.#group = this.#track.appendGroup();
+			this.#keyframe = timestamp;
+			this.#tainted = false;
+		}
+		this.#marked = false;
+		if (opens) {
+			this.#close(timestamp);
+			// A track's first group says nothing came before it, so a reader can tell it is the first.
+			if (this.#track.largest() === undefined) {
+				const start = keyOf(this.#track, timestamp);
+				if (start > 0n) this.#track.skipGroups(0n, start);
+			}
+			this.#group = this.#track.appendGroup(Time.Timestamp.fromMicros(timestamp));
 			this.#floor = this.#start;
-			this.#start = timestamp;
+			this.#ceiling = this.#newest;
+			this.#skipping = false;
+			this.#start = source;
+			this.#moved = timestamp === source ? undefined : [source, timestamp];
 		} else if (!this.#group) {
 			throw new Error("must start with a keyframe");
 		}
 
 		this.#group?.writeFrame({
-			payload: encodeFrame(data, pts),
+			payload: encodeFrame(data, Duration.micros(timestamp)),
 			timestamp: Time.Timestamp.fromMicros(timestamp),
 		});
 
-		this.#reordered ||= this.#previous !== undefined && timestamp < this.#previous;
-		if (this.#previous !== undefined && timestamp > this.#previous) {
-			const delta = timestamp - this.#previous;
+		// The cadence follows the source, so a moved start never stretches the estimate after it.
+		// Either order stepping back is a reorder: a frame after a keyframe a group start moved can
+		// be written below it, so the source's order alone misses it.
+		this.#reordered ||=
+			(this.#previous !== undefined && source < this.#previous) ||
+			(this.#previousWritten !== undefined && timestamp < this.#previousWritten);
+		if (this.#previous !== undefined && source > this.#previous) {
+			const delta = source - this.#previous;
 			this.#interval = delta;
 		}
-		this.#previous = timestamp;
+		this.#previous = source;
+		this.#previousWritten = timestamp;
 		if (this.#end === undefined || timestamp > this.#end) this.#end = timestamp;
+		if (this.#newest === undefined || timestamp > this.#newest) this.#newest = timestamp;
 	}
 
 	/**
@@ -134,71 +289,103 @@ export class Producer {
 	 *
 	 * `end` is where the content stops. Without one the group closes with no end estimated from the
 	 * frame cadence, since whatever resumes may land sooner than one frame later and an end past it
-	 * reads as a rewind. After closing the group, this publishes a marker group of one empty frame at
-	 * `end`, or at the live edge without one. Without the marker, a group's reach runs to its
-	 * successor's first frame, so the group before a pause reads as live until whatever resumes it,
-	 * and a subscriber joining mid-break is handed that stale media. The marker bounds it, and it is
-	 * the latest group a joiner lands on. An empty payload is data on a data track, so its marker is one
-	 * object with no bytes at all. No marker is written until a frame follows the last one. Throws if
-	 * `end` precedes the last video frame.
+	 * reads as a rewind. After closing the group, this publishes a marker group of one empty frame
+	 * just before `end`, or before the live edge without one, so media resuming there starts after
+	 * it, and the closing group ends whole at the marker. Without the marker, a group's reach runs to
+	 * its successor's first frame, so the group before a pause reads as live until whatever resumes
+	 * it, and a subscriber joining mid-break is handed that stale media. The marker bounds it, and it
+	 * is the latest group a joiner lands on. The marker never starts below a frame the closing group
+	 * holds, a video track's end marker at `end` included, so on a video track a keyframe resuming at
+	 * `end` is stamped one unit of the track's timescale later. An empty payload is data on a data track, so its marker is one object with no bytes
+	 * at all. No marker is written until a frame follows the last one. Throws if `end` precedes a
+	 * frame of the open group.
 	 */
 	discontinuity(endpoint?: Duration) {
 		const end = endpoint === undefined ? undefined : micros(endpoint);
 		// Nothing is measured across the break, so a missing end has no cadence to estimate from.
 		// An explicit end keeps the cadence until #close validates it, in case it throws.
 		if (end === undefined) this.#interval = undefined;
-		this.#close(end);
+		// The live edge once the open group closes, which raises it to the furthest point written.
+		const written = this.#group && this.#end !== undefined ? this.#end : undefined;
+		const edge = end ?? (written === undefined ? this.#liveEdge : Math.max(this.#liveEdge ?? written, written));
+		// The marker starts one unit of the track's timescale before the live edge, so media resuming
+		// right at the edge still starts after it, but not below the newest frame, nor a video
+		// track's end marker at `end`, since the closing group ends whole at the marker and never
+		// below a frame of its own; and past the newest group, since starts strictly increase.
+		let marker: Time.Timestamp | undefined;
+		if (!this.#marked && edge !== undefined) {
+			let start = keyOf(this.#track, edge) - 1n;
+			const endpoint = this.#group && this.#format.kind === "video" && !this.#reordered ? end : undefined;
+			const newest = keyOf(this.#track, Math.max(this.#newest ?? 0, endpoint ?? 0));
+			if (start < newest) start = newest;
+			const largest = this.#track.largest()?.group;
+			if (largest !== undefined && start <= largest) start = largest + 1n;
+			// keyOf vouched for the timescale.
+			marker = new Time.Timestamp(Number(start), this.#track.timescale as Time.Timescale);
+		}
+		// The open group ends whole at the marker, so a reader can tell the marker follows it.
+		this.#close(end, marker);
 		this.#interval = undefined;
-		const timestamp = end ?? this.#liveEdge;
-		if (this.#marked || timestamp === undefined) return;
+		if (marker === undefined) return;
 
-		const group = this.#track.appendGroup();
+		// The wire stamps whole microseconds, rounded down like every other conversion here.
+		const timestamp = Time.floorAt(marker, Time.Timescale.MICRO);
+		const group = this.#track.appendGroup(marker);
 		group.writeFrame({
 			payload:
 				this.#format.kind === "data"
 					? new Uint8Array()
 					: encodeFrame(new Uint8Array(), Duration.micros(timestamp)),
-			timestamp: Time.Timestamp.fromMicros(timestamp),
+			timestamp: marker,
 		});
 		group.finish();
 		this.#liveEdge = this.#liveEdge === undefined ? timestamp : Math.max(this.#liveEdge, timestamp);
 		this.#marked = true;
 	}
 
-	// Flush and close the current group at the supplied or estimated end timestamp.
-	#close(end?: number) {
+	// Flush and close the current group at the supplied or estimated end timestamp, whole at the
+	// `whole` marker start when one follows it.
+	#close(end?: number, whole?: Time.Timestamp) {
 		if (!this.#group) return;
-		if (
-			this.#format.kind === "video" &&
-			!this.#reordered &&
-			end !== undefined &&
-			this.#previous !== undefined &&
-			end < this.#previous
-		) {
-			throw new Error("video group endpoint precedes its last frame");
+		// A group never ends below a frame of its own.
+		if (end !== undefined && this.#end !== undefined && end < this.#end) {
+			throw new Error("group endpoint precedes a frame of its own");
 		}
 		end ??= this.#end !== undefined && this.#interval !== undefined ? this.#end + this.#interval : undefined;
 		// A presentation endpoint cannot bound the decode-order tail after reordering.
-		this.#format.finishGroup(this.#group, this.#reordered || end === undefined ? undefined : Duration.micros(end));
-		this.#group.finish();
+		const bound = this.#reordered ? undefined : end;
+		this.#format.finishGroup(this.#group, bound === undefined ? undefined : Duration.micros(bound));
+		// A group ends whole where its content stops, which bounds its reach without a successor.
+		const at =
+			whole !== undefined ? BigInt(whole.value) : bound === undefined ? undefined : keyOf(this.#track, bound);
+		if (at !== undefined && at > this.#group.start) this.#group.finishAt(at);
+		else this.#group.finish();
 		this.#group = undefined;
 		if (this.#end !== undefined) {
 			this.#liveEdge = this.#liveEdge === undefined ? this.#end : Math.max(this.#liveEdge, this.#end);
 		}
 		this.#end = undefined;
 		this.#previous = undefined;
+		this.#previousWritten = undefined;
 		this.#reordered = false;
 	}
 
-	/** Close the track and current group, optionally with an error. */
-	close(err?: Error) {
-		if (!err) this.#close();
-		if (err) this.#group?.abort(err);
-		else this.#group?.finish();
-		if (err) this.#track.abort(err);
-		else {
-			this.#track.finish();
-			this.#track.close();
-		}
+	/** Close the current group and finish the track, returning it as {@link Finished}. */
+	finish(): Finished {
+		this.#close();
+		this.#track.finish();
+		this.#track.close();
+		return this;
+	}
+
+	/**
+	 * Abort the current group and the track with `err`, which readers see in place of a clean end. A
+	 * no-op after {@link finish}: the track is already complete.
+	 */
+	// fallow-ignore-next-line unused-class-member
+	abort(err: Error) {
+		this.#group?.abort(err);
+		this.#group = undefined;
+		this.#track.abort(err);
 	}
 }

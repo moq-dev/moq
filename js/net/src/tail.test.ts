@@ -1,15 +1,18 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { Duration, type Installed, Instant, Manual } from "@moq/clock";
+import { Duration, type Installed, Instant } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { Once } from "@moq/signals";
 import { accept, connect } from "./connection/index.ts";
+import { defined } from "./defined.test-util.ts";
 import * as Ietf from "./ietf/index.ts";
 import { GRACE as TAIL_GRACE_MS } from "./ledger.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair, manual, textFrame } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
+import { withMax } from "./subscription.test-util.ts";
 import { Tail } from "./tail.ts";
-import { Timescale } from "./time.ts";
+import { Timescale, Timestamp } from "./time.ts";
 import type { Ordered } from "./track.ts";
 import { wireOf } from "./wire.ts";
 
@@ -28,11 +31,11 @@ async function session(protocol: string) {
 	]);
 	const broadcastRoute = origin.route(Path.from("test"));
 	const broadcast = broadcastRoute.broadcast;
-	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const video = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 	const remote = wireOf(client).consume(Path.from("test"));
 	const reader = remote
 		.track("video")
-		.subscribe({ delay: { max: MAX_DELAY } })
+		.subscribe(withMax({ delay: { max: MAX_DELAY } }))
 		.ordered();
 
 	return {
@@ -56,22 +59,22 @@ async function readAll(reader: Ordered): Promise<string[]> {
 	}
 }
 
-// moq-lite carries the end in SUBSCRIBE_FINISH as soon as it is declared, so a subscriber
+// moq-lite carries the end in SUBSCRIBE_END as soon as it is declared, so a subscriber
 // learns it while the last group is still to come.
 test.each([Lite.ALPN_05, Lite.ALPN_06])(
 	"%s: an end declared ahead of the live edge reaches the subscriber",
 	async (alpn) => {
 		const { video, reader, close } = await session(alpn);
 		try {
-			video.writeFrame(textFrame("0"));
+			video.writeFrame(textFrame("0", Timestamp.fromMillis(0)));
 			expect(await reader.readString()).toBe("0");
-			video.writeFrame(textFrame("1"));
+			video.writeFrame(textFrame("1", Timestamp.fromMillis(1)));
 			expect(await reader.readString()).toBe("1");
 
 			video.finishAt({ group: 3n, frame: 0 });
 			expect(await reader.finished()).toEqual({ group: 3n, frame: 0 });
 
-			video.writeFrame(textFrame("2"));
+			video.writeFrame(textFrame("2", Timestamp.fromMillis(2)));
 			video.finish();
 			video.close();
 			expect(await readAll(reader)).toEqual(["2"]);
@@ -90,12 +93,12 @@ test.each([Ietf.ALPN.DRAFT_22])("%s: END_OF_TRACK carries the declared end", asy
 	using clock = manual();
 	const { video, reader, close } = await session(alpn);
 	try {
-		video.writeFrame(textFrame("0"));
+		video.writeFrame(textFrame("0", Timestamp.fromMillis(0)));
 		expect(await reader.readString()).toBe("0");
 
 		video.finishAt({ group: 4n, frame: 0 });
-		video.writeFrame(textFrame("1"));
-		video.writeFrame(textFrame("2"));
+		video.writeFrame(textFrame("1", Timestamp.fromMillis(1)));
+		video.writeFrame(textFrame("2", Timestamp.fromMillis(2)));
 		const ended = clock.now();
 		video.finish();
 		video.close();
@@ -122,7 +125,7 @@ describe("Tail", () => {
 	function tail(grace = GRACE) {
 		const clock = new Manual();
 		installed = clock.install();
-		const at = (to: Duration) => clock.jump(Instant.ZERO.add(to).since(clock.now()));
+		const at = (to: Duration) => clock.jump(Instant.ZERO.saturatingAdd(to).since(clock.now()));
 		return { at, clock, tail: new Tail({ grace: () => grace }) };
 	}
 
@@ -184,7 +187,27 @@ describe("Tail", () => {
 
 		await clock.advance(Duration.millis(50));
 		expect(settled).toBe(false);
-		read();
+		read.done();
 		await settling;
+	});
+
+	test("an excused stream is waited for at most the grace", async () => {
+		const { clock, tail: t } = tail(Duration.millis(10));
+		const stream = t.open(0n);
+		stream.excuse();
+		let settled = false;
+		const settling = t
+			.settle(() => true, new Once<unknown>())
+			.then(() => {
+				settled = true;
+			});
+
+		await clock.advance(Duration.millis(5));
+		expect(settled).toBe(false);
+		await clock.advance(Duration.millis(10));
+		await settling;
+		// Read to its end after all, it is let go once.
+		stream.done();
+		stream.done();
 	});
 });

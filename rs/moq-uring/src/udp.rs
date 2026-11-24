@@ -55,6 +55,11 @@ use crate::metrics::Counters;
 use crate::shared::{Cqe, Op, Shared};
 use crate::worker::Owner;
 
+// The control-message walk's fuzz target, on 64-bit, which the reference model's struct layouts
+// assume.
+#[cfg(all(any(test, feature = "fuzz"), target_pointer_width = "64"))]
+pub mod fuzz;
+
 /// `CMSG_SPACE` of a `len`-byte payload.
 const fn cmsg_space(len: usize) -> usize {
 	// SAFETY: a pure size computation.
@@ -140,11 +145,12 @@ impl Default for Config {
 			gro: true,
 			gso: true,
 			multishot: true,
-			// 16 MiB and 64 MiB of headroom at the default buffer lengths,
-			// reached only by a socket that actually starves for them.
+			// 16 MiB and 32 MiB of headroom at the default buffer lengths,
+			// reached only by a socket that actually starves for them. Their
+			// sum stays under the worker's CQ, which can grow no further.
 			rx_buffers_max: 256,
 			rx_buffer_len: MAX_RECV + RECV_OVERHEAD,
-			tx_buffers_max: 1024,
+			tx_buffers_max: 512,
 			tx_buffer_len: 64 * 1024,
 		}
 	}
@@ -2513,7 +2519,12 @@ mod tests {
 				shared.bgids.borrow().free
 			);
 			let err = handle.udp(bind(), Config::default()).expect_err("every id is live");
-			assert!(err.to_string().contains("buffer group id"), "{err}");
+			// The cause sits in the source chain; `Error::Io` displays only its kind.
+			let chain = std::iter::successors(Some(&err as &dyn std::error::Error), |err| err.source())
+				.map(ToString::to_string)
+				.collect::<Vec<_>>()
+				.join(": ");
+			assert!(chain.contains("buffer group id"), "{chain}");
 
 			let weak = sock.downgrade();
 			drop(sock);

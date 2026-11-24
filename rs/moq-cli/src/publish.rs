@@ -4,8 +4,8 @@ use moq_mux::container::{flv, fmp4, ts};
 /// Container format read from stdin on the import (source) side.
 #[derive(Clone, Copy)]
 pub enum PublishFormat {
-	/// Raw AVC (H.264) Annex B elementary stream.
-	Avc3,
+	/// Raw H.264 Annex B elementary stream.
+	H264,
 	/// Fragmented MP4 (CMAF), republished whole as CMAF when `cmaf`.
 	Fmp4 { cmaf: bool },
 	/// MPEG-TS (transport stream), limited to one `program` of a multiplex when given.
@@ -112,6 +112,12 @@ pub struct CaptureArgs {
 	#[usage(long)]
 	pub bitrate: Option<u64>,
 
+	/// Also publish a smaller rendition as `video/NAME`, scaled from each captured frame to
+	/// SCALE of its pixels (0.25 is half the width and height). Repeatable. Each one encodes only
+	/// while watched, and under congestion the smallest keeps playing while larger ones pause.
+	#[usage(long = "rendition", value_name = "NAME=SCALE")]
+	pub renditions: Vec<moq_video::encode::Rendition>,
+
 	/// Video codec to encode. H.265 is hardware-only (VideoToolbox on macOS).
 	#[usage(long, value_enum, default = "h264")]
 	pub codec: VideoCodec,
@@ -125,13 +131,14 @@ pub struct CaptureArgs {
 	pub software: bool,
 
 	/// Capture a microphone, by the id `moq devices` reports. Bare
-	/// `--microphone`, or no audio source flag, opens the default input.
+	/// `--microphone`, or no audio source flag, opens the default input. It is
+	/// encoded as voice, which sends nothing while its talker is silent.
 	#[usage(long, group = "audio-source")]
 	pub microphone: Option<Option<String>>,
 
 	/// Capture the system (desktop) audio instead of a microphone: everything the
 	/// machine is playing, minus this process. macOS only, and it needs the Screen
-	/// Recording permission.
+	/// Recording permission. It is encoded as music.
 	#[usage(long, group = "audio-source")]
 	pub system_audio: bool,
 
@@ -158,28 +165,27 @@ pub struct CaptureArgs {
 	#[usage(long = "no-audio", hide = true)]
 	no_audio: bool,
 
-	/// The VA-API render node, such as `/dev/dri/renderD129`. Defaults to the
-	/// first that encodes, decodes, and scales.
-	#[cfg(all(target_os = "linux", feature = "vaapi"))]
-	#[usage(long, env = "MOQ_VAAPI_DEVICE", value_hint = usage_rs::ValueHint::FilePath)]
+	/// The render node the encoder opens, such as `/dev/dri/renderD129`: VA-API
+	/// opens it, and NVENC the NVIDIA GPU behind it. Defaults to the first that
+	/// encodes, decodes, and scales. Linux only.
+	#[usage(long, env = "MOQ_VAAPI_DEVICE", value_hint = usage_rs::ValueHint::FilePath, conflicts = "--v4l2-encoder")]
 	pub vaapi_device: Option<std::path::PathBuf>,
 
 	/// The V4L2 M2M encoder node, such as `/dev/video11`. Defaults to the first
-	/// that encodes H.264.
-	#[cfg(all(target_os = "linux", feature = "v4l2"))]
+	/// that encodes H.264. Linux only.
 	#[usage(long, env = "MOQ_V4L2_ENCODER", value_hint = usage_rs::ValueHint::FilePath)]
 	pub v4l2_encoder: Option<std::path::PathBuf>,
 }
 
 enum PublishDecoder {
-	Avc3 {
+	H264 {
 		split: Box<moq_mux::codec::h264::Split>,
 		import: Box<moq_mux::codec::h264::Import>,
 	},
 	Fmp4(Box<fmp4::Import>),
-	// TS carries undecoded elementary streams (SCTE-35, teletext, DVB AC-3, ...)
-	// verbatim, so it uses the `mpegts` catalog extension rather than the media-only `()`.
-	Ts(Box<ts::Import<ts::Ext>>),
+	/// `import ts`: one program, owning its route and catalog, republished on each change of
+	/// source.
+	Ts(Box<ts::Republish>),
 	/// `import ts --program all`: one importer, broadcast, and catalog per program.
 	TsPrograms(Box<ts::Programs>),
 	/// `import ts --passthrough`: the multiplex whole, on one track.
@@ -191,19 +197,22 @@ impl PublishDecoder {
 	/// Decode a chunk of stdin bytes. Each importer buffers any partial trailing
 	/// frame internally, so the caller feeds fresh chunks rather than an
 	/// accumulating buffer.
-	fn decode_chunk(&mut self, chunk: &[u8]) -> anyhow::Result<()> {
+	///
+	/// A TS import whose source changed returns the change before reading on; see
+	/// [`ts::Republish::decode`].
+	fn decode_chunk(&mut self, chunk: &[u8]) -> anyhow::Result<Option<ts::Republished>> {
 		match self {
-			Self::Avc3 { split, import } => {
+			Self::H264 { split, import } => {
 				let frames = split.decode(chunk, None)?;
 				import.decode(frames)?;
 			}
 			Self::Fmp4(d) => d.decode(chunk)?,
-			Self::Ts(d) => d.decode(chunk).map_err(suggest_program)?,
+			Self::Ts(d) => return d.decode(chunk).map_err(suggest_program),
 			Self::TsPrograms(d) => d.decode(chunk)?,
 			Self::TsPassthrough(d) => d.decode(chunk)?,
 			Self::Flv(d) => d.decode(chunk)?,
 		}
-		Ok(())
+		Ok(None)
 	}
 
 	/// What each elementary stream has delivered and the audio frame sync lost so far, for
@@ -212,37 +221,74 @@ impl PublishDecoder {
 		match self {
 			Self::Ts(d) => Some(d.stats()),
 			Self::TsPrograms(d) => Some(d.stats()),
-			Self::Avc3 { .. } | Self::Fmp4(_) | Self::TsPassthrough(_) | Self::Flv(_) => None,
+			Self::H264 { .. } | Self::Fmp4(_) | Self::TsPassthrough(_) | Self::Flv(_) => None,
 		}
 	}
 
 	/// Flush any buffered trailing frame and close the tracks at end of input.
-	/// The avc3 split holds the final access unit until the next start code, so
+	/// The H.264 split holds the final access unit until the next start code, so
 	/// stdin EOF must flush it explicitly.
-	///
-	/// `import ts --program all` owns its broadcasts, so it returns them; see
-	/// [`ts::Programs::finish`].
-	fn finish(&mut self) -> anyhow::Result<Vec<moq_net::broadcast::Producer>> {
-		match self {
-			Self::Avc3 { split, import } => {
+	fn finish(self) -> anyhow::Result<FinishedDecoder> {
+		Ok(match self {
+			Self::H264 { mut split, mut import } => {
 				let tail = split.flush(None)?;
 				import.decode(tail)?;
-				import.finish()?;
+				FinishedDecoder::H264(Box::new(import.finish()?))
 			}
-			Self::Fmp4(d) => d.finish()?,
-			Self::Ts(d) => d.finish()?,
-			Self::TsPrograms(d) => return d.finish(),
-			Self::TsPassthrough(d) => d.finish()?,
-			Self::Flv(d) => d.finish()?,
-		}
-		Ok(Vec::new())
+			Self::Fmp4(d) => FinishedDecoder::Fmp4(Box::new(d.finish()?)),
+			Self::Ts(d) => FinishedDecoder::Ts(Box::new(d.finish()?)),
+			Self::TsPrograms(d) => FinishedDecoder::TsPrograms(Box::new(d.finish()?)),
+			Self::TsPassthrough(d) => FinishedDecoder::TsPassthrough(Box::new(d.finish()?)),
+			Self::Flv(d) => FinishedDecoder::Flv(Box::new(d.finish()?)),
+		})
 	}
 
 	/// Abort the tracks with `err` instead of finishing, so subscribers see the
 	/// real cause rather than `Error::Dropped`. Consumes the decoder.
 	fn abort(self, err: moq_net::Error) {
 		match self {
-			Self::Avc3 { import, .. } => import.abort(err),
+			Self::H264 { import, .. } => import.abort(err),
+			Self::Fmp4(d) => d.abort(err),
+			Self::Ts(d) => d.abort(err),
+			Self::TsPrograms(d) => d.abort(err),
+			Self::TsPassthrough(d) => d.abort(err),
+			Self::Flv(d) => d.abort(err),
+		}
+	}
+}
+
+/// A [`PublishDecoder`] whose tracks finished, holding them so they stay servable.
+enum FinishedDecoder {
+	H264(Box<moq_mux::container::Finished<moq_mux::catalog::hang::Container, hang::catalog::VideoConfig>>),
+	Fmp4(Box<fmp4::Finished>),
+	Ts(Box<ts::republish::Finished>),
+	TsPrograms(Box<ts::programs::Finished>),
+	TsPassthrough(Box<ts::passthrough::Finished>),
+	Flv(Box<flv::Finished>),
+}
+
+impl FinishedDecoder {
+	/// The broadcasts a TS import owns; see [`ts::Republish::finish`] and [`ts::Programs::finish`].
+	fn broadcasts(&self) -> Vec<moq_net::broadcast::Producer> {
+		match self {
+			Self::Ts(d) => vec![d.broadcast().clone()],
+			Self::TsPrograms(d) => d.broadcasts(),
+			_ => Vec::new(),
+		}
+	}
+
+	/// What each elementary stream delivered, for the formats that report it.
+	fn stats(&self) -> Option<ts::stats::Snapshot> {
+		match self {
+			Self::Ts(d) => Some(d.stats()),
+			Self::TsPrograms(d) => Some(d.stats()),
+			Self::H264(_) | Self::Fmp4(_) | Self::TsPassthrough(_) | Self::Flv(_) => None,
+		}
+	}
+
+	fn abort(self, err: moq_net::Error) {
+		match self {
+			Self::H264(import) => import.abort(err),
 			Self::Fmp4(d) => d.abort(err),
 			Self::Ts(d) => d.abort(err),
 			Self::TsPrograms(d) => d.abort(err),
@@ -253,28 +299,31 @@ impl PublishDecoder {
 }
 
 /// Point a multi-program refusal at the flag that resolves it.
-fn suggest_program(err: anyhow::Error) -> anyhow::Error {
-	if err.is::<ts::MultipleProgramsError>() {
-		err.context("choose one with `--program <n>`, or publish each with `--program all`")
-	} else {
-		err
+fn suggest_program(err: ts::Error) -> anyhow::Error {
+	let multiplex = matches!(err, ts::Error::MultiplePrograms { .. });
+	let err = anyhow::Error::from(err);
+	match multiplex {
+		true => err.context("choose one with `--program <n>`, or publish each with `--program all`"),
+		false => err,
 	}
 }
 
-/// The catalog a stdin decoder publishes into. TS carries the `mpegts` extension.
+/// The catalog a stdin decoder publishes into.
 enum PublishCatalog {
-	Media(moq_mux::catalog::Producer),
-	Ts(moq_mux::catalog::Producer<ts::Ext>),
-	/// `import ts --program all`: each program's catalog, finished by [`ts::Programs::finish`].
-	TsPrograms,
+	Media(Box<moq_mux::catalog::Producer>),
+	/// `import ts --passthrough`'s, with the `mpegts` extension that names its track.
+	Passthrough(Box<moq_mux::catalog::Producer<ts::Ext>>),
+	/// A TS import's: each instance's or program's, with the `mpegts` extension, finished by
+	/// [`ts::Republish::finish`] or [`ts::Programs::finish`].
+	Ts,
 }
 
 impl PublishCatalog {
 	fn abort(self, err: moq_net::Error) {
 		match self {
 			Self::Media(catalog) => catalog.abort(err),
-			Self::Ts(catalog) => catalog.abort(err),
-			Self::TsPrograms => {}
+			Self::Passthrough(catalog) => catalog.abort(err),
+			Self::Ts => {}
 		}
 	}
 
@@ -282,42 +331,11 @@ impl PublishCatalog {
 	fn finish(&mut self) -> anyhow::Result<()> {
 		match self {
 			Self::Media(catalog) => catalog.finish()?,
-			Self::Ts(catalog) => catalog.finish()?,
-			Self::TsPrograms => {}
+			Self::Passthrough(catalog) => catalog.finish()?,
+			Self::Ts => {}
 		}
 		Ok(())
 	}
-
-	/// The multiplex rate a TS catalog records.
-	fn mux_rate(&self) -> Option<u64> {
-		match self {
-			Self::Ts(catalog) => catalog.snapshot().ext.mpegts.mux_rate,
-			Self::Media(_) | Self::TsPrograms => None,
-		}
-	}
-}
-
-/// Build the importer and `mpegts` catalog for one TS broadcast.
-///
-/// TS carries undecoded elementary streams (SCTE-35, teletext, DVB AC-3, ...) verbatim, so it
-/// uses the `mpegts` catalog extension rather than the media-only `()`. The catalog producer
-/// owns the broadcast's catalog tracks, so each broadcast gets exactly one.
-fn ts_import(
-	broadcast: &mut moq_net::broadcast::Producer,
-	config: moq_mux::catalog::Config,
-	program: Option<u16>,
-	mux_rate: Option<u64>,
-) -> anyhow::Result<(ts::Import<ts::Ext>, moq_mux::catalog::Producer<ts::Ext>)> {
-	let mut initial = moq_mux::catalog::hang::Catalog::<ts::Ext>::default();
-	// A rate already measured on this multiplex releases the catalog with the first media.
-	initial.ext.mpegts.mux_rate = mux_rate;
-	let config = config.with_catalog(initial);
-	let catalog = moq_mux::catalog::Producer::new(broadcast, config)?;
-	let mut import = ts::Import::new(broadcast.clone(), catalog.timebase().reserve());
-	if let Some(program) = program {
-		import = import.with_program(program);
-	}
-	Ok((import, catalog))
 }
 
 #[cfg_attr(
@@ -364,8 +382,8 @@ pub struct Publish {
 	report: Option<crate::report::Stats>,
 	// How long a stdin import keeps its broadcast up after EOF; see [`Self::with_linger`].
 	linger: std::time::Duration,
-	// How a stdin TS import republishes when its source changes; see [`Self::stdin`].
-	republish: Option<Republish>,
+	// What a stdin TS import sets on each instance it republishes; see [`Self::stdin`].
+	sections: Sections,
 }
 
 /// A broadcast's announcement, held until its catalog first goes out.
@@ -410,30 +428,33 @@ impl Publish {
 		format: &PublishFormat,
 		config: moq_mux::catalog::Config,
 	) -> anyhow::Result<Self> {
-		// TS builds its `Ext` catalog instead of the shared `()` below.
-		if let PublishFormat::Ts { program } = *format {
-			let (ts, catalog) = ts_import(&mut broadcast, config, program, None)?;
-			return Ok(Self {
-				source: Source::Stream {
-					decoder: PublishDecoder::Ts(Box::new(ts)),
-					catalog: PublishCatalog::Ts(catalog),
-				},
-				broadcast: Some(broadcast),
-				route: None,
-				announce: false,
-				report: None,
-				linger: moq_mux::Linger::DEFAULT,
-				republish: None,
-			});
+		anyhow::ensure!(
+			!matches!(format, PublishFormat::Ts { .. }),
+			"a TS import publishes through an origin, which republishes it as its source changes"
+		);
+		if let PublishFormat::TsPassthrough { pcr_pid } = *format {
+			// Nothing about the multiplex is described beyond the track that carries it, which the
+			// `mpegts` section names.
+			let config = config.with_catalog(hang::Catalog::<ts::Ext>::default());
+			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
+			let mut passthrough = ts::Passthrough::new(broadcast.clone(), catalog.timebase().reserve())?;
+			if let Some(pid) = pcr_pid {
+				passthrough = passthrough.with_pcr_pid(pid);
+			}
+			let decoder = PublishDecoder::TsPassthrough(Box::new(passthrough));
+			return Ok(Self::decode(
+				broadcast,
+				decoder,
+				PublishCatalog::Passthrough(Box::new(catalog)),
+			));
 		}
-
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
 		let decoder = match format {
-			PublishFormat::Avc3 => {
-				let track = broadcast.unique_track(".avc3", catalog.track_info(hang::catalog::PRIORITY.video))?;
+			PublishFormat::H264 => {
+				let track = broadcast.unique_track(".avc3", catalog.track_info(hang::catalog::PRIORITY.video));
 				let import = moq_mux::codec::h264::Import::new(track, catalog.reserve(), Default::default())?;
 				let split = Box::new(moq_mux::codec::h264::Split::new());
-				PublishDecoder::Avc3 {
+				PublishDecoder::H264 {
 					split,
 					import: Box::new(import),
 				}
@@ -443,17 +464,7 @@ impl Publish {
 				let fmp4 = fmp4::Import::new(broadcast.clone(), timebase.reserve()).with_cmaf(*cmaf);
 				PublishDecoder::Fmp4(Box::new(fmp4))
 			}
-			PublishFormat::Ts { .. } => unreachable!("TS is handled above with the mpegts catalog extension"),
-			// The `m2ts` section is in the base catalog: nothing about the multiplex is described
-			// beyond the track that carries it.
-			PublishFormat::TsPassthrough { pcr_pid } => {
-				let timebase = catalog.timebase();
-				let mut passthrough = ts::Passthrough::new(broadcast.clone(), timebase.reserve())?;
-				if let Some(pid) = pcr_pid {
-					passthrough = passthrough.with_pcr_pid(*pid);
-				}
-				PublishDecoder::TsPassthrough(Box::new(passthrough))
-			}
+			PublishFormat::Ts { .. } | PublishFormat::TsPassthrough { .. } => unreachable!("handled above"),
 			// FLV's 32-bit milliseconds wrap after 49 days, which its importer does not follow,
 			// so it takes no era.
 			PublishFormat::Flv => {
@@ -463,26 +474,33 @@ impl Publish {
 			}
 		};
 
-		Ok(Self {
-			source: Source::Stream {
-				decoder,
-				catalog: PublishCatalog::Media(catalog),
-			},
+		Ok(Self::decode(
+			broadcast,
+			decoder,
+			PublishCatalog::Media(Box::new(catalog)),
+		))
+	}
+
+	/// A publisher feeding `decoder` from stdin into `broadcast`, described by `catalog`.
+	fn decode(broadcast: moq_net::broadcast::Producer, decoder: PublishDecoder, catalog: PublishCatalog) -> Self {
+		Self {
+			source: Source::Stream { decoder, catalog },
 			broadcast: Some(broadcast),
 			route: None,
 			announce: false,
 			report: None,
 			linger: moq_mux::Linger::DEFAULT,
-			republish: None,
-		})
+			sections: Sections::default(),
+		}
 	}
 
 	/// Build a publisher decoding `format` from stdin into a new broadcast at `name` on
 	/// `origin` under `instance`, retaining its route alongside the decoder's fill handle.
 	///
-	/// A TS import whose source changes ([`ts::Restart`]), such as a changeover between two
-	/// encoders whose clocks were never locked or whose PATs name another program, finishes the broadcast
-	/// and republishes the rest of the input at `name` under a new instance.
+	/// A TS import whose source changes, such as a changeover between two encoders whose clocks
+	/// were never locked or whose PATs name another program, finishes the broadcast and republishes
+	/// the rest of the input at `name` under a new instance ([`ts::Republish`]). Its first
+	/// instance is `instance`.
 	pub(super) fn stdin(
 		origin: &moq_net::origin::Producer,
 		name: &str,
@@ -490,23 +508,29 @@ impl Publish {
 		format: &PublishFormat,
 		config: moq_mux::catalog::Config,
 	) -> anyhow::Result<Self> {
+		if let PublishFormat::Ts { program } = *format {
+			let mut republish = ts::Republish::new(origin.clone(), moq_net::Path::new(name)?, instance, config)?;
+			if let Some(program) = program {
+				republish = republish.with_program(program);
+			}
+			return Ok(Self {
+				source: Source::Stream {
+					decoder: PublishDecoder::Ts(Box::new(republish)),
+					catalog: PublishCatalog::Ts,
+				},
+				broadcast: None,
+				route: None,
+				announce: false,
+				report: None,
+				linger: moq_mux::Linger::DEFAULT,
+				sections: Sections::default(),
+			});
+		}
 		let route = origin
 			.route(name, moq_net::origin::RouteOptions::hidden().with_instance(instance, 0))
 			.context("failed to create broadcast")?;
-		let republish = match *format {
-			PublishFormat::Ts { program } => Some(Republish {
-				origin: origin.clone(),
-				name: name.to_string(),
-				config: config.clone(),
-				program,
-				report: None,
-				echo: None,
-			}),
-			_ => None,
-		};
 		let mut result = Self::new(route.broadcast().clone(), format, config)?;
 		result.route = Some(route);
-		result.republish = republish;
 		Ok(result)
 	}
 
@@ -524,14 +548,14 @@ impl Publish {
 		Self {
 			source: Source::Stream {
 				decoder: PublishDecoder::TsPrograms(Box::new(ts::Programs::new(origin, name, config))),
-				catalog: PublishCatalog::TsPrograms,
+				catalog: PublishCatalog::Ts,
 			},
 			broadcast: None,
 			route: None,
 			announce: false,
 			report: None,
 			linger: moq_mux::Linger::DEFAULT,
-			republish: None,
+			sections: Sections::default(),
 		}
 	}
 
@@ -576,7 +600,7 @@ impl Publish {
 			announce: false,
 			report: None,
 			linger: moq_mux::Linger::DEFAULT,
-			republish: None,
+			sections: Sections::default(),
 		})
 	}
 
@@ -586,20 +610,24 @@ impl Publish {
 	///
 	/// Call it before the importer declares its tracks, so the section rides the first catalog.
 	pub fn with_report(mut self, connection: Option<moq_tokio::connection::Monitor>) -> anyhow::Result<Self> {
-		let Some(broadcast) = self.broadcast.as_mut() else {
-			anyhow::bail!("`import ts --program all` builds a catalog per program");
-		};
-		if let Some(republish) = &mut self.republish {
-			republish.report = Some(connection.clone());
-		}
 		let report = match &self.source {
-			Source::Stream { catalog, .. } => match catalog {
-				PublishCatalog::Media(catalog) => crate::report::Stats::new(broadcast, catalog, connection)?,
-				PublishCatalog::Ts(catalog) => crate::report::Stats::new(broadcast, catalog, connection)?,
-				PublishCatalog::TsPrograms => anyhow::bail!("`import ts --program all` builds a catalog per program"),
+			Source::Stream { decoder, catalog } => match (decoder, catalog, self.broadcast.as_mut()) {
+				(_, PublishCatalog::Media(catalog), Some(broadcast)) => {
+					crate::report::Stats::new(broadcast, catalog, connection)?
+				}
+				(_, PublishCatalog::Passthrough(catalog), Some(broadcast)) => {
+					crate::report::Stats::new(broadcast, catalog, connection)?
+				}
+				(PublishDecoder::Ts(republish), _, _) => {
+					self.sections.report = Some(connection.clone());
+					report(republish, connection)?
+				}
+				_ => anyhow::bail!("`import ts --program all` builds a catalog per program"),
 			},
 			#[cfg(feature = "capture")]
-			Source::Capture { catalog, .. } => crate::report::Stats::new(broadcast, catalog, connection)?,
+			Source::Capture { broadcast, catalog, .. } => {
+				crate::report::Stats::new(&mut broadcast.clone(), catalog, connection)?
+			}
 		};
 		self.report = Some(report);
 		Ok(self)
@@ -609,21 +637,25 @@ impl Publish {
 	///
 	/// Call it before the importer declares its tracks, so the section rides the first catalog.
 	pub fn with_echo(mut self, echo: hang::catalog::Echo) -> anyhow::Result<Self> {
-		let catalog = match &mut self.source {
-			Source::Stream { catalog, .. } => catalog,
+		match &mut self.source {
+			Source::Stream { decoder, catalog } => match (decoder, catalog) {
+				(_, PublishCatalog::Media(catalog)) => {
+					catalog.mutate(|catalog| catalog.echo = Some(echo), catalog.next_timestamp())?
+				}
+				(_, PublishCatalog::Passthrough(catalog)) => {
+					catalog.mutate(|catalog| catalog.echo = Some(echo), catalog.next_timestamp())?
+				}
+				(PublishDecoder::Ts(republish), _) => {
+					self.sections.echo = Some(echo.clone());
+					republish.catalog().clone().mutate(
+						|catalog| catalog.echo = Some(echo),
+						republish.catalog().next_timestamp(),
+					)?;
+				}
+				_ => anyhow::bail!("`import ts --program all` builds a catalog per program"),
+			},
 			#[cfg(feature = "capture")]
-			Source::Capture { catalog, .. } => {
-				catalog.mutate(|catalog| catalog.echo = Some(echo))?;
-				return Ok(self);
-			}
-		};
-		if let Some(republish) = &mut self.republish {
-			republish.echo = Some(echo.clone());
-		}
-		match catalog {
-			PublishCatalog::Media(catalog) => catalog.mutate(|catalog| catalog.echo = Some(echo))?,
-			PublishCatalog::Ts(catalog) => catalog.mutate(|catalog| catalog.echo = Some(echo))?,
-			PublishCatalog::TsPrograms => anyhow::bail!("`import ts --program all` builds a catalog per program"),
+			Source::Capture { catalog, .. } => catalog.mutate(|catalog| catalog.echo = Some(echo), catalog.next_timestamp())?,
 		}
 		Ok(self)
 	}
@@ -663,7 +695,7 @@ impl Publish {
 					pending,
 					report: self.report,
 					linger: self.linger,
-					republish: self.republish,
+					sections: self.sections,
 				};
 				decode(decoder, catalog, tokio::io::stdin(), publication).await
 			}
@@ -677,6 +709,7 @@ impl Publish {
 			} => {
 				drop(gate);
 				let mut report = self.report;
+				let has_video = video.is_some();
 				// Each enabled medium publishes its own track onto the shared
 				// broadcast + catalog. Both stamp frames on the catalog's
 				// advertised clock, so HLS/DASH wall times match the mapping on
@@ -700,29 +733,31 @@ impl Publish {
 				};
 				let audio_fut = async move {
 					match audio {
-						Some((config, encode, retain)) => {
-							let capture = moq_audio::capture::Producer::open(config).await?;
-							let mut options = moq_audio::encode::Capture::new(capture.consume());
-							options.encode = encode;
-							options.retain = retain;
-							let (_publication, driver) =
-								moq_audio::encode::publish_capture(broadcast, catalog, options)?;
-							let mut publish = std::pin::pin!(driver.run());
-							tokio::select! {
-								result = capture.run() => {
-									// Let the encoder serve its retained audio, then end its
-									// track with the source error, before its future is dropped.
-									let published = publish.await;
-									result.and(published).map_err(anyhow::Error::from)
-								}
-								result = &mut publish => result.map_err(anyhow::Error::from),
-							}
-						}
-						None => Ok(()),
+						Some(audio) => publish_audio(broadcast, catalog, audio).await,
+						None => Ok(Ok(())),
 					}
 				};
 
-				let capture = async { tokio::try_join!(video_fut, audio_fut).map(|_| ()) };
+				// A video failure ends the publish. An audio failure that outlasted its reopens
+				// ends only the audio track: the video keeps publishing, and the command reports
+				// the audio failure once the video ends.
+				let capture = async {
+					let mut video_fut = std::pin::pin!(video_fut);
+					let mut audio_fut = std::pin::pin!(audio_fut);
+					tokio::select! {
+						result = &mut video_fut => {
+							result?;
+							audio_fut.await?
+						}
+						result = &mut audio_fut => {
+							let ended = result?;
+							if let Err(err) = &ended && has_video {
+								tracing::error!(error = %format_args!("{err:#}"), "audio capture ended; video keeps publishing");
+							}
+							video_fut.await.and(ended)
+						}
+					}
+				};
 				// Written beside the encoders, so a capture waiting on its first viewer still reports.
 				let result = match report.as_mut() {
 					Some(report) => tokio::select! {
@@ -742,6 +777,115 @@ impl Publish {
 	}
 }
 
+/// Publish the captured audio, reopening the device and its track when the capture fails
+/// mid-session, as a USB microphone re-enumerating or a sample-rate change does.
+///
+/// moq-audio never reopens a failed device, so this loop does. Each reopen publishes a new track,
+/// since the failed one ends with its error. Returns once the track closes, or with the last
+/// failure once failures outlast [`Reopen::BUDGET`].
+///
+/// A first open or publication that fails is a setup problem, such as a wrong device id or a
+/// denied permission, so it fails the whole publish at once: the outer error. The inner one ends
+/// only the audio.
+#[cfg(feature = "capture")]
+async fn publish_audio(
+	broadcast: moq_net::broadcast::Producer,
+	catalog: moq_mux::catalog::Producer,
+	(config, encode, retain): (moq_audio::capture::Config, moq_audio::encode::Options, bool),
+) -> anyhow::Result<anyhow::Result<()>> {
+	// A failed track keeps serving its retained audio until it is served or expires, up to
+	// `--max-age`, without holding up the reopen or the report.
+	let mut draining = tokio::task::JoinSet::new();
+	let mut reopen = Reopen::default();
+	let mut published = false;
+	let result = loop {
+		let mut live = None;
+		let attempt = async {
+			let capture = moq_audio::capture::Producer::open(config.clone()).await?;
+			live = Some(kio::clock::Instant::now());
+			let mut options = moq_audio::encode::Capture::new(capture.consume());
+			options.encode = encode.clone();
+			options.retain = retain;
+			let (_publication, driver) =
+				moq_audio::encode::publish_capture(broadcast.clone(), catalog.clone(), options)?;
+			published = true;
+			let mut publish = Box::pin(driver.run());
+			tokio::select! {
+				result = capture.run() => {
+					draining.spawn(publish);
+					result
+				}
+				result = &mut publish => result,
+			}
+		};
+		let err = match attempt.await {
+			Ok(()) => break Ok(()),
+			Err(err) => anyhow::Error::from(err),
+		};
+		if !published {
+			return Err(err);
+		}
+		while draining.try_join_next().is_some() {}
+		match reopen.failed(live, kio::clock::Instant::now()) {
+			Some(wait) => {
+				tracing::warn!(error = %format_args!("{err:#}"), ?wait, "audio capture failed; reopening");
+				kio::clock::sleep(wait).await;
+			}
+			None => break Err(err.context(format!("audio capture kept failing for {:?}", Reopen::BUDGET))),
+		}
+	};
+	// Report at once: the failed tracks keep draining in the background while the video runs,
+	// each ending with its error, and are dropped when the command exits.
+	draining.detach_all();
+	Ok(result)
+}
+
+/// When to reopen a failed audio capture, and when to give up on it.
+#[cfg(feature = "capture")]
+struct Reopen {
+	/// The wait before the next reopen.
+	delay: std::time::Duration,
+	/// When the current run of failures began, with no healthy capture since.
+	failing: Option<kio::clock::Instant>,
+}
+
+#[cfg(feature = "capture")]
+impl Default for Reopen {
+	fn default() -> Self {
+		Self {
+			delay: Self::MIN,
+			failing: None,
+		}
+	}
+}
+
+#[cfg(feature = "capture")]
+impl Reopen {
+	/// The first wait. It covers a USB device re-enumerating.
+	const MIN: std::time::Duration = std::time::Duration::from_millis(500);
+	/// The longest wait, so a returning device is picked up within seconds.
+	const MAX: std::time::Duration = std::time::Duration::from_secs(4);
+	/// A capture that ran this long recovered, so its failure starts a fresh run of retries.
+	const HEALTHY: std::time::Duration = std::time::Duration::from_secs(1);
+	/// How long failures may persist before the audio track ends.
+	const BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
+	/// Record a failure at `now` of a capture live since `live` (`None` when it never opened),
+	/// returning the wait before the next reopen, or `None` to give up.
+	fn failed(&mut self, live: Option<kio::clock::Instant>, now: kio::clock::Instant) -> Option<std::time::Duration> {
+		if live.is_some_and(|live| now.saturating_duration_since(live) >= Self::HEALTHY) {
+			*self = Self::default();
+		}
+		let failing = *self.failing.get_or_insert(now);
+		if now.saturating_duration_since(failing) >= Self::BUDGET {
+			return None;
+		}
+		let wait = self.delay;
+		self.delay = (self.delay * 2).min(Self::MAX);
+		Some(wait)
+	}
+}
+
 /// What a stdin import does around its media: announce, report, and retain the end.
 #[derive(Default)]
 struct Publication {
@@ -756,53 +900,41 @@ struct Publication {
 	report: Option<crate::report::Stats>,
 	/// How long the finished broadcasts stay up after EOF.
 	linger: std::time::Duration,
-	/// How a change of source republishes, or `None` to end the import there.
-	republish: Option<Republish>,
+	/// What a TS import sets on each instance it republishes.
+	sections: Sections,
 }
 
-/// How a stdin TS import republishes its path when the source changes ([`ts::Restart`]): as a
-/// new broadcast under a new instance, with the same catalog sections.
-struct Republish {
-	origin: moq_net::origin::Producer,
-	name: String,
-	config: moq_mux::catalog::Config,
-	program: Option<u16>,
+/// The catalog sections a stdin TS import sets again on each instance it republishes.
+#[derive(Clone, Default)]
+struct Sections {
 	/// The connection `--report` measures, when the import reports.
 	report: Option<Option<moq_tokio::connection::Monitor>>,
 	echo: Option<hang::catalog::Echo>,
 }
 
-impl Republish {
-	/// A new instance of the broadcast under a new instance, announced once its catalog goes out.
-	///
-	/// `mux_rate` is the previous instance's measurement of the same multiplex, which the new
-	/// catalog carries from its first media rather than waiting on a fresh window.
-	fn instance(&self, mux_rate: Option<u64>) -> anyhow::Result<Instance> {
-		let control = self
-			.origin
-			.route(&self.name, moq_net::origin::RouteOptions::hidden())
-			.context("failed to create broadcast")?;
-		let mut broadcast = control.broadcast().clone();
-		let (import, mut catalog) = ts_import(&mut broadcast, self.config.clone(), self.program, mux_rate)?;
-		// Before the import declares a track, so the sections ride the first catalog.
-		let report = match &self.report {
-			Some(connection) => Some(crate::report::Stats::new(&mut broadcast, &catalog, connection.clone())?),
-			None => None,
-		};
+impl Sections {
+	/// Set these sections on the instance `republish` just opened, before it declares a track so
+	/// they ride its first catalog, returning its report.
+	fn apply(&self, republish: &ts::Republish) -> anyhow::Result<Option<crate::report::Stats>> {
 		if let Some(echo) = &self.echo {
-			catalog.mutate(|catalog| catalog.echo = Some(echo.clone()))?;
+			republish.catalog().clone().mutate(
+				|catalog| catalog.echo = Some(echo.clone()),
+				republish.catalog().next_timestamp(),
+			)?;
 		}
-		tracing::info!(instance = %control.instance(), "publisher instance");
-		let pending = Pending::new(control.clone())?;
-		Ok(Instance {
-			decoder: PublishDecoder::Ts(Box::new(import)),
-			catalog: PublishCatalog::Ts(catalog),
-			control: Some(control),
-			broadcast: Some(broadcast),
-			pending: Some(pending),
-			report,
-		})
+		self.report
+			.as_ref()
+			.map(|connection| report(republish, connection.clone()))
+			.transpose()
 	}
+}
+
+/// A `--report` track on the current instance of `republish`.
+fn report(
+	republish: &ts::Republish,
+	connection: Option<moq_tokio::connection::Monitor>,
+) -> anyhow::Result<crate::report::Stats> {
+	crate::report::Stats::new(&mut republish.broadcast().clone(), republish.catalog(), connection)
 }
 
 /// One publisher instance of a stdin import: the decoder filling its broadcast, and what
@@ -835,8 +967,8 @@ struct Reader<R> {
 /// The finished broadcasts then stay servable for the linger, so a subscriber that saw the
 /// final catalog only at EOF can still request them.
 ///
-/// A change of source ([`ts::Restart`]) ends the instance there. With `republish`, the rest of the
-/// input publishes a new instance on the same path; otherwise the import fails with it.
+/// A change of source ([`ts::Republished`]) ends a TS import's instance there, and the rest of the
+/// input publishes a new instance on the same path.
 async fn decode(
 	decoder: PublishDecoder,
 	catalog: PublishCatalog,
@@ -849,7 +981,7 @@ async fn decode(
 		pending,
 		report,
 		linger,
-		republish,
+		sections,
 	} = publication;
 	let mut instance = Instance {
 		decoder,
@@ -871,15 +1003,12 @@ async fn decode(
 	};
 
 	let result = loop {
-		let restart = match instance.read(&mut reader).await {
-			Ok(Some(restart)) => restart,
+		let republished = match instance.read(&mut reader).await {
+			Ok(Some(republished)) => republished,
 			Ok(None) => break Ok(()),
 			Err(err) => break Err(err),
 		};
-		let Some(republish) = &republish else {
-			break Err(restart.into());
-		};
-		if let Err(err) = instance.restart(republish, restart, &mut reader.log) {
+		if let Err(err) = instance.republished(&sections, republished, &mut reader.log) {
 			break Err(err);
 		}
 	};
@@ -892,7 +1021,7 @@ impl Instance {
 	async fn read<R: tokio::io::AsyncRead + Unpin>(
 		&mut self,
 		reader: &mut Reader<R>,
-	) -> anyhow::Result<Option<ts::Restart>> {
+	) -> anyhow::Result<Option<ts::Republished>> {
 		let Self {
 			decoder,
 			pending,
@@ -909,8 +1038,8 @@ impl Instance {
 				if n == 0 {
 					return Ok(None); // EOF
 				}
-				if let Some(restart) = feed(decoder, pending, &reader.buffer)? {
-					return Ok(Some(restart));
+				if let Some(republished) = feed(decoder, pending, &reader.buffer)? {
+					return Ok(Some(republished));
 				}
 
 				if reader.sampled.elapsed() >= ts::stats::Log::INTERVAL {
@@ -933,100 +1062,118 @@ impl Instance {
 		}
 	}
 
-	/// The source changed: finish this instance before the change, and replace it with a new one
-	/// on the same path that takes the rest of the input.
-	fn restart(&mut self, republish: &Republish, restart: ts::Restart, log: &mut ts::stats::Log) -> anyhow::Result<()> {
-		let mut restart = restart;
+	/// The source changed, and the importer republished: end this instance's report, and set the
+	/// sections on the new instance before it reads the rest of the input.
+	fn republished(
+		&mut self,
+		sections: &Sections,
+		republished: ts::Republished,
+		log: &mut ts::stats::Log,
+	) -> anyhow::Result<()> {
+		let mut republished = republished;
 		loop {
-			tracing::warn!(step = %restart.step, "the source changed; republishing");
-			self.decoder.finish()?;
-			if let Some(stats) = self.decoder.stats() {
-				self.report_mpegts(&stats);
-				log.finish(&stats);
-			}
+			let PublishDecoder::Ts(republish) = &self.decoder else {
+				unreachable!("only a TS import republishes");
+			};
+			tracing::warn!(step = %republished.step, instance = %republish.instance(), "the source changed; republishing");
+			report_mpegts(&self.report, &republished.stats);
+			log.finish(&republished.stats);
 			if let Some(report) = &mut self.report {
 				report.finish();
 			}
-			self.catalog.finish()?;
-			// The finished broadcast ends as its handles drop, withdrawing its announcement.
-			*self = republish.instance(self.catalog.mux_rate())?;
+			self.report = sections.apply(republish)?;
 			*log = ts::stats::Log::default();
-			match feed(&mut self.decoder, &mut self.pending, &restart.remainder)? {
-				Some(next) => restart = next,
+			match feed(&mut self.decoder, &mut self.pending, &[])? {
+				Some(next) => republished = next,
 				None => return Ok(()),
 			}
-		}
-	}
-
-	/// Set the report's `mpegts` section, when the import reports.
-	fn report_mpegts(&self, snapshot: &ts::stats::Snapshot) {
-		if let Some(report) = &self.report {
-			report.sections().set(|report| report.mpegts = Some(snapshot.clone()));
 		}
 	}
 
 	/// Finish on a clean EOF and serve the finished broadcasts for the linger, or abort with
 	/// the real cause of `result`, so subscribers see it instead of a bare Error::Dropped.
 	async fn end(
-		mut self,
+		self,
 		result: anyhow::Result<()>,
 		log: &mut ts::stats::Log,
 		linger: std::time::Duration,
 	) -> anyhow::Result<()> {
-		// Flush on a clean EOF; on any error (read, decode, or the flush
-		// itself) abort with the real cause.
-		let outcome = result.and_then(|()| self.decoder.finish());
-		// The drain can release the first catalog. Without one the input declared no track, and
-		// announcing would only advertise an empty broadcast.
-		let outcome = outcome.and_then(|finished| {
-			if let Some(announce) = &mut self.pending
-				&& !announce.announce()?
-			{
-				anyhow::bail!("input ended before it declared a track");
-			}
-			Ok(finished)
-		});
-		// The drain at end of input can publish a frame nothing vouched for, so the
-		// final snapshot is only complete after `finish`.
-		if let Some(stats) = self.decoder.stats() {
-			self.report_mpegts(&stats);
-			log.finish(&stats);
-		}
 		let Self {
 			decoder,
 			mut catalog,
 			control,
 			broadcast,
-			report,
-			..
+			mut pending,
+			mut report,
 		} = self;
-		match outcome {
-			Ok(mut finished) => {
-				// Finished before the broadcast is, so it lingers with the media.
-				let mut report = report;
-				if let Some(report) = &mut report {
-					report.finish();
-				}
-				catalog.finish()?;
-				finished.extend(broadcast);
-				tracing::info!(?linger, "input ended; serving the finished broadcast");
-				// The decoder and catalog hold the finished tracks, so they go only once it closes.
-				moq_mux::Linger::new(finished, (decoder, catalog, report, control), linger)
-					.wait()
-					.await;
-				Ok(())
-			}
+		// Flush on a clean EOF; on any error (read, decode, or the flush
+		// itself) abort with the real cause.
+		let finished = match result {
+			Ok(()) => decoder.finish(),
 			Err(err) => {
-				let reason = moq_net::Error::Transport(err.to_string());
-				if let Some(report) = report {
-					report.abort(reason.clone());
+				if let Some(stats) = decoder.stats() {
+					report_mpegts(&report, &stats);
+					log.finish(&stats);
 				}
-				catalog.abort(reason.clone());
-				decoder.abort(reason);
-				Err(err)
+				decoder.abort(moq_net::Error::Transport(err.to_string()));
+				return Err(fail(catalog, report, err));
+			}
+		};
+		let decoder = match finished {
+			Ok(decoder) => decoder,
+			Err(err) => return Err(fail(catalog, report, err)),
+		};
+		// The drain at end of input can publish a frame nothing vouched for, so the
+		// final snapshot is only complete after `finish`.
+		if let Some(stats) = decoder.stats() {
+			report_mpegts(&report, &stats);
+			log.finish(&stats);
+		}
+		// The drain can release the first catalog. Without one the input declared no track, and
+		// announcing would only advertise an empty broadcast.
+		if let Some(announce) = &mut pending {
+			let declared = announce.announce().and_then(|declared| {
+				anyhow::ensure!(declared, "input ended before it declared a track");
+				Ok(())
+			});
+			if let Err(err) = declared {
+				decoder.abort(moq_net::Error::Transport(err.to_string()));
+				return Err(fail(catalog, report, err));
 			}
 		}
+		drop(pending);
+
+		// Finished before the broadcast is, so it lingers with the media.
+		if let Some(report) = &mut report {
+			report.finish();
+		}
+		catalog.finish()?;
+		let mut broadcasts = decoder.broadcasts();
+		broadcasts.extend(broadcast);
+		tracing::info!(?linger, "input ended; serving the finished broadcast");
+		// The decoder and catalog hold the finished tracks, so they go only once it closes.
+		moq_mux::Linger::new(broadcasts, (decoder, catalog, report, control), linger)
+			.wait()
+			.await;
+		Ok(())
 	}
+}
+
+/// Set the report's `mpegts` section, when the import reports.
+fn report_mpegts(report: &Option<crate::report::Stats>, snapshot: &ts::stats::Snapshot) {
+	if let Some(report) = report {
+		report.sections().set(|report| report.mpegts = Some(snapshot.clone()));
+	}
+}
+
+/// Abort the catalog and report with `err` so subscribers see the real cause, and return it.
+fn fail(catalog: PublishCatalog, report: Option<crate::report::Stats>, err: anyhow::Error) -> anyhow::Error {
+	let reason = moq_net::Error::Transport(err.to_string());
+	if let Some(report) = report {
+		report.abort(reason.clone());
+	}
+	catalog.abort(reason);
+	err
 }
 
 /// Decode `chunk` into `decoder`, announcing `pending` once its catalog goes out, or return the
@@ -1035,9 +1182,9 @@ fn feed(
 	decoder: &mut PublishDecoder,
 	pending: &mut Option<Pending>,
 	chunk: &[u8],
-) -> anyhow::Result<Option<ts::Restart>> {
-	if let Err(err) = decoder.decode_chunk(chunk) {
-		return err.downcast::<ts::Restart>().map(Some);
+) -> anyhow::Result<Option<ts::Republished>> {
+	if let Some(republished) = decoder.decode_chunk(chunk)? {
+		return Ok(Some(republished));
 	}
 	if let Some(announce) = pending
 		&& announce.announce()?
@@ -1103,14 +1250,14 @@ impl CaptureArgs {
 			Source::App(id.clone())
 		} else if let Some(id) = &self.display {
 			match id {
-				Some(id) => Source::Display(Some(id.clone())),
+				Some(id) => Source::Display(moq_video::capture::DisplaySelection::new(id.clone())),
 				// Wayland has no main display to name, so the system picker chooses the screen.
 				#[cfg(all(target_os = "linux", feature = "pipewire"))]
 				None if std::env::var_os("WAYLAND_DISPLAY").is_some() => {
 					use moq_video::capture::portal::{Kind, Selection};
 					Source::Portal(Selection::new(Kind::Screen))
 				}
-				None => Source::Display(None),
+				None => Source::Display(moq_video::capture::DisplaySelection::default()),
 			}
 		} else {
 			Source::Camera(self.camera.clone().flatten())
@@ -1127,7 +1274,10 @@ impl CaptureArgs {
 			.map(|fps| moq_video::FrameRate::new(fps, 1))
 			.transpose()
 			.map_err(anyhow::Error::from)?;
-		config.cursor = !self.no_cursor;
+		config.cursor = match self.no_cursor {
+			true => moq_video::capture::Cursor::Hidden,
+			false => moq_video::capture::Cursor::Drawn,
+		};
 		Ok(config)
 	}
 
@@ -1145,14 +1295,8 @@ impl CaptureArgs {
 		};
 		options.bandwidth = bandwidth;
 		options.on_demand = self.video == Mode::Demand;
-		#[cfg(all(target_os = "linux", feature = "vaapi"))]
-		{
-			options.vaapi = self.vaapi_device.clone();
-		}
-		#[cfg(all(target_os = "linux", feature = "v4l2"))]
-		{
-			options.v4l2 = self.v4l2_encoder.clone();
-		}
+		options.device = crate::device(&self.vaapi_device, &self.v4l2_encoder);
+		options.renditions = self.renditions.clone();
 		Ok(options)
 	}
 
@@ -1176,9 +1320,16 @@ impl CaptureArgs {
 
 	/// The audio encode settings. `track` is left unset so the name derives
 	/// from the codec, the way the video side names its track; consumers find
-	/// it through the catalog either way.
+	/// it through the catalog either way. The source sets the kind, as
+	/// `@moq/publish`'s microphone and screen sources do.
 	fn audio_encode(&self, bandwidth: moq_net::bandwidth::Allocator) -> moq_audio::encode::Options {
+		use moq_audio::encode::Kind;
+
 		let mut options = moq_audio::encode::Options::default();
+		options.config.kind = Some(match self.system_audio {
+			true => Kind::Music,
+			false => Kind::Voice,
+		});
 		options.config.bitrate = self
 			.audio_bitrate
 			.map(|bps| moq_net::bandwidth::Rate::from_bps(bps.into()));
@@ -1211,6 +1362,58 @@ pub(crate) mod tests {
 	use moq_net::Timestamp;
 
 	use super::*;
+
+	/// Each wait in a run of reopens that never open, from the first failure until giving up.
+	#[cfg(feature = "capture")]
+	fn reopen_waits(reopen: &mut Reopen, mut now: kio::clock::Instant) -> Vec<Duration> {
+		let mut waits = Vec::new();
+		while let Some(wait) = reopen.failed(None, now) {
+			waits.push(wait);
+			now = now.saturating_add(wait);
+		}
+		waits
+	}
+
+	#[cfg(feature = "capture")]
+	#[test]
+	fn a_failing_audio_capture_backs_off_then_gives_up() {
+		let ms = Duration::from_millis;
+		let waits = reopen_waits(&mut Reopen::default(), kio::clock::Instant::ZERO);
+		assert_eq!(waits, [ms(500), ms(1000), ms(2000), ms(4000), ms(4000)]);
+		assert!(waits.iter().sum::<Duration>() >= Reopen::BUDGET);
+	}
+
+	#[cfg(feature = "capture")]
+	#[test]
+	fn a_healthy_audio_capture_restarts_its_reopens() {
+		let start = kio::clock::Instant::ZERO;
+		let mut reopen = Reopen::default();
+		reopen_waits(&mut reopen, start);
+
+		// A capture that ran past healthy recovered, however long the failures before it.
+		let live = start.saturating_add(Duration::from_secs(60));
+		let failed = live.saturating_add(Reopen::HEALTHY);
+		assert_eq!(reopen.failed(Some(live), failed), Some(Reopen::MIN));
+		assert_eq!(
+			reopen.failed(None, failed.saturating_add(Reopen::MIN)),
+			Some(Reopen::MIN * 2)
+		);
+	}
+
+	#[cfg(feature = "capture")]
+	#[test]
+	fn a_flapping_audio_capture_still_gives_up() {
+		// Opens that fail sooner than healthy are no recovery, so the budget still runs out.
+		let mut reopen = Reopen::default();
+		let mut now = kio::clock::Instant::ZERO;
+		let mut attempts = 0;
+		while let Some(wait) = reopen.failed(Some(now), now.saturating_add(Reopen::HEALTHY / 2)) {
+			now = now.saturating_add(Reopen::HEALTHY / 2 + wait);
+			attempts += 1;
+			assert!(attempts < 100, "a flapping capture never gave up");
+		}
+		assert_eq!(attempts, 5);
+	}
 
 	#[cfg(feature = "capture")]
 	fn capture_args(flags: &[&str]) -> CaptureArgs {
@@ -1252,6 +1455,49 @@ pub(crate) mod tests {
 				video == "demand"
 			);
 			assert_eq!(args.audio_capture(Allocator::unlimited()).2, audio == "demand");
+		}
+	}
+
+	/// `--rendition` repeats, each `NAME=SCALE` reaching the video capture, and a malformed one
+	/// fails parsing.
+	#[cfg(feature = "capture")]
+	#[test]
+	fn renditions_reach_the_video_capture() {
+		use moq_net::bandwidth::Allocator;
+
+		let args = capture_args(&["--rendition", "sd=0.25", "--rendition", "ld=0.1"]);
+		let renditions = args.video_capture(Allocator::unlimited()).unwrap().renditions;
+		let parsed: Vec<_> = renditions.iter().map(|r| (r.name(), r.scale())).collect();
+		assert_eq!(parsed, [("sd", 0.25), ("ld", 0.1)]);
+		assert!(capture_args(&[]).renditions.is_empty());
+
+		for bad in ["sd", "sd=1", "a/b=0.5"] {
+			let argv = [
+				"moq",
+				"--connect",
+				"http://localhost",
+				"import",
+				"capture",
+				"--rendition",
+				bad,
+			];
+			assert!(crate::args::Invocation::try_parse_from(argv).is_err(), "{bad}");
+		}
+	}
+
+	#[cfg(feature = "capture")]
+	#[test]
+	fn the_audio_source_sets_its_kind() {
+		use moq_audio::encode::Kind;
+		use moq_net::bandwidth::Allocator;
+
+		for (flags, kind) in [
+			(&[][..], Kind::Voice),
+			(&["--microphone"][..], Kind::Voice),
+			(&["--system-audio"][..], Kind::Music),
+		] {
+			let options = capture_args(flags).audio_capture(Allocator::unlimited()).1;
+			assert_eq!(options.config.kind, Some(kind), "{flags:?}");
 		}
 	}
 
@@ -1394,12 +1640,11 @@ pub(crate) mod tests {
 		// Section-framed verbatim stream (SCTE-35, stream_type 0x86).
 		let section = broadcast
 			.broadcast()
-			.unique_track(".scte35", hang::container::track_info(hang::catalog::PRIORITY.text))
-			.unwrap();
+			.unique_track(".scte35", hang::container::track_info(hang::catalog::PRIORITY.text));
 		let mut section_track = tscat::Track::new(SECTION_PID);
 		section_track.verbatim = Some(tscat::Verbatim::new(0x86, tscat::Framing::Section));
 		catalog
-			.modify()
+			.modify(catalog.next_timestamp())
 			.unwrap()
 			.ext
 			.mpegts
@@ -1418,17 +1663,16 @@ pub(crate) mod tests {
 			})
 			.unwrap();
 		section_producer.cut(None).unwrap();
-		section_producer.finish().unwrap();
+		let _finished = section_producer.finish().unwrap();
 
 		// Whole-PES stream (undecoded private data, stream_type 0x06).
 		let pes = broadcast
 			.broadcast()
-			.unique_track(".data", hang::container::track_info(hang::catalog::PRIORITY.text))
-			.unwrap();
+			.unique_track(".data", hang::container::track_info(hang::catalog::PRIORITY.text));
 		let mut pes_track = tscat::Track::new(PES_PID);
 		pes_track.pes_packet = Some(tscat::PesPacket::new(0x06));
 		catalog
-			.modify()
+			.modify(catalog.next_timestamp())
 			.unwrap()
 			.ext
 			.mpegts
@@ -1444,12 +1688,12 @@ pub(crate) mod tests {
 			})
 			.unwrap();
 		pes_producer.cut(None).unwrap();
-		pes_producer.finish().unwrap();
+		let _finished = pes_producer.finish().unwrap();
 
 		// Add the real video/audio (moves `broadcast` into the importer).
 		let mut import = Import::new(broadcast.broadcast().clone(), reserved);
 		import.decode(&BytesMut::from(BBB)).unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 
 		// `catalog`, the producers, and `import` stay alive: the exporter subscribes to
 		// the retained tracks.
@@ -1459,6 +1703,35 @@ pub(crate) mod tests {
 				.unwrap(),
 		)
 		.await
+	}
+
+	/// A stdin TS import of `demo` on an origin of its own, and a reader of its first instance's
+	/// broadcast.
+	fn ts_stdin() -> (Publish, moq_net::broadcast::Consumer) {
+		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
+		if tokio::runtime::Handle::try_current().is_ok() {
+			tokio::spawn(moq_net::time::run(driver));
+		} else {
+			// Nothing polls the driver in a sync test, and dropping it would tear the origin down.
+			std::mem::forget(driver);
+		}
+		let publish = Publish::stdin(
+			&origin,
+			"demo",
+			moq_net::Instance::random(),
+			&PublishFormat::Ts { program: None },
+			Default::default(),
+		)
+		.unwrap();
+		let Source::Stream {
+			decoder: PublishDecoder::Ts(republish),
+			..
+		} = &publish.source
+		else {
+			panic!("a TS import");
+		};
+		let consumer = republish.broadcast().consume();
+		(publish, consumer)
 	}
 
 	/// A source for the broadcast at `path`, resolved through `origin`.
@@ -1492,11 +1765,12 @@ pub(crate) mod tests {
 		// fire instantly instead of waiting on the wall clock.
 		let input = manufacture_input().await;
 
-		// Publish side: `Publish::new(Ts)` builds a `ts::Import<Ext>`, so the verbatim
-		// streams land in the broadcast instead of being dropped by the media-only path.
-		// The broadcast is created on a throwaway origin so the exporter can resolve it by path.
+		// Publish side: a TS import uses the `mpegts` catalog, so the verbatim streams land in
+		// the broadcast instead of being dropped by the media-only path. The broadcast is created
+		// on a throwaway origin so the exporter can resolve it by path, announced once its
+		// catalog goes out.
 		let origin = moq_tokio::origin::spawn();
-		let mut publish = Publish::stdin(
+		let publish = Publish::stdin(
 			&origin,
 			"cli",
 			moq_net::Instance::random(),
@@ -1504,8 +1778,6 @@ pub(crate) mod tests {
 			Default::default(),
 		)
 		.unwrap();
-		publish.route.as_ref().unwrap().announce().unwrap();
-		settle().await;
 		#[cfg_attr(
 			not(feature = "capture"),
 			expect(
@@ -1513,11 +1785,11 @@ pub(crate) mod tests {
 				reason = "`Source::Capture` exists only with the capture feature"
 			)
 		)]
-		let Source::Stream { decoder, .. } = &mut publish.source else {
+		let Source::Stream { mut decoder, .. } = publish.source else {
 			panic!("expected a stream source");
 		};
 		decoder.decode_chunk(&input).unwrap();
-		decoder.finish().unwrap();
+		let _decoder = decoder.finish().unwrap();
 
 		// Subscribe side: the same catalog stream `run_ts` selects, re-emitting the
 		// ancillary streams verbatim.
@@ -1535,7 +1807,7 @@ pub(crate) mod tests {
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
 		let mut import = Import::new(broadcast, catalog.reserve());
 		import.decode(&BytesMut::from(&output[..])).unwrap();
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 		let snapshot = catalog.snapshot();
 
 		let (section_name, section) = snapshot
@@ -1575,14 +1847,14 @@ pub(crate) mod tests {
 		);
 	}
 
-	/// `moq import ts --passthrough` publishes no renditions, only the `m2ts` section naming one
+	/// `moq import ts --passthrough` publishes no renditions, only the `mpegts` section naming one
 	/// track, and that track reads back as the input from its first group on.
 	#[tokio::test(start_paused = true)]
 	async fn ts_passthrough_publishes_the_multiplex_on_one_track() {
 		const KYRION: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/kyrion_mpeg2av_ac3.ts");
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let mut publish = Publish::new(
+		let publish = Publish::new(
 			broadcast,
 			&PublishFormat::TsPassthrough { pcr_pid: None },
 			Default::default(),
@@ -1595,31 +1867,36 @@ pub(crate) mod tests {
 				reason = "`Source::Capture` exists only with the capture feature"
 			)
 		)]
-		let Source::Stream { decoder, .. } = &mut publish.source else {
+		let Source::Stream { mut decoder, .. } = publish.source else {
 			panic!("expected a stream source");
 		};
 		for chunk in KYRION.chunks(64 * 1024) {
 			decoder.decode_chunk(chunk).unwrap();
 		}
-		decoder.finish().unwrap();
+		let _decoder = decoder.finish().unwrap();
 
-		let catalog = hang::catalog::Catalog::<()>::subscribe(&consumer)
+		let catalog = hang::catalog::Catalog::<ts::Ext>::subscribe(&consumer)
 			.await
 			.unwrap()
 			.next()
 			.await
 			.unwrap()
-			.expect("a catalog");
+			.expect("a catalog")
+			.value;
 		assert!(catalog.video.renditions.is_empty() && catalog.audio.renditions.is_empty());
-		let m2ts = catalog.m2ts.expect("the m2ts section");
-		assert!(m2ts.random_access);
+		let passthrough = catalog.ext.mpegts.passthrough.expect("the passthrough track");
+		assert!(passthrough.random_access);
 
 		let mut track = consumer
-			.track(&m2ts.track)
+			.track(&passthrough.track)
 			.unwrap()
 			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(RECORDING_MAX_AGE),
+						max: Some(RECORDING_MAX_AGE),
+					},
+				)]),
 			)
 			.await
 			.unwrap();
@@ -1697,7 +1974,7 @@ pub(crate) mod tests {
 			};
 
 			let origin = moq_tokio::origin::spawn();
-			let mut publish = Publish::stdin(
+			let publish = Publish::stdin(
 				&origin,
 				"pt.hang",
 				moq_net::Instance::random(),
@@ -1713,7 +1990,7 @@ pub(crate) mod tests {
 					reason = "`Source::Capture` exists only with the capture feature"
 				)
 			)]
-			let Source::Stream { decoder, .. } = &mut publish.source else {
+			let Source::Stream { mut decoder, .. } = publish.source else {
 				panic!("expected a stream source");
 			};
 			let _publisher = client()
@@ -1739,13 +2016,14 @@ pub(crate) mod tests {
 				.unwrap()
 				.unwrap()
 				.unwrap();
-			let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&consumer).await.unwrap();
+			let mut catalogs = hang::catalog::Catalog::<ts::Ext>::subscribe(&consumer).await.unwrap();
 			let catalog = kio::clock::timeout(WAIT, catalogs.next())
 				.await
 				.unwrap()
 				.unwrap()
-				.expect("a catalog");
-			let name = catalog.m2ts.expect("the m2ts section").track;
+				.expect("a catalog")
+				.value;
+			let name = catalog.ext.mpegts.passthrough.expect("the passthrough track").track;
 
 			// Subscribe and take the first group, so a read starts behind anything decoded
 			// afterwards: an IETF subscription joins the publisher's current group when its
@@ -1755,7 +2033,7 @@ pub(crate) mod tests {
 				let first = kio::clock::timeout(WAIT, track.recv_group()).await.unwrap().unwrap();
 				(track, first)
 			};
-			// Each group's sequence and frames, read until the track ends. A read cut off as
+			// Each group's start and frames, read until the track ends. A read cut off as
 			// stale leaves `None` for that group's frames, and a marker leaves none.
 			let read = |(mut track, first): (moq_net::track::Subscriber, Option<moq_net::group::Consumer>)| {
 				tokio::spawn(kio::clock::timeout(WAIT, async move {
@@ -1779,30 +2057,34 @@ pub(crate) mod tests {
 								Err(err) => panic!("{err}"),
 							}
 						}
-						groups.push((group.sequence, frames));
+						groups.push((group.start, frames));
 						next = track.recv_group().await.unwrap();
 					}
-					groups.sort_by_key(|(sequence, _)| *sequence);
+					groups.sort_by_key(|(start, _)| *start);
 					groups
 				}))
 			};
 			let recording = read(
 				start(
-					moq_net::track::Subscription::default()
-						.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+					moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+						moq_net::track::Start::Live {
+							min: Some(RECORDING_MAX_AGE),
+							max: Some(RECORDING_MAX_AGE),
+						},
+					)]),
 				)
 				.await,
 			);
 			// All at once: the track ends while the relay is still pulling the older groups.
 			decoder.decode_chunk(&second).unwrap();
-			decoder.finish().unwrap();
+			let _decoder = decoder.finish().unwrap();
 
 			let recording: Vec<_> = recording
 				.await
 				.unwrap()
-				.expect("the recording ends with the track")
+				.unwrap_or_else(|err| panic!("{version}: the recording ends with the track: {err}"))
 				.into_iter()
-				.map(|(sequence, frames)| (sequence, frames.expect("the recording reads every group whole")))
+				.map(|(start, frames)| (start, frames.expect("the recording reads every group whole")))
 				.collect();
 			let output = recording
 				.iter()
@@ -1815,24 +2097,30 @@ pub(crate) mod tests {
 				"{version}: byte-identical from the first group"
 			);
 			let media: Vec<_> = recording.iter().filter(|(_, frames)| !frames.is_empty()).collect();
-			let first = |frames: &[hang::container::Frame]| frames[0].timestamp.as_micros();
+			let first = |frames: &[hang::container::Frame]| frames[0].timestamp.as_micros().unwrap();
 			let jump = media
 				.windows(2)
 				.find(|pair| first(&pair[1].1) > first(&pair[0].1) + 10_000_000)
 				.map(|pair| pair[1].0)
 				.unwrap_or_else(|| panic!("{version}: no jump crossed"));
-			let last = recording.last().unwrap().0;
-			assert_eq!(
-				recording.iter().map(|(sequence, _)| *sequence).collect::<Vec<_>>(),
-				(recording[0].0..=last).collect::<Vec<_>>(),
-				"{version}: no group missing"
+			// Groups are keyed by their starts, so a missing one shows in the bytes above rather than
+			// in the keys, which only have to rise.
+			let starts: Vec<u64> = recording.iter().map(|(start, _)| *start).collect();
+			assert!(
+				starts.windows(2).all(|pair| pair[0] < pair[1]),
+				"{version}: groups in start order: {starts:?}"
 			);
+			let at = starts.iter().position(|start| *start == jump).unwrap();
 			let markers: Vec<u64> = recording
 				.iter()
 				.filter(|(_, frames)| frames.is_empty())
-				.map(|(sequence, _)| *sequence)
+				.map(|(start, _)| *start)
 				.collect();
-			assert_eq!(markers, [jump - 1], "{version}: the break marker precedes the jump");
+			assert_eq!(
+				markers,
+				[starts[at - 1]],
+				"{version}: the break marker precedes the jump"
+			);
 
 			// Joining once every group is out, with a budget half the jump, reads every group
 			// after it past the marker, and none of the groups the jump left more than
@@ -1841,8 +2129,12 @@ pub(crate) mod tests {
 			if version.starts_with("moq-lite") {
 				let late = read(
 					start(
-						moq_net::track::Subscription::default()
-							.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
+						moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+							moq_net::track::Start::Live {
+								min: Some(Duration::from_secs(10)),
+								max: Some(Duration::from_secs(10)),
+							},
+						)]),
 					)
 					.await,
 				)
@@ -1852,14 +2144,14 @@ pub(crate) mod tests {
 				let whole: Vec<u64> = late
 					.iter()
 					.filter(|(_, frames)| frames.is_some())
-					.map(|(sequence, _)| *sequence)
+					.map(|(start, _)| *start)
 					.collect();
 				assert!(
-					whole.ends_with(&(jump..=last).collect::<Vec<_>>()),
+					whole.ends_with(&starts[at..]),
 					"{version}: a late subscriber reads every group from the jump on: {whole:?}"
 				);
 				assert!(
-					whole.iter().all(|sequence| *sequence + 2 >= jump),
+					whole.iter().all(|start| *start >= starts[at - 2]),
 					"{version}: only the group the jump follows is in budget before it: {whole:?}"
 				);
 			}
@@ -1870,9 +2162,7 @@ pub(crate) mod tests {
 	/// clock on it, so the first frame is live on arrival.
 	#[tokio::test]
 	async fn ts_import_anchors_the_catalog_clock_on_arrival() {
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let consumer = broadcast.consume();
-		let mut publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
+		let (publish, consumer) = ts_stdin();
 		#[cfg_attr(
 			not(feature = "capture"),
 			expect(
@@ -1880,13 +2170,13 @@ pub(crate) mod tests {
 				reason = "`Source::Capture` exists only with the capture feature"
 			)
 		)]
-		let Source::Stream { decoder, .. } = &mut publish.source else {
+		let Source::Stream { mut decoder, .. } = publish.source else {
 			panic!("expected a stream source");
 		};
 		let before = kio::clock::wall();
 		decoder.decode_chunk(BBB).unwrap();
 		let after = kio::clock::wall();
-		decoder.finish().unwrap();
+		let _decoder = decoder.finish().unwrap();
 
 		let catalog = hang::catalog::Catalog::<()>::subscribe(&consumer)
 			.await
@@ -1894,14 +2184,18 @@ pub(crate) mod tests {
 			.next()
 			.await
 			.unwrap()
-			.expect("a catalog");
-		let clock = catalog.media.clock.expect("the catalog advertises a clock");
+			.expect("a catalog")
+			.value;
+		let clock = catalog.sync.clock.expect("the catalog advertises a clock");
 		let (name, config) = catalog.video.renditions.iter().next().expect("a video rendition");
-		let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
+		// The import already finished, so the default live join's zero max would age its last
+		// group out as the wall clock passes its span: read the whole clip as history instead.
+		let history = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL]);
+		let track = consumer.track(name).unwrap().subscribe(history).await.unwrap();
 		let container = moq_mux::catalog::hang::Container::try_from(config).unwrap();
 		let first = next_frame(&mut Consumer::new(track, container)).await.timestamp;
 		assert!(
-			first.as_micros() < Duration::from_secs(5).as_micros(),
+			first.as_micros().unwrap() < Duration::from_secs(5).as_micros(),
 			"the feed's own PTS: {first:?}"
 		);
 		// The PES that anchors the mapping need not be this frame: the mux spaces them apart.
@@ -1917,13 +2211,9 @@ pub(crate) mod tests {
 	/// would announce a stdin import before it can serve anything.
 	#[tokio::test]
 	async fn echo_rides_the_first_catalog() {
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let consumer = broadcast.consume();
+		let (publish, consumer) = ts_stdin();
 		let echo = hang::catalog::Echo::new(moq_net::path::Relative::new("viewers").unwrap());
-		let mut publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default())
-			.unwrap()
-			.with_echo(echo.clone())
-			.unwrap();
+		let publish = publish.with_echo(echo.clone()).unwrap();
 		let mut track = consumer.track(Catalog::DEFAULT_NAME).unwrap();
 		let mut published = || {
 			matches!(
@@ -1940,11 +2230,11 @@ pub(crate) mod tests {
 				reason = "`Source::Capture` exists only with the capture feature"
 			)
 		)]
-		let Source::Stream { decoder, .. } = &mut publish.source else {
+		let Source::Stream { mut decoder, .. } = publish.source else {
 			panic!("expected a stream source");
 		};
 		decoder.decode_chunk(BBB).unwrap();
-		decoder.finish().unwrap();
+		let _decoder = decoder.finish().unwrap();
 		assert!(published(), "the input's tracks release the catalog");
 		let catalog = Catalog::<()>::subscribe(&consumer)
 			.await
@@ -1952,7 +2242,8 @@ pub(crate) mod tests {
 			.next()
 			.await
 			.unwrap()
-			.expect("a catalog");
+			.expect("a catalog")
+			.value;
 		assert_eq!(catalog.echo, Some(echo));
 		assert!(!catalog.video.renditions.is_empty(), "beside the tracks");
 	}
@@ -1979,8 +2270,7 @@ pub(crate) mod tests {
 			}
 		}
 
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
+		let (publish, _) = ts_stdin();
 		#[cfg_attr(
 			not(feature = "capture"),
 			expect(
@@ -2024,8 +2314,7 @@ pub(crate) mod tests {
 			}
 			file.flush().unwrap();
 			let input = tokio::fs::File::open(file.path()).await.unwrap();
-			let broadcast = moq_net::broadcast::Info::new().produce();
-			let publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
+			let (publish, _) = ts_stdin();
 			#[cfg_attr(
 				not(feature = "capture"),
 				expect(
@@ -2048,9 +2337,7 @@ pub(crate) mod tests {
 	/// subscriber reads a finished broadcast rather than its tracks being removed.
 	#[tokio::test(start_paused = true)]
 	async fn eof_finishes_the_catalog_with_its_renditions() {
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let consumer = broadcast.consume();
-		let publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
+		let (publish, consumer) = ts_stdin();
 		let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&consumer).await.unwrap();
 
 		#[cfg_attr(
@@ -2072,7 +2359,7 @@ pub(crate) mod tests {
 				.await
 				.expect("the catalog track ends");
 			match next.expect("the catalog ends cleanly") {
-				Some(catalog) => last = Some(catalog),
+				Some(catalog) => last = Some(catalog.value),
 				None => break,
 			}
 		}
@@ -2086,9 +2373,7 @@ pub(crate) mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_finished_import_serves_its_tracks_for_the_linger() {
 		const LINGER: Duration = Duration::from_secs(30);
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let consumer = broadcast.consume();
-		let publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
+		let (publish, consumer) = ts_stdin();
 		let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&consumer).await.unwrap();
 
 		#[cfg_attr(
@@ -2112,7 +2397,7 @@ pub(crate) mod tests {
 			res = &mut import => panic!("the import returned before its linger: {res:?}"),
 			name = async {
 				loop {
-					let catalog = catalogs.next().await.unwrap().expect("a catalog before the finish");
+					let catalog = catalogs.next().await.unwrap().expect("a catalog before the finish").value;
 					if let Some(name) = catalog.video.renditions.keys().next() {
 						break name.clone();
 					}
@@ -2161,7 +2446,8 @@ pub(crate) mod tests {
 				Default::default(),
 			)
 			.unwrap();
-			let broadcast = publish.route.clone().unwrap();
+			// A TS import announces through its own route.
+			let pending = publish.route.clone().map(|route| Pending::new(route).unwrap());
 			#[cfg_attr(
 				not(feature = "capture"),
 				expect(
@@ -2172,10 +2458,9 @@ pub(crate) mod tests {
 			let Source::Stream { decoder, catalog } = publish.source else {
 				panic!("expected a stream source");
 			};
-			let pending = Pending::new(broadcast).unwrap();
 			let (mut stdin, input_end) = tokio::io::duplex(input.len());
 			let publication = Publication {
-				pending: Some(pending),
+				pending,
 				..Default::default()
 			};
 			let mut import = std::pin::pin!(decode(decoder, catalog, input_end, publication));
@@ -2195,11 +2480,11 @@ pub(crate) mod tests {
 					let event = announced.next().await.expect("origin closed");
 					assert!(matches!(event, moq_net::announce::Event::Present(_)), "{event:?}");
 					let broadcast = consumer.request("demo", None).await.unwrap();
-					let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&broadcast).await.unwrap();
-					let catalog = catalogs.next().await.unwrap().expect("a catalog");
-					// A passthrough carries the multiplex on one track, named by its m2ts section.
-					let name = match catalog.m2ts {
-						Some(m2ts) => m2ts.track,
+					let mut catalogs = hang::catalog::Catalog::<ts::Ext>::subscribe(&broadcast).await.unwrap();
+					let catalog = catalogs.next().await.unwrap().expect("a catalog").value;
+					// A passthrough carries the multiplex on one track, named in the mpegts section.
+					let name = match catalog.ext.mpegts.passthrough {
+						Some(passthrough) => passthrough.track,
 						None => catalog.video.renditions.keys().next().expect("a video rendition").clone(),
 					};
 					broadcast.track(&name).unwrap().subscribe(None).await
@@ -2224,15 +2509,8 @@ pub(crate) mod tests {
 				std::task::Poll::Ready(Err(std::io::Error::other("stdin failed")))
 			}
 		}
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let publish = Publish::new(
-			broadcast.clone(),
-			&PublishFormat::Ts { program: None },
-			Default::default(),
-		)
-		.unwrap();
-		let mut catalog_reader = broadcast
-			.consume()
+		let (publish, consumer) = ts_stdin();
+		let mut catalog_reader = consumer
 			.track(hang::Catalog::DEFAULT_NAME)
 			.unwrap()
 			.subscribe(None)
@@ -2259,13 +2537,13 @@ pub(crate) mod tests {
 
 	/// A source whose clock steps back republishes the path under a new instance, announced once
 	/// its catalog goes out, with the sections the first instance's catalog carried. The new
-	/// catalog reuses the first instance's mux rate, so it goes out with the first media rather
-	/// than after a fresh two-second measurement window.
+	/// catalog reuses the first instance's mux rate, so an export of it needn't wait on a fresh
+	/// measurement window.
 	#[tokio::test(start_paused = true)]
 	async fn a_clock_step_republishes_under_a_new_instance() {
 		// 5 s of H.264 and AAC at a constant 400 kb/s, its clock on PID 0x100.
 		const CLIP: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/bbb5s_cbr.ts");
-		// Its first 1.5 s: short of a measurement window, so only a reused rate releases a catalog.
+		// Its first 1.5 s: short of a measurement window, so only a reused rate is in the catalog.
 		const HEAD: &[u8] = CLIP.split_at(400 * 188).0;
 		let mut flag = vec![0x47, 0x01, 0x00, 0x20, 183, 0x80];
 		flag.resize(188, 0xff);
@@ -2295,12 +2573,8 @@ pub(crate) mod tests {
 		let Source::Stream { decoder, catalog } = publish.source else {
 			panic!("expected a stream source");
 		};
-		let control = publish.route.unwrap();
 		let publication = Publication {
-			pending: Some(Pending::new(control.clone()).unwrap()),
-			control: Some(control),
-			broadcast: publish.broadcast,
-			republish: publish.republish,
+			sections: publish.sections,
 			..Default::default()
 		};
 		let (mut stdin, input_end) = tokio::io::duplex(2 * CLIP.len() + flag.len());
@@ -2325,7 +2599,7 @@ pub(crate) mod tests {
 		assert_eq!(next(&mut import).await, first);
 		let broadcast = origin.consume().request("demo", None).await.unwrap();
 		let mut catalogs = hang::catalog::Catalog::<ts::Ext>::subscribe(&broadcast).await.unwrap();
-		let catalog = catalogs.next().await.unwrap().expect("a catalog");
+		let catalog = catalogs.next().await.unwrap().expect("a catalog").value;
 		let rate = catalog
 			.ext
 			.mpegts
@@ -2340,7 +2614,7 @@ pub(crate) mod tests {
 		assert_ne!(next(&mut import).await, first, "the new instance has its own instance");
 		let broadcast = origin.consume().request("demo", None).await.unwrap();
 		let mut catalogs = hang::catalog::Catalog::<ts::Ext>::subscribe(&broadcast).await.unwrap();
-		let catalog = catalogs.next().await.unwrap().expect("a catalog");
+		let catalog = catalogs.next().await.unwrap().expect("a catalog").value;
 		assert!(catalog.echo.is_some(), "the new instance solicits feedback too");
 		assert_eq!(
 			catalog.ext.mpegts.mux_rate,
@@ -2350,8 +2624,11 @@ pub(crate) mod tests {
 		// Its first group is already out with the catalog.
 		let (name, _) = catalog.video.renditions.iter().next().expect("a video rendition");
 		let mut track = broadcast.track(name).unwrap().subscribe(None).await.unwrap();
-		let group = track.recv_group().await.unwrap().expect("the first group");
-		assert_eq!(group.sequence, 0, "the new instance's first group");
+		track
+			.recv_group()
+			.await
+			.unwrap()
+			.expect("the new instance's first group");
 		drop(stdin);
 		import.await.unwrap();
 	}
@@ -2368,6 +2645,7 @@ pub(crate) mod tests {
 
 		const CLIP: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/bbb5s_cbr.ts");
 		let origin = moq_tokio::origin::spawn();
+		let mut announced = origin.consume().announced();
 		let publish = Publish::stdin(
 			&origin,
 			"demo",
@@ -2383,24 +2661,28 @@ pub(crate) mod tests {
 		let Source::Stream { decoder, catalog } = publish.source else {
 			panic!("a stream source");
 		};
-		let control = publish.route.unwrap();
 		let mut instance = Instance {
 			decoder,
 			catalog,
-			pending: Some(Pending::new(control.clone()).unwrap()),
-			control: Some(control),
-			broadcast: publish.broadcast,
+			pending: None,
+			control: None,
+			broadcast: None,
 			report: None,
 		};
-		let republish = publish.republish.unwrap();
 		let mut log = ts::stats::Log::default();
 		let mut follower = None;
+		let mut listed = false;
 		let mut output = [Vec::new(), Vec::new()];
 		for chunk in CLIP.iter().chain(CLIP).copied().collect::<Vec<_>>().chunks(8 * 188) {
-			if let Some(restart) = feed(&mut instance.decoder, &mut instance.pending, chunk).unwrap() {
-				instance.restart(&republish, restart, &mut log).unwrap();
+			if let Some(republished) = feed(&mut instance.decoder, &mut instance.pending, chunk).unwrap() {
+				instance
+					.republished(&Sections::default(), republished, &mut log)
+					.unwrap();
 			}
-			if follower.is_none() && instance.pending.is_none() {
+			while let Some(event) = announced.try_next() {
+				listed |= matches!(event, moq_net::announce::Event::Present(_));
+			}
+			if follower.is_none() && listed {
 				let export = open_export(
 					resolved(&origin, "demo").await,
 					CatalogFormat::Hang,
@@ -2428,9 +2710,17 @@ pub(crate) mod tests {
 			}
 			tokio::time::advance(Duration::from_micros(30_080)).await;
 		}
-		instance.decoder.finish().unwrap();
-		instance.catalog.finish().unwrap();
-		drop(instance);
+		let Instance {
+			decoder,
+			mut catalog,
+			control,
+			broadcast,
+			pending,
+			report,
+		} = instance;
+		let decoder = decoder.finish().unwrap();
+		catalog.finish().unwrap();
+		drop((decoder, catalog, control, broadcast, pending, report));
 		let mut follower = follower.unwrap();
 		while let Some(frame) = follower.next().await.unwrap() {
 			output[follower.export().discontinuity() as usize].extend_from_slice(&frame.payload);
@@ -2496,7 +2786,7 @@ pub(crate) mod tests {
 			(PublishFormat::Ts { program: None }, Vec::new()),
 			(PublishFormat::Ts { program: Some(1) }, tables),
 			(PublishFormat::Flv, flv_header),
-			(PublishFormat::Avc3, aud),
+			(PublishFormat::H264, aud),
 		] {
 			let origin = moq_tokio::origin::spawn();
 			let mut announced = origin.consume().announced();
@@ -2508,7 +2798,8 @@ pub(crate) mod tests {
 				Default::default(),
 			)
 			.unwrap();
-			let broadcast = publish.route.clone().unwrap();
+			// A TS import announces through its own route.
+			let pending = publish.route.clone().map(|route| Pending::new(route).unwrap());
 			#[cfg_attr(
 				not(feature = "capture"),
 				expect(
@@ -2519,9 +2810,8 @@ pub(crate) mod tests {
 			let Source::Stream { decoder, catalog } = publish.source else {
 				panic!("expected a stream source");
 			};
-			let pending = Pending::new(broadcast).unwrap();
 			let publication = Publication {
-				pending: Some(pending),
+				pending,
 				..Default::default()
 			};
 			let err = decode(decoder, catalog, &input[..], publication).await.unwrap_err();
@@ -2628,8 +2918,7 @@ pub(crate) mod tests {
 	/// Plain `import ts` refuses a multiplex, naming its programs and the flag that picks one.
 	#[test]
 	fn a_multiplex_is_refused_with_the_programs_and_the_flag() {
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let mut publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
+		let (mut publish, _) = ts_stdin();
 		#[cfg_attr(
 			not(feature = "capture"),
 			expect(

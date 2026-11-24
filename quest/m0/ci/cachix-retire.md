@@ -5,7 +5,7 @@
 Tags cut from `release` push their Nix packages to nix.moq.dev through
 `release-nix.yml`, and a clean machine substitutes a tagged package from
 there. `release` no longer runs `cachix.yml`, and `CACHIX_AUTH_TOKEN` is
-deleted. Both nix.moq.dev bucket sizes hold under the CI bucket's 30-day
+deleted. Both nix.moq.dev bucket sizes hold under the CI bucket's 14-day
 expiry.
 
 ## Plan
@@ -40,8 +40,8 @@ otherwise have to move.
   push` would fail), any local action it uses, the deletion of
   `cachix.yml`, and `main`'s `cache.yml` in place of `release`'s, whose
   dispatch-only `warm` job still runs `cachix push kixelated` with
-  `CACHIX_AUTH_TOKEN` and would fail once the token is gone. Match `release`'s own tag patterns (it still cuts `libmoq-v*`
-  where `main` cuts `moq-c-v*`) and the flake attributes `release` builds; the
+  `CACHIX_AUTH_TOKEN` and would fail once the token is gone. Match `release`'s own tag patterns and the flake attributes `release` builds
+  (`main` cuts `libmoq-v*` like `release`); the
   `cache-write` Environment must admit those tags.
 - On the first `moq-relay-v*` or `moq-cli-v*` tag after the backport, record
   its `release-nix.yml` pushes from all three legs, then
@@ -57,9 +57,9 @@ Public API: none. Wire: none.
 
 - Maintainer: record both bucket sizes no earlier than 2026-11-24, a month
   after the first `cache.yml` push to `nix-ci-moq-dev` on 2026-10-24, against
-  the 30-day expiry in `infra/nix/lifecycle.json`. Sizes need a
+  the 14-day expiry in `infra/nix/lifecycle.json`. Sizes need a
   `wrangler login` to the Cloudflare account, which agents lack. A path
-  expires 30 days after upload even while CI still reads it, and `nix copy`
+  expires 14 days after upload even while CI still reads it, and `nix copy`
   re-uploads it on the next merge. Look for Nightly jobs that fell back to
   source builds once paths expired (`building '/nix/store/...uniffi-bindgen`
   in a job log), and refresh on a schedule or switch to a closure-aware

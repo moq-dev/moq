@@ -75,8 +75,24 @@ test("the corpus has cases", () => {
 	expect(cases.length).toBeGreaterThan(0);
 });
 
+// The lite-07 Announce Stream types only two nodes that both declared a Node ID exchange. This
+// node declares none, so it refuses them all, where a routing node decodes the well-formed ones.
+const ROUTING = new Set([3, 7, 8, 9, 10]);
+
+function routing(c: Case): boolean {
+	return (
+		c.message === "announce" &&
+		version(c.version) === Version.DRAFT_07 &&
+		ROUTING.has(Number.parseInt(c.hex.slice(0, 2), 16))
+	);
+}
+
 for (const c of cases) {
 	test(c.name, async () => {
-		expect(await outcome(c)).toBe(c.expect === "decoded" ? c.hex : "refused");
+		if (routing(c)) {
+			expect(await outcome(c)).toBe("refused");
+			return;
+		}
+		expect(await outcome(c)).toBe(c.expect === "decoded" ? c.hex : c.expect);
 	});
 }

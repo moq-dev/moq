@@ -33,7 +33,7 @@ pub async fn test_relay() -> anyhow::Result<TestRelay> {
 		.collect();
 	config.listen.tls.generate = vec!["localhost".into()];
 	config.web.http.listen = Some("127.0.0.1:0".parse()?);
-	config.auth.public = vec![moq_auth::Pattern::all()];
+	config.auth.public = vec![moq_auth::Prefix::all()];
 
 	let relay = Relay::load(config).await?.with_signals(false);
 	let quic = relay.quic_addr()?;

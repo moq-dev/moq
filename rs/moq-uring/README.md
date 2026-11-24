@@ -47,8 +47,7 @@ local (`!Send`) task set, and the UDP sockets bound through it.
   `quic::Transport::qlog` turns capture on. The pinned worker never writes to
   the file: the QUIC stacks want a `Send + Sync` writer, which cannot hold the
   worker's `!Send` ring handle, so a trace is staged in memory and handed to
-  one background thread for every worker sharing the sink. Behind the `qlog`
-  feature, so a production build compiles none of it.
+  one background thread for every worker sharing the sink.
 - **Metrics**: a set of relaxed atomic counters per worker, read from any
   thread through `metrics::Metrics::snapshot`. Buffer-pool health (`ENOBUFS`,
   provided-buffer exhaustion, TX-pool stalls), batch effectiveness (datagrams
@@ -93,10 +92,10 @@ Building without default features leaves the `quic` module out entirely.
 just rs uring
 ```
 
-`moq-relay` enables it with `--features io-uring`.
+`moq-relay` always builds it on Linux and serves from it with `--runtime-io-uring`.
 
-The `qlog` feature turns on moq-quic's capture support. It writes one file per
-endpoint on the accept side and per dial on the connect side.
+qlog capture writes one file per endpoint on the accept side and per dial on
+the connect side.
 
 ## Validation
 
@@ -152,9 +151,11 @@ just rs test -p moq-uring --release -E 'test(benchmark_socket_queues)' --run-ign
 
 ## Parallel test runs
 
-Locked memory is charged per user across processes, not per nextest run.
+Linux 6.14 up to the 7.3 fix (backported to stable kernels) charges rings to
+locked memory per user across processes, not per nextest run; other kernels
+charge them to the memory cgroup.
 Unit tests use 128 SQ entries and 512 CQ entries instead of the production
-256/2048 geometry. Integration tests still exercise production rings.
+256/1024 geometry. Integration tests still exercise production rings.
 The nextest group allows four ring tests per invocation. Each socket-queue
 benchmark axis occupies all four slots, excluding other ring tests while measuring.
 
@@ -162,7 +163,7 @@ Other programs draw on the same budget. libuv gives every event loop a
 256-entry ring of 28 KiB, and it creates these without checking
 `UV_USE_IO_URING`. A desktop running nine agent sessions held 4 to 5 MiB of an
 8 MiB limit before any test started, mostly in Node.js tool servers. A
-production-geometry worker takes 52 KiB and a unit-test worker 20 KiB.
+production-geometry worker takes 36 KiB and a unit-test worker 20 KiB.
 One `moq-uring` plus `moq-relay` test invocation needs about 0.5 to 1 MiB
 of what is left. Count the rings with `ls -l /proc/*/fd 2>/dev/null | grep -c io_uring`.
 

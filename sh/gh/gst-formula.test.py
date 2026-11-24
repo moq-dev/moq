@@ -39,7 +39,8 @@ class Installer(unittest.TestCase):
 
     def test_failed_test_cleans_only_created_tap_and_install(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            # Real path, as the formula records it; macOS's temp dir sits behind a symlink.
+            root = Path(tmp).resolve()
             (root / "Formula").mkdir()
 
             def brew(command, **kwargs):

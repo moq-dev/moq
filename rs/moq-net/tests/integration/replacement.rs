@@ -11,10 +11,12 @@
 //! from then on, so its holder follows the `Restart` instead.
 
 use crate::support;
+use support::AppendNext;
+use support::AtStart;
 
 use std::time::Duration;
 
-use moq_net::{Error, Instance, Timestamp, Version, broadcast, origin, track};
+use moq_net::{Error, Instance, Version, broadcast, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -25,9 +27,11 @@ fn timed() -> moq_net::track::Info {
 const TEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// Have `to` pull everything `from` publishes, over a new session.
@@ -48,8 +52,8 @@ async fn next_event(announced: &mut origin::Routes) -> origin::RouteEvent {
 
 /// Write one group of one frame tagged `tag`.
 fn write(track: &track::Producer, tag: &str) {
-	let mut group = track.append_group().unwrap();
-	group.write_frame(Timestamp::ZERO, tag.as_bytes().to_vec()).unwrap();
+	let mut group = track.append_next().unwrap();
+	group.write_frame(group.at_start(), tag.as_bytes().to_vec()).unwrap();
 	group.finish().unwrap();
 }
 
@@ -97,6 +101,7 @@ async fn replace(version: &str, instance: Option<Instance>) {
 		origin::RouteEvent {
 			kind: origin::RouteKind::Start,
 			announce,
+			..
 		} => {
 			assert_eq!(announce.prefix.as_str(), "cam");
 			let carried = announce.route.instance();
@@ -139,6 +144,7 @@ async fn replace(version: &str, instance: Option<Instance>) {
 		Some(origin::RouteEvent {
 			kind: origin::RouteKind::Restart,
 			announce,
+			..
 		}) => assert_eq!(announce.prefix.as_str(), "cam"),
 		other => panic!("{version}: expected the restart, got {other:?}"),
 	}
@@ -179,7 +185,7 @@ async fn carried_lite07() {
 /// does over older lite.
 #[kio::test]
 async fn minted_ietf() {
-	for version in ["moq-transport-18", "moq-transport-22"] {
+	for version in ["moq-transport-18", "moq-transport-22", "moq-transport-23"] {
 		kio::clock::timeout(TEST_TIMEOUT, replace(version, Some("cam".parse().unwrap())))
 			.await
 			.expect("timed out");
@@ -309,7 +315,7 @@ async fn restart_while_the_old_session_lingers(version: &str, old_hop: u64, new_
 
 #[kio::test]
 async fn restart_while_the_old_session_lingers_wins() {
-	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
+	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22", "moq-transport-23"] {
 		for (old_hop, new_hop) in [(1, 4), (4, 1)] {
 			kio::clock::timeout(
 				TEST_TIMEOUT,

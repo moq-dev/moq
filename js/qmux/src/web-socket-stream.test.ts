@@ -1,5 +1,6 @@
 import { describe, expect, onTestFinished, test } from "bun:test";
-import { Duration, Manual, yieldNow } from "@moq/clock";
+import { Duration, yieldNow } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import {
 	openWebSocketStream,
 	type WebSocketConstructor,
@@ -97,6 +98,19 @@ describe("WebSocketStream ponyfill", () => {
 		const b = await reader.read();
 		expect(a.value).toEqual(new Uint8Array([1, 2, 3]));
 		expect(b.value).toBe("hello");
+	});
+
+	test("a message arriving after the readable is cancelled is dropped", async () => {
+		const wss = new WebSocketStream("wss://x", { webSocket: ctor });
+		const ws = FakeWebSocket.last as FakeWebSocket;
+		ws.open();
+		const { readable } = await wss.opened;
+		await readable.cancel();
+		expect(ws.closeArgs).toBeDefined();
+
+		// The socket is only closing, so frames already in flight still arrive.
+		expect(() => ws.message(new Uint8Array([1]).buffer)).not.toThrow();
+		expect(() => ws.message("late")).not.toThrow();
 	});
 
 	test("writes are sent and backpressure follows bufferedAmount", async () => {

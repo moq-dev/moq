@@ -6,19 +6,19 @@
 //! AV1 OBU temporal units, and VP8 / VP9 frames untouched. Gates output until the
 //! first keyframe so the backend never sees a delta frame it can't decode.
 //!
-//! The container decides the NAL framing. CMAF samples are always
-//! length-prefixed (ISO/IEC 14496-15), so even an avc3 / hev1 track, whose
-//! parameter sets ride in the samples, converts with the length size from its
-//! description. A Legacy or LOC track is Annex-B when the codec says its
-//! parameter sets are in band (avc3 / hev1), and length-prefixed otherwise
-//! (avc1 / hvc1).
+//! The catalog's `description` decides the NAL framing, never the codec
+//! prefix. A configuration record (avcC / hvcC) means length-prefixed NAL units
+//! of its length size, its parameter sets seeding every keyframe; no record
+//! means Annex-B carrying its own parameter sets. The prefix only says where
+//! the parameter sets live: avc3 / hev1 may repeat them in band beside a
+//! record, as the fMP4 and HLS imports publish. CMAF samples are always
+//! length-prefixed, so a CMAF track needs its record.
 //!
-//! A track that says avc1 and carries no description is read as Annex-B rather
-//! than refused. A browser encoding with WebCodecs' `annexb` output keeps the
-//! avc1 label while putting its parameter sets in band, which is what
-//! `@moq/publish` does today. Length-prefixed payloads without their parameter
-//! sets could not be decoded anyway, so the lenient reading only ever turns an
-//! error into a picture.
+//! A Legacy or LOC avc1 / hvc1 track with no record contradicts itself and is
+//! read as Annex-B rather than refused, as older `@moq/publish` builds labelled
+//! their Annex-B output: length-prefixed payloads without their parameter sets
+//! could not be decoded anyway, so the lenient reading only ever turns an error
+//! into a picture.
 
 use std::collections::VecDeque;
 use std::marker::PhantomData;
@@ -87,16 +87,13 @@ pub struct Config {
 	/// [`Frame::resize`](crate::Frame::resize) to the rest; the hint only lets a
 	/// decoder that can make that a no-op do so.
 	pub scale_hint: Option<Size>,
-	/// The VA-API render node, such as `/dev/dri/renderD129`. `None` picks the
-	/// first that encodes, decodes, and scales, so a DMA-BUF moves between them
-	/// without a copy. A named node is used even when it fails to open.
-	#[cfg(all(target_os = "linux", feature = "vaapi"))]
-	pub vaapi: Option<std::path::PathBuf>,
-	/// The V4L2 M2M decoder node, such as `/dev/video10`. `None` searches every
-	/// node for one that decodes H.264, which a driver whose format enumeration
-	/// is wrong can defeat.
-	#[cfg(all(target_os = "linux", feature = "v4l2"))]
-	pub v4l2: Option<std::path::PathBuf>,
+	/// The hardware the decoder opens. [`Device::Auto`](crate::Device::Auto)
+	/// (the default) picks one: VA-API the first render node that encodes,
+	/// decodes, and scales, so a DMA-BUF moves between them without a copy;
+	/// NVDEC the first CUDA device; V4L2 the first node that decodes H.264,
+	/// which a driver whose format enumeration is wrong can defeat. Name the
+	/// encoder's device so a frame passes to it without a copy.
+	pub device: crate::Device,
 }
 
 impl Config {
@@ -108,11 +105,11 @@ impl Config {
 
 /// How to turn a container payload into a backend access unit.
 enum Conversion {
-	/// The payload is already in the backend's input framing: Annex-B for a
-	/// Legacy or LOC avc3 / hev1, OBU temporal units for AV1, one coded frame for
-	/// VP8 / VP9.
+	/// The payload is already in the backend's input framing: Annex-B for an
+	/// H.264 / H.265 track with no record, OBU temporal units for AV1, one coded
+	/// frame for VP8 / VP9.
 	Passthrough,
-	/// avc1 / hvc1, and every CMAF H.264 / H.265 track: length-prefixed NALs.
+	/// An H.264 / H.265 track with a record: length-prefixed NALs.
 	/// Replace the length prefixes with start codes and prepend `keyframe_prefix`
 	/// (the description's parameter sets, empty when they are all in band) ahead
 	/// of every keyframe. `pins_size` is whether the description carries an
@@ -141,6 +138,12 @@ impl Conversion {
 		}
 	}
 }
+
+/// The most colour switches a decoder waits on. Each one is a keyframe whose
+/// pictures the backend still holds behind earlier ones, so a decoder never needs
+/// more than it holds pictures: at most 16 for H.264 and H.265, and this leaves
+/// room for a hardware pipeline beyond that, as the consumer's arrivals do.
+const SWITCHES: usize = 32;
 
 /// Decodes container payloads (the codec bitstream) into raw [`Frame`]s.
 ///
@@ -190,14 +193,19 @@ impl Decoder {
 	/// for another reason, such as a missing driver, the result is
 	/// [`Error::NoDecoder`], a fault rather than a property of the track.
 	pub fn new(catalog: &VideoConfig, config: &Config) -> Result<Self, Error> {
-		// CMAF samples are length-prefixed whatever the sample entry; Legacy and LOC
-		// carry Annex-B exactly when the parameter sets are in band.
+		// The description decides the framing, never the codec prefix: with a
+		// configuration record the NAL units are length-prefixed by its length size,
+		// without one they are Annex-B. CMAF samples are always length-prefixed, so
+		// they need the record.
 		let cmaf = matches!(catalog.container, Container::Cmaf { .. });
+		let description = catalog
+			.description
+			.as_ref()
+			.filter(|description| !description.is_empty());
 		let (codec, conversion) = match &catalog.codec {
 			VideoCodec::H264(h264) => {
-				let conversion = match (cmaf || !h264.inline, catalog.description.as_ref()) {
-					(false, _) => Conversion::Passthrough,
-					(true, Some(avcc)) => {
+				let conversion = match description {
+					Some(avcc) => {
 						let params = h264::Avcc::parse(avcc)
 							.map_err(|err| Error::UnsupportedCodec(format!("invalid avcC description: {err}")))?;
 						let keyframe_prefix = annexb::build_prefix(params.sps.iter().chain(params.pps.iter()));
@@ -207,34 +215,24 @@ impl Decoder {
 							pins_size: !params.sps.is_empty(),
 						}
 					}
-					(true, None) if cmaf => {
-						return Err(Error::UnsupportedCodec(
-							"CMAF H.264 track is missing its avcC description".into(),
-						));
-					}
-					(true, None) => {
-						tracing::warn!("avc1 track has no avcC description; reading it as Annex-B");
-						Conversion::Passthrough
-					}
+					None => annexb_conversion(cmaf, h264.inline, "H.264", "avcC")?,
 				};
 				(Codec::H264, conversion)
 			}
 			VideoCodec::H265(h265) => {
-				let conversion = if !cmaf && h265.in_band {
-					Conversion::Passthrough
-				} else {
-					let hvcc = catalog.description.as_ref().ok_or_else(|| {
-						Error::UnsupportedCodec("length-prefixed H.265 track is missing its hvcC description".into())
-					})?;
-					let params = h265::Hvcc::parse(hvcc)
-						.map_err(|err| Error::UnsupportedCodec(format!("invalid hvcC description: {err}")))?;
-					let keyframe_prefix =
-						annexb::build_prefix(params.vps.iter().chain(params.sps.iter()).chain(params.pps.iter()));
-					Conversion::LengthPrefixed {
-						length_size: params.length_size,
-						keyframe_prefix,
-						pins_size: !params.sps.is_empty(),
+				let conversion = match description {
+					Some(hvcc) => {
+						let params = h265::Hvcc::parse(hvcc)
+							.map_err(|err| Error::UnsupportedCodec(format!("invalid hvcC description: {err}")))?;
+						let keyframe_prefix =
+							annexb::build_prefix(params.vps.iter().chain(params.sps.iter()).chain(params.pps.iter()));
+						Conversion::LengthPrefixed {
+							length_size: params.length_size,
+							keyframe_prefix,
+							pins_size: !params.sps.is_empty(),
+						}
 					}
+					None => annexb_conversion(cmaf, h265.in_band, "H.265", "hvcC")?,
 				};
 				(Codec::H265, conversion)
 			}
@@ -297,13 +295,36 @@ impl Decoder {
 	/// Convert one access unit and hand it to the backend.
 	fn submit(&mut self, payload: &Bytes, timestamp: Timestamp, keyframe: bool) -> Result<(), Error> {
 		let access_unit = self.conversion.access_unit(payload, keyframe)?;
-		if keyframe
-			&& let Some(color) = super::vui::signalled(self.codec, &access_unit)
-			&& self.switches.back().map_or(self.color, |(_, color)| *color) != color
-		{
-			self.switches.push_back((timestamp, color));
+		let signalled = keyframe
+			.then(|| super::vui::signalled(self.codec, &access_unit))
+			.flatten();
+		// A refused keyframe yields no picture, so its switch would wait for one forever.
+		self.backend.decode(access_unit, timestamp, keyframe)?;
+		if keyframe {
+			self.switch(timestamp, signalled);
 		}
-		self.backend.decode(access_unit, timestamp, keyframe)
+		Ok(())
+	}
+
+	/// Record the space a keyframe at `timestamp` switched to, if it signalled one.
+	fn switch(&mut self, timestamp: Timestamp, signalled: Option<Option<Color>>) {
+		// Nothing decoded before a keyframe presents at or after it, so a switch there was
+		// never going to be reached: only timestamps that run backwards leave one.
+		while self.switches.back().is_some_and(|(at, _)| *at >= timestamp) {
+			self.switches.pop_back();
+		}
+		let Some(color) = signalled else { return };
+		if self.switches.back().map_or(self.color, |(_, color)| *color) == color {
+			return;
+		}
+		// A backend that drops pictures leaves switches no output reaches. The oldest is
+		// applied early rather than kept, so the queue stays bounded.
+		if self.switches.len() == SWITCHES
+			&& let Some((_, color)) = self.switches.pop_front()
+		{
+			self.color = color;
+		}
+		self.switches.push_back((timestamp, color));
 	}
 
 	/// Pop the oldest ready raw frame, or `None` while the decoder holds the rest.
@@ -433,6 +454,27 @@ fn declared(catalog: &VideoConfig) -> Option<Color> {
 	Color::from_code_points(Some(codes), range, coded.unwrap_or_default())
 }
 
+/// The conversion for an H.264 / H.265 track with no configuration record:
+/// its frames are Annex-B and carry their own parameter sets.
+///
+/// A CMAF track has no Annex-B framing, so one without a record is refused. A
+/// Legacy or LOC track whose codec says its parameter sets are out of band
+/// (avc1 / hvc1) contradicts itself, but its frames can only decode if they
+/// carry them, so it is read as Annex-B rather than refused.
+fn annexb_conversion(cmaf: bool, in_band: bool, codec: &str, record: &str) -> Result<Conversion, Error> {
+	if cmaf {
+		return Err(Error::UnsupportedCodec(format!(
+			"CMAF {codec} track is missing its {record} description"
+		)));
+	}
+	if !in_band {
+		tracing::warn!(
+			"{codec} track says its parameter sets are out of band but has no {record}; reading it as Annex-B"
+		);
+	}
+	Ok(Conversion::Passthrough)
+}
+
 /// What the catalog says about the stream before its first picture, for the
 /// backends to ask their devices with.
 fn stream(catalog: &VideoConfig, codec: Codec, conversion: &Conversion) -> backend::Stream {
@@ -552,7 +594,7 @@ mod tests {
 		// The timestamp rides through the codec and comes back on each picture,
 		// including any tail released by the drain. It returns in presentation order:
 		// strictly increasing and drawn from the values we fed.
-		let micros: Vec<u128> = decoded.iter().map(|d| d.timestamp.as_micros()).collect();
+		let micros: Vec<u128> = decoded.iter().map(|d| d.timestamp.as_micros().unwrap()).collect();
 		assert!(
 			micros.windows(2).all(|w| w[0] < w[1]),
 			"decoded timestamps not strictly increasing: {micros:?}"
@@ -709,19 +751,6 @@ mod tests {
 	/// framing from the container and hands the backend start-coded NAL units.
 	#[tokio::test]
 	async fn hev1_cmaf_round_trip_reaches_the_backend_as_annexb() {
-		// One keyframe of a 64x64 HEVC stream from x265.
-		const VPS: &[u8] = &[
-			0x40, 0x01, 0x0c, 0x01, 0xff, 0xff, 0x02, 0x20, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03, 0x00, 0x00,
-			0x03, 0x00, 0x1e, 0x95, 0x98, 0x09,
-		];
-		const SPS: &[u8] = &[
-			0x42, 0x01, 0x01, 0x02, 0x20, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x1e,
-			0xa0, 0x20, 0x81, 0x04, 0xd9, 0x65, 0x66, 0x92, 0x4c, 0xaf, 0x01, 0x68, 0x08, 0x00, 0x00, 0x03, 0x00, 0x08,
-			0x00, 0x00, 0x03, 0x00, 0xf0, 0x40,
-		];
-		const PPS: &[u8] = &[0x44, 0x01, 0xc1, 0x72, 0xb4, 0x22, 0x40];
-		const IDR: &[u8] = &[0x28, 0x01, 0xaf, 0x08, 0x60, 0xf9, 0x2a, 0x5c, 0xf3, 0x65, 0x62, 0xe8];
-
 		let (origin, driver) = moq_net::origin::Producer::new(Default::default());
 		tokio::spawn(moq_net::time::run(driver));
 		let source = origin.route("test", Default::default()).unwrap();
@@ -732,19 +761,11 @@ mod tests {
 			.broadcast()
 			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
-		let mut config = hang::catalog::VideoConfig::new(hang::catalog::H265 {
-			in_band: true,
-			profile_space: 0,
-			profile_idc: 2,
-			profile_compatibility_flags: [0x20, 0, 0, 0],
-			tier_flag: false,
-			level_idc: 0x1e,
-			constraint_flags: [0x90, 0, 0, 0, 0, 0],
-		});
+		let mut config = hev1_catalog(true);
 		config.coded_width = Some(64);
 		config.coded_height = Some(64);
 		source_catalog
-			.modify()
+			.modify(source_catalog.next_timestamp())
 			.unwrap()
 			.video
 			.renditions
@@ -753,20 +774,15 @@ mod tests {
 			track,
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
 		);
-		let mut keyframe = Vec::new();
-		for nal in [VPS, SPS, PPS, IDR] {
-			keyframe.extend_from_slice(&[0, 0, 0, 1]);
-			keyframe.extend_from_slice(nal);
-		}
 		producer
 			.write(moq_mux::container::Frame {
 				timestamp: Timestamp::from_micros(0).unwrap(),
 				duration: Some(Timestamp::from_micros(33_333).unwrap()),
-				payload: keyframe.into(),
+				payload: hevc_keyframe(),
 				keyframe: true,
 			})
 			.unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let broadcast = origin.consume().request("test", None).await.unwrap();
 		let catalog = moq_mux::catalog::Consumer::<()>::new(&broadcast, moq_mux::catalog::CatalogFormat::Hang)
@@ -774,7 +790,7 @@ mod tests {
 			.unwrap();
 		let mut export =
 			moq_mux::container::fmp4::Export::new(moq_mux::Source::new(origin.consume(), broadcast), catalog)
-				.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(30)));
+				.with_delay(moq_mux::container::Delay::default().with_max(std::time::Duration::from_secs(30)));
 		let init = export.next().await.unwrap().expect("CMAF init");
 		let fragment = export.next().await.unwrap().expect("CMAF fragment");
 
@@ -797,8 +813,12 @@ mod tests {
 			.track(name)
 			.unwrap()
 			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(30))),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(std::time::Duration::from_secs(30)),
+						max: Some(std::time::Duration::from_secs(30)),
+					},
+				)]),
 			)
 			.await
 			.unwrap();
@@ -818,6 +838,37 @@ mod tests {
 			.conversion
 			.access_unit(&sample.payload, sample.keyframe)
 			.unwrap();
+		let types = hevc_nal_types(&access_unit);
+		// VPS (32), SPS (33), PPS (34), then the IDR_W_RADL slice (20): every NAL
+		// found by its start code, and the parameter sets ahead of the slice.
+		assert_eq!(types.first(), Some(&32), "{types:?}");
+		assert!(types.contains(&33) && types.contains(&34), "{types:?}");
+		assert_eq!(types.last(), Some(&20), "{types:?}");
+	}
+
+	/// One keyframe of a 64x64 HEVC stream from x265, as Annex-B.
+	fn hevc_keyframe() -> bytes::Bytes {
+		const VPS: &[u8] = &[
+			0x40, 0x01, 0x0c, 0x01, 0xff, 0xff, 0x02, 0x20, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03, 0x00, 0x00,
+			0x03, 0x00, 0x1e, 0x95, 0x98, 0x09,
+		];
+		const SPS: &[u8] = &[
+			0x42, 0x01, 0x01, 0x02, 0x20, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x1e,
+			0xa0, 0x20, 0x81, 0x04, 0xd9, 0x65, 0x66, 0x92, 0x4c, 0xaf, 0x01, 0x68, 0x08, 0x00, 0x00, 0x03, 0x00, 0x08,
+			0x00, 0x00, 0x03, 0x00, 0xf0, 0x40,
+		];
+		const PPS: &[u8] = &[0x44, 0x01, 0xc1, 0x72, 0xb4, 0x22, 0x40];
+		const IDR: &[u8] = &[0x28, 0x01, 0xaf, 0x08, 0x60, 0xf9, 0x2a, 0x5c, 0xf3, 0x65, 0x62, 0xe8];
+		let mut keyframe = Vec::new();
+		for nal in [VPS, SPS, PPS, IDR] {
+			keyframe.extend_from_slice(&[0, 0, 0, 1]);
+			keyframe.extend_from_slice(nal);
+		}
+		keyframe.into()
+	}
+
+	/// The H.265 NAL unit types of an Annex-B access unit, in order.
+	fn hevc_nal_types(access_unit: &bytes::Bytes) -> Vec<u8> {
 		let mut buf = access_unit.clone();
 		let mut nals = moq_mux::codec::annexb::NalIterator::new(&mut buf);
 		let mut types = Vec::new();
@@ -825,11 +876,67 @@ mod tests {
 			types.push(nal.unwrap()[0] >> 1);
 		}
 		types.extend(nals.flush().unwrap().map(|nal| nal[0] >> 1));
-		// VPS (32), SPS (33), PPS (34), then the IDR_W_RADL slice (20): every NAL
-		// found by its start code, and the parameter sets ahead of the slice.
-		assert_eq!(types.first(), Some(&32), "{types:?}");
-		assert!(types.contains(&33) && types.contains(&34), "{types:?}");
-		assert_eq!(types.last(), Some(&20), "{types:?}");
+		types
+	}
+
+	fn hev1_catalog(in_band: bool) -> hang::catalog::VideoConfig {
+		hang::catalog::VideoConfig::new(hang::catalog::H265 {
+			in_band,
+			profile_space: 0,
+			profile_idc: 2,
+			profile_compatibility_flags: [0x20, 0, 0, 0],
+			tier_flag: false,
+			level_idc: 0x1e,
+			constraint_flags: [0x90, 0, 0, 0, 0, 0],
+		})
+	}
+
+	/// A Legacy hev1 track with an hvcC, as `moq publish fmp4` and the HLS import
+	/// publish ffmpeg's default HEVC MP4: the record says the frames are
+	/// length-prefixed, whatever the codec prefix says about the parameter sets.
+	#[test]
+	fn legacy_hev1_with_a_record_is_length_prefixed() {
+		let mut hvc1 = moq_mux::codec::h265::Hvc1::new();
+		let sample = hvc1
+			.transform(hevc_keyframe())
+			.unwrap()
+			.expect("a length-prefixed sample");
+		let mut catalog = hev1_catalog(true);
+		catalog.description = Some(hvc1.hvcc().expect("an hvcC").clone());
+
+		let decoder = super::Decoder::new(
+			&catalog,
+			&decode_config(super::Kind::Named(probe::BUFFERED_NAME.into())),
+		)
+		.unwrap();
+		let access_unit = decoder.conversion.access_unit(&sample, true).unwrap();
+		// VPS (32), SPS (33), PPS (34) from the record, then the IDR_W_RADL slice (20).
+		assert_eq!(hevc_nal_types(&access_unit), [32, 33, 34, 20]);
+	}
+
+	/// An hvc1 track with no record carries Annex-B with its parameter sets, the
+	/// only framing that decodes without one, as H.264 reads a record-less avc1.
+	#[test]
+	fn hvc1_without_a_record_is_annexb() {
+		let decoder = super::Decoder::new(
+			&hev1_catalog(false),
+			&decode_config(super::Kind::Named(probe::BUFFERED_NAME.into())),
+		)
+		.unwrap();
+		let keyframe = hevc_keyframe();
+		let access_unit = decoder.conversion.access_unit(&keyframe, true).unwrap();
+		assert_eq!(hevc_nal_types(&access_unit), [32, 33, 34, 20]);
+	}
+
+	/// A CMAF track has no Annex-B framing, so one with no record is refused.
+	#[test]
+	fn cmaf_hev1_without_a_record_is_refused() {
+		let mut catalog = hev1_catalog(true);
+		catalog.container = hang::catalog::Container::Cmaf {
+			init: bytes::Bytes::new(),
+		};
+		let config = decode_config(super::Kind::Named(probe::BUFFERED_NAME.into()));
+		assert!(super::Decoder::new(&catalog, &config).is_err());
 	}
 
 	/// A reordering backend still holds the old sequence's last picture when a
@@ -876,6 +983,48 @@ mod tests {
 		let tail = decoder.flush_all().unwrap();
 		assert_eq!(tail[0].timestamp, second);
 		assert_eq!(tail[0].surface.color(), Some(Color::BT601));
+	}
+
+	/// The colour switches a decoder waits on stay bounded whatever a publisher's
+	/// keyframes signal: spaces that alternate while no picture comes back, and
+	/// keyframe timestamps that run backwards.
+	#[test]
+	fn color_switches_stay_bounded() {
+		let mut catalog = hang::catalog::VideoConfig::new(hang::catalog::H265 {
+			in_band: true,
+			profile_space: 0,
+			profile_idc: 2,
+			profile_compatibility_flags: [0x20, 0, 0, 0],
+			tier_flag: false,
+			level_idc: 0x1e,
+			constraint_flags: [0x90, 0, 0, 0, 0, 0],
+		});
+		catalog.coded_width = Some(64);
+		catalog.coded_height = Some(64);
+		let kind = super::Kind::Named(probe::HOLDING_NAME.into());
+		let mut decoder = super::Decoder::new(&catalog, &decode_config(kind)).unwrap();
+		let keyframe = |index: u64| {
+			let sps = match index % 2 {
+				0 => super::super::vui::SPS_HDR10,
+				_ => super::super::vui::SPS_NVENC,
+			};
+			bytes::Bytes::from([&[0, 0, 0, 1], sps].concat())
+		};
+
+		for index in 0..100u64 {
+			let at = Timestamp::from_micros(index * 1_000).unwrap();
+			decoder.decode(&keyframe(index), at, true).unwrap();
+			assert!(decoder.switches.len() <= super::SWITCHES);
+		}
+		assert_eq!(decoder.switches.len(), super::SWITCHES);
+		for index in (0..100u64).rev() {
+			let at = Timestamp::from_micros(index).unwrap();
+			decoder.decode(&keyframe(index), at, true).unwrap();
+			assert!(
+				decoder.switches.len() <= 1,
+				"a switch after a later keyframe stays queued"
+			);
+		}
 	}
 
 	/// A VP9 catalog that declares BT.2020 PQ labels the pictures a backend

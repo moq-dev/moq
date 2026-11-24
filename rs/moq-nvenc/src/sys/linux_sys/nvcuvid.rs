@@ -225,6 +225,7 @@ pub struct _CUVIDPARSERPARAMS {
     pub pExtVideoInfo: *mut CUVIDEOFORMATEX,
 }
 pub const MAX_CLOCK_TS: u32 = 3;
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__HEVCTIMECODESET() {
     const UNINIT: ::core::mem::MaybeUninit<_HEVCTIMECODESET> = ::core::mem::MaybeUninit::uninit();
@@ -400,6 +401,7 @@ fn bindgen_test_layout__HEVCTIMECODESET() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__HEVCSEITIMECODE() {
     const UNINIT: ::core::mem::MaybeUninit<_HEVCSEITIMECODE> = ::core::mem::MaybeUninit::uninit();
@@ -435,6 +437,7 @@ fn bindgen_test_layout__HEVCSEITIMECODE() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__CUSEIMESSAGE() {
     const UNINIT: ::core::mem::MaybeUninit<_CUSEIMESSAGE> = ::core::mem::MaybeUninit::uninit();
@@ -480,6 +483,7 @@ fn bindgen_test_layout__CUSEIMESSAGE() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout_CUVIDEOFORMAT__bindgen_ty_1() {
     const UNINIT: ::core::mem::MaybeUninit<CUVIDEOFORMAT__bindgen_ty_1> =
@@ -516,6 +520,7 @@ fn bindgen_test_layout_CUVIDEOFORMAT__bindgen_ty_1() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout_CUVIDEOFORMAT__bindgen_ty_2() {
     const UNINIT: ::core::mem::MaybeUninit<CUVIDEOFORMAT__bindgen_ty_2> =
@@ -572,6 +577,7 @@ fn bindgen_test_layout_CUVIDEOFORMAT__bindgen_ty_2() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout_CUVIDEOFORMAT__bindgen_ty_3() {
     const UNINIT: ::core::mem::MaybeUninit<CUVIDEOFORMAT__bindgen_ty_3> =
@@ -608,6 +614,7 @@ fn bindgen_test_layout_CUVIDEOFORMAT__bindgen_ty_3() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout_CUVIDEOFORMAT__bindgen_ty_4() {
     const UNINIT: ::core::mem::MaybeUninit<CUVIDEOFORMAT__bindgen_ty_4> =
@@ -654,6 +661,7 @@ fn bindgen_test_layout_CUVIDEOFORMAT__bindgen_ty_4() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout_CUVIDEOFORMAT() {
     const UNINIT: ::core::mem::MaybeUninit<CUVIDEOFORMAT> = ::core::mem::MaybeUninit::uninit();
@@ -809,6 +817,7 @@ fn bindgen_test_layout_CUVIDEOFORMAT() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout_CUVIDOPERATINGPOINTINFO__bindgen_ty_1__bindgen_ty_1() {
     const UNINIT: ::core::mem::MaybeUninit<CUVIDOPERATINGPOINTINFO__bindgen_ty_1__bindgen_ty_1> =
@@ -861,6 +870,7 @@ fn bindgen_test_layout_CUVIDOPERATINGPOINTINFO__bindgen_ty_1__bindgen_ty_1() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout_CUVIDOPERATINGPOINTINFO__bindgen_ty_1() {
     const UNINIT: ::core::mem::MaybeUninit<CUVIDOPERATINGPOINTINFO__bindgen_ty_1> =
@@ -903,6 +913,7 @@ fn bindgen_test_layout_CUVIDOPERATINGPOINTINFO__bindgen_ty_1() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout_CUVIDOPERATINGPOINTINFO() {
     const UNINIT: ::core::mem::MaybeUninit<CUVIDOPERATINGPOINTINFO> =
@@ -929,6 +940,7 @@ fn bindgen_test_layout_CUVIDOPERATINGPOINTINFO() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__CUVIDSEIMESSAGEINFO() {
     const UNINIT: ::core::mem::MaybeUninit<_CUVIDSEIMESSAGEINFO> =
@@ -985,6 +997,7 @@ fn bindgen_test_layout__CUVIDSEIMESSAGEINFO() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout_CUVIDAV1SEQHDR() {
     const UNINIT: ::core::mem::MaybeUninit<CUVIDAV1SEQHDR> = ::core::mem::MaybeUninit::uninit();
@@ -1030,6 +1043,7 @@ fn bindgen_test_layout_CUVIDAV1SEQHDR() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout_CUVIDEOFORMATEX__bindgen_ty_1() {
     const UNINIT: ::core::mem::MaybeUninit<CUVIDEOFORMATEX__bindgen_ty_1> =
@@ -1066,6 +1080,7 @@ fn bindgen_test_layout_CUVIDEOFORMATEX__bindgen_ty_1() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout_CUVIDEOFORMATEX() {
     const UNINIT: ::core::mem::MaybeUninit<CUVIDEOFORMATEX> = ::core::mem::MaybeUninit::uninit();
@@ -1091,6 +1106,7 @@ fn bindgen_test_layout_CUVIDEOFORMATEX() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout_CUAUDIOFORMAT() {
     const UNINIT: ::core::mem::MaybeUninit<CUAUDIOFORMAT> = ::core::mem::MaybeUninit::uninit();
@@ -1166,6 +1182,7 @@ fn bindgen_test_layout_CUAUDIOFORMAT() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__CUVIDSOURCEDATAPACKET() {
     const UNINIT: ::core::mem::MaybeUninit<_CUVIDSOURCEDATAPACKET> =
@@ -1222,6 +1239,7 @@ fn bindgen_test_layout__CUVIDSOURCEDATAPACKET() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__CUVIDSOURCEPARAMS() {
     const UNINIT: ::core::mem::MaybeUninit<_CUVIDSOURCEPARAMS> = ::core::mem::MaybeUninit::uninit();
@@ -1297,6 +1315,7 @@ fn bindgen_test_layout__CUVIDSOURCEPARAMS() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__CUVIDPARSERDISPINFO() {
     const UNINIT: ::core::mem::MaybeUninit<_CUVIDPARSERDISPINFO> =
@@ -1363,6 +1382,7 @@ fn bindgen_test_layout__CUVIDPARSERDISPINFO() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__CUVIDPARSERPARAMS() {
     const UNINIT: ::core::mem::MaybeUninit<_CUVIDPARSERPARAMS> = ::core::mem::MaybeUninit::uninit();

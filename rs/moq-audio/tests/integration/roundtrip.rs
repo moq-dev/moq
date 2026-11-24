@@ -94,14 +94,14 @@ async fn opus_roundtrip(case: Case) {
 	let mut consumer = decode::Consumer::new(&source, rendition, "audio", options)
 		.await
 		.unwrap();
-	producer.finish().unwrap();
+	let _finished = producer.finish().unwrap();
 	// Decoded from the track's first packet, so only the codec's pre-skip is dropped.
 	let mut pcm = Vec::new();
 	while let Some(frame) = next_frame(&mut consumer).await.unwrap() {
 		let expected = 123_000 + pcm.len() as u128 / channels as u128 * 1_000_000 / case.rate as u128;
 		// Microsecond stamping rounds each chunk independently.
 		assert!(
-			frame.timestamp.as_micros().abs_diff(expected) <= 1,
+			frame.timestamp.as_micros().unwrap().abs_diff(expected) <= 1,
 			"{:?} versus {expected}us",
 			frame.timestamp
 		);
@@ -139,7 +139,9 @@ fn power(samples: &[f32], frequency: f64, rate: u32) -> f64 {
 	previous * previous + older * older - coefficient * previous * older
 }
 
-#[tokio::test]
+// Paused: the default zero max delay ages a finished group out once its span passes on the
+// wall clock, so a loaded runner would subscribe after the frame went stale.
+#[tokio::test(start_paused = true)]
 async fn pcm_round_trip_is_lossless() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
@@ -168,7 +170,7 @@ async fn pcm_round_trip_is_lossless() {
 	let mut consumer = decode::Consumer::new(&broadcast_consumer, catalog, "pcm", decode::Options::default())
 		.await
 		.unwrap();
-	producer.finish().unwrap();
+	let _finished = producer.finish().unwrap();
 
 	let frame = next_frame(&mut consumer).await.unwrap().unwrap();
 	assert_eq!(frame.timestamp, Timestamp::from_micros(123_000).unwrap());
@@ -186,7 +188,9 @@ async fn pcm_round_trip_is_lossless() {
 /// A 5.1 broadcast carries only its channel count in the catalog, which reads
 /// back as 5.1 in canonical order and remixes to whatever the subscriber asks
 /// for.
-#[tokio::test]
+// Paused: the default zero max delay ages a finished group out once its span passes on the
+// wall clock, so a loaded runner would subscribe after the frame went stale.
+#[tokio::test(start_paused = true)]
 async fn pcm_five_one_reads_back_at_any_layout() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
@@ -232,7 +236,7 @@ async fn pcm_five_one_reads_back_at_any_layout() {
 				.unwrap(),
 		);
 	}
-	producer.finish().unwrap();
+	let _finished = producer.finish().unwrap();
 
 	for (mut consumer, (_, layout, frame)) in consumers.into_iter().zip(cases) {
 		assert_eq!(consumer.layout(), layout);

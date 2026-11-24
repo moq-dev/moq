@@ -101,8 +101,9 @@ kind.
   `#[non_exhaustive]` catalog types, and new types. The line left the
   [QoS](/quest/m3/qos/README.md) line, which keeps the relay's moq-stats
   changes.
-- **No `@moq/stats` package.** Media types live in `@moq/hang`, and the
-  demo dashboard's relay-stats reader stays where it is.
+- **Media types live in `@moq/hang`.** `@moq/stats` reads only the relay's
+  `moq-stats` format; amended 2026-11-11, when the demo's relay-stats reader
+  moved there.
 - Docs stay inline: `doc/concept/hang.md` documents both catalog sections,
   `doc/concept/stats.md` gains a media section beside the relay's, and
   `drafts/draft-lcurley-moq-hang.md` specs the wire.
@@ -117,15 +118,6 @@ media checks moq.pro planned against the pre-#4510 `.stats` broadcast are
 generic, so they join this line as [client health](/doc/concept/stats.md#health)
 and [preflight](/quest/m3/stats/preflight.md). moq.pro keeps the per-project
 connection view and the dashboard flow.
-
-## Required
-
-- [Rust reporters](/quest/m3/stats/rust.md) - the player and gateways
-  publish stats and feedback, as the CLI remuxes and capture do
-- [Preflight](/quest/m3/stats/preflight.md) - a bounded test run over a
-  broadcast reports which media layer is broken and why
-- [Client health in use](/quest/m3/stats/health-consumers.md) - a per-connection media counter, consumers of the grade, and re-measured limits
-- [The media test checks browser feedback](/quest/m3/stats/feedback-media-test.md) - a browser publishes feedback and Rust reads it back with `moq export echo`
 
 ## Related
 

@@ -6,9 +6,9 @@
 
 import type { Path } from "@moq/net";
 import * as z from "zod/mini";
-import { u53Schema } from "./catalog/integers";
-import { renditions } from "./catalog/section";
-import { TransportSchema } from "./stats";
+import { u53Schema } from "./catalog/integers.ts";
+import { renditionsSchema } from "./snapshot.ts";
+import { TransportSchema } from "./stats.ts";
 
 /** The newest received media timestamp paired with its arrival wall time. */
 export const ArrivalSchema = z.object({
@@ -53,7 +53,7 @@ export const SnapshotSchema = z.looseObject({
 	// Connection measurements; unavailable fields remain absent.
 	transport: z.optional(TransportSchema),
 	// Empty entries retain a rendition ID whose counters are all zero.
-	renditions: z.optional(renditions(RenditionSchema)),
+	renditions: z.optional(renditionsSchema(RenditionSchema)),
 });
 /** One viewer report, with application or container sections flattened beside it. */
 export type Snapshot = z.infer<typeof SnapshotSchema>;

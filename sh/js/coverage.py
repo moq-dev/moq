@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def packages(root):
     directories = json.loads((root / "package.json").read_text())["workspaces"]
-    # Shared tooling has tests but is not a published workspace.
+    # Shared tooling keeps its tests beside its scripts, not under src/.
     return [
         root / "js/common",
         *(
@@ -37,8 +37,10 @@ def report(root, directories):
                 found = lines.setdefault(source, {})
                 found[int(number)] = found.get(int(number), False) or int(count) > 0
     summary = {}
+    # Sources above are real paths; a symlinked root (macOS /var) must match them.
+    root = root.resolve()
     manifest = json.loads((root / "package.json").read_text())
-    for directory in [root / "js/common", *(root / path for path in manifest["workspaces"] if path.startswith("js/"))]:
+    for directory in [root / path for path in manifest["workspaces"] if path.startswith("js/")]:
         sources = [
             path
             for path in (directory / "src").rglob("*")

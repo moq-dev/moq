@@ -2,7 +2,7 @@ import type * as broadcast from "./broadcast.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import type { WireRoute } from "./hop.ts";
 import * as Instance from "./instance.ts";
-import { compareRouteCandidates, coveringPrefixes, Epochs } from "./internal.ts";
+import { bestCandidate, coveringPrefixes, mostSpecific } from "./internal.ts";
 import type * as Path from "./path.ts";
 import { type Served, sameInstance } from "./wire.ts";
 
@@ -38,7 +38,11 @@ class Validity {
 	}
 }
 
-type Selection = Served & { readonly validity?: Validity };
+// The route a consume selected: its instance, which its requests pin.
+type Selection = Served & {
+	readonly route: Pick<WireRoute, "instance">;
+	readonly validity?: Validity;
+};
 
 class Blind implements Selection {
 	readonly identity = {};
@@ -46,13 +50,15 @@ class Blind implements Selection {
 	readonly validity = new Validity();
 }
 
+type Advertised = { identity: object; route: WireRoute };
+
 /** Consumed broadcasts shared only within the selected serving instance. @internal */
 export class BroadcastCache {
 	#cache = new Map<
 		Path.Valid,
 		Map<Instance.Valid | object, { consumer: broadcast.Consumer; selection: Selection }>
 	>();
-	#announced = new Map<Path.Valid, Map<object, { identity: object; route: WireRoute }>>();
+	#announced = new Map<Path.Valid, Map<object, Advertised>>();
 	#blind = new Map<Path.Valid, Blind>();
 	#blindPrefixes = new Map<Path.Valid, Set<Path.Valid>>();
 	#paths = new Map<Path.Valid, Set<Path.Valid>>();
@@ -66,7 +72,10 @@ export class BroadcastCache {
 			entries = new Map();
 			this.#announced.set(path, entries);
 		}
-		const identity = (!restart && entries.get(owner)?.identity) || {};
+		const previous = entries.get(owner);
+		const identity = (!restart && previous?.identity) || {};
+		// A new or restarted stream ranks as the newest, which wins a full tie at its own path; see bestCandidate.
+		if (!previous || restart) entries.delete(owner);
 		entries.set(owner, { identity, route });
 		this.#update(path);
 	}
@@ -81,30 +90,42 @@ export class BroadcastCache {
 
 	/** Resolve the same most-specific-prefix and route preference as the origin. */
 	instance(path: Path.Valid): Selection {
-		for (const prefix of coveringPrefixes(path)) {
-			const entries = this.#announced.get(prefix);
-			if (!entries) continue;
-			let best: { identity: object; route: WireRoute } | undefined;
-			const epochs = new Epochs([...entries.values()].map((entry) => entry.route));
-			for (const entry of entries.values()) {
-				if (epochs.supersedes(entry.route)) continue;
-				if (!best || compareRouteCandidates(path, prefix, entry.route, best.route) < 0) best = entry;
-			}
-			if (best) {
-				const cached = this.#cache.get(path)?.get(best.route.instance ?? best.identity);
-				// A minted instance names the announcement, not the publisher's stream, so a
-				// request for it can only name the path: it holds while this route is selected.
-				const named = best.route.instance !== undefined && !Instance.isMinted(best.route.instance);
-				return {
-					...best,
-					validity: !named
-						? ((cached?.consumer.closed.peek() === undefined ? cached?.selection.validity : undefined) ??
-							new Validity())
-						: undefined,
-				};
-			}
+		const best = mostSpecific(
+			path,
+			(prefix) => bestCandidate(path, prefix, this.#eligible(prefix), (entry) => entry.route),
+			(entry) => entry.route,
+		);
+		if (best) {
+			const cached = this.#cache.get(path)?.get(best.route.instance ?? best.identity);
+			// A minted instance names the announcement, not the publisher's stream, so a
+			// request for it can only name the path: it holds while this route is selected.
+			const named = best.route.instance !== undefined && !Instance.isMinted(best.route.instance);
+			return {
+				...best,
+				validity: !named
+					? ((cached?.consumer.closed.peek() === undefined ? cached?.selection.validity : undefined) ??
+						new Validity())
+					: undefined,
+			};
 		}
 		return this.#blind.get(path) ?? new Blind();
+	}
+
+	/**
+	 * The best route of `instance` alone at `path`, whichever instance wins the path, as a
+	 * request pinned to it resolves. With no route of it, the instance alone, which the peer
+	 * resolves or refuses.
+	 */
+	pinned(path: Path.Valid, instance: Instance.Valid): Selection {
+		const best = mostSpecific(
+			path,
+			(prefix) => {
+				const entries = this.#eligible(prefix).filter((entry) => entry.route.instance === instance);
+				return bestCandidate(path, prefix, entries, (entry) => entry.route);
+			},
+			(entry) => entry.route,
+		);
+		return best ?? { identity: {}, route: { instance } };
 	}
 
 	/** Clone the live cached consumer only when it serves the selected instance. */
@@ -176,13 +197,20 @@ export class BroadcastCache {
 		}
 	}
 
+	// The advertisements at `prefix`, oldest first.
+	#eligible(prefix: Path.Valid): Advertised[] {
+		return [...(this.#announced.get(prefix)?.values() ?? [])];
+	}
+
 	#update(prefix: Path.Valid): void {
-		for (const path of this.#paths.get(prefix) ?? []) {
-			const selected = this.instance(path);
-			for (const entry of this.#cache.get(path)?.values() ?? []) {
-				const same = sameInstance(entry.selection, selected);
-				entry.selection.validity?.update(same, !same && !(selected instanceof Blind));
-			}
+		for (const path of this.#paths.get(prefix) ?? []) this.#check(path);
+	}
+
+	#check(path: Path.Valid): void {
+		const selected = this.instance(path);
+		for (const entry of this.#cache.get(path)?.values() ?? []) {
+			const same = sameInstance(entry.selection, selected);
+			entry.selection.validity?.update(same, !same && !(selected instanceof Blind));
 		}
 	}
 }

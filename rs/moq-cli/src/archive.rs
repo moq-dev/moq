@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
+use moq_tokio::RedactedUrl;
 use object_store::path::{Path, PathPart};
 use object_store::{ObjectStore, ObjectStoreScheme};
 use url::Url;
@@ -51,6 +52,10 @@ type Instance = (moq_net::Path, moq_net::Instance);
 /// Record every broadcast announced at or under `prefix` into `args.store`, each stream under
 /// `<path>/@<instance>`, until the announcements end.
 ///
+/// A broadcast that fails to record, or whose path cannot be followed, is logged and dropped:
+/// every other broadcast keeps recording, whatever one publisher does. Only the origin
+/// failing, or a task panicking, ends the export.
+///
 /// A wire that carries no instance has its relay mint one per announcement, so each one records
 /// under a key of its own: a restarted export never stitches two streams together.
 pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: ExportArgs) -> anyhow::Result<()> {
@@ -66,8 +71,8 @@ pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: Exp
 	let (store, root) = open_store(&args.store)?;
 
 	// Announcements leave hidden routes out unless asked, and a prefix naming one asks.
-	let hidden = prefix.split('/').any(|segment| segment.starts_with('.'));
 	let prefix = moq_net::Path::new(&prefix)?;
+	let hidden = prefix.parts().any(|segment| segment.starts_with('.'));
 	let mut announced = origin.clone().with_hidden(hidden).announced();
 	// A follower per listed path, reporting each instance that serves it, stopped with the export.
 	let mut following = tokio::task::JoinSet::new();
@@ -77,7 +82,7 @@ pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: Exp
 	let mut running = Running::default();
 	let claims = Claims::default();
 
-	tracing::info!(%prefix, store = %args.store, "recording");
+	tracing::info!(%prefix, store = %RedactedUrl::new(&args.store), "recording");
 	notify_ready();
 
 	loop {
@@ -91,21 +96,20 @@ pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: Exp
 							old.abort();
 						}
 					}
-					moq_net::announce::Event::Absent(announce) | moq_net::announce::Event::Offline(announce) => {
+					moq_net::announce::Event::Absent(announce) => {
 						if let Some(follower) = followers.remove(&announce.prefix) {
 							follower.abort();
 						}
 					}
-					// A follower rides out its path being held.
-					moq_net::announce::Event::Present(_)
-					| moq_net::announce::Event::Available(_)
-					| moq_net::announce::Event::Unavailable(_) => {}
+					_ => {}
 				}
 				continue;
 			}
 			Some(followed) = following.join_next() => {
 				match followed {
-					Ok(result) => result?,
+					Ok(Ok(())) => {}
+					// One path cannot be followed, which ends only its own recordings.
+					Ok(Err(err)) => tracing::warn!("not recording: {err:#}"),
 					// Aborted once its path went absent.
 					Err(err) if err.is_cancelled() => {}
 					Err(err) => return Err(err).context("follower panicked"),
@@ -120,7 +124,10 @@ pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: Exp
 			}
 			Some(done) = recordings.join_next() => {
 				let (instance, result) = done.context("recording panicked")?;
-				result?;
+				// Recorded again if announced anew meanwhile, which fails or not on its own.
+				if let Err(err) = result {
+					tracing::warn!("recording ended: {err:#}");
+				}
 				if !running.done(&instance) {
 					continue;
 				}
@@ -139,7 +146,8 @@ pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: Exp
 /// Report each instance serving `path` as it comes online or takes over. An instance comes
 /// again after the path went offline, since a return is announced anew.
 ///
-/// Fails when the path cannot be followed or a handler refuses it, as a recording would.
+/// Fails when the path cannot be followed or a handler refuses it, as a recording would;
+/// the export drops the path then, as it drops a failed recording.
 async fn follow(
 	origin: moq_net::origin::Consumer,
 	path: moq_net::Path,
@@ -267,12 +275,15 @@ async fn record(
 
 /// The key prefix one stream records under: its path's segments, then `@<instance>`.
 ///
-/// A path segment's key never starts with `@`, since a leading one is percent-encoded like `%`
-/// always is, so no stream's prefix lies inside another's, whatever paths a publisher picks.
+/// Each key segment is a path segment's content, percent-encoded, so one holding a `/` stays
+/// one segment. A path segment's key never starts with `@`, since a leading one is
+/// percent-encoded like `%` always is, so no stream's prefix lies inside another's, whatever
+/// paths a publisher picks.
 fn key(root: &Path, (path, instance): &Instance) -> anyhow::Result<Path> {
 	let mut key = root.clone();
-	for segment in path.as_str().split('/').filter(|segment| !segment.is_empty()) {
-		let part = PathPart::from(segment);
+	for segment in path.parts() {
+		let segment = moq_net::path::unescape(segment);
+		let part = PathPart::from(segment.as_ref());
 		key = match part.as_ref().strip_prefix('@') {
 			Some(rest) => key.join(PathPart::parse(&format!("%40{rest}"))?),
 			None => key.join(part),
@@ -294,6 +305,7 @@ pub async fn import(
 	instance: moq_net::Instance,
 ) -> anyhow::Result<()> {
 	let store = open(&args.store)?;
+	let url = RedactedUrl::new(&args.store);
 	let mut config = moq_archive::consumer::Config::default();
 	if let Some(refresh) = args.refresh {
 		config = config.with_refresh(refresh.into());
@@ -307,22 +319,32 @@ pub async fn import(
 		.context("failed to create broadcast")?;
 	let consumer = moq_archive::Consumer::open(store, route.broadcast().clone(), config)
 		.await
-		.with_context(|| format!("no readable recording at {}", args.store))?;
+		.with_context(|| format!("no readable recording at {url}"))?;
 	route.announce().context("failed to announce broadcast")?;
 
-	tracing::info!(%name, store = %args.store, "replaying");
+	tracing::info!(%name, store = %url, "replaying");
 	notify_ready();
-	consumer
-		.run()
-		.await
-		.with_context(|| format!("replaying {} failed", args.store))
+	consumer.run().await.with_context(|| format!("replaying {url} failed"))
 }
 
 /// Open the object store `url` names, taking cloud credentials from the `AWS_*`, `GOOGLE_*`,
 /// and `AZURE_*` environment variables, with the prefix the URL names.
+///
+/// A password, query, or fragment is refused: no store reads one, and object_store echoes the
+/// URL it was given in its errors, so refusing them keeps credentials out of every message.
 fn open_store(url: &Url) -> anyhow::Result<(Arc<dyn ObjectStore>, Path)> {
-	let unsupported = || format!("unsupported archive store {url}");
-	let (scheme, prefix) = ObjectStoreScheme::parse(url).with_context(unsupported)?;
+	let redacted = RedactedUrl::new(url).to_string();
+	anyhow::ensure!(
+		url.password().is_none() && url.query().is_none() && url.fragment().is_none(),
+		"archive store {redacted} has a password, query, or fragment, which no store reads; \
+		 pass credentials through the environment instead",
+	);
+	// object_store quotes the URL it was given, userinfo included, so its message is redacted too.
+	let unsupported = |err: anyhow::Error| {
+		let reason = format!("{err:#}").replace(url.as_str(), &redacted);
+		anyhow::anyhow!(reason).context(format!("unsupported archive store {redacted}"))
+	};
+	let (scheme, prefix) = ObjectStoreScheme::parse(url).map_err(|err| unsupported(err.into()))?;
 	// Each cloud builder signs through rind, which `parse_url_opts` has no way to pass.
 	let store: Arc<dyn ObjectStore> = match scheme {
 		ObjectStoreScheme::Local => Arc::new(object_store::local::LocalFileSystem::new()),
@@ -332,7 +354,7 @@ fn open_store(url: &Url) -> anyhow::Result<(Arc<dyn ObjectStore>, Path)> {
 				.with_url(url.as_str())
 				.with_crypto_provider(rind_object_store::default_provider())
 				.build()
-				.with_context(unsupported)?,
+				.map_err(|err| unsupported(err.into()))?,
 		),
 		#[cfg(feature = "gcs")]
 		ObjectStoreScheme::GoogleCloudStorage => Arc::new(
@@ -340,7 +362,7 @@ fn open_store(url: &Url) -> anyhow::Result<(Arc<dyn ObjectStore>, Path)> {
 				.with_url(url.as_str())
 				.with_crypto_provider(rind_object_store::default_provider())
 				.build()
-				.with_context(unsupported)?,
+				.map_err(|err| unsupported(err.into()))?,
 		),
 		#[cfg(feature = "azure")]
 		ObjectStoreScheme::MicrosoftAzure => Arc::new(
@@ -348,9 +370,9 @@ fn open_store(url: &Url) -> anyhow::Result<(Arc<dyn ObjectStore>, Path)> {
 				.with_url(url.as_str())
 				.with_crypto_provider(rind_object_store::default_provider())
 				.build()
-				.with_context(unsupported)?,
+				.map_err(|err| unsupported(err.into()))?,
 		),
-		_ => anyhow::bail!(unsupported()),
+		_ => anyhow::bail!("unsupported archive store {redacted}"),
 	};
 	Ok((store, prefix))
 }
@@ -408,7 +430,7 @@ mod tests {
 		for path in ["live/a", "live/b", "other"] {
 			let broadcast = origin.route(path, moq_net::origin::RouteOptions::hidden()).unwrap();
 			let track = broadcast.broadcast().create_track("video", info.clone()).unwrap();
-			let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+			let mut group = track.create_group(group::Info { start: 0 }).unwrap();
 			group.write_frame(Timestamp::from_millis(0).unwrap(), path).unwrap();
 			group.finish().unwrap();
 			broadcast.announce().unwrap();
@@ -445,7 +467,7 @@ mod tests {
 			}
 			assert!(
 				files.contains(&format!(
-					"{path}/@{instance}/video/0000000000000000000-0000000000000000000-0000000000000000000"
+					"{path}/@{instance}/video/0000000000000000000-0000000000000000000"
 				)),
 				"{files:?}"
 			);
@@ -453,9 +475,87 @@ mod tests {
 		assert!(!files.iter().any(|file| file.starts_with("other")), "{files:?}");
 	}
 
-	/// A handler refusing a listed path fails the export, as a refused recording did.
-	#[tokio::test]
-	async fn a_refused_path_fails_the_export() {
+	/// Publish `path` with one group and announce it, hidden like a broadcast a relay serves.
+	fn publish(
+		origin: &moq_net::origin::Producer,
+		path: &str,
+		timescale: Timescale,
+	) -> (moq_net::origin::Route, moq_net::track::Producer) {
+		let info = track::Info::default()
+			.with_timescale(timescale)
+			.with_max_age(Duration::from_secs(3600));
+		let broadcast = origin.route(path, moq_net::origin::RouteOptions::hidden()).unwrap();
+		let track = broadcast.broadcast().create_track("video", info).unwrap();
+		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+		group.write_frame(Timestamp::from_millis(0).unwrap(), path).unwrap();
+		group.finish().unwrap();
+		broadcast.announce().unwrap();
+		(broadcast, track)
+	}
+
+	/// Wait for `file` under `dir`, which the export writes once it subscribed and the broadcast ended.
+	async fn complete(dir: &std::path::Path, file: String) {
+		kio::clock::timeout(Duration::from_secs(10), async {
+			while !dir.join(&file).exists() {
+				kio::clock::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.unwrap_or_else(|_| panic!("{file} is written"));
+	}
+
+	/// End `broadcast` once the export subscribed to its track.
+	async fn finish((broadcast, mut track): (moq_net::origin::Route, moq_net::track::Producer)) {
+		kio::clock::timeout(Duration::from_secs(10), track.subscription_changed())
+			.await
+			.expect("the export subscribes")
+			.unwrap();
+		let _track = track.finish().unwrap();
+		broadcast.broadcast().close();
+	}
+
+	/// A recording that fails, here a track re-added with another timescale than its stored
+	/// one, is dropped alone: the other broadcast records and the export keeps running.
+	#[tokio::test(start_paused = true)]
+	async fn a_failed_recording_leaves_the_others_recording() {
+		let dir = tempfile::tempdir().unwrap();
+		let args = ExportArgs {
+			store: Url::from_directory_path(dir.path()).unwrap(),
+			retention: None,
+			retention_grace: None,
+		};
+		let origin = moq_tokio::origin::spawn();
+		let recording = tokio::spawn(export(origin.consume(), "live".into(), args));
+
+		// `live/a` already holds a recording whose track has another timescale.
+		let bad = publish(&origin, "live/a", Timescale::MILLI);
+		let stored = dir.path().join(format!("live/a/@{}/video", bad.0.instance()));
+		std::fs::create_dir_all(&stored).unwrap();
+		std::fs::write(
+			stored.join(".info"),
+			moq_archive::Info::new(0, Some(90_000)).unwrap().encode().unwrap(),
+		)
+		.unwrap();
+		let good = publish(&origin, "live/b", Timescale::MILLI);
+		let good_end = format!("live/b/@{}/.end", good.0.instance());
+
+		finish(good).await;
+		complete(dir.path(), good_end).await;
+		assert!(!recording.is_finished(), "one broadcast's failure ended the export");
+
+		// A broadcast announced after the failure records too.
+		let later = publish(&origin, "live/c", Timescale::MILLI);
+		let later_end = format!("live/c/@{}/.end", later.0.instance());
+		finish(later).await;
+		complete(dir.path(), later_end).await;
+		assert!(!recording.is_finished());
+		recording.abort();
+		drop(bad);
+	}
+
+	/// A handler refusing a listed path drops that path, not the export.
+	#[tokio::test(start_paused = true)]
+	async fn a_refused_path_leaves_the_others_recording() {
 		let dir = tempfile::tempdir().unwrap();
 		let args = ExportArgs {
 			store: Url::from_directory_path(dir.path()).unwrap(),
@@ -473,12 +573,45 @@ mod tests {
 			.expect("the export follows the listed path")
 			.unwrap();
 		request.reject(moq_net::Error::NotFound);
-		let result = kio::clock::timeout(Duration::from_secs(10), recording)
+
+		let good = publish(&origin, "live/b", Timescale::MILLI);
+		let good_end = format!("live/b/@{}/.end", good.0.instance());
+		finish(good).await;
+		complete(dir.path(), good_end).await;
+		assert!(!recording.is_finished(), "a refused path ended the export");
+		recording.abort();
+	}
+
+	/// A track aborted with an error code, then its route dropped, ends only its own recording.
+	/// The archive records the abort as an end and returns `Ok`, so this does not reach the
+	/// failure isolation the tests above pin.
+	#[tokio::test(start_paused = true)]
+	async fn an_aborted_track_leaves_the_others_recording() {
+		let dir = tempfile::tempdir().unwrap();
+		let args = ExportArgs {
+			store: Url::from_directory_path(dir.path()).unwrap(),
+			retention: None,
+			retention_grace: None,
+		};
+		let origin = moq_tokio::origin::spawn();
+		let recording = tokio::spawn(export(origin.consume(), "live".into(), args));
+
+		let (gone, mut track) = publish(&origin, "live/a", Timescale::MILLI);
+		kio::clock::timeout(Duration::from_secs(10), track.subscription_changed())
 			.await
-			.expect("the export ends")
+			.expect("the export subscribes")
 			.unwrap();
-		let err = result.expect_err("a refused path fails the export");
-		assert!(err.to_string().contains("live/a"), "{err:#}");
+		track.abort(moq_net::Error::Cancel).unwrap();
+		drop(gone);
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		assert!(!recording.is_finished(), "a dropped publisher ended the export");
+
+		let good = publish(&origin, "live/b", Timescale::MILLI);
+		let good_end = format!("live/b/@{}/.end", good.0.instance());
+		finish(good).await;
+		complete(dir.path(), good_end).await;
+		assert!(!recording.is_finished());
+		recording.abort();
 	}
 
 	/// `import archive` republishes a recording `export archive` wrote under the given name and
@@ -496,7 +629,7 @@ mod tests {
 			.with_max_age(None);
 		let video = source.create_track("video", info).unwrap();
 		for sequence in 0..2 {
-			let mut group = video.create_group(group::Info { sequence }).unwrap();
+			let mut group = video.create_group(group::Info { start: sequence * 1000 }).unwrap();
 			let pts = Timestamp::from_millis(sequence * 1000).unwrap();
 			group.write_frame(pts, format!("frame {sequence}")).unwrap();
 			group.finish().unwrap();
@@ -610,6 +743,16 @@ mod tests {
 		}
 	}
 
+	/// A path segment holding a `/` or `\` keys as one segment of its content.
+	#[test]
+	fn an_escaped_segment_keys_one_segment() {
+		let instance = moq_net::Instance::random();
+		let pinned = (moq_net::Path::from_static(r"live/a\/b\\c"), instance.clone());
+		let key = key(&Path::from("rec"), &pinned).unwrap();
+		assert_eq!(key.as_ref(), format!("rec/live/a%2Fb%5Cc/@{instance}"));
+		assert_eq!(key.parts().count(), 4);
+	}
+
 	/// A path segment's key never starts with `@`, so a path that spells out another instance's
 	/// key prefix records beside it, never inside it.
 	#[test]
@@ -639,5 +782,33 @@ mod tests {
 		)
 		.unwrap();
 		assert!(literal.as_ref().starts_with("rec/live/a/%2540"), "{literal}");
+	}
+
+	/// A store URL that fails to open is reported without its userinfo or query, whichever
+	/// layer refuses it.
+	#[test]
+	fn a_refused_store_hides_its_credentials() {
+		let mut urls = vec![
+			// Refused up front: no store reads a password, query, or fragment.
+			"s3://user:SECRET@bucket/prefix",
+			"file:///rec?token=SECRET",
+			"file:///rec#SECRET",
+			// Refused by object_store, which quotes the URL it was given.
+			"ftp://SECRET@example.com/rec",
+			// Recognised, but not a store an archive opens.
+			"https://SECRET@example.com/rec",
+		];
+		if cfg!(feature = "azure") {
+			urls.push("az://SECRET@account.example.com/rec");
+		}
+		for url in urls {
+			let url = Url::parse(url).unwrap();
+			let Err(err) = open(&url) else {
+				panic!("{url} opened");
+			};
+			let err = format!("{err:#} {err:?}");
+			assert!(!err.contains("SECRET"), "{err}");
+			assert!(err.contains(&RedactedUrl::new(&url).to_string()), "{err}");
+		}
 	}
 }

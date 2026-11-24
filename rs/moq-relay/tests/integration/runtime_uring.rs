@@ -5,7 +5,7 @@
 //!
 //! Linux-only like the mode itself. Unsupported local kernels skip loudly;
 //! CI_STRICT makes CI refuse them.
-#![cfg(all(target_os = "linux", feature = "_uring"))]
+#![cfg(uring)]
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -106,7 +106,7 @@ fn uring_config(cert: &std::path::Path, key: &std::path::Path) -> Config {
 	config.runtime.workers = moq_relay::runtime::Workers::Count(std::num::NonZeroU16::new(WORKERS).unwrap());
 	config.runtime.pin = false;
 	config.runtime.io_uring = true;
-	config.auth.public = vec![moq_auth::Pattern::all()];
+	config.auth.public = vec![moq_auth::Prefix::all()];
 	config
 }
 
@@ -171,9 +171,11 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 		.broadcast()
 		.create_track("video", timed())
 		.expect("create track");
-	let mut group = track.append_group().expect("append group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("append group");
 	group
-		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
+		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("write frame");
 	group.finish().expect("finish group");
 
@@ -267,9 +269,11 @@ async fn uring_workers_serve_every_configured_version() {
 		.broadcast()
 		.create_track("video", timed())
 		.expect("create track");
-	let mut group = track.append_group().expect("append group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("append group");
 	group
-		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
+		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("write frame");
 	group.finish().expect("finish group");
 
@@ -429,11 +433,11 @@ async fn drain_on_the_trigger(version: Option<moq_net::Version>) {
 	let url: url::Url = format!("moql://127.0.0.1:{port}/drain").parse().expect("parse url");
 	let label = version.map_or("every version", |version| version.as_str());
 	// Only moq-transport puts the deadline on the wire.
-	let ietf = matches!(version, Some(moq_net::Version::Ietf(_)));
+	let ietf = version.is_some_and(|version| !version.is_lite());
 
 	let connecting = tokio::spawn(connect(client.clone(), url.clone()));
 	let first = admissions.next().await.expect("first admission");
-	let all = moq_auth::Pattern::all;
+	let all = moq_auth::Prefix::all;
 	let (_first_lease, first_consumer) = moq_auth::lease::Producer::new(moq_auth::Grant::new(all(), all()));
 	first.grant(first_consumer);
 	let established = connecting.await.expect("client task");
@@ -443,7 +447,14 @@ async fn drain_on_the_trigger(version: Option<moq_net::Version>) {
 
 	// Hold the next real connection at authentication. Its admission keeps the
 	// drain open even after the first session leaves, without an unrelated peer.
-	let arriving = tokio::spawn(connect(client, url));
+	// Reconnecting, so the GOAWAY that lands with the relay's acceptance leaves the drained
+	// session readable as the predecessor, where a one-shot loop ends on it.
+	let arriving = tokio::spawn(async move {
+		kio::clock::timeout(TIMEOUT, client.with_reconnect(true).connect(url).established())
+			.await
+			.expect("connect timeout")
+			.expect("connect failed")
+	});
 	let pending = admissions.next().await.expect("pending admission");
 	// The relay fixes its deadline inside `start`, so these bracket it: what is
 	// left of each bounds what the relay tells the arrival from below and above.
@@ -502,10 +513,8 @@ async fn drain_on_the_trigger(version: Option<moq_net::Version>) {
 			"{label}: an arrival mid-drain got {timeout:?}, short of the {least:?} left of the window"
 		);
 	}
-	kio::clock::timeout(TIMEOUT, arrival.closed())
-		.await
-		.unwrap_or_else(|_| panic!("{label}: the arrival never closed"))
-		.expect("a one-shot session leaves cleanly on GOAWAY");
+	// A reconnecting arrival would redial the draining relay, so leave instead.
+	drop(arrival);
 
 	// `run` joins the worker threads before returning, so returning at all is
 	// the clean join; the rebind proves every worker let go of the port.
@@ -614,7 +623,7 @@ async fn workers_share_a_generated_identity() {
 		config.runtime.workers = moq_relay::runtime::Workers::Count(std::num::NonZeroU16::new(WORKERS).unwrap());
 		config.runtime.pin = false;
 		config.runtime.io_uring = io_uring;
-		config.auth.public = vec![moq_auth::Pattern::all()];
+		config.auth.public = vec![moq_auth::Prefix::all()];
 		let relay = Relay::load(config)
 			.await
 			.expect("generated worker identity")
@@ -697,9 +706,11 @@ async fn an_mtls_client_authenticates_without_a_token() {
 		.broadcast()
 		.create_track("video", timed())
 		.expect("create track");
-	let mut group = track.append_group().expect("append group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("append group");
 	group
-		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
+		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("write frame");
 	group.finish().expect("finish group");
 	let publisher = connect(client().with_publisher(&origin), url.clone()).await;
@@ -746,25 +757,16 @@ async fn an_mtls_client_authenticates_without_a_token() {
 	let _ = running.await;
 }
 
-/// `quic.qlog` captures traces from the io_uring workers, the same as it does
-/// from the tokio ones.
-///
-/// A real session keeps both trace writers active through worker shutdown, so
-/// the test covers capture on the io_uring data path and the final flush.
-#[cfg(feature = "qlog")]
-#[tokio::test]
-async fn uring_workers_write_qlog_traces() {
-	let _ = rind_rustls::default_provider().install_default();
-	if !supported() {
-		return;
-	}
-
+/// Runs one real session through io_uring workers running `congestion` and returns
+/// every qlog record they wrote, each checked to be JSON on a line of its own.
+async fn traced_session(congestion: Option<moq_tokio::quic::CongestionControl>) -> Vec<serde_json::Value> {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
 	let traces = dir.path().join("qlog");
 	std::fs::create_dir(&traces).expect("create qlog dir");
 	let mut config = uring_config(&cert, &key);
 	config.quic.qlog = Some(traces.clone());
+	config.quic.congestion_control = congestion;
 	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let port = relay.addr().expect("workers bound an address").port();
 	let ready = relay.ready();
@@ -782,9 +784,11 @@ async fn uring_workers_write_qlog_traces() {
 		.broadcast()
 		.create_track("video", timed())
 		.expect("create track");
-	let mut group = track.append_group().expect("append group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("append group");
 	group
-		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
+		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("write frame");
 	group.finish().expect("finish group");
 	let publisher = connect(client().with_publisher(&origin), url.clone()).await;
@@ -827,6 +831,7 @@ async fn uring_workers_write_qlog_traces() {
 
 	// Every record has to be JSON on a line of its own, or the trace is not
 	// something a qlog reader can open.
+	let mut parsed = Vec::new();
 	for path in written {
 		let raw = std::fs::read_to_string(&path).expect("read trace");
 		let records: Vec<&str> = raw
@@ -836,10 +841,51 @@ async fn uring_workers_write_qlog_traces() {
 			.collect();
 		assert!(!records.is_empty(), "{} holds no records", path.display());
 		for record in records {
-			serde_json::from_str::<serde_json::Value>(record)
-				.unwrap_or_else(|err| panic!("{}: {err}: {record}", path.display()));
+			parsed.push(
+				serde_json::from_str::<serde_json::Value>(record)
+					.unwrap_or_else(|err| panic!("{}: {err}: {record}", path.display())),
+			);
 		}
 	}
+	parsed
+}
+
+/// `quic.qlog` captures traces from the io_uring workers, the same as it does
+/// from the tokio ones.
+///
+/// A real session keeps both trace writers active through worker shutdown, so
+/// the test covers capture on the io_uring data path and the final flush.
+#[tokio::test]
+async fn uring_workers_write_qlog_traces() {
+	let _ = rind_rustls::default_provider().install_default();
+	if !supported() {
+		return;
+	}
+	traced_session(None).await;
+}
+
+/// Whether any recovery metrics update in `records` reports `field`.
+fn reports(records: &[serde_json::Value], field: &str) -> bool {
+	records.iter().any(|record| record["data"].get(field).is_some())
+}
+
+/// The workers run the algorithm `[quic]` names, read back from the trace: CUBIC
+/// reports a slow-start threshold and no pacing rate, BBR v3 the reverse.
+#[tokio::test]
+async fn uring_workers_run_the_configured_congestion_control() {
+	let _ = rind_rustls::default_provider().install_default();
+	if !supported() {
+		return;
+	}
+
+	let cubic = traced_session(Some(moq_tokio::quic::CongestionControl::Cubic)).await;
+	assert!(reports(&cubic, "ssthresh"), "cubic reported no ssthresh");
+	assert!(!reports(&cubic, "pacing_rate"), "cubic reported a pacing rate");
+
+	// Unset is BBR v3.
+	let bbr = traced_session(None).await;
+	assert!(reports(&bbr, "pacing_rate"), "bbr reported no pacing rate");
+	assert!(!reports(&bbr, "ssthresh"), "bbr reported an ssthresh");
 }
 
 /// A session the workers refuse reaches `/metrics` like one the shared runtime
@@ -854,7 +900,7 @@ async fn uring_refusals_reach_metrics() {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
 	let mut config = uring_config(&cert, &key);
-	config.auth.public = vec!["anon/**".parse().unwrap()];
+	config.auth.public = vec!["anon".parse().unwrap()];
 	config.internal.listen = Some("127.0.0.1:0".parse().unwrap());
 	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let port = relay.addr().expect("workers bound an address").port();
@@ -904,7 +950,7 @@ async fn uring_refusals_reach_metrics() {
 /// A policy admitting verified certificates and nobody else.
 fn mtls_only() -> moq_auth::serve::Policy {
 	let mut policy = moq_auth::serve::Policy::default();
-	policy.mtls = moq_auth::Permissions::new(moq_auth::Pattern::all(), moq_auth::Pattern::all());
+	policy.mtls = moq_auth::Permissions::new(moq_auth::Prefix::all(), moq_auth::Prefix::all());
 	policy
 }
 
@@ -928,16 +974,18 @@ async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net
 			kind:
 				moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update | moq_net::origin::RouteKind::Restart,
 			announce: route,
+			..
 		} => Some((route, true)),
 		moq_net::origin::RouteEvent {
 			kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 			announce: route,
+			..
 		} => Some((route, false)),
+		other => panic!("unexpected route event {other:?}"),
 	}
 }
 
 /// A moq-transport SETUP credential reaches the decider on both ring transports.
-#[cfg(feature = "quic")]
 #[tokio::test]
 async fn uring_forwards_the_setup_token() {
 	use moq_tokio::quic::{driver, web};
@@ -970,7 +1018,7 @@ async fn uring_forwards_the_setup_token() {
 				assert_eq!(admission.request.path, "/");
 				assert!(admission.request.query.is_none());
 			}
-			let all: moq_auth::Patterns = [moq_auth::Pattern::all()].into_iter().collect();
+			let all = moq_auth::Prefixes::all();
 			admission.grant(moq_auth::lease::Consumer::fixed(moq_auth::Grant::new(all.clone(), all)));
 		}
 	});
@@ -1057,7 +1105,7 @@ async fn uring_auth_reports_distinct_quic_and_webtransport() {
 					.as_ref()
 					.is_some_and(|alpn| alpn.starts_with("moq-lite-"))
 			);
-			let all: moq_auth::Patterns = [moq_auth::Pattern::all()].into_iter().collect();
+			let all = moq_auth::Prefixes::all();
 			let grant = moq_auth::Grant::new(all.clone(), all);
 			let (producer, consumer) = moq_auth::lease::Producer::new(grant);
 			leases.push(producer);
@@ -1080,71 +1128,6 @@ async fn uring_auth_reports_distinct_quic_and_webtransport() {
 	let _ = running.await;
 }
 
-/// `listen.extensions` reaches the workers' SETUP, as it does the tokio listener's.
-/// A moq-transport client's connection token reaches the decider while the relay
-/// offers MoQ Auth, and is refused as unsupported once it is turned off, since no
-/// request would carry it.
-#[tokio::test]
-async fn uring_workers_offer_the_configured_extensions() {
-	let _ = rind_rustls::default_provider().install_default();
-	if !supported() {
-		return;
-	}
-	let dir = tempfile::tempdir().unwrap();
-	let (cert, key) = certificate(dir.path());
-	let all: moq_auth::Patterns = [moq_auth::Pattern::all()].into_iter().collect();
-	let grant = || moq_auth::lease::Consumer::fixed(moq_auth::Grant::new(all.clone(), all.clone()));
-	for offered in [true, false] {
-		let mut config = uring_config(&cert, &key);
-		config.auth.public.clear();
-		config.listen.extensions.auth = offered;
-		let mut relay = Relay::load(config).await.unwrap().with_signals(false);
-		let port = relay.addr().unwrap().port();
-		let mut admissions = relay.admissions().expect("embedded auth");
-		let ready = relay.ready();
-		let running = tokio::spawn(relay.run());
-		ready.wait().await.expect("relay ready");
-
-		let mut dial = moq_tokio::connect::Config::default();
-		dial.tls.insecure = Some(true);
-		dial.bind = Some("127.0.0.1:0".parse().unwrap());
-		dial.version = vec!["moq-transport-22".parse().unwrap()];
-		let client = dial.init(Default::default()).unwrap();
-		let url = format!("moql://127.0.0.1:{port}/extensions").parse().unwrap();
-		let (connection, ()) = tokio::join!(connect(client, url), async {
-			let admission = kio::clock::timeout(TIMEOUT, admissions.next()).await.unwrap().unwrap();
-			assert!(!admission.attached(), "offered {offered}: the session arrived attached");
-			admission.grant(grant());
-		});
-
-		let auth = connection.auth();
-		let presented = kio::clock::timeout(TIMEOUT, auth.add("token"));
-		match offered {
-			true => {
-				let (token, ()) = tokio::join!(presented, async {
-					let admission = kio::clock::timeout(TIMEOUT, admissions.next()).await.unwrap().unwrap();
-					assert!(admission.attached(), "an AUTH token arrived as a new session");
-					admission.grant(grant());
-				});
-				let _ = token
-					.expect("the token was never answered")
-					.expect("the token was refused");
-			}
-			false => {
-				// Without MoQ Auth no AUTH stream carries it: only a request naming it does.
-				let _ = presented
-					.await
-					.expect("the token was never answered")
-					.expect("a moq-transport request can carry the token");
-			}
-		}
-
-		drop(connection);
-		running.abort();
-		let _ = running.await;
-	}
-}
-
 /// `listen.timeout` bounds every handshake phase from the first packet: TLS,
 /// HTTP/3 before CONNECT, and MoQ SETUP over raw QUIC and WebTransport. Each
 /// phase closes in its own error space.
@@ -1152,7 +1135,6 @@ async fn uring_workers_offer_the_configured_extensions() {
 /// The relay and the client run on a manual clock, so only the test passes time.
 /// Both select no congestion control, so neither paces: a pacer waits on time
 /// passing.
-#[cfg(feature = "quic")]
 #[test]
 fn uring_workers_bound_stalled_handshakes() {
 	use moq_net::transport::Error as _;
@@ -1174,7 +1156,7 @@ fn uring_workers_bound_stalled_handshakes() {
 		let (cert, key) = certificate(dir.path());
 		let mut config = uring_config(&cert, &key);
 		config.listen.timeout = Some(LISTEN.into());
-		config.quic.congestion_control = Some(moq_tokio::quic::CongestionControl::None);
+		config.quic.congestion_control = Some(moq_tokio::quic::CongestionControl::Unlimited);
 		let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 		let port = relay.addr().expect("workers bound an address").port();
 		let addr = SocketAddr::from(([127, 0, 0, 1], port));
@@ -1260,7 +1242,6 @@ fn uring_workers_bound_stalled_handshakes() {
 /// first answers, and every answer back, so the server never sees the client
 /// finish its handshake. Returns the address to dial, and a signal for the
 /// server's first answer.
-#[cfg(feature = "quic")]
 async fn stall_after_hello(server: SocketAddr) -> (SocketAddr, tokio::sync::oneshot::Receiver<()>) {
 	let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("bind hop");
 	let addr = socket.local_addr().expect("hop address");
@@ -1352,25 +1333,13 @@ async fn uring_sessions_log_their_close_under_a_connection_span() {
 
 /// A ring refused at worker startup reaches a `Ready` waiter with the actionable error.
 #[tokio::test]
-async fn uring_startup_reports_the_memlock_limit() {
-	// Resource limits belong to the process, so isolate even under libtest.
-	if !test_env::Env::default().set("MOQ_TEST_MEMLOCK", "0").isolate() {
+async fn uring_startup_reports_a_refused_ring() {
+	// The filter binds the whole process, so isolate even under libtest.
+	if !test_env::Env::default().set("MOQ_TEST_REFUSE_RING", "1").isolate() {
 		return;
 	}
 	let _ = rind_rustls::default_provider().install_default();
 	if !supported() {
-		return;
-	}
-	// CAP_IPC_LOCK, which root holds, exempts io_uring from the limit.
-	let status = std::fs::read_to_string("/proc/self/status").expect("process status");
-	let effective = status
-		.lines()
-		.find_map(|line| line.strip_prefix("CapEff:"))
-		.expect("effective capabilities");
-	let effective = u64::from_str_radix(effective.trim(), 16).expect("capability mask");
-	const CAP_IPC_LOCK: u32 = 14;
-	if effective & (1 << CAP_IPC_LOCK) != 0 {
-		eprintln!("skipping the memlock test: CAP_IPC_LOCK lifts the limit");
 		return;
 	}
 	let dir = tempfile::tempdir().expect("tempdir");
@@ -1379,18 +1348,10 @@ async fn uring_startup_reports_the_memlock_limit() {
 		.await
 		.expect("load relay")
 		.with_signals(false);
-	let mut limit = libc::rlimit {
-		rlim_cur: 0,
-		rlim_max: 0,
-	};
-	// SAFETY: valid out-pointer in an isolated test process.
-	assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut limit) }, 0);
-	limit.rlim_cur = 0;
-	// SAFETY: valid limit in an isolated test process.
-	assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &limit) }, 0);
+	refuse_rings();
 	let ready = relay.ready();
 	let running = tokio::spawn(relay.run());
-	let error = ready.wait().await.expect_err("a worker needs locked memory");
+	let error = ready.wait().await.expect_err("a worker needs a ring");
 	let message = format!("{error:#}");
 	for expected in [
 		"io_uring worker 0 failed to start",
@@ -1404,4 +1365,54 @@ async fn uring_startup_reports_the_memlock_limit() {
 		.await
 		.expect("join relay")
 		.expect_err("run fails with the waiter");
+}
+
+/// Fails every later `io_uring_setup` in this process with `ENOMEM`, the way a
+/// spent memory cgroup or, on Linux 6.14 up to the 7.3 fix, a spent
+/// `RLIMIT_MEMLOCK` refuses a ring. Which one a kernel charges varies, so the
+/// test injects the refusal instead of exhausting either.
+fn refuse_rings() {
+	use libc::{BPF_ABS, BPF_JEQ, BPF_JMP, BPF_K, BPF_LD, BPF_RET, BPF_W, sock_filter};
+	let op = |code: u32, k: u32| sock_filter {
+		code: code as u16,
+		jt: 0,
+		jf: 0,
+		k,
+	};
+	// Matching the syscall number alone suffices: this test only issues native
+	// syscalls, and the filter injects a fault rather than enforcing a policy.
+	let filter = [
+		// seccomp_data.nr
+		op(BPF_LD | BPF_W | BPF_ABS, 0),
+		sock_filter {
+			code: (BPF_JMP | BPF_JEQ | BPF_K) as u16,
+			jt: 0,
+			jf: 1,
+			k: libc::SYS_io_uring_setup as u32,
+		},
+		op(BPF_RET | BPF_K, libc::SECCOMP_RET_ERRNO | libc::ENOMEM as u32),
+		op(BPF_RET | BPF_K, libc::SECCOMP_RET_ALLOW),
+	];
+	let program = libc::sock_fprog {
+		len: filter.len() as u16,
+		filter: filter.as_ptr().cast_mut(),
+	};
+	// SAFETY: plain flag; without it an unprivileged process may not install a filter.
+	assert_eq!(unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) }, 0);
+	// SAFETY: `program` points at `filter`, both live across the call, which copies them.
+	// TSYNC applies it to the threads already running too, not only the ones spawned later.
+	let installed = unsafe {
+		libc::syscall(
+			libc::SYS_seccomp,
+			libc::SECCOMP_SET_MODE_FILTER,
+			libc::SECCOMP_FILTER_FLAG_TSYNC,
+			&program,
+		)
+	};
+	assert_eq!(
+		installed,
+		0,
+		"install the seccomp filter: {}",
+		std::io::Error::last_os_error()
+	);
 }

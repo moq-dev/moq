@@ -1,14 +1,13 @@
 /**
  * In-band authorization: present tokens to the peer and learn what they grant.
  *
- * Each side of a moq-lite-07 session, and of a moq-transport draft-18+ session when both
- * sides negotiate MoQ Auth, presents the credential its connection already carried (the
- * URL, or nothing) right after setup, and learns the {@link Grant} it earned. Older
- * versions, and peers that do not negotiate it, carry no AUTH exchange: the grant stays
- * undefined. There {@link Handle.add} rejects with {@link Unsupported} on moq-lite, and on
- * moq-transport keeps the token, with no grant, for the announcements whose route names it.
+ * Each side of a moq-lite-07 session presents the credential its connection already carried
+ * (the URL, or nothing) right after setup, and learns the {@link Grant} it earned. Older
+ * versions and moq-transport carry no AUTH exchange: the grant stays undefined. There a
+ * {@link Credential.answered} rejects with {@link Unsupported} on moq-lite, and on
+ * moq-transport the token is kept, with no grant, for the announcements whose route names it.
  * {@link Handle.grant} is the union of every token this side presented, and {@link Handle.add}
- * presents another without reconnecting, returning its {@link Credential}.
+ * presents another without reconnecting, returning its {@link Credential} at once.
  *
  * A {@link Handle} passed to `connect` as `auth`, or the one a reconnecting `Connection` owns,
  * outlives its sessions: each presents every token it holds, so a route naming one of its
@@ -19,7 +18,7 @@
  */
 
 import type { Wall } from "@moq/clock";
-import type { Getter } from "@moq/signals";
+import type { GetPromise, Getter } from "@moq/signals";
 import type { SessionCode } from "./error.ts";
 import type * as Path from "./path.ts";
 
@@ -28,13 +27,14 @@ export { Duplicate, Handle, Unsupported } from "./auth_session.ts";
 /**
  * What a peer lets this side do, in this side's own paths (relative to the session).
  *
- * An empty {@link Path.Patterns} grants nothing; `**` grants everything.
+ * Each {@link Path.Prefix} covers its whole subtree. An empty {@link Path.Prefixes} grants
+ * nothing; the empty prefix grants everything.
  */
 export interface Grant {
 	/** The broadcasts this side may publish to the peer. */
-	publish: Path.Patterns;
+	publish: Path.Prefixes;
 	/** The broadcasts this side may subscribe to from the peer. */
-	subscribe: Path.Patterns;
+	subscribe: Path.Prefixes;
 	/** When the grant lapses on the `@moq/clock` wall clock, or undefined for never. */
 	expires?: Wall;
 }
@@ -54,7 +54,15 @@ export interface Credential {
 	 * peer closed it without one or it was withdrawn, or the handle's end. A session ending is
 	 * not one: the next session presents it again.
 	 */
-	readonly closed: PromiseLike<Error | null>;
+	readonly closed: GetPromise<Error | null>;
+	/**
+	 * Resolves once a peer first accepts the token. Rejects with {@link Unsupported} when a
+	 * session neither carries AUTH nor lets a request carry a token (moq-lite without AUTH),
+	 * with the peer's refusal as an `Error.Session`, with the handle's end, or once the token is
+	 * withdrawn before an answer. On moq-transport without AUTH it resolves at once with no grant:
+	 * only a request whose route names it carries it.
+	 */
+	readonly answered: PromiseLike<void>;
 	/** Withdraw the token, removing its grant from the union and remaking any request that carries it without it. */
 	close(): void;
 }
@@ -68,7 +76,7 @@ export interface Request {
 	/** The token the peer presented. Empty means the credential its connection carried. */
 	readonly token: Uint8Array;
 	/** Settles when the peer withdraws this unanswered token or closes the session. */
-	readonly closed: PromiseLike<Error | null>;
+	readonly closed: GetPromise<Error | null>;
 	/**
 	 * Grant the token until the returned {@link Issued} is revoked or closed.
 	 *
@@ -76,7 +84,13 @@ export interface Request {
 	 * what enforce the grant, and revoking before `expires` is the acceptor's job.
 	 */
 	accept(grant: Grant): Issued;
-	/** Refuse the token with a session code and a reason for the peer. */
+	/**
+	 * Refuse the token with a session code and a reason for the peer.
+	 *
+	 * `Internal`, `TooManyRequests`, and `Timeout` say this side failed to decide, such as with its
+	 * auth backend down, so a moq-lite peer presents the token again after a backoff; any other
+	 * code ends it.
+	 */
 	reject(code: SessionCode, reason: string): void;
 }
 
@@ -93,7 +107,7 @@ export interface Issued {
 	/** End the grant without a reason. */
 	close(): void;
 	/** Settles once the peer withdraws the token or its stream ends. */
-	readonly closed: PromiseLike<Error | null>;
+	readonly closed: GetPromise<Error | null>;
 }
 
 /**

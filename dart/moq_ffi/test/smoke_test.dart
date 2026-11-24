@@ -20,7 +20,9 @@ void main() {
       info: null,
     );
     final consumer = track.consume(subscription: null);
-    final producer = track.appendGroup();
+    final producer = track.appendGroup(
+      start: MoqTimestamp(value: 0, scale: null),
+    );
     final group = await consumer.nextGroup();
     producer.abort(errorCode: 404);
     await expectLater(
@@ -47,12 +49,14 @@ void main() {
     final broadcast = MoqBroadcastProducer();
     final track = broadcast.publishTrack(
       name: 'events',
-      info: MoqTrackInfo(timescale: 1000000),
+      info: MoqTrackInfo(timescale: 1000000, refresh: MoqTrackRefresh()),
     );
     final consumer = track.consume(subscription: null);
     final nextGroup = consumer.nextGroup();
 
-    final producer = track.appendGroup();
+    final producer = track.appendGroup(
+      start: MoqTimestamp(value: 0, scale: 1000000),
+    );
     producer.writeFrame(
       frame: MoqFrame(
         payload: utf8.encode('dart'),

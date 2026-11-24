@@ -591,7 +591,7 @@ public:
 		broadcast = route->broadcast();
 		if (video) {
 			moq::VideoInit init{};
-			init.format = moq::VideoFormat::kAvc3;
+			init.format = moq::VideoFormat::h264();
 			init.data = TestH264Init();
 			this->video =
 				TestOk(moq::MediaTrackProducer::video(broadcast, moq::MediaTarget::kNamed{}, init),
@@ -599,7 +599,7 @@ public:
 		}
 		if (audio) {
 			moq::AudioInit init{};
-			init.format = moq::AudioFormat::kOpus;
+			init.format = moq::AudioFormat::opus();
 			init.data = TestOpusHead();
 			this->audio =
 				TestOk(moq::MediaTrackProducer::audio(broadcast, moq::MediaTarget::kNamed{}, init),
@@ -697,7 +697,7 @@ std::vector<uint8_t> PcmFrame(uint64_t timestamp_us, uint32_t channels)
 moq::Catalog CatalogSnapshot(Publisher &publisher)
 {
 	auto consumer = TestOk(publisher.broadcast->consume(), "local broadcast consumer");
-	auto catalogs = TestOk(moq::MediaCatalogConsumer::subscribe(consumer).get(), "local catalog");
+	auto catalogs = TestOk(moq::MediaCatalogConsumer::subscribe(consumer, {}).get(), "local catalog");
 	auto snapshot = TestOk(catalogs->next().get(), "catalog snapshot");
 	CHECK(snapshot.has_value());
 	return *snapshot;
@@ -953,7 +953,7 @@ int main()
 		CHECK(publisher.WriteUntil([] { return g_output_frames > 0; }));
 		FreezeCatalog(ctx, publisher);
 		moq::VideoInit init{};
-		init.format = moq::VideoFormat::kAvc3;
+		init.format = moq::VideoFormat::h264();
 		init.data = TestH264Init();
 		auto replacement = TestOk(
 			moq::MediaTrackProducer::video(publisher.broadcast,
@@ -987,7 +987,7 @@ int main()
 		reset(relay.Url());
 		Publisher publisher(relay, "obs/test", false, false);
 		moq::AudioInit init{};
-		init.format = moq::AudioFormat::kAac;
+		init.format = moq::AudioFormat::aac();
 		init.data = AAC_CONFIG;
 		auto aac = TestOk(moq::MediaTrackProducer::audio(publisher.broadcast, moq::MediaTarget::kNamed{}, init),
 				  "aac producer");
@@ -1042,8 +1042,12 @@ int main()
 			CHECK(publisher.WriteUntil([&] { return g_output_audio >= audio + 3; }));
 		} else {
 			uint64_t timestamp_us = 2'000'000;
+			// The scale-less track carries the time in its payload, so each frame's timestamp
+			// is the unscaled key of the group it opens.
+			uint64_t key = 0;
 			CHECK(WaitFor([&] {
-				TestOk(pcm->write_frame(moq::Frame{PcmFrame(timestamp_us, channels), std::nullopt}),
+				TestOk(pcm->write_frame(moq::Frame{PcmFrame(timestamp_us, channels),
+								   moq::Timestamp{key++, std::nullopt}}),
 				       "write pcm");
 				timestamp_us += 20'000;
 				std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -1093,7 +1097,7 @@ int main()
 		void *source = createSource();
 		CHECK(publisher.WriteUntil([] { return g_output_frames > 0 && g_output_audio > 0; }));
 		auto consumer = TestOk(publisher.broadcast->consume(), "local broadcast consumer");
-		auto catalogs = TestOk(moq::MediaCatalogConsumer::subscribe(consumer).get(), "local catalog");
+		auto catalogs = TestOk(moq::MediaCatalogConsumer::subscribe(consumer, {}).get(), "local catalog");
 		auto snapshot = TestOk(catalogs->next().get(), "catalog snapshot");
 		CHECK(snapshot.has_value());
 		auto &video = snapshot->video.begin()->second;
@@ -1374,7 +1378,7 @@ int main()
 		CHECK(publisher.WriteUntil([] { return g_output_frames > 0; }));
 		FreezeCatalog(ctx, publisher);
 		moq::VideoInit init{};
-		init.format = moq::VideoFormat::kAvc3;
+		init.format = moq::VideoFormat::h264();
 		init.data = TestH264Init();
 		auto replacement = TestOk(
 			moq::MediaTrackProducer::video(publisher.broadcast,
@@ -1403,7 +1407,7 @@ int main()
 		FreezeCatalog(ctx, publisher);
 		g_candidate_decode = failure;
 		moq::VideoInit init{};
-		init.format = moq::VideoFormat::kAvc3;
+		init.format = moq::VideoFormat::h264();
 		init.data = TestH264Init();
 		auto replacement = TestOk(
 			moq::MediaTrackProducer::video(publisher.broadcast,
@@ -1458,7 +1462,7 @@ int main()
 		}
 		FreezeCatalog(ctx, publisher);
 		moq::AudioInit init{};
-		init.format = moq::AudioFormat::kOpus;
+		init.format = moq::AudioFormat::opus();
 		init.data = TestOpusHead();
 		auto replacement = TestOk(
 			moq::MediaTrackProducer::audio(publisher.broadcast,
@@ -1476,10 +1480,12 @@ int main()
 			g_candidate = {candidate, false};
 			return true;
 		}));
+		// Each cut opens a group, so each retry starts later than the last.
+		uint64_t bad_us = 1'000'000'000;
 		CHECK(publisher.WriteUntil([&] {
-			TestOk(replacement->write_frame(moq::Frame{BAD_OPUS, Micros(1'000'000'000)}),
-			       "replacement frame");
+			TestOk(replacement->write_frame(moq::Frame{BAD_OPUS, Micros(bad_us)}), "replacement frame");
 			TestOk(replacement->cut(), "replacement audio cut");
+			bad_us += 20'000;
 			std::lock_guard<std::mutex> lock(g_candidate_mutex);
 			return g_candidate.failed && candidate.expired();
 		}));
@@ -1506,7 +1512,7 @@ int main()
 		CHECK(publisher.WriteUntil([] { return g_output_audio > 0; }));
 		FreezeCatalog(ctx, publisher);
 		moq::AudioInit init{};
-		init.format = moq::AudioFormat::kOpus;
+		init.format = moq::AudioFormat::opus();
 		init.data = TestOpusHead();
 		auto replacement = TestOk(
 			moq::MediaTrackProducer::audio(publisher.broadcast,
@@ -1576,7 +1582,7 @@ int main()
 		void *source = createSource();
 		CHECK(publisher.WriteUntil([] { return g_output_frames > 0; }));
 		auto consumer = TestOk(publisher.broadcast->consume(), "local broadcast consumer");
-		auto catalogs = TestOk(moq::MediaCatalogConsumer::subscribe(consumer).get(), "local catalog");
+		auto catalogs = TestOk(moq::MediaCatalogConsumer::subscribe(consumer, {}).get(), "local catalog");
 		auto snapshot = TestOk(catalogs->next().get(), "catalog snapshot");
 		CHECK(snapshot.has_value());
 		auto config = snapshot->video.begin()->second;
@@ -1637,7 +1643,7 @@ int main()
 		CHECK(publisher.WriteUntil([] { return g_output_frames > 0; }));
 		g_find_decoder_ok = false;
 		moq::VideoInit init{};
-		init.format = moq::VideoFormat::kAvc3;
+		init.format = moq::VideoFormat::h264();
 		init.data = TestH264Init();
 		auto replacement = TestOk(
 			moq::MediaTrackProducer::video(publisher.broadcast,

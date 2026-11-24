@@ -4,13 +4,27 @@ use gst::glib;
 use gst::prelude::*;
 use std::time::Duration;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(crate) struct Settings {
 	version: Option<String>,
-	tls_disable_verify: bool,
+	websocket_enabled: bool,
+	connect_tls_insecure: bool,
 	quic_idle_timeout: Option<Duration>,
 	quic_keep_alive: Option<Duration>,
 	quic_keylog: bool,
+}
+
+impl Default for Settings {
+	fn default() -> Self {
+		Self {
+			version: None,
+			websocket_enabled: moq_tokio::websocket::Config::default().resolve().enabled,
+			connect_tls_insecure: false,
+			quic_idle_timeout: None,
+			quic_keep_alive: None,
+			quic_keylog: false,
+		}
+	}
 }
 
 pub(crate) fn duration_millis(duration: Duration) -> u64 {
@@ -27,8 +41,14 @@ pub(crate) fn properties() -> Vec<glib::ParamSpec> {
 			)
 			.mutable_ready()
 			.build(),
-		glib::ParamSpecBoolean::builder("tls-disable-verify")
-			.nick("TLS disable verify")
+		glib::ParamSpecBoolean::builder("connect-websocket-enabled")
+			.nick("Connect WebSocket enabled")
+			.blurb("Race a WebSocket fallback against QUIC for http(s) URLs")
+			.default_value(moq_tokio::websocket::Config::default().resolve().enabled)
+			.mutable_ready()
+			.build(),
+		glib::ParamSpecBoolean::builder("connect-tls-insecure")
+			.nick("Connect TLS insecure")
 			.blurb("Disable TLS certificate verification")
 			.mutable_ready()
 			.build(),
@@ -56,7 +76,8 @@ impl Settings {
 	pub(crate) fn set(&mut self, name: &str, value: &glib::Value) {
 		match name {
 			"connect-version" => self.version = value.get().unwrap(),
-			"tls-disable-verify" => self.tls_disable_verify = value.get().unwrap(),
+			"connect-websocket-enabled" => self.websocket_enabled = value.get().unwrap(),
+			"connect-tls-insecure" => self.connect_tls_insecure = value.get().unwrap(),
 			"quic-idle-timeout" => self.quic_idle_timeout = Some(Duration::from_millis(value.get().unwrap())),
 			"quic-keep-alive" => self.quic_keep_alive = Some(Duration::from_millis(value.get().unwrap())),
 			"quic-keylog" => self.quic_keylog = value.get().unwrap(),
@@ -67,7 +88,8 @@ impl Settings {
 	pub(crate) fn get(&self, name: &str) -> glib::Value {
 		match name {
 			"connect-version" => self.version.to_value(),
-			"tls-disable-verify" => self.tls_disable_verify.to_value(),
+			"connect-websocket-enabled" => self.websocket_enabled.to_value(),
+			"connect-tls-insecure" => self.connect_tls_insecure.to_value(),
 			"quic-idle-timeout" => duration_millis(
 				self.quic_idle_timeout
 					.unwrap_or_else(|| moq_tokio::quic::Resolved::default().idle_timeout.unwrap_or_default()),
@@ -89,8 +111,9 @@ impl Settings {
 			.filter(|version| !version.is_empty())
 			.map(|version| version.parse().map_err(anyhow::Error::msg))
 			.collect::<anyhow::Result<_>>()?;
-		connect.tls.insecure = Some(self.tls_disable_verify);
-		connect.backoff.timeout = Some(Duration::ZERO.into());
+		connect.websocket.enabled = Some(self.websocket_enabled);
+		connect.tls.insecure = Some(self.connect_tls_insecure);
+		connect.backoff.timeout = Some(moq_tokio::cli::Bound::NONE);
 		let mut quic = moq_tokio::quic::Config::default();
 		quic.idle_timeout = self.quic_idle_timeout.map(Into::into);
 		quic.keep_alive = self.quic_keep_alive.map(Into::into);
@@ -131,6 +154,14 @@ mod tests {
 		}
 	}
 
+	#[test]
+	fn websocket_fallback_defaults_on_and_turns_off() {
+		let mut settings = Settings::default();
+		assert!(settings.get("connect-websocket-enabled").get::<bool>().unwrap());
+		settings.set("connect-websocket-enabled", &false.to_value());
+		assert_eq!(settings.resolve().unwrap().0.websocket.enabled, Some(false));
+	}
+
 	/// Automatic reads back as zero while its interval follows the idle timeout.
 	#[test]
 	fn unset_keep_alive_reads_as_automatic() {
@@ -150,7 +181,7 @@ mod tests {
 		let mut settings = Settings::default();
 		for (name, value) in [
 			("connect-version", " moq-transport-18 , moq-lite-06 ".to_value()),
-			("tls-disable-verify", true.to_value()),
+			("connect-tls-insecure", true.to_value()),
 			("quic-idle-timeout", 15_000u64.to_value()),
 			("quic-keep-alive", 0u64.to_value()),
 			("quic-keylog", true.to_value()),
@@ -163,7 +194,7 @@ mod tests {
 			["moq-transport-18".parse().unwrap(), "moq-lite-06".parse().unwrap()]
 		);
 		assert_eq!(connect.tls.insecure, Some(true));
-		assert_eq!(connect.backoff.timeout, Some(Duration::ZERO.into()));
+		assert_eq!(connect.backoff.timeout, Some(moq_tokio::cli::Bound::NONE));
 		let quic = quic.resolve();
 		assert_eq!(quic.idle_timeout, Some(Duration::from_secs(15)));
 		assert_eq!(quic.keep_alive, None);

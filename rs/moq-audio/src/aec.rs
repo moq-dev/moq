@@ -2,7 +2,7 @@
 //!
 //! Without this, anyone on a laptop without a headset sends the rest of the call
 //! back to itself. [`Processor`] accepts interleaved playback and microphone PCM
-//! from any audio stack. The `aec` feature also provides `Control`, which wires
+//! from any audio stack. With both `capture` and `playback`, `Control` also wires
 //! a `playback::Engine` directly to `capture::Config`:
 //!
 //! ```no_run
@@ -30,20 +30,20 @@
 //! echo reference and the microphone are processed there, in that order, which
 //! is the ordering the echo model needs.
 
-#[cfg(feature = "aec")]
+#[cfg(all(feature = "capture", feature = "playback"))]
 use std::fmt;
-#[cfg(feature = "aec")]
+#[cfg(all(feature = "capture", feature = "playback"))]
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-#[cfg(feature = "aec")]
+#[cfg(all(feature = "capture", feature = "playback"))]
 use std::sync::{Arc, Mutex, Weak};
-#[cfg(feature = "aec")]
+#[cfg(all(feature = "capture", feature = "playback"))]
 use std::time::Duration;
 
-#[cfg(feature = "aec")]
+#[cfg(all(feature = "capture", feature = "playback"))]
 use crate::Error;
-#[cfg(feature = "aec")]
+#[cfg(all(feature = "capture", feature = "playback"))]
 use crate::playback::{self, REFERENCE_CHANNELS};
-#[cfg(feature = "aec")]
+#[cfg(all(feature = "capture", feature = "playback"))]
 use crate::ring;
 use sonora::config::{EchoCanceller, GainController2, NoiseSuppression, NoiseSuppressionLevel};
 
@@ -55,7 +55,7 @@ pub use processor::{Processor, Stats, Stream};
 /// Fixed rather than the device's, so switching to a 44.1 kHz output doesn't
 /// invalidate an adaptive filter that spent seconds converging. Devices run at
 /// 48 kHz far more often than not, in which case this resamples nothing.
-#[cfg(feature = "aec")]
+#[cfg(all(feature = "capture", feature = "playback"))]
 const REFERENCE_RATE: u32 = 48_000;
 
 /// Slack between the output callback and the microphone callback, for the
@@ -68,15 +68,15 @@ const REFERENCE_RATE: u32 = 48_000;
 /// and a device that buffers less than the queue holds would see its echo
 /// arrive before the reference describing it, which is a reference the model
 /// cannot use at all.
-#[cfg(feature = "aec")]
+#[cfg(all(feature = "capture", feature = "playback"))]
 const REFERENCE_LATENCY: Duration = Duration::from_millis(10);
 
 /// Ceiling on that queue, bounding what a closed microphone can pin.
-#[cfg(feature = "aec")]
+#[cfg(all(feature = "capture", feature = "playback"))]
 const REFERENCE_CAPACITY: Duration = Duration::from_millis(200);
 
 /// Samples per channel in one 10 ms reference frame.
-#[cfg(feature = "aec")]
+#[cfg(all(feature = "capture", feature = "playback"))]
 const REFERENCE_FRAME: usize = REFERENCE_RATE as usize / 100;
 
 /// Echo cancellation settings.
@@ -140,13 +140,13 @@ impl Config {
 /// acquires an exclusive attachment before opening a microphone, so clones
 /// cannot run that state against two inputs. The playback reference goes away
 /// when the last control and attachment drop.
-#[cfg(feature = "aec")]
+#[cfg(all(feature = "capture", feature = "playback"))]
 #[derive(Clone)]
 pub struct Control {
 	inner: Arc<Inner>,
 }
 
-#[cfg(feature = "aec")]
+#[cfg(all(feature = "capture", feature = "playback"))]
 impl Control {
 	/// Register echo cancellation against a running engine.
 	///
@@ -252,7 +252,7 @@ impl Control {
 	}
 }
 
-#[cfg(feature = "aec")]
+#[cfg(all(feature = "capture", feature = "playback"))]
 impl fmt::Debug for Control {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.debug_struct("Control")
@@ -266,12 +266,12 @@ impl fmt::Debug for Control {
 /// Capture owns this for exactly one live stream. Dropping it releases the
 /// adaptive state for a later microphone while cloned [`Control`] handles stay
 /// valid for UI toggles.
-#[cfg(feature = "aec")]
+#[cfg(all(feature = "capture", feature = "playback"))]
 pub(crate) struct Attachment {
 	inner: Arc<Inner>,
 }
 
-#[cfg(feature = "aec")]
+#[cfg(all(feature = "capture", feature = "playback"))]
 impl Attachment {
 	/// Replace the microphone samples in `buf` with the same span, minus the
 	/// echo.
@@ -298,7 +298,7 @@ impl Attachment {
 	}
 }
 
-#[cfg(feature = "aec")]
+#[cfg(all(feature = "capture", feature = "playback"))]
 impl Drop for Attachment {
 	fn drop(&mut self) {
 		let mut state = self.inner.state.lock().unwrap();
@@ -313,7 +313,7 @@ impl Drop for Attachment {
 
 /// The shared half: what the microphone callback locks, and what the playback
 /// driver swaps a new reference into.
-#[cfg(feature = "aec")]
+#[cfg(all(feature = "capture", feature = "playback"))]
 struct Inner {
 	/// Distinguishes this canceller from a later one built on the same engine,
 	/// so dropping the first doesn't take the second's tap with it.
@@ -332,7 +332,7 @@ struct Inner {
 	shared: Arc<playback::Shared>,
 }
 
-#[cfg(feature = "aec")]
+#[cfg(all(feature = "capture", feature = "playback"))]
 impl Drop for Inner {
 	fn drop(&mut self) {
 		self.shared.clear_reference(self.id);
@@ -343,7 +343,7 @@ impl Drop for Inner {
 ///
 /// Only the playback driver on a reference switch contends, and the callback
 /// passes that buffer through rather than waiting.
-#[cfg(feature = "aec")]
+#[cfg(all(feature = "capture", feature = "playback"))]
 struct State {
 	/// `None` until a microphone opens and reports its format.
 	processor: Option<Processor>,
@@ -358,7 +358,7 @@ struct State {
 	reference_frame: Vec<f32>,
 }
 
-#[cfg(feature = "aec")]
+#[cfg(all(feature = "capture", feature = "playback"))]
 impl Default for State {
 	fn default() -> Self {
 		Self {
@@ -370,7 +370,7 @@ impl Default for State {
 	}
 }
 
-#[cfg(feature = "aec")]
+#[cfg(all(feature = "capture", feature = "playback"))]
 impl State {
 	/// Forget the samples in flight, because the stream they belong to is gone.
 	fn reset(&mut self) {
@@ -460,7 +460,7 @@ impl State {
 ///
 /// The mirror image of a sink's registration, rebuilt at the same points. The
 /// producer goes to the mixer and the consumer to the canceller.
-#[cfg(feature = "aec")]
+#[cfg(all(feature = "capture", feature = "playback"))]
 pub(crate) struct Reference {
 	/// The canceller this belongs to, matched on removal.
 	id: u64,
@@ -475,7 +475,7 @@ pub(crate) struct Reference {
 	pending: Option<ring::Producer>,
 }
 
-#[cfg(feature = "aec")]
+#[cfg(all(feature = "capture", feature = "playback"))]
 impl Reference {
 	/// Whether this tap belongs to the canceller with this id.
 	pub(crate) fn owned_by(&self, id: u64) -> bool {
@@ -517,7 +517,7 @@ impl Reference {
 
 /// The tap itself: the mixer pushes the device's mix in at `rate` and the
 /// canceller reads it back at [`REFERENCE_RATE`].
-#[cfg(feature = "aec")]
+#[cfg(all(feature = "capture", feature = "playback"))]
 fn channel(rate: u32) -> (ring::Producer, ring::Consumer) {
 	ring::channel(
 		REFERENCE_CHANNELS,
@@ -531,14 +531,13 @@ fn channel(rate: u32) -> (ring::Producer, ring::Consumer) {
 			// back up to the target depth with silence the speaker never played
 			// would be both a fabricated reference and the standing delay this
 			// is shaped to avoid.
-			pad: false,
-			trim: true,
+			correction: ring::Correction::Fixed { pad: false, trim: true },
 			comfort: false,
 		},
 	)
 }
 
-#[cfg(all(test, feature = "aec"))]
+#[cfg(all(test, feature = "capture", feature = "playback"))]
 mod tests {
 	use std::collections::VecDeque;
 

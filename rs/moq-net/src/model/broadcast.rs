@@ -26,8 +26,8 @@ mod listing;
 // Sessions dedup a peer's listings per broadcast; a custom session has no public owner yet.
 #[cfg(feature = "async")]
 pub(crate) use listing::Owner;
+pub use listing::{Kind, Listed, Lister, Tracks, TracksEvent};
 pub(super) use listing::{ListOnAccept, Unlist};
-pub use listing::{Lister, Tracks, TracksEvent};
 
 /// A collection of media tracks that can be published and subscribed to.
 ///
@@ -68,6 +68,10 @@ pub struct Info {
 	// What the frames this broadcast's groups are still receiving may allocate up front,
 	// inherited from the origin handle that created it.
 	pub(crate) frames: super::frame::Budget,
+
+	// What the live edges of this broadcast's tracks may hold, shared with the session
+	// ingesting it, inherited from the origin handle that created it.
+	pub(crate) edges: cache::Edges,
 }
 
 impl Default for Info {
@@ -78,6 +82,7 @@ impl Default for Info {
 			path: crate::Path::default(),
 			instance: None,
 			frames: Default::default(),
+			edges: Default::default(),
 		}
 	}
 }
@@ -139,12 +144,26 @@ struct BroadcastState {
 }
 
 impl BroadcastState {
-	/// Insert a track weak handle into the lookup, returning an error if a live
-	/// track already holds the name. A closed entry under the name is reclaimed.
-	fn insert_track(&mut self, weak: track::TrackWeak) -> Result<(), Error> {
-		match self.cache_track(weak) {
-			Some(_) => Err(Error::Duplicate),
-			None => Ok(()),
+	/// Insert a track weak handle into the lookup, returning false if a live track
+	/// already holds the name. A closed entry under the name is reclaimed.
+	fn insert_track(&mut self, weak: track::TrackWeak) -> bool {
+		self.cache_track(weak).is_none()
+	}
+
+	/// Mint a name no live track holds, as [`Producer::unique_name`] documents.
+	fn unique_name(&mut self, suffix: &str) -> String {
+		let separator = if suffix.starts_with(|c: char| c.is_ascii_digit()) {
+			"-"
+		} else {
+			""
+		};
+		loop {
+			let id = self.unique;
+			self.unique = id.checked_add(1).expect("unique track IDs exhausted");
+			let name = format!("{id}{separator}{suffix}");
+			if !self.tracks.contains_key(name.as_str()) {
+				return name;
+			}
 		}
 	}
 
@@ -305,7 +324,8 @@ impl Producer {
 		Demand::new(self.alive.token.consume().weak(), self.state.clone())
 	}
 
-	/// Produce a new track and insert it into the broadcast.
+	/// Produce a new track and insert it into the broadcast, or `None` while a live track
+	/// holds the name.
 	///
 	/// Pass a name and an optional [`track::Info`], so a bare name works:
 	/// `create_track("video", None)` creates an untimed track.
@@ -313,11 +333,17 @@ impl Producer {
 		&self,
 		name: impl Into<Arc<str>>,
 		info: impl Into<Option<track::Info>>,
-	) -> Result<track::Producer, Error> {
-		let name = name.into();
-		let info = info.into().unwrap_or_default();
-		let mut state = self.state.lock();
+	) -> Option<track::Producer> {
+		let state = self.state.lock();
+		self.insert_created(state, name.into(), info.into().unwrap_or_default())
+	}
 
+	fn insert_created(
+		&self,
+		mut state: kio::Mut<'_, BroadcastState>,
+		name: Arc<str>,
+		info: track::Info,
+	) -> Option<track::Producer> {
 		// A consumer may have requested this name before it existed (a live
 		// [`Requests`] queues such requests). Creating the track fulfills that
 		// request: its consumers resolve against this very producer. Without
@@ -329,48 +355,67 @@ impl Producer {
 			// live same-name entry cannot exist (its presence would have kept
 			// the request from queuing).
 			let _ = state.cache_track(track.weak());
-			let unlist = Unlist::list(&self.state, &mut state.listing, name, &info);
-			return Ok(track.listed(unlist));
+			let unlist = Unlist::list(&self.state, &mut state.listing, name, Listed::Track(info));
+			return Some(track.listed(unlist));
 		}
 
 		let track = track::Producer::new(self.info.clone(), name.clone(), info.clone()).with_stats(self.stats.clone());
-		state.insert_track(track.weak())?;
-		let unlist = Unlist::list(&self.state, &mut state.listing, name, &info);
-		Ok(track.listed(unlist))
+		if !state.insert_track(track.weak()) {
+			return None;
+		}
+		let unlist = Unlist::list(&self.state, &mut state.listing, name, Listed::Track(info));
+		Some(track.listed(unlist))
 	}
 
-	/// Produce a new datagram track and insert it into the broadcast.
+	/// Produce a new datagram track and insert it into the broadcast, listed until it ends.
 	///
 	/// Datagram tracks are a namespace apart from stream tracks, so this never conflicts with
-	/// [`Self::create_track`]. Fails with [`Error::Duplicate`] while a live datagram track
-	/// holds the name.
+	/// [`Self::create_track`]. Returns `None` while a live datagram track holds the name.
 	///
 	/// Moq-lite 05 and 06 carry it on its name's stream track subscriptions, but only those
 	/// that start once it exists: create it before, or with, a stream track of the same name.
 	/// See [`datagram`](crate::datagram).
-	pub fn create_datagrams(
+	pub fn create_datagrams(&self, name: impl Into<Arc<str>>, info: datagram::Info) -> Option<datagram::Producer> {
+		self.insert_datagrams(name.into(), info, true)
+	}
+
+	/// [`Self::create_datagrams`] for a track no listing ever names, as a session's datagram
+	/// track riding a stream track's subscription, which serves a request rather than the
+	/// broadcast's inventory.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn create_unlisted_datagrams(
 		&self,
 		name: impl Into<Arc<str>>,
 		info: datagram::Info,
-	) -> Result<datagram::Producer, Error> {
-		let name = name.into();
+	) -> Option<datagram::Producer> {
+		self.insert_datagrams(name.into(), info, false)
+	}
+
+	fn insert_datagrams(&self, name: Arc<str>, info: datagram::Info, listed: bool) -> Option<datagram::Producer> {
 		let mut state = self.state.lock();
-		if let Some(live) = state.datagrams.get(name.as_ref()) {
-			// A consumer asked for it before it existed, and no handler took the request yet:
-			// creating the track serves those consumers.
-			let queued = state
-				.datagram_requests
-				.iter()
-				.position(|request| live.same_channel(&request.weak()));
-			let Some(queued) = queued else {
-				return Err(Error::Duplicate);
-			};
-			let request = state.datagram_requests.remove(queued).expect("found above");
-			return Ok(request.with_stats(self.stats.clone()).accept(info));
+		let producer = match state.datagrams.get(name.as_ref()) {
+			Some(live) => {
+				// A consumer asked for it before it existed, and no handler took the request
+				// yet: creating the track serves those consumers.
+				let queued = state
+					.datagram_requests
+					.iter()
+					.position(|request| live.same_channel(&request.weak()));
+				let queued = queued?;
+				let request = state.datagram_requests.remove(queued).expect("found above");
+				request.with_stats(self.stats.clone()).accept(info)
+			}
+			None => {
+				let producer = datagram::Producer::new(name.clone(), Some(info)).with_stats(self.stats.clone());
+				state.datagrams.insert(name.clone(), producer.weak());
+				producer
+			}
+		};
+		if !listed {
+			return Some(producer);
 		}
-		let producer = datagram::Producer::new(name.clone(), Some(info)).with_stats(self.stats.clone());
-		state.datagrams.insert(name, producer.weak());
-		Ok(producer)
+		let unlist = Unlist::list(&self.state, &mut state.listing, name, Listed::Datagrams(info));
+		Some(producer.listed(unlist))
 	}
 
 	/// Answer datagram lookups from `source`, the broadcast an origin's front serves from,
@@ -379,7 +424,8 @@ impl Producer {
 		self.state.lock().datagram_source = Some(source);
 	}
 
-	/// Reserve a track by name without finalizing its [`track::Info`].
+	/// Reserve a track by name without finalizing its [`track::Info`], or `None` while a
+	/// live track holds the name.
 	///
 	/// Returns a [`track::Request`] already discoverable by consumers; call
 	/// [`track::Request::accept`] to set its info and start producing. Use this when
@@ -390,32 +436,40 @@ impl Producer {
 	/// Subscribers wait on the name until it is accepted, so a reservation the producer
 	/// ends up never filling has to be dropped or rejected. Ending the broadcast
 	/// resolves whatever is left.
-	pub fn reserve_track(&self, name: impl Into<Arc<str>>) -> Result<track::Request, Error> {
+	pub fn reserve_track(&self, name: impl Into<Arc<str>>) -> Option<track::Request> {
 		let name = name.into();
 		let mut state = self.state.lock();
 		let request = track::Request::new(self.info.clone(), name.clone()).with_stats(self.stats.clone());
-		state.insert_track(request.weak())?;
-		Ok(request.listed(ListOnAccept {
+		if !state.insert_track(request.weak()) {
+			return None;
+		}
+		Some(request.listed(ListOnAccept {
 			state: self.state.clone(),
 			name,
 		}))
 	}
 
 	/// [`Self::reserve_track`] for a track no listing ever names, so only a reader who
-	/// already knows the name finds it, as a socket session's track.
-	pub(super) fn reserve_unlisted_track(&self, name: impl Into<Arc<str>>) -> Result<track::Request, Error> {
+	/// already knows the name finds it, such as a per-session track whose name the two
+	/// sides agreed on.
+	///
+	/// Unlisted controls discovery, not authorization: anyone allowed to subscribe to the
+	/// broadcast can read the track by name.
+	pub fn reserve_unlisted_track(&self, name: impl Into<Arc<str>>) -> Option<track::Request> {
 		let mut state = self.state.lock();
 		let request = track::Request::new(self.info.clone(), name.into()).with_stats(self.stats.clone());
-		state.insert_track(request.weak())?;
-		Ok(request)
+		state.insert_track(request.weak()).then_some(request)
 	}
 
 	/// Create a track with a unique name using the given suffix.
 	///
 	/// Uses [`Self::unique_name`]; minted names are never reused, even after closure.
-	pub fn unique_track(&self, suffix: &str, info: impl Into<Option<track::Info>>) -> Result<track::Producer, Error> {
-		let name = self.unique_name(suffix);
-		self.create_track(name, info)
+	pub fn unique_track(&self, suffix: &str, info: impl Into<Option<track::Info>>) -> track::Producer {
+		let mut state = self.state.lock();
+		let name = state.unique_name(suffix);
+		// Minted under the same lock, so no live track can hold the name.
+		self.insert_created(state, name.into(), info.into().unwrap_or_default())
+			.expect("a minted name is free")
 	}
 
 	/// Generate a unique track name from a suffix without creating the track.
@@ -430,20 +484,7 @@ impl Producer {
 	///
 	/// Panics if the broadcast exhausts its `u64` IDs.
 	pub fn unique_name(&self, suffix: &str) -> String {
-		let mut state = self.state.lock();
-		let separator = if suffix.starts_with(|c: char| c.is_ascii_digit()) {
-			"-"
-		} else {
-			""
-		};
-		loop {
-			let id = state.unique;
-			state.unique = id.checked_add(1).expect("unique track IDs exhausted");
-			let name = format!("{id}{separator}{suffix}");
-			if !state.tracks.contains_key(name.as_str()) {
-				return name;
-			}
-		}
+		self.state.lock().unique_name(suffix)
 	}
 
 	/// Create a dynamic producer that handles on-demand track requests from consumers.
@@ -482,11 +523,6 @@ impl Producer {
 	/// Dropping the last producer does the same. Closing twice is a no-op.
 	pub fn close(&self) {
 		self.alive.close();
-	}
-
-	/// `Ready` once the broadcast ended, by [`Self::close`] or the last producer dropping.
-	pub(super) fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.alive.token.poll_closed(waiter)
 	}
 
 	/// Whether any [`Consumer`] handle exists, which is not itself demand for a track.
@@ -1556,11 +1592,26 @@ mod test {
 	fn unique_names_survive_closed_track_pruning() {
 		let producer = Info::new().produce();
 		let consumer = producer.consume();
-		let track = producer.unique_track(".opus", crate::track::Info::timed()).unwrap();
+		let track = producer.unique_track(".opus", crate::track::Info::timed());
 		assert_eq!(track.name(), "0.opus");
 		drop(track);
 		assert!(matches!(consumer.track("0.opus"), Err(Error::NotFound)));
 		assert_eq!(producer.unique_name(".opus"), "1.opus");
+	}
+
+	/// A live track holds its name against every creator, a minted name skips it, and the
+	/// name frees once the track ends.
+	#[test]
+	fn a_live_name_is_taken_until_its_track_ends() {
+		let producer = Info::new().produce();
+		let track = producer.create_track("0.opus", crate::track::Info::timed()).unwrap();
+		assert!(producer.create_track("0.opus", None).is_none());
+		assert!(producer.reserve_track("0.opus").is_none());
+		assert!(producer.reserve_unlisted_track("0.opus").is_none());
+		assert_eq!(producer.unique_track(".opus", None).name(), "1.opus");
+
+		drop(track);
+		assert!(producer.create_track("0.opus", None).is_some());
 	}
 
 	/// A track handle reads what an open broadcast serves now, so a track that went away
@@ -1570,11 +1621,11 @@ mod test {
 		let producer = Info::new().produce();
 		let consumer = producer.consume();
 		let track = producer.create_track("a", crate::track::Info::timed()).unwrap();
-		let _open = track.append_group().unwrap();
+		let _open = track.append_next().unwrap();
 		let handle = consumer.track("a").unwrap();
-		assert_eq!(handle.latest_sequence(), Some(0));
+		assert_eq!(handle.latest_key(), Some(0));
 		drop(track);
-		assert_eq!(handle.latest_sequence(), None);
+		assert_eq!(handle.latest_key(), None);
 	}
 
 	/// A handle's largest reads the instance its open broadcast serves now, without asking
@@ -1584,8 +1635,10 @@ mod test {
 		let producer = Info::new().produce();
 		let consumer = producer.consume();
 		let track = producer.create_track("a", crate::track::Info::default()).unwrap();
-		let mut group = track.append_group().unwrap();
-		group.write_frame(None, &b"a"[..]).unwrap();
+		let mut group = track.append_next().unwrap();
+		group
+			.write_frame(crate::Timestamp::unscaled(group.start), &b"a"[..])
+			.unwrap();
 		let mut handle = consumer.track("a").unwrap();
 		let waiter = kio::Waiter::noop();
 		assert_eq!(
@@ -1604,11 +1657,11 @@ mod test {
 		let producer = Info::new().produce();
 		let consumer = producer.consume();
 		let track = producer.create_track("a", crate::track::Info::timed()).unwrap();
-		let _open = track.append_group().unwrap();
+		let _open = track.append_next().unwrap();
 		let handle = consumer.track("a").unwrap();
 		producer.close();
 		drop(track);
-		assert_eq!(handle.latest_sequence(), Some(0));
+		assert_eq!(handle.latest_key(), Some(0));
 	}
 
 	#[test]
@@ -1798,14 +1851,14 @@ mod test {
 		let mut demand = producer.demand();
 		let waiter = kio::Waiter::noop();
 		let mut subscriber = video.subscribe(None);
-		let mut writing = video.append_group().unwrap();
+		let mut writing = video.append_next().unwrap();
 		writing.write_frame(crate::Timestamp::ZERO, &b"key"[..]).unwrap();
 		assert_eq!(wanted_changed(&mut demand, &waiter), Some(true));
 
 		let mut group = subscriber.assert_group();
 		drop(subscriber);
 		assert_eq!(wanted_changed(&mut demand, &waiter), None, "the group is read");
-		assert!(video.demand().wanted().is_some());
+		assert!(video.demand().wanted());
 
 		let Poll::Ready(Ok(Some(frame))) = group.poll_next_frame(&waiter) else {
 			panic!("the frame was written");
@@ -1816,7 +1869,7 @@ mod test {
 
 		drop(frame);
 		assert!(!writing.demand().wanted());
-		assert_eq!(video.demand().wanted(), None);
+		assert_eq!(video.demand().wanted_start(), None);
 		assert_eq!(wanted_changed(&mut demand, &waiter), Some(false));
 	}
 
@@ -1840,7 +1893,7 @@ mod test {
 
 		// Create the track before any consumer exists.
 		let track1 = producer.assert_create_track("track1", crate::track::Info::timed());
-		track1.append_group().unwrap().finish().unwrap();
+		track1.append_next().unwrap().finish().unwrap();
 
 		let consumer = producer.consume();
 
@@ -1854,7 +1907,7 @@ mod test {
 		let mut track2_consumer = consumer2.track("track2").unwrap().subscribe(None).await.unwrap();
 		track2_consumer.assert_no_group();
 
-		track2.append_group().unwrap().finish().unwrap();
+		track2.append_next().unwrap().finish().unwrap();
 
 		track2_consumer.assert_group();
 	}
@@ -1942,7 +1995,7 @@ mod test {
 		track3.subscribe(None).assert_is_clone(&track1);
 
 		// Append a group and make sure they all get it.
-		track3.append_group().unwrap().finish().unwrap();
+		track3.append_next().unwrap().finish().unwrap();
 		track1.assert_group();
 		track2.assert_group();
 
@@ -1968,7 +2021,7 @@ mod test {
 		let mut track1 = track1_fut.await.unwrap();
 
 		// Close the producer (simulating publisher disconnect).
-		producer1.append_group().unwrap().finish().unwrap();
+		producer1.append_next().unwrap().finish().unwrap();
 		let producer1 = producer1.finish().unwrap();
 		drop(producer1);
 
@@ -1984,7 +2037,7 @@ mod test {
 
 		// The new consumer should receive the new group, which continues past the first's.
 		producer2
-			.create_group(crate::group::Info { sequence: 1 })
+			.create_group(crate::group::Info { start: 1 })
 			.unwrap()
 			.finish()
 			.unwrap();
@@ -2003,7 +2056,7 @@ mod test {
 
 		let track = consumer.track("media").unwrap().subscribe(None);
 		let first = dynamic.assert_request().accept(crate::track::Info::timed());
-		let mut group = first.create_group(crate::group::Info { sequence: 8 }).unwrap();
+		let mut group = first.create_group(crate::group::Info { start: 8 }).unwrap();
 		group.write_frame(at(1000), b"a".as_slice()).unwrap();
 		group.finish().unwrap();
 		let first = first.finish().unwrap();
@@ -2011,13 +2064,13 @@ mod test {
 
 		let track = consumer.track("media").unwrap().subscribe(None);
 		let second = dynamic.assert_request().accept(crate::track::Info::timed());
-		let mut group = second.append_group().unwrap();
-		assert_eq!(group.sequence, 0);
+		let mut group = second.append_next().unwrap();
+		assert_eq!(group.start, 0);
 		group.write_frame(at(500), b"b".as_slice()).unwrap();
 		drop((group, second, track));
 
 		let mut third = producer.create_track("media", crate::track::Info::timed()).unwrap();
-		third.finish_at(crate::track::Position::group(0), None).unwrap();
+		third.finish_at(crate::track::Position::group(0)).unwrap();
 	}
 
 	/// Names that are gone leave nothing behind, served or not, so churning distinct names
@@ -2030,7 +2083,7 @@ mod test {
 		for i in 0..1000 {
 			let track = consumer.track(&format!("requested/{i}")).unwrap().subscribe(None);
 			let served = dynamic.assert_request().accept(crate::track::Info::timed());
-			served.append_group().unwrap().finish().unwrap();
+			served.append_next().unwrap().finish().unwrap();
 			drop((served, track));
 
 			let track = consumer.track(&format!("refused/{i}")).unwrap().subscribe(None);
@@ -2039,7 +2092,7 @@ mod test {
 			let created = producer
 				.create_track(format!("created/{i}"), crate::track::Info::timed())
 				.unwrap();
-			created.append_group().unwrap().finish().unwrap();
+			created.append_next().unwrap().finish().unwrap();
 		}
 		let state = producer.state.lock();
 		assert!(state.tracks.len() < 16, "{} names retained", state.tracks.len());
@@ -2057,18 +2110,18 @@ mod test {
 		let consumer1 = c1_fut.await.unwrap();
 
 		// The producer should NOT be unused yet because there's a consumer.
-		assert!(producer1.demand().wanted().is_some(), "track producer should be used");
+		assert!(producer1.demand().wanted(), "track producer should be used");
 
 		// A second subscriber reuses the live producer (fast path / dedup).
 		let consumer2 = bc.track("unknown_track").unwrap().subscribe(None).await.unwrap();
 		consumer2.assert_is_clone(&consumer1);
 
 		drop(consumer1);
-		assert!(producer1.demand().wanted().is_some(), "track producer should be used");
+		assert!(producer1.demand().wanted(), "track producer should be used");
 
 		drop(consumer2);
 		assert!(
-			producer1.demand().wanted().is_none(),
+			!producer1.demand().wanted(),
 			"track producer should be unused after all consumers are dropped"
 		);
 
@@ -2089,7 +2142,7 @@ mod test {
 		let consumer4 = c4_fut.await.unwrap();
 		drop(consumer4);
 		assert!(
-			producer2.demand().wanted().is_none(),
+			!producer2.demand().wanted(),
 			"new track producer should be unused after its consumer is dropped"
 		);
 	}
@@ -2114,7 +2167,7 @@ mod test {
 		let mut sub = subscribing.await.expect("fulfilled by create_track");
 
 		// The fulfilled subscription is live against this very producer.
-		track.append_group().unwrap().finish().unwrap();
+		track.append_next().unwrap().finish().unwrap();
 		sub.recv_group().await.expect("recv").expect("group");
 
 		// The handler never sees the request; a fresh subscribe reuses the track.
@@ -2239,7 +2292,7 @@ mod test {
 		assert!(matches!(queued.await, Err(Error::Unroutable)));
 		assert!(matches!(consumer.track("later"), Err(Error::Unroutable)));
 
-		served.append_group().unwrap().finish().unwrap();
+		served.append_next().unwrap().finish().unwrap();
 		accepted.assert_group();
 	}
 
@@ -2306,7 +2359,10 @@ mod test {
 		let track = consumer.track("track1").unwrap();
 		let pending_fetch = track.fetch_group(0, None);
 		let fetch = dynamic.requested_fill_group().await.unwrap();
-		let group = fetch.accept(crate::track::Info::timed()).unwrap();
+		let group = fetch
+			.accept(crate::track::Info::timed())
+			.unwrap()
+			.expect("a fresh group");
 		group.finish().unwrap();
 		pending_fetch.await.unwrap();
 
@@ -2315,7 +2371,7 @@ mod test {
 		assert!(matches!(subscriber.recv_group().await, Err(Error::Unroutable)));
 
 		let stale = request.accept(crate::track::Info::timed());
-		assert!(stale.append_group().is_err());
+		assert!(stale.append_next().is_err());
 	}
 
 	/// A staged track resolves no subscriber until it commits, and then with what was
@@ -2336,7 +2392,7 @@ mod test {
 
 		let _track = staged.commit();
 		let mut subscriber = subscribing.await.unwrap();
-		assert_eq!(subscriber.recv_group().await.unwrap().unwrap().sequence, 0);
+		assert_eq!(subscriber.recv_group().await.unwrap().unwrap().start, 0);
 	}
 
 	/// Dropping a staged track uncommitted rejects the request, so its subscribers fail
@@ -2363,7 +2419,7 @@ mod test {
 		let producer = Info::new().produce();
 		let request = producer.reserve_track("track1").unwrap();
 		let staged = request.stage(crate::track::Info::timed());
-		let mut group = staged.append_group().unwrap();
+		let mut group = staged.append_next().unwrap();
 		drop(staged);
 		let write = group.write_frame(crate::Timestamp::ZERO, b"x".as_slice());
 		assert!(matches!(write, Err(Error::Dropped)), "{write:?}");
@@ -2383,7 +2439,7 @@ mod test {
 		producer.close();
 		assert!(matches!(consumer.track("track1"), Err(Error::Unroutable)));
 
-		track.append_group().unwrap().finish().unwrap();
+		track.append_next().unwrap().finish().unwrap();
 		subscriber.assert_group();
 		let _track = track.finish().unwrap();
 	}
@@ -2404,7 +2460,7 @@ mod test {
 		assert!(matches!(pending.await, Err(Error::Unroutable)));
 
 		let track = request.accept(crate::track::Info::timed());
-		assert!(track.append_group().is_err());
+		assert!(track.append_next().is_err());
 		let mut subscriber = track.subscribe(None);
 		assert!(matches!(subscriber.recv_group().await, Err(Error::Unroutable)));
 		assert!(consumer.track("track1").is_err());
@@ -2456,7 +2512,7 @@ mod test {
 		let track = producer.create_track("video", crate::track::Info::timed()).unwrap();
 
 		// The unused wake a teardown acts on.
-		assert!(track.demand().wanted().is_none());
+		assert!(!track.demand().wanted());
 
 		// Demand returns in the gap before it commits.
 		let viewer = consumer.track("video").unwrap().subscribe(None);
@@ -2468,7 +2524,7 @@ mod test {
 		assert!(!track.is_closed());
 		let mut subscriber = viewer.await.unwrap();
 		subscriber.assert_no_group();
-		track.append_group().unwrap().finish().unwrap();
+		track.append_next().unwrap().finish().unwrap();
 		assert!(subscriber.recv_group().await.unwrap().is_some());
 
 		// Once the viewer really leaves, the same teardown commits, and the lookup
@@ -2511,13 +2567,10 @@ mod test {
 		let consumer = producer.consume();
 		let _track = producer.create_track("audio", crate::track::Info::timed()).unwrap();
 		let mut datagrams = producer.create_datagrams("audio", datagram::Info::default()).unwrap();
-		assert!(matches!(
-			producer.create_datagrams("audio", datagram::Info::default()),
-			Err(Error::Duplicate)
-		));
+		assert!(producer.create_datagrams("audio", datagram::Info::default()).is_none());
 
 		let mut reader = consumer.datagrams("audio").unwrap();
-		datagrams.append(None, "x").unwrap();
+		datagrams.append(crate::Timestamp::unscaled(0), "x").unwrap();
 		assert_eq!(received(&mut reader), 0);
 
 		// Once it ends, the name is free again, and a reader no longer joins it.
@@ -2549,7 +2602,7 @@ mod test {
 		let info = datagram::Info::default().with_priority(2);
 		let mut served = request.accept(info);
 		assert!(matches!(second.poll_info(&kio::Waiter::noop()), Poll::Ready(Ok(got)) if got == info));
-		served.append(None, "x").unwrap();
+		served.append(crate::Timestamp::unscaled(0), "x").unwrap();
 		assert_eq!(received(&mut first), 0);
 		assert_eq!(received(&mut second), 0);
 
@@ -2572,7 +2625,7 @@ mod test {
 		let info = datagram::Info::default().with_priority(2);
 		let mut datagrams = producer.create_datagrams("audio", info).unwrap();
 		assert!(matches!(reader.poll_info(&kio::Waiter::noop()), Poll::Ready(Ok(got)) if got == info));
-		datagrams.append(None, "x").unwrap();
+		datagrams.append(crate::Timestamp::unscaled(0), "x").unwrap();
 		assert_eq!(received(&mut reader), 0);
 		assert!(handler.poll_requested(&kio::Waiter::noop()).is_pending());
 	}

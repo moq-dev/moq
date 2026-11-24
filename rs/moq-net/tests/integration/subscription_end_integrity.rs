@@ -10,7 +10,7 @@
 //! `Ok(None)` only after that FIN; any other ending is an error.
 //!
 //! The publisher opens the final group and writes its first frame (the group stream
-//! opens), finishes the track (SUBSCRIBE_FINISH goes out), then writes the rest, finishes
+//! opens), finishes the track (SUBSCRIBE_END goes out), then writes the rest, finishes
 //! the group and disconnects with no await in between, so the final group's tail and
 //! its FIN never leave. The close lands before the subscriber reads on. The subscriber
 //! must then either see every frame or end with an error; it must not end `Ok(None)`
@@ -20,10 +20,12 @@
 //! send" step is an idle-advance rather than a race.
 
 use crate::support;
+use support::AppendNext;
+use support::AtStart;
 
 use std::time::Duration;
 
-use moq_net::{Timestamp, Version};
+use moq_net::Version;
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -36,10 +38,11 @@ const HEAD: [&[u8]; 2] = [b"head-a", b"head-b"];
 const TAIL: [&[u8]; 2] = [b"tail-a", b"tail-b"];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// Let the drivers run until nothing is runnable: under paused time an idle runtime
@@ -83,7 +86,7 @@ async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 	let (go_tx, go_rx) = futures::channel::oneshot::channel::<()>();
 
 	let reader = kio::clock::sim::spawn(async move {
-		let subscription = moq_net::track::Subscription::default().with_range(0..);
+		let subscription = moq_net::track::Subscription::default().with_ranges([support::keys(0..)]);
 		let mut sub = remote
 			.track("video")
 			.unwrap()
@@ -118,9 +121,9 @@ async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 		.expect("no subscriber appeared")
 		.unwrap();
 
-	let mut head = track.append_group().unwrap();
+	let mut head = track.append_next().unwrap();
 	for payload in HEAD {
-		head.write_frame(Timestamp::ZERO, payload).unwrap();
+		head.write_frame(head.at_start(), payload).unwrap();
 	}
 	head.finish().unwrap();
 	kio::clock::timeout(TIMEOUT, drained_rx)
@@ -129,16 +132,16 @@ async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 		.expect("reader gone");
 
 	// The final group opens and its first frame is sent, then the track's end is
-	// declared: SUBSCRIBE_FINISH reaches the subscriber with the group still open, as it
+	// declared: SUBSCRIBE_END reaches the subscriber with the group still open, as it
 	// does whenever a finish races a group still in flight.
-	let mut tail = track.append_group().unwrap();
-	tail.write_frame(Timestamp::ZERO, TAIL[0]).unwrap();
+	let mut tail = track.append_next().unwrap();
+	tail.write_frame(tail.at_start(), TAIL[0]).unwrap();
 	let track = track.finish().unwrap();
 	settle().await;
 
 	// The rest of the group, its clean end, and the disconnect happen with no await in
 	// between, so the session has sent none of it when it closes.
-	tail.write_frame(Timestamp::ZERO, TAIL[1]).unwrap();
+	tail.write_frame(tail.at_start(), TAIL[1]).unwrap();
 	tail.finish().unwrap();
 	drop(track);
 	let server = if drop_session {
@@ -240,7 +243,7 @@ async fn killed(version: &str, kill: Kill) -> (Option<moq_net::Error>, Option<mo
 	// Subscribing resolves only once the publisher serves the track, which it does
 	// only after seeing the subscription, so the reader runs concurrently.
 	let reader = kio::clock::sim::spawn(async move {
-		let subscription = moq_net::track::Subscription::default().with_range(0..);
+		let subscription = moq_net::track::Subscription::default().with_ranges([support::keys(0..)]);
 		let mut sub = remote
 			.track("video")
 			.unwrap()
@@ -270,8 +273,8 @@ async fn killed(version: &str, kill: Kill) -> (Option<moq_net::Error>, Option<mo
 	crate::support::wanted(track.demand())
 		.await
 		.expect("no subscriber appeared");
-	let mut group = track.append_group().unwrap();
-	group.write_frame(Timestamp::ZERO, HEAD[0]).unwrap();
+	let mut group = track.append_next().unwrap();
+	group.write_frame(group.at_start(), HEAD[0]).unwrap();
 	settle().await;
 
 	match kill {

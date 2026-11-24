@@ -155,6 +155,16 @@ struct MkvTrack {
 	default_duration: Option<std::time::Duration>,
 	kind: TrackKind,
 	track: Media,
+	/// An H.264/H.265 record held unpublished until the track's first keyframe commits, whose
+	/// bytes say whether the parameter sets also ride in band. The rendition withholds the catalog
+	/// meanwhile.
+	record: Option<Record>,
+}
+
+struct Record {
+	config: VideoConfig,
+	/// The scan of the first keyframe's bytes so far, once it opens.
+	keyframe: Option<crate::codec::video::InBand>,
 }
 
 enum Media {
@@ -190,10 +200,10 @@ impl Media {
 		}
 	}
 
-	fn seek(&mut self, sequence: u64) -> crate::Result<()> {
+	fn seek(&mut self, start: u64) -> crate::Result<()> {
 		match self {
-			Self::Video(track) => track.seek(sequence),
-			Self::Audio(track) => track.seek(sequence),
+			Self::Video(track) => track.seek(start),
+			Self::Audio(track) => track.seek(start),
 		}
 	}
 
@@ -208,6 +218,14 @@ impl Media {
 		match self {
 			Self::Video(track) => track.abort(err),
 			Self::Audio(track) => track.abort(err),
+		}
+	}
+
+	/// Publish a video track's config.
+	fn configure(&mut self, config: VideoConfig) -> crate::Result<()> {
+		match self {
+			Self::Video(track) => track.set(config),
+			Self::Audio(_) => unreachable!("only a video track holds a record"),
 		}
 	}
 }
@@ -637,10 +655,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			return Err(Error::StreamedCmaf.into());
 		}
 
-		let track = self.broadcast.create_track(
-			self.broadcast.unique_name(suffix),
-			self.catalog.track_info(kind.priority()),
-		)?;
+		let track = self
+			.broadcast
+			.unique_track(suffix, self.catalog.track_info(kind.priority()));
 		// Build the media producer before publishing the rendition. It is fallible (its
 		// timeline track can collide), and a rendition published for a track we then fail
 		// to produce would be advertised to consumers but never served.
@@ -651,16 +668,22 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				TrackKind::Audio => crate::container::Kind::Audio,
 			},
 		)?;
-		let media = match kind {
+		let (media, record) = match kind {
 			TrackKind::Video => {
 				let mut config = build_video_config(&codec_id, codec_private.as_ref(), video_children.as_deref())?;
 				config.container = self.container.clone();
-				Media::Video(reserved.video(track, wire, config)?)
+				match config.codec {
+					VideoCodec::H264(_) | VideoCodec::H265(_) => {
+						let record = Record { config, keyframe: None };
+						(Media::Video(reserved.video(track, wire, None)?), Some(record))
+					}
+					_ => (Media::Video(reserved.video(track, wire, config)?), None),
+				}
 			}
 			TrackKind::Audio => {
 				let mut config = build_audio_config(&codec_id, codec_private.as_ref(), audio_children.as_deref())?;
 				config.container = self.container.clone();
-				Media::Audio(reserved.audio(track, wire, config)?)
+				(Media::Audio(reserved.audio(track, wire, config)?), None)
 			}
 		};
 
@@ -670,6 +693,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				default_duration,
 				kind,
 				track: media,
+				record,
 			},
 		);
 
@@ -737,7 +761,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					};
 					chunk = rest;
 					block.remaining -= 1;
-					let Some(sizes) = lacing.push(byte, block.remaining).map_err(anyhow::Error::new)? else {
+					let Some(sizes) = lacing.push(byte, block.remaining)? else {
 						continue;
 					};
 					let fixed = lacing.block;
@@ -783,11 +807,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			.ok_or(Error::TimestampOverflow)?;
 
 		let duration = match laced {
-			true => Some(
-				track
-					.default_duration
-					.ok_or_else(|| anyhow::Error::new(LacingError::MissingDuration))?,
-			),
+			true => Some(track.default_duration.ok_or(Error::LacingDuration)?),
 			false => None,
 		};
 		// Validate the last timestamp before publishing any part of this block.
@@ -839,14 +859,23 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					};
 					let size = usize::try_from(size).map_err(|_| moq_net::Error::FrameTooLarge)?;
 					frames.index += 1;
-					frames
-						.open
-						.insert(track.track.open(timestamp, keyframe, frames.duration, size)?)
+					let frame = track.track.open(timestamp, keyframe, frames.duration, size)?;
+					if keyframe && let Some(record) = &mut track.record {
+						// A keyframe a failed block cut short starts over.
+						record.keyframe = Some(crate::codec::video::InBand::new(&record.config)?);
+					}
+					frames.open.insert(frame)
 				}
 			};
 			let (bytes, rest) = chunk.split_at(frame.remaining().min(chunk.len()));
 			if !bytes.is_empty() {
 				frame.write(bytes)?;
+				if let Some(Record {
+					keyframe: Some(scan), ..
+				}) = &mut track.record
+				{
+					scan.scan(bytes);
+				}
 			}
 			chunk = rest;
 			if frame.remaining() > 0 {
@@ -854,6 +883,14 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			}
 			let frame = frames.open.take().expect("a frame is open");
 			track.track.commit(frame)?;
+			if let Some(Record {
+				mut config,
+				keyframe: Some(scan),
+			}) = track.record.take_if(|record| record.keyframe.is_some())
+			{
+				scan.apply(&mut config);
+				track.track.configure(config)?;
+			}
 		}
 		Ok(total - chunk.len())
 	}
@@ -871,7 +908,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				}
 				.into());
 			}
-			BlockState::Lacing(_) => return Err(anyhow::Error::new(LacingError::Invalid).into()),
+			BlockState::Lacing(_) => return Err(Error::InvalidLacing.into()),
 			BlockState::Frames(frames) => {
 				// The frame sizes add up to the body, so every frame was written as its bytes arrived.
 				debug_assert!(frames.open.is_none() && frames.index == frames.sizes.len());
@@ -883,37 +920,41 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			}
 			BlockState::Skip => {}
 		}
-		if let Some(sequence) = self.seek.take() {
-			self.seek(sequence)?;
+		if let Some(start) = self.seek.take() {
+			self.seek(start)?;
 		}
 		Ok(())
 	}
 
-	/// Close the current group on every track and open the next one at `sequence`.
+	/// Close the current group on every track and open the next one at `start`.
 	///
 	/// Broadcast-wide: every track inside this MKV import advances together; per-track
 	/// control is intentionally not exposed. While a block streams in, the seek waits for it to end,
 	/// since its later frames continue its group.
-	pub fn seek(&mut self, sequence: u64) -> Result<()> {
+	pub fn seek(&mut self, start: u64) -> Result<()> {
 		self.input.check()?;
 		if self.block.is_some() {
-			self.seek = Some(sequence);
+			self.seek = Some(start);
 			return Ok(());
 		}
 		for track in self.tracks.values_mut() {
-			track.track.seek(sequence)?;
+			track.track.seek(start)?;
 		}
 		Ok(())
 	}
 
-	/// Finish all tracks, flushing current groups.
+	/// Finish all tracks, flushing current groups, and return the [`Finished`] import.
 	///
 	/// Input that ends inside an element other than an unknown-size Segment or Cluster is refused as
 	/// truncated, but the tracks still end with what was accepted, as they do after a refused
-	/// [`decode`](Self::decode). Either way every track has ended. A finish that failed returns
-	/// the same error to every later call; one that succeeded refuses later input with
-	/// [`Finished`](crate::Error::Finished), or with the refusal it followed.
-	pub fn finish(&mut self) -> Result<()> {
+	/// [`decode`](Self::decode). Either way every track has ended, so a failed finish can't be
+	/// retried.
+	pub fn finish(mut self) -> Result<Finished<E>> {
+		self.finish_in_place()?;
+		Ok(Finished { import: self })
+	}
+
+	fn finish_in_place(&mut self) -> Result<()> {
 		let mut result = match &self.input {
 			crate::container::Input::Finished => return Ok(()),
 			crate::container::Input::Failed(err) => return Err(err.clone()),
@@ -928,7 +969,13 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			// A frame cut short fails its group with the reason, rather than waiting for the rest.
 			self.abort_block(err.reason());
 		}
-		// No frame follows to anchor the clock, so publish the declared track set now.
+		// No frame follows to anchor the clock, so publish the declared track set now, with a track
+		// whose record no keyframe followed as the record stands.
+		for track in self.tracks.values_mut() {
+			if let Some(record) = track.record.take() {
+				result = result.and_then(|()| track.track.configure(record.config));
+			}
+		}
 		self.initial_reservation = None;
 		for track in self.tracks.values_mut() {
 			// End every track even on refusal, keeping the first error. A track whose finish fails
@@ -966,6 +1013,29 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		{
 			frame.abort(err);
 		}
+	}
+}
+
+/// An MKV import that [finished](Import::finish): every track has ended, and they can still be
+/// read or aborted, but it takes no more input.
+///
+/// Dropping it retires the tracks and their catalog renditions, as dropping the [`Import`] does.
+///
+/// ```compile_fail,E0599
+/// # fn cannot_decode(mut import: moq_mux::container::mkv::Finished) {
+/// import.decode(b"").unwrap();
+/// # }
+/// ```
+#[must_use = "dropping it retires the tracks and their catalog renditions"]
+pub struct Finished<E: crate::catalog::hang::CatalogExt = ()> {
+	import: Import<E>,
+}
+
+impl<E: crate::catalog::hang::CatalogExt> Finished<E> {
+	/// Abort every track with `err`; see [`Import::abort`]. Readers still draining a track get its
+	/// clean end instead once every group below its end finished.
+	pub fn abort(self, err: moq_net::Error) {
+		self.import.abort(err);
 	}
 }
 
@@ -1475,21 +1545,13 @@ fn build_av1_config(codec_private: Option<&Bytes>) -> Result<VideoConfig> {
 	Ok(config)
 }
 
-#[derive(Debug, thiserror::Error)]
-enum LacingError {
-	#[error("invalid MKV lacing")]
-	Invalid,
-	#[error("MKV lacing requires a positive TrackEntry DefaultDuration")]
-	MissingDuration,
-}
-
 impl Lacing {
 	/// Take the next lace header byte, returning every frame's size once the header ends.
 	/// `remaining` counts the body bytes after `byte`; the last frame takes what the others leave.
 	// webm-iterable's splitter uses unchecked indexing and size arithmetic on malformed laces, so
 	// sizes and signed EBML deltas stay checked here.
-	fn push(&mut self, byte: u8, remaining: u64) -> std::result::Result<Option<Vec<u64>>, LacingError> {
-		let invalid = LacingError::Invalid;
+	fn push(&mut self, byte: u8, remaining: u64) -> std::result::Result<Option<Vec<u64>>, Error> {
+		let invalid = Error::InvalidLacing;
 		let Some(count) = self.count else {
 			let count = usize::from(byte) + 1;
 			if count < 2 {
@@ -1546,8 +1608,8 @@ impl Lacing {
 			.sizes
 			.iter()
 			.try_fold(0u64, |sum, size| sum.checked_add(*size))
-			.ok_or(LacingError::Invalid)?;
-		let last = remaining.checked_sub(sum).ok_or(LacingError::Invalid)?;
+			.ok_or(Error::InvalidLacing)?;
+		let last = remaining.checked_sub(sum).ok_or(Error::InvalidLacing)?;
 		let mut sizes = std::mem::take(&mut self.sizes);
 		sizes.push(last);
 		Ok(Some(sizes))
@@ -1628,9 +1690,7 @@ mod tests {
 			}
 			assert_eq!(import.cluster_timestamp, timestamp);
 		}
-		import.finish().unwrap();
-		import.finish().unwrap();
-		assert!(matches!(import.decode(&[0]), Err(crate::Error::Finished)));
+		let _import = import.finish().unwrap();
 	}
 
 	/// A WebM prefix declaring `entries`, leaving an unknown-size Segment and Cluster open.
@@ -1675,8 +1735,15 @@ mod tests {
 
 	/// A SimpleBlock header for a keyframe on `track` declaring `size` payload bytes.
 	fn simple_block(track: u8, size: u64) -> Vec<u8> {
+		simple_block_at(track, size, 0)
+	}
+
+	/// A keyframe block `timecode` ticks past its cluster's.
+	fn simple_block_at(track: u8, size: u64, timecode: i16) -> Vec<u8> {
 		let mut block = header(&[0xa3], size + 4);
-		block.extend_from_slice(&[0x80 | track, 0, 0, 0x80]);
+		block.push(0x80 | track);
+		block.extend_from_slice(&timecode.to_be_bytes());
+		block.push(0x80);
 		block
 	}
 
@@ -1725,7 +1792,7 @@ mod tests {
 			read.extend_from_slice(&chunk);
 		}
 		assert_eq!(read.len(), 1 + SIZE);
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 	}
 
 	#[test]
@@ -1743,7 +1810,7 @@ mod tests {
 			import.decode(&[0]),
 			Err(crate::Error::Moq(moq_net::Error::FrameTooLarge))
 		));
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 	}
 
 	#[test]
@@ -1838,7 +1905,7 @@ mod tests {
 			import.decode(&entry_ending_in(&header(id, SIZE), SIZE)).unwrap();
 			feed_unretained(&mut import, SIZE).unwrap();
 			assert_eq!(import.tracks.len(), 1, "{id:x?}");
-			import.finish().unwrap();
+			let _finished = import.finish().unwrap();
 		}
 	}
 
@@ -2004,6 +2071,8 @@ mod tests {
 					assert!(hvcc.retained() <= 2 * canonical.len(), "{}", hvcc.retained());
 				}
 			}
+			// No keyframe follows, so the record publishes as it stands at finish.
+			let _finished = import.finish().unwrap();
 			let config = catalog.snapshot().video.renditions.into_values().next().unwrap();
 			assert_eq!(config.description.as_deref(), Some(canonical.as_slice()));
 		}
@@ -2072,7 +2141,7 @@ mod tests {
 			.unwrap();
 		feed_unretained(&mut import, SIZE).unwrap();
 		assert_eq!(import.tracks.len(), 1);
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 	}
 
 	#[tokio::test]
@@ -2094,7 +2163,7 @@ mod tests {
 		import.decode(b"key").unwrap();
 		let mut frame = first_frame(&catalog, &consumer).await;
 		assert_eq!(frame.read_all().await.unwrap(), b"\0key"[..]);
-		import.finish().unwrap();
+		let _finished = import.finish().unwrap();
 	}
 
 	/// Output nobody reads is evicted by its track, so the importer keeps accepting input.
@@ -2103,12 +2172,14 @@ mod tests {
 		let (mut import, _catalog, _consumer) = import();
 		import.decode(&live(vec![entry(1, 1, "V_VP9")])).unwrap();
 		let payload = vec![3; 1024 * 1024];
-		// Twice the most a track holds.
-		for _ in 0..64 {
-			import.decode(&simple_block(1, payload.len() as u64)).unwrap();
+		// Twice the most a track holds, one group a millisecond.
+		for timecode in 0..64 {
+			import
+				.decode(&simple_block_at(1, payload.len() as u64, timecode))
+				.unwrap();
 			import.decode(&payload).unwrap();
 		}
-		import.finish().unwrap();
+		let _import = import.finish().unwrap();
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -2120,9 +2191,9 @@ mod tests {
 		import.decode(&simple_block(1, 1024)).unwrap();
 		import.decode(&[4; 512]).unwrap();
 		let mut frame = first_frame(&catalog, &consumer).await;
-		let err = import.finish().unwrap_err();
+		// In place, so the frame fails from the finish rather than from dropping the importer.
+		let err = import.finish_in_place().unwrap_err();
 		assert!(matches!(err, crate::Error::Mkv(Error::Truncated)));
-		// The importer is still owned, and the frame fails rather than waiting on it.
 		let read = frame.read_all().now_or_never().expect("the cut-short frame must fail");
 		assert!(matches!(
 			read,
@@ -2145,11 +2216,19 @@ mod tests {
 				for piece in data.chunks(chunk) {
 					import.decode(piece).unwrap();
 				}
-				assert!(matches!(import.finish(), Err(crate::Error::Mkv(Error::Truncated))));
+				// In place, so the catalog still lists the ended tracks.
+				assert!(matches!(
+					import.finish_in_place(),
+					Err(crate::Error::Mkv(Error::Truncated))
+				));
 				let snapshot = catalog.snapshot();
 				let (name, config) = snapshot.audio.renditions.iter().next().unwrap();
-				let subscription = moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(1)));
+				let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(std::time::Duration::from_secs(1)),
+						max: Some(std::time::Duration::from_secs(1)),
+					},
+				)]);
 				let track = consumer.track(name).unwrap().subscribe(subscription).await.unwrap();
 				let mut reader =
 					crate::container::Consumer::new(track, crate::catalog::hang::Container::try_from(config).unwrap());
@@ -2178,7 +2257,11 @@ mod tests {
 			.unwrap();
 		import.decode(&[0xec, 0x81]).unwrap();
 		assert!(clocks.drain().is_empty(), "no block has anchored the catalog yet");
-		assert!(matches!(import.finish(), Err(crate::Error::Mkv(Error::Truncated))));
+		// In place, so the catalog still lists the ended tracks.
+		assert!(matches!(
+			import.finish_in_place(),
+			Err(crate::Error::Mkv(Error::Truncated))
+		));
 		assert!(
 			!clocks.drain().is_empty(),
 			"finish must release the initial catalog reservation"
@@ -2210,18 +2293,5 @@ mod tests {
 			let read = kio::clock::timeout(WAIT, frame.read_all()).await.unwrap();
 			assert!(read.is_err(), "a frame cut short must not read as complete: {read:?}");
 		}
-	}
-
-	/// A failed finish is final: later input and a retried finish report its cause.
-	#[test]
-	fn a_failed_finish_reports_its_cause() {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-		let mut import = Import::new(broadcast, catalog.reserve());
-		// An EBML header declaring a byte it never sends.
-		import.decode(&[0x1a, 0x45, 0xdf, 0xa3, 0x81]).unwrap();
-		assert!(matches!(import.finish(), Err(crate::Error::Mkv(Error::Truncated))));
-		assert!(matches!(import.decode(&[0]), Err(crate::Error::Mkv(Error::Truncated))));
-		assert!(matches!(import.finish(), Err(crate::Error::Mkv(Error::Truncated))));
 	}
 }

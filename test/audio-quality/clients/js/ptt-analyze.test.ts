@@ -79,6 +79,7 @@ function nativeTrace(result: ReturnType<typeof trace>) {
 			at,
 			render: at - 500,
 			stalled: false,
+			delay: 250,
 			comfort: mutes.reduce((sum, [from, to]) => sum + Math.min(Math.max(page - from, 0), to - from), 0),
 			utterances: heads.filter((head) => head.at <= at && head.at > at - 250),
 		});
@@ -196,7 +197,7 @@ test("a mute that disables the rendition fails the run", async () => {
 });
 
 // The silence between presses is declared, so playback crosses it without counting it. Underruns
-// and stalls the player does count are reported, not failed: the audio grading judges them.
+// and stalls the player does count are reported, not failed: zero underruns is not a goal.
 test("an underrun or stall across the presses is reported and passes", async () => {
 	const result = trace();
 	result.playback = { underruns: 3, stalls: 2 };
@@ -210,7 +211,7 @@ test("the native listener's results sit beside each press", async () => {
 	expect(exitCode).toBe(0);
 	expect(summary.native.offset).toBe(NATIVE + 2);
 	expect(summary.native.playback).toEqual({ underruns: 0, stalls: 0 });
-	expect(summary.presses[0].native).toEqual({ head: true, comfort: null });
+	expect(summary.presses[0].native).toEqual({ head: true, lag: NATIVE + 2, comfort: null });
 	// A separated press's mute, less the 300 ms its previous utterance still played, give or take a
 	// sample on each side.
 	const comfort = summary.presses[8].native.comfort;
@@ -226,6 +227,21 @@ test("a native utterance resumed past its head fails the run", async () => {
 	const { exitCode, stderr } = await analyze(result, native);
 	expect(exitCode).toBe(1);
 	expect(stderr).toContain("native: an utterance did not resume on its head");
+});
+
+test("back-to-back native resumes that each re-buffer a playout delay fail the run", async () => {
+	const result = trace();
+	const native = nativeTrace(result);
+	// Each back-to-back press resumes one delay later than the one before it.
+	native
+		.flatMap((sample) => sample.utterances ?? [])
+		.slice(1, 8)
+		.forEach((utterance, i) => {
+			utterance.at += 250 * (i + 1);
+		});
+	const { exitCode, stderr } = await analyze(result, native);
+	expect(exitCode).toBe(1);
+	expect(stderr).toContain("native: back-to-back presses grew the latency by a playout delay");
 });
 
 test("a native mute without comfort noise fails the run", async () => {

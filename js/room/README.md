@@ -14,7 +14,7 @@ Participants are discovered from the announce stream. Identity is the path befor
 - `{identity}/camera.hang`: camera + microphone, hd/sd renditions
 - `{identity}/screen.hang`: screenshare; its announce/unannounce is the share lifecycle
 
-This is the generic room layer extracted from [hang.live](https://hang.live) (roster, local/remote, `hang/*.json` metadata) and [iroh-live](https://github.com/n0-computer/iroh-live) (the `chat` track `iroh-rooms` is moving onto the announce bus). Memes, 3D layout, chat UI, and accounts stay in the app. The native twin is [`moq-room`](../../rs/moq-room).
+This is the generic room layer extracted from [hang.live](https://hang.live) (roster, local/remote, `hang/*.json` metadata) and [iroh-live](https://github.com/n0-computer/iroh-live) (the `chat` track `iroh-rooms` is moving onto the announce bus). Memes, 3D layout, chat UI, and accounts stay in the app.
 
 ## Install
 
@@ -24,7 +24,7 @@ bun add @moq/room
 
 ## Token
 
-Sign with [`@moq/auth`](../auth). `root` is the room, `subscribe: ["**"]` subscribes to everyone, `publish: ["<identity>/**"]` so a participant cannot publish at someone else's paths.
+Sign with [`@moq/auth`](../auth). `root` is the room, `subscribe: [""]` subscribes to everyone, `publish: ["<identity>"]` so a participant cannot publish at someone else's paths.
 
 ```ts
 import { claims } from "@moq/room";
@@ -54,18 +54,18 @@ const local = new Local({
 	user: { name: "Alice" },
 });
 local.enabled.set(true);
-local.cameraEnabled.set(true);
-local.microphoneEnabled.set(true);
+local.camera.enabled.set(true);
+local.microphone.enabled.set(true);
 
 const room = new Room({ connection, identity });
 
-// room.remotes is a Map<identity, Remote>. Each Remote has camera/screen
+// room.remotes is a ReadonlyMap<identity, Remote>. Each Remote has camera/screen
 // Members; call member.canvas.set(canvas) to display video and
 // member.muted.set(false) to play audio. member.video and member.audio
 // report the playing timestamp and receive stats.
 ```
 
-`Local` publishes through `Publish.Broadcast`, which encodes while enabled: while `cameraEnabled` is on, the camera's hd and sd renditions encode even when nobody in the room watches, so a member who arrives late can fetch the last few seconds. While `microphoneEnabled` is on, the microphone keeps raw audio and encodes it once someone listens. Turn either off to stop that capture.
+`Local` publishes through `Publish.Broadcast`, which encodes while enabled: while `camera.enabled` is on, the camera's hd and sd renditions encode even when nobody in the room watches, so a member who arrives late can fetch the last few seconds. While `microphone.enabled` is on, the microphone keeps raw audio and encodes it once someone listens. Turn either off to stop that capture.
 
 hang.live should depend on this package for `Room`, `Local`, `Remote`, and the `hang/*.json` metadata tracks. Location stays an app-defined catalog extension (`TRACK.location`). hang.live's JSON chat (`TRACK.chat` = `hang/chat.json`) is also an extension; the JSON window track is `Chat.TRACK` (`"chat"`).
 

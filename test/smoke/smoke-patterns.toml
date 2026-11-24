@@ -1,0 +1,20 @@
+# Relay config for the cross-language interop smoke test, for published relays from
+# 0.15 until grants became prefixes: they read `**` as everything and refuse a public
+# rule without a wildcard. smoke.toml carries the prefix form this checkout reads.
+# Delete this file once every channel ships a relay that reads prefixes.
+
+[log]
+level = "info"
+
+[listen]
+# QUIC on UDP. 127.0.0.1 avoids IPv6 flakiness on CI runners.
+bind = "127.0.0.1:4443"
+tls.generate = ["localhost", "127.0.0.1"]
+
+[web.http]
+# HTTP + WebSocket on TCP, also serving /certificate.sha256 for cert pinning.
+listen = "127.0.0.1:4443"
+
+[auth]
+# Allow anonymous access to everything.
+public = "**"

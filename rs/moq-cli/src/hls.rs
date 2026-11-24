@@ -217,10 +217,10 @@ pub async fn import(target: ImportTarget, args: ImportArgs, instance: moq_net::I
 
 	// The playlist ended: serve the finished broadcast for the linger, so a subscriber that
 	// arrives after the end still gets the tail. An interrupt drops it at once.
-	importer.finish()?;
+	let finished = importer.finish()?;
 	let linger = ingest.linger;
 	tracing::info!(?linger, "playlist ended; serving the finished broadcast");
-	moq_mux::Linger::new([route.broadcast().clone()], importer, linger)
+	moq_mux::Linger::new([route.broadcast().clone()], finished, linger)
 		.wait()
 		.await;
 	Ok(())
@@ -273,8 +273,8 @@ fn playlist_url(playlist: &str) -> anyhow::Result<Url> {
 /// `/<name>/master.m3u8` and `/<name>/manifest.mpd`); other broadcasts in the
 /// Origin are not served.
 pub async fn export(origin: moq_net::origin::Consumer, args: ExportArgs, name: String) -> anyhow::Result<()> {
-	let scope = moq_net::Patterns::from(
-		moq_net::Pattern::subtree(&name).with_context(|| format!("invalid broadcast name `{name}`"))?,
+	let scope = moq_net::Prefixes::from(
+		moq_net::Prefix::try_from(name.as_str()).with_context(|| format!("invalid broadcast name `{name}`"))?,
 	);
 	let scoped = origin
 		.scope("", &scope)
@@ -531,7 +531,7 @@ mod test {
 		announced.next().await.expect("announced");
 		let broadcast = consumer.request("hls", None).await.unwrap();
 		let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&broadcast).await.unwrap();
-		let catalog = catalogs.next().await.unwrap().expect("a catalog");
+		let catalog = catalogs.next().await.unwrap().expect("a catalog").value;
 		let name = catalog.audio.renditions.keys().next().expect("an audio rendition");
 		let mut media = broadcast.track(name).unwrap().subscribe(None).await.unwrap();
 		let mut listing = broadcast.track("catalog.json").unwrap().subscribe(None).await.unwrap();
@@ -539,7 +539,7 @@ mod test {
 		// The source restarts at zero under the same init segment.
 		std::fs::write(&playlist, format!("{live}#EXT-X-DISCONTINUITY\n#EXTINF:1,\n1.m4s\n")).unwrap();
 		let err = importing.await.unwrap().expect_err("a reset fails the import");
-		assert!(format!("{err:#}").contains("rewound"), "{err:#}");
+		assert!(format!("{err:#}").contains("failed to decode"), "{err:#}");
 
 		for track in [&mut media, &mut listing] {
 			let ended = ended_with(track).await;

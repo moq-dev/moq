@@ -83,25 +83,35 @@ pub enum Source {
 	/// A camera / webcam. `None` opens the default camera.
 	///
 	/// The identifiers from [`cameras`] are an AVFoundation `uniqueID` on macOS,
-	/// a `/dev/videoN` path on Linux, and a Media Foundation symbolic link on
-	/// Windows. Bare numeric indices remain accepted on Linux and Windows.
+	/// a Media Foundation symbolic link on Windows, and on Linux a `/dev/videoN`
+	/// path or, with the `pipewire` feature, a `pipewire:<node name>` id. Bare
+	/// numeric indices remain accepted on Linux and Windows.
 	///
-	/// With the `pipewire` feature, Linux also lists PipeWire camera nodes as
-	/// `pipewire:<node name>`, and `pipewire` alone opens the camera with the
-	/// highest session priority, which the session manager treats as default.
-	/// The id picks the backend: a `/dev/videoN` path always opens V4L2, and a
-	/// `pipewire` id always opens PipeWire. `None` opens `/dev/video0`, except
-	/// inside a sandbox (Flatpak or Snap), where it opens PipeWire's default
-	/// camera through the camera portal.
+	/// With the `pipewire` feature, Linux lists a webcam that a PipeWire node
+	/// fronts by the node's id, since PipeWire shares the camera with other
+	/// clients while a V4L2 open holds it exclusively. Only devices no node
+	/// fronts list as `/dev/videoN`. `pipewire` alone opens the listed camera
+	/// with the highest session priority, which the session manager treats as
+	/// default.
+	///
+	/// The id picks the backend: a `/dev/videoN` path always opens V4L2, listed
+	/// or not, so an id saved from an earlier listing keeps working, and a
+	/// `pipewire` id always opens PipeWire.
+	///
+	/// With the `pipewire` feature, `None` opens PipeWire's default camera when
+	/// PipeWire lists a camera, and `/dev/video0` otherwise, such as on a host
+	/// without a PipeWire session. Inside a sandbox (Flatpak or Snap) it always
+	/// goes through the camera portal. Without the feature, `None` opens
+	/// `/dev/video0`.
 	Camera(Option<String>),
 
-	/// A whole display. `None` opens the main display.
+	/// A whole display. [`DisplaySelection::default`] opens the main display.
 	///
 	/// The id is the opaque value [`displays`] reports. Linux supports X11
 	/// displays only, including XWayland's `x11:` ids; on Wayland the main
 	/// display and any other id are refused, so ask the system picker with
 	/// [`Source::Portal`] instead.
-	Display(Option<String>),
+	Display(DisplaySelection),
 
 	/// A single window, by the id [`windows`] reports. Supported on macOS,
 	/// Windows, and X11.
@@ -140,8 +150,10 @@ impl Source {
 		match self {
 			Self::Camera(None) => "camera".to_string(),
 			Self::Camera(Some(id)) => format!("camera:{id}"),
-			Self::Display(None) => "display".to_string(),
-			Self::Display(Some(id)) => format!("display:{}", id.strip_prefix("display:").unwrap_or(id)),
+			Self::Display(selection) => match &selection.id {
+				None => "display".to_string(),
+				Some(id) => format!("display:{}", id.strip_prefix("display:").unwrap_or(id)),
+			},
 			Self::Window(id) => format!("window:{}", id.strip_prefix("window:").unwrap_or(id)),
 			Self::App(id) => format!("app:{id}"),
 			#[cfg(all(target_os = "linux", feature = "pipewire"))]
@@ -150,8 +162,28 @@ impl Source {
 	}
 }
 
+/// Which display [`Source::Display`] captures.
+///
+/// `#[non_exhaustive]`: build it with [`DisplaySelection::new`] or
+/// [`DisplaySelection::default`], so a capture option can join it without
+/// breaking callers.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DisplaySelection {
+	/// The opaque id [`displays`] reports. `None` selects the main display.
+	pub id: Option<String>,
+}
+
+impl DisplaySelection {
+	/// Select the display with this id, as [`displays`] reports it.
+	pub fn new(id: impl Into<String>) -> Self {
+		Self { id: Some(id.into()) }
+	}
+}
+
 /// A camera reported by [`cameras`].
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Camera {
 	/// Opaque identifier: pass to [`Source::Camera`].
 	pub id: String,
@@ -168,6 +200,7 @@ impl Camera {
 
 /// A capture mode a source reports: one frame size and its exact frame rates.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Mode {
 	/// Frame width in pixels.
 	pub width: u32,
@@ -189,6 +222,7 @@ impl Mode {
 
 /// A display reported by [`displays`].
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Display {
 	/// Opaque identifier: pass to [`Source::Display`].
 	pub id: String,
@@ -205,12 +239,13 @@ pub struct Display {
 impl Display {
 	/// The [`Source`] that captures this display.
 	pub fn source(&self) -> Source {
-		Source::Display(Some(self.id.clone()))
+		Source::Display(DisplaySelection::new(self.id.clone()))
 	}
 }
 
 /// A window reported by [`windows`].
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Window {
 	/// Opaque identifier: pass to [`Source::Window`].
 	pub id: String,
@@ -235,6 +270,7 @@ impl Window {
 
 /// An application reported by [`apps`].
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct App {
 	/// Bundle identifier: pass to [`Source::App`].
 	pub id: String,
@@ -265,9 +301,9 @@ pub struct Config {
 	pub height: Option<u32>,
 	/// Preferred exact frame rate.
 	pub framerate: Option<FrameRate>,
-	/// Draw the mouse cursor into captured frames. Screen/window/app sources
-	/// only; ignored by cameras. Defaults to `true`.
-	pub cursor: bool,
+	/// What happens to the mouse cursor. Screen/window/app sources only;
+	/// ignored by cameras. Defaults to [`Cursor::Drawn`].
+	pub cursor: Cursor,
 	/// Where captured pixels live. Defaults to [`Output::Native`]: whatever the
 	/// platform captures into, a GPU surface or CPU pixels.
 	pub output: Output,
@@ -280,8 +316,29 @@ impl Default for Config {
 			width: None,
 			height: None,
 			framerate: None,
-			cursor: true,
+			cursor: Cursor::default(),
 			output: Output::Native,
+		}
+	}
+}
+
+/// What a screen, window, or app capture does with the mouse cursor.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Cursor {
+	/// Drawn into each frame where it sits.
+	#[default]
+	Drawn,
+	/// Left out of the frames.
+	Hidden,
+}
+
+impl Cursor {
+	/// Whether the platform should draw the cursor into the frame.
+	pub(crate) fn drawn(self) -> bool {
+		match self {
+			Self::Drawn => true,
+			Self::Hidden => false,
 		}
 	}
 }
@@ -428,6 +485,11 @@ impl Synthetic {
 		self.chan.push_native(surface, source);
 	}
 
+	/// Whether the stream read the last frame delivered.
+	pub(crate) fn taken(&self) -> bool {
+		self.chan.taken()
+	}
+
 	/// End the stream, as a device that stops delivering does.
 	pub(crate) fn close(&self) {
 		self.chan.close();
@@ -458,6 +520,13 @@ async fn open_source(config: &Config) -> Result<Stream, Error> {
 			{
 				match LinuxCamera::select(device.as_deref(), sandboxed()) {
 					LinuxCamera::V4l2(device) => v4l2::open(config, device).await,
+					LinuxCamera::Default => {
+						#[cfg(feature = "pipewire")]
+						if pipewire::camera::present().await {
+							return pipewire::camera::open(config, None).await;
+						}
+						v4l2::open(config, None).await
+					}
 					#[cfg(feature = "pipewire")]
 					LinuxCamera::PipeWire(node) => pipewire::camera::open(config, node).await,
 					#[cfg(not(feature = "pipewire"))]
@@ -475,11 +544,11 @@ async fn open_source(config: &Config) -> Result<Stream, Error> {
 				Err(Error::Unsupported("camera capture".to_string()))
 			}
 		}
-		Source::Display(device) => {
-			let _ = device;
+		Source::Display(selection) => {
+			let _ = selection;
 			#[cfg(target_os = "macos")]
 			{
-				screencapture::open_display(config, device.as_deref()).await
+				screencapture::open_display(config, selection.id.as_deref()).await
 			}
 			#[cfg(target_os = "windows")]
 			{
@@ -487,7 +556,7 @@ async fn open_source(config: &Config) -> Result<Stream, Error> {
 			}
 			#[cfg(target_os = "linux")]
 			{
-				x11::open_display(config, device.as_deref()).await
+				x11::open_display(config, selection.id.as_deref()).await
 			}
 			#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 			{
@@ -532,10 +601,12 @@ async fn open_source(config: &Config) -> Result<Stream, Error> {
 /// List the available cameras and the identifiers [`Source::Camera`] accepts.
 ///
 /// On Linux, V4L2 lists only devices offering YUYV or MJPEG. With the `pipewire`
-/// feature, PipeWire camera nodes follow, excluding V4L2 paths already listed.
-/// PipeWire-only cameras remain visible. A session without PipeWire lists V4L2
-/// alone. Inside a sandbox the PipeWire nodes come through the camera portal,
-/// which may ask the user for camera access.
+/// feature, PipeWire camera nodes come first, and a V4L2 device that a listed
+/// node fronts is listed only as that node, since PipeWire shares the device
+/// with other clients while a V4L2 open holds it exclusively. V4L2 devices no
+/// node fronts remain visible. A session without PipeWire, or one whose daemon
+/// does not answer, lists V4L2 alone. Inside a sandbox the PipeWire nodes come
+/// through the camera portal, which may ask the user for camera access.
 pub async fn cameras() -> Result<Vec<Camera>, Error> {
 	#[cfg(target_os = "macos")]
 	{
@@ -545,10 +616,7 @@ pub async fn cameras() -> Result<Vec<Camera>, Error> {
 	{
 		let cameras = blocking(v4l2::cameras).await?;
 		#[cfg(feature = "pipewire")]
-		let cameras = {
-			let pipewire = pipewire::camera::cameras(&cameras).await?;
-			[cameras, pipewire].concat()
-		};
+		let cameras = pipewire::camera::cameras(cameras).await?;
 		Ok(cameras)
 	}
 	#[cfg(target_os = "windows")]
@@ -584,6 +652,13 @@ pub async fn camera_modes(camera: Option<&str>) -> Result<Vec<Mode>, Error> {
 			LinuxCamera::V4l2(camera) => {
 				let camera = camera.map(str::to_string);
 				blocking(move || v4l2::modes(camera.as_deref())).await
+			}
+			LinuxCamera::Default => {
+				#[cfg(feature = "pipewire")]
+				if pipewire::camera::present().await {
+					return pipewire::camera::modes(None).await;
+				}
+				blocking(|| v4l2::modes(None)).await
 			}
 			#[cfg(feature = "pipewire")]
 			LinuxCamera::PipeWire(node) => pipewire::camera::modes(node).await,
@@ -663,10 +738,14 @@ const PIPEWIRE: &str = "pipewire";
 #[cfg(any(target_os = "linux", test))]
 #[derive(Debug, PartialEq, Eq)]
 enum LinuxCamera<'a> {
+	/// No camera named, outside a sandbox: PipeWire's default camera when the
+	/// `pipewire` feature is on and PipeWire lists a camera, else `/dev/video0`.
+	Default,
 	/// A V4L2 device, by path or index. `None` opens `/dev/video0`.
 	V4l2(Option<&'a str>),
-	/// A PipeWire camera, by `node.name`. `None` picks the camera with the
-	/// highest session priority, the one the session manager links by default.
+	/// A PipeWire camera, by `node.name`. `None` picks the listed camera with
+	/// the highest session priority, the one the session manager links by
+	/// default.
 	PipeWire(Option<&'a str>),
 }
 
@@ -677,7 +756,7 @@ impl<'a> LinuxCamera<'a> {
 	fn select(selector: Option<&'a str>, sandboxed: bool) -> Self {
 		match selector {
 			None if sandboxed => Self::PipeWire(None),
-			None => Self::V4l2(None),
+			None => Self::Default,
 			Some(PIPEWIRE) => Self::PipeWire(None),
 			Some(selector) => match selector.strip_prefix(PIPEWIRE).and_then(|rest| rest.strip_prefix(':')) {
 				Some(name) => Self::PipeWire(Some(name)),
@@ -721,15 +800,15 @@ mod tests {
 	fn source_labels_add_the_source_kind() {
 		assert_eq!(Source::Camera(None).label(), "camera");
 		assert_eq!(Source::Camera(Some("camera-id".into())).label(), "camera:camera-id");
-		assert_eq!(Source::Display(None).label(), "display");
-		assert_eq!(Source::Display(Some("0".into())).label(), "display:0");
+		assert_eq!(Source::Display(DisplaySelection::default()).label(), "display");
+		assert_eq!(Source::Display(DisplaySelection::new("0")).label(), "display:0");
 		assert_eq!(Source::Window("123".into()).label(), "window:123");
 		assert_eq!(Source::App("com.example.app".into()).label(), "app:com.example.app");
 	}
 
 	#[test]
 	fn source_labels_preserve_prefixed_display_ids() {
-		assert_eq!(Source::Display(Some("display:0".into())).label(), "display:0");
+		assert_eq!(Source::Display(DisplaySelection::new("display:0")).label(), "display:0");
 	}
 
 	#[test]
@@ -739,7 +818,7 @@ mod tests {
 
 	#[test]
 	fn camera_selectors_name_their_backend() {
-		assert_eq!(LinuxCamera::select(None, false), LinuxCamera::V4l2(None));
+		assert_eq!(LinuxCamera::select(None, false), LinuxCamera::Default);
 		assert_eq!(LinuxCamera::select(None, true), LinuxCamera::PipeWire(None));
 		for sandboxed in [false, true] {
 			assert_eq!(

@@ -65,7 +65,7 @@ async fn segments_match_their_manifests() {
 		.expect("publish");
 	let mut broadcast = publication.broadcast().clone();
 	let mut seeded = moq_mux::catalog::hang::Catalog::<()>::default();
-	seeded.media.join = hang::catalog::Join::new(DURATION);
+	seeded.sync.interval = Some(DURATION);
 	let mut catalog =
 		moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default().with_catalog(seeded))
 			.expect("catalog");
@@ -90,7 +90,7 @@ async fn segments_match_their_manifests() {
 		if i == CHUNKS / 3 {
 			// What a publisher's estimator writes back: the rendition keeps its instance and its URLs.
 			// A published jitter only ever rises, so the edit raises it and never lowers it.
-			let mut catalog = catalog.modify().expect("catalog open");
+			let mut catalog = catalog.modify(catalog.next_timestamp()).expect("catalog open");
 			for config in catalog.video.renditions.values_mut() {
 				config.bitrate = Some(1_234_567);
 				config.jitter = config.jitter.max(Some(Duration::from_millis(40)));
@@ -105,7 +105,7 @@ async fn segments_match_their_manifests() {
 		recorder.caught_up(&seen.newest()).await;
 	}
 	seen.reload = true;
-	import.finish().expect("finish import");
+	let _finished = import.finish().expect("finish import");
 	catalog.finish().expect("finish catalog");
 
 	let deadline = kio::clock::now().saturating_add(TIMEOUT);

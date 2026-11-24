@@ -1,12 +1,14 @@
 //! An async QUIC driver: [`moq_quic`]'s state machine on tokio sockets and timers.
 //!
+//! Public only with the `test-support` feature, for tests, benches, and the QUIC interop
+//! example: it can change in any release. MoQ sessions reach it through `connect` and `listen`.
+//!
 //! It exposes moq-quic streams and datagrams with:
 //! [`send::Group`]s that schedule streams and datagrams together, [`send::Stream::reset_at`] to
 //! keep a prefix reliable, [`recv::Stream::poll_lease`] to hold receive credit until a message is
 //! complete, and [`connection::Connection::set_limits`] to change flow control on a live connection.
 //!
-//! It needs no MoQ session: enable the `driver` feature and
-//! `default-features = false` to build it without moq-net. The entry point is the
+//! It needs no MoQ session. The entry point is the
 //! [`endpoint::Endpoint`], built from an [`endpoint::Config`] and a UDP socket it owns;
 //! [`endpoint::Endpoint::connect`] dials with a [`client::Config`].
 //!
@@ -57,7 +59,7 @@ mod mutex;
 pub mod recv;
 mod runtime;
 pub mod send;
-#[cfg(feature = "sim")]
+#[cfg(feature = "test-support")]
 pub mod sim;
 mod work_limiter;
 
@@ -67,7 +69,6 @@ pub(crate) use std::time::Duration;
 pub use moq_quic::{ConfigError, Limits, LimitsError, Rate, VarInt, client, crypto, server, stream, transport};
 pub(crate) use moq_quic::{EcnCodepoint, Transmit};
 
-#[cfg(feature = "quic")]
 pub(crate) use crate::quic::driver::runtime::{Slot, wrap_udp_socket};
 
 #[cfg(test)]

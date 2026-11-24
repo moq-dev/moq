@@ -138,6 +138,15 @@ class SelectionTest(unittest.TestCase):
                 self.assertTrue(plan["all"])
                 self.assertEqual(len(plan["packages"]), len(self.packages))
 
+    def test_shared_tooling_workspace_falls_back(self):
+        # Packages run its scripts by path, so its manifest dependents are not all its users.
+        self.packages["js/common"] = {"name": "@example/common"}
+        self.packages["demo/nested"]["devDependencies"] = {"@example/common": "workspace:*"}
+        self.write()
+        plan = self.plan(["js/common/package.ts"])
+        self.assertTrue(plan["all"])
+        self.assertEqual(len(plan["packages"]), len(self.packages))
+
     def test_optional_dependency_selects_transitive_consumers(self):
         self.assertEqual(
             set(self.plan(["js/bindings/README.md"])["packages"]), {"@example/bindings", "browser", "demo"}
@@ -205,13 +214,13 @@ class SelectionTest(unittest.TestCase):
             set(self.plan(["js/view/src/index.ts"])["packages"]), {"@example/core", "@example/view", "docs"}
         )
 
-    def calls(self, paths, action="check", github_actions=False, reports=None):
+    def calls(self, paths, action="check", github_actions=False):
         calls = []
         self.configurations = []
 
         def invoke(args, **kwargs):
             calls.append(list(args))
-            if args[:2] == ("bunx", "tsc") and args[-1] != "test/tsconfig.json":
+            if args[:3] == ("bun", "check", "--no-script") and args[-1] != "test/tsconfig.json":
                 self.configurations.append(json.loads(Path(args[-1]).read_text()))
             return type("Result", (), {"returncode": 1 if args[0] == "grep" else 0})()
 
@@ -221,12 +230,27 @@ class SelectionTest(unittest.TestCase):
             patch.object(selector.os, "chdir"),
             patch.object(selector.subprocess, "run", side_effect=invoke),
         ):
-            # The nightly gate cost scenarios set this for the whole gate, these tests included.
-            selector.os.environ.pop("JS_TEST_REPORTS", None)
-            if reports:
-                selector.os.environ["JS_TEST_REPORTS"] = str(reports)
             selector.run(action, self.plan(paths))
         return calls
+
+    def test_node_loads_published_tsc_builds_with_their_dependencies_built(self):
+        tsc = "rm -rf dist && tsc -b tsconfig.build.json"
+        # vite emits the JS here, and `tsc -p` only declarations.
+        self.packages["js/core"]["scripts"]["build"] = "rm -rf dist && vite build && tsc -p tsconfig.build.json"
+        self.packages["js/view"]["scripts"]["build"] = tsc
+        self.packages["js/room"] = {
+            "name": "@example/room",
+            "dependencies": {"@example/view": "workspace:*", "zod": "^4"},
+            "scripts": {"build": tsc},
+        }
+        self.packages["js/lib"] = {"name": "@example/lib", "scripts": {"build": "tsc -p tsconfig.build.json"}}
+        self.packages["js/private"] = {"name": "@example/private", "private": True, "scripts": {"build": tsc}}
+        self.write()
+        calls = self.calls(["js/room/src/index.ts", "js/lib/src/index.ts", "js/private/src/index.ts"])
+        self.assertIn(
+            ["bun", "run", "--filter=@example/core", "--filter=@example/view", "--elide-lines=0", "build"], calls
+        )
+        self.assertEqual(calls[-1], ["node", "sh/js/dist-imports.test.mjs", "js/lib", "js/room"])
 
     def test_executor_runs_only_selected_package_scripts(self):
         calls = self.calls(["doc/index.md"])
@@ -238,7 +262,7 @@ class SelectionTest(unittest.TestCase):
                 for action in ("check", "build")
             ],
         )
-        self.assertTrue(any(c[:2] == ["bunx", "tsc"] for c in calls))
+        self.assertTrue(any(c[:3] == ["bun", "check", "--no-script"] for c in calls))
         self.assertEqual(
             self.configurations,
             [{"extends": "./tsconfig.json", "exclude": ["**/dist", str(self.root / "test/browser")]}],
@@ -249,30 +273,51 @@ class SelectionTest(unittest.TestCase):
         calls = self.calls(["doc/index.md"], "test")
         self.assertIn(["bun", "run", "--sequential", "--filter=docs", "--elide-lines=0", "test"], calls)
         hosted = self.calls(["doc/index.md"], "test", github_actions=True)
-        self.assertIn(["bun", "run", "--filter=docs", "--elide-lines=0", "test"], hosted)
+        self.assertIn(["bun", "run", "--parallel", "--filter=docs", "--elide-lines=0", "test"], hosted)
         self.assertFalse(any(c[0] == "just" for c in calls))
-
-    def test_reports_keep_one_junit_per_package(self):
-        reports = self.root / "reports"
-        calls = self.calls(["js/view/src/index.ts"], "test", reports=reports)
-
-        def junit(directory):
-            return ["--reporter=junit", f"--reporter-outfile={reports / directory / 'junit.xml'}"]
-
-        self.assertEqual(
-            [c for c in calls if c[:2] == ["bun", "run"]],
-            [["bun", "run", "test", *junit(d)] for d in ("js/view", "doc")],
-        )
-        self.assertTrue(any(c[:3] == ["bun", "test", *junit(".")[:1]] and junit(".")[1] in c for c in calls))
 
     def test_owned_package_without_scripts_keeps_harness_check(self):
         self.packages["doc"].pop("scripts")
         self.write()
         calls = self.calls(["doc/index.md"])
         self.assertFalse(any(c[:2] == ["bun", "run"] for c in calls))
-        self.assertTrue(any(c[:2] == ["bunx", "tsc"] for c in calls))
+        self.assertTrue(any(c[:3] == ["bun", "check", "--no-script"] for c in calls))
         self.assertFalse(any(c[:2] == ["bun", "run"] for c in self.calls(["doc/index.md"], "test")))
         self.assertFalse(any(c[:2] == ["bun", "run"] for c in self.calls(["doc/index.md"], "build")))
+
+    def test_install_built_packages_skip_unlocked_build(self):
+        self.packages["js/libav"] = {
+            "name": "@moq/libav",
+            "scripts": {"check": "bun check --no-script", "build": "bun build.ts"},
+        }
+        self.packages["js/core"]["dependencies"] = {"@moq/libav": "workspace:*"}
+        self.packages["js/core"]["scripts"]["build"] = "tsc -p tsconfig.json"
+        self.packages["js/core"]["scripts"]["release"] = "bun ../common/release.ts"
+        self.write()
+        check_calls = self.calls(["js/libav/build.ts"], "check")
+        self.assertIn(
+            [
+                "bun",
+                "run",
+                "--sequential",
+                "--filter=@example/core",
+                "--filter=@example/view",
+                "--filter=@moq/libav",
+                "--filter=docs",
+                "--elide-lines=0",
+                "check",
+            ],
+            check_calls,
+        )
+        build_calls = [c for c in check_calls if c[:2] == ["bun", "run"] and c[-1] == "build"]
+        self.assertTrue(build_calls)
+        self.assertFalse(any("--filter=@moq/libav" in c for c in build_calls), build_calls)
+        # Runtime closure for unselected deps must also reuse the install-built libav artifact.
+        dep_calls = self.calls(["js/core/src/index.ts"], "check")
+        self.assertIn(["node", "sh/js/dist-imports.test.mjs", "js/core"], dep_calls)
+        dep_builds = [c for c in dep_calls if c[:2] == ["bun", "run"] and c[-1] == "build"]
+        self.assertTrue(dep_builds)
+        self.assertFalse(any("--filter=@moq/libav" in c for c in dep_builds), dep_builds)
 
     def test_empty_selection_runs_nothing(self):
         self.assertEqual(self.calls([]), [])

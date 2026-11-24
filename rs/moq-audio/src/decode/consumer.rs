@@ -1,6 +1,7 @@
 //! Subscribe to an encoded audio track and emit raw PCM.
 
 use std::collections::VecDeque;
+use std::task::Poll;
 
 use kio::clock::Instant;
 use moq_mux::container::Read as Encoded;
@@ -8,11 +9,12 @@ use std::time::Duration;
 
 use bytes::Bytes;
 
+use super::backpressure::{self, Backpressure};
 use super::decoder::{Config, Decoder};
 use crate::jitter::{self, Target};
 use crate::resample::{Remix, Resampler};
 use crate::{Activity, Error, Format, Frame, Layout};
-pub use moq_net::track::Delay;
+pub use moq_mux::container::Delay;
 
 /// One item of a [`Consumer`] read, in delivery order: decoded PCM, or a break in it.
 ///
@@ -57,6 +59,16 @@ pub enum Start {
 	Latest,
 }
 
+/// The delay a subscription for `options` carries: theirs, with the playout delay `stated` as the
+/// min, where a live join starts. [`Start::Oldest`] states none, which reaches back as far as the
+/// max delay allows rather than join the live edge.
+fn subscribed(options: &Options, stated: Duration) -> Delay {
+	match options.start {
+		Start::Oldest => options.delay.with_min(None),
+		Start::Latest => options.delay.with_min(stated),
+	}
+}
+
 /// PCM output conversion requested from [`Consumer`].
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
@@ -81,15 +93,23 @@ pub struct Options {
 	///
 	/// [`Delay::min`] is the playout delay: the jitter buffer a player holds ahead of the
 	/// playhead, reported by [`Consumer::delay`], and where a cold join starts. With
-	/// [`estimate`](Self::estimate) it is a floor under the measured delay instead. A `min`
-	/// beyond the track's max age is refused. [`Delay::max`] is how far a group may fall
-	/// behind the live edge before the subscription skips it; it adds no buffering.
+	/// [`estimate`](Self::estimate) it is a floor under the measured delay instead. A
+	/// [`Start::Latest`] subscription states whichever delay the player holds as its min,
+	/// following the estimate; a [`Start::Oldest`] one states none, reaching back to the oldest
+	/// group.
+	/// A `min` beyond the track's max age is refused. [`Delay::max`] is how far a group may fall
+	/// behind the live edge before the subscription skips it, and how long a missing group is
+	/// waited for; it adds no buffering.
 	pub delay: Delay,
 	/// Measure the playout delay from arrival timing, never below [`Delay::min`] (default:
 	/// `true`). `false` holds exactly `delay.min`.
 	pub estimate: bool,
 	/// Initial cached-group policy.
 	pub start: Start,
+	/// The subscription priority, ordering this track against the others on the session under
+	/// congestion: higher is sent first. Defaults to hang's `PRIORITY.audio`;
+	/// [`Consumer::set_priority`] moves it while running.
+	pub priority: i8,
 }
 
 impl Default for Options {
@@ -100,6 +120,7 @@ impl Default for Options {
 			delay: Delay::default(),
 			estimate: true,
 			start: Start::default(),
+			priority: hang::catalog::PRIORITY.audio,
 		}
 	}
 }
@@ -120,15 +141,23 @@ impl Options {
 pub struct Consumer {
 	decoder: Decoder,
 	track: moq_mux::container::Consumer<moq_mux::catalog::hang::Container>,
+	/// The subscription's preferences, for a priority change, until the track ends: holding them
+	/// past that would keep the publisher's demand the container released.
+	control: Option<moq_net::track::Control>,
 	resampler: Option<Resampler>,
 	/// Converts the decoded layout to the output's, when they differ.
 	remix: Option<Remix>,
 	options: Options,
 	max_delay: std::time::Duration,
+	/// The track's max age, which clamps the max delay.
+	max_age: Option<std::time::Duration>,
 	/// Prime after a join or loss, never after a declared endpoint or at the track's
 	/// first packet, which the codec's own delay already primes.
 	warmup: Duration,
 	warmup_pending: bool,
+	/// Media decoded so far, up to the warmup. A gap keeps the codec's history, which primes
+	/// it as the browser's pre-roll does, so only what this falls short of is trimmed.
+	primed: Duration,
 	/// Whether a packet was read or lost yet, so the track's first packet can be told apart.
 	started: bool,
 	warmup_until: Option<moq_net::Timestamp>,
@@ -161,13 +190,37 @@ pub struct Consumer {
 	terminal_start: Option<moq_net::Timestamp>,
 	/// The playout delay, fixed or estimated from arrivals.
 	target: Target,
+	/// The playout delay the subscription states as its [`Delay::min`] in place of
+	/// [`Options::delay`]'s.
+	stated: Duration,
 	/// Where arrival times are measured from.
 	origin: Instant,
+	/// Packets read and observed but not yet decoded, held by the [`Backpressure`] gate,
+	/// each with when it arrived, and how many of them are gaps or ends.
+	pending: VecDeque<(Encoded, kio::clock::Instant)>,
+	breaks: usize,
+	/// When the latest packet decoded arrived.
+	arrived: Option<kio::clock::Instant>,
+	/// The track ended, or failed with this error, behind whatever is pending.
+	ended: Option<Option<Error>>,
+	/// The gate, while its [`Backpressure`] handle lives.
+	gate: Option<kio::Consumer<backpressure::State>>,
+	/// The latest gap or end handed over: a playhead at or before it is from the timeline it ended.
+	boundary: Option<Duration>,
+	/// The duration of the latest decoded packet, which the next one is taken to match.
+	frame: Duration,
+	/// The group of the latest end read, until a later group or a loss arrives.
+	declared: Option<u64>,
 }
 
 struct ActivitySpan {
 	end: moq_net::Timestamp,
 	activity: Activity,
+}
+
+/// A target in `f64` milliseconds as a [`Duration`].
+fn from_millis(millis: f64) -> Duration {
+	Duration::from_secs_f64(millis / 1000.0)
 }
 
 impl Consumer {
@@ -199,16 +252,23 @@ impl Consumer {
 		}
 
 		let name = name.into();
-		let warmup = catalog.warmup.unwrap_or_default();
-		let playout = moq_mux::container::Playout::new(options.delay, warmup);
+		let warmup = catalog.warmup.unwrap_or_default().min(moq_mux::container::DELAY_MAX);
+		let target = Target::new(options.delay.min.unwrap_or_default(), options.estimate, catalog.jitter);
+		// The subscription states the playout delay as its min from the start, the estimate's cold
+		// start included, so a live join reaches back by it (see `next`).
+		let stated = from_millis(target.millis());
+		let playout = moq_mux::container::Playout::new(subscribed(&options, stated), warmup);
 		let track = broadcast.track(hang::catalog::Reference::track(catalog, &name))?;
 		// The whole delay from the start, as the container keeps it: the transport enforces the
 		// max too, so a narrower one while joining would drop the groups queued behind a reader
 		// slow to take its first, and the publisher should never see a stated zero min first.
 		let mut subscriber = track
 			.subscribe(
-				playout
-					.subscription(moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.audio)),
+				playout.subscription(
+					moq_net::track::Subscription::default()
+						.with_priority(options.priority)
+						.with_ranges([moq_net::track::Range::ALL]),
+				),
 			)
 			.await?;
 		// Latest skips cached history; a warmup is primed by trimming the newest group's
@@ -222,6 +282,7 @@ impl Consumer {
 		{
 			subscriber = subscriber.with_range(live_edge.group..);
 		}
+		let control = subscriber.control();
 		let track = subscriber;
 		let max_age = track.info().max_age;
 		let max_delay = options
@@ -248,15 +309,19 @@ impl Consumer {
 		let track = playout.consumer(track, container);
 
 		Ok(Self {
-			target: Target::new(delay, options.estimate, catalog.jitter),
+			target,
+			stated,
 			decoder,
 			track,
+			control: Some(control),
 			resampler: None,
 			remix,
 			options,
 			max_delay,
+			max_age,
 			warmup,
 			warmup_pending: !warmup.is_zero(),
+			primed: Duration::ZERO,
 			warmup_until: None,
 			started: false,
 			resolved_sample_rate: sample_rate,
@@ -272,6 +337,14 @@ impl Consumer {
 			end_group: 0,
 			terminal_start: None,
 			origin: now(),
+			pending: VecDeque::new(),
+			breaks: 0,
+			arrived: None,
+			ended: None,
+			gate: None,
+			boundary: None,
+			frame: Duration::ZERO,
+			declared: None,
 		})
 	}
 
@@ -290,15 +363,43 @@ impl Consumer {
 		self.max_delay
 	}
 
+	/// Move [`Delay::max`] mid-stream, clamped to the track's max age like [`Options::delay`].
+	///
+	/// A player whose playout delay moves calls this to keep the subscription reaching as far
+	/// behind it, as `moq play` keeps it at the delay plus its time stretch.
+	pub fn set_max_delay(&mut self, max: std::time::Duration) {
+		self.options.delay = self.options.delay.with_max(max);
+		self.track.set_delay(self.stated());
+		self.max_delay = max.min(self.max_age.unwrap_or(std::time::Duration::MAX));
+	}
+
+	/// Move [`Options::priority`] mid-stream, updating the subscription in place rather than
+	/// resubscribing, so nothing already fetched is dropped or fetched again.
+	pub fn set_priority(&mut self, priority: i8) {
+		self.options.priority = priority;
+		let Some(control) = &self.control else {
+			return;
+		};
+		let subscription = control.subscription();
+		if subscription.priority != priority {
+			// Closed only once the track ended, when there is nothing left to prioritize.
+			let _ = control.update(subscription.with_priority(priority));
+		}
+	}
+
 	/// The playout delay to hold ahead of the playhead right now: the fixed
 	/// [`Delay::min`], or with [`Options::estimate`] the estimate from every frame read so far.
 	///
-	/// The estimate measures when [`read`](Self::read) hands each packet over, so
-	/// it is only as honest as the caller is prompt: read as soon as the previous
-	/// frame is handled and let the playback buffer absorb the jitter, rather than
-	/// pacing reads to the speaker.
+	/// The estimate measures when each packet landed in this node's cache
+	/// ([`moq_mux::container::Consumer::arrival`]), so neither a hole the container waits out nor
+	/// a late read holds the packets behind it as jitter.
 	pub fn delay(&self) -> Duration {
-		Duration::from_secs_f64(self.target.millis() / 1000.0)
+		from_millis(self.target.millis())
+	}
+
+	// The delay the subscription carries; see [`subscribed`].
+	fn stated(&self) -> Delay {
+		subscribed(&self.options, self.stated)
 	}
 
 	/// Sample rate samples are actually delivered at, which is
@@ -310,6 +411,24 @@ impl Consumer {
 	/// Layout samples are actually delivered in.
 	pub fn layout(&self) -> Layout {
 		self.resolved_layout
+	}
+
+	/// Gate decoding behind the returned [`Backpressure`], replacing any earlier gate.
+	///
+	/// [`read`](Self::read) keeps reading packets as they arrive and holds them encoded
+	/// until the gate admits them. Dropping the handle decodes every packet as it arrives
+	/// again.
+	pub fn backpressure(&mut self) -> Backpressure {
+		let (backpressure, gate) = Backpressure::new();
+		self.gate = Some(gate);
+		backpressure
+	}
+
+	/// When the packet behind the latest decoded frame landed in this node's cache
+	/// ([`moq_mux::container::Consumer::arrival`]), which a hole or a gate holding it encoded
+	/// may have kept well before [`read`](Self::read) handed the frame over.
+	pub fn arrival(&self) -> Option<kio::clock::Instant> {
+		self.arrived
 	}
 
 	/// Read decoded PCM or a track boundary, or `None` when the track ends.
@@ -330,31 +449,36 @@ impl Consumer {
 				return Ok(Some(frame));
 			}
 
-			let (mux_frame, track_start) = match self.track.read().await? {
+			let (mux_frame, track_start) = match self.next().await? {
 				Some(Encoded::Frame { group, frame }) => {
 					let first = !std::mem::replace(&mut self.started, true);
 					// A later group after a declared end comes from a fresh encoder; the end's
 					// own group carries the stopped encoder's final packets, trimmed below.
-					// Those packets end the speech before the silence, so only this frame
-					// tells the estimator the silence it measures across was declared.
 					if self.end.is_some() && group != self.end_group {
-						self.target.end();
 						self.restart()?;
+						self.fresh_encoder();
 					}
-					// Nothing precedes group 0, and a group delivers from its frame 0 or not at
-					// all, so reading it first means decoding from the encoder's first packet.
-					// A finished group's end marker may come first; it carries no media.
-					(frame, first && group == 0)
+					// A group with nothing below it, which its publisher declares by skipping
+					// every start before it, is the track's first, and a group delivers from its
+					// frame 0 or not at all, so reading it first means decoding from the
+					// encoder's first packet. A finished group's end marker may come first; it
+					// carries no media.
+					(frame, first && self.track.is_skipped(0..group))
 				}
 				// Behind whatever the resampler held from before the loss.
 				Some(Encoded::Gap { timestamp, duration }) => {
+					self.boundary = Some(Duration::try_from(timestamp)?);
 					self.started = true;
-					// The restart forgets the end, but the silence across it stays declared.
-					if self.end.is_some() {
-						self.target.end();
-					}
+					// Groups lost past a declared end were the fresh encoder's, so the packet
+					// after them still comes from it, and decodes as its first, unprimed: a wire
+					// before lite-07 names the run the publisher skipped across its silence a
+					// drop, so after every pause this gap is that silence, not lost media.
+					let fresh = self.end.is_some();
 					self.restart()?;
 					self.warmup_pending = !self.warmup.is_zero();
+					if fresh {
+						self.fresh_encoder();
+					}
 					self.ready.push_back(Read::Gap { timestamp, duration });
 					continue;
 				}
@@ -363,6 +487,7 @@ impl Consumer {
 				// after the end, starting before it, once a fresh encoder or the track's end
 				// drains it.
 				Some(Encoded::End { group, end }) => {
+					self.boundary = Some(Duration::try_from(end)?);
 					self.end = Some(end);
 					self.end_group = group;
 					self.frames_decoded = 0;
@@ -373,15 +498,10 @@ impl Consumer {
 				None => return Ok(self.flush()?.map(Read::Frame)),
 			};
 
-			// Every packet the container hands over is an arrival, including one the
-			// decoder is about to refuse, so it is observed before anything can fail.
-			let arrival = jitter::millis(now().duration_since(self.origin));
 			let timestamp = mux_frame.timestamp;
-			let media = timestamp.value() as f64 * 1000.0 / timestamp.scale().as_u64() as f64;
-			self.target.observe(arrival, media);
 
 			// Undeclared holes are routine: a skipped stalled group, a packet the
-			// decoder refused, an ingest that resynced. Drop every stage's state at
+			// decoder refused, an ingest that resynced. Drop the timeline's state at
 			// the edge, before the packet after it goes anywhere near the decoder.
 			//
 			// Skipped once an end marker arrives, because from there the terminal
@@ -389,14 +509,17 @@ impl Consumer {
 			// reading it off the packet, so there is nothing left to compare.
 			if self.end.is_none()
 				&& let Some(next) = self.next_start
-				&& discontinuous(next, timestamp)
+				&& discontinuous(next, timestamp)?
 			{
 				if let Some(frame) = self.gap()? {
 					self.ready.push_back(Read::Frame(frame));
 				}
 				// From where the timeline should have continued to where it did, which an
 				// overlap leaves empty.
-				let start = next.convert(timestamp.scale())?.min(timestamp);
+				let start = earlier(
+					next.convert(timestamp.scale().ok_or(moq_net::TimeOverflow)?)?,
+					timestamp,
+				);
 				self.ready.push_back(Read::Gap {
 					timestamp: start,
 					duration: timestamp.checked_sub(start)?,
@@ -424,8 +547,12 @@ impl Consumer {
 			// first packet has no history to warm up from: the codec's pre-skip, trimmed by
 			// the decoder, is all the priming its encoder declared.
 			if std::mem::take(&mut self.warmup_pending) && !track_start {
-				let warmup = moq_net::Timestamp::try_from(self.warmup)?.convert(timestamp.scale())?;
-				self.warmup_until = Some(timestamp.checked_add(warmup)?);
+				let warmup = self.warmup.saturating_sub(self.primed);
+				if !warmup.is_zero() {
+					let warmup = moq_net::Timestamp::try_from(warmup)?
+						.convert(timestamp.scale().ok_or(moq_net::TimeOverflow)?)?;
+					self.warmup_until = Some(timestamp.checked_add(warmup)?);
+				}
 			}
 			// Codec delay trimmed off the front is media this packet covered even
 			// though no samples came out, so it still moves the packet after it along.
@@ -438,11 +565,13 @@ impl Consumer {
 			let covered = decoded.len() / self.decoder.layout().channels() as usize + trimmed;
 			if covered > 0 {
 				self.target.set_frame(covered as f64 * 1000.0 / rate as f64);
+				self.frame = Duration::from_secs_f64(covered as f64 / rate as f64);
+				self.primed = self.primed.saturating_add(self.frame).min(self.warmup);
 			}
 			if let Some(end) = self.end {
 				let terminal_start = *self
 					.terminal_start
-					.get_or_insert(rewind(mux_frame.timestamp, self.delay_trimmed, rate)?.max(epoch));
+					.get_or_insert(later(rewind(mux_frame.timestamp, self.delay_trimmed, rate)?, epoch));
 				let total = frames_between(terminal_start, end, rate)?;
 				let remaining = total.saturating_sub(self.frames_decoded);
 				decoded.truncate(remaining.saturating_mul(self.decoder.layout().channels() as usize));
@@ -455,7 +584,7 @@ impl Consumer {
 				// The codec delay is padding before the epoch, not a hole after the
 				// first short frame. Keep later output contiguous by moving it back over
 				// everything trimmed since this decoder epoch began.
-				rewind(mux_frame.timestamp, self.delay_trimmed, rate)?.max(epoch)
+				later(rewind(mux_frame.timestamp, self.delay_trimmed, rate)?, epoch)
 			};
 			if self.end.is_some() {
 				self.frames_decoded += frames;
@@ -534,8 +663,168 @@ impl Consumer {
 		}
 	}
 
+	/// The next packet or boundary the gate admits, reading and observing every packet
+	/// that arrives meanwhile, or `None` once the track ends.
+	async fn next(&mut self) -> Result<Option<Encoded>, Error> {
+		loop {
+			// The subscription states the playout delay as its min, where a join starts; the
+			// container gives a missing group up by the max delay alone. Checked before every poll,
+			// since each arrival and each decoded frame can move it; the estimate moves in whole
+			// buckets, so each move is one update.
+			if self.stated != self.delay() {
+				self.stated = self.delay();
+				self.track.set_delay(self.stated());
+			}
+			// Read before judging the head, so any update after that wakes the wait.
+			let seen = self.gate.as_ref().map_or(0, |gate| gate.read().version);
+			let deadline = match self.pending.front() {
+				Some((Encoded::Frame { frame, .. }, arrived)) => {
+					match self.admit(Duration::try_from(frame.timestamp)?, *arrived) {
+						None => return Ok(self.pop()),
+						due => due,
+					}
+				}
+				Some(_) => return Ok(self.pop()),
+				None => match self.ended.as_mut() {
+					Some(failed) => return failed.take().map_or(Ok(None), Err),
+					None => None,
+				},
+			};
+
+			let gate = self.gate.as_ref().filter(|gate| !gate.is_closed());
+			let mut sleep = std::pin::pin!(deadline.map(kio::clock::sleep_until));
+			let track = &mut self.track;
+			let ended = self.ended.is_some();
+			let read = kio::wait(|waiter| {
+				if !ended && let Poll::Ready(read) = track.poll_read(waiter) {
+					return Poll::Ready(Some(read));
+				}
+				if let Some(gate) = gate
+					&& gate
+						.poll(waiter, |state| match state.version != seen {
+							true => Poll::Ready(()),
+							false => Poll::Pending,
+						})
+						.is_ready()
+				{
+					return Poll::Ready(None);
+				}
+				if let Some(sleep) = sleep.as_mut().as_pin_mut()
+					&& waiter.poll_future(sleep).is_ready()
+				{
+					return Poll::Ready(None);
+				}
+				Poll::Pending
+			})
+			.await;
+
+			match read {
+				// A scale-less track carries group keys, not times, so there is nothing to place.
+				Some(Ok(Some(Encoded::Frame { frame, .. }))) if frame.timestamp.scale().is_none() => {
+					self.ended = Some(Some(moq_net::Error::TimestampMismatch.into()));
+				}
+				Some(Ok(Some(read))) => {
+					// The estimator times arrivals, so it learns of a declared silence as the
+					// packets around it arrive rather than as they decode. The end's own group
+					// carries the stopped encoder's final packets, which end the speech before
+					// the silence, so only a later group, or a loss, says the silence it
+					// measures across was declared. A loss forgets the end, but the silence
+					// across it stays declared.
+					match &read {
+						Encoded::End { group, .. } => self.declared = Some(*group),
+						Encoded::Frame { group, .. } if self.declared.is_some_and(|end| end != *group) => {
+							self.declared = None;
+							self.target.end();
+						}
+						Encoded::Gap { .. } if self.declared.take().is_some() => self.target.end(),
+						_ => {}
+					}
+					// A backlog group the container dropped unread is never observed, so the
+					// estimator learns when it arrived instead: a join lasts until its skipped
+					// backlog has.
+					if let Some(backlog) = self.track.backlog() {
+						self.target.backlog(jitter::millis(backlog.duration_since(self.origin)));
+					}
+					// Every packet the container hands over is an arrival, including one the
+					// decoder will refuse, so it is observed before anything can fail.
+					// When the packet landed, not when it was read: a hole the container waits out
+					// holds the packets behind it, which arrived on time. The estimator and the
+					// gate's hold both count from it.
+					let landed = self.track.arrival().unwrap_or_else(now);
+					match &read {
+						Encoded::Frame { frame, .. } => {
+							if let Some(scale) = frame.timestamp.scale() {
+								let arrival = jitter::millis(landed.duration_since(self.origin));
+								let media = frame.timestamp.value() as f64 * 1000.0 / scale.as_u64() as f64;
+								self.target.observe(arrival, media);
+							}
+						}
+						_ => self.breaks += 1,
+					}
+					self.pending.push_back((read, landed));
+				}
+				Some(Ok(None)) => self.ended = Some(None),
+				Some(Err(err)) => self.ended = Some(Some(err.into())),
+				None => {}
+			}
+			if self.ended.is_some() {
+				self.control = None;
+			}
+		}
+	}
+
+	/// Take the oldest pending packet or boundary.
+	fn pop(&mut self) -> Option<Encoded> {
+		let (read, arrived) = self.pending.pop_front()?;
+		match read {
+			Encoded::Frame { .. } => self.arrived = Some(arrived),
+			_ => self.breaks -= 1,
+		}
+		Some(read)
+	}
+
+	/// When the pending packet at `timestamp`, which arrived at `arrived`, may decode, or
+	/// `None` if it may now.
+	fn admit(&self, timestamp: Duration, arrived: kio::clock::Instant) -> Option<kio::clock::Instant> {
+		let gate = self.gate.as_ref().filter(|gate| !gate.is_closed())?;
+		let state = gate.read();
+		if state.hold.is_zero() || self.ended.is_some() {
+			return None;
+		}
+		// Media queued behind the packet covers the hold, or nothing more continues it.
+		let covered = self.breaks > 0
+			|| matches!(self.pending.back(), Some((Encoded::Frame { frame, .. }, _))
+				if Duration::try_from(frame.timestamp).is_ok_and(|end| end >= timestamp + state.hold));
+		if covered {
+			return None;
+		}
+
+		// A packet waits at most the hold, which bounds what the gate keeps by arrival time,
+		// whatever the timestamps say.
+		let mut due = arrived.checked_add(state.hold);
+		let boundary = self.boundary;
+		if let Some((playhead, at)) = state
+			.playhead
+			.filter(|(playhead, _)| boundary.is_none_or(|boundary| *playhead > boundary))
+		{
+			// Due once the playhead is within the floor of where this packet's output ends.
+			let end = timestamp + self.frame;
+			let reach = playhead + state.floor;
+			let played = match end.checked_sub(reach) {
+				Some(ahead) => at.checked_add(ahead),
+				// Before the clock's origin is long past, so it decodes now.
+				None => Some(at.checked_sub(reach - end)?),
+			};
+			due = due.into_iter().chain(played).min();
+		}
+		// Past the clock's range never comes, so decode now rather than hold it forever.
+		due.filter(|due| *due > kio::clock::Instant::now())
+	}
+
 	/// Start a new timeline after a gap or past a declared end. The decoder is not reset:
-	/// the next group already starts on a keyframe, and pre-skip is a play-path concern.
+	/// the next group already starts on a keyframe, and the history it keeps primes the
+	/// packets after the break, so a gap trims no more warmup than the decoder still lacks,
+	/// and no pre-skip, which only a fresh encoder starts with.
 	///
 	/// Samples the resampler still holds arrived before the break, so they are drained
 	/// as their own frame first rather than filtered together with what follows it.
@@ -552,21 +841,28 @@ impl Consumer {
 		self.epoch = None;
 		self.delay_trimmed = 0;
 		self.warmup_until = None;
-		self.decoder.reapply_delay();
 		Ok(())
 	}
 
-	/// Reset codec prediction and resampling state at a hole, returning whatever the
-	/// resampler was still holding from before it.
+	/// Expect a fresh encoder's packets: its pre-skip is trimmed again, and the stopped
+	/// encoder's history primes none of its warmup. Its first packet needs no warmup either, so
+	/// one a join or a gap left pending is dropped.
+	fn fresh_encoder(&mut self) {
+		self.decoder.reapply_delay();
+		self.primed = Duration::ZERO;
+		self.warmup_pending = false;
+	}
+
+	/// Reset resampling state at a hole, returning whatever the resampler was still
+	/// holding from before it.
 	///
 	/// Those samples arrived before the hole and belong before it, so they come
 	/// out as their own frame rather than being filtered together with the audio
 	/// on the far side. The resampler starts over from there, which is what makes
 	/// the next packet's output stamp from the packet itself: nothing is buffered
-	/// to reach back over.
+	/// to reach back over. The codec keeps its history, which primes the packets
+	/// after the hole as a pre-roll would.
 	fn gap(&mut self) -> Result<Option<Frame>, Error> {
-		self.decoder.reset_prediction()?;
-
 		let frame = self.drain()?;
 
 		self.next_start = None;
@@ -640,7 +936,7 @@ impl Consumer {
 		{
 			let channels = self.decoder.layout().channels() as usize;
 			let frames = pcm.len() / channels;
-			let duration = Duration::from(until.checked_sub(timestamp)?);
+			let duration = Duration::try_from(until.checked_sub(timestamp)?)?;
 			let trim = (duration.as_nanos() * u128::from(self.resolved_sample_rate)).div_ceil(1_000_000_000);
 			let trim = usize::try_from(trim).unwrap_or(usize::MAX).min(frames);
 			pcm.drain(..trim * channels);
@@ -667,13 +963,8 @@ impl Consumer {
 	}
 }
 
-/// The receiver's monotonic clock, which a test can pin to replay a recorded
-/// arrival trace without waiting it out.
+/// The receiver's monotonic clock.
 fn now() -> Instant {
-	#[cfg(test)]
-	if let Some(now) = tests::CLOCK.get() {
-		return now;
-	}
 	Instant::now()
 }
 
@@ -700,11 +991,25 @@ fn now() -> Instant {
 /// finest quantization a packet can be assumed to have kept. That floor stays under
 /// the shortest packet anything here can send, 2.5 ms of Opus, so it never
 /// swallows a lost one.
-fn discontinuous(expected: moq_net::Timestamp, timestamp: moq_net::Timestamp) -> bool {
-	let scale = expected.scale().max(timestamp.scale());
+fn discontinuous(expected: moq_net::Timestamp, timestamp: moq_net::Timestamp) -> Result<bool, Error> {
+	let unscaled = moq_net::TimeOverflow;
+	let scale = expected
+		.scale()
+		.ok_or(unscaled)?
+		.max(timestamp.scale().ok_or(unscaled)?);
 	let quantum = scale.min(moq_net::Timescale::MILLI);
 	let tolerance = (scale.as_u64() as u128).div_ceil(quantum.as_u64() as u128) + 1;
-	expected.as_scale(scale).abs_diff(timestamp.as_scale(scale)) > tolerance
+	Ok(expected.as_scale(scale)?.abs_diff(timestamp.as_scale(scale)?) > tolerance)
+}
+
+/// The later of two timestamps on one timeline, `a` when they don't compare.
+fn later(a: moq_net::Timestamp, b: moq_net::Timestamp) -> moq_net::Timestamp {
+	if b > a { b } else { a }
+}
+
+/// The earlier of two timestamps on one timeline, `a` when they don't compare.
+fn earlier(a: moq_net::Timestamp, b: moq_net::Timestamp) -> moq_net::Timestamp {
+	if b < a { b } else { a }
 }
 
 /// `timestamp` moved forward by `frames` at `sample_rate`, in its own timescale.
@@ -713,14 +1018,16 @@ fn advance(timestamp: moq_net::Timestamp, frames: usize, sample_rate: u32) -> Re
 		return Ok(timestamp);
 	}
 
-	let offset = moq_net::Timestamp::from_scale(frames as u64, sample_rate as u64)?.convert(timestamp.scale())?;
+	let offset = moq_net::Timestamp::from_scale(frames as u64, sample_rate as u64)?
+		.convert(timestamp.scale().ok_or(moq_net::TimeOverflow)?)?;
 	Ok(timestamp.checked_add(offset)?)
 }
 
 /// Codec-rate frames in the interval, rounding a microsecond marker to the nearest frame.
 fn frames_between(start: moq_net::Timestamp, end: moq_net::Timestamp, sample_rate: u32) -> Result<usize, Error> {
 	let duration = end.checked_sub(start)?;
-	let frames = (std::time::Duration::from(duration).as_nanos() * sample_rate as u128 + 500_000_000) / 1_000_000_000;
+	let frames =
+		(std::time::Duration::try_from(duration)?.as_nanos() * sample_rate as u128 + 500_000_000) / 1_000_000_000;
 	usize::try_from(frames).map_err(|_| Error::Unsupported("audio duration does not fit in memory".into()))
 }
 
@@ -733,10 +1040,11 @@ fn rewind(timestamp: moq_net::Timestamp, frames: usize, sample_rate: u32) -> Res
 		return Ok(timestamp);
 	}
 
-	let offset = moq_net::Timestamp::from_scale(frames as u64, sample_rate as u64)?.convert(timestamp.scale())?;
+	let scale = timestamp.scale().ok_or(moq_net::TimeOverflow)?;
+	let offset = moq_net::Timestamp::from_scale(frames as u64, sample_rate as u64)?.convert(scale)?;
 	Ok(timestamp
 		.checked_sub(offset)
-		.unwrap_or(moq_net::Timestamp::new(0, timestamp.scale())?))
+		.unwrap_or(moq_net::Timestamp::new(0, scale)?))
 }
 
 #[cfg(test)]
@@ -757,7 +1065,20 @@ mod tests {
 	use crate::encode::{Config as EncodeConfig, Encoder, Input, Options as EncodeOptions, Producer};
 	use crate::{Format, Layout};
 
-	/// The first request already states the min delay, and the max plus the warmup: a latest
+	/// The staleness budget of `subscription`'s one live join.
+	fn live_max(subscription: &moq_net::track::Subscription) -> Option<Duration> {
+		match subscription.ranges.as_slice() {
+			[
+				moq_net::track::Range {
+					start: moq_net::track::Start::Live { max, .. },
+					..
+				},
+			] => *max,
+			ranges => panic!("expected one live join, got {ranges:?}"),
+		}
+	}
+
+	/// The first request already states the min and max delay, each plus the warmup: a latest
 	/// start waits for the live edge with its subscription open, before the container could
 	/// update it.
 	#[tokio::test]
@@ -768,7 +1089,7 @@ mod tests {
 			.unwrap();
 		let mut catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 1);
 		catalog.warmup = Some(Duration::from_millis(100));
-		let delay = moq_net::track::Delay {
+		let delay = Delay {
 			min: Some(Duration::from_millis(300)),
 			max: Some(Duration::from_millis(500)),
 		};
@@ -790,9 +1111,79 @@ mod tests {
 			first = track.subscription_changed() => first.unwrap(),
 		};
 		assert_eq!(
-			first.map(|sub| sub.delay),
-			Some(delay.with_max(Duration::from_millis(600)))
+			first.map(|sub| sub.ranges),
+			Some(vec![moq_net::track::Range::from(moq_net::track::Start::Live {
+				min: Some(Duration::from_millis(400)),
+				max: Some(Duration::from_millis(600)),
+			})])
 		);
+	}
+
+	/// The priority reaches the publisher's aggregate subscription at hang's audio default, and a
+	/// change moves that subscription in place, keeping the moved delay with it.
+	#[tokio::test(start_paused = true)]
+	async fn priority_reaches_the_subscription_and_moves_in_place() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 1);
+		let mut consumer = Consumer::new(&broadcast.consume(), &catalog, "audio", Options::new())
+			.await
+			.unwrap();
+		assert_eq!(
+			track.subscription().map(|sub| sub.priority),
+			Some(hang::catalog::PRIORITY.audio)
+		);
+
+		consumer.set_priority(-20);
+		assert_eq!(consumer.options().priority, -20);
+		assert_eq!(track.subscription().map(|sub| sub.priority), Some(-20));
+
+		// A later delay change rewrites the subscription without undoing the priority.
+		consumer.set_max_delay(Duration::from_secs(2));
+		let subscription = track.subscription().unwrap();
+		assert_eq!(subscription.priority, -20);
+		assert_eq!(live_max(&subscription), Some(Duration::from_secs(2)));
+	}
+
+	/// A moved max delay reaches the subscription, plus the warmup, clamped to the max age.
+	#[tokio::test(start_paused = true)]
+	async fn a_moved_max_delay_reaches_the_subscription() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track(
+				"audio",
+				hang::container::track_info(hang::catalog::PRIORITY.audio).with_max_age(Duration::from_secs(5)),
+			)
+			.unwrap();
+		let mut catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 1);
+		catalog.warmup = Some(Duration::from_millis(100));
+		let mut consumer = Consumer::new(
+			&broadcast.consume(),
+			&catalog,
+			"audio",
+			Options {
+				delay: Delay {
+					max: Some(Duration::from_millis(500)),
+					..Delay::default()
+				},
+				..Options::new()
+			},
+		)
+		.await
+		.unwrap();
+		assert_eq!(consumer.max_delay(), Duration::from_millis(500));
+
+		consumer.set_max_delay(Duration::from_secs(2));
+		assert_eq!(consumer.max_delay(), Duration::from_secs(2));
+		assert_eq!(
+			live_max(&track.subscription().unwrap()),
+			Some(Duration::from_millis(2_100))
+		);
+
+		consumer.set_max_delay(Duration::from_secs(9));
+		assert_eq!(consumer.max_delay(), Duration::from_secs(5));
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -884,7 +1275,22 @@ mod tests {
 		}
 	}
 
-	async fn warmup_output(declared: bool) -> (Vec<u128>, usize) {
+	/// How the timeline breaks between `warmup_output`'s two runs of packets.
+	#[derive(Clone, Copy, Debug)]
+	enum Break {
+		/// A declared end, so a fresh encoder follows.
+		Declared,
+		/// A lost group: a seek opens the next without declaring the starts before it skipped.
+		Lost,
+		/// A timestamp jump across contiguous groups.
+		Undeclared,
+		/// A declared end, then a seek past the starts after it, as a wire before lite-07 delivers
+		/// the run a publisher skipped across a pause.
+		DeclaredGap,
+	}
+
+	/// Decodes `first` packets, then six more a second later, past a `cut` in the timeline.
+	async fn warmup_output(cut: Break, first: u64) -> (Vec<u128>, usize) {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
@@ -898,10 +1304,18 @@ mod tests {
 		// Joined mid-stream: the track's first packet needs no warmup.
 		producer.seek(1).unwrap();
 		for epoch in 0..2 {
-			if epoch != 0 && declared {
-				producer.discontinuity().unwrap();
+			if epoch != 0 {
+				match cut {
+					Break::Declared => producer.discontinuity().unwrap(),
+					Break::Lost => producer.seek(1_000_000).unwrap(),
+					Break::Undeclared => {}
+					Break::DeclaredGap => {
+						producer.discontinuity().unwrap();
+						producer.seek(1_000_000).unwrap();
+					}
+				}
 			}
-			for packet in 0..6 {
+			for packet in 0..if epoch == 0 { first } else { 6 } {
 				producer
 					.write(moq_mux::container::Frame {
 						timestamp: Timestamp::from_micros(epoch * 1_000_000 + packet * 20_000).unwrap(),
@@ -913,7 +1327,7 @@ mod tests {
 				producer.cut(None).unwrap();
 			}
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		let mut consumer = Consumer::new(
 			&broadcast.consume(),
 			&catalog,
@@ -931,15 +1345,15 @@ mod tests {
 		let mut stamps = Vec::new();
 		let mut frames = 0;
 		while let Some(frame) = next_frame(&mut consumer).await.unwrap() {
-			stamps.push(frame.timestamp.as_micros());
+			stamps.push(frame.timestamp.as_micros().unwrap());
 			frames += frame.data.len() / size_of::<f32>();
 		}
 		(stamps, frames)
 	}
 
-	/// An origin at `hop`, its driver spawned.
-	fn origin(hop: u64) -> moq_net::origin::Producer {
-		let config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	/// An origin, its driver spawned.
+	fn origin() -> moq_net::origin::Producer {
+		let config = moq_net::origin::Config::default();
 		let (producer, driver) = moq_net::origin::Producer::new(config);
 		tokio::spawn(moq_net::time::run(driver));
 		producer
@@ -987,7 +1401,7 @@ mod tests {
 	/// replaying that backlog.
 	#[tokio::test(start_paused = true)]
 	async fn latest_skips_a_warm_copys_backlog() {
-		let publisher = origin(1);
+		let publisher = origin();
 		let broadcast = publisher
 			.route("bcast", moq_net::origin::RouteOptions::hidden())
 			.unwrap();
@@ -1016,7 +1430,7 @@ mod tests {
 			write(packet);
 		}
 
-		let relay = origin(2);
+		let relay = origin();
 		let _link = link(&publisher, &relay).await;
 		let consumer = relay.consume();
 		let remote = consumer
@@ -1029,8 +1443,12 @@ mod tests {
 
 		// A first reader warms the relay's copy with every group.
 		{
-			let subscription = moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)));
+			let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+				moq_net::track::Start::Live {
+					min: Some(Duration::from_secs(10)),
+					max: Some(Duration::from_secs(10)),
+				},
+			)]);
 			let mut warm = remote.track("audio").unwrap().subscribe(subscription).await.unwrap();
 			let mut groups = 0;
 			while groups < 4 {
@@ -1039,7 +1457,7 @@ mod tests {
 			}
 		}
 		// The relay cancels the unread upstream subscription; its copy keeps the groups.
-		while demand.wanted_changed().await.unwrap().is_some() {}
+		while demand.wanted_changed().await.unwrap() {}
 		write(4);
 
 		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 1);
@@ -1059,7 +1477,7 @@ mod tests {
 		.await
 		.unwrap();
 		let frame = next_frame(&mut consumer).await.unwrap().unwrap();
-		assert_eq!(frame.timestamp.as_micros(), 80_000, "the backlog was replayed");
+		assert_eq!(frame.timestamp.as_micros().unwrap(), 80_000, "the backlog was replayed");
 	}
 
 	/// A latest join with a warmup loses no group the publisher bursts before its first
@@ -1068,7 +1486,7 @@ mod tests {
 	/// behind its newest, a gap no later update recovers.
 	#[tokio::test(start_paused = true)]
 	async fn latest_loses_no_group_the_publisher_bursts_before_its_first_frame() {
-		let publisher = origin(1);
+		let publisher = origin();
 		let broadcast = publisher
 			.route("bcast", moq_net::origin::RouteOptions::hidden())
 			.unwrap();
@@ -1097,7 +1515,7 @@ mod tests {
 		};
 		write(0);
 
-		let subscriber = origin(2);
+		let subscriber = origin();
 		let _link = link(&publisher, &subscriber).await;
 		let consumer = subscriber.consume();
 		let remote = consumer
@@ -1130,12 +1548,12 @@ mod tests {
 		for packet in 1..=20 {
 			write(packet);
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let mut stamps = Vec::new();
 		while let Some(read) = consumer.read().await.unwrap() {
 			match read {
-				Read::Frame(frame) => stamps.push(frame.timestamp.as_micros()),
+				Read::Frame(frame) => stamps.push(frame.timestamp.as_micros().unwrap()),
 				Read::Gap { timestamp, duration } => panic!("a gap of {duration:?} after {timestamp:?}"),
 				Read::End { .. } => {}
 			}
@@ -1145,8 +1563,56 @@ mod tests {
 	}
 
 	#[tokio::test(start_paused = true)]
+	async fn the_join_trim_stops_at_the_warmup_ceiling() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let mut catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 1);
+		catalog.warmup = Some(Duration::from_secs(3600));
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
+		);
+		producer.seek(1).unwrap();
+		let ceiling = moq_mux::container::DELAY_MAX.as_micros() as u64;
+		// Contiguous, so no gap re-arms the warmup.
+		for micros in (0..=ceiling).step_by(20_000) {
+			producer
+				.write(moq_mux::container::Frame {
+					timestamp: Timestamp::from_micros(micros).unwrap(),
+					duration: None,
+					payload: vec![0; 960 * size_of::<f32>()].into(),
+					keyframe: true,
+				})
+				.unwrap();
+			producer.cut(None).unwrap();
+		}
+		let _finished = producer.finish().unwrap();
+		let options = Options {
+			delay: Delay {
+				max: Some(moq_mux::container::DELAY_MAX),
+				..Delay::default()
+			},
+			..Options::new()
+		};
+		let mut consumer = Consumer::new(&broadcast.consume(), &catalog, "audio", options)
+			.await
+			.unwrap();
+		let mut stamps = Vec::new();
+		while let Some(frame) = next_frame(&mut consumer).await.unwrap() {
+			stamps.push(frame.timestamp.as_micros().unwrap());
+		}
+		assert_eq!(
+			stamps,
+			[ceiling as u128],
+			"an hour of warmup trims only up to the ceiling"
+		);
+	}
+
+	#[tokio::test(start_paused = true)]
 	async fn warmup_trims_the_join_without_trimming_groups_or_declared_returns() {
-		let (stamps, frames) = warmup_output(true).await;
+		let (stamps, frames) = warmup_output(Break::Declared, 6).await;
 		assert_eq!(
 			stamps,
 			[
@@ -1156,11 +1622,36 @@ mod tests {
 		assert_eq!(frames, 8 * 960);
 	}
 
+	/// A join during a pause reaches a fresh encoder's first packet, which needs no warmup, past a
+	/// gap or not.
 	#[tokio::test(start_paused = true)]
-	async fn warmup_restarts_after_an_undeclared_gap() {
-		let (stamps, frames) = warmup_output(false).await;
-		assert_eq!(stamps, [80_000, 100_000, 1_080_000, 1_100_000]);
-		assert_eq!(frames, 4 * 960);
+	async fn a_join_during_a_pause_trims_no_warmup() {
+		for cut in [Break::Declared, Break::DeclaredGap] {
+			let (stamps, frames) = warmup_output(cut, 0).await;
+			assert_eq!(
+				stamps,
+				[1_000_000, 1_020_000, 1_040_000, 1_060_000, 1_080_000, 1_100_000],
+				"{cut:?}"
+			);
+			assert_eq!(frames, 6 * 960, "{cut:?}");
+		}
+	}
+
+	/// The codec's history primes it across a gap, so only the warmup it falls short of is trimmed.
+	#[tokio::test(start_paused = true)]
+	async fn a_gap_trims_the_warmup_the_history_leaves() {
+		for cut in [Break::Lost, Break::Undeclared] {
+			let (stamps, frames) = warmup_output(cut, 2).await;
+			assert_eq!(stamps, [1_040_000, 1_060_000, 1_080_000, 1_100_000], "{cut:?}");
+			assert_eq!(frames, 4 * 960, "{cut:?}");
+			// A primed decoder trims nothing after the gap.
+			let (stamps, _) = warmup_output(cut, 6).await;
+			assert_eq!(
+				stamps[2..],
+				[1_000_000, 1_020_000, 1_040_000, 1_060_000, 1_080_000, 1_100_000],
+				"{cut:?}"
+			);
+		}
 	}
 
 	/// A latest join skips the cached backlog and primes the decoder on the live edge's own
@@ -1190,7 +1681,7 @@ mod tests {
 			}
 			producer.cut(None).unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let mut catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 1);
 		catalog.warmup = Some(Duration::from_millis(80));
@@ -1210,13 +1701,13 @@ mod tests {
 		.await
 		.unwrap();
 		assert_eq!(
-			track.subscription().unwrap().delay.max,
+			live_max(&track.subscription().unwrap()),
 			Some(Duration::from_millis(10_080))
 		);
 
 		let mut stamps = Vec::new();
 		while let Some(frame) = next_frame(&mut consumer).await.unwrap() {
-			stamps.push(frame.timestamp.as_micros());
+			stamps.push(frame.timestamp.as_micros().unwrap());
 		}
 		assert_eq!(stamps, [1_080_000, 1_100_000]);
 	}
@@ -1243,7 +1734,7 @@ mod tests {
 				keyframe: true,
 			})
 			.unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		let mut consumer = Consumer::new(
 			&broadcast.consume(),
 			&catalog,
@@ -1263,7 +1754,7 @@ mod tests {
 		.await
 		.unwrap();
 		let frame = next_frame(&mut consumer).await.unwrap().unwrap();
-		assert!(frame.timestamp.as_micros() >= 1_080_000);
+		assert!(frame.timestamp.as_micros().unwrap() >= 1_080_000);
 		let first = f32::from_le_bytes(frame.data[..4].try_into().unwrap());
 		assert!(
 			(first - 0.25).abs() < 0.0001,
@@ -1299,7 +1790,7 @@ mod tests {
 				})
 				.unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let mut consumer = Consumer::new(
 			&broadcast.consume(),
@@ -1317,7 +1808,7 @@ mod tests {
 		.unwrap();
 		let (mut first, mut frames) = (None, 0);
 		while let Some(frame) = next_frame(&mut consumer).await.unwrap() {
-			first.get_or_insert(frame.timestamp.as_micros());
+			first.get_or_insert(frame.timestamp.as_micros().unwrap());
 			frames += frame.data.len() / size_of::<f32>();
 		}
 		(first, frames)
@@ -1365,7 +1856,7 @@ mod tests {
 				})
 				.unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		let mut consumer = Consumer::new(
 			&broadcast.consume(),
 			&catalog,
@@ -1383,7 +1874,7 @@ mod tests {
 		assert!(next_frame(&mut consumer).await.is_err());
 		let mut stamps = Vec::new();
 		while let Some(frame) = next_frame(&mut consumer).await.unwrap() {
-			stamps.push(frame.timestamp.as_micros());
+			stamps.push(frame.timestamp.as_micros().unwrap());
 		}
 		assert_eq!(stamps, [100_000, 120_000]);
 	}
@@ -1433,10 +1924,10 @@ mod tests {
 				})
 				.unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		let mut stamps = Vec::new();
 		while let Some(frame) = next_frame(&mut consumer).await.unwrap() {
-			stamps.push(frame.timestamp.as_micros());
+			stamps.push(frame.timestamp.as_micros().unwrap());
 		}
 		assert_eq!(stamps.len(), 4, "each span's body and tail: {stamps:?}");
 		assert!(
@@ -1534,7 +2025,7 @@ mod tests {
 		// 312 samples at 48 kHz is 6.5 ms.
 		for (micros, frames) in [(0, 960 - 312), (13_500, 960), (33_500, 960)] {
 			let frame = next_frame(&mut consumer).await.unwrap().expect("decoded frame");
-			assert_eq!(frame.timestamp.as_micros(), micros);
+			assert_eq!(frame.timestamp.as_micros().unwrap(), micros);
 			assert_eq!(frame.data.len() / size_of::<f32>(), frames);
 		}
 	}
@@ -1572,13 +2063,17 @@ mod tests {
 				})
 				.unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		let mut reads = Vec::new();
 		while let Some(event) = consumer.read().await.unwrap() {
 			reads.push(match event {
-				Read::Frame(frame) => format!("frame {}", frame.timestamp.as_micros()),
-				Read::Gap { timestamp, duration } => format!("gap {}+{}", timestamp.as_micros(), duration.as_micros()),
-				Read::End { end } => format!("end {}", end.as_micros()),
+				Read::Frame(frame) => format!("frame {}", frame.timestamp.as_micros().unwrap()),
+				Read::Gap { timestamp, duration } => format!(
+					"gap {}+{}",
+					timestamp.as_micros().unwrap(),
+					duration.as_micros().unwrap()
+				),
+				Read::End { end } => format!("end {}", end.as_micros().unwrap()),
 			});
 		}
 		assert_eq!(reads, ["frame 0", "frame 20000", "gap 40000+460000", "frame 500000"]);
@@ -1629,7 +2124,7 @@ mod tests {
 				producer.discontinuity().unwrap();
 			}
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 		let mut before = Vec::new();
 		let mut ended = None;
 		let mut after = Vec::new();
@@ -1709,7 +2204,7 @@ mod tests {
 		}
 
 		let first = next_frame(&mut consumer).await.unwrap().expect("decoded frame");
-		assert_eq!(first.timestamp.as_micros(), 0);
+		assert_eq!(first.timestamp.as_micros().unwrap(), 0);
 
 		// Continuity, not a fixed number: the second frame starts where the first
 		// one's samples end, whatever they came to. Within a few frames rather than
@@ -1719,7 +2214,7 @@ mod tests {
 		let second = next_frame(&mut consumer).await.unwrap().expect("decoded frame");
 		let first_frames = (first.data.len() / size_of::<f32>()) as u128;
 		let ends_at = first_frames * 1_000_000 / 48_000;
-		let gap = second.timestamp.as_micros().abs_diff(ends_at);
+		let gap = second.timestamp.as_micros().unwrap().abs_diff(ends_at);
 		assert!(gap < 100, "expected the frames to meet, got a {gap} us gap");
 	}
 
@@ -1766,7 +2261,7 @@ mod tests {
 				keyframe: true,
 			})
 			.unwrap();
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let first = next_frame(&mut consumer).await.unwrap().expect("decoded frame");
 		let first_frames = first.data.len() / size_of::<f32>();
@@ -1781,7 +2276,7 @@ mod tests {
 		// It picks up where the first frame's samples ended, within the same few
 		// frames of whole-frame rounding as above.
 		let ends_at = (first_frames as u128) * 1_000_000 / 48_000;
-		let gap = tail.timestamp.as_micros().abs_diff(ends_at);
+		let gap = tail.timestamp.as_micros().unwrap().abs_diff(ends_at);
 		assert!(gap < 100, "expected the tail to meet the body, got a {gap} us gap");
 
 		// Together they cover the packet and no more: 1024 frames at 44.1 kHz is
@@ -1795,7 +2290,7 @@ mod tests {
 	#[tokio::test]
 	async fn resampling_keeps_the_activity_boundary_on_its_source() {
 		let mut encoder = Encoder::new(&EncodeConfig {
-			dtx: true,
+			kind: Some(crate::encode::Kind::Voice),
 			bitrate: Some(moq_net::bandwidth::Rate::from_bps(24_000)),
 			frame_duration: std::time::Duration::from_millis(10),
 			..EncodeConfig::new(48_000, Layout::Mono)
@@ -1850,7 +2345,7 @@ mod tests {
 				.unwrap();
 			producer.cut(None).unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let expected = first_dtx.expect("silence should enter Opus DTX");
 		let mut actual = None;
@@ -1873,7 +2368,7 @@ mod tests {
 		// what labelling by the packet most recently submitted does, since the
 		// resampler is handing back audio from before that packet. It puts the
 		// boundary a chunk early instead of a fraction of a chunk late.
-		let delay = actual.as_micros() as i128 - expected.as_micros() as i128;
+		let delay = actual.as_micros().unwrap() as i128 - expected.as_micros().unwrap() as i128;
 		let chunk_us = 20_000i128;
 		assert!(
 			(0..chunk_us).contains(&delay),
@@ -1928,13 +2423,100 @@ mod tests {
 				})
 				.unwrap();
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let mut read = Vec::new();
 		while let Some(frame) = next_frame(&mut consumer).await.unwrap() {
-			read.push((frame.timestamp.as_micros(), frame.data.len() / size_of::<f32>()));
+			read.push((
+				frame.timestamp.as_micros().unwrap(),
+				frame.data.len() / size_of::<f32>(),
+			));
 		}
 		read
+	}
+
+	/// Backpressure holds packets encoded while still reading and timing every one:
+	/// stalled, a packet decodes once the media behind it covers the hold, with a
+	/// playhead, once that is within the floor of where the packet ends, and either
+	/// way once it has waited the hold, whatever its timestamp says.
+	#[tokio::test(start_paused = true)]
+	async fn backpressure_holds_packets_encoded_until_the_ring_has_room() {
+		const PACKET: Duration = Duration::from_millis(20);
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 1);
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
+		);
+		let mut consumer = Consumer::new(
+			&broadcast.consume(),
+			&catalog,
+			"audio",
+			Options {
+				delay: Delay {
+					max: Some(Duration::from_secs(1)),
+					..Delay::default()
+				},
+				..Options::new()
+			},
+		)
+		.await
+		.unwrap();
+		let backpressure = consumer.backpressure();
+		backpressure.set_latency(Duration::from_millis(100), Duration::from_secs(2));
+
+		let payload: Bytes = vec![0u8; 960 * size_of::<f32>()].into();
+		let mut write = |index: u32| {
+			producer
+				.write(moq_mux::container::Frame {
+					timestamp: Timestamp::try_from(PACKET * index).unwrap(),
+					duration: None,
+					payload: payload.clone(),
+					keyframe: true,
+				})
+				.unwrap();
+		};
+		let read = async |consumer: &mut Consumer, wait: Duration| {
+			kio::clock::timeout(wait, next_frame(consumer))
+				.await
+				.ok()
+				.map(|frame| Duration::try_from(frame.unwrap().unwrap().timestamp).unwrap())
+		};
+
+		// Ten packets cover 180 ms behind the first, short of the hold.
+		for index in 0..10 {
+			write(index);
+		}
+		assert_eq!(read(&mut consumer, Duration::from_secs(1)).await, None);
+		assert_eq!(consumer.pending.len(), 10, "every packet is read and held encoded");
+		write(100);
+		assert_eq!(read(&mut consumer, Duration::ZERO).await, Some(Duration::ZERO));
+
+		// The first packet ends sounding in half a second, so the next one, ending
+		// 20 ms later, is within the 100 ms floor of the playhead 80 ms before that.
+		let sounds = kio::clock::Instant::now()
+			.checked_add(Duration::from_millis(500))
+			.unwrap();
+		backpressure.observe(Timestamp::try_from(PACKET).unwrap(), sounds);
+		assert_eq!(read(&mut consumer, Duration::from_millis(419)).await, None);
+		assert_eq!(read(&mut consumer, Duration::from_millis(1)).await, Some(PACKET));
+
+		// With the playhead far off, the next packet waits out the hold from its arrival.
+		let far = kio::clock::Instant::now().checked_add(Duration::from_secs(10)).unwrap();
+		backpressure.observe(Timestamp::try_from(PACKET * 2).unwrap(), far);
+		assert_eq!(read(&mut consumer, Duration::from_millis(579)).await, None);
+		assert_eq!(read(&mut consumer, Duration::from_millis(1)).await, Some(PACKET * 2));
+
+		// The track's end leaves nothing to wait for.
+		let _finished = producer.finish().unwrap();
+		let mut rest = 0;
+		while next_frame(&mut consumer).await.unwrap().is_some() {
+			rest += 1;
+		}
+		assert_eq!(rest, 8);
 	}
 
 	/// A packet that doesn't continue the last one is a hole, not a splice: the
@@ -1963,7 +2545,7 @@ mod tests {
 		// The audio after the hole is stamped by its own packet. Rewinding over the
 		// resampler's buffer instead would put it ~3 ms early, in the middle of the
 		// hole, and splice the two sides together through the filter.
-		assert_eq!(read[2].0, stamps[1].as_micros());
+		assert_eq!(read[2].0, stamps[1].as_micros().unwrap());
 
 		// And the hole is the packet that never arrived: 1024 frames at 44.1 kHz.
 		let ends_at = read[1].0 + (read[1].1 as u128) * 1_000_000 / 48_000;
@@ -2006,7 +2588,7 @@ mod tests {
 		let read = pcm_gaps(44_100, 48_000, 882, &stamps).await;
 		let mut r = crate::resample::Resampler::new(44_100, 48_000, 1, 882).unwrap();
 		r.process(&[0.25; 882], stamps[0]).unwrap();
-		let expected = r.output_at(stamps[1]).unwrap().as_micros();
+		let expected = r.output_at(stamps[1]).unwrap().as_micros().unwrap();
 		assert_eq!(read[1].0, expected);
 	}
 
@@ -2018,7 +2600,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_terminal_jump_leaves_the_held_samples_alone() {
 		let mut encoder = Encoder::new(&EncodeConfig {
-			dtx: true,
+			kind: Some(crate::encode::Kind::Voice),
 			bitrate: Some(moq_net::bandwidth::Rate::from_bps(24_000)),
 			..EncodeConfig::new(48_000, Layout::Mono)
 		})
@@ -2079,13 +2661,17 @@ mod tests {
 		// Same group: a new group at 1s would sit below the marker's live edge.
 		write(&mut producer, 3 * 48_000, Bytes::new(), false);
 		write(&mut producer, 48_000, dtx.payload, false);
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let frame = next_frame(&mut consumer).await.unwrap().expect("decoded frame");
 		// The output begins with the first packet's samples, so it is stamped and
 		// labelled from that packet. Rewinding from the terminal one instead drops it
 		// most of a second into the future, carrying the DTX label with it.
-		assert_eq!(frame.timestamp.as_micros(), 0, "held samples moved with the jump");
+		assert_eq!(
+			frame.timestamp.as_micros().unwrap(),
+			0,
+			"held samples moved with the jump"
+		);
 		assert!(
 			frame.activity.is_active(),
 			"held samples took the terminal packet's label"
@@ -2193,10 +2779,10 @@ mod tests {
 		let frames = first.data.len() / size_of::<f32>();
 		assert!(frames < 960, "the pre-skip should be trimmed, got {frames} frames");
 
-		// The hole is real, so codec prediction starts over but stream-level pre-skip
-		// does not. The audio is stamped where the packet says rather than 2.5 ms early.
+		// The hole is real, but stream-level pre-skip does not start over. The audio is
+		// stamped where the packet says rather than 2.5 ms early.
 		let second = next_frame(&mut consumer).await.unwrap().expect("decoded frame");
-		assert_eq!(second.timestamp.as_micros(), 22_500);
+		assert_eq!(second.timestamp.as_micros().unwrap(), 22_500);
 		assert_eq!(second.data.len() / size_of::<f32>(), 960, "pre-skip was reapplied");
 
 		let third = next_frame(&mut consumer)
@@ -2210,10 +2796,101 @@ mod tests {
 		);
 	}
 
-	thread_local! {
-		/// A pinned receiver clock for [`now`], so a test replays an arrival trace
-		/// instantly. Thread-local because a `tokio::test` runs on one thread.
-		pub(super) static CLOCK: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+	/// A lost group leaves the same encoder running, so its pre-skip, trimmed once at the
+	/// stream's start, is not trimmed again off the media after the loss.
+	#[tokio::test(start_paused = true)]
+	async fn a_lost_group_does_not_trim_the_pre_skip_again() {
+		assert_eq!(after_loss(false, None).await[0], (1_000_000, 960));
+	}
+
+	/// Groups lost past a declared end were the fresh encoder's, so the packet after them
+	/// still comes from it: its pre-skip is trimmed, leaving its media at the packet's stamp.
+	#[tokio::test(start_paused = true)]
+	async fn a_loss_after_a_declared_end_trims_the_fresh_encoders_pre_skip() {
+		assert_eq!(after_loss(true, None).await[0], (1_000_000, 960 - 312));
+	}
+
+	/// A gap after a declared end reaches the fresh encoder's first packet, which plays from its
+	/// own stamp rather than a warmup later: before lite-07 the run skipped across every pause
+	/// arrives as a drop, so priming there would clip the start of each utterance.
+	#[tokio::test(start_paused = true)]
+	async fn a_gap_after_a_declared_end_trims_no_warmup() {
+		let warmup = Some(Duration::from_millis(10));
+		assert_eq!(after_loss(true, warmup).await[0], (1_000_000, 960 - 312));
+	}
+
+	/// Decodes two Opus packets, then, past lost groups and a declared end if `declared`, one
+	/// more a second later, returning the stamp and length of each frame after the loss.
+	async fn after_loss(declared: bool, warmup: Option<Duration>) -> Vec<(u128, usize)> {
+		let input = Input {
+			format: Format::F32,
+			sample_rate: 48_000,
+			layout: Layout::Mono,
+		};
+		let config = EncodeConfig::new(input.sample_rate, input.layout);
+		let mut encoder = Encoder::new(&config).unwrap();
+		let mut catalog = encoder.catalog();
+		catalog.warmup = warmup;
+
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
+		);
+		let pcm = vec![0.25f32; encoder.frame_size()];
+		for epoch in 0..2u64 {
+			if epoch == 1 {
+				if declared {
+					producer.discontinuity().unwrap();
+					encoder = Encoder::new(&config).unwrap();
+				}
+				producer.seek(1_000_000).unwrap();
+			}
+			for packet in 0..if epoch == 0 { 2 } else { 1 } {
+				producer
+					.write(moq_mux::container::Frame {
+						timestamp: Timestamp::from_micros(epoch * 1_000_000 + packet * 20_000).unwrap(),
+						duration: None,
+						payload: crate::single(encoder.encode_all(&pcm).unwrap()).payload,
+						keyframe: true,
+					})
+					.unwrap();
+				producer.cut(None).unwrap();
+			}
+		}
+		let _finished = producer.finish().unwrap();
+		let mut consumer = Consumer::new(
+			&broadcast.consume(),
+			&catalog,
+			"audio",
+			Options {
+				delay: Delay {
+					max: Some(Duration::from_secs(10)),
+					..Delay::default()
+				},
+				..Options::new()
+			},
+		)
+		.await
+		.unwrap();
+
+		let mut lost = false;
+		let mut after = Vec::new();
+		while let Some(read) = consumer.read().await.unwrap() {
+			match read {
+				Read::Gap { .. } => lost = true,
+				Read::Frame(frame) if lost => after.push((
+					frame.timestamp.as_micros().unwrap(),
+					frame.data.len() / size_of::<f32>(),
+				)),
+				Read::Frame(_) | Read::End { .. } => {}
+			}
+		}
+		assert!(!after.is_empty(), "no frame after the loss");
+		after
 	}
 
 	/// Replay a corpus trace through the whole decode path, one PCM packet per group
@@ -2224,8 +2901,9 @@ mod tests {
 	/// sample count either way, and an unoptimized Opus codec takes minutes over
 	/// the whole corpus. [`opus_states_its_own_frame_duration`] covers Opus. The
 	/// lowest common rate keeps each packet small, since only its duration counts.
-	/// With `hole`, the group after each end marker never arrives, so the consumer reads a
-	/// gap between the marker and what resumes.
+	/// With `hole`, the publisher leaves the starts between each end marker and what resumes
+	/// undeclared, so whatever lay there may have been lost: a group after the marker that never
+	/// arrived.
 	async fn replay(case: &crate::jitter::tests::Case, hole: bool) -> Vec<f64> {
 		use crate::jitter::tests::duration;
 
@@ -2245,7 +2923,6 @@ mod tests {
 		);
 
 		let origin = Instant::now();
-		CLOCK.set(Some(origin));
 		let mut consumer = Consumer::new(
 			&subscriber,
 			&catalog,
@@ -2264,28 +2941,28 @@ mod tests {
 
 		let payload: Bytes = vec![0u8; samples * size_of::<f32>()].into();
 		let mut series = Vec::with_capacity(case.arrival.len());
-		// The sequence of the next group, one per packet and one per marker.
-		let mut sequence = 0;
 		for (index, (&arrival, &media)) in case.arrival.iter().zip(&case.media).enumerate() {
+			// The track's timescale is microseconds, so this is also the packet group's start.
+			let micros = media as u64 * 1000;
 			// The marker goes out as the utterance stops, so it is read during the silence
 			// rather than alongside what resumes it.
 			if case.ends.contains(&index) {
 				producer.discontinuity().unwrap();
-				sequence += 1;
 				match consumer.read().await.unwrap() {
 					Some(Read::End { .. }) => {}
 					other => panic!("packet {index} is preceded by {other:?}, not its end"),
 				}
+				// A seek creates the group without appending it, so nothing declares the starts
+				// before it skipped.
 				if hole {
-					sequence += 1;
-					producer.seek(sequence).unwrap();
+					producer.seek(micros).unwrap();
 				}
 			}
-			sequence += 1;
-			CLOCK.set(Some(origin.saturating_add(duration(arrival))));
+			// On tokio's paused clock, which moq-net's landing times follow.
+			tokio::time::advance(duration(arrival).saturating_sub(origin.elapsed())).await;
 			producer
 				.write(moq_mux::container::Frame {
-					timestamp: Timestamp::from_micros(media as u64 * 1000).unwrap(),
+					timestamp: Timestamp::from_micros(micros).unwrap(),
 					duration: None,
 					payload: payload.clone(),
 					keyframe: true,
@@ -2299,7 +2976,6 @@ mod tests {
 				.expect("one decoded frame per packet");
 			series.push(crate::jitter::millis(consumer.delay()));
 		}
-		CLOCK.set(None);
 		series
 	}
 
@@ -2309,7 +2985,7 @@ mod tests {
 	/// estimator's own test, since the container refuses a timestamp that runs
 	/// backwards. `silence` publishes a discontinuity marker ahead of each frame its
 	/// `ends` lists, so the consumer has to find the declared end on its own.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn the_decode_path_conforms_to_the_corpus() {
 		for name in [
 			"advertised",
@@ -2336,9 +3012,315 @@ mod tests {
 		}
 	}
 
+	/// Paced packets for the first minute of `budget`'s trace: long enough to spend the
+	/// prior and settle the target at its floor.
+	const PACED: usize = 3000;
+
+	/// `@moq/watch`'s `playout.test.ts` "subscription budget" trace, `(arrival, media)` in ms
+	/// per packet: a minute of 20 ms packets over a 50 ms path, then six seconds of them
+	/// flushed six at a time.
+	fn flushes() -> Vec<(u64, u64)> {
+		let base = 20 * PACED as u64;
+		(0..PACED as u64)
+			.map(|i| (50 + 20 * i, 20 * i))
+			.chain((0..300).map(|i| (base + 50 + 20 * (i / 6 * 6 + 5), base + 20 * i)))
+			.collect()
+	}
+
+	/// [`flushes`] through the whole decode path, one PCM packet per group. Every packet
+	/// sharing an arrival lands before any is read, so the oldest of a flush trails the newest by
+	/// 100 ms. After each arrival, `budget` turns the consumer's delay into its max delay.
+	/// Returns the delay after each arrival in milliseconds, and how many packets were decoded
+	/// rather than skipped.
+	async fn budget(budget: impl Fn(Duration) -> Duration) -> (Vec<f64>, usize) {
+		use moq_mux::container::Container as _;
+
+		let events = flushes();
+		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 8_000, 1);
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let subscriber = broadcast.consume();
+		let options = Options {
+			delay: Delay {
+				max: Some(budget(Duration::ZERO)),
+				..Delay::default()
+			},
+			estimate: true,
+			..Options::new()
+		};
+		let mut consumer = Consumer::new(&subscriber, &catalog, "audio", options).await.unwrap();
+
+		let container = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio);
+		let payload: Bytes = vec![0u8; 160 * size_of::<f32>()].into();
+		let start = kio::clock::now();
+		let mut series = Vec::new();
+		let mut delivered = 0;
+		let mut next = 0;
+		while next < events.len() {
+			let at = events[next].0;
+			tokio::time::advance(Duration::from_millis(at).saturating_sub(start.elapsed())).await;
+			let mut newest = 0;
+			for (sequence, &(_, media)) in events.iter().enumerate().skip(next) {
+				if events[sequence].0 != at {
+					break;
+				}
+				let mut group = track
+					.create_group(moq_net::group::Info { start: sequence as u64 })
+					.unwrap();
+				let frame = moq_mux::container::Frame {
+					timestamp: Timestamp::from_micros(media * 1000).unwrap(),
+					duration: None,
+					payload: payload.clone(),
+					keyframe: true,
+				};
+				container.write(&mut group, &[frame]).unwrap();
+				group.finish().unwrap();
+				newest = media;
+				next = sequence + 1;
+			}
+			// Read through the newest packet, which the max delay never gives up; what it gives
+			// up below that reads as a gap.
+			loop {
+				let frame = next_frame(&mut consumer).await.unwrap().expect("one frame per packet");
+				delivered += 1;
+				if frame.timestamp == Timestamp::from_micros(newest * 1000).unwrap() {
+					break;
+				}
+			}
+			series.push(crate::jitter::millis(consumer.delay()));
+			consumer.set_max_delay(budget(consumer.delay()));
+		}
+		(series, delivered)
+	}
+
+	/// The targets across the first twenty flushes, 2.4 s of them.
+	fn onset(series: &[f64]) -> f64 {
+		series[PACED..PACED + 20].iter().copied().fold(f64::MIN, f64::max)
+	}
+
+	/// `moq play`'s subscription reaches the estimator's 2 s ceiling past its delay, never below
+	/// the 2 s it opened with (`rs/moq-cli/src/play/media.rs`, here with audio's delay as the
+	/// shared one), so a flush that starts after the target settled at its floor still lands
+	/// whole and moves it, as the browser's does.
+	#[tokio::test(start_paused = true)]
+	async fn the_subscription_reaches_a_flush_that_starts_after_the_target_settled() {
+		let reach = Duration::from_secs(2);
+		let (series, delivered) = budget(|delay| (delay + reach).max(reach)).await;
+		assert_eq!(series[PACED - 1], 40.0);
+		assert_eq!(delivered, PACED + 300);
+
+		// Every packet observed: the estimator fed the same arrivals directly, after each one.
+		let mut target = crate::jitter::Target::new(Duration::ZERO, true, None);
+		target.set_frame(20.0);
+		let mut direct = Vec::new();
+		let events = flushes();
+		for (index, &(at, media)) in events.iter().enumerate() {
+			target.observe(at as f64, media as f64);
+			if events.get(index + 1).is_none_or(|next| next.0 != at) {
+				direct.push(target.millis());
+			}
+		}
+		assert_eq!(series, direct);
+		// Every flush lands whole, so its 100 ms reaches the 95th percentile within a few intervals.
+		assert!(onset(&series) >= 120.0, "{:?}", &series[PACED..PACED + 20]);
+	}
+
+	/// The counter-case: a max delay that only follows the delay gives up the oldest of each
+	/// flush before the consumer observes it, so the estimate only ever sees what the delay it
+	/// already holds allows.
+	#[tokio::test(start_paused = true)]
+	async fn a_budget_following_the_delay_drops_the_flush_it_should_measure() {
+		let (series, delivered) = budget(|delay| delay).await;
+		assert!(delivered < PACED + 300, "{delivered} delivered");
+		assert!(onset(&series) < 120.0, "{:?}", &series[PACED..PACED + 20]);
+	}
+
+	/// Write `events`, `(arrival, group, media)` in ms in arrival order, through the whole
+	/// decode path, one PCM packet per group, reading each one `read` admits as it lands.
+	/// The publisher answers that its feed starts at the first event's group, as a session's
+	/// does. Returns the delay once they have all landed, and whether the container reported a
+	/// backlog.
+	async fn play(events: &[(u64, u64, u64)], read: impl Fn(u64) -> bool) -> (f64, bool) {
+		use moq_mux::container::Container as _;
+
+		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 8_000, 1);
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let mut track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		track.start_at(events[0].1).unwrap();
+		let subscriber = broadcast.consume();
+		// The estimate's 2 s ceiling past the delay, as `moq play` subscribes.
+		let options = Options {
+			delay: Delay {
+				max: Some(Duration::from_secs(2)),
+				..Delay::default()
+			},
+			estimate: true,
+			..Options::new()
+		};
+		let mut consumer = Consumer::new(&subscriber, &catalog, "audio", options).await.unwrap();
+
+		let container = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio);
+		let payload: Bytes = vec![0u8; 160 * size_of::<f32>()].into();
+		let start = kio::clock::now();
+		for &(at, sequence, media) in events {
+			tokio::time::advance(Duration::from_millis(at).saturating_sub(start.elapsed())).await;
+			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
+			let frame = moq_mux::container::Frame {
+				timestamp: Timestamp::from_micros(media * 1000).unwrap(),
+				duration: None,
+				payload: payload.clone(),
+				keyframe: true,
+			};
+			container.write(&mut group, &[frame]).unwrap();
+			group.finish().unwrap();
+			if read(sequence) {
+				next_frame(&mut consumer).await.unwrap().expect("one frame per packet");
+			}
+		}
+		(
+			crate::jitter::millis(consumer.delay()),
+			consumer.track.backlog().is_some(),
+		)
+	}
+
+	/// The live edge, group 200 onward, a packet every 20 ms over a 40 ms path, its arrivals
+	/// moved by `delay`, which never lets one overtake another.
+	fn live(delay: impl Fn(u64) -> u64) -> Vec<(u64, u64, u64)> {
+		let mut last = 0;
+		(0..300)
+			.map(|k| {
+				let at = delay(20 * k).max(last);
+				last = at;
+				(at, 200 + k, 100_000 + 20 * k)
+			})
+			.collect()
+	}
+
+	/// A path that delivers every fifth packet 300 ms late from the start: each lands after
+	/// the cursor passed it and is dropped unread, but was produced after the subscription
+	/// began, so it is no backlog and holds no join open. The estimator measures the path
+	/// from what it observes, as if the late packets never arrived.
+	#[tokio::test(start_paused = true)]
+	async fn late_groups_dropped_from_the_start_hold_no_join_open() {
+		let late = |sequence: u64| sequence > 200 && sequence.is_multiple_of(5);
+		let mut events: Vec<_> = live(|produced| produced + 40)
+			.into_iter()
+			.map(|(at, sequence, media)| (at + if late(sequence) { 300 } else { 0 }, sequence, media))
+			.collect();
+		events.sort_by_key(|&(at, sequence, _)| (at, sequence));
+		let (dropped, backlog) = play(&events, |sequence| !late(sequence)).await;
+		assert!(!backlog);
+		let never: Vec<_> = events
+			.iter()
+			.copied()
+			.filter(|&(_, sequence, _)| !late(sequence))
+			.collect();
+		let (lost, _) = play(&never, |_| true).await;
+		assert_eq!(dropped, lost);
+	}
+
+	/// A hole the container waits out up to the max delay holds the packets behind it, which
+	/// landed on time: the estimate and [`Consumer::arrival`] use when they landed, not when
+	/// they were read, so the wait reads as no jitter.
+	#[tokio::test(start_paused = true)]
+	async fn a_hole_waited_out_to_the_max_delay_leaves_the_estimate() {
+		use moq_mux::container::Container as _;
+
+		let publisher = origin();
+		let route = publisher
+			.route("bcast", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let track = route
+			.broadcast()
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		route.announce().unwrap();
+		let container = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio);
+		let payload: Bytes = vec![0u8; 160 * size_of::<f32>()].into();
+		let write = |sequence: u64| {
+			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
+			let frame = moq_mux::container::Frame {
+				timestamp: Timestamp::from_micros(sequence * 20_000).unwrap(),
+				duration: None,
+				payload: payload.clone(),
+				keyframe: true,
+			};
+			container.write(&mut group, &[frame]).unwrap();
+			group.finish().unwrap();
+		};
+
+		// A received copy: its feed owes the missing group, so the reader waits for it.
+		let relay = origin();
+		let _link = link(&publisher, &relay).await;
+		let remote = relay
+			.consume()
+			.follow("bcast", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
+		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 8_000, 1);
+		let max = Duration::from_secs(2);
+		let options = Options {
+			delay: Delay {
+				max: Some(max),
+				..Delay::default()
+			},
+			estimate: true,
+			..Options::new()
+		};
+		let mut consumer = Consumer::new(&remote, &catalog, "audio", options).await.unwrap();
+
+		write(0);
+		next_frame(&mut consumer).await.unwrap().expect("the first packet");
+		let estimate = consumer.delay();
+
+		// Packet 1 never arrives; the ones after it land on time, 20 ms apart.
+		for sequence in 2..6 {
+			tokio::time::advance(Duration::from_millis(if sequence == 2 { 40 } else { 20 })).await;
+			write(sequence);
+		}
+		let since = kio::clock::now();
+		assert!(matches!(consumer.read().await.unwrap(), Some(Read::Gap { .. })));
+		assert!(
+			since.elapsed() >= max / 2,
+			"the hole was not waited: {:?}",
+			since.elapsed()
+		);
+		for _ in 2..6 {
+			next_frame(&mut consumer)
+				.await
+				.unwrap()
+				.expect("a packet past the hole");
+		}
+		// They report when they landed too, which a gate's hold counts from.
+		assert!(
+			consumer.arrival().is_some_and(|arrived| arrived <= since),
+			"a packet past the hole reports when it was read: {:?}, read from {since:?}",
+			consumer.arrival()
+		);
+		// Steady arrivals after it, read as they land, close the interval that measured the wait.
+		let resumed = 6 + (since.elapsed().as_millis() / 20) as u64;
+		for sequence in resumed..resumed + 100 {
+			write(sequence);
+			next_frame(&mut consumer).await.unwrap().expect("a steady packet");
+			tokio::time::advance(Duration::from_millis(20)).await;
+		}
+		assert!(
+			consumer.delay() <= estimate,
+			"the wait read as jitter: {:?} after, {estimate:?} before",
+			consumer.delay()
+		);
+	}
+
 	/// A group lost between a declared end and what resumes leaves the end declared, as the
 	/// browser's consumer does: the estimator measures the same as when nothing was lost.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_declared_end_survives_a_lost_group() {
 		let case = crate::jitter::tests::case("silence");
 		assert!(!case.ends.is_empty());
@@ -2567,7 +3549,7 @@ mod tests {
 			2,
 			crate::single(encoder.encode_all(&pcm).unwrap()).payload,
 		);
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		let first = next_frame(&mut consumer).await.unwrap().expect("first decoded frame");
 		let _second = next_frame(&mut consumer).await.unwrap().expect("second decoded frame");
@@ -2612,7 +3594,7 @@ mod tests {
 		)
 		.await
 		.unwrap();
-		assert_eq!(observed.subscription().unwrap().delay.max, Some(max_delay));
+		assert_eq!(live_max(&observed.subscription().unwrap()), Some(max_delay));
 
 		let samples = [0.25f32, -0.5, 0.75, -1.0];
 		let payload: Vec<u8> = samples.iter().flat_map(|sample| sample.to_le_bytes()).collect();
@@ -2685,7 +3667,7 @@ mod tests {
 		let frame = next_frame(&mut consumer).await.unwrap().expect("decoded frame");
 		// `as_micros`, not `==`: the CMAF path carries the fmp4 timescale and
 		// `Timestamp`'s equality is structural, so the scales would have to match too.
-		assert_eq!(frame.timestamp.as_micros(), 0);
+		assert_eq!(frame.timestamp.as_micros().unwrap(), 0);
 		let samples = Format::F32.as_interleaved_f32(&frame.data, 2).unwrap();
 		assert_eq!(samples.len(), (960 - 312) * 2);
 	}

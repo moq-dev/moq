@@ -26,7 +26,7 @@ public:
 	void Stop(bool signal = true);
 	void Data(struct encoder_packet *packet);
 
-	inline size_t GetTotalBytes() { return total_bytes_sent; }
+	inline uint64_t GetTotalBytes() { return total_bytes_sent.load(std::memory_order_relaxed); }
 
 	inline int GetConnectTime() { return connect_time_ms; }
 
@@ -130,6 +130,11 @@ private:
 		// weak ref so Reset() can hand the configured bitrate back.
 		std::shared_ptr<moq::RateControl> rate;
 		OBSWeakEncoder encoder;
+		// The encoder setting that holds its peak, which following the grant retunes.
+		const char *rate_key = "bitrate";
+		// The average NVENC's plain VBR holds beside its peak, or 0: following lowers it
+		// with the peak and Reset() restores it.
+		long long average_kbps = 0;
 		// The bitrate the encoder was last told, which Reset() restores when it moved.
 		uint64_t applied_bps = 0;
 		// Whether the last target enabled this rendition.
@@ -219,7 +224,9 @@ private:
 
 	std::string path;
 
-	size_t total_bytes_sent;
+	// Bytes handed to MoQ since the last Start. Written by the encoder thread,
+	// read by OBS's stats.
+	std::atomic<uint64_t> total_bytes_sent;
 };
 
 void register_moq_output();

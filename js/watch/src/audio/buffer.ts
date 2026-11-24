@@ -1,7 +1,30 @@
-import { Duration } from "@moq/clock";
+import { Duration, Instant, now } from "@moq/clock";
 import { Effect, type Getter, Signal } from "@moq/signals";
-import { ringHold, ringSamples } from "./latency";
-import type { Data, End, Init, Latency, Playing, Reset, State, Truncate } from "./render";
+import { Peak, ringHold, ringSamples } from "./latency";
+import type { Clock, Data, End, Init, Latency, Playing, Reading, Received, Reset, State, Truncate } from "./render";
+
+// The stretch's 30 ms processing window, in microseconds. @internal
+const WINDOW = 30_000;
+
+/**
+ * How long an ordered reader waits for a missing group before giving it up as a gap: what the ring
+ * holds of the delay, plus how far the ring lets audio trail the clock before skipping it, never less
+ * than one stretch window. A group landing any later could no longer play.
+ */
+export function holeWait(held: Duration, bound: Duration): Duration {
+	return held.add(bound.max(Duration.micros(WINDOW)));
+}
+
+// The least move, in milliseconds, of how far the worklet renders ahead of what sounds that is reported.
+const LEAD_STEP = 5;
+
+// How far the clock's offset from the context's time may fall per state report: far past any drift
+// between the two clocks, and well short of the render callback a reading can land within.
+const FALL = 100;
+
+// An offset that moves further than this moved for real, as a delay or a reference change moves it,
+// rather than by where a reading landed within a render callback.
+const JUMP = 10_000;
 
 /**
  * Decides when the decode loop may decode a frame, which is how the target delay is split between
@@ -11,19 +34,20 @@ import type { Data, End, Init, Latency, Playing, Reset, State, Truncate } from "
  * hold) and, in buffered mode, the lookahead stay encoded in the container consumer, so memory follows
  * the bytes actually received rather than whatever a catalog advertised. A frame at `timestamp` is due:
  *
- *   - while the ring is stalled, once the media queued behind it covers the hold, so playback starts
- *     or refills with the whole target ahead of the playhead, decoded or not. A buffered refill also
- *     stops once the PCM in the ring plus the frames still decoding reach the floor, since the ring
- *     plays through and cannot shed what overflows it;
- *   - while playing, once the playhead is within the floor of where its output lands, keeping the
- *     ring on its floor. Live, that is where the output ends: the ring's time stretch measures its
- *     depth right after each write, and reads a tail past the floor as audio behind the clock;
- *   - while playing live, also once the media queued behind it covers the hold, so media past the
- *     target reaches the ring, whose skip band catches up to the live edge. Buffered mode plays
- *     through instead.
+ *   - before playback starts on a timeline, once the media queued behind it covers the hold, so
+ *     playback starts with the whole target ahead of the playhead, decoded or not. A buffered start
+ *     also stops once the PCM in the ring plus the frames still decoding reach the floor, since
+ *     nothing drains the ring until it starts;
+ *   - once it has started, while what the ring was given, landed or still decoding, reaches less
+ *     than the floor and one stretch window past the playhead, so the ring holds its floor and a
+ *     full window to stretch. The frame's own timestamp does not matter: across a hole the next
+ *     frame lies far ahead, and the ring plays the hole as silence. A stall keeps releasing by the
+ *     playhead: the ring resumes on a cushion and slows down to rebuild, and media past the floor
+ *     stays encoded, counted toward the level the ring decides on. A playhead trailing the shared
+ *     clock past the ring's bound, stalled or not, counts from the clock instead, where the ring
+ *     skips to, so a backlog behind it goes at once rather than a window per state report.
  *
- * With no hold, live playback releases every frame at once and the ring bounds itself. The playhead
- * comes from the worklet's state messages.
+ * The playhead comes from the worklet's state messages.
  *
  * @internal Exported for the replay harness.
  */
@@ -39,17 +63,17 @@ export class Backpressure {
 
 	// The newest media timestamp queued ahead of the decoder, unset while none is.
 	#queued?: number;
+	// Whether the publisher finished the track, so the queue holds all the media it will send.
+	#complete = false;
 
 	// The ring as last observed. The playhead is undefined until one is known on the current timeline.
 	#playhead?: number;
-	#stalled = true;
-	// The first frame released on the current timeline. Until PCM lands and a report carries a
-	// playhead, it stands in for where the ring anchors, since the ring may already be playing.
-	#anchor?: number;
-	// Whether the ring is parked for a hold the queued media does not cover yet. The worklet keeps a
-	// park until the next floor update, so only this decides when it ends: a write of output decoded
-	// before the park cannot.
-	#parked = false;
+	// Where the shared clock stood as the ring played the playhead, unset without a clock.
+	#clock?: number;
+	// How far the playhead may trail the clock before the ring skips onto it.
+	#bound = WINDOW;
+	// Whether the ring has played on the current timeline.
+	#started = false;
 
 	// A buffered refill counts what reaches the ring, not what it released: output the decoder
 	// discards (warmup, Opus pre-skip, a terminal trim) never lands, so counting released frames would
@@ -61,20 +85,18 @@ export class Backpressure {
 	#decoding: number[] = [];
 	#inserted?: { start: number; end: number };
 	// How far output lands in the ring behind the frame it was decoded from (Opus pre-skip). A playing
-	// ring compares a frame to its playhead where the output lands, or an offset past the floor would
+	// ring counts a frame still decoding where its output lands, or an offset past the floor would
 	// drain it.
 	#offset = 0;
-	// The duration of the latest output, which the next frame's is taken to match. A live frame released
-	// by where its output starts would land with its tail past the floor, and the stretch accelerating
-	// that away would only draw the next frame out sooner, playing through the hold.
+	// The duration of the latest output, which a frame still decoding is taken to match.
 	#frame = 0;
 
 	#waiters: Array<{ timestamp: number; resolve: () => void }> = [];
 
-	constructor(rate: number, buffered: boolean, delay: Duration) {
+	constructor(rate: number, buffered: boolean, delay: Duration, bound = Duration.ZERO) {
 		this.#rate = rate;
 		this.#buffered = buffered;
-		this.setLatency(delay);
+		this.setLatency(delay, bound);
 	}
 
 	/** The ring's floor in samples: the part of the target held as decoded PCM. */
@@ -82,56 +104,53 @@ export class Backpressure {
 		return this.#floor;
 	}
 
+	/** How far output lands in the ring behind the frame it was decoded from, in microseconds. */
+	get offset(): number {
+		return this.#offset;
+	}
+
 	/**
-	 * Split `delay` between the floor and the hold. Returns true when the ring must park with the new
-	 * floor: a rise in the hold that the queued media does not cover yet holds playback until it does,
-	 * the way a deeper floor parks the ring until it refills, since video holds the extra delay on its
-	 * own. A floor update ends a park, so a ring already parked stays parked while the remaining hold
-	 * is uncovered.
+	 * Split `delay` between the floor and the hold, and note how far audio may trail the clock before
+	 * the ring skips onto it, at least a stretch window as the ring's own threshold is.
 	 */
-	setLatency(delay: Duration): boolean {
+	setLatency(delay: Duration, bound = Duration.ZERO): void {
+		this.#bound = Math.max(bound.asMicros(), WINDOW);
 		this.#floor = ringSamples(this.#rate, delay);
 		this.#headroom = (this.#floor / this.#rate) * 1_000_000;
-		const hold = ringHold(delay).asMicros();
-		const rise = hold > this.#hold;
-		this.#hold = hold;
-
-		// Parks whatever the ring was last reported doing: a report of a stall may be stale, and
-		// parking a ring that is still stalled changes nothing.
-		const playhead = this.#start();
-		this.#parked = (rise || this.#parked) && playhead !== undefined && !this.#covered(playhead + this.#headroom);
-		if (this.#parked) this.#stalled = true;
+		this.#hold = ringHold(delay).asMicros();
 		this.#release();
-		return this.#parked;
 	}
 
-	/** Note the ring's playhead and whether it is stalled, and release every frame now due. */
-	observe(playhead: number | undefined, stalled: boolean): void {
+	/**
+	 * Note the ring's playhead, whether it is stalled, and where the shared clock stood as it played
+	 * there, and release every frame now due.
+	 */
+	observe(playhead: number | undefined, stalled: boolean, clock?: number): void {
 		this.#playhead = playhead;
-		this.#stalled = stalled;
+		this.#clock = clock;
+		if (playhead !== undefined && !stalled) this.#started = true;
 		this.#release();
 	}
 
-	/**
-	 * Note the newest media timestamp queued ahead of the decoder, or undefined once none is. Returns
-	 * true when that covers the hold of a parked ring, which a floor update then resumes.
-	 */
-	queued(newest: number | undefined): boolean {
+	/** Note the newest media timestamp queued ahead of the decoder, or undefined once none is. */
+	queued(newest: number | undefined): void {
 		this.#queued = newest;
-		const playhead = this.#start();
-		const resume = this.#parked && playhead !== undefined && this.#covered(playhead + this.#headroom);
-		if (resume) this.#parked = false;
 		this.#release();
-		return resume;
+	}
+
+	/** Note whether the publisher finished the track being decoded, so nothing more will queue. */
+	complete(complete: boolean): void {
+		this.#complete = complete;
+		this.#release();
 	}
 
 	/**
-	 * Note that the decoder produced output ending at `end`, which lands in the ring up to `landed`
-	 * unless it was discarded. It answers the oldest frame still decoding and every one it reaches
-	 * past: a decoder may emit nothing for a frame.
+	 * Note that the decoder produced output ending at `end`, which lands in the ring `offset` behind it
+	 * (the codec's pre-skip, not what a trim removed) unless it was discarded. It answers the oldest
+	 * frame still decoding and every one it reaches past: a decoder may emit nothing for a frame.
 	 */
-	decoded(end: number, landed?: number): void {
-		if (landed !== undefined) this.#offset = end - landed;
+	decoded(end: number, offset?: number): void {
+		if (offset !== undefined) this.#offset = offset;
 		let answered = 0;
 		while (answered < this.#decoding.length && (answered === 0 || this.#decoding[answered] < end)) answered++;
 		this.#decoding.splice(0, answered);
@@ -180,12 +199,20 @@ export class Backpressure {
 		});
 	}
 
+	/**
+	 * Release a frame at once whose output the ring would skip unheard, so a backlog behind the clock
+	 * decodes at the codec's pace, only to warm it, rather than at the pace the ring drains. It counts
+	 * as decoding until its output answers it.
+	 */
+	pass(timestamp: number): void {
+		this.#decoding.push(timestamp);
+	}
+
 	/** The ring was flushed for a new timeline: its playhead is unknown until the next frame anchors it. */
 	reset(): void {
 		this.#playhead = undefined;
-		this.#anchor = undefined;
-		this.#stalled = true;
-		this.#parked = false;
+		this.#clock = undefined;
+		this.#started = false;
 		this.#decoding = [];
 		this.#inserted = undefined;
 		this.#offset = 0;
@@ -209,50 +236,50 @@ export class Backpressure {
 		});
 	}
 
-	// Whether the queued media reaches the hold past `timestamp`.
+	// Whether the queued media reaches the hold past `timestamp`, or is all a finished track has.
 	#covered(timestamp: number): boolean {
-		if (this.#hold === 0) return true;
+		if (this.#hold === 0 || this.#complete) return true;
 		return this.#queued !== undefined && this.#queued >= timestamp + this.#hold;
-	}
-
-	// The frame the ring plays from: its reported playhead, else where it anchored or will anchor,
-	// mapped back to the frame its output came from, which is what the queued media covers.
-	#start(): number | undefined {
-		const start = this.#playhead ?? this.#inserted?.start;
-		if (start !== undefined) return start + this.#offset;
-		return this.#anchor;
 	}
 
 	#admit(timestamp: number): boolean {
 		const due = this.#due(timestamp);
-		if (due) {
-			this.#anchor ??= timestamp;
-			if (this.#buffered) this.#decoding.push(timestamp);
-		}
+		if (due) this.#decoding.push(timestamp);
 		return due;
 	}
 
 	#due(timestamp: number): boolean {
 		const playhead = this.#playhead;
-		if (!this.#stalled && playhead !== undefined) {
-			const tail = this.#buffered ? 0 : this.#frame;
-			if (timestamp + tail - this.#offset - this.#headroom <= playhead) return true;
-			return !this.#buffered && this.#covered(timestamp);
+		if (this.#started && playhead !== undefined) {
+			// The ring skips onto the clock once it trails it past the bound, so it plays on from there.
+			// Within the bound it stretches onto the clock, playing everything from its playhead.
+			const clock = this.#clock;
+			const from = clock !== undefined && clock - playhead > this.#bound ? clock : playhead;
+			return this.#reach(from) - from < this.#headroom + WINDOW;
 		}
 
 		if (!this.#covered(timestamp)) return false;
-		// A live ring sheds what overflows its floor, so it refills from everything that is due.
-		if (!this.#buffered) return true;
+		// A live ring holds no more than the hold leaves uncovered, so it fills from everything due. A
+		// finished track covers all of itself, so it fills only to the floor, as a buffered ring does.
+		if (!this.#buffered && !this.#complete) return true;
 
-		// Refill while the PCM in the ring past its playhead, plus the span of frames still decoding, is
-		// short of the floor. The ring un-stalls once it holds the floor, and output the decoder
-		// discards never counts, so the refill cannot stop with the ring short of it.
+		// Fill while the PCM in the ring past its playhead, plus the span of frames still decoding, is
+		// short of the floor. The ring starts once it holds the floor, and output the decoder discards
+		// never counts, so the fill cannot stop with the ring short of it.
 		const inserted = this.#inserted;
 		const start = playhead ?? inserted?.start;
 		const buffered = inserted && start !== undefined ? Math.max(0, inserted.end - start) : 0;
 		const decoding = this.#decoding;
 		const pending = decoding.length > 0 ? decoding[decoding.length - 1] - decoding[0] : 0;
 		return buffered + pending < this.#headroom;
+	}
+
+	// Where what the ring was given ends, on its timeline: the newest frame still decoding, where its
+	// output lands, or else the PCM it holds.
+	#reach(playhead: number): number {
+		const landed = this.#inserted?.end ?? playhead;
+		const decoding = this.#decoding.at(-1);
+		return decoding === undefined ? landed : Math.max(landed, decoding + this.#frame - this.#offset);
 	}
 }
 
@@ -264,10 +291,27 @@ export class AudioBuffer {
 	readonly rate: number;
 	readonly channels: number;
 	#worklet: AudioWorkletNode;
+	// The realtime context the worklet renders in, which reports where its output stands.
+	#context: AudioContext;
 
 	readonly #timestamp = new Signal<number>(0);
-	/** Current playback timestamp, as the worklet last reported it. */
+	/** The presentation timestamp sounding now, as of the worklet's last report. */
 	readonly timestamp: Getter<number> = this.#timestamp;
+
+	readonly #output = new Signal<Duration>(Duration.ZERO);
+	/**
+	 * How long the output takes to sound what the ring renders: the context's base latency plus the
+	 * highest output latency it reported over the last five seconds.
+	 */
+	readonly output: Getter<Duration> = this.#output;
+
+	readonly #lead = new Signal<Duration>(Duration.ZERO);
+	/**
+	 * How far the worklet renders ahead of what sounds now, as the context's output position last
+	 * reported it, or `output` until it reports one. Unlike `output`, it follows an output latency
+	 * that fell at once rather than holding its peak, and moves only by a few milliseconds at a time.
+	 */
+	readonly lead: Getter<Duration> = this.#lead;
 
 	readonly #stalled = new Signal<boolean>(true);
 	/** Whether the ring is stalled (waiting to fill). */
@@ -295,10 +339,33 @@ export class AudioBuffer {
 
 	// Backpressure runs off the playhead the worklet reports in its state messages.
 	#backpressure: Backpressure;
-	// Bumped per reset or park. A state message posted before the worklet saw it reports the ring
-	// playing on the old terms, which would open the gate.
+	// Whether an end was declared since the last reset, which the next audio follows.
+	#declared = false;
+	// Where the latest declared end stands, until a reset that is not the next utterance. Audio before
+	// it is a finite tail, which the ring plays out however far it trails the clock.
+	#tail?: number;
+	// Bumped per reset. A state message posted before the worklet saw it reports the ring on the old
+	// timeline, which would open the gate.
 	#epoch = 0;
 	#playing?: Getter<boolean>;
+	// How far audio may trail the shared clock before the ring skips ahead.
+	#bound: Duration;
+	// The peak output latency, between the render and the speaker, which the ring does not hold.
+	#latency = new Peak();
+	#heard = Duration.ZERO;
+	// What the worklet reported rendering, oldest first, back to what is sounding now.
+	#rendered: { time: number; timestamp: number }[] = [];
+	// The shared clock the ring plays onto, and the reference it plays from.
+	#sync?: { position(): number | undefined; out: { reference: Getter<number | undefined> } };
+	// The shared clock less the context time sounding at the same instant, in microseconds, as last
+	// sent. A browser that reads its output position only once per render callback reports it up to a
+	// callback early, so the greatest offset is the reading taken nearest a callback's start. It falls
+	// only slowly, as drift needs, unless it moves past any callback, as a delay or reference change
+	// moves it.
+	#offset?: number;
+	// The shared clock's reference as last sent, in milliseconds. One that moved earlier stepped the
+	// clock ahead, which the offset takes whole rather than as where a reading landed.
+	#reference?: number;
 
 	#signals = new Effect();
 
@@ -309,26 +376,36 @@ export class AudioBuffer {
 			rate: number;
 			/** The target delay. The ring holds up to a fixed floor of it decoded; the rest stays encoded. */
 			delay: Duration;
-			/** Anchor to the first frame and play through, holding the lookahead upstream. */
+			/** How far audio may trail the shared clock before the ring skips ahead. */
+			bound?: Duration;
+			/** Anchor to the first frame and hold the lookahead upstream until playback starts. */
 			buffered: boolean;
+			/** The shared clock the ring plays onto, and the reference it plays from. */
+			clock?: { position(): number | undefined; out: { reference: Getter<number | undefined> } };
 			/** Hold consumption until the shared startup floor is ready. */
 			playing?: Getter<boolean>;
 		},
 	) {
-		const { channels, rate, buffered, playing } = props;
+		const { channels, rate, buffered, playing, clock } = props;
 		this.#playing = props.playing;
 		this.#worklet = worklet;
+		this.#context = worklet.context as AudioContext;
 		this.channels = channels;
 		this.rate = rate;
+		this.#bound = props.bound ?? Duration.ZERO;
+		this.#sync = clock;
 
-		this.#backpressure = new Backpressure(rate, buffered, props.delay);
+		// The output latency the context already reports, so startup holds only what the ring must.
+		this.#observeOutput();
+		this.#lead.set(this.#output.peek());
+		const held = this.held(props.delay);
+		this.#backpressure = new Backpressure(rate, buffered, held, this.#bound);
 
 		const msg: Init = {
 			type: "init",
 			channels,
 			rate,
-			latency: this.#latency(),
-			buffered,
+			...this.#terms(),
 			...(playing && { playing: playing.peek() }),
 		};
 		worklet.port.postMessage(msg);
@@ -342,7 +419,10 @@ export class AudioBuffer {
 		this.#signals.event(worklet.port, "message", (ev: Event) => {
 			const data = (ev as MessageEvent<State>).data;
 			if (data?.type === "state") {
-				this.#timestamp.set(data.timestamp);
+				const heard = this.#sounding();
+				this.#observeOutput();
+				this.#observeLead(heard);
+				this.#timestamp.set(this.#heardAt(data, heard));
 				this.#stalled.set(data.stalled);
 				this.#underruns.set(data.underruns);
 				this.#skips.set(data.skips);
@@ -350,7 +430,16 @@ export class AudioBuffer {
 				this.#accelerated.set(Duration.millis(data.accelerated));
 				this.#silent.set(data.silent);
 				if (data.epoch === this.#epoch) {
-					this.#backpressure.observe(data.anchored ? data.timestamp : undefined, data.stalled);
+					if (clock) {
+						const msg: Clock = {
+							type: "clock",
+							...this.#read(clock.position(), clock.out.reference.peek(), heard),
+						};
+						this.#worklet.port.postMessage(msg);
+					}
+					// The clock as the ring played the reported playhead, on the ring's timeline.
+					const at = this.#offset === undefined ? undefined : this.#offset + data.time * 1_000_000;
+					this.#backpressure.observe(data.anchored ? data.timestamp : undefined, data.stalled, at);
 				}
 			}
 		});
@@ -358,17 +447,103 @@ export class AudioBuffer {
 		worklet.port.start();
 	}
 
-	// The floor as the worklet takes it.
-	#latency(): number {
-		return (this.#backpressure.floor / this.rate) * 1000;
+	/**
+	 * What the ring holds of a delay: the delay less the output latency it renders ahead by, though
+	 * never less than one callback, the least it can render from. Its floor, its startup, and what
+	 * stays encoded upstream all follow this, so a start never queues media the clock then skips.
+	 * @internal
+	 */
+	held(delay: Duration): Duration {
+		const base = Duration.secs(this.#context.baseLatency || 0);
+		return delay.saturatingSub(this.#heard).max(base.min(delay));
+	}
+
+	// The floor and bound as the worklet takes them.
+	#terms(): Omit<Latency, "type" | "clock"> {
+		return {
+			latency: (this.#backpressure.floor / this.rate) * 1000,
+			bound: this.#bound.asMillis(),
+		};
+	}
+
+	// The context time sounding now, in seconds, or undefined before the output has played anything.
+	// The browser reports its output position with the instant it was heard, on the page's clock.
+	#sounding(): number | undefined {
+		const position = this.#context.getOutputTimestamp();
+		if (!position.performanceTime || position.contextTime === undefined) return undefined;
+		return position.contextTime + (now().since(Instant.ZERO).asMillis() - position.performanceTime) / 1000;
+	}
+
+	// Fold in the output latency the context reports now. `baseLatency` is the callback the context
+	// renders at once; `outputLatency`, where reported, the rest of the way to the speaker.
+	#observeOutput(): void {
+		const context = this.#context;
+		this.#heard = this.#latency.observe(Duration.secs(context.outputLatency || 0), now());
+		this.#output.set(Duration.secs(context.baseLatency || 0).add(this.#heard));
+	}
+
+	// Fold in how far the context renders ahead of the output position sounding at `heard`. The
+	// position is only as fine as a render callback, so a smaller move is left alone, since a signal
+	// that notifies on every state report would wake whatever reads it as often.
+	#observeLead(heard: number | undefined): void {
+		const lead =
+			heard === undefined ? this.#output.peek() : Duration.secs(Math.max(0, this.#context.currentTime - heard));
+		if (Math.abs(lead.asMillis() - this.#lead.peek().asMillis()) >= LEAD_STEP) this.#lead.set(lead);
+	}
+
+	// Where the playhead sounding at context time `heard` stands, from what the worklet rendered: the
+	// report rendered last at or before it, advanced at real time up to the next. Without a position,
+	// the reported playhead.
+	#heardAt(state: State, heard: number | undefined): number {
+		if (heard === undefined) {
+			this.#rendered = [];
+			return state.timestamp;
+		}
+		const rendered = this.#rendered;
+		rendered.push({ time: state.time, timestamp: state.timestamp });
+		while (rendered.length > 1 && rendered[1].time <= heard) rendered.shift();
+		const [at, next] = rendered;
+		const projected = at.timestamp + (heard - at.time) * 1_000_000;
+		return Math.max(0, next ? Math.min(projected, next.timestamp) : Math.min(projected, at.timestamp));
+	}
+
+	// Where the shared clock stands, in the ring's coordinates, against the context time sounding at
+	// the same instant, so the ring renders each sample to sound when the clock says it is due. The
+	// reading carries the context's time it was taken at, so a late message misplaces neither.
+	#read(position: number | undefined, reference: number | undefined, heard: number | undefined): Reading {
+		const time = this.#context.currentTime;
+		const last = this.#reference;
+		this.#reference = reference;
+		if (position === undefined || heard === undefined) {
+			this.#offset = undefined;
+			return { time };
+		}
+		// A reference move is a step of the clock, not where a reading landed, so the offset takes it whole.
+		const moved = last !== undefined && reference !== undefined ? (last - reference) * 1000 : 0;
+		// The ring already holds presentation time (Opus output lands a pre-skip before its frame
+		// timestamp), so the clock maps onto it unshifted.
+		const offset = position * 1000 - heard * 1_000_000;
+		const previous = this.#offset === undefined ? undefined : this.#offset + moved;
+		this.#offset =
+			previous !== undefined && Math.abs(offset - previous) < JUMP ? Math.max(offset, previous - FALL) : offset;
+		return { timestamp: this.#offset + time * 1_000_000, time };
+	}
+
+	/**
+	 * Note that a frame arrived whose media ends at `end`, on the decoder's timeline. How far it reaches
+	 * past the playhead is the depth the ring slows down to keep, decoded or not.
+	 */
+	received(end: Duration): void {
+		const msg: Received = { type: "received", end: end.asMicros() - this.#backpressure.offset };
+		this.#worklet.port.postMessage(msg);
 	}
 
 	/**
 	 * Note that the decoder produced output ending at `end` on its own timeline, which lands in the ring
-	 * up to `landed` unless it was discarded.
+	 * `offset` behind it unless it was discarded.
 	 */
-	decoded(end: number, landed?: number): void {
-		this.#backpressure.decoded(end, landed);
+	decoded(end: number, offset?: number): void {
+		this.#backpressure.decoded(end, offset);
 	}
 
 	/** Note that the decoder closed or reset, dropping every frame still decoding. */
@@ -392,25 +567,35 @@ export class AudioBuffer {
 	}
 
 	/**
-	 * Update the target delay. The ring holds up to a fixed floor of it decoded, and the rest stays
-	 * encoded upstream until the media queued behind a frame covers it.
+	 * Update the target delay, and how far audio may trail the shared clock before the ring snaps onto
+	 * it. The ring holds up to a fixed floor of the delay decoded, and the rest stays encoded upstream.
+	 * A moved delay moves the clock, which the ring plays onto like any other lag.
 	 */
-	setLatency(delay: Duration): void {
-		const park = this.#backpressure.setLatency(delay);
-		const msg: Latency = { type: "latency", latency: this.#latency() };
-		// One message, so the worklet never plays a quantum between the new floor and the park.
-		if (park) msg.park = ++this.#epoch;
+	setLatency(delay: Duration, bound: Duration = this.#bound): void {
+		this.#bound = bound;
+		this.#backpressure.setLatency(this.held(delay), bound);
+		// The clock moves with the delay, so its offset starts over, from a reading sent with the terms.
+		this.#offset = undefined;
+		const sync = this.#sync;
+		const msg: Latency = {
+			type: "latency",
+			...this.#terms(),
+			...(sync && { clock: this.#read(sync.position(), sync.out.reference.peek(), this.#sounding()) }),
+		};
 		this.#worklet.port.postMessage(msg);
 	}
 
 	/**
 	 * Note the newest media timestamp queued ahead of the decoder, or undefined once none is. The
-	 * queue is what covers the part of the target held encoded, so it is what resumes a parked ring.
+	 * queue is what covers the part of the target held encoded before playback starts.
 	 */
 	queued(newest: number | undefined): void {
-		if (!this.#backpressure.queued(newest)) return;
-		const msg: Latency = { type: "latency", latency: this.#latency() };
-		this.#worklet.port.postMessage(msg);
+		this.#backpressure.queued(newest);
+	}
+
+	/** Note whether the publisher finished the track being decoded, so nothing more will queue. */
+	complete(complete: boolean): void {
+		this.#backpressure.complete(complete);
 	}
 
 	/**
@@ -418,12 +603,15 @@ export class AudioBuffer {
 	 *
 	 * Used when a new track takes over the timeline: its samples overwrite the slots they land on,
 	 * but the previous track's write-ahead tail would otherwise play once the new audio runs out.
-	 * Unlike `reset()` this keeps playing, so there's no gap at the handover.
+	 * Unlike `reset()` this keeps playing, so there's no gap at the handover. An end the previous
+	 * track declared no longer holds: the new audio follows it like the next utterance.
 	 */
 	truncate(timestamp: number): void {
 		this.#backpressure.truncated(timestamp);
+		if (this.#tail !== undefined) this.#tail = Math.min(this.#tail, timestamp);
 		const msg: Truncate = { type: "truncate", timestamp };
 		this.#worklet.port.postMessage(msg);
+		if (this.#declared) this.next();
 	}
 
 	/**
@@ -432,6 +620,8 @@ export class AudioBuffer {
 	 * an underrun, until the next audio plays.
 	 */
 	end(timestamp: number): void {
+		this.#declared = true;
+		this.#tail = timestamp;
 		const msg: End = { type: "end", timestamp };
 		this.#worklet.port.postMessage(msg);
 	}
@@ -451,6 +641,8 @@ export class AudioBuffer {
 	}
 
 	#reset(next: boolean): void {
+		this.#declared = false;
+		if (!next) this.#tail = undefined;
 		this.#epoch++;
 		const msg: Reset = {
 			type: "reset",
@@ -460,6 +652,8 @@ export class AudioBuffer {
 		};
 		this.#worklet.port.postMessage(msg);
 		this.#backpressure.reset();
+		this.#offset = undefined;
+		this.#rendered = [];
 	}
 
 	/**
@@ -468,8 +662,28 @@ export class AudioBuffer {
 	 * whose whole target fits the floor. Resolves early, releasing the wait, once `signal` aborts.
 	 */
 	wait(timestamp: number, signal: AbortSignal): Promise<void> {
+		// An aborted loop already dropped what it was decoding, so it must not count another frame.
+		if (signal.aborted) return Promise.resolve();
+		if (this.stale(timestamp)) {
+			this.#backpressure.pass(timestamp);
+			return Promise.resolve();
+		}
 		// The worklet-reported playhead lags by a state-message interval, which only holds frames longer.
 		return this.#backpressure.wait(timestamp, signal);
+	}
+
+	/**
+	 * Whether media at `timestamp`, in microseconds, trails the shared clock past the bound, so the ring
+	 * would skip it unheard, as a publisher's replayed backlog does on a rejoin. The decoder still
+	 * decodes it to warm the codec, but writes none of it: a ring anchored on it would play catch-up
+	 * instead of the live edge. Audio up to a declared end is never stale, since the ring plays a
+	 * finite tail out rather than skip it.
+	 */
+	stale(timestamp: number): boolean {
+		if (this.#tail !== undefined && timestamp <= this.#tail) return false;
+		const position = this.#sync?.position();
+		if (position === undefined) return false;
+		return position * 1000 - timestamp > Math.max(this.#bound.asMicros(), WINDOW);
 	}
 
 	/** Stop observing the worklet and release every pending wait. */

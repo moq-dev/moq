@@ -1091,6 +1091,7 @@ pub const NVENC_INFINITE_GOPLENGTH: u32 = 4294967295;
 pub const NV_MAX_SEQ_HDR_LEN: u32 = 512;
 pub const NV_MAX_TILE_COLS_AV1: u32 = 64;
 pub const NV_MAX_TILE_ROWS_AV1: u32 = 64;
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__GUID() {
     const UNINIT: ::core::mem::MaybeUninit<_GUID> = ::core::mem::MaybeUninit::uninit();
@@ -1146,6 +1147,7 @@ fn bindgen_test_layout__GUID() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NVENC_RECT() {
     const UNINIT: ::core::mem::MaybeUninit<_NVENC_RECT> = ::core::mem::MaybeUninit::uninit();
@@ -1201,6 +1203,7 @@ fn bindgen_test_layout__NVENC_RECT() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_CAPS_PARAM() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_CAPS_PARAM> = ::core::mem::MaybeUninit::uninit();
@@ -1246,6 +1249,7 @@ fn bindgen_test_layout__NV_ENC_CAPS_PARAM() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_RESTORE_ENCODER_STATE_PARAMS() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_RESTORE_ENCODER_STATE_PARAMS> =
@@ -1338,6 +1342,7 @@ fn bindgen_test_layout__NV_ENC_RESTORE_ENCODER_STATE_PARAMS() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_OUTPUT_STATS_BLOCK() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_OUTPUT_STATS_BLOCK> =
@@ -1404,6 +1409,7 @@ fn bindgen_test_layout__NV_ENC_OUTPUT_STATS_BLOCK() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_OUTPUT_STATS_ROW() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_OUTPUT_STATS_ROW> =
@@ -1470,6 +1476,7 @@ fn bindgen_test_layout__NV_ENC_OUTPUT_STATS_ROW() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_ENCODE_OUT_PARAMS() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_ENCODE_OUT_PARAMS> =
@@ -1516,6 +1523,7 @@ fn bindgen_test_layout__NV_ENC_ENCODE_OUT_PARAMS() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_LOOKAHEAD_PIC_PARAMS() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_LOOKAHEAD_PIC_PARAMS> =
@@ -1582,6 +1590,7 @@ fn bindgen_test_layout__NV_ENC_LOOKAHEAD_PIC_PARAMS() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_CREATE_INPUT_BUFFER() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_CREATE_INPUT_BUFFER> =
@@ -1698,6 +1707,7 @@ fn bindgen_test_layout__NV_ENC_CREATE_INPUT_BUFFER() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_CREATE_BITSTREAM_BUFFER() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_CREATE_BITSTREAM_BUFFER> =
@@ -1794,6 +1804,7 @@ fn bindgen_test_layout__NV_ENC_CREATE_BITSTREAM_BUFFER() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_MVECTOR() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_MVECTOR> = ::core::mem::MaybeUninit::uninit();
@@ -1829,6 +1840,7 @@ fn bindgen_test_layout__NV_ENC_MVECTOR() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_H264_MV_DATA() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_H264_MV_DATA> =
@@ -1895,6 +1907,7 @@ fn bindgen_test_layout__NV_ENC_H264_MV_DATA() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_HEVC_MV_DATA() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_HEVC_MV_DATA> =
@@ -1961,6 +1974,7 @@ fn bindgen_test_layout__NV_ENC_HEVC_MV_DATA() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_CREATE_MV_BUFFER() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_CREATE_MV_BUFFER> =
@@ -2017,6 +2031,7 @@ fn bindgen_test_layout__NV_ENC_CREATE_MV_BUFFER() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_QP() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_QP> = ::core::mem::MaybeUninit::uninit();
@@ -2062,6 +2077,7 @@ fn bindgen_test_layout__NV_ENC_QP() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_RC_PARAMS() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_RC_PARAMS> = ::core::mem::MaybeUninit::uninit();
@@ -2337,6 +2353,7 @@ fn bindgen_test_layout__NV_ENC_RC_PARAMS() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_CLOCK_TIMESTAMP_SET() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_CLOCK_TIMESTAMP_SET> =
@@ -2363,6 +2380,7 @@ fn bindgen_test_layout__NV_ENC_CLOCK_TIMESTAMP_SET() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_TIME_CODE() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_TIME_CODE> = ::core::mem::MaybeUninit::uninit();
@@ -2398,6 +2416,7 @@ fn bindgen_test_layout__NV_ENC_TIME_CODE() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_CONFIG_H264_VUI_PARAMETERS() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_CONFIG_H264_VUI_PARAMETERS> =
@@ -2589,6 +2608,7 @@ fn bindgen_test_layout__NV_ENC_CONFIG_H264_VUI_PARAMETERS() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NVENC_EXTERNAL_ME_HINT_COUNTS_PER_BLOCKTYPE() {
     const UNINIT: ::core::mem::MaybeUninit<_NVENC_EXTERNAL_ME_HINT_COUNTS_PER_BLOCKTYPE> =
@@ -2621,6 +2641,7 @@ fn bindgen_test_layout__NVENC_EXTERNAL_ME_HINT_COUNTS_PER_BLOCKTYPE() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NVENC_EXTERNAL_ME_HINT() {
     assert_eq!(
@@ -2634,6 +2655,7 @@ fn bindgen_test_layout__NVENC_EXTERNAL_ME_HINT() {
         concat!("Alignment of ", stringify!(_NVENC_EXTERNAL_ME_HINT))
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NVENC_EXTERNAL_ME_SB_HINT() {
     assert_eq!(
@@ -2647,6 +2669,7 @@ fn bindgen_test_layout__NVENC_EXTERNAL_ME_SB_HINT() {
         concat!("Alignment of ", stringify!(_NVENC_EXTERNAL_ME_SB_HINT))
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_CONFIG_H264() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_CONFIG_H264> =
@@ -2933,6 +2956,7 @@ fn bindgen_test_layout__NV_ENC_CONFIG_H264() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_CONFIG_HEVC() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_CONFIG_HEVC> =
@@ -3169,6 +3193,7 @@ fn bindgen_test_layout__NV_ENC_CONFIG_HEVC() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_FILM_GRAIN_PARAMS_AV1() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_FILM_GRAIN_PARAMS_AV1> =
@@ -3345,6 +3370,7 @@ fn bindgen_test_layout__NV_ENC_FILM_GRAIN_PARAMS_AV1() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_CONFIG_AV1() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_CONFIG_AV1> = ::core::mem::MaybeUninit::uninit();
@@ -3600,6 +3626,7 @@ fn bindgen_test_layout__NV_ENC_CONFIG_AV1() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_CONFIG_H264_MEONLY() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_CONFIG_H264_MEONLY> =
@@ -3636,6 +3663,7 @@ fn bindgen_test_layout__NV_ENC_CONFIG_H264_MEONLY() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_CONFIG_HEVC_MEONLY() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_CONFIG_HEVC_MEONLY> =
@@ -3672,6 +3700,7 @@ fn bindgen_test_layout__NV_ENC_CONFIG_HEVC_MEONLY() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_CODEC_CONFIG() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_CODEC_CONFIG> =
@@ -3748,6 +3777,7 @@ fn bindgen_test_layout__NV_ENC_CODEC_CONFIG() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_CONFIG() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_CONFIG> = ::core::mem::MaybeUninit::uninit();
@@ -3873,6 +3903,7 @@ fn bindgen_test_layout__NV_ENC_CONFIG() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_INITIALIZE_PARAMS() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_INITIALIZE_PARAMS> =
@@ -4119,6 +4150,7 @@ fn bindgen_test_layout__NV_ENC_INITIALIZE_PARAMS() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_RECONFIGURE_PARAMS() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_RECONFIGURE_PARAMS> =
@@ -4155,6 +4187,7 @@ fn bindgen_test_layout__NV_ENC_RECONFIGURE_PARAMS() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_PRESET_CONFIG() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_PRESET_CONFIG> =
@@ -4211,6 +4244,7 @@ fn bindgen_test_layout__NV_ENC_PRESET_CONFIG() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_PIC_PARAMS_MVC() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_PIC_PARAMS_MVC> =
@@ -4287,6 +4321,7 @@ fn bindgen_test_layout__NV_ENC_PIC_PARAMS_MVC() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_PIC_PARAMS_H264_EXT() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_PIC_PARAMS_H264_EXT> =
@@ -4323,6 +4358,7 @@ fn bindgen_test_layout__NV_ENC_PIC_PARAMS_H264_EXT() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_SEI_PAYLOAD() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_SEI_PAYLOAD> =
@@ -4369,6 +4405,7 @@ fn bindgen_test_layout__NV_ENC_SEI_PAYLOAD() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_PIC_PARAMS_H264() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_PIC_PARAMS_H264> =
@@ -4587,6 +4624,7 @@ fn bindgen_test_layout__NV_ENC_PIC_PARAMS_H264() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_PIC_PARAMS_HEVC() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_PIC_PARAMS_HEVC> =
@@ -4775,6 +4813,7 @@ fn bindgen_test_layout__NV_ENC_PIC_PARAMS_HEVC() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_PIC_PARAMS_AV1() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_PIC_PARAMS_AV1> =
@@ -4933,6 +4972,7 @@ fn bindgen_test_layout__NV_ENC_PIC_PARAMS_AV1() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_CODEC_PIC_PARAMS() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_CODEC_PIC_PARAMS> =
@@ -4989,6 +5029,7 @@ fn bindgen_test_layout__NV_ENC_CODEC_PIC_PARAMS() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_PIC_PARAMS() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_PIC_PARAMS> = ::core::mem::MaybeUninit::uninit();
@@ -5304,6 +5345,7 @@ fn bindgen_test_layout__NV_ENC_PIC_PARAMS() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_MEONLY_PARAMS() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_MEONLY_PARAMS> =
@@ -5450,6 +5492,7 @@ fn bindgen_test_layout__NV_ENC_MEONLY_PARAMS() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_LOCK_BITSTREAM() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_LOCK_BITSTREAM> =
@@ -5746,6 +5789,7 @@ fn bindgen_test_layout__NV_ENC_LOCK_BITSTREAM() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_LOCK_INPUT_BUFFER() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_LOCK_INPUT_BUFFER> =
@@ -5822,6 +5866,7 @@ fn bindgen_test_layout__NV_ENC_LOCK_INPUT_BUFFER() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_MAP_INPUT_RESOURCE() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_MAP_INPUT_RESOURCE> =
@@ -5918,6 +5963,7 @@ fn bindgen_test_layout__NV_ENC_MAP_INPUT_RESOURCE() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_INPUT_RESOURCE_OPENGL_TEX() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_INPUT_RESOURCE_OPENGL_TEX> =
@@ -5957,6 +6003,7 @@ fn bindgen_test_layout__NV_ENC_INPUT_RESOURCE_OPENGL_TEX() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_FENCE_POINT_D3D12() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_FENCE_POINT_D3D12> =
@@ -6033,6 +6080,7 @@ fn bindgen_test_layout__NV_ENC_FENCE_POINT_D3D12() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_INPUT_RESOURCE_D3D12() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_INPUT_RESOURCE_D3D12> =
@@ -6109,6 +6157,7 @@ fn bindgen_test_layout__NV_ENC_INPUT_RESOURCE_D3D12() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_OUTPUT_RESOURCE_D3D12() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_OUTPUT_RESOURCE_D3D12> =
@@ -6185,6 +6234,7 @@ fn bindgen_test_layout__NV_ENC_OUTPUT_RESOURCE_D3D12() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_REGISTER_RESOURCE() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_REGISTER_RESOURCE> =
@@ -6341,6 +6391,7 @@ fn bindgen_test_layout__NV_ENC_REGISTER_RESOURCE() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_STAT() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_STAT> = ::core::mem::MaybeUninit::uninit();
@@ -6516,6 +6567,7 @@ fn bindgen_test_layout__NV_ENC_STAT() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_SEQUENCE_PARAM_PAYLOAD() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_SEQUENCE_PARAM_PAYLOAD> =
@@ -6612,6 +6664,7 @@ fn bindgen_test_layout__NV_ENC_SEQUENCE_PARAM_PAYLOAD() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_EVENT_PARAMS() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_EVENT_PARAMS> =
@@ -6678,6 +6731,7 @@ fn bindgen_test_layout__NV_ENC_EVENT_PARAMS() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENC_OPEN_ENCODE_SESSIONEX_PARAMS() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENC_OPEN_ENCODE_SESSIONEX_PARAMS> =
@@ -6770,6 +6824,7 @@ fn bindgen_test_layout__NV_ENC_OPEN_ENCODE_SESSIONEX_PARAMS() {
         )
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn bindgen_test_layout__NV_ENCODE_API_FUNCTION_LIST() {
     const UNINIT: ::core::mem::MaybeUninit<_NV_ENCODE_API_FUNCTION_LIST> =

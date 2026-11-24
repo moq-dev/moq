@@ -27,7 +27,7 @@ fn import_ts(data: &[u8]) -> crate::catalog::hang::Catalog {
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	let buf = BytesMut::from(data);
 	import.decode(&buf).unwrap();
-	import.finish().unwrap();
+	let _finished = import.finish().unwrap();
 
 	catalog.snapshot()
 }
@@ -44,7 +44,7 @@ fn import_ts_ext(data: &[u8]) -> crate::catalog::hang::Catalog<crate::container:
 
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	import.decode(data).unwrap();
-	import.finish().unwrap();
+	let _finished = import.finish().unwrap();
 
 	catalog.snapshot()
 }
@@ -85,7 +85,7 @@ async fn public_container_preserves_loc_for_ts() {
 	let reserved = catalog.reserve();
 	let mut import = super::Import::new(broadcast, reserved).with_container(hang::catalog::Container::Loc);
 	import.decode(data).unwrap();
-	import.finish().unwrap();
+	let _finished = import.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
 	let (name, config) = snapshot.video.renditions.iter().next().unwrap();
@@ -240,7 +240,7 @@ async fn import_opus_frames() {
 	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	import.decode(&BytesMut::from(&data[..])).unwrap();
-	import.finish().unwrap();
+	let _finished = import.finish().unwrap();
 
 	let name = catalog
 		.snapshot()
@@ -255,8 +255,12 @@ async fn import_opus_frames() {
 		.track(&name)
 		.unwrap()
 		.subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+				moq_net::track::Start::Live {
+					min: Some(RECORDING_MAX_AGE),
+					max: Some(RECORDING_MAX_AGE),
+				},
+			)]),
 		)
 		.await
 		.unwrap();
@@ -289,7 +293,7 @@ async fn opus_catalog_carries_the_anchored_clock() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-	let provisional = catalog.snapshot().media.clock.expect("a clock");
+	let provisional = catalog.snapshot().sync.clock.expect("a clock");
 	let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 
@@ -299,10 +303,10 @@ async fn opus_catalog_carries_the_anchored_clock() {
 		import.decode(pkt).unwrap();
 		published.extend(clocks.drain());
 	}
-	import.finish().unwrap();
+	let _finished = import.finish().unwrap();
 	published.extend(clocks.drain());
 
-	let anchored = catalog.snapshot().media.clock.expect("a clock");
+	let anchored = catalog.snapshot().sync.clock.expect("a clock");
 	assert_ne!(anchored, provisional, "the first PES anchors the clock");
 	assert!(!published.is_empty(), "the catalog publishes");
 	assert!(published.iter().all(|clock| *clock == Some(anchored)), "{published:?}");
@@ -447,7 +451,7 @@ fn resyncs_across_chunk_boundaries() {
 	for chunk in misaligned.chunks(100) {
 		import.decode(&BytesMut::from(chunk)).unwrap();
 	}
-	import.finish().unwrap();
+	let _finished = import.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
 	assert_eq!(
@@ -473,7 +477,7 @@ async fn import_export_import_roundtrip() {
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	let buf = BytesMut::from(&data[..]);
 	import.decode(&buf).unwrap();
-	import.finish().unwrap();
+	let _finished = import.finish().unwrap();
 
 	// Re-export to TS. `import` and `catalog` stay alive so the exporter can
 	// subscribe to the finished, retained tracks.
@@ -525,7 +529,7 @@ async fn survives_midstream_join() {
 	import
 		.decode(&BytesMut::from(&buf[..]))
 		.expect("a mid-stream join must not abort the demux");
-	import.finish().unwrap();
+	let _finished = import.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
 	assert_eq!(snapshot.video.renditions.len(), 1, "video track lost across the join");
@@ -537,8 +541,12 @@ async fn survives_midstream_join() {
 		.track(&name)
 		.unwrap()
 		.subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+				moq_net::track::Start::Live {
+					min: Some(RECORDING_MAX_AGE),
+					max: Some(RECORDING_MAX_AGE),
+				},
+			)]),
 		)
 		.await
 		.unwrap();
@@ -577,7 +585,7 @@ async fn kyrion_dirtystart_extracts_real_cues() {
 	import
 		.decode(&BytesMut::from(&data[..]))
 		.expect("a dirty mid-stream join must not abort the demux");
-	import.finish().unwrap();
+	let _finished = import.finish().unwrap();
 
 	let snap = catalog.snapshot();
 	assert_eq!(snap.video.renditions.len(), 1, "video track lost across the dirty join");
@@ -595,8 +603,12 @@ async fn kyrion_dirtystart_extracts_real_cues() {
 		.track(&name)
 		.unwrap()
 		.subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+				moq_net::track::Start::Live {
+					min: Some(RECORDING_MAX_AGE),
+					max: Some(RECORDING_MAX_AGE),
+				},
+			)]),
 		)
 		.await
 		.unwrap();
@@ -640,7 +652,7 @@ fn import_handles_unaligned_chunks() {
 		let buf = BytesMut::from(chunk);
 		import.decode(&buf).unwrap();
 	}
-	import.finish().unwrap();
+	let _finished = import.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
 	assert_eq!(snapshot.video.renditions.len(), 1);
@@ -723,12 +735,12 @@ async fn import_stream(data: &[u8]) -> Imported {
 	let before = kio::clock::wall();
 	import.decode(data).unwrap();
 	let after = kio::clock::wall();
-	import.finish().unwrap();
+	let _finished = import.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
 	Imported {
 		published: crate::container::test_util::published(&consumer, &snapshot).await,
-		clock: snapshot.media.clock.expect("the catalog advertises a clock"),
+		clock: snapshot.sync.clock.expect("the catalog advertises a clock"),
 		arrival: before..=after,
 	}
 }

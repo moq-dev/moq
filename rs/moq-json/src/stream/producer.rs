@@ -6,7 +6,6 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 
 use super::Encoder;
-use moq_net::Timed;
 
 use crate::Result;
 
@@ -65,12 +64,12 @@ impl<T: Serialize> Producer<T> {
 		}
 	}
 
-	/// Append one record to the log.
+	/// Append one record to the log at `at` (see [`Timed::at`](crate::Timed::at)).
 	///
 	/// The log accepts appends for its track's life. A record larger than a frame may be is refused
 	/// with [`moq_net::Error::FrameTooLarge`] before anything is written, leaving the log intact. A
-	/// timestamp that doesn't match the track's timescale (missing on a timed track, present on an
-	/// untimed one, or beyond what its scale can hold) is refused with
+	/// timestamp that doesn't match the track's timescale (unscaled on a timed track, scaled on a
+	/// scale-less one, or beyond what its scale can hold) is refused with
 	/// [`moq_net::Error::TimestampMismatch`] the same way, so a corrected append carries on.
 	///
 	/// Any other failure ends the track. A log missing a record is not the lossless log a stream
@@ -80,22 +79,78 @@ impl<T: Serialize> Producer<T> {
 	/// complete. Every later append fails on the ended track.
 	///
 	/// Returns the encoded size of the frame written.
-	pub fn append<'a>(&mut self, value: impl Into<Timed<&'a T>>) -> Result<usize>
-	where
-		T: 'a,
-	{
-		self.inner.lock().unwrap().append(value.into())
+	pub fn append(&mut self, value: &T, at: moq_net::Timestamp) -> Result<usize> {
+		self.inner.lock().unwrap().append(value, at)
 	}
 
-	/// Finish the track, closing the group.
-	pub fn finish(&mut self) -> Result<()> {
-		self.inner.lock().unwrap().finish()
+	/// Finish the track, closing the group, and return the [`Finished`] log.
+	///
+	/// Clones sharing the track see it ended: their next [`append`](Self::append) fails.
+	pub fn finish(self) -> Result<Finished<T>> {
+		self.inner.lock().unwrap().finish()?;
+		Ok(Finished {
+			inner: self.inner,
+			_marker: PhantomData,
+		})
 	}
 
 	/// Abort the track with the given error, which consumers see in place of a clean end.
 	///
 	/// Consumes the handle, since nothing can be appended afterwards. Clones sharing the track see
 	/// it closed: their next [`append`](Self::append) fails.
+	pub fn abort(self, err: moq_net::Error) -> Result<()> {
+		self.inner.lock().unwrap().track.abort(err);
+		Ok(())
+	}
+
+	/// [`abort`](Self::abort) the track only while nobody wants it, handing the handle back
+	/// unchanged when a reader does.
+	///
+	/// This is how an on-demand publisher ends a track once its [`demand`](Self::demand) reports
+	/// nobody wants it: dropping or aborting it instead fails a reader that joined in between.
+	/// See [`moq_net::track::Producer::abort_unwanted`]. Clones sharing the track see it as
+	/// [`abort`](Self::abort) leaves it.
+	pub fn abort_unwanted(self, err: moq_net::Error) -> std::result::Result<(), Self> {
+		let mut inner = self.inner.lock().unwrap();
+		// The check and the abort are one step on the track; the rest is the same cleanup.
+		if inner.track.inner.clone().abort_unwanted(err.clone()).is_err() {
+			drop(inner);
+			return Err(self);
+		}
+		inner.track.abort(err);
+		Ok(())
+	}
+}
+
+/// A log whose producer [finished](Producer::finish) it: it can still be read or aborted, but
+/// not appended to.
+///
+/// Dropping the last handle sharing the track releases it, so new readers can no longer find it.
+///
+/// ```compile_fail,E0599
+/// # fn cannot_append(log: moq_json::stream::Finished<u32>) {
+/// log.append(&1, moq_net::Timestamp::unscaled(0)).unwrap();
+/// # }
+/// ```
+#[must_use = "dropping the last handle releases the track, which new readers can then no longer find"]
+pub struct Finished<T> {
+	inner: Arc<Mutex<Inner<T>>>,
+	_marker: PhantomData<fn(T)>,
+}
+
+impl<T> Finished<T> {
+	/// Create a subscriber for the underlying track.
+	pub fn consume(&self) -> moq_net::track::Subscriber {
+		self.inner.lock().unwrap().track.inner.subscribe(None)
+	}
+
+	/// A watch-only handle to the underlying track's subscriber demand.
+	pub fn demand(&self) -> moq_net::track::Demand {
+		self.inner.lock().unwrap().track.inner.demand()
+	}
+
+	/// Abort the track with `err`; see [`moq_net::track::Finished::abort`]. Readers still draining
+	/// get the clean end instead once every group below the end finished.
 	pub fn abort(self, err: moq_net::Error) -> Result<()> {
 		self.inner.lock().unwrap().track.abort(err);
 		Ok(())
@@ -121,18 +176,18 @@ struct Inner<T> {
 }
 
 impl<T: Serialize> Inner<T> {
-	fn append(&mut self, payload: Timed<&T>) -> Result<usize> {
+	fn append(&mut self, value: &T, at: moq_net::Timestamp) -> Result<usize> {
 		// Split the borrow so `record` can hold the encoder while `track` is written through.
 		let Inner { track, encoder } = self;
 
 		// A timestamp that doesn't match the track, or that its scale can't hold, is refused before
 		// anything changes: found by `write`, it would be a hole that ends the whole log.
-		let at = track.inner.info().rescale(payload.at)?;
+		let at = track.inner.info().rescale(at)?;
 
 		// Encode first, so a value that can't be serialized doesn't publish an empty group that
 		// subscribers would advance into and wait on. Opening the group afterwards is safe because
 		// `record` guards the window: any failure below drops it uncommitted.
-		let record = match encoder.encode(payload.value) {
+		let record = match encoder.encode(value) {
 			Ok(record) => record,
 			// Refused before encoding, so nothing is missing from the log and nothing desynced.
 			Err(err @ crate::Error::Net(moq_net::Error::FrameTooLarge)) => return Err(err),
@@ -145,7 +200,7 @@ impl<T: Serialize> Inner<T> {
 			}
 		};
 
-		let opened = track.open();
+		let opened = track.open(at);
 		let published = opened.is_ok();
 		let result = match opened {
 			Ok(()) => track.write(at, record.payload()),
@@ -190,10 +245,10 @@ struct Track {
 }
 
 impl Track {
-	/// Open the log's group if it isn't already.
-	fn open(&mut self) -> std::result::Result<(), moq_net::Error> {
+	/// Open the log's group if it isn't already, starting at its first record's `timestamp`.
+	fn open(&mut self, timestamp: moq_net::Timestamp) -> std::result::Result<(), moq_net::Error> {
 		if self.group.is_none() {
-			self.group = Some(self.inner.append_group()?);
+			self.group = Some(self.inner.append_group(timestamp)?);
 		}
 		Ok(())
 	}
@@ -201,11 +256,11 @@ impl Track {
 	/// Append one encoded record to the log's group at `timestamp`.
 	fn write(
 		&mut self,
-		timestamp: Option<moq_net::Timestamp>,
+		timestamp: moq_net::Timestamp,
 		payload: &bytes::Bytes,
 	) -> std::result::Result<(), moq_net::Error> {
 		let group = self.group.as_mut().expect("a group is open");
-		group.write_frame(timestamp, payload.clone())
+		group.write_frame(crate::frame_time(group, timestamp), payload.clone())
 	}
 
 	/// End the track with an error, so a consumer sees the failure rather than a clean end.

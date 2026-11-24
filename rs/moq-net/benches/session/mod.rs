@@ -33,7 +33,7 @@
 //! `session_delivery_datagram` writes to a datagram track per broadcast instead of groups:
 //! one datagram per track per round across publisher and viewer axes, then larger payloads
 //! and cadences, on moq-lite and moq-transport-22. Throughput counts delivered datagrams,
-//! each checked for its sequence and payload, so a lost one fails.
+//! each checked for its key and payload, so a lost one fails.
 //! Delivery uses expiry-only pools: history expires between rounds outside timing,
 //! so byte pressure cannot shed unread frames during a batch.
 //! `SESSION_EXPIRY_ONLY=1` advances the cache clock by a second instead of the 30s
@@ -42,6 +42,10 @@
 //!
 //! `session_join_*` times a new viewer connecting, resolving a broadcast, and
 //! receiving its latest group, swept over what the relays already announce.
+//!
+//! `session_announce` times one broadcast announced and withdrawn beside many a publisher
+//! already announces, until every viewer session saw both, swept over those broadcasts and
+//! the viewers: a change's cost grows with the viewers it reaches, never with the claims held.
 //!
 //! `session_dash_*` models the moq.pro dash aggregator: one session following
 //! every node's per-project stats broadcast, each announced by a peer relay, at
@@ -84,6 +88,8 @@
 mod harness;
 #[path = "../../tests/integration/support/mock.rs"]
 pub(crate) mod mock;
+#[path = "../../tests/integration/support/schedule.rs"]
+mod schedule;
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -196,7 +202,10 @@ impl Shape {
 	/// subscription writes off as late.
 	fn subscription(&self) -> Option<track::Subscription> {
 		(self.burst > 1).then(|| {
-			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(30)))
+			track::Subscription::default().with_ranges([track::Range::from(track::Start::Live {
+				min: Some(Duration::from_secs(30)),
+				max: Some(Duration::from_secs(30)),
+			})])
 		})
 	}
 
@@ -426,6 +435,38 @@ fn runtime() -> tokio::runtime::Runtime {
 		.unwrap()
 }
 
+/// How long a lite-07 origin's route node holds a closed session's claims in case another
+/// session serves them: its debounce, 32 hops of 25 ms (`route::relay::debounce`).
+const ROUTE_LINGER: Duration = Duration::from_millis(32 * 25);
+
+/// Drop what a cell built on `rt`, if Criterion's filter ran it, and assert every task its
+/// sessions and origins spawned ends with it: a task that outlives its handles leaks for
+/// as long as a relay runs. The origins may first wait out [`ROUTE_LINGER`], on a paused
+/// clock so the wait costs nothing.
+fn retire<T>(rt: &tokio::runtime::Runtime, built: Option<T>) {
+	let Some(built) = built else {
+		return;
+	};
+	drop(built);
+	rt.block_on(async {
+		tokio::time::pause();
+		// Each close reaches the next driver on its following poll; this many passes is far
+		// more than any teardown chain takes.
+		let settle = || async {
+			for _ in 0..1024 {
+				if rt.metrics().num_alive_tasks() == 0 {
+					break;
+				}
+				tokio::task::yield_now().await;
+			}
+		};
+		settle().await;
+		tokio::time::sleep(ROUTE_LINGER).await;
+		settle().await;
+	});
+	assert_eq!(rt.metrics().num_alive_tasks(), 0, "tasks outlived the cell's handles");
+}
+
 /// A multi-threaded runtime with `workers` threads, for the scenarios timed in process CPU.
 fn threaded(workers: usize) -> tokio::runtime::Runtime {
 	tokio::runtime::Builder::new_multi_thread()
@@ -491,13 +532,34 @@ impl MeasurementClock {
 	}
 }
 
+/// Append the next group on a [`timed`] track, one millisecond past its largest start or at
+/// 0 on an empty track, so groups keep the key order a counter would give them.
+fn append_next(track: &track::Producer) -> group::Producer {
+	let key = track.largest().map_or(0, |largest| largest.group + 1);
+	track.append_group(Timestamp::from_millis(key).unwrap()).unwrap()
+}
+
+/// Where a group on a [`timed`] track starts, as its frames' timestamp.
+fn at(group: &group::Producer) -> Timestamp {
+	Timestamp::from_millis(group.start).unwrap()
+}
+
+/// The groups from the one starting at `key` onward.
+fn from(key: u64) -> track::Range {
+	track::Range {
+		start: track::Start::Time(key),
+		end: None,
+	}
+}
+
 fn write_group(track: &track::Producer, payload: &Bytes, frames: usize) -> u64 {
-	let mut group = track.append_group().unwrap();
+	let mut group = append_next(track);
+	let timestamp = at(&group);
 	for _ in 0..frames {
-		group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+		group.write_frame(timestamp, payload.clone()).unwrap();
 	}
 	let group = group.finish().unwrap();
-	group.sequence
+	group.start
 }
 
 /// Read one whole group, returning its payload bytes so skipped work can't look
@@ -535,8 +597,7 @@ impl Backend for Model {
 	fn relay(id: u64, capacity: Option<u64>) -> (Self::Relay, cache::Pool) {
 		// A relay forwards the routes it learns, as moq-relay's cluster does; off, a
 		// moq-lite-07 viewer never learns the publisher's broadcasts.
-		let (origin, pool) = make_origin(id, capacity);
-		(origin.with_proxy(true), pool)
+		make_origin(id, capacity, true)
 	}
 
 	fn origin(relay: &Self::Relay) -> &origin::Producer {
@@ -572,7 +633,7 @@ impl Drop for Pair {
 	}
 }
 
-fn make_origin(id: u64, capacity: Option<u64>) -> (origin::Producer, cache::Pool) {
+fn make_origin(id: u64, capacity: Option<u64>, proxy: bool) -> (origin::Producer, cache::Pool) {
 	let mut config = origin::Config::new(std::num::NonZeroU64::new(id).unwrap());
 	let profiling = std::env::var_os("SESSION_EXPIRY_ONLY").is_some();
 	let pool = cache::Pool::new(if capacity.is_none() || profiling {
@@ -581,6 +642,7 @@ fn make_origin(id: u64, capacity: Option<u64>) -> (origin::Producer, cache::Pool
 		cache::Config::default().with_capacity(capacity)
 	});
 	config.pool = pool.clone();
+	config.proxy = proxy;
 	let (producer, driver) = origin::Producer::new(config);
 	harness::spawn(driver);
 	(producer, pool)
@@ -601,7 +663,8 @@ struct Cluster<B: Backend> {
 	/// One datagram track per broadcast, indexed like [`path`], for datagram shapes only.
 	datagrams: Vec<datagram::Producer>,
 	_broadcasts: Vec<origin::Route>,
-	_origins: Vec<origin::Producer>,
+	/// Each publisher's origin, indexed like `publisher`.
+	origins: Vec<origin::Producer>,
 	_pairs: Vec<Pair>,
 	next_hop: u64,
 	/// The relay and publisher caches; each viewer owns its own.
@@ -621,7 +684,7 @@ impl<B: Backend> Cluster<B> {
 			tracks: Vec::new(),
 			datagrams: Vec::new(),
 			_broadcasts: Vec::new(),
-			_origins: Vec::new(),
+			origins: Vec::new(),
 			_pairs: Vec::new(),
 			next_hop: 0,
 			pools: Vec::new(),
@@ -689,7 +752,7 @@ impl<B: Backend> Cluster<B> {
 			let target = &this.relays[publisher % shape.relays];
 			options.server_subscribe = Some(B::origin(target).clone());
 			this._pairs.push(B::connect(options, target, false).await);
-			this._origins.push(origin);
+			this.origins.push(origin);
 		}
 
 		this
@@ -697,7 +760,7 @@ impl<B: Backend> Cluster<B> {
 
 	fn origin(&mut self, capacity: u64) -> (origin::Producer, cache::Pool) {
 		self.next_hop += 1;
-		make_origin(self.next_hop, (!self.expiry).then_some(capacity))
+		make_origin(self.next_hop, (!self.expiry).then_some(capacity), false)
 	}
 
 	/// Connect a viewer session to `relay`.
@@ -705,9 +768,10 @@ impl<B: Backend> Cluster<B> {
 		let (origin, pool) = self.origin(CLIENT_CACHE);
 		let mut options = MockConnectOptions::new(self.version);
 		options.transport.stream_buffer = self.window;
-		// Draft 22, the one IETF version here, keeps its SETUP stream open beside the groups.
-		options.transport.max_concurrent_uni_streams =
-			self.credit.map(|credit| credit + usize::from(!self.version.is_lite()));
+		// Draft 22 keeps its SETUP stream open beside the groups, and moq-lite-07 the
+		// relay's Announce Stream: neither may take the one grant the groups share.
+		let persistent = !self.version.is_lite() || self.version.as_str() == "moq-lite-07-wip";
+		options.transport.max_concurrent_uni_streams = self.credit.map(|credit| credit + usize::from(persistent));
 		options.client_discovers_all = self.discovers_all;
 		// Hidden included, as the dash's `.stats/` scope sees its subtree.
 		options.server_publish = Some(B::origin(&self.relays[relay]).consume().with_hidden(true));
@@ -746,7 +810,7 @@ impl Viewer {
 		let mut announced = self
 			.origin
 			.consume()
-			.scope(path, &moq_net::Patterns::from(moq_net::Pattern::all()))
+			.scope(path, &moq_net::Prefixes::all())
 			.unwrap()
 			.routes();
 		let event = announced.next().await.expect("announced");
@@ -1018,8 +1082,8 @@ impl<B: Backend> Room<B> {
 					let mut bytes = 0;
 					for (broadcast, track) in &viewer.fetches {
 						let newest = newest[*broadcast];
-						for sequence in newest + 1 - burst..=newest {
-							let mut group = track.fetch_group(sequence, None).await.unwrap();
+						for key in newest + 1 - burst..=newest {
+							let mut group = track.fetch_group(key, None).await.unwrap();
 							while let Some(frame) = group.read_frame().await.unwrap() {
 								bytes += frame.payload.len();
 							}
@@ -1059,7 +1123,7 @@ impl<B: Backend> Room<B> {
 		}
 	}
 
-	/// Line every viewer up on the same next sequence before the strict rounds.
+	/// Line every viewer up on the same next key before the strict rounds.
 	///
 	/// A consumer is live once its track's info arrives, but on lite-05/06 the SUBSCRIBE
 	/// that carries the datagrams follows that answer, so a datagram may still miss it.
@@ -1141,8 +1205,8 @@ impl<B: Backend> Room<B> {
 		self.written += 1;
 
 		for (writing, &broadcast) in self.writing.iter_mut().zip(&self.watched) {
-			let group = writing.get_or_insert_with(|| self.cluster.tracks[broadcast].append_group().unwrap());
-			group.write_frame(Timestamp::ZERO, self.payload.clone()).unwrap();
+			let group = writing.get_or_insert_with(|| append_next(&self.cluster.tracks[broadcast]));
+			group.write_frame(at(group), self.payload.clone()).unwrap();
 			if last {
 				writing.take().expect("written above").finish().unwrap();
 			}
@@ -1227,6 +1291,7 @@ fn delivery<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator
 				let room = room.get_or_insert_with(|| rt.block_on(Room::<B>::new(version, *shape)));
 				b.iter_custom(|iters| rt.block_on(room.measure(iters)))
 			});
+			retire(&rt, room);
 		}
 	}
 	group.finish();
@@ -1348,11 +1413,7 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 							.watch(
 								&path(0),
 								&[TRACK],
-								Some(
-									track::Subscription::default()
-										.with_range(span..)
-										.with_delay(track::Delay::default().with_max(None)),
-								),
+								Some(track::Subscription::default().with_ranges([from(span)])),
 							)
 							.await;
 						viewers.push(viewer);
@@ -1368,11 +1429,7 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 							let future = next + span;
 							for viewer in &mut viewers {
 								viewer.subscribers[0]
-									.update(
-										track::Subscription::default()
-											.with_range(future..)
-											.with_delay(track::Delay::default().with_max(None)),
-									)
+									.update(track::Subscription::default().with_ranges([from(future)]))
 									.unwrap();
 							}
 							kio::wait(|waiter| {
@@ -1380,9 +1437,10 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 									assert!(viewer.subscribers[0].poll_recv_group(waiter).is_pending());
 								}
 								loop {
-									if cluster.tracks[0].subscription().is_some_and(|subscription| {
-										subscription.ranges == [track::Range::groups(future..)]
-									}) {
+									if cluster.tracks[0]
+										.subscription()
+										.is_some_and(|subscription| subscription.ranges == [from(future)])
+									{
 										return std::task::Poll::Ready(());
 									}
 									if cluster.tracks[0].poll_subscription_changed(waiter).is_pending() {
@@ -1391,17 +1449,13 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 								}
 							})
 							.await;
-							for sequence in next..future {
-								assert_eq!(write_group(&cluster.tracks[0], &payload, 1), sequence);
+							for key in next..future {
+								assert_eq!(write_group(&cluster.tracks[0], &payload, 1), key);
 							}
 							let started = Instant::now();
 							for viewer in &mut viewers {
 								viewer.subscribers[0]
-									.update(
-										track::Subscription::default()
-											.with_range(future - 1..)
-											.with_delay(track::Delay::default().with_max(None)),
-									)
+									.update(track::Subscription::default().with_ranges([from(future - 1)]))
 									.unwrap();
 							}
 							for _ in 0..1 {
@@ -1434,12 +1488,11 @@ fn join<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Ite
 						let cluster = Cluster::<B>::new(version, *shape, false).await;
 						let payload = Bytes::from(vec![0; shape.frame]);
 						for track in &cluster.tracks {
-							for sequence in 0..shape.history {
-								let mut group = track.append_group().unwrap();
+							for key in 0..shape.history as u64 {
+								let start = Timestamp::from_millis(key).unwrap();
+								let mut group = track.append_group(start).unwrap();
 								for _ in 0..shape.group_frames {
-									group
-										.write_frame(Timestamp::from_millis(sequence as u64).unwrap(), payload.clone())
-										.unwrap();
+									group.write_frame(start, payload.clone()).unwrap();
 								}
 								group.finish().unwrap();
 							}
@@ -1472,6 +1525,71 @@ fn join<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Ite
 					})
 				})
 			});
+			retire(&rt, cluster);
+		}
+	}
+	group.finish();
+}
+
+/// `(broadcasts, viewers)` shapes for [`announce`].
+const ANNOUNCE: [(usize, usize); 4] = [(16, 1), (4096, 1), (16, 64), (4096, 64)];
+
+/// One more broadcast announced and withdrawn beside `broadcasts` a publisher already
+/// announces through one relay, timed until each of `viewers` sessions saw both.
+fn announce<B: Backend>(c: &mut Criterion) {
+	let mut group = c.benchmark_group(format!("{}session_announce", B::PREFIX));
+	for version in VERSIONS {
+		for (broadcasts, viewers) in ANNOUNCE {
+			let rt = runtime();
+			let mut room = None;
+			let id = format!("{version}/broadcasts={broadcasts}/viewers={viewers}");
+			group.bench_function(BenchmarkId::from_parameter(id), |b| {
+				let (cluster, routes, next) = room.get_or_insert_with(|| {
+					rt.block_on(async {
+						let shape = Shape {
+							publishers: 1,
+							broadcasts,
+							viewers,
+							..Shape::BASE
+						};
+						let mut cluster = Cluster::<B>::new(version, shape, false).await;
+						let mut routes = Vec::new();
+						for _ in 0..viewers {
+							let viewer = cluster.join(0, false).await;
+							let mut announced = viewer.origin.consume().routes();
+							for _ in 0..broadcasts {
+								let event = announced.next().await.expect("announced");
+								assert_eq!(event.kind, origin::RouteKind::Start);
+							}
+							routes.push((viewer, announced));
+						}
+						(cluster, routes, broadcasts)
+					})
+				});
+				b.iter_custom(|iters| {
+					rt.block_on(async {
+						let start = Instant::now();
+						for _ in 0..iters {
+							// A fresh path each time: a broadcast's identity never comes back.
+							let route = cluster.origins[0]
+								.route(path(*next), origin::RouteOptions::default())
+								.unwrap();
+							*next += 1;
+							for (_, announced) in routes.iter_mut() {
+								let event = announced.next().await.expect("announced");
+								assert_eq!(event.kind, origin::RouteKind::Start);
+							}
+							drop(route);
+							for (_, announced) in routes.iter_mut() {
+								let event = announced.next().await.expect("withdrawn");
+								assert_eq!(event.kind, origin::RouteKind::End);
+							}
+						}
+						start.elapsed()
+					})
+				})
+			});
+			retire(&rt, room);
 		}
 	}
 	group.finish();
@@ -1600,6 +1718,7 @@ fn dash<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Ite
 				let room = room.get_or_insert_with(|| rt.block_on(DashRoom::<B>::new(version, *shape)));
 				b.iter_custom(|iters| rt.block_on(room.measure(iters)))
 			});
+			retire(&rt, room);
 		}
 	}
 	group.finish();
@@ -1760,7 +1879,7 @@ impl<B: Backend> ChurnRoom<B> {
 			drop(subscriber);
 			drop(track);
 			let mut demand = self.churn[session].demand();
-			while demand.wanted_changed().await.unwrap().is_some() {}
+			while demand.wanted_changed().await.unwrap() {}
 		}
 		start.elapsed()
 	}
@@ -1778,6 +1897,7 @@ fn churn<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator<It
 				let room = room.get_or_insert_with(|| rt.block_on(ChurnRoom::<B>::new(version, *shape)));
 				b.iter_custom(|iters| rt.block_on(room.measure(iters)))
 			});
+			retire(&rt, room);
 		}
 	}
 	group.finish();
@@ -2100,6 +2220,8 @@ pub(crate) fn session<B: Backend>(c: &mut Criterion) {
 	);
 
 	join::<B>(c, "relays", [1, 2, 8].map(|relays| Shape { relays, ..base }));
+
+	announce::<B>(c);
 
 	churn::<B>(c, "sessions", [1, 16, 128].map(|sessions| Churn { sessions, held: 16 }));
 	churn::<B>(

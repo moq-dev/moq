@@ -26,7 +26,6 @@
 pub mod client;
 pub mod endpoint;
 pub mod handshake;
-#[cfg(feature = "qlog")]
 pub mod qlog;
 pub mod server;
 pub mod transport;
@@ -41,33 +40,6 @@ pub use endpoint::Endpoint;
 pub use moq_quic::{Limits, LimitsError, Rate};
 /// Stream identity, and the varint every QUIC code is.
 pub use moq_quic::{VarInt, stream};
-
-/// A built-in congestion control family, which converts into the factory
-/// [`transport::Config::congestion`] holds.
-///
-/// CUBIC is used for loss-based control and BBRv3 for delay-based control.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Congestion {
-	/// Loss-based: grows until it drops packets, so the send rate sawtooths.
-	Loss,
-	/// Delay-based: tracks the measured delivery rate and RTT instead of
-	/// waiting for loss, which keeps queues short and the send rate steady
-	/// enough for an encoder to track.
-	Delay,
-	/// No congestion control and no pacing, for tests and controlled links.
-	None,
-}
-
-impl From<Congestion> for std::sync::Arc<dyn moq_congestion::Factory + Send + Sync> {
-	fn from(family: Congestion) -> Self {
-		match family {
-			Congestion::Loss => std::sync::Arc::new(moq_congestion::cubic::Config::default()),
-			Congestion::Delay => std::sync::Arc::new(moq_congestion::bbr3::Config::default()),
-			Congestion::None => std::sync::Arc::new(moq_congestion::Unlimited),
-		}
-	}
-}
 
 /// Why a connection could not be set up or has ended.
 ///

@@ -6,7 +6,21 @@
 //! [`Reconnect::failed`], and otherwise polls it with the current time. The machine
 //! watches each live session for its close and GOAWAY itself, keeps a drained
 //! predecessor serving through its handover, and drops neither on the caller's behalf
-//! until it reports [`Action::Done`].
+//! until it reports [`Action::Done`]. A connected session serves only once the machine
+//! reports it [`Action::Established`], so a caller never shows a refusal as connected.
+//!
+//! The policy fails fast until a session is established: the peer accepts the connection
+//! credential (its SETUP, or on moq-lite-07-wip the AUTH_OK to the connection's own
+//! credential) or drains the session with a GOAWAY. On moq-lite 03/04, which answer the
+//! credential with nothing, staying up past [`Backoff::healthy`] establishes it too; a
+//! version with an answer waits for it however long the session stays up. A failed walk,
+//! or a session closed before then, ends the policy
+//! with [`Action::Done`] carrying that error rather than retrying, so a setup mistake
+//! surfaces at once instead of looping. That covers a peer that refuses the session right
+//! after connecting, as a relay rejecting a token on moq-lite 03 or later does. A client
+//! started before its peer is reachable therefore exits, for its supervisor or app to
+//! restart. Once a session has been established, a later failure backs off and retries
+//! under [`Backoff`], so restarts and redeploys still recover.
 //!
 //! A caller whose session landed on a fallback transport says so with
 //! [`Reconnect::fallback`]. The machine then asks for [`Action::Probe`]s of the preferred
@@ -24,7 +38,7 @@ use std::{collections::VecDeque, task::Poll, time::Duration};
 use rand::RngExt;
 use url::Url;
 
-use crate::{Error, Session, SessionError, auth, goaway, time::Instant};
+use crate::{Error, Session, auth, goaway, time::Instant};
 use redirect::{Redirects, Shown, endpoint};
 
 /// How long one address gets before the walk moves to the peer's next one.
@@ -45,7 +59,11 @@ const PROBE_INITIAL: Duration = Duration::from_secs(10);
 /// The longest wait between probes of the preferred transport, before jitter.
 const PROBE_MAX: Duration = Duration::from_secs(300);
 
-/// When to redial after a failure, and when to give up.
+/// When to redial after a failure, and when to give up, once a session has been established.
+///
+/// A session is established once the peer accepts the connection credential or drains the
+/// session with a GOAWAY, or, on a version with no answer to the credential (moq-lite
+/// 03/04), once it stays up past `healthy`. Before then nothing retries: a failed walk, or a session closed sooner, ends the policy.
 ///
 /// `initial` and `multiplier` set the wait before each retry, `max` caps it, and
 /// `healthy` decides which sessions count as failed attempts. The delays carry jitter,
@@ -55,10 +73,11 @@ const PROBE_MAX: Duration = Duration::from_secs(300);
 /// peer sends one to each session until it goes, and each of those serves, so it
 /// restarts the timeout instead.
 ///
-/// A GOAWAY off a healthy session migrates at once, unless it sends the connection back
-/// to an endpoint that already redirected it elsewhere and the session lived less than
-/// `max`. Two peers redirecting to each other thus wait out this backoff and count
-/// against the timeout.
+/// A GOAWAY off a healthy session migrates at once, unless the run of redirects, among
+/// sessions that each lived less than `max`, has looped back through an endpoint. The loop
+/// check keeps one endpoint, so it catches a cycle within a few laps rather than at the
+/// first revisit: A to B, B to C, C to B is followed once before it is caught. Peers
+/// redirecting in a loop then wait out this backoff and count against the timeout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Backoff {
@@ -72,13 +91,16 @@ pub struct Backoff {
 	pub max: Option<Duration>,
 	/// How long a session must stay up to count as healthy. Must be nonzero. Defaults to 1 s.
 	///
+	/// Where the peer never answers the connection credential, as on moq-lite 03/04, the first
+	/// healthy session establishes the policy, so failures retry from then on. Elsewhere only
+	/// the peer's answer or a GOAWAY establishes it, however long a session stays up.
 	/// A healthy session's end resets the delay and the timeout. One that ends sooner is a
 	/// failed attempt, so a peer that accepts and then drops every session still escalates
 	/// the delay and exhausts the timeout.
 	pub healthy: Duration,
 	/// How long to keep retrying before giving up. `None` (the default) retries forever, so
 	/// an outage of any length recovers on its own; a caller that can react to a persistent
-	/// failure sets one. Zero still makes the first walk, and gives up when it fails.
+	/// failure sets one. Zero gives up at the first failure.
 	///
 	/// No new walk of the peer's addresses starts once it has passed, but one under way
 	/// finishes: each address but the last gets up to 5 s, and the last runs to
@@ -100,10 +122,10 @@ impl Default for Backoff {
 	}
 }
 
-/// How a connection reacts to a peer's GOAWAY.
+/// How a connection hands over to a new session after a peer's GOAWAY.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct Goaway {
+pub struct Handover {
 	/// What to do with the URI the GOAWAY names. Defaults to [`Redirect::SameHost`].
 	pub redirect: Redirect,
 	/// The longest the old session keeps serving after a GOAWAY. Defaults to 10 s.
@@ -114,7 +136,7 @@ pub struct Goaway {
 	pub handover: Duration,
 }
 
-impl Default for Goaway {
+impl Default for Handover {
 	fn default() -> Self {
 		Self {
 			redirect: Redirect::default(),
@@ -123,7 +145,7 @@ impl Default for Goaway {
 	}
 }
 
-impl Goaway {
+impl Handover {
 	/// The handover window for a GOAWAY naming `deadline`: whichever is sooner.
 	fn handover(&self, deadline: Option<Duration>) -> Duration {
 		deadline.map_or(self.handover, |deadline| deadline.min(self.handover))
@@ -139,11 +161,17 @@ pub enum Restart {
 	/// off the drained one. The default.
 	#[default]
 	Redial,
-	/// Keep serving on the drained session until the peer closes it, then reconnect as after
-	/// any drop. Right for an address that names one node, where a redial only reaches the
-	/// draining process again. The peer must close the session itself, as a relay does at
-	/// its drain deadline.
-	Wait,
+	/// Redial the same addresses once, as [`Self::Redial`] does, and keep serving on the
+	/// drained session meanwhile. A redial that reaches the draining process again, which
+	/// drains it before it is [healthy](Backoff::healthy), then keeps serving until the peer
+	/// closes it, and the connection reconnects as after any drop.
+	///
+	/// Right for an address that names one node which may start its replacement beside the
+	/// draining process, as a relay with `[handoff]` does: the one redial reaches the
+	/// replacement. A node that restarts in place costs a single extra session to the
+	/// draining process rather than one per backoff. The peer must close the session
+	/// itself, as a relay does at its drain deadline.
+	Handoff,
 }
 
 /// The whole connect policy for one peer.
@@ -153,7 +181,7 @@ pub struct Config {
 	/// When to redial, and when to give up.
 	pub backoff: Backoff,
 	/// How to follow a peer's GOAWAY.
-	pub goaway: Goaway,
+	pub goaway: Handover,
 	/// What a GOAWAY naming no URI does.
 	pub restart: Restart,
 	/// The deadline for one dial and its handshake. `None` waits forever. Defaults to 30 s.
@@ -171,7 +199,7 @@ impl Default for Config {
 	fn default() -> Self {
 		Self {
 			backoff: Backoff::default(),
-			goaway: Goaway::default(),
+			goaway: Handover::default(),
 			restart: Restart::default(),
 			timeout: Some(Duration::from_secs(30)),
 			once: false,
@@ -200,7 +228,8 @@ impl Target for Url {
 	}
 }
 
-/// What a failed dial means for the rest of the policy, judged by the caller.
+/// What a failed dial means for the address walk, judged by the caller from the address
+/// and the peer's answer rather than the error's kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Verdict {
@@ -212,23 +241,6 @@ pub enum Verdict {
 	/// The peer's answer for every address, such as an HTTP 404: stop the walk, then
 	/// back off and retry.
 	Settled,
-	/// The peer refused the credential: give up unless the tokens changed since the dial.
-	Refused,
-	/// Nothing a retry can repair, such as malformed protocol input: give up.
-	Fatal,
-}
-
-impl From<&Error> for Verdict {
-	/// Judge an error from the MoQ handshake or a session's close.
-	fn from(err: &Error) -> Self {
-		match SessionError::from(err) {
-			SessionError::Unauthorized | SessionError::Expired | SessionError::MalformedAuthToken => Self::Refused,
-			SessionError::ProtocolViolation | SessionError::KeyValueFormatting | SessionError::InvalidRequestId => {
-				Self::Fatal
-			}
-			_ => Self::Retry,
-		}
-	}
 }
 
 /// A failure the policy itself decides on.
@@ -330,18 +342,25 @@ pub enum Action<A, E> {
 	/// [`Reconnect::failed`], polling meanwhile. Build each session's client with
 	/// [`Attempt::client`].
 	Dial(Attempt<A>),
+	/// The live session is established: its peer accepted the connection credential or
+	/// drained it with a GOAWAY, or, on a version with no answer (moq-lite 03/04), it stayed
+	/// up past [`Backoff::healthy`]. Until then a
+	/// connected session may still be a refusal, so report it as serving only from here.
+	/// Carries the session, which a GOAWAY may already have moved to the predecessor.
+	Established(Box<Session>),
 	/// Drop the dial or probe in flight: it ran out its deadline, which already counted as
-	/// its failure.
+	/// its failure, or the predecessor's peer redirected while it headed for that peer.
 	Abandon,
-	/// The live session got a GOAWAY and now drains as the [`predecessor`](Reconnect::predecessor)
-	/// while a replacement is dialed.
+	/// The [`predecessor`](Reconnect::predecessor) serves while a replacement is dialed: the
+	/// live session got a GOAWAY and now drains as it, or the replacement closed while it
+	/// still drains.
 	Migrating,
 	/// The predecessor closed or overstayed its handover.
 	Retired,
 	/// Nothing serves anymore: the live session ended with this error, or the predecessor
 	/// retired between sessions. A redial follows.
 	Offline(Option<E>),
-	/// Why the policy is waiting to redial: a walk failed or a session ended too soon.
+	/// Why the policy is waiting to redial: a walk failed, or a session ended.
 	Retrying(E),
 	/// Poll again by this instant, or on a wake.
 	Wait(Option<Instant>),
@@ -361,12 +380,18 @@ pub enum Action<A, E> {
 pub struct Reconnect<A, E> {
 	config: Config,
 	targets: Vec<A>,
+	// The addresses the caller configured, which a failed walk to a redirect returns to.
+	// None until a GOAWAY redirect replaces `targets`.
+	configured: Option<Vec<A>>,
 	tokens: Option<auth::Tokens>,
 	retry: Retry<E>,
 	redirects: Redirects,
 	phase: Phase,
 	/// The failures of the walk under way.
 	walk: Walk<E>,
+	/// Whether any session was established: [`Action::Established`] was reported for it. Until
+	/// then, a failed walk or a closed session ends the policy.
+	established: bool,
 	/// An old session kept serving after a GOAWAY so its in-flight groups finish.
 	predecessor: Option<Predecessor>,
 	queue: VecDeque<Action<A, E>>,
@@ -400,9 +425,10 @@ struct Live {
 	session: Session,
 	since: Instant,
 	index: usize,
+	/// Whether [`Action::Established`] was reported for this session.
+	established: bool,
 	/// Dropped once a restart is waited out: it is a latch, so it would keep firing.
 	goaway: Option<goaway::Consumer>,
-	presented: Option<auth::Dial>,
 	/// Set while the session runs on a fallback transport.
 	probe: Option<Probe>,
 }
@@ -496,10 +522,12 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 			retry: Retry::new(Pacing::new(&config.backoff).initial, now),
 			config,
 			targets,
+			configured: None,
 			tokens: None,
 			redirects: Redirects::default(),
 			phase: Phase::Start,
 			walk: Walk::default(),
+			established: false,
 			predecessor: None,
 			queue: VecDeque::new(),
 		})
@@ -507,8 +535,7 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 
 	/// Present `tokens` on every dial, through [`Attempt::client`].
 	///
-	/// A refused credential then earns another dial once the tokens change, and an ended
-	/// tokens handle ends the policy at its next walk.
+	/// An ended tokens handle ends the policy at its next walk.
 	pub fn with_tokens(mut self, tokens: auth::Tokens) -> Self {
 		self.tokens = Some(tokens);
 		self
@@ -543,9 +570,11 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 			}
 
 			let live = matches!(self.phase, Phase::Live(_));
+			// A replacement serves only once established: until then it may be a refusal.
+			let serving = matches!(&self.phase, Phase::Live(live) if live.established);
 			if let Some(predecessor) = self.predecessor.as_mut() {
 				// The replacement serves, so a predecessor carrying nothing closes now.
-				if live {
+				if serving {
 					predecessor.poll_idle(waiter);
 				}
 				if predecessor.poll(now, waiter) {
@@ -553,11 +582,16 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 					self.queue.push_back(Action::Retired);
 					// Nothing is serving once it retires between sessions, so a caller must
 					// stop handing out a session that is already closed.
-					if !live {
+					if !serving {
 						self.queue.push_back(Action::Offline(None));
 					}
 					continue;
 				}
+			}
+			// Until a replacement serves, a redirect the predecessor's peer sends decides where
+			// the next dial goes.
+			if !live && let Some(action) = self.follow(waiter) {
+				return action;
 			}
 			let handover = self.predecessor.as_ref().map(|predecessor| predecessor.deadline);
 
@@ -576,11 +610,42 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 					deadline => return Action::Wait(earliest(deadline.as_ref().map(|(at, _)| *at), handover)),
 				},
 				Phase::Live(live) => {
+					// Checked before the close, which may follow the peer's acceptance in one wake:
+					// a session the peer accepted and then dropped is an outage, not a refusal.
+					// Uptime stands in for an answer only on a version that has none: a peer that
+					// can answer and has not may still refuse.
+					let healthy = live
+						.session
+						.is_silent()
+						.then(|| live.since.saturating_add(self.config.backoff.healthy));
+					let uptime = healthy.is_some_and(|healthy| now >= healthy);
+					if !live.established && (uptime || live.session.poll_accepted(waiter).is_ready()) {
+						live.established = true;
+						self.established = true;
+						return Action::Established(Box::new(live.session.clone()));
+					}
 					let mut ended = None;
 					// Checked before the close: a GOAWAY means the session is still up, and
 					// migrating from it is not the same as reconnecting after it died.
 					if let Some(Poll::Ready(Ok(msg))) = live.goaway.as_ref().map(|goaway| goaway.poll(waiter)) {
-						if self.config.restart == Restart::Wait && msg.uri().is_empty() {
+						// A GOAWAY establishes the policy however soon it comes: the peer accepted
+						// the session and asked us to move, which a refusal never does. So a
+						// client started while its relay drains rides out the restart, whether it
+						// redials now or serves until the peer closes the session.
+						self.established = true;
+						if !std::mem::replace(&mut live.established, true) {
+							self.queue
+								.push_back(Action::Established(Box::new(live.session.clone())));
+						}
+						// Under `Handoff`, a session drained before it was healthy is a redial that
+						// reached the draining process rather than a replacement, so another would
+						// only reach it again.
+						let wait = match self.config.restart {
+							Restart::Redial => false,
+							Restart::Handoff => now.saturating_duration_since(live.since) < self.config.backoff.healthy,
+						};
+						// A one-shot policy ends on any GOAWAY instead, as `once` promises.
+						if wait && !self.config.once && msg.uri().is_empty() {
 							tracing::info!("peer is restarting; serving until it closes the session");
 							live.goaway = None;
 						} else {
@@ -596,7 +661,18 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 						self.end(now, ended);
 						continue;
 					}
-					match live.probe.as_mut().map(|probe| probe.poll(now)) {
+					if !self.queue.is_empty() {
+						continue;
+					}
+					// An unestablished silent session is established by uptime at the latest.
+					let handover = match live.established {
+						true => handover,
+						false => earliest(healthy, handover),
+					};
+					// Only an established session is left for the preferred transport: one that may
+					// still be a refusal is no session to hand over.
+					let probe = live.probe.as_mut().filter(|_| live.established);
+					match probe.map(|probe| probe.poll(now)) {
 						None => return Action::Wait(handover),
 						Some(ProbePoll::Wait(at)) => return Action::Wait(earliest(at, handover)),
 						Some(ProbePoll::Abandon) => return Action::Abandon,
@@ -640,16 +716,13 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		if let Some(tokens) = &self.tokens {
 			tokens.connected(&session);
 		}
-		// A predecessor that retired mid-dial queued an offline this session now contradicts.
-		// Its `Retired` stays, so the caller still drops the predecessor.
-		self.queue.retain(|action| !matches!(action, Action::Offline(_)));
 		self.walk = Walk::default();
 		self.phase = Phase::Live(Box::new(Live {
 			goaway: Some(session.draining()),
 			session,
 			since: now,
 			index: dialing.index,
-			presented: dialing.presented,
+			established: false,
 			probe: None,
 		}));
 	}
@@ -716,10 +789,11 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		};
 		// A GOAWAY naming no URI: the peer learns we are moving, and the session stops
 		// taking new work, which frees the tokens for its replacement.
-		if old.session.drain().send(goaway::Goaway::new()).is_err() {
+		if old.session.goaway(goaway::Goaway::new()).is_err() {
 			tracing::debug!("the fallback session was already draining");
 		}
 		// The fallback session served all along, so a long one still earns the healthy reset.
+		// Only an established session is probed, so the policy already is.
 		self.retry.settle(
 			now,
 			now.saturating_duration_since(old.since),
@@ -728,10 +802,20 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		if let Some(older) = self.predecessor.take() {
 			older.retire();
 		}
+		// Its peer may still redirect us while it drains, which `follow` acts on. A fixed
+		// target never moves, so it needs no watch.
+		let redirect = old
+			.goaway
+			.filter(|_| !self.targets[index].fixed())
+			.map(|goaway| Redirected {
+				goaway,
+				url: self.targets[index].url().clone(),
+			});
 		self.predecessor = Some(Predecessor {
 			deadline: now.saturating_add(self.config.goaway.handover),
 			session: old.session,
 			closing: false,
+			redirect,
 		});
 		// Only now, once the fallback stops taking new work: a probe that never gets through
 		// leaves the serving session's tokens and their grants alone.
@@ -841,9 +925,7 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 			// settles the whole walk. Carrying on would offer the same rejected credentials at
 			// the peer's other addresses, and a later transport failure would overwrite the
 			// real reason.
-			Verdict::Settled | Verdict::Refused | Verdict::Fatal => {
-				return self.walk_failed(now, err, verdict, dialing.presented.as_ref());
-			}
+			Verdict::Settled => return self.walk_failed(now, err, verdict),
 			Verdict::Retry => self.walk.transient = Some(err.clone()),
 			Verdict::Unusable => {}
 		}
@@ -860,26 +942,76 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		// One unusable target must not turn another target's transient failure terminal.
 		let walk = std::mem::take(&mut self.walk);
 		match walk.transient {
-			Some(err) => self.walk_failed(now, err, Verdict::Retry, None),
-			None => self.walk_failed(now, walk.last.expect("a failed walk"), Verdict::Unusable, None),
+			Some(err) => self.walk_failed(now, err, Verdict::Retry),
+			None => self.walk_failed(now, walk.last.expect("a failed walk"), Verdict::Unusable),
 		}
 	}
 
-	fn walk_failed(&mut self, now: Instant, err: E, verdict: Verdict, presented: Option<&auth::Dial>) {
+	fn walk_failed(&mut self, now: Instant, err: E, verdict: Verdict) {
 		self.walk = Walk::default();
-		let terminal = match verdict {
-			Verdict::Fatal | Verdict::Unusable => true,
-			Verdict::Refused => !self.changed(presented),
-			Verdict::Retry | Verdict::Settled => false,
-		};
-		if terminal || self.config.once {
+		// Otherwise a walk fails fast until a session was established: a peer that never
+		// accepted one is more likely misconfigured (an unknown host, an untrusted certificate,
+		// no version in common) than restarting, and only the caller can fix that.
+		// After that, every failure retries, whatever its kind.
+		if verdict == Verdict::Unusable || self.config.once || !self.established {
 			return self.done(Err(err));
 		}
 		self.queue.push_back(Action::Retrying(err.clone()));
 		self.retry.last = Some(err);
+		// A redirect target that no longer answers is dropped: the next walk dials the
+		// configured addresses, which may still answer.
+		if let Some(configured) = self.configured.take() {
+			self.targets = configured;
+		}
 		// No URL here: with several targets there isn't one to name, and each attempt
 		// already logged the address it tried.
 		self.back_off(now, self.config.backoff.timeout, false, "reconnecting after backoff");
+	}
+
+	/// Act on a GOAWAY the predecessor's peer sent after a probe moved us off it, the way
+	/// [`end`](Self::end) would have: an accepted redirect becomes the only target, and a dial
+	/// still headed for the leaving peer is dropped. Anything else leaves the targets alone,
+	/// since the policy is already leaving that session.
+	fn follow(&mut self, waiter: &kio::Waiter) -> Option<Action<A, E>> {
+		let predecessor = self.predecessor.as_mut()?;
+		let redirect = predecessor.redirect.as_ref()?;
+		let Poll::Ready(msg) = redirect.goaway.poll(waiter) else {
+			return None;
+		};
+		// No need to establish the policy here: only an established session is probed.
+		let redirect = predecessor.redirect.take()?;
+		let target = match msg.map(|msg| {
+			self.config
+				.goaway
+				.redirect
+				.target(msg.uri(), &redirect.url, self.config.pinned)
+		}) {
+			Ok(Ok(Some(target))) => target,
+			// A closed session, a restart in place, or a refused redirect: nothing to follow.
+			_ => return None,
+		};
+		tracing::info!(peer = %Shown(&target), "draining fallback peer redirected; following");
+		// No loop scoring here: only a probe that got through leads here, and the probe's
+		// backoff paces those. The session this dial lands on is scored when it ends.
+		let redirected = std::mem::replace(&mut self.targets, vec![A::from(target)]);
+		self.configured.get_or_insert(redirected);
+		// A walk of the replaced targets gives way to one of the new target.
+		if matches!(self.phase, Phase::Dialing(_) | Phase::Next { .. }) {
+			self.walk = Walk::default();
+		}
+		match self.phase {
+			Phase::Dialing(_) => {
+				self.phase = Phase::Start;
+				Some(Action::Abandon)
+			}
+			// An index into the replaced targets.
+			Phase::Next { .. } => {
+				self.phase = Phase::Start;
+				None
+			}
+			// A backoff still paces the next dial, which now goes to the new target.
+			_ => None,
+		}
 	}
 
 	/// Score how a live session ended and decide what follows.
@@ -890,7 +1022,6 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		let tenure = now.saturating_duration_since(live.since);
 		let url = self.targets[live.index].url().clone();
 		let pacing = Pacing::new(&self.config.backoff);
-
 		// The connected target owns the policy, including when connecting once. A refused
 		// redirect is terminal: the peer is leaving and named somewhere we won't go, so
 		// redialing the old address or a fallback would ignore it.
@@ -936,15 +1067,17 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 
 		let msg = match ended {
 			Ended::Goaway(msg) => msg,
-			Ended::Closed(err) => return self.closed(now, err, healthy, live.presented.as_ref(), &url),
+			Ended::Closed(err) => return self.closed(now, err, healthy, &url),
 		};
 
-		// An accepted redirect is an assignment: keep dialing it from here on, and only it.
-		// The peer named exactly one place to go, which retires whatever other addresses got
-		// us to this session.
+		// An accepted redirect is an assignment: keep dialing it from here on, and only it,
+		// until a walk to it fails and `walk_failed` restores the configured addresses. The
+		// peer named exactly one place to go, which retires whatever other addresses got us
+		// to this session.
 		let url = match assigned {
 			Some(target) => {
-				self.targets = vec![A::from(target.clone())];
+				let redirected = std::mem::replace(&mut self.targets, vec![A::from(target.clone())]);
+				self.configured.get_or_insert(redirected);
 				target
 			}
 			None => url,
@@ -961,6 +1094,8 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 			deadline: now.saturating_add(self.config.goaway.handover(msg.timeout())),
 			session: live.session,
 			closing: false,
+			// Its GOAWAY was just acted on.
+			redirect: None,
 		});
 		self.queue.push_back(Action::Migrating);
 
@@ -994,21 +1129,33 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 	}
 
 	/// The live session closed with `err`.
-	fn closed(&mut self, now: Instant, err: Error, healthy: bool, presented: Option<&auth::Dial>, url: &Url) {
-		// Refusals and malformed protocol input are settled failures, however long the
-		// session lived, unless the tokens changed since this dial read them.
-		let terminal = match Verdict::from(&err) {
-			Verdict::Fatal => true,
-			Verdict::Refused => !self.changed(presented),
-			_ => false,
-		};
+	fn closed(&mut self, now: Instant, err: Error, healthy: bool, url: &Url) {
 		let err = E::from(err);
 		// Connecting once, the session ending ends the policy with its close reason.
-		if terminal || self.config.once {
+		if self.config.once {
+			return self.done(Err(err));
+		}
+		// Until a session was established, a close ends the policy as a failed walk does. It
+		// is how a peer refuses a session that is already live, such as a rejected credential
+		// on moq-lite 03 or later, closed before the peer's SETUP or AUTH_OK; redialing would
+		// offer the same credential forever. No error kind is read, and as for a refused dial,
+		// tokens replaced since change nothing.
+		if !self.established {
 			return self.done(Err(err));
 		}
 
-		self.queue.push_back(Action::Offline(Some(err.clone())));
+		// A predecessor still draining serves again, so this is no outage: the caller moves
+		// back onto it. One closing gracefully already carries nothing and takes no new work.
+		if self
+			.predecessor
+			.as_ref()
+			.is_some_and(|predecessor| !predecessor.closing)
+		{
+			self.queue.push_back(Action::Migrating);
+			self.queue.push_back(Action::Retrying(err.clone()));
+		} else {
+			self.queue.push_back(Action::Offline(Some(err.clone())));
+		}
 		if healthy {
 			// The window was reset, so a one-off drop reconnects promptly.
 			tracing::warn!(peer = %Shown(url), "session closed, reconnecting");
@@ -1037,14 +1184,6 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 			until: now.saturating_add(wait),
 			restart,
 		};
-	}
-
-	/// Whether the tokens changed since `presented` read them, so a refusal earns another dial.
-	fn changed(&self, presented: Option<&auth::Dial>) -> bool {
-		match (&self.tokens, presented) {
-			(Some(tokens), Some(presented)) => tokens.changed(presented),
-			_ => false,
-		}
 	}
 
 	/// Giving up once the retry `window` ran out.
@@ -1154,6 +1293,14 @@ struct Predecessor {
 	deadline: Instant,
 	/// Whether [`Self::poll_idle`] started the graceful close.
 	closing: bool,
+	/// Watches for a redirect from the peer, set when a probe moved us off this session.
+	redirect: Option<Redirected>,
+}
+
+/// A drained fallback session's GOAWAY, and the URL a redirect in it is judged against.
+struct Redirected {
+	goaway: goaway::Consumer,
+	url: Url,
 }
 
 impl Predecessor {

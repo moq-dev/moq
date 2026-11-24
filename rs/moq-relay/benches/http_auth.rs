@@ -138,7 +138,7 @@ impl Fixture {
 }
 
 fn grant() -> Grant {
-	Grant::new(moq_auth::Patterns::new(), moq_auth::Pattern::all())
+	Grant::new(moq_auth::Prefixes::new(), moq_auth::Prefix::all())
 }
 
 async fn decide(

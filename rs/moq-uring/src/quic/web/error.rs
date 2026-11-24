@@ -12,10 +12,6 @@ pub enum Error {
 	#[error("closed: code={0} reason={1}")]
 	Closed(u32, String),
 
-	/// The peer tore down the session's streams before its close reason arrived.
-	#[error("session gone")]
-	SessionGone,
-
 	/// HTTP/3 closed the connection with a code of its own, one that names no WebTransport
 	/// code (`H3_NO_ERROR`, say), so not a code the peer's application chose.
 	#[error("http/3 closed: code={code} reason={reason:?}")]
@@ -106,7 +102,7 @@ impl Error {
 	/// Whether the session's recorded close reason should replace this error: the connection
 	/// closing caused it, or it is a close itself.
 	pub(super) fn is_close(&self) -> bool {
-		self.connection().is_some() || matches!(self, Self::Closed(..) | Self::SessionGone | Self::Http3 { .. })
+		self.connection().is_some() || matches!(self, Self::Closed(..) | Self::Http3 { .. })
 	}
 }
 

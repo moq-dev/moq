@@ -1,10 +1,12 @@
 import { expect, mock, spyOn, test } from "bun:test";
-import { Duration, Manual } from "@moq/clock";
+import { Duration } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { ProtocolViolation, SessionCode, StreamCode, StreamError } from "../error.ts";
 import { manual, settlesWithin } from "../mock.ts";
 import { Reader, Stream } from "../stream.ts";
 import { Deadline, REQUEST_TIMEOUT_MS } from "../util/deadline.ts";
 import * as Varint from "../varint.ts";
+import { framed } from "./message.test-util.ts";
 import { RequestError } from "./request.ts";
 import { namespaceUpdate, nextMessage, RequestStream, refuse } from "./request_stream.ts";
 import type { Session } from "./session.ts";
@@ -37,12 +39,16 @@ function requested(version: IetfVersion, bytes: Uint8Array, end?: "fin" | "reset
 	return { request: new RequestStream(stream, session, quic), closes };
 }
 
+/** A control message of `type` framed for `version`. */
+const message = (type: number, body: number[], version: IetfVersion) => [type, ...framed(body, version)];
 // GOAWAY with no new session and no timeout.
-const GOAWAY = [0x10, 0, 2, 0, 0];
+const goaway = (version: IetfVersion) => message(0x10, [0, 0], version);
+// An empty REQUEST_OK, or an empty REQUEST_UPDATE.
+const empty = (type: number, version: IetfVersion) => message(type, [], version);
 
 test("an oversized or truncated request stream message type is a protocol violation", async () => {
 	// Both drafts use leading-ones varints.
-	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22, Version.DRAFT_23]) {
 		const oversized = Varint.encodeLeadingOnes(2n ** 53n);
 		// A two-byte varint prefix with its second byte missing.
 		const truncated = Uint8Array.of(0x80);
@@ -55,17 +61,17 @@ test("an oversized or truncated request stream message type is a protocol violat
 });
 
 test("namespace update framing refuses duplicate prefix parameters", async () => {
-	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22, Version.DRAFT_23]) {
 		const body = [2, 2, 0x34, 1, 1, 97, 0, 1, 1, 98];
-		const reader = new Reader(undefined, Uint8Array.from([0, body.length, ...body]), version);
+		const reader = new Reader(undefined, framed(body, version), version);
 		await expect(namespaceUpdate({ type: 2, reader }, version)).rejects.toBeInstanceOf(ProtocolViolation);
 	}
 });
 
 test("a repeated namespace update token is a request refusal", async () => {
-	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22, Version.DRAFT_23]) {
 		const body = [2, 2, 3, 3, 3, 0, 170, 0, 3, 3, 0, 170];
-		const reader = new Reader(undefined, Uint8Array.from([0, body.length, ...body]), version);
+		const reader = new Reader(undefined, framed(body, version), version);
 		expect(await namespaceUpdate({ type: 2, reader }, version)).toEqual({
 			requestId: 2n,
 			refused: "malformed_auth_token",
@@ -73,9 +79,9 @@ test("a repeated namespace update token is a request refusal", async () => {
 	}
 });
 
-for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
+for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22, Version.DRAFT_23]) {
 	test(`${versionName(version)} a request nobody reads yet still refuses a second GOAWAY`, async () => {
-		const { request, closes } = requested(version, Uint8Array.of(...GOAWAY, ...GOAWAY));
+		const { request, closes } = requested(version, Uint8Array.of(...goaway(version), ...goaway(version)));
 		await request.ended;
 		expect(closes).toEqual([
 			{ closeCode: SessionCode.ProtocolViolation, reason: "second GOAWAY on a request stream" },
@@ -90,10 +96,10 @@ for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 	test(`${versionName(version)} a request stream's messages are taken whole, around a GOAWAY`, async () => {
 		using clock = manual();
 		// An empty REQUEST_OK, then FIN.
-		const { request, closes } = requested(version, Uint8Array.of(...GOAWAY, 7, 0, 0), "fin");
-		const framed = await request.next();
-		expect(framed?.type).toBe(7);
-		expect(await framed?.reader.u16()).toBe(0);
+		const { request, closes } = requested(version, Uint8Array.of(...goaway(version), ...empty(7, version)), "fin");
+		const next = await request.next();
+		expect(next?.type).toBe(7);
+		expect(await next?.reader.readAll()).toEqual(framed([], version));
 		expect(await request.next()).toBeUndefined();
 		// FIN cancels a draft-18 request; a draft-22 one lasts until reset.
 		expect(await settlesWithin(request.ended, clock, Duration.millis(10))).toBe(version === Version.DRAFT_18);
@@ -105,25 +111,26 @@ for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 		const ends = version === Version.DRAFT_18 ? (["fin", "reset"] as const) : (["reset"] as const);
 		for (const end of ends) {
 			// An empty REQUEST_UPDATE, then the peer's end.
-			const { request, closes } = requested(version, Uint8Array.of(2, 0, 0), end);
+			const { request, closes } = requested(version, Uint8Array.of(...empty(2, version)), end);
 			await request.ended;
 			expect(closes).toEqual([]);
 		}
 	});
 }
 
-for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
+for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22, Version.DRAFT_23]) {
 	test(`${versionName(version)} keeps GOAWAY state across request response phases`, async () => {
 		// GOAWAY, an empty REQUEST_OK, and another GOAWAY on the same stream.
-		const reader = new Reader(undefined, Uint8Array.of(0x10, 0, 2, 0, 0, 7, 0, 0, 0x10, 0, 2, 0, 0), version);
+		const bytes = [...goaway(version), ...empty(7, version), ...goaway(version)];
+		const reader = new Reader(undefined, Uint8Array.from(bytes), version);
 		expect(await nextMessage(reader, version, true)).toBe(7);
-		expect(await reader.u16()).toBe(0);
+		expect(await reader.read(framed([], version).length)).toEqual(framed([], version));
 		await expect(nextMessage(reader, version, true)).rejects.toBeInstanceOf(ProtocolViolation);
 	});
 
 	test(`${versionName(version)} keeps separate request streams' GOAWAY state`, async () => {
 		for (let n = 0; n < 2; n++) {
-			const reader = new Reader(undefined, Uint8Array.of(0x10, 0, 2, 0, 0, 7, 0, 0), version);
+			const reader = new Reader(undefined, Uint8Array.of(...goaway(version), ...empty(7, version)), version);
 			expect(await nextMessage(reader, version, false)).toBe(7);
 		}
 	});
@@ -158,7 +165,7 @@ function recording(version: IetfVersion) {
 const refusal = { condition: "not_supported", reasonPhrase: "no" } as const;
 
 test("a refusal carries its reason", async () => {
-	for (const version of [Version.DRAFT_22]) {
+	for (const version of [Version.DRAFT_22, Version.DRAFT_23]) {
 		const { stream, wire } = recording(version);
 		await refuse(stream, version, "fetch", refusal);
 		const r = wire();

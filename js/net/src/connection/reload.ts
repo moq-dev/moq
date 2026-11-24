@@ -4,7 +4,7 @@ import type * as Announce from "../announced.ts";
 import { Handle as AuthHandle } from "../auth.ts";
 import { ended } from "../auth_session.ts";
 import { Allocator, reserved, Viewers } from "../bandwidth.ts";
-import { error, reason, SessionCode, SessionError } from "../error.ts";
+import { error, reason } from "../error.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Follow } from "../util/observed.ts";
@@ -21,11 +21,11 @@ import {
 } from "./connect.ts";
 import { parse } from "./endpoint.ts";
 import { DISCOVERY_REMOVED } from "./forward.ts";
-import { DEFAULT_HANDOVER, type Drain, dialed, type GoawayProps, handover, pinnedTransport, target } from "./goaway.ts";
+import { DEFAULT_HANDOVER, dialed, type Goaway, type Handover, handover, pinnedTransport, target } from "./goaway.ts";
 import type { Session } from "./session.ts";
 import { estimates, type Probe } from "./stats.ts";
 import { tick } from "./ticker.ts";
-import { heldOf } from "./tokens.ts";
+import { heldOf, Verdict } from "./tokens.ts";
 
 /**
  * The wait before a session on the WebSocket fallback first probes WebTransport, before jitter.
@@ -36,26 +36,29 @@ const PROBE_INITIAL = Duration.secs(10);
 /** The longest wait between WebTransport probes, before jitter. */
 const PROBE_MAX = Duration.secs(300);
 
-function sameTokens(a: readonly string[], b: readonly string[]): boolean {
-	return a.length === b.length && a.every((token, i) => token === b[i]);
-}
-
 /**
  * Exponential backoff settings for the reconnect loop.
  *
  * The delays carry jitter, so a fleet of tabs knocked offline together doesn't reconnect in
- * lockstep. Every failure is retried, including an attempt that outlives
- * {@link ConnectProps.timeout}, until {@link ReloadDelay.timeout} runs out; only an auth
- * rejection or a refused GOAWAY redirect stops the current URL sooner. A new URL or a
- * disable/re-enable starts another sequence.
+ * lockstep. Nothing retries until a session to the current URL has been established: the peer
+ * accepts the connection credential (its SETUP, or on moq-lite-07-wip the AUTH_OK to the
+ * connection's own credential) or drains the session with a GOAWAY, which no refusal sends. On
+ * moq-lite 03/04, which answer the credential with nothing, staying up past
+ * {@link Backoff.healthy} establishes it too; a version with an answer waits for it however long
+ * the session stays up. An attempt failing, or a session closing sooner, stops that
+ * URL with its error. That covers a relay refusing a live session, as it does a rejected token
+ * on moq-lite 03 or later. After that, every failure is retried,
+ * including an attempt that outlives {@link ConnectProps.timeout}, until
+ * {@link Backoff.timeout} runs out, whatever the error, an auth rejection included; only a
+ * refused GOAWAY redirect stops the current URL sooner. A new URL or a disable/re-enable starts another sequence.
  *
- * A GOAWAY off a session that outlived {@link ReloadDelay.healthy} migrates at once, unless it
+ * A GOAWAY off a session that outlived {@link Backoff.healthy} migrates at once, unless it
  * sends the connection back to an endpoint that already redirected it elsewhere and the
- * session lived less than {@link ReloadDelay.max} (or {@link ReloadDelay.healthy} when
+ * session lived less than {@link Backoff.max} (or {@link Backoff.healthy} when
  * uncapped). Two peers redirecting to each other thus
  * wait out this backoff and count against the timeout.
  */
-export type ReloadDelay = {
+export type Backoff = {
 	/** The delay before reconnecting (default: 1000ms; zero retries at once). */
 	initial?: Duration;
 
@@ -71,6 +74,9 @@ export type ReloadDelay = {
 	/**
 	 * How long a session must stay up to count as healthy (default: 1000ms; must be positive).
 	 *
+	 * Where the peer never answers the connection credential, as on moq-lite 03/04, the first
+	 * healthy session establishes the URL. Elsewhere only the peer's answer or a GOAWAY does,
+	 * however long a session stays up.
 	 * A healthy session's end resets the delay and the timeout. One that ends sooner is a
 	 * failed attempt, so a peer that accepts and then drops every session still escalates the
 	 * delay and exhausts the timeout.
@@ -79,7 +85,7 @@ export type ReloadDelay = {
 
 	/**
 	 * Maximum total time to spend retrying the current URL before giving up
-	 * (default: `null`, unlimited; zero gives up when the first attempt fails). Counts from the first dial, and restarts after a healthy session
+	 * (default: `null`, unlimited; zero gives up at the first failure). Counts from the first dial, and restarts after a healthy session
 	 * outside a redirect loop, a URL change, or a disable/re-enable. It decides whether another
 	 * attempt starts and never cuts one that is running, so giving up can take up to one attempt
 	 * longer than the window; {@link ConnectProps.timeout} bounds each attempt. A peer that
@@ -94,13 +100,13 @@ export type ReloadDelay = {
  * {@link ConnectProps.transport} is excluded: a supplied session is good for exactly one
  * connection, so the reconnect loop has nothing to reuse once that session drops. Call
  * {@link connect} directly when you have a session to hand over. Every attempt advertises
- * the default {@link ConnectProps.implementation} and {@link ConnectProps.extensions}.
+ * the default {@link ConnectProps.implementation}.
  *
  * @internal
  */
 export type ReloadProps = Omit<
 	ConnectProps,
-	"url" | "signal" | "transport" | "implementation" | "extensions" | "tokens" | "viewers"
+	"url" | "signal" | "transport" | "implementation" | "tokens" | "viewers"
 > & {
 	/** See {@link ConnectProps.tokens}; pass a `Signal` to replace them before they expire. */
 	tokens?: readonly string[] | Signal<readonly string[]>;
@@ -121,14 +127,14 @@ export type ReloadProps = Omit<
 	url?: URL | Signal<URL | undefined>;
 
 	/** Backoff settings for the reconnect loop; every field falls back to its default. */
-	delay?: ReloadDelay;
+	backoff?: Backoff;
 
 	/** How to react to the peer's GOAWAY; every field falls back to its default. */
-	goaway?: GoawayProps;
+	goaway?: Handover;
 };
 
 /**
- * The backoff applied to whichever {@link ReloadDelay} fields a caller leaves out.
+ * The backoff applied to whichever {@link Backoff} fields a caller leaves out.
  *
  * Retries are unlimited by default: a loop that gives up stays offline until something
  * redials it, and a page usually has nothing that will, so an outage of any length has to
@@ -136,7 +142,7 @@ export type ReloadProps = Omit<
  * sets a timeout to surface a persistent failure on {@link Reload.error}; giving up does not
  * dispose the loop, and a new URL or a disable/re-enable starts another sequence.
  */
-const DEFAULT_DELAY: Required<ReloadDelay> = {
+const DEFAULT_BACKOFF: Required<Backoff> = {
 	initial: Duration.millis(1000),
 	multiplier: 2,
 	max: Duration.millis(5000),
@@ -145,23 +151,23 @@ const DEFAULT_DELAY: Required<ReloadDelay> = {
 };
 
 /**
- * {@link ReloadDelay} resolved against its defaults, with the same meaning as moq-tokio's
+ * {@link Backoff} resolved against its defaults, with the same meaning as moq-tokio's
  * backoff. Throws a RangeError for a value that has none.
  *
  * Field by field rather than by spread: a caller building `{ initial: maybeInitial }` from an
  * optional value passes an explicit undefined, which a spread would take as the answer.
  */
-function pacing(delay: ReloadDelay) {
-	const initial = delay.initial ?? DEFAULT_DELAY.initial;
+function pacing(backoff: Backoff) {
+	const initial = backoff.initial ?? DEFAULT_BACKOFF.initial;
 	// `null` means no bound, so only `undefined` takes the default.
-	const cap = delay.max === undefined ? DEFAULT_DELAY.max : delay.max;
-	const multiplier = delay.multiplier ?? DEFAULT_DELAY.multiplier;
-	if (!Number.isFinite(multiplier)) throw new RangeError(`invalid delay.multiplier: ${multiplier}`);
+	const cap = backoff.max === undefined ? DEFAULT_BACKOFF.max : backoff.max;
+	const multiplier = backoff.multiplier ?? DEFAULT_BACKOFF.multiplier;
+	if (!Number.isFinite(multiplier)) throw new RangeError(`invalid backoff.multiplier: ${multiplier}`);
 	// Zero would count every session as healthy, resetting the retry window forever under a
 	// peer that drops each one on sight.
-	const healthy = delay.healthy ?? DEFAULT_DELAY.healthy;
-	if (healthy.isZero()) throw new RangeError("delay.healthy must be positive");
-	const timeout = delay.timeout === undefined ? DEFAULT_DELAY.timeout : delay.timeout;
+	const healthy = backoff.healthy ?? DEFAULT_BACKOFF.healthy;
+	if (healthy.isZero()) throw new RangeError("backoff.healthy must be positive");
+	const timeout = backoff.timeout === undefined ? DEFAULT_BACKOFF.timeout : backoff.timeout;
 	// A multiplier below 1 means no growth, not a delay that shrinks to nothing.
 	const growth = Math.max(multiplier, 1);
 
@@ -192,6 +198,12 @@ export type ReloadStatus = "connecting" | "connected" | "disconnected";
  * The reconnect loop behind a Connection handle: connects, waits for the session to end, then
  * redials with exponential backoff.
  *
+ * The first attempt for a URL fails fast instead: until a session to it was established (see
+ * {@link Backoff}), a failed attempt or a closed session sets {@link Reload.error}
+ * rather than retrying, so a setup mistake such as an
+ * untrusted certificate or no version in common surfaces at once. A page opened before its
+ * relay is reachable therefore stays disconnected until a new URL or a disable/re-enable.
+ *
  * @internal
  */
 export class Reload {
@@ -204,18 +216,22 @@ export class Reload {
 	/**
 	 * Credentials every dial presents; see {@link ConnectProps.tokens}. Replacing them reaches
 	 * the next dial and, on a live session with AUTH, presents the new tokens at once,
-	 * withdrawing the replaced ones once every new one has its answer. A session refused as
-	 * unauthorized redials only when these changed since its dial.
+	 * withdrawing the replaced ones once every new one has its answer.
 	 */
 	tokens: Signal<readonly string[]>;
 
-	/** Current connection status. */
+	/**
+	 * Current connection status. A session reads as connected only once its peer accepts the
+	 * credential (on moq-lite-03/04, which never answer it, once it stays up past the healthy
+	 * bar), so a refused one never does.
+	 */
 	status = new Signal<ReloadStatus>("disconnected");
 
 	/**
 	 * The failure that stopped retrying the current URL, or undefined while the loop is live.
 	 *
-	 * Set on an auth rejection or when the retry window expires. Cleared when a new URL or a
+	 * Set when the first attempt for a URL fails, or when the retry window
+	 * expires. Cleared when a new URL or a
 	 * disable/re-enable starts another sequence, not on a page hide/show. Transient drops
 	 * that are still being retried leave this empty.
 	 */
@@ -242,7 +258,7 @@ export class Reload {
 	 * its rate rather than encode at zero. It is sampled from the transport only
 	 * while a reservation reads it, so the first reservation after none waits one
 	 * snapshot for its slice. It stays `undefined` on a transport that cannot
-	 * report one: the WebSocket fallback, WebRTC, WebTransport without
+	 * report one: the WebSocket fallback, WebTransport without
 	 * `getStats()`, or Safari's stub, which reads as none.
 	 */
 	readonly allocator: Allocator;
@@ -267,8 +283,14 @@ export class Reload {
 	 */
 	readonly auth = new AuthHandle();
 
+	// The peer's verdict on the latest tokens, across reconnects.
+	readonly #verdict: Verdict;
+
 	/** Protocol versions to offer, most preferred first, kept across retries and redirects. */
 	readonly versions?: readonly string[];
+
+	/** Whether the URL carries the connection credential as `auth` (not reactive); see {@link ConnectProps.urlAuth}. */
+	readonly urlAuth?: boolean;
 
 	/** WebTransport options applied to each connection attempt (not reactive). */
 	webtransport?: WebTransportProps;
@@ -299,15 +321,16 @@ export class Reload {
 	consume?: OriginProducer;
 
 	/** Backoff settings for the reconnect loop; an unset field uses its default. */
-	delay: ReloadDelay;
+	backoff: Backoff;
 
 	/** How to react to the peer's GOAWAY (not reactive). */
-	goaway: GoawayProps;
+	goaway: Handover;
 
 	/**
 	 * The URL an accepted GOAWAY redirect assigned, or undefined while the loop dials
 	 * {@link Reload.url}. Sticky across reconnects: a redirect is an assignment, not a
-	 * detour. Cleared when a new URL or a disable/re-enable starts another sequence.
+	 * detour. Cleared when a dial to it fails, so the redial returns to {@link Reload.url},
+	 * or when a new URL or a disable/re-enable starts another sequence.
 	 */
 	readonly redirect: Getter<URL | undefined>;
 
@@ -335,6 +358,8 @@ export class Reload {
 	// A session the peer sent GOAWAY on, serving its groups in flight while the replacement
 	// dials. Retired when it closes, at its handover cap, or when the sequence ends.
 	#draining: Draining | undefined;
+	// A redirect from the draining fallback's peer, held while a replacement serves.
+	#pending: { connection: Session; next: URL } | undefined;
 
 	// Sessions this loop ended that are still draining, each until its close settles.
 	#ending = new Map<Session, Promise<void>>();
@@ -348,7 +373,7 @@ export class Reload {
 	#dialing = false;
 
 	// The current wait between attempts, doubling per failure, and when the retry window expires.
-	// Both are undefined between sequences, so a later edit to `delay` applies to the next one.
+	// Both are undefined between sequences, so a later edit to `backoff` applies to the next one.
 	#delay: Duration | undefined;
 	// When the retry window expires, or null when it never does.
 	#deadline: Instant | null | undefined;
@@ -358,14 +383,15 @@ export class Reload {
 	#sequenceHref: string | undefined;
 
 	// The href that exhausted its retry sequence. Survives a page hide/show so resume does
-	// not redial credentials the peer already refused. Cleared when the URL changes or the
+	// does not restart a sequence that already gave up. Cleared when the URL changes or the
 	// loop is disabled.
 	#givenUpHref: string | undefined;
 
-	// The tokens the latest dial presented, so a refusal can tell whether they changed since.
-	#dialedTokens: readonly string[] = [];
-	// Whether the sequence stopped because the peer refused those tokens.
-	#refused = false;
+	// The configured href a session's peer accepted the credential of or drained with a GOAWAY,
+	// or a moq-lite-03/04 session stayed up past the healthy bar for. Until it matches, a failed
+	// attempt or a closed session gives up rather than retrying. Kept across a page hide/show and a disable/re-enable, which
+	// resume a URL that worked.
+	#establishedHref: string | undefined;
 
 	// Increased by 1 each time to trigger a reload.
 	#tick = new Signal(0);
@@ -383,12 +409,14 @@ export class Reload {
 		this.url = Signal.from(props?.url);
 		this.enabled = Signal.from(props?.enabled ?? true);
 		this.tokens = Signal.from(props?.tokens ?? []);
-		this.delay = props?.delay ?? {};
+		this.#verdict = new Verdict(this.tokens, this.auth);
+		this.backoff = props?.backoff ?? {};
 		// Validated here, like the timeout, rather than by every retry.
-		pacing(this.delay);
+		pacing(this.backoff);
 		this.goaway = props?.goaway ?? {};
 		this.redirect = this.#redirect;
 		this.versions = normalizeVersions(props);
+		this.urlAuth = props?.urlAuth;
 		this.webtransport = props?.webtransport;
 		this.websocket = props?.websocket;
 		// Validated here, like the versions, rather than by every attempt.
@@ -479,18 +507,10 @@ export class Reload {
 		// The live session holds the current tokens on AUTH; a dial picks them up itself.
 		this.#signals.run((effect) => {
 			const tokens = effect.get(this.tokens);
+			// Before the held tokens change, so a token the set kept is judged by what it was.
+			this.#verdict.refresh();
 			const connection = effect.get(this.established);
 			if (connection) heldOf(connection)?.update(tokens);
-		});
-
-		// New credentials redial a URL that stopped on an auth refusal of the old ones.
-		this.#signals.run((effect) => {
-			const tokens = effect.get(this.tokens);
-			if (!this.#refused || this.#givenUpHref === undefined || sameTokens(tokens, this.#dialedTokens)) return;
-			this.#refused = false;
-			this.#givenUpHref = undefined;
-			this.#error.set(undefined);
-			this.#tick.update((tick) => tick + 1);
 		});
 
 		this.#url = this.#signals.computed((effect) => effect.get(this.url)?.href);
@@ -548,8 +568,13 @@ export class Reload {
 		// The session this run serves, ended with the run. A drained one leaves this slot
 		// for #draining, which outlives the run.
 		let current: Session | undefined;
+		// Set once the session is live, so #retry can tell a healthy session that
+		// later dropped from a connect failure or a peer that flaps immediately.
+		let connected: Instant | undefined;
 		effect.cleanup(() => {
 			if (current) {
+				// A session torn down while live, as on a page hide, may already have earned it.
+				if (connected !== undefined) this.#settle(href, current, connected);
 				this.#end(current);
 				if (this.established.peek() === current) this.#serve(undefined);
 				current = undefined;
@@ -558,9 +583,8 @@ export class Reload {
 		});
 
 		effect.spawn(async () => {
-			// Set once the session is live, so #retry can tell a healthy session that
-			// later dropped from a connect failure or a peer that flaps immediately.
-			let connected: Instant | undefined;
+			// Whether the last failure was a dial to a GOAWAY redirect's target.
+			let redirectFailed = false;
 
 			try {
 				// The WebTransport session a probe opened, which the next dial finishes its MoQ
@@ -575,7 +599,8 @@ export class Reload {
 					this.#deadline ??= this.#window(now());
 
 					this.#setDialing(true);
-					this.#dialedTokens = reached?.tokens ?? this.tokens.peek();
+					this.#verdict.dialing();
+					const tokens = reached?.tokens ?? this.tokens.peek();
 					let connection: Session;
 					const reusing = reached;
 					reached = undefined;
@@ -583,7 +608,8 @@ export class Reload {
 						connection = await establish(
 							{
 								url: dialing,
-								tokens: this.#dialedTokens,
+								tokens,
+								urlAuth: this.urlAuth,
 								// A redirect names the relay; a fallback URL pinned for the old one does not follow.
 								websocket: this.#redirect.peek()
 									? { ...this.websocket, url: undefined }
@@ -601,6 +627,7 @@ export class Reload {
 						);
 					} catch (err) {
 						this.#setDialing(false);
+						redirectFailed = this.#redirect.peek() !== undefined;
 						throw err;
 					}
 
@@ -611,11 +638,33 @@ export class Reload {
 						return;
 					}
 					current = connection;
-
-					// The replacement serves now; a predecessor keeps draining its groups in flight.
-					this.#serve(connection);
-					this.#setDialing(false);
+					this.#verdict.connected(connection);
 					connected = now();
+
+					// Serve only once the session is established: the peer accepted its credential or
+					// drained it with a GOAWAY. On a version that never answers (moq-lite-03/04),
+					// staying up past the healthy bar is the only sign, so it counts there alone.
+					// Until then it may still be a refusal, which never reads as connected. A close
+					// first is handled below.
+					const auth = wireOf(connection).auth;
+					const bar = this.#pacing().healthy;
+					const acceptance = auth.accepted;
+					if (!acceptance.peek()) {
+						const waiting = new AbortController();
+						const waits: unknown[] = [Signal.race(acceptance), connection.closed, connection.draining];
+						if (auth.silent) waits.push(sleep(bar, { signal: waiting.signal }).catch(() => {}));
+						await effect.race(...waits).finally(() => waiting.abort());
+						if (signal.aborted) return;
+					}
+					if (
+						acceptance.peek() ||
+						connection.draining.peek() !== undefined ||
+						(auth.silent && now().since(connected).ge(bar))
+					) {
+						// The replacement serves now; a predecessor keeps draining its groups in flight.
+						this.#serve(connection);
+					}
+					this.#setDialing(false);
 
 					// A cancelled effect resolves undefined, so the sentinel tells the session
 					// closing (null for clean, an Error otherwise) apart from this run being
@@ -643,16 +692,33 @@ export class Reload {
 						reached = raced;
 					}
 					const ended = raced instanceof Reached ? { uri: "" } : raced;
+					this.#settle(href, connection, connected);
 					if (ended === null || ended instanceof Error) {
+						// Until a session was established, a close stops the URL as a failed attempt
+						// does: it is how a relay refuses a live session before accepting its credential.
+						// No error kind is read.
+						if (this.#establishedHref !== href) {
+							console.warn(`connection closed, not retrying: ${ended ? reason(ended) : "no error"}`);
+							current = undefined;
+							this.#serve(undefined);
+							this.#giveUp(ended ?? new Error("connection closed"));
+							return;
+						}
 						console.warn(`connection closed, reconnecting: ${ended ? reason(ended) : "no error"}`);
 						this.#redirects.reset();
 						current = undefined;
-						if (this.established.peek() === connection) this.#serve(undefined);
+						// A predecessor still draining serves again, so this is no outage.
+						if (this.established.peek() === connection) this.#serve(this.#draining?.serving());
+						this.#applyPending();
 						this.#retry(effect, connected, ended ?? undefined);
 						return;
 					}
 
 					current = undefined;
+					// A peer's GOAWAY establishes the URL however soon it came: the peer accepted the
+					// session and asked us to move, which a refusal never does, so a page opened while
+					// its relay drains rides out the restart. Leaving the fallback is our own.
+					if (!reached) this.#establishedHref = href;
 					// A pinned WebSocket URL can win the race against the primary. Judge the
 					// redirect against that endpoint, not the primary we never reached.
 					const socket = this.#redirect.peek() ? undefined : this.websocket?.url;
@@ -666,6 +732,7 @@ export class Reload {
 					// backoff already paces it, so its replacement dials at once. A fallback that
 					// served past the healthy bar still earns the healthy reset.
 					if (reached) {
+						this.#follow(connection, at, pinnedTransport(connection.transport, this.#pinned()), href);
 						if (now().since(connected).ge(this.#pacing().healthy)) {
 							this.#delay = undefined;
 							this.#deadline = undefined;
@@ -717,7 +784,18 @@ export class Reload {
 					return;
 				}
 
+				// Attempts fail fast until a session was established: a URL whose peer never accepted
+				// one is more likely misconfigured than restarting, and only the app can fix that.
+				if (this.#establishedHref !== href) {
+					console.warn("connection failed, not retrying:", err);
+					this.#giveUp(error(err));
+					return;
+				}
+
 				console.warn("connection error:", err);
+				// A redirect target that no longer answers is dropped: the redial returns to the
+				// configured URL, which may still answer. Rust's Reconnect follows the same rule.
+				if (redirectFailed) this.#redirect.set(undefined);
 				this.#retry(effect, connected, err);
 			}
 		});
@@ -737,6 +815,7 @@ export class Reload {
 				await sleep(delay.mul(0.5 + Math.random() / 2), { signal });
 				const props = {
 					tokens: this.tokens.peek(),
+					urlAuth: this.urlAuth,
 					versions: this.versions,
 					webtransport: this.webtransport,
 					websocket: this.#redirect.peek() ? undefined : this.websocket,
@@ -756,11 +835,9 @@ export class Reload {
 	 * to go next and leave the old session serving until it drains. Returns false when the
 	 * redirect is refused, which ends the sequence rather than redialing.
 	 */
-	#migrate(connection: Session, dialing: URL, drain: Drain): boolean {
-		const hashes = this.webtransport?.serverCertificateHashes?.length ?? 0;
-		const configured = hashes > 0 || this.webtransport?.serverCertificate !== undefined;
+	#migrate(connection: Session, dialing: URL, drain: Goaway): boolean {
 		// The pin is a WebTransport option. A WebSocket that won the race never used it.
-		const pinned = pinnedTransport(connection.transport, configured);
+		const pinned = pinnedTransport(connection.transport, this.#pinned());
 
 		let next: URL | undefined;
 		try {
@@ -792,6 +869,56 @@ export class Reload {
 		});
 		this.#draining = draining;
 		return true;
+	}
+
+	/** Whether a certificate pin is configured for WebTransport. */
+	#pinned(): boolean {
+		const hashes = this.webtransport?.serverCertificateHashes?.length ?? 0;
+		return hashes > 0 || this.webtransport?.serverCertificate !== undefined;
+	}
+
+	/**
+	 * Follow a redirect the peer of `connection`, a fallback session we left for a probe that
+	 * got through, sends while it drains: whenever nothing else serves, the next dial goes where
+	 * the peer named, and a dial still headed for the leaving peer starts over. A restart in
+	 * place or a refused redirect is ignored, since we are already leaving. No loop scoring:
+	 * only a probe that got through leads here, and the probe's backoff paces those.
+	 */
+	#follow(connection: Session, dialing: URL, pinned: boolean, href: string): void {
+		void connection.draining.then((drain) => {
+			// The peer accepted the fallback session and asked us to move, so its GOAWAY establishes
+			// the URL as one off the live session does, while the sequence still targets it.
+			if (this.#sequenceHref === href) this.#establishedHref = href;
+			let next: URL | undefined;
+			try {
+				next = target(this.goaway.redirect ?? "same-host", drain.uri, dialing, pinned);
+			} catch {
+				return;
+			}
+			if (!next) return;
+			this.#pending = { connection, next };
+			this.#applyPending();
+		});
+	}
+
+	/**
+	 * Apply the pending redirect once its session is the one serving, which a replacement that
+	 * closes hands back to; drop it once that session retires.
+	 */
+	#applyPending(): void {
+		const pending = this.#pending;
+		if (!pending) return;
+		if (this.#draining?.serving() !== pending.connection) {
+			this.#pending = undefined;
+			return;
+		}
+		if (this.established.peek() !== pending.connection) return;
+		this.#pending = undefined;
+		console.info("draining fallback peer redirected; following");
+		this.#redirect.set(pending.next);
+		this.#redirectHref = this.#sequenceHref;
+		// A backoff still paces the next dial, which now goes to the new target.
+		if (this.#dialing) this.#tick.update((prev) => prev + 1);
 	}
 
 	/**
@@ -833,16 +960,26 @@ export class Reload {
 		if (draining) this.#end(draining);
 	}
 
-	// Resolved per use rather than at construction, so an edit to `delay` (including one that
+	// A session establishes its URL once the peer accepted its credential, which a closed
+	// session still reports, or, on a version that never answers the credential
+	// (moq-lite-03/04), once it stayed up past the healthy bar.
+	#settle(href: string, session: Session, connected: Instant): void {
+		const auth = wireOf(session).auth;
+		if (auth.accepted.peek() || (auth.silent && now().since(connected).ge(this.#pacing().healthy))) {
+			this.#establishedHref = href;
+		}
+	}
+
+	// Resolved per use rather than at construction, so an edit to `backoff` (including one that
 	// drops a field back to its default) applies to the next retry.
 	#pacing() {
-		return pacing(this.delay ?? {});
+		return pacing(this.backoff ?? {});
 	}
 
 	// When a retry window starting `at` expires.
 	#window(at: Instant): Instant | null {
 		const { timeout } = this.#pacing();
-		return timeout === null ? null : at.add(timeout);
+		return timeout === null ? null : at.saturatingAdd(timeout);
 	}
 
 	/**
@@ -883,31 +1020,6 @@ export class Reload {
 			this.#deadline = undefined;
 		}
 
-		// An auth rejection stops this URL however long the session lived. UNAUTHORIZED,
-		// MALFORMED_AUTH_TOKEN, and EXPIRED_AUTH_TOKEN are specified codes rather than ones we guessed at, so this is the
-		// peer saying these credentials will never work again; retrying them just burns the
-		// window, and an expired token needs the app to refresh it via a new URL. Matches
-		// moq-tokio's reconnect loop, which stops on the same close. A new URL or a
-		// disable/re-enable starts another sequence; the handle itself is not disposed.
-		//
-		// Only a session close says that. The stream registry gives 2 to DELIVERY_TIMEOUT,
-		// so a stream reset during the SETUP exchange would otherwise suppress reconnect
-		// for good.
-		//
-		// Tokens replaced since that dial are new credentials, so those earn another dial.
-		if (
-			cause instanceof SessionError &&
-			(cause.code === SessionCode.Unauthorized ||
-				cause.code === SessionCode.MalformedAuthToken ||
-				cause.code === SessionCode.Expired) &&
-			sameTokens(this.tokens.peek(), this.#dialedTokens)
-		) {
-			console.warn("session rejected as unauthorized, not retrying");
-			this.#giveUp(cause);
-			this.#refused = true;
-			return;
-		}
-
 		const at = now();
 		// A healthy session's end starts the window here.
 		this.#deadline ??= this.#window(at);
@@ -939,7 +1051,7 @@ export class Reload {
 	}
 
 	#giveUp(cause: Error): void {
-		this.#refused = false;
+		this.#verdict.gaveUp(cause);
 		this.#error.set(cause);
 		this.#givenUpHref = this.#sequenceHref;
 		this.#resetSequence();
@@ -951,6 +1063,21 @@ export class Reload {
 		this.#sequenceHref = undefined;
 		this.#redirects.reset();
 		this.#retire();
+	}
+
+	/**
+	 * Resolve once the peer first answers the latest {@link tokens}, like Rust's `Tokens::poll_answered`.
+	 *
+	 * It covers the tokens the latest set newly presented, or the initial ones before any set:
+	 * each is granted in band, or is the connection credential a dial carried and the peer
+	 * accepted. A token the set kept, the connection credential included, counts only once the
+	 * peer refuses it, and nothing is re-checked after the answer. Rejects with the peer's refusal,
+	 * `Unsupported` when a session cannot carry a token in band, the loop's end, or the failure that
+	 * stopped it retrying its URL while no session answered, such as a refused first dial. A set replaced
+	 * before its answer moves the wait to the new one.
+	 */
+	answered(): Promise<void> {
+		return this.#verdict.answered();
 	}
 
 	/** Stop reconnecting, drain and close the current connection, and settle {@link Reload.closed}. Idempotent. */
@@ -1051,6 +1178,11 @@ class Draining {
 			this.#timer.abort();
 			this.retire();
 		});
+	}
+
+	/** The old session while it still serves, before it retires. */
+	serving(): Session | undefined {
+		return this.#retired ? undefined : this.#connection;
 	}
 
 	/** Stop serving from the old session, returning it the first time for the caller to end. */

@@ -16,15 +16,9 @@ export interface Config {
 	idleTimeout?: Duration | null;
 	maxDatagramFrameSize?: bigint | null;
 	maxRecordSize?: bigint;
-	maxStreamsBidi?: bigint;
-	maxStreamsUni?: bigint;
+	maxStreams?: bigint;
 	receiveWindow?: bigint;
 	streamReceiveWindow?: bigint;
-}
-
-export interface InstallOptions {
-	requireProtocol?: boolean;
-	versions?: Record<string, Version | Version[] | null>;
 }
 
 export interface SendStream extends WritableStream<Uint8Array> {
@@ -63,6 +57,7 @@ export class Session implements WebTransport {
 	readonly ready: Promise<void>;
 	get reliability(): "reliable-only";
 	setSendBufferSize(bytes: number): void;
+	readonly transport: "websocket";
 }
 
 export class SessionError extends Error implements Pick<WebTransportError, "source" | "streamErrorCode"> {
@@ -135,8 +130,6 @@ export interface WebSocketStreamOpenEvent {
 	readable: ReadableStream<WebSocketStreamData>;
 	writable: WritableStream<WebSocketStreamData>;
 }
-
-export function install(options?: InstallOptions): boolean;
 
 export function selectSubprotocol(offered: string | readonly string[] | null | undefined, options?: Pick<SessionOptions, "protocols" | "versions" | "requireProtocol">): string | undefined;
 ```

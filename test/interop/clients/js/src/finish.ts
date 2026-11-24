@@ -84,6 +84,7 @@ export function finish(
 			maxAge: null,
 			priority: Catalog.PRIORITY.video,
 		});
+		if (!track) throw new Error("the track already exists");
 		const media = new Container.Legacy.Producer(track, new Container.Legacy.Format(config));
 		let encodingError: Error | undefined;
 		const encoder = new VideoEncoder({
@@ -119,19 +120,18 @@ export function finish(
 		} finally {
 			encoder.close();
 		}
-		media.close();
+		media.finish();
 		const catalog = new CatalogProducer();
 		catalog.mutate((root) => {
 			root.video = { renditions: { video: config } };
 		});
 		const serving = new Effect();
-		catalog.serve(
-			broadcast.createTrack(Catalog.TRACK, {
-				timescale: Moq.Time.Timescale.MILLI,
-				priority: Catalog.PRIORITY.catalog,
-			}),
-			serving,
-		);
+		const catalogTrack = broadcast.createTrack(Catalog.TRACK, {
+			timescale: Moq.Time.Timescale.MILLI,
+			priority: Catalog.PRIORITY.catalog,
+		});
+		if (!catalogTrack) throw new Error("the track already exists");
+		catalog.serve(catalogTrack, serving);
 		serving.close();
 		broadcastRoute.announce();
 		// Keep the finished broadcast up for the late readers, then take it offline.
@@ -142,8 +142,12 @@ export function finish(
 		const healthRoute = origin.route(Moq.Path.from(`${path}.health`), { hidden: true });
 		const health = healthRoute.broadcast;
 		const healthTrack = health.createTrack("live");
-		const group = healthTrack.appendGroup();
-		group.writeFrame({ payload: new TextEncoder().encode("session-alive") });
+		if (!healthTrack) throw new Error("the track already exists");
+		const group = healthTrack.appendGroup(Moq.Time.Timestamp.unscaled((healthTrack.largest()?.group ?? -1n) + 1n));
+		group.writeFrame({
+			payload: new TextEncoder().encode("session-alive"),
+			timestamp: Moq.Time.Timestamp.unscaled(group.start),
+		});
 		group.finish();
 		healthTrack.finish();
 		healthTrack.close();

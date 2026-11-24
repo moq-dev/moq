@@ -339,6 +339,56 @@ fn tiny_frames_do_not_pin_receive_buffers() {
 		.expect("worker");
 }
 
+/// A lease wanting more than a reset stream has left fails with the reset, but
+/// leaves its reliable bytes for a smaller lease.
+#[test]
+fn a_failed_lease_keeps_a_reset_streams_reliable_bytes() {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let (server, client, dial) = endpoints(&handle, WINDOW, WINDOW);
+
+	worker
+		.block_on(async move {
+			let dialed = client
+				.connect(&dial, server.local_addr(), "localhost")
+				.await
+				.expect("dial");
+			let accepted = server.accept().await.expect("accept");
+
+			let mut send = dialed.open_uni(Default::default()).await.expect("open_uni");
+			send.write_all(&b"reliable"[..]).await.expect("write");
+			let mut recv = within(&handle, "the stream", accepted.accept_uni())
+				.await
+				.expect("accept_uni");
+			let offset = send.offset();
+			send.reset_at(offset, quic::VarInt::from_u32(7));
+
+			let lease = within(
+				&handle,
+				"the reset",
+				kio::wait(|waiter| recv.poll_lease(waiter, 16).map_ok(|_| ())),
+			)
+			.await;
+			assert!(
+				matches!(lease, Err(quic::recv::Error::Reset(code)) if code == quic::VarInt::from_u32(7)),
+				"{lease:?}"
+			);
+			let taken = kio::wait(|waiter| {
+				recv.poll_lease(waiter, 8).map_ok(|mut lease| {
+					let taken = lease.copy_to_bytes(8);
+					lease.release();
+					taken
+				})
+			})
+			.await
+			.expect("lease");
+			assert_eq!(taken, &b"reliable"[..]);
+			let reset = recv.received_reset().await.expect("received_reset");
+			assert_eq!(reset, Some(quic::VarInt::from_u32(7)));
+		})
+		.expect("worker");
+}
+
 /// Whether `bytes` is the only handle on an allocation of exactly its own size.
 fn owns_exactly(bytes: Bytes) -> bool {
 	let len = bytes.len();

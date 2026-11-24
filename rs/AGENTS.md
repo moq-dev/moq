@@ -6,6 +6,7 @@ The `/rs` Cargo workspace.
 - `kio` provides the async primitives everything polls through.
 - `moq-quic` (our quinn fork) is the only QUIC stack we develop; it also powers qmux and WebTransport. Don't add or deepen dependencies on web-transport, noq, or quinn.
 - `moq-cli` builds the `moq` binary and owns the CLI surface for the gateway crates.
+- `moq-tokio` and `moq-uring` hold only runtime plumbing, such as dialing and reconnect loops. Logic both would need lives in `moq-net`.
 
 # Producer / Consumer
 
@@ -31,11 +32,10 @@ A `Producer` writes and any number of `Consumer`s read, sharing state via `kio`.
 - Derive `Serialize`/`Deserialize` (with `serde_with` as needed) instead of hand-writing a second copy of the wire shape.
 - Keep `mod encoder` private and re-export flat as `encode::Encoder`.
 - Dependencies use `{ workspace = true }`, except internal dev-dependencies, which are path-only so releases publish.
-- Newtypes and enums over untyped strings.
 
 # Semver
 
-- `#[non_exhaustive]` only on error enums, enums that will gain variants, and `Config`-style structs with `pub` fields.
+- `#[non_exhaustive]` only on error enums, enums that will gain variants, `Config`-style structs with `pub` fields, and the event and item types a crate returns, including their struct variants.
 - Append variants to the end of a public fieldless enum; inserting reorders `as` values.
 - A renamed flag or env var stays as a hidden arg reported through `deprecated()` into `moq_tokio::cli::Deprecated`, which fails startup naming the replacement. Never advertise the old name.
 
@@ -48,6 +48,6 @@ A `Producer` writes and any number of `Consumer`s read, sharing state via `kio`.
 # Testing
 
 - Tests are inline `#[cfg(test)] mod tests`; full Client/Server session tests go in the crate's `tests/integration/`.
-- Time-dependent async tests call `tokio::time::pause()` (moq-net and moq-relay's in-memory tests use `#[kio::test]`), unless they cross real sockets; those assert lower bounds.
+- Time-dependent async tests default to `#[kio::test]`'s simulated clock. Use `#[tokio::test]` with `tokio::time::pause()` only when the test needs a real tokio runtime and no socket I/O races a timer: a paused clock auto-advances while a read is pending. Tests on real sockets run on real time, call `kio::clock::host_time()` (`just test` sets `KIO_DENY_HOST_TIMERS=1`), and assert lower bounds.
 - Run tests through `just` (nextest), not `cargo test`. A SLOW test is a bug to fix, not a threshold to raise.
 - Local checks build only the host platform; nightly covers the full feature matrix (`just rs features`) and Windows/macOS.

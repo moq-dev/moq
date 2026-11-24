@@ -1,5 +1,5 @@
 import { Duration, Elapsed, sleep, timeout } from "@moq/clock";
-import { Session as Qmux, type SessionOptions as QmuxOptions, type Version as QmuxVersion } from "@moq/qmux";
+import type { Session as Qmux, SessionOptions as QmuxOptions, Version as QmuxVersion } from "@moq/qmux";
 import { type Getter, race } from "@moq/signals";
 import type * as Auth from "../auth.ts";
 import { vacant } from "../auth_session.ts";
@@ -14,12 +14,12 @@ import * as Hex from "../util/hex.ts";
 import { after } from "../util/timer.ts";
 import { isWebTransportSupported } from "./browser.ts";
 import { parse, show } from "./endpoint.ts";
-import * as Extensions from "./extensions.ts";
 import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
 import { DEFAULT_TIMEOUT, exchangeSetup, handsOff } from "./handshake.ts";
 import type { Session } from "./session.ts";
 import { inspect } from "./stats.ts";
 import { credential, fallback, hold, type Presentation } from "./tokens.ts";
+import { transportOf } from "./transport.ts";
 
 // Default head start for WebTransport before attempting the WebSocket fallback.
 const DEFAULT_WEBSOCKET_DELAY = Duration.millis(500);
@@ -43,7 +43,7 @@ const DEFAULT_MAX_STREAMS = 10_000;
 
 // Match moq-tokio so WebSocket readers have the same bandwidth-delay budget.
 const DEFAULT_RECEIVE_WINDOW = 4 << 20;
-const DEFAULT_STREAM_RECEIVE_WINDOW = 1 << 20;
+const DEFAULT_STREAM_RECEIVE_WINDOW = 4 << 20;
 
 // RESET_STREAM and CONNECTION_CLOSE are separate transport notifications. Give the latter
 // time to surface its authoritative code without letting a reset-only peer stall SETUP forever.
@@ -75,7 +75,7 @@ export interface WebSocketProps {
 	/** Connection receive window in bytes (default: 4 MiB). Must be a positive safe integer. */
 	receiveWindow?: number;
 
-	/** Per-stream receive window in bytes (default: 1 MiB). Must be a positive safe integer. */
+	/** Per-stream receive window in bytes (default: 4 MiB). Must be a positive safe integer. */
 	streamReceiveWindow?: number;
 }
 
@@ -121,18 +121,21 @@ const VERSIONS: Record<string, { alpn: string; setup?: Lite.Version }> = {
 	"moq-lite-03": { alpn: Lite.ALPN_03, setup: Lite.Version.DRAFT_03 },
 	"moq-lite-02": { alpn: Lite.ALPN, setup: Lite.Version.DRAFT_02 },
 	"moq-lite-01": { alpn: Lite.ALPN, setup: Lite.Version.DRAFT_01 },
+	"moq-transport-23": { alpn: Ietf.ALPN.DRAFT_23 },
 	"moq-transport-22": { alpn: Ietf.ALPN.DRAFT_22 },
 	"moq-transport-20": { alpn: Ietf.ALPN.DRAFT_20 },
 	"moq-transport-18": { alpn: Ietf.ALPN.DRAFT_18 },
 };
 
-// Experimental lite-07 is offered only when named.
-const DEFAULT_VERSIONS = Object.keys(VERSIONS).filter((name) => name !== "moq-lite-07-wip");
+// Experimental lite-07 and the partial draft-23 port are offered only when named.
+const OPT_IN = new Set(["moq-lite-07-wip", "moq-transport-23"]);
+const DEFAULT_VERSIONS = Object.keys(VERSIONS).filter((name) => !OPT_IN.has(name));
 
 // moq-transport is pinned to qmux-01. Every other ALPN is currently
 // negotiated as `qmux-00.{alpn}`, but `null` lets the polyfill advertise every QMux draft
 // it knows and the server pick one.
 const QMUX: Record<string, QmuxVersion | QmuxVersion[] | null> = {
+	[Ietf.ALPN.DRAFT_23]: "qmux-01",
 	[Ietf.ALPN.DRAFT_22]: "qmux-01",
 	[Ietf.ALPN.DRAFT_20]: "qmux-01",
 	[Ietf.ALPN.DRAFT_18]: "qmux-01",
@@ -251,13 +254,6 @@ export interface ConnectProps {
 	consume?: OriginProducer;
 
 	/**
-	 * The moq-transport extensions to offer, each on unless set to `false`.
-	 *
-	 * @internal Tests only; nothing outside the package consumes it.
-	 */
-	extensions?: Extensions.Extensions;
-
-	/**
 	 * Credentials to present, kept apart from the URL.
 	 *
 	 * The first is the connection credential: it rides SETUP, and the URL's `jwt` query too
@@ -266,6 +262,19 @@ export interface ConnectProps {
 	 * keeps it as the connection credential, and then every token rides AUTH.
 	 */
 	tokens?: readonly string[];
+
+	/**
+	 * Carry the connection credential, the first of {@link ConnectProps.tokens}, in the URL's
+	 * `auth` query parameter instead of SETUP and `jwt`. For a relay that reads a credential of
+	 * its own from the URL and takes a SETUP token or `jwt` to be its own kind. The peer's
+	 * verdict on it is judged like any connection credential, and a credential in a `Signal` of
+	 * tokens is replaced for each dial without changing the URL. Replacing it on a live session
+	 * takes a redial: the new credential rides no AUTH stream, so `answered()` waits for it.
+	 *
+	 * An `auth` parameter the URL already has is replaced. A URL's own `jwt` still wins: then
+	 * every token rides AUTH. A supplied `transport` never dials the URL, so it refuses `urlAuth`.
+	 */
+	urlAuth?: boolean;
 
 	/**
 	 * Build the session on `auth`, so it presents every token the handle holds and a route
@@ -312,8 +321,6 @@ type SessionProps = {
 	handle?: Auth.Handle;
 	/** Whether this side dialed; only the dialing side aborts on a publication its grant does not cover. */
 	client: boolean;
-	/** The moq-transport extensions this side offers. */
-	extensions: Extensions.Offered;
 	/** The connection credential SETUP presents, on versions that carry one. */
 	token?: Uint8Array;
 	/** The implementation this side advertises in SETUP; empty sends nothing. */
@@ -360,6 +367,8 @@ export async function establish({ url, ...props }: ConnectProps, reached?: Reach
 	if ("discovery" in props) throw new TypeError(DISCOVERY_REMOVED);
 	props.versions = normalizeVersions(props);
 	if (props.transport && props.versions) throw new TypeError("versions cannot reconfigure a supplied transport");
+	// The URL is never dialed for a supplied transport, so the credential it carries would be dropped.
+	if (props.transport && props.urlAuth) throw new TypeError("urlAuth cannot reach a supplied transport");
 	const signal = props.signal ?? NEVER_ABORTED;
 	if (signal.aborted) reached?.transport.close();
 	signal.throwIfAborted();
@@ -428,13 +437,14 @@ export class Reached {
  */
 export async function reachable(
 	url: URL,
-	props: Pick<ConnectProps, "tokens" | "versions" | "webtransport" | "websocket" | "timeout">,
+	props: Pick<ConnectProps, "tokens" | "urlAuth" | "versions" | "webtransport" | "websocket" | "timeout">,
 	signal: AbortSignal,
 ): Promise<Reached | undefined> {
 	if (!isWebTransportSupported() || signal.aborted) return undefined;
 	const tokens = props.tokens ?? [];
 	const offered = offer(normalizeVersions(props));
-	const dialUrl = parse(credential(url, tokens, offered.setupToken).url).url;
+	const carrier = { setupToken: offered.setupToken, urlAuth: props.urlAuth };
+	const dialUrl = parse(credential(url, tokens, carrier).url).url;
 	const { promise: cancel, resolve } = Promise.withResolvers<void>();
 	const onAbort = () => resolve();
 	signal.addEventListener("abort", onAbort, { once: true });
@@ -467,14 +477,14 @@ async function connectInner(
 	reached?: WebTransport,
 ): Promise<[Session, Presentation]> {
 	const offered = offer(props.versions);
-	const dial = credential(raw, tokens, offered.setupToken);
+	const carrier = { setupToken: offered.setupToken, urlAuth: props.urlAuth };
+	const dial = credential(raw, tokens, carrier);
 	const url = parse(dial.url).url;
-	const fallbackDial = props.websocket?.url && fallback(raw, props.websocket.url, tokens, offered.setupToken);
+	const fallbackDial = props.websocket?.url && fallback(raw, props.websocket.url, tokens, carrier);
 	const wiring = (presented: Presentation): SessionProps => ({
 		publish: props.publish,
 		handle: props.auth,
 		client: true,
-		extensions: Extensions.offered(props.extensions),
 		token: presented.setup === undefined ? undefined : new TextEncoder().encode(presented.setup),
 		implementation: props.implementation ?? IMPLEMENTATION,
 		probeTarget: props.viewers?.target,
@@ -496,7 +506,8 @@ async function connectInner(
 	void abort.then(() => session.close());
 
 	// Record who won the race to this server, so QUIC's next head start follows the last result.
-	if (session instanceof Qmux) {
+	const websocket = transportOf(session) === "websocket";
+	if (websocket) {
 		console.debug(show(parse(url)), "connected via WebSocket");
 		websocketWon.add(server);
 	} else {
@@ -514,9 +525,9 @@ async function connectInner(
 		session.close();
 		throw new Error("server negotiated no protocol, and no offered version negotiates in SETUP");
 	}
-	const won = session instanceof Qmux && fallbackDial ? fallbackDial : dial;
+	const won = websocket && fallbackDial ? fallbackDial : dial;
 	const connection = await connectTransport(url, session as WebTransport, wiring(won), offered.setup);
-	if (session instanceof Qmux) {
+	if (websocket) {
 		const forget = () => websocketWon.delete(server);
 		void connection.closed.then(forget, forget);
 	}
@@ -554,8 +565,7 @@ async function dialRace(
 					protocols: offered.alpns,
 					versions: Object.fromEntries(offered.alpns.map((alpn) => [alpn, QMUX[alpn] ?? null])),
 					config: {
-						maxStreamsBidi: maxStreams,
-						maxStreamsUni: maxStreams,
+						maxStreams,
 						receiveWindow: BigInt(props.websocket?.receiveWindow ?? DEFAULT_RECEIVE_WINDOW),
 						streamReceiveWindow: BigInt(
 							props.websocket?.streamReceiveWindow ?? DEFAULT_STREAM_RECEIVE_WINDOW,
@@ -638,13 +648,15 @@ async function negotiate(
 	console.debug(show(parse(url)), "negotiated ALPN:", protocol ?? "(none)");
 
 	const ietf =
-		protocol === Ietf.ALPN.DRAFT_22
-			? Ietf.Version.DRAFT_22
-			: protocol === Ietf.ALPN.DRAFT_20
-				? Ietf.Version.DRAFT_20
-				: protocol === Ietf.ALPN.DRAFT_18
-					? Ietf.Version.DRAFT_18
-					: undefined;
+		protocol === Ietf.ALPN.DRAFT_23
+			? Ietf.Version.DRAFT_23
+			: protocol === Ietf.ALPN.DRAFT_22
+				? Ietf.Version.DRAFT_22
+				: protocol === Ietf.ALPN.DRAFT_20
+					? Ietf.Version.DRAFT_20
+					: protocol === Ietf.ALPN.DRAFT_18
+						? Ietf.Version.DRAFT_18
+						: undefined;
 	if (ietf !== undefined) {
 		return await handshakeAlpn(url, session, ietf, wiring);
 	} else if (protocol === Lite.ALPN_07_WIP) {
@@ -952,13 +964,17 @@ async function connectWebSocket(
 	cancel: Promise<void>,
 	options: QmuxOptions,
 ): Promise<Qmux | undefined> {
-	const timer = sleep(delay);
-
-	const active = await Promise.race([cancel, timer.then(() => true)]);
+	const active = await race([cancel, sleep(delay).then(() => true)]);
 	if (!active) return undefined;
 
+	// qmux loads only once the fallback dials, so a session WebTransport wins within its head
+	// start never downloads it.
+	const qmux = await race([cancel, import("@moq/qmux")]);
+	if (!qmux) return undefined;
+	const { Session } = qmux;
+
 	for (let wait = WEBSOCKET_REDIAL; ; wait = wait.mul(2)) {
-		const quic = new Qmux(url, options);
+		const quic = new Session(url, options);
 
 		// Wait for the WebSocket to connect, for the cancel promise to resolve, or for the
 		// redial. `ready` rejects on a refused/failed connection, so a throw here is the

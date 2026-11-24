@@ -19,7 +19,7 @@ main-thread blocking through workers, or a new preparation API.
   starting implementation. Constructor support alone is insufficient.
   Check nonfinal frame output, shared history, exact declared-size admission,
   early output-overrun refusal, cancellation, malformed input and group end.
-- Native decoding is also an avenue in the size audit. JS compression landed
+- Native decoding is also an avenue in the [cost audit](/quest/m3/audit-cost.md). JS compression landed
   with a bundled pako codec in `js/net/src/flate`; coordinate with the audit
   and remove only duplicated conditional scope. Encoder and decoder adoption
   may land independently if each preserves the existing contract and removes

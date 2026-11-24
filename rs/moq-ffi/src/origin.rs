@@ -50,9 +50,9 @@ pub struct MoqRouteOptions {
 	pub cost: u64,
 	/// A stable instance for the stream, or `None` to mint a fresh one.
 	///
-	/// Set one only for a publisher that continues its group sequences across restarts and
+	/// Set one only for a publisher that continues its group starts across restarts and
 	/// raises `epoch` on each, or to forward an observed route's stream as is: readers stitch
-	/// every route of one instance together, so restarting the sequences under an old instance
+	/// every route of one instance together, so restarting the starts under an old instance
 	/// splices unrelated groups into their tracks. Naming an instance grants nothing:
 	/// publishing still needs the path's grant.
 	#[uniffi(default = None)]
@@ -205,8 +205,7 @@ impl From<moq_net::announce::Announce> for MoqAnnounce {
 	}
 }
 
-/// What a [`MoqAnnounceConsumer`] yields: a path becoming present, absent, or offline, or
-/// its availability changing.
+/// What a [`MoqAnnounceConsumer`] yields: a path becoming present or absent.
 ///
 /// Another publisher instance taking a path over keeps it present: follow it with
 /// `MoqOriginConsumer::follow` to see the broadcast change.
@@ -217,51 +216,26 @@ pub enum MoqAnnounceEvent {
 		/// The announcement that made the path present.
 		announce: MoqAnnounce,
 	},
-	/// The present path lost every usable path to its origin but may recover one: it stays
-	/// present while requests for it may fail.
-	Unavailable {
-		/// The announcement, now unavailable.
-		announce: MoqAnnounce,
-	},
-	/// The present path recovered a usable path: request it again.
-	Available {
-		/// The announcement, available again.
-		announce: MoqAnnounce,
-	},
-	/// The origin withdrew the path: no route covers it any more. Carries its last
-	/// advertised route.
+	/// No route covers the path any more, whether its origin withdrew it or this side let go
+	/// of it. Carries its last advertised route.
 	Absent {
-		/// The announcement that went.
-		announce: MoqAnnounce,
-	},
-	/// This origin let go of the path, and no route covers it any more: the session it
-	/// arrived on closed, or the network lost every path to it. Its origin may still serve
-	/// it. Carries its last advertised route.
-	Offline {
 		/// The announcement that went.
 		announce: MoqAnnounce,
 	},
 }
 
-impl From<moq_net::announce::Event> for MoqAnnounceEvent {
-	fn from(event: moq_net::announce::Event) -> Self {
+impl MoqAnnounceEvent {
+	/// The event as bindings see it, or `None` for one they have no variant for.
+	fn new(event: moq_net::announce::Event) -> Option<Self> {
 		use moq_net::announce::Event;
 		match event {
-			Event::Present(announce) => Self::Present {
+			Event::Present(announce) => Some(Self::Present {
 				announce: announce.into(),
-			},
-			Event::Unavailable(announce) => Self::Unavailable {
+			}),
+			Event::Absent(announce) => Some(Self::Absent {
 				announce: announce.into(),
-			},
-			Event::Available(announce) => Self::Available {
-				announce: announce.into(),
-			},
-			Event::Absent(announce) => Self::Absent {
-				announce: announce.into(),
-			},
-			Event::Offline(announce) => Self::Offline {
-				announce: announce.into(),
-			},
+			}),
+			_ => None,
 		}
 	}
 }
@@ -386,7 +360,7 @@ impl MoqOriginProducer {
 
 #[uniffi::export]
 impl MoqOriginConsumer {
-	/// Subscribe to routes whose names match a pattern scope; updates stay relative to the origin.
+	/// Subscribe to routes whose names match a discovery filter; updates stay relative to the origin.
 	pub fn announced(&self, config: MoqAnnounceConfig) -> Result<Arc<MoqAnnounceConsumer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		self.driver.check()?;
@@ -395,10 +369,7 @@ impl MoqOriginConsumer {
 			None => moq_net::Pattern::all(),
 		};
 		let filter = filter.rooted(&config.prefix)?;
-		let origin = self
-			.inner
-			.scope("", &moq_net::Patterns::from(filter))?
-			.with_hidden(config.hidden);
+		let origin = self.inner.filter(&filter)?.with_hidden(config.hidden);
 		Ok(Arc::new(MoqAnnounceConsumer {
 			reads: Polled::new(origin.announced()).supervised(self.driver.clone()),
 		}))
@@ -554,6 +525,18 @@ impl MoqRoute {
 		self.with(|route| route.set_cost(cost))
 	}
 
+	/// Swap the credential the route's announcing request carries, renewing that request in
+	/// place, or `None` to announce under the session's scope.
+	///
+	/// Only the session it was minted on carries it, a client session across every
+	/// reconnect; any other session announces the route under its own scope. Errors with
+	/// `Closed` once its broadcast closed, keeping the credential it had, and with
+	/// `Cancelled` for a cancelled credential.
+	pub fn set_auth(&self, credential: Option<Arc<crate::auth::MoqCredential>>) -> Result<(), MoqError> {
+		let credential = credential.map(|credential| credential.credential()).transpose()?;
+		self.with(|route| route.set_auth(credential))
+	}
+
 	/// Retract the route and release it here, not when the handle is.
 	///
 	/// Terminal: later calls fail with `Cancelled`. The broadcast lives on for its other
@@ -627,6 +610,17 @@ impl MoqClaim {
 		self.with(|claim| claim.set_cost(cost))
 	}
 
+	/// Swap the credential the claim's announcing request carries, renewing that request in
+	/// place, or `None` to announce under the session's scope.
+	///
+	/// Only the session it was minted on carries it, a client session across every
+	/// reconnect; any other session announces the claim under its own scope. Errors with
+	/// `Cancelled` for a cancelled credential.
+	pub fn set_auth(&self, credential: Option<Arc<crate::auth::MoqCredential>>) -> Result<(), MoqError> {
+		let credential = credential.map(|credential| credential.credential()).transpose()?;
+		self.with(|claim| claim.set_auth(credential))
+	}
+
 	/// Wait for the next broadcast a consumer requests beneath this claim.
 	///
 	/// Serve a held broadcast, route a new one, or reject the returned request; the requesting
@@ -689,7 +683,7 @@ impl MoqBroadcastRequest {
 
 	/// Serve a held broadcast under the claim's instance without announcing an exact route.
 	///
-	/// Every answer at this path must continue the same sequences and bytes. Start a new
+	/// Every answer at this path must continue the same group starts and bytes. Start a new
 	/// claim for different content, or route a job, whose end moves the claim to another
 	/// instance.
 	pub fn serve(&self, broadcast: &Arc<MoqBroadcastConsumer>) -> Result<(), MoqError> {
@@ -719,7 +713,18 @@ impl MoqAnnounceConsumer {
 	/// Get the next announce event. Returns `None` when the origin is closed.
 	pub async fn next(&self) -> Result<Option<MoqAnnounceEvent>, MoqError> {
 		self.reads
-			.wait(|announced, waiter| Poll::Ready(Ok(ready!(announced.poll_next(waiter)).map(Into::into))))
+			.wait(|announced, waiter| {
+				loop {
+					match ready!(announced.poll_next(waiter)) {
+						Some(event) => {
+							if let Some(event) = MoqAnnounceEvent::new(event) {
+								return Poll::Ready(Ok(Some(event)));
+							}
+						}
+						None => return Poll::Ready(Ok(None)),
+					}
+				}
+			})
 			.await
 	}
 
@@ -872,7 +877,7 @@ mod supervision_tests {
 		let container = MoqMediaContainerProducer::new(
 			&broadcast,
 			MoqContainerInit {
-				format: MoqContainerFormat::Ts,
+				format: MoqContainerFormat::ts(),
 				data: Vec::new(),
 				timebase: Some(timebase.clone()),
 			},
@@ -881,7 +886,7 @@ mod supervision_tests {
 		let independent = MoqMediaContainerProducer::new(
 			&broadcast,
 			MoqContainerInit {
-				format: MoqContainerFormat::Ts,
+				format: MoqContainerFormat::ts(),
 				data: Vec::new(),
 				timebase: None,
 			},
@@ -913,11 +918,11 @@ mod supervision_tests {
 		let route = origin.route("routed".into(), Default::default()).unwrap();
 		let broadcast = route.broadcast();
 		let track = broadcast.publish_track("data".into(), None).unwrap();
-		let open = track.append_group().unwrap();
+		let open = track.append_group(crate::media::MoqTimestamp::unscaled(0)).unwrap();
 		let consumer = origin.consume().request("routed".into(), None).await.unwrap();
 		let subscriber = consumer.subscribe_track("data".into(), None).await.unwrap();
 		let group = subscriber.recv_group().await.unwrap().unwrap();
-		let catalog = crate::media::MoqMediaCatalogConsumer::subscribe(&consumer)
+		let catalog = crate::media::MoqMediaCatalogConsumer::subscribe(&consumer, std::time::Duration::ZERO)
 			.await
 			.unwrap();
 		drop(consumer);

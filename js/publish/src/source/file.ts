@@ -1,9 +1,10 @@
-import { Duration, Instant, now } from "@moq/clock";
+import { now } from "@moq/clock";
 import * as Util from "@moq/hang/util";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { InputAudioTrack, InputVideoTrack, VideoSample } from "mediabunny";
 import { hosted } from "../assets";
-import { pace, sleepUntil } from "./pace";
+import * as MediaClock from "../media-clock";
+import { pace } from "./pace";
 import { Timeline } from "./timeline";
 import type { Media } from "./types";
 
@@ -28,8 +29,8 @@ export type FileOutput = {
 // Image, video, and audio files we know how to decode (see #decode).
 const ACCEPT = "image/*,video/*,audio/*";
 
-// A still image has no cadence of its own, so republish it at this rate. Delta coding makes the
-// repeats nearly free, and a steady stream keeps the encoder's keyframe interval honest.
+// The rate the encoder and catalog plan a still image for. Its one frame never changes, so the
+// capture repeats it at its 4 Hz floor instead.
 const IMAGE_FRAME_RATE = 30;
 
 // How many packets to measure when estimating the file's frame rate.
@@ -106,34 +107,24 @@ export class File {
 		effect.cleanup(() => bitmap.close());
 		if (signal.aborted) return;
 
-		const zero = now();
-		let index = 0;
-
+		// One frame, then nothing until teardown ends the stream.
+		let sent = false;
 		const frames = new ReadableStream<VideoFrame>(
 			{
 				async pull(controller) {
-					// Every repeat is the same picture, so a reader returning after a gap skips to the
-					// slot due now instead of replaying each one it missed.
-					const due = Math.floor(now().since(zero).asSecs() * IMAGE_FRAME_RATE);
-					index = Math.max(index, due);
-
-					const at = zero.add(Duration.secs(index / IMAGE_FRAME_RATE));
-					index++;
-
-					await sleepUntil(at, signal);
-
+					if (sent && !signal.aborted) {
+						await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+					}
 					// The bitmap is closed on teardown, so stop before building a frame from a dead one.
 					if (signal.aborted) {
 						controller.close();
 						return;
 					}
-
-					controller.enqueue(
-						new VideoFrame(bitmap, { timestamp: Math.round(at.since(Instant.ZERO).asMicros()) }),
-					);
+					sent = true;
+					const timestamp = Math.round(MediaClock.now().asMicros());
+					controller.enqueue(new VideoFrame(bitmap, { timestamp }));
 				},
 			},
-			// Prefetching would park a stale frame in the queue while nothing reads, and hand it out on resume.
 			{ highWaterMark: 0 },
 		);
 
@@ -204,9 +195,9 @@ export class File {
 								(sample) => sample.toAudioData(),
 								signal,
 							),
+							// A file is whatever the user picked, so it carries no kind and the encoder
+							// leaves the Opus tuning to the browser.
 							...format,
-							// A file is whatever the user picked, so leave the Opus tuning to the encoder.
-							kind: "auto",
 						}
 					: undefined,
 		};

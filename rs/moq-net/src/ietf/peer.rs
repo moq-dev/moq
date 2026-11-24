@@ -20,12 +20,6 @@ pub(crate) struct Peer {
 	/// SUBSCRIBE_NAMESPACE, so we may send it.
 	pub hidden: bool,
 
-	/// Whether the peer understands subscriber max age (MoQ Timestamp).
-	pub max_age: bool,
-
-	/// MoQ Auth: whether both sides negotiated the Auth request streams.
-	pub auth: bool,
-
 	/// MoQ Active Count: whether the REQUEST_OK answering SUBSCRIBE_NAMESPACE counts the
 	/// NAMESPACE messages before the subscription is synced, in both directions.
 	pub active_count: bool,
@@ -60,7 +54,7 @@ impl PeerSetup {
 
 	/// Tell `link` once the peer's SETUP arrives that it accepted the connection credential.
 	pub fn accepting(mut self, link: crate::auth::Link) -> Self {
-		link.await_setup();
+		link.await_acceptance();
 		self.accept = Some(link);
 		self
 	}
@@ -126,8 +120,6 @@ mod tests {
 			},
 			solicit: None,
 			hidden: false,
-			max_age: false,
-			auth: false,
 			active_count: false,
 			flate: false,
 		};
@@ -141,8 +133,6 @@ mod tests {
 			},
 			solicit: Some(true),
 			hidden: true,
-			max_age: false,
-			auth: true,
 			active_count: true,
 			flate: true,
 		});

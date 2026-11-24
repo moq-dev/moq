@@ -72,6 +72,8 @@ pub(crate) async fn run(
 			video: Arc::new(Mutex::new(VecDeque::new())),
 			drained: Arc::new(Notify::new()),
 			output,
+			// No window, so the catalog's ranking decides.
+			viewport: tokio::sync::watch::channel(None).1,
 		}
 		.run(),
 	);
@@ -144,11 +146,10 @@ mod tests {
 		let args = Args {
 			catalog_format: None,
 			metrics: None,
-			#[cfg(all(target_os = "linux", feature = "vaapi"))]
 			vaapi_device: None,
-			#[cfg(all(target_os = "linux", feature = "v4l2"))]
 			v4l2_decoder: None,
 			delay: super::super::args::Delay::Auto,
+			stretch: std::time::Duration::from_millis(200).into(),
 			select: crate::subscribe::SelectArgs {
 				video: Some(crate::subscribe::Mode::Off),
 				..Default::default()
@@ -171,11 +172,10 @@ mod tests {
 		let args = Args {
 			catalog_format: None,
 			metrics: Some(path.clone()),
-			#[cfg(all(target_os = "linux", feature = "vaapi"))]
 			vaapi_device: None,
-			#[cfg(all(target_os = "linux", feature = "v4l2"))]
 			v4l2_decoder: None,
 			delay: super::super::args::Delay::Auto,
+			stretch: std::time::Duration::from_millis(200).into(),
 			select: crate::subscribe::SelectArgs {
 				video: Some(crate::subscribe::Mode::Off),
 				..Default::default()
@@ -201,11 +201,10 @@ mod tests {
 		let args = Args {
 			catalog_format: None,
 			metrics: None,
-			#[cfg(all(target_os = "linux", feature = "vaapi"))]
 			vaapi_device: None,
-			#[cfg(all(target_os = "linux", feature = "v4l2"))]
 			v4l2_decoder: None,
 			delay: super::super::args::Delay::Auto,
+			stretch: std::time::Duration::from_millis(200).into(),
 			select: crate::subscribe::SelectArgs {
 				video: Some(crate::subscribe::Mode::Off),
 				..Default::default()

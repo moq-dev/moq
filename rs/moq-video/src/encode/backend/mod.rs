@@ -18,6 +18,7 @@
 //! when this build enables it.
 
 use super::encoder::{Applied, Codec, Config, Kind};
+use crate::device::Drives;
 use crate::encode::Encoded;
 use crate::{Error, Frame};
 
@@ -80,7 +81,15 @@ pub(crate) trait Backend {
 	fn flush(&mut self) -> Result<(), Error>;
 
 	/// Submit one frame and collect everything it readied.
-	#[cfg(test)]
+	#[cfg(all(
+		test,
+		any(
+			feature = "openh264",
+			apple,
+			all(target_os = "android", feature = "mediacodec"),
+			all(target_os = "linux", feature = "vaapi"),
+		)
+	))]
 	fn encode_all(&mut self, frame: &Frame, cut: bool) -> Result<Vec<Encoded>, Error> {
 		self.encode(frame, cut)?;
 		self.receive_all()
@@ -122,6 +131,13 @@ pub(crate) trait Backend {
 	/// reason as `set_bitrate`: a backend that cannot cut has to say so, not
 	/// inherit a yes and let the refusal surface as a mislaid group boundary.
 	fn can_cut(&self) -> bool;
+
+	/// Whether [`encode`](Self::encode) scales `surface` to the session size
+	/// itself, on the surface's device, so a resizing encoder hands the frame
+	/// over at its own size. The default leaves scaling to the encoder.
+	fn scales(&self, _surface: &crate::Surface) -> bool {
+		false
+	}
 
 	/// The encoder name in use, e.g. `"videotoolbox"` (for logging and errors).
 	fn name(&self) -> &'static str;
@@ -225,6 +241,8 @@ struct Candidate {
 		allow(dead_code, reason = "only the `capture` feature uses it")
 	)]
 	cuts: bool,
+	/// The kind of [`Device`](crate::Device) it opens, which a named one steers selection by.
+	drives: Drives,
 	#[cfg(target_os = "linux")]
 	vulkan: bool,
 }
@@ -238,6 +256,7 @@ const HARDWARE: &[Candidate] = &[
 		codecs: &[Codec::H264, Codec::H265],
 		open: videotoolbox::VideoToolbox::open,
 		cuts: true,
+		drives: Drives::Own,
 		#[cfg(target_os = "linux")]
 		vulkan: false,
 	},
@@ -247,6 +266,7 @@ const HARDWARE: &[Candidate] = &[
 		codecs: &[Codec::H264, Codec::H265],
 		open: mediafoundation::MediaFoundation::open,
 		cuts: true,
+		drives: Drives::Own,
 		#[cfg(target_os = "linux")]
 		vulkan: false,
 	},
@@ -256,6 +276,7 @@ const HARDWARE: &[Candidate] = &[
 		codecs: &[Codec::H264, Codec::H265],
 		open: mediacodec::MediaCodec::open,
 		cuts: true,
+		drives: Drives::Own,
 		#[cfg(target_os = "linux")]
 		vulkan: false,
 	},
@@ -265,6 +286,7 @@ const HARDWARE: &[Candidate] = &[
 		codecs: &[Codec::H264, Codec::H265],
 		open: nvenc::Nvenc::open,
 		cuts: true,
+		drives: Drives::Nvidia,
 		#[cfg(target_os = "linux")]
 		vulkan: true,
 	},
@@ -274,6 +296,7 @@ const HARDWARE: &[Candidate] = &[
 		codecs: &[Codec::H264, Codec::H265],
 		open: vaapi::Vaapi::open,
 		cuts: true,
+		drives: Drives::Render,
 		#[cfg(target_os = "linux")]
 		vulkan: false,
 	},
@@ -286,6 +309,7 @@ const HARDWARE: &[Candidate] = &[
 		codecs: &[Codec::H264],
 		open: v4l2::V4l2::open,
 		cuts: false,
+		drives: Drives::Video,
 		#[cfg(target_os = "linux")]
 		vulkan: false,
 	},
@@ -301,6 +325,7 @@ const SOFTWARE: &[Candidate] = &[
 		codecs: &[Codec::H264],
 		open: openh264::Openh264::open,
 		cuts: true,
+		drives: Drives::Own,
 		#[cfg(target_os = "linux")]
 		vulkan: false,
 	},
@@ -316,6 +341,7 @@ const NAMED_ONLY: &[Candidate] = &[
 		codecs: &[Codec::H264],
 		open: probe::Probe::open,
 		cuts: true,
+		drives: Drives::Own,
 		#[cfg(target_os = "linux")]
 		vulkan: false,
 	},
@@ -324,6 +350,17 @@ const NAMED_ONLY: &[Candidate] = &[
 		codecs: &[Codec::H264],
 		open: probe::Probe::open_no_cut,
 		cuts: false,
+		drives: Drives::Own,
+		#[cfg(target_os = "linux")]
+		vulkan: false,
+	},
+	#[cfg(feature = "openh264")]
+	Candidate {
+		name: probe::PIPELINED,
+		codecs: &[Codec::H264],
+		open: probe::Pipelined::open,
+		cuts: true,
+		drives: Drives::Own,
 		#[cfg(target_os = "linux")]
 		vulkan: false,
 	},
@@ -425,6 +462,23 @@ fn select(attempts: Vec<Attempt>, config: &Config) -> Result<Box<dyn Backend>, E
 			tried.push(format!("{name}: cannot import external Vulkan {device}"));
 			continue;
 		}
+		match config.device.takes(attempt.candidate.drives) {
+			Ok(true) => {}
+			Ok(false) => {
+				tried.push(format!("{name}: does not open {}", config.device));
+				continue;
+			}
+			// Telling whether this backend drives the named node failed, which
+			// counts against this candidate alone, as a failed open would.
+			Err(e) => {
+				tracing::debug!(encoder = name, error = %e, "encoder unavailable, trying next");
+				tried.push(format!("{name}: {e}"));
+				if attempt.hardware {
+					refused.push(format!("{name}: {e}"));
+				}
+				continue;
+			}
+		}
 		match (attempt.candidate.open)(config) {
 			Ok(backend) => {
 				// `Auto` returning a software encoder is otherwise invisible except for
@@ -510,6 +564,95 @@ fn available_names(codec: Codec) -> Vec<&'static str> {
 pub(crate) mod test_util {
 	use h264_reader::nal::sps::SeqParameterSet;
 	use h264_reader::nal::{Nal, RefNal, UnitType};
+
+	/// What a scene cost an encoder held to `config.bitrate`, its cap.
+	#[derive(Debug)]
+	pub(crate) struct Spent {
+		/// The mean bitrate after the first second, once rate control has settled.
+		pub mean: u64,
+		/// The most any one second carried after the first.
+		#[cfg_attr(
+			all(
+				feature = "openh264",
+				not(any(apple, all(target_os = "linux", any(feature = "nvidia", feature = "vaapi"))))
+			),
+			expect(dead_code, reason = "only the hardware encoders' tests bound the peak")
+		)]
+		pub peak: u64,
+	}
+
+	/// What [`spend`] encodes.
+	#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+	pub(crate) enum Scene {
+		/// A detailed picture drifting a pixel a frame.
+		Calm,
+		/// Fresh noise every frame, which no quantizer below the coarsest codes
+		/// under any cap.
+		Busy,
+		/// The calm picture held still for half the run, then noise: a rate
+		/// controller that banked what the still picture left unspent can pour
+		/// it into the first busy frames.
+		Waking,
+	}
+
+	/// Encode three seconds of `scene` and report what it spent, retuning the cap
+	/// to `retune` half a second in. `None` when the backend `config` names
+	/// cannot open on this machine; once it opens, any failure panics, so an
+	/// encoder that opens but cannot encode fails the test instead of skipping it.
+	pub(crate) fn spend(config: &crate::encode::Config, scene: Scene, retune: Option<u64>) -> Option<Spent> {
+		let mut encoder = crate::encode::Encoder::new(config).ok()?;
+		let size = crate::Size::new(config.width, config.height);
+		let fps = config.framerate.rounded() as usize;
+		let mut sizes = Vec::new();
+		let mut noise = 0x2545_f491_4f6c_dd1du64;
+		for index in 0..3 * fps {
+			if let Some(bps) = retune.filter(|_| index == fps / 2) {
+				encoder
+					.set_bitrate(moq_net::bandwidth::Rate::from_bps(bps))
+					.expect("retune the cap");
+			}
+			let (w, h) = (size.width as usize, size.height as usize);
+			let busy = match scene {
+				Scene::Calm => false,
+				Scene::Busy => true,
+				Scene::Waking => index >= 3 * fps / 2,
+			};
+			// The still picture is the calm one's first frame.
+			let shift = if scene == Scene::Waking { 0 } else { index };
+			let mut rgba = vec![255u8; w * h * 4];
+			for y in 0..h {
+				for x in 0..w {
+					let i = (y * w + x) * 4;
+					let value = if busy {
+						noise ^= noise << 13;
+						noise ^= noise >> 7;
+						noise ^= noise << 17;
+						noise as u8
+					} else {
+						let sx = x + shift;
+						(((sx * 7) ^ (y * 13)) & 0xff) as u8 / 2 + ((sx / 9 + y / 5) % 2) as u8 * 64
+					};
+					rgba[i..i + 3].fill(value);
+				}
+			}
+			let surface = crate::Surface::rgba(&rgba, size).expect("wrap the frame");
+			let timestamp =
+				moq_net::Timestamp::from_micros(index as u64 * 1_000_000 / fps as u64).expect("frame timestamp");
+			let bytes: usize = encoder
+				.encode_all(&crate::Frame::new(surface, timestamp))
+				.expect("encode a frame")
+				.iter()
+				.map(|unit| unit.payload.len())
+				.sum();
+			sizes.push(bytes);
+		}
+		let settled = &sizes[fps..];
+		let bits = |frames: &[usize]| frames.iter().sum::<usize>() as u64 * 8;
+		Some(Spent {
+			mean: bits(settled) * fps as u64 / settled.len() as u64,
+			peak: settled.windows(fps).map(bits).max().unwrap_or(0),
+		})
+	}
 
 	/// A stream's VUI color description, as the raw code points ISO/IEC 23091-2
 	/// assigns them plus the range flag.
@@ -635,6 +778,7 @@ mod tests {
 		codecs: &[Codec::H264],
 		open: Stub::open,
 		cuts: true,
+		drives: Drives::Own,
 		#[cfg(target_os = "linux")]
 		vulkan: false,
 	};
@@ -646,6 +790,7 @@ mod tests {
 		codecs: &[Codec::H264],
 		open: |_| Err(Error::codec(anyhow::anyhow!("driver libraries not found"))),
 		cuts: true,
+		drives: Drives::Own,
 		#[cfg(target_os = "linux")]
 		vulkan: false,
 	};
@@ -668,6 +813,69 @@ mod tests {
 		for candidate in NAMED_ONLY {
 			let backend = (candidate.open)(&config()).unwrap();
 			assert_eq!(backend.can_cut(), candidate.cuts, "{}", candidate.name);
+		}
+	}
+
+	/// A named node passes over the hardware that drives another kind of device
+	/// without opening it, and says so when nothing else opens.
+	#[test]
+	fn a_named_device_passes_over_other_hardware() {
+		const RENDER: Candidate = Candidate {
+			name: "render",
+			open: |_| panic!("opened a render backend for a codec node"),
+			drives: Drives::Render,
+			..WORKING
+		};
+		const VIDEO: Candidate = Candidate {
+			name: "video",
+			drives: Drives::Video,
+			..WORKING
+		};
+
+		let mut config = config();
+		config.device = crate::Device::Video("/dev/video11".into());
+		let opened = select(vec![Attempt::hardware(&RENDER), Attempt::hardware(&VIDEO)], &config).unwrap();
+		assert_eq!(opened.name(), "stub");
+
+		match select(vec![Attempt::hardware(&RENDER)], &config) {
+			Err(Error::NoEncoder(reason)) => assert!(
+				reason.contains("render: does not open codec node /dev/video11"),
+				"{reason}"
+			),
+			Err(other) => panic!("expected NoEncoder, got {other:?}"),
+			Ok(backend) => panic!("expected NoEncoder, opened {}", backend.name()),
+		}
+	}
+
+	/// A driver check that cannot read the named node counts against the NVIDIA
+	/// candidate alone: selection goes on, and the reason reaches the error.
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn a_failed_driver_check_moves_on() {
+		const NVIDIA: Candidate = Candidate {
+			name: "nvidia",
+			open: |_| panic!("opened NVIDIA for an unreadable node"),
+			drives: Drives::Nvidia,
+			..WORKING
+		};
+		const RENDER: Candidate = Candidate {
+			name: "render",
+			drives: Drives::Render,
+			..WORKING
+		};
+
+		let mut config = config();
+		config.device = crate::Device::Render("/dev/dri/renderD199-absent".into());
+		let opened = select(vec![Attempt::hardware(&NVIDIA), Attempt::hardware(&RENDER)], &config).unwrap();
+		assert_eq!(opened.name(), "stub");
+
+		match select(vec![Attempt::hardware(&NVIDIA)], &config) {
+			Err(Error::NoEncoder(reason)) => assert!(
+				reason.contains("nvidia: ") && reason.contains("renderD199-absent"),
+				"{reason}"
+			),
+			Err(other) => panic!("expected NoEncoder, got {other:?}"),
+			Ok(backend) => panic!("expected NoEncoder, opened {}", backend.name()),
 		}
 	}
 

@@ -169,7 +169,13 @@ def lock_version(root, package):
     return matches[0][1]
 
 
+# The release cycle's phase, which the API diff reads: `additive` denies breaks.
+PHASES = (None, "additive", "api", "wire")
+
+
 def check(root, config):
+    if config["phase"] not in PHASES:
+        raise ValueError(f"invalid phase {config['phase']!r}: expected one of {PHASES}")
     minor = config["minor"]
     if minor is None:
         print("shared version: disabled until the release cut runs just version")
@@ -245,6 +251,10 @@ def bump(root, config, target):
                 sections.append(f'[[package]]\nname = "{p.name}"\nchangelog_path = {json.dumps(str(changelog))}\n')
             config_path.write_text("\n".join(sections))
             if rust:
+                # Older release-plz, such as a non-Nix one ahead on PATH, leaves versions unset without failing.
+                found = run(root, "release-plz", "--version").split()[-1]
+                if version(found) < (0, 4, 1):
+                    raise ValueError(f"release-plz {found} is older than 0.4.1; use the Nix dev shell's")
                 run(
                     root,
                     "release-plz",

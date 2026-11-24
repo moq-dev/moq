@@ -25,12 +25,8 @@ pub enum ParameterVarInt {
 	Solicit = super::solicit::SOLICIT,
 	/// HIDDEN, from the MoQ Hidden extension.
 	Hidden = super::hidden::HIDDEN,
-	/// AUTH, from the MoQ Auth extension.
-	Auth = super::auth::AUTH,
 	/// ACTIVE_COUNT, from the MoQ Active Count extension.
 	ActiveCount = super::active_count::ACTIVE_COUNT,
-	/// Subscriber max age, from the MoQ Timestamp extension.
-	MaxAge = super::max_age::OPTION,
 	/// DEFLATE-compressed tracks, from the MoQ Flate extension.
 	Flate = super::flate::OPTION,
 	#[num_enum(catch_all)]
@@ -465,7 +461,7 @@ mod tests {
 
 	#[test]
 	fn setup_allows_repeated_unknown_options() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			for kind in [0x20, 0x21, 0x9d, 0x11c] {
 				let mut buf = Vec::new();
 				let mut w = Encoder::new(&mut buf, version.into());
@@ -487,7 +483,7 @@ mod tests {
 
 	#[test]
 	fn setup_rejects_repeated_known_options() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			for bytes in [&[4, 1, 0, 2][..], &[7, 1, b'a', 0, 1, b'b'][..]] {
 				assert!(matches!(
 					Parameters::decode_slice(bytes, version),
@@ -499,14 +495,14 @@ mod tests {
 
 	#[test]
 	fn setup_repeated_unknown_options_still_require_complete_values() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			assert!(Parameters::decode_slice(&[0x21, 1, b'a', 0, 2, b'b'], version).is_err());
 		}
 	}
 
 	#[test]
 	fn group_order_parameter_rejects_values_outside_one_and_two() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			for value in [0u8, 3, 255] {
 				let bytes = [value];
 				let mut r = Decoder::new(&bytes, version.into());
@@ -647,6 +643,7 @@ mod tests {
 		for (version, expected) in [
 			(Version::Draft18, &[0x01, 0x09, 0x80, 0xff, 0x80, 0x80][..]),
 			(Version::Draft22, &[0x01, 0x09, 0x80, 0xff, 0x80, 0x80][..]),
+			(Version::Draft23, &[0x01, 0x09, 0x80, 0xff, 0x80, 0x80][..]),
 		] {
 			let mut buf = Vec::new();
 			encode_params!(&mut Encoder::new(&mut buf, version.into()), version, 0x09 => location.clone());

@@ -24,13 +24,13 @@
 //! See `test/drill/README.md` for the recipe, the sensitivity proof that each
 //! drill fails when its recovery behavior is removed, and the fuzz targets
 //! covering the wire underneath.
-#![cfg(all(feature = "quic", feature = "websocket"))]
 
 use std::time::Duration;
 
 use futures::FutureExt;
 
 use moq_relay::{Config, Relay};
+use moq_tokio::connection::Phase;
 
 /// A millisecond track with no publisher max age: the frames written here carry timestamps,
 /// and superseded groups stay readable.
@@ -285,7 +285,7 @@ fn relay_config() -> Config {
 	let mut config = Config::default();
 	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.listen.tls.generate = vec!["localhost".into()];
-	config.auth.public = vec![moq_auth::Pattern::all()];
+	config.auth.public = vec![moq_auth::Prefix::all()];
 	config
 }
 
@@ -346,9 +346,11 @@ fn dial() -> moq_tokio::connect::Config {
 
 /// Append one finished group carrying `payload`.
 fn write_group(track: &mut moq_net::track::Producer, payload: &[u8]) {
-	let mut group = track.append_group().expect("append group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("append group");
 	group
-		.write_frame(moq_net::Timestamp::ZERO, payload)
+		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), payload)
 		.expect("write frame");
 	group.finish().expect("finish group");
 }
@@ -361,7 +363,7 @@ async fn read_group(reader: &mut Reader, what: &str) -> (u64, Vec<u8>) {
 		.unwrap_or_else(|_| panic!("{what}: no group within {TIMEOUT:?}"))
 		.unwrap_or_else(|err| panic!("{what}: track aborted: {err}"))
 		.unwrap_or_else(|| panic!("{what}: track finished instead of delivering a group"));
-	let sequence = group.sequence;
+	let sequence = group.start;
 
 	let mut group = group;
 	let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
@@ -594,11 +596,11 @@ async fn relay_killed_mid_group_aborts_then_resumes(lane: Lane) {
 		.broadcast()
 		.create_track(TRACK, timed())
 		.expect("create track");
-	let mut publish_loop = client(&url).publish(publisher.consume()).expect("no connect url");
+	let publish_loop = client(&url).publish(publisher.consume()).expect("no connect url");
 
 	let subscriber = moq_tokio::origin::spawn();
 	let subscribed = subscriber.consume();
-	let mut subscribe_loop = client(&url).consume(subscriber).expect("no connect url");
+	let subscribe_loop = client(&url).consume(subscriber).expect("no connect url");
 
 	write_group(&mut track, b"before");
 	let mut reader = subscribe(&subscribed, "live").await;
@@ -609,8 +611,10 @@ async fn relay_killed_mid_group_aborts_then_resumes(lane: Lane) {
 	// a second: the kill lands mid-group rather than in the quiet between them.
 	// Nothing more is written, so what the reader is waiting for cannot arrive
 	// ahead of the kill and turn this into a race.
-	let mut open = track.append_group().expect("append group");
-	open.write_frame(moq_net::Timestamp::ZERO, b"read".as_ref())
+	let mut open = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("append group");
+	open.write_frame(moq_net::Timestamp::from_millis(open.start).unwrap(), b"read".as_ref())
 		.expect("write frame");
 	let mut open_reader = kio::clock::timeout(TIMEOUT, reader.groups.recv_group())
 		.await
@@ -637,14 +641,14 @@ async fn relay_killed_mid_group_aborts_then_resumes(lane: Lane) {
 	println!("fault activated: interrupted group aborted with {err}");
 
 	// Fault activation: both loops noticed they lost the relay.
-	expect_status(&mut subscribe_loop, moq_tokio::Status::Disconnected, "subscriber").await;
-	expect_status(&mut publish_loop, moq_tokio::Status::Disconnected, "publisher").await;
+	expect_phase(&subscribe_loop, disconnected, "subscriber").await;
+	expect_phase(&publish_loop, disconnected, "publisher").await;
 
 	let relay = replacement;
 	path.retarget(&relay);
 
-	expect_status(&mut subscribe_loop, moq_tokio::Status::Connected, "subscriber").await;
-	expect_status(&mut publish_loop, moq_tokio::Status::Connected, "publisher").await;
+	expect_phase(&subscribe_loop, connected, "subscriber").await;
+	expect_phase(&publish_loop, connected, "publisher").await;
 
 	// The outage is observed, not hidden: the broadcast the dead session fed closed
 	// with it, so the old subscription ends rather than reading from a stale route.
@@ -674,16 +678,23 @@ async fn relay_killed_mid_group_aborts_then_resumes(lane: Lane) {
 
 lanes!(relay_killed_mid_group_aborts_then_resumes);
 
-/// Wait for a reconnect loop to report `want`, failing with what it said instead.
-async fn expect_status(reconnect: &mut moq_tokio::Connection, want: moq_tokio::Status, who: &str) {
-	loop {
-		let status = kio::clock::timeout(TIMEOUT, reconnect.status())
+fn connected(phase: &Phase) -> bool {
+	matches!(phase, Phase::Connected { .. })
+}
+
+fn disconnected(phase: &Phase) -> bool {
+	matches!(phase, Phase::Disconnected { .. })
+}
+
+/// Wait for a reconnect loop's phase to match `want`, failing with what it reached instead.
+async fn expect_phase(reconnect: &moq_tokio::Connection, want: fn(&Phase) -> bool, who: &str) {
+	let monitor = reconnect.monitor();
+	let mut seen = monitor.state();
+	while !want(&seen.phase) {
+		seen = kio::clock::timeout(TIMEOUT, monitor.state_changed(seen.revision))
 			.await
-			.unwrap_or_else(|_| panic!("{who}: no status change within {TIMEOUT:?}, wanted {want:?}"))
+			.unwrap_or_else(|_| panic!("{who}: still {:?} after {TIMEOUT:?}", seen.phase))
 			.unwrap_or_else(|err| panic!("{who}: reconnect loop gave up: {err}"));
-		if status == want {
-			return;
-		}
 	}
 }
 
@@ -1258,7 +1269,7 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 					Err(err) => panic!("the subscription aborted: {err}"),
 					Ok(None) => panic!("the subscription finished"),
 				};
-				let sequence = group.sequence;
+				let sequence = group.start;
 
 				// Every unclaimed group below this one is a gap the subscription
 				// skipped: FETCH it now rather than wait.
@@ -1408,17 +1419,15 @@ async fn next_update(announced: &mut moq_net::origin::Routes) -> Option<(moq_net
 			kind:
 				moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update | moq_net::origin::RouteKind::Restart,
 			announce: route,
+			..
 		} => Some((route, true)),
 		moq_net::origin::RouteEvent {
 			kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 			announce: route,
+			..
 		} => Some((route, false)),
+		other => panic!("unexpected route event {other:?}"),
 	}
-}
-
-#[tokio::test]
-async fn ietf_subscriber_max_age_skips_bufferbloat() {
-	subscriber_max_age_skips_bufferbloat("moq-transport-22").await
 }
 
 #[tokio::test]
@@ -1428,8 +1437,9 @@ async fn lite_subscriber_max_age_skips_bufferbloat() {
 
 /// A finite deep queue, below the media bitrate, must shed superseded groups while
 /// preserving the newest catalog snapshot. Random loss is disabled in this acceptance test.
-/// On both protocols: this is the benign twin of a subscriber that stalls on purpose, so
-/// bounding what a stalled one makes the relay hold must not cost it the live edge.
+/// This is the benign twin of a subscriber that stalls on purpose, so bounding what a
+/// stalled one makes the relay hold must not cost it the live edge. moq-lite only:
+/// moq-transport carries no subscriber budget.
 async fn subscriber_max_age_skips_bufferbloat(version: &str) {
 	let version: moq_net::Version = version.parse().unwrap();
 	let mut config = relay_config();
@@ -1488,8 +1498,12 @@ async fn subscriber_max_age_skips_bufferbloat(version: &str) {
 		.track(TRACK)
 		.unwrap()
 		.subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(100))),
+			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+				moq_net::track::Start::Live {
+					min: Some(Duration::from_millis(100)),
+					max: Some(Duration::from_millis(100)),
+				},
+			)]),
 		)
 		.await
 		.unwrap();
@@ -1500,10 +1514,13 @@ async fn subscriber_max_age_skips_bufferbloat(version: &str) {
 	);
 	kio::clock::timeout(TIMEOUT, async {
 		loop {
-			if track
-				.subscription()
-				.is_some_and(|subscription| subscription.delay.max == Some(Duration::from_millis(100)))
-			{
+			// Every wire carries the budget, though one before lite-07 reaches the publisher
+			// with a lag of its own.
+			if track.subscription().is_some_and(|subscription| {
+				subscription.ranges.iter().any(|range| {
+					matches!(range.start, moq_net::track::Start::Live { max: Some(max), .. } if max == Duration::from_millis(100))
+				})
+			}) {
 				break;
 			}
 			track.subscription_changed().await.unwrap();
@@ -1529,14 +1546,20 @@ async fn subscriber_max_age_skips_bufferbloat(version: &str) {
 	assert!(path.overflowed() > 0, "the finite queue did not drop overflow");
 	// 5.12Mb/s of media behind a 64kb/s link, for a second.
 	for sequence in 2..22 {
-		let mut group = track.append_group().unwrap();
+		let mut group = track
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
+			.unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(sequence * 50).unwrap(), payload.clone())
 			.unwrap();
 		group.finish().unwrap();
 		kio::clock::sleep(Duration::from_millis(50)).await;
 	}
-	let mut newest = track.append_group().unwrap();
+	let mut newest = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.unwrap();
 	newest
 		.write_frame(moq_net::Timestamp::from_millis(1100).unwrap(), b"snapshot")
 		.unwrap();
@@ -1549,7 +1572,7 @@ async fn subscriber_max_age_skips_bufferbloat(version: &str) {
 			if let Ok(Some(frame)) = group.read_frame().await
 				&& frame.payload == b"snapshot".as_slice()
 			{
-				break group.sequence;
+				break group.start;
 			}
 		}
 	})

@@ -1,4 +1,4 @@
-use std::sync::OnceLock;
+use std::{sync::Mutex, task::Poll};
 
 /// Why a WebTransport (or raw QUIC) session failed: its handshake, its connection, or a close.
 #[derive(thiserror::Error, Debug, Clone)]
@@ -11,10 +11,6 @@ pub enum Error {
 	/// The session closed with this application code and reason.
 	#[error("closed: code={0} reason={1}")]
 	Closed(u32, String),
-
-	/// The peer tore down the session's streams before its close reason arrived.
-	#[error("session gone")]
-	SessionGone,
 
 	/// A stream named a different session.
 	#[error("unknown session")]
@@ -97,21 +93,36 @@ const WT_SESSION_GONE: u64 = 0x170d7b68;
 pub(crate) struct CloseReason {
 	// Raw QUIC carries the application code as is; HTTP/3 maps it into its own code space.
 	raw: bool,
-	reason: OnceLock<Error>,
+	reason: Mutex<Reason>,
+}
+
+#[derive(Debug, Default)]
+struct Reason {
+	err: Option<Error>,
+	/// Readers that saw WT_SESSION_GONE before the reason was recorded.
+	waiters: kio::WaiterList,
 }
 
 impl CloseReason {
 	pub(crate) fn new(raw: bool) -> Self {
 		Self {
 			raw,
-			reason: OnceLock::new(),
+			reason: Mutex::default(),
 		}
 	}
 
-	/// The QUIC code to reset or stop a stream with.
+	fn get(&self) -> Option<Error> {
+		self.reason.lock().unwrap().err.clone()
+	}
+
+	/// The QUIC code to reset or stop a stream with: WT_SESSION_GONE once the session closed,
+	/// which tells the peer to read the session's close reason instead (draft-ietf-webtrans-http3 §4.4).
 	pub(crate) fn encode_stream_code(&self, code: u32) -> crate::quic::driver::VarInt {
 		if self.raw {
 			return code.into();
+		}
+		if self.reason.lock().unwrap().err.is_some() {
+			return crate::quic::driver::VarInt::from_u64(WT_SESSION_GONE).unwrap();
 		}
 		crate::quic::driver::VarInt::try_from(web_transport_proto::error_to_http3(code)).unwrap()
 	}
@@ -128,22 +139,42 @@ impl CloseReason {
 		}
 	}
 
-	/// The session's close reason when the peer reset or stopped a stream with
+	/// Poll the session's close reason when the peer reset or stopped a stream with
 	/// WT_SESSION_GONE, which tears down the streams of a closed session
 	/// (draft-ietf-webtrans-http3 §4.4), or None for any other code.
 	///
-	/// The reset can beat the close capsule, so until it lands the code and reason are
-	/// unknown: [`Error::SessionGone`], never a guessed clean close.
-	pub(crate) fn session_gone(&self, code: crate::quic::driver::VarInt) -> Option<Error> {
+	/// The reset can beat the close capsule, so this is pending until the reason is recorded,
+	/// which the capsule or the connection's close always does.
+	pub(crate) fn poll_session_gone(
+		&self,
+		waiter: &kio::Waiter,
+		code: crate::quic::driver::VarInt,
+	) -> Option<Poll<Error>> {
 		if self.raw || code.into_inner() != WT_SESSION_GONE {
 			return None;
 		}
-		Some(self.reason.get().cloned().unwrap_or(Error::SessionGone))
+		let mut reason = self.reason.lock().unwrap();
+		Some(match &reason.err {
+			Some(err) => Poll::Ready(err.clone()),
+			None => {
+				reason.waiters.register(waiter);
+				Poll::Pending
+			}
+		})
 	}
 
 	/// Record the close reason, returning false if one was already recorded.
 	pub(crate) fn set(&self, err: Error) -> bool {
-		self.reason.set(err).is_ok()
+		let mut waiters = {
+			let mut reason = self.reason.lock().unwrap();
+			if reason.err.is_some() {
+				return false;
+			}
+			reason.err = Some(err);
+			reason.waiters.take()
+		};
+		waiters.wake();
+		true
 	}
 
 	/// Replace an error caused by the connection closing with the recorded reason, or
@@ -155,12 +186,12 @@ impl CloseReason {
 			Error::Connection(conn)
 			| Error::Read(recv::Error::Connection(conn))
 			| Error::Write(send::Error::Connection(conn)) => Some(conn),
-			Error::Closed(..) | Error::SessionGone | Error::Http3 { .. } => None,
+			Error::Closed(..) | Error::Http3 { .. } => None,
 			_ => return err,
 		};
 
-		if let Some(reason) = self.reason.get() {
-			return reason.clone();
+		if let Some(reason) = self.get() {
+			return reason;
 		}
 
 		let Some(connection::Error::ApplicationClosed(close)) = conn else {
@@ -276,22 +307,32 @@ mod tests {
 		assert_eq!(close.decode_stream_code(invalid), None);
 	}
 
-	/// WT_SESSION_GONE reports the session's close, before and after its capsule arrives.
+	/// WT_SESSION_GONE waits for the session's close reason, and a closed session sends it.
 	#[test]
-	fn session_gone_reads_as_the_close() {
+	fn session_gone_waits_for_the_close() {
 		let gone = crate::quic::driver::VarInt::from_u64(WT_SESSION_GONE).unwrap();
 		let close = CloseReason::new(false);
-		assert!(matches!(close.session_gone(gone), Some(Error::SessionGone)));
+		struct Flag(std::sync::atomic::AtomicBool);
+		impl std::task::Wake for Flag {
+			fn wake(self: std::sync::Arc<Self>) {
+				self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+			}
+		}
+		let flag = std::sync::Arc::new(Flag(Default::default()));
+		let waiter = kio::Waiter::new(flag.clone().into());
+		assert!(matches!(close.poll_session_gone(&waiter, gone), Some(Poll::Pending)));
+		assert!(close.poll_session_gone(&waiter, close.encode_stream_code(7)).is_none());
 
 		close.set(Error::Closed(7, "bye".into()));
+		assert!(flag.0.load(std::sync::atomic::Ordering::SeqCst));
 		assert!(matches!(
-			close.session_gone(gone),
-			Some(Error::Closed(7, reason)) if reason == "bye"
+			close.poll_session_gone(&waiter, gone),
+			Some(Poll::Ready(Error::Closed(7, reason))) if reason == "bye"
 		));
-		assert!(close.session_gone(close.encode_stream_code(7)).is_none());
+		assert_eq!(close.encode_stream_code(7), gone);
 
 		// Raw QUIC has no HTTP/3 code space, so the same number is an application code.
-		assert!(CloseReason::new(true).session_gone(gone).is_none());
+		assert!(CloseReason::new(true).poll_session_gone(&waiter, gone).is_none());
 	}
 
 	/// A peer close maps into WebTransport code space, or is HTTP/3's own failure when its

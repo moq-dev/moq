@@ -14,13 +14,15 @@
 //!   reopens it for the next viewer. A fresh portal session would re-prompt the
 //!   picker every time, so the portal's restore token is kept with the selection
 //!   and consumed by the next [`open`], which restores the same grant without a
-//!   dialog (on compositors that support persistence). The token is forgotten when the
+//!   dialog (on compositors that support persistence). The grant lasts until the
+//!   user revokes it, so a caller can also persist the token for a later process
+//!   (`Selection::restore_token`). The token is forgotten when the
 //!   compositor ends the stream (the user hit "stop sharing"), so a revoked
 //!   grant is asked for again rather than silently resumed.
-//! - Compositors only deliver frames on damage, so a static screen would starve
-//!   the encoder. A loop timer re-emits the last frame whenever a frame interval
-//!   passes without a fresh one.
-//!   Cameras deliver every interval, so their streams have no such timer.
+//! - Compositors only deliver frames on damage, so a still screen would starve
+//!   the encoder and stall the player. The screen's channel repeats the last
+//!   frame at a 4 Hz floor (see [`FrameChannel::repeating`]). Cameras deliver
+//!   every interval, so their channels never repeat.
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -67,7 +69,7 @@ pub(super) mod camera;
 
 /// Open a system-picked screen or window and stream frames from a PipeWire thread.
 pub(super) async fn open(config: &Config, selection: &portal::Selection) -> Result<Stream, Error> {
-	let (node_id, fd, session) = portal_negotiate(config.cursor, selection).await?;
+	let (node_id, fd, session) = portal_negotiate(config.cursor.drawn(), selection).await?;
 	start(
 		config,
 		Capture {
@@ -121,11 +123,14 @@ enum Target {
 /// Spawn the PipeWire loop for `capture` and wait for its format and first frame.
 async fn start(config: &Config, capture: Capture, session: Option<SessionGuard>) -> Result<Stream, Error> {
 	let kind = capture.kind;
-	let chan = FrameChannel::new();
 	let framerate = config
 		.framerate
 		.unwrap_or(crate::FrameRate::integer(DEFAULT_FRAMERATE))
 		.rounded();
+	let chan = match kind {
+		Kind::Screen => FrameChannel::repeating(Duration::from_micros(1_000_000 / u64::from(framerate.max(1)))),
+		Kind::Camera => FrameChannel::new(),
+	};
 	let (geo_tx, geo_rx) = tokio::sync::oneshot::channel();
 	let (quit_tx, quit_rx) = pw::channel::channel::<()>();
 	let (return_tx, return_rx) = pw::channel::channel::<Lease>();
@@ -138,8 +143,6 @@ async fn start(config: &Config, capture: Capture, session: Option<SessionGuard>)
 				geometry: None,
 				color: None,
 				geo_tx: Some(geo_tx),
-				last: None,
-				fresh: false,
 				generation: 0,
 				dmabuf_modifier: None,
 				terminal: None,
@@ -256,8 +259,10 @@ async fn portal_negotiate(cursor: bool, selection: &portal::Selection) -> Result
 				})
 				.set_sources(ashpd::enumflags2::BitFlags::from(requested))
 				.set_multiple(false)
-				.set_persist_mode(PersistMode::Application)
-				.set_restore_token(restore.as_deref()),
+				// A grant that ends with the process would make a token persisted
+				// through `Selection::restore_token` useless to the next one.
+				.set_persist_mode(PersistMode::ExplicitlyRevoked)
+				.set_restore_token(restore.as_ref().map(portal::RestoreToken::as_str)),
 		)
 		.await
 		.map_err(|e| err("portal select sources", e))?
@@ -343,7 +348,7 @@ impl Drop for LoopGuard {
 	}
 }
 
-/// Shared by the stream callbacks and the pacing timer, all on the loop thread.
+/// Shared by the stream callbacks, all on the loop thread.
 struct State {
 	format: VideoInfoRaw,
 	/// The even-clamped size sent to `open`.
@@ -351,10 +356,6 @@ struct State {
 	/// The NV12 color space used to configure the encoder.
 	color: Option<Color>,
 	geo_tx: Option<tokio::sync::oneshot::Sender<Result<Geometry, Error>>>,
-	/// Most recent converted frame, re-emitted while the screen is static.
-	last: Option<Last>,
-	/// Whether a fresh frame arrived since the last pacing tick.
-	fresh: bool,
 	/// Buffer-pool generation. Returns from superseded pools are discarded.
 	generation: u64,
 	/// Explicit DRM modifier from the negotiated DMA-BUF format.
@@ -365,25 +366,9 @@ struct State {
 
 impl State {
 	/// PipeWire freed a buffer of the pool: a lease still out on it must not be
-	/// queued back, and the retained frame may point into it.
+	/// queued back.
 	fn buffer_removed(&mut self) {
 		self.generation = self.generation.wrapping_add(1);
-		self.last = None;
-	}
-}
-
-/// A retained frame for the static-screen pacing tick.
-enum Last {
-	I420(I420),
-	DmaBuf(DmaBuf),
-}
-
-impl Last {
-	fn surface(&self) -> Surface {
-		match self {
-			Self::I420(frame) => Surface::I420(frame.clone()),
-			Self::DmaBuf(frame) => Surface::DmaBuf(frame.clone()),
-		}
 	}
 }
 
@@ -437,7 +422,7 @@ impl DmaBufFrame for PipeWireDmaBuf {
 
 		wait_dma_buf_readable(self.fd.as_fd())
 			.map_err(|e| Error::codec(anyhow::anyhow!("waiting for DMA-BUF producer: {e}")))?;
-		with_dma_buf_read(&self.fd, || {
+		with_dma_buf_read(self.fd.as_fd(), || {
 			let allocation_size = self
 				.allocation_size
 				.ok_or_else(|| Error::codec(anyhow::anyhow!("DMA-BUF descriptor does not report a mappable size")))?;
@@ -483,7 +468,7 @@ struct DmaBufSync {
 }
 
 /// Brackets CPU reads with the cache-coherency protocol required by DMA-BUF.
-fn with_dma_buf_read<T>(fd: &OwnedFd, read: impl FnOnce() -> Result<T, Error>) -> Result<T, Error> {
+fn with_dma_buf_read<T>(fd: BorrowedFd<'_>, read: impl FnOnce() -> Result<T, Error>) -> Result<T, Error> {
 	let sync = DmaBufRead::new(fd)?;
 	let result = read();
 	let end = sync.finish();
@@ -495,12 +480,12 @@ fn with_dma_buf_read<T>(fd: &OwnedFd, read: impl FnOnce() -> Result<T, Error>) -
 }
 
 struct DmaBufRead<'a> {
-	fd: &'a OwnedFd,
+	fd: BorrowedFd<'a>,
 	finished: bool,
 }
 
 impl<'a> DmaBufRead<'a> {
-	fn new(fd: &'a OwnedFd) -> Result<Self, Error> {
+	fn new(fd: BorrowedFd<'a>) -> Result<Self, Error> {
 		dma_buf_sync(fd, DMA_BUF_SYNC_READ)?;
 		Ok(Self { fd, finished: false })
 	}
@@ -521,14 +506,14 @@ impl Drop for DmaBufRead<'_> {
 	}
 }
 
-fn dma_buf_sync(fd: &OwnedFd, flags: u64) -> Result<(), Error> {
+fn dma_buf_sync(fd: BorrowedFd<'_>, flags: u64) -> Result<(), Error> {
 	let mut sync = DmaBufSync { flags };
 	loop {
 		// SAFETY: this is the DMA-BUF sync ioctl with its matching UAPI payload,
 		// and `fd` stays open for the duration of the call.
 		let result = unsafe {
 			libc::ioctl(
-				std::os::fd::AsRawFd::as_raw_fd(fd),
+				std::os::fd::AsRawFd::as_raw_fd(&fd),
 				linux_raw_sys::ioctl::DMA_BUF_IOCTL_SYNC as libc::Ioctl,
 				&mut sync,
 			)
@@ -897,6 +882,7 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 		})
 		.param_changed({
 			let state = state.clone();
+			let chan = chan.clone();
 			let mainloop = mainloop.downgrade();
 			move |stream, _, id, param| {
 				let Some(param) = param else { return };
@@ -946,7 +932,8 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 						return;
 					}
 				};
-				state.last = None;
+				// A repeat in the old format would not match the new one.
+				chan.forget();
 				state.dmabuf_modifier = dmabuf_modifier;
 				let buffers = buffer_offer(state.dmabuf_modifier.is_some());
 				if let Some(param) = spa::pod::Pod::from_bytes(&buffers) {
@@ -1036,12 +1023,9 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					(raw.mapoffset, raw.maxsize)
 				};
 				let dmabuf = data.type_() == DataType::DmaBuf;
-				let chunk_size = data.chunk().size();
-				let size = if dmabuf {
-					dma_buf_chunk_size(chunk_size, maxsize)
-				} else {
-					clamp_chunk_size(chunk_size, maxsize)
-				};
+				// A DMA-BUF's chunk size sizes only an encoded frame, which spans its
+				// chunk; a raw frame's size comes from its layout.
+				let size = clamp_chunk_size(data.chunk().size(), maxsize);
 				let stride = match u32::try_from(data.chunk().stride()) {
 					Ok(stride) if stride > 0 => stride,
 					_ => match state.format.format() {
@@ -1066,8 +1050,10 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					ChunkKind::Empty => return,
 					ChunkKind::Invalid => return,
 				}
-				// A JPEG spans its chunk, whatever its layout would suggest.
+				// A JPEG spans its chunk, whatever its layout would suggest. An
+				// empty one carries no frame.
 				let required = match state.format.format() {
+					VideoFormat::Encoded if size == 0 => return,
 					VideoFormat::Encoded => size,
 					format => {
 						let Some(required) = frame_data_size(format, layout) else {
@@ -1077,11 +1063,10 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 						required
 					}
 				};
-				if dmabuf {
-					let Some(format) = drm_format(state.format.format()) else {
-						tracing::warn!(format = ?state.format.format(), "unsupported DMA-BUF pixel format");
-						return;
-					};
+				// Import a DMA-BUF only in a format and modifier this stream
+				// negotiated. Anything else goes to the CPU path below.
+				if dmabuf && let Some((format, modifier)) = drm_format(state.format.format()).zip(state.dmabuf_modifier)
+				{
 					if data.fd() < 0 || stride == 0 {
 						tracing::warn!("DMA-BUF has no valid fd or row stride");
 						return;
@@ -1093,16 +1078,9 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 						return;
 					};
 					let offset = normalize_dma_buf_offset(chunk_offset, maxsize);
-					if !dma_buf_chunk_contains(required, chunk_size, maxsize) {
-						tracing::warn!(
-							required,
-							available = size,
-							"DMA-BUF chunk does not contain a complete frame"
-						);
-						return;
-					}
+					// The fd's own allocation is the bound: the chunk size and maxsize are advisory.
 					let allocation_size = match dma_buf_allocation_size(fd.as_fd(), map_offset) {
-						Ok(Some(size)) if offset.checked_add(required).is_some_and(|end| end <= size) => Some(size),
+						Ok(Some(size)) if dma_buf_frame_fits(offset, required, size) => Some(size),
 						Ok(Some(size)) => {
 							tracing::warn!(
 								required,
@@ -1137,10 +1115,6 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					} else {
 						vec![DmaBufPlane::new(base, layout.stride)]
 					};
-					let Some(modifier) = state.dmabuf_modifier else {
-						tracing::warn!("received a DMA-BUF without a negotiated modifier");
-						return;
-					};
 					let lease = buffer.lease(state.generation);
 					let inner = Arc::new(PipeWireDmaBuf {
 						fd,
@@ -1164,15 +1138,7 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 						},
 						inner,
 					) {
-						Ok(frame) => {
-							chan.push(Surface::DmaBuf(frame.clone()));
-							// Only the pacing timer reads `last`. A camera must not
-							// hold a leased buffer back from its producer's pool.
-							if kind == Kind::Screen {
-								state.last = Some(Last::DmaBuf(frame));
-							}
-							state.fresh = true;
-						}
+						Ok(frame) => chan.push(Surface::DmaBuf(frame)),
 						Err(e) => tracing::warn!(error = %e, "invalid PipeWire DMA-BUF"),
 					}
 					return;
@@ -1182,16 +1148,28 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					tracing::warn!("pipewire buffer has zero maximum size");
 					return;
 				};
-				if required > size || required > allocation_size {
+				if !cpu_frame_fits(dmabuf, offset, required, size, allocation_size) {
 					tracing::warn!(
 						required,
+						offset,
 						available = size,
+						allocation = allocation_size,
 						"pipewire chunk does not contain a complete frame"
 					);
 					return;
 				}
-				// MAP_BUFFERS maps MemPtr/MemFd for the CPU fallback. `None` here
-				// means the producer forced an unsupported buffer representation.
+				// A DMA-BUF that gets here is one this stream cannot import: a
+				// camera another client already runs keeps the buffers it
+				// allocated for that client, so a stream that negotiated shared
+				// memory can still receive DMA-BUFs. A camera's V4L2 buffer is
+				// linear, so it reads like shared memory once PipeWire has mapped
+				// it, inside the DMA-BUF sync bracket.
+				// SAFETY: PipeWire owns this fd while the buffer is dequeued, and
+				// `buffer` stays dequeued until the read below has finished.
+				let dma_buf = (dmabuf && data.fd() >= 0).then(|| unsafe { BorrowedFd::borrow_raw(data.fd()) });
+				// MAP_BUFFERS maps MemPtr/MemFd, and a DMA-BUF flagged MAPPABLE, for
+				// the CPU fallback. `None` here means the producer forced a buffer
+				// representation this stream cannot read.
 				let Some(bytes) = data.data() else {
 					tracing::warn!("pipewire buffer is not CPU-mapped; stopping capture");
 					state.terminal = Some(Error::SourceUnavailable(
@@ -1205,17 +1183,29 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 				let Some(allocation) = bytes.get(..allocation_size) else {
 					return;
 				};
-				let Some(bytes) = chunk_bytes(allocation, offset, required) else {
-					return;
+				let format = state.format.format();
+				let read = || {
+					chunk_bytes(allocation, offset, required)
+						.map(|bytes| convert(format, bytes.as_ref(), layout, color))
+						.transpose()
 				};
-				match convert(state.format.format(), bytes.as_ref(), layout, color) {
-					Ok(i420) => {
-						chan.push(Surface::I420(i420.clone()));
-						if kind == Kind::Screen {
-							state.last = Some(Last::I420(i420));
+				let converted = match dma_buf {
+					Some(fd) => {
+						// The sync ioctl only keeps caches coherent. Waiting for the
+						// producer's write fence is the reader's job, as in
+						// `download_i420`. A late fence costs this frame, not the
+						// capture.
+						if let Err(error) = wait_dma_buf_readable(fd) {
+							tracing::warn!(%error, "DMA-BUF producer did not finish the frame; dropping it");
+							return;
 						}
-						state.fresh = true;
+						with_dma_buf_read(fd, read)
 					}
+					None => read(),
+				};
+				match converted {
+					Ok(None) => {}
+					Ok(Some(i420)) => chan.push(Surface::I420(i420)),
 					Err(e) => {
 						// Persistent (bad format), not per-frame; stop rather than spam.
 						tracing::warn!(?kind, error = %e, "frame conversion failed; stopping capture");
@@ -1229,7 +1219,12 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 		})
 		.remove_buffer({
 			let state = state.clone();
-			move |_, _, _| state.borrow_mut().buffer_removed()
+			let chan = chan.clone();
+			move |_, _, _| {
+				state.borrow_mut().buffer_removed();
+				// The repeated frame may point into the freed buffer.
+				chan.forget();
+			}
 		})
 		.register()
 		.map_err(|e| err("pipewire listener", e))?;
@@ -1277,30 +1272,6 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 		)
 		.map_err(|e| err("pipewire stream connect", e))?;
 
-	// Re-emit the last frame when an interval passes without a fresh one, so a
-	// static screen still produces a steady stream for the encoder. A camera
-	// never retains a `last` frame and never arms the timer.
-	let timer = mainloop.loop_().add_timer({
-		let state = state.clone();
-		let chan = chan.clone();
-		move |_| {
-			let mut state = state.borrow_mut();
-			if std::mem::take(&mut state.fresh) {
-				return;
-			}
-			if let Some(last) = &state.last {
-				chan.push(last.surface());
-			}
-		}
-	});
-	if kind == Kind::Screen {
-		let interval = Duration::from_micros(1_000_000 / framerate as u64);
-		timer
-			.update_timer(Some(interval), Some(interval))
-			.into_result()
-			.map_err(|e| err("pipewire timer", e))?;
-	}
-
 	// Quit when the Stream drops.
 	let _quit = quit_rx.attach(mainloop.loop_(), {
 		let mainloop = mainloop.downgrade();
@@ -1331,16 +1302,23 @@ fn clamp_chunk_size(size: u32, maxsize: u32) -> usize {
 	size.min(maxsize) as usize
 }
 
-fn dma_buf_chunk_size(size: u32, maxsize: u32) -> usize {
-	if maxsize == 0 {
-		size as usize
-	} else {
-		clamp_chunk_size(size, maxsize)
-	}
+// A producer cannot always state a DMA-BUF's size: xdg-desktop-portal-hyprland
+// leaves maxsize 0 and writes a placeholder chunk size of 9, flagging bad frames
+// CORRUPTED instead (see `chunk_kind`). So the frame is bounded by the fd's own
+// allocation, which must hold it at its offset.
+fn dma_buf_frame_fits(offset: usize, required: usize, allocation: usize) -> bool {
+	offset.checked_add(required).is_some_and(|end| end <= allocation)
 }
 
-fn dma_buf_chunk_contains(required: usize, size: u32, maxsize: u32) -> bool {
-	size == 0 || required <= dma_buf_chunk_size(size, maxsize)
+/// Whether a frame read from a CPU mapping of `allocation` bytes lies whole in it.
+/// A DMA-BUF's frame never wraps, so the mapping must hold it at its offset. A
+/// shared-memory ring buffer's frame may wrap, so its offset is not bounded.
+fn cpu_frame_fits(dmabuf: bool, offset: usize, required: usize, size: usize, allocation: usize) -> bool {
+	if dmabuf {
+		dma_buf_frame_fits(offset, required, allocation)
+	} else {
+		required <= size && required <= allocation
+	}
 }
 
 fn chunk_bytes(data: &[u8], offset: usize, size: usize) -> Option<Cow<'_, [u8]>> {
@@ -1612,6 +1590,22 @@ fn format_offer(framerate: u32, format: VideoFormat, dmabuf: bool) -> Vec<u8> {
 			spa::utils::Fraction { num: 0, denom: 1 },
 			spa::utils::Fraction { num: 1000, denom: 1 }
 		),
+		// A compositor sends a changed frame as often as it repaints, up to this.
+		spa::pod::property!(
+			spa::param::format::FormatProperties::VideoMaxFramerate,
+			Choice,
+			Range,
+			Fraction,
+			spa::utils::Fraction {
+				num: framerate,
+				denom: 1
+			},
+			spa::utils::Fraction { num: 1, denom: 1 },
+			spa::utils::Fraction {
+				num: framerate,
+				denom: 1
+			}
+		),
 	);
 	if dmabuf {
 		obj.properties.push(linear_modifier());
@@ -1703,6 +1697,9 @@ mod tests {
 	use super::*;
 	use crate::capture::Config;
 
+	/// `SPA_VIDEO_TRANSFER_SMPTE2084`, spelled out: PipeWire 1.0.x headers predate it.
+	const SPA_VIDEO_TRANSFER_SMPTE2084: spa::sys::spa_video_transfer_function = 14;
+
 	/// The serialized format offer must parse back as a valid pod.
 	#[test]
 	fn format_offer_is_valid_pod() {
@@ -1721,6 +1718,14 @@ mod tests {
 				property(spa::param::format::FormatProperties::VideoFormat.as_raw()).map(|p| &p.value),
 				Some(&spa::pod::Value::Id(spa::utils::Id(format.as_raw())))
 			);
+			// The compositor paces changed frames to the configured rate.
+			assert!(matches!(
+				property(spa::param::format::FormatProperties::VideoMaxFramerate.as_raw()).map(|p| &p.value),
+				Some(spa::pod::Value::Choice(spa::pod::ChoiceValue::Fraction(spa::utils::Choice(
+					_,
+					spa::utils::ChoiceEnum::Range { max, .. },
+				)))) if max.num == 30 && max.denom == 1
+			));
 			let modifier = property(spa::param::format::FormatProperties::VideoModifier.as_raw());
 			if index < SCREEN_FORMATS.len() {
 				let modifier = modifier.expect("DMA-BUF offer has no modifier");
@@ -1860,11 +1865,71 @@ mod tests {
 	fn chunk_size_is_clamped_to_the_allocation() {
 		assert_eq!(clamp_chunk_size(18, 16), 16);
 		assert_eq!(clamp_chunk_size(8, 16), 8);
-		assert_eq!(dma_buf_chunk_size(8, 16), 8);
-		assert_eq!(dma_buf_chunk_size(8, 0), 8);
-		assert!(dma_buf_chunk_contains(16, 0, 0));
-		assert!(!dma_buf_chunk_contains(16, 8, 0));
-		assert!(dma_buf_chunk_contains(16, 16, 16));
+		assert_eq!(clamp_chunk_size(8, 0), 0);
+	}
+
+	// xdg-desktop-portal-hyprland's shape for a 4K BGRx frame: maxsize 0 and a
+	// placeholder chunk size of 9, with the frame's allocation held by the fd.
+	#[test]
+	fn dma_buf_placeholder_chunk_size_is_accepted() {
+		let layout = FrameLayout {
+			stride: 3840 * 4,
+			width: 3840,
+			height: 2160,
+			source_height: 2160,
+		};
+		let required = frame_data_size(VideoFormat::BGRx, layout).unwrap();
+		assert_eq!(required, 33_177_600);
+		// The clamped chunk size is 0 here, which a DMA-BUF chunk still accepts.
+		assert_eq!(
+			chunk_kind(clamp_chunk_size(9, 0), spa::buffer::ChunkFlags::empty(), true),
+			ChunkKind::Data
+		);
+		assert!(dma_buf_frame_fits(0, required, required));
+		// A bad frame is flagged, which still rejects it.
+		assert_eq!(
+			chunk_kind(9, spa::buffer::ChunkFlags::CORRUPTED, true),
+			ChunkKind::Invalid
+		);
+	}
+
+	#[test]
+	fn dma_buf_frame_must_fit_its_allocation_at_its_offset() {
+		assert!(dma_buf_frame_fits(0, 33_177_600, 33_177_600));
+		assert!(!dma_buf_frame_fits(0, 33_177_600, 33_177_599));
+		// The offset counts against the allocation, not only the frame.
+		assert!(!dma_buf_frame_fits(4096, 33_177_600, 33_177_600));
+		assert!(dma_buf_frame_fits(4096, 33_177_600 - 4096, 33_177_600));
+		assert!(!dma_buf_frame_fits(usize::MAX, 1, usize::MAX));
+	}
+
+	/// A CPU-mapped DMA-BUF frame at a nonzero offset must not wrap to the mapping's
+	/// start. A shared-memory ring buffer's frame still may.
+	#[test]
+	fn cpu_dma_buf_frame_does_not_wrap() {
+		let maxsize = 33_177_600u32;
+		let frame = maxsize as usize;
+		let offset = normalize_chunk_offset(4096, maxsize).unwrap();
+		assert_eq!(offset, 4096);
+		// The placeholder chunk size 9 does not bound a DMA-BUF; the mapping does.
+		assert!(!cpu_frame_fits(true, offset, frame, 9, frame));
+		assert!(cpu_frame_fits(true, 0, frame, 9, frame));
+		assert!(cpu_frame_fits(false, offset, frame, frame, frame));
+		assert!(!cpu_frame_fits(false, offset, frame, frame - 1, frame));
+		assert!(!cpu_frame_fits(false, 0, frame + 1, frame + 1, frame));
+
+		// Every DMA-BUF frame the rule accepts is read whole, never wrapped.
+		let mapping = [0u8; 16];
+		for offset in 0..mapping.len() {
+			for required in 0..=mapping.len() {
+				if cpu_frame_fits(true, offset, required, 9, mapping.len()) {
+					assert!(
+						matches!(chunk_bytes(&mapping, offset, required), Some(Cow::Borrowed(_))),
+						"offset {offset}, required {required} wrapped"
+					);
+				}
+			}
+		}
 	}
 
 	#[test]
@@ -1980,7 +2045,7 @@ mod tests {
 		assert!(pipewire_color(Kind::Screen, format, 1920, 1080).is_err());
 		format.set_color_range(spa::sys::SPA_VIDEO_COLOR_RANGE_UNKNOWN);
 		format.set_color_matrix(spa::sys::SPA_VIDEO_COLOR_MATRIX_UNKNOWN);
-		format.set_transfer_function(spa::sys::SPA_VIDEO_TRANSFER_SMPTE2084);
+		format.set_transfer_function(SPA_VIDEO_TRANSFER_SMPTE2084);
 		assert!(pipewire_color(Kind::Screen, format, 1920, 1080).is_err());
 
 		let layout = FrameLayout {
@@ -2044,26 +2109,14 @@ mod tests {
 	}
 
 	/// A buffer PipeWire removes is freed, so a lease taken from it before must
-	/// not be queued back, and the retained frame is dropped with it.
+	/// not be queued back.
 	#[test]
-	fn removed_buffer_retires_its_leases_and_the_retained_frame() {
-		let frame = nv12_to_i420(
-			&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-			FrameLayout {
-				stride: 4,
-				width: 4,
-				height: 2,
-				source_height: 2,
-			},
-		)
-		.unwrap();
+	fn removed_buffer_retires_its_leases() {
 		let mut state = State {
 			format: VideoInfoRaw::default(),
 			geometry: None,
 			color: None,
 			geo_tx: None,
-			last: Some(Last::I420(frame)),
-			fresh: false,
 			generation: 1,
 			dmabuf_modifier: None,
 			terminal: None,
@@ -2075,7 +2128,6 @@ mod tests {
 		};
 		state.buffer_removed();
 		assert_eq!(lease.current(state.generation), None);
-		assert!(state.last.is_none());
 	}
 
 	#[test]

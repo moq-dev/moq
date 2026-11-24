@@ -44,6 +44,9 @@ autodoc_mock_imports = ["moq_ffi"]
 suppress_warnings = ["autodoc.mocked_object"]
 
 autosummary_generate = True
+# The `moq.media.catalog` and `moq.media.Catalog` stubs collide on
+# case-insensitive filesystems (macOS), so the function's stub gets its own name.
+autosummary_filename_map = {"moq.media.catalog": "moq.media.catalog-function"}
 autodoc_typehints = "description"
 autodoc_member_order = "bysource"
 napoleon_google_docstring = True

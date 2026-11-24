@@ -26,6 +26,7 @@ informative:
 
 This document defines an extension for moq-lite {{moql}} that carries the object state of MoQ Transport {{moqt}} across a moq-lite session between two relays.
 A track a MoQ Transport publisher sends through relay A, then over moq-lite to relay B, reaches a MoQ Transport subscriber of relay B as it would through one relay: with its Object IDs, gaps, properties, and END_OF_GROUP status.
+A datagram track keeps only what moq-lite carries.
 
 --- note_Note_to_Readers
 
@@ -37,7 +38,7 @@ Submit an [issue](https://github.com/moq-dev/moq/issues) or [PR](https://github.
 # Conventions and Definitions
 {::boilerplate bcp14-tagged}
 
-A **relayed** group or datagram arrived from a MoQ Transport publisher, so it has object state that moq-lite cannot express.
+A **relayed** group arrived from a MoQ Transport publisher, so it has object state that moq-lite cannot express.
 A **plain** one has none: its Object IDs are its frame indices, it has no properties, and its group ends where its last frame does.
 A track's **Version** is the {{moqt}} version its original publisher spoke, which serialized every property it carries, or none for a track published over moq-lite ([Track Stream](#track)).
 
@@ -62,14 +63,15 @@ An endpoint offers the extension with the following Setup Parameter ({{moql}} SE
 
 The value MUST be empty; a receiver MUST close the session with a PROTOCOL_VIOLATION otherwise.
 The extension is negotiated only when both endpoints offer it, and only on moq-lite-07 and later.
-An endpoint MUST NOT send any field this document defines unless the extension is negotiated, and MUST NOT parse a Group Stream, FETCH response, Track Stream, or datagram from the peer until it has the peer's SETUP and so knows whether it was.
-An endpoint MAY drop a datagram that arrives before then.
-A Group Stream, FETCH response, or datagram is read with the Version of its track, which the Track Stream carries before any subscription or fetch opens.
+An endpoint MUST NOT send any field this document defines unless the extension is negotiated, and MUST NOT parse a Group Stream, FETCH response, or Track Stream from the peer until it has the peer's SETUP and so knows whether it was.
+A Group Stream or FETCH response is read with the Version of its track, which the Track Stream carries before any subscription or fetch opens.
 
 
 # Group Streams {#group}
-When the extension is negotiated, a Group Stream carries a Group State after the GROUP message, and an Object Record before each FRAME.
-A FETCH response carries the same, with the Group State first.
+When the extension is negotiated, a Group Stream of a track with a Version carries a Group State after the GROUP message, and an Object Record before each FRAME.
+A FETCH response for such a track carries the same, with the Group State first.
+A Group Stream or FETCH response of a track without a Version is exactly as {{moql}} defines it, so the extension costs a track published over moq-lite nothing.
+Datagrams are unchanged too: a datagram track ({{moql}}) has no Track Stream and so no Version.
 
 ~~~
 Group Stream {
@@ -93,7 +95,6 @@ A bit field describing the group's relay state, or 0 for a plain group:
 - `0x8` **END_OF_GROUP**: The stream's end ends the group, as a {{moqt}} subgroup that contains the end of its group.
 
 A receiver MUST reset the stream with a PROTOCOL_VIOLATION on any other bit, a bit without RELAYED, or a record with Properties when EXTENSIONS is clear.
-A track without a Version has no {{moqt}} state, so a receiver MUST reset the stream with a PROTOCOL_VIOLATION on any Group State but 0 for one.
 A publisher MUST clear FIRST_OBJECT when the stream starts after the first frame it holds, and END_OF_GROUP when the stream may stop before the end of the group, such as at a subscription's end frame.
 A stream that stops at an end frame carries no END_OF_GROUP record, even when that frame is the group's last.
 
@@ -134,27 +135,17 @@ A relay forwards the block to a peer of that encoding unchanged, so the block ne
 Every property of the object, serialized as the track's Version serializes an object's properties, in ascending ID order.
 Immutable Properties (0x0b) are in the same encoding, as the publisher sent them.
 It MUST NOT be empty or longer than 65,536 bytes.
-A track without a Version carries no properties: a Property Block on one is malformed.
-On a timed track an object with a FRAME, or a datagram without a Status, MUST NOT carry one longer than 65,526 bytes, leaving room for the largest Timestamp a relay restates ([Timestamps](#timestamps)): a one-byte key and a value of up to nine bytes.
-A relay MUST refuse a {{moqt}} object whose properties, less its mutable Timestamp, exceed that, so every object it forwards fits.
 A receiver MUST treat a block the track's Version would refuse as malformed, as it MUST a block on an object that Version could not send with properties.
-Only draft 14 lets a status object carry them, so a block on the END_OF_GROUP record needs a Version of draft 14, and a datagram with a block MUST have fields an OBJECT_DATAGRAM Type of its Version carries ([Datagrams](#datagrams)).
+Only draft 14 lets a status object carry them, so a block on the END_OF_GROUP record needs a Version of draft 14.
 The Version also gives each property its meaning: drafts 18 and 19 serialize a block alike, but only drafts 19 and later assign property 0x06 to SUBGROUP_DELIVERY_TIMEOUT, so a relay knows not to forward a 0x06 to a draft that would read it differently.
 Other properties are opaque to this extension.
 
 ## Timestamps {#timestamps}
 A relay MUST preserve a relayed track's Timescale and timestamps across a negotiated hop.
-A nonzero Version identifies timestamps from MoQ Transport, which may be arrival times and need not rise with Group Sequence.
-The receiver MUST NOT apply moq-lite's group-start rewind check to such a track; a Version of zero retains that check.
-Without this extension, or in a listing ({{track}}), the receiver may check them like native moq-lite timestamps and refuse a Group that rewinds.
+A nonzero Version identifies a track from MoQ Transport, whose objects take their time from their Group ID, in the track's Timescale.
 
-On a timed track, the FRAME's Timestamp, or the datagram's for a datagram, is the object's time, and nothing else carries it.
-The Property Block MUST NOT contain a mutable Timestamp (0x10) there; a receiver MUST treat one as malformed.
-A relay forwarding the object to {{moqt}} restates the time as the mutable Timestamp, unless a Timestamp inside the Immutable Properties already says it.
-A sealed Timestamp is in the track's Timescale ({{moql}} TRACK_INFO), and a relay MUST NOT forward one to a peer of other units, which would change its meaning.
-
-On an untimed track there is no FRAME Timestamp, so a mutable Timestamp stays in the Property Block as an opaque property.
-Likewise, an object without a FRAME, such as the END_OF_GROUP record or a datagram with a non-zero Status, has no time of its own beside the block, so its mutable Timestamp stays there on any track.
+The FRAME's Timestamp is the object's time.
+A Timestamp property (0x10) a {{moqt}} publisher attached, mutable or sealed, is opaque like any other: it stays in the Property Block, and a relay neither reads nor restates it.
 
 
 # Track Stream {#track}
@@ -184,13 +175,14 @@ A message MUST NOT carry more than 64 properties, nor any a relay interprets rat
 TRACK_INFO carries what a relay keeps of them, so a second copy could only contradict it.
 A message that breaks either rule is malformed.
 
-A relay restates up to five of those from TRACK_INFO, so it forwards at most 59 properties, and it refuses a track with more, from a {{moqt}} publisher or over this extension, as unsupported.
+A relay restates up to four of those from TRACK_INFO, never MAX_CACHE_DURATION, and it forwards at most 59 properties, and it refuses a track with more, from a {{moqt}} publisher or over this extension, as unsupported.
 Dropping those five can widen the delta that spans them, so a relay also refuses a {{moqt}} track whose remaining list would not fit a TRACK_PROPERTIES message beside its Version, as unsupported.
 
-The Immutable Properties may still hold one of those five, which a relay forwards in place of the one it would restate.
-A relay acts on TRACK_INFO, so a sealed value MUST equal the one it restates: MAX_CACHE_DURATION the Max Age in milliseconds, TIMESCALE the Timescale, DEFAULT_PUBLISHER_PRIORITY the priority, and DYNAMIC_GROUPS whether its Refresh is nonzero.
-A sealed DEFAULT_PUBLISHER_GROUP_ORDER is advisory: a relay serves its own order and forwards the sealed value unchanged, whatever it says.
-A relay refuses a track whose sealed value differs, from a {{moqt}} publisher or over this extension, as unsupported.
+The Immutable Properties may still hold one of the properties a relay restates, which it forwards in place of the one it would restate.
+A sealed MAX_CACHE_DURATION has no restated counterpart, so it travels beside none and is never compared.
+A relay acts on TRACK_INFO, so a sealed TIMESCALE MUST equal the Timescale, DEFAULT_PUBLISHER_PRIORITY the priority, and DYNAMIC_GROUPS whether its Refresh is nonzero.
+A sealed DEFAULT_PUBLISHER_GROUP_ORDER or MAX_CACHE_DURATION is advisory: a relay serves its own order and Max Age and forwards the sealed value unchanged, whatever it says.
+A relay refuses a track whose sealed value breaks that rule, from a {{moqt}} publisher or over this extension, as unsupported.
 
 A relay neither processes nor forwards a track with a Mandatory Track Property (0x4000 to 0x7FFF), mutable or inside the Immutable Properties, so a publisher never sends one.
 A receiver refuses such a track as {{moqt}} ingress does, with an unsupported extension error.
@@ -199,44 +191,7 @@ The receiver parses the keys inside the Immutable Properties from its value, whi
 It SHOULD read them from the value when needed rather than hold them beside it, as a list of IDs can cost several times the value.
 
 A TRACKS_ADD ({{moql}} Tracks Stream) embeds TRACK_INFO without TRACK_PROPERTIES, so when the extension is negotiated a subscriber MUST NOT skip the Track Stream for a track it learned from a listing.
-Lacking the Version, a TRACKS_ADD cannot mark a {{moqt}} track's timestamps as unchecked ({{timestamps}}).
-
-
-# Datagrams {#datagrams}
-When the extension is negotiated, a DATAGRAM carries a Datagram State after its Group Sequence.
-
-~~~
-DATAGRAM Body {
-  Subscribe ID (i)
-  Group Sequence (i)
-  Datagram State (i)
-  [Object ID (i)]
-  [Publisher Priority (8)]
-  [Status (i)]
-  [Properties Length (i), Properties (..)]
-  [Timestamp (i)]
-  [Inflated Size (i)]
-  Payload (b)
-}
-~~~
-
-**Datagram State**:
-A bit field, or 0 for a plain datagram, which has none of the optional fields before the Timestamp:
-
-- `0x1` **RELAYED**: The datagram is relayed, so its Properties follow. Every other bit requires it.
-- `0x2` **OBJECT_ID**: The Object ID follows.
-- `0x4` **PRIORITY**: The {{moqt}} Publisher Priority follows.
-- `0x8` **END_OF_GROUP**: The object ends its group.
-- `0x10` **STATUS**: The {{moqt}} Object Status follows.
-
-A receiver MUST drop a datagram with any other bit, a bit without RELAYED, or any bit on a track without a Version.
-
-A datagram with a Status MUST have an empty Payload, as {{moqt}} sends no payload beside one; a Normal (0) Status is an empty object.
-It has no Inflated Size ({{moql}} DATAGRAM), even on a compressed track, as there is no payload to inflate.
-A non-zero Status carries no object: it has no Timestamp, even on a timed track.
-A receiver MUST drop a datagram whose Status no {{moqt}} draft defines: only 0 (Normal), 1 (DOES_NOT_EXIST, drafts 14 and 15), 3 (END_OF_GROUP), and 4 (END_OF_TRACK) are relayed.
-It MUST also drop one its track's Version could not send: whose fields no OBJECT_DATAGRAM Type of that Version carries, such as STATUS with END_OF_GROUP, or whose Status it does not define.
-From draft 17 on a non-zero Status carries no properties, and only drafts 14 and 15 define DOES_NOT_EXIST.
+Lacking the Version, a TRACKS_ADD cannot say whether the track's Group Streams carry Object Records ({{group}}).
 
 
 # Security Considerations
@@ -259,13 +214,6 @@ A high, distinctive value is used to avoid collisions with the low values {{moql
 
 
 --- back
-
-# Changelog
-
-## Since draft-lcurley-moq-ietf-00 (in progress)
-
-- Preserve relayed track timestamps and their unchecked MoQ Transport provenance across negotiated hops. Without the extension a relay serves them as native moq-lite timestamps rather than untimed.
-- Initial version.
 
 # Acknowledgments
 {:numbered="false"}

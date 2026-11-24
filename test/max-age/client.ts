@@ -43,13 +43,13 @@ try {
 			if (event.kind === "present" && event.prefix === "age") break;
 		}
 		const request = origin.consume().request(Path.from("age"));
-		let broadcast = request.active.peek();
-		while (!broadcast) broadcast = await request.active.changed();
-		assert(broadcast);
+		const broadcast = await request.broadcast();
 		for (const [i, age] of ages.entries()) {
 			const track = broadcast.track(String(i)).subscribe();
-			// A track received without a max age has no publisher limit.
-			assert.equal((await track.info()).maxAge?.asMillis(), age?.asMillis(), `${protocol} track ${i}`);
+			// moq-transport never sends MAX_CACHE_DURATION (it would expire the newest group too),
+			// so only lite carries the publisher's limit.
+			const want = protocol.startsWith("moq-lite-") ? age?.asMillis() : undefined;
+			assert.equal((await track.info()).maxAge?.asMillis(), want, `${protocol} track ${i}`);
 			track.close();
 		}
 		request.close();

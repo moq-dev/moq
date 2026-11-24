@@ -31,7 +31,7 @@
 #![warn(clippy::use_self)]
 
 use core::time::Duration;
-#[cfg(any(unix, target_os = "wasi"))]
+#[cfg(unix)]
 use std::os::fd::AsFd;
 #[cfg(windows)]
 use std::os::windows::io::AsSocket;
@@ -39,17 +39,8 @@ use std::{
 	io,
 	net::{IpAddr, Ipv6Addr, SocketAddr},
 };
-#[cfg(target_os = "wasi")]
-use std::{
-	mem::ManuallyDrop,
-	net::UdpSocket,
-	os::fd::{AsRawFd, FromRawFd},
-};
 #[cfg(windows)]
 use windows_sys::Win32::Networking::WinSock;
-
-#[cfg(apple_fast)]
-mod apple_fast;
 
 #[cfg(any(unix, windows))]
 mod cmsg;
@@ -61,12 +52,13 @@ mod imp;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod linux;
 
+// The control-message walk's fuzz target. Linux only, where the fuzzer runs, and 64-bit, which the
+// reference model's struct layouts assume.
+#[cfg(all(any(test, feature = "fuzz"), target_os = "linux", target_pointer_width = "64"))]
+pub mod fuzz;
+
 #[cfg(windows)]
 #[path = "windows.rs"]
-mod imp;
-
-#[cfg(target_os = "wasi")]
-#[path = "wasi.rs"]
 mod imp;
 
 #[allow(
@@ -161,61 +153,12 @@ impl Transmit<'_> {
 	/// This case is actually quite common when splitting up a prepared GSO batch
 	/// again after GSO has been disabled because the last datagram in a GSO
 	/// batch is allowed to be smaller than the segment size.
-	#[cfg_attr(
-		apple_fast,
-		allow(dead_code, reason = "used by prepare_msg, which is unused when apple_fast")
-	)]
 	fn effective_segment_size(&self) -> Option<usize> {
 		match self.segment_size? {
 			size if size >= self.contents.len() => None,
 			size => Some(size),
 		}
 	}
-}
-
-/// Asynchronous transport-layer errors reported by the operating system
-///
-/// On Linux and Android these are delivered via the socket error queue
-/// (`MSG_ERRQUEUE`) and originate from ICMP messages.
-///
-/// These errors are out-of-band and do not correspond to a received packet.
-#[derive(Debug, Copy, Clone)]
-#[non_exhaustive]
-pub struct TransportError {
-	/// Address associated with the error
-	///
-	/// This is the remote peer or an intermediate network device that triggered the error.
-	/// Returns `None` if the kernel cannot determine the source (e.g. `AF_UNSPEC`).
-	pub addr: Option<SocketAddr>,
-	/// Transport-layer error details
-	pub payload: TransportErrorPayload,
-	/// The raw error code from the underlying operating system
-	pub raw_errno: i32,
-}
-
-impl TransportError {
-	/// Returns the recommended MTU for packet-too-big errors
-	pub fn mtu(&self) -> Option<u32> {
-		match self.payload {
-			TransportErrorPayload::TooBig { mtu } => Some(mtu),
-			_ => None,
-		}
-	}
-}
-
-/// Transport-layer error details reported by the kernel
-#[derive(Debug, Copy, Clone)]
-#[non_exhaustive]
-pub enum TransportErrorPayload {
-	/// Destination host or port is unreachable
-	Unreachable,
-	/// Packet exceeds path MTU
-	TooBig {
-		/// Recommended Maximum Transmission Unit
-		mtu: u32,
-	},
-	/// Other transport-layer or kernel-reported error
-	Other,
 }
 
 /// Returns true if the given I/O error corresponds to a message size error
@@ -238,10 +181,6 @@ pub fn is_msg_size_err(err: &io::Error) -> bool {
 	{
 		err.raw_os_error() == Some(WinSock::WSAEMSGSIZE)
 	}
-	#[cfg(not(any(unix, windows)))]
-	{
-		false
-	}
 }
 
 /// Returns true if the given send error means the local stack has no way to reach the destination
@@ -252,9 +191,9 @@ pub fn is_msg_size_err(err: &io::Error) -> bool {
 /// connection attempt can give up on that address at once, for example to dial the other address
 /// family.
 ///
-/// They are only local for an unconnected socket with transport errors left disabled, as
-/// `UdpSocketState` sockets are by default. A `connect`ed socket, or one with `IP_RECVERR`, can
-/// report a received ICMP error here instead, which an off-path attacker can forge.
+/// They are only local for an unconnected socket without `IP_RECVERR`, as `UdpSocketState` sockets
+/// are. A `connect`ed socket, or one with `IP_RECVERR`, can report a received ICMP error here
+/// instead, which an off-path attacker can forge.
 pub fn is_unreachable_err(err: &io::Error) -> bool {
 	matches!(
 		err.kind(),
@@ -272,22 +211,11 @@ pub struct UdpSockRef<'a>(socket2::SockRef<'a>);
 impl UdpSockRef<'_> {
 	/// Configures the socket for non-blocking or blocking operation.
 	pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
-		#[cfg(not(target_os = "wasi"))]
-		self.0.set_nonblocking(nonblocking)?;
-
-		#[cfg(target_os = "wasi")]
-		{
-			// socket2 uses `fcntl`, which WASI rejects; `std` uses `ioctl(FIONBIO)`.
-			// Safety: `self` outlives the borrow, and `ManuallyDrop` prevents a second close.
-			let borrowed = ManuallyDrop::new(unsafe { UdpSocket::from_raw_fd(self.0.as_raw_fd()) });
-			borrowed.set_nonblocking(nonblocking)?;
-		}
-
-		Ok(())
+		self.0.set_nonblocking(nonblocking)
 	}
 }
 
-#[cfg(any(unix, target_os = "wasi"))]
+#[cfg(unix)]
 impl<'s, S> From<&'s S> for UdpSockRef<'s>
 where
 	S: AsFd,

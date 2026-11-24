@@ -107,11 +107,20 @@ jobs:
         id: setup
         run: echo "Platform tools ready"
       - name: Rust compile
+        id: compile
         if: ${{ !cancelled() && steps.setup.outcome == 'success' && (needs.scope.outputs.rs == 'true') }}
         shell: bash
         env:
           CI_BASE: ${{ github.event_name != 'pull_request' && '--all' || '' }}
         run: just rs windows "$CI_BASE"
+      # Windows misses most cache lookups that macOS hits; mbx analyze reads the
+      # build mbx just recorded and names why each compilation missed. It only
+      # explains, so its own failure does not fail the job.
+      - name: Explain Rust cache misses
+        if: ${{ !cancelled() && steps.compile.outcome != 'skipped' }}
+        continue-on-error: true
+        shell: bash
+        run: mbx analyze
       - name: Rust tests
         if: ${{ !cancelled() && steps.setup.outcome == 'success' && (needs.scope.outputs.rs == 'true') }}
         shell: bash

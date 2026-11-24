@@ -1,6 +1,7 @@
 use crate::{
 	Instance,
 	coding::{DecodeError, Decoder, EncodeError, Encoder},
+	route::NodeId,
 };
 
 use super::Version;
@@ -38,21 +39,31 @@ pub(super) fn decode_pin(r: &mut Decoder<'_>, version: Version) -> Result<Option
 	}
 }
 
-/// Encode the origin node a request names, 0 letting the publisher select one. Only
-/// lite-07 carries it, so an older peer always selects, and a node set here is dropped.
-pub(super) fn encode_node(w: &mut Encoder<'_>, version: Version, node: u64) -> Result<(), EncodeError> {
-	match version.has_routes() {
-		true => w.varint(node),
-		false => Ok(()),
+/// Encode the forwarding node a request names, or none to let the receiver select one,
+/// as Node ID 0. Only lite-07 carries it, so an older peer always selects, and what is
+/// set here is dropped.
+pub(super) fn encode_node(w: &mut Encoder<'_>, version: Version, node: Option<NodeId>) -> Result<(), EncodeError> {
+	if !version.has_routes() {
+		return Ok(());
+	}
+	match node {
+		Some(node) => super::announce::encode_node(w, node),
+		None => w.varint(0),
 	}
 }
 
-/// Decode the origin node a request names; see [`encode_node`].
-pub(super) fn decode_node(r: &mut Decoder<'_>, version: Version) -> Result<u64, DecodeError> {
-	match version.has_routes() {
-		true => r.varint(),
-		false => Ok(0),
+/// Decode the forwarding node a request names; see [`encode_node`].
+pub(super) fn decode_node(r: &mut Decoder<'_>, version: Version) -> Result<Option<NodeId>, DecodeError> {
+	if !version.has_routes() {
+		return Ok(None);
 	}
+	Ok(match r.varint()? {
+		0 => None,
+		relay => Some(NodeId {
+			relay,
+			marked: r.bool()?,
+		}),
+	})
 }
 
 /// Encode the instance, its minted flag, and the epoch an announcement serves. Every route
@@ -71,13 +82,12 @@ pub(super) fn encode_route(
 	w.varint(epoch)
 }
 
-/// Decode the instance and epoch an announcement serves; see [`encode_route`].
-pub(super) fn decode_route(r: &mut Decoder<'_>, version: Version) -> Result<(Option<Instance>, u64), DecodeError> {
-	if !version.has_instance() {
-		return Ok((None, 0));
-	}
+/// Decode lite-07's instance and epoch, refusing an instance that is empty or not UTF-8;
+/// see [`encode_route`].
+pub(super) fn decode_forwarded(r: &mut Decoder<'_>) -> Result<(Instance, u64), DecodeError> {
 	let instance = decode(r.bytes()?, r.bool()?)?;
-	Ok((Some(instance), r.varint()?))
+	let epoch = r.varint()?;
+	Ok((instance, epoch))
 }
 
 fn encode(w: &mut Encoder<'_>, instance: &Instance) -> Result<(), EncodeError> {
@@ -153,13 +163,11 @@ mod test {
 		)
 		.unwrap();
 		let mut decoder = Decoder::new(&buf, Version::Lite07.into());
-		assert_eq!(
-			decode_route(&mut decoder, Version::Lite07).unwrap(),
-			(Some(instance), 7)
-		);
+		assert_eq!(decode_forwarded(&mut decoder).unwrap(), (instance, 7));
 		assert!(decoder.is_empty());
 
-		// Every lite-07 route names one: none is refused both ways.
+		// Every lite-07 route names one: none is never sent, and a receiver refuses an
+		// invalid one.
 		assert!(
 			encode_route(
 				&mut Encoder::new(&mut Vec::new(), Version::Lite07.into()),
@@ -174,7 +182,8 @@ mod test {
 		w.bytes(&[]).unwrap();
 		w.bool(false);
 		w.varint(0).unwrap();
-		assert!(decode_route(&mut Decoder::new(&buf, Version::Lite07.into()), Version::Lite07).is_err());
+		let mut decoder = Decoder::new(&buf, Version::Lite07.into());
+		assert!(decode_forwarded(&mut decoder).is_err());
 	}
 
 	#[test]

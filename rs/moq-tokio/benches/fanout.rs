@@ -157,7 +157,6 @@ fn bench_fanout(c: &mut Criterion) {
 	group.finish();
 }
 
-#[cfg(feature = "quic")]
 mod native {
 	use super::*;
 	use bytes::Bytes;
@@ -262,11 +261,6 @@ mod native {
 		}
 		group.finish();
 	}
-}
-
-#[cfg(not(feature = "quic"))]
-mod native {
-	pub fn benchmark(_: &mut criterion::Criterion) {}
 }
 
 criterion_group!(benches, bench_fanout, native::benchmark);

@@ -9,11 +9,6 @@ all-features = true
 version = 2
 yanked = "deny"
 ignore = [
-    # rsa 0.9.x Marvin Attack: test-only compatibility fixtures use published
-    # moq-auth 0.2.1 and moq-token 0.7, which still depend on rsa. Production
-    # key generation and signing use rind; no normal/build graph holds rsa.
-    "RUSTSEC-2023-0071",
-
     # paste is unmaintained (proc-macro, build-time only). Pulled by
     # tikv-jemalloc-ctl (moq-tokio's `jemalloc` feature; 0.7 still uses it).
     "RUSTSEC-2024-0436",
@@ -37,15 +32,27 @@ ignore = [
     # https://github.com/askama-rs/askama/blob/main/askama_derive/Cargo.toml
     "RUSTSEC-2026-0374",
 
-    # zbus 6 merged these crates into its names/wire modules. ashpd 0.13, the
-    # latest stable portal client used by moq-video, still requires zbus 5.
-    # These advisories report maintenance status, not a known vulnerability.
-    # Drop when ashpd migrates to zbus 6:
-    # https://github.com/z-galaxy/zbus/issues/2043
-    # https://github.com/bilelmoussaoui/ashpd/pull/491
+    # zvariant, zbus_names, and zvariant_derive are unmaintained: zbus 6 absorbed
+    # them. Reachable only via moq-video's `pipewire` feature -> ashpd 0.13 ->
+    # zbus 5, held there because zbus 6 pipelines its handshake, which breaks
+    # every portal call inside a Flatpak on xdg-dbus-proxy before 0.1.6 (Ubuntu
+    # 24.04 LTS ships 0.1.5). See the ashpd note in rs/moq-video/Cargo.toml.
     "RUSTSEC-2026-0370",
     "RUSTSEC-2026-0371",
     "RUSTSEC-2026-0372",
+
+    # chrono is unmaintained, with no patched release; no vulnerability is known.
+    # Every crate that reaches it is already at its newest release: object_store
+    # (moq-archive, moq-cli), m3u8-rs (moq-hls), procfs (moq-bench), s3s (dev),
+    # and boytacean and gst-plugin-version-helper (build-time). Our own use is
+    # only the moq-tokio clock example. Drop when those migrate to jiff or time.
+    "RUSTSEC-2026-0543",
+
+    # humantime is unmaintained only because chrono's maintainers stewarded it;
+    # it has no dependencies and no known vulnerability. object_store and qlog
+    # (moq-quic) still use it at their newest releases, so replacing our own
+    # duration parsing with jiff would not remove it. Drop with chrono's above.
+    "RUSTSEC-2026-0542",
 
 ]
 

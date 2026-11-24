@@ -63,6 +63,8 @@ class ReportTest(unittest.TestCase):
                 "peak_bytes",
                 "mib_per_s",
                 "overflowed_packets",
+                "max_messages",
+                "claim_items",
                 "payload_bytes",
                 "bytes",
                 "frames_per_chunk",
@@ -81,6 +83,8 @@ class ReportTest(unittest.TestCase):
                 "peak_bytes": "bytes",
                 "mib_per_s": "MiB/s",
                 "overflowed_packets": "packets",
+                "max_messages": "messages",
+                "claim_items": "items",
                 # Workload dimensions, as the JS benchmarks name them.
                 "payload_bytes": None,
                 "bytes": None,
@@ -256,78 +260,6 @@ class ReportTest(unittest.TestCase):
             ],
         )
 
-    def gate_cost(self, modules="300 250000 check rs\n120 410500 test rs\n420 660500 whole run\n"):
-        raw = self.root / "raw"
-        (raw / "cold" / "js" / "js" / "net").mkdir(parents=True)
-        (raw / "toolchains.txt").write_text("rustc 1.98.1\ncargo 1.98.1\n")
-        (raw / "cold" / "loadavg").write_text("0.52 0.30 0.12 1/200 4242\n")
-        (raw / "cold" / "modules.txt").write_text(modules)
-        ours = ROOT / "rs" / "moq-net"
-        (raw / "cold" / "rustc.tsv").write_text(
-            f"moq-net\t{ours}\tlib\t9000\t300\n"
-            f"moq-net\t{ours}\ttest\t4000\t200\n"
-            f"moq-net\t{ours}\tlib\t1000\t100\n"
-            "aws-lc-sys\t/cargo/registry/src/aws-lc-sys-0.30.0\tbuild\t500\t50\n"
-            "aws-lc-sys\t/cargo/registry/src/aws-lc-sys-0.30.0\tlib\t1500\t70\n"
-            f"moq-ffi\t{ROOT / '.tmp' / 'fixture'}\tbin\t7000\t900\n"
-            "moq-ffi\t/tmp/fixture\tlib\t7000\t900\n"
-        )
-        (raw / "cold" / "nextest.xml").write_text(
-            '<testsuites><testsuite name="moq-net">'
-            '<testcase classname="moq-net" name="a" time="1.5"/><testcase classname="moq-net" name="b" time="0.25"/>'
-            '</testsuite><testsuite name="moq-net::integration">'
-            '<testcase classname="moq-net::integration" name="c" time="2"/></testsuite></testsuites>'
-        )
-        (raw / "cold" / "js" / "js" / "net" / "junit.xml").write_text(
-            '<testsuites><testsuite name="src/a.test.ts" file="src/a.test.ts" time="0.5">'
-            '<testcase name="x" time="0.25"/><testsuite name="nested" file="src/a.test.ts" time="0.5">'
-            '<testcase name="y" time="0.5"/></testsuite></testsuite></testsuites>'
-        )
-        common = (
-            '<testsuite name="js/common/api.test.ts" file="js/common/api.test.ts" time="0.125">'
-            '<testcase name="z" time="0.125"/></testsuite>'
-        )
-        (raw / "cold" / "js" / "junit.xml").write_text(f"<testsuites>{common}</testsuites>")
-        return report.cost(self.root)
-
-    def test_gate_cost_records_modules_crates_and_tests(self):
-        entries = {entry["name"]: entry for entry in self.gate_cost()}
-        values = {name: (entry["unit"], entry["value"]) for name, entry in entries.items()}
-        self.assertEqual(
-            values,
-            {
-                "cold/module/rs/check/wall": ("s", 300),
-                "cold/module/rs/check/cpu": ("s", 250),
-                "cold/module/rs/test/wall": ("s", 120),
-                "cold/module/rs/test/cpu": ("s", 410.5),
-                "cold/total/wall": ("s", 420),
-                "cold/total/cpu": ("s", 660.5),
-                "cold/rustc/cpu": ("s", 16),
-                "cold/rustc/instructions": ("instructions", 720),
-                # Our crate splits by target kind; the dependency's build script and library sum;
-                # the tooling tests' fixture crates, whatever their names, are left out.
-                "cold/crate/moq-net/lib/instructions": ("instructions", 400),
-                "cold/crate/moq-net/test/instructions": ("instructions", 200),
-                "cold/crate/aws-lc-sys/instructions": ("instructions", 120),
-                "cold/rust-test/moq-net": ("s", 1.75),
-                "cold/rust-test/moq-net::integration": ("s", 2),
-                # A file sums its tests, nested describe blocks included, rather than its elapsed time.
-                "cold/js-test/js/net/src/a.test.ts": ("s", 0.75),
-                "cold/js-test/js/common/api.test.ts": ("s", 0.125),
-            },
-        )
-        self.assertEqual(
-            entries["cold/total/wall"]["extra"],
-            "Load average 0.52 0.30 0.12 before the scenario; rustc 1.98.1; cargo 1.98.1",
-        )
-
-    def test_gate_cost_refuses_a_phase_that_did_not_pass(self):
-        for status in ("failed", "cancelled", "skipped"):
-            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
-                self.root = Path(directory)
-                with self.assertRaisesRegex(ValueError, "did not pass"):
-                    self.gate_cost(f"300 250000 check rs ({status})\n300 250000 whole run\n")
-
     def test_criterion_requires_fresh_measured_estimates(self):
         run = self.root / "runs" / "one"
         run.mkdir(parents=True)
@@ -481,6 +413,136 @@ class ReportTest(unittest.TestCase):
         (source / "outcome.json").write_text('{"status":"failure"}')
         report.prepare(self.root, output)
         self.assertEqual(json.loads((output / "costs.json").read_text()), [])
+
+    def source(self, name, entries, outcome="success", comparison=None):
+        source = self.root / name
+        source.mkdir()
+        (source / "report.json").write_text(json.dumps(entries))
+        (source / "outcome.json").write_text(json.dumps({"status": outcome}))
+        if comparison is not None:
+            (source / "paired.json").write_text(json.dumps(comparison))
+
+    def test_nightly_metrics_name_each_row_once_and_add_the_paired_base(self):
+        base = "b" * 40
+        self.source(
+            "bench-rust",
+            [{"name": "rust/kio/lock/4", "unit": "ns", "value": 150.123456789}],
+            comparison={
+                "base": base,
+                "cases": [
+                    {"name": "rust/kio/lock/4", "base_ns": 100, "verdict": "unchanged"},
+                    {"name": "rust/kio/same", "base_ns": None, "verdict": "identical"},
+                ],
+            },
+        )
+        self.source(
+            "bench-rust-test",
+            [
+                {"name": "rust-test/moq-net/fanout/viewers=4/elapsed_ns", "unit": "ns", "value": 2e9},
+                {"name": "rust-test/moq-net/fanout/viewers=4/lost_packets", "unit": "packets", "value": 0},
+            ],
+        )
+        self.source("bench-size", [{"name": "size/moq-relay", "unit": "bytes", "value": 4}])
+        self.source("bench-js", [{"name": "js/x", "unit": "ns", "value": 1}], outcome="failure")
+        metrics = json.loads(report.nightly_metrics(self.root))
+        self.assertEqual(
+            metrics,
+            {
+                "units": {"time": "ns", "elapsed_ns": "ns", "lost_packets": "packets", "size": "bytes"},
+                "samples": [
+                    {
+                        "metrics": {
+                            "rust/kio/lock/4": {"time": {"value": 150.123}},
+                            "rust-test/moq-net/fanout/viewers=4": {
+                                "elapsed_ns": {"value": 2000000000},
+                                "lost_packets": {"value": 0},
+                            },
+                            "size/moq-relay": {"size": {"value": 4}},
+                        }
+                    },
+                    {"commit": base, "metrics": {"rust/kio/lock/4": {"time": {"value": 100}}}},
+                ],
+            },
+        )
+        # Sources are named apart only by their entries, so a name two sources share is refused.
+        self.source("bench-rust-extra", [{"name": "size/moq-relay", "unit": "bytes", "value": 5}])
+        with self.assertRaises(ValueError):
+            report.nightly_metrics(self.root)
+        for name in ("bench-rust-extra", "bench-rust", "bench-rust-test", "bench-size"):
+            (self.root / name / "outcome.json").write_text('{"status":"failure"}')
+        self.assertIsNone(report.nightly_metrics(self.root))
+
+    def test_kixel_metrics_refuse_what_kixel_quest_would_not_read(self):
+        entry = {"name": "rust/kio/lock", "unit": "ns", "value": 1}
+        for head, bases in (
+            ([entry], {"c1": [entry]}),
+            ([{**entry, "name": "x" * 1025}], {}),
+        ):
+            with self.assertRaises(ValueError):
+                report.kixel(head, bases)
+        many = [{"name": f"rust/{index:0500}", "unit": "ns", "value": 1} for index in range(2100)]
+        with self.assertRaises(ValueError):
+            report.kixel(many, {})
+
+    def profile(self, name, text):
+        folder = self.root / "profile.abc.out"
+        folder.mkdir(exist_ok=True)
+        (folder / name).write_text(text)
+
+    def test_codspeed_metrics_read_each_benchmark_part(self):
+        header = "# callgrind format\nversion: 1\ncreator: callgrind-3.26.0.codspeed\npid: 7\ncmd: bench\n"
+
+        # As CodSpeed's Callgrind writes them: a zero `summary`, and the part's cost in its `totals`.
+        def part(number, trigger, totals):
+            return (
+                f"\npart: {number}\n\ndesc: I1 cache: 32768 B, 64 B, 8-way associative\n"
+                f"desc: Timerange: Basic block 0 - 9\ndesc: Trigger: {trigger}\n\n"
+                "positions: line\nevents: Ir Dr Dw I1mr\nsummary: 0\n\n"
+                f"ob=(1) /bench\nfl=(1) ???\nfn=(1) main\n0 12 3\n\n\ntotals: {totals}\n"
+            )
+
+        self.profile(
+            "7.out",
+            header
+            + part(1, "Client Request: Metadata: codspeed-rust 6.0.0", "0")
+            + part(2, "Client Request: rs/moq-net/benches/varint.rs::varint::encode[1]", "12345 3 4 1")
+            + part(3, "Client Request: rs/moq-net/benches/varint.rs::varint::decode", "6789")
+            + part(4, "Program termination", "0")
+            + "totals: 0\n",
+        )
+        self.profile("8.out", header + part(1, "Program termination", "0"))
+        # Other files in the folder, such as Valgrind's logs, are not profiles.
+        self.profile("valgrind.7.log", "")
+        metrics = json.loads(report.codspeed_metrics(self.root))
+        self.assertEqual(
+            metrics,
+            {
+                "units": {"instructions": "instructions"},
+                "samples": [
+                    {
+                        "metrics": {
+                            "rs/moq-net/benches/varint.rs::varint::encode[1]": {"instructions": {"value": 12345}},
+                            "rs/moq-net/benches/varint.rs::varint::decode": {"instructions": {"value": 6789}},
+                        }
+                    }
+                ],
+            },
+        )
+        for broken in (
+            "not a profile\n",
+            header + part(1, "Client Request", "5"),
+            header + part(1, "Client Request: rs/a.rs::b", "0"),
+            header + part(1, "Client Request: rs/a.rs::b", "5").replace("totals: 5\n", ""),
+            header + part(1, "Client Request: rs/a.rs::b", "5").replace("events: Ir", "events: Dr"),
+        ):
+            self.profile("9.out", broken)
+            with self.assertRaises(ValueError):
+                report.codspeed_metrics(self.root)
+        # A run that measured nothing reports nothing rather than an empty file.
+        for path in (self.root / "profile.abc.out").glob("*.out"):
+            path.unlink()
+        with self.assertRaises(ValueError):
+            report.codspeed_metrics(self.root)
 
     def history(self, kind, runs):
         """Store runs of (commit, day, {name: value}) the way github-action-benchmark does."""

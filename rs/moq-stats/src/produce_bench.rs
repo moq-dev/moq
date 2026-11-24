@@ -42,11 +42,17 @@ impl Driver {
 			depth,
 			linger: Duration::from_secs(300),
 			interval: Duration::from_secs(1),
+			roots: false,
 		};
 		Some(Self {
 			drain: Drain::new(task)?,
 			now: kio::clock::now(),
 		})
+	}
+
+	/// Also publish each root's view, as [`crate::produce::Config::roots`] does.
+	pub fn publish_roots(&mut self) {
+		self.drain.task.roots = true;
 	}
 
 	/// Drain the registry and encode every track once, one interval after the last tick.

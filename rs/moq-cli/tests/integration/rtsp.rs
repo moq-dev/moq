@@ -75,6 +75,7 @@ async fn next_broadcast(
 					| moq_net::origin::RouteKind::Update,
 				..
 			} => {}
+			other => panic!("unexpected route event {other:?}"),
 		}
 	}
 	let broadcast = running(child, "the broadcast", consumer.request("camera", None))
@@ -90,7 +91,8 @@ async fn next_broadcast(
 	let catalog = running(child, "the first catalog", catalogs.next())
 		.await
 		.expect("catalog read")
-		.expect("a catalog");
+		.expect("a catalog")
+		.value;
 	assert_eq!(
 		catalog.video.renditions.len(),
 		1,

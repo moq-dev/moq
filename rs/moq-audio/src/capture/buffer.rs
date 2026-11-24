@@ -1,7 +1,7 @@
 //! Preallocated handoff from the microphone callback to the async capture loop.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use moq_net::time::Instant;
@@ -28,7 +28,7 @@ const REPORT_INTERVAL: Duration = Duration::from_secs(1);
 pub(super) fn channel(
 	channels: usize,
 	sample_rate: u32,
-	#[cfg(feature = "aec")] aec: Option<crate::aec::Attachment>,
+	#[cfg(all(feature = "capture", feature = "playback"))] aec: Option<crate::aec::Attachment>,
 ) -> (Writer, Reader) {
 	let samples = CHUNK_FRAMES * channels;
 	let (filled, pending) = HeapRb::<Filled>::new(DEPTH).split();
@@ -59,11 +59,12 @@ pub(super) fn channel(
 		recycle,
 		free,
 		pending_gap: false,
+		lost: Gap::default(),
 		dropped: dropped.clone(),
 		channels,
 		sample_rate,
 		capture: None,
-		#[cfg(feature = "aec")]
+		#[cfg(all(feature = "capture", feature = "playback"))]
 		aec,
 	};
 	let reader = Reader {
@@ -118,22 +119,40 @@ struct RecycleSlot {
 	recycled: HeapCons<Vec<f32>>,
 }
 
+/// Audio the device lost outside the callback, such as an overrun the host recovered from,
+/// reported from its error callback so the next buffer carries a gap.
+#[derive(Clone, Default)]
+pub(super) struct Gap(Arc<AtomicBool>);
+
+impl Gap {
+	/// The device lost audio before its next callback.
+	pub(super) fn mark(&self) {
+		self.0.store(true, Ordering::Relaxed);
+	}
+}
+
 /// The callback-owned half of the pool.
 pub(super) struct Writer {
 	filled: HeapProd<Filled>,
 	recycle: Vec<RecycleSlot>,
 	free: Vec<Buffer>,
 	pending_gap: bool,
+	lost: Gap,
 	dropped: Arc<AtomicU64>,
 	channels: usize,
 	sample_rate: u32,
 	/// Capture instant of the next chunk's first sample. `None` stamps arrival.
 	capture: Option<Instant>,
-	#[cfg(feature = "aec")]
+	#[cfg(all(feature = "capture", feature = "playback"))]
 	aec: Option<crate::aec::Attachment>,
 }
 
 impl Writer {
+	/// The handle the stream's error callback marks lost audio through.
+	pub(super) fn gap(&self) -> Gap {
+		self.lost.clone()
+	}
+
 	/// Copy native `f32` samples into preallocated buffers.
 	///
 	/// `captured` is the instant of `input`'s first sample. Each chunk keeps its
@@ -157,6 +176,13 @@ impl Writer {
 
 	/// Convert and submit one host callback without touching the allocator.
 	fn write<T: Copy>(&mut self, input: &[T], convert: impl Fn(T) -> f32) {
+		if self.lost.0.swap(false, Ordering::Relaxed) {
+			self.pending_gap = true;
+			#[cfg(all(feature = "capture", feature = "playback"))]
+			if let Some(aec) = &self.aec {
+				aec.mark_discontinuous();
+			}
+		}
 		let chunk_samples = CHUNK_FRAMES * self.channels;
 		let complete = input.len() - input.len() % self.channels;
 
@@ -171,7 +197,7 @@ impl Writer {
 			debug_assert!(output.data.capacity() >= input.len());
 			output.data.extend(input.iter().copied().map(&convert));
 
-			#[cfg(feature = "aec")]
+			#[cfg(all(feature = "capture", feature = "playback"))]
 			if let Some(aec) = &self.aec {
 				aec.process(&mut output.data);
 			}
@@ -252,7 +278,7 @@ impl Writer {
 
 	fn drop_one(&mut self) {
 		self.pending_gap = true;
-		#[cfg(feature = "aec")]
+		#[cfg(all(feature = "capture", feature = "playback"))]
 		if let Some(aec) = &self.aec {
 			aec.mark_discontinuous();
 		}
@@ -317,12 +343,12 @@ mod tests {
 		channel(
 			channels,
 			48_000,
-			#[cfg(feature = "aec")]
+			#[cfg(all(feature = "capture", feature = "playback"))]
 			None,
 		)
 	}
 
-	#[cfg(feature = "aec")]
+	#[cfg(all(feature = "capture", feature = "playback"))]
 	fn create_with_aec(channels: usize) -> (Writer, Reader, crate::aec::Control) {
 		let aec = crate::aec::Control::new(
 			Arc::new(crate::playback::Shared::default()),
@@ -416,7 +442,7 @@ mod tests {
 		assert_eq!(recovered.data[0], 1.0);
 	}
 
-	#[cfg(feature = "aec")]
+	#[cfg(all(feature = "capture", feature = "playback"))]
 	#[tokio::test]
 	async fn overflow_discards_partial_aec_frames() {
 		let (mut writer, mut reader, aec) = create_with_aec(1);

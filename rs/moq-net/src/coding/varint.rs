@@ -7,7 +7,7 @@
 use thiserror::Error;
 
 use super::{DecodeError, EncodeError};
-use crate::{Version, ietf, lite};
+use crate::{Draft, Version, ietf, lite};
 
 /// The number does not fit the target: a varint wire form or a narrower integer.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Error)]
@@ -16,6 +16,10 @@ pub struct BoundsExceeded;
 
 /// The largest value the QUIC form can carry: `2^62 - 1`.
 pub(crate) const MAX_QUIC: u64 = (1 << 62) - 1;
+
+/// The longest varint either form decodes, minimal or not: the leading-ones form's 9 bytes,
+/// past QUIC's 8.
+pub(crate) const MAX_LEN: usize = 9;
 
 /// How a protocol version lays out a varint on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,8 +55,8 @@ impl From<ietf::Version> for Form {
 impl From<Version> for Form {
 	fn from(version: Version) -> Self {
 		match version {
-			Version::Lite(v) => v.into(),
-			Version::Ietf(v) => v.into(),
+			Version(Draft::Lite(v)) => v.into(),
+			Version(Draft::Ietf(v)) => v.into(),
 		}
 	}
 }

@@ -155,6 +155,9 @@ impl Shared {
 
 	/// Deliver a wake [`Polling::hold`] kept back, unless the set was polled since.
 	fn release(&self) {
+		// The held wake set `true` on this thread, so `false` means a pass cleared it since.
+		// That pass took the wake's bit, or ran before the wake's level was marked above
+		// it, and the waker marking that level then saw `false` and woke the parent itself.
 		if !self.pending.load(Ordering::Acquire) {
 			return;
 		}
@@ -330,6 +333,11 @@ impl<T> Tasks<T> {
 		self.len == 0
 	}
 
+	/// The tasks still running, in no particular order.
+	pub fn iter(&self) -> impl Iterator<Item = &T> {
+		self.children.iter().flatten().map(|occupant| &occupant.task)
+	}
+
 	/// Add a task, queued for its first poll.
 	///
 	/// Wakes the owner, so a task pushed between polls (from another arm of the
@@ -369,6 +377,18 @@ impl<T> Tasks<T> {
 		TaskKey {
 			index,
 			generation: self.generation,
+		}
+	}
+
+	/// Cancel every task `keep` rejects.
+	pub fn retain(&mut self, mut keep: impl FnMut(&T) -> bool) {
+		for (index, slot) in self.children.iter_mut().enumerate() {
+			if slot.as_ref().is_some_and(|occupant| !keep(&occupant.task)) {
+				// A wake bit left set costs the slot's next occupant one spurious poll at most.
+				*slot = None;
+				self.free.push(index);
+				self.len -= 1;
+			}
 		}
 	}
 
@@ -484,9 +504,23 @@ impl<T: Task> Tasks<T> {
 			// Re-arm before sweeping: a wake landing mid-pass must nudge the owner
 			// again, since its word will already have been snapshotted. The same
 			// flag tells the loop whether the pass woke anything.
+			//
+			// Acquire/release is enough, though this store is followed by reads of
+			// other atomics: the pass takes each level with an RMW and a waker marks it
+			// with one, so the two meet on one location. A mark that makes a level
+			// nonzero either precedes the pass's `swap(0)` of that level in its
+			// modification order, so the pass takes it, or reads from that swap
+			// (directly or through other wakers' RMWs), which orders this store before
+			// the waker's `pending.swap`. That swap then reads `false` and wakes the
+			// parent, or a later waker's `true`, from a waker that did. A wake into a
+			// level already nonzero is covered by the waker that made it nonzero, the
+			// same argument one level up (see `wake_by_ref`), ending at `ready`, which
+			// every pass swaps. A plain load on either side would be the
+			// store-buffering (Dekker) shape that loses wakes, so keep both sides RMWs.
 			self.shared.pending.store(false, Ordering::Release);
 			self.pass(done);
 			ran += 1;
+			// A `true` this misses belongs to a waker that saw `false` and woke the parent.
 			if ran == budget.get() || !self.shared.pending.load(Ordering::Acquire) {
 				return ran;
 			}
@@ -634,6 +668,50 @@ mod tests {
 		assert!(tasks.poll(&waiter).is_pending(), "b is still live");
 		assert_eq!(a_polls.load(Ordering::SeqCst), 2, "a was woken");
 		assert_eq!(b_polls.load(Ordering::SeqCst), 1, "b was not");
+	}
+
+	/// A task named by its tag, finishing when its gate opens.
+	struct Tagged {
+		tag: usize,
+		gate: crate::Consumer<bool>,
+	}
+
+	impl Task for Tagged {
+		type Output = ();
+
+		fn poll(&mut self, waiter: &Waiter) -> Poll<()> {
+			self.gate
+				.poll(waiter, |open| if **open { Poll::Ready(()) } else { Poll::Pending })
+				.map(|_| ())
+		}
+	}
+
+	/// A rejected task is cancelled and its slot reused, while a kept one still runs.
+	#[test]
+	fn retain_cancels_only_the_rejected() {
+		let mut tasks = Tasks::new();
+		let gates: Vec<_> = (0..3).map(|_| crate::Producer::new(false)).collect();
+		for (tag, gate) in gates.iter().enumerate() {
+			tasks.push(Tagged {
+				tag,
+				gate: gate.consume(),
+			});
+		}
+		let waiter = Waiter::noop();
+		assert!(tasks.poll(&waiter).is_pending());
+
+		tasks.retain(|task| task.tag == 1);
+		assert_eq!(tasks.len(), 1);
+		assert_eq!(tasks.iter().map(|task| task.tag).collect::<Vec<_>>(), [1]);
+
+		tasks.push(Tagged {
+			tag: 3,
+			gate: gates[0].consume(),
+		});
+		assert_eq!(tasks.children.len(), 3, "a freed slot is reused");
+		open(&gates[0]);
+		open(&gates[1]);
+		assert!(tasks.poll(&waiter).is_ready(), "the kept task still finishes");
 	}
 
 	/// Finished tasks retire, their slots are reused, and an empty set is Ready.

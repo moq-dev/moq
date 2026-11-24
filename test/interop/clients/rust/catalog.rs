@@ -34,14 +34,15 @@ async fn main() -> anyhow::Result<()> {
 	let route = origin.route(&args[2], moq_net::origin::RouteOptions::hidden())?;
 	let track = route
 		.broadcast()
-		.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())?;
+		.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
+		.context("the track already exists")?;
 	ensure!(
 		track.info().compression == moq_net::track::Compression::Deflate,
 		"hang catalogs are compressed"
 	);
 	let mut catalog = moq_json::snapshot::Producer::<hang::Catalog>::new(track, Default::default());
 	let value = hang::Catalog::from_slice(CATALOG.as_bytes())?;
-	catalog.update(moq_net::Timed::from(&value).at(moq_net::Timestamp::ZERO))?;
+	catalog.update(&value, moq_net::Timestamp::ZERO)?;
 	route.announce()?;
 
 	// A local reader sees the inflated snapshot, as a plain peer of the relay does. The group
@@ -64,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
 		commands.next_line().await?.as_deref() == Some("clean end"),
 		"readers did not acknowledge the catalog"
 	);
-	catalog.finish()?;
+	let _catalog = catalog.finish()?;
 	route.broadcast().close();
 	session.close().await?;
 	eprintln!("catalog acknowledged");

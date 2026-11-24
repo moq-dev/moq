@@ -1,7 +1,7 @@
 import type { Effect } from "@moq/signals";
 import type MoqWatch from "../../element";
 
-/** Shows why the origin refused the broadcast, in place of the offline notice. */
+/** Shows why the relay refused the connection, or the origin the broadcast, in place of the offline notice. */
 export function refusedIndicator(parent: Effect, watch: MoqWatch): HTMLElement {
 	const container = document.createElement("div");
 	container.className = "watch-ui__notice watch-ui__refused-indicator";
@@ -13,13 +13,18 @@ export function refusedIndicator(parent: Effect, watch: MoqWatch): HTMLElement {
 	container.appendChild(text);
 
 	parent.run((effect) => {
-		const error = effect.get(watch.broadcast.out.error);
-		container.style.display = error ? "" : "none";
-		if (!error) return;
-
-		text.textContent = error.message
-			? `This broadcast was refused: ${error.message}`
-			: "This broadcast was refused";
+		// A connection that gave up, as on a refused token, explains more than an older
+		// refusal of the broadcast, which no session is asking about any more.
+		const connection = effect.get(watch.connection.error);
+		const broadcast = effect.get(watch.broadcast.out.error);
+		container.style.display = connection || broadcast ? "" : "none";
+		if (connection) {
+			text.textContent = connection.message ? `Could not connect: ${connection.message}` : "Could not connect";
+		} else if (broadcast) {
+			text.textContent = broadcast.message
+				? `This broadcast was refused: ${broadcast.message}`
+				: "This broadcast was refused";
+		}
 	});
 
 	return container;

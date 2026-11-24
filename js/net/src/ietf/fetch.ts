@@ -7,8 +7,9 @@ import * as Namespace from "./namespace.ts";
 import { Parameters } from "./parameters.ts";
 import { DEFAULT_WIRE } from "./priority.ts";
 import * as Properties from "./properties.ts";
+import { RequestOk } from "./request.ts";
 import { GroupOrder } from "./subscribe.ts";
-import type { IetfVersion } from "./version.ts";
+import { type IetfVersion, isDraft23 } from "./version.ts";
 
 /**
  * The header that begins a fetch stream (draft-22 section 11.4), naming the request it
@@ -91,12 +92,6 @@ export class Fetch {
 	/** Whether the request carried Range Filters, which we refuse. Never encoded. */
 	rangeFilters: boolean;
 
-	/**
-	 * FILL_TIMEOUT: the total wait for objects not yet available before they are reported as
-	 * a gap, zero for only what is cached. Absent waits as long as the publisher chooses.
-	 */
-	fillTimeout?: number;
-
 	/** Whether the requester wants Track Properties in FETCH_OK (INCLUDE_PROPERTIES, draft-22). */
 	propertiesWanted: boolean;
 
@@ -106,7 +101,6 @@ export class Fetch {
 		subscriberPriority = DEFAULT_WIRE,
 		groupOrder,
 		rangeFilters = false,
-		fillTimeout,
 		propertiesWanted = true,
 	}: {
 		requestId: bigint;
@@ -114,7 +108,6 @@ export class Fetch {
 		subscriberPriority?: number;
 		groupOrder?: Order;
 		rangeFilters?: boolean;
-		fillTimeout?: number;
 		propertiesWanted?: boolean;
 	}) {
 		this.requestId = requestId;
@@ -122,7 +115,6 @@ export class Fetch {
 		this.subscriberPriority = subscriberPriority;
 		this.groupOrder = groupOrder;
 		this.rangeFilters = rangeFilters;
-		this.fillTimeout = fillTimeout;
 		this.propertiesWanted = propertiesWanted;
 	}
 
@@ -133,7 +125,6 @@ export class Fetch {
 		params.subscriberPriority = this.subscriberPriority;
 		if (this.groupOrder !== undefined)
 			params.groupOrder = this.groupOrder === "ascending" ? GroupOrder.Ascending : GroupOrder.Descending;
-		params.fillTimeout = this.fillTimeout;
 
 		const type = this.type;
 		if (Filter.isDraft20(version)) {
@@ -226,25 +217,31 @@ export class Fetch {
 			// Parameters refuses anything but Ascending or Descending.
 			groupOrder: order === undefined ? undefined : order === GroupOrder.Ascending ? "ascending" : "descending",
 			rangeFilters: params.rangeFilters,
-			fillTimeout: params.fillTimeout,
 			// Defaults to 1, so an absent parameter means the requester wants them.
 			propertiesWanted: params.includeProperties ?? true,
 		});
 	}
 }
 
-/** The answer to a FETCH, sent before its fetch stream. */
+/**
+ * The answer to a FETCH, sent before its fetch stream: the FETCH_OK message (0x18) through
+ * draft-22, and a REQUEST_OK (0x07) from draft-23 on (section 9.3).
+ */
 export class FetchOk {
 	static id = 0x18;
 
-	/** Whether the response holds the track's final object. */
+	/** Whether the response holds the track's final object. Through draft-22 only. */
 	endOfTrack: boolean;
 
 	/**
 	 * Where the response ends. Draft-18 uses the last object plus one, or Object 0 for the
-	 * whole End Group; draft-22 and later an inclusive End Location.
+	 * whole End Group; draft-22 an inclusive End Location. Draft-23 has none: the answer ends
+	 * at {@link largest} when set, and at the requested end otherwise (section 3.2).
 	 */
 	endLocation: Location;
+
+	/** Draft-23's LARGEST_OBJECT, where the answer ends when the requested range reaches it. */
+	largest?: Location;
 
 	/** The track's properties, as SUBSCRIBE_OK carries them. */
 	properties: Properties.Properties;
@@ -252,23 +249,35 @@ export class FetchOk {
 	constructor({
 		endOfTrack,
 		endLocation,
+		largest,
 		properties = {},
 	}: {
 		endOfTrack: boolean;
 		endLocation: Location;
+		largest?: Location;
 		properties?: Properties.Properties;
 	}) {
 		this.endOfTrack = endOfTrack;
 		this.endLocation = endLocation;
+		this.largest = largest;
 		this.properties = properties;
 	}
 
+	/** The message type answering a FETCH on `version`; FETCH_OK's own is reserved from draft-23. */
+	static idFor(version: IetfVersion): number {
+		return isDraft23(version) ? RequestOk.id : FetchOk.id;
+	}
+
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
-		await w.bool(this.endOfTrack);
-		await w.u62(this.endLocation.group);
-		await w.u62(this.endLocation.object);
-		// FETCH_OK defines no parameters.
-		await new Parameters().encode(w, version);
+		const params = new Parameters();
+		if (isDraft23(version)) {
+			if (this.largest) params.largest = { groupId: this.largest.group, objectId: this.largest.object };
+		} else {
+			await w.bool(this.endOfTrack);
+			await w.u62(this.endLocation.group);
+			await w.u62(this.endLocation.object);
+		}
+		await params.encode(w, version);
 		// Track Properties are the final field, so nothing may follow.
 		await Properties.encode(w, this.properties, version);
 	}
@@ -282,6 +291,19 @@ export class FetchOk {
 	}
 
 	static async #decode(r: Reader, version: IetfVersion): Promise<FetchOk> {
+		if (isDraft23(version)) {
+			// EXPIRES is read and ignored, like SUBSCRIBE_OK's.
+			const params = await Parameters.decode(r, version, "fetch-ok");
+			const properties = await Properties.decode(r, version);
+			const at = params.largest;
+			const largest = at && { group: at.groupId, object: at.objectId };
+			return new FetchOk({
+				endOfTrack: false,
+				endLocation: largest ?? { group: 0n, object: 0n },
+				largest,
+				properties,
+			});
+		}
 		const endOfTrack = await r.bool();
 		const endLocation = { group: await r.u62(), object: await r.u62() };
 		// FETCH_OK lists no parameters, so any is a protocol violation.

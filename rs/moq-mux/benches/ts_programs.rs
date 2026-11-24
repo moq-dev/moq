@@ -228,8 +228,8 @@ fn ingest(programs: u16, input: &[u8]) -> (moq_mux::container::ts::stats::Snapsh
 	let (mut importer, driver) = setup();
 	importer.decode(input).unwrap();
 	let finished = importer.finish().unwrap();
-	assert_eq!(finished.len(), usize::from(programs));
-	(importer.stats(), (driver, finished))
+	assert_eq!(finished.broadcasts().len(), usize::from(programs));
+	(finished.stats(), (driver, finished))
 }
 
 fn programs(c: &mut Criterion) {

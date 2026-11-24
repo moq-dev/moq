@@ -1,36 +1,37 @@
-use crate::path;
-use moq_pattern::Patterns;
+use crate::{Access, path};
+use moq_pattern::{Prefix, Prefixes};
 use serde::{Deserialize, Serialize};
 
 /// The immutable ceiling on what a key may grant, embedded in its JWK.
 ///
-/// Patterns in `publish` and `subscribe` are relative to `root`, matching token claim
-/// semantics. A key signs a token only when every pattern the token grants is
-/// contained by one the scope allows, in the same role; see [`allows`](Self::allows).
+/// Prefixes in `publish` and `subscribe` are relative to `root`, matching token claim
+/// semantics. A key signs a token only when every prefix the token grants lies at or
+/// beneath one the scope allows, in the same role; see [`allows`](Self::allows).
 ///
 /// The scope is fixed at key generation. Widening it means minting a new key, which
 /// is the point: a leaked scoped key can never be talked into signing more than it
 /// already could. A key with no scope at all is unrestricted, so keys minted before
 /// scopes existed keep working.
 ///
-/// Legacy `put`/`get` prefix scopes load as subtree patterns, and a scope that only
-/// grants subtrees is written that way so older readers load it too.
+/// Legacy `put`/`get` scopes load as the same prefixes; a scope is always written as
+/// `publish` and `subscribe`, spelled as [`Claims`] are.
 #[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq, Eq)]
-#[serde(try_from = "crate::wire::Scope", into = "crate::wire::Scope")]
+#[serde(try_from = "crate::wire::Object<crate::wire::Scope>", into = "crate::wire::Scope")]
 pub struct Scope {
-	/// The root for the publish/subscribe patterns below.
+	/// The root for the publish/subscribe prefixes below.
 	pub root: String,
 
-	/// Patterns this key may grant to publishers.
-	pub publish: Patterns,
+	/// Prefixes this key may grant to publishers.
+	pub publish: Prefixes,
 
-	/// Patterns this key may grant to subscribers.
-	pub subscribe: Patterns,
+	/// Prefixes this key may grant to subscribers.
+	pub subscribe: Prefixes,
 }
 
 impl Scope {
 	/// Returns an error when the scope permits nothing, making the key unusable, or names
-	/// a root [`Key::sign`](crate::Key::sign) would refuse.
+	/// a malformed root. [`Key::with_scope`](crate::Key::with_scope) also refuses a root
+	/// [`Key::sign`](crate::Key::sign) would.
 	pub fn validate(&self) -> crate::Result<()> {
 		path::validate(&self.root)?;
 		if self.publish.is_empty() && self.subscribe.is_empty() {
@@ -40,47 +41,47 @@ impl Scope {
 		Ok(())
 	}
 
-	/// Whether every pattern `claims` grants is covered by this scope, per role.
+	/// Whether every prefix `claims` grants is covered by this scope, per role.
 	///
 	/// Both sides are placed beneath their own root before comparing, so the same
-	/// grant expressed as `root: "demo"` + `publish: ["room/**"]` or as
-	/// `publish: ["demo/room/**"]` is treated identically. Containment is per pattern,
-	/// so a scope of `live/**` does not cover `lively/**`, and the roles are checked
+	/// grant expressed as `root: "demo"` + `publish: ["room"]` or as
+	/// `publish: ["demo/room"]` is treated identically. Coverage is by segment, so a
+	/// scope of `live` does not cover `lively`, and the roles are checked
 	/// independently: a publish-only scope never authorizes a subscribe grant.
 	///
-	/// `**` covers everything beneath the scope root, so a scope of `root: "demo"` +
-	/// `publish: ["**"]` grants publish anywhere under `demo`.
+	/// The empty prefix covers everything beneath the scope root, so a scope of
+	/// `root: "demo"` + `publish: [""]` grants publish anywhere under `demo`.
 	pub fn allows(&self, claims: &Claims) -> bool {
-		let covers = |granted: &Patterns, requested: &Patterns| {
+		let covers = |granted: &Prefixes, requested: &Prefixes| {
 			match (granted.rooted(&self.root), requested.rooted(&claims.root)) {
 				(Ok(granted), Ok(requested)) => granted.covers(&requested),
-				// A root too deep to place the patterns beneath cannot be granted either way.
+				// A root too deep to place the prefixes beneath cannot be granted either way.
 				_ => false,
 			}
 		};
 
-		covers(&self.publish, &claims.publish) && covers(&self.subscribe, &claims.subscribe)
+		covers(&self.publish, &claims.publish.path) && covers(&self.subscribe, &claims.subscribe.path)
 	}
 }
 
-/// The access a [`Claims`] grants at a specific path, with every pattern rebased so
-/// it is relative to that path.
+/// The access a [`Claims`] grants at a specific path, with every prefix rebased so it
+/// is relative to that path.
 ///
-/// Produced by [`Claims::authorize`]. `**` grants the path itself and everything
-/// beneath it; the empty pattern grants exactly the path. The reference server's
-/// policy holds its anonymous and mTLS rules as this pair too, authorized at `/`.
+/// Produced by [`Claims::authorize`]. The empty prefix grants the path itself and
+/// everything beneath it. The reference server's policy holds its anonymous and mTLS
+/// rules as this pair too, authorized at `/`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Permissions {
-	/// Patterns the holder may subscribe to, relative to the authorized path.
-	pub subscribe: Patterns,
+	/// Prefixes the holder may subscribe to, relative to the authorized path.
+	pub subscribe: Prefixes,
 
-	/// Patterns the holder may publish to, relative to the authorized path.
-	pub publish: Patterns,
+	/// Prefixes the holder may publish to, relative to the authorized path.
+	pub publish: Prefixes,
 }
 
 impl Permissions {
-	/// Access granted as these pattern unions.
-	pub fn new(publish: impl Into<Patterns>, subscribe: impl Into<Patterns>) -> Self {
+	/// Access granted as these prefix sets.
+	pub fn new(publish: impl Into<Prefixes>, subscribe: impl Into<Prefixes>) -> Self {
 		Self {
 			publish: publish.into(),
 			subscribe: subscribe.into(),
@@ -93,47 +94,43 @@ impl Permissions {
 	}
 }
 
-/// The payload of a token: a root, plus the publish/subscribe patterns granted beneath it.
+/// The payload of a token: a root, plus the publish/subscribe prefixes granted beneath it.
 ///
 /// Build one from [`Default`] with the `with_*` setters, sign it with
 /// [`Key::sign`](crate::Key::sign), and scope it to a connection with
-/// [`authorize`](Self::authorize). A pattern names exactly what it says: `alice`
-/// is one broadcast, `alice/**` is a subtree, and `**` is everything under the root.
+/// [`authorize`](Self::authorize). A prefix covers its path and everything beneath it:
+/// `alice` is `alice` and every broadcast under it, and the empty prefix is everything
+/// under the root. A [`Prefix`] holds no wildcard: `alice/**` or `*` fails to parse.
 ///
 /// ```no_run
 /// let claims = moq_auth::Claims::default()
 ///     .with_root("room/123")
-///     .with_publish(["alice/**".parse().unwrap()])
-///     .with_subscribe(["**".parse().unwrap()]);
+///     .with_publish(["alice".parse().unwrap()])
+///     .with_subscribe([moq_auth::Prefix::all()]);
 /// ```
 ///
-/// Legacy `moq-token` claims are read too: each `put`/`get` prefix `p` is the subtree
-/// `p/**`. Claims that only grant subtrees are written that way, so every published
-/// verifier accepts them; anything else is written as `publish`/`subscribe`, which an
-/// older verifier refuses rather than misreads. A capped role is written as
-/// `{"path": [...], "rate": bps}`, which every published verifier refuses rather than
-/// drop the cap. The registered `iss`, `sub`, and `jti`
-/// claims are read and ignored; any other field fails verification, since it might
-/// narrow the grant, and a misspelled `root` would otherwise widen it.
+/// Grants are written as `publish` and `subscribe`, each prefix spelled as the subtree
+/// pattern a release before 0.22 reads (`alice/**`, `**`), and read back alike; any
+/// other wildcard fails verification. Legacy `moq-token` claims are read too: each
+/// `put`/`get` entry is the same prefix. A capped role is written as
+/// `{"path": [...], "rate": bps}`, which every older verifier refuses rather than drop
+/// the cap. The registered `iss` and `sub` claims are read and ignored; any other field
+/// fails verification, since it might narrow the grant, and a misspelled `root` would
+/// otherwise widen it.
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
-#[serde(try_from = "crate::wire::Claims", into = "crate::wire::Claims")]
+#[serde(try_from = "crate::wire::Object<crate::wire::Claims>", into = "crate::wire::Claims")]
 #[non_exhaustive]
 pub struct Claims {
-	/// The root for the publish/subscribe patterns below.
+	/// The root for the publish/subscribe prefixes below.
 	/// It's mostly for compression and is optional, defaulting to the empty string.
 	pub root: String,
 
-	/// Patterns the holder may publish, relative to the root.
-	pub publish: Patterns,
+	/// What the holder may publish, relative to the root.
+	pub publish: Access,
 
-	/// The most the holder may publish, or no cap when absent.
-	pub publish_rate: Option<crate::Rate>,
-
-	/// Patterns the holder may subscribe to, relative to the root.
-	pub subscribe: Patterns,
-
-	/// The most the holder may receive from its subscriptions, or no cap when absent.
-	pub subscribe_rate: Option<crate::Rate>,
+	/// What the holder may subscribe to, relative to the root. A cap bounds what it
+	/// receives from its subscriptions.
+	pub subscribe: Access,
 
 	/// The expiration time of the token as a unix timestamp (`exp`).
 	pub expires: Option<kio::clock::Wall>,
@@ -144,37 +141,40 @@ pub struct Claims {
 	/// The time before which the token is refused, as a unix timestamp (`nbf`).
 	/// Enforced by [`Key::verify`](crate::Key::verify).
 	pub not_before: Option<kio::clock::Wall>,
+
+	/// The token's identifier (`jti`), which its issuer may record to revoke it.
+	pub id: Option<crate::TokenId>,
 }
 
 impl Claims {
-	/// Set the root that the publish/subscribe patterns are relative to.
+	/// Set the root that the publish/subscribe prefixes are relative to.
 	pub fn with_root(mut self, root: impl Into<String>) -> Self {
 		self.root = root.into();
 		self
 	}
 
-	/// Grant publish access to these patterns, relative to the root.
-	pub fn with_publish(mut self, patterns: impl IntoIterator<Item = moq_pattern::Pattern>) -> Self {
-		self.publish = patterns.into_iter().collect();
+	/// Grant publish access to these prefixes, relative to the root, keeping any cap.
+	pub fn with_publish(mut self, prefixes: impl IntoIterator<Item = Prefix>) -> Self {
+		self.publish.path = prefixes.into_iter().collect();
 		self
 	}
 
-	/// Grant subscribe access to these patterns, relative to the root.
-	pub fn with_subscribe(mut self, patterns: impl IntoIterator<Item = moq_pattern::Pattern>) -> Self {
-		self.subscribe = patterns.into_iter().collect();
+	/// Grant subscribe access to these prefixes, relative to the root, keeping any cap.
+	pub fn with_subscribe(mut self, prefixes: impl IntoIterator<Item = Prefix>) -> Self {
+		self.subscribe.path = prefixes.into_iter().collect();
 		self
 	}
 
 	/// Cap what the holder may publish, in bits per second; `None` lifts the cap.
 	pub fn with_publish_rate(mut self, rate: impl Into<Option<crate::Rate>>) -> Self {
-		self.publish_rate = rate.into();
+		self.publish.rate = rate.into();
 		self
 	}
 
 	/// Cap what the holder may receive from its subscriptions, in bits per second; `None`
 	/// lifts the cap.
 	pub fn with_subscribe_rate(mut self, rate: impl Into<Option<crate::Rate>>) -> Self {
-		self.subscribe_rate = rate.into();
+		self.subscribe.rate = rate.into();
 		self
 	}
 
@@ -194,31 +194,39 @@ impl Claims {
 		self
 	}
 
+	/// Identify the token, such as for its issuer to revoke it. Nothing invents one.
+	///
+	/// Accepts an `Option` so a caller can pass one through without unwrapping it.
+	pub fn with_id(mut self, id: impl Into<Option<crate::TokenId>>) -> Self {
+		self.id = id.into();
+		self
+	}
+
 	/// Returns an error when the token grants nothing at all, making it useless.
 	pub fn validate(&self) -> crate::Result<()> {
-		if self.publish.is_empty() && self.subscribe.is_empty() {
+		if self.publish.path.is_empty() && self.subscribe.path.is_empty() {
 			return Err(crate::Error::UselessToken);
 		}
 
 		Ok(())
 	}
 
-	/// The access these claims grant at `path`, rebased so each returned pattern is
+	/// The access these claims grant at `path`, rebased so each returned prefix is
 	/// relative to `path`.
 	///
 	/// `path` and [`root`](Self::root) must overlap, in either direction:
 	///
 	/// - `path` extends the root (root `demo`, path `demo/room`), so the extra
-	///   `room` narrows each pattern and drops the ones outside it.
+	///   `room` narrows each prefix and drops the ones outside it.
 	/// - `path` is a parent of the root (root `demo`, path ``), so `demo` is
-	///   prepended to each pattern to keep it anchored where the token points.
+	///   prepended to each prefix to keep it anchored where the token points.
 	///
 	/// Matching is segment-aware, so a root of `foo` does not cover `foobar`.
 	/// Slashes at the boundaries are implicit: `/demo/` and `demo` are the same path.
 	///
 	/// Returns [`Error::RootMismatch`](crate::Error::RootMismatch) when the two don't
 	/// overlap, and [`Error::NoAccess`](crate::Error::NoAccess) when they do but every
-	/// pattern falls outside `path`.
+	/// prefix falls outside `path`.
 	///
 	/// This is authorization only. Verify the signature first with
 	/// [`Key::verify`](crate::Key::verify), which is where expiry is enforced.
@@ -236,19 +244,19 @@ impl Claims {
 			return Err(crate::Error::RootMismatch(path));
 		};
 
-		let scope = |patterns: &Patterns| -> crate::Result<Patterns> {
+		let scope = |prefixes: &Prefixes| -> crate::Result<Prefixes> {
 			if prefix.is_empty() {
-				// The path reaches into the grant; keep what each pattern says below it.
-				Ok(patterns.rebase(suffix))
+				// The path reaches into the grant; keep what each prefix covers below it.
+				Ok(prefixes.rebase(suffix))
 			} else {
 				// The grant sits below the path; name it from there.
-				Ok(patterns.rooted(prefix)?)
+				Ok(prefixes.rooted(prefix)?)
 			}
 		};
 
 		let permissions = Permissions {
-			subscribe: scope(&self.subscribe)?,
-			publish: scope(&self.publish)?,
+			subscribe: scope(&self.subscribe.path)?,
+			publish: scope(&self.publish.path)?,
 		};
 
 		if permissions.subscribe.is_empty() && permissions.publish.is_empty() {
@@ -265,7 +273,7 @@ mod tests {
 
 	use std::time::Duration;
 
-	fn patterns(texts: &[&str]) -> Patterns {
+	fn prefixes(texts: &[&str]) -> Prefixes {
 		texts.iter().map(|text| text.parse().unwrap()).collect()
 	}
 
@@ -275,7 +283,7 @@ mod tests {
 	fn fractional_times_narrow_the_window() {
 		let at = kio::clock::Wall::UNIX_EPOCH + Duration::from_millis(1500);
 		let claims = Claims {
-			publish: patterns(&["**"]),
+			publish: prefixes(&[""]).into(),
 			expires: Some(at),
 			not_before: Some(at),
 			..Default::default()
@@ -286,14 +294,13 @@ mod tests {
 
 	fn create_test_claims() -> Claims {
 		Claims {
-			publish_rate: None,
-			subscribe_rate: None,
 			root: "test-path".to_string(),
-			publish: patterns(&["test-pub/**"]),
-			subscribe: patterns(&["test-sub/**"]),
+			publish: prefixes(&["test-pub"]).into(),
+			subscribe: prefixes(&["test-sub"]).into(),
 			expires: Some(kio::clock::wall() + Duration::from_secs(3600)),
 			issued: Some(kio::clock::wall()),
 			not_before: None,
+			id: None,
 		}
 	}
 
@@ -301,12 +308,12 @@ mod tests {
 	fn scope_allows_contained_claims() {
 		let scope = Scope {
 			root: "project".into(),
-			publish: patterns(&["live/**"]),
-			subscribe: patterns(&["watch/**"]),
+			publish: prefixes(&["live"]),
+			subscribe: prefixes(&["watch"]),
 		};
 		let claims = Claims {
 			root: "project/live/room".into(),
-			publish: patterns(&["**"]),
+			publish: prefixes(&[""]).into(),
 			..Default::default()
 		};
 		assert!(scope.allows(&claims));
@@ -316,17 +323,17 @@ mod tests {
 	fn scope_rejects_sibling_and_role_escalation() {
 		let scope = Scope {
 			root: "project".into(),
-			publish: patterns(&["live/**"]),
-			subscribe: Patterns::new(),
+			publish: prefixes(&["live"]),
+			subscribe: Prefixes::new(),
 		};
 		let sibling = Claims {
 			root: "project/lively".into(),
-			publish: patterns(&["**"]),
+			publish: prefixes(&[""]).into(),
 			..Default::default()
 		};
 		let role = Claims {
 			root: "project/live".into(),
-			subscribe: patterns(&["**"]),
+			subscribe: prefixes(&[""]).into(),
 			..Default::default()
 		};
 		assert!(!scope.allows(&sibling));
@@ -338,24 +345,24 @@ mod tests {
 		// The same grant, expressed three ways, must compare identically.
 		let scope = Scope {
 			root: "project".into(),
-			publish: patterns(&["live/**"]),
-			subscribe: Patterns::new(),
+			publish: prefixes(&["live"]),
+			subscribe: Prefixes::new(),
 		};
 
 		for claims in [
 			Claims {
 				root: "project".into(),
-				publish: patterns(&["live/room/**"]),
+				publish: prefixes(&["live/room"]).into(),
 				..Default::default()
 			},
 			Claims {
 				root: String::new(),
-				publish: patterns(&["project/live/room/**"]),
+				publish: prefixes(&["project/live/room"]).into(),
 				..Default::default()
 			},
 			Claims {
 				root: "/project/live/".into(),
-				publish: patterns(&["room/**"]),
+				publish: prefixes(&["room"]).into(),
 				..Default::default()
 			},
 		] {
@@ -367,15 +374,15 @@ mod tests {
 	fn scope_rejects_escaping_above_its_root() {
 		let scope = Scope {
 			root: "project".into(),
-			publish: patterns(&["live/**"]),
-			subscribe: Patterns::new(),
+			publish: prefixes(&["live"]),
+			subscribe: Prefixes::new(),
 		};
 
 		// A root above the scope's does not widen it, even though `**` would grant
 		// everything within the scope.
 		let claims = Claims {
 			root: String::new(),
-			publish: patterns(&["**"]),
+			publish: prefixes(&[""]).into(),
 			..Default::default()
 		};
 		assert!(!scope.allows(&claims));
@@ -385,53 +392,50 @@ mod tests {
 	fn scope_globstar_grants_everything_beneath_it() {
 		let scope = Scope {
 			root: "project".into(),
-			publish: patterns(&["**"]),
-			subscribe: Patterns::new(),
+			publish: prefixes(&[""]),
+			subscribe: Prefixes::new(),
 		};
 		let claims = Claims {
 			root: "project/anything/deep".into(),
-			publish: patterns(&["**"]),
+			publish: prefixes(&[""]).into(),
 			..Default::default()
 		};
 		assert!(scope.allows(&claims));
 	}
 
 	#[test]
-	fn scope_requires_every_requested_pattern() {
-		// One allowed pattern does not carry an unallowed sibling along with it.
+	fn scope_requires_every_requested_prefix() {
+		// One allowed prefix does not carry an unallowed sibling along with it.
 		let scope = Scope {
 			root: "project".into(),
-			publish: patterns(&["live/**"]),
-			subscribe: Patterns::new(),
+			publish: prefixes(&["live"]),
+			subscribe: Prefixes::new(),
 		};
 		let claims = Claims {
 			root: "project".into(),
-			publish: patterns(&["live/room/**", "other/**"]),
+			publish: prefixes(&["live/room", "other"]).into(),
 			..Default::default()
 		};
 		assert!(!scope.allows(&claims));
 	}
 
 	#[test]
-	fn scope_is_exact_about_a_literal() {
-		// `live` is one broadcast; a subtree beneath it is more than the scope grants.
+	fn scope_covers_by_segment() {
+		// `live` covers itself and everything beneath it, but not `lively` or its parent.
 		let scope = Scope {
 			root: "project".into(),
-			publish: patterns(&["live"]),
-			subscribe: Patterns::new(),
+			publish: prefixes(&["live"]),
+			subscribe: Prefixes::new(),
 		};
-		let exact = Claims {
+		let claims = |publish: &[&str]| Claims {
 			root: "project".into(),
-			publish: patterns(&["live"]),
+			publish: prefixes(publish).into(),
 			..Default::default()
 		};
-		let subtree = Claims {
-			root: "project".into(),
-			publish: patterns(&["live/**"]),
-			..Default::default()
-		};
-		assert!(scope.allows(&exact));
-		assert!(!scope.allows(&subtree));
+		assert!(scope.allows(&claims(&["live"])));
+		assert!(scope.allows(&claims(&["live/room"])));
+		assert!(!scope.allows(&claims(&["lively"])));
+		assert!(!scope.allows(&claims(&[""])));
 	}
 
 	#[test]
@@ -445,33 +449,49 @@ mod tests {
 	}
 
 	#[test]
-	fn scope_reads_legacy_prefixes_as_subtrees() {
+	fn scope_reads_legacy_prefixes_as_prefixes() {
 		let scope: Scope = serde_json::from_str(r#"{"root":"demo","put":["room"],"get":[""]}"#).unwrap();
-		assert_eq!(scope.publish, patterns(&["room/**"]));
-		assert_eq!(scope.subscribe, patterns(&["**"]));
+		assert_eq!(scope.publish, prefixes(&["room"]));
+		assert_eq!(scope.subscribe, prefixes(&[""]));
+	}
+
+	/// TEMPORARY MIGRATION (see `wire::alias`): written as the subtree patterns a release
+	/// before 0.22 reads.
+	#[test]
+	fn scope_writes_subtree_patterns() {
+		let both = Scope {
+			root: "demo".into(),
+			publish: prefixes(&["room"]),
+			subscribe: prefixes(&[""]),
+		};
+		let json = serde_json::to_string(&both).unwrap();
+		assert_eq!(json, r#"{"root":"demo","publish":["room/**"],"subscribe":["**"]}"#);
+		assert_eq!(serde_json::from_str::<Scope>(&json).unwrap(), both);
+
+		let publish = Scope {
+			root: "demo".into(),
+			publish: prefixes(&["room"]),
+			subscribe: Prefixes::new(),
+		};
+		assert_eq!(
+			serde_json::to_string(&publish).unwrap(),
+			r#"{"root":"demo","publish":["room/**"]}"#
+		);
 	}
 
 	#[test]
-	fn scope_writes_legacy_prefixes_only_when_faithful() {
-		let subtrees = Scope {
-			root: "demo".into(),
-			publish: patterns(&["room/**"]),
-			subscribe: patterns(&["**"]),
-		};
-		assert_eq!(
-			serde_json::to_string(&subtrees).unwrap(),
-			r#"{"root":"demo","put":["room"],"get":[""]}"#
-		);
+	fn scope_reads_bare_prefixes() {
+		let scope: Scope = serde_json::from_str(r#"{"root":"demo","publish":["room"],"subscribe":[""]}"#).unwrap();
+		assert_eq!(scope.publish, prefixes(&["room"]));
+		assert_eq!(scope.subscribe, prefixes(&[""]));
+	}
 
-		let exact = Scope {
-			root: "demo".into(),
-			publish: patterns(&["room"]),
-			subscribe: Patterns::new(),
-		};
-		assert_eq!(
-			serde_json::to_string(&exact).unwrap(),
-			r#"{"root":"demo","publish":["room"]}"#
-		);
+	#[test]
+	fn scope_refuses_a_wildcard() {
+		for json in [r#"{"publish":["room/*"]}"#, r#"{"subscribe":["*/chat"]}"#] {
+			let err = serde_json::from_str::<Scope>(json).unwrap_err();
+			assert!(err.to_string().contains("wildcard"), "{json}: {err}");
+		}
 	}
 
 	#[test]
@@ -501,7 +521,7 @@ mod tests {
 	fn test_claims_validation_only_publish() {
 		let claims = Claims {
 			root: "test-path".to_string(),
-			publish: patterns(&["test-pub"]),
+			publish: prefixes(&["test-pub"]).into(),
 			..Default::default()
 		};
 
@@ -512,7 +532,7 @@ mod tests {
 	fn test_claims_validation_only_subscribe() {
 		let claims = Claims {
 			root: "test-path".to_string(),
-			subscribe: patterns(&["test-sub"]),
+			subscribe: prefixes(&["test-sub"]).into(),
 			..Default::default()
 		};
 
@@ -534,13 +554,13 @@ mod tests {
 	fn test_claims_serde_names() {
 		let claims = Claims {
 			root: "live".into(),
-			publish: patterns(&["camera1"]),
-			subscribe: patterns(&["camera1", "camera2"]),
+			publish: prefixes(&["camera1"]).into(),
+			subscribe: prefixes(&["camera1", "camera2"]).into(),
 			..Default::default()
 		};
 		assert_eq!(
 			serde_json::to_string(&claims).unwrap(),
-			r#"{"root":"live","publish":["camera1"],"subscribe":["camera1","camera2"]}"#
+			r#"{"root":"live","publish":["camera1/**"],"subscribe":["camera1/**","camera2/**"]}"#
 		);
 	}
 
@@ -548,37 +568,43 @@ mod tests {
 	fn test_claims_read_legacy_prefixes_as_subtrees() {
 		let claims: Claims =
 			serde_json::from_str(r#"{"root":"test","put":["pub1","/a//b/"],"get":"","exp":1700000000}"#).unwrap();
-		assert_eq!(claims.publish, patterns(&["pub1/**", "a/b/**"]));
-		assert_eq!(claims.subscribe, patterns(&["**"]));
+		assert_eq!(claims.publish.path, prefixes(&["pub1", "a/b"]));
+		assert_eq!(claims.subscribe.path, prefixes(&[""]));
 		assert!(claims.expires.is_some());
 	}
 
 	#[test]
-	fn test_claims_write_legacy_prefixes_only_when_faithful() {
-		// Every grant is a subtree, so the legacy form says exactly the same thing.
+	fn test_claims_write_patterns_and_id() {
 		let subtrees = Claims {
 			root: "live".into(),
-			publish: patterns(&["camera1/**"]),
-			subscribe: patterns(&["**"]),
+			publish: prefixes(&["camera1"]).into(),
+			subscribe: prefixes(&[""]).into(),
 			..Default::default()
-		};
+		}
+		.with_id(crate::TokenId::decode("abc-123").unwrap());
 		let json = serde_json::to_string(&subtrees).unwrap();
-		assert_eq!(json, r#"{"root":"live","put":["camera1"],"get":[""]}"#);
+		assert_eq!(
+			json,
+			r#"{"root":"live","publish":["camera1/**"],"subscribe":["**"],"jti":"abc-123"}"#
+		);
 		let back: Claims = serde_json::from_str(&json).unwrap();
 		assert_eq!(back.publish, subtrees.publish);
 		assert_eq!(back.subscribe, subtrees.subscribe);
+		assert_eq!(back.id, subtrees.id);
+	}
 
-		// One grant a prefix can't say moves the whole document to patterns.
-		let mixed = Claims {
-			root: "live".into(),
-			publish: patterns(&["camera1/**"]),
-			subscribe: patterns(&["*/chat"]),
-			..Default::default()
-		};
-		assert_eq!(
-			serde_json::to_string(&mixed).unwrap(),
-			r#"{"root":"live","publish":["camera1/**"],"subscribe":["*/chat"]}"#
-		);
+	#[test]
+	fn test_claims_refuse_an_unbounded_id() {
+		let long = format!(r#"{{"publish":[""],"jti":"{}"}}"#, "x".repeat(129));
+		for json in [
+			r#"{"publish":[""],"jti":7}"#,
+			r#"{"publish":[""],"jti":null}"#,
+			r#"{"publish":[""],"jti":""}"#,
+			r#"{"publish":[""],"jti":"has space"}"#,
+			long.as_str(),
+		] {
+			assert!(serde_json::from_str::<Claims>(json).is_err(), "{json}");
+		}
 	}
 
 	#[test]
@@ -600,18 +626,48 @@ mod tests {
 		assert!(serde_json::from_str::<Claims>(r#"{"put":["a/*"]}"#).is_err());
 	}
 
+	/// TEMPORARY MIGRATION (see `wire::alias`): the subtree patterns released issuers
+	/// write read as their prefixes, and a bare member as its prefix too.
 	#[test]
-	fn test_claims_refuse_a_bad_pattern() {
-		let err = serde_json::from_str::<Claims>(r#"{"publish":["a/**/b/**"]}"#).unwrap_err();
-		assert!(err.to_string().contains("**"), "{err}");
+	fn test_claims_read_subtree_patterns() {
+		let claims: Claims =
+			serde_json::from_str(r#"{"publish":["alice/**","bob"],"subscribe":{"path":["**"],"rate":1000}}"#).unwrap();
+		assert_eq!(claims.publish.path, prefixes(&["alice", "bob"]));
+		assert_eq!(claims.subscribe.path, prefixes(&[""]));
+	}
+
+	#[test]
+	fn test_claims_refuse_any_other_wildcard() {
+		for json in [
+			r#"{"publish":["*"]}"#,
+			r#"{"publish":["cam-*.hang"]}"#,
+			r#"{"publish":["a/**/b"]}"#,
+			r#"{"publish":["a/*/**"]}"#,
+			r#"{"publish":["/**"]}"#,
+			r#"{"publish":{"path":["*/a"],"rate":1000}}"#,
+		] {
+			let err = serde_json::from_str::<Claims>(json).unwrap_err();
+			assert!(err.to_string().contains("wildcard"), "{json}: {err}");
+		}
+	}
+
+	#[test]
+	fn test_claims_refuse_a_malformed_prefix() {
+		for json in [
+			r#"{"publish":["/a"]}"#,
+			r#"{"publish":["a/"]}"#,
+			r#"{"publish":["a//b"]}"#,
+		] {
+			assert!(serde_json::from_str::<Claims>(json).is_err(), "{json}");
+		}
 	}
 
 	#[test]
 	fn test_claims_default() {
 		let claims = Claims::default();
 		assert_eq!(claims.root, "");
-		assert!(claims.publish.is_empty());
-		assert!(claims.subscribe.is_empty());
+		assert!(claims.publish.path.is_empty());
+		assert!(claims.subscribe.path.is_empty());
 		assert_eq!(claims.expires, None);
 		assert_eq!(claims.issued, None);
 	}
@@ -619,94 +675,112 @@ mod tests {
 	fn authorize_claims(root: &str, subscribe: &[&str], publish: &[&str]) -> Claims {
 		Claims {
 			root: root.to_string(),
-			subscribe: patterns(subscribe),
-			publish: patterns(publish),
+			subscribe: prefixes(subscribe).into(),
+			publish: prefixes(publish).into(),
 			..Default::default()
 		}
 	}
 
 	#[test]
 	fn test_authorize_path_equals_root() {
-		let claims = authorize_claims("room/123", &["**"], &["alice/**"]);
+		let claims = authorize_claims("room/123", &[""], &["alice"]);
 		let permissions = claims.authorize("room/123").unwrap();
 
-		assert_eq!(permissions.subscribe, patterns(&["**"]));
-		assert_eq!(permissions.publish, patterns(&["alice/**"]));
+		assert_eq!(permissions.subscribe, prefixes(&[""]));
+		assert_eq!(permissions.publish, prefixes(&["alice"]));
 	}
 
 	#[test]
 	fn test_authorize_path_extends_root() {
 		// Connecting below the root consumes the matching part of each grant.
-		let claims = authorize_claims("room/123", &["bob/**"], &["alice/**"]);
+		let claims = authorize_claims("room/123", &["bob"], &["alice"]);
 		let permissions = claims.authorize("room/123/alice").unwrap();
 
-		assert_eq!(permissions.subscribe, Patterns::new());
-		assert_eq!(permissions.publish, patterns(&["**"]));
+		assert_eq!(permissions.subscribe, Prefixes::new());
+		assert_eq!(permissions.publish, prefixes(&[""]));
 	}
 
 	#[test]
-	fn test_authorize_literal_becomes_the_path_itself() {
-		// A literal grant reached exactly is the empty pattern: this path, nothing below.
+	fn test_authorize_within_a_prefix_grants_everything_there() {
+		// A prefix reached at or beneath it is the empty prefix: this path and all below.
 		let claims = authorize_claims("room", &[], &["alice"]);
-		let permissions = claims.authorize("room/alice").unwrap();
-
-		assert_eq!(permissions.publish, patterns(&[""]));
+		for path in ["room/alice", "room/alice/cam"] {
+			let permissions = claims.authorize(path).unwrap();
+			assert_eq!(permissions.publish, prefixes(&[""]), "{path}");
+		}
 	}
 
 	#[test]
 	fn test_authorize_path_is_parent_of_root() {
 		// Connecting above the root prepends it, keeping the grants anchored.
-		let claims = authorize_claims("demo", &["**"], &["alice/**"]);
+		let claims = authorize_claims("demo", &[""], &["alice"]);
 		let permissions = claims.authorize("/").unwrap();
 
-		assert_eq!(permissions.subscribe, patterns(&["demo/**"]));
-		assert_eq!(permissions.publish, patterns(&["demo/alice/**"]));
+		assert_eq!(permissions.subscribe, prefixes(&["demo"]));
+		assert_eq!(permissions.publish, prefixes(&["demo/alice"]));
 	}
 
 	#[test]
 	fn test_authorize_empty_root() {
 		// A root-scoped token grants everything it lists, wherever it connects.
-		let claims = authorize_claims("", &["demo/**"], &[]);
+		let claims = authorize_claims("", &["demo"], &[]);
 		let permissions = claims.authorize("demo/room").unwrap();
 
-		assert_eq!(permissions.subscribe, patterns(&["**"]));
-		assert_eq!(permissions.publish, Patterns::new());
+		assert_eq!(permissions.subscribe, prefixes(&[""]));
+		assert_eq!(permissions.publish, Prefixes::new());
 	}
 
 	#[test]
 	fn test_authorize_slashes_are_implicit() {
-		let claims = authorize_claims("/room/123/", &["bob/**"], &[]);
+		let claims = authorize_claims("/room/123/", &["bob"], &[]);
 		let permissions = claims.authorize("//room/123//").unwrap();
 
-		assert_eq!(permissions.subscribe, patterns(&["bob/**"]));
+		assert_eq!(permissions.subscribe, prefixes(&["bob"]));
 	}
 
 	#[test]
 	fn test_authorize_respects_segment_boundaries() {
 		// "foo" must not cover "foobar".
-		let claims = authorize_claims("foo", &["**"], &["**"]);
+		let claims = authorize_claims("foo", &[""], &[""]);
 		assert!(matches!(claims.authorize("foobar"), Err(crate::Error::RootMismatch(_))));
 	}
 
 	#[test]
 	fn test_authorize_unrelated_path() {
-		let claims = authorize_claims("demo", &["**"], &["**"]);
+		let claims = authorize_claims("demo", &[""], &[""]);
 		assert!(matches!(claims.authorize("other"), Err(crate::Error::RootMismatch(_))));
 	}
 
 	#[test]
 	fn test_authorize_no_access_at_path() {
 		// The path overlaps the root, but every grant sits outside it.
-		let claims = authorize_claims("", &["demo/**"], &[]);
+		let claims = authorize_claims("", &["demo"], &[]);
 		assert!(matches!(claims.authorize("other"), Err(crate::Error::NoAccess(_))));
 	}
 
 	#[test]
-	fn test_authorize_wildcards_rebase_as_a_set() {
-		// `**/chat` reached at `chat` is both the path itself and deeper `**/chat`.
-		let claims = authorize_claims("", &["**/chat"], &[]);
-		let permissions = claims.authorize("chat").unwrap();
-		assert_eq!(permissions.subscribe.len(), 2);
-		assert_eq!(permissions.subscribe, patterns(&["", "**/chat"]));
+	fn test_authorize_reads_an_escaped_separator_as_content() {
+		// `a\/b` is one segment holding a `/`, the spelling of a moq-transport field.
+		let claims = authorize_claims("room", &[r"a\/b/c"], &[r"a\/b"]);
+		let permissions = claims.authorize(r"room/a\/b").unwrap();
+		assert_eq!(permissions.subscribe, prefixes(&["c"]));
+		assert_eq!(permissions.publish, prefixes(&[""]));
+		assert!(claims.authorize("room").unwrap().publish.matches(r"a\/b"));
+		assert!(!claims.authorize("room").unwrap().publish.matches("a/b"));
+		// `a\` ends inside that segment, so it is no path the root covers.
+		assert!(matches!(
+			authorize_claims(r"a\/b", &[""], &[]).authorize(r"a\"),
+			Err(crate::Error::RootMismatch(_))
+		));
+	}
+
+	#[test]
+	fn test_authorize_rebases_each_prefix() {
+		// Reached at `room`, a grant keeps only what lies beneath it, and anything above
+		// it grants the whole room.
+		let claims = authorize_claims("", &["room/a", "room/b/c", "lobby"], &[""]);
+		let permissions = claims.authorize("room").unwrap();
+		assert_eq!(permissions.subscribe, prefixes(&["a", "b/c"]));
+		assert_eq!(permissions.publish, prefixes(&[""]));
 	}
 }

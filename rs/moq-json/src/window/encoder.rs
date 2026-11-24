@@ -25,7 +25,7 @@ pub(super) const MAX_INDEX: u64 = (1 << 53) - 1;
 /// stay additive), or chain the `with_*` setters.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct ProducerConfig {
+pub struct Config {
 	/// Whether edits ride as push and pop ops in the open group.
 	///
 	/// `false` makes every edit its own single-frame group restating the window. The window's
@@ -45,7 +45,7 @@ pub struct ProducerConfig {
 	pub checkpoint_records: Option<usize>,
 }
 
-impl Default for ProducerConfig {
+impl Default for Config {
 	fn default() -> Self {
 		Self {
 			ops: true,
@@ -54,7 +54,7 @@ impl Default for ProducerConfig {
 	}
 }
 
-impl ProducerConfig {
+impl Config {
 	/// Set [`ops`](Self::ops) (a builder, since the struct is `#[non_exhaustive]`).
 	pub fn with_ops(mut self, ops: bool) -> Self {
 		self.ops = ops;
@@ -141,7 +141,7 @@ impl<T> Drop for Pending<'_, T> {
 /// [`Demand::wanted`](moq_net::track::Demand::wanted)), [`snapshot`](Self::snapshot) restates the
 /// window in one.
 pub struct Encoder<T> {
-	config: ProducerConfig,
+	config: Config,
 
 	/// The decodable checkpoint suffix. With no checkpoint bound this is the complete window.
 	window: VecDeque<Value>,
@@ -171,7 +171,7 @@ pub struct Encoder<T> {
 
 impl<T> Encoder<T> {
 	/// Create an encoder with an empty window, so the first edit opens a group.
-	pub fn new(config: ProducerConfig) -> Self {
+	pub fn new(config: Config) -> Self {
 		assert!(
 			config.checkpoint_records != Some(0),
 			"checkpoint_records must be positive"
@@ -191,7 +191,7 @@ impl<T> Encoder<T> {
 
 	/// The retained checkpoint suffix, oldest first.
 	///
-	/// This is the complete window unless [`ProducerConfig::checkpoint_records`] is set.
+	/// This is the complete window unless [`Config::checkpoint_records`] is set.
 	pub fn window(&self) -> Vec<Value> {
 		self.window.iter().cloned().collect()
 	}
@@ -274,7 +274,7 @@ impl<T> Encoder<T> {
 
 	/// Serialize a bounded suffix of the window as a group header.
 	fn header<'a>(
-		config: &ProducerConfig,
+		config: &Config,
 		offset: u64,
 		start: u64,
 		len: usize,
@@ -376,7 +376,8 @@ impl<T: Serialize> Encoder<T> {
 		// Serialize before touching the window, so a value that can't be encoded leaves the encoder
 		// exactly as it was. Reading the record back out of its own bytes keeps the stored copy
 		// identical to what a push would have put on the wire.
-		let bytes = serde_json::to_vec(value)?;
+		// A header nests each record two containers deep, in its object and its `records` array.
+		let bytes = crate::strict::to_vec(value, 2)?;
 		let record: Value = serde_json::from_slice(&bytes)?;
 		if self.range().end >= MAX_INDEX {
 			return Err(crate::Error::Json("window index exceeds the safe integer range".into()));
@@ -424,7 +425,7 @@ mod test {
 
 	#[test]
 	fn an_op_that_would_evict_the_header_rolls_first() {
-		let mut encoder = Encoder::<String>::new(ProducerConfig::default().with_ops(true));
+		let mut encoder = Encoder::<String>::new(Config::default().with_ops(true));
 		encoder.max_group_bytes = BUDGET;
 		let first = "a".repeat(16 * 1024);
 		let next = "b".repeat(15 * 1024);
@@ -449,7 +450,7 @@ mod test {
 
 	#[test]
 	fn an_uncommitted_edit_leaves_the_window_unchanged() {
-		let mut encoder = Encoder::<u64>::new(ProducerConfig::default());
+		let mut encoder = Encoder::<u64>::new(Config::default());
 
 		drop(encoder.push(&1).unwrap());
 		assert!(encoder.window().is_empty());
@@ -465,7 +466,7 @@ mod test {
 
 	#[test]
 	fn a_header_larger_than_the_group_cache_is_rejected() {
-		let mut encoder = Encoder::<String>::new(ProducerConfig::default());
+		let mut encoder = Encoder::<String>::new(Config::default());
 		encoder.max_group_bytes = BUDGET;
 		let record = "x".repeat(BUDGET as usize);
 

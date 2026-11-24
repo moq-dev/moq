@@ -72,11 +72,15 @@ describe("sign", () => {
 		rmSync(dir, { recursive: true, force: true });
 	});
 
-	function exp(...args: string[]): number | undefined {
-		const result = Bun.spawnSync(["bun", CLI, "sign", "--key", key, "--publish", "**", ...args]);
+	function payload(...args: string[]) {
+		const result = Bun.spawnSync(["bun", CLI, "sign", "--key", key, "--publish", "", ...args]);
 		expect(result.exitCode).toBe(0);
-		const payload = result.stdout.toString().trim().split(".")[1];
-		return JSON.parse(Buffer.from(payload, "base64url").toString()).exp;
+		const encoded = result.stdout.toString().trim().split(".")[1];
+		return JSON.parse(Buffer.from(encoded, "base64url").toString());
+	}
+
+	function exp(...args: string[]): number | undefined {
+		return payload(...args).exp;
 	}
 
 	/** The `exp` `args` write, with the wall seconds bracketing the subprocess that wrote it. */
@@ -101,5 +105,50 @@ describe("sign", () => {
 		expect(exp("--unbounded")).toBeUndefined();
 		const conflict = Bun.spawnSync(["bun", CLI, "sign", "--key", key, "--unbounded", "--ttl", "1d"]);
 		expect(conflict.exitCode).not.toBe(0);
+	});
+
+	test("writes a jti only when --id gives one", () => {
+		expect(payload()).not.toHaveProperty("jti");
+		expect(payload("--id", "t-1").jti).toBe("t-1");
+		const invalid = Bun.spawnSync(["bun", CLI, "sign", "--key", key, "--publish", "", "--id", "a b"]);
+		expect(invalid.exitCode).not.toBe(0);
+	});
+});
+
+describe("grants", () => {
+	let dir: string;
+
+	beforeEach(() => {
+		dir = mkdtempSync(join(tmpdir(), "moq-auth-cli-"));
+	});
+
+	afterEach(() => {
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	test("flags take prefixes alone", () => {
+		const key = join(dir, "key.jwk");
+		run("generate", "--out", key);
+		for (const args of [
+			["generate", "--out", join(dir, "scoped.jwk"), "--publish", "room/**"],
+			["generate", "--out", join(dir, "scoped.jwk"), "--subscribe", "**"],
+			["sign", "--key", key, "--publish", "room/**"],
+			["sign", "--key", key, "--subscribe", "**"],
+		]) {
+			const result = Bun.spawnSync(["bun", CLI, ...args]);
+			expect(result.exitCode, args.join(" ")).not.toBe(0);
+			expect(result.stderr.toString(), args.join(" ")).toContain("wildcard");
+		}
+	});
+
+	// TEMPORARY MIGRATION (see `readPrefix` in wire.ts): the scope a release before 0.22 reads.
+	test("a key scope is written as the subtree patterns every release reads", async () => {
+		const key = join(dir, "scoped.jwk");
+		run("generate", "--out", key, "--root", "demo", "--publish", "room", "--subscribe", "");
+		expect(JSON.parse(await Bun.file(key).text()).scope).toEqual({
+			root: "demo",
+			publish: ["room/**"],
+			subscribe: ["**"],
+		});
 	});
 });

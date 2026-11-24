@@ -52,7 +52,10 @@ async fn run(relay: bool, js_publishes: bool) {
 	let serve = {
 		let local = local.clone();
 		tokio::spawn(async move {
-			let relayed = moq_tokio::origin::spawn();
+			// A relay carries what it learned on to its other peers (moq-lite-07).
+			let mut config = moq_net::origin::Config::default();
+			config.proxy = true;
+			let relayed = moq_tokio::origin::spawn_config(config);
 			let mut sessions = Vec::new();
 			for _ in 0..if relay { 2 } else { 1 } {
 				let request = server.accept().await.unwrap();
@@ -135,8 +138,8 @@ async fn run(relay: bool, js_publishes: bool) {
 		for ((sequence, micros, payload), got) in AUDIO.into_iter().zip(got) {
 			assert_eq!(got.sequence, sequence, "audio sequence");
 			assert_eq!(
-				got.timestamp.map(|t| t.as_micros()),
-				Some(micros.into()),
+				got.timestamp.as_micros().unwrap(),
+				u128::from(micros),
 				"audio timestamp"
 			);
 			assert_eq!(got.payload, payload, "audio payload");
@@ -148,14 +151,18 @@ async fn run(relay: bool, js_publishes: bool) {
 		got.sort_by_key(|datagram| datagram.sequence);
 		for ((sequence, payload), got) in EVENTS.into_iter().zip(got) {
 			assert_eq!(got.sequence, sequence, "events sequence");
-			assert_eq!(got.timestamp, None, "an untimed datagram has no timestamp");
+			assert_eq!(
+				got.timestamp,
+				Timestamp::unscaled(sequence),
+				"a scale-less datagram is stamped with its sequence"
+			);
 			assert_eq!(got.payload, payload, "events payload");
 		}
 		let mut group = track.recv_group().await.unwrap().expect("stream track ended early");
 		let frame = group.read_frame().await.unwrap().expect("group ended early");
 		assert_eq!(
-			frame.timestamp.map(|t| t.as_millis()),
-			Some(FRAME.0.into()),
+			frame.timestamp.as_millis().unwrap(),
+			u128::from(FRAME.0),
 			"frame timestamp"
 		);
 		assert_eq!(frame.payload, FRAME.1, "frame payload");
@@ -208,7 +215,7 @@ async fn run(relay: bool, js_publishes: bool) {
 			audio
 				.insert(datagram::Datagram {
 					sequence,
-					timestamp: Some(Timestamp::from_micros(micros).unwrap()),
+					timestamp: Timestamp::from_micros(micros).unwrap(),
 					payload: Bytes::from_static(payload),
 				})
 				.unwrap();
@@ -217,7 +224,7 @@ async fn run(relay: bool, js_publishes: bool) {
 			events
 				.insert(datagram::Datagram {
 					sequence,
-					timestamp: None,
+					timestamp: Timestamp::unscaled(sequence),
 					payload: Bytes::from_static(payload),
 				})
 				.unwrap();
@@ -238,7 +245,7 @@ async fn run(relay: bool, js_publishes: bool) {
 }
 
 #[tokio::test]
-#[ignore = "JS lite-07 route wire awaits quest/m2/cluster-routing/routes/js.md"]
+#[ignore = "requires Bun; run by just test datagram-tracks in the interop workflow"]
 async fn datagram_tracks_javascript() {
 	for relay in [false, true] {
 		for js_publishes in [false, true] {

@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use super::Encoded;
 use super::backend::{self, Backend};
-use crate::{Color, Error, Frame, FrameRate, Size};
+use crate::{Color, Device, Error, Frame, FrameRate, Size};
 
 /// Output video codec. `#[non_exhaustive]` so new codecs can be added without
 /// breaking external `match`es.
@@ -19,15 +19,35 @@ use crate::{Color, Error, Frame, FrameRate, Size};
 /// (VideoToolbox on macOS and iOS today). Building an [`Encoder`] returns
 /// [`Error::NoEncoder`](crate::Error::NoEncoder) when nothing can encode the
 /// requested codec on this machine.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Codec {
-	/// H.264 / AVC, Annex-B with in-band SPS/PPS (the "avc3" shape). The widest
+	/// H.264 / AVC, Annex-B with in-band SPS/PPS, published as avc3 with no
+	/// description. The widest
 	/// support and the default.
 	#[default]
 	H264,
-	/// H.265 / HEVC, Annex-B with in-band VPS/SPS/PPS (the "hev1" shape).
+	/// H.265 / HEVC, Annex-B with in-band VPS/SPS/PPS, published as hev1
+	/// with no description.
 	H265,
+}
+
+impl Codec {
+	/// The codec's lowercase name, such as `h264`.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::H264 => "h264",
+			Self::H265 => "h265",
+		}
+	}
+
+	/// What this codec needs against H.264 for the same picture, which scales the default cap.
+	fn bitrate_scale(self) -> f64 {
+		match self {
+			Self::H264 => 1.0,
+			Self::H265 => 0.7,
+		}
+	}
 }
 
 /// Which encoder implementation to use. `#[non_exhaustive]` so new selection
@@ -85,7 +105,7 @@ pub struct Applied {
 	/// not confirm them (a refused or advisory low-latency setting).
 	pub preset: Option<Preset>,
 	/// The backend controls that took effect, for display, e.g.
-	/// `"p1, low-latency tuning, no B-frames, CBR, 1-frame VBV"`. Not a parse target.
+	/// `"p1, low-latency tuning, no B-frames, CQ 30 under the cap, 3-frame VBV"`. Not a parse target.
 	pub controls: String,
 	/// Whether [`Encoder::cut`] can force a group boundary; one that cannot (a V4L2
 	/// driver without the force-keyframe control) refuses every cut.
@@ -153,8 +173,8 @@ pub struct Config {
 	pub height: u32,
 	/// Encoded frame rate.
 	pub framerate: FrameRate,
-	/// Target bitrate. `None` derives a sane default
-	/// from resolution and framerate (~0.07 bits per pixel per second).
+	/// The rendition's cap: the highest bitrate the encoder is configured for. `None` derives
+	/// [`resolved_bitrate`](Self::resolved_bitrate)'s default from the size, frame rate, and codec.
 	pub bitrate: Option<moq_net::bandwidth::Rate>,
 	/// The time between join points: a keyframe (an IDR with its parameter sets
 	/// in band) opens a group this often, so a subscriber joining mid-stream waits
@@ -172,6 +192,23 @@ pub struct Config {
 	/// How the encoder trades latency for compression. Defaults to
 	/// [`Preset::LowLatency`].
 	pub preset: Preset,
+	/// The finest quantizer (0-51, lower is finer) the rate control may pick.
+	/// `None` (the default) keeps the backend's own floor, which keeps quality
+	/// constant under the cap, so a calm scene spends less than it rather than
+	/// buying detail no one sees: 22 for openh264, 25 (H.264) or 23 (H.265) for
+	/// VideoToolbox.
+	///
+	/// Lower it to let the rate control code a picture finer when the cap
+	/// allows, or set `Some(0)` for no floor beyond the codec's own (openh264
+	/// never codes finer than 12). What that costs depends on the content: a
+	/// detailed calm scene spends more of the cap, while very simple content
+	/// can come out smaller and cheaper to encode and decode. Values above 51
+	/// act as 51. [`Applied`]'s controls name the floor that took effect.
+	///
+	/// openh264 and VideoToolbox read it; VideoToolbox before macOS 13 and iOS
+	/// 16 has no floor at all. The other backends keep their own quality
+	/// controls, tuned per device.
+	pub qp_floor: Option<u8>,
 	/// The color space of the input frames, written into the bitstream's VUI so a
 	/// decoder doesn't have to guess. `None` uses [`Color::infer`], which is both
 	/// what the crate's own RGB conversions produce and what a player falls back
@@ -203,16 +240,15 @@ pub struct Config {
 	/// `None` retains selection for CPU and native decoder/capture surfaces.
 	#[cfg(target_os = "linux")]
 	pub input: Option<crate::frame::vulkan::Device>,
-	/// The VA-API render node, such as `/dev/dri/renderD129`. `None` picks the
-	/// first that encodes, decodes, and scales, so a DMA-BUF moves between them
-	/// without a copy. A named node is used even when it fails to open.
-	#[cfg(all(target_os = "linux", feature = "vaapi"))]
-	pub vaapi: Option<std::path::PathBuf>,
-	/// The V4L2 M2M encoder node, such as `/dev/video11`. `None` searches every
-	/// node for one that encodes H.264, which a driver whose format enumeration
-	/// is wrong can defeat.
-	#[cfg(all(target_os = "linux", feature = "v4l2"))]
-	pub v4l2: Option<std::path::PathBuf>,
+	/// The hardware the encoder opens. [`Device::Auto`] (the default) picks
+	/// one: VA-API the first render node that encodes, decodes, and scales, so a
+	/// DMA-BUF moves between them without a copy; NVENC the first CUDA device, or
+	/// the one behind [`input`](Self::input); V4L2 the first node that encodes
+	/// H.264, which a driver whose format enumeration is wrong can defeat.
+	///
+	/// A render node an NVIDIA driver runs that is not the device behind
+	/// `input` is refused.
+	pub device: Device,
 }
 
 impl Config {
@@ -228,14 +264,12 @@ impl Config {
 			codec: Codec::default(),
 			kind: Kind::Auto,
 			preset: Preset::default(),
+			qp_floor: None,
 			color: None,
 			resize: None,
 			#[cfg(target_os = "linux")]
 			input: None,
-			#[cfg(all(target_os = "linux", feature = "vaapi"))]
-			vaapi: None,
-			#[cfg(all(target_os = "linux", feature = "v4l2"))]
-			v4l2: None,
+			device: Device::Auto,
 		}
 	}
 
@@ -339,34 +373,40 @@ impl Config {
 		self.color.unwrap_or_else(|| Color::infer(self.size()))
 	}
 
-	/// The resize options, scaling on this encoder's VA-API node unless they name one.
+	/// The resize options, scaling on this encoder's device unless they name one.
 	fn resolved_resize(&self) -> Option<crate::resize::Config> {
-		let resize = self.resize.clone()?;
-		#[cfg(all(target_os = "linux", feature = "vaapi"))]
-		let resize = crate::resize::Config {
-			vaapi: resize.vaapi.or_else(|| self.vaapi.clone()),
-			..resize
-		};
+		let mut resize = self.resize.clone()?;
+		if resize.device == Device::Auto {
+			resize.device = self.device.clone();
+		}
 		Some(resize)
 	}
 
-	/// Resolved bitrate: explicit override, or a pixels-per-second estimate.
-	pub(crate) fn resolved_bitrate(&self) -> moq_net::bandwidth::Rate {
+	/// The rendition's cap: [`bitrate`](Self::bitrate), or the default for its size, frame rate, and
+	/// codec.
+	///
+	/// The default is `7.2 Mbps x Mpx / (1 + Mpx / 1.38)`, which levels off toward 10 Mbps, for
+	/// H.264 at 30 fps: 720p30 is 4 Mbps and 1080p30 is 6 Mbps. Frame rate scales it by
+	/// `(30 + (fps - 30) / 2) / 30`, since delta frames make it less than linear, and the codec by
+	/// its efficiency against H.264 (H.265 is 0.7). The JS publisher derives the same default.
+	pub fn resolved_bitrate(&self) -> moq_net::bandwidth::Rate {
 		self.bitrate
-			.unwrap_or_else(|| default_bitrate(self.size(), self.framerate))
+			.unwrap_or_else(|| default_bitrate(self.size(), self.framerate, self.codec))
 	}
 }
 
-/// The bitrate an unconfigured encode resolves to: 0.07 bits per pixel per second, which matches
-/// the JS publisher's default and lands ~4.4 Mbps for 1080p30.
-pub(crate) fn default_bitrate(size: Size, framerate: FrameRate) -> moq_net::bandwidth::Rate {
-	moq_net::bandwidth::Rate::from_bps((size.pixels() as f64 * framerate.as_f64() * 0.07) as u64)
+/// The cap an unconfigured encode resolves to; see [`Config::resolved_bitrate`].
+pub(crate) fn default_bitrate(size: Size, framerate: FrameRate, codec: Codec) -> moq_net::bandwidth::Rate {
+	let megapixels = size.pixels() as f64 / 1e6;
+	let frames = (30.0 + (framerate.as_f64() - 30.0) / 2.0) / 30.0;
+	let bps = 7.2e6 * megapixels / (1.0 + megapixels / 1.38) * frames * codec.bitrate_scale();
+	moq_net::bandwidth::Rate::from_bps(bps as u64)
 }
 
 /// Video encoder. Build one with [`Encoder::new`], submit raw [`Frame`]s via
 /// [`encode`](Self::encode), [`receive`](Self::receive) the resulting
 /// [`Encoded`] access units until it returns `None`, and publish them through a
-/// [`Producer`](super::Producer) built for the same [`Codec`].
+/// [`Publisher`](super::Publisher) built for the same [`Codec`].
 ///
 /// An encoder is bound to the thread that opens it. Use [`Sink`](super::Sink)
 /// when the owner can move between threads.
@@ -463,8 +503,7 @@ impl Encoder {
 	///
 	/// Returns [`Error::BitrateUnsupported`] if this backend can't retune while
 	/// running. That's not fatal: the encoder keeps running at its current rate,
-	/// so a caller driving a control loop should stop adapting rather than stop
-	/// encoding.
+	/// so a caller driving a control loop keeps encoding, and may try again later.
 	pub fn set_bitrate(&mut self, bitrate: moq_net::bandwidth::Rate) -> Result<(), Error> {
 		if bitrate == self.bitrate {
 			return Ok(());
@@ -478,7 +517,7 @@ impl Encoder {
 		Ok(())
 	}
 
-	/// The codec this encoder emits. A [`Producer`](super::Producer) must be
+	/// The codec this encoder emits. A [`Publisher`](super::Publisher) must be
 	/// built for the same codec to publish its packets.
 	pub fn codec(&self) -> Codec {
 		self.codec
@@ -536,7 +575,8 @@ impl Encoder {
 	/// here; without it, scale them with
 	/// [`Frame::resize`](crate::Frame::resize), which
 	/// [`decode::Config::scale_hint`](crate::decode::Config::scale_hint) lets a
-	/// hardware decoder make a no-op.
+	/// hardware decoder make a no-op. An [unscaled](moq_net::Timestamp::unscaled)
+	/// frame has no time and fails with [`Error::TimeOverflow`].
 	pub fn encode(&mut self, frame: &Frame) -> Result<(), Error> {
 		// A transposed frame is why this compares the shape rather than a byte
 		// count: 240x320 and 320x240 hold the same number of bytes.
@@ -555,16 +595,22 @@ impl Encoder {
 		};
 		#[cfg(not(target_os = "linux"))]
 		let external = false;
+		// A backend that scales a GPU surface itself writes it straight into its
+		// own input, rather than into a scaled copy made here.
+		let scaled = external
+			|| self.resize.as_ref().is_some_and(|config| {
+				config.output.resolve(&frame.surface) == crate::Output::Native && self.backend.scales(&frame.surface)
+			});
 		let resized;
 		let frame = match &self.resize {
-			Some(config) if !external && frame.size() != self.size => {
+			Some(config) if !scaled && frame.size() != self.size => {
 				resized = frame.resize(self.size, config)?;
 				&resized
 			}
 			_ => frame,
 		};
 		let size = frame.size();
-		if !external && size != self.size {
+		if !scaled && size != self.size {
 			return Err(Error::codec(anyhow::anyhow!(
 				"frame {size} does not match encoder {}",
 				self.size
@@ -575,7 +621,14 @@ impl Encoder {
 		// standard-definition boundary, where the pixels keep their space but the
 		// encoder was sized into another one, and by a source whose space changes
 		// mid-stream.
-		if let Some(color) = frame.surface.color()
+		// A frame the backend scales keeps its samples' space, and an unlabelled
+		// one means what `Color::infer` guesses for its own size, as
+		// `Frame::resize` would have labelled the copy.
+		let color = match frame.surface.color() {
+			None if scaled && !external && size != self.size => Some(Color::infer(size)),
+			color => color,
+		};
+		if let Some(color) = color
 			&& color != self.color
 		{
 			return Err(Error::ColorMismatch {
@@ -583,7 +636,8 @@ impl Encoder {
 				encoder: self.color,
 			});
 		}
-		let timestamp = std::time::Duration::from(frame.timestamp);
+		// Video is timed: an unscaled frame has no time to space keyframes by.
+		let timestamp = std::time::Duration::try_from(frame.timestamp)?;
 		let cut = self.pending_cut || (self.backend.can_cut() && self.join.due(timestamp));
 		self.backend.encode(frame, cut)?;
 		// Cleared only once the frame is through: a failed encode produced no
@@ -696,7 +750,7 @@ impl Join {
 	/// its own count, so the next is measured from the latest.
 	fn observe(&mut self, encoded: &Encoded) {
 		if encoded.keyframe {
-			self.last = self.last.max(Some(encoded.timestamp.into()));
+			self.last = self.last.max(std::time::Duration::try_from(encoded.timestamp).ok());
 		}
 	}
 }
@@ -786,7 +840,7 @@ mod tests {
 
 		// Every encoded frame carries the timestamp of the raw frame it came from,
 		// so the stream stays in step even if a backend buffers.
-		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
+		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros().unwrap()).collect();
 		assert!(
 			micros.windows(2).all(|w| w[0] < w[1]),
 			"encoded timestamps not strictly increasing: {micros:?}"
@@ -796,7 +850,7 @@ mod tests {
 			"encoded timestamp outside the fed set: {micros:?}"
 		);
 
-		// The first packet must start with an Annex-B start code so the avc3
+		// The first packet must start with an Annex-B start code so the Annex-B
 		// importer can find the inline SPS/PPS.
 		let packets = payloads(&frames);
 		let first = &packets[0];
@@ -915,7 +969,7 @@ mod tests {
 		assert!(!frames.is_empty(), "encoder produced no packets");
 		// VideoToolbox completes each frame before returning, so the timestamps come
 		// back one per input frame, in order.
-		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
+		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros().unwrap()).collect();
 		assert!(
 			micros.windows(2).all(|w| w[0] < w[1]),
 			"encoded timestamps not strictly increasing: {micros:?}"
@@ -1128,7 +1182,7 @@ mod tests {
 		assert!(!frames.is_empty(), "encoder produced no packets");
 		// The MFT buffers, so packets come back stamped with the frame they were
 		// encoded from rather than whichever frame was going in at the time.
-		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
+		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros().unwrap()).collect();
 		assert!(
 			micros.windows(2).all(|w| w[0] < w[1]),
 			"encoded timestamps not strictly increasing: {micros:?}"
@@ -1255,6 +1309,36 @@ mod tests {
 		assert!(small > moq_net::bandwidth::Rate::ZERO);
 	}
 
+	/// The anchors the formula was fit to (720p30 = 4 Mbps, 720p60 = 6 Mbps) and the 16:9 ladder it
+	/// derives, in kbps at 30 fps H.264.
+	#[test]
+	fn default_bitrate_follows_the_formula() {
+		let cap = |width, height, fps, codec| {
+			let mut config = Config::new(width, height, crate::FrameRate::new(fps, 1).unwrap());
+			config.codec = codec;
+			config.resolved_bitrate().as_bps() as f64 / 1e6
+		};
+		let h264 = Codec::H264;
+		for (width, height, mbps) in [
+			(426, 240, 0.69),
+			(640, 360, 1.4),
+			(854, 480, 2.3),
+			(1280, 720, 4.0),
+			(1920, 1080, 6.0),
+			(2560, 1440, 7.3),
+			(3840, 2160, 8.6),
+		] {
+			let got = cap(width, height, 30, h264);
+			assert!((got - mbps).abs() < 0.1, "{height}p30: {got} Mbps, want {mbps}");
+		}
+		assert!((cap(1280, 720, 60, h264) - 6.0).abs() < 0.05);
+		// Half the frames still cost more than half: 15 fps is 3/4 of 30.
+		assert!((cap(1280, 720, 15, h264) / cap(1280, 720, 30, h264) - 0.75).abs() < 1e-3);
+		assert!((cap(1280, 720, 30, Codec::H265) / cap(1280, 720, 30, h264) - 0.7).abs() < 1e-3);
+		// It levels off below 10 Mbps at 30 fps however large the picture.
+		assert!(cap(16384, 8640, 30, h264) < 10.0);
+	}
+
 	/// A backend that holds each frame back by one, like the Media Foundation MFT:
 	/// `encode` readies the *previous* frame's access unit and `flush` the last.
 	/// The payload is the frame's timestamp in microseconds, so a test can tell
@@ -1267,7 +1351,7 @@ mod tests {
 
 	impl Backend for Delayed {
 		fn encode(&mut self, frame: &Frame, cut: bool) -> Result<(), Error> {
-			let payload = bytes::Bytes::from(frame.timestamp.as_micros().to_string());
+			let payload = bytes::Bytes::from(frame.timestamp.as_micros().unwrap().to_string());
 			self.ready
 				.extend(self.held.replace(Encoded::new(payload, frame.timestamp, cut)));
 			Ok(())
@@ -1311,6 +1395,79 @@ mod tests {
 			input: None,
 			_thread_bound: PhantomData,
 		}
+	}
+
+	/// Scales every surface itself, the way NVENC scales CUDA frames into its
+	/// input, and records the size each frame reached it at.
+	struct Scaling {
+		sizes: std::sync::Arc<std::sync::Mutex<Vec<Size>>>,
+	}
+
+	impl Backend for Scaling {
+		fn encode(&mut self, frame: &Frame, _cut: bool) -> Result<(), Error> {
+			self.sizes.lock().unwrap().push(frame.size());
+			Ok(())
+		}
+
+		fn receive(&mut self) -> Result<Option<Encoded>, Error> {
+			Ok(None)
+		}
+
+		fn flush(&mut self) -> Result<(), Error> {
+			Ok(())
+		}
+
+		fn set_bitrate(&mut self, _bitrate: u64) -> Result<(), Error> {
+			Ok(())
+		}
+
+		fn can_cut(&self) -> bool {
+			true
+		}
+
+		fn scales(&self, _surface: &crate::Surface) -> bool {
+			true
+		}
+
+		fn name(&self) -> &'static str {
+			"scaling"
+		}
+	}
+
+	/// A backend that scales the frame itself is handed it at its own size, but
+	/// the frame is held to the space it would have after `Frame::resize`: an
+	/// unlabelled 720p frame is BT.709, which a 480p encoder would label BT.601.
+	#[test]
+	fn a_frame_the_backend_scales_keeps_its_implied_color() {
+		use crate::Color;
+
+		let unlabelled = |size: Size| {
+			let i420 = I420::new(size, vec![0x80; I420::len(size).unwrap()]).unwrap();
+			Frame::new(Surface::I420(i420), moq_net::Timestamp::from_micros(0).unwrap())
+		};
+		let mut config = Config::new(640, 480, crate::FrameRate::new(30, 1).unwrap());
+		config.resize = Some(crate::resize::Config::default());
+		let sizes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+		let mut encoder = encoder_with(Box::new(Scaling { sizes: sizes.clone() }), &config);
+
+		let err = encoder
+			.encode(&unlabelled(Size::new(1280, 720)))
+			.expect_err("an implied BT.709 frame is refused");
+		assert!(
+			matches!(
+				err,
+				Error::ColorMismatch {
+					frame: Color::BT709,
+					encoder: Color::BT601
+				}
+			),
+			"{err}"
+		);
+
+		// Within the same space, the backend gets the frame unscaled.
+		encoder.encode(&unlabelled(Size::new(704, 576))).unwrap();
+		encoder.encode(&unlabelled(Size::new(640, 480))).unwrap();
+		assert_eq!(*sizes.lock().unwrap(), [Size::new(704, 576), Size::new(640, 480)]);
 	}
 
 	/// Records the cut flag each frame reached the codec with, so a test can
@@ -1630,7 +1787,7 @@ mod tests {
 		for i in 0..70 {
 			for encoded in encoder.encode_all(&gray_at(i * 50_000)).unwrap() {
 				if encoded.keyframe {
-					keys.push(encoded.timestamp.as_micros() / 50_000);
+					keys.push(encoded.timestamp.as_micros().unwrap() / 50_000);
 				}
 			}
 		}
@@ -1799,7 +1956,10 @@ mod tests {
 			assert_eq!(encoded[0].timestamp, at(i - 1));
 			// And the packet really is the earlier frame's, not a mis-stamped copy of
 			// the one going in.
-			assert_eq!(&encoded[0].payload[..], at(i - 1).as_micros().to_string().as_bytes());
+			assert_eq!(
+				&encoded[0].payload[..],
+				at(i - 1).as_micros().unwrap().to_string().as_bytes()
+			);
 		}
 
 		// The tail: frame 4 never came back from an encode call, so `flush` drains

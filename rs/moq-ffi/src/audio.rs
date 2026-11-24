@@ -58,7 +58,8 @@ impl From<MoqAudioSampleFormat> for moq_audio::Format {
 ///
 /// An immutable object so adding a codec later does not break callers
 /// switching over a closed enum.
-#[derive(uniffi::Object)]
+#[derive(Debug, PartialEq, Eq, Hash, uniffi::Object)]
+#[uniffi::export(Debug, Eq, Hash)]
 pub struct MoqAudioCodec {
 	inner: moq_audio::encode::Codec,
 }
@@ -81,6 +82,11 @@ impl MoqAudioCodec {
 		Arc::new(Self {
 			inner: moq_audio::encode::Codec::Aac,
 		})
+	}
+
+	/// The codec's lowercase name, such as `opus`.
+	pub fn name(&self) -> String {
+		self.inner.as_str().to_string()
 	}
 }
 
@@ -237,7 +243,7 @@ impl From<moq_audio::decode::Read> for MoqAudioRead {
 			moq_audio::decode::Read::Frame(frame) => Self::Frame { frame: frame.into() },
 			moq_audio::decode::Read::Gap { timestamp, duration } => Self::Gap {
 				timestamp: timestamp.into(),
-				duration: crate::ffi::duration(duration.into()),
+				duration: crate::ffi::gap(duration),
 			},
 			moq_audio::decode::Read::End { end } => Self::End { end: end.into() },
 		}
@@ -313,8 +319,8 @@ impl MoqAudioEncoder {
 		let guard = self.inner.lock().unwrap();
 		let encoder = guard.as_ref().ok_or(MoqError::Closed)?;
 		let format = match encoder.codec() {
-			moq_audio::encode::Codec::Opus => crate::media::MoqAudioFormat::Opus,
-			moq_audio::encode::Codec::Aac => crate::media::MoqAudioFormat::Aac,
+			moq_audio::encode::Codec::Opus => crate::media::MoqAudioFormat::opus(),
+			moq_audio::encode::Codec::Aac => crate::media::MoqAudioFormat::aac(),
 			codec => return Err(moq_audio::Error::Unsupported(format!("no audio init for {codec}")).into()),
 		};
 		let data = encoder.catalog().description.ok_or(MoqError::Unsupported)?;
@@ -396,12 +402,14 @@ impl TryFrom<MoqAudioFrame> for moq_audio::Frame {
 /// is PCM in the format declared by the [`MoqAudioEncoderInput`]
 /// passed at publish time.
 ///
-/// Released before its finish, or still open when its broadcast closes, it ends its track with
-/// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
+/// Released before its finish, it ends its track with `Dropped`, which readers elsewhere see as
+/// `Internal`. Still open when its broadcast closes, it ends it with `Unroutable`, which a
+/// moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqAudioProducer {
 	inner: std::sync::Mutex<Option<moq_audio::encode::Producer>>,
-	reservation: std::sync::Mutex<Option<Arc<MoqReservation>>>,
+	/// The claim itself; [`reservation`](Self::reservation) hands out only views of it.
+	reservation: std::sync::Mutex<Option<Arc<moq_net::bandwidth::Reservation>>>,
 	/// Held so the reservation's registry outlives extra bandwidth handles.
 	_bandwidth: Option<Arc<MoqAllocator>>,
 	children: crate::producer::Children,
@@ -420,7 +428,7 @@ impl crate::producer::Child for MoqAudioProducer {
 
 impl Drop for MoqAudioProducer {
 	fn drop(&mut self) {
-		crate::producer::Child::abort(self, moq_net::Error::Unroutable);
+		crate::producer::Child::abort(self, moq_net::Error::Dropped);
 	}
 }
 
@@ -462,10 +470,37 @@ impl MoqAudioProducer {
 	}
 
 	/// This encoder's bandwidth reservation, if it was published against a
-	/// [`MoqAllocator`]. Dropping the handle does not release the claim; the
-	/// producer holds it until [`finish`](Self::finish).
+	/// [`MoqAllocator`]. The producer owns the claim, not the handle: dropping the
+	/// handle keeps it, and [`finish`](Self::finish) releases it however many handles
+	/// remain, after which they read no rate.
 	pub fn reservation(&self) -> Option<Arc<MoqReservation>> {
-		self.reservation.lock().unwrap().clone()
+		let guard = self.reservation.lock().unwrap();
+		Some(Arc::new(MoqReservation::borrowed(guard.as_ref()?)))
+	}
+
+	/// Abort this track with an application error code, but only while nobody wants it.
+	///
+	/// This is how an on-demand publisher ends a track once [`MoqTrackDemand::wanted_changed`]
+	/// returns null. Releasing it instead fails a reader that joined in between. Returns true
+	/// once the track is closed, and this handle's later calls fail with `Closed`. Returns
+	/// false, leaving the track unchanged, when a reader wants it again, so keep serving and
+	/// wait for the next null on a fresh `demand()`: one that already returned null misses a
+	/// reader that came and went, and waits on. Fails with `Closed` once finished, like every
+	/// other call.
+	pub fn abort_unwanted(&self, error_code: u16) -> Result<bool, MoqError> {
+		let _guard = crate::ffi::runtime().enter();
+		let mut guard = self.inner.lock().unwrap();
+		let producer = guard.take().ok_or(MoqError::Closed)?;
+		match producer.abort_unwanted(moq_net::Error::App(error_code)) {
+			Ok(()) => {
+				self.reservation.lock().unwrap().take();
+				Ok(true)
+			}
+			Err(producer) => {
+				*guard = Some(producer);
+				Ok(false)
+			}
+		}
 	}
 
 	/// Drain the encoder and finish the audio track.
@@ -476,14 +511,11 @@ impl MoqAudioProducer {
 		// Held through the flush, so a racing broadcast close waits it out instead of
 		// missing a track that still publishes.
 		let mut inner = self.inner.lock().unwrap();
-		let mut producer = inner.take().ok_or(MoqError::Closed)?;
+		let producer = inner.take().ok_or(MoqError::Closed)?;
 		self.reservation.lock().unwrap().take();
-		if let Err(err) = producer.finish() {
-			// Readers see the failure rather than `Dropped`, as a failed video drain does.
-			producer.abort(moq_net::Error::Transport(err.to_string()));
-			return Err(err.into());
-		}
-		self.children.keep(producer);
+		// A failed finish already ended the track with an error, so readers see the failure
+		// rather than `Dropped`, as a failed video drain does.
+		self.children.keep(producer.finish()?);
 		Ok(())
 	}
 }
@@ -552,7 +584,7 @@ impl MoqAudioProducer {
 		// means the Rust producer will reserve and follow whenever it starts to.
 		let reservation = bandwidth
 			.as_ref()
-			.map(|bandwidth| bandwidth.reserve_demand(&producer.demand(), producer.bitrate().as_bps()));
+			.map(|bandwidth| Arc::new(bandwidth.inner().reserve(&producer.demand(), producer.bitrate())));
 
 		children.adopt(Arc::new(MoqAudioProducer {
 			inner: std::sync::Mutex::new(Some(producer)),
@@ -641,7 +673,7 @@ fn audio_config(catalog_audio: crate::media::MoqAudio) -> Result<hang::catalog::
 	config.track = catalog_audio.track;
 	config.bitrate = catalog_audio.bitrate;
 	config.description = catalog_audio.description.map(Into::into);
-	config.container = catalog_audio.container.into();
+	config.container = catalog_audio.container.try_into()?;
 	config.jitter = catalog_audio.jitter;
 	config.warmup = catalog_audio.warmup;
 	Ok(config)
@@ -715,6 +747,18 @@ impl MoqAudioConsumer {
 mod tests {
 	use super::*;
 	use crate::media::{MoqAudio, MoqContainer};
+
+	/// Codecs compare and hash by value, and their names are distinct.
+	#[test]
+	fn codecs_name_compare_and_hash_by_value() {
+		assert_eq!(MoqAudioCodec::opus().name(), "opus");
+		assert_eq!(MoqAudioCodec::aac().name(), "aac");
+		assert_eq!(
+			std::collections::HashSet::from([MoqAudioCodec::opus(), MoqAudioCodec::opus()]).len(),
+			1
+		);
+		assert_ne!(MoqAudioCodec::opus(), MoqAudioCodec::aac());
+	}
 
 	fn catalog_audio(codec: &str) -> MoqAudio {
 		MoqAudio {
@@ -823,7 +867,10 @@ mod tests {
 			// A partial codec frame makes finish publish the final packet and lookahead.
 			audio
 				.write(MoqAudioFrame {
-					timestamp: MoqTimestamp { value: 0, scale: 1 },
+					timestamp: MoqTimestamp {
+						value: 0,
+						scale: Some(1),
+					},
 					data: vec![0.1_f32; 860].into_iter().flat_map(f32::to_ne_bytes).collect(),
 				})
 				.unwrap();
@@ -896,7 +943,7 @@ mod tests {
 	fn codec_only_encoder_reports_its_opus_head() {
 		let encoder = MoqAudioEncoder::new(opus_output(None)).unwrap();
 		let init = encoder.track_init().unwrap();
-		assert!(matches!(init.format, crate::media::MoqAudioFormat::Opus));
+		assert_eq!(init.format, crate::media::MoqAudioFormat::opus());
 		assert_eq!(&init.data[..8], b"OpusHead");
 		// Channel count, then a nonzero pre-skip for the codec lookahead.
 		assert_eq!(init.data[9], 2);

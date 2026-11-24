@@ -16,7 +16,6 @@ export type { BufferedRange, BufferedRanges } from "@moq/hang/container";
 export * as Net from "@moq/net";
 /** Re-export of {@link https://www.npmjs.com/package/@moq/signals | @moq/signals}, the reactive primitives used throughout this package. */
 export * as Signals from "@moq/signals";
-export type { Arrival, Arrivals } from "./arrivals";
 export { assets } from "./assets";
 /** Audio rendition selection, decoding, and playback. */
 export * as Audio from "./audio";

@@ -16,7 +16,6 @@ struct Errors {
 
 // Each bound is the next binary power above the largest measured reference
 // difference, including the consumer's preroll-trimmed result. See test_data/README.md.
-#[cfg(feature = "aac")]
 const AAC: Errors = Errors {
 	rms: 1.0 / (1u64 << 24) as f64,
 	peak: 1.0 / (1u64 << 20) as f64,
@@ -46,7 +45,6 @@ struct Vector {
 }
 
 const VECTORS: &[Vector] = &[
-	#[cfg(feature = "aac")]
 	Vector {
 		name: "aac-speech",
 		container: Container::Cmaf(include_bytes!("test_data/aac-speech.mp4")),
@@ -55,7 +53,6 @@ const VECTORS: &[Vector] = &[
 		channels: 1,
 		errors: AAC,
 	},
-	#[cfg(feature = "aac")]
 	Vector {
 		name: "aac-44100-stereo",
 		container: Container::Cmaf(include_bytes!("test_data/aac-44100-stereo.mp4")),
@@ -64,7 +61,6 @@ const VECTORS: &[Vector] = &[
 		channels: 2,
 		errors: AAC,
 	},
-	#[cfg(feature = "aac")]
 	Vector {
 		name: "aac-48000-stereo",
 		container: Container::Cmaf(include_bytes!("test_data/aac-48000-stereo.mp4")),
@@ -149,14 +145,12 @@ fn import(
 		Container::Ts(bytes) => {
 			let mut importer = moq_mux::container::ts::Import::new(broadcast, catalog.reserve());
 			importer.decode(bytes).unwrap();
-			importer.finish().unwrap();
-			Box::new(importer)
+			Box::new(importer.finish().unwrap())
 		}
 		Container::Cmaf(bytes) => {
 			let mut importer = moq_mux::container::fmp4::Import::new(broadcast, catalog.reserve());
 			importer.decode(bytes).unwrap();
-			importer.finish().unwrap();
-			Box::new(importer)
+			Box::new(importer.finish().unwrap())
 		}
 	};
 	let snapshot = catalog.snapshot();
@@ -172,8 +166,12 @@ async fn every_backend_matches_independent_reference() {
 		let track = broadcast.track(&name).unwrap();
 		let track = track
 			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(Duration::from_secs(1)),
+						max: Some(Duration::from_secs(1)),
+					},
+				)]),
 			)
 			.await
 			.unwrap();
@@ -234,8 +232,9 @@ async fn consumer_preserves_reference_samples_and_timeline() {
 			if let decode::Read::Frame(frame) = read {
 				let start = *first.get_or_insert(frame.timestamp);
 				let elapsed = Duration::from_secs_f64(pcm.len() as f64 / vector.channels as f64 / vector.rate as f64);
-				let actual = Duration::from(frame.timestamp)
-					.checked_sub(Duration::from(start))
+				let actual = Duration::try_from(frame.timestamp)
+					.unwrap()
+					.checked_sub(Duration::try_from(start).unwrap())
 					.expect("monotonic PCM");
 				assert!(
 					actual.abs_diff(elapsed) <= Duration::from_micros(1),

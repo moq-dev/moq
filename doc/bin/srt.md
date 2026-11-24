@@ -9,8 +9,10 @@ description: SRT contribution and playback
 source (`--connect`); `moq export srt` serves SRT to players or pushes to a
 remote. The payload is MPEG-TS, so the same codecs and behavior as
 [`import ts`](/bin/ts) apply: H.264/H.265 video and AAC, MP2, AC-3, E-AC-3, or
-Opus audio. A damaged unit is dropped and the session stays up; video resumes at its
-next keyframe, freezing for up to one GOP.
+Opus audio. A lost or flagged-corrupt packet drops only its unit and the session
+stays up; video freezes until the next keyframe that arrives intact. A unit,
+PES header, or adaptation field that arrives whole but does not parse ends the
+session with the cause.
 
 ```bash
 # Accept a contribution feed and publish it
@@ -26,8 +28,11 @@ moq --connect https://relay.example.com/anon --broadcast event.hang import srt -
 
 Each connection publishes under a fresh
 [instance](/concept/moq-lite#publisher-instances), so an encoder that reconnects
-while its stale connection is still open replaces it at once: viewers see the
-broadcast restart, and their next subscribe reaches the new feed. An
+while its stale connection is still open replaces it once the new feed has
+declared its tracks: viewers see the broadcast restart, and their next
+subscribe reaches the new feed. A source that steps onto another timeline
+republishes on the same connection, as [`import ts`](/bin/ts#programs-and-changes)
+does; under `--program all` it ends the ingest instead. An
 `export srt` stream ends with its broadcast; `--follow` and `--stitch` follow a
 return or a replacement on the same connection, as they do for
 [`export ts`](/bin/cli#retention-and-latency).

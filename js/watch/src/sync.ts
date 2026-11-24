@@ -1,12 +1,13 @@
 import { Duration, Instant, now, sleep } from "@moq/clock";
+import { Container } from "@moq/hang";
 import { Derived, Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 
 /**
  * How far playback trails the live edge.
  *
  * `"auto"` (the default) holds the largest playout target the registered decoders measure from how
- * late their frames arrive (see doc/concept/audio-jitter.md). A `Duration` fixes the delay at
- * exactly that value and disables adaptation.
+ * late their frames arrive (see doc/concept/audio-jitter.md), at most 10 s. A `Duration` fixes the
+ * delay at exactly that value and disables adaptation.
  *
  * `"instant"` drops the buffer and the pacing together: nothing is held, and the wait before
  * presenting a frame never sleeps, so it presents as soon as it exists. It also overrides
@@ -14,6 +15,16 @@ import { Derived, Effect, type Getter, getter, type Inputs, type Readonlys, read
  * off: a ring with no depth underruns, so the audio decoder unsubscribes and flushes its ring.
  */
 export type Delay = "instant" | "auto" | Duration;
+
+/** The default {@link SyncInput.stretch}: how far live audio may trail the clock before it skips onto it. @internal */
+export const STRETCH = Duration.millis(200);
+
+/** The most an `"auto"` delay holds, and how far catalog `warmup` reaches back. @internal */
+export const DELAY_MAX = Container.DELAY_MAX;
+
+// How long a track's arrivals must all trail its anchor before the anchor follows them later: the
+// estimator's window, so the clock and the target measure lateness against the same fastest frame.
+const FOLLOW = 2000;
 
 /** Signals the sync reads. */
 export type SyncInput = {
@@ -25,12 +36,30 @@ export type SyncInput = {
 	 *
 	 * Zero minimizes latency, the live default: playback re-anchors as soon as anything arrives
 	 * early. A larger value lets faster-than-real-time frames (a TTS response with future
-	 * timestamps) build up instead of being skipped. Always finite, so worst case the audio ring
-	 * drops its oldest samples rather than exhausting memory. With a nonzero lookahead, the first video
+	 * timestamps) build up instead of being skipped. Audio that falls behind, as after a stall,
+	 * catches up by playing faster, and skips onto the clock only when it trails by more than the
+	 * larger of the lookahead and {@link SyncInput.stretch}. Always
+	 * finite, so worst case the audio ring drops its oldest samples rather than exhausting memory.
+	 * With a nonzero lookahead, the first video
 	 * frame is a poster until every enabled media track holds the resolved delay; `lookahead` is
 	 * the most held ahead, not the amount required to start.
 	 */
 	lookahead: Getter<Duration>;
+
+	/**
+	 * How far audio may trail the clock before it skips onto it (default: 200 ms).
+	 *
+	 * Within this, audio that falls behind the clock, as after a stall, speeds up until it is back on
+	 * it; past it, audio skips onto the clock, as video does. Audio that leads the clock by more than
+	 * this, as a rise in the delay leaves it, waits for it in silence. A buffered player already keeps its
+	 * whole lookahead, so audio skips only past the larger of the two. This sizes nothing else: the
+	 * audio subscription reaches 2 s past the delay whatever it is set to.
+	 *
+	 * Zero turns the time stretch off: received audio plays unaltered, late audio is skipped, an
+	 * underrun is silence, and drift against the publisher's clock is corrected by a small skip or
+	 * pad. Video is unaffected either way: it stays on the clock.
+	 */
+	stretch: Getter<Duration>;
 };
 
 /** Signals the sync derives. */
@@ -39,14 +68,19 @@ export type SyncOutput = {
 	// that only care about the mode don't rerun when the number changes.
 	instant: Signal<boolean>;
 
-	// The earliest time we've received a frame, relative to its timestamp: arrival minus timestamp
-	// in milliseconds, an offset that is negative when the timestamps run ahead of the local clock.
-	// This will keep being updated as we catch up to the live playhead then will be relatively static.
-	// Each track holds its own part of it; see `Track.reset()`.
+	/**
+	 * The earliest time we've received a frame, relative to its timestamp: arrival minus timestamp
+	 * in milliseconds, an offset that is negative when the timestamps run ahead of the local clock.
+	 * This will keep being updated as we catch up to the live playhead then will be relatively static,
+	 * moving later only after a lasting step in path delay (see doc/concept/audio-jitter.md).
+	 * Each track holds its own part of it; see `Track.reset()`.
+	 *
+	 * @internal Read by the audio buffer.
+	 */
 	reference: Signal<number | undefined>;
 
 	// The resolved delay from the live edge to the playhead: the configured number, or in "auto" the
-	// largest registered playout target. Zero for "instant".
+	// largest registered playout target, at most DELAY_MAX. Zero for "instant".
 	delay: Signal<Duration>;
 
 	// The media timestamp of the most recently received frame.
@@ -62,8 +96,13 @@ export type SyncOutput = {
 	maxDelay: Signal<Duration>;
 };
 
-/** A decoded span from the opening of a track's timeline. @internal */
-export type Span = { start: Duration; end: Duration };
+/**
+ * What a track holds from the opening of its timeline, and how long its output takes to sound the
+ * opening once released, which counts toward the delay and holds the opening's turn back as long.
+ * `complete` once the publisher finished the track, so nothing extends it and it is ready however short.
+ * @internal
+ */
+export type Span = { start: Duration; end: Duration; lead?: Duration; complete?: boolean };
 
 /** What a track holds in the shared clock. @internal */
 export type TrackProps = {
@@ -82,7 +121,12 @@ export type Part = {
 	anchor?: number;
 	// The furthest playhead this track's own skips jumped to, restored when it takes the reference.
 	floor?: number;
+	// The window of arrivals that decides whether the anchor follows a lasting step later.
+	window?: Window;
 };
+
+/** A window of one track's arrivals: when it opened and the earliest reference among them. @internal */
+type Window = { start: number; least: number };
 
 /**
  * Where the clock's current timeline stands. `idle` has not played and holds nothing back: it is
@@ -131,6 +175,7 @@ export class Clock {
 		this.in = {
 			delay: getter(props?.delay ?? ("auto" as Delay)),
 			lookahead: getter(props?.lookahead ?? Duration.ZERO),
+			stretch: getter(props?.stretch ?? STRETCH),
 		};
 	}
 
@@ -145,11 +190,33 @@ export class Clock {
 		return ref + cap - delay;
 	}
 
+	// Move a track's anchor later once a whole window of its arrivals trailed it by more than half the
+	// delay, as after a lasting increase in path delay. Reports whether the anchor moved.
+	follow(part: Part, at: number, ref: number): boolean {
+		const window = part.window;
+		if (!window) {
+			part.window = { start: at, least: ref };
+			return false;
+		}
+		window.least = Math.min(window.least, ref);
+		if (at - window.start < FOLLOW) return false;
+
+		// The arrival that closes a window counts in it and opens the next.
+		part.window = { start: at, least: ref };
+		if (part.anchor === undefined || window.least - part.anchor <= this.out.delay.peek().asMillis() / 2) {
+			return false;
+		}
+		part.anchor = window.least;
+		return true;
+	}
+
 	received(part: Part, timestamp: Duration, arrival: Instant): boolean {
 		this.out.timestamp.update((current) => (current === undefined || timestamp.gt(current) ? timestamp : current));
 		const ref = millis(arrival) - timestamp.asMillis();
 		const current = this.out.reference.peek();
 		part.anchor = this.fold(part.anchor, ref);
+		// Startup holds the opening still, so only a playing clock follows a step.
+		const followed = this.playing.peek() && this.follow(part, millis(arrival), ref);
 
 		// First frame anchors the reference.
 		if (current === undefined) {
@@ -169,7 +236,12 @@ export class Clock {
 		const late = current - ref + delay < 0;
 
 		const reference = this.fold(current, ref);
-		if (reference === current) return late;
+		if (reference === current) {
+			// The owner's anchor moving later moves the reference to the earliest anchor left, which only
+			// a whole window of every track's arrivals trailing it moves.
+			if (followed && this.owner === part) this.handoff(current);
+			return late;
+		}
 		this.out.reference.set(reference);
 		this.owner = part;
 
@@ -184,19 +256,35 @@ export class Clock {
 		return late;
 	}
 
-	// End one track's timeline: its parked frames drop and it releases its part of the reference.
-	end(part: Part): void {
-		part.epoch.update((epoch) => epoch + 1);
-		part.anchor = undefined;
-		part.floor = undefined;
-		if (this.owner !== part) return;
-
-		// The earliest remaining track holds the reference, else the next frame anchors a new one.
+	// The track with the earliest anchor, which holds the reference.
+	earliest(): Part | undefined {
 		let earliest: Part | undefined;
 		for (const other of this.parts.peek()) {
 			if (other.anchor === undefined) continue;
 			if (earliest?.anchor === undefined || other.anchor < earliest.anchor) earliest = other;
 		}
+		return earliest;
+	}
+
+	// The owner's anchor moved later: the earliest anchor now holds the reference, never earlier than
+	// `current`, since every other track's arrivals already folded into it.
+	handoff(current: number): void {
+		const earliest = this.earliest();
+		if (earliest?.anchor === undefined) return;
+		this.owner = earliest;
+		if (earliest.anchor > current) this.out.reference.set(earliest.anchor);
+	}
+
+	// End one track's timeline: its parked frames drop and it releases its part of the reference.
+	end(part: Part): void {
+		part.epoch.update((epoch) => epoch + 1);
+		part.anchor = undefined;
+		part.floor = undefined;
+		part.window = undefined;
+		if (this.owner !== part) return;
+
+		// The earliest remaining track holds the reference, else the next frame anchors a new one.
+		const earliest = this.earliest();
 		this.owner = earliest;
 		if (earliest?.anchor === undefined) {
 			this.unanchor();
@@ -218,6 +306,7 @@ export class Clock {
 	// Clear the reference so the next frame anchors a new timeline. Every parked frame belongs to
 	// the old one.
 	unanchor(): void {
+		for (const part of this.parts.peek()) part.window = undefined;
 		this.epoch.update((epoch) => epoch + 1);
 		this.floor = undefined;
 		this.owner = undefined;
@@ -243,11 +332,17 @@ export class Clock {
 	}
 
 	now(): Duration | undefined {
+		const position = this.position();
+		// Media time is nonnegative, so a playhead before the first frame's turn reads as zero.
+		return position === undefined ? undefined : Duration.millis(Math.max(0, position));
+	}
+
+	// The media time due now in milliseconds, negative before media zero's turn.
+	position(): number | undefined {
 		if (!this.playing.peek()) return undefined;
 		const reference = this.out.reference.peek();
 		if (reference === undefined) return undefined;
-		// Media time is nonnegative, so a playhead before the first frame's turn reads as zero.
-		return Duration.millis(Math.max(0, wall() - reference - this.out.delay.peek().asMillis()));
+		return wall() - reference - this.out.delay.peek().asMillis();
 	}
 
 	async wait(part: Part, timestamp: Duration, signal?: AbortSignal): Promise<boolean> {
@@ -417,22 +512,25 @@ export class Sync {
 		}
 		if (clock.phase.peek() === "playing") return;
 		const ready = spans.flatMap(({ part, span }) => (span ? [{ part, span }] : []));
+		const lead = (span: Span) => span.lead ?? Duration.ZERO;
 		if (
 			reference === undefined ||
 			ready.length !== spans.length ||
-			ready.some(({ span }) => span.end.saturatingSub(span.start).lt(delay))
+			ready.some(({ span }) => !span.complete && span.end.add(lead(span)).saturatingSub(span.start).lt(delay))
 		) {
 			clock.phase.set("starting");
 			return;
 		}
-		// The track with the earliest opening holds the reference it anchors.
-		const earliest = ready.reduce((a, b) => (b.span.start.lt(a.span.start) ? b : a));
-		const first = earliest.span.start;
+		// The track whose opening sounds earliest holds the reference it anchors.
+		const opens = (span: Span) => span.start.asMillis() - lead(span).asMillis();
+		const earliest = ready.reduce((a, b) => (opens(b.span) < opens(a.span) ? b : a));
+		const first = opens(earliest.span);
 		clock.owner = earliest.part;
 		// Anchor at the retained opening, not at its arrival: startup may have waited on another track.
 		// Every track's own anchor moves by the same offset, keeping the gaps between tracks that
-		// playing would have held, so a later handoff moves the playhead only by that gap.
-		const anchored = wall() - first.asMillis() - delay.asMillis();
+		// playing would have held, so a later handoff moves the playhead only by that gap. An opening
+		// whose output takes a while to sound comes due that much later.
+		const anchored = wall() - first - delay.asMillis();
 		for (const part of clock.parts.peek()) {
 			if (part.anchor !== undefined) part.anchor += anchored - reference;
 		}
@@ -467,6 +565,9 @@ export class Sync {
 			for (const { props } of effect.get(this.#clock.parts)) {
 				delay = delay.max(effect.get(props.target) ?? Duration.ZERO);
 			}
+			// Capped once, on the resolved delay, so audio and video stay on one clock. The
+			// subscription's live join max follows it.
+			delay = delay.min(DELAY_MAX);
 		}
 
 		this.#clock.out.delay.set(delay);
@@ -487,6 +588,15 @@ export class Sync {
 	 */
 	now(): Duration | undefined {
 		return this.#clock.now();
+	}
+
+	/**
+	 * {@link Sync.now} in milliseconds, negative rather than zero before media time zero's turn, as
+	 * when an opening waits for its output to sound it.
+	 * @internal
+	 */
+	position(): number | undefined {
+		return this.#clock.position();
 	}
 
 	/** Stop and release everything this holds. */

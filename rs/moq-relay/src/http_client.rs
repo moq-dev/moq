@@ -156,7 +156,7 @@ mod tests {
 			return None;
 		};
 		let request = read_request(&mut stream).await;
-		let body = r#"{"publish":["**"],"subscribe":["**"]}"#;
+		let body = r#"{"publish":[""],"subscribe":[""]}"#;
 		let response = format!(
 			"HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
 			body.len()

@@ -17,6 +17,7 @@ import type { Lister, Tracks } from "./listing.ts";
 import type * as origin from "./origin.ts";
 import type * as Path from "./path.ts";
 import type * as track from "./track.ts";
+import { checkName } from "./util/utf8.ts";
 
 /** The protocol-facing operations behind a broadcast handle. */
 export interface Broadcast {
@@ -24,7 +25,8 @@ export interface Broadcast {
 	localDatagrams: boolean;
 	datagrams(name: string): datagram.Consumer;
 	liveDatagrams(name: string): datagram.Consumer | undefined;
-	createDatagrams(name: string, info: Partial<datagram.Info>): datagram.Producer;
+	/** Create a datagram track, listed unless `listed` is false, as a session's track riding a stream track's subscription. */
+	createDatagrams(name: string, info: Partial<datagram.Info>, listed?: boolean): datagram.Producer | undefined;
 	requestedDatagrams(): Promise<datagram.Request | undefined>;
 	subscribe(name: string, options?: track.Subscription): track.Subscriber;
 	/** The track's properties; `hold` keeps the track wanted until it aborts, the way a held TRACK stream does, and aborting it before the answer abandons the lookup. */
@@ -32,7 +34,7 @@ export interface Broadcast {
 	/** The newest frame the track's cache holds, read without subscribing; `undefined` while it holds none. */
 	largest(name: string): track.Position | undefined;
 	/** Fetch one group; absent when the session's version has no FETCH, so callers never ask. */
-	fetchGroup?(name: string, sequence: bigint, options?: track.FetchGroupOptions): Promise<GroupConsumer>;
+	fetchGroup?(name: string, key: bigint, options?: track.FetchGroupOptions): Promise<GroupConsumer>;
 	requested(): Promise<track.Request | undefined>;
 	// Sessions dedup a peer's listings per broadcast; a custom session has no public owner yet.
 	/** List the broadcast's tracks for `owner`, ending its older listing of this broadcast with CANCELLED. */
@@ -69,7 +71,7 @@ export interface OriginProducer {
 	 * the returned dispose: a session holds one while its peer's initial set is in flight.
 	 */
 	snapshot(prefix: Path.Valid): Dispose;
-	readonly requests: Getter<ReadonlyMap<Path.Valid, RequestSlot> | undefined>;
+	readonly requests: Getter<ReadonlyMap<Path.Valid, RequestSlot>>;
 	changed(): GetPromise<unknown>;
 	/** Whether sessions should answer the request with a blind subscription right now. */
 	blind(slot: RequestSlot): boolean;
@@ -104,14 +106,16 @@ export interface OriginConsumer {
 	local(path: Path.Valid, instance?: Instance.Valid): broadcast.Consumer | undefined;
 	/** Resolve `path` for serving; throws `Unroutable` when the route serves another `instance`. */
 	demand(path: Path.Valid, instance?: Instance.Valid, signal?: AbortSignal): Promise<broadcast.Consumer | undefined>;
+	/** Whether the handle's scope admits everything beneath the root-relative `prefix`. */
+	covers(prefix: Path.Valid): boolean;
+	/** The root-relative prefixes the handle's scope admits; unset for every path. */
+	readonly allowed?: Path.Prefixes;
 }
 
 /** One originated advertisement exposed to the publishing wire. */
 export interface Advertised {
 	readonly identity: object;
 	readonly route: WireRoute;
-	/** The paths a scoped route may serve beneath its prefix, relative like its key; unset for the whole subtree. */
-	readonly claim?: Path.Patterns;
 	/**
 	 * The prefix the route was advertised at, when a scope's projection merged several covering
 	 * prefixes under one key; unset when the key is its prefix. Supersession compares only routes
@@ -143,7 +147,11 @@ export type Advertisements = ReadonlyMap<Path.Valid, readonly Advertised[]>;
 
 /** The protocol-facing operations behind an established session. */
 export interface Established {
-	consume(path: Path.Valid): broadcast.Consumer;
+	/**
+	 * Consume `path` from the session: the route it ranks best, or with `instance`, the best
+	 * route of that instance alone, as a request pinned to it resolves.
+	 */
+	consume(path: Path.Valid, instance?: Instance.Valid): broadcast.Consumer;
 	/**
 	 * Whether the peer refuses an announce request overlapping one it still holds, so
 	 * discovery never holds two where one covers the other.
@@ -208,5 +216,6 @@ export function registerTrackConsumer(factory: (name: string, source: Broadcast)
 /** Create a track handle backed by a broadcast's private wire view. */
 export function trackOf(name: string, source: broadcast.Producer | broadcast.Consumer): track.Consumer {
 	if (!makeTrack) throw new Error("track module is not loaded");
+	checkName(name);
 	return makeTrack(name, wireOf(source));
 }

@@ -36,7 +36,9 @@ func (p *DatagramProducer) Name() (string, error) { return p.inner.Name() }
 func (p *DatagramProducer) Info() (DatagramInfo, error) { return p.inner.Info() }
 
 // Append sends a datagram and returns its sequence; keep payloads below the path MTU.
-func (p *DatagramProducer) Append(timestamp *Timestamp, payload []byte) (uint64, error) {
+// The timestamp must match the track: on a scale-less track it is Unscaled at the
+// sequence to write.
+func (p *DatagramProducer) Append(timestamp Timestamp, payload []byte) (uint64, error) {
 	return p.inner.Append(timestamp, payload)
 }
 

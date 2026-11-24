@@ -187,6 +187,12 @@ impl TaskSet {
 		}
 	}
 
+	/// The children queued or running.
+	#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
+	pub fn len(&self) -> usize {
+		self.state.read().queued.len() + self.active.len()
+	}
+
 	/// Drive submitted children until every submission handle is dropped and all
 	/// active children finish. The async form of [`Self::poll`], for callers with
 	/// nothing else to poll.
@@ -215,10 +221,10 @@ impl Drop for TaskSet {
 #[cfg(feature = "async")]
 pub(crate) fn poll_unwanted(demand: &mut crate::track::Demand, waiter: &kio::Waiter) -> Poll<()> {
 	// Drain the changes so the waiter stays registered, then read where demand settled.
-	while let Poll::Ready(Ok(Some(_))) = demand.poll_wanted_changed(waiter) {}
+	while let Poll::Ready(Ok(true)) = demand.poll_wanted_changed(waiter) {}
 	match demand.wanted() {
-		None => Poll::Ready(()),
-		Some(_) => Poll::Pending,
+		false => Poll::Ready(()),
+		true => Poll::Pending,
 	}
 }
 

@@ -1,4 +1,6 @@
 import { Duration, Instant } from "@moq/clock";
+import * as MediaClock from "../media-clock";
+import { follow } from "../media-timeline";
 
 /**
  * Maps a file's presentation timeline onto our clock, repeating it forever.
@@ -11,6 +13,10 @@ import { Duration, Instant } from "@moq/clock";
 export class Timeline {
 	readonly #zero: Instant;
 	readonly #duration: Duration;
+	// How far the file is placed past the installed clock on the media clock, in microseconds.
+	readonly #shift: number;
+	// The media clock's suspend jumps since the file was placed, in microseconds.
+	readonly #jumps: () => number;
 
 	/**
 	 * Anchor a file of `duration` seconds at clock time `zero`.
@@ -19,6 +25,8 @@ export class Timeline {
 	 */
 	constructor(zero: Instant, duration: number) {
 		this.#zero = zero;
+		this.#shift = MediaClock.capture(zero).asMicros() - zero.since(Instant.ZERO).asMicros();
+		this.#jumps = follow();
 		this.#duration = Number.isFinite(duration) && duration > 0 ? Duration.secs(duration) : Duration.ZERO;
 	}
 
@@ -33,9 +41,19 @@ export class Timeline {
 	 * zero, so it stays signed until it lands on the clock, which saturates at the clock's origin.
 	 */
 	at(micros: number, loop: number): Instant {
-		const start = this.#zero.add(this.#duration.mul(loop));
-		if (micros >= 0) return start.add(Duration.micros(micros));
-		return Instant.ZERO.add(start.since(Instant.ZERO).saturatingSub(Duration.micros(-micros)));
+		const start = this.#zero.saturatingAdd(this.#duration.mul(loop));
+		if (micros >= 0) return start.saturatingAdd(Duration.micros(micros));
+		return start.saturatingSub(Duration.micros(-micros));
+	}
+
+	/**
+	 * The media clock timestamp of a clock time from {@link at}. A file is placed on the media clock
+	 * where it starts and keeps its own spacing after that, so its audio stays contiguous, until the
+	 * media clock jumps a suspend ahead of it: the file then jumps with it, rather than publish late.
+	 */
+	stamp(at: Instant): Duration {
+		const shift = this.#shift + this.#jumps();
+		return Duration.micros(Math.max(at.since(Instant.ZERO).asMicros() + shift, 0));
 	}
 
 	/** The file timestamp and pass due at the given clock time, the inverse of {@link at}. */

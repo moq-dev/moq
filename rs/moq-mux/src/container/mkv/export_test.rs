@@ -42,7 +42,12 @@ fn declared_avc() -> Live {
 			)
 			.unwrap(),
 		);
-		catalog.modify().unwrap().video.renditions.insert(name, config);
+		catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.video
+			.renditions
+			.insert(name, config);
 	})
 }
 
@@ -60,7 +65,7 @@ async fn a_declared_depth_bounds_malformed_video_by_count_and_payload() {
 					frame.payload = bytes.into();
 					live.track.write(frame).unwrap();
 				}
-				live.track.finish().unwrap();
+				live.track.end_with(None).unwrap();
 				live.catalog.finish().unwrap();
 				let mut export = super::Export::new(live.source().await, live.catalog_stream().await)
 					.with_fragment_duration(std::time::Duration::ZERO)
@@ -94,7 +99,12 @@ async fn declared_reorder_starts_before_zero_and_resets_each_group() {
 		let mut config = hang::catalog::AudioConfig::new(hang::catalog::AAC { profile: 2 }, 44100, 2);
 		config.description = Some(Bytes::from_static(&[0x12, 0x10]));
 		config.container = hang::catalog::Container::Legacy;
-		catalog.modify().unwrap().audio.renditions.insert(name, config);
+		catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.audio
+			.renditions
+			.insert(name, config);
 	});
 	for start in [0, 400_000] {
 		for (index, offset) in [0, 160_000, 80_000, 40_000, 120_000].into_iter().enumerate() {
@@ -109,12 +119,12 @@ async fn declared_reorder_starts_before_zero_and_resets_each_group() {
 		}
 		audio.write(raw_frame(start, b"audio", true)).unwrap();
 	}
-	live.track.finish().unwrap();
-	audio.finish().unwrap();
+	live.track.end_with(None).unwrap();
+	let _finished = audio.finish().unwrap();
 	live.catalog.finish().unwrap();
 	let mut export = super::Export::new(live.source().await, live.catalog_stream().await)
 		.with_delay(
-			moq_net::track::Delay::default()
+			crate::container::Delay::default()
 				.with_min(std::time::Duration::from_secs(5))
 				.with_max(std::time::Duration::from_secs(5)),
 		)
@@ -153,7 +163,7 @@ async fn export_header_roundtrip_vp9_opus() {
 	let mut importer = crate::container::mkv::Import::new(producer, catalog.reserve());
 	let buf = bytes::BytesMut::from(import_bytes.as_slice());
 	importer.decode(&buf).unwrap();
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 
 	// Now subscribe via the exporter and pull bytes.
 	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
@@ -382,7 +392,7 @@ async fn export_header_roundtrip_mp3() {
 	importer
 		.decode(&bytes::BytesMut::from(import_bytes.as_slice()))
 		.unwrap();
-	importer.finish().unwrap();
+	let _finished = importer.finish().unwrap();
 
 	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
 		.await
@@ -489,7 +499,12 @@ async fn export_derives_video_geometry_before_header() {
 	let mut live = Live::new(".vp8", |catalog, name| {
 		let mut config = VideoConfig::new(VideoCodec::VP8);
 		config.container = Container::Legacy;
-		catalog.modify().unwrap().video.renditions.insert(name, config);
+		catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.video
+			.renditions
+			.insert(name, config);
 	});
 	// Geometry-less startup frames must not park the source before the keyframe.
 	live.track.write(raw_frame(0, &[0x31, 0x00, 0x00], true)).unwrap();
@@ -500,7 +515,7 @@ async fn export_derives_video_geometry_before_header() {
 			true,
 		))
 		.unwrap();
-	live.track.finish().unwrap();
+	live.track.end_with(None).unwrap();
 
 	let mut exporter = crate::container::mkv::Export::new(live.source().await, live.catalog_stream().await);
 	let header = kio::clock::timeout(std::time::Duration::from_secs(1), exporter.next())
@@ -533,7 +548,7 @@ async fn export_emits_blocks_for_each_frame() {
 	let mut importer = crate::container::mkv::Import::new(producer, catalog.reserve());
 	let buf = bytes::BytesMut::from(import_bytes.as_slice());
 	importer.decode(&buf).unwrap();
-	importer.finish().unwrap();
+	let importer = importer.finish().unwrap();
 
 	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
 		.await
@@ -543,7 +558,7 @@ async fn export_emits_blocks_for_each_frame() {
 		// Cluster chunk; batching is exercised in a dedicated test below.
 		.with_fragment_duration(std::time::Duration::ZERO)
 		.with_delay(
-			moq_net::track::Delay::default()
+			crate::container::Delay::default()
 				.with_min(RECORDING_MAX_DELAY)
 				.with_max(RECORDING_MAX_DELAY),
 		)
@@ -591,7 +606,7 @@ async fn export_emits_blocks_for_each_frame() {
 	let mut imp2 = crate::container::mkv::Import::new(bcast2, cat2.reserve());
 	let rt = bytes::BytesMut::from(exported.as_slice());
 	imp2.decode(&rt).unwrap();
-	imp2.finish().unwrap();
+	let _finished = imp2.finish().unwrap();
 	let snap = cat2.snapshot();
 	assert_eq!(snap.video.renditions.len(), 1);
 	assert_eq!(snap.audio.renditions.len(), 1);
@@ -623,7 +638,12 @@ async fn export_rejects_cmaf_track() {
 		config.container = Container::Cmaf {
 			init: Bytes::from(vec![0u8; 32]),
 		};
-		catalog.modify().unwrap().video.renditions.insert(name, config);
+		catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.video
+			.renditions
+			.insert(name, config);
 	});
 
 	let mut exporter = crate::container::mkv::Export::new(live.source().await, live.catalog_stream().await);
@@ -648,7 +668,7 @@ async fn export_avc3_source_synthesizes_avcc_and_length_prefixes() {
 	let mut live = Live::avc3();
 	live.track.write(video_frame(0, true)).unwrap();
 	live.track.write(raw_frame(33_000, PSLICE_ANNEXB, false)).unwrap();
-	live.track.finish().unwrap();
+	live.track.end_with(None).unwrap();
 	live.catalog.finish().unwrap();
 
 	let mut exporter = crate::container::mkv::Export::new(live.source().await, live.catalog_stream().await)
@@ -755,7 +775,7 @@ async fn export_avc3_source_synthesizes_avcc_and_length_prefixes() {
 	let mut imp2 = crate::container::mkv::Import::new(bcast2, cat2.reserve());
 	let rt = bytes::BytesMut::from(exported.as_slice());
 	imp2.decode(&rt).unwrap();
-	imp2.finish().unwrap();
+	let _finished = imp2.finish().unwrap();
 	let snap = cat2.snapshot();
 	assert_eq!(snap.video.renditions.len(), 1);
 	let v = snap.video.renditions.values().next().unwrap();
@@ -781,7 +801,7 @@ async fn export_fragment_duration_batches_blocks() {
 	let mut importer = crate::container::mkv::Import::new(producer, catalog.reserve());
 	let buf = bytes::BytesMut::from(import_bytes.as_slice());
 	importer.decode(&buf).unwrap();
-	importer.finish().unwrap();
+	let importer = importer.finish().unwrap();
 	catalog.finish().unwrap();
 
 	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
@@ -790,7 +810,7 @@ async fn export_fragment_duration_batches_blocks() {
 	let mut exporter = crate::container::mkv::Export::new(crate::source::announced(&consumer).await, catalog_stream)
 		.with_fragment_duration(std::time::Duration::from_secs(2))
 		.with_delay(
-			moq_net::track::Delay::default()
+			crate::container::Delay::default()
 				.with_min(RECORDING_MAX_DELAY)
 				.with_max(RECORDING_MAX_DELAY),
 		)
@@ -935,6 +955,201 @@ async fn a_moved_rendition_continues_on_its_new_track() {
 	}
 }
 
+/// Add a Legacy AAC rendition to `live`.
+fn add_aac(live: &mut Live) -> crate::container::Producer<crate::catalog::hang::Container> {
+	live.add_track(".aac", |catalog, name| {
+		let mut config = hang::catalog::AudioConfig::new(hang::catalog::AAC { profile: 2 }, 44100, 2);
+		config.description = Some(Bytes::from_static(&[0x12, 0x10]));
+		config.container = hang::catalog::Container::Legacy;
+		catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.audio
+			.renditions
+			.insert(name, config);
+	})
+}
+
+/// The `(track number, payload)` of every block in `mkv`.
+fn blocks(mkv: Vec<u8>) -> Vec<(u64, Vec<u8>)> {
+	WebmIterator::new(&mut Cursor::new(mkv), &[])
+		.filter_map(|tag| match tag {
+			Ok(MatroskaSpec::SimpleBlock(data)) => {
+				let block = SimpleBlock::try_from(&data).unwrap();
+				Some((block.track, block.read_frame_data().unwrap()[0].data.to_vec()))
+			}
+			_ => None,
+		})
+		.collect()
+}
+
+/// A capture that loses its microphone fails the audio track, keeps it listed while it drains,
+/// and lists the reopened one under a new name, either before or after a reader sees the failure.
+/// The replacement continues under the audio track number the header declared while the video
+/// plays on.
+#[tokio::test(start_paused = true)]
+async fn a_failed_rendition_continues_on_its_replacement() {
+	for listed_first in [false, true] {
+		let mut live = Live::avc3();
+		let mut audio = add_aac(&mut live);
+		let failed = audio.name().to_string();
+		live.track.write(video_frame(0, true)).unwrap();
+		audio.write(raw_frame(0, b"old", true)).unwrap();
+		let mut exporter = crate::container::mkv::Export::new(live.source().await, live.catalog_stream().await)
+			.with_delay(crate::container::Delay::default().with_max(std::time::Duration::from_secs(5)));
+		let mut out = drain_now(&mut exporter).await.unwrap();
+
+		let mut replacement = None;
+		if listed_first {
+			replacement = Some(add_aac(&mut live));
+			out.extend(drain_now(&mut exporter).await.unwrap());
+		}
+		audio.write(raw_frame(20_000, b"old", true)).unwrap();
+		out.extend(drain_now(&mut exporter).await.unwrap());
+		audio.abort(moq_net::Error::Transport("audio device lost".into()));
+		live.track.write(video_frame(100_000, true)).unwrap();
+		out.extend(drain_now(&mut exporter).await.unwrap());
+		let mut replacement = replacement.unwrap_or_else(|| add_aac(&mut live));
+		out.extend(drain_now(&mut exporter).await.unwrap());
+		for ms in [200, 220, 240] {
+			replacement.write(raw_frame(ms * 1000, b"new", true)).unwrap();
+			out.extend(drain_now(&mut exporter).await.unwrap());
+		}
+		live.catalog
+			.modify(live.catalog.next_timestamp())
+			.unwrap()
+			.audio
+			.renditions
+			.remove(&failed);
+		live.track.write(video_frame(300_000, true)).unwrap();
+		out.extend(drain_now(&mut exporter).await.unwrap());
+		live.track.end_with(None).unwrap();
+		let _finished = replacement.finish().unwrap();
+		live.catalog.finish().unwrap();
+		while let Some(chunk) = exporter.next().await.unwrap() {
+			out.extend_from_slice(&chunk);
+		}
+
+		let blocks = blocks(out);
+		let audio: Vec<_> = blocks
+			.iter()
+			.filter(|(_, payload)| payload.as_slice() == b"old" || payload.as_slice() == b"new")
+			.collect();
+		let payloads: Vec<&[u8]> = audio.iter().map(|(_, payload)| payload.as_slice()).collect();
+		assert_eq!(
+			payloads,
+			[&b"old"[..], b"old", b"new", b"new", b"new"],
+			"listed first: {listed_first}"
+		);
+		let numbers: std::collections::HashSet<u64> = audio.iter().map(|(number, _)| *number).collect();
+		assert_eq!(numbers.len(), 1, "the replacement writes under the declared track");
+		assert_eq!(blocks.len(), audio.len() + 3, "the video played on");
+	}
+}
+
+/// An audio-only export whose replacement was listed before the failure reads it from the poll
+/// that continues the failed track: nothing else would wake the export for its first frames.
+#[tokio::test(start_paused = true)]
+async fn a_continued_track_wakes_the_export() {
+	use std::future::Future;
+
+	let mut config = hang::catalog::AudioConfig::new(hang::catalog::AAC { profile: 2 }, 44100, 2);
+	config.description = Some(Bytes::from_static(&[0x12, 0x10]));
+	let mut live = Live::audio(config);
+	live.track.write(raw_frame(0, b"old", true)).unwrap();
+	let mut exporter = crate::container::mkv::Export::new(live.source().await, live.catalog_stream().await)
+		.with_fragment_duration(std::time::Duration::ZERO);
+	let mut out = drain_now(&mut exporter).await.unwrap();
+	let mut replacement = add_aac(&mut live);
+	out.extend(drain_now(&mut exporter).await.unwrap());
+
+	let woken = std::sync::Arc::new(crate::container::test_util::Woken::default());
+	let waker = std::task::Waker::from(woken.clone());
+	let mut cx = std::task::Context::from_waker(&waker);
+	let mut next = Box::pin(exporter.next());
+	assert!(next.as_mut().poll(&mut cx).is_pending());
+	live.track.abort(moq_net::Error::Transport("audio device lost".into()));
+	assert!(woken.take(), "the failure woke the export");
+	assert!(next.as_mut().poll(&mut cx).is_pending());
+	replacement.write(raw_frame(200_000, b"new", true)).unwrap();
+	kio::clock::sleep(std::time::Duration::from_millis(10)).await;
+	assert!(woken.take(), "the replacement's frames woke the export");
+	drop(next);
+
+	let _finished = replacement.finish().unwrap();
+	live.catalog.finish().unwrap();
+	while let Some(chunk) = exporter.next().await.unwrap() {
+		out.extend_from_slice(&chunk);
+	}
+	let payloads: Vec<Vec<u8>> = blocks(out).into_iter().map(|(_, payload)| payload).collect();
+	assert_eq!(payloads, [b"old".to_vec(), b"new".to_vec()]);
+}
+
+/// A video track that fails before its codec configuration declares nothing, so the header goes
+/// out with the audio that still plays.
+#[tokio::test(start_paused = true)]
+async fn a_track_failing_before_its_config_leaves_the_header_to_the_rest() {
+	let mut config = hang::catalog::AudioConfig::new(hang::catalog::AAC { profile: 2 }, 44100, 2);
+	config.description = Some(Bytes::from_static(&[0x12, 0x10]));
+	let mut live = Live::audio(config);
+	let video = live.add_track(".avc3", Live::insert_avc3);
+	live.track.write(raw_frame(0, b"aud", true)).unwrap();
+	let mut exporter = crate::container::mkv::Export::new(live.source().await, live.catalog_stream().await)
+		.with_fragment_duration(std::time::Duration::ZERO);
+	assert!(
+		drain_now(&mut exporter).await.unwrap().is_empty(),
+		"the header waits on the video"
+	);
+	video.abort(moq_net::Error::Transport("camera lost".into()));
+	live.track.write(raw_frame(20_000, b"aud", true)).unwrap();
+	let out = drain_now(&mut exporter).await.unwrap();
+	assert!(
+		!blocks(out).is_empty(),
+		"the header went out without the video, then the audio"
+	);
+
+	// The header declared no video track, so a replacement can't continue the one it left out.
+	let replacement = live.add_track(".avc3", Live::insert_avc3);
+	let err = drain_now(&mut exporter).await.unwrap_err();
+	assert!(
+		matches!(&err, crate::Error::Mkv(crate::container::mkv::Error::HeaderAddedTrack(added)) if added == replacement.name()),
+		"{err:?}"
+	);
+}
+
+/// A rendition that joins after the header waits only while a declared track of its kind could
+/// still fail: once that one ends cleanly, it is a track the header never declared.
+#[tokio::test(start_paused = true)]
+async fn a_spare_rendition_fails_once_its_kind_ends_cleanly() {
+	let mut live = Live::avc3();
+	let mut audio = add_aac(&mut live);
+	live.track.write(video_frame(0, true)).unwrap();
+	audio.write(raw_frame(0, b"old", true)).unwrap();
+	let mut exporter = crate::container::mkv::Export::new(live.source().await, live.catalog_stream().await);
+	drain_now(&mut exporter).await.unwrap();
+
+	let spare = add_aac(&mut live);
+	drain_now(&mut exporter).await.unwrap();
+	let _finished = audio.finish().unwrap();
+	let err = drain_now(&mut exporter).await.unwrap_err();
+	assert!(
+		matches!(&err, crate::Error::Mkv(crate::container::mkv::Error::HeaderAddedTrack(added)) if added == spare.name()),
+		"{err:?}"
+	);
+}
+
+/// With nothing else reading, a failed track still fails the export.
+#[tokio::test(start_paused = true)]
+async fn the_last_failed_track_fails_the_export() {
+	let mut live = Live::avc3();
+	live.track.write(video_frame(0, true)).unwrap();
+	let mut exporter = crate::container::mkv::Export::new(live.source().await, live.catalog_stream().await);
+	drain_now(&mut exporter).await.unwrap();
+	live.track.abort(moq_net::Error::Transport("camera lost".into()));
+	let err = drain_now(&mut exporter).await.unwrap_err();
+	assert!(err.to_string().contains("camera lost"), "{err:?}");
+}
+
 /// The header's TrackEntry carries the rendition's first avcC, which a move to a track
 /// described by another SPS cannot change mid-file. It fails before writing any of that track.
 #[tokio::test(start_paused = true)]
@@ -978,7 +1193,7 @@ async fn a_rendition_moved_to_a_cmaf_track_fails() {
 	};
 	moving
 		.catalog
-		.modify()
+		.modify(moving.catalog.next_timestamp())
 		.unwrap()
 		.video
 		.renditions
@@ -1135,7 +1350,7 @@ async fn configured_delay_holds_live_frames() {
 	let mut live = Live::audio(config);
 	let mut export = super::Export::new(live.source().await, live.catalog_stream().await)
 		.with_delay(
-			moq_net::track::Delay::default()
+			crate::container::Delay::default()
 				.with_min(std::time::Duration::from_millis(100))
 				.with_max(std::time::Duration::from_millis(100)),
 		)
@@ -1160,7 +1375,7 @@ async fn delay_drops_late_frames_and_drains_the_final_frame() {
 	let mut live = Live::audio(config);
 	let delay = std::time::Duration::from_millis(100);
 	let mut export = super::Export::new(live.source().await, live.catalog_stream().await)
-		.with_delay(moq_net::track::Delay::default().with_min(delay).with_max(delay))
+		.with_delay(crate::container::Delay::default().with_min(delay).with_max(delay))
 		.with_fragment_duration(std::time::Duration::ZERO);
 	export.next().await.unwrap().unwrap();
 	let start = kio::clock::now();
@@ -1175,7 +1390,7 @@ async fn delay_drops_late_frames_and_drains_the_final_frame() {
 	live.track.write(raw_frame(20_000, b"expired", true)).unwrap();
 	// Sent a delay ahead: any further would be a step in its timeline, which re-acquires.
 	live.track.write(raw_frame(300_000, b"final", true)).unwrap();
-	live.track.finish().unwrap();
+	live.track.end_with(None).unwrap();
 	live.catalog.finish().unwrap();
 	let final_frame = export.next().await.unwrap().unwrap();
 	assert!(final_frame.windows(5).any(|part| part == b"final"));
@@ -1194,11 +1409,16 @@ async fn decode_order_is_independent_of_cross_track_arrival_order() {
 		config.container = Container::Legacy;
 		let mut live = Live::audio(config.clone());
 		let mut other = live.add_track("other", |catalog, name| {
-			catalog.modify().unwrap().audio.renditions.insert(name, config);
+			catalog
+				.modify(catalog.next_timestamp())
+				.unwrap()
+				.audio
+				.renditions
+				.insert(name, config);
 		});
 		let mut export = super::Export::new(live.source().await, live.catalog_stream().await)
 			.with_delay(
-				moq_net::track::Delay::default()
+				crate::container::Delay::default()
 					.with_min(std::time::Duration::from_millis(100))
 					.with_max(std::time::Duration::from_millis(100)),
 			)
@@ -1232,25 +1452,37 @@ async fn reordered_video_uses_decode_deadlines_but_keeps_block_pts() {
 	use crate::container::test_util::{Live, raw_frame, video_frame};
 	use hang::catalog::{AAC, AudioConfig, Container};
 	let mut live = Live::avc3();
-	for config in live.catalog.modify().unwrap().video.renditions.values_mut() {
+	for config in live
+		.catalog
+		.modify(live.catalog.next_timestamp())
+		.unwrap()
+		.video
+		.renditions
+		.values_mut()
+	{
 		config.jitter = Some(std::time::Duration::from_millis(120));
 	}
 	let mut audio = live.add_track("audio", |catalog, name| {
 		let mut config = AudioConfig::new(AAC { profile: 2 }, 44100, 2);
 		config.description = Some(Bytes::from_static(&[0x12, 0x10]));
 		config.container = Container::Legacy;
-		catalog.modify().unwrap().audio.renditions.insert(name, config);
+		catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.audio
+			.renditions
+			.insert(name, config);
 	});
 	for (index, timestamp) in [1000, 1120, 1040, 1080].into_iter().enumerate() {
 		live.track.write(video_frame(timestamp * 1000, index == 0)).unwrap();
 	}
 	audio.write(raw_frame(1_060_000, b"audio", true)).unwrap();
-	live.track.finish().unwrap();
-	audio.finish().unwrap();
+	live.track.end_with(None).unwrap();
+	let _finished = audio.finish().unwrap();
 	live.catalog.finish().unwrap();
 	let mut export = super::Export::new(live.source().await, live.catalog_stream().await)
 		.with_delay(
-			moq_net::track::Delay::default()
+			crate::container::Delay::default()
 				.with_min(std::time::Duration::from_secs(5))
 				.with_max(std::time::Duration::from_secs(5)),
 		)
@@ -1286,7 +1518,7 @@ async fn a_backlog_stays_in_the_source_until_due() {
 		config.description = Some(Bytes::from_static(&[0x12, 0x10]));
 		let mut live = Live::audio(config);
 		let mut export = super::Export::new(live.source().await, live.catalog_stream().await)
-			.with_delay(moq_net::track::Delay::default().with_min(delay).with_max(delay))
+			.with_delay(crate::container::Delay::default().with_min(delay).with_max(delay))
 			.with_fragment_duration(std::time::Duration::ZERO);
 		export.next().await.unwrap().unwrap();
 		live.track.write(raw_frame(0, b"first", true)).unwrap();
@@ -1324,7 +1556,7 @@ async fn a_retained_group_trims_to_the_delay() {
 	}
 	let delay = std::time::Duration::from_millis(100);
 	let mut export = super::Export::new(live.source().await, live.catalog_stream().await)
-		.with_delay(moq_net::track::Delay::default().with_min(delay).with_max(delay))
+		.with_delay(crate::container::Delay::default().with_min(delay).with_max(delay))
 		.with_fragment_duration(std::time::Duration::ZERO);
 	export.next().await.unwrap().unwrap();
 	export.next().await.unwrap().unwrap();
@@ -1344,16 +1576,26 @@ async fn disabled_renditions_stay_out_of_the_header_and_idle_after_it() {
 	let mut live = Live::audio(config.clone());
 	let main = live.track.name().to_string();
 	let mut other = live.add_track("other", |catalog, name| {
-		catalog.modify().unwrap().audio.renditions.insert(name, config.clone());
+		catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.audio
+			.renditions
+			.insert(name, config.clone());
 	});
 	let _disabled = live.add_track("disabled", |catalog, name| {
 		let mut config = config.clone();
 		config.enabled = false;
-		catalog.modify().unwrap().audio.renditions.insert(name, config);
+		catalog
+			.modify(catalog.next_timestamp())
+			.unwrap()
+			.audio
+			.renditions
+			.insert(name, config);
 	});
 	let set_enabled = |live: &mut Live, enabled: bool| {
 		live.catalog
-			.modify()
+			.modify(live.catalog.next_timestamp())
 			.unwrap()
 			.audio
 			.renditions
@@ -1394,11 +1636,18 @@ async fn stalled_presentation_time_keeps_the_export_bounded() {
 	let backward: fn(u64) -> u64 = |index| 10_000_000 - index * 10_000;
 	for (name, pts, lookahead) in [("flat", flat, jitter), ("backward", backward, deepest)] {
 		let mut live = Live::avc3();
-		for config in live.catalog.modify().unwrap().video.renditions.values_mut() {
+		for config in live
+			.catalog
+			.modify(live.catalog.next_timestamp())
+			.unwrap()
+			.video
+			.renditions
+			.values_mut()
+		{
 			config.jitter = Some(jitter);
 		}
 		let mut export = super::Export::new(live.source().await, live.catalog_stream().await)
-			.with_delay(moq_net::track::Delay::default().with_min(delay).with_max(delay))
+			.with_delay(crate::container::Delay::default().with_min(delay).with_max(delay))
 			.with_fragment_duration(Duration::ZERO);
 		live.track.write(video_frame(pts(0), true)).unwrap();
 		export.next().await.unwrap().unwrap();
@@ -1424,12 +1673,19 @@ async fn live_reordered_video_keeps_every_frame() {
 	use std::time::Duration;
 	let frame = 40_000;
 	let mut live = Live::avc3();
-	for config in live.catalog.modify().unwrap().video.renditions.values_mut() {
+	for config in live
+		.catalog
+		.modify(live.catalog.next_timestamp())
+		.unwrap()
+		.video
+		.renditions
+		.values_mut()
+	{
 		config.jitter = Some(Duration::from_millis(120));
 	}
 	let mut export = super::Export::new(live.source().await, live.catalog_stream().await)
 		.with_delay(
-			moq_net::track::Delay::default()
+			crate::container::Delay::default()
 				.with_min(Duration::from_millis(500))
 				.with_max(Duration::from_millis(500)),
 		)
@@ -1455,7 +1711,7 @@ async fn live_reordered_video_keeps_every_frame() {
 			count(chunk.unwrap().unwrap());
 		}
 	}
-	live.track.finish().unwrap();
+	live.track.end_with(None).unwrap();
 	live.catalog.finish().unwrap();
 	while let Some(chunk) = export.next().await.unwrap() {
 		count(chunk);

@@ -36,16 +36,24 @@ try {
 	}
 }
 
+// A 100 ms floor at 1 kHz, with no clock until a test sends one.
 function renderer() {
 	const render = new Render();
 	const send = (data: Message) => render.port.onmessage?.({ data } as MessageEvent<Message>);
-	send({ type: "init", channels: 1, rate: 1000, latency: 100, buffered: true });
+	send({ type: "init", channels: 1, rate: 1000, latency: 100, bound: 0 });
 	return {
 		send,
 		sent: render.sent,
 		read(samples: number) {
 			const output = new Float32Array(samples);
-			expect(render.process([], [[output]], {})).toBe(true);
+			// The context's time, at zero unless a test runs it.
+			const time = Object.getOwnPropertyDescriptor(globalThis, "currentTime");
+			if (!time) Object.defineProperty(globalThis, "currentTime", { configurable: true, value: 0 });
+			try {
+				expect(render.process([], [[output]], {})).toBe(true);
+			} finally {
+				if (!time) Reflect.deleteProperty(globalThis, "currentTime");
+			}
 			return output;
 		},
 	};
@@ -81,6 +89,8 @@ describe("render dispatch", () => {
 				type: "state",
 				epoch: 7,
 				timestamp: 560_000,
+				// The end of the 20-sample quantum at 1 kHz, at a context time of zero.
+				time: 0.02,
 				stalled: false,
 				anchored: true,
 				underruns: 0,
@@ -92,47 +102,47 @@ describe("render dispatch", () => {
 		]);
 	});
 
-	// A covered ring parks and resumes only on the main thread's word: data decoded before the park
-	// may still land. The echoed epoch is what tells the main thread that state reports no longer
-	// predate the park.
-	it("parks until the next floor update and echoes the park's epoch", () => {
-		const { send, read, sent } = renderer();
-		send({ type: "data", timestamp: 0, data: [new Float32Array(200).fill(1)] });
-		expect([...read(20)]).toEqual(Array(20).fill(1));
-		send({ type: "latency", latency: 100, park: 3 });
-		expect([...read(20)]).toEqual(Array(20).fill(0));
-		send({ type: "data", timestamp: 200_000, data: [new Float32Array(20).fill(2)] });
-		expect([...read(20)]).toEqual(Array(20).fill(0));
-		send({ type: "latency", latency: 100 });
-		// It fades back in on the parked audio, not the new data.
-		expect(read(20)[19]).toBe(1);
-		read(20);
-		expect(sent).toEqual([
-			{
-				type: "state",
-				epoch: 3,
-				timestamp: 60_000,
-				stalled: false,
-				anchored: true,
-				underruns: 0,
-				skips: 0,
-				trimmed: 0,
-				accelerated: 0,
-				silent: false,
-			},
-		]);
-	});
-
-	it("parks on a latency rise and preserves unread PCM", () => {
+	it("keeps playing through a latency rise, keeping unread PCM", () => {
 		const { send, read } = renderer();
 		send({ type: "data", timestamp: 0, data: [new Float32Array(100).fill(1)] });
 		expect([...read(20)]).toEqual(Array(20).fill(1));
-		send({ type: "latency", latency: 200 });
-		expect([...read(20)]).toEqual(Array(20).fill(0));
+		send({ type: "latency", latency: 200, bound: 0 });
+		expect([...read(20)]).toEqual(Array(20).fill(1));
 		send({ type: "data", timestamp: 100_000, data: [new Float32Array(120).fill(2)] });
 		const output = read(100);
-		expect(output[79]).toBe(1);
-		expect([...output.slice(80)]).toEqual(Array(20).fill(2));
+		expect(output.slice(0, 60).every((value) => value === 1)).toBe(true);
+		expect(output.slice(-20).every((value) => value === 2)).toBe(true);
+	});
+
+	it("plays onto the clock it is sent, skipping only past the bound", () => {
+		const { send, read, sent } = renderer();
+		const time = Object.getOwnPropertyDescriptor(globalThis, "currentTime");
+		// The context's time, advanced a quantum per read as the clock is.
+		let now = 1;
+		const tick = () => {
+			read(20);
+			now += 0.02;
+		};
+		try {
+			Object.defineProperty(globalThis, "currentTime", { configurable: true, get: () => now });
+			send({ type: "data", timestamp: 0, data: [new Float32Array(1000).fill(1)] });
+			// Half a second behind a clock that allows none, so the next quantum lands on the clock.
+			send({ type: "clock", timestamp: 500_000, time: now });
+			for (let i = 0; i < 5; i++) tick();
+			expect(sent.at(-1)).toMatchObject({ timestamp: 600_000, skips: 1, trimmed: 500 });
+			// A latency update moves the clock, so one without a new reading leaves none.
+			send({ type: "latency", latency: 100, bound: 0 });
+			now += 1;
+			for (let i = 0; i < 5; i++) tick();
+			expect(sent.at(-1)).toMatchObject({ timestamp: 700_000, skips: 1, trimmed: 500 });
+			// One carrying the moved clock keeps playing onto it.
+			send({ type: "latency", latency: 100, bound: 0, clock: { timestamp: 800_000, time: now } });
+			for (let i = 0; i < 5; i++) tick();
+			expect(sent.at(-1)).toMatchObject({ timestamp: 900_000, skips: 2, trimmed: 600 });
+		} finally {
+			if (time) Object.defineProperty(globalThis, "currentTime", time);
+			else Reflect.deleteProperty(globalThis, "currentTime");
+		}
 	});
 });
 

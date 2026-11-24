@@ -140,7 +140,7 @@ impl Live {
 		cfg.description =
 			Some(crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap());
 		catalog
-			.modify()
+			.modify(catalog.next_timestamp())
 			.unwrap()
 			.video
 			.renditions
@@ -157,7 +157,7 @@ impl Live {
 		cfg.description = Some(Bytes::from_static(&[0x11, 0x90]));
 		cfg.container = Container::Legacy;
 		catalog
-			.modify()
+			.modify(catalog.next_timestamp())
 			.unwrap()
 			.audio
 			.renditions
@@ -207,7 +207,7 @@ impl Live {
 	/// Declare that video decodes up to `jitter` before it is presented, as a deep B-pyramid's
 	/// catalog would, so a receiver holds that much of it for its DTS.
 	fn declare_video_jitter(&mut self, jitter: Duration) {
-		let mut catalog = self.catalog.modify().unwrap();
+		let mut catalog = self.catalog.modify(self.catalog.next_timestamp()).unwrap();
 		for config in catalog.video.renditions.values_mut() {
 			config.jitter = Some(jitter);
 		}
@@ -222,7 +222,7 @@ impl Live {
 		let description =
 			crate::codec::h264::build_avcc(&[Bytes::from_static(SPS_PYRAMID)], &[Bytes::from_static(PYRAMID_PPS)])
 				.unwrap();
-		let mut catalog = self.catalog.modify().unwrap();
+		let mut catalog = self.catalog.modify(self.catalog.next_timestamp()).unwrap();
 		for config in catalog.video.renditions.values_mut() {
 			config.description = Some(description.clone());
 			config.reorder = Some(2);
@@ -255,6 +255,8 @@ impl Live {
 			waiter: kio::Waiter::new(Waker::from(woken.clone())),
 			woken,
 			out: Vec::new(),
+			sink: None,
+			busy: None,
 		}
 	}
 
@@ -285,38 +287,102 @@ impl Live {
 					}
 				}
 				if keyframe {
-					self.group = Some(self.video.append_group().unwrap());
+					let start = video.strict_add_signed(self.offset);
+					self.group = Some(self.video.append_group(Timestamp::from_micros(start).unwrap()).unwrap());
 				}
 				if stall(tick) {
 					self.stalling = true;
 				} else if !self.stalling {
-					let slice = if keyframe {
-						vec![0x65u8; 3_000]
-					} else {
-						vec![0x41u8; self.delta_size]
-					};
-					let presented = match self.reorder {
-						true => (tick - tick % GOP + PYRAMID[(tick % GOP) as usize] + PYRAMID_DELAY) * VIDEO_US,
-						false => video,
-					};
+					let frame = self.video_frame(tick);
 					let group = self.group.as_mut().expect("the first tick is a keyframe");
-					HangContainer::Legacy(crate::container::Kind::Video)
-						.write(
-							group,
-							&[Frame {
-								timestamp: Timestamp::from_micros(presented.strict_add_signed(self.offset)).unwrap(),
-								duration: None,
-								payload: length_prefixed(&[&slice]),
-								keyframe,
-							}],
-						)
-						.unwrap();
+					write_video(group, frame);
 				}
 				self.tick += 1;
 			}
 			for leg in legs.iter_mut() {
 				leg.poll_now();
 			}
+		}
+	}
+
+	/// The video frame of `tick`.
+	fn video_frame(&self, tick: u64) -> Frame {
+		let keyframe = tick.is_multiple_of(GOP);
+		let slice = if keyframe {
+			vec![0x65u8; 3_000]
+		} else {
+			vec![0x41u8; self.delta_size]
+		};
+		let presented = match self.reorder {
+			true => (tick - tick % GOP + PYRAMID[(tick % GOP) as usize] + PYRAMID_DELAY) * VIDEO_US,
+			false => tick * VIDEO_US,
+		};
+		Frame {
+			timestamp: Timestamp::from_micros(presented.strict_add_signed(self.offset)).unwrap(),
+			duration: None,
+			payload: length_prefixed(&[&slice]),
+			keyframe,
+		}
+	}
+
+	/// Stall the whole path for `stall` from the next video tick, which must lie in the open group
+	/// with a group boundary within the stall: nothing arrives, and then all that was sent
+	/// meanwhile lands at once, newest group first, as a relay drains a backlog in descending
+	/// group order. The legs read the audio and the newer group before the older group's tail
+	/// lands.
+	fn stall_path(&mut self, stall: Duration, legs: &mut [&mut Leg]) {
+		let (video_at, _) = self.send_times(self.tick * VIDEO_US, 0);
+		let resume = video_at.saturating_add(stall);
+		let (mut tail, mut newer) = (Vec::new(), Vec::new());
+		let mut boundary = None;
+		let mut audio = Vec::new();
+		loop {
+			let (video_at, audio_at) = self.send_times(self.tick * VIDEO_US, self.audio_index * AUDIO_US);
+			if video_at.min(audio_at) >= resume {
+				break;
+			}
+			if audio_at < video_at {
+				audio.push(self.audio_index);
+				self.audio_index += 1;
+			} else {
+				let frame = self.video_frame(self.tick);
+				if frame.keyframe {
+					assert!(boundary.is_none(), "the stall crosses one group boundary");
+					boundary = Some(self.tick);
+				}
+				match boundary {
+					None => tail.push(frame),
+					Some(_) => newer.push(frame),
+				}
+				self.tick += 1;
+			}
+		}
+		let boundary = boundary.expect("the stall crosses one group boundary");
+		assert!(!tail.is_empty(), "the stall starts within a group");
+		self.advance(resume, legs);
+
+		let end = std::mem::take(&mut self.audio_index);
+		for index in audio {
+			self.audio_index = index;
+			self.send_audio();
+		}
+		self.audio_index = end;
+		let start = (boundary * VIDEO_US).strict_add_signed(self.offset);
+		let mut group = self.video.append_group(Timestamp::from_micros(start).unwrap()).unwrap();
+		for frame in newer {
+			write_video(&mut group, frame);
+		}
+		for leg in legs.iter_mut() {
+			leg.poll_now();
+		}
+
+		let mut older = self.group.replace(group).expect("the stall starts in an open group");
+		for frame in tail {
+			write_video(&mut older, frame);
+		}
+		older.finish().unwrap();
+		for leg in legs.iter_mut() {
+			leg.poll_now();
 		}
 	}
 
@@ -347,12 +413,30 @@ impl Live {
 		}
 	}
 
-	/// End the broadcast and let every leg render what it holds.
+	/// End the broadcast and let every leg render what it holds, side by side: a leg left
+	/// unread while another drains would be a blocked sink.
 	fn finish(&mut self, legs: &mut [&mut Leg]) {
 		self.finish_media();
 		self.catalog.finish().unwrap();
-		for leg in legs.iter_mut() {
-			leg.drain(&self.clock);
+		let mut ended = vec![false; legs.len()];
+		loop {
+			for (leg, ended) in legs.iter_mut().zip(&mut ended) {
+				*ended = *ended || leg.poll();
+			}
+			let Some(deadline) = legs
+				.iter()
+				.zip(&ended)
+				.filter(|(_, ended)| !**ended)
+				.map(|(leg, _)| {
+					leg.export
+						.next_due()
+						.expect("export parked without ending or scheduled output")
+				})
+				.min()
+			else {
+				break;
+			};
+			self.clock.advance(deadline.max(self.clock.now()));
 		}
 	}
 
@@ -363,7 +447,7 @@ impl Live {
 		}
 		self.stalled.clear();
 		drop(self.video.clone().finish().unwrap());
-		self.audio.finish().unwrap();
+		self.audio.end_with(None).unwrap();
 	}
 
 	/// Run the clock to `at`, letting every leg read whenever it would have on its own.
@@ -395,6 +479,13 @@ impl Live {
 	}
 }
 
+/// Write one video frame to `group`.
+fn write_video(group: &mut moq_net::group::Producer, frame: Frame) {
+	HangContainer::Legacy(crate::container::Kind::Video)
+		.write(group, &[frame])
+		.unwrap();
+}
+
 /// One receiver: an exporter and what it rendered, with the instant each slot went out.
 struct Leg {
 	export: Export<crate::catalog::Consumer>,
@@ -407,6 +498,11 @@ struct Leg {
 	waiter: kio::Waiter,
 	woken: Arc<Woken>,
 	out: Vec<(Instant, Frame)>,
+	/// The rate its output drains at, in bits per second, if it drains slower than it is read:
+	/// each frame keeps it from reading again until the frame is written.
+	sink: Option<u64>,
+	/// It reads nothing until this instant, as a sink still writing or a blocked stdout.
+	busy: Option<Instant>,
 }
 
 struct Woken(AtomicBool);
@@ -424,6 +520,9 @@ impl Wake for Woken {
 impl Leg {
 	/// When this leg next reads on its own.
 	fn wake(&self) -> Option<Instant> {
+		if self.busy.is_some() {
+			return self.busy;
+		}
 		match self.every.is_zero() {
 			true => self.export.next_due(),
 			false => Some(self.next_poll),
@@ -433,18 +532,29 @@ impl Leg {
 	/// Read if anything woke the export since it last read, as the task polling it would: a read
 	/// nothing woke finds nothing new.
 	fn poll_now(&mut self) {
-		if self.every.is_zero() && self.woken.0.load(Ordering::Relaxed) {
+		if self.busy.is_none() && self.every.is_zero() && self.woken.0.load(Ordering::Relaxed) {
 			assert!(!self.poll(), "export ended while the broadcast is live");
 		}
 	}
 
 	/// Read everything ready now, returning whether the broadcast ended.
 	fn poll(&mut self) -> bool {
-		self.woken.0.store(false, Ordering::Relaxed);
 		let now = kio::clock::now();
+		if self.busy.is_some_and(|busy| busy > now) {
+			return false;
+		}
+		self.busy = None;
+		self.woken.0.store(false, Ordering::Relaxed);
 		while let std::task::Poll::Ready(frame) = self.export.poll_next(&self.waiter) {
-			match frame.expect("exporter error") {
-				Some(frame) => self.out.push((now, frame)),
+			match frame.unwrap_or_else(|err| panic!("exporter error: {err}")) {
+				Some(frame) => {
+					let bits = frame.payload.len() as u64 * 8;
+					self.out.push((now, frame));
+					if let Some(sink) = self.sink {
+						self.busy = Some(now.saturating_add(Duration::from_secs_f64(bits as f64 / sink as f64)));
+						return false;
+					}
+				}
 				None => return true,
 			}
 		}
@@ -658,22 +768,30 @@ const LAGS: [i64; 2] = [300_000, -300_000];
 const CLOCK_SLACK: f64 = 2.0 * SLOT_MS;
 
 /// Join mid-group with `lag`, render 7.2 s with the video ticks `stall` accepts stalled, and
-/// return the leg's units.
-async fn join(lag: i64, stall: impl Fn(u64) -> bool) -> Vec<Unit> {
+/// return the leg's units and how many frames it dropped as late.
+async fn join(lag: i64, stall: impl Fn(u64) -> bool) -> (Vec<Unit>, u64) {
 	let mut live = Live::new(1.0, lag).await;
 	live.run(JOIN, &mut [], |_| false);
 	let mut leg = live.join(Duration::ZERO).await;
 	live.run(24 * GOP, &mut [&mut leg], stall);
-	assert_eq!(leg.export.dropped(), 0, "every frame arrived inside its deadline");
-	leg.units()
+	(leg.units(), leg.export.dropped())
 }
 
-/// Assert a skip left the video where it is without one, against the audio, from 4 s after the
-/// leg's first video unit.
+/// Assert a skip cost at most the group after the stalled one and left the video where it is
+/// without one, against the audio, from 4 s after the leg's first video unit.
+///
+/// The stalled group's tail never arrives, so the export waits the whole delay for it before it
+/// skips to the next group, whose first frames are then due: they go late, and the video resumes
+/// at the keyframe after them. The wait is bounded by the delay, so no more than that group goes.
 async fn assert_one_clock(stall: impl Fn(u64) -> bool + Copy) {
 	let mut moved = Vec::new();
 	for lag in LAGS {
-		let (clean, skipped) = (join(lag, |_| false).await, join(lag, stall).await);
+		let ((clean, none), (skipped, dropped)) = (join(lag, |_| false).await, join(lag, stall).await);
+		assert_eq!(none, 0, "every frame of a clean source arrived inside its deadline");
+		assert!(
+			dropped <= GOP,
+			"lag {lag}: {dropped} frames went late, more than the group the stall held"
+		);
 		let from = after_first_video(&clean, 4_000_000);
 		let (want, got) = (video_behind_audio(&clean, from), video_behind_audio(&skipped, from));
 		if (got - want).abs() > CLOCK_SLACK {
@@ -707,6 +825,45 @@ async fn a_skip_at_the_join_keeps_one_clock() {
 #[tokio::test(start_paused = true)]
 async fn a_skip_while_running_keeps_one_clock() {
 	assert_one_clock(|tick| (6 * GOP + 7..7 * GOP).contains(&tick)).await;
+}
+
+/// A stall of the whole path longer than half the delay but shorter than it, across a group
+/// boundary, loses nothing, though the newer group lands before the older group's tail: the
+/// export waits the whole delay for the tail rather than skip it.
+#[tokio::test(start_paused = true)]
+async fn a_path_stall_within_the_delay_loses_nothing() {
+	let mut lost = Vec::new();
+	for stall in [300, 400, 475].map(Duration::from_millis) {
+		for before in [1, 3] {
+			let mut live = Live::new(1.0, 0).await;
+			let mut leg = live.join(Duration::ZERO).await;
+			live.run(6 * GOP - before, &mut [&mut leg], |_| false);
+			live.stall_path(stall, &mut [&mut leg]);
+			live.run(12 * GOP, &mut [&mut leg], |_| false);
+			let ticks: Vec<u64> = leg
+				.units()
+				.iter()
+				.filter(|unit| unit.pid == VIDEO_PID)
+				.map(|unit| unit.decode / at90(VIDEO_US))
+				.collect();
+			let skipped = ticks.windows(2).filter(|pair| pair[1] != pair[0] + 1).count();
+			let dropped = leg.export.dropped();
+			if dropped > 0 || skipped > 0 || ticks.last().is_none_or(|last| *last < 7 * GOP) {
+				lost.push(format!(
+					"{} ms stall from {before} frames before a boundary: {dropped} dropped, {skipped} skips, \
+					 video {:?}..{:?}",
+					stall.as_millis(),
+					ticks.first(),
+					ticks.last(),
+				));
+			}
+		}
+	}
+	assert!(
+		lost.is_empty(),
+		"a stall within the delay lost content:\n{}",
+		lost.join("\n")
+	);
 }
 
 // A TS source sends its video up to a second ahead of its decode time and its audio just in time,
@@ -941,12 +1098,11 @@ async fn a_successor_settles_held_video_across_a_skip_or_restart() {
 			live.fall_silent(Duration::from_secs(3), &mut [&mut leg]);
 			if restart {
 				live.group.take().unwrap().finish().unwrap();
-				let mut marker = live.video.append_group().unwrap();
+				// A microsecond before the keyframe that resumes: group starts strictly increase.
+				let at = live.tick * VIDEO_US - 1;
+				let mut marker = live.video.append_group(Timestamp::from_micros(at).unwrap()).unwrap();
 				HangContainer::Legacy(crate::container::Kind::Video)
-					.write(
-						&mut marker,
-						&[crate::container::test_util::raw_frame(live.tick * VIDEO_US, b"", true)],
-					)
+					.write(&mut marker, &[crate::container::test_util::raw_frame(at, b"", true)])
 					.unwrap();
 				marker.finish().unwrap();
 			} else {
@@ -1047,12 +1203,12 @@ async fn on_a_scaled_clock(scale: f64, ticks: u64) -> (Duration, u64, Stats) {
 	let mut leg = live.join(Duration::ZERO).await;
 	live.run(ticks, &mut [&mut leg], |_| false);
 
-	let first = leg.out.first().expect("output").1.timestamp.as_micros() as u64;
+	let first = leg.out.first().expect("output").1.timestamp.as_micros().unwrap() as u64;
 	let held: Vec<Duration> = leg
 		.out
 		.iter()
-		.filter(|(_, frame)| frame.timestamp.as_micros() as u64 >= first + 10_000_000)
-		.map(|(sent, frame)| sent.saturating_duration_since(live.sent(frame.timestamp.as_micros() as u64)))
+		.filter(|(_, frame)| frame.timestamp.as_micros().unwrap() as u64 >= first + 10_000_000)
+		.map(|(sent, frame)| sent.saturating_duration_since(live.sent(frame.timestamp.as_micros().unwrap() as u64)))
 		.collect();
 	assert!(held.len() > 1_000, "too little output to judge: {}", held.len());
 	let spread = *held.iter().max().unwrap() - *held.iter().min().unwrap();
@@ -1102,6 +1258,98 @@ async fn a_source_far_off_real_time_fails_within_seconds() {
 	live.run(10_000_000 / VIDEO_US, &mut [&mut leg], |_| false);
 }
 
+// A padded output writes every slot of its grid, so a sink that stops reading, or reads slower
+// than the multiplex rate, would otherwise face every slot it missed at once, and the backlog's
+// own wait would read to the jitter buffer as a source clock running far slow.
+
+/// How far a padded export may fall behind before it sheds: half the delay.
+const BUDGET: Duration = Duration::from_millis(DELAY.as_millis() as u64 / 2);
+
+/// How long after the source's clock each slot written at or after `from` went out.
+fn holds(live: &Live, leg: &Leg, from: Instant) -> Vec<Duration> {
+	leg.out
+		.iter()
+		.filter(|(sent, _)| *sent >= from)
+		.map(|(sent, frame)| sent.saturating_duration_since(live.sent(frame.timestamp.as_micros().unwrap() as u64)))
+		.collect()
+}
+
+/// How many PCRs flag a discontinuity in the slots written at or after `from`.
+fn flagged(leg: &Leg, from: Instant) -> usize {
+	leg.out
+		.iter()
+		.filter(|(sent, _)| *sent >= from)
+		.flat_map(|(_, frame)| frame.payload.chunks(188).map(<[u8]>::to_vec).collect::<Vec<_>>())
+		.filter(|packet| packet[3] & 0x20 != 0 && packet[4] > 0 && packet[5] & 0x10 != 0 && packet[5] & 0x80 != 0)
+		.count()
+}
+
+/// A sink that blocks for ten seconds resumes on the current slot, the jump flagged once, rather
+/// than being handed every slot it missed.
+#[tokio::test(start_paused = true)]
+async fn a_blocked_sink_resumes_on_the_current_slot() {
+	let mut live = Live::new(1.0, 0).await;
+	let mut leg = live.join(Duration::ZERO).await;
+	live.run(10 * GOP, &mut [&mut leg], |_| false);
+	let normal = *holds(&live, &leg, live.start).iter().max().unwrap();
+
+	let resume = kio::clock::now().saturating_add(Duration::from_secs(10));
+	leg.busy = Some(resume);
+	live.run(10 * GOP + 10_000_000 / VIDEO_US + 10 * GOP, &mut [&mut leg], |_| false);
+
+	let burst = leg.out.iter().filter(|(sent, _)| *sent == resume).count();
+	let slots = (BUDGET.as_millis() / PCR_INTERVAL.as_millis()) as usize + 2;
+	assert!(
+		burst <= slots,
+		"{burst} slots went out on resuming, past the {slots} the budget holds"
+	);
+	assert_eq!(flagged(&leg, resume), 1, "the jump is flagged once");
+	let worst = *holds(&live, &leg, resume.saturating_add(BUDGET)).iter().max().unwrap();
+	assert!(
+		worst <= normal + PCR_INTERVAL,
+		"held {worst:?} after resuming, {normal:?} before"
+	);
+	assert!(
+		leg.units()
+			.iter()
+			.any(|unit| unit.sent > resume && unit.pid == VIDEO_PID),
+		"video resumed"
+	);
+}
+
+/// A sink draining at half the multiplex rate keeps a bounded lag, shedding what it cannot
+/// write, and never reads to the jitter buffer as a slow source clock. The export lays at most
+/// the budget's worth of missed slots at once, which this sink takes twice as long to write, so
+/// it falls up to a delay behind.
+#[tokio::test(start_paused = true)]
+async fn a_slow_sink_sheds_and_keeps_its_lag() {
+	let mut live = Live::new(1.0, 0).await;
+	let mut leg = live.join(Duration::ZERO).await;
+	live.run(10 * GOP, &mut [&mut leg], |_| false);
+	let normal = *holds(&live, &leg, live.start).iter().max().unwrap();
+
+	let slow = kio::clock::now();
+	leg.sink = Some(MUX_RATE / 2);
+	live.run(10 * GOP + 120_000_000 / VIDEO_US, &mut [&mut leg], |_| false);
+
+	let worst = *holds(&live, &leg, slow).iter().max().unwrap();
+	assert!(
+		worst <= normal + DELAY,
+		"held {worst:?} at half the rate, {normal:?} before"
+	);
+	let video = leg
+		.units()
+		.iter()
+		.filter(|unit| unit.sent > slow && unit.pid == VIDEO_PID)
+		.count();
+	assert!(video > 0, "no video went out");
+	assert_eq!(
+		leg.export.stats().release.out_of_tolerance,
+		0,
+		"the sink read as source drift"
+	);
+}
+
 // A 1+1 pair is two receivers of one broadcast whose outputs a seamless switch compares packet
 // for packet. They join at different times and read with different cadences, and from the moment
 // they overlap they must render the same bytes. The continuity counters are the known exception
@@ -1114,7 +1362,7 @@ fn assert_same_packets(a: &Leg, b: &Leg, from: u64) {
 		leg.out
 			.iter()
 			.map(|(_, frame)| frame.clone())
-			.filter(|frame| frame.timestamp.as_micros() as u64 >= from)
+			.filter(|frame| frame.timestamp.as_micros().unwrap() as u64 >= from)
 			.collect()
 	};
 	let (a, b) = (pick(a), pick(b));
@@ -1161,7 +1409,14 @@ async fn pair_at(rate: u64, scale: f64, lag: i64, ticks: u64, stall: impl Fn(u64
 	let mut b = live.join(Duration::from_millis(100)).await;
 	live.run(ticks, &mut [&mut a, &mut b], stall);
 	live.finish(&mut [&mut a, &mut b]);
-	let joined = b.out.first().expect("the joiner rendered").1.timestamp.as_micros() as u64;
+	let joined = b
+		.out
+		.first()
+		.expect("the joiner rendered")
+		.1
+		.timestamp
+		.as_micros()
+		.unwrap() as u64;
 	(a, b, joined + 2_000_000)
 }
 
@@ -1185,11 +1440,15 @@ async fn two_legs_pad_the_same_slots_at_a_fractional_rate() {
 /// Whatever follows the source's clock has to follow it identically on both legs, though they
 /// joined at different points on it.
 #[tokio::test(start_paused = true)]
-async fn two_legs_render_a_drifting_source_the_same_way() {
-	for scale in [0.9996, 1.0004] {
-		let (a, b, from) = pair(scale, 0, 180_000_000 / VIDEO_US, |_| false).await;
-		assert_same_packets(&a, &b, from);
-	}
+async fn two_legs_render_a_slow_drifting_source_the_same_way() {
+	let (a, b, from) = pair(0.9996, 0, 180_000_000 / VIDEO_US, |_| false).await;
+	assert_same_packets(&a, &b, from);
+}
+
+#[tokio::test(start_paused = true)]
+async fn two_legs_render_a_fast_drifting_source_the_same_way() {
+	let (a, b, from) = pair(1.0004, 0, 180_000_000 / VIDEO_US, |_| false).await;
+	assert_same_packets(&a, &b, from);
 }
 
 // A receiver locks its decoder's clock to the PCR, so the output's system clock is held to
@@ -1209,7 +1468,9 @@ async fn a_joiner_keeps_the_system_clock_in_tolerance() {
 	// The instant each slot first went out, by its PCR time.
 	let mut first = std::collections::BTreeMap::new();
 	for (sent, frame) in &leg.out {
-		first.entry(frame.timestamp.as_micros() as u64).or_insert(*sent);
+		first
+			.entry(frame.timestamp.as_micros().unwrap() as u64)
+			.or_insert(*sent);
 	}
 	let slots: Vec<(u64, Instant)> = first.into_iter().collect();
 	// (window end in seconds of PCR time, the system clock's offset in ppm)
@@ -1258,7 +1519,7 @@ async fn a_joiner_runs_at_the_delay_from_its_first_output() {
 		.out
 		.iter()
 		.map(|(sent, frame)| {
-			let media = frame.timestamp.as_micros() as u64;
+			let media = frame.timestamp.as_micros().unwrap() as u64;
 			sent.saturating_duration_since(live.send_times(media, media).1)
 		})
 		.collect();

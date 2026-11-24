@@ -29,8 +29,8 @@ the methods exactly as moq-net has them today.
   - Requests: a broadcast producer's `requests` returns its own
     `broadcast::Requests`, whose `requested_track` yields its own
     `track::Request`, so generic code serves undeclared names (as
-    `moq_crypto::e2ee::broadcast::Requests` does). A
-    `track::Requests`'s `requested_fill` yields its own `track::Fill`, whose
+    `moq_e2ee::broadcast::Requests` does). A
+    `track::Requests`'s `requested_fill` yields its own `track::FillGroups`, whose
     `accept` returns its own group producer and whose `drop_groups` names
     the rest dropped.
   - Pending operations: `track::Consumer::subscribe` resolves to the
@@ -68,7 +68,7 @@ Public API: new moq-net traits, plus the hidden test-wrapper feature. Wire: none
 Decided 2026-10-22 (maintainer): the traits break moq-net's public API, so
 they wait for the breaking release cut.
 
-Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): trait only what adopters call: the broadcast, track, group, and frame producer chain, `track::Consumer` to `Subscriber` to `Ordered`, `requests` with `requested_track`, `tracks`, and datagrams. `Fill`, `Fetching`, and `Resolving` stay concrete until a wrapped consumer needs them.
+Decided 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): trait only what adopters call: the broadcast, track, group, and frame producer chain, `track::Consumer` to `Subscriber` to `Ordered`, `requests` with `requested_track`, `tracks`, and datagrams. `FillGroups`, `Fetching`, and `Resolving` stay concrete until a wrapped consumer needs them.
 
 ## Required
 

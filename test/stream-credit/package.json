@@ -1,0 +1,17 @@
+{
+	"name": "@moq/stream-credit-test",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"check": "bun check --no-script"
+	},
+	"dependencies": {
+		"@moq/net": "workspace:*"
+	},
+	"devDependencies": {
+		"@types/bun": "^1.4.4",
+		"@typescript/lib-dom": "npm:@types/web@^0.0.358",
+		"typescript": "7.0.2",
+		"vite": "^8.3.8"
+	}
+}

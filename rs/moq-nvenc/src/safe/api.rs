@@ -17,9 +17,7 @@ use crate::sys::nvEncodeAPI::{
 
 #[cfg(target_os = "linux")]
 const CANDIDATES: &[&str] = &["libnvidia-encode.so.1", "libnvidia-encode.so"];
-#[cfg(target_os = "windows")]
-const CANDIDATES: &[&str] = &["nvEncodeAPI64.dll", "nvEncodeAPI.dll"];
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+#[cfg(not(target_os = "linux"))]
 const CANDIDATES: &[&str] = &[];
 
 /// An error while loading the NVENC driver API.

@@ -22,14 +22,12 @@ RUN rustup show active-toolchain || rustup toolchain install \
     && curl -LsSf "https://get.nexte.st/$NEXTEST_VERSION/$nextest" | tar zxf - -C "$CARGO_HOME/bin" \
     && cargo nextest --version
 
-ARG CRATES="kio hang moq-auth moq-crypto moq-hls moq-json moq-loc moq-msf moq-mux moq-net moq-pattern moq-quic moq-relay moq-rtmp moq-rtsp moq-sock moq-srt moq-stats moq-tokio moq-uring moq-webrtc moq-cli"
+ARG CRATES="kio hang moq-auth moq-crypto moq-e2ee moq-hls moq-json moq-loc moq-msf moq-mux moq-net moq-pattern moq-quic moq-relay moq-rtmp moq-rtsp moq-sock moq-srt moq-stats moq-tokio moq-uring moq-webrtc moq-cli"
 
 # Path specs, because the lockfile also has published copies of some workspace crates.
-# io-uring compiles the relay's io_uring QUIC workers (`--runtime-io-uring`), which the default features leave out.
-# p2p compiles moq-webrtc's data channel transport and its tests.
 RUN cargo fetch --locked \
     && specs=$(printf -- '-p path+file:///src/rs/%s ' $CRATES) \
-    && cargo build --locked $specs --features moq-relay/io-uring,moq-webrtc/p2p --bins \
-    && cargo test --locked --no-run $specs --features moq-relay/io-uring,moq-webrtc/p2p
+    && cargo build --locked $specs --bins \
+    && cargo test --locked --no-run $specs
 
 ENV CARGO_NET_OFFLINE=true

@@ -19,22 +19,25 @@
 //! only the newest group.
 //!
 //! [`Passthrough`] is the other shape: it publishes the multiplex whole, every packet
-//! verbatim on one track named by the hang catalog's `m2ts` section, for what
+//! verbatim on one track named by [`Mpegts::passthrough`], for what
 //! demultiplexing cannot carry (TS-level scrambling, PSI and SI as authored), and
-//! [`Release`] writes that track back out on a fixed delay.
+//! [`Release`] writes that track back out on a fixed delay. A [`Follower`] carries either
+//! across its broadcast's returns and replacements.
 
 use crate::codec::aac::adts;
 mod damage;
 mod demux;
+mod error;
 mod export;
 mod follower;
 mod health;
 mod import;
 mod mux_rate;
-mod passthrough;
-mod programs;
+pub mod passthrough;
+pub mod programs;
 mod psi;
 mod release;
+pub mod republish;
 mod schedule;
 mod si;
 mod step;
@@ -45,14 +48,19 @@ mod unclaimed;
 // they read as `ts::Catalog`, `ts::Mpegts`, ... instead of stuttering under `catalog`.
 mod catalog;
 
-pub use catalog::{Catalog, Descriptor, Ext, Framing, Mpegts, PesPacket, Program, SiEntry, Track, Verbatim};
+pub use catalog::{
+	Catalog, Descriptor, Ext, Framing, Mpegts, PassthroughTrack, PesPacket, Program, SiEntry, Track, Verbatim,
+};
+pub use error::Error;
 pub use export::Export;
-pub use follower::Follower;
+pub use follower::{Followed, Follower};
 pub use import::*;
 pub use passthrough::Passthrough;
 pub use programs::Programs;
 pub use release::Release;
-pub use step::{Restart, Step};
+pub use republish::{Republish, Republished};
+use step::Restart;
+pub use step::Step;
 
 pub mod stats;
 

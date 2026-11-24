@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { Duration, type Installed, Manual } from "@moq/clock";
+import { Duration, type Installed } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { Time, Track } from "@moq/net";
 import { Consumer } from "./consumer";
 import { encodeFrame, Format, Producer } from "./legacy";
@@ -13,9 +14,15 @@ beforeEach(() => {
 });
 afterEach(() => installed.close());
 
+// A track at hang's microsecond timescale, as `trackInfo` pins it: each group starts at its first
+// frame's timestamp. No publisher max age, so a reader reaches superseded groups.
+function micro(): Track.Producer {
+	return new Track.Producer("rewind").accept({ timescale: Time.Timescale.MICRO, maxAge: null });
+}
+
 function setup() {
-	const track = new Track.Producer("rewind");
-	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
+	const track = micro();
+	const consumer = new Consumer(track.subscribe({ ranges: [{}] }), {
 		format: new Format("video"),
 		delay: { max: Duration.millis(30_000) },
 	});
@@ -23,7 +30,7 @@ function setup() {
 }
 
 function group(track: Track.Producer, timestamps: number[], end?: number) {
-	const group = track.appendGroup();
+	const group = track.appendGroup(Time.Timestamp.fromMicros(timestamps[0]));
 	for (const timestamp of timestamps) {
 		group.writeFrame({
 			timestamp: Time.Timestamp.fromMicros(timestamp),
@@ -64,7 +71,7 @@ test("Consumer accepts a resuming keyframe before the estimated group end", asyn
 });
 
 for (const start of [16_000, 0]) {
-	test(`Producer and Consumer accept the next group starting at ${start}us`, async () => {
+	test(`Producer continues the open group at a keyframe at ${start}us`, async () => {
 		const { track, consumer } = setup();
 		const producer = new Producer(track, new Format("video"));
 		try {
@@ -73,36 +80,21 @@ for (const start of [16_000, 0]) {
 			expect((await frame(consumer))?.group).toBe(0n);
 			await frame(consumer);
 			producer.encode(new Uint8Array([1]), Duration.micros(start), true);
-			expect((await frame(consumer))?.group).toBe(1n);
+			// A keyframe that doesn't start past the newest frame continues the open group.
+			expect((await frame(consumer))?.group).toBe(0n);
 		} finally {
 			consumer.close();
-			producer.close();
+			producer.finish();
 		}
 	});
 }
-
-test("Consumer accepts leading pictures below the previous group's content", async () => {
-	const { track, consumer } = setup();
-	try {
-		group(track, [100_000, 180_000]);
-		await frame(consumer);
-		await frame(consumer);
-		group(track, [200_000, 150_000]);
-		expect((await frame(consumer))?.frame?.timestamp.asMicros()).toBe(200_000);
-		expect((await frame(consumer))?.frame?.timestamp.asMicros()).toBe(150_000);
-	} finally {
-		consumer.close();
-		track.finish();
-		track.close();
-	}
-});
 
 test("Consumer rejects a later frame below the previous group start", async () => {
 	const { track, consumer } = setup();
 	try {
 		group(track, [100_000]);
 		await frame(consumer);
-		const current = track.appendGroup();
+		const current = track.appendGroup(Time.Timestamp.fromMicros(200_000));
 		current.writeFrame({
 			timestamp: Time.Timestamp.fromMicros(200_000),
 			payload: encodeFrame(new Uint8Array([1]), Duration.micros(200_000)),
@@ -121,7 +113,7 @@ test("Consumer rejects a later frame below the previous group start", async () =
 });
 
 test("Producer refuses a rewind before closing the current group", () => {
-	const track = new Track.Producer("rewind");
+	const track = micro();
 	const producer = new Producer(track, new Format("video"));
 	try {
 		producer.encode(new Uint8Array([1]), Duration.micros(100_000), true);
@@ -132,6 +124,6 @@ test("Producer refuses a rewind before closing the current group", () => {
 		producer.encode(new Uint8Array([1]), Duration.micros(150_000), false);
 		expect(() => producer.encode(new Uint8Array([1]), Duration.micros(99_000), false)).toThrow("below");
 	} finally {
-		producer.close();
+		producer.finish();
 	}
 });

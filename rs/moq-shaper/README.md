@@ -148,7 +148,7 @@ delay = "5ms"
 ```
 
 `--profile` takes a file's path, or one of the built-ins in `profiles/`, embedded in the binary. The
-audio-quality lane (`test/audio-quality/`) uses `bursty` and `step`, plus its own flag profiles.
+audio-quality lane (`test/audio-quality/`) uses `bursty`, `step`, and `congestion`, plus its own flag profiles.
 
 | Name | What it models |
 | --- | --- |
@@ -156,6 +156,7 @@ audio-quality lane (`test/audio-quality/`) uses `bursty` and `step`, plus its ow
 | `mild` | A healthy wired LAN: 5ms delay, 5ms sigma, in order. |
 | `bursty` | A paced hop: seven datagrams per 160ms window, released together. |
 | `step` | 5ms for thirty seconds, then 60ms, with no recovery. |
+| `congestion` | A 1 Mbit/s downlink behind a 1s queue that collapses to 16 kbit/s from 25s to 26.5s. |
 | `cellular-step` | A 2 Mbit/s uplink behind a 500ms queue that drops to 500 kbit/s at 10s and recovers at 20s. |
 | `cellular-bursty` | A 2 Mbit/s uplink released in scheduler grants of five datagrams or 20ms, at 1 Mbit/s from 10s to 20s. |
 | `cellular-deep` | A 1 Mbit/s uplink behind a 2s queue that drops to 300 kbit/s at 10s and recovers at 20s. |

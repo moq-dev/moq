@@ -96,7 +96,7 @@ impl Imported {
 	fn all(data: &[u8]) -> Self {
 		let mut imported = Self::new();
 		imported.import.decode(data).unwrap();
-		imported.import.finish().unwrap();
+		imported.import.finish_in_place().unwrap();
 		imported
 	}
 
@@ -114,8 +114,12 @@ impl Imported {
 	/// Every frame on the track carrying `pid`.
 	async fn frames(&self, pid: u16) -> Vec<crate::container::Frame> {
 		let (name, _) = self.entry(pid).expect("a track on the PID");
-		let subscription = moq_net::track::Subscription::default()
-			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(3600)));
+		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+			moq_net::track::Start::Live {
+				min: Some(Duration::from_secs(3600)),
+				max: Some(Duration::from_secs(3600)),
+			},
+		)]);
 		let track = self
 			.consumer
 			.track(&name)

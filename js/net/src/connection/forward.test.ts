@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, jest, spyOn, test } from "bun:test";
-import { Duration, type Installed, Manual } from "@moq/clock";
+import { Duration, type Installed } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import * as Announce from "../announced.ts";
 import { AuthSession } from "../auth_session.ts";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "../broadcast.ts";
@@ -49,6 +50,7 @@ class FakeSession {
 		scope: string;
 		hidden: boolean | undefined;
 		covering: boolean | undefined;
+		claims: boolean | undefined;
 		stream: Announce.Producer;
 	}[] = [];
 
@@ -57,6 +59,9 @@ class FakeSession {
 	 * once for the table, so a second consume is the blind answer to a request.
 	 */
 	readonly consumed = new Map<Path.Valid, BroadcastProducer[]>();
+
+	/** The instance each consume was pinned to, in order. */
+	readonly pins: (Instance.Valid | undefined)[] = [];
 
 	/** Whether each request is synced as it opens, as one with no initial set to wait for is. */
 	syncedAtOnce = false;
@@ -70,19 +75,25 @@ class FakeSession {
 	/** `exclusive` stands in for a peer that refuses overlapping requests. */
 	constructor({ exclusive = false } = {}) {
 		registerWire(this, {
-			consume: (path) => this.consume(path),
+			consume: (path, instance) => this.consume(path, instance),
 			exclusive,
 			leave: () => {},
-			auth: new AuthSession({ peerGrant: { publish: new Path.Patterns(), subscribe: new Path.Patterns() } }),
+			auth: new AuthSession({ peerGrant: { publish: new Path.Prefixes(), subscribe: new Path.Prefixes() } }),
 		});
 		this.closed = new Promise((resolve) => {
 			this.#die = resolve;
 		});
 	}
 
-	routes(scope: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): Announce.Routes {
+	routes(scope: Path.Pattern = Path.Pattern.all(), options?: Announce.RouteOptions): Announce.Routes {
 		const stream = new Announce.Producer();
-		this.requests.push({ scope: scope.text, hidden: options?.hidden, covering: options?.covering, stream });
+		this.requests.push({
+			scope: scope.text,
+			hidden: options?.hidden,
+			covering: options?.covering,
+			claims: options?.claims,
+			stream,
+		});
 		if (this.syncedAtOnce) stream.synced();
 		const consumer = stream.consume();
 		const close = consumer.close.bind(consumer);
@@ -109,7 +120,8 @@ class FakeSession {
 		return found.stream;
 	}
 
-	consume(path: Path.Valid): BroadcastConsumer {
+	consume(path: Path.Valid, instance?: Instance.Valid): BroadcastConsumer {
+		this.pins.push(instance);
 		const producer = new BroadcastProducer();
 		const existing = this.consumed.get(path);
 		if (existing) existing.push(producer);
@@ -145,6 +157,92 @@ function record(stream: Announce.Routes): string[] {
 	})();
 	return events;
 }
+
+// A session can carry another instance's claim at the prefix, which ranks apart from this one:
+// a request through a received route consumes that route's instance, never whichever wins.
+test("a request through a received route consumes that route's instance", async () => {
+	const origin = new OriginProducer();
+	const session = new FakeSession();
+	forwardAnnounced(session.session, origin);
+	const instance = Instance.parse("a");
+	const request = origin.request(Path.from("pool/job"));
+	await settle();
+	start(session.stream("pool/job/**"), "pool/job", { ...WireRoute.default, instance });
+	session.stream("pool/job/**").synced();
+	await settle();
+	expect(request.active.peek()).toBeDefined();
+	expect(session.pins).toEqual([instance]);
+	request.close();
+	session.die();
+	origin.close();
+});
+
+// A lite-07 stream reports each instance's claim at a path as its own route, so the origin holds
+// every candidate: an unpinned request spreads by instance, and one pinned to the claim that
+// does not win still resolves.
+test("the origin holds each instance's claim at a prefix", async () => {
+	const origin = new OriginProducer();
+	const session = new FakeSession();
+	forwardAnnounced(session.session, origin);
+	const a = Instance.parse("a");
+	const b = Instance.parse("b");
+	const watch = origin.routes(Path.Pattern.subtree(Path.from("pool")));
+	await settle();
+	expect(session.requests[0]).toMatchObject({ claims: true });
+	start(session.stream("pool/**"), "pool", { ...WireRoute.default, instance: a, claimed: true });
+	start(session.stream("pool/**"), "pool", { ...WireRoute.default, instance: b, claimed: true });
+	session.stream("pool/**").synced();
+	await settle();
+
+	// `b`'s rendezvous hash wins `pool/job`; see `lite07_ties_match_js` in rs/moq-net.
+	const job = Path.from("pool/job");
+	const unpinned = origin.request(job);
+	await settle();
+	expect(unpinned.active.peek()).toBeDefined();
+	expect(session.pins).toEqual([b]);
+	const pinned = origin.request(job, { instance: a });
+	await settle();
+	expect(pinned.active.peek()).toBeDefined();
+	expect(session.pins).toEqual([b, a]);
+
+	unpinned.close();
+	pinned.close();
+	watch.close();
+	session.die();
+	origin.close();
+});
+
+// A route handed to another request's report of another instance restarts, so its requests
+// consume that instance rather than the one the first report named.
+test("a route handed over to another instance consumes that instance", async () => {
+	const origin = new OriginProducer();
+	const session = new FakeSession();
+	forwardAnnounced(session.session, origin);
+	const a = Instance.parse("a");
+	const b = Instance.parse("b");
+	const narrow = origin.routes(Path.Pattern.subtree(Path.from("a/b")));
+	await settle();
+	start(session.stream("a/b/**"), "a/b/x", { ...WireRoute.default, instance: a, epoch: 0n });
+	session.stream("a/b/**").synced();
+	const broad = origin.routes(Path.Pattern.subtree(Path.from("a")));
+	await settle();
+	start(session.stream("a/**"), "a/b/x", { ...WireRoute.default, instance: b, epoch: 0n });
+	session.stream("a/**").synced();
+	await settle();
+
+	session.stream("a/b/**").close(new Error("namespace rejected"));
+	await settle();
+	const request = origin.request(Path.from("a/b/x"));
+	await settle();
+	expect(request.active.peek()).toBeDefined();
+	expect(session.pins.at(-1)).toBe(b);
+
+	request.close();
+	narrow.close();
+	broad.close();
+	session.die();
+	origin.close();
+});
 
 test("a request discovers an unwatched path and waits for its initial set", async () => {
 	const origin = new OriginProducer();
@@ -592,12 +690,9 @@ test("a request replaced across one coalesced wakeup still gets answered", async
 	origin.close();
 });
 
-test("a scoped origin narrows a root watch to its disjoint literal heads", async () => {
+test("a scoped origin narrows a root watch to its prefixes", async () => {
 	const origin = new OriginProducer();
-	const scoped = origin.scope(
-		Path.empty(),
-		new Path.Patterns(["room/*/chat", "room/nested/**", "other/**"].map(Path.Pattern.parse)),
-	);
+	const scoped = origin.scope(Path.empty(), Path.Prefixes.parse(["room", "room/nested", "other"]));
 	const session = new FakeSession();
 	forwardAnnounced(session.session, scoped);
 
@@ -606,14 +701,14 @@ test("a scoped origin narrows a root watch to its disjoint literal heads", async
 	expect(session.open()).toEqual(["other/**", "room/**"]);
 	all.close();
 
-	// A watch inside a head rides the head's open request, and one outside the scope asks for
-	// nothing.
+	// A watch inside a prefix rides the prefix's open request, and one outside the scope asks
+	// for nothing.
 	let inside = origin.routes(Path.Pattern.subtree(Path.from("room/alice/chat")));
 	const outside = origin.routes(Path.Pattern.subtree(Path.from("elsewhere")));
 	await advance(LINGER);
 	expect(session.open()).toEqual(["room/**"]);
 
-	// With nothing open above it, a watch inside a head asks for itself.
+	// With nothing open above it, a watch inside a prefix asks for itself.
 	inside.close();
 	await advance(LINGER);
 	expect(session.open()).toEqual([]);
@@ -629,17 +724,17 @@ test("a scoped origin narrows a root watch to its disjoint literal heads", async
 
 test("a scoped session filters discovered routes and requests under its root", async () => {
 	const origin = new OriginProducer();
-	const scoped = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.parse("room/*/chat")]));
+	const scoped = origin.scope(Path.from("tenant"), Path.Prefixes.parse(["room/alice/chat", "room/bob/chat"]));
 	const session = new FakeSession();
 	forwardAnnounced(session.session, scoped);
 
 	const all = origin.routes();
 	const events = record(all);
 	await settle();
-	// Session-relative: the scope's root is the session's.
-	expect(session.open()).toEqual(["room/**"]);
-	for (const prefix of ["room/alice/video", "room/alice/chat", "room/bob/chat"])
-		start(session.stream("room/**"), prefix);
+	// Session-relative: the scope's root is the session's, and it asks for each prefix.
+	expect(session.open()).toEqual(["room/alice/chat/**", "room/bob/chat/**"]);
+	start(session.stream("room/alice/chat/**"), "room/alice/chat");
+	start(session.stream("room/bob/chat/**"), "room/bob/chat");
 
 	const allowed = origin.request(Path.from("tenant/room/bob/chat"));
 	const denied = origin.request(Path.from("tenant/room/bob/video"));
@@ -753,7 +848,7 @@ test("a request synced as it opens releases the watcher", async () => {
 
 test("a scoped session refuses blind requests outside its allowed paths", async () => {
 	const origin = new OriginProducer();
-	const scoped = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.parse("room/*/chat")]));
+	const scoped = origin.scope(Path.from("tenant"), Path.Prefixes.parse(["room/bob/chat"]));
 	const session = new FakeSession();
 	forwardAnnounced(session.session, scoped);
 	const allowed = origin.request(Path.from("tenant/room/bob/chat"));

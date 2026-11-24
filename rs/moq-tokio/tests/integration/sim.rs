@@ -6,8 +6,6 @@
 //! bottleneck runs below the track's bitrate behind a deep but finite queue, and the run checks
 //! that the queue overflowed, so the congestion loss came from the sender filling it.
 
-#![cfg(feature = "quic")]
-
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use kio::clock::Instant;
@@ -155,8 +153,8 @@ async fn serve(network: &Network, version: Version, seed: u64) -> Arrivals {
 		driver::endpoint::Endpoint::new(endpoint(seed, 1).with_server(server_config), network.bind(SERVER)).unwrap();
 	let client = driver::endpoint::Endpoint::new(endpoint(seed, 2), network.bind(CLIENT)).unwrap();
 
-	let publisher = origin_producer(1);
-	let viewer = origin_producer(2);
+	let publisher = origin_producer();
+	let viewer = origin_producer();
 	let broadcast = publisher
 		.route("live", moq_net::origin::RouteOptions::hidden())
 		.unwrap();
@@ -207,7 +205,12 @@ async fn serve(network: &Network, version: Version, seed: u64) -> Arrivals {
 		.track("video")
 		.unwrap()
 		// A budget spanning the run, so recovery has to deliver every group, however late.
-		.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(TIMEOUT)))
+		.subscribe(
+			track::Subscription::default().with_ranges([track::Range::from(track::Start::Live {
+				min: Some(TIMEOUT),
+				max: Some(TIMEOUT),
+			})]),
+		)
 		.await
 		.unwrap();
 
@@ -215,7 +218,7 @@ async fn serve(network: &Network, version: Version, seed: u64) -> Arrivals {
 		let mut source = source.clone();
 		while source.subscription_changed().await.unwrap().is_none() {}
 		for sequence in 0..GROUPS {
-			let mut group = source.create_group(moq_net::group::Info { sequence }).unwrap();
+			let mut group = source.create_group(moq_net::group::Info { start: sequence }).unwrap();
 			let timestamp = Timestamp::from_millis(sequence * INTERVAL.as_millis() as u64).unwrap();
 			group.write_frame(timestamp, vec![sequence as u8; FRAME]).unwrap();
 			group.finish().unwrap();
@@ -226,7 +229,7 @@ async fn serve(network: &Network, version: Version, seed: u64) -> Arrivals {
 	let read = async {
 		let mut arrivals = Vec::new();
 		while let Some(mut group) = reader.recv_group().await.unwrap() {
-			let sequence = group.sequence;
+			let sequence = group.start;
 			let frame = group.read_frame().await.unwrap().expect("a group is cut short");
 			assert_eq!(frame.payload.len(), FRAME, "group {sequence} is cut short");
 			assert!(
@@ -286,8 +289,8 @@ fn tls(version: Version) -> (driver::server::Config, driver::client::Config) {
 	)
 }
 
-fn origin_producer(hop: u64) -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+fn origin_producer() -> origin::Producer {
+	let (origin, driver) = origin::Producer::new(origin::Config::default());
 	spawn(driver);
 	origin
 }

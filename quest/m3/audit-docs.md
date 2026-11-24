@@ -7,59 +7,37 @@ undocumented exported symbols are fixed or planned.
 
 ## Plan
 
-Recurs once per major release (decided 2026-10-19). The PR that finishes
-this run also adds the next one with the same file name at the end of m3's `Required`, which the shift after the next cut
-brings into m1. The successor keeps the Goal
-and this paragraph; the rest of its Plan is rewritten with what this run
-learned: baselines, results, and what to check first. The successor also lists the [release cut](/quest/m3/release/cut.md) under `Required`, so it
-waits for the release in flight to ship. Only `/quest-delete` ends the
-recurrence. Fixes land in the run's PR, one commit each, rather than as follow-ups.
-Only a change that needs a maintainer decision (public API, scope) or is
-independently landable and too large to review alongside the rest becomes a
-follow-up through `/quest-plan`.
+Recurs each major release: the PR that finishes a run keeps its results in
+its own body and re-adds this file at the end of m3's `Required`, with its own `Required`
+naming the [release cut](/quest/m3/release/cut.md) and Check first rewritten. Fixes land
+in that PR; only maintainer decisions (public API, scope) and changes too
+large to review alongside become follow-ups.
 
 Follow `doc/AGENTS.md` for what belongs in `doc/`. The docs site deploys from
-`release`, so a page describing an unreleased package (such as `@moq/video`,
-first published by the release cut) is expected to 404 on its registry until
-then. The m1 run (2026-10-21) found the stale claims in pages no PR had touched
-for a while: the root `README.md` crate table, `doc/concept/transport.md`, and
-the codec lists in `doc/bin/rtmp.md` and `srt.md`. Read those kinds of pages
-claim by claim against the code first; the pages recent PRs edit are the
-freshest. Baselines:
+`release`, so a page for a package the cut first publishes 404s on its
+registry until then.
 
-- Rust: 31 crates set `#![warn(missing_docs)]`, including `moq-mux`,
-  `moq-ffi`, and `moq-c` since
-  [#6088](https://github.com/moq-dev/moq/pull/6088) and
-  [#6091](https://github.com/moq-dev/moq/pull/6091); m1 added `moq-shaper`.
-  Count the rest with
-  `cargo rustdoc -p <crate> --lib --all-features -- -W missing_docs`.
-  `moq-auth` is ambiguous with its crates.io copy, so pass its
-  `path+file://` spec. Every linted crate was clean with all features.
-  `moq-audio`, `moq-video`, and `moq-sock` were also clean on Linux but stay
-  unlinted for their macOS, Windows, and Android items. `moq-gst` has 3 items
-  from `gst::plugin_define!`. `moq-v4l` reports 3108, nearly all its generated
-  `sys` bindings; whether the fork earns docs is still undecided.
-- JS: the doc build renders the API reference with TypeDoc and fails on any
-  TypeDoc warning, such as an unresolved link, but not on an undocumented
-  export, so look for those and check that docs say something.
+Previous run: [moq-dev/moq#6170](https://github.com/moq-dev/moq/pull/6170).
+
+### Check first
+
+- Pages no recent PR touched, claim by claim against the code: last run's
+  stale claims were in the root `README.md` crate table,
+  `doc/concept/transport.md`, and the codec lists in `doc/bin/`.
+- Rust: count undocumented items with `cargo rustdoc -p <crate> --lib
+  --all-features -- -W missing_docs` in crates without
+  `#![warn(missing_docs)]`. `moq-auth` needs its `path+file://` spec. Whether
+  `moq-v4l`'s generated `sys` bindings earn docs is still undecided.
+- JS: TypeDoc fails on warnings but not on an undocumented export; look for
+  those.
 - Links: GET (not HEAD) every external URL in `doc/` with a browser user
-  agent. 316 URLs: all answered except placeholder and local hosts, relay
-  URLs that only speak MoQ, npmjs.com and w3.org pages that refuse
-  non-browser clients, and the unreleased items above. Check npm packages on
-  `registry.npmjs.org/<package>` and crates on the crates.io API, since
-  crates.io pages answer 200 to anything. `README.md`'s `moq-c` badge waits on
-  the crate's first publish.
-- CLI: all 68 shell invocations in `doc/`, `README.md`, and
-  `rs/moq-cli/README.md` parse with `--help` appended against a build with
-  `capture,play,transcode,openh264`, after substituting a URL for the
-  elided `moq ...` connect. Unknown flags fail but bad values do not.
-  `gst-inspect-1.0` of a debug `moq-gst` build lists every element and pad
-  property `doc/bin/gstreamer.md` names.
-- Cross-Package Sync: walked from `9b90cdd569` through `7d2a91fe66`. Walk the
-  next run from there. At that baseline, Go could not observe first-dial
-  failures because `Dial` returned only once connected. Every binding now
-  returns a connecting session with one coherent `state()` snapshot; verify
-  first-dial failure observation and Kotlin/Dart wording against that API.
+  agent. Check npm packages on `registry.npmjs.org` and crates on the
+  crates.io API, since crates.io pages answer 200 to anything.
+- CLI: every shell invocation in `doc/`, `README.md`, and
+  `rs/moq-cli/README.md` parses with `--help` appended; `gst-inspect-1.0`
+  lists every property `doc/bin/gstreamer.md` names.
+- Cross-Package Sync: walk the commits since `7d2a91fe66` for a feature one
+  language or binding lacks.
 
 ## Required
 

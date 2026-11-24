@@ -2,17 +2,17 @@ import Foundation
 import MoqFFI
 
 /// What the peer lets this side do, in this side's own paths: the broadcast
-/// patterns it may publish and subscribe to, and `expires` until it lapses.
-/// An empty pattern list grants nothing in that direction; `**` grants everything.
+/// prefixes it may publish and subscribe to, and `expires` until it lapses. Each
+/// prefix covers its path and everything beneath it. An empty list grants nothing
+/// in that direction; the empty prefix `""` grants everything.
 public typealias Grant = MoqFFI.MoqGrant
 
 /// Follows the grant a session's peer gave it. Iterate directly:
 /// `for try await grant in session.grants() { ... }` yields the current grant,
 /// then each change, `nil` while there is none.
 ///
-/// Returned by `Session.grants()`. AUTH is only on `moq-lite-07-wip` and on
-/// moq-transport sessions that negotiate the MoQ Auth extension; elsewhere the
-/// grant stays `nil`. The sequence ends when the session does; cancelling the
+/// Returned by `Session.grants()`. AUTH is only on `moq-lite-07-wip`; elsewhere
+/// the grant stays `nil`. The sequence ends when the session does; cancelling the
 /// consuming task cancels the consumer.
 public final class GrantConsumer: AsyncSequence, Sendable {
     /// The grant emitted by this sequence, `nil` while there is none.
@@ -78,7 +78,6 @@ public final class Tokens: Sendable {
     /// each other one widens the grant over in-band AUTH. The next dial presents them,
     /// and a live session with in-band AUTH presents them at once, withdrawing each
     /// replaced token once its replacements are answered, even when one is refused.
-    /// After an authorization refusal the session redials only if they changed.
     /// - Throws: `MoqError.Config` for an empty token.
     public func set(_ tokens: [String]) throws {
         try ffi.set(tokens: tokens)
@@ -94,5 +93,33 @@ public final class Tokens: Sendable {
     /// calling task.
     public func answered() async throws {
         try await ffi.answered()
+    }
+}
+
+/// A request token a session presents, which a `Route` or `Claim` names with `setAuth`.
+///
+/// Returned by `Session.credential(_:)`. It stays presented until `cancel()`, or until it
+/// is released and no route or claim names it, answered or not.
+public final class Credential: Sendable {
+    let ffi: MoqCredential
+
+    init(_ ffi: MoqCredential) {
+        self.ffi = ffi
+    }
+
+    /// Suspend until the peer's first verdict on the token: return once a peer accepts it, at
+    /// once on moq-transport, where only the requests that name it carry the token.
+    ///
+    /// Throws the peer's refusal as `MoqError.Protocol` carrying its code,
+    /// `MoqError.Unsupported` when nothing can carry a token (moq-lite without AUTH), and
+    /// `MoqError.Cancelled` once `cancel()` ran.
+    public func answered() async throws {
+        try await ffi.answered()
+    }
+
+    /// Release the credential now: withdrawn at once unless a route or claim still names it,
+    /// and every `answered()` call throws `MoqError.Cancelled`.
+    public func cancel() {
+        ffi.cancel()
     }
 }

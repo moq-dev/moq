@@ -25,7 +25,10 @@ import {
 	Epochs,
 	firstEligible,
 	hiddenBelow,
+	holdsOnTie,
 	hooks,
+	mostSpecific,
+	routeHops,
 	scopeCaptures,
 	scopeHead,
 	scopeOverlaps,
@@ -51,16 +54,17 @@ class Scope {
 	static readonly all = new Scope(Path.empty());
 
 	readonly root: Path.Valid;
-	readonly allowed?: Path.Patterns;
+	/** The absolute prefixes this handle reaches; unset for every path. */
+	readonly allowed?: Path.Prefixes;
 
-	constructor(root: Path.Valid, allowed?: Path.Patterns) {
+	constructor(root: Path.Valid, allowed?: Path.Prefixes) {
 		this.root = root;
 		this.allowed = allowed;
 	}
 
-	narrow(root: Path.Valid, patterns: Path.Patterns): Scope {
+	narrow(root: Path.Valid, prefixes: Path.Prefixes): Scope {
 		const joined = Path.encode(Path.join(this.root, root));
-		const rooted = patterns.rooted(joined);
+		const rooted = prefixes.rooted(joined);
 		const allowed = this.allowed?.intersect(rooted) ?? rooted;
 		if (allowed.size === 0) throw new Error("origin scopes do not overlap");
 		return new Scope(joined, allowed);
@@ -68,6 +72,21 @@ class Scope {
 
 	matches(path: Path.Valid): boolean {
 		return this.allowed?.matches(path) ?? true;
+	}
+
+	/**
+	 * Where a claim at the absolute `prefix` is filed, so each place serves its whole subtree:
+	 * the prefix itself when this scope covers it, and otherwise each of its prefixes beneath
+	 * it, with how many segments beneath the claim's prefix it lies. Mirrors rs/moq-net's `filed`.
+	 */
+	filed(prefix: Path.Valid): [Path.Valid, bigint][] {
+		if (!this.allowed || this.allowed.matches(prefix)) return [[prefix, 0n]];
+		const depth = Path.parts(prefix).length;
+		return this.allowed
+			.toArray()
+			.map((member) => member.text as Path.Valid)
+			.filter((at) => Path.check(at) === undefined && Path.hasPrefix(prefix, at))
+			.map((at) => [at, BigInt(Path.parts(at).length - depth)]);
 	}
 
 	path(path: Path.Valid): Path.Valid {
@@ -78,22 +97,22 @@ class Scope {
 
 	prefix(prefix: Path.Valid): Path.Valid {
 		const joined = Path.encode(Path.join(this.root, prefix));
-		if (this.allowed && !this.allowed.overlaps(Path.Pattern.subtree(joined))) {
-			throw new Error("prefix is outside the origin scope");
-		}
+		if (!this.overlaps(joined)) throw new Error("prefix is outside the origin scope");
 		return joined;
 	}
 
-	patterns(pattern: Path.Pattern = Path.Pattern.all()): Path.Patterns {
-		const rooted = new Path.Patterns([pattern.rooted(this.root)]);
-		return this.allowed?.intersect(rooted) ?? rooted;
+	/** The absolute paths a reader's `filter`, relative to the root, lists within this scope. */
+	patterns(filter: Path.Pattern = Path.Pattern.all()): Path.Patterns {
+		const rooted = new Path.Patterns([filter.rooted(this.root)]);
+		return this.allowed?.patterns().intersect(rooted) ?? rooted;
 	}
 
-	/** Omit nested heads because the outer subscription already carries their routes. */
+	/** The root-relative prefixes this scope asks its peer about: its own, already disjoint. */
 	#heads(): Path.Valid[] {
 		if (!this.allowed) return [Path.empty()];
-		const heads = [...new Set([...this.allowed.rebase(this.root)].map(scopeHead))].sort();
-		return heads.filter((head) => !heads.some((other) => other !== head && Path.hasPrefix(other, head)));
+		return [...this.allowed.rebase(this.root)]
+			.map((prefix) => prefix.text as Path.Valid)
+			.filter((head) => Path.check(head) === undefined);
 	}
 
 	#headsCache?: Path.Valid[];
@@ -116,14 +135,23 @@ class Scope {
 		return out;
 	}
 
+	/** Whether this scope allows everything beneath the root-relative `prefix`. */
+	covers(prefix: Path.Valid): boolean {
+		if (!this.allowed) return true;
+		// A peer's prefix may fit the wire alone and overflow once joined: nothing allowed lies there.
+		const path = Path.join(this.root, prefix);
+		return !Path.check(path) && this.allowed.matches(path);
+	}
+
 	/** Whether this scope allows anything beneath the absolute `prefix`. */
 	overlaps(prefix: Path.Valid): boolean {
-		return this.allowed?.overlaps(Path.Pattern.subtree(prefix)) ?? true;
+		return this.allowed?.overlaps(prefix) ?? true;
 	}
 
 	/** The exact paths within this scope, relative to its root. */
-	projectPaths<T>(values: ReadonlyMap<Path.Valid, T> | undefined): ReadonlyMap<Path.Valid, T> | undefined {
-		if (!values || this === Scope.all) return values;
+	projectPaths<T>(values: ReadonlyMap<Path.Valid, T>): ReadonlyMap<Path.Valid, T> {
+		if (this === Scope.all) return values;
+
 		const out = new Map<Path.Valid, T>();
 		for (const [path, value] of values) {
 			if (!this.matches(path)) continue;
@@ -135,22 +163,22 @@ class Scope {
 
 	/**
 	 * The advertisements that may serve this scope, relative to its root. Every prefix at or
-	 * above the root presents as the empty path, most specific first, since that is the order
-	 * a request beneath the root resolves in.
+	 * above the root presents as the empty path, as far above it as its claim is above the root,
+	 * most specific first, since that is the order a request beneath the root resolves in.
 	 */
 	projectRoutes(values: Advertisements | undefined): Advertisements | undefined {
 		if (!values || this === Scope.all) return values;
 		const out = new Map<Path.Valid, readonly Advertised[]>();
 		const covering: [Path.Valid, Advertised[]][] = [];
-		const allowed = this.allowed && [...this.allowed];
+		const allowed = this.allowed;
+		const rootDepth = Path.parts(this.root).length;
 		for (const [path, candidates] of values) {
 			const relative = Path.stripPrefix(this.root, path);
 			const above = relative === null || relative === Path.empty();
 			if (above && !Path.hasPrefix(path, this.root)) continue;
-			const visible = candidates
-				.filter((value) => !allowed || allowed.some((pattern) => advertOverlaps(value, path, pattern)))
-				// The claim moves with the key, so it compares against root-relative requests.
-				.map((value) => (value.claim ? { ...value, claim: value.claim.rebase(this.root) } : value));
+			// A route serves the whole subtree it is filed at, so it may serve this scope when the two overlap.
+			if (allowed && !allowed.overlaps(path)) continue;
+			const visible = candidates;
 			if (visible.length === 0) continue;
 			if (!above) {
 				out.set(relative, visible);
@@ -158,11 +186,22 @@ class Scope {
 			}
 			// Hold the empty path's place in the order until every covering prefix is known.
 			if (covering.length === 0) out.set(Path.empty(), []);
-			// Each keeps its own prefix, so supersession never compares across the merged prefixes.
-			covering.push([path, visible.map((value) => ({ ...value, prefix: path }))]);
+			// Each keeps its own prefix, so supersession never compares across the merged prefixes,
+			// and its claim's own prefix: raised to the root, it is that much further above it.
+			const raised = BigInt(rootDepth - Path.parts(path).length);
+			covering.push([
+				path,
+				visible.map((value) => ({
+					...value,
+					prefix: path,
+					route: raised === 0n ? value.route : { ...value.route, above: (value.route.above ?? 0n) + raised },
+				})),
+			]);
 		}
 		if (covering.length > 0) {
-			covering.sort(([a], [b]) => b.length - a.length);
+			// The most specific claim first, as a request beneath the root resolves, then the deeper filing.
+			const rank = ([, visible]: [Path.Valid, Advertised[]]) => claimDepth(Path.empty(), visible[0].route);
+			covering.sort((a, b) => rank(b) - rank(a) || b[0].length - a[0].length);
 			out.set(
 				Path.empty(),
 				covering.flatMap(([, visible]) => visible),
@@ -170,11 +209,6 @@ class Scope {
 		}
 		return out;
 	}
-}
-
-/** Whether the route advertised at `prefix` may serve any path `pattern` admits. */
-function advertOverlaps(advert: Advertised, prefix: Path.Valid, pattern: Path.Pattern): boolean {
-	return advert.claim ? advert.claim.overlaps(pattern) : scopeOverlaps(pattern, prefix);
 }
 
 /** One segment of the watched-prefix trie, kept while it or anything beneath it is watched. */
@@ -203,24 +237,29 @@ function frontier(node: WatchNode, out: Path.Valid[] = []): Path.Valid[] {
 
 /**
  * Presents advertised prefixes relative to a root. Every prefix at or above the root
- * collapses to the empty path, where the most specific one wins, since that is the route
- * a request beneath the root resolves through.
+ * collapses to the empty path, where the most specific claim wins, then the deeper filing,
+ * since that is the route a request beneath the root resolves through.
  */
 class CoveringRoot {
 	readonly #root: Path.Valid;
-	#covering?: Path.Valid;
+	#covering?: [number, number];
 
 	constructor(root: Path.Valid) {
 		this.#root = root;
 	}
 
-	/** The presented path for `path`, or undefined when it is outside the root or a broader cover. */
-	relative(path: Path.Valid): Path.Valid | undefined {
+	/**
+	 * The presented path for `route` at `path`, or undefined when it is outside the root or a
+	 * more specific cover.
+	 */
+	relative(path: Path.Valid, route: WireRoute): Path.Valid | undefined {
 		const relative = Path.stripPrefix(this.#root, path);
 		if (relative !== null && relative !== Path.empty()) return relative;
 		if (relative === null && !Path.hasPrefix(path, this.#root)) return undefined;
-		if (this.#covering !== undefined && !Path.hasPrefix(this.#covering, path)) return undefined;
-		this.#covering = path;
+		const rank: [number, number] = [claimDepth(path, route), Path.parts(path).length];
+		const covering = this.#covering;
+		if (covering && (rank[0] < covering[0] || (rank[0] === covering[0] && rank[1] < covering[1]))) return undefined;
+		this.#covering = rank;
 		return Path.empty();
 	}
 }
@@ -251,6 +290,11 @@ interface RequestSlot {
 	readonly handles: Set<Once<Error | null>>;
 	/** Pending plain handles, each ending itself once synced discovery leaves it no route. */
 	readonly absent: Set<() => void>;
+	/**
+	 * Called each time the table moves for the path while the slot keeps its route and no takeover
+	 * is pending: the evidence a read stranded on that route waits for.
+	 */
+	readonly moved: Set<() => void>;
 	readonly route: Signal<Resolution | undefined>;
 	/** The front a detached slot took from the table, closed with its last handle. */
 	retired?: broadcast.Consumer;
@@ -270,6 +314,10 @@ interface Resolution {
 	readonly instance?: Instance.Valid;
 	/** The local broadcast or route entry's identity the front came from, when it did. */
 	readonly source?: object;
+	/** Whether the front is the local broadcast, whose word on a track no route news overtakes. */
+	readonly local?: boolean;
+	/** Kept while a cheaper route of the instance has yet to answer: a takeover is pending. */
+	readonly pending?: boolean;
 }
 
 /**
@@ -283,8 +331,6 @@ interface Resolution {
 interface RouteEntry {
 	readonly identity: object;
 	readonly scope: Scope;
-	/** The paths the entry may serve beneath its prefix, when its producer is scoped. */
-	readonly claim?: Path.Patterns;
 	readonly route: Signal<WireRoute>;
 	readonly originated: boolean;
 	readonly server?: ServeState;
@@ -295,6 +341,11 @@ interface RouteEntry {
 	lost: boolean;
 }
 
+/** Whether `entry` may serve a request for `path`. */
+function admits(entry: RouteEntry, path: Path.Valid): boolean {
+	return entry.scope.matches(path);
+}
+
 /** One advertisement at a prefix. `exact` marks an announced local broadcast, which is only its own path. */
 interface Candidate extends Advertised {
 	readonly exact: boolean;
@@ -303,21 +354,31 @@ interface Candidate extends Advertised {
 }
 
 /**
- * Orders advertisements at a prefix: the better route, then a local broadcast on a tie, then
- * fewer hops. A remaining tie is left to the table's newest-first order; see
- * {@link compareRouteCandidates}.
+ * Orders advertisements at a prefix: the most specific claim, then the better route, then a
+ * local broadcast on a tie, then fewer hops. A remaining tie is left to the table's newest-first
+ * order; see {@link compareRouteCandidates}.
  */
 function compareCandidates(a: Candidate, b: Candidate): number {
+	const above = (a.route.above ?? 0n) - (b.route.above ?? 0n);
 	return (
+		(above < 0n ? -1 : above > 0n ? 1 : 0) ||
 		compareRoutes(a.route, b.route) ||
 		Number(b.exact) - Number(a.exact) ||
-		a.route.hops.length - b.route.hops.length
+		routeHops(a.route) - routeHops(b.route)
 	);
 }
 
 /**
+ * How many segments the claim a route at `path` shows has: the path's, less how far above it
+ * the claim is. The most specific claim covering a path wins, however deep it is filed.
+ */
+function claimDepth(path: Path.Valid, route: WireRoute): number {
+	return Path.parts(path).length - Number(route.above ?? 0n);
+}
+
+/**
  * The preferred of `entries` (newest first, at `prefix`) for resolving `path`, not skipped
- * nor superseded: see {@link compareRouteCandidates}, then newest.
+ * nor superseded: see {@link compareRouteCandidates}, then {@link holdsOnTie}.
  */
 function preferredEntry(
 	path: Path.Valid,
@@ -326,7 +387,13 @@ function preferredEntry(
 	skip?: (entry: RouteEntry) => boolean,
 	others: readonly WireRoute[] = [],
 ): RouteEntry | undefined {
-	const eligible = entries.filter((entry) => !skip?.(entry));
+	const admitted = entries.filter((entry) => !skip?.(entry));
+	// The most specific claims are the whole answer: a broader one shown here neither competes
+	// with them nor supersedes them, whatever its epoch.
+	const above = (entry: RouteEntry) => entry.route.peek().above ?? 0n;
+	// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min throws on bigint.
+	const narrowest = admitted.reduce((least, entry) => (above(entry) < least ? above(entry) : least), 2n ** 64n);
+	const eligible = admitted.filter((entry) => above(entry) === narrowest);
 	// `others` compete at the prefix too, such as a broadcast announced here at the path.
 	const epochs = new Epochs([...eligible.map((entry) => entry.route.peek()), ...others]);
 	let best: RouteEntry | undefined;
@@ -337,9 +404,11 @@ function preferredEntry(
 			best = entry;
 			continue;
 		}
+		// Newest first, so an older entry replaces on a tie only where the tie holds the oldest.
 		const a = entry.route.peek();
 		const b = best.route.peek();
-		if (compareRouteCandidates(path, prefix, a, b) < 0) best = entry;
+		const order = compareRouteCandidates(path, prefix, a, b);
+		if (order < 0 || (order === 0 && holdsOnTie(path, prefix, a, b))) best = entry;
 	}
 	return best;
 }
@@ -510,9 +579,9 @@ interface Presented extends Advertised {
 class VersionedSignal<T> extends Signal<T> {
 	version = 0;
 
-	override set(value: T, notify?: boolean): void {
+	override set(value: T, force?: true): void {
 		this.version++;
-		super.set(value, notify);
+		super.set(value, force);
 	}
 }
 
@@ -541,8 +610,8 @@ function retire({ producer, front }: Created): void {
 /** Reactive backing state shared by origin producers and consumers. */
 class OriginState {
 	// Both tables decouple the application producing into the origin from the
-	// connections serving or feeding it. Undefined once the origin closes, so late
-	// writes fail loudly.
+	// connections serving or feeding it. Emptied once the origin closes, after which
+	// `closed` refuses late writes.
 	//
 	// Created is what this endpoint publishes, keyed by exact path, announced or not.
 	// Local is the announced subset, with its route in advertisedLocal: a broadcast
@@ -551,10 +620,10 @@ class OriginState {
 	// newest first. Local and routes stay separate so a session can never announce a
 	// received entry back to a peer, which is what makes an origin shared by both
 	// directions echo-free.
-	created: Map<Path.Valid, Created> | undefined = new Map();
-	local = new VersionedSignal<Map<Path.Valid, broadcast.Consumer> | undefined>(new Map());
-	advertisedLocal = new VersionedSignal<Map<Path.Valid, WireRoute> | undefined>(new Map());
-	routes = new VersionedSignal<Map<Path.Valid, RouteEntry[]> | undefined>(new Map());
+	created = new Map<Path.Valid, Created>();
+	local = new VersionedSignal(new Map<Path.Valid, broadcast.Consumer>());
+	advertisedLocal = new VersionedSignal(new Map<Path.Valid, WireRoute>());
+	routes = new VersionedSignal(new Map<Path.Valid, RouteEntry[]>());
 
 	#snapshotVersion = "";
 	#snapshot: ReadonlyMap<Path.Valid, readonly Candidate[]> = new Map();
@@ -577,14 +646,13 @@ class OriginState {
 	 */
 	candidates(skip?: (entry: RouteEntry) => boolean): Map<Path.Valid, Candidate[]> {
 		const out = new Map<Path.Valid, Candidate[]>();
-		for (const [path, entries] of this.routes.peek() ?? []) {
+		for (const [path, entries] of this.routes.peek()) {
 			const list: Candidate[] = [];
 			for (const entry of entries) {
 				if (skip?.(entry)) continue;
 				list.push({
 					identity: entry.identity,
 					route: entry.route.peek(),
-					claim: entry.claim,
 					exact: false,
 					lost: () => entry.lost,
 				});
@@ -592,10 +660,10 @@ class OriginState {
 			if (list.length > 0) out.set(path, list);
 		}
 		const advertised = this.advertisedLocal.peek();
-		for (const [path, front] of this.local.peek() ?? []) {
+		for (const [path, front] of this.local.peek()) {
 			const local = {
 				identity: front,
-				route: advertised?.get(path) ?? WireRoute.default,
+				route: advertised.get(path) ?? WireRoute.default,
 				exact: true,
 			};
 			const list = out.get(path);
@@ -612,6 +680,7 @@ class OriginState {
 	// Originated advertisements sessions should forward: exact-path announces plus
 	// originated dynamics. Identity is the local front or the route entry, so a
 	// republish diffs as retract-then-announce and a re-price as another active.
+	// Undefined once the origin closes, which ends the sessions publishing it.
 	originated = new Signal<Advertisements | undefined>(new Map());
 
 	// Every open prefix route's server, advertised or not, so the origin's close ends each
@@ -629,7 +698,7 @@ class OriginState {
 	// Paths consumers asked for without waiting for an announcement; attached sessions
 	// answer them with blind subscriptions. Never announced: an answered request is assumed
 	// present, not known live, so it must not read as an availability claim.
-	requests = new Signal<Map<Path.Valid, RequestSlot> | undefined>(new Map());
+	requests = new Signal(new Map<Path.Valid, RequestSlot>());
 
 	// Path-local wakeups for followers, which survive the end of a resolved instance.
 	// A counter rather than the instance: the instance is a plain object, so two routes with
@@ -645,9 +714,6 @@ class OriginState {
 	// An in-place Restart forgets served answers for future requests, but resolved handles
 	// retain their old broadcast without participating in routing or same-instance failover.
 	retained = new WeakSet<RequestSlot>();
-
-	// The sessions withholding hidden broadcasts from their peer; see `hooks.withholdHidden`.
-	withheld = new Signal(0);
 
 	// How many sessions are attached, and how many of those support broadcast discovery.
 	// What backs the public `discovery` getter.
@@ -694,14 +760,14 @@ class OriginState {
 			// Every request watches its own path, so the watches beneath the prefix name exactly
 			// the requests it can settle, without scanning the rest of the table.
 			let node: WatchNode | undefined = this.#watches;
-			for (const part of prefix === Path.empty() ? [] : prefix.split("/")) node = node?.children.get(part);
+			for (const part of Path.parts(prefix)) node = node?.children.get(part);
 			const stack = node ? [node] : [];
 			for (let next = stack.pop(); next; next = stack.pop()) {
 				if (visited.has(next)) continue;
 				visited.add(next);
 				// Children first: settling a request may prune its node.
 				stack.push(...next.children.values());
-				const slot = requests?.get(next.path);
+				const slot = requests.get(next.path);
 				if (slot) for (const absent of [...slot.absent]) absent();
 				// A pinned slot waits detached.
 				for (const other of [...(this.detached.get(next.path) ?? [])]) {
@@ -741,7 +807,7 @@ class OriginState {
 
 	#watchOne(head: Path.Valid): void {
 		let node = this.#watches;
-		for (const part of head === Path.empty() ? [] : head.split("/")) {
+		for (const part of Path.parts(head)) {
 			let child = node.children.get(part);
 			if (!child) {
 				child = { path: Path.join(node.path, part as Path.Valid), parent: node, children: new Map(), count: 0 };
@@ -757,7 +823,7 @@ class OriginState {
 
 	#unwatchOne(head: Path.Valid): void {
 		let node: WatchNode | undefined = this.#watches;
-		for (const part of head === Path.empty() ? [] : head.split("/")) node = node?.children.get(part);
+		for (const part of Path.parts(head)) node = node?.children.get(part);
 		if (!node || node.count === 0) throw new Error("unwatched prefix released");
 		if (--node.count === 0 && !coveredAbove(node)) {
 			for (const narrower of frontier(node)) this.#emit(narrower, true);
@@ -765,7 +831,7 @@ class OriginState {
 		}
 		// Prune the segments nothing watches any more.
 		while (node.parent && node.count === 0 && node.children.size === 0) {
-			node.parent.children.delete(node.path.slice(node.path.lastIndexOf("/") + 1));
+			node.parent.children.delete(Path.parts(node.path).at(-1) ?? "");
 			node = node.parent;
 		}
 	}
@@ -796,7 +862,7 @@ class OriginState {
 	 */
 	refresh(path: Path.Valid): void {
 		this.watchers.get(path)?.version.update((n) => n + 1);
-		const slot = this.requests.peek()?.get(path);
+		const slot = this.requests.peek().get(path);
 		const detached = [...(this.detached.get(path) ?? [])];
 		if (slot) this.reroute(path, slot);
 		for (const other of detached) this.reroute(path, other);
@@ -805,14 +871,14 @@ class OriginState {
 
 	/** Release unanswered requests no wire waiter or local route still needs. */
 	forget(path: Path.Valid): void {
-		const slot = this.requests.peek()?.get(path);
+		const slot = this.requests.peek().get(path);
 		// An empty slot remains joinable until its deferred teardown removes it.
 		const best = slot ? this.bestEntry(path) : undefined;
 		const wanted = best && !this.localWins(path, best) ? best.server : undefined;
 		const failovers = this.detached.get(path);
 		let held: Set<RouteEntry> | undefined;
 		for (const prefix of coveringPrefixes(path)) {
-			for (const entry of this.routes.peek()?.get(prefix) ?? []) {
+			for (const entry of this.routes.peek().get(prefix) ?? []) {
 				const server = entry.server;
 				const pending = server?.pending.get(path);
 				if (!server || !pending || server.demanding.has(path) || server === wanted) continue;
@@ -838,17 +904,26 @@ class OriginState {
 	 * stops serving, it ends, except for an answer retained across an in-place Restart.
 	 */
 	reroute(path: Path.Valid, slot: RequestSlot): void {
+		const before = slot.route.peek()?.source;
+		this.#reroute(path, slot);
+		// Only the same route still winning, with no takeover pending, is news for a read stranded
+		// on it, as the Rust front unstrands only when the selected route is the serving one.
+		const after = slot.route.peek();
+		if (before === undefined || after?.source !== before || after.pending || slot.failover) return;
+		for (const moved of [...slot.moved]) moved();
+	}
+
+	#reroute(path: Path.Valid, slot: RequestSlot): void {
 		if (this.retained.has(slot)) return;
 		const current = slot.route.peek();
-		// Until it resolves, a pinned slot takes the best route of its instance; then it stays on
-		// that instance, like any detached slot.
+		// A pinned slot follows its instance from the start, and a detached one once it resolved.
 		if (slot.pin !== undefined && !(current?.front && current.source)) {
-			this.pick(path, slot, slot.pin);
+			this.follow(path, slot, slot.pin, undefined);
 			return;
 		}
 		if (current?.front && current.source) {
 			if (this.detached.get(path)?.has(slot)) {
-				this.failover(path, slot, current.source, current.instance);
+				this.follow(path, slot, current.instance, current.source);
 				return;
 			}
 			if (!this.serves(path, current.source, current.instance, false)) {
@@ -866,68 +941,51 @@ class OriginState {
 	}
 
 	/**
-	 * Keep a detached slot on its instance: on its own source while that serves, else on another
-	 * route of the same instance, which serves the same bytes, keeping the old front until that one
-	 * answers. Without such a route the slot ends.
+	 * Keep `slot` on `instance` through its cheapest route, as Rust's lookup does whichever
+	 * instance wins `path`: a local broadcast announced under it, else its best route, each serving
+	 * the same bytes. A move to a route that has not answered yet keeps the front `source` gave
+	 * until it does. Without a route a resolved slot ends, and an unresolved one waits, its handles
+	 * ending once discovery syncs. Without an instance, nothing says another source serves the same
+	 * bytes, so the slot stays on `source` until it stops serving.
 	 */
-	failover(path: Path.Valid, slot: RequestSlot, source: object, instance: Instance.Valid | undefined): void {
-		if (this.serves(path, source, instance, true)) {
-			// Its own source serves again: a takeover still pending speaks for nobody.
-			slot.failover = undefined;
-			return;
-		}
-		// A local broadcast announced under the instance serves the same bytes with no round trip.
-		const local = this.local.peek()?.get(path);
-		if (instance !== undefined && local && this.advertisedLocal.peek()?.get(path)?.instance === instance) {
-			slot.failover = undefined;
-			this.retain(path, slot, undefined);
-			slot.route.set({ front: local, instance, source: local });
-			return;
-		}
-		const entry =
-			instance === undefined
-				? undefined
-				: this.bestEntry(
-						path,
-						(candidate) => !candidate.server || candidate.route.peek().instance !== instance,
-					);
-		if (!entry?.server) {
+	follow(
+		path: Path.Valid,
+		slot: RequestSlot,
+		instance: Instance.Valid | undefined,
+		source: object | undefined,
+	): void {
+		// A slot it follows records a pending takeover in `failover`, so one the slot was taken
+		// out of the table with is stale.
+		const current = slot.route.peek();
+		if (current?.pending) slot.route.set({ ...current, pending: false });
+		if (instance === undefined) {
+			if (source && this.serves(path, source, instance, true)) return;
 			this.drop(path, slot, unroutable());
 			return;
 		}
-		const served = entry.server.served.get(path);
-		if (!served || served.closed.peek() !== undefined) {
-			slot.failover = entry;
-			entry.server.enqueue(path);
-			return;
-		}
-		slot.failover = undefined;
-		this.retain(path, slot, served);
-		slot.route.set({ front: served, instance, source: entry.identity });
-	}
-
-	/**
-	 * Resolve a pinned slot that has not resolved yet through the best route of `instance` alone,
-	 * as Rust's lookup does, whichever instance wins `path`. Without one it waits, and its handles
-	 * end once discovery syncs.
-	 */
-	pick(path: Path.Valid, slot: RequestSlot, instance: Instance.Valid): void {
 		const skip = (candidate: RouteEntry) => !candidate.server || candidate.route.peek().instance !== instance;
 		const entry = this.bestEntry(path, skip);
-		const local = this.local.peek()?.get(path);
+		const local = this.local.peek().get(path);
 		if (
 			local &&
-			this.advertisedLocal.peek()?.get(path)?.instance === instance &&
+			this.advertisedLocal.peek().get(path)?.instance === instance &&
 			this.localWins(path, entry, skip)
 		) {
 			slot.failover = undefined;
+			if (source === local) return;
 			this.retain(path, slot, undefined);
-			slot.route.set({ front: local, instance, source: local });
+			slot.route.set({ front: local, instance, source: local, local: true });
 			return;
 		}
 		if (!entry?.server) {
 			slot.failover = undefined;
-			slot.route.set(undefined);
+			if (source) this.drop(path, slot, unroutable());
+			else slot.route.set(undefined);
+			return;
+		}
+		if (entry.identity === source) {
+			// Already on the cheapest: a takeover still pending speaks for nobody.
+			slot.failover = undefined;
 			return;
 		}
 		const served = entry.server.served.get(path);
@@ -935,7 +993,7 @@ class OriginState {
 			// Held by the slot, so the pending request outlives a forget.
 			slot.failover = entry;
 			entry.server.enqueue(path);
-			slot.route.set({ instance });
+			if (!source) slot.route.set({ instance });
 			return;
 		}
 		slot.failover = undefined;
@@ -968,13 +1026,13 @@ class OriginState {
 	 */
 	serves(path: Path.Valid, source: object, instance: Instance.Valid | undefined, exact: boolean): boolean {
 		const matches = (candidate: object) => candidate === source || (!exact && instance !== undefined);
-		const local = this.local.peek()?.get(path);
-		const advertised = this.advertisedLocal.peek()?.get(path);
+		const local = this.local.peek().get(path);
+		const advertised = this.advertisedLocal.peek().get(path);
 		if (local && advertised && advertised.instance === instance && matches(local)) return true;
-		for (const [prefix, entries] of this.routes.peek() ?? []) {
+		for (const [prefix, entries] of this.routes.peek()) {
 			if (!Path.hasPrefix(prefix, path)) continue;
 			for (const entry of entries) {
-				if (!entry.server || !entry.scope.matches(path) || entry.route.peek().instance !== instance) continue;
+				if (!entry.server || !admits(entry, path) || entry.route.peek().instance !== instance) continue;
 				if (matches(entry.identity)) return true;
 			}
 		}
@@ -984,9 +1042,9 @@ class OriginState {
 	/** The publisher instance a request for `path` resolves through, when one serves it. */
 	instance(path: Path.Valid): Served | undefined {
 		const entry = this.bestEntry(path);
-		const local = this.local.peek()?.get(path);
+		const local = this.local.peek().get(path);
 		if (local && this.localWins(path, entry)) {
-			return { identity: local, route: { instance: this.advertisedLocal.peek()?.get(path)?.instance } };
+			return { identity: local, route: { instance: this.advertisedLocal.peek().get(path)?.instance } };
 		}
 		if (!entry?.server) return undefined;
 		return { identity: entry.identity, route: entry.route.peek() };
@@ -998,7 +1056,7 @@ class OriginState {
 	 */
 	retire(path: Path.Valid, slot: RequestSlot): void {
 		this.requests.mutate((map) => {
-			if (map?.get(path) === slot) map.delete(path);
+			if (map.get(path) === slot) map.delete(path);
 		});
 		let detached = this.detached.get(path);
 		if (!detached) {
@@ -1016,7 +1074,7 @@ class OriginState {
 	/** Preserve this route's resolved answers before its server resets for another instance. */
 	restart(entry: RouteEntry): void {
 		for (const path of entry.server?.served.keys() ?? []) {
-			const joined = this.requests.peek()?.get(path);
+			const joined = this.requests.peek().get(path);
 			const slots = [...(this.detached.get(path) ?? [])];
 			if (joined) slots.push(joined);
 			for (const slot of slots) {
@@ -1058,7 +1116,7 @@ class OriginState {
 				this.drop(path, other, err);
 			}
 		}
-		const slot = this.requests.peek()?.get(path);
+		const slot = this.requests.peek().get(path);
 		if (!slot) return;
 		// Only the route the request is waiting on speaks for it; one superseded by another
 		// route or a local broadcast has a moot answer.
@@ -1069,10 +1127,10 @@ class OriginState {
 
 	/** End `slot` with `err`, wherever it is held: it leaves the table and every handle closes. */
 	drop(path: Path.Valid, slot: RequestSlot, err: Error): void {
-		const joined = this.requests.peek()?.get(path) === slot;
+		const joined = this.requests.peek().get(path) === slot;
 		if (joined) {
 			this.requests.mutate((map) => {
-				map?.delete(path);
+				map.delete(path);
 			});
 		}
 		this.detach(path, slot);
@@ -1103,20 +1161,20 @@ class OriginState {
 	refreshPrefix(prefix: Path.Valid): void {
 		for (const [path, watch] of this.watchers) if (Path.hasPrefix(prefix, path)) watch.version.update((n) => n + 1);
 		const detached = [...this.detached].map(([path, slots]) => [path, [...slots]] as const);
-		for (const [path, slot] of [...(this.requests.peek() ?? [])]) {
+		for (const [path, slot] of [...this.requests.peek()]) {
 			if (Path.hasPrefix(prefix, path)) this.reroute(path, slot);
 		}
 		for (const [path, slots] of detached) {
 			if (!Path.hasPrefix(prefix, path)) continue;
 			for (const slot of slots) this.reroute(path, slot);
 		}
-		for (const path of this.requests.peek()?.keys() ?? []) if (Path.hasPrefix(prefix, path)) this.forget(path);
+		for (const path of this.requests.peek().keys()) if (Path.hasPrefix(prefix, path)) this.forget(path);
 		for (const [path] of detached) if (Path.hasPrefix(prefix, path)) this.forget(path);
 	}
 
 	/** Rebuild the publisher-facing originated table after an advertisement write. */
 	rebuildOriginated(): void {
-		if (!this.local.peek() && !this.advertisedLocal.peek() && !this.routes.peek()) {
+		if (this.closed.peek() !== undefined) {
 			this.originated.set(undefined);
 			return;
 		}
@@ -1139,21 +1197,22 @@ class OriginState {
 	/** The preferred entry on the most specific route covering `path`, ignoring skipped entries, if any. */
 	bestEntry(path: Path.Valid, skip?: (entry: RouteEntry) => boolean): RouteEntry | undefined {
 		const routes = this.routes.peek();
-		if (!routes) return undefined;
-		const local = this.local.peek()?.has(path) ? this.advertisedLocal.peek()?.get(path) : undefined;
-		for (const prefix of coveringPrefixes(path)) {
-			const entries = routes.get(prefix);
-			if (!entries) continue;
-			const entry = preferredEntry(
-				path,
-				prefix,
-				entries,
-				(candidate) => !candidate.scope.matches(path) || (skip?.(candidate) ?? false),
-				prefix === path && local ? [local] : [],
-			);
-			if (entry) return entry;
-		}
-		return undefined;
+		const local = this.local.peek().has(path) ? this.advertisedLocal.peek().get(path) : undefined;
+		return mostSpecific(
+			path,
+			(prefix) => {
+				const entries = routes.get(prefix);
+				if (!entries) return undefined;
+				return preferredEntry(
+					path,
+					prefix,
+					entries,
+					(candidate) => !admits(candidate, path) || (skip?.(candidate) ?? false),
+					prefix === path && local ? [local] : [],
+				);
+			},
+			(entry) => entry.route.peek(),
+		);
 	}
 
 	/**
@@ -1166,16 +1225,21 @@ class OriginState {
 	 * announced locally at `path`.
 	 */
 	localWins(path: Path.Valid, entry: RouteEntry | undefined, skip?: (entry: RouteEntry) => boolean): boolean {
-		const local = this.advertisedLocal.peek()?.get(path);
-		if (!local || !this.local.peek()?.has(path)) return false;
-		if (!entry || !this.routes.peek()?.get(path)?.includes(entry)) return true;
+		const local = this.advertisedLocal.peek().get(path);
+		if (!local || !this.local.peek().has(path)) return false;
+		if (!entry || !this.routes.peek().get(path)?.includes(entry)) return true;
 		const remote = entry.route.peek();
+		// A broadcast exactly here shadows every broader claim shown here, whatever its epoch or
+		// cost: the best claim is that broad only when each one is.
+		if ((remote.above ?? 0n) > 0n) return true;
 		// Within one instance only the higher epoch is eligible, however cheap the other is, so
 		// any route at the path the request could take supersedes the local broadcast, not only
 		// the best one.
-		const rivals = (this.routes.peek()?.get(path) ?? [])
+		const rivals = (this.routes.peek().get(path) ?? [])
 			.filter((candidate) => candidate.scope.matches(path) && !(skip?.(candidate) ?? false))
-			.map((candidate) => candidate.route.peek());
+			.map((candidate) => candidate.route.peek())
+			// A broader claim shown here competes with nothing the local broadcast competes with.
+			.filter((rival) => (rival.above ?? 0n) === 0n);
 		if (superseded(local, rivals)) return false;
 		if (superseded(remote, [local])) return true;
 		return compareRoutes(local, remote) <= 0;
@@ -1192,11 +1256,16 @@ class OriginState {
 	 */
 	route(path: Path.Valid, slot: Pick<RequestSlot, "answer">): Resolution | undefined {
 		const entry = this.bestEntry(path);
-		const local = this.local.peek()?.get(path);
+		const local = this.local.peek().get(path);
 		if (local && this.localWins(path, entry)) {
 			// Nothing reads a remote front the local broadcast replaced, so close its session subscription.
 			this.releaseMaterialized(path);
-			return { front: local, instance: this.advertisedLocal.peek()?.get(path)?.instance, source: local };
+			return {
+				front: local,
+				instance: this.advertisedLocal.peek().get(path)?.instance,
+				source: local,
+				local: true,
+			};
 		}
 
 		let cached = this.materialized.get(path);
@@ -1222,7 +1291,7 @@ class OriginState {
 		entry.server.enqueue(path);
 		// The same instance over another route: the old front serves until the new one answers.
 		const kept = cached?.instance === instance ? cached : undefined;
-		return { front: kept?.front, instance, source: kept?.source };
+		return { front: kept?.front, instance, source: kept?.source, pending: true };
 	}
 }
 
@@ -1249,8 +1318,8 @@ export interface Reader {
 	/** Follow `path` across publisher instances; see {@link Consumer.follow}. */
 	follow(path: Path.Valid, options?: FollowOptions): Following;
 
-	/** The available broadcasts under `scope`, as a live stream; see {@link Consumer.announced}. */
-	announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
+	/** The available broadcasts matching `filter`, as a live stream; see {@link Consumer.announced}. */
+	announced(filter?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 }
 
 /**
@@ -1300,10 +1369,10 @@ export interface RouteOptions {
 	/**
 	 * Serve this stable instance `id` at `epoch`, in place of a freshly minted one.
 	 *
-	 * Only for a publisher that continues the instance's sequence space across restarts,
+	 * Only for a publisher that continues the instance's key space across restarts,
 	 * announcing a higher `epoch` each time, such as a counter persisted on disk. Readers
 	 * stitch every route of one instance together, so a publisher that restarts its group
-	 * sequences under an old instance splices unrelated groups into their tracks. The highest
+	 * keys under an old instance splices unrelated groups into their tracks. The highest
 	 * epoch wins over every older one of the instance, cheaper or not. Naming an instance grants
 	 * nothing: publishing still needs the path's grant.
 	 */
@@ -1346,7 +1415,7 @@ let exactRoute: (producer: Producer, path: Path.Valid, options: RouteOptions, re
 export class Producer implements Table {
 	#state = new OriginState();
 	#scope = Scope.all;
-	#requests?: Getter<ReadonlyMap<Path.Valid, RequestSlot> | undefined>;
+	#requests?: Getter<ReadonlyMap<Path.Valid, RequestSlot>>;
 
 	// Set on a derived handle, which borrows the origin: what it registered, so its close
 	// releases only that. The owner has none, since its close ends the whole origin.
@@ -1358,7 +1427,6 @@ export class Producer implements Table {
 	#reader = makeConsumer(this.#state, this.#scope);
 
 	static {
-		hooks.hiddenWithheld = (origin) => origin.#state.withheld;
 		exactRoute = (producer, path, options, request) => producer.#exact(path, options, request);
 	}
 
@@ -1403,12 +1471,12 @@ export class Producer implements Table {
 	}
 
 	/**
-	 * Narrow this handle to patterns beneath root, presenting paths relative to that root.
-	 * The result borrows the origin; see {@link close}.
+	 * Narrow this handle to `prefixes` beneath `root`, presenting paths relative to that root.
+	 * Each prefix covers its whole subtree. The result borrows the origin; see {@link close}.
 	 */
-	scope(root: Path.Valid, patterns: Path.Patterns): Producer {
+	scope(root: Path.Valid, prefixes: Path.Prefixes): Producer {
 		if (this.#borrowed?.closed) throw new Error("origin handle is closed");
-		const scope = this.#scope.narrow(root, patterns);
+		const scope = this.#scope.narrow(root, prefixes);
 		const producer = new Producer();
 		producer.#state = this.#state;
 		producer.#scope = scope;
@@ -1431,8 +1499,8 @@ export class Producer implements Table {
 	 * This is how local content enters an origin. Fill the broadcast through
 	 * {@link Route.broadcast}. The route serves a fresh random instance, minted here and kept
 	 * for its lifetime, across {@link Route.withdraw} and {@link Route.announce}, since its
-	 * sequences continue: a new route is a new stream that never splices into an old one. A
-	 * publisher that continues one sequence space across restarts may name a stable instance
+	 * keys continue: a new route is a new stream that never splices into an old one. A
+	 * publisher that continues one key space across restarts may name a stable instance
 	 * instead ({@link RouteOptions.instance}).
 	 *
 	 * Announced at once unless created {@link RouteOptions.hidden | hidden}. A hidden route
@@ -1455,8 +1523,8 @@ export class Producer implements Table {
 		path = this.#scope.path(path);
 		if (this.#borrowed?.closed) throw new Error("origin handle is closed");
 		publishPath(path);
+		if (this.#state.closed.peek() !== undefined) throw new Error("origin is closed");
 		const created = this.#state.created;
-		if (!created) throw new Error("origin is closed");
 		// Normalized first, so a bad cost throws before anything is created.
 		let info = WireRoute.normalize({
 			instance: options.instance?.id ?? Instance.random(),
@@ -1474,7 +1542,7 @@ export class Producer implements Table {
 		const producer = new broadcast.Producer();
 		hooks.stampPath(producer, path);
 		const front = producer.consume();
-		const announced = () => this.#state.local.peek()?.get(path) === front;
+		const announced = () => this.#state.local.peek().get(path) === front;
 		// The claim moves on before the retraction reroutes anything, so no request resolving the
 		// claim in this step is answered under the ended stream.
 		const retract = () => {
@@ -1538,7 +1606,7 @@ export class Producer implements Table {
 		};
 		const change = (next: WireRoute) => {
 			if (producer.closed.peek() !== undefined) throw new Error("broadcast is closed");
-			if (!this.#state.created) throw new Error("origin is closed");
+			if (this.#state.closed.peek() !== undefined) throw new Error("origin is closed");
 			info = next;
 			if (announced()) this.#advertiseExact(path, front, info);
 		};
@@ -1557,7 +1625,7 @@ export class Producer implements Table {
 			change: (update) => change(WireRoute.normalize({ ...info, ...update })),
 			close: release,
 			end: release,
-			info: () => (announced() ? this.#state.advertisedLocal.peek()?.get(path) : undefined),
+			info: () => (announced() ? this.#state.advertisedLocal.peek().get(path) : undefined),
 			update: (next) => {
 				const named = WireRoute.normalize(next);
 				info = named.instance === undefined ? { ...named, instance: info.instance, epoch: info.epoch } : named;
@@ -1569,26 +1637,26 @@ export class Producer implements Table {
 	}
 
 	#advertiseExact(path: Path.Valid, front: broadcast.Consumer, route: WireRoute): void {
-		if (!this.#state.local.peek()) throw new Error("origin is closed");
-		if (this.#state.created?.get(path)?.front !== front) throw new Error("broadcast is closed");
+		if (this.#state.closed.peek() !== undefined) throw new Error("origin is closed");
+		if (this.#state.created.get(path)?.front !== front) throw new Error("broadcast is closed");
 		// Both maps move together, so every reader sees the broadcast and its route at once.
 		this.#state.local.mutate((broadcasts) => {
-			broadcasts?.set(path, front);
+			broadcasts.set(path, front);
 		});
 		this.#state.advertisedLocal.mutate((advertised) => {
-			advertised?.set(path, route);
+			advertised.set(path, route);
 		});
 		this.#state.rebuildOriginated();
 		this.#state.refresh(path);
 	}
 
 	#retractExact(path: Path.Valid, front: broadcast.Consumer): void {
-		if (this.#state.local.peek()?.get(path) !== front) return;
+		if (this.#state.local.peek().get(path) !== front) return;
 		this.#state.local.mutate((broadcasts) => {
-			broadcasts?.delete(path);
+			broadcasts.delete(path);
 		});
 		this.#state.advertisedLocal.mutate((advertised) => {
-			advertised?.delete(path);
+			advertised.delete(path);
 		});
 		this.#state.rebuildOriginated();
 		this.#state.refresh(path);
@@ -1623,7 +1691,10 @@ export class Producer implements Table {
 		return this.#serving(prefix, info, true, true, !options.hidden);
 	}
 
-	/** Land a route a peer announced, taken as given. Not originated, so a session never announces it back. */
+	/**
+	 * Land a route a peer announced, taken as given. Not originated, so a session never announces it
+	 * back.
+	 */
 	#receive(prefix: Path.Valid, route?: Partial<WireRoute>): Claim {
 		return this.#serving(prefix, WireRoute.normalize(route), false, false, true);
 	}
@@ -1636,16 +1707,32 @@ export class Producer implements Table {
 		publishPath(prefix);
 		const server = new ServeState(this.#scope.root, prefix);
 		server.onChange = (path) => this.#state.refresh(path);
-		const entry: RouteEntry = {
-			identity: {},
-			scope: this.#scope,
-			claim: this.#scope.allowed?.intersect(new Path.Patterns([Path.Pattern.subtree(prefix)])),
-			route: new Signal(route),
-			originated,
-			server,
-			lost: false,
+		// Filed where the scope lets it serve whole subtrees, each place as many segments above
+		// its path as the claim is broader: one claim, with one identity and one server.
+		const identity = {};
+		let current = route;
+		const lowered = (route: WireRoute, below: bigint): WireRoute =>
+			below === 0n ? route : { ...route, above: (route.above ?? 0n) + below };
+		const filed = this.#scope.filed(prefix).map(([at, below]) => {
+			const entry: RouteEntry = {
+				identity,
+				scope: this.#scope,
+				route: new Signal(lowered(route, below)),
+				originated,
+				server,
+				lost: false,
+			};
+			return { at, below, entry };
+		});
+		if (filed.length === 0) throw new Error("prefix is outside the origin scope");
+		server.onReject = (path, err) => {
+			const place = filed.find(({ at }) => Path.hasPrefix(at, path));
+			if (place) this.#state.refuse(path, place.entry, err);
 		};
-		server.onReject = (path, err) => this.#state.refuse(path, entry, err);
+		const refresh = () => {
+			this.#state.rebuildOriginated();
+			for (const { at } of filed) this.#state.refreshPrefix(at);
+		};
 
 		let inserted = false;
 		let ended = false;
@@ -1653,7 +1740,7 @@ export class Producer implements Table {
 		// still marked inserted learns of it here, matching an exact route's "origin is closed".
 		const open = () => {
 			if (ended) throw new Error("claim is closed");
-			if (this.#state.routes.peek()) return;
+			if (this.#state.closed.peek() === undefined) return;
 			inserted = false;
 			throw new Error("origin is closed");
 		};
@@ -1661,44 +1748,45 @@ export class Producer implements Table {
 			open();
 			if (inserted) return;
 			this.#state.routes.mutate((routes) => {
-				const entries = routes?.get(prefix);
-				if (entries) entries.unshift(entry);
-				else routes?.set(prefix, [entry]);
+				for (const { at, entry } of filed) {
+					const entries = routes.get(at);
+					if (entries) entries.unshift(entry);
+					else routes.set(at, [entry]);
+				}
 			});
 			inserted = true;
-			this.#state.rebuildOriginated();
-			this.#state.refreshPrefix(prefix);
+			refresh();
 		};
-		// Take the entry out of the table, then end (or renew) the server before the requests
-		// beneath it reroute, so none of them resolves through an answer it already gave.
+		// Take the entries out of the table, then end (or renew) the server before the requests
+		// beneath them reroute, so none of them resolves through an answer it already gave.
 		const remove = (server: () => void) => {
 			if (inserted) {
 				inserted = false;
 				this.#state.routes.mutate((routes) => {
-					const entries = routes?.get(prefix);
-					if (!entries) return;
-					const index = entries.indexOf(entry);
-					if (index < 0) return;
-					entries.splice(index, 1);
-					if (entries.length === 0) routes?.delete(prefix);
+					for (const { at, entry } of filed) {
+						const entries = routes.get(at);
+						if (!entries) continue;
+						const index = entries.indexOf(entry);
+						if (index < 0) continue;
+						entries.splice(index, 1);
+						if (entries.length === 0) routes.delete(at);
+					}
 				});
 			}
 			server();
-			this.#state.rebuildOriginated();
-			this.#state.refreshPrefix(prefix);
+			refresh();
 		};
+		// A received route torn down by any path (its handle, or the scoped handle it came through)
+		// was lost with its session; only its announcer ending it on the wire withdraws it.
+		let lost = !originated;
 		const release = this.#hold(() => {
+			if (!ended) for (const { entry } of filed) entry.lost = lost;
 			ended = true;
 			this.#state.servers.delete(server);
 			remove(() => server.close());
 		});
-		// A received route its handle closes was lost with its session, unless its announcer ended it.
-		const close = (lost: boolean) => {
-			if (!ended) entry.lost = lost;
-			release();
-		};
 		// A route made after its origin (or this handle) closed is born retracted.
-		if (this.#borrowed?.closed || !this.#state.routes.peek()) {
+		if (this.#borrowed?.closed || this.#state.closed.peek() !== undefined) {
 			ended = true;
 			server.close();
 		} else {
@@ -1711,30 +1799,44 @@ export class Producer implements Table {
 		// served; only readers restart.
 		const update = (next: WireRoute, advance = false) => {
 			open();
-			const previous = entry.route.peek().instance;
+			const previous = current.instance;
 			const restart = inserted && previous !== next.instance;
-			if (restart) this.#state.restart(entry);
-			entry.route.set(next);
+			const renewed = previous !== next.instance || (current.epoch ?? 0n) !== (next.epoch ?? 0n);
+			current = next;
+			for (const { below, entry } of filed) {
+				if (restart) this.#state.restart(entry);
+				entry.route.set(lowered(next, below));
+			}
 			if (previous !== next.instance) {
 				// Wakes a peer's demand pinned to the old instance, which then refuses it.
 				if (advance) server.settled.update((n) => n + 1);
 				else server.reset();
 			}
 			if (!inserted) return;
-			this.#state.rebuildOriginated();
-			this.#state.refreshPrefix(prefix);
-			this.#state.routes.mutate(() => {});
+			// A claim is new when it restarts, so it moves to the newest place and yields a tie
+			// it held to one that kept its instance (see bestCandidate).
+			this.#state.routes.mutate((routes) => {
+				if (!renewed) return;
+				for (const { at, entry } of filed) {
+					const entries = routes.get(at);
+					const index = entries?.indexOf(entry) ?? -1;
+					if (!entries || index <= 0) continue;
+					entries.splice(index, 1);
+					entries.unshift(entry);
+				}
+			});
+			refresh();
 		};
 
 		if (publishes && minted) {
 			server.handoff = {
 				current: () => {
-					const { instance, epoch } = entry.route.peek();
+					const { instance, epoch } = current;
 					return { instance: instance as Instance.Valid, epoch: epoch ?? 0n };
 				},
 				advance: (instance) => {
-					if (ended || !this.#state.routes.peek() || entry.route.peek().instance !== instance) return;
-					update({ ...entry.route.peek(), instance: Instance.random(), epoch: 0n }, true);
+					if (ended || this.#state.closed.peek() !== undefined || current.instance !== instance) return;
+					update({ ...current, instance: Instance.random(), epoch: 0n }, true);
 				},
 			};
 		}
@@ -1742,21 +1844,23 @@ export class Producer implements Table {
 		const publisher = publishes ? this : undefined;
 		return makeClaim(
 			{
-				instance: () => entry.route.peek().instance as Instance.Valid,
+				instance: () => current.instance as Instance.Valid,
 				announce: insert,
 				withdraw: () => {
 					if (ended || !inserted) return;
 					remove(() => server.reset());
 				},
-				announced: () => inserted && this.#state.routes.peek() !== undefined,
-				change: (changed) => update(WireRoute.normalize({ ...entry.route.peek(), ...changed })),
-				close: () => close(!originated),
-				end: () => close(false),
-				info: () => (inserted && this.#state.routes.peek() ? entry.route.peek() : undefined),
+				announced: () => inserted && this.#state.closed.peek() === undefined,
+				change: (changed) => update(WireRoute.normalize({ ...current, ...changed })),
+				close: release,
+				end: () => {
+					lost = false;
+					release();
+				},
+				info: () => (inserted && this.#state.closed.peek() === undefined ? current : undefined),
 				update: (next) => {
 					// A route naming no instance keeps the one it serves.
 					const named = WireRoute.normalize(next);
-					const current = entry.route.peek();
 					update(
 						named.instance === undefined
 							? { ...named, instance: current.instance, epoch: current.epoch }
@@ -1833,7 +1937,7 @@ export class Producer implements Table {
 	 * @internal
 	 */
 	#answer(path: Path.Valid, front: broadcast.Consumer): Dispose | undefined {
-		const slot = this.#state.requests.peek()?.get(path);
+		const slot = this.#state.requests.peek().get(path);
 		if (!slot || slot.answer !== undefined || this.#borrowed?.closed) {
 			front.close();
 			return undefined;
@@ -1879,14 +1983,14 @@ export class Producer implements Table {
 		return this.#reader.follow(path, options);
 	}
 
-	/** The available broadcasts under `scope`, as a live stream; see {@link Consumer.announced}. */
-	announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer {
-		return this.#reader.announced(scope, options);
+	/** The available broadcasts matching `filter`, as a live stream; see {@link Consumer.announced}. */
+	announced(filter?: Path.Pattern, options?: Announce.Options): Announce.Consumer {
+		return this.#reader.announced(filter, options);
 	}
 
-	/** Every route change under `scope`; see {@link Consumer.routes}. @internal */
-	routes(scope?: Path.Pattern, options?: Announce.Options): announce.Routes {
-		return this.#reader.routes(scope, options);
+	/** Every route change matching `filter`; see {@link Consumer.routes}. @internal */
+	routes(filter?: Path.Pattern, options?: Announce.Options): announce.Routes {
+		return this.#reader.routes(filter, options);
 	}
 
 	/**
@@ -1911,15 +2015,15 @@ export class Producer implements Table {
 		// Cleared before the broadcasts close, so each route's synchronous retraction finds
 		// nothing left to rebuild rather than rebuilding the table once per route.
 		const created = this.#state.created;
-		this.#state.created = undefined;
-		this.#state.local.update(() => undefined);
-		this.#state.advertisedLocal.update(() => undefined);
-		for (const entry of created?.values() ?? []) retire(entry);
+		this.#state.created = new Map();
+		this.#state.local.update(() => new Map());
+		this.#state.advertisedLocal.update(() => new Map());
+		for (const entry of created.values()) retire(entry);
 		this.#state.routes.update((routes) => {
-			for (const entries of routes?.values() ?? []) {
+			for (const entries of routes.values()) {
 				for (const entry of entries) entry.server?.close(abort);
 			}
-			return undefined;
+			return new Map();
 		});
 		// A hidden or withdrawn prefix route is out of the table but its handler still waits.
 		for (const server of this.#state.servers) server.close(abort);
@@ -1930,19 +2034,26 @@ export class Producer implements Table {
 			cached.front.close();
 		}
 		this.#state.materialized.clear();
+		// Every open request ends with the origin, pending or resolved, so an await never hangs.
+		const ended: RequestSlot[] = [];
 		this.#state.requests.update((requests) => {
-			for (const slot of requests?.values() ?? []) {
+			for (const slot of requests.values()) {
 				slot.answer?.close();
 				slot.answer = undefined;
 				slot.route.set(undefined);
+				ended.push(slot);
 			}
-			return undefined;
+			return new Map();
 		});
 		for (const [path, slots] of [...this.#state.detached]) {
 			for (const slot of slots) {
 				this.#state.detach(path, slot);
 				slot.route.set(undefined);
+				ended.push(slot);
 			}
+		}
+		for (const slot of ended) {
+			for (const closed of slot.handles) if (closed.peek() === undefined) closed.set(abort ?? null);
 		}
 	}
 }
@@ -1980,6 +2091,15 @@ let requestHandoff: (request: Request) => Handoff | undefined;
 /**
  * An owned request for one publisher instance at a broadcast path; see {@link Consumer.request}.
  *
+ * Await {@link broadcast} for the broadcast, as Rust awaits `request(path)`; read {@link active} and
+ * {@link closed} to follow it reactively instead. The handle is not itself awaitable, so an
+ * `await` or an async return never takes the broadcast out from under the request that owns it.
+ *
+ * ```ts
+ * const request = origin.request(Path.from("room"));
+ * const broadcast = await request.broadcast();
+ * ```
+ *
  * @public
  */
 export class Requesting {
@@ -2002,6 +2122,7 @@ export class Requesting {
 
 	#dispose: Dispose;
 	#disposed = false;
+	#answer?: Promise<broadcast.Consumer>;
 
 	private constructor(
 		path: Path.Valid,
@@ -2019,12 +2140,47 @@ export class Requesting {
 		makeRequesting = (path, active, closed, dispose) => new Requesting(path, active, closed, dispose);
 	}
 
+	/**
+	 * Resolves with the broadcast once {@link active} holds one. Rejects with the error
+	 * {@link closed} carries if the request ends first, such as `Unroutable`, or with a
+	 * `StreamCode.Cancel` error if it closed cleanly: this handle or its origin was closed. The
+	 * answer is fixed by the first call, and every later call gets the same one. The request
+	 * still owns the broadcast, so close the request, not only the broadcast, when done.
+	 */
+	broadcast(): Promise<broadcast.Consumer> {
+		this.#answer ??= answer(this.active, this.closed);
+		return this.#answer;
+	}
+
 	/** Withdraw the request. The path stays routed for any other open request. Idempotent. */
 	close(): void {
 		if (this.#disposed) return;
 		this.#disposed = true;
 		this.#dispose();
 	}
+}
+
+// The first of `active` holding a broadcast or `closed` settling, as a promise.
+function answer(
+	active: Getter<broadcast.Consumer | undefined>,
+	closed: GetPromise<Error | null>,
+): Promise<broadcast.Consumer> {
+	return new Promise((resolve, reject) => {
+		let done = false;
+		const stops: Dispose[] = [];
+		const check = () => {
+			if (done) return;
+			const ended = closed.peek();
+			const value = ended === undefined ? active.peek() : undefined;
+			if (ended === undefined && !value) return;
+			done = true;
+			for (const stop of stops) stop();
+			if (value) resolve(value);
+			else reject(ended ?? new StreamError(StreamCode.Cancel, { message: "request closed" }));
+		};
+		check();
+		if (!done) stops.push(active.subscribe(check), closed.subscribe(check));
+	});
 }
 
 /**
@@ -2107,21 +2263,13 @@ export class Consumer implements Reader {
 					: new Derived([state.originated], (routes) => scope.projectRoutes(routes)),
 			local: (path, instance) => this.#local(scope.path(path), instance),
 			demand: (path, instance, signal) => this.#demand(scope.path(path), instance, signal),
+			covers: (prefix: Path.Valid) => scope.covers(prefix),
+			allowed: scope.allowed?.rebase(scope.root),
 		});
 	}
 
 	static {
 		makeConsumer = (state, scope) => new Consumer(state, scope);
-		hooks.withholdHidden = (origin) => {
-			const withheld = origin.#state.withheld;
-			withheld.update((count) => count + 1);
-			let held = true;
-			return () => {
-				if (!held) return;
-				held = false;
-				withheld.update((count) => count - 1);
-			};
-		};
 	}
 
 	/** Settles once the origin closes; see {@link Producer.closed}. */
@@ -2157,7 +2305,7 @@ export class Consumer implements Reader {
 	 * @internal
 	 */
 	#routes(path: Path.Valid): boolean {
-		if (this.#state.local.peek()?.has(path)) return true;
+		if (this.#state.local.peek().has(path)) return true;
 		return this.#state.bestEntry(path) !== undefined;
 	}
 
@@ -2169,7 +2317,7 @@ export class Consumer implements Reader {
 	 * session's discovery has synced without a route for it, and can use a session without
 	 * discovery instead. With no session attached, such as between reconnects, it waits. Once resolved it keeps
 	 * that instance, ending when the instance stops serving. Use {@link follow} to move on
-	 * to the next one.
+	 * to the next one. Await the handle for the broadcast, or the error ending it first.
 	 */
 	request(path: Path.Valid, options: RequestOptions = {}): Requesting {
 		return this.#resolve(path, options.instance, false);
@@ -2297,7 +2445,7 @@ export class Consumer implements Reader {
 		const relative = path;
 		path = this.#scope.path(path);
 		const requests = this.#state.requests.peek();
-		if (!requests) {
+		if (this.#state.closed.peek() !== undefined) {
 			// Closed origin: a request that can never resolve ends at once.
 			const closed = new Once<Error | null>();
 			closed.set(this.#state.closed.peek() ?? null);
@@ -2319,6 +2467,7 @@ export class Consumer implements Reader {
 				blind: 0,
 				handles: new Set(),
 				absent: new Set(),
+				moved: new Set(),
 				route: new Signal<Resolution | undefined>(undefined),
 				pin,
 			};
@@ -2329,7 +2478,7 @@ export class Consumer implements Reader {
 				this.#state.detached.set(path, detached);
 			}
 			detached.add(created);
-			this.#state.pick(path, created, pin);
+			this.#state.follow(path, created, pin, undefined);
 		} else if (!slot) {
 			// Seeded through the constructor, so a path the table already routes resolves on the
 			// first read. It must not go through a silent set: that still captures the pre-seed
@@ -2340,11 +2489,12 @@ export class Consumer implements Reader {
 				blind: 0,
 				handles: new Set(),
 				absent: new Set(),
+				moved: new Set(),
 				route: new Signal(this.#state.route(path, {})),
 			};
 			slot = created;
 			this.#state.requests.mutate((map) => {
-				map?.set(path, created);
+				map.set(path, created);
 			});
 		}
 		const closed = new Once<Error | null>();
@@ -2377,7 +2527,7 @@ export class Consumer implements Reader {
 			const front = instance === undefined || resolution?.instance === instance ? offered : undefined;
 			if (logical && source?.instance !== undefined && resolution?.instance === source.instance) {
 				// Between routes of the instance, readers wait for the next one to answer.
-				if (front) logical.serve(front);
+				if (front) logical.serve(front, resolution?.local);
 				else logical.park();
 				return handle;
 			}
@@ -2389,7 +2539,7 @@ export class Consumer implements Reader {
 				// route may answer a re-request with another stream, so nothing re-sources it.
 				const carried = resolution?.instance !== undefined && !Instance.isMinted(resolution.instance);
 				logical = front && carried ? new Front() : undefined;
-				logical?.serve(front as broadcast.Consumer);
+				logical?.serve(front as broadcast.Consumer, resolution?.local);
 				handle = logical ? logical.consumer : front?.clone();
 				if (handle) {
 					hooks.stampPath(handle, relative);
@@ -2427,6 +2577,18 @@ export class Consumer implements Reader {
 			release();
 		};
 		if (!announced) taken.absent.add(absent);
+		// The table moved while the same route may still win: a read stranded on it asks again.
+		// Queued behind the route's own flush, so a route that changed is served first, and
+		// checked again then: a takeover gone pending meanwhile is no news.
+		const moved = () => {
+			const at = route.peek()?.source;
+			queueMicrotask(() => {
+				const now = route.peek();
+				if (released || now?.source !== at || now?.pending || taken.failover) return;
+				logical?.moved();
+			});
+		};
+		taken.moved.add(moved);
 
 		const unsubscribe = route.subscribe((resolution) => {
 			own(resolution);
@@ -2439,6 +2601,7 @@ export class Consumer implements Reader {
 			released = true;
 			unsubscribe();
 			taken.absent.delete(absent);
+			taken.moved.delete(moved);
 			logical?.conclude();
 			logical = undefined;
 			handle?.close();
@@ -2459,13 +2622,13 @@ export class Consumer implements Reader {
 				if (taken.handles.size > 0) return;
 				// A refused slot already tore itself down, and the path may hold a newer one. A
 				// detached slot owns the front it took.
-				if (this.#state.requests.peek()?.get(path) !== taken) {
+				if (this.#state.requests.peek().get(path) !== taken) {
 					this.#state.detach(path, taken);
 					this.#state.forget(path);
 					return;
 				}
 				this.#state.requests.mutate((map) => {
-					map?.delete(path);
+					map.delete(path);
 				});
 				taken.answer?.close();
 				taken.answer = undefined;
@@ -2480,31 +2643,32 @@ export class Consumer implements Reader {
 	}
 
 	/**
-	 * The paths announced matching `scope`, each reported as it becomes present or absent:
-	 * every currently advertised one arrives first as `present`. Another instance taking a
-	 * path over keeps it present; {@link follow} it to see the broadcast change.
-	 * Any pattern is accepted. A local broadcast appears once it announces, exactly as a
-	 * peer sees it. Only routes whose literal name matches the scope are listed, unless
-	 * `options.covering` also asks for every dynamic or received route whose subtree
-	 * overlaps it. The stream ends when the origin closes or the consumer is closed. Hidden
-	 * routes are left out unless `options.hidden` opts in (see {@link Announce.Options}).
-	 * While open, it watches the scope's literal head: a `consume` session asks its peer for
-	 * announcements there.
+	 * The paths announced matching `filter` within this handle's scope, each reported as it
+	 * becomes present or absent: every currently advertised one arrives first as `present`.
+	 * Another instance taking a path over keeps it present; {@link follow} it to see the
+	 * broadcast change. The filter is any pattern, relative to the root, and only picks what is
+	 * listed: what the wildcards stood for is each announcement's `captures`. A local broadcast
+	 * appears once it announces, exactly as a peer sees it. Only routes whose literal name
+	 * matches the filter are listed, unless `options.covering` also asks for every dynamic or
+	 * received route whose subtree overlaps it. The stream ends when the origin closes or the
+	 * consumer is closed. Hidden routes are left out unless `options.hidden` opts in (see
+	 * {@link Announce.Options}). While open, it watches the filter's literal head: a `consume`
+	 * session asks its peer for announcements there.
 	 */
-	announced(scope: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): Announce.Consumer {
-		return announce.list(this.routes(scope, options));
+	announced(filter: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): Announce.Consumer {
+		return announce.list(this.routes(filter, options));
 	}
 
 	/**
-	 * Every change to the routes matching `scope`, for code that forwards routes: a re-price
-	 * is an `update`, and another instance serving a path a `restart`. Scope, options and the
-	 * watch are as for {@link announced}.
+	 * Every change to the routes matching `filter`, for code that forwards routes: a re-price
+	 * is an `update`, and another instance serving a path a `restart`. The filter, options and
+	 * the watch are as for {@link announced}.
 	 *
 	 * @internal
 	 */
-	routes(scope: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): announce.Routes {
+	routes(filter: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): announce.Routes {
 		const producer = new announce.Producer();
-		const patterns = this.#scope.patterns(scope);
+		const patterns = this.#scope.patterns(filter);
 		void producer.closed.then(this.#state.watch([...patterns].map(scopeHead)));
 		void this.#runAnnounced(producer, patterns, options?.hidden ?? false, options?.covering ?? false);
 		const consumer = producer.consume();
@@ -2527,13 +2691,13 @@ export class Consumer implements Reader {
 				scopes.find(
 					({ pattern, head }) =>
 						(covering || pattern.matches(path)) &&
-						(candidate.exact ? pattern.matches(path) : advertOverlaps(candidate, path, pattern)) &&
+						(candidate.exact ? pattern.matches(path) : scopeOverlaps(pattern, path)) &&
 						(hidden || !hiddenBelow(head, path)),
 				);
 			const entry = firstEligible(candidates, (candidate) => scopeOf(candidate) !== undefined);
 			const scope = entry && scopeOf(entry);
 			if (!entry || !scope) continue;
-			const relative = rooted.relative(path);
+			const relative = rooted.relative(path, entry.route);
 			if (relative === undefined) continue;
 			next.set(relative, {
 				identity: entry.identity,
@@ -2560,10 +2724,7 @@ export class Consumer implements Reader {
 
 		try {
 			for (;;) {
-				const local = this.#state.local.peek();
-				const advertisedLocal = this.#state.advertisedLocal.peek();
-				const routes = this.#state.routes.peek();
-				if (local === undefined && advertisedLocal === undefined && routes === undefined) break;
+				if (this.#state.closed.peek() !== undefined) break;
 
 				const next = this.#listed(patterns, hidden, covering);
 
@@ -2621,9 +2782,9 @@ export class Consumer implements Reader {
 	 * Resolves through what rebuildOriginated advertised: a peer never sees received routes.
 	 */
 	#local(path: Path.Valid, instance?: Instance.Valid): broadcast.Consumer | undefined {
-		const local = this.#state.local.peek()?.get(path);
+		const local = this.#state.local.peek().get(path);
 		if (!local) return undefined;
-		if (instance !== undefined && this.#state.advertisedLocal.peek()?.get(path)?.instance !== instance)
+		if (instance !== undefined && this.#state.advertisedLocal.peek().get(path)?.instance !== instance)
 			return undefined;
 		// Pinned, it competes only with its own instance's routes, whichever instance wins.
 		const skip = unservable(instance);
@@ -2876,6 +3037,7 @@ export class Route {
 	 * Swap the credential the advertising request carries; see {@link RouteOptions.auth}.
 	 * Undefined advertises under the session's scope. Throws once the route or its broadcast closed.
 	 */
+	// fallow-ignore-next-line unused-class-member
 	setAuth(auth?: Credential): void {
 		this.#control.change({ auth });
 	}
@@ -2972,6 +3134,7 @@ export class Claim {
 	 * Swap the credential the advertising request carries; see {@link RouteOptions.auth}.
 	 * Undefined advertises under the session's scope. Throws once the claim or the origin closed.
 	 */
+	// fallow-ignore-next-line unused-class-member
 	setAuth(auth?: Credential): void {
 		this.#control.change({ auth });
 	}
@@ -3011,9 +3174,11 @@ export class Request {
 	readonly path: Path.Valid;
 
 	#server: ServeState;
-	#done = false;
-	#withdrawn = false;
+	// Answered by the application, or withdrawn by the origin before it was.
+	#state: "pending" | "answered" | "withdrawn" = "pending";
 	#publisher?: Producer;
+	// Settled once the origin withdraws it: nobody waits on its answer any more.
+	#unwanted = new Once<true>();
 
 	private constructor(path: Path.Valid, server: ServeState) {
 		this.path = path;
@@ -3040,10 +3205,20 @@ export class Request {
 		};
 		requestHandoff = (request) => request.#server.handoff;
 		finishRequest = (request, err) => {
-			request.#done = true;
-			request.#withdrawn = true;
+			request.#state = "withdrawn";
+			if (request.#unwanted.peek() === undefined) request.#unwanted.set(true);
 			void err;
 		};
+	}
+
+	/**
+	 * Resolves once no requester waits on the answer any more: each left, or the origin moved
+	 * them to another route. Final: a later requester gets a new request.
+	 */
+	// Public API for a claimant's owner, such as an orchestrator deciding whether to launch work.
+	// fallow-ignore-next-line unused-class-member
+	async unwanted(): Promise<void> {
+		await this.#unwanted;
 	}
 
 	/**
@@ -3053,7 +3228,7 @@ export class Request {
 	 * instance, bound when it first announces or {@link Route.instance} first reads it, so readers that resolved the path through the
 	 * claim keep reading the same stream. Once this route stops being advertised the
 	 * claim moves to a fresh instance, so a job that restarts beneath it is a new stream
-	 * for its restarted sequences, and a request naming the ended instance is refused. Under a
+	 * for its restarted keys, and a request naming the ended instance is refused. Under a
 	 * claim naming its instance, the route mints a fresh one. Closing the route withdraws
 	 * only this path: the claim keeps answering later requests. Created
 	 * visible, the route announces now and answers the requesters waiting on its path. Created
@@ -3065,10 +3240,10 @@ export class Request {
 	 * released or its claim retracted. Otherwise it throws as {@link Producer.route} does.
 	 */
 	route(options: RouteOptions = {}): Route {
-		if (this.#done) throw new Error("request is closed");
+		if (this.#state !== "pending") throw new Error("request is closed");
 		if (!this.#publisher) throw unroutable();
 		const route = exactRoute(this.#publisher, this.path, options, this);
-		this.#done = true;
+		this.#state = "answered";
 		return route;
 	}
 
@@ -3076,26 +3251,27 @@ export class Request {
 	 * Serve a held broadcast under this claim without announcing an exact route.
 	 *
 	 * Takes ownership of a consumer; a producer stays the caller's. Every answer at this
-	 * path belongs to the claim's instance and must continue the same sequences and
+	 * path belongs to the claim's instance and must continue the same keys and
 	 * bytes. Start a new claim for different content, or use {@link route} for a job
 	 * that can restart independently.
 	 */
 	serve(source: broadcast.Producer | broadcast.Consumer): void {
-		if (this.#done) {
+		if (this.#state !== "pending") {
 			// A withdrawn request takes no answer. Only the handed-off consumer is ours;
 			// the application still owns its producer and any other consumers.
-			if (this.#withdrawn && source instanceof broadcast.Consumer) source.close();
+			if (this.#state === "withdrawn" && source instanceof broadcast.Consumer) source.close();
 			return;
 		}
-		this.#done = true;
+		this.#state = "answered";
 		const front = source instanceof broadcast.Producer ? source.consume() : source;
 		this.#server.accept(this, front);
 	}
 
 	/** Reject the request, resolving every awaiting requester with `err`. */
 	reject(err: Error): void {
-		if (this.#done) return;
-		this.#done = true;
+		if (this.#state !== "pending") return;
+		this.#state = "answered";
+
 		this.#server.reject(this, err);
 	}
 }

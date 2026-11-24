@@ -385,9 +385,9 @@ int main(void)
 	moq_dispatcher dispatcher = {loop_dispatch, loop_shutdown, NULL};
 	moq_set_dispatcher(&dispatcher);
 
-	/* Only the defaults carry moq-net's zero delay; a bare record leaves both bounds unset. */
+	/* Only the defaults carry moq-net's zero max delay, with no min; a bare record leaves both unset. */
 	moq_subscription *defaults = moq_subscription_defaults();
-	CHECK(defaults->delay.min.has_value && defaults->delay.min.value == 0);
+	CHECK(!defaults->delay.min.has_value);
 	CHECK(defaults->delay.max.has_value && defaults->delay.max.value == 0);
 	moq_subscription_free(defaults);
 	moq_subscription bare = moq_subscription_default();
@@ -495,11 +495,10 @@ int main(void)
 	result reading = {0};
 	task = moq_track_consumer_read_frame(consumer, on_frame, &reading);
 	const uint8_t hello[] = {'h', 'e', 'l', 'l', 'o'};
-	moq_frame frame = moq_frame_default();
-	frame.payload.data = hello;
-	frame.payload.len = sizeof(hello);
-	moq_timestamp timestamp = {1000, 1000000};
-	frame.timestamp = &timestamp;
+	moq_frame frame = {
+		.payload = {.data = hello, .len = sizeof(hello)},
+		.timestamp = {.value = 1000, .scale = {.has_value = true, .value = 1000000}},
+	};
 	ok(moq_track_producer_write_frame(track, &frame), "write_frame");
 	moq_frame *received = await(&reading, "read_frame");
 	moq_task_free(task);
@@ -507,7 +506,8 @@ int main(void)
 	CHECK(received->payload.len == sizeof(hello));
 	CHECK(memcmp(received->payload.data, hello, sizeof(hello)) == 0);
 	/* Lite-07 carries both the Implementation parameter and frame timestamps, at any scale. */
-	CHECK(received->timestamp && received->timestamp->value * 1000000 == 1000 * received->timestamp->scale);
+	CHECK(received->timestamp.scale.has_value &&
+	      received->timestamp.value * 1000000 == 1000 * received->timestamp.scale.value);
 	moq_frame_free(received);
 	CHECK(!cancelled.done);
 
@@ -549,9 +549,8 @@ int main(void)
 	moq_route_free(route);
 	moq_origin_producer_free(origin);
 
-	/* A first dial that keeps failing still returns the session, whose state names each failed
-     * attempt while it retries, then ends closed once cancelled; the server is gone, so every
-     * dial fails. */
+	/* A first dial that fails still returns the session, whose state ends closed with the
+     * dial's error rather than retrying; the server is gone, so the dial fails. */
 	moq_client_config retry_config = moq_client_config_default();
 	retry_config.timeout.has_value = true;
 	retry_config.timeout.value = 100000000; /* 100ms */
@@ -561,20 +560,15 @@ int main(void)
 	ok(moq_client_new(&retry_config, &retrying), "client new");
 	result dialing = {0};
 	task = moq_client_connect(retrying, url, on_session, &dialing);
-	moq_session *redialing = await(&dialing, "retrying connect");
+	moq_session *redialing = await(&dialing, "failing connect");
 	moq_task_free(task);
 	moq_connection_state *state = moq_session_state(redialing);
-	CHECK(state->phase.tag == MOQ_CONNECTION_PHASE_CONNECTING);
-	while (!state->phase.connecting.failure) {
-		state = next_state(redialing, state);
-		CHECK(state->phase.tag == MOQ_CONNECTION_PHASE_CONNECTING);
-	}
-	CHECK(state->phase.connecting.failure->tag == MOQ_ERROR_CONNECT);
-	CHECK(state->connects == 0);
-	moq_session_cancel(redialing, 0);
 	while (state->phase.tag != MOQ_CONNECTION_PHASE_CLOSED) {
+		CHECK(state->phase.tag == MOQ_CONNECTION_PHASE_CONNECTING);
 		state = next_state(redialing, state);
 	}
+	CHECK(state->phase.closed.failure);
+	CHECK(state->phase.closed.failure->tag == MOQ_ERROR_CONNECT);
 	CHECK(state->connects == 0);
 	moq_connection_state_free(state);
 	moq_session_free(redialing);

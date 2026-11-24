@@ -3,7 +3,6 @@
 //! `POST /<broadcast-path>` accepts a WHEP SDP offer and returns an SDP
 //! answer sourced from the matching MoQ broadcast on the subscribe origin.
 
-use crate::vendor::str0m::Candidate;
 #[cfg(feature = "server")]
 use axum::{
 	Router,
@@ -13,6 +12,7 @@ use axum::{
 	response::{IntoResponse, Response as HttpResponse},
 	routing::post,
 };
+use str0m::Candidate;
 
 use std::time::Duration;
 
@@ -93,7 +93,7 @@ async fn accept_offer(
 	headers: &HeaderMap,
 	body: Bytes,
 ) -> Result<Response> {
-	if !is_sdp(headers) {
+	if !crate::server::is_sdp(headers) {
 		return Err(Error::InvalidSdp("expected Content-Type: application/sdp".into()));
 	}
 	let offer = std::str::from_utf8(&body).map_err(|err| Error::InvalidSdp(err.to_string()))?;
@@ -139,7 +139,8 @@ impl<'a> Request<'a> {
 /// enforced by moq-net exactly as for a native session; the bundled [`Server::subscribe_router`]
 /// passes the server's own (unauthenticated) consumer. It parses the offer,
 /// resolves the broadcast on `subscriber`, restricts the answer to the codecs the
-/// catalog actually has, registers a media session on the shared mux, and
+/// catalog actually has and to at most one audio and one video line (rejecting the
+/// rest, as it does data channels), registers a media session on the shared mux, and
 /// returns the SDP answer plus an opaque `resource_id` for the WHEP `Location`
 /// header. The caller must run the returned [`Response`] to drive the MoQ->RTP
 /// session. Mirrors [`whip::accept`](super::whip::accept).
@@ -158,7 +159,7 @@ pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 		broadcast,
 		offer,
 	} = request;
-	let offer = sdp::parse_offer(offer)?;
+	let (offer, refused) = sdp::parse_offer(offer, sdp::Lines::FirstOfKind)?;
 
 	let source = resolve(subscriber, broadcast).await?;
 	let codecs = source.catalog_codecs();
@@ -170,7 +171,7 @@ pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 	// CodecConfig before accept_offer so the answer intersects the peer's offer
 	// with what the catalog actually has, instead of agreeing to a codec we can't
 	// fulfil; set the mux's known ICE credentials on the same config.
-	let mux = server.mux().await?;
+	let mux = server.mux();
 	let (creds, inbound, registration) = mux.register();
 	let mut rtc = session::rtc_config_with_codecs(&codecs)
 		.set_local_ice_credentials(creds)
@@ -191,7 +192,7 @@ pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 
 	Ok(Response {
 		resource_id: resource_id.clone(),
-		answer: sdp::render_answer(&answer),
+		answer: sdp::render_answer(&answer, &refused),
 		session: crate::server::AcceptedSession {
 			server: server.clone(),
 			resource_id,
@@ -202,15 +203,6 @@ pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 			role: "whep server",
 		},
 	})
-}
-
-#[cfg(feature = "server")]
-fn is_sdp(headers: &HeaderMap) -> bool {
-	headers
-		.get(header::CONTENT_TYPE)
-		.and_then(|v| v.to_str().ok())
-		.map(|v| v.eq_ignore_ascii_case("application/sdp"))
-		.unwrap_or(false)
 }
 
 /// Resolve `path` on the subscribe origin and wait for its first catalog.
@@ -343,7 +335,10 @@ mod tests {
 			.expect("create broadcast");
 		let (sub_origin, _connection, accept) = lazy_client(pub_origin).await;
 
-		let _router = super::router(crate::server::Server::new(Default::default()), sub_origin.consume());
+		let server = crate::server::Server::bind("127.0.0.1:0".parse().unwrap(), Default::default())
+			.await
+			.unwrap();
+		let _router = super::router(server, sub_origin.consume());
 		let missing = kio::clock::timeout(TIMEOUT, sub_origin.consume().request("missing", None))
 			.await
 			.expect("sync timed out");

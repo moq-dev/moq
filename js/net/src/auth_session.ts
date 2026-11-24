@@ -1,29 +1,23 @@
 import { Duration, type Instant, now, sleep, type Wall, wall, yieldNow } from "@moq/clock";
-import { type Dispose, type Getter, Once, race, Signal } from "@moq/signals";
+import { type Dispose, type GetPromise, type Getter, Once, race, Signal } from "@moq/signals";
 import type { Credential, Grant, Issued, Request, Requests } from "./auth.ts";
 import { closeReason, error, ProtocolViolation, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
 import * as Path from "./path.ts";
 import type { Reader, Stream, Writer } from "./stream.ts";
 
-/** Write a grant's patterns as a count and each one's canonical text, the encoding both wires' AUTH_OK share. @internal */
-export async function encodePatterns(w: Writer, patterns: Path.Patterns) {
-	await w.u53(patterns.size);
-	for (const pattern of patterns) await w.string(pattern.text);
+/** Write a grant's prefixes as a count and each one's text, the encoding both wires' AUTH_OK share. @internal */
+export async function encodePrefixes(w: Writer, prefixes: Path.Prefixes) {
+	await w.u53(prefixes.size);
+	for (const prefix of prefixes) await w.string(prefix.text);
 }
 
-/** Read a grant's patterns, refusing any that is invalid or not canonical. @internal */
-export async function decodePatterns(r: Reader): Promise<Path.Patterns> {
+/** Read a grant's prefixes, refusing any that is a wildcard or not a valid path. @internal */
+export async function decodePrefixes(r: Reader): Promise<Path.Prefixes> {
 	const count = await r.u53();
-	const patterns: Path.Pattern[] = [];
-	for (let i = 0; i < count; i++) {
-		const text = await r.string();
-		const pattern = Path.Pattern.parse(text);
-		// Only the canonical spelling is valid, so each pattern has one encoding.
-		if (pattern.text !== text) throw new Error(`non-canonical pattern: ${text}`);
-		patterns.push(pattern);
-	}
-	// Reduce once, so a peer's count never turns into quadratic work.
-	return new Path.Patterns(patterns);
+	const prefixes: Path.Prefix[] = [];
+	for (let i = 0; i < count; i++) prefixes.push(Path.Prefix.parse(await r.string()));
+	// Sort and sweep once, so a peer's count costs n log n whatever its shape.
+	return new Path.Prefixes(prefixes);
 }
 
 /** Whether two grants allow the same paths and lapse together. */
@@ -37,6 +31,7 @@ function grantsEqual(a: Grant | undefined, b: Grant | undefined): boolean {
 /** The session or peer carries no AUTH exchange, or takes no tokens in band. */
 export class Unsupported extends Error {
 	/** The moq-lite session code for this condition. */
+	// fallow-ignore-next-line unused-class-member
 	readonly code = SessionCode.Unsupported;
 	constructor(message = "auth unsupported") {
 		super(message);
@@ -62,32 +57,28 @@ export class Duplicate extends Error {
 export const RETRY_INITIAL = Duration.millis(1000);
 const RETRY_MAX = Duration.millis(30_000);
 
-// Whether a refusal is the acceptor failing to decide rather than its verdict on the token,
-// such as an unreachable auth server or a full verification queue.
-function transient(err: Error | null): boolean {
-	return (
-		err instanceof SessionError &&
-		(err.code === SessionCode.Internal ||
-			err.code === SessionCode.TooManyRequests ||
-			err.code === SessionCode.Timeout)
-	);
+// Whether a token's stream ending with `result` is the peer's verdict on it: a final refusal,
+// Unsupported, or a clean close after a grant. Anything else left the token undecided.
+function isVerdict(refused: Refused | undefined, granted: boolean, result: Error | null): boolean {
+	return refused === "final" || result instanceof Unsupported || (result === null && granted);
 }
 
-// Whether a token's stream ending with `result` is the peer's verdict on it: a refusal that will
-// not pass, Unsupported, or a clean close after a grant. Anything else left the token undecided.
-function isVerdict(refused: boolean, granted: boolean, result: Error | null): boolean {
-	return (refused && !transient(result)) || result instanceof Unsupported || (result === null && granted);
-}
+// How the peer refused the last attempt with a reply: "undecided" when its code says the acceptor
+// failed to decide, so the token is presented again, or "final".
+type Refused = "final" | "undecided";
 
 /** A grant as the wire carries it: the expiry is milliseconds from now. @internal */
 export interface WireGrant {
-	publish: Path.Patterns;
-	subscribe: Path.Patterns;
+	publish: Path.Prefixes;
+	subscribe: Path.Prefixes;
 	expires?: number;
 }
 
-/** One reply read off a presented token's stream. @internal */
-export type WireReply = { grant: WireGrant } | { refused: Error };
+/**
+ * One reply read off a presented token's stream. A refusal is `undecided` when its code says the
+ * acceptor failed to decide, so the token is presented again after a backoff. @internal
+ */
+export type WireReply = { grant: WireGrant } | { refused: Error; undecided: boolean };
 
 /**
  * How one wire carries AUTH, AUTH_OK, and AUTH_ERROR, so moq-lite and moq-transport share
@@ -114,17 +105,17 @@ export interface AuthWire {
 
 /** The paths any of `grants` allows. Reduced once over all of them, not pairwise. */
 function union(grants: Iterable<Grant>): Grant {
-	const publish: Path.Pattern[] = [];
-	const subscribe: Path.Pattern[] = [];
+	const publish: Path.Prefix[] = [];
+	const subscribe: Path.Prefix[] = [];
 	let expires: Wall | undefined;
 	for (const grant of grants) {
-		for (const pattern of grant.publish) publish.push(pattern);
-		for (const pattern of grant.subscribe) subscribe.push(pattern);
+		for (const prefix of grant.publish) publish.push(prefix);
+		for (const prefix of grant.subscribe) subscribe.push(prefix);
 		// The earliest expiry is when the union next shrinks.
 		if (grant.expires !== undefined && (expires === undefined || grant.expires.lt(expires)))
 			expires = grant.expires;
 	}
-	return { publish: new Path.Patterns(publish), subscribe: new Path.Patterns(subscribe), expires };
+	return { publish: new Path.Prefixes(publish), subscribe: new Path.Prefixes(subscribe), expires };
 }
 
 // The transport closed under the stream, which ends the whole session rather than one token.
@@ -160,38 +151,36 @@ class Presented {
 }
 
 /**
- * A token {@link Handle.present} returned before its answer.
+ * A token {@link Handle.present} returned, with what the connection's token rotation reads.
  *
  * @internal
  */
 export interface Pending extends Credential {
-	/** Resolves once a peer accepts the token, or rejects as {@link Handle.add} does. */
 	readonly answered: Promise<void>;
 	/** Whether any session holds a grant for it now, a draining one included. */
 	readonly held: boolean;
+	/** Whether a peer granted it in band: false for a token only a request carries, which {@link answered} also resolves for. */
+	readonly inband: boolean;
 }
 
 /** A token the application added to a {@link Handle}, presented on every session of it. */
 class Token implements Pending {
 	readonly grant = new Signal<Grant | undefined>(undefined);
-	readonly closed: Promise<Error | null>;
 	readonly answered: Promise<void>;
 	readonly bytes: Uint8Array;
 
 	isAnswered = false;
 	ended = false;
+	inband = false;
 
 	#state: HandleState;
-	#close!: (err: Error | null) => void;
+	#closed = new Once<Error | null>();
 	#answer!: () => void;
 	#refuse!: (err: Error) => void;
 
 	constructor(bytes: Uint8Array, state: HandleState) {
 		this.bytes = bytes;
 		this.#state = state;
-		this.closed = new Promise((resolve) => {
-			this.#close = resolve;
-		});
 		this.answered = new Promise((resolve, reject) => {
 			this.#answer = resolve;
 			this.#refuse = reject;
@@ -214,7 +203,11 @@ class Token implements Pending {
 			this.isAnswered = true;
 			this.#refuse(err ?? new Error("withdrawn"));
 		}
-		this.#close(err);
+		this.#closed.set(err);
+	}
+
+	get closed(): GetPromise<Error | null> {
+		return this.#closed;
 	}
 
 	get held(): boolean {
@@ -234,6 +227,8 @@ class HandleState {
 	own = false;
 	/** Set once the handle ends. */
 	closed?: Error;
+	/** The handle's end, for a watcher that outlives its sessions. */
+	readonly end = new Signal<Error | undefined>(undefined);
 	/** Every token the application added that has not ended. */
 	readonly tokens = new Set<Token>();
 	/** Every open session built on this handle, oldest first. */
@@ -312,6 +307,7 @@ class HandleState {
 	abort(err: Error) {
 		if (this.closed) return;
 		this.closed = err;
+		this.end.set(err);
 		for (const token of [...this.tokens]) this.verdict(token, err);
 		if (this.acceptor instanceof RequestQueue) this.acceptor.close();
 	}
@@ -344,6 +340,15 @@ export function ended(handle: Handle): Error | undefined {
 }
 
 /**
+ * When `handle` ends, with why, for a watcher that outlives its sessions.
+ *
+ * @internal
+ */
+export function ending(handle: Handle): Getter<Error | undefined> {
+	return stateOf(handle).end;
+}
+
+/**
  * The tokens this side presents and the grant they earn, across every session built on it.
  *
  * A session made without one creates its own, returned by `Session.auth`, which ends with
@@ -367,25 +372,21 @@ export class Handle {
 	}
 
 	/**
-	 * Present another token on every session of this handle, resolving once a peer answers it.
+	 * Present another token on every session of this handle, returning it at once; its
+	 * {@link Credential.answered} settles on the peer's first verdict, and closing it withdraws
+	 * it, answered or not.
 	 *
 	 * With no session live it waits for the next one. A refusal that may pass, such as an
 	 * unreachable auth server, is presented again after a backoff on moq-lite, and so is a token
-	 * whose stream the peer drops without a verdict. Rejects with
-	 * {@link Unsupported} when a session neither carries AUTH nor lets a request carry a token
-	 * (moq-lite without AUTH), with the peer's refusal as an `Error.Session`, or with the
-	 * handle's end. On moq-transport without AUTH it resolves at once with no grant: only a
-	 * request whose route names it carries it.
+	 * whose stream the peer drops without a verdict. Throws once the handle ended, or while its
+	 * own session drains with no successor.
 	 */
-	async add(token: string | Uint8Array): Promise<Credential> {
-		const added = this.present(token);
-		await added.answered;
-		return added;
+	add(token: string | Uint8Array): Credential {
+		return this.present(token);
 	}
 
 	/**
-	 * Present another token like {@link add}, returning it at once with its answer, so it can be
-	 * withdrawn before the peer answers.
+	 * Present another token like {@link add}, returning what the token rotation reads.
 	 *
 	 * @internal
 	 */
@@ -445,7 +446,7 @@ class PeerRequest implements Request {
 		this.#issued = issued;
 	}
 
-	get closed(): Promise<Error | null> {
+	get closed(): GetPromise<Error | null> {
 		return this.#issued.closed;
 	}
 
@@ -469,8 +470,7 @@ class PeerRequest implements Request {
 
 /** Our side of one of the peer's tokens: the grant we issued and its stream. */
 class IssuedGrant implements Issued {
-	ended = false;
-	readonly closed: Promise<Error | null>;
+	readonly #closed = new Once<Error | null>();
 	#stream: Stream;
 	#wire: AuthWire;
 	#writes = Promise.resolve();
@@ -484,15 +484,19 @@ class IssuedGrant implements Issued {
 		this.#stream = stream;
 		this.#wire = wire;
 		// The presenter withdraws by closing or cancelling its side.
-		this.closed = wire
-			.withdrawn(stream)
-			.then(
-				() => null,
-				(err: unknown) => (err instanceof StreamError && err.code === StreamCode.Cancel ? null : error(err)),
-			)
-			.finally(() => {
-				this.ended = true;
-			});
+		void wire.withdrawn(stream).then(
+			() => this.#closed.set(null),
+			(err: unknown) =>
+				this.#closed.set(err instanceof StreamError && err.code === StreamCode.Cancel ? null : error(err)),
+		);
+	}
+
+	get closed(): GetPromise<Error | null> {
+		return this.#closed;
+	}
+
+	get ended(): boolean {
+		return this.#closed.peek() !== undefined;
 	}
 
 	#write(write: () => Promise<void>) {
@@ -606,6 +610,17 @@ export interface AuthSessionProps {
 	handle?: Handle;
 	/** Whether the session is draining after a GOAWAY or a local close, which frees its handle for a successor. */
 	draining?: () => boolean;
+	/**
+	 * Whether the peer's SETUP, still to come, is what accepts the connection credential: a
+	 * session without AUTH that is live before its peer has checked the credential.
+	 */
+	awaiting?: boolean;
+	/**
+	 * Whether the version never answers the connection credential (a moq-lite-03/04 client),
+	 * so the peer refuses it only by closing the session. Its credential still counts as
+	 * accepted, but {@link AuthSession.accepted} never says so.
+	 */
+	silent?: boolean;
 }
 
 /**
@@ -640,6 +655,12 @@ export class AuthSession {
 	// #presented by #recount after every change to it or to an `isAnswered`.
 	#setupPending = new Signal(0);
 	#pending = new Signal(0);
+	// The peer's verdict on the connection credential this session presented: null once accepted,
+	// the refusal, or undefined while it has none.
+	#credential = new Signal<Error | null | undefined>(undefined);
+	// Whether the peer said it accepts the connection credential, which a silent version never does.
+	#accepted = new Signal(false);
+	#silent: boolean;
 	#closed = false;
 
 	// Whoever answers the peer's tokens is decided once, after the task that established
@@ -648,14 +669,20 @@ export class AuthSession {
 	#decided = yieldNow();
 
 	/** Throws {@link Duplicate} while `handle` backs another active session, or the handle's end. */
-	constructor({ wire, requests, peerGrant, handle, draining }: AuthSessionProps) {
+	constructor({ wire, requests, peerGrant, handle, draining, awaiting, silent }: AuthSessionProps) {
 		this.handle = handle ?? ownHandle();
 		this.#state = stateOf(this.handle);
 		this.#wire = wire;
 		this.#requests = requests ?? false;
 		this.#peerGrant = peerGrant;
 		this.#draining = draining ?? (() => false);
+		this.#silent = silent ?? false;
 		this.#state.attach(this);
+		// A session without AUTH has the peer's acceptance with its handshake, unless it awaits its SETUP.
+		if (!wire && !awaiting) {
+			this.#credential.set(null);
+			if (!silent) this.#accepted.set(true);
+		}
 
 		// Present the connection's own credential right away, so both sides learn their
 		// grant without waiting on the app.
@@ -666,6 +693,39 @@ export class AuthSession {
 	/** Whether the session still takes new work: open, neither closing nor past a GOAWAY. */
 	get active(): boolean {
 		return !this.#closed && !this.#draining();
+	}
+
+	/**
+	 * The peer's verdict on the connection credential this session presented: `null` once it
+	 * accepted it, its refusal, or undefined while it has none, which the session ending leaves
+	 * to the session's own close.
+	 */
+	get credential(): Getter<Error | null | undefined> {
+		return this.#credential;
+	}
+
+	/**
+	 * Whether the peer said it accepts the connection credential: with its handshake, its SETUP,
+	 * or the AUTH_OK to the connection's own credential (moq-lite-07). Never on a silent version.
+	 * The session ending leaves it as it was.
+	 */
+	get accepted(): Getter<boolean> {
+		return this.#accepted;
+	}
+
+	/**
+	 * Whether the version never answers the connection credential (a moq-lite-03/04 client), so
+	 * only uptime suggests the peer took it.
+	 */
+	get silent(): boolean {
+		return this.#silent;
+	}
+
+	/** The peer's SETUP arrived, so it accepted the connection credential a session without AUTH presented. */
+	accept(): void {
+		if (this.#wire) return;
+		this.#credential.set(null);
+		this.#accepted.set(true);
 	}
 
 	/** The union of this session's grants, undefined until its peer first answers. */
@@ -880,14 +940,14 @@ export class AuthSession {
 		let result: Error | null = null;
 		let closed = false;
 		// The peer refused the last attempt with a reply, rather than losing its stream.
-		let refused = false;
+		let refused: Refused | undefined;
 		// The peer granted the token, so a clean close ends the grant. A retry clears it.
 		let granted = false;
 		// The peer replied to an earlier attempt, so it knows AUTH.
 		let replied = false;
 		let delay: Duration | undefined;
 		for (;;) {
-			refused = false;
+			refused = undefined;
 			// Whether the peer answered this token, so a close is not the peer predating AUTH:
 			// a grant on this stream, or a reply to an earlier one that this retry follows.
 			let answered = replied;
@@ -926,20 +986,21 @@ export class AuthSession {
 						answered = granted = replied = true;
 						delay = undefined;
 						this.#replied = true;
+						if (presented.setup) {
+							this.#credential.set(null);
+							this.#accepted.set(true);
+						}
 						this.#answered(presented);
 						this.#recompute();
 						continue;
 					}
 					console.warn("auth token refused", reply.refused);
 					// A refused setup token leaves an empty union, not an unknown (unrestricted)
-					// one. A grant the acceptor could not tell, or never judged, is unknown, not empty.
-					const goingAway =
-						reply.refused instanceof StreamError && reply.refused.code === StreamCode.GoingAway;
-					if (!goingAway && !(reply.refused instanceof Unsupported)) this.#replied = true;
+					// one. A grant the acceptor could not tell is unknown, not empty.
+					if (!(reply.refused instanceof Unsupported)) this.#replied = true;
 					result = reply.refused;
 					replied = true;
-					// A peer going away judged nothing, so the successor presents the token instead.
-					refused = !goingAway;
+					refused = reply.undecided ? "undecided" : "final";
 					stream.close();
 					break;
 				}
@@ -975,7 +1036,7 @@ export class AuthSession {
 				presented.withdrawn ||
 				presented.ended ||
 				result instanceof ProtocolViolation ||
-				(!refused && this.#state.own)
+				(refused === undefined && this.#state.own)
 			)
 				break;
 			presented.grant = undefined;
@@ -989,13 +1050,13 @@ export class AuthSession {
 			await sleep(delay, { signal: presented.retry.signal }).catch(() => void 0);
 			presented.retry = undefined;
 			if (this.#closed || presented.withdrawn || presented.ended) {
-				refused = false;
+				refused = undefined;
 				result = null;
 				break;
 			}
 			// After a GOAWAY the peer must not see new streams: the successor presents it.
 			if (this.#draining()) {
-				refused = false;
+				refused = undefined;
 				result = new StreamError(StreamCode.GoingAway);
 				break;
 			}
@@ -1003,6 +1064,13 @@ export class AuthSession {
 
 		// Already ended by the session's close.
 		if (presented.ended) return;
+		// The peer's verdict on the credential: Unsupported is the moq-transport SETUP that
+		// carried it accepting it before the peer declined AUTH. Anything else leaves it to the close.
+		if (presented.setup && !presented.withdrawn && isVerdict(refused, granted, result)) {
+			this.#credential.set(
+				result instanceof Unsupported ? null : (result ?? new Error("the peer ended the credential")),
+			);
+		}
 		presented.ended = true;
 		presented.grant = undefined;
 		// A token that ends unanswered counts as answered for enforcement: its refusal is
@@ -1036,6 +1104,7 @@ export class AuthSession {
 	/** The peer granted `presented`: it counts as answered, and so does the handle's token. */
 	#answered(presented: Presented) {
 		presented.isAnswered = true;
+		if (presented.owner) presented.owner.inband = true;
 		presented.owner?.answer();
 	}
 

@@ -120,6 +120,11 @@ impl Installed {
 		self.0.lock().unwrap().clock.step_wall(wall);
 	}
 
+	/// How long the clock has spent suspended.
+	pub(crate) fn suspended(&self) -> Duration {
+		self.0.lock().unwrap().clock.suspended()
+	}
+
 	/// Whether `other` is a clone of this clock.
 	pub(crate) fn same(&self, other: &Self) -> bool {
 		Arc::ptr_eq(&self.0, &other.0)

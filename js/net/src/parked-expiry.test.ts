@@ -1,11 +1,14 @@
 import { expect, spyOn, test } from "bun:test";
-import { Duration, Manual } from "@moq/clock";
+import { Duration } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
+import { defined } from "./defined.test-util.ts";
 import { StreamCode } from "./error.ts";
 import { randomHop } from "./hop.ts";
 import { Publisher as IetfPublisher } from "./ietf/publisher.ts";
 import { NativeSession } from "./ietf/session.ts";
 import { Subscribe as IetfSubscribe } from "./ietf/subscribe.ts";
 import { ALPN, Version as Ietf } from "./ietf/version.ts";
+import { NO_MAX_DELAY } from "./internal.ts";
 import { Publisher as LitePublisher } from "./lite/publisher.ts";
 import { decodeSubscribeResponse, Subscribe as LiteSubscribe } from "./lite/subscribe.ts";
 import { ALPN_05, ALPN_07_WIP, Version as Lite } from "./lite/version.ts";
@@ -32,11 +35,14 @@ for (const protocol of protocols) {
 			const origin = new Origin();
 			const broadcastRoute = origin.route(Path.from("parked"));
 			const broadcast = broadcastRoute.broadcast;
+			const budget = mode === "expires" ? 100 : 60_000;
 			// No publisher limit, so the cache eviction rather than a stale verdict ends a long budget.
-			const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
-			const write = (sequence: bigint) => {
-				const group = track.createGroup(sequence);
-				group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(0) });
+			// moq-transport carries no subscriber budget, so there the publisher's own limit expires it.
+			const maxAge = protocol.kind === "ietf" && mode === "expires" ? Duration.millis(budget) : null;
+			const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge }));
+			const write = (key: bigint) => {
+				const group = track.createGroup(key);
+				group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(Number(key)) });
 				group.finish();
 			};
 
@@ -71,7 +77,6 @@ for (const protocol of protocols) {
 			const client = await Stream.open(pair.client, { version: protocol.version });
 			const server = await Stream.accept(pair.server, protocol.version);
 			if (!server) throw new Error("missing subscribe stream");
-			const budget = mode === "expires" ? 100 : 60_000;
 			let running: Promise<void>;
 			let close = () => {};
 			if (protocol.kind === "lite") {
@@ -83,7 +88,11 @@ for (const protocol of protocols) {
 						broadcast: Path.from("parked"),
 						track: "video",
 						priority: 0,
-						maxDelay: budget,
+						// Lite-07 carries the budget on a live join reaching back to the oldest group, and
+						// earlier lite one subscription-wide max age.
+						...(protocol.version === Lite.DRAFT_07
+							? { ranges: [{ start: { live: { min: NO_MAX_DELAY, max: budget } } }] }
+							: { maxDelay: budget }),
 					}),
 					server,
 				);
@@ -100,7 +109,6 @@ for (const protocol of protocols) {
 						trackNamespace: Path.from("parked"),
 						trackName: "video",
 						subscriberPriority: 0,
-						maxAge: budget,
 					}),
 					server,
 				);
@@ -153,11 +161,16 @@ for (const protocol of protocols) {
 		const origin = new Origin();
 		const broadcastRoute = origin.route(Path.from("parked"));
 		const broadcast = broadcastRoute.broadcast;
-		const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
-		const write = (sequence: bigint, frames: number) => {
-			const group = track.createGroup(sequence);
+		// No publisher limit, so the eviction rather than a stale verdict gives the group up: lite-07
+		// closes the stream of a group gone stale instead of resetting it.
+		const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
+		const write = (key: bigint, frames: number) => {
+			const group = track.createGroup(key);
 			for (let frame = 0; frame < frames; frame++) {
-				group.writeFrame({ payload: new Uint8Array([frame]), timestamp: Timestamp.fromMillis(0) });
+				group.writeFrame({
+					payload: new Uint8Array([frame]),
+					timestamp: Timestamp.fromMillis(Number(key)),
+				});
 			}
 			group.finish();
 		};
@@ -213,7 +226,6 @@ for (const protocol of protocols) {
 					trackNamespace: Path.from("parked"),
 					trackName: "video",
 					subscriberPriority: 0,
-					maxAge: budget,
 				}),
 				server,
 			);

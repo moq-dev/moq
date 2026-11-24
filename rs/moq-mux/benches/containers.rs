@@ -81,8 +81,7 @@ async fn prepare(video: Video, payload: &Bytes) -> (moq_mux::Source, impl Stream
 				})
 				.unwrap();
 		}
-		publisher.finish().unwrap();
-		publishers.push(publisher);
+		publishers.push(publisher.finish().unwrap());
 	}
 	catalog.finish().unwrap();
 	broadcast.announce().unwrap();
@@ -101,7 +100,7 @@ async fn export(format: &str, source: moq_mux::Source, stream: impl Stream, coll
 	let mut data = BytesMut::new();
 	if format == "cmaf" {
 		let mut export = moq_mux::container::fmp4::Export::new(source, stream)
-			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(30)))
+			.with_delay(moq_mux::container::Delay::default().with_max(Duration::from_secs(30)))
 			.with_fragment_duration(Duration::ZERO);
 		while let Some(chunk) = export.next().await.unwrap() {
 			if collect {
@@ -112,7 +111,7 @@ async fn export(format: &str, source: moq_mux::Source, stream: impl Stream, coll
 		}
 	} else {
 		let mut export = h264::Export::new(source, stream)
-			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(30)));
+			.with_delay(moq_mux::container::Delay::default().with_max(Duration::from_secs(30)));
 		while let Some(chunk) = export.next().await.unwrap() {
 			if collect {
 				data.extend_from_slice(&chunk);
@@ -136,7 +135,7 @@ fn cmaf_import(passthrough: bool) -> (moq_mux::catalog::Producer, moq_mux::conta
 fn import_cmaf(
 	import: (moq_mux::catalog::Producer, moq_mux::container::fmp4::Import),
 	data: &Bytes,
-) -> (moq_mux::catalog::Producer, moq_mux::container::fmp4::Import) {
+) -> (moq_mux::catalog::Producer, moq_mux::container::fmp4::Finished) {
 	import_cmaf_chunks(import, data, data.len())
 }
 
@@ -144,19 +143,25 @@ fn import_cmaf_chunks(
 	(catalog, mut import): (moq_mux::catalog::Producer, moq_mux::container::fmp4::Import),
 	data: &Bytes,
 	chunk: usize,
-) -> (moq_mux::catalog::Producer, moq_mux::container::fmp4::Import) {
+) -> (moq_mux::catalog::Producer, moq_mux::container::fmp4::Finished) {
 	for chunk in data.chunks(chunk) {
 		import.decode(chunk).unwrap();
 	}
-	import.finish().unwrap();
-	(catalog, import)
+	(catalog, import.finish().unwrap())
 }
 
 struct Annexb {
-	_broadcast: moq_net::broadcast::Producer,
+	broadcast: moq_net::broadcast::Producer,
 	catalog: moq_mux::catalog::Producer,
 	import: h264::Import,
 	split: h264::Split,
+}
+
+/// What a finished [`Annexb`] import keeps published, returned so the timed run drops none of it.
+struct Imported {
+	_broadcast: moq_net::broadcast::Producer,
+	catalog: moq_mux::catalog::Producer,
+	_track: moq_mux::container::Finished<moq_mux::catalog::hang::Container, hang::catalog::VideoConfig>,
 }
 
 impl Annexb {
@@ -168,29 +173,32 @@ impl Annexb {
 			.unwrap();
 		let import = h264::Import::new(track, catalog.reserve(), Default::default()).unwrap();
 		Self {
-			_broadcast: broadcast,
+			broadcast,
 			catalog,
 			import,
 			split: h264::Split::new(),
 		}
 	}
 
-	fn decode(&mut self, payload: &Bytes, frames: usize) {
+	fn decode(mut self, payload: &Bytes, frames: usize) -> Imported {
 		for index in 0..frames {
 			let pts = timestamp(index);
 			let mut complete = self.split.decode(payload, pts).unwrap();
 			complete.extend(self.split.flush(pts).unwrap());
 			self.import.decode(complete).unwrap();
 		}
-		self.import.finish().unwrap();
+		Imported {
+			_broadcast: self.broadcast,
+			catalog: self.catalog,
+			_track: self.import.finish().unwrap(),
+		}
 	}
 }
 
 // Collect only timed import work, excluding the output validation in setup.
 #[inline(never)]
-fn profiled_import(mut import: Annexb, payload: &Bytes, frames: usize) -> Annexb {
-	import.decode(payload, frames);
-	import
+fn profiled_import(import: Annexb, payload: &Bytes, frames: usize) -> Imported {
+	import.decode(payload, frames)
 }
 
 /// `fragments` moofs whose `tracks` trafs each split their samples into `runs` one-sample runs,
@@ -368,7 +376,7 @@ fn cmaf_receive(c: &mut Criterion) {
 			}
 			.encode(&mut data)
 			.unwrap();
-			let frame = moq_net::frame::Frame::new(None, Bytes::from(data));
+			let frame = moq_net::frame::Frame::new(moq_net::Timestamp::unscaled(0), Bytes::from(data));
 			assert_eq!(wire.decode(frame.clone()).unwrap().len(), samples);
 			group.throughput(Throughput::Elements(samples as u64));
 			group.bench_function(BenchmarkId::new(samples.to_string(), size), |b| {
@@ -403,7 +411,7 @@ fn containers(c: &mut Criterion) {
 						for passthrough in [false, true] {
 							let (catalog, mut import) = cmaf_import(passthrough);
 							import.decode(&data).unwrap();
-							import.finish().unwrap();
+							let _finished = import.finish().unwrap();
 							assert_eq!(catalog.snapshot().video.renditions.len(), *tracks);
 						}
 						use mp4_atom::DecodeMaybe;
@@ -416,8 +424,7 @@ fn containers(c: &mut Criterion) {
 						}
 						assert_eq!(fragments, tracks * frames);
 					} else {
-						let mut import = Annexb::new();
-						import.decode(&payload, frames);
+						let import = Annexb::new().decode(&payload, frames);
 						assert_eq!(import.catalog.snapshot().video.renditions.len(), 1);
 					}
 					assert!(!data.is_empty());
@@ -637,6 +644,10 @@ impl SiImport {
 	fn identities(count: u16) -> Self {
 		let mut this = Self::new();
 		this.repeat((0..count).map(|id| (2, 0x80, id)));
+		// The first renewal advertises the SI tracks in the catalog, a one-time publish that would
+		// otherwise land in every timed iteration, since each starts from a fresh importer.
+		this.tick();
+		this.repeat((0..count).map(|id| (2, 0x80, id)));
 		this
 	}
 
@@ -759,8 +770,7 @@ fn mkv_chunks(c: &mut Criterion) {
 					for bytes in std::hint::black_box(data).chunks(chunk) {
 						import.decode(bytes).unwrap();
 					}
-					import.finish().unwrap();
-					(catalog, import)
+					(catalog, import.finish().unwrap())
 				},
 				BatchSize::PerIteration,
 			);
@@ -832,8 +842,7 @@ fn mkv_payloads(c: &mut Criterion) {
 						for bytes in std::hint::black_box(&data).chunks(chunk) {
 							import.decode(bytes).unwrap();
 						}
-						import.finish().unwrap();
-						(catalog, import)
+						(catalog, import.finish().unwrap())
 					},
 					BatchSize::PerIteration,
 				);

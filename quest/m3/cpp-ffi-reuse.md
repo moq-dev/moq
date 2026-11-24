@@ -32,7 +32,7 @@ and doc samples. All four jobs then verified/extracted their checked archives
 and produced C++ packages. Later commits change only documentation and the
 tag-only release-creation notes, which that dry-run does not exercise.
 
-The [FFI build evidence](/.github/ffi.md#c-comparison) separates historical
+The [FFI build evidence](https://github.com/moq-dev/moq/pull/5740) separates historical
 archive/metadata comparisons from this current executable consumer proof.
 Historical Windows assembly and Rust LTO comparisons do not prove complete
 byte-for-byte code equivalence. The current four-host consumers have passed;
@@ -56,3 +56,14 @@ Keep this quest open for the published release input:
 
 Follow-up to [#5549](https://github.com/moq-dev/moq/pull/5549), which shared
 the default FFI build across Go, Kotlin and Swift.
+
+Checked 2026-11-12 (/quest-audit): `cpp/moq/FFI_VERSION` is still unset and
+`cpp/moq/FFI_SHA256.json` is `{}`. moq-ffi releases still come from `release`
+(moq-ffi-v0.4.25 on 2026-11-11 ships per-target libraries, not the four
+archives), and `main`'s `release-shared-ffi.yml`, which runs
+`just cpp ffi archive`, differs from `release`'s, so the first release that
+can satisfy the pin is the cut's.
+
+## Required
+
+- [Release cut](/quest/m3/release/cut.md) - the first moq-ffi release that publishes the four default-feature archives

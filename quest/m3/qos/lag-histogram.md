@@ -32,7 +32,7 @@ Decided 2026-10-26 (maintainer, on #6791), each with its reason:
   behind, and every unsubscribe, rendition switch, or session close charges
   the open group's whole content to `dropped`, so a healthy audience with
   churn reads a dropped baseline. The frontier instead moves at every
-  acknowledged frame end through [poll_acked](/quest/m3/quic-ack-hook.md), so
+  acknowledged frame end through `poll_acked`, so
   the sampler reads a frontier at most one frame stale. `dropped` counts only
   the frames written after the newest acknowledged one. This folds in the
   frontier half of the former starvation-frames quest; a delivery-delay
@@ -41,9 +41,14 @@ Decided 2026-10-26 (maintainer, on #6791), each with its reason:
   it writes, each frame end records its offset and timestamp, and one waiter
   per stream polls the oldest pending offset, interleaved with later writes so
   a lagging ACK never stalls sending, retiring every frame at or below what is
-  acknowledged.
-- **No hook, no fields.** A subscription whose backend reports `poll_acked`
-  unsupported (qmux, the browser transport) keeps no frontier and adds
+  acknowledged. Egress billing already does that: `coding::Writer`'s
+  `Billing` mints an offset whenever a write ends a frame and retires them
+  oldest first, so the frontier rides those offsets rather than minting its
+  own.
+- **No hook, no fields.** A subscription whose backend cannot see
+  acknowledgments (`poll_acked` answers `Unsupported`, as the browser
+  transport does, or `Sent`, as qmux does once its link took the bytes, which
+  says nothing of when the peer got them) keeps no frontier and adds
   nothing to `lag` or `dropped`. A node serving only such viewers leaves both
   absent. Document this in `doc/concept/stats.md`.
 - **The lag edge is the newest group's.** On the branch, `Produced.newest` is
@@ -99,8 +104,3 @@ Update `doc/concept/stats.md` and the stats section of
 `doc/bin/relay/config.md`.
 
 Changed 2026-11-07 (maintainer, /quest-plan from the API sweep of open PRs and remaining quests): [moq-dev/moq#8266](https://github.com/moq-dev/moq/pull/8266) makes `stats::Registry::report` take `now` and the handle's arguments `#[non_exhaustive]` before the cut, so this adds fields and is not breaking.
-
-## Required
-
-- [poll_acked on moq-net's send stream](/quest/m3/quic-ack-hook.md) - the
-  per-frame acknowledgement the frontier moves on

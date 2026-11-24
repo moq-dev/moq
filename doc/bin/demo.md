@@ -1,6 +1,6 @@
 ---
 title: Demos
-description: The web demo, MoQ Boy, and CARLA
+description: The web demo, MoQ Boy, CARLA, and VR
 ---
 
 # Demos
@@ -40,15 +40,13 @@ just boy start path/to/game.gb        # your own ROM; run several for a grid
 What it demonstrates:
 
 - **On-demand encoding.** Emulation and encoding pause when the last viewer leaves and resume with a keyframe when one arrives. No timers, just subscription state.
-- **Discovery by prefix.** Game sessions appear under `boy/game/`. No control plane.
-- **Sockets.** Each emulator runs a [socket](/concept/socket) server endpoint named for its game, and each viewer dials it from a client endpoint with a random id. Button presses go up as messages on the viewer's own session, and the emulator answers each with that viewer's latency. A `status` track comes down to everyone with the held buttons and player count. Same relay, same protocol as the media. Sockets need `moq-lite-07-wip` or moq-transport on every hop. The emulator and viewer offer `moq-lite-07-wip`, which is opt-in, so the local relay enables it.
-- **Split trust.** In production only the server publishes games and their server endpoints, while anonymous viewers may publish only client endpoints.
+- **Discovery by prefix.** Game sessions appear under `boy/game/`; viewers each publish a tiny broadcast under `boy/viewer/`. No control plane.
+- **Bidirectional data.** Button presses go up on a JSON `command` track; a `status` track comes down with everyone's held buttons and latency. Same relay, same protocol as the media.
+- **Split trust.** In production the game prefix is authenticated (only the server publishes games) while the viewer prefix is anonymous.
 
 Code: [`rs/moq-boy`](https://github.com/moq-dev/moq/tree/main/rs/moq-boy) (emulator
-and publisher), [`js/moq-boy`](https://github.com/moq-dev/moq/tree/main/js/moq-boy)
-(the `<moq-boy>` element, published as `@moq/boy`), and
-[`demo/boy`](https://github.com/moq-dev/moq/tree/main/demo/boy). The same
-shape covers teleoperation: swap the emulator for a robot.
+and publisher) and [`demo/boy`](https://github.com/moq-dev/moq/tree/main/demo/boy)
+(the `<moq-boy>` element and page).
 
 ## CARLA
 
@@ -66,7 +64,33 @@ just carla                            # relay + trucks + player
 What it demonstrates:
 
 - **GPU to wire.** Camera images never leave the GPU: `moq-video` encodes them on the device that rendered them, and a camera renders only while someone subscribes.
-- **Control with a lease.** A driver dials the truck's [socket](/concept/socket) endpoint and sends JSON controls on its own session, which carries the truck's acknowledgements back; the truck accepts one driver at a time, bound to that session, and returns to autonomy when the lease lapses.
+- **Control with a lease.** A driver publishes a JSON `control` track under `viewer/carla/{truck}/`; the truck accepts one driver at a time, bound to the instance it announced with, and returns to autonomy when the lease lapses.
 - **Measured feedback.** Each truck's `status` track carries what the gate accepted and what the vehicle did, so the player draws requested against measured steering.
 
 Code: [`demo/carla`](https://github.com/moq-dev/moq/tree/main/demo/carla).
+
+## VR
+
+A WebXR player for 360 and VR180 video with spatial audio, in a headset or a
+desktop tab. It lays a broadcast out by the catalog's
+[spatial fields](/concept/hang#catalog): an equirectangular `projection` wraps
+the picture on a sphere spanning its field of view, `stereo` crops each eye
+from a packed frame, and an `ambisonic` audio layout decodes the sound field
+around the viewer's head, at first order: a higher order plays only its first
+four channels. Without them it shows a flat screen with the sound
+coming from it.
+
+```bash
+just relay    # a local relay
+ffmpeg -re -i vr180.mp4 -c copy -strict unofficial \
+    -movflags cmaf+frag_keyframe+empty_moov+default_base_moof -f mp4 - |
+    moq --connect http://localhost:4443 --broadcast vr.hang import fmp4
+just vr serve # the player: Enter VR in a headset, or drag to look around
+```
+
+The importer reads the projection and stereo packing from an MP4's Spherical
+Video V2 boxes, which ffmpeg writes only past `-strict unofficial`, and the
+ambisonic layout from Opus channel mapping family 2. In the player, a trigger
+or `R` recentres the picture where you look, and a grip or `M` mutes.
+
+Code: [`demo/vr`](https://github.com/moq-dev/moq/tree/main/demo/vr).

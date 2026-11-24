@@ -6,8 +6,6 @@
 //! dials: `a` is rooted at `tenant-a`, `b` at `tenant-b` with a read-only
 //! mount of `tenant-a/public` at `shared`.
 
-#![cfg(feature = "quic")]
-
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -19,7 +17,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
-use moq_auth::{Event, Grant, Pattern, Patterns, Request};
+use moq_auth::{Event, Grant, Prefixes, Request};
 use moq_relay::Relay;
 use moq_tokio::quic::driver;
 
@@ -35,7 +33,7 @@ fn timed() -> moq_net::track::Info {
 /// Publish and subscribe everything under `root`, for an hour, without a re-check
 /// of its own: a test pushes one through `/sessions/revalidate` when it wants it.
 fn rooted(root: &str) -> Grant {
-	let all: Patterns = [Pattern::all()].into_iter().collect();
+	let all = Prefixes::all();
 	let mut grant = Grant::new(all.clone(), all);
 	grant.root = Some(root.into());
 	grant.expires = Some(kio::clock::wall() + Duration::from_secs(3600));
@@ -225,9 +223,13 @@ impl Publisher {
 			.broadcast()
 			.create_track("video", timed())
 			.expect("create track");
-		let mut group = track.append_group().expect("append group");
+		let mut group = track
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
+			.expect("append group");
 		group
-			.write_frame(moq_net::Timestamp::ZERO, payload)
+			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), payload)
 			.expect("write frame");
 		self.held.push(Box::new((broadcast, track, group)));
 	}
@@ -269,6 +271,7 @@ impl Watcher {
 					if let moq_net::origin::RouteEvent {
 						kind: moq_net::origin::RouteKind::Start,
 						announce: route,
+						..
 					} = event
 					{
 						seen.lock().unwrap().push(route.prefix.to_string());
@@ -358,12 +361,15 @@ async fn synced_listing(url: url::Url) -> BTreeSet<String> {
 				Some(RouteEvent {
 					kind: RouteKind::End | RouteKind::Offline,
 					announce: route,
+					..
 				}) => listed.remove(route.prefix.as_str()),
 				Some(RouteEvent {
 					kind: RouteKind::Start | RouteKind::Update | RouteKind::Restart,
 					announce: route,
+					..
 				}) => listed.insert(route.prefix.to_string()),
 				None => return,
+				other => panic!("unexpected route event {other:?}"),
 			};
 		}
 	})
@@ -513,7 +519,7 @@ async fn tokio_keeps_tenants_apart() {
 	matrix(false).await;
 }
 
-#[cfg(all(target_os = "linux", feature = "_uring"))]
+#[cfg(uring)]
 #[tokio::test]
 async fn uring_keeps_tenants_apart() {
 	if !crate::runtime_uring::supported() {

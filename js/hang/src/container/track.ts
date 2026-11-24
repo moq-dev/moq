@@ -22,7 +22,7 @@ import { Time, type Track } from "@moq/net";
 export const MAX_AGE = Duration.millis(30_000);
 
 /**
- * Track properties for a track carrying media frames, for `Request.accept`.
+ * Track properties for a track carrying media frames, for `Track.Producer.accept`.
  *
  * Pins the timescale to microseconds (the timestamps hang's containers stamp), and declares
  * {@link MAX_AGE} instead of `@moq/net`'s zero default, so superseded groups stay fresh long enough
@@ -50,8 +50,8 @@ export type TrackInfoOptions = {
 	priority: number;
 
 	/**
-	 * How long, in milliseconds, a superseded group stays fresh, so a fetch or a subscriber's
-	 * `delay.max` can still reach it; see `Track.Info.maxAge`. Omitted or `undefined` is
+	 * How long, in milliseconds, a superseded group stays fresh, so a fetch or a subscriber's live
+	 * join can still reach it; see `Track.Info.maxAge`. Omitted or `undefined` is
 	 * {@link MAX_AGE}, and `null` sets no publisher limit.
 	 *
 	 * A freshness bound, not a delivery budget, so it never makes anyone play further behind live

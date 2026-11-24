@@ -5,6 +5,7 @@
 use std::ffi::CStr;
 use std::fs::File;
 use std::io;
+use std::os::raw::c_int;
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use std::path::PathBuf;
@@ -89,8 +90,7 @@ pub(crate) fn open_first(probe: impl Fn(&Display) -> anyhow::Result<()>) -> anyh
 /// A VADisplay opened over DRM.
 ///
 /// A Display is the starting point to using libva. This struct is essentially a safe wrapper over
-/// `VADisplay`, from which [`Surface`]s and [`Context`]s can be allocated in order to perform
-/// actual work using [`Display::create_surfaces`] and [`Display::create_context`], respectively.
+/// `VADisplay`, from which [`Surface`]s can be allocated with [`Display::create_surfaces`].
 ///
 /// Although libva offers several ways to create a display, this struct currently only supports
 /// opening through DRM. It may be extended to support other display types (X11, Wayland) in the
@@ -169,29 +169,18 @@ impl Display {
 	}
 
 	/// Returns the handle of this display.
-	pub fn handle(&self) -> bindings::VADisplay {
+	pub(crate) fn handle(&self) -> bindings::VADisplay {
 		self.handle
 	}
 
 	/// Queries supported profiles by this display by wrapping `vaQueryConfigProfiles`.
 	pub fn query_config_profiles(&self) -> Result<Vec<bindings::VAProfile::Type>, VaError> {
 		// Safe because `self` represents a valid VADisplay.
-		let mut max_num_profiles = unsafe { bindings::va().vaMaxNumProfiles(self.handle) };
-		let mut profiles = Vec::with_capacity(max_num_profiles as usize);
-
-		// Safe because `self` represents a valid `VADisplay` and the vector has `max_num_profiles`
-		// as capacity.
-		va_check(unsafe {
-			bindings::va().vaQueryConfigProfiles(self.handle, profiles.as_mut_ptr(), &mut max_num_profiles)
-		})?;
-
-		// Safe because `profiles` is allocated with a `max_num_profiles` capacity and
-		// `vaQueryConfigProfiles` wrote the actual number of profiles to `max_num_entrypoints`.
-		unsafe {
-			profiles.set_len(max_num_profiles as usize);
-		};
-
-		Ok(profiles)
+		let max = unsafe { bindings::va().vaMaxNumProfiles(self.handle) };
+		// Safe because `self` represents a valid `VADisplay` and `query` passes a buffer of `max`.
+		query(max, |profiles, num| unsafe {
+			bindings::va().vaQueryConfigProfiles(self.handle, profiles, num)
+		})
 	}
 
 	/// Returns a string describing some aspects of the VA implemenation on the specific hardware
@@ -218,28 +207,11 @@ impl Display {
 		profile: bindings::VAProfile::Type,
 	) -> Result<Vec<bindings::VAEntrypoint::Type>, VaError> {
 		// Safe because `self` represents a valid VADisplay.
-		let mut max_num_entrypoints = unsafe { bindings::va().vaMaxNumEntrypoints(self.handle) };
-		let mut entrypoints = Vec::with_capacity(max_num_entrypoints as usize);
-
-		// Safe because `self` represents a valid VADisplay and the vector has `max_num_entrypoints`
-		// as capacity.
-		va_check(unsafe {
-			bindings::va().vaQueryConfigEntrypoints(
-				self.handle,
-				profile,
-				entrypoints.as_mut_ptr(),
-				&mut max_num_entrypoints,
-			)
-		})?;
-
-		// Safe because `entrypoints` is allocated with a `max_num_entrypoints` capacity, and
-		// `vaQueryConfigEntrypoints` wrote the actual number of entrypoints to
-		// `max_num_entrypoints`
-		unsafe {
-			entrypoints.set_len(max_num_entrypoints as usize);
-		}
-
-		Ok(entrypoints)
+		let max = unsafe { bindings::va().vaMaxNumEntrypoints(self.handle) };
+		// Safe because `self` represents a valid VADisplay and `query` passes a buffer of `max`.
+		query(max, |entrypoints, num| unsafe {
+			bindings::va().vaQueryConfigEntrypoints(self.handle, profile, entrypoints, num)
+		})
 	}
 
 	/// Writes attributes for a given `profile`/`entrypoint` pair into `attributes`. Wrapper over
@@ -247,7 +219,7 @@ impl Display {
 	///
 	/// Entries of `attributes` must have their `type_` member initialized to the desired attribute
 	/// to retrieve.
-	pub fn get_config_attributes(
+	pub(crate) fn get_config_attributes(
 		&self,
 		profile: bindings::VAProfile::Type,
 		entrypoint: bindings::VAEntrypoint::Type,
@@ -316,7 +288,7 @@ impl Display {
 	/// * `coded_height` - The coded picture height
 	/// * `surfaces` - Optional hint for the amount of surfaces tied to the context
 	/// * `progressive` - Whether only progressive frame pictures are present in the sequence
-	pub fn create_context<D: SurfaceMemoryDescriptor>(
+	pub(crate) fn create_context<D: SurfaceMemoryDescriptor>(
 		self: &Arc<Self>,
 		config: &Config,
 		coded_width: u32,
@@ -340,7 +312,7 @@ impl Display {
 	/// for a given profile/entrypoint pair can be retrieved using
 	/// [`Display::get_config_attributes`]. Other attributes will take their default values, and
 	/// `attrs` can be empty in order to obtain a default configuration.
-	pub fn create_config(
+	pub(crate) fn create_config(
 		self: &Arc<Self>,
 		attrs: Vec<bindings::VAConfigAttrib>,
 		profile: bindings::VAProfile::Type,
@@ -352,24 +324,29 @@ impl Display {
 	/// Returns available image formats for this display by wrapping around `vaQueryImageFormats`.
 	pub fn query_image_formats(&self) -> Result<Vec<bindings::VAImageFormat>, VaError> {
 		// Safe because `self` represents a valid VADisplay.
-		let mut num_image_formats = unsafe { bindings::va().vaMaxNumImageFormats(self.handle) };
-		let mut image_formats = Vec::with_capacity(num_image_formats as usize);
-
-		// Safe because `self` represents a valid VADisplay. The `image_formats` vector is properly
-		// initialized and a valid size is passed to the C function, so it is impossible to write
-		// past the end of their storage by mistake.
-		va_check(unsafe {
-			bindings::va().vaQueryImageFormats(self.handle, image_formats.as_mut_ptr(), &mut num_image_formats)
-		})?;
-
-		// Safe because the C function will have written exactly `num_image_format` entries, which
-		// is known to be within the vector's capacity.
-		unsafe {
-			image_formats.set_len(num_image_formats as usize);
-		}
-
-		Ok(image_formats)
+		let max = unsafe { bindings::va().vaMaxNumImageFormats(self.handle) };
+		// Safe because `self` represents a valid VADisplay and `query` passes a buffer of `max`.
+		query(max, |formats, num| unsafe {
+			bindings::va().vaQueryImageFormats(self.handle, formats, num)
+		})
 	}
+}
+
+/// Runs a libva `query` that fills a buffer of `max` entries and writes how many it filled,
+/// failing when libva reports a negative maximum or more entries than fit.
+fn query<T>(max: c_int, query: impl FnOnce(*mut T, *mut c_int) -> bindings::VAStatus) -> Result<Vec<T>, VaError> {
+	let invalid = || VaError::status(bindings::VA_STATUS_ERROR_OPERATION_FAILED);
+	let capacity = usize::try_from(max).map_err(|_| invalid())?;
+	let mut list = Vec::with_capacity(capacity);
+	let mut num = max;
+	va_check(query(list.as_mut_ptr(), &mut num))?;
+	let len = usize::try_from(num)
+		.ok()
+		.filter(|&len| len <= capacity)
+		.ok_or_else(invalid)?;
+	// Safe because libva wrote `len` entries, which fit the `capacity` allocated above.
+	unsafe { list.set_len(len) };
+	Ok(list)
 }
 
 impl Drop for Display {

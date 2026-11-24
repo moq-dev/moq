@@ -45,6 +45,12 @@ public final class Client: Sendable {
         publish: OriginProducer? = nil,
         consume: OriginProducer? = nil
     ) throws {
+        try checkDuration(timeout, "timeout")
+        try checkDuration(race, "race")
+        try checkDuration(resolutionDelay, "resolutionDelay")
+        try checkQuic(quic)
+        try checkDuration(websocket.delay, "websocket.delay")
+        try checkBackoff(backoff)
         ffi = try MoqClient(
             config: MoqClientConfig(
                 bind: bind,
@@ -65,6 +71,9 @@ public final class Client: Sendable {
     }
 
     /// Start a connection and return its session without waiting for the native first dial to succeed.
+    /// Until the peer has accepted a session's credential or drained a session with a GOAWAY
+    /// (or, on moq-lite 03/04, which never answer it, a session stayed up 1s), a failed dial or a closed
+    /// session, such as a refused credential, closes the session with its error rather than retrying.
     public func connect(to url: String) async throws -> Session {
         Session(try await ffi.connect(url: url))
     }
@@ -80,11 +89,6 @@ public final class Client: Sendable {
 /// `Client(versions:)` takes them.
 public func versions() -> [String] {
     moqVersions()
-}
-
-/// Whether this build can write qlog traces for `QuicConfig.qlog`.
-public func qlogSupported() -> Bool {
-    moqQlogSupported()
 }
 
 /// A MoQ session, including its initial native dial.
@@ -151,6 +155,17 @@ public final class Session: Sendable {
     /// each reconnect, reading `nil` while offline.
     public func grants() -> GrantConsumer {
         GrantConsumer(ffi.grants())
+    }
+
+    /// Present a request token on this session, for a `Route` or `Claim` to carry with
+    /// `setAuth`.
+    ///
+    /// On moq-transport it rides each naming route's announcing request; on moq-lite it needs
+    /// AUTH, where it earns a grant. A client session presents it again on every reconnect,
+    /// and with no session live it waits for the next one.
+    /// - Throws: `MoqError.Config` for an empty token.
+    public func credential(_ token: String) throws -> Credential {
+        Credential(try ffi.credential(token: token))
     }
 
     /// The credentials a native client session presents, to replace while it runs;

@@ -50,7 +50,7 @@ informative:
 
 This document defines the `mpegts` catalog section, which records what demultiplexing an MPEG-2 Transport Stream {{mpeg2}} into a MoQ broadcast would otherwise lose: each track's PID and PMT descriptors, the program identity, the service information tables, and a carriage record for every elementary stream the publisher did not decode.
 It is a root member of either the hang catalog {{hang}} or the MSF catalog {{msf}}, so a subscriber that ignores it still plays the broadcast and one that reads it can rebuild the source multiplex.
-It also defines the `m2ts` section of the hang catalog, which names a track carrying the transport stream whole, and maps that track onto MSFTS {{msfts}}.
+The same section can instead name one track carrying the transport stream whole, which this document maps onto MSFTS {{msfts}}.
 
 --- note_Note_to_Readers
 
@@ -69,7 +69,7 @@ A **verbatim** track carries an elementary stream the publisher did not decode, 
 
 # Introduction {#introduction}
 A transport stream reaches MoQ in one of two shapes.
-A publisher can leave the multiplex intact and carry the packet stream as opaque payload, which is what {{msfts}} specifies for MSF and the `m2ts` section ({{m2ts}}) describes in a hang catalog.
+A publisher can leave the multiplex intact and carry the packet stream as opaque payload, which is what {{msfts}} specifies for MSF and the section's `passthrough` member ({{passthrough}}) describes.
 Or it can demultiplex, which is what most of this document addresses: each elementary stream becomes its own MoQ track with a codec description, so a relay can drop and prioritize per track and a subscriber can decode without a transport-stream parser ({{comparison}}).
 
 Demultiplexing loses everything that is not media: the PID layout, the PMT descriptors, the program identity, the service information, and any stream the publisher has no decoder for.
@@ -79,7 +79,7 @@ It defines no packaging and no container: decoded media keeps the container its 
 
 # Comparison with mpeg2ts Packaging {#comparison}
 {{msfts}} carries the transport stream as it arrives: each object is a run of whole 188- or 192-byte packets, and the receiver demultiplexes as it always has.
-The `m2ts` section ({{m2ts}}) carries the same shape in a hang catalog: one track per multiplex, with a timestamp before each object's packets.
+A `passthrough` track ({{passthrough}}) carries the same shape: one track per multiplex, with a timestamp before each object's packets.
 This document takes the stream apart at the publisher and discards the packetization layer, because MoQ already provides what it was there for:
 
 - **Packet framing** interleaves elementary streams onto one serial pipe. MoQ delivers each track separately.
@@ -104,7 +104,7 @@ A track is one shape or the other, and a broadcast may carry either.
 
 
 # The mpegts Section {#section}
-A publisher that demultiplexed a transport stream SHOULD add an `mpegts` root member to its catalog ({{carriage}}):
+A publisher that demultiplexed a transport stream SHOULD add an `mpegts` root member to its catalog ({{carriage}}), and one that carries a transport stream whole MUST:
 
 ~~~
 type Mpegts = {
@@ -113,6 +113,7 @@ type Mpegts = {
   "program": Program | undefined,
   "si": Map<PidString, Si> | undefined,
   "muxRate": number | undefined,
+  "passthrough": Passthrough | undefined,
 }
 ~~~
 
@@ -161,7 +162,7 @@ type Program = {
 They are the only service-layer fields this document parses; everything else about the program stays inside the opaque `si` tables.
 A PAT that moves the PMT to another PID changes `pmtPid` in place.
 
-A publisher MUST include `program` when the broadcast came from a transport stream, and omit it otherwise.
+A publisher MUST include `program` when it demultiplexed a transport stream, and omit it otherwise.
 A publisher MUST NOT change `transportStreamId` or `programNumber` in place: the carried `si` describes that service, so a source whose PAT names another ends the broadcast.
 
 ## si {#field-si}
@@ -274,69 +275,68 @@ A verbatim or whole-PES track has no codec, dimensions, or decoder configuration
 Nothing there declares a container, so its frames use hang's `legacy` container ({{hang}}): a varint microsecond timestamp followed by the payload.
 
 
-# The m2ts Section {#m2ts}
-A publisher that carries a transport stream whole, without demultiplexing it, names its track in an `m2ts` root member of the hang catalog ({{carriage-hang}}):
+# Passthrough {#passthrough}
+A publisher that carries a transport stream whole, without demultiplexing it, names its track in the section's `passthrough` member:
 
 ~~~
-type M2ts = {
+type Passthrough = {
   "track": TrackName,
   "randomAccess": boolean,
-  "muxRate": number | undefined,
 }
 ~~~
 
 `track` names the one track carrying the multiplex, in the same broadcast as the catalog.
 A second multiplex is a second broadcast.
 
-`randomAccess` says that every group starts at a random access point ({{m2ts-groups}}).
+`randomAccess` says that every group starts at a random access point ({{passthrough-groups}}).
 A publisher MUST write it, and a consumer MUST read an absent `randomAccess` as false.
 
-`muxRate` follows {{field-mux-rate}}, measured over every packet of the track.
+The section's `muxRate` ({{field-mux-rate}}) is the rate of every packet of the track.
+Nothing else is recorded for it: the program, PIDs, descriptors, and tables reach the consumer inside the packets, as the publisher received them.
+A publisher MUST NOT also describe the track as a rendition, in `tracks`, or in `si`, and a consumer MUST refuse a section whose `tracks` or `si` names the `passthrough` track.
 
-The section records no program, PID, descriptor, or table: they all reach the consumer inside the packets, as the publisher received them.
-A track named here MUST NOT also be described as a rendition or in an `mpegts` section.
-
-## Objects {#m2ts-objects}
-Each frame is a run of whole 188-byte packets in the order the publisher received them, in hang's `legacy` container ({{hang}}) with the timestamp of {{m2ts-timestamps}}.
+## Objects {#passthrough-objects}
+Each frame is a run of whole 188-byte packets in the order the publisher received them, in hang's `legacy` container ({{hang}}) with the timestamp of {{passthrough-timestamps}}.
 A publisher MUST refuse a source of 192- or 204-byte packets rather than reframe it, since removing the extra bytes would change the stream.
 
 The multiplex is paced on one clock PID: the `PCR_PID` in the PMT of the first program the PAT lists, unless the publisher is configured with another.
 A frame runs from one packet carrying a PCR on the clock PID up to the next, and is also cut wherever a group starts.
 
-A publisher publishes nothing until it has read the PAT, the PMT of the clock's program, and a PCR, and its first group then waits for the next group start ({{m2ts-groups}}).
+A publisher publishes nothing until it has read the PAT, the PMT of the clock's program, and a PCR, and its first group then waits for the next group start ({{passthrough-groups}}).
 It drops the bytes before that group, and any bytes off the 188-byte packet grid, and they are outside the track's identity with its input.
 From the first group on, the frames of consecutive groups concatenate to the input: a publisher MUST NOT drop, reorder, or modify a packet after that point.
 
-## Groups {#m2ts-groups}
+## Groups {#passthrough-groups}
 A group starts at:
 
 - a packet with `random_access_indicator` set on the video PID of the clock's program (the first PID its PMT declares with a video `stream_type`), or on the clock PID when that program has no video;
-- a PCR on the clock PID with `discontinuity_indicator` set that steps forward ({{m2ts-timestamps}}), since a group MUST NOT contain a PCR discontinuity;
+- a PCR on the clock PID that breaks the count ({{passthrough-timestamps}}), since a group MUST NOT contain a PCR discontinuity;
 - otherwise, the first PCR at least one second of PCR time after the group's start;
 - the frame that would take a group past a size bound the publisher chooses below what a relay caches of one group; frames are never split to meet it.
 
 `randomAccess` is true only while the PAT lists one program, its PMT declares at most one video stream, and the clock PID is that PMT's `PCR_PID`, and only if every group so far has started at a `random_access_indicator`.
-The first group that starts any other way, or that carries packets while that layout does not hold, republishes the section with `randomAccess` false for the rest of the track.
+The first group that starts any other way, or that carries packets while that layout does not hold, republishes the catalog with `randomAccess` false for the rest of the track.
 With more programs or video streams the random access points can stagger, so a group start is not one for all of them.
 
 Both indicators sit in the adaptation field, which TS-level scrambling leaves in the clear, so a scrambled multiplex groups like its clear twin.
 A publisher parses the PAT and the PMT and nothing else past the adaptation field.
 
-## Timestamps {#m2ts-timestamps}
+## Timestamps {#passthrough-timestamps}
 A frame's timestamp is the PCR time of its first byte, in microseconds rounded down.
 A PCR gives the time of the byte holding the last bit of its `program_clock_reference_base` ({{mpeg2}}), ten bytes into its packet.
 A byte between two PCRs is placed at the rate between them; a byte past the last PCR of a timebase takes the rate of the interval before it, and one before the first PCR of a timebase takes the rate of the interval after it.
 
 PCRs are unwrapped into a 64-bit count of 27 MHz ticks, and timestamps never decrease.
-A step forward of at most half the 2^33 × 300 tick period adds to the count, across the wrap included, so a wrap is not a discontinuity.
-A PCR with `discontinuity_indicator` set whose step is forward by that measure adds its step too, after the bytes before it are timed at the rate before it, and the group it starts MUST follow hang's discontinuity marker ({{hang}}).
-A PCR that steps backwards MUST end the track with an error, flagged or not: a flagged one is a restart, which is new content, so a publisher that carries on publishes it as a new broadcast.
+A step forward of at most half the 2^33 × 300 tick period adds to the count, across the wrap included, so a wrap is not a discontinuity, unless it exceeds 10 seconds without `discontinuity_indicator`.
+A PCR with `discontinuity_indicator` set whose step is forward by that measure breaks the count and adds its step.
+Any other step, backwards with or without the flag or that unflagged leap forward, breaks the count and is spliced: the count continues from the time the rate before the PCR gives its byte, raised to at least the last frame's.
+At a break, the bytes before the PCR are timed at the rate before it, and the group it starts MUST follow hang's discontinuity marker ({{hang}}).
 
 The timeline depends only on the bytes since the publisher's first PCR, so two publishers that start at the same packet of one input publish identical frames.
 
-## Mapping onto MSFTS {#m2ts-msfts}
+## Mapping onto MSFTS {#passthrough-msfts}
 Stripping each frame's timestamp leaves an {{msfts}} object of whole source packets, and the groups carry over unchanged.
-An MSF catalog does not list the `m2ts` track itself, whose frames hold more than packets; a converter that republishes the stripped objects describes its track as follows:
+An MSF catalog names the `passthrough` track only in its `mpegts` section, since the track's frames hold more than packets; a converter that republishes the stripped objects describes its track as follows:
 
 | MSFTS track field | Value |
 |:--------|:--------|
@@ -344,11 +344,11 @@ An MSF catalog does not list the `m2ts` track itself, whose frames hold more tha
 | `mpeg2tsMode` | `unmodified-program` when the PAT lists one program, otherwise `unmodified-multiplex` |
 | `mpeg2tsPacketSize` | 188 |
 | `mpeg2tsRandomAccess` | `randomAccess` |
-| `mpeg2tsMuxRate` | `muxRate`, in `unmodified-program` mode only |
+| `mpeg2tsMuxRate` | the section's `muxRate`, in `unmodified-program` mode only |
 | `mpeg2tsProgramNumber`, `mpeg2tsPcrPid`, `mpeg2tsScte35Pid` | read from the PAT and the PMT in the packets, where {{msfts}} permits them in the mode |
 | `mpeg2tsTimestampMode`, `mpeg2tsEsPid`, `mpeg2tsSiPids` | absent |
 
-{{msfts}} asks for the PAT and the PMT in `initDataList` when random access is true; the `m2ts` section does not carry them, so a converter takes them from the packets.
+{{msfts}} asks for the PAT and the PMT in `initDataList` when random access is true; the `mpegts` section does not carry them for a passthrough, so a converter takes them from the packets.
 
 
 # Carriage {#carriage}
@@ -356,16 +356,15 @@ The section is the same JSON in either catalog format.
 
 ## hang {#carriage-hang}
 A root member named `mpegts`, alongside `video` and `audio` ({{hang}}).
-The `m2ts` section ({{m2ts}}) is a root member of the hang catalog only.
 hang carries a decoder config's raw bytes as hex while every binary field here is base64; the alphabets overlap, so the encoding cannot be detected and is stated per field above.
 
 ## MSF {#carriage-msf}
 A root member named `mpegts`, alongside `tracks` ({{msf}}).
 A publisher MUST NOT name a section after a member MSF itself defines.
 
-The keys of the section's own `tracks` member are MSF track names; a decoded track also has an MSF track object, a verbatim track does not.
+The keys of the section's own `tracks` member are MSF track names; a decoded track also has an MSF track object, a verbatim or `passthrough` track does not.
 
-This document defines no packaging value; {{msfts}} defines `mpeg2ts` for the passthrough shape ({{comparison}}), and {{m2ts-msfts}} maps an `m2ts` track onto it.
+This document defines no packaging value; {{msfts}} defines `mpeg2ts` for the passthrough shape ({{comparison}}), and {{passthrough-msfts}} maps a `passthrough` track onto it.
 
 
 # Rebuilding a Transport Stream {#rebuild}
@@ -389,7 +388,7 @@ A consumer MUST NOT derive one that contradicts a recorded descriptor.
 
 # Security Considerations
 Every binary field here is re-emitted without inspection, by a publisher that never parsed it and a relay that never looked, so a consumer MUST treat all of it as untrusted input.
-The same holds for every packet of an `m2ts` track, which the publisher forwards as it received them.
+The same holds for every packet of a `passthrough` track, which the publisher forwards as it received them.
 
 Nothing bounds the number of entries in the section, nor the size of an SI track: a publisher controls both, and an EPG is large by nature.
 A consumer MUST bound what it accepts of each, and MUST reject a catalog it cannot bound rather than truncate it into a stream that silently differs from what was described.
@@ -453,14 +452,14 @@ A broadcast demultiplexed from a DVB transport stream: video and audio described
 {:numbered="false"}
 
 - Programs without media anchor on PCR, preserving its era across the wrap; rebuilding supports audio clocks and a dedicated PCR-only PID for data-only programs.
-- Added the `m2ts` section, a transport stream carried whole, with its mapping onto MSFTS; the comparison uses MSFTS's `mpeg2ts` names.
+- Added the `passthrough` member, naming a track that carries the transport stream whole, with its mapping onto MSFTS; the section's `muxRate` is that track's rate. The comparison uses MSFTS's `mpeg2ts` names.
 - Section-framed `verbatim` timestamps use PCR-derived placement at the first section byte, as whole PES do, rather than a video presentation time.
 - Added the `pesPacket` record: each frame one whole PES packet, timestamped with its placement. A consumer that predates it drops the track rather than refusing the catalog.
 - `verbatim` carries sections only, breaking -00: `framing` is required and `"section"` its only value, and `streamId` is gone. A consumer refuses a -00 catalog with `"pes"` framing or a `verbatim` record without `framing`. A publisher carries an undecoded PES stream as `pesPacket`, and refuses one it cannot carry unaltered.
 - MPEG-1/2 video and LATM AAC are named among `pesPacket` streams, and the DSM-CC types 0x0A to 0x0D among section-framed `verbatim` ones. A rebuilt PAT lists the network entry when the NIT is carried.
 - MPEG-1/2 video `pesPacket` frames group from one sequence header to the next, rather than one PES per group.
-- A flagged PCR jump on an `m2ts` track follows hang's discontinuity marker rather than a skipped group sequence.
-- An `m2ts` track unwraps PCRs from its history, clamps extrapolated object times at a forward discontinuity, and cuts a fallback group after one second. `randomAccess` covers every published group; `muxRate` follows the measured source rate.
+- A flagged PCR jump on a `passthrough` track follows hang's discontinuity marker rather than a skipped group sequence.
+- A `passthrough` track unwraps PCRs from its history, clamps extrapolated object times at a forward discontinuity, splices a PCR step back or an unflagged one over 10 seconds forward rather than ending, and cuts a fallback group after one second. `randomAccess` covers every published group; `muxRate` follows the measured source rate.
 - A `tracks` entry is never changed in place: a stream the PMT revises continues under a new name, and one it drops leaves the section. `programDescriptors` follows the PMT; `program`'s `transportStreamId` and `programNumber` do not change.
 - A consumer rebuilding a stream follows the catalog's revisions at the next PMT `version_number`, and carries a stream only while a PMT lists it.
 - `pmtPid` follows a PAT that moves the PMT, and a consumer rebuilding a stream moves the PMT behind a PAT at the next `version_number`.

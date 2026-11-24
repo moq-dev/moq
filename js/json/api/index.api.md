@@ -1,6 +1,7 @@
 # `@moq/json`
 
 ```ts
+import { Duration } from "@moq/clock";
 import { Time } from "@moq/net";
 import { Timed } from "@moq/net";
 import { Track } from "@moq/net";
@@ -28,6 +29,7 @@ export namespace Snapshot {
 	}
 	export namespace Consumer {
 		export type Config<T> = Pick<Snapshot.Config<T>, "schema"> & {
+			delay?: Duration;
 			priority?: number;
 			track: Pick<Track.Consumer, "subscribe">;
 		};
@@ -57,6 +59,7 @@ export namespace Snapshot {
 		update(value: T): Snapshot.Pending | undefined;
 		get value(): T | undefined;
 	}
+	export interface Finished {}
 	export { MissingSnapshot };
 	export interface Pending extends Snapshot.Encoded {
 		commit(): void;
@@ -69,9 +72,9 @@ export namespace Snapshot {
 	export class Producer<T> {
 		constructor(config: Snapshot.Producer.Config<T>);
 		cut(): void;
-		finish(): void;
-		mutate(fn: (value: T) => void, at?: Time.Timestamp): void;
-		update({ ... }: Timed<T>): void;
+		finish(): Snapshot.Finished;
+		mutate(fn: (value: T) => void, at: Time.Timestamp): void;
+		update(value: T, at: Time.Timestamp): void;
 	}
 }
 
@@ -97,6 +100,7 @@ export namespace Stream {
 		constructor(config?: Stream.Config<T>);
 		encode(value: T): Stream.Pending;
 	}
+	export interface Finished {}
 	export interface Pending {
 		commit(): void;
 		payload: Uint8Array;
@@ -108,8 +112,8 @@ export namespace Stream {
 	}
 	export class Producer<T> {
 		constructor(config: Stream.Producer.Config<T>);
-		append({ ... }: Timed<T>): void;
-		finish(): void;
+		append(value: T, at: Time.Timestamp): void;
+		finish(): Stream.Finished;
 	}
 	export class Rolled extends Error {
 		constructor();
@@ -121,15 +125,17 @@ export namespace Window {
 		checkpointRecords?: number;
 		ops?: boolean;
 	}
+	export namespace Consumer {
+		export type Config = {
+			track: Track.Subscriber;
+		};
+	}
 	export class Consumer<T> {
-		constructor(config: Window.ConsumerConfig);
+		constructor(config: Window.Consumer.Config);
 		[Symbol.asyncIterator](): AsyncIterator<Timed<Window.Event<T>>>;
 		next(): Promise<Timed<Window.Event<T>> | undefined>;
 		get offset(): number;
 	}
-	export type ConsumerConfig = {
-		track: Track.Subscriber;
-	};
 	export class Decoder<T> {
 		constructor();
 		group(): Window.Group;
@@ -160,25 +166,32 @@ export namespace Window {
 	} | {
 		skip: Window.Span;
 	};
+	export interface Finished<T> {
+		abort(err: Error): void;
+		readonly offset: number;
+		readonly window: T[];
+	}
 	export interface Group {
 		decode(payload: Uint8Array): void;
 	}
 	export interface Pending extends Window.Encoded {
 		commit(): void;
 	}
+	export namespace Producer {
+		export type Config = Window.Config & {
+			track: Track.Producer;
+		};
+	}
 	export class Producer<T> {
-		constructor(config: Window.ProducerConfig);
+		constructor(config: Window.Producer.Config);
 		abort(err: Error): void;
 		cut(): void;
-		finish(): void;
+		finish(): Window.Finished<T>;
 		get offset(): number;
-		pop(count: number, at?: Time.Timestamp): void;
-		push({ ... }: Timed<T>): void;
+		pop(count: number, at: Time.Timestamp): void;
+		push(value: T, at: Time.Timestamp): void;
 		get window(): T[];
 	}
-	export type ProducerConfig = Window.Config & {
-		track: Track.Producer;
-	};
 	export interface Span {
 		end: number;
 		start: number;
@@ -190,4 +203,6 @@ export function deepEqual(a: unknown, b: unknown): boolean;
 export function diff(oldVal: unknown, newVal: unknown): Diff;
 
 export function merge(target: unknown, patch: unknown): unknown;
+
+export function next(track: Track.Producer, at: Time.Timestamp): Time.Timestamp;
 ```

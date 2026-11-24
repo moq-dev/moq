@@ -15,7 +15,7 @@
 	},
 	"scripts": {
 		"build": "rm -rf dist && tsc -b tsconfig.build.json && bun ../common/package.ts",
-		"check": "tsc --noEmit",
+		"check": "bun check --no-script",
 		"test": "bun test --only-failures",
 		"release": "bun ../common/release.ts"
 	},
@@ -30,10 +30,10 @@
 		"zod": "^4.6.7"
 	},
 	"devDependencies": {
-		"@types/audioworklet": "^0.0.100",
+		"@types/audioworklet": "^0.0.102",
 		"@types/bun": "^1.4.4",
 		"@typescript/lib-dom": "npm:@types/web@^0.0.358",
 		"typescript": "7.0.2",
-		"vite": "^8.3.5"
+		"vite": "^8.3.8"
 	}
 }

@@ -10,6 +10,7 @@
 import * as jose from "jose";
 import * as z from "zod/mini";
 import type { Claims } from "./claims.ts";
+import * as Json from "./json.ts";
 import { Key, KeySchema, type PublicKey } from "./key.ts";
 
 /**
@@ -47,9 +48,9 @@ export interface PublicKeySet {
 function parse(jwks: string): KeySet {
 	let data: unknown;
 	try {
-		data = JSON.parse(jwks.trim());
-	} catch {
-		throw new Error("Failed to parse JWKS: invalid JSON format");
+		data = Json.parse(jwks);
+	} catch (error) {
+		throw new Error(`Failed to parse JWKS: ${error instanceof Error ? error.message : "invalid JSON"}`);
 	}
 
 	try {
@@ -59,7 +60,7 @@ function parse(jwks: string): KeySet {
 	}
 }
 
-/** Strip the private material from every key in the set. Throws on a symmetric (oct) key, which has no public half. */
+/** Strip the private material from every key in the set. Throws on a symmetric (oct) key, which has no public half, and on a key that cannot verify. */
 function toPublic(set: KeySet): PublicKeySet {
 	return { keys: set.keys.map(Key.public) };
 }
@@ -111,7 +112,7 @@ async function verify(set: KeySet, token: string): Promise<Claims> {
 export const KeySet = {
 	/** Parse a JWK Set from JSON. Throws when the JSON or any key in it is invalid. */
 	parse,
-	/** Strip the private material from every key in the set. Throws on a symmetric (oct) key, which has no public half. */
+	/** Strip the private material from every key in the set. Throws on a symmetric (oct) key, which has no public half, and on a key that cannot verify. */
 	public: toPublic,
 	/** The key with the given `kid`, or undefined when the set has no such key. */
 	find,

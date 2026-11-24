@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { Duration, Instant, Manual, now, yieldNow } from "@moq/clock";
+import { Duration, Instant, now, yieldNow } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { pace, type Sample, SEEK_BEHIND, type Sink } from "./pace";
 import { Timeline } from "./timeline";
 
@@ -107,7 +108,7 @@ test("a reader returning after a long gap seeks to the present on the shared tim
 
 		// Pacing continues from there at 1x.
 		expect(await read()).toBe(zero + 61_600_000);
-		expect(clock.now()).toEqual(Instant.ZERO.add(Duration.micros(zero + 61_600_000)));
+		expect(clock.now()).toEqual(Instant.ZERO.saturatingAdd(Duration.micros(zero + 61_600_000)));
 	} finally {
 		await close();
 	}
