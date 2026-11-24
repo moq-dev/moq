@@ -39,6 +39,8 @@ Decisions (maintainer, 2026-10-13):
 - Caches move to Cloudflare R2: mbx's S3 backend for Rust, and `nix.moq.dev`
   replacing Cachix for Nix. The infra lives in `infra/` beside apt and rpm,
   checked in where wrangler allows; one-time commands where it does not.
+  Superseded 2026-11-23: both move to Backblaze B2 for its startup credits
+  ([Rust](/quest/m0/ci/mbx-b2.md), [Nix](/quest/m0/ci/nix-b2.md)).
 - Untrusted runs only read. Write credentials live in GitHub Environments
   whose deployment policy allows only `main` (plus release tags for the Nix
   signing key), so a pull request job cannot read them even from the same
