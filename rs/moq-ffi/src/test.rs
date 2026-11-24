@@ -2179,8 +2179,7 @@ async fn track_request_demand_survives_accept() {
 	demand.until_wanted().await.unwrap();
 	consumer.cancel();
 	demand.until_unwanted().await.unwrap();
-	// Released unfinished, the track ends dropped, which its watcher reports as `Closed`, as a
-	// track released without an abort.
+	// Released unfinished and unwanted, the track ends, which its watcher reports as `Closed`.
 	drop(track);
 	broadcast.close().unwrap();
 	let Err(err) = demand.until_wanted().await else {
@@ -2189,275 +2188,225 @@ async fn track_request_demand_survives_accept() {
 	assert!(matches!(err, MoqError::Closed), "{err:?}");
 }
 
-/// An on-demand track ends once unwanted, but a reader that joined first keeps it, and a later
-/// reader requests it afresh.
-#[tokio::test]
-async fn abort_unwanted_keeps_a_late_reader() {
-	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let dynamic = broadcast.requests().unwrap();
-	let consumer = broadcast.consume().unwrap();
-	let first = {
-		let consumer = consumer.clone();
-		tokio::spawn(async move { consumer.subscribe_track("events".into(), None).await })
-	};
-	let track = dynamic.requested_track().await.unwrap().accept(None).unwrap();
-	let demand = track.demand().unwrap();
-	first.await.unwrap().unwrap().cancel();
-	demand.until_unwanted().await.unwrap();
+/// A producer handle as a test releases it.
+type Released = Box<dyn std::any::Any>;
 
-	// A reader joins after the publisher saw nobody wanted the track.
-	let late = consumer.subscribe_track("events".into(), None).await.unwrap();
-	assert!(!track.abort_unwanted(7).unwrap());
-	track.append_group(MoqTimestamp::unscaled(0)).unwrap().finish().unwrap();
-	let group = kio::clock::timeout(TIMEOUT, late.recv_group())
-		.await
-		.expect("timed out waiting for the late reader's group")
-		.unwrap();
-	assert!(group.is_some());
-
-	// The publisher's demand loop sees the reader come and go; then the same teardown
-	// commits, and later calls find the handle closed.
-	demand.until_wanted().await.unwrap();
-	drop(group);
-	late.cancel();
-	demand.until_unwanted().await.unwrap();
-	assert!(track.abort_unwanted(7).unwrap());
-	assert!(matches!(track.abort_unwanted(7), Err(MoqError::Closed)));
-	assert!(matches!(
-		track.append_group(MoqTimestamp::unscaled(1)),
-		Err(MoqError::Closed)
-	));
-
-	// The next reader asks the publisher again instead of finding the aborted track.
-	let next = tokio::spawn(async move { consumer.subscribe_track("events".into(), None).await });
-	let request = kio::clock::timeout(TIMEOUT, dynamic.requested_track())
-		.await
-		.expect("timed out waiting for the track to be requested again")
-		.unwrap();
-	assert_eq!(request.name().unwrap(), "events");
-	request.reject(404).unwrap();
-	assert!(next.await.unwrap().is_err());
-
-	// A finished track is kept for its readers the same way.
-	let finished = broadcast.publish_track("status".into(), None).unwrap();
-	let reader = finished.consume(None).unwrap();
-	finished.finish().unwrap();
-	assert!(!finished.abort_unwanted(7).unwrap());
-	reader.cancel();
-	assert!(finished.abort_unwanted(7).unwrap());
-}
-
-/// Every typed producer ends an idle track with `abort_unwanted`, but keeps it for a reader that
-/// joined since, which reads what is written next; once that reader leaves the abort commits and
-/// the handle is closed.
-///
-/// The reader leaves before the publisher's watcher sees it arrive, so that watcher, still on
-/// null, never wakes: the publisher waits for the next null on a fresh `demand()` instead.
-async fn typed_abort_unwanted(
+/// Releasing a producer ends an on-demand track: cleanly while nobody wants it, so a later reader
+/// asks for it afresh, and by handing a reader that joined since the publisher saw it idle to the
+/// broadcast's next request for the track.
+async fn release_ends_on_demand(
 	broadcast: &MoqBroadcastProducer,
-	demand: impl Fn() -> Arc<crate::demand::MoqTrackDemand>,
-	abort: impl Fn() -> Result<bool, MoqError>,
-	write: impl FnOnce(),
+	dynamic: &MoqBroadcastRequests,
+	publish: impl Fn(&str) -> (Arc<crate::demand::MoqTrackDemand>, Released),
+	name: &str,
 ) {
-	let watcher = demand();
-	let name = watcher.name();
-	kio::clock::timeout(TIMEOUT, watcher.until_unwanted())
+	let idle = format!("{name}-idle");
+	let (demand, producer) = publish(&idle);
+	kio::clock::timeout(TIMEOUT, demand.until_unwanted())
 		.await
 		.expect("timed out waiting for the track to start unwanted")
 		.unwrap();
+	drop(producer);
+	let closed = kio::clock::timeout(TIMEOUT, kio::wait(|waiter| demand.inner().poll_closed(waiter)))
+		.await
+		.unwrap_or_else(|_| panic!("timed out waiting for {idle} to close"));
+	assert!(closed.is_ok(), "{idle} ended with {closed:?}");
+	let again = {
+		let consumer = broadcast.consume().unwrap();
+		let idle = idle.clone();
+		tokio::spawn(async move { consumer.subscribe_track(idle, None).await })
+	};
+	let request = kio::clock::timeout(TIMEOUT, dynamic.requested_track())
+		.await
+		.unwrap_or_else(|_| panic!("timed out waiting for {idle} to be requested again"))
+		.unwrap();
+	assert_eq!(request.name().unwrap(), idle);
+	request.reject(404).unwrap();
+	assert!(again.await.unwrap().is_err());
 
-	// A reader joins after the publisher saw nobody wanted the track.
-	let late = subscribe(broadcast, &name).await;
-	assert!(!abort().unwrap(), "{name} aborted under a reader");
-	write();
+	// A reader joins after the publisher saw nobody wanted the track, then the publisher releases.
+	let (demand, producer) = publish(name);
+	kio::clock::timeout(TIMEOUT, demand.until_unwanted())
+		.await
+		.expect("timed out waiting for the track to start unwanted")
+		.unwrap();
+	let late = subscribe(broadcast, name).await;
+	drop(producer);
+	let request = kio::clock::timeout(TIMEOUT, dynamic.requested_track())
+		.await
+		.unwrap_or_else(|_| panic!("timed out waiting for {name} to be requested again"))
+		.unwrap();
+	assert_eq!(request.name().unwrap(), name);
+	let next = request.accept(Some(timed_info())).unwrap();
+	next.append_group(us(0)).unwrap().finish().unwrap();
 	let group = kio::clock::timeout(TIMEOUT, late.recv_group())
 		.await
 		.unwrap_or_else(|_| panic!("timed out waiting for {name}'s group"))
 		.unwrap();
 	assert!(group.is_some(), "{name} ended under a reader");
 
-	// The reader leaves before the publisher's watcher looks again.
+	// Released while the reader still holds it, the next producer would be asked for again too.
 	drop(group);
 	late.cancel();
-	let fresh = demand();
-	kio::clock::timeout(TIMEOUT, fresh.until_unwanted())
+	let demand = next.demand().unwrap();
+	kio::clock::timeout(TIMEOUT, demand.until_unwanted())
 		.await
 		.expect("timed out waiting for the reader to leave")
 		.unwrap();
-	let stale = std::pin::pin!(watcher.wanted_changed());
-	let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
-	assert!(
-		stale.poll(&mut cx).is_pending(),
-		"{name}'s old watcher saw the reader come and go"
-	);
-	assert!(abort().unwrap(), "{name} kept with nobody reading");
-	assert!(matches!(abort(), Err(MoqError::Closed)), "{name} still open");
 }
 
 #[tokio::test]
-async fn typed_abort_unwanted_keeps_a_late_reader() {
+async fn release_ends_every_on_demand_producer() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let dynamic = broadcast.requests().unwrap();
 	let named = |name: &str| MoqMediaTarget::Named {
 		name: Some(name.into()),
 	};
 
-	let media = MoqMediaTrackProducer::audio(
+	release_ends_on_demand(
 		&broadcast,
-		named("media"),
-		audio_init(MoqAudioFormat::opus(), opus_head()),
-	)
-	.unwrap();
-	typed_abort_unwanted(
-		&broadcast,
-		|| media.demand().unwrap(),
-		|| media.abort_unwanted(7),
-		|| {
-			media
-				.write_frame(MoqFrame {
-					payload: b"opus frame".to_vec(),
-					timestamp: us(0),
-				})
-				.unwrap()
+		&dynamic,
+		|name| {
+			let track = broadcast.publish_track(name.into(), Some(timed_info())).unwrap();
+			(track.demand().unwrap(), Box::new(track))
 		},
-	)
-	.await;
-	assert!(matches!(
-		media.write_frame(MoqFrame {
-			payload: b"opus frame".to_vec(),
-			timestamp: us(20_000)
-		}),
-		Err(MoqError::Closed)
-	));
-
-	let stream = MoqMediaTrackStreamProducer::video(
-		&broadcast,
-		named("stream"),
-		video_init(MoqVideoFormat::h264(), Vec::new()),
-	)
-	.unwrap();
-	typed_abort_unwanted(
-		&broadcast,
-		|| stream.demand().unwrap(),
-		|| stream.abort_unwanted(7),
-		|| {
-			// A second keyframe delimits the first access unit.
-			let mut keyframe = h264_init();
-			keyframe.extend_from_slice(&[0, 0, 0, 1, 0x65, 0x88, 0x84, 0x21]);
-			stream.write(keyframe.repeat(2)).unwrap();
-		},
+		"raw",
 	)
 	.await;
 
-	let audio = crate::audio::MoqAudioProducer::new(
-		&MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
-		crate::audio::MoqAudioProducerOptions {
-			input: crate::audio::MoqAudioEncoderInput {
-				format: crate::audio::MoqAudioSampleFormat::F32,
-				sample_rate: 48_000,
-				channels: 1,
-			},
-			output: crate::audio::MoqAudioEncoderOutput {
-				codec: crate::audio::MoqAudioCodec::opus(),
-				sample_rate: None,
-				channels: None,
-				bitrate: None,
-				frame_duration: Some(Duration::from_millis(20)),
-			},
-			track: Some("microphone".into()),
-			bandwidth: None,
-		},
-	)
-	.unwrap();
-	typed_abort_unwanted(
+	release_ends_on_demand(
 		&broadcast,
-		|| audio.demand().unwrap(),
-		|| audio.abort_unwanted(7),
-		|| {
-			audio
-				.write(crate::audio::MoqAudioFrame {
-					timestamp: us(0),
-					data: vec![0; 960 * std::mem::size_of::<f32>()],
-				})
-				.unwrap()
-		},
-	)
-	.await;
-
-	let video = crate::video::MoqVideoProducer::new(
-		&MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
-		crate::video::MoqVideoProducerOptions {
-			input: crate::video::MoqVideoEncoderInput {
-				format: crate::video::MoqVideoPixelFormat::rgba(),
-				width: 320,
-				height: 240,
-				framerate: crate::video::MoqVideoFrameRate {
-					numerator: 30,
-					denominator: 1,
-				},
-			},
-			output: crate::video::MoqVideoEncoderOutput {
-				codec: crate::video::MoqVideoCodec::h264(),
-				bitrate: None,
-				join: None,
-				kind: crate::video::MoqVideoEncoderKind::Software,
-			},
-			track: Some("camera".into()),
-			bandwidth: None,
-			lower: None,
-		},
-	)
-	.unwrap();
-	typed_abort_unwanted(
-		&broadcast,
-		|| video.demand().unwrap(),
-		|| video.abort_unwanted(7),
-		|| {
-			// A backend that pipelines readies an earlier frame's output.
-			for i in 0..5u64 {
-				video
-					.write(crate::video::MoqVideoFrame {
-						timestamp: us(i * 1_000_000 / 30),
-						data: vec![0x80; 320 * 240 * 4],
-					})
+		&dynamic,
+		|name| {
+			let media =
+				MoqMediaTrackProducer::audio(&broadcast, named(name), audio_init(MoqAudioFormat::opus(), opus_head()))
 					.unwrap();
-			}
+			(media.demand().unwrap(), Box::new(media))
 		},
+		"media",
 	)
 	.await;
 
-	let track = broadcast.publish_track("snapshot".into(), Some(timed_info())).unwrap();
-	let snapshot = MoqJsonSnapshotProducer::new(&broadcast, &track, MoqJsonSnapshotConfig { deltas: true }).unwrap();
-	typed_abort_unwanted(
+	release_ends_on_demand(
 		&broadcast,
-		|| snapshot.demand().unwrap(),
-		|| snapshot.abort_unwanted(7),
-		|| snapshot.update("1".into(), us(0)).unwrap(),
-	)
-	.await;
-
-	let track = broadcast.publish_track("log".into(), Some(timed_info())).unwrap();
-	let log = MoqJsonStreamProducer::new(&broadcast, &track).unwrap();
-	typed_abort_unwanted(
-		&broadcast,
-		|| log.demand().unwrap(),
-		|| log.abort_unwanted(7),
-		|| log.append("1".into(), us(0)).unwrap(),
-	)
-	.await;
-
-	let track = broadcast.publish_track("window".into(), Some(timed_info())).unwrap();
-	let window = MoqJsonWindowProducer::new(
-		&track,
-		MoqJsonWindowConfig {
-			checkpoint_records: None,
+		&dynamic,
+		|name| {
+			let stream = MoqMediaTrackStreamProducer::video(
+				&broadcast,
+				named(name),
+				video_init(MoqVideoFormat::h264(), Vec::new()),
+			)
+			.unwrap();
+			(stream.demand().unwrap(), Box::new(stream))
 		},
+		"stream",
 	)
-	.unwrap();
-	typed_abort_unwanted(
+	.await;
+
+	release_ends_on_demand(
 		&broadcast,
-		|| window.demand().unwrap(),
-		|| window.abort_unwanted(7),
-		|| window.push("1".into(), us(0)).unwrap(),
+		&dynamic,
+		|name| {
+			let audio = crate::audio::MoqAudioProducer::new(
+				&MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
+				crate::audio::MoqAudioProducerOptions {
+					input: crate::audio::MoqAudioEncoderInput {
+						format: crate::audio::MoqAudioSampleFormat::F32,
+						sample_rate: 48_000,
+						channels: 1,
+					},
+					output: crate::audio::MoqAudioEncoderOutput {
+						codec: crate::audio::MoqAudioCodec::opus(),
+						sample_rate: None,
+						channels: None,
+						bitrate: None,
+						frame_duration: Some(Duration::from_millis(20)),
+					},
+					track: Some(name.into()),
+					bandwidth: None,
+				},
+			)
+			.unwrap();
+			(audio.demand().unwrap(), Box::new(audio))
+		},
+		"microphone",
+	)
+	.await;
+
+	release_ends_on_demand(
+		&broadcast,
+		&dynamic,
+		|name| {
+			let video = crate::video::MoqVideoProducer::new(
+				&MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
+				crate::video::MoqVideoProducerOptions {
+					input: crate::video::MoqVideoEncoderInput {
+						format: crate::video::MoqVideoPixelFormat::rgba(),
+						width: 320,
+						height: 240,
+						framerate: crate::video::MoqVideoFrameRate {
+							numerator: 30,
+							denominator: 1,
+						},
+					},
+					output: crate::video::MoqVideoEncoderOutput {
+						codec: crate::video::MoqVideoCodec::h264(),
+						bitrate: None,
+						join: None,
+						kind: crate::video::MoqVideoEncoderKind::Software,
+					},
+					track: Some(name.into()),
+					bandwidth: None,
+					lower: None,
+				},
+			)
+			.unwrap();
+			(video.demand().unwrap(), Box::new(video))
+		},
+		"camera",
+	)
+	.await;
+
+	release_ends_on_demand(
+		&broadcast,
+		&dynamic,
+		|name| {
+			let track = broadcast.publish_track(name.into(), Some(timed_info())).unwrap();
+			let snapshot =
+				MoqJsonSnapshotProducer::new(&broadcast, &track, MoqJsonSnapshotConfig { deltas: true }).unwrap();
+			(snapshot.demand().unwrap(), Box::new(snapshot))
+		},
+		"snapshot",
+	)
+	.await;
+
+	release_ends_on_demand(
+		&broadcast,
+		&dynamic,
+		|name| {
+			let track = broadcast.publish_track(name.into(), Some(timed_info())).unwrap();
+			let log = MoqJsonStreamProducer::new(&broadcast, &track).unwrap();
+			(log.demand().unwrap(), Box::new(log))
+		},
+		"log",
+	)
+	.await;
+
+	release_ends_on_demand(
+		&broadcast,
+		&dynamic,
+		|name| {
+			let track = broadcast.publish_track(name.into(), Some(timed_info())).unwrap();
+			let window = MoqJsonWindowProducer::new(
+				&track,
+				MoqJsonWindowConfig {
+					checkpoint_records: None,
+				},
+			)
+			.unwrap();
+			(window.demand().unwrap(), Box::new(window))
+		},
+		"window",
 	)
 	.await;
 }
