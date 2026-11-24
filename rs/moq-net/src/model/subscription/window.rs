@@ -1888,7 +1888,7 @@ mod tests {
 		let max = Duration::from_millis(30);
 		// Placed at the latest group, 9.
 		let join = Range::from(Start::Live {
-			min: Duration::ZERO,
+			min: Some(Duration::ZERO),
 			max: Some(max),
 		});
 		let history = range(time(3), time(3));
