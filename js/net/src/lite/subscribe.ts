@@ -1659,17 +1659,17 @@ export async function decodeSubscribeResponse(r: Reader, version: Version): Prom
 }
 
 /**
- * Whether the next response `r` holds whole, without reading the stream, is a lite-07
- * SUBSCRIBE_START, so a subscriber applying a burst of them can take the next before applying.
+ * Whether `r` holds the next response whole, without reading the stream, so a subscriber can take
+ * a burst that already arrived before applying any of it.
  */
-export function startBuffered(r: Reader, version: Version): boolean {
-	if (!hasRanges(version)) return false;
-	const start = r.tryPeek((c) => {
-		if (c.u53() !== 0x4) return false;
+export function responseBuffered(r: Reader, version: Version): boolean {
+	const whole = r.tryPeek((c) => {
+		// Before lite-03 the only response is the untyped SUBSCRIBE_OK.
+		if (version !== Version.DRAFT_01 && version !== Version.DRAFT_02) c.u53();
 		c.read(c.u53());
 		return true;
 	});
-	return start === true;
+	return whole === true;
 }
 
 /** Like {@link decodeSubscribeResponse} but resolves `undefined` on a clean FIN. */
