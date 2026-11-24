@@ -12679,16 +12679,32 @@ impl Subscriber {
 	/// lite copy once its upstream answered with the edge, or on a wire before lite-07 once it
 	/// holds a live group, or once it ended (see [`Producer::await_edge`],
 	/// [`Producer::edge_from_groups`]). `false` while a front's reader has no copy serving.
+	/// Registers `waiter` for the answer, the end, or a live group starting.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn knows_edge(&mut self, waiter: &kio::Waiter) -> bool {
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
-				let state = cursor.state.read();
-				let ended = state.outcome.is_final() || state.declared().is_some();
-				match state.edge {
-					EdgeSource::Cache => true,
-					EdgeSource::Answer { answered } => answered || ended,
-					EdgeSource::FirstGroup => state.largest().is_some() || ended,
+				let known = |state: &TrackState| {
+					let ended = state.outcome.is_final() || state.declared().is_some();
+					match state.edge {
+						EdgeSource::Cache => true,
+						EdgeSource::Answer { answered } => answered || ended,
+						EdgeSource::FirstGroup => state.largest().is_some() || ended,
+					}
+				};
+				// A group's header lands before its first frame, and that frame starting the group
+				// writes no track state, so it wakes `waiter` only through a watch on the group.
+				let polled = cursor.state.poll(waiter, |state| match known(state) {
+					true => Poll::Ready(()),
+					false => {
+						state.watch_starts(waiter);
+						Poll::Pending
+					}
+				});
+				match polled {
+					Poll::Ready(Ok(())) => true,
+					Poll::Ready(Err(state)) => known(&state),
+					Poll::Pending => false,
 				}
 			}
 			Inner::Resume(resume, _) => resume.knows_edge(waiter),
