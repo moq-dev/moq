@@ -1529,7 +1529,8 @@ impl Misses {
 	/// Ask fills for `asks`, which [`Self::judge`] returned, take in what the fills answered, and
 	/// give up what a fill still owes past `drift`'s budget, parking `waiter` on the rest. Costs
 	/// nothing with nothing to ask, no fill to hear from, and no gap to time, when no answer can
-	/// arrive. While its record `owes` a debt, what its allowance leaves unasked is given up.
+	/// arrive. While its record `owes` a debt, what its allowance leaves unasked is given up,
+	/// with the asked pieces past it.
 	#[expect(
 		clippy::too_many_arguments,
 		reason = "one probe's inputs, borrowed apart from its cursor"
@@ -1563,13 +1564,39 @@ impl Misses {
 				let fills = state.read().fills.clone();
 				self.ask(state, &fills, &retry, &asking, given_up);
 			}
-			if owes {
-				self.give_up_unasked(given_up);
-			}
 		}
 		// Only what a fill still owes can expire.
 		if self.is_waiting() {
 			self.expire(&state.read(), drift, given_up, waiter);
+		}
+		if owes {
+			self.give_up_unasked(given_up);
+			self.give_up_split(given_up);
+		}
+	}
+
+	/// Give up the asked runs past the allowance, farthest from the front in the reader's order
+	/// first: what arrives or expires inside an asked run splits it, and no new ask bounds those
+	/// pieces. Only under a debt, as for what waits unasked: with room they are still answered.
+	fn give_up_split(&mut self, given_up: &mut GivenUp) {
+		// Every reader is allowed two: its ranges hold at least one run.
+		if self.asked.len() <= 2 {
+			return;
+		}
+		let over = self.asked.len().saturating_sub(self.allowance());
+		let split: RangeSet<u64> = match self.asking.map_or(Order::Ascending, |asking| asking.order) {
+			Order::Ascending => self.asked.iter().rev().take(over).cloned().collect(),
+			Order::Descending => self.asked.iter().take(over).cloned().collect(),
+		};
+		if split.is_empty() {
+			return;
+		}
+		for run in split.iter() {
+			self.unwant(run.clone());
+		}
+		self.release(&split);
+		for run in split.iter() {
+			self.give_up(run.clone(), given_up);
 		}
 	}
 

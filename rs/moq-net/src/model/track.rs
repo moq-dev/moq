@@ -32130,6 +32130,35 @@ mod test {
 		}
 	}
 
+	/// One ask for a long run below where the feed starts, which upstream never answers, split
+	/// by groups arriving late at every other key inside it: the fragments past the reader's
+	/// allowance go back to waiting unasked, so the record stays bounded as the arrivals split it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_ask_split_by_late_arrivals_keeps_a_bounded_record() {
+		const GROUPS: u64 = 400;
+		let (mut producer, _pool) = pooled_producer(0);
+		let dynamic = producer.requests();
+		let mut subscriber = producer.subscribe(Subscription::default().with_range(0..).with_order(Order::Ascending));
+		producer.start_at(GROUPS).unwrap();
+		write_group(&producer, GROUPS);
+		let waiter = kio::Waiter::noop();
+		drain_groups(&mut subscriber);
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("everything below the start is a miss");
+		};
+		assert_eq!((fill.start().group, fill.end()), (0, GROUPS));
+		let mut most = 0;
+		for key in (0..GROUPS).step_by(2) {
+			write_group(&producer, key);
+			drain_groups(&mut subscriber);
+			drained_drops(&mut subscriber);
+			let record = subscriber.record();
+			most = most.max(subscriber.delivered_runs() + record.reported.len() + record.pending.len());
+		}
+		assert!(most <= 6, "the record grew to {most} runs");
+	}
+
 	/// A track whose newest group is `newest`, every group fresh to [`replay`].
 	#[cfg(feature = "async")]
 	fn quiet_track(newest: u64) -> Producer {
