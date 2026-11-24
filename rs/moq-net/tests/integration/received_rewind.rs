@@ -3,8 +3,8 @@
 //! A relay passes on the timestamps it receives over lite-06 and moq-transport, with their
 //! values, even for a group that arrives after a later one.
 
+use crate::WithMax as _;
 use crate::support;
-use moq_net::track::Delay;
 
 use std::time::Duration;
 
@@ -79,8 +79,8 @@ async fn relay(upstream: &str, downstream: &str) -> (Option<moq_net::Timescale>,
 		.unwrap();
 
 	let subscription = Subscription::default()
-		.with_delay(Delay::default().with_max(BUDGET))
-		.with_ranges([support::keys(0..)]);
+		.with_ranges([support::keys(0..)])
+		.with_max(BUDGET);
 	let reader = kio::clock::sim::spawn(async move {
 		let mut sub = remote
 			.track("data")
@@ -129,8 +129,8 @@ async fn relay(upstream: &str, downstream: &str) -> (Option<moq_net::Timescale>,
 #[kio::test]
 async fn a_timed_track_keeps_its_timestamps_through_a_relay() {
 	let mut failures = Vec::new();
-	for upstream in ["moq-lite-06", "moq-transport-22"] {
-		for downstream in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
+	for upstream in ["moq-lite-06", "moq-transport-22", "moq-transport-23"] {
+		for downstream in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22", "moq-transport-23"] {
 			let (timescale, got) = relay(upstream, downstream).await;
 			let ok = timescale == Some(moq_net::Timescale::MILLI)
 				&& matches!(

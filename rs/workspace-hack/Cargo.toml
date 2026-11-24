@@ -217,10 +217,12 @@ libc = { version = "0.2", features = ["extra_traits"] }
 nix = { version = "0.31", features = ["net", "uio"] }
 num-traits = { version = "0.2", default-features = false, features = ["libm"] }
 objc2 = { version = "0.6" }
+objc2-av-foundation = { version = "0.3", features = ["objc2-core-media"] }
 objc2-core-audio = { version = "0.3", default-features = false, features = ["AudioHardware", "AudioHardwareDeprecated", "objc2", "objc2-core-audio-types", "objc2-foundation", "std"] }
 objc2-core-audio-types = { version = "0.3" }
 objc2-core-foundation = { version = "0.3", features = ["CFBase"] }
 objc2-core-graphics = { version = "0.3" }
+objc2-core-media = { version = "0.3" }
 objc2-core-video = { version = "0.3" }
 objc2-foundation = { version = "0.3" }
 objc2-metal = { version = "0.3" }
@@ -247,10 +249,12 @@ libc = { version = "0.2", features = ["extra_traits"] }
 nix = { version = "0.31", features = ["net", "uio"] }
 num-traits = { version = "0.2", default-features = false, features = ["libm"] }
 objc2 = { version = "0.6" }
+objc2-av-foundation = { version = "0.3", features = ["objc2-core-media"] }
 objc2-core-audio = { version = "0.3", default-features = false, features = ["AudioHardware", "AudioHardwareDeprecated", "objc2", "objc2-core-audio-types", "objc2-foundation", "std"] }
 objc2-core-audio-types = { version = "0.3" }
 objc2-core-foundation = { version = "0.3", features = ["CFBase"] }
 objc2-core-graphics = { version = "0.3" }
+objc2-core-media = { version = "0.3" }
 objc2-core-video = { version = "0.3" }
 objc2-foundation = { version = "0.3" }
 objc2-metal = { version = "0.3" }

@@ -68,12 +68,6 @@ public final class Fill: Sendable {
         ffi.priority()
     }
 
-    /// The most tolerant age budget among its readers, or nil for the publisher's max age
-    /// alone.
-    public var maxDelay: TimeInterval? {
-        ffi.maxDelay()
-    }
-
     /// Which end to fill first.
     public var order: Subscription.Order {
         ffi.order()

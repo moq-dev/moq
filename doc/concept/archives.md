@@ -43,21 +43,19 @@ each relay by listing it in [`listen.version`](/bin/relay/config#listen), plus
 `connect.version` for its cluster links. A relay left at its default versions
 cannot negotiate moq-lite 07.
 
-Recording starts with content the subscription can still receive. Groups are
-stored in start order. A group the track still owes is given up once newer
-content runs the publisher's max age, capped by the producer's max delay, ahead
-of it, so a gap cannot stall later groups; one the publisher skipped or dropped
-is never waited for. Only stream tracks are recorded: a
-datagram track is live-only, so an archive's playback never includes it. An
-archive cannot recover content already lost or evicted before it subscribed. The same max delay
-(`producer::Config::max_delay`, 10 s by default and in `moq export archive`)
-bounds the backlog: content further behind the live edge is skipped, even when
-the publisher still caches it.
+Recording asks for history: everything the publisher still caches, delivered in
+full and bounded only by the publisher's max age. Groups are stored in start
+order. A group the track still owes waits for the publisher's verdict: it is a
+gap once the publisher drops it or newer content runs its max age ahead, so a
+gap cannot stall later groups; one the publisher skipped or dropped is never
+waited for. Only stream tracks are recorded: a datagram track is live-only, so
+an archive's playback never includes it. An archive cannot recover content
+already lost or evicted before it subscribed.
 
 Pick a distinct store prefix for each publisher instance, such as its broadcast
 path and [instance](/concept/identity). Restarting a recorder on the same instance
-and prefix resumes after each track's last stored frame, within that max delay:
-an interruption longer than it leaves a gap. A prefix already marked complete
+and prefix resumes after each track's last stored frame, with whatever the publisher
+still caches from there: an interruption longer than its max age leaves a gap. A prefix already marked complete
 records nothing. Never append a new publisher run that restarts its
 group starts to an old prefix. `moq export archive` makes this choice for you.
 

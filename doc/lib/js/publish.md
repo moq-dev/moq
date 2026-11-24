@@ -73,7 +73,7 @@ with a warning, since every viewer would refuse it.
 ## Encoding
 
 Video encodes while enabled, so its recent groups wait in the track's cache for
-a late subscription's `delay.max` or a fetch. The cache keeps an idle group for
+a late live join's `max`, a history range, or a fetch. The cache keeps an idle group for
 30 seconds whatever `maxAge` says; `maxAge` only bounds how far back a reader
 may reach into it. Audio keeps raw PCM while nobody listens, then encodes the part of
 that history a subscriber wants ahead of live audio when one arrives: from a live join's
@@ -137,6 +137,11 @@ together. `el.audio.join` changes that minimum; a join shorter than a frame
 puts every frame in its own group, and zero is refused. A longer join lets a
 relay keep fewer streams, at the cost of coarser loss: a viewer that falls
 behind skips a whole group. Frames still forward as they are encoded.
+A reader that skips a superseded group at once (a zero `delay.max`, the default
+subscription) loses a 20 ms group whenever jitter delivers it to a relay together
+with its successor; give that reader a `delay.max` of at least the path's jitter
+rather than lengthening the join. In a room, `Local` takes the same knob as
+`microphone.join` and `screen.audio.join`.
 
 Timestamps are the page's media clock, `MediaClock.now()`, a `Duration` since
 `@moq/clock`'s origin, so every source shares one timeline. The catalog's `sync.clock` maps it to

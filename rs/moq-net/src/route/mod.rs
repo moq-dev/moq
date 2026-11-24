@@ -176,10 +176,6 @@ pub(crate) enum Error {
 	Malformed,
 	#[error("a message the neighbor's role never sends")]
 	Role,
-	#[error(
-		"a routing neighbor started before a session of its relay known closed: its clock went back, or two relays share an id"
-	)]
-	Regressed,
 }
 
 impl Error {
@@ -191,7 +187,6 @@ impl Error {
 			Self::Malformed | Self::Nested | Self::UnknownPrefix => RouteClose::Malformed,
 			Self::Role | Self::Partial => RouteClose::Role,
 			Self::Unasked | Self::Unrouted => RouteClose::Unasked,
-			Self::Regressed => RouteClose::Regressed,
 			// This node's own inputs: never a peer's, short of a bug here.
 			Self::ZeroCost | Self::UnknownNeighbor | Self::Duplicate => RouteClose::Other,
 		}

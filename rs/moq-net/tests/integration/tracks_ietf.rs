@@ -19,7 +19,12 @@ use support::harness::{MockConnectOptions, MockPair, connect_mock};
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Every draft that has SUBSCRIBE_TRACKS.
-const DRAFTS: [&str; 3] = ["moq-transport-18", "moq-transport-20", "moq-transport-22"];
+const DRAFTS: [&str; 4] = [
+	"moq-transport-18",
+	"moq-transport-20",
+	"moq-transport-22",
+	"moq-transport-23",
+];
 
 /// SUBSCRIBE (0x03), as the first byte of a request stream.
 const SUBSCRIBE: u8 = 0x03;
@@ -45,6 +50,7 @@ async fn next(tracks: &mut moq_net::broadcast::Tracks) -> String {
 		Ok(Some(TracksEvent::Removed { name, .. })) => format!("-{name}"),
 		Ok(Some(TracksEvent::Finished { name, .. })) => format!("~{name}"),
 		Ok(Some(TracksEvent::Synced)) => "synced".into(),
+		Ok(Some(event)) => panic!("unexpected event {event:?}"),
 		Ok(None) => "end".into(),
 		Err(err) => format!("error: {err}"),
 	}

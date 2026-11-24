@@ -3,7 +3,7 @@
 //! Random keys of route flips, route failures, give-ups, short closes, ranges, cache expiry,
 //! and reader joins and leaves drive an origin's fronts on the simulated clock. Every reader's
 //! groups, frames, drops, and end are checked against what one plain cursor on the logical
-//! track would see: every group its range and budget allow, each once, in its order. A
+//! track would see: every group its range and staleness budget allow, each once, in its order. A
 //! second instance, priced below the first, wins the path while older readers stay on
 //! theirs until it has no route left, then end with an error.
 //!
@@ -30,8 +30,6 @@ const SLOTS: usize = 3;
 const INSTANCES: usize = 2;
 const READERS: usize = 4;
 const PATH: &str = "room/alice";
-/// A budget nothing in a case outlives.
-const HOUR: Duration = Duration::from_secs(3600);
 /// A budget spanning about three groups.
 const SHORT: Duration = Duration::from_millis(30);
 
@@ -56,19 +54,15 @@ fn route_failure() -> Error {
 /// A verdict on content, not a route failing: another route may still deliver it.
 const GIVE_UP: StreamError = StreamError::DeliveryTimeout;
 
+/// The staleness budget of a reader with no range. Only a live join has one: a reader with a
+/// range asks for history and reads all of it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Budget {
+	/// Nothing in a case outlives it, so the reader takes every group from the oldest, as
+	/// history.
 	Hour,
+	/// A live join reaching back past every group, taking only those within [`SHORT`].
 	Short,
-}
-
-impl Budget {
-	fn duration(self) -> Duration {
-		match self {
-			Self::Hour => HOUR,
-			Self::Short => SHORT,
-		}
-	}
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -80,6 +74,13 @@ struct Spec {
 	range: Option<(u64, u64)>,
 	/// Polls drops from the start, as a publisher forwarding them does.
 	drops: bool,
+}
+
+impl Spec {
+	/// Whether `range` reads a live join whose groups expire within a case.
+	fn expires(&self, range: Option<(u64, u64)>) -> bool {
+		self.budget == Budget::Short && range.is_none()
+	}
 }
 
 #[derive(Clone, Debug)]
@@ -269,6 +270,11 @@ impl Publisher {
 		self.routes.iter().flatten()
 	}
 
+	/// The route the front serves: the cheapest live one.
+	fn serving(&self) -> Option<&Copy> {
+		self.routes.iter().rev().flatten().next()
+	}
+
 	fn newest(&self) -> Option<u64> {
 		self.written.last_key_value().map(|(group, _)| *group)
 	}
@@ -315,6 +321,9 @@ struct Reader {
 	floor: Option<u64>,
 	/// Its instance lost its last route while it read.
 	doomed: bool,
+	/// It once read a live join whose groups expire within a case, so any group it was handed
+	/// may have ended short, and only the last is owed.
+	expires: bool,
 	end: Option<Result<(), Error>>,
 	/// What every live route carried in full, in range, when the track ended cleanly.
 	carried: BTreeSet<u64>,
@@ -408,11 +417,12 @@ impl Reader {
 }
 
 fn subscription(budget: Budget, range: Option<(u64, u64)>) -> track::Subscription {
-	let subscription = track::Subscription::default().with_delay(track::Delay::default().with_max(budget.duration()));
-	match range {
-		Some((start, end)) => subscription.with_range(start..end),
-		None => subscription,
-	}
+	let range = match (range, budget) {
+		(Some((start, end)), _) => track::Range::groups(start..end),
+		(None, Budget::Hour) => track::Range::ALL,
+		(None, Budget::Short) => track::Range::from(track::Start::within(SHORT)),
+	};
+	track::Subscription::default().with_ranges([range])
 }
 
 fn fail(reader: usize, what: impl std::fmt::Display) -> TestCaseError {
@@ -429,7 +439,7 @@ struct Model {
 impl Model {
 	fn new() -> Self {
 		let origin = origin::Config {
-			node: std::num::NonZeroU64::MIN,
+			node: Some(std::num::NonZeroU64::MIN),
 			update_hold: Duration::ZERO,
 			..Default::default()
 		};
@@ -526,6 +536,7 @@ impl Model {
 				};
 				reader.ranges = range;
 				reader.holding = None;
+				reader.expires |= reader.spec.expires(range);
 				let _ = reader.control.update(subscription(reader.spec.budget, range));
 				// A read that ended at its range's end reads on once the range widens.
 				if matches!(reader.end, Some(Ok(()))) && !self.instances[reader.instance].ended {
@@ -762,6 +773,7 @@ impl Model {
 			dropped: BTreeSet::new(),
 			floor: self.instances[instance].newest(),
 			doomed: false,
+			expires: spec.expires(spec.range),
 			end: None,
 			carried: BTreeSet::new(),
 			passed: None,
@@ -921,7 +933,8 @@ impl Model {
 					Poll::Ready(Ok(None)) => {
 						// Short of whole only where a route closed it, and, unless the budget gave up or
 						// the group may have expired, only while a route that closed it lives: one whose
-						// route failed reads on from the route replacing it.
+						// route failed reads on from the route replacing it, unless that route gave the
+						// group up, so nothing continues it.
 						let whole = read.frames == frames(*key) && instance.complete.contains(key);
 						if !whole && !instance.short.contains(&(*key, read.frames)) {
 							return Err(fail(
@@ -930,9 +943,10 @@ impl Model {
 							));
 						}
 						if !whole
-							&& reader.spec.budget == Budget::Hour
-							&& !reader.doomed && reader.floor.is_none_or(|floor| *key > floor)
+							&& !reader.expires && !reader.doomed
+							&& reader.floor.is_none_or(|floor| *key > floor)
 							&& !instance.live().any(|copy| copy.closed_at(*key, read.frames))
+							&& !instance.serving().is_some_and(|copy| copy.given_up.contains(key))
 						{
 							return Err(fail(
 								index,
@@ -1073,7 +1087,7 @@ impl Model {
 			Some(Ok(())) => owed.retain(|group| reader.carried.contains(group)),
 			_ => owed.retain(|group| !reader.passed_below(*group) || reader.carried.contains(group)),
 		}
-		if reader.spec.budget == Budget::Short {
+		if reader.expires {
 			owed.retain(|group| *group == GROUPS - 1);
 		}
 		let missing: Vec<u64> = owed
@@ -1085,7 +1099,7 @@ impl Model {
 		if !missing.is_empty() {
 			let _ = write!(problems, "missing groups {missing:?}; ");
 		}
-		if reader.spec.budget == Budget::Hour {
+		if !reader.expires {
 			for (key, read) in &reader.reading {
 				if carried(*key) && !instance.given_up.contains(key) && !matches!(read.end, Some(Ok(()))) {
 					let _ = write!(
@@ -1894,9 +1908,8 @@ fn regressions() {
 			finish: false,
 		},
 		// A group the local floor keeps out of where an earlier copy placed a range, below where
-		// the serving copy places it: the read runs without a stall. The oracle owes nothing
-		// below the serving copy's placement, so it does not check that group yet; see
-		// quest/m0/nightly/resume-model-placement.md.
+		// the serving copy places it: the read runs without a stall, and stays open for that
+		// group, which every live route held when the range placed, so the oracle owes it.
 		Case {
 			ops: vec![
 				Op::Join {
@@ -1914,6 +1927,180 @@ fn regressions() {
 					frames: 1,
 				},
 				Op::Up { instance: 0, slot: 1 },
+			],
+			finish: false,
+		},
+		// A group read past where the serving copy then closes it short cannot end cleanly
+		// there: no route said it ends at the frames read.
+		Case {
+			ops: vec![
+				Op::Join {
+					reader: 0,
+					spec: spec(false, Budget::Hour, None, false),
+				},
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: Some(5),
+					frames: 2,
+				},
+				Op::Up { instance: 0, slot: 1 },
+				Op::Write {
+					instance: 0,
+					slot: 1,
+					group: Some(5),
+					frames: 1,
+				},
+				Op::Down { instance: 0, slot: 0 },
+				Op::Close {
+					instance: 0,
+					slot: 1,
+					group: None,
+					down: false,
+				},
+			],
+			finish: false,
+		},
+		// A short close from a route that failed stands once the route replacing it gave the
+		// group up, so nothing continues it.
+		Case {
+			ops: vec![
+				Op::Up { instance: 0, slot: 2 },
+				Op::Up { instance: 0, slot: 1 },
+				Op::GiveUp {
+					instance: 0,
+					slot: 1,
+					group: 5,
+				},
+				Op::Join {
+					reader: 0,
+					spec: spec(false, Budget::Hour, None, false),
+				},
+				Op::Write {
+					instance: 0,
+					slot: 2,
+					group: Some(5),
+					frames: 1,
+				},
+				Op::Close {
+					instance: 0,
+					slot: 2,
+					group: None,
+					down: true,
+				},
+			],
+			finish: false,
+		},
+		// A serving copy whose floor lies above every group the reader's range now names was
+		// asked for nothing, so its own resolution is empty: the copy replacing it, from a lower
+		// boundary, is asked from where the reader placed the range instead.
+		Case {
+			ops: vec![
+				Op::Join {
+					reader: 3,
+					spec: spec(false, Budget::Hour, Some((0, 1)), false),
+				},
+				Op::Up { instance: 0, slot: 1 },
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: Some(1),
+					frames: 1,
+				},
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: Some(8),
+					frames: 1,
+				},
+				Op::Write {
+					instance: 0,
+					slot: 1,
+					group: None,
+					frames: 1,
+				},
+				Op::Ranges {
+					reader: 3,
+					range: Some((0, 6)),
+				},
+				Op::Up { instance: 0, slot: 2 },
+				Op::Write {
+					instance: 0,
+					slot: 1,
+					group: Some(2),
+					frames: 1,
+				},
+				Op::Write {
+					instance: 0,
+					slot: 2,
+					group: None,
+					frames: 1,
+				},
+			],
+			finish: false,
+		},
+		// The same once a failover moves the boundary below a time start the replaced copy
+		// placed at a lower group.
+		Case {
+			ops: vec![
+				Op::Up { instance: 1, slot: 2 },
+				Op::Join {
+					reader: 0,
+					spec: spec(false, Budget::Hour, Some((6, 7)), false),
+				},
+				Op::Up { instance: 1, slot: 0 },
+				Op::Write {
+					instance: 1,
+					slot: 2,
+					group: Some(7),
+					frames: 1,
+				},
+				Op::Down { instance: 1, slot: 2 },
+				Op::Up { instance: 1, slot: 2 },
+				Op::Write {
+					instance: 1,
+					slot: 0,
+					group: Some(1),
+					frames: 1,
+				},
+				Op::Write {
+					instance: 1,
+					slot: 2,
+					group: Some(1),
+					frames: 1,
+				},
+			],
+			finish: false,
+		},
+		// A backfill passed a group outside the reader's range, which a widening then owes: the
+		// serving route is asked for it, since the backfill will not hand it out again.
+		Case {
+			ops: vec![
+				Op::Join {
+					reader: 0,
+					spec: spec(false, Budget::Hour, Some((3, 4)), false),
+				},
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: Some(1),
+					frames: 1,
+				},
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: Some(4),
+					frames: 1,
+				},
+				Op::Up { instance: 0, slot: 1 },
+				Op::Write {
+					instance: 0,
+					slot: 1,
+					group: None,
+					frames: 1,
+				},
+				Op::Down { instance: 0, slot: 0 },
+				Op::Ranges { reader: 0, range: None },
 			],
 			finish: false,
 		},

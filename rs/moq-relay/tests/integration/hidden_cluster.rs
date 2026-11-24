@@ -77,6 +77,7 @@ async fn old_peer_keeps_hidden_paths(version: moq_net::Version) {
 			if let moq_net::origin::RouteEvent {
 				kind: moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update,
 				announce,
+				..
 			} = discovered.next().await.expect("peer origin closed")
 				&& announce.prefix.as_str() == ".hidden/test"
 			{

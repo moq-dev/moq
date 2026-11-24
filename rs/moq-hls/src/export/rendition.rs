@@ -1422,8 +1422,12 @@ impl Rendition {
 		waiter: &kio::Waiter,
 	) -> Poll<Option<moq_net::track::Subscribing>> {
 		let track = std::task::ready!(self.media.poll_track(binding, waiter));
-		let subscription = moq_net::track::Subscription::default()
-			.with_delay(moq_net::track::Delay::default().with_max(FEED_MAX_DELAY));
+		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+			moq_net::track::Start::Live {
+				min: Some(FEED_MAX_DELAY),
+				max: Some(FEED_MAX_DELAY),
+			},
+		)]);
 		Poll::Ready(track.map(|(_, track)| track.subscribe(subscription).into_inner()))
 	}
 
@@ -2378,8 +2382,13 @@ impl WatchMedia {
 					let Some((_, track)) = ready!(media.poll_track_or_refusal(binding, waiter))? else {
 						return Poll::Ready(Ok(()));
 					};
-					let subscription = moq_net::track::Subscription::default()
-						.with_delay(moq_net::track::Delay::default().with_max(FEED_MAX_DELAY));
+					let subscription =
+						moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+							moq_net::track::Start::Live {
+								min: Some(FEED_MAX_DELAY),
+								max: Some(FEED_MAX_DELAY),
+							},
+						)]);
 					// The index is the export's own bookkeeping, not delivery to a client, so a
 					// metered source counts only the segments and inits clients fetch.
 					let track = track.unmetered();

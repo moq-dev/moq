@@ -242,10 +242,15 @@ mod tests {
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
 		// Delayed, so the reader starts from the first group rather than the newest.
-		let subscriber = track.subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(5))),
-		);
+		let subscriber =
+			track.subscribe(
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(Duration::from_secs(5)),
+						max: Some(Duration::from_secs(5)),
+					},
+				)]),
+			);
 		let config: hang::catalog::AudioConfig = crate::codec::opus::Config::new(48_000, 2).into();
 		let wire = crate::catalog::hang::Container::try_from(&config).unwrap();
 		let mut import = super::Import::new(track, catalog.reserve(), config).unwrap();

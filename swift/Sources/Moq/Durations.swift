@@ -29,10 +29,6 @@ func checkTrackInfo(_ info: TrackInfo?) throws {
     try checkDuration(info?.refresh.interval, "refresh.interval")
 }
 
-func checkFetch(_ options: FetchGroupOptions?) throws {
-    try checkDuration(options?.maxDelay, "maxDelay")
-}
-
 func checkQuic(_ quic: QuicConfig) throws {
     try checkDuration(quic.idleTimeout, "quic.idleTimeout")
     try checkDuration(quic.keepAlive, "quic.keepAlive")

@@ -3,10 +3,11 @@
 //! How each reader's disposition record settles drops, skips, and evictions through a relay:
 //! a publisher origin, a relay origin, and a viewer origin joined with lite sessions.
 
+use crate::WithMax as _;
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use moq_net::track::{Delay, Info, Range, Subscription};
+use moq_net::track::{Info, Range, Subscription};
 use moq_net::{Timescale, Timestamp, Version, cache, origin, track};
 
 use crate::support;
@@ -156,11 +157,10 @@ fn asked(pair: &MockPair) -> (usize, usize) {
 	(count(2), count(3))
 }
 
-/// A reader of `ranges` with max delay `budget`.
+/// A reader of `ranges` under `budget`: a range from the oldest group takes every group still
+/// within it, and a time start stays history (see [`crate::WithMax`]).
 fn reading(budget: impl Into<Option<Duration>>, ranges: impl IntoIterator<Item = Range>) -> Subscription {
-	Subscription::default()
-		.with_delay(Delay::default().with_max(budget))
-		.with_ranges(ranges)
+	Subscription::default().with_ranges(ranges).with_max(budget)
 }
 
 /// Every group `subscriber` receives until it goes quiet for a second, or ends.
@@ -196,11 +196,11 @@ async fn a_relay_eviction_is_filled_by_range_for_every_reader() {
 		chain.populate();
 
 		// A reader with no budget warms the relay with every group, then leaves.
-		let mut warm = chain.subscribe(reading(None, [Range::default()])).await;
+		let mut warm = chain.subscribe(reading(None, [Range::ALL])).await;
 		assert_eq!(received(&mut warm).await, (0..GROUPS).collect());
 		drop(warm);
 
-		let mut widened = chain.subscribe(reading(NARROW, [Range::default()])).await;
+		let mut widened = chain.subscribe(reading(NARROW, [Range::ALL])).await;
 		assert_eq!(received(&mut widened).await, (6..GROUPS).collect());
 		// Owed every group from 0, on the relay's own cache, and reading none of them yet.
 		let mut owed = chain.subscribe_relay(reading(None, [support::keys(0..)])).await;
@@ -210,7 +210,7 @@ async fn a_relay_eviction_is_filled_by_range_for_every_reader() {
 		kio::clock::sleep(EXPIRY * 3).await;
 		let (subscribes, _) = chain.asked_upstream();
 
-		widened.update(reading(None, [Range::default()])).unwrap();
+		widened.update(reading(None, [Range::ALL])).unwrap();
 		assert_eq!(received(&mut widened).await, (0..6).collect(), "the widened reader");
 
 		let mut new = chain.subscribe(reading(None, [support::keys(1..4)])).await;
@@ -338,7 +338,7 @@ async fn reported_drop_through(versions: [&str; 2]) {
 		for key in (0..GROUPS).filter(|key| *key != 7) {
 			write(&chain.source, key, key * 1000);
 		}
-		let mut first = chain.subscribe(reading(B1, [Range::default()])).await;
+		let mut first = chain.subscribe(reading(B1, [Range::ALL])).await;
 		assert_eq!(received(&mut first).await, [5, 6, 8, 9].into(), "{name}");
 
 		// Group 7 lands once its successor is older than B1 by the wall clock, so the
@@ -353,13 +353,16 @@ async fn reported_drop_through(versions: [&str; 2]) {
 			true => (0..GROUPS).filter(|key| *key != 7).collect(),
 			false => (0..GROUPS).collect(),
 		};
-		first.update(reading(B2, [Range::default()])).unwrap();
-		assert_eq!(
-			received(&mut first).await,
-			&want - &[5, 6, 8, 9].into(),
-			"{name}: the widened reader"
-		);
-		let mut second = chain.subscribe(reading(B2, [Range::default()])).await;
+		// Widening a lite-07 viewer's live join keeps where it started, past the groups B1
+		// expired, so it takes back only the stale group above its start. Over a lite-06
+		// viewer hop the join reaches back to the oldest group, so the re-offer serves those.
+		let widened = match versions[1] == LITE06 {
+			true => &want - &[5, 6, 8, 9].into(),
+			false => [7].into(),
+		};
+		first.update(reading(B2, [Range::ALL])).unwrap();
+		assert_eq!(received(&mut first).await, widened, "{name}: the widened reader");
+		let mut second = chain.subscribe(reading(B2, [Range::ALL])).await;
 		assert_eq!(received(&mut second).await, want, "{name}: the later reader");
 
 		let _finished = chain.source.clone().finish().unwrap();
@@ -519,6 +522,7 @@ async fn an_ordered_reader_is_told_of_every_group_the_origin_evicted() {
 							assert!(told.insert(key), "group {key} reported twice");
 						}
 					}
+					_ => panic!("unexpected item"),
 				}
 			}
 			assert!(got.is_disjoint(&told), "{versions:?}: {got:?} also reported {told:?}");
@@ -572,8 +576,8 @@ async fn relay_pool_pressure_folds_every_reported_run() {
 		kio::clock::timeout(TIMEOUT * 10, async {
 			let pool = cache::Pool::new(cache::Config::default().with_expiry(None));
 			let chain = Chain::new([LITE07, LITE07], [forever(), pool.clone(), forever()]).await;
-			let mut local = chain.subscribe_relay(reading(budget, [support::keys(0..)])).await;
-			let mut remote = chain.subscribe(reading(budget, [support::keys(0..)])).await;
+			let mut local = chain.subscribe_relay(reading(budget, [Range::ALL])).await;
+			let mut remote = chain.subscribe(reading(budget, [Range::ALL])).await;
 			let odd = write_odd(&chain, RUNS);
 			for (reader, name) in [(&mut local, "local"), (&mut remote, "remote")] {
 				assert_eq!(received(reader).await, odd, "stale={stale}: the {name} reader");

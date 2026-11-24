@@ -28,20 +28,21 @@ pub struct MoqDelay {
 	/// The target latency: the playout or jitter-buffer delay held behind the live edge, or null
 	/// to leave it unstated. A range with no start is a live join once this is stated, zero
 	/// included: it starts at the group containing the live edge minus `min`
-	/// ([`Start::Live`](moq_net::track::Start::Live)). Unstated, such a range reaches back as far
-	/// as `max` allows. A range with a start ignores it, and a missing group is given up by `max`
-	/// alone. A media consumer starts an unstated minimum as zero. moq-lite-07 sends each live join
+	/// ([`Start::Live`](moq_net::track::Start::Live)). Unstated, such a range joins `max` behind
+	/// the live edge, and is history from the oldest group when `max` is null too. A range with a
+	/// start ignores it, and a missing group is given up by `max` alone. A media consumer starts an unstated minimum as zero. moq-lite-07 sends each live join
 	/// upstream. A `min` past `max` starts a live join no further back than
 	/// the group covering the point `max` behind the live edge, since the publisher serves no
 	/// older group. An audio decoder refuses a `min` beyond the track's max age instead.
 	pub min: Option<Duration>,
 	/// How far a non-latest group may fall behind the live edge before it is skipped, and how
-	/// far newer media may run past a missing group before it is given up, or null for no subscriber limit, leaving the
-	/// publisher's max age alone to bound it. `0` skips immediately; a larger value tolerates
-	/// that much reordering. It bounds lateness only, never the start.
+	/// far newer media may run past a missing group before it is given up, or null for no
+	/// subscriber limit, leaving the publisher's max age alone to bound it. `0` skips immediately;
+	/// a larger value tolerates that much reordering. It bounds lateness only, never the start.
 	///
-	/// Enforced both by the publisher's cache (sent on the wire) and by any local buffering,
-	/// such as [`MoqMediaTrackConsumer`]'s jitter buffer. It caps every range.
+	/// Each live join carries it as its [`Start::Live`](moq_net::track::Start::Live) `max`, and
+	/// any local buffering, such as [`MoqMediaTrackConsumer`]'s jitter buffer, applies it too. A
+	/// range with a start is history, delivered in full whatever this is.
 	pub max: Option<Duration>,
 }
 
@@ -106,8 +107,9 @@ pub fn moq_subscription_defaults() -> MoqSubscription {
 /// `start` through the group containing `end`.
 ///
 /// Every start is the first frame of its group, and every end includes its whole group. A time
-/// names the group containing it, the newest one starting at or before it, so a group's start
-/// names exactly it. Both are given [unscaled](MoqTimestamp::unscaled), in the track's
+/// names the group containing it, the newest one starting at or before it unless that group ended
+/// whole at or before the time, so a group's start names exactly it. A start in the pause past a
+/// whole group's end begins at the next group. Both are given [unscaled](MoqTimestamp::unscaled), in the track's
 /// timescale; a scaled one is refused with a timestamp mismatch until the bindings convert it.
 ///
 /// Over a session older than moq-lite-07, a start between two groups reaches the publisher as
@@ -116,7 +118,8 @@ pub fn moq_subscription_defaults() -> MoqSubscription {
 pub struct MoqRange {
 	/// Where delivery starts, or null for no start, which the subscription's [`MoqDelay`]
 	/// places: a stated `min` is a live join that far behind the live edge (zero is the latest
-	/// group), and an unstated one reaches back as far as `max` allows.
+	/// group), and an unstated one joins `max` behind it. A start is history: every group from it
+	/// on is delivered, bounded only by the publisher's max age.
 	#[uniffi(default = None)]
 	pub start: Option<MoqTimestamp>,
 	/// Where delivery stops, including the group containing it, or null to keep following the
@@ -182,18 +185,11 @@ pub struct MoqFetchGroupOptions {
 	/// The default 0 is the midpoint.
 	#[uniffi(default = 0)]
 	pub priority: i8,
-	/// Maximum age behind the live edge; null uses the publisher's max age alone.
-	#[uniffi(default = None)]
-	pub max_delay: Option<Duration>,
 }
 
 impl From<MoqFetchGroupOptions> for moq_net::group::Fetch {
 	fn from(options: MoqFetchGroupOptions) -> Self {
-		let fetch = moq_net::group::Fetch::default().with_priority(options.priority);
-		match options.max_delay {
-			Some(max_delay) => fetch.with_max_delay(max_delay),
-			None => fetch,
-		}
+		moq_net::group::Fetch::default().with_priority(options.priority)
 	}
 }
 
@@ -201,7 +197,9 @@ impl MoqSubscription {
 	/// The subscription without its delay, each range with no start still from the oldest group,
 	/// and that delay, for a caller widening it before it subscribes.
 	pub(crate) fn resolve(self) -> Result<(moq_net::track::Subscription, moq_mux::container::Delay), MoqError> {
-		let mut subscription = moq_net::track::Subscription::default().with_priority(self.priority);
+		let mut subscription = moq_net::track::Subscription::default()
+			.with_priority(self.priority)
+			.with_ranges([moq_net::track::Range::ALL]);
 		if let Some(ranges) = self.ranges {
 			let ranges = ranges
 				.into_iter()

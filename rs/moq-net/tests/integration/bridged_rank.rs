@@ -59,6 +59,7 @@ async fn via_b(subscriber: &origin::Producer) -> bool {
 		if let origin::RouteEvent {
 			kind: origin::RouteKind::Start | origin::RouteKind::Update | origin::RouteKind::Restart,
 			announce,
+			..
 		} = event && announce.prefix.as_str() == "live"
 		{
 			via = Some(announce.route.cost().value() >= B_COST);

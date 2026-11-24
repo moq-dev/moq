@@ -47,11 +47,11 @@ pub(super) const SI_PIDS: &[u16] = &[
 
 /// The DVB maximum repetition interval for a known `table_id` (ETSI TS 101 211).
 ///
-/// Export treats the interval as an upper bound, not the source's observed cadence,
-/// which is a property of that multiplexer's bitrate shaping and means nothing
-/// downstream. `None` for a table we don't recognize; export then falls back to its
-/// PSI cadence, so an unknown table degrades to a safe (fast) rate rather than being
-/// dropped. Keyed by `table_id` rather than PID because that is the granularity the
+/// Export treats the interval as an upper bound and repeats at half of it, not at
+/// the source's observed cadence, which is a property of that multiplexer's bitrate
+/// shaping and means nothing downstream. `None` for a table we don't recognize;
+/// export then falls back to its PSI cadence, so an unknown table degrades to a safe
+/// (fast) rate rather than being dropped. Keyed by `table_id` rather than PID because that is the granularity the
 /// spec defines: the EIT PID alone carries tables wanting 2s and 30s.
 pub(super) fn si_interval(table_id: u8) -> Option<Duration> {
 	match table_id {
@@ -281,7 +281,7 @@ pub struct SiEntry {
 	pub track: String,
 
 	/// Re-emit at least this often. A hint: import fills in the DVB maximum for the
-	/// tables it recognizes, and export is free to clamp it. Absent for an unknown
+	/// tables it recognizes, and export repeats at half of it. Absent for an unknown
 	/// `table_id`, which export then re-emits on its own PSI cadence, so an unknown
 	/// table degrades to a safe rate rather than being dropped.
 	///

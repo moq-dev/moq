@@ -585,7 +585,7 @@ if needs swift; then
 fi
 
 if needs kotlin; then
-    echo "building kotlin client (dev.moq:moq from Maven Central)..."
+    echo "building kotlin client (dev.moq:moq from Google's Maven Central mirror)..."
     KOTLIN_SMOKE="$CLIENTS/kotlin/build/install/smoke/bin/smoke"
     # `latest.release` + disabled dynamic-version caching resolves the newest each run.
     if ! have gradle; then

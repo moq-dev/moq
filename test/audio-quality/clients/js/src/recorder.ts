@@ -89,7 +89,10 @@ async function record(): Promise<void> {
 	if (!name || !config) throw new Error("the catalog ended without an audio rendition");
 
 	const decoder = format(config);
-	const track = broadcast.track(name).subscribe({ priority: Catalog.PRIORITY.audio, delay: { max: MAX_DELAY } });
+	const track = broadcast.track(name).subscribe({
+		priority: Catalog.PRIORITY.audio,
+		ranges: [{ start: { live: { min: MAX_DELAY, max: MAX_DELAY } } }],
+	});
 	info = {
 		transport: connection.transport,
 		get rtt() {

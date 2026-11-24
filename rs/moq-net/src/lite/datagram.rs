@@ -324,7 +324,6 @@ mod test {
 			instance: None,
 			node: Some(crate::route::NodeId {
 				relay: 0x7a3f,
-				start: 9,
 				marked: false,
 			}),
 			track: "audio".into(),
@@ -338,7 +337,6 @@ mod test {
 			decoded.node,
 			Some(crate::route::NodeId {
 				relay: 0x7a3f,
-				start: 9,
 				marked: false,
 			})
 		);

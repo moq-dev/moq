@@ -2,7 +2,7 @@
 
 ## Goal
 
-An ordered reader that resumes across a front's route copies (`rs/moq-net/src/model/resume.rs`, `js/net/src/resume.ts`) and widens its `Delay::max` takes back a gap its serving copy's fill gave up as stale (`Error::Old`) under the narrower budget, unless it already returned that gap, and asks the run again. A plain ordered reader already does (Rust `Cursor::rejudge`, JS `Subscriber.#withdraw`). Rust and JS match.
+An ordered reader that resumes across a front's route copies (`rs/moq-net/src/model/resume.rs`, `js/net/src/resume.ts`) and widens a live join's `max` takes back a gap its serving copy's fill gave up as stale (`Error::Old`) under the narrower budget, unless it already returned that gap, and asks the run again. A plain ordered reader already does (Rust `Cursor::rejudge`, JS `Subscriber.#withdraw`). Rust and JS match.
 
 ## Plan
 

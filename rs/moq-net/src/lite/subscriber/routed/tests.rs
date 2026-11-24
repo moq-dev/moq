@@ -14,7 +14,6 @@ use super::{Routed, Subscriber};
 /// The forwarding node the peer declares.
 const PEER: NodeId = NodeId {
 	relay: 7,
-	start: 1,
 	marked: false,
 };
 
@@ -524,7 +523,6 @@ async fn a_route_to_the_same_node_keeps_its_route_id() {
 	let (subscriber, _consumer) = forwarding();
 	let other = NodeId {
 		relay: 9,
-		start: 1,
 		marked: false,
 	};
 	let mut routed = routing(&subscriber);

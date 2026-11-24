@@ -347,8 +347,11 @@ impl Reader {
 		let track = broadcast.track(hang::catalog::Reference::track(catalog, name))?;
 		// The whole delay from the first request, as the container keeps it, so the publisher
 		// never sees a stated zero min before the container's update.
-		let subscription =
-			playout.subscription(moq_net::track::Subscription::default().with_priority(options.priority));
+		let subscription = playout.subscription(
+			moq_net::track::Subscription::default()
+				.with_priority(options.priority)
+				.with_ranges([moq_net::track::Range::ALL]),
+		);
 		let mut subscriber = track.subscribe(subscription).await?;
 		// The live edge is known only once the feed is live: a warm copy still waiting on its
 		// source reports nothing yet. Opening waits for it, or the track's end, as `Start::Latest`
@@ -685,9 +688,10 @@ mod tests {
 		// resends the broadcast from them. The live join starts from each hop's live edge.
 		assert_eq!(
 			published.subscription().map(|sub| sub.ranges),
-			Some(vec![moq_net::track::Range::from(moq_net::track::Start::Live(
-				std::time::Duration::ZERO
-			))]),
+			Some(vec![moq_net::track::Range::from(moq_net::track::Start::Live {
+				min: Some(std::time::Duration::ZERO),
+				max: Some(std::time::Duration::from_secs(10)),
+			})]),
 			"the publisher was asked to rewind the track",
 		);
 	}
@@ -923,11 +927,16 @@ mod tests {
 		.unwrap();
 
 		let subscription = published.subscription().expect("the consumer subscribed");
-		assert_eq!(
-			subscription.delay.max,
-			Some(max_delay),
-			"the age budget did not reach the publisher"
-		);
+		let max = match subscription.ranges[..] {
+			[
+				moq_net::track::Range {
+					start: moq_net::track::Start::Live { max, .. },
+					..
+				},
+			] => max,
+			ref ranges => panic!("expected one live join, got {ranges:?}"),
+		};
+		assert_eq!(max, Some(max_delay), "the age budget did not reach the publisher");
 
 		let opened = probe::native_opened().expect("the decoder opened");
 		assert_eq!(opened.output, decoder.output);
@@ -1623,13 +1632,11 @@ mod tests {
 			first = track.subscription_changed() => first.unwrap(),
 		};
 		assert_eq!(
-			first.map(|sub| (sub.delay, sub.ranges)),
-			Some((
-				moq_net::track::Delay::default().with_max(delay.max),
-				vec![moq_net::track::Range::from(moq_net::track::Start::Live(
-					std::time::Duration::from_millis(300)
-				))],
-			))
+			first.map(|sub| sub.ranges),
+			Some(vec![moq_net::track::Range::from(moq_net::track::Start::Live {
+				min: Some(std::time::Duration::from_millis(300)),
+				max: delay.max,
+			})])
 		);
 	}
 

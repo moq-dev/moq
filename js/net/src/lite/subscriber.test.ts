@@ -23,10 +23,11 @@ import {
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { type Hop, isAnonymous, MAX_HOPS, toHop, UNKNOWN_HOP, WireRoute } from "../hop.ts";
 import * as Instance from "../instance.ts";
-import { hooks, NO_MAX_DELAY } from "../internal.ts";
+import { hooks } from "../internal.ts";
 import { GRACE } from "../ledger.ts";
 import * as Path from "../path.ts";
-import { Reader, Writer } from "../stream.ts";
+import { concat, Reader, Writer } from "../stream.ts";
+import { withMax } from "../subscription.test-util.ts";
 import { Timescale } from "../time.ts";
 import type { Producer } from "../track.ts";
 import { SEGMENT_BYTES } from "../util/limits.ts";
@@ -49,20 +50,41 @@ import { Probe } from "./probe.ts";
 import { ProbeLevel, Setup } from "./setup.ts";
 import { DataType, StreamId } from "./stream.ts";
 import {
+	type Edge,
 	encodeSubscribeResponse,
+	LiveRanges,
 	Subscribe,
 	SubscribeDrop,
-	SubscribeFinish,
+	SubscribeEnd,
 	SubscribeOk,
 	type SubscribeResponse,
 	SubscribeSkip,
 	SubscribeStart,
-	SubscribeStarted,
 	SubscribeUpdate,
 } from "./subscribe.ts";
-import { Minted, Subscriber } from "./subscriber.ts";
+import { fittedReasks, Minted, Subscriber } from "./subscriber.ts";
 import { Track, TrackInfo } from "./track.ts";
-import { hasLengthFirst, Version, versionName } from "./version.ts";
+import { hasLengthFirst, hasRanges, hasTrackStream, Version, versionName } from "./version.ts";
+
+/**
+ * The SUBSCRIBE_START answering range `id` at `start`: on lite-07 with `largest`, by default that
+ * the track has no group yet, which a range following the live edge may be answered with.
+ */
+function answer(version: Version, start: bigint | undefined, id = 0n, largest: Edge = "empty"): SubscribeStart {
+	return new SubscribeStart({ id, start, largest: hasRanges(version) ? largest : "unknown" });
+}
+
+// A probe answered before its reader began waiting again, under a narrower max than the reader now
+// waits with, is asked afresh even though its fresh probe asks another max: a retune would keep the
+// old answer, which places no reader that began after it. Mirrors the Rust
+// `a_probe_answered_before_a_restate_is_asked_afresh`.
+test("a reasked probe is renewed whatever max its fresh probe asks", () => {
+	const join = (max: number) => ({ start: { live: { min: 1000, max } } });
+	const live = new LiveRanges(Version.DRAFT_07, [join(120), join(120)]);
+	expect(fittedReasks([1n], live, [join(300)])).toEqual(new Set([1n]));
+	// A fresh probe for another join renews nothing.
+	expect(fittedReasks([1n], live, [{ start: { live: { min: 2000, max: 300 } } }])).toEqual(new Set());
+});
 
 test("closing the subscriber suppresses probe stream warnings", async () => {
 	let readable!: ReadableStreamDefaultController<Uint8Array>;
@@ -1467,7 +1489,7 @@ test.each(
 	const track = subscriber
 		.consume(Path.from("room"))
 		.track("video")
-		.subscribe({ priority: 3, delay: { max: Duration.millis(10_000) } });
+		.subscribe(withMax({ priority: 3, delay: { max: Duration.millis(10_000) } }));
 	try {
 		await opened(0);
 		await streams[0].reading;
@@ -1478,7 +1500,10 @@ test.each(
 		expect(await subscribe.u53()).toBe(StreamId.Subscribe);
 		// Reading the request waits for its body without needing TRACK_INFO first.
 		const msg = await Subscribe.decode(subscribe, version);
-		expect([msg.id, msg.track, msg.priority, msg.maxDelay]).toEqual([0n, "video", 3, 10_000]);
+		// Lite-07 carries the max on the live join, and earlier lite as the one Subscriber Max Age.
+		const maxAge = version === Version.DRAFT_07 ? null : 10_000;
+		expect([msg.id, msg.track, msg.priority, msg.maxDelay]).toEqual([0n, "video", 3, maxAge]);
+		if (version === Version.DRAFT_07) expect(msg.ranges?.map((range) => range.start?.live?.max)).toEqual([10_000]);
 
 		const chunks: Uint8Array[] = [];
 		const writer = new Writer(
@@ -1490,9 +1515,9 @@ test.each(
 		await track.info();
 		await request.reading;
 		// An explicit change orders after any update caused by TRACK_INFO, even if its encoding yields.
-		track.update({ priority: 4, delay: { max: Duration.millis(10_000) } });
+		track.update(withMax({ priority: 4, delay: { max: Duration.millis(10_000) } }));
 		const update = await SubscribeUpdate.decode(subscribe, version);
-		expect([update.priority, update.maxDelay]).toEqual([4, 10_000]);
+		expect([update.priority, update.maxDelay]).toEqual([4, maxAge]);
 		track.close();
 		expect(await subscribe.done()).toBe(true);
 	} finally {
@@ -1507,7 +1532,11 @@ test("a group that beats its track info waits for it", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, toHop(1n));
-	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
+	// History, which places without waiting on the publisher to answer a live join.
+	const track = subscriber
+		.consume(Path.from("room"))
+		.track("video")
+		.subscribe({ ranges: [{}] });
 	try {
 		await opened(0);
 		await (await opened(1)).writing;
@@ -1574,13 +1603,13 @@ test.each([
 	const track = subscriber
 		.consume(Path.from("room"))
 		.track("video")
-		.subscribe({ delay: { max: Duration.millis(60_000) } });
+		.subscribe(withMax({ delay: { max: Duration.millis(60_000) } }));
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version, 1000);
 		const request = await opened(1);
 		await request.reading;
-		await respond(request, version, [{ start: new SubscribeStart([0n]) }]);
+		await respond(request, version, [{ start: answer(version, 0n) }]);
 
 		const first = handStream(version);
 		const frame = hasLengthFirst(version)
@@ -1620,13 +1649,13 @@ test("a reset without its code ends the group", async () => {
 	const track = subscriber
 		.consume(Path.from("room"))
 		.track("video")
-		.subscribe({ delay: { max: Duration.millis(60_000) } });
+		.subscribe(withMax({ delay: { max: Duration.millis(60_000) } }));
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version, 1000);
 		const request = await opened(1);
 		await request.reading;
-		await respond(request, version, [{ start: new SubscribeStart([0n]) }]);
+		await respond(request, version, [{ start: answer(version, 0n) }]);
 
 		const first = handStream(version);
 		first.write(await liteFrame(300, new Uint8Array([1])));
@@ -1665,7 +1694,7 @@ test.each([
 		await answerTrackInfo(streams[0], version, 1000);
 		const request = await opened(1);
 		await request.reading;
-		await respond(request, version, [{ start: new SubscribeStart([0n]) }]);
+		await respond(request, version, [{ start: answer(version, 0n) }]);
 
 		const error = kind === "stale" ? StreamCode.Old : StreamCode.NotFound;
 		const drop = { drop: new SubscribeDrop({ start: 0n, end: 1n, error }) };
@@ -1681,7 +1710,7 @@ test.each([
 		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
 		if (order === "after") await respond(request, version, [drop]);
 		if (kind === "final then stale" && order === "before") await respond(request, version, [stale]);
-		await respond(request, version, [{ finish: new SubscribeFinish(1n) }]);
+		await respond(request, version, [{ end: new SubscribeEnd(1n) }]);
 		await drainReactions();
 		// An update reopens neither drop.
 		if (kind === "final then stale") {
@@ -1723,7 +1752,7 @@ test("a drop during a duplicate wait lets the end give up on a stream that never
 		await answerTrackInfo(streams[0], version, 1000);
 		const request = await opened(1);
 		await request.reading;
-		await respond(request, version, [{ start: new SubscribeStart([0n]) }]);
+		await respond(request, version, [{ start: answer(version, 0n) }]);
 
 		// The copy still arriving, then a stream of the same group that waits on it.
 		const first = handStream(version);
@@ -1738,7 +1767,7 @@ test("a drop during a duplicate wait lets the end give up on a stream that never
 
 		await respond(request, version, [
 			{ drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.NotFound }) },
-			{ finish: new SubscribeFinish(1n) },
+			{ end: new SubscribeEnd(1n) },
 		]);
 		await drainReactions();
 
@@ -1771,7 +1800,7 @@ test("a stream whose gap the grace gave up on still holds the end", async () => 
 		await answerTrackInfo(streams[0], version, 1000);
 		const request = await opened(1);
 		await request.reading;
-		await respond(request, version, [{ start: new SubscribeStart([0n]) }]);
+		await respond(request, version, [{ start: answer(version, 0n) }]);
 		// Group 2 opens a gap at 1, which the grace gives up on by the time group 3 arrives.
 		for (const key of [0n, 2n, 3n]) {
 			const stream = handStream(version);
@@ -1784,7 +1813,7 @@ test("a stream whose gap the grace gave up on still holds the end", async () => 
 		late.write(await liteFrame(0, new Uint8Array([1])));
 		const running = subscriber.runGroup(new Group({ subscribe: 0n, key: 1n }), late.reader);
 		await drainReactions();
-		await respond(request, version, [{ finish: new SubscribeFinish(4n) }]);
+		await respond(request, version, [{ end: new SubscribeEnd(4n) }]);
 		await drainReactions();
 
 		let fin = false;
@@ -1818,7 +1847,7 @@ test("a stream a stale drop excused stays excused after an update", async () => 
 		await answerTrackInfo(streams[0], version, 1000);
 		const request = await opened(1);
 		await request.reading;
-		await respond(request, version, [{ start: new SubscribeStart([0n]) }]);
+		await respond(request, version, [{ start: answer(version, 0n) }]);
 
 		const slow = handStream(version);
 		slow.write(await liteFrame(0, new Uint8Array([1])));
@@ -1826,10 +1855,13 @@ test("a stream a stale drop excused stays excused after an update", async () => 
 		const group = await track.recvGroup();
 		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
 		await respond(request, version, [{ drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.Old }) }]);
-		// SUBSCRIBE_FINISH starts the end's grace, and the update then widens the budget.
-		await respond(request, version, [{ finish: new SubscribeFinish(1n) }]);
+		// SUBSCRIBE_END starts the end's grace, and the update then widens the live join's max.
+		await respond(request, version, [{ end: new SubscribeEnd(1n) }]);
 		await drainReactions();
-		track.update({ priority: 0, delay: { max: Duration.millis(60_000) } });
+		track.update({
+			priority: 0,
+			ranges: [{ start: { live: { min: Duration.ZERO, max: Duration.millis(60_000) } } }],
+		});
 		await drainReactions();
 
 		await clock.advance(GRACE.mul(3));
@@ -1852,7 +1884,7 @@ test("a malformed lite-07 group stream ends only its group", async () => {
 	const track = subscriber
 		.consume(Path.from("room"))
 		.track("video")
-		.subscribe({ delay: { max: Duration.millis(60_000) } });
+		.subscribe({ ranges: [{}] });
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version, 1000);
@@ -1902,7 +1934,7 @@ test("a lite-07 GROUP_END accounts for the starts inside its group's span", asyn
 	const track = subscriber
 		.consume(Path.from("room"))
 		.track("video")
-		.subscribe({ delay: { max: Duration.millis(60_000) } });
+		.subscribe({ ranges: [{}] });
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version, 1000);
@@ -2397,7 +2429,7 @@ test.each([
 		await subscribe.reading;
 
 		if (outcome === "answered") {
-			await respond(subscribe, version, [{ start: new SubscribeStart([0n]) }]);
+			await respond(subscribe, version, [{ start: answer(version, 0n) }]);
 			await drainReactions();
 			await pool.replace();
 			await drainReactions();
@@ -2406,12 +2438,7 @@ test.each([
 			await pool.withdraw();
 			await drainReactions();
 			expect(track.closed.peek()).toBeUndefined();
-			await respond(
-				subscribe,
-				version,
-				[{ start: new SubscribeStart([0n]) }, { finish: new SubscribeFinish(0n) }],
-				true,
-			);
+			await respond(subscribe, version, [{ start: answer(version, 0n) }, { end: new SubscribeEnd(0n) }], true);
 			expect(await track.closed).toBeNull();
 		} else {
 			await pool.replace();
@@ -2719,7 +2746,7 @@ function drainReactions(): Promise<void> {
 	});
 }
 
-test("a local unsubscribe owes no SUBSCRIBE_FINISH", async () => {
+test("a local unsubscribe owes no SUBSCRIBE_END", async () => {
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, Version.DRAFT_07, toHop(1n));
 	const responseTask = Promise.withResolvers<void>();
@@ -2736,7 +2763,7 @@ test("a local unsubscribe owes no SUBSCRIBE_FINISH", async () => {
 		return task;
 	});
 	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.track("video").subscribe();
+	const track = broadcast.track("video").subscribe({ ranges: [{}] });
 	const ordered = track.ordered();
 	try {
 		await opened(0);
@@ -2854,13 +2881,14 @@ test.each([0, 5, 9000])("a received group numbers its frames from transport offs
 	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
 	const consumer = broadcast.track("video");
-	const early = consumer.subscribe();
+	// History, which places without waiting on the publisher to answer a live join.
+	const early = consumer.subscribe({ ranges: [{}] });
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version, 1000);
 		await (await opened(1)).reading;
 		await subscriber.runGroup(new Group({ subscribe: 0n, key: 0n, frameStart }), await groupStream(1000, version));
-		const late = consumer.subscribe();
+		const late = consumer.subscribe({ ranges: [{}] });
 		try {
 			for (const reader of [early, late]) {
 				const group = await reader.recvGroup();
@@ -2912,7 +2940,7 @@ test.each([Version.DRAFT_05, Version.DRAFT_06])("version %p passes received time
 	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
 	// Old enough to keep every group, however far behind the newest start.
-	const track = broadcast.track("video").subscribe({ delay: { max: Duration.millis(60_000) } });
+	const track = broadcast.track("video").subscribe(withMax({ delay: { max: Duration.millis(60_000) } }));
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version, 1000);
@@ -2948,7 +2976,7 @@ test("a lite-07 rewind is refused", async () => {
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.track("video").subscribe({ delay: { max: Duration.millis(60_000) } });
+	const track = broadcast.track("video").subscribe(withMax({ delay: { max: Duration.millis(60_000) } }));
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version, 1000);
@@ -2966,7 +2994,7 @@ test("a lite-07 rewind is refused", async () => {
 	}
 });
 
-test("a publisher FIN without SUBSCRIBE_FINISH still violates an open subscription", async () => {
+test("a publisher FIN without SUBSCRIBE_END still violates an open subscription", async () => {
 	const { quic, streams, opened, closes } = fakeSession();
 	const subscriber = new Subscriber(quic, Version.DRAFT_07, toHop(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
@@ -2977,7 +3005,7 @@ test("a publisher FIN without SUBSCRIBE_FINISH still violates an open subscripti
 		await (await opened(1)).reading;
 		streams[1].inbound.close();
 		expect(await track.closed).toBeInstanceOf(ProtocolViolation);
-		expect((track.closed.peek() as Error).message).toBe("subscribe stream ended without SUBSCRIBE_FINISH");
+		expect((track.closed.peek() as Error).message).toBe("subscribe stream ended without SUBSCRIBE_END");
 		await drainReactions();
 		expect(closes.map((info) => info?.closeCode)).toEqual([SessionCode.ProtocolViolation]);
 	} finally {
@@ -2987,8 +3015,19 @@ test("a publisher FIN without SUBSCRIBE_FINISH still violates an open subscripti
 	}
 });
 
-// Our SUBSCRIBE carries one range, so a lite-07 SUBSCRIBE_START with any other count is malformed.
-test.each([[[]], [[0, 5]]])("a lite-07 SUBSCRIBE_START resolving %j violates the protocol", async (starts) => {
+// Our SUBSCRIBE carries one range, which follows the live edge: a lite-07 SUBSCRIBE_START for a Range
+// ID never assigned, a second one for the range, or one not knowing where the edge is, is malformed.
+test.each([
+	["an unassigned range", [{ id: 1n, start: 0n, largest: "empty" }]],
+	[
+		"a range twice",
+		[
+			{ id: 0n, start: 0n, largest: "empty" },
+			{ id: 0n, start: 0n, largest: "empty" },
+		],
+	],
+	["no edge for a live range", [{ id: 0n, start: 0n, largest: "unknown" }]],
+] as const)("a lite-07 SUBSCRIBE_START for %s violates the protocol", async (_, starts) => {
 	const { quic, streams, opened, closes } = fakeSession();
 	const subscriber = new Subscriber(quic, Version.DRAFT_07, toHop(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
@@ -2998,7 +3037,11 @@ test.each([[[]], [[0, 5]]])("a lite-07 SUBSCRIBE_START resolving %j violates the
 		await answerTrackInfo(streams[0], Version.DRAFT_07);
 		const request = await opened(1);
 		await request.reading;
-		await respond(request, Version.DRAFT_07, [{ start: new SubscribeStart(starts.map(BigInt)) }]);
+		await respond(
+			request,
+			Version.DRAFT_07,
+			starts.map((start) => ({ start: new SubscribeStart(start) })),
+		);
 		expect(await track.closed).toBeInstanceOf(ProtocolViolation);
 		await drainReactions();
 		expect(closes.map((info) => info?.closeCode)).toEqual([SessionCode.ProtocolViolation]);
@@ -3009,9 +3052,59 @@ test.each([[[]], [[0, 5]]])("a lite-07 SUBSCRIBE_START resolving %j violates the
 	}
 });
 
+// A burst of lite-07 SUBSCRIBE_STARTs read together, as one per range of a wide SUBSCRIBE arrives, is
+// recorded whole and applied once: each application walks every range, so one per START would cost
+// the square of the ranges. Mirrors the Rust `ServeLoop` draining a burst before `apply_starts`.
+test("a burst of lite-07 SUBSCRIBE_STARTs is applied once", async () => {
+	const version = Version.DRAFT_07;
+	const count = 16;
+	const ranges = Array.from({ length: count }, (_, i) => ({ start: BigInt(i * 10), end: BigInt(i * 10 + 1) }));
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, toHop(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.track("video").subscribe({ ranges });
+	const timeStarts = hooks.timeStarts;
+	let applied = 0;
+	hooks.timeStarts = (...args) => {
+		applied++;
+		return timeStarts(...args);
+	};
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version);
+		const request = await opened(1);
+		const sent = new Reader(request.outbound, undefined, version);
+		expect(await sent.u53()).toBe(StreamId.Subscribe);
+		expect((await Subscribe.decode(sent, version)).ranges).toHaveLength(count);
+		await request.reading;
+		// One chunk, as a transport read hands over what arrived together.
+		const chunks: Uint8Array[] = [];
+		const writer = new Writer(
+			new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
+			version,
+		);
+		for (const [i, range] of ranges.entries())
+			await encodeSubscribeResponse(
+				writer,
+				{ start: answer(version, range.start, BigInt(i), "unknown") },
+				version,
+			);
+		applied = 0;
+		request.inbound.enqueue(concat(chunks));
+		await drainReactions();
+		expect(hooks.sourceStart(track)).toBe(0n);
+		expect(applied).toBe(1);
+	} finally {
+		hooks.timeStarts = timeStarts;
+		track.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
 // An empty START resolves the feed's start, and a range an update adds leaves it pending until its
-// SUBSCRIBE_STARTED says where that range starts, which the feed then starts from.
-test("a widened range's SUBSCRIBE_STARTED resolves the feed's start", async () => {
+// SUBSCRIBE_START says where that range starts, which the feed then starts from.
+test("a widened range's SUBSCRIBE_START resolves the feed's start", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, toHop(1n));
@@ -3026,7 +3119,7 @@ test("a widened range's SUBSCRIBE_STARTED resolves the feed's start", async () =
 		await Subscribe.decode(sent, version);
 		await request.reading;
 		expect(hooks.sourceStart(track)).toBe("pending");
-		await respond(request, version, [{ start: new SubscribeStart([undefined]) }]);
+		await respond(request, version, [{ start: answer(version, undefined) }]);
 		await drainReactions();
 		expect(hooks.sourceStart(track)).not.toBe("pending");
 		track.update({ ranges: [{ start: 0n, end: 1n }] });
@@ -3036,7 +3129,7 @@ test("a widened range's SUBSCRIBE_STARTED resolves the feed's start", async () =
 		// The widened range retires Range ID 0 and takes the next one.
 		expect(update.remove).toEqual([0n]);
 		expect(update.ranges).toHaveLength(1);
-		await respond(request, version, [{ started: new SubscribeStarted(1n, 1n) }]);
+		await respond(request, version, [{ start: answer(version, 1n, 1n) }]);
 		await drainReactions();
 		expect(hooks.sourceStart(track)).toBe(1n);
 	} finally {
@@ -3055,7 +3148,7 @@ test("a lite-07 copy asks upstream for a time start it cannot place", async () =
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
-	const oldest = broadcast.track("video").subscribe({ delay: { max: null } });
+	const oldest = broadcast.track("video").subscribe(withMax({ delay: { max: null } }));
 	let reader: ReturnType<typeof oldest.fork> | undefined;
 	try {
 		await opened(0);
@@ -3066,16 +3159,16 @@ test("a lite-07 copy asks upstream for a time start it cannot place", async () =
 		await Subscribe.decode(sent, version);
 		await request.reading;
 		// The oldest group's range starts at 5, which may have expired a group at or before 3.
-		await respond(request, version, [{ start: new SubscribeStart([5n]) }]);
+		await respond(request, version, [{ start: answer(version, 5n) }]);
 		await drainReactions();
-		reader = oldest.fork({ delay: { max: null }, ranges: [{ start: 3n }] });
+		reader = oldest.fork(withMax({ delay: { max: null }, ranges: [{ start: 3n }] }));
 		const probe = await SubscribeUpdate.decode(sent, version);
 		expect(probe.remove ?? []).toEqual([]);
 		expect(probe.ranges).toEqual([{ start: { time: 3n }, end: { time: 3n } }]);
-		// Answered past its time: no group at or before 3, so the reader starts at the oldest group.
-		await respond(request, version, [{ started: new SubscribeStarted(1n, 5n) }]);
+		// Answered past its time: the range from 3 starts at 5, whatever older groups the copy holds.
+		await respond(request, version, [{ start: answer(version, 5n, 1n) }]);
 		await drainReactions();
-		expect(hooks.servingResolved(reader)).toEqual([{ start: 0n, end: undefined, floored: false }]);
+		expect(hooks.servingResolved(reader)).toEqual([{ start: 5n, end: undefined, floored: true }]);
 		const retired = await SubscribeUpdate.decode(sent, version);
 		expect(retired.remove).toEqual([1n]);
 	} finally {
@@ -3094,25 +3187,24 @@ test("a lite-07 range answered empty is reported only for a range reaching its t
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
-	const reported: (readonly [bigint, bigint | undefined, number])[][] = [];
+	const reported: (readonly [bigint, bigint | undefined])[][] = [];
 	const timeStarts = hooks.timeStarts;
 	hooks.timeStarts = (producer, starts) => {
 		reported.push([...starts]);
 		timeStarts(producer, starts);
 	};
-	const track = broadcast.track("video").subscribe({
-		delay: { max: null },
-		ranges: [{ start: 10n, end: 20n }, { start: 30n }],
-	});
+	const track = broadcast.track("video").subscribe({ ranges: [{ start: 10n, end: 20n }, { start: 30n }] });
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version);
 		const request = await opened(1);
 		await request.reading;
-		await respond(request, version, [{ start: new SubscribeStart([undefined, undefined]) }]);
+		await respond(request, version, [
+			{ start: answer(version, undefined, 0n) },
+			{ start: answer(version, undefined, 1n) },
+		]);
 		await drainReactions();
-		// Under the budget the range was asked with, here none.
-		expect(reported.at(-1)).toEqual([[10n, undefined, NO_MAX_DELAY]]);
+		expect(reported.at(-1)).toEqual([[10n, undefined]]);
 	} finally {
 		hooks.timeStarts = timeStarts;
 		track.close();
@@ -3120,6 +3212,57 @@ test("a lite-07 range answered empty is reported only for a range reaching its t
 		subscriber.close();
 	}
 });
+
+// A placed join under a max age may be answered past groups the publisher still holds, stale for
+// it alone, so its answer places no history reader at its group; one with no max age skips nothing.
+// Mirrors the Rust `only_an_unbounded_placed_join_answers_for_history`.
+for (const [max, retuned] of [
+	[Duration.ZERO, undefined],
+	[null, undefined],
+	[null, "before"],
+	[null, "after"],
+] as const) {
+	const name = `${max === null ? "none" : "0"}${retuned ? `, retuned from 0 ${retuned} its answer,` : ""}`;
+	test(`a placed join with max ${name} answers for history only without one`, async () => {
+		const version = Version.DRAFT_07;
+		const { quic, streams, opened } = fakeSession();
+		const subscriber = new Subscriber(quic, version, toHop(1n));
+		const broadcast = subscriber.consume(Path.from("room"));
+		const reported: (readonly [bigint, bigint | undefined])[][] = [];
+		const timeStarts = hooks.timeStarts;
+		hooks.timeStarts = (producer, starts) => {
+			reported.push([...starts]);
+			timeStarts(producer, starts);
+		};
+		const asked = (max: Duration | null) => ({
+			ranges: [{ start: { live: { min: Duration.ZERO, max } } }],
+			placed: new Map([[0, 10n]]),
+		});
+		const track = broadcast.track("video").subscribe(asked(retuned ? Duration.ZERO : max));
+		try {
+			await opened(0);
+			await answerTrackInfo(streams[0], version);
+			const request = await opened(1);
+			await request.reading;
+			const retune = async () => {
+				track.update(asked(max));
+				await drainReactions();
+			};
+			if (retuned === "before") await retune();
+			await respond(request, version, [
+				{ start: answer(version, 20n, 0n, { position: { group: 20n, frame: 0 }, ended: false }) },
+			]);
+			await drainReactions();
+			if (retuned === "after") await retune();
+			expect(reported.at(-1)).toEqual(max === null && !retuned ? [[10n, 20n]] : []);
+		} finally {
+			hooks.timeStarts = timeStarts;
+			track.close();
+			broadcast.close();
+			subscriber.close();
+		}
+	});
+}
 
 // A lite-07 stale (OLD) drop accounts for its groups for good, whichever of it and a group's stream
 // lands first: an update owes none of them again, and a group still arriving, such as one another
@@ -3142,7 +3285,7 @@ test("a stale drop accounts for its groups for good on lite-07", async () => {
 		return runResponses(stream, captured);
 	});
 	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.track("video").subscribe({ delay: { max: Duration.millis(500) } });
+	const track = broadcast.track("video").subscribe(withMax({ delay: { max: Duration.millis(500) } }));
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version);
@@ -3168,7 +3311,7 @@ test("a stale drop accounts for its groups for good on lite-07", async () => {
 			return { group: hooks.receiveGroup(entry.track, { start: key, offset: 0 }), read };
 		};
 
-		await send({ start: new SubscribeStart([0n]) });
+		await send({ start: answer(version, 0n) });
 		// OLD, then the group, which finishes.
 		await send(old(1n));
 		const one = arrive(1n);
@@ -3184,7 +3327,7 @@ test("a stale drop accounts for its groups for good on lite-07", async () => {
 		await send(old(4n));
 		if (!entry) throw new Error("no subscription");
 
-		track.update({ priority: 1, delay: { max: Duration.millis(500) } });
+		track.update(withMax({ priority: 1, delay: { max: Duration.millis(500) } }));
 		await drainReactions();
 		expect(entry.tail.covers(1n, 5n)).toBe(true);
 		// Neither the drop nor the update aborts a group still arriving.
@@ -3218,7 +3361,7 @@ test("a stale drop is recorded under the narrowest budget asked on lite-07", asy
 		return runResponses(stream, captured);
 	});
 	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.track("video").subscribe({ delay: { max: Duration.millis(500) } });
+	const track = broadcast.track("video").subscribe(withMax({ delay: { max: Duration.millis(500) } }));
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version);
@@ -3232,11 +3375,12 @@ test("a stale drop is recorded under the narrowest budget asked on lite-07", asy
 
 		// Each update is sent only once the previous write is credited, which may take tasks, so wait
 		// for it on the wire: the budget narrows before its update is written.
-		track.update({ delay: { max: Duration.millis(5000) } });
-		expect((await SubscribeUpdate.decode(sent, version)).maxDelay).toBe(5000);
+		// Each retunes the live join's max in place.
+		track.update(withMax({ delay: { max: Duration.millis(5000) } }));
+		expect((await SubscribeUpdate.decode(sent, version)).retune).toEqual([[0n, 5000]]);
 		expect(entry.staleBudget).toBe(500);
-		track.update({ delay: { max: Duration.millis(200) } });
-		expect((await SubscribeUpdate.decode(sent, version)).maxDelay).toBe(200);
+		track.update(withMax({ delay: { max: Duration.millis(200) } }));
+		expect((await SubscribeUpdate.decode(sent, version)).retune).toEqual([[0n, 200]]);
 		expect(entry.staleBudget).toBe(200);
 	} finally {
 		responses.mockRestore();
@@ -3263,7 +3407,7 @@ test("a skip or final drop replaces an earlier stale one on lite-07", async () =
 		return runResponses(stream, captured);
 	});
 	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.track("video").subscribe({ delay: { max: Duration.millis(500) } });
+	const track = broadcast.track("video").subscribe(withMax({ delay: { max: Duration.millis(500) } }));
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version);
@@ -3278,7 +3422,7 @@ test("a skip or final drop replaces an earlier stale one on lite-07", async () =
 			drop: new SubscribeDrop({ start, end, error: StreamCode.Old }),
 		});
 		for (const resp of [
-			{ start: new SubscribeStart([0n]) },
+			{ start: answer(version, 0n) },
 			old(1n, 3n),
 			old(4n, 5n),
 			{ skip: new SubscribeSkip({ start: 1n, end: 3n }) },
@@ -3290,7 +3434,7 @@ test("a skip or final drop replaces an earlier stale one on lite-07", async () =
 		await drainReactions();
 		if (!entry) throw new Error("no subscription");
 
-		track.update({ priority: 1, delay: { max: Duration.millis(500) } });
+		track.update(withMax({ priority: 1, delay: { max: Duration.millis(500) } }));
 		await drainReactions();
 		expect(entry.tail.covers(1n, 3n)).toBe(true);
 		expect(entry.tail.covers(4n, 5n)).toBe(true);
@@ -3323,7 +3467,7 @@ test("a skip replaces a final drop but not a cached group on lite-07", async () 
 	});
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.track("video").subscribe({ delay: { max: Duration.millis(500) } });
+	const track = broadcast.track("video").subscribe(withMax({ delay: { max: Duration.millis(500) } }));
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version);
@@ -3340,7 +3484,7 @@ test("a skip replaces a final drop but not a cached group on lite-07", async () 
 			await drainReactions();
 		};
 		await send([
-			{ start: new SubscribeStart([0n]) },
+			{ start: answer(version, 0n) },
 			{ drop: new SubscribeDrop({ start: 1n, end: 3n, error: StreamCode.NotFound }) },
 		]);
 		if (!entry) throw new Error("no subscription");
@@ -3358,7 +3502,7 @@ test("a skip replaces a final drop but not a cached group on lite-07", async () 
 		expect(entry.tail.covers(4n, 7n)).toBe(true);
 		expect(warn).toHaveBeenCalledTimes(1);
 
-		const reader = entry.track.subscribe({ delay: { max: null } });
+		const reader = entry.track.subscribe(withMax({ delay: { max: null } }));
 		const got: unknown[] = [];
 		for (
 			let next = hooks.tryRecvGroup(reader, true);
@@ -3416,9 +3560,43 @@ test.each(
 	}
 });
 
+// A relay serving this copy onward over lite-07 answers a range following the live edge only once
+// the copy knows where the edge is. Before lite-07 no answer says so, SUBSCRIBE_OK nor
+// SUBSCRIBE_START: the copy's first live group does. Mirrors the Rust `Producer::edge_from_groups`.
+test.each(
+	[Version.DRAFT_01, Version.DRAFT_02, Version.DRAFT_03, Version.DRAFT_04, Version.DRAFT_05, Version.DRAFT_06].map(
+		(v) => [versionName(v), v] as const,
+	),
+)("a %s copy learns where the live feed is from its first group", async (_, version) => {
+	const { quic, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, toHop(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.track("video").subscribe();
+	const legacy = !hasTrackStream(version);
+	try {
+		if (!legacy) await answerTrackInfo(await opened(0), version);
+		const stream = await opened(legacy ? 0 : 1);
+		await stream.reading;
+		await respond(stream, version, [legacy ? { ok: new SubscribeOk({}) } : { start: answer(version, 0n) }]);
+		await drainReactions();
+		expect(hooks.knowsEdge(track)).toBe(false);
+
+		const group = new ReadableStream<Uint8Array>({
+			start: (controller) => controller.enqueue(new Uint8Array([1, 0])),
+		});
+		void subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), new Reader(group, undefined, version));
+		await drainReactions();
+		expect(hooks.knowsEdge(track)).toBe(true);
+	} finally {
+		track.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
 // A session that dies once the publisher ended the track, but before the tail settled, cuts it
 // off: the track ends with the session's error unless the declared end settled first. That end
-// is SUBSCRIBE_FINISH on lite-05+, and the FIN before it.
+// is SUBSCRIBE_END on lite-05+, and the FIN before it.
 test.each([
 	["lite-03 ends clean with its last group finished", Version.DRAFT_03, true],
 	["lite-03 aborts with its last group still open", Version.DRAFT_03, false],
@@ -3441,7 +3619,7 @@ test.each([
 		await subscribe.reading;
 		const responses: SubscribeResponse[] = legacy
 			? [{ ok: new SubscribeOk({}) }]
-			: [{ start: new SubscribeStart([0n]) }, { finish: new SubscribeFinish(1n) }];
+			: [{ start: answer(version, 0n) }, { end: new SubscribeEnd(1n) }];
 		await respond(subscribe, version, responses, true);
 		if (settled) {
 			const group = new ReadableStream<Uint8Array>({
@@ -3502,7 +3680,7 @@ test.each([
 				new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
 				version,
 			);
-			await encodeSubscribeResponse(writer, { finish: new SubscribeFinish(0n) }, version);
+			await encodeSubscribeResponse(writer, { end: new SubscribeEnd(0n) }, version);
 			for (const chunk of chunks) stream.inbound.enqueue(chunk);
 			stream.inbound.close();
 			expect(await track.closed).toBeNull();
@@ -3558,7 +3736,7 @@ test("a lite-07 drop with an empty span closes the session", async () => {
 			new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
 			version,
 		);
-		await encodeSubscribeResponse(writer, { start: new SubscribeStart([0n]) }, version);
+		await encodeSubscribeResponse(writer, { start: answer(version, 0n) }, version);
 		for (const chunk of chunks) stream.inbound.enqueue(chunk);
 		// Type, length, Group Start 4, Group End 4, OLD.
 		stream.inbound.enqueue(new Uint8Array([2, 3, 4, 4, StreamCode.Old]));
@@ -4027,8 +4205,8 @@ test("a cancelled legacy datagram lookup cannot refuse a stream answer arriving 
 			new WritableStream<Uint8Array>({ write: (chunk) => streams[1].inbound.enqueue(new Uint8Array(chunk)) }),
 			version,
 		);
-		await encodeSubscribeResponse(writer, { start: new SubscribeStart([0n]) }, version);
-		await encodeSubscribeResponse(writer, { finish: new SubscribeFinish(0n) }, version);
+		await encodeSubscribeResponse(writer, { start: answer(version, 0n) }, version);
+		await encodeSubscribeResponse(writer, { end: new SubscribeEnd(0n) }, version);
 		streams[1].inbound.close();
 		expect(await grouped.recvGroup()).toBeUndefined();
 	} finally {

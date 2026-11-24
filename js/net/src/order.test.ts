@@ -19,6 +19,7 @@ import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { sendOrder } from "./priority.ts";
 import type { SendStream } from "./stream.ts";
+import { withMax } from "./subscription.test-util.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import type { Order, Producer as TrackProducer, Subscriber as TrackSubscriber } from "./track.ts";
 import { wireOf } from "./wire.ts";
@@ -152,15 +153,17 @@ async function backlog(protocol: string, order: Order, update?: Order) {
 	const groups = [0, 1, 2].map(() => writeGroup(video));
 
 	const remote = wireOf(client).consume(Path.from("test"));
-	const subscriber = remote.track("video").subscribe({
-		delay: { max: MAX_DELAY },
-		order,
-		ranges: [{ start: 0n }],
-	});
+	const subscriber = remote.track("video").subscribe(
+		withMax({
+			delay: { max: MAX_DELAY },
+			order,
+			ranges: [{ start: 0n }],
+		}),
+	);
 	await receive(subscriber, groups.length);
 
 	if (update !== undefined) {
-		subscriber.update({ delay: { max: MAX_DELAY }, order: update, ranges: [{ start: 0n }] });
+		subscriber.update(withMax({ delay: { max: MAX_DELAY }, order: update, ranges: [{ start: 0n }] }));
 		await aggregate(video, (upstream) => upstream === update);
 	}
 
@@ -204,7 +207,7 @@ test.each(["ascending", "descending"] as const)("ietf serves GROUP_ORDER %s", as
 	const video = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 
 	const remote = wireOf(client).consume(Path.from("test"));
-	const subscriber = remote.track("video").subscribe({ delay: { max: MAX_DELAY }, order });
+	const subscriber = remote.track("video").subscribe(withMax({ delay: { max: MAX_DELAY }, order }));
 	await aggregate(video, (upstream) => upstream === order);
 
 	const groups: GroupProducer[] = [];
@@ -271,7 +274,7 @@ test("ietf keeps a closing group stream ranked until it settles", async () => {
 	const video = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 
 	const remote = wireOf(client).consume(Path.from("test"));
-	const subscriber = remote.track("video").subscribe({ delay: { max: MAX_DELAY }, order: "descending" });
+	const subscriber = remote.track("video").subscribe(withMax({ delay: { max: MAX_DELAY }, order: "descending" }));
 	await aggregate(video, (upstream) => upstream === "descending");
 
 	const groups: GroupProducer[] = [];
@@ -311,13 +314,15 @@ test("a shared track aggregates descending and serves each subscriber in its own
 	const video = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 
 	const ascendingRemote = wireOf(ascending.client).consume(Path.from("test"));
-	const ascendingTrack = ascendingRemote.track("video").subscribe({ delay: { max: MAX_DELAY }, order: "ascending" });
+	const ascendingTrack = ascendingRemote
+		.track("video")
+		.subscribe(withMax({ delay: { max: MAX_DELAY }, order: "ascending" }));
 	await aggregate(video, (order) => order === "ascending");
 
 	const descendingRemote = wireOf(descending.client).consume(Path.from("test"));
 	const descendingTrack = descendingRemote
 		.track("video")
-		.subscribe({ delay: { max: MAX_DELAY }, order: "descending" });
+		.subscribe(withMax({ delay: { max: MAX_DELAY }, order: "descending" }));
 	await aggregate(video, (order) => order === "descending");
 
 	// One at a time, so each session opens its streams in sequence order.

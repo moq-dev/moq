@@ -2,12 +2,12 @@
 -- Routes between forwarding nodes, as `route::relay::Router` ranks and extends
 -- them (`rs/moq-net/src/route/relay.rs`).
 --
--- A node is a Node ID: one start of one relay, a restart being a new node as a
--- restarted relay names itself afresh, and each start's marked identity, which
--- announces what the node took over a marked link. `relay`, `start`, and `mark`
--- read the three back from a node: the floor files a closed session by relays and
--- orders it by start, a node refuses a path naming another start of its relay,
--- and equal routes order by the neighbour's Node ID.
+-- A node is a Node ID: one run of one relay, a restarted relay being a new relay,
+-- and its marked identity, which announces what the node took over a marked link.
+-- `relay` and `mark` read the two back from a node: the floor files a closed
+-- session by relays, and equal routes order by the neighbour's Node ID. A path
+-- names a marked identity only right before its node, so one naming the
+-- receiver's relay names the receiver, which the algebra refuses.
 --
 -- A node's marked identity is a node whose one link is from the node itself: up,
 -- free, marked, at session 0, so its route there is the node's marked route.
@@ -28,7 +28,7 @@ open import RoutingLib.Routing.Basics.Path.Uncertified using (Path; Edge)
 
 open import Order
 
-module Route (relay start mark : ℕ → ℕ) where
+module Route (relay mark : ℕ → ℕ) where
 
 open import Data.List.Properties using (map-injective)
 open import Data.List.Relation.Binary.Lex.Core using (base; halt)
@@ -57,18 +57,18 @@ e₀-least : ∀ e → Ordered._≤_ OE e₀ e
 e₀-least []      = base _
 e₀-least (_ ∷ _) = halt
 
--- Among equal ranks and lengths, by the neighbour's Node ID: its relay, then its
--- start, then unmarked first, as `NodeId` orders. No two candidates at one node
--- share a neighbour, so the rest of the path never decides between them.
+-- Among equal ranks and lengths, by the neighbour's Node ID: its relay, then
+-- unmarked first, as `NodeId` orders. No two candidates at one node share a
+-- neighbour, so the rest of the path never decides between them.
 OP : Ordered Path
-OP = keyed (map neighbour) (map-injective neighbour-injective) (list (lex nat (lex nat (lex nat (lex nat nat)))))
+OP = keyed (map neighbour) (map-injective neighbour-injective) (list (lex nat (lex nat (lex nat nat))))
   where
-  neighbour : Edge → ℕ × ℕ × ℕ × ℕ × ℕ
-  neighbour (a , b) = a , relay b , start b , mark b , b
+  neighbour : Edge → ℕ × ℕ × ℕ × ℕ
+  neighbour (a , b) = a , relay b , mark b , b
 
   neighbour-injective : ∀ {x y} → neighbour x ≡ neighbour y → x ≡ y
   neighbour-injective {a , b} {c , d} eq with ,-injectiveˡ eq
-  ... | refl = cong (a ,_) (,-injectiveʳ (,-injectiveʳ (,-injectiveʳ (,-injectiveʳ eq))))
+  ... | refl = cong (a ,_) (,-injectiveʳ (,-injectiveʳ (,-injectiveʳ eq)))
 
 -- Nothing leads a route's rank.
 OC : Ordered ⊤
@@ -82,13 +82,12 @@ open import Increasing OC tt (λ _ → refl) e₀ OT (λ e → lex-≤ OP OE (Or
 ------------------------------------------------------------------------
 -- The link
 
--- The highest session known closed from relay `near` to relay `far`: the start
--- of near it was held by (`started`), and its number there.
+-- The highest session known closed from relay `near` to relay `far`, as near
+-- numbered it.
 record Floor : Set where
   constructor floor
   field
-    near far : ℕ
-    started session : ℕ
+    near far session : ℕ
 
 -- The link from the receiver to the neighbour that offers it a route.
 record Link : Set where
@@ -116,34 +115,24 @@ closed : List Floor → Edge × ℕ → Bool
 closed fs ((a , b) , s) = any at-or-below fs
   where
   at-or-below : Floor → Bool
-  at-or-below (floor n f st se) =
-    (relay a ≡ᵇ n) ∧ (relay b ≡ᵇ f) ∧ ((start a <ᵇ st) ∨ ((start a ≡ᵇ st) ∧ (s ≤ᵇ se)))
+  at-or-below (floor n f se) = (relay a ≡ᵇ n) ∧ (relay b ≡ᵇ f) ∧ (s ≤ᵇ se)
 
 -- The largest cost a route carries (`Metric`).
 metric : ℕ
 metric = 18446744073709551615
 
--- Whether a path at j names another start of i's relay.
-elsewhere : Edge → Path → Bool
-elsewhere (i , j) p = any other (j ∷ map proj₂ p)
-  where
-  other : ℕ → Bool
-  other n = (relay n ≡ᵇ relay i) ∧ not (start n ≡ᵇ start i)
-
 -- A link refuses a route when it is down, when the route is the neighbour's
 -- route to itself and the neighbour announces no claim, when the route crossed a
 -- marked link and this one is marked at the neighbour, when the path would grow
--- past `max-hops`, when the cost would pass the metric, when the path names
--- another start of the receiver's relay, or when it names a session the receiver
--- knows closed.
+-- past `max-hops`, when the cost would pass the metric, or when the path names a
+-- session the receiver knows closed.
 refuses : Link → Edge → Valid → Bool
-refuses f e v =
+refuses f _ v =
   not (L.up f)
   ∨ (null (path v) ∧ not (L.claimed f))
   ∨ (marked v ∧ L.marked-there f)
   ∨ (max-hops ≤ᵇ suc (length (path v)))
   ∨ (metric <ᵇ L.cost f + cost v)
-  ∨ elsewhere e (path v)
   ∨ any (closed (L.floors f)) (zip (path v) (extra v))
 
 -- The receiver ranks a route draining when it names a node known draining.

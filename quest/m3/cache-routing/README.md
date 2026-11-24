@@ -59,6 +59,12 @@ The earlier Plan, items 1 to 14 (2026-11-08 to 2026-11-14), is in
   maintainer stripped its wire from lite-07 on 2026-11-14
   ([moq-dev/moq#8840](https://github.com/moq-dev/moq/pull/8840)).
 
+Load spreading among equal-cost routes is this quest's to deliver (maintainer,
+2026-11-22, on [moq-dev/moq#9404](https://github.com/moq-dev/moq/pull/9404)):
+a relay keeps the cold route in use on a tie, so its first pick goes by
+arrival, not by a hash that spreads paths; warm pulls are what keep warm
+subscriptions off cold routes and spread readers within a region.
+
 This README's own work, once its child lands:
 
 - End-to-end tests over real sessions, time mocked. A chain of three relays

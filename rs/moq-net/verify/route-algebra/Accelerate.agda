@@ -16,7 +16,7 @@
 open import Data.Nat.Base using (ℕ)
 open import Relation.Binary.PropositionalEquality using (_≡_)
 
-module Accelerate (relay start mark : ℕ → ℕ) where
+module Accelerate (relay mark : ℕ → ℕ) where
 
 open import Data.Bool.Base using (Bool; true; false; _∨_; _∧_; not)
 import Data.Bool.Properties as Bool
@@ -37,7 +37,7 @@ open import RoutingLib.Routing.Basics.Path.Uncertified using (Path; Edge)
 open import RoutingLib.Routing.Basics.Path.Uncertified.Properties using (_⇿?_; _∈ₚ?_)
 open import RoutingLib.Routing.Basics.Network using (AdjacencyMatrix)
 
-open import Route relay start mark
+open import Route relay mark
 
 private
   -- A link refuses every route while it is down.
@@ -184,7 +184,7 @@ module _ {n : ℕ} (A : AdjacencyMatrix algebra n) where
       prefix : Bool → Bool
       prefix b = not (Link.up (A i k)) ∨ (null (path x) ∧ not (Link.claimed (A i k)))
         ∨ (marked x ∧ Link.marked-there (A i k)) ∨ (max-hops ≤ᵇ suc (length (path x)))
-        ∨ (metric <ᵇ Link.cost (A i k) + cost x) ∨ elsewhere (toℕ i , toℕ k) (path x) ∨ b
+        ∨ (metric <ᵇ Link.cost (A i k) + cost x) ∨ b
 
     -- One step across a link of A takes a sound route as `plain` does.
     neutral : ∀ i k w → Sound w → extend (A i k) (toℕ i , toℕ k) w ≡ extend (plain i k) (toℕ i , toℕ k) w

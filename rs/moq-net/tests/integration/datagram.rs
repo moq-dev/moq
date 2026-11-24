@@ -317,8 +317,8 @@ async fn legacy_versions_carry_both_kinds_of_a_name() {
 		&["moq-lite-06"],
 		&["moq-lite-06", "moq-lite-06"],
 		&["moq-transport-18"],
-		&["moq-transport-22"],
-		&["moq-transport-18", "moq-transport-22"],
+		&["moq-transport-22", "moq-transport-23"],
+		&["moq-transport-18", "moq-transport-22", "moq-transport-23"],
 	] {
 		let chain = Chain::new(hops).await;
 		let mut track = chain
@@ -408,7 +408,7 @@ async fn lite06_shared_datagrams_end_with_their_subscription() {
 }
 
 /// A lite-05/06 subscriber reads a name as a stream track, as one predating datagram tracks
-/// does, so the datagram fallback ends with SUBSCRIBE_FINISH ahead of its FIN: a FIN alone
+/// does, so the datagram fallback ends with SUBSCRIBE_END ahead of its FIN: a FIN alone
 /// is a protocol violation there.
 #[kio::test]
 async fn lite05_and_lite06_finish_a_datagram_track_as_a_stream_subscriber_expects() {
@@ -628,7 +628,7 @@ async fn a_datagram_track_needs_datagrams() {
 /// readers attached to the old shared producer or accept stale stream metadata as an answer.
 #[kio::test]
 async fn ietf_datagram_readers_rejoin_a_lingering_broadcast() {
-	let chain = Chain::new(&["moq-transport-18", "moq-transport-22"]).await;
+	let chain = Chain::new(&["moq-transport-18", "moq-transport-22", "moq-transport-23"]).await;
 	let mut producer = chain.publication.broadcast().create_datagrams(TRACK, timed()).unwrap();
 	let remote = chain.remote().await;
 	for priority in [2, 3] {
@@ -767,7 +767,12 @@ async fn a_stream_tracks_datagram_sent_between_its_answer_and_end_arrives() {
 /// Ending a track must preserve its queued datagrams across the receiver's budget.
 #[kio::test]
 async fn an_ietf_datagram_burst_sent_with_its_end_arrives() {
-	for version in ["moq-transport-18", "moq-transport-20", "moq-transport-22"] {
+	for version in [
+		"moq-transport-18",
+		"moq-transport-20",
+		"moq-transport-22",
+		"moq-transport-23",
+	] {
 		let chain = Chain::new(&[version]).await;
 		let mut producer = chain.publication.broadcast().create_datagrams(TRACK, timed()).unwrap();
 		let mut consumer = chain.consume(&producer, 5).await;

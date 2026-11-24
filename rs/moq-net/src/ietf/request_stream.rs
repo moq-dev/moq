@@ -359,7 +359,8 @@ impl Update {
 			0x02 => object_timeout: Option<u64>,
 			0x03 => token: Vec<super::token::RequestToken>,
 			0x06 => subgroup_timeout: Option<u64>,
-			0x10 => forward: Option<bool>,
+			0x10 => forward: Option<bool> where !version.paused(),
+			0x11 => paused: Option<bool> where version.paused(),
 			0x20 => priority: Option<u8>,
 			0x21 => filter: Option<Filter>,
 			0x23 => fill: Option<Fill> where Filter::is_draft20(version),
@@ -388,7 +389,7 @@ impl Update {
 			refused,
 			authorization_token,
 			new_group,
-			forward,
+			forward: Version::forward_state(forward, paused),
 			filter,
 			fill,
 		})
@@ -414,7 +415,7 @@ impl<'a> Decode<'a, Version> for Update {
 			return Err(DecodeError::InvalidValue);
 		}
 		let start = r.position();
-		let size = r.u16()? as usize;
+		let size = super::message::decode_length(r, version)?;
 		let mut data = r.sub(size)?;
 		// The complete frame is present; a short field inside it is malformed.
 		let update = Self::decode_body(&mut data, version).map_err(DecodeError::complete)?;
@@ -451,7 +452,7 @@ impl<'a> Decode<'a, Version> for NamespaceUpdate {
 			return Err(DecodeError::InvalidValue);
 		}
 		let start = r.position();
-		let size = r.u16()? as usize;
+		let size = super::message::decode_length(r, version)?;
 		let mut data = r.sub(size)?;
 		let mut decode = || {
 			let request_id = super::RequestId::decode(&mut data, version)?;
@@ -484,12 +485,21 @@ impl<'a> Decode<'a, Version> for NamespaceUpdate {
 mod tests {
 	use super::*;
 
+	/// A message of type `id` with `version`'s Message Length, as it sits on a request stream.
+	fn framed(version: Version, id: u8, body: &[u8]) -> Vec<u8> {
+		let mut frame = vec![id];
+		frame.extend(super::super::message::length_bytes(body.len(), version));
+		frame.extend_from_slice(body);
+		frame
+	}
+
 	#[kio::test]
 	async fn request_messages_keep_goaway_state_across_response_phases() {
 		use crate::lite::test_transport::ScriptedSession;
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			// GOAWAY, REQUEST_OK, then another GOAWAY on the same stream.
-			let script = vec![0x10, 0, 2, 0, 0, 0x07, 0, 0, 0x10, 0, 2, 0, 0];
+			let goaway = framed(version, 0x10, &[0, 0]);
+			let script = [goaway.clone(), framed(version, 0x07, &[]), goaway].concat();
 			let session = ScriptedSession::eof(script);
 			let mut stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 				.await
@@ -533,8 +543,8 @@ mod tests {
 	#[kio::test]
 	async fn a_goaway_does_not_cancel_a_pending_request() {
 		use crate::lite::test_transport::ScriptedSession;
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
-			let session = ScriptedSession::new(vec![0x10, 0, 2, 0, 0]);
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
+			let session = ScriptedSession::new(framed(version, 0x10, &[0, 0]));
 			let mut stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 				.await
 				.unwrap();
@@ -553,7 +563,7 @@ mod tests {
 			);
 			assert!(session.log.closes().is_empty());
 			// A second GOAWAY is still session-fatal while the response is pending.
-			session.push(&[0x10, 0, 2, 0, 0]);
+			session.push(&framed(version, 0x10, &[0, 0]));
 			assert!(matches!(
 				futures::poll!(kio::wait(|waiter| poll_cancel(
 					&mut stream,
@@ -570,7 +580,7 @@ mod tests {
 
 	#[test]
 	fn delivery_timeouts_on_subscription_updates_are_accepted() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			// Request ID 2; OBJECT_DELIVERY_TIMEOUT=7, SUBGROUP_DELIVERY_TIMEOUT=9.
 			let mut buf = bytes::Bytes::from_static(&[2, 2, 0x02, 7, 0x04, 9]);
 			let update = crate::coding::decode_buf(&mut buf, version, Update::decode_body).unwrap();
@@ -593,10 +603,15 @@ mod tests {
 	/// SUBSCRIBE_NAMESPACE's it closes the session.
 	#[test]
 	fn track_property_filter_on_namespace_update_closes() {
-		// REQUEST_UPDATE, 6 bytes: Request ID 2, one parameter: 0x29 with a two-byte value.
-		const FRAME: &[u8] = &[0x02, 0x00, 0x06, 2, 1, 0x29, 2, 0, 0];
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
-			let mut buf = bytes::Bytes::from_static(FRAME);
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
+			// REQUEST_UPDATE: Request ID 2 and no parameters is a valid update, so the
+			// refusal below is the parameter's and not the framing's.
+			let mut buf = bytes::Bytes::from(framed(version, 0x02, &[2, 0]));
+			let decoded = crate::coding::decode_buf(&mut buf, version, |r, v| NamespaceUpdate::decode(r, v));
+			assert!(decoded.is_ok(), "{version}");
+
+			// Request ID 2, one parameter: 0x29 with a two-byte value.
+			let mut buf = bytes::Bytes::from(framed(version, 0x02, &[2, 1, 0x29, 2, 0, 0]));
 			let decoded = crate::coding::decode_buf(&mut buf, version, |r, v| NamespaceUpdate::decode(r, v));
 			assert!(decoded.is_err(), "{version}");
 		}

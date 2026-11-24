@@ -23,6 +23,7 @@ import {
 	bestOfTier,
 	compareRouteCandidates,
 	compareRoutes,
+	compareTie,
 	compareTier,
 	coveringPrefixes,
 	type Filed,
@@ -203,20 +204,23 @@ class Scope {
 		}
 		if (covering.length > 0) {
 			// The most specific claim first, as a request beneath the root resolves; claims of one
-			// prefix rank against each other wherever each is filed, then by each filing's own order,
-			// and across filings the most recently received, then the deeper filing.
-			const ranked = covering.flatMap(([path, visible], filing) =>
-				visible.map((value, order) => ({ value, path, depth: Path.parts(path).length, filing, order })),
+			// prefix rank against each other wherever each is filed, hashed on the root, as a
+			// request for it resolves.
+			const ranked = covering.flatMap(([prefix, visible]) =>
+				visible.map((value, order) => ({
+					value,
+					prefix,
+					depth: Path.parts(prefix).length,
+					order,
+					arrival: arrival(value.identity),
+					route: value.route,
+				})),
 			);
-			// Hashed on the root, as a request for it resolves.
-			const tier = (entry: (typeof ranked)[number]) => ({ prefix: entry.path, route: entry.value.route });
 			ranked.sort(
 				(a, b) =>
-					Number((a.value.route.above ?? 0n) - (b.value.route.above ?? 0n)) ||
-					compareTier(this.root, tier(a), tier(b)) ||
-					(a.filing === b.filing
-						? a.order - b.order
-						: arrival(b.value.identity) - arrival(a.value.identity) || b.depth - a.depth),
+					Number((a.route.above ?? 0n) - (b.route.above ?? 0n)) ||
+					compareTier(this.root, a, b) ||
+					compareTie(this.root, a, b),
 			);
 			out.set(
 				Path.empty(),
@@ -1736,6 +1740,7 @@ export class Producer implements Table {
 			open();
 			const previous = current.instance;
 			const restart = inserted && previous !== next.instance;
+			const renewed = previous !== next.instance || (current.epoch ?? 0n) !== (next.epoch ?? 0n);
 			current = next;
 			for (const { below, entry } of filed) {
 				if (restart) this.#state.restart(entry);
@@ -1747,8 +1752,20 @@ export class Producer implements Table {
 				else server.reset();
 			}
 			if (!inserted) return;
+			// A claim is new when it restarts, so it moves to the newest place and yields a tie
+			// it held to one that kept its instance (see compareTie), at each filing and across them.
+			if (renewed) receive(identity);
+			this.#state.routes.mutate((routes) => {
+				if (!renewed) return;
+				for (const { at, entry } of filed) {
+					const entries = routes.get(at);
+					const index = entries?.indexOf(entry) ?? -1;
+					if (!entries || index <= 0) continue;
+					entries.splice(index, 1);
+					entries.unshift(entry);
+				}
+			});
 			refresh();
-			this.#state.routes.mutate(() => {});
 		};
 
 		if (publishes && minted) {
@@ -2655,7 +2672,7 @@ export class Consumer implements Reader {
 			next.set(relative, present(path, entry, scope.pattern));
 		}
 		// Hashed on the root, as a request for it resolves.
-		const best = bestOfTier(atRoot, (a, b) => compareTier(root, a, b));
+		const best = bestOfTier(root, atRoot);
 		if (best)
 			next.set(Path.empty(), present(best.candidate.path, best.candidate.candidate, best.candidate.pattern));
 		return next;

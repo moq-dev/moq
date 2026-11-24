@@ -14,9 +14,12 @@ export async function run(): Promise<void> {
 	const offsets = [0, 80, 40];
 	try {
 		// The same reordered-PTS verdict runs here in Chromium before timing any work.
-		// No publisher limit, so the reader's own 80 ms budget alone judges the reordered tail.
+		// No publisher limit, so the reader's own 80 ms max alone judges the reordered tail: a live join
+		// reaching back past every group, so it takes each still within that max.
 		const check = new Track.Producer("reordered").accept({ timescale: Time.Timescale.MILLI, maxAge: null });
-		const reader = check.subscribe({ delay: { max: Duration.millis(80) } });
+		const reader = check.subscribe({
+			ranges: [{ start: { live: { min: null, max: Duration.millis(80) } } }],
+		});
 		try {
 			for (const timestamps of [[0], [100], [150, 200, 160]]) {
 				const group = hooks.appendNext(check);
@@ -63,12 +66,21 @@ export async function run(): Promise<void> {
 								}
 								const subscribers = Array.from({ length: readers }, () =>
 									track.subscribe({
-										delay: {
-											max: Duration.millis(
-												(retained + Math.ceil((iterations + warmup) / offsets.length) + 1) *
-													100,
-											),
-										},
+										ranges: [
+											{
+												start: {
+													live: {
+														min: null,
+														max: Duration.millis(
+															(retained +
+																Math.ceil((iterations + warmup) / offsets.length) +
+																1) *
+																100,
+														),
+													},
+												},
+											},
+										],
 									}),
 								);
 								// Drain replay through the normal ordered cursor while retaining its timeline.

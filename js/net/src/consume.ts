@@ -75,7 +75,7 @@ export class BroadcastCache {
 		const previous = entries.get(owner);
 		const identity = (!restart && previous?.identity) || {};
 		arrival(identity);
-		// A new or restarted stream ranks as the newest, which wins a full tie; see mostSpecific.
+		// A new or restarted stream ranks as the newest, which wins a full tie at its own path; see mostSpecific.
 		if (!previous || restart) entries.delete(owner);
 		entries.set(owner, { identity, route });
 		this.#update(path);
