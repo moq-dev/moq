@@ -1348,10 +1348,16 @@ impl Registry {
 	/// Sample each source once before taking the counter maps, independently of held tracks.
 	fn collect_wire(&self) {
 		let Some(shared) = &self.shared else { return };
-		shared.wire.lock().retain(|source| {
-			let Some(source) = source.upgrade() else { return false };
-			source.sample(false)
-		});
+		// A sourced sample makes a syscall, so sample outside the lock each new connection takes.
+		// A closed source samples nothing; its entry goes once its guard drops.
+		let live: Vec<_> = {
+			let mut wire = shared.wire.lock();
+			wire.retain(|source| source.strong_count() > 0);
+			wire.iter().filter_map(Weak::upgrade).collect()
+		};
+		for source in live {
+			source.sample(false);
+		}
 	}
 }
 
