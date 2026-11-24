@@ -356,8 +356,9 @@ fn panic_error() -> MoqError {
 /// [`write`](Self::write) accepts a [`MoqVideoFrame`] whose `data` is in the
 /// pixel format declared by the [`MoqVideoEncoderInput`] passed at publish time.
 ///
-/// Released before its finish, it ends its track with `Dropped`, which readers elsewhere see as
-/// `Internal`. Still open when its broadcast closes, it ends it with `Unroutable`, which a
+/// Released before its finish, it ends its track cleanly while nobody wants it; a reader that
+/// still does is served by the broadcast's next request for the track, or reads `Dropped` (seen
+/// elsewhere as `Internal`) with no request handler. Still open when its broadcast closes, it ends it with `Unroutable`, which a
 /// moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqVideoProducer {
@@ -394,7 +395,7 @@ impl MoqVideoProducer {
 	}
 }
 
-// Dropped or closed before its finish, the track ends the way a publisher leaving does.
+// Closed with its broadcast before its finish, the track ends with the close's cause.
 impl crate::producer::Child for MoqVideoProducer {
 	fn abort(&self, err: moq_net::Error) {
 		let _guard = crate::ffi::runtime().enter();
@@ -411,7 +412,13 @@ impl crate::producer::Child for MoqVideoProducer {
 
 impl Drop for MoqVideoProducer {
 	fn drop(&mut self) {
-		crate::producer::Child::abort(self, moq_net::Error::Dropped);
+		let _guard = crate::ffi::runtime().enter();
+		drop(
+			self.inner
+				.get_mut()
+				.unwrap_or_else(std::sync::PoisonError::into_inner)
+				.take(),
+		);
 	}
 }
 
@@ -496,26 +503,6 @@ impl MoqVideoProducer {
 		self.bandwidth.as_ref()?;
 		let guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 		Some(Arc::new(MoqReservation::borrowed(guard.as_ref()?.reservation())))
-	}
-
-	/// Abort this track with an application error code, but only while nobody wants it.
-	///
-	/// This is how an on-demand publisher ends a track once [`MoqTrackDemand::wanted_changed`]
-	/// returns null. Releasing it instead fails a reader that joined in between. Returns true
-	/// once the track is closed, and this handle's later calls fail with `Closed`. Returns
-	/// false, leaving the track unchanged, when a reader wants it again, so keep serving and
-	/// wait for the next null on a fresh `demand()`: one that already returned null misses a
-	/// reader that came and went, and waits on. Fails with `Closed` once finished, like every
-	/// other call.
-	pub fn abort_unwanted(&self, error_code: u16) -> Result<bool, MoqError> {
-		let _guard = crate::ffi::runtime().enter();
-		let mut guard = self.inner.lock().map_err(|_| panic_error())?;
-		let producer = guard.take().ok_or(MoqError::Closed)?;
-		if let Err(producer) = producer.abort_unwanted(moq_net::Error::App(error_code)) {
-			*guard = Some(producer);
-			return Ok(false);
-		}
-		Ok(true)
 	}
 
 	/// Flush any frames the codec is still holding and finalize the track.

@@ -956,15 +956,17 @@ impl Consume {
 				if Pin::new(&mut *close).poll(&mut waiter.context()).is_ready() {
 					return Poll::Ready(Ok(RawStep::Stop));
 				}
-				match ready!(group.poll_read_frame(waiter))? {
-					Some(frame) => Poll::Ready(Ok(RawStep::Item(frame))),
-					None => Poll::Ready(Ok(RawStep::End)),
+				match ready!(group.poll_read_frame(waiter)) {
+					Ok(Some(frame)) => Poll::Ready(Ok(RawStep::Item(frame))),
+					// A group cut short (aborted, reset, or left open by a producer that went) is
+					// that group's loss: the track reads on, and its own end reports a failed track.
+					Ok(None) | Err(_) => Poll::Ready(Ok(RawStep::End)),
 				}
 			})
 			.await?
 			{
 				RawStep::Item(frame) => frame,
-				// Group fully read.
+				// Group read to its end, or cut short.
 				RawStep::End => return Ok(false),
 				// Consumer closed mid-group: terminate without touching `close` again.
 				RawStep::Stop => return Ok(true),

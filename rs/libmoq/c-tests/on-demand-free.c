@@ -1,9 +1,8 @@
-// An on-demand publisher ends a track nobody wants with `*_abort_unwanted`, which keeps the
-// track for a reader that joined since. Each handle that can serve one is checked both ways:
-// an idle track ends, and the handle is released; a track whose reader joined before the call
-// stays, so the handle still publishes and the reader still reads. The reader joins through an
-// origin, which keeps a joined track wanted past the reader's leaving, so a wanted track is
-// finished instead of waited out. Rust tests cover the reader leaving.
+// An on-demand publisher ends a track nobody wants by freeing its handle with `*_free`. Each
+// handle that can serve one is checked both ways: freed idle, the track ends cleanly and the
+// handle is released; freed while a reader that joined since still wants the track, the broadcast
+// asks its request handler for the track again, and the reader reads what the next producer
+// writes. The reader joins through an origin, as a remote one does.
 #include <moq.h>
 
 #include <pthread.h>
@@ -19,7 +18,6 @@
     abort(); \
 } } while (0)
 
-#define APP_ERROR 7
 #define QUEUE_SIZE 64
 
 // The codes a callback delivered, in order.
@@ -71,43 +69,65 @@ static void wait_wanted(Queue *demand) {
     while (next(demand) != MOQ_DEMAND_WANTED) {}
 }
 
-// Wait for a frame the reader delivered, and release it.
-static void read_frame(Queue *frames) {
-    int32_t frame = next(frames);
-    CHECK(frame > 0);
-    CHECK(moq_consume_track_frame_free((uint32_t)frame) == 0);
-}
-
 typedef struct {
-    int32_t (*abort_unwanted)(uint32_t handle, uint16_t error_code);
-    int32_t (*finish)(uint32_t handle);
+    int32_t (*free)(uint32_t handle);
     int32_t (*demand)(uint32_t handle, moq_status_callback on_demand, void *user_data);
 } Handle;
 
-// An idle handle ends: the call reports it closed, releases the handle, and ends its watcher.
+// An idle handle ends: freeing it releases the handle and ends its watcher cleanly.
 static void check_idle(const Handle *ops, uint32_t handle) {
     Queue *demand = queue_new();
     CHECK(ops->demand(handle, on_code, demand) > 0);
     CHECK(next(demand) == MOQ_DEMAND_UNWANTED);
 
-    CHECK(ops->abort_unwanted(handle, APP_ERROR) == 1);
-    CHECK(ops->abort_unwanted(handle, APP_ERROR) < 0);
-    CHECK(ops->finish(handle) < 0);
-    CHECK(next(demand) < 0);
+    CHECK(ops->free(handle) == 0);
+    CHECK(ops->free(handle) < 0);
+    CHECK(next(demand) == 0);
 }
 
-// A handle whose reader joined keeps serving: the call reports it open, the handle still
-// publishes, and the reader reads what it publishes.
-static void check_wanted(const Handle *ops, uint32_t handle, Queue *frames, void (*write)(uint32_t handle)) {
-    Queue *demand = queue_new();
-    CHECK(ops->demand(handle, on_code, demand) > 0);
-    wait_wanted(demand);
+// The handler that serves a track asked for again.
+static uint32_t handler;
+static Queue *requests;
+static int64_t raw_at = 10000000;
 
-    CHECK(ops->abort_unwanted(handle, APP_ERROR) == 0);
-    write(handle);
-    read_frame(frames);
-    // The broadcast keeps the finished track, and its watcher, until it closes.
-    CHECK(ops->finish(handle) == 0);
+// A handle whose reader joined is freed: the broadcast asks for the track again, and the reader
+// reads what the raw track accepted from that request writes, past any group it already read.
+static void check_wanted(const Handle *ops, uint32_t handle, const char *name, Queue *frames) {
+    Queue *demand = queue_new();
+    int32_t watcher = ops->demand(handle, on_code, demand);
+    CHECK(watcher > 0);
+    wait_wanted(demand);
+    CHECK(ops->free(handle) == 0);
+    CHECK(ops->free(handle) < 0);
+
+    int32_t request = next(requests);
+    CHECK(request > 0);
+    moq_string requested = {NULL, 0};
+    CHECK(moq_track_request_name((uint32_t)request, &requested) == 0);
+    CHECK(requested.len == strlen(name) && memcmp(requested.data, name, requested.len) == 0);
+    int32_t track = moq_track_request_accept((uint32_t)request, NULL);
+    CHECK(track > 0);
+    moq_timestamp timestamp = {(uint64_t)raw_at, 1000000, true};
+    raw_at += 1000000;
+    CHECK(moq_publish_track_frame((uint32_t)track, (const uint8_t *)"served again", 12, &timestamp) == 0);
+
+    // What the freed handle already published may come first.
+    for (;;) {
+        int32_t frame = next(frames);
+        CHECK(frame > 0);
+        moq_frame read;
+        memset(&read, 0, sizeof(read));
+        CHECK(moq_consume_track_frame((uint32_t)frame, &read) == 0);
+        bool served = read.payload_size == 12 && memcmp(read.payload, "served again", 12) == 0;
+        CHECK(moq_consume_track_frame_free((uint32_t)frame) == 0);
+        if (served) break;
+    }
+
+    // The watcher follows the track, not the freed handle, so it is stopped here.
+    CHECK(moq_publish_demand_cancel((uint32_t)watcher) == 0);
+    while (next(demand) > 0) {}
+    // The origin keeps a joined track wanted past the reader's leaving, so it is finished instead.
+    CHECK(moq_publish_track_finish((uint32_t)track) == 0);
 }
 
 // ---- raw tracks ----
@@ -116,40 +136,19 @@ static int32_t track_demand(uint32_t track, moq_status_callback on_demand, void 
     return moq_publish_track_demand(track, on_demand, user_data);
 }
 
-static void write_track(uint32_t track) {
-    moq_timestamp timestamp = {0, 1000000, true};
-    CHECK(moq_publish_track_frame(track, (const uint8_t *)"data", 4, &timestamp) == 0);
-}
-
-static const Handle TRACK = {
-    moq_publish_track_abort_unwanted, moq_publish_track_finish, track_demand,
-};
+static const Handle TRACK = {moq_publish_track_free, track_demand};
 
 // ---- media tracks ----
 
 static const uint8_t OPUS_HEAD[19] = {'O', 'p', 'u', 's', 'H', 'e', 'a', 'd', 1, 2, 0, 0, 0x80, 0xbb, 0, 0, 0, 0, 0};
 
-static void write_media(uint32_t media) {
-    moq_timestamp timestamp = {1000, 1000000, true};
-    CHECK(moq_publish_media_frame(media, (const uint8_t *)"opus frame", 10, timestamp) == 0);
-}
-
 static int32_t media_demand(uint32_t media, moq_status_callback on_demand, void *user_data) {
     return moq_publish_media_demand(media, on_demand, user_data);
 }
 
-static const Handle MEDIA = {
-    moq_publish_media_abort_unwanted, moq_publish_media_finish, media_demand,
-};
+static const Handle MEDIA = {moq_publish_media_free, media_demand};
 
 // ---- encoded audio ----
-
-static float pcm[960 * 2];
-
-static void write_audio(uint32_t producer) {
-    moq_audio_frame frame = {{0, 1000000, true}, (const uint8_t *)pcm, sizeof(pcm)};
-    CHECK(moq_encode_audio_frame(producer, &frame) == 0);
-}
 
 static int32_t audio_demand(uint32_t producer, moq_status_callback on_demand, void *user_data) {
     return moq_encode_audio_demand(producer, on_demand, user_data);
@@ -161,9 +160,7 @@ static int32_t encode_audio(uint32_t broadcast, const char *name) {
     return moq_encode_audio(broadcast, name, strlen(name), &input, &output, 0);
 }
 
-static const Handle AUDIO = {
-    moq_encode_audio_abort_unwanted, moq_encode_audio_finish, audio_demand,
-};
+static const Handle AUDIO = {moq_encode_audio_free, audio_demand};
 
 // ---- encoded video ----
 
@@ -171,13 +168,10 @@ static const Handle AUDIO = {
 #define HEIGHT 240
 
 static uint8_t gray_rgba[WIDTH * HEIGHT * 4];
-static uint64_t next_timestamp;
 
 static void write_video(uint32_t producer) {
-    CHECK(moq_encode_video_cut(producer) == 0);
-    for (int i = 0; i < 5; i++) {
-        moq_video_encoder_frame frame = {{next_timestamp, 1000000, true}, gray_rgba, sizeof(gray_rgba)};
-        next_timestamp += 33333;
+    for (uint64_t i = 0; i < 5; i++) {
+        moq_video_encoder_frame frame = {{i * 33333, 1000000, true}, gray_rgba, sizeof(gray_rgba)};
         CHECK(moq_encode_video_frame(producer, &frame) == 0);
     }
 }
@@ -192,9 +186,7 @@ static int32_t encode_video(uint32_t broadcast) {
     return moq_encode_video(broadcast, &input, &output, NULL);
 }
 
-static const Handle VIDEO = {
-    moq_encode_video_abort_unwanted, moq_encode_video_finish, video_demand,
-};
+static const Handle VIDEO = {moq_encode_video_free, video_demand};
 
 // ---- the fixture ----
 
@@ -223,17 +215,21 @@ static void video_name(uint32_t consume, char *name, size_t size) {
 }
 
 int main(void) {
-    for (size_t sample = 0; sample < 960; sample++) { pcm[sample * 2] = 0.25f; pcm[sample * 2 + 1] = -0.5f; }
     memset(gray_rgba, 0x80, sizeof(gray_rgba));
 
     int32_t origin = moq_origin_create();
     CHECK(origin > 0);
-    const char *path = "abort-unwanted";
+    const char *path = "on-demand-free";
     int32_t route = moq_origin_route((uint32_t)origin, path, strlen(path), NULL);
     CHECK(route > 0);
     int32_t created = moq_route_broadcast((uint32_t)route);
     CHECK(created > 0);
     uint32_t broadcast = (uint32_t)created;
+
+    requests = queue_new();
+    int32_t requested = moq_publish_requests(broadcast, on_code, requests);
+    CHECK(requested > 0);
+    handler = (uint32_t)requested;
 
     // A reader joins through the origin, as a remote one does.
     Queue *broadcasts = queue_new();
@@ -251,7 +247,7 @@ int main(void) {
     track = moq_publish_track(broadcast, "wanted", 6, NULL);
     CHECK(track > 0);
     int32_t reader = join(consume, "wanted", track_frames);
-    check_wanted(&TRACK, (uint32_t)track, track_frames, write_track);
+    check_wanted(&TRACK, (uint32_t)track, "wanted", track_frames);
     CHECK(moq_consume_track_cancel((uint32_t)reader) == 0);
 
     // Media tracks, which a track request creates once the reader has asked for the name.
@@ -260,18 +256,14 @@ int main(void) {
     CHECK(media > 0);
     check_idle(&MEDIA, (uint32_t)media);
 
-    Queue *requests = queue_new();
     Queue *media_frames = queue_new();
-    int32_t handler = moq_publish_requests(broadcast, on_code, requests);
-    CHECK(handler > 0);
     reader = join(consume, "requested", media_frames);
     int32_t request = next(requests);
     CHECK(request > 0);
     media = moq_track_request_audio((uint32_t)request, &init);
     CHECK(media > 0);
-    check_wanted(&MEDIA, (uint32_t)media, media_frames, write_media);
+    check_wanted(&MEDIA, (uint32_t)media, "requested", media_frames);
     CHECK(moq_consume_track_cancel((uint32_t)reader) == 0);
-    CHECK(moq_publish_requests_cancel((uint32_t)handler) == 0);
 
     // Encoded audio.
     int32_t audio = encode_audio(broadcast, "idle-audio");
@@ -282,7 +274,7 @@ int main(void) {
     audio = encode_audio(broadcast, "wanted-audio");
     CHECK(audio > 0);
     reader = join(consume, "wanted-audio", audio_frames);
-    check_wanted(&AUDIO, (uint32_t)audio, audio_frames, write_audio);
+    check_wanted(&AUDIO, (uint32_t)audio, "wanted-audio", audio_frames);
     CHECK(moq_consume_track_cancel((uint32_t)reader) == 0);
 
     // Encoded video. A rendition is named by the catalog once the encoder has produced a keyframe,
@@ -298,13 +290,14 @@ int main(void) {
     char name[64];
     video_name(consume, name, sizeof(name));
     reader = join(consume, name, video_frames);
-    check_wanted(&VIDEO, (uint32_t)video, video_frames, write_video);
+    check_wanted(&VIDEO, (uint32_t)video, name, video_frames);
     CHECK(moq_consume_track_cancel((uint32_t)reader) == 0);
 
+    CHECK(moq_publish_requests_cancel(handler) == 0);
     CHECK(moq_consume_close(consume) == 0);
     CHECK(moq_route_free((uint32_t)route) == 0);
     CHECK(moq_publish_close(broadcast) == 0);
     CHECK(moq_origin_close((uint32_t)origin) == 0);
-    fprintf(stderr, "C abort_unwanted ends an idle track and keeps a wanted one passed\n");
+    fprintf(stderr, "C *_free ends an idle track and hands a wanted one to the next request passed\n");
     return 0;
 }

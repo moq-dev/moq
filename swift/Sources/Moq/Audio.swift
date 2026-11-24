@@ -63,15 +63,6 @@ public enum Audio {
             ffi.reservation().map(Reservation.init)
         }
 
-        /// Abort the track with an application error code, but only while nobody wants it: call it
-        /// once `TrackDemand.wantedChanged()` returns false. Returns true once the track is closed,
-        /// and false, leaving the track open, when a reader joined since; keep serving and wait for
-        /// the next nil on a fresh `demand()`: one that already returned nil misses a reader
-        /// that came and went, and waits on.
-        public func abortUnwanted(errorCode: UInt16) throws -> Bool {
-            try ffi.abortUnwanted(errorCode: errorCode)
-        }
-
         /// Finish the track and finalize encoding.
         public func finish() throws {
             try ffi.finish()

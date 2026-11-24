@@ -179,14 +179,10 @@ func (p *Producer) Reservation() *moq.Reservation {
 	return bridge.Reservation(*raw).(*moq.Reservation)
 }
 
-// AbortUnwanted closes the track with an application error code, but only while
-// nobody wants it: call it once moq.TrackDemand.WantedChanged returns false. It returns
-// true once the track is closed, and false, leaving the track open, when a reader
-// joined since; keep serving and wait for the next nil on a fresh Demand():
-// one that already returned nil misses a reader that came and went, and waits on.
-func (p *Producer) AbortUnwanted(errorCode uint16) (bool, error) {
-	return p.inner.AbortUnwanted(errorCode)
-}
+// Close releases the producer on the calling goroutine without finishing its track: a
+// track nobody wants ends cleanly, and a reader that joined since is served by the next
+// request for it. The producer is unusable afterwards.
+func (p *Producer) Close() { p.inner.Destroy() }
 
 // Finish flushes pending samples and ends the track.
 func (p *Producer) Finish() error { return p.inner.Finish() }
