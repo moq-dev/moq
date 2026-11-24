@@ -41,7 +41,7 @@ Without a subscriber the encoder keeps raw PCM
 up to the track's `max_age`, then encodes the part of that history within the
 subscribers want, from a live join's lag (its playout delay plus the codec's warmup)
 bounded by its max delay, before continuing live when someone subscribes. A join with
-no lag limit, as every join before moq-lite-07 is, gets live audio only. With an unlimited `max_age` it keeps at most 30 seconds
+no lag limit, as every join before moq-lite-07 is, gets the retained audio within its max delay. With an unlimited `max_age` it keeps at most 30 seconds
 (about 11.5 MB for 48 kHz stereo f32). Set `encode::Capture::retain` to false
 to encode continuously instead. Dropping an encoder leaves the shared capture running. A device
 failure keeps the retained history on the track until it is subscribed or expires, then the
