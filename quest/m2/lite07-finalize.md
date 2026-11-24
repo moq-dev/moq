@@ -241,7 +241,8 @@ full-codebase audit): ✅ this quest fixes the changelog typo at
 `drafts/draft-lcurley-moq-lite.md:2380` during the cut.
 
 Decided 2026-11-23 (taken while the maintainer was away, on
-[moq-dev/moq#9371](https://github.com/moq-dev/moq/pull/9371)): the cut waits
+[moq-dev/moq#9371](https://github.com/moq-dev/moq/pull/9371), and listed in
+that PR's decisions when the maintainer picked it to merge): the cut waits
 for the router to rank one claim prefix's filings as one tier, since the
 draft now says copies of one claim rank together wherever each is filed.
 

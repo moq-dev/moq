@@ -318,8 +318,8 @@ export class Routed {
 	}
 
 	// A claim through this session: its cost plus a local link cost of 1, which the draft lets
-	// a receiver charge in place of the peer's declared cost; ranked last while the peer or a
-	// node on its way drains, then by the lowest priority on its way, past this link's 0; and
+	// a receiver charge in place of the peer's declared cost; ranked below every available claim
+	// while the peer or a node on its way drains, then by the lowest priority on its way, past this link's 0; and
 	// unavailable while no route reaches it.
 	#candidate(live: Live, claim: Claim): WireRoute {
 		return this.#session.drained(

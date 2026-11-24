@@ -29,6 +29,15 @@ failing the request, though the endpoint's claim at `src` serves it. A peer's
 narrow ANNOUNCE_REQUEST at `src/a` is likewise told only the unavailable
 copy. The test fails on `main` and passes with the fix.
 
+Until this lands, the origin and the router of one relay can disagree, which
+a later review of that PR read from the source (not yet run): relay R owns
+claim (`src`, I), and its reader also holds node P's copy shown at (`src/a`,
+I, Above 1). Downstream D's origin picks R's cheaper claim for `src/a/b` and
+names R, but R's `step` starts at `src/a`, finds no claim of its own there,
+and refuses the request; before the origin fix, D named P. Reproduce it as a
+two-relay test first. lite-07 is negotiated only by explicit opt-in
+(`moq-lite-07-wip`), so this reaches only meshes that opt in.
+
 Recommended approach: gather the claims of the most specific claim prefix
 from every covering filing, as the origin's `best_route` and
 `TableCursor::best` do, and rank them together by the draft's Resolution

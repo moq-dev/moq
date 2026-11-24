@@ -7,16 +7,7 @@ import { defined } from "./defined.test-util.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import { type Cost, toHop, WireRoute } from "./hop.ts";
 import * as Instance from "./instance.ts";
-import {
-	arrival,
-	compareRouteCandidates,
-	compareRoutes,
-	hooks,
-	mostSpecific,
-	presented,
-	spreadHash,
-	superseded,
-} from "./internal.ts";
+import { arrival, compareRoutes, hooks, mostSpecific, presented, spreadHash, superseded } from "./internal.ts";
 import * as Mint from "./mint.ts";
 import { SessionBroadcast, textFrame } from "./mock.ts";
 import type { Consumer, Table } from "./origin.ts";
@@ -2220,9 +2211,16 @@ test("a claim nearer its path outranks a broader one", () => {
 	const path = Path.from("src/derived");
 	const exact = { ...WireRoute.default, instance: Instance.parse("a"), claimed: true, cost: 9n, priority: -5 };
 	const broad = { ...WireRoute.default, instance: Instance.parse("b"), claimed: true, cost: 1n, above: 1n };
-	expect(compareRouteCandidates(path, path, exact, broad)).toBeLessThan(0);
-	expect(compareRouteCandidates(path, path, broad, exact)).toBeGreaterThan(0);
-	expect(compareRouteCandidates(path, path, exact, { ...broad, above: 0n })).toBeGreaterThan(0);
+	const pick = (...routes: WireRoute[]) =>
+		mostSpecific(
+			path,
+			(prefix) => (prefix === path ? routes : []),
+			(route) => ({ identity: route, route }),
+		);
+	expect(pick(exact, broad)).toBe(exact);
+	expect(pick(broad, exact)).toBe(exact);
+	const level = { ...broad, above: 0n };
+	expect(pick(exact, level)).toBe(level);
 });
 
 // A claim shown above its own prefix is filed deeper than it is: it counts for where it really is,
@@ -3064,6 +3062,23 @@ test("a scope's root row presents the tied claim a request holds", async () => {
 	request.close();
 	older.close();
 	newer.close();
+	origin.close();
+});
+
+// A broadcast published above a scope's root serves only its own path, so the merged root row,
+// whose first eligible entry an unsolicited PUBLISH_NAMESPACE offers, leads with the costlier claim
+// of the same prefix that serves the root.
+test("a scope's root row leads with a claim that serves it over a broadcast above it", async () => {
+	const origin = new Producer();
+	const broadcast = origin.route(Path.from("src"));
+	const filed = origin.scope(Path.empty(), Path.Prefixes.parse(["src/a"])).claim(Path.from("src"), { cost: 5n });
+	const reader = origin.scope(Path.from("src/a"), Path.Prefixes.all()).consume();
+	await settle();
+	const row = wireOf(reader).advertised.peek()?.get(Path.empty());
+	if (!row) throw new Error("expected a root row");
+	expect(row.map((entry) => entry.route.instance)).toEqual([filed.instance, broadcast.instance]);
+	broadcast.close();
+	filed.close();
 	origin.close();
 });
 

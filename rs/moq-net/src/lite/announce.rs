@@ -114,7 +114,7 @@ pub enum AnnounceBroadcast {
 	/// DEAD (lite-07+): the session `hop` names closed, at the node `far` at its other
 	/// end, which ends every route the sender offered through it.
 	Dead { hop: RouteHop, far: NodeId },
-	/// DRAIN (lite-07+): `node` sent GOAWAY, so every route through it ranks last.
+	/// DRAIN (lite-07+): `node` sent GOAWAY, so every route through it ranks below every available one.
 	Drain { node: NodeId },
 	/// ANNOUNCE_FLOOR (lite-07+): closes the batch of claim messages since the last
 	/// one, which change the claims of the node the route with this id leads to, and

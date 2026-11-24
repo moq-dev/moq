@@ -2034,18 +2034,16 @@ impl TableCursor {
 	/// The visible entry among `candidates` that presents at the absolute `at`: the most
 	/// specific claim, then the first eligible one in [`route_order`] resolving `at`, wherever
 	/// each claim of that tier is filed, so the stream advertises what a request for `at`
-	/// resolves to. One that cannot serve `at`, such as a broadcast published above it, still
-	/// shadows broader claims but ranks behind every tier-mate that can.
+	/// resolves to. One whose producer may not serve `at` is no candidate, as in
+	/// [`RouteTable::best_route`]; one that cannot serve `at`, such as a broadcast published
+	/// above it, still shadows broader claims but ranks behind every tier-mate that can.
 	fn best<'a>(&self, at: &Path, candidates: impl Iterator<Item = &'a RouteEntry> + Clone) -> Option<&'a RouteEntry> {
-		let visible = candidates.filter(|entry| self.visible(entry));
+		let visible = candidates.filter(|entry| self.visible(entry) && entry.authorizes(at));
 		let epochs = Epochs::of(visible.clone());
 		visible
 			.clone()
 			.filter(|entry| !epochs.superseded(entry))
-			.min_by_key(|entry| {
-				let serves = entry.serves(at) && entry.authorizes(at);
-				(Reverse(entry.specificity()), !serves, route_order(at, entry))
-			})
+			.min_by_key(|entry| (Reverse(entry.specificity()), !entry.serves(at), route_order(at, entry)))
 	}
 
 	/// Whether the hidden rule lets this cursor discover a route at `prefix`.
@@ -6407,7 +6405,8 @@ impl RouteTable {
 		let (above, at) = self.split(path);
 		// How specific each claim is: its node's depth less how far above it the claim was
 		// shown, as [`RouteEntry::specificity`] counts without walking the prefix.
-		let candidates = (above.into_iter().chain(at).enumerate())
+		// Borrowed, so the clones below copy no node list.
+		let candidates = (above.iter().copied().chain(at).enumerate())
 			.flat_map(|(depth, node)| {
 				(node.entries.iter()).map(move |entry| (depth.saturating_sub(usize::from(entry.lane.above)), entry))
 			})
@@ -11702,13 +11701,22 @@ mod tests {
 	}
 
 	/// A covering stream's root advertises the claim a request for the root takes, passing over a
-	/// cheaper tier-mate that cannot serve it: a broadcast published above the root, which serves
-	/// only its own path, or a claim whose producer excludes the root.
+	/// cheaper one that cannot serve it. A broadcast published above the root serves only its own
+	/// path, so it ranks behind a tier-mate that serves. A claim whose producer excludes the root
+	/// is no candidate at all: it neither outranks a tier-mate, shadows a broader claim, nor
+	/// supersedes an older epoch of its instance.
 	#[test]
-	fn a_covering_root_passes_over_a_tier_mate_that_cannot_serve_it() {
-		let route = |instance: &crate::Instance, node, above, cost| {
+	fn a_covering_root_passes_over_a_claim_that_cannot_serve_it() {
+		#[derive(Debug, Clone, Copy)]
+		enum Case {
+			Broadcast,
+			Excluded,
+			ExcludedShadow,
+			ExcludedEpoch,
+		}
+		let route = |instance: &crate::Instance, epoch, node, above, cost: u64| {
 			RouteInfo::new()
-				.with_instance(instance.clone(), 0)
+				.with_instance(instance.clone(), epoch)
 				.with_hops(hops(&[node]))
 				.with_node(Some(node_id(node)))
 				.with_lane(Lane {
@@ -11717,7 +11725,12 @@ mod tests {
 				})
 				.with_cost(cost)
 		};
-		for excluded in [false, true] {
+		for case in [
+			Case::Broadcast,
+			Case::Excluded,
+			Case::ExcludedShadow,
+			Case::ExcludedEpoch,
+		] {
 			let producer = Config {
 				update_hold: Duration::ZERO,
 				..Config::from(origin(1))
@@ -11727,17 +11740,28 @@ mod tests {
 				.covering()
 				.routes();
 			let (cheap, serving) = (crate::Instance::random(), crate::Instance::random());
-			let (_broadcast, _excluded) = match excluded {
-				false => {
+			let excluded = producer.exclude("src/a").unwrap();
+			let mut held = Vec::new();
+			let mut broadcast = None;
+			match case {
+				Case::Broadcast => {
 					let options = RouteOptions::default().with_instance(cheap.clone(), 0);
-					(Some(producer.route("src", options).unwrap()), None)
+					broadcast = Some(producer.route("src", options).unwrap());
+					held.push(producer.forward("src/a", route(&serving, 0, 11, 1, 5)).unwrap());
 				}
-				true => {
-					let handle = producer.exclude("src/a").unwrap();
-					(None, Some(handle.forward("src", route(&cheap, 10, 0, 0)).unwrap()))
+				Case::Excluded => {
+					held.push(excluded.forward("src", route(&cheap, 0, 10, 0, 0)).unwrap());
+					held.push(producer.forward("src/a", route(&serving, 0, 11, 1, 5)).unwrap());
 				}
-			};
-			let _filed = producer.forward("src/a", route(&serving, 11, 1, 5)).unwrap();
+				Case::ExcludedShadow => {
+					held.push(excluded.forward("src", route(&cheap, 0, 10, 0, 0)).unwrap());
+					held.push(producer.forward("", route(&serving, 0, 11, 0, 5)).unwrap());
+				}
+				Case::ExcludedEpoch => {
+					held.push(excluded.forward("src", route(&serving, 2, 10, 0, 0)).unwrap());
+					held.push(producer.forward("src/a", route(&serving, 1, 11, 1, 5)).unwrap());
+				}
+			}
 
 			let table = producer.shared.read();
 			let resolved = table
@@ -11747,14 +11771,15 @@ mod tests {
 					&HashSet::new(),
 					|_| true,
 				)
-				.map(|entry| entry.instance.clone());
+				.map(|entry| (entry.instance.clone(), entry.cost));
 			drop(table);
-			assert_eq!(resolved, Some(serving.clone()), "excluded: {excluded}");
+			assert_eq!(resolved, Some((serving.clone(), Cost::from(5u64))), "{case:?}");
 			let mut advertised = None;
 			while let Some(event) = announced.try_next() {
-				advertised = Some(event.announce.route.instance().clone());
+				advertised = Some((event.announce.route.instance().clone(), event.announce.route.cost()));
 			}
-			assert_eq!(advertised, resolved, "excluded: {excluded}");
+			assert_eq!(advertised, resolved, "{case:?}");
+			drop((held, broadcast));
 		}
 	}
 

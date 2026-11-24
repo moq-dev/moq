@@ -21,7 +21,6 @@ import * as Instance from "./instance.ts";
 import {
 	arrival,
 	bestOfTier,
-	compareRouteCandidates,
 	compareRoutes,
 	compareTie,
 	compareTier,
@@ -223,9 +222,13 @@ class Scope {
 					route: value.route,
 				})),
 			);
+			// A broadcast published above the root serves only its own path, so a tier-mate that
+			// serves the root ranks ahead of it, as `presented` ranks them.
+			const serves = (entry: (typeof ranked)[number]) => !entry.value.exact || entry.prefix === this.root;
 			ranked.sort(
 				(a, b) =>
 					Number((a.route.above ?? 0n) - (b.route.above ?? 0n)) ||
+					Number(serves(b)) - Number(serves(a)) ||
 					compareTier(this.root, a, b) ||
 					compareTie(this.root, a, b),
 			);
@@ -354,7 +357,7 @@ interface Candidate extends Advertised {
 /**
  * Orders advertisements at a prefix: the most specific claim, then the better route, then a
  * local broadcast on a tie, then fewer hops. A remaining tie is left to the table's newest-first
- * order; see {@link compareRouteCandidates}.
+ * order; see {@link compareTier}.
  */
 function compareCandidates(a: Candidate, b: Candidate): number {
 	const above = (a.route.above ?? 0n) - (b.route.above ?? 0n);

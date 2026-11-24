@@ -249,8 +249,10 @@ that peer below every other available route, whatever the costs say, though
 still above a route held unavailable. New
 subscriptions go elsewhere when another route serves them, and an existing one
 moves to another route of the same stream if there is one, or else finishes on
-the draining peer. The drain is that relay's
-own state, so it still advertises the routes onward at their real cost. A
+the draining peer. The drain never changes a price: the relay still
+advertises the routes onward at their real cost. Over moq-lite 07 the claims
+it makes for them also say they drain, so its peers rank them alike; older
+wires carry only the price. A
 relay whose session to a peer draining to restart has lived past
 `backoff.healthy` redials it once, at once, which reaches a replacement serving
 beside the draining process ([handoff](/bin/relay/config#handoff)). A session

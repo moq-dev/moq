@@ -2061,22 +2061,11 @@ export function compareRoutes(a: WireRoute, b: WireRoute): number {
 }
 
 /**
- * Order eligible routes at `prefix` resolving `path` by preference, hop count, then, beneath the
- * prefix, the spread hash of each named instance. A lite-07 claim counts as one hop, to the peer
- * that sent it, and ranks by the rendezvous hash of its instance. The hashes only spread a pool
- * over a prefix's paths, as `route_order` in rs/moq-net does. Any other tie breaks by
- * {@link compareTie}.
- */
-export function compareRouteCandidates(path: Path.Valid, prefix: Path.Valid, a: WireRoute, b: WireRoute): number {
-	// The most specific claim wins outright: an exact claim shadows broader ones shown at its path.
-	const above = (a.above ?? 0n) - (b.above ?? 0n);
-	return (above < 0n ? -1 : above > 0n ? 1 : 0) || compareTier(path, { prefix, route: a }, { prefix, route: b });
-}
-
-/**
  * Order two claims of one tier resolving `path`, each filed at its `prefix`: by preference, hop
- * count, then one filed at `path` itself, then the hash of {@link compareRouteCandidates} keyed on
- * `path` whatever each claim's filing.
+ * count, then one filed at `path` itself, then, keyed on `path` whatever each claim's filing, the
+ * rendezvous hash of a lite-07 claim's instance or the spread hash of a named one. The hashes only
+ * spread a pool over a prefix's paths, as `route_order` in rs/moq-net does. Any other tie breaks by
+ * {@link compareTie}.
  */
 export function compareTier(
 	path: Path.Valid,
