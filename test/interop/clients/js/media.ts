@@ -1402,7 +1402,12 @@ try {
 					deadline: withdrawn + SWITCH_MS,
 					assertion: "live incumbent fallback plays",
 					description: `the still-live older run's picture and synchronized tone within ${SWITCH_MS}ms of the newest withdrawing`,
-					predicate: (s) => s.generation === 0 && !s.audioStalled && playsInSync(s),
+					predicate: (s) => {
+						console.error(
+							`  TMP fallback @${Date.now() % 100000} +${Date.now() - withdrawn}ms gen=${s.generation} frame=${s.frameId} vts=${s.videoTimestamp} ats=${s.audioTimestamp} stalled=${s.audioStalled} tone=${s.toneStep} want=${s.frameId === undefined ? "?" : Pattern.expectedStep(s.frameId)} bytes=${s.audioBytes} delay=${s.delay} seq=${s.seq}`,
+						);
+						return s.generation === 0 && !s.audioStalled && playsInSync(s);
+					},
 				});
 				const fallbackMs = Date.now() - withdrawn;
 				// Only lite-07 carries the incumbent's instance back; an older wire's session mints a
