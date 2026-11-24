@@ -28,8 +28,7 @@ Non-breaking findings from the same audit live in
 [m4](/quest/m4/fuzz-binary-parsers.md) (binary-parser fuzz targets).
 
 Decided 2026-11-23 (maintainer): ✅ the cut waits for a
-[safe on-demand drop](/quest/m2/on-demand-drop.md) and
-[deleting `abort_unwanted`](/quest/m2/abort-unwanted-delete.md), so 0.22 never
+safe on-demand drop and deleting `abort_unwanted`, so 0.22 never
 publishes an API the next release removes (rejected: leaving them in m3,
 cutting first and deleting in the next breaking release).
 
