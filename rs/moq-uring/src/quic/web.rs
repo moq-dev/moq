@@ -855,6 +855,7 @@ fn close(conn: &Connection, web: Option<&Rc<Web>>, code: u32, reason: &str) {
 					Poll::Pending => {
 						ready!(deadline.poll(waiter));
 						tracing::debug!("peer left streams open past the grace; closing anyway");
+						conn.abandon_quiesce();
 					}
 				}
 				closing = closing.take().map(Closing::write);

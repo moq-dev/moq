@@ -707,6 +707,9 @@ impl<'a> Stream<'a> {
 		let send = stream.reset(error_code, reliable_size, at);
 		self.state.connection_blocked.swap_remove(&self.id);
 		self.state.buffered_data -= buffered - stream.pending.buffered();
+		// The reset may drop the last of what the peer had yet to acknowledge, which a quiesce
+		// waits for, as a peer's earlier STOP_SENDING has it.
+		let drained = stream.pending.is_fully_acked();
 		let waiting = stream.take_waiting();
 		// Only data below the Reliable Size is left to send
 		if !stream.is_pending() {
@@ -718,6 +721,9 @@ impl<'a> Stream<'a> {
 		}
 		if waiting {
 			self.state.waits.wake(self.id, Wait::Acked);
+		}
+		if drained {
+			self.state.waits.wake_ended();
 		}
 		// The stream ended, and a writer waiting on it learns it is closed.
 		self.state.waits.wake(self.id, Wait::End);

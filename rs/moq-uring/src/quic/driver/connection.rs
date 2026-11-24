@@ -523,6 +523,12 @@ impl Connection {
 		}
 	}
 
+	/// Give up a quiesce that is not ready, as
+	/// [`moq_quic::connection::Connection::abandon_quiesce`] does.
+	pub(crate) fn abandon_quiesce(&self) {
+		self.shared.conn.borrow_mut().abandon_quiesce();
+	}
+
 	/// Receive the next datagram.
 	#[kio::wrapper]
 	pub fn poll_recv_datagram(&self, waiter: &kio::Waiter) -> Poll<Result<Bytes, Error>> {

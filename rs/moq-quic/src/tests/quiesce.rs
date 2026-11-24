@@ -310,3 +310,78 @@ fn fails_on_loss() {
 	assert!(waiter.wakes() > 0);
 	assert_matches!(quiesce(&mut pair, server_ch, &waiter, &[]), Poll::Ready(Err(_)));
 }
+
+/// Write to each of `streams` what the client loses, so it stays unacknowledged
+fn lose_writes(pair: &mut Pair, server_ch: ConnectionHandle, streams: &[StreamId]) {
+	for &s in streams {
+		pair.server_send(server_ch, s).write(&mut &b"lost"[..]).unwrap();
+	}
+	pair.drive_server();
+	pair.client.inbound.clear();
+}
+
+/// Deliver the client's STOP_SENDING for each of `streams` to the server, and nothing else the
+/// server sends
+fn stop_from_client(pair: &mut Pair, client_ch: ConnectionHandle, streams: &[StreamId]) {
+	for &s in streams {
+		pair.client_recv(client_ch, s).stop(VarInt(1)).unwrap();
+	}
+	pair.drive_client();
+	pair.drive_server();
+	pair.client.inbound.clear();
+}
+
+/// A reset that drops the last bytes the peer has yet to acknowledge, as one does once the peer
+/// stopped the stream, wakes the wait instead of leaving it to the grace: a writer's reset after
+/// the peer's STOP_SENDING, and a peer's STOP_SENDING after the writer's reset.
+#[test]
+fn a_reset_dropping_unacked_data_wakes_the_wait() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	let (client_ch, server_ch) = pair.connect();
+	let stopped_first = open_ours(&mut pair, server_ch);
+	let reset_first = open_ours(&mut pair, server_ch);
+	lose_writes(&mut pair, server_ch, &[stopped_first, reset_first]);
+
+	let waiter = Counter::new();
+	assert!(quiesce(&mut pair, server_ch, &waiter, &[]).is_pending());
+	stop_from_client(&mut pair, client_ch, &[stopped_first]);
+	let wakes = waiter.wakes();
+	pair.server_send(server_ch, stopped_first).reset(VarInt(5)).unwrap();
+	assert!(waiter.wakes() > wakes, "the writer's reset left the wait asleep");
+	assert!(quiesce(&mut pair, server_ch, &waiter, &[]).is_pending());
+
+	pair.server_send(server_ch, reset_first).reset(VarInt(5)).unwrap();
+	let wakes = waiter.wakes();
+	stop_from_client(&mut pair, client_ch, &[reset_first]);
+	assert!(waiter.wakes() > wakes, "the peer's stop left the wait asleep");
+	assert!(quiesce(&mut pair, server_ch, &waiter, &[]).is_pending());
+	pair.drive();
+	assert_eq!(quiesce(&mut pair, server_ch, &waiter, &[]), Poll::Ready(Ok(())));
+}
+
+/// Abandoning a quiesce that is not ready resets the streams it stopped and sends the resets
+/// their writers asked for, which it held for the peer to acknowledge what was written.
+#[test]
+fn abandoning_sends_the_held_resets() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	let (client_ch, server_ch) = pair.connect();
+	let reset = open_ours(&mut pair, server_ch);
+	let open = open_ours(&mut pair, server_ch);
+	lose_writes(&mut pair, server_ch, &[reset]);
+
+	let waiter = Counter::new();
+	assert!(quiesce(&mut pair, server_ch, &waiter, &[]).is_pending());
+	pair.server_send(server_ch, reset).reset(VarInt(5)).unwrap();
+	pair.drive_server();
+	pair.client.inbound.clear();
+	assert_eq!(pair.server_conn_mut(server_ch).stats().frame_tx.reset_stream, 0);
+
+	pair.server_conn_mut(server_ch).abandon_quiesce();
+	pair.drive();
+	assert_eq!(reset_seen(&mut pair, client_ch, reset).1, Some(VarInt(5)));
+	assert_eq!(reset_seen(&mut pair, client_ch, open), (b"unread".to_vec(), Some(CODE)));
+	// Nothing is held any longer: the stream the quiesce stopped is already reset.
+	assert_eq!(pair.server_send(server_ch, open).reset(VarInt(5)), Err(send::Error::Closed));
+}

@@ -459,18 +459,29 @@ impl StreamsState {
 	}
 
 	/// The streams this endpoint sends on that a quiesce ends, except `keep` and those the
-	/// application has yet to accept, each with whether it can still be reset: not reset yet, nor
-	/// released by its application, which left it to finish. A stream stays until the peer
-	/// acknowledged its end.
-	pub(crate) fn sending(&self, keep: &[StreamId]) -> Vec<(StreamId, bool)> {
+	/// application has yet to accept. A stream stays until the peer acknowledged its end.
+	pub(crate) fn sending(&self, keep: &[StreamId]) -> Vec<StreamId> {
 		self.send
-			.iter()
-			.filter(|&(id, _)| {
+			.keys()
+			.filter(|&id| {
 				let unaccepted =
 					id.initiator() != self.side && id.index() >= self.next_reported_remote[Dir::Bi as usize];
 				!keep.contains(id) && !unaccepted
 			})
-			.map(|(&id, slot)| (id, !slot.as_ref().is_some_and(|send| send.is_reset() || send.released)))
+			.copied()
+			.collect()
+	}
+
+	/// The streams a quiesce stopped that are still to be reset, each with the quiesce's code: not
+	/// reset yet, nor released by their application, which left them to finish
+	pub(crate) fn quiesced_open(&self) -> Vec<(StreamId, VarInt)> {
+		self.send
+			.iter()
+			.filter_map(|(&id, slot)| {
+				let send = slot.as_ref()?;
+				let code = send.quiesced?;
+				(!send.is_reset() && !send.released).then_some((id, code))
+			})
 			.collect()
 	}
 
@@ -564,6 +575,10 @@ impl StreamsState {
 		let buffered = stream.pending.buffered();
 		let reset = stream.abandon_reliable();
 		self.buffered_data -= buffered - stream.pending.buffered();
+		if reset.is_some() {
+			// The reset dropped what the peer had yet to acknowledge, which a quiesce waits for.
+			self.waits.wake_ended();
+		}
 		let waiting = stream.take_waiting();
 		if !stream.is_pending() {
 			self.pending.remove(&mut stream.slot);

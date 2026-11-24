@@ -429,7 +429,10 @@ impl Session {
 				tracing::debug!(?e, "connection ended before the peer ended its streams");
 				return;
 			}
-			Err(_) => tracing::debug!("peer left streams open past the deadline; closing anyway"),
+			Err(_) => {
+				tracing::debug!("peer left streams open past the deadline; closing anyway");
+				self.conn.abandon_quiesce();
+			}
 		}
 
 		// Encode the capsule, then wrap it in an HTTP/3 DATA frame.
