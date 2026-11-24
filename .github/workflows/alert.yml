@@ -29,6 +29,7 @@ on:
     workflows:
       - apt-repo
       - Cache
+      - Central check
       - Docker
       - Interop
       - libmoq
