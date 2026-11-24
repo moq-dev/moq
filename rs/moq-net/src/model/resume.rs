@@ -1173,6 +1173,8 @@ struct Retain<'a> {
 	/// The widest budget any of the reader's groups gets.
 	widest: Duration,
 	groups_read: bool,
+	/// The reader's ranges as it asked them, by key.
+	ranges: &'a BTreeMap<u64, track::Range>,
 	/// The newest group the serving copy has.
 	edge: Option<u64>,
 	delivered: &'a Delivered,
@@ -1192,7 +1194,7 @@ impl Retain<'_> {
 	/// the mirrored range. Costs the starts naming no group, nothing once all do.
 	fn unplaced(&self) -> impl Iterator<Item = (u64, Option<u64>)> + '_ {
 		(self.window.unnamed_keys())
-			.filter_map(|key| self.mirrored.ranges.get(&key))
+			.filter_map(|key| self.ranges.get(&key))
 			.filter_map(|range| Some((range.time()?, range.end)))
 	}
 }
@@ -2601,6 +2603,7 @@ impl Reader {
 			window: &self.window,
 			widest: self.mirrored.widest(),
 			groups_read: self.groups_read,
+			ranges: &self.mirrored.ranges,
 			edge,
 			delivered,
 			out: &self.out,
@@ -11281,7 +11284,6 @@ mod test {
 				.consume()
 				.subscribe(
 					Subscription::default()
-						.with_delay(Delay::default().with_max(HOUR))
 						.with_ranges([track::Range {
 							start: crate::track::Start::Time(7),
 							end: Some(7),
@@ -11334,7 +11336,6 @@ mod test {
 			.consume()
 			.subscribe(
 				Subscription::default()
-					.with_delay(Delay::default().with_max(HOUR))
 					.with_ranges([track::Range {
 						start: crate::track::Start::Time(7),
 						end: Some(7),
@@ -11377,7 +11378,6 @@ mod test {
 			.consume()
 			.subscribe(
 				Subscription::default()
-					.with_delay(Delay::default().with_max(HOUR))
 					.with_ranges([track::Range {
 						start: crate::track::Start::Time(7),
 						end: Some(7),
@@ -11418,7 +11418,6 @@ mod test {
 		routes.serve(a.consume());
 		let from = |time, end| {
 			Subscription::default()
-				.with_delay(Delay::default().with_max(HOUR))
 				.with_ranges([track::Range {
 					start: crate::track::Start::Time(time),
 					end,

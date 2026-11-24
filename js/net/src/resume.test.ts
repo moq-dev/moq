@@ -694,9 +694,8 @@ test("an unplaced time start waits on a replaced copy", async () => {
 	const handles = sources.map((source) => source.consume());
 	const [tb, tc] = sources.map(copy);
 	for (const t of [tb, tc]) hooks.receiveTrack(t.producer);
-	const delay = { max: Duration.millis(3_600_000) };
 	front.serve(handles[0]);
-	const sub = front.consumer.track("seq").subscribe({ delay, ranges: [{ start: 7n, end: 7n }] });
+	const sub = front.consumer.track("seq").subscribe({ ranges: [{ start: 7n, end: 7n }] });
 	try {
 		await clock.advance(Duration.ZERO);
 		tb.write(8n);
@@ -742,9 +741,8 @@ test("an unplaced time start waits below its time on a replaced copy", async () 
 	const handles = sources.map((source) => source.consume());
 	const [tb, tc] = sources.map(copy);
 	for (const t of [tb, tc]) hooks.receiveTrack(t.producer);
-	const delay = { max: Duration.millis(3_600_000) };
 	front.serve(handles[0]);
-	const sub = front.consumer.track("seq").subscribe({ delay, ranges: [{ start: 7n, end: 7n }] });
+	const sub = front.consumer.track("seq").subscribe({ ranges: [{ start: 7n, end: 7n }] });
 	try {
 		await clock.advance(Duration.ZERO);
 		tb.write(8n);
@@ -786,11 +784,10 @@ test("a backfill through an inner front waits on a copy replaced before placing"
 	const handles = sources.map((source) => source.consume());
 	const [ta, tb, tc] = sources.map(copy);
 	for (const t of [ta, tb, tc]) hooks.receiveTrack(t.producer);
-	const delay = { max: Duration.millis(3_600_000) };
 	ta.write(6n);
 	ta.write(8n);
 	front.serve(handles[0]);
-	const sub = front.consumer.track("seq").subscribe({ delay, ranges: [{ start: 8n }] });
+	const sub = front.consumer.track("seq").subscribe({ ranges: [{ start: 8n }] });
 	try {
 		await clock.advance(Duration.ZERO);
 		expect(drain(sub)).toEqual([8n]);
@@ -798,7 +795,7 @@ test("a backfill through an inner front waits on a copy replaced before placing"
 		front.serve(inner.consumer);
 		await clock.advance(Duration.ZERO);
 		ta.producer.abort(new StreamError(StreamCode.SessionClosed));
-		sub.update({ delay, ranges: [{ start: 7n, end: 7n }] });
+		sub.update({ ranges: [{ start: 7n, end: 7n }] });
 		await clock.advance(Duration.ZERO);
 		tb.write(8n);
 		await clock.advance(Duration.ZERO);
