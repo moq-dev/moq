@@ -388,6 +388,13 @@ export function runGaps(runs: readonly Run[], start: bigint, end: bigint): Run[]
  * What a non-blocking group read found, which is everything the caller needs to decide what
  * to do next: no second look at the track's closed state, and no ordering rule to get wrong.
  */
+/**
+ * What a group read reports as a `drop` before the group: nothing, everything its cursor gives up,
+ * or `"budget"`, only what its budget skips, still handing out a failed group so a front's read
+ * continues it through its recovery, as a front reads its serving copy.
+ */
+export type Dispositions = boolean | "budget";
+
 export type Recv =
 	/** A group to serve. It has already left the buffer, so dropping this is dropping the group. */
 	| { kind: "group"; group: GroupConsumer }
@@ -952,9 +959,9 @@ export const hooks: {
 	 *
 	 * Synchronous so a caller can pop a group and act on it in the same turn. Park on
 	 * {@link groupChanged} when it reports `idle` or `boundary`. With `dispositions`, what
-	 * the cursor gives up is reported once as a `drop`.
+	 * the cursor gives up is reported once as a `drop`; see {@link Dispositions}.
 	 */
-	tryRecvGroup: (subscriber: Subscriber, dispositions: boolean) => Recv;
+	tryRecvGroup: (subscriber: Subscriber, dispositions: Dispositions) => Recv;
 	/**
 	 * The next run the subscriber's cursor gave up and has not reported, without taking a group.
 	 * From the first call on, the budget skips of {@link tryRecvGroup} without dispositions are

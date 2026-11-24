@@ -1786,6 +1786,39 @@ test("a skip between overlapping placements ends the read", async () => {
 	}
 });
 
+// A group the serving copy failed while buffered still comes out of a read with dispositions, to
+// continue through its recovery on the next route: a route failing is no verdict.
+test("a read with dispositions hands out a group its serving copy failed", async () => {
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	const pending = ta.producer.requests();
+	const front = new Front();
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	try {
+		ta.write(0n, 1, false).abort(new StreamError(StreamCode.SessionClosed));
+		const recv = hooks.tryRecvGroup(sub, true);
+		if (recv.kind !== "group") throw new Error(`expected group 0, got ${recv.kind}`);
+		const group = recv.group;
+		expect(group.start).toBe(0n);
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+		const next = group.readFrame();
+		tb.write(0n, 3);
+		front.serve(b.consume());
+		expect(dec.decode((await next)?.payload)).toBe("0.1");
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.2");
+		expect(await group.readFrame()).toBeUndefined();
+	} finally {
+		pending.close();
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	}
+});
+
 test("a fork continues its open group across a route failure after its parent closes", async () => {
 	const a = new BroadcastProducer();
 	const b = new BroadcastProducer();

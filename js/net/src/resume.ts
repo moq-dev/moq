@@ -55,6 +55,7 @@ import { NotFound, Retry, retry, SessionError, StreamCode, StreamError, sessionC
 import type { Consumer as GroupConsumer } from "./group.ts";
 import {
 	type Ask,
+	type Dispositions,
 	type DropRun,
 	type Expiry,
 	finalKey,
@@ -439,9 +440,9 @@ function subscribe(wire: BroadcastWire, name: string, subscription: track.Subscr
 
 /**
  * Take a copy's next group, in sequence or arrival order. With `dispositions`, a run the copy gives
- * up on the way, such as a group its budget expired, comes back first, as a direct reader's does.
+ * up on the way comes back first; see {@link Dispositions}.
  */
-function take(copy: Copy, ordered: boolean, floor?: bigint, dispositions = false): Recv {
+function take(copy: Copy, ordered: boolean, floor?: bigint, dispositions: Dispositions = false): Recv {
 	return ordered ? hooks.tryNextGroup(copy.sub, floor) : hooks.tryRecvGroup(copy.sub, dispositions);
 }
 
@@ -1683,12 +1684,13 @@ class Reader implements ResumeSource {
 	}
 
 	// Take `copy`'s next group past the newest handed out. Under `dispositions`, the serving copy
-	// returns first what it gives up on the way, which is queued, so a publisher hears of it before
-	// the group, as from a direct reader; only the serving copy's verdicts count.
+	// returns first what its budget skips on the way, which is queued, so a publisher hears of it
+	// before the group, as from a direct reader; only the serving copy's verdicts count. A failed
+	// group still comes out, to continue through its recovery.
 	#take(copy: Copy, ordered: boolean, dispositions: boolean): Recv {
 		const newest = this.#newest === undefined ? undefined : this.#newest + 1n;
 		const serving = dispositions ? this.#serving() : undefined;
-		const recv = take(copy, ordered, newest, copy === serving);
+		const recv = take(copy, ordered, newest, copy === serving && "budget");
 		if (recv.kind === "drop" && serving) this.#queueDrop(serving, recv);
 		return recv;
 	}

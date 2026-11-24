@@ -770,8 +770,9 @@ async function servedSubscription(
 		version?: Version;
 		maxDatagramSize?: number;
 		// Answer the subscription with a front's broadcast, as an application forwarding a
-		// routed one does, so the track reads through the front's serving route.
-		routed?: boolean;
+		// routed one does, so the track reads through the front's serving route. `"nested"` serves
+		// that front from another front, so its route copy is a front's track too.
+		routed?: boolean | "nested";
 		// Groups the track holds before the SUBSCRIBE arrives, stamped by sequence.
 		prefill?: bigint[];
 		// Runs the track's source gave up before the SUBSCRIBE arrives, as a relay's copy records.
@@ -797,7 +798,11 @@ async function servedSubscription(
 	if (options.routed) {
 		broadcast = new BroadcastProducer();
 		const front = new Front();
-		front.serve(broadcast.consume());
+		if (options.routed === "nested") {
+			const inner = new Front();
+			inner.serve(broadcast.consume());
+			front.serve(inner.consumer);
+		} else front.serve(broadcast.consume());
 		const dynamic = origin.claim(Path.from("test"));
 		void (async () => {
 			for await (const request of dynamic.requested()) request.serve(front.consumer);
@@ -3551,8 +3556,9 @@ test("runProbe rounds a fractional smoothedRtt instead of killing the stream", a
 // of the rest: they lie past a group its budget skipped, which the subscriber is not owed. One lowering
 // its start asks for them, so they are named then, on a front too, whose copies reported them once
 // already. Mirrors the Rust `a_join_names_no_gap_past_a_skipped_group`.
-for (const routed of [false, true]) {
-	test(`lite draft-06: a join names no gap past a skipped group${routed ? " on a front" : ""}`, async () => {
+for (const routed of [false, true, "nested"] as const) {
+	const on = routed === "nested" ? " on a front of a front" : routed ? " on a front" : "";
+	test(`lite draft-06: a join names no gap past a skipped group${on}`, async () => {
 		const keys = Array.from({ length: 50 }, (_, i) => BigInt(i * 20));
 		const sub = await servedSubscription({
 			version: Version.DRAFT_06,
