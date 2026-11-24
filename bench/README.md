@@ -976,10 +976,11 @@ The Instructions workflow counts each deterministic bench's instructions every
 night on `main`, under stock Valgrind on a hosted runner, through
 [rust2-bench](https://github.com/kixel-ai/rust2/tree/main/bench/runner). Each
 benchmark runs alone in its own Valgrind process, so a change of a few percent
-shows without the paired comparison's rounds. Some benches still read the wall
-clock, so their counts move with the host's load, by up to 32% when its cores
-are oversubscribed
-([quest](/quest/m9/repeatable-instruction-counts.md)). It does not see
+shows without the paired comparison's rounds. Some counts still move
+between runs of the same code: some benches read the wall clock and follow the
+host's load, by up to 32%, and some shift with the checkout's path
+([quest](/quest/m9/repeatable-instruction-counts.md)). CI counts one benchmark
+at a time (`--jobs 1`), so a bisect step counts under the nightly's load. It does not see
 syscalls, I/O, contention, or caches, and CodSpeed's Criterion, which counts
 them, skips `iter_custom` benches, so `sh/rs/instructions.sh` selects only
 single-threaded targets without I/O, and Nightly keeps measuring every bench.
@@ -990,8 +991,9 @@ rust2-bench sets. Nothing gates on it.
 Each count's measure names the environment it ran in, such as `instructions
 (x86_64-3059cd1d9e65)`: Valgrind's simulated CPU, glibc's tunables, and the
 Valgrind version, which rust2's flake input pins. Counts compare only within one
-fingerprint, so a local count compares with CI's only when the two match, and
-a Valgrind bump starts new series. On x86-64 Linux:
+fingerprint, and a Valgrind bump starts new series. A matching fingerprint does
+not yet reproduce CI's counts: two hosts sharing one agreed exactly on fewer
+than a quarter of the benchmarks. On x86-64 Linux:
 
 ```bash
 nix develop --command just rs instructions fingerprint
@@ -1000,8 +1002,10 @@ nix develop --command just rs instructions compare origin/main  # a table of eac
 ```
 
 Add `--benchmarks <file>`, one name a line, to build and count only those
-benchmarks' targets. `compare` builds the same targets at both commits, so
-against a base that lacks one, name benchmarks both have. It keeps each
+benchmarks' targets. `compare` selects the same packages and targets at both
+commits, so its base needs every package `sh/rs/instructions.sh` lists. It
+counts the base in another worktree, whose path alone can move a count, so
+recount a change it reports in one checkout before trusting it. It keeps each
 checkout's base worktree and build under `~/.cache/rust2-bench` for the next
 compare; delete the directory, then `git worktree prune`, to reclaim them.
 
