@@ -5218,7 +5218,10 @@ export class Subscriber {
 		hooks.taking = (subscriber) => {
 			// One staleness verdict for the whole walk, as the Rust `Subscriber::taking` takes.
 			const drift = subscriber.#resume ? undefined : subscriber.#drift();
+			// A reader following route copies takes the serving copy's verdict, whose cursor judges.
+			const serving = subscriber.#resume?.servingTaking();
 			return (key) => {
+				if (serving && !serving(key)) return false;
 				if (drift) {
 					if (key < subscriber.#nextKey) return false;
 					// Stale under the current budget, it is skipped when reached or already was, which

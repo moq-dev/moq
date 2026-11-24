@@ -10,7 +10,6 @@ import { Withdrawal } from "../connection/withdrawal.ts";
 import { Counts } from "../cover.ts";
 import type * as datagram from "../datagram.ts";
 import * as DatagramStream from "../datagram_stream.ts";
-import { Runs } from "../drops.ts";
 import {
 	error,
 	NotFound,
@@ -37,7 +36,6 @@ import {
 	presented,
 	type Run,
 	runGaps,
-	sameHole,
 } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -1935,9 +1933,6 @@ export class Publisher {
 		// Wake the ranges waiting on the cursor telling of `[start, end)`; see `Waits.tell`.
 		const told = (start: bigint, end: bigint) =>
 			waits.tell(start, end, (hooks.nextHeld(track, start) ?? end) < end);
-		// Lite-07: the stale runs the cursor gave up that no started range owes but a range still
-		// waiting for its start covers; see `settleStale`. Mirrors the Rust `TrackRun::stale`.
-		const stale = new Runs<DropRun>(sameHole);
 		// Lite-07: the drops and skips given up while no range's SUBSCRIBE_START has gone out yet. A
 		// subscriber reads none before the subscription's first START. Mirrors the Rust
 		// `Start::Withholding`.
@@ -1974,28 +1969,38 @@ export class Publisher {
 			return sendStart(new SubscribeStart({ id: 0n, start: from, largest: "unknown" }));
 		};
 
-		// Lite-07: the first key from `key` past the stale runs still held: none is a group a range
-		// starts at, as a stale run below a start before lite-07 is not. Mirrors the Rust
-		// `TrackRun::pass_stale`.
-		const passStale = (key: bigint): bigint => {
-			for (let run = stale.at(key); run; run = stale.at(key)) key = run.end;
+		// Lite-07: the first key from `key` past the groups held here in the cursor's ranges that it
+		// will never hand out and the wire was not told of, such as a stale run past the publisher's max
+		// age no started range owed: none is a group a range starts at, as a stale run below a start is
+		// not. Mirrors the Rust `TrackRun::pass_given_up`.
+		const passGivenUp = (key: bigint): bigint => {
+			const taking = hooks.taking(track);
+			while (
+				!record?.reportAt(key) &&
+				hooks.nextHeld(track, key) === key &&
+				hooks.nextInRange(track, key) === key &&
+				!taking(key)
+			)
+				key++;
 			return key;
 		};
 
 		// Lite-07: the first group from `from` before `end` the cursor served or dropped, or what that
 		// waits on: the cursor reaching the next group held here in its ranges, or a group held at
-		// all. It passes the keys the cursor told start none, the stale runs still held, and those no
-		// group held here starts at, which a group arriving later may take: the source's feed
-		// accounts for that. A walk reaching `end` waits there, or at a key it passed that a group may
-		// still take. Mirrors the Rust `TrackRun::first_group`.
+		// all. It passes the keys the cursor told start none, the groups it will never hand out that
+		// the wire was not told of, as a stale run past the publisher's max age that no started range
+		// owed, and those no group held here starts at, which a group arriving later may take: the
+		// source's feed accounts for that. A walk reaching `end` waits there, or at a key it passed
+		// that a group may still take. Mirrors the Rust `TrackRun::first_group`.
 		const firstGroup = (from: bigint, end: bigint | undefined): bigint | Wait => {
+			// The cursor's staleness verdict, taken once for the whole walk.
+			let taking: ((key: bigint) => boolean) | undefined;
 			let at = from;
 			// The first key passed with no group held there, where one arriving changes the answer.
 			let gap: bigint | undefined;
 			// A group held anywhere from the gap on wakes it, the one told at `at` included.
 			const wait = (wait: Wait): Wait => (gap === undefined ? wait : { held: gap });
 			for (;;) {
-				at = passStale(at);
 				// A group past the range's end is not its start, whatever a sibling was told there.
 				if (end !== undefined && at >= end) return wait({ held: at });
 				const report = record?.reportAt(at);
@@ -2011,11 +2016,17 @@ export class Publisher {
 					at = next;
 					continue;
 				}
-				// The cursor tells of each group held in its ranges, so this waits for it to.
+				// The cursor tells of each group held in its ranges it may still hand out, so this waits
+				// for it to.
 				const covered = hooks.nextInRange(track, at);
 				if (covered === undefined) return wait({ held: at });
-				if (covered === at) return wait({ told: at });
-				at = covered;
+				if (covered !== at) {
+					at = covered;
+					continue;
+				}
+				taking ??= hooks.taking(track);
+				if (taking(at)) return wait({ told: at });
+				at++;
 			}
 		};
 
@@ -2034,7 +2045,9 @@ export class Publisher {
 			if (source.upstream && source.oldest !== undefined) return max(from, source.oldest);
 			if (source.feed === "pending" && !finished) return "track";
 			const feed =
-				source.feed === "pending" || source.feed === undefined ? undefined : passStale(max(from, source.feed));
+				source.feed === "pending" || source.feed === undefined
+					? undefined
+					: passGivenUp(max(from, source.feed));
 			if (source.upstream && feed !== undefined) return feed;
 			const first = firstGroup(from, end);
 			if (typeof first === "bigint") return feed === undefined ? first : min(feed, first);
@@ -2043,9 +2056,8 @@ export class Publisher {
 		};
 
 		// Lite-07: the keys each started range owes, from where its SUBSCRIBE_START placed it to its
-		// end, and those a range still waiting for its start may come to owe. Mirrors the Rust
-		// `TrackRun::owed`.
-		const owedRuns = (): { owed: Run[]; pending: Run[] } => {
+		// end. Mirrors the Rust `TrackRun::owed`.
+		const owedRuns = (): Run[] => {
 			const starts = [...answers.started()].filter((entry): entry is [bigint, bigint] => entry[1] !== undefined);
 			const owed: Run[] = [];
 			const resolution = hooks.servingResolvedKeys(
@@ -2056,49 +2068,31 @@ export class Publisher {
 				const range = resolution[index];
 				if (range) insertRun(owed, start, range.end ?? UNBOUNDED);
 			}
-			const pending: Run[] = [];
-			const waiting = [...answers.waitingAll()].map(([id]) => id).filter((id) => controls.holds(id));
-			// One not resolved yet may cover any key.
-			for (const range of hooks.servingResolvedKeys(track, waiting))
-				insertRun(pending, range?.start ?? 0n, range?.end ?? UNBOUNDED);
-			return { owed, pending };
+			return owed;
 		};
 
-		// Lite-07: the stale runs held in `stale` that a started range owes, from its SUBSCRIBE_START
-		// on, for the caller to name. Each part a range still waiting for its start covers stays
-		// held; any other is forgotten, never named, so a wider budget may still serve it, as a
-		// stale run below a start before lite-07 is. Mirrors the Rust `TrackRun::settle_stale`.
+		// Lite-07: the parts of the stale `run` the cursor just gave up that a started range owes, from
+		// its SUBSCRIBE_START on, for the caller to name. Any other part is forgotten, never named, so
+		// a wider budget may still serve it, as a stale run below a start before lite-07 is: a range
+		// answered later that owes it waits out its grace for it. Mirrors the Rust
+		// `TrackRun::settle_stale`.
 		//
-		// A `fresh` run the cursor just gave up is settled too. With every range started, its part past
-		// every key a started range covers but does not owe is owed whole, since the cursor gives up
-		// only keys in its ranges: only the rest resolves every range. Mirrors the Rust
-		// `TrackRun::settle_given_up`.
-		const settleStale = (fresh?: DropRun): DropRun[] => {
-			let whole: DropRun | undefined;
-			if (fresh) {
-				let split = fresh.end;
-				if (!answers.anyWaiting) {
-					answers.place((ids) => hooks.servingResolvedKeys(track, ids));
-					split = min(max(fresh.start, answers.unowedEnd), fresh.end);
-				}
-				if (split > fresh.start) stale.set(fresh.start, split, fresh);
-				if (fresh.end > split) whole = { ...fresh, start: split, end: fresh.end };
+		// With every range started, its part past every key a started range covers but does not owe
+		// is owed whole, since the cursor gives up only keys in its ranges: only the rest resolves
+		// every range. Mirrors the Rust `TrackRun::settle_given_up`.
+		const settleStale = (run: DropRun): DropRun[] => {
+			let split = run.end;
+			if (!answers.anyWaiting) {
+				answers.place((ids) => hooks.servingResolvedKeys(track, ids));
+				split = min(max(run.start, answers.unowedEnd), run.end);
 			}
 			const named: DropRun[] = [];
-			if (stale.size > 0) {
-				const { owed, pending } = owedRuns();
-				const runs = [...stale.all];
-				stale.clear(runs);
-				for (const run of runs) {
-					for (const part of coveredRuns(owed, run.start, run.end)) named.push({ ...run, ...part });
-					for (const gap of runGaps(owed, run.start, run.end)) {
-						for (const part of coveredRuns(pending, gap.start, gap.end))
-							stale.set(part.start, part.end, run);
-						for (const rest of runGaps(pending, gap.start, gap.end)) record?.untell(rest.start, rest.end);
-					}
-				}
+			if (split > run.start) {
+				const owed = owedRuns();
+				for (const part of coveredRuns(owed, run.start, split)) named.push({ ...run, ...part });
+				for (const gap of runGaps(owed, run.start, split)) record?.untell(gap.start, gap.end);
 			}
-			if (whole) named.push(whole);
+			if (run.end > split) named.push({ ...run, start: split, end: run.end });
 			return named;
 		};
 
@@ -2124,7 +2118,6 @@ export class Publisher {
 				: waits.take(whole, hooks.takePlaced(track));
 			const held = ids.filter((id) => answers.waiting(id) !== undefined && controls.holds(id));
 			const resolution = hooks.servingResolvedKeys(track, held);
-			let reported = false;
 			for (const [index, id] of held.entries()) {
 				// Or one taken while an earlier start went out.
 				if (!controls.holds(id)) continue;
@@ -2136,6 +2129,10 @@ export class Publisher {
 					continue;
 				}
 				const range = resolution[index];
+				// Unlike Rust, which floors a lite-07 cursor at the lowest start its ranges name and so
+				// answers a time start waiting at or below that floor from the floor, nothing floors
+				// this cursor (the ranges cap it): a group holding the time may still be read, so the
+				// range waits to be placed, which a group arriving or a copy's upstream answer does.
 				if (!range && !finished) {
 					waits.park(id, "placed");
 					continue;
@@ -2163,10 +2160,6 @@ export class Publisher {
 					start = range.end !== undefined && range.end <= placed ? undefined : placed;
 				}
 				if (!(await sendStart(new SubscribeStart({ id, start, largest }), range))) return false;
-				reported = true;
-			}
-			if (reported) {
-				for (const run of settleStale()) if (!(await forward(run.start, run.end, run))) return false;
 			}
 			return true;
 		};
@@ -2386,8 +2379,6 @@ export class Publisher {
 									answers.retire(id);
 									waits.remove(id);
 								}
-								// Retiring makes no stale run owed, so this names none.
-								settleStale();
 								for (const [id, range] of control.applied.added) {
 									answers.ask(id, asked(range));
 									waits.wake(id);
@@ -2517,7 +2508,7 @@ export class Publisher {
 							};
 							// Only the groups inside the ranges are owed, and on lite-07 a range owes
 							// none below where its own start placed it.
-							const owed = perRange ? owedRuns().owed : undefined;
+							const owed = perRange ? owedRuns() : undefined;
 							for (const run of hooks.servingRuns(track, from, boundary())) {
 								const parts = owed ? coveredRuns(owed, run.start, run.end) : [run];
 								for (const part of parts)

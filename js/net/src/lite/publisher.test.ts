@@ -1039,9 +1039,6 @@ test("lite-07 a range starts at a group arriving below the first held", async ()
 	}
 });
 
-// A bounded range whose own keys are all accounted for is answered as it would be alone, while an
-// open sibling still waits for a group. Mirrors the Rust
-// `lite07_a_bounded_range_is_answered_beside_an_open_one`.
 // A bounded range whose first held group lies past its end waits for a group arriving below that,
 // even once a sibling has been served that group. Mirrors the Rust
 // `lite07_a_bounded_range_waits_past_a_group_a_sibling_was_served`.
@@ -1067,6 +1064,9 @@ test.each([[false], [true]])(
 	},
 );
 
+// A bounded range whose own keys are all accounted for is answered as it would be alone, while an
+// open sibling still waits for a group. Mirrors the Rust
+// `lite07_a_bounded_range_is_answered_beside_an_open_one`.
 test.each([[false], [true]])("lite-07 a bounded range is answered beside an open one (sibling %p)", async (sibling) => {
 	const version = Version.DRAFT_07;
 	const ranges: Subscribe["ranges"] = [{ start: { absolute: 5n }, end: { absolute: 6n } }];
@@ -1276,6 +1276,39 @@ async function drops(reader: Reader, version: Version): Promise<[bigint, bigint]
 		if ("drop" in resp) ranges.push([resp.drop.start, resp.drop.end]);
 	}
 }
+
+// A range asking for history past the publisher's max age starts past the groups that expired, which
+// are never named, rather than wait on them. Mirrors the Rust
+// `lite07_a_history_range_past_the_publisher_max_age_starts`.
+test.each([[false], [true]])(
+	"lite draft-07: a history range past the publisher max age starts (routed %p)",
+	async (routed) => {
+		const version = Version.DRAFT_07;
+		const clock = new Manual();
+		const installed = clock.install();
+		const sub = await servedSubscription({
+			version,
+			routed,
+			maxAge: Duration.millis(500),
+			prefill: [0n, 1000n, 2000n, 3000n, 4000n],
+			ranges: [{ start: { absolute: 0n } }],
+		});
+		try {
+			const resp = await decodeSubscribeResponse(sub.client.reader, version);
+			if (!("start" in resp)) throw new Error("expected SUBSCRIBE_START");
+			expect(resp.start.start).toBe(3000n);
+			expect(await sub.servedSequence()).toBe(3000n);
+			expect(await sub.servedSequence()).toBe(4000n);
+			sub.track.finish();
+			sub.track.close();
+			// Only the keys the range owes that no group took, none below its start.
+			expect(await holesToEnd(sub.client.reader)).toEqual([["drop", 3001n, 4000n]]);
+		} finally {
+			await sub.close();
+			installed.close();
+		}
+	},
+);
 
 // A cut group is dropped as soon as the publisher gives it up, and the end sweep does not
 // name it again.
@@ -2125,7 +2158,7 @@ test("lite draft-07: a placed range goes out before an older unplaced one", asyn
 
 // A relay's copy that placed one range from its upstream's answer, which also asked for the oldest
 // group held: that range starts where the copy's feed does, so it is answered only once the copy
-// knows, never at the floor delivery started from. Mirrors the Rust
+// knows, never at the read cursor's floor. Mirrors the Rust
 // `lite07_a_range_reaching_back_waits_for_the_copys_start`.
 test("lite draft-07: a range reaching back waits for the copy's start", async () => {
 	const version = Version.DRAFT_07;

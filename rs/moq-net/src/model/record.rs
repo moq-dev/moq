@@ -34,10 +34,6 @@ pub(crate) struct Record {
 	pub(super) pending: RangeMap<u64, Pending>,
 	/// Every key already reported, with how.
 	pub(super) reported: RangeMap<u64, Report>,
-	/// Stale runs given up that the wire was not told yet, nor forgotten: a lite-07 publisher's,
-	/// which a range still waiting for its start may come to owe. Never final, so no fold passes
-	/// one.
-	withheld: RangeMap<u64, Hole>,
 	/// Everything below was settled for good and folded away under pool pressure: handed
 	/// out, or reported final, so none is handed out or reported again.
 	floor: u64,
@@ -173,23 +169,6 @@ impl Record {
 		}
 	}
 
-	/// Withhold the stale run `range` given up as `hole`, until [`Self::take_withheld`].
-	pub fn withhold(&mut self, range: Range<u64>, hole: Hole) {
-		if !range.is_empty() {
-			self.withheld.insert(range, hole);
-		}
-	}
-
-	/// One past the withheld run holding `key`, if one does.
-	pub fn withheld_end(&self, key: u64) -> Option<u64> {
-		self.withheld.get_key_value(&key).map(|(run, _)| run.end)
-	}
-
-	/// Every run withheld, now no longer.
-	pub fn take_withheld(&mut self) -> RangeMap<u64, Hole> {
-		std::mem::take(&mut self.withheld)
-	}
-
 	/// Forget every report of `range`, which the wire was never told: a run given up below
 	/// where delivery starts, which a later widening may still serve.
 	pub fn untell(&mut self, range: Range<u64>) {
@@ -287,8 +266,7 @@ impl Record {
 			+ self.skipped.runs()
 			+ self.written_off.len()
 			+ self.pending.len()
-			+ self.reported.len()
-			+ self.withheld.len()) as u64
+			+ self.reported.len()) as u64
 	}
 
 	/// Whether the track left this reader a debt to pay: what its record holds back, such as
@@ -381,7 +359,7 @@ impl Record {
 			walk.folded.push(0..floor.end);
 		}
 		let mut from = floor.end.max(self.floor);
-		while let Some(start) = self.next_stretch(from) {
+		while let Some(start) = self.next_told(from) {
 			let stretch = self.final_end(start, reader, beside, retire);
 			walk.gaps.extend(&stretch.gaps);
 			if fold && !stretch.gaps.is_empty() && stretch.runs > 2 {
@@ -397,7 +375,7 @@ impl Record {
 	/// not final. Final are the groups handed out, every report, and this reader's own
 	/// verdicts: its stale skips and what `beside` gave up, which a wider budget would offer
 	/// again only while they were held. Not final are the runs given up and not reported yet,
-	/// the runs withheld, and the keys nothing settled.
+	/// and the keys nothing settled.
 	///
 	/// A reader that started above its floor, as at a sparse-key track's live edge or its
 	/// oldest group, never settles the keys below its start, so each final stretch from its
@@ -435,7 +413,7 @@ impl Record {
 				self.settle_stretch(start..stretch.end);
 				folded.push(start..stretch.end);
 			}
-			from = self.next_stretch(stretch.end.max(start + 1));
+			from = self.next_told(stretch.end.max(start + 1));
 		}
 		folded
 	}
@@ -456,18 +434,6 @@ impl Record {
 		self.skipped.forget(stretch.clone());
 		self.written_off.remove(stretch.clone());
 		self.reported.insert(stretch, Report::Settled);
-	}
-
-	/// The lowest key from `key` on a final stretch may start at: one handed out or reported,
-	/// past each withheld run, which is not final however wide its report.
-	fn next_stretch(&self, mut key: u64) -> Option<u64> {
-		loop {
-			let next = self.next_told(key)?;
-			match self.withheld.get_key_value(&next) {
-				Some((run, _)) => key = run.end,
-				None => return Some(next),
-			}
-		}
 	}
 
 	/// The lowest key from `key` on that was handed out or reported.
@@ -492,10 +458,6 @@ impl Record {
 				.next()
 				.map(|(run, _)| run.start.max(key)),
 			self.written_off.overlapping(&span).next().map(|run| run.start.max(key)),
-			self.withheld
-				.overlapping(&span)
-				.next()
-				.map(|(run, _)| run.start.max(key)),
 			self.skipped.next_from(key),
 		]
 		.into_iter()
@@ -549,9 +511,6 @@ impl Record {
 		let mut runs = 0;
 		let mut gaps = Vec::new();
 		loop {
-			if self.withheld.contains_key(&end) {
-				break;
-			}
 			let next = match self.reported.get_key_value(&end) {
 				Some((run, _)) => run.end,
 				None if self.pending.contains_key(&end) => break,
@@ -599,8 +558,7 @@ impl Record {
 			if next <= end {
 				break;
 			}
-			// A withheld run inside it stops it there.
-			end = (self.withheld.overlapping(&(end..next)).next()).map_or(next, |(run, _)| run.start);
+			end = next;
 			runs += 1;
 		}
 		Stretch { end, runs, gaps }
@@ -796,58 +754,6 @@ mod test {
 		);
 		assert!(record.told(2), "the drops below it fold");
 		assert!(!record.told(3), "the handed group stays to be told");
-	}
-
-	/// A withheld run as wide as its report is passed whole, never key by key, by a fold or a
-	/// retirement.
-	#[test]
-	fn a_wide_withheld_run_is_passed_whole() {
-		let (pool, track) = account();
-		let mut record = Record::default();
-		record.reported.insert(0..1_000_000_001, Report::Dropped);
-		record.withhold(1..1_000_000_001, Hole::stale(Duration::ZERO));
-		record.settle(|| track.clone(), &mut (), Standing::default());
-		owe(&track, pool.used());
-		let reader = Standing {
-			from: 1,
-			handed: None,
-			ranges: Some(Cover::new([0..=0, 2_000_000_000..=2_000_000_000])),
-		};
-		record.settle(|| track.clone(), &mut (), reader);
-		assert_eq!(record.withheld_end(1), Some(1_000_000_001), "still withheld");
-	}
-
-	/// A stale run withheld from the wire bills like any run, and no fold passes it: it is
-	/// not final, as the publisher may still name it.
-	#[test]
-	fn a_withheld_run_bills_and_stops_the_fold() {
-		let (pool, track) = account();
-		let mut record = Record::default();
-		record.reported.insert(0..4, Report::Dropped);
-		record.withhold(2..3, Hole::stale(Duration::ZERO));
-		record.settle(|| track.clone(), &mut (), Standing::default());
-		owe(&track, pool.used());
-		record.settle(|| track.clone(), &mut (), Standing::default());
-		assert_eq!(record.floor, 2, "the fold stops short of the withheld run");
-
-		let (pool, track) = account();
-		let mut record = Record::default();
-		record.reported.insert(0..2, Report::Dropped);
-		record.withhold(1..2, Hole::stale(Duration::ZERO));
-		// Withheld runs kept apart by reports, each billed.
-		for key in (2..1_000).step_by(2) {
-			record.reported.insert(key..key + 1, Report::Skip);
-			record.reported.insert(key + 1..key + 2, Report::Dropped);
-			record.withhold(key + 1..key + 2, Hole::stale(Duration::ZERO));
-		}
-		record.settle(|| track.clone(), &mut (), Standing::default());
-		assert_eq!(pool.used(), (1 + 998 + 500) * RUN_OVERHEAD);
-		owe(&track, pool.used());
-		record.settle(|| track.clone(), &mut (), Standing::default());
-		assert_eq!(record.floor, 1, "the fold stops short of the first");
-		for key in (1..1_000).step_by(2) {
-			assert_eq!(record.withheld_end(key), Some(key + 1), "no stretch folds over {key}");
-		}
 	}
 
 	/// A run the reader gave up beside its record, such as a drop it took from the track's drop

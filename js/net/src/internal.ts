@@ -586,6 +586,8 @@ export interface ResumeSource {
 	oldestStart(): bigint | undefined;
 	/** The lowest group the serving copy holds at or after `from`; see `hooks.nextHeld`. */
 	nextHeld(from: bigint): bigint | undefined;
+	/** Whether the serving copy may still hand out each group, by its cursor's staleness verdict; see `hooks.taking`. */
+	servingTaking(): ((key: bigint) => boolean) | undefined;
 	/** The reader's ranges placed since the last call; see `hooks.takePlaced`. */
 	takePlaced(): Set<bigint>;
 	/** Whether the serving copy knows where the live feed is; see `hooks.knowsEdge`. */

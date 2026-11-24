@@ -2200,6 +2200,14 @@ class Reader implements ResumeSource {
 		return this.#window().takePlaced();
 	}
 
+	// Whether the serving copy may still hand out each group, by its cursor's staleness verdict; see
+	// `hooks.taking`. Mirrors the Rust `resume::Subscriber::may_take`.
+	servingTaking(): ((key: bigint) => boolean) | undefined {
+		this.sync();
+		const serving = this.#serving();
+		return serving && hooks.taking(serving.sub);
+	}
+
 	// The lowest group the serving copy holds at or after `from`; see `hooks.nextHeld`.
 	nextHeld(from: bigint): bigint | undefined {
 		this.sync();

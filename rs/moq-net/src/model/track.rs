@@ -8638,7 +8638,7 @@ impl Reserved {
 
 /// Which groups a subscriber may still hand out, against the staleness verdict it held when
 /// taken; see [`Subscriber::taking`].
-pub(super) struct Taking<'a> {
+pub(crate) struct Taking<'a> {
 	sub: &'a Subscriber,
 	/// `None` while the edge is unknown, which judges nothing stale.
 	drift: Option<Drift>,
@@ -8665,7 +8665,8 @@ impl Taking<'_> {
 						}
 					}
 			}
-			Inner::Resume(..) => true,
+			// The copies' cursors judge staleness.
+			Inner::Resume(resume, _) => resume.may_take(key),
 		};
 		ahead && self.sub.next_in_range(key) == Some(key) && !record.delivered.contains(key)
 	}
@@ -12824,7 +12825,7 @@ impl Subscriber {
 
 	/// Which groups this subscriber may still hand out, judged against one staleness verdict
 	/// taken now, so a walk over many keys resolves the edge once; see [`Taking::may_take`].
-	pub(super) fn taking(&self) -> Taking<'_> {
+	pub(crate) fn taking(&self) -> Taking<'_> {
 		let drift = match &self.inner {
 			Inner::Plain(cursor) => match cursor.poll_drift(&cursor.servable, &kio::Waiter::noop()) {
 				Poll::Ready(Ok(drift)) => Some(drift),

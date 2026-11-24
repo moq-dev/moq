@@ -1494,6 +1494,15 @@ impl Subscriber {
 			.collect()
 	}
 
+	/// Whether the copy serving the reader may still hand out group `key`, by its cursor's
+	/// staleness verdict; see [`track::Taking::may_take`]. `true` with no copy ready.
+	pub(super) fn may_take(&self, key: u64) -> bool {
+		match self.reader().copies.last().map(|copy| &copy.sub) {
+			Some(Sub::Ready(sub)) => sub.taking().may_take(key),
+			_ => true,
+		}
+	}
+
 	/// The lowest group at or above `from` the reader's ranges cover; see
 	/// [`track::Subscriber::next_in_range`].
 	pub(super) fn next_in_range(&self, from: u64) -> Option<u64> {

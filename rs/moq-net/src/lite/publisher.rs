@@ -5331,7 +5331,8 @@ impl Subscription {
 	}
 }
 
-/// Where a subscription's delivery starts, which SUBSCRIBE_START reports.
+/// Where a subscription stands with SUBSCRIBE_START: lite-05/06's one start, or whether lite-07's
+/// first went out.
 enum Start {
 	/// Lite-03/04 send no SUBSCRIBE_START, and so no drops either.
 	Legacy,
@@ -5417,7 +5418,7 @@ struct TrackRun {
 	// A SUBSCRIBE_UPDATE this track cannot serve, such as a time anchor on a track the
 	// peer was told is untimed, which ends the subscription.
 	refused: Option<Error>,
-	// Where delivery starts, which SUBSCRIBE_START reports.
+	// Where the subscription stands with SUBSCRIBE_START.
 	start: Start,
 	end_sent: bool,
 	// Lite-05/06: the track's end, declared while the start was still unresolved. Their
@@ -6066,10 +6067,6 @@ impl TrackRun {
 			self.answers.retire(*id);
 			self.waits.remove(*id);
 		}
-		// Retiring makes no stale run owed, so this names none.
-		let withheld = self.track.record_mut().take_withheld();
-		let owed = self.settle_stale(withheld);
-		debug_assert!(owed.is_empty(), "a retired range owes nothing");
 		for (id, range) in pins.into_iter().chain(retuned) {
 			self.requested.insert(id, range, placed.get(&id).copied());
 			// Replaced in place, it may land elsewhere.
@@ -6258,12 +6255,6 @@ impl TrackRun {
 			self.buffer_start(lite::SubscribeStart { id, start, largest }, resolved, writer)?;
 			reported = true;
 		}
-		if reported {
-			let withheld = self.track.record_mut().take_withheld();
-			for (groups, hole) in self.settle_stale(withheld) {
-				self.forward_range(groups, &hole, writer)?;
-			}
-		}
 		Ok(reported)
 	}
 
@@ -6332,7 +6323,7 @@ impl TrackRun {
 			return Ok(from.max(answered));
 		}
 		let feed = match source.feed {
-			Poll::Ready(feed) => feed.map(|feed| self.pass_stale(from.max(feed))),
+			Poll::Ready(feed) => feed.map(|feed| self.pass_given_up(from.max(feed))),
 			Poll::Pending if finished => None,
 			Poll::Pending => return Err(Wait::Track),
 		};
@@ -6349,27 +6340,36 @@ impl TrackRun {
 		}
 	}
 
-	/// The first key from `key` past the stale runs still held: none is a group a range starts
-	/// at, as a stale run below a start before lite-07 is not.
-	fn pass_stale(&self, mut key: u64) -> u64 {
-		while let Some(end) = self.track.record().withheld_end(key) {
-			key = end;
+	/// The first key from `key` past the groups held here in the cursor's ranges that it will
+	/// never hand out and the wire was not told of, such as a stale run past the publisher's max
+	/// age no started range owed: none is a group a range starts at, as a stale run below a
+	/// start is not.
+	fn pass_given_up(&self, mut key: u64) -> u64 {
+		let taking = self.track.taking();
+		while self.track.record().report_at(key).is_none()
+			&& self.track.next_held(key) == Some(key)
+			&& self.track.next_in_range(key) == Some(key)
+			&& !taking.may_take(key)
+		{
+			key += 1;
 		}
 		key
 	}
 
 	/// The first group from `from` before `end` the cursor served or dropped, or what that
 	/// waits on: the cursor reaching the next group held here in its ranges, or a group held at
-	/// all. It passes the keys the cursor told start none, the stale runs still withheld, and
-	/// those no group held here starts at, which a group arriving later may take: the source's
-	/// feed accounts for that (see [`Self::first_start`]). A walk reaching `end` waits there,
-	/// or at a key it passed that a group may still take.
+	/// all. It passes the keys the cursor told start none, the groups it will never hand out
+	/// that the wire was not told of, as a stale run past the publisher's max age that no
+	/// started range owed, and those no group held here starts at, which a group arriving later
+	/// may take: the source's feed accounts for that (see [`Self::first_start`]). A walk
+	/// reaching `end` waits there, or at a key it passed that a group may still take.
 	fn first_group(&mut self, from: u64, end: Option<u64>) -> Result<u64, Wait> {
+		// The cursor's staleness verdict, taken once for the whole walk.
+		let mut taking = None;
 		let mut at = from;
 		// The first key passed with no group held there, where one arriving changes the answer.
 		let mut gap = None;
 		let wait = loop {
-			at = self.pass_stale(at);
 			// A group past the range's end is not its start, whatever a sibling was told there.
 			if end.is_some_and(|end| at >= end) {
 				break Wait::Held(at);
@@ -6383,9 +6383,15 @@ impl TrackRun {
 						gap.get_or_insert(at);
 						at = next;
 					}
-					// The cursor tells of each group held in its ranges, so this waits for it to.
+					// The cursor tells of each group held in its ranges it may still hand out, so
+					// this waits for it to.
 					Some(_) => match self.track.next_in_range(at) {
-						Some(next) if next == at => break Wait::Told(at),
+						Some(next) if next == at => {
+							match taking.get_or_insert_with(|| self.track.taking()).may_take(at) {
+								true => break Wait::Told(at),
+								false => at += 1,
+							}
+						}
 						Some(next) => at = next,
 						None => break Wait::Held(at),
 					},
@@ -6815,33 +6821,19 @@ impl TrackRun {
 		Ok(())
 	}
 
-	/// Lite-07: the parts of the stale `runs` the cursor gave up that a started range owes, from
-	/// its SUBSCRIBE_START on, for the caller to name. Each part a range still waiting for its
-	/// start covers stays withheld in the reader's record, billed to the pool; any other is
-	/// forgotten, never named, so a wider budget may still serve it, as a stale run below a
-	/// start before lite-07 is.
-	fn settle_stale(&mut self, runs: impl IntoIterator<Item = (Range<u64>, Hole)>) -> Vec<(Range<u64>, Hole)> {
-		let mut runs = runs.into_iter().peekable();
-		if runs.peek().is_none() {
-			return Vec::new();
+	/// Lite-07: the parts of the stale `run` the cursor gave up that a started range owes, from
+	/// its SUBSCRIBE_START on, for the caller to name. Any other part is forgotten, never named,
+	/// so a wider budget may still serve it, as a stale run below a start before lite-07 is: a
+	/// range answered later that owes it waits out its grace for it.
+	fn settle_stale(&mut self, run: Range<u64>, hole: Hole) -> Vec<(Range<u64>, Hole)> {
+		let owed = self.owed();
+		for gap in owed.gaps(&run) {
+			self.track.record_mut().untell(gap);
 		}
-		let (owed, pending) = self.owed();
-		let mut named = Vec::new();
-		for (run, hole) in runs {
-			for part in owed.overlapping(&run) {
-				named.push((part.start.max(run.start)..part.end.min(run.end), hole.clone()));
-			}
-			for gap in owed.gaps(&run) {
-				for part in pending.overlapping(&gap) {
-					let held = part.start.max(gap.start)..part.end.min(gap.end);
-					self.track.record_mut().withhold(held, hole.clone());
-				}
-				for rest in pending.gaps(&gap) {
-					self.track.record_mut().untell(rest);
-				}
-			}
-		}
-		named
+		let parts = owed
+			.overlapping(&run)
+			.map(|part| part.start.max(run.start)..part.end.min(run.end));
+		parts.map(|part| (part, hole.clone())).collect()
 	}
 
 	/// Lite-07: [`Self::settle_stale`] for a stale `run` the cursor just gave up. With every
@@ -6858,19 +6850,19 @@ impl TrackRun {
 		let below = run.start..split;
 		let mut named = match below.is_empty() {
 			true => Vec::new(),
-			false => self.settle_stale([(below, hole.clone())]),
+			false => self.settle_stale(below, hole.clone()),
 		};
 		let whole = split..run.end;
 		if !whole.is_empty() {
-			debug_assert!(self.owed().0.gaps(&whole).next().is_none(), "{whole:?} is owed whole");
+			debug_assert!(self.owed().gaps(&whole).next().is_none(), "{whole:?} is owed whole");
 			named.push((whole, hole));
 		}
 		named
 	}
 
 	/// Lite-07: the keys each started range owes, from where its SUBSCRIBE_START placed it to
-	/// its end, and those a range still waiting for its start may come to owe.
-	fn owed(&mut self) -> (RangeSet<u64>, RangeSet<u64>) {
+	/// its end.
+	fn owed(&mut self) -> RangeSet<u64> {
 		let started: Vec<(u64, u64)> = (self.answers.started())
 			.filter_map(|(id, start)| start.map(|start| (id, start)))
 			.collect();
@@ -6882,17 +6874,7 @@ impl TrackRun {
 				owed.insert(start..end);
 			}
 		}
-		let mut pending = RangeSet::new();
-		let resolved = self.track.resolved_keys(self.answers.waiting_all().map(|(id, _)| id));
-		for resolved in resolved {
-			// One not resolved yet may cover any key.
-			let (start, end) = resolved.map_or((0, None), |resolved| (resolved.start, resolved.end));
-			let end = end.unwrap_or(u64::MAX);
-			if end > start {
-				pending.insert(start..end);
-			}
-		}
-		(owed, pending)
+		owed
 	}
 
 	/// Name every key from the start to the end that this subscription never got. The
@@ -6927,7 +6909,7 @@ impl TrackRun {
 		let hole = Hole::drop(StreamError::NotFound);
 		let runs = self.track.runs_in_range(start, end);
 		// Lite-07: below where its own start placed it, a range is owed nothing.
-		let owed = self.start.per_range().then(|| self.owed().0);
+		let owed = self.start.per_range().then(|| self.owed());
 		let mut dropped = false;
 		for run in runs {
 			let Some(owed) = &owed else {
@@ -10289,10 +10271,10 @@ mod serve_group_test {
 
 	/// An update before SUBSCRIBE_START that leaves only a time start a lite-07 copy can't
 	/// place yet floors the cursor at that time, so the group containing it is out of range
-	/// whichever it is: the range starts where delivery does, reported rather than left
-	/// without a start.
+	/// whichever it is: the range starts at the first group from the floor, answered rather
+	/// than left without a start.
 	#[kio::test]
-	async fn lite07_a_floored_time_start_reports_where_delivery_starts() {
+	async fn lite07_a_floored_time_start_starts_at_the_first_group_from_the_floor() {
 		// Open, and through group 1000, which the copy already holds.
 		for end in [None, Some(lite::Anchor::Time(1000))] {
 			let mut track = track::Producer::new(
@@ -10320,7 +10302,7 @@ mod serve_group_test {
 		}
 	}
 
-	/// As [`lite07_a_floored_time_start_reports_where_delivery_starts`], on a relay's front
+	/// As [`lite07_a_floored_time_start_starts_at_the_first_group_from_the_floor`], on a relay's front
 	/// whose copy already resolved a later range: that range is answered with the group it
 	/// resolved to at once, whatever the others still wait on.
 	#[kio::test]
@@ -10617,7 +10599,7 @@ mod serve_group_test {
 
 	/// A relay's copy that placed one range from its upstream's answer, which also asked for
 	/// the oldest group held: that range starts where the copy's feed does, so it is answered
-	/// only once the copy knows, never at the floor delivery started from.
+	/// only once the copy knows, never at the read cursor's floor.
 	#[kio::test]
 	async fn lite07_a_range_reaching_back_waits_for_the_copys_start() {
 		let mut track = track::Producer::new(
@@ -12105,6 +12087,49 @@ mod serve_group_test {
 			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 			assert!(run.start.started(), "{version}");
 			assert_eq!(drops(&mut writer, &log, version).await, [], "{version}");
+		}
+	}
+
+	/// A lite-07 range asking for history past the publisher's max age, as a SUBSCRIBE asks it,
+	/// plainly and on a relay's front.
+	#[kio::test]
+	async fn lite07_a_history_range_past_the_publisher_max_age_starts() {
+		for routed in [false, true] {
+			let info = crate::track::Info::timed().with_max_age(Duration::from_millis(500));
+			let ranges = [lite::Range::span(Some(0), 0, None, None)];
+			let bounds = Bounds::new(&ranges, None);
+			let subscription = track::Subscription::default().with_ranges(bounds.ranges.iter().copied());
+			let mut origin = track::Producer::new(Arc::new(broadcast::Info::default()), "test", info.clone());
+			let mut copy = track::Routed::new("test", info);
+			let subscriber = match routed {
+				false => {
+					origin.start_at(0).unwrap();
+					for key in 0..5 {
+						write_group(&mut origin, key, key * 1000);
+					}
+					origin.subscribe(subscription)
+				}
+				true => {
+					copy.copy.start_at(0).unwrap();
+					for key in 0..5 {
+						write_group(&mut copy.copy, key, key * 1000);
+					}
+					(copy.logical.consume())
+						.subscribe(subscription)
+						.now_or_never()
+						.unwrap()
+						.unwrap()
+				}
+			};
+			let (mut run, mut writer, log) = lite07_run(SinkSession::new(Log::default()), subscriber);
+			asked(&mut run, &bounds.ranges);
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			assert_eq!(
+				starts(&responses(&mut writer, &log).await),
+				[(0, Some(3))],
+				"routed={routed}"
+			);
+			assert_eq!(drops(&mut writer, &log, Version::Lite07).await, [], "routed={routed}");
 		}
 	}
 
