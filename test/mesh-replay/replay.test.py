@@ -9,6 +9,8 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
+import tomllib
+
 HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("replay", HERE / "replay.py")
 assert spec and spec.loader
@@ -490,10 +492,10 @@ class BuildTest(unittest.TestCase):
         run.shaper_port = {"a-b": 1, "a-c": 5}
         relay = replay.Relay.__new__(replay.Relay)
         relay.run, relay.name, relay.port, relay.internal = run, "a", 2, 3
-        for build, priced in [("old", ""), ("new", ", cost = 3")]:
-            config = relay.config(replay.Build(build, "relay", []))
-            self.assertIn(f'peer.a"{priced} }}', config.split("127.0.0.1:1/")[1], build)
-            self.assertIn('127.0.0.1:5/", token = "peer.a", cost = 4', config, build)
+        for build, priced in [("old", None), ("new", 3)]:
+            config = tomllib.loads(relay.config(replay.Build(build, "relay", [])))
+            cost = {peer["url"]: peer.get("cost") for peer in config["cluster"]["connect"]}
+            self.assertEqual(cost, {"https://127.0.0.1:1/": priced, "https://127.0.0.1:5/": 4}, build)
 
     def test_only_the_new_build_marks_a_link_upstream(self):
         run, _ = self.fake_run(None, None)
