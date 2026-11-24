@@ -5405,8 +5405,8 @@ impl Producer {
 	/// Appending says the producer will not go back, so it skips every start below the new
 	/// group that it never produced, from just past its previous append (before the first,
 	/// from the lowest group it created, or from 0 when it creates the track's first group), as
-	/// [`Self::skip_groups`] would, replacing any drop there: consecutive appends name the span between their starts. Those starts are then
-	/// final: creating one is refused. A `start` at or before a group this track holds is
+	/// [`Self::skip_groups`] would, replacing any drop there: consecutive appends name the span
+	/// between their starts. Those starts are then final: creating one is refused. A `start` at or before a group this track holds is
 	/// [`Error::TimestampMismatch`], like a rewound frame.
 	///
 	/// The same broadcast, track, and group start always name the same content, and nothing
