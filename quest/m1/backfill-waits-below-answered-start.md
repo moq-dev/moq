@@ -16,6 +16,8 @@ START lies past that group. Today they differ:
 
 ## Plan
 
+Decided 2026-11-24 (maintainer, /quest-run pick on moq-dev/moq#9438): ✅ keep this quest (rejected: drop).
+
 Found on [moq-dev/moq#9438](https://github.com/moq-dev/moq/pull/9438). Its JS
 test `an unplaced time start waits below its time on a replaced copy` reads
 group 6 and places the start, but `recvGroup` then stays pending for an hour of
