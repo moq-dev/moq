@@ -108,8 +108,17 @@ The Nightly's `Media (firefox player)` failed the `replacement` case on 11-20, 1
 [moq-dev/moq#9300](https://github.com/moq-dev/moq/pull/9300). Each time an unrelated page
 underflowed with it, so the ARM runner starved;
 [moq-dev/moq#9494](https://github.com/moq-dev/moq/pull/9494) idles the lifecycle pages through
-the section, and the [Firefox replacement](/quest/m0/interop-green/firefox-replacement.md) child
-owns the lite-06 fallback audio that remains.
+the section. Measured on that runner class
+([run 45309593159](https://github.com/moq-dev/moq/actions/runs/45309593159), 20 of 20 focused
+runs passed), the `moq-lite-06` fallback takes 719 to 1028 ms against the 1039 ms bound
+(lite-07 314 to 438 ms, moq-transport 214 to 319 ms). A lite-06 SUBSCRIBE states no lag, so the
+viewer's audio join is a live join from the oldest group with the player's 2.13 s Max Age (2 s
+past its delay, so its jitter estimator sees every arrival), and the incumbent's
+`onDemand: "retain"` audio encodes those 2.13 s of retained PCM before its first live frame.
+Decided 2026-11-23 (maintainer, [moq-dev/moq#9511](https://github.com/moq-dev/moq/pull/9511)):
+that replay is correct, since the join gets exactly what it asks for; the quest that owned the
+fallback closed on the 20 of 20 (rejected: encoding live audio before the replay; a looser
+lite-06 bound; replaying nothing).
 
 Decided 2026-11-12 (maintainer), since green scheduled Interop is this epic's goal and stale pins caused four of the last six red runs:
 

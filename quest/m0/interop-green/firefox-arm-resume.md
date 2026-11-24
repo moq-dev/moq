@@ -75,11 +75,13 @@ it at the root and measure the stop on ARM before and after. If no stop
 recurs, the relay becomes the suspect again: rerun with the relay at
 `moq_net=trace`. Loosening the bounds or retrying is not a fix.
 
+Ruled out by [moq-dev/moq#9511](https://github.com/moq-dev/moq/pull/9511)'s
+measurements: the retained-audio replay. The lifecycle player joins over `moq-lite-06`,
+with no lag limit, so each resume makes the JS fixture (`onDemand: "retain"`) encode its
+2.13 s audio Max Age ahead of the live edge. With an experiment replaying nothing for such
+a join, `rejoin reaches live` still failed once in 6 full Firefox runs on ARM, with
+the player's latest sample 401 ms old and a 1.56 s audio skip after the rejoin
+([run 45304404751](https://github.com/moq-dev/moq/actions/runs/45304404751)).
+So the page stop has another cause.
+
 Public API: none expected. Wire: none expected.
-
-## Related
-
-- [Firefox replacement](/quest/m0/interop-green/firefox-replacement.md) -
-  [moq-dev/moq#9494](https://github.com/moq-dev/moq/pull/9494) rewrites it to
-  the `moq-lite-06` fallback's audio on ARM, which also ends unanchored after
-  `skipping missing groups: track=audio`. The same page stop may explain it.
