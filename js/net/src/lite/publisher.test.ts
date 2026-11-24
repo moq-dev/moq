@@ -774,6 +774,8 @@ async function servedSubscription(
 		routed?: boolean;
 		// Groups the track holds before the SUBSCRIBE arrives, stamped by sequence.
 		prefill?: bigint[];
+		// Runs the track's source gave up before the SUBSCRIBE arrives, as a relay's copy records.
+		dropped?: [bigint, bigint][];
 		// A newer largest group the track's source reported before the SUBSCRIBE arrives.
 		reported?: bigint;
 		// Leave the track unresolved until `accept`, as an on-demand track the SUBSCRIBE beats.
@@ -812,6 +814,10 @@ async function servedSubscription(
 		const group = track.createGroup(key);
 		for (const frame of frames) group.writeFrame(textFrame(frame, Timestamp.fromMillis(Number(key))));
 		group.finish();
+	}
+	for (const [start, end] of options.dropped ?? []) {
+		if (!track) throw new Error("a pending track holds nothing to drop");
+		hooks.dropTrackGroups(track, start, end, { error: new StreamError(StreamCode.NotFound) });
 	}
 	if (options.reported !== undefined) {
 		if (!track) throw new Error("a pending track has no source to report");
@@ -3537,6 +3543,34 @@ test("runProbe rounds a fractional smoothedRtt instead of killing the stream", a
 	} finally {
 		client.close();
 		await probing;
+	}
+});
+
+// A join over a long history of gaps, as a lite-06 track keyed by timestamp carries one per group,
+// names only the gaps from the group below its start up: the older ones lie past a group its
+// budget skipped, so it reaches them only through a wider budget. Mirrors the Rust
+// `a_join_names_no_gap_past_a_skipped_group`.
+test("lite draft-06: a join names no gap past a skipped group", async () => {
+	const keys = Array.from({ length: 50 }, (_, i) => BigInt(i * 20));
+	const sub = await servedSubscription({
+		version: Version.DRAFT_06,
+		prefill: keys,
+		dropped: keys.map((key) => [key + 1n, key + 20n]),
+		maxDelay: 100,
+	});
+	try {
+		const response = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
+		if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
+		const start = response.start.start;
+		if (start === undefined) throw new Error("expected a start");
+		expect(start).toBeGreaterThan(0n);
+		const dropped = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
+		if (!("drop" in dropped)) throw new Error("expected SUBSCRIBE_DROP");
+		expect([dropped.drop.start, dropped.drop.end]).toEqual([start - 19n, start]);
+		const next = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
+		if ("drop" in next) expect(next.drop.start).toBeGreaterThan(start);
+	} finally {
+		await sub.close();
 	}
 });
 
