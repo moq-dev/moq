@@ -137,8 +137,11 @@ impl Client {
 	/// Ingest one session into `broadcast`, publishing its renditions on `catalog`.
 	///
 	/// Publishes the session's H.264 and H.265 video and AAC audio, starting on a keyframe.
-	/// Audio the stack cannot play is skipped with a warning. The session's timestamps shift
-	/// onto the catalog's clock, so several sessions can publish renditions of one broadcast.
+	/// Audio the stack cannot play is skipped with a warning. The session keeps the camera's
+	/// timestamps, counted from PLAY, and places them on the catalog's clock (see
+	/// [`Client::with_report_wait`]), which the catalog waits for. Several sessions can publish
+	/// renditions of one broadcast by sharing its catalog, but only the first places its clock: a
+	/// later session, like one on a clock fixed beforehand, keeps its timestamps and logs a warning.
 	///
 	/// Never reconnects: returns once the session ends or its timeline jumps, finishing its
 	/// tracks, or fails, aborting them, including when a request or the media stalls. The
@@ -752,9 +755,9 @@ impl Ingest {
 		Ok(None)
 	}
 
-	/// Whether a video stream has waited longer than `timeout` for a keyframe. A session waiting
-	/// for a sender report holds its keyframes, so that wait counts too.: its first since
-	/// `playing`, or its next since a loss held it.
+	/// Whether a video stream has waited longer than `timeout` for a keyframe: its first since
+	/// `playing`, or its next since a loss held it. A session waiting for a sender report holds
+	/// its keyframes, so that wait counts too.
 	fn awaiting_keyframe(&self, playing: kio::clock::Instant, timeout: std::time::Duration) -> bool {
 		self.streams.iter().flatten().any(|stream| {
 			let since = match stream.held {
