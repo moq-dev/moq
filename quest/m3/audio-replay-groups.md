@@ -19,3 +19,12 @@ is retained history or live, so a lite-06 viewer joining a retained Rust publish
 cost. Cut history at the broadcast's declared interval (the longest group of any rendition,
 which an audio-only broadcast declares as the audio's own join), and keep live audio at `join`.
 Mirror the JS test: a replay groups at the interval, the live frames after it at the join.
+
+Decided 2026-11-24 (maintainer, /quest-plan, from
+[moq-dev/moq#9552](https://github.com/moq-dev/moq/pull/9552)):
+
+- History groups at the catalog's declared `sync.interval`: ✅ declared interval (rejected: one
+  group for the whole replay, equally fast but it breaks the `sync.interval` promise HLS/DASH
+  export cuts segments on; raising stream credit, which only moves the cliff).
+- ✅ Keep this as its own m3 quest (rejected: fold into #9552, which would delay the interop fix;
+  drop), since no CI case publishes retained audio from Rust today.
