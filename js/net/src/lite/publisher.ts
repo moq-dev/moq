@@ -1989,11 +1989,12 @@ export class Publisher {
 		try {
 			for (;;) {
 				if (startKey !== undefined && skipped.length > 0) {
-					// Below the start, only the final runs reaching up to it unbroken are named: a reader
-					// filling below the start (a relay whose reader reaches lower) learns that nothing there
-					// exists. Past a stale run, a group still held, or a key nothing gave up, the subscriber
-					// reaches lower only through a wider budget, which offers the groups there again and
-					// names the runs between them as it passes. Mirrors the Rust `TrackRun::resolve`.
+					// Nothing below the start is owed. The final runs reaching up to it unbroken are named all
+					// the same, so a reader filling below the start (a relay whose reader reaches lower) learns
+					// nothing there exists. Past a stale run, a group still held, or a key nothing gave up, a
+					// final run is settled unnamed: naming those would send every gap in the track's history,
+					// as a lite-06 track keyed by timestamp holds one per group. Mirrors the Rust
+					// `TrackRun::resolve`.
 					let reach = startKey;
 					for (const range of [...skipped].sort((a, b) =>
 						a.start > b.start ? -1 : a.start < b.start ? 1 : 0,
@@ -2005,8 +2006,7 @@ export class Publisher {
 					for (const range of skipped) {
 						const below = min(range.end, reach);
 						if (range.start < below) {
-							// A stale run is untold, so a wider budget may still serve it. A final one is
-							// settled unnamed, so no update names it either.
+							// A stale run is untold, so a wider budget may still serve it.
 							if (range.stale !== undefined) record?.untell(range.start, below);
 							else record?.tell(range.start, below, reportOf(range));
 						}

@@ -6625,13 +6625,13 @@ impl TrackRun {
 			unreachable!("resolved above");
 		};
 		// The subscriber now owes itself everything from the start, so a range given up
-		// above it is named as it would have been after the start. Below it, only the final runs
-		// reaching up to it unbroken are named: a reader filling below the start (a relay whose
-		// reader reaches lower) learns that nothing there exists, as if the start lay at their
-		// bottom. Past a stale run, a group still held, or a key nothing gave up, the subscriber
-		// reaches lower only through a wider budget, which offers the groups there again and
-		// names the runs between them as it passes; naming them now would send every gap in the
-		// track's history at each join, as on a lite-06 track keyed by timestamp.
+		// above it is named as it would have been after the start. Below it, nothing is owed. The
+		// final runs reaching up to it unbroken are named all the same, so a reader filling below
+		// the start (a relay whose reader reaches lower) learns nothing there exists. Past a stale
+		// run, a group still held, or a key nothing gave up, a final run is settled unnamed, by
+		// this start and every update after it: naming those would send every gap in the track's
+		// history, as a lite-06 track keyed by timestamp holds one per group. A stale run is never
+		// named, so a wider budget may still serve it.
 		let mut reach = start;
 		for (range, hole) in skipped.iter().rev() {
 			if range.start >= reach {
