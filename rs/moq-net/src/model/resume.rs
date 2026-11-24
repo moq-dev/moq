@@ -11941,6 +11941,49 @@ mod test {
 		}
 	}
 
+	/// A front's reader retires the gaps its ranges left behind once they move, as a plain
+	/// reader does: past one per run the ranges hold, lowest first.
+	#[test]
+	fn a_front_reader_retires_the_gaps_its_ranges_left() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = history(&logical);
+		for key in (0..=50).step_by(10) {
+			write(&a, key);
+		}
+		assert_eq!(drain(&mut sub, false), [0, 10, 20, 30, 40, 50]);
+		assert_eq!(sub.delivered_runs(), 6, "every gap is still owed");
+		sub.update(Subscription::default().with_range(50..=50)).unwrap();
+		assert_eq!(sub.delivered_runs(), 2, "0 through 40, then 50");
+	}
+
+	/// A front's reader knows the live edge only once its serving copy does, and places ranges
+	/// as its publisher would only while that copy does.
+	#[test]
+	fn a_front_reader_answers_for_its_serving_copy() {
+		let noop = kio::Waiter::noop();
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let mut sub = history(&logical);
+		assert!(!sub.knows_edge(&noop), "no copy serves");
+		assert!(!sub.places_as_upstream(&noop), "no copy serves");
+
+		let a = received_copy();
+		a.await_edge();
+		routes.serve(a.consume());
+		assert!(!sub.knows_edge(&noop), "the copy's upstream has not said");
+		assert!(!sub.places_as_upstream(&noop), "the copy places ranges itself");
+		a.answer_edge();
+		assert!(sub.knows_edge(&noop));
+
+		let b = received_copy();
+		b.anchored();
+		routes.serve(b.consume());
+		assert!(sub.places_as_upstream(&noop));
+	}
+
 	/// Every live reader counts toward the demand on a new copy however many readers came
 	/// and went, and the readers list tracks the live count rather than every reader there
 	/// ever was.
