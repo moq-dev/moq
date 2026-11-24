@@ -7,15 +7,15 @@ front matching the Rust one, fixed at its cause.
 
 ## Plan
 
-Found by `MOQ_RESUME_SEED=472819650` (JS only, about 1 seed in 13), once
+Found by `MOQ_RESUME_SEED=472819650` (JS only; seeds 1 to 36 pass), once
 the stale-budget failure that hid it was fixed:
 
 ```text
 reader 0: group 11 ended after 1 frames where a failed route closed it
 ```
 
-It replays deterministically as a case in `js/net/src/resume.model.test.ts`
-`regressions`, and the same ops pass in the Rust model:
+These ops replay it deterministically as a case added to
+`js/net/src/resume.model.test.ts` `regressions`, and pass in the Rust model:
 
 ```ts
 { kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
