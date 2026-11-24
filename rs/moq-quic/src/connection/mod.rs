@@ -564,7 +564,8 @@ impl Connection {
 			let written = send.offset();
 			send.reset_at(written, code).expect("a stream still sending resets");
 		}
-		self.streams.release_quiesced_resets(&mut self.spaces[SpaceId::Data].pending);
+		self.streams
+			.release_quiesced_resets(&mut self.spaces[SpaceId::Data].pending);
 	}
 
 	/// Provide control over streams

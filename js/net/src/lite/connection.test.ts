@@ -11,12 +11,11 @@ import { hooks } from "../internal.ts";
 import { createMockTransportPair, type MockTransport, manual, settlesWithin, textFrame } from "../mock.ts";
 import { Producer } from "../origin.ts";
 import * as Path from "../path.ts";
-import { acceptBudget, Readers, Stream, Writer } from "../stream.ts";
+import { acceptBudget, Stream, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import { wireOf } from "../wire.ts";
-import { type AnnounceBroadcast, decodeAnnounceBroadcast, encodeAnnounceBroadcast } from "./announce.ts";
+import { type AnnounceBroadcast, encodeAnnounceBroadcast } from "./announce.ts";
 import { AnnounceStream } from "./announce_stream.ts";
-import { AuthError, AuthMessage, AuthOk } from "./auth.ts";
 import { Connection, probeLevel } from "./connection.ts";
 import { Fetch } from "./fetch.ts";
 import { Goaway } from "./goaway.ts";
@@ -1172,7 +1171,9 @@ function announceWriter(quic: MockTransport): { reset(): void; stop(): void } {
 				if (first && chunk?.[0] === DataType.Announce) announce = writer;
 				first = false;
 				if (stopped && writer === announce) {
-					return Promise.reject(Object.assign(new Error("stopped"), { source: "stream", streamErrorCode: 0 }));
+					return Promise.reject(
+						Object.assign(new Error("stopped"), { source: "stream", streamErrorCode: 0 }),
+					);
 				}
 				return write(chunk);
 			};

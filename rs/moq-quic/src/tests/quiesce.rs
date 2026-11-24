@@ -383,5 +383,8 @@ fn abandoning_sends_the_held_resets() {
 	assert_eq!(reset_seen(&mut pair, client_ch, reset).1, Some(VarInt(5)));
 	assert_eq!(reset_seen(&mut pair, client_ch, open), (b"unread".to_vec(), Some(CODE)));
 	// Nothing is held any longer: the stream the quiesce stopped is already reset.
-	assert_eq!(pair.server_send(server_ch, open).reset(VarInt(5)), Err(send::Error::Closed));
+	assert_eq!(
+		pair.server_send(server_ch, open).reset(VarInt(5)),
+		Err(send::Error::Closed)
+	);
 }

@@ -962,8 +962,4 @@ export class Readers {
 		if (next.done) return;
 		return new Reader(next.value, undefined, this.#version);
 	}
-
-	close() {
-		this.#reader.cancel();
-	}
 }
