@@ -6644,7 +6644,7 @@ impl TrackRun {
 		}
 		for (range, hole) in skipped.iter() {
 			let below = range.start..range.end.min(reach);
-			self.track.record_mut().untell(below);
+			self.track.untell(below);
 			self.forward_range(range.start.max(reach)..range.end, hole, writer)?;
 		}
 		// An end declared while this start was held follows it.
@@ -10741,28 +10741,54 @@ mod serve_group_test {
 	/// A join over a long history of gaps, as a lite-06 track keyed by timestamp carries one per
 	/// group, names only the gaps from the group below its start up, and an update keeping its
 	/// start names none of the rest: they lie past a group its budget skipped, which the
-	/// subscriber is not owed. One lowering its start asks for them, so they are named then.
+	/// subscriber is not owed. One lowering its start asks for them, so they are named then, on a
+	/// relay's front too, whose copies reported them once already.
 	#[kio::test]
 	async fn a_join_names_no_gap_past_a_skipped_group() {
-		for version in [Version::Lite05, Version::Lite06] {
-			let mut track = track::Producer::new(
-				Arc::new(broadcast::Info::default()),
-				"test",
-				crate::track::Info::timed(),
-			);
+		for (version, routed) in [Version::Lite05, Version::Lite06]
+			.into_iter()
+			.flat_map(|v| [(v, false), (v, true)])
+		{
+			let mut plain = None;
+			let mut front = None;
+			let track = match routed {
+				false => plain.insert(track::Producer::new(
+					Arc::new(broadcast::Info::default()),
+					"test",
+					crate::track::Info::timed(),
+				)),
+				true => {
+					&mut front
+						.insert(track::Routed::new("test", crate::track::Info::timed()))
+						.copy
+				}
+			};
 			for key in (0..1000).step_by(20) {
-				write_group(&mut track, key, key);
+				write_group(track, key, key);
 				track.drop_groups(key + 1..key + 20, crate::StreamError::NotFound);
 			}
 			let subscription = track::Subscription::default().with_max(Duration::from_millis(100));
-			let (mut run, mut writer, log) =
-				lite_run(version, SinkSession::new(Log::default()), track.subscribe(subscription));
+			let subscriber = match &front {
+				None => plain.as_ref().unwrap().subscribe(subscription),
+				Some(front) => front
+					.logical
+					.consume()
+					.subscribe(subscription)
+					.now_or_never()
+					.expect("an accepted logical track answers at once")
+					.unwrap(),
+			};
+			let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
 			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 			let start = run.start.resolved().expect("resolved");
 			let below: Vec<_> = (drops(&mut writer, &log, version).await.into_iter())
 				.filter(|(first, _)| *first < start)
 				.collect();
-			assert_eq!(below, [(start - 19, start - 1)], "{version:?}: start {start}");
+			assert_eq!(
+				below,
+				[(start - 19, start - 1)],
+				"{version:?} routed {routed}: start {start}"
+			);
 
 			let update = |start| lite::SubscribeUpdate {
 				wanted_group: None,
@@ -10775,7 +10801,11 @@ mod serve_group_test {
 			run.replace(update(None));
 			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 			let after = drops(&mut writer, &log, version).await;
-			assert_eq!(after.len(), named, "{version:?}: an update keeping the start");
+			assert_eq!(
+				after.len(),
+				named,
+				"{version:?} routed {routed}: an update keeping the start"
+			);
 
 			// One lowering the start asks for those keys, so each gap there is named then.
 			run.replace(update(Some(1)));
@@ -10784,7 +10814,7 @@ mod serve_group_test {
 			for key in (0..start - 20).step_by(20) {
 				assert!(
 					lowered.contains(&(key + 1, key + 19)),
-					"{version:?}: gap {key} after a lowered start"
+					"{version:?} routed {routed}: gap {key} after a lowered start"
 				);
 			}
 		}

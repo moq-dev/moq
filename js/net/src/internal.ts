@@ -572,6 +572,11 @@ export interface ResumeSource {
 	 * `delivered` this is, judged on the newest copy. Mirrors the Rust `Subscriber::forget_past`.
 	 */
 	forgetPast(delivered: Delivered, budget: Budget): void;
+	/**
+	 * Forget every copy's report of `[start, end)`, so the copy serving when the reader's ranges ask
+	 * for it again reports it again. Mirrors the Rust `Reader::untell`.
+	 */
+	untell(start: bigint, end: bigint): void;
 	/** Have every copy read whole groups for this reader; see `hooks.wholeGroups`. */
 	wholeGroups(frameOf: (key: bigint) => number | undefined): void;
 	/** The newest key any copy has seen. */
@@ -1088,6 +1093,8 @@ export const hooks: {
 	forgetPastBudget: (subscriber: Subscriber, delivered: Delivered, budget: Budget) => void;
 	/** Fold a route copy's record below `at`, where the reader it feeds is, which reports nothing there. */
 	fold: (subscriber: Subscriber, at: bigint) => void;
+	/** Forget what a route copy reported of `[start, end)`, which its reader's wire was never told. */
+	untell: (subscriber: Subscriber, start: bigint, end: bigint) => void;
 	/**
 	 * What a lite publisher told its wire about a subscriber's keys, kept in the
 	 * subscriber's own record. Mirrors the Rust crate-private `track::Subscriber::record_mut`.
@@ -1535,6 +1542,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	fold: () => {
+		throw new Error("track.ts not loaded");
+	},
+	untell: () => {
 		throw new Error("track.ts not loaded");
 	},
 	wire: () => {

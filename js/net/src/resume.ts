@@ -437,9 +437,12 @@ function subscribe(wire: BroadcastWire, name: string, subscription: track.Subscr
 	}
 }
 
-/** Take a copy's next group, in sequence or arrival order. */
-function take(copy: Copy, ordered: boolean, floor?: bigint): Recv {
-	return ordered ? hooks.tryNextGroup(copy.sub, floor) : hooks.tryRecvGroup(copy.sub, false);
+/**
+ * Take a copy's next group, in sequence or arrival order. With `dispositions`, a run the copy gives
+ * up on the way, such as a group its budget expired, comes back first, as a direct reader's does.
+ */
+function take(copy: Copy, ordered: boolean, floor?: bigint, dispositions = false): Recv {
+	return ordered ? hooks.tryNextGroup(copy.sub, floor) : hooks.tryRecvGroup(copy.sub, dispositions);
 }
 
 /** Where `copy` stopped offering the groups below, which only a backfill of its route reads. */
@@ -1385,7 +1388,12 @@ class Reader implements ResumeSource {
 			owing = lowest.owing;
 			const next = lowest.next;
 			if (!next) break;
-			const recv = take(next, ordered, this.#newest === undefined ? undefined : this.#newest + 1n);
+			const recv = this.#take(next, ordered, dispositions);
+			if (recv.kind === "drop") {
+				const dropped = this.#tryDrop(delivered);
+				if (dropped) return dropped;
+				continue;
+			}
 			if (recv.kind === "group") {
 				// The take may pass the offered group, such as one missing its head, for a later one
 				// the window leaves out: judge the group it got.
@@ -1422,7 +1430,12 @@ class Reader implements ResumeSource {
 					held.add(copy);
 					break;
 				}
-				const recv = take(copy, ordered, newest);
+				const recv = this.#take(copy, ordered, dispositions);
+				if (recv.kind === "drop") {
+					const dropped = this.#tryDrop(delivered);
+					if (dropped) return dropped;
+					continue;
+				}
 				if (recv.kind === "group") {
 					const key = recv.group.start;
 					const deliverable = this.#deliverable(copy, key, delivered);
@@ -1630,13 +1643,7 @@ class Reader implements ResumeSource {
 					this.#drops = removeRun(this.#drops, gap.start, gap.end);
 			}
 			for (let dropped = hooks.tryDrop(serving.sub); dropped; dropped = hooks.tryDrop(serving.sub)) {
-				// A route failing is no verdict: another route may still deliver the group, and
-				// one it failed while buffered is handed out to continue through its recovery.
-				if (routeFailed(dropped.error)) continue;
-				// A stale run the copy holds came from its upstream, which a new subscription may supersede.
-				const received =
-					dropped.stale !== undefined && hooks.staleHeld(serving.sub, dropped.start, dropped.end).length > 0;
-				this.#drops = insertDrop(this.#drops, dropped.start, dropped.end, { ...dropped, received });
+				this.#queueDrop(serving, dropped);
 			}
 		}
 		this.#drops = this.#drops.filter((run) => !delivered.covers(run.start, run.end));
@@ -1662,6 +1669,28 @@ class Reader implements ResumeSource {
 			}
 		}
 		return undefined;
+	}
+
+	// Queue a run the serving copy gave up, to report once no other copy may still deliver it.
+	#queueDrop(serving: Copy, dropped: Recv & { kind: "drop" }): void {
+		// A route failing is no verdict: another route may still deliver the group, and one it
+		// failed while buffered is handed out to continue through its recovery.
+		if (routeFailed(dropped.error)) return;
+		// A stale run the copy holds came from its upstream, which a new subscription may supersede.
+		const received =
+			dropped.stale !== undefined && hooks.staleHeld(serving.sub, dropped.start, dropped.end).length > 0;
+		this.#drops = insertDrop(this.#drops, dropped.start, dropped.end, { ...dropped, received });
+	}
+
+	// Take `copy`'s next group past the newest handed out. Under `dispositions`, the serving copy
+	// returns first what it gives up on the way, which is queued, so a publisher hears of it before
+	// the group, as from a direct reader; only the serving copy's verdicts count.
+	#take(copy: Copy, ordered: boolean, dispositions: boolean): Recv {
+		const newest = this.#newest === undefined ? undefined : this.#newest + 1n;
+		const serving = dispositions ? this.#serving() : undefined;
+		const recv = take(copy, ordered, newest, copy === serving);
+		if (recv.kind === "drop" && serving) this.#queueDrop(serving, recv);
+		return recv;
 	}
 
 	// Whether `copy`, bounded where it was replaced, ran out under that bound: its track ended, no
@@ -2130,6 +2159,10 @@ class Reader implements ResumeSource {
 
 	forgetPastBudget(delivered: Delivered): void {
 		this.forgetPast(delivered, this.#readerBudget());
+	}
+
+	untell(start: bigint, end: bigint): void {
+		for (const copy of this.#copies) hooks.untell(copy.sub, start, end);
 	}
 
 	forgetPast(delivered: Delivered, budget: Budget): void {

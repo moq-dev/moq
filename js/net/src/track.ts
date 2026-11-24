@@ -4019,8 +4019,11 @@ export class Subscriber {
 			tell: (start, end, report) => {
 				if (start < end) reported.set(start, end, { ...report, start, end });
 			},
+			// A front's copies forget it too, so ranges that later ask for it report it again.
 			untell: (start, end) => {
-				if (start < end) reported.set(start, end);
+				if (start >= end) return;
+				reported.set(start, end);
+				this.#resume?.untell(start, end);
 			},
 		};
 	}
@@ -5175,6 +5178,9 @@ export class Subscriber {
 			else subscriber.#forgetPastBudget(delivered, budget);
 		};
 		hooks.fold = (subscriber, at) => subscriber.#fold(at);
+		hooks.untell = (subscriber, start, end) => {
+			if (start < end) subscriber.#reported.set(start, end);
+		};
 		hooks.wire = (subscriber) => subscriber.#wireRecord();
 		hooks.deliveredRuns = (subscriber) => subscriber.#delivered.runs;
 		hooks.reportedRuns = (subscriber) => subscriber.#reported.size;

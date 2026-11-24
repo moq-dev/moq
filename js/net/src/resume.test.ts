@@ -4320,6 +4320,8 @@ test("a separately polled drop does not deliver its run", () => {
 	source.close();
 });
 
+// Before the group it passed for, as a direct reader of the copy reports it, so a publisher still
+// waiting to say where delivery starts hears of it first.
 test("a resumed reader reports a group its serving copy skipped past the budget", async () => {
 	const clock = new Manual();
 	const installed = install(clock);
@@ -4328,15 +4330,20 @@ test("a resumed reader reports a group its serving copy skipped past the budget"
 		const a = new BroadcastProducer();
 		const ta = copy(a);
 		front.serve(a.consume());
-		const sub = front.consumer.track("seq").subscribe(withMax({ delay: { max: Duration.millis(1_000) } }));
+		const budget = withMax({ delay: { max: Duration.millis(1_000) } });
+		const sub = front.consumer.track("seq").subscribe(budget);
+		const direct = ta.producer.subscribe(budget);
 		expect(recvDisposition(sub)).toBe("idle");
 		ta.write(0n);
 		ta.write(1n);
 		await clock.advance(Duration.nanos(2_000_000_000));
-		expect(recvDisposition(sub)).toBe(1n);
-		expect(recvDisposition(sub)).toEqual([0n, 1n, StreamCode.Old]);
-		expect(recvDisposition(sub)).toBe("idle");
+		for (const reader of [direct, sub]) {
+			expect(recvDisposition(reader)).toEqual([0n, 1n, StreamCode.Old]);
+			expect(recvDisposition(reader)).toBe(1n);
+			expect(recvDisposition(reader)).toBe("idle");
+		}
 
+		direct.close();
 		sub.close();
 		front.consumer.close();
 		a.close();
