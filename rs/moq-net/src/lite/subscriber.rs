@@ -22,7 +22,7 @@ use crate::tail::{self, Reading, Settle, Tail};
 use kio::Lock;
 
 mod fills;
-use fills::{FillAsk, RangeFills};
+use fills::{FillAsk, RangeFills, Recovery, Refusal};
 mod fit;
 pub(super) mod route_stream;
 mod routed;
@@ -6843,8 +6843,13 @@ mod tests {
 		let finished = FinishedServe {
 			serving: Some(serve_loop.serving),
 			demand: serve_loop.demand,
-			dynamic: serve_loop.dynamic.fetches_only(),
+			dynamic: serve_loop.dynamic,
 			fetches: serve_loop.fetches,
+			range_fills: RangeFills::per_run(),
+			asks: Vec::new(),
+			priority: 0,
+			probes: Default::default(),
+			placed: Default::default(),
 			closed: serve_loop.closed,
 		};
 		// A reader holds the finished copy.
@@ -12954,25 +12959,126 @@ struct TrackServeRun {
 	gate: crate::auth::Gate,
 	/// Lite-05/06: the name's datagram track, taking the datagrams its subscription carries.
 	datagrams: Option<SharedDatagrams>,
-	/// The copy once the publisher finished it, still serving fetches below its end.
+	/// The copy once the publisher finished it, still serving fills below its end.
 	finished: Option<FinishedServe>,
 }
 
-/// A copy whose publisher finished the track, which still takes a group below its end that
-/// a reader fetches, as a local [`track::Finished`] does. Its subscription is over, but a
-/// group read partway, or never delivered, continues only through a FETCH upstream, so the
-/// copy stays while anyone reads it or a fetch is in flight. A reader's miss is no fetch:
-/// the subscription's tail already settled what it owed.
+/// A copy whose publisher finished the track, which still takes a group below its end that a
+/// reader misses or fetches, as a local [`track::Finished`] does. Its subscription is over,
+/// and its tail settled only what that subscription owed: a group read partway, never
+/// delivered, or delivered and since evicted continues only through upstream, so the copy
+/// stays while anyone reads it or a fill is in flight.
 struct FinishedServe {
 	serving: Option<track::Producer>,
 	demand: track::Demand,
 	dynamic: track::Requests,
 	fetches: kio::Tasks<FillServeRun>,
+	/// Fills spanning groups, each run on a subscription of its own.
+	range_fills: RangeFills,
+	/// Lite-07: the time starts readers wait on, which the copy can't place, and the
+	/// priority they ask with, as its demand last said.
+	asks: Vec<u64>,
+	priority: i8,
+	/// Each of those asked on a subscription of its own from that time, as a live copy probes
+	/// them on its subscription, by time.
+	probes: BTreeMap<u64, Recovery>,
+	/// Where each probe's publisher started, by time, which places the readers waiting on
+	/// it, while they still do.
+	placed: BTreeMap<u64, Option<u64>>,
 	closed: Transport,
 }
 
 impl FinishedServe {
-	/// Ready once nobody reads the copy and no fetch is in flight, or the session closed.
+	/// Ask upstream for each time start readers wait on that no probe asks yet, and place
+	/// those readers once upstream said where it starts and its group is arriving. A probe
+	/// that fails before saying fails only the readers waiting on its time, with upstream's
+	/// error, as a failed FETCH fails only its fill's groups. `read` is whether anyone still
+	/// reads the copy.
+	fn probe(&mut self, serve: &TrackServe, read: bool, waiter: &kio::Waiter) -> Result<(), Error> {
+		let Some(serving) = &mut self.serving else {
+			return Ok(());
+		};
+		while let Poll::Ready(Ok(demand)) = serving.poll_subscription_changed(waiter) {
+			(self.asks, self.priority) = demand.map_or((Vec::new(), 0), |demand| (demand.asks, demand.priority));
+		}
+		let asks = &self.asks;
+		// Sorted, as the demand counts them by time: a copy's readers can wait on thousands.
+		let asked = |time: &u64| asks.binary_search(time).is_ok();
+		// A time nobody waits on any more is owed nothing.
+		let before = self.placed.len();
+		self.placed.retain(|time, _| asked(time));
+		let mut moved = self.placed.len() != before;
+		// Its readers placed or gone, a probe stays only while its group is still arriving to
+		// someone reading the copy, which ending it would cut.
+		self.probes.retain(|time, probe| {
+			let keep = asked(time) || (read && probe.reading());
+			if !keep {
+				probe.end(crate::StreamError::Cancel);
+			}
+			keep
+		});
+		for &time in asks {
+			if self.placed.contains_key(&time) || self.probes.contains_key(&time) {
+				continue;
+			}
+			// No group starts at the last key, so no range from it holds one.
+			let Some(end) = time.checked_add(1) else {
+				continue;
+			};
+			self.probes
+				.insert(time, Recovery::new(serve, serving, time..end, self.priority));
+		}
+		let mut done = Vec::new();
+		for (&time, probe) in &mut self.probes {
+			let refused = match probe.poll(waiter) {
+				Poll::Ready(refused) => Some(refused?),
+				Poll::Pending => None,
+			};
+			if asked(&time) && !self.placed.contains_key(&time) {
+				match (probe.landed(), &refused) {
+					(Some(start), _) => {
+						self.placed.insert(time, start);
+						moved = true;
+					}
+					// Its readers stop asking, so the time is asked again only for a later one.
+					(None, Some(refused)) => {
+						let err = refused.get(&time).map_or(Error::NotFound, Refusal::error);
+						tracing::debug!(track = %serve.name, time, %err, "time probe failed");
+						serving.refuse_time(time, err);
+					}
+					(None, None) => {}
+				}
+			}
+			if refused.is_some() {
+				done.push(time);
+			}
+		}
+		for time in done {
+			self.probes.remove(&time);
+		}
+		// Replacing what the subscription last reported, whose ranges are over.
+		if moved {
+			serving.time_starts(self.placed.iter().map(|(&time, &start)| (time, start)));
+		}
+		Ok(())
+	}
+
+	/// A fill spanning groups goes on a subscription of its own, which any version carries,
+	/// and a group, or a slice of one, by FETCH.
+	fn take_fill(&mut self, serve: &TrackServe, fill: track::FillGroups) {
+		let Some(serving) = &self.serving else {
+			return;
+		};
+		match spans_groups(&fill) {
+			true => self.range_fills.push(fill),
+			false => {
+				let info = FetchInfo::Known(serving.info().clone());
+				self.fetches.push(FillServeRun::new(serve.clone(), fill, info));
+			}
+		}
+	}
+
+	/// Ready once nobody reads the copy and no fill is in flight, or the session closed.
 	fn poll(&mut self, serve: &TrackServe, waiter: &kio::Waiter) -> Poll<()> {
 		loop {
 			let Some(serving) = &self.serving else {
@@ -12980,8 +13086,7 @@ impl FinishedServe {
 			};
 			match self.dynamic.poll_requested_fill(waiter) {
 				Poll::Ready(Ok(fill)) => {
-					let info = FetchInfo::Known(serving.info().clone());
-					self.fetches.push(FillServeRun::new(serve.clone(), fill, info));
+					self.take_fill(serve, fill);
 					continue;
 				}
 				// Aborted through another handle: nothing is left to serve.
@@ -12992,6 +13097,18 @@ impl FinishedServe {
 				Poll::Pending => {}
 			}
 			let _ = self.fetches.poll(waiter);
+			let read = crate::util::poll_unwanted(&mut self.demand, waiter).is_pending();
+			if let Err(err) = self.range_fills.poll(serve, serving, None, read, waiter) {
+				// A recovery's publisher broke the protocol, which closes the session.
+				lite::error::control(&mut serve.subscriber.session.clone(), err);
+			}
+			if let Err(err) = self.probe(serve, read, waiter) {
+				lite::error::control(&mut serve.subscriber.session.clone(), err);
+			}
+			let Some(serving) = &self.serving else {
+				return Poll::Ready(());
+			};
+			ServeLoop::walk_fills(serve, &mut self.range_fills, &mut self.fetches, serving);
 			// The groups it already holds stay readable, its clean end too once settled.
 			if let Poll::Ready(err) = self.closed.poll_closed(waiter) {
 				if let Some(serving) = self.serving.take() {
@@ -13000,7 +13117,7 @@ impl FinishedServe {
 				}
 				return Poll::Ready(());
 			}
-			if !self.fetches.is_empty() || crate::util::poll_unwanted(&mut self.demand, waiter).is_pending() {
+			if !self.fetches.is_empty() || !self.range_fills.is_empty() || !self.probes.is_empty() || read {
 				return Poll::Pending;
 			}
 			// No linger: a new reader asks upstream afresh rather than reading this cache, which
@@ -13421,22 +13538,39 @@ impl TrackServeRun {
 							let _ = serve_loop.serving.finish_shared();
 							// No FETCH before lite-05: nothing but the subscription fills a group.
 							if serve_loop.supports_fetch {
-								// A reader's miss in flight is settled by the tail instead, except one a
-								// stalled recovery handed to FETCH.
-								let mut fetches = serve_loop.fetches;
-								fetches.retain(|run| run.fill.is_fetch() || run.walk);
+								// Before lite-07 every run is on a subscription of its own already, which
+								// outlives this one, so its recoveries carry on as they are.
+								let per_run = !self.serve.subscriber.version.has_ranges();
 								let mut range_fills = serve_loop.range_fills;
-								for fill in range_fills.take_fetches() {
-									let info = FetchInfo::Known(serve_loop.serving.info().clone());
-									fetches.push(FillServeRun::new(self.serve.clone(), fill, info));
-								}
-								self.finished = Some(FinishedServe {
+								// The time starts readers waited on already, which the live loop saw.
+								let (asks, priority) = (serve_loop.serving.subscription())
+									.map_or((Vec::new(), 0), |demand| (demand.asks, demand.priority));
+								let mut finished = FinishedServe {
 									serving: Some(serve_loop.serving),
+									asks,
+									priority,
+									probes: Default::default(),
+									placed: Default::default(),
 									demand: serve_loop.demand,
-									dynamic: serve_loop.dynamic.fetches_only(),
-									fetches,
+									dynamic: serve_loop.dynamic,
+									fetches: serve_loop.fetches,
+									range_fills: match per_run {
+										true => std::mem::take(&mut range_fills),
+										false => RangeFills::per_run(),
+									},
 									closed: serve_loop.closed,
-								});
+								};
+								// Each fill the lite-07 subscription carried goes on its own now.
+								ServeLoop::walk_fills(
+									&self.serve,
+									&mut range_fills,
+									&mut finished.fetches,
+									finished.serving.as_ref().expect("just set"),
+								);
+								for fill in range_fills.take_held() {
+									finished.take_fill(&self.serve, fill);
+								}
+								self.finished = Some(finished);
 							}
 							if let Some(datagrams) = &mut self.datagrams {
 								datagrams.end(Ok(()));
@@ -13951,6 +14085,21 @@ impl FeedFetches {
 }
 
 impl ServeLoop {
+	/// Serve a reader's or a fetch's `fill`: through a subscription when it spans groups, by
+	/// FETCH when it is one, and before lite-05, which has neither, from the live feed.
+	fn take_fill(&mut self, serve: &TrackServe, fill: track::FillGroups) {
+		if serve.subscriber.version.has_track_stream() && spans_groups(&fill) {
+			self.range_fills.push(fill);
+		} else if self.supports_fetch {
+			let info = FetchInfo::Known(self.serving.info().clone());
+			self.fetches.push(FillServeRun::new(serve.clone(), fill, info));
+		} else {
+			// No FETCH on the wire: wait for the live feed, which a subscription arriving
+			// alongside may still be opening.
+			self.feed_fetches.push(fill, &self.serving.consume());
+		}
+	}
+
 	/// TEMPORARY MIGRATION, delete at the next version cut with `fills::Recovery::walk`: FETCH
 	/// what a recovery stalled on behind a relay of the previous release, a key at a time.
 	fn walk_fills(
@@ -13961,9 +14110,7 @@ impl ServeLoop {
 	) {
 		for fill in range_fills.take_walks() {
 			let info = FetchInfo::Known(serving.info().clone());
-			let mut run = FillServeRun::new(serve.clone(), fill, info);
-			run.walk = true;
-			fetches.push(run);
+			fetches.push(FillServeRun::new(serve.clone(), fill, info));
 		}
 	}
 
@@ -14511,7 +14658,24 @@ impl ServeLoop {
 					};
 					return Poll::Ready(ServeEnd::GiveBack(err));
 				}
-				ServeMode::Tail { settle, requested_end } => {
+				ServeMode::Tail { .. } => {
+					// A reader's miss is history the tail does not settle, such as a group the copy
+					// evicted, so it goes upstream. Before lite-07 it goes on a subscription of its
+					// own, which the finished copy takes over. Lite-07's would ride this subscription,
+					// which the publisher already ended, so it waits for the finished copy.
+					if !serve.subscriber.version.has_ranges() {
+						match self.dynamic.poll_requested_fill(waiter) {
+							Poll::Ready(Ok(fill)) => {
+								self.take_fill(serve, fill);
+								continue;
+							}
+							Poll::Ready(Err(err)) => return Poll::Ready(ServeEnd::GiveBack(err)),
+							Poll::Pending => {}
+						}
+					}
+					let ServeMode::Tail { settle, requested_end } = &mut self.mode else {
+						unreachable!()
+					};
 					// The tail waits for groups, parked ones included.
 					if let Sub::Active(active) = &mut self.sub
 						&& std::mem::take(&mut active.parked)
@@ -14539,13 +14703,14 @@ impl ServeLoop {
 						return Poll::Ready(ServeEnd::GiveBack(err));
 					}
 					Self::walk_fills(serve, &mut self.range_fills, &mut self.fetches, &self.serving);
-					// Ending drops a recovery still out, as a lite-07 track waits for them too.
+					// Ending lite-07's subscription drops a recovery still out, so its end waits for
+					// them, as a lite-07 track does. Before lite-07 the finished copy takes them over.
 					if settle
 						.poll(waiter, |tail| {
 							owed.as_ref()
 								.is_some_and(|owed| owed.iter().all(|owed| tail.covers(owed.clone())))
 						})
-						.is_ready() && !self.range_fills.recovering()
+						.is_ready() && (!serve.subscriber.version.has_ranges() || !self.range_fills.recovering())
 					{
 						return Poll::Ready(ServeEnd::Finished);
 					}
@@ -14608,26 +14773,7 @@ impl ServeLoop {
 					// subscription churn.
 					match self.dynamic.poll_requested_fill(waiter) {
 						Poll::Ready(Ok(fill)) => {
-							// More than one group is asked through a subscription: lite-07's own, or
-							// earlier, one of its own per run (see `RangeFills`). One group, or a
-							// slice of one, is what FETCH carries.
-							let last = fill.end().saturating_sub(1);
-							let groups = fill.start().frame == 0
-								&& fill.start().group < last
-								&& fill.group(last).frame_end().is_none();
-							if serve.subscriber.version.has_track_stream() && groups {
-								self.range_fills.push(fill);
-							} else if self.supports_fetch {
-								self.fetches.push(FillServeRun::new(
-									serve.clone(),
-									fill,
-									FetchInfo::Known(self.serving.info().clone()),
-								));
-							} else {
-								// No FETCH on the wire: wait for the live feed, which a
-								// subscription arriving alongside may still be opening.
-								self.feed_fetches.push(fill, &self.serving.consume());
-							}
+							self.take_fill(serve, fill);
 							continue;
 						}
 						// A live clone can abort the producer with a specific cause.
@@ -14859,6 +15005,13 @@ fn info_failed(info: &FetchInfo) -> Option<Error> {
 	info.peek()?.err()
 }
 
+/// Whether `fill` asks for more than one whole group, which a subscription carries rather
+/// than FETCH.
+fn spans_groups(fill: &track::FillGroups) -> bool {
+	let last = fill.end().saturating_sub(1);
+	fill.start().frame == 0 && fill.start().group < last && fill.group(last).frame_end().is_none()
+}
+
 /// Serves one fill a group at a time, newest first for a descending reader, each with its
 /// own [`FetchServeRun`], until it is answered or nobody waits on it.
 struct FillServeRun {
@@ -14868,9 +15021,6 @@ struct FillServeRun {
 	run: Option<(u64, FetchServeRun)>,
 	/// The group the last run answered.
 	last: Option<u64>,
-	/// TEMPORARY MIGRATION, see `fills::Recovery::walk`: a reader's fill a stalled recovery
-	/// handed back, which the subscription's tail no longer settles.
-	walk: bool,
 }
 
 impl Drop for FillServeRun {
@@ -14891,7 +15041,6 @@ impl FillServeRun {
 			info,
 			run: None,
 			last: None,
-			walk: false,
 		}
 	}
 }

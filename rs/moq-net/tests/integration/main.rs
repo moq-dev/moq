@@ -35,6 +35,7 @@ mod fetch_from_feed;
 mod fetch_only;
 mod fetch_pipeline;
 mod finished_broadcast_mock;
+mod finished_copy_history;
 mod finite_relay;
 mod flights;
 mod goaway;
