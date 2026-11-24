@@ -6173,7 +6173,9 @@ impl TrackRun {
 	/// a newer group's stream can beat an older one. Once nothing more arrives, it starts at
 	/// the feed or the floor, and the drops account for what is missing.
 	fn first_start(&mut self, from: u64, source: &Source, finished: bool) -> Result<u64, Wait> {
-		if source.upstream && let Some(answered) = source.oldest {
+		if source.upstream
+			&& let Some(answered) = source.oldest
+		{
 			return Ok(from.max(answered));
 		}
 		let feed = match source.feed {
