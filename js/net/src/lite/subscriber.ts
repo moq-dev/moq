@@ -108,11 +108,10 @@ import {
 	LiveRanges,
 	type RangeKind,
 	requestedRange,
-	responseBuffered,
 	Subscribe,
-	type SubscribeResponse,
 	type SubscribeStart,
 	SubscribeUpdate,
+	startBuffered,
 	toWireRanges,
 	type WireAnchor,
 	type WireRange,
@@ -2644,88 +2643,70 @@ export class Subscriber {
 				return;
 			}
 
-			// The rest of a burst that already arrived is taken before any of it applies, so the
-			// readers its drops wake judge the burst once rather than once per response, as in Rust,
-			// whose serve loop runs nothing between the responses it has buffered. A lite-06 join
-			// behind a timestamp-keyed history gets a drop for every gap below its start.
-			const burst = [resp];
-			let malformed: unknown;
-			try {
-				while (responseBuffered(stream.reader, this.version))
-					burst.push(await decodeSubscribeResponse(stream.reader, this.version));
-			} catch (err) {
-				// What arrived before it still applies, as it would have one at a time.
-				malformed = err;
-			}
-			for (let i = 0; i < burst.length; i++) this.#respond(stream, entry, burst[i], burst[i + 1]);
-			if (malformed !== undefined) throw malformed;
-		}
-	}
-
-	// Apply one subscribe response, which `next` follows in the same burst.
-	#respond(stream: Stream, entry: SubscribeEntry, resp: SubscribeResponse, next?: SubscribeResponse): void {
-		if ("ok" in resp) throw new ProtocolViolation("duplicate SUBSCRIBE_OK");
-		if ("start" in resp) {
-			if (hasRanges(this.version)) {
-				this.#started(entry, resp.start);
-				// The rest of a burst is recorded before applying it once.
-				if (!(next && "start" in next)) this.#applyStarts(entry);
-			} else {
-				// Before lite-07 the one start answers the subscription, and says the feed is live.
-				if (entry.start !== undefined) throw new ProtocolViolation("duplicate SUBSCRIBE_START");
-				const start = resp.start.start;
-				entry.start = start ?? null;
-				// A tail waits for SUBSCRIBE_START to say where delivery starts.
-				entry.tail.touch();
-				hooks.startTrack(entry.track, {
-					start: entry.start,
-					requested: entry.requested,
-					restated: entry.restated,
-				});
-				// The groups the SUBSCRIBE asked for below it are not waited for, whatever the
-				// demand asks later. One that still arrives is delivered.
-				if (entry.requested !== undefined && start !== undefined) entry.tail.account(entry.requested, start);
-			}
-		} else if ("end" in resp) {
-			if (entry.end !== undefined) throw new ProtocolViolation("duplicate SUBSCRIBE_END");
-			entry.end = resp.end.group;
-			// A local close can win the race with the response; there is nothing left to end.
-			if (hooks.trackReleased(entry.track).peek() !== undefined) return;
-			try {
-				// Lower groups may still be on the wire behind a higher one, so readers hold
-				// at a hole below the end until the tail settles.
-				hooks.endTrack(entry.track, { group: entry.end, frame: 0 }, resp.end.cause());
-			} catch (err) {
-				// lite-05 specified an inclusive end, and @moq/net 0.1.3 to 0.1.9 sent one, so
-				// there an end below a received group only costs the early boundary: the FIN
-				// still finishes the track. Later drafts made it exclusive.
-				if (this.version !== Version.DRAFT_05) {
-					throw new ProtocolViolation(`invalid SUBSCRIBE_END: ${reason(error(err))}`);
+			if ("ok" in resp) throw new ProtocolViolation("duplicate SUBSCRIBE_OK");
+			if ("start" in resp) {
+				if (hasRanges(this.version)) {
+					this.#started(entry, resp.start);
+					// The rest of a burst already here is recorded before applying it once.
+					if (!startBuffered(stream.reader, this.version)) this.#applyStarts(entry);
+				} else {
+					// Before lite-07 the one start answers the subscription, and says the feed is live.
+					if (entry.start !== undefined) throw new ProtocolViolation("duplicate SUBSCRIBE_START");
+					const start = resp.start.start;
+					entry.start = start ?? null;
+					// A tail waits for SUBSCRIBE_START to say where delivery starts.
+					entry.tail.touch();
+					hooks.startTrack(entry.track, {
+						start: entry.start,
+						requested: entry.requested,
+						restated: entry.restated,
+					});
+					// The groups the SUBSCRIBE asked for below it are not waited for, whatever the
+					// demand asks later. One that still arrives is delivered.
+					if (entry.requested !== undefined && start !== undefined)
+						entry.tail.account(entry.requested, start);
 				}
-				console.warn(`invalid SUBSCRIBE_END: ${reason(error(err))}`);
+			} else if ("end" in resp) {
+				if (entry.end !== undefined) throw new ProtocolViolation("duplicate SUBSCRIBE_END");
+				entry.end = resp.end.group;
+				// A local close can win the race with the response; there is nothing left to end.
+				if (hooks.trackReleased(entry.track).peek() !== undefined) continue;
+				try {
+					// Lower groups may still be on the wire behind a higher one, so readers hold
+					// at a hole below the end until the tail settles.
+					hooks.endTrack(entry.track, { group: entry.end, frame: 0 }, resp.end.cause());
+				} catch (err) {
+					// lite-05 specified an inclusive end, and @moq/net 0.1.3 to 0.1.9 sent one, so
+					// there an end below a received group only costs the early boundary: the FIN
+					// still finishes the track. Later drafts made it exclusive.
+					if (this.version !== Version.DRAFT_05) {
+						throw new ProtocolViolation(`invalid SUBSCRIBE_END: ${reason(error(err))}`);
+					}
+					console.warn(`invalid SUBSCRIBE_END: ${reason(error(err))}`);
+				}
+				// Lite-07 keeps the stream open past SUBSCRIBE_END: FIN once the tail settles,
+				// and the publisher's FIN in reply ends this loop.
+				if (keepsSubscribeOpen(this.version)) void this.#finishTail(stream, entry).catch(() => {});
+			} else if ("drop" in resp) {
+				// The publisher will never send these groups on this subscription, so they are accounted
+				// for without a stream, and a reader of one still arriving ends with the drop's error now.
+				const { start, end } = resp.drop;
+				const error = resp.drop.cause(this.version);
+				// Lite-07 tells a stream a drop overtook from one whose gap the grace gave up on.
+				if (hasSkip(this.version)) entry.tail.drop(start, end);
+				else entry.tail.account(start, end);
+				this.#dropped(entry, start, end);
+				// On lite-07 an OLD drop is stale, recorded under the narrowest budget it may have been
+				// judged under: a reader wider than that does not settle on it, and asks for the group
+				// with a request of its own.
+				const stale = hasSkip(this.version) && toStreamCode(error) === StreamCode.Old;
+				const hole = stale ? staleHole(entry.staleBudget) : { error };
+				hooks.dropTrackGroups(entry.track, start, end, hole);
+				entry.fills?.refuse(start, end, error);
+			} else if ("skip" in resp) {
+				const { start, end } = resp.skip;
+				this.#skipped(entry, start, end);
 			}
-			// Lite-07 keeps the stream open past SUBSCRIBE_END: FIN once the tail settles,
-			// and the publisher's FIN in reply ends this loop.
-			if (keepsSubscribeOpen(this.version)) void this.#finishTail(stream, entry).catch(() => {});
-		} else if ("drop" in resp) {
-			// The publisher will never send these groups on this subscription, so they are accounted
-			// for without a stream, and a reader of one still arriving ends with the drop's error now.
-			const { start, end } = resp.drop;
-			const error = resp.drop.cause(this.version);
-			// Lite-07 tells a stream a drop overtook from one whose gap the grace gave up on.
-			if (hasSkip(this.version)) entry.tail.drop(start, end);
-			else entry.tail.account(start, end);
-			this.#dropped(entry, start, end);
-			// On lite-07 an OLD drop is stale, recorded under the narrowest budget it may have been
-			// judged under: a reader wider than that does not settle on it, and asks for the group
-			// with a request of its own.
-			const stale = hasSkip(this.version) && toStreamCode(error) === StreamCode.Old;
-			const hole = stale ? staleHole(entry.staleBudget) : { error };
-			hooks.dropTrackGroups(entry.track, start, end, hole);
-			entry.fills?.refuse(start, end, error);
-		} else if ("skip" in resp) {
-			const { start, end } = resp.skip;
-			this.#skipped(entry, start, end);
 		}
 	}
 
