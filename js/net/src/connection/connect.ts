@@ -80,9 +80,10 @@ export interface WebSocketProps {
 
 	/**
 	 * How long the session may go without a frame before it closes, like `moq-tokio`'s
-	 * `quic.idle_timeout` (default: 30 s). It keeps a quiet session alive with a ping every third
-	 * of it. `null` turns it off when the server's is off too, so a quiet session sends nothing and
-	 * a dead link surfaces only as the WebSocket closing. Must be positive.
+	 * `connect.websocket.idle_timeout` (default: 30 s). It keeps a quiet session alive with a ping
+	 * every third of it. `null` turns it off when the server's is off too, so a quiet session sends
+	 * nothing and a dead link surfaces only as the WebSocket closing. Only QMux drafts 01 and later
+	 * negotiate it: a `qmux-00` session runs no idle timer. Must be positive.
 	 */
 	idleTimeout?: Duration | null;
 }
@@ -208,13 +209,9 @@ export function normalizeVersions(props?: {
 	if (
 		idleTimeout !== undefined &&
 		idleTimeout !== null &&
-		!(
-			idleTimeout instanceof Duration &&
-			!idleTimeout.isZero() &&
-			Number.isSafeInteger(Math.ceil(idleTimeout.asMillis()))
-		)
+		!(!idleTimeout.isZero() && Number.isSafeInteger(Math.ceil(idleTimeout.asMillis())))
 	)
-		throw new RangeError(`websocket.idleTimeout must be a positive Duration or null: ${idleTimeout}`);
+		throw new RangeError(`websocket.idleTimeout must be positive or null: ${idleTimeout}`);
 	return props?.versions === undefined ? undefined : checkVersions(props.versions);
 }
 

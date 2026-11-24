@@ -868,9 +868,7 @@ test("WebSocket limits must be positive safe integers", async () => {
 			await expect(connect(url, { websocket: { [key]: value } })).rejects.toThrow(RangeError);
 		}
 	}
-	for (const idleTimeout of [Duration.ZERO, 30_000 as unknown as Duration]) {
-		await expect(connect(url, { websocket: { idleTimeout } })).rejects.toThrow(RangeError);
-	}
+	await expect(connect(url, { websocket: { idleTimeout: Duration.ZERO } })).rejects.toThrow(RangeError);
 });
 
 // A WebTransport whose handshake nothing ever answers, as a dial to a dead target is.

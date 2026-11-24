@@ -121,6 +121,7 @@ impl Client {
 
 		quic.validate()?;
 		config.backoff.validate()?;
+		config.websocket.validate()?;
 
 		// Only the rustls-backed transports use this. The plaintext qmux
 		// transports must not require a rustls crypto provider.
