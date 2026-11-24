@@ -138,8 +138,8 @@ export function launch(args: string[] = [], engine: Engine = "chromium"): Promis
 				"media.autoplay.default": 1,
 				"media.autoplay.block-webaudio": true,
 				// Firefox records an async stack at every await and promise reaction only in a page a
-				// debugger watches, and Playwright's Juggler watches every page. That is a third of a
-				// player's main-thread time through a resume's burst of groups, which no user pays.
+				// debugger watches, and Playwright's Juggler watches every page. That is a quarter to a
+				// third of a player's main-thread time through a resume's burst, which no user pays.
 				"javascript.options.asyncstack": false,
 			},
 		});
