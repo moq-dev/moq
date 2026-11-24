@@ -386,27 +386,33 @@ class SmokeTest {
     }
 
     @Test
-    fun `abortUnwanted keeps a reader that joined late`() = runTest {
+    fun `releasing a producer ends an on-demand track`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val track = broadcast.publishTrack("status", null)
-            val demand = track.demand()
-            while (demand.wantedChanged()) {}
+            broadcast.requests().use { requests ->
+                val idle = broadcast.publishTrack("idle", null)
+                val idleDemand = idle.demand()
+                while (idleDemand.wantedChanged()) {}
+                idle.close()
+                assertFailsWith<MoqException.Closed> { idleDemand.wantedChanged() }
 
-            val late = track.consume(null)
-            assertFalse(track.abortUnwanted(7u))
-            track.writeFrame(
-                Frame(
-                    payload = "still serving".encodeToByteArray(),
-                    timestamp = Timestamp.unscaled(0uL),
+                val track = broadcast.publishTrack("status", null)
+                val demand = track.demand()
+                while (demand.wantedChanged()) {}
+                val late = broadcast.consume().subscribeTrack("status", null)
+                track.close()
+
+                val request = requests.requestedTrack()
+                assertEquals("status", request.name())
+                val next = request.accept(null)
+                next.writeFrame(
+                    Frame(
+                        payload = "served again".encodeToByteArray(),
+                        timestamp = Timestamp.unscaled(0uL),
+                    )
                 )
-            )
-            assertEquals("still serving", late.readFrame()?.payload?.decodeToString())
-
-            while (!demand.wantedChanged()) {}
-            late.cancel()
-            while (demand.wantedChanged()) {}
-            assertTrue(track.abortUnwanted(7u))
-            assertFailsWith<MoqException.Closed> { track.abortUnwanted(7u) }
+                assertEquals("served again", late.readFrame()?.payload?.decodeToString())
+                late.cancel()
+            }
         }
     }
 
@@ -713,27 +719,24 @@ class SmokeTest {
     }
 
     @Test
-    fun `json abortUnwanted keeps a reader that joined late`() = runTest {
+    fun `json release serves a reader that joined late`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val track =
-                broadcast.publishTrack(
-                    "events",
-                    TrackInfo(maxAge = java.time.Duration.ZERO, timescale = 1_000uL),
-                )
-            val producer = StreamProducer(broadcast, track)
-            val demand = producer.demand()
-            while (demand.wantedChanged()) {}
+            broadcast.requests().use { requests ->
+                val info = TrackInfo(maxAge = java.time.Duration.ZERO, timescale = 1_000uL)
+                val producer = StreamProducer(broadcast, broadcast.publishTrack("events", info))
+                val demand = producer.demand()
+                while (demand.wantedChanged()) {}
 
-            val late = StreamConsumer(broadcast.consume().subscribeTrack("events", null))
-            assertFalse(producer.abortUnwanted(7u))
-            producer.append("\"still serving\"", Timestamp(0uL, 1_000uL))
-            assertEquals("\"still serving\"", late.next()?.value)
+                val late = StreamConsumer(broadcast.consume().subscribeTrack("events", null))
+                producer.close()
 
-            while (!demand.wantedChanged()) {}
-            late.cancel()
-            while (demand.wantedChanged()) {}
-            assertTrue(producer.abortUnwanted(7u))
-            assertFailsWith<MoqException.Closed> { producer.abortUnwanted(7u) }
+                val request = requests.requestedTrack()
+                assertEquals("events", request.name())
+                val next = StreamProducer(broadcast, request.accept(info))
+                next.append("\"served again\"", Timestamp(0uL, 1_000uL))
+                assertEquals("\"served again\"", late.next()?.value)
+                late.cancel()
+            }
         }
     }
 

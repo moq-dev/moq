@@ -816,56 +816,59 @@ final class SmokeTests: XCTestCase {
         try broadcast.close()
     }
 
-    /// An idle track ends only once a reader that joined after it went unwanted has left.
-    func testAbortUnwantedKeepsALateReader() async throws {
+    /// Released once unwanted, a track ends; a reader that joined since is served by the next
+    /// request for it.
+    func testReleaseEndsAnOnDemandTrack() async throws {
         let broadcast = try BroadcastProducer()
-        let track = try broadcast.publishTrack(name: "status")
-        let demand = try track.demand()
-        while try await demand.wantedChanged() {}
+        let requests = try broadcast.requests()
 
-        let late = try track.consume()
-        XCTAssertFalse(try track.abortUnwanted(errorCode: 7))
-        try track.writeFrame(Data("still serving".utf8), timestamp: .unscaled(0))
+        var idle: TrackProducer? = try broadcast.publishTrack(name: "idle")
+        let idleDemand = try idle!.demand()
+        while try await idleDemand.wantedChanged() {}
+        idle = nil
+        do {
+            _ = try await idleDemand.wantedChanged()
+            XCTFail("the watcher outlived its released track")
+        } catch MoqError.Closed {}
+
+        var track: TrackProducer? = try broadcast.publishTrack(name: "status")
+        let demand = try track!.demand()
+        while try await demand.wantedChanged() {}
+        let late = try await broadcast.consume().subscribeTrack(name: "status")
+        track = nil
+
+        let request = try await requests.requestedTrack()
+        XCTAssertEqual(try request.name, "status")
+        let next = try request.accept()
+        try next.writeFrame(Data("served again".utf8), timestamp: .unscaled(0))
         let frame = try await late.readFrame()
-        XCTAssertEqual(frame?.payload, Data("still serving".utf8))
-
-        while try await !demand.wantedChanged() {}
+        XCTAssertEqual(frame?.payload, Data("served again".utf8))
         late.cancel()
-        while try await demand.wantedChanged() {}
-        XCTAssertTrue(try track.abortUnwanted(errorCode: 7))
-        XCTAssertThrowsError(try track.abortUnwanted(errorCode: 7)) { error in
-            guard case MoqError.Closed = error else {
-                return XCTFail("expected Closed, got \(error)")
-            }
-        }
         try broadcast.close()
     }
 
-    /// A typed producer keeps an idle track for a reader that joined since, like a raw one.
-    func testJsonAbortUnwantedKeepsALateReader() async throws {
+    /// A released typed producer hands a reader that joined since to the next request, like a
+    /// raw one.
+    func testJsonReleaseServesALateReader() async throws {
         let broadcast = try BroadcastProducer()
-        let producer = try Json.StreamProducer<String>(
-            broadcast: broadcast,
-            track: try broadcast.publishTrack(name: "events", info: TrackInfo(maxAge: nil, timescale: 1_000_000)))
-        let demand = try producer.demand()
+        let requests = try broadcast.requests()
+        let info = TrackInfo(maxAge: nil, timescale: 1_000_000)
+        var producer: Json.StreamProducer<String>? = try Json.StreamProducer<String>(
+            broadcast: broadcast, track: try broadcast.publishTrack(name: "events", info: info))
+        let demand = try producer!.demand()
         while try await demand.wantedChanged() {}
 
         let late = try Json.StreamConsumer<String>(
             track: try await broadcast.consume().subscribeTrack(name: "events"))
-        XCTAssertFalse(try producer.abortUnwanted(errorCode: 7))
-        try producer.append("still serving", timestamp: micros(0))
-        let record = try await late.next()
-        XCTAssertEqual(record, Json.Timed(value: "still serving", timestamp: micros(0)))
+        producer = nil
 
-        while try await !demand.wantedChanged() {}
+        let request = try await requests.requestedTrack()
+        XCTAssertEqual(try request.name, "events")
+        let next = try Json.StreamProducer<String>(broadcast: broadcast, track: try request.accept(info: info))
+        try next.append("served again", timestamp: micros(0))
+        let record = try await late.next()
+        XCTAssertEqual(record, Json.Timed(value: "served again", timestamp: micros(0)))
         late.cancel()
-        while try await demand.wantedChanged() {}
-        XCTAssertTrue(try producer.abortUnwanted(errorCode: 7))
-        XCTAssertThrowsError(try producer.abortUnwanted(errorCode: 7)) { error in
-            guard case MoqError.Closed = error else {
-                return XCTFail("expected Closed, got \(error)")
-            }
-        }
         try broadcast.close()
     }
 

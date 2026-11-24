@@ -91,14 +91,10 @@ func (p *SnapshotProducer) Demand() (*moq.TrackDemand, error) {
 	return bridge.TrackDemand(inner).(*moq.TrackDemand), nil
 }
 
-// AbortUnwanted closes the track with an application error code, but only while
-// nobody wants it: call it once moq.TrackDemand.WantedChanged returns false. It returns
-// true once the track is closed, and false, leaving the track open, when a reader
-// joined since; keep serving and wait for the next nil on a fresh Demand():
-// one that already returned nil misses a reader that came and went, and waits on.
-func (p *SnapshotProducer) AbortUnwanted(errorCode uint16) (bool, error) {
-	return p.inner.AbortUnwanted(errorCode)
-}
+// Close releases the producer on the calling goroutine without finishing its track: a
+// track nobody wants ends cleanly, and a reader that joined since is served by the next
+// request for it. The producer is unusable afterwards.
+func (p *SnapshotProducer) Close() { p.inner.Destroy() }
 
 // Finish closes the snapshot track.
 func (p *SnapshotProducer) Finish() error {
@@ -140,14 +136,10 @@ func (p *StreamProducer) Demand() (*moq.TrackDemand, error) {
 	return bridge.TrackDemand(inner).(*moq.TrackDemand), nil
 }
 
-// AbortUnwanted closes the track with an application error code, but only while
-// nobody wants it: call it once moq.TrackDemand.WantedChanged returns false. It returns
-// true once the track is closed, and false, leaving the track open, when a reader
-// joined since; keep serving and wait for the next nil on a fresh Demand():
-// one that already returned nil misses a reader that came and went, and waits on.
-func (p *StreamProducer) AbortUnwanted(errorCode uint16) (bool, error) {
-	return p.inner.AbortUnwanted(errorCode)
-}
+// Close releases the producer on the calling goroutine without finishing its track: a
+// track nobody wants ends cleanly, and a reader that joined since is served by the next
+// request for it. The producer is unusable afterwards.
+func (p *StreamProducer) Close() { p.inner.Destroy() }
 
 // Finish closes the stream track.
 func (p *StreamProducer) Finish() error {
@@ -310,14 +302,10 @@ func (p *WindowProducer) Demand() (*moq.TrackDemand, error) {
 	return bridge.TrackDemand(inner).(*moq.TrackDemand), nil
 }
 
-// AbortUnwanted closes the track with an application error code, but only while
-// nobody wants it: call it once moq.TrackDemand.WantedChanged returns false. It returns
-// true once the track is closed, and false, leaving the track open, when a reader
-// joined since; keep serving and wait for the next nil on a fresh Demand():
-// one that already returned nil misses a reader that came and went, and waits on.
-func (p *WindowProducer) AbortUnwanted(errorCode uint16) (bool, error) {
-	return p.inner.AbortUnwanted(errorCode)
-}
+// Close releases the producer on the calling goroutine without finishing its track: a
+// track nobody wants ends cleanly, and a reader that joined since is served by the next
+// request for it. The producer is unusable afterwards.
+func (p *WindowProducer) Close() { p.inner.Destroy() }
 
 // Finish closes the window track.
 func (p *WindowProducer) Finish() error {
