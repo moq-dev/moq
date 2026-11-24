@@ -240,6 +240,15 @@ Decided 2026-11-21 (maintainer, /quest-plan of the exhaustive pre-cut
 full-codebase audit): ✅ this quest fixes the changelog typo at
 `drafts/draft-lcurley-moq-lite.md:2380` during the cut.
 
+Decided 2026-11-23 (taken while the maintainer was away, on
+[moq-dev/moq#9371](https://github.com/moq-dev/moq/pull/9371)): the cut waits
+for the router to rank one claim prefix's filings as one tier, since the
+draft now says copies of one claim rank together wherever each is filed.
+
+## Required
+
+- [The router ranks one claim prefix's filings as one tier](/quest/m2/router-claim-tier.md) - the lite-07 router follows the draft's one-tier ranking instead of stopping at the deepest filing
+
 ## Related
 
 - [Takeover](/quest/m3/group-takeover.md) - a later lite version may let a group stream take over for another group; lite-07 freezes without it (maintainer, 2026-11-13)
