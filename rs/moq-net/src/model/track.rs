@@ -10453,6 +10453,7 @@ impl Cursor {
 			&asks,
 			|| asking(&self.subscription, self.key_order),
 			&drift,
+			self.record.owes(),
 			&mut given_up,
 			waiter,
 		);
@@ -11161,6 +11162,7 @@ impl Cursor {
 			&asks,
 			|| asking(&self.subscription, self.key_order),
 			drift,
+			self.record.owes(),
 			&mut given_up,
 			waiter,
 		);
@@ -32088,6 +32090,43 @@ mod test {
 				}
 				assert!(most <= 4, "capacity {capacity}, descending {descending}: {most} runs");
 			}
+		}
+	}
+
+	/// A reader whose ranges never move, with no delay budget, at capacity 0, whose upstream
+	/// takes every fill and never answers one: the cache evicts every other group before the
+	/// reader takes it, each a gap of its own. Its unanswered asks stay within its allowance,
+	/// so neither they nor its record grow however long the feed runs.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_upstream_that_never_answers_keeps_a_bounded_record() {
+		const GROUPS: u64 = 400;
+		for order in [Order::Ascending, Order::Descending] {
+			let (producer, _pool) = pooled_producer(0);
+			let dynamic = producer.requests();
+			let mut subscriber = producer.subscribe(Subscription::default().with_range(0..).with_order(order));
+			let waiter = kio::Waiter::noop();
+			let mut fills = Vec::new();
+			let (mut most_runs, mut most_asks) = (0, 0);
+			for key in 0..GROUPS {
+				write_group(&producer, key);
+				if key % 2 == 0 {
+					if key > 0 {
+						evict(&producer, key - 1);
+					}
+					drain_groups(&mut subscriber);
+					drained_drops(&mut subscriber);
+				}
+				while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) {
+					fills.push(fill);
+				}
+				fills.retain(|fill| fill.wanted().is_some());
+				let record = subscriber.record();
+				most_runs = most_runs.max(subscriber.delivered_runs() + record.reported.len() + record.pending.len());
+				most_asks = most_asks.max(fills.len());
+			}
+			assert!(most_asks <= 2, "{order:?}: {most_asks} fills unanswered at once");
+			assert!(most_runs <= 4, "{order:?}: the record grew to {most_runs} runs");
 		}
 	}
 

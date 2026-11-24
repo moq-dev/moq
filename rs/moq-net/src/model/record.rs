@@ -251,6 +251,12 @@ impl Record {
 			+ self.reported.len()) as u64
 	}
 
+	/// Whether the track left this reader a debt to pay: what its record holds back, such as
+	/// the misses its allowance left unasked, is then its own to settle.
+	pub(super) fn owes(&self) -> bool {
+		self.bill.as_ref().is_some_and(|bill| bill.debt() > 0)
+	}
+
 	/// Bill this record to `account`, opened on its first run. Once the reader's ranges
 	/// moved, retire the gaps they left behind (see [`Self::retire`]); under a debt the track
 	/// left its readers, pay what it can by folding what it settled for good into its floor.
@@ -354,11 +360,12 @@ impl Record {
 	/// and the keys nothing settled.
 	///
 	/// A reader that started above its floor, as at a sparse-key track's live edge or its
-	/// oldest group, never settles the keys below its start, so the final stretch from its
-	/// start folds too, into one handed-out and reported run: from where its ranges start, or
-	/// the lowest key it settled when they name none or less. The keys below stay owed, should
-	/// a group arrive there or its ranges widen. Returns the runs it folded, below the floor
-	/// and the stretch.
+	/// oldest group, never settles the keys below its start, so each final stretch from its
+	/// start on folds too, into one handed-out and reported run: from where its ranges start,
+	/// or the lowest key it settled when they name none or less. The keys below stay owed,
+	/// should a group arrive there or its ranges widen. Folding past each key still owed, as a
+	/// miss its fills have yet to answer, bounds what is left by those keys, which the reader's
+	/// ask allowance bounds in turn. Returns the runs it folded, below the floor and above.
 	fn fold(&mut self, reader: &Standing, beside: &dyn Beside) -> Vec<std::ops::Range<u64>> {
 		let mut folded = Vec::new();
 		// The runs copied from the track's drop set go first: the next scan folds in again
@@ -380,14 +387,15 @@ impl Record {
 			self.raise(floor);
 			folded.push(0..floor);
 		}
-		let from = reader.from.max(self.lowest_settled().unwrap_or(0));
-		if from > self.floor {
-			// Folded, the stretch costs two runs: only one spanning more is worth it.
-			let stretch = self.final_end(from, reader, beside, Fold::Debt);
+		let mut from = Some(reader.from.max(self.lowest_settled().unwrap_or(0))).filter(|from| *from > self.floor);
+		while let Some(start) = from {
+			// Folded, a stretch costs two runs: only one spanning more is worth it.
+			let stretch = self.final_end(start, reader, beside, Fold::Debt);
 			if stretch.runs > 2 {
-				self.settle_stretch(from..stretch.end);
-				folded.push(from..stretch.end);
+				self.settle_stretch(start..stretch.end);
+				folded.push(start..stretch.end);
 			}
+			from = self.next_told(stretch.end.max(start + 1));
 		}
 		folded
 	}
@@ -634,40 +642,55 @@ mod test {
 	}
 
 	/// A reader whose ranges start above a key nothing settled, which it no longer asks for,
-	/// folds the final stretch from where they start.
+	/// folds the final stretches from where they start, and leaves those below as they are.
 	#[test]
 	fn a_debt_folds_from_where_the_reader_starts() {
 		let (pool, track) = account();
 		let mut record = Record::default();
-		record.delivered.insert(1_000);
-		for key in [2_000, 3_000] {
+		for key in [1_000, 1_100, 2_000, 3_000] {
 			record.delivered.insert(key);
-			record.reported.insert(key + 1..key + 1_000, Report::Dropped);
+			let end = if key < 2_000 { key + 100 } else { key + 1_000 };
+			record.reported.insert(key + 1..end, Report::Dropped);
 		}
 		record.settle(|| track.clone(), &mut (), Standing::default());
+		assert_eq!(pool.used(), 7 * RUN_OVERHEAD);
 		owe(&track, pool.used());
-		record.settle(|| track.clone(), &mut (), Standing::default());
-		assert_eq!(
-			pool.used(),
-			4 * RUN_OVERHEAD,
-			"the lowest key settled starts no stretch"
-		);
-
 		let started = Standing {
-			from: 2_000,
+			from: 1_500,
 			..Standing::default()
 		};
 		// What the reader gave up inside the stretch is settled with it, so it bills nothing.
 		let mut forgotten = Forgotten(Vec::new());
 		record.settle(|| track.clone(), &mut forgotten, started);
-		assert_eq!(pool.used(), 2 * RUN_OVERHEAD, "the stretch, and the key below it");
+		assert_eq!(pool.used(), 5 * RUN_OVERHEAD, "the stretch from its start folds");
 		assert!(record.delivered.contains(3_500) && record.told(3_500));
+		assert!(!record.delivered.contains(1_050), "below its start stays as it was");
 		assert!(!record.told(1_500), "below its start stays owed");
 		assert_eq!(
 			forgotten.0,
 			std::slice::from_ref(&(2_000..4_000)),
 			"the stretch, beside the record too"
 		);
+	}
+
+	/// Under a debt, every final stretch folds, also those above a key still owed, such as a
+	/// miss its fills have yet to answer: what stays is bounded by the keys owed.
+	#[test]
+	fn a_debt_folds_every_stretch_past_an_owed_key() {
+		let (pool, track) = account();
+		let mut record = Record::default();
+		record.delivered.insert(1_000);
+		for key in [2_000, 3_000, 5_000, 6_000] {
+			record.delivered.insert(key);
+			record.reported.insert(key + 1..key + 1_000, Report::Dropped);
+		}
+		record.settle(|| track.clone(), &mut (), Standing::default());
+		assert_eq!(pool.used(), 8 * RUN_OVERHEAD);
+		owe(&track, pool.used());
+		record.settle(|| track.clone(), &mut (), Standing::default());
+		assert_eq!(pool.used(), 4 * RUN_OVERHEAD, "both stretches fold");
+		assert!(record.told(2_500) && record.told(6_500));
+		assert!(!record.told(1_500) && !record.told(4_500), "the keys owed stay owed");
 	}
 
 	/// What a reader holds beside its record, here only what it was told to forget.
