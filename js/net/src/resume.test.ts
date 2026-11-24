@@ -1938,6 +1938,39 @@ test("a skip between overlapping placements ends the read", async () => {
 	}
 });
 
+// A group the serving copy failed while buffered still comes out of a read with dispositions, to
+// continue through its recovery on the next route: a route failing is no verdict.
+test("a read with dispositions hands out a group its serving copy failed", async () => {
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	const pending = ta.producer.requests();
+	const front = new Front();
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	try {
+		ta.write(0n, 1, false).abort(new StreamError(StreamCode.SessionClosed));
+		const recv = hooks.tryRecvGroup(sub, true);
+		if (recv.kind !== "group") throw new Error(`expected group 0, got ${recv.kind}`);
+		const group = recv.group;
+		expect(group.start).toBe(0n);
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+		const next = group.readFrame();
+		tb.write(0n, 3);
+		front.serve(b.consume());
+		expect(dec.decode((await next)?.payload)).toBe("0.1");
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.2");
+		expect(await group.readFrame()).toBeUndefined();
+	} finally {
+		pending.close();
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	}
+});
+
 test("a fork continues its open group across a route failure after its parent closes", async () => {
 	const a = new BroadcastProducer();
 	const b = new BroadcastProducer();
@@ -4538,6 +4571,8 @@ test("a separately polled drop does not deliver its run", () => {
 	source.close();
 });
 
+// Before the group it passed for, as a direct reader of the copy reports it, so a publisher still
+// waiting to say where delivery starts hears of it first.
 test("a resumed reader reports a group its serving copy skipped past the budget", async () => {
 	const clock = new Manual();
 	const installed = install(clock);
@@ -4546,15 +4581,20 @@ test("a resumed reader reports a group its serving copy skipped past the budget"
 		const a = new BroadcastProducer();
 		const ta = copy(a);
 		front.serve(a.consume());
-		const sub = front.consumer.track("seq").subscribe(withMax({ delay: { max: Duration.millis(1_000) } }));
+		const budget = withMax({ delay: { max: Duration.millis(1_000) } });
+		const sub = front.consumer.track("seq").subscribe(budget);
+		const direct = ta.producer.subscribe(budget);
 		expect(recvDisposition(sub)).toBe("idle");
 		ta.write(0n);
 		ta.write(1n);
 		await clock.advance(Duration.nanos(2_000_000_000));
-		expect(recvDisposition(sub)).toBe(1n);
-		expect(recvDisposition(sub)).toEqual([0n, 1n, StreamCode.Old]);
-		expect(recvDisposition(sub)).toBe("idle");
+		for (const reader of [direct, sub]) {
+			expect(recvDisposition(reader)).toEqual([0n, 1n, StreamCode.Old]);
+			expect(recvDisposition(reader)).toBe(1n);
+			expect(recvDisposition(reader)).toBe("idle");
+		}
 
+		direct.close();
 		sub.close();
 		front.consumer.close();
 		a.close();

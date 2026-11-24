@@ -6625,19 +6625,27 @@ impl TrackRun {
 			unreachable!("resolved above");
 		};
 		// The subscriber now owes itself everything from the start, so a range given up
-		// above it is named as it would have been after the start. A stale run below it is
-		// never named, so a wider budget may still serve it. A final one is named all the same:
-		// no budget brings it back, and a subscriber filling below the start (a relay whose
-		// reader reaches lower) must still learn its fate.
-		for (range, hole) in skipped.iter() {
-			let below = range.start..range.end.min(start);
-			match hole.stale_budget() {
-				Some(_) => self.track.record_mut().untell(below),
-				None => {
-					self.forward_range(below, hole, writer)?;
-				}
+		// above it is named as it would have been after the start. Below it, nothing is owed. The
+		// final runs reaching up to it unbroken are named all the same, so a reader filling below
+		// the start (a relay whose reader reaches lower) learns nothing there exists. The rest,
+		// past a stale run, a group still held, or a key nothing gave up, stay untold: naming them
+		// would send every gap in the track's history, as a lite-06 track keyed by timestamp holds
+		// one per group. An update that asks below the start names them then, and a wider budget
+		// may still serve a stale one.
+		let mut reach = start;
+		for (range, hole) in skipped.iter().rev() {
+			if range.start >= reach {
+				continue;
 			}
-			self.forward_range(range.start.max(start)..range.end, hole, writer)?;
+			if range.end < reach || hole.stale_budget().is_some() {
+				break;
+			}
+			reach = range.start;
+		}
+		for (range, hole) in skipped.iter() {
+			let below = range.start..range.end.min(reach);
+			self.track.untell(below);
+			self.forward_range(range.start.max(reach)..range.end, hole, writer)?;
 		}
 		// An end declared while this start was held follows it.
 		if let Some(end) = self.held_end.take() {
@@ -10742,6 +10750,88 @@ mod serve_group_test {
 			drops(&mut writer, &log, version).await,
 			[(2, WIDE - 1), (1, 1), (WIDE, WIDE + 1)]
 		);
+	}
+
+	/// A join over a long history of gaps, as a lite-06 track keyed by timestamp carries one per
+	/// group, names only the gaps from the group below its start up, and an update keeping its
+	/// start names none of the rest: they lie past a group its budget skipped, which the
+	/// subscriber is not owed. One lowering its start asks for them, so they are named then, on a
+	/// relay's front too, whose copies reported them once already.
+	#[kio::test]
+	async fn a_join_names_no_gap_past_a_skipped_group() {
+		for (version, routed) in [Version::Lite05, Version::Lite06]
+			.into_iter()
+			.flat_map(|v| [(v, false), (v, true)])
+		{
+			let mut plain = None;
+			let mut front = None;
+			let track = match routed {
+				false => plain.insert(track::Producer::new(
+					Arc::new(broadcast::Info::default()),
+					"test",
+					crate::track::Info::timed(),
+				)),
+				true => {
+					&mut front
+						.insert(track::Routed::new("test", crate::track::Info::timed()))
+						.copy
+				}
+			};
+			for key in (0..1000).step_by(20) {
+				write_group(track, key, key);
+				track.drop_groups(key + 1..key + 20, crate::StreamError::NotFound);
+			}
+			let subscription = track::Subscription::default().with_max(Duration::from_millis(100));
+			let subscriber = match &front {
+				None => plain.as_ref().unwrap().subscribe(subscription),
+				Some(front) => front
+					.logical
+					.consume()
+					.subscribe(subscription)
+					.now_or_never()
+					.expect("an accepted logical track answers at once")
+					.unwrap(),
+			};
+			let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			let start = run.start.resolved().expect("resolved");
+			let below: Vec<_> = (drops(&mut writer, &log, version).await.into_iter())
+				.filter(|(first, _)| *first < start)
+				.collect();
+			assert_eq!(
+				below,
+				[(start - 19, start - 1)],
+				"{version:?} routed {routed}: start {start}"
+			);
+
+			let update = |start| lite::SubscribeUpdate {
+				wanted_group: None,
+				order: crate::track::Order::Descending,
+				priority: 1,
+				max_delay: Some(Duration::from_millis(100)),
+				ranges: vec![lite::Range::span(start, 0, None, None)],
+			};
+			let named = drops(&mut writer, &log, version).await.len();
+			run.replace(update(None));
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			let after = drops(&mut writer, &log, version).await;
+			assert_eq!(
+				after.len(),
+				named,
+				"{version:?} routed {routed}: an update keeping the start"
+			);
+
+			// One lowering the start asks for those keys, so each gap there is named then.
+			run.replace(update(Some(1)));
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			let lowered: Vec<_> = drops(&mut writer, &log, version).await.split_off(named);
+			for key in (0..start - 20).step_by(20) {
+				assert!(
+					lowered.contains(&(key + 1, key + 19)),
+					"{version:?} routed {routed}: gap {key} after a lowered start"
+				);
+			}
+		}
 	}
 
 	/// An upstream drop below the floor is forwarded once an update lowers the floor to it,

@@ -10,6 +10,7 @@ import { Withdrawal } from "../connection/withdrawal.ts";
 import { Counts } from "../cover.ts";
 import type * as datagram from "../datagram.ts";
 import * as DatagramStream from "../datagram_stream.ts";
+import { Runs } from "../drops.ts";
 import {
 	error,
 	NotFound,
@@ -36,6 +37,7 @@ import {
 	presented,
 	type Run,
 	runGaps,
+	sameHole,
 } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -1675,8 +1677,10 @@ export class Publisher {
 		// first group is known, SUBSCRIBE_END when the track finishes.
 		const emitRange = hasTrackStream(this.version);
 		let startSent = false;
-		// Dispositions before START refine its boundary; later ones must be named as drops.
-		const skipped: DropRun[] = [];
+		// Dispositions before START refine its boundary; later ones must be named as drops. Each
+		// replaces the runs it covers, as a skip may go out over a drop, so they stay sorted and
+		// disjoint. Mirrors the Rust `Start::Unresolved::skipped`.
+		let skipped = new Runs<DropRun>(sameHole);
 		// Where SUBSCRIBE_START resolved, lowered by an update that asks for groups below it.
 		let startKey: bigint | undefined;
 		// The first group and the edge seen before it was popped, held until the source
@@ -1988,19 +1992,27 @@ export class Publisher {
 		});
 		try {
 			for (;;) {
-				if (startKey !== undefined && skipped.length > 0) {
-					for (const range of skipped) {
-						// A stale run below the start is never named, so a wider budget may serve it. A
-						// final one is named all the same: no budget brings it back, and a subscriber
-						// filling below the start (a relay whose reader reaches lower) must still learn
-						// its fate. Mirrors the Rust `TrackRun::resolve`.
-						const below = min(range.end, startKey);
-						if (range.stale !== undefined) {
-							if (range.start < below) record?.untell(range.start, below);
-						} else if (!(await forward(range.start, below, range))) return false;
-						if (!(await forward(max(range.start, startKey), range.end, range))) return false;
+				if (startKey !== undefined && skipped.size > 0) {
+					// Nothing below the start is owed. The final runs reaching up to it unbroken are named all
+					// the same, so a reader filling below the start (a relay whose reader reaches lower) learns
+					// nothing there exists. The rest, past a stale run, a group still held, or a key nothing
+					// gave up, stay untold: naming them would send every gap in the track's history, as a
+					// lite-06 track keyed by timestamp holds one per group. An update that asks below the start
+					// names them then, and a wider budget may still serve a stale one. Mirrors the Rust
+					// `TrackRun::resolve`.
+					let reach = startKey;
+					for (let i = skipped.size - 1; i >= 0; i--) {
+						const range = skipped.all[i];
+						if (range.start >= reach) continue;
+						if (range.end < reach || range.stale !== undefined) break;
+						reach = range.start;
 					}
-					skipped.length = 0;
+					for (const range of skipped.all) {
+						const below = min(range.end, reach);
+						if (range.start < below) record?.untell(range.start, below);
+						if (!(await forward(max(range.start, reach), range.end, range))) return false;
+					}
+					skipped = new Runs<DropRun>(sameHole);
 				}
 				if (pendingDrops.length > 0) {
 					for (const { start, end, error } of pendingDrops.splice(0)) {
@@ -2101,7 +2113,7 @@ export class Publisher {
 					case "error":
 						throw recv.error;
 					case "drop":
-						if (!startSent) skipped.push(recv);
+						if (!startSent) skipped.set(recv.start, recv.end, recv);
 						else if (!(await forward(recv.start, recv.end, recv))) return false;
 						continue;
 					case "idle":
@@ -2126,7 +2138,7 @@ export class Publisher {
 							const end = hooks.servingEnd(track);
 							const runs = end === undefined ? [] : hooks.servingRuns(track, 0n, end);
 							const given: Run[] = [];
-							for (const range of skipped) insertRun(given, range.start, range.end);
+							for (const range of skipped.all) insertRun(given, range.start, range.end);
 							if (
 								runs.length > 0 &&
 								runs.every((run) => runGaps(given, run.start, run.end).length === 0)
@@ -2233,8 +2245,7 @@ export class Publisher {
 					startKey = min(group.start, source ?? group.start);
 					// A group given up cannot be where the feed starts. Adjacent runs given up with
 					// different errors stay separate, so walk them in order.
-					skipped.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
-					for (const range of skipped) {
+					for (const range of skipped.all) {
 						if (range.start <= startKey && range.end > startKey) startKey = min(range.end, group.start);
 					}
 					// A later group above an explicit floor is still delivered, so the cursor stays put.

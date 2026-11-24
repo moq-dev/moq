@@ -889,9 +889,10 @@ impl Copy {
 		match change {
 			Change::Scalars => self.send(reader, []),
 			Change::Edit(keys) => {
-				let added: Vec<(u64, track::Range)> = keys
+				let added: Vec<u64> = keys
 					.iter()
-					.filter_map(|key| Some((*key, *reader.ranges.get(key)?)))
+					.copied()
+					.filter(|key| reader.ranges.contains_key(key))
 					.collect();
 				for key in keys {
 					self.resolved.remove(key);
@@ -899,8 +900,8 @@ impl Copy {
 				// Added ranges resolve against this copy's cache now, as any subscriber's do;
 				// a copy still unanswered resolves them once it answers.
 				if let Sub::Ready(sub) = &mut self.sub {
-					let subscription = reader.with_ranges(added.iter().map(|(_, range)| *range).collect());
-					for ((key, _), resolved) in added.iter().zip(sub.resolve_ranges(&subscription)) {
+					let subscription = reader.subscription(added.iter().copied());
+					for (key, resolved) in added.iter().zip(sub.resolve_ranges(&subscription)) {
 						if let Some(resolved) = resolved {
 							self.resolved.insert(*key, resolved);
 						}
@@ -914,7 +915,7 @@ impl Copy {
 				self.resolved = match &mut self.sub {
 					Sub::Ready(sub) => keyed_resolution(
 						reader.ranges.keys().copied(),
-						sub.resolve_ranges(&reader.subscription()),
+						sub.resolve_ranges(&reader.subscription(reader.ranges.keys().copied())),
 					),
 					Sub::Pending(_) => BTreeMap::new(),
 				};
@@ -1558,6 +1559,12 @@ impl Subscriber {
 		self.reader().poll_drop(delivered, probe, waiter)
 	}
 
+	/// Forget every copy's report of `range`; see [`track::Subscriber::untell`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(super) fn untell(&mut self, range: std::ops::Range<u64>) {
+		self.reader().untell(range)
+	}
+
 	/// Assign the local read floor and exclusive cap; see [`track::Subscriber::with_range`].
 	/// `delivered` says which groups a lowered floor newly owes.
 	pub(super) fn set_range(&mut self, start: u64, end: Option<u64>, delivered: &Delivered) {
@@ -1912,9 +1919,15 @@ impl Mirrored {
 		}
 	}
 
-	/// These preferences, the ranges in key order. Costs every range.
-	fn subscription(&self) -> Subscription {
-		self.with_ranges(self.ranges.values().copied().collect())
+	/// These preferences with the ranges keyed `keys`, in that order, each live join placed
+	/// where the reader placed it, so a copy resolves it there rather than afresh.
+	fn subscription(&self, keys: impl IntoIterator<Item = u64>) -> Subscription {
+		let (ranges, placed) =
+			split((keys.into_iter()).filter_map(|key| Some((*self.ranges.get(&key)?, self.placed(key)))));
+		Subscription {
+			placed,
+			..self.with_ranges(ranges)
+		}
 	}
 
 	/// [`Self::subscription`] from no earlier than `floor` and through no later than the
@@ -3379,6 +3392,17 @@ impl Reader {
 		// up) may still land, and is handed out if it does.
 		self.remove_drop(open.clone());
 		Poll::Ready((open, err))
+	}
+
+	/// Forget every copy's report of `range`, so the copy serving when the reader's ranges ask
+	/// for it again reports it again: each copy's record would otherwise hold it as reported.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	fn untell(&mut self, range: std::ops::Range<u64>) {
+		for copy in &mut self.copies {
+			if let Sub::Ready(sub) = &mut copy.sub {
+				sub.untell(range.clone());
+			}
+		}
 	}
 
 	/// Forget `run` as queued, received or not.

@@ -12507,6 +12507,20 @@ impl Subscriber {
 		}
 	}
 
+	/// Forget what this reader reported of `range`, which its publisher never told its wire: a
+	/// run given up below where delivery starts. Ranges that later ask for it report it again,
+	/// on a front through whichever copy serves then.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn untell(&mut self, range: ops::Range<u64>) {
+		match &mut self.inner {
+			Inner::Plain(cursor) => cursor.record.untell(range),
+			Inner::Resume(resume, logical) => {
+				logical.record.untell(range.clone());
+				resume.untell(range);
+			}
+		}
+	}
+
 	/// How many runs of groups written off as stale this subscriber remembers.
 	#[cfg(test)]
 	fn written_off_runs(&self) -> usize {

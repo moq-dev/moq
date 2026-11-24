@@ -385,6 +385,13 @@ export function runGaps(runs: readonly Run[], start: bigint, end: bigint): Run[]
 }
 
 /**
+ * What a group read reports as a `drop` before the group: nothing, everything its cursor gives up,
+ * or `"budget"`, only what its budget skips, still handing out a failed group so a front's read
+ * continues it through its recovery, as a front reads its serving copy.
+ */
+export type Dispositions = boolean | "budget";
+
+/**
  * What a non-blocking group read found, which is everything the caller needs to decide what
  * to do next: no second look at the track's closed state, and no ordering rule to get wrong.
  */
@@ -572,6 +579,11 @@ export interface ResumeSource {
 	 * `delivered` this is, judged on the newest copy. Mirrors the Rust `Subscriber::forget_past`.
 	 */
 	forgetPast(delivered: Delivered, budget: Budget): void;
+	/**
+	 * Forget every copy's report of `[start, end)`, so the copy serving when the reader's ranges ask
+	 * for it again reports it again. Mirrors the Rust `Reader::untell`.
+	 */
+	untell(start: bigint, end: bigint): void;
 	/** Have every copy read whole groups for this reader; see `hooks.wholeGroups`. */
 	wholeGroups(frameOf: (key: bigint) => number | undefined): void;
 	/** The newest key any copy has seen. */
@@ -947,9 +959,9 @@ export const hooks: {
 	 *
 	 * Synchronous so a caller can pop a group and act on it in the same turn. Park on
 	 * {@link groupChanged} when it reports `idle` or `boundary`. With `dispositions`, what
-	 * the cursor gives up is reported once as a `drop`.
+	 * the cursor gives up is reported once as a `drop`; see {@link Dispositions}.
 	 */
-	tryRecvGroup: (subscriber: Subscriber, dispositions: boolean) => Recv;
+	tryRecvGroup: (subscriber: Subscriber, dispositions: Dispositions) => Recv;
 	/**
 	 * The next run the subscriber's cursor gave up and has not reported, without taking a group.
 	 * From the first call on, the budget skips of {@link tryRecvGroup} without dispositions are
@@ -1088,6 +1100,8 @@ export const hooks: {
 	forgetPastBudget: (subscriber: Subscriber, delivered: Delivered, budget: Budget) => void;
 	/** Fold a route copy's record below `at`, where the reader it feeds is, which reports nothing there. */
 	fold: (subscriber: Subscriber, at: bigint) => void;
+	/** Forget what a route copy reported of `[start, end)`, which its reader's wire was never told. */
+	untell: (subscriber: Subscriber, start: bigint, end: bigint) => void;
 	/**
 	 * What a lite publisher told its wire about a subscriber's keys, kept in the
 	 * subscriber's own record. Mirrors the Rust crate-private `track::Subscriber::record_mut`.
@@ -1535,6 +1549,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	fold: () => {
+		throw new Error("track.ts not loaded");
+	},
+	untell: () => {
 		throw new Error("track.ts not loaded");
 	},
 	wire: () => {
