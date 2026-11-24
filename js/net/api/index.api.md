@@ -174,6 +174,17 @@ export namespace Connection {
 		websocket?: Connection.WebSocketProps;
 		webtransport?: Connection.WebTransportProps;
 	}
+	export class Dial {
+		fail(err: Error): void;
+		present(tokens: readonly string[]): void;
+		readonly signal: AbortSignal;
+		readonly url: URL;
+	}
+	export let Dials: typeof Connection.Dials;
+	export class Dials {
+		constructor();
+		next(): Promise<Connection.Dial | undefined>;
+	}
 	export interface Goaway {
 		readonly timeout?: Clock.Duration;
 		readonly uri: string;
@@ -195,7 +206,7 @@ export namespace Connection {
 		share?: boolean;
 		signal?: never;
 		timeout?: Clock.Duration;
-		tokens?: readonly string[] | Signals.Signal<readonly string[]>;
+		tokens?: readonly string[] | Signals.Signal<readonly string[]> | Connection.Dials;
 		transport?: never;
 		url?: URL | Signals.Signal<URL | undefined>;
 		urlAuth?: boolean;
