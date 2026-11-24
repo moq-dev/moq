@@ -22,9 +22,12 @@ revoked`), but the page's session error reads `remote error: 3 (Announce
 Stream broke)`. A refusal at connect is unaffected: it reads `remote error: 2
 (unauthorized)`.
 
-Recommended: a stream breaking after the session's token got a final refusal
-ends the session with that refusal, in `#runAnnounce` and the other
-session-fatal stream readers. Check what Chrome reports for a
-`WT_SESSION_GONE` reset (`WebTransportError.streamErrorCode`) first: if it is
-`null`, rather than an application code, treat any such reset as the session
-ending and wait for its close instead.
+Chrome cannot tell that reset from an application's: Chrome 157 reports a
+`WT_SESSION_GONE` reset as `WebTransportError` with `source: "stream"` and
+`streamErrorCode: 0`, "Received RESET_STREAM.", the same as an application
+code 0 (measured in Kixel's E2E), so `@moq/net` cannot key on the code.
+Recommended: a session-fatal stream breaking after the session's token got a
+final refusal ends the session with that refusal, in `#runAnnounce`, the
+Announce Stream's `broken` handler, and any other session-fatal reader. The
+refusal arrives first, since the server writes it before closing and the
+close's resets still deliver what was written.

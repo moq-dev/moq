@@ -459,8 +459,9 @@ impl StreamsState {
 	}
 
 	/// The streams this endpoint sends on that a quiesce ends, except `keep` and those the
-	/// application has yet to accept, each with whether it was reset already. A stream stays
-	/// until the peer acknowledged its end.
+	/// application has yet to accept, each with whether it can still be reset: not reset yet, nor
+	/// released by its application, which left it to finish. A stream stays until the peer
+	/// acknowledged its end.
 	pub(crate) fn sending(&self, keep: &[StreamId]) -> Vec<(StreamId, bool)> {
 		self.send
 			.iter()
@@ -469,7 +470,7 @@ impl StreamsState {
 					id.initiator() != self.side && id.index() >= self.next_reported_remote[Dir::Bi as usize];
 				!keep.contains(id) && !unaccepted
 			})
-			.map(|(&id, slot)| (id, slot.as_ref().is_some_and(|send| send.is_reset())))
+			.map(|(&id, slot)| (id, !slot.as_ref().is_some_and(|send| send.is_reset() || send.released)))
 			.collect()
 	}
 

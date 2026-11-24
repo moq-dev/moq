@@ -831,7 +831,6 @@ fn close(conn: &Connection, web: Option<&Rc<Web>>, code: u32, reason: &str) {
 	// pieces, and abandoning a partial frame would leave the browser with
 	// neither the code nor the reason.
 	let mut deadline = conn.owner().after(CLOSE_GRACE);
-	let mut quiescing = true;
 	let reason = reason.to_string();
 	let owner = conn.owner().clone();
 	let conn = conn.clone();
@@ -841,16 +840,15 @@ fn close(conn: &Connection, web: Option<&Rc<Web>>, code: u32, reason: &str) {
 	let web = web.clone();
 	owner.spawn(async move {
 		let mut frame = Bytes::from(frame);
-		// Taken to finish once the frame is all written, and kept until the close.
-		let mut send = Some(send);
-		let mut finished = None;
+		// Only empty mid-transition.
+		let mut closing = Some(Closing::Quiescing(send));
 		kio::wait(|waiter| {
 			// Stop writing once the connection is gone; the deadline is the
 			// only other thing that ends this.
 			if conn.poll_closed(waiter).is_ready() {
 				return Poll::Ready(());
 			}
-			if quiescing {
+			if let Some(Closing::Quiescing(_)) = closing {
 				match quiesce(&conn, &web, connect, waiter) {
 					Poll::Ready(Ok(())) => {}
 					Poll::Ready(Err(_)) => return Poll::Ready(()),
@@ -859,10 +857,10 @@ fn close(conn: &Connection, web: Option<&Rc<Web>>, code: u32, reason: &str) {
 						tracing::debug!("peer left streams open past the grace; closing anyway");
 					}
 				}
-				quiescing = false;
+				closing = closing.take().map(Closing::write);
 				deadline.set(conn.owner().now().checked_add(CLOSE_GRACE));
 			}
-			if let Some(stream) = &mut send {
+			if let Some(Closing::Writing(stream)) = &mut closing {
 				while frame.has_remaining() {
 					match stream.poll_write_buf(waiter, &mut frame) {
 						Poll::Ready(Ok(_)) => {}
@@ -873,7 +871,7 @@ fn close(conn: &Connection, web: Option<&Rc<Web>>, code: u32, reason: &str) {
 					}
 				}
 				if !frame.has_remaining() {
-					finished = send.take().map(driver_send::Stream::finish);
+					closing = closing.take().map(Closing::finish);
 				}
 			}
 
@@ -882,8 +880,38 @@ fn close(conn: &Connection, web: Option<&Rc<Web>>, code: u32, reason: &str) {
 		.await;
 		conn.close_code(http3, &reason);
 		// Only now, so the critical streams end with the connection.
-		drop((web, finished));
+		drop((web, closing));
 	});
+}
+
+/// Where a close's CONNECT stream is: waiting for the session's streams to
+/// end, carrying the capsule, then finished and kept until the connection
+/// closes.
+enum Closing {
+	Quiescing(driver_send::Stream),
+	Writing(driver_send::Stream),
+	Finished(
+		#[allow(dead_code, reason = "held so the finished stream lives until the connection closes")]
+		driver_send::Finished,
+	),
+}
+
+impl Closing {
+	/// On to writing the capsule.
+	fn write(self) -> Self {
+		match self {
+			Self::Quiescing(stream) => Self::Writing(stream),
+			other => other,
+		}
+	}
+
+	/// Finish the stream, the capsule all written.
+	fn finish(self) -> Self {
+		match self {
+			Self::Writing(stream) => Self::Finished(stream.finish()),
+			other => other,
+		}
+	}
 }
 
 /// End every stream either side sends on, as [`Connection::poll_quiesce`] does

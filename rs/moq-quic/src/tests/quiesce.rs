@@ -101,7 +101,10 @@ fn waits_for_every_reset() {
 		2,
 		"an unaccepted stream is left to the application"
 	);
+	// Accepting it wakes the wait, whose next poll stops it.
+	let wakes = waiter.wakes();
 	assert_eq!(pair.server_streams(server_ch).accept(Dir::Uni), Some(late));
+	assert!(waiter.wakes() > wakes);
 	assert!(quiesce(&mut pair, server_ch, &waiter, &keep).is_pending());
 	pair.drive();
 
@@ -138,6 +141,32 @@ fn waits_for_its_resets_to_be_acknowledged() {
 	assert!(waiter.wakes() > 0);
 	assert_eq!(quiesce(&mut pair, server_ch, &waiter, &[]), Poll::Ready(Ok(())));
 	assert_eq!(reset_seen(&mut pair, client_ch, ours), (b"unread".to_vec(), Some(CODE)));
+}
+
+/// A stream its application finished and released is left to finish, and the wait lasts until
+/// the peer acknowledged it.
+#[test]
+fn released_streams_finish() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	let (client_ch, server_ch) = pair.connect();
+	let s = pair
+		.server_streams(server_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	pair.server_send(server_ch, s).write(&mut &b"done"[..]).unwrap();
+	pair.server_send(server_ch, s).finish().unwrap();
+	pair.server_send(server_ch, s).release();
+
+	let waiter = Counter::new();
+	assert!(quiesce(&mut pair, server_ch, &waiter, &[]).is_pending());
+	pair.drive();
+	assert_eq!(quiesce(&mut pair, server_ch, &waiter, &[]), Poll::Ready(Ok(())));
+	let mut recv = pair.client_recv(client_ch, s);
+	let mut chunks = recv.read().unwrap();
+	assert_matches!(chunks.next(usize::MAX), Ok(Some(chunk)) if chunk.bytes == b"done"[..]);
+	assert_matches!(chunks.next(usize::MAX), Ok(None));
+	chunks.finalize();
 }
 
 /// A stream the peer already finished, or one the reader stopped and the peer ended, holds

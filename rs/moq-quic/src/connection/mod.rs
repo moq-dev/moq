@@ -524,8 +524,8 @@ impl Connection {
 			return Poll::Ready(Err(err.clone()));
 		}
 		let sending = self.streams.sending(keep);
-		for &(id, reset) in &sending {
-			if reset {
+		for &(id, resettable) in &sending {
+			if !resettable {
 				continue;
 			}
 			// What the application wrote is still delivered.
