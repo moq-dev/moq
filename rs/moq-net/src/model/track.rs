@@ -12100,16 +12100,19 @@ impl Subscriber {
 					return Poll::Pending;
 				}
 				let mut idle = idle::Idle::start(&mut cursor.idle, waiter);
+				// Taken once for the whole read: taking it again may retire it for a fresh one,
+				// dropping what the read registered on so far.
+				let parked = idle.waiter();
 				let polled = loop {
 					let peeked = match ordered {
-						true => cursor.poll_peek_next(idle.waiter()),
-						false => cursor.poll_peek_recv(idle.waiter()),
+						true => cursor.poll_peek_next(parked),
+						false => cursor.poll_peek_recv(parked),
 					};
 					let peeked = match peeked {
 						Poll::Pending => {
 							// A read that only skipped since its last hand-out settles its write-offs too.
 							cursor.retire_written_off();
-							break match !self.parks && cursor.is_exhausted(ordered, idle.waiter()) {
+							break match !self.parks && cursor.is_exhausted(ordered, parked) {
 								true => {
 									if ordered && let Some(end) = cursor.filter.window.end() {
 										cursor.pass_end(cursor.end_key.map_or(end, |cap| cap.min(end)));
@@ -13563,16 +13566,16 @@ impl Ordered {
 			return Poll::Ready(Ok(None));
 		}
 		let mut idle = idle::Idle::start(&mut self.idle, waiter);
-		let polled = self.poll_item(idle.waiter());
+		// Taken once for the whole read: taking it again may retire it for a fresh one,
+		// dropping what the read registered on so far.
+		let parked = idle.waiter();
+		let polled = self.poll_item(parked);
 		let rest = match &polled {
 			Poll::Pending => Some(Rest::Pending),
 			Poll::Ready(Ok(None)) => {
 				// The ranges are what can move past an end, as a widening update does through
 				// a [`Control`], whose write wakes this registration.
-				let _ = self
-					.inner
-					.preferences()
-					.poll_ref(idle.waiter(), |_| Poll::<()>::Pending);
+				let _ = self.inner.preferences().poll_ref(parked, |_| Poll::<()>::Pending);
 				Some(Rest::End)
 			}
 			Poll::Ready(_) => None,
