@@ -30951,7 +30951,10 @@ mod test {
 		assert!(producer.state.read().fill_holds.holds(9), "held as it lands");
 		pool.resize(pool.pinned() + 1_000);
 		producer.evict_for_debt(9);
-		assert_eq!(fill.unfit().iter().cloned().collect::<Vec<_>>(), [9..10]);
+		assert!(
+			fill.unfit().iter().eq(std::iter::once(&(9..10))),
+			"group 9 does not fit"
+		);
 
 		subscriber.update(descending(Range::groups(0..8))).unwrap();
 		assert!(subscriber.poll_recv_group(&waiter).is_pending());
