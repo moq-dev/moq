@@ -38,7 +38,7 @@ impl Held {
 				// A budget wide enough that no cached group is skipped as stale.
 				let mut reader = track.subscribe(track::Subscription::default().with_ranges([track::Range::from(
 					track::Start::Live {
-						min: Duration::from_secs(3600),
+						min: Some(Duration::from_secs(3600)),
 						max: Some(Duration::from_secs(3600)),
 					},
 				)]));

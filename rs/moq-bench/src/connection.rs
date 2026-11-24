@@ -464,7 +464,7 @@ async fn drain(broadcast: broadcast::Consumer, max_delay: Duration, stats: &Stat
 	let _gauge = Gauge::inc(&stats.subscriptions);
 
 	let subscription = track::Subscription::default().with_ranges([track::Range::from(track::Start::Live {
-		min: max_delay,
+		min: Some(max_delay),
 		max: Some(max_delay),
 	})]);
 	let mut track = broadcast.track(TRACK)?.subscribe(subscription).await?;

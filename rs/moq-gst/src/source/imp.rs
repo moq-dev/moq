@@ -3032,7 +3032,7 @@ mod session_tests {
 		assert_eq!(
 			request.subscription().unwrap().ranges,
 			[moq_net::track::Range::from(moq_net::track::Start::Live {
-				min: max_delay,
+				min: Some(max_delay),
 				max: Some(max_delay),
 			})]
 		);
@@ -3072,7 +3072,7 @@ mod session_tests {
 		assert_eq!(
 			request.subscription().unwrap().ranges,
 			[moq_net::track::Range::from(moq_net::track::Start::Live {
-				min: max_delay + warmup,
+				min: Some(max_delay + warmup),
 				max: Some(max_delay + warmup),
 			})]
 		);

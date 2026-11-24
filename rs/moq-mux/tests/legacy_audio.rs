@@ -83,7 +83,7 @@ async fn one_packet_opus_groups_read_on_without_a_gap() {
 		let track = remote.track("audio").expect("track");
 		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 			moq_net::track::Start::Live {
-				min: Duration::from_secs(5),
+				min: Some(Duration::from_secs(5)),
 				max: Some(Duration::from_secs(5)),
 			},
 		)]);
@@ -141,7 +141,7 @@ async fn a_dropped_run_waits_for_the_next_groups_first_packet() {
 			.unwrap();
 		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 			moq_net::track::Start::Live {
-				min: Duration::from_secs(5),
+				min: Some(Duration::from_secs(5)),
 				max: Some(Duration::from_secs(5)),
 			},
 		)]);
@@ -201,7 +201,7 @@ async fn an_old_publishers_marker_group_reads_as_an_end() {
 			.unwrap();
 		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 			moq_net::track::Start::Live {
-				min: Duration::from_secs(5),
+				min: Some(Duration::from_secs(5)),
 				max: Some(Duration::from_secs(5)),
 			},
 		)]);

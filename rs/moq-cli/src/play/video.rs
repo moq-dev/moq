@@ -569,7 +569,7 @@ mod tests {
 			.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: delay,
+						min: Some(delay),
 						max: Some(delay),
 					},
 				)]),
@@ -614,7 +614,7 @@ mod tests {
 			.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: budget,
+						min: Some(budget),
 						max: Some(budget),
 					},
 				)]),
@@ -714,7 +714,7 @@ mod tests {
 		assert_eq!(
 			source.subscription().map(|subscription| subscription.ranges),
 			Some(vec![moq_net::track::Range::from(moq_net::track::Start::Live {
-				min,
+				min: Some(min),
 				max: Some(max + held),
 			})]),
 			"the subscription's budget grows with the shared delay"
@@ -828,7 +828,7 @@ mod tests {
 			.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: delay,
+						min: Some(delay),
 						max: Some(delay),
 					},
 				)]),
@@ -888,7 +888,7 @@ mod tests {
 			.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: delay,
+						min: Some(delay),
 						max: Some(delay),
 					},
 				)]),
@@ -958,7 +958,7 @@ mod tests {
 			.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: delay,
+						min: Some(delay),
 						max: Some(delay),
 					},
 				)]),
@@ -1007,7 +1007,7 @@ mod tests {
 			.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: delay,
+						min: Some(delay),
 						max: Some(delay),
 					},
 				)]),
@@ -1053,7 +1053,7 @@ mod tests {
 			.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_secs(10),
+						min: Some(Duration::from_secs(10)),
 						max: Some(Duration::from_secs(10)),
 					},
 				)]),
@@ -1105,7 +1105,7 @@ mod tests {
 			.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: delay,
+						min: Some(delay),
 						max: Some(delay),
 					},
 				)]),
@@ -1171,7 +1171,7 @@ mod tests {
 			.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: delay,
+						min: Some(delay),
 						max: Some(delay),
 					},
 				)]),
@@ -1234,7 +1234,7 @@ mod tests {
 			.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: delay,
+						min: Some(delay),
 						max: Some(delay),
 					},
 				)]),

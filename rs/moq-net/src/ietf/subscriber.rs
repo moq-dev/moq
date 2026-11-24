@@ -14714,7 +14714,7 @@ mod filter_tests {
 		let live = |min: Option<Duration>, start: u64| {
 			let first = match min {
 				Some(min) => track::Range::from(track::Start::Live {
-					min,
+					min: Some(min),
 					max: Some(std::time::Duration::ZERO),
 				}),
 				None => track::Range::ALL,
@@ -14761,7 +14761,7 @@ mod filter_tests {
 		assert_eq!(wire_bounds(&asking(&bounded), None), (Some(0), Some(5)));
 		// A live join alone asks from the live edge, whatever its max.
 		let patient = track::Range::from(track::Start::Live {
-			min: Duration::ZERO,
+			min: Some(Duration::ZERO),
 			max: Some(Duration::from_secs(10)),
 		});
 		for subscription in [asking(&[live]), asking(&[patient])] {

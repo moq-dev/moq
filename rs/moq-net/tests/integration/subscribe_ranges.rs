@@ -44,7 +44,7 @@ fn write_group(track: &moq_net::track::Producer, key: u64) {
 /// A live join at the latest group.
 fn live() -> Subscription {
 	Subscription::default().with_ranges([Range::from(Start::Live {
-		min: Duration::ZERO,
+		min: Some(Duration::ZERO),
 		max: Some(std::time::Duration::ZERO),
 	})])
 }
@@ -235,7 +235,7 @@ async fn a_live_viewer_asks_lite07_upstream_for_the_live_edge() {
 		assert_eq!(
 			asked,
 			[Range::from(Start::Live {
-				min: Duration::ZERO,
+				min: Some(Duration::ZERO),
 				max: Some(std::time::Duration::ZERO)
 			})],
 			"relay={relay}: a live join"
@@ -359,7 +359,7 @@ async fn initial_mixed_ranges_keep_the_absolute_history() {
 					.with_ranges([
 						support::keys(1..2),
 						Range::from(Start::Live {
-							min: Duration::ZERO,
+							min: Some(Duration::ZERO),
 							max: None,
 						}),
 					])
@@ -701,7 +701,7 @@ async fn draft22_cold_widening_finishes_the_largest_group() {
 			let narrowed = match start {
 				0 => support::keys(future..),
 				_ => Range::from(Start::Live {
-					min: Duration::ZERO,
+					min: Some(Duration::ZERO),
 					max: None,
 				}),
 			};
@@ -896,7 +896,7 @@ async fn holes_through_a_relay(version: &str, budget: Option<Duration>) {
 			Subscription::default().with_max(budget).with_order(order).with_ranges([
 				keys(0..8),
 				Range::from(Start::Live {
-					min: Duration::ZERO,
+					min: Some(Duration::ZERO),
 					max: Some(std::time::Duration::ZERO),
 				}),
 			]),

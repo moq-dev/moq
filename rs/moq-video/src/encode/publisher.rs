@@ -369,7 +369,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: replay,
+						min: Some(replay),
 						max: Some(replay),
 					},
 				)]),

@@ -1014,10 +1014,10 @@ impl State {
 		let Some(origin) = named.or_else(|| self.router.pick(broadcast)) else {
 			return Some(None);
 		};
-		let Some(next) = self.router.step(origin, broadcast) else {
+		let Some(next) = self.router.step(origin, broadcast, from) else {
 			// Shown available with no way yet: hold the request rather than answer it
 			// unroutable, which nothing this node shows would ever make its sender retry.
-			return match self.router.awaits(origin, broadcast) {
+			return match self.router.awaits(origin, broadcast, from) {
 				true => None,
 				false => Some(None),
 			};

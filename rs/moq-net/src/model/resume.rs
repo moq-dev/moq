@@ -5130,7 +5130,7 @@ mod test {
 		// The copy's aggregate, where a placed join's lag places nothing.
 		let asked = next.subscription().unwrap();
 		let placed = track::Start::Live {
-			min: Duration::ZERO,
+			min: Some(Duration::ZERO),
 			max: Some(HOUR),
 		};
 		assert_eq!(asked.ranges, [track::Range::from(placed)]);
@@ -8392,7 +8392,7 @@ mod test {
 			add: vec![(
 				1,
 				track::Range::from(track::Start::Live {
-					min: Duration::from_millis(6),
+					min: Some(Duration::from_millis(6)),
 					max: Some(HOUR),
 				}),
 			)],
@@ -10424,7 +10424,7 @@ mod test {
 		// No `max`, so the new copy is asked for it where it resolved; see `Range::asked`.
 		let behind = Subscription::default().with_ranges([track::Range {
 			start: track::Start::Live {
-				min: Duration::from_millis(1500),
+				min: Some(Duration::from_millis(1500)),
 				max: None,
 			},
 			end: Some(1_000_000),
@@ -10672,7 +10672,7 @@ mod test {
 		assert!(copy.poll_ready((0, None), &kio::Waiter::noop()).is_ready());
 		// Two behind the newest frame, at 4.
 		let updated = Subscription::default().with_ranges([track::Range::from(track::Start::Live {
-			min: Duration::from_millis(2),
+			min: Some(Duration::from_millis(2)),
 			max: None,
 		})]);
 		let updated = Mirrored::of(&updated);
@@ -11284,7 +11284,7 @@ mod test {
 		// Two behind the newest frame, at 10.
 		// No `max`, so the replacement is asked for it where it resolved; see `Range::asked`.
 		let subscription = Subscription::default().with_ranges([track::Range::from(track::Start::Live {
-			min: Duration::from_millis(2),
+			min: Some(Duration::from_millis(2)),
 			max: None,
 		})]);
 		let mut sub = logical
@@ -11320,7 +11320,7 @@ mod test {
 		routes.serve(a.consume());
 		let range = track::Range {
 			start: track::Start::Live {
-				min: Duration::ZERO,
+				min: Some(Duration::ZERO),
 				max: None,
 			},
 			end: Some(1_000_000),
@@ -11368,7 +11368,7 @@ mod test {
 		let joined = sub
 			.subscription()
 			.with_ranges([track::Range::from(track::Start::Live {
-				min: Duration::ZERO,
+				min: Some(Duration::ZERO),
 				max: None,
 			})])
 			.with_max(Duration::from_secs(30));
@@ -11381,7 +11381,7 @@ mod test {
 			sub.recv_group().now_or_never().is_none(),
 			"only its upstream's answer places it"
 		);
-		b.answer_join(Duration::ZERO, None, Some(1000), Duration::MAX);
+		b.answer_join(Some(Duration::ZERO), None, Some(1000), Duration::MAX);
 		let group = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
 		assert_eq!(group.start, 1000);
 	}
@@ -11494,7 +11494,7 @@ mod test {
 		// Two behind the newest frame, at 10: group 8.
 		// No `max`, so the capped copy is asked for it where it resolved; see `Range::asked`.
 		let subscription = Subscription::default().with_ranges([track::Range::from(track::Start::Live {
-			min: Duration::from_millis(2),
+			min: Some(Duration::from_millis(2)),
 			max: None,
 		})]);
 		let sub = routes.consume().subscribe(subscription.into());
@@ -11672,7 +11672,7 @@ mod test {
 		// A live join `back` behind the newest frame, a range of its own for each.
 		// No `max`, so a copy is asked for it where it resolved; see `Range::asked`.
 		let join = |back| track::Start::Live {
-			min: Duration::from_millis(back),
+			min: Some(Duration::from_millis(back)),
 			max: None,
 		};
 		let ranges = |back| {
@@ -12994,7 +12994,7 @@ mod test {
 		// One behind the newest frame, at 5.
 		let subscription = Subscription::default()
 			.with_ranges([track::Range::from(track::Start::Live {
-				min: Duration::from_millis(1),
+				min: Some(Duration::from_millis(1)),
 				max: Some(std::time::Duration::ZERO),
 			})])
 			.with_max(Duration::from_secs(10));
@@ -13054,7 +13054,7 @@ mod test {
 			.with_ranges([
 				track::Range::groups(0..1),
 				track::Range::from(track::Start::Live {
-					min: Duration::from_millis(1),
+					min: Some(Duration::from_millis(1)),
 					max: Some(std::time::Duration::ZERO),
 				}),
 			])
@@ -13076,7 +13076,7 @@ mod test {
 		for start in [
 			track::Start::Time(0),
 			track::Start::Live {
-				min: Duration::ZERO,
+				min: Some(Duration::ZERO),
 				max: Some(std::time::Duration::ZERO),
 			},
 		] {

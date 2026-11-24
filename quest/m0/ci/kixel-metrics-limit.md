@@ -22,8 +22,19 @@ A full Nightly `metrics.json` is 865 KB today, and CodSpeed's is 161 KB.
 - Each artifact zip must still fit Kixel Quest's 1 MiB compressed budget. A
   full Nightly compresses to about 97 KB, so nothing needs to check that yet.
 
+Decided 2026-11-23 (maintainer, /quest-run pick on
+[kixel-ai/kixel.quest#120](https://github.com/kixel-ai/kixel.quest/pull/120)):
+✅ raise the limit only once Kixel Quest's factory page caps its series list
+(rejected: raising it as soon as the budget deploys; lowering the budget to
+4 MiB). The page lists every series in full, and thirty runs at 8 MiB render
+27.7 MB of HTML in 10.5 s.
+
 ## Waiting
 
 - kixel-ai/kixel.quest: the 8 MiB inflated budget is deployed. Check that
   `quest/m0/metrics-budget.md` is gone from kixel.quest's `main` and that
   `src/metrics.ts` no longer caps an inflated file at `1 << 20`.
+- kixel-ai/kixel.quest: its factory page caps the series it lists, planned in
+  its `quest/m0/factory-series-cap.md` by kixel-ai/kixel.quest#120. Check that
+  #120 has merged and that the quest file is then gone from kixel.quest's
+  `main`.

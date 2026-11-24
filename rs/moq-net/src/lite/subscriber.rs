@@ -4009,7 +4009,7 @@ mod tests {
 			.await
 			.unwrap();
 		let join = track::JoinAsk {
-			min: Duration::from_secs(1),
+			min: Some(Duration::from_secs(1)),
 			end: None,
 			budget: Duration::from_secs(30),
 			since: 0,
@@ -4064,7 +4064,7 @@ mod tests {
 			.await
 			.unwrap();
 		let join = |budget, since| track::JoinAsk {
-			min: Duration::from_secs(1),
+			min: Some(Duration::from_secs(1)),
 			end: None,
 			budget,
 			since,
@@ -4359,7 +4359,7 @@ mod tests {
 		// A live join, which only the publisher can place.
 		let back = lite::Range {
 			start: Some(lite::Anchor::Live {
-				min: Duration::ZERO,
+				min: Some(Duration::ZERO),
 				max: None,
 			}),
 			end: None,
@@ -6246,7 +6246,7 @@ mod tests {
 		let (serve, mut serving, tail, _broadcast) = lite07_serving(budget).await;
 		// A live join under the budget, which the upstream placed at group 0: a stale drop
 		// under that budget ends what it reads.
-		let lag = Duration::from_secs(10);
+		let lag = Some(Duration::from_secs(10));
 		let mut reader =
 			serving.serving.subscribe(
 				crate::track::Subscription::default().with_ranges([crate::track::Range::from(
@@ -6277,7 +6277,7 @@ mod tests {
 			// A live join under a wider max age replaces the range.
 			let wider = lite::Range {
 				start: Some(lite::Anchor::Live {
-					min: Duration::ZERO,
+					min: Some(Duration::ZERO),
 					max: Some(Duration::from_secs(5)),
 				}),
 				end: None,
@@ -8863,7 +8863,7 @@ mod tests {
 			wire_ranges(&Subscription::default()),
 			Some(vec![lite::Range {
 				start: Some(lite::Anchor::Live {
-					min: Duration::ZERO,
+					min: Some(Duration::ZERO),
 					max: Some(Duration::ZERO)
 				}),
 				end: None,
@@ -8878,7 +8878,7 @@ mod tests {
 	fn a_placed_join_goes_out_joined() {
 		let max = Some(Duration::from_secs(2));
 		let join = track::Range::from(crate::track::Start::Live {
-			min: Duration::from_millis(40),
+			min: Some(Duration::from_millis(40)),
 			max,
 		});
 		let mut placed = Subscription {
@@ -8895,7 +8895,7 @@ mod tests {
 		};
 		let live = lite::Range {
 			start: Some(lite::Anchor::Live {
-				min: Duration::from_millis(40),
+				min: Some(Duration::from_millis(40)),
 				max,
 			}),
 			end: None,
@@ -10932,7 +10932,7 @@ fn wire_ranges(subscription: &Subscription) -> Option<Vec<lite::Range>> {
 /// It starts at the lowest start. A subscription with only ranges without a start asks with
 /// none, which a pre-06 publisher reads as the latest group and a lite-06 one as no floor,
 /// under the widest max age among them, the one `Subscriber Max Age` the wire carries: a
-/// live join reaching back past every group (see [`track::Start::within`]), or none while a
+/// live join with no lag limit (see [`track::Start::within`]), or none while a
 /// range from the oldest group asks for history. One mixing the two asks from group 0,
 /// history, since no single start covers both: the latest group may sit below the start.
 ///
@@ -11440,7 +11440,7 @@ fn join_probe(join: &track::JoinAsk) -> lite::Range {
 
 /// The live join a wire range asks, as its lag and inclusive end (see [`through`]), `None`
 /// for one that isn't a live join. Where it lands doesn't depend on its max age.
-fn wire_join(range: &lite::Range) -> Option<(Duration, Option<u64>)> {
+fn wire_join(range: &lite::Range) -> Option<(Option<Duration>, Option<u64>)> {
 	match range.start {
 		Some(lite::Anchor::Live { min, .. }) => Some((min, through(range.end))),
 		_ => None,

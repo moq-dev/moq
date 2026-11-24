@@ -587,7 +587,7 @@ impl Aged {
 					.unwrap();
 				let mut sub = track.subscribe(track::Subscription::default().with_ranges([track::Range::from(
 					track::Start::Live {
-						min: AGED_BUDGET,
+						min: Some(AGED_BUDGET),
 						max: Some(AGED_BUDGET),
 					},
 				)]));
@@ -1128,7 +1128,7 @@ fn bench_subscriber_preferences(c: &mut Criterion) {
 	let extreme = track::Subscription::default()
 		.with_priority(i8::MAX)
 		.with_ranges([track::Range::from(track::Start::Live {
-			min: Duration::from_secs(10),
+			min: Some(Duration::from_secs(10)),
 			max: Some(Duration::from_secs(10)),
 		})]);
 	let mut group = c.benchmark_group("track_subscriber_preferences");
@@ -1322,7 +1322,7 @@ fn bench_parked_read(c: &mut Criterion) {
 				);
 				let mut sub = track.subscribe(track::Subscription::default().with_ranges([track::Range::from(
 					track::Start::Live {
-						min: max_delay,
+						min: Some(max_delay),
 						max: Some(max_delay),
 					},
 				)]));
@@ -1404,7 +1404,7 @@ impl Sparse {
 		let track = broadcast.create_track("bench", info.clone()).unwrap();
 		let sub = track.subscribe(track::Subscription::default().with_ranges([track::Range::from(
 			track::Start::Live {
-				min: Duration::from_secs(3600),
+				min: Some(Duration::from_secs(3600)),
 				max: Some(Duration::from_secs(3600)),
 			},
 		)]));
@@ -1522,7 +1522,7 @@ impl Idle {
 		for _ in 0..readers {
 			let reader = track.subscribe(track::Subscription::default().with_ranges([track::Range::from(
 				track::Start::Live {
-					min: AGED_BUDGET,
+					min: Some(AGED_BUDGET),
 					max: Some(AGED_BUDGET),
 				},
 			)]));
@@ -1587,7 +1587,7 @@ impl Expiring {
 			.sub
 			.update(
 				track::Subscription::default().with_ranges([track::Range::from(track::Start::Live {
-					min: Duration::from_millis(gaps),
+					min: Some(Duration::from_millis(gaps)),
 					max: Some(Duration::from_millis(gaps)),
 				})]),
 			)
@@ -1657,7 +1657,7 @@ impl GapFlush {
 		let track = broadcast.create_track("bench", timed()).unwrap();
 		let mut sub = track.subscribe(track::Subscription::default().with_ranges([track::Range::from(
 			track::Start::Live {
-				min: Duration::from_secs(3600),
+				min: Some(Duration::from_secs(3600)),
 				max: Some(Duration::from_secs(3600)),
 			},
 		)]));
@@ -1769,7 +1769,7 @@ impl EmptyRun {
 			Run::Retired => (Duration::ZERO, 1),
 		};
 		let budget = track::Subscription::default().with_ranges([track::Range::from(track::Start::Live {
-			min: budget,
+			min: Some(budget),
 			max: Some(budget),
 		})]);
 		Self {
@@ -1888,7 +1888,7 @@ impl BudgetWidening {
 		let broadcast = broadcast::Info::default().produce();
 		let track = broadcast.create_track("bench", timed()).unwrap();
 		let narrow = track::Subscription::default().with_ranges([track::Range::from(track::Start::Live {
-			min: Self::NARROW,
+			min: Some(Self::NARROW),
 			max: Some(Self::NARROW),
 		})]);
 		let mut reader = track.subscribe(narrow.clone());
@@ -1924,7 +1924,7 @@ impl BudgetWidening {
 
 	fn widen(&mut self) {
 		let wide = track::Subscription::default().with_ranges([track::Range::from(track::Start::Live {
-			min: AGED_BUDGET,
+			min: Some(AGED_BUDGET),
 			max: Some(AGED_BUDGET),
 		})]);
 		self.reader.update(wide).unwrap();
