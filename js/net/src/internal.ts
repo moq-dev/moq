@@ -463,7 +463,7 @@ export interface Expiry {
 /**
  * Why a group read looks past the copy it reads, as the Rust `resume::Cause`: the copy failed,
  * stalled while a newer route serves, or closed the group short of a known end (a FIN without
- * GROUP_END) after a newer route took over, which may hold more.
+ * GROUP_END) after a newer route took over or while one is being spliced in, which may hold more.
  */
 export type RecoverCause = { kind: "failed"; error: Error } | { kind: "stalled" } | { kind: "closed" };
 

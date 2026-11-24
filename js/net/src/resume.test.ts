@@ -2266,8 +2266,12 @@ function gated(source: BroadcastProducer, gate: Promise<void>): BroadcastConsume
 		override clone(): Gated {
 			return new Gated(this.shareState());
 		}
+
+		static of(consumer: BroadcastConsumer): Gated {
+			return new Gated((consumer as Gated).shareState());
+		}
 	}
-	return new Gated((source.consume() as Gated).shareState());
+	return Gated.of(source.consume());
 }
 
 // The front splices a copy in once its info answers; a short close the serving copy makes

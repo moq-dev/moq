@@ -1180,8 +1180,8 @@ export class Consumer {
 	// Whether the read may go on past a close of the copy being read that names no end (a FIN
 	// without GROUP_END), with every frame it delivered read: the group may hold more, which the
 	// route that replaced the copy reads on from. A read that reaches the close (`decide`) judges
-	// it, once: it goes on while a newer route serves, and otherwise ends there for good, so every
-	// later look agrees. Until then it may go on, so the end is not yet final.
+	// it, once: it goes on while a newer route serves or is being spliced in, and otherwise ends
+	// there for good, so every later look agrees. Until then it may go on, so the end is not yet final.
 	#continues(decide: boolean): boolean {
 		if (this.#ended || this.#released || !this.#recover || this.#verdict.peek()) return false;
 		const state = this.#state;

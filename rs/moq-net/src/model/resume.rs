@@ -4075,7 +4075,8 @@ pub(super) enum Cause {
 	/// The copy stalled while a newer route serves.
 	Stalled,
 	/// The copy closed the group short of a known end, a FIN without GROUP_END, after the
-	/// front replaced it: the route that replaced it may hold more.
+	/// front replaced it or while it stages a replacement: the route replacing it may hold
+	/// more.
 	Closed,
 	/// The copy failed with this error.
 	Failed(Error),
