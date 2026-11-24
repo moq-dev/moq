@@ -1,5 +1,8 @@
 import { Signal } from "@moq/signals";
 
+// Set by Dial's static block, which alone may call its private constructor.
+let makeDial: (url: URL, signal: AbortSignal) => [Dial, Promise<readonly string[]>];
+
 /** One dial of a connection, waiting for the tokens it presents. */
 export class Dial {
 	/** Where the dial goes: the connection's URL, or the relay a GOAWAY redirected it to. */
@@ -10,14 +13,20 @@ export class Dial {
 
 	readonly #tokens = Promise.withResolvers<readonly string[]>();
 
-	/** @internal */
-	constructor(url: URL, signal: AbortSignal) {
+	private constructor(url: URL, signal: AbortSignal) {
 		this.url = url;
 		this.signal = signal;
 		// A dial its connection abandoned rejects unread.
 		this.#tokens.promise.catch(() => {});
 		if (signal.aborted) this.#tokens.reject(signal.reason);
 		else signal.addEventListener("abort", () => this.#tokens.reject(signal.reason), { once: true });
+	}
+
+	static {
+		makeDial = (url, signal) => {
+			const dial = new Dial(url, signal);
+			return [dial, dial.#tokens.promise];
+		};
 	}
 
 	/** Present `tokens` on this dial, as a fixed list would be; the first answer counts. */
@@ -28,11 +37,6 @@ export class Dial {
 	/** Fail this dial with `err`, as an unreachable peer would: the connection retries or gives up as for any failed dial. */
 	fail(err: Error): void {
 		this.#tokens.reject(err);
-	}
-
-	/** @internal */
-	get tokens(): Promise<readonly string[]> {
-		return this.#tokens.promise;
 	}
 }
 
@@ -62,10 +66,10 @@ export class Dials {
 	/** Ask for the tokens of a dial to `url`, until `signal` aborts. @internal */
 	request(url: URL, signal: AbortSignal): Promise<readonly string[]> {
 		if (this.#closed) return Promise.reject(new Error("connection closed"));
-		const dial = new Dial(url, signal);
+		const [dial, tokens] = makeDial(url, signal);
 		this.#waiting.push(dial);
 		this.#queued.update((n) => n + 1);
-		return dial.tokens;
+		return tokens;
 	}
 
 	/** End {@link next}, failing every dial still waiting. @internal */
