@@ -5426,6 +5426,19 @@ impl Producer {
 		}
 	}
 
+	/// Fail the readers of this lite-07 copy waiting now on time start `time` with `err`, as its
+	/// upstream refused the range asked to place it, the way a refused fill fails the readers
+	/// of its groups. A reader waiting on it later asks again.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn refuse_time(&self, time: u64, err: Error) {
+		let subscriptions = self.state.read().subscriptions.clone();
+		subscriptions.lock().refuse(time, err).wake();
+		// Recorded first, so a reader woken here finds it.
+		if let Ok(mut state) = self.modify() {
+			state.placing += 1;
+		}
+	}
+
 	/// Record how the upstream publisher answered a range of this lite-07 copy asking the live
 	/// join `min` behind the live edge through `end`: at group `start`, or `None` for nothing
 	/// to deliver, asked under at most `budget`. It replaces the join's earlier answer, and
@@ -9215,6 +9228,9 @@ struct Asked {
 	/// The demand counting them, once one is counted.
 	subscriptions: Option<kio::Lock<Subscriptions>>,
 	times: Vec<u64>,
+	/// The demand's refusals when each of `times` was first counted, so only a refusal since
+	/// fails it.
+	since: BTreeMap<u64, u64>,
 	joins: Vec<JoinAsk>,
 }
 
@@ -9266,9 +9282,15 @@ impl Asked {
 					}
 				}
 			}
-			let times = changes(&self.times, &times)
-				.into_iter()
-				.map(|(time, waits)| subs.ask(time, waits));
+			let refusals = subs.refusals();
+			let since = &mut self.since;
+			let times = changes(&self.times, &times).into_iter().map(|(time, waits)| {
+				let at = match waits {
+					true => *since.entry(time).insert_entry(refusals).get(),
+					false => since.remove(&time).expect("a counted time"),
+				};
+				subs.ask(time, at, waits)
+			});
 			let times: Vec<_> = times.collect();
 			let joins = changes(&self.joins, &joins)
 				.into_iter()
@@ -9279,6 +9301,15 @@ impl Asked {
 		for mut wakes in wakes {
 			wakes.wake();
 		}
+	}
+
+	/// Why the upstream refused a time start counted here since it was counted, if it did.
+	fn refused(&self) -> Option<Error> {
+		let subs = self.subscriptions.as_ref()?.lock();
+		if !subs.has_refusals() {
+			return None;
+		}
+		(self.times.iter()).find_map(|time| subs.refusal(*time, self.since[time]))
 	}
 }
 
@@ -9857,7 +9888,8 @@ impl Cursor {
 			return;
 		}
 		let state = self.state.read();
-		let times = match state.anchors == Anchors::Wire {
+		// A failed read waits on no time start until its ranges change.
+		let times = match state.anchors == Anchors::Wire && self.filter.refused.is_none() {
 			true => times.collect(),
 			false => Vec::new(),
 		};
@@ -9875,7 +9907,13 @@ impl Cursor {
 		let subscriptions = state.subscriptions.clone();
 		// Released first, so the two locks never nest.
 		drop(state);
-		self.asked.set(times, joins, || subscriptions);
+		self.asked.set(times, joins.clone(), || subscriptions.clone());
+		// The upstream refused to place one: the reads fail with its error, as a refused
+		// lookup's do, and a later reader asks again.
+		if let Some(err) = self.asked.refused() {
+			(self.filter.refused, self.filter.stale) = (Some(err), true);
+			self.asked.set(Vec::new(), joins, || subscriptions);
+		}
 	}
 
 	/// [`Self::sync`] without the asks. Returns whether the window moved.
@@ -17483,6 +17521,53 @@ mod test {
 		assert_eq!(placed(&mut past), Some((2000, true)));
 		drop(past);
 		assert_eq!(asks(&producer), Vec::<u64>::new());
+	}
+
+	/// Upstream refusing to place a time start fails only the readers waiting on it then, with
+	/// its error, and they stop asking for it; a reader waiting on it later asks again.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_refused_time_start_fails_only_the_readers_waiting_then() {
+		let from = |time| {
+			Subscription::default()
+				.with_ranges([Range {
+					start: crate::track::Start::Time(time),
+					end: None,
+				}])
+				.with_max(None)
+		};
+		let asks = |producer: &Producer| -> Vec<u64> {
+			let asks = producer.subscription().map(|aggregate| aggregate.asks);
+			asks.unwrap_or_default()
+		};
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		write_group(&producer, 1000);
+		let mut waiting = [producer.subscribe(from(1500)), producer.subscribe(from(1500))];
+		let mut other = producer.subscribe(from(1700));
+		for subscriber in waiting.iter_mut().chain([&mut other]) {
+			assert!(subscriber.refused().is_none());
+		}
+		assert_eq!(asks(&producer), [1500, 1700]);
+
+		producer.refuse_time(1500, Error::NotFound);
+		assert_eq!(asks(&producer), [1700], "its readers stop asking at once");
+		for subscriber in &mut waiting {
+			assert!(matches!(subscriber.refused(), Some(Error::NotFound)), "fails with its error");
+		}
+		assert!(other.refused().is_none(), "another time still waits");
+
+		let mut later = producer.subscribe(from(1500));
+		assert!(later.refused().is_none(), "a later reader waits");
+		assert_eq!(asks(&producer), [1500, 1700], "and asks again");
+		drop(waiting);
+		assert_eq!(asks(&producer), [1500, 1700], "the failed readers leaving takes no other ask");
+		producer.refuse_time(1500, Error::Cancel);
+		assert!(matches!(later.refused(), Some(Error::Cancel)));
+		assert_eq!(asks(&producer), [1700]);
+		drop(later);
+		assert_eq!(asks(&producer), [1700]);
 	}
 
 	/// A lite-07 copy holding a whole group places a time inside its span from that group

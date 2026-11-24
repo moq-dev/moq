@@ -22,7 +22,7 @@ use crate::tail::{self, Reading, Settle, Tail};
 use kio::Lock;
 
 mod fills;
-use fills::{FillAsk, RangeFills, Recovery};
+use fills::{FillAsk, RangeFills, Recovery, Refusal};
 mod fit;
 pub(super) mod route_stream;
 mod routed;
@@ -6610,7 +6610,6 @@ mod tests {
 			priority: 0,
 			probes: Default::default(),
 			placed: Default::default(),
-			failed: Default::default(),
 			closed: serve_loop.closed,
 		};
 		// A reader holds the finished copy.
@@ -12644,17 +12643,16 @@ struct FinishedServe {
 	/// Where each probe's publisher started, by time, which places the readers waiting on
 	/// it, while they still do.
 	placed: BTreeMap<u64, Option<u64>>,
-	/// The times whose probe failed, not asked again while their readers still wait.
-	failed: BTreeSet<u64>,
 	closed: Transport,
 }
 
 impl FinishedServe {
 	/// Ask upstream for each time start readers wait on that no probe asks yet, and place
 	/// those readers once upstream said where it starts and its group is arriving. A probe
-	/// that fails before saying leaves its readers waiting and is not asked again while they
-	/// do: the failure is upstream's, and ending the copy would cut every other reader of it.
-	fn probe(&mut self, serve: &TrackServe, waiter: &kio::Waiter) -> Result<(), Error> {
+	/// that fails before saying fails only the readers waiting on its time, with upstream's
+	/// error, as a failed FETCH fails only its fill's groups. `read` is whether anyone still
+	/// reads the copy.
+	fn probe(&mut self, serve: &TrackServe, read: bool, waiter: &kio::Waiter) -> Result<(), Error> {
 		let Some(serving) = &mut self.serving else {
 			return Ok(());
 		};
@@ -12666,18 +12664,17 @@ impl FinishedServe {
 		let before = self.placed.len();
 		self.placed.retain(|time, _| asks.contains(time));
 		let mut moved = self.placed.len() != before;
-		self.failed.retain(|time| asks.contains(time));
-		// Its readers placed or gone, a probe stays only while its group is still arriving,
-		// which ending it would cut.
+		// Its readers placed or gone, a probe stays only while its group is still arriving to
+		// someone reading the copy, which ending it would cut.
 		self.probes.retain(|time, probe| {
-			let keep = asks.contains(time) || probe.reading();
+			let keep = asks.contains(time) || (read && probe.reading());
 			if !keep {
 				probe.end(crate::StreamError::Cancel);
 			}
 			keep
 		});
 		for &time in asks {
-			if self.placed.contains_key(&time) || self.probes.contains_key(&time) || self.failed.contains(&time) {
+			if self.placed.contains_key(&time) || self.probes.contains_key(&time) {
 				continue;
 			}
 			// No group starts at the last key, so no range from it holds one.
@@ -12689,27 +12686,26 @@ impl FinishedServe {
 		}
 		let mut done = Vec::new();
 		for (&time, probe) in &mut self.probes {
-			let over = match probe.poll(waiter) {
-				Poll::Ready(refused) => {
-					refused?;
-					true
-				}
-				Poll::Pending => false,
+			let refused = match probe.poll(waiter) {
+				Poll::Ready(refused) => Some(refused?),
+				Poll::Pending => None,
 			};
 			if asks.contains(&time) && !self.placed.contains_key(&time) {
-				match probe.landed() {
-					Some(start) => {
+				match (probe.landed(), &refused) {
+					(Some(start), _) => {
 						self.placed.insert(time, start);
 						moved = true;
 					}
-					None if over => {
-						tracing::debug!(track = %serve.name, time, "time probe failed");
-						self.failed.insert(time);
+					// Its readers stop asking, so the time is asked again only for a later one.
+					(None, Some(refused)) => {
+						let err = refused.get(&time).map_or(Error::NotFound, Refusal::error);
+						tracing::debug!(track = %serve.name, time, %err, "time probe failed");
+						serving.refuse_time(time, err);
 					}
-					None => {}
+					(None, None) => {}
 				}
 			}
-			if over {
+			if refused.is_some() {
 				done.push(time);
 			}
 		}
@@ -12762,7 +12758,7 @@ impl FinishedServe {
 				// A recovery's publisher broke the protocol, which closes the session.
 				lite::error::control(&mut serve.subscriber.session.clone(), err);
 			}
-			if let Err(err) = self.probe(serve, waiter) {
+			if let Err(err) = self.probe(serve, read, waiter) {
 				lite::error::control(&mut serve.subscriber.session.clone(), err);
 			}
 			let Some(serving) = &self.serving else {
@@ -13211,7 +13207,6 @@ impl TrackServeRun {
 									priority,
 									probes: Default::default(),
 									placed: Default::default(),
-									failed: Default::default(),
 									demand: serve_loop.demand,
 									dynamic: serve_loop.dynamic,
 									fetches: serve_loop.fetches,

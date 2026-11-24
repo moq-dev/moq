@@ -204,16 +204,41 @@ async fn read_back(version: Version, during_tail: bool) {
 /// evicted.
 #[kio::test]
 async fn a_finished_copy_asks_for_a_time_it_cannot_place() {
-	for during_tail in [true, false] {
-		place_time(during_tail).await;
+	for ask in [Ask::DuringTail, Ask::Finished] {
+		place_time(ask).await;
 	}
 }
 
+/// Upstream refusing the range a finished copy asks to place a time fails the reader waiting
+/// on it with upstream's error, rather than leaving it waiting, and the copy serves on.
+#[kio::test]
+async fn a_finished_copy_fails_a_time_upstream_refuses() {
+	place_time(Ask::Refused).await;
+}
+
+/// A finished copy lets go of the range placing a time once nobody reads the copy, even while
+/// the group it placed is still arriving.
+#[kio::test]
+async fn a_finished_copy_lets_go_of_a_time_nobody_reads() {
+	place_time(Ask::Abandoned).await;
+}
+
+/// When a reader asks the finished copy for a time it cannot place, and what upstream does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Ask {
+	/// While the copy's tail still waits for the last group.
+	DuringTail,
+	/// Once the copy finished.
+	Finished,
+	/// Once the copy finished and upstream no longer lists the track.
+	Refused,
+	/// Once the copy finished, leaving before the placed group's frames arrive.
+	Abandoned,
+}
+
 /// The copy receives groups 0 to 20 s, five seconds apart, and expires all but the newest.
-/// The publisher then finishes the track after one more, and a reader asks for time 18 s:
-/// while the copy's tail still waits for the last group (`during_tail`), or once the copy
-/// finished.
-async fn place_time(during_tail: bool) {
+/// The publisher then finishes the track after one more, and a reader asks for time 18 s.
+async fn place_time(ask: Ask) {
 	let version: Version = "moq-lite-07-wip".parse().unwrap();
 	let mut config = origin::Config::new(std::num::NonZeroU64::new(1).unwrap());
 	config.proxy = true;
@@ -283,11 +308,12 @@ async fn place_time(during_tail: bool) {
 	}
 	kio::clock::sleep(moq_net::cache::DEFAULT_EXPIRY * 2 + Duration::from_secs(2)).await;
 	// During the tail, the last group's stream is held, so the reader asks before the copy finished.
+	let during_tail = ask == Ask::DuringTail;
 	if during_tail {
 		upstream.server_transport.hold_unis();
 	}
 	written.push(write(25));
-	let _ended = track.finish().unwrap();
+	let mut ended = Some(track.finish().unwrap());
 	let mut second = None;
 	if during_tail {
 		kio::clock::sleep(Duration::from_millis(100)).await;
@@ -306,16 +332,48 @@ async fn place_time(during_tail: bool) {
 		.expect("end timeout");
 	assert!(matches!(end, Ok(None)), "the copy finished");
 
+	match ask {
+		// The track leaves upstream's listing, so a range asking it is refused.
+		Ask::Refused => ended = None,
+		// The placed group's header lands, and its frame is held.
+		Ask::Abandoned => upstream.server_transport.split_unis(),
+		Ask::DuringTail | Ask::Finished => {}
+	}
 	let mut second = match second {
 		Some(second) => second,
 		None => history(support::keys(18_000..=18_000)).await,
 	};
-	let mut group = kio::clock::timeout(TIMEOUT, second.recv_group())
+	let group = kio::clock::timeout(TIMEOUT, second.recv_group())
 		.await
-		.unwrap_or_else(|_| panic!("during tail {during_tail}: the copy asks upstream for time 18 s"))
-		.unwrap()
-		.expect("the group containing it");
-	assert_eq!(group.start, 15_000, "during tail {during_tail}");
+		.unwrap_or_else(|_| panic!("{ask:?}: the copy asks upstream for time 18 s"));
+	if ask == Ask::Refused {
+		let err = group.err();
+		assert!(err.is_some(), "upstream's refusal fails the reader");
+		// Only that reader: the copy still serves the group it holds.
+		let mut held = history(support::keys(25_000..=25_000)).await;
+		let group = kio::clock::timeout(TIMEOUT, held.recv_group())
+			.await
+			.expect("held group timeout")
+			.unwrap()
+			.expect("the held group");
+		assert_eq!(group.start, 25_000);
+		drop((broadcast, upstream, publisher, relay, written, first));
+		return;
+	}
+	let mut group = group.unwrap().expect("the group containing it");
+	assert_eq!(group.start, 15_000, "{ask:?}");
+	if ask == Ask::Abandoned {
+		// Every reader leaves.
+		let resets = upstream.client_transport.resets().len();
+		drop((group, second, first, last));
+		kio::clock::sleep(Duration::from_millis(100)).await;
+		assert!(
+			upstream.client_transport.resets().len() > resets,
+			"the copy nobody reads cancels the range still delivering its group"
+		);
+		drop((broadcast, upstream, publisher, relay, written, ended));
+		return;
+	}
 	// Whole: the probe that placed the reader outlives its ask until the group is read.
 	let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
 		.await
@@ -326,6 +384,6 @@ async fn place_time(during_tail: bool) {
 	let end = kio::clock::timeout(TIMEOUT, group.read_frame())
 		.await
 		.expect("group end timeout");
-	assert!(matches!(end, Ok(None)), "during tail {during_tail}: {end:?}");
-	drop((broadcast, upstream, publisher, relay, written, first));
+	assert!(matches!(end, Ok(None)), "{ask:?}: {end:?}");
+	drop((broadcast, upstream, publisher, relay, written, first, ended));
 }

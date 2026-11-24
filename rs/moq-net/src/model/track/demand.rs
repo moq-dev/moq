@@ -54,6 +54,11 @@ pub(super) struct Subscriptions {
 	/// The time starts a received copy's readers wait on, by time, counted: see
 	/// [`Subscription::asks`].
 	asks: BTreeMap<u64, usize>,
+	/// The time starts whose upstream lookup failed, by time: the readers that waited then,
+	/// counted apart from [`Self::asks`] until each lets go, and what they fail with.
+	refused: BTreeMap<u64, RefusedTime>,
+	/// Bumped by each refusal, so a reader can tell whether it began waiting before one.
+	refusals: u64,
 	/// Where capping subscribers stop; see [`Subscription::cap`].
 	caps: BTreeMap<Position, usize>,
 	/// How many subscribers cap, so the aggregate asks without summing [`Self::caps`].
@@ -82,6 +87,14 @@ pub(super) struct Subscriptions {
 struct Waiting {
 	budgets: BTreeMap<Duration, usize>,
 	since: BTreeMap<u64, usize>,
+}
+
+/// The readers a time start's refusal failed, which still count it.
+struct RefusedTime {
+	/// The [`Subscriptions::refusals`] it was refused at: a reader asking since then waits.
+	epoch: u64,
+	err: crate::Error,
+	count: usize,
 }
 
 /// A pending request for a group past every key written.
@@ -186,16 +199,61 @@ impl Subscriptions {
 	}
 
 	/// Count a reader waiting on time start `time`, or uncount one when not `waits`, waking the
-	/// aggregate's watchers when the first starts or the last stops waiting on it.
-	pub(super) fn ask(&mut self, time: u64, waits: bool) -> kio::WaiterList {
+	/// aggregate's watchers when the first starts or the last stops waiting on it. `since` is
+	/// the [`Self::refusals`] it began waiting at, which a reader waiting returns.
+	pub(super) fn ask(&mut self, time: u64, since: u64, waits: bool) -> kio::WaiterList {
 		let moved = match waits {
 			true => add(&mut self.asks, time),
-			false => remove(&mut self.asks, time),
+			// One a refusal failed is counted there instead.
+			false => match self.refused.get_mut(&time).filter(|refused| refused.epoch > since) {
+				Some(refused) => {
+					refused.count -= 1;
+					if refused.count == 0 {
+						self.refused.remove(&time);
+					}
+					false
+				}
+				None => remove(&mut self.asks, time),
+			},
 		};
 		match moved {
 			true => self.waiters.take(),
 			false => Default::default(),
 		}
+	}
+
+	/// The refusals so far, which a reader beginning to wait on a time start notes.
+	pub(super) fn refusals(&self) -> u64 {
+		self.refusals
+	}
+
+	/// Fail the readers waiting on time start `time` now with `err`, as the upstream refused
+	/// to place it: they stop counting in [`Self::asks`], and a reader waiting later asks
+	/// again. Wakes the aggregate's watchers when any waited.
+	pub(super) fn refuse(&mut self, time: u64, err: crate::Error) -> kio::WaiterList {
+		let Some(count) = self.asks.remove(&time) else {
+			return Default::default();
+		};
+		self.refusals += 1;
+		let refused = self.refused.entry(time).or_insert(RefusedTime {
+			epoch: 0,
+			err: err.clone(),
+			count: 0,
+		});
+		(refused.epoch, refused.err) = (self.refusals, err);
+		refused.count += count;
+		self.waiters.take()
+	}
+
+	/// Why time start `time` failed for a reader waiting on it since refusal `since`, if it did.
+	pub(super) fn refusal(&self, time: u64, since: u64) -> Option<crate::Error> {
+		let refused = self.refused.get(&time)?;
+		(refused.epoch > since).then(|| refused.err.clone())
+	}
+
+	/// Whether any time start's refusal still fails a reader.
+	pub(super) fn has_refusals(&self) -> bool {
+		!self.refused.is_empty()
 	}
 
 	/// [`Self::combined`] without its ranges, costing none of them.
