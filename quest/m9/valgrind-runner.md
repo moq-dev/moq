@@ -29,4 +29,4 @@ Public API: none. Wire: none.
 
 ## Waiting
 
-- kixel-ai/rust2: its Valgrind runner, `quest/m1/bench-runner.md` there; check that the file is gone from rust2's `main`.
+- kixel-ai/rust2: its Valgrind runner lands in [kixel-ai/rust2#995](https://github.com/kixel-ai/rust2/pull/995); check `gh pr view 995 -R kixel-ai/rust2 --json state,mergeCommit`. moq's `rust2` flake input pins that PR's head (`af1a7664`) until then; move the pin to its squash commit on rust2's `main`.

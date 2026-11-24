@@ -975,8 +975,10 @@ sharing one can leave a bench linked against the other tree's library.
 The Instructions workflow counts each deterministic bench's instructions every
 night on `main`, under stock Valgrind on a hosted runner, through
 [rust2-bench](https://github.com/kixel-ai/rust2/tree/main/bench/runner). Each
-benchmark runs alone in its own Valgrind process, and its count repeats run to
-run, so a change of a few percent shows without the paired comparison's rounds. It does not see syscalls,
+benchmark runs alone in its own Valgrind process, and most counts repeat run to
+run, so a change of a few percent shows without the paired comparison's rounds;
+some still vary by up to 17%
+([quest](/quest/m9/repeatable-instruction-counts.md)). It does not see syscalls,
 I/O, contention, or caches, and CodSpeed's Criterion, which counts them, skips
 `iter_custom` benches, so `just rs instructions` builds only single-threaded
 targets without I/O, and Nightly keeps measuring every bench. Workspace benches
