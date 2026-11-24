@@ -2260,9 +2260,9 @@ export class Producer {
 		return entry.arrived.checkedAdd(refresh.interval)?.max(current);
 	}
 
-	// Report the demand: whether anyone subscribes, and the group start asked for while it is
-	// past every key written, which is the next free key once a pending refresh is due. A
-	// deferred one arms a wakeup to report again when it comes due.
+	// Report the demand: whether anyone subscribes to or holds the open track, and the group start
+	// asked for while it is past every key written, which is the next free key once a pending
+	// refresh is due. A deferred one arms a wakeup to report again when it comes due.
 	#reportWanted(): void {
 		const current = now();
 		const request = this.#pending;
@@ -2271,7 +2271,9 @@ export class Producer {
 		const start = due ? max(this.#received, this.#floor) : this.#floor;
 		const asked = start >= this.#received ? start : undefined;
 		this.#asked.set(asked);
-		this.#wanted.set(this.#sinks.size > 0 || this.#holds > 0);
+		// A closed track wants nothing, though a lookup still holds it.
+		const open = this.#state.closed.peek() === undefined;
+		this.#wanted.set(open && (this.#sinks.size > 0 || this.#holds > 0));
 		// Only a subscriber reads the group a refresh asks for.
 		const refreshing = this.#sinks.size > 0 && asked !== undefined;
 		// A request due in the batch that ended the last one leaves the level unchanged, so it
@@ -3255,6 +3257,7 @@ export class Producer {
 		// from another copy. Releasing it here would end that continuation at its next short close.
 		for (const sink of this.#sinks) closeTrackState(sink, abort);
 		this.#sinks.clear();
+		this.#reportWanted();
 		// The former live edge becomes evictable too, its idle window restarted, so the close
 		// never reclaims a group its subscribers have yet to drain.
 		const edge = this.#edgeEntry();

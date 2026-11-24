@@ -262,6 +262,28 @@ test("held info lookups keep a request until the last one lets go", async () => 
 	broadcast.close();
 });
 
+test("a held info lookup stops counting as demand once its track closes", async () => {
+	const broadcast = new BroadcastProducer();
+	const pulled = wireOf(broadcast).requested();
+	const first = new AbortController();
+	const opened = wireOf(broadcast).resolveTrackInfo("media", first.signal);
+	const request = await pulled;
+	if (!request) throw new Error("expected request");
+	const producer = request.accept({ timescale: Timescale.MILLI });
+	const second = new AbortController();
+	await wireOf(broadcast).resolveTrackInfo("media", second.signal);
+	await opened;
+	expect(producer.demand().wanted.peek()).toBe(true);
+
+	producer.close();
+	expect(producer.demand().wanted.peek()).toBe(false);
+	// A hold letting go after the close reports demand again, which stays off.
+	first.abort();
+	expect(producer.demand().wanted.peek()).toBe(false);
+	second.abort();
+	broadcast.close();
+});
+
 test("an abandoned info lookup's request goes once answered", async () => {
 	const broadcast = new BroadcastProducer();
 	const pulled = wireOf(broadcast).requested();
