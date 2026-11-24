@@ -15,12 +15,12 @@ jobs:
   measure:
     name: Firefox replacement (${{ matrix.variant }} ${{ matrix.shard }})
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 60
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        variant: [trace]
-        shard: [1, 2, 3, 4]
+        variant: [replacement, full]
+        shard: [1, 2]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -43,12 +43,14 @@ jobs:
           BROWSERS: ${{ runner.temp }}/playwright
         run: |
           runs=5
+          cases=(--media-cases replacement)
+          if [[ "$VARIANT" == full ]]; then runs=3; cases=(); fi
           pass=0
           fail=0
           for i in $(seq "$runs"); do
             log="$RUNNER_TEMP/run-$i.log"
             if nix develop --command env PLAYWRIGHT_BROWSERS_PATH="$BROWSERS" HARNESS_RUNS="$RUNNER_TEMP/runs-$i" HARNESS_KEEP=1 RUST_LOG=moq_net=trace \
-              just test media --media-engines firefox --media-cases replacement >"$log" 2>&1; then
+              just test media --media-engines firefox "${cases[@]}" >"$log" 2>&1; then
               pass=$((pass + 1))
               echo "run $i: pass"
             else
