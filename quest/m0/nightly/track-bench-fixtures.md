@@ -8,6 +8,8 @@ the groups after it in that target.
 
 ## Plan
 
+Kept by the maintainer on 2026-11-24 ([pick round](https://github.com/moq-dev/moq/pull/9529#issuecomment-7140096782)).
+
 Found while smoke-running the benches for [moq-dev/moq#9529](https://github.com/moq-dev/moq/pull/9529).
 Each failure below reproduces identically on 85ab682bf4, the commit before that PR:
 

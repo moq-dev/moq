@@ -8,6 +8,8 @@ of a plain track does. Today it hands out the group and never reports the gap.
 
 ## Plan
 
+Kept by the maintainer on 2026-11-24 ([pick round](https://github.com/moq-dev/moq/pull/9529#issuecomment-7140096782)).
+
 Found while building [moq-dev/moq#9529](https://github.com/moq-dev/moq/pull/9529): on lite-06,
 `drop_record::an_ordered_reader_is_told_of_every_group_the_origin_evicted` hit it once the origin
 served its queued groups newest first. That PR lets group 0 go out before the rest queue, which
