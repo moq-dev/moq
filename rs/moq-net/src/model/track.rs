@@ -11208,7 +11208,28 @@ impl Cursor {
 				self.filter.owed.insert(key..=key);
 			}
 		}
+		self.prune_owed();
 		moved
+	}
+
+	/// Forget every owed run no cached group is left in once the runs outnumber the cache's
+	/// groups twice over. [`Self::first_owed`] drops such a run only on reaching it, which a
+	/// newest-first read holding an old group may never do, so this keeps a run per cached
+	/// group at O(1) per arrival amortized.
+	fn prune_owed(&mut self) {
+		let state = self.state.read();
+		if self.filter.owed.len() <= state.lookup.len().saturating_mul(2) || !state.serves_bounded(&self.filter.window)
+		{
+			return;
+		}
+		let gone: Vec<_> = (self.filter.owed.iter())
+			.filter(|run| !state.lookup.range((*run).clone()).any(|(_, slot)| slot.is_read()))
+			.cloned()
+			.collect();
+		drop(state);
+		for run in gone {
+			self.filter.owed.remove(run);
+		}
 	}
 
 	/// Write off group `key`, which the drift budget gave up on, as dropped `Old`:
@@ -12149,6 +12170,15 @@ impl Subscriber {
 		match &self.inner {
 			Inner::Plain(cursor) => cursor.forget_past_budget(delivered, budget),
 			Inner::Resume(resume, _) => resume.forget_past(delivered, budget),
+		}
+	}
+
+	/// How many runs of groups this subscriber's arrival read owes.
+	#[cfg(test)]
+	pub(super) fn owed_runs(&self) -> usize {
+		match &self.inner {
+			Inner::Plain(cursor) => cursor.filter.owed.len(),
+			Inner::Resume(..) => 0,
 		}
 	}
 
@@ -31395,6 +31425,39 @@ mod test {
 		write_group(&producer, 2998);
 		write_group(&producer, 2500);
 		assert_eq!(drain_groups(&mut subscriber), [2998]);
+	}
+
+	/// A newest-first reader that never drains down to the groups the cache evicted under it
+	/// owes no more runs than the cache holds groups, however long the track runs.
+	#[test]
+	fn a_reader_forgets_the_owed_groups_the_cache_evicted() {
+		let producer = track_producer("test", Info::timed());
+		// Cached throughout, and never stale without a budget, so the oldest-end scan stops here.
+		write_group(&producer, 0);
+		let mut subscriber = producer.subscribe(Subscription::default().with_ranges([Range::ALL]).with_max(None));
+		let waiter = kio::Waiter::noop();
+		let (mut most, mut peak) = (0, 0);
+		for batch in 1..200u64 {
+			// Sparse keys, so no two owed groups merge into one run.
+			let (older, newer) = (batch * 10, batch * 10 + 5);
+			write_group(&producer, older);
+			write_group(&producer, newer);
+			peak = peak.max(producer.state.read().lookup.len());
+			let Poll::Ready(Ok(Some(group))) = subscriber.poll_recv_group(&waiter) else {
+				panic!("batch {batch} hands out a group");
+			};
+			assert_eq!(group.start, newer, "newest first");
+			// The cache lets the older one go before the reader gets down to it, and the
+			// last batch's newer one, handed out.
+			evict(&producer, older);
+			if batch > 1 {
+				evict(&producer, newer - 10);
+			}
+			most = most.max(subscriber.owed_runs());
+		}
+		assert!(most <= 2 * peak, "{most} owed runs for at most {peak} cached groups");
+		// Draining down still reads the group the cache kept.
+		assert_eq!(drain_groups(&mut subscriber), [0]);
 	}
 
 	/// A group of one untimed frame at `key`.
