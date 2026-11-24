@@ -713,7 +713,10 @@ mod tests {
 		first.lost();
 
 		let second = signed(&set, &["second", "extra-2"]);
-		assert!(answered(&set).is_pending(), "the replaced set's refusal answered the new one");
+		assert!(
+			answered(&set).is_pending(),
+			"the replaced set's refusal answered the new one"
+		);
 		second.grant_credential();
 		second.link.grant(id(&set, "extra-2"), Grant::all());
 		ok(&set);
