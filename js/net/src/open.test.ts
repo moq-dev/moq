@@ -220,30 +220,3 @@ test("an RTT of 0 reads as no sample, so an open still waits 100 ms", async () =
 		installed.close();
 	}
 });
-
-// Held opens stay out of the line, so no create the handshake's open started reaches them, and a
-// cancelled one never opens a stream.
-test("a hold keeps every open but the handshake's out of the line until it settles", async () => {
-	const { client, server } = createMockTransportPair();
-	const admitted = Promise.withResolvers<void>();
-	lines(client).hold(admitted.promise);
-
-	const held = Writer.open(client, { version, sendOrder: 9 });
-	const cancel = Promise.withResolvers<void>();
-	const cancelled = Writer.tryOpen(client, { version, cancel: cancel.promise });
-	const setup = await Writer.open(client, { version, handshake: true });
-	expect(client.sendStreams.uni).toHaveLength(1);
-
-	cancel.resolve();
-	expect(await cancelled).toBeUndefined();
-	admitted.resolve();
-	await held;
-	expect(client.sendStreams.uni).toHaveLength(2);
-	expect(client.sendStreams.uni[1].sendOrder).toBe(9);
-	// Once settled, a new open no longer waits.
-	await Writer.open(client, { version });
-	expect(client.sendStreams.uni).toHaveLength(3);
-	setup.close();
-	client.close();
-	server.close();
-});

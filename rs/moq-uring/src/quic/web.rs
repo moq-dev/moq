@@ -797,12 +797,21 @@ fn close(conn: &Connection, web: Option<&Rc<Web>>, code: u32, reason: &str) {
 		*closed = Some(Error::Closed(code, reason.to_string()));
 	}
 
-	let connect_send = web.state.lock().connect_send.take();
+	let (connect_send, critical) = {
+		let mut state = web.state.lock();
+		let held = state.held_recv.iter().flatten().map(driver_recv::Stream::id);
+		let critical: Vec<_> = held.collect();
+		(state.connect_send.take(), critical)
+	};
 	let http3 = proto::error_to_http3(code);
 	let Some(send) = connect_send else {
 		conn.close_code(http3, reason);
 		return;
 	};
+	// The CONNECT stream carries the peer's capsules, and the control and QPACK streams end
+	// the peer's HTTP/3 connection if stopped, so the quiesce leaves them be.
+	let mut critical = critical;
+	critical.push(send.id());
 
 	// The capsule is what carries the code and reason to a browser
 	// (`WebTransport.closed`); the connection close alone would lose the
@@ -818,12 +827,19 @@ fn close(conn: &Connection, web: Option<&Rc<Web>>, code: u32, reason: &str) {
 	encode_varint(payload.len() as u64, &mut frame);
 	frame.extend_from_slice(&payload);
 
-	// Finish the capsule and then give the peer a moment to act on it,
+	// First have the peer end every stream it sends on: Chrome's renderer
+	// crashes when the capsule arrives while the page still writes a stream
+	// (https://issues.chromium.org/issues/589817008). The session is closed,
+	// so the stops carry WT_SESSION_GONE. A peer that leaves them open past
+	// the grace gets the capsule anyway.
+	//
+	// Then finish the capsule and give the peer a moment to act on it,
 	// closing either way once the grace period is up. The write goes in
 	// the task rather than here because flow control can take it in
 	// pieces, and abandoning a partial frame would leave the browser with
 	// neither the code nor the reason.
 	let mut deadline = conn.owner().after(CLOSE_GRACE);
+	let mut quiescing = true;
 	let reason = reason.to_string();
 	let owner = conn.owner().clone();
 	let conn = conn.clone();
@@ -841,6 +857,18 @@ fn close(conn: &Connection, web: Option<&Rc<Web>>, code: u32, reason: &str) {
 			// only other thing that ends this.
 			if conn.poll_closed(waiter).is_ready() {
 				return Poll::Ready(());
+			}
+			if quiescing {
+				match conn.poll_quiesce(waiter, http3_code(WT_SESSION_GONE), &critical) {
+					Poll::Ready(Ok(())) => {}
+					Poll::Ready(Err(_)) => return Poll::Ready(()),
+					Poll::Pending => {
+						ready!(deadline.poll(waiter));
+						tracing::debug!("peer left streams open past the grace; closing anyway");
+					}
+				}
+				quiescing = false;
+				deadline.set(conn.owner().now().checked_add(CLOSE_GRACE));
 			}
 			if let Some(stream) = &mut send {
 				while frame.has_remaining() {

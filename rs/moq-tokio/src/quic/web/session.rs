@@ -61,18 +61,35 @@ struct Web {
 	header_bi: Bytes,
 	header_datagram: Bytes,
 
-	/// Held so the control and QPACK streams stay open until the last clone drops.
-	_settings: Settings,
+	/// Held so the control streams stay open until the last clone drops.
+	settings: Settings,
 
 	/// The send side of the CONNECT stream, which the first close takes to write the
 	/// CloseWebTransportSession capsule.
 	connect_send: Mutex<Option<crate::quic::driver::send::Stream>>,
+
+	/// The CONNECT stream, whose capsules a close keeps reading.
+	connect_id: crate::quic::driver::stream::Id,
 
 	/// The request sent by the client.
 	request: ConnectRequest,
 
 	/// The response sent by the server, with the subprotocol it selected.
 	response: ConnectResponse,
+}
+
+impl Web {
+	/// The HTTP/3 streams a close must leave open: the CONNECT stream and the peer's control and
+	/// QPACK streams, since stopping one ends the peer's HTTP/3 connection before the capsule.
+	fn critical(&self) -> Vec<crate::quic::driver::stream::Id> {
+		let accept = self.accept.lock().unwrap();
+		let qpack = [&accept.qpack_encoder, &accept.qpack_decoder];
+		let qpack = qpack.into_iter().flatten().map(|recv| recv.id());
+		[self.connect_id, self.settings.control_id()]
+			.into_iter()
+			.chain(qpack)
+			.collect()
+	}
 }
 
 impl Session {
@@ -108,7 +125,8 @@ impl Session {
 			header_uni: header_uni.into(),
 			header_bi: header_bi.into(),
 			header_datagram: header_datagram.into(),
-			_settings: settings,
+			settings,
+			connect_id: connect.send.id(),
 			connect_send: Mutex::new(Some(connect.send)),
 			request: connect.request.clone(),
 			response: connect.response.clone(),
@@ -374,6 +392,7 @@ impl Session {
 					reason: reason.to_string(),
 				};
 				let timeout = (self.conn.rtt() * 3).max(Duration::from_millis(100));
+				let critical = web.critical();
 
 				// The task owns a clone of the whole session, not just the connection:
 				// dropping the caller's last handle would otherwise end the HTTP/3
@@ -381,7 +400,7 @@ impl Session {
 				// browser treats as a connection error, losing the code and reason.
 				let session = self.clone();
 				crate::runtime::detach(crate::panic::isolate(async move {
-					session.close_with_capsule(send, capsule, code, timeout).await;
+					session.close_with_capsule(send, capsule, code, timeout, critical).await;
 				}));
 			}
 		} else {
@@ -390,15 +409,32 @@ impl Session {
 		}
 	}
 
-	/// Deliver the close capsule and FIN, then give the peer its teardown grace.
+	/// Have the peer end the streams it sends on, deliver the close capsule and FIN, then give
+	/// the peer its teardown grace.
 	async fn close_with_capsule(
 		&self,
 		mut send: crate::quic::driver::send::Stream,
 		capsule: web_transport_proto::Capsule,
 		code: u32,
 		timeout: std::time::Duration,
+		critical: Vec<crate::quic::driver::stream::Id>,
 	) {
 		let http3_code: crate::quic::driver::VarInt = web_transport_proto::error_to_http3(code).try_into().unwrap();
+
+		// Chrome's renderer crashes when the capsule arrives while the page still writes a
+		// stream (https://issues.chromium.org/issues/589817008), so stop every stream it sends
+		// on, the HTTP/3 ones aside, and send the capsule once it has reset them. The session
+		// is closed, so the stops carry WT_SESSION_GONE.
+		let gone = self.close.encode_stream_code(0);
+		let quiesce = kio::wait(|waiter| self.conn.poll_quiesce(waiter, gone, &critical));
+		match kio::clock::timeout(timeout, quiesce).await {
+			Ok(Ok(())) => {}
+			Ok(Err(e)) => {
+				tracing::debug!(?e, "connection ended before the peer ended its streams");
+				return;
+			}
+			Err(_) => tracing::debug!("peer left streams open past the deadline; closing anyway"),
+		}
 
 		// Encode the capsule, then wrap it in an HTTP/3 DATA frame.
 		// In HTTP/3, capsule data is carried inside DATA frames on the CONNECT
@@ -1496,6 +1532,42 @@ mod tests {
 		assert_eq!(bi.read_to_end(2).await.unwrap(), b"bi");
 		assert!(server.accept_uni().await.is_err());
 		assert!(server.accept_bi().await.is_err());
+	}
+
+	/// A close stops every stream the peer sends on and sends its capsule only once the peer
+	/// reset them, since Chrome crashes on a capsule arriving under a write in flight
+	/// (https://issues.chromium.org/issues/589817008).
+	#[tokio::test]
+	async fn close_waits_for_the_peer_to_reset_its_streams() {
+		let (client_conn, server_conn, _endpoints) = pair().await;
+		let (client, server) = tokio::join!(
+			Session::connect(client_conn, url::Url::parse("https://localhost/").unwrap()),
+			async { crate::quic::web::Request::accept(server_conn).await.unwrap().ok().await },
+		);
+		let (client, server) = (client.unwrap(), server.unwrap());
+		// The connection's own streams, whose stop the test sees directly: a session stream
+		// stopped with WT_SESSION_GONE waits for the capsule's reason instead.
+		let web = client.web().unwrap();
+		let mut uni = client.conn.open_uni(Default::default()).await.unwrap();
+		uni.write_all(web.header_uni.clone()).await.unwrap();
+		let (mut bi, _recv) = client.conn.open_bi(Default::default()).await.unwrap();
+		bi.write_all(web.header_bi.clone()).await.unwrap();
+		// The server holds both, mid-read, as a session does.
+		let _accepted = (server.accept_uni().await.unwrap(), server.accept_bi().await.unwrap());
+
+		server.close(2, "unauthorized");
+		let gone = crate::quic::driver::VarInt::from_u64(super::super::error::WT_SESSION_GONE).unwrap();
+		assert_eq!(uni.closed().await.unwrap(), Some(gone));
+		assert_eq!(bi.closed().await.unwrap(), Some(gone));
+		assert!(client.close.get().is_none(), "the capsule arrived before the resets");
+
+		uni.reset(gone);
+		bi.reset(gone);
+		let err = client.closed().await;
+		assert!(
+			matches!(err, Error::Closed(2, ref reason) if reason == "unauthorized"),
+			"{err:?}"
+		);
 	}
 
 	/// A queued capsule must survive a stalled socket beyond the teardown grace.

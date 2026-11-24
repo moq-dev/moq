@@ -66,8 +66,6 @@ class Line<T> {
 	/** Creates still waiting on the transport, never more than the opens waiting. */
 	#creating = 0;
 	readonly #room?: Room;
-	/** Settles once the session admits more than its handshake; see {@link Lines.hold}. */
-	#held?: Promise<void>;
 	/**
 	 * Streams reset to make room whose credit has yet to reach an open, never more than the
 	 * opens waiting: the first this many in line are owed one.
@@ -80,21 +78,13 @@ class Line<T> {
 		this.#room = room;
 	}
 
-	/** Hold every open but the handshake's until `until` settles; see {@link Lines.hold}. */
-	hold(until: Promise<void>) {
-		const held = until.finally(() => {
-			if (this.#held === held) this.#held = undefined;
-		});
-		this.#held = held;
-	}
-
 	/**
 	 * Wait for a stream at `rank`, read again whenever a stream is handed out, or undefined once
-	 * `cancel` settles or aborts first. A `handshake` open skips the {@link hold}.
+	 * `cancel` settles or aborts first.
 	 */
-	open(rank: Rank, cancel?: undefined, handshake?: boolean): Promise<T>;
+	open(rank: Rank): Promise<T>;
 	open(rank: Rank, cancel: Promise<unknown> | AbortSignal): Promise<T | undefined>;
-	async open(rank: Rank, cancel?: Promise<unknown> | AbortSignal, handshake = false): Promise<T | undefined> {
+	async open(rank: Rank, cancel?: Promise<unknown> | AbortSignal): Promise<T | undefined> {
 		const current = typeof rank === "number" ? () => rank : rank;
 		// A caller already cancelled takes nothing, not even a stream that is free now. A signal
 		// says so at once, so the open keeps its place in call order. A fresh settled promise,
@@ -102,8 +92,6 @@ class Line<T> {
 		if (cancel instanceof AbortSignal) {
 			if (cancel.aborted) return undefined;
 		} else if (cancel && (await race([cancel, Promise.resolve(live)])) !== live) return undefined;
-		// Held outside the line, so no create starts and no create the handshake started is handed here.
-		if (this.#held && !handshake && !(await this.#wait(this.#held, cancel))) return undefined;
 		if (this.#waiting.length === 0) {
 			const spare = this.#spare.pop();
 			if (spare) return this.#handed(spare, current());
@@ -151,20 +139,6 @@ class Line<T> {
 		}
 		if (opened !== undefined || !this.#leave(waiting)) return opened ?? ticket;
 		return undefined;
-	}
-
-	/** Wait out the hold, or false once `cancel` settles or aborts first. */
-	async #wait(held: Promise<void>, cancel?: Promise<unknown> | AbortSignal): Promise<boolean> {
-		if (!cancel) {
-			await held;
-			return true;
-		}
-		const signalled = cancel instanceof AbortSignal ? aborted(cancel) : undefined;
-		try {
-			return (await race([held.then(() => live), signalled?.promise ?? cancel])) === live;
-		} finally {
-			signalled?.done();
-		}
 	}
 
 	/** Leave the line, or false once a stream was already handed over. */
@@ -311,14 +285,6 @@ interface Lines {
 	streams: OpenStreams;
 	/** The peer's PROBE estimates, whose RTT stands in for a transport that reports none. */
 	probe?: Getter<Probe>;
-	/**
-	 * Hold every open but the handshake's (AUTH and SETUP) until `until` settles. A client holds
-	 * until the server's SETUP, which says it admitted the session: Chrome's renderer crashes
-	 * when a refusal closes the session under a unidirectional write in flight
-	 * (https://issues.chromium.org/issues/589817008). `until` must also settle when the session
-	 * closes; it never rejects.
-	 */
-	hold(until: Promise<void>): void;
 }
 
 const sessions = new WeakMap<WebTransport, Lines>();
@@ -352,10 +318,6 @@ export function lines(quic: WebTransport): Lines {
 			},
 		),
 		streams,
-		hold: (until) => {
-			session.uni.hold(until);
-			session.bi.hold(until);
-		},
 	};
 	sessions.set(quic, session);
 	return session;

@@ -13,7 +13,7 @@ pub struct Settings {
 	)]
 	send: crate::quic::driver::send::Stream,
 
-	#[allow(dead_code, reason = "held so the stream stays open until dropped")]
+	/// The peer's control stream, held so it stays open until dropped.
 	recv: crate::quic::driver::recv::Stream,
 
 	/// The peer's other unidirectional streams that arrived before its control stream, their
@@ -23,6 +23,11 @@ pub struct Settings {
 }
 
 impl Settings {
+	/// The peer's control stream, which a close must leave open.
+	pub(crate) fn control_id(&self) -> crate::quic::driver::stream::Id {
+		self.recv.id()
+	}
+
 	// Establish the H3 connection.
 	pub async fn connect(conn: &crate::quic::driver::connection::Connection) -> Result<Self, super::Error> {
 		let recv = Self::accept(conn);

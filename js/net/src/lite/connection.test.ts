@@ -623,7 +623,6 @@ async function servedRawSubscription(alpn: string = ALPN_07_WIP, version: Versio
 		quic: pair.server,
 		version,
 		publish: origin.consume(),
-		client: false,
 	});
 
 	const group = hooks.appendNext(producer);
@@ -975,7 +974,6 @@ for (const violation of ["a partial group", "a group past the declared end"] as 
 			const pair = createMockTransportPair(violation === "a partial group" ? ALPN_06 : ALPN_07_WIP);
 			const connection = new Connection({ url: new URL("https://relay.example/"), quic: pair.client, version });
 			try {
-				await sendSetup(pair.server, version);
 				const track = wireOf(connection).consume(Path.from("room")).track("video").subscribe();
 
 				// The publisher, played by hand: answer TRACK_INFO, start the subscription, and
@@ -1046,14 +1044,6 @@ for (const violation of ["a partial group", "a group past the declared end"] as 
 	);
 }
 
-/** A server's SETUP, which says it admitted the session. */
-async function sendSetup(quic: MockTransport, version: Version) {
-	const writer = await Writer.open(quic, { version });
-	await writer.u53(DataType.Setup);
-	await new Setup({}).encode(writer, version);
-	writer.close();
-}
-
 // Lite-07: each endpoint sends everything it says about discovery and routing on one
 // unidirectional Announce Stream, which the peer may only finish.
 async function announceStream(pair: { server: MockTransport }) {
@@ -1083,7 +1073,6 @@ for (const [name, violate] of [
 			await AuthMessage.decode(auth.reader, Version.DRAFT_07);
 			const all = Path.Prefixes.all();
 			await new AuthOk(all, all).encode(auth.writer, Version.DRAFT_07);
-			await sendSetup(pair.server, Version.DRAFT_07);
 			const { writer, send } = await announceStream(pair);
 			await send({ status: "request", more: false, remove: [], add: [{ prefix: ROOM, hidden: false }] });
 			// A reset discards what the peer has not read, and a stream whose type byte is lost
@@ -1264,54 +1253,3 @@ test("a bidirectional stream of the Announce type is unknown to moq-lite-07", as
 		connection.abort();
 	}
 });
-
-// A server sends its SETUP only once it admits the session, and Chrome's renderer crashes when
-// a refusal closes the session under a unidirectional write in flight
-// (https://issues.chromium.org/issues/589817008). So a client publishing broadcasts and asking
-// for announcements opens nothing but AUTH and SETUP until then.
-for (const [alpn, version] of [
-	[ALPN_05, Version.DRAFT_05],
-	[ALPN_06, Version.DRAFT_06],
-	[ALPN_07_WIP, Version.DRAFT_07],
-] as const) {
-	for (const admitted of [true, false]) {
-		test(`a ${versionName(version)} client opens only its handshake until ${admitted ? "admitted" : "refused"}`, async () => {
-			const pair = createMockTransportPair(alpn);
-			const origin = new Producer();
-			const route = origin.route(Path.from("room"));
-			const connection = new Connection({
-				url: new URL("https://relay.example/"),
-				quic: pair.client,
-				version,
-				publish: origin.consume(),
-			});
-			const announced = connection.announced();
-			const auth = version === Version.DRAFT_07 ? 1 : 0;
-			try {
-				// The SETUP, and on lite-07 the AUTH presenting the connection credential.
-				await settle();
-				expect(pair.client.sendStreams.uni).toHaveLength(1);
-				expect(pair.client.sendStreams.bidi).toHaveLength(auth);
-
-				if (admitted) {
-					await sendSetup(pair.server, version);
-					// Lite-07 sends its routes and requests on its Announce Stream; earlier drafts
-					// ask on an ANNOUNCE_REQUEST bidirectional stream.
-					while (pair.client.sendStreams.uni.length + pair.client.sendStreams.bidi.length === 1 + auth)
-						await yieldNow();
-				} else {
-					pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
-					await connection.closed;
-					await settle();
-					expect(pair.client.sendStreams.uni).toHaveLength(1);
-					expect(pair.client.sendStreams.bidi).toHaveLength(auth);
-				}
-			} finally {
-				announced.close();
-				connection.abort();
-				route.broadcast.close();
-				origin.close();
-			}
-		});
-	}
-}

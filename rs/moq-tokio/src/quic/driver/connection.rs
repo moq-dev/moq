@@ -333,6 +333,21 @@ impl Connection {
 		Poll::Ready(Ok((send::Stream::new(conn.clone(), id), recv::Stream::new(conn, id))))
 	}
 
+	/// Ask the peer to end every stream it may still send on, except `keep`, and wait until it
+	/// has, as [`moq_quic::connection::Connection::poll_quiesce`] does.
+	pub(crate) fn poll_quiesce(
+		&self,
+		waiter: &kio::Waiter,
+		code: VarInt,
+		keep: &[StreamId],
+	) -> Poll<Result<(), Error>> {
+		let mut state = self.0.state.lock();
+		match ready!(state.inner.poll_quiesce(waiter, code, keep)) {
+			Ok(()) => Poll::Ready(Ok(())),
+			Err(err) => Poll::Ready(Err(state.lost_as(err))),
+		}
+	}
+
 	/// Receive an application datagram
 	///
 	/// # Cancel safety

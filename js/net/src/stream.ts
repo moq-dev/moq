@@ -141,13 +141,10 @@ export interface OpenOptions {
 	 * transport's default.
 	 */
 	sendOrder?: number;
-
-	/** Part of the handshake (AUTH or SETUP), so it skips the hold before the peer admits the session. */
-	handshake?: boolean;
 }
 
 /** Options for {@link Writer.tryOpen}. */
-export interface TryOpenOptions extends Omit<OpenOptions, "sendOrder" | "handshake"> {
+export interface TryOpenOptions extends Omit<OpenOptions, "sendOrder"> {
 	/**
 	 * The send order, as {@link OpenOptions.sendOrder}, or a function read again whenever the
 	 * line hands out a stream, for a rank that moves while the open waits.
@@ -216,7 +213,7 @@ export class Stream {
 	 */
 	/** Open a stream, waiting its turn for the peer's stream credit. */
 	static async open(quic: WebTransport, options: OpenOptions): Promise<Stream> {
-		const opened = await lines(quic).bi.open(options.sendOrder ?? 0, undefined, options.handshake);
+		const opened = await lines(quic).bi.open(options.sendOrder ?? 0);
 		return new Stream({ readable: opened.readable, writable: opened.writable, version: options.version });
 	}
 
@@ -227,7 +224,7 @@ export class Stream {
 	 */
 	static async tryOpen(
 		quic: WebTransport,
-		options: Omit<OpenOptions, "handshake"> & { signal: AbortSignal },
+		options: OpenOptions & { signal: AbortSignal },
 	): Promise<Stream | undefined> {
 		const opened = await lines(quic).bi.open(options.sendOrder ?? 0, options.signal);
 		return opened && new Stream({ readable: opened.readable, writable: opened.writable, version: options.version });
@@ -895,7 +892,7 @@ export class Writer implements OpenStream {
 	/** Open a send-only stream, waiting its turn for the peer's stream credit. */
 	static async open(quic: WebTransport, options: OpenOptions): Promise<Writer> {
 		const session = lines(quic);
-		const writable = await session.uni.open(options.sendOrder ?? 0, undefined, options.handshake);
+		const writable = await session.uni.open(options.sendOrder ?? 0);
 		return Writer.#opened(writable, options.version, options.sendOrder ?? 0, session.streams);
 	}
 

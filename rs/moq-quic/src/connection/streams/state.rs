@@ -327,7 +327,11 @@ impl StreamsState {
 			return Ok(false);
 		}
 
+		let fin = frame.fin;
 		let (new_bytes, closed) = rs.ingest(frame, payload_len, self.data_recvd, self.local_max_data)?;
+		if fin {
+			self.waits.wake_ended();
+		}
 		let (stopped, evicted) = (rs.reader != Reader::Reading, rs.reader == Reader::Evicted);
 		let rank = (!stopped).then(|| rs.lease.arrived(id)).flatten();
 		self.spend(new_bytes);
@@ -423,6 +427,7 @@ impl StreamsState {
 			// Redundant reset
 			return Ok(false);
 		};
+		self.waits.wake_ended();
 		let (stopped, evicted) = (rs.reader != Reader::Reading, rs.reader == Reader::Evicted);
 		let rank = (!stopped).then(|| rs.lease.arrived(id)).flatten();
 		self.spend(new_bytes);
@@ -451,6 +456,35 @@ impl StreamsState {
 			return Ok(transmit);
 		}
 		Ok(self.evict_after_arrival(transmit))
+	}
+
+	/// Ask the peer with STOP_SENDING to end every stream it may still send on, except `keep`,
+	/// returning whether any of them is still open.
+	///
+	/// A stream is asked once, and a stream the application already stopped was asked by its stop.
+	/// The readers keep reading: each stream ends with the peer's reset or FIN as usual.
+	pub(crate) fn quiesce(&mut self, pending: &mut Retransmits, code: VarInt, keep: &[StreamId]) -> bool {
+		let mut open = false;
+		let mut asked = false;
+		for (&id, slot) in &mut self.recv {
+			if keep.contains(&id) {
+				continue;
+			}
+			let rs = get_or_insert_recv(slot, self.initial_stream_receive_window);
+			if !rs.final_offset_unknown() {
+				continue;
+			}
+			open = true;
+			if rs.reader == Reader::Stopped || mem::replace(&mut rs.quiesced, true) {
+				continue;
+			}
+			pending.stop_sending.push(frame::StopSending { id, error_code: code });
+			asked = true;
+		}
+		if asked {
+			self.waits.wake_transmit();
+		}
+		open
 	}
 
 	/// Process incoming `STOP_SENDING` frame
@@ -1416,6 +1450,7 @@ impl StreamsState {
 				self.connection_blocked.shrink_to_fit();
 			}
 		} else {
+			self.waits.wake_ended();
 			// Contract geometrically, so a surviving stream cannot pin a burst's empty slots and
 			// removing a burst costs linear work overall. Empty tables release every slot.
 			if self.recv.capacity() > self.recv.len().saturating_mul(4) {

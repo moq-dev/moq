@@ -213,9 +213,6 @@ export class MockTransport implements WebTransport {
 	// The stream data this side wrote while held.
 	#held: Held = {};
 
-	// Either side closed the session, so a create fails as a browser's does.
-	#closed = false;
-
 	// While set, each uni stream this side opens holds its own data, oldest first.
 	#heldUnis?: Held[];
 
@@ -363,7 +360,6 @@ export class MockTransport implements WebTransport {
 	async createBidirectionalStream(options?: WebTransportSendStreamOptions): Promise<WebTransportBidirectionalStream> {
 		const peer = this.#peer;
 		if (!peer) throw new Error("no peer");
-		if (this.#closed) throw new DOMException("session closed", "InvalidStateError");
 
 		// One stream for each direction
 		const c2s = newStream(this.#streams, this.#held);
@@ -393,7 +389,6 @@ export class MockTransport implements WebTransport {
 	async createUnidirectionalStream(options?: WebTransportSendStreamOptions): Promise<WritableStream<Uint8Array>> {
 		const peer = this.#peer;
 		if (!peer) throw new Error("no peer");
-		if (this.#closed) throw new DOMException("session closed", "InvalidStateError");
 
 		let held = this.#held;
 		if (this.#heldUnis) {
@@ -434,8 +429,6 @@ export class MockTransport implements WebTransport {
 			throw new DOMException("close reason exceeds 1024 bytes", "SyntaxError");
 		}
 		const info = _closeInfo ?? { closeCode: 0, reason: "" };
-		this.#closed = true;
-		if (this.#peer) this.#peer.#closed = true;
 		this.#closeResolve(info);
 
 		// Shaped like the WebTransportError a real session close fails its streams with.

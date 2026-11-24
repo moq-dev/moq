@@ -507,6 +507,27 @@ impl Connection {
 		}
 	}
 
+	/// Ask the peer to end every stream it may still send on, except `keep`, and wait until it has
+	///
+	/// Each stream gets one STOP_SENDING with `code`, including those the peer opens while this
+	/// waits, and is done once its final size arrives with a reset or FIN. The readers keep their
+	/// streams. Ready once none is left open, or with the reason the connection was lost first. A
+	/// peer that keeps opening streams keeps this waiting, so bound the wait.
+	pub fn poll_quiesce(&mut self, waiter: &kio::Waiter, code: VarInt, keep: &[StreamId]) -> Poll<Result<(), Error>> {
+		if let Some(err) = self.streams.waits.lost() {
+			return Poll::Ready(Err(err.clone()));
+		}
+		let pending = &mut self.spaces[SpaceId::Data].pending;
+		if !self.streams.quiesce(pending, code, keep) {
+			return Poll::Ready(Ok(()));
+		}
+		// A stream the peer opens, or one ending, may change the answer.
+		self.streams.waits.register_ended(waiter);
+		self.streams.waits.register_accept(Dir::Uni, waiter);
+		self.streams.waits.register_accept(Dir::Bi, waiter);
+		Poll::Pending
+	}
+
 	/// Provide control over streams
 	#[must_use]
 	pub fn recv_stream(&mut self, id: StreamId) -> recv::Stream<'_> {

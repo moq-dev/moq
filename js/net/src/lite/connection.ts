@@ -132,8 +132,6 @@ export class Connection implements Session {
 	// until the peer's SETUP arrives; stays undefined forever on older drafts.
 	#peerSetup = new Signal<Setup | undefined>(undefined);
 	#setupSeen = false;
-	// Settles with the peer's SETUP or the session's close, releasing the opens held until then.
-	#admitted = Promise.withResolvers<void>();
 	// Lite-07: the peer opened its one Announce Stream.
 	#announceSeen = false;
 	// The transport closed, so a stream breaking says nothing about the peer.
@@ -183,13 +181,6 @@ export class Connection implements Session {
 		this.#token = client && hasAuth(version) ? token : undefined;
 		this.#quic = quic;
 		this.#session = session;
-		// A server sends its SETUP only once it admits the session, so a client opens nothing but
-		// its handshake before then: a refusal then closes no stream of ours mid-write.
-		if (client && hasSetupStream(version)) {
-			const settle = () => this.#admitted.resolve();
-			void quic.closed.then(settle, settle);
-			lines(quic).hold(this.#admitted.promise);
-		}
 		// The session stream was opened at the SETUP exchange's version; the rest of it speaks this one.
 		if (session) {
 			session.reader.version = version;
@@ -439,7 +430,7 @@ export class Connection implements Session {
 	// (lite-06 removed ANNOUNCE_REQUEST's exclude_hop for it). Lite-07 sends none: only a node
 	// that forwards declares a Node ID.
 	async #sendSetup(): Promise<void> {
-		const writer = await Writer.open(this.#quic, { version: this.#version, handshake: true });
+		const writer = await Writer.open(this.#quic, { version: this.#version });
 		try {
 			await writer.u53(DataType.Setup);
 			const probe = await probeLevel(this.#quic, this.#version);
@@ -590,7 +581,6 @@ export class Connection implements Session {
 			if (!this.#client && setup.path !== undefined)
 				throw new ProtocolViolation("Path on a URI-carrying binding");
 			this.#peerSetup.set(setup);
-			this.#admitted.resolve();
 			this.#auth.accept();
 			this.#peerImplementation.resolve(setup.implementation);
 		} else {
