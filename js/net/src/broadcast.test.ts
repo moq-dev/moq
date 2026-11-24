@@ -212,7 +212,8 @@ test("an info lookup joining a subscription's request is answered after the subs
 	// Flush every pending notification, so only the lookup is left holding demand.
 	subscriber.close();
 	await yieldNow();
-	expect(request.demand().wanted.peek()).toBe(false);
+	expect(request.demand().wanted.peek()).toBe(true);
+	expect(hooks.demandSubscribed(request.demand())).toBe(false);
 
 	request.accept({ timescale: Timescale.MILLI, priority: 2 });
 	expect((await info).priority).toBe(2);
@@ -243,7 +244,7 @@ test("held info lookups keep a request until the last one lets go", async () => 
 	const opened = wireOf(broadcast).resolveTrackInfo("media", first.signal);
 	const request = await pulled;
 	if (!request) throw new Error("expected request");
-	expect(hooks.requestWanted(request).peek()).toBe(true);
+	expect(request.demand().wanted.peek()).toBe(true);
 	const producer = request.accept();
 	const second = new AbortController();
 	await wireOf(broadcast).resolveTrackInfo("media", second.signal);
@@ -252,9 +253,11 @@ test("held info lookups keep a request until the last one lets go", async () => 
 	// The lookup that opened the request lets go first, under the one still holding it.
 	first.abort();
 	expect(producer.closed.peek()).toBeUndefined();
+	// An answered lookup still held is the accepted track's demand, as a subscriber is.
+	expect(producer.demand().wanted.peek()).toBe(true);
 
 	second.abort();
-	expect(hooks.requestWanted(request).peek()).toBe(false);
+	expect(producer.demand().wanted.peek()).toBe(false);
 	expect(producer.closed.peek()).toBeDefined();
 	broadcast.close();
 });
@@ -692,8 +695,9 @@ test("a pending track info query is answered by its request, and closing rejects
 
 	const request = await pending;
 	if (!request) throw new Error("expected request");
-	// Nobody subscribes to the queried track itself.
-	expect(request.demand().wanted.peek()).toBe(false);
+	// Nobody subscribes to the queried track itself, but the pending query is its demand.
+	expect(request.demand().wanted.peek()).toBe(true);
+	expect(hooks.demandSubscribed(request.demand())).toBe(false);
 	request.accept({ timescale: Timescale.MILLI, priority: 2 });
 	expect((await info).priority).toBe(2);
 
