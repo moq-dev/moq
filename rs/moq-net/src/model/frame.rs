@@ -1669,8 +1669,14 @@ impl Consumer {
 				Poll::Pending => None,
 			};
 			let evicted = failed.is_some() && self.evicted();
+			let cause = failed.map_or(super::resume::Cause::Stalled, super::resume::Cause::Failed);
 			let reroute = match &mut self.resume {
-				Resume::Route(routed) => routed.recover.wants(failed.as_ref(), waiter),
+				Resume::Route(routed) => {
+					routed.recover.wants(&cause, waiter)
+						// A route that would only repeat the eviction, as one the front concluded on
+						// this copy does, leaves the frame to its flight.
+						&& !(evicted && cause.error().is_some_and(|err| routed.recover.repeats(err)))
+				}
 				_ => false,
 			};
 			let (route, frame, index) = match &mut self.resume {
@@ -1680,7 +1686,6 @@ impl Consumer {
 					if self.state.read().sparse() {
 						return Poll::Ready(Err(Error::Unsupported));
 					}
-					let cause = failed.map_or(super::resume::Cause::Stalled, super::resume::Cause::Failed);
 					let mut replacement = match recover.poll(*index, &cause, waiter) {
 						Poll::Ready(Ok(group)) => group,
 						Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),

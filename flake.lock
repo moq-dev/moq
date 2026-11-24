@@ -36,11 +36,11 @@
     },
     "nixpkgs-bun": {
       "locked": {
-        "lastModified": 1794495034,
-        "narHash": "sha256-E0hYoioqUtM2XmPPvYYpJgdADF5AW9oOoPSEiM9dTHQ=",
+        "lastModified": 1794644783,
+        "narHash": "sha256-3GnIGIy15bMduoS9RnWqKTmsJLWThla42UFtm0S7+us=",
         "owner": "NixOS",
         "repo": "nixpkgs",
-        "rev": "2074cc672349f14240fb7ea90d509e0b643e9dd4",
+        "rev": "5d2b81a7a3be3e2f832879028e4d60abbf58e9a0",
         "type": "github"
       },
       "original": {
@@ -63,11 +63,11 @@
         "token-max": "token-max"
       },
       "locked": {
-        "lastModified": 1795451030,
-        "narHash": "sha256-NOyyzkGemOFJE1YmEE0+3VCh1yNaCtU88gpag6ytozQ=",
+        "lastModified": 1795536594,
+        "narHash": "sha256-VxMlgOXleWDB+7AemB34T1Hm89xlrufG9Hf22cyQKKc=",
         "owner": "kixel-ai",
         "repo": "quest",
-        "rev": "59b106e06d3b698ee82f942a5366e254bf9d39e4",
+        "rev": "65fd9e0081ade0dea4be2aea60452f0b27243ed5",
         "type": "github"
       },
       "original": {
@@ -79,15 +79,15 @@
     "quest-pinned": {
       "flake": false,
       "locked": {
-        "lastModified": 1795201512,
-        "narHash": "sha256-6dpXEa5hfe8KVMU5h0d6G2oJmu7LT95Wjt/7FP52wng=",
-        "owner": "moq-dev",
+        "lastModified": 1795475187,
+        "narHash": "sha256-jce7joKMWpLh6poIZVGajXvTOpYcP2XcKRYiZXb1VSQ=",
+        "owner": "kixel-ai",
         "repo": "quest",
-        "rev": "eaee1d593675aa5c4865122fe3a6bf8d8a0d990f",
+        "rev": "a57434cd4a670ba4f8ef4a667d406132456fff09",
         "type": "github"
       },
       "original": {
-        "owner": "moq-dev",
+        "owner": "kixel-ai",
         "repo": "quest",
         "type": "github"
       }
@@ -150,11 +150,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1795289142,
-        "narHash": "sha256-0mCwGbRtsMZKhTxPWDJevN3I7o9zRm9GtNfKrie7gC4=",
+        "lastModified": 1795488772,
+        "narHash": "sha256-/GnevX/eNInFQjVjNyUtoxv4bvQvHTxdGnSKMEk8yJc=",
         "owner": "kixel-ai",
         "repo": "token-max",
-        "rev": "fff53685f9c86c86bef44864065d5859a800f0b6",
+        "rev": "ae533b8de79be21d5019f4098e96a302fabcaff2",
         "type": "github"
       },
       "original": {

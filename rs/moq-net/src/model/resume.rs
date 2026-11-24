@@ -3672,12 +3672,14 @@ impl Recover {
 
 	/// Whether to look past the copy being read: it stalled, closed short, or failed with a
 	/// verdict on the group while a newer route serves, or it failed delivering the group, or
-	/// it closed short on a route that failed since, which the front is to replace. A route
-	/// that returns to serve the copy being read is no change.
-	pub(super) fn wants(&mut self, err: Option<&Error>, waiter: &kio::Waiter) -> bool {
-		match err {
-			Some(err) if self.undelivered(err) => return true,
-			None if copy_failed(&self.copy) => return true,
+	/// it closed short on a route that failed since, or while the front stages the copy to
+	/// replace it, which the front is to splice. A route that returns to serve the copy being
+	/// read is no change.
+	pub(super) fn wants(&mut self, cause: &Cause, waiter: &kio::Waiter) -> bool {
+		match cause {
+			Cause::Failed(err) if self.undelivered(err) => return true,
+			Cause::Stalled | Cause::Closed if copy_failed(&self.copy) => return true,
+			Cause::Closed if self.route.consumer().read().staged.is_some() => return true,
 			_ => {}
 		}
 		while self
@@ -3751,6 +3753,17 @@ impl Recover {
 			|| (self.reader.is_none() && matches!(StreamError::from(err), StreamError::Old | StreamError::Evicted))
 	}
 
+	/// Whether the route would answer `err`, a failure of the copy being read, with `err`
+	/// again: it still serves that copy, as a clean end or conclusion leaves it, and `err`
+	/// judged the group rather than its delivery. The reader's other copies go unasked.
+	pub(super) fn repeats(&self, err: &Error) -> bool {
+		if self.undelivered(err) {
+			return false;
+		}
+		let route = self.route.consumer().read();
+		route.generation == self.generation && !matches!(route.phase, Phase::Failed(_))
+	}
+
 	/// Poll for the serving route's copy of the group, positioned at frame `index`, once the
 	/// copy being read looks past itself for `cause`.
 	///
@@ -3767,25 +3780,28 @@ impl Recover {
 			reader.sync(waiter);
 		}
 		loop {
-			let (generation, serving, end, moves) = {
+			let (generation, serving, end, moves, staged) = {
 				let route = self.route.consumer().read();
 				(
 					route.generation,
 					route.copy.clone(),
 					route.phase.end(),
 					route.phase.moves(),
+					route.staged.as_ref().map(|(id, _)| *id),
 				)
 			};
 			// Once no front will replace the copy, nothing comes after it.
 			let done = !moves;
 			// Registered before looking, so a route change from here on wakes the reader, a
-			// finished track's too. Not through the watch: `generation` is the one just read,
-			// not `self.generation`.
+			// finished track's too, and so does a stage coming or going, which a short close
+			// waits on. Not through the watch: `generation` is the one just read, not
+			// `self.generation`.
 			let moved = self
 				.route
 				.consumer()
 				.poll(waiter, |route| {
-					match route.generation != generation || !route.phase.moves() {
+					let restaged = route.staged.as_ref().map(|(id, _)| *id) != staged;
+					match route.generation != generation || restaged || !route.phase.moves() {
 						true => Poll::Ready(()),
 						false => Poll::Pending,
 					}
@@ -3837,8 +3853,9 @@ impl Recover {
 				match cause {
 					// The copy being read still serves: only a failure asks it again.
 					Cause::Stalled => return Poll::Pending,
-					// Its route failed, so the next one may hold more, unless none will come.
-					Cause::Closed if copy_failed(&self.copy) && !done => return Poll::Pending,
+					// Its route failed, or the front stages the copy to replace it, so that one
+					// may hold more, unless none will come.
+					Cause::Closed if (copy_failed(&self.copy) || staged.is_some()) && !done => return Poll::Pending,
 					// It serves on with no front to replace it, so its close stands.
 					Cause::Closed => return Poll::Ready(Err(Error::NotFound)),
 					Cause::Failed(_) => {}
@@ -4080,7 +4097,8 @@ pub(super) enum Cause {
 	/// The copy stalled while a newer route serves.
 	Stalled,
 	/// The copy closed the group short of a known end, a FIN without GROUP_END, after the
-	/// front replaced it: the route that replaced it may hold more.
+	/// front replaced it or while it stages a replacement: the route replacing it may hold
+	/// more.
 	Closed,
 	/// The copy failed with this error.
 	Failed(Error),
@@ -4646,6 +4664,86 @@ mod test {
 		}
 		assert_eq!(rest, payload[2..], "past the bytes already read");
 		drop(arriving);
+	}
+
+	/// A front that ends cleanly on the evicted copy, or concludes on it, replaces nothing, so
+	/// the frame still reads the rest from its flight, whether the front ended before the
+	/// eviction or while the flight was pending. A front that fails the track ends the frame.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_routed_frame_keeps_its_flight_once_the_front_ends_cleanly() {
+		let noop = kio::Waiter::noop();
+		// `None` concludes the front; `Some` ends the track with that result.
+		for ending in [None, Some(Ok(())), Some(Err(Error::Unauthorized))] {
+			for boarded in [false, true] {
+				let case = format!("ending={ending:?} boarded={boarded}");
+				let routes = Producer::new();
+				let logical = logical(&routes);
+				let source = copy();
+				let requests = source.requests();
+				routes.serve(source.consume());
+				let mut sub = subscribe(&logical, HOUR);
+				let live = source.create_group(group::Info { start: 0 }).unwrap();
+				let handle = live.handle();
+				let payload = bytes::Bytes::from(vec![7; 16]);
+				let info = crate::frame::Info {
+					size: payload.len() as u64,
+					timestamp: ts(0),
+				};
+				let mut arriving = live.create_frame(info).unwrap();
+				arriving.write(payload.slice(..2)).unwrap();
+				let mut group = recv(&mut sub);
+				let Poll::Ready(Ok(Some(mut frame))) = group.poll_next_frame(&noop) else {
+					panic!("{case}: the arriving frame");
+				};
+				assert!(matches!(frame.poll_read_chunk(&noop), Poll::Ready(Ok(Some(chunk))) if chunk == payload[..2]));
+				let end = || match &ending {
+					None => routes.conclude(),
+					Some(result) => routes.end(result.clone()),
+				};
+				if !boarded {
+					end();
+				}
+				handle.shed_all();
+				if boarded {
+					let res = frame.poll_read_chunk(&noop);
+					assert!(
+						res.is_pending(),
+						"{case}: boarding a flight: {:?}",
+						res.map(|res| res.map(|_| ()))
+					);
+					end();
+				}
+				if let Some(Err(_)) = &ending {
+					let res = frame.poll_read_chunk(&noop).map(|res| res.map(|_| ()));
+					assert!(matches!(res, Poll::Ready(Err(Error::Unauthorized))), "{case}: {res:?}");
+					continue;
+				}
+				let res = frame.poll_read_chunk(&noop);
+				assert!(
+					res.is_pending(),
+					"{case}: on a flight: {:?}",
+					res.map(|res| res.map(|_| ()))
+				);
+				let fill = match requests.poll_requested_fill(&noop) {
+					Poll::Ready(fill) => fill.unwrap(),
+					Poll::Pending => panic!("{case}: a flight is asked"),
+				};
+				let flight = fill.accept(0, None).unwrap().expect("a fresh group");
+				let mut flying = flight.create_frame(info).unwrap();
+				flying.write(payload.clone()).unwrap();
+				let mut rest = Vec::new();
+				loop {
+					match frame.poll_read_chunk(&noop) {
+						Poll::Ready(Ok(Some(chunk))) => rest.extend_from_slice(&chunk),
+						Poll::Ready(Ok(None)) => break,
+						other => panic!("{case}: the rest of the frame: {:?}", other.map(|res| res.map(|_| ()))),
+					}
+				}
+				assert_eq!(rest, payload[2..], "{case}");
+				drop(arriving);
+			}
+		}
 	}
 
 	/// A routed frame waiting on the flight that continues its evicted copy still follows the
@@ -5880,6 +5978,51 @@ mod test {
 		routes.serve(b.consume());
 		assert_eq!(read(&mut reading), Some(b"b".to_vec()));
 		assert_eq!(read(&mut reading), None);
+	}
+
+	/// A group the serving copy closed short while the front stages the copy to replace it
+	/// waits for that copy: it reads on once the copy is spliced, and ends where it closed
+	/// once the stage is dropped.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_short_group_waits_for_a_staged_replacement() {
+		for spliced in [true, false] {
+			let routes = Producer::new();
+			let front = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&front, HOUR);
+			let mut short = a.create_group(group::Info { start: 0 }).unwrap();
+			short.write_frame(ts(0), b"a".as_ref()).unwrap();
+			let mut reading = recv(&mut sub);
+			assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+
+			let b = copy();
+			let mut whole = b.create_group(group::Info { start: 0 }).unwrap();
+			for (ms, frame) in [(0, b"a"), (1, b"b")] {
+				whole.write_frame(ts(ms), frame.as_ref()).unwrap();
+			}
+			whole.finish_at(2).unwrap();
+			let staged = routes.stage(b.consume());
+			short.finish().unwrap();
+			if spliced {
+				assert!(
+					reading.read_frame().now_or_never().is_none(),
+					"waits for the staged copy"
+				);
+				routes.splice(b.consume(), staged);
+				assert_eq!(read(&mut reading), Some(b"b".to_vec()));
+				assert_eq!(read(&mut reading), None);
+			} else {
+				// Its end waits too, and wakes once the stage is dropped.
+				let wake = Arc::new(Wake::default());
+				let waiter = kio::Waiter::new(wake.clone().into());
+				assert!(reading.poll_finished(&waiter).is_pending(), "waits for the staged copy");
+				drop(staged);
+				assert!(wake.0.load(std::sync::atomic::Ordering::Relaxed), "woken once dropped");
+				assert!(matches!(reading.poll_finished(&waiter), Poll::Ready(Ok(1))));
+			}
+		}
 	}
 
 	/// A replacement that holds none of a short group is asked for the rest, which continues
