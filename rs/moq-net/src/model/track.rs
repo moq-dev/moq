@@ -372,10 +372,10 @@ impl Info {
 	}
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzz"))]
 impl Info {
-	/// A millisecond track with no publisher max age, for tests that write timestamps: a test
-	/// of staleness sets its max age explicitly.
+	/// A millisecond track with no publisher max age, for tests and benches that write
+	/// timestamps: a test of staleness sets its max age explicitly.
 	pub(crate) fn timed() -> Self {
 		Self::default().with_timescale(Timescale::MILLI).with_max_age(None)
 	}

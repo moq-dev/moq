@@ -17,6 +17,11 @@
 //! up, so a drop costing every range shows as a slope over `ranges`, and one costing every
 //! drop before it as a slope over `drops`.
 //!
+//! `publisher_stale` gives up `drops` stale groups of a live join beside `ranges` ranges, every
+//! one answered (`started`) or one still waiting for its start (`waiting`). A stale group is
+//! named only where a started range owes it, so a drop costing every range shows as a slope
+//! over `ranges`: `started` should have none.
+//!
 //! Run with `cargo bench -p moq-net --features fuzz --bench publisher`.
 
 use std::time::Duration;
@@ -107,5 +112,40 @@ fn bench_drop(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, bench_covered_before_start, bench_update, bench_drop);
+fn bench_stale(c: &mut Criterion) {
+	let mut group = c.benchmark_group("publisher_stale");
+	// The largest cell answers 8192 ranges per sample before it times anything.
+	group.sample_size(10);
+	group.measurement_time(Duration::from_secs(2));
+	for waiting in [false, true] {
+		let phase = if waiting { "waiting" } else { "started" };
+		for ranges in SWEEP {
+			for drops in SWEEP {
+				group.throughput(Throughput::Elements(drops));
+				group.bench_function(
+					BenchmarkId::new(format!("{phase}/ranges={ranges}"), format!("drops={drops}")),
+					|b| {
+						b.iter_batched(
+							|| CoverageBench::stale(ranges, waiting),
+							|mut run| {
+								run.give_up_stale(drops);
+								run
+							},
+							BatchSize::PerIteration,
+						)
+					},
+				);
+			}
+		}
+	}
+	group.finish();
+}
+
+criterion_group!(
+	benches,
+	bench_covered_before_start,
+	bench_update,
+	bench_drop,
+	bench_stale
+);
 criterion_main!(benches);

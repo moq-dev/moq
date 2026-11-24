@@ -7179,6 +7179,8 @@ pub struct CoverageBench {
 	track: track::Producer,
 	/// The drops not given up yet, the next one last.
 	drops: Vec<(Range<u64>, StreamError)>,
+	/// The lowest group [`Self::stale`]'s open range holds.
+	stale: u64,
 	_peer: crate::transport::memory::Session,
 }
 
@@ -7200,10 +7202,25 @@ impl CoverageBench {
 	/// Each range starts at a time no group held places, so it may reach back to the group
 	/// before it: giving a range up gives that group up too, which starts the range.
 	pub fn spread(ranges: u64, drops: u64) -> Self {
-		// Every other group, so no two ranges merge into one run.
-		let wire = (0..ranges).map(|range| 2 * range..2 * range + 1);
+		let drops = Self::spread_drops(ranges, drops);
+		Self::build(Self::spread_wire(ranges), drops, track::Info::default())
+	}
+
+	/// [`Self::spread`]'s ranges: every other group, so no two ranges merge into one run.
+	fn spread_wire(ranges: u64) -> Vec<lite::Range> {
+		let group = |group| Some(lite::Anchor::Absolute(track::Position::group(group)));
+		(0..ranges)
+			.map(|range| lite::Range {
+				start: group(2 * range),
+				end: group(2 * range + 1),
+			})
+			.collect()
+	}
+
+	/// [`Self::spread`]'s first `drops` drops, each giving up a range and the group before it.
+	fn spread_drops(ranges: u64, drops: u64) -> Vec<(Range<u64>, StreamError)> {
 		// Alternating errors keep adjacent drops separate entries in the skipped record.
-		let drops = (0..drops.min(ranges))
+		(0..drops.min(ranges))
 			.map(|range| {
 				let err = match range % 2 {
 					0 => StreamError::NotFound,
@@ -7211,8 +7228,66 @@ impl CoverageBench {
 				};
 				((2 * range).saturating_sub(1)..2 * range + 1, err)
 			})
-			.collect();
-		Self::build(wire, drops)
+			.collect()
+	}
+
+	/// Subscribe as [`Self::spread`] does, plus a live join open past them, and answer every
+	/// range, ready to give up stale groups of the join with [`Self::give_up_stale`]: in a
+	/// subscription's steady state, or when `waiting`, beside a range still waiting for its start.
+	///
+	/// The spread ranges start as their drops give them up, and the join at a group served.
+	/// A group then lands stale once newer ones hold the live edge past its max age.
+	pub fn stale(ranges: u64, waiting: bool) -> Self {
+		let open = 2 * ranges + 1;
+		let edge = open + (1 << 32);
+		let mut wire = Self::spread_wire(ranges);
+		// A live join placed at `open`, whose groups expire a millisecond behind the edge.
+		wire.push(lite::Range {
+			start: Some(lite::Anchor::Joined {
+				at: track::Position::group(open),
+				max: Some(Duration::from_millis(1)),
+			}),
+			end: None,
+		});
+		let mut this = Self::build(wire, Self::spread_drops(ranges, ranges), track::Info::timed());
+		this.give_up(ranges);
+		this.write(open);
+		// The edge, far past every group given up stale, and one fresh group a second below it.
+		// Each stale group lands a second below the last, so the one after it is a second older
+		// than the edge.
+		this.write(edge);
+		this.stale = edge - 1000;
+		this.write(this.stale);
+		if waiting {
+			// A range the model never placed, which no pass looks at: each stale drop resolves
+			// every range, as one still waiting makes it.
+			let unplaced = Unstarted {
+				joins: None,
+				live: false,
+				oldest: false,
+			};
+			this.run.answers.ask(ranges + 1, unplaced);
+		}
+		assert_eq!(this.run.answers.any_waiting(), waiting, "every other range is answered");
+		this
+	}
+
+	/// Give up the next `count` groups of [`Self::stale`]'s open range as stale, each
+	/// followed by every wake it causes.
+	pub fn give_up_stale(&mut self, count: u64) {
+		for _ in 0..count {
+			self.stale -= 1000;
+			self.write(self.stale);
+		}
+	}
+
+	/// Write and finish group `key`, stamped `key` milliseconds, then take every wake it causes.
+	fn write(&mut self, key: u64) {
+		let mut group = self.track.create_group(crate::group::Info { start: key }).unwrap();
+		let at = crate::Timestamp::from_millis(key).unwrap();
+		group.write_frame(at, bytes::Bytes::from_static(b"x")).unwrap();
+		group.finish().unwrap();
+		while self.step().is_ready() {}
 	}
 
 	/// Give up the next `count` drops, each followed by every wake it causes.
@@ -7224,7 +7299,7 @@ impl CoverageBench {
 		}
 	}
 
-	fn build(wire: impl Iterator<Item = Range<u64>>, drops: Vec<(Range<u64>, StreamError)>) -> Self {
+	fn build(wire: Vec<lite::Range>, drops: Vec<(Range<u64>, StreamError)>, info: track::Info) -> Self {
 		let version = Version::Lite07;
 		let (local, peer) = crate::transport::memory::pair(Default::default());
 		let session = Transport::new(local);
@@ -7233,19 +7308,8 @@ impl CoverageBench {
 		else {
 			panic!("a memory stream opens at once");
 		};
-		let group = |group| Some(lite::Anchor::Absolute(track::Position::group(group)));
-		let wire: Vec<_> = wire
-			.map(|range| lite::Range {
-				start: group(range.start),
-				end: group(range.end),
-			})
-			.collect();
 		let bounds = Bounds::new(&wire, None);
-		let track = track::Producer::new(
-			Arc::new(crate::broadcast::Info::default()),
-			"bench",
-			track::Info::default(),
-		);
+		let track = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "bench", info);
 		let subscriber = track.subscribe(bounds.groups());
 		let steer = kio::Producer::new(Steer::default());
 		let ctx = Subscription {
@@ -7269,6 +7333,7 @@ impl CoverageBench {
 			writer: Writer::new(stream, version),
 			track,
 			drops,
+			stale: 0,
 			_peer: peer,
 		};
 		while this.step().is_ready() {}
@@ -10348,6 +10413,23 @@ mod serve_group_test {
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		assert_eq!(run.ctx.outcomes.opened.load(Ordering::Relaxed), 1, "group 2 is served");
 		assert_eq!(starts(&responses(&mut writer, &log).await), [(0, Some(2))]);
+	}
+
+	/// The `publisher_stale` bench gives up stale groups that a started range owes, which names
+	/// each, whether or not another range still waits for its start.
+	#[kio::test]
+	async fn the_stale_bench_names_each_stale_group() {
+		for waiting in [false, true] {
+			let mut bench = CoverageBench::stale(4, waiting);
+			let edge = bench.stale;
+			bench.give_up_stale(3);
+			for key in (1..=3).map(|step| edge - step * 1000) {
+				assert!(
+					matches!(bench.run.track.record().report_at(key), Some((_, Report::Dropped))),
+					"group {key} is named, waiting: {waiting}"
+				);
+			}
+		}
 	}
 
 	/// A bounded range whose first held group lies past its end waits for a group arriving
