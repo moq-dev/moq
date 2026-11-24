@@ -6767,9 +6767,10 @@ pub(crate) struct Routed {
 
 #[cfg(any(feature = "fuzz", all(test, feature = "async")))]
 impl Routed {
-	/// A logical track named `name`, and a copy of it serving it, both with `info`.
-	pub(crate) fn new(name: &str, info: Info) -> Self {
-		let broadcast = Arc::new(broadcast::Info::default());
+	/// A logical track named `name` in `broadcast`, and a copy of it serving it, both with
+	/// `info`.
+	pub(crate) fn new(broadcast: broadcast::Info, name: &str, info: Info) -> Self {
+		let broadcast = Arc::new(broadcast);
 		let routes = super::resume::Producer::new();
 		let logical = Request::new(broadcast.clone(), name)
 			.routes(routes.consume())
@@ -11236,6 +11237,17 @@ impl Cursor {
 		}
 	}
 
+	/// Forget every report of `range` and judge it again; see [`Subscriber::reopen`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	fn reopen(&mut self, range: ops::Range<u64>) {
+		self.record.untell(range.clone());
+		if let Some(misses) = &mut self.misses {
+			misses.reopen(range);
+		}
+		self.record.rescan = true;
+		idle::Idle::reopen(&mut self.idle);
+	}
+
 	/// Judge again what this cursor's misses gave up as stale under a budget narrower than
 	/// `budget`, as [`Self::reoffer`] does for the cached groups it skipped: a drop judged
 	/// under a narrower budget never settles a wider reader. What it already told stands: a
@@ -12435,6 +12447,34 @@ impl Subscriber {
 		match &mut self.inner {
 			Inner::Plain(cursor) => &mut cursor.record,
 			Inner::Resume(_, logical) => &mut logical.record,
+		}
+	}
+
+	/// Forget every report of `range`, which the wire was never told: a run given up below
+	/// where delivery starts, which a later widening may still serve. A front's reader also
+	/// lets its copies report it again, or their own records would block a later verdict.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn untell(&mut self, range: ops::Range<u64>) {
+		match &mut self.inner {
+			Inner::Plain(cursor) => cursor.record.untell(range),
+			Inner::Resume(resume, logical) => {
+				logical.record.untell(range.clone());
+				resume.untell(range);
+			}
+		}
+	}
+
+	/// [`Self::untell`] `range`, and judge it again, so a verdict reached on it before is
+	/// reported again: a publisher whose delivery start moved below a run it took back owes
+	/// the wire its fate. A drop the track holds for it is owed again too.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn reopen(&mut self, range: ops::Range<u64>) {
+		match &mut self.inner {
+			Inner::Plain(cursor) => cursor.reopen(range),
+			Inner::Resume(resume, logical) => {
+				logical.record.untell(range.clone());
+				resume.reopen(range);
+			}
 		}
 	}
 

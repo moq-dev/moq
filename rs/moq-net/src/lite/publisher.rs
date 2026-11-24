@@ -4,7 +4,7 @@ use crate::transport::poll::Session as _;
 use crate::model::record::Report;
 use crate::model::track::Hole;
 use crate::{SessionError, datagram, frame, group, origin, track};
-use rangemap::RangeMap;
+use rangemap::{RangeMap, RangeSet};
 use std::{
 	borrow::Cow,
 	collections::HashMap,
@@ -5411,6 +5411,10 @@ struct TrackRun {
 	// SUBSCRIBE_START has gone out yet, as a range following an edge this hop does not know
 	// yet leaves it. A subscriber reads none before the subscription's first START.
 	withheld: Option<RangeMap<u64, Hole>>,
+	// Lite-07: the stale runs given up below where delivery started, taken back unnamed so a
+	// wider budget may still serve them. Judged again once delivery starts below one, which
+	// then owes its fate.
+	taken_back: RangeSet<u64>,
 	// Lite-07 with every range bounded: once every group in its ranges is given up, it is
 	// answered without a group to resolve its start, rather than left unanswered.
 	bounded: bool,
@@ -5566,6 +5570,7 @@ impl TrackRun {
 			end_sent: false,
 			held_end: None,
 			withheld: None,
+			taken_back: RangeSet::new(),
 			opening: None,
 			children: kio::Tasks::new(),
 			idle: None,
@@ -5664,12 +5669,10 @@ impl TrackRun {
 		if let Some(start) = floor {
 			self.floor = start;
 			// Before SUBSCRIBE_START nothing is owed yet; the start accounts for it.
-			if let Start::Resolved(resolved) = &mut self.start {
-				// A lowered floor owes the groups it newly asks for, so the end sweep covers them.
-				// A raised one sends no early drop: the subscriber already stops owing below its
-				// floor, and a later update may lower it again to reopen those groups.
-				*resolved = (*resolved).min(start);
-			}
+			// A lowered floor owes the groups it newly asks for, so the end sweep covers them.
+			// A raised one sends no early drop: the subscriber already stops owing below its
+			// floor, and a later update may lower it again to reopen those groups.
+			self.lower_start(start);
 		}
 		self.cap = end.map_or(Bound::Unbounded, Bound::Excluded);
 		// Moving the cursor wakes its readers, so an update that keeps the range moves nothing.
@@ -5942,8 +5945,29 @@ impl TrackRun {
 			reported = true;
 		}
 		self.unstarted = waiting;
-		self.start = Start::Resolved(lowest);
+		self.lower_start(lowest);
 		Ok(reported)
+	}
+
+	/// Move where delivery starts down to `start`, once resolved. The stale runs taken back
+	/// below the old start that it now owes are judged again, so the wire learns their fate:
+	/// the cursor reported them once already, and reports nothing twice.
+	fn lower_start(&mut self, start: u64) {
+		let Start::Resolved(resolved) = &mut self.start else {
+			return;
+		};
+		let owed = start..*resolved;
+		*resolved = (*resolved).min(start);
+		if owed.is_empty() {
+			return;
+		}
+		let runs: Vec<_> = (self.taken_back.overlapping(&owed))
+			.map(|run| run.start.max(owed.start)..run.end.min(owed.end))
+			.collect();
+		for run in runs {
+			self.taken_back.remove(run.clone());
+			self.track.reopen(run);
+		}
 	}
 
 	/// Apply `update`, replacing every range with fresh Range IDs, as an update before
@@ -6632,7 +6656,11 @@ impl TrackRun {
 		for (range, hole) in skipped.iter() {
 			let below = range.start..range.end.min(start);
 			match hole.stale_budget() {
-				Some(_) => self.track.record_mut().untell(below),
+				Some(_) if !below.is_empty() => {
+					self.track.untell(below.clone());
+					self.taken_back.insert(below);
+				}
+				Some(_) => {}
 				None => {
 					self.forward_range(below, hole, writer)?;
 				}
@@ -6926,7 +6954,7 @@ impl UpdateBench {
 		);
 		track.starts_at_keys();
 		let routed = routed.then(|| {
-			let routed = track::Routed::new("bench", track.info().clone());
+			let routed = track::Routed::new(Default::default(), "bench", track.info().clone());
 			routed.copy.starts_at_keys();
 			routed
 		});
@@ -9802,6 +9830,72 @@ mod serve_group_test {
 		);
 	}
 
+	/// A relay's ceiling makes the history below its copy's only group stale to a reader with
+	/// no budget of its own, so the oldest range starts at that group and the stale run below
+	/// goes unnamed. A range an update adds over that run starts below it, and so owes the
+	/// run's fate, routed or not: a subscriber waits on that range until it learns it.
+	#[kio::test]
+	async fn lite07_a_range_added_below_the_start_learns_the_stale_runs_fate() {
+		const LIVE: u64 = 100_000;
+		for routed in [false, true] {
+			let ceiling = broadcast::Info {
+				cache_duration: Some(Duration::from_secs(30)),
+				..Default::default()
+			};
+			let routes = track::Routed::new(ceiling.clone(), "test", crate::track::Info::timed());
+			let copy = match routed {
+				true => routes.copy.clone(),
+				false => track::Producer::new(Arc::new(ceiling), "test", crate::track::Info::timed()),
+			};
+			// A lite-07 copy, which places each range where its upstream would.
+			copy.received();
+			copy.anchored();
+			// Live for a minute, past the ceiling.
+			let mut group = copy.create_group(group::Info { start: LIVE }).unwrap();
+			for at in (LIVE..=LIVE + 60_000).step_by(10_000) {
+				if at > LIVE {
+					kio::clock::sim::advance(Duration::from_secs(10)).await;
+				}
+				group
+					.write_frame(Timestamp::from_millis(at).unwrap(), b"x".as_slice())
+					.unwrap();
+			}
+
+			let oldest = [lite::Range::OPEN];
+			let bounds = Bounds::new(&oldest, None);
+			let subscription = track::Subscription::default().with_ranges(bounds.ranges.iter().copied());
+			let subscriber = match routed {
+				true => routes
+					.logical
+					.consume()
+					.subscribe(subscription)
+					.now_or_never()
+					.unwrap()
+					.unwrap(),
+				false => copy.subscribe(subscription),
+			};
+			let (mut run, mut writer, log) = lite07_run(SinkSession::new(Log::default()), subscriber);
+			asked(&mut run, &bounds.ranges);
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+
+			let below = lite::Range {
+				start: Some(lite::Anchor::Absolute(track::Position::group(0))),
+				end: Some(lite::Anchor::Absolute(track::Position::group(LIVE))),
+			};
+			run.update(lite07_add(&run, &[(0, oldest[0])], 1, &[below]));
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			let sent = responses(&mut writer, &log).await;
+			assert_eq!(starts(&sent), [(0, Some(LIVE)), (1, Some(0))], "routed: {routed}");
+			let drops: Vec<_> = (sent.iter())
+				.filter_map(|msg| match msg {
+					lite::SubscribeResponse::Drop(drop) => Some((drop.groups.clone(), drop.error(Version::Lite07))),
+					_ => None,
+				})
+				.collect();
+			assert_eq!(drops, [(0..LIVE, StreamError::Old)], "routed: {routed}");
+		}
+	}
+
 	/// An update before SUBSCRIBE_START that leaves only a time start a lite-07 copy can't
 	/// place yet floors the cursor at that time, so the group containing it is out of range
 	/// whichever it is: the range starts where delivery does, reported rather than left
@@ -9840,7 +9934,7 @@ mod serve_group_test {
 	/// whatever the floored one still waits on.
 	#[kio::test]
 	async fn lite07_a_routed_range_past_a_floored_time_start_reports_its_start() {
-		let mut routed = track::Routed::new("test", crate::track::Info::timed());
+		let mut routed = track::Routed::new(Default::default(), "test", crate::track::Info::timed());
 		routed.copy.received();
 		routed.copy.anchored();
 		write_group(&mut routed.copy, 1000, 1000);

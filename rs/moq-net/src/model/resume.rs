@@ -1525,6 +1525,18 @@ impl Subscriber {
 		self.reader().poll_drop(delivered, probe, waiter)
 	}
 
+	/// Let each copy report `range` again; see [`track::Subscriber::untell`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(super) fn untell(&mut self, range: std::ops::Range<u64>) {
+		self.reader().untell(range)
+	}
+
+	/// Have each copy judge `range` again; see [`track::Subscriber::reopen`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(super) fn reopen(&mut self, range: std::ops::Range<u64>) {
+		self.reader().reopen(range)
+	}
+
 	/// Assign the local read floor and exclusive cap; see [`track::Subscriber::with_range`].
 	/// `delivered` says which groups a lowered floor newly owes.
 	pub(super) fn set_range(&mut self, start: u64, end: Option<u64>, delivered: &Delivered) {
@@ -3333,6 +3345,28 @@ impl Reader {
 		// up) may still land, and is handed out if it does.
 		self.remove_drop(open.clone());
 		Poll::Ready((open, err))
+	}
+
+	/// Let each copy report `range` again, which the logical reader's wire was never told:
+	/// a copy's own record of it would block every later verdict on it, such as the drop
+	/// its upstream sends once it learns the run's fate.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	fn untell(&mut self, range: std::ops::Range<u64>) {
+		for copy in &mut self.copies {
+			if let Sub::Ready(sub) = &mut copy.sub {
+				sub.untell(range.clone());
+			}
+		}
+	}
+
+	/// Have each copy judge `range` again, and report again what it finds.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	fn reopen(&mut self, range: std::ops::Range<u64>) {
+		for copy in &mut self.copies {
+			if let Sub::Ready(sub) = &mut copy.sub {
+				sub.reopen(range.clone());
+			}
+		}
 	}
 
 	/// Forget `run` as queued, received or not.
@@ -7149,6 +7183,42 @@ mod test {
 		write(&a, 4);
 		assert_eq!(drain(&mut sub, false), [3, 4]);
 		assert_eq!(dropped(&mut sub), []);
+	}
+
+	/// A stale run a publisher takes back as never told, being below where it starts delivery,
+	/// is reported again once the copy learns the run's fate, routed or not: otherwise a range
+	/// a later update adds over that run waits on it forever.
+	#[test]
+	fn a_run_taken_back_reports_the_copys_later_drop() {
+		for routed in [false, true] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			// A relay's ceiling makes everything below the live group stale to a reader with no
+			// budget of its own.
+			let ceiling = broadcast::Info {
+				cache_duration: Some(Duration::from_secs(30)),
+				..Default::default()
+			};
+			let mut source = track::Producer::new(Arc::new(ceiling), "video", crate::track::Info::timed());
+			source.start_at(100_000).unwrap();
+			routes.serve(source.consume());
+			let mut group = source.create_group(group::Info { start: 100_000 }).unwrap();
+			group.write_frame(ts(100_000), b"x".as_ref()).unwrap();
+			group.write_frame(ts(160_000), b"x".as_ref()).unwrap();
+
+			let oldest = Subscription::default().with_ranges([track::Range::from(track::Start::Oldest)]);
+			let reading = if routed { &logical } else { &source };
+			let mut sub = reading.consume().subscribe(oldest).now_or_never().unwrap().unwrap();
+			assert_eq!(dropped(&mut sub), [(0..100_000, StreamError::Old)], "routed: {routed}");
+			sub.untell(0..100_000);
+
+			source.drop_groups(0..100_000, StreamError::NotFound);
+			assert_eq!(
+				dropped(&mut sub),
+				[(0..100_000, StreamError::NotFound)],
+				"routed: {routed}"
+			);
+		}
 	}
 
 	/// A skip of a run the serving copy already dropped replaces the drop, so the resumed
