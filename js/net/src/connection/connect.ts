@@ -77,6 +77,14 @@ export interface WebSocketProps {
 
 	/** Per-stream receive window in bytes (default: 4 MiB). Must be a positive safe integer. */
 	streamReceiveWindow?: number;
+
+	/**
+	 * How long the session may go without a frame before it closes, like `moq-tokio`'s
+	 * `quic.idle_timeout` (default: 30 s). It keeps a quiet session alive with a ping every third
+	 * of it. `null` turns it off when the server's is off too, so a quiet session sends nothing and
+	 * a dead link surfaces only as the WebSocket closing. Must be positive.
+	 */
+	idleTimeout?: Duration | null;
 }
 
 /**
@@ -196,6 +204,17 @@ export function normalizeVersions(props?: {
 		if (value !== undefined && !(Number.isSafeInteger(value) && value > 0))
 			throw new RangeError(`websocket.${key} must be a positive safe integer: ${value}`);
 	}
+	const idleTimeout = props?.websocket?.idleTimeout;
+	if (
+		idleTimeout !== undefined &&
+		idleTimeout !== null &&
+		!(
+			idleTimeout instanceof Duration &&
+			!idleTimeout.isZero() &&
+			Number.isSafeInteger(Math.ceil(idleTimeout.asMillis()))
+		)
+	)
+		throw new RangeError(`websocket.idleTimeout must be a positive Duration or null: ${idleTimeout}`);
 	return props?.versions === undefined ? undefined : checkVersions(props.versions);
 }
 
@@ -570,6 +589,7 @@ async function dialRace(
 						streamReceiveWindow: BigInt(
 							props.websocket?.streamReceiveWindow ?? DEFAULT_STREAM_RECEIVE_WINDOW,
 						),
+						idleTimeout: props.websocket?.idleTimeout,
 					},
 				})
 			: undefined;
