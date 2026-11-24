@@ -7,6 +7,7 @@ on:
   pull_request:
     paths:
       - .github/workflows/tmp-firefox-arm-resume.yml
+      - .github/tmp-arm/**
 
 permissions:
   contents: read
@@ -20,14 +21,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { variant: stops, shard: 1 }
-          - { variant: stops, shard: 2 }
-          - { variant: stops, shard: 3 }
-          - { variant: stops, shard: 4 }
-          - { variant: plain, shard: 1 }
-          - { variant: plain, shard: 2 }
-          - { variant: plain, shard: 3 }
-          - { variant: plain, shard: 4 }
+          - { variant: rev9508, shard: 1 }
+          - { variant: rev9508, shard: 2 }
+          - { variant: rev9508, shard: 3 }
+          - { variant: rev9508, shard: 4 }
+          - { variant: rev9422, shard: 1 }
+          - { variant: rev9422, shard: 2 }
+          - { variant: rev9422, shard: 3 }
+          - { variant: rev9422, shard: 4 }
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -54,6 +55,8 @@ jobs:
           cases=(--media-cases pause,rejoin,detach)
           case "$VARIANT" in
             full | stops | profile-full | plain) runs=3; cases=() ;;
+            rev9508) runs=3; cases=(); git apply .github/tmp-arm/revert-c0b8d1e4f3.patch ;;
+            rev9422) runs=3; cases=(); git apply .github/tmp-arm/revert-35e6841f4f.patch ;;
             chromium) engine=chromium ;;
           esac
           pass=0
