@@ -1791,7 +1791,7 @@ mod read_tests {
 		assert_eq!(
 			subscription.ranges,
 			[moq_net::track::Range::from(moq_net::track::Start::Live {
-				min: DELAY + WARMUP,
+				min: Some(DELAY + WARMUP),
 				max: Some(DELAY + WARMUP),
 			})]
 		);
@@ -2350,7 +2350,7 @@ mod timebase_tests {
 					.subscribe(
 						moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 							moq_net::track::Start::Live {
-								min: Duration::from_secs(30),
+								min: Some(Duration::from_secs(30)),
 								max: Some(Duration::from_secs(30)),
 							},
 						)]),

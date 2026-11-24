@@ -569,8 +569,10 @@ async fn a_run_dropped_before_the_first_group_settles_a_later_range() {
 async fn relay_pool_pressure_folds_every_reported_run() {
 	/// The relay's readers each record this many disjoint dropped runs.
 	const RUNS: u64 = 200;
-	/// The groups that land on the relay at once once its pool shrinks.
-	const BURST: u64 = 1000;
+	/// The groups that land on the relay at once once its pool shrinks: enough to leave the
+	/// records a debt, few enough that each reader keeps up, since a group evicted before its
+	/// reader took it is a promise no fold settles, and one hold per reader refills it.
+	const BURST: u64 = 100;
 	let budget = Duration::from_secs(2);
 	for stale in [false, true] {
 		kio::clock::timeout(TIMEOUT * 10, async {

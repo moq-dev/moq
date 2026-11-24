@@ -354,7 +354,7 @@ impl Reader {
 				// From the live edge, and never skipping a group however late.
 				let prefs = track::Subscription::default()
 					.with_ranges([track::Range::from(track::Start::Live {
-						min: Duration::ZERO,
+						min: Some(Duration::ZERO),
 						max: None,
 					})])
 					.with_max(Duration::from_secs(60));

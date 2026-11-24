@@ -1105,7 +1105,7 @@ async fn measure(cell: Cell, profile: Option<moq_shaper::Profile>, bytes: usize)
 		// Groups in flight fall behind the live edge, so a zero budget would skip them.
 		let subscription =
 			Subscription::default().with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
-				min: TIMEOUT,
+				min: Some(TIMEOUT),
 				max: Some(TIMEOUT),
 			})]);
 		let sub = kio::clock::timeout(TIMEOUT, setup.remote.track(&name).unwrap().subscribe(subscription))
@@ -1395,7 +1395,7 @@ async fn join(bits_per_second: u64, stream_window: u64) -> Joined {
 	// Groups in flight fall behind the live edge, so a zero budget would skip them.
 	let subscription = || {
 		Subscription::default().with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
-			min: Duration::from_secs(60),
+			min: Some(Duration::from_secs(60)),
 			max: Some(Duration::from_secs(60)),
 		})])
 	};

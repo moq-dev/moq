@@ -1,6 +1,6 @@
 ---
 name: verify-reconnect
-description: Model-check the client connect policy (`rs/moq-net/src/reconnect.rs`) and the `moq_tokio::Connection` loop that drives it with TLA+. Use when a change touches GOAWAY handovers, the dials that ask for each attempt's tokens, the predecessor's drain and retirement, the action queue, fallback probes, what a `Connection` reports (its phase, presence, the predecessor `close` and `drain` take), or which address a redial picks after a redirect.
+description: Model-check client reconnect and GOAWAY handovers (`rs/moq-net/src/reconnect.rs`, `moq_tokio::Connection`) with TLA+. Use when changing connect policy, per-dial tokens (`Dials`), predecessor drain/retirement, fallback probes, or redirect redials.
 ---
 
 # Verify reconnect and GOAWAY handovers

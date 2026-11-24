@@ -4009,7 +4009,7 @@ mod tests {
 			.await
 			.unwrap();
 		let join = track::JoinAsk {
-			min: Duration::from_secs(1),
+			min: Some(Duration::from_secs(1)),
 			end: None,
 			budget: Duration::from_secs(30),
 			since: 0,
@@ -4064,7 +4064,7 @@ mod tests {
 			.await
 			.unwrap();
 		let join = |budget, since| track::JoinAsk {
-			min: Duration::from_secs(1),
+			min: Some(Duration::from_secs(1)),
 			end: None,
 			budget,
 			since,
@@ -4359,7 +4359,7 @@ mod tests {
 		// A live join, which only the publisher can place.
 		let back = lite::Range {
 			start: Some(lite::Anchor::Live {
-				min: Duration::ZERO,
+				min: Some(Duration::ZERO),
 				max: None,
 			}),
 			end: None,
@@ -6005,6 +6005,42 @@ mod tests {
 		(serve, serving, tail, broadcast)
 	}
 
+	/// A run no fill owes stays asked while a stream of it still arrives, judged by the copy
+	/// alone: one the pool evicts mid-stream lets the run go without asking a flight of the
+	/// group, which nobody here would read.
+	#[kio::test]
+	#[expect(clippy::single_range_in_vec_init, reason = "the asked runs are a list, here one")]
+	async fn a_drained_run_asks_no_flight_for_an_evicted_stream() {
+		let (serve, _serving, _tail, _broadcast) = lite07_serving(Duration::from_millis(500)).await;
+		let waiter = kio::Waiter::noop();
+		let copy = crate::track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			crate::track::Info::default()
+				.with_timescale(crate::Timescale::MILLI)
+				.with_max_age(None),
+		);
+		let requests = copy.requests();
+		let mut arriving = copy.create_group(group::Info { start: 0 }).unwrap();
+		arriving
+			.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"x".as_slice())
+			.unwrap();
+		let mut fills = fills::RangeFills::default();
+		fills.ask.groups.insert(0..1);
+		fills.poll(&serve, &copy, None, true, &waiter).unwrap();
+		assert_eq!(
+			fills.ask.groups.iter().cloned().collect::<Vec<_>>(),
+			[0..1],
+			"its stream still arrives"
+		);
+
+		copy.evict(0);
+		assert!(fills.poll(&serve, &copy, None, true, &waiter).unwrap());
+		assert!(fills.ask.groups.is_empty(), "the stream ended with its copy");
+		assert!(requests.poll_requested_fill(&waiter).is_pending(), "no flight is asked");
+		drop(arriving);
+	}
+
 	/// A stale drop of part of a fill's run recovers that part on its own subscription, which
 	/// takes it out of the copy's ranges at once, though the rest of the run stays asked: the
 	/// subscription that dropped it never delivers it.
@@ -6053,6 +6089,209 @@ mod tests {
 			[2..4],
 			"the recovered run is no longer asked"
 		);
+	}
+
+	/// A group the subscription delivered, recovered once and evicted again before its reader
+	/// took it, is recovered again rather than refused, and the copy landing is held for the
+	/// reader: a key a reader is owed is never lost to the cache.
+	#[kio::test]
+	async fn an_evicted_recovered_group_is_recovered_again() {
+		let (serve, _serving, tail, _broadcast) = lite07_serving(Duration::from_millis(500)).await;
+		let waiter = kio::Waiter::noop();
+		let copy = crate::track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			crate::track::Info::default()
+				.with_timescale(crate::Timescale::MILLI)
+				.with_max_age(None),
+		);
+		let requests = copy.requests();
+		let write = |key: u64| {
+			let mut group = copy.create_group(group::Info { start: key }).unwrap();
+			group
+				.write_frame(crate::Timestamp::from_millis(key * 1000).unwrap(), b"x".as_slice())
+				.unwrap();
+			group.finish().unwrap();
+		};
+		for key in 0..3 {
+			write(key);
+		}
+		copy.evict(0);
+		let mut reader = copy
+			.subscribe(crate::track::Subscription::default().with_range(0..1))
+			.ordered();
+		assert!(reader.poll_next_group(&waiter).is_pending(), "group 0 is owed");
+		let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
+			panic!("group 0 is a miss");
+		};
+		let mut fills = fills::RangeFills::default();
+		fills.push(fill);
+		// Delivered on the subscription before, and recovered once since.
+		let Ok(mut accounted) = tail.write() else {
+			unreachable!("the tail is open");
+		};
+		accounted.account(0..1, serve.subscriber.runtime.now());
+		drop(accounted);
+		fills.recovered_once(0..1);
+		fills.poll(&serve, &copy, Some(&tail), true, &waiter).unwrap();
+		assert!(fills.recovering(), "recovered again");
+		assert!(reader.poll_next_group(&waiter).is_pending(), "still owed, not given up");
+
+		// The recovered copy lands and is held for the reader, which takes it.
+		write(0);
+		fills.poll(&serve, &copy, Some(&tail), true, &waiter).unwrap();
+		let Poll::Ready(Ok(Some(group))) = reader.poll_next_group(&waiter) else {
+			panic!("group 0 reaches the reader");
+		};
+		assert_eq!(group.start, 0);
+	}
+
+	/// Whether a fill owing group 0, recovered once already as `size` bytes and evicted for
+	/// debt, recovers it again once `room` resizes the pool. If `lands`, the recovery landed in
+	/// the run the fill awaits, held, and was evicted for debt before the fill answered it,
+	/// and the track forgot every eviction since, as a debt or the miss grace does.
+	async fn recovers_again(size: usize, room: impl Fn(&crate::cache::Pool), lands: bool) -> bool {
+		let (serve, _serving, tail, _broadcast) = lite07_serving(Duration::from_millis(500)).await;
+		let waiter = kio::Waiter::noop();
+		let pool = crate::cache::Pool::unbounded();
+		let copy = crate::track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info {
+				pool: pool.clone(),
+				..Default::default()
+			}),
+			"video",
+			crate::track::Info::default()
+				.with_timescale(crate::Timescale::MILLI)
+				.with_max_age(None),
+		);
+		let requests = copy.requests();
+		for key in 0..3 {
+			let mut group = copy.create_group(group::Info { start: key }).unwrap();
+			let frame = vec![0u8; if key == 0 { size } else { 1 }];
+			group
+				.write_frame(crate::Timestamp::from_millis(key * 1000).unwrap(), frame)
+				.unwrap();
+			group.finish().unwrap();
+		}
+		copy.evict_for_debt(0);
+		let mut reader = copy
+			.subscribe(crate::track::Subscription::default().with_range(0..1))
+			.ordered();
+		assert!(reader.poll_next_group(&waiter).is_pending(), "group 0 is owed");
+		let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
+			panic!("group 0 is a miss");
+		};
+		if lands {
+			assert_eq!(fill.next_run(), Some(0..1), "the fill awaits group 0");
+			let mut group = copy.create_group(group::Info { start: 0 }).unwrap();
+			group.write_frame(crate::Timestamp::ZERO, vec![0u8; size]).unwrap();
+			group.finish().unwrap();
+			room(&pool);
+			copy.evict_for_debt(0);
+			copy.forget_lost();
+		}
+		let mut fills = fills::RangeFills::default();
+		fills.push(fill);
+		let Ok(mut accounted) = tail.write() else {
+			unreachable!("the tail is open");
+		};
+		accounted.account(0..1, serve.subscriber.runtime.now());
+		drop(accounted);
+		fills.recovered_once(0..1);
+		room(&pool);
+		fills.poll(&serve, &copy, Some(&tail), true, &waiter).unwrap();
+		let again = fills.recovering();
+		assert_eq!(fills.is_empty(), !again, "refused unless recovered");
+		again
+	}
+
+	/// A group recovered once already is refused rather than recovered again while no hold
+	/// fits, as in a pool its live edges fill: the pool would evict the copy landing unheld,
+	/// and each recovery after it would go the same way.
+	#[kio::test]
+	async fn a_recovered_group_is_not_recovered_again_without_hold_room() {
+		assert!(!recovers_again(1, |pool| pool.resize(0), false).await);
+	}
+
+	/// A group recovered once already is refused rather than recovered again when it is bigger
+	/// than the room the pool has for a hold, however much room that is: it would land held
+	/// past the capacity, be evicted again, and be recovered again, forever.
+	#[kio::test]
+	async fn a_recovered_group_too_big_to_hold_is_not_recovered_again() {
+		// Room for a hold beside what the copy caches, though not for group 0.
+		let room = |pool: &crate::cache::Pool| pool.resize(pool.used() + 1_000);
+		assert!(!recovers_again(100_000, room, false).await);
+		assert!(
+			recovers_again(100, room, false).await,
+			"one that fits is recovered again"
+		);
+	}
+
+	/// A recovery too big to hold, evicted before its fill answered it, is not recovered again
+	/// once the track forgets the eviction: the fill that held it keeps the verdict.
+	#[kio::test]
+	async fn a_recovery_too_big_to_hold_is_not_recovered_again_once_its_eviction_is_forgotten() {
+		// Room for a hold beside the copy's live edge, though not for group 0.
+		let room = |pool: &crate::cache::Pool| pool.resize(pool.pinned() + 10_000);
+		assert!(!recovers_again(100_000, room, true).await);
+		assert!(
+			recovers_again(100, room, true).await,
+			"one that fits is recovered again"
+		);
+	}
+
+	/// A group evicted after the subscription delivered it is recovered again even when the
+	/// run owing it starts with keys a recovery answered skipped: a refusal answers only its
+	/// own keys.
+	#[kio::test]
+	async fn an_evicted_group_past_a_skipped_run_is_recovered() {
+		let (serve, _serving, tail, _broadcast) = lite07_serving(Duration::from_millis(500)).await;
+		let waiter = kio::Waiter::noop();
+		let copy = crate::track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			crate::track::Info::default()
+				.with_timescale(crate::Timescale::MILLI)
+				.with_max_age(None),
+		);
+		let requests = copy.requests();
+		let write = |key: u64| {
+			let mut group = copy.create_group(group::Info { start: key }).unwrap();
+			group
+				.write_frame(crate::Timestamp::from_millis(key * 1000).unwrap(), b"x".as_slice())
+				.unwrap();
+			group.finish().unwrap();
+		};
+		for key in 0..3 {
+			write(key);
+		}
+		copy.evict(0);
+		copy.evict(1);
+		let mut reader = copy
+			.subscribe(crate::track::Subscription::default().with_range(0..2))
+			.ordered();
+		assert!(reader.poll_next_group(&waiter).is_pending(), "groups 0 and 1 are owed");
+		let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
+			panic!("a miss");
+		};
+		let mut fills = fills::RangeFills::default();
+		fills.push(fill);
+		let Ok(mut accounted) = tail.write() else {
+			unreachable!("the tail is open");
+		};
+		accounted.account(0..2, serve.subscriber.runtime.now());
+		drop(accounted);
+		// The run the fill owes starts at the key a recovery answered skipped.
+		fills.refused_skipped(0..1);
+		fills.poll(&serve, &copy, Some(&tail), true, &waiter).unwrap();
+		assert!(fills.recovering(), "group 1 is recovered");
+
+		write(1);
+		fills.poll(&serve, &copy, Some(&tail), true, &waiter).unwrap();
+		let Poll::Ready(Ok(Some(group))) = reader.poll_next_group(&waiter) else {
+			panic!("group 1 reaches the reader");
+		};
+		assert_eq!(group.start, 1);
 	}
 
 	/// What a lite-06 copy holds and what its reader owes.
@@ -6246,7 +6485,7 @@ mod tests {
 		let (serve, mut serving, tail, _broadcast) = lite07_serving(budget).await;
 		// A live join under the budget, which the upstream placed at group 0: a stale drop
 		// under that budget ends what it reads.
-		let lag = Duration::from_secs(10);
+		let lag = Some(Duration::from_secs(10));
 		let mut reader =
 			serving.serving.subscribe(
 				crate::track::Subscription::default().with_ranges([crate::track::Range::from(
@@ -6277,7 +6516,7 @@ mod tests {
 			// A live join under a wider max age replaces the range.
 			let wider = lite::Range {
 				start: Some(lite::Anchor::Live {
-					min: Duration::ZERO,
+					min: Some(Duration::ZERO),
 					max: Some(Duration::from_secs(5)),
 				}),
 				end: None,
@@ -8863,7 +9102,7 @@ mod tests {
 			wire_ranges(&Subscription::default()),
 			Some(vec![lite::Range {
 				start: Some(lite::Anchor::Live {
-					min: Duration::ZERO,
+					min: Some(Duration::ZERO),
 					max: Some(Duration::ZERO)
 				}),
 				end: None,
@@ -8878,7 +9117,7 @@ mod tests {
 	fn a_placed_join_goes_out_joined() {
 		let max = Some(Duration::from_secs(2));
 		let join = track::Range::from(crate::track::Start::Live {
-			min: Duration::from_millis(40),
+			min: Some(Duration::from_millis(40)),
 			max,
 		});
 		let mut placed = Subscription {
@@ -8895,7 +9134,7 @@ mod tests {
 		};
 		let live = lite::Range {
 			start: Some(lite::Anchor::Live {
-				min: Duration::from_millis(40),
+				min: Some(Duration::from_millis(40)),
 				max,
 			}),
 			end: None,
@@ -9086,10 +9325,12 @@ mod tests {
 			wanted
 		};
 
-		// The deltas outweigh the first frame, so every join asks for group 1.
+		// The deltas outweigh the first frame, so every join asks for group 1. Each joins
+		// after another track's answer, so the joins differ in the tick they wait past.
 		arrive(&serving, 0);
 		let mut joins = Vec::new();
 		for _ in 0..8 {
+			crate::model::track::answer_elsewhere();
 			joins.push(track.subscribe(None).await.unwrap());
 			assert!(serving.poll(&h.serve, &kio::Waiter::noop()).is_pending());
 		}
@@ -10932,7 +11173,7 @@ fn wire_ranges(subscription: &Subscription) -> Option<Vec<lite::Range>> {
 /// It starts at the lowest start. A subscription with only ranges without a start asks with
 /// none, which a pre-06 publisher reads as the latest group and a lite-06 one as no floor,
 /// under the widest max age among them, the one `Subscriber Max Age` the wire carries: a
-/// live join reaching back past every group (see [`track::Start::within`]), or none while a
+/// live join with no lag limit (see [`track::Start::within`]), or none while a
 /// range from the oldest group asks for history. One mixing the two asks from group 0,
 /// history, since no single start covers both: the latest group may sit below the start.
 ///
@@ -11440,7 +11681,7 @@ fn join_probe(join: &track::JoinAsk) -> lite::Range {
 
 /// The live join a wire range asks, as its lag and inclusive end (see [`through`]), `None`
 /// for one that isn't a live join. Where it lands doesn't depend on its max age.
-fn wire_join(range: &lite::Range) -> Option<(Duration, Option<u64>)> {
+fn wire_join(range: &lite::Range) -> Option<(Option<Duration>, Option<u64>)> {
 	match range.start {
 		Some(lite::Anchor::Live { min, .. }) => Some((min, through(range.end))),
 		_ => None,
@@ -12020,6 +12261,8 @@ impl TrackServe {
 						// Downstream preferences changed: forward them upstream as a
 						// SUBSCRIBE_UPDATE (Lite03+ only; older peers can't carry one).
 						let start_moved = demand.is_some() && active.start != subscription.start();
+						let terms = (active.priority, active.order, active.max_delay);
+						let live = active.live.unchanged();
 						active.priority = subscription.priority;
 						active.order = subscription.order;
 						active.max_delay = max_age;
@@ -12070,7 +12313,11 @@ impl TrackServe {
 							} else if start_moved {
 								let _ = producer.start_at(active.start);
 							}
-							buffer_update(active, edit)?;
+							// One restating what is live tells the publisher nothing, as when a join's
+							// tick moves while its probe is still unanswered: joins coalesce.
+							if edit != live || terms != (active.priority, active.order, active.max_delay) {
+								buffer_update(active, edit)?;
+							}
 						}
 						Ok(Begin::None)
 					}
@@ -14571,7 +14818,9 @@ impl kio::Task for FillServeRun {
 			// The next fetch waits for a reader to pick up the group the last one brought, so a
 			// fill wider than the cache never evicts its own groups before they are read.
 			ready!(self.fill.poll_paced(waiter));
+			// Answered, the fill lives until its readers take what it holds for them.
 			let Some(key) = self.fill.wanted() else {
+				ready!(self.fill.poll_taken(waiter));
 				return Poll::Ready(());
 			};
 			// Every run answers its group, so the same one coming back is a bug; ending the

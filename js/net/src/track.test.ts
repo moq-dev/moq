@@ -8,7 +8,7 @@ import { ProtocolViolation, Skipped, StreamCode, StreamError, TimestampMismatch,
 import type { FillGroups } from "./fill.ts";
 import type { Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
-import { hooks, NO_MAX_DELAY, PAST_EVERY_GROUP, skipHole, staleHole } from "./internal.ts";
+import { hooks, NO_MAX_DELAY, skipHole, staleHole } from "./internal.ts";
 import { GRACE } from "./ledger.ts";
 import { textFrame } from "./mock.ts";
 import { rescale, rescaleIn } from "./rescale.ts";
@@ -325,7 +325,7 @@ test("an ordered reader owes the groups below a restated START", async () => {
 	for (let key = 5n; key < 10n; key++) putGroup(producer, key, Number(key) * 1000);
 	await clock.advance(10);
 	const reader = producer
-		.subscribe({ ranges: [{ start: { live: { min: PAST_EVERY_GROUP, max: Duration.millis(6500) } } }] })
+		.subscribe({ ranges: [{ start: { live: { min: null, max: Duration.millis(6500) } } }] })
 		.ordered();
 	hooks.restateTrack(producer);
 	try {
@@ -2760,7 +2760,7 @@ test("an aborted live-edge anchor does not make older content stale", async () =
 
 	// A join reaching back past every group under a zero max: the aborted group is no live edge, so
 	// the older one is the newest it judges by.
-	const track = producer.subscribe({ ranges: [{ start: { live: { min: PAST_EVERY_GROUP, max: Duration.ZERO } } }] });
+	const track = producer.subscribe({ ranges: [{ start: { live: { min: null, max: Duration.ZERO } } }] });
 	expect((await track.recvGroup())?.start).toBe(1n);
 	track.close();
 });
@@ -2783,9 +2783,13 @@ test.each(["arrival", "ordered"] as const)("subscription bounds stay reader-loca
 		expect((await read())?.start).toBe(3n);
 		expect(await read()).toBeUndefined();
 		subscriber.update({ ranges: [{ end: 4n }] });
-		// The unread group below both old floors was passed over outside every range, so neither read
-		// goes back for it, as in Rust.
-		expect((await read())?.start).toBe(4n);
+		// Arrival readers can now offer the unread group below the old floors; ordered ones cannot
+		// rewind. Which goes first is the Group Order, not what this pins. Mirrors the Rust
+		// `a_widened_history_read_offers_a_group_it_passed_over`.
+		const widened: (bigint | undefined)[] = [];
+		for (let count = ordered ? 1 : 2; count > 0; count--) widened.push((await read())?.start);
+		widened.sort((a, b) => Number((a ?? 0n) - (b ?? 0n)));
+		expect(widened).toEqual(ordered ? [4n] : [0n, 4n]);
 		expect(await read()).toBeUndefined();
 		// An open range parks at the live edge instead.
 		subscriber.update({ ranges: [{ start: 5n }] });
@@ -6702,7 +6706,7 @@ test("a forgotten kept-out run is judged by each range's budget", async () => {
 		const sub = producer.subscribe({
 			ranges: [
 				{ start: 0n, end: 2n },
-				{ start: { live: { min: PAST_EVERY_GROUP, max: Duration.millis(1_000) } }, end: 7n },
+				{ start: { live: { min: null, max: Duration.millis(1_000) } }, end: 7n },
 			],
 		});
 		expect(sub.tryRecvGroup()?.start).toBe(0n);

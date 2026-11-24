@@ -2225,7 +2225,7 @@ mod tests {
 				let (name, config) = snapshot.audio.renditions.iter().next().unwrap();
 				let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: std::time::Duration::from_secs(1),
+						min: Some(std::time::Duration::from_secs(1)),
 						max: Some(std::time::Duration::from_secs(1)),
 					},
 				)]);

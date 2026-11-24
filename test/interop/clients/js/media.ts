@@ -326,9 +326,16 @@ async function waitForLive(
 	assertion: string,
 	resumed = false,
 ): Promise<{ first: number; lag: number; after: number }> {
-	let since = Date.now();
+	const entered = Date.now();
+	let since = entered;
 	let started = !resumed;
 	const startup = since + timeoutMs;
+	// Watched from the catch-up window's start, so a failure can tell a starved host from a stuck page.
+	// `top` exits on its own after a window, so a throw from a check below leaves nothing running long.
+	let host = started ? watchHost(assertion) : undefined;
+	// When the player's latest sample arrived: a page whose main thread stopped stops sampling, and its
+	// last sample then reads as a player stuck behind live.
+	let sampled: { seq: number; at: number } | undefined;
 	let first: number | undefined;
 	let lag: number | undefined;
 	let frame: number | undefined;
@@ -343,6 +350,7 @@ async function waitForLive(
 		const [fixture, state] = await Promise.all([readFixtureState(publisher), readPlayerState(player)]).catch(
 			() => [],
 		);
+		if (state && state.seq !== sampled?.seq) sampled = { seq: state.seq, at: Date.now() };
 		if (fixture && state?.frameId !== undefined) {
 			origin ??= state.at;
 			const start = origin;
@@ -364,6 +372,7 @@ async function waitForLive(
 			if (moved && !started) {
 				started = true;
 				since = Date.now();
+				host = watchHost(assertion);
 			}
 			const live = reachesLive({
 				previous: frame,
@@ -372,17 +381,23 @@ async function waitForLive(
 				bound: LIVE_LAG_FRAMES,
 			});
 			frame = state.frameId;
-			if (live) return { first, lag, after: Date.now() - since };
+			if (live) {
+				host?.process.kill();
+				return { first, lag, after: Date.now() - since };
+			}
 		}
 		await sleep(POLL_INTERVAL_MS);
 	}
 	throwPageErrors(publisherErrors);
 	throwPageErrors(playerErrors);
-	throw new Failure(
+	const failure = new Failure(
 		assertion,
 		`${moved ? "still" : "held a frame"} ${lag === undefined ? "?" : framesToMs(lag)}ms behind the fixture ` +
-			`${started ? LATE_CATCHUP_MS : timeoutMs}ms after the first frame, against a ${framesToMs(LIVE_LAG_FRAMES)}ms bound for playback; audio ${audio}`,
+			`${started ? LATE_CATCHUP_MS : timeoutMs}ms after the first frame, against a ${framesToMs(LIVE_LAG_FRAMES)}ms bound for playback; audio ${audio}; ` +
+			`the player's latest sample arrived ${sampled ? Date.now() - sampled.at : "?"}ms ago`,
 	);
+	await explainStalls(player, { start: entered, end: Date.now() }, assertion, host);
+	throw failure;
 }
 
 /**
@@ -425,8 +440,8 @@ async function observe(
 	playerErrors: BrowserErrors,
 	label: string,
 ): Promise<{ samples: Sample[]; grade: (checks?: () => void) => Promise<void> }> {
-	const host = watchHost(label);
 	const start = Date.now();
+	const host = watchHost(label);
 	const samples = await collect(player, playerErrors, WINDOW_MS);
 	const bounds = { start, end: Date.now() };
 	const grade = async (checks?: () => void) => {
@@ -460,16 +475,17 @@ const HOST_INTERVAL_S = 0.5;
  */
 function watchHost(
 	label: string,
-): { process: Bun.Subprocess<"ignore", "pipe", "ignore">; output: Promise<string> } | undefined {
+): { process: Bun.Subprocess<"ignore", "pipe", "ignore">; output: Promise<string>; started: number } | undefined {
 	if (process.platform !== "linux") return undefined;
 	const iterations = Math.ceil(WINDOW_MS / 1000 / HOST_INTERVAL_S) + 1;
 	// Evidence only: a host without `top` loses this part of a failure's explanation, not the window.
 	try {
+		const started = Date.now();
 		const top = Bun.spawn(
 			["top", "-b", "-c", "-w", "512", "-d", String(HOST_INTERVAL_S), "-n", String(iterations)],
 			{ stdin: "ignore", stdout: "pipe", stderr: "ignore" },
 		);
-		return { process: top, output: new Response(top.stdout).text() };
+		return { process: top, output: new Response(top.stdout).text(), started };
 	} catch (err) {
 		console.error(`  ${label}: host processes unavailable: ${err}`);
 		return undefined;
@@ -541,7 +557,10 @@ async function explainStalls(
 	if (!host) return;
 	host.process.kill();
 	const snapshots = (await host.output).split(/^top - /m).slice(1);
-	console.error(`  ${label}: busiest host processes every ${HOST_INTERVAL_S}s from the window's start`);
+	// `top` may start after the window does, as a resumed wait's does once playback moves, so its
+	// snapshots count from the same start as the frames above.
+	const offset = (host.started - start) / 1000;
+	console.error(`  ${label}: busiest host processes every ${HOST_INTERVAL_S}s`);
 	for (const [index, snapshot] of snapshots.entries()) {
 		const lines = snapshot.split("\n");
 		const idle = lines.find((line) => line.startsWith("%Cpu"))?.match(/([\d.]+) id/)?.[1];
@@ -551,7 +570,9 @@ async function explainStalls(
 			.map((line) => line.trim().split(/\s+/))
 			.filter((fields) => fields.length >= 12)
 			.map((fields) => `${processName(fields.slice(11).join(" "))} ${fields[8]}%`);
-		console.error(`    +${(index * HOST_INTERVAL_S).toFixed(1)}s idle ${idle ?? "?"}%: ${busiest.join(", ")}`);
+		console.error(
+			`    +${(offset + index * HOST_INTERVAL_S).toFixed(2)}s idle ${idle ?? "?"}%: ${busiest.join(", ")}`,
+		);
 	}
 }
 

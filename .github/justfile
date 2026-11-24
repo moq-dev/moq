@@ -139,6 +139,11 @@ test-integration:
     bash sh/local.sh python3 bench/build.slow.test.py
     python3 sh/dispatch-query.test.py --bench
 
+# Have Maven Central's Portal validate a Maven repository with a rust2 checkout's ffi/release/central.sh, then drop it unpublished.
+[positional-arguments]
+central-check rust2 repo:
+    "$1/ffi/release/central.sh" validate "$2"
+
 # Release workflow helpers, e.g. `just gh release parse-version moq-cli`.
 [positional-arguments]
 release *args:

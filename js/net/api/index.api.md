@@ -759,7 +759,7 @@ export namespace Track {
 	};
 	export interface Live {
 		max?: Clock.Duration | null;
-		min: Clock.Duration;
+		min: Clock.Duration | null;
 	}
 	export type Order = "ascending" | "descending";
 	export class Ordered {

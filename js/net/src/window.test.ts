@@ -42,9 +42,9 @@ const range = (start: bigint | undefined, end?: bigint): Range => {
 const groups = (start: bigint, end?: bigint): Range =>
 	range(time(start), end === undefined ? undefined : time(end - 1n));
 
-/** A live join `ms` behind the live edge, through `end` or onward for undefined. */
-const live = (ms: number, end?: bigint): Range => {
-	const out: Range = { start: { live: { min: Duration.millis(ms), max: Duration.ZERO } } };
+/** A live join `ms` behind the live edge, or with no lag limit for null, through `end` or onward for undefined. */
+const live = (ms: number | null, end?: bigint): Range => {
+	const out: Range = { start: { live: { min: ms === null ? null : Duration.millis(ms), max: Duration.ZERO } } };
 	if (end !== undefined) out.end = end;
 	return out;
 };
@@ -62,7 +62,7 @@ class Keys implements Holdings {
 	done = false;
 	looks = false;
 	dropped = 0n;
-	joins?: (min: Duration, end: bigint | undefined, budget: number, since: number) => Join | undefined;
+	joins?: (min: Duration | null, end: bigint | undefined, budget: number, since: number) => Join | undefined;
 	// The tick of the upstream's answer to every live join, which alone places one when set.
 	answered?: number;
 
@@ -93,7 +93,7 @@ class Keys implements Holdings {
 		return this.#sorted().find((key) => key >= from);
 	}
 
-	join(min: Duration, end: bigint | undefined, budget: number, since: number): Join | undefined {
+	join(min: Duration | null, end: bigint | undefined, budget: number, since: number): Join | undefined {
 		if (this.answered !== undefined && this.answered <= since) return undefined;
 		return this.joins?.(min, end, budget, since);
 	}
@@ -188,7 +188,7 @@ describe("Window", () => {
 
 	test("a range with no start reaches back to the oldest group, and a live join by its lag", () => {
 		const held = new Keys([0n, 33n, 66n, 99n]);
-		held.joins = (min) => ({ time: 99n - BigInt(min.asMillis()) });
+		held.joins = (min) => ({ time: 99n - BigInt(min?.asMillis() ?? 99) });
 		// The oldest group, naming no floor, needing no latest group.
 		let window = new Window([{}], undefined, held);
 		expect([window.floor(), window.start(), window.settled]).toEqual([0n, undefined, true]);
@@ -202,7 +202,7 @@ describe("Window", () => {
 	test("a live join looks its time start up, unlike a join to a group", () => {
 		const held = new Keys([4000n, 9000n]);
 		held.looks = true;
-		held.joins = (min) => ({ time: 9000n - BigInt(min.asMillis()) });
+		held.joins = (min) => ({ time: 9000n - BigInt(min?.asMillis() ?? 9000) });
 		const window = new Window([live(500)], 9000n, held);
 		expect(window.lookups()).toEqual([{ time: 8500n, floor: 4001n }]);
 		expect(window.found(8500n, { kind: "group", group: 8000n }, held)).toBe(true);
@@ -335,6 +335,28 @@ describe("Window", () => {
 			expect([budget.widest(), budget.isUniform()]).toEqual([NO_MAX_DELAY, false]);
 			const clamped = budget.clamped(200);
 			expect([clamped.at(55n), clamped.at(30n)]).toEqual([200, 100]);
+		}
+	});
+
+	// A group no range covers, such as one handed out before the ranges moved off it, takes the widest
+	// budget any range asks: none beside a history range, and the widest max beside live joins alone.
+	// Mirrors the Rust `a_group_none_covers_takes_the_widest_budget`.
+	test("a group none covers takes the widest budget", () => {
+		const held = new Keys(keys(0n, 10n));
+		// Placed at the latest group, 9.
+		const join: Range = { start: { live: { min: Duration.ZERO, max: Duration.millis(30) } } };
+		const history = range(3n, 3n);
+		for (const [ranges, rest] of [
+			[[history], NO_MAX_DELAY],
+			[[history, join], NO_MAX_DELAY],
+			[[join], 30],
+		] as const) {
+			const window = new Window(ranges, 9n, held);
+			expect([window.settled, window.contains(1n)]).toEqual([true, false]);
+			const keyed = new Map(ranges.map((range, i) => [BigInt(i), range] as const));
+			for (const budget of [window.budget(), window.budgetOf(keyed)]) {
+				expect([budget.at(1n), budget.widest()]).toEqual([rest, rest]);
+			}
 		}
 	});
 
@@ -563,7 +585,7 @@ describe("Window", () => {
 		const joining: Holdings = {
 			...CONTIGUOUS,
 			join: (min) => {
-				const back = BigInt(min.asMillis());
+				const back = BigInt(min?.asMillis() ?? 7);
 				return { time: back < 7n ? 7n - back : 0n };
 			},
 		};
@@ -815,7 +837,8 @@ test("window: settling by steps matches trying every start and rebuilding from t
 		keys.joins = (min) => {
 			const newest = [...keys.held].sort(ascending).at(-1);
 			if (newest === undefined) return undefined;
-			const at = newest > BigInt(min.asMillis()) ? newest - BigInt(min.asMillis()) : 0n;
+			const back = min === null ? undefined : BigInt(min.asMillis());
+			const at = back !== undefined && newest > back ? newest - back : 0n;
 			return byTime ? { time: at } : { group: newest };
 		};
 		const fast = new Window(ranges, undefined, keys);
@@ -864,7 +887,11 @@ test("window: an edit by key matches building the edited ranges afresh", () => {
 		const kind = random(8);
 		const end = random(3) === 0 ? undefined : time(BigInt(random(48)));
 		if (kind === 0) return range(undefined, end);
-		if (kind === 1) return live(random(10), end);
+		if (kind === 1) {
+			// One in eleven with no lag limit.
+			const lag = random(11);
+			return live(lag === 10 ? null : lag, end);
+		}
 		return range(time(BigInt(random(40))), end);
 	};
 	const seen = (window: Window) => ({
@@ -882,8 +909,9 @@ test("window: an edit by key matches building the edited ranges afresh", () => {
 		keys.looks = random(2) === 0;
 		const latest = [...keys.held].sort(ascending).at(-1);
 		keys.joins = (age) => {
-			const back = BigInt(age.asMillis());
-			return latest === undefined ? undefined : { time: latest > back ? latest - back : 0n };
+			const back = age === null ? undefined : BigInt(age.asMillis());
+			if (latest === undefined) return undefined;
+			return { time: back !== undefined && latest > back ? latest - back : 0n };
 		};
 		const held = new Map<bigint, Range>();
 		let next = 0n;

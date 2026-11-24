@@ -126,7 +126,7 @@ fn view(origin: &moq_net::origin::Producer, name: &str) -> tokio::sync::mpsc::Un
 		// A budget, so a group the move delays is late rather than skipped.
 		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 			moq_net::track::Start::Live {
-				min: Duration::from_secs(5),
+				min: Some(Duration::from_secs(5)),
 				max: Some(Duration::from_secs(5)),
 			},
 		)]);

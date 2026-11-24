@@ -60,7 +60,7 @@ pub(super) struct Subscriptions {
 	capping: usize,
 	/// The live joins a received copy's readers wait on, by lag and end: see
 	/// [`Subscription::joins`].
-	joins: BTreeMap<(Duration, Option<u64>), Waiting>,
+	joins: BTreeMap<(Option<Duration>, Option<u64>), Waiting>,
 	/// The lowest group consumers want while no refresh is pending, never lowered.
 	wanted: u64,
 	/// A request for a group past every key written, until a group answers it or its
@@ -119,7 +119,7 @@ impl Subscriptions {
 			placed.insert(ranges.len() as u64, group);
 			ranges.push(Range {
 				start: Start::Live {
-					min: Duration::ZERO,
+					min: Some(Duration::ZERO),
 					max: max_of(*budget),
 				},
 				end,
@@ -569,6 +569,18 @@ pub(in crate::model) struct Prefs {
 	log: VecDeque<(u64, u64)>,
 	/// The oldest revision [`Self::changes`] can catch a reader up from.
 	base: u64,
+	/// The revision of the last whole replacement, which every reader behind places afresh.
+	restated: u64,
+}
+
+/// What changed in a subscriber's ranges since a revision a reader saw.
+pub(in crate::model) enum Changes {
+	/// The keys the changes touched.
+	Keys(BTreeSet<u64>),
+	/// More changes than the log holds: the reader compares every range with its own.
+	Overflowed,
+	/// The ranges were replaced whole, so the reader places every range afresh.
+	Restated,
 }
 
 impl Prefs {
@@ -587,6 +599,7 @@ impl Prefs {
 			revision: 0,
 			log: VecDeque::new(),
 			base: 0,
+			restated: 0,
 		};
 		for (key, range) in (0..).zip(value.ranges) {
 			prefs.insert(key, (range, value.placed.get(&key).copied()), tick);
@@ -672,14 +685,28 @@ impl Prefs {
 		self.placed.get(&key).copied()
 	}
 
-	/// The keys the changes since `revision` touched, or `None` once the log no longer
-	/// reaches back that far, when the reader resolves every range again.
-	pub fn changes(&self, revision: u64) -> Option<BTreeSet<u64>> {
+	/// The keys whose range or live join placement `ranges` and `joining` hold otherwise,
+	/// those these preferences retired included: what a reader holding them edits after
+	/// [`Changes::Overflowed`]. Costs every range.
+	pub fn differ(&self, ranges: &BTreeMap<u64, Range>, joining: &BTreeMap<u64, Joining>) -> BTreeSet<u64> {
+		let retired = ranges.keys().filter(|key| !self.ranges.contains_key(key)).copied();
+		let moved = self.ranges.iter().filter_map(|(key, range)| {
+			let held = (ranges.get(key), joining.get(key).copied());
+			(held != (Some(range), range.join().map(|_| self.joining(*key)))).then_some(*key)
+		});
+		retired.chain(moved).collect()
+	}
+
+	/// What changed since `revision`: see [`Changes`].
+	pub fn changes(&self, revision: u64) -> Changes {
+		if revision < self.restated {
+			return Changes::Restated;
+		}
 		if revision < self.base {
-			return None;
+			return Changes::Overflowed;
 		}
 		let from = self.log.partition_point(|(at, _)| *at <= revision);
-		Some(self.log.range(from..).map(|(_, key)| *key).collect())
+		Changes::Keys(self.log.range(from..).map(|(_, key)| *key).collect())
 	}
 
 	fn contribution(&self) -> Contribution {
@@ -765,6 +792,7 @@ impl Prefs {
 		self.revision += 1;
 		self.log.clear();
 		self.base = self.revision;
+		self.restated = self.revision;
 	}
 
 	/// Replace every preference, rekeying the ranges by position when they change: every
@@ -804,6 +832,7 @@ impl Prefs {
 		self.revision += 1;
 		self.log.clear();
 		self.base = self.revision;
+		self.restated = self.revision;
 	}
 }
 
@@ -1028,7 +1057,7 @@ mod tests {
 			let start = |rng: &mut rand::rngs::StdRng| match rng.random_range(0..4) {
 				0 => Start::Oldest,
 				1 => Start::Live {
-					min: Duration::from_millis(rng.random_range(0..8)),
+					min: (rng.random_bool(0.8)).then(|| Duration::from_millis(rng.random_range(0..8))),
 					max: rng
 						.random_bool(0.8)
 						.then(|| Duration::from_millis(rng.random_range(0..8))),

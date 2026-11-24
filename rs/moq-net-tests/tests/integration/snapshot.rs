@@ -18,7 +18,7 @@ fn reads_skip_an_owed_hole() {
 		// The caller's own reader of the track, at the budget it might have wanted.
 		let range = match max {
 			Some(max) => track::Range::from(track::Start::Live {
-				min: max,
+				min: Some(max),
 				max: Some(max),
 			}),
 			None => track::Range::ALL,

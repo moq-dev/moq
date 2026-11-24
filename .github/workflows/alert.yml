@@ -16,6 +16,7 @@ on:
     workflows:
       - apt-repo
       - Cache
+      - Central check
       - CodSpeed
       - Docker
       - GStreamer CI image
