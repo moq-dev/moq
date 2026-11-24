@@ -510,9 +510,11 @@ impl Connection {
 	/// End every stream either side may still send on, except `keep`, and wait until both ends are
 	/// through
 	///
-	/// Each stream the application accepted or opened is reset with `code`, still delivering what
-	/// was written, and gets one STOP_SENDING with it. It is done once the peer acknowledged the
-	/// reset, or every byte of a finish, and its final size arrived with a reset or FIN. A
+	/// Each stream the application opened or accepted first stops taking writes, and once the peer
+	/// acknowledged everything written to them, each is reset with `code` and gets one
+	/// STOP_SENDING with it, so the peer reads what was written ahead of any end. A stream is done
+	/// once the peer acknowledged the reset, or every byte of a finish, and its final size arrived
+	/// with a reset or FIN. A
 	/// stream waiting to be accepted is left alone but keeps this waiting: accept it, and keep it
 	/// by passing it in `keep` or let the next poll end it. The readers and writers keep their
 	/// streams, and learn of the ends by using them: a writer sees its stream stopped with
@@ -524,15 +526,25 @@ impl Connection {
 			return Poll::Ready(Err(err.clone()));
 		}
 		let sending = self.streams.sending(keep);
+		// The writers stop, and what they wrote reaches the peer before any stream ends, so it
+		// reads that, such as a refusal, ahead of the resets and stops, whatever the packets do.
+		let mut unacked = false;
 		for &(id, resettable) in &sending {
-			if !resettable {
-				continue;
+			if resettable {
+				unacked |= self.streams.stop_for_writer(id, code);
 			}
-			// What the application wrote is still delivered.
-			let mut send = self.send_stream(id);
-			let written = send.offset();
-			send.reset_at(written, code).expect("a stream still sending resets");
-			self.streams.stop_for_writer(id, code);
+		}
+		if unacked {
+			self.streams.waits.register_ended(waiter);
+			return Poll::Pending;
+		}
+		for &(id, resettable) in &sending {
+			if resettable {
+				// Keeping what was written, which a peer with RESET_STREAM_AT still hands its reader.
+				let mut send = self.send_stream(id);
+				let written = send.offset();
+				send.reset_at(written, code).expect("a stream still sending resets");
+			}
 		}
 		let pending = &mut self.spaces[SpaceId::Data].pending;
 		if !self.streams.quiesce(pending, code, keep) && sending.is_empty() {

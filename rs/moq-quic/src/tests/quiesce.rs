@@ -127,6 +127,41 @@ fn waits_for_every_reset() {
 	assert_eq!(recv.received_reset(), Ok(Some(CODE)));
 }
 
+/// What the server wrote reaches the peer before any stream ends, whatever its packets do: the
+/// writers stop at once, and the resets and stops wait until the peer acknowledged the data.
+#[test]
+fn writes_arrive_before_anything_ends() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	let (client_ch, server_ch) = pair.connect();
+	let theirs = open(&mut pair, client_ch, server_ch, Dir::Uni);
+	let ours = pair
+		.server_streams(server_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	pair.server_send(server_ch, ours).write(&mut &b"refused"[..]).unwrap();
+
+	let waiter = Counter::new();
+	assert!(quiesce(&mut pair, server_ch, &waiter, &[]).is_pending());
+	assert_eq!(pair.server_send(server_ch, ours).stopped(), Ok(Some(CODE)));
+	// The data is sent but not yet acknowledged: nothing ends.
+	pair.drive_server();
+	assert_eq!(stops_sent(&mut pair, server_ch), 0);
+	assert_eq!(pair.server_conn_mut(server_ch).stats().frame_tx.reset_stream, 0);
+
+	pair.drive();
+	assert!(waiter.wakes() > 0);
+	assert!(quiesce(&mut pair, server_ch, &waiter, &[]).is_pending());
+	pair.drive();
+	assert_eq!(stops_sent(&mut pair, server_ch), 1);
+	assert_eq!(
+		reset_seen(&mut pair, client_ch, ours),
+		(b"refused".to_vec(), Some(CODE))
+	);
+	answer(&mut pair, client_ch, &[theirs]);
+	assert_eq!(quiesce(&mut pair, server_ch, &waiter, &[]), Poll::Ready(Ok(())));
+}
+
 /// With nothing left for the peer to end, the wait lasts until it acknowledged the resets.
 #[test]
 fn waits_for_its_resets_to_be_acknowledged() {

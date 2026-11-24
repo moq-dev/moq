@@ -9,10 +9,11 @@ peer that never resets the streams it was asked to stop).
 ## Plan
 
 `moq-tokio`'s `Session::close` and `moq-uring`'s web `close` first call
-`poll_quiesce` (`rs/moq-quic/src/connection/mod.rs`): a reset with
-`WT_SESSION_GONE` on every stream the server sends on, still delivering what
-was written, and STOP_SENDING with it on every stream the peer may still send
-on, the HTTP/3 CONNECT, control, and QPACK streams aside. They write the
+`poll_quiesce` (`rs/moq-quic/src/connection/mod.rs`): it stops the writers of
+every stream the server sends on and waits until the peer acknowledged what
+they wrote, then sends a reset with `WT_SESSION_GONE` on each, and STOP_SENDING
+with it on every stream the peer may still send on, the HTTP/3 CONNECT,
+control, and QPACK streams aside. They write the
 capsule only once the peer has acknowledged the resets and reset each stopped
 stream, or once the close's grace runs out. This avoids a Chrome renderer
 crash: a capsule arriving while the page has a bidirectional stream with a
@@ -24,7 +25,8 @@ server and a 30-line page with no MoQ, is attached to the Chromium issue below.
 
 Once a shipping Chrome carries the fix, drop the wait from both closes, along
 with `poll_quiesce`, `StreamsState::sending` and `stop_for_writer`, the
-`quiesced` flag on moq-quic's `Recv`, the `ended` waiter list, the close's
+`quiesced` fields on moq-quic's `Recv` and `Send`, the wakes of the `ended`
+list on an accept and an acknowledgment, the `ended` waiter list itself, the close's
 classification of the peer's streams (`Classifying` in moq-tokio), and their
 tests (`tests/quiesce.rs`,
 `close_waits_for_the_peer_to_reset_its_streams` in moq-tokio, and

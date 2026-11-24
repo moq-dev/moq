@@ -475,11 +475,15 @@ impl StreamsState {
 	}
 
 	/// Have a writer of `id` see the stream stopped with `code`, as a peer's stop would end it,
-	/// once a quiesce reset it behind the writer's back.
-	pub(crate) fn stop_for_writer(&mut self, id: StreamId, code: VarInt) {
-		if let Some(Some(send)) = self.send.get_mut(&id) {
-			send.try_stop(code);
-		}
+	/// so a quiesce can end it behind the writer's back, returning whether data written to it is
+	/// still unacknowledged.
+	pub(crate) fn stop_for_writer(&mut self, id: StreamId, code: VarInt) -> bool {
+		let max_data = self.max_send_data(id);
+		let Ok(send) = Self::send_mut(&mut self.send, id, max_data) else {
+			return false;
+		};
+		send.quiesced.get_or_insert(code);
+		!send.pending.is_fully_acked()
 	}
 
 	/// Ask the peer with STOP_SENDING to end every stream it may still send on, except `keep`
@@ -1002,6 +1006,10 @@ impl StreamsState {
 			self.pending.remove(&mut stream.slot);
 		}
 		let acked = stream.take_acked();
+		if stream.pending.is_fully_acked() {
+			// A quiesce waits for the data written before it to arrive.
+			self.waits.wake_ended();
+		}
 		// The stream is unfinished or may still need retransmits
 		let held = (!finished).then(|| stream.take_held_reset());
 		// A reset is not reported as finished, like one without a Reliable Size

@@ -23,6 +23,9 @@ pub(super) struct Send {
 	pub(super) data_blocked_limit: Option<u64>,
 	/// The reason the peer wants us to stop, if `STOP_SENDING` was received
 	pub(super) stop_reason: Option<VarInt>,
+	/// The code a quiesce ended the stream with: its writer sees it stopped with it, though the
+	/// peer still reads what was written
+	pub(super) quiesced: Option<VarInt>,
 	/// The lowest offset a [`Stream::acked`] call is waiting for
 	pub(super) notify: Option<u64>,
 	/// The application gave up the stream's ID with [`Stream::release`], so its end is not kept
@@ -42,6 +45,7 @@ impl Send {
 			slot: Slot::default(),
 			data_blocked_limit: None,
 			stop_reason: None,
+			quiesced: None,
 			notify: None,
 			released: false,
 			truncated_acked: 0,
@@ -54,7 +58,7 @@ impl Send {
 	}
 
 	pub(super) fn finish(&mut self) -> Result<(), Error> {
-		if self.stop_reason.is_some() {
+		if self.stop_reason.is_some() || self.quiesced.is_some() {
 			Err(Error::Stopped)
 		} else if self.state == SendState::Ready {
 			self.state = SendState::DataSent {
@@ -76,7 +80,7 @@ impl Send {
 		if !self.is_writable() {
 			return Err(Error::Closed);
 		}
-		if self.stop_reason.is_some() {
+		if self.stop_reason.is_some() || self.quiesced.is_some() {
 			return Err(Error::Stopped);
 		}
 		let budget = self.max_data - self.pending.offset();
@@ -98,9 +102,10 @@ impl Send {
 		Ok(Some(written))
 	}
 
-	/// How the stream ended, if it has: a peer's stop wins over the end it interrupted.
+	/// How the stream ended, if it has: a peer's stop, or a quiesce's, wins over the end it
+	/// interrupted.
 	pub(super) fn end(&self) -> Option<End> {
-		if let Some(code) = self.stop_reason {
+		if let Some(code) = self.stop_reason.or(self.quiesced) {
 			return Some(End::Stopped(code));
 		}
 		match self.state {
