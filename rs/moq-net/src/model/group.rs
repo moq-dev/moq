@@ -5212,7 +5212,7 @@ impl Consumer {
 					this.poll_finished_once(waiter)
 						.map(|res| res.map(|index| (!this.closed_short()).then_some(index)))
 				})
-				.map(|res| res.map(|index| index.unwrap_or(self.cursor.index as u64))),
+				.map(|res| res.map(|index| index.unwrap_or(self.position() as u64))),
 		};
 		if let Poll::Ready(Ok(_)) = res {
 			self.release_if_finished();
@@ -5263,7 +5263,7 @@ impl Consumer {
 		drained: usize,
 		failed: Poll<Result<u64>>,
 	) -> Poll<Result<u64>> {
-		let index = self.cursor.index as u64;
+		let index = self.position() as u64;
 		if self.cursor.end.is_some_and(|end| drained >= end) {
 			return Poll::Ready(Ok(index));
 		}
@@ -5317,9 +5317,12 @@ impl Consumer {
 			return Poll::Ready(Err(Error::Old));
 		}
 		let index = self.cursor.index;
+		// Where the reader stands, past the frames a compressed flight it boarded still
+		// inflates from frame 0 and drops.
+		let position = self.position() as u64;
 		// Reads end cleanly at the range's end, whatever becomes of the frames past it.
 		if self.cursor.capped() {
-			return Poll::Ready(Ok(index as u64));
+			return Poll::Ready(Ok(position));
 		}
 		let (raw, end) = (self.cursor.raw, self.cursor.end);
 		// Frames already prefetched are this cursor's whatever the group sheds since, so
@@ -5334,7 +5337,7 @@ impl Consumer {
 		let res = self
 			.cursor
 			.poll(waiter, |state| state.poll_end(index, unread, raw, end))
-			.map(|res| res.map(|()| index as u64));
+			.map(|res| res.map(|()| position));
 		self.poll_expired_if_blocked(waiter, res)
 	}
 }

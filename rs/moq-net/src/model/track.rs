@@ -35520,6 +35520,45 @@ mod test {
 		drop(arriving);
 	}
 
+	/// A reader of a compressed group that fell off, awaiting only its end, boards a flight
+	/// from frame 0 to rebuild the decoder, and the end it reports is its own frame, not the
+	/// flight's frame 0.
+	#[test]
+	#[cfg(feature = "async")]
+	fn the_end_of_a_compressed_group_on_its_flight_stays_where_the_reader_is() {
+		let producer = track_producer("test", Info::default().with_compression(Compression::Deflate));
+		let requests = producer.requests();
+		let mut live = producer.append_next().unwrap();
+		let mut reader = live.consume();
+		let mut behind = live.consume();
+		for index in 0..3_000 {
+			live.write_frame(crate::Timestamp::unscaled(live.start), numbered(index))
+				.unwrap();
+			assert_eq!(read_numbered(&mut reader), Some(index));
+			if index < 10 {
+				assert_eq!(read_numbered(&mut behind), Some(index));
+			}
+		}
+
+		// The live copy shed frame 10, which the decoder is past.
+		let waiter = kio::Waiter::noop();
+		assert!(behind.poll_finished(&waiter).is_pending(), "boarding a flight");
+		let fill = asked(&requests).expect("the end asks a flight");
+		assert_eq!(fill.start(), Position { group: 0, frame: 0 }, "from frame 0");
+		let mut flight = fill.accept(0, None).unwrap().expect("a fresh group");
+		for index in 0..12 {
+			flight
+				.write_frame(crate::Timestamp::unscaled(flight.start), numbered(index))
+				.unwrap();
+		}
+		flight.finish().unwrap();
+		assert!(
+			matches!(behind.poll_finished(&waiter), Poll::Ready(Ok(10))),
+			"the reader's own frame"
+		);
+		assert_eq!(read_numbered(&mut behind), Some(10), "read from the flight");
+	}
+
 	/// A group the pool evicted while it arrived, whose flight the handler refuses as too
 	/// old, ends `Old`: the frames are gone because the group is stale, which a reader skips
 	/// as within its budget, not because the cache lost them.
