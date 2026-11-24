@@ -199,7 +199,7 @@ async fn decode(inner: &Inner, sender: &broadcast::Sender<Item>) -> Result<(), E
 	let subscription = moq_net::track::Subscription::default()
 		.with_order(moq_net::track::Order::Ascending)
 		.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
-			min: std::time::Duration::ZERO,
+			min: Some(std::time::Duration::ZERO),
 			max: Some(SUPERSEDED),
 		})]);
 	let mut subscriber = inner.broadcast.track(&inner.name)?.subscribe(subscription).await?;

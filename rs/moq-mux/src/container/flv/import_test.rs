@@ -133,7 +133,7 @@ async fn import_emits_frames() {
 		.subscribe(
 			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 				moq_net::track::Start::Live {
-					min: Duration::from_secs(1),
+					min: Some(Duration::from_secs(1)),
 					max: Some(Duration::from_secs(1)),
 				},
 			)]),
@@ -604,7 +604,7 @@ async fn config_churn_keeps_flat_state() {
 		.subscribe(
 			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 				moq_net::track::Start::Live {
-					min: Duration::from_secs(1),
+					min: Some(Duration::from_secs(1)),
 					max: Some(Duration::from_secs(1)),
 				},
 			)]),
@@ -625,7 +625,7 @@ async fn config_churn_keeps_flat_state() {
 		.subscribe(
 			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 				moq_net::track::Start::Live {
-					min: Duration::from_secs(1),
+					min: Some(Duration::from_secs(1)),
 					max: Some(Duration::from_secs(1)),
 				},
 			)]),
@@ -678,7 +678,7 @@ async fn import_enhanced_av1() {
 		.subscribe(
 			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 				moq_net::track::Start::Live {
-					min: Duration::from_secs(1),
+					min: Some(Duration::from_secs(1)),
 					max: Some(Duration::from_secs(1)),
 				},
 			)]),
@@ -819,7 +819,7 @@ async fn import_reports_negative_pts_and_can_resume() {
 		.subscribe(
 			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 				moq_net::track::Start::Live {
-					min: Duration::from_secs(1),
+					min: Some(Duration::from_secs(1)),
 					max: Some(Duration::from_secs(1)),
 				},
 			)]),
@@ -866,7 +866,7 @@ async fn import_enhanced_hvc1_applies_composition_time() {
 		.subscribe(
 			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 				moq_net::track::Start::Live {
-					min: Duration::from_secs(1),
+					min: Some(Duration::from_secs(1)),
 					max: Some(Duration::from_secs(1)),
 				},
 			)]),
@@ -1201,7 +1201,7 @@ async fn a_seek_reaches_a_track_waiting_for_its_keyframe() {
 	let name = snapshot.video.renditions.keys().next().unwrap();
 	let replay = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 		moq_net::track::Start::Live {
-			min: Duration::from_secs(3600),
+			min: Some(Duration::from_secs(3600)),
 			max: Some(Duration::from_secs(3600)),
 		},
 	)]);
@@ -1253,7 +1253,7 @@ async fn a_changed_sequence_header_waits_for_its_keyframe() {
 	let replay = || {
 		moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 			moq_net::track::Start::Live {
-				min: Duration::from_secs(3600),
+				min: Some(Duration::from_secs(3600)),
 				max: Some(Duration::from_secs(3600)),
 			},
 		)])

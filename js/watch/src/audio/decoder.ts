@@ -168,7 +168,6 @@ type Phase =
  *
  * The user is responsible for hooking up audio to speakers, an analyzer, etc.
  */
-const TMP_STALE: { first?: number; count: number } = { count: 0 };
 export class Decoder {
 	/** The wired inputs, read-only. */
 	readonly in: Readonlys<DecoderInput>;
@@ -1139,17 +1138,8 @@ export class Decoder {
 		// Audio the ring would skip anyway only warmed the codec. Written, it would anchor the ring behind
 		// the clock, which then skips and re-stalls on each refill until the backlog runs out.
 		if (ring.stale(end.asMicros())) {
-			TMP_STALE.first ??= performance.now();
-			TMP_STALE.count++;
 			sample.close();
 			return;
-		}
-		if (TMP_STALE.first !== undefined) {
-			console.warn(
-				`TMP decoded ${TMP_STALE.count} stale outputs over ${Math.round(performance.now() - TMP_STALE.first)}ms before ${timestamp}`,
-			);
-			TMP_STALE.first = undefined;
-			TMP_STALE.count = 0;
 		}
 
 		// A new subscription has taken over the timeline: drop the previous one's write-ahead tail

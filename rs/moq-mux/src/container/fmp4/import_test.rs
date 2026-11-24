@@ -1971,7 +1971,7 @@ async fn test_msf_catalog_roundtrip() {
 async fn starts(consumer: &moq_net::broadcast::Consumer, track: &str) -> Vec<u64> {
 	let replay = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 		moq_net::track::Start::Live {
-			min: std::time::Duration::from_secs(3600),
+			min: Some(std::time::Duration::from_secs(3600)),
 			max: Some(std::time::Duration::from_secs(3600)),
 		},
 	)]);

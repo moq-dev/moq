@@ -1348,10 +1348,16 @@ impl Registry {
 	/// Sample each source once before taking the counter maps, independently of held tracks.
 	fn collect_wire(&self) {
 		let Some(shared) = &self.shared else { return };
-		shared.wire.lock().retain(|source| {
-			let Some(source) = source.upgrade() else { return false };
-			source.sample(false)
-		});
+		// A sourced sample makes a syscall, so sample outside the lock each new connection takes.
+		// A closed source samples nothing; its entry goes once its guard drops.
+		let live: Vec<_> = {
+			let mut wire = shared.wire.lock();
+			wire.retain(|source| source.strong_count() > 0);
+			wire.iter().filter_map(Weak::upgrade).collect()
+		};
+		for source in live {
+			source.sample(false);
+		}
 	}
 }
 
@@ -1548,6 +1554,9 @@ impl WireInner {
 		if last.closed {
 			return false;
 		};
+		// Refresh under `last`: a source's setters are plain stores, so two samplers refreshing
+		// unlocked could leave an older reading over a newer one and count the gap twice.
+		self.counters.refresh();
 		let read = WIRE.map(|read| read(&self.counters));
 		if let Some(presence) = &current.presence {
 			for ((counter, now), then) in presence.wire.iter().zip(read).zip(last.read) {
@@ -2463,6 +2472,45 @@ mod tests {
 			(report.sessions[0].presence.wire_tx, report.sessions[0].presence.wire_rx),
 			(19, 23)
 		);
+	}
+
+	/// A source's counts, which nothing pushes, are pulled by each report, by a retag so the
+	/// old row keeps what came before it, and by the guard's drop for the final reading.
+	#[test]
+	fn a_wire_source_is_read_on_each_report_retag_and_close() {
+		struct Kernel(Arc<std::sync::atomic::AtomicU64>);
+		impl crate::transport::WireSource for Kernel {
+			fn refresh(&self, wire: &crate::transport::Wire) {
+				let sent = self.0.load(Relaxed);
+				wire.set_sent_bytes(sent);
+				wire.set_received_bytes(2 * sent);
+			}
+		}
+
+		let registry = test_stats();
+		let session = registry
+			.tier(Tier::default())
+			.session(SessionInfo::new(crate::Path::from_static("old")));
+		let kernel = Arc::new(std::sync::atomic::AtomicU64::new(5));
+		let wire = session.wire(crate::transport::Wire::from_source(Kernel(kernel.clone())));
+		let row = |report: &Report, label: &str| {
+			let row = report.sessions.iter().find(|row| row.label.as_str() == label).unwrap();
+			(row.presence.wire_tx, row.presence.wire_rx)
+		};
+		assert_eq!(row(&drain(&registry), "old"), (5, 10));
+		kernel.store(9, Relaxed);
+		assert_eq!(row(&drain(&registry), "old"), (9, 18));
+
+		kernel.store(12, Relaxed);
+		session.retag(Tier::default(), crate::Path::from_static("new"));
+		kernel.store(20, Relaxed);
+		let report = drain(&registry);
+		assert_eq!(row(&report, "old"), (12, 24));
+		assert_eq!(row(&report, "new"), (8, 16));
+
+		kernel.store(21, Relaxed);
+		drop(wire);
+		assert_eq!(row(&drain(&registry), "new"), (9, 18));
 	}
 
 	#[test]

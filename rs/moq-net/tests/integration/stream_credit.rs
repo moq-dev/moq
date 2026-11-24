@@ -287,7 +287,7 @@ async fn a_subscription_past_the_credit_is_served_once_credit_returns() {
 			.unwrap();
 		let prefs = track::Subscription::default().with_max(Duration::from_secs(30));
 		let join = track::Subscription::default().with_ranges([track::Range::from(track::Start::Live {
-			min: Duration::ZERO,
+			min: Some(Duration::ZERO),
 			max: Some(Duration::from_secs(30)),
 		})]);
 		let held = remote.track("first").unwrap().subscribe(join).await.unwrap();
@@ -353,7 +353,7 @@ async fn an_abandoned_setup_returns_credit_with_the_publisher_still_live() {
 			.unwrap();
 		let prefs = track::Subscription::default().with_max(Duration::from_secs(30));
 		let join = track::Subscription::default().with_ranges([track::Range::from(track::Start::Live {
-			min: Duration::ZERO,
+			min: Some(Duration::ZERO),
 			max: Some(Duration::from_secs(30)),
 		})]);
 		let held = remote.track("first").unwrap().subscribe(join).await.unwrap();

@@ -219,7 +219,7 @@ export async function open(
 			latest.set(prefix, text.slice(prefix.length));
 			return;
 		}
-		console.error(`[${label}] @${Date.now() % 100000} ${text}`);
+		console.error(`[${label}] ${text}`);
 		if (message.type() === "error") errors.console.push(text);
 		if (message.type() === "warning") errors.warnings.push(text);
 	});

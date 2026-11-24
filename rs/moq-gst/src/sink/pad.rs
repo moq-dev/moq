@@ -1673,7 +1673,7 @@ mod tests {
 			.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_secs(1),
+						min: Some(Duration::from_secs(1)),
 						max: Some(Duration::from_secs(1)),
 					},
 				)]),
@@ -2073,7 +2073,7 @@ mod tests {
 			.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: std::time::Duration::from_secs(1),
+						min: Some(std::time::Duration::from_secs(1)),
 						max: Some(std::time::Duration::from_secs(1)),
 					},
 				)]),

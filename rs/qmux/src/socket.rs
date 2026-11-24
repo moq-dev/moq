@@ -467,6 +467,18 @@ mod unix {
 		}
 	}
 
+	/// Reads the kernel's byte counts into the counters, for a TCP connection that carries no
+	/// session of its own, such as a media gateway's. The duplicate descriptor delays the
+	/// socket's close until the counters drop, so drop them with the connection.
+	impl moq_net::transport::WireSource for TcpStats {
+		fn refresh(&self, wire: &moq_net::transport::Wire) {
+			if let Some(bytes) = self.bytes() {
+				wire.set_sent_bytes(bytes.sent);
+				wire.set_received_bytes(bytes.received);
+			}
+		}
+	}
+
 	/// The option bounding `socket`'s unsent bytes, and the value its congestion window
 	/// calls for.
 	#[cfg(test)]

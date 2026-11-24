@@ -161,7 +161,6 @@ type Pipeline = {
  * live audio; leaving resumes buffering without ending the epoch. The broadcast's `onDemand: "off"`
  * keeps encoding continuously instead. Rename by constructing a new encoder; the name is not a signal.
  */
-const TMP_REPLAY: { start?: number; in: number; out: number } = { in: 0, out: 0 };
 export class Encoder {
 	/** The full track name of this rendition, e.g. `"audio/data"`. */
 	readonly name: string;
@@ -769,13 +768,6 @@ export class Encoder {
 							if (keyframe) live.start = timestamp;
 							live.producer.encode(frame, timestamp, keyframe);
 							const history = this.#history !== undefined && timestamp.lt(this.#history);
-							if (history) TMP_REPLAY.out++;
-							else if (TMP_REPLAY.start !== undefined) {
-								console.warn(
-									`TMP replay encoded ${TMP_REPLAY.out}/${TMP_REPLAY.in} frames ${Math.round(performance.now() - TMP_REPLAY.start)}ms after its drain`,
-								);
-								TMP_REPLAY.start = undefined;
-							}
 							if (!history && this.#estimator.write(timestamp.asMicros(), order, keyframe)) {
 								this.#estimate.set({ ...this.#estimator.estimate });
 							}
@@ -888,15 +880,9 @@ export class Encoder {
 						// Expired history is a real gap, unlike a loss of demand: end the epoch where the
 						// encoded audio stops, so its last frame isn't stretched across the gap.
 						if (backlog.takeEvicted()) cut();
-						if (!backlog.empty) {
-							TMP_REPLAY.start = performance.now();
-							TMP_REPLAY.in = 0;
-							TMP_REPLAY.out = 0;
-						}
 						for (;;) {
 							const entry = backlog.peek();
 							if (!entry) break;
-							TMP_REPLAY.in++;
 							// A pause broke the timeline here.
 							if (backlog.takeCut()) cut();
 							backlog.shift();
@@ -1047,17 +1033,17 @@ export function resolve(captured: Format, selected: Codec): Resolved {
 
 // How far back a subscription wants retained audio replayed. A live join starts its lag behind the
 // live edge, which a player states as its playout delay plus the codec's warmup, and never reaches
-// past its own max, so the largest of those bounds it; a join before lite-07 reaches past every
-// group, so only its max does. Any other range is history, which wants the whole retention, as does
-// no subscription.
+// past its own max, so the largest of those bounds it; a join with no lag limit, as before lite-07,
+// reaches past every group, so only its max does. Any other range is history, which wants the whole
+// retention, as does no subscription or a join bounded by neither.
 function replayBudget(subscription: Moq.Track.Subscription | undefined): Duration | undefined {
 	if (!subscription) return undefined;
 	let reach: Duration | undefined;
 	for (const range of subscription.ranges ?? [{}]) {
 		if (typeof range.start !== "object") return undefined;
 		const { min, max = Duration.ZERO } = range.start.live;
-		// TMP experiment: a join reaching past its max states no target, so nothing is replayed.
-		const join = max === null ? min : min.gt(max) ? Duration.ZERO : min;
+		const join = max === null ? min : min === null ? max : min.min(max);
+		if (join === null) return undefined;
 		reach = reach === undefined ? join : reach.max(join);
 	}
 	return reach;
