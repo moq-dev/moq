@@ -234,6 +234,7 @@ export namespace Connection {
 	export interface WebSocketProps {
 		delay?: Clock.Duration;
 		enabled?: boolean;
+		idleTimeout?: Clock.Duration | null;
 		maxStreams?: number;
 		receiveWindow?: number;
 		streamReceiveWindow?: number;
