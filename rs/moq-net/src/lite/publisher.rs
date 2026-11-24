@@ -10193,7 +10193,7 @@ mod serve_group_test {
 	async fn lite07_a_bounded_range_is_answered_beside_an_open_one() {
 		let mut answers = Vec::new();
 		for sibling in [false, true] {
-			let mut track = track::Producer::new(
+			let track = track::Producer::new(
 				Arc::new(broadcast::Info::default()),
 				"test",
 				crate::track::Info::timed(),

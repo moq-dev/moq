@@ -2004,7 +2004,8 @@ export class Publisher {
 						placed = firstStart(range.start, source, finished);
 						// A walk that passed a bounded range's end left no key in it a group may still
 						// take, so nothing more can arrive for it, whatever its siblings still wait on.
-						const key = typeof placed === "object" ? ("told" in placed ? placed.told : placed.held) : undefined;
+						const key =
+							typeof placed === "object" ? ("told" in placed ? placed.told : placed.held) : undefined;
 						if (key !== undefined && range.end !== undefined && key >= range.end)
 							placed = firstStart(range.start, source, true);
 					}
