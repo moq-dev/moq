@@ -129,7 +129,8 @@ impl Send {
 		debug_assert!(reliable_size <= self.pending.offset());
 		let final_size = self.pending.offset();
 		self.truncate(reliable_size);
-		let send = at || self.pending.is_fully_acked();
+		// A quiesce sends its streams' resets together, once everything written to them arrived.
+		let send = self.quiesced.is_none() && (at || self.pending.is_fully_acked());
 		self.state = ResetSent {
 			final_size,
 			reliable_size,
@@ -149,11 +150,23 @@ impl Send {
 		else {
 			return None;
 		};
-		if !*held || !self.pending.is_fully_acked() {
+		if !*held || self.quiesced.is_some() || !self.pending.is_fully_acked() {
 			return None;
 		}
 		*held = false;
 		Some(*reliable_size)
+	}
+
+	/// Release a reset held while the stream was quiesced, returning its Reliable Size
+	pub(super) fn take_quiesced_reset(&mut self) -> Option<u64> {
+		self.quiesced?;
+		let SendState::ResetSent {
+			held, reliable_size, ..
+		} = &mut self.state
+		else {
+			return None;
+		};
+		std::mem::take(held).then_some(*reliable_size)
 	}
 
 	/// The Reliable Size this stream's reset delivers, if it was reset

@@ -545,6 +545,7 @@ impl Connection {
 			}
 		}
 		let pending = &mut self.spaces[SpaceId::Data].pending;
+		self.streams.release_quiesced_resets(pending);
 		if !self.streams.quiesce(pending, code, keep) && sending.is_empty() {
 			return Poll::Ready(Ok(()));
 		}

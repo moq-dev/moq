@@ -476,18 +476,35 @@ impl StreamsState {
 
 	/// Have a writer of `id` see the stream stopped with `code`, as a peer's stop would end it,
 	/// so a quiesce can end it behind the writer's back, returning whether data written to it is
-	/// still unacknowledged, which a reset since then still delivers.
+	/// still unacknowledged, which a reset or release since then still delivers.
+	///
+	/// A writer's own reset from then on keeps what was written and is held for
+	/// [`Self::release_quiesced_resets`].
 	pub(crate) fn stop_for_writer(&mut self, id: StreamId, code: VarInt) -> bool {
 		let max_data = self.max_send_data(id);
-		let Ok(send) = Self::send_mut(&mut self.send, id, max_data) else {
+		let Some(slot) = self.send.get_mut(&id) else {
 			return false;
 		};
-		if !send.is_reset() && send.quiesced.is_none() {
+		let send = slot.get_or_insert_with(|| Send::new(max_data));
+		if !send.is_reset() && !send.released && send.quiesced.is_none() {
 			send.quiesced = Some(code);
 			self.waits.wake(id, Wait::Write);
 			self.waits.wake(id, Wait::End);
 		}
 		!send.pending.is_fully_acked()
+	}
+
+	/// Send every reset held since its stream was quiesced
+	pub(crate) fn release_quiesced_resets(&mut self, pending: &mut Retransmits) {
+		let before = pending.reset_stream.len();
+		for (&id, slot) in &mut self.send {
+			if let Some(reliable_size) = slot.as_mut().and_then(|send| send.take_quiesced_reset()) {
+				pending.reset_stream.push((id, reliable_size));
+			}
+		}
+		if pending.reset_stream.len() > before {
+			self.waits.wake_transmit();
+		}
 	}
 
 	/// Ask the peer with STOP_SENDING to end every stream it may still send on, except `keep`

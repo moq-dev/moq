@@ -162,34 +162,46 @@ fn writes_arrive_before_anything_ends() {
 	assert_eq!(quiesce(&mut pair, server_ch, &waiter, &[]), Poll::Ready(Ok(())));
 }
 
-/// A writer that resets its stream once the quiesce stopped it, as a dropped handle echoes a
-/// stop, still delivers what it wrote, and nothing else ends until the peer acknowledged it.
+/// Writers that reset and release their streams once the quiesce stopped them, as dropped
+/// handles echo a stop, still deliver what they wrote, and no stream ends, theirs included, until
+/// the peer acknowledged everything written.
 #[test]
 fn a_writers_reset_keeps_what_it_wrote() {
 	let _guard = subscribe();
 	let mut pair = Pair::default();
 	let (client_ch, server_ch) = pair.connect();
 	let theirs = open(&mut pair, client_ch, server_ch, Dir::Uni);
-	let ours = pair
+	let delivered = open_ours(&mut pair, server_ch);
+	let refusal = pair
 		.server_streams(server_ch)
 		.open(Dir::Uni, Default::default())
 		.unwrap();
-	pair.server_send(server_ch, ours).write(&mut &b"refused"[..]).unwrap();
+	pair.server_send(server_ch, refusal)
+		.write(&mut &b"refused"[..])
+		.unwrap();
 
 	let waiter = Counter::new();
 	assert!(quiesce(&mut pair, server_ch, &waiter, &[]).is_pending());
-	pair.server_send(server_ch, ours).reset(VarInt(5)).unwrap();
+	for s in [delivered, refusal] {
+		pair.server_send(server_ch, s).reset(VarInt(5)).unwrap();
+		pair.server_send(server_ch, s).release();
+	}
 	assert!(quiesce(&mut pair, server_ch, &waiter, &[]).is_pending());
 	pair.drive_server();
 	assert_eq!(stops_sent(&mut pair, server_ch), 0);
+	assert_eq!(pair.server_conn_mut(server_ch).stats().frame_tx.reset_stream, 0);
 
 	pair.drive();
 	assert!(quiesce(&mut pair, server_ch, &waiter, &[]).is_pending());
 	pair.drive();
 	assert_eq!(stops_sent(&mut pair, server_ch), 1);
 	assert_eq!(
-		reset_seen(&mut pair, client_ch, ours),
+		reset_seen(&mut pair, client_ch, refusal),
 		(b"refused".to_vec(), Some(VarInt(5)))
+	);
+	assert_eq!(
+		reset_seen(&mut pair, client_ch, delivered),
+		(b"unread".to_vec(), Some(VarInt(5)))
 	);
 	answer(&mut pair, client_ch, &[theirs]);
 	assert_eq!(quiesce(&mut pair, server_ch, &waiter, &[]), Poll::Ready(Ok(())));
