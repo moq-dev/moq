@@ -1035,13 +1035,14 @@ export function resolve(captured: Format, selected: Codec): Resolved {
 // live edge, which a player states as its playout delay plus the codec's warmup, and never reaches
 // past its own max, so the largest of those bounds it. A join with no lag limit, as every join before
 // lite-07 is, states no target to fill, so it replays nothing: encoding its whole max first would hold
-// the live edge back by that encode, for history its player skips. Any other range is history, which
-// wants the whole retention, as does no subscription or a join bounded by neither.
+// the live edge back by that encode, for history its player skips. Any other range, one with an end
+// included, is history, which wants the whole retention, as does no subscription or a join bounded
+// by neither.
 function replayBudget(subscription: Moq.Track.Subscription | undefined): Duration | undefined {
 	if (!subscription) return undefined;
 	let reach: Duration | undefined;
 	for (const range of subscription.ranges ?? [{}]) {
-		if (typeof range.start !== "object") return undefined;
+		if (typeof range.start !== "object" || range.end !== undefined) return undefined;
 		const { min, max = Duration.ZERO } = range.start.live;
 		if (min === null && max === null) return undefined;
 		const join = min === null ? Duration.ZERO : max === null ? min : min.min(max);

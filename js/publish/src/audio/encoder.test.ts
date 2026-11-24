@@ -1591,6 +1591,40 @@ test("a join with no lag limit replays no retained audio", async () => {
 	}
 });
 
+// A range with an end asks for history up to it, so it gets the whole retention even with no lag
+// limit, as Rust's twin does.
+test("a join with no lag limit and an end replays the whole retention", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	const clock = new Manual();
+	const installed = clock.install();
+	const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name: Moq.Path.from("ended.hang") });
+	const feed = new Feed();
+	const configuring = configured();
+	const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(feed) as never });
+	let late: Moq.Track.Subscriber | undefined;
+	try {
+		await configuring;
+		await settle();
+		for (let index = 0; index < 150; index++) {
+			await feed.push({ timestamp: Duration.micros(index * 20_000), channels: [new Float32Array(960)] });
+			await feed.drain();
+			await clock.advance(Duration.millis(20));
+		}
+		const net = broadcast.net.peek();
+		if (!net) throw new Error("expected network broadcast");
+		late = net.track("audio").subscribe({
+			ranges: [{ start: { live: { min: null, max: Duration.millis(2_000) } }, end: 150n * 20_000n }],
+		});
+		await settle();
+		expect(encoder.out.stats.peek().frames).toBe(150);
+	} finally {
+		late?.close();
+		encoder.close();
+		broadcast.close();
+		installed.close();
+	}
+});
+
 // A fetch's own budget judges only the group it asks for, so it must not narrow what the encoder
 // replays for the live subscribers that come later.
 test("a fetch alone replays the whole retention", async () => {
