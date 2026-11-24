@@ -1,5 +1,6 @@
 import { expect, mock, spyOn, test } from "bun:test";
-import { Duration, Instant, Manual } from "@moq/clock";
+import { Duration } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { File as FileSource } from "./file";
 
 const flush = () => new Promise<void>((resolve) => queueMicrotask(resolve));
@@ -87,7 +88,7 @@ test("clearing a decoded file clears its published media", async () => {
 	}
 });
 
-test("an image read again after a gap skips to the slot due now", async () => {
+test("an image is one frame, stamped now, and ends on teardown", async () => {
 	const createImageBitmap = Object.getOwnPropertyDescriptor(globalThis, "createImageBitmap");
 	const videoFrame = Object.getOwnPropertyDescriptor(globalThis, "VideoFrame");
 
@@ -110,7 +111,6 @@ test("an image read again after a gap skips to the slot due now", async () => {
 	const installed = clock.install();
 	// Start away from zero so an unanchored timestamp can't pass by accident.
 	clock.jump(Duration.secs(1));
-	const zero = 1_000_000;
 
 	const source = new FileSource({
 		file: new File([new Uint8Array([0])], "still.png", { type: "image/png" }),
@@ -121,20 +121,20 @@ test("an image read again after a gap skips to the slot due now", async () => {
 		const video = source.out.source.peek()?.video;
 		if (!video || !("frames" in video)) throw new Error("missing image frames");
 		const reader = video.frames.getReader();
-		const read = async () => (await clock.drive(reader.read())).value?.timestamp;
+		expect((await reader.read()).value?.timestamp).toBe(1_000_000);
 
-		expect(await read()).toBe(zero);
-
-		// Unread for a minute: the next frame is the one due now, not the 1,799 missed in between.
+		// The capture repeats a still picture itself, so the source sends nothing more.
+		let done: boolean | undefined;
+		const next = reader.read().then((result) => {
+			done = result.done;
+		});
 		clock.jump(Duration.secs(60));
-		expect(await read()).toBe(zero + 60_000_000);
+		await settle();
+		expect(done).toBeUndefined();
 
-		// Then the 30fps cadence resumes from the present.
-		const next = zero + (1801 / 30) * 1_000_000;
-		expect(await read()).toBe(Math.round(next));
-		expect(clock.now().since(Instant.ZERO).asMicros()).toBeCloseTo(next, 3);
-
-		await reader.cancel();
+		source.close();
+		await next;
+		expect(done).toBe(true);
 	} finally {
 		source.close();
 		installed.close();

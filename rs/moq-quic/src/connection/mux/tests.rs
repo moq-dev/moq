@@ -67,14 +67,14 @@ fn read_all(conn: &mut Connection, id: StreamId) -> (Vec<u8>, bool) {
 	let mut data = Vec::new();
 	let mut fin = false;
 	loop {
-		match chunks.next(usize::MAX) {
-			Ok(Some(chunk)) => data.extend_from_slice(&chunk.bytes),
-			Ok(None) => {
+		match chunks.try_next(usize::MAX) {
+			Poll::Ready(Ok(Some(chunk))) => data.extend_from_slice(&chunk.bytes),
+			Poll::Ready(Ok(None)) => {
 				fin = true;
 				break;
 			}
-			Err(recv::Error::Blocked) => break,
-			Err(err) => panic!("read failed: {err}"),
+			Poll::Pending => break,
+			Poll::Ready(Err(err)) => panic!("read failed: {err}"),
 		}
 	}
 	chunks.finalize();
@@ -159,7 +159,7 @@ fn credit_returns_for_unread_and_stopped_streams() {
 			// Stopped before the rest arrives, which then arrives anyway
 			0 => {
 				pair.server.recv_stream(accepted).stop(VarInt::from_u32(1)).unwrap();
-				let _ = pair.client.send_stream(id).write(&mut &chunk[..]);
+				let _ = pair.client.send_stream(id).try_write(&mut &chunk[..]);
 			}
 			// Read to the end
 			_ => {
@@ -307,29 +307,17 @@ fn draft00_rejects_qx_ping() {
 #[test]
 fn rejects_oversized_records() {
 	let now = Instant::now();
-	let mut server = Connection::new(config(Version::QMux01), Side::Server, now);
-	server.handle_record(vec![0; DEFAULT_MAX_RECORD_SIZE as usize + 1].into(), now);
-	assert_eq!(
-		transport_error(&mut server).code,
-		TransportErrorCode::PROTOCOL_VIOLATION
-	);
-
-	let mut server = Connection::new(config(Version::QMux00), Side::Server, now);
-	server.handle_record(vec![0; MAX_FRAME_SIZE + 1].into(), now);
-	assert_eq!(
-		transport_error(&mut server).code,
-		TransportErrorCode::FRAME_ENCODING_ERROR
-	);
-
-	// The same, refused by the transport before it was read
-	for (version, code) in [
-		(Version::QMux01, TransportErrorCode::PROTOCOL_VIOLATION),
-		(Version::QMux00, TransportErrorCode::FRAME_ENCODING_ERROR),
+	for (version, size) in [
+		(Version::QMux02, DEFAULT_MAX_RECORD_SIZE as usize),
+		(Version::QMux01, DEFAULT_MAX_RECORD_SIZE as usize),
+		(Version::QMux00, MAX_FRAME_SIZE),
 	] {
 		let mut server = Connection::new(config(version), Side::Server, now);
-		server.handle_oversized();
-		assert_eq!(transport_error(&mut server).code, code);
-		assert!(server.transmit(now).is_some(), "CONNECTION_CLOSE");
+		server.handle_record(vec![0; size + 1].into(), now);
+		assert_eq!(
+			transport_error(&mut server).code,
+			TransportErrorCode::FRAME_ENCODING_ERROR
+		);
 	}
 }
 
@@ -376,6 +364,48 @@ fn draft00_sends_one_length_prefixed_frame_per_message() {
 	let (data, fin) = read_all(&mut server, id);
 	assert_eq!(data.len(), 40_000);
 	assert!(fin);
+}
+
+/// A record's stream data is acknowledged only once the transport takes it, so a session that
+/// fails with records still unsent never reports them delivered. On draft-00 that holds for
+/// each frame split from one batch, not only the first. A stream reset between handing a record
+/// out and the transport taking it still counts the record's data.
+#[test]
+fn stream_data_is_acknowledged_once_the_transport_takes_it() {
+	for &version in Version::ALL {
+		let mut pair = Pair::new(config(version));
+		let a = pair.client.streams().open(Dir::Uni, send::Options::default()).unwrap();
+		let b = pair.client.streams().open(Dir::Uni, send::Options::default()).unwrap();
+		pair.client.send_stream(a).write(&mut &b"first"[..]).unwrap();
+		pair.client.send_stream(b).write(&mut &b"second"[..]).unwrap();
+		let acked = |pair: &mut Pair| {
+			(
+				pair.client.send_stream(a).acked_len(),
+				pair.client.send_stream(b).acked_len(),
+			)
+		};
+
+		let mut records = Vec::new();
+		while let Poll::Ready(record) = pair.client.poll_transmit(&kio::Waiter::noop(), pair.now) {
+			records.push(record);
+		}
+		assert_eq!(acked(&mut pair), (0, 0), "{version:?}: handed out, none taken");
+		pair.client.send_stream(b).reset(VarInt::from_u32(1)).unwrap();
+		pair.client.transmitted();
+		let first = acked(&mut pair);
+		assert!(first.0 + first.1 > 0, "{version:?}: the first record taken");
+		if version == Version::QMux00 {
+			assert_eq!(records.len(), 2, "one frame per stream");
+			assert!(
+				first.0 == 0 || first.1 == 0,
+				"{version:?}: the second frame is not taken yet"
+			);
+		}
+		for _ in 1..records.len() {
+			pair.client.transmitted();
+		}
+		assert_eq!(acked(&mut pair), (5, 6), "{version:?}: every record taken");
+	}
 }
 
 #[test]
@@ -446,7 +476,8 @@ fn reset_stream_at_delivers_the_prefix() {
 	};
 	chunks.finalize();
 	assert!(data.starts_with(b"header"), "{data:?} {err:?}");
-	assert_eq!(err, recv::Error::Reset(VarInt::from_u32(9)));
+	assert_eq!(err, recv::Error::Reset);
+	assert_eq!(recv.received_reset(), Ok(Some(VarInt::from_u32(9))));
 }
 
 #[test]

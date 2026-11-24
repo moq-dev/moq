@@ -1,4 +1,3 @@
-import { Duration } from "@moq/clock";
 import { Report, Echo as Schema } from "@moq/hang";
 import * as Moq from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, Signal } from "@moq/signals";
@@ -148,12 +147,12 @@ export class Echo {
 			effect.cleanup(() => published.close());
 			effect.cleanup(() => writer.finish());
 			effect.cleanup(write);
-			effect.interval(write, Duration.millis(Report.INTERVAL));
+			effect.interval(write, Report.INTERVAL);
 
 			// Observing the probe asks the peer for PROBE updates, so only do it while someone reads them.
 			const demand = writer.track.demand();
 			effect.run((inner) => {
-				if (inner.get(demand.wanted) !== undefined) inner.get(this.in.probe);
+				if (inner.get(demand.wanted)) inner.get(this.in.probe);
 			});
 		});
 	}

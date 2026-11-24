@@ -13,7 +13,7 @@ use std::time::Duration;
 use bytes::{Bytes, BytesMut};
 use futures::stream::BoxStream;
 use moq_archive::Store;
-use moq_net::{Timescale, Timestamp, group, track};
+use moq_net::{Timescale, Timestamp, track};
 use object_store::memory::InMemory;
 use object_store::path::Path;
 use object_store::{
@@ -114,9 +114,7 @@ impl Recording {
 		let mut json = moq_json::snapshot::Config::default();
 		json.deltas = false;
 		let mut catalog = moq_json::snapshot::Producer::new(track, json);
-		catalog
-			.update(moq_net::Timed::from(&self::catalog()).at(Timestamp::now()))
-			.unwrap();
+		catalog.update(&self::catalog(), Timestamp::ZERO).unwrap();
 
 		let mut sources = HashMap::new();
 		for name in ["360p", "1080p", "audio"] {
@@ -130,10 +128,7 @@ impl Recording {
 			sources.insert(name.to_string(), Source { media });
 		}
 
-		// The source publishes in bursts, so the budget covers a whole recording.
-		let config = moq_archive::producer::Config::default()
-			.with_flush(Duration::from_millis(100))
-			.with_max_delay(Duration::from_secs(3600));
+		let config = moq_archive::producer::Config::default().with_flush(Duration::from_millis(100));
 		let recorder = tokio::spawn(moq_archive::Producer::new(store.clone(), broadcast.consume(), config).run());
 		// Subscribed before anything is published, so every group is recorded live.
 		for source in sources.values() {
@@ -151,11 +146,14 @@ impl Recording {
 		}
 	}
 
-	/// Publish `groups` on `track`, each a list of frame timestamps in micros.
-	fn add(&mut self, track: &str, groups: &[(u64, &[u64])]) {
+	/// Publish `groups` on `track`, each a list of frame timestamps in micros, starting at its first.
+	fn add(&mut self, track: &str, groups: &[&[u64]]) {
 		let source = self.sources.get_mut(track).unwrap();
-		for &(sequence, frames) in groups {
-			let mut group = source.media.create_group(group::Info { sequence }).unwrap();
+		for &frames in groups {
+			let mut group = source
+				.media
+				.append_group(Timestamp::from_micros(frames[0]).unwrap())
+				.unwrap();
 			for (index, &micros) in frames.iter().enumerate() {
 				let timestamp = Timestamp::from_micros(micros).unwrap();
 				group.write_frame(timestamp, legacy(track, micros, index == 0)).unwrap();
@@ -207,7 +205,7 @@ fn legacy(track: &str, micros: u64, keyframe: bool) -> Bytes {
 /// configs, so no init needs media.
 fn catalog() -> hang::Catalog {
 	let mut catalog = hang::Catalog::default();
-	catalog.media.join = hang::catalog::Join::new(Duration::from_secs(2));
+	catalog.sync.interval = Some(Duration::from_secs(2));
 	for (name, width, height) in [("360p", 640, 360), ("1080p", 1920, 1080)] {
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.coded_width = Some(width);
@@ -307,13 +305,10 @@ async fn segments(count: u64) -> Recording {
 fn add_segment(recording: &mut Recording, segment: u64) {
 	let pts = segment * 2_000_000;
 	for video in ["360p", "1080p"] {
-		recording.add(video, &[(segment, &[pts, pts + 1_000_000])]);
+		recording.add(video, &[&[pts, pts + 1_000_000]]);
 	}
-	let audio: Vec<(u64, [u64; 1])> = (0..4).map(|i| (segment * 4 + i, [pts + i * 500_000])).collect();
-	let audio: Vec<(u64, &[u64])> = audio
-		.iter()
-		.map(|(sequence, frames)| (*sequence, &frames[..]))
-		.collect();
+	let audio: Vec<[u64; 1]> = (0..4).map(|i| [pts + i * 500_000]).collect();
+	let audio: Vec<&[u64]> = audio.iter().map(|frames| &frames[..]).collect();
 	recording.add("audio", &audio);
 }
 
@@ -383,12 +378,12 @@ async fn renditions_share_the_grid_and_segments_get_their_own_objects() {
 async fn skipped_grid_slots_are_gaps() {
 	let mut recording = Recording::new().await;
 	// 1080p: two 2s groups, a pause, then content resumes at 10s.
-	recording.add("1080p", &[(0, &[0, 1_000_000]), (1, &[2_000_000, 3_000_000])]);
-	recording.add("1080p", &[(2, &[10_000_000, 11_000_000])]);
+	recording.add("1080p", &[&[0, 1_000_000], &[2_000_000, 3_000_000]]);
+	recording.add("1080p", &[&[10_000_000, 11_000_000]]);
 	// 360p overruns its first group to 3.5s, so it starts segment 2 there, and pauses too.
-	recording.add("360p", &[(0, &[0, 1_000_000]), (1, &[3_500_000, 4_500_000])]);
-	recording.add("360p", &[(2, &[10_000_000, 11_000_000])]);
-	recording.add("audio", &[(0, &[0, 1_000_000])]);
+	recording.add("360p", &[&[0, 1_000_000], &[3_500_000, 4_500_000]]);
+	recording.add("360p", &[&[10_000_000, 11_000_000]]);
+	recording.add("audio", &[&[0, 1_000_000]]);
 	let counting = recording.counting.clone();
 	let store = recording.finish().await;
 

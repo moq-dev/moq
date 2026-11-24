@@ -144,12 +144,12 @@ pub fn cmaf(data: &[u8]) -> bool {
 	let Ok(wire) = crate::container::fmp4::Wire::from_init(init) else {
 		return false;
 	};
-	let frame = moq_net::frame::Frame::new(None, Bytes::copy_from_slice(fragment));
+	let frame = moq_net::frame::Frame::new(moq_net::Timestamp::unscaled(0), Bytes::copy_from_slice(fragment));
 	wire.decode(frame).is_ok()
 }
 
 /// The codecs [`annexb`] splits, selected by the leading byte modulo their count.
-const STREAMS: &[VideoFormat] = &[VideoFormat::Avc3, VideoFormat::Hev1, VideoFormat::Av01];
+const STREAMS: &[VideoFormat] = &[VideoFormat::H264, VideoFormat::H265, VideoFormat::Av01];
 
 /// A raw byte stream of unknown frame boundaries: H.264 or H.265 Annex-B, or AV1 OBUs.
 ///
@@ -206,7 +206,9 @@ pub fn catalog(data: &[u8]) -> bool {
 		Box::new(move || consumer.poll_next(&waiter))
 	};
 
-	let mut group = track.append_group().expect("a fresh track takes a group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(0).unwrap())
+		.expect("a fresh track takes a group");
 	let mut accepted = false;
 	for frame in data.split(|&byte| byte == 0) {
 		if group
@@ -445,9 +447,12 @@ mod tests {
 		for (name, target) in TARGETS {
 			// Nothing has failed yet for this target; `fuzz/README.md` says what to drop in here
 			// when something does.
-			let Ok(entries) = std::fs::read_dir(root.join(name)) else {
+			let dir = root.join(name);
+			// Skip only a missing directory, so an unreadable one fails instead of passing empty.
+			if !dir.try_exists().expect("could not check the regression directory") {
 				continue;
-			};
+			}
+			let entries = std::fs::read_dir(&dir).expect("could not read the regression directory");
 			for entry in entries {
 				let path = entry.expect("could not read the regression directory").path();
 				let data = std::fs::read(&path).expect("could not read a regression input");

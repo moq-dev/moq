@@ -181,11 +181,14 @@ mod tests {
 					| moq_net::origin::RouteKind::Update
 					| moq_net::origin::RouteKind::Restart,
 				announce: route,
+				..
 			} => Some((route, true)),
 			moq_net::origin::RouteEvent {
 				kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 				announce: route,
+				..
 			} => Some((route, false)),
+			other => panic!("unexpected route event {other:?}"),
 		}
 	}
 
@@ -223,8 +226,15 @@ mod tests {
 		/// Write one frame of `bytes` bytes into the broadcast and read it out on the
 		/// egress side, so the publisher `bytes`/`frames`/`groups` counters advance.
 		async fn write(&mut self, bytes: usize) {
-			let mut group = self.track.append_group().unwrap();
-			group.write_frame(Timestamp::ZERO, vec![0u8; bytes]).unwrap();
+			let mut group = self
+				.track
+				.append_group(
+					Timestamp::from_millis(self.track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+				)
+				.unwrap();
+			group
+				.write_frame(Timestamp::from_millis(group.start).unwrap(), vec![0u8; bytes])
+				.unwrap();
 			group.finish().unwrap();
 			let mut group = self.sub.recv_group().await.unwrap().unwrap();
 			while group.read_frame().await.unwrap().is_some() {}

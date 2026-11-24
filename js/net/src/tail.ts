@@ -1,6 +1,6 @@
 import { type Duration, now, sleep } from "@moq/clock";
-import { type GetPromise, Signal } from "@moq/signals";
-import { insertRun, type Run, runGaps } from "./internal.ts";
+import { type GetPromise, type Getter, Signal } from "@moq/signals";
+import { insertRun, type Run, runGaps, runsFrom } from "./internal.ts";
 import { GRACE, Ledger } from "./ledger.ts";
 
 /** How a {@link Tail} measures its grace. */
@@ -9,11 +9,22 @@ export interface TailOptions {
 	grace?: () => Duration;
 }
 
+/** A group stream a {@link Tail} counts, from its header until it is read to its end. */
+export interface Counted {
+	/** Mark it read to its end. Idempotent. */
+	done(): void;
+	/**
+	 * The publisher accounted for its group another way, such as a drop, so {@link Tail.settle}
+	 * waits for it at most the grace. Idempotent.
+	 */
+	excuse(): void;
+}
+
 /**
  * The group streams a subscription has received, so its end can wait for the ones still owed.
  *
  * A publisher ends a subscription before every group stream it opened has necessarily
- * arrived. This records which sequences are accounted for (a stream's header arrived, or
+ * arrived. This records which keys are accounted for (a stream's header arrived, or
  * the publisher dropped them) and how many streams are still being read, and {@link settle}
  * waits on them.
  *
@@ -23,20 +34,29 @@ export interface TailOptions {
  * @internal
  */
 export class Tail {
-	// The sequences accounted for, whose gaps fold once the grace stops waiting for them.
+	// The keys accounted for, whose gaps fold once the grace stops waiting for them.
 	#ledger = new Ledger();
-	// Group streams whose header arrived, and those still being read.
+	// Group streams whose header arrived, and those still being read and holding the end.
 	#streams = 0;
 	#active = 0;
+	// The lowest group a stream's header named, which proves the group exists.
+	#first: bigint | undefined;
+	// Streams still being read that the end waits for at most the grace, until a settle gives up
+	// on them, as the ledger does on a gap.
+	#excused = new Set<object>();
 	#changed = new Signal(0);
 	#grace: () => Duration;
-	// Groups whose stream finished since the last update was sent. A lite-07 stale drop under that
-	// update names one only if it was sent before the publisher served the group, so the group won
-	// over it, even once the cache evicted it.
-	#finished: Run[] = [];
+	// Keys a drop named, so a stream whose header the drop overtook can be told from one
+	// whose gap the grace gave up on.
+	#dropped: Run[] = [];
 
 	constructor(options: TailOptions = {}) {
 		this.#grace = options.grace ?? (() => GRACE);
+	}
+
+	/** Release what the tail keeps beside its ledger, once its subscription ended. */
+	close(): void {
+		this.#dropped = [];
 	}
 
 	/** Group streams whose header arrived, whether they finished or were reset. */
@@ -44,21 +64,35 @@ export class Tail {
 		return this.#streams;
 	}
 
-	/**
-	 * Record a group stream whose header arrived. Returns the call that marks it read to
-	 * its end, which is idempotent.
-	 */
-	open(sequence: bigint): () => void {
-		this.#streams += 1;
-		this.#active += 1;
-		this.#account(sequence, sequence + 1n);
+	/** The lowest group whose stream's header arrived. */
+	get first(): bigint | undefined {
+		return this.#first;
+	}
 
-		let closed = false;
-		return () => {
-			if (closed) return;
-			closed = true;
-			this.#active -= 1;
-			this.#bump();
+	/** Record a group stream whose header arrived, held until it is read to its end. */
+	open(key: bigint): Counted {
+		this.#streams += 1;
+		if (this.#first === undefined || key < this.#first) this.#first = key;
+		this.#active += 1;
+		this.#account(key, key + 1n);
+
+		let state: "held" | "excused" | "done" = "held";
+		const token = {};
+		return {
+			done: () => {
+				if (state === "done") return;
+				if (state === "held") this.#active -= 1;
+				else this.#excused.delete(token);
+				state = "done";
+				this.#bump();
+			},
+			excuse: () => {
+				if (state !== "held") return;
+				state = "excused";
+				this.#active -= 1;
+				this.#excused.add(token);
+				this.#bump();
+			},
 		};
 	}
 
@@ -94,37 +128,26 @@ export class Tail {
 		};
 	}
 
-	/** Record that the group stream for `sequence` arrived whole. */
-	finish(sequence: bigint): void {
-		insertRun(this.#finished, sequence, sequence + 1n);
-	}
-
-	/** The parts of `[start, end)` whose stream did not finish since the last update was sent. */
-	unfinished(start: bigint, end: bigint): Run[] {
-		return runGaps(this.#finished, start, end);
-	}
-
-	/**
-	 * Forget which streams finished, for an update being sent: a stale drop under an earlier one is
-	 * no verdict, so none needs them.
-	 */
-	updated(): void {
-		this.#finished = [];
-	}
-
 	/** Re-check what {@link settle} waits on, after something outside the ledger changed. */
 	touch(): void {
 		this.#bump();
 	}
 
-	/** Record sequences `[start, end)` as accounted for without a stream: dropped, or a datagram. */
+	/** Record keys `[start, end)` as accounted for without a stream: dropped, or a datagram. */
 	account(start: bigint, end: bigint): void {
 		this.#account(start, end);
 	}
 
-	/** Owe `[start, end)` again: a stale drop that accounted for it was reversed by a widening. */
-	unaccount(start: bigint, end: bigint): void {
-		this.#ledger.unaccount(start, end, now());
+	/** Record `[start, end)` as given up by a drop, accounting for it. */
+	drop(start: bigint, end: bigint): void {
+		insertRun(this.#dropped, start, end);
+		this.#account(start, end);
+	}
+
+	/** Whether a drop named `key`. */
+	dropped(key: bigint): boolean {
+		const run = this.#dropped[runsFrom(this.#dropped, key)];
+		return run !== undefined && run.start <= key;
 	}
 
 	/** Restart the age of every gap reaching into `[start, end)`, which the demand newly asks for. */
@@ -132,26 +155,43 @@ export class Tail {
 		this.#ledger.demand(start, end, now());
 	}
 
-	/** Whether every sequence in `[start, end)` is accounted for. */
+	/** The parts of `[start, end)` accounted for: a stream arrived, a drop named them, or the grace gave up. */
+	accounted(start: bigint, end: bigint): Run[] {
+		return runGaps(this.#ledger.gaps(start, end), start, end);
+	}
+
+	/** Whether a group stream is still being read, an excused one included until a settle gives up on it. */
+	get reading(): boolean {
+		return this.#active > 0 || this.#excused.size > 0;
+	}
+
+	/** Bumped on every change {@link settle} watches. */
+	get changed(): Getter<number> {
+		return this.#changed;
+	}
+
+	/** Whether every key in `[start, end)` is accounted for. */
 	covers(start: bigint, end: bigint): boolean {
 		return this.#ledger.covers(start, end);
 	}
 
 	/**
 	 * Wait until every stream is read to its end and `complete()` holds, or the grace passes
-	 * with nothing left being read, or `closed` settles.
+	 * with nothing left being read but excused streams, or `closed` settles.
 	 *
-	 * A stream still being read is always waited for: a group ends on its own stream's FIN
-	 * or reset, never because its track ended. The grace only gives up on streams that never
-	 * arrived.
+	 * A stream still being read is waited for: a group ends on its own stream's FIN or reset,
+	 * never because its track ended. The grace gives up on streams that never arrived, and on
+	 * excused ones: a browser can lose a stream's reset, leaving it open forever, and the
+	 * publisher's drop already accounted for its group. `limit` caps the grace.
 	 */
-	async settle(complete: () => boolean, closed: GetPromise<unknown>): Promise<void> {
+	async settle(complete: () => boolean, closed: GetPromise<unknown>, limit?: Duration): Promise<void> {
 		// A gap that aged past the grace since the last insert is no longer waited for either.
 		this.#ledger.expire(now(), this.#grace());
 
 		let expired = false;
 		const timer = new AbortController();
-		void sleep(this.#grace(), { signal: timer.signal }).then(
+		const grace = this.#grace();
+		void sleep(limit === undefined ? grace : grace.min(limit), { signal: timer.signal }).then(
 			() => {
 				expired = true;
 				this.#bump();
@@ -160,7 +200,13 @@ export class Tail {
 		);
 		try {
 			while (closed.peek() === undefined) {
-				if (this.#active === 0 && (expired || complete())) return;
+				if (this.#active === 0 && expired) {
+					// Given up on, so a later settle, such as the one the publisher's FIN starts, does
+					// not wait another grace for them.
+					this.#excused.clear();
+					return;
+				}
+				if (this.#active === 0 && this.#excused.size === 0 && complete()) return;
 				await Signal.race(this.#changed, closed);
 			}
 		} finally {

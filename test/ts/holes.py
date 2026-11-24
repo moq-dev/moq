@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Find the media a capture is missing, from its timestamps against its generated source.
 
-    ./holes.py capture.ts source.ts [--shed]
+    ./holes.py capture.ts source.ts [--shed] [--program N [--join S]]
 
 Every audio and video stream of a generated clip has a constant frame duration, so the step
 between consecutive presentation timestamps, in presentation order, is the same throughout. A
@@ -29,6 +29,15 @@ past the exporter's delay, fails.
 
 This reads the captures alone, independently of what the exporter reports, and needs only
 ffprobe. A real capture's streams need not keep a constant step, so it grades generated clips.
+
+Under `--program N` the source is a multiplex and the capture one export of its program N: only
+that program's streams are graded, and the capture's PAT must list that program alone, its PMT
+naming the source's PCR PID and elementary streams. `--join S` is how far into the source that
+export started, which it may start later by. Each track joins at its own latest group then, so
+no stream may start more than two of the source's video groups before the join (its group, and
+one more for the publisher starting late on the wall clock the join is counted on), which would
+be a replay from before the export started, or more than one after the capture's first video
+keyframe, which would leave that stream missing what the program carries from there.
 
 Exit status is 0 when every source stream is in the capture without a hole (or, under
 `--shed`, losing only whole groups) or a cut, 1 otherwise.
@@ -97,13 +106,13 @@ def shed(pts: list[int], sync: list[bool], kept: list[int]) -> Shed:
 Span = tuple[Fraction, Fraction, Fraction]
 
 
-def cuts(source: Span, capture: Span, frame: Fraction) -> list[str]:
+def cuts(source: Span, capture: Span, frame: Fraction, join: Fraction = JOIN) -> list[str]:
     """How a capture's (first PTS, last PTS, last DTS), in seconds, falls short of its source's."""
     # Both ends: losing trailing B pictures leaves the last PTS, and losing the last P picture the last DTS.
     late, short = capture[0] - source[0], max(source[1] - capture[1], source[2] - capture[2])
     found = []
-    if late > JOIN:
-        found.append(f"starts {float(late):.3f}s after its source, past the {float(JOIN)}s join")
+    if late > join:
+        found.append(f"starts {float(late):.3f}s after its source, past the {float(join)}s join")
     if 2 * short > frame:
         found.append(f"ends {float(short):.3f}s before its source")
     return found
@@ -118,6 +127,53 @@ class Stream:
     pts: list[int]
     sync: list[bool]
     span: Span  # first PTS, last PTS and last DTS, in seconds
+
+
+@dataclass
+class Program:
+    """A program as its PAT entry and PMT describe it."""
+
+    pmt: int  # PMT PID
+    pcr: int  # PCR PID
+    streams: list[str]  # elementary stream PIDs, in PMT order
+
+
+def programs(path: str) -> dict[int, Program]:
+    """Each program the PAT lists, by program number."""
+    report = json.loads(
+        subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "program=program_num,pmt_pid,pcr_pid:stream=id",
+                "-of",
+                "json",
+                path,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    )
+    return {
+        p["program_num"]: Program(p["pmt_pid"], p["pcr_pid"], [s["id"] for s in p.get("streams", [])])
+        for p in report.get("programs", [])
+    }
+
+
+def tables(capture: dict[int, Program], source: dict[int, Program], number: int) -> list[str]:
+    """How the capture's programs differ from the source's program `number` alone."""
+    if list(capture) != [number]:
+        return [f"the PAT lists programs {sorted(capture)}, not {number} alone"]
+    got, want = capture[number], source[number]
+    found = []
+    if got.pcr != want.pcr:
+        found.append(f"PCR PID {got.pcr:#x}, not the source's {want.pcr:#x}")
+    if got.streams != want.streams:
+        found.append(f"elementary streams {got.streams}, not the source's {want.streams}")
+    return found
 
 
 def probe(path: str) -> dict[str, Stream]:
@@ -169,18 +225,81 @@ def probe(path: str) -> dict[str, Stream]:
     }
 
 
+def starts(source: dict[str, Stream], capture: dict[str, Stream], join: Fraction) -> dict[str, list[str]]:
+    """Where each of a program's streams starts against its source's video groups, by PID: under a
+    `join`, no earlier than two groups before it, and in any case no later than one group after
+    the capture's first video keyframe or its source's own start, whichever is later."""
+    videos = [pid for pid, src in source.items() if src.info.get("codec_type") == "video"]
+    if not videos:
+        return {}
+
+    def keyframes(stream: Stream) -> list[Fraction]:
+        base = Fraction(stream.info["time_base"])
+        return sorted(t * base for t, key in zip(stream.pts, stream.sync) if key)
+
+    group = max(
+        (b - a for pid in videos for a, b in zip(keyframes(source[pid]), keyframes(source[pid])[1:])),
+        default=Fraction(0),
+    )
+    opened = min(
+        (keyframes(capture[pid])[0] for pid in videos if pid in capture and any(capture[pid].sync)),
+        default=None,
+    )
+    # The join is time into the program, which starts with its first stream, not each stream's own.
+    origin = min(src.span[0] for src in source.values())
+    found: dict[str, list[str]] = {}
+    for pid in source:
+        if pid not in capture:
+            continue
+        first = capture[pid].span[0]
+        reasons = found.setdefault(pid, [])
+        if join and first - origin < join - 2 * group:
+            reasons.append(
+                f"starts {float(first - origin):.3f}s into its program, over two {float(group)}s groups "
+                f"before the {float(join)}s join"
+            )
+        # A stream the source itself starts later than that may start as late in the capture.
+        if opened is not None and first > max(opened + group, source[pid].span[0]):
+            reasons.append(
+                f"starts {float(first - opened):.3f}s after the program's first video keyframe, "
+                f"past a {float(group)}s group and its source's start"
+            )
+    return found
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("capture")
     parser.add_argument("source")
     parser.add_argument("--shed", action="store_true", help="allow losing whole groups, but not the last")
+    parser.add_argument("--program", type=int, help="grade this program of a multiplex, carried alone")
+    parser.add_argument("--join", type=Fraction, default=Fraction(0), help="seconds into the source the export started")
     args = parser.parse_args()
+    if args.join and args.program is None:
+        parser.error("--join needs --program")
     capture, source = probe(args.capture), probe(args.source)
+    join = JOIN + args.join
+    failed = False
+    if args.program is not None:
+        wanted = programs(args.source)
+        if args.program not in wanted:
+            sys.exit(f"error: {args.source} has no program {args.program}")
+        want = wanted[args.program]
+        found = tables(programs(args.capture), wanted, args.program)
+        print(f"### program {args.program} tables (the capture's PAT and PMT against the source's)")
+        print(
+            f"  {'FAIL' if found else 'PASS'}  program {args.program}: PCR PID {want.pcr:#x}, "
+            f"elementary streams {' '.join(want.streams)}"
+        )
+        for reason in found:
+            print(f"        {reason}")
+        failed = bool(found)
+        source = {pid: s for pid, s in source.items() if pid in want.streams}
+    early = starts(source, capture, args.join) if args.program is not None else {}
     if not source:
         sys.exit(f"error: {args.source} has no audio or video stream")
 
     print("### media holes (capture timestamps against the source" + (", whole groups shed" if args.shed else "") + ")")
-    failed = False
     for pid, src in sorted(source.items()):
         label = f"PID {pid} {src.info['codec_name']}"
         # The source's step, not the capture's: a capture that kept every other frame has a step of its own.
@@ -213,15 +332,16 @@ def main() -> None:
             if graded.tail:
                 reasons.append(f"lost {graded.tail} frames of the source's last group")
             late = got.span[0] - src.span[0]
-            if late > JOIN:
-                reasons.append(f"starts {float(late):.3f}s after its source, past the {float(JOIN)}s join")
+            if late > join:
+                reasons.append(f"starts {float(late):.3f}s after its source, past the {float(join)}s join")
             summary = f"{graded.missing} frames ({float(graded.missing * frame * base):.1f} s) shed"
         else:
             found = holes(sorted(got.pts), frame)
             reasons = [f"at {float(at * base):.3f}s: {float(gap * base) * 1000:.0f} ms step" for at, gap in found[:5]]
-            reasons += cuts(src.span, got.span, frame * base)
+            reasons += cuts(src.span, got.span, frame * base, join)
             missing = sum(gap - frame for _, gap in found) * base
             summary = f"{len(found)} holes, {float(missing) * 1000:.0f} ms missing"
+        reasons += early.get(pid, [])
         failed |= bool(reasons)
         print(
             f"  {'FAIL' if reasons else 'PASS'}  {label}: {len(got.dts)} frames of "

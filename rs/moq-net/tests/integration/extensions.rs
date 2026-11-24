@@ -1,7 +1,7 @@
 #![cfg(feature = "async")]
 
-//! A side may decline a moq-transport extension with `setup::Extensions`, and then
-//! connects as a peer that does not speak it.
+//! A test side may decline a moq-transport extension through moq-net's hidden doors, and
+//! then connects as a peer that does not speak it.
 //!
 //! Deterministic: paused time over the mock transport.
 
@@ -9,19 +9,21 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Version, origin, setup::Extensions};
-use support::harness::{MockConnectOptions, MockPair, connect_mock};
+use moq_net::{Version, origin};
+use support::harness::{Extensions, MockConnectOptions, MockPair, connect_mock};
 
 /// Long enough, in virtual time, for anything in flight to reach the far side.
 const SETTLE: Duration = Duration::from_secs(1);
 
 /// Every moq-transport draft, each of which carries the SOLICIT option.
-const MOQT: [&str; 2] = ["moq-transport-18", "moq-transport-22"];
+const MOQT: [&str; 3] = ["moq-transport-18", "moq-transport-22", "moq-transport-23"];
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 fn declined(f: impl FnOnce(&mut Extensions)) -> Extensions {
@@ -47,15 +49,18 @@ fn announced(origin: &origin::Producer, path: &str) -> bool {
 					| moq_net::origin::RouteKind::Update
 					| moq_net::origin::RouteKind::Restart,
 				announce: update,
+				..
 			} => {
 				live |= update.prefix.as_str() == path;
 			}
 			moq_net::origin::RouteEvent {
 				kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 				announce: update,
+				..
 			} => {
 				live &= update.prefix.as_str() != path;
 			}
+			other => panic!("unexpected route event {other:?}"),
 		}
 	}
 	live

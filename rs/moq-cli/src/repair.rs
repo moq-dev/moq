@@ -38,7 +38,8 @@ struct Mp4 {
 }
 
 impl Mp4 {
-	/// Index the recording and write its `moov`, or report that it is already finished.
+	/// Index the recording and write its `moov`, or report that it is already finished with
+	/// exactly that `moov`.
 	async fn run(self) -> anyhow::Result<()> {
 		let path = self.file;
 		let file = std::fs::OpenOptions::new()
@@ -46,20 +47,30 @@ impl Mp4 {
 			.write(true)
 			.open(&path)
 			.with_context(|| format!("failed to open {}", path.display()))?;
-		let (file, finish) = tokio::task::spawn_blocking(move || {
+		// Held for the repair's life: an `export mp4` recording holds it until it closes the file,
+		// so a file we can't lock is still being written, and repairing it would corrupt it.
+		// A filesystem without locks refuses too, since the recorder refuses to start there.
+		file.try_lock().with_context(|| {
+			format!(
+				"failed to lock {}, so it may still be open by a recorder",
+				path.display()
+			)
+		})?;
+		let repaired = tokio::task::spawn_blocking(move || {
 			let mut file = file;
-			let finish = moq_mux::container::mp4::repair(&mut file);
-			(file, finish)
+			let Some(finish) = moq_mux::container::mp4::repair(&mut file, &[])? else {
+				return anyhow::Ok(false);
+			};
+			finish.write(&mut file)?;
+			Ok(true)
 		})
-		.await?;
-		let finish = finish.with_context(|| format!("failed to repair {}", path.display()))?;
+		.await?
+		.with_context(|| format!("failed to repair {}", path.display()))?;
 
-		match finish {
-			Some(finish) => {
-				crate::subscribe::write_finish(&mut tokio::fs::File::from_std(file), &finish).await?;
-				tracing::info!(path = %path.display(), "recording repaired");
-			}
-			None => tracing::info!(path = %path.display(), "recording already finished"),
+		if repaired {
+			tracing::info!(path = %path.display(), "recording repaired");
+		} else {
+			tracing::info!(path = %path.display(), "recording already finished");
 		}
 		Ok(())
 	}

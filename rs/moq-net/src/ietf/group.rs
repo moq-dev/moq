@@ -1,17 +1,23 @@
 use crate::coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder};
-use crate::{Timescale, Timestamp};
 
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use super::Version;
 use crate::ietf::Param;
 
-/// MOQ Object Property IDs (the MOQ Object Properties registry, shared with
-/// draft-ietf-moq-loc-04). Even type ids carry a single varint value. The object-scope
-/// Timescale is only skipped on decode, so only tests name it.
+/// Encode the Timestamp object property (0x10) a third-party publisher may send, which
+/// moq-net reads as an opaque property, at `timestamp` converted into `timescale`.
 #[cfg(test)]
-const PROP_TIMESCALE: u64 = 0x08;
-const PROP_TIMESTAMP: u64 = 0x10;
+pub(crate) fn encode_object_time(
+	w: &mut Encoder<'_>,
+	timestamp: crate::Timestamp,
+	timescale: crate::Timescale,
+) -> Result<(), EncodeError> {
+	let timestamp = timestamp.convert(timescale).map_err(|_| EncodeError::BoundsExceeded)?;
+	w.varint(0x10)?;
+	w.varint(timestamp.value())?;
+	Ok(())
+}
 
 /// Implementation limit for an object's extension (property) block, independent of the
 /// IETF draft. Checked at the length prefix, before the block is buffered.
@@ -32,40 +38,6 @@ impl<'a> Decode<'a, Version> for ObjectExtensionsLength {
 		}
 		Ok(Self(size))
 	}
-}
-
-/// Encode a frame's presentation timestamp as a moq-transport Object Property.
-///
-/// Matches the LOC encoding of the same registry id so a relay or LOC-aware peer
-/// reads the same bytes. The Timestamp value is always absolute. Writes the raw KVP bytes
-/// (no outer length prefix); the caller frames the block with its byte length.
-///
-/// The units come from the track's TIMESCALE property, not from here: repeating the
-/// timescale on every object would cost bytes per frame to restate something fixed for
-/// the track's lifetime. `timescale` is what the track advertised, and the timestamp is
-/// converted into it so the value on the wire matches the declared units.
-pub fn encode_object_time(w: &mut Encoder<'_>, timestamp: Timestamp, timescale: Timescale) -> Result<(), EncodeError> {
-	let timestamp = timestamp.convert(timescale).map_err(|_| EncodeError::BoundsExceeded)?;
-	// The first property's type is a delta from zero, so it is written as is.
-	w.varint(PROP_TIMESTAMP)?;
-	w.varint(timestamp.value())?;
-	Ok(())
-}
-
-/// Decode the same property list as ingest when checking timestamps in wire tests.
-#[cfg(test)]
-pub fn decode_object_time(
-	r: &mut Decoder<'_>,
-	timescale: Timescale,
-	version: Version,
-) -> Result<Option<Timestamp>, DecodeError> {
-	let data = bytes::Bytes::copy_from_slice(r.rest());
-	super::object::read(&data, version, Some(timescale))
-		.map(|decoded| decoded.timestamp)
-		.map_err(|error| match error {
-			crate::Error::Decode(error) => error,
-			_ => DecodeError::InvalidValue,
-		})
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
@@ -307,94 +279,6 @@ impl<'a> Decode<'a, Version> for GroupHeader {
 mod tests {
 	use super::*;
 
-	/// Encode an object's properties at `version`.
-	fn encode_time(ts: Timestamp, timescale: Timescale, version: Version) -> Vec<u8> {
-		let mut buf = Vec::new();
-		encode_object_time(&mut Encoder::new(&mut buf, version.into()), ts, timescale).unwrap();
-		buf
-	}
-
-	/// Read `buf` back as a flat list of varints.
-	fn varints(buf: &[u8], version: Version) -> Vec<u64> {
-		let mut r = Decoder::new(buf, version.into());
-		std::iter::from_fn(|| (!r.is_empty()).then(|| r.varint().unwrap())).collect()
-	}
-
-	/// Write `values` as a flat list of varints.
-	fn from_varints(values: &[u64], version: Version) -> Vec<u8> {
-		let mut buf = Vec::new();
-		let mut w = Encoder::new(&mut buf, version.into());
-		for value in values {
-			w.varint(*value).unwrap();
-		}
-		buf
-	}
-
-	fn decode_time(buf: &[u8], timescale: Timescale, version: Version) -> Option<Timestamp> {
-		let mut r = Decoder::new(buf, version.into());
-		let decoded = decode_object_time(&mut r, timescale, version).unwrap();
-		assert!(r.is_empty());
-		decoded
-	}
-
-	/// An object Timestamp round-trips through encode/decode at the track's scale.
-	#[test]
-	fn test_object_time_roundtrip() {
-		let ts = Timestamp::new(96_000, Timescale::MICRO).unwrap();
-		let buf = encode_time(ts, Timescale::MICRO, Version::Draft18);
-
-		let decoded = decode_time(&buf, Timescale::MICRO, Version::Draft18).unwrap();
-		assert_eq!(decoded.value(), 96_000);
-		assert_eq!(decoded.scale(), Timescale::MICRO);
-	}
-
-	/// The value on the wire is in the track's units, not the frame's.
-	#[test]
-	fn test_object_time_converts_into_the_track_scale() {
-		// 2 seconds, expressed in milliseconds by the frame.
-		let ts = Timestamp::new(2_000, Timescale::MILLI).unwrap();
-		let buf = encode_time(ts, Timescale::MICRO, Version::Draft18);
-		assert_eq!(varints(&buf, Version::Draft18), [PROP_TIMESTAMP, 2_000_000]);
-
-		let decoded = decode_time(&buf, Timescale::MICRO, Version::Draft18).unwrap();
-		assert_eq!(decoded.value(), 2_000_000);
-		assert_eq!(decoded.scale(), Timescale::MICRO);
-	}
-
-	/// An object-scope Timescale (which LOC permits) is ignored: the track's units apply.
-	#[test]
-	fn test_object_time_ignores_an_object_scope_timescale() {
-		let buf = from_varints(
-			&[
-				PROP_TIMESCALE,
-				u64::from(Timescale::MILLI),
-				PROP_TIMESTAMP - PROP_TIMESCALE,
-				42,
-			],
-			Version::Draft18,
-		);
-
-		let decoded = decode_time(&buf, Timescale::MICRO, Version::Draft18).unwrap();
-		assert_eq!(decoded.value(), 42);
-		assert_eq!(decoded.scale(), Timescale::MICRO);
-	}
-
-	/// The track's timescale supplies the units.
-	#[test]
-	fn test_object_time_defaults_to_the_track_scale() {
-		let buf = from_varints(&[PROP_TIMESTAMP, 1234], Version::Draft18);
-
-		let decoded = decode_time(&buf, Timescale::MILLI, Version::Draft18).unwrap();
-		assert_eq!(decoded.value(), 1234);
-		assert_eq!(decoded.scale(), Timescale::MILLI);
-	}
-
-	/// No Timestamp property at all yields None.
-	#[test]
-	fn test_object_time_absent() {
-		assert!(decode_time(&[], Timescale::MICRO, Version::Draft18).is_none());
-	}
-
 	// Test table from draft-ietf-moq-transport-14 Section 10.4.2 Table 7
 	#[test]
 	fn test_group_flags_spec_table() {
@@ -530,7 +414,7 @@ mod tests {
 	/// to survive decode rather than being stripped with the bit.
 	#[test]
 	fn first_object_round_trips() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			for first_object in [true, false] {
 				let flags = GroupFlags {
 					first_object,

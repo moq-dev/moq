@@ -5,8 +5,9 @@ import { wall } from "@moq/clock";
 import { Command, Option } from "commander";
 import { base64url } from "jose";
 import type { Algorithm } from "./algorithm.ts";
-import { authorize, ClaimsSchema, type Scope, ScopeSchema } from "./claims.ts";
+import { Claims, prefixes, type Scope, ScopeSchema } from "./claims.ts";
 import { Key } from "./key.ts";
+import * as Path from "./path.ts";
 import { encodeGrants } from "./wire.ts";
 
 const program = new Command();
@@ -22,15 +23,22 @@ program
 	.option("--public <path>", "Path to save the public key (for asymmetric algorithms)")
 	.option("--base64", "Output as base64url instead of JSON", false)
 	.option("--root <root>", "Root path for the optional key scope", "")
-	.option("--publish <pattern...>", "Publish patterns the key may grant (foo/** for a subtree)")
-	.option("--subscribe <pattern...>", "Subscribe patterns the key may grant (foo/** for a subtree)")
+	.option("--publish <prefix...>", 'Publish prefixes the key may grant, each with its subtree ("" for everything)')
+	.option(
+		"--subscribe <prefix...>",
+		'Subscribe prefixes the key may grant, each with its subtree ("" for everything)',
+	)
 	.action(async (options) => {
 		try {
 			const algorithm = options.algorithm as Algorithm;
 			let key = await Key.generate(algorithm, options.id);
 			if (options.publish || options.subscribe) {
 				// Parse rather than cast, so a useless scope fails here like it does
-				// in the Rust CLI instead of writing an unusable key to disk.
+				// in the Rust CLI instead of writing an unusable key to disk. Flags take
+				// prefixes alone; only a key file reads the subtree patterns releases wrote.
+				Path.signable(options.root);
+				prefixes(options.publish);
+				prefixes(options.subscribe);
 				const scope: Scope = ScopeSchema.parse({
 					root: options.root,
 					...(options.publish && { publish: options.publish }),
@@ -40,7 +48,6 @@ program
 			}
 
 			const encodeKey = (k: { scope?: Scope }): string => {
-				// Written the legacy way when that says the same thing, so older readers load it.
 				const json = JSON.stringify(k.scope ? { ...k, scope: encodeGrants(k.scope) } : k, null, 2);
 				if (options.base64) {
 					return base64url.encode(json);
@@ -69,8 +76,11 @@ program
 	.description("Sign a token to stdout")
 	.requiredOption("--key <path>", "Path to the key file")
 	.option("--root <root>", "Root path for the token", "")
-	.option("--publish <pattern...>", "Patterns the holder may publish (foo/** for a subtree)")
-	.option("--subscribe <pattern...>", "Patterns the holder may subscribe to (foo/** for a subtree)")
+	.option("--publish <prefix...>", 'Prefixes the holder may publish, each with its subtree ("" for everything)')
+	.option(
+		"--subscribe <prefix...>",
+		'Prefixes the holder may subscribe to, each with its subtree ("" for everything)',
+	)
 	.addOption(
 		new Option("--expires <timestamp>", "Expiration time as unix timestamp, instead of --ttl from now")
 			.argParser(parseUnixTimestamp)
@@ -83,23 +93,23 @@ program
 	)
 	.addOption(new Option("--unbounded", "Write no exp, so the token never expires"))
 	.option("--issued <timestamp>", "Issued time as unix timestamp", parseUnixTimestamp)
+	.option("--id <id>", "Token ID, written as its jti, such as one you record to revoke it")
 	.action(async (options) => {
 		try {
 			const keyEncoded = readFileSync(options.key, "utf-8");
 			const key = Key.parse(keyEncoded);
 
-			const exp = options.unbounded
+			const expires = options.unbounded
 				? undefined
 				: (options.expires ?? Math.floor(wall().asUnixMillis() / 1000) + (options.ttl ?? 3600));
-			const claims = ClaimsSchema.parse({
+			const token = await Key.sign(key, {
 				root: options.root,
 				...(options.publish && { publish: options.publish }),
 				...(options.subscribe && { subscribe: options.subscribe }),
-				...(exp !== undefined && { exp }),
-				...(options.issued && { iat: options.issued }),
+				...(expires !== undefined && { expires }),
+				...(options.issued && { issued: options.issued }),
+				...(options.id !== undefined && { id: options.id }),
 			});
-
-			const token = await Key.sign(key, claims);
 			console.log(token);
 		} catch (error) {
 			console.error("Error signing token:", error instanceof Error ? error.message : error);
@@ -123,7 +133,7 @@ program
 
 			const claims = await Key.verify(key, token);
 			if (options.root !== undefined) {
-				authorize(claims, options.root);
+				Claims.authorize(claims, options.root);
 			}
 			console.log(JSON.stringify(claims, null, 2));
 		} catch (error) {

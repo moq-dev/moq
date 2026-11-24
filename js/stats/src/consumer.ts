@@ -170,6 +170,8 @@ export class BucketReader {
 				this.close();
 				return undefined;
 			}
+			// Buckets are tracks of groups, so a datagram track of the same name is not one.
+			if (event.kind === "synced" || event.datagrams) continue;
 			if (event.kind === "added" && parseBucketTrack(event.name)?.bucket === this.#bucket) {
 				// A newer run supersedes the current one.
 				if (this.#run) this.#end(this.#run);
@@ -178,10 +180,11 @@ export class BucketReader {
 					name: event.name,
 					reader: new Json.Snapshot.Consumer({ track, schema: BucketFrameSchema }),
 				};
-			} else if ((event.kind === "removed" || event.kind === "finished") && event.name === this.#run?.name) {
+			} else if (event.kind === "removed" && event.name === this.#run?.name) {
 				this.#end(this.#run);
 				return { kind: "ended" };
 			}
+			// A finished run is left to its reader, which yields its final frames before it ends.
 		}
 	}
 

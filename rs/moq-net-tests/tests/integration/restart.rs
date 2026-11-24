@@ -8,6 +8,7 @@
 //! instance's cached groups.
 
 use crate::support;
+use support::AppendNext;
 
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
@@ -24,9 +25,11 @@ fn timed() -> moq_net::track::Info {
 const TEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// Have `to` pull everything `from` publishes.
@@ -70,16 +73,19 @@ async fn expect_replaced(version: Version, announced: &mut origin::Routes, prefi
 		origin::RouteEvent {
 			kind: origin::RouteKind::Restart,
 			announce,
+			..
 		} if restarts => assert_eq!(announce.prefix.as_str(), prefix),
 		origin::RouteEvent {
 			kind: origin::RouteKind::End,
 			announce,
+			..
 		} if !restarts => {
 			assert_eq!(announce.prefix.as_str(), prefix);
 			match next_event(announced).await {
 				origin::RouteEvent {
 					kind: origin::RouteKind::Start,
 					announce,
+					..
 				} => assert_eq!(announce.prefix.as_str(), prefix),
 				other => panic!("{version}: expected the start, got {other:?}"),
 			}
@@ -95,10 +101,11 @@ async fn quiet(version: Version, announced: &mut origin::Routes) {
 	}
 }
 
-/// Write one group of one frame tagged `tag`.
+/// Write the next group of one frame tagged `tag`, starting at its key in milliseconds.
 fn write(track: &track::Producer, tag: &str) {
-	let mut group = track.append_group().unwrap();
-	group.write_frame(Timestamp::ZERO, tag.as_bytes().to_vec()).unwrap();
+	let mut group = track.append_next().unwrap();
+	let start = Timestamp::from_millis(group.start).unwrap();
+	group.write_frame(start, tag.as_bytes().to_vec()).unwrap();
 	group.finish().unwrap();
 }
 
@@ -137,6 +144,7 @@ async fn relay_chain(version: &str) {
 		origin::RouteEvent {
 			kind: origin::RouteKind::Start,
 			announce,
+			..
 		} => assert_eq!(announce.prefix.as_str(), "live"),
 		other => panic!("{version}: expected the route, got {other:?}"),
 	}
@@ -251,6 +259,7 @@ async fn prefix_pool(version: &str) {
 		origin::RouteEvent {
 			kind: origin::RouteKind::Start,
 			announce,
+			..
 		} => advertised(announce),
 		other => panic!("{version}: expected the pool, got {other:?}"),
 	}
@@ -282,6 +291,7 @@ async fn prefix_pool(version: &str) {
 			origin::RouteEvent {
 				kind: origin::RouteKind::Restart,
 				announce,
+				..
 			} => advertised(announce),
 			other => panic!("{version}: expected a restart at most, got {other:?}"),
 		}
@@ -377,6 +387,7 @@ async fn dynamic_instance(version: &str, from: Option<Instance>, to: Instance) {
 		origin::RouteEvent {
 			kind: origin::RouteKind::Start,
 			announce,
+			..
 		} => assert_eq!(announce.prefix.as_str(), "live"),
 		other => panic!("{version}: expected the claim, got {other:?}"),
 	}
@@ -598,7 +609,7 @@ async fn unanswered_takeover(version: &str) {
 		Err(err) => assert!(matches!(err, moq_net::Error::Unroutable), "{version}: {err}"),
 		Ok(group) => panic!(
 			"{version}: the replaced instance's SUBSCRIBE went on: {:?}",
-			group.map(|group| group.sequence)
+			group.map(|group| group.start)
 		),
 	}
 }
@@ -900,4 +911,41 @@ priority_update_tests! {
 	priority_update_lite07: "moq-lite-07-wip",
 	priority_update_ietf18: "moq-transport-18",
 	priority_update_ietf22: "moq-transport-22",
+}
+
+/// An endpoint replacing its own broadcast ends the old instance for its reader: the
+/// broadcast handed out first has closed by the time its replacement is handed out, as
+/// one a publisher ended, not one held in case its route returns.
+#[kio::test]
+async fn an_endpoint_replacing_its_broadcast_ends_the_old_one() {
+	let version: Version = "moq-lite-07-wip".parse().unwrap();
+	let endpoint = || {
+		let (producer, driver) = origin::Producer::new(origin::Config::default());
+		support::harness::spawn(driver);
+		producer
+	};
+	let publisher = endpoint();
+	let viewer = endpoint();
+	let _session = link(version, &publisher, &viewer).await;
+	let old = publisher.route("live", origin::RouteOptions::default()).unwrap();
+	let old_track = old.broadcast().create_track("video", timed()).unwrap();
+	let mut following = viewer.consume().follow("live", None).unwrap();
+	let held = following.available().await.unwrap().expect("the first instance");
+	let mut subscription = held.track("video").unwrap().subscribe(None).await.unwrap();
+	write(&old_track, "old:0");
+	assert_eq!(read(&mut subscription).await, "old:0");
+	settle().await;
+
+	let _replacement = publisher.route("live", origin::RouteOptions::default()).unwrap();
+	let next = kio::clock::timeout(Duration::from_secs(10), following.available())
+		.await
+		.expect("the takeover hung")
+		.unwrap()
+		.expect("the replacement");
+	assert!(!next.is_clone(&held));
+	assert!(held.is_closed(), "the replaced broadcast is still open");
+
+	// The subscription already on it stays.
+	write(&old_track, "old:1");
+	assert_eq!(read(&mut subscription).await, "old:1");
 }

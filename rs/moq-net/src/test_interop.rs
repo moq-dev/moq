@@ -4,10 +4,10 @@
 use crate::coding::{Decoder, Encode, Encoder, Form, varint};
 use crate::{ietf, lite};
 
-// Runs a script with a JSON argument, returning its stdout.
+// Runs `test/interop/<script>.ts` with a JSON argument, returning its stdout.
 pub(crate) fn bun(script: &str, input: serde_json::Value) -> Vec<u8> {
 	let output = std::process::Command::new("bun")
-		.arg(format!("{}/../../test/interop/{script}", env!("CARGO_MANIFEST_DIR")))
+		.arg(format!("{}/../../test/interop/{script}.ts", env!("CARGO_MANIFEST_DIR")))
 		.arg(input.to_string())
 		.output()
 		.expect("Bun must be installed for the interop tests");
@@ -21,14 +21,14 @@ pub(crate) fn bun(script: &str, input: serde_json::Value) -> Vec<u8> {
 
 pub(crate) fn fin(version: &str, started: bool, clean: bool, responses: Vec<u8>) -> Vec<u8> {
 	let input = serde_json::json!({ "version": version, "started": started, "clean": clean, "responses": responses });
-	serde_json::from_slice(&bun("bare-fin.ts", input)).expect("JS publisher returned response bytes")
+	serde_json::from_slice(&bun("bare-fin", input)).expect("JS publisher returned response bytes")
 }
 
 /// Feed a JS subscriber responses that end the track owing group 0, kill its session, and
 /// return the JS publisher's encoding of the same responses.
 pub(crate) fn owed_tail(version: &str, responses: Vec<u8>) -> Vec<u8> {
 	let input = serde_json::json!({ "version": version, "owed": true, "responses": responses });
-	serde_json::from_slice(&bun("bare-fin.ts", input)).expect("JS publisher returned response bytes")
+	serde_json::from_slice(&bun("bare-fin", input)).expect("JS publisher returned response bytes")
 }
 
 /// Rust updates keep the JS subscription alive, cover both unseen groups after narrowing,
@@ -69,7 +69,6 @@ fn ietf_range_updates_interop() {
 			range_filters: false,
 			authorization_token: None,
 			new_group: None,
-			max_age: None,
 		}
 		.encode(&mut w, version)
 		.unwrap();
@@ -84,7 +83,6 @@ fn ietf_range_updates_interop() {
 				filter: Some(filter),
 				authorization_token: None,
 				new_group: None,
-				max_age: None,
 				fill,
 			}
 			.encode(&mut w, version)
@@ -111,7 +109,7 @@ fn ietf_range_updates_interop() {
 			"subscribe": subscribe,
 			"updates": updates,
 		});
-		let served: Served = serde_json::from_slice(&bun("ietf-range-updates.ts", input)).unwrap();
+		let served: Served = serde_json::from_slice(&bun("ietf-range-updates", input)).unwrap();
 		assert_eq!(served.responses.len(), 3);
 		for (index, bytes) in served.responses.iter().enumerate() {
 			let mut r = Decoder::new(bytes, version.into());
@@ -169,19 +167,30 @@ fn ietf_range_updates_interop() {
 				let mut r = Decoder::new(bytes, version.into());
 				let header = ietf::GroupHeader::decode(&mut r, version).unwrap();
 				assert_eq!(header.track_alias, 0, "updates must retain the subscription alias");
-				assert!(header.flags.has_end, "a complete group must end");
+				// A FIN claims nothing: a complete group ends with an explicit END_OF_GROUP.
+				assert!(!header.flags.has_end, "the header never claims the end");
 				let mut objects = Vec::new();
+				let mut prior = None;
+				let mut ended = false;
 				while !r.is_empty() {
+					assert!(!ended, "nothing follows END_OF_GROUP");
 					let delta = r.varint().unwrap();
-					let object = objects.last().map_or(delta, |prior| prior + delta + 1);
+					let object = prior.map_or(delta, |prior: u64| prior + delta + 1);
+					prior = Some(object);
 					if header.flags.has_extensions {
 						let len = r.varint().unwrap() as usize;
 						r.slice(len).unwrap();
 					}
 					let len = r.varint().unwrap() as usize;
+					if len == 0 {
+						assert_eq!(r.varint().unwrap(), ietf::object::END_OF_GROUP);
+						ended = true;
+						continue;
+					}
 					assert_eq!(r.slice(len).unwrap(), [header.group_id as u8, object as u8]);
 					objects.push(object);
 				}
+				assert!(ended, "a complete group must end");
 				groups.push((header.group_id, objects));
 			}
 		}
@@ -237,8 +246,7 @@ fn varint_interop() {
 		"quic": values.iter().map(|&v| encode(v, quic)).collect::<Vec<_>>(),
 		"leadingOnes": values.iter().map(|&v| encode(v, leading_ones)).collect::<Vec<_>>(),
 	});
-	let output: serde_json::Value =
-		serde_json::from_slice(&bun("varint.ts", input)).expect("JS returned its encodings");
+	let output: serde_json::Value = serde_json::from_slice(&bun("varint", input)).expect("JS returned its encodings");
 	let js = |format: &str| -> Vec<Vec<u8>> { serde_json::from_value(output[format].clone()).unwrap() };
 
 	for ((&value, js_quic), js_leading) in values.iter().zip(js("quic")).zip(js("leadingOnes")) {
@@ -264,14 +272,15 @@ fn lite_values() -> Vec<u64> {
 }
 
 /// One GROUP header and its frames, as a publisher writes them: a zigzag timestamp delta on
-/// a timed track, the payload size, then the payload.
+/// a timed track, the payload size, then the payload. The header names a frame start, which
+/// lite-06 and later carry.
 fn lite_group(version: lite::Version, frames: impl IntoIterator<Item = (Option<i64>, usize)>) -> Vec<u8> {
 	let mut buf = Vec::new();
 	let w = &mut Encoder::new(&mut buf, version.into());
 	let header = lite::Group {
 		subscribe: 5,
-		sequence: 1 << 20,
-		frame_start: 200,
+		key: 1 << 20,
+		frame_start: if version.has_frame_bounds() { 200 } else { 0 },
 	};
 	header.encode(w, version).unwrap();
 	for (delta, size) in frames {
@@ -291,8 +300,6 @@ struct Echo {
 	varints: Vec<u8>,
 	setup: Vec<u8>,
 	datagram: Vec<u8>,
-	padding: Vec<u8>,
-	untimed_datagram: Vec<u8>,
 	track_info: Vec<u8>,
 	group: Vec<u8>,
 	untimed_group: Vec<u8>,
@@ -325,7 +332,7 @@ fn lite_varint_interop() {
 		let datagram = lite::Datagram {
 			subscribe: (1 << 40) + 1,
 			sequence: 300,
-			timestamp: Some((1 << 50) + 5),
+			timestamp: (1 << 50) + 5,
 			payload: bytes::Bytes::from_static(b"x"),
 		}
 		.encode_bytes(version)
@@ -333,37 +340,11 @@ fn lite_varint_interop() {
 
 		// Only lite-07 can carry an untimed track; lite-06 stamps it, so it has no untimed bytes.
 		let untimed = version.wire_timescale(None).is_none();
-		let padding = match version.has_padding() {
-			true => {
-				let mut bytes = Vec::new();
-				let mut w = Encoder::new(&mut bytes, version.into());
-				w.varint(1).unwrap();
-				w.slice(&[0xff; 1199]);
-				bytes
-			}
-			false => Vec::new(),
-		};
-
-		// The body doesn't say it is untimed; the subscription's track does.
-		let untimed_datagram = lite::Datagram {
-			subscribe: 9,
-			sequence: 1 << 30,
-			timestamp: None,
-			payload: bytes::Bytes::from_static(b"untimed"),
-		}
-		.encode_bytes(version);
-		let untimed_datagram = match untimed {
-			true => untimed_datagram.unwrap().to_vec(),
-			false => {
-				assert!(untimed_datagram.is_err(), "{version}: encoded an untimed datagram");
-				Vec::new()
-			}
-		};
 
 		// An untimed track: zero on lite-07, milliseconds before it. Compressed where the
 		// version can say so.
 		let track_info = lite::TrackInfo {
-			refresh: None,
+			refresh: crate::track::Refresh::default(),
 			priority: 1,
 			max_age: None,
 			timescale: None,
@@ -396,30 +377,17 @@ fn lite_varint_interop() {
 			"varints": varints,
 			"setup": setup.to_vec(),
 			"datagram": datagram.to_vec(),
-			"padding": padding,
-			"untimedDatagram": untimed_datagram,
 			"trackInfo": track_info.to_vec(),
 			"group": group,
 			"untimedGroup": untimed_group,
 		});
-		let echo: Echo = serde_json::from_slice(&bun("lite-varint.ts", input)).expect("JS returned its encodings");
+		let echo: Echo = serde_json::from_slice(&bun("lite-varint", input)).expect("JS returned its encodings");
 
 		let decoded: Vec<u64> = echo.values.iter().map(|v| v.parse().unwrap()).collect();
 		assert_eq!(decoded, values, "{version}: JS decoded different values");
 		assert_eq!(echo.varints, varints, "{version}: JS encoded the values differently");
 		assert_eq!(echo.setup, setup, "{version}: SETUP");
 		assert_eq!(echo.datagram, datagram, "{version}: datagram");
-		assert_eq!(echo.padding, padding, "{version}: padding");
-		if version.has_padding() {
-			assert!(
-				lite::Datagram::decode(echo.padding.into(), version, |_| {
-					panic!("padding must not look up a subscription")
-				})
-				.unwrap()
-				.is_none()
-			);
-		}
-		assert_eq!(echo.untimed_datagram, untimed_datagram, "{version}: untimed datagram");
 		assert_eq!(echo.track_info, track_info, "{version}: TRACK_INFO");
 		assert_eq!(echo.group, group, "{version}: group");
 		assert_eq!(echo.untimed_group, untimed_group, "{version}: untimed group");
@@ -442,8 +410,6 @@ fn lite_varint_interop() {
 #[derive(serde::Deserialize)]
 struct DatagramEcho {
 	echoes: Vec<Vec<u8>>,
-	/// The Timestamp each datagram's Properties carry, in milliseconds, if any.
-	timestamps: Vec<Option<u64>>,
 	/// The OBJECT_DATAGRAM the JS publisher sends for the first datagram's fields.
 	published: Vec<u8>,
 }
@@ -465,7 +431,8 @@ fn ietf_datagram_interop() {
 		let mut w = Encoder::new(&mut properties, version.into());
 		ietf::encode_object_time(&mut w, Timestamp::from_millis(1234).unwrap(), Timescale::MILLI).unwrap();
 
-		// What a publisher sends: Object 0, explicit priority, ending its group, stamped.
+		// What a third-party publisher sends: Object 0, explicit priority, ending its group,
+		// stamped. The JS publisher sends the same without the Timestamp.
 		let mut datagrams = vec![ietf::ObjectDatagram {
 			track_alias: 3,
 			group_id: 42,
@@ -500,24 +467,16 @@ fn ietf_datagram_interop() {
 
 		let input = serde_json::json!({ "draft": draft, "datagrams": encoded });
 		let echo: DatagramEcho =
-			serde_json::from_slice(&bun("ietf-datagram.ts", input)).expect("JS returned its encodings");
+			serde_json::from_slice(&bun("ietf-datagram", input)).expect("JS returned its encodings");
 
 		assert_eq!(echo.echoes, encoded, "{version}: JS re-encoded differently");
-		let expected: Vec<Option<u64>> = datagrams
-			.iter()
-			.map(|datagram| datagram.properties.as_ref().map(|_| 1234))
-			.collect();
-		assert_eq!(echo.timestamps, expected, "{version}: JS decoded different timestamps");
-
 		let (published, used) = ietf::ObjectDatagram::decode_slice(&echo.published, version).unwrap();
 		assert_eq!(used, echo.published.len(), "{version}: a datagram runs to its end");
-		assert_eq!(published, datagrams[0], "{version}: the JS publisher's datagram");
-		let Some(properties) = &published.properties else {
-			panic!("{version}: the JS publisher sent no Timestamp");
+		let unstamped = ietf::ObjectDatagram {
+			properties: None,
+			..datagrams[0].clone()
 		};
-		let mut r = Decoder::new(properties, version.into());
-		let timestamp = ietf::decode_object_time(&mut r, Timescale::MILLI, version).unwrap();
-		assert_eq!(timestamp.map(|t| t.as_millis()), Some(1234), "{version}: Timestamp");
+		assert_eq!(published, unstamped, "{version}: the JS publisher's datagram");
 	}
 }
 
@@ -527,8 +486,8 @@ fn ietf_datagram_interop() {
 fn lite_auth_unsupported_interop() {
 	let version = lite::Version::Lite07;
 	let grant = lite::AuthReply::Ok(lite::AuthOk {
-		publish: crate::Patterns::from(crate::Pattern::subtree("room").unwrap()),
-		subscribe: crate::Patterns::new(),
+		publish: crate::Prefixes::from(crate::Prefix::try_from("room").unwrap()),
+		subscribe: crate::Prefixes::new(),
 		expires: None,
 	});
 	let refused = lite::AuthReply::Error(lite::AuthError {
@@ -539,7 +498,7 @@ fn lite_auth_unsupported_interop() {
 	let mut writer = Encoder::new(&mut bytes, version.into());
 	grant.encode(&mut writer, version).unwrap();
 	refused.encode(&mut writer, version).unwrap();
-	let echo: Vec<u8> = serde_json::from_slice(&bun("auth-unsupported.ts", serde_json::json!(bytes))).unwrap();
+	let echo: Vec<u8> = serde_json::from_slice(&bun("auth-unsupported", serde_json::json!(bytes))).unwrap();
 	assert_eq!(echo, bytes);
 	let mut reader = Decoder::new(&echo, version.into());
 	assert_eq!(
@@ -554,10 +513,10 @@ fn lite_auth_unsupported_interop() {
 }
 
 /// moq-lite-07 TRACKS across the Rust/JS boundary: the JS publisher answers a Rust TRACKS request
-/// with a listing Rust decodes, and JS decodes Rust's listing events and re-encodes them byte for
-/// byte.
+/// with a listing Rust decodes, a datagram track among its tracks, and JS decodes Rust's listing
+/// events of both kinds and re-encodes them byte for byte.
 #[test]
-#[ignore = "JS encodes TRACKS without a Node ID until quest/m2/cluster-routing/routes/js.md, which restores it to just test interop"]
+#[ignore = "requires Bun; run by just test interop"]
 fn lite_tracks_interop() {
 	use crate::coding::Decode;
 
@@ -565,35 +524,57 @@ fn lite_tracks_interop() {
 	let request = lite::Tracks {
 		broadcast: crate::Path::from_static("room"),
 		instance: None,
-		node: 0,
+		node: None,
 	}
 	.encode_bytes(version)
 	.unwrap();
 	let input = serde_json::json!({ "mode": "answer", "bytes": request.to_vec() });
-	let answer: Vec<u8> = serde_json::from_slice(&bun("tracks.ts", input)).expect("JS returned its listing");
+	let answer: Vec<u8> = serde_json::from_slice(&bun("tracks", input)).expect("JS returned its listing");
 	let mut r = Decoder::new(&answer, version.into());
 	let mut events = Vec::new();
 	while !r.is_empty() {
+		let named = |kind: crate::broadcast::Kind, name: &str| match kind {
+			crate::broadcast::Kind::Track => name.to_string(),
+			crate::broadcast::Kind::Datagrams => format!("d:{name}"),
+		};
 		events.push(match lite::TracksEvent::decode(&mut r, version).unwrap() {
-			lite::TracksEvent::Added { name, info } => {
+			lite::TracksEvent::Added {
+				name,
+				info: lite::Listed::Track(info),
+			} => {
 				if name == "a" {
 					assert_eq!(info.timescale, Some(crate::Timescale::MILLI));
 					assert_eq!(info.max_age, Some(std::time::Duration::from_secs(3)));
 					assert_eq!(info.priority, 9);
-					assert_eq!(info.refresh, Some(4));
+					assert_eq!(
+						info.refresh,
+						crate::track::Refresh::default()
+							.with_ratio(4)
+							.with_interval(std::time::Duration::from_millis(1500))
+					);
 				}
 				format!("+{name}")
 			}
-			lite::TracksEvent::Removed { name } => format!("-{name}"),
-			lite::TracksEvent::Finished { name } => format!("~{name}"),
+			lite::TracksEvent::Added {
+				name,
+				info: lite::Listed::Datagrams(info),
+			} => {
+				assert_eq!(info.timescale, Some(crate::Timescale::MILLI));
+				assert_eq!(info.priority, 2);
+				format!("+d:{name}")
+			}
+			lite::TracksEvent::Removed { kind, name } => format!("-{}", named(kind, &name)),
+			lite::TracksEvent::Finished { kind, name } => format!("~{}", named(kind, &name)),
 			lite::TracksEvent::Synced => "synced".to_string(),
 		});
 	}
 	// The broadcast's end is the JS publisher's FIN, after the last event.
-	assert_eq!(events, ["+a", "+b", "synced", "-a"]);
+	assert_eq!(events, ["+a", "+b", "+d:a", "synced", "-a", "~d:a"]);
 
 	let info = lite::TrackInfo {
-		refresh: Some(4),
+		refresh: crate::track::Refresh::default()
+			.with_ratio(4)
+			.with_interval(std::time::Duration::from_millis(1500)),
 		priority: 3,
 		max_age: Some(std::time::Duration::from_secs(2)),
 		timescale: Some(crate::Timescale::MICRO),
@@ -604,15 +585,29 @@ fn lite_tracks_interop() {
 	for event in [
 		lite::TracksEvent::Added {
 			name: "video".into(),
-			info,
+			info: lite::Listed::Track(info),
 		},
-		lite::TracksEvent::Removed { name: "video".into() },
+		lite::TracksEvent::Added {
+			name: "video".into(),
+			info: lite::Listed::Datagrams(lite::DatagramsInfo {
+				priority: -3,
+				timescale: Some(crate::Timescale::MILLI),
+			}),
+		},
+		lite::TracksEvent::Removed {
+			kind: crate::broadcast::Kind::Track,
+			name: "video".into(),
+		},
+		lite::TracksEvent::Finished {
+			kind: crate::broadcast::Kind::Datagrams,
+			name: "video".into(),
+		},
 		lite::TracksEvent::Synced,
 	] {
 		event.encode(&mut w, version).unwrap();
 	}
 	let input = serde_json::json!({ "mode": "echo", "bytes": bytes });
-	let echo: Vec<u8> = serde_json::from_slice(&bun("tracks.ts", input)).expect("JS echoed the events");
+	let echo: Vec<u8> = serde_json::from_slice(&bun("tracks", input)).expect("JS echoed the events");
 	assert_eq!(echo, bytes);
 }
 
@@ -650,7 +645,7 @@ fn ietf_track_status_interop() {
 			"requests": [request(1, "room", true), request(3, "room", false), request(5, "absent", true)],
 		});
 		let responses: Vec<Vec<u8>> =
-			serde_json::from_slice(&bun("track-status.ts", input)).expect("JS returned its responses");
+			serde_json::from_slice(&bun("track-status", input)).expect("JS returned its responses");
 		assert_eq!(responses.len(), 3, "{version}");
 
 		for (index, wanted) in [true, false].into_iter().enumerate() {

@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
-import { Duration, Manual, now, yieldNow } from "@moq/clock";
+import { Duration, now, yieldNow } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { Once } from "@moq/signals";
 import { accept } from "./connection/accept.ts";
 import { connect } from "./connection/connect.ts";
-import type { Drain } from "./connection/goaway.ts";
+import type { Goaway as Received } from "./connection/goaway.ts";
 import { GoAway } from "./ietf/goaway.ts";
 import type { Session } from "./ietf/session.ts";
 import { Subscriber } from "./ietf/subscriber.ts";
@@ -15,7 +16,7 @@ import { createMockTransportPair, type MockTransport, textFrame } from "./mock.t
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Stream, Writer } from "./stream.ts";
-import { Timescale } from "./time.ts";
+import { Timescale, Timestamp } from "./time.ts";
 import type { Producer as TrackProducer } from "./track.ts";
 import { wireOf } from "./wire.ts";
 
@@ -115,9 +116,9 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 			if (!req) break;
 			// The draining session fetches the superseded group 0 below.
 			const track = req.accept({ timescale: Timescale.MILLI, maxAge: null });
-			if (req.name === "video" && armVideo) track.writeFrame(textFrame("one"));
-			if (req.name === "later") track.writeFrame(textFrame("from-draining"));
-			if (req.name === "audio") track.writeFrame(textFrame("from-replacement"));
+			if (req.name === "video" && armVideo) track.writeFrame(textFrame("one", Timestamp.fromMillis(0)));
+			if (req.name === "later") track.writeFrame(textFrame("from-draining", Timestamp.fromMillis(0)));
+			if (req.name === "audio") track.writeFrame(textFrame("from-replacement", Timestamp.fromMillis(0)));
 			served.push(track);
 		}
 	})();
@@ -170,7 +171,7 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 		expect(request.active.peek()).toBe(front);
 
 		for (const producer of served) {
-			if (producer.closed.peek() === undefined) producer.writeFrame(textFrame("two"));
+			if (producer.closed.peek() === undefined) producer.writeFrame(textFrame("two", Timestamp.fromMillis(1)));
 		}
 		expect(await video.readString()).toBe("two");
 
@@ -245,8 +246,8 @@ test("ietf: requests open on the draining session until the replacement wins", a
 });
 
 test("announcing and subscribing after GOAWAY still open streams", async () => {
-	for (const version of [IetfVersion.DRAFT_18, IetfVersion.DRAFT_22]) {
-		const goaway = new Once<Drain>();
+	for (const version of [IetfVersion.DRAFT_18, IetfVersion.DRAFT_22, IetfVersion.DRAFT_23]) {
+		const goaway = new Once<Received>();
 		goaway.set({ uri: "" });
 		let opened = false;
 		const session: Session = {
@@ -306,7 +307,7 @@ async function routeDeath(kind: "lite" | "ietf", after: boolean): Promise<void> 
 			const req = await wireOf(broadcast).requested();
 			if (!req) break;
 			const track = req.accept({ timescale: Timescale.MILLI });
-			track.writeFrame(textFrame("one"));
+			track.writeFrame(textFrame("one", Timestamp.fromMillis(0)));
 			served.push(track);
 		}
 	})();
@@ -350,7 +351,7 @@ async function routeDeath(kind: "lite" | "ietf", after: boolean): Promise<void> 
 
 		// The old publisher still serves the old instance, so its subscription carries on.
 		for (const producer of served) {
-			if (producer.closed.peek() === undefined) producer.writeFrame(textFrame("two"));
+			if (producer.closed.peek() === undefined) producer.writeFrame(textFrame("two", Timestamp.fromMillis(1)));
 		}
 		expect(await video.readString()).toBe("two");
 

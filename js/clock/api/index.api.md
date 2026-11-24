@@ -73,19 +73,6 @@ export class Interval {
 	tick(): Promise<Instant>;
 }
 
-export class Manual {
-	constructor();
-	static readonly WALL_START: Wall;
-	advance(duration: Duration): Promise<void>;
-	drive<T>(work: PromiseLike<T>): Promise<T>;
-	fire(): Promise<Instant>;
-	install(): Installed;
-	jump(duration: Duration): void;
-	now(): Instant;
-	stepWall(wall: Wall): void;
-	wall(): Wall;
-}
-
 export const MissedTickBehavior: {
 	readonly Burst: "burst";
 	readonly Delay: "delay";
@@ -93,6 +80,18 @@ export const MissedTickBehavior: {
 };
 
 export type MissedTickBehavior = typeof MissedTickBehavior[keyof typeof MissedTickBehavior];
+
+export class Unsettled<T> extends Error {
+	constructor(watchdog: Duration, last: T | undefined, cause?: unknown);
+	readonly last: T | undefined;
+}
+
+export interface Wait<T> {
+	every?: Duration;
+	read: (left: Duration) => Promise<T>;
+	ready: (state: T) => boolean;
+	watchdog: Duration;
+}
 
 export class Wall {
 	static readonly UNIX_EPOCH: Wall;
@@ -135,6 +134,8 @@ export function timeoutSignal(duration: Duration, options?: {
 	ref?: boolean;
 	signal?: AbortSignal;
 }): AbortSignal;
+
+export function until<T>(wait: Wait<T>): Promise<T | Unsettled<T>>;
 
 export function wall(): Wall;
 

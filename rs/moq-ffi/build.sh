@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Build and package moq-ffi native libraries for release.
-# Usage: ./build.sh [--target TARGET] [--version VERSION] [--output DIR] [--bindings-only [--library PATH]] [--no-default-features]
+# Usage: ./build.sh [--target TARGET] [--version VERSION] [--output DIR] [--bindings-only [--library PATH]]
 #
 # Examples:
 #   ./build.sh                                    # Build for host, detect version from Cargo.toml
@@ -25,7 +25,6 @@ OUTPUT_DIR="dist"
 BINDINGS_ONLY=false
 LIBRARY=""
 ARCHIVE=false
-NO_DEFAULT_FEATURES=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -56,12 +55,8 @@ while [[ $# -gt 0 ]]; do
             ARCHIVE=true
             shift
             ;;
-        --no-default-features)
-            NO_DEFAULT_FEATURES=true
-            shift
-            ;;
         -h | --help)
-            echo "Usage: $0 [--target TARGET] [--version VERSION] [--output DIR] [--bindings-only [--library PATH]] [--archive] [--no-default-features]"
+            echo "Usage: $0 [--target TARGET] [--version VERSION] [--output DIR] [--bindings-only [--library PATH]] [--archive]"
             exit 0
             ;;
         *)
@@ -76,12 +71,6 @@ if [[ -n "$LIBRARY" ]]; then
         echo "Error: --library requires --bindings-only and an existing library" >&2
         exit 1
     fi
-fi
-
-# A cdylib's file name carries no feature hash, so the minimal library gets a
-# target directory of its own rather than replacing the default build's.
-if [[ "$NO_DEFAULT_FEATURES" == true ]]; then
-    TARGET_BASE_DIR="$TARGET_BASE_DIR/minimal"
 fi
 
 # Get version from Cargo.toml if not specified
@@ -120,11 +109,8 @@ build_target() {
     local target="$1"
     # The shared default build (.cargo/config.toml): releases carry the OpenH264
     # software fallback, the only encoder on API-24 Android and the Apple
-    # simulators. It is a no-op under --no-default-features.
+    # simulators.
     local cargo_args=(build-ffi --release --message-format=json-render-diagnostics --target-dir "$TARGET_BASE_DIR" --manifest-path "$WORKSPACE_DIR/Cargo.toml")
-    if [[ "$NO_DEFAULT_FEATURES" == true ]]; then
-        cargo_args+=(--no-default-features)
-    fi
     echo "Building moq-ffi for $target..."
 
     # Ensure the target's std is installed for the pinned toolchain Cargo
@@ -181,7 +167,7 @@ generate_bindings() {
 
     # Go uses a separate, third-party bindgen. Upstream has no uniffi 0.32
     # release yet, so install the compatible generator fork with:
-    # cargo install --locked uniffi-bindgen-go --git https://github.com/kixelated/uniffi-bindgen-go --rev v0.10.0-kixelated.2+v0.32.0
+    # cargo install --locked uniffi-bindgen-go --git https://github.com/kixelated/uniffi-bindgen-go --rev v0.10.0-kixelated.3+v0.32.0
     if command -v uniffi-bindgen-go >/dev/null 2>&1; then
         echo "  Generating go bindings..."
         uniffi-bindgen-go --library "$lib_path" --out-dir "$OUTPUT_DIR/bindings/go"

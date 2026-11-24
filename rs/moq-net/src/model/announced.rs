@@ -1,6 +1,5 @@
 //! The paths announced under a scope, each present or absent.
 
-use std::collections::HashSet;
 use std::task::Poll;
 
 use super::origin_impl::{Announce, RouteEvent, RouteKind, Routes};
@@ -8,87 +7,38 @@ use crate::{Error, Path};
 
 /// What an announcement listing reports for a path.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum AnnounceEvent {
 	/// A route now covers the path, which was absent. It may arrive unavailable; see
 	/// [`RouteInfo::available`](crate::origin::RouteInfo::available).
 	Present(Announce),
-	/// The present path's route lost every usable path to its origin but may recover
-	/// one, so the path stays present while requests for it may fail.
-	Unavailable(Announce),
-	/// The present path's route recovered a usable path: request it again.
-	Available(Announce),
-	/// The origin withdrew the path: no route covers it any more. Carries its last
-	/// advertised route.
+	/// No route covers the path any more, whether its origin withdrew it or this side let
+	/// go of it. Carries its last advertised route.
 	Absent(Announce),
-	/// This origin let go of the path, and no route covers it any more: the session it
-	/// arrived on closed, or the network lost every path to it. Its origin may still
-	/// serve it. Carries its last advertised route.
-	Offline(Announce),
 }
 
 /// The paths announced in a scope, each reported as it becomes present or absent.
 ///
-/// A path that another instance takes over stays present, and a route's metadata
-/// changing is not reported, except its availability: hold a
+/// A path that another instance takes over stays present, and a route's metadata,
+/// availability included, changing is not reported: hold a
 /// [`follow`](crate::origin::Consumer::follow) to see the broadcast change. Created by
 /// [`Consumer::announced`](crate::origin::Consumer::announced). Drop to unregister.
 pub struct AnnounceConsumer {
 	routes: Routes,
-	/// The present paths last reported unavailable, bounded by the present set.
-	unavailable: HashSet<Path>,
 }
 
 impl AnnounceConsumer {
 	pub(super) fn new(routes: Routes) -> Self {
-		Self {
-			routes,
-			unavailable: HashSet::new(),
-		}
+		Self { routes }
 	}
 
 	/// What a route change means for the listing, if anything.
-	fn list(&mut self, event: RouteEvent) -> Option<AnnounceEvent> {
-		match event {
-			RouteEvent {
-				kind: RouteKind::Start,
-				announce,
-			} => {
-				if !announce.route.available() {
-					self.unavailable.insert(announce.prefix.clone());
-				}
-				Some(AnnounceEvent::Present(announce))
-			}
-			RouteEvent {
-				kind: RouteKind::Update | RouteKind::Restart,
-				announce,
-			} => {
-				let was = !self.unavailable.contains(&announce.prefix);
-				match (was, announce.route.available()) {
-					(true, false) => {
-						self.unavailable.insert(announce.prefix.clone());
-						Some(AnnounceEvent::Unavailable(announce))
-					}
-					(false, true) => {
-						self.unavailable.remove(&announce.prefix);
-						Some(AnnounceEvent::Available(announce))
-					}
-					_ => None,
-				}
-			}
-			RouteEvent {
-				kind: RouteKind::End,
-				announce,
-			} => {
-				self.unavailable.remove(&announce.prefix);
-				Some(AnnounceEvent::Absent(announce))
-			}
-			RouteEvent {
-				kind: RouteKind::Offline,
-				announce,
-			} => {
-				self.unavailable.remove(&announce.prefix);
-				Some(AnnounceEvent::Offline(announce))
-			}
+	fn list(event: RouteEvent) -> Option<AnnounceEvent> {
+		let RouteEvent { kind, announce } = event;
+		match kind {
+			RouteKind::Start => Some(AnnounceEvent::Present(announce)),
+			RouteKind::Update | RouteKind::Restart => None,
+			RouteKind::End | RouteKind::Offline => Some(AnnounceEvent::Absent(announce)),
 		}
 	}
 
@@ -109,7 +59,7 @@ impl AnnounceConsumer {
 			let Some(event) = std::task::ready!(self.routes.poll_next(waiter)) else {
 				return Poll::Ready(None);
 			};
-			if let Some(event) = self.list(event) {
+			if let Some(event) = Self::list(event) {
 				return Poll::Ready(Some(event));
 			}
 		}
@@ -122,7 +72,7 @@ impl AnnounceConsumer {
 	pub fn try_next(&mut self) -> Option<AnnounceEvent> {
 		loop {
 			let event = self.routes.try_next()?;
-			if let Some(event) = self.list(event) {
+			if let Some(event) = Self::list(event) {
 				return Some(event);
 			}
 		}
@@ -168,7 +118,7 @@ impl futures::Stream for AnnounceConsumer {
 			else {
 				return Poll::Ready(None);
 			};
-			if let Some(event) = this.list(event) {
+			if let Some(event) = Self::list(event) {
 				return Poll::Ready(Some(event));
 			}
 		}
@@ -195,9 +145,6 @@ mod tests {
 		match event {
 			AnnounceEvent::Present(announce) => format!("present {}", announce.prefix),
 			AnnounceEvent::Absent(announce) => format!("absent {}", announce.prefix),
-			AnnounceEvent::Offline(announce) => format!("offline {}", announce.prefix),
-			AnnounceEvent::Available(announce) => format!("available {}", announce.prefix),
-			AnnounceEvent::Unavailable(announce) => format!("unavailable {}", announce.prefix),
 		}
 	}
 
@@ -255,10 +202,10 @@ mod tests {
 		assert_eq!(listed(&mut announced).await, "absent live");
 	}
 
-	/// A held route keeps its path present, reported unavailable and available as it flips; a
-	/// session losing a route takes its path offline, while a peer's withdrawal ends it.
+	/// A held route keeps its path present and quiet as its availability flips; a session
+	/// letting go of a route and a peer withdrawing it both leave the path absent.
 	#[kio::test]
-	async fn availability_flips_and_offline_is_not_absent() {
+	async fn availability_is_quiet_and_offline_is_absent() {
 		let origin = Hop::new(1).unwrap().produce();
 		let mut announced = origin.consume().announced();
 		let instance = Instance::random();
@@ -271,11 +218,11 @@ mod tests {
 		lost.update(held.clone().with_cost(Cost::new(3))).unwrap();
 		quiet(&mut announced).await;
 		lost.update(held.clone().with_available(true)).unwrap();
-		assert_eq!(listed(&mut announced).await, "available lost");
+		quiet(&mut announced).await;
 		lost.update(held.clone()).unwrap();
-		assert_eq!(listed(&mut announced).await, "unavailable lost");
+		quiet(&mut announced).await;
 		drop(lost);
-		assert_eq!(listed(&mut announced).await, "offline lost");
+		assert_eq!(listed(&mut announced).await, "absent lost");
 
 		let ended = origin.forward("ended", held.with_available(true)).unwrap();
 		assert_eq!(listed(&mut announced).await, "present ended");

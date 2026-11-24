@@ -1,19 +1,20 @@
 import { ProtocolViolation } from "../error.ts";
-import { type Cost, type Hop, HopSchema, MAX_HOPS, UNKNOWN_HOP, wireHop } from "../hop.ts";
+import { type Cost, type Hop, MAX_HOPS, toHop, UNKNOWN_HOP, wireHop } from "../hop.ts";
 import type * as Instance from "../instance.ts";
 import * as Path from "../path.ts";
-import type { Reader, Writer } from "../stream.ts";
+import { encodeVarint, type Reader, type Writer } from "../stream.ts";
 import { SEGMENT_BYTES } from "../util/limits.ts";
 import { decodeRoute, encodeRoute } from "./instance.ts";
 import * as Message from "./message.ts";
+import { MAX_MESSAGE_SIZE } from "./message.ts";
+import { fromWire, toWire } from "./priority.ts";
 import {
 	hasAnnounceCompression,
 	hasAnnounceId,
 	hasAnnounceOk,
-	hasAnnounceRestart,
 	hasExcludeHop,
-	hasHidden,
 	hasRouteCost,
+	hasRoutes,
 	hasSynced,
 	Version,
 } from "./version.ts";
@@ -30,66 +31,125 @@ const STATUS_UPDATE = 2;
 const ANNOUNCE_START = 0;
 const ANNOUNCE_END = 1;
 const ANNOUNCE_UPDATE = 2;
-// lite-07: another publisher instance replaces the advertisement.
-const ANNOUNCE_RESTART = 3;
+// lite-07: what only two nodes that both declared a Node ID exchange. An endpoint declares none,
+// so receiving one is a protocol violation.
+const ANNOUNCE_FLOOR = 3;
 const SYNCED = 4;
+// lite-07: an edit of the prefixes the sender wants, and the marker answering one.
+const ANNOUNCE_REQUEST = 5;
+const ANNOUNCE_OK = 6;
+const ROUTE = 7;
+const ROUTE_END = 8;
+const DEAD = 9;
+const DRAIN = 10;
 
-/**
- * Lite-07: copy `keep` path segments (from the head) or hops (from the tail) of the
- * live announcement `distance` back from the stream's next Announce ID, where 1 is the
- * latest ANNOUNCE_START. Resolved by {@link AnnounceHistory}.
- */
+/** Lite-07: copy the first `keep` path segments of the live announcement `distance` back from
+ * the stream's next Announce ID, where 1 is the latest ANNOUNCE_START. Resolved by
+ * {@link AnnounceHistory}. */
 export type Base = { distance: bigint; keep: number };
 
+/** The most nodes a lite-07 claim's chain may name: one that would reach 32 is never taken. */
+export const CHAIN_MAX = 31;
+
+// Claim flags.
+const UNAVAILABLE = 0x1;
+const DRAINING = 0x2;
+const MARKED = 0x4;
+
 /**
- * An announcement on the Announce Stream, advertising or retracting a broadcast.
+ * What a lite-07 claim says beside its path and instance. Mirrors `route::relay::Claim` in
+ * rs/moq-net.
+ */
+export interface Claim {
+	/** Which incarnation of the instance this is. */
+	epoch: bigint;
+	/** The sender's cost to the claim's publisher. */
+	cost: Cost;
+	/** How many segments broader the claim is than the path it is presented at. */
+	above: bigint;
+	/** No route reaches the claim from the node that told it: requests for it fail until one does. */
+	unavailable: boolean;
+	/** A node on the way to its publisher sent GOAWAY. */
+	draining: boolean;
+	/** A marked session lies on the way to its publisher, so a relay never tells it over another. */
+	marked: boolean;
+	/** The lowest link priority on the way to its publisher. */
+	priority: number;
+	/** The Relay of each relay the claim entered or left a routing domain by, oldest first. */
+	chain: bigint[];
+}
+
+/** A claim this origin publishes itself: no cost, at the top priority, announced again by no one. */
+export function ownClaim(epoch: bigint, above = 0n): Claim {
+	return { epoch, cost: 0n, above, unavailable: false, draining: false, marked: false, priority: 127, chain: [] };
+}
+
+/** Whether two claims say the same. */
+export function claimsEqual(a: Claim, b: Claim): boolean {
+	return (
+		a.epoch === b.epoch &&
+		a.cost === b.cost &&
+		a.above === b.above &&
+		a.unavailable === b.unavailable &&
+		a.draining === b.draining &&
+		a.marked === b.marked &&
+		a.priority === b.priority &&
+		a.chain.length === b.chain.length &&
+		a.chain.every((node, i) => node === b.chain[i])
+	);
+}
+
+/**
+ * A message on the Announce Stream.
  *
- * On lite-06+ these are independently-typed messages (`ANNOUNCE_START`, `ANNOUNCE_END`,
- * `ANNOUNCE_UPDATE`, and on lite-07 `ANNOUNCE_RESTART`), each framed as `Type | Length | Body`
- * like the subscribe stream's responses. Each `active` (ANNOUNCE_START) implicitly assigns the
- * next announce id (a per-stream ordinal starting at 0); the others reference that id instead of repeating the path. Older versions send
+ * Lite-07 carries everything one side says about its claims on its one unidirectional stream:
+ * the edits of the prefixes it wants (`request`), and the markers (`ok`, `synced`) and claims
+ * answering the prefixes its peer wants. Two nodes that both declared a Node ID also exchange
+ * routes there, which an endpoint never sends and refuses to receive.
+ *
+ * On lite-06+ these are independently-typed messages, each framed as `Type | Length | Body`
+ * like the subscribe stream's responses. Each ANNOUNCE_START implicitly assigns the next
+ * announce id (a per-stream ordinal starting at 0); the others reference it. Older versions send
  * a single ANNOUNCE_BROADCAST message that retracts by path (`ended`).
  */
 export type AnnounceBroadcast =
-	/** A broadcast is now available, carrying the path suffix, the hop chain, and
-	 * (lite-06+) the route cost. An absent cost encodes as zero; it decodes as
-	 * `undefined` on a wire with no room for one. On lite-07, `suffix` follows the
-	 * segments `pathBase` copies and `hops` precede the ones `hopBase` copies. The instance
-	 * and epoch (lite-07+) change only with a `restart`. */
-	| {
-			status: "active";
-			suffix: Path.Valid;
-			instance?: Instance.Valid;
-			epoch?: bigint;
-			hops: Hop[];
-			cost?: Cost;
-			pathBase?: Base;
-			hopBase?: Base;
-	  }
+	/** Before lite-07: a broadcast is now available, carrying the path suffix relative to the
+	 * requested prefix, the hop chain, and (lite-06) the cost. An absent cost encodes as zero; it
+	 * decodes as `undefined` on a wire with no room for one. */
+	| { status: "active"; suffix: Path.Valid; hops?: Hop[]; cost?: Cost }
 	/** Pre-lite-06: a broadcast is no longer available, retracted by path. */
 	| { status: "ended"; suffix: Path.Valid }
-	/** Lite06+: a broadcast is no longer available, retracted by announce id.
-	 * The id is retired; referencing it again is a protocol violation. */
-	| { status: "endedId"; id: bigint }
-	/** Lite06+: atomically replace the metadata of the announcement with this id (e.g. a
-	 * new hop chain after a relay failover, or a route whose cost moved). The id stays live. */
-	| { status: "update"; id: bigint; hops: Hop[]; cost?: Cost; hopBase?: Base }
-	/** Lite07+: the announcement with this id now serves the instance and epoch given. Another
-	 * instance is another stream, so what the receiver resolved under its prefix is stale; a
-	 * higher epoch of the same one continues it. The id stays live. */
-	| {
-			status: "restart";
-			id: bigint;
-			instance?: Instance.Valid;
-			epoch?: bigint;
-			hops: Hop[];
-			cost?: Cost;
-			hopBase?: Base;
-	  }
-	/** An unknown lite-06+ announce type, skipped by length. Does not assign an id. */
+	/** Lite06+: the claim with this announce id is gone, and the id retired; referencing it again
+	 * is a protocol violation. On lite-07 its publisher withdrew it unless `lost`, when the
+	 * sender only lost its way to it. */
+	| { status: "endedId"; id: bigint; lost?: boolean }
+	/** Lite06 only: atomically replace the hop chain and cost of the announcement with this id.
+	 * The id stays live. */
+	| { status: "update"; id: bigint; hops?: Hop[]; cost?: Cost }
+	/** Lite07+ ANNOUNCE_START: a claim of the broadcast at `suffix`, relative to the session,
+	 * serving `instance`, which assigns it the next announce id. */
+	| { status: "start"; suffix: Path.Valid; pathBase?: Base; instance: Instance.Valid; claim: Claim }
+	/** Lite07+ ANNOUNCE_UPDATE: the claim with this id now stands as `claim`. */
+	| { status: "change"; id: bigint; claim: Claim }
+	/** An unknown lite-06 announce type, skipped by length. Does not assign an id. lite-07 rejects it instead. */
 	| { status: "skipped" }
-	/** Lite07+: the initial set has been delivered. */
-	| { status: "synced" };
+	/** Lite07+ SYNCED: the initial set of the prefix the receiver assigned this Prefix ID has been
+	 * delivered. */
+	| { status: "synced"; prefix: bigint }
+	/** Lite07+ ANNOUNCE_REQUEST: the sender edits the prefixes it wants claims for, removing those
+	 * with the Prefix IDs in `remove` and then adding each of `add`, which assigns it the next
+	 * Prefix ID. With `more`, the edit continues in the next message, and takes effect whole with
+	 * its last (see `requestParts`). */
+	| { status: "request"; more: boolean; remove: bigint[]; add: Add[] }
+	/** Lite07+ ANNOUNCE_OK: the receiver's oldest unanswered edit takes effect here. */
+	| { status: "ok" };
+
+/** A prefix an ANNOUNCE_REQUEST adds, relative to the session, and whether it also wants the
+ * hidden claims beneath it. */
+export interface Add {
+	prefix: Path.Valid;
+	hidden: boolean;
+}
 
 // Both wire rules on a hop chain, applied to what we send and to what we receive: a
 // chain that revisits a hop looped, so neither forwarding it nor subscribing through it
@@ -113,7 +173,7 @@ function checkHops(hops: Hop[]) {
 	}
 }
 
-async function encodeHops(w: Writer, version: Version, hops: Hop[]) {
+async function encodeHops(w: Writer, version: Version, hops: Hop[] = []) {
 	checkHops(hops);
 	switch (version) {
 		case Version.DRAFT_01:
@@ -150,7 +210,7 @@ async function decodeHops(r: Reader, version: Version): Promise<Hop[]> {
 			if (count > MAX_HOPS) throw new Error(`hop count ${count} exceeds maximum ${MAX_HOPS}`);
 			const hops: Hop[] = [];
 			for (let i = 0; i < count; i++) {
-				hops.push(HopSchema.parse(await r.u62()));
+				hops.push(toHop(await r.u62()));
 			}
 			checkHops(hops);
 			return hops;
@@ -158,51 +218,24 @@ async function decodeHops(r: Reader, version: Version): Promise<Hop[]> {
 	}
 }
 
-// Lite-07 carries a base around a path and a hop list. A distance of 0 names
-// nothing, and a keep without a base is a violation. Other versions have no room for
-// a base at all.
-function checkBase(version: Version, base: Base | undefined) {
-	if (base && !hasAnnounceCompression(version)) {
-		throw new Error("announce compression not supported for this version");
-	}
-}
-
-function toBase(distance: bigint, keep: number): Base | undefined {
-	if (distance !== 0n) return { distance, keep };
-	if (keep !== 0) throw new ProtocolViolation("announce keep without a base");
-	return undefined;
-}
-
 async function encodePath(w: Writer, version: Version, suffix: Path.Valid, base: Base | undefined) {
-	checkBase(version, base);
 	if (hasAnnounceCompression(version)) {
 		await w.u62(base?.distance ?? 0n);
 		await w.u53(base?.keep ?? 0);
+	} else if (base) {
+		throw new Error("announce compression not supported for this version");
 	}
 	await w.string(Path.encode(suffix));
 }
 
 async function decodePath(r: Reader, version: Version): Promise<{ suffix: Path.Valid; pathBase?: Base }> {
 	if (!hasAnnounceCompression(version)) return { suffix: Path.decode(await r.string()) };
-	const pathBase = toBase(await r.u62(), await r.u53());
-	const suffix = Path.decode(await r.string());
-	return pathBase ? { suffix, pathBase } : { suffix };
-}
-
-async function encodeHopsBlock(w: Writer, version: Version, hops: Hop[], base: Base | undefined) {
-	checkBase(version, base);
-	if (!hasAnnounceCompression(version)) return encodeHops(w, version, hops);
-	await w.u62(base?.distance ?? 0n);
-	await encodeHops(w, version, hops);
-	await w.u53(base?.keep ?? 0);
-}
-
-async function decodeHopsBlock(r: Reader, version: Version): Promise<{ hops: Hop[]; hopBase?: Base }> {
-	if (!hasAnnounceCompression(version)) return { hops: await decodeHops(r, version) };
 	const distance = await r.u62();
-	const hops = await decodeHops(r, version);
-	const hopBase = toBase(distance, await r.u53());
-	return hopBase ? { hops, hopBase } : { hops };
+	const keep = await r.u53();
+	// A distance of 0 names nothing, so a keep without a base is a violation.
+	if (distance === 0n && keep !== 0) throw new ProtocolViolation("announce keep without a base");
+	const suffix = Path.decode(await r.string());
+	return distance === 0n ? { suffix } : { suffix, pathBase: { distance, keep } };
 }
 
 // Lite07 carries one static cost. Lite06 retains its second field at the ceiling;
@@ -224,30 +257,184 @@ async function decodeRouteCost(r: Reader, version: Version): Promise<Cost | unde
 	return cost;
 }
 
+/** Encode what a lite-07 claim says after its epoch: cost, above, flags, priority, and chain. */
+async function encodeClaim(w: Writer, claim: Claim) {
+	if (claim.chain.length > CHAIN_MAX || claim.chain.some((node) => node === 0n))
+		throw new Error("no node sends that chain");
+	await w.u62(saturate(claim.cost));
+	await w.u62(claim.above);
+	await w.u8((claim.unavailable ? UNAVAILABLE : 0) | (claim.draining ? DRAINING : 0) | (claim.marked ? MARKED : 0));
+	await w.u8(toWire(claim.priority));
+	await w.u53(claim.chain.length);
+	for (const node of claim.chain) await w.u62(node);
+}
+
+/** Decode a lite-07 claim of `epoch`. A chain past the limit or naming Node ID 0, and a flag this
+ * version does not define, fail the stream: no sender builds one. Mirrors rs/moq-net. */
+async function decodeClaim(r: Reader, epoch: bigint): Promise<Claim> {
+	// Costs saturate at 2^62-1 on every version, so a larger one reads as the ceiling.
+	const cost = saturate(await r.u62());
+	const above = await r.u62();
+	const flags = await r.u8();
+	if (flags & ~(UNAVAILABLE | DRAINING | MARKED)) throw new ProtocolViolation(`unknown claim flags ${flags}`);
+	const priority = fromWire(await r.u8());
+	const count = await r.u62();
+	if (count > BigInt(CHAIN_MAX)) throw new ProtocolViolation(`claim chain of ${count} nodes`);
+	const chain: bigint[] = [];
+	for (let i = 0n; i < count; i++) {
+		const node = await r.u62();
+		if (node === 0n) throw new ProtocolViolation("Node ID 0 names no node");
+		chain.push(node);
+	}
+	return {
+		epoch,
+		cost,
+		above,
+		unavailable: (flags & UNAVAILABLE) !== 0,
+		draining: (flags & DRAINING) !== 0,
+		marked: (flags & MARKED) !== 0,
+		priority,
+		chain,
+	};
+}
+
+/** Encode an ANNOUNCE_REQUEST body: `More`, the Prefix IDs to remove, then the prefixes to add,
+ * each with its `Hidden`. */
+async function encodeRequest(w: Writer, more: boolean, remove: bigint[], add: Add[]) {
+	await w.bool(more);
+	await w.u53(remove.length);
+	for (const id of remove) await w.u62(id);
+	await w.u53(add.length);
+	for (const { prefix, hidden } of add) {
+		await w.string(Path.encode(prefix));
+		await w.bool(hidden);
+	}
+}
+
+/** Decode an ANNOUNCE_REQUEST body. The prefixes are the sender's own, so one that is no path
+ * fails the message rather than being refused. Each entry takes bytes, so the body bounds both
+ * counts before either loop runs out. */
+async function decodeRequest(r: Reader): Promise<AnnounceBroadcast> {
+	const more = await r.bool();
+	const remove: bigint[] = [];
+	for (let left = await r.u62(); left > 0n; left--) remove.push(await r.u62());
+	const add: Add[] = [];
+	for (let left = await r.u62(); left > 0n; left--) {
+		add.push({ prefix: Path.decode(await r.string()), hidden: await r.bool() });
+	}
+	return { status: "request", more, remove, add };
+}
+
+/** The bytes one Add of `prefix` takes: its length, its bytes, and its flag. */
+function addSize(prefix: Path.Valid, version: Version): number {
+	const length = new TextEncoder().encode(Path.encode(prefix)).byteLength;
+	return encodeVarint(length, version).byteLength + length + 1;
+}
+
+/** The bytes an ANNOUNCE_REQUEST body takes with `removes` Prefix IDs totalling `ids` bytes and
+ * `adds` Adds totalling `added` bytes. */
+function requestSize(removes: number, ids: number, adds: number, added: number, version: Version): number {
+	return 1 + encodeVarint(removes, version).byteLength + encodeVarint(adds, version).byteLength + ids + added;
+}
+
+/** Whether the prefixes `set` fit the Adds of one ANNOUNCE_REQUEST, as a subscriber's whole set
+ * must. */
+export function requestFits(set: Iterable<Path.Valid>, version: Version): boolean {
+	let adds = 0;
+	let added = 0;
+	for (const prefix of set) {
+		adds++;
+		added += addSize(prefix, version);
+	}
+	return requestSize(0, 0, adds, added, version) <= MAX_MESSAGE_SIZE;
+}
+
+/**
+ * The ANNOUNCE_REQUESTs of one edit removing the Prefix IDs `remove` and adding `add`: as many as
+ * it takes for each to fit one message, every one but the last with `more`. The receiver applies
+ * them together at the last, so how they split changes nothing. Mirrors `request_parts` in
+ * rs/moq-net.
+ *
+ * @internal
+ */
+export function requestParts(
+	remove: bigint[],
+	add: Add[],
+	version: Version,
+): { status: "request"; more: boolean; remove: bigint[]; add: Add[] }[] {
+	const parts: { remove: bigint[]; add: Add[] }[] = [];
+	let part: { remove: bigint[]; add: Add[] } = { remove: [], add: [] };
+	let ids = 0;
+	let added = 0;
+	const fits = (id: number, adding: number) =>
+		requestSize(
+			part.remove.length + (id > 0 ? 1 : 0),
+			ids + id,
+			part.add.length + (adding > 0 ? 1 : 0),
+			added + adding,
+			version,
+		) <= MAX_MESSAGE_SIZE;
+	const next = () => {
+		parts.push(part);
+		part = { remove: [], add: [] };
+		ids = 0;
+		added = 0;
+	};
+	for (const id of remove) {
+		const bytes = encodeVarint(id, version).byteLength;
+		if (!fits(bytes, 0)) next();
+		part.remove.push(id);
+		ids += bytes;
+	}
+	for (const one of add) {
+		const bytes = addSize(one.prefix, version);
+		if (!fits(0, bytes)) next();
+		part.add.push(one);
+		added += bytes;
+	}
+	parts.push(part);
+	return parts.map((part, i) => ({ status: "request", more: i + 1 < parts.length, ...part }));
+}
+
 // lite-06 message body (no discriminator; the type is carried outside the length prefix).
 async function encodeAnnounce06Body(w: Writer, msg: AnnounceBroadcast, version: Version) {
 	switch (msg.status) {
 		case "active":
-			await encodePath(w, version, msg.suffix, msg.pathBase);
-			await encodeRoute(w, version, msg.instance, msg.epoch);
-			await encodeHopsBlock(w, version, msg.hops, msg.hopBase);
+			if (hasRoutes(version)) throw new Error("a lite-07 claim names its instance");
+			await encodePath(w, version, msg.suffix, undefined);
+			await encodeRoute(w, version, undefined, undefined);
+			await encodeHops(w, version, msg.hops);
 			await encodeRouteCost(w, version, msg.cost);
 			break;
 		case "endedId":
 			await w.u62(msg.id);
+			if (hasRoutes(version)) await w.bool(msg.lost ?? false);
 			break;
 		case "update":
+			if (hasRoutes(version)) throw new Error("a lite-07 update carries its claim");
 			await w.u62(msg.id);
-			await encodeHopsBlock(w, version, msg.hops, msg.hopBase);
+			await encodeHops(w, version, msg.hops);
 			await encodeRouteCost(w, version, msg.cost);
 			break;
-		case "restart":
+		case "start":
+			if (!hasRoutes(version)) throw new Error("claims not supported for this version");
+			await encodePath(w, version, msg.suffix, msg.pathBase);
+			await encodeRoute(w, version, msg.instance, msg.claim.epoch);
+			await encodeClaim(w, msg.claim);
+			break;
+		case "change":
+			if (!hasRoutes(version)) throw new Error("claims not supported for this version");
 			await w.u62(msg.id);
-			await encodeRoute(w, version, msg.instance, msg.epoch);
-			await encodeHopsBlock(w, version, msg.hops, msg.hopBase);
-			await encodeRouteCost(w, version, msg.cost);
+			await w.u62(msg.claim.epoch);
+			await encodeClaim(w, msg.claim);
 			break;
 		case "synced":
+			await w.u62(msg.prefix);
+			break;
+		case "request":
+			await encodeRequest(w, msg.more, msg.remove, msg.add);
+			break;
+		case "ok":
 			break;
 		case "ended":
 			// The pre-lite-06 path-form retraction has no place on lite-06.
@@ -261,18 +448,22 @@ async function encodeAnnounce06Body(w: Writer, msg: AnnounceBroadcast, version: 
 function announce06Type(msg: AnnounceBroadcast, version: Version): number {
 	switch (msg.status) {
 		case "active":
+		case "start":
 			return ANNOUNCE_START;
 		case "endedId":
 			return ANNOUNCE_END;
 		case "update":
+		case "change":
 			return ANNOUNCE_UPDATE;
-		case "restart":
-			// Older versions send an end and a start instead.
-			if (!hasAnnounceRestart(version)) throw new Error("announce restart not supported for this version");
-			return ANNOUNCE_RESTART;
 		case "synced":
 			if (!hasSynced(version)) throw new Error("synced not supported for this version");
 			return SYNCED;
+		case "request":
+			if (!hasRoutes(version)) throw new Error("announce edits not supported for this version");
+			return ANNOUNCE_REQUEST;
+		case "ok":
+			if (!hasRoutes(version)) throw new Error("announce edits not supported for this version");
+			return ANNOUNCE_OK;
 		case "ended":
 			throw new Error("ended-by-path not supported for this version");
 		case "skipped":
@@ -285,29 +476,46 @@ async function decodeAnnounce06Body(r: Reader, typ: number, version: Version): P
 		case ANNOUNCE_START: {
 			const path = await decodePath(r, version);
 			const served = await decodeRoute(r, version);
-			const hops = await decodeHopsBlock(r, version);
-			return { status: "active", ...path, ...served, ...hops, cost: await decodeRouteCost(r, version) };
+			if (hasRoutes(version)) {
+				// Every lite-07 claim names its instance.
+				if (served.instance === undefined) throw new ProtocolViolation("a claim without an instance");
+				const claim = await decodeClaim(r, served.epoch ?? 0n);
+				return { status: "start", ...path, instance: served.instance, claim };
+			}
+			const hops = await decodeHops(r, version);
+			return { status: "active", suffix: path.suffix, hops, cost: await decodeRouteCost(r, version) };
+		}
+		case ANNOUNCE_END: {
+			const id = await r.u62();
+			return hasRoutes(version) ? { status: "endedId", id, lost: await r.bool() } : { status: "endedId", id };
+		}
+		case ANNOUNCE_UPDATE: {
+			const id = await r.u62();
+			if (hasRoutes(version)) return { status: "change", id, claim: await decodeClaim(r, await r.u62()) };
+			const hops = await decodeHops(r, version);
+			return { status: "update", id, hops, cost: await decodeRouteCost(r, version) };
 		}
 		case SYNCED:
 			if (!hasSynced(version)) break;
-			return { status: "synced" };
-		case ANNOUNCE_END:
-			return { status: "endedId", id: await r.u62() };
-		case ANNOUNCE_UPDATE: {
-			const id = await r.u62();
-			const hops = await decodeHopsBlock(r, version);
-			return { status: "update", id, ...hops, cost: await decodeRouteCost(r, version) };
-		}
-		case ANNOUNCE_RESTART: {
-			// Unknown before lite-07: skipped below like any other.
-			if (!hasAnnounceRestart(version)) break;
-			const id = await r.u62();
-			const served = await decodeRoute(r, version);
-			const hops = await decodeHopsBlock(r, version);
-			return { status: "restart", id, ...served, ...hops, cost: await decodeRouteCost(r, version) };
-		}
+			return { status: "synced", prefix: await r.u62() };
+		case ANNOUNCE_REQUEST:
+			if (!hasRoutes(version)) break;
+			return decodeRequest(r);
+		case ANNOUNCE_OK:
+			if (!hasRoutes(version)) break;
+			return { status: "ok" };
+		case ANNOUNCE_FLOOR:
+		case ROUTE:
+		case ROUTE_END:
+		case DEAD:
+		case DRAIN:
+			if (!hasRoutes(version)) break;
+			// Only two nodes that both declared a Node ID exchange routes, and this one declares none.
+			throw new ProtocolViolation(`route message ${typ} to a node that declared no Node ID`);
 	}
-	// Skip the length-prefixed body so an earlier Lite06 build negotiating
+	// lite-07 defines every type its streams carry, so an unknown one is a violation.
+	if (hasRoutes(version)) throw new ProtocolViolation(`unknown announce message type ${typ}`);
+	// Lite06 skips the length-prefixed body so a build that predates a type negotiating
 	// the same ALPN does not kill the announce stream.
 	await r.readAll();
 	return { status: "skipped" };
@@ -317,7 +525,6 @@ async function decodeAnnounce06Body(r: Reader, typ: number, version: Version): P
 async function encodeLegacyBody(w: Writer, msg: AnnounceBroadcast, version: Version) {
 	switch (msg.status) {
 		case "active":
-			checkBase(version, msg.pathBase ?? msg.hopBase);
 			await w.u8(STATUS_ACTIVE);
 			await w.string(Path.encode(msg.suffix));
 			await encodeHops(w, version, msg.hops);
@@ -327,11 +534,7 @@ async function encodeLegacyBody(w: Writer, msg: AnnounceBroadcast, version: Vers
 			await w.string(Path.encode(msg.suffix));
 			await encodeHops(w, version, []);
 			break;
-		case "synced":
-		case "endedId":
-		case "update":
-		case "restart":
-		case "skipped":
+		default:
 			// The id-referencing forms only exist on lite-06+.
 			throw new Error("announce ids not supported for this version");
 	}
@@ -354,8 +557,7 @@ async function decodeLegacyBody(r: Reader, version: Version): Promise<AnnounceBr
 export async function encodeAnnounceBroadcast(w: Writer, msg: AnnounceBroadcast, version: Version): Promise<void> {
 	if (hasAnnounceId(version)) {
 		// lite-06+: outer type discriminator, then a size-prefixed body (like the subscribe stream).
-		await w.u53(announce06Type(msg, version));
-		return Message.encode(w, (w) => encodeAnnounce06Body(w, msg, version));
+		return Message.encode(w, (w) => encodeAnnounce06Body(w, msg, version), { id: announce06Type(msg, version) });
 	}
 	return Message.encode(w, (w) => encodeLegacyBody(w, msg, version));
 }
@@ -382,76 +584,69 @@ export async function decodeAnnounceBroadcastMaybe(
 	return Message.decodeMaybe(r, (r) => decodeLegacyBody(r, version));
 }
 
-type Advertised = { suffix: Path.Valid; hops: Hop[] };
-
 /**
- * The live announcements on one lite-06+ announce stream, by Announce ID: what
- * ANNOUNCE_END and ANNOUNCE_UPDATE reference, and what a lite-07 base copies from.
- * Every violation throws {@link ProtocolViolation}.
+ * The live announcements on one lite-06+ announce stream, by Announce ID: what ANNOUNCE_END
+ * and ANNOUNCE_UPDATE reference, and what a lite-07 base copies from. Every
+ * violation throws {@link ProtocolViolation}.
  */
 export class AnnounceHistory {
 	#next = 0n;
-	#live = new Map<bigint, Advertised>();
+	#live = new Map<bigint, Path.Valid>();
+	// The live ids whose path was refused, which a base names only to be refused too.
+	#refused = new Set<bigint>();
 
-	#base(base: Base): Advertised {
-		const live = this.#live.get(this.#next - base.distance);
-		if (!live) throw new ProtocolViolation(`announce base ${base.distance} is not live`);
+	/** The Announce ID the next ANNOUNCE_START is assigned. */
+	get next(): bigint {
+		return this.#next;
+	}
+
+	/** An ANNOUNCE_START: assign it the next id, and resolve its suffix, or undefined when that
+	 * suffix, or the base it names, is no path this node can hold. */
+	start(msg: { suffix: Path.Valid; pathBase?: Base } | undefined): Path.Valid | undefined {
+		const suffix = msg && this.#resolve(msg);
+		const id = this.#next++;
+		if (suffix === undefined) this.#refused.add(id);
+		else this.#live.set(id, suffix);
+		return suffix;
+	}
+
+	#resolve(msg: { suffix: Path.Valid; pathBase?: Base }): Path.Valid | undefined {
+		const suffix = msg.suffix;
+		if (!msg.pathBase) return suffix;
+		const id = this.#next - msg.pathBase.distance;
+		if (this.#refused.has(id)) return undefined;
+		const base = this.#live.get(id);
+		if (base === undefined) throw new ProtocolViolation(`announce base ${msg.pathBase.distance} is not live`);
+		// A keep counts whole parts, so a kept head never ends inside an escape.
+		const head = Path.parts(base);
+		const keep = msg.pathBase.keep;
+		if (keep > head.length) throw new ProtocolViolation(`announce keeps ${keep} of ${head.length} parts`);
+		// A path that does not resolve, such as one too deep, is refused as content, as rs/moq-net does.
+		const kept = head.slice(0, keep);
+		if (suffix !== Path.empty()) kept.push(suffix);
+		return Path.tryDecode(kept.join("/"));
+	}
+
+	/** The suffix of the live announcement `id`, which an update references. */
+	get(id: bigint): Path.Valid {
+		const live = this.#live.get(id);
+		if (live === undefined) throw new ProtocolViolation(`unknown announce id: ${id}`);
 		return live;
 	}
 
-	#hops(hops: Hop[], base: Base | undefined): Hop[] {
-		if (!base) return hops;
-		const tail = this.#base(base).hops;
-		if (base.keep > tail.length) throw new ProtocolViolation(`announce keeps ${base.keep} of ${tail.length} hops`);
-		const resolved = [...hops, ...tail.slice(tail.length - base.keep)];
-		checkHops(resolved);
-		return resolved;
-	}
-
-	/** An ANNOUNCE_START: resolve it and assign it the next id. */
-	start(msg: { suffix: Path.Valid; hops: Hop[]; pathBase?: Base; hopBase?: Base }): Advertised {
-		let suffix = msg.suffix;
-		if (msg.pathBase) {
-			const head = Path.parts(this.#base(msg.pathBase).suffix);
-			const keep = msg.pathBase.keep;
-			if (keep > head.length) throw new ProtocolViolation(`announce keeps ${keep} of ${head.length} segments`);
-			// Joined as text before parsing: a kept segment may end in the `\` of an escaped `/`.
-			const kept = head.slice(0, keep);
-			if (suffix !== Path.empty()) kept.push(suffix);
-			try {
-				suffix = Path.from(kept.join("/"));
-			} catch (cause) {
-				throw new ProtocolViolation("announce keeps half an escape", { cause });
-			}
-			const error = Path.check(suffix);
-			if (error) throw new ProtocolViolation(error);
-		}
-		const hops = this.#hops(msg.hops, msg.hopBase);
-		this.#live.set(this.#next++, { suffix, hops });
-		return { suffix, hops };
-	}
-
-	/** An ANNOUNCE_UPDATE: resolve its chain before replacing the old one, which it may be based on. */
-	update(msg: { id: bigint; hops: Hop[]; hopBase?: Base }): Advertised {
-		const hops = this.#hops(msg.hops, msg.hopBase);
-		const live = this.#live.get(msg.id);
-		if (!live) throw new ProtocolViolation(`unknown announce id: ${msg.id}`);
-		this.#live.set(msg.id, { suffix: live.suffix, hops });
-		return { suffix: live.suffix, hops };
-	}
-
-	/** An ANNOUNCE_END: retire the id, returning its suffix. */
-	end(id: bigint): Path.Valid {
-		const live = this.#live.get(id);
-		if (!live) throw new ProtocolViolation(`unknown announce id: ${id}`);
+	/** An ANNOUNCE_END: retire the id, returning its suffix, or undefined if it was refused. */
+	end(id: bigint): Path.Valid | undefined {
+		if (this.#refused.delete(id)) return undefined;
+		const live = this.get(id);
 		this.#live.delete(id);
-		return live.suffix;
+		return live;
 	}
 }
 
 /**
- * ANNOUNCE_REQUEST: sent by the subscriber to request ANNOUNCE_BROADCAST messages
- * for a path prefix. Renamed from `AnnounceInterest` in lite-05.
+ * ANNOUNCE_REQUEST before lite-07: sent by the subscriber to request ANNOUNCE_BROADCAST messages
+ * for a path prefix, opening a bidirectional Announce Stream. Renamed from `AnnounceInterest` in
+ * lite-05. Lite-07 edits a set of prefixes on its one stream instead (the `request` message).
  */
 export class AnnounceRequest {
 	prefix: Path.Valid;
@@ -460,15 +655,14 @@ export class AnnounceRequest {
 	 * "no exclusion". Not on the wire elsewhere, so a value set here is ignored when
 	 * encoding for another version and decodes as unknown. */
 	excludeHop: Hop;
-	/** Lite07+: also announce routes with a `.`-prefixed segment below the prefix. Not on
-	 * the wire earlier, so a value set here is ignored when encoding for an older version
-	 * and decodes as false. */
-	hidden: boolean;
 
-	constructor(prefix: Path.Valid, excludeHop: Hop = UNKNOWN_HOP, hidden = false) {
+	constructor(prefix: Path.Valid, excludeHop: Hop = UNKNOWN_HOP) {
 		this.prefix = prefix;
 		this.excludeHop = excludeHop;
-		this.hidden = hidden;
+	}
+
+	static #guard(version: Version) {
+		if (hasRoutes(version)) throw new Error("announce request streams not supported for this version");
 	}
 
 	async #encode(w: Writer, version: Version) {
@@ -476,23 +670,21 @@ export class AnnounceRequest {
 		if (hasExcludeHop(version)) {
 			await w.u62(wireHop(this.excludeHop, version));
 		}
-		if (hasHidden(version)) {
-			await w.bool(this.hidden);
-		}
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<AnnounceRequest> {
 		const prefix = Path.decode(await r.string());
-		const excludeHop = hasExcludeHop(version) ? HopSchema.parse(await r.u62()) : UNKNOWN_HOP;
-		const hidden = hasHidden(version) ? await r.bool() : false;
-		return new AnnounceRequest(prefix, excludeHop, hidden);
+		const excludeHop = hasExcludeHop(version) ? toHop(await r.u62()) : UNKNOWN_HOP;
+		return new AnnounceRequest(prefix, excludeHop);
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {
+		AnnounceRequest.#guard(version);
 		return Message.encode(w, (w) => this.#encode(w, version));
 	}
 
 	static async decode(r: Reader, version: Version): Promise<AnnounceRequest> {
+		AnnounceRequest.#guard(version);
 		return Message.decode(r, (r) => AnnounceRequest.#decode(r, version));
 	}
 }
@@ -552,12 +744,13 @@ export class AnnounceInit {
 }
 
 /// Sent by the publisher as the first message on an announce stream, before any
-/// individual Announce messages. Lite05+ only; the successor to AnnounceInit.
+/// individual Announce messages. Lite05/06 only; the successor to AnnounceInit. Lite-07 answers
+/// on its one stream instead (the `ok` message).
 ///
 /// `origin` is the responder's Hop ID, which the subscriber stamps onto each
 /// announce's hop chain (the publisher no longer stamps itself), or the reserved
-/// {@link UNKNOWN_HOP} when the responder has no identity to give. Lite05/06
-/// carry `active`, the initial start count; lite07 uses SYNCED instead.
+/// {@link UNKNOWN_HOP} when the responder has no identity to give. `active` is the
+/// initial start count.
 export class AnnounceOk {
 	hop: Hop;
 	active: number;
@@ -568,23 +761,22 @@ export class AnnounceOk {
 	}
 
 	static #guard(version: Version) {
-		if (!hasAnnounceOk(version)) {
+		if (!hasAnnounceOk(version) || hasRoutes(version)) {
 			throw new Error("announce ok not supported for this version");
 		}
 	}
 
 	async #encode(w: Writer, version: Version) {
 		await w.u62(wireHop(this.hop, version));
-		if (!hasSynced(version)) await w.u53(this.active);
+		await w.u53(this.active);
 	}
 
-	static async #decode(r: Reader, version: Version): Promise<AnnounceOk> {
+	static async #decode(r: Reader): Promise<AnnounceOk> {
 		// The draft reserves 0 for "unknown": the responder was never assigned an id, or
 		// withholds it to obscure its routing. It names nobody, so callers must not stamp
 		// it onto a hop chain, but it is a legal message and not grounds to drop the stream.
-		const origin = HopSchema.parse(await r.u62());
-		const active = hasSynced(version) ? 0 : await r.u53();
-		return new AnnounceOk(origin, active);
+		const origin = toHop(await r.u62());
+		return new AnnounceOk(origin, await r.u53());
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {
@@ -594,6 +786,6 @@ export class AnnounceOk {
 
 	static async decode(r: Reader, version: Version): Promise<AnnounceOk> {
 		AnnounceOk.#guard(version);
-		return Message.decode(r, (r) => AnnounceOk.#decode(r, version));
+		return Message.decode(r, AnnounceOk.#decode);
 	}
 }

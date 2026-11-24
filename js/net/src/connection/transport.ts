@@ -1,15 +1,13 @@
-import { Session } from "@moq/qmux";
-
 /** The wire transport a session runs over. */
-export type Transport = "webtransport" | "websocket" | "webrtc";
+export type Transport = "webtransport" | "websocket";
 
 /**
- * The transport a live session is actually running over. WebSocket and WebRTC adapters
- * share the WebTransport shape; WebRTC carries its label to avoid a dependency cycle.
+ * The transport a live session is actually running over. The WebSocket adapter shares the
+ * WebTransport shape and carries its label, so `@moq/qmux` stays a lazy chunk.
  *
  * @internal Not re-exported from the package entrypoint.
  */
 export function transportOf(quic: WebTransport): Transport {
-	if ("transport" in quic && quic.transport === "webrtc") return "webrtc";
-	return quic instanceof Session ? "websocket" : "webtransport";
+	const label = "transport" in quic ? quic.transport : undefined;
+	return label === "websocket" ? label : "webtransport";
 }

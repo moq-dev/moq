@@ -38,8 +38,9 @@ pub struct Config {
 	pub prefix: Path,
 	/// How long a departed node's traffic waits for its path to return before
 	/// folding into the retired total (default 10 minutes). A return within it
-	/// under the same instance resumes the node's own counters; a return after it with counters intact counts its earlier
-	/// traffic twice, so size this above reconnect times.
+	/// under the same instance, or a minted one after a minted one with its
+	/// counters intact, resumes the node's own counters; a return after it with counters intact counts its
+	/// earlier traffic twice, so size this above reconnect times.
 	pub grace: Duration,
 }
 
@@ -94,8 +95,11 @@ impl Default for Config {
 /// track's new [`BucketFrame::epoch`] adds to the old epoch's counters the same
 /// way. A reader stays pinned to its broadcast instance, so a
 /// replacement never feeds it. A wire that carries no instance has its relay
-/// mint one per announcement, so a node reached through one announces anew each
-/// time it is announced again.
+/// mint one per announcement. A minted instance following a minted one at the
+/// same path, while the departed one is still within [`Config::grace`], takes
+/// over its entry, and its first frame decides: counters that continue are the
+/// same node reached anew, while a new bucket epoch or a counter going down is
+/// a restart whose new counters add to the old ones.
 ///
 /// A bucket's per-label sessions are the exception: they are a gauge, so a
 /// departed node stops counting them immediately.
@@ -109,8 +113,10 @@ impl Default for Config {
 /// rollup. A node that resumes after its departure closed its open pairs
 /// reopens them as new starts rather than lowering their ends. A bucket's
 /// per-path traffic also reopens pairs when a node resumes without regressing,
-/// but keeps the reset contract of a single node: one that returns within the
-/// grace with a lower counter regresses the merged counter.
+/// but keeps the reset contract of a single node: a new counter epoch on a
+/// node it keeps reading regresses the merged counter. A minted node that
+/// returns within the grace from a restart is the exception: its first frame
+/// folds the earlier run into the rollup, as an expired grace would.
 pub struct Consumer {
 	origin: origin::Consumer,
 	config: Config,
@@ -348,6 +354,13 @@ impl Mergeable for Presence {
 	fn regressed(&self, prev: &Self) -> bool {
 		self.wire_tx < prev.wire_tx
 			|| self.wire_rx < prev.wire_rx
+			|| self.credit_stalls < prev.credit_stalls
+			|| self.credit_stalled_us < prev.credit_stalled_us
+			|| self.credit_held_readers_us < prev.credit_held_readers_us
+			|| self.credit_held_evicted_us < prev.credit_held_evicted_us
+			|| self.wire_lost < prev.wire_lost
+			|| self.cwnd_blocked_us < prev.cwnd_blocked_us
+			|| self.pacing_blocked_us < prev.pacing_blocked_us
 			|| self.sessions_refused.regressed(&prev.sessions_refused)
 			|| self.sessions_failed.regressed(&prev.sessions_failed)
 			|| self.requests < prev.requests
@@ -357,6 +370,8 @@ impl Mergeable for Presence {
 			|| self.received_bytes < prev.received_bytes
 			|| self.announces_peak < prev.announces_peak
 			|| self.subscriptions_peak < prev.subscriptions_peak
+			|| self.routes_refused < prev.routes_refused
+			|| self.routes.regressed(&prev.routes)
 	}
 }
 
@@ -509,6 +524,10 @@ trait Shape: Default {
 
 	/// Forget the contribution, once it has folded into the retired total.
 	fn clear(&mut self);
+
+	/// Whether `frame` comes from a restarted producer rather than the one this
+	/// contribution was read from.
+	fn restarted(&self, frame: &Self::Frame) -> bool;
 }
 
 /// One node's fold of a keyed frame of [`Mergeable`] values.
@@ -599,6 +618,14 @@ impl<V: Mergeable, K: Ord + Clone> Keyed<V, K> {
 		self.base.clear();
 		self.last = None;
 	}
+
+	/// Whether any counter in `frame` went down from the last one read.
+	fn regressed(&self, frame: &BTreeMap<K, V>) -> bool {
+		self.last
+			.iter()
+			.flatten()
+			.any(|(key, prev)| frame.get(key).is_some_and(|next| next.regressed(prev)))
+	}
 }
 
 impl<V: Mergeable> Shape for Keyed<V> {
@@ -620,6 +647,10 @@ impl<V: Mergeable> Shape for Keyed<V> {
 
 	fn clear(&mut self) {
 		self.forget();
+	}
+
+	fn restarted(&self, frame: &Self::Frame) -> bool {
+		self.regressed(frame)
 	}
 }
 
@@ -695,6 +726,11 @@ impl Shape for Bucketed {
 		self.paths.forget();
 		self.labels.forget();
 	}
+
+	/// A restarted node mints a new epoch for every bucket track.
+	fn restarted(&self, frame: &BucketFrame) -> bool {
+		self.epoch.as_ref().is_some_and(|epoch| *epoch != frame.epoch)
+	}
 }
 
 /// One node's subscription to the merged track.
@@ -732,6 +768,9 @@ struct Node<S: Shape> {
 	/// Only an unannounced node folds, so a still-announced node whose reader
 	/// failed keeps its own counters.
 	departed: Option<Instant>,
+	/// The shape was taken over from the path's previous minted instance, which
+	/// may be the same node reached anew or a restart: the first frame decides.
+	adopted: bool,
 }
 
 impl<S: Shape> Node<S> {
@@ -750,6 +789,16 @@ impl<S: Shape> Node<S> {
 	/// Take a fresh frame.
 	fn observe(&mut self, frame: S::Frame) {
 		self.shape.observe(frame);
+	}
+
+	/// Settle an adopted contribution on the new instance's first frame: one the
+	/// frame shows came from before a restart folds into `retired`, as a
+	/// departed instance's would, instead of resetting under the new counters.
+	fn settle_adopted(&mut self, frame: &S::Frame, retired: &mut S::Merged) {
+		if std::mem::take(&mut self.adopted) && self.shape.restarted(frame) {
+			self.shape.contribute(retired);
+			self.shape.clear();
+		}
 	}
 
 	/// Fold the contribution into `retired` if the node departed at least
@@ -777,13 +826,16 @@ struct Merged<S: Shape> {
 	name: String,
 	config: moq_json::snapshot::consumer::Config,
 	/// One entry per live or recently departed node broadcast, keyed by
-	/// absolute announced path and route instance, so each instance is its own entry.
+	/// absolute announced path and route instance, so each named instance is its
+	/// own entry; a minted one takes over the path's previous minted entry until
+	/// its first frame shows a restart.
 	nodes: HashMap<(Path, Instance), Node<S>>,
 	/// The instance last announced at each path, including while it remains in grace.
 	last_announced: HashMap<Path, Instance>,
 	/// How long a departed node waits before folding into `retired`.
 	grace: Duration,
-	/// The summed last frames of every node whose grace elapsed.
+	/// The summed last frames of every node whose grace elapsed, plus each
+	/// minted takeover's earlier run once its first frame shows a restart.
 	retired: S::Merged,
 }
 
@@ -817,6 +869,7 @@ impl<S: Shape> Merged<S> {
 				Poll::Ready(Some(moq_net::origin::RouteEvent {
 					kind: moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update,
 					announce: update,
+					..
 				})) => {
 					let instance = update.route.instance().clone();
 					changed |= self.apply_announce(&update, instance, true)
@@ -824,6 +877,7 @@ impl<S: Shape> Merged<S> {
 				Poll::Ready(Some(moq_net::origin::RouteEvent {
 					kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 					announce: update,
+					..
 				})) => {
 					let instance = update.route.instance().clone();
 					changed |= self.apply_announce(&update, instance, false)
@@ -833,6 +887,7 @@ impl<S: Shape> Merged<S> {
 				Poll::Ready(Some(moq_net::origin::RouteEvent {
 					kind: moq_net::origin::RouteKind::Restart,
 					announce: update,
+					..
 				})) => {
 					// An announced prefix is a path beneath the root, so rooting it fits.
 					let absolute = self.announce.absolute(&update.prefix).ok();
@@ -842,6 +897,8 @@ impl<S: Shape> Merged<S> {
 					let instance = update.route.instance().clone();
 					changed |= self.apply_announce(&update, instance, true);
 				}
+				// A route change this version does not know changes no membership.
+				Poll::Ready(Some(_)) => {}
 				Poll::Ready(None) => return Poll::Ready(Ok(None)),
 				Poll::Pending => break,
 			}
@@ -859,7 +916,7 @@ impl<S: Shape> Merged<S> {
 		let retired = &mut self.retired;
 		let last_announced = &mut self.last_announced;
 		self.nodes.retain(|(path, instance), node| {
-			changed |= advance(node, origin, config, name, waiter);
+			changed |= advance(node, origin, config, name, waiter, retired);
 			if node.fold_expired(retired, grace, now) {
 				if last_announced.get(path) == Some(instance) {
 					last_announced.remove(path);
@@ -921,7 +978,25 @@ impl<S: Shape> Merged<S> {
 			};
 		}
 
-		self.last_announced.insert(key.0.clone(), key.1.clone());
+		let mut changed = false;
+		let previous = self.last_announced.insert(key.0.clone(), key.1.clone());
+		// Below lite-07 each session mints a fresh instance per announcement, so
+		// a minted instance after a minted one is likely the same node reached
+		// anew (a redial, a failover, a relay restart): it takes over the
+		// previous entry until its first frame shows whether the node restarted.
+		if let Some(previous) = previous
+			&& previous != key.1
+			&& previous.is_minted()
+			&& key.1.is_minted()
+			&& !self.nodes.contains_key(&key)
+			&& let Some(mut node) = self.nodes.remove(&(key.0.clone(), previous))
+		{
+			// Stop reading the old instance; the arm below re-resolves the new one.
+			changed = node.depart();
+			node.instance = key.1.clone();
+			node.adopted = true;
+			self.nodes.insert(key.clone(), node);
+		}
 		// A route update on a node already tracked (a reprice, or another route
 		// of the same instance) keeps the live reader: existing
 		// subscriptions survive it, and the reader re-resolves through
@@ -950,10 +1025,11 @@ impl<S: Shape> Merged<S> {
 					path: path.clone(),
 					shape: S::default(),
 					departed: None,
+					adopted: false,
 				});
 			}
 		}
-		false
+		changed
 	}
 
 	/// Sum the retired total and every node's contribution, per key.
@@ -974,6 +1050,7 @@ fn advance<S: Shape>(
 	config: &moq_json::snapshot::consumer::Config,
 	name: &str,
 	waiter: &Waiter,
+	retired: &mut S::Merged,
 ) -> bool {
 	let mut changed = false;
 	// At most one re-resolve per call: a subscription that terminates
@@ -985,20 +1062,33 @@ fn advance<S: Shape>(
 		// listing that ends took its broadcast with it.
 		while let Some(listing) = &mut node.listing {
 			match listing.poll_next(waiter) {
-				Poll::Ready(Ok(Some(broadcast::TracksEvent::Added { name: listed, .. }))) => {
+				Poll::Ready(Ok(Some(broadcast::TracksEvent::Added {
+					name: listed,
+					info: broadcast::Listed::Track(_),
+					..
+				}))) => {
 					if parse_bucket_track(&listed).is_some_and(|(bucket, _)| bucket.as_str() == name) {
 						node.offered = Some(listed);
 					}
 				}
 				Poll::Ready(Ok(Some(
-					broadcast::TracksEvent::Removed { name: listed }
-					| broadcast::TracksEvent::Finished { name: listed },
+					broadcast::TracksEvent::Removed {
+						kind: broadcast::Kind::Track,
+						name: listed,
+						..
+					}
+					| broadcast::TracksEvent::Finished {
+						kind: broadcast::Kind::Track,
+						name: listed,
+						..
+					},
 				))) => {
 					if node.offered.as_ref() == Some(&listed) {
 						node.offered = None;
 					}
 				}
-				Poll::Ready(Ok(Some(broadcast::TracksEvent::Synced))) => {}
+				// SYNCED, and datagram tracks: buckets are tracks of groups.
+				Poll::Ready(Ok(Some(_))) => {}
 				Poll::Ready(result) => {
 					if let Err(err) = result {
 						tracing::debug!(?err, name, "stats: node listing ended");
@@ -1079,6 +1169,7 @@ fn advance<S: Shape>(
 			},
 			Reader::Active(reader) => match reader.poll_latest(waiter) {
 				Poll::Ready(Ok(Some(frame))) => {
+					node.settle_adopted(&frame.value, retired);
 					node.observe(frame.value);
 					changed = true;
 				}
@@ -1162,11 +1253,14 @@ mod tests {
 					| moq_net::origin::RouteKind::Update
 					| moq_net::origin::RouteKind::Restart,
 				announce: route,
+				..
 			} => Some((route, true)),
 			moq_net::origin::RouteEvent {
 				kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 				announce: route,
+				..
 			} => Some((route, false)),
+			other => panic!("unexpected route event {other:?}"),
 		}
 	}
 
@@ -1300,7 +1394,7 @@ mod tests {
 		let consumer = egress.request(path, None).await.expect("resolve");
 		let mut sub = consumer.track("video").unwrap().subscribe(None).await.unwrap();
 
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
 		group.write_frame(Timestamp::ZERO, vec![0u8; bytes]).unwrap();
 		group.finish().unwrap();
 		let mut group = sub.recv_group().await.unwrap().unwrap();
@@ -1348,6 +1442,11 @@ mod tests {
 		}
 	}
 
+	/// A millisecond past every group on `track`, so each publish opens the next group.
+	fn next_stamp(track: &track::Producer) -> Timestamp {
+		Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap()
+	}
+
 	/// A hand-published node broadcast at `.stats/node/<node>` with one plain
 	/// bucket track carrying default-tier egress per path, so a test controls
 	/// the exact frames and can fail one node's reader alone (the
@@ -1361,6 +1460,7 @@ mod tests {
 		bucket: moq_json::snapshot::Producer<BucketFrame>,
 		track: track::Producer,
 		frame: TrafficFrame,
+		epoch: Epoch,
 	}
 
 	impl NodeBroadcast {
@@ -1369,13 +1469,24 @@ mod tests {
 		}
 
 		fn with_instance(origin: &origin::Producer, bucket: &str, node: &str, instance: moq_net::Instance) -> Self {
+			Self::with_epoch(origin, bucket, node, instance, bucket_epoch())
+		}
+
+		/// A node publishing a bucket run of its own, as a restarted node does.
+		fn with_epoch(
+			origin: &origin::Producer,
+			bucket: &str,
+			node: &str,
+			instance: moq_net::Instance,
+			epoch: Epoch,
+		) -> Self {
 			let path = format!(".stats/node/{node}");
 			let options = origin::RouteOptions::default().with_instance(instance, 0);
 			let source = origin.route(path.as_str(), options).expect("announce");
 			let track = source
 				.broadcast()
 				.create_track(
-					crate::bucket_track(moq_net::Path::new(bucket).unwrap(), &bucket_epoch()),
+					crate::bucket_track(moq_net::Path::new(bucket).unwrap(), &epoch),
 					timed(),
 				)
 				.expect("create track");
@@ -1385,6 +1496,7 @@ mod tests {
 				track,
 				source,
 				frame: TrafficFrame::new(),
+				epoch,
 			}
 		}
 
@@ -1398,22 +1510,22 @@ mod tests {
 				bucket.paths.entry(path.clone()).or_default().publisher = *traffic;
 			}
 			let frame = BucketFrame {
-				epoch: bucket_epoch(),
+				epoch: self.epoch.clone(),
 				tiers: BTreeMap::from([(String::new(), bucket)]),
 			};
-			self.bucket
-				.update(moq_net::Timed::from(&frame).at(moq_net::Timestamp::now()))
-				.expect("publish");
+			self.bucket.update(&frame, next_stamp(&self.track)).expect("publish");
 		}
 
 		/// Fail the node's reader: append a frame the snapshot decoder can't
 		/// parse, so the subscription errors while the broadcast stays announced.
 		fn fail_traffic(&mut self) {
-			let mut group = self.track.append_group().expect("append group");
-			group
-				.write_frame(Timestamp::now(), b"not json".to_vec())
-				.expect("write frame");
-			group.finish().expect("finish group");
+			let at = next_stamp(&self.track);
+			let mut group = self
+				.track
+				.append_group(Timestamp::from_millis(at.value()).unwrap())
+				.expect("append group");
+			group.write_frame(at, b"not json".to_vec()).expect("write frame");
+			group.finish().expect("close group");
 		}
 	}
 
@@ -1696,6 +1808,98 @@ mod tests {
 
 		let frame = read_monotonic_until(&mut traffic, "acme/room", 140, 170).await;
 		assert_eq!(frame.get("acme/room").expect("entry").bytes, 170, "100 + 30 + 40");
+	}
+
+	/// Node A (100, under a minted instance) and node B (40) merged to 140, then A
+	/// departs and returns `after` later through a new session, which mints a new
+	/// instance, with its counters intact plus 20.
+	async fn reconnect_minted(after: Duration) -> (TrafficConsumer, NodeBroadcast) {
+		let origin = produce_origin();
+		let agg = Consumer::new(origin.consume(), Config::new().with_grace(GRACE));
+		let mut traffic = traffic(&agg);
+		let mut node_a = NodeBroadcast::with_instance(&origin, "acme", "a", moq_net::fuzz::minted_instance());
+		let mut node_b = NodeBroadcast::new(&origin, "acme", "b");
+		node_a.publish("acme/room", 100);
+		node_b.publish("acme/room", 40);
+		read_until_bytes(&mut traffic, "acme/room", 140).await;
+
+		let frame = node_a.frame.clone();
+		drop(node_a);
+		settle(&mut traffic).await;
+
+		tokio::time::advance(after).await;
+		let mut node_a = NodeBroadcast::with_instance(&origin, "acme", "a", moq_net::fuzz::minted_instance());
+		node_a.frame = frame;
+		node_a.publish("acme/room", 20);
+		// The node outlives the test's reads, like node B.
+		std::mem::forget(node_a);
+		(traffic, node_b)
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn minted_reconnect_within_grace_counts_once() {
+		// A session mints a fresh instance per announcement below lite-07, so a
+		// reconnected node arrives under a new instance with its counters intact.
+		// It continues its own entry: once the grace passes, nothing it reported
+		// before the reconnect folds into the retired total on top of it.
+		let (mut traffic, _node_b) = reconnect_minted(GRACE - Duration::from_secs(1)).await;
+		let frame = read_monotonic_until(&mut traffic, "acme/room", 140, 160).await;
+		assert_eq!(frame.get("acme/room").expect("entry").bytes, 160, "100 + 20 + 40");
+
+		tokio::time::advance(GRACE).await;
+		settle(&mut traffic).await;
+		assert_eq!(traffic.inner.nodes.len(), 2, "one entry per node");
+		assert!(traffic.inner.retired.is_empty(), "nothing folded");
+		assert_eq!(
+			publisher(&traffic.inner.merged())
+				.get("acme/room")
+				.expect("entry")
+				.bytes,
+			160
+		);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn minted_reconnect_after_grace_starts_over() {
+		// Past the grace the departed entry has folded, so a minted return starts
+		// over and counts its earlier traffic twice, as for any route.
+		let (mut traffic, _node_b) = reconnect_minted(GRACE).await;
+		let frame = read_monotonic_until(&mut traffic, "acme/room", 140, 260).await;
+		assert_eq!(
+			frame.get("acme/room").expect("entry").bytes,
+			260,
+			"retired 100 + returned 120 + 40"
+		);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn minted_restart_within_grace_keeps_path_traffic() {
+		// A restarted node reached through an older wire also returns under a
+		// new minted instance within the grace, but with a new bucket epoch and
+		// fresh counters: its earlier per-path traffic stays counted, as for a
+		// restart under a named instance, instead of resetting under the new run.
+		let origin = produce_origin();
+		let agg = Consumer::new(origin.consume(), Config::new().with_grace(GRACE));
+		let mut traffic = traffic(&agg);
+		let mut node_a = NodeBroadcast::with_instance(&origin, "acme", "a", moq_net::fuzz::minted_instance());
+		let mut node_b = NodeBroadcast::new(&origin, "acme", "b");
+		node_a.publish("acme/room", 100);
+		node_b.publish("acme/room", 40);
+		read_until_bytes(&mut traffic, "acme/room", 140).await;
+
+		drop(node_a);
+		settle(&mut traffic).await;
+
+		let epoch: Epoch = "01900000-0000-7000-8000-000000000100".parse().unwrap();
+		let mut node_a = NodeBroadcast::with_epoch(&origin, "acme", "a", moq_net::fuzz::minted_instance(), epoch);
+		node_a.publish("acme/room", 30);
+		let frame = read_monotonic_until(&mut traffic, "acme/room", 140, 170).await;
+		assert_eq!(frame.get("acme/room").expect("entry").bytes, 170, "100 + 30 + 40");
+
+		tokio::time::advance(GRACE).await;
+		node_a.publish("acme/room", 5);
+		let frame = read_monotonic_until(&mut traffic, "acme/room", 170, 175).await;
+		assert_eq!(frame.get("acme/room").expect("entry").bytes, 175, "100 + 35 + 40");
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1985,15 +2189,25 @@ mod tests {
 	struct TotalsNode {
 		_source: origin::Route,
 		totals: moq_json::snapshot::Producer<TotalsFrame>,
+		track: track::Producer,
 	}
 
 	impl TotalsNode {
 		fn new(origin: &origin::Producer, node: &str) -> Self {
+			Self::from_options(origin, node, moq_net::origin::RouteOptions::default())
+		}
+
+		fn with_instance(origin: &origin::Producer, node: &str, instance: moq_net::Instance) -> Self {
+			Self::from_options(
+				origin,
+				node,
+				moq_net::origin::RouteOptions::default().with_instance(instance, 0),
+			)
+		}
+
+		fn from_options(origin: &origin::Producer, node: &str, options: moq_net::origin::RouteOptions) -> Self {
 			let source = origin
-				.route(
-					format!(".stats/node/{node}").as_str(),
-					moq_net::origin::RouteOptions::default(),
-				)
+				.route(format!(".stats/node/{node}").as_str(), options)
 				.expect("create broadcast");
 			let track = source
 				.broadcast()
@@ -2002,7 +2216,8 @@ mod tests {
 			let config = moq_json::snapshot::Config::default().with_deltas(false);
 			Self {
 				_source: source,
-				totals: moq_json::snapshot::Producer::new(track, config),
+				totals: moq_json::snapshot::Producer::new(track.clone(), config),
+				track,
 			}
 		}
 
@@ -2011,9 +2226,7 @@ mod tests {
 			let mut totals = Totals::default();
 			totals.publisher.bytes = bytes;
 			self.totals
-				.update(
-					moq_net::Timed::from(&TotalsFrame::from([(String::new(), totals)])).at(moq_net::Timestamp::now()),
-				)
+				.update(&TotalsFrame::from([(String::new(), totals)]), next_stamp(&self.track))
 				.expect("publish");
 		}
 	}
@@ -2043,21 +2256,40 @@ mod tests {
 		read_until(&mut totals.inner, grew, |frame| frame[""].publisher.bytes == 175).await;
 	}
 
+	#[tokio::test(start_paused = true)]
+	async fn minted_reconnect_detects_a_restart() {
+		// A restarted node reached through an older wire comes back under a new
+		// minted instance, which takes over its entry; its counter going down
+		// shows the restart, so the old readout folds and the new one adds to
+		// it, through and past the grace.
+		let origin = produce_origin();
+		let mut node_a = TotalsNode::with_instance(&origin, "a", moq_net::fuzz::minted_instance());
+		node_a.publish(100);
+
+		let agg = Consumer::new(origin.consume(), Config::new().with_grace(GRACE));
+		let mut totals = agg.totals();
+		let grew = |before: &Totals, after: &Totals| after.publisher.bytes >= before.publisher.bytes;
+		read_until(&mut totals.inner, grew, |frame| frame[""].publisher.bytes == 100).await;
+
+		drop(node_a);
+		let mut node_a = TotalsNode::with_instance(&origin, "a", moq_net::fuzz::minted_instance());
+		node_a.publish(30);
+		read_until(&mut totals.inner, grew, |frame| frame[""].publisher.bytes == 130).await;
+		assert_eq!(totals.inner.nodes.len(), 1, "the reconnect continues the node's entry");
+
+		tokio::time::advance(GRACE).await;
+		node_a.publish(35);
+		read_until(&mut totals.inner, grew, |frame| frame[""].publisher.bytes == 135).await;
+		assert_eq!(totals.inner.retired[""].publisher.bytes, 100, "the first run folded");
+	}
+
 	/// A node announced at `.stats/node/a`, ready to observe frames by hand.
 	fn hand_merged<V: Mergeable>() -> (Merged<Keyed<V>>, (Path, Instance)) {
 		let origin = produce_origin();
 		let path = Path::from_static(".stats/node/a");
 		let instance: Instance = "a".parse().unwrap();
 		let mut merged = Merged::<Keyed<V>>::new(origin.consume(), &Config::new(), "p".into());
-		merged.apply_announce(
-			&moq_net::announce::Announce {
-				prefix: path.clone(),
-				captures: None,
-				route: moq_net::fuzz::route_info([], 0, None),
-			},
-			instance.clone(),
-			true,
-		);
+		merged.apply_announce(&moq_net::fuzz::announce(path.as_str(), 0), instance.clone(), true);
 		(merged, (path, instance))
 	}
 
@@ -2071,15 +2303,7 @@ mod tests {
 			value
 		};
 		let path = Path::from_static(".stats/node/b");
-		merged.apply_announce(
-			&moq_net::announce::Announce {
-				prefix: path.clone(),
-				captures: None,
-				route: moq_net::fuzz::route_info([], 0, None),
-			},
-			"b".parse().unwrap(),
-			true,
-		);
+		merged.apply_announce(&moq_net::fuzz::announce(path.as_str(), 0), "b".parse().unwrap(), true);
 		let second = (path, "b".parse().unwrap());
 		merged
 			.nodes

@@ -42,7 +42,7 @@ test-group = "io-uring"
 # The vivid tests share one capture node, and a second process configuring its
 # queue while another streams gets EBUSY.
 [[profile.default.overrides]]
-filter = "package(moq-video) & test(/^capture::v4l2::tests::vivid::/)"
+filter = "(package(moq-video) & test(/^capture::v4l2::tests::vivid::/)) | (package(moq-v4l) & test(/::tests::vivid::/))"
 test-group = "v4l2"
 
 # The binding benchmark runs many `MOQ_BENCH_SECONDS` budgets back to back, so its
@@ -60,6 +60,12 @@ slow-timeout = { period = "120s", terminate-after = 2 }
 # whose rate bounds how fast a run can go, so it outlasts the hang budget.
 [[profile.default.overrides]]
 filter = "package(moq-tokio) & test(=receive_credit::benchmark_receive_windows)"
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+# The join-lag benchmark watches twelve joins in real time, each 14 s of live track after
+# its warm-up, about 225 s in all.
+[[profile.default.overrides]]
+filter = "package(moq-tokio) & test(=receive_credit::benchmark_join_lag)"
 slow-timeout = { period = "60s", terminate-after = 5 }
 
 # The datagram benchmark publishes in real time and drains the bottleneck's backlog,
@@ -86,11 +92,6 @@ retries = 0
 # Repeat each failure at the end of the run, so it isn't buried in the log.
 failure-output = "immediate-final"
 
-# Each run's per-test times, which the nightly gate cost scenarios read
-# (see bench/README.md); a later run of the profile replaces the report.
-[profile.ci.junit]
-path = "junit.xml"
-
 # `just rs miri` interprets every instruction, orders of magnitude slower than
 # native, so a test that takes a second here takes minutes there. The cap still
 # turns a lost wakeup into a TIMEOUT; keep a test under it by shrinking its
@@ -99,3 +100,10 @@ path = "junit.xml"
 slow-timeout = { period = "300s", terminate-after = 3 }
 retries = 0
 failure-output = "immediate-final"
+
+# A sweep run past its gate count on purpose, such as those `test/route-sweep.sh`
+# runs with `-P sweep`, takes minutes. Still bounded, so a lost wakeup
+# ends in a TIMEOUT rather than a wedge.
+[profile.sweep]
+slow-timeout = { period = "60s", terminate-after = 60 }
+retries = 0

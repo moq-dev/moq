@@ -251,7 +251,7 @@ impl MediaCodec {
 	/// none free: a decoder that skips one produces a broken picture until the
 	/// next keyframe, which is a far worse trade than the wait.
 	fn submit(&mut self, access_unit: &[u8], timestamp: Timestamp) -> Result<(), Error> {
-		let time = timestamp.as_micros().min(u64::MAX as u128) as u64;
+		let time = timestamp.as_micros()?.min(u64::MAX as u128) as u64;
 
 		for _ in 0..SUBMIT_ROUNDS {
 			let queued = match self
@@ -262,9 +262,14 @@ impl MediaCodec {
 				DequeuedInputBufferResult::Buffer(mut buffer) => {
 					let target = buffer.buffer_mut();
 					if target.len() < access_unit.len() {
+						let capacity = target.len();
+						// Handed back empty: a dequeued buffer the codec never gets back
+						// is one fewer for the rest of the stream.
+						self.codec
+							.queue_input_buffer(buffer, 0, 0, time, 0)
+							.map_err(|e| codec_err("return an unused input buffer", e))?;
 						return Err(Error::codec(anyhow::anyhow!(
-							"MediaCodec input buffer is {} bytes, needs {} for this access unit",
-							target.len(),
+							"MediaCodec input buffer is {capacity} bytes, needs {} for this access unit",
 							access_unit.len()
 						)));
 					}

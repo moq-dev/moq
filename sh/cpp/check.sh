@@ -71,6 +71,11 @@ if [[ -n "$archive" ]]; then
     fi
 else
     prefix="$PWD/$build/prefix"
+    # Cargo under `mbx exec` compiles Rust uncached, so build moq-ffi's shared default
+    # (.cargo/config.toml) first, where mbx caches it, and CMake's cargo finds it fresh.
+    if [[ -z "$ffi_dir" && "${cmake_command[0]}" == mbx ]]; then
+        (cd .. && cargo build-ffi)
+    fi
     "${cmake_command[@]}" -S moq -B "$build/package" -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_LIBDIR=lib -DMOQ_FFI_DIR="$ffi_dir"
     "${cmake_command[@]}" --build "$build/package" --config Release
     rm -rf "$prefix"
@@ -94,13 +99,15 @@ if [[ "$(uname -s)" == MINGW* || "$(uname -s)" == MSYS* ]]; then
     exit 0
 fi
 
-# The samples in doc/lib/cpp compile against the installed headers.
+# The samples in doc/lib/cpp compile against the installed headers. These compile-only steps
+# use -c rather than -fsyntax-only: the Nix cc-wrapper adds its link flags unless it sees -c,
+# and clang -Werror rejects them as unused.
 bash ../doc/lib/samples.sh cpp ../doc/lib/cpp/index.md >"$build/doc-samples.cpp"
-"${CXX:-c++}" -std=c++17 -fsyntax-only -Wall -Werror -include moq/test/doc-samples.hpp \
+"${CXX:-c++}" -std=c++17 -c -o /dev/null -Wall -Werror -include moq/test/doc-samples.hpp \
     -I"$prefix/include" "$build/doc-samples.cpp"
 
 # The nightly runs the binding benchmark; compiling it here catches wrapper drift per PR.
-"${CXX:-c++}" -std=c++20 -fsyntax-only -Wall -Werror -I"$prefix/include" moq/bench/main.cpp
+"${CXX:-c++}" -std=c++20 -c -o /dev/null -Wall -Werror -I"$prefix/include" moq/bench/main.cpp
 
 if command -v pkg-config >/dev/null 2>&1; then
     pc="$prefix/lib/pkgconfig/moq-cpp.pc"

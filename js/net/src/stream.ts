@@ -364,6 +364,12 @@ export class Reader {
 		return result instanceof Short ? undefined : result;
 	}
 
+	/** Like {@link tryDecode}, but consumes nothing: a look at what is buffered. */
+	tryPeek<T extends NonNullable<unknown>>(decode: (c: Cursor) => T): T | undefined {
+		const result = this.#try(decode, false);
+		return result instanceof Short ? undefined : result;
+	}
+
 	/** Run a synchronous decode, filling from the stream until it has the bytes it needs. */
 	async decode<T>(decode: (c: Cursor) => T): Promise<T> {
 		for (;;) {
@@ -373,8 +379,8 @@ export class Reader {
 		}
 	}
 
-	// Like decode, but leaves the bytes buffered for the next read.
-	async #peek<T>(decode: (c: Cursor) => T): Promise<T> {
+	/** Like {@link decode}, but leaves the bytes buffered for the next read. */
+	async peek<T>(decode: (c: Cursor) => T): Promise<T> {
 		for (;;) {
 			const result = this.#try(decode, false);
 			if (!(result instanceof Short)) return result;
@@ -482,7 +488,7 @@ export class Reader {
 
 	/** Like {@link u62}, but leaves the varint buffered, so a stream's type can be read twice. */
 	async peekU62(): Promise<bigint> {
-		return this.#peek(U62);
+		return this.peek(U62);
 	}
 
 	async varint(): Promise<U64> {

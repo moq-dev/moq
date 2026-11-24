@@ -16,26 +16,30 @@ V4L2 `VIDIOC_EXPBUF` source is dropped with the export itself (see
 Decided 2026-10-08: the VAAPI low-power entrypoint check is dropped. Neither
 Meteor Lake nor the Arrow Lake test host exposes `EncSliceLP`, so no machine
 on hand reaches that fallback. A render node other than the first is checked
-by [VA-API external images](/quest/m3/vaapi-vulkan-import.md).
+by [VA-API external images](/quest/m5/vaapi-vulkan-import.md).
+
+Decided 2026-11-15 (maintainer, /quest-complete): ✅ split the items the
+`windows` host (RTX 2070, no camera) can run today, the Windows GPU probes and
+the two dx12 export tests, into [Windows GPU tests](/quest/m4/windows-gpu-tests.md)
+(rejected: splitting them into the lab; keeping everything here until the
+whole hardware set is on hand).
 
 - **Windows Media Foundation capture**: the camera opens while capture is
   enabled and closes when it is disabled, so the LED is off whenever capture
   is; with the `on_demand` opt-in it also opens and closes as the first viewer
-  arrives and the last leaves. NV12 delivery from MJPEG and YUY2 cameras.
-- **A GPU export on a hardware encoder**: run the ignored
-  `render::export::dx12::tests::exports_an_nv12_texture` (the Platform runner
-  has only WARP, which has no Direct3D11 video device) and
-  `render::export::dx12::tests::media_foundation_encodes_the_export_in_place`
-  on a Windows GPU with a Media Foundation H.264 encoder. The
-  [studio](https://github.com/moq-dev/studio), the export's main consumer,
-  confirms its Output panel reports no readback on that machine and a Mac in
-  its own repository.
+  arrives and the last leaves. NV12 delivery from MJPEG and YUY2 cameras,
+  and the ignored `mediafoundation_camera_texture` encode test, which needs
+  a camera and a GPU.
+- **A GPU export on a Mac**: the [studio](https://github.com/moq-dev/studio),
+  the export's main consumer, confirms in its own repository that its Output
+  panel reports no readback on an Apple Silicon Mac.
 - **A live camera run per platform**: capture needs device permission that a
   headless or agent process cannot grant itself.
 - **OBS follows its grant on a shaped uplink**: stream from a real OBS build
   through `tc netem` (or `rs/moq-shaper`), narrow and reopen the link, and
   confirm the Stats tab's video target drops at once, climbs back over a few
-  seconds, and the encoder output follows (`cpp/obs/src/moq-rate.h`).
+  seconds, and the encoder output follows (the grant handling in
+  `cpp/obs/src/moq-output.cpp`).
 
 ### PipeWire DMA-BUF capture on KDE
 
@@ -69,22 +73,6 @@ A separate-plane producer is not planned; if that is why a
 Pi produces nothing, write it down and stop. `doc/lib/rs/moq-video.md` says
 both paths are reachable; correct that sentence if one cannot capture.
 
-### Windows GPU probes
-
-Ignored moq-video tests that only a GPU on that platform can run, and that no
-runner hosts (found by the m0 coverage audit):
-
-- Direct3D11 video processing: `d3d11_resize_defaults_to_the_gpu`,
-  `d3d11_resize_matches_cpu`, and
-  `mediafoundation_resized_texture_reencodes_in_place`. `VideoProcessorBlt`
-  can hang on affected drivers, so run them one at a time.
-- WGC conversion and encode: `wgc_conversion_crops_odd_edges_and_preserves_color`,
-  `wgc_conversion_workload`, and
-  `wgc_nv12_encodes_with_matching_color_on_gpu_and_software`. The `wgc_*`
-  capture tests belong to [Windows.Graphics.Capture](/quest/m4/capture-wgc.md).
-- Media Foundation encode: `mediafoundation_cpu_rgba` and
-  `mediafoundation_camera_texture`.
-
 ### Fixes
 
 Fix only a defect a run hits. Precedent for what this catches: NVENC
@@ -98,5 +86,6 @@ is not a bug any amount of review finds.
 
 ## Related
 
+- [Windows GPU tests](/quest/m4/windows-gpu-tests.md) - the Windows GPU probes and dx12 export tests split out to run on the `windows` host
 - [#2819](/quest/m4/2819-moq-video-carry-pipewire-dma-bufs-safely-into-the-vulkan.md) - the DMA-BUF import validation this capture feeds
 - [Embedded video path](/quest/m5/video-embedded.md) - presenting on a Pi, which is a different gap

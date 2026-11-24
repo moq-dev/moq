@@ -16,7 +16,7 @@
 //! that is a refusal of the stream rather than a fault. For H.265, which has no
 //! software decoder behind this one, that refusal is what lets a player pick
 //! another rendition. The render node is the one the encoder and the GPU resize
-//! share, unless that one cannot decode H.265, and `Config::vaapi` can name
+//! share, unless that one cannot decode H.265, and `Config::device` can name
 //! it; see `frame::vaapi::device`.
 //!
 //! Progressive 8-bit 4:2:0 only, which is everything a browser's `VideoEncoder`,
@@ -25,16 +25,14 @@
 //! which surfaces here as a decode error rather than wrong pixels. Left and top
 //! cropping are also rejected.
 //!
-//! Unlike NVDEC, which cuvid lets us pin to zero display delay, H.264 output
-//! trails the input even without B-frames: its DPB releases a picture only once a
-//! later one needs its slot, and the slot count comes from the sequence's
-//! reference and reorder limits rather than the reorder depth actually used. A
-//! stream coded with three reference frames therefore keeps three pictures in
-//! hand, which is why this backend implements [`Backend::flush`] and the layers
-//! above call it when the track ends. H.265 releases a picture as soon as the
-//! SPS's reorder limit allows, so a stream without B-frames comes out as it
-//! decodes. The decoded frames carry their own timestamps, so the delay itself
-//! needs nothing downstream.
+//! Output trails the input by the reorder depth the stream declares and no
+//! more: `moq-vaapi` releases a picture as soon as the SPS's reorder limit
+//! allows, so a stream without B-frames, which is what this crate's encoders,
+//! WebRTC, and openh264 emit, comes out as it decodes. A stream with B-frames
+//! keeps pictures in hand, which is why this backend implements
+//! [`Backend::flush`] and the layers above call it when the track ends. The
+//! decoded frames carry their own timestamps, so the delay itself needs nothing
+//! downstream.
 //!
 //! Under [`Output::Native`](crate::Output::Native) each picture comes back as
 //! the zero-copy [`Surface::DmaBuf`] the hardware decoded it into. Measured on
@@ -122,14 +120,14 @@ impl Vaapi {
 			other => return Err(Error::codec(anyhow::anyhow!("VAAPI cannot decode {}", other.label()))),
 		};
 		if let Some((profile, name)) = required
-			&& offered(codec, config.vaapi.as_deref(), profile) == Some(false)
+			&& offered(codec, config.device.render(), profile) == Some(false)
 		{
 			return Err(Error::UnsupportedCodec(format!("no VA-API driver here decodes {name}")));
 		}
 
 		let vaapi = VaapiConfig {
 			codec,
-			device: vaapi::device(codec, config.vaapi.as_deref()),
+			device: vaapi::device(codec, config.device.render()),
 		};
 		let decoder = Decoder::new(vaapi).map_err(|e| Error::codec(anyhow::anyhow!("VAAPI decoder init: {e:?}")))?;
 
@@ -220,7 +218,7 @@ impl Backend for Vaapi {
 	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<(), Error> {
 		// The timestamp rides through the decoder with the picture, so it
 		// survives the DPB reordering a stream with B-frames goes through.
-		let timestamp = timestamp.as_micros() as u64;
+		let timestamp = timestamp.as_micros()? as u64;
 		if let Some(frames) = self.decode_shared(&access_unit, timestamp) {
 			return frames;
 		}
@@ -435,7 +433,7 @@ mod tests {
 		for (i, frame) in decoded.iter().enumerate() {
 			// openh264 encodes IPPP, so the pictures come back in feed order.
 			assert_eq!(
-				frame.timestamp.as_micros(),
+				frame.timestamp.as_micros().unwrap(),
 				i as u128 * 33_333,
 				"timestamp did not ride the picture"
 			);
@@ -523,13 +521,11 @@ mod tests {
 
 	/// Regression: every picture fed in comes back out, which needs the flush.
 	///
-	/// H.264 releases a picture from the DPB only once a later one needs its slot,
-	/// so a stream simply stopping leaves its tail there. How many depends on the
-	/// sequence's reference and reorder limits, not on the reorder depth the
-	/// stream used: openh264 codes one reference frame and loses the last picture,
-	/// x264's default three loses three. The `decode` half of the assertion is
-	/// what keeps this honest, since a decoder that held nothing back would pass
-	/// the rest of it without a flush ever running.
+	/// A stream with B-frames keeps pictures in the DPB until later ones come
+	/// out ahead of them, so a stream simply stopping leaves its tail there. The
+	/// fixture is libx264 at High profile with three B-frames. The `decode` half
+	/// of the assertion is what keeps this honest, since a decoder that held
+	/// nothing back would pass the rest of it without a flush ever running.
 	#[test]
 	fn flushing_returns_the_tail_the_dpb_holds() {
 		if !hw_available() {
@@ -551,44 +547,73 @@ mod tests {
 	}
 
 	fn flushing_returns_the_tail(config: &DecodeConfig) {
-		const FRAMES: u64 = 5;
-		let (w, h) = (320u32, 240u32);
-		let rgba = gradient_rgba(w, h);
-
-		let mut encoder = Encoder::new(&EncodeConfig {
-			kind: EncodeKind::Software,
-			..EncodeConfig::new(w, h, crate::FrameRate::new(30, 1).unwrap())
-		})
-		.unwrap();
+		let units = crate::decode::conformance::split(include_bytes!("../test_data/bframes_64x64_pattern_30f.h264"));
 		let mut decoder = Vaapi::open(&Codec::H264.into(), config).expect("VAAPI H.264 decoder");
 
 		let mut streamed = Vec::new();
-		for i in 0..FRAMES {
-			if i == 0 {
-				encoder.cut().unwrap();
-			}
-			let surface = Surface::rgba(&rgba, crate::Size::new(w, h)).unwrap();
-			let frame = Frame::new(surface, Timestamp::from_micros(i * 33_333).unwrap());
-			for encoded in encoder.encode_all(&frame).unwrap() {
-				streamed.extend(decoder.decode_all(encoded.payload, encoded.timestamp, i == 0).unwrap());
-			}
+		for unit in &units {
+			streamed.extend(
+				decoder
+					.decode_all(unit.payload.clone(), unit.timestamp, unit.keyframe)
+					.unwrap(),
+			);
 		}
 		assert!(
-			(streamed.len() as u64) < FRAMES,
+			streamed.len() < units.len(),
 			"the DPB held nothing back, so this test proves nothing"
 		);
 
 		let flushed = decoder.flush_all().unwrap();
-		let timestamps: Vec<u128> = streamed
+		// Timestamps have no total order across scales, so they compare as microseconds.
+		let mut timestamps: Vec<u128> = streamed
 			.iter()
 			.chain(&flushed)
-			.map(|frame| frame.timestamp.as_micros())
+			.map(|frame| frame.timestamp.as_micros().unwrap())
 			.collect();
-		let expected: Vec<u128> = (0..FRAMES as u128).map(|i| i * 33_333).collect();
+		timestamps.sort_unstable();
+		let expected: Vec<u128> = units.iter().map(|unit| unit.timestamp.as_micros().unwrap()).collect();
 		assert_eq!(timestamps, expected, "the stream lost pictures at its end");
 
 		// A second flush has nothing left to hand back, so the drain is idempotent
 		// and a caller that flushes twice does not see a picture twice.
 		assert!(decoder.flush_all().unwrap().is_empty());
+	}
+
+	/// A stream without B-frames comes out as it decodes, one picture per
+	/// access unit with nothing left for the flush.
+	///
+	/// openh264 declares one frame buffer, so a decoder that waits for the next
+	/// picture to need it hands each picture out one access unit late. A player
+	/// that keeps only the newest picture would show every one a frame interval
+	/// behind.
+	#[test]
+	fn a_stream_without_b_frames_is_not_held_back() {
+		if !hw_available() {
+			return;
+		}
+		for config in [decode_config(), gpu_decode_config()] {
+			let (w, h) = (320u32, 240u32);
+			let rgba = gradient_rgba(w, h);
+			let mut encoder = Encoder::new(&EncodeConfig {
+				kind: EncodeKind::Software,
+				..EncodeConfig::new(w, h, crate::FrameRate::new(30, 1).unwrap())
+			})
+			.unwrap();
+			let mut decoder = Vaapi::open(&Codec::H264.into(), &config).expect("VAAPI H.264 decoder");
+
+			for i in 0..5u64 {
+				if i == 0 {
+					encoder.cut().unwrap();
+				}
+				let surface = Surface::rgba(&rgba, crate::Size::new(w, h)).unwrap();
+				let timestamp = Timestamp::from_micros(i * 33_333).unwrap();
+				for encoded in encoder.encode_all(&Frame::new(surface, timestamp)).unwrap() {
+					let decoded = decoder.decode_all(encoded.payload, encoded.timestamp, i == 0).unwrap();
+					let timestamps: Vec<Timestamp> = decoded.iter().map(|frame| frame.timestamp).collect();
+					assert_eq!(timestamps, [timestamp], "picture {i} was held back");
+				}
+			}
+			assert!(decoder.flush_all().unwrap().is_empty());
+		}
 	}
 }

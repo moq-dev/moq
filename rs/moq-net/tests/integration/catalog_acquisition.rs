@@ -3,14 +3,17 @@
 //! Initial catalog acquisition while the same publisher gains a second session.
 
 use crate::support;
+use support::AppendNext;
 
 use moq_net::{Error, Version, origin};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 fn origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 async fn link(version: Version, from: &origin::Producer, to: &origin::Producer, cost: u64) -> MockPair {
@@ -45,6 +48,7 @@ async fn acquisition(version: &str, carries_instance: bool) {
 		Some(moq_net::origin::RouteEvent {
 			kind: moq_net::origin::RouteKind::Start,
 			announce,
+			..
 		}) => announce.route.cost(),
 		other => panic!("expected the first route, got {other:?}"),
 	};
@@ -62,17 +66,21 @@ async fn acquisition(version: &str, carries_instance: bool) {
 		Some(moq_net::origin::RouteEvent {
 			kind: moq_net::origin::RouteKind::Update,
 			announce,
+			..
 		}) if carries_instance => announce.route.cost(),
 		Some(moq_net::origin::RouteEvent {
 			kind: moq_net::origin::RouteKind::Restart,
 			announce,
+			..
 		}) if !carries_instance => announce.route.cost(),
 		other => panic!("{version}: unexpected route change {other:?}"),
 	};
 	assert!(new_cost < old_cost, "the cheaper session wins the route");
 	let track = request.accept(None);
-	let mut group = track.append_group().unwrap();
-	group.write_frame(None, b"catalog".to_vec()).unwrap();
+	let mut group = track.append_next().unwrap();
+	group
+		.write_frame(moq_net::Timestamp::unscaled(group.start), b"catalog".to_vec())
+		.unwrap();
 	group.finish().unwrap();
 	let result = pending.await;
 	if carries_instance {

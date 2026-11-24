@@ -4,6 +4,7 @@ import { type Getter, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Producer as BroadcastProducer, type Tracks } from "../broadcast.ts";
 import { accept, connect } from "../connection/index.ts";
+import { defined } from "../defined.test-util.ts";
 import { fromTransport, NotFound, SessionCode, StreamCode, StreamError } from "../error.ts";
 import { randomHop } from "../hop.ts";
 import * as Instance from "../instance.ts";
@@ -14,6 +15,7 @@ import { Reader, Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import type { Limits } from "../util/limits.ts";
 import { wireOf } from "../wire.ts";
+import { DatagramsInfo } from "./datagram.ts";
 import { Publisher } from "./publisher.ts";
 import { StreamId } from "./stream.ts";
 import { Subscriber } from "./subscriber.ts";
@@ -98,6 +100,47 @@ test("events and the request round-trip", async () => {
 	expect(got.instance).toBe(instance);
 });
 
+test("a datagram track's events carry its kind ahead of its name", async () => {
+	const info = new DatagramsInfo({ priority: 0 });
+	// Type, length, kind 1, name "a", then DATAGRAMS_INFO: length 2, priority 0x80, no timescale.
+	expect(
+		await bytes((w) => encodeTracksEvent(w, { kind: "added", name: "a", datagrams: true, info }, version)),
+	).toEqual(new Uint8Array([0x00, 0x06, 0x01, 0x01, 0x61, 0x02, 0x80, 0x00]));
+	expect(await bytes((w) => encodeTracksEvent(w, { kind: "removed", name: "a", datagrams: true }, version))).toEqual(
+		new Uint8Array([0x01, 0x03, 0x01, 0x01, 0x61]),
+	);
+
+	const events: TracksEvent[] = [
+		{
+			kind: "added",
+			name: "a",
+			datagrams: true,
+			info: new DatagramsInfo({ priority: -2, timescale: Timescale.MILLI }),
+		},
+		{ kind: "finished", name: "a", datagrams: true },
+		{ kind: "removed", name: "a", datagrams: true },
+	];
+	const encoded = await bytes(async (w) => {
+		for (const event of events) await encodeTracksEvent(w, event, version);
+	});
+	const reader = new Reader(undefined, encoded, version);
+	const added = await decodeTracksEventMaybe(reader, version);
+	expect(added).toMatchObject({ kind: "added", name: "a", datagrams: true, info: { priority: -2 } });
+	expect(added?.kind === "added" && added.info.timescale).toBe(Timescale.MILLI);
+	expect(await decodeTracksEventMaybe(reader, version)).toEqual({ kind: "finished", name: "a", datagrams: true });
+	expect(await decodeTracksEventMaybe(reader, version)).toEqual({ kind: "removed", name: "a", datagrams: true });
+
+	// Any kind but the two is malformed.
+	for (const typ of [0x00, 0x01, 0x02]) {
+		await expect(
+			decodeTracksEventMaybe(
+				new Reader(undefined, new Uint8Array([typ, 0x03, 0x02, 0x01, 0x61]), version),
+				version,
+			),
+		).rejects.toThrow("unknown listed track kind");
+	}
+});
+
 test("older versions have no tracks stream", async () => {
 	await expect(bytes((w) => new TracksMessage(Path.from("room")).encode(w, Version.DRAFT_06))).rejects.toThrow(
 		"not supported",
@@ -155,8 +198,18 @@ test("a session forwards the peer's tracks as they arrive, and syncs when the pe
 	await peer.send({ kind: "removed", name: "b" });
 	expect(await next(tracks)).toBe("-b");
 
+	// A datagram track of a listed name is a track apart.
+	await peer.send({ kind: "added", name: "a", datagrams: true, info: new DatagramsInfo({ priority: 1 }) });
+	expect(await tracks.next()).toEqual({
+		kind: "added",
+		name: "a",
+		datagrams: true,
+		info: { priority: 1, timescale: null },
+	});
 	await peer.send({ kind: "removed", name: "a" });
-	expect(await next(tracks)).toBe("-a");
+	expect(await tracks.next()).toEqual({ kind: "removed", name: "a" });
+	await peer.send({ kind: "finished", name: "a", datagrams: true });
+	expect(await tracks.next()).toEqual({ kind: "finished", name: "a", datagrams: true });
 
 	// The peer's broadcast ended: so does the listing, whether or not its retraction arrived.
 	peer.stream.writer.close();
@@ -250,15 +303,21 @@ test("a listing past the announces cap is reset, and the session stays", async (
 	again.close();
 });
 
-// Quarantined: timed out at 5 s in 2 of 30 full js/net runs under 48 CPU burners; see moq-dev/moq#8355.
-test.skip("a flood of a peer's listing churn yields to the host's tasks", async () => {
+// The budget's CPU slice is stubbed to pass on every check, so the yield does not depend on load
+// and a short flood still spans many slices.
+// biome-ignore lint/style/noRestrictedGlobals: stubs the host CPU clock the budget reads.
+const host = performance;
+test("a flood of a peer's listing churn yields to the host's tasks", async () => {
+	// Starts from the real time, since the shared budget may hold a real slice start.
+	let fakeNow = host.now();
+	spyOn(host, "now").mockImplementation(() => (fakeNow += 5));
 	const { subscriber, listed } = handPlayed();
 	const tracks = subscriber.consume(Path.from("room")).tracks();
 	const peer = await listed();
 	// Churn of one name never reaches the announces cap, so only the budget bounds it.
 	const flood = await bytes(async (w) => {
 		await encodeTracksEvent(w, { kind: "added", name: "first", info }, version);
-		for (let i = 0; i < 20_000; i++) {
+		for (let i = 0; i < 1024; i++) {
 			await encodeTracksEvent(w, { kind: "added", name: "churn", info }, version);
 			await encodeTracksEvent(w, { kind: "removed", name: "churn" }, version);
 		}
@@ -289,7 +348,7 @@ test("a version without the Tracks Stream refuses the listing", async () => {
 });
 
 function scoped(prefix: string): Grant {
-	return { publish: new Path.Patterns(), subscribe: new Path.Patterns([Path.Pattern.subtree(prefix)]) };
+	return { publish: new Path.Prefixes(), subscribe: new Path.Prefixes([Path.Prefix.parse(prefix)]) };
 }
 
 test("a listing our grant does not cover is refused, and never reaches the wire", async () => {
@@ -356,7 +415,7 @@ test("data after a TRACKS request closes the session", async () => {
 	const origin = new OriginProducer();
 	const broadcastRoute = origin.route(Path.from("room"));
 	const broadcast = broadcastRoute.broadcast;
-	broadcast.createTrack("a");
+	defined(broadcast.createTrack("a"));
 	const { list, closing } = publisher(origin);
 	const listing = await list("room");
 	expect(await listing.next()).toBe("+a");
@@ -371,7 +430,7 @@ test("a publisher lists its broadcast's own tracks, never one served on request"
 	const origin = new OriginProducer();
 	const broadcastRoute = origin.route(Path.from("room"));
 	const broadcast = broadcastRoute.broadcast;
-	broadcast.createTrack("a", { priority: 5 });
+	defined(broadcast.createTrack("a", { priority: 5 }));
 	// Served on request: answered when asked, never listed.
 	void wireOf(broadcast)
 		.requested()
@@ -382,7 +441,7 @@ test("a publisher lists its broadcast's own tracks, never one served on request"
 	expect(await listing.next()).toBe("synced");
 
 	broadcast.consume().track("x").subscribe();
-	broadcast.createTrack("b");
+	defined(broadcast.createTrack("b"));
 	expect(await listing.next()).toBe("+b");
 
 	broadcast.close();
@@ -393,7 +452,7 @@ test("a newer listing of a broadcast on one session replaces the older", async (
 	const origin = new OriginProducer();
 	const broadcastRoute = origin.route(Path.from("room"));
 	const broadcast = broadcastRoute.broadcast;
-	broadcast.createTrack("a");
+	defined(broadcast.createTrack("a"));
 	const { list } = publisher(origin);
 	const older = await list("room");
 	expect(await older.next()).toBe("+a");
@@ -402,7 +461,7 @@ test("a newer listing of a broadcast on one session replaces the older", async (
 	expect(await newer.next()).toBe("+a");
 	expect(await newer.next()).toBe("synced");
 	expect(await older.next()).toBe(`reset: ${StreamCode.Cancel}`);
-	broadcast.createTrack("b");
+	defined(broadcast.createTrack("b"));
 	expect(await newer.next()).toBe("+b");
 	broadcast.close();
 });
@@ -413,7 +472,7 @@ test("a path served through a covering prefix route is NOT_FOUND", async () => {
 	void (async () => {
 		for await (const request of dynamic.requested()) {
 			const served = new BroadcastProducer();
-			served.createTrack("video");
+			defined(served.createTrack("video"));
 			request.serve(served);
 		}
 	})();
@@ -430,7 +489,7 @@ test("a local read through a covering prefix route is NOT_FOUND, and through its
 		void (async () => {
 			for await (const request of dynamic.requested()) {
 				const served = new BroadcastProducer();
-				served.createTrack("video");
+				defined(served.createTrack("video"));
 				request.serve(served);
 			}
 		})();
@@ -464,13 +523,15 @@ test("a listing over a session carries each track's info, end to end", async () 
 	]);
 	const broadcastRoute = origin.route(Path.from("room"));
 	const broadcast = broadcastRoute.broadcast;
-	broadcast.createTrack("a", {
-		timescale: Timescale.MILLI,
-		maxAge: Duration.millis(3000),
-		priority: 9,
-		refresh: 4,
-		compression: "deflate",
-	});
+	defined(
+		broadcast.createTrack("a", {
+			timescale: Timescale.MILLI,
+			maxAge: Duration.millis(3000),
+			priority: 9,
+			refresh: { ratio: 4, interval: Duration.millis(250) },
+			compression: "deflate",
+		}),
+	);
 
 	const tracks = wireOf(client).consume(Path.from("room")).tracks();
 	expect(await tracks.next()).toEqual({
@@ -480,15 +541,24 @@ test("a listing over a session carries each track's info, end to end", async () 
 			timescale: Timescale.MILLI,
 			maxAge: Duration.millis(3000),
 			priority: 9,
-			refresh: 4,
+			refresh: { ratio: 4, interval: Duration.millis(250) },
 			compression: "deflate",
 		},
 	});
 	expect(await next(tracks)).toBe("synced");
-	broadcast.createTrack("b");
+	defined(broadcast.createTrack("b"));
 	expect(await next(tracks)).toBe("+b");
 	broadcast.removeTrack("a");
 	expect(await next(tracks)).toBe("-a");
+	const datagrams = defined(broadcast.createDatagrams("a", { timescale: Timescale.MILLI, priority: 3 }));
+	expect(await tracks.next()).toEqual({
+		kind: "added",
+		name: "a",
+		datagrams: true,
+		info: { timescale: Timescale.MILLI, priority: 3 },
+	});
+	datagrams.finish();
+	expect(await tracks.next()).toEqual({ kind: "finished", name: "a", datagrams: true });
 	broadcast.close();
 	expect(await next(tracks)).toBe("end");
 	client.abort();
@@ -508,7 +578,7 @@ test("an instance-pinned front lists its serving route's tracks", async () => {
 		instance: { id: Instance.parse("01900000-0000-7000-8000-000000000001"), epoch: 0n },
 	});
 	const broadcast = broadcastRoute.broadcast;
-	broadcast.createTrack("a");
+	defined(broadcast.createTrack("a"));
 	broadcastRoute.announce();
 
 	const reader = clientOrigin.consume();
@@ -522,7 +592,7 @@ test("an instance-pinned front lists its serving route's tracks", async () => {
 	// The front syncs with its source's listing, which syncs when the peer does.
 	expect(await next(tracks)).toBe("+a");
 	expect(await next(tracks)).toBe("synced");
-	broadcast.createTrack("b");
+	defined(broadcast.createTrack("b"));
 	expect(await next(tracks)).toBe("+b");
 	tracks.close();
 	request.close();
@@ -538,7 +608,7 @@ test("a front pinned to a named instance served through a covering prefix route 
 	void (async () => {
 		for await (const request of dynamic.requested()) {
 			const served = new BroadcastProducer();
-			served.createTrack("video");
+			defined(served.createTrack("video"));
 			request.serve(served);
 		}
 	})();

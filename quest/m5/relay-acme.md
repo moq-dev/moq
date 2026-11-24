@@ -25,7 +25,7 @@ server such as Pebble.
 
 Decided 2026-11-09 (maintainer, /quest-unblock): rind deleted
 `rind-instant-acme` on 2026-11-08
-([moq-dev/rind#510](https://github.com/moq-dev/rind/pull/510)) because no
+([kixel-ai/rind#510](https://github.com/kixel-ai/rind/pull/510)) because no
 consumer used it, so this quest waits on instant-acme 0.9 directly instead of
 on that crate. Restore the adapter in rind from #510's parent commit, published
 this time (rejected: dropping relay ACME, and leaving the wait on the deleted

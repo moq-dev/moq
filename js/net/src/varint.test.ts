@@ -62,17 +62,6 @@ test("Varint bigint roundtrip preserves 62-bit precision", () => {
 	}
 });
 
-test("Varint size calculation", () => {
-	expect(Varint.size(0)).toBe(1);
-	expect(Varint.size(63)).toBe(1);
-	expect(Varint.size(64)).toBe(2);
-	expect(Varint.size(16383)).toBe(2);
-	expect(Varint.size(16384)).toBe(4);
-	expect(Varint.size(1073741823)).toBe(4);
-	expect(Varint.size(1073741824)).toBe(8);
-	expect(Varint.size(Number.MAX_SAFE_INTEGER)).toBe(8);
-});
-
 test("Varint decode returns remaining buffer", () => {
 	// Encode a value and append extra data
 	const encoded = Varint.encode(42);

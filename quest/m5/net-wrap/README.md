@@ -15,7 +15,7 @@ Compression is not a wrapper: it moves into moq-net as a track flag
 moq-flate, so moq-flate is out of scope.
 
 Non-goals:
-- A runtime seam: libraries poll and spawn nothing ([the remaining library spawns](/quest/m3/spawn-audit.md)).
+- A runtime seam: libraries poll and spawn nothing ([the remaining library spawns](/quest/m4/spawn-audit.md)).
 - The transport seam: custom transports implement moq-net's `transport::poll` traits, including both native WebTransport backends.
 
 ## Plan
@@ -39,7 +39,7 @@ and its trait-versus-bridge comparison:
   `next_frame`, `read_chunk`,
   the broadcast consumer's `tracks` listing (maintainer, 2026-10-24), and
   their `poll_*` forms. A wrapper adapts
-  to moq-net, not the other way around: `moq_crypto::e2ee::Error` converts into
+  to moq-net, not the other way around: `moq_e2ee::Error` converts into
   `moq_net::Error`.
 - **Datagrams follow the datagram types.** Datagram tracks have their own
   producer and consumer types (`datagram::Producer::append` and `insert`,

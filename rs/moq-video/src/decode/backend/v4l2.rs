@@ -146,7 +146,7 @@ impl V4l2 {
 			return Err(Error::UnsupportedCodec(format!("{NAME} decodes H.264 only")));
 		}
 
-		let device = v4l2::open(&ROLE, config.v4l2.as_deref())?;
+		let device = v4l2::open(&ROLE, config.device.video())?;
 		// Before the first access unit, so the announcement of the stream's size
 		// cannot be missed.
 		device.subscribe_source_change()?;
@@ -192,6 +192,8 @@ impl V4l2 {
 
 	/// Hand one access unit to the driver, waiting for a free buffer.
 	fn submit(&mut self, access_unit: &Bytes, timestamp: Timestamp) -> Result<(), Error> {
+		// Ahead of taking a buffer, so a timestamp with no time leaves none claimed.
+		let key = key(timestamp)?;
 		let deadline = Instant::now().saturating_add(BUFFER_TIMEOUT);
 		let index = loop {
 			self.reclaim_coded()?;
@@ -219,7 +221,6 @@ impl V4l2 {
 		self.coded.plane_mut(index, 0)[..access_unit.len()].copy_from_slice(access_unit);
 
 		let bytesused = [access_unit.len() as u32];
-		let key = key(timestamp);
 		self.coded.queue(&self.device, index, &bytesused, key)?;
 		remember(&mut self.submitted, key, timestamp);
 		Ok(())
@@ -344,7 +345,7 @@ impl V4l2 {
 	/// `V4L2_BUF_FLAG_LAST` on its last picture and then with `EPIPE` on any
 	/// dequeue past it.
 	fn drain(&mut self) -> Result<bool, Error> {
-		let Phase::Decoding(pictures) = &self.phase else {
+		let Phase::Decoding(pictures) = &mut self.phase else {
 			return Ok(false);
 		};
 
@@ -370,11 +371,13 @@ impl V4l2 {
 					);
 					None
 				}
-				_ => Some(pictures.planes.read(&pictures.queue, &buffer)?),
+				_ => Some(pictures.planes.read(&pictures.queue, &buffer)),
 			};
-			// Back to the driver before anything can fail: a picture buffer left out
-			// of the pool is one the decoder never gets to write again.
+			// Back to the driver before anything can fail, a bad read included: a
+			// picture buffer left out of the pool is one the decoder never gets to
+			// write again.
 			pictures.queue.queue(&self.device, buffer.index, &[], Duration::ZERO)?;
+			let decoded = decoded.transpose()?;
 
 			if let Some(decoded) = decoded {
 				let timestamp = restore(&mut self.submitted, buffer.timestamp)?;
@@ -519,9 +522,10 @@ impl V4l2 {
 }
 
 /// The `struct timeval` an access unit rides the driver under, which the
-/// driver copies onto the picture it becomes.
-fn key(timestamp: Timestamp) -> Duration {
-	Duration::from_micros(timestamp.as_micros() as u64)
+/// driver copies onto the picture it becomes, refused for an
+/// [unscaled](Timestamp::unscaled) timestamp, which has no time to carry.
+fn key(timestamp: Timestamp) -> Result<Duration, moq_net::TimeOverflow> {
+	Ok(Duration::from_micros(timestamp.as_micros()? as u64))
 }
 
 /// Record an access unit handed to the driver, forgetting the oldest once
@@ -637,14 +641,17 @@ mod tests {
 		let ninety_khz = moq_net::Timescale::new(90_000).unwrap();
 		let first = Timestamp::new(3003, ninety_khz).unwrap();
 		let second = Timestamp::new(6006, ninety_khz).unwrap();
-		assert_ne!(Timestamp::from_micros(first.as_micros() as u64).unwrap(), first);
+		assert_ne!(
+			Timestamp::from_micros(first.as_micros().unwrap() as u64).unwrap(),
+			first
+		);
 
 		let mut submitted = VecDeque::new();
-		remember(&mut submitted, key(first), first);
-		remember(&mut submitted, key(second), second);
+		remember(&mut submitted, key(first).unwrap(), first);
+		remember(&mut submitted, key(second).unwrap(), second);
 
-		assert_eq!(restore(&mut submitted, key(second)).unwrap(), second);
-		assert_eq!(restore(&mut submitted, key(first)).unwrap(), first);
+		assert_eq!(restore(&mut submitted, key(second).unwrap()).unwrap(), second);
+		assert_eq!(restore(&mut submitted, key(first).unwrap()).unwrap(), first);
 		assert!(submitted.is_empty());
 	}
 
@@ -653,7 +660,7 @@ mod tests {
 	#[test]
 	fn an_unknown_picture_keeps_the_buffer_timestamp() {
 		let mut submitted = VecDeque::new();
-		remember(&mut submitted, key(micros(10)), micros(10));
+		remember(&mut submitted, key(micros(10)).unwrap(), micros(10));
 		assert_eq!(restore(&mut submitted, Duration::from_micros(7)).unwrap(), micros(7));
 		// The one that was submitted is still waiting for its picture.
 		assert_eq!(submitted.len(), 1);
@@ -664,12 +671,12 @@ mod tests {
 	fn remembered_access_units_are_bounded() {
 		let mut submitted = VecDeque::new();
 		for at in 0..=REMEMBERED as u64 {
-			remember(&mut submitted, key(micros(at)), micros(at));
+			remember(&mut submitted, key(micros(at)).unwrap(), micros(at));
 		}
 		assert_eq!(submitted.len(), REMEMBERED);
-		assert_eq!(restore(&mut submitted, key(micros(0))).unwrap(), micros(0));
+		assert_eq!(restore(&mut submitted, key(micros(0)).unwrap()).unwrap(), micros(0));
 		assert_eq!(submitted.len(), REMEMBERED);
-		assert_eq!(restore(&mut submitted, key(micros(1))).unwrap(), micros(1));
+		assert_eq!(restore(&mut submitted, key(micros(1)).unwrap()).unwrap(), micros(1));
 		assert_eq!(submitted.len(), REMEMBERED - 1);
 	}
 }

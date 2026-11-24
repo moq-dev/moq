@@ -4,13 +4,15 @@
 //! tokens union, and a publication outside the grant fails loud, on moq-lite-07-wip.
 //! moq-transport carries tokens only on the requests that name them.
 
+use crate::WithMax as _;
 use crate::support;
+use support::AppendNext;
 
 use std::time::Duration;
 
 use futures::StreamExt;
 use moq_net::{
-	Client, Error, Pattern, Patterns, Server, Session, SessionError, StreamError, Version,
+	Client, Error, Prefix, Prefixes, Server, Session, SessionError, StreamError, Version,
 	auth::{self, Grant},
 	origin,
 };
@@ -69,9 +71,10 @@ cases!(
 	a_handle_backs_one_active_session,
 	a_token_queued_before_our_goaway_rides_only_the_successor,
 	a_broadcast_received_from_the_peer_is_not_ours_to_check,
-	exact_and_subtree_grants_admit_their_broadcast,
-	pattern_grants_arrive_exactly,
-	a_wildcard_grant_is_enforced,
+	a_broadcast_relayed_from_another_client_is_not_ours_to_check,
+	a_prefix_grant_admits_its_broadcast,
+	prefix_grants_arrive_exactly,
+	a_prefix_grant_is_enforced_by_segment,
 );
 
 #[kio::test]
@@ -120,8 +123,8 @@ async fn lite_07_a_scoped_withdrawal_ends() {
 }
 
 #[kio::test]
-async fn lite_07_a_scope_change_reopens_without_letting_go() {
-	a_scope_change_reopens_without_letting_go(LITE_07).await
+async fn lite_07_a_scope_change_edits_without_letting_go() {
+	a_scope_change_edits_without_letting_go(LITE_07).await
 }
 
 #[kio::test]
@@ -260,11 +263,7 @@ async fn connect_route_auth_on(
 		client_publish: Some(client_origin.clone()),
 		server_subscribe: Some(server_origin.clone()),
 		server_requests: true,
-		server_extensions: Some({
-			let mut extensions = moq_net::setup::Extensions::default();
-			extensions.solicit = false;
-			extensions
-		}),
+		server_declines_solicit: true,
 		client_auth,
 		..Default::default()
 	})
@@ -328,24 +327,26 @@ async fn a_route_auth_renews_its_announce(version: &'static str) {
 
 /// Build an origin producer, spawning its driver on the ambient runtime.
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
-fn patterns(prefixes: &[&str]) -> Patterns {
+fn prefixes(prefixes: &[&str]) -> Prefixes {
 	prefixes
 		.iter()
-		.map(|prefix| Pattern::subtree(prefix).unwrap())
+		.map(|prefix| Prefix::try_from(*prefix).unwrap())
 		.collect()
 }
 
 fn grant(publish: &[&str], subscribe: &[&str]) -> Grant {
-	grant_of(patterns(publish), patterns(subscribe))
+	grant_of(prefixes(publish), prefixes(subscribe))
 }
 
 /// A grant of exactly these paths that never expires.
-fn grant_of(publish: Patterns, subscribe: Patterns) -> Grant {
+fn grant_of(publish: Prefixes, subscribe: Prefixes) -> Grant {
 	let mut grant = Grant::default();
 	grant.publish = publish;
 	grant.subscribe = subscribe;
@@ -377,15 +378,18 @@ async fn wait_announced(origin: &origin::Consumer, path: &str, active: bool) {
 			kind:
 				moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update | moq_net::origin::RouteKind::Restart,
 			announce: update,
+			..
 		} => {
 			live.insert(update.prefix.to_string());
 		}
 		moq_net::origin::RouteEvent {
 			kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 			announce: update,
+			..
 		} => {
 			live.remove(update.prefix.as_str());
 		}
+		other => panic!("unexpected route event {other:?}"),
 	};
 	// Take in the replay first, so a retraction is judged against what is announced now
 	// rather than against an empty start.
@@ -408,8 +412,8 @@ struct Options {
 	server_subscribe: Option<origin::Producer>,
 	/// Take the server's AUTH requests before its driver runs.
 	server_requests: bool,
-	/// The server's extensions, when not the defaults.
-	server_extensions: Option<moq_net::setup::Extensions>,
+	/// The server acts as a moq-transport peer without MoQ Solicit.
+	server_declines_solicit: bool,
 	version: Option<&'static str>,
 	/// The connection credential the client's SETUP presents.
 	client_token: Option<&'static [u8]>,
@@ -454,10 +458,9 @@ async fn connect(opts: Options) -> Pair {
 		client = client.with_auth(handle);
 	}
 
-	let mut server = Server::new().with_versions(version.into());
-	if let Some(extensions) = opts.server_extensions {
-		server = server.with_extensions(extensions);
-	}
+	let mut server = Server::new()
+		.with_versions(version.into())
+		.with_solicit(!opts.server_declines_solicit);
 	if let Some(publish) = &opts.server_publish {
 		server = server.with_publisher(publish);
 	}
@@ -477,7 +480,7 @@ async fn connect(opts: Options) -> Pair {
 	};
 	let server_fut = async {
 		let mut handshake = server
-			.accept_request(now(), server_transport)
+			.handshake(now(), server_transport)
 			.await
 			.expect("server handshake");
 		let setup_token = handshake.token().cloned();
@@ -538,8 +541,8 @@ async fn both_sides_learn_their_grant_from_scoped_origins(version: &'static str)
 			version: Some(version),
 			client_publish: Some(produce_origin(2)),
 			client_subscribe: Some(produce_origin(3)),
-			server_publish: Some(relay.scope("", &patterns(&["room"])).unwrap()),
-			server_subscribe: Some(relay.scope("", &patterns(&["room/alice"])).unwrap()),
+			server_publish: Some(relay.scope("", &prefixes(&["room"])).unwrap()),
+			server_subscribe: Some(relay.scope("", &prefixes(&["room/alice"])).unwrap()),
 			..Default::default()
 		})
 		.await;
@@ -581,7 +584,7 @@ async fn an_out_of_scope_announce_aborts_with_the_path(version: &'static str) {
 		let pair = connect(Options {
 			version: Some(version),
 			client_publish: Some(publisher.clone()),
-			server_subscribe: Some(relay.scope("", &patterns(&["baz"])).unwrap()),
+			server_subscribe: Some(relay.scope("", &prefixes(&["baz"])).unwrap()),
 			..Default::default()
 		})
 		.await;
@@ -623,7 +626,7 @@ async fn a_broadcast_published_before_the_grant_is_checked(version: &'static str
 		let pair = connect(Options {
 			version: Some(version),
 			client_publish: Some(publisher.clone()),
-			server_subscribe: Some(produce_origin(1).scope("", &patterns(&["baz"])).unwrap()),
+			server_subscribe: Some(produce_origin(1).scope("", &prefixes(&["baz"])).unwrap()),
 			..Default::default()
 		})
 		.await;
@@ -818,10 +821,10 @@ async fn a_scoped_withdrawal_ends(version: &'static str) {
 	.expect("timed out");
 }
 
-/// Widening the limit to a second prefix reopens the relay's request above both, and
-/// narrowing it reopens the request at the first again, each without letting go of what
-/// the limit kept: the old request serves until the new one is synced.
-async fn a_scope_change_reopens_without_letting_go(version: &'static str) {
+/// Widening the limit to a second prefix edits what the relay asks for to add it, and
+/// narrowing it removes it again, each without letting go of what the limit kept: the
+/// prefix both sets hold is never asked for again.
+async fn a_scope_change_edits_without_letting_go(version: &'static str) {
 	within(async {
 		let publisher = produce_origin(2);
 		let relay = produce_origin(1);
@@ -840,7 +843,7 @@ async fn a_scope_change_reopens_without_letting_go(version: &'static str) {
 		kio::clock::sleep(Duration::from_secs(1)).await;
 		assert_eq!(kinds(&mut routes, "a/x"), [origin::RouteKind::Start]);
 
-		// Widened past what the first request asked for: the new one carries `b`.
+		// Widened past what the relay asked for: the edit adds `b`.
 		pair.server.auth().authorize(&grant(&["a", "b"], &[]));
 		kio::clock::sleep(Duration::from_secs(1)).await;
 		let b = publisher.route("b/y", moq_net::origin::RouteOptions::hidden()).unwrap();
@@ -861,9 +864,43 @@ async fn a_scope_change_reopens_without_letting_go(version: &'static str) {
 	.expect("timed out");
 }
 
+/// Widening the limit to the root reopens the relay's request there and files the peer's
+/// claims under bare identities, along a route at another prefix. The new request takes
+/// `a/x` over in place, with no let go between the two.
+#[kio::test]
+async fn lite_07_a_scope_widened_to_the_root_reopens_without_letting_go() {
+	within(async {
+		let publisher = produce_origin(2);
+		let relay = produce_origin(1);
+		let pair = connect(Options {
+			version: Some(LITE_07),
+			client_publish: Some(publisher.clone()),
+			server_subscribe: Some(relay.clone()),
+			..Default::default()
+		})
+		.await;
+		pair.server.auth().authorize(&grant(&["a"], &[]));
+
+		let mut routes = relay.consume().routes();
+		let a = publisher.route("a/x", moq_net::origin::RouteOptions::hidden()).unwrap();
+		a.announce().unwrap();
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		assert_eq!(kinds(&mut routes, "a/x"), [origin::RouteKind::Start]);
+
+		pair.server.auth().authorize(&grant(&[""], &[]));
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		assert!(
+			(kinds(&mut routes, "a/x").iter()).all(|kind| *kind == origin::RouteKind::Update),
+			"the widening let go of a/x"
+		);
+	})
+	.await
+	.expect("timed out");
+}
+
 /// A session holding all the announce slots it may has no room to hear its peer's claims
-/// twice, so the old request gives its slots to the new one during a scope change,
-/// rather than the handover running the peer past its cap.
+/// twice, and a scope change sends none again: the edit keeps what both sets cover, so
+/// the peer stays within its cap.
 async fn a_scope_change_at_the_announce_cap_keeps_the_session(version: &'static str) {
 	within(async {
 		let publisher = produce_origin(2);
@@ -891,7 +928,7 @@ async fn a_scope_change_at_the_announce_cap_keeps_the_session(version: &'static 
 
 		pair.server.auth().authorize(&grant(&["a", "b"], &[]));
 		kio::clock::sleep(Duration::from_secs(1)).await;
-		assert_eq!(kinds(&mut routes, "a/x"), [], "the handover let go of a/x");
+		assert_eq!(kinds(&mut routes, "a/x"), [], "the edit let go of a/x");
 		assert_eq!(pair.server_transport.close_reason(), None);
 		assert_eq!(pair.client_transport.close_reason(), None);
 	})
@@ -1191,10 +1228,10 @@ async fn older_versions_have_no_grant(version: &'static str) {
 	.expect("timed out");
 }
 
-/// An exact path and a subtree are both admitted, and told as issued wherever AUTH runs:
-/// a grant is never refused for the shape of its patterns.
-async fn exact_and_subtree_grants_admit_their_broadcast(version: &'static str) {
-	for scope in ["ch1", "ch1/**"] {
+/// A prefix naming the broadcast and the empty prefix both admit it, and are told as
+/// issued wherever AUTH runs.
+async fn a_prefix_grant_admits_its_broadcast(version: &'static str) {
+	for scope in ["ch1", ""] {
 		within(async {
 			let relay = produce_origin(1);
 			let broadcast = relay.route("ch1", moq_net::origin::RouteOptions::hidden()).unwrap();
@@ -1202,7 +1239,7 @@ async fn exact_and_subtree_grants_admit_their_broadcast(version: &'static str) {
 			broadcast.announce().unwrap();
 
 			let received = produce_origin(2);
-			let scope = pattern_set(&[scope]);
+			let scope = prefixes(&[scope]);
 			let pair = connect(Options {
 				version: Some(version),
 				client_subscribe: Some(received.clone()),
@@ -1211,7 +1248,7 @@ async fn exact_and_subtree_grants_admit_their_broadcast(version: &'static str) {
 			})
 			.await;
 
-			let mut group = track.append_group().unwrap();
+			let mut group = track.append_next().unwrap();
 			group
 				.write_frame(moq_net::Timestamp::from_millis(0).unwrap(), b"frame".as_ref())
 				.unwrap();
@@ -1223,8 +1260,7 @@ async fn exact_and_subtree_grants_admit_their_broadcast(version: &'static str) {
 				.await
 				.unwrap()
 				.unwrap();
-			let prefs = moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)));
+			let prefs = moq_net::track::Subscription::default().with_max(Duration::from_secs(10));
 			let mut sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
 			sub.recv_group().await.unwrap().expect("a group");
 
@@ -1290,7 +1326,7 @@ async fn a_live_subscription_survives_union_renewal(version: &'static str) {
 			.await
 			.unwrap()
 			.unwrap();
-		let mut group = published.append_group().unwrap();
+		let mut group = published.append_next().unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(0).unwrap(), b"first".as_ref())
 			.unwrap();
@@ -1307,7 +1343,7 @@ async fn a_live_subscription_survives_union_renewal(version: &'static str) {
 		let _renewed = renewed.unwrap();
 		drop(first);
 		first_grant.closed().await;
-		let mut group = published.append_group().unwrap();
+		let mut group = published.append_next().unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), b"renewed".as_ref())
 			.unwrap();
@@ -1326,10 +1362,7 @@ async fn a_live_subscription_survives_union_renewal(version: &'static str) {
 async fn a_revoked_grant_cancels_its_subscriptions(version: &'static str) {
 	within(async {
 		let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
-		let prefs = || {
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)))
-		};
+		let prefs = || moq_net::track::Subscription::default().with_max(Duration::from_secs(10));
 
 		// The server publishes room/x to the client; the client publishes up/y to the server.
 		let server_origin = produce_origin(1);
@@ -1362,9 +1395,9 @@ async fn a_revoked_grant_cancels_its_subscriptions(version: &'static str) {
 		});
 		let (_, setup) = issued.next().await.unwrap();
 
-		let mut group = down_track.append_group().unwrap();
+		let mut group = down_track.append_next().unwrap();
 		group.write_frame(ts(0), b"down".as_ref()).unwrap();
-		let mut group = up_track.append_group().unwrap();
+		let mut group = up_track.append_next().unwrap();
 		group.write_frame(ts(0), b"up".as_ref()).unwrap();
 
 		let remote = received
@@ -1514,10 +1547,10 @@ async fn a_grant_update_too_large_for_one_message_is_unsupported(version: &'stat
 		let token = added(&pair.client.auth(), "update").await.unwrap();
 		let (_, updated) = issued.next().await.unwrap();
 		assert_eq!(granted(&pair.client).await, grant(&["a", "b"], &[]));
-		let huge: Patterns = (0..20)
-			.map(|i| Pattern::subtree(&format!("{i}{}", "x".repeat(4000))).unwrap())
+		let huge: Prefixes = (0..20)
+			.map(|i| Prefix::try_from(format!("{i}{}", "x".repeat(4000))).unwrap())
 			.collect();
-		updated.update(grant_of(huge, Patterns::new()));
+		updated.update(grant_of(huge, Prefixes::new()));
 		let err = token.closed().await;
 		assert!(matches!(err, Error::Unsupported), "{err:?}");
 		assert_eq!(token.grant().peek(), None);
@@ -1528,13 +1561,9 @@ async fn a_grant_update_too_large_for_one_message_is_unsupported(version: &'stat
 	.expect("timed out");
 }
 
-fn pattern_set(texts: &[&str]) -> Patterns {
-	texts.iter().map(|text| Pattern::try_from(*text).unwrap()).collect()
-}
-
-/// Literal, wildcard, and mixed grants reach the presenter exactly as issued, never
+/// Single, nested, sibling, and root grants reach the presenter exactly as issued, never
 /// widened to a covering prefix.
-async fn pattern_grants_arrive_exactly(version: &'static str) {
+async fn prefix_grants_arrive_exactly(version: &'static str) {
 	within(async {
 		let mut pair = connect(Options {
 			version: Some(version),
@@ -1546,11 +1575,11 @@ async fn pattern_grants_arrive_exactly(version: &'static str) {
 		.await;
 		let table = |token: &[u8]| -> Option<Grant> {
 			let (publish, subscribe) = match token {
-				b"" => (pattern_set(&["a/**"]), pattern_set(&[])),
-				b"exact" => (pattern_set(&["room/alice"]), pattern_set(&[])),
-				b"wildcard" => (pattern_set(&["room/*/cam"]), pattern_set(&["**/demo.hang"])),
-				b"mixed" => (pattern_set(&["room/**", "lobby", "cam-*.hang"]), pattern_set(&[])),
-				b"root" => (pattern_set(&[""]), pattern_set(&["**"])),
+				b"" => (prefixes(&["a"]), prefixes(&[])),
+				b"single" => (prefixes(&["room/alice"]), prefixes(&[])),
+				b"nested" => (prefixes(&["room/a/cam", "room/b"]), prefixes(&["demo.hang"])),
+				b"siblings" => (prefixes(&["room", "lobby", "cam.hang"]), prefixes(&[])),
+				b"root" => (prefixes(&[""]), prefixes(&[""])),
 				_ => return None,
 			};
 			Some(grant_of(publish, subscribe))
@@ -1560,7 +1589,7 @@ async fn pattern_grants_arrive_exactly(version: &'static str) {
 		assert_eq!(granted(&pair.client).await, table(b"").unwrap());
 
 		let mut held = Vec::new();
-		for token in ["exact", "wildcard", "mixed", "root"] {
+		for token in ["single", "nested", "siblings", "root"] {
 			let added = added(&pair.client.auth(), token).await.expect(token);
 			assert_eq!(added.grant().peek(), table(token.as_bytes()), "{token}");
 			held.push(added);
@@ -1571,13 +1600,13 @@ async fn pattern_grants_arrive_exactly(version: &'static str) {
 	.expect("timed out");
 }
 
-/// A wildcard grant admits what it matches, including a leading `**` matching zero
-/// segments, and a publish outside it still aborts naming the path.
-async fn a_wildcard_grant_is_enforced(version: &'static str) {
+/// A prefix grant admits its path and every path beneath it, and a publish that shares
+/// only its bytes, not its segments, still aborts naming the path.
+async fn a_prefix_grant_is_enforced_by_segment(version: &'static str) {
 	within(async {
 		let publisher = produce_origin(2);
 		let relay = produce_origin(1);
-		let scope = pattern_set(&["room/*/cam", "**/b.hang"]);
+		let scope = prefixes(&["room/alice", "b.hang"]);
 		let pair = connect(Options {
 			version: Some(version),
 			client_publish: Some(publisher.clone()),
@@ -1588,7 +1617,7 @@ async fn a_wildcard_grant_is_enforced(version: &'static str) {
 		assert_eq!(granted(&pair.client).await.publish, scope);
 
 		let mut held = Vec::new();
-		for path in ["room/alice/cam", "b.hang", "deep/x/b.hang"] {
+		for path in ["room/alice", "room/alice/cam", "b.hang"] {
 			let broadcast = publisher.route(path, moq_net::origin::RouteOptions::hidden()).unwrap();
 			broadcast.announce().unwrap();
 			wait_announced(&relay.consume(), path, true).await;
@@ -1597,7 +1626,7 @@ async fn a_wildcard_grant_is_enforced(version: &'static str) {
 		assert_eq!(pair.client_transport.close_reason(), None);
 
 		let bad = publisher
-			.route("room/alice/mic", moq_net::origin::RouteOptions::hidden())
+			.route("room/alice-mic", moq_net::origin::RouteOptions::hidden())
 			.unwrap();
 		bad.announce().unwrap();
 		assert!(matches!(
@@ -1606,7 +1635,7 @@ async fn a_wildcard_grant_is_enforced(version: &'static str) {
 		));
 		assert_eq!(
 			pair.client_transport.close_reason().map(|(_, reason)| reason),
-			Some("unauthorized: room/alice/mic".to_string())
+			Some("unauthorized: room/alice-mic".to_string())
 		);
 	})
 	.await
@@ -1671,7 +1700,7 @@ async fn a_broadcast_received_from_the_peer_is_not_ours_to_check(version: &'stat
 			client_publish: Some(local.clone()),
 			client_subscribe: Some(local.clone()),
 			server_publish: Some(relay.clone()),
-			server_subscribe: Some(relay.scope("", &patterns(&["local"])).unwrap()),
+			server_subscribe: Some(relay.scope("", &prefixes(&["local"])).unwrap()),
 			..Default::default()
 		})
 		.await;
@@ -1762,10 +1791,7 @@ async fn ended(sub: &mut moq_net::track::Subscriber) -> Error {
 async fn a_narrowing_deafens_one_path(version: &'static str) {
 	within(async {
 		let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
-		let prefs = || {
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)))
-		};
+		let prefs = || moq_net::track::Subscription::default().with_max(Duration::from_secs(10));
 
 		let relay = produce_origin(1);
 		let audio = relay
@@ -1783,14 +1809,14 @@ async fn a_narrowing_deafens_one_path(version: &'static str) {
 		let pair = connect(Options {
 			version: Some(version),
 			client_subscribe: Some(received.clone()),
-			server_publish: Some(relay.scope("", &patterns(&["room"])).unwrap()),
+			server_publish: Some(relay.scope("", &prefixes(&["room"])).unwrap()),
 			..Default::default()
 		})
 		.await;
 
-		let mut group = audio_track.append_group().unwrap();
+		let mut group = audio_track.append_next().unwrap();
 		group.write_frame(ts(0), b"a".as_ref()).unwrap();
-		let mut group = video_track.append_group().unwrap();
+		let mut group = video_track.append_next().unwrap();
 		group.write_frame(ts(0), b"v".as_ref()).unwrap();
 
 		let remote = received
@@ -1821,10 +1847,10 @@ async fn a_narrowing_deafens_one_path(version: &'static str) {
 		wait_announced(&received.consume(), "room/alice/audio", false).await;
 
 		// The sibling keeps flowing.
-		let mut group = video_track.append_group().unwrap();
+		let mut group = video_track.append_next().unwrap();
 		group.write_frame(ts(1), b"v".as_ref()).unwrap();
 		let group = video_sub.recv_group().await.unwrap().expect("video still flows");
-		assert_eq!(group.sequence, 1);
+		assert_eq!(group.start, 1);
 
 		// The relay enforced it, not the client: moq-lite resets the subscription with
 		// UNAUTHORIZED, even on a version without the Auth Stream, and neither side
@@ -1840,7 +1866,7 @@ async fn a_narrowing_deafens_one_path(version: &'static str) {
 			let narrowed = wait_for(pair.client.auth().grant(), |grant| {
 				grant
 					.as_ref()
-					.is_some_and(|grant| grant.subscribe == patterns(&["room/alice/video"]))
+					.is_some_and(|grant| grant.subscribe == prefixes(&["room/alice/video"]))
 			})
 			.await;
 			assert_eq!(narrowed, Some(grant(&[], &["room/alice/video"])));
@@ -1856,10 +1882,7 @@ async fn a_narrowing_deafens_one_path(version: &'static str) {
 async fn a_narrowing_aborts_what_the_peer_published(version: &'static str) {
 	within(async {
 		let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
-		let prefs = || {
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)))
-		};
+		let prefs = || moq_net::track::Subscription::default().with_max(Duration::from_secs(10));
 
 		let client_origin = produce_origin(2);
 		let mic = client_origin
@@ -1882,9 +1905,9 @@ async fn a_narrowing_aborts_what_the_peer_published(version: &'static str) {
 		})
 		.await;
 
-		let mut group = mic_track.append_group().unwrap();
+		let mut group = mic_track.append_next().unwrap();
 		group.write_frame(ts(0), b"m".as_ref()).unwrap();
-		let mut group = cam_track.append_group().unwrap();
+		let mut group = cam_track.append_next().unwrap();
 		group.write_frame(ts(0), b"c".as_ref()).unwrap();
 
 		let remote = relay
@@ -1914,10 +1937,10 @@ async fn a_narrowing_aborts_what_the_peer_published(version: &'static str) {
 		assert!(unauthorized(&err), "{err:?}");
 		wait_announced(&relay.consume(), "room/bob/mic", false).await;
 
-		let mut group = cam_track.append_group().unwrap();
+		let mut group = cam_track.append_next().unwrap();
 		group.write_frame(ts(1), b"c".as_ref()).unwrap();
 		let group = cam_sub.recv_group().await.unwrap().expect("cam still flows");
-		assert_eq!(group.sequence, 1);
+		assert_eq!(group.start, 1);
 
 		// A narrowing is not a publication outside the grant: the client stays up.
 		assert_eq!(pair.client_transport.close_reason(), None);
@@ -1937,7 +1960,7 @@ async fn a_narrowing_resets_a_fetch_in_flight(version: &'static str) {
 		let track = broadcast.broadcast().create_track("video", timed()).unwrap();
 		broadcast.announce().unwrap();
 		// The group stays open, so the fetch is still in flight when the grant narrows.
-		let mut group = track.append_group().unwrap();
+		let mut group = track.append_next().unwrap();
 		group.write_frame(ts(0), b"first".as_ref()).unwrap();
 
 		let received = produce_origin(3);
@@ -1985,11 +2008,11 @@ async fn a_narrowing_resets_a_fetch_in_flight(version: &'static str) {
 	.expect("timed out");
 }
 
-/// Read groups until one at `sequence` or later arrives.
-async fn recv_through(sub: &mut moq_net::track::Subscriber, sequence: u64) {
+/// Read groups until one at `key` or later arrives.
+async fn recv_through(sub: &mut moq_net::track::Subscriber, key: u64) {
 	loop {
 		let group = sub.recv_group().await.unwrap().expect("track ended");
-		if group.sequence >= sequence {
+		if group.start >= key {
 			return;
 		}
 	}
@@ -2000,10 +2023,7 @@ async fn recv_through(sub: &mut moq_net::track::Subscriber, sequence: u64) {
 async fn a_widening_brings_back_a_deafened_path(version: &'static str) {
 	within(async {
 		let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
-		let prefs = || {
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)))
-		};
+		let prefs = || moq_net::track::Subscription::default().with_max(Duration::from_secs(10));
 
 		let relay = produce_origin(1);
 		let audio = relay
@@ -2016,12 +2036,12 @@ async fn a_widening_brings_back_a_deafened_path(version: &'static str) {
 		let pair = connect(Options {
 			version: Some(version),
 			client_subscribe: Some(received.clone()),
-			server_publish: Some(relay.scope("", &patterns(&["room"])).unwrap()),
+			server_publish: Some(relay.scope("", &prefixes(&["room"])).unwrap()),
 			..Default::default()
 		})
 		.await;
 
-		let mut group = audio_track.append_group().unwrap();
+		let mut group = audio_track.append_next().unwrap();
 		group.write_frame(ts(0), b"a".as_ref()).unwrap();
 		let remote = received
 			.consume()
@@ -2051,7 +2071,7 @@ async fn a_widening_brings_back_a_deafened_path(version: &'static str) {
 			.unwrap()
 			.unwrap();
 		let mut sub = remote.track("opus").unwrap().subscribe(prefs()).await.unwrap();
-		let mut group = audio_track.append_group().unwrap();
+		let mut group = audio_track.append_next().unwrap();
 		group.write_frame(ts(1), b"a".as_ref()).unwrap();
 		recv_through(&mut sub, 1).await;
 
@@ -2060,7 +2080,7 @@ async fn a_widening_brings_back_a_deafened_path(version: &'static str) {
 			let widened = wait_for(pair.client.auth().grant(), |grant| {
 				grant
 					.as_ref()
-					.is_some_and(|grant| grant.subscribe == patterns(&["room"]))
+					.is_some_and(|grant| grant.subscribe == prefixes(&["room"]))
 			})
 			.await;
 			assert_eq!(widened, Some(grant(&[], &["room"])));
@@ -2076,10 +2096,7 @@ async fn a_widening_brings_back_a_deafened_path(version: &'static str) {
 async fn a_widening_brings_back_what_the_peer_published(version: &'static str) {
 	within(async {
 		let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
-		let prefs = || {
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)))
-		};
+		let prefs = || moq_net::track::Subscription::default().with_max(Duration::from_secs(10));
 
 		let client_origin = produce_origin(2);
 		let mic = client_origin
@@ -2112,7 +2129,7 @@ async fn a_widening_brings_back_what_the_peer_published(version: &'static str) {
 			.unwrap()
 			.unwrap();
 		let mut sub = remote.track("opus").unwrap().subscribe(prefs()).await.unwrap();
-		let mut group = mic_track.append_group().unwrap();
+		let mut group = mic_track.append_next().unwrap();
 		group.write_frame(ts(0), b"m".as_ref()).unwrap();
 		recv_through(&mut sub, 0).await;
 
@@ -2229,7 +2246,7 @@ async fn a_handle_backs_one_active_session(version: &'static str) {
 			.await;
 		assert!(matches!(concurrent, Err(Error::Duplicate)), "{:?}", concurrent.err());
 
-		first.server.drain().send(moq_net::goaway::Goaway::new()).unwrap();
+		first.server.goaway(moq_net::goaway::Goaway::new()).unwrap();
 		support::Draining::recv(&first.client.draining())
 			.await
 			.expect("the GOAWAY");
@@ -2285,7 +2302,7 @@ async fn a_token_queued_before_our_goaway_rides_only_the_successor(version: &'st
 		// Its first poll queues the token; the driver runs only once this side drains.
 		let mut adding = Box::pin(added(&handle, "late"));
 		assert!(adding.as_mut().now_or_never().is_none());
-		first.client.drain().send(moq_net::goaway::Goaway::new()).unwrap();
+		first.client.goaway(moq_net::goaway::Goaway::new()).unwrap();
 		kio::clock::sleep(Duration::from_secs(1)).await;
 		assert!(
 			first_tokens.next().now_or_never().is_none(),
@@ -2306,8 +2323,8 @@ async fn a_token_queued_before_our_goaway_rides_only_the_successor(version: &'st
 	.expect("timed out");
 }
 
-/// A refusal that may pass, such as an overloaded verifier, presents the token again
-/// after a backoff rather than ending it.
+/// Each refusal that leaves the token undecided, such as an overloaded verifier, presents
+/// the token again after a backoff rather than ending it.
 async fn a_transient_refusal_is_presented_again(version: &'static str) {
 	within(async {
 		let mut pair = connect(Options {
@@ -2320,13 +2337,18 @@ async fn a_transient_refusal_is_presented_again(version: &'static str) {
 		let mut requests = pair.requests.take().unwrap();
 		let (tx, mut issued) = futures::channel::mpsc::unbounded();
 		kio::clock::sim::spawn(async move {
-			let mut refused = false;
+			let mut undecided = vec![
+				SessionError::Internal,
+				SessionError::TooManyRequests,
+				SessionError::Timeout,
+			];
 			while let Some(request) = requests.next().await {
-				if request.token().is_empty() || refused {
-					let _ = tx.unbounded_send(request.accept(Grant::default()));
-				} else {
-					refused = true;
-					request.reject(SessionError::TooManyRequests, "busy");
+				let code = (!request.token().is_empty()).then(|| undecided.pop()).flatten();
+				match code {
+					Some(code) => request.reject(code, "undecided"),
+					None => {
+						let _ = tx.unbounded_send(request.accept(Grant::default()));
+					}
 				}
 			}
 		});
@@ -2339,9 +2361,179 @@ async fn a_transient_refusal_is_presented_again(version: &'static str) {
 	.expect("timed out");
 }
 
+/// A broadcast another client publishes through the relay, consumed into one origin that
+/// both publishes and consumes, is not ours to check either: the relay is not its origin.
+async fn a_broadcast_relayed_from_another_client_is_not_ours_to_check(version: &'static str) {
+	within(async {
+		let relay = produce_origin(1);
+		let publisher = produce_origin(3);
+		let broadcast = publisher
+			.route("remote/x", moq_net::origin::RouteOptions::hidden())
+			.unwrap();
+		let track = broadcast.broadcast().create_track("video", timed()).unwrap();
+		broadcast.announce().unwrap();
+		let _upstream = connect(Options {
+			version: Some(version),
+			client_publish: Some(publisher.clone()),
+			server_subscribe: Some(relay.clone()),
+			..Default::default()
+		})
+		.await;
+		wait_announced(&relay.consume(), "remote/x", true).await;
+
+		let local = produce_origin(2);
+		let pair = connect(Options {
+			version: Some(version),
+			client_publish: Some(local.clone()),
+			client_subscribe: Some(local.clone()),
+			server_publish: Some(relay.clone()),
+			server_subscribe: Some(relay.scope("", &prefixes(&["local"])).unwrap()),
+			..Default::default()
+		})
+		.await;
+		assert_eq!(granted(&pair.client).await, grant(&["local"], &[""]));
+
+		let mut group = track.append_next().unwrap();
+		group
+			.write_frame(moq_net::Timestamp::from_millis(0).unwrap(), b"frame".as_ref())
+			.unwrap();
+		let remote = local
+			.consume()
+			.follow("remote/x", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap()
+			.unwrap();
+		let prefs = moq_net::track::Subscription::default().with_max(Duration::from_secs(10));
+		let mut sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
+		sub.recv_group().await.unwrap().expect("a group");
+
+		// The first broadcast refused is the one we published, not the one relayed to us.
+		let bad = local.route("bad/x", moq_net::origin::RouteOptions::hidden()).unwrap();
+		bad.announce().unwrap();
+		assert!(matches!(
+			pair.server.closed().await,
+			Error::Session(SessionError::Unauthorized)
+		));
+		let (_, reason) = pair.client_transport.close_reason().expect("closed");
+		assert_eq!(reason, "unauthorized: bad/x");
+	})
+	.await
+	.expect("timed out");
+}
+
 /// Present `token` on `handle` and wait for its first verdict.
 async fn added(handle: &auth::Handle, token: impl Into<bytes::Bytes>) -> moq_net::Result<auth::Credential> {
 	let credential = handle.add(token)?;
 	credential.answered().await?;
 	Ok(credential)
+}
+
+/// A relay grants its client 18 disjoint regions over two tokens, half each, and publishes
+/// a broadcast in each, plus a claim above the last; none widens within the grant. Each
+/// token's grant fits its own message, but their union's prefixes cannot all fit the one
+/// ANNOUNCE_REQUEST a subscriber's whole set must, so the client asks for the root, and
+/// the relay answers each granted region inside it. A reader of the whole tree finds every
+/// region's broadcast, and the claim above the last region at that region, and nothing
+/// the grant leaves out. A third token then grants a 19th region under the same ask: a
+/// reader of it syncs with its broadcast, not before.
+#[kio::test]
+async fn lite_07_a_grant_too_wide_to_ask_is_answered_region_by_region() {
+	within(async {
+		let relay = produce_origin(1);
+		let regions: Vec<String> = (0..19).map(|i| format!("r{i:02}/{}", "x".repeat(3800))).collect();
+		let mut published: Vec<origin::Route> = (regions.iter())
+			.map(|region| {
+				let route = relay
+					.route(format!("{region}/live"), origin::RouteOptions::hidden())
+					.unwrap();
+				route.announce().unwrap();
+				route
+			})
+			.collect();
+		// Above the last granted region, and outside every region.
+		for path in ["r17", "outside/live"] {
+			let route = relay.route(path, origin::RouteOptions::hidden()).unwrap();
+			route.announce().unwrap();
+			published.push(route);
+		}
+		let subscribe = |regions: &[String]| {
+			let subtrees = regions.iter().map(|region| Prefix::try_from(region.as_str()).unwrap());
+			grant_of(Prefixes::default(), subtrees.collect())
+		};
+		let client = produce_origin(9);
+		let mut pair = connect(Options {
+			server_publish: Some(relay.clone()),
+			client_subscribe: Some(client.clone()),
+			server_requests: true,
+			..Default::default()
+		})
+		.await;
+		// The relay confines its client to the grants it issues.
+		pair.server.auth().authorize(&grant(&[], &[]));
+		let (first, second, third) = (
+			subscribe(&regions[..9]),
+			subscribe(&regions[9..18]),
+			subscribe(&regions[18..]),
+		);
+		let _issued = serve(pair.requests.take().unwrap(), move |token| match token {
+			b"" => Some(first.clone()),
+			b"t1" => Some(second.clone()),
+			b"t2" => Some(third.clone()),
+			_ => None,
+		});
+		let _t1 = added(&pair.client.auth(), "t1").await.expect("t1 granted");
+		let whole = subscribe(&regions[..18]).subscribe;
+		wait_for(pair.client.auth().grant(), |grant| {
+			grant.as_ref().is_some_and(|grant| grant.subscribe == whole)
+		})
+		.await;
+
+		let mut everything = client.consume().routes();
+		let mut first = (client.consume().scope(&regions[0], &Prefixes::all()))
+			.unwrap()
+			.routes();
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		let found = |routes: &mut origin::Routes| {
+			let mut found = std::collections::BTreeSet::new();
+			while let Some(event) = routes.try_next() {
+				found.insert(event.announce.prefix.to_string());
+			}
+			found
+		};
+		let mut expected: std::collections::BTreeSet<String> =
+			regions[..18].iter().map(|region| format!("{region}/live")).collect();
+		expected.insert(regions[17].clone());
+		assert_eq!(found(&mut everything), expected, "every region, and nothing outside");
+		assert!(everything.poll_synced(&kio::Waiter::noop()).is_ready());
+		assert_eq!(found(&mut first).len(), 1);
+		let synced = |routes: &origin::Routes| routes.poll_synced(&kio::Waiter::noop()).is_ready();
+		assert!(synced(&first));
+
+		// The 19th region joins the grant under the root the client already asks for. The
+		// reader of the whole tree is synced again only with its broadcast; the reader of
+		// the first region, which the change cannot show anything new, stays synced.
+		let _t2 = added(&pair.client.auth(), "t2").await.expect("t2 granted");
+		kio::wait(|waiter| match everything.poll_synced(waiter) {
+			std::task::Poll::Ready(()) => std::task::Poll::Pending,
+			std::task::Poll::Pending => std::task::Poll::Ready(()),
+		})
+		.await;
+		assert!(synced(&first), "a region the change misses stays synced");
+		let mut seen = std::collections::BTreeSet::new();
+		kio::wait(|waiter| {
+			seen.extend(found(&mut everything));
+			everything.poll_synced(waiter)
+		})
+		.await;
+		let last = regions.last().unwrap();
+		assert_eq!(
+			seen,
+			std::collections::BTreeSet::from([format!("{last}/live")]),
+			"synced again with the new region's broadcast"
+		);
+	})
+	.await
+	.expect("timed out");
 }

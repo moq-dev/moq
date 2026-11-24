@@ -836,6 +836,7 @@ for (const [version, tooFarBehind] of [
 	[QUIC, StreamCode.TooFarBehind],
 	[Version.DRAFT_18, StreamCode.TooFarBehind],
 	[Version.DRAFT_22, StreamCode.TooFarBehind],
+	[Version.DRAFT_23, StreamCode.TooFarBehind],
 ] as const) {
 	test(`stream resets select the negotiated registry (${version})`, async () => {
 		for (const [reason, expected] of [

@@ -21,11 +21,15 @@ const GAPS: Moq.StreamCode[] = [
  * and {@link latest} skips to the newest state, for a caller that only wants the current value.
  * What {@link latest} skips is gone, so a later {@link next} resumes after it. Overlapping reads
  * take turns in call order.
+ * A value that fails the `schema` rejects the read like any other failure: the publisher broke the
+ * contract, so the caller ends the subscription instead of reading on.
  * When something else already owns the track, use the {@link Decoder} directly.
  *
- * A snapshot is superseded the moment a newer one exists, so the consumer subscribes itself at a
- * zero `delay.max` and keeps that subscription to itself: a group is skipped once a newer one
- * arrives, and a lower group the subscription still owes never holds up a newer one.
+ * A snapshot is superseded the moment a newer one exists, so by default the consumer subscribes
+ * itself as a live join at a zero lag and max, and keeps that subscription to itself: a group is skipped once a
+ * newer one arrives, and a lower group the subscription still owes never holds up a newer one.
+ * The `delay` option keeps superseded groups for a reader that applies each snapshot at
+ * its timestamp.
  * {@link close} ends the subscription.
  */
 export class Consumer<T> {
@@ -43,7 +47,9 @@ export class Consumer<T> {
 			.subscribe({
 				...Moq.Track.Subscription.default(),
 				priority: config.priority ?? 0,
-				delay: { max: Duration.ZERO },
+				ranges: [
+					{ start: { live: { min: config.delay ?? Duration.ZERO, max: config.delay ?? Duration.ZERO } } },
+				],
 			})
 			.ordered();
 		this.#decoder = new Decoder(config);
@@ -177,11 +183,19 @@ export namespace Consumer {
 	export type Config<T> = Pick<CodecConfig<T>, "schema"> & {
 		/**
 		 * The track to read: a {@link Moq.Track.Consumer}, or a {@link Moq.Track.Producer} to read
-		 * in-process. The consumer subscribes to it at a zero `delay.max`, with default options
+		 * in-process. The consumer subscribes to it at `delay`, with default options
 		 * otherwise.
 		 */
 		track: Pick<Moq.Track.Consumer, "subscribe">;
 		/** Delivery priority of the consumer's subscription, higher first; defaults to 0. */
 		priority?: number;
+		/**
+		 * The reader's playout delay behind the live edge: the subscription's live join, as both its
+		 * `min` and its `max`; defaults to zero, which skips a snapshot the moment a newer one arrives. A
+		 * reader that holds each snapshot until media reaches its timestamp sets its delay, so a
+		 * superseded snapshot it may still need stays deliverable that long and `next()`
+		 * yields it.
+		 */
+		delay?: Duration;
 	};
 }

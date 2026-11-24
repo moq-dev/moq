@@ -35,8 +35,6 @@ tests [moq-dev/moq#7600](https://github.com/moq-dev/moq/pull/7600), build time
   [alert.yml](/.github/workflows/alert.yml), a Pages report, or a job summary;
   a result only in an artifact or log is invisible), and cost (runner-minutes
   by runner type; macOS is the scarce one).
-- The [benchmark history](https://git.moq.dev/bench/)'s `bench-gate-cost`
-  `module/*` rows give each `just ci` module's wall and CPU seconds.
 - Sum elapsed runner-minutes from the REST jobs API. Org billing is monthly
   attribution only; never derive a workflow's cost from it.
 - Read failures by cause, not job count: N fuzz targets failing one build is
@@ -83,8 +81,9 @@ tests [moq-dev/moq#7600](https://github.com/moq-dev/moq/pull/7600), build time
   incremental state. In a warm edit the final binaries are about half the
   unit time. On the hybrid host use `perf stat --no-scale`.
 - Rows built with dev-dependencies shift across the cargo-hakari
-  workspace-hack ([moq-dev/moq#6985](https://github.com/moq-dev/moq/pull/6985)).
-  Feature unification belongs to [hakari follow-ups](/quest/m0/ci/hakari-followups.md).
+  workspace-hack ([moq-dev/moq#6985](https://github.com/moq-dev/moq/pull/6985)),
+  which excludes native media crates from unification
+  ([moq-dev/moq#7713](https://github.com/moq-dev/moq/pull/7713)).
 
 ### Check first: artifact size
 
@@ -95,9 +94,7 @@ tests [moq-dev/moq#7600](https://github.com/moq-dev/moq/pull/7600), build time
   closure and normalize hashed filenames.
 - `nm -S -C --defined-only` on the shipped static libraries attributes native
   growth by namespace.
-- Kept: `sorted-btree` (the `@js-sdsl/ordered-map` candidate was slower on
-  ascending and rolling arrivals), and the whole Rust workspace in the Python
-  sdist, minus `test_data`
+- Kept: the whole Rust workspace in the Python sdist, minus `test_data`
   ([moq-dev/moq#6867](https://github.com/moq-dev/moq/pull/6867)).
   `opt-level = "s"` for the bindings needs codec, crypto, and FFI throughput
   measurements first.
@@ -117,8 +114,8 @@ tests [moq-dev/moq#7600](https://github.com/moq-dev/moq/pull/7600), build time
   `rs/moq-quic/README.md` (decided 2026-10-28). Only a
   [vendor sync](/quest/m3/vendor-sync/quinn.md), which reviews the full
   upstream range, advances the recorded upstream commit.
-- Waiting on upstream: [ashpd](/quest/m4/ashpd-maintained.md) and
-  [askama](/quest/m4/askama-maintained.md); the root Bun overrides for glob,
+- Waiting on upstream:
+  [askama](/quest/m5/askama-maintained.md); the root Bun overrides for glob,
   minimatch, chokidar, postcss-selector-parser, and Vite, each removable once
   its parent allows a safe range; `deny.toml`'s proc-macro-error2 ignore,
   until core-models moves to hax-lib 0.4; paste through tikv-jemalloc-ctl;
@@ -134,7 +131,8 @@ tests [moq-dev/moq#7600](https://github.com/moq-dev/moq/pull/7600), build time
   `assert_matches`, `cpu-time`, `stats_alloc`, `unsafe-libopus`, the
   QUIC/UDP, RTMP, V4L2, NVIDIA, VA-API, UniFFI, and LibAV forks
   ([vendor-sync](/quest/m3/vendor-sync/README.md) ports upstream), and JS's
-  Zod, pako, sorted-btree, and UUIDv7. `moq-gst` keeps its Rust 1.92 floor
+  Zod, pako, and UUIDv7. Replaced: `sorted-btree`, by the ledger's in-tree
+  chunked `Sorted` list (about 5 KB Brotli per bundle). `moq-gst` keeps its Rust 1.92 floor
   for GStreamer.
 
 ## Required

@@ -13,9 +13,13 @@
 //! - [`Claims`], [`Key`], and [`KeySet`]: the JWT a client presents in its query, with
 //!   the keys that sign and verify it. `moq auth generate|sign|verify` is the CLI.
 //!
-//! Grants and claims name paths with [`Pattern`]s from `moq-pattern`, re-exported here:
-//! `foo` is one broadcast, `foo/**` is a subtree, `**` is everything. Each role may also
-//! carry a bitrate cap, a [`Rate`].
+//! Grants and claims name paths with [`Prefixes`] from `moq-pattern`, re-exported here:
+//! `foo` is `foo` and everything beneath it, and the empty prefix is everything. A grant
+//! holds no wildcard: a [`Prefix`] refuses `foo/**`, `**`, and `*`. Until the next two
+//! version migrations, a token, key scope, or [`Grant`] is written with each prefix as
+//! the subtree pattern releases before 0.22 read, `foo/**` or `**`, and reads one back
+//! as its prefix; any other wildcard there is refused.
+//! Each role is an [`Access`]: its prefixes, and optionally a bitrate cap, a [`Rate`].
 //!
 //! The lease `poll_*` methods are always available. Enable the `async` feature for their
 //! generated async wrappers (`changed`, `closed`, and `revalidate_requested`) and
@@ -23,6 +27,7 @@
 
 #![warn(missing_docs)]
 
+mod access;
 mod algorithm;
 mod claims;
 #[cfg(test)]
@@ -30,6 +35,9 @@ mod corpus;
 mod crypto;
 mod error;
 mod fs;
+/// Test support for the `fuzz/` harness: the target bodies and their seeds.
+#[cfg(any(test, feature = "fuzz"))]
+pub mod fuzz;
 mod generate;
 mod grant;
 mod key;
@@ -38,10 +46,10 @@ mod path;
 mod rate;
 mod request;
 mod set;
+mod token_id;
 mod wire;
 
 pub mod lease;
-pub mod mesh;
 pub mod refusal;
 pub use refusal::Refusal;
 #[cfg(feature = "serve")]
@@ -51,6 +59,7 @@ pub mod tier;
 #[cfg(feature = "client")]
 mod client;
 
+pub use access::*;
 pub use algorithm::*;
 pub use claims::*;
 #[cfg(feature = "client")]
@@ -59,7 +68,8 @@ pub use error::*;
 pub use grant::*;
 pub use key::*;
 pub use key_id::*;
-pub use moq_pattern::{InvalidPattern, Pattern, Patterns, Segment, Specificity};
+pub use moq_pattern::{InvalidPattern, InvalidPrefix, Prefix, Prefixes};
 pub use rate::*;
 pub use request::*;
 pub use set::*;
+pub use token_id::*;

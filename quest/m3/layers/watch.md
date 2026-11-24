@@ -1,20 +1,21 @@
-# [M] The watch player composites layers
+# [M] The watch player plays compositions
 
 ## Goal
 
-`@moq/watch` plays a broadcast that carries a layer layout track: it
-composites each visible layer over the main picture where and when the layout
-says, mixes each audio layer in at its gain, mute, pan, and delay, and lets a
-viewer toggle each layer the layout marks toggleable. A broadcast without one
-plays as today.
+`@moq/watch` plays a composition: it opens each child broadcast the
+composition lists, draws each visible picture where and when the
+composition says, on the composition's clock through the child's offset,
+mixes each child's sound in at its gain, mute, pan, and delay, and lets a
+viewer toggle each child the composition marks toggleable. A broadcast
+without a composition plays as today.
 
 ## Plan
 
-Fetch only visible layers, at the layout's priorities through moq-lite's
-subscription priorities, and unsubscribe a toggled-off layer. Prove placement
+Fetch only children a visible picture or an unmuted sound uses, at the composition's priorities through moq-lite's
+subscription priorities, and unsubscribe a toggled-off child. Prove placement
 and timing against the epic's fixture, matching `moq play` within its
 tolerance.
 
 ## Required
 
-- [hang specifies a layer layout track](/quest/m3/layers/spec.md) - what `@moq/watch` composites
+- [hang specifies a composition](/quest/m3/layers/spec.md) - what `@moq/watch` plays

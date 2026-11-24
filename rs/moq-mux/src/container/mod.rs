@@ -14,6 +14,7 @@ use bytes::Bytes;
 
 mod consumer;
 mod declared;
+pub use declared::ReorderError;
 mod decode;
 mod group;
 mod input;
@@ -32,7 +33,7 @@ pub mod mkv;
 pub mod mp4;
 pub mod ts;
 
-pub use consumer::{Consumer, Playout};
+pub use consumer::{Consumer, DELAY_MAX, Delay, Playout};
 pub use group::GroupConsumer;
 pub(crate) use input::Input;
 pub use producer::{Finished, Guard, Producer};
@@ -127,12 +128,42 @@ pub struct Frame {
 	pub keyframe: bool,
 }
 
+/// A media timestamp's time since its track's zero, or `None` when [unscaled](moq_net::Timestamp::unscaled).
+///
+/// A [`Consumer`] refuses an unscaled frame as it decodes, so every frame an export reads has a
+/// time; where nothing can return the error, skipping one only has to never panic.
+pub(crate) fn time(timestamp: moq_net::Timestamp) -> Option<std::time::Duration> {
+	std::time::Duration::try_from(timestamp).ok()
+}
+
+/// `timestamp` in microseconds for a message, or its debug form when unscaled.
+fn micros(timestamp: moq_net::Timestamp) -> String {
+	match timestamp.as_micros() {
+		Ok(micros) => format!("{micros} µs"),
+		Err(_) => format!("{timestamp:?}"),
+	}
+}
+
+/// The later of two timestamps, `a` when they don't compare: [`moq_net::Timestamp`] has no
+/// [`Ord`], since an unscaled one orders against no scaled one.
+pub(crate) fn later(a: moq_net::Timestamp, b: moq_net::Timestamp) -> moq_net::Timestamp {
+	if b > a { b } else { a }
+}
+
+/// The earlier of two timestamps, `a` when they don't compare; see [`later`].
+pub(crate) fn earlier(a: moq_net::Timestamp, b: moq_net::Timestamp) -> moq_net::Timestamp {
+	if b < a { b } else { a }
+}
+
 /// Stamp `frame` with the duration that ends at `bound`, unless it already has one.
 pub(crate) fn close_duration(frame: &mut Frame, bound: moq_net::Timestamp) {
 	if frame.duration.is_some() {
 		return;
 	}
-	let Some(delta) = bound.as_micros().checked_sub(frame.timestamp.as_micros()) else {
+	let (Ok(bound), Ok(timestamp)) = (bound.as_micros(), frame.timestamp.as_micros()) else {
+		return;
+	};
+	let Some(delta) = bound.checked_sub(timestamp) else {
 		return;
 	};
 	if delta == 0 {
@@ -156,22 +187,23 @@ pub(crate) fn close_duration(frame: &mut Frame, bound: moq_net::Timestamp) {
 #[error("missing keyframe: a group must open on a keyframe")]
 pub struct MissingKeyframe;
 
-/// An explicit endpoint precedes the last frame of an ordered video group.
+/// An explicit endpoint precedes a frame of the group it ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("video group endpoint precedes its last frame")]
+#[error("group endpoint precedes a frame of its own")]
 pub struct InvalidEnd;
 
-/// A group starts before the previous group did: the source restarted, which is a new broadcast.
+/// A group starts before the previous group did, or a seek before what the track holds: the source
+/// restarted, which is a new broadcast.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error(
-	"frame timestamp {} µs is below the previous group's start {} µs",
-	.timestamp.as_micros(),
-	.floor.as_micros()
+	"frame timestamp {} is below the previous group's start {}",
+	micros(*.timestamp),
+	micros(*.floor)
 )]
 pub struct TimestampRewind {
 	/// The refused frame's timestamp.
 	pub timestamp: moq_net::Timestamp,
-	/// The lowest allowed timestamp: the previous group's start.
+	/// The lowest allowed timestamp: the previous group's start, or the lowest start a seek allows.
 	pub floor: moq_net::Timestamp,
 }
 

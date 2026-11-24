@@ -11,7 +11,8 @@ export interface Frame {
 
 	/**
 	 * How long this frame occupies the presentation timeline. CMAF carries a
-	 * per-sample duration; Legacy and LOC report later endpoints through Consumer.next().end.
+	 * per-sample duration, and Legacy audio reads one from a codec that states it;
+	 * otherwise Legacy and LOC report later endpoints through Consumer.next().end.
 	 * The consumer adds it to `timestamp` to learn how far a group has presented,
 	 * so it can advance to a newer group as soon as the gap is covered instead of
 	 * waiting out the max delay budget.

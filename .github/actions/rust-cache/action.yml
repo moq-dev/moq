@@ -8,6 +8,9 @@ inputs:
   secret-access-key:
     description: R2 secret access key matching `access-key-id`.
     default: ""
+  write:
+    description: Whether a run on `main` publishes its compilations. A job whose builds nothing reuses, such as one per mutant, passes false and reads with the repository's key.
+    default: "true"
 
 runs:
   using: composite
@@ -21,7 +24,8 @@ runs:
         echo "::error::Persistent self-hosted caches require Queue on main's merge queue." >&2
         exit 1
 
-    # Hosted runs on `main` write; everything else reads. The merge queue
+    # Hosted runs on `main` write, unless the job passes `write: false`;
+    # everything else reads. The merge queue
     # uses only its local store and receives no remote credentials.
     #
     # The write key is the boundary. It lives in the `cache-write`
@@ -40,7 +44,7 @@ runs:
       env:
         KEY_ID: ${{ inputs.access-key-id }}
         SECRET: ${{ inputs.secret-access-key }}
-        WRITE: ${{ github.ref == 'refs/heads/main' }}
+        WRITE: ${{ github.ref == 'refs/heads/main' && inputs.write == 'true' }}
       run: |
         if [ -z "$KEY_ID" ] && [ -z "$SECRET" ]; then
           if [ "$WRITE" = "true" ]; then
@@ -59,6 +63,13 @@ runs:
           echo "AWS_SECRET_ACCESS_KEY=$SECRET"
           echo "MBX_REMOTE_S3_ENDPOINT=https://dd618f5dbd5da77b8296f1613c301f5c.r2.cloudflarestorage.com"
           echo "MBX_REMOTE_S3_REGION=auto"
+          # The action store's size budget also caps what one build downloads,
+          # and a hosted disk scales it to 5 GiB on Linux and 10 on Windows.
+          # Prefetching predictions every job shares spends that early, so the
+          # job's own results then fail to restore, compile again, and re-upload
+          # objects the bucket already holds, each a refused but billed put.
+          # 20 GiB covers the most any job downloaded with the cap lifted.
+          echo "MBX_GC_MAX_SIZE=20GiB"
           if [ "$WRITE" = "true" ]; then
             echo "MBX_REMOTE_MODE=read-write"
             # mbx trusts only a push to a protected branch, which leaves out
@@ -82,7 +93,7 @@ runs:
     - uses: jdx/mr-boxington-action@88acf2bb50552c7c508cbac13e5f8c576b95b1de # v1.7.3
       id: mbx
       with:
-        version: 1.29.2
+        version: 1.30.0
         backend: ${{ runner.environment != 'self-hosted' && inputs.access-key-id != '' && inputs.secret-access-key != '' && 'remote' || 'local' }}
         remote-url: s3://mbx-moq-dev
         namespace: ${{ runner.os }}-${{ runner.arch }}
@@ -110,19 +121,24 @@ runs:
 
     # After a build, mbx sweeps in the background, and on a disk short of
     # gc.min_free_size it removes whatever no compiler has open at that moment,
-    # including generated source trees the job's next build reads. That build
-    # then recompiles, which sh/dart/check.sh refuses. Most of this runner's
-    # disk holds data mbx does not own, so those sweeps empty the cache without
-    # closing the gap. Sweep once here, before anything builds, and never during
-    # the job. The global config carries the setting because generate.sh and
-    # Dart's build hooks drop MBX_* variables.
+    # including generated source trees the job's next build reads, forcing
+    # avoidable recompiles. Most of this runner's disk holds data mbx does not
+    # own, so those sweeps empty the cache without closing the gap. Sweep once
+    # here, before anything builds, and never during the job. The runner's
+    # global mbx config carries the setting, since Dart's build hooks drop
+    # MBX_* variables. The runner provides it, read-only (dotfiles'
+    # nixos/modules/ci-runners.nix), so a job cannot write it: check it instead,
+    # with the variables stripped as a hook strips them, so a runner without it
+    # fails here and not mid-build.
     - name: Sweep the cache before building
       if: runner.environment == 'self-hosted'
       shell: bash
       run: |
-        config="$HOME/.config/mbx/config.toml"
-        mkdir -p "${config%/*}"
-        printf '[gc]\nauto = false\n' > "$config"
+        auto=$(env -i HOME="$HOME" PATH="$PATH" mbx settings get gc.auto)
+        if [ "$auto" != "false" ]; then
+          echo "::error::the runner's global mbx config must set gc.auto = false, but it reads '$auto' without MBX_* variables"
+          exit 1
+        fi
         mbx gc
 
     # The action only warns when it cannot reach the remote, which is how a

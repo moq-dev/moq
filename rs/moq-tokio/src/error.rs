@@ -5,10 +5,6 @@ use std::sync::Arc;
 /// Dependency errors are stored as messages so their crates stay out of this crate's public
 /// API. Several of them (reqwest above all) keep the useful detail in `source()`, which a
 /// plain `to_string()` would drop.
-#[allow(
-	dead_code,
-	reason = "a build with no transport feature compiles no backend module, so nothing calls this"
-)]
 pub(crate) fn message(err: impl std::error::Error) -> String {
 	use std::fmt::Write;
 
@@ -23,10 +19,6 @@ pub(crate) fn message(err: impl std::error::Error) -> String {
 
 /// Generates `From` conversions into message-carrying variants of the enclosing module's `Error`,
 /// so `?` still works on a dependency's error without that dependency reaching our public API.
-#[allow(
-	unused_macros,
-	reason = "a build with no transport feature compiles no backend module, so nothing calls this"
-)]
 macro_rules! from_message {
 	($($ty:ty => $variant:ident),* $(,)?) => {
 		$(
@@ -39,10 +31,6 @@ macro_rules! from_message {
 	};
 }
 
-#[allow(
-	unused_imports,
-	reason = "a build with no transport feature compiles no backend module, so nothing calls this"
-)]
 pub(crate) use from_message;
 
 /// Whether an HTTP response status means "ask again later".
@@ -50,7 +38,6 @@ pub(crate) use from_message;
 /// A response that arrived is the server's answer, and only this narrow set invites another
 /// attempt: request timeout, rate limit, and the gateway/overload statuses. Every other status,
 /// `404` and `403` included, is settled.
-#[cfg(feature = "net")]
 pub(crate) fn status_retryable(status: u16) -> bool {
 	matches!(status, 408 | 429 | 502 | 503 | 504)
 }
@@ -77,7 +64,6 @@ pub enum Error {
 	Io(Arc<std::io::Error>),
 
 	/// The MoQ session itself failed, after the transport was established.
-	#[cfg(feature = "net")]
 	#[error(transparent)]
 	MoqNet(#[from] moq_net::Error),
 
@@ -93,13 +79,9 @@ pub enum Error {
 	#[error("failed to initialize Android logcat layer")]
 	Logcat(#[source] Arc<std::io::Error>),
 
-	/// No compiled-in backend or configured listener can serve this. The string names what is missing.
+	/// No configured backend or listener can serve this. The string names what is missing.
 	#[error("{0}")]
 	NoBackend(&'static str),
-
-	/// A qlog directory was configured but this build can't capture traces.
-	#[error("qlog capture requires the 'qlog' feature")]
-	QlogUnsupported,
 
 	/// Key logging was enabled without a destination, including a boolean binding's missing env path.
 	#[error("quic.keylog needs a nonempty path; boolean keylog settings require SSLKEYLOGFILE")]
@@ -151,13 +133,17 @@ pub enum Error {
 	#[error("{0}:// can't present the client certificate; dial https://, wss://, moqt://, moql://, or tls:// instead")]
 	ClientCertScheme(String),
 
+	/// A client on a simulated host dials only QUIC, since every other transport opens a real
+	/// socket. The payload is the scheme.
+	#[cfg(feature = "test-support")]
+	#[error("{0}:// can't be dialed from a simulated host; dial https://, moqt://, or moql:// instead")]
+	SimScheme(String),
+
 	/// The server rejected the connection with an auth status. See [`crate::ConnectError`].
-	#[cfg(feature = "net")]
 	#[error(transparent)]
 	Connect(#[from] crate::ConnectError),
 
 	/// Both halves of the QUIC/WebSocket race failed, so neither error alone tells the story.
-	#[cfg(feature = "websocket")]
 	#[error("failed to connect to server: QUIC failed: {quic}; WebSocket failed: {websocket}")]
 	TransportRace {
 		/// Why the QUIC attempt failed.
@@ -166,9 +152,9 @@ pub enum Error {
 		websocket: Arc<Error>,
 	},
 
-	/// A client CA or pinned peers were configured on a server with no QUIC or `tls://` listener to verify them.
+	/// A client CA was configured on a server with no QUIC or `tls://` listener to verify it.
 	#[error(
-		"mTLS (--listen-tls-root or tls.peers) needs a QUIC listener (--listen) or a TLS TCP listener (--listen-tcp-tls); the plaintext TCP and Unix listeners never ask for a client certificate"
+		"mTLS (--listen-tls-root) needs a QUIC listener (--listen) or a TLS TCP listener (--listen-tcp-tls); the plaintext TCP and Unix listeners never ask for a client certificate"
 	)]
 	MtlsUnsupported,
 
@@ -232,7 +218,6 @@ pub enum Error {
 
 	/// A listener's endpoint stopped, so [`Listener::accept`](crate::Listener::accept) can never
 	/// yield another session. The endpoint's own failure is logged where it happened.
-	#[cfg(feature = "_transport")]
 	#[error("the {0} listener stopped accepting")]
 	Accept(crate::Transport),
 
@@ -241,95 +226,48 @@ pub enum Error {
 	Tls(Arc<crate::tls::Error>),
 
 	/// The QUIC backend failed.
-	#[cfg(feature = "quic")]
 	#[error(transparent)]
 	Quic(Arc<crate::quic::Error>),
 
 	/// The WebSocket fallback transport failed.
-	#[cfg(feature = "websocket")]
 	#[error(transparent)]
 	WebSocket(Arc<crate::websocket::Error>),
 
 	/// The TCP (qmux) transport failed.
-	#[cfg(feature = "tcp")]
 	#[error(transparent)]
 	Tcp(Arc<crate::tcp::Error>),
 
 	/// The Unix socket transport failed.
-	#[cfg(all(feature = "uds", unix))]
+	#[cfg(unix)]
 	#[error(transparent)]
 	Unix(Arc<crate::unix::Error>),
 
 	/// [`crate::watch::Files`] could not watch a file's directory. The string has the details.
-	#[cfg(feature = "watch")]
 	#[error("failed to watch files: {0}")]
 	Watch(String),
 
 	/// A qmux session refused the limits [`crate::server::Request::with_quic_limits`] set,
 	/// such as a rate cap, which qmux cannot pace.
-	#[cfg(feature = "qmux")]
 	#[error("qmux refused the session limits: {0}")]
 	QmuxLimits(String),
 }
 
 impl Error {
-	/// A fixed local error or settled rejection that another dial cannot repair.
-	#[cfg(feature = "net")]
-	pub(crate) fn is_terminal(&self) -> bool {
-		match self {
-			#[cfg(feature = "websocket")]
-			Self::TransportRace { quic, websocket } => quic.is_terminal() && websocket.is_terminal(),
-			Self::MoqNet(err) => matches!(
-				moq_net::reconnect::Verdict::from(err),
-				moq_net::reconnect::Verdict::Refused | moq_net::reconnect::Verdict::Fatal
-			),
-			Self::Tls(err) => err.is_terminal(),
-			Self::NoBackend(_)
-			| Self::Deprecated(_)
-			| Self::IdleTimeoutRange
-			| Self::WindowRange(_)
-			| Self::ReceiveWindowTooSmall(_)
-			| Self::StreamsRange
-			| Self::KeylogUnset
-			| Self::BackoffHealthy
-			| Self::QlogUnsupported
-			| Self::ClientCertScheme(_)
-			| Self::Connect(_) => true,
-			#[cfg(feature = "quic")]
-			Self::Quic(err) => err.is_terminal(),
-			#[cfg(feature = "websocket")]
-			Self::WebSocket(err) => err.is_terminal(),
-			#[cfg(feature = "tcp")]
-			Self::Tcp(err) => matches!(
-				err.as_ref(),
-				crate::tcp::Error::MissingHostname | crate::tcp::Error::MissingPort
-			),
-			#[cfg(all(feature = "uds", unix))]
-			Self::Unix(err) => matches!(err.as_ref(), crate::unix::Error::MissingPath),
-			_ => self.is_auth(),
-		}
-	}
-
 	/// The auth rejection behind this error, digging through backend and race variants.
-	#[cfg(feature = "net")]
 	pub fn connect_error(&self) -> Option<crate::ConnectError> {
 		match self {
 			Self::Connect(err) => Some(*err),
 			Self::MoqNet(
 				moq_net::Error::Unauthorized | moq_net::Error::Session(moq_net::SessionError::Unauthorized),
 			) => Some(crate::ConnectError::Unauthorized),
-			#[cfg(feature = "quic")]
 			Self::Quic(err) => err.connect_error(),
-			#[cfg(feature = "websocket")]
 			Self::TransportRace { quic, websocket } => quic.connect_error().or_else(|| websocket.connect_error()),
-			#[cfg(feature = "websocket")]
 			Self::WebSocket(err) => err.connect_error(),
 			_ => None,
 		}
 	}
 
 	/// True if the server rejected us for auth reasons, so retrying won't help without new credentials.
-	#[cfg(feature = "net")]
 	pub fn is_auth(&self) -> bool {
 		// Neither code has an HTTP status, so neither has a `ConnectError` to report.
 		matches!(
@@ -353,15 +291,12 @@ impl Error {
 			// A race is only settled when both halves were answered, and answered with something not
 			// worth repeating: one transport being refused says nothing about the other, so a `404`
 			// over QUIC alongside a dead WebSocket is still just a failed dial.
-			#[cfg(feature = "websocket")]
 			Self::TransportRace { quic, websocket } => match (quic.status(), websocket.status()) {
 				(Some(quic), Some(websocket)) if !status_retryable(quic) && !status_retryable(websocket) => Some(quic),
 				_ => None,
 			},
 
-			#[cfg(feature = "quic")]
 			Self::Quic(err) => err.status(),
-			#[cfg(feature = "websocket")]
 			Self::WebSocket(err) => err.status(),
 			_ => None,
 		}
@@ -369,7 +304,6 @@ impl Error {
 }
 
 /// What a connection reports when moq-net's reconnect policy fails an attempt or gives up.
-#[cfg(feature = "net")]
 impl From<moq_net::reconnect::Failure> for Error {
 	fn from(failure: moq_net::reconnect::Failure) -> Self {
 		use moq_net::reconnect::Failure;
@@ -403,7 +337,6 @@ impl From<crate::tls::Error> for Error {
 	}
 }
 
-#[cfg(feature = "quic")]
 impl From<crate::quic::Error> for Error {
 	fn from(err: crate::quic::Error) -> Self {
 		if let Some(err) = err.connect_error() {
@@ -414,7 +347,6 @@ impl From<crate::quic::Error> for Error {
 	}
 }
 
-#[cfg(feature = "websocket")]
 impl From<crate::websocket::Error> for Error {
 	fn from(err: crate::websocket::Error) -> Self {
 		if let Some(err) = err.connect_error() {
@@ -425,14 +357,13 @@ impl From<crate::websocket::Error> for Error {
 	}
 }
 
-#[cfg(feature = "tcp")]
 impl From<crate::tcp::Error> for Error {
 	fn from(err: crate::tcp::Error) -> Self {
 		Self::Tcp(Arc::new(err))
 	}
 }
 
-#[cfg(all(feature = "uds", unix))]
+#[cfg(unix)]
 impl From<crate::unix::Error> for Error {
 	fn from(err: crate::unix::Error) -> Self {
 		Self::Unix(Arc::new(err))
@@ -442,76 +373,15 @@ impl From<crate::unix::Error> for Error {
 /// Convenience alias for results produced by this crate.
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[cfg(all(test, feature = "websocket"))]
+#[cfg(test)]
 mod tests {
 	use super::*;
 
 	#[test]
-	fn a_transport_race_is_terminal_only_when_every_arm_is_terminal() {
-		let local = || Error::WebSocket(Arc::new(crate::websocket::Error::UnsupportedScheme("bad".into())));
-		let transient = || Error::Io(Arc::new(std::io::Error::from(std::io::ErrorKind::ConnectionRefused)));
-		assert!(local().is_terminal());
-		assert!(!transient().is_terminal());
-		for (quic, websocket) in [(local(), transient()), (transient(), local())] {
-			assert!(
-				!Error::TransportRace {
-					quic: Arc::new(quic),
-					websocket: Arc::new(websocket)
-				}
-				.is_terminal()
-			);
-		}
-		assert!(
-			Error::TransportRace {
-				quic: Arc::new(local()),
-				websocket: Arc::new(local())
-			}
-			.is_terminal()
-		);
-		assert!(Error::Tls(Arc::new(crate::tls::Error::NoRoots)).is_terminal());
-		assert!(Error::Tls(Arc::new(crate::tls::Error::InvalidHostName("a!b".into()))).is_terminal());
-		// A root file can be briefly absent or empty while it rotates, so rereading it may succeed.
-		assert!(!Error::Tls(Arc::new(crate::tls::Error::EmptyRoots("roots.pem".into()))).is_terminal());
-		assert!(!Error::Tls(Arc::new(crate::tls::Error::Open(std::io::ErrorKind::NotFound.into()))).is_terminal());
-	}
-
-	/// Redialing with the same expired credentials cannot succeed; the caller must refresh them.
-	#[test]
-	fn expired_credentials_are_terminal() {
-		assert!(Error::MoqNet(moq_net::Error::Expired).is_terminal());
-		assert!(Error::MoqNet(moq_net::SessionError::Expired.into()).is_terminal());
+	fn expired_and_malformed_credentials_are_auth_rejections() {
 		assert!(Error::MoqNet(moq_net::Error::Expired).is_auth());
 		assert!(Error::MoqNet(moq_net::SessionError::Expired.into()).is_auth());
-	}
-
-	/// Redialing with a token the peer could not parse sends the same bytes again.
-	#[test]
-	fn malformed_credentials_are_terminal() {
-		let err = Error::MoqNet(moq_net::SessionError::MalformedAuthToken.into());
-		assert!(err.is_terminal());
-		assert!(err.is_auth());
-	}
-
-	/// Every raced address building the same malformed request is as terminal as one address doing so.
-	#[test]
-	fn an_address_race_is_terminal_only_when_every_attempt_is_terminal() {
-		use crate::failover::Attempt;
-		use crate::websocket::Error as Ws;
-
-		let addr = |port| std::net::SocketAddr::from(([127, 0, 0, 1], port));
-		let malformed = |port| Attempt {
-			addr: addr(port),
-			error: Ws::BuildRequest("fragment".into()),
-		};
-		let refused = |port| Attempt {
-			addr: addr(port),
-			error: Ws::Io(std::io::ErrorKind::ConnectionRefused.into()),
-		};
-
-		let race = |attempts| Error::WebSocket(Arc::new(Ws::Failover(attempts)));
-		assert!(race(vec![malformed(1), malformed(2)]).is_terminal());
-		assert!(!race(vec![malformed(1), refused(2)]).is_terminal());
-		assert!(!race(vec![refused(1), malformed(2)]).is_terminal());
+		assert!(Error::MoqNet(moq_net::SessionError::MalformedAuthToken.into()).is_auth());
 	}
 
 	#[test]

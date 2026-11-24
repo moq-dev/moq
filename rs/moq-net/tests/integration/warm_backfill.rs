@@ -9,10 +9,10 @@
 //! nor asks for them, and read only the live edge until it took the cached backfill as
 //! filled.
 
+use crate::WithMax as _;
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use moq_net::track::Delay;
 use moq_net::track::{Info, Subscription};
 use moq_net::{Timescale, Timestamp, Version, origin, track};
 
@@ -29,9 +29,11 @@ const BUDGET: Duration = Duration::from_secs(100);
 const VERSIONS: &[&str] = &["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"];
 
 fn origin(hop: u64) -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (origin, driver) = origin::Producer::new(config);
 	spawn(driver);
-	origin.with_proxy(true)
+	origin
 }
 
 async fn subscribe(relay: &origin::Producer) -> track::Subscriber {
@@ -48,8 +50,8 @@ async fn subscribe(relay: &origin::Producer) -> track::Subscriber {
 		.unwrap()
 		.subscribe(
 			Subscription::default()
-				.with_delay(Delay::default().with_max(BUDGET))
-				.with_range(0..),
+				.with_ranges([crate::support::keys(0..)])
+				.with_max(BUDGET),
 		)
 		.await
 		.unwrap()
@@ -60,7 +62,7 @@ async fn received(subscriber: &mut track::Subscriber) -> BTreeSet<u64> {
 	let mut got = BTreeSet::new();
 	while let Ok(group) = kio::clock::timeout(Duration::from_secs(1), subscriber.recv_group()).await {
 		let group = group.unwrap().expect("the track is live");
-		assert!(got.insert(group.sequence), "group {} delivered twice", group.sequence);
+		assert!(got.insert(group.start), "group {} delivered twice", group.start);
 	}
 	got
 }
@@ -81,10 +83,10 @@ async fn a_newcomer_on_a_warm_relay_gets_the_backfill() {
 				Info::default().with_timescale(Timescale::MILLI).with_max_age(None),
 			)
 			.unwrap();
-		for sequence in 0..GROUPS {
-			let mut group = source.create_group(moq_net::group::Info { sequence }).unwrap();
+		for key in 0..GROUPS {
+			let mut group = source.create_group(moq_net::group::Info { start: key }).unwrap();
 			group
-				.write_frame(Timestamp::from_millis(sequence * 1000).unwrap(), &b"x"[..])
+				.write_frame(Timestamp::from_millis(key * 1000).unwrap(), &b"x"[..])
 				.unwrap();
 			group.finish().unwrap();
 		}
@@ -104,7 +106,7 @@ async fn a_newcomer_on_a_warm_relay_gets_the_backfill() {
 /// A refused history fill or FETCH never ends its live subscription.
 #[kio::test]
 async fn a_refused_transport_backfill_keeps_delivering_live() {
-	for version in ["moq-transport-18", "moq-transport-22"] {
+	for version in ["moq-transport-18", "moq-transport-22", "moq-transport-23"] {
 		let publisher = origin(1);
 		let relay = origin(2);
 		let _link = peer(version.parse::<Version>().unwrap(), &publisher, &relay).await;
@@ -115,10 +117,10 @@ async fn a_refused_transport_backfill_keeps_delivering_live() {
 			.broadcast()
 			.create_track("video", Info::default().with_timescale(Timescale::MILLI))
 			.unwrap();
-		for sequence in 0..GROUPS {
-			let mut group = source.create_group(sequence.into()).unwrap();
+		for key in 0..GROUPS {
+			let mut group = source.create_group(key.into()).unwrap();
 			group
-				.write_frame(Timestamp::from_millis(sequence * 1000).unwrap(), &b"x"[..])
+				.write_frame(Timestamp::from_millis(key * 1000).unwrap(), &b"x"[..])
 				.unwrap();
 			group.finish().unwrap();
 		}
@@ -136,6 +138,6 @@ async fn a_refused_transport_backfill_keeps_delivering_live() {
 			.unwrap()
 			.unwrap()
 			.unwrap();
-		assert_eq!(got.sequence, GROUPS, "{version}: still live after the refused backfill");
+		assert_eq!(got.start, GROUPS, "{version}: still live after the refused backfill");
 	}
 }

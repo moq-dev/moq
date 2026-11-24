@@ -1,9 +1,11 @@
 /**
- * Exact path patterns for Media over QUIC: grammar, matching, and set algebra.
+ * Path grants and exact path patterns for Media over QUIC: grammar, matching, and set algebra.
  *
- * A {@link Pattern} describes a set of broadcast paths. {@link Patterns} is an unordered
- * union reduced by exact containment. Matching is linear. {@link Pattern.literal}
- * rejects `*` because it is reserved for pattern syntax.
+ * A grant is a {@link Prefixes} set: each {@link Prefix} covers a path and everything beneath
+ * it, and a grant never holds a wildcard. A {@link Pattern} describes a set of broadcast paths
+ * for discovery filters, such as listing the announcements matching `room/ * /chat`.
+ * {@link Patterns} is an unordered union reduced by exact containment. Matching is linear.
+ * {@link Pattern.literal} rejects `*` because it is reserved for pattern syntax.
  *
  * `@moq/net` and `@moq/auth` re-export this package. The Rust twin is `moq-pattern`.
  *
@@ -15,6 +17,11 @@
  * - `*`, matching one complete segment;
  * - `lit*lit`, with one `*` matching bytes inside one segment;
  * - `**`, matching zero or more complete segments, at most once per pattern.
+ *
+ * Segments are split as {@link parts} splits a path: a `\` escapes the `\` or `/` after it,
+ * so `a\/b` is one literal segment holding a `/`, and any other `\` is refused. A literal
+ * matches the segment spelled the same way, which is how a pattern names a moq-transport
+ * namespace field holding a `/`. There is no escape for `*`.
  *
  * Patterns are exact: `foo` matches only `foo`, `foo/**` matches its subtree including
  * `foo`, `**` matches every path, and the empty pattern matches only the current root.
@@ -36,7 +43,8 @@
  *
  * Common Access Token and `draft-ietf-moq-c4m-01` match namespace fields positionally:
  * exact, prefix, or suffix per field, with a trailing `nil` for exact depth. Without
- * `nil`, longer namespaces that start with the matching fields are in scope.
+ * `nil`, longer namespaces that start with the matching fields are in scope. A pattern
+ * segment is one field, compared by its {@link unescape}d content.
  *
  * That common subset is `foo/bar` (exact fields plus `nil`), `foo/bar/**` (no `nil`),
  * `foo*` / `*foo` (prefix / suffix on a field), `*` (prefix of the empty byte string),
@@ -55,12 +63,68 @@
  */
 
 /**
+ * The segments of `path`, split only at a `/` no `\` escapes and still escaped as written.
+ *
+ * The empty path has none. Anything else yields one more segment than it has separators,
+ * empty ones included, so a caller that requires non-empty segments checks them itself.
+ * With `limit`, stops after that many segments.
+ *
+ * @example
+ * ```typescript
+ * parts("room/a\\/b/cam"); // ["room", "a\\/b", "cam"]
+ * ```
+ */
+export function parts(path: string, limit?: number): string[] {
+	if (path === "") return [];
+	// Without a `\`, every `/` separates.
+	if (!path.includes("\\")) return limit === undefined ? path.split("/") : path.split("/", limit);
+	const max = limit ?? Number.POSITIVE_INFINITY;
+	const out: string[] = [];
+	let start = 0;
+	for (let i = 0; i < path.length && out.length < max; i++) {
+		const c = path[i];
+		if (c === "\\") {
+			// The escaped character is never a separator.
+			i++;
+		} else if (c === "/") {
+			out.push(path.slice(start, i));
+			start = i + 1;
+		}
+	}
+	if (out.length < max) out.push(path.slice(start));
+	return out;
+}
+
+/**
+ * A segment's content: each escaped `\` or `/` as the character itself.
+ *
+ * Expects a segment as {@link parts} yields it from a valid path, where every `\` escapes
+ * the character after it.
+ */
+// biome-ignore lint/suspicious/noShadowRestrictedNames: the name mirrors Rust; the deprecated global is unused.
+export function unescape(segment: string): string {
+	return segment.includes("\\") ? segment.replace(/\\(.)/gs, "$1") : segment;
+}
+
+/** The segment holding `content`: each `\` or `/` escaped by a `\`. The inverse of {@link unescape}. */
+// biome-ignore lint/suspicious/noShadowRestrictedNames: the name mirrors Rust; the deprecated global is unused.
+export function escape(content: string): string {
+	return /[\\/]/.test(content) ? content.replace(/[\\/]/g, "\\$&") : content;
+}
+
+// Whether `segment` is one escaped segment: every `\` escapes a `\` or `/`, and no `/` is bare.
+function isSegment(segment: string): boolean {
+	return /^(?:[^\\/]|\\[\\/])*$/.test(segment);
+}
+
+/**
  * One segment of a {@link Pattern}.
  *
- * A literal is never empty and never contains `/` or `*`. A wildcard (`*`) matches any
- * one segment. A partial (`prefix*suffix`) matches any one segment that starts with the
- * prefix and ends with the suffix without overlap; either may be empty, not both. A
- * globstar (`**`) matches any run of zero or more segments, at most once per pattern.
+ * A literal is spelled as in a path: never empty, no `*`, and every `/` or `\` it holds
+ * escaped by a `\`. A wildcard (`*`) matches any one segment. A partial (`prefix*suffix`)
+ * matches any one segment that starts with the prefix and ends with the suffix without
+ * overlap; either may be empty, not both, and each is spelled like a literal. A globstar
+ * (`**`) matches any run of zero or more segments, at most once per pattern.
  */
 export type Segment =
 	| { readonly kind: "literal"; readonly value: string }
@@ -144,7 +208,7 @@ const MAX_INTERSECTION_PATTERNS = 1024;
 
 /** The non-empty segments of a path, normalized like a broadcast path. */
 function splitPath(path: string): string[] {
-	return path.split("/").filter((part) => part !== "");
+	return parts(path).filter((part) => part !== "");
 }
 
 function invalidSegment(text: string): InvalidPattern {
@@ -155,13 +219,15 @@ function parseSegment(text: string): Segment {
 	if (text === "") throw new InvalidPattern("empty-segment", "empty path segment");
 	if (text === "*") return WILDCARD;
 	if (text === "**") return GLOBSTAR;
-	if (text.includes("/")) throw invalidSegment(text);
 	const star = text.indexOf("*");
-	if (star < 0) return { kind: "literal", value: text };
+	if (star < 0) {
+		if (!isSegment(text)) throw invalidSegment(text);
+		return { kind: "literal", value: text };
+	}
 	const prefix = text.slice(0, star);
 	const suffix = text.slice(star + 1);
-	// More than one star in a segment is reserved.
-	if (suffix.includes("*")) throw invalidSegment(text);
+	// More than one star in a segment is reserved, and so is a malformed escape.
+	if (suffix.includes("*") || !isSegment(prefix) || !isSegment(suffix)) throw invalidSegment(text);
 	return { kind: "partial", prefix, suffix };
 }
 
@@ -355,13 +421,19 @@ export class Pattern {
 					throw new InvalidPattern("invalid-segment", "literal value must be a string");
 				}
 				if (segment.value === "") throw new InvalidPattern("empty-segment", "empty path segment");
-				if (segment.value.includes("*") || segment.value.includes("/")) throw invalidSegment(segment.value);
+				if (segment.value.includes("*") || !isSegment(segment.value)) throw invalidSegment(segment.value);
 			} else if (segment.kind === "partial") {
 				const { prefix, suffix } = segment;
 				if (typeof prefix !== "string" || typeof suffix !== "string") {
 					throw new InvalidPattern("invalid-segment", "partial prefix and suffix must be strings");
 				}
-				if ((prefix === "" && suffix === "") || /[*/]/.test(prefix) || /[*/]/.test(suffix)) {
+				if (
+					(prefix === "" && suffix === "") ||
+					prefix.includes("*") ||
+					suffix.includes("*") ||
+					!isSegment(prefix) ||
+					!isSegment(suffix)
+				) {
 					throw invalidSegment(`${prefix}*${suffix}`);
 				}
 			} else if (segment.kind === "globstar") {
@@ -405,7 +477,7 @@ export class Pattern {
 		if (text === "") return new Pattern([]);
 		// One past the limit is enough for the constructor to refuse, without splitting
 		// a peer's megabytes of `a/a/...` into segments first.
-		return new Pattern(text.split("/", MAX_PATTERN_SEGMENTS + 1).map(parseSegment));
+		return new Pattern(parts(text, MAX_PATTERN_SEGMENTS + 1).map(parseSegment));
 	}
 
 	/** A pattern from its segments, validating the grammar. Throws {@link InvalidPattern}. */
@@ -513,8 +585,8 @@ export class Pattern {
 	/**
 	 * Whether every path `other` matches, this pattern matches too.
 	 *
-	 * This is the authorization check: a grant contains a request when the request
-	 * cannot name a path outside it. A pattern contains itself.
+	 * A filter contains a candidate when the candidate cannot name a path outside it. A
+	 * pattern contains itself.
 	 */
 	contains(other: Pattern): boolean {
 		if (this.#globstar === undefined) {
@@ -589,7 +661,7 @@ export class Pattern {
 	 * The patterns that, relative to `root`, match exactly the paths this pattern matches
 	 * beneath `root`.
 	 *
-	 * This is how a grant or an advertisement is presented inside a rooted view. It is a
+	 * This is how a filter is presented inside a rooted view. It is a
 	 * set because `**` may consume the root or stop short of it: `** /a` rebased at `a` is
 	 * both the empty pattern (the root itself) and `** /a` (deeper paths ending in `a`).
 	 * Empty when nothing under `root` matches. The root is normalized like a broadcast path.
@@ -630,8 +702,8 @@ export class Pattern {
 	/**
 	 * The patterns matching exactly the paths both patterns match.
 	 *
-	 * This is how a claim is clamped to a scope: the covered paths inside the grant, as
-	 * patterns of their own. It is a set because two partial segments or two `**` runs can
+	 * This is how a filter is clamped to a scope: the paths inside both, as patterns of their
+	 * own. It is a set because two partial segments or two `**` runs can
 	 * meet in more than one way: `ab*` and `*b` meet at `ab*b` and at `ab`, and `a/**` and
 	 * `** /a` meet at `a/** /a` and at `a`. Empty when the two do not {@link overlaps | overlap}.
 	 */
@@ -1043,18 +1115,18 @@ function bounded(patterns: Iterable<Pattern>): Pattern[] {
 /**
  * A union of patterns, reduced so no member is contained by another.
  *
- * This is the shape of a grant (the paths a token may publish) and of a rebased pattern
- * (see {@link Pattern.rebase}). Members are kept in canonical order, so two unions
- * describing the same reduced set are {@link Patterns.equals | equal}.
+ * This is the shape of a discovery filter and of a rebased pattern (see
+ * {@link Pattern.rebase}). Members are kept in canonical order, so two unions describing the
+ * same reduced set are {@link Patterns.equals | equal}.
  *
  * Containment is per member: {@link Patterns.contains} holds when one pattern in the union
  * contains the candidate. A candidate covered only jointly by several members (`a/**`
  * against `a`, `a/*`, and `a/* /**`) is refused, which keeps the check linear and its answer
- * easy to predict. A grant that means a subtree writes `a/**`.
+ * easy to predict. A union that means a subtree writes `a/**`.
  *
  * Operations over a whole union (construction, {@link Patterns.covers}, and
  * {@link Patterns.intersect}) index one side by segment first, so their cost follows the
- * members a query could match rather than every pair. That keeps common grants near their own
+ * members a query could match rather than every pair. That keeps common unions near their own
  * size, but containment between wildcard patterns reduces to Orthogonal Vectors, so some shapes
  * stay super-linear (the `mask` and `chain` cases in `bench/algebra.ts`).
  *
@@ -1172,5 +1244,325 @@ export class Patterns implements Iterable<Pattern> {
 	/** Whether the two unions have the same reduced pattern members. */
 	equals(other: Patterns): boolean {
 		return this.size === other.size && this.#members.every((member, i) => member.equals(other.#members[i]));
+	}
+}
+
+/** Thrown when a grant member is not a valid {@link Prefix}. */
+export class InvalidPrefix extends Error {
+	/** Which rule was broken. */
+	readonly code: InvalidPrefix.Code;
+
+	/** Create an error with the broken rule in `code` and a human-readable `message`. */
+	constructor(code: InvalidPrefix.Code, message: string, options?: ErrorOptions) {
+		super(message, options);
+		this.name = "InvalidPrefix";
+		this.code = code;
+	}
+}
+
+/** Types for {@link InvalidPrefix}. */
+export namespace InvalidPrefix {
+	/** Why a string is not a valid {@link Prefix}. */
+	export type Code =
+		/** It holds a `*`: a grant is a prefix, never a wildcard. */
+		| "wildcard"
+		/** It is not a valid path: an empty segment, a bad escape, or too many segments. */
+		| "path";
+}
+
+// Order two strings by code point, which agrees with UTF-8 byte order and so with the Rust crate.
+function compareText(a: string, b: string): number {
+	const n = Math.min(a.length, b.length);
+	for (let i = 0; i < n; i++) {
+		let x = a.charCodeAt(i);
+		let y = b.charCodeAt(i);
+		if (x === y) continue;
+		// UTF-16 sorts surrogates below U+E000..U+FFFF; code point order puts them above.
+		if (x >= 0xd800 && y >= 0xd800) {
+			x = x < 0xe000 ? x + 0x2000 : x - 0x800;
+			y = y < 0xe000 ? y + 0x2000 : y - 0x800;
+		}
+		return x - y;
+	}
+	return a.length - b.length;
+}
+
+// Order two segment lists segment by segment, so a list sorts right before every list it starts.
+function compareSegments(a: readonly string[], b: readonly string[]): number {
+	const n = Math.min(a.length, b.length);
+	for (let i = 0; i < n; i++) {
+		const order = compareText(a[i], b[i]);
+		if (order !== 0) return order;
+	}
+	return a.length - b.length;
+}
+
+// Whether `inner` starts with every segment of `outer`.
+function startsWith(outer: readonly string[], inner: readonly string[]): boolean {
+	return outer.length <= inner.length && outer.every((segment, i) => segment === inner[i]);
+}
+
+function wildcard(text: string): InvalidPrefix {
+	const hint =
+		text === "**"
+			? 'write the empty prefix "" for everything'
+			: text.endsWith("/**") && !text.slice(0, -3).includes("*")
+				? `write ${JSON.stringify(text.slice(0, -3))} for its subtree`
+				: "wildcards are refused";
+	return new InvalidPrefix(
+		"wildcard",
+		`${JSON.stringify(text)} is a wildcard, but a grant is a prefix covering its whole subtree: ${hint}`,
+	);
+}
+
+/**
+ * One grant member: a path covering itself and every path beneath it. The empty prefix
+ * covers every path.
+ *
+ * A prefix is never a wildcard: `foo` covers `foo` and its subtree, so a grant writes `foo`
+ * where a pattern would write `foo/**`, and the empty prefix where it would write `**`.
+ * Build one with {@link Prefix.parse} or {@link Prefix.all}.
+ *
+ * @public
+ */
+export class Prefix {
+	/** The canonical text: segments joined by `/`, escapes as written. */
+	readonly text: string;
+	/** The segments, still escaped as written. */
+	readonly segments: readonly string[];
+
+	private constructor(segments: readonly string[]) {
+		this.segments = Object.freeze([...segments]);
+		this.text = segments.join("/");
+		Object.freeze(this);
+	}
+
+	/**
+	 * Parse a grant member. Throws {@link InvalidPrefix}: `wildcard` for any `*`, and `path`
+	 * for a leading, trailing, or doubled `/`, a `\` that escapes neither `\` nor `/`, or more
+	 * than {@link Pattern.MAX_SEGMENTS} segments.
+	 */
+	static parse(text: string): Prefix {
+		if (text.includes("*")) throw wildcard(text);
+		// The pattern grammar owns path syntax; a text with no `*` parses only as literals.
+		try {
+			Pattern.parse(text);
+		} catch (err) {
+			if (!(err instanceof InvalidPattern)) throw err;
+			throw new InvalidPrefix("path", `invalid prefix ${JSON.stringify(text)}: ${err.message}`, { cause: err });
+		}
+		return new Prefix(parts(text));
+	}
+
+	/** The empty prefix, which covers every path. */
+	static all(): Prefix {
+		return new Prefix([]);
+	}
+
+	/** Order two prefixes segment by segment, so a prefix sorts right before everything beneath it. */
+	static compare(a: Prefix, b: Prefix): number {
+		return compareSegments(a.segments, b.segments);
+	}
+
+	/** The canonical text. */
+	toString(): string {
+		return this.text;
+	}
+
+	/** Serializes as the canonical text, matching the Rust crate's serde form. */
+	toJSON(): string {
+		return this.text;
+	}
+
+	/** Whether the two are the same prefix. */
+	equals(other: Prefix): boolean {
+		return this.text === other.text;
+	}
+
+	/** Whether this is the empty prefix, covering every path. */
+	get isEmpty(): boolean {
+		return this.text === "";
+	}
+
+	/** Whether `path`, normalized like a broadcast path, is this prefix or beneath it. */
+	matches(path: string): boolean {
+		return startsWith(this.segments, splitPath(path));
+	}
+
+	/** Whether `path`, normalized like a broadcast path, and this prefix share a path: one lies beneath the other. */
+	overlaps(path: string): boolean {
+		const segments = splitPath(path);
+		return startsWith(this.segments, segments) || startsWith(segments, this.segments);
+	}
+
+	/**
+	 * This prefix placed beneath the path `root`, normalized like a broadcast path (slashes
+	 * trimmed and collapsed). Throws {@link InvalidPrefix} when `root` holds a wildcard or a
+	 * malformed escape, or the result has more than {@link Pattern.MAX_SEGMENTS} segments.
+	 */
+	rooted(root: string): Prefix {
+		const segments = [...Prefix.parse(splitPath(root).join("/")).segments, ...this.segments];
+		if (segments.length > MAX_PATTERN_SEGMENTS) {
+			throw new InvalidPrefix("path", `more than ${MAX_PATTERN_SEGMENTS} segments`);
+		}
+		return new Prefix(segments);
+	}
+
+	/**
+	 * This prefix as seen from the path `root`, normalized like a broadcast path: the rest
+	 * beneath it, or the empty prefix when this one covers `root` already. Undefined when the
+	 * two share no path.
+	 */
+	rebase(root: string): Prefix | undefined {
+		const base = splitPath(root);
+		if (startsWith(this.segments, base)) return Prefix.all();
+		if (startsWith(base, this.segments)) return new Prefix(this.segments.slice(base.length));
+		return undefined;
+	}
+
+	/** Its subtree as a {@link Pattern}: `prefix/**`, or the literal at {@link Pattern.MAX_SEGMENTS}. */
+	pattern(): Pattern {
+		return Pattern.subtree(this.text);
+	}
+}
+
+/**
+ * A grant: a set of {@link Prefix}es, reduced so no member lies beneath another, and sorted
+ * segment by segment, so two sets covering the same paths are {@link Prefixes.equals | equal}.
+ * The empty set grants nothing.
+ *
+ * Every operation is near-linear in the members on every shape: a prefix's ancestors sort
+ * right before it, so finding the member covering a path is one binary search.
+ *
+ * @public
+ */
+export class Prefixes implements Iterable<Prefix> {
+	#members: Prefix[] = [];
+
+	/** The reduced set of the given prefixes. Empty when none are given. */
+	constructor(prefixes?: Iterable<Prefix>) {
+		if (!prefixes) return;
+		const sorted = [...prefixes].sort(Prefix.compare);
+		// Sorted, a prefix's subtree is the run right after it, so one sweep against the last
+		// member kept drops every covered one.
+		for (const prefix of sorted) {
+			const last = this.#members[this.#members.length - 1];
+			if (!last || !startsWith(last.segments, prefix.segments)) this.#members.push(prefix);
+		}
+	}
+
+	/** The set holding the empty prefix, which covers every path. */
+	static all(): Prefixes {
+		return new Prefixes([Prefix.all()]);
+	}
+
+	/** Parse each text as a {@link Prefix} into one set. Throws {@link InvalidPrefix}. */
+	static parse(texts: Iterable<string>): Prefixes {
+		return new Prefixes(Array.from(texts, (text) => Prefix.parse(text)));
+	}
+
+	/**
+	 * Add a prefix, dropping the members beneath it.
+	 *
+	 * Returns false when a member already covers it, leaving the set unchanged.
+	 */
+	insert(prefix: Prefix): boolean {
+		if (this.#covering(prefix.segments)) return false;
+		const at = this.#after(prefix.segments);
+		let end = at;
+		while (end < this.#members.length && startsWith(prefix.segments, this.#members[end].segments)) end++;
+		this.#members.splice(at, end - at, prefix);
+		return true;
+	}
+
+	/**
+	 * Whether some member covers `path`, normalized like a broadcast path. A member covering a
+	 * path covers its whole subtree, so this also says whether the set grants everything beneath it.
+	 */
+	matches(path: string): boolean {
+		return this.#covering(splitPath(path));
+	}
+
+	/** Whether some member lies at, above, or beneath `path`, normalized like a broadcast path. */
+	overlaps(path: string): boolean {
+		const segments = splitPath(path);
+		if (this.#covering(segments)) return true;
+		// Anything beneath the path sorts right after it.
+		const next = this.#members[this.#after(segments)];
+		return next !== undefined && startsWith(segments, next.segments);
+	}
+
+	/** Whether every member of `other` is covered here: `other` grants nothing this set does not. */
+	covers(other: Prefixes): boolean {
+		return other.#members.every((prefix) => this.#covering(prefix.segments));
+	}
+
+	/** The paths in both sets: each member of one that the other covers. */
+	intersect(other: Prefixes): Prefixes {
+		return new Prefixes([
+			...this.#members.filter((prefix) => other.#covering(prefix.segments)),
+			...other.#members.filter((prefix) => this.#covering(prefix.segments)),
+		]);
+	}
+
+	/** What this set covers beneath `root`, named relative to it. See {@link Prefix.rebase}. */
+	rebase(root: string): Prefixes {
+		return new Prefixes(this.#members.flatMap((member) => member.rebase(root) ?? []));
+	}
+
+	/** Every member placed beneath `root`. See {@link Prefix.rooted}. */
+	rooted(root: string): Prefixes {
+		return new Prefixes(this.#members.map((member) => member.rooted(root)));
+	}
+
+	/** Each member's subtree as one {@link Patterns} union, to intersect with a pattern filter. */
+	patterns(): Patterns {
+		return new Patterns(this.#members.map((member) => member.pattern()));
+	}
+
+	/** The number of members. */
+	get size(): number {
+		return this.#members.length;
+	}
+
+	/** The members, in canonical order. */
+	[Symbol.iterator](): Iterator<Prefix> {
+		return this.#members[Symbol.iterator]();
+	}
+
+	/** The members as a fresh array, in canonical order. */
+	toArray(): Prefix[] {
+		return [...this.#members];
+	}
+
+	/** Serializes as a list of texts, matching the Rust crate's serde form. */
+	toJSON(): string[] {
+		return this.#members.map((member) => member.text);
+	}
+
+	/** Whether the two sets cover the same paths. */
+	equals(other: Prefixes): boolean {
+		return this.size === other.size && this.#members.every((member, i) => member.equals(other.#members[i]));
+	}
+
+	// Whether the last member at or before `segments` covers them. In a reduced, sorted set it is
+	// the only candidate: any covering member sorts before them, with only its own subtree, which
+	// holds no other member, in between.
+	#covering(segments: readonly string[]): boolean {
+		const at = this.#after(segments);
+		const member = this.#members[at] && compareSegments(this.#members[at].segments, segments) === 0 ? at : at - 1;
+		return member >= 0 && startsWith(this.#members[member].segments, segments);
+	}
+
+	// The index of the first member sorting at or after `segments`.
+	#after(segments: readonly string[]): number {
+		let lo = 0;
+		let hi = this.#members.length;
+		while (lo < hi) {
+			const mid = (lo + hi) >>> 1;
+			if (compareSegments(this.#members[mid].segments, segments) < 0) lo = mid + 1;
+			else hi = mid;
+		}
+		return lo;
 	}
 }

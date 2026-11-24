@@ -36,6 +36,7 @@ use bytes::Bytes;
 use moq_net::Timestamp;
 
 use super::catalog;
+use super::error::{Result, bail};
 use super::mux_rate::{MAX_INTERVAL, PCR_WRAP};
 use super::passthrough::PCR_HZ;
 use super::psi::{self, CRC};
@@ -421,7 +422,7 @@ impl Entry {
 		(pid, table_id): (u16, u8),
 		pts: Timestamp,
 		now: Instant,
-	) -> anyhow::Result<()> {
+	) -> Result<()> {
 		let frames: Vec<Vec<u8>> = self
 			.active
 			.values()
@@ -440,14 +441,16 @@ impl Entry {
 			None => {
 				let info = track_info(max_age);
 				self.track.insert(
-					match broadcast.create_track(format!("{pid:#06x}-{table_id:#04x}.si"), info.clone()) {
-						Ok(track) => track,
-						Err(_) => broadcast.unique_track(".si", info)?,
-					},
+					broadcast
+						.create_track(format!("{pid:#06x}-{table_id:#04x}.si"), info.clone())
+						.unwrap_or_else(|| broadcast.unique_track(".si", info)),
 				)
 			}
 		};
-		let mut group = track.append_group()?;
+		// A cut can land on the same millisecond as the last one (a retraction cuts at once, and SI
+		// without media PTS cuts at zero), so it is stamped a unit later instead of refused.
+		let (_, pts) = crate::start::next(track, pts)?;
+		let mut group = track.append_group(pts)?;
 		for payload in frames {
 			group.write_frame(pts, payload)?;
 		}
@@ -644,7 +647,7 @@ impl<E: catalog::Catalog> Capture<E> {
 	/// `pts` is the media clock, used to stamp the frames; the cut debounce runs on
 	/// the host clock ([`DEBOUNCE`]), and a first snapshot is never delayed. `force`
 	/// overrides the debounce, for end of stream.
-	pub fn flush(&mut self, pts: Timestamp, force: bool) -> anyhow::Result<()> {
+	pub fn flush(&mut self, pts: Timestamp, force: bool) -> Result<()> {
 		let now = kio::clock::now();
 		// The max age this catalog mints media with, which its SI shares.
 		let max_age = self.catalog.track_info(hang::catalog::PRIORITY.catalog).max_age;
@@ -663,9 +666,9 @@ impl<E: catalog::Catalog> Capture<E> {
 		}
 
 		if self.entries.values().any(|e| e.advertised != e.populated) {
-			let mut guard = self.catalog.modify()?;
+			let mut guard = self.catalog.edit()?;
 			let Some(mpegts) = guard.ext.mpegts_mut() else {
-				anyhow::bail!("catalog extension no longer carries an mpegts section");
+				bail!("catalog extension no longer carries an mpegts section");
 			};
 			for ((pid, table_id), entry) in self.entries.iter_mut() {
 				// Either flag implies the track exists.
@@ -692,7 +695,7 @@ impl<E: catalog::Catalog> Capture<E> {
 	}
 
 	/// Flush everything and finish every track.
-	pub fn finish(&mut self, pts: Timestamp) -> anyhow::Result<()> {
+	pub fn finish(&mut self, pts: Timestamp) -> Result<()> {
 		self.flush(pts, true)?;
 		// Each entry keeps its own clone, whose appends the end refuses.
 		for track in self.entries.values().filter_map(|entry| entry.track.as_ref()) {
@@ -720,7 +723,7 @@ impl<E: catalog::Catalog> Capture<E> {
 			return;
 		}
 		// A closed catalog has nothing left to unadvertise from.
-		let Ok(mut guard) = self.catalog.modify() else {
+		let Ok(mut guard) = self.catalog.edit() else {
 			return;
 		};
 		let Some(mpegts) = guard.ext.mpegts_mut() else {
@@ -800,9 +803,10 @@ mod tests {
 	/// budget: at moq-net's zero default the superseded revision would be skipped at once.
 	#[test]
 	fn a_superseded_si_revision_stays_readable_within_the_export_budget() {
+		// Each revision's group starts at its time, in the track's milliseconds.
 		for (info, expected) in [
-			(track_info(Some(hang::container::MAX_AGE)), vec![0, 1]),
-			(track_info(Some(Duration::ZERO)), vec![1]),
+			(track_info(Some(hang::container::MAX_AGE)), vec![0, 100]),
+			(track_info(Some(Duration::ZERO)), vec![100]),
 		] {
 			let broadcast = moq_net::broadcast::Info::new().produce();
 			let mut track = broadcast.create_track("0x0014-0x70.si", info).unwrap();
@@ -811,15 +815,21 @@ mod tests {
 					.write_frame(Timestamp::from_millis(revision * 100).unwrap(), vec![revision as u8])
 					.unwrap();
 			}
-			// As the export subscribes: in order, with the CLI's default 500 ms delay.
-			let delay = moq_net::track::Delay::default().with_max(Duration::from_millis(500));
+			// As the export subscribes: in order, joining live the CLI's default 500 ms back and
+			// keeping each group that long.
+			let delay = Duration::from_millis(500);
+			let join = moq_net::track::Start::Live {
+				min: Some(delay),
+				max: Some(delay),
+			};
 			let mut reader = track
-				.subscribe(moq_net::track::Subscription::default().with_delay(delay))
+				.subscribe(moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(join)]))
 				.ordered();
 			let waiter = kio::Waiter::noop();
 			let mut read = Vec::new();
+			// A group given up on is passed over.
 			while let std::task::Poll::Ready(Ok(Some(group))) = reader.poll_next_group(&waiter) {
-				read.push(group.sequence);
+				read.push(group.start);
 			}
 			assert_eq!(read, expected);
 		}

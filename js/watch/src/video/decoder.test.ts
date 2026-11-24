@@ -1,6 +1,7 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { readFileSync } from "node:fs";
-import { Duration, Instant, Manual, now, yieldNow } from "@moq/clock";
+import { Duration, Instant, now, yieldNow } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/net";
@@ -8,9 +9,12 @@ import { Effect, Signal } from "@moq/signals";
 import { ringSamples } from "../audio/latency";
 import { AudioRingBuffer } from "../audio/ring-buffer";
 import type { Broadcast } from "../broadcast";
+import { defined } from "../defined.test-util.ts";
 import { type Delay, Sync, Track } from "../sync";
-import { Decoder, insertRecoveryPoint } from "./decoder";
+import { stubSupport } from "../webcodecs.test-util";
+import { Decoder } from "./decoder";
 import { Source } from "./source";
+import { supported } from "./supported";
 
 const flush = () => yieldNow();
 
@@ -49,10 +53,7 @@ async function play(catalog: Signal<Catalog.Root>): Promise<{
 	decoder: Decoder;
 }> {
 	const broadcast = new Signal<Broadcast | undefined>(watchBroadcast(catalog));
-	const source = new Source({
-		broadcast,
-		supported: async () => true,
-	});
+	const source = new Source({ broadcast });
 	const sync = new Sync({ delay: Duration.millis(0) });
 	await settle();
 	const decoder = new Decoder({ source, sync });
@@ -61,6 +62,12 @@ async function play(catalog: Signal<Catalog.Root>): Promise<{
 }
 
 describe("Decoder jitter across a source switch", () => {
+	let decoder: Disposable;
+	beforeEach(() => {
+		decoder = stubSupport({ video: () => true });
+	});
+	afterEach(() => decoder[Symbol.dispose]());
+
 	it("keeps the outgoing floor when the next source reuses the track name", async () => {
 		const outgoing = new Signal<Catalog.Root>({
 			video: { renditions: { video: config({ delay: 200, jitter: 60 }) } },
@@ -166,18 +173,15 @@ class Picture {
 	displayWidth = 16;
 	displayHeight = 16;
 	readonly timestamp: number;
-	// The index of the codec that decoded it, in creation order, or -1 for one a test made.
-	readonly codec: number;
 	readonly #pictures: Picture[];
-	constructor(timestamp: number, pictures: Picture[], codec = -1) {
+	constructor(timestamp: number, pictures: Picture[]) {
 		this.#pictures = pictures;
 		pictures.push(this);
 		this.timestamp = timestamp;
-		this.codec = codec;
 	}
 	clone() {
 		if (this.closed) throw new Error("clone of a closed frame");
-		return new Picture(this.timestamp, this.#pictures, this.codec);
+		return new Picture(this.timestamp, this.#pictures);
 	}
 	close() {
 		this.closed = true;
@@ -192,14 +196,14 @@ function manualAt(ms: number) {
 	clock.jump(Duration.millis(ms));
 	return { advance: (by: number) => clock.advance(Duration.millis(by)), installed: clock.install() };
 }
-function sample(group: bigint, timestamp: number, keyframe = true, payload: Uint8Array = new Uint8Array([1])): Read {
+function sample(group: bigint, timestamp: number, keyframe = true): Read {
 	return {
 		kind: "frame",
 		group,
 		frame: {
 			arrival: now(),
 			timestamp: Duration.micros(timestamp),
-			payload,
+			payload: new Uint8Array([1]),
 			keyframe,
 		},
 	};
@@ -207,13 +211,13 @@ function sample(group: bigint, timestamp: number, keyframe = true, payload: Uint
 const gap: Read = { kind: "gap", timestamp: Duration.micros(0), duration: Duration.micros(0) };
 
 // One read queue per container consumer, in the order each first reads. An empty queue waits for
-// `push` rather than ending the track.
+// `push` rather than ending the track; pushing `undefined` finishes it cleanly.
 class Feeds {
-	readonly #queues: Read[][] = [];
+	readonly #queues: (Read | undefined)[][] = [];
 	readonly #owners = new Map<Container.Consumer, number>();
 	#wake: (() => void)[] = [];
 
-	push(index: number, ...reads: Read[]) {
+	push(index: number, ...reads: (Read | undefined)[]) {
 		while (this.#queues.length <= index) this.#queues.push([]);
 		this.#queues[index].push(...reads);
 		for (const wake of this.#wake.splice(0)) wake();
@@ -226,8 +230,8 @@ class Feeds {
 			this.#owners.set(consumer, index);
 		}
 		for (;;) {
-			const read = this.#queues[index]?.shift();
-			if (read) return read;
+			const queue = this.#queues[index];
+			if (queue?.length) return queue.shift();
 			await new Promise<void>((resolve) => this.#wake.push(resolve));
 		}
 	}
@@ -241,23 +245,28 @@ class Feeds {
 
 // `reads` stands in for the container consumer, unless `live`, which reads what tests publish into
 // `producer` through real consumers instead, or `feeds`, which gives each consumer its own queue.
-// `fields` add to the rendition's catalog entry, and `initial` is the delay the decoder subscribes with.
+// `fields` add to the rendition's catalog entry, and `initial` and `priority` are the delay and
+// priority the decoder subscribes with.
 async function guardedPlayback(
 	kind: "legacy" | "cmaf",
 	reads: Read[],
 	hold: readonly number[] = [],
 	live = false,
 	lookahead = 0,
-	{ fields = {}, initial, feeds }: { fields?: Partial<Catalog.VideoConfig>; initial?: Delay; feeds?: Feeds } = {},
+	{
+		fields = {},
+		initial,
+		feeds,
+		priority,
+	}: { fields?: Partial<Catalog.VideoConfig>; initial?: Delay; feeds?: Feeds; priority?: Signal<number> } = {},
 ) {
 	// Load the optional container before the fixture drains only reactive microtasks.
 	if (kind === "cmaf") await import("@moq/hang/cmaf");
 	const originalDecoder = Object.getOwnPropertyDescriptor(globalThis, "VideoDecoder");
 	const originalChunk = Object.getOwnPropertyDescriptor(globalThis, "EncodedVideoChunk");
 	const submitted: number[] = [];
-	// What each codec, in creation order, was given, and the bytes of each chunk.
+	// What each codec, in creation order, was given.
 	const decoded: number[][] = [];
-	const payloads: Uint8Array[][] = [];
 	const outputs: number[] = [];
 	const pictures: Picture[] = [];
 	const owed = new Set(hold);
@@ -266,13 +275,15 @@ async function guardedPlayback(
 	const errors: VideoDecoderInit["error"][] = [];
 	const frames: VideoDecoderInit["output"][] = [];
 	const configures: VideoDecoderConfig[] = [];
-	// A read that is an Error stands in for a malformed container read.
+	// A read that is an Error stands in for a malformed container read. Running out resets the
+	// subscription rather than finishing the track, which would flush the pictures a test holds.
 	const next = spyOn(Container.Consumer.prototype, "next").mockImplementation(async function (
 		this: Container.Consumer,
 	) {
 		if (feeds) return feeds.next(this);
 		const read = reads.shift() as Read | Error | undefined;
 		if (read instanceof Error) throw read;
+		if (read === undefined) throw new Moq.Error.Stream(Moq.StreamCode.Cancel);
 		return read;
 	});
 	if (live) next.mockRestore();
@@ -289,7 +300,6 @@ async function guardedPlayback(
 		constructor(callbacks: VideoDecoderInit) {
 			this.callbacks = callbacks;
 			decoded.push([]);
-			payloads.push([]);
 			errors.push(callbacks.error);
 			frames.push(callbacks.output);
 		}
@@ -307,10 +317,9 @@ async function guardedPlayback(
 			this.#keyRequired = false;
 			submitted.push(chunk.timestamp);
 			decoded[this.index].push(chunk.timestamp);
-			payloads[this.index].push((chunk as unknown as { data: Uint8Array }).data);
 			const emit = () => {
 				outputs.push(chunk.timestamp);
-				const picture = new Picture(chunk.timestamp, pictures, this.index);
+				const picture = new Picture(chunk.timestamp, pictures);
 				void this.callbacks.output(picture as unknown as VideoFrame);
 			};
 			if (owed.delete(chunk.timestamp)) {
@@ -320,6 +329,10 @@ async function guardedPlayback(
 			for (const earlier of pending) earlier();
 			pending.length = 0;
 			emit();
+		}
+		// Like WebCodecs, a flush emits every picture still inside the decoder.
+		async flush() {
+			for (const earlier of pending.splice(0)) earlier();
 		}
 		reset() {
 			resets++;
@@ -374,16 +387,18 @@ async function guardedPlayback(
 		producer.close();
 		mediaProducer.close();
 	};
-	const source = new Source({ broadcast, supported: async () => true });
+	const source = new Source({ broadcast });
 	const delay = new Signal<Delay>(initial ?? (lookahead ? Duration.millis(100) : "instant"));
 	const sync = new Sync({ delay, lookahead: Duration.millis(lookahead) });
 	const enabled = new Signal(true);
 	// Published before the decoder subscribes, since a broadcast with no request handler refuses
 	// an unknown track.
 	const track = live
-		? mediaProducer.createTrack("video", { timescale: Moq.Time.Timescale.MILLI, maxAge: Container.MAX_AGE })
+		? defined(
+				mediaProducer.createTrack("video", { timescale: Moq.Time.Timescale.MILLI, maxAge: Container.MAX_AGE }),
+			)
 		: undefined;
-	const decoder = new Decoder({ source, sync, enabled });
+	const decoder = new Decoder({ source, sync, enabled, priority });
 	// Another track on the same clock, whose arrivals the tests drive by hand.
 	const audio = sync.track({ target: new Signal<Duration | undefined>(undefined) });
 	await microtasks();
@@ -393,9 +408,7 @@ async function guardedPlayback(
 		delay,
 		fail: (error: DOMException, index = -1) => errors.at(index)?.(error),
 		emit: (timestamp: number, index = -1) =>
-			frames.at(index)?.(
-				new Picture(timestamp, pictures, (index + frames.length) % frames.length) as unknown as VideoFrame,
-			),
+			frames.at(index)?.(new Picture(timestamp, pictures) as unknown as VideoFrame),
 		get codecs() {
 			return errors.length;
 		},
@@ -412,7 +425,6 @@ async function guardedPlayback(
 		track,
 		submitted,
 		decoded,
-		payloads,
 		outputs,
 		pictures,
 		sync,
@@ -444,7 +456,12 @@ async function guardedPlayback(
 				? new Moq.Origin.Producer().route(Moq.Path.from(path), { hidden: true }).broadcast
 				: new Moq.Broadcast.Producer();
 			const track = live
-				? mediaProducer.createTrack("video", { timescale: Moq.Time.Timescale.MILLI, maxAge: Container.MAX_AGE })
+				? defined(
+						mediaProducer.createTrack("video", {
+							timescale: Moq.Time.Timescale.MILLI,
+							maxAge: Container.MAX_AGE,
+						}),
+					)
 				: undefined;
 			media.set(mediaProducer.consume());
 			return track;
@@ -501,6 +518,27 @@ for (const kind of ["legacy", "cmaf"] as const) {
 	}
 }
 
+// Signals compare a write against the value it replaced, so a range changed in place after delivery
+// is a change no subscriber hears about.
+it("never changes the buffered ranges it already reported", async () => {
+	const reads = Array.from({ length: 8 }, (_, i) => sample(0n, i * 20_000, i === 0));
+	const playback = await guardedPlayback("legacy", reads, [], false, 1000);
+	const show = (ranges: Container.BufferedRanges) =>
+		ranges.map((r) => `${r.start.asMicros()}-${r.end.asMicros()}`).join();
+	const seen: [Container.BufferedRanges, string][] = [];
+	const dispose = playback.decoder.out.buffered.subscribe((ranges) => seen.push([ranges, show(ranges)]));
+	try {
+		await microtasks();
+		expect(seen.length).toBeGreaterThan(1);
+		for (const [ranges, shown] of seen) expect(show(ranges)).toBe(shown);
+		expect(show(playback.decoder.out.buffered.peek())).toBe(seen.at(-1)?.[1] ?? "");
+	} finally {
+		dispose();
+		playback.close();
+		await microtasks();
+	}
+});
+
 it("promoting from no active track holds its picture and timestamp until a frame arrives", async () => {
 	const playback = await guardedPlayback("legacy", [sample(10n, 1000)]);
 	try {
@@ -525,7 +563,7 @@ it("configures an avc3 rendition with the avc1 string WebCodecs accepted, leavin
 	});
 	try {
 		const rendition = playback.catalog.peek().video?.renditions?.video;
-		expect(rendition && (await Decoder.supported(rendition))).toBe(true);
+		expect(rendition && (await supported(rendition))).toBe(true);
 		expect(rendition?.codec).toBe("avc3.640028");
 		expect(playback.configures.at(-1)?.codec).toBe("avc1.640028");
 	} finally {
@@ -795,6 +833,27 @@ for (const kind of ["legacy", "cmaf"] as const) {
 		}
 	});
 }
+
+// Priority orders every subscription on a connection, so a page ranks one player's video against another's.
+it("subscribes at the hang video priority unless given one, and follows a change", async () => {
+	const defaulted = await guardedPlayback("legacy", [], [], true);
+	try {
+		expect(defaulted.track?.subscription.peek()?.priority).toBe(Catalog.PRIORITY.video);
+	} finally {
+		defaulted.close();
+	}
+
+	const priority = new Signal(127);
+	const playback = await guardedPlayback("legacy", [], [], true, 0, { priority });
+	try {
+		expect(playback.track?.subscription.peek()?.priority).toBe(127);
+		priority.set(-128);
+		await microtasks();
+		expect(playback.track?.subscription.peek()?.priority).toBe(-128);
+	} finally {
+		playback.close();
+	}
+});
 
 it("releases a failed video subscription and recovers only on a new source", async () => {
 	const close = spyOn(Moq.Track.Subscriber.prototype, "close");
@@ -1165,10 +1224,12 @@ it("a renamed video track keeps the delay, so audio neither skips nor goes silen
 		(playback.track as Moq.Track.Producer).close();
 		playback.switchRendition("video/1");
 		video.replace(
-			playback.producer.createTrack("video/1", {
-				timescale: Moq.Time.Timescale.MILLI,
-				maxAge: Container.MAX_AGE,
-			}),
+			defined(
+				playback.producer.createTrack("video/1", {
+					timescale: Moq.Time.Timescale.MILLI,
+					maxAge: Container.MAX_AGE,
+				}),
+			),
 		);
 		await run(20_000, 26_000);
 
@@ -1179,6 +1240,68 @@ it("a renamed video track keeps the delay, so audio neither skips nor goes silen
 		expect(playback.sync.out.delay.peek().ge(delay)).toBe(true);
 	} finally {
 		follow.close();
+		playback.close();
+		await microtasks();
+		clock.installed.close();
+	}
+});
+
+// A pause releases the rendition and a resume subscribes again on the same path. Restarting its
+// arrival estimate from the cold-start prior gave the first outage after the resume a tenth of the
+// histogram, so one late keyframe group held the shared delay near a second and froze the picture.
+it("a resumed video track keeps its estimate, so one late burst does not raise the delay", async () => {
+	const clock = manualAt(0);
+	const playback = await guardedPlayback("legacy", [], [], true);
+	const track = playback.track as Moq.Track.Producer;
+	// One frame every 33ms in one-second groups, each written as it is due unless `held`.
+	const FRAME = 33;
+	const GOP = 30;
+	let frame = 0;
+	let group: Moq.Group.Producer | undefined;
+	let held = false;
+	const queued: number[] = [];
+	const run = async (until: number) => {
+		while (frame * FRAME <= until) {
+			await clock.advance(FRAME);
+			queued.push(frame * FRAME);
+			frame++;
+			if (!held) {
+				for (const media of queued.splice(0)) {
+					if (media % (FRAME * GOP) === 0) {
+						group?.finish();
+						group = track.createGroup(BigInt(media / (FRAME * GOP)));
+					}
+					group?.writeFrame(legacyFrame(Duration.millis(media)));
+				}
+			}
+			await new Promise((resolve) => setImmediate(resolve));
+			await microtasks();
+		}
+	};
+
+	try {
+		playback.delay.set("auto");
+		await microtasks();
+
+		// Long enough for the estimate to settle on a path where every frame lands on time.
+		await run(20_000);
+		const warm = playback.sync.out.delay.peek();
+
+		playback.enabled.set(false);
+		await run(23_000);
+		playback.enabled.set(true);
+		// Past the join, so the outage below is measured as the path's.
+		await run(25_000);
+
+		// One outage: the frames from a keyframe on held back for 800ms and flushed at once.
+		held = true;
+		await run(25_740 + 800);
+		held = false;
+		await run(28_000);
+
+		expect(playback.decoder.out.timestamp.peek()?.asMillis()).toBeGreaterThan(27_000);
+		expect(playback.sync.out.delay.peek().asMillis()).toBeLessThan(warm.asMillis() + 100);
+	} finally {
 		playback.close();
 		await microtasks();
 		clock.installed.close();
@@ -1261,6 +1384,26 @@ describe("Decoder stalls", () => {
 		}
 	});
 
+	// A publisher repeats a still screen at a 4 Hz floor rather than its frame rate.
+	it("a still picture repeated every 250 ms plays without a stall", async () => {
+		const { clock, feeds, playback, stalls, close } = await cold();
+		try {
+			feeds.push(0, sample(0n, 0));
+			await microtasks();
+			for (let ms = 250; ms <= 5000; ms += 250) {
+				await clock.advance(250);
+				feeds.push(0, sample(0n, ms * 1000, false));
+				await microtasks();
+				// Past the poster's second-long wait, the picture plays.
+				if (ms >= 1500) expect(playback.decoder.out.stalled.peek()).toBe(false);
+			}
+			expect(playback.decoder.out.frame.peek()?.timestamp).toBe(4_000_000);
+			expect(stalls()).toBe(0);
+		} finally {
+			await close();
+		}
+	});
+
 	it("holds the last picture through a declared end without a stall", async () => {
 		const { clock, feeds, playback, stalls, feedback, close } = await cold();
 		try {
@@ -1277,6 +1420,36 @@ describe("Decoder stalls", () => {
 			expect(playback.decoder.out.stalled.peek()).toBe(false);
 			expect(stalls()).toBe(0);
 			expect(feedback()).toBe(0);
+		} finally {
+			await close();
+		}
+	});
+
+	// A publisher that stops cleanly finishes the track instead of writing an end marker.
+	it("a finished track holds its last picture without a stall, and ends once that picture is due", async () => {
+		const { clock, feeds, playback, stalls, close } = await cold();
+		try {
+			feeds.push(0, sample(0n, 0));
+			for (let ms = 100; ms <= 2000; ms += 100) {
+				await clock.advance(100);
+				feeds.push(0, sample(0n, ms * 1000, false));
+				await microtasks();
+			}
+			feeds.push(0, undefined);
+			await microtasks();
+			expect(playback.decoder.out.stalled.peek()).toBe(false);
+
+			// The tail still plays out a second behind.
+			await clock.advance(900);
+			expect(playback.decoder.out.ended.peek()).toBe(false);
+			await clock.advance(100);
+			await microtasks();
+			expect(playback.decoder.out.frame.peek()?.timestamp).toBe(2_000_000);
+			expect(playback.decoder.out.ended.peek()).toBe(true);
+
+			for (let i = 0; i < 30; i++) await clock.advance(100);
+			expect(playback.decoder.out.stalled.peek()).toBe(false);
+			expect(stalls()).toBe(0);
 		} finally {
 			await close();
 		}
@@ -1365,6 +1538,63 @@ it("buffered video holds its poster until its own span reaches the floor", async
 	}
 });
 
+// A buffered player joining a finished track shorter than its floor plays what exists.
+it("buffered video starts on a finished track shorter than its floor, and ends", async () => {
+	const clock = manualAt(1000);
+	const feeds = new Feeds();
+	const playback = await guardedPlayback("legacy", [], [], false, 1000, { feeds, initial: Duration.millis(1000) });
+	try {
+		feeds.push(0, sample(0n, 0), sample(0n, 100_000, false));
+		await microtasks();
+		await clock.advance(100);
+		expect(playback.sync.playing.peek()).toBe(false);
+
+		feeds.push(0, undefined);
+		await microtasks();
+		await clock.advance(0);
+		expect(playback.sync.playing.peek()).toBe(true);
+		for (let i = 0; i < 15; i++) await clock.advance(100);
+		expect(playback.decoder.out.frame.peek()?.timestamp).toBe(100_000);
+		expect(playback.decoder.out.ended.peek()).toBe(true);
+	} finally {
+		playback.close();
+		await microtasks();
+		clock.installed.close();
+	}
+});
+
+// Holes keep coverage short of the floor while the max delay parks the read loop before it reaches the
+// finish, so startup has to learn of it from the subscription.
+it("buffered video starts on a finished track whose holes park it at the max delay, and ends", async () => {
+	const clock = manualAt(0);
+	const playback = await guardedPlayback("legacy", [], [], true, 1000);
+	if (!playback.track) throw new Error("missing video track");
+	try {
+		const first = playback.track.createGroup(0n);
+		first.writeFrame(legacyFrame(Duration.micros(0)));
+		first.finish();
+		// Group 1 never arrives.
+		const second = playback.track.createGroup(2n);
+		second.writeFrame(legacyFrame(Duration.micros(2_000_000)));
+		second.finish();
+		await microtasks();
+		await clock.advance(100);
+		expect(playback.sync.playing.peek()).toBe(false);
+
+		playback.track.finish();
+		await microtasks();
+		await clock.advance(0);
+		expect(playback.sync.playing.peek()).toBe(true);
+		for (let i = 0; i < 40; i++) await clock.advance(100);
+		expect(playback.decoder.out.frame.peek()?.timestamp).toBe(2_000_000);
+		expect(playback.decoder.out.ended.peek()).toBe(true);
+	} finally {
+		playback.close();
+		await microtasks();
+		clock.installed.close();
+	}
+});
+
 for (const kind of ["legacy", "cmaf"] as const) {
 	it(`${kind} bounds startup across disconnected ranges, then starts on the retained timeline`, async () => {
 		const clock = manualAt(0);
@@ -1441,7 +1671,7 @@ it("bounds startup decoding while another track is missing and releases it on cl
 	const playback = await guardedPlayback("legacy", [], [], true, 1000);
 	const remove = playback.sync.track({ target: new Signal(Duration.millis(100)), startup: new Signal(null) });
 	if (!playback.track) throw new Error("missing video track");
-	const group = playback.track.appendGroup();
+	const group = playback.track.appendGroup(Moq.Time.Timestamp.fromMillis(0));
 	try {
 		for (let i = 0; i < 20; i++) group.writeFrame(legacyFrame(Duration.micros(i * 40_000)));
 		await microtasks();
@@ -1467,7 +1697,7 @@ it("resumes decoding the moment shared startup releases", async () => {
 	const audio = new Signal<{ start: Duration; end: Duration } | null>(null);
 	const remove = playback.sync.track({ target: new Signal(Duration.millis(100)), startup: audio });
 	if (!playback.track) throw new Error("missing video track");
-	const group = playback.track.appendGroup();
+	const group = playback.track.appendGroup(Moq.Time.Timestamp.fromMillis(0));
 	try {
 		for (let i = 0; i < 8; i++) group.writeFrame(legacyFrame(Duration.micros(i * 40_000)));
 		await microtasks();
@@ -1515,7 +1745,7 @@ it("continues filling when the shared floor rises while video waits on audio", a
 	const audio = new Signal<{ start: Duration; end: Duration } | null>(null);
 	const remove = playback.sync.track({ target: new Signal(Duration.millis(100)), startup: audio });
 	if (!playback.track) throw new Error("missing video track");
-	const group = playback.track.appendGroup();
+	const group = playback.track.appendGroup(Moq.Time.Timestamp.fromMillis(0));
 	try {
 		for (let i = 0; i < 7; i++) group.writeFrame(legacyFrame(Duration.micros(i * 40_000)));
 		await microtasks();
@@ -1539,7 +1769,7 @@ it("keeps feeding a decoder that has not output its first picture yet", async ()
 	const clock = manualAt(0);
 	const playback = await guardedPlayback("legacy", [], [0, 40_000, 80_000, 120_000], true, 1000);
 	if (!playback.track) throw new Error("missing video track");
-	const group = playback.track.appendGroup();
+	const group = playback.track.appendGroup(Moq.Time.Timestamp.fromMillis(0));
 	try {
 		for (let i = 0; i < 5; i++) group.writeFrame(legacyFrame(Duration.micros(i * 40_000)));
 		await microtasks();
@@ -1585,564 +1815,5 @@ for (const kind of ["legacy", "cmaf"] as const) {
 			await microtasks();
 			clock.installed.close();
 		}
-	});
-}
-
-describe("Decoder with a warmup rendition", () => {
-	// One refresh sweep, which is one group.
-	const WARMUP = Catalog.u53(300);
-	// The codecs in creation order: the min-delay decoder opens first.
-	const MIN = 0;
-	const MAX = 1;
-
-	// A frame of `group` at `ms`, a recovery point when `key`.
-	const at = (group: bigint, ms: number, key = false) => sample(group, ms * 1000, key);
-
-	// A warmup rendition whose two container consumers each read their own feed, presenting at once.
-	// `hold` keeps those timestamps in the codec until `release`.
-	async function refresh(fields: Partial<Catalog.VideoConfig> = { warmup: WARMUP }, hold: number[] = []) {
-		const feeds = new Feeds();
-		const playback = await guardedPlayback("legacy", [], hold, false, 0, { fields, feeds });
-		// Every picture shown, as [ms, codec].
-		const shown: [number, number][] = [];
-		const watch = new Effect();
-		watch.subscribe(playback.decoder.out.frame, (frame) => {
-			const picture = frame as unknown as Picture | undefined;
-			if (picture) shown.push([picture.timestamp / 1000, picture.codec]);
-		});
-		const current = () => {
-			const picture = playback.decoder.out.frame.peek() as unknown as Picture | undefined;
-			return picture && [picture.timestamp / 1000, picture.codec];
-		};
-		const push = async (lane: number, ...reads: Read[]) => {
-			feeds.push(lane, ...reads);
-			await microtasks();
-		};
-		return {
-			playback,
-			shown,
-			current,
-			push,
-			async close() {
-				watch.close();
-				playback.close();
-				await microtasks();
-				expect(playback.pictures.filter((frame) => !frame.closed)).toEqual([]);
-			},
-		};
-	}
-
-	function ascending(shown: [number, number][]) {
-		for (let i = 1; i < shown.length; i++) {
-			expect(shown[i][0]).toBeGreaterThanOrEqual(shown[i - 1][0]);
-		}
-	}
-
-	it("opens one subscription and one decoder without a warmup", async () => {
-		for (const [fields, decoders] of [
-			[{}, 1],
-			[{ warmup: Catalog.u53(0) }, 1],
-			[{ warmup: WARMUP }, 2],
-		] as const) {
-			const subscribe = spyOn(Moq.Track.Consumer.prototype, "subscribe");
-			const run = await refresh(fields);
-			try {
-				expect(run.playback.codecs).toBe(decoders);
-				const budgets = subscribe.mock.calls.map(([options]) => options?.delay?.max);
-				// The max-delay decoder tolerates one sweep more; js/net merges the two upstream.
-				expect(budgets).toEqual(
-					decoders === 1 ? [Duration.millis(0)] : [Duration.millis(0), Duration.millis(WARMUP)],
-				);
-			} finally {
-				subscribe.mockRestore();
-				await run.close();
-			}
-		}
-	});
-
-	it("shows the min-delay picture on a cold join, then the max-delay one once it catches up", async () => {
-		const run = await refresh();
-		try {
-			expect(run.playback.codecs).toBe(2);
-
-			// The max-delay decoder joined a group earlier. Before the min-delay decoder anchors the
-			// clock, its pictures have no place on it.
-			await run.push(MAX, at(9n, 700, true), at(9n, 733));
-			expect(run.current()).toBeUndefined();
-
-			// The min-delay decoder's picture shows at once, stripes and all.
-			await run.push(MIN, at(10n, 1000, true));
-			expect(run.current()).toEqual([1000, MIN]);
-
-			// Pictures behind it never win, even though they are clean.
-			await run.push(MAX, at(9n, 966));
-			expect(run.current()).toEqual([1000, MIN]);
-
-			// Caught up: the max-delay picture wins the tie, and keeps the lead.
-			await run.push(MAX, at(10n, 1000, true));
-			expect(run.current()).toEqual([1000, MAX]);
-			await run.push(MIN, at(10n, 1033));
-			await run.push(MAX, at(10n, 1033));
-			expect(run.current()).toEqual([1033, MAX]);
-			ascending(run.shown);
-		} finally {
-			await run.close();
-		}
-	});
-
-	it("keeps the max-delay picture through a stall shorter than one sweep", async () => {
-		const run = await refresh();
-		try {
-			for (const lane of [MIN, MAX]) await run.push(lane, at(10n, 1000, true), at(10n, 1033));
-			expect(run.current()).toEqual([1033, MAX]);
-
-			// Group 10 stalls. The min-delay decoder skips to group 11 and shows its stripes.
-			await run.push(MIN, gap, at(11n, 1300, true));
-			expect(run.current()).toEqual([1300, MIN]);
-
-			// The max-delay decoder tolerates the stall: it gets the rest of group 10, decodes it
-			// behind the playhead, and takes over again once it reaches the min-delay picture.
-			await run.push(MAX, at(10n, 1066), at(10n, 1100), at(10n, 1266));
-			expect(run.current()).toEqual([1300, MIN]);
-			await run.push(MAX, at(11n, 1300, true));
-			expect(run.current()).toEqual([1300, MAX]);
-			await run.push(MIN, at(11n, 1333));
-			await run.push(MAX, at(11n, 1333));
-			expect(run.current()).toEqual([1333, MAX]);
-
-			// Neither codec restarted: the keyframe the min-delay decoder skipped to re-primes it.
-			expect(run.playback.resets).toBe(0);
-			expect(run.playback.decoded[MAX]).toEqual(
-				[1000, 1033, 1066, 1100, 1266, 1300, 1333].map((ms) => ms * 1000),
-			);
-			ascending(run.shown);
-		} finally {
-			await run.close();
-		}
-	});
-
-	it("skips both decoders on a stall longer than one sweep", async () => {
-		const run = await refresh();
-		try {
-			for (const lane of [MIN, MAX]) await run.push(lane, at(10n, 1000, true), at(10n, 1033));
-
-			// Past the max-delay decoder's budget too: both skip, keeping their codecs.
-			await run.push(MIN, gap, at(12n, 1600, true));
-			expect(run.current()).toEqual([1600, MIN]);
-			await run.push(MAX, gap, at(12n, 1600, true));
-			expect(run.current()).toEqual([1600, MAX]);
-			expect(run.playback.resets).toBe(0);
-			ascending(run.shown);
-		} finally {
-			await run.close();
-		}
-	});
-
-	it("moves the shared clock only from the min-delay decoder", async () => {
-		const run = await refresh();
-		const received = spyOn(Track.prototype, "received");
-		const reset = spyOn(Track.prototype, "reset");
-		try {
-			await run.push(MIN, at(10n, 1000, true), at(10n, 1033));
-			await run.push(MAX, at(9n, 700, true), at(9n, 733), at(10n, 1000, true), at(10n, 1033));
-			expect(received.mock.calls.map(([timestamp]) => timestamp)).toEqual([
-				Duration.millis(1000),
-				Duration.millis(1033),
-			]);
-			expect(run.current()).toEqual([1033, MAX]);
-
-			// The publisher restarts its timeline. The min-delay decoder restarts video's timeline on the
-			// clock and shows the new one; the max-delay picture still on the old one never wins.
-			await run.push(MIN, marker(10n, 1_066_000), at(11n, 0, true));
-			expect(reset).toHaveBeenCalledTimes(1);
-			expect(run.current()).toEqual([0, MIN]);
-
-			// Once the max-delay decoder reads the restart too, it takes over again, without its own reset.
-			await run.push(MAX, marker(10n, 1_066_000), at(11n, 0, true));
-			expect(reset).toHaveBeenCalledTimes(1);
-			expect(run.current()).toEqual([0, MAX]);
-			expect(received.mock.calls.map(([timestamp]) => timestamp)).toEqual([
-				Duration.millis(1000),
-				Duration.millis(1033),
-				Duration.millis(0),
-			]);
-		} finally {
-			received.mockRestore();
-			reset.mockRestore();
-			await run.close();
-		}
-	});
-
-	it("keeps a picture held from before a restart out of the new timeline", async () => {
-		const run = await refresh(undefined, [0]);
-		try {
-			for (const lane of [MIN, MAX]) await run.push(lane, at(10n, 1000, true));
-			expect(run.current()).toEqual([1000, MAX]);
-
-			// The min-delay decoder reads a restart, but its first new picture is still in the codec.
-			// The picture it holds from the old timeline must not show, nor block the new one.
-			await run.push(MIN, marker(10n, 1_066_000), at(11n, 0, true));
-			expect(run.current()).toEqual([1000, MAX]);
-			run.playback.release();
-			await microtasks();
-			expect(run.current()).toEqual([0, MIN]);
-		} finally {
-			await run.close();
-		}
-	});
-
-	it("promotes a pending rendition once the outgoing one restarts its timeline", async () => {
-		const run = await refresh({}, [0]);
-		try {
-			await run.push(MIN, at(10n, 1000, true));
-			expect(run.current()).toEqual([1000, MIN]);
-
-			// The outgoing rendition reads a restart whose first picture is still in the codec. It has
-			// presented nothing on the new timeline, so the replacement need not catch up to 1000.
-			await run.push(MIN, marker(10n, 1_066_000), at(11n, 0, true));
-			expect(run.current()).toEqual([1000, MIN]);
-			run.playback.switchRendition();
-			await microtasks();
-			expect(run.playback.codecs).toBe(2);
-			// Emitted straight from the replacement codec, since decoding there would flush the held picture.
-			run.playback.emit(0, 1);
-			await microtasks();
-			expect(run.current()).toEqual([0, 1]);
-		} finally {
-			await run.close();
-		}
-	});
-
-	it("takes the max-delay picture when that decoder opens after a restart", async () => {
-		const run = await refresh({});
-		try {
-			expect(run.playback.codecs).toBe(1);
-			await run.push(MIN, at(10n, 1000, true), marker(10n, 1_066_000), at(11n, 0, true), at(11n, 33));
-			expect(run.current()).toEqual([33, MIN]);
-
-			// The catalog gains a warmup. The new decoder never saw the restart, yet reads the same timeline.
-			run.playback.switchRendition("video", { warmup: WARMUP });
-			await microtasks();
-			expect(run.playback.codecs).toBe(2);
-			await run.push(MAX, at(11n, 0, true), at(11n, 33), at(11n, 66));
-			await run.push(MIN, at(11n, 66));
-			expect(run.current()).toEqual([66, MAX]);
-		} finally {
-			await run.close();
-		}
-	});
-
-	it("never shows a lower timestamp across a 100ms trailing gap and a recovery boundary", async () => {
-		const run = await refresh();
-		try {
-			await run.push(MIN, at(10n, 1000, true));
-			let min = 1000;
-			let max = 900;
-			for (let cycle = 0; cycle < 6; cycle++) {
-				// Trailing by 100ms, the max-delay decoder catches up at twice the frame rate.
-				while (max < min) {
-					min += 33;
-					run.playback.emit(min * 1000, MIN);
-					run.playback.emit(max * 1000, MAX);
-					max = Math.min(max + 66, min);
-					run.playback.emit(max * 1000, MAX);
-					await microtasks();
-				}
-				// Level for a few frames, the max-delay picture winning each tie.
-				for (let i = 0; i < 3; i++) {
-					min += 33;
-					max = min;
-					run.playback.emit(min * 1000, MIN);
-					await microtasks();
-					run.playback.emit(max * 1000, MAX);
-					await microtasks();
-					expect(run.current()).toEqual([min, MAX]);
-				}
-				// A skip leaves it 100ms behind again.
-				min += 100;
-			}
-			expect(run.shown.some(([, codec]) => codec === MIN)).toBe(true);
-			ascending(run.shown);
-		} finally {
-			await run.close();
-		}
-	});
-
-	it("hands the picture back when the max-delay decoder stops producing", async () => {
-		const run = await refresh();
-		try {
-			for (const lane of [MIN, MAX]) await run.push(lane, at(10n, 1000, true));
-			expect(run.current()).toEqual([1000, MAX]);
-
-			await run.push(MIN, at(10n, 1033));
-			expect(run.current()).toEqual([1033, MIN]);
-			await run.push(MIN, at(10n, 1066));
-			expect(run.current()).toEqual([1066, MIN]);
-		} finally {
-			await run.close();
-		}
-	});
-
-	// Through real container consumers: the max-delay one reaches back one more sweep for its start.
-	it("joins the max-delay decoder one group earlier", async () => {
-		const clock = manualAt(5000);
-		const playback = await guardedPlayback("legacy", [], [], true, 0, {
-			fields: { warmup: WARMUP },
-			initial: Duration.millis(100),
-		});
-		const track = playback.track as Moq.Track.Producer;
-		const write = (group: Moq.Group.Producer, from: number, to: number) => {
-			for (let ms = from; ms <= to; ms += 30) group.writeFrame(legacyFrame(Duration.millis(ms)));
-		};
-		const flush = async () => {
-			await clock.advance(0);
-			await microtasks();
-		};
-		try {
-			// A relay serves a cold join newest first: the live group, then the sweep before it.
-			write(track.createGroup(5n), 1500, 1620);
-			await flush();
-			const live = track.createGroup(4n);
-			write(live, 1200, 1470);
-			live.finish();
-			await flush();
-
-			// The min-delay decoder starts at the live group, which covers its 100ms reach. The
-			// max-delay one reaches 400ms back, to the group before.
-			expect(playback.decoded[MIN][0]).toBe(1_500_000);
-			expect(playback.decoded[MAX][0]).toBe(1_200_000);
-			expect(playback.decoded[MAX]).toContain(1_620_000);
-
-			// The poster is the min-delay picture. The burst moved the playhead to 1520, so by the
-			// time the rest comes due, the max-delay decoder has decoded it too, and its clean
-			// pictures win.
-			const shown = playback.decoder.out.frame.peek() as unknown as Picture;
-			expect([shown.timestamp, shown.codec]).toEqual([1_500_000, MIN]);
-			await clock.advance(10);
-			await microtasks();
-			const due = playback.decoder.out.frame.peek() as unknown as Picture;
-			expect([due.timestamp, due.codec]).toEqual([1_530_000, MAX]);
-		} finally {
-			playback.close();
-			await microtasks();
-			clock.installed.close();
-		}
-	});
-
-	// Through real container consumers, on a live track of 300ms groups at 30ms per frame, 100ms
-	// behind. Group 2 stalls after 660ms while group 3 keeps arriving, until `release`.
-	async function stall(release: number) {
-		const clock = manualAt(0);
-		const playback = await guardedPlayback("legacy", [], [], true, 0, {
-			fields: { warmup: WARMUP },
-			initial: Duration.millis(100),
-		});
-		const track = playback.track as Moq.Track.Producer;
-		const shown: [number, number][] = [];
-		const watch = new Effect();
-		watch.subscribe(playback.decoder.out.frame, (frame) => {
-			const picture = frame as unknown as Picture | undefined;
-			if (picture) shown.push([picture.timestamp / 1000, picture.codec]);
-		});
-		const groups: Moq.Group.Producer[] = [];
-		const write = (ms: number) => {
-			const sequence = Math.floor(ms / 300);
-			groups[sequence] ??= track.createGroup(BigInt(sequence));
-			groups[sequence].writeFrame(legacyFrame(Duration.millis(ms)));
-			if (ms % 300 === 270) groups[sequence].finish();
-		};
-		const stalled = (ms: number) => ms > 660 && ms < 900;
-		try {
-			for (let ms = 0; ms <= 1500; ms += 10) {
-				if (ms % 30 === 0 && !stalled(ms)) write(ms);
-				if (ms === release) for (let late = 690; late < 900; late += 30) write(late);
-				await clock.advance(10);
-				await microtasks();
-			}
-			return { decoded: playback.decoded, resets: playback.resets, shown };
-		} finally {
-			watch.close();
-			playback.close();
-			await microtasks();
-			clock.installed.close();
-		}
-	}
-
-	it("keeps the max-delay decoder continuous through a live stall shorter than one sweep", async () => {
-		const { decoded, resets, shown } = await stall(1000);
-		const stalled = [690, 720, 750, 780, 810, 840, 870].map((ms) => ms * 1000);
-		// The min-delay decoder skipped the rest of group 2 and resumed at group 3.
-		for (const ms of stalled) expect(decoded[MIN]).not.toContain(ms);
-		expect(resets).toBe(0);
-		// The max-delay decoder waited for it.
-		for (const ms of stalled) expect(decoded[MAX]).toContain(ms);
-		// Stripes showed until the max-delay picture caught up, then it took over again.
-		expect(shown.some(([ms, codec]) => ms >= 900 && codec === MIN)).toBe(true);
-		expect(shown.at(-1)?.[1]).toBe(MAX);
-		ascending(shown);
-	});
-
-	it("skips both decoders on a live stall longer than one sweep", async () => {
-		const { decoded, resets, shown } = await stall(1400);
-		for (const lane of [MIN, MAX]) expect(decoded[lane]).not.toContain(690_000);
-		expect(resets).toBe(0);
-		expect(shown.at(-1)?.[1]).toBe(MAX);
-		ascending(shown);
-	});
-
-	it("holds a leading max-delay picture when that decoder closes", async () => {
-		const run = await refresh();
-		try {
-			for (const lane of [MIN, MAX]) await run.push(lane, at(10n, 1000, true));
-			// The min-delay decoder is slower to deliver, so the max-delay one leads.
-			await run.push(MAX, at(10n, 1033), at(10n, 1066));
-			expect(run.current()).toEqual([1066, MAX]);
-
-			// The catalog drops its warmup. The min-delay picture behind does not replace the lead.
-			run.playback.switchRendition("video", { warmup: Catalog.u53(0) });
-			await microtasks();
-			expect(run.current()).toEqual([1066, MAX]);
-			await run.push(MIN, at(10n, 1033));
-			expect(run.current()).toEqual([1066, MAX]);
-			await run.push(MIN, at(10n, 1066), at(10n, 1100));
-			expect(run.current()).toEqual([1100, MIN]);
-			ascending(run.shown);
-		} finally {
-			await run.close();
-		}
-	});
-});
-
-// H.264 NAL units, without their start code or length prefix.
-const NAL = {
-	aud: [0x09, 0xf0],
-	sps: [0x67, 0x64, 0x00, 0x28],
-	pps: [0x68, 0xee],
-	// An SEI recovery point counting one 30-frame sweep, as an intra-refresh encoder writes it.
-	sweep: [0x06, 0x06, 0x02, 0x0f, 0x84, 0x80],
-	// The one the decoder inserts: recovery_frame_cnt = 0.
-	recovered: [0x06, 0x06, 0x01, 0x84, 0x80],
-	slice: [0x41, 0x9a, 0x02],
-	idr: [0x65, 0x88, 0x84],
-};
-
-// Length-prefixed with `size` bytes, as an avcC `description` declares.
-function avcc(nals: number[][], size = 4): Uint8Array {
-	const out: number[] = [];
-	for (const nal of nals) {
-		for (let i = size - 1; i >= 0; i--) out.push((nal.length >> (8 * i)) & 0xff);
-		out.push(...nal);
-	}
-	return new Uint8Array(out);
-}
-
-function annexB(nals: number[][], code = [0, 0, 0, 1]): Uint8Array {
-	return new Uint8Array(nals.flatMap((nal) => [...code, ...nal]));
-}
-
-// avcC records whose lengthSizeMinusOne is 3 and 1.
-const AVCC4 = new Uint8Array([0x01, 0x64, 0x00, 0x28, 0xff]);
-const AVCC2 = new Uint8Array([0x01, 0x64, 0x00, 0x28, 0xfd]);
-
-describe("insertRecoveryPoint", () => {
-	it("inserts a zero-count recovery point before the first slice of a length-prefixed recovery point", () => {
-		const payload = avcc([NAL.sweep, NAL.slice, NAL.slice]);
-		expect(insertRecoveryPoint(payload, AVCC4)).toEqual(avcc([NAL.sweep, NAL.recovered, NAL.slice, NAL.slice]));
-		expect(insertRecoveryPoint(avcc([NAL.slice], 2), AVCC2)).toEqual(avcc([NAL.recovered, NAL.slice], 2));
-	});
-
-	it("inserts it before the first slice of an Annex B recovery point", () => {
-		// The slice's 4-byte start code keeps its leading zero byte, which now leads the inserted unit.
-		expect(insertRecoveryPoint(annexB([NAL.aud, NAL.sweep, NAL.slice]))).toEqual(
-			new Uint8Array([...annexB([NAL.aud, NAL.sweep]), 0, ...annexB([NAL.recovered, NAL.slice], [0, 0, 1])]),
-		);
-		const short = [0, 0, 1];
-		expect(insertRecoveryPoint(annexB([NAL.sps, NAL.pps, NAL.slice], short))).toEqual(
-			annexB([NAL.sps, NAL.pps, NAL.recovered, NAL.slice], short),
-		);
-	});
-
-	it("leaves an IDR, a payload without a slice, and a malformed payload unchanged", () => {
-		for (const [payload, description] of [
-			[avcc([NAL.sps, NAL.pps, NAL.idr]), AVCC4],
-			[annexB([NAL.sps, NAL.pps, NAL.idr]), undefined],
-			[avcc([NAL.sps, NAL.pps]), AVCC4],
-			[annexB([NAL.sweep]), undefined],
-			// A length running past the payload, and a truncated description.
-			[avcc([NAL.slice]).subarray(0, 6), AVCC4],
-			[avcc([NAL.slice]), new Uint8Array([0x01])],
-		] as const) {
-			expect(insertRecoveryPoint(payload, description)).toBe(payload);
-		}
-	});
-});
-
-for (const kind of ["legacy", "cmaf"] as const) {
-	describe(`Decoder opening a ${kind} warmup rendition`, () => {
-		const MIN = 0;
-		const MAX = 1;
-		const recovery = avcc([NAL.sweep, NAL.slice]);
-		const patched = avcc([NAL.sweep, NAL.recovered, NAL.slice]);
-		const delta = avcc([NAL.slice]);
-		const idr = avcc([NAL.sps, NAL.pps, NAL.idr]);
-		const at = (group: bigint, ms: number, key: boolean, payload: Uint8Array) =>
-			sample(group, ms * 1000, key, payload);
-
-		async function open(fields: Partial<Catalog.VideoConfig>) {
-			const feeds = new Feeds();
-			const playback = await guardedPlayback(kind, [], [], false, 0, { fields, feeds });
-			return {
-				playback,
-				push: async (lane: number, ...reads: Read[]) => {
-					feeds.push(lane, ...reads);
-					await microtasks();
-				},
-			};
-		}
-
-		it("rewrites only the recovery point that opens each codec", async () => {
-			const { playback, push } = await open({ warmup: Catalog.u53(300) });
-			try {
-				expect(playback.codecs).toBe(2);
-				for (const lane of [MIN, MAX]) {
-					await push(lane, at(10n, 1000, true, recovery), at(10n, 1033, false, delta));
-					// The next group continues the open codec, so Chromium does not check it.
-					await push(lane, at(11n, 1300, true, recovery));
-				}
-				for (const lane of [MIN, MAX]) expect(playback.payloads[lane]).toEqual([patched, delta, recovery]);
-
-				// A skip keeps the open codec, so the group it resumes on is left alone.
-				await push(MIN, gap, at(13n, 1900, true, recovery));
-				expect(playback.resets).toBe(0);
-				expect(playback.payloads[MIN].at(-1)).toEqual(recovery);
-			} finally {
-				playback.close();
-				await microtasks();
-			}
-		});
-
-		it("leaves an opening IDR unchanged", async () => {
-			const { playback, push } = await open({ warmup: Catalog.u53(300) });
-			try {
-				for (const lane of [MIN, MAX]) await push(lane, at(10n, 1000, true, idr));
-				for (const lane of [MIN, MAX]) expect(playback.payloads[lane]).toEqual([idr]);
-			} finally {
-				playback.close();
-				await microtasks();
-			}
-		});
-
-		it("leaves a rendition without a warmup unchanged", async () => {
-			const { playback, push } = await open({});
-			try {
-				expect(playback.codecs).toBe(1);
-				await push(MIN, at(10n, 1000, true, recovery), gap, at(13n, 1900, true, recovery));
-				expect(playback.resets).toBe(0);
-				expect(playback.payloads[MIN]).toEqual([recovery, recovery]);
-			} finally {
-				playback.close();
-				await microtasks();
-			}
-		});
 	});
 }

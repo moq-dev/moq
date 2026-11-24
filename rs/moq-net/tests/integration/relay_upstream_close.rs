@@ -13,12 +13,13 @@
 //! acknowledged on arrival, as QUIC does, so its close can drain before the relay reads
 //! them.
 
+use crate::WithMax as _;
 use crate::support;
-use moq_net::track::Delay;
+use support::AppendNext;
 
 use std::time::Duration;
 
-use moq_net::track::Subscription;
+use moq_net::track::{Range, Subscription};
 use moq_net::{Error, Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
@@ -49,10 +50,11 @@ const VERSIONS: &[&str] = &[
 ];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// How the publisher's session to the relay ends.
@@ -80,7 +82,7 @@ async fn read(mut sub: moq_net::track::Subscriber) -> Outcome {
 			match group.read_frame().await {
 				Ok(Some(frame)) => {
 					let index: u64 = std::str::from_utf8(&frame.payload).unwrap().parse().unwrap();
-					got.push((group.sequence, index));
+					got.push((group.start, index));
 				}
 				Ok(None) => break,
 				Err(err) => return (got, Err(err)),
@@ -129,9 +131,9 @@ async fn round(name: &str, end: End) -> Vec<Outcome> {
 
 	let mut readers = Vec::new();
 	for (index, track) in tracks.iter().enumerate() {
-		let subscription = Subscription::default()
-			.with_delay(Delay::default().with_max(MAX_DELAY))
-			.with_range(0..);
+		// Every group still within the max age, as a subscription-wide max delay once asked:
+		// a time start would be history, which lite-03 never ends, declaring no end.
+		let subscription = Subscription::default().with_ranges([Range::ALL]).with_max(MAX_DELAY);
 		let sub = remote.track(&format!("track{index}")).unwrap().subscribe(subscription);
 		let sub = kio::clock::timeout(TIMEOUT, sub)
 			.await
@@ -147,10 +149,10 @@ async fn round(name: &str, end: End) -> Vec<Outcome> {
 	// The subscriber now reads nothing until the upstream session is gone.
 	downstream.server_transport.hold_unis();
 	for track in &tracks {
-		for sequence in 0..GROUPS {
-			let mut group = track.append_group().unwrap();
+		for key in 0..GROUPS {
+			let mut group = track.append_next().unwrap();
 			for index in 0..FRAMES {
-				let at = Timestamp::from_millis(sequence * FRAMES + index).unwrap();
+				let at = Timestamp::from_millis(key * FRAMES + index).unwrap();
 				group.write_frame(at, index.to_string().into_bytes()).unwrap();
 			}
 			group.finish().unwrap();

@@ -168,8 +168,9 @@ nix develop --command just bench origin/release "quic ws wss tcp"
 ```
 
 Beside relay CPU in cores, each case
-reports CPU microseconds per delivered frame and cores per delivered Gbps; base
-comparisons pair those too.
+reports CPU microseconds per delivered frame, cores per delivered Gbps, and the
+relay's peak RSS over the window; base comparisons pair those too. Only `chat`,
+with 2,001 connections, shows a per-connection memory change.
 
 The qmux micro-bench isolates the transport from the relay. It connects
 client/server pairs over loopback TCP, each echoing one message at a time on one
@@ -209,7 +210,7 @@ also run during timing. Every timed round reads and checks all payload bytes,
 returns lease credit, and fills each stream again. Throughput counts delivered
 payload once. Nightly's supplemental Rust benchmark leg records the series and
 keeps the memory output with its raw results. The broader MoQ session transport
-and version sweep remains in [its quest](/quest/m4/bench-transport-sweep.md).
+and version sweep remains in [its quest](/quest/m5/bench-transport-sweep.md).
 
 Compare one multi-threaded Tokio runtime with the same number of independent
 Tokio/epoll and io\_uring workers:
@@ -425,7 +426,7 @@ hides steps of a few percent. `just bench-fanout` counts the chat fan-out
 without a relay process or sockets, so the counts are the code's alone:
 
 ```bash
-nix develop --command just bench-fanout "cdff3c8f95 21d6da9fc1"
+nix develop --command just bench-fanout origin/main
 nix develop --command just bench-fanout "" "model" "1 512"
 ```
 
@@ -435,7 +436,8 @@ run by default:
 - `model`: one finished group a cycle through the track model, which every
   subscriber takes before parking again, as moq-net's `track_fanout_group`
   bench does. It builds against every revision since
-  [cdff3c8f95](https://github.com/moq-dev/moq/commit/cdff3c8f952b1d6bd2fd40c3f64eb0fd53b97e95).
+  [moq-dev/moq#8961](https://github.com/moq-dev/moq/pull/8961) started groups at a
+  timestamp; an older revision reports it unsupported.
 - `session`: one publisher session into a relay origin and one viewer session
   out of it per subscriber, over `transport::memory`, on one current-thread
   runtime. It counts the publisher, relay, and viewer sessions together, but no
@@ -712,7 +714,7 @@ Rust counterpart is `cargo bench -p moq-net --features fuzz --bench bandwidth`, 
 `BANDWIDTH_COUNTS=<iterations>` mode prints allocations and wakes per operation.
 `pattern` runs `js/pattern/bench/algebra.ts` against every checkout's `@moq/pattern`:
 the same peer grant shapes as the Rust `pattern-algebra` sweep below, reduced and
-compared against a previous grant, up to a whole `AUTH_OK`.
+compared against a previous grant, up to a whole `AUTH_OK`, plus the prefix grant `AUTH_OK` carries now.
 The drift sweep includes untimed controls and timed groups with decode-order
 B-frames, independently varying publisher and reader counts and retained history.
 Its `time_mode` column is 0 for untimed, 1 for millisecond timestamps, and 2
@@ -747,7 +749,10 @@ It sweeps fronts, names read per route, and route count, with `stable` names
 route), each read by info lookup, fetch, or subscription and then closed. Once a
 manual clock ages out every cache, asynchronous major collections from Chromium's
 exposed `gc` run without stack heap pointers, so dead stack slots cannot pin a route
-even under tracing. Weak references count the retired routes' sessions, transports,
+even under tracing. Chromium compiles on the main thread here
+(`--no-concurrent-recompilation`): a queued background optimization job holds its
+closure's context strongly, so a cold run would otherwise keep a route a hot closure
+captured until the job landed. Weak references count the retired routes' sessions, transports,
 broadcast handles, and delivered payload buffers still reachable. These counts are exact,
 so any nonzero one in a timed or traced pass fails the run once every sample is
 written, leaving a retaining `before` revision's counts in the JSON. A concluded control must release everything,
@@ -848,33 +853,9 @@ The table includes these measurements:
   `rust-test/moq-congestion/gcc/bench/benchmark_per_packet`. A test with no runnable
   path prints only `# benchmark skipped: REASON`; the report omits that capability
   skip while rejecting an empty table or missing measurements.
-- Shipping sizes, in bytes: the release artifacts, minimal FFI build, and JS
+- Shipping sizes, in bytes: the release artifacts and JS
   bundles the [size report](../sh/size/README.md) measures, recorded even on a
   night its growth check fails. Release build times stay out.
-- The merge gate's own cost (`bench-gate-cost`), described below.
-
-The gate cost source runs `just gh gate-cost` on a hosted x86 runner in two
-scenarios: `cold`, a `just ci --all` from an empty target directory with no
-Rust cache, then `moq-net`, the diff-scoped `just ci` an agent runs after an
-edit to moq-net, on what `cold` built. Modules run one at a time
-(`CHECK_JOBS=1`), so each module's cost is its own rather than whichever lane
-reached a shared build first. Each scenario records `total` and
-`module/MODULE/PHASE` wall and CPU seconds, which the dispatcher writes to
-`CHECK_TIMES`; CPU counts the processes a phase waited for, so a daemon's work,
-such as a Nix build or Gradle's, is wall time only. `rustc` and
-`crate/PACKAGE/KIND` (`lib`, `bin`, `test`, or `build` for a build script's
-compile) for the repository's own crates, or `crate/PACKAGE` for a dependency,
-are the user-space instructions of every rustc run, which
-`sh/gh/rustc-cost.sh` counts under `perf stat` as the `RUSTC_WRAPPER`.
-Instructions are the low-noise series for compiles; build script runs, such as
-aws-lc-sys's C build, and tooling tests' fixture crates count only in their
-module. `rust-test/BINARY` and
-`js-test/FILE` are summed test seconds (slot time, which more workers do not
-shrink) from the workspace nextest run's JUnit report and a Bun JUnit report
-per package. The total's history keeps the load average before the scenario
-and the toolchain versions. Reproduce it from a clean checkout with an empty
-target directory, the Rust cache off (no mbx shim on PATH), and
-`kernel.perf_event_paranoid` at 2 or below; it takes hours.
 
 Hosted runners vary across nights, so a trend flag prompts a look at the paired
 comparison rather than proving a regression.
@@ -922,9 +903,14 @@ the table requires no new renderer or data branch. A source's `paired.json`, as
 ### Paired comparison
 
 Each Nightly's Rust bench groups (`rust-bench`, `rust-shared`, `rust-relay`,
-`rust-extra` and `rust-uring`) also build the previous scheduled Nightly's commit beside their
-own, on the same runner, so night-to-night runner variance drops out. Each
-built target runs once per side in the trend's quick mode, alternating which
+`rust-extra` and `rust-uring`) also run the previous scheduled Nightly's commit beside their
+own, on the same runner, so night-to-night runner variance drops out. That
+night kept its bench executables as an artifact, which serve as the base
+instead of a rebuild: the Rust cache cannot hold a linked executable, and
+relinking `rust-bench`'s 32 fat-LTO targets took seven of its sixty minutes.
+When that night kept no executable for some target, or one cannot load on
+this runner, as after a library bump, the base is built. Each
+target runs once per side in the trend's quick mode, alternating which
 side goes first; the current side is the trend point. A target whose base
 executable is byte-identical to the current one is not compared: it is listed
 as the same build, since only noise could tell them apart. A case more than 10%
@@ -975,6 +961,10 @@ Each run's evidence directory keeps both builds' estimates (`criterion` and
 `paired.json`. The base build streams its diagnostics and retains them in
 `base-build.log`, including when it fails.
 
+A target that prints nothing for ten minutes (`BENCH_CRITERION_IDLE_SECONDS`) is killed and
+named as hung. A hung base only marks its target unavailable, so one hang in the revision
+being compared cannot hold the leg to its hour and lose the current results.
+
 Each revision builds in its own Cargo target directory (`base` and `current`
 under `CARGO_TARGET_DIR`, default `target/bench`). For an A/B comparison, use
 `run.sh`'s `BENCH_BASE` mode or a target directory per source tree: two trees
@@ -982,23 +972,41 @@ sharing one can leave a bench linked against the other tree's library.
 
 ### CodSpeed
 
-The CodSpeed workflow adds nightly instruction counts for `main`, at
-<https://codspeed.io/moq-dev/moq>. Its CPU simulation runs
+The CodSpeed workflow adds instruction counts for each landing on `main` that
+touches Rust, at <https://codspeed.io/moq-dev/moq>. A landing waits for the
+running measurement and GitHub keeps only the newest pending one, so a run may
+cover several landings. Its CPU simulation runs
 each bench under Valgrind on a hosted runner, so a change of a few percent
 shows without the paired comparison's rounds. It does not see syscalls, I/O,
 contention, or caches, and skips `iter_custom` benches, so `just rs codspeed`
 builds only single-threaded targets without I/O, and Nightly keeps measuring
 every bench. Workspace benches import `criterion`, which `rs/bench-harness`
 resolves to Criterion, or to CodSpeed's instrumented Criterion under
-`cargo codspeed`. Nothing gates on it.
+`cargo codspeed`. Nothing gates on it. CI uploads three shards (`net`, `mux`,
+`rest`), since CodSpeed rejects a run of more than about 1,000 benchmarks.
 
 ```bash
-nix develop --command just rs codspeed
+nix develop --command just rs codspeed net  # or mux, rest
 nix develop --command cargo codspeed run
 ```
 
 Run locally, the benches only check that each case runs; there is no
 measurement outside CodSpeed's runner.
+
+### Kixel Quest
+
+CodSpeed and Nightly also upload what they measured as `kixel-metrics`
+artifacts, which [Kixel Quest](https://kixel.quest) reads when the run finishes
+and turns a regression into an investigation quest in `quest/m0/`, bisected to
+the landing that caused it by dispatching CodSpeed on a `kixel-bisect/<commit>`
+branch. CodSpeed reports each bench's simulated instruction count, read from
+the Callgrind profiles its runner leaves (`just gh benchmark-report
+codspeed-metrics`); Nightly reports every successful source's report, without
+its `bench-*` prefix, and each paired comparison's base as a second observation
+of that commit (`just gh benchmark-report nightly-metrics`). A benchmark CSV
+column becomes a measure of its row. Kixel Quest reads at most 1 MiB of a run's
+metrics, and a full Nightly writes about 0.87 MiB, so the step fails rather than
+upload more.
 
 ## Local check capacity
 
@@ -1027,12 +1035,3 @@ OOM kill does too, even inside a Quest scope: each worker watches `local.py`
 through a pidfd and stops once it exits. macOS has no pidfd, so there killing
 `local.py` with SIGKILL frees the lock while its workers keep measuring until
 their own gates exit, an accepted gap. Stop it with Ctrl-C or SIGTERM instead.
-
-### Python socket sessions
-
-The Python binding runner also sweeps both TCP and track sockets over 1, 4,
-and 16 accepting endpoints and 1, 4, and 16 concurrent sessions per endpoint.
-Each session sends a checked payload and finishes both halves. The
-`socket/<protocol>/endpoints=N/sessions=M` entries report complete sessions per
-second, including handshake, FFI calls, reads, and teardown. Run with
-`just py bench`; Nightly's binding lane runs the same sweep.

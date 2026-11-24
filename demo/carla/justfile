@@ -89,10 +89,11 @@ check:
 # The bridge is a Cargo workspace of its own, so the root's `just rs` skips it.
 #
 # Format-check, lint, and test the bridge.
+# Clippy rides on the test build via RUSTC_WORKSPACE_WRAPPER (same as rs/justfile),
+# avoiding a second full compilation of the bridge workspace.
 bridge-check:
     cd bridge && cargo fmt --check
-    cd bridge && bash ../../../sh/local.sh cargo clippy --locked --all-targets -- -D warnings
-    cd bridge && bash ../../../sh/local.sh cargo test --locked
+    cd bridge && CARGO_BUILD_WARNINGS=deny RUSTC_WORKSPACE_WRAPPER={{ quote(require("clippy-driver")) }} bash ../../../sh/local.sh cargo test --locked
     cd bridge && RUSTDOCFLAGS="-D warnings" bash ../../../sh/local.sh cargo doc --locked --no-deps
 
 # Format the bridge and apply its lint fixes.

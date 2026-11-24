@@ -144,7 +144,10 @@ impl Pacer {
 
         // divisions come before multiplications to prevent overflow
         // this is the time at which the pacing window becomes empty
-        Some(now.saturating_add((unscaled_delay / 5) * 4))
+        // At least a nanosecond: a refill too fast to measure would truncate to zero and re-arm
+        // the timer at `now` forever.
+        let delay = ((unscaled_delay / 5) * 4).max(Duration::from_nanos(1));
+        Some(now.saturating_add(delay))
     }
 
     /// Return how long we need to wait before sending `bytes_to_send` when the congestion
@@ -211,7 +214,7 @@ pub(crate) struct Rate {
     /// smoothed RTT, sped up by 5/4.
     pub window: u64,
     /// Bytes per second, which takes precedence over the window when present.
-    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#name-pacing-rate-cpacing_rate>
+    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-07.html#name-pacing-rate-cpacing_rate>
     pub pacing_rate: Option<u64>,
 }
 
@@ -402,6 +405,26 @@ mod tests {
         let resume = pacer
             .delay(rtt, u64::from(mtu), mtu, now, metrics)
             .expect("three bytes short must wait");
+        assert!(
+            resume > now,
+            "the pacer re-armed its timer at the current instant"
+        );
+        assert_eq!(pacer.delay(rtt, u64::from(mtu), mtu, resume, metrics), None);
+    }
+
+    #[test]
+    fn sub_nanosecond_window_refill_still_waits() {
+        let mtu = 1500;
+        // A loopback RTT and the largest window that is still paced: the whole burst budget
+        // refills in under a nanosecond.
+        let rtt = Duration::from_micros(1);
+        let window = u64::from(u32::MAX);
+        let now = Instant::now();
+        let metrics = unpaced_metrics(window);
+        let mut pacer = Pacer::new(rtt, window, mtu, now);
+
+        let (resume, _) = burst_until_blocked(&mut pacer, rtt, mtu, now, metrics)
+            .expect("the burst budget runs out at a single instant");
         assert!(
             resume > now,
             "the pacer re-armed its timer at the current instant"

@@ -43,10 +43,12 @@ pub(super) fn rewrite(document: &[u8], source: Timestamp, sample: Range<Timestam
 		return Err("TTML root is not a tt element in the TTML namespace");
 	}
 	let rates = Rates::from_root(root)?;
+	let nanos = |time: Timestamp| time.as_nanos().map_err(|_| "TTML sample timestamp has no timescale");
+	let (start, end) = (nanos(sample.start)?, nanos(sample.end)?);
 	let clock = Clock {
-		offset: sample.start.as_nanos() as i128 - source.as_nanos() as i128,
-		start: sample.start.as_nanos(),
-		end: sample.end.as_nanos(),
+		offset: start as i128 - nanos(source)? as i128,
+		start,
+		end,
 	};
 	let mut edit = Edit {
 		document,

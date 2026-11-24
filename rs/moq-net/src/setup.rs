@@ -1,8 +1,7 @@
-//! The SETUP exchange, the extensions a side offers in it, and the credential a peer may
-//! present in it.
+//! The SETUP exchange and the credential a peer may present in it.
 //!
-//! Only [`Extensions`], [`Token`], and [`Role`] are public; the SETUP messages themselves
-//! are wire internals.
+//! Only [`Token`] and [`Role`] are public; the SETUP messages and the extensions a side
+//! offers in them are wire internals.
 
 use bytes::Bytes;
 
@@ -73,14 +72,12 @@ pub(crate) fn implementation(value: &str) -> Option<String> {
 
 /// The SETUP extensions this side offers.
 ///
-/// Turning one off connects as a peer that does not speak that extension. moq-lite carries
-/// solicit in its core, so that one only changes moq-transport sessions.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(default, deny_unknown_fields)]
-#[non_exhaustive]
-pub struct Extensions {
+/// Not public: every session offers Solicit, and only moq-relay offers `ietf`, through
+/// `Client::with_ietf` and `Server::with_ietf` behind the `relay` feature.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Extensions {
 	/// The MoQ Solicit extension: the peer answers our SUBSCRIBE_NAMESPACE rather than
-	/// announcing unasked (moq-transport only).
+	/// announcing unasked (moq-transport only). Off only in tests acting as a peer without it.
 	pub solicit: bool,
 	/// The MoQ IETF extension, off by default: a moq-lite 07 hop between relays carries the
 	/// moq-transport object state a relay preserves, such as Object IDs and properties.
@@ -142,9 +139,13 @@ impl Encode<Version> for Setup {
 			return Err(EncodeError::Version);
 		}
 		w.varint(SETUP)?;
-		let prefix = w.prefix_u16();
+		// Draft-23 (section 9) makes every Message Length a varint, SETUP's included.
+		let prefix = match varint_length(v) {
+			true => w.prefix_varint(),
+			false => w.prefix_u16(),
+		};
 		w.slice(&self.parameters);
-		w.fill(prefix)
+		fill_body(w, prefix)
 	}
 }
 
@@ -158,16 +159,37 @@ impl<'a> Decode<'a, Version> for Setup {
 		if kind != SETUP {
 			return Err(DecodeError::InvalidValue);
 		}
-		let size = r.u16()? as usize;
+		let size = match varint_length(v) {
+			true => {
+				// Until the peer's SETUP is read the limit is the default 65535
+				// (draft-23 section 9.1.8), SETUP itself included.
+				let size = r.varint()?;
+				match usize::try_from(size) {
+					Ok(size) if size <= MAX_SETUP_SIZE => size,
+					_ => {
+						return Err(DecodeError::MessageTooLarge {
+							size: usize::try_from(size).unwrap_or(usize::MAX),
+							max: MAX_SETUP_SIZE,
+						});
+					}
+				}
+			}
+			false => r.u16()? as usize,
+		};
 		let parameters = Bytes::copy_from_slice(r.slice(size)?);
 		Ok(Self { parameters })
 	}
 }
 
+/// Whether `v` writes the moq-transport SETUP's Message Length as a varint (draft-23).
+fn varint_length(v: Version) -> bool {
+	matches!(v.0, crate::Draft::Ietf(ietf) if ietf.varint_length())
+}
+
 /// Whether `v` encodes the `moql` bidi SETUP exchange: moq-lite 01/02, whose draft-14 framing
 /// and QUIC varints it keeps whichever moq-lite version it negotiates.
 fn framed(v: Version) -> bool {
-	matches!(v, Version::Lite(lite::Version::Lite01 | lite::Version::Lite02))
+	matches!(v.0, crate::Draft::Lite(lite::Version::Lite01 | lite::Version::Lite02))
 }
 
 /// The client half of the `moql` bidi SETUP exchange, offering moq-lite versions.
@@ -202,7 +224,7 @@ impl Client {
 			.flat_map(|v| Version::try_from(*v).ok())
 			.find(|v| supported.contains(v));
 		match version {
-			Some(Version::Lite(version)) => Ok(version),
+			Some(Version(crate::Draft::Lite(version))) => Ok(version),
 			_ => {
 				// The client only learns that the session closed, so this is the one place
 				// that can name both sides of the mismatch.
@@ -326,6 +348,36 @@ impl<'a> Decode<'a, Version> for Server {
 mod tests {
 	use super::*;
 
+	/// The moq-transport SETUP's Length is 16 bits through draft-22 and a varint from
+	/// draft-23 (section 9.1).
+	#[test]
+	fn ietf_setup_length_follows_the_draft() {
+		let setup = Setup {
+			parameters: Bytes::from_static(&[0x00]),
+		};
+		let draft22 = Version::ietf(crate::ietf::Version::Draft22);
+		let draft23 = Version::ietf(crate::ietf::Version::Draft23);
+		let mut kind = Vec::new();
+		Encoder::new(&mut kind, draft22.into()).varint(SETUP).unwrap();
+
+		for (version, length) in [(draft22, &[0x00, 0x01][..]), (draft23, &[0x01][..])] {
+			let wire = setup.encode_bytes(version).unwrap();
+			assert_eq!(wire, [&kind[..], length, &[0x00]].concat(), "{version}");
+			let (decoded, _) = Setup::decode_slice(&wire, version).unwrap();
+			assert_eq!(decoded.parameters, setup.parameters, "{version}");
+		}
+
+		// A length past the default MAX_CONTROL_MESSAGE_SIZE is refused at the prefix.
+		let mut wire = kind.clone();
+		Encoder::new(&mut wire, draft23.into())
+			.varint(MAX_SETUP_SIZE as u64 + 1)
+			.unwrap();
+		assert!(matches!(
+			Setup::decode_slice(&wire, draft23),
+			Err(DecodeError::MessageTooLarge { .. })
+		));
+	}
+
 	#[test]
 	fn credentials_stay_out_of_traces() {
 		let secret = "credential-that-must-not-be-logged";
@@ -360,8 +412,8 @@ mod tests {
 			let setup = Setup {
 				parameters: params.encode_bytes(version).unwrap(),
 			};
-			let wire = setup.encode_bytes(crate::Version::Ietf(version)).unwrap();
-			let decoded = Setup::decode_slice(&wire, crate::Version::Ietf(version)).unwrap().0;
+			let wire = setup.encode_bytes(crate::Version::ietf(version)).unwrap();
+			let decoded = Setup::decode_slice(&wire, crate::Version::ietf(version)).unwrap().0;
 			let (params, _) = crate::ietf::Parameters::decode_slice(&decoded.parameters, version).unwrap();
 			assert_eq!(crate::ietf::token::from_setup(&params, version).unwrap(), Some(token));
 			tracing::trace!(?setup, ?decoded, ?params, "SETUP diagnostics");
@@ -397,7 +449,7 @@ mod tests {
 	#[test]
 	fn the_moql_setup_has_a_u16_size() {
 		for v in [lite::Version::Lite01, lite::Version::Lite02] {
-			let v = Version::Lite(v);
+			let v = Version::lite(v);
 			let client = Client {
 				versions: coding::Versions::from([v.into()]),
 				parameters: Bytes::from_static(&[0]),
@@ -419,7 +471,7 @@ mod tests {
 	/// Never emit a legacy SETUP our own receiver would refuse.
 	#[test]
 	fn encode_enforces_the_setup_limit() {
-		let v = Version::Lite(lite::Version::Lite01);
+		let v = Version::lite(lite::Version::Lite01);
 		let parameters = Bytes::from(vec![0; MAX_SETUP_SIZE]);
 
 		let client = Client {

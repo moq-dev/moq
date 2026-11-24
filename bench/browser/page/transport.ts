@@ -39,6 +39,7 @@ async function publish(config: Transport): Promise<void> {
 		timescale: Moq.Time.Timescale.MILLI,
 		maxAge: Duration.millis(600_000),
 	});
+	if (!track) throw new Error("the track already exists");
 	const demand = track.demand().wanted;
 	publication.announce();
 	const connection = await Moq.Connection.connect({
@@ -55,11 +56,12 @@ async function publish(config: Transport): Promise<void> {
 		origin.close();
 	});
 	writer = (async () => {
-		while (demand.peek() === undefined && track.closed.peek() === undefined)
+		while (!demand.peek() && track.closed.peek() === undefined)
 			await Promise.race([demand.changed(), track.closed]);
 		if (track.closed.peek() !== undefined) return;
 		for (let start = 0; start < config.frames; start += config.group) {
-			const group = track.appendGroup();
+			// Each group starts at its first frame's time, one millisecond per frame.
+			const group = track.appendGroup(Moq.Time.Timestamp.fromMillis(start));
 			for (let frame = start; frame < Math.min(start + config.group, config.frames); frame++)
 				group.writeFrame({ payload: fixtures[frame], timestamp: Moq.Time.Timestamp.fromMillis(frame) });
 			group.finish();
@@ -95,9 +97,7 @@ async function consume(config: Transport): Promise<Delivery> {
 	if (!broadcast) throw new Error("consume before prepare");
 	const groups = Math.ceil(config.frames / config.group);
 	const start = performance.now();
-	const subscriber = broadcast
-		.track("data")
-		.subscribe({ delay: { max: Duration.millis(600_000) }, order: "ascending" });
+	const subscriber = broadcast.track("data").subscribe({ ranges: [{}], order: "ascending" });
 	cleanup.push(() => subscriber.close());
 	let frames = 0;
 	let bytes = 0;
@@ -107,8 +107,10 @@ async function consume(config: Transport): Promise<Delivery> {
 	for (let received = 0; received < groups; received++) {
 		const group = await subscriber.recvGroup();
 		if (!group) throw new Error(`track ended after ${received} of ${groups} groups`);
-		const sequence = Number(group.sequence);
-		if (sequence >= groups || seen.has(sequence)) throw new Error(`unexpected group ${group.sequence}`);
+		// Group n starts at its first frame, n * config.group milliseconds.
+		const sequence = Number(group.start) / config.group;
+		if (!Number.isInteger(sequence) || sequence >= groups || seen.has(sequence))
+			throw new Error(`unexpected group ${group.start}`);
 		seen.add(sequence);
 		readers.push(
 			(async () => {
@@ -117,12 +119,12 @@ async function consume(config: Transport): Promise<Delivery> {
 				try {
 					for (let frame = first; frame < last; frame++) {
 						const got = await group.readFrame();
-						if (!got) throw new Error(`group ${group.sequence} ended before frame ${frame}`);
+						if (!got) throw new Error(`group ${group.start} ended before frame ${frame}`);
 						digest = (digest + check(got.payload, config.size, frame, config.full)) >>> 0;
 						frames++;
 						bytes += got.payload.byteLength;
 					}
-					if (await group.readFrame()) throw new Error(`group ${group.sequence} has an extra frame`);
+					if (await group.readFrame()) throw new Error(`group ${group.start} has an extra frame`);
 				} finally {
 					group.close();
 				}

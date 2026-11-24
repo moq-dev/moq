@@ -1,6 +1,6 @@
 /**
  * Logical monotonic time, wall time, and timers from one clock per JS realm.
- * Install a Manual clock for deterministic tests without replacing host timers.
+ * Tests install a `Manual` clock from `@moq/clock/test` without replacing host timers.
  *
  * @module
  */
@@ -9,7 +9,6 @@ import { backend } from "./ambient.ts";
 import { type Wall, wallOf } from "./types.ts";
 
 export type { Installed } from "./ambient.ts";
-export { Manual } from "./manual.ts";
 export {
 	Elapsed,
 	Interval,
@@ -23,6 +22,7 @@ export {
 	yieldNow,
 } from "./timer.ts";
 export { Duration, Instant, Wall } from "./types.ts";
+export { Unsettled, until, type Wait } from "./until.ts";
 
 /** Read the installed clock's wall time. */
 export function wall(): Wall {

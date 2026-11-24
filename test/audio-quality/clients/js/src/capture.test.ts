@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
-import { Duration, Manual, yieldNow } from "@moq/clock";
+import { Duration, yieldNow } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import * as Catalog from "@moq/hang/catalog";
 import { Legacy } from "@moq/hang/container";
 import { Group, Error as NetError, Origin, Path, Time } from "@moq/net";
 import { Signal } from "@moq/signals";
-import type { Delay } from "@moq/watch";
 import { Broadcast } from "../../../../../js/watch/src/broadcast.ts";
 import { arrivals, Capture, format } from "./capture.ts";
 import type { Arrival } from "./schema.ts";
@@ -78,6 +78,7 @@ test("the observer shares playback demand and closes without ending playback", a
 	const publishedRoute = origin.route(Path.from("tone.hang"), { hidden: true });
 	const published = publishedRoute.broadcast;
 	const track = published.createTrack("audio", { timescale: Time.Timescale.MILLI });
+	if (!track) throw new Error("the track already exists");
 	publishedRoute.announce();
 	const source = new Broadcast({ origin, name: Path.from("tone.hang"), follow: false, catalogFormat: "manual" });
 	const capture = new Capture({
@@ -89,24 +90,24 @@ test("the observer shares playback demand and closes without ending playback", a
 			numberOfChannels: 1,
 			container: { kind: "legacy" },
 		} as Catalog.AudioConfig),
-		delay: new Signal<Delay>(Duration.millis(250)),
+		delay: new Signal(Duration.millis(250)),
 		maxDelay: new Signal(Duration.millis(250)),
 	});
 	try {
 		while (!track.subscription.peek()) await track.subscription.changed();
-		expect(track.subscription.peek()).toMatchObject({
-			priority: Catalog.PRIORITY.audio,
-			delay: { max: Duration.millis(250) },
-		});
+		// The player's live join: its delay behind the live edge, and a reach of the delay plus the
+		// estimator's 2 s ceiling.
+		const join = { ranges: [{ start: { live: { min: Duration.millis(250), max: Duration.millis(2250) } } }] };
+		expect(track.subscription.peek()).toMatchObject({ priority: Catalog.PRIORITY.audio, ...join });
 		const player = published
 			.consume()
 			.track("audio")
-			.subscribe({ priority: Catalog.PRIORITY.audio, delay: { max: Duration.millis(250) } });
+			.subscribe({ priority: Catalog.PRIORITY.audio, ...join });
 		await capture.close();
 		expect(player.closed.peek()).toBeUndefined();
 		player.close();
 		const demand = track.demand();
-		while (demand.wanted.peek() !== undefined && demand.closed.peek() === undefined) {
+		while (demand.wanted.peek() && demand.closed.peek() === undefined) {
 			await Signal.race(demand.wanted, demand.closed);
 		}
 		expect(capture.error()).toBeUndefined();
@@ -117,13 +118,14 @@ test("the observer shares playback demand and closes without ending playback", a
 	}
 });
 
-test("at auto the observer asks for the decoder's 2 s budget, not the target", async () => {
+test("the observer asks for the decoder's delay plus its stretch and warmup, not the target", async () => {
 	// A capture cut to the target would drop the frames later than it, which are what the target
 	// is measured from, so a trace recorded that way can never show the player falling short.
 	const origin = new Origin.Producer();
 	const publishedRoute = origin.route(Path.from("tone.hang"), { hidden: true });
 	const published = publishedRoute.broadcast;
 	const track = published.createTrack("audio", { timescale: Time.Timescale.MILLI });
+	if (!track) throw new Error("the track already exists");
 	publishedRoute.announce();
 	const source = new Broadcast({ origin, name: Path.from("tone.hang"), follow: false, catalogFormat: "manual" });
 	const capture = new Capture({
@@ -134,13 +136,63 @@ test("at auto the observer asks for the decoder's 2 s budget, not the target", a
 			sampleRate: 48000,
 			numberOfChannels: 1,
 			container: { kind: "legacy" },
+			warmup: 80,
 		} as Catalog.AudioConfig),
-		delay: new Signal<Delay>("auto"),
+		delay: new Signal(Duration.millis(100)),
+		maxDelay: new Signal(Duration.millis(100)),
+	});
+	try {
+		while (!track.subscription.peek()) await track.subscription.changed();
+		// The live join starts the delay plus the warmup back, and reaches that plus the stretch.
+		expect(track.subscription.peek()).toMatchObject({
+			ranges: [{ start: { live: { min: Duration.millis(180), max: Duration.millis(2180) } } }],
+		});
+	} finally {
+		await capture.close();
+		source.close();
+		origin.close();
+	}
+});
+
+test("the observer reads the publisher's largest group as its subscription began, not a later one", async () => {
+	const origin = new Origin.Producer();
+	const publishedRoute = origin.route(Path.from("tone.hang"), { hidden: true });
+	const published = publishedRoute.broadcast;
+	const track = published.createTrack("audio", { timescale: Time.Timescale.MILLI });
+	if (!track) throw new Error("the track already exists");
+	publishedRoute.announce();
+	const frame = (group: Group.Producer, micros: number) =>
+		group.writeFrame({
+			timestamp: Time.Timestamp.fromMicros(micros),
+			payload: Legacy.encodeFrame(new Uint8Array([1]), Duration.micros(micros)),
+		});
+	const source = new Broadcast({ origin, name: Path.from("tone.hang"), follow: false, catalogFormat: "manual" });
+	const capture = new Capture({
+		broadcast: new Signal(source),
+		track: new Signal("audio"),
+		config: new Signal({
+			codec: "opus",
+			sampleRate: 48000,
+			numberOfChannels: 1,
+			container: { kind: "legacy" },
+		} as Catalog.AudioConfig),
+		delay: new Signal(Duration.millis(250)),
 		maxDelay: new Signal(Duration.millis(250)),
 	});
 	try {
 		while (!track.subscription.peek()) await track.subscription.changed();
-		expect(track.subscription.peek()).toMatchObject({ delay: { max: Duration.millis(2000) } });
+		const first = track.createGroup(7n);
+		frame(first, 0);
+		while (capture.largest() === undefined) await yieldNow();
+		// Live groups landing after the answer raise the track's largest, not the join's.
+		const later = track.createGroup(12n);
+		frame(later, 20_000);
+		const seen: Arrival[] = [];
+		while (seen.length < 2) {
+			seen.push(...capture.drain());
+			await yieldNow();
+		}
+		expect(capture.largest()).toBe(7);
 	} finally {
 		await capture.close();
 		source.close();
@@ -154,6 +206,7 @@ async function captureGroupEnd(end: (group: Group.Producer) => void): Promise<st
 	const publishedRoute = origin.route(Path.from("tone.hang"), { hidden: true });
 	const published = publishedRoute.broadcast;
 	const track = published.createTrack("audio", { timescale: Time.Timescale.MILLI });
+	if (!track) throw new Error("the track already exists");
 	publishedRoute.announce();
 	const source = new Broadcast({ origin, name: Path.from("tone.hang"), follow: false, catalogFormat: "manual" });
 	const capture = new Capture({
@@ -165,12 +218,12 @@ async function captureGroupEnd(end: (group: Group.Producer) => void): Promise<st
 			numberOfChannels: 1,
 			container: { kind: "legacy" },
 		} as Catalog.AudioConfig),
-		delay: new Signal<Delay>(Duration.millis(250)),
+		delay: new Signal(Duration.millis(250)),
 		maxDelay: new Signal(Duration.millis(250)),
 	});
 	try {
 		while (!track.subscription.peek()) await track.subscription.changed();
-		const group = track.appendGroup();
+		const group = track.appendGroup(Time.Timestamp.fromMicros(0));
 		group.writeFrame({
 			timestamp: Time.Timestamp.fromMicros(0),
 			payload: Legacy.encodeFrame(new Uint8Array([1]), Duration.micros(0)),

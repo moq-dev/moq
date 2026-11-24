@@ -15,7 +15,7 @@ pub struct Bridge {
 impl Bridge {
 	/// Publish an `.av1` track on `broadcast`, adding the catalog rendition once config is known.
 	pub fn new(broadcast: moq_net::broadcast::Producer, catalog: moq_mux::catalog::Producer) -> Result<Self> {
-		let track = broadcast.unique_track(".av1", catalog.track_info(hang::catalog::PRIORITY.video))?;
+		let track = broadcast.unique_track(".av1", catalog.track_info(hang::catalog::PRIORITY.video));
 		let import = moq_mux::codec::av1::Import::new(track, catalog.reserve(), Default::default())?;
 		let split = moq_mux::codec::av1::Split::new();
 		Ok(Self { split, import })
@@ -32,8 +32,13 @@ impl codec::Bridge for Bridge {
 		Ok(())
 	}
 
-	fn finish(&mut self) -> Result<()> {
-		Ok(self.import.finish()?)
+	fn discontinuity(&mut self) -> Result<()> {
+		self.import.discontinuity()?;
+		Ok(())
+	}
+
+	fn finish(self: Box<Self>) -> Result<codec::Finished> {
+		Ok(Box::new(self.import.finish()?))
 	}
 
 	fn abort(self: Box<Self>, err: moq_net::Error) {

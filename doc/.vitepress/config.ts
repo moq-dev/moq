@@ -11,11 +11,10 @@ const drafts = syncDrafts();
 
 // The JS API reference under lib/js/api/, generated the same way from the
 // packages' TSDoc. TypeDoc runs in its own process, since it holds the whole
-// program in memory and needs its own TypeScript. A build always regenerates
-// it; the dev server reuses the last one until a package changes.
+// program in memory and needs its own TypeScript. It reuses a cached reference
+// while none of its inputs has changed.
 const generator = fileURLToPath(new URL("./api/index.ts", import.meta.url));
-const build = process.argv.slice(2).includes("build");
-execFileSync("bun", build ? [generator] : [generator, "--cached"], { stdio: "inherit" });
+execFileSync("bun", [generator], { stdio: "inherit" });
 const reference = (items: DefaultTheme.SidebarItem[], parent?: string): DefaultTheme.SidebarItem[] =>
 	items
 		// A package with several entrypoints lists its main one again under itself.
@@ -59,6 +58,13 @@ export default defineConfig({
 		["meta", { name: "twitter:image", content: "https://doc.moq.dev/og.png" }],
 		["meta", { name: "theme-color", content: "#0f172a" }],
 	],
+
+	// Serves /sitemap.xml, which public/robots.txt names. It lists the clean URLs,
+	// since the host redirects `.html` ones.
+	sitemap: {
+		hostname: "https://doc.moq.dev",
+		transformItems: (items) => items.map((item) => ({ ...item, url: item.url.replace(/\.html$/, "") })),
+	},
 
 	appearance: "force-dark",
 
@@ -118,7 +124,6 @@ export default defineConfig({
 						{ text: "Transport", link: "/concept/transport" },
 						{ text: "moq-lite", link: "/concept/moq-lite" },
 						{ text: "Identity and recovery", link: "/concept/identity" },
-						{ text: "Sockets", link: "/concept/socket" },
 						{ text: "hang", link: "/concept/hang" },
 						{ text: "Archives", link: "/concept/archives" },
 						{ text: "Audio jitter", link: "/concept/audio-jitter" },
@@ -133,7 +138,6 @@ export default defineConfig({
 								{ text: "vs RTMP/SRT", link: "/concept/use-case/contribution" },
 								{ text: "vs WebRTC", link: "/concept/use-case/conferencing" },
 								{ text: "For AI", link: "/concept/use-case/ai" },
-								{ text: "For teleoperation", link: "/concept/use-case/teleoperation" },
 							],
 						},
 					],
@@ -178,7 +182,7 @@ export default defineConfig({
 							items: [
 								{ text: "RTMP", link: "/bin/rtmp" },
 								{ text: "SRT", link: "/bin/srt" },
-								{ text: "WebRTC", link: "/bin/rtc" },
+								{ text: "WebRTC", link: "/bin/webrtc" },
 								{ text: "HLS", link: "/bin/hls" },
 							],
 						},
@@ -230,6 +234,7 @@ export default defineConfig({
 								{ text: "@moq/clock", link: "/lib/js/clock" },
 								{ text: "@moq/json", link: "/lib/js/json" },
 								{ text: "@moq/stats", link: "/lib/js/api/stats" },
+								{ text: "@moq/obs", link: "/lib/js/api/obs" },
 								{ text: "API reference", link: "/lib/js/api/" },
 							],
 						},

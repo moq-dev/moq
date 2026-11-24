@@ -1,4 +1,4 @@
-//! The sequences a feed has accounted for, and how long each gap between them is waited for.
+//! The keys a feed has accounted for, and how long each gap between them is waited for.
 //!
 //! A subscription's tail (the session's `tail::Tail`) and a track's record of live arrivals
 //! both keep one, so they give up on a missing group by the same rule.
@@ -34,7 +34,7 @@ pub(crate) const RUN_OVERHEAD: u64 = 2
 	* (size_of::<(u64, Run)>() + size_of::<(Instant, u64)>() + size_of::<(u64, (u64, u64))>() + size_of::<(u64, u64)>())
 		as u64;
 
-/// A run of accounted sequences, keyed by its inclusive start.
+/// A run of accounted keys, keyed by its inclusive start.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Run {
 	end: u64,
@@ -42,15 +42,15 @@ struct Run {
 	since: Instant,
 }
 
-/// The sequences accounted for, and how late each gap between them is.
+/// The keys accounted for, and how late each gap between them is.
 #[derive(Debug)]
 pub(crate) struct Ledger {
-	// Disjoint, sorted, non-adjacent runs of accounted sequences. A gap older than the grace
+	// Disjoint, sorted, non-adjacent runs of accounted keys. A gap older than the grace
 	// can no longer be waited for, so it folds into the runs around it, which bounds this by
 	// the gaps opened within the grace rather than every gap ever seen. A fold is final: a
 	// later, longer grace or a lowered floor cannot reopen it.
 	runs: BTreeMap<u64, Run>,
-	// Demand can restart a gap below an older one, so sequence order is not age order.
+	// Demand can restart a gap below an older one, so key order is not age order.
 	// Index both: one due gap must not make every arrival scan all the younger ones.
 	ages: BTreeSet<(Instant, u64)>,
 	grace: Duration,
@@ -162,60 +162,14 @@ impl Ledger {
 		self.changes.insert(first..end);
 	}
 
-	/// Take `groups` back out of what is accounted for, owed again from `now`: a verdict that
-	/// accounted for them was reversed. The gap they leave opens now, so it is waited for a
-	/// fresh grace, even where it joins an older gap.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub fn unaccount(&mut self, groups: Range<u64>, now: Instant) {
-		if groups.is_empty() {
-			return;
-		}
-		let overlapping: Vec<u64> = self.accounted(groups.clone()).map(|run| run.start).collect();
-		if overlapping.is_empty() {
-			return;
-		}
-		for clipped in overlapping {
-			let start = self
-				.runs
-				.range(..=clipped)
-				.next_back()
-				.map(|(&start, _)| start)
-				.expect("an accounted run");
-			let run = self.remove(start);
-			if start < groups.start {
-				self.ages.insert((run.since, start));
-				self.runs.insert(
-					start,
-					Run {
-						end: groups.start,
-						since: run.since,
-					},
-				);
-				self.changes.insert(start..groups.start);
-			}
-			if groups.end < run.end {
-				self.ages.insert((now, groups.end));
-				self.runs.insert(
-					groups.end,
-					Run {
-						end: run.end,
-						since: now,
-					},
-				);
-				self.changes.insert(groups.end..run.end);
-			}
-		}
-		self.demand(groups, now);
-	}
-
-	/// Account a live arrival, refreshing a cached incarnation even if its sequence was
+	/// Account a live arrival, refreshing a cached incarnation even if its key was
 	/// accounted before. Its gap ages stay unchanged, but readers must revisit a refusal.
-	pub fn arrive(&mut self, sequence: u64, now: Instant) {
+	pub fn arrive(&mut self, key: u64, now: Instant) {
 		let revision = self.changes.revision();
-		self.account(sequence..sequence.saturating_add(1), now);
+		self.account(key..key.saturating_add(1), now);
 		if self.changes.revision() == revision
-			&& let Some((&start, run)) = self.runs.range(..=sequence).next_back()
-			&& sequence < run.end
+			&& let Some((&start, run)) = self.runs.range(..=key).next_back()
+			&& key < run.end
 		{
 			self.changes.insert(start..run.end);
 		}
@@ -240,7 +194,7 @@ impl Ledger {
 	}
 
 	/// Fold the oldest gap into the runs around it however young, giving up on it early,
-	/// and return the sequences it held; `None` when no gap is left to fold.
+	/// and return the keys it held; `None` when no gap is left to fold.
 	pub fn fold_oldest(&mut self) -> Option<Range<u64>> {
 		let first = self.first()?;
 		let &(_, start) = self.ages.iter().find(|(_, start)| *start != first)?;
@@ -262,23 +216,23 @@ impl Ledger {
 		self.runs.len()
 	}
 
-	/// The lowest sequence accounted for.
+	/// The lowest key accounted for.
 	pub fn first(&self) -> Option<u64> {
 		self.runs.first_key_value().map(|(start, _)| *start)
 	}
 
-	/// The exclusive end of the accounted run holding `sequence`, `None` while it is not.
-	pub fn run_end(&self, sequence: u64) -> Option<u64> {
+	/// The exclusive end of the accounted run holding `key`, `None` while it is not.
+	pub fn run_end(&self, key: u64) -> Option<u64> {
 		self.runs
-			.range(..=sequence)
+			.range(..=key)
 			.next_back()
-			.filter(|(_, run)| sequence < run.end)
+			.filter(|(_, run)| key < run.end)
 			.map(|(_, run)| run.end)
 	}
 
-	/// The exclusive end of the highest accounted run starting at or below `sequence`.
-	pub fn end_below(&self, sequence: u64) -> Option<u64> {
-		self.runs.range(..=sequence).next_back().map(|(_, run)| run.end)
+	/// The exclusive end of the highest accounted run starting at or below `key`.
+	pub fn end_below(&self, key: u64) -> Option<u64> {
+		self.runs.range(..=key).next_back().map(|(_, run)| run.end)
 	}
 
 	/// The accounted runs overlapping `groups`, clipped to it, lowest first.
@@ -553,38 +507,6 @@ mod tests {
 		ledger.expire(lowered.saturating_add(GRACE));
 		assert!(ledger.covers(1..10));
 	}
-	/// Unaccounting reopens what a reversed verdict accounted for, as a gap waited for a fresh
-	/// grace, and leaves the rest of the run accounted.
-	#[test]
-	fn unaccount_reopens_a_gap_for_a_fresh_grace() {
-		let start = Instant::now();
-		let mut ledger = Ledger::new(GRACE);
-		arrive(&mut ledger, 0..10, start);
-		ledger.unaccount(3..5, start.saturating_add(GRACE));
-		assert!(ledger.covers(0..3) && ledger.covers(5..10));
-		assert!(!ledger.covers(3..5));
-		ledger.expire(start.saturating_add(GRACE * 3 / 2));
-		assert!(!ledger.covers(3..5), "its grace runs from the reversal");
-		ledger.expire(start.saturating_add(GRACE * 2));
-		assert!(ledger.covers(0..10));
-	}
-
-	/// A reopened gap that joins an older one is waited for a fresh grace as a whole, rather
-	/// than folding with the older gap's age.
-	#[test]
-	fn unaccount_restarts_the_older_gap_it_joins() {
-		let start = Instant::now();
-		let mut ledger = Ledger::new(GRACE);
-		arrive(&mut ledger, 0..2, start);
-		arrive(&mut ledger, 4..6, start);
-		let reversed = start.saturating_add(GRACE * 9 / 10);
-		ledger.unaccount(1..2, reversed);
-		ledger.expire(start.saturating_add(GRACE));
-		assert!(!ledger.covers(1..2), "its grace runs from the reversal");
-		ledger.expire(reversed.saturating_add(GRACE));
-		assert!(ledger.covers(0..6));
-	}
-
 	#[test]
 	fn demand_can_move_an_older_gap_after_a_newer_one() {
 		let start = Instant::now();

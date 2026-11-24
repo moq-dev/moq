@@ -51,13 +51,34 @@ export function playbackIdentity(config: Catalog.AudioConfig): PlaybackIdentity 
 	};
 }
 
+const OPUS_HEAD = new TextEncoder().encode("OpusHead");
+
+/**
+ * The description to configure WebCodecs with: the catalog's, or the init segment's when it has none.
+ *
+ * An Opus stream past stereo cannot decode without its OpusHead's channel mapping, but Chromium then
+ * trims the header's pre-skip itself, again after every flush. The decoder's Terminal owns that trim,
+ * gap resumes included, so WebCodecs gets a copy with the pre-skip zeroed. WebCodecs reads only a
+ * signed OpusHead, so a dOps or an unsigned header stays dropped, as before.
+ */
+export function decoderDescription(codec: string, description: Uint8Array | undefined): Uint8Array | undefined {
+	if (!description || codec !== "opus") return description;
+	if (!OPUS_HEAD.every((byte, index) => description[index] === byte)) return undefined;
+	// Validates the header's length.
+	Util.Opus.preSkip(description);
+	const copy = description.slice();
+	// The two little-endian bytes after the version and channel count.
+	copy.fill(0, OPUS_HEAD.length + 2, OPUS_HEAD.length + 4);
+	return copy;
+}
+
 /**
  * A frame's duration as a constant over the catalog's sample rate, for codecs that fix it.
  *
  * Undefined for Opus, whose packets state their own duration (see `Util.Opus.packetSamples`), and
  * for codecs with no constant. Never learned from observed timestamps.
  */
-export function frameDuration(config: Pick<Catalog.AudioConfig, "codec" | "sampleRate">): Duration | undefined {
+export function frameDuration(config: { readonly codec: string; readonly sampleRate: number }): Duration | undefined {
 	const samples = frameSamples(config);
 	if (samples === undefined) return undefined;
 	return Duration.millis((samples * 1000) / config.sampleRate);
@@ -75,7 +96,7 @@ export function packetDuration(codec: string, frame: Container.Frame): Duration 
 	return samples === undefined ? undefined : Duration.millis((samples * 1000) / OPUS_RATE);
 }
 
-function frameSamples(config: Pick<Catalog.AudioConfig, "codec" | "sampleRate">): number | undefined {
+function frameSamples(config: { readonly codec: string; readonly sampleRate: number }): number | undefined {
 	switch (Util.Aac.objectType(config.codec)) {
 		case 2:
 			return AAC_LC_FRAME_SAMPLES;

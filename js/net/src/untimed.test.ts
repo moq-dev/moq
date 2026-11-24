@@ -1,10 +1,13 @@
 // A track keeps its timedness end to end: no receive path fills in arrival time, a wire that
-// can't declare a timeline delivers frames untimed, and lite-05/06, which can't declare an
-// untimed one, deliver its send times. Mirrors rs/moq-net/tests/integration/untimed.rs.
+// can't declare a timeline delivers frames scale-less, stamped with their group's key, and
+// lite-05/06, which can't declare a scale-less one, deliver its group keys as milliseconds.
+// Mirrors rs/moq-net/tests/integration/untimed.rs.
 import { expect, test } from "bun:test";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { accept, connect } from "./connection/index.ts";
+import { defined } from "./defined.test-util.ts";
 import * as Ietf from "./ietf/index.ts";
+import { hooks } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
@@ -21,22 +24,30 @@ interface Wire {
 	version?: number;
 	/** Whether a timed track arrives timed. */
 	declares: boolean;
-	/** Whether an untimed track arrives timed in milliseconds with its send times, as on lite-05/06. */
-	sends: boolean;
+	/** Whether an untimed track arrives timed in milliseconds at its group keys, as on lite-05/06. */
+	keys: boolean;
+	/**
+	 * Whether a timed track's frames arrive at their group's key in its units rather than their
+	 * own times, as on moq-transport, which carries no Timestamp.
+	 */
+	keyed?: boolean;
 }
 
 const WIRES: Wire[] = [
-	{ name: "lite-01", protocol: "", version: Lite.Version.DRAFT_01, declares: false, sends: false },
-	{ name: "lite-03", protocol: Lite.ALPN_03, declares: false, sends: false },
-	{ name: "lite-04", protocol: Lite.ALPN_04, declares: false, sends: false },
-	{ name: "lite-05", protocol: Lite.ALPN_05, declares: true, sends: true },
-	{ name: "lite-06", protocol: Lite.ALPN_06, declares: true, sends: true },
-	{ name: "lite-07-wip", protocol: Lite.ALPN_07_WIP, declares: true, sends: false },
-	{ name: "ietf-22", protocol: Ietf.ALPN.DRAFT_22, declares: true, sends: false },
+	{ name: "lite-01", protocol: "", version: Lite.Version.DRAFT_01, declares: false, keys: false },
+	{ name: "lite-03", protocol: Lite.ALPN_03, declares: false, keys: false },
+	{ name: "lite-04", protocol: Lite.ALPN_04, declares: false, keys: false },
+	{ name: "lite-05", protocol: Lite.ALPN_05, declares: true, keys: true },
+	{ name: "lite-06", protocol: Lite.ALPN_06, declares: true, keys: true },
+	{ name: "lite-07-wip", protocol: Lite.ALPN_07_WIP, declares: true, keys: false },
+	{ name: "ietf-22", protocol: Ietf.ALPN.DRAFT_22, declares: true, keys: false, keyed: true },
 ];
 
-/** Serve one group of `timestamps` on a track with `timescale`, and read it back over `wire`. */
-async function roundTrip(wire: Wire, timescale: Timescale | undefined, timestamps: (Timestamp | undefined)[]) {
+/**
+ * Serve one group of `timestamps` on a track with `timescale`, starting at `sequence` (the next
+ * one by default), and read it back over `wire`.
+ */
+async function roundTrip(wire: Wire, timescale: Timescale | undefined, timestamps: Timestamp[], key?: bigint) {
 	const pair = createMockTransportPair(wire.protocol);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
@@ -51,7 +62,8 @@ async function roundTrip(wire: Wire, timescale: Timescale | undefined, timestamp
 		for (;;) {
 			const request = await wireOf(broadcast).requested();
 			if (!request) break;
-			const group = request.accept({ timescale }).appendGroup();
+			const track = request.accept({ timescale });
+			const group = key === undefined ? hooks.appendNext(track) : track.createGroup(key);
 			for (const [i, timestamp] of timestamps.entries()) {
 				group.writeFrame({ payload: new Uint8Array([i]), timestamp });
 			}
@@ -78,12 +90,13 @@ async function roundTrip(wire: Wire, timescale: Timescale | undefined, timestamp
 async function republish(input: BroadcastConsumer): Promise<BroadcastProducer> {
 	const subscription = input.track("video").subscribe();
 	const copy = new BroadcastProducer();
-	const video = copy.createTrack("video", await subscription.info());
+	const video = defined(copy.createTrack("video", await subscription.info()));
 	void (async () => {
 		try {
 			const groups = subscription.ordered();
 			for (let group = await groups.nextGroup(); group; group = await groups.nextGroup()) {
-				const out = video.appendGroup();
+				// The same group, so a scale-less frame's key still names it.
+				const out = video.createGroup(group.start);
 				for (let frame = await group.readFrame(); frame; frame = await group.readFrame()) out.writeFrame(frame);
 				out.finish();
 			}
@@ -120,7 +133,7 @@ test("a forwarded untimed track stays untimed", async () => {
 		for (;;) {
 			const request = await wireOf(broadcast).requested();
 			if (!request) break;
-			const group = request.accept({ timescale: Timescale.MICRO }).appendGroup();
+			const group = hooks.appendNext(request.accept({ timescale: Timescale.MICRO }));
 			group.writeFrame({ payload: new Uint8Array([7]), timestamp: Timestamp.fromMicros(1_234) });
 			group.finish();
 		}
@@ -143,7 +156,7 @@ test("a forwarded untimed track stays untimed", async () => {
 	expect((await track.info()).timescale).toBeNull();
 	const frame = await (await track.ordered().nextGroup())?.readFrame();
 	expect(frame?.payload).toEqual(new Uint8Array([7]));
-	expect(frame?.timestamp).toBeUndefined();
+	expect(frame?.timestamp).toEqual(Timestamp.unscaled(0n));
 
 	broadcast.close();
 	await serving;
@@ -155,12 +168,27 @@ test("a forwarded untimed track stays untimed", async () => {
 });
 
 for (const wire of WIRES) {
-	test(`${wire.name}: an untimed track arrives ${wire.sends ? "with its send times" : "untimed"}`, async () => {
-		const { info, frames } = await roundTrip(wire, undefined, [undefined, undefined]);
+	test(`${wire.name}: an untimed track arrives ${wire.keys ? "with its keys as milliseconds" : "untimed"}`, async () => {
+		// The track's first group is 0, which each scale-less frame's key names.
+		const key = Timestamp.unscaled(0n);
+		const { info, frames } = await roundTrip(wire, undefined, [key, key]);
 		expect(frames.map((frame) => frame.payload[0])).toEqual([0, 1]);
-		expect(info.timescale).toBe(wire.sends ? Timescale.MILLI : null);
-		for (const frame of frames) expect(frame.timestamp !== undefined).toBe(wire.sends);
+		expect(info.timescale).toBe(wire.keys ? Timescale.MILLI : null);
+		for (const frame of frames) expect(frame.timestamp.scale !== undefined).toBe(wire.keys);
 	});
+
+	// Lite-07 stamps each scale-less frame with its group's start as a bare number, which the
+	// subscriber checks against the GROUP, and lite-05/06 as milliseconds, so a start past 0
+	// tells it apart from no stamp, or a clock, at all.
+	if (wire.name === "lite-07-wip" || wire.keys) {
+		test(`${wire.name}: an untimed group past 0 arrives stamped with its start`, async () => {
+			const key = Timestamp.unscaled(9n);
+			const { frames } = await roundTrip(wire, undefined, [key, key], 9n);
+			expect(frames.map((frame) => frame.payload[0])).toEqual([0, 1]);
+			const stamped = wire.keys ? Timestamp.fromMillis(9) : key;
+			for (const frame of frames) expect(frame.timestamp).toEqual(stamped);
+		});
+	}
 
 	test(`${wire.name}: a timed track keeps its timestamps only where the wire delivers them`, async () => {
 		const { info, frames } = await roundTrip(wire, Timescale.MICRO, [
@@ -169,13 +197,18 @@ for (const wire of WIRES) {
 		]);
 		expect(frames.map((frame) => frame.payload[0])).toEqual([0, 1]);
 
-		if (wire.declares) {
+		if (wire.keyed) {
+			// TIMESCALE declares the units of the Group IDs, so each frame starts at its group, 0.
+			expect(info.timescale).toBe(Timescale.MICRO);
+			expect(frames.map((frame) => frame.timestamp?.asMicros())).toEqual([0, 0]);
+		} else if (wire.declares) {
 			expect(info.timescale).toBe(Timescale.MICRO);
 			expect(frames.map((frame) => frame.timestamp?.asMicros())).toEqual([1_000, 1_234]);
 		} else {
-			// No trusted units on the wire, and no arrival time made up in their place.
+			// No trusted units on the wire, and no arrival time made up in their place: each frame
+			// carries only its group's key.
 			expect(info.timescale).toBeNull();
-			for (const frame of frames) expect(frame.timestamp).toBeUndefined();
+			for (const frame of frames) expect(frame.timestamp).toEqual(Timestamp.unscaled(0n));
 		}
 	});
 }

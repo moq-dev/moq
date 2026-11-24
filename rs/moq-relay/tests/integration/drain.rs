@@ -41,7 +41,7 @@ async fn admit(observer: &shutdown::Observer, version: moq_net::Version, stalled
 	drop(kio::clock::sim::spawn(async move {
 		let server = moq_net::Server::new().with_versions(version.into());
 		let handshake = server
-			.accept_request(moq_net::time::Instant::now(), relay_link)
+			.handshake(moq_net::time::Instant::now(), relay_link)
 			.await
 			.expect("relay handshake");
 		let request = Accepted::new(handshake, moq_auth::Transport::Quic);
@@ -51,7 +51,7 @@ async fn admit(observer: &shutdown::Observer, version: moq_net::Version, stalled
 			.await;
 	}));
 
-	let all = moq_auth::Pattern::all;
+	let all = moq_auth::Prefix::all;
 	let (lease, consumer) = lease::Producer::new(moq_auth::Grant::new(all(), all()));
 	drop(kio::clock::sim::spawn(async move {
 		admissions.next().await.expect("an admission").grant(consumer);

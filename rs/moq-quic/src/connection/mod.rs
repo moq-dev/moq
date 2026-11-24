@@ -57,7 +57,6 @@ use datagrams::DatagramState;
 pub use datagrams::Datagrams;
 
 mod mtud;
-#[cfg(feature = "mux")]
 pub mod mux;
 
 mod packet_builder;
@@ -100,7 +99,7 @@ impl ConnectionTag {
 		Self(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
 	}
 }
-pub use stats::{CreditStats, FrameStats, PathStats, Stats, UdpStats};
+pub use stats::{CreditStats, FrameStats, HeldStats, PathStats, SendCreditStats, Stats, UdpStats};
 
 pub(crate) mod streams;
 pub use streams::Streams;
@@ -125,8 +124,8 @@ use timer::{Timer, TimerTable};
 /// - B. Handlers for incoming events from the network or system, named `handle_*`.
 /// - C. State machine mutators, for incoming commands from the application. For convenience we
 ///   refer to this as "performing I/O" below, however as per the design of this library none of the
-///   functions actually perform system-level I/O. For example, [`read`](recv::Stream::read) and
-///   [`write`](send::Stream::write), but also things like [`reset`](send::Stream::reset).
+///   functions actually perform system-level I/O. For example, [`read`](recv::Stream::read),
+///   but also things like [`reset`](send::Stream::reset).
 /// - D. Polling functions for outgoing events or actions for the caller to
 ///   take, named `poll_*`.
 ///
@@ -253,6 +252,8 @@ pub struct Connection {
 	/// A probe timed out with the peer unheard since the packet it probed for went out, so the
 	/// path may have been down: the next packet heard brings the next probe forward.
 	probe_when_heard: bool,
+	/// When handshake CRYPTO was last recovered ahead of the PTO ([`Self::recover_crypto_early`])
+	early_crypto_sent: Option<Instant>,
 
 	//
 	// Congestion Control
@@ -272,6 +273,8 @@ pub struct Connection {
 	bandwidth_probe: BandwidthProbe,
 	/// Holds sending to a cap below whatever the congestion controller allows
 	send_rate: Option<rate::Bucket>,
+	/// Since when the congestion controller has held back data ready to send, and how
+	congestion_wait: Option<(Instant, CongestionLimit)>,
 
 	streams: StreamsState,
 	/// Surplus remote CIDs for future use on new paths
@@ -384,9 +387,11 @@ impl Connection {
 			pto_count: 0,
 			heard_since_sent: false,
 			probe_when_heard: false,
+			early_crypto_sent: None,
 
 			app_limited: false,
 			send_rate: None,
+			congestion_wait: None,
 			acked: Vec::new(),
 			receive_timestamps: None,
 			arrival: None,
@@ -556,6 +561,9 @@ impl Connection {
 	#[must_use]
 	pub(crate) fn transmit(&mut self, now: Instant, max_datagrams: usize, buf: &mut Vec<u8>) -> Option<Transmit> {
 		assert!(max_datagrams != 0);
+		// A write that blocked on the peer's credit, or the congestion controller, woke this call:
+		// date its wait from here.
+		self.observe_waits(now);
 		let max_datagrams = match self.config.segmentation_offload {
 			false => 1,
 			true => max_datagrams,
@@ -580,6 +588,12 @@ impl Connection {
 		// packets, this can be earlier than the start of the current QUIC packet.
 		let mut datagram_start = 0;
 		let mut segment_size = usize::from(self.path.current_mtu());
+		// No datagram may outgrow what the anti-amplification limit has left (RFC 9000 §8.1). A
+		// smaller one still goes out, so a path MTU past the whole budget cannot stall the
+		// handshake.
+		if let Some(budget) = self.path.anti_amplification_budget() {
+			segment_size = segment_size.min(usize::try_from(budget).unwrap_or(usize::MAX));
+		}
 		// The peer's maximum UDP payload size can reduce the path MTU below our configured minimum.
 		let min_mtu = Ord::min(self.config.min_mtu, self.path.current_mtu());
 
@@ -654,6 +668,11 @@ impl Connection {
 		let mut builder_storage: Option<PacketBuilder> = None;
 		let mut sent_frames = None;
 		let mut pad_datagram = false;
+		// Whether the datagram carries the current path's PATH_CHALLENGE
+		let mut challenge_datagram = false;
+		// Whether the datagram's room was cleared to go in flight: the window held it, or it
+		// carries a loss probe or a close. A datagram opened by a bare ACK was not.
+		let mut datagram_cleared = false;
 		let mut pad_datagram_to_mtu = false;
 		// Set when either the congestion window or the pacer held a send back; drives
 		// `app_limited`, since neither case means the application ran dry.
@@ -667,6 +686,9 @@ impl Connection {
 		// Set when the send rate cap held a send back: a local policy, not the path, so the
 		// controller hears it as application-limited.
 		let mut rate_blocked = false;
+		// When the pacer releases data ready to send it held back; a held bandwidth probe
+		// resends data already in flight, so it is not one.
+		let mut pacing_until = None;
 
 		// Iterate over all spaces and find data to send
 		let mut space_idx = 0;
@@ -747,18 +769,26 @@ impl Connection {
 					break;
 				}
 
-				// Anti-amplification is only based on `total_sent`, which gets
-				// updated at the end of this method. Therefore we pass the amount
-				// of bytes for datagrams that are already created, as well as 1 byte
-				// for starting another datagram. If there is any anti-amplification
-				// budget left, we always allow a full MTU to be sent
-				// (see https://github.com/quinn-rs/quinn/issues/1082)
-				if self
-					.path
-					.anti_amplification_blocked(segment_size as u64 * (num_datagrams as u64) + 1)
-				{
+				// Anti-amplification counts `total_sent`, which this method updates only at its
+				// end, so the datagrams it already built count too: each is one segment. A
+				// client's Initial, and a server's ack-eliciting one, is padded to `min_mtu`
+				// (RFC 9000 §14.1); when the budget cannot carry that, a later space may still
+				// fit.
+				let padded = space_id == SpaceId::Initial && (self.side.is_client() || ack_eliciting);
+				let datagram = segment_size.max(min_packet_space(space_id) + tag_len);
+				let built = (segment_size * num_datagrams) as u64;
+				if self.path.anti_amplification_blocked(built + datagram as u64) {
 					trace!("blocked by anti-amplification");
 					break;
+				}
+				if padded
+					&& self
+						.path
+						.anti_amplification_blocked(built + datagram.max(usize::from(min_mtu)) as u64)
+				{
+					trace!("Initial blocked by anti-amplification");
+					space_idx += 1;
+					continue;
 				}
 
 				// Congestion control and pacing checks
@@ -768,7 +798,9 @@ impl Connection {
 				// pending frames that will never be sent once closing, and a closed connection no
 				// longer processes ACKs, so the window could never drain
 				// (see https://github.com/quinn-rs/quinn/issues/2785)
-				if ack_eliciting && self.spaces[space_id].loss_probes == 0 && !close {
+				// A padded Initial counts in flight even when it carries only an ACK (RFC 9002
+				// §2), so the window holds it too, though the pacer lets an ACK out at once.
+				if (ack_eliciting || padded) && self.spaces[space_id].loss_probes == 0 && !close {
 					debug_assert!(untracked_bytes <= segment_size as u64);
 
 					let bytes_to_send = segment_size as u64 + untracked_bytes;
@@ -783,9 +815,10 @@ impl Connection {
 					}
 
 					// Check whether the next datagram is blocked by pacing
-					if let Some(delay) = self.path.congestion.pace(now, bytes_to_send) {
+					if ack_eliciting && let Some(delay) = self.path.congestion.pace(now, bytes_to_send) {
 						self.timers.set(Timer::Pacing, delay);
 						send_blocked = true;
+						pacing_until = Some(delay);
 						// Loss probes should be subject to pacing, even though
 						// they are not congestion controlled.
 						trace!("blocked by pacing");
@@ -811,7 +844,7 @@ impl Connection {
 				// Finish current packet
 				if let Some(mut builder) = builder_storage.take() {
 					if pad_datagram {
-						builder.pad_to(min_mtu);
+						self.pad_datagram(&mut builder, min_mtu, buf_capacity - datagram_start, challenge_datagram);
 					}
 
 					if num_datagrams > 1 || pad_datagram_to_mtu {
@@ -883,6 +916,8 @@ impl Connection {
 					}
 				}
 
+				datagram_cleared = ack_eliciting || padded || close || self.spaces[space_id].loss_probes > 0;
+
 				// Allocate space for another datagram
 				let next_datagram_size_limit = match self.spaces[space_id].loss_probes {
 					0 => segment_size,
@@ -909,6 +944,7 @@ impl Connection {
 				num_datagrams += 1;
 				coalesce = true;
 				pad_datagram = false;
+				challenge_datagram = false;
 				datagram_start = buf.len();
 
 				debug_assert_eq!(
@@ -918,14 +954,25 @@ impl Connection {
 				);
 			} else {
 				// We can append/coalesce the next packet into the current
-				// datagram.
+				// datagram, if the window holds it: one behind a bare ACK was never checked.
+				if ack_eliciting
+					&& !close && !datagram_cleared
+					&& self.spaces[space_id].loss_probes == 0
+					&& self.path.in_flight.bytes + untracked_bytes > self.path.congestion.window()
+				{
+					space_idx += 1;
+					send_blocked = true;
+					cwnd_blocked = true;
+					trace!("blocked by congestion control");
+					continue;
+				}
 				// Finish current packet without adding extra padding
 				if let Some(builder) = builder_storage.take() {
 					builder.finish_and_track(now, self, sent_frames.take(), buf);
 				}
 			}
 
-			debug_assert!(buf_capacity - buf.len() >= MIN_PACKET_SPACE);
+			debug_assert!(buf_capacity - buf.len() >= min_packet_space(space_id));
 
 			//
 			// From here on, we've determined that a packet will definitely be sent.
@@ -1074,14 +1121,7 @@ impl Connection {
 				});
 			}
 
-			let sent = self.populate_packet(
-				now,
-				space_id,
-				buf,
-				builder.max_size,
-				builder.exact_number,
-				bandwidth_probe,
-			);
+			let sent = self.populate_packet(now, space_id, buf, builder, bandwidth_probe);
 			debug_assert!(buf.len() <= builder.max_size, "frames overflowed the packet");
 
 			// ACK-only packets should only be sent when explicitly allowed. If we write them due to
@@ -1099,6 +1139,7 @@ impl Connection {
 				"SendableFrames was {can_send:?}, but only ACKs have been written"
 			);
 			pad_datagram |= sent.requires_padding;
+			challenge_datagram |= sent.path_challenge;
 
 			if sent.largest_acked.is_some() {
 				self.spaces[space_id].pending_acks.acks_sent();
@@ -1116,7 +1157,7 @@ impl Connection {
 		// Finish the last packet
 		if let Some(mut builder) = builder_storage {
 			if pad_datagram {
-				builder.pad_to(min_mtu);
+				self.pad_datagram(&mut builder, min_mtu, buf_capacity - datagram_start, challenge_datagram);
 			}
 
 			// If this datagram is a loss probe and `segment_size` is larger than `min_mtu`,
@@ -1148,6 +1189,15 @@ impl Connection {
 		if cwnd_blocked {
 			self.path.congestion.on_cwnd_limited();
 		}
+		// A full window outranks the pacer: the pacer only matters once the window opens. The
+		// check charged a packet still being built a whole segment, so the window is full only if
+		// the finished packets left no room for another.
+		let limit = match (cwnd_blocked && self.window_full(), pacing_until) {
+			(true, _) => Some(CongestionLimit::Window),
+			(false, Some(until)) => Some(CongestionLimit::Pacing { until }),
+			(false, None) => None,
+		};
+		self.congestion_wait = limit.map(|limit| (now, limit));
 
 		// Send MTU probe if necessary. Only probe validated paths: probes bypass the
 		// anti-amplification check above, and until a migrated path is validated, its budget is
@@ -1211,6 +1261,20 @@ impl Connection {
 			},
 			local_ip: self.local_ip,
 		})
+	}
+
+	/// Pad a datagram to `min_mtu`, or to its `room` when the anti-amplification limit shrank it
+	/// below that. RFC 9000 §8.2.1 exempts such a datagram from padding, and padding past its end
+	/// would run into frames written to fill it; a challenge sent in one is marked short.
+	fn pad_datagram(&mut self, builder: &mut PacketBuilder, min_mtu: u16, room: usize, challenge: bool) {
+		let room = u16::try_from(room).unwrap_or(u16::MAX);
+		if room < min_mtu
+			&& challenge
+			&& let Some(challenge) = &mut self.path.challenge
+		{
+			challenge.short = true;
+		}
+		builder.pad_to(min_mtu.min(room));
 	}
 
 	/// Send PATH_CHALLENGE for a previous path if necessary
@@ -1351,6 +1415,7 @@ impl Connection {
 					// the server's first flight is lost.
 					self.set_loss_detection_timer(now);
 				}
+				self.observe_waits(now);
 			}
 			NewIdentifiers(ids, now) => {
 				self.local_cid_state.new_cids(&ids, now);
@@ -1417,6 +1482,8 @@ impl Connection {
 				Timer::PathValidation => {
 					debug!("path validation failed");
 					if let Some((_, prev)) = self.prev_path.take() {
+						// The failed path's congestion wait ends with it.
+						self.observe_congestion(now, true);
 						self.path = prev;
 						self.set_loss_detection_timer(now);
 					}
@@ -1442,6 +1509,41 @@ impl Connection {
 				}
 			}
 		}
+		self.observe_waits(now);
+	}
+
+	/// Accrue a writer's wait on the peer's credit or the congestion controller, and a hold on the
+	/// spent receive window, up to `now`
+	fn observe_waits(&mut self, now: Instant) {
+		let closed = self.state.is_closed();
+		self.streams.observe_credit(now, closed);
+		// A closed connection sends nothing more, so its wait ends here.
+		self.observe_congestion(now, closed);
+	}
+
+	/// Accrue the congestion wait up to `now`, ending it once its limit clears or at `end`, as
+	/// when the path that imposed it is replaced
+	fn observe_congestion(&mut self, now: Instant, end: bool) {
+		if let Some((since, limit)) = self.congestion_wait {
+			// A wait ends once its limit clears, whether or not a transmit follows at once, as
+			// one may not while a driver's send buffers are full.
+			let (until, cleared) = match limit {
+				CongestionLimit::Window => (now, end || !self.window_full()),
+				CongestionLimit::Pacing { until } => (now.min(until), end || now >= until),
+			};
+			let total = match limit {
+				CongestionLimit::Window => &mut self.stats.path.cwnd_blocked,
+				CongestionLimit::Pacing { .. } => &mut self.stats.path.pacing_blocked,
+			};
+			*total += until.saturating_duration_since(since);
+			self.congestion_wait = (!cleared).then_some((until, limit));
+		}
+	}
+
+	/// Whether the congestion window has no room for another datagram
+	fn window_full(&self) -> bool {
+		let room = self.path.congestion.window().saturating_sub(self.path.in_flight.bytes);
+		room < u64::from(self.path.current_mtu())
 	}
 
 	/// Close a connection immediately
@@ -1449,7 +1551,7 @@ impl Connection {
 	/// This does not ensure delivery of outstanding data. It is the application's responsibility to
 	/// call this only when all important communications have been completed, e.g. by calling
 	/// [`send::Stream::finish`] on outstanding streams and waiting for
-	/// [`send::Stream::poll_end`].
+	/// [`send::Stream::poll_stopped`].
 	///
 	/// If [`Streams::send_streams`] returns 0, all outstanding stream data has been
 	/// delivered. There may still be data from the peer that has not been received.
@@ -1463,7 +1565,8 @@ impl Connection {
 				reason: reason.clone(),
 			});
 		}
-		self.close_inner(now, Close::Application(frame::ApplicationClose { error_code, reason }))
+		self.close_inner(now, Close::Application(frame::ApplicationClose { error_code, reason }));
+		self.observe_waits(now);
 	}
 
 	/// Report that a send to the peer found no route, such as `ENETUNREACH`
@@ -1511,6 +1614,7 @@ impl Connection {
 		stats.path.bandwidth_estimate = self.path.congestion.metrics().bandwidth_estimate;
 		stats.path.current_mtu = self.path.mtud.current_mtu();
 		stats.credit = self.streams.credit_stats();
+		stats.send_credit = self.streams.send_credit_stats();
 
 		stats
 	}
@@ -1564,12 +1668,16 @@ impl Connection {
 		self.crypto.peer_identity()
 	}
 
-	/// 32 bytes of keying material exported from the TLS session (RFC 8446 section 7.5) under
-	/// `label` and `context`, or `None` before the handshake completes.
-	pub fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
-		let mut output = [0; 32];
-		self.crypto.export_keying_material(&mut output, label, context).ok()?;
-		Some(output)
+	/// Fill `output` with keying material exported from the TLS session (RFC 5705), using
+	/// `label` and `context` for domain separation
+	#[cfg(test)]
+	pub(crate) fn export_keying_material(
+		&self,
+		output: &mut [u8],
+		label: &[u8],
+		context: &[u8],
+	) -> Result<(), crypto::ExportKeyingMaterialError> {
+		self.crypto.export_keying_material(output, label, context)
 	}
 
 	/// Whether the connection is in the process of being established
@@ -1590,6 +1698,16 @@ impl Connection {
 	/// [`Error::LocallyClosed`] when the local application closed it via [`close()`](Self::close).
 	pub fn is_closed(&self) -> bool {
 		self.state.is_closed()
+	}
+
+	/// Whether a CONNECTION_CLOSE is due that [`poll_transmit`](Self::poll_transmit) has yet to hand
+	/// over
+	///
+	/// Closing owes the peer one, as does each packet the peer sends on the current path during
+	/// the closing period; a loss with nothing to answer, such as an idle timeout or a stateless
+	/// reset, owes none. Once a closed connection owes none, everything it had to send is out.
+	pub fn owes_close(&self) -> bool {
+		self.state.owes_close()
 	}
 
 	/// Whether there is no longer any need to keep the connection around
@@ -1622,9 +1740,9 @@ impl Connection {
 	/// fills the inflight it allows
 	/// ([`probe_inflight`](crate::congestion::Metrics::probe_inflight)) with duplicates
 	/// of STREAM data still in flight, sending no more than the target in all, so the probe
-	/// measures the path. A controller that paces its own probe cluster
-	/// ([`Controller::paces_probe`]) gets it filled at its pace instead, and may aim its probes at
-	/// the target ([`Controller::on_probe_target`]). Duplicates count against congestion control,
+	/// measures the path. A controller that paces its own probe cluster, which only the `lab`
+	/// feature's GoogCC does, gets it filled at its pace instead, and may aim its probes at the
+	/// target. Duplicates count against congestion control,
 	/// as [`PathStats::sent_bandwidth_probe_bytes`]. A reset stream's data is never sent again. An
 	/// attempt that misses the target sits out a few seconds before retrying it, and a changed
 	/// target is retried at once. A controller that never probes ([`Controller::probes`])
@@ -1634,9 +1752,9 @@ impl Connection {
 			return;
 		}
 		self.bandwidth_probe.set_target(bytes_per_second);
-		self.path.congestion.on_probe_target(bytes_per_second);
+		bandwidth_probe::report_target(&mut *self.path.congestion, bytes_per_second);
 		if let Some((_, prev)) = &mut self.prev_path {
-			prev.congestion.on_probe_target(bytes_per_second);
+			bandwidth_probe::report_target(&mut *prev.congestion, bytes_per_second);
 		}
 	}
 
@@ -1653,7 +1771,7 @@ impl Connection {
 	#[cfg(test)]
 	pub(crate) fn path_changed(&mut self, now: Instant) {
 		self.path.reset(now, self.rng.random(), &self.config);
-		self.path.congestion.on_probe_target(self.bandwidth_probe.target());
+		bandwidth_probe::report_target(&mut *self.path.congestion, self.bandwidth_probe.target());
 		// The rebuilt controller never sees state the old one gave packets still in flight.
 		for space in SpaceId::iter() {
 			for info in self.spaces[space].sent_packets.values_mut() {
@@ -1844,7 +1962,11 @@ impl Connection {
 			}
 		}
 
-		// After the RTT update, as RFC 9002's OnAckReceived orders it.
+		// Must be called before crypto/pto_count are clobbered. The losses this ACK reveals reach
+		// the controller before the ACK itself, as RFC 9002's OnAckReceived orders them.
+		self.detect_lost_packets(now, space, true);
+
+		// After the RTT update and loss detection, as RFC 9002's OnAckReceived orders it.
 		self.path.congestion.on_ack(congestion::Ack {
 			now,
 			packets: &acked,
@@ -1853,9 +1975,6 @@ impl Connection {
 			rtt: self.path.rtt.get(),
 		});
 		self.acked = acked;
-
-		// Must be called before crypto/pto_count are clobbered
-		self.detect_lost_packets(now, space, true);
 
 		if self.peer_completed_address_validation() {
 			self.pto_count = 0;
@@ -2032,11 +2151,80 @@ impl Connection {
 			_ => 2,
 		};
 		self.spaces[space].loss_probes = self.spaces[space].loss_probes.saturating_add(count);
+		if space != SpaceId::Data {
+			// The whole unacknowledged handshake flight goes in the probe, both spaces coalesced
+			// (RFC 9002 §6.2.4), rather than the fired space's oldest packet padded out: a server
+			// held to three times what it heard otherwise spends that budget on a padded
+			// ServerHello and a Handshake flight apart, and has none left when one is lost again.
+			self.requeue_crypto(SpaceId::Initial);
+			self.requeue_crypto(SpaceId::Handshake);
+		}
 		self.probe_when_heard = space == SpaceId::Data
 			&& self.spaces[space].time_of_last_ack_eliciting_packet.is_some()
 			&& !self.heard_since_sent;
 		self.pto_count = self.pto_count.saturating_add(1);
 		self.set_loss_detection_timer(now);
+	}
+
+	/// Act on a peer's packet showing handshake CRYPTO went missing, now rather than at a PTO
+	/// (RFC 9002 §6.2.3): re-send ours that it has not acknowledged, or PING in our newest
+	/// handshake space for a packet it answers by re-sending its own
+	///
+	/// A PTO backed off under heavy loss can be seconds out, past a peer's handshake timeout.
+	/// At most once a round trip, so the peer's packets that prompted it, such as each datagram
+	/// of a lost flight, cannot multiply into a flood; each still crosses the path at most once.
+	fn recover_crypto_early(&mut self, now: Instant, missing: Missing) {
+		if self
+			.early_crypto_sent
+			.is_some_and(|sent| now.saturating_duration_since(sent) < self.path.rtt.get())
+		{
+			return;
+		}
+		let sent = match missing {
+			Missing::Ours => {
+				let initial = self.requeue_crypto(SpaceId::Initial);
+				self.requeue_crypto(SpaceId::Handshake) || initial
+			}
+			// A client without the ServerHello repeats its ClientHello if unacknowledged: the
+			// RFC's server heuristic keys on duplicate Initial CRYPTO, and a server following
+			// only that text just ACKs a PING. A server lacking the Finished only PINGs, since
+			// the client already holds its whole flight.
+			Missing::Theirs => {
+				let space = match self.spaces[SpaceId::Handshake].crypto {
+					Some(_) => SpaceId::Handshake,
+					None => SpaceId::Initial,
+				};
+				if space == SpaceId::Initial && self.requeue_crypto(space) {
+					true
+				} else if self.spaces[space].crypto.is_some() {
+					self.spaces[space].ping_pending = true;
+					true
+				} else {
+					false
+				}
+			}
+		};
+		if sent {
+			trace!(?missing, "recovering handshake CRYPTO ahead of the PTO");
+			self.early_crypto_sent = Some(now);
+		}
+	}
+
+	/// Move a handshake space's unacknowledged CRYPTO back to pending, reporting whether there was any
+	fn requeue_crypto(&mut self, space_id: SpaceId) -> bool {
+		let space = &mut self.spaces[space_id];
+		if space.crypto.is_none() {
+			return false;
+		}
+		let mut recovered = VecDeque::new();
+		for packet in space.sent_packets.values_mut() {
+			if packet.retransmits.get().is_some_and(|x| !x.crypto.is_empty()) {
+				recovered.extend(mem::take(&mut packet.retransmits.get_or_create().crypto));
+			}
+		}
+		let any = !recovered.is_empty();
+		spaces::queue_crypto(&mut space.pending.crypto, recovered);
+		any
 	}
 
 	/// Send the next probe now if the peer, silent through the last probe timeout, is heard
@@ -2058,7 +2246,7 @@ impl Connection {
 	fn detect_lost_packets(&mut self, now: Instant, pn_space: SpaceId, due_to_ack: bool) {
 		let mut lost_packets = Vec::<u64>::new();
 		let mut lost_mtu_probe = None;
-		let in_flight_mtu_probe = self.path.mtud.in_flight_mtu_probe();
+		let in_flight_mtu_probe = self.path.mtud.in_flight_mtu_probe(pn_space);
 		let rtt = self.path.rtt.conservative();
 		let loss_delay = cmp::max(rtt.mul_f32(self.config.time_threshold), TIMER_GRANULARITY);
 
@@ -2141,14 +2329,10 @@ impl Connection {
 					.congestion
 					.filter(|_| info.path_generation == self.path.generation())
 				{
-					let new_burst = packet
-						.checked_sub(1)
-						.is_none_or(|prev| self.spaces[pn_space].lost_packets.get(prev).is_none());
 					lost.push(congestion::Lost {
 						sent: info.time_sent,
 						bytes: info.size,
 						packet: state,
-						new_burst,
 					});
 				}
 				self.qlog
@@ -2162,7 +2346,7 @@ impl Connection {
 					}
 				}
 				self.spaces[pn_space].pending |= info.retransmits;
-				self.path.mtud.on_non_probe_lost(packet, info.size);
+				self.path.mtud.on_non_probe_lost(pn_space, packet, info.size);
 
 				self.spaces[pn_space].lost_packets.insert(
 					packet,
@@ -2224,8 +2408,10 @@ impl Connection {
 				continue;
 			}
 			if space == SpaceId::Data {
-				// Skip ApplicationData until handshake completes.
-				if self.is_handshaking() {
+				// Skip ApplicationData until the handshake is confirmed (RFC 9002 §6.2.1), which
+				// discards the Handshake keys: a client's 1-RTT probe before then would back off
+				// the PTO that re-sends its Finished.
+				if self.is_handshaking() || self.spaces[SpaceId::Handshake].crypto.is_some() {
 					return result;
 				}
 				// Include max_ack_delay and backoff for ApplicationData.
@@ -2533,6 +2719,8 @@ impl Connection {
 		space.crypto = None;
 		space.time_of_last_ack_eliciting_packet = None;
 		space.loss_time = None;
+		// Its probes can never be sent, and one left owed would read as a probe in flight
+		space.loss_probes = 0;
 		let sent_packets = mem::take(&mut space.sent_packets);
 		for packet in sent_packets.into_values() {
 			self.remove_in_flight(&packet);
@@ -2572,6 +2760,16 @@ impl Connection {
 		ecn: Option<EcnCodepoint>,
 		partial_decode: PartialDecode,
 	) {
+		// A server's Handshake or 1-RTT packet before its ServerHello means an Initial of its was
+		// lost
+		if self.side.is_client()
+			&& self.state.is_handshake()
+			&& remote == self.path.remote
+			&& matches!(partial_decode.space(), Some(SpaceId::Handshake | SpaceId::Data))
+			&& self.spaces[SpaceId::Handshake].crypto.is_none()
+		{
+			self.recover_crypto_early(now, Missing::Theirs);
+		}
 		if let Some(decoded) =
 			packet_crypto::unprotect_header(partial_decode, &self.spaces, self.peer_params.stateless_reset_token)
 		{
@@ -2658,6 +2856,11 @@ impl Connection {
 						&& self.early_1rtt.len() < MAX_EARLY_1RTT_PACKETS
 					{
 						trace!("buffering short packet during handshake");
+						// The client sent this after its Finished, which we lack, so it already
+						// holds our whole flight
+						if self.side.is_server() {
+							self.recover_crypto_early(now, Missing::Theirs);
+						}
 						self.early_1rtt.push(EarlyPacket {
 							remote,
 							ecn,
@@ -3028,6 +3231,8 @@ impl Connection {
 	/// Process an Initial or Handshake packet payload
 	fn process_early_payload(&mut self, now: Instant, packet: Packet) -> Result<(), TransportError> {
 		debug_assert_ne!(packet.header.space(), SpaceId::Data);
+		let space = packet.header.space();
+		let read = self.spaces[space].crypto_stream.bytes_read();
 		let payload_len = packet.payload.len();
 		let mut ack_eliciting = false;
 		for result in frame::Iter::new(packet.payload.freeze())? {
@@ -3069,9 +3274,12 @@ impl Connection {
 
 		if ack_eliciting {
 			// In the initial and handshake spaces, ACKs must be sent immediately
-			self.spaces[packet.header.space()]
-				.pending_acks
-				.set_immediate_ack_required();
+			self.spaces[space].pending_acks.set_immediate_ack_required();
+			// A peer probing without moving its handshake forward, by repeating its CRYPTO or
+			// with a PING, is missing some of ours (RFC 9002 §6.2.3)
+			if self.spaces[space].crypto_stream.bytes_read() == read {
+				self.recover_crypto_early(now, Missing::Ours);
+			}
 		}
 
 		self.write_crypto();
@@ -3153,7 +3361,7 @@ impl Connection {
 					close = Some(reason);
 				}
 				Frame::PathChallenge(token) => {
-					self.path_responses.push(number, token, remote);
+					self.path_responses.push(number, token, remote, self.path.remote);
 					if remote == self.path.remote {
 						// PATH_CHALLENGE on active path, possible off-path packet forwarding
 						// attack. Send a non-probing packet to recover the active path.
@@ -3164,15 +3372,24 @@ impl Connection {
 					}
 				}
 				Frame::PathResponse(token) => {
-					if self.path.challenge.is_some_and(|challenge| challenge.token == token)
+					if let Some(challenge) = self.path.challenge.filter(|challenge| challenge.token == token)
 						&& remote == self.path.remote
 					{
-						trace!("new path validated");
-						self.timers.stop(Timer::PathValidation);
-						self.path.challenge = None;
 						self.path.validated = true;
 						if let Some((_, prev_path)) = &mut self.prev_path {
 							prev_path.challenge = None;
+						}
+						if challenge.short {
+							// RFC 9000 §8.2.1: the address is validated, but the path is not yet shown
+							// to carry `min_mtu`, so validate it again at full size.
+							trace!("path validated through a short datagram, challenging again");
+							self.path.challenge = Some(Challenge::new(self.rng.random()));
+							self.timers
+								.set(Timer::PathValidation, now.saturating_add(3 * self.pto(SpaceId::Data)));
+						} else {
+							trace!("new path validated");
+							self.timers.stop(Timer::PathValidation);
+							self.path.challenge = None;
 						}
 					} else {
 						debug!(token, "ignoring invalid PATH_RESPONSE");
@@ -3254,17 +3471,18 @@ impl Connection {
 						));
 					}
 
-					use crate::cid_queue::InsertError;
-					match self.rem_cids.insert(frame) {
-						Ok(None) => {}
-						Ok(Some((retired, reset_token))) => {
+					use crate::cid_queue::Inserted;
+					let inserted = self
+						.rem_cids
+						.insert(frame)
+						.map_err(|_| TransportError::CONNECTION_ID_LIMIT_ERROR(""))?;
+					match inserted {
+						Inserted::Queued => {}
+						Inserted::Advanced { retired, reset_token } => {
 							self.spaces[SpaceId::Data].pending.retire_cids(retired)?;
 							self.set_reset_token(reset_token);
 						}
-						Err(InsertError::ExceedsLimit) => {
-							return Err(TransportError::CONNECTION_ID_LIMIT_ERROR(""));
-						}
-						Err(InsertError::Retired) => {
+						Inserted::Stale => {
 							trace!("discarding already-retired");
 							// RETIRE_CONNECTION_ID might not have been previously sent if e.g. a
 							// range of connection IDs larger than the active connection ID limit
@@ -3276,10 +3494,15 @@ impl Connection {
 						}
 					};
 
-					if self.side.is_server() && self.rem_cids.active_seq() == 0 {
-						// We're a server still using the initial remote CID for the client, so
-						// let's switch immediately to enable clientside stateless resets.
-						self.update_rem_cid();
+					// A server still on the client's initial CID switches at once, to enable
+					// client-side stateless resets, but only to sequence 1: jumping to a later
+					// one would retire the CIDs before it, still in flight, without using them.
+					if self.side.is_server()
+						&& self.rem_cids.active_seq() == 0
+						&& let Some((reset_token, retired)) = self.rem_cids.next_in_order()
+					{
+						self.spaces[SpaceId::Data].pending.retire_cids.extend(retired);
+						self.set_reset_token(reset_token);
 					}
 				}
 				Frame::NewToken(NewToken { token }) => {
@@ -3417,10 +3640,12 @@ impl Connection {
 				&self.config,
 			)
 		};
-		new_path.congestion.on_probe_target(self.bandwidth_probe.target());
+		bandwidth_probe::report_target(&mut *new_path.congestion, self.bandwidth_probe.target());
 		new_path.challenge = Some(Challenge::new(self.rng.random()));
 		let prev_pto = self.pto(SpaceId::Data);
 
+		// The old path's congestion wait ends with it.
+		self.observe_congestion(now, true);
 		let mut prev = mem::replace(&mut self.path, new_path);
 		self.datagrams().drop_oversized();
 
@@ -3486,10 +3711,10 @@ impl Connection {
 		now: Instant,
 		space_id: SpaceId,
 		buf: &mut Vec<u8>,
-		max_size: usize,
-		pn: u64,
+		builder: &PacketBuilder,
 		bandwidth_probe: bool,
 	) -> SentFrames {
+		let (max_size, pn) = (builder.max_size, builder.exact_number);
 		let mut sent = SentFrames::default();
 		let space = &mut self.spaces[space_id];
 		space.pending_acks.maybe_ack_non_eliciting();
@@ -3568,6 +3793,13 @@ impl Connection {
 			);
 		}
 
+		// A packet planned as ACK-only skipped the congestion window, so it must stay that way
+		// (RFC 9002 §7): a frame that rides along, such as the challenge an unvalidated path
+		// repeats, waits for a packet the window let through.
+		if !builder.ack_eliciting {
+			return sent;
+		}
+
 		// PATH_CHALLENGE
 		if buf.len() + 9 < max_size && space_id == SpaceId::Data {
 			// Transmit challenges with every outgoing frame on an unvalidated path
@@ -3577,6 +3809,7 @@ impl Connection {
 				let token = challenge.token;
 				sent.non_retransmits = true;
 				sent.requires_padding = true;
+				sent.path_challenge = true;
 				trace!("PATH_CHALLENGE {:08x}", token);
 				buf.write(frame::FrameType::PATH_CHALLENGE);
 				buf.write(token);
@@ -3584,8 +3817,8 @@ impl Connection {
 			}
 		}
 
-		// PATH_RESPONSE
-		if buf.len() + 9 < max_size
+		// PATH_RESPONSE, one for each challenge received on this path
+		while buf.len() + 9 < max_size
 			&& space_id == SpaceId::Data
 			&& let Some(token) = self.path_responses.pop_on_path(self.path.remote)
 		{
@@ -4017,6 +4250,18 @@ impl Connection {
 		self.path.remove_in_flight(&packet);
 	}
 
+	/// What a test's observer reads to check that bytes in flight stay within the congestion
+	/// window
+	#[cfg(test)]
+	pub(crate) fn window_state(&self) -> WindowState {
+		WindowState {
+			window: self.path.congestion.window(),
+			in_flight: self.path.in_flight.bytes,
+			probing: SpaceId::iter().any(|space| self.spaces[space].loss_probes > 0),
+			probes: self.stats.path.sent_plpmtud_probes + self.stats.path.sent_bandwidth_probes,
+		}
+	}
+
 	/// Number of bytes worth of non-ack-only packets that may be sent
 	#[cfg(test)]
 	pub(crate) fn congestion_window(&self) -> u64 {
@@ -4086,6 +4331,7 @@ impl Connection {
 	/// See also `self.space(SpaceId::Data).can_send()`
 	fn can_send_1rtt(&self, max_size: usize) -> bool {
 		self.streams.can_send_frames(max_size)
+			|| self.streams.owes_streams_blocked()
 			|| self.path.challenge.is_some_and(|challenge| challenge.pending)
 			|| self
 				.prev_path
@@ -4182,6 +4428,15 @@ impl fmt::Debug for Connection {
 			.field("handshake_cid", &self.handshake_cid)
 			.finish()
 	}
+}
+
+/// What the congestion controller held data back on
+#[derive(Debug, Clone, Copy)]
+enum CongestionLimit {
+	/// The congestion window had no room for another datagram
+	Window,
+	/// The pacer holds the next send until then
+	Pacing { until: Instant },
 }
 
 /// Fields of `Connection` specific to it being client-side or server-side
@@ -4409,6 +4664,13 @@ impl State {
 	fn is_drained(&self) -> bool {
 		matches!(*self, Self::Drained)
 	}
+
+	fn owes_close(&self) -> bool {
+		match self {
+			Self::Closed(state::Closed { send_close, .. }) | Self::Draining { send_close } => *send_close,
+			Self::Handshake(_) | Self::Established | Self::Drained => false,
+		}
+	}
 }
 
 mod state {
@@ -4439,6 +4701,15 @@ mod state {
 	}
 }
 
+/// Whose handshake CRYPTO a peer's packet showed is missing
+#[derive(Debug, Clone, Copy)]
+enum Missing {
+	/// Ours: the peer probed without moving its handshake forward
+	Ours,
+	/// The peer's: it sent what follows CRYPTO we never got
+	Theirs,
+}
+
 fn get_max_ack_delay(params: &TransportParameters) -> Duration {
 	Duration::from_micros(params.max_ack_delay.0 * 1000)
 }
@@ -4457,6 +4728,18 @@ struct EarlyPacket {
 	packet: Packet,
 }
 
+/// A connection's congestion window as a test's observer sees it
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct WindowState {
+	pub(crate) window: u64,
+	pub(crate) in_flight: u64,
+	/// Whether a loss probe is owed, which may cross the window
+	pub(crate) probing: bool,
+	/// The MTU and bandwidth probes sent so far, which the window does not bound
+	pub(crate) probes: u64,
+}
+
 /// Minimal remaining size to allow packet coalescing, excluding cryptographic tag
 ///
 /// This must be at least as large as the header for a well-formed empty packet to be coalesced,
@@ -4465,6 +4748,20 @@ struct EarlyPacket {
 /// datagram (because we coalesce in ascending packet space order and the only reason to split a
 /// packet is when packet space changes).
 const MIN_PACKET_SPACE: usize = MAX_HANDSHAKE_HEADER_SIZE + 32;
+
+/// [`MIN_PACKET_SPACE`] for a 1-RTT packet starting its own datagram, whose short header leaves
+/// the same room for frames
+///
+/// An unvalidated path's datagram may be this small, as one answering a migrated peer's PING.
+const MIN_SHORT_PACKET_SPACE: usize = 1 + MAX_CID_SIZE + 4 + 32;
+
+/// The least room a packet in `space` needs, excluding its tag
+fn min_packet_space(space: SpaceId) -> usize {
+	match space {
+		SpaceId::Data => MIN_SHORT_PACKET_SPACE,
+		SpaceId::Initial | SpaceId::Handshake => MIN_PACKET_SPACE,
+	}
+}
 
 /// Largest amount of space that could be occupied by a Handshake packet's header
 ///
@@ -4489,6 +4786,8 @@ struct SentFrames {
 	/// Whether the packet contains non-retransmittable frames (like datagrams)
 	non_retransmits: bool,
 	requires_padding: bool,
+	/// Whether the packet carries the current path's PATH_CHALLENGE
+	path_challenge: bool,
 }
 
 impl SentFrames {

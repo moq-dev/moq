@@ -13,8 +13,8 @@ fn main() -> anyhow::Result<()> {
 	// Create claims for the token.
 	let claims = moq_auth::Claims::default()
 		.with_root("demo")
-		.with_publish(["my-stream/**".parse()?]) // Can publish to demo/my-stream and below
-		.with_subscribe(["**".parse()?]) // Can subscribe to anything under demo/
+		.with_publish(["my-stream".parse()?]) // Can publish to demo/my-stream and below
+		.with_subscribe([moq_auth::Prefix::all()]) // Can subscribe to anything under demo/
 		.with_expires(kio::clock::wall() + Duration::from_secs(3600))
 		.with_issued(kio::clock::wall());
 

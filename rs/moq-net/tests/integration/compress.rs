@@ -6,6 +6,7 @@
 //! signal compression receive the plain frames the relay inflates once for all of them.
 
 use crate::support;
+use support::AppendNext;
 
 use std::time::Duration;
 
@@ -30,10 +31,11 @@ fn compressed() -> moq_net::track::Info {
 }
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// A repetitive payload, which DEFLATE shrinks, distinct per frame.
@@ -124,13 +126,18 @@ async fn relay(published: Published, hops: [&str; 2], subscription: moq_net::tra
 }
 
 /// Hops that carry a start group and negotiate compression: lite-07 and moq-transport.
-const RANGED: &[&str] = &["moq-lite-07-wip", "moq-transport-18", "moq-transport-22"];
+const RANGED: &[&str] = &[
+	"moq-lite-07-wip",
+	"moq-transport-18",
+	"moq-transport-22",
+	"moq-transport-23",
+];
 
 /// A subscription starting at a group delivers it whole from its first frame across every
 /// pair of hops, compressed or not, whether the group began before it subscribed or after.
 #[kio::test]
 async fn a_start_group_arrives_whole() {
-	use moq_net::track::{Anchor, Subscription};
+	use moq_net::track::Subscription;
 	let write = |group: &mut moq_net::group::Producer, frames: std::ops::Range<u64>| {
 		for index in frames {
 			group
@@ -153,23 +160,25 @@ async fn a_start_group_arrives_whole() {
 							false => moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 						};
 						let published = publish(info);
-						let mut group = published
-							.track
-							.create_group(moq_net::group::Info { sequence: 5 })
-							.unwrap();
+						let mut group = published.track.create_group(moq_net::group::Info { start: 5 }).unwrap();
 						write(&mut group, 0..head);
-						let mut fixture = relay(published, hops, Subscription::default().with_range(5..)).await;
+						let mut fixture = relay(
+							published,
+							hops,
+							Subscription::default().with_ranges([support::keys(5..)]),
+						)
+						.await;
 						if lite {
 							assert_eq!(
 								fixture.track.subscription_changed().await.unwrap().unwrap().ranges[0].start,
-								Anchor::Absolute(5),
+								moq_net::track::Start::Time(5),
 								"{case}: upstream asks for the start group"
 							);
 						}
 						write(&mut group, head..5);
 						group.finish().unwrap();
 						let mut reading = fixture.subscriber.recv_group().await.unwrap().unwrap();
-						assert_eq!(reading.sequence, 5, "{case}");
+						assert_eq!(reading.start, 5, "{case}");
 						for index in 0..5 {
 							assert_eq!(
 								reading.read_frame().await.unwrap().unwrap().payload,
@@ -200,7 +209,7 @@ async fn relay_serves_every_version() {
 				"{version}: compression declared"
 			);
 
-			let mut group = fixture.track.append_group().unwrap();
+			let mut group = fixture.track.append_next().unwrap();
 			group
 				.write_frame(Timestamp::from_millis(0).unwrap(), payload(0))
 				.unwrap();
@@ -212,7 +221,7 @@ async fn relay_serves_every_version() {
 			let mut frame = group
 				.create_frame(moq_net::frame::Info {
 					size: chunked.len() as u64,
-					timestamp: Some(Timestamp::from_millis(2).unwrap()),
+					timestamp: Timestamp::from_millis(2).unwrap(),
 				})
 				.unwrap();
 			for chunk in chunked.chunks(100) {
@@ -240,15 +249,15 @@ async fn relay_serves_every_version() {
 /// Negotiated IETF ingress stays compressed across a relay to IETF or lite-07 egress.
 #[kio::test]
 async fn ietf_ingress_stays_compressed_across_protocols() {
-	for upstream in ["moq-transport-18", "moq-transport-22"] {
-		for downstream in ["moq-lite-07-wip", "moq-transport-22"] {
+	for upstream in ["moq-transport-18", "moq-transport-22", "moq-transport-23"] {
+		for downstream in ["moq-lite-07-wip", "moq-transport-22", "moq-transport-23"] {
 			kio::clock::timeout(TIMEOUT, async {
 				let mut fixture = connect(upstream, downstream).await;
 				assert!(
 					fixture.subscriber.info().compression == moq_net::track::Compression::Deflate,
 					"{upstream} -> {downstream}"
 				);
-				let mut group = fixture.track.append_group().unwrap();
+				let mut group = fixture.track.append_next().unwrap();
 				for index in 0..3 {
 					group
 						.write_frame(Timestamp::from_millis(index).unwrap(), payload(index))
@@ -273,14 +282,14 @@ async fn ietf_ingress_stays_compressed_across_protocols() {
 /// A finished compressed track remains fetchable without subscribing to its live feed.
 #[kio::test]
 async fn ietf_fetch_keeps_the_stored_form() {
-	for version in ["moq-transport-18", "moq-transport-22"] {
+	for version in ["moq-transport-18", "moq-transport-22", "moq-transport-23"] {
 		kio::clock::timeout(TIMEOUT, async {
 			let publisher = produce_origin(1);
 			let broadcast = publisher
 				.route("bcast", moq_net::origin::RouteOptions::hidden())
 				.unwrap();
 			let track = broadcast.broadcast().create_track("data", compressed()).unwrap();
-			let mut group = track.append_group().unwrap();
+			let mut group = track.append_next().unwrap();
 			for index in 0..3 {
 				group
 					.write_frame(Timestamp::from_millis(index).unwrap(), payload(index))

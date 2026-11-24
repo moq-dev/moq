@@ -8,7 +8,7 @@
 	"scripts": {
 		"dev": "vite --open",
 		"build": "vite build",
-		"check": "tsc --noEmit",
+		"check": "bun check --no-script",
 		"test": "bun test --only-failures"
 	},
 	"dependencies": {
@@ -17,14 +17,14 @@
 		"@moq/net": "workspace:^",
 		"@moq/signals": "workspace:^",
 		"@moq/watch": "workspace:^",
-		"solid-js": "^1.9.18",
+		"solid-js": "^1.9.19",
 		"zod": "^4.6.7"
 	},
 	"devDependencies": {
+		"@moq/common": "workspace:*",
 		"@types/bun": "^1.4.4",
-		"rolldown": "^1.2.16",
 		"typescript": "7.0.2",
-		"vite": "^8.3.5",
-		"vite-plugin-solid": "^2.11.15"
+		"vite": "^8.3.8",
+		"vite-plugin-solid": "^2.11.16"
 	}
 }

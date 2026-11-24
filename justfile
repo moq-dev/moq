@@ -34,6 +34,7 @@ mod carla 'demo/carla'
 mod pub 'demo/pub'
 mod relay 'demo/relay'
 mod sub 'demo/sub'
+mod vr 'demo/vr'
 mod web 'demo/web'
 
 # Run the demo by default.
@@ -104,6 +105,7 @@ install:
 # lint for cfgs hidden by the device features (see sh/rs/select.sh).
 
 # Lint, compile, and test what the branch changed since BASE, plus its dependents.
+# A Rust phase that already passed here on the same inputs is skipped; CHECK_RERUN=1 runs it.
 check $BASE="":
     sh/dispatch.sh check "$BASE"
 

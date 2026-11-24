@@ -17,7 +17,7 @@ use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError};
 use std::time::Duration;
 
 use super::observe::{self, Ledger};
-#[cfg(feature = "aec")]
+#[cfg(all(feature = "capture", feature = "playback"))]
 use crate::resample::Remix;
 use crate::ring::{self, Read};
 use crate::{Error, Layout};
@@ -32,7 +32,7 @@ const RAMP: f32 = 0.003;
 
 /// The echo reference is the mix downmixed to stereo, whatever layout the
 /// device plays, so the canceller's model survives a device switch.
-#[cfg(feature = "aec")]
+#[cfg(all(feature = "capture", feature = "playback"))]
 pub(crate) const REFERENCE_CHANNELS: usize = 2;
 
 /// Sinks one device will mix. The entry list is allocated to this up front and
@@ -110,7 +110,7 @@ pub(super) enum Command {
 	/// device.
 	Remove { id: u64 },
 	/// Copy the mix into an echo-cancellation reference, or stop with `None`.
-	#[cfg(feature = "aec")]
+	#[cfg(all(feature = "capture", feature = "playback"))]
 	Reference(Option<ring::Producer>),
 }
 
@@ -146,7 +146,7 @@ pub(super) enum Retired {
 	/// A sink that was removed or rebuilt.
 	Sink(Entry),
 	/// The echo reference a canceller replaced or gave up.
-	#[cfg(feature = "aec")]
+	#[cfg(all(feature = "capture", feature = "playback"))]
 	Reference(ring::Producer),
 }
 
@@ -170,16 +170,18 @@ pub(super) struct Mixer {
 	scratch: Vec<f32>,
 	/// Counts what the mix played, for an [`Observer`](super::Observer).
 	ledger: Ledger,
+	/// Frames the device delays a read by before it sounds, as last reported.
+	heard: usize,
 	/// Where echo cancellation reads what was played. Fed the clipped mix, since
 	/// that is the signal the speaker gets and therefore the one the microphone
 	/// hears back.
-	#[cfg(feature = "aec")]
+	#[cfg(all(feature = "capture", feature = "playback"))]
 	reference: Option<ring::Producer>,
 	/// Downmixes the bus to the reference's stereo.
-	#[cfg(feature = "aec")]
+	#[cfg(all(feature = "capture", feature = "playback"))]
 	downmix: Remix,
 	/// Stereo scratch for the downmixed reference.
-	#[cfg(feature = "aec")]
+	#[cfg(all(feature = "capture", feature = "playback"))]
 	stereo: Vec<f32>,
 }
 
@@ -212,11 +214,12 @@ impl Mixer {
 			bus: vec![0.0; CHUNK * channels],
 			scratch: vec![0.0; CHUNK * channels],
 			ledger: Ledger::new(observe, rate),
-			#[cfg(feature = "aec")]
+			heard: 0,
+			#[cfg(all(feature = "capture", feature = "playback"))]
 			reference: None,
-			#[cfg(feature = "aec")]
+			#[cfg(all(feature = "capture", feature = "playback"))]
 			downmix: Remix::new(layout, Layout::Stereo)?,
-			#[cfg(feature = "aec")]
+			#[cfg(all(feature = "capture", feature = "playback"))]
 			stereo: vec![0.0; CHUNK * REFERENCE_CHANNELS],
 		})
 	}
@@ -245,9 +248,11 @@ impl Mixer {
 		}
 	}
 
-	/// Report the host's latency for the buffer about to be filled.
-	pub(super) fn latency(&self, latency: Option<Duration>) {
-		self.ledger.latency(latency);
+	/// Report the host's latency for the buffer of `frames` about to be filled:
+	/// how long after its read its first frame sounds.
+	pub(super) fn latency(&mut self, latency: Option<Duration>, frames: usize) {
+		self.ledger.latency(latency, frames);
+		self.heard = latency.map_or(0, |latency| (latency.as_secs_f64() * self.rate as f64).round() as usize);
 	}
 
 	/// Fill one device buffer, interleaved at the device's channel count and in
@@ -302,7 +307,7 @@ impl Mixer {
 						self.retire(Retired::Sink(entry));
 					}
 				}
-				#[cfg(feature = "aec")]
+				#[cfg(all(feature = "capture", feature = "playback"))]
 				Ok(Command::Reference(reference)) => {
 					// The old tap owns a heap ring, so it leaves the same way a
 					// removed sink does rather than being freed here.
@@ -323,11 +328,12 @@ impl Mixer {
 			bus,
 			scratch,
 			ledger,
-			#[cfg(feature = "aec")]
+			heard,
+			#[cfg(all(feature = "capture", feature = "playback"))]
 			reference,
-			#[cfg(feature = "aec")]
+			#[cfg(all(feature = "capture", feature = "playback"))]
 			downmix,
-			#[cfg(feature = "aec")]
+			#[cfg(all(feature = "capture", feature = "playback"))]
 			stereo,
 			..
 		} = self;
@@ -363,6 +369,7 @@ impl Mixer {
 				// stays on the timeline instead of queueing up and jumping when
 				// it unmutes. The status only reports under/overflow, which the
 				// channel has already corrected for.
+				entry.cons.heard(*heard);
 				let status = entry.cons.read_at(&mut scratch[..samples], now, total - done);
 				if !matches!(status, Read::NotReady | Read::Underflow { frames: 0 }) {
 					entry.played_at = played_at;
@@ -429,7 +436,7 @@ impl Mixer {
 			// Tap the mix on its way out. Overflow means the microphone stopped
 			// draining, which the canceller notices on its own; there is nothing
 			// useful to do about it from here and nothing may be logged.
-			#[cfg(feature = "aec")]
+			#[cfg(all(feature = "capture", feature = "playback"))]
 			if let Some(reference) = reference.as_mut() {
 				let stereo = &mut stereo[..frames * REFERENCE_CHANNELS];
 				downmix.apply(&bus[..samples], stereo);
@@ -501,6 +508,11 @@ mod tests {
 		/// The channel runs at the device rate so no resampling sits between the
 		/// pushed samples and the assertions.
 		fn add(&mut self, gain: Arc<Gain>) -> (u64, ring::Producer) {
+			self.add_corrected(gain, ring::Correction::Fixed { pad: true, trim: true })
+		}
+
+		/// [`add`](Self::add) a sink corrected as `correction` says.
+		fn add_corrected(&mut self, gain: Arc<Gain>, correction: ring::Correction) -> (u64, ring::Producer) {
 			let (prod, cons) = ring::channel(
 				self.channels,
 				RATE,
@@ -508,8 +520,7 @@ mod tests {
 				ring::Config {
 					latency: Duration::from_millis(10),
 					capacity: Duration::from_secs(1),
-					pad: true,
-					trim: true,
+					correction,
 					comfort: true,
 				},
 			);
@@ -562,14 +573,16 @@ mod tests {
 			for sinks in [1, 8, 32, MAX_SINKS] {
 				for frames in [128, 480, 1024, 2048] {
 					let mut harness = Harness::with_depth(Layout::Stereo, MAX_SINKS);
-					let mut prods: Vec<_> = (0..sinks).map(|_| harness.add(Arc::new(Gain::new())).1).collect();
+					let correction = if stretch {
+						ring::Correction::Stretch
+					} else {
+						ring::Correction::Fixed { pad: true, trim: true }
+					};
+					let mut prods: Vec<_> = (0..sinks)
+						.map(|_| harness.add_corrected(Arc::new(Gain::new()), correction).1)
+						.collect();
 					let mut out = vec![0.0; frames * STEREO];
 					harness.fill(&mut out);
-					if stretch {
-						for entry in &mut harness.mixer.entries {
-							entry.cons.stretch(RATE);
-						}
-					}
 					let pcm = vec![0.25 / sinks as f32; frames * STEREO];
 					for prod in &mut prods {
 						prod.push(&vec![0.25 / sinks as f32; 4800 * STEREO]);
@@ -604,19 +617,17 @@ mod tests {
 	#[test]
 	fn each_chunk_of_a_callback_reads_the_clock_where_it_starts() {
 		let mut harness = Harness::new(Layout::Stereo);
-		let (mut prod, mut cons) = ring::channel(
+		let (mut prod, cons) = ring::channel(
 			STEREO,
 			RATE,
 			RATE,
 			ring::Config {
 				latency: Duration::from_millis(10),
 				capacity: Duration::from_secs(2),
-				pad: false,
-				trim: false,
+				correction: ring::Correction::Stretch,
 				comfort: true,
 			},
 		);
-		cons.stretch(RATE);
 		harness
 			.commands
 			.send(Command::Add {
@@ -641,7 +652,7 @@ mod tests {
 		// goes, so none of them restarts the clock.
 		let callback = 4 * CHUNK;
 		let mut now = start + Duration::from_millis(10);
-		prod.due(now + prod.buffered(), Duration::from_secs(2), Duration::ZERO);
+		prod.due(now + prod.buffered(), Duration::from_secs(2));
 
 		let period = Duration::from_secs_f64(callback as f64 / RATE as f64);
 		let mut out = vec![0i16; callback * STEREO];
@@ -813,14 +824,14 @@ mod tests {
 			.expect("the removed sink was dropped in the callback");
 		match retired {
 			Retired::Sink(entry) => assert_eq!(entry.id, id),
-			#[cfg(feature = "aec")]
+			#[cfg(all(feature = "capture", feature = "playback"))]
 			Retired::Reference(_) => panic!("the mixer retired the echo reference instead"),
 		}
 	}
 
 	/// Echo cancellation reads what the speaker was given, so the tap has to see
 	/// the summed and clipped mix rather than any one sink.
-	#[cfg(feature = "aec")]
+	#[cfg(all(feature = "capture", feature = "playback"))]
 	#[test]
 	fn the_echo_reference_gets_the_mix() {
 		let mut harness = Harness::new(Layout::Stereo);
@@ -855,7 +866,7 @@ mod tests {
 
 	/// The tap owns a heap ring, so replacing or clearing it must leave by the
 	/// same route a removed sink does.
-	#[cfg(feature = "aec")]
+	#[cfg(all(feature = "capture", feature = "playback"))]
 	#[test]
 	fn a_replaced_echo_reference_is_handed_back() {
 		let mut harness = Harness::new(Layout::Stereo);
@@ -888,7 +899,7 @@ mod tests {
 
 	/// A tap running at the device rate, so the assertions see the mix untouched
 	/// by resampling.
-	#[cfg(feature = "aec")]
+	#[cfg(all(feature = "capture", feature = "playback"))]
 	fn reference_channel() -> (ring::Producer, ring::Consumer) {
 		ring::channel(
 			REFERENCE_CHANNELS,
@@ -897,8 +908,7 @@ mod tests {
 			ring::Config {
 				latency: Duration::from_millis(20),
 				capacity: Duration::from_millis(200),
-				pad: true,
-				trim: true,
+				correction: ring::Correction::Fixed { pad: true, trim: true },
 				comfort: true,
 			},
 		)
@@ -951,7 +961,7 @@ mod tests {
 
 	/// The canceller models a stereo reference whatever the device plays, so a
 	/// surround bus reaches it downmixed rather than cut to its front pair.
-	#[cfg(feature = "aec")]
+	#[cfg(all(feature = "capture", feature = "playback"))]
 	#[test]
 	fn the_echo_reference_downmixes_a_surround_bus() {
 		let mut harness = Harness::new(Layout::FivePointOne);
@@ -1008,7 +1018,7 @@ mod tests {
 		let (_, mut prod) = harness.add(Arc::new(Gain::new()));
 		harness.fill(&mut out[..STEREO]);
 		push(&mut prod, 0.5, 960);
-		prod.end();
+		prod.silence();
 		// The opening silence, the 960 pushed, then comfort noise.
 		harness.fill(&mut out);
 

@@ -24,7 +24,7 @@ The image is the package's nix closure on `scratch`, so it has no shell.
 
 ## Usage
 
-`moq-cli` routes endpoints onto a shared MoQ Origin: `moq <MoQ side> <import|export> <endpoint>`. The MoQ side (before the verb) dials with `--connect <url>`, self-hosts QUIC/WebTransport with `--listen <addr>`, or self-hosts raw qmux with `--listen-tcp-bind <addr>` / `--listen-unix-bind <path>` (Unix only). `import` moves media into MoQ, `export` moves it out. The endpoint is a container format (`fmp4`, `ts`, `flv`, ... read from stdin / written to stdout), or a gateway (`hls`, `rtmp`, `srt`, `rtc`, `archive`). A build with the `play` feature can also render a broadcast locally with `moq <MoQ side> play`.
+`moq-cli` routes endpoints onto a shared MoQ Origin: `moq <MoQ side> <import|export> <endpoint>`. The MoQ side (before the verb) dials with `--connect <url>`, self-hosts QUIC/WebTransport with `--listen <addr>`, or self-hosts raw qmux with `--listen-tcp-bind <addr>` / `--listen-unix-bind <path>` (Unix only). `import` moves media into MoQ, `export` moves it out. The endpoint is a container format (`fmp4`, `ts`, `flv`, ... read from stdin / written to stdout), or a gateway (`hls`, `rtmp`, `srt`, `webrtc`, `archive`). A build with the `play` feature can also render a broadcast locally with `moq <MoQ side> play`.
 
 Separate additional stages with `--` to bridge several broadcasts (or both directions) over one connection, each naming its own `--broadcast`:
 
@@ -60,7 +60,7 @@ Hosts a MoQ server and publishes a single broadcast read from stdin into it. Use
 
 ```bash
 ffmpeg -i input.mp4 -c copy -f mpegts -pes_payload_size 0 -muxdelay 0 - | \
-    moq --listen '[::]:4443' --listen-tls-generate localhost --auth-public '**' --broadcast my-stream.hang import ts
+    moq --listen '[::]:4443' --listen-tls-generate localhost --auth-public '' --broadcast my-stream.hang import ts
 ```
 
 ### Self-host: subscribe to an inbound broadcast
@@ -68,10 +68,10 @@ ffmpeg -i input.mp4 -c copy -f mpegts -pes_payload_size 0 -muxdelay 0 - | \
 Hosts a MoQ server and writes an incoming broadcast's media to stdout. The inverse of the above.
 
 ```bash
-moq --listen '[::]:4443' --listen-tls-generate localhost --auth-public '**' --broadcast my-stream.hang export ts | ffplay -
+moq --listen '[::]:4443' --listen-tls-generate localhost --auth-public '' --broadcast my-stream.hang export ts | ffplay -
 ```
 
 ### Import formats
 
-- `avc3` raw H.264 Annex-B from stdin
+- `h264` raw H.264 Annex B elementary stream from stdin
 - `fmp4` fragmented MP4 from stdin

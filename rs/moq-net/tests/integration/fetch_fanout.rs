@@ -6,12 +6,15 @@
 use crate::support;
 use moq_net::{Version, origin, track};
 use std::time::Duration;
+use support::AppendNext;
 use support::harness::{MockConnectOptions, connect_mock};
 
 fn origin(hop: u64) -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (origin, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	origin.with_proxy(true)
+	origin
 }
 
 #[kio::test]
@@ -50,8 +53,8 @@ async fn sequential_viewers_share_the_relays_fetched_groups() {
 			viewers.push((viewer, pair, remote));
 		}
 		for round in 0..3 {
-			let mut group = track.append_group().unwrap();
-			let sequence = group.sequence;
+			let mut group = track.append_next().unwrap();
+			let key = group.start;
 			group
 				.write_frame(
 					moq_net::Timestamp::from_millis(round * 1000).unwrap(),
@@ -60,12 +63,7 @@ async fn sequential_viewers_share_the_relays_fetched_groups() {
 				.unwrap();
 			group.finish().unwrap();
 			for (i, (_, _, remote)) in viewers.iter().enumerate() {
-				let mut group = remote
-					.track("video")
-					.unwrap()
-					.fetch_group(sequence, None)
-					.await
-					.unwrap();
+				let mut group = remote.track("video").unwrap().fetch_group(key, None).await.unwrap();
 				assert_eq!(group.read_frame().await.unwrap().unwrap().payload.as_ref(), b"payload");
 				assert!(group.read_frame().await.unwrap().is_none());
 				// FETCH's lite stream type is 3, and its varint occupies one byte.
@@ -75,7 +73,7 @@ async fn sequential_viewers_share_the_relays_fetched_groups() {
 					.into_iter()
 					.filter(|kind| *kind == 3)
 					.count();
-				assert_eq!(fetches, round as usize + 1, "{version}: viewer {i}, group {sequence}");
+				assert_eq!(fetches, round as usize + 1, "{version}: viewer {i}, group {key}");
 			}
 			kio::clock::sleep(Duration::from_secs(1)).await;
 		}

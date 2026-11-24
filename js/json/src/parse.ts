@@ -39,6 +39,64 @@ function colons(bytes: Uint8Array): number {
 // the recursive merge, diff, clone and schema code never overflows the call stack.
 const MAX_DEPTH = 128;
 
+/**
+ * Serialize a value into JSON that {@link parse} accepts once a frame wraps it in `envelope`
+ * containers, refusing what it would refuse: an unpaired surrogate, or nesting too deep.
+ *
+ * `JSON.stringify` escapes an unpaired surrogate as valid JSON text that still decodes to one, and
+ * never limits nesting, so its output alone would publish frames every reader refuses. Scanning the
+ * text rather than the value sees exactly what `toJSON` and dropped fields leave on the wire.
+ */
+export function stringify(value: unknown, envelope = 0): string {
+	const text: string | undefined = JSON.stringify(value);
+	// A top-level undefined, function, or symbol would otherwise frame as empty bytes.
+	if (text === undefined) throw new TypeError("value is not representable as JSON");
+
+	// `JSON.stringify` keeps a surrogate pair literal and escapes only an unpaired surrogate, as a
+	// lowercase `\ud800` through `\udfff`. Backslashes appear only inside strings, so each such
+	// escape that an odd run of backslashes does not itself escape is one.
+	for (let at = text.indexOf("\\ud"); at !== -1; at = text.indexOf("\\ud", at + 1)) {
+		const high = text.charCodeAt(at + 3);
+		if ((high === 0x38 || high === 0x39 || (high >= 0x61 && high <= 0x66)) && escaped(text, at + 1)) {
+			throw new TypeError("unpaired surrogate in JSON string");
+		}
+	}
+
+	// Each level takes an opening and a closing bracket, so a short text cannot pass the limit.
+	const limit = MAX_DEPTH - 1 - envelope;
+	if (text.length <= 2 * limit) return text;
+
+	let depth = 0;
+	for (let i = 0; i < text.length; i++) {
+		const char = text.charCodeAt(i);
+		if (char === 0x22) {
+			// Step through a short string, which is cheaper than a native search, then search for the
+			// closing quote: the first one no backslash escapes.
+			const short = i + 32;
+			for (i++; i < short && text.charCodeAt(i) !== 0x22; i++) {
+				if (text.charCodeAt(i) === 0x5c) i++;
+			}
+			if (i >= short) {
+				do i = text.indexOf('"', i);
+				while (escaped(text, i++));
+				i--;
+			}
+		} else if (char === 0x5b || char === 0x7b) {
+			if (++depth > limit) throw new TypeError("JSON nested too deeply");
+		} else if (char === 0x5d || char === 0x7d) {
+			depth--;
+		}
+	}
+	return text;
+}
+
+// Whether the character at `at` follows an odd run of backslashes, which escapes it.
+function escaped(text: string, at: number): boolean {
+	let run = 0;
+	while (text.charCodeAt(at - 1 - run) === 0x5c) run++;
+	return run % 2 === 1;
+}
+
 // Count the object members in a parsed value, refusing what Rust's moq-json refuses: nesting
 // `MAX_DEPTH` containers deep, a number outside the double range, and an unpaired surrogate.
 // Iterative so the walk itself cannot overflow the call stack before the depth check fires.

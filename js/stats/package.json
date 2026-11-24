@@ -1,7 +1,7 @@
 {
 	"name": "@moq/stats",
 	"type": "module",
-	"version": "0.1.0",
+	"version": "0.0.1",
 	"description": "Read a MoQ relay's published traffic stats: discover nodes and yield typed frames.",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": {
@@ -15,7 +15,7 @@
 	},
 	"scripts": {
 		"build": "rm -rf dist && tsc -b tsconfig.build.json && bun ../common/package.ts",
-		"check": "tsc --noEmit",
+		"check": "bun check --no-script",
 		"test": "bun test --only-failures",
 		"release": "bun ../common/release.ts"
 	},
@@ -26,6 +26,7 @@
 		"zod": "^4.6.7"
 	},
 	"devDependencies": {
+		"@moq/clock": "workspace:^",
 		"@types/bun": "^1.4.4",
 		"typescript": "7.0.2"
 	}

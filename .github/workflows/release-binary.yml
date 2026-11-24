@@ -53,10 +53,13 @@ jobs:
 
       - uses: ./.github/actions/just
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          targets: ${{ matrix.target }}
+      # Run from the checkout, so rustup installs the toolchain rust-toolchain.toml
+      # pins and adds the target to that one rather than to the image's stable.
+      - name: Add the Rust target
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: rustup target add "$TARGET"
 
       - name: Parse version
         id: parse

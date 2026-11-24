@@ -349,7 +349,9 @@ async fn a_session_arriving_mid_drain_gets_what_is_left_inner() {
 	// then told to leave at once.
 	kio::clock::sleep(DRAIN_TIMEOUT / 2).await;
 	let dialed = kio::clock::now();
-	let arrival = connect(&client, port).await;
+	// Reconnecting, so the GOAWAY that lands with the relay's acceptance leaves the drained
+	// session readable as the predecessor, where a one-shot loop ends on it.
+	let arrival = connect(&client.clone().with_reconnect(true), port).await;
 	let draining = arrival.draining().expect("connected");
 	let goaway = kio::clock::timeout(Duration::from_secs(1), kio::wait(|waiter| draining.poll(waiter)))
 		.await
@@ -545,7 +547,7 @@ async fn connect(client: &moq_tokio::Client, port: u16) -> moq_tokio::Connection
 fn relay_config() -> Config {
 	// Fully public auth: any no-JWT stream client gets the whole root.
 	let mut auth = auth::Config::default();
-	auth.public = vec![moq_auth::Pattern::all()];
+	auth.public = vec![moq_auth::Prefix::all()];
 
 	let mut config = Config::default();
 	config.listen.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));

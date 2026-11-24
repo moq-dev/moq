@@ -31,7 +31,9 @@
 //! `<bucket>/bucket.<epoch>.json` track of [`BucketFrame`]s, one per counter run, carrying the bucket's per-path
 //! [`Traffic`] and per-label [`Presence`], listed through the broadcast's
 //! track listing while the bucket is live; compute and parse names with
-//! [`bucket_track`] and [`parse_bucket_track`]. The full contract (paths,
+//! [`bucket_track`] and [`parse_bucket_track`]. With
+//! [`produce::Config::roots`], each root a session is scoped to also gets its own
+//! view at [`root_prefix`]`/node/<node>`. The full contract (paths,
 //! tracks, and counter semantics) is at
 //! <https://doc.moq.dev/concept/stats>.
 //!
@@ -195,7 +197,7 @@ pub fn prefix_track(path: impl Into<Path>) -> String {
 /// The track name for one counter run of a bucket: `<bucket>/bucket.<epoch>.json`,
 /// or `bucket.<epoch>.json` for the empty bucket.
 ///
-/// Each run has its own name, so no name is ever reused and its MoQ group 0 is
+/// Each run has its own name, so no name is ever reused and its first MoQ group is
 /// where the run's counters start, for every reader and every relay cache. A
 /// reader finds the current run through the broadcast's track listing.
 pub fn bucket_track(bucket: impl Into<Path>, epoch: &Epoch) -> String {
@@ -219,15 +221,28 @@ pub fn parse_bucket_track(name: &str) -> Option<(Path, Epoch)> {
 /// list, whose subscription fails like any unlisted track's.
 #[cfg(test)]
 pub(crate) async fn listed_bucket_track(broadcast: &moq_net::broadcast::Consumer, bucket: &Path) -> String {
-	use moq_net::broadcast::TracksEvent;
+	use moq_net::broadcast::{Kind, Listed, TracksEvent};
 	let mut listed = None;
 	if let Ok(mut tracks) = broadcast.tracks() {
 		while let Ok(Some(event)) = tracks.next().await {
 			match event {
-				TracksEvent::Added { name, .. } if parse_bucket_track(&name).is_some_and(|(b, _)| b == *bucket) => {
+				TracksEvent::Added {
+					name,
+					info: Listed::Track(_),
+					..
+				} if parse_bucket_track(&name).is_some_and(|(b, _)| b == *bucket) => {
 					listed = Some(name.to_string());
 				}
-				TracksEvent::Removed { name } | TracksEvent::Finished { name } if listed.as_deref() == Some(&*name) => {
+				TracksEvent::Removed {
+					kind: Kind::Track,
+					name,
+					..
+				}
+				| TracksEvent::Finished {
+					kind: Kind::Track,
+					name,
+					..
+				} if listed.as_deref() == Some(&*name) => {
 					listed = None;
 				}
 				TracksEvent::Synced => break,
@@ -268,6 +283,22 @@ fn parse_keyed_track(name: &str, kind: &str) -> Option<Path> {
 	// Only a valid key round-trips, so each key has exactly one name.
 	Path::new(key).ok()
 }
+
+/// The prefix a root's own stats publish under: `<prefix>/root/<root>`, with `root`
+/// escaped into one segment so no two roots share a prefix.
+///
+/// A [`Producer`] with [`produce::Config::roots`] publishes each root's view at
+/// `<this>/node/<node>`, and a relay mounts this prefix at `<root>/<prefix>`, so a
+/// session scoped to the root reads its stats at `<prefix>/node/<node>` like the
+/// top-level ones. Fails if the result is not a valid path, such as a root too
+/// long to nest.
+pub fn root_prefix(prefix: &Path, root: &Path) -> std::result::Result<Path, moq_net::path::Error> {
+	let segment = Path::new(&moq_net::path::escape(root.as_str()))?;
+	prefix.join(&Path::from_static(ROOT))?.join(&segment)
+}
+
+/// The category segment root views publish under, beside `node`.
+const ROOT: &str = "root";
 
 /// The node a stats broadcast path names: `<prefix>/node/<node>` yields
 /// `<node>`, and `<prefix>/node` the empty node.

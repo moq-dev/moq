@@ -6,14 +6,17 @@
 //! Frames arrive via [`decode`](Import::decode).
 //!
 //! The codec config comes from exactly one of two places: an avcC handed to
-//! [`initialize`](Import::initialize) (the "avc1" shape), or the SPS the splitter
-//! packages into the first keyframe (the "avc3" shape, scanned out of the frame
-//! here). A keyframe that can't be configured from either is an error;
-//! non-keyframes before the first config are tolerated (mid-stream joins).
+//! [`initialize`](Import::initialize), for length-prefixed frames, or the SPS the
+//! splitter packages into the first Annex-B keyframe (scanned out of the frame
+//! here). The codec string says where the parameter sets live, never the
+//! framing: Annex-B is always avc3, and an avcC is avc3 when its first keyframe
+//! carries a parameter set in band and avc1 otherwise. A keyframe that can't be
+//! configured from either is an error; non-keyframes before the first config are
+//! tolerated (mid-stream joins).
 
 use bytes::Bytes;
 
-use super::{Error, NAL_TYPE_SEI, NAL_TYPE_SPS, Sps};
+use super::{Error, NAL_TYPE_PPS, NAL_TYPE_SEI, NAL_TYPE_SPS, Sps};
 use crate::Result;
 use crate::catalog::hang::CatalogExt;
 use crate::codec::annexb::NalIterator;
@@ -24,8 +27,9 @@ use crate::container::Frame;
 /// Build it with [`new`](Self::new), passing the track producer and the
 /// [`catalog::Reserved`](crate::catalog::Reserved) it reserves its rendition from.
 /// Feed it frames a [`Split`](super::Split) produced via [`decode`](Self::decode).
-/// The catalog rendition fills in lazily once the codec config is known (avcC via
-/// [`initialize`](Self::initialize) for avc1, the first SPS for avc3).
+/// The catalog rendition fills in lazily once the codec config is known (at the
+/// first keyframe after an avcC via [`initialize`](Self::initialize), or the first
+/// Annex-B SPS).
 pub struct Import {
 	/// The NALU length size for the avc1 shape, whose codec config is out-of-band (avcC), so
 	/// keyframes are not scanned for an inline SPS. `None` for Annex-B.
@@ -33,6 +37,9 @@ pub struct Import {
 	track: crate::container::Producer<crate::catalog::hang::Container, hang::catalog::VideoConfig>,
 	catalog: crate::codec::video::Catalog,
 	last_sps: Option<Bytes>,
+	/// The avcC's config, held until the first keyframe says whether the stream also repeats its
+	/// parameter sets in band (avc3) or keeps them in the record only (avc1).
+	pending: Option<hang::catalog::VideoConfig>,
 }
 
 impl Import {
@@ -56,6 +63,7 @@ impl Import {
 			track,
 			catalog,
 			last_sps: None,
+			pending: None,
 		};
 		if let Some(config) = import.catalog.initial_config() {
 			import.apply_config(config)?;
@@ -65,11 +73,12 @@ impl Import {
 
 	/// Resolve the codec config from the codec's leading bytes.
 	///
-	/// - **avc1** (no leading start code): parsed as an `AVCDecoderConfigurationRecord`,
+	/// - **avcC** (no leading start code): parsed as an `AVCDecoderConfigurationRecord`,
 	///   which resolves the config and is stored as the catalog `description`. Required
-	///   for avc1.
-	/// - **avc3** (leading start code): parsed as Annex-B; any SPS resolves the config.
-	///   Optional, since avc3 also self-initializes from the first keyframe.
+	///   for length-prefixed frames. The rendition publishes at the first keyframe, as avc3
+	///   when that keyframe carries a parameter set in band and avc1 otherwise.
+	/// - **Annex-B** (leading start code): any SPS resolves the config, as avc3.
+	///   Optional, since Annex-B also self-initializes from the first keyframe.
 	///
 	/// Takes a read-only slice: the dispatcher-owned [`Split`](super::Split) is what
 	/// consumes the stream (and reads the same avcC for the NALU length size). The
@@ -83,13 +92,12 @@ impl Import {
 	}
 
 	fn initialize_avc1(&mut self, avcc_bytes: &[u8]) -> Result<()> {
-		// Only switch to avc1 mode once the avcC actually parses, so a parse failure leaves the
-		// importer in avc3 mode where inline-SPS keyframes still self-initialize.
+		// Only switch to length-prefixed mode once the avcC actually parses, so a parse failure
+		// leaves the importer in Annex-B mode where inline-SPS keyframes still self-initialize.
 		let config = config_from_avcc(avcc_bytes)?;
-		// A new record starts a new coded sequence, whose HDR metadata the samples will carry.
-		self.catalog.hdr(&mut self.track, Default::default(), true)?;
 		self.length_size = Some(super::Avcc::parse(avcc_bytes)?.length_size);
-		self.apply_config(config)?;
+		// A new record waits for its keyframe; the record already published holds nothing back.
+		self.pending = (self.catalog.description() != Some(avcc_bytes)).then_some(config);
 		Ok(())
 	}
 
@@ -131,16 +139,62 @@ impl Import {
 		self.track.track()
 	}
 
-	/// Finish the track, flushing any buffered data.
-	pub fn finish(&mut self) -> Result<()> {
-		self.track.end_with(None)?;
-		Ok(())
+	/// Finish the track, flushing the current group, and return the [`Finished`](crate::container::Finished)
+	/// track, which keeps it and its catalog rendition published.
+	///
+	/// A record no keyframe followed publishes as it stands. A finish that fails ends the track with
+	/// the cause instead, so it can't be retried.
+	pub fn finish(
+		mut self,
+	) -> crate::Result<crate::container::Finished<crate::catalog::hang::Container, hang::catalog::VideoConfig>> {
+		match self.publish_pending() {
+			Ok(()) => self.track.finish(),
+			Err(err) => {
+				drop(self.track.fail(err.reason()));
+				Err(err)
+			}
+		}
+	}
+
+	/// [`finish`](Self::finish) the track in place, for an owner that keeps this importer.
+	pub(crate) fn finish_in_place(&mut self) -> crate::Result<()> {
+		let published = self.publish_pending();
+		let ended = self.track.end_with(published.as_ref().err().map(crate::Error::reason));
+		published.and(ended)
+	}
+
+	/// End the track unless it already ended, dropping a record no keyframe followed, for an owner
+	/// replacing this importer with a successor.
+	pub(crate) fn end(&mut self) -> crate::Result<()> {
+		self.pending = None;
+		self.track.end()
+	}
+
+	/// Publish a held record as it stands: no keyframe follows to say where the parameter sets live.
+	/// It starts a coded sequence, so the last one's in-band HDR metadata goes first.
+	fn publish_pending(&mut self) -> crate::Result<()> {
+		let Some(config) = self.pending.take() else {
+			return Ok(());
+		};
+		self.catalog.hdr(&mut self.track, Default::default(), true)?;
+		self.apply_config(config)
 	}
 
 	/// Abort the track with `err` instead of finishing it cleanly, so subscribers
 	/// see the real cause rather than [`moq_net::Error::Dropped`]. Consumes this importer.
 	pub fn abort(self, err: moq_net::Error) {
 		self.track.abort(err);
+	}
+
+	/// [`abort`](Self::abort) the track only while nobody wants it, handing the importer back
+	/// unchanged when a reader does; see
+	/// [`Producer::abort_unwanted`](crate::container::Producer::abort_unwanted).
+	#[expect(
+		clippy::result_large_err,
+		reason = "hand the importer back to keep serving without allocating on an idle check"
+	)]
+	pub fn abort_unwanted(self, err: moq_net::Error) -> std::result::Result<(), Self> {
+		self.track.abort_unwanted(err).map_err(|track| Self { track, ..self })
 	}
 
 	/// Cut the current group at `end` without finishing the track.
@@ -177,9 +231,9 @@ impl Import {
 		self.track.report_bitrate(bitrate);
 	}
 
-	/// Close the current group and open the next one at `sequence`.
-	pub fn seek(&mut self, sequence: u64) -> Result<()> {
-		self.track.seek(sequence)?;
+	/// Close the current group and open the next one at `start`.
+	pub fn seek(&mut self, start: u64) -> Result<()> {
+		self.track.seek(start)?;
 		Ok(())
 	}
 
@@ -215,6 +269,11 @@ impl Import {
 	/// keyframe's inline SPS and refining the catalog jitter as it goes.
 	fn write_frames(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
 		for frame in frames {
+			// A delta between a new record and its keyframe decodes against neither, so it never
+			// reaches the open group, whose timestamps it is no part of.
+			if self.pending.is_some() && !frame.keyframe {
+				return Err(crate::container::MissingKeyframe.into());
+			}
 			self.configure(&frame)?;
 
 			if !self.catalog.configured() {
@@ -248,8 +307,14 @@ impl Import {
 		let sps = self.length_size.is_none().then(|| find_sps(&frame.payload)).flatten();
 		// A new SPS starts a coded sequence whose HDR metadata replaces the last one's. It goes
 		// first, so a keyframe that also configures publishes once.
-		let sequence = sps.as_ref().is_some_and(|sps| self.last_sps.as_ref() != Some(sps));
+		// So does a new record, held for this keyframe.
+		let pending = self.pending.take();
+		let sequence = pending.is_some() || sps.as_ref().is_some_and(|sps| self.last_sps.as_ref() != Some(sps));
 		self.catalog.hdr(&mut self.track, hdr, sequence)?;
+		if let Some(mut config) = pending {
+			crate::codec::video::detect_in_band(&mut config, &frame.payload)?;
+			self.apply_config(config)?;
+		}
 		if let Some(sps) = sps {
 			self.configure_from_sps(&sps)?;
 		}
@@ -264,7 +329,7 @@ impl Import {
 }
 
 /// The catalog config a stream's codec bytes describe, resolved without publishing anything: an
-/// `AVCDecoderConfigurationRecord` (the avc1 shape) or Annex-B carrying an inline SPS (avc3).
+/// `AVCDecoderConfigurationRecord` (avc1) or Annex-B carrying an inline SPS (avc3).
 ///
 /// The video counterpart of [`opus::config`](crate::codec::opus::config), for a caller holding the
 /// bytes but no track: a publisher that wants its catalog rendition to say what its encoder really
@@ -316,6 +381,11 @@ fn config_from_sps(sps_nal: &[u8]) -> Result<hang::catalog::VideoConfig> {
 		vui.apply(&mut config);
 	}
 	Ok(config)
+}
+
+/// Whether a NAL unit header names a parameter set (SPS or PPS).
+pub(crate) fn is_parameter_set(header: u8) -> bool {
+	matches!(header & 0x1f, NAL_TYPE_SPS | NAL_TYPE_PPS)
 }
 
 fn is_sps(nal: &[u8]) -> bool {
@@ -522,12 +592,43 @@ mod tests {
 		let color = || catalog.snapshot().video.renditions["video"].color.clone().unwrap();
 		assert!(color().mastering.is_some());
 
-		// The new avcC is a new description, so it publishes a new track.
+		// The new avcC is a new description, so its next keyframe publishes a new track.
 		import.initialize(&avcc(SPS_BT709)).unwrap();
+		import.decode([idr_frame(33)]).unwrap();
 		assert_eq!(import.name(), "video/1");
 		let color = || catalog.snapshot().video.renditions["video/1"].color.clone().unwrap();
 		assert_eq!(color().primaries, Some(1));
 		assert_eq!((color().mastering, color().content_light), (None, None));
+	}
+
+	/// A new avcC that no keyframe follows still starts a new coded sequence when it publishes at
+	/// finish, so the last one's in-band HDR metadata is dropped.
+	#[tokio::test(start_paused = true)]
+	async fn a_record_published_at_finish_drops_stale_hdr_metadata() {
+		use crate::codec::h264::fixtures::{PPS, SEI_CONTENT_LIGHT, SEI_MASTERING, SPS_BT709, SPS_HDR10};
+
+		let avcc = |sps: &'static [u8]| {
+			crate::codec::h264::build_avcc(&[Bytes::from_static(sps)], &[Bytes::from_static(PPS)]).unwrap()
+		};
+		let (track, catalog) = setup("video");
+		let mut import = Import::new(track, catalog.reserve(), Default::default()).unwrap();
+		import.initialize(&avcc(SPS_HDR10)).unwrap();
+		let mut au = Vec::new();
+		for nal in [SEI_MASTERING, SEI_CONTENT_LIGHT, &[0x65, 0x88, 0x84, 0x21][..]] {
+			au.extend_from_slice(&(nal.len() as u32).to_be_bytes());
+			au.extend_from_slice(nal);
+		}
+		let pts = moq_net::Timestamp::from_micros(0).unwrap();
+		import
+			.decode([crate::codec::h264::avc1_frame(au, 4, pts).unwrap()])
+			.unwrap();
+
+		import.initialize(&avcc(SPS_BT709)).unwrap();
+		let _finished = import.finish().unwrap();
+		let snapshot = catalog.snapshot();
+		let color = snapshot.video.renditions["video/1"].color.clone().unwrap();
+		assert_eq!(color.primaries, Some(1));
+		assert_eq!((color.mastering, color.content_light), (None, None));
 	}
 
 	/// Seeding an Annex-B importer with a new SPS starts a new coded sequence, dropping the last
@@ -579,6 +680,7 @@ mod tests {
 		let avcc =
 			crate::codec::h264::build_avcc(&[Bytes::from_static(SPS_BT709)], &[Bytes::from_static(PPS)]).unwrap();
 		import.initialize(&avcc).unwrap();
+		import.decode([idr_frame(0)]).unwrap();
 
 		let color = catalog.snapshot().video.renditions["video"]
 			.color
@@ -666,16 +768,85 @@ mod tests {
 		let buf = bytes::BytesMut::from(avcc.as_slice());
 		import.initialize(&buf).expect("initialize avc1");
 		assert_eq!(buf.len(), avcc.len(), "initialize must not consume the buffer");
+		assert!(
+			catalog.snapshot().video.renditions.is_empty(),
+			"the first keyframe decides where the parameter sets live"
+		);
+		import.decode([idr_frame(0)]).unwrap();
 
 		let snapshot = catalog.snapshot();
 		let cfg = snapshot.video.renditions.get("video").expect("rendition");
 		let hang::catalog::VideoCodec::H264(h264) = &cfg.codec else {
 			panic!("expected H.264 codec")
 		};
-		assert!(!h264.inline, "avc1 source should land as inline=false");
+		assert!(!h264.inline, "parameter sets only in the avcC land as avc1");
 		assert_eq!(h264.profile, 0x42);
 		assert_eq!(h264.level, 0x1f);
 		assert_eq!(cfg.description.as_ref().expect("description").as_ref(), avcc.as_slice());
+	}
+
+	/// A length-prefixed IDR slice at `ms`, carrying no parameter sets.
+	fn idr_frame(ms: u64) -> Frame {
+		let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
+		let mut au = (idr.len() as u32).to_be_bytes().to_vec();
+		au.extend_from_slice(idr);
+		crate::codec::h264::avc1_frame(au, 4, moq_net::Timestamp::from_millis(ms).unwrap()).unwrap()
+	}
+
+	/// An avcC stream whose keyframes carry any parameter set in band lands as avc3, since a keyframe
+	/// may change or supply parameter sets the record would otherwise fix: a PPS alone counts, as for
+	/// a record that omits it. The record still frames the stream.
+	#[tokio::test(start_paused = true)]
+	async fn avcc_with_in_band_parameter_sets_lands_as_avc3() {
+		use crate::codec::h264::fixtures::{PPS, SPS_BT709};
+
+		let full =
+			crate::codec::h264::build_avcc(&[Bytes::from_static(SPS_BT709)], &[Bytes::from_static(PPS)]).unwrap();
+		let sps_only = crate::codec::h264::build_avcc(&[Bytes::from_static(SPS_BT709)], &[]).unwrap();
+		for (avcc, in_band) in [(full, &[SPS_BT709, PPS][..]), (sps_only, &[PPS][..])] {
+			let (track, catalog) = setup("video");
+			let mut import = Import::new(track, catalog.reserve(), Default::default()).unwrap();
+			import.initialize(&avcc).unwrap();
+
+			let mut au = Vec::new();
+			for nal in in_band.iter().chain([&&[0x65, 0x88, 0x84, 0x21][..]]) {
+				au.extend_from_slice(&(nal.len() as u32).to_be_bytes());
+				au.extend_from_slice(nal);
+			}
+			let pts = moq_net::Timestamp::from_micros(0).unwrap();
+			import
+				.decode([crate::codec::h264::avc1_frame(au, 4, pts).unwrap()])
+				.unwrap();
+
+			let snapshot = catalog.snapshot();
+			let cfg = &snapshot.video.renditions["video"];
+			assert_eq!(
+				cfg.codec.to_string().get(..4),
+				Some("avc3"),
+				"{} in band",
+				in_band.len()
+			);
+			assert_eq!(cfg.description.as_deref(), Some(avcc.as_ref()));
+		}
+	}
+
+	/// A record no keyframe followed publishes as it stands when the track finishes.
+	#[tokio::test(start_paused = true)]
+	async fn a_record_without_a_keyframe_publishes_at_finish() {
+		use crate::codec::h264::fixtures::{PPS, SPS_BT709};
+
+		let avcc =
+			crate::codec::h264::build_avcc(&[Bytes::from_static(SPS_BT709)], &[Bytes::from_static(PPS)]).unwrap();
+		let (track, catalog) = setup("video");
+		let mut import = Import::new(track, catalog.reserve(), Default::default()).unwrap();
+		import.initialize(&avcc).unwrap();
+		assert!(catalog.snapshot().video.renditions.is_empty());
+		let _finished = import.finish().unwrap();
+		let snapshot = catalog.snapshot();
+		assert_eq!(
+			snapshot.video.renditions["video"].codec.to_string().get(..4),
+			Some("avc1")
+		);
 	}
 
 	/// An avc3 stream self-initializes: the config is resolved from the SPS the

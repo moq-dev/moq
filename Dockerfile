@@ -8,7 +8,7 @@
 
 # Pinned by digest so the build tooling cannot drift under the same source.
 # Both the builder and its /nix cache seed come from this one stage.
-FROM docker.io/nixos/nix:2.35.4@sha256:f159a58f390677f41e8e900a74b6e2f9c7f27b364122ae6acf7a652ce6c551c0 AS nix
+FROM docker.io/nixos/nix:2.35.6@sha256:b49cb33f3a7e5cf3933ad8774529de0e3807ec5cf54987aa7ccdfb49f2fc55ed AS nix
 
 FROM nix AS builder
 ENV NIX_CONFIG="experimental-features = nix-command flakes"

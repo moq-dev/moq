@@ -63,9 +63,11 @@ fn lite_session_over_the_worker() {
 		.broadcast()
 		.create_track("data", timed())
 		.expect("create track");
-	let mut group = track.append_group().expect("append group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("append group");
 	group
-		.write_frame(moq_net::Timestamp::ZERO, PAYLOAD)
+		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), PAYLOAD)
 		.expect("write frame");
 	group.finish().expect("finish group");
 
@@ -193,9 +195,11 @@ fn two_lite_sessions_share_the_server_socket() {
 		.broadcast()
 		.create_track("data", timed())
 		.expect("create track");
-	let mut group = track.append_group().expect("append group");
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.expect("append group");
 	group
-		.write_frame(moq_net::Timestamp::ZERO, PAYLOAD)
+		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), PAYLOAD)
 		.expect("write frame");
 	group.finish().expect("finish group");
 

@@ -18,7 +18,6 @@ mod demux;
 mod idle;
 pub(crate) use demux::{Classified, Stream, Tls, classify};
 pub(crate) use idle::Admission;
-#[cfg(feature = "websocket")]
 pub(crate) use idle::Io;
 
 use std::{
@@ -45,7 +44,7 @@ impl Accepted {
 	}
 }
 
-#[cfg(all(test, unix, feature = "websocket"))]
+#[cfg(all(test, unix))]
 impl Accepted {
 	/// A socket accepted outside [`Listener`], holding no admission.
 	pub(crate) fn new(stream: TcpStream) -> Self {

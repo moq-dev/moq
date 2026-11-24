@@ -16,7 +16,7 @@ capture or playback is enabled.
 | Module | Does |
 | --- | --- |
 | `capture` | Microphones via CoreAudio, WASAPI, ALSA (and PipeWire/PulseAudio hosts), plus macOS system audio |
-| `encode` | PCM to Opus (mono or stereo, with DTX and voice activity) or raw PCM |
+| `encode` | PCM to Opus (mono or stereo, tuned for voice or music) or raw PCM |
 | `decode` | Opus (up to 7.1), PCM, and AAC-LC (mono or stereo) back to PCM, resampled to the rate you want |
 | `playback` | One output device mixing every track in a call, with click-free volume ramps, each track's received audio stretched onto the caller's clock (`Sink::due`) |
 | `aec` | Acoustic echo cancellation (a port of WebRTC's) for caller-supplied PCM or the built-in devices |
@@ -32,11 +32,16 @@ clock on `kio::clock` or a device callback, advances its one driver by the
 frames that clock moved, so tests step it on virtual time. Each mix sums only
 the sources routed into it, and its readers get blocks stamped with their
 position on that clock, so a reader that falls behind skips its own audio
-without stalling the mix.
+without stalling the mix. A positioned channel takes audio already scheduled
+on that clock, such as decoded media timed against its video; given a stretch
+bound, it glides onto positions that move with a playout target, as playback
+glides onto its clock, instead of writing silence or failing at each step.
 
 Without a subscriber the encoder keeps raw PCM
 up to the track's `max_age`, then encodes the part of that history within the
-subscribers' max delay before continuing live when someone subscribes. With an unlimited `max_age` it keeps at most 30 seconds
+subscribers want, from a live join's lag (its playout delay plus the codec's warmup)
+bounded by its max delay, before continuing live when someone subscribes. A join with
+no lag limit, as every join before moq-lite-07 is, gets the retained audio within its max delay. With an unlimited `max_age` it keeps at most 30 seconds
 (about 11.5 MB for 48 kHz stereo f32). Set `encode::Capture::retain` to false
 to encode continuously instead. Dropping an encoder leaves the shared capture running. A device
 failure keeps the retained history on the track until it is subscribed or expires, then the
@@ -45,7 +50,10 @@ or 10 ms with a shorter `frame_duration`. Groups carry at least 20 ms by default
 so 10 ms packets pair up. `encode::Options::join`
 changes that minimum; a join shorter than a packet puts every packet in its own
 group, and zero is refused. Longer groups
-mean fewer streams per relay but coarser loss. There is no AAC encoder, so an
+mean fewer streams per relay but coarser loss. An encode of `Kind::Voice`, as
+`moq import capture` makes of a microphone, sends nothing while its talker is
+silent: libopus decides when speech stops, the track declares the end as a
+push-to-talk mute does, and players fill the pause with comfort noise. There is no AAC encoder, so an
 AAC encode request is refused; AAC decode is for broadcasts from the ingest gateways.
 
 Playback writes never block: samples that do not fit are dropped and
@@ -58,8 +66,8 @@ then: up to 10 ms later with echo cancellation on, and at the producer's read ti
 
 ```bash
 cargo add moq-audio --features playback
-cargo add moq-audio --features aec    # Built-in devices; Linux: cpal links libasound
-cargo add moq-audio                   # PCM echo processing needs no device feature
+cargo add moq-audio --features capture,playback  # Built-in devices; Linux: cpal links libasound
+cargo add moq-audio                               # PCM echo processing needs no device feature
 cargo add moq-audio --features capture,pipewire
 ```
 

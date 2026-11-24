@@ -23,8 +23,10 @@ AUTH and prints it as an `auth granted` line before the client starts.
 import argparse
 import asyncio
 import contextlib
+import faulthandler
 import json
 import math
+import signal
 import struct
 import sys
 from datetime import timedelta
@@ -74,8 +76,15 @@ async def _publish_tone(audio: moq.audio.Producer, tones: list[int]) -> None:
         await asyncio.sleep(max(0.0, started + timestamp_us / 1_000_000 - loop.time()))
 
 
-def _client(url: str, version: str | None) -> moq.Client:
-    return moq.Client(url, tls=moq.ClientTls(insecure=True), versions=[] if version is None else [version])
+def _client(url: str, version: str | None, finish: bool) -> moq.Client:
+    # The finish case checks one session end to end, so it stays on QUIC: leaving a
+    # WebSocket fallback that won a slow race would open a second session.
+    return moq.Client(
+        url,
+        tls=moq.ClientTls(insecure=True),
+        versions=[] if version is None else [version],
+        websocket=moq.WebSocketConfig(enabled=False) if finish else None,
+    )
 
 
 async def _print_grant(client: moq.Client, timeout: float) -> None:
@@ -106,7 +115,7 @@ async def publish(
     tones: list[int],
     finish_ack: str | None,
 ) -> None:
-    async with _client(url, version) as client:
+    async with _client(url, version, finish_ack is not None) as client:
         if grant:
             await _print_grant(client, timeout)
         # Hold the route for the lifetime of the publish loop: dropping it retracts the broadcast.
@@ -114,7 +123,7 @@ async def publish(
         producer = route.broadcast
         catalog = moq.media.CatalogProducer(producer)
         media = moq.media.TrackStreamProducer.video(
-            producer, moq.media.VideoInit(format=moq.media.VideoFormat.AVC3, data=b"")
+            producer, moq.media.VideoInit(format=moq.media.VideoFormat.h264(), data=b"")
         )
         audio = moq.audio.Producer(
             catalog,
@@ -157,7 +166,7 @@ async def publish(
             producer.close()
             health = client.route(f"{broadcast}.health", hidden=True)
             live = health.broadcast.publish_track("live")
-            live.write_frame(b"session-alive")
+            live.write_frame(b"session-alive", moq.Timestamp.unscaled(0))
             live.finish()
             health.announce()
 
@@ -197,7 +206,7 @@ async def _finish_subscribe(client: moq.Client, broadcast: str, frames: int) -> 
                     raise RuntimeError("catalog ended without video")
                 id, video = next(iter(catalog.video.items()))
                 async with await moq.media.TrackConsumer.subscribe(
-                    consumer, id, video, subscription=moq.Subscription(delay=moq.Delay(max=MAX_DELAY))
+                    consumer, id, video, subscription=moq.Subscription(delay=moq.Delay(min=None, max=MAX_DELAY))
                 ) as media:
                     count = 0
                     async for frame in media:
@@ -236,7 +245,7 @@ async def _finish_subscribe(client: moq.Client, broadcast: str, frames: int) -> 
             async for group in live:
                 async with group:
                     async for frame in group:
-                        # Its timestamp goes unchecked: lite-05/06 carry an untimed track's send time.
+                        # Its timestamp goes unchecked: lite-05/06 declare an untimed track in milliseconds.
                         if seen or frame.payload != b"session-alive":
                             raise RuntimeError("unexpected session health payload")
                         seen = True
@@ -256,11 +265,15 @@ async def _decode_audio(
     exclusively, so two renditions of one codec fail rather than overwrite each other.
     """
     out = f"{out}.{audio.codec.split('.')[0]}"
+    # moq-audio waits on a missing group for its playout delay, measured from arrival timing at
+    # tens of ms, so a runtime starved longer than that skips a group that is only late. This
+    # reader checks delivery between implementations, not a real-time deadline: it holds a playout
+    # delay of the max delay, waiting on a hole for the same budget it grants a late group.
     decoder = await moq.audio.Consumer.subscribe(
         consumer,
         id,
         audio,
-        moq.audio.DecoderOutput(format=moq.audio.SampleFormat.F32, delay=moq.Delay(max=MAX_DELAY)),
+        moq.audio.DecoderOutput(format=moq.audio.SampleFormat.F32, delay=moq.Delay(min=MAX_DELAY, max=MAX_DELAY)),
     )
     frame_bytes = 4 * audio.channel_count
     decoded = 0
@@ -269,7 +282,7 @@ async def _decode_audio(
         async for frame in decoder:
             # moq-audio reports a hole it saw directly; tone.py checks the timestamps too.
             if isinstance(frame, moq.audio.Gap):
-                raise RuntimeError(f"audio gap after {decoded} samples")
+                raise RuntimeError(f"audio gap after {decoded} samples, at {frame.timestamp} for {frame.duration}")
             if isinstance(frame, moq.audio.End):
                 raise RuntimeError("audio track ended early")
             samples = len(frame.data) // frame_bytes
@@ -293,7 +306,7 @@ async def subscribe(
     finish: bool,
     frames: int,
 ) -> None:
-    async with _client(url, version) as client:
+    async with _client(url, version, finish) as client:
         if grant:
             await _print_grant(client, timeout)
         if finish:
@@ -311,7 +324,7 @@ async def subscribe(
         id, video = next(iter(catalog.video.items()))
 
         media = await moq.media.TrackConsumer.subscribe(
-            consumer, id, video, subscription=moq.Subscription(delay=moq.Delay(max=MAX_DELAY))
+            consumer, id, video, subscription=moq.Subscription(delay=moq.Delay(min=None, max=MAX_DELAY))
         )
 
         total = 0
@@ -357,6 +370,9 @@ def main() -> None:
     if args.role == "subscribe" and not args.finish and (not args.audio_out or not args.audio_ms):
         parser.error("subscribe needs --audio-out and --audio-ms")
 
+    # The harness's `timeout` sends SIGTERM to a client that hangs: dump every thread first, so
+    # the log shows where it waited, then end as SIGTERM would.
+    faulthandler.register(signal.SIGTERM, all_threads=True, chain=True)
     # Warnings and errors from the Rust layer, such as a publication outside the grant.
     moq.log_level("warn")
     try:

@@ -12,14 +12,14 @@ fn main() -> anyhow::Result<()> {
 	println!("Private key:\n{}\n", private_key.to_str()?);
 
 	// Extract the public key for the relay.
-	let public_key = private_key.to_public()?;
+	let public_key = private_key.public()?;
 	println!("Public key (give this to the relay):\n{}\n", public_key.to_str()?);
 
 	// Sign a token with the private key.
 	let claims = moq_auth::Claims::default()
 		.with_root("rooms/meeting-123")
-		.with_publish(["alice/**".parse()?])
-		.with_subscribe(["**".parse()?])
+		.with_publish(["alice".parse()?])
+		.with_subscribe([moq_auth::Prefix::all()])
 		.with_expires(kio::clock::wall() + Duration::from_secs(3600))
 		.with_issued(kio::clock::wall());
 

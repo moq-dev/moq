@@ -1,5 +1,7 @@
 # moq\_ffi
 
+**Experimental:** the API may change in any release, and nobody has run it on iOS or in a Flutter application yet.
+
 Raw Dart and Flutter bindings for the MoQ protocol stack. Most applications
 should use the higher-level [`moq`](https://pub.dev/packages/moq) package.
 
@@ -21,6 +23,6 @@ The path is resolved relative to the `pubspec.yaml` that declares it. This is
 the only override: build hooks run with a filtered environment, so an
 environment variable cannot reach one.
 
-The native libraries carry moq-ffi's default features, so the native audio
-and video encoders and decoders ship alongside sessions, announcements,
-broadcasts, tracks, groups, frames, catalogs, and JSON tracks.
+The native libraries carry the native audio and video encoders and decoders
+alongside sessions, announcements, broadcasts, tracks, groups, frames, catalogs,
+and JSON tracks.

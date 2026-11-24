@@ -3,7 +3,7 @@
 //! Linux-only, because the mode is: every worker binds the listen address with
 //! `SO_REUSEPORT`, and no other platform load-balances a unicast UDP port across
 //! the group.
-#![cfg(all(target_os = "linux", feature = "quic"))]
+#![cfg(target_os = "linux")]
 
 use std::net::UdpSocket;
 
@@ -174,10 +174,7 @@ async fn stopping_the_group_closes_its_sessions() {
 
 	let mut connect = moq_tokio::connect::Config::default();
 	connect.tls.fingerprint = fingerprints;
-	#[cfg(feature = "websocket")]
-	{
-		connect.websocket.enabled = Some(false);
-	}
+	connect.websocket.enabled = Some(false);
 	// Far past the wait below, so only a close on the wire can end the session.
 	let mut quic = moq_tokio::quic::Config::default();
 	quic.idle_timeout = Some((std::time::Duration::from_secs(600)).into());
@@ -773,7 +770,6 @@ async fn dropping_the_group_with_work_in_flight_stops() {
 }
 
 /// Every member's next fresh handshake uses the fingerprint exposed by the group.
-#[cfg(feature = "watch")]
 #[tokio::test]
 async fn rotated_identity_reaches_every_worker() {
 	let _ = rind_rustls::default_provider().unwrap().install_default();
@@ -825,10 +821,7 @@ async fn rotated_identity_reaches_every_worker() {
 				// Fresh client endpoints make independent handshakes, without session resumption.
 				let mut config = moq_tokio::connect::Config::default();
 				config.tls.fingerprint = expected.clone();
-				#[cfg(feature = "websocket")]
-				{
-					config.websocket.enabled = Some(false);
-				}
+				config.websocket.enabled = Some(false);
 				let client = config.init(Default::default()).unwrap().with_reconnect(false);
 				let url: url::Url = format!("https://{addr}/").parse().unwrap();
 				let session = client
@@ -868,4 +861,24 @@ fn shutting_down_outside_a_runtime_joins_the_workers() {
 	let owned = bound(workers.local_addr());
 	futures::executor::block_on(workers.split().shutdown());
 	assert!(owned.is_disjoint(&open_sockets()), "the group left the port bound");
+}
+
+/// A group whose member was taken before it was served would leave that member's
+/// share of the port to nobody, so serving it is refused.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_group_missing_a_member_is_refused() {
+	let _ = rind_rustls::default_provider().unwrap().install_default();
+
+	let dir = tempfile::tempdir().expect("tempdir");
+	let (cert, key) = certificate(dir.path());
+	for taken in [1, 2] {
+		let mut group = moq_sock::shard::bind("127.0.0.1:0".parse().unwrap(), 2).unwrap();
+		for _ in 0..taken {
+			group.member().unwrap().expect("a member");
+		}
+		let mut server = moq_tokio::server::Config::default();
+		server.listen = listen_config(&cert, &key, 0);
+		Workers::from_group(server, group, false).expect_err("served a group missing a member");
+	}
 }

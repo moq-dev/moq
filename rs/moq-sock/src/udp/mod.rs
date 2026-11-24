@@ -52,6 +52,11 @@ mod imp;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod linux;
 
+// The control-message walk's fuzz target. Linux only, where the fuzzer runs, and 64-bit, which the
+// reference model's struct layouts assume.
+#[cfg(all(any(test, feature = "fuzz"), target_os = "linux", target_pointer_width = "64"))]
+pub mod fuzz;
+
 #[cfg(windows)]
 #[path = "windows.rs"]
 mod imp;
@@ -156,51 +161,6 @@ impl Transmit<'_> {
 	}
 }
 
-/// Asynchronous transport-layer errors reported by the operating system
-///
-/// On Linux and Android these are delivered via the socket error queue
-/// (`MSG_ERRQUEUE`) and originate from ICMP messages.
-///
-/// These errors are out-of-band and do not correspond to a received packet.
-#[derive(Debug, Copy, Clone)]
-#[non_exhaustive]
-pub struct TransportError {
-	/// Address associated with the error
-	///
-	/// This is the remote peer or an intermediate network device that triggered the error.
-	/// Returns `None` if the kernel cannot determine the source (e.g. `AF_UNSPEC`).
-	pub addr: Option<SocketAddr>,
-	/// Transport-layer error details
-	pub payload: TransportErrorPayload,
-	/// The raw error code from the underlying operating system
-	pub raw_errno: i32,
-}
-
-impl TransportError {
-	/// Returns the recommended MTU for packet-too-big errors
-	pub fn mtu(&self) -> Option<u32> {
-		match self.payload {
-			TransportErrorPayload::TooBig { mtu } => Some(mtu),
-			_ => None,
-		}
-	}
-}
-
-/// Transport-layer error details reported by the kernel
-#[derive(Debug, Copy, Clone)]
-#[non_exhaustive]
-pub enum TransportErrorPayload {
-	/// Destination host or port is unreachable
-	Unreachable,
-	/// Packet exceeds path MTU
-	TooBig {
-		/// Recommended Maximum Transmission Unit
-		mtu: u32,
-	},
-	/// Other transport-layer or kernel-reported error
-	Other,
-}
-
 /// Returns true if the given I/O error corresponds to a message size error
 ///
 /// Useful, for example, after invoking `std::io::Error::last_os_error()`
@@ -231,9 +191,9 @@ pub fn is_msg_size_err(err: &io::Error) -> bool {
 /// connection attempt can give up on that address at once, for example to dial the other address
 /// family.
 ///
-/// They are only local for an unconnected socket with transport errors left disabled, as
-/// `UdpSocketState` sockets are by default. A `connect`ed socket, or one with `IP_RECVERR`, can
-/// report a received ICMP error here instead, which an off-path attacker can forge.
+/// They are only local for an unconnected socket without `IP_RECVERR`, as `UdpSocketState` sockets
+/// are. A `connect`ed socket, or one with `IP_RECVERR`, can report a received ICMP error here
+/// instead, which an off-path attacker can forge.
 pub fn is_unreachable_err(err: &io::Error) -> bool {
 	matches!(
 		err.kind(),

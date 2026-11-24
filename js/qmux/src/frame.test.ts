@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { TransportCode, transportCode } from "./error.ts";
 import * as Frame from "./frame.ts";
 import * as Stream from "./stream.ts";
 import { VarInt } from "./varint.ts";
@@ -73,6 +74,18 @@ describe("QMux01 record framing", () => {
 			0x00,
 		);
 		expect(() => Frame.decode(record, "qmux-00")).toThrow();
+	});
+
+	test("qmux-00 decode rejects a message carrying more than one frame", () => {
+		const ping = Frame.encode({ type: "ping_request", sequence: 1n }, "qmux-00");
+		const stream = Frame.encode(
+			{ type: "stream", id: new Stream.Id(VarInt.from(0n)), data: new Uint8Array([1]), fin: false },
+			"qmux-00",
+		);
+		expect(() => Frame.decode(new Uint8Array([...ping, ...stream]), "qmux-00")).toThrow();
+		// A PADDING byte is a frame of its own, so a STREAM frame behind it is a second frame.
+		expect(() => Frame.decode(new Uint8Array([0x00, ...stream]), "qmux-00")).toThrow();
+		expect(Frame.decode(new Uint8Array([0x00]), "qmux-00")).toBeNull();
 	});
 
 	test("ping_request and ping_response round-trip preserves the sequence number", () => {
@@ -215,6 +228,18 @@ describe("QMux02 (draft-02)", () => {
 			0x01, // duplicate
 		]);
 		expect(() => Frame.decode(bytes, "qmux-02")).toThrow();
+	});
+
+	test("a malformed transport parameter value is a TRANSPORT_PARAMETER_ERROR", () => {
+		// QX_TRANSPORT_PARAMETERS carrying initial_max_data (0x04) with an empty value.
+		const bytes = new Uint8Array([0xff, 0x51, 0x53, 0x30, 0x0d, 0x0a, 0x0d, 0x0a, 0x02, 0x04, 0x00]);
+		let caught: unknown;
+		try {
+			Frame.decode(bytes, "qmux-02");
+		} catch (err) {
+			caught = err;
+		}
+		expect(transportCode(caught)).toBe(TransportCode.TRANSPORT_PARAMETER_ERROR);
 	});
 
 	test("forbidden QUIC v1 transport parameters are rejected", () => {

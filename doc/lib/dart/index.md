@@ -5,27 +5,31 @@ description: Futures and streams for Flutter via the moq package
 
 # Dart and Flutter
 
+**Experimental:** the API may change in any release, and nobody has run it on iOS or in a Flutter application yet.
+
 [![pub.dev](https://img.shields.io/pub/v/moq)](https://pub.dev/packages/moq)
 
 The [`moq`](https://pub.dev/packages/moq) package on pub.dev wraps the
 generated [`moq_ffi`](https://pub.dev/packages/moq_ffi) bindings in Dart
 futures and streams. A Native Assets hook supplies the Rust core for Android
 (API 24+), iOS (16+), Linux, macOS, and Windows. Flutter web is not supported,
-since it can't load a native library.
+since it can't load a native library. The iOS library ships but has not yet
+been run in an iOS app, so treat iOS as untested.
 
 Import `package:moq/media.dart` with a prefix for catalogs, encoded-media imports, and
 container consumers. `TrackProducer.audio` / `.video` take a broadcast, an init record,
 and a `Named` or `Requested` target. `CatalogProducer(broadcast: ...)` owns catalog properties
 and sections; it holds the broadcast weakly and fails after the broadcast closes.
-Publish JSON tracks with `MoqTrackInfo(compression: MoqCompression.deflate)`; a `package:moq/json.dart` consumer reads one with no option of its own.
-A raw frame without a timestamp stays untimed, which only an untimed track accepts; JSON writes always take one. The library never substitutes zero or now.
+Publish JSON tracks with `TrackInfo(compression: Compression.deflate())`; a `package:moq/json.dart` consumer reads one with no option of its own.
+Every write takes a timestamp, and the library never substitutes zero or now.
 `SnapshotProducer.update`, `StreamProducer.append`, and `WindowProducer.push` and `pop` require a timestamp on the broadcast clock (`CatalogProducer.now()`), the epoch every track in the broadcast shares, so their track needs a timescale.
 `package:moq/json.dart` consumers return `Value` (`value`, `timestamp`) from `next()`; a snapshot consumer
 yields each state in order, and `latest()` skips to the newest.
 Media times are exact `Timestamp` records, `value` units at `scale` units per second, so a 90 kHz tick survives a
 read and republish. `Duration.toTimestamp()` converts exactly; `Timestamp.toDuration()` rounds down to a whole microsecond.
-Raw tracks with a `null` timescale are untimed on both publish and receive.
-`MoqTrackInfo.compression` set to `MoqCompression.deflate` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
+A raw track with a `null` timescale is untimed: each frame carries `Timestamp.unscaled(key)`, its group's key, whose `scale` is `null`.
+`TrackInfo`'s `maxAge`, how long a superseded group stays fresh, defaults to zero, which serves only the live edge; an explicit `null` sets no publisher limit, as it does for `Delay.max`. The generated `MoqTrackInfo` leaves an omitted `maxAge` null instead.
+`TrackInfo.compression` set to `Compression.deflate()` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
 Timed raw/data tracks require caller-supplied timestamps. Use `CatalogProducer.now()` to stamp a locally
 created event on the broadcast clock; reading it fixes that clock for later media producers.
@@ -33,7 +37,7 @@ Share `media.Timebase(broadcast: ...)` through `ContainerInit` when several impo
 one source timeline; omitting it keeps an independent offset. A timebase belongs to its
 broadcast and does not keep it open. `ContainerProducer` takes chunks split anywhere,
 so a raw byte stream needs no other importer.
-`ContainerFormat.fmp4` splits each fragment into one frame per sample.
+`ContainerFormat.fmp4()` splits each fragment into one frame per sample.
 `media.CatalogConsumer.subscribe`, `media.TrackConsumer.subscribe`, and `media.GroupConsumer.fetch`
 construct the read side from a broadcast; the last two take a catalog `media.Rendition` and
 follow its broadcast and track themselves. For arrival-order reads, decode each group from
@@ -73,7 +77,7 @@ moq
 // Wait for a publisher at one path. The first call never returns null; call available()
 // again for the next one, or null once the path goes offline.
 final broadcast = (await moq.follow('live/camera').available())!;
-final catalog = await media.CatalogConsumer.subscribe(broadcast: broadcast);
+final catalog = await media.CatalogConsumer.subscribe(broadcast: broadcast, delay: Duration.zero);
 print(await catalog.next());
 ```
 
@@ -87,13 +91,13 @@ final encoder = video.Producer(
   catalog: media.CatalogProducer(broadcast: camera.broadcast()),
   options: video.ProducerOptions(
     input: video.EncoderInput(
-      format: video.PixelFormat.rgba,
+      format: video.PixelFormat.rgba(),
       width: 1280,
       height: 720,
       framerate: video.FrameRate(numerator: 30000, denominator: 1001),
     ),
     output: video.EncoderOutput(
-      codec: video.Codec.h264,
+      codec: video.Codec.h264(),
       kind: video.AutoEncoder(),
     ),
     track: 'camera',
@@ -109,7 +113,7 @@ encoder.finish();
 import 'package:moq/video.dart' as video;
 
 final remote = (await moq.follow('live/camera').available())!;
-final renditions = await media.CatalogConsumer.subscribe(broadcast: remote);
+final renditions = await media.CatalogConsumer.subscribe(broadcast: remote, delay: Duration.zero);
 final decoder = await video.Consumer.subscribe(
   broadcast: remote,
   id: 'camera',
@@ -120,7 +124,7 @@ final decoder = await video.Consumer.subscribe(
 // A read is a frame, a gap where media was lost, or an end where the publisher stopped its encoder.
 final read = await decoder.next();
 if (read is video.ReadFrame) {
-  print(read.frame.pixels(format: video.PixelFormat.rgba).length);
+  print(read.frame.pixels(format: video.PixelFormat.rgba()).length);
   read.frame.dispose();
 }
 ```
@@ -131,8 +135,8 @@ final route = moq.route('live/camera'); // visible at once, under a fresh instan
 print(route.instance());
 final mine = route.broadcast();
 final track = mine.publishTrack(name: 'video', info: null);
-final group = track.appendGroup();
-group.writeFrame(frame: Frame(payload: bytes, timestamp: null));
+final group = track.appendGroup(start: Timestamp.unscaled(0));
+group.writeFrame(frame: Frame(payload: bytes, timestamp: Timestamp.unscaled(group.start())));
 group.finish();
 track.finish();
 mine.close(); // ends the route too
@@ -155,15 +159,17 @@ shows which module holds each.
 - **Media reads.** `media.TrackConsumer`, `audio.Consumer`, and `video.Consumer` return a `Read` in order: a `ReadFrame`, a `ReadGap` where media was lost, or a `ReadEnd` where the publisher stopped its encoder. A gap breaks continuity. An encoder end is not stream EOF: following frames before its endpoint are the old encoder's drain; the first at or past it starts fresh. A decoder reads everything the track still holds unless a live player sets `start: media.DecodeStart.latest` in its decoder output, which joins at the newest group and skips the cached backlog.
 - **Decoded frames hold decoder buffers.** `dispose()` each frame from a `video.Consumer` promptly rather than waiting for the garbage collector, or the decoder stalls. `resize` is best effort, so read each frame's `width()` and `height()`.
 - **Closing.** `await moq.close()` drains for up to one second and reports its result. `session.shutdown()` requests the drain synchronously; `await session.closed()` waits for its result. `session.cancel(code: 0)` closes at once. Finish or abort live tracks first. Awaiting cancellation of an announcement, grant, or request subscription releases its pending native read. Announcements and grants also release their consumer; server listeners leave their shared server usable. moq-lite-05 and newer wait for the peer to receive finished tails; older Lite versions and IETF wait only for transport ACKs.
-- **Ending cleanly.** When the input ends, finish every track, then call `finish()` on its `CatalogProducer` to finish the catalog, which ends the content. The broadcast stays announced and keeps serving the finished tracks, so a subscriber still catching up can drain them, until `broadcast.close()` or disposing its `MoqRoute` takes it offline. How long to keep it up is yours to decide. A track still open at the close, or released without a finish, ends with `Unroutable` (`Internal` over moq-transport, which has no such code). Readers follow a publisher's runs by announcement, not by that error: see [identity and recovery](/concept/identity).
-- **Stats.** `session.stats()` reports `rtt`, `estimatedSendRateBps`, and the byte and packet counters (`bytesSent`, `bytesReceived`, `bytesLost`, `packetsSent`, `packetsReceived`, `packetsLost`), and `datagramsUnrouted`, the datagrams received for a subscription with no datagram track, reported only on moq-lite 05 and later, which carry datagrams. A field is `null` when the transport does not report it, which is not the same as zero. `version` names the negotiated protocol. Connect returns a connecting session; read its coherent `state()` snapshot and wait with that snapshot's revision to observe reconnects. A first dial that reaches no session ends the session with that error rather than retrying. Each watcher keeps its own revision. Hold the owned `BandwidthConsumer` returned by `session.recvBandwidth()` to receive bandwidth estimates. `rate()` reads the current estimate in bits per second and `rateChanged()` waits for a new one. Release the consumer or call `cancel()` when finished; releasing the last consumer stops PROBE; the session and stats snapshots do not request it. Client consumers survive reconnects and report no estimate while disconnected.
+- **Ending cleanly.** When the input ends, finish every track, then call `finish()` on its `CatalogProducer` to finish the catalog, which ends the content. The broadcast stays announced and keeps serving the finished tracks, so a subscriber still catching up can drain them, until `broadcast.close()` or disposing its `MoqRoute` takes it offline. How long to keep it up is yours to decide. A track still open at the close ends with `Unroutable` (`Internal` over moq-transport, which has no such code), and one released without a finish ends `Dropped`, which readers see as `Internal`. Readers follow a publisher's runs by announcement, not by that error: see [identity and recovery](/concept/identity).
+- **Stats.** `session.stats()` reports `rtt`, `estimatedSendRateBps`, and the byte and packet counters (`bytesSent`, `bytesReceived`, `bytesLost`, `packetsSent`, `packetsReceived`, `packetsLost`), and `datagramsUnrouted`, the datagrams received for a subscription with no datagram track, reported only on moq-lite 05 and later, which carry datagrams. A field is `null` when the transport does not report it, which is not the same as zero. `version` names the negotiated protocol. Connect returns a connecting session; read its coherent `state()` snapshot and wait with that snapshot's revision to observe reconnects. Until the peer has accepted a session's credential or drained a session with a GOAWAY (or, on moq-lite 03/04, which never answer it, a session stayed up 1s), a failed dial or a closed session, such as a refused credential, ends the session with that error rather than retrying. Each watcher keeps its own revision. Hold the owned `BandwidthConsumer` returned by `session.recvBandwidth()` to receive bandwidth estimates. `rate()` reads the current estimate in bits per second and `rateChanged()` waits for a new one. Release the consumer or call `cancel()` when finished; releasing the last consumer stops PROBE; the session and stats snapshots do not request it. Client consumers survive reconnects and report no estimate while disconnected.
 - **Viewers.** `client.viewers()` divides the connection's receive estimate among the broadcasts you watch, max-min fair by each one's ceiling. `watch(maxBps: ...)` returns a `Viewer` claiming up to what the largest rendition the player would switch to needs; `rate()` reads its slice in bits per second, `null` while there is no estimate, so hold the current selection. `update(maxBps: ...)` changes the ceiling, such as when the catalog enables or disables a rendition. Holding a viewer requests PROBE, and the session sends the viewers' summed ceilings as the PROBE target; `dispose()` it once the broadcast stops being watched. `setTarget(targetBps: ...)` sends another target, `0` sends none, and `null` follows the viewers again. Ceilings or a target past 2^53 - 1 bps, the most a PROBE target carries, throw `OutOfRangeMoqException`. Client viewers survive reconnects and read `null` while disconnected.
 - **Authorization.** On `moq-lite-07-wip` (opt in with `ConnectOptions(versions: ...)`), listen to `moq.grants().updates()` for the `Grant` the relay sent back and each change, `null` until it answers and while a client session reconnects.
-- **Tokens.** Pass `ConnectOptions(tokens: [...])` instead of putting the credential in the URL. The first is the connection credential, sent in SETUP and, while an offered version can't carry it there (lite before 07), as the URL's `?jwt=`; each other token widens the grant over AUTH. `moq.tokens().set_(tokens: [...])` replaces them before they expire: the next dial presents them, a live AUTH session at once, and after an authorization refusal the session redials only if they changed. `await tokens().answered()` returns once the relay accepts them and throws its refusal with the relay's code. A `?jwt=` already in the URL stays the connection credential, which is how to reach a relay older than this release. For a per-request token, `moq.credential(token)` returns a `Credential` that `route.setAuth(credential: credential)` or `claim.setAuth(credential: credential)` names (`null` for none); setting a new one renews the announcement in place. Only the session that minted it carries it, a client session across its reconnects; another session announcing the same route uses its own scope. On moq-transport `answered` resolves at once, since only the request carries the token; on moq-lite the token rides AUTH instead (07 only, unsupported before), so `answered` is the peer's verdict and the grant joins the whole session's, not only the named route's. `await credential.answered()` throws the peer's refusal, and `credential.cancel()` withdraws it unless a route or claim still names it.
+- **Tokens.** Pass `ConnectOptions(tokens: [...])` instead of putting the credential in the URL. The first is the connection credential, sent in SETUP and, while an offered version can't carry it there (lite before 07), as the URL's `?jwt=`; each other token widens the grant over AUTH. `moq.tokens().set_(tokens: [...])` replaces them before they expire: the next dial presents them, a live AUTH session at once. `await tokens().answered()` returns once the relay accepts them and throws its refusal with the relay's code. A `?jwt=` already in the URL stays the connection credential, which is how to reach a relay older than this release. For a per-request token, `moq.credential(token)` returns a `Credential` that `route.setAuth(credential: credential)` or `claim.setAuth(credential: credential)` names (`null` for none); setting a new one renews the announcement in place. Only the session that minted it carries it, a client session across its reconnects; another session announcing the same route uses its own scope. On moq-transport `answered` resolves at once, since only the request carries the token; on moq-lite the token rides AUTH instead (07 only, unsupported before), so `answered` is the peer's verdict and the grant joins the whole session's, not only the named route's. `await credential.answered()` throws the peer's refusal, and `credential.cancel()` withdraws it unless a route or claim still names it.
 - **Errors.** Read diagnostic payloads from `reason` and structured protocol failures from `details`.
+- **Catalog timing.** Each catalog a `CatalogConsumer` yields carries the `timestamp` it takes effect at on the broadcast's media timeline. `CatalogConsumer.subscribe(broadcast: b, delay: Duration.zero)` reads only the newest catalog; a player that holds each update until its media reaches that time passes its playout delay instead, and reads in order every update it may still need.
 - **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode. Audio and video subscribe setup returns `UnsupportedConfigMoqException` when the decoder refuses the codec, layout, or description; a player can then try its next ranked rendition. Decoder faults and later peer or decode failures do not report that setup refusal.
 - **Subscription defaults.** A bare `Subscription()`, passing no subscription, and `defaultSubscription()` all mean moq-net's defaults, whose zero `delay` starts at the newest group and skips a superseded one at once. `Delay` defaults both bounds to zero: pass `max: null` for no subscriber limit, or `min: null` to leave the target latency unstated. Decoders take the same `Delay`.
-- **Track demand.** Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected. A producer publishes everything you write, subscribed or not, so a late subscriber can fetch the recent past. Capturing only while a producer's `demand()` reports a subscriber is an opt-in that saves the encode but leaves nothing from before the first one.
+- **Track demand.** Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected. A producer publishes everything you write, subscribed or not, so a late subscriber can fetch the recent past. Capturing only while a producer's `demand()` reports a subscriber is an opt-in that saves the encode but leaves nothing from before the first one. To end a track nobody wants, call `abortUnwanted(errorCode:)` on its producer (raw, media, audio, video, or JSON) once `wantedChanged()` returns false rather than releasing it: it returns false and keeps the track for a subscriber that joined since. Then wait for the next false on a fresh `demand()`, since one that already returned false misses a subscriber that came and went.
+- **Group refresh.** `await demand().refresh()` returns once a subscriber asks for a new group: the first group of a track with none, or a join judged by `TrackInfo(refresh: TrackRefresh(ratio: ..., interval: ...))`. Write a group starting with a keyframe or snapshot, which answers it, then wait again. The ratio asks on a join once the newest group has grown past that many times its first frame; the interval has a request wait until the newest group is that old, which caps how often you make groups however many subscribers ask. A subscriber asks with `await consumer.refresh()`, which returns once the request is sent (forwarded upstream, or read by a local publisher); cancelling the future first withdraws it.
 
 ## Runtime
 

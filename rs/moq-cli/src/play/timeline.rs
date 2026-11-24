@@ -130,13 +130,20 @@ impl AudioTimeline {
 		// keeps the next frame contiguous with the new timeline position.
 		let origin = *self.origin.get_or_insert(start);
 		let expected = (start.saturating_sub(origin).as_secs_f64() * sample_rate as f64).round() as u64;
+		// A hole within that rounding is the same jitter, not missing audio: the frame continues
+		// the last one rather than playing a few samples of silence ahead of it.
 		let hole = expected.saturating_sub(self.written);
+		let hole = if (hole as f64) <= tolerance.as_secs_f64() * sample_rate as f64 {
+			0
+		} else {
+			hole
+		};
 		let skipped = hole > fill_max;
 		let silence = if skipped { 0 } else { hole };
 		let reset_sink = rewound || skipped;
 		self.written = self
 			.written
-			.max(expected)
+			.saturating_add(hole)
 			.saturating_add(u64::try_from(samples).unwrap_or(u64::MAX));
 		self.end = Some(end);
 
@@ -234,6 +241,12 @@ mod tests {
 		// 1024 frames end at 23.22 ms, but an FLV timestamp carries 23 ms.
 		let rounded = timeline.push(Duration::from_millis(23), 1024, 44_100, 22_050);
 		assert!(!rounded.reset_sink);
+		assert_eq!(rounded.silence, 0);
+
+		// The third frame starts at 46.44 ms, a 47 ms stamp: no silence ahead of it either.
+		let late = timeline.push(Duration::from_millis(47), 1024, 44_100, 22_050);
+		assert!(!late.reset_sink);
+		assert_eq!(late.silence, 0);
 	}
 
 	#[test]

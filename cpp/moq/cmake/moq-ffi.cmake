@@ -2,7 +2,6 @@
 # (MOQ_FFI_DIR), or a cargo build of this checkout. Sets MOQ_FFI_LIB (the staticlib to link),
 # MOQ_FFI_METADATA (the cdylib uniffi-bindgen-cpp reads), MOQ_FFI_CARGO (the target that builds
 # them, or empty for a prebuilt input), and MOQ_NATIVE_LIBS (what an external linker adds).
-# MOQ_FFI_QLOG adds moq-ffi's qlog feature to the cargo build, which a prebuilt input lacks.
 #
 # Run with -P, it is that cargo build: it links the libraries cargo reports into OUT, so no
 # cargo setting (target-dir, build.target) can move them from where the packages look.
@@ -20,12 +19,6 @@ if(CMAKE_SCRIPT_MODE_FILE)
     set(_args build-ffi --message-format=json-render-diagnostics)
     if(RELEASE)
         list(APPEND _args --release)
-    endif()
-    # A cdylib's file name carries no feature hash, so a qlog build takes a target directory of
-    # its own rather than replacing the default library every other binding loads.
-    if(QLOG)
-        string(APPEND _target_dir "/qlog")
-        list(APPEND _args --features qlog --target-dir "${_target_dir}")
     endif()
     execute_process(
         COMMAND cargo ${_args}
@@ -119,12 +112,7 @@ if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
 endif()
 
 set(MOQ_FFI_DIR "" CACHE PATH "Extracted default-feature moq-ffi native package")
-option(MOQ_FFI_QLOG "Build moq-ffi from source with qlog trace capture" OFF)
 if(MOQ_FFI_DIR)
-    if(MOQ_FFI_QLOG)
-        message(FATAL_ERROR "MOQ_FFI_QLOG requires a source build of moq-ffi; MOQ_FFI_DIR "
-            "carries default features only")
-    endif()
     get_filename_component(MOQ_FFI_DIR "${MOQ_FFI_DIR}" ABSOLUTE)
     file(READ "${MOQ_FFI_DIR}/manifest.json" _manifest)
     foreach(_field version target features profile source)
@@ -163,13 +151,8 @@ else()
             "or architecture, set MOQ_FFI_DIR to a native package for it")
     endif()
     # The top-level build tree, so a project adding both packages shares one cargo build and
-    # one rule for its outputs, as Ninja requires. A qlog build links into a directory of its
-    # own: the hard link keeps cargo's timestamp, so toggling MOQ_FFI_QLOG in place could swap
-    # in an older library that nothing relinks against, while a new path changes the commands.
+    # one rule for its outputs, as Ninja requires.
     set(_out "${CMAKE_BINARY_DIR}/moq-ffi")
-    if(MOQ_FFI_QLOG)
-        string(APPEND _out "-qlog")
-    endif()
     set(MOQ_FFI_LIB "${_out}/${_moq_ffi_static}")
     set(MOQ_FFI_METADATA "${_out}/${_moq_ffi_dynamic}")
     set(MOQ_FFI_CARGO moq_ffi_cargo)
@@ -183,15 +166,14 @@ else()
         add_custom_target(moq_ffi_cargo
             COMMAND "${CMAKE_COMMAND}" -DWORKSPACE=${_moq_workspace} -DOUT=${_out}
                 -DSTATIC=${_moq_ffi_static} -DDYNAMIC=${_moq_ffi_dynamic} -DRELEASE=${_release}
-                -DQLOG=${MOQ_FFI_QLOG}
                 -P "${CMAKE_CURRENT_LIST_FILE}"
             BYPRODUCTS "${MOQ_FFI_LIB}" "${MOQ_FFI_METADATA}"
             COMMENT "Building moq-ffi"
             VERBATIM
         )
     endif()
-    # System libraries the staticlib needs from an external linker. moq-ffi and moq-c share one
-    # dependency tree, so they share rs/moq-c/native-libs/, which says how to regenerate it.
+    # System libraries the staticlib needs from an external linker. moq-ffi and libmoq share one
+    # dependency tree, so they share rs/libmoq/native-libs/, which says how to regenerate it.
     if(APPLE)
         set(_platform apple)
     elseif(WIN32)
@@ -199,7 +181,7 @@ else()
     else()
         set(_platform linux)
     endif()
-    set(_native_libs "${_moq_workspace}/rs/moq-c/native-libs/${_platform}.txt")
+    set(_native_libs "${_moq_workspace}/rs/libmoq/native-libs/${_platform}.txt")
 endif()
 
 file(STRINGS "${_native_libs}" _lines)

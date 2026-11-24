@@ -22,7 +22,7 @@ pub struct Args {
 	/// The track name, taken literally: a `/` in it is part of the name.
 	pub track: String,
 
-	/// The group sequence to read; the newest group when omitted.
+	/// The start of the group to read, in the track's timescale; the newest group when omitted.
 	#[usage(long)]
 	pub group: Option<u64>,
 
@@ -63,9 +63,10 @@ async fn fetch(
 
 	// Scoped to the broadcast, so the relay announces it by name even when a hidden
 	// segment such as `.stats` would keep it out of an unscoped listing.
-	let pattern = moq_net::Pattern::subtree(&broadcast).with_context(|| format!("invalid broadcast `{broadcast}`"))?;
+	let scope =
+		moq_net::Prefix::try_from(broadcast.as_str()).with_context(|| format!("invalid broadcast `{broadcast}`"))?;
 	let origin = moq_tokio::origin::spawn()
-		.scope("", &moq_net::Patterns::from(pattern))
+		.scope("", &moq_net::Prefixes::from(scope))
 		.with_context(|| format!("failed to scope to `{broadcast}`"))?;
 
 	// Subscribe-only: this session reads and never publishes.
@@ -127,21 +128,21 @@ async fn fetch_from<C>(
 		let mut group = moq_relay::fetch_group(&track, args.group)
 			.await
 			.with_context(|| match args.group {
-				Some(sequence) => format!("group {sequence} of `{}` not found", args.track),
+				Some(start) => format!("group {start} of `{}` not found", args.track),
 				None => format!("no group of `{}` found", args.track),
 			})?;
 
-		let sequence = group.sequence;
+		let start = group.start;
 		let mut index = 0;
 		while let Some(frame) = group
 			.read_frame()
 			.await
-			.with_context(|| format!("failed to read group {sequence} of `{}`", args.track))?
+			.with_context(|| format!("failed to read group {start} of `{}`", args.track))?
 		{
 			match args.json {
 				true => {
 					let mut line = serde_json::to_vec(&Frame {
-						group: sequence,
+						group: start,
 						frame: index,
 						size: frame.payload.len() as u64,
 						payload: base64::engine::general_purpose::STANDARD.encode(&frame.payload),
@@ -201,18 +202,23 @@ mod tests {
 
 			let data = broadcast.broadcast().create_track("data", timed()).expect("data track");
 			for sequence in 0..3 {
-				let mut group = data.append_group().expect("group");
+				let mut group = data
+					.append_group(moq_net::Timestamp::from_millis(sequence).unwrap())
+					.expect("group");
+				let at = moq_net::Timestamp::from_millis(sequence).expect("timestamp");
 				for frame in frames(sequence) {
-					group.write_frame(moq_net::Timestamp::ZERO, frame).expect("frame");
+					group.write_frame(at, frame).expect("frame");
 				}
-				group.finish().expect("finish");
+				group.finish().expect("close");
 			}
 			let empty = broadcast
 				.broadcast()
 				.create_track("empty", timed())
 				.expect("empty track");
 			let live = broadcast.broadcast().create_track("live", timed()).expect("live track");
-			let mut open = live.append_group().expect("open group");
+			let mut open = live
+				.append_group(moq_net::Timestamp::from_millis(0).unwrap())
+				.expect("open group");
 			open.write_frame(moq_net::Timestamp::ZERO, b"first".as_ref())
 				.expect("frame");
 
@@ -265,11 +271,13 @@ mod tests {
 				.route(".hidden", moq_net::origin::RouteOptions::default())
 				.expect("hidden broadcast");
 			let secret = hidden.broadcast().create_track("data", timed()).expect("hidden track");
-			let mut group = secret.append_group().expect("group");
+			let mut group = secret
+				.append_group(moq_net::Timestamp::from_millis(0).unwrap())
+				.expect("group");
 			group
 				.write_frame(moq_net::Timestamp::ZERO, b"secret".as_ref())
 				.expect("frame");
-			group.finish().expect("finish");
+			group.finish().expect("close");
 
 			let ready = fixture.relay.ready();
 			tokio::spawn(fixture.relay.run());

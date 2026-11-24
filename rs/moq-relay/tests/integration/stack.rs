@@ -1,6 +1,6 @@
 //! The library's startup and serving futures fit a Windows main-thread stack.
 
-#![cfg(all(debug_assertions, feature = "_quic"))]
+#![cfg(debug_assertions)]
 
 use moq_relay::{Config, Relay};
 
@@ -10,7 +10,7 @@ async fn load_and_run() {
 	let mut config = Config::default();
 	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.listen.tls.generate = vec!["localhost".into()];
-	config.auth.public = vec![moq_auth::Pattern::all()];
+	config.auth.public = vec![moq_auth::Prefix::all()];
 	config.drain_timeout = Some((std::time::Duration::ZERO).into());
 	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let ready = relay.ready();

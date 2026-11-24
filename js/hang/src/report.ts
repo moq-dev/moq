@@ -3,19 +3,20 @@
  * @module
  */
 
+import { Duration } from "@moq/clock";
 import * as Json from "@moq/json";
-import type * as Moq from "@moq/net";
+import * as Moq from "@moq/net";
 import type * as z from "zod/mini";
 
-/** How often a reporter writes, in milliseconds: about once a second, as the hang draft asks. */
-export const INTERVAL = 1000;
+/** How often a reporter writes: about once a second, as the hang draft asks. */
+export const INTERVAL = Duration.secs(1);
 
 // Below every media track, so a report never delays the media it describes.
 const PRIORITY = -128;
 
 // Deltas compress against the snapshot in their group, and a joiner asks for a fresh group once
 // they outweigh eight snapshots. Matches the Rust CLI's report tracks.
-const REFRESH = 8;
+const REFRESH = { ratio: 8 };
 
 /**
  * One compressed snapshot track, written only while someone subscribes, so an unobserved report
@@ -29,13 +30,18 @@ export class Writer<T, I = T> {
 	#producer: Json.Snapshot.Producer<T>;
 	#schema: z.ZodMiniType<T, I>;
 	#closed = false;
+	// The report track is scale-less, so each write names the next group key: past every group a
+	// snapshot opened, while a delta carries its open group's key whatever this names.
+	#key = 0n;
 
 	/**
 	 * Create `name` on `broadcast`, parsing each report with `schema` before it is written, so a
 	 * publisher passes the schema's input (plain numbers) and readers get its output.
 	 */
 	constructor(broadcast: Moq.Broadcast.Producer, name: string, schema: z.ZodMiniType<T, I>) {
-		this.track = broadcast.createTrack(name, { priority: PRIORITY, compression: "deflate", refresh: REFRESH });
+		const track = broadcast.createTrack(name, { priority: PRIORITY, compression: "deflate", refresh: REFRESH });
+		if (!track) throw new Error(`the track ${name} already exists`);
+		this.track = track;
 		this.#producer = new Json.Snapshot.Producer<T>({ track: this.track });
 		this.#schema = schema;
 	}
@@ -46,9 +52,9 @@ export class Writer<T, I = T> {
 	 * is aborted with the cause, which its subscribers read.
 	 */
 	update(value: I): void {
-		if (this.#closed || this.track.demand().wanted.peek() === undefined) return;
+		if (this.#closed || !this.track.demand().wanted.peek()) return;
 		try {
-			this.#producer.update({ value: this.#schema.parse(value) });
+			this.#producer.update(this.#schema.parse(value), Moq.Time.Timestamp.unscaled(this.#key++));
 		} catch (err) {
 			console.warn("a report track failed; closing it", err);
 			this.#closed = true;

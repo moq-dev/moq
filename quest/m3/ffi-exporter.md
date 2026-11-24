@@ -8,8 +8,10 @@ moq's bindings (Kotlin, Swift, Python, Go, Dart, C++, and C) come from
 attributes. moq-ffi shrinks to the remainder that is genuinely new API.
 `rs/uniffi-bindgen`, `nix/uniffi-dart-*`, the per-generator pins, and the
 UniFFI dependency are deleted, and the three `kixelated/uniffi-*` generator
-forks are archived. Wrapper APIs do not change except where a decision below
-says so.
+forks are archived. The switch is a breaking release of every binding
+(decided 2026-11-16): the hand-written parts of each wrapper keep their API
+except where a decision below says so, and the generated names the wrappers
+re-export may change.
 
 ## Plan
 
@@ -24,39 +26,14 @@ exporter. Until the switch, moq keeps building from its pinned
 [the vendor sync](/quest/m3/vendor-sync/README.md).
 Not chosen: publish the fork and switch to it first; decide later.
 
-Carried over from the fork plan, where they still apply to the exporter's
-generators (each needs re-checking against the exporter's design):
+The bullets below carried over from the fork plan; each still applies to the
+exporter's generators and needs re-checking against its design. The fork-era
+choices (UniFFI as the base, a hard fork in rust2 published as the
+`rust2-uniffi*` crates) no longer apply: the fork is not published, and
+moq-ffi builds on the exporter's pinned revision with no `[patch]` and no git
+dependency, so crates.io moq-ffi still builds (see the
+[condition quest](/quest/m3/rust2-exporter.md)).
 
-
-Decided with the maintainer on 2026-10-13, after a review of how moq uses
-UniFFI:
-
-- **Base**: UniFFI. [The BoltFFI spike](https://github.com/moq-dev/rust2/blob/main/bench/ffi/README.md#boltffi-comparison)
-  recommended it.
-- **Why fork**: every UniFFI minor release breaks external generators (0.31
-  changed `module_path`, 0.32 changed the metadata encoding without bumping
-  the contract version, and `main` removes the old library-mode API). No
-  external generator has released for 0.32, so moq carries three forks, each
-  pinned in about five places. The core also blocks work moq needs: byte
-  copies, zero-copy returns, and namespaced external types
-  (mozilla/uniffi-rs#3026, auto-closed by our
-  [#5498](https://github.com/moq-dev/moq/pull/5498) and still unfixed
-  upstream).
-- **Free to diverge**: the fork may change metadata, checksums, and the FFI
-  contract when a moq quest needs it. A diverged contract must never mix
-  silently with upstream UniFFI.
-
-Decided with the maintainer on 2026-10-23: the hard fork lives in
-`moq-dev/rust2`, not a new `moq-dev/uniffi`. rust2 groups Rust-to-other-language
-tools (bindings, a TypeScript translator, build-speed work) under one setup.
-moq's generator code moves with it, including `rs/uniffi-bindgen`. The import
-and crates.io publishing are rust2's
-[UniFFI import quest](https://github.com/moq-dev/rust2/blob/main/quest/m1/uniffi.md),
-which publishes `rust2-uniffi`, `rust2-uniffi-core`, `rust2-uniffi-macros`, and
-`rust2-uniffi-bindgen`. This quest is the moq side:
-
-- moq-ffi depends on the `rust2-uniffi*` crates directly, with no `[patch]` and
-  no git dependency, so crates.io moq-ffi still builds.
 - **Generated code stays identical**: Kotlin package names, library symbol
   prefixes, and every wrapper's API do not change, except Dart's
   `MoqRoute.instanceId()` below. Diff the regenerated bindings for every
@@ -93,25 +70,51 @@ which publishes `rust2-uniffi`, `rust2-uniffi-core`, `rust2-uniffi-macros`, and
   workflows, `rs/moq-ffi/build.sh`, and `sh/` read the generators from it.
   Delete `rs/uniffi-bindgen`, the "five places" comments in `flake.nix`, and the
   `nix/uniffi-dart-*` lockfile and patch. The `sh/{kt,swift,dart,cpp}`
-  packaging scripts stay: they package moq.
+  packaging scripts stay, except the Swift FFI ones the release template below
+  replaces.
+- **Python and Swift FFI releases** (maintainer, 2026-11-17, from
+  [kixel-ai/rust2#852](https://github.com/kixel-ai/rust2/pull/852), which added
+  rust2's [release template](https://github.com/kixel-ai/rust2/blob/main/ffi/release/README.md)):
+  moq-ffi's wheels and XCFramework come from rust2's shared `bindings.yml`
+  builder, published by the `release.yml` that
+  `package.py init --manifest-path rs/moq-ffi/Cargo.toml --swift-mirror moq-dev/moq-swift-ffi`
+  writes at the rust2 commit moq pins, plus `features: openh264`. It publishes
+  on the `moq-ffi-v*` tags moq already cuts. Register it as `moq-ffi`'s PyPI
+  trusted publisher in place of `release-py-ffi.yml`, then delete
+  `release-py-ffi.yml`, `release-swift-ffi.yml`,
+  `sh/swift/{package,verify,publish}-ffi.sh`, and the maturin section of
+  `pyproject.toml`. `release-swift-lib.yml`, `release-py.yml`, and
+  `sh/swift/{package,verify,publish}.sh` keep packaging the hand-written
+  wrappers, against the new FFI package.
+  - ✅ Floors rise to Python 3.11 (the stable ABI's first with the buffer
+    protocol), macOS 13 and Swift 6.2, with iOS 16 unchanged, and moq-ffi
+    ships no sdist, since a source build needs the nightly exporter
+    (rejected: keep Python 3.10; keep macOS 12.3 by gating `Swift.Duration`
+    APIs; a pre-exported sdist).
+  - ✅ Delete the Swift FFI packaging scripts the template replaces (rejected:
+    keep them), so one path packages the FFI.
+  - ✅ Accept the exporter's names: the Python import stays `moq_ffi`, the
+    Swift module becomes `MoqFfi` and the asset `MoqFfiFFI.xcframework.zip`
+    (today both `MoqFFI`), listed in `MIGRATE.md` (rejected: keep `MoqFFI`,
+    which needs a rename the exporter has no way to express).
+  - ✅ A new `swift-mirror` environment holds moq-bot's App credentials,
+    deployable only from `moq-ffi-v*` tags, so moq's `release.yml` stays
+    exactly what `package.py init` writes and a rust2 pin bump is a re-init
+    (rejected: hand-editing moq's copy to the existing `bot` environment;
+    renaming the template's environment in rust2 to moq's name).
 - Zero-default durations (Decided 2026-11-03 (maintainer, follow-up planning after the 2026-11-03 /quest-afk and /quest-complete runs), from
   [moq-dev/moq#7697](https://github.com/moq-dev/moq/pull/7697)): the
   exporter gives generated duration fields a zero default, so a bare C++
   `moq::Subscription{}` or generated C `moq_subscription_default()` means a
   max delay of 0, as every hand-written binding's does. Until then those
   two leave both bounds unset, and their docs say to start from
-  `subscription_defaults()` (accepted docs-only on #7697). Options shown:
-  m0; m1; ✅ m2, in this quest.
+  `subscription_defaults()` (accepted docs-only on #7697). It lands in
+  this quest.
 - Negative durations (2026-10-25, maintainer): the Dart negative-duration
   patch moq carries goes upstream into the fork's Dart generator, and the Go
   generator stops panicking on a negative `time.Duration` (the Go wrapper
   guards it today; delete the guard in the PR that pins a generator with the
   fix, with a test passing a negative duration through the Go binding).
-- Cancelled Go results ([moq-dev/moq#7397](https://github.com/moq-dev/moq/pull/7397)):
-  uniffi-bindgen-go `v0.10.0-kixelated.2` destroys a result whose context was
-  cancelled as the call completed, and completes a future cancelled while
-  pending as `context.Canceled`. The exporter's Go bindings must do both, tested
-  like the fork's `destroy` fixture, which counts live handles.
 - Python running-loop preference and Dart buffer ownership (2026-10-31, from
   [moq-dev/moq#7461](https://github.com/moq-dev/moq/pull/7461)):
   [kixelated/uniffi-rs#1](https://github.com/kixelated/uniffi-rs/pull/1)
@@ -126,7 +129,10 @@ which publishes `rust2-uniffi`, `rust2-uniffi-core`, `rust2-uniffi-macros`, and
   ([Generated C bindings](/quest/m3/c/README.md)) to point at rust2, then
   archive the three forks.
 - Cancelled Go results (2026-10-31, from
-  [moq-dev/moq#7397](https://github.com/moq-dev/moq/pull/7397), open): the
+  [moq-dev/moq#7397](https://github.com/moq-dev/moq/pull/7397)):
+  uniffi-bindgen-go `v0.10.0-kixelated.2` destroys a result whose context was
+  cancelled as the call completed, and completes a future cancelled while
+  pending as `context.Canceled`; the exporter's Go bindings must do both. The
   Go generator's fix that destroys a cancelled async call's result lives on
   `kixelated/uniffi-bindgen-go`'s `cancelled-result` branch and tag
   `v0.10.0-kixelated.2+v0.32.0`, not on the fork's `main`, like the earlier
@@ -136,10 +142,49 @@ which publishes `rust2-uniffi`, `rust2-uniffi-core`, `rust2-uniffi-macros`, and
   with an error, which the fork still leaks (moq-ffi's errors hold no
   handles today).
 
-Public API: moq-ffi's dependency names change, generated C type names become
-CamelCase, and the generated record `MoqAudioEncoderFinished` becomes
-`MoqAudioEncoderFinish` in every language; wrapper APIs do not change except
-Dart's `MoqRoute.instanceId()`, which takes the exporter's name. Wire: none.
+Deferred 2026-11-15 (maintainer, /quest-complete): the `Waiting` decision on
+the generated binding renames stays open, kept out of that run's m0 to m2
+scope, since the binding API changes anyway in the rust2 migration expected
+around 2026-12-15.
+
+Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit), settling
+that `Waiting` item: ✅ accept two breaks. 0.22 ships the bindings on
+UniFFI, and the switch is a second breaking binding release (rejected:
+announcing the binding packages as a preview that freezes at the switch;
+holding the binding packages off the shared minor until the switch; counting
+only the hand-written wrappers as public API, the old option B).
+
+Option B's premise does not hold, which is why it was not offered again: the
+generated layer is public API in most languages, counted 2026-11-16.
+
+- Kotlin: 187 `typealias` lines under `kt/moq/src/jvmAndAndroidMain` onto
+  `uniffi.moq.*` classes, handles included (104 in `Aliases.kt`), and a test
+  requires one for every generated record and handle
+  (`SmokeTest.kt:224`).
+- Dart: 157 `typedef` lines under `dart/moq/lib`.
+- Swift wraps handles but has 102 `typealias` lines under
+  `swift/Sources/Moq` (46 in `Aliases.swift`), among them `MoqError`,
+  `ProtocolKind`, `AnnounceEvent`, and `ConnectionPhase`.
+- C++ and the generated C are generated entirely.
+
+So "wrapper APIs do not change" in the bullets above, carried over from the
+abandoned fork plan, is a property to measure, not assume: the switch's PR diffs each
+language's public API (`sh/api-diff`) and its Impact section lists every
+rename for the packages' `MIGRATE.md`. Reshapes that outlive the generator
+land before the cut instead: the open-set rule in `rs/moq-ffi/AGENTS.md`
+(selector objects, `Unknown` variants, and a null `max_age` for no limit) and
+the group rename; the switch keeps those shapes. The audit's other binding findings were not picked: the `Moq`
+facade Kotlin and Dart start from stays, and `MoqError`'s variants stay as
+they are.
+
+Public API: breaking in every binding. moq-ffi's dependency names change,
+generated C type names become CamelCase, the generated record
+`MoqAudioEncoderFinished` becomes `MoqAudioEncoderFinish` in every language,
+Dart's `MoqRoute.instanceId()` takes the exporter's name, the FFI Swift module
+becomes `MoqFfi`, moq-ffi's floors rise to Python 3.11, macOS 13, and Swift
+6.2 with no sdist, and any other generated name the wrappers re-export may
+change, each listed in the PR.
+Wire: none.
 
 ## Required
 

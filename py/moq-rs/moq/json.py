@@ -6,7 +6,7 @@ long as they live, while the catalog has no window mode. A consumer takes over a
 :class:`~moq.TrackConsumer` that has not read a group yet. Either track can come from a request
 as well as by name. Values are any JSON-serializable Python object.
 
-Compression is the track's: publish it with ``TrackInfo(compression=Compression.DEFLATE)``, which JSON benefits from,
+Compression is the track's: publish it with ``TrackInfo(compression=Compression.deflate())``, which JSON benefits from,
 and a consumer reads it with no option of its own.
 
 Every write (a snapshot update, a stream append, a window push or pop) takes a timestamp on the
@@ -19,11 +19,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
 from moq_ffi import (
     MoqJsonSnapshotConfig,
     MoqJsonSnapshotConsumer,
+    MoqJsonSnapshotConsumerConfig,
     MoqJsonSnapshotProducer,
     MoqJsonStreamConsumer,
     MoqJsonStreamProducer,
@@ -36,7 +38,7 @@ from moq_ffi import (
 )
 
 from . import publish, subscribe
-from ._records import Timestamp, _opt_from_ts
+from ._records import Timestamp
 from ._stream import _Stream
 from .publish import BroadcastProducer, TrackDemand
 
@@ -59,17 +61,18 @@ __all__ = [
 class Timed:
     """A parsed JSON value and the timestamp of the frame that carried it.
 
-    ``timestamp`` is on the broadcast clock, and ``None`` on an untimed track.
+    ``timestamp`` is on the broadcast clock, or :meth:`moq.Timestamp.unscaled` at the
+    frame's group key on a scale-less track.
     """
 
     value: Any
-    timestamp: Timestamp | None
+    timestamp: Timestamp
 
     @staticmethod
     def _from_ffi(value: MoqJsonValue | None) -> Timed | None:
         if value is None:
             return None
-        return Timed(value=json.loads(value.value), timestamp=_opt_from_ts(value.timestamp))
+        return Timed(value=json.loads(value.value), timestamp=Timestamp._from_ffi(value.timestamp))
 
 
 class SnapshotProducer:
@@ -77,7 +80,7 @@ class SnapshotProducer:
 
     Each :meth:`update` supersedes the last; a late joiner only sees the newest value, encoded as
     snapshots and merge-patch deltas automatically. Set ``deltas=False`` to publish every update
-    as a full snapshot in its own group. With deltas on, give the track a ``refresh`` ratio so a
+    as a full snapshot in its own group. With deltas on, give the track a :class:`moq.TrackRefresh` ``ratio`` so a
     join after more than that many snapshots' worth of deltas asks for the value restated in a
     fresh group. A name the catalog already carries is refused.
     """
@@ -103,6 +106,16 @@ class SnapshotProducer:
         """
         self._inner.update(json.dumps(value), timestamp._ffi())
 
+    def abort_unwanted(self, error_code: int) -> bool:
+        """Abort this track with an application error code, but only while nobody wants it.
+
+        Call it once :meth:`TrackDemand.wanted_changed` returns ``False``. Returns ``True`` once
+        the track is closed, and ``False``, leaving the track open, when a reader joined since;
+        keep serving and wait for the next ``None`` on a fresh ``demand()``: one that already
+        returned ``None`` misses a reader that came and went, and waits on.
+        """
+        return self._inner.abort_unwanted(error_code)
+
     def finish(self) -> None:
         """Finish the track, closing any open group."""
         self._inner.finish()
@@ -126,6 +139,16 @@ class StreamProducer:
         """Append one record to the log at ``timestamp`` on the broadcast clock."""
         self._inner.append(json.dumps(value), timestamp._ffi())
 
+    def abort_unwanted(self, error_code: int) -> bool:
+        """Abort this track with an application error code, but only while nobody wants it.
+
+        Call it once :meth:`TrackDemand.wanted_changed` returns ``False``. Returns ``True`` once
+        the track is closed, and ``False``, leaving the track open, when a reader joined since;
+        keep serving and wait for the next ``None`` on a fresh ``demand()``: one that already
+        returned ``None`` misses a reader that came and went, and waits on.
+        """
+        return self._inner.abort_unwanted(error_code)
+
     def finish(self) -> None:
         """Finish the track, closing the group."""
         self._inner.finish()
@@ -136,13 +159,25 @@ class SnapshotConsumer(_Stream[Timed]):
 
     Each item is a :class:`Timed`. Every group a newer one supersedes is skipped; :meth:`latest`
     skips to the newest state instead. The consumer subscribes to the track ``name`` on
-    ``broadcast`` itself, at a zero ``delay.max`` and ``priority`` (higher first); a read waits for
-    that subscription and raises if it fails. Usable as an async context manager that cancels on
-    exit.
+    ``broadcast`` itself, at ``priority`` (higher first) and ``delay``; a read waits for that
+    subscription and raises if it fails. Usable as an async context manager that cancels on exit.
+
+    ``delay`` is the reader's playout delay behind the live edge, the subscription's ``delay.min``
+    and ``delay.max``. Zero skips a snapshot the moment a newer one arrives. A reader that holds
+    each snapshot until media reaches its timestamp sets its delay, so a superseded snapshot it may
+    still need stays deliverable that long and iteration yields it.
     """
 
-    def __init__(self, broadcast: subscribe.BroadcastConsumer, name: str, *, priority: int = 0) -> None:
-        self._inner = MoqJsonSnapshotConsumer(broadcast._inner, name, priority)
+    def __init__(
+        self,
+        broadcast: subscribe.BroadcastConsumer,
+        name: str,
+        *,
+        priority: int = 0,
+        delay: timedelta = timedelta(0),
+    ) -> None:
+        config = MoqJsonSnapshotConsumerConfig(priority=priority, delay=delay)
+        self._inner = MoqJsonSnapshotConsumer(broadcast._inner, name, config)
 
     async def _next(self) -> Timed | None:
         return Timed._from_ffi(await self._inner.next())
@@ -183,7 +218,7 @@ class WindowProducer:
     that restate the records it retains, so a reader can join at any point. Bound what it retains
     by popping, or with ``checkpoint_records`` for a window that is never popped: a reader that
     keeps up still sees every record, while one joining later is told the older ones were skipped.
-    Give the track a ``refresh`` ratio so a join past it gets the window restated in a fresh group.
+    Give the track a :class:`moq.TrackRefresh` ``ratio`` so a join past it gets the window restated in a fresh group.
 
     Not advertised in the broadcast's catalog, which has no window mode; a reader names the track.
     """
@@ -216,6 +251,16 @@ class WindowProducer:
         so every edit so far sits in a group no later frame extends.
         """
         self._inner.cut()
+
+    def abort_unwanted(self, error_code: int) -> bool:
+        """Abort this track with an application error code, but only while nobody wants it.
+
+        Call it once :meth:`TrackDemand.wanted_changed` returns ``False``. Returns ``True`` once
+        the track is closed, and ``False``, leaving the track open, when a reader joined since;
+        keep serving and wait for the next ``None`` on a fresh ``demand()``: one that already
+        returned ``None`` misses a reader that came and went, and waits on.
+        """
+        return self._inner.abort_unwanted(error_code)
 
     def finish(self) -> None:
         """Finish the track, closing any open group."""
@@ -265,7 +310,7 @@ def _window_event(timed: MoqJsonWindowTimed | None) -> Timed | None:
         value = WindowEventSkip(range(event.start, event.end))
     else:
         raise TypeError(f"unknown window event: {event!r}")
-    return Timed(value=value, timestamp=_opt_from_ts(timed.timestamp))
+    return Timed(value=value, timestamp=Timestamp._from_ffi(timed.timestamp))
 
 
 class WindowConsumer(_Stream[Timed]):

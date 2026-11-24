@@ -57,8 +57,7 @@ func TestTracks(t *testing.T) {
 	broadcast, consumer := newBroadcast(t)
 
 	scale := uint64(1_000_000)
-	deflate := moq.CompressionDeflate
-	track, err := broadcast.PublishTrack("status", &moq.TrackInfo{Timescale: &scale, Compression: &deflate})
+	track, err := broadcast.PublishTrack("status", &moq.TrackInfo{Timescale: &scale, Compression: moq.DeflateCompression()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +71,7 @@ func TestTracks(t *testing.T) {
 	}
 	defer snapshotConsumer.Cancel()
 	for viewers := 1; viewers <= 4; viewers++ {
-		at := moq.Timestamp{Value: uint64(viewers) * 1000, Scale: scale}
+		at := moq.TimestampFromScale(uint64(viewers)*1000, scale)
 		if err := snapshot.Update(map[string]any{"viewers": viewers}, at); err != nil {
 			t.Fatal(err)
 		}
@@ -91,7 +90,7 @@ func TestTracks(t *testing.T) {
 		if decoded["viewers"] != float64(viewers) {
 			t.Fatalf("snapshot = %s, want viewers %d", value.Value, viewers)
 		}
-		if want := (moq.Timestamp{Value: uint64(viewers) * 1000, Scale: scale}); value.Timestamp == nil || *value.Timestamp != want {
+		if want := moq.TimestampFromScale(uint64(viewers)*1000, scale); !reflect.DeepEqual(value.Timestamp, want) {
 			t.Fatalf("timestamp = %v, want %v", value.Timestamp, want)
 		}
 	}
@@ -111,7 +110,7 @@ func TestTracks(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer streamConsumer.Cancel()
-	at := moq.Timestamp{Value: 5, Scale: 1_000}
+	at := moq.TimestampFromScale(5, 1_000)
 	if err := stream.Append(map[string]any{"n": 1}, at); err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +118,7 @@ func TestTracks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(record.Value) != `{"n":1}` || record.Timestamp == nil || *record.Timestamp != at {
+	if string(record.Value) != `{"n":1}` || !reflect.DeepEqual(record.Timestamp, at) {
 		t.Fatalf("record = %s at %v, want %v", record.Value, record.Timestamp, at)
 	}
 
@@ -138,8 +137,7 @@ func TestWindow(t *testing.T) {
 	broadcast, consumer := newBroadcast(t)
 
 	scale := uint64(1_000_000)
-	deflate := moq.CompressionDeflate
-	track, err := broadcast.PublishTrack("log", &moq.TrackInfo{Timescale: &scale, Compression: &deflate})
+	track, err := broadcast.PublishTrack("log", &moq.TrackInfo{Timescale: &scale, Compression: moq.DeflateCompression()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,15 +151,15 @@ func TestWindow(t *testing.T) {
 	}
 	defer windowConsumer.Cancel()
 
-	ms := func(n int) *moq.Timestamp {
-		return &moq.Timestamp{Value: uint64(n) * 1000, Scale: scale}
+	ms := func(n int) moq.Timestamp {
+		return moq.TimestampFromScale(uint64(n)*1000, scale)
 	}
 	for n := range 3 {
-		if err := window.Push(map[string]any{"n": n}, *ms(n)); err != nil {
+		if err := window.Push(map[string]any{"n": n}, ms(n)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := window.Pop(2, *ms(3)); err != nil {
+	if err := window.Pop(2, ms(3)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -185,7 +183,7 @@ func TestWindow(t *testing.T) {
 	if err := window.Cut(); err != nil {
 		t.Fatal(err)
 	}
-	if err := window.Push(map[string]any{"n": 3}, *ms(4)); err != nil {
+	if err := window.Push(map[string]any{"n": 3}, ms(4)); err != nil {
 		t.Fatal(err)
 	}
 	if err := window.Finish(); err != nil {
@@ -244,8 +242,8 @@ func TestDemand(t *testing.T) {
 	if name := snapshotDemand.Name(); name != "status" {
 		t.Fatalf("Name = %q, want status", name)
 	}
-	if wanted := snapshotDemand.Wanted(); wanted != nil {
-		t.Fatalf("Wanted = %d before any subscriber", *wanted)
+	if snapshotDemand.Wanted() {
+		t.Fatal("Wanted before any subscriber")
 	}
 
 	snapshotConsumer, err := moqjson.NewSnapshotConsumer(consumer, "status", moqjson.SnapshotConsumerOptions{})
@@ -280,6 +278,58 @@ func TestDemand(t *testing.T) {
 	}
 }
 
+// TestAbortUnwantedKeepsALateReader ends an idle stream only once a reader that
+// joined after its demand went unwanted has left.
+func TestAbortUnwantedKeepsALateReader(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	broadcast, consumer := newBroadcast(t)
+
+	stream, err := moqjson.NewStreamProducer(broadcast, publishTrack(t, broadcast, "events"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	demand, err := stream.Demand()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := untilWanted(ctx, demand, false); err != nil {
+		t.Fatal(err)
+	}
+
+	late, err := moqjson.NewStreamConsumer(subscribeTrack(ctx, t, consumer, "events"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if aborted, err := stream.AbortUnwanted(7); err != nil || aborted {
+		t.Fatalf("AbortUnwanted = %v, %v; want false with a reader", aborted, err)
+	}
+	if err := stream.Append("still serving", moq.TimestampFromScale(0, 1_000)); err != nil {
+		t.Fatal(err)
+	}
+	record, err := late.Next(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record == nil || string(record.Value) != `"still serving"` {
+		t.Fatalf("record = %+v, want \"still serving\"", record)
+	}
+
+	if err := untilWanted(ctx, demand, true); err != nil {
+		t.Fatal(err)
+	}
+	late.Cancel()
+	if err := untilWanted(ctx, demand, false); err != nil {
+		t.Fatal(err)
+	}
+	if aborted, err := stream.AbortUnwanted(7); err != nil || !aborted {
+		t.Fatalf("AbortUnwanted = %v, %v; want true once unwanted", aborted, err)
+	}
+	if _, err := stream.AbortUnwanted(7); !errors.Is(err, moq.ErrClosed) {
+		t.Fatalf("AbortUnwanted after abort = %v, want ErrClosed", err)
+	}
+}
+
 // untilWanted blocks until some subscriber wants the track, or none does.
 func untilWanted(ctx context.Context, demand *moq.TrackDemand, wanted bool) error {
 	for {
@@ -287,7 +337,7 @@ func untilWanted(ctx context.Context, demand *moq.TrackDemand, wanted bool) erro
 		if err != nil {
 			return err
 		}
-		if (next != nil) == wanted {
+		if next == wanted {
 			return nil
 		}
 	}

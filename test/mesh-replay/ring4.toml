@@ -1,0 +1,26 @@
+# The smaller end of the nightly sweep over relays: a ring of four, the smallest mesh
+# where a relay's neighbours can all reach a publisher only through it. The longest
+# route crosses two links. Links dial clockwise, so every relay dials one and accepts one.
+name = "ring4"
+relays = ["a", "b", "c", "d"]
+
+[shape]
+delay = "10ms"
+rate = 4000000
+queue = "250ms"
+
+[[links]]
+dial = "a"
+accept = "b"
+
+[[links]]
+dial = "b"
+accept = "c"
+
+[[links]]
+dial = "c"
+accept = "d"
+
+[[links]]
+dial = "d"
+accept = "a"

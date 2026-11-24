@@ -25,10 +25,13 @@
 			"remote": true
 		}
 	],
-	// Observability
+	// Observability: keep console lines (cache read errors) but skip the
+	// per-request invocation log, which was about a quarter of the account's
+	// Workers Logs volume (503K events in 3 days at about 5 kB each).
 	"observability": {
 		"logs": {
-			"enabled": true
+			"enabled": true,
+			"invocation_logs": false
 		}
 	}
 }

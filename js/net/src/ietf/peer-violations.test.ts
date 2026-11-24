@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { SessionCode, StreamCode, StreamError } from "../error.ts";
-import { HopSchema } from "../hop.ts";
+import { toHop } from "../hop.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Stream, Writer } from "../stream.ts";
@@ -21,7 +21,8 @@ const versions = [
 
 // Both connection drivers run, while the client can inject a malformed peer stream.
 for (const [version, alpn] of versions) {
-	test.each(["update", "unsolicited"] as const)(
+	// "long" names a namespace past the 1024-byte close reason a browser accepts.
+	test.each(["update", "unsolicited", "long"] as const)(
 		`${alpn}: %s closes the peer session with its violation`,
 		async (kind) => {
 			const pair = createMockTransportPair(alpn);
@@ -51,7 +52,8 @@ for (const [version, alpn] of versions) {
 				if (kind === "update") await stream.writer.u62(0x02n);
 				else {
 					await stream.writer.u53(PublishNamespace.id);
-					await new PublishNamespace({ requestId: 0n, trackNamespace: Path.from("unasked") }).encode(
+					const name = kind === "long" ? "x".repeat(2000) : "unasked";
+					await new PublishNamespace({ requestId: 0n, trackNamespace: Path.from(name) }).encode(
 						stream.writer,
 						version,
 					);
@@ -111,8 +113,8 @@ for (const [version, alpn] of versions) {
 		);
 		await writer.u53(RequestOk.id);
 		await new RequestOk({}).encode(writer, version);
-		const self = HopSchema.parse(5n),
-			peer = HopSchema.parse(9n);
+		const self = toHop(5n),
+			peer = toHop(9n);
 		const entry = async (name: string) => {
 			await writer.u53(SubscribeNamespaceEntry.id);
 			await new SubscribeNamespaceEntry({
@@ -161,8 +163,8 @@ for (const [version, alpn] of versions) {
 		`${alpn}: %s releases a slot after route reflection and reattachment`,
 		async (ending) => {
 			const pair = createMockTransportPair(alpn);
-			const self = HopSchema.parse(5n),
-				peer = HopSchema.parse(9n);
+			const self = toHop(5n),
+				peer = toHop(9n);
 			const subscriber = new Subscriber({
 				session: new NativeSession(pair.server, version, true),
 				quic: pair.server,

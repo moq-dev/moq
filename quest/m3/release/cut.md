@@ -7,18 +7,29 @@ package versions, and the release-triggered publication jobs complete.
 
 ## Plan
 
-Follow CONTRIBUTING.md's release procedure: merge release into main first,
+Follow RELEASE.md's release procedure: merge release into main first,
 then main into release using merge commits. Confirm the maintainer's cut
 instruction before executing it. Right after merging release into main, set
 every eligible package with `just version 0.22.0` for this cut, then one
-minor up per cut, following [Versions](/CONTRIBUTING.md#versions), including
-packages that did not change. `@moq/qmux` and the Rust `qmux` crate are
+minor up per later API or wire cut, following
+[Versions](/RELEASE.md#versions), including packages that did not change. `@moq/qmux` and the Rust `qmux` crate are
 exempt from that version (`version.json`), so check each against its
 registry by hand: npm already has `@moq/qmux` 0.3.3 and 0.3.4, published
-from moq-dev/web-transport, while `js/qmux` is at 0.3.3. Publishing 0.3.3
+from moq-dev/web-transport, and 0.3.5 for
+[the release line's credit fix](https://github.com/moq-dev/moq/pull/8808), while `js/qmux` is at 0.3.3. Publishing 0.3.3
 fails, and `workspace:^` would resolve `@moq/net`'s dependency to
-web-transport's 0.3.4, a different API. `js/qmux` must publish above 0.3.4;
+web-transport's latest 0.3.x, a different API. `js/qmux` must publish above that;
 the maintainer picks the version (found 2026-11-07 by the API shape audit).
+Recommended 2026-11-12 (/quest-audit): 0.4.0, so a consumer of
+web-transport's `^0.3` never resolves to the new API.
+Also before publishing, recreate the npm trusted publishers of `@moq/clock`,
+`@moq/libav`, `@moq/stats`, and `@moq/video`, which were claimed as `0.0.0`
+placeholders on 2026-11-24. npm expires a trusted publisher that no OIDC
+exchange has validated about 48 hours after it is created, and only the
+package's Settings page shows it as Expired. Revoke each (`npm trust list`,
+`npm trust revoke --id`) and run `npm trust github @moq/<name> --file
+release-js.yml --repository moq-dev/moq --environment npm --allow-publish
+--allow-stage-publish`, then publish within 48 hours.
 Before publishing, confirm moq-dev/web-transport's release config no longer
 publishes `@moq/qmux` or `qmux` (the freeze step of
 [qmux-js-retire](/quest/m3/release/qmux-js-retire.md) and
@@ -30,8 +41,13 @@ its unpublished 0.6.0 (decided 2026-11-01). Run candidate
 compatibility, draft, package, and all-language interop checks, and verify
 publication outcomes. Separate artifact install proofs and package-specific
 tags follow this cut. This planning PR cuts and publishes nothing.
-After publication, re-measure the planned wire-compat breaks against the
-published versions, as CONTRIBUTING.md's release procedure describes.
+After publication, check Release remeasure and its pin-update PR, as
+RELEASE.md describes. Also check that the first release-plz PR after the cut
+gets the regenerated `nix/Cargo.nix` commit
+([moq-dev/moq#8684](https://github.com/moq-dev/moq/pull/8684)) and passes
+Check: that step has never run (found by the
+[feature review](/quest/m3/release/feature-review.md), 2026-11-14). The pipeline re-measures changed planned-break pins
+and requests landing through the main merge queue.
 
 This cut carries stats epochs, so it drops
 [#4810](https://github.com/moq-dev/moq/pull/4810)'s release-only wall-clock
@@ -51,50 +67,119 @@ cached groups on drafts 14 to 22. ✅ No backport (maintainer, 2026-11-04;
 [moq-dev/moq#7815](https://github.com/moq-dev/moq/pull/7815)), so check
 both fixes reach release.
 
-Recurs once per major release (decided 2026-10-19; shift rule replaced
-2026-11-05). The PR that finishes the cut shifts the milestones, as the root
-[questline](/quest/README.md) describes: this epic's remaining publication
-and adoption quests move to m0, m3's other quests split by kind into m1
-(additive) and m2 (breaking), m4's move to m3, m5 stays, and every link to a
-moved path is rewritten. A recurring cut-gate child that its last run
-re-created in m3, such as the [vendor
-sync](/quest/m3/vendor-sync/README.md), moves under the re-created
-gate instead. That PR also removes this path from every `Required`, which
-releases the audits waiting on it. It then re-creates the cut gate at `quest/m2/cut-gate/README.md` from
-the template below, and
-this quest, the [API shape review](/quest/m3/release/api-review.md), the
-[feature review](/quest/m3/release/feature-review.md), and the [Cargo feature
-review](/quest/m3/release/feature-flags.md) at the same paths under a fresh
-release epic in m3. Each keeps its Goal and recurrence paragraph and requires
-the new `/quest/m2/README.md`, and the cut also requires all three reviews.
+Recurs once per cut (decided 2026-10-19 as once per major release; per cut,
+in three kinds, 2026-11-09). The kinds, what each publishes, and which checks
+each runs are in [Releases](/RELEASE.md#releases). This run is the
+`0.22.0` cut: it still waits on all of m2, and it ends this cycle like a wire
+cut. Once it merges into `release` and
+release-plz has published every package it bumps (the API diff's baselines), a
+PR on `main` sets `phase` in `version.json` to `additive` (the cut PR keeps
+the old phase, so its API diff only reports its breaks) and performs the re-split the root
+[questline](/quest/README.md) describes. This epic's remaining publication and
+adoption quests move to a release epic in m0, m3's other quests sort by kind
+into m1 (additive), m2 (API breaks) and m3 (wire changes), m4 stays, m5 moves
+to m6 with its `Required` and a new empty m5 requires the wire cut too, each
+milestone README's Goal and current Plan rule are rewritten for its new
+role (dated decision entries stay as history), and each audit's
+recurrence names m4 and the wire cut instead of m3 and this path.
+
+Every cut's PR removes its own path from every `Required`, which releases the
+quests waiting on it, and rewrites every link to a moved path. Each cut
+recurs as one of two quests, which keep their Goal, these recurrence
+paragraphs, and the cut gate template with its decision:
+
+- **The on-demand cut**, `/quest/m0/release/cut.md` in m0's release epic
+  (created if the cut moved nothing there): the next additive or API cut. It
+  has no `Required` and a `## Waiting` item for the maintainer's instruction
+  naming the cut and its kind. Any quest that waits only for the next
+  publication requires it. Every cut's PR, the wire cut's included, removes
+  this path from every `Required` and re-creates it.
+- **The wire cut**, `/quest/m4/wire-cut.md`: the cut that ends the cycle. It
+  requires `/quest/m2/README.md` and `/quest/m3/README.md`, so it becomes
+  ready once the cycle's API breaks, wire changes, and the cut gate in m3
+  have merged, and it has no `## Waiting`, since the maintainer opens the
+  wire phase before that. [m5](/quest/m5/README.md) and m6 require it: the
+  gate that holds later work while m9's lab stays open. The hygiene audits
+  and the vendor sync's children recur behind it in m4. Its PR re-creates it
+  at the same path and keeps the m5 and m6 links, so the gate holds the next
+  cycle too; m5's quests reach m4 in the shift, which is when they can start.
+
+The wire cut lives in m4 because no quest requires one in a later milestone,
+so it sits in or after m3, the last milestone it waits on; m3 can't hold it,
+since a quest can't require the milestone that holds it. A milestone can't
+require the cut it holds either, so m4 stays open and the gate covers the
+milestones after it. The on-demand cut waits on no milestone, so it stays in
+m0, where its publication follow-ups live and anything can require it.
+
+Each run follows its kind:
+
+- **Additive**: the readiness checks, with the API diff refusing any break.
+  Changed JS packages and binding wrappers take patch bumps on `main` first;
+  release-plz proposes the Rust patches.
+- **API or wire**: first re-create the [API shape
+  review](/quest/m3/release/api-review.md), the [feature
+  review](/quest/m3/release/feature-review.md), the [Cargo feature
+  review](/quest/m3/release/feature-flags.md), and the [migration
+  audit](/quest/m3/release/migrate-audit.md) in m0's release
+  epic, each keeping
+  its Goal and recurrence paragraph, scoped to what changed since the last
+  breaking cut and requiring nothing, and add them to the cut's
+  `Required`. Then advance the shared minor with `just version`.
+- **Wire**, which ends the cycle: finalize the cycle's wire version, then,
+  once it merges into `release` and its packages are published, set `phase`
+  back to `additive` on `main`, and shift the milestones: remaining
+  publication and adoption quests to m0, m4's quests other than the wire cut
+  by kind into m1, m2 and m3, m5's to m4, and m6 stays the deferred bucket.
+  Rewrite the Goal and the current Plan rule of each milestone it moves (m4,
+  m5, m6) to match, so no README keeps a rule from an older split.
+
+The `0.22.0` cut re-creates both quests, points m5's `Required` at the wire
+cut in place of this path, and drops m4's, so m4 opens. It and each wire cut
+also re-create the cut gate in m3 from the
+template below; a recurring cut-gate child that the last run re-created in
+m4, such as the [vendor
+sync](/quest/m3/vendor-sync/README.md), moves under it.
 Only `/quest-delete` ends the recurrence.
 
 From the 2026-10-25 pre-cut run:
 
 - Write the moq-cli and moq-gst `MIGRATE.md` entries from the Impact section of
   [moq-dev/moq#6522](https://github.com/moq-dev/moq/pull/6522); that rename list exists nowhere else.
-- Raise each wrapper's moq-ffi version floor (for example Kotlin's
-  `MOQ_FFI_RANGE`) to the release that ships the `implementation` field from
-  [moq-dev/moq#6775](https://github.com/moq-dev/moq/pull/6775).
 
 From [moq-dev/moq#7702](https://github.com/moq-dev/moq/pull/7702), which
 merged moq-e2ee and moq-sign into moq-crypto (decided 2026-11-02, no yank):
 
-- Nothing to publish for moq-e2ee: its final code-free release, 0.0.22,
-  already points at moq-crypto, and `rs/moq-e2ee` is gone. Don't merge a
-  `release` branch release-plz proposal that bumps it.
+- `rs/moq-e2ee` is gone from `main`, but crates.io's newest moq-e2ee is a
+  full 0.0.25 crate published 2026-11-11 from `release`, not the code-free
+  0.0.22 pointer (corrected 2026-11-12, /quest-audit). Don't merge a
+  `release` branch release-plz proposal that bumps it again;
+  [retired names](/quest/m3/release/retired-names.md) publishes the pointer
+  above 0.0.25, with the other names this cut stops publishing.
+
+Decided 2026-11-14 ([cut placement](https://github.com/moq-dev/moq/pull/8736),
+taken by the agent under /quest-afk, for the maintainer's review): ✅ the
+wire cut lives in m4 and gates m5 and m6 every cycle, while additive and API
+cuts recur in m0. Rejected: one cut quest in m0 that requires m2 and m3 for
+a wire cut (breaks the 2026-11-13 rule); the wire cut in m3 requiring each m3
+entry by hand (a list nobody keeps current, like the hand-kept m2 list
+rejected 2026-11-09); one cut quest in m4 for every kind (additive and API
+cuts would rank last, nothing in m0 to m3 could require one, and every
+additive cut would have to pick which links to keep); lifting the gate between
+cycles (nothing marks a moment to lift it, and m5's work reaches m4 at each
+shift anyway).
 
 Cut gate template (moved here 2026-11-09 from the gate's own Plan; see the
-decision below). The gate is an epic in m2 for the checks the cut needs that
+decision below). The gate is an epic in m3, `/quest/m3/cut-gate/`, for the checks the cut needs that
 break nothing: `main` is no slower than `release`, vendored code has the
 upstream fixes it needs, and the hand-written `moq-c` is at parity with
 moq-ffi. It has no work of its own and completes when every child merges. It
-recurs once per release cycle, always in m2, and never re-creates itself: m2
-holds it and the cut requires m2, so a copy made before the cut would block
-that cut forever. Re-create its README with that Goal and this recurrence, a
-fresh "main is no slower than release" child with its Goal and no
+recurs once per release cycle, always in m3, and never re-creates itself: m3
+holds it and the cycle's wire cut requires m3, so a copy made before that cut
+would block it forever. Cuts earlier in the cycle do not wait on it, but each
+confirms on its candidate that the gate's finished checks still hold.
+Re-create its README with that Goal and this recurrence, a fresh "main is no slower than release" child with its Goal and no
 measurements yet, and the [vendor sync](/quest/m3/vendor-sync/README.md)
-questline that the last run re-created in m3. Only `/quest-delete` ends the
+questline that the last run re-created in the later-work milestone. Only `/quest-delete` ends the
 recurrence.
 
 Decided 2026-11-09 (maintainer, /quest-unblock): the cut, not the gate,
@@ -132,12 +217,97 @@ after [moq-dev/moq#7942](https://github.com/moq-dev/moq/pull/7942) until the
 re-run fixed them. Run those browser checks by hand on the cut tree, along
 with the suites above.
 
+Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit):
+
+- ✅ The cut waits on [the rind 0.4 adapters](/quest/m0/rind-adapters.md)
+  ([moq-dev/moq#8432](https://github.com/moq-dev/moq/pull/8432)), so the
+  `UnsupportedCpu` error that exists only for rind 0.3 is never published.
+- ✅ The FFI's `abort_unwanted`
+  ([moq-dev/moq#8897](https://github.com/moq-dev/moq/pull/8897)) lands first: it adds a
+  method to an existing binding object, which the API diff counts as a
+  break once 0.22 is published. Superseded 2026-11-23 (maintainer): it
+  landed, and [abort-unwanted-delete](/quest/m2/abort-unwanted-delete.md)
+  in m2 deletes it before 0.22 publishes it.
+- ✅ End-to-end encryption does not publish at this cut
+  ([its own unpublished crate](https://github.com/moq-dev/moq/pull/8947)),
+  so `moq-e2ee` is no longer a retired name, and the paragraph above about
+  publishing a pointer above 0.0.25 no longer applies: the name is held for
+  [the finished format](/quest/m3/e2ee-format.md). `release` still holds
+  `rs/moq-e2ee` at 0.0.25 and publishes it; once the cut merges `main` into
+  `release`, its copy is `publish = false` at 0.0.26. Check that
+  release-plz proposes nothing for `moq-e2ee`.
+- ✅ The hand-written C API publishes as `libmoq` 0.22, its final line,
+  reversing 2026-10-25, so the
+  cut gate's "hand-written `moq-c`" below reads `libmoq`, and the two
+  quests for a code-free `libmoq` stub were deleted.
+
+Decided 2026-11-20 (maintainer, /quest-plan of the pre-cut flow-control
+audit): ✅ the cut waits on the credit model (`verify-credit`),
+[#9210](https://github.com/moq-dev/moq/pull/9210)'s
+paused-stream allowance, which merges once the model passes on it, and a bounded relay cache by
+default. Rejected: cutting with flow
+control unverified; landing #9210 after the cut. The
+[JS frame cap](https://github.com/moq-dev/moq/pull/9283) ships with the cut only if it
+lands first.
+
+Decided 2026-11-21 (maintainer, /quest-plan of the main → release
+flow-control review): ✅ the cut waits on
+send-credit stalls (landed: `credit_stalls` and `credit_stalled` in session
+stats, and in the relay's `Presence`), so the release that
+ships the flow-control rework ships a counter for its failure mode, a
+connection blocked on its peer's credit (rejected: the cut not waiting;
+leaving it in m3). The peer window default
+([#9329](https://github.com/moq-dev/moq/pull/9329)) ships with the cut only if it lands first
+(rejected: the cut waiting on it). If it does, rewrite the
+[#7624](https://github.com/moq-dev/moq/pull/7624) entries in moq-relay's, moq-tokio's, and
+moq-uring's `MIGRATE.md` from its Impact section: the peer windows stay at release's 64 MiB, not 16 MiB,
+and every connection's stream window stays at release's 4 MiB, not 1 MiB. `@moq/net`'s
+"WebSocket receive windows match Rust" entry then says 4 MiB per stream.
+
+Decided 2026-11-21 (maintainer, /quest-plan of the exhaustive pre-cut
+full-codebase audit): ✅ the cut waits on the release-pipeline and packaging
+bugs found in m0: simultaneous apt/rpm/brew tag cancellation and npm publish
+propagation retries, while
+[crates-trusted-publisher](/quest/m3/crates-trusted-publisher.md) adds
+`moq-vaapi` after the cut first-publishes it by token (rejected: putting all
+pipeline fixes in m1 without gating the cut; fixing only 3 publish-breaking
+bugs and dropping the rest).
+
+On the reconciled candidate, regenerate the Nix build plan with `just rs cargo-nix` after the
+shared version bump. A dry run of the bump to 0.22.0 updated 52 packages and left Cargo.nix stale.
+Repeat the two-relay smoke with the candidate and the last published relay. Put each binary upstream
+in turn, then publish from each side, discover it from the other, fetch and compare a frame, and
+observe withdrawal. All four paths passed on lite-06 with 0.17.17 and audited main at d0ce553674.
+Re-run the existing cut checks on the resolved merge and version bump. After publication,
+check that Release remeasure opened or updated its pin PR, as RELEASE.md describes.
+
+From the 2026-11-20 main → release audit (main `9828a20cab` against release `381b802d9b`: 4,241
+main-only and 307 release-only commits, 330 paths conflicted in a trial merge), for the
+candidate:
+- Keep the behavior of release-only fixes while resolving conflicts, not just their text, and
+  run a test of each on the candidate: stopped-stream receive credit (`b834502dfa`, qmux 0.5.4
+  and `@moq/qmux` 0.3.5), a far-ahead group sequence costing a relay nothing extra
+  (`0c9ffdd7a7`, backport of [moq-dev/moq#9044](https://github.com/moq-dev/moq/pull/9044)), a
+  relay restarting under its old hop ID stranding nothing (`4a9005c3c5`), a 64-bit Hop ID read
+  as unknown in Rust and JS (`f48b7a066e`, `a480bba27c`), and a restarted publisher winning over
+  its lingering session (`5511441a02`). List the rest with
+  `git log --no-merges origin/main..origin/release`.
+- Widen the two-relay smoke above: keep a reader attached through each roll, in both directions
+  (last published relay to candidate and back), and check it keeps receiving the same frames
+  after the roll and after a withdrawal and return.
+- The cut PR (head `main`) now runs the full moq-transport matrix and Released wire
+  compatibility in its Release gate, which a backport PR still skips (planned by the audit's
+  PR). Read both results on the cut PR rather than repeating them by hand.
+- Attach each result to the candidate SHA in the cut PR body, so a later push visibly
+  invalidates it.
+
 ## Required
 
 - [Breaking release readiness](/quest/m2/README.md) - code, protocol and package proofs
+- [rind 0.4 adapters](/quest/m0/rind-adapters.md) - `UnsupportedCpu`, which exists only for rind 0.3, never publishes
 - [Migration audit](/quest/m3/release/migrate-audit.md) - every break on the cut PR has its MIGRATE.md entry
 - [API shape review](/quest/m3/release/api-review.md) - every new or changed public API was reviewed for a better shape, and approved changes landed
 - [Feature review](/quest/m3/release/feature-review.md) - every major work line since the last release was judged end to end, and its follow-ups landed
 - [Cargo feature review](/quest/m3/release/feature-flags.md) - every Cargo feature was judged against the feature rules, and approved changes landed
-- [Cycle phases](/quest/m3/release/cycle-phases.md) - the shift this cut performs sorts by additive, API and wire, and its recurrence is rewritten to match
-- [Claim new npm names](/quest/m3/release/npm-first-publish.md) - trusted publishing can publish every new `@moq/*` package
+- [Interop and Video pass on main](/quest/m0/interop-green/README.md) - the cut PR's release gate runs `interop.yml`, which failed on `main` every day through 2026-11-12
+- [Nightly passes on main](/quest/m0/nightly/README.md) - the release gate runs `features.yml`, red in the 2026-11-12 Nightly

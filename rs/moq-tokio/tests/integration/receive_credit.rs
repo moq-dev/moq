@@ -9,16 +9,14 @@
 //!
 //! Some runs go through a bufferbloated path instead of loopback, so a sender held back by
 //! a slow link and a deep queue is shown not to look like a stuck window.
-
-#![cfg(feature = "quic")]
+//!
+//! The benchmarks measure what the windows cost: memory and throughput, and how far behind
+//! live a viewer joining over a warm cross-region peer link lands.
 
 use std::{process::Stdio, sync::Arc, time::Duration};
 
 use bytes::Bytes;
-use moq_net::{
-	Timestamp, frame,
-	track::{Delay, Subscription},
-};
+use moq_net::{Timestamp, frame, track::Subscription};
 use moq_tokio::quic::{driver, web};
 use tokio::io::AsyncWriteExt;
 
@@ -77,6 +75,16 @@ async fn setup_through(
 	transport: driver::transport::Config,
 	profile: Option<moq_shaper::Profile>,
 ) -> Setup {
+	setup_served(version, transport, profile, Default::default()).await
+}
+
+/// [`setup_through`], with the server's QUIC settings.
+async fn setup_served(
+	version: &str,
+	transport: driver::transport::Config,
+	profile: Option<moq_shaper::Profile>,
+	quic: moq_tokio::quic::Config,
+) -> Setup {
 	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let version: moq_net::Version = version.parse().expect("version");
 
@@ -89,12 +97,7 @@ async fn setup_through(
 	config.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.tls.generate = vec!["localhost".into()];
 	config.version = vec![version];
-	let mut server = config
-		.init(Default::default())
-		.expect("init server")
-		.listen()
-		.await
-		.expect("listen");
+	let mut server = config.init(quic).expect("init server").listen().await.expect("listen");
 	let server_addr: std::net::SocketAddr = ([127, 0, 0, 1], server.local_addr().expect("addr").port()).into();
 	let shaper = match profile {
 		Some(profile) => Some(
@@ -266,12 +269,14 @@ async fn the_less_urgent_partial_frame_gives_way(version: &str, profile: Option<
 	let (high, mut high_sub) = setup.subscribe("high", 100).await;
 
 	// Three quarters of the window, held by a frame that never finishes.
-	let mut low_frame = low
-		.append_group()
-		.unwrap()
+	let group = low
+		.append_group(Timestamp::from_millis(low.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.unwrap();
+	let timestamp = Timestamp::from_millis(group.start).unwrap();
+	let mut low_frame = group
 		.create_frame(frame::Info {
 			size: WINDOW as u64,
-			timestamp: Some(Timestamp::ZERO),
+			timestamp,
 		})
 		.unwrap();
 	low_frame.write(vec![1u8; WINDOW * 3 / 4]).unwrap();
@@ -281,15 +286,26 @@ async fn the_less_urgent_partial_frame_gives_way(version: &str, profile: Option<
 
 	// Half the window, which only fits once the low frame lets go.
 	let payload = Bytes::from(vec![2u8; WINDOW / 2]);
-	let mut high_group = high.append_group().unwrap();
-	high_group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+	let mut high_group = high
+		.append_group(moq_net::Timestamp::from_millis(high.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.unwrap();
+	high_group
+		.write_frame(
+			moq_net::Timestamp::from_millis(high_group.start).unwrap(),
+			payload.clone(),
+		)
+		.unwrap();
 	high_group.finish().unwrap();
 	assert_eq!(next_frame(&mut high_sub).await, payload, "{version}");
 
 	// The session survives, and the low track keeps delivering what fits.
 	drop(low_frame);
-	let mut group = low.append_group().unwrap();
-	group.write_frame(Timestamp::ZERO, &b"after"[..]).unwrap();
+	let mut group = low
+		.append_group(moq_net::Timestamp::from_millis(low.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.unwrap();
+	group
+		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), &b"after"[..])
+		.unwrap();
 	group.finish().unwrap();
 	assert_eq!(next_frame(&mut low_sub).await, &b"after"[..], "{version}");
 	assert_eq!(setup.conn.stats().credit.evicted, 1, "{version}");
@@ -332,8 +348,15 @@ async fn bufferbloat_is_not_a_stuck_window() {
 		let payload = payload.clone();
 		tasks.push(tokio::spawn(async move {
 			for _ in 0..ROUNDS {
-				let mut group = track.append_group().unwrap();
-				group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+				let mut group = track
+					.append_group(
+						moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1))
+							.unwrap(),
+					)
+					.unwrap();
+				group
+					.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), payload.clone())
+					.unwrap();
 				group.finish().unwrap();
 				assert_eq!(next_frame(&mut sub).await, payload);
 			}
@@ -357,8 +380,12 @@ async fn lite_frame_of_many_windows_completes() {
 	let (track, mut sub) = setup.subscribe("file", 0).await;
 
 	let payload = Bytes::from((0..4 * SEGMENTED).map(|i| (i % 251) as u8).collect::<Vec<_>>());
-	let mut group = track.append_group().unwrap();
-	group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.unwrap();
+	group
+		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), payload.clone())
+		.unwrap();
 	group.finish().unwrap();
 
 	assert!(next_frame(&mut sub).await == payload, "the frame arrived corrupted");
@@ -373,12 +400,14 @@ async fn lite_frame_past_the_window_gives_way() {
 	let setup = setup("moq-lite-06", transport(WINDOW as u64)).await;
 	let (low, mut low_sub) = setup.subscribe("low", 1).await;
 
-	let mut low_frame = low
-		.append_group()
-		.unwrap()
+	let group = low
+		.append_group(Timestamp::from_millis(low.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.unwrap();
+	let timestamp = Timestamp::from_millis(group.start).unwrap();
+	let mut low_frame = group
 		.create_frame(frame::Info {
 			size: 2 * WINDOW as u64,
-			timestamp: Some(Timestamp::ZERO),
+			timestamp,
 		})
 		.unwrap();
 	low_frame.write(vec![1u8; 2 * WINDOW]).unwrap();
@@ -399,8 +428,12 @@ async fn lite_frame_past_the_window_gives_way() {
 	}
 
 	drop(low_frame);
-	let mut group = low.append_group().unwrap();
-	group.write_frame(Timestamp::ZERO, &b"after"[..]).unwrap();
+	let mut group = low
+		.append_group(moq_net::Timestamp::from_millis(low.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.unwrap();
+	group
+		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), &b"after"[..])
+		.unwrap();
 	group.finish().unwrap();
 	assert_eq!(next_frame(&mut low_sub).await, &b"after"[..]);
 }
@@ -570,8 +603,12 @@ async fn unidentified_headers_give_way() {
 	let partial = partial_message(0x00, (WINDOW / 2) as u32, WINDOW / 2 - 1);
 	setup.raw(false, vec![partial; 2], 1).await;
 	let (track, mut sub) = setup.subscribe("video", 1).await;
-	let mut group = track.append_group().unwrap();
-	group.write_frame(Timestamp::ZERO, vec![3u8; 4096]).unwrap();
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.unwrap();
+	group
+		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), vec![3u8; 4096])
+		.unwrap();
 	group.finish().unwrap();
 	assert_eq!(next_frame(&mut sub).await.len(), 4096);
 }
@@ -594,16 +631,17 @@ fn group_stream(subscribe: u64, sequence: u64, size: usize) -> Vec<u8> {
 	let mut header = Vec::new();
 	varint(&mut header, subscribe);
 	varint(&mut header, sequence);
-	// The first frame.
+	// Frame Start: the stream carries the group from its first frame.
 	varint(&mut header, 0);
 
 	// GROUP, then its size-prefixed header.
 	let mut bytes = vec![0x00];
 	varint(&mut bytes, header.len() as u64);
 	bytes.extend_from_slice(&header);
-	// The zigzag timestamp delta, then the frame's size and payload.
+	// The frame's size plus one, the zigzag timestamp delta, then the payload. The first
+	// frame's delta counts from the group's start, and it starts its group, so it is 0.
+	varint(&mut bytes, size as u64 + 1);
 	varint(&mut bytes, 0);
-	varint(&mut bytes, size as u64);
 	bytes.resize(bytes.len() + size, 5);
 	bytes
 }
@@ -617,12 +655,14 @@ async fn groups_waiting_for_track_info_give_way_first() {
 
 	// Subscription 0: an urgent track's frame, half sent and holding its credit.
 	let (urgent, mut urgent_sub) = setup.subscribe("urgent", 100).await;
-	let mut frame = urgent
-		.append_group()
-		.unwrap()
+	let group = urgent
+		.append_group(Timestamp::from_millis(urgent.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.unwrap();
+	let timestamp = Timestamp::from_millis(group.start).unwrap();
+	let mut frame = group
 		.create_frame(frame::Info {
 			size: (WINDOW / 2) as u64,
-			timestamp: Some(Timestamp::ZERO),
+			timestamp,
 		})
 		.unwrap();
 	frame.write(vec![1u8; WINDOW / 4]).unwrap();
@@ -633,8 +673,7 @@ async fn groups_waiting_for_track_info_give_way_first() {
 	let mut requests = setup.broadcast.broadcast().requests();
 	let every = Subscription::default()
 		.with_order(moq_net::track::Order::Ascending)
-		.with_range(0..)
-		.with_delay(Delay::default().with_max(Duration::from_secs(60)));
+		.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Time(0))]);
 	let waiting = tokio::spawn({
 		let remote = setup.remote.clone();
 		async move { remote.track("parked").unwrap().subscribe(every).await }
@@ -679,8 +718,58 @@ async fn groups_waiting_for_track_info_give_way_first() {
 			}
 			// Stopped to make room for the urgent frame.
 			Err(moq_net::Error::Evicted) => continue,
-			other => panic!("group {} ended with {other:?}", group.sequence),
+			other => panic!("group {} ended with {other:?}", group.start),
 		}
+	}
+}
+
+/// A GROUP header still arriving when group streams overcommit the window outlasts them:
+/// it holds only the header's bytes, and stopping it would hide which group it carried.
+/// Once a group stream gives way, the header completes and its group is delivered.
+#[tokio::test]
+async fn a_header_still_arriving_outlasts_group_streams() {
+	let setup = reversed("moq-lite-07-wip").await;
+	let _track = setup.broadcast.broadcast().create_track("video", timed()).unwrap();
+	// History: the publisher's own track never gets a frame to place a live join at, and the
+	// raw streams below carry every group.
+	let history = Subscription::default().with_ranges([moq_net::track::Range::ALL]);
+	let mut sub = kio::clock::timeout(TIMEOUT, setup.remote.track("video").unwrap().subscribe(history))
+		.await
+		.expect("subscribe timeout")
+		.expect("subscribe");
+
+	// Subscription 0's group 100, cut after the first byte of its header.
+	let whole = group_stream(0, 100, 16);
+	let (head, rest) = whole.split_at(3);
+	let mut header = setup.conn.open_uni(Default::default()).await.expect("open");
+	header.write_all(head).await.expect("header start");
+	header.flush().await.expect("flush");
+
+	// Partial frames, together more than the window: one group stream gives way.
+	let groups = (1..=3)
+		.map(|sequence| {
+			let mut bytes = group_stream(0, sequence, WINDOW / 2);
+			bytes.truncate(bytes.len() - WINDOW / 2 + WINDOW * 2 / 5);
+			bytes
+		})
+		.collect();
+	setup.raw(false, groups, 1).await;
+
+	header.write_all(rest).await.expect("the header stream was stopped");
+	// Held until the group is read: dropping it would reset the stream.
+	let _finished = header.finish();
+	loop {
+		let mut group = next_group(&mut sub).await;
+		if group.start != 100 {
+			continue;
+		}
+		let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
+			.await
+			.expect("frame timed out")
+			.expect("the header's group failed")
+			.expect("group ended");
+		assert_eq!(frame.payload.len(), 16);
+		break;
 	}
 }
 
@@ -695,8 +784,12 @@ async fn partial_control_requests_give_way() {
 	let partial = partial_message(0x01, size as u32, size - 1);
 	setup.raw(true, vec![partial; 5], 2).await;
 	let (track, mut sub) = setup.subscribe("video", 1).await;
-	let mut group = track.append_group().unwrap();
-	group.write_frame(Timestamp::ZERO, vec![3u8; 4096]).unwrap();
+	let mut group = track
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.unwrap();
+	group
+		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), vec![3u8; 4096])
+		.unwrap();
 	group.finish().unwrap();
 	assert_eq!(next_frame(&mut sub).await.len(), 4096);
 }
@@ -711,12 +804,14 @@ async fn the_largest_unit_completes_under_pressure(version: &str) {
 	// Several groups' worth of frames that never finish, opened before and after.
 	let mut partial = Vec::new();
 	let mut open_partial = || {
-		let mut frame = low
-			.append_group()
-			.unwrap()
+		let group = low
+			.append_group(Timestamp::from_millis(low.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+			.unwrap();
+		let timestamp = Timestamp::from_millis(group.start).unwrap();
+		let mut frame = group
 			.create_frame(frame::Info {
 				size: WINDOW as u64,
-				timestamp: Some(Timestamp::ZERO),
+				timestamp,
 			})
 			.unwrap();
 		frame.write(vec![1u8; WINDOW / 4]).unwrap();
@@ -727,8 +822,12 @@ async fn the_largest_unit_completes_under_pressure(version: &str) {
 
 	// Room for the stream's headers and nothing else.
 	let payload = Bytes::from(vec![2u8; WINDOW - 64]);
-	let mut group = high.append_group().unwrap();
-	group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+	let mut group = high
+		.append_group(moq_net::Timestamp::from_millis(high.largest().map_or(0, |largest| largest.group + 1)).unwrap())
+		.unwrap();
+	group
+		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), payload.clone())
+		.unwrap();
 	group.finish().unwrap();
 	open_partial();
 
@@ -937,10 +1036,10 @@ const INFLIGHT: usize = 1 << 20;
 /// The receiver's storage segment (`moq_net`'s crate-private `frame::SEGMENT`): a frame within
 /// one keeps its credit until it completes, and a larger one returns each segment's as it seals.
 const SEGMENT: usize = 1 << 20;
-/// Why cells whose incomplete units overcommit the window are skipped: the quest that makes
-/// `track::Subscriber` report each group it abandons, which their readers need to return its
+/// Why cells whose incomplete units overcommit the window are skipped: their readers must
+/// read through `track::Ordered`, which reports each group it abandons, to return its
 /// in-flight credit.
-const OVERCOMMITTED: &str = "waits on quest/m2/group-drops.md";
+const OVERCOMMITTED: &str = "waits on quest/m3/receive-windows-evicted.md";
 
 /// One benchmark configuration.
 #[derive(Clone, Copy)]
@@ -1004,7 +1103,11 @@ async fn measure(cell: Cell, profile: Option<moq_shaper::Profile>, bytes: usize)
 			.create_track(name.as_str(), timed().with_max_age(None))
 			.unwrap();
 		// Groups in flight fall behind the live edge, so a zero budget would skip them.
-		let subscription = Subscription::default().with_delay(Delay::default().with_max(TIMEOUT));
+		let subscription =
+			Subscription::default().with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
+				min: Some(TIMEOUT),
+				max: Some(TIMEOUT),
+			})]);
 		let sub = kio::clock::timeout(TIMEOUT, setup.remote.track(&name).unwrap().subscribe(subscription))
 			.await
 			.expect("subscribe timeout")
@@ -1027,9 +1130,18 @@ async fn measure(cell: Cell, profile: Option<moq_shaper::Profile>, bytes: usize)
 					async move {
 						for _ in 0..rounds {
 							inflight.acquire().await.unwrap().forget();
-							let mut group = track.append_group().unwrap();
-							sent.lock().unwrap().insert(group.sequence, kio::clock::now());
-							group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+							let mut group = track
+								.append_group(
+									moq_net::Timestamp::from_millis(
+										track.largest().map_or(0, |largest| largest.group + 1),
+									)
+									.unwrap(),
+								)
+								.unwrap();
+							sent.lock().unwrap().insert(group.start, kio::clock::now());
+							group
+								.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), payload.clone())
+								.unwrap();
 							group.finish().unwrap();
 						}
 						track
@@ -1041,7 +1153,7 @@ async fn measure(cell: Cell, profile: Option<moq_shaper::Profile>, bytes: usize)
 					let read = kio::clock::timeout(TIMEOUT, group.read_frame())
 						.await
 						.expect("frame timed out");
-					let sent = sent.lock().unwrap().remove(&group.sequence).expect("written");
+					let sent = sent.lock().unwrap().remove(&group.start).expect("written");
 					match read {
 						Ok(Some(frame)) => {
 							assert_eq!(frame.payload.len(), payload.len());
@@ -1049,7 +1161,7 @@ async fn measure(cell: Cell, profile: Option<moq_shaper::Profile>, bytes: usize)
 						}
 						// The stuck window evicted the group's stream, and it is not fetched again.
 						Err(moq_net::Error::Evicted) => {}
-						other => panic!("group {} ended with {other:?}", group.sequence),
+						other => panic!("group {} ended with {other:?}", group.start),
 					}
 					inflight.add_permits(1);
 				}
@@ -1100,8 +1212,8 @@ async fn measure(cell: Cell, profile: Option<moq_shaper::Profile>, bytes: usize)
 ///
 /// Cells whose units overcommit the window are skipped, each printed with [`OVERCOMMITTED`]
 /// as the reason. They should keep their offered load and report what eviction cost them, but
-/// the subscriber can abandon a group without handing it out, so its in-flight credit never
-/// returns and the track's writer stalls.
+/// the reader abandons a group without handing it out, so its in-flight credit never returns
+/// and the track's writer stalls, until it reads the gaps `track::Ordered` reports.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "release benchmark, run by nightly"]
 async fn benchmark_receive_windows() {
@@ -1230,5 +1342,192 @@ impl rustls::client::danger::ServerCertVerifier for AnyCert {
 			.unwrap()
 			.signature_verification_algorithms
 			.supported_schemes()
+	}
+}
+
+/// The connection windows a relay gives a peer link (`[limits.peer.quic]`).
+const PEER_WINDOW: u64 = 64 << 20;
+/// The one-way delay of a cross-region peer link.
+const PEER_DELAY: Duration = Duration::from_millis(125);
+/// A live track's frame interval, about 30 fps.
+const LIVE_PERIOD: Duration = Duration::from_millis(33);
+/// A live track's frame size: 16 Mbps at [`LIVE_PERIOD`].
+const LIVE_FRAME: usize = 66_666;
+/// How much of the live track's one group the publisher holds when the viewer joins.
+const LIVE_BACKLOG: Duration = Duration::from_secs(2);
+/// How long a join is watched: past BBR.MinRTTFilterLen (10 s) from the warm-up, so a
+/// ProbeRTT the warm-up's congestion makes due lands inside it.
+const LIVE_WATCH: Duration = Duration::from_secs(12);
+/// What crosses the link before the join, as on a peer link already carrying traffic.
+const WARM_BYTES: usize = 32 << 20;
+
+/// What one join onto a warm peer link measured.
+struct Joined {
+	/// From the subscribe to the first frame within two frames of the path's one-way delay.
+	caught_up: Duration,
+	/// Each later frame's lag behind its write, sorted.
+	lag: Vec<Duration>,
+	/// Datagrams the bottleneck's full queue dropped, the warm-up's included.
+	overflowed: u64,
+}
+
+/// Join a 16 Mbps live track mid-group over a warm peer link with a `bits_per_second`
+/// bottleneck behind a 250 ms drop-tail queue, the receiver granting each stream
+/// `stream_window`, and watch it for [`LIVE_WATCH`].
+async fn join(bits_per_second: u64, stream_window: u64) -> Joined {
+	let mut transport = transport(PEER_WINDOW);
+	transport.limits.max_streams = std::num::NonZeroU64::new(moq_tokio::quic::DEFAULT_MAX_STREAMS);
+	transport.limits.stream_receive_window = std::num::NonZeroU64::new(stream_window);
+	transport.limits.send_window = std::num::NonZeroU64::new(PEER_WINDOW);
+	let mut quic = moq_tokio::quic::Config::default();
+	quic.receive_window = Some(PEER_WINDOW);
+	quic.send_window = Some(PEER_WINDOW);
+	let profile = moq_shaper::Profile {
+		delay: PEER_DELAY,
+		rate: Some(moq_shaper::Rate {
+			bits_per_second,
+			burst: 1500,
+			queue: Duration::from_millis(250),
+		}),
+		..Default::default()
+	};
+	let setup = setup_served("moq-lite-06", transport, Some(profile), quic).await;
+	// Groups in flight fall behind the live edge, so a zero budget would skip them.
+	let subscription = || {
+		Subscription::default().with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
+			min: Some(Duration::from_secs(60)),
+			max: Some(Duration::from_secs(60)),
+		})])
+	};
+
+	// Warm the link with 1 MiB groups, which overflow a slower bottleneck's queue as a
+	// sender's startup does.
+	let warm = setup
+		.broadcast
+		.broadcast()
+		.create_track("warm", timed().with_max_age(None))
+		.unwrap();
+	let mut sub = setup
+		.remote
+		.track("warm")
+		.unwrap()
+		.subscribe(subscription())
+		.await
+		.unwrap();
+	let chunk = Bytes::from(vec![1u8; SEGMENT]);
+	for index in 0..(WARM_BYTES / SEGMENT) as u64 {
+		let start = Timestamp::from_millis(index).unwrap();
+		let mut group = warm.append_group(start).unwrap();
+		group.write_frame(start, chunk.clone()).unwrap();
+		group.finish().unwrap();
+	}
+	for _ in 0..WARM_BYTES / SEGMENT {
+		let mut group = next_group(&mut sub).await;
+		kio::clock::timeout(TIMEOUT, group.read_frame())
+			.await
+			.expect("warm frame timed out")
+			.unwrap()
+			.expect("warm frame");
+	}
+
+	let live = setup
+		.broadcast
+		.broadcast()
+		.create_track("live", timed().with_max_age(None))
+		.unwrap();
+	let frames = ((LIVE_BACKLOG + LIVE_WATCH).as_millis() / LIVE_PERIOD.as_millis()) as u64;
+	let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+	let writer = tokio::spawn({
+		let sent = sent.clone();
+		async move {
+			let payload = Bytes::from(vec![7u8; LIVE_FRAME]);
+			let mut group = live.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
+			let start = kio::clock::now();
+			for index in 0..frames {
+				kio::clock::sleep_until(start.saturating_add(LIVE_PERIOD * index as u32)).await;
+				sent.lock().unwrap().push(kio::clock::now());
+				let timestamp = Timestamp::from_millis(index * LIVE_PERIOD.as_millis() as u64).unwrap();
+				group.write_frame(timestamp, payload.clone()).unwrap();
+			}
+			group.finish().unwrap();
+			live
+		}
+	});
+
+	kio::clock::sleep(LIVE_BACKLOG).await;
+	let subscribed = kio::clock::now();
+	let mut sub = setup
+		.remote
+		.track("live")
+		.unwrap()
+		.subscribe(subscription())
+		.await
+		.unwrap();
+	let mut group = next_group(&mut sub).await;
+	let mut caught_up = None;
+	let mut lag = Vec::new();
+	while let Some(frame) = kio::clock::timeout(TIMEOUT, group.read_frame())
+		.await
+		.expect("live frame timed out")
+		.expect("live frame")
+	{
+		let now = kio::clock::now();
+		let index = (frame.timestamp.as_millis().unwrap() / LIVE_PERIOD.as_millis()) as usize;
+		let behind = now - sent.lock().unwrap()[index];
+		if caught_up.is_none() && behind < PEER_DELAY + LIVE_PERIOD * 2 {
+			caught_up = Some(now - subscribed);
+		}
+		if caught_up.is_some() {
+			lag.push(behind);
+		}
+	}
+	drop(writer.await.unwrap());
+	lag.sort();
+	Joined {
+		caught_up: caught_up.expect("never caught up to live"),
+		lag,
+		overflowed: setup
+			.verify()
+			.map_or(0, |stats| stats.down.overflowed + stats.up.overflowed),
+	}
+}
+
+/// How far behind live a viewer joining mid-group over a warm cross-region peer link lands,
+/// and stays.
+///
+/// The link is a relay's peer link: 64 MiB connection windows, 125 ms each way, and a
+/// bottleneck behind a 250 ms drop-tail queue, warmed with 32 MiB first. The viewer joins a
+/// 16 Mbps track 2 s into its group, so the backlog crosses first. Each axis varies the
+/// bottleneck and the stream window: the default, and one as large as the connection window.
+/// Reports when the join caught up to live, the lag of every frame after that (median and
+/// worst), and the warm-up's queue drops, each the median of the runs. The 200 Mbps link
+/// overflows during the warm-up, which once made BBR3 run ProbeRTT inside the watch and hold
+/// the track about 240 ms further behind live for seconds. Run by nightly.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "release benchmark, run by nightly"]
+async fn benchmark_join_lag() {
+	const RUNS: usize = 3;
+	println!("rate_mbps,stream_window_mib,caught_up_ms,lag_p50_ms,lag_max_ms,overflowed_packets");
+	for bits_per_second in [1_000_000_000, 200_000_000] {
+		for stream_window in [moq_tokio::quic::DEFAULT_STREAM_RECEIVE_WINDOW, PEER_WINDOW] {
+			let mut runs = Vec::with_capacity(RUNS);
+			for _ in 0..RUNS {
+				runs.push(join(bits_per_second, stream_window).await);
+			}
+			let median = |mut values: Vec<f64>| {
+				values.sort_by(f64::total_cmp);
+				values[values.len() / 2]
+			};
+			let ms = |duration: Duration| duration.as_secs_f64() * 1e3;
+			let caught_up = median(runs.iter().map(|run| ms(run.caught_up)).collect());
+			let p50 = median(runs.iter().map(|run| ms(run.lag[run.lag.len() / 2])).collect());
+			let max = median(runs.iter().map(|run| ms(*run.lag.last().unwrap())).collect());
+			let overflowed = median(runs.iter().map(|run| run.overflowed as f64).collect());
+			println!(
+				"{},{},{caught_up:.0},{p50:.0},{max:.0},{overflowed}",
+				bits_per_second / 1_000_000,
+				stream_window >> 20,
+			);
+		}
 	}
 }

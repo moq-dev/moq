@@ -129,9 +129,9 @@ pub struct Fetch<'a> {
 	/// MAX_FILTER_RANGES, so the request is refused rather than served unfiltered.
 	/// Never encoded; we send no range filters.
 	pub range_filters: bool,
-	/// Whether the request carried FILL_TIMEOUT (0x0A), a budget for waiting on upstream
-	/// that ends in Timed-Out gaps we cannot write, so the request is refused rather than
-	/// left to wait without it. Never encoded; we send no fill timeout.
+	/// Whether the request carried FILL_TIMEOUT (0x0A), a budget for waiting on upstream.
+	/// It is accepted and ignored: a one-group read ends with the group. Never encoded;
+	/// we send no fill timeout.
 	pub fill_timeout: bool,
 	/// Whether the requester wants Track Properties in FETCH_OK (INCLUDE_PROPERTIES,
 	/// draft-22). Always `true` before draft-22, which has no way to opt out.
@@ -325,19 +325,54 @@ impl<'a> Message<'a> for Fetch<'a> {
 	}
 }
 
+/// The answer to a FETCH: the FETCH_OK message (0x18) through draft-22, and a REQUEST_OK
+/// (0x07) from draft-23 on, which the draft still calls FETCH_OK (section 9.3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchOk {
+	/// Through draft-22 only: draft-23 has no such field.
 	pub end_of_track: bool,
 	/// Draft 18 uses the last object plus one, or Object 0 for the whole End Group;
-	/// draft 22 and later use an inclusive End Location.
+	/// draft 22 uses an inclusive End Location. Draft-23 has no such field: the answer ends
+	/// at [`Self::largest`] when that is set, and at the requested End Location otherwise
+	/// (section 3.2), so a decoded one holds [`Self::largest`] or a zero placeholder here.
 	pub end_location: Location,
+	/// Draft-23's LARGEST_OBJECT parameter: the track's Largest Object, a MUST when it is
+	/// within the requested range, where the answer then ends (section 3.2). Not on the
+	/// wire before draft-23.
+	pub largest: Option<Location>,
 	/// The track's properties, as SUBSCRIBE_OK carries them.
 	pub properties: super::Properties,
 }
+
+impl FetchOk {
+	/// The message type answering a FETCH: its own FETCH_OK through draft-22, and
+	/// REQUEST_OK from draft-23 on, where 0x18 is reserved (section 9).
+	pub fn id(version: Version) -> u64 {
+		match Self::is_request_ok(version) {
+			true => super::RequestOk::ID,
+			false => Self::ID,
+		}
+	}
+
+	fn is_request_ok(version: Version) -> bool {
+		!matches!(version, Version::Draft18 | Version::Draft20 | Version::Draft22)
+	}
+}
+
 impl<'a> Message<'a> for FetchOk {
 	const ID: u64 = 0x18;
 
+	fn wire_id(version: Version) -> u64 {
+		Self::id(version)
+	}
+
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
+		if Self::is_request_ok(version) {
+			// REQUEST_OK: the parameters, then the Track Properties to the end of the message.
+			encode_params!(w, version, 0x09 => self.largest);
+			self.properties.encode(w, version)?;
+			return Ok(());
+		}
 		// GROUP_ORDER is not a legal FETCH_OK parameter; the order of the response is
 		// whatever the FETCH asked for.
 		w.bool(self.end_of_track);
@@ -349,6 +384,20 @@ impl<'a> Message<'a> for FetchOk {
 	}
 
 	fn decode_msg(buf: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
+		if Self::is_request_ok(version) {
+			// EXPIRES is read and ignored, like SUBSCRIBE_OK's.
+			decode_params!(buf, version,
+				0x08 => _expires: Option<u64>,
+				0x09 => largest: Option<Location>,
+			);
+			let properties = super::Properties::decode(buf, version)?;
+			return Ok(Self {
+				end_of_track: false,
+				end_location: largest.unwrap_or(Location { group: 0, object: 0 }),
+				largest,
+				properties,
+			});
+		}
 		let end_of_track = buf.bool()?;
 		let end_location = Location::decode(buf, version)?;
 		// FETCH_OK lists no parameters, so any closes the session.
@@ -360,6 +409,7 @@ impl<'a> Message<'a> for FetchOk {
 		Ok(Self {
 			end_of_track,
 			end_location,
+			largest: None,
 			properties,
 		})
 	}
@@ -449,33 +499,77 @@ pub enum FetchObject {
 
 	/// An End of Range marker: every Location between the prior Object and this one,
 	/// inclusive, does not exist (`0x8C`), is unknown (`0x10C`), or timed out (`0x20C`).
+	/// Draft-23 adds Gone (`0x40C`).
 	///
-	/// The Group and Object IDs are the same delta fields an [`Self::Object`] carries.
+	/// Through draft-22 the two fields are the Location itself. Draft-23 (section 11.4.2.1)
+	/// encodes them against the prior Object or indicator, as deltas.
 	EndOfRange {
-		/// The raw Serialization Flags, which is which of the three it is.
+		/// The raw Serialization Flags, which is which of them it is.
 		reason: u64,
-		/// The Group ID Delta.
+		/// The Group ID, or from draft-23 the Group ID Delta.
 		group: u64,
-		/// The Object ID Delta.
+		/// The Object ID, or from draft-23 the Object ID Delta.
 		object: u64,
+	},
+
+	/// Draft-23 only (section 11.4.2.2): the prior Object is the last in its Group, or with
+	/// `track` the last in the Track, which ends its Group too. No field follows.
+	EndOfGroup {
+		/// End of Track (`0x81`) rather than End of Group (`0x80`).
+		track: bool,
 	},
 }
 
 impl FetchObject {
 	/// The Serialization Flags values that mark an End of Range instead of an Object.
 	const END_OF_RANGE: &'static [u64] = &[0x8C, 0x10C, 0x20C];
+
+	/// End of Gone Range, which draft-23 adds to [`Self::END_OF_RANGE`].
+	const END_OF_GONE_RANGE: u64 = 0x40C;
+
+	/// The Serialization Flags value for End of Group, from draft-23 on.
+	const END_OF_GROUP: u64 = 0x80;
+
+	/// The Serialization Flags value for End of Track, from draft-23 on.
+	const END_OF_TRACK: u64 = 0x81;
+
+	/// Whether the draft has the End of Group, End of Track and End of Gone Range indicators
+	/// (draft-23 section 11.4.1). Earlier drafts refuse them like any other unnamed value.
+	pub(super) fn has_group_end(version: Version) -> bool {
+		!matches!(version, Version::Draft18 | Version::Draft20 | Version::Draft22)
+	}
+
+	/// How far past its own value an Object ID Delta reaches within a group. Through
+	/// draft-22 the Object ID is the prior one plus the delta. Draft-23 (section 11.4.1)
+	/// adds two, so a delta is only sent for a gap and zero skips one Object.
+	pub(super) fn object_delta_bias(version: Version) -> u64 {
+		match version {
+			Version::Draft18 | Version::Draft20 | Version::Draft22 => 0,
+			_ => 2,
+		}
+	}
 }
 
 impl Encode<Version> for FetchObject {
-	fn encode(&self, w: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
+	fn encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		match self {
 			Self::EndOfRange { reason, group, object } => {
-				if !Self::END_OF_RANGE.contains(reason) {
+				let gone = *reason == Self::END_OF_GONE_RANGE && Self::has_group_end(version);
+				if !gone && !Self::END_OF_RANGE.contains(reason) {
 					return Err(EncodeError::InvalidState);
 				}
 				w.varint(*reason)?;
 				w.varint(*group)?;
 				w.varint(*object)?;
+			}
+			Self::EndOfGroup { track } => {
+				if !Self::has_group_end(version) {
+					return Err(EncodeError::InvalidState);
+				}
+				w.varint(match track {
+					true => Self::END_OF_TRACK,
+					false => Self::END_OF_GROUP,
+				})?;
 			}
 			Self::Object {
 				subgroup,
@@ -530,10 +624,17 @@ impl<'a> Decode<'a, Version> for FetchObject {
 	fn decode(buf: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let flags = buf.varint()?;
 
-		// Anything at or above 128 is a named value rather than a set of flags, and only
-		// the three End of Range markers are defined.
+		// Anything at or above 128 is a named value rather than a set of flags. Through
+		// draft-22 only the three End of Range markers are defined; draft-23 adds a fourth
+		// and the two that end a Group or the Track.
 		if flags >= 0x80 {
-			if !Self::END_OF_RANGE.contains(&flags) {
+			let named = Self::has_group_end(version);
+			if named && (flags == Self::END_OF_GROUP || flags == Self::END_OF_TRACK) {
+				return Ok(Self::EndOfGroup {
+					track: flags == Self::END_OF_TRACK,
+				});
+			}
+			if !Self::END_OF_RANGE.contains(&flags) && !(named && flags == Self::END_OF_GONE_RANGE) {
 				return Err(DecodeError::InvalidValue);
 			}
 			return Ok(Self::EndOfRange {
@@ -629,11 +730,33 @@ mod tests {
 		assert_eq!(decoded.subscriber_priority, 128);
 	}
 
+	/// Draft-23 answers a FETCH with REQUEST_OK, a reply other requests share, so its
+	/// stats class is the shared one rather than FETCH's, on the way out and in.
+	#[test]
+	fn a_draft23_fetch_answer_counts_as_a_shared_reply() {
+		let msg = FetchOk {
+			end_of_track: false,
+			end_location: Location { group: 0, object: 0 },
+			largest: None,
+			properties: Default::default(),
+		};
+		for (version, class) in [
+			(Version::Draft22, crate::stats::Message::Fetch),
+			(Version::Draft23, crate::stats::Message::Other),
+		] {
+			let mut buf = Vec::new();
+			let mut w = Encoder::new(&mut buf, version.into());
+			crate::coding::Encode::encode(&msg, &mut w, version).unwrap();
+			assert_eq!(w.control, Some(class), "{version}");
+		}
+	}
+
 	#[test]
 	fn test_fetch_ok_v18_round_trip() {
 		let msg = FetchOk {
 			end_of_track: false,
 			end_location: Location { group: 5, object: 3 },
+			largest: None,
 			properties: Default::default(),
 		};
 
@@ -651,6 +774,7 @@ mod tests {
 		let msg = FetchOk {
 			end_of_track: false,
 			end_location: Location { group: 5, object: 3 },
+			largest: None,
 			properties: Default::default(),
 		};
 
@@ -662,6 +786,132 @@ mod tests {
 			0, // zero message parameters
 		];
 		assert_eq!(encode_message(&msg, Version::Draft18), expected);
+	}
+
+	/// Draft-23 (section 9.3) answers a FETCH with REQUEST_OK: the parameters, then the Track
+	/// Properties, with no End Of Track or End Location. Drafts 18 to 22 keep FETCH_OK, and
+	/// never write the Largest Object.
+	#[test]
+	fn fetch_ok_is_a_request_ok_at_draft23() {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+			assert_eq!(FetchOk::id(version), 0x18, "{version:?}");
+		}
+		assert_eq!(FetchOk::id(Version::Draft23), 0x07);
+
+		let msg = FetchOk {
+			end_of_track: false,
+			end_location: Location { group: 5, object: 3 },
+			largest: Some(Location { group: 5, object: 3 }),
+			properties: Default::default(),
+		};
+		#[rustfmt::skip]
+		let expected = vec![
+			1, // one message parameter
+			0x09, 5, 3, // LARGEST_OBJECT = 5/3
+		];
+		assert_eq!(encode_message(&msg, Version::Draft23), expected);
+		let decoded: FetchOk = decode_message(&expected, Version::Draft23).unwrap();
+		assert_eq!(decoded, msg);
+
+		// Draft-22 writes its own fields, and nothing of the Largest Object.
+		assert_eq!(encode_message(&msg, Version::Draft22), vec![0, 5, 3, 0]);
+
+		// An answer that ends at the requested End Location names no Largest Object.
+		let bounded = FetchOk { largest: None, ..msg };
+		assert_eq!(encode_message(&bounded, Version::Draft23), vec![0]);
+		let decoded: FetchOk = decode_message(&[0], Version::Draft23).unwrap();
+		assert_eq!(decoded.largest, None);
+		assert!(!decoded.end_of_track);
+	}
+
+	/// A draft-23 answer may carry EXPIRES, which is read and dropped; any parameter the
+	/// draft does not list for it is refused, since none can be skipped (section 9.19).
+	#[test]
+	fn fetch_ok_reads_expires_and_refuses_the_rest_at_draft23() {
+		#[rustfmt::skip]
+		let body = [
+			2, // two message parameters
+			0x08, 5, // EXPIRES = 5
+			0x01, 7, 0, // LARGEST_OBJECT (0x09) = 7/0
+		];
+		let decoded: FetchOk = decode_message(&body, Version::Draft23).unwrap();
+		assert_eq!(decoded.largest, Some(Location { group: 7, object: 0 }));
+
+		// GROUP_ORDER (0x22) is not a FETCH_OK parameter.
+		assert!(matches!(
+			decode_message::<FetchOk>(&[1, 0x22, 1], Version::Draft23),
+			Err(DecodeError::InvalidValue)
+		));
+	}
+
+	/// Within a group, draft-23 (section 11.4.1) reads an Object ID Delta as the prior Object
+	/// ID plus the delta plus two; drafts 18 to 22 add the delta alone.
+	#[test]
+	fn object_id_delta_reaches_two_further_at_draft23() {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+			assert_eq!(FetchObject::object_delta_bias(version), 0, "{version:?}");
+		}
+		assert_eq!(FetchObject::object_delta_bias(Version::Draft23), 2);
+	}
+
+	fn encode_object(object: &FetchObject, version: Version) -> Result<Vec<u8>, EncodeError> {
+		let mut buf = Vec::new();
+		object.encode(&mut Encoder::new(&mut buf, version.into()), version)?;
+		Ok(buf)
+	}
+
+	fn decode_object(bytes: &[u8], version: Version) -> Result<FetchObject, DecodeError> {
+		FetchObject::decode(&mut Decoder::new(bytes, version.into()), version)
+	}
+
+	/// Draft-23 (section 11.4.1) adds End of Group, End of Track and End of Gone Range to the
+	/// named Serialization Flags. Drafts 18 to 22 neither write them nor read them.
+	#[test]
+	fn fetch_stream_indicators_are_draft23_only() {
+		let end_of_group = FetchObject::EndOfGroup { track: false };
+		let end_of_track = FetchObject::EndOfGroup { track: true };
+		let gone = FetchObject::EndOfRange {
+			reason: 0x40C,
+			group: 1,
+			object: 2,
+		};
+
+		let version = Version::Draft23;
+		for object in [&end_of_group, &end_of_track, &gone] {
+			let bytes = encode_object(object, version).unwrap();
+			assert_eq!(&decode_object(&bytes, version).unwrap(), object);
+		}
+		// No field follows End of Group or End of Track, so each is the flags alone.
+		let mut flags = Vec::new();
+		Encoder::new(&mut flags, version.into()).varint(0x80).unwrap();
+		assert_eq!(encode_object(&end_of_group, version).unwrap(), flags);
+
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+			for object in [&end_of_group, &end_of_track, &gone] {
+				assert!(encode_object(object, version).is_err(), "{version:?} wrote {object:?}");
+				let bytes = encode_object(object, Version::Draft23).unwrap();
+				assert!(
+					matches!(decode_object(&bytes, version), Err(DecodeError::InvalidValue)),
+					"{version:?} read {object:?}"
+				);
+			}
+		}
+
+		// The three earlier End of Range markers read on every draft, and any other value
+		// from 128 up on none.
+		for version in [Version::Draft22, Version::Draft23] {
+			let unknown = FetchObject::EndOfRange {
+				reason: 0x10C,
+				group: 3,
+				object: 4,
+			};
+			let bytes = encode_object(&unknown, version).unwrap();
+			assert_eq!(decode_object(&bytes, version).unwrap(), unknown);
+
+			let mut other = Vec::new();
+			Encoder::new(&mut other, version.into()).varint(0x82).unwrap();
+			assert!(matches!(decode_object(&other, version), Err(DecodeError::InvalidValue)));
+		}
 	}
 
 	/// The head of a draft-22 FETCH up to its Number of Parameters: Request ID 1, Track
@@ -941,9 +1191,14 @@ mod cache_duration_tests {
 	/// subscription still learns its max age.
 	#[test]
 	fn max_cache_duration_is_read_in_each_drafts_field() {
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
 			for age in [0u64, 30_000] {
-				let mut payload = vec![0, 0, 0, 0, 4];
+				// End Of Track, End Location and no parameters ahead of the property; draft-23's
+				// REQUEST_OK has only the parameter count there.
+				let mut payload = match version {
+					Version::Draft23 => vec![0, 4],
+					_ => vec![0, 0, 0, 0, 4],
+				};
 				Encoder::new(&mut payload, version.into()).varint(age).unwrap();
 				let got = FetchOk::decode_msg(&mut Decoder::new(&payload, version.into()), version).unwrap();
 				assert_eq!(

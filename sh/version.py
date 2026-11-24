@@ -169,7 +169,13 @@ def lock_version(root, package):
     return matches[0][1]
 
 
+# The release cycle's phase, which the API diff reads: `additive` denies breaks.
+PHASES = (None, "additive", "api", "wire")
+
+
 def check(root, config):
+    if config["phase"] not in PHASES:
+        raise ValueError(f"invalid phase {config['phase']!r}: expected one of {PHASES}")
     minor = config["minor"]
     if minor is None:
         print("shared version: disabled until the release cut runs just version")

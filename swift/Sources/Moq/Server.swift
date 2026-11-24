@@ -25,6 +25,7 @@ public final class Server: Sendable {
         publish: OriginProducer? = nil,
         consume: OriginProducer? = nil
     ) throws {
+        try checkQuic(quic)
         ffi = try MoqServer(
             config: MoqServerConfig(
                 bind: bind,

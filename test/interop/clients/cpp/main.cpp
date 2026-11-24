@@ -118,7 +118,14 @@ T until(moq::Future<T> future, Clock::time_point deadline, const char *what) {
 std::string patterns(const std::vector<std::string> &list) {
     std::string out = "[";
     for (size_t i = 0; i < list.size(); i++) {
-        out += (i == 0 ? "\"" : ", \"") + list[i] + "\"";
+        out += i == 0 ? "\"" : ", \"";
+        for (char c : list[i]) {
+            if (c == '"' || c == '\\') {
+                out += '\\';
+            }
+            out += c;
+        }
+        out += "\"";
     }
     return out + "]";
 }
@@ -129,6 +136,9 @@ struct Dial {
     std::string version;
     // Wait for the relay's grant and print it.
     bool grant = false;
+    // Turn off the WebSocket fallback. The finish case checks one session end to end, and
+    // leaving a fallback that won a slow race would open a second one.
+    bool quic_only = false;
 };
 
 // The session owns its connection; the client that made it can go. With `grant`, waits for
@@ -138,6 +148,9 @@ std::shared_ptr<moq::Session> connect(const std::string &url, const Dial &dial, 
     config.tls.insecure = true;
     if (!dial.version.empty()) {
         config.versions = {dial.version};
+    }
+    if (dial.quic_only) {
+        config.websocket.enabled = false;
     }
     auto client = ok(moq::Client::init(config), "client init");
     open_session = until(client->connect(url), deadline, "connect");
@@ -203,7 +216,7 @@ int publish(
     auto broadcast = route->broadcast();
     auto catalog = ok(moq::MediaCatalogProducer::init(broadcast), "catalog producer");
     auto media = ok(
-        moq::MediaTrackStreamProducer::video(broadcast, moq::MediaTarget::kNamed{}, {moq::VideoFormat::kAvc3, {}}),
+        moq::MediaTrackStreamProducer::video(broadcast, moq::MediaTarget::kNamed{}, {moq::VideoFormat::h264(), {}}),
         "video stream producer"
     );
     moq::AudioEncoderOutput output{moq::AudioCodec::opus()};
@@ -265,7 +278,9 @@ int publish(
         auto health = health_route->broadcast();
         auto track = ok(health->publish_track("live", std::nullopt), "health track");
         const std::string payload = "session-alive";
-        ok(track->write_frame({std::vector<uint8_t>(payload.begin(), payload.end()), std::nullopt}), "health write");
+        // The track is untimed, so its one frame carries its group key, 0.
+        ok(track->write_frame({std::vector<uint8_t>(payload.begin(), payload.end()), moq::Timestamp{0, std::nullopt}}),
+           "health write");
         ok(track->finish(), "health finish");
         ok(health_route->announce(), "health announce");
         // Only teardown waits on the FIFO; linger has already completed on its own clock.
@@ -304,7 +319,11 @@ void decode_audio(
     }
     moq::AudioDecoderOutput output{};
     output.format = moq::AudioSampleFormat::kF32;
-    output.delay = moq::Delay{std::chrono::nanoseconds(0), MAX_DELAY};
+    // moq-audio waits on a missing group for its playout delay, measured from arrival timing at
+    // tens of ms, so a runtime starved longer than that skips a group that is only late. This
+    // reader checks delivery between implementations, not a real-time deadline: it holds a playout
+    // delay of the max delay, waiting on a hole for the same budget it grants a late group.
+    output.delay = moq::Delay{MAX_DELAY, MAX_DELAY};
     auto decoder = until(moq::AudioConsumer::subscribe(consumer, id, audio, output), deadline, "audio consumer");
 
     std::ofstream log(out + ".txt");
@@ -318,8 +337,14 @@ void decode_audio(
             fail("audio track ended early");
         }
         // moq-audio reports a hole it saw directly; tone.py checks the timestamps too.
-        if (std::holds_alternative<moq::AudioRead::kGap>(read->get_variant())) {
-            fail("audio gap");
+        if (const auto *gap = std::get_if<moq::AudioRead::kGap>(&read->get_variant())) {
+            // Decoded audio is timed, so its scale is always set.
+            const auto scale = gap->timestamp.scale.value();
+            const auto at = gap->timestamp.value / scale * 1'000'000 + gap->timestamp.value % scale * 1'000'000 / scale;
+            const auto us = std::chrono::duration_cast<std::chrono::microseconds>(gap->duration).count();
+            fail(("audio gap after " + std::to_string(decoded) + " samples, at " + std::to_string(at) + "us for " +
+                  std::to_string(us) + "us")
+                     .c_str());
         }
         const auto *variant = std::get_if<moq::AudioRead::kFrame>(&read->get_variant());
         if (!variant) {
@@ -330,7 +355,8 @@ void decode_audio(
         const size_t samples = frame->data.size() / frame_bytes;
         // tone.py reads whole microseconds; splitting off the seconds keeps the product in range.
         const auto &ts = frame->timestamp;
-        log << ts.value / ts.scale * 1'000'000 + ts.value % ts.scale * 1'000'000 / ts.scale << " " << samples << "\n";
+        const auto scale = ts.scale.value();
+        log << ts.value / scale * 1'000'000 + ts.value % scale * 1'000'000 / scale << " " << samples << "\n";
         pcm.write(reinterpret_cast<const char *>(frame->data.data()), static_cast<std::streamsize>(frame->data.size()));
         decoded += samples;
     }
@@ -366,7 +392,7 @@ int subscribe(
     // The catalog is a live track. A lazy publisher (e.g. the browser, which only encodes on
     // demand) may announce a rendition in a later update rather than the first snapshot, so
     // wait for a catalog that has both video and audio. A finished fixture has video only.
-    auto catalogs = until(moq::MediaCatalogConsumer::subscribe(consumer), read_deadline, "catalog consumer");
+    auto catalogs = until(moq::MediaCatalogConsumer::subscribe(consumer, {}), read_deadline, "catalog consumer");
     std::optional<moq::Catalog> catalog;
     while (!catalog || catalog->video.empty() || (!finish && catalog->audio.empty())) {
         catalog = until(catalogs->next(), read_deadline, "catalog");
@@ -377,6 +403,8 @@ int subscribe(
     const auto &[id, video] = *catalog->video.begin();
 
     auto subscription = moq::subscription_defaults();
+    // A video reader that plays nothing out states no min, so a hole is waited for the max.
+    subscription.delay.min = std::nullopt;
     subscription.delay.max =
         finish ? std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::duration<double>(timeout)) : MAX_DELAY;
     auto media = until(
@@ -423,7 +451,7 @@ int subscribe(
         auto group = until(track->next_group(), read_deadline, "health group");
         if (!group) fail("missing health group");
         auto frame = until(group->read_frame(), read_deadline, "health frame");
-        // Its timestamp goes unchecked: lite-05/06 carry an untimed track's send time.
+        // Its timestamp goes unchecked: lite-05/06 declare an untimed track in milliseconds.
         if (!frame || std::string(frame->payload.begin(), frame->payload.end()) != "session-alive") {
             fail("health payload");
         }
@@ -501,6 +529,7 @@ int main(int argc, char **argv) {
     if (url.empty() || broadcast.empty()) {
         fail("--url and --broadcast are required");
     }
+    dial.quic_only = finish || !finish_ack.empty();
     // Warnings and errors from the Rust layer, such as a publication outside the grant.
     ok(moq::log_level("warn"), "log level");
 

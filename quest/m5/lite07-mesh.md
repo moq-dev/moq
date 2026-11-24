@@ -13,8 +13,13 @@ this quest and every `Required` entry that links it.
 moq.pro's lite-07 rollout waits on [Finalize moq-lite-07](/quest/m2/lite07-finalize.md), so this
 condition cannot clear before a release carries the final version.
 
-Decided 2026-10-05: [Cluster routing](/quest/m2/cluster-routing/README.md)'s
-route layer lands in lite-07, so the final lite-07 carries ROUTE and
-path-less ANNOUNCE instead of native hop lists (a temporary lite-06
-compatibility chain rides until lite-08), and loses the `Hop Base`/`Hop Keep`
-announce compression. moq.pro's rollout must plan for that wire.
+Decided 2026-10-05, and redesigned 2026-11-15 by
+[cache-aware multicast](https://github.com/moq-dev/moq/blob/41cc107579/quest/m2/multicast/README.md): the final lite-07
+carries the route layer of [moq-dev/moq#8987](https://github.com/moq-dev/moq/pull/8987).
+Relays route to each other by ROUTE, ROUTE_END, DEAD, and DRAIN under a
+Node ID, and every claim belongs to the relay that announces
+it, with no hop list on the wire; a claim from a lite-06 peer, or across a
+scoped grant, carries a chain of the relays that announced it again. Announce
+compression is `Path Base`/`Path Keep`. moq.pro's rollout must plan for that
+wire, and for its newest and previous releases interoperating as relays
+while a lite-06 relay is still in the mesh.

@@ -1,5 +1,6 @@
 /** CMAF fragment decode over fixed audio and video input, with no network in the timed phase. */
 import * as CmafDecode from "@moq/hang/cmaf";
+import { Time } from "@moq/net";
 import { check } from "../fixture.ts";
 import { longTasks, nextTask } from "./observe.ts";
 
@@ -44,6 +45,9 @@ async function prepare(next: Cmaf): Promise<void> {
 	decoded = undefined;
 }
 
+// A scale-less frame carries a group key and no time, so samples present at their tfdt.
+const UNTIMED = Time.Timestamp.unscaled(0n);
+
 async function decode(): Promise<Phase> {
 	const segment = init;
 	if (!config || !segment || fragments.length !== config.sizes.length) throw new Error("decode before prepare");
@@ -53,7 +57,7 @@ async function decode(): Promise<Phase> {
 	for (let iteration = 0; iteration < config.iterations; iteration++) {
 		decoded = fragments.map((fragment) => {
 			bytes += fragment.byteLength;
-			return CmafDecode.decodeDataSegment(fragment, segment, undefined);
+			return CmafDecode.decodeDataSegment(fragment, segment, UNTIMED);
 		});
 	}
 	const end = performance.now();

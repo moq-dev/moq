@@ -20,6 +20,7 @@ mod config;
 mod connection;
 mod critical;
 mod fetch;
+pub mod handoff;
 mod http_client;
 mod incoming;
 pub mod internal;
@@ -30,18 +31,16 @@ mod refusals;
 mod relay;
 pub mod runtime;
 pub mod session;
-mod settings;
 pub mod shutdown;
+#[cfg(feature = "test-support")]
+pub mod sim;
 pub mod stats;
-#[cfg(any(feature = "stun", test))]
-pub mod stun;
 #[cfg(feature = "test-support")]
 mod test_support;
-#[cfg(all(target_os = "linux", feature = "_uring"))]
+#[cfg(uring)]
 pub(crate) mod uring;
 /// The HTTP/HTTPS server: health, certificate fingerprint, announcements, fetch, and WebSocket sessions.
 pub mod web;
-#[cfg(feature = "websocket")]
 mod websocket;
 
 /// The shared default stream limit for MoQ clients and relays.
@@ -72,5 +71,5 @@ pub use test_support::*;
 
 /// The relay settings registry for composing a binary's CLI and TOML merge.
 pub fn settings() -> usage_rs::config::Registry {
-	settings::Settings::SETTINGS_REGISTRY
+	config::registry()
 }

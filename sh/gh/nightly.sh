@@ -22,17 +22,24 @@ esac
 
 # BENCH_BASE pairs every Rust bench target with its build at that revision, run on the
 # same machine; `previous-nightly` is the commit of the latest other scheduled Nightly on main.
+# That run kept its bench executables as the BENCH_BUILDS_ARTIFACT artifact. The cache
+# can't hold a linked executable, so reusing them saves relinking every target at the base.
+base_builds=
 if [[ -n ${BENCH_BASE:-} ]]; then
     if [[ $report != rust ]]; then
         echo "nightly: BENCH_BASE applies only to the Rust bench groups" >&2
         exit 2
     fi
     if [[ $BENCH_BASE == previous-nightly ]]; then
-        BENCH_BASE=$(gh run list --workflow nightly.yml --branch main --event schedule --limit 2 \
-            --json databaseId,headSha --jq "map(select(.databaseId != ${GITHUB_RUN_ID:-0}))[0].headSha // empty")
-        if [[ -z $BENCH_BASE ]]; then
-            echo "nightly: no previous scheduled Nightly on main" >&2
-            exit 1
+        read -r base_run BENCH_BASE < <(bash "$(dirname "${BASH_SOURCE[0]}")/previous-nightly.sh" --run) || exit 1
+        if [[ -n ${BENCH_BUILDS_ARTIFACT:-} ]]; then
+            base_builds=$(git rev-parse --show-toplevel)/target/bench/base-builds/$1
+            rm -rf "$base_builds"
+            # A previous leg that ended before its builds kept none; the base is built instead.
+            if ! gh run download "$base_run" --name "$BENCH_BUILDS_ARTIFACT" --dir "$base_builds"; then
+                echo "nightly: run $base_run kept no $BENCH_BUILDS_ARTIFACT; building the base" >&2
+                base_builds=
+            fi
         fi
     fi
     # A shallow CI checkout has only its own commit. Fetching a branch name only updates
@@ -44,9 +51,12 @@ if [[ -n ${BENCH_BASE:-} ]]; then
     export BENCH_BASE=$base
 fi
 
+group=$1
 if [[ -n $report ]]; then
     root=$(git rev-parse --show-toplevel)
     out=${BENCH_RESULTS:-$root/target/bench/nightly/$1}
+    builds=$root/target/bench/builds/$group
+    rm -rf "$builds"
     mkdir -p "$out"
     export BENCH_RUNS="$out/criterion-runs.txt"
     : >"$BENCH_RUNS"
@@ -57,10 +67,15 @@ fi
 # shellcheck source=sh/checks.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../checks.sh"
 
+# Each label keeps its executables for the next Nightly's base, under the directory
+# the workflow uploads.
 criterion() {
     local label=$1
     shift
-    run env BENCH_LABEL="$label" BENCH_ARTIFACTS="$out/runs" just gh criterion "$@"
+    run env BENCH_LABEL="$label" BENCH_ARTIFACTS="$out/runs" \
+        BENCH_KEEP_BUILDS="$builds/$label" \
+        BENCH_BASE_BUILDS="${base_builds:+$base_builds/$group/$label}" \
+        just gh criterion "$@"
 }
 
 javascript() {
@@ -101,15 +116,15 @@ case "$1" in
         export NEXTEST_PROFILE=bench NEXTEST_TEST_THREADS=1
         nextest just rs bench-tests --no-fail-fast --run-ignored only \
             -p moq-bench -p moq-congestion -p moq-quic -p moq-net -p moq-tokio -p moq-uring \
-            --features moq-net/async --lib --bin moq-bench --test integration \
-            -E 'test(benchmark_observation_contention) | test(benchmark_readiness_establishment) | test(benchmark_per_packet) | test(benchmark_feed_fetch_wakes) | test(=mesh_sweep::benchmark_route_mesh) | test(benchmark_route_rules) | test(benchmark_route_churn) | test(benchmark_receive_credit) | test(benchmark_receive_windows) | test(benchmark_datagram_delivery) | test(benchmark_socket_queues)'
+            --features moq-net/async,moq-congestion/lab --lib --bin moq-bench --test integration \
+            -E 'test(benchmark_observation_contention) | test(benchmark_readiness_establishment) | test(benchmark_per_packet) | test(benchmark_feed_fetch_wakes) | test(=mesh_sweep::benchmark_route_mesh) | test(benchmark_route_rules) | test(benchmark_route_churn) | test(benchmark_receive_credit) | test(benchmark_receive_windows) | test(benchmark_join_lag) | test(benchmark_datagram_delivery) | test(benchmark_socket_queues)'
         ;;
     rust-test-apps)
         export NEXTEST_PROFILE=bench NEXTEST_TEST_THREADS=1
         nextest just rs bench-tests --no-fail-fast --run-ignored only \
-            -p moq-audio -p moq-mux -p moq-c -p moq-relay -p moq-cli -p moq-ffi \
+            -p moq-audio -p moq-mux -p libmoq -p moq-relay -p moq-cli -p moq-ffi \
             --features moq-audio/playback --lib --bin moq \
-            -E 'test(benchmark_mixer_callbacks) | test(benchmark_resampler) | test(benchmark_raw_audio) | test(benchmark_damage_pid_fanout) | test(benchmark_pes_staging) | test(benchmark_handles) | test(benchmark_stun_sources) | test(benchmark_stream_import) | test(benchmark_timebase_reservation_fanout)'
+            -E 'test(benchmark_mixer_callbacks) | test(benchmark_resampler) | test(benchmark_raw_audio) | test(benchmark_damage_pid_fanout) | test(benchmark_pes_staging) | test(benchmark_handles) | test(benchmark_stream_import) | test(benchmark_timebase_reservation_fanout)'
         ;;
     # Measured Cargo bench targets, all in the bench profile. A paired run builds and
     # measures each group twice, so the groups split across jobs to fit an hour each.
@@ -120,8 +135,6 @@ case "$1" in
         SESSION_CPU=1 criterion net-cpu -p moq-net --features fuzz --bench session -- session_delivery_group_cost_cpu
         # Measure each kio routine, including the contended bench's worker threads.
         criterion kio --no-fail-fast -p kio --bench '*'
-        # moq-gst's catalog bench shares a target name with moq-mux's, so it runs on its own.
-        criterion gst -p moq-gst --bench catalog
         ;;
     rust-shared)
         # One invocation unifies this release build instead of rebuilding shared crates
@@ -140,12 +153,14 @@ case "$1" in
     rust-extra)
         criterion qmux --manifest-path rs/qmux/Cargo.toml --bench receive
         criterion msf -p moq-msf --bench catalog
+        # moq-gst's catalog bench shares a target name with moq-mux's, so it runs on its own.
+        criterion gst -p moq-gst --bench catalog
         # The allocation/window/play-buffer/batch/receive-bursts/openh264 tables keep their stdout in the run;
         # only Criterion estimates enter the trend report.
-        criterion extra --no-fail-fast -p moq-crypto -p moq-json -p moq-archive -p moq-cli -p moq-mux -p moq-audio \
+        criterion extra --no-fail-fast -p moq-e2ee -p moq-json -p moq-archive -p moq-cli -p moq-mux -p moq-audio \
             -p moq-quic -p moq-sock -p moq-tokio -p moq-transcode -p moq-hls -p moq-video \
             --features moq-json/bench,moq-quic/fuzz,moq-video/openh264 \
-            --bench protect --bench sign --bench codec --bench table --bench allocations --bench window \
+            --bench protect --bench codec --bench table --bench allocations --bench window \
             --bench producer --bench play_buffer --bench jitter --bench sync --bench decode_clock --bench ts_programs --bench ts_video \
             --bench bus --bench batches --bench parameter_sets --bench sent_packets --bench demux --bench receive_bursts --bench ladder --bench fanout --bench include \
             --bench openh264
@@ -162,14 +177,13 @@ case "$1" in
         done
         ;;
     js)
-        for benchmark in broadcasts requests fills forward reader frames drift ledger bandwidth replay varint lite-varint track resume priority subscribe-drop refresh observed compression datagrams socket; do
+        for benchmark in broadcasts requests fills fill-probe forward reader frames drift ledger bandwidth replay varint lite-varint track resume priority subscribe-drop window-drop publisher-update refresh observed compression datagrams; do
             javascript "$benchmark" just js bench "$benchmark"
         done
         javascript catalog just js catalog-bench
         javascript qmux-record just js qmux-record-bench
         javascript qmux-datagrams just js qmux-datagrams-bench
         javascript cmaf just js cmaf-bench
-        javascript p2p just js p2p-bench
         javascript e2ee just js e2ee-bench
         javascript json-stream just js json-stream-bench
         javascript signals just js signals-bench

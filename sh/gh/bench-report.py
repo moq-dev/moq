@@ -31,6 +31,7 @@ SMALLER = {
     "streams",
     "instructions",
     "messages",
+    "items",
 }
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -167,6 +168,9 @@ def measurement_unit(column):
         return "packets"
     if column.endswith("_messages"):
         return "messages"
+    # Changes carried in messages, counted apart from the messages.
+    if column.endswith("_items"):
+        return "items"
     for unit in ("ns", "us", "ms"):
         if re.search(f"(^|_){unit}($|_per_)", column):
             return unit
@@ -246,69 +250,8 @@ def sizes(directory):
     )
 
 
-def cost(directory):
-    """Read the gate cost scenarios: each module's wall and CPU time, each crate's compile
-    instructions, and each test binary's and test file's summed test time."""
-    raw = directory / "raw"
-    toolchains = "; ".join((raw / "toolchains.txt").read_text().splitlines())
-    scenarios = sorted(path for path in raw.iterdir() if path.is_dir())
-    if not scenarios:
-        raise ValueError(f"no gate cost scenarios in {raw}")
-    entries = []
-    for scenario in scenarios:
-        name = scenario.name
-        load = " ".join((scenario / "loadavg").read_text().split()[:3])
-        extra = f"Load average {load} before the scenario; {toolchains}"
-        for line in (scenario / "modules.txt").read_text().splitlines():
-            wall, cpu, label = line.split(" ", 2)
-            if label == "whole run":
-                key, note = "total", {"extra": extra}
-            elif match := re.fullmatch(r"(\w+) (\w+)", label):
-                key, note = f"module/{match[2]}/{match[1]}", {}
-            else:
-                raise ValueError(f"{name}: a gate phase did not pass: {label}")
-            entries.append({"name": f"{name}/{key}/wall", "unit": "s", "value": value(int(wall)), **note})
-            entries.append({"name": f"{name}/{key}/cpu", "unit": "s", "value": value(int(cpu) / 1000), **note})
-
-        # The repository's own crates split by target kind; a dependency's builds sum into one
-        # series. A tooling test's fixture crate, in a scratch directory, counts only in its module.
-        crates, cpu = {}, 0
-        for line in (scenario / "rustc.tsv").read_text().splitlines():
-            package, manifest, kind, milliseconds, instructions = line.split("\t")
-            if Path(manifest).is_relative_to(ROOT) and not Path(manifest).is_relative_to(ROOT / ".tmp"):
-                key = f"{package}/{kind}"
-            elif "/registry/src/" in manifest or "/git/checkouts/" in manifest:
-                key = package
-            else:
-                continue
-            crates[key] = crates.get(key, 0) + int(instructions)
-            cpu += int(milliseconds)
-        entries.append({"name": f"{name}/rustc/cpu", "unit": "s", "value": value(cpu / 1000)})
-        entries.append({"name": f"{name}/rustc/instructions", "unit": "instructions", "value": sum(crates.values())})
-        entries += [
-            {"name": f"{name}/crate/{key}/instructions", "unit": "instructions", "value": value(total)}
-            for key, total in sorted(crates.items())
-        ]
-
-        # Slot time, the sum of each test's elapsed time, does not shrink with more workers.
-        tests = {}
-        for case in ElementTree.parse(scenario / "nextest.xml").getroot().iter("testcase"):
-            key = f"rust-test/{case.get('classname')}"
-            tests[key] = tests.get(key, 0) + float(case.get("time"))
-        for report in sorted((scenario / "js").glob("**/junit.xml")):
-            package = report.parent.relative_to(scenario / "js")
-            for suite in ElementTree.parse(report).getroot().findall("testsuite"):
-                # Bun's suite time is elapsed, which shrinks when tests overlap.
-                seconds = sum(float(case.get("time")) for case in suite.iter("testcase"))
-                tests[f"js-test/{(package / suite.get('file')).as_posix()}"] = seconds
-        entries += [
-            {"name": f"{name}/{key}", "unit": "s", "value": value(seconds)} for key, seconds in sorted(tests.items())
-        ]
-    return checked(entries)
-
-
-def prepare(directory, output):
-    costs, rates, comparisons = [], [], {}
+def completed(directory):
+    """Each nightly source that succeeded, as its name, its checked entries, and its paired comparison or None."""
     for source in sorted(directory.glob("bench-*")):
         # Other nightly artifacts share the prefix; only a recorded outcome marks a chart source.
         status = source / "outcome.json"
@@ -318,18 +261,25 @@ def prepare(directory, output):
         if outcome not in {"success", "failure", "cancelled", "skipped"}:
             raise ValueError(f"invalid benchmark outcome: {source}")
         if outcome != "success":
-            print(f"{source.name}: {outcome}; no history point")
+            print(f"{source.name}: {outcome}; no point")
             continue
         report = source / "report.json"
         if not report.exists():
             raise ValueError(f"successful benchmark has no report: {source}")
         entries = checked(json.loads(report.read_text()))
+        print(f"{source.name}: {len(entries)} measured entries")
+        paired = source / "paired.json"
+        yield source.name, entries, json.loads(paired.read_text()) if paired.exists() else None
+
+
+def prepare(directory, output):
+    costs, rates, comparisons = [], [], {}
+    for source, entries, comparison in completed(directory):
         for entry in entries:
             target = rates if entry["unit"] in BIGGER else costs
-            target.append({**entry, "name": f"{source.name}/{entry['name']}"})
-        print(f"{source.name}: {len(entries)} measured entries")
-        if (source / "paired.json").exists():
-            comparisons[source.name] = json.loads((source / "paired.json").read_text())
+            target.append({**entry, "name": f"{source}/{entry['name']}"})
+        if comparison is not None:
+            comparisons[source] = comparison
     if not costs and not rates:
         # The table still rebuilds from stored history and marks every source stale.
         print("no completed benchmark reports; no history point")
@@ -343,6 +293,116 @@ def prepare(directory, output):
         if target := os.environ.get("GITHUB_OUTPUT"):
             with open(target, "a") as stream:
                 stream.write(f"{name}={str(bool(entries)).lower()}\n")
+
+
+# Kixel Quest reads at most this many bytes of a run attempt's metrics, across its artifacts.
+KIXEL_LIMIT = 1 << 20
+# The measure an entry that is no benchmark CSV column records, by its unit; any other unit names its own.
+MEASURES = {"ns": "time", "bytes": "size"}
+
+
+def compact(number):
+    """A measurement to six significant digits, far finer than its noise, so a night's fits Kixel Quest's limit."""
+    rounded = float(f"{value(number):.6g}")
+    return int(rounded) if rounded.is_integer() else rounded
+
+
+def kixel(head, bases):
+    """Kixel Quest's `metrics.json` for entries measured at the run's commit and, by commit, at paired bases.
+
+    A benchmark CSV column becomes a measure of the row its other segments name, so a row's columns share one name.
+    """
+    units = {}
+
+    def metrics(entries):
+        result = {}
+        for entry in checked(entries):
+            benchmark, _, column = entry["name"].rpartition("/")
+            if not benchmark or measurement_unit(column) != entry["unit"]:
+                benchmark, measure = entry["name"], MEASURES.get(entry["unit"], entry["unit"])
+            else:
+                measure = column
+            if len(benchmark) > 1024 or len(measure) > 64:
+                raise ValueError(f"name too long for Kixel Quest: {entry['name']}")
+            # A column's name implies its unit, and MEASURES names no column, so a measure keeps one unit.
+            units[measure] = entry["unit"]
+            measures = result.setdefault(benchmark, {})
+            if measure in measures:
+                raise ValueError(f"duplicate measurement: {entry['name']}")
+            measures[measure] = {"value": compact(entry["value"])}
+        return result
+
+    samples = [{"metrics": metrics(head)}]
+    for commit, entries in sorted(bases.items()):
+        if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", commit):
+            raise ValueError(f"paired base is not a full commit ID: {commit!r}")
+        samples.append({"commit": commit, "metrics": metrics(entries)})
+    text = json.dumps({"units": units, "samples": samples}, separators=(",", ":"), ensure_ascii=False) + "\n"
+    size = len(text.encode())
+    if size > KIXEL_LIMIT:
+        raise ValueError(f"metrics.json is {size} bytes, over the {KIXEL_LIMIT} Kixel Quest reads")
+    print(f"metrics.json: {size} bytes of {KIXEL_LIMIT}")
+    return text
+
+
+def nightly_metrics(directory):
+    """Kixel Quest's metrics of each successful source, with each paired comparison's base; None when none succeeded."""
+    head, bases = [], {}
+    for _, entries, comparison in completed(directory):
+        head += entries
+        if comparison is not None:
+            measured = [case for case in comparison["cases"] if case["base_ns"] is not None]
+            bases.setdefault(comparison["base"], []).extend(
+                {"name": case["name"], "unit": "ns", "value": case["base_ns"]} for case in measured
+            )
+    # A comparison of only identical builds measured no base.
+    return kixel(head, {commit: entries for commit, entries in bases.items() if entries}) if head else None
+
+
+def callgrind(path):
+    """Each benchmark's instruction count in one Callgrind profile, as CodSpeed's instrumented Criterion dumps it."""
+    parts, events = [], None
+    with path.open("rb") as stream:
+        if stream.readline().rstrip(b"\n") != b"# callgrind format":
+            raise ValueError(f"not a Callgrind profile: {path}")
+        # Only a part's header lines begin with these keys; its cost lines begin with positions or `key=`.
+        for line in stream:
+            if line.startswith(b"part:"):
+                parts.append({"trigger": None, "events": events, "totals": None})
+            elif not parts:
+                continue
+            elif line.startswith(b"desc: Trigger: "):
+                parts[-1]["trigger"] = line[len(b"desc: Trigger: ") :].rstrip(b"\n").decode()
+            elif line.startswith(b"events:"):
+                events = parts[-1]["events"] = line.split()[1:]
+            # CodSpeed's Callgrind leaves each part's `summary` 0 and closes the part with its `totals`.
+            elif line.startswith(b"totals:") and parts[-1]["totals"] is None:
+                parts[-1]["totals"] = line.split()[1:]
+    entries = []
+    for part in parts:
+        trigger = part["trigger"]
+        # Each benchmark dumps its own part; codspeed-rust also dumps its version, and Valgrind dumps at exit.
+        request = (trigger or "").removeprefix("Client Request: ")
+        if trigger == "Program termination" or request.startswith("Metadata: "):
+            continue
+        if request == (trigger or ""):
+            raise ValueError(f"unexpected Callgrind dump {trigger!r}: {path}")
+        if part["events"] is None or b"Ir" not in part["events"] or part["totals"] is None:
+            raise ValueError(f"Callgrind part {request} counts no instructions: {path}")
+        # Callgrind drops trailing zero costs.
+        index, totals = part["events"].index(b"Ir"), part["totals"]
+        instructions = int(totals[index]) if index < len(totals) else 0
+        if instructions == 0:
+            raise ValueError(f"{request} ran no simulated instructions: {path}")
+        entries.append({"name": request, "unit": "instructions", "value": instructions})
+    return entries
+
+
+def codspeed_metrics(directory):
+    """Kixel Quest's metrics of every benchmark in the Callgrind profiles CodSpeed's runner left in its temp folder."""
+    # Each run part's profile folder, holding a `<pid>.out` for each process.
+    profiles = sorted(directory.glob("profile.*.out/*.out"))
+    return kixel([entry for path in profiles for entry in callgrind(path)], {})
 
 
 HISTORY_PREFIX = "window.BENCHMARK_DATA = "
@@ -626,7 +686,7 @@ def index(directory, commit=None, paired_path=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    for command in ("rust", "rust-test", "js", "size", "cost", "prepare"):
+    for command in ("rust", "rust-test", "js", "size", "prepare", "nightly-metrics", "codspeed-metrics"):
         sub = commands.add_parser(command)
         sub.add_argument("directory", type=Path)
         sub.add_argument("output", type=Path)
@@ -652,10 +712,14 @@ def main():
         write(args.output, javascript(args.directory))
     elif args.command == "size":
         write(args.output, sizes(args.directory))
-    elif args.command == "cost":
-        write(args.output, cost(args.directory))
     elif args.command == "prepare":
         prepare(args.directory, args.output)
+    elif args.command in ("nightly-metrics", "codspeed-metrics"):
+        metrics = nightly_metrics if args.command == "nightly-metrics" else codspeed_metrics
+        text = metrics(args.directory)
+        if text is not None:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(text)
     elif args.command == "status":
         args.directory.mkdir(parents=True, exist_ok=True)
         (args.directory / "outcome.json").write_text(json.dumps({"status": args.status}) + "\n")

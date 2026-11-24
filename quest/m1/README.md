@@ -22,12 +22,50 @@ publisher and OIDC quests (setup after the cut's first publishes) are
 additive. video-vaapi moved up from later work
 because a downstream iGPU transcode trial needs it now.
 
-Held here by open claims: a quest's branch is its path, so a claimed quest
-cannot move until its PR merges, and an epic moves with its children. These
-breaking epics and quests stay in m1 for now and are listed in m2's
-`Required`, so the cut still waits on them: drop-set and
-stream-credit. The [re-cut follow-up](/quest/m2/recut-held.md)
-moves what remains of them once their claims merge.
+Decided 2026-11-13 (maintainer, /quest-run): stream-credit stays in m1 and
+no longer gates m2, since takeover, its only wire change, moved to m3.
+Its YIELDED continuations leave lite-07 again in m2
+([moq-dev/moq#8965](https://github.com/moq-dev/moq/pull/8965), 2026-11-16).
+
+Decided 2026-11-12 (maintainer, /quest-audit before the cut):
+
+- ✅ Additive and docs-only work that sat in m2 moved here, so the cut stops
+  waiting on it: the time-addressing guide, the JS fills that carry a time,
+  and outbound federation (rejected: leaving each in m2 beside the breaking
+  work it follows). Each still lists the m2 quest it builds on under
+  `Required`. Superseded 2026-11-13, below.
+- ✅ The mesh libraries and byte streams moved here from m3 (rejected:
+  staying first in m3). The 2026-11-03 reason to keep them out of m1 was that
+  the cut would wait on them; since 2026-11-05 the cut waits on m2 alone, and
+  a downstream application builds on them from `main` now. Superseded
+  2026-11-13, below, and 2026-11-14 (maintainer): byte streams moved to Kixel,
+  which builds its own on moq-net's public API, and sockets dropped their
+  `tcp` protocol. Socket endpoints followed on 2026-11-16 (maintainer,
+  /quest-plan of the pre-cut audit): [they leave moq](https://github.com/moq-dev/moq/pull/9029)
+  for Kixel before the cut.
+- ✅ Also moved here: the two reconnect fixes whose bugs came from PRs that
+  are on `main` and not on `release`, so the cut would publish them; the Go
+  module proxy, since the mirror repository nears 1 GB; and the ashpd bump.
+
+Decided 2026-11-13 (maintainer, /quest-plan): no quest requires one in a later
+milestone, so the 14 m1 quests that waited on m2 work moved to
+[m3](/quest/m3/README.md): buffered-ascending, export-order,
+receive-windows-evicted, route-trace-validation, routing-guide,
+subscribe-fills-js, time-addressing-guide, and the cluster-routing and mesh
+epics whole. ✅ m3 (rejected: m2, where the cut would wait on them; pulling
+their 12 breaking m2 blockers into m1). m3 is not gated, and they rank right
+after m2, which is when they can start.
+
+Decided 2026-11-13 (maintainer, /quest-plan on what testing to add): tests
+that guard what production traffic reaches join m1 ahead of the questline's
+m4 default, so changes are proven before they ship: the
+QUIC Interop Runner (`test/quic-interop`), sim rule checks,
+relay parser fuzz targets (qmux, moq-auth), and from m4
+the relay on the sim (landed),
+mutation testing (#8712), and peer-reachable unsafe. OSS-Fuzz stays in m4 (maintainer, same round): it mostly waits on
+google/oss-fuzz.
+Left in m4 without a pick: Kani, Miri seeds and TSan, the JS corpus, and
+bindings interop.
 
 ## Related
 

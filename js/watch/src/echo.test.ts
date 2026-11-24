@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { Duration, Manual, yieldNow } from "@moq/clock";
+import { Duration, yieldNow } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { Echo as Schema } from "@moq/hang";
 import type * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
@@ -31,8 +32,8 @@ function announced(origin: Origin.Producer): Set<string> {
 		for (;;) {
 			const entry = await listing.next();
 			if (!entry) break;
-			if (entry.kind === "absent" || entry.kind === "offline") paths.delete(entry.prefix);
-			else if (entry.kind === "present") paths.add(entry.prefix);
+			if (entry.kind === "absent") paths.delete(entry.prefix);
+			else paths.add(entry.prefix);
 		}
 	})();
 	return paths;

@@ -11,9 +11,10 @@ infrastructure.
 | `infra/mbx` |                 | `mbx-moq-dev`   | Private Rust build cache for CI         |
 | `infra/nix` | `nix.moq.dev`   | `nix-moq-dev`, `nix-ci-moq-dev` | Nix binary cache        |
 | `infra/corpus` | `corpus.moq.dev` | `corpus-moq-dev`, `corpus-private-moq-dev` | Video-quality corpus |
+| `infra/go`  | `go.moq.dev`    | `go-moq-dev`    | Go module proxy for `moq.dev/moq-ffi`   |
 
 Each worker is a standalone bun package with a `wrangler.jsonc` and a
-small TypeScript handler. The apt and rpm workers proxy GETs out of the R2
+small TypeScript handler. The apt, rpm, and go workers proxy GETs out of the R2
 bucket with appropriate `Content-Type` and `Cache-Control` headers for the
 file kind, and the nix worker does the same across its two buckets. The
 moq.sh worker serves `install.sh` from its bundle at every path, with the
@@ -31,6 +32,7 @@ just infra apt deploy
 just infra rpm deploy
 just infra moq-sh deploy
 just infra nix deploy
+just infra go deploy
 ```
 
 Each recipe runs `bun install` and `bun wrangler deploy`. The
@@ -157,7 +159,7 @@ self-hosted runner `nixos-moq-ci` (label `moq-queue`, with its local caches and
 main ruleset requires its `Queue` context and the merge queue, so only the
 queue (or the administrator bypass) lands on `main`. moq-dev/quest's queue
 watcher, `quest land watch`, runs on the maintainer's NixOS host
-([kixelated/nixos](https://github.com/kixelated/nixos), `modules/quest-land.nix`)
+(kixel-ai/dotfiles, `nixos/modules/quest-land.nix`)
 with moq-bot's key: it comments on each PR the queue drops, runs the Codex
 fixer, and re-enqueues the result.
 See [`CONTRIBUTING.md`](../CONTRIBUTING.md#landing-gate) for requesting a landing.
@@ -186,7 +188,7 @@ is done for `main`.
    just infra mbx create
    ```
 
-   `lifecycle.json` deletes every object 14 days after upload and aborts
+   `lifecycle.json` deletes every object 7 days after upload and aborts
    multipart uploads left incomplete for a day. mbx writes each compilation
    once and never refreshes it, so a result still in use expires too; the
    next writer that misses it compiles and uploads it again. After editing
@@ -272,17 +274,19 @@ merge to `main`, for x86 Linux, ARM Linux, and ARM macOS. It publishes the full
 build closure from `nix develop --profile`, uploading only missing paths, plus
 `moq-libav`, its wasm build, and its downloaded sources, which `bun install`
 builds outside the dev shell. An independent x86 Linux job builds and pushes
-the `moq-relay` and `moq` runtime closures for Smoke's nix channel, which
-reads them without write keys. Their existing Crane `cargoArtifacts` outputs
-are published first so later builds can substitute them when their inputs
-are unchanged; those inputs include the patched `kio` sources. The other
+the `moq-relay`, `moq`, and `moq-boy` closures that Smoke's nix channel and
+demo deploys pin by commit (`just gh cache-rev`), which read them without
+write keys. They build one derivation per crate (`nix/crates.nix`), and the
+crates they link (`.#<package>.deps`) are published first, so a later build
+rebuilds only the crates whose source, features, or dependencies changed. The other
 platforms have no Smoke nix lane. Runtime warms serialize: the active run
 finishes and new pushes replace only the pending run, avoiding duplicate
 builds without starving publication or delaying the dev-shell matrix.
-Its lifecycle rule (`infra/nix/lifecycle.json`) deletes each object 30 days
+Its lifecycle rule (`infra/nix/lifecycle.json`) deletes each object 14 days
 after upload. `nix copy` never re-uploads a path the bucket already has, so a
 path many commits reuse keeps its first upload's age. Each job therefore
-records the store paths it pushed under `roots/<commit>/`, then copies every
+records the store paths it pushed under `roots/<commit>/`, the runtime job its
+dependency crates too, since no runtime closure references them, then copies every
 object in that commit's recorded closures that is over a week old onto itself,
 restarting its age; it fails if any is already gone. The newest cached
 commit, the one Smoke pins, therefore substitutes in full while `main` keeps
@@ -320,7 +324,7 @@ done.
      "enforcement": "active",
      "conditions": {"ref_name": {"exclude": [], "include": [
        "refs/tags/moq-relay-v*", "refs/tags/moq-cli-v*",
-       "refs/tags/moq-c-v*", "refs/tags/moq-gst-v*",
+       "refs/tags/libmoq-v*", "refs/tags/moq-gst-v*",
        "refs/tags/moq-ffi-v*", "refs/tags/moq-dart-v*"
      ]}},
      "rules": [{"type": "creation"}, {"type": "update"}, {"type": "deletion"}],
@@ -345,7 +349,7 @@ done.
    bootstrap created:
 
    ```bash
-   for tag in 'moq-relay-v*' 'moq-cli-v*' 'moq-c-v*' 'moq-gst-v*'; do
+   for tag in 'moq-relay-v*' 'moq-cli-v*' 'libmoq-v*' 'moq-gst-v*'; do
      gh api -X POST repos/moq-dev/moq/environments/cache-write/deployment-branch-policies \
        -f name="$tag" -f type=tag
    done
@@ -380,10 +384,83 @@ never for released ones unless they are re-signed, and for CI paths only after
 emptying `nix-ci-moq-dev`, since the refresh keeps the newest cached commit's
 paths, with their old signatures, indefinitely. The next Cache push refills it.
 
+## Bootstrapping the Go module proxy
+
+`go.moq.dev` serves `moq.dev/moq-ffi` in the GOPROXY protocol out of the
+`go-moq-dev` bucket, so its static libraries stay out of git. moq.dev's vanity
+page (`worker/vanity.ts` in moq-dev/moq.dev) points the go command there with
+a `mod` go-import tag, which proxy.golang.org and `GOPROXY=direct` both follow.
+A 404 is final: nothing falls back past this proxy.
+
+`release-go-ffi.yml` publishes each `moq-ffi-v*` tag with `just go publish-ffi`
+from the `publish` Environment, reusing its `R2_ACCESS_KEY_ID` and
+`R2_SECRET_ACCESS_KEY`. Until the cutover below, it reads moq.dev's go-import
+tag (`just go ffi-origin`) and keeps publishing to the moq-dev/moq-go-ffi git
+mirror. sum.golang.org pins the first hash it sees for each version, so the
+upload never replaces an object: a rerun skips identical files and fails on
+different ones.
+
+All of this runs once, by a maintainer, in this order, with no `moq-ffi`
+release in flight between steps 3 and 5.
+
+1. **Create the bucket and deploy the Worker** under your `wrangler login`:
+
+   ```bash
+   just infra go create
+   just infra go deploy
+   curl -fsS https://go.moq.dev/   # prints the proxy's banner
+   ```
+
+2. **Let the `publish` Environment's R2 token write the bucket.** If the token
+   behind `R2_ACCESS_KEY_ID` is scoped to buckets, add `go-moq-dev` with
+   **Object Read & Write** in the dashboard (R2 -> Manage API tokens). Wrangler
+   cannot edit R2 tokens.
+
+3. **Backfill and verify** every published version, with that token in the
+   environment, from the dev shell with rclone added (`nix shell .#packaging`):
+
+   ```bash
+   export R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=...
+   just infra go backfill
+   just infra go verify
+   ```
+
+   `backfill` copies every version proxy.golang.org lists, byte for byte as
+   `go mod download` checked it against sum.golang.org. `verify` downloads each
+   one through `https://go.moq.dev` from a clean module cache, so the go
+   command checks it against sum.golang.org again, and fails if any listed
+   version is missing.
+
+4. **Cut over moq.dev.** In moq-dev/moq.dev's `worker/vanity.ts`, serve
+   `<meta name="go-import" content="moq.dev/moq-ffi mod https://go.moq.dev">`
+   for `/moq-ffi` and drop its `go-source` tag, since the generated `moq.go`
+   lives in no repository. Once deployed (the page caches for an hour):
+
+   ```bash
+   just go ffi-origin   # prints mod
+   ```
+
+5. **Catch up and verify the paths users take**, from a clean module cache:
+
+   ```bash
+   just infra go backfill   # any release the mirror took before the cutover
+   just infra go verify --proxy direct
+   just infra go verify --proxy https://proxy.golang.org
+   ```
+
+6. **Archive the mirror** once a `moq-ffi` release has published through
+   go.moq.dev (its `Publish to Go module mirror` job runs `Publish to
+   go.moq.dev`). Archiving keeps every tag readable for anyone who imported
+   the old `github.com/moq-dev/moq-go-ffi` path:
+
+   ```bash
+   gh repo archive moq-dev/moq-go-ffi --yes
+   ```
+
 ## Bootstrapping the video corpus
 
 The nightly video-quality job, which [the harness
-quest](../quest/m3/video-quality/harness.md) adds, reads its clips from two
+quest](../quest/m9/video-quality/harness.md) adds, reads its clips from two
 buckets.
 `corpus-moq-dev` holds open clips and is public at `corpus.moq.dev`.
 `corpus-private-moq-dev` holds clips that cannot be redistributed. It has no

@@ -1,34 +1,37 @@
-# [S] Retire the hand-written moq-c crate
+# [S] Retire the hand-written libmoq crate
 
 ## Goal
 
-The hand-written C crate is gone: its source, workflows, and docs that only
-served it are deleted once the generated `moq-c` publishes. The generated
-`moq-c` package's `MIGRATE.md` tells C users how to move.
+The hand-written C crate, `libmoq`, is gone: its source, workflows, and docs
+that only served it are deleted once the generated `moq-c` publishes. The
+generated `moq-c` package's `MIGRATE.md` tells C users how to move, and the
+last `libmoq` on crates.io and the last `libmoq-v*` release say `moq-c`
+replaces them.
 
 ## Plan
 
-- #4288 renamed libmoq to `moq-c` (`rs/moq-c`); this quest deletes that
-  hand-written crate.
-- Decided 2026-10-25 (maintainer): the hand-written `moq-c` 0.7 ships at the
-  m1 cut, so it is a published package when the generated 0.8 replaces it.
-  Its `MIGRATE.md` history carries into the generated package. This replaces
-  the 2026-10-20 premise that it never published.
-- `rs/moq-c/native-libs/` serves the generated package too, and
+- Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit): the
+  hand-written API ships at the cut as `libmoq` 0.22, its final line, and
+  `moq-c` names only the generated package
+  (`c/moq`). This replaces the
+  2026-10-25 decision that it ships as `moq-c`, and with it the code-free
+  `rs/libmoq` stub and its two quests: there is no stub at this cut.
+- So the crate this deletes is `rs/libmoq`. Before its source goes, publish
+  the pointer: a final `libmoq` patch whose README and description name
+  `moq-c`, as [retired names](/quest/m3/release/retired-names.md) does for
+  the other renames, since the hand-written crate is a published package
+  when the generated one replaces it. Its `MIGRATE.md` history carries into
+  the generated package.
+- The crate's `native-libs/` serves the generated package too, and
   `cpp/moq/cmake/moq-ffi.cmake` serves both C++ and C. Move them to a neutral
   home shared by both packages before deleting the crate, update every
-  reader of either path (`rg 'moq-c/native-libs|moq-ffi\.cmake'`), and check
+  reader of either path (`rg 'native-libs|moq-ffi\.cmake'`), and check
   that the installed C and C++ CMake configs still link the native libraries.
-- `AGENTS.md`'s Cross-Package Sync table keeps the hand-written crate beside
-  `c/moq` while it ships. Drop `rs/moq-c` from the `rs/moq-ffi` row and point
-  the `rs/moq-c` C ABI row at the generated `c/moq` header (`<moq/moq.h>`).
-- Deleting the crate removes its four `moq-c-<target>` archives from the
+- Deleting the crate removes its four per-target archives from the
   Nightly size report, which `sh/size/report.py` refuses as missing. Add a way
   to retire one artifact's series without dropping the rest of the history
   (decided 2026-10-28, from [moq-dev/moq#7132](https://github.com/moq-dev/moq/pull/7132)),
   rather than deleting every `nightly-size-history` artifact.
-- The code-free `rs/libmoq` stub left under the old name is
-  [Retire the libmoq stub](/quest/m3/release/libmoq-retire.md)'s, separately.
 
 ## Required
 
@@ -36,6 +39,3 @@ served it are deleted once the generated `moq-c` publishes. The generated
 
 - [C consumers](/quest/m3/c/consumers.md) - the interop client and `doc/lib/c` samples no longer call the hand-written ABI
 
-## Related
-
-- [Retire the libmoq stub](/quest/m3/release/libmoq-retire.md) - deletes the `rs/libmoq` stub under the old name

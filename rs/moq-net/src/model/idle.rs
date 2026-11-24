@@ -12,23 +12,25 @@
 //!
 //! Gates nest: a read through a gate that polls another gated reader passes it the outer
 //! gate's waiter, whose waker stays the same across reads, so the inner gate keeps its arm
-//! and its wake reaches the outer gate on the way to the task.
+//! and its wake reaches the outer gate on the way to the task. A change made outside the
+//! read, such as a drop poll hearing a fill's answer, reopens the gate instead of disarming
+//! it, so that wake reaches the outer gates too.
 
 pub(super) use crate::util::Idle;
 
-/// Which group read parked: a track reader parks the arrival and sequence walks
+/// Which group read parked: a track reader parks the arrival and key walks
 /// separately, since one finding nothing says nothing about the other.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Walk {
 	Arrival,
-	Sequence,
+	Key,
 }
 
 impl Walk {
-	/// The walk a read in sequence order for `ordered`, or arrival order otherwise, takes.
+	/// The walk a read in key order for `ordered`, or arrival order otherwise, takes.
 	pub(super) fn new(ordered: bool) -> Self {
 		match ordered {
-			true => Self::Sequence,
+			true => Self::Key,
 			false => Self::Arrival,
 		}
 	}

@@ -10,6 +10,17 @@ use std::time::Duration;
 use kio::clock::{Instant, Sleep};
 use moq_net::Timestamp;
 
+/// Why the buffer refuses a frame.
+#[derive(Clone, Debug, thiserror::Error)]
+pub(crate) enum Error {
+	/// The source's clock runs further off ours than the output's may follow.
+	#[error("the source's clock runs {ppm:+.1} ppm off ours, past the {limit:.0} ppm the output's may follow")]
+	Drift { ppm: f64, limit: f64 },
+	/// A publisher handed off from queued a frame after its handoff deadline.
+	#[error("a retired publisher queued after its handoff deadline")]
+	Retired,
+}
+
 /// What each track may hold before its reader is held back, as the container consumer's max
 /// buffer: the most one group may cache.
 pub(crate) const MAX_BYTES: usize = 32 * 1024 * 1024;
@@ -125,12 +136,11 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		}
 	}
 
-	pub fn push(&mut self, key: K, arrival: Arrival<T>) -> anyhow::Result<Push> {
-		if let Some(Handoff::Committed(committed)) = self.handoff.as_deref() {
-			anyhow::ensure!(
-				committed.keys.contains(&key),
-				"a retired publisher queued after its handoff deadline"
-			);
+	pub fn push(&mut self, key: K, arrival: Arrival<T>) -> Result<Push, Error> {
+		if let Some(Handoff::Committed(committed)) = self.handoff.as_deref()
+			&& !committed.keys.contains(&key)
+		{
+			return Err(Error::Retired);
 		}
 		self.writing(&key).push(key, arrival)
 	}
@@ -335,8 +345,7 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		self.committed().map_or(&self.active, |committed| &committed.old)
 	}
 
-	pub fn at(&self, generation: u64, decode: impl Into<Decode>) -> Option<Instant> {
-		let decode = decode.into();
+	pub fn at(&self, generation: u64, decode: Decode) -> Option<Instant> {
 		self.committed()
 			.and_then(|committed| committed.old.at(generation, decode))
 			.or_else(|| self.active.at(generation, decode))
@@ -382,9 +391,12 @@ impl Decode {
 	}
 }
 
-impl From<Timestamp> for Decode {
-	fn from(timestamp: Timestamp) -> Self {
-		Self::from_nanos(timestamp.as_nanos() as i128)
+impl TryFrom<Timestamp> for Decode {
+	type Error = moq_net::TimeOverflow;
+
+	/// Refused for an [unscaled](Timestamp::unscaled) timestamp, which has no time to decode at.
+	fn try_from(timestamp: Timestamp) -> Result<Self, Self::Error> {
+		Ok(Self::from_nanos(timestamp.as_nanos()? as i128))
 	}
 }
 
@@ -428,7 +440,8 @@ pub(crate) struct Ready<K, T> {
 	pub generation: u64,
 	pub item: T,
 	decode: Decode,
-	deadline: Instant,
+	/// When it was due, on the clock that follows the source's.
+	pub deadline: Instant,
 	/// Whether it is the first frame of its track to go out.
 	pub first: bool,
 	bytes: usize,
@@ -584,7 +597,7 @@ const LEADS: usize = (RATE_WINDOW / STEER.as_secs_f64()) as usize;
 const RESPONSE: f64 = 600.0;
 /// The furthest the clock runs off ours: 810 Hz of the 27 MHz system clock (ISO/IEC 13818-1
 /// 2.4.2.1).
-const MAX_DRIFT: f64 = 810.0 / 27e6;
+pub(crate) const MAX_DRIFT: f64 = 810.0 / 27e6;
 /// How fast that may change, per second: 0.075 Hz/s of 27 MHz (ISO/IEC 13818-1 2.4.2.1).
 const MAX_SLEW: f64 = 0.075 / 27e6;
 /// How close two tracks' depths under their envelopes are to fit them equally, in seconds: a
@@ -854,7 +867,7 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 
 	/// Queue a frame, or drop it if it cannot make its deadline. Fails once the source's clock
 	/// runs further off ours than the clock may follow.
-	pub fn push(&mut self, key: K, arrival: Arrival<T>) -> anyhow::Result<Push> {
+	pub fn push(&mut self, key: K, arrival: Arrival<T>) -> Result<Push, Error> {
 		let held = self.acquire.as_ref().and_then(|acquire| acquire.tracks.get(&key));
 		// A restart behind what the track already holds cannot decode in order on the clock the
 		// acquisition would anchor, so the acquisition ends at it and the frame opens the next.
@@ -1162,7 +1175,7 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 	/// Account for the slack a frame arrived with, and every [`STEER`] of our time step the
 	/// clock's drift toward the source's rate plus a pull back to the delay, as far as
 	/// [`MAX_SLEW`] allows.
-	fn steer(&mut self, key: &K, deadline: Option<Instant>, arrival: &Arrival<T>) -> anyhow::Result<()> {
+	fn steer(&mut self, key: &K, deadline: Option<Instant>, arrival: &Arrival<T>) -> Result<(), Error> {
 		let (Some(clock), Some(deadline)) = (self.clock, deadline) else {
 			return Ok(());
 		};
@@ -1292,11 +1305,10 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 			self.out_of_tolerance += 1;
 			// The clock can never catch up, so fail once the rate has cost half the delay.
 			if lost * slow.signum() < -delay / 2.0 {
-				anyhow::bail!(
-					"the source's clock runs {:+.1} ppm off ours, past the {:.0} ppm the output's may follow",
-					rate * 1e6,
-					MAX_DRIFT * 1e6
-				);
+				return Err(Error::Drift {
+					ppm: rate * 1e6,
+					limit: MAX_DRIFT * 1e6,
+				});
 			}
 		}
 		Ok(())
@@ -1304,12 +1316,12 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 
 	/// When a frame of `generation` decoding at `decode` goes out: on the current clock, or on the
 	/// previous one while that generation's tail is still going out.
-	pub fn at(&self, generation: u64, decode: impl Into<Decode>) -> Option<Instant> {
+	pub fn at(&self, generation: u64, decode: Decode) -> Option<Instant> {
 		let clock = [self.clock, self.previous]
 			.into_iter()
 			.flatten()
 			.find(|clock| clock.generation == generation)?;
-		self.deadline(&clock, decode.into())
+		self.deadline(&clock, decode)
 	}
 
 	/// When a frame decoding at `decode` goes out on `clock`, if any instant holds it.
@@ -1795,7 +1807,7 @@ mod tests {
 		buffer.cancel();
 		assert_eq!(buffer.reporting().dropped(), 2);
 		assert_eq!(
-			buffer.at(0, ms(200)),
+			buffer.at(0, ms(200).try_into().unwrap()),
 			Some(start.saturating_add(delay).saturating_add(Duration::from_millis(200)))
 		);
 		buffer.push(0, arrival(kio::clock::now(), 200, "A resumed")).unwrap();
@@ -1917,7 +1929,9 @@ mod tests {
 			let frame = Arrival {
 				arrived: now,
 				read: now,
-				decode: ms(u64::from(key) * 100_000 + (now - start).as_millis() as u64).into(),
+				decode: ms(u64::from(key) * 100_000 + (now - start).as_millis() as u64)
+					.try_into()
+					.unwrap(),
 				restart: 0,
 				sync: true,
 				leading: false,
@@ -1990,7 +2004,10 @@ mod tests {
 			buffer.at(0, before_zero),
 			Some(start.saturating_add(DELAY).saturating_sub(Duration::from_nanos(22_223)))
 		);
-		assert_eq!(buffer.at(0, ms(0)), Some(start.saturating_add(DELAY)));
+		assert_eq!(
+			buffer.at(0, ms(0).try_into().unwrap()),
+			Some(start.saturating_add(DELAY))
+		);
 		kio::clock::sleep(DELAY).await;
 		assert_eq!(due(&mut buffer), ["video", "audio"]);
 	}
@@ -2050,7 +2067,7 @@ mod tests {
 		Arrival {
 			arrived,
 			read: arrived,
-			decode: ms(decode).into(),
+			decode: ms(decode).try_into().unwrap(),
 			restart: 0,
 			sync: true,
 			leading: false,
@@ -2117,7 +2134,7 @@ mod tests {
 			}
 			assert!(due(&mut buffer).is_empty());
 			assert_eq!(
-				buffer.at(0, ms(800)),
+				buffer.at(0, ms(800).try_into().unwrap()),
 				Some(start.saturating_add(Duration::from_millis(500)))
 			);
 			tokio::time::advance(Duration::from_millis(500)).await;
@@ -2550,7 +2567,7 @@ mod tests {
 		assert!(due(&mut buffer).is_empty());
 		let tail = start.saturating_add(Duration::from_millis(500));
 		assert_eq!(
-			buffer.at(1, ms(5_000)),
+			buffer.at(1, ms(5_000).try_into().unwrap()),
 			Some(tail),
 			"the export clock follows the queued tail"
 		);
@@ -2782,7 +2799,7 @@ mod tests {
 	/// What a run against a drifting source saw.
 	struct Run {
 		/// The error the run ended on, if it failed.
-		err: Option<anyhow::Error>,
+		err: Option<Error>,
 		/// The largest gap between a frame's slack and the delay, in seconds, from `settled`
 		/// hours on.
 		worst: f64,
@@ -2842,7 +2859,10 @@ mod tests {
 			let frame = Arrival {
 				arrived,
 				read: arrived,
-				decode: Timestamp::from_micros(decode.as_micros() as u64).unwrap().into(),
+				decode: Timestamp::from_micros(decode.as_micros() as u64)
+					.unwrap()
+					.try_into()
+					.unwrap(),
 				restart: 0,
 				sync: true,
 				leading: false,
@@ -2862,8 +2882,13 @@ mod tests {
 			}
 			if hour >= settled
 				&& queued.is_zero()
-				&& let Some(deadline) = buffer.at(0, Timestamp::from_micros(decode.as_micros() as u64).unwrap())
-			{
+				&& let Some(deadline) = buffer.at(
+					0,
+					Timestamp::from_micros(decode.as_micros() as u64)
+						.unwrap()
+						.try_into()
+						.unwrap(),
+				) {
 				let slack = since(arrived, deadline) as f64 / 1e9;
 				run.worst = run.worst.max((slack - delay.as_secs_f64()).abs());
 			}
@@ -2897,29 +2922,46 @@ mod tests {
 	/// 10 ms once converged; at the limit the clock cannot run past the source's to win back
 	/// what reaching its rate under the slew limit cost, 30 ppm squared over twice the slew
 	/// (162 ms), so it holds there.
+	async fn assert_clock_follows_drifting_source(ppm: f64, bound: f64) {
+		let run = drift(ppm, 24.0, 16.0, |_| Duration::ZERO).await;
+		assert!(run.err.is_none(), "{ppm} ppm: {:?}", run.err);
+		assert!(run.worst <= bound, "{ppm} ppm: held {} s off the delay", run.worst);
+		// One track queued nowhere: every frame's spare is its slack, the delay and the offset.
+		let offset = run.offset.expect("an offset");
+		assert!(offset.abs() <= bound, "{ppm} ppm: offset {offset} s");
+		let margin = run.margin.expect("a margin");
+		assert!(
+			(margin - 0.5 - offset).abs() < 0.001,
+			"{ppm} ppm: margin {margin} s, offset {offset} s"
+		);
+		let drift = run.drift.expect("a measurement") * 1e6;
+		assert!((drift + ppm).abs() < 0.1, "{ppm} ppm: measured {drift} ppm");
+		assert!(
+			(run.clock * 1e6 - ppm).abs() < 0.5,
+			"{ppm} ppm: the clock settled at {}",
+			run.clock * 1e6
+		);
+		assert_eq!(run.out_of_tolerance, 0, "{ppm} ppm");
+	}
+
 	#[tokio::test(start_paused = true)]
-	async fn the_clock_follows_a_drifting_source_for_a_day() {
-		for (ppm, bound) in [(30.0, 0.170), (-30.0, 0.170), (25.0, 0.010), (-25.0, 0.010)] {
-			let run = drift(ppm, 24.0, 16.0, |_| Duration::ZERO).await;
-			assert!(run.err.is_none(), "{ppm} ppm: {:?}", run.err);
-			assert!(run.worst <= bound, "{ppm} ppm: held {} s off the delay", run.worst);
-			// One track queued nowhere: every frame's spare is its slack, the delay and the offset.
-			let offset = run.offset.expect("an offset");
-			assert!(offset.abs() <= bound, "{ppm} ppm: offset {offset} s");
-			let margin = run.margin.expect("a margin");
-			assert!(
-				(margin - 0.5 - offset).abs() < 0.001,
-				"{ppm} ppm: margin {margin} s, offset {offset} s"
-			);
-			let drift = run.drift.expect("a measurement") * 1e6;
-			assert!((drift + ppm).abs() < 0.1, "{ppm} ppm: measured {drift} ppm");
-			assert!(
-				(run.clock * 1e6 - ppm).abs() < 0.5,
-				"{ppm} ppm: the clock settled at {}",
-				run.clock * 1e6
-			);
-			assert_eq!(run.out_of_tolerance, 0, "{ppm} ppm");
-		}
+	async fn the_clock_follows_a_drifting_source_for_a_day_plus_30() {
+		assert_clock_follows_drifting_source(30.0, 0.170).await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn the_clock_follows_a_drifting_source_for_a_day_minus_30() {
+		assert_clock_follows_drifting_source(-30.0, 0.170).await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn the_clock_follows_a_drifting_source_for_a_day_plus_25() {
+		assert_clock_follows_drifting_source(25.0, 0.010).await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn the_clock_follows_a_drifting_source_for_a_day_minus_25() {
+		assert_clock_follows_drifting_source(-25.0, 0.010).await;
 	}
 
 	/// A spell of queueing lowers the floor only while it lasts, so four minutes of 200 ms
@@ -2964,7 +3006,7 @@ mod tests {
 	/// What [`feed`] saw.
 	struct Fed {
 		/// The decode time a push failed at, in seconds, and its error.
-		err: Option<(f64, anyhow::Error)>,
+		err: Option<(f64, Error)>,
 		dropped: u64,
 		/// What the last push did.
 		last: Option<Push>,
@@ -3030,7 +3072,10 @@ mod tests {
 			let frame = Arrival {
 				arrived,
 				read: arrived,
-				decode: Timestamp::from_micros(decode.as_micros() as u64).unwrap().into(),
+				decode: Timestamp::from_micros(decode.as_micros() as u64)
+					.unwrap()
+					.try_into()
+					.unwrap(),
 				restart: 0,
 				sync: true,
 				leading: false,
@@ -3129,7 +3174,7 @@ mod tests {
 
 	/// What [`unmarked`] saw.
 	struct Stepped {
-		err: Option<anyhow::Error>,
+		err: Option<Error>,
 		dropped: u64,
 		/// Each frame's generation, in the order they went out.
 		out: Vec<u64>,
@@ -3169,7 +3214,10 @@ mod tests {
 				let frame = Arrival {
 					arrived,
 					read: arrived,
-					decode: Timestamp::from_micros((decode * 1e6).round() as u64).unwrap().into(),
+					decode: Timestamp::from_micros((decode * 1e6).round() as u64)
+						.unwrap()
+						.try_into()
+						.unwrap(),
 					restart: 0,
 					sync: true,
 					leading: false,

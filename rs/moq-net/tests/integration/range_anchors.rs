@@ -1,17 +1,17 @@
 #![cfg(feature = "async")]
 
-//! A range anchored relative to the latest group or at a presentation time resolves where
-//! the track is held, and on a copy received over a wire that tells it enough to resolve
-//! the anchor the same way. A moq-transport copy resolves a relative anchor from the
-//! Largest Object its live join reports. A copy received over any other wire refuses the
-//! anchor instead of resolving it against the part of the track it happens to hold.
+//! A range anchored at a presentation time resolves where the track is held, and on a copy
+//! received over lite-07 the same way. Every wire carries every range, a time as the group ID
+//! with that key, but only lite-07 resolves a time start to the group containing it: an older
+//! wire's publisher starts at the first group at or after it. A range with no start is placed
+//! by the Min Age: a live join that far behind the live edge where lite-07 carries it, the
+//! oldest group when it is not stated.
 
 use crate::support;
-use moq_net::track::Delay;
 
 use std::time::Duration;
 
-use moq_net::track::{Anchor, Info, Order, Range, Subscription};
+use moq_net::track::{Info, Order, Range, Subscription};
 use moq_net::{Error, Timescale, Timestamp, Version};
 use support::harness::peer;
 
@@ -31,20 +31,45 @@ const VERSIONS: &[&str] = &[
 ];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 fn millis(ms: u64) -> Timestamp {
 	Timestamp::from_millis(ms).unwrap()
 }
 
-/// Groups 0 to 4, group `n` presenting at `n` seconds, then what a subscriber to `range`
-/// reads oldest first: through the publisher's own origin with no `version`, otherwise
-/// over one session on it.
+/// Groups at 0 to 4 seconds, each keyed by its start in milliseconds, then what a subscriber
+/// to `range` reads oldest first: through the publisher's own origin with no `version`,
+/// otherwise over one session on it.
 async fn read(version: Option<&str>, range: Range) -> Result<Vec<u64>, Error> {
+	read_as(version, range, Read::default()).await.map(|read| read.groups)
+}
+
+/// How [`read_as`] publishes and reads.
+#[derive(Clone, Copy, Default)]
+struct Read {
+	/// The publisher appends each group, saying it will not go back below it.
+	append: bool,
+	/// The subscriber reads in key order.
+	ordered: bool,
+	/// The subscriber's Min Age, which places a range with no start.
+	min: Option<Duration>,
+}
+
+/// What [`read_as`] read.
+#[derive(Debug, PartialEq)]
+struct Groups {
+	groups: Vec<u64>,
+	/// The read ended, rather than waited out [`TIMEOUT`].
+	ended: bool,
+}
+
+/// [`read`], published and read as `how` says.
+async fn read_as(version: Option<&str>, range: Range, how: Read) -> Result<Groups, Error> {
 	let publisher = produce_origin(1);
 	let broadcast = publisher
 		.route("room", moq_net::origin::RouteOptions::hidden())
@@ -57,9 +82,12 @@ async fn read(version: Option<&str>, range: Range) -> Result<Vec<u64>, Error> {
 		)
 		.unwrap();
 	broadcast.announce().unwrap();
-	for sequence in 0..5 {
-		let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
-		group.write_frame(millis(sequence * 1000), &b"x"[..]).unwrap();
+	for key in (0..5).map(|second| second * 1000) {
+		let mut group = match how.append {
+			true => track.append_group(millis(key)).unwrap(),
+			false => track.create_group(moq_net::group::Info { start: key }).unwrap(),
+		};
+		group.write_frame(millis(key), &b"x"[..]).unwrap();
 		group.finish().unwrap();
 	}
 
@@ -82,98 +110,164 @@ async fn read(version: Option<&str>, range: Range) -> Result<Vec<u64>, Error> {
 		}
 	};
 
+	// A range with no start joins live, `how.min` behind the live edge, when one is given.
+	let range = match (range.start, how.min) {
+		(moq_net::track::Start::Oldest, Some(min)) => Range {
+			start: moq_net::track::Start::Live {
+				min: Some(min),
+				max: Some(FOREVER),
+			},
+			..range
+		},
+		_ => range,
+	};
 	let subscription = Subscription::default()
-		.with_delay(Delay::default().with_max(FOREVER))
 		.with_order(Order::Ascending)
 		.with_ranges([range]);
-	let mut reader = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription))
+	let reader = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription))
 		.await
 		.expect("subscribe timeout")?;
 
-	let mut read = Vec::new();
-	while let Ok(group) = kio::clock::timeout(TIMEOUT, reader.recv_group()).await {
+	let mut read = Groups {
+		groups: Vec::new(),
+		ended: false,
+	};
+	let mut ordered = None;
+	let mut arrival = None;
+	match how.ordered {
+		true => ordered = Some(reader.ordered()),
+		false => arrival = Some(reader),
+	}
+	loop {
+		let next = match (&mut ordered, &mut arrival) {
+			(Some(ordered), _) => kio::clock::timeout(TIMEOUT, ordered.next_group()).await,
+			(_, Some(arrival)) => kio::clock::timeout(TIMEOUT, arrival.recv_group()).await,
+			_ => unreachable!(),
+		};
+		let Ok(group) = next else { break };
 		match group? {
-			Some(group) => read.push(group.sequence),
-			None => break,
+			Some(group) => read.groups.push(group.start),
+			None => {
+				read.ended = true;
+				break;
+			}
+		}
+	}
+	// A read that ended passed its range: a group the publisher creates there now is late.
+	if read.ended && !how.append {
+		let mut late = track.create_group(moq_net::group::Info { start: 1500 }).unwrap();
+		late.write_frame(millis(1500), &b"x"[..]).unwrap();
+		late.finish().unwrap();
+		let next = match (&mut ordered, &mut arrival) {
+			(Some(ordered), _) => kio::clock::timeout(TIMEOUT, ordered.next_group()).await,
+			(_, Some(arrival)) => kio::clock::timeout(TIMEOUT, arrival.recv_group()).await,
+			_ => unreachable!(),
+		};
+		// An error or a wait fails the test; a group handed out shows in the groups read.
+		if let Some(group) = next.expect("an ended read answers at once")? {
+			read.groups.push(group.start);
 		}
 	}
 	let _track = track.finish().unwrap();
 	Ok(read)
 }
 
-fn range(start: Anchor, end: Option<Anchor>) -> Range {
+fn range(start: Option<u64>, end: Option<u64>) -> Range {
+	let start = match start {
+		Some(start) => moq_net::track::Start::Time(start),
+		None => moq_net::track::Start::Oldest,
+	};
 	Range { start, end }
 }
 
-/// Relative and time anchors at each end, with what a reader of the held track reads.
-fn anchored() -> [(Range, Vec<u64>); 6] {
-	let zero = Anchor::Absolute(0);
+/// Time ranges, with what a reader of the held track reads.
+fn timed() -> [(Range, Vec<u64>); 3] {
 	[
-		(range(Anchor::Relative(2), None), vec![2, 3, 4]),
-		(range(Anchor::Time(millis(2500)), None), vec![2, 3, 4]),
-		(range(zero, Some(Anchor::Relative(1))), vec![0, 1, 2, 3]),
-		(range(zero, Some(Anchor::Time(millis(2500)))), vec![0, 1, 2]),
-		(range(Anchor::Relative(2), Some(Anchor::Relative(1))), vec![2, 3]),
-		(
-			range(Anchor::Time(millis(1500)), Some(Anchor::Time(millis(3500)))),
-			vec![1, 2, 3],
-		),
+		(range(Some(2500), None), vec![2000, 3000, 4000]),
+		(range(Some(0), Some(2500)), vec![0, 1000, 2000]),
+		(range(Some(1500), Some(3500)), vec![1000, 2000, 3000]),
 	]
 }
 
-/// Each wire resolves the anchors it carries as the held track does and refuses the rest,
-/// rather than resolve them against the part of the track its copy happens to hold.
+/// Each wire carries a time range and resolves it as the held track does, except that an older
+/// wire starts it at the first group at or after its start instead.
 #[kio::test]
-async fn each_wire_refuses_only_the_anchors_it_drops() {
+async fn each_wire_carries_a_time_range() {
+	let mut failures = Vec::new();
 	for version in std::iter::once(None).chain(VERSIONS.iter().copied().map(Some)) {
-		// Lite-07 reports the largest and asks for everything the budget allows, so its copy
-		// resolves every anchor where it is held.
-		let carried = matches!(version, None | Some("moq-lite-07-wip"));
-		// A wire without timestamps refuses a time anchor for that first.
-		let timed = !matches!(version, Some("moq-lite-03" | "moq-lite-04"));
-		for (range, held) in anchored() {
+		// Lite-07 resolves a time start to the group containing it, as the held track does.
+		let resolves = matches!(version, None | Some("moq-lite-07-wip"));
+		// A moq-transport copy joins live, so the groups below arrive as fills, after the live one.
+		let transport = matches!(version, Some(version) if version.starts_with("moq-transport"));
+		for (range, mut held) in timed() {
+			// An older wire's publisher starts a time start at the first group at or after it,
+			// not the group containing it.
+			if let (false, moq_net::track::Start::Time(start)) = (resolves, range.start) {
+				held.retain(|&key| key >= start);
+			}
 			let mut result = read(version, range).await;
-			let time = matches!(range.start, Anchor::Time(_)) || matches!(range.end, Some(Anchor::Time(_)));
-			// A moq-transport copy joins live and resolves a relative anchor from the Largest
-			// Object, so the groups below it arrive as fills, after the live one.
-			let transport = matches!(version, Some(version) if version.starts_with("moq-transport"));
-			let carried = carried || (transport && !time);
 			if transport && let Ok(read) = &mut result {
 				read.sort_unstable();
 			}
-			match (&result, time && !timed, carried) {
-				(Err(Error::TimestampMismatch), true, _) => {}
-				(Err(Error::Unsupported), false, false) => {}
-				(Ok(read), false, true) if *read == held => {}
-				_ => panic!("{version:?}: {range:?} read {result:?}"),
+			match &result {
+				Ok(read) if *read == held => {}
+				_ => failures.push(format!("{version:?}: {range:?} read {result:?}")),
 			}
 		}
 	}
+	assert!(failures.is_empty(), "{failures:#?}");
 }
 
-/// Every wire carries the live and oldest starts, which it spells with no floor. A wire whose
-/// copy starts at the live edge reads oldest from there: no floor asks for the older groups.
+/// Every wire carries a range with no start, as the live start with a stated Min Age and the
+/// oldest with none, which it spells with no floor. A wire whose copy starts at the live edge
+/// reads oldest from there: no floor asks for the older groups.
 #[kio::test]
 async fn every_wire_carries_the_live_and_oldest_starts() {
 	for version in VERSIONS {
-		let live = read(Some(version), Range::live()).await;
-		assert_eq!(live.unwrap().last(), Some(&4), "{version}: live reads the latest group");
-		let mut oldest = read(Some(version), Range::oldest()).await.unwrap();
+		let live = Read {
+			min: Some(Duration::ZERO),
+			..Read::default()
+		};
+		let live = read_as(Some(version), Range::ALL, live).await;
+		assert_eq!(
+			live.unwrap().groups.last(),
+			Some(&4000),
+			"{version}: live reads the latest group"
+		);
+		let mut oldest = read(Some(version), Range::ALL).await.unwrap();
 		oldest.sort_unstable();
 		let want: &[u64] = match *version {
-			"moq-lite-03" | "moq-lite-04" | "moq-lite-05" | "moq-transport-18" | "moq-transport-22" => &[4],
-			_ => &[0, 1, 2, 3, 4],
+			"moq-lite-03" | "moq-lite-04" | "moq-lite-05" | "moq-transport-18" | "moq-transport-22" => &[4000],
+			_ => &[0, 1000, 2000, 3000, 4000],
 		};
 		assert_eq!(oldest, want, "{version}: oldest reads every group its start reaches");
 	}
 }
 
-/// A publisher counts a relative start back from its newest group, which may hold no frame yet
-/// and so counts neither in the largest it reports nor where the copy resolves the start. The
-/// copy reports the publisher's start instead, where a reader waiting on each group in sequence
-/// starts, rather than one below that never arrives.
+/// A live join stating a Min Age starts at the group containing the live edge minus it, where
+/// the track is held and over lite-07. Older wires carry no Min Age, so the join starts at their
+/// live edge.
 #[kio::test]
-async fn a_relative_start_reports_the_publishers_start_over_a_frameless_newest_group() {
+async fn a_live_join_reaches_back_by_its_min_age_where_the_wire_carries_it() {
+	let join = Read {
+		min: Some(Duration::from_secs(2)),
+		..Read::default()
+	};
+	for version in std::iter::once(None).chain(VERSIONS.iter().copied().map(Some)) {
+		let read = read_as(version, Range::ALL, join).await.unwrap().groups;
+		match version {
+			None | Some("moq-lite-07-wip") => assert_eq!(read, [2000, 3000, 4000], "{version:?}"),
+			_ => assert_eq!(read.last(), Some(&4000), "{version:?}: joins at the live edge"),
+		}
+	}
+}
+
+/// A publisher starts a live join at its newest group, which may hold no frame yet and so counts
+/// neither in the largest it reports nor where the copy would place the join. The copy keeps the
+/// publisher's start instead, so a reader waiting on each group in key starts there rather than
+/// waiting below it for groups that never arrive.
+#[kio::test]
+async fn an_ordered_reader_starts_at_the_publishers_start_over_a_frameless_newest_group() {
 	let publisher = produce_origin(1);
 	let broadcast = publisher
 		.route("room", moq_net::origin::RouteOptions::hidden())
@@ -183,12 +277,14 @@ async fn a_relative_start_reports_the_publishers_start_over_a_frameless_newest_g
 		.create_track("data", Info::default().with_max_age(FOREVER))
 		.unwrap();
 	broadcast.announce().unwrap();
-	for sequence in 0..5 {
-		let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
-		group.write_frame(None, &b"x"[..]).unwrap();
+	for key in 0..5 {
+		let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
+		group
+			.write_frame(moq_net::Timestamp::unscaled(group.start), &b"x"[..])
+			.unwrap();
 		group.finish().unwrap();
 	}
-	let mut newest = track.create_group(moq_net::group::Info { sequence: 5 }).unwrap();
+	let mut newest = track.create_group(moq_net::group::Info { start: 5 }).unwrap();
 
 	let subscriber = produce_origin(2);
 	let _pair = peer("moq-lite-07-wip".parse::<Version>().unwrap(), &publisher, &subscriber).await;
@@ -197,29 +293,135 @@ async fn a_relative_start_reports_the_publishers_start_over_a_frameless_newest_g
 		.expect("resolve timeout")
 		.expect("broadcast resolves")
 		.unwrap();
+	let subscription = Subscription::default().with_ranges([Range::from(moq_net::track::Start::Live {
+		min: Some(Duration::ZERO),
+		max: Some(FOREVER),
+	})]);
+	let mut reader = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription))
+		.await
+		.expect("subscribe timeout")
+		.unwrap()
+		.ordered();
+
+	newest
+		.write_frame(moq_net::Timestamp::unscaled(newest.start), &b"x"[..])
+		.unwrap();
+	newest.finish().unwrap();
+	// Waiting on each group in key, the reader starts where the publisher resolved the start,
+	// counting its frameless newest group, with nothing below it owed or given up.
+	let item = kio::clock::timeout(TIMEOUT, reader.next_item())
+		.await
+		.expect("group timeout")
+		.unwrap();
+	let Some(moq_net::track::Item::Group(group)) = item else {
+		panic!("expected group 5 first")
+	};
+	assert_eq!(group.start, 5);
+	let _track = track.finish().unwrap();
+}
+
+/// A lite-07 copy holds only part of the track, so a live join starts where its publisher placed
+/// it rather than over the groups the copy holds: a sparse request mixing a time range and a
+/// live join ending at a time reads every group it names.
+#[kio::test]
+async fn a_sparse_request_places_its_live_join_as_the_publisher_did() {
+	let publisher = produce_origin(1);
+	let broadcast = publisher
+		.route("room", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	let track = broadcast
+		.broadcast()
+		.create_track(
+			"data",
+			Info::default().with_timescale(Timescale::MILLI).with_max_age(FOREVER),
+		)
+		.unwrap();
+	broadcast.announce().unwrap();
+	for key in 0..10 {
+		let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
+		group.write_frame(millis(key), &b"x"[..]).unwrap();
+		group.finish().unwrap();
+	}
+
+	let subscriber = produce_origin(2);
+	let _pair = peer("moq-lite-07-wip".parse::<Version>().unwrap(), &publisher, &subscriber).await;
+	let remote = kio::clock::timeout(TIMEOUT, subscriber.consume().follow("room", None).unwrap().available())
+		.await
+		.expect("resolve timeout")
+		.expect("broadcast resolves")
+		.unwrap();
+	// The live edge is at 9 ms, so a 2 ms lag joins at group 7.
+	let join = Range {
+		start: moq_net::track::Start::Live {
+			min: Some(Duration::from_millis(2)),
+			max: Some(FOREVER),
+		},
+		end: Some(8),
+	};
 	let subscription = Subscription::default()
-		.with_delay(Delay::default().with_max(FOREVER))
-		.with_ranges([Range::live()]);
+		.with_order(Order::Ascending)
+		.with_ranges([range(Some(1), Some(2)), join]);
 	let mut reader = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription))
 		.await
 		.expect("subscribe timeout")
 		.unwrap();
 
-	let start = kio::clock::timeout(TIMEOUT, reader.start())
+	let mut read = Vec::new();
+	for _ in 0..4 {
+		let group = kio::clock::timeout(TIMEOUT, reader.recv_group())
+			.await
+			.expect("group timeout")
+			.unwrap();
+		read.push(group.map(|group| group.start));
+	}
+	assert_eq!(read, [Some(1), Some(2), Some(7), Some(8)]);
+	let end = kio::clock::timeout(TIMEOUT, reader.recv_group())
 		.await
-		.expect("start timeout");
-	assert_eq!(
-		start,
-		Some(5),
-		"the publisher's resolved start, counting its frameless newest group"
-	);
-
-	newest.write_frame(None, &b"x"[..]).unwrap();
-	newest.finish().unwrap();
-	let group = kio::clock::timeout(TIMEOUT, reader.recv_group())
-		.await
-		.expect("group timeout")
+		.expect("end timeout")
 		.unwrap();
-	assert_eq!(group.map(|group| group.sequence), Some(5));
+	assert_eq!(end.map(|group| group.start), None, "the ranges are covered");
 	let _track = track.finish().unwrap();
+}
+
+/// A time end between two groups ends an ordered read once the publisher created a group past
+/// it: handing that group out would have passed the starts between. Through the publisher's own
+/// origin that is its own state. A lite-07 copy ends there only on what its wire proves, the
+/// starts between skipped, which an appending publisher's SUBSCRIBE_SKIP and GROUP_END say. A
+/// publisher creating groups out of order says nothing, so the copy, and any arrival read of a
+/// track created that way, waits for a group that may still come. A group created below the
+/// end after an ordered read ended is late, as for any key the read passed.
+#[kio::test]
+async fn a_time_end_between_groups_ends_an_ordered_read_at_the_next() {
+	let between = range(Some(1500), Some(1999));
+	let ordered = |append| Read {
+		append,
+		ordered: true,
+		min: None,
+	};
+	let arrival = |append| Read {
+		append,
+		ordered: false,
+		min: None,
+	};
+	let lite07 = Some("moq-lite-07-wip");
+	for (version, how, ended) in [
+		(None, ordered(false), true),
+		(None, ordered(true), true),
+		(None, arrival(false), false),
+		(None, arrival(true), true),
+		(lite07, ordered(true), true),
+		(lite07, arrival(true), true),
+		(lite07, ordered(false), false),
+	] {
+		let read = read_as(version, between, how).await.unwrap();
+		let label = (version, how.append, how.ordered);
+		assert_eq!(
+			read,
+			Groups {
+				groups: vec![1000],
+				ended
+			},
+			"{label:?}"
+		);
+	}
 }

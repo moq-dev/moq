@@ -1,4 +1,4 @@
-# [S] Report upstream bugs found during the pre-cut run
+# [S] Report approved upstream bugs
 
 ## Goal
 
@@ -7,18 +7,14 @@ our workaround links the report.
 
 ## Plan
 
-Posting outside `moq-dev` and `kixelated` needs maintainer approval for each
-report.
-
-- **GStreamer `faad`:** it drops the first AAC frame and shifts timestamps by
-  one frame, so the interop AAC phase check skips GStreamer
-  ([moq-dev/moq#6742](https://github.com/moq-dev/moq/pull/6742)). Remove the
-  skip once it's fixed.
-- **retina 0.4.21:** when the server sends an RTSP request during playback,
-  retina logs a warning, returns `Pending`, and goes idle until something else
-  wakes it ([moq-dev/moq#6736](https://github.com/moq-dev/moq/pull/6736)).
-- **mr-boxington:** the eviction found while landing
-  [moq-dev/moq#6709](https://github.com/moq-dev/moq/pull/6709).
+Decided 2026-11-15 (maintainer, /quest-complete): ✅ (b) drop the three
+reports that had no recorded approval, the GStreamer `faad` first-frame drop
+([moq-dev/moq#6742](https://github.com/moq-dev/moq/pull/6742)), retina
+0.4.21's idle `Pending`
+([moq-dev/moq#6736](https://github.com/moq-dev/moq/pull/6736)), and the
+mr-boxington eviction ([moq-dev/moq#6709](https://github.com/moq-dev/moq/pull/6709)),
+and keep only the approved reports below (rejected: (a) approve some or all).
+Each workaround already works and none blocks other work.
 
 Added 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
 /quest-complete run). Upstream reports: ✅ Chromium VideoFrame leak
@@ -29,7 +25,9 @@ B-frames realtime ([moq-dev/moq#7402](https://github.com/moq-dev/moq/pull/7402))
 file; str0m/dimpl DTLS budget
 ([moq-dev/moq#7379](https://github.com/moq-dev/moq/pull/7379)) NOT approved.
 
-Approved to file (search for an existing report first):
+Approved to file, each after searching for an existing report and reading
+the tracker's policy on LLM-written reports; where it bans them, hand the
+maintainer a draft instead:
 
 - **Chromium:** tearing down a `MediaStreamTrackProcessor` with a frame
   still in flight inside it drops that `VideoFrame` unclosed, so Chromium
@@ -41,19 +39,38 @@ Approved to file (search for an existing report first):
   for the next codec.
 - **Biome:** filed 2026-10-31 as
   [biomejs/biome#12796](https://github.com/biomejs/biome/issues/12796)
-  (open): `useMathMinMax` flags comparisons of `bigint` operands, and its
-  autofix to `Math.min`/`Math.max` throws `TypeError` on bigints. #7305
-  suppressed the 9 sites in `js/qmux` and `js/net/src/hop.ts`; their
-  `biome-ignore` comments don't link the report yet, so add the link, and
-  remove them once it is fixed. The string and `Date` cases were fixed
+  (open, checked 2026-11-12): `useMathMinMax` flags comparisons of `bigint`
+  operands, and its autofix to `Math.min`/`Math.max` throws `TypeError` on
+  bigints. #7305 suppressed the sites in `js/qmux` and `js/net/src/hop.ts`;
+  link the report from their 8 `biome-ignore` comments, then remove them once
+  it is fixed. The string and `Date` cases were fixed
   upstream ([biomejs/biome#12624](https://github.com/biomejs/biome/issues/12624),
   [biomejs/biome#10272](https://github.com/biomejs/biome/issues/10272)).
 
 Not to be filed:
 
 - **str0m/dimpl:** the DTLS retry budget runs out before ICE picks a
-  path, found in #7379. The [WebRTC epic](/quest/m3/webrtc/README.md)
-  vendors str0m instead of reporting upstream, and
-  [DTLS waits for ICE](/quest/m3/webrtc/dtls-after-ice.md) fixes it there.
+  path, found in #7379. Not filed while the
+  [WebRTC epic](/quest/m3/webrtc/README.md) vendored str0m. Since
+  2026-11-16 moq-webrtc [returns to upstream](https://github.com/moq-dev/moq/pull/8963),
+  so this and three more become candidates once their quests show the
+  public API cannot do it: [DTLS waits for ICE](/quest/m3/webrtc/dtls-after-ice.md),
+  [the typed DTLS timeout](/quest/m3/webrtc/dtls-timeout.md),
+  [several bandwidth lines](/quest/m4/webrtc-sdp-bandwidth.md), and the
+  NACK hook of [WHEP pacing](/quest/m3/rtc-pacing.md). Each needs the
+  maintainer's approval and a read of the repository's AI policy before it
+  is filed.
+- **str0m:** no setting refuses an offered data channel, so moq-webrtc
+  takes the `m=application` section out of the offer's text and answers it
+  rejected (`rs/moq-webrtc/src/sdp.rs`, `refuse_channels`). A
+  `RtcConfig` switch that answers it rejected and starts no SCTP would
+  retire that. The switch's PR body holds a draft. Same approval rule.
+- **str0m:** two bugs the vendored copy had patched, worked around in
+  moq-webrtc since the switch, each with a test that fails without it.
+  An answer puts its candidates only on the first section even when that
+  section is rejected and out of BUNDLE (`sdp.rs`,
+  `candidates_on_accepted`). ICE asks for no timeout until its first one,
+  so a side that hears no checks, facing an ICE-lite peer, never sends any
+  (`ice/agent.rs`, `Agent::new`). Same approval rule.
 
 Public API: none. Wire: none.

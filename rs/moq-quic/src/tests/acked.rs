@@ -255,6 +255,30 @@ fn reset_keeps_its_acked_prefix() {
 	assert_eq!(poll_acked(&mut pair, client_ch, s, &waiter, kept), Poll::Ready(Ok(())));
 }
 
+/// A plain reset discards the stream's data, yet the stream keeps reporting the prefix the peer
+/// acknowledged before it, while the reset is in flight and once it frees the stream.
+#[test]
+fn plain_reset_keeps_its_acked_len() {
+	let _guard = subscribe();
+	let mut pair = pair(false);
+	let (client_ch, server_ch) = pair.connect();
+	let s = open(&mut pair, client_ch, server_ch);
+	let header = pair.client_send(client_ch, s).offset();
+	pair.client_send(client_ch, s).write(&mut &b"dropped"[..]).unwrap();
+	lose_client_packets(&mut pair);
+
+	pair.client_send(client_ch, s).reset(VarInt(42)).unwrap();
+	assert_eq!(
+		pair.client_send(client_ch, s).acked_len(),
+		6,
+		"while the reset is in flight"
+	);
+	pair.drive();
+	assert_eq!(pair.client_streams(client_ch).send_streams(), 0);
+	assert_eq!(pair.client_send(client_ch, s).acked_len(), 6, "once the reset freed it");
+	assert_eq!(acked(&mut pair, client_ch, s, header), Ok(true));
+}
+
 /// A waiter whose offset a later reset drops wakes to learn so, even beside a lower waiter the
 /// reset keeps.
 #[test]

@@ -32,7 +32,7 @@ informative:
 
 --- abstract
 
-This document specifies moq-e2ee-00, a versioned profile for end-to-end encryption of MoQ application payloads.
+This document specifies moq-e2ee-01-wip, a versioned profile for end-to-end encryption of MoQ application payloads.
 Authorized publishers and subscribers share a 32-byte broadcast secret out of band.
 Each publisher instance mints an epoch and announces it on the route for an opaque broadcast path.
 HKDF-SHA-256 derives per-track AES-128-GCM keys from the secret and the epoch; grouped frames and datagrams use separate key domains.
@@ -84,7 +84,7 @@ Its independent counter, 17-byte per-frame header, ChaCha20-Poly1305 suite, sign
 
 
 # Profile Version
-This document defines profile `moq-e2ee-00`.
+This document defines profile `moq-e2ee-01-wip` while it is a work in progress, which becomes `moq-e2ee-01` once finalized.
 The profile is named out of band alongside the credential; an application MUST refuse a credential that names any other profile.
 A new profile is a new document; implementations MUST NOT fall back to plaintext or to an older profile because a catalog, announcement, or peer suggested one.
 
@@ -151,7 +151,7 @@ Neither can cause a nonce to repeat, because only the publisher instance chooses
 A restart or replacement of a publisher is a new instance and mints a new epoch.
 So is a cloned process image, such as a `fork` without `exec`, a restored VM snapshot or process checkpoint, or a producing generation prepared once and copied to two processes: each copy MUST mint its own generation before it encrypts.
 A clone copies the epoch and the per-track counters verbatim, so two copies that both encrypt would protect different plaintext under the same key and nonce, and nothing on the wire lets a receiver or relay detect it.
-Transport sequence numbers therefore restart freely without any coordination between instances.
+Group starts and datagram sequences therefore restart freely without any coordination between instances.
 An ended instance stays readable only for as long as relays or archives retain it under its epoch; once another instance wins the shared path, subscribers resolve that one.
 
 
@@ -167,7 +167,7 @@ Integers used as group, frame, or kid identities are refused before encoding if 
 
 # Key Derivation {#derive}
 Keys and physical names are derived with HKDF-SHA-256 {{RFC5869}}.
-Let `salt` be the ASCII bytes of `"moq-e2ee-00"`.
+Let `salt` be the ASCII bytes of `"moq-e2ee-01-wip"`.
 
 ~~~
 prk = HKDF-Extract(salt, secret)
@@ -176,7 +176,7 @@ prk = HKDF-Extract(salt, secret)
 Opaque broadcast path material is 16 bytes:
 
 ~~~
-path_info = "moq-e2ee-00 path"
+path_info = "moq-e2ee-01-wip path"
             || bytes(context)
             || u64(kid)
             || bytes(semantic_broadcast)
@@ -191,8 +191,8 @@ Physical track names encrypt the semantic name deterministically, using only HMA
 
 ~~~
 scope     = bytes(context) || bytes(epoch) || u64(kid)
-name_mac  = HKDF-Expand(prk, "moq-e2ee-00 name-mac" || scope, 32)
-name_key  = HKDF-Expand(prk, "moq-e2ee-00 name-key" || scope, 16)
+name_mac  = HKDF-Expand(prk, "moq-e2ee-01-wip name-mac" || scope, 32)
+name_key  = HKDF-Expand(prk, "moq-e2ee-01-wip name-key" || scope, 16)
 padded    = semantic_name || 0x80 || 0x00 ... 0x00
 nonce     = HMAC-SHA-256(name_mac, padded)[0..12]
 physical  = nonce || AES-128-GCM(name_key, nonce, padded)
@@ -214,7 +214,7 @@ The nonce check keeps one physical name per semantic name, so two tracks never s
 AEAD keys are 16 bytes, one per semantic name and domain:
 
 ~~~
-key_info = "moq-e2ee-00 key"
+key_info = "moq-e2ee-01-wip key"
            || bytes(context)
            || bytes(epoch)
            || u64(kid)
@@ -234,7 +234,8 @@ A subscriber derives both from the semantic name it wants; a publisher derives t
 A protected object is the tuple `(generation, physical_name, domain, group, frame)`.
 
 ## Grouped Frames
-A grouped frame uses `domain = 0x00`, the group's sequence as `group`, and the frame index within that group as `frame`.
+A grouped frame uses `domain = 0x00`, the group's start as `group`, and the frame index within that group as `frame`.
+The start is the Group Start of a moq-lite-07 GROUP, the Group Sequence of an earlier moq-lite version, and the Group ID on MoQ Transport, which carry the same value ({{moql}} Section "Group").
 moq-lite numbers frames from 0 in write order ({{moql}}).
 On MoQ Transport, `frame` is the explicit Object ID, never its arrival ordinal.
 Publishers supporting both transports MUST assign contiguous Object IDs from zero so that each matches its moq-lite write-order index; relays MUST NOT renumber protected objects.
@@ -265,7 +266,7 @@ AES-128-GCM encrypts the application bytes with `key`, `nonce`, and empty AAD.
 The bytes placed in the MoQ frame or datagram payload are ciphertext concatenated with the 16-byte tag, in the {{RFC5116}} convention.
 There is no inner header.
 
-Within a generation a publisher MUST allocate each semantic name's group sequences, and separately its datagram sequences, monotonically, and frame indices in write order, so an identity is encrypted at most once.
+Within a generation a publisher MUST give each semantic name's groups strictly increasing starts, allocate its datagram sequences monotonically, and frame indices in write order, so an identity is encrypted at most once.
 Encrypting at an identity the same instance already used is `reuse` and MUST be refused.
 Relays and caches forward ciphertext unchanged, so replay from a cache never re-encrypts.
 
@@ -290,7 +291,7 @@ Encrypting then compressing is forbidden: ciphertext does not compress.
 # Bounds {#bounds}
 Implementations MUST refuse non-integer identities (including NaN and infinities) and identities outside these bounds before encoding or AEAD:
 
-- `group` (grouped sequence or datagram sequence) and `kid`: `0..=2^53-1`. Above that is `identity`.
+- `group` (group start or datagram sequence) and `kid`: `0..=2^53-1`. Above that is `identity`.
 - `frame`: `0..=2^32-1`. `2^32` and above is `identity`.
 - AEAD operations with one key: at most `2^24` invocations and at most `2^36` plaintext bytes (`2^32` 16-byte blocks). Exceeding either is `exhausted`.
 
@@ -333,7 +334,7 @@ A receiver MUST NOT require group 0 or any prior identity before opening a later
 
 
 # Test Vectors {#vectors}
-Known-answer and negative vectors live in `moq-e2ee-00.json` beside this draft.
+Known-answer and negative vectors live in `moq-e2ee-01-wip.json` beside this draft.
 Hex strings are octet sequences.
 The JSON is authoritative for primitive interop; an implementation of this profile MUST pass every vector.
 Each negative row specifies an `operation`, its inputs, and its expected typed error.
@@ -351,7 +352,7 @@ Passing the primitive vectors alone is not profile conformance.
 # Security Considerations
 Relays, caches, recorders, and control planes are untrusted for content.
 Authorized endpoints that hold the broadcast secret are trusted.
-Sender authenticity against another endpoint that also holds the secret is not a goal of `moq-e2ee-00`.
+Sender authenticity against another endpoint that also holds the secret is not a goal of this profile.
 
 A relay can still observe the opaque broadcast path, route epoch, opaque physical names and the length of each semantic track name rounded up to 16 bytes, group and frame structure, timestamps, sizes, and traffic patterns.
 A subscription for a physical name the publisher does not serve fails as for any missing track, which tells a relay only that the name is not served.
@@ -387,6 +388,7 @@ This document requests no registrations.
 ## draft-lcurley-moq-e2ee-01
 {:numbered="false"}
 
+- Assigned `moq-e2ee-01-wip` as this draft's profile until it is finalized as `moq-e2ee-01`; every label and the salt follow it.
 - Require internally minted producing epochs and consume-only bindings for discovered epochs.
 - Require canonical UUIDv7 epochs, carried as the route's Instance rather than in the path, leaving HKDF UUID inputs unchanged. Relays no longer rank the newest epoch first.
 - Keep semantic track names in the decrypted catalog; subscribers derive physical names from them.

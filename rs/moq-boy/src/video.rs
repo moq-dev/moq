@@ -2,8 +2,8 @@
 //!
 //! Runs on a dedicated thread so the emulator's frame loop never blocks on the
 //! encoder. Frames arrive on a bounded channel; if the encoder falls behind,
-//! frames are dropped to keep latency low. moq-video does the RGBA -> H.264
-//! encode and the avc3 publish; this module keeps moq-boy's threading,
+//! frames are dropped to keep latency low. moq-video's encode producer does the
+//! RGBA -> H.264 encode and the avc3 publish; this module keeps moq-boy's threading,
 //! frame-dropping, force-keyframe and timing-stats behavior.
 
 use kio::clock::Instant;
@@ -43,8 +43,8 @@ enum EncoderMsg {
 }
 
 impl VideoEncoder {
-	/// Publish the catalog rendition, then hand the encoder to a worker thread that only runs while
-	/// someone is watching. The returned handle feeds it frames; the emulator never blocks on it.
+	/// Publish the catalog rendition, then hand the encoder to a worker thread. The returned
+	/// handle feeds it frames; the emulator never blocks on it.
 	pub async fn spawn(broadcast: moq_net::broadcast::Producer, catalog: moq_mux::catalog::Producer) -> Self {
 		let (tx, rx) = tokio::sync::mpsc::channel(4);
 
@@ -54,24 +54,24 @@ impl VideoEncoder {
 			moq_video::encode::Config::new(WIDTH, HEIGHT, moq_video::FrameRate::new(FRAMERATE, 1).unwrap());
 		config.kind = moq_video::encode::Kind::Software;
 
-		// Probed from a throwaway encoder, before the emulator has run a frame, so a
-		// viewer can discover (and unpause) a moq-boy that has published nothing.
-		let rendition = config.probe().await.expect("failed to probe the H.264 encoder");
-		let reserved = catalog.reserve().with_interval(config.effective_join());
-		let track = broadcast
-			.unique_track(".avc3", reserved.track_info(hang::catalog::PRIORITY.video))
-			.expect("failed to create the avc3 track");
-		let producer =
-			moq_video::encode::Producer::new(track, reserved, rendition).expect("failed to create avc3 producer");
+		// The rendition is probed before the emulator has run a frame, so a viewer can discover
+		// (and unpause) a moq-boy that has published nothing.
+		let options = moq_video::encode::Options::new(config);
+		let producer = moq_video::encode::Producer::new(&broadcast, catalog, options)
+			.await
+			.expect("failed to open the H.264 encoder");
 		let demand = producer.demand();
 
 		let force_keyframe = Arc::new(AtomicBool::new(false));
 		let encode_duration = Arc::new(AtomicU64::new(0));
 		let fk = force_keyframe.clone();
 		let ed = encode_duration.clone();
+		// The thread drives the producer's futures through this runtime, whose timers its rate
+		// control uses.
+		let runtime = tokio::runtime::Handle::current();
 		let thread = std::thread::Builder::new()
 			.name("video-encoder".into())
-			.spawn(move || encoder_thread(rx, producer, config, fk, ed))
+			.spawn(move || runtime.block_on(encoder_thread(rx, producer, fk, ed)))
 			.expect("failed to spawn video encoder thread");
 
 		Self {
@@ -93,7 +93,8 @@ impl VideoEncoder {
 
 	/// Publish a marker group marking a pause, so the PTS jump on resume reads as a break
 	/// rather than one very long frame, and a viewer arriving mid-pause isn't served the
-	/// pre-pause group as if it were live.
+	/// pre-pause group as if it were live. The encoder closes until the next frame, so a
+	/// paused emulator holds none.
 	///
 	/// Blocks rather than dropping on a full channel: a dropped frame costs one frame, a
 	/// dropped marker silently reinstates the bug it exists to prevent.
@@ -115,37 +116,24 @@ impl VideoEncoder {
 	}
 }
 
-fn encoder_thread(
+/// Encode each frame on its own thread, so a slow encode never stalls the emulator.
+///
+/// Driven by `Handle::block_on` on a thread of its own, so the producer's awaits block only it.
+async fn encoder_thread(
 	mut rx: tokio::sync::mpsc::Receiver<EncoderMsg>,
 	mut producer: moq_video::encode::Producer,
-	config: moq_video::encode::Config,
 	force_keyframe: Arc<AtomicBool>,
 	encode_duration: Arc<AtomicU64>,
 ) {
-	let mut encoder: Option<moq_video::encode::Encoder> = None;
-
-	while let Some(msg) = rx.blocking_recv() {
-		let msg = match msg {
+	while let Some(msg) = rx.recv().await {
+		let (rgba, ts) = match msg {
 			EncoderMsg::Frame { rgba, ts } => (rgba, ts),
 			EncoderMsg::Discontinuity => {
-				if let Err(e) = producer.discontinuity() {
-					tracing::warn!(error = %e, "failed to mark the video discontinuity");
+				// Marked even when the drain fails, which only loses the last frames.
+				if let Err(e) = producer.discontinuity().await {
+					tracing::warn!(error = %e, "failed to drain the video encoder at the discontinuity");
 				}
 				continue;
-			}
-		};
-		let (rgba, ts) = msg;
-		let enc = match encoder.as_mut() {
-			Some(enc) => enc,
-			None => {
-				// Opened on the first frame, so a paused emulator holds no encoder.
-				match moq_video::encode::Encoder::new(&config) {
-					Ok(enc) => encoder.insert(enc),
-					Err(e) => {
-						tracing::error!(error = %e, "H.264 encoder init failed");
-						return;
-					}
-				}
 			}
 		};
 
@@ -155,9 +143,10 @@ fn encoder_thread(
 		// otherwise the encoder's own GOP keys the stream. A refusal is terminal:
 		// only a backend that cannot cut at all gives one, and this never selects one.
 		if force_keyframe.swap(false, Ordering::AcqRel)
-			&& let Err(e) = enc.cut()
+			&& let Err(e) = producer.cut().await
 		{
 			tracing::error!(error = %e, "H.264 encoder cannot cut a group; stopping encoder");
+			producer.abort(moq_net::Error::Transport(e.to_string()));
 			return;
 		}
 		let start = Instant::now();
@@ -169,26 +158,13 @@ fn encoder_thread(
 				continue;
 			}
 		};
-		// A single bad frame is tolerable; keep going.
-		if let Err(e) = enc.encode(&moq_video::Frame::new(surface, ts)) {
-			tracing::error!(error = %e, "H.264 encode error");
-		}
-		loop {
-			match enc.receive() {
-				Ok(Some(encoded)) => {
-					if let Err(e) = producer.publish(&encoded) {
-						// Publish only fails once the track/broadcast is gone, which
-						// is terminal -- stop rather than flooding logs every frame.
-						tracing::error!(error = %e, "video publish failed; stopping encoder");
-						return;
-					}
-				}
-				Ok(None) => break,
-				Err(e) => {
-					tracing::error!(error = %e, "H.264 encode error");
-					break;
-				}
-			}
+		// A frame of the configured size only fails to encode or publish once the codec or the
+		// track is gone, which is terminal: stop rather than flooding logs every frame.
+		if let Err(e) = producer.write(moq_video::Frame::new(surface, ts)).await {
+			tracing::error!(error = %e, "video encode failed; stopping encoder");
+			// Subscribers see the cause rather than an unfinished track's `Dropped`.
+			producer.abort(moq_net::Error::Transport(e.to_string()));
+			return;
 		}
 		encode_duration.store(start.elapsed().as_micros() as u64, Ordering::Relaxed);
 	}

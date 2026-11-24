@@ -1,7 +1,7 @@
 import { Duration } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import { Legacy } from "@moq/hang/container";
-import { Origin, Path } from "@moq/net";
+import { Origin, Path, Time } from "@moq/net";
 import { Signal } from "@moq/signals";
 import { Player } from "@moq/watch";
 
@@ -12,9 +12,10 @@ async function poster(audio: boolean, buffered: boolean) {
 	const producerRoute = origin.route(name, { hidden: true });
 	const producer = producerRoute.broadcast;
 	const track = producer.createTrack("video");
-	const group = track.appendGroup();
+	if (!track) throw new Error("the track already exists");
+	const group = track.appendGroup(Time.Timestamp.unscaled(0n));
 	const audioTrack = audio ? producer.createTrack("audio") : undefined;
-	const audioGroup = audioTrack?.appendGroup();
+	const audioGroup = audioTrack?.appendGroup(Time.Timestamp.unscaled(0n));
 	const catalog: Catalog.Root = {
 		video: {
 			renditions: {
@@ -82,7 +83,10 @@ async function poster(audio: boolean, buffered: boolean) {
 	const push = (timestamp: number) => {
 		const payload = chunks.get(timestamp);
 		if (!payload) throw new Error("missing encoded frame");
-		group.writeFrame({ payload: Legacy.encodeFrame(payload, Duration.micros(timestamp)) });
+		group.writeFrame({
+			payload: Legacy.encodeFrame(payload, Duration.micros(timestamp)),
+			timestamp: Time.Timestamp.unscaled(group.start),
+		});
 	};
 	return {
 		push,
@@ -94,7 +98,10 @@ async function poster(audio: boolean, buffered: boolean) {
 				output(chunk) {
 					const data = new Uint8Array(chunk.byteLength);
 					chunk.copyTo(data);
-					audioGroup.writeFrame({ payload: Legacy.encodeFrame(data, Duration.micros(chunk.timestamp)) });
+					audioGroup.writeFrame({
+						payload: Legacy.encodeFrame(data, Duration.micros(chunk.timestamp)),
+						timestamp: Time.Timestamp.unscaled(audioGroup.start),
+					});
 				},
 				error(error) {
 					throw error;

@@ -29,7 +29,18 @@ pub struct Stream {
 	unwritten: Bytes,
 	/// The end of the WebTransport header once written, which a reset must still deliver.
 	header: Option<send::Offset>,
+	/// Where the stream stood when it was reset, which drops the handle to it.
+	ended: Ended,
 	id: crate::quic::stream::Id,
+}
+
+/// Where a reset left a stream, which still answers for its acknowledgments.
+#[derive(Debug, Clone, Copy)]
+struct Ended {
+	/// The offset just past the data written.
+	offset: send::Offset,
+	/// How many leading bytes the peer acknowledged, header included.
+	acked: u64,
 }
 
 /// The mutable terminal state required by moq-net's poll trait.
@@ -49,6 +60,10 @@ impl Stream {
 	pub(super) fn new(stream: send::Stream, close: &Rc<Handles>, header: Bytes) -> Self {
 		let mut this = Self {
 			id: stream.id(),
+			ended: Ended {
+				offset: stream.offset(),
+				acked: 0,
+			},
 			state: State::Open(stream),
 			close: close.clone(),
 			unwritten: header,
@@ -74,6 +89,17 @@ impl Stream {
 	/// A WebTransport header already written still reaches the peer, so it can tell which
 	/// session the reset belongs to.
 	fn reset_mut(&mut self, code: u32) {
+		self.ended = match &self.state {
+			State::Open(stream) => Ended {
+				offset: stream.offset(),
+				acked: stream.acked_len(),
+			},
+			State::Finished(stream) => Ended {
+				offset: stream.offset(),
+				acked: stream.acked_len(),
+			},
+			State::Reset(_) | State::Unsent => return,
+		};
 		let code = self.close.encode_stream_code(code);
 		// The connection is driven on this thread, so no STOP_SENDING lands between this check
 		// and the reset: what the stream reports now is what the reset settles.
@@ -271,6 +297,32 @@ impl Drop for Stream {
 impl moq_net::transport::poll::SendStream for Stream {
 	type Error = Error;
 	type Group = send::Group;
+	type Offset = send::Offset;
+
+	/// Counts the WebTransport header, which the offsets of the bytes after it include.
+	fn offset(&self) -> send::Offset {
+		match &self.state {
+			State::Open(stream) => stream.offset(),
+			State::Finished(stream) => stream.offset(),
+			State::Reset(_) | State::Unsent => self.ended.offset,
+		}
+	}
+
+	/// Once reset, answers from the prefix acknowledged by then, failing for the bytes after it.
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: &send::Offset) -> Poll<Result<(), Self::Error>> {
+		let acked = match &self.state {
+			State::Open(stream) => stream.poll_acked(waiter, *offset),
+			State::Finished(stream) => stream.poll_acked(waiter, *offset),
+			State::Reset(_) | State::Unsent => match u64::from(*offset) <= self.ended.acked {
+				true => Poll::Ready(Ok(())),
+				false => return Poll::Ready(Err(Error::ClosedStream)),
+			},
+		};
+		match std::task::ready!(acked) {
+			Ok(()) => Poll::Ready(Ok(())),
+			Err(err) => poll_error(&self.close, waiter, err).map(Err),
+		}
+	}
 
 	fn poll_write(&mut self, waiter: &kio::Waiter, mut buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		self.poll_write_buf(waiter, &mut buf)
@@ -295,16 +347,6 @@ impl moq_net::transport::poll::SendStream for Stream {
 			Ok(None) => Ok(()),
 			Ok(Some(code)) => Err(Error::Stopped(code)),
 			Err(err) => Err(err),
-		})
-	}
-	fn acknowledged(&self) -> Option<bool> {
-		if self.unwritten.has_remaining() {
-			return Some(false);
-		}
-		Some(match &self.state {
-			State::Open(stream) => stream.acknowledged(),
-			State::Finished(stream) => stream.acknowledged(),
-			State::Reset(_) | State::Unsent => false,
 		})
 	}
 }

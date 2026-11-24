@@ -124,9 +124,11 @@ impl Sink {
 		self.0.receive()
 	}
 
-	/// Retune the encoder, waiting for the backend's verdict. See
-	/// [`Encoder::set_bitrate`](super::Encoder::set_bitrate) for what a failure
-	/// means (not fatal: stop adapting, keep encoding).
+	/// Retune the encoder, waiting for the backend's verdict.
+	///
+	/// A refused rate, such as [`Error::BitrateUnsupported`], is not fatal: the encoder keeps
+	/// its rate and keeps encoding (see [`Encoder::set_bitrate`](super::Encoder::set_bitrate)).
+	/// [`Error::CodecGone`] means the encode thread stopped, so the sink cannot continue.
 	pub async fn set_bitrate(&mut self, bitrate: moq_net::bandwidth::Rate) -> Result<(), Error> {
 		self.0.set_bitrate(bitrate).await
 	}
@@ -173,8 +175,8 @@ mod threaded {
 		/// refusal has to reach the caller, since the alternative is a group
 		/// boundary that silently never happens.
 		Cut { resp: oneshot::Sender<Result<(), Error>> },
-		/// Retune to a new bitrate, reporting whether the backend took it so the
-		/// caller can stop adapting against an encoder that can't. The round trip
+		/// Retune to a new bitrate, reporting whether the backend took it, so the
+		/// caller's rate control knows the rate it is encoding at. The round trip
 		/// is affordable because the rate control policy only sends one of these
 		/// when the target moves meaningfully, not per frame.
 		SetBitrate {
@@ -509,7 +511,7 @@ mod tests {
 				}
 				let mut received = Vec::new();
 				while let Some(frame) = sink.receive().unwrap() {
-					received.push(frame.timestamp.as_micros());
+					received.push(frame.timestamp.as_micros().unwrap());
 				}
 				(std::thread::current().id(), received)
 			});
@@ -530,7 +532,7 @@ mod tests {
 			pollster::block_on(sink.flush()).unwrap();
 			let mut tail = Vec::new();
 			while let Some(frame) = sink.receive().unwrap() {
-				tail.push(frame.timestamp.as_micros());
+				tail.push(frame.timestamp.as_micros().unwrap());
 			}
 			drop(sink);
 			(std::thread::current().id(), tail)

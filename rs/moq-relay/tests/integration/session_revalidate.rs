@@ -13,7 +13,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
-use moq_auth::{Event, Grant, Pattern, Patterns, Request};
+use moq_auth::{Event, Grant, Prefixes, Request};
 use moq_relay::session::{Filter, List, Nudged};
 use moq_relay::{Connection, auth, cluster, internal, web};
 
@@ -106,6 +106,7 @@ impl Script {
 			Event::Connect | Event::Attach => script.connect.lock().unwrap().clone(),
 			Event::Revalidate => script.revalidate.lock().unwrap().clone(),
 			Event::End { .. } => return StatusCode::NO_CONTENT.into_response(),
+			_ => return StatusCode::BAD_REQUEST.into_response(),
 		};
 		match answer {
 			Answer::Grant(grant) => Json(grant).into_response(),
@@ -122,8 +123,8 @@ impl Script {
 	}
 }
 
-fn all() -> Patterns {
-	[Pattern::all()].into_iter().collect()
+fn all() -> Prefixes {
+	Prefixes::all()
 }
 
 /// A grant that lasts an hour and would not re-check on its own during a test.
@@ -155,7 +156,6 @@ impl Fixture {
 		Self::spawn(auth, false).await
 	}
 
-	#[cfg(feature = "websocket")]
 	async fn ws(auth: moq_relay::auth::Auth) -> Self {
 		Self::spawn(auth, true).await
 	}
@@ -266,10 +266,7 @@ impl Fixture {
 fn client_at(bind: &str) -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
-	#[cfg(feature = "websocket")]
-	{
-		config.websocket.delay = Some((Duration::ZERO).into());
-	}
+	config.websocket.delay = Some((Duration::ZERO).into());
 	config.bind = Some(bind.parse().expect("parse bind"));
 	config
 		.init(Default::default())
@@ -394,7 +391,6 @@ async fn path_and_cidr_select_a_subset() {
 }
 
 /// A WebSocket session is listed and closes on a push like a QUIC one.
-#[cfg(feature = "websocket")]
 #[tokio::test]
 async fn websocket_is_listed_and_closes_on_a_push() {
 	let script = Script::new(grant());

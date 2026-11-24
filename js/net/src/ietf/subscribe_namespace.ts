@@ -1,3 +1,4 @@
+import { ProtocolViolation } from "../error.ts";
 import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
@@ -11,7 +12,7 @@ import {
 	NEGOTIATED_NONE,
 	type Negotiated,
 } from "./publish_namespace.ts";
-import type { IetfVersion } from "./version.ts";
+import { type IetfVersion, isDraft23 } from "./version.ts";
 
 // SUBSCRIBE_NAMESPACE message (type 0x50).
 export class SubscribeNamespace {
@@ -67,9 +68,9 @@ export const SUBSCRIBE_TRACKS_ID = 0x51;
 /**
  * NAMESPACE message (0x08), sent on the SUBSCRIBE_NAMESPACE bidi stream.
  *
- * The base message carries only the suffix. A session that negotiated the MoQ Cluster
- * extension uses the extended form instead, which appends one Parameters field
- * so the advertisement can carry its HOP_PATH and ROUTE_COST (see `cluster.ts`).
+ * The base message carries only the suffix, and from draft-23 an empty Parameters field. A
+ * session that negotiated the MoQ Cluster extension uses the extended form instead, whose
+ * Parameters carry the advertisement's HOP_PATH and ROUTE_COST (see `cluster.ts`).
  */
 export class SubscribeNamespaceEntry {
 	static id = 0x08;
@@ -89,8 +90,9 @@ export class SubscribeNamespaceEntry {
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
 		await Namespace.encode(w, this.suffix);
-		// The base form has no Parameters field at all, so there is nothing to write.
 		if (this.params) await advertIntoParams(this.params).encode(w, version);
+		// Draft-23 (section 9.15) always has the block; it defines no parameter of its own.
+		else if (isDraft23(version)) await w.u53(0);
 	}
 
 	async encode(w: Writer, version: IetfVersion): Promise<void> {
@@ -111,8 +113,13 @@ export class SubscribeNamespaceEntry {
 
 	static async #decode(r: Reader, version: IetfVersion, negotiated: Negotiated): Promise<SubscribeNamespaceEntry> {
 		const suffix = await Namespace.decode(r);
-		// The base form has no Parameters field at all, so there is nothing to read.
-		if (!extended(negotiated)) return new SubscribeNamespaceEntry({ suffix });
+		if (!extended(negotiated)) {
+			// Draft-23 defines no NAMESPACE parameter, and one without a length cannot be skipped.
+			if (isDraft23(version) && (await r.u53()) !== 0) {
+				throw new ProtocolViolation("NAMESPACE carries a parameter no negotiated extension defines");
+			}
+			return new SubscribeNamespaceEntry({ suffix });
+		}
 
 		return new SubscribeNamespaceEntry({ suffix, params: await decodeAdvert(r, version, "namespace", negotiated) });
 	}

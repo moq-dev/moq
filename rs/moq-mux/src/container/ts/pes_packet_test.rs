@@ -179,7 +179,7 @@ struct Imported {
 
 /// Import `data`, onto a catalog clock already fixed when `captured` (so the timestamps shift),
 /// or one the first PTS places (so they stay verbatim).
-fn import(data: &[u8], captured: bool) -> anyhow::Result<Imported> {
+fn import(data: &[u8], captured: bool) -> Result<Imported, super::Error> {
 	let mut import = start(captured);
 	import.import.decode(data)?;
 	import.import.finish_in_place()?;
@@ -196,7 +196,7 @@ fn start(captured: bool) -> Imported {
 	.unwrap();
 	// Paused, the clock reads the same until the first PTS anchors on it.
 	let offset = match captured {
-		true => catalog.clock().now().as_micros() as i128,
+		true => catalog.clock().now().as_micros().unwrap() as i128,
 		false => 0,
 	};
 	let import = super::Import::new(broadcast, catalog.reserve());
@@ -238,8 +238,12 @@ async fn read_until(
 	consumer: &moq_net::broadcast::Consumer,
 	name: &str,
 ) -> (Vec<crate::container::Frame>, Result<bool, String>) {
-	let subscription = moq_net::track::Subscription::default()
-		.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(3600)));
+	let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+		moq_net::track::Start::Live {
+			min: Some(Duration::from_secs(3600)),
+			max: Some(Duration::from_secs(3600)),
+		},
+	)]);
 	let track = consumer.track(name).unwrap().subscribe(subscription).await.unwrap();
 	let mut reader = crate::container::Consumer::new(
 		track,
@@ -299,7 +303,7 @@ async fn async_klv_takes_the_program_clock_at_its_first_byte() {
 		.collect();
 	let got: Vec<_> = frames
 		.iter()
-		.map(|frame| (frame.timestamp.as_micros() as u64, frame.payload.to_vec()))
+		.map(|frame| (frame.timestamp.as_micros().unwrap() as u64, frame.payload.to_vec()))
 		.collect();
 	assert_eq!(got.len(), expected.len());
 	for (k, (got, expected)) in got.iter().zip(&expected).enumerate() {
@@ -366,7 +370,7 @@ async fn sync_klv_rebases_its_pts_and_dts_onto_the_catalog_clock() {
 	assert_eq!(frames.len(), feed.pes.len());
 	for (k, (frame, (at, pes))) in frames.iter().zip(&feed.pes).enumerate() {
 		assert_eq!(
-			frame.timestamp.as_micros() as u64,
+			frame.timestamp.as_micros().unwrap() as u64,
 			placed(feed.clock(*at).unwrap(), offset),
 			"PES {k} timestamp"
 		);
@@ -520,7 +524,7 @@ async fn dvb_ac3_keeps_its_sync_frames_in_one_pes() {
 /// and the refusal is counted.
 #[tokio::test(start_paused = true)]
 async fn a_pes_with_a_field_no_rebase_reaches_refuses_its_stream() {
-	let cases: [(&str, Vec<u8>); 8] = [
+	let cases: [(&str, Vec<u8>); 7] = [
 		// PES_extension_flag set with no header byte left for the extension.
 		("truncated extension", pes_with(0xbd, 0x80, 0x01, &[], 0, b"ext")),
 		// ES_rate flagged with one of its three bytes inside PES_header_data_length.
@@ -546,7 +550,6 @@ async fn a_pes_with_a_field_no_rebase_reaches_refuses_its_stream() {
 				b"tref",
 			),
 		),
-		("scrambling", pes_with(0xbd, 0x90, 0x00, &[], 0, b"scrambled")),
 		("unbounded", {
 			let mut pes = pes_with(0xbd, 0x80, 0x00, &[], 0, b"unbounded");
 			pes[4..6].fill(0);
@@ -584,6 +587,29 @@ async fn a_pes_with_a_field_no_rebase_reaches_refuses_its_stream() {
 		assert!(imported.entry().is_none(), "{why}: the track left the catalog");
 		assert_eq!(imported.stats().refused, 1, "{why}");
 	}
+}
+
+/// A PES-scrambled PES is refused alone, as a TS-scrambled packet is: the track stays, and the
+/// clear PES after it publishes.
+#[tokio::test(start_paused = true)]
+async fn a_scrambled_pes_is_refused_until_clear() {
+	let mut feed = Feed::new(0x06, &[]);
+	let start = 1_000 * MS;
+	feed.pcr(start).picture(start).data(klv(1, 8)).pcr(start + 40 * MS);
+	feed.picture(start + 40 * MS)
+		.data(pes_with(0xbd, 0x90, 0x00, &[], 0, b"scrambled"))
+		.pcr(start + 80 * MS)
+		.picture(start + 80 * MS)
+		.data(klv(2, 8))
+		.pcr(start + 120 * MS);
+
+	let imported = import(&feed.bytes(), false).unwrap();
+	let (name, _) = imported.entry().expect("the track stays in the catalog");
+	let (frames, err) = read(&imported.consumer, &name).await;
+	let got: Vec<_> = frames.iter().map(|frame| frame.payload.to_vec()).collect();
+	assert_eq!(got, [feed.pes[0].1.clone(), feed.pes[2].1.clone()]);
+	assert!(err.is_none(), "the track ends cleanly");
+	assert_eq!(imported.stats().refused, 1);
 }
 
 /// Begin importing `head` onto a clock the first PTS places.
@@ -627,7 +653,10 @@ fn a_program_with_missing_media_timestamps_is_refused() {
 		feed.pcr(1_000 * MS + i * 40 * MS).data(klv(i as u8, 8));
 	}
 	let err = import(&feed.bytes(), false).err().expect("the import is refused");
-	assert!(err.to_string().contains("without a media timestamp"), "{err:#}");
+	assert!(
+		matches!(&err, super::Error::Malformed(msg) if msg.contains("without a media timestamp")),
+		"{err:#}"
+	);
 }
 
 /// No media PTS is needed when the PMT declares only data: PCR carries the era too.
@@ -654,7 +683,7 @@ async fn a_data_only_program_preserves_placements_across_the_pcr_wrap() {
 	for (frame, (at, pes)) in frames.iter().zip(&feed.pes) {
 		assert_eq!(frame.payload.as_ref(), pes);
 		assert_eq!(
-			frame.timestamp.as_micros(),
+			frame.timestamp.as_micros().unwrap(),
 			u128::from(placed(feed.clock(*at).unwrap(), 0))
 		);
 	}
@@ -695,7 +724,7 @@ async fn a_clock_break_places_each_side_on_its_own_timebase() {
 	let (frames, err) = read(&imported.consumer, &name).await;
 	assert!(err.is_none(), "{err:?}");
 	assert_eq!(frames.len(), 2);
-	assert_eq!(frames[0].timestamp.as_micros() as u64, placed(before, 0));
+	assert_eq!(frames[0].timestamp.as_micros().unwrap() as u64, placed(before, 0));
 	assert!(frames[1].timestamp > frames[0].timestamp);
 	assert_eq!(&frames[1].payload[..], &feed.pes[1].1[..]);
 }
@@ -733,7 +762,10 @@ async fn a_pcr_pid_switch_places_each_side_on_its_own_timebase() {
 	let (name, _) = imported.entry().unwrap();
 	let (frames, err) = read(&imported.consumer, &name).await;
 	assert!(err.is_none(), "{err:?}");
-	let got: Vec<_> = frames.iter().map(|frame| frame.timestamp.as_micros() as u64).collect();
+	let got: Vec<_> = frames
+		.iter()
+		.map(|frame| frame.timestamp.as_micros().unwrap() as u64)
+		.collect();
 	assert_eq!(got, [placed(before, 0), placed(after, 0)]);
 	assert_eq!(imported.stats().unplaced, 0);
 }
@@ -777,7 +809,7 @@ async fn a_pes_header_split_by_a_pcr_is_placed_from_its_start_code() {
 	let (frames, err) = read(&imported.consumer, &name).await;
 	assert!(err.is_none(), "{err:?}");
 	assert_eq!(frames.len(), 1);
-	assert_eq!(frames[0].timestamp.as_micros() as u64, expected);
+	assert_eq!(frames[0].timestamp.as_micros().unwrap() as u64, expected);
 	assert_eq!(&frames[0].payload[..], &feed.pes[1].1[..]);
 	assert_eq!(imported.stats().unplaced, 1, "the PES begun before the first PCR");
 }
@@ -806,7 +838,7 @@ async fn a_pes_header_held_past_several_pcrs_takes_the_first_after_it() {
 	let (frames, err) = read(&imported.consumer, &name).await;
 	assert!(err.is_none(), "{err:?}");
 	assert_eq!(frames.len(), 1);
-	assert_eq!(frames[0].timestamp.as_micros() as u64, expected);
+	assert_eq!(frames[0].timestamp.as_micros().unwrap() as u64, expected);
 }
 
 /// A later PMT that names a PCR carries the private PES stream refused for want of one, and one
@@ -913,7 +945,7 @@ async fn a_revised_private_stream_publishes_under_a_fresh_name() {
 		let (frames, end) = old_reader.await.unwrap();
 		assert_eq!(end, Ok(true), "the old track finishes");
 		assert_eq!(frames.len(), 2);
-		assert_eq!(frames[1].timestamp.as_micros() as u64, held);
+		assert_eq!(frames[1].timestamp.as_micros().unwrap() as u64, held);
 		let tracks = imported.catalog.snapshot().ext.mpegts.tracks;
 		let listed: Vec<_> = tracks.iter().filter(|(_, track)| track.pid == DATA_PID).collect();
 		assert_eq!(listed.len(), 1, "one entry for the PID: {tracks:?}");
@@ -986,7 +1018,10 @@ async fn a_private_stream_dropped_before_the_media_clock_refuses_the_import() {
 		.import
 		.decode(&feed.bytes()[head.len()..])
 		.expect_err("the held PES has no media timestamp to be placed by");
-	assert!(err.to_string().contains("without a media timestamp"), "{err:#}");
+	assert!(
+		matches!(&err, super::Error::Malformed(msg) if msg.contains("without a media timestamp")),
+		"{err:#}"
+	);
 	imported.import.abort(moq_net::Error::Unsupported);
 	let (_, end) = held.await.unwrap();
 	assert!(end.as_ref().is_err_and(|err| err.contains("unsupported")), "{end:?}");

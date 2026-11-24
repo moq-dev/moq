@@ -4,13 +4,15 @@
 //! group below the end, then the error, and so does one subscribing after the first ended.
 //! Before lite-07 the end has nowhere to carry its error, so the subscription resets with it.
 
+use crate::WithMax as _;
 use crate::support;
-use moq_net::track::Delay;
+use support::AppendNext;
+use support::AtStart;
 
 use std::time::Duration;
 
-use moq_net::track::{Position, Subscription};
-use moq_net::{Error, StreamError, Timestamp, Version};
+use moq_net::track::Subscription;
+use moq_net::{Error, StreamError, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -18,18 +20,19 @@ const GROUPS: u64 = 2;
 const FRAMES: [&[u8]; 2] = [b"first", b"second"];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
-/// Read every group from the first, frame by frame, returning each group's sequence and
+/// Read every group from the first, frame by frame, returning each group's key and
 /// payloads, and how the read ended.
 async fn read(broadcast: &moq_net::broadcast::Consumer) -> (Vec<(u64, Vec<Vec<u8>>)>, Option<Error>) {
 	let subscription = Subscription::default()
-		.with_range(0..)
-		.with_delay(Delay::default().with_max(Duration::from_secs(30)));
+		.with_ranges([support::keys(0..)])
+		.with_max(Duration::from_secs(30));
 	let mut sub = kio::clock::timeout(TIMEOUT, broadcast.track("video").unwrap().subscribe(subscription))
 		.await
 		.expect("subscribe timeout")
@@ -45,11 +48,11 @@ async fn read(broadcast: &moq_net::broadcast::Consumer) -> (Vec<(u64, Vec<Vec<u8
 				while let Some(frame) = kio::clock::timeout(TIMEOUT, group.read_frame())
 					.await
 					.expect("frame timeout")
-					.unwrap_or_else(|err| panic!("group {} cut short: {err:?}", group.sequence))
+					.unwrap_or_else(|err| panic!("group {} cut short: {err:?}", group.start))
 				{
 					frames.push(frame.payload.to_vec());
 				}
-				got.push((group.sequence, frames));
+				got.push((group.start, frames));
 			}
 			Ok(None) => return (got, None),
 			Err(err) => return (got, Some(err)),
@@ -60,7 +63,7 @@ async fn read(broadcast: &moq_net::broadcast::Consumer) -> (Vec<(u64, Vec<Vec<u8
 /// What [`read`] returns for the whole history.
 fn history() -> Vec<(u64, Vec<Vec<u8>>)> {
 	(0..GROUPS)
-		.map(|sequence| (sequence, FRAMES.iter().map(|frame| frame.to_vec()).collect()))
+		.map(|key| (key, FRAMES.iter().map(|frame| frame.to_vec()).collect()))
 		.collect()
 }
 
@@ -85,16 +88,16 @@ async fn an_errored_end_keeps_its_history_across_a_hop() {
 		let info = moq_net::track::Info::default()
 			.with_timescale(moq_net::Timescale::MILLI)
 			.with_max_age(None);
-		let mut track = broadcast.broadcast().create_track("video", info).unwrap();
+		let track = broadcast.broadcast().create_track("video", info).unwrap();
 		broadcast.announce().unwrap();
 		for _ in 0..GROUPS {
-			let mut group = track.append_group().unwrap();
+			let mut group = track.append_next().unwrap();
 			for frame in FRAMES {
-				group.write_frame(Timestamp::ZERO, frame).unwrap();
+				group.write_frame(group.at_start(), frame).unwrap();
 			}
 			group.finish().unwrap();
 		}
-		track.finish_at(Position::group(GROUPS), Some(Error::App(7))).unwrap();
+		let track = track.fail(Error::App(7)).unwrap();
 
 		let subscriber = produce_origin(2);
 		let mut options = MockConnectOptions::new(version);
@@ -137,7 +140,7 @@ async fn an_errored_end_keeps_its_history_across_a_hop() {
 				false => assert!(err.is_some(), "{label} {what}: ended cleanly"),
 			}
 		}
-		// Lite-07 ends the subscription after SUBSCRIBE_FINISH rather than resetting it.
+		// Lite-07 ends the subscription after SUBSCRIBE_END rather than resetting it.
 		let reset = session.server_transport.resets().contains(&(64 + 7));
 		assert_eq!(
 			reset,

@@ -33,17 +33,16 @@ impl CidQueue {
 
 	/// Handle a `NEW_CONNECTION_ID` frame
 	///
-	/// Returns a non-empty range of retired sequence numbers and the reset token of the new active
-	/// CID iff any CIDs were retired.
-	pub(crate) fn insert(&mut self, cid: NewConnectionId) -> Result<Option<(Range<u64>, ResetToken)>, InsertError> {
+	/// Fails when its sequence number is past the window the connection ID limit allows.
+	pub(crate) fn insert(&mut self, cid: NewConnectionId) -> Result<Inserted, ExceedsLimit> {
 		// Position of new CID wrt. the current active CID
 		let Some(index) = cid.sequence.checked_sub(self.offset) else {
-			return Err(InsertError::Retired);
+			return Ok(Inserted::Stale);
 		};
 
 		let retired_count = cid.retire_prior_to.saturating_sub(self.offset);
 		if index >= Self::LEN as u64 + retired_count {
-			return Err(InsertError::ExceedsLimit);
+			return Err(ExceedsLimit);
 		}
 
 		// Discard retired CIDs, if any
@@ -56,7 +55,7 @@ impl CidQueue {
 		self.buffer[index] = Some((cid.id, Some(cid.reset_token)));
 
 		if retired_count == 0 {
-			return Ok(None);
+			return Ok(Inserted::Queued);
 		}
 
 		// The active CID was retired. Find the first known CID with sequence number of at least
@@ -76,10 +75,10 @@ impl CidQueue {
 		// connection ID limit we specified based on Self::LEN. If we do receive a such a frame
 		// in the future, e.g. due to reordering, we'll retire it then. This ensures we can't be
 		// made to buffer an arbitrarily large number of RETIRE_CONNECTION_ID frames.
-		Ok(Some((
-			orig_offset..self.offset.min(orig_offset + Self::LEN as u64),
-			token.expect("non-initial CID missing reset token"),
-		)))
+		Ok(Inserted::Advanced {
+			retired: orig_offset..self.offset.min(orig_offset + Self::LEN as u64),
+			reset_token: token.expect("non-initial CID missing reset token"),
+		})
 	}
 
 	/// Switch to next active CID if possible, return
@@ -92,6 +91,20 @@ impl CidQueue {
 		self.offset += i as u64;
 		self.cursor = (self.cursor + i) % Self::LEN;
 		Some((cid_data.1.unwrap(), orig_offset..self.offset))
+	}
+
+	/// Switch to the CID right after the active one, if known, returning its reset token and
+	/// the retired active sequence number
+	pub(crate) fn next_in_order(&mut self) -> Option<(ResetToken, Range<u64>)> {
+		let next = (self.cursor + 1) % Self::LEN;
+		let (_, token) = self.buffer[next]?;
+		self.buffer[self.cursor] = None;
+		self.cursor = next;
+		self.offset += 1;
+		Some((
+			token.expect("non-initial CID missing reset token"),
+			self.offset - 1..self.offset,
+		))
 	}
 
 	/// Iterate CIDs in CidQueue that are not `None`, including the active CID
@@ -121,13 +134,24 @@ impl CidQueue {
 	pub(crate) const LEN: usize = 5;
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub(crate) enum InsertError {
-	/// CID was already retired
-	Retired,
-	/// Sequence number violates the leading edge of the window
-	ExceedsLimit,
+/// What a `NEW_CONNECTION_ID` frame did, from [`CidQueue::insert`]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) enum Inserted {
+	/// Queued, or already known, with the active CID unchanged
+	Queued,
+	/// It retired the active CID: retire the non-empty range of sequence numbers, and switch to
+	/// the reset token of the new active CID
+	Advanced {
+		retired: Range<u64>,
+		reset_token: ResetToken,
+	},
+	/// The CID was already retired
+	Stale,
 }
+
+/// A `NEW_CONNECTION_ID` sequence number past the leading edge of the window
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub(crate) struct ExceedsLimit;
 
 #[cfg(test)]
 mod tests {
@@ -139,6 +163,14 @@ mod tests {
 			id: ConnectionId::new(&[0xAB; 8]),
 			reset_token: ResetToken::from([0xCD; crate::RESET_TOKEN_SIZE]),
 			retire_prior_to,
+		}
+	}
+
+	/// The sequence numbers an insert retired.
+	fn retired(inserted: Result<Inserted, ExceedsLimit>) -> Range<u64> {
+		match inserted {
+			Ok(Inserted::Advanced { retired, .. }) => retired,
+			other => panic!("retired nothing: {other:?}"),
 		}
 	}
 
@@ -179,6 +211,28 @@ mod tests {
 	}
 
 	#[test]
+	fn next_in_order_waits_for_the_gap() {
+		let mut q = CidQueue::new(initial_cid());
+		q.insert(cid(4, 0)).unwrap();
+		q.insert(cid(2, 0)).unwrap();
+		assert!(q.next_in_order().is_none(), "sequence 1 is still in flight");
+		assert_eq!(q.active_seq(), 0);
+
+		q.insert(cid(1, 0)).unwrap();
+		assert_eq!(q.next_in_order().unwrap().1, 0..1);
+		assert_eq!(q.active_seq(), 1);
+		assert_eq!(q.next_in_order().unwrap().1, 1..2);
+		assert!(q.next_in_order().is_none(), "sequence 3 is still in flight");
+
+		// The CIDs that arrived early are still there to use.
+		q.insert(cid(3, 0)).unwrap();
+		assert_eq!(q.next_in_order().unwrap().1, 2..3);
+		assert_eq!(q.next_in_order().unwrap().1, 3..4);
+		assert_eq!(q.active_seq(), 4);
+		assert!(q.next_in_order().is_none());
+	}
+
+	#[test]
 	fn wrap() {
 		let mut q = CidQueue::new(initial_cid());
 
@@ -207,14 +261,14 @@ mod tests {
 		}
 		assert_eq!(q.active_seq(), 0);
 
-		assert_eq!(q.insert(cid(4, 2)).unwrap().unwrap().0, 0..2);
+		assert_eq!(retired(q.insert(cid(4, 2))), 0..2);
 		assert_eq!(q.active_seq(), 2);
-		assert_eq!(q.insert(cid(4, 2)), Ok(None));
+		assert_eq!(q.insert(cid(4, 2)), Ok(Inserted::Queued));
 
 		for i in 2..(CidQueue::LEN as u64 - 1) {
 			let _ = q.next().unwrap();
 			assert_eq!(q.active_seq(), i + 1);
-			assert_eq!(q.insert(cid(i + 1, i + 1)), Ok(None));
+			assert_eq!(q.insert(cid(i + 1, i + 1)), Ok(Inserted::Queued));
 		}
 
 		assert!(q.next().is_none());
@@ -225,7 +279,7 @@ mod tests {
 		// Retiring CID 0 when CID 1 is not known should retire CID 1 as we move to CID 2
 		let mut q = CidQueue::new(initial_cid());
 		q.insert(cid(2, 0)).unwrap();
-		assert_eq!(q.insert(cid(3, 1)).unwrap().unwrap().0, 0..2,);
+		assert_eq!(retired(q.insert(cid(3, 1))), 0..2);
 		assert_eq!(q.active_seq(), 2);
 	}
 
@@ -233,18 +287,15 @@ mod tests {
 	fn retire_many() {
 		let mut q = CidQueue::new(initial_cid());
 		q.insert(cid(2, 0)).unwrap();
-		assert_eq!(
-			q.insert(cid(1_000_000, 1_000_000)).unwrap().unwrap().0,
-			0..CidQueue::LEN as u64,
-		);
+		assert_eq!(retired(q.insert(cid(1_000_000, 1_000_000))), 0..CidQueue::LEN as u64);
 		assert_eq!(q.active_seq(), 1_000_000);
 	}
 
 	#[test]
 	fn insert_limit() {
 		let mut q = CidQueue::new(initial_cid());
-		assert_eq!(q.insert(cid(CidQueue::LEN as u64 - 1, 0)), Ok(None));
-		assert_eq!(q.insert(cid(CidQueue::LEN as u64, 0)), Err(InsertError::ExceedsLimit));
+		assert_eq!(q.insert(cid(CidQueue::LEN as u64 - 1, 0)), Ok(Inserted::Queued));
+		assert_eq!(q.insert(cid(CidQueue::LEN as u64, 0)), Err(ExceedsLimit));
 	}
 
 	#[test]
@@ -257,13 +308,17 @@ mod tests {
 	#[test]
 	fn insert_retired() {
 		let mut q = CidQueue::new(initial_cid());
-		assert_eq!(q.insert(cid(0, 0)), Ok(None), "reinserting active CID succeeds");
+		assert_eq!(
+			q.insert(cid(0, 0)),
+			Ok(Inserted::Queued),
+			"reinserting active CID succeeds"
+		);
 		assert!(q.next().is_none(), "active CID isn't requeued");
 		q.insert(cid(1, 0)).unwrap();
 		q.next().unwrap();
 		assert_eq!(
 			q.insert(cid(0, 0)),
-			Err(InsertError::Retired),
+			Ok(Inserted::Stale),
 			"previous active CID is already retired"
 		);
 	}
@@ -276,10 +331,7 @@ mod tests {
 		}
 		q.next().unwrap();
 		q.insert(cid(CidQueue::LEN as u64, 0)).unwrap();
-		assert_eq!(
-			q.insert(cid(CidQueue::LEN as u64 + 1, 0)),
-			Err(InsertError::ExceedsLimit)
-		);
+		assert_eq!(q.insert(cid(CidQueue::LEN as u64 + 1, 0)), Err(ExceedsLimit));
 	}
 
 	#[test]

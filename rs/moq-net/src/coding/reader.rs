@@ -8,7 +8,10 @@ use bytes::{Buf, Bytes};
 use crate::{
 	Error, StreamError,
 	coding::*,
-	transport::poll::{Lease, RecvStream},
+	transport::{
+		boxed::Shaper,
+		poll::{Lease, RecvStream},
+	},
 };
 
 /// A reader for decoding messages from a stream.
@@ -26,6 +29,12 @@ pub struct Reader<S: RecvStream, V> {
 	want: usize,
 	/// A contiguous copy of a message that spans transport chunks, empty between decodes.
 	scratch: Vec<u8>,
+	/// Bytes taken into a frame's unsealed segment, whose receive credit returns once it seals.
+	unreleased: u64,
+	/// The declared size of the last frame admitted. A group pauses when its next frame does
+	/// not fit, up to a frame short of its window, so the stream's credit stops that short
+	/// too, judging the next frame by this one.
+	frame: u64,
 	stats: crate::stats::Session,
 }
 
@@ -40,18 +49,60 @@ pub struct Reader<S: RecvStream, V> {
 /// enough that an ordinary burst is still one wake.
 const WAKE_BUDGET: usize = 64 * 1024;
 
+/// How a [`Reader`] read ended, told apart where the reader knows which it was, so a caller
+/// never has to match an [`Error`] to tell a cut stream from malformed bytes.
+pub(crate) enum Recv<T> {
+	/// The next message.
+	Message(T),
+	/// The stream finished cleanly between messages.
+	Ended,
+	/// The stream was reset, or finished inside a message: the reason it gave.
+	Reset(Error),
+	/// The bytes are not a valid message.
+	Malformed(DecodeError),
+}
+
+/// Why a read gave up, before a caller picks [`Recv`] or an [`Error`].
+enum Fault {
+	Reset(Error),
+	Malformed(DecodeError),
+}
+
+impl From<Fault> for Error {
+	fn from(fault: Fault) -> Self {
+		match fault {
+			Fault::Reset(err) => err,
+			Fault::Malformed(err) => err.into(),
+		}
+	}
+}
+
 /// A stream ingest may stop reading to pace a group's writer, which holds its receive
 /// credit meanwhile.
 pub(crate) trait Pause {
 	/// How far the group's writer reads this stream ahead of its fastest reader before
 	/// pausing: the stream's receive credit, capped at the live tail's ahead half (see
 	/// [`crate::model::pace::window`]). A stream outside any session takes the cap.
-	fn window(&self) -> u64 {
+	fn window(&mut self) -> u64 {
 		crate::model::pace::AHEAD
 	}
 
-	/// Reserve the credit this stream may hold while paused, returning whether it may pause.
-	/// A stream outside any session always may.
+	/// Let the peer send only what the group's writer has `room` for, at least the `unsealed`
+	/// rest of the segment being written, so the stream holds little once it pauses; `None`
+	/// while no reader holds the writer back.
+	fn shape(&mut self, _room: Option<u64>, _unsealed: u64) {}
+
+	/// What [`Self::shape`] would set, for a lease to set as it is handed back: the stream is
+	/// borrowed while one is out. Read after [`Self::window`].
+	fn shaper(&mut self) -> Shaper {
+		Shaper::default()
+	}
+
+	/// Note the window a lease set from [`Self::shaper`], as [`Self::shape`] would have.
+	fn shaped(&mut self, _window: u64) {}
+
+	/// Reserve the credit this stream holds while paused, returning whether it may pause. A
+	/// stream outside any session always may.
 	fn pause(&mut self) -> bool {
 		true
 	}
@@ -61,8 +112,20 @@ pub(crate) trait Pause {
 }
 
 impl Pause for crate::transport::boxed::RecvStream {
-	fn window(&self) -> u64 {
+	fn window(&mut self) -> u64 {
 		crate::transport::boxed::RecvStream::window(self)
+	}
+
+	fn shape(&mut self, room: Option<u64>, unsealed: u64) {
+		crate::transport::boxed::RecvStream::shape(self, room, unsealed)
+	}
+
+	fn shaper(&mut self) -> Shaper {
+		crate::transport::boxed::RecvStream::shaper(self)
+	}
+
+	fn shaped(&mut self, window: u64) {
+		crate::transport::boxed::RecvStream::shaped(self, window)
 	}
 
 	fn pause(&mut self) -> bool {
@@ -97,6 +160,8 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 			version,
 			want: 0,
 			scratch: Vec::new(),
+			unreleased: 0,
+			frame: 0,
 			stats: Default::default(),
 		}
 	}
@@ -138,8 +203,21 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		&mut self,
 		waiter: &kio::Waiter,
 		consume: bool,
-		mut decode: impl FnMut(&mut Decoder<'_>) -> Result<T, DecodeError>,
+		decode: impl FnMut(&mut Decoder<'_>) -> Result<T, DecodeError>,
 	) -> Poll<Result<(T, usize), Error>>
+	where
+		V: Into<Form> + Copy,
+	{
+		self.poll_fault(waiter, consume, decode).map_err(Error::from)
+	}
+
+	/// [`Self::poll_with_sized`], keeping a reset apart from malformed bytes.
+	fn poll_fault<T>(
+		&mut self,
+		waiter: &kio::Waiter,
+		consume: bool,
+		mut decode: impl FnMut(&mut Decoder<'_>) -> Result<T, DecodeError>,
+	) -> Poll<Result<(T, usize), Fault>>
 	where
 		V: Into<Form> + Copy,
 	{
@@ -147,7 +225,8 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		loop {
 			let want = self.want.max(1);
 			let version = &self.version;
-			let mut lease = ready!(self.stream.poll_lease(waiter, want)).map_err(|err| version.transport_error(err))?;
+			let mut lease = ready!(self.stream.poll_lease(waiter, want))
+				.map_err(|err| Fault::Reset(version.transport_error(err)))?;
 
 			// Decode against the first chunk, or a copy of as much as the last attempt needed
 			// when that spans chunks. Only a message cut across chunks pays for the copy.
@@ -192,7 +271,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 					// A short read inside a complete body is malformed, but reports what it
 					// needed from the body, so always ask for at least one byte more.
 					Err(DecodeError::Short) => r.need().max(buf.len() + 1),
-					Err(e) => return Poll::Ready(Err(e.into())),
+					Err(e) => return Poll::Ready(Err(Fault::Malformed(e))),
 				};
 
 				if need <= lease.remaining() {
@@ -201,7 +280,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 				}
 				// Stream closed while we still need more data.
 				if lease.is_fin() {
-					return Poll::Ready(Err(DecodeError::Short.into()));
+					return Poll::Ready(Err(Fault::Reset(DecodeError::Short.into())));
 				}
 				self.want = need;
 				// The lease keeps every byte for the retry, which copies them again, so a
@@ -292,6 +371,24 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 	{
 		let version = self.version;
 		self.poll_with_maybe(waiter, true, |r| T::decode(r, version))
+	}
+
+	/// The next message, or how the stream ended instead.
+	pub(crate) fn poll_recv<T: for<'a> Decode<'a, V> + Debug>(&mut self, waiter: &kio::Waiter) -> Poll<Recv<T>>
+	where
+		V: Into<Form> + Copy,
+	{
+		match ready!(self.poll_has_more(waiter)) {
+			Err(err) => return Poll::Ready(Recv::Reset(err)),
+			Ok(false) => return Poll::Ready(Recv::Ended),
+			Ok(true) => {}
+		}
+		let version = self.version;
+		Poll::Ready(match ready!(self.poll_fault(waiter, true, |r| T::decode(r, version))) {
+			Ok((message, _)) => Recv::Message(message),
+			Err(Fault::Reset(err)) => Recv::Reset(err),
+			Err(Fault::Malformed(err)) => Recv::Malformed(err),
+		})
 	}
 
 	/// The next message without consuming it, or `None` if the stream closes cleanly first.
@@ -390,13 +487,29 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 
 		let result = loop {
 			// A writer too far ahead of the group's fastest reader leaves the rest in the
-			// stream, so flow control pushes back upstream.
-			let lease = match self.poll_pace(waiter, frame.poll_ready(waiter, self.stream.window())) {
-				Poll::Ready(Ok(())) => self.poll_lease(waiter, frame.remaining().min(1)),
+			// stream, so flow control pushes back upstream. One partway into a segment reads
+			// on to its seal first, so a paused stream never holds a segment's credit.
+			let window = self.stream.window();
+			let paced = match self.unreleased {
+				0 => {
+					let paced = frame.poll_ready(waiter, window);
+					self.poll_pace(waiter, paced, || frame.room(window, 0), frame.unsealed() as u64)
+				}
+				_ => Poll::Ready(Ok(())),
+			};
+			// Read here, as a lease borrows the stream.
+			let shaper = self.stream.shaper();
+			let mut lease = match match paced {
+				// The stream alone, so `unreleased` can count while the lease is out.
+				Poll::Ready(Ok(())) => {
+					let version = &self.version;
+					self.stream
+						.poll_lease(waiter, frame.remaining().min(1))
+						.map_err(|err| version.transport_error(err))
+				}
 				Poll::Ready(Err(err)) => break Err(err),
 				Poll::Pending => Poll::Pending,
-			};
-			let mut lease = match lease {
+			} {
 				Poll::Pending => {
 					if owed > 0 {
 						frame.notify();
@@ -427,11 +540,31 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 			};
 			let complete = chunk.len() == remaining;
 			let ended = lease.is_fin() && !lease.has_remaining();
+			// The transport grants credit from what was taken when it next sends, so the window
+			// is sized to the room once the chunk is in, and set as the lease goes back: a
+			// shrink after it could lose the race to a grant from the old window.
+			let shaped = match chunk.is_empty() {
+				true => None,
+				false => {
+					let room = frame
+						.room(window, chunk.len())
+						.map(|room| room.saturating_sub(self.frame));
+					shaper.window(room, frame.unsealed_after(chunk.len()) as u64)
+				}
+			};
+			if let Some(window) = shaped {
+				lease.set_window(window);
+			}
 			if complete || chunk.len() == frame.unsealed() {
 				// Every byte of the segment is in hand, so its credit returns.
 				lease.release();
+				self.unreleased = 0;
 			} else {
 				drop(lease);
+				self.unreleased += chunk.len() as u64;
+			}
+			if let Some(window) = shaped {
+				self.stream.shaped(window);
 			}
 
 			if !chunk.is_empty() {
@@ -471,21 +604,34 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 	where
 		S: Pause,
 	{
-		self.poll_pace(waiter, group.poll_admit(waiter, header, self.stream.window()))
+		self.frame = header.info.size;
+		let window = self.stream.window();
+		let paced = group.poll_admit(waiter, header, window);
+		self.poll_pace(waiter, paced, || group.room(window), 0)
 	}
 
 	/// Wait out `paced`, the group's pace gate, if the session has room for the credit this
 	/// stream holds while paused (see [`Pause`]); otherwise read on, and the group sheds.
+	/// Once open, the stream's credit is sized to the `room` the writer has left, at least
+	/// the `unsealed` rest of its segment.
 	///
 	/// A paused stream is not read, so it is watched for a reset instead, which fails the
 	/// wait rather than leaving it to the group's reader to notice.
-	fn poll_pace(&mut self, waiter: &kio::Waiter, paced: Poll<()>) -> Poll<Result<(), Error>>
+	fn poll_pace(
+		&mut self,
+		waiter: &kio::Waiter,
+		paced: Poll<()>,
+		room: impl FnOnce() -> Option<u64>,
+		unsealed: u64,
+	) -> Poll<Result<(), Error>>
 	where
 		S: Pause,
 	{
 		match paced {
 			Poll::Ready(()) => {
 				self.stream.resume();
+				let room = room().map(|room| room.saturating_sub(self.frame));
+				self.stream.shape(room, unsealed);
 				Poll::Ready(Ok(()))
 			}
 			Poll::Pending if self.stream.pause() => {
@@ -557,6 +703,8 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 			version,
 			want: self.want,
 			scratch: self.scratch,
+			unreleased: self.unreleased,
+			frame: self.frame,
 			stats: self.stats,
 		}
 	}
@@ -673,6 +821,46 @@ mod tests {
 		assert_eq!(counted(), [vec![auth], probes(2)].concat());
 	}
 
+	/// A read tells a message, a clean end, a stream cut inside a message, and malformed
+	/// bytes apart, without a caller matching the error.
+	#[test]
+	fn a_read_tells_a_cut_stream_from_malformed_bytes() {
+		use crate::lite;
+		let version = lite::Version::Lite07;
+		let waiter = &kio::Waiter::noop();
+		let probe = lite::Probe {
+			bitrate: Some(123),
+			rtt: Some(4),
+		};
+		let bytes: &'static [u8] = probe.encode_bytes(version).unwrap().to_vec().leak();
+
+		let mut reader = queue(&[bytes], version);
+		reader.stream.get_mut().fin = true;
+		assert!(matches!(
+			reader.poll_recv::<lite::Probe>(waiter),
+			Poll::Ready(Recv::Message(_))
+		));
+		assert!(matches!(
+			reader.poll_recv::<lite::Probe>(waiter),
+			Poll::Ready(Recv::Ended)
+		));
+
+		// The stream finishes inside the message: a cut, not a violation.
+		let mut reader = queue(&[&bytes[..2]], version);
+		reader.stream.get_mut().fin = true;
+		assert!(matches!(
+			reader.poll_recv::<lite::Probe>(waiter),
+			Poll::Ready(Recv::Reset(_))
+		));
+
+		// A body cut short inside its declared size is malformed.
+		let mut reader = queue(&[&[1, 0x80]], version);
+		assert!(matches!(
+			reader.poll_recv::<lite::Probe>(waiter),
+			Poll::Ready(Recv::Malformed(_))
+		));
+	}
+
 	/// STOP_SENDING refuses a stream, so it must carry a stream code. Reusing the session
 	/// table here would have the peer decode it against the wrong registry: `Cancel` would
 	/// arrive as INTERNAL_ERROR, and `Unauthorized` as DELIVERY_TIMEOUT.
@@ -739,12 +927,12 @@ mod tests {
 		kio::Waiter,
 		Arc<CountWaker>,
 	) {
-		let group = crate::group::Info { sequence: 0 }.produce();
+		let group = crate::group::Info { start: 0 }.produce();
 		let mut consumer = group.consume();
 		let frame = group
 			.create_frame(crate::frame::Info {
 				size: size as u64,
-				timestamp: Some(crate::Timestamp::ZERO),
+				timestamp: crate::Timestamp::ZERO,
 			})
 			.unwrap();
 
@@ -913,8 +1101,8 @@ mod tests {
 			ietf::GoAway::decode(r, ietf::Version::Draft22).map(|_| ())
 		});
 		for version in [lite::Version::Lite01, lite::Version::Lite02] {
-			refuses_frame::<setup::Client, _>(&[0x20, 0, 0], Version::Lite(version), false);
-			refuses_frame::<setup::Server, _>(&[0x21, 0, 0], Version::Lite(version), false);
+			refuses_frame::<setup::Client, _>(&[0x20, 0, 0], Version::lite(version), false);
+			refuses_frame::<setup::Server, _>(&[0x21, 0, 0], Version::lite(version), false);
 		}
 	}
 
@@ -935,12 +1123,12 @@ mod tests {
 			let mut prefix = vec![0x20];
 			Encoder::new(&mut prefix, version.into()).varint(65535).unwrap();
 			assert!(matches!(
-				setup::Client::decode_slice(&prefix, Version::Lite(version)),
+				setup::Client::decode_slice(&prefix, Version::lite(version)),
 				Err(DecodeError::Short)
 			));
 			prefix[0] = 0x21;
 			assert!(matches!(
-				setup::Server::decode_slice(&prefix, Version::Lite(version)),
+				setup::Server::decode_slice(&prefix, Version::lite(version)),
 				Err(DecodeError::Short)
 			));
 		}
@@ -982,7 +1170,7 @@ mod tests {
 
 	/// A group 17 MB past an idle reader, so its writer is paced.
 	fn paced_group() -> (crate::group::Producer, crate::group::Consumer) {
-		let mut group = crate::group::Info { sequence: 0 }.produce();
+		let mut group = crate::group::Info { start: 0 }.produce();
 		let idle = group.consume();
 		let payload = Bytes::from(vec![0u8; 1 << 20]);
 		for _ in 0..17 {
@@ -1002,7 +1190,7 @@ mod tests {
 		let group = crate::recv::Group::new(group);
 		let header = crate::frame::Header::from(crate::frame::Info {
 			size: 1,
-			timestamp: Some(crate::Timestamp::ZERO),
+			timestamp: crate::Timestamp::ZERO,
 		});
 		let mut reader = queue(&[], crate::lite::Version::Lite05);
 		assert!(reader.poll_admit(noop, &group, &header).is_pending(), "paused to admit");
@@ -1013,7 +1201,7 @@ mod tests {
 		let mut frame = group
 			.create_frame(crate::frame::Info {
 				size: 1,
-				timestamp: Some(crate::Timestamp::ZERO),
+				timestamp: crate::Timestamp::ZERO,
 			})
 			.unwrap();
 		let mut reader = queue(&[b"x"], crate::lite::Version::Lite05);
@@ -1145,11 +1333,69 @@ mod tests {
 		chunks: VecDeque<Bytes>,
 		held: usize,
 		released: usize,
+		/// The pacing window, or the cap when zero.
+		window: u64,
+		/// The credit held at each pause.
+		paused: Vec<usize>,
+		/// The window the peer is granted under, as the transport holds it, `None` for the full
+		/// credit.
+		in_force: Option<u64>,
+		/// Every window set, in order.
+		windows: Vec<u64>,
+		/// The window in force as each release returned its credit.
+		released_under: Vec<Option<u64>>,
 	}
 
-	struct CreditedLease<'a>(&'a mut Credited);
+	impl Credited {
+		fn set_window(&mut self, window: u64) {
+			self.in_force = Some(window);
+			self.windows.push(window);
+		}
+	}
 
-	impl Pause for Credited {}
+	struct CreditedLease<'a> {
+		stream: &'a mut Credited,
+		window: Option<u64>,
+	}
+
+	impl Drop for CreditedLease<'_> {
+		fn drop(&mut self) {
+			if let Some(window) = self.window.take() {
+				self.stream.set_window(window);
+			}
+		}
+	}
+
+	impl Pause for Credited {
+		fn window(&mut self) -> u64 {
+			match self.window {
+				0 => crate::model::pace::AHEAD,
+				window => window,
+			}
+		}
+
+		/// Shapes to the room itself, an allowance of none, so a test reads the window.
+		fn shaper(&mut self) -> Shaper {
+			const STREAM: u64 = u64::MAX / 2;
+			Shaper {
+				active: true,
+				stream: STREAM,
+				allowance: 0,
+				current: self.in_force.unwrap_or(STREAM),
+			}
+		}
+
+		fn shape(&mut self, room: Option<u64>, unsealed: u64) {
+			if let Some(window) = self.shaper().window(room, unsealed) {
+				self.set_window(window);
+			}
+		}
+
+		fn pause(&mut self) -> bool {
+			self.paused.push(self.held);
+			true
+		}
+	}
 
 	impl RecvStream for Credited {
 		type Error = crate::lite::test_transport::SinkError;
@@ -1157,7 +1403,10 @@ mod tests {
 
 		fn poll_lease(&mut self, _: &kio::Waiter, want: usize) -> Poll<Result<CreditedLease<'_>, Self::Error>> {
 			match self.chunks.iter().map(Bytes::len).sum::<usize>() >= want {
-				true => Poll::Ready(Ok(CreditedLease(self))),
+				true => Poll::Ready(Ok(CreditedLease {
+					stream: self,
+					window: None,
+				})),
 				false => Poll::Pending,
 			}
 		}
@@ -1169,34 +1418,42 @@ mod tests {
 
 	impl Buf for CreditedLease<'_> {
 		fn remaining(&self) -> usize {
-			self.0.chunks.iter().map(Bytes::len).sum()
+			self.stream.chunks.iter().map(Bytes::len).sum()
 		}
 
 		fn chunk(&self) -> &[u8] {
-			self.0.chunks.front().map_or(&[], |chunk| &chunk[..])
+			self.stream.chunks.front().map_or(&[], |chunk| &chunk[..])
 		}
 
 		fn advance(&mut self, n: usize) {
-			let front = self.0.chunks.front_mut().expect("advanced past the lease");
+			let front = self.stream.chunks.front_mut().expect("advanced past the lease");
 			front.advance(n);
 			if front.is_empty() {
-				self.0.chunks.pop_front();
+				self.stream.chunks.pop_front();
 			}
-			self.0.held += n;
+			self.stream.held += n;
 		}
 	}
 
 	impl Lease for CreditedLease<'_> {
 		fn chunks(&self) -> impl Iterator<Item = &[u8]> {
-			self.0.chunks.iter().map(|chunk| &chunk[..])
+			self.stream.chunks.iter().map(|chunk| &chunk[..])
 		}
 
 		fn is_fin(&self) -> bool {
 			false
 		}
 
-		fn release(self) {
-			self.0.released += std::mem::take(&mut self.0.held);
+		fn release(mut self) {
+			if let Some(window) = self.window.take() {
+				self.stream.set_window(window);
+			}
+			self.stream.released += std::mem::take(&mut self.stream.held);
+			self.stream.released_under.push(self.stream.in_force);
+		}
+
+		fn set_window(&mut self, window: u64) {
+			self.window = Some(window);
 		}
 	}
 
@@ -1236,5 +1493,134 @@ mod tests {
 			read.extend_from_slice(&chunk);
 		}
 		assert_eq!(read, data);
+	}
+
+	/// A stream paced partway through a segment reads on to its seal before pausing, so a
+	/// paused stream never holds the credit of a segment it has yet to seal, and its credit
+	/// stays sized to at least the rest of that segment meanwhile.
+	#[test]
+	fn a_stream_reads_on_to_the_seal_before_pausing() {
+		use crate::frame::SEGMENT;
+		const CHUNK: usize = 100_000;
+
+		// An idle reader behind one committed frame, so the writer is paced past the window.
+		let mut group = crate::group::Info { start: 0 }.produce();
+		let _idle = group.consume();
+		group
+			.write_frame(crate::Timestamp::ZERO, Bytes::from_static(b"x"))
+			.unwrap();
+		let mut frame = group
+			.create_frame(crate::frame::Info {
+				size: 2 * SEGMENT as u64,
+				timestamp: crate::Timestamp::ZERO,
+			})
+			.unwrap();
+
+		let stream = Credited {
+			window: SEGMENT as u64 / 2,
+			..Default::default()
+		};
+		let mut reader = Reader::new(stream, crate::lite::Version::Lite05);
+		// One chunk straddles the seal.
+		for _ in 0..SEGMENT / CHUNK + 1 {
+			reader.stream.chunks.push_back(Bytes::from(vec![0u8; CHUNK]));
+		}
+		let noop = &kio::Waiter::noop();
+		assert!(
+			reader.poll_read_frame(noop, &mut frame).is_pending(),
+			"paced at the seal"
+		);
+
+		let stream = &reader.stream;
+		assert_eq!(stream.released, SEGMENT, "read on past the window to the seal");
+		assert_eq!(stream.paused, [0], "paused holding nothing taken");
+		assert_eq!(
+			stream.windows.last(),
+			Some(&(SEGMENT as u64)),
+			"no room left, but the next segment to seal"
+		);
+	}
+
+	/// While a reader holds the group back, ingest sizes the stream's credit to the room the
+	/// group has left, a frame short, since it pauses once the next frame does not fit.
+	#[test]
+	fn credit_is_shaped_a_frame_short_of_the_room() {
+		const FRAME: usize = 1000;
+		const WINDOW: u64 = 100_000;
+
+		let group = crate::group::Info { start: 0 }.produce();
+		let _idle = group.consume();
+		let mut group = crate::recv::Group::new(group);
+		let info = crate::frame::Info {
+			size: FRAME as u64,
+			timestamp: crate::Timestamp::ZERO,
+		};
+		let stream = Credited {
+			window: WINDOW,
+			..Default::default()
+		};
+		let mut reader = Reader::new(stream, crate::lite::Version::Lite05);
+		let noop = &kio::Waiter::noop();
+		let mut room = None;
+		for _ in 0..3 {
+			assert!(matches!(
+				reader.poll_admit(noop, &group, &info.into()),
+				Poll::Ready(Ok(()))
+			));
+			let mut frame = group.create_object(info.into()).unwrap();
+			reader.stream.chunks.push_back(Bytes::from(vec![0u8; FRAME]));
+			assert!(matches!(reader.poll_read_frame(noop, &mut frame), Poll::Ready(Ok(()))));
+			room = frame.room(WINDOW, 0);
+			group.restore(frame.finish().unwrap());
+		}
+
+		let room = room.expect("a reader holds it back");
+		assert!(room <= WINDOW - 3 * FRAME as u64, "the frames took room");
+		assert_eq!(
+			reader.stream.windows.last(),
+			Some(&(room - FRAME as u64)),
+			"a frame short, nothing more to seal between frames"
+		);
+	}
+
+	/// The window shrinks as the lease goes back, in the same step as the credit returns: a
+	/// shrink after the hand back could lose the race to a grant the transport builds from the
+	/// old window, and credit granted cannot be taken back, so the stream would hold more than
+	/// its allowance once it pauses.
+	#[test]
+	fn the_window_shrinks_as_the_credit_returns() {
+		const FRAME: usize = 1000;
+		const WINDOW: u64 = 100_000;
+
+		let group = crate::group::Info { start: 0 }.produce();
+		let _idle = group.consume();
+		let mut group = crate::recv::Group::new(group);
+		let info = crate::frame::Info {
+			size: FRAME as u64,
+			timestamp: crate::Timestamp::ZERO,
+		};
+		let stream = Credited {
+			window: WINDOW,
+			..Default::default()
+		};
+		let mut reader = Reader::new(stream, crate::lite::Version::Lite05);
+		let noop = &kio::Waiter::noop();
+		for _ in 0..3 {
+			assert!(matches!(
+				reader.poll_admit(noop, &group, &info.into()),
+				Poll::Ready(Ok(()))
+			));
+			let mut frame = group.create_object(info.into()).unwrap();
+			reader.stream.chunks.push_back(Bytes::from(vec![0u8; FRAME]));
+			assert!(matches!(reader.poll_read_frame(noop, &mut frame), Poll::Ready(Ok(()))));
+			let room = frame.room(WINDOW, 0).expect("a reader holds it back");
+			group.restore(frame.finish().unwrap());
+
+			assert_eq!(
+				reader.stream.released_under.last(),
+				Some(&Some(room - FRAME as u64)),
+				"the credit returned under the window the chunk left room for"
+			);
+		}
 	}
 }

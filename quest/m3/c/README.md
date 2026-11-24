@@ -11,14 +11,15 @@ scope; they already sit on moq-ffi through the generated C++.
 ## Plan
 
 Decided 2026-10-25 (maintainer): this line ships after the cut, once moq builds
-its bindings from rust2's UniFFI fork. The hand-written crate ships at the cut
+its bindings from [rust2's exporter](/quest/m3/ffi-exporter.md) (amended
+2026-11-02, when moq chose the exporter over rust2's UniFFI fork). The hand-written crate ships at the cut
 instead, with the binding features moq-ffi gained in m1 and m2
 ([moq-dev/moq#8060](https://github.com/moq-dev/moq/pull/8060)). Features moq-c
 never had, such as single-group fetch and group-level consumption, wait for this
-line. The generator fix for the C name
-clash landed in rust2's fork
-([moq-dev/rust2#66](https://github.com/moq-dev/rust2/pull/66)), not in a
-`kixelated/uniffi-bindgen-cpp` release, and reaches moq with the switch.
+line. The C generator's GLib-style names, which fix
+the C name clash, come from rust2
+([moq-dev/rust2#66](https://github.com/moq-dev/rust2/pull/66)), not from a
+`kixelated/uniffi-bindgen-cpp` release, and reach moq with the switch.
 
 Decided earlier, still standing:
 
@@ -34,10 +35,13 @@ Decided earlier, still standing:
   (`err->protocol`). Infallible calls return their value directly, optional
   scalars are `{has_value, value}`, each async function has its own callback
   typedef, and unnamed variant fields are `v1`, as in C++.
-- The generated package takes over the `moq-c` name and `moq::c` target at
-  the shared minor of the cut that ships it, after the hand-written crate's
-  0.22 (CONTRIBUTING.md's [Versions](/CONTRIBUTING.md#versions),
-  [moq-dev/moq#7610](https://github.com/moq-dev/moq/pull/7610)).
+- The generated package is the first published `moq-c`, with the `moq::c`
+  target, at the shared minor of the cut that ships it (RELEASE.md's
+  [Versions](/RELEASE.md#versions),
+  [moq-dev/moq#7610](https://github.com/moq-dev/moq/pull/7610)). Amended
+  2026-11-16 (maintainer, /quest-plan of the pre-cut audit): the
+  hand-written API ships at 0.22 as `libmoq`, not `moq-c`, so the generated package takes
+  over no published name and C users rename once, when the API changes.
 - Docs change inline: the consumer quest rewrites `doc/lib/c`, and its Impact
   bullet carries the move for the package's `MIGRATE.md`.
 

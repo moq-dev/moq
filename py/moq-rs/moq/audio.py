@@ -86,7 +86,8 @@ class DecoderOutput:
     ``delay.min`` is the jitter buffer to hold ahead of the playhead, and where a
     cold join starts; with ``estimate`` (the default) it floors the delay measured
     from arrival timing instead. ``delay.max`` only bounds how stale a group may
-    get before it is skipped, and adds no buffering. Both default to zero.
+    get before it is skipped, and adds no buffering. ``min`` defaults to unstated, which the
+    decoder starts as zero, and ``max`` to zero.
     ``start`` picks where to begin on a track that already holds groups, ``None``
     for the oldest: a live player passes ``DecodeStart.LATEST`` so a reopened
     decoder skips the cached backlog.
@@ -153,6 +154,16 @@ class Producer:
         """This encoder's bandwidth reservation, if published against a session allocator."""
         value = self._inner.reservation()
         return None if value is None else Reservation(value)
+
+    def abort_unwanted(self, error_code: int) -> bool:
+        """Abort this track with an application error code, but only while nobody wants it.
+
+        Call it once :meth:`TrackDemand.wanted_changed` returns ``False``. Returns ``True`` once
+        the track is closed, and ``False``, leaving the track open, when a reader joined since;
+        keep serving and wait for the next ``None`` on a fresh ``demand()``: one that already
+        returned ``None`` misses a reader that came and went, and waits on.
+        """
+        return self._inner.abort_unwanted(error_code)
 
     def finish(self) -> None:
         """Flush any pending samples and finalize the track."""

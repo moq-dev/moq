@@ -9,7 +9,7 @@ publication-dependent cleanup and downstream adoption.
 ## Plan
 
 Decided 2026-10-13: readiness, publication, adoption, and rollout are distinct
-stages. This epic is not a prerequisite of m2. Follow CONTRIBUTING.md: merge
+stages. This epic is not a prerequisite of m2. Follow RELEASE.md: merge
 release into main before the breaking cut, preserving published versions and
 release-only fixes, then merge main into release without squashing. Version
 bumps and tags happen at this cut, not in the milestone-planning PR.

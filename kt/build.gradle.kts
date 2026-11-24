@@ -23,7 +23,7 @@ plugins {
     // Generates the KDoc HTML that `:moq` ships as its Maven Central javadoc jar,
     // which javadoc.io then hosts. Declared once here (see the header note) so the
     // module can request it by id.
-    id("org.jetbrains.dokka") version "2.2.0" apply false
+    id("org.jetbrains.dokka") version "2.3.0" apply false
 }
 
 allprojects {

@@ -1,7 +1,8 @@
 import { expect, spyOn, test } from "bun:test";
-import { Duration, type Manual } from "@moq/clock";
-import { offered } from "../connection/extensions.ts";
+import { Duration } from "@moq/clock";
+import type { Manual } from "@moq/clock/test";
 import { exchangeSetup } from "../connection/handshake.ts";
+import { defined } from "../defined.test-util.ts";
 import { ProtocolViolation, SessionCode, StreamCode, StreamError } from "../error.ts";
 import { createMockTransportPair, manual } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
@@ -9,6 +10,7 @@ import * as Path from "../path.ts";
 import { Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import { Connection } from "./connection.ts";
+import { IetfSessionCode } from "./error.ts";
 import { GoAway } from "./goaway.ts";
 import { RequestOk } from "./request.ts";
 import { Setup } from "./setup.ts";
@@ -63,7 +65,7 @@ async function serving(version: IetfVersion, alpn: string) {
 	const origin = new OriginProducer();
 	const broadcastRoute = origin.route(Path.from("room"));
 	const broadcast = broadcastRoute.broadcast;
-	broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const connection = new Connection({
 		url: new URL("https://example.com"),
 		quic: pair.server,
@@ -107,7 +109,7 @@ function goaways(count: number, version: IetfVersion, requestId?: number): Uint8
 
 for (const [version, alpn] of DRAFTS) {
 	for (const [name, bytes, code] of [
-		["a wrong-parity Request ID", subscribe([field(4)], 5, 1), SessionCode.InvalidRequestId],
+		["a wrong-parity Request ID", subscribe([field(4)], 5, 1), IetfSessionCode.InvalidRequestId],
 		["an empty namespace field", subscribe([field(0)], 5), SessionCode.ProtocolViolation],
 		["a namespace over 4096 bytes", subscribe([field(4097)], 1), SessionCode.ProtocolViolation],
 		["a full track name over 4096 bytes", subscribe([field(4000)], 97), SessionCode.ProtocolViolation],
@@ -257,9 +259,9 @@ for (const [version, alpn] of DRAFTS) {
 
 	// A server sends neither PATH nor AUTHORITY, and a token that cannot be decoded closes.
 	for (const [name, key, value, code] of [
-		["PATH", SetupOption.Path, [0x2f], SessionCode.InvalidPath],
-		["AUTHORITY", SetupOption.Authority, [0x61], SessionCode.InvalidAuthority],
-		["a malformed token", SetupOption.AuthorizationToken, [0x04], SessionCode.KeyValueFormatting],
+		["PATH", SetupOption.Path, [0x2f], IetfSessionCode.InvalidPath],
+		["AUTHORITY", SetupOption.Authority, [0x61], IetfSessionCode.InvalidAuthority],
+		["a malformed token", SetupOption.AuthorizationToken, [0x04], IetfSessionCode.KeyValueFormatting],
 		["a REGISTER token", SetupOption.AuthorizationToken, [0x01, 0x07, 0x00], undefined],
 	] as const) {
 		test(`a server SETUP with ${name} ${code === undefined ? "is accepted" : "closes"} ${alpn}`, async () => {
@@ -270,7 +272,7 @@ for (const [version, alpn] of DRAFTS) {
 			parameters.setBytes(key, new Uint8Array(value));
 			await new Setup({ parameters }).encode(setup, version);
 
-			const dialed = exchangeSetup(pair.client, version, "test", { client: true, extensions: offered() });
+			const dialed = exchangeSetup(pair.client, version, "test", { client: true });
 			if (code === undefined) {
 				await dialed;
 				pair.client.close();
@@ -287,8 +289,8 @@ for (const [version, alpn] of DRAFTS) {
 for (const [requestId, code] of [
 	[0, undefined],
 	[4, undefined],
-	[1, SessionCode.InvalidRequestId],
-	[5, SessionCode.InvalidRequestId],
+	[1, IetfSessionCode.InvalidRequestId],
+	[5, IetfSessionCode.InvalidRequestId],
 	[undefined, SessionCode.ProtocolViolation],
 ] as const) {
 	const name = requestId === undefined ? "without a Request ID" : `Request ID ${requestId}`;

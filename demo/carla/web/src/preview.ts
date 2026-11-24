@@ -13,12 +13,12 @@ export function populatePreview(add: (path: Moq.Path.Valid) => Truck) {
 	].entries()) {
 		const truck = add(Moq.Path.from(`carla/truck${index + 1}/front.hang`));
 		const origin = new Moq.Broadcast.Producer();
-		const producer = new Json.Snapshot.Producer<TruckStatus>({
-			track: origin.createTrack("status", { compression: "deflate" }),
-		});
+		const track = origin.createTrack("status", { compression: "deflate" });
+		if (!track) throw new Error("the status track already exists");
+		const producer = new Json.Snapshot.Producer<TruckStatus>({ track });
 		(truck.broadcast.out.active as Moq.Signals.Signal<Moq.Broadcast.Consumer | undefined>).set(origin.consume());
-		producer.update({
-			value: {
+		producer.update(
+			{
 				accepted: { steering: 0, throttle: 0, brake: 1, gear: "neutral" },
 				measured: {
 					steering: 0.15,
@@ -30,8 +30,11 @@ export function populatePreview(add: (path: Moq.Path.Valid) => Truck) {
 				estopped: false,
 				map: "Town10HD_Opt",
 				pose,
+				media_pipeline: {},
 			},
-		});
+			// The status track is scale-less, so the write names the group it opens.
+			Moq.Time.Timestamp.unscaled(0n),
+		);
 		cleanup.push(() => {
 			producer.finish();
 			origin.close();

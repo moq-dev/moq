@@ -35,11 +35,18 @@
 //! | `main_64x64_yellow_5f.h264` | Main | 5 (I P P P I) | 64x64 | CABAC rather than CAVLC entropy coding |
 //! | `seq_100x66_pattern_5f.h264` | Constrained Baseline | 5 (I P P P I) | 100x66 | Non-square and not macroblock-aligned, so the SPS crops 112x80 down and a decoder that ignores that returns the wrong picture |
 //!
+//! `main_poc0_64x64_pattern_5f.h264` is no conformance fixture: the openh264
+//! backend's output-order tests use it. It is moq-vaapi's encoder output rather
+//! than libx264's, captured from a VA-API encode of a 64x64 test pattern, and
+//! it is the one fixture whose SPS rules reordering out with picture order
+//! count type 0 and a VUI `max_num_reorder_frames` of 0 rather than with type 2.
+//! Main, CABAC, one reference frame, 5 pictures (I P P P P), its parameter sets
+//! sent twice ahead of the IDR.
+//!
 //! Every fixture ends on an IDR, which is what keeps the picture counts
 //! assertable. [`Backend`] has no drain, and a decoder that bumps its DPB only
-//! when the buffer fills rather than at the reorder depth the VUI declares (the
-//! VA-API backend does this, and holds `num_ref_frames` pictures for it) would
-//! otherwise still be sitting on most of a short stream when it ended. A closing
+//! when the buffer fills rather than at the reorder depth the VUI declares would
+//! otherwise still be sitting on part of a short stream when it ended. A closing
 //! IDR flushes everything before it, so at most the final picture is ever
 //! outstanding.
 //!
@@ -178,10 +185,11 @@ fn nal_type(nal: &Bytes) -> u8 {
 }
 
 /// One coded picture, framed the way [`Backend::decode`] wants it.
-struct AccessUnit {
-	payload: Bytes,
-	timestamp: Timestamp,
-	keyframe: bool,
+pub(super) struct AccessUnit {
+	pub(super) payload: Bytes,
+	/// The picture's place in decoding order, at the fixtures' 30fps.
+	pub(super) timestamp: Timestamp,
+	pub(super) keyframe: bool,
 }
 
 /// Split an Annex-B elementary stream into one access unit per coded picture.
@@ -192,7 +200,22 @@ struct AccessUnit {
 /// IDR. That is enough for these fixtures: single-slice pictures, no redundant
 /// slices, no access unit delimiters.
 fn access_units(vector: &Vector) -> Vec<AccessUnit> {
-	let mut buf = Bytes::from_static(vector.bitstream);
+	let units = split(vector.bitstream);
+	assert_eq!(
+		units.len(),
+		vector.pictures,
+		"{} splits into {} access units, expected {}",
+		vector.name,
+		units.len(),
+		vector.pictures
+	);
+	units
+}
+
+/// Split an Annex-B elementary stream into access units the way
+/// [`access_units`] does, for a stream that is not one of the vectors here.
+pub(super) fn split(bitstream: &'static [u8]) -> Vec<AccessUnit> {
+	let mut buf = Bytes::from_static(bitstream);
 	let mut iter = annexb::NalIterator::new(&mut buf);
 	let mut nals: Vec<Bytes> = iter
 		.by_ref()
@@ -216,15 +239,6 @@ fn access_units(vector: &Vector) -> Vec<AccessUnit> {
 	if current.iter().any(is_slice) {
 		units.push(access_unit(&current, units.len()));
 	}
-
-	assert_eq!(
-		units.len(),
-		vector.pictures,
-		"{} splits into {} access units, expected {}",
-		vector.name,
-		units.len(),
-		vector.pictures
-	);
 	units
 }
 
@@ -288,7 +302,7 @@ fn pictures(name: &str, vector: &Vector) -> Vec<I420> {
 			// IPPP with no reordering, so pictures come back in the order they were
 			// fed, each carrying the timestamp its access unit went in with.
 			assert_eq!(
-				frame.timestamp.as_micros(),
+				frame.timestamp.as_micros().unwrap(),
 				i as u128 * FRAME_MICROS as u128,
 				"{name}: {} picture {i} lost its timestamp",
 				vector.name

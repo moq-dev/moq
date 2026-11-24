@@ -5,8 +5,6 @@
 //! AudioSpecificConfig, so import strips ADTS headers (and synthesizes a
 //! config from the first one) while export re-frames raw AAC into ADTS.
 
-use anyhow::Context;
-
 use super::SAMPLE_RATES;
 
 /// An invalid ADTS header or frame.
@@ -28,6 +26,18 @@ pub enum Error {
 	/// A packet does not contain exactly one complete ADTS frame.
 	#[error("ADTS packet must contain exactly one complete frame")]
 	PacketLength,
+	/// An audioObjectType outside the four ADTS's 2-bit profile can carry.
+	#[error("audioObjectType {0} not representable in ADTS")]
+	ObjectType(u8),
+	/// A sample rate outside ADTS's table, which has no explicit-rate escape.
+	#[error("sample rate {0} not representable in ADTS")]
+	Rate(u32),
+	/// A channelConfiguration past ADTS's 3 bits.
+	#[error("channelConfiguration {0} not representable in ADTS")]
+	ChannelConfig(u8),
+	/// A frame past ADTS's 13-bit frame length.
+	#[error("AAC frame of {0} bytes too large for ADTS framing")]
+	TooLarge(usize),
 }
 
 /// Bytes needed to attempt a header parse: the fixed header without a CRC.
@@ -105,22 +115,22 @@ pub(crate) fn write_header(
 	sample_rate: u32,
 	channel_config: u8,
 	raw_len: usize,
-) -> anyhow::Result<[u8; 7]> {
+) -> Result<[u8; 7], Error> {
 	// ADTS `profile` is the 2-bit audioObjectType - 1, so only Main, LC, SSR, and LTP fit.
-	anyhow::ensure!(
-		(1..=4).contains(&object_type),
-		"audioObjectType {object_type} not representable in ADTS"
-	);
+	if !(1..=4).contains(&object_type) {
+		return Err(Error::ObjectType(object_type));
+	}
 	let profile = object_type - 1;
 	let freq_index = freq_index_from_rate(sample_rate)?;
 	// ADTS has 3 bits for it; the higher configurations only fit an AudioSpecificConfig.
-	anyhow::ensure!(
-		channel_config < 8,
-		"channelConfiguration {channel_config} not representable in ADTS"
-	);
+	if channel_config >= 8 {
+		return Err(Error::ChannelConfig(channel_config));
+	}
 
 	let frame_len = raw_len + 7;
-	anyhow::ensure!(frame_len < (1 << 13), "AAC frame too large for ADTS framing");
+	if frame_len >= 1 << 13 {
+		return Err(Error::TooLarge(frame_len));
+	}
 
 	let mut h = [0u8; 7];
 	h[0] = 0xFF;
@@ -135,14 +145,14 @@ pub(crate) fn write_header(
 	Ok(h)
 }
 
-fn freq_index_from_rate(sample_rate: u32) -> anyhow::Result<u8> {
+fn freq_index_from_rate(sample_rate: u32) -> Result<u8, Error> {
 	// ADTS has no explicit-rate escape (unlike AudioSpecificConfig), so a rate
 	// outside the table can't be represented. Fail rather than mislabel it.
 	SAMPLE_RATES
 		.iter()
 		.position(|&r| r == sample_rate)
 		.map(|i| i as u8)
-		.with_context(|| format!("sample rate {sample_rate} not representable in ADTS"))
+		.ok_or(Error::Rate(sample_rate))
 }
 
 #[cfg(test)]

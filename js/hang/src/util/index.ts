@@ -6,16 +6,16 @@
  */
 
 /** AAC codec constraints. */
-export * as Aac from "./aac";
+export * as Aac from "./aac.ts";
 /** A package's directory of self-hosted files. */
-export * as Assets from "./assets";
+export * as Assets from "./assets.ts";
 /** Unlocking Web Audio on a user gesture. */
-export * as Gesture from "./gesture";
+export * as Gesture from "./gesture.ts";
 /** Browser detection for engine-specific workarounds. */
-export * as Hacks from "./hacks";
+export * as Hacks from "./hacks.ts";
 /** Hex encoding and decoding. */
-export * as Hex from "./hex";
+export * as Hex from "./hex.ts";
 /** The libav WebCodecs polyfill. */
-export * as Libav from "./libav";
+export * as Libav from "./libav.ts";
 /** Opus codec constraints. */
-export * as Opus from "./opus";
+export * as Opus from "./opus.ts";

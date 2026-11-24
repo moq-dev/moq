@@ -193,7 +193,6 @@ impl Sim {
                     sent: flight.sent,
                     bytes: flight.bytes,
                     packet: flight.packet,
-                    new_burst: true,
                 }),
             }
         }

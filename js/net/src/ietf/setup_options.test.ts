@@ -15,7 +15,6 @@ test("setup option keys match the registries", () => {
 		RelayCost: 0x40b56n,
 		Solicit: 0x40b5an,
 		Hidden: 0x40b5cn,
-		MaxAge: 0x915c4n,
 		ActiveCount: 0x40b64n,
 	});
 });

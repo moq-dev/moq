@@ -47,27 +47,25 @@ skipping inside the Nix shell.
   NVENC and CUDA external-image import (the verification #4975 deferred here).
 - Merge queue: a `merge_group` job in `.github/workflows/check.yml` (or
   `video.yml`) runs `nix develop --command just rs nvidia`, a recipe and not
-  a script path, like every other workflow step, on a self-hosted runner VM
+  a script path, like every other workflow step, on a self-hosted runner
   labeled for the NVIDIA host. Scope it like the other queue jobs: run when
   the queue's diff touches moq-video, moq-nvenc, or what they depend on.
   Read-only `permissions`, never `pull_request`.
 - Decided 2026-10-20 (maintainer): GPU tests gate in the merge queue on the
-  NVIDIA card, because they gate correctness, not trends. The runner is a
-  persistent VM from the `github-runner-vm` module (#6040,
-  `nix/runner/README.md`). That module has no GPU passthrough today: add
-  VFIO passthrough of the NVIDIA card to the guest, with the driver in the
-  guest, and keep the runner registered only to this repository with
-  approval required for every external contributor's workflow, as the
-  README requires.
-- Open (2026-10-25): the [CI epic](/quest/m0/ci/README.md) dropped the VM
-  for the CI host in favor of kernel sandboxing, which conflicts with VFIO
-  passthrough. Recommendation: a container runner with the NVIDIA device
-  nodes and the host driver's libraries bound in. Confirm with the
-  maintainer before starting.
+  NVIDIA card, because they gate correctness, not trends. Keep the runner
+  registered only to this repository with approval required for every
+  external contributor's workflow.
+- Decided 2026-11-15 (maintainer, /quest-complete): ✅ (a) a sandboxed runner
+  container on the CI host, like `nixos`'s existing runner containers, with
+  the NVIDIA device nodes and the host driver's libraries bound in, as
+  [GPU runners](/quest/m9/video-quality/gpu-runners.md) plans for the quality
+  job (rejected: (b) a VFIO-passthrough VM from `github-runner-vm`, which
+  conflicts with the [CI epic](/quest/m0/ci/README.md)'s choice of kernel
+  sandboxing over a VM).
 
 Public API: none. Wire: none.
 
 ## Related
 
 - [Video hardware validation](/quest/m5/video-hardware.md) - hardware paths nothing runs yet
-- [Video quality hardware rows](/quest/m3/video-quality/hardware.md) - the nightly quality job that also needs this runner's GPU
+- [Video quality hardware rows](/quest/m9/video-quality/hardware.md) - the nightly quality job that also needs this runner's GPU

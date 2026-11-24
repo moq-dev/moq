@@ -4,35 +4,38 @@
 //! ends, on every wire, from the publisher directly or through a relay. A range reaching
 //! past the live edge ends once the groups up to its end arrive.
 
+use crate::WithMax as _;
 use crate::support;
+use support::AppendNext;
 
 use std::time::Duration;
 
-use moq_net::track::{Delay, Order, Subscription};
+use moq_net::track::{Order, Subscription};
 use moq_net::{Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
-fn write_group(track: &mut moq_net::track::Producer, sequence: u64) {
-	let mut group = track.append_group().unwrap();
-	assert_eq!(group.sequence, sequence);
+fn write_group(track: &mut moq_net::track::Producer, key: u64) {
+	let mut group = track.append_next().unwrap();
+	assert_eq!(group.start, key);
+	let at = Timestamp::from_millis(key).unwrap();
 	for frame in 0..2u64 {
-		let at = Timestamp::from_millis(sequence * 100 + frame).unwrap();
-		group.write_frame(at, payload(sequence, frame)).unwrap();
+		group.write_frame(at, payload(key, frame)).unwrap();
 	}
 	group.finish().unwrap();
 }
 
-fn payload(sequence: u64, frame: u64) -> Vec<u8> {
-	format!("{sequence}-{frame}").into_bytes()
+fn payload(key: u64, frame: u64) -> Vec<u8> {
+	format!("{key}-{frame}").into_bytes()
 }
 
 /// Each group a one-range read of `range` gets, read whole, until it ends.
@@ -51,8 +54,8 @@ async fn read(sub: &mut moq_net::track::Subscriber) -> Vec<u64> {
 		{
 			frames.push(frame.payload.to_vec());
 		}
-		assert_eq!(frames, [payload(group.sequence, 0), payload(group.sequence, 1)]);
-		read.push(group.sequence);
+		assert_eq!(frames, [payload(group.start, 0), payload(group.start, 1)]);
+		read.push(group.start);
 	}
 	read
 }
@@ -77,8 +80,8 @@ async fn fixture(
 		)
 		.unwrap();
 	broadcast.announce().unwrap();
-	for sequence in 0..3 {
-		write_group(&mut track, sequence);
+	for key in 0..3 {
+		write_group(&mut track, key);
 	}
 
 	let middle = produce_origin(2);
@@ -108,8 +111,8 @@ async fn fixture(
 
 fn one_range(groups: std::ops::Range<u64>) -> Subscription {
 	Subscription::default()
-		.with_range(groups)
-		.with_delay(Delay::default().with_max(None))
+		.with_ranges([support::keys(groups)])
+		.with_max(None)
 		.with_order(Order::Ascending)
 }
 
@@ -141,8 +144,8 @@ async fn straddling(version: Version, relay: bool) {
 	let mut sub = remote.track("video").unwrap().subscribe(one_range(1..5)).await.unwrap();
 	let reading = kio::clock::sim::spawn(async move { read(&mut sub).await });
 	kio::clock::sleep(Duration::from_millis(50)).await;
-	for sequence in 3..6 {
-		write_group(&mut track, sequence);
+	for key in 3..6 {
+		write_group(&mut track, key);
 	}
 	// Arrival order: an older wire sends a backlog in no particular order.
 	let mut read = reading.await.unwrap();
@@ -201,6 +204,62 @@ async fn one_range_reads_back_to_back_each_complete() {
 						failures.push((version, relay, groups, hold));
 					}
 				}
+			}
+		}
+	}
+	assert!(failures.is_empty(), "failed: {failures:?}");
+}
+
+async fn moved_off(version: Version, relay: bool) {
+	let (remote, mut track, _held) = fixture(version, relay).await;
+	let mut open = track.append_next().unwrap();
+	open.write_frame(Timestamp::from_millis(3).unwrap(), payload(3, 0))
+		.unwrap();
+	let mut sub = remote
+		.track("video")
+		.unwrap()
+		.subscribe(one_range(3..10))
+		.await
+		.unwrap();
+	let mut held = kio::clock::timeout(TIMEOUT, sub.recv_group())
+		.await
+		.unwrap()
+		.unwrap()
+		.unwrap();
+	assert_eq!(held.start, 3);
+	let first = kio::clock::timeout(TIMEOUT, held.read_frame())
+		.await
+		.unwrap()
+		.unwrap()
+		.unwrap();
+	assert_eq!(first.payload.to_vec(), payload(3, 0));
+	for key in 4..6 {
+		write_group(&mut track, key);
+	}
+	sub.update(one_range(5..6)).unwrap();
+	kio::clock::sleep(Duration::from_millis(50)).await;
+	open.write_frame(Timestamp::from_millis(3).unwrap(), payload(3, 1))
+		.unwrap();
+	open.finish().unwrap();
+	let mut rest = Vec::new();
+	while let Some(frame) = kio::clock::timeout(TIMEOUT, held.read_frame())
+		.await
+		.expect("read timed out")
+		.unwrap_or_else(|err| panic!("{version} relay={relay}: {err}"))
+	{
+		rest.push(frame.payload.to_vec());
+	}
+	assert_eq!(rest, [payload(3, 1)], "{version} relay={relay}");
+}
+
+/// A group a history read holds stays owed in full once its ranges move off it.
+#[kio::test]
+async fn a_held_history_group_outlives_its_ranges_moving_off_it() {
+	let mut failures = Vec::new();
+	for version in support::every_version() {
+		for relay in [false, true] {
+			if kio::clock::sim::spawn(moved_off(version, relay)).await.is_err() {
+				failures.push((version, relay));
 			}
 		}
 	}

@@ -457,8 +457,8 @@ mod tests {
 
 	fn grant(publish: &str) -> Grant {
 		Grant::new(
-			publish.parse::<moq_pattern::Pattern>().unwrap(),
-			moq_pattern::Patterns::new(),
+			publish.parse::<moq_pattern::Prefix>().unwrap(),
+			moq_pattern::Prefixes::new(),
 		)
 	}
 
@@ -468,19 +468,19 @@ mod tests {
 
 	#[test]
 	fn update_wakes_the_consumer_once_per_change() {
-		let (producer, mut consumer) = Producer::new(grant("a/**"));
-		assert_eq!(consumer.grant(), grant("a/**"));
+		let (producer, mut consumer) = Producer::new(grant("a"));
+		assert_eq!(consumer.grant(), grant("a"));
 		assert!(poll(consumer.changed()).is_pending());
 
-		producer.update(grant("b/**"));
-		assert_eq!(poll(consumer.changed()), Poll::Ready(Ok(grant("b/**"))));
-		assert_eq!(consumer.grant(), grant("b/**"));
+		producer.update(grant("b"));
+		assert_eq!(poll(consumer.changed()), Poll::Ready(Ok(grant("b"))));
+		assert_eq!(consumer.grant(), grant("b"));
 		assert!(poll(consumer.changed()).is_pending());
 	}
 
 	#[test]
 	fn revoke_reaches_the_consumer() {
-		let (producer, mut consumer) = Producer::new(grant("a/**"));
+		let (producer, mut consumer) = Producer::new(grant("a"));
 		assert!(poll(consumer.closed()).is_pending());
 
 		producer.revoke(Reason::Refused);
@@ -490,7 +490,7 @@ mod tests {
 
 	#[test]
 	fn the_session_close_hands_over_byte_totals() {
-		let (producer, consumer) = Producer::new(grant("a/**"));
+		let (producer, consumer) = Producer::new(grant("a"));
 		consumer.close("done", Bytes { sent: 3, received: 5 });
 		assert_eq!(
 			poll(producer.closed()),
@@ -500,7 +500,7 @@ mod tests {
 
 	#[test]
 	fn consumer_clones_hold_the_lease_until_the_last_drop() {
-		let (producer, consumer) = Producer::new(grant("a/**"));
+		let (producer, consumer) = Producer::new(grant("a"));
 		let retained = consumer.clone();
 		drop(consumer);
 		assert!(poll(producer.closed()).is_pending());
@@ -513,7 +513,7 @@ mod tests {
 
 	#[test]
 	fn closing_one_consumer_ends_every_clone() {
-		let (producer, consumer) = Producer::new(grant("a/**"));
+		let (producer, consumer) = Producer::new(grant("a"));
 		let retained = consumer.clone();
 		consumer.close(Reason::Shutdown, Bytes { sent: 3, received: 5 });
 		assert_eq!(poll(retained.closed()), Poll::Ready(Reason::Shutdown));
@@ -525,14 +525,14 @@ mod tests {
 
 	#[test]
 	fn dropping_the_producer_revokes() {
-		let (producer, consumer) = Producer::new(grant("a/**"));
+		let (producer, consumer) = Producer::new(grant("a"));
 		drop(producer);
 		assert_eq!(poll(consumer.closed()), Poll::Ready(Reason::Dropped));
 	}
 
 	#[test]
 	fn dropping_the_consumer_reports_zero_bytes() {
-		let (producer, consumer) = Producer::new(grant("a/**"));
+		let (producer, consumer) = Producer::new(grant("a"));
 		drop(consumer);
 		assert_eq!(
 			poll(producer.closed()),
@@ -542,7 +542,7 @@ mod tests {
 
 	#[test]
 	fn the_session_close_reaches_the_producer_and_the_first_reason_wins() {
-		let (producer, consumer) = Producer::new(grant("a/**"));
+		let (producer, consumer) = Producer::new(grant("a"));
 		assert!(poll(producer.closed()).is_pending());
 
 		let recorded = consumer.close("disconnected", Bytes { sent: 1, received: 2 });
@@ -558,12 +558,12 @@ mod tests {
 
 	#[test]
 	fn a_fixed_lease_only_ends_by_the_holder() {
-		let mut consumer = Consumer::fixed(grant("a/**"));
-		assert_eq!(consumer.grant(), grant("a/**"));
+		let mut consumer = Consumer::fixed(grant("a"));
+		assert_eq!(consumer.grant(), grant("a"));
 		assert!(poll(consumer.changed()).is_pending());
 		assert!(poll(consumer.closed()).is_pending());
 		consumer.revalidate();
-		assert_eq!(consumer.grant(), grant("a/**"));
+		assert_eq!(consumer.grant(), grant("a"));
 		assert!(poll(consumer.changed()).is_pending());
 		assert!(poll(consumer.closed()).is_pending());
 		assert_eq!(consumer.close("done", Bytes::default()), Reason::Session("done".into()));
@@ -571,7 +571,7 @@ mod tests {
 
 	#[test]
 	fn n_nudges_wake_the_producer_once() {
-		let (producer, consumer) = Producer::new(grant("a/**"));
+		let (producer, consumer) = Producer::new(grant("a"));
 		assert!(poll(producer.revalidate_requested()).is_pending());
 
 		for _ in 0..8 {
@@ -588,7 +588,7 @@ mod tests {
 	#[tokio::test]
 	async fn due_follows_cadence_nudges_and_backoff() {
 		tokio::time::pause();
-		let mut grant = grant("a/**");
+		let mut grant = grant("a");
 		grant.revalidate = Some(Duration::from_secs(10));
 		grant.expires = Some(kio::clock::wall() + Duration::from_secs(60));
 		let (producer, consumer) = Producer::new(grant.clone());
@@ -625,7 +625,7 @@ mod tests {
 	#[tokio::test]
 	async fn due_reschedules_an_outstanding_wait_after_update() {
 		tokio::time::pause();
-		let mut grant = grant("a/**");
+		let mut grant = grant("a");
 		grant.revalidate = Some(Duration::from_secs(30));
 		grant.expires = Some(kio::clock::wall() + Duration::from_secs(3600));
 		let (producer, _consumer) = Producer::new(grant.clone());
@@ -645,7 +645,7 @@ mod tests {
 	#[tokio::test]
 	async fn backoff_grows_and_stays_bounded() {
 		tokio::time::pause();
-		let mut grant = grant("a/**");
+		let mut grant = grant("a");
 		grant.revalidate = Some(Duration::from_secs(30));
 		grant.expires = Some(kio::clock::wall() + Duration::from_secs(3600));
 		let (producer, _consumer) = Producer::new(grant);
@@ -662,7 +662,7 @@ mod tests {
 	#[tokio::test]
 	async fn an_unschedulable_cadence_never_rechecks() {
 		tokio::time::pause();
-		let mut grant = grant("a/**");
+		let mut grant = grant("a");
 		grant.revalidate = Some(Duration::MAX);
 		let (producer, _consumer) = Producer::new(grant);
 		tokio::time::advance(Duration::from_secs(3600)).await;
@@ -677,7 +677,7 @@ mod tests {
 	#[tokio::test]
 	async fn due_expires_even_without_a_recheck() {
 		tokio::time::pause();
-		let mut grant = grant("a/**");
+		let mut grant = grant("a");
 		grant.expires = Some(kio::clock::wall() - Duration::from_secs(4));
 		let (producer, _consumer) = Producer::new(grant);
 		let task = tokio::spawn(async move { producer.due(&mut DueTimers::default()).await });

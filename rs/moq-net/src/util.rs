@@ -221,10 +221,10 @@ impl Drop for TaskSet {
 #[cfg(feature = "async")]
 pub(crate) fn poll_unwanted(demand: &mut crate::track::Demand, waiter: &kio::Waiter) -> Poll<()> {
 	// Drain the changes so the waiter stays registered, then read where demand settled.
-	while let Poll::Ready(Ok(Some(_))) = demand.poll_wanted_changed(waiter) {}
+	while let Poll::Ready(Ok(true)) = demand.poll_wanted_changed(waiter) {}
 	match demand.wanted() {
-		None => Poll::Ready(()),
-		Some(_) => Poll::Pending,
+		false => Poll::Ready(()),
+		true => Poll::Pending,
 	}
 }
 

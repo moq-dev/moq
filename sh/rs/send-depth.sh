@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Prove native downstream futures at the default recursion limit on the
-# flake's pinned nightly, so only a pin bump changes the compiler it checks.
+# Prove the session driver Send, its Sync check settled, moq-tokio's spawned
+# session future Send, and native downstream futures Send at the default
+# recursion limit on the flake's pinned nightly, so only a pin bump changes the
+# compiler it checks. `async` is off by default, and without it the lib has no
+# driver and the `send` test compiles to nothing.
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
@@ -32,4 +35,9 @@ export RUSTDOC="$send_sysroot/bin/rustdoc"
 export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-D recursion_depth_exceeding_limit"
 rustc --version
 cargo --version
-cargo check --locked -p moq-net --test send
+# Nightly shares no artifacts with stable target/; isolate its target dir so it
+# never blocks on target/.cargo-lock while stable checks run in parallel.
+target_dir="${CARGO_TARGET_DIR:-$PWD/target}/send-depth"
+cargo check --locked --target-dir "$target_dir" -p moq-net --features async --lib --test send
+# moq-tokio spawns the session future, which must prove Send at the same limit.
+cargo check --locked --target-dir "$target_dir" -p moq-tokio --lib

@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
-import { Duration, Manual } from "@moq/clock";
+import { Duration } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { SessionCode, SessionError } from "./error.ts";
-import { HopSchema } from "./hop.ts";
+import { toHop } from "./hop.ts";
 import { NativeSession } from "./ietf/session.ts";
 import { Subscriber as IetfSubscriber } from "./ietf/subscriber.ts";
 import { Version as Ietf } from "./ietf/version.ts";
@@ -58,7 +59,7 @@ for (const protocol of ["lite", "ietf"] as const) {
 			const transport = limited(mode);
 			const subscriber =
 				protocol === "lite"
-					? new LiteSubscriber(transport.quic, Lite.DRAFT_07, HopSchema.parse(1n))
+					? new LiteSubscriber(transport.quic, Lite.DRAFT_07, toHop(1n))
 					: new IetfSubscriber({ session: new NativeSession(transport.quic, Ietf.DRAFT_18, true) });
 			const broadcast = subscriber.consume(Path.from("room"));
 			const track = broadcast.track("video").subscribe();
@@ -95,7 +96,7 @@ for (const protocol of ["lite", "ietf"] as const) {
 		const transport = limited("open");
 		const subscriber =
 			protocol === "lite"
-				? new LiteSubscriber(transport.quic, Lite.DRAFT_07, HopSchema.parse(1n))
+				? new LiteSubscriber(transport.quic, Lite.DRAFT_07, toHop(1n))
 				: new IetfSubscriber({ session: new NativeSession(transport.quic, Ietf.DRAFT_18, true) });
 		const broadcast = subscriber.consume(Path.from("room"));
 		const cancel = new AbortController();
@@ -129,7 +130,7 @@ for (const operation of ["info", "fetch"] as const) {
 			const clock = new Manual();
 			const installed = clock.install();
 			const transport = limited(mode);
-			const subscriber = new LiteSubscriber(transport.quic, Lite.DRAFT_07, HopSchema.parse(1n));
+			const subscriber = new LiteSubscriber(transport.quic, Lite.DRAFT_07, toHop(1n));
 			const cancel = new AbortController();
 			let failure: unknown;
 			const request = (
@@ -175,9 +176,10 @@ for (const protocol of ["lite", "ietf"] as const) {
 			const clock = new Manual();
 			const installed = clock.install();
 			const transport = limited(mode);
+			// Lite-06 asks on a bidirectional stream of its own; lite-07 asks on its Announce Stream.
 			const subscriber =
 				protocol === "lite"
-					? new LiteSubscriber(transport.quic, Lite.DRAFT_07, HopSchema.parse(1n))
+					? new LiteSubscriber(transport.quic, Lite.DRAFT_06, toHop(1n))
 					: new IetfSubscriber({ session: new NativeSession(transport.quic, Ietf.DRAFT_18, true) });
 			const announced = subscriber.routes();
 			try {
@@ -208,7 +210,7 @@ for (const protocol of ["lite", "ietf"] as const) {
 		const transport = limited("queue");
 		const subscriber =
 			protocol === "lite"
-				? new LiteSubscriber(transport.quic, Lite.DRAFT_07, HopSchema.parse(1n))
+				? new LiteSubscriber(transport.quic, Lite.DRAFT_07, toHop(1n))
 				: new IetfSubscriber({ session: new NativeSession(transport.quic, Ietf.DRAFT_18, true) });
 		const broadcast = subscriber.consume(Path.from("room"));
 		const track = broadcast.track("video").subscribe();
@@ -241,7 +243,7 @@ for (const protocol of ["lite", "ietf"] as const) {
 		} as unknown as WebTransport;
 		const subscriber =
 			protocol === "lite"
-				? new LiteSubscriber(quic, Lite.DRAFT_07, HopSchema.parse(1n))
+				? new LiteSubscriber(quic, Lite.DRAFT_07, toHop(1n))
 				: new IetfSubscriber({ quic, session: new NativeSession(quic, Ietf.DRAFT_18, true) });
 		const broadcast = subscriber.consume(Path.from("room"));
 		const track = broadcast.track("video").subscribe();

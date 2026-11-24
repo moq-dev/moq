@@ -100,8 +100,12 @@ impl MtuDiscovery {
 		}
 	}
 
-	/// Returns the packet number of the in-flight MTU probe, if any
-	pub(crate) fn in_flight_mtu_probe(&self) -> Option<u64> {
+	/// Returns the packet number of the in-flight MTU probe in `space`, if any
+	pub(crate) fn in_flight_mtu_probe(&self, space: SpaceId) -> Option<u64> {
+		// MTU probes are only sent in application data space, whose packet numbers other spaces reuse
+		if space != SpaceId::Data {
+			return None;
+		}
 		match &self.state {
 			Some(EnabledMtuDiscovery {
 				phase: Phase::Searching(search_state),
@@ -123,7 +127,11 @@ impl MtuDiscovery {
 	/// When done notifying of lost packets, [`MtuDiscovery::black_hole_detected`] must be called, to
 	/// ensure the last loss burst is properly processed and to trigger black hole recovery logic if
 	/// necessary.
-	pub(crate) fn on_non_probe_lost(&mut self, pn: u64, len: u16) {
+	pub(crate) fn on_non_probe_lost(&mut self, space: SpaceId, pn: u64, len: u16) {
+		// The detector orders losses against probes by packet number, so only probes' own space
+		if space != SpaceId::Data {
+			return;
+		}
 		self.black_hole_detector.on_non_probe_lost(pn, len);
 	}
 
@@ -543,12 +551,12 @@ mod tests {
 	#[test]
 	fn black_hole_detector_ignores_burst_containing_non_suspicious_packet() {
 		let mut mtud = default_mtud();
-		mtud.on_non_probe_lost(2, 1300);
-		mtud.on_non_probe_lost(3, 1300);
+		mtud.on_non_probe_lost(SpaceId::Data, 2, 1300);
+		mtud.on_non_probe_lost(SpaceId::Data, 3, 1300);
 		assert_eq!(mtud.black_hole_detector.largest_non_probe_lost(), Some(3));
 		assert_eq!(mtud.black_hole_detector.suspicious_loss_burst_count(), 0);
 
-		mtud.on_non_probe_lost(4, 800);
+		mtud.on_non_probe_lost(SpaceId::Data, 4, 800);
 		assert!(!mtud.black_hole_detected(Instant::ZERO));
 		assert_eq!(mtud.black_hole_detector.largest_non_probe_lost(), None);
 		assert_eq!(mtud.black_hole_detector.suspicious_loss_burst_count(), 0);
@@ -557,8 +565,8 @@ mod tests {
 	#[test]
 	fn black_hole_detector_counts_burst_containing_only_suspicious_packets() {
 		let mut mtud = default_mtud();
-		mtud.on_non_probe_lost(2, 1300);
-		mtud.on_non_probe_lost(3, 1300);
+		mtud.on_non_probe_lost(SpaceId::Data, 2, 1300);
+		mtud.on_non_probe_lost(SpaceId::Data, 3, 1300);
 		assert_eq!(mtud.black_hole_detector.largest_non_probe_lost(), Some(3));
 		assert_eq!(mtud.black_hole_detector.suspicious_loss_burst_count(), 0);
 
@@ -588,7 +596,7 @@ mod tests {
 
 		for i in 0..4 {
 			// The packets are never contiguous, so each one has its own burst
-			mtud.on_non_probe_lost(i * 2, 1300);
+			mtud.on_non_probe_lost(SpaceId::Data, i * 2, 1300);
 		}
 
 		assert!(mtud.black_hole_detected(now));
@@ -602,7 +610,7 @@ mod tests {
 		let now = Instant::ZERO;
 
 		for i in 0..2 {
-			mtud.on_non_probe_lost(i, 1300);
+			mtud.on_non_probe_lost(SpaceId::Data, i, 1300);
 			assert!(!mtud.black_hole_detected(now));
 		}
 	}
@@ -614,7 +622,7 @@ mod tests {
 
 		for i in 0..4 {
 			// The packets are never contiguous, so each one has its own burst
-			mtud.on_non_probe_lost(i * 2, 1300);
+			mtud.on_non_probe_lost(SpaceId::Data, i * 2, 1300);
 		}
 
 		assert!(mtud.black_hole_detected(now));
@@ -790,7 +798,9 @@ mod tests {
 
 			// "Send" next probe
 			assert!(result.is_some());
-			assert!(mtud.in_flight_mtu_probe().is_some());
+			assert!(mtud.in_flight_mtu_probe(SpaceId::Data).is_some());
+			// Other spaces number their packets from 0 too, so none of theirs is the probe
+			assert_eq!(mtud.in_flight_mtu_probe(SpaceId::Handshake), None);
 
 			// Nothing else to send while the probe is in-flight
 			assert_matches!(mtud.poll_transmit(now, other_pn), None);

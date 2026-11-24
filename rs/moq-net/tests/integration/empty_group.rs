@@ -3,10 +3,12 @@
 //! A group finished with no frames reaches the subscriber as an empty group.
 
 use crate::support;
+use support::AppendNext;
+use support::AtStart;
 
 use std::time::Duration;
 
-use moq_net::{Timestamp, Version, origin};
+use moq_net::{Version, origin};
 use support::harness::{peer, subscribed};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -16,12 +18,19 @@ fn timed() -> moq_net::track::Info {
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-const VERSIONS: &[&str] = &["moq-lite-06", "moq-transport-18", "moq-transport-22"];
+const VERSIONS: &[&str] = &[
+	"moq-lite-06",
+	"moq-transport-18",
+	"moq-transport-22",
+	"moq-transport-23",
+];
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 #[kio::test]
@@ -49,28 +58,28 @@ async fn an_empty_group_arrives_empty() {
 			.expect("subscribe");
 		subscribed(&track).await;
 
-		track.append_group().unwrap().finish().unwrap();
+		track.append_next().unwrap().finish().unwrap();
 		let mut empty = kio::clock::timeout(TIMEOUT, sub.recv_group())
 			.await
 			.unwrap_or_else(|_| panic!("{version}: the empty group was dropped"))
 			.unwrap()
 			.expect("a group");
-		assert_eq!(empty.sequence, 0, "{version}");
+		assert_eq!(empty.start, 0, "{version}");
 		let frame = kio::clock::timeout(TIMEOUT, empty.read_frame())
 			.await
 			.expect("frame timeout")
 			.unwrap();
 		assert!(frame.is_none(), "{version}: the empty group carried a frame");
 
-		let mut group = track.append_group().unwrap();
-		group.write_frame(Timestamp::ZERO, &b"ok"[..]).unwrap();
+		let mut group = track.append_next().unwrap();
+		group.write_frame(group.at_start(), &b"ok"[..]).unwrap();
 		group.finish().unwrap();
 		let mut next = kio::clock::timeout(TIMEOUT, sub.recv_group())
 			.await
 			.expect("group timeout")
 			.unwrap()
 			.expect("a group");
-		assert_eq!(next.sequence, 1, "{version}");
+		assert_eq!(next.start, 1, "{version}");
 		let frame = next.read_frame().await.unwrap().expect("a frame");
 		assert_eq!(frame.payload.as_ref(), b"ok", "{version}");
 	}

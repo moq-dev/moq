@@ -17,9 +17,11 @@ on:
 permissions:
   contents: read
 
+# `queue: max` keeps a manual dispatch from cancelling a pending tag publish,
+# or the reverse: the default queue holds one pending run per group.
 concurrency:
   group: release-kt-ffi
-  cancel-in-progress: false
+  queue: max
 
 jobs:
   ffi:
@@ -64,7 +66,7 @@ jobs:
 
       - uses: ./.github/actions/just
 
-      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: temurin
           java-version: "17"

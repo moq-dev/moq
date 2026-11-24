@@ -10,7 +10,6 @@ from moq_ffi import (
     MoqClient,
     MoqClientConfig,
     MoqCongestionControl,
-    moq_qlog_supported,
     moq_versions,
 )
 
@@ -35,11 +34,6 @@ class _Connected(NamedTuple):
 def versions() -> list[str]:
     """The protocol versions offered by default, most preferred first, as ``versions`` spells them."""
     return moq_versions()
-
-
-def qlog_supported() -> bool:
-    """Whether this build can write qlog traces; ``qlog`` raises `moq.Error` otherwise."""
-    return moq_qlog_supported()
 
 
 class Client:

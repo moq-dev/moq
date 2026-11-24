@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { HopSchema } from "../hop.ts";
+import { ProtocolViolation } from "../error.ts";
+import { toHop } from "../hop.ts";
 import { encodeVarint, Reader, Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
 import { ProbeLevel, Role, Setup } from "./setup.ts";
@@ -10,6 +11,7 @@ import { Version } from "./version.ts";
 const PARAM_PROBE = 0x1n;
 const PARAM_PATH = 0x2n;
 const PARAM_ROLE = 0x3n;
+const PARAM_COST = 0x4n;
 const PARAM_HOP = 0x5n;
 const PARAM_IMPLEMENTATION = 0x6n;
 
@@ -138,7 +140,7 @@ test("unknown probe level saturates to Increase", async () => {
 });
 
 test("SETUP with hop round-trips", async () => {
-	const hop = HopSchema.parse(42n);
+	const hop = toHop(42n);
 	const got = await roundTrip(new Setup({ hop }));
 	expect(got.hop).toBe(hop);
 });
@@ -149,21 +151,33 @@ test("hop 0 decodes as absent", async () => {
 	expect(got.hop).toBeUndefined();
 });
 
-test("lite-07 Node ID is never 0 or qualified", async () => {
-	for (const id of [0n, (1n << 63n) | 7n]) {
-		await expect(decodeParam(PARAM_HOP, encodeVarint(id, Version.DRAFT_07), Version.DRAFT_07)).rejects.toThrow();
-	}
-	const qualified = new Setup({ hop: HopSchema.parse((1n << 63n) | 7n) });
-	await expect(bytes((w) => qualified.encode(w, Version.DRAFT_07), Version.DRAFT_07)).rejects.toThrow();
+// An endpoint declares no Node ID, so it sends none, and reads a peer's only to check its form:
+// a non-zero Node ID, then its Marked.
+test("lite-07 SETUP sends no Node ID and checks the one it is sent", async () => {
+	const v = Version.DRAFT_07;
+	const sent = await roundTrip(new Setup({ hop: toHop(7n) }), v);
+	expect(sent.hop).toBeUndefined();
+
+	const node = (id: bigint, marked?: number) =>
+		concat([encodeVarint(id, v), ...(marked === undefined ? [] : [new Uint8Array([marked])])]);
+	expect((await decodeParam(PARAM_HOP, node(7n, 0), v)).hop).toBeUndefined();
+	await expect(decodeParam(PARAM_HOP, node(0n, 0), v)).rejects.toThrow();
+	await expect(decodeParam(PARAM_HOP, node(7n), v)).rejects.toThrow();
+	// A session's node is never a marked identity.
+	await expect(decodeParam(PARAM_HOP, node(7n, 1), v)).rejects.toThrow();
+	await expect(decodeParam(PARAM_HOP, concat([node(7n, 0), new Uint8Array([0])]), v)).rejects.toThrow();
+});
+
+test("lite-07 SETUP refuses a zero link cost, which older versions ignore", async () => {
+	const cost = (value: bigint, v: Version) => decodeParam(PARAM_COST, encodeVarint(value, v), v);
+	await expect(cost(0n, Version.DRAFT_07)).rejects.toThrow(ProtocolViolation);
+	await cost(5n, Version.DRAFT_07);
+	await cost(0n, Version.DRAFT_06);
 });
 
 test("SETUP with implementation round-trips", async () => {
-	const got = await roundTrip(
-		new Setup({ hop: HopSchema.parse(7n), implementation: "moq-ffi/0.4.12 moq-net-rs/0.3.10" }),
-		Version.DRAFT_07,
-	);
+	const got = await roundTrip(new Setup({ implementation: "moq-ffi/0.4.12 moq-net-rs/0.3.10" }), Version.DRAFT_07);
 	expect(got.implementation).toBe("moq-ffi/0.4.12 moq-net-rs/0.3.10");
-	expect(got.hop).toBe(HopSchema.parse(7n));
 });
 
 test("an empty implementation is omitted rather than encoded", async () => {
@@ -239,20 +253,17 @@ test("SETUP refuses an empty token", async () => {
 	await expect(Setup.decode(new Reader(undefined, wire, Version.DRAFT_07), Version.DRAFT_07)).rejects.toThrow();
 });
 
-test("SETUP route key round-trips on lite-07 only, at exactly 96 bytes", async () => {
-	const proof = new Uint8Array(96).fill(7);
-	const msg = new Setup({ routeKey: proof });
-	const wire = await bytes((w) => msg.encode(w, Version.DRAFT_07), Version.DRAFT_07);
-	const got = await Setup.decode(new Reader(undefined, wire, Version.DRAFT_07), Version.DRAFT_07);
-	expect(got.routeKey).toEqual(proof);
-
-	await expect(bytes((w) => msg.encode(w, Version.DRAFT_06), Version.DRAFT_06)).rejects.toThrow();
-	// An older version ignores the parameter like any unknown one.
-	expect((await decodeParam(0x8n, proof, Version.DRAFT_06)).routeKey).toBeUndefined();
-
-	const short = new Setup({ routeKey: new Uint8Array(95) });
-	await expect(bytes((w) => short.encode(w, Version.DRAFT_07), Version.DRAFT_07)).rejects.toThrow();
-	await expect(decodeParam(0x8n, new Uint8Array(95), Version.DRAFT_07)).rejects.toThrow();
+test("SETUP carries no Hop ID on lite-07, and reads past a peer's Node ID", async () => {
+	const msg = new Setup({ hop: toHop(7n) });
+	// An endpoint forwards nothing, so it declares no Node ID.
+	expect([...(await bytes((w) => msg.encode(w, Version.DRAFT_07), Version.DRAFT_07))]).toEqual([0x01, 0x00]);
+	// A forwarding peer's Node ID and Marked.
+	expect((await decodeParam(0x5n, new Uint8Array([7, 0]), Version.DRAFT_07)).hop).toBeUndefined();
+	// A Node ID of 0 names nobody, Marked must follow it, a session's node is never marked, and
+	// nothing may follow that.
+	for (const value of [[0, 0], [7], [7, 1], [7, 2], [7, 0, 1]]) {
+		await expect(decodeParam(0x5n, new Uint8Array(value), Version.DRAFT_07)).rejects.toThrow();
+	}
 });
 
 test("older SETUP versions ignore the unknown Implementation parameter before parsing it", async () => {

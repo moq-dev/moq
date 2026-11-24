@@ -1,4 +1,6 @@
 /** Sweep failed group sends over independent publishers and subscribers. */
+
+import { defined } from "../src/defined.test-util.ts";
 import { randomHop } from "../src/hop.ts";
 import { Publisher } from "../src/lite/publisher.ts";
 import { decodeSubscribeResponseMaybe, Subscribe } from "../src/lite/subscribe.ts";
@@ -7,7 +9,7 @@ import { createMockTransportPair, textFrame } from "../src/mock.ts";
 import { Producer as OriginProducer } from "../src/origin.ts";
 import * as Path from "../src/path.ts";
 import { Stream } from "../src/stream.ts";
-import { Timescale } from "../src/time.ts";
+import { Timescale, Timestamp } from "../src/time.ts";
 
 const groups = 128;
 const counts = [1, 4, 16];
@@ -24,10 +26,11 @@ try {
 					const origin = new OriginProducer();
 					const broadcastRoute = origin.route(Path.from("bench"));
 					const broadcast = broadcastRoute.broadcast;
-					const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+					const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 					for (let sequence = 0n; sequence < BigInt(groups); sequence++) {
 						const group = track.createGroup(sequence);
-						group.writeFrame(textFrame("frame"));
+						// A timed group holds frames from its start up to the next group's.
+						group.writeFrame(textFrame("frame", Timestamp.fromMillis(Number(sequence))));
 						group.finish();
 					}
 					track.finish();
@@ -64,7 +67,7 @@ try {
 								server,
 							);
 							try {
-								// Lite-07 keeps the Subscribe Stream open past SUBSCRIBE_FINISH, so stop once every
+								// Lite-07 keeps the Subscribe Stream open past SUBSCRIBE_END, so stop once every
 								// group is accounted for rather than waiting for its end.
 								let dropped = 0;
 								while (dropped < groups) {

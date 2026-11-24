@@ -36,17 +36,23 @@ impl Held {
 					.create_track(format!("bench{i}"), moq_net::track::Info::default().with_max_age(None))
 					.unwrap();
 				// A budget wide enough that no cached group is skipped as stale.
-				let mut reader = track.subscribe(
-					track::Subscription::default()
-						.with_delay(track::Delay::default().with_max(Duration::from_secs(3600))),
-				);
+				let mut reader = track.subscribe(track::Subscription::default().with_ranges([track::Range::from(
+					track::Start::Live {
+						min: Some(Duration::from_secs(3600)),
+						max: Some(Duration::from_secs(3600)),
+					},
+				)]));
 				track.start_at(0).unwrap();
 				let end = track::Position::group(groups as u64 + 1);
 				moq_net::fuzz::received(&track);
-				track.finish_at(end, None).unwrap();
+				track.finish_at(end).unwrap();
 				// Group 0 never arrives: the hole that holds the reader.
-				for sequence in 1..=groups as u64 {
-					track.create_group(group::Info { sequence }).unwrap().finish().unwrap();
+				for key in 1..=groups as u64 {
+					track
+						.create_group(group::Info { start: key })
+						.unwrap()
+						.finish()
+						.unwrap();
 				}
 				for _ in 0..groups {
 					assert!(matches!(reader.poll_recv_group(&waiter), Poll::Ready(Ok(Some(_)))));

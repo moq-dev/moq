@@ -32,8 +32,9 @@ in sync at the latency you ask for.
 | `url`, `name` | Relay URL (with `?jwt=` if needed) and broadcast name. |
 | `versions` | Protocol versions to offer, most preferred first, comma-separated like `moq-transport-18,moq-lite-06`. Every stable version by default. |
 | `paused`, `muted`, `volume` | The usual player controls. |
-| `delay` | How far playback trails the live edge: `"auto"` (the default, sized from how late frames arrive; see [audio jitter](/concept/audio-jitter)), a duration like `"300ms"`, or `"instant"` to paint video as it decodes, with no audio. |
+| `delay` | How far playback trails the live edge: `"auto"` (the default, sized from how late frames arrive, at most 10 s; see [audio jitter](/concept/audio-jitter)), a duration like `"300ms"`, or `"instant"` to paint video as it decodes, with no audio. |
 | `lookahead` | How far ahead of the live edge media may run; see [buffered playback](#buffered-playback). |
+| `stretch` | How far audio may trail the clock before it skips onto it: a duration like `"200ms"` (the default), or `"0"` to turn the time stretch off; see [catching up](#catching-up). |
 | `captions` | The caption track to show. |
 | `visible` | Only download video while the element is on screen (or near it). |
 | `backend` | How the canvas is drawn; see [@moq/video](/lib/js/video). `auto` (default), `webgpu`, or `2d`. |
@@ -62,22 +63,6 @@ The failing track closes its subscription and stops decoding. Select another
 source or rendition to clear the failure; the player does not resubscribe to
 broken media automatically.
 
-A video rendition encoded with intra refresh has no keyframes, and its catalog
-`warmup` says how long a decoder takes to clean up after joining. The player
-decodes such a rendition twice: one decoder holds your delay and may show
-refresh stripes after a join or a skip, while a second starts one group earlier
-and tolerates `warmup` more lateness, so its picture is clean. The clean
-picture shows whenever it has caught up. Each decoder costs its own CPU and
-decoder memory, and both share one subscription. A rendition without `warmup`
-uses one decoder.
-
-An H.264 group of such a rendition opens on a recovery point that is not an
-IDR. Chromium's WebCodecs refuses to open a decoder on that picture: it wants
-an IDR or a recovery point that counts zero frames. So when a decoder opens on
-one, the player inserts a second recovery point with a zero count before its
-first slice. The slices are untouched; the stripes clear as the sweep
-completes.
-
 `el.broadcast.out.status` is `connecting`, `offline`, `loading`, `live`, `error`, or `unsupported`.
 It reads `connecting` until a session could have announced the broadcast: while the
 connection dials, redials, or was refused (`el.connection.error` says why), and until the
@@ -88,9 +73,11 @@ and the player does not ask again until it is pointed elsewhere or re-enabled.
 
 The broadcast's announcement is its online signal: the player starts when a
 route serving the name is announced, goes `offline` when none is left, and
-waits for one to return for as long as it is mounted. A catalog track that
-ends cleanly keeps playing until the broadcast ends, so a viewer drains a
-finished broadcast's tail. When the exact route
+waits for one to return for as long as it is mounted. A publisher that stops
+cleanly finishes its catalog and media tracks: the player plays the tail it
+received, holding the last picture without a buffering spinner, then reads
+`offline` (`el.video.out.ended` and `el.audio.out.ended` turn true) even while the
+relay still serves the finished broadcast to late subscribers. When the exact route
 ends while a covering prefix still serves the name, it moves to the prefix. A
 name outside the origin's scope is an `error`. A restarted publisher at the same name is followed at
 once, with a fresh catalog, and video, audio, and the clock start over on its
@@ -204,6 +191,12 @@ Pass a signal from [`@moq/signals`](/lib/js/signals) for any control you want
 to change later, such as `audio.muted` or `delay`. `Player` is the pipeline inside
 `<moq-watch>`; its parts are exported for custom composition.
 
+`video.target`'s `width` and `height` cap the picture and, unless the box is
+square, prefer the renditions shown in its orientation, falling back to the
+other only when none can be decoded. `<moq-watch>` sets them from its rendered
+size, so rotating a phone switches between a broadcast's portrait and landscape
+renditions.
+
 `viewer.viewers` claims the broadcast's share of the connection's receive
 estimate (see [`connection.viewers`](/lib/js/net)). Its ceiling follows the
 catalog: the rate at which selection would pick the best enabled video
@@ -218,16 +211,30 @@ leave the connection's estimate unclaimed. Without a claim, video selects the be
 `video.target` allows. To stop the relay probing while still adapting, keep the claim and call
 `connection.viewers.setTarget(0)`.
 
+## Catching up
+
+After a stall, video shows each late frame as it arrives and is live again at
+once. Audio cannot skip without losing what arrives late, so it slows down
+slightly when the audio received ahead of it runs low, falls behind the clock,
+and speeds back up once it recovers until it is back on it, never more than 10%
+off real time, whatever the content. Audio that trails
+by more than `stretch`, 200 ms by default, skips onto the clock as video does,
+so a long stall costs one skip instead of seconds of lag, and audio that leads
+it by as much, as when the delay rises, waits for it in silence.
+
+`stretch="0"` turns the time stretch off: received audio plays unaltered, late
+audio is skipped, an underrun is silence, and drift between the publisher's
+clock and the device's is corrected by a small skip or pad.
+
 ## Buffered playback
 
-By default the player minimizes latency: audio plays at the delay, slows down
-slightly when the audio received ahead of it runs low, speeds back up once it
-recovers, and skips ahead only audio trailing by more than the subscription
-still delivers. Content produced faster than real time, such as a TTS
+By default the player minimizes latency: playback trails the live edge by the
+delay, and audio catches up after a stall as [above](#catching-up). Content produced faster than real time, such as a TTS
 response emitted in one burst with future timestamps, wants the opposite. Set
 `lookahead` to how far ahead it may run and it plays through at the encoded pace.
 If a stall leaves audio behind, it catches up by playing faster, as live
-playback does, and skips only what trails by more than the lookahead:
+playback does, and skips only what trails by more than the larger of the
+lookahead and `stretch`; a zero `stretch` still turns the stretch off:
 
 ```html
 <moq-watch url="..." name="bot/tts.hang" delay="100ms" lookahead="30s"></moq-watch>
@@ -237,8 +244,9 @@ playback does, and skips only what trails by more than the lookahead:
 `delay`, since playback only skips ahead once media sits more than
 `delay + lookahead` past the playhead.
 
-Durations need a unit; a bare number is rejected. From script, the `delay` and
-`lookahead` properties take a `Duration` from `@moq/clock`, such as
+Durations need a unit; a bare number other than zero is rejected. From script,
+the `delay`, `lookahead`, and `stretch` properties take a `Duration` from
+`@moq/clock`, such as
 `el.delay = Duration.millis(300)`. Audio holds the lookahead
 as encoded frames, so a large one is cheap; video waits as decoded pictures,
 which hold decoder memory, so a long video lookahead is not. The first video

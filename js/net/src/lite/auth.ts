@@ -1,5 +1,5 @@
 import { Unsupported } from "../auth.ts";
-import { type AuthWire, decodePatterns, encodePatterns, type WireGrant, type WireReply } from "../auth_session.ts";
+import { type AuthWire, decodePrefixes, encodePrefixes, type WireGrant, type WireReply } from "../auth_session.ts";
 import { ProtocolViolation, SessionCode, SessionError } from "../error.ts";
 import type * as Path from "../path.ts";
 import { type Reader, Stream, type Writer } from "../stream.ts";
@@ -49,20 +49,20 @@ export class AuthMessage {
 export class AuthOk {
 	static id = 0;
 
-	publish: Path.Patterns;
-	subscribe: Path.Patterns;
+	publish: Path.Prefixes;
+	subscribe: Path.Prefixes;
 	/** Milliseconds until the grant lapses, or undefined for never. */
 	expires?: number;
 
-	constructor(publish: Path.Patterns, subscribe: Path.Patterns, expires?: number) {
+	constructor(publish: Path.Prefixes, subscribe: Path.Prefixes, expires?: number) {
 		this.publish = publish;
 		this.subscribe = subscribe;
 		this.expires = expires;
 	}
 
 	async #encode(w: Writer) {
-		await encodePatterns(w, this.publish);
-		await encodePatterns(w, this.subscribe);
+		await encodePrefixes(w, this.publish);
+		await encodePrefixes(w, this.subscribe);
 		// 0 means never, so a lapsed grant rounds up to the smallest real expiry.
 		const expires =
 			this.expires === undefined ? 0 : Math.min(Math.max(Math.ceil(this.expires), 1), Number.MAX_SAFE_INTEGER);
@@ -70,8 +70,8 @@ export class AuthOk {
 	}
 
 	static async #decode(r: Reader): Promise<AuthOk> {
-		const publish = await decodePatterns(r);
-		const subscribe = await decodePatterns(r);
+		const publish = await decodePrefixes(r);
+		const subscribe = await decodePrefixes(r);
 		const expires = await r.u53();
 		return new AuthOk(publish, subscribe, expires === 0 ? undefined : expires);
 	}
@@ -104,6 +104,19 @@ export class AuthError {
 	constructor(code: number, reason: string) {
 		this.code = code;
 		this.reason = reason;
+	}
+
+	/**
+	 * Whether the code says the acceptor failed to decide (INTERNAL_ERROR, TOO_MANY_REQUESTS, or
+	 * CONTROL_MESSAGE_TIMEOUT), so the presenter presents the token again after a backoff. Any
+	 * other code is the acceptor's verdict.
+	 */
+	undecided(): boolean {
+		return (
+			this.code === SessionCode.Internal ||
+			this.code === SessionCode.TooManyRequests ||
+			this.code === SessionCode.Timeout
+		);
 	}
 
 	async #encode(w: Writer) {
@@ -192,6 +205,7 @@ export class LiteAuthWire implements AuthWire {
 				reply.code === SessionCode.Unsupported
 					? new Unsupported(reply.reason)
 					: new SessionError(reply.code as SessionCode, { reason: reply.reason }),
+			undecided: reply.undecided(),
 		};
 	}
 

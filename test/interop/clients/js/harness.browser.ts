@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
+import { worklet } from "@moq/common/vite-plugin-worklet";
 import type MoqWatch from "@moq/watch/element";
 import type { Locator } from "playwright";
 import { createServer } from "vite";
-import { worklet } from "../../../../js/common/vite-plugin-worklet";
 import { launch, open, pause, waitFor } from "./harness";
 
 test("pause activates its button when a canvas intercepts pointer input", async () => {
@@ -156,6 +156,71 @@ test("watch mute and volume are independent in either attribute or property orde
 			expect(result.zero).toEqual({ volume: 0, muted: false, enabled: false });
 			expect(result.zeroAfterUnmute).toBe(0);
 			expect(result.zeroEnabledAfterUnmute).toBe(false);
+		}
+	} finally {
+		await browser.close();
+		await server.close();
+	}
+}, 30_000);
+
+test("watch video and audio priority follow their attribute and property, and refuse a value off the wire range", async () => {
+	const server = await createServer({
+		configFile: false,
+		root: `${import.meta.dir}/watch-ui`,
+		plugins: [worklet()],
+		server: { host: "127.0.0.1", port: 0 },
+	});
+	await server.listen();
+	const browser = await launch();
+	try {
+		const page = await browser.newPage();
+		await page.goto(server.resolvedUrls?.local[0] ?? "");
+		await page.waitForFunction(() => !!customElements.get("moq-watch"));
+		const results = await page.evaluate(async () => {
+			const settle = async () => {
+				for (let i = 0; i < 5; i++) await new Promise<void>((resolve) => queueMicrotask(resolve));
+			};
+			const results = [];
+			for (const kind of ["video", "audio"] as const) {
+				document.body.insertAdjacentHTML("beforeend", `<moq-watch ${kind}-priority="-128"></moq-watch>`);
+				const watch = document.body.lastElementChild as MoqWatch;
+				const read = () => ({
+					property: watch[`${kind}Priority`],
+					attribute: watch.getAttribute(`${kind}-priority`),
+					decoder: watch[kind].in.priority.peek(),
+				});
+				await settle();
+				const attribute = read();
+				watch[`${kind}Priority`] = 127;
+				await settle();
+				const property = read();
+				const refused = [128, -129, 1.5, Number.NaN].map((value) => {
+					try {
+						watch[`${kind}Priority`] = value;
+						return false;
+					} catch {
+						return true;
+					}
+				});
+				await settle();
+				const kept = read();
+				watch.removeAttribute(`${kind}-priority`);
+				await settle();
+				results.push({ kind, attribute, property, refused, kept, absent: read() });
+				watch.remove();
+				watch.signals.close();
+			}
+			return results;
+		});
+		expect(results.map((result) => result.kind)).toEqual(["video", "audio"]);
+		for (const result of results) {
+			expect(result.attribute).toEqual({ property: -128, attribute: "-128", decoder: -128 });
+			expect(result.property).toEqual({ property: 127, attribute: "127", decoder: 127 });
+			expect(result.refused).toEqual([true, true, true, true]);
+			expect(result.kept).toEqual(result.property);
+			// Without the attribute, the track takes hang's default for its kind and reflects it.
+			const fallback = result.kind === "video" ? 60 : 80;
+			expect(result.absent).toEqual({ property: fallback, attribute: `${fallback}`, decoder: fallback });
 		}
 	} finally {
 		await browser.close();

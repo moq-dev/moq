@@ -7,7 +7,7 @@
  */
 
 import { Duration } from "@moq/clock";
-import type * as Catalog from "@moq/hang/catalog";
+import * as Catalog from "@moq/hang/catalog";
 import * as Moq from "@moq/net";
 import { Derived, Effect, Signal } from "@moq/signals";
 import type * as Audio from "./audio";
@@ -15,7 +15,7 @@ import { type Broadcast, CATALOG_FORMATS, type CatalogFormat } from "./broadcast
 import { formatDuration, parseDuration } from "./duration";
 import { checkName, Echo } from "./echo";
 import { Player } from "./player";
-import type { Delay, Sync } from "./sync";
+import { type Delay, STRETCH, type Sync } from "./sync";
 import type * as Text from "./text";
 import type * as Video from "./video";
 
@@ -59,6 +59,8 @@ const OBSERVED = [
 	"muted",
 	"visible",
 	"backend",
+	"video-priority",
+	"audio-priority",
 	"follow",
 	// Renamed to `follow`, observed only to refuse it.
 	"announced",
@@ -66,6 +68,7 @@ const OBSERVED = [
 	"buffer",
 	"delay",
 	"lookahead",
+	"stretch",
 	"catalog-format",
 	"captions",
 	"echo",
@@ -89,6 +92,16 @@ function parseBackend(value: string | null): Video.Backend {
 	throw invalidAttribute("backend", value, '"auto", "webgpu", or "2d"');
 }
 
+// Parse the `video-priority` or `audio-priority` attribute: a signed byte, or hang's default for
+// the kind when absent.
+function parsePriority(kind: "video" | "audio", value: string | null): number {
+	if (value === null) return Catalog.PRIORITY[kind];
+	const trimmed = value.trim();
+	const priority = Number(trimmed);
+	if (/^-?\d+$/.test(trimmed) && priority >= -128 && priority <= 127) return priority;
+	throw invalidAttribute(`${kind}-priority`, value, "an integer from -128 to 127");
+}
+
 // Parse the `delay` attribute: "auto" (adaptive), "instant" (no buffer, no pacing), or a duration.
 function parseDelay(value: string | null): Delay {
 	if (value === null) return "auto";
@@ -105,6 +118,14 @@ function parseLookahead(value: string | null): Duration {
 	const parsed = parseDuration(value);
 	if (parsed !== undefined) return parsed;
 	throw invalidAttribute("lookahead", value, 'a duration like "30s"');
+}
+
+// Parse the `stretch` attribute: a duration, or the default when absent.
+function parseStretch(value: string | null): Duration {
+	if (value === null) return STRETCH;
+	const parsed = parseDuration(value);
+	if (parsed !== undefined) return parsed;
+	throw invalidAttribute("stretch", value, 'a duration like "200ms", or "0" to turn it off');
 }
 
 // Parse the `echo` attribute: the viewer's feedback name, one visible path segment, or undefined when absent.
@@ -150,9 +171,9 @@ class Enabled extends Signal<boolean> {
 		super(false);
 	}
 
-	override set(value: boolean, notify?: boolean): void {
+	override set(value: boolean, force?: true): void {
 		this.#wanted = value;
-		super.set(value && this.#running, notify);
+		super.set(value && this.#running, force);
 	}
 
 	run(running: boolean): void {
@@ -209,6 +230,8 @@ export default class MoqWatch extends HTMLElement {
 		delay: new Signal<Delay>("auto"),
 		// Future-dated media held beyond the live edge before playback skips ahead.
 		lookahead: new Signal<Duration>(Duration.ZERO),
+		// How far audio may trail the clock before it skips onto it; zero turns the time stretch off.
+		stretch: new Signal<Duration>(STRETCH),
 		video: {
 			// The desired video rendition (resolution/bitrate cap).
 			target: new Signal<Video.Target | undefined>(undefined),
@@ -216,12 +239,16 @@ export default class MoqWatch extends HTMLElement {
 			visible: new Signal<Video.Visible>("20%"),
 			// Which graphics API paints the canvas. See {@link Video.Backend}.
 			backend: new Signal<Video.Backend>("auto"),
+			// Delivery priority of the video track against the connection's other subscriptions.
+			priority: new Signal<number>(Catalog.PRIORITY.video),
 		},
 		audio: {
 			// The desired audio rendition, or automatic selection when unset.
 			target: new Signal<Audio.Target | undefined>(undefined),
 			volume: new Signal(0.5),
 			muted: new Signal(false),
+			// Delivery priority of the audio track against the connection's other subscriptions.
+			priority: new Signal<number>(Catalog.PRIORITY.audio),
 		},
 		viewer: {
 			// The viewer ceiling in bits per second instead of the catalog's, or 0 to claim none.
@@ -362,6 +389,12 @@ export default class MoqWatch extends HTMLElement {
 		);
 		this.signals.run((effect) => this.#reflect(effect, "visible", effect.get(this.controls.video.visible)));
 		this.signals.run((effect) => this.#reflect(effect, "backend", effect.get(this.controls.video.backend)));
+		this.signals.run((effect) =>
+			this.#reflect(effect, "video-priority", effect.get(this.controls.video.priority).toString()),
+		);
+		this.signals.run((effect) =>
+			this.#reflect(effect, "audio-priority", effect.get(this.controls.audio.priority).toString()),
+		);
 		this.signals.run((effect) => this.#reflect(effect, "follow", effect.get(this.#follow) ? "" : "false"));
 		this.signals.run((effect) => this.#reflect(effect, "catalog-format", effect.get(this.#catalogFormat)));
 		this.signals.run((effect) => this.#reflect(effect, "captions", effect.get(this.controls.text.target)));
@@ -372,6 +405,9 @@ export default class MoqWatch extends HTMLElement {
 		});
 		this.signals.run((effect) =>
 			this.#reflect(effect, "lookahead", formatDuration(effect.get(this.controls.lookahead))),
+		);
+		this.signals.run((effect) =>
+			this.#reflect(effect, "stretch", formatDuration(effect.get(this.controls.stretch))),
 		);
 
 		// Track the element's rendered size and feed it into the rendition picker,
@@ -442,6 +478,8 @@ export default class MoqWatch extends HTMLElement {
 			else if (name === "muted") this.muted = parseBoolean(newValue, false);
 			else if (name === "visible") this.visible = parseVisible(newValue);
 			else if (name === "backend") this.backend = parseBackend(newValue);
+			else if (name === "video-priority") this.videoPriority = parsePriority("video", newValue);
+			else if (name === "audio-priority") this.audioPriority = parsePriority("audio", newValue);
 			else if (name === "follow") this.follow = parseBoolean(newValue, true);
 			else if (name === "announced" && newValue !== null)
 				throw new Error("moq-watch: `announced` was renamed to `follow`");
@@ -451,6 +489,7 @@ export default class MoqWatch extends HTMLElement {
 			else if (name === "buffer") this.#accept("buffer");
 			else if (name === "delay") this.delay = parseDelay(newValue);
 			else if (name === "lookahead") this.lookahead = parseLookahead(newValue);
+			else if (name === "stretch") this.stretch = parseStretch(newValue);
 			else if (name === "catalog-format") this.catalogFormat = parseCatalogFormat(newValue);
 			else if (name === "captions") this.captions = newValue || undefined;
 			else if (name === "echo") this.echo = parseEcho(newValue);
@@ -574,6 +613,36 @@ export default class MoqWatch extends HTMLElement {
 		this.#accept("backend");
 	}
 
+	/**
+	 * Delivery priority of the video track, mirrored by the `video-priority` attribute: an integer in
+	 * `-128..=127`, higher sent first, defaulting to `Catalog.PRIORITY.video`.
+	 *
+	 * Priority orders every subscription on a connection, so it ranks this video against the other
+	 * elements sharing the relay URL as well as against this element's audio and captions.
+	 */
+	get videoPriority(): number {
+		return this.controls.video.priority.peek();
+	}
+
+	set videoPriority(value: number) {
+		this.controls.video.priority.set(parsePriority("video", String(value)));
+		this.#accept("video-priority");
+	}
+
+	/**
+	 * Delivery priority of the audio track, mirrored by the `audio-priority` attribute: an integer in
+	 * `-128..=127`, higher sent first, defaulting to `Catalog.PRIORITY.audio`. It ranks as
+	 * {@link videoPriority} does.
+	 */
+	get audioPriority(): number {
+		return this.controls.audio.priority.peek();
+	}
+
+	set audioPriority(value: number) {
+		this.controls.audio.priority.set(parsePriority("audio", String(value)));
+		this.#accept("audio-priority");
+	}
+
 	/** Whether to follow the broadcast's announcements, waiting for one before subscribing, mirrored by the `follow` attribute. */
 	get follow(): boolean {
 		return this.#follow.peek();
@@ -607,8 +676,8 @@ export default class MoqWatch extends HTMLElement {
 	 * Zero (the default) minimizes latency. A larger value enables buffered playback: build up
 	 * future-dated frames (e.g. TTS written faster than real-time) and only skip ahead
 	 * once they would sit further than `delay + lookahead` past the playhead. Audio that falls
-	 * behind, as after a stall, catches up by playing faster, and skips only what trails by more
-	 * than the lookahead. Call `reset()` at each utterance boundary. Not a jitter buffer: live
+	 * behind, as after a stall, catches up by playing faster, and skips onto the clock only past
+	 * the larger of the lookahead and the {@link stretch}. Call `reset()` at each utterance boundary. Not a jitter buffer: live
 	 * streams leave it at zero and tune `delay`.
 	 */
 	get lookahead(): Duration {
@@ -619,6 +688,24 @@ export default class MoqWatch extends HTMLElement {
 		if (!(value instanceof Duration)) throw invalidAttribute("lookahead", value, "a Duration");
 		this.controls.lookahead.set(parseLookahead(formatDuration(value)));
 		this.#accept("lookahead");
+	}
+
+	/**
+	 * How far audio may trail the clock before it skips onto it (default: 200 ms), mirrored by the
+	 * `stretch` attribute.
+	 *
+	 * Within it, audio behind the clock, as after a stall, speeds up until it is back on it; past it,
+	 * audio skips onto the clock as video does. Zero turns the time stretch off: received audio plays
+	 * unaltered and late audio is skipped.
+	 */
+	get stretch(): Duration {
+		return this.controls.stretch.peek();
+	}
+
+	set stretch(value: Duration) {
+		if (!(value instanceof Duration)) throw invalidAttribute("stretch", value, "a Duration");
+		this.controls.stretch.set(parseStretch(formatDuration(value)));
+		this.#accept("stretch");
 	}
 
 	/**

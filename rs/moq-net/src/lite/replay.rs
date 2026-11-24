@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crate::{announce, origin};
 
 /// Keep each prefix's last active event in its original event order.
-pub(super) fn initial(events: impl IntoIterator<Item = origin::RouteEvent>) -> Vec<announce::Announce> {
+pub(crate) fn initial(events: impl IntoIterator<Item = origin::RouteEvent>) -> Vec<announce::Announce> {
 	let mut pending: Vec<Option<announce::Announce>> = Vec::new();
 	let mut positions = HashMap::new();
 	for event in events {
