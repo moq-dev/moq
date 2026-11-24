@@ -2455,6 +2455,9 @@ export class Publisher {
 						} else if (!(await forward(recv.start, recv.end, recv))) return false;
 						continue;
 					case "idle": {
+						// Armed before anything below awaits: a group landing while it does would
+						// otherwise wake nothing, and the park would wait on a change already made.
+						armed ??= armSubscription(controls, track, drops);
 						// A declared end goes out while lower groups are still being produced.
 						if (!endSent && hooks.subscriberEnd(track) !== undefined && declareEarly()) {
 							if (!(await sendEnd())) return false;

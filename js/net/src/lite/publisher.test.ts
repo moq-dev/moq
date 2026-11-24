@@ -1234,6 +1234,39 @@ test("lite draft-05: a late-arriving older group is still served", async () => {
 	}
 });
 
+// A group landing while the loop, having found nothing to serve, awaits before it parks still
+// wakes it.
+for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
+	test(`lite ${version}: a group landing as the loop goes idle is served`, async () => {
+		const sub = await servedSubscription({ version, startGroup: 0n });
+		const tryRecvGroup = hooks.tryRecvGroup;
+		try {
+			// The read after group 0 finds nothing, and group 1 lands as it returns, before the loop parks.
+			let popped = false;
+			hooks.tryRecvGroup = (subscriber, dispositions) => {
+				const recv = tryRecvGroup(subscriber, dispositions);
+				if (recv.kind === "group") popped = true;
+				else if (recv.kind === "idle" && popped) {
+					hooks.tryRecvGroup = tryRecvGroup;
+					sub.serve(1n);
+				}
+				return recv;
+			};
+			sub.serve(0n);
+			expect(await sub.servedSequence()).toBe(0n);
+			let served: bigint | undefined;
+			void sub.servedSequence().then((key) => {
+				served = key;
+			});
+			for (let i = 0; i < 10; i++) await flush();
+			expect(served).toBe(1n);
+		} finally {
+			hooks.tryRecvGroup = tryRecvGroup;
+			await sub.close();
+		}
+	});
+}
+
 // The SUBSCRIBE_DROP ranges a subscribe stream carried up to its FIN.
 async function drops(reader: Reader, version: Version): Promise<[bigint, bigint][]> {
 	const ranges: [bigint, bigint][] = [];
