@@ -3593,6 +3593,28 @@ test("lite draft-06: a join names no gap past a skipped group", async () => {
 	}
 });
 
+// A skip a reader reports over a run it already gave up, both before the start, replaces that run,
+// so the final runs reaching up to the start are still named. Mirrors the Rust `RangeMap` of runs
+// given up before the start.
+test("lite draft-06: a skip below the start replaces the drop it covers", async () => {
+	const sub = await servedSubscription({ version: Version.DRAFT_06, maxDelay: 100 });
+	try {
+		hooks.dropTrackGroups(sub.track, 5n, 6n, { error: new StreamError(StreamCode.NotFound) });
+		await flush();
+		sub.track.skipGroups(3n, 8n);
+		await flush();
+		sub.serve(8n);
+		const response = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
+		if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
+		expect(response.start.start).toBe(8n);
+		const drop = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
+		if (!("drop" in drop)) throw new Error("expected SUBSCRIBE_DROP");
+		expect([drop.drop.start, drop.drop.end]).toEqual([3n, 8n]);
+	} finally {
+		await sub.close();
+	}
+});
+
 test("a version without the latency field serves a non-dropping budget", async () => {
 	for (const version of [Version.DRAFT_01, Version.DRAFT_02]) {
 		// These drafts carry no max age, which decodes as no limit: history from the oldest group,

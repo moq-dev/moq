@@ -31,8 +31,10 @@ runs per job, 4 jobs per variant):
   at a time, and its page answers no long-animation-frame query within 2 s.
   It passed in a local x86 run.
 
-#9508 made a held track info lookup count as demand (`Demand.wanted`), so an
-on-demand publisher runs while a TRACK is held. Find which held lookup keeps
+#9508 changed only `js/net`: `track.Producer` now counts held info lookups
+(`#holds`) in `Demand.wanted`, so a JS on-demand publisher runs while a TRACK is
+held. Rust already counted a held `track::Resolving` as its track's `Demand`, so
+the Rust relay's own demand did not change. Find which held lookup keeps
 which track wanted through the replacement section (the JS fixture's
 `onDemand: "retain"` tracks, a relay's held TRACK to the fixture, or a lookup
 whose hold never lets go), and what the relay then spends its CPU on at the
