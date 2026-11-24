@@ -4884,7 +4884,9 @@ test("a lite-07 rooted answer shows the claim a request for its root takes", asy
 	const root = Path.from("src/a/b");
 	for (const [i, swap] of [...Array(16).keys()].flatMap((i) => [[i, false] as const, [i, true] as const])) {
 		const origin = new OriginProducer();
-		const names = swap ? [`b${i}`, `a${i}`] : [`a${i}`, `b${i}`];
+		// Names whose hash order differs between paths.
+		const pair = [`cam${i * 7}`, `pub${i * 13}`];
+		const names = swap ? pair.toReversed() : pair;
 		const instance = (name: string) => ({ id: Instance.parse(name), epoch: 0n });
 		const shallow = origin.claim(Path.from("src"), { instance: instance(names[0]) });
 		const deep = origin
@@ -4901,6 +4903,57 @@ test("a lite-07 rooted answer shows the claim a request for its root takes", asy
 			}
 			const starts = msgs.flatMap((msg) => (msg.status === "start" ? [msg.instance] : []));
 			const request = origin.consume().request(root);
+			const which = await Promise.race([
+				shallow
+					.requested()
+					.next()
+					.then(() => shallow.instance),
+				deep
+					.requested()
+					.next()
+					.then(() => deep.instance),
+			]);
+			expect(starts).toEqual([which]);
+			request.close();
+		} finally {
+			shallow.close();
+			deep.close();
+			close();
+			origin.close();
+		}
+	}
+});
+
+// Read beneath a handle's root, claims of one prefix filed above and at the root that tie on rank
+// hash on the absolute path read, as a request for it resolves, not on the path from the root:
+// the answer carries the claim the request takes.
+test("a lite-07 rooted answer beneath its root shows the claim a request for that path takes", async () => {
+	const root = Path.from("src/a");
+	for (const [i, swap] of [...Array(16).keys()].flatMap((i) => [[i, false] as const, [i, true] as const])) {
+		const origin = new OriginProducer();
+		// Names whose hash order differs between the absolute path and the path from the root.
+		const pair = [`cam${i * 7}`, `pub${i * 13}`];
+		const names = swap ? pair.toReversed() : pair;
+		const instance = (name: string) => ({ id: Instance.parse(name), epoch: 0n });
+		const shallow = origin.claim(Path.from("src"), { instance: instance(names[0]) });
+		const deep = origin
+			.scope(Path.empty(), Path.Prefixes.parse(["src/a"]))
+			.claim(Path.from("src"), { instance: instance(names[1]) });
+		const { next, ok, close } = routedAnswer(
+			origin.scope(root, Path.Prefixes.parse([""])),
+			undefined,
+			Path.from("x"),
+		);
+		try {
+			await ok();
+			const msgs: AnnounceBroadcast[] = [];
+			for (;;) {
+				const msg = await next();
+				msgs.push(msg);
+				if (msg.status === "synced") break;
+			}
+			const starts = msgs.flatMap((msg) => (msg.status === "start" ? [msg.instance] : []));
+			const request = origin.consume().request(Path.from("src/a/x"));
 			const which = await Promise.race([
 				shallow
 					.requested()

@@ -110,12 +110,16 @@ export interface OriginConsumer {
 	covers(prefix: Path.Valid): boolean;
 	/** The root-relative prefixes the handle's scope admits; unset for every path. */
 	readonly allowed?: Path.Prefixes;
+	/** The absolute path the handle's root-relative paths hang from. */
+	readonly root: Path.Valid;
 }
 
 /** One originated advertisement exposed to the publishing wire. */
 export interface Advertised {
 	readonly identity: object;
 	readonly route: WireRoute;
+	/** The absolute prefix a claim raised to its handle's root is filed at; unset when filed at its row. */
+	readonly filed?: Path.Valid;
 }
 
 /** What names a stream: an advertisement, and the instance its route serves. */

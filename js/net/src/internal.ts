@@ -115,13 +115,18 @@ export function presented(
 	prefix: Path.Valid,
 	table: Advertisements,
 	carries: (covered: Path.Valid) => boolean,
-	// Lite-07: a route above the prefix keeps how many segments broader than the prefix it is.
-	keepAbove = false,
-	shows: (candidate: Advertised, at: Path.Valid) => boolean = () => true,
+	options: {
+		// The absolute path the table's paths hang from, so claims rank as a request resolves.
+		root?: Path.Valid;
+		// Lite-07: a route above the prefix keeps how many segments broader than the prefix it is.
+		keepAbove?: boolean;
+		shows?: (candidate: Advertised, at: Path.Valid) => boolean;
+	} = {},
 ): Map<Path.Valid, Advertised> {
+	const { root = Path.empty(), keepAbove = false, shows = () => true } = options;
 	const out = new Map<Path.Valid, Advertised>();
 	// Every claim covering the prefix, as a request through the prefix resolves: the most specific
-	// tier, ranked across the prefixes its claims are filed at.
+	// tier, ranked across the prefixes its claims are filed at, each by its absolute filing.
 	const covering: Filed<Advertised>[] = [];
 	for (const [covered, candidates] of table) {
 		if (!carries(covered)) continue;
@@ -132,7 +137,7 @@ export function presented(
 				// Hold the empty suffix's place in the order the table lists its first claim.
 				if (covering.length === 0) out.set(Path.empty(), candidate);
 				covering.push({
-					prefix: covered,
+					prefix: candidate.filed ?? Path.join(root, covered),
 					depth,
 					order,
 					arrival: arrival(candidate.identity),
@@ -146,8 +151,8 @@ export function presented(
 		const best = suffix !== null ? firstEligible(candidates, (candidate) => shows(candidate, covered)) : undefined;
 		if (suffix !== null && best) out.set(suffix, best);
 	}
-	// Hashed on the requested prefix, as a request for it resolves.
-	const best = bestOfTier(prefix, covering);
+	// Hashed on the absolute path requested, as a request for it resolves.
+	const best = bestOfTier(Path.join(root, prefix), covering);
 	if (best) {
 		const snap = best.candidate;
 		const above = BigInt(Path.parts(prefix).length - best.depth);

@@ -1036,7 +1036,7 @@ export class Publisher {
 		// What the peer currently sees: the table under the prefix, less whatever our grant
 		// does not let us publish.
 		const visible = (table: Advertisements): Map<Path.Valid, Advertised> => {
-			const out = presented(msg.prefix, table, carries);
+			const out = presented(msg.prefix, table, carries, { root: this.#publish && wireOf(this.#publish).root });
 			const grant = this.#grant?.peek();
 			if (grant) {
 				for (const suffix of [...out.keys()]) {

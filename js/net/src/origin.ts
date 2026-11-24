@@ -191,14 +191,19 @@ class Scope {
 			// Hold the empty path's place in the order until every covering prefix is known.
 			if (covering.length === 0) out.set(Path.empty(), []);
 			// Raised to the root, a claim is that much further above it, so its Above names its own
-			// prefix: claims of one prefix supersede each other wherever each is filed.
+			// prefix: claims of one prefix supersede each other wherever each is filed. It keeps
+			// where it is filed, so a read beneath the root ranks it as a request there resolves.
 			const raised = BigInt(rootDepth - Path.parts(path).length);
 			covering.push([
 				path,
 				visible.map((value) =>
 					raised === 0n
 						? value
-						: { ...value, route: { ...value.route, above: (value.route.above ?? 0n) + raised } },
+						: {
+								...value,
+								filed: path,
+								route: { ...value.route, above: (value.route.above ?? 0n) + raised },
+							},
 				),
 			]);
 		}
@@ -2205,6 +2210,7 @@ export class Consumer implements Reader {
 			demand: (path, instance, signal) => this.#demand(scope.path(path), instance, signal),
 			covers: (prefix: Path.Valid) => scope.covers(prefix),
 			allowed: scope.allowed?.rebase(scope.root),
+			root: scope.root,
 		});
 	}
 
