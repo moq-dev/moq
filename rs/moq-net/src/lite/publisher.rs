@@ -5451,9 +5451,6 @@ struct TrackRun {
 	/// Lite-07: where each range a SUBSCRIBE_START answered starts, by Range ID, `None` for one
 	/// answered with no group: it owes its groups from there to its end.
 	started: std::collections::BTreeMap<u64, Option<u64>>,
-	/// Lite-07: the stale runs the cursor gave up that no started range owes but a range still
-	/// waiting for its start covers; see [`Self::settle_stale`].
-	stale: RangeMap<u64, Hole>,
 	/// Lite-07: the ranges whose start or end may still resolve; see [`Self::pin`].
 	unpinned: Unpinned,
 }
@@ -5722,7 +5719,6 @@ impl TrackRun {
 			unstarted,
 			waits,
 			started: Default::default(),
-			stale: RangeMap::new(),
 			unpinned,
 			bounded,
 			requested: bounds.requested(0..),
@@ -5934,7 +5930,8 @@ impl TrackRun {
 			self.started.remove(id);
 		}
 		// Retiring makes no stale run owed, so this names none.
-		let owed = self.settle_stale();
+		let withheld = self.track.record_mut().take_withheld();
+		let owed = self.settle_stale(withheld);
 		debug_assert!(owed.is_empty(), "a retired range owes nothing");
 		for (id, range) in pins.into_iter().chain(retuned) {
 			self.requested.insert(id, range, placed.get(&id).copied());
@@ -6132,7 +6129,8 @@ impl TrackRun {
 			reported = true;
 		}
 		if reported {
-			for (groups, hole) in self.settle_stale() {
+			let withheld = self.track.record_mut().take_withheld();
+			for (groups, hole) in self.settle_stale(withheld) {
 				self.forward_range(groups, &hole, writer)?;
 			}
 		}
@@ -6199,36 +6197,43 @@ impl TrackRun {
 	/// The first key from `key` past the stale runs still held: none is a group a range starts
 	/// at, as a stale run below a start before lite-07 is not.
 	fn pass_stale(&self, mut key: u64) -> u64 {
-		while let Some((run, _)) = self.stale.get_key_value(&key) {
-			key = run.end;
+		while let Some(end) = self.track.record().withheld_end(key) {
+			key = end;
 		}
 		key
 	}
 
 	/// The first group from `from` the cursor served or dropped, or what that waits on: the
 	/// cursor reaching the next group held here in its ranges, or a group held at all. It
-	/// passes the keys the cursor told start none, the stale runs still held, and those no group
-	/// held here starts at, which a group arriving later may take: the source's feed accounts for
-	/// that (see [`Self::first_start`]).
+	/// passes the keys the cursor told start none, the stale runs still withheld, and those no
+	/// group held here starts at, which a group arriving later may take: the source's feed
+	/// accounts for that (see [`Self::first_start`]).
 	fn first_group(&mut self, from: u64) -> Result<u64, Wait> {
 		let mut at = from;
-		loop {
+		// The first key passed with no group held there, where one arriving changes the answer.
+		let mut gap = None;
+		let wait = loop {
 			at = self.pass_stale(at);
-			match self.track.record_mut().report_at(at) {
+			match self.track.record().report_at(at) {
 				Some((end, Report::Skip)) => at = end,
 				Some(_) => return Ok(at),
 				None => match self.track.next_held(at) {
-					None => return Err(Wait::Held(at)),
-					Some(next) if next > at => at = next,
+					None => break Wait::Held(at),
+					Some(next) if next > at => {
+						gap.get_or_insert(at);
+						at = next;
+					}
 					// The cursor tells of each group held in its ranges, so this waits for it to.
 					Some(_) => match self.track.next_in_range(at) {
-						Some(next) if next == at => return Err(Wait::Told(at)),
+						Some(next) if next == at => break Wait::Told(at),
 						Some(next) => at = next,
-						None => return Err(Wait::Held(at)),
+						None => break Wait::Held(at),
 					},
 				},
 			}
-		}
+		};
+		// A group held anywhere from the gap on wakes it, the one told at `at` included.
+		Err(gap.map_or(wait, Wait::Held))
 	}
 
 	/// Apply `update`, replacing every range with fresh Range IDs, as an update before
@@ -6529,8 +6534,7 @@ impl TrackRun {
 			Start::Unresolved { skipped, .. } => skipped.insert(range, hole),
 			start if start.per_range() && hole.stale_budget().is_some() => {
 				self.told(range.clone());
-				self.stale.insert(range, hole);
-				for (groups, hole) in self.settle_stale() {
+				for (groups, hole) in self.settle_stale([(range, hole)]) {
 					self.forward_range(groups, &hole, writer)?;
 				}
 			}
@@ -6653,24 +6657,26 @@ impl TrackRun {
 		Ok(())
 	}
 
-	/// Lite-07: the stale runs held in [`Self::stale`] that a started range owes, from its
-	/// SUBSCRIBE_START on, for the caller to name. Each part a range still waiting for its start
-	/// covers stays held; any other is forgotten, never named, so a wider budget may still serve
-	/// it, as a stale run below a start before lite-07 is.
-	fn settle_stale(&mut self) -> Vec<(Range<u64>, Hole)> {
-		if self.stale.is_empty() {
+	/// Lite-07: the parts of the stale `runs` the cursor gave up that a started range owes, from
+	/// its SUBSCRIBE_START on, for the caller to name. Each part a range still waiting for its
+	/// start covers stays withheld in the reader's record, billed to the pool; any other is
+	/// forgotten, never named, so a wider budget may still serve it, as a stale run below a
+	/// start before lite-07 is.
+	fn settle_stale(&mut self, runs: impl IntoIterator<Item = (Range<u64>, Hole)>) -> Vec<(Range<u64>, Hole)> {
+		let mut runs = runs.into_iter().peekable();
+		if runs.peek().is_none() {
 			return Vec::new();
 		}
 		let (owed, pending) = self.owed();
 		let mut named = Vec::new();
-		for (run, hole) in std::mem::take(&mut self.stale) {
+		for (run, hole) in runs {
 			for part in owed.overlapping(&run) {
 				named.push((part.start.max(run.start)..part.end.min(run.end), hole.clone()));
 			}
 			for gap in owed.gaps(&run) {
 				for part in pending.overlapping(&gap) {
 					let held = part.start.max(gap.start)..part.end.min(gap.end);
-					self.stale.insert(held, hole.clone());
+					self.track.record_mut().withhold(held, hole.clone());
 				}
 				for rest in pending.gaps(&gap) {
 					self.track.record_mut().untell(rest);
@@ -10137,6 +10143,26 @@ mod serve_group_test {
 		track.time_starts([(0, Some(5))]);
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		assert_eq!(starts(&responses(&mut writer, &log).await), [(0, Some(5))]);
+	}
+
+	/// A range whose first held group lies past its end starts at a group arriving below that
+	/// later, even one served while it waits.
+	#[kio::test]
+	async fn lite07_a_range_starts_at_a_group_arriving_below_the_first_held() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		write_group(&mut track, 10, 10_000);
+		let (mut run, mut writer, log) = lite07_run_ranges(&track, &[lite::Range::span(None, 0, Some(4), None)]);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert!(starts(&responses(&mut writer, &log).await).is_empty());
+
+		write_group(&mut track, 2, 2_000);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(run.ctx.outcomes.opened.load(Ordering::Relaxed), 1, "group 2 is served");
+		assert_eq!(starts(&responses(&mut writer, &log).await), [(0, Some(2))]);
 	}
 
 	/// A relay's fresh copy is readable before its upstream answers, but says nothing of the live

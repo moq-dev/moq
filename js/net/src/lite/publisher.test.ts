@@ -1022,6 +1022,23 @@ test("lite-07 SUBSCRIBE_START names each resolved range start", async () => {
 	}
 });
 
+// A range whose first held group lies past its end starts at a group arriving below that later,
+// even one served while it waits. Mirrors the Rust
+// `lite07_a_range_starts_at_a_group_arriving_below_the_first_held`.
+test("lite-07 a range starts at a group arriving below the first held", async () => {
+	const version = Version.DRAFT_07;
+	const sub = await servedSubscription({ version, prefill: [10n], ranges: [{ end: { absolute: 5n } }] });
+	try {
+		await flush();
+		sub.serve(2n);
+		const resp = await decodeSubscribeResponse(sub.client.reader, version);
+		if (!("start" in resp)) throw new Error("expected SUBSCRIBE_START");
+		expect([resp.start.id, resp.start.start]).toEqual([0n, 2n]);
+	} finally {
+		await sub.close();
+	}
+});
+
 // A group whose stream the session reset to make room is a final drop on every version: the
 // publisher names it in SUBSCRIBE_DROP with TOO_FAR_BEHIND and opens no second stream for it.
 test.each([

@@ -1869,6 +1869,10 @@ export class Publisher {
 		// `TrackRun::first_group`.
 		const firstGroup = (from: bigint): bigint | Wait => {
 			let at = from;
+			// The first key passed with no group held there, where one arriving changes the answer.
+			let gap: bigint | undefined;
+			// A group held anywhere from the gap on wakes it, the one told at `at` included.
+			const wait = (wait: Wait): Wait => (gap === undefined ? wait : { held: gap });
 			for (;;) {
 				at = passStale(at);
 				const report = record?.reportAt(at);
@@ -1878,15 +1882,16 @@ export class Publisher {
 				}
 				if (report) return at;
 				const next = hooks.nextHeld(track, at);
-				if (next === undefined) return { held: at };
+				if (next === undefined) return wait({ held: at });
 				if (next > at) {
+					gap ??= at;
 					at = next;
 					continue;
 				}
 				// The cursor tells of each group held in its ranges, so this waits for it to.
 				const covered = hooks.nextInRange(track, at);
-				if (covered === undefined) return { held: at };
-				if (covered === at) return { told: at };
+				if (covered === undefined) return wait({ held: at });
+				if (covered === at) return wait({ told: at });
 				at = covered;
 			}
 		};

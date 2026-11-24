@@ -11929,7 +11929,7 @@ impl Subscriber {
 	}
 
 	/// What this reader settled.
-	fn record(&self) -> &Record {
+	pub(crate) fn record(&self) -> &Record {
 		match &self.inner {
 			Inner::Plain(cursor) => &cursor.record,
 			Inner::Resume(_, logical) => &logical.record,

@@ -34,6 +34,10 @@ pub(crate) struct Record {
 	pub(super) pending: RangeMap<u64, Pending>,
 	/// Every key already reported, with how.
 	pub(super) reported: RangeMap<u64, Report>,
+	/// Stale runs given up that the wire was not told yet, nor forgotten: a lite-07 publisher's,
+	/// which a range still waiting for its start may come to owe. Never final, so no fold passes
+	/// one.
+	withheld: RangeMap<u64, Hole>,
 	/// Everything below was settled for good and folded away under pool pressure: handed
 	/// out, or reported final, so none is handed out or reported again.
 	floor: u64,
@@ -169,6 +173,23 @@ impl Record {
 		}
 	}
 
+	/// Withhold the stale run `range` given up as `hole`, until [`Self::take_withheld`].
+	pub fn withhold(&mut self, range: Range<u64>, hole: Hole) {
+		if !range.is_empty() {
+			self.withheld.insert(range, hole);
+		}
+	}
+
+	/// One past the withheld run holding `key`, if one does.
+	pub fn withheld_end(&self, key: u64) -> Option<u64> {
+		self.withheld.get_key_value(&key).map(|(run, _)| run.end)
+	}
+
+	/// Every run withheld, now no longer.
+	pub fn take_withheld(&mut self) -> RangeMap<u64, Hole> {
+		std::mem::take(&mut self.withheld)
+	}
+
 	/// Forget every report of `range`, which the wire was never told: a run given up below
 	/// where delivery starts, which a later widening may still serve.
 	pub fn untell(&mut self, range: Range<u64>) {
@@ -218,7 +239,8 @@ impl Record {
 			+ self.skipped.runs()
 			+ self.written_off.len()
 			+ self.pending.len()
-			+ self.reported.len()) as u64
+			+ self.reported.len()
+			+ self.withheld.len()) as u64
 	}
 
 	/// Whether the pool needed a run this reader was promised, which ended it.
@@ -267,7 +289,7 @@ impl Record {
 	/// not final. Final are the groups handed out, every report, and this reader's own
 	/// verdicts: its stale skips and what `beside` gave up, which a wider budget would offer
 	/// again only while they were held. Not final are the runs given up and not reported yet,
-	/// and the keys nothing settled.
+	/// the runs withheld, and the keys nothing settled.
 	fn fold(&mut self, handed: Option<u64>, beside: &dyn Beside) {
 		// The runs copied from the track's drop set go first: the next scan folds in again
 		// whatever the track still holds.
@@ -285,6 +307,9 @@ impl Record {
 		}
 		let mut floor = self.floor;
 		loop {
+			if self.withheld.contains_key(&floor) {
+				break;
+			}
 			let next = match self.reported.get_key_value(&floor) {
 				Some((run, _)) => run.end,
 				None if self.pending.contains_key(&floor) => break,
@@ -318,6 +343,7 @@ impl Record {
 			if next <= floor {
 				break;
 			}
+			let next = (self.withheld.overlapping(&(floor..next)).next()).map_or(next, |(run, _)| run.start);
 			floor = next;
 		}
 		if floor == self.floor {
@@ -421,6 +447,37 @@ mod test {
 		record.settle(|| track.clone(), &mut (), Some(3)).unwrap();
 		assert!(record.told(2), "the drops below it fold");
 		assert!(!record.told(3), "the handed group stays to be told");
+	}
+
+	/// A stale run withheld from the wire bills like any run and stops the fold, so a debt it
+	/// leaves ends the reader rather than letting the runs grow unbilled.
+	#[test]
+	fn a_withheld_run_bills_and_stops_the_fold() {
+		let (pool, track) = account();
+		let mut record = Record::default();
+		record.reported.insert(0..4, Report::Dropped);
+		record.withhold(2..3, Hole::stale(Duration::ZERO));
+		record.settle(|| track.clone(), &mut (), None).unwrap();
+		owe(&track, pool.used());
+		record.settle(|| track.clone(), &mut (), None).unwrap();
+		assert_eq!(record.floor, 2, "the fold stops short of the withheld run");
+
+		let (pool, track) = account();
+		let mut record = Record::default();
+		record.reported.insert(0..2, Report::Dropped);
+		record.withhold(1..2, Hole::stale(Duration::ZERO));
+		// Withheld runs kept apart by reports, each billed.
+		for key in (2..1_000).step_by(2) {
+			record.reported.insert(key..key + 1, Report::Skip);
+			record.reported.insert(key + 1..key + 2, Report::Dropped);
+			record.withhold(key + 1..key + 2, Hole::stale(Duration::ZERO));
+		}
+		record.settle(|| track.clone(), &mut (), None).unwrap();
+		assert_eq!(pool.used(), (1 + 998 + 500) * RUN_OVERHEAD);
+		owe(&track, pool.used());
+		let err = record.settle(|| track.clone(), &mut (), None).unwrap_err();
+		assert_eq!(StreamError::from(&err), StreamError::TooFarBehind);
+		assert!(record.failed());
 	}
 
 	/// A run the reader gave up beside its record, such as a drop it took from the track's drop
