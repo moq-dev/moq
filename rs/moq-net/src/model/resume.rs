@@ -2307,15 +2307,13 @@ impl Reader {
 					Change::Edit(edited.into_iter().map(|(key, _)| key).collect())
 				}
 				Some(Err(ranges)) => {
-					let mut mirrored = Mirrored {
-						ranges: BTreeMap::new(),
-						joining: BTreeMap::new(),
-						..std::mem::take(&mut self.mirrored)
-					};
+					let mirrored = &mut self.mirrored;
+					mirrored.ranges.clear();
+					// Only bounds memory: every read of an entry goes by a key of `ranges`.
+					mirrored.joining.clear();
 					for (key, (range, since)) in ranges {
 						mirrored.insert(key, range, since);
 					}
-					self.mirrored = mirrored;
 					self.window = mirrored_window(&self.mirrored);
 					// The serving copy's resume point may cut off groups the new ranges cover,
 					// judged by the reader's window.
@@ -7374,6 +7372,82 @@ mod test {
 		write(&c, 2);
 		assert_eq!(drain(&mut sub, false), [2]);
 		assert_eq!(dropped(&mut sub), []);
+	}
+
+	/// A run the serving copy's own cursor wrote off as stale is its verdict, not a received one
+	/// a new upstream subscription supersedes: it is still reported after the copy lets go of a
+	/// stale run its upstream judged.
+	#[kio::test]
+	async fn a_stale_run_judged_here_outlives_a_superseded_one() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		routes.serve(a.consume());
+		let budget = Duration::from_secs(1);
+		let mut sub = subscribe(&logical, budget);
+		assert_eq!(dropped(&mut sub), []);
+		write(&a, 2000);
+		assert_eq!(drain(&mut sub, false), [2000]);
+		// Lands late, then ages past the budget under 2000: the copy writes it off.
+		write(&a, 3);
+		a.drop_groups(1..2, StreamError::NotFound);
+		kio::clock::sleep(budget * 2).await;
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		let first = sub
+			.poll_drop(&kio::Waiter::noop())
+			.map(|(run, hole)| (run, hole.error()));
+		assert_eq!(first, Poll::Ready((0..1, StreamError::Old)));
+		// The upstream judged 5000 stale, then a new upstream subscription superseded it.
+		a.give_up(5000..5001, track::Hole::stale(budget));
+		a.supersede_stale();
+		assert_eq!(
+			dropped(&mut sub),
+			[(1..2, StreamError::NotFound), (2..2000, StreamError::Old)]
+		);
+	}
+
+	/// A reader floored at the last sequence holds back nothing for a copy the front parked
+	/// either: nothing it may deliver is in range.
+	#[test]
+	fn a_parked_copy_holds_back_nothing_past_the_last_sequence() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		write(&a, 0);
+		assert_eq!(drain(&mut sub, false), [0]);
+		let b = copy();
+		routes.serve(b.consume());
+		routes.park();
+		let mut sub = sub.with_range(u64::MAX..);
+		assert_eq!(dropped(&mut sub), []);
+	}
+
+	/// A route returning to serve resumes the boundary group past the frames another copy now
+	/// holds from its first, though it was asked for none of them before.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_returning_route_resumes_past_the_head_held_since() {
+		let routes = Producer::new();
+		let track = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&track, HOUR);
+		// Lands on the first route without its head, so no copy holds the group from its first.
+		let track::Received::Group(mut tail) = a.create_group_at(group::Info { start: 0 }, 1, 0..0).unwrap() else {
+			panic!("nothing else holds the group");
+		};
+		tail.write_frame(ts(1), b"b".as_ref()).unwrap();
+		let _reading = recv(&mut sub);
+		let b = copy();
+		routes.serve(b.consume());
+		assert_eq!(a.subscription().unwrap().resume, None);
+		let mut whole = b.create_group(group::Info { start: 0 }).unwrap();
+		whole.write_frame(ts(0), b"a".as_ref()).unwrap();
+		whole.write_frame(ts(1), b"b".as_ref()).unwrap();
+		routes.serve(a.consume());
+		assert_eq!(a.subscription().unwrap().resume, Some(Position::new(0, 2)));
 	}
 
 	/// A reader floored at the last sequence holds back nothing for a replaced copy that may
