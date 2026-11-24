@@ -7,6 +7,7 @@ import type { Grant } from "../auth.ts";
 import type { AuthSession } from "../auth_session.ts";
 import { Viewers } from "../bandwidth.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
+import { answered } from "../demand.ts";
 import {
 	error,
 	fromTransport,
@@ -4665,4 +4666,34 @@ test.each([
 	expect(closes[0]?.closeCode).toBe(SessionCode.ProtocolViolation);
 	announced.close();
 	subscriber.close();
+});
+
+// Readers joining while the probe for their live join is unanswered send no update, though each
+// joins after another track's answer moved the join tick: the pending probe answers them all.
+// Mirrors the Rust `refresh_joins_coalesce_upstream`.
+test("a lite-07 copy coalesces joins its unanswered probe already asks", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, toHop(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	const join = { ranges: [{ start: { live: { min: Duration.millis(500), max: Duration.secs(2) } } }] };
+	const readers = [broadcast.track("video").subscribe(join)];
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version);
+		const request = await opened(1);
+		await request.reading;
+		await drainReactions();
+		const established = request.written.length;
+		for (let i = 0; i < 4; i++) {
+			answered();
+			readers.push(broadcast.track("video").subscribe(join));
+			await drainReactions();
+		}
+		expect(request.written.length).toBe(established);
+	} finally {
+		for (const reader of readers) reader.close();
+		broadcast.close();
+		subscriber.close();
+	}
 });
