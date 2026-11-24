@@ -4360,7 +4360,7 @@ impl Consumer {
 				Poll::Ready(Err(err)) => Cause::Failed(err.clone()),
 				Poll::Pending => Cause::Stalled,
 			};
-			if !recover.wants(cause.error(), waiter) {
+			if !recover.wants(&cause, waiter) {
 				match &cause {
 					Cause::Failed(err) => recover.failed(index, err),
 					// The copy being read still serves and holds no more than was read, so

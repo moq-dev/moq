@@ -1522,7 +1522,6 @@ impl Misses {
 				end: run.end,
 				frame_end: None,
 				asking: *asking,
-				fetch: false,
 			};
 			let (joins, unfillable) = fills.lock().join(fills, &ask);
 			for groups in unfillable {

@@ -1831,6 +1831,19 @@ test("regressions", async () => {
 			],
 			finish: false,
 		},
+		// A copy that declared the track's end closes the last group short and fails, so its clean
+		// end hides the failure: the group waits for the copy the front is splicing in, and reads
+		// on from it instead of ending at that close.
+		{
+			ops: [
+				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
+				{ kind: "up", instance: 0, slot: 2 },
+				{ kind: "write", instance: 0, slot: 0, group: 11, frames: 1 },
+				{ kind: "end", instance: 0, slot: 2 },
+				{ kind: "close", instance: 0, slot: 2, group: undefined, down: true },
+			],
+			finish: false,
+		},
 	];
 	const failures: string[] = [];
 	for (const [i, c] of regressions.entries()) {
