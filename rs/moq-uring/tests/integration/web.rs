@@ -1279,8 +1279,8 @@ fn a_close_waits_for_the_peer_to_reset_its_streams() {
 				.encode(&mut header);
 			write_raw(&mut uni, &header).await;
 			// And one stalled mid-header, which may yet turn out to be QPACK:
-			// it holds the capsule off until the close's grace runs out, but not
-			// the other streams' stops.
+			// it is spared, and holds neither the other streams' stops nor the
+			// capsule.
 			let mut stalled = peer.open_uni(Default::default()).await.expect("stalled");
 			write_raw(&mut stalled, &[0x40]).await;
 			// The session holds the uni stream but never accepts the bidi one,

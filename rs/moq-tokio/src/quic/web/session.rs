@@ -899,8 +899,10 @@ impl SessionAccept {
 	///
 	/// Nobody else accepts once the session closed, so this accepts and classifies the peer's
 	/// streams itself, dropping the session's, which stops them. A stream still mid-header may be
-	/// a QPACK stream, so it is spared until classified, and keeps this waiting. Poll it through
-	/// [`poll_quiesce_shared`], which holds the wakes the classification causes.
+	/// a QPACK stream, so it is spared, without waiting on it: Chrome opens its QPACK streams
+	/// without writing to them, and waiting out the grace lets the page open more streams under
+	/// the capsule. Poll it through [`poll_quiesce_shared`], which holds the wakes the
+	/// classification causes.
 	fn poll_quiesce(
 		&mut self,
 		waiter: &Waiter,
@@ -914,11 +916,7 @@ impl SessionAccept {
 		let pending = self.pending_uni.iter().map(|header| header.id);
 		let pending = pending.chain(self.pending_bi.iter().map(|header| header.id));
 		let keep: Vec<_> = critical.iter().copied().chain(qpack).chain(pending).collect();
-		std::task::ready!(self.conn.poll_quiesce(waiter, code, &keep))?;
-		match self.pending_uni.is_empty() && self.pending_bi.is_empty() {
-			true => Poll::Ready(Ok(())),
-			false => Poll::Pending,
-		}
+		self.conn.poll_quiesce(waiter, code, &keep).map_err(Into::into)
 	}
 
 	// Reads the stream header, returning Some if it's a WebTransport stream.
@@ -1623,8 +1621,8 @@ mod tests {
 		let mut header = Vec::new();
 		StreamUni::QPACK_ENCODER.encode(&mut header);
 		qpack.write_all(&header[..]).await.unwrap();
-		// And one stalled mid-header, which may yet turn out to be QPACK: it holds the capsule
-		// off until the close's grace runs out, but not the other streams' stops.
+		// And one stalled mid-header, which may yet turn out to be QPACK: it is spared, and
+		// holds neither the other streams' stops nor the capsule.
 		let mut stalled = client.conn.open_uni(Default::default()).await.unwrap();
 		stalled.write_all(&[0x40][..]).await.unwrap();
 		for stream in [&uni, &bi, &qpack, &stalled] {

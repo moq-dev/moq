@@ -894,7 +894,9 @@ fn close(conn: &Connection, web: Option<&Rc<Web>>, code: u32, reason: &str) {
 /// Nobody else accepts once the session closed, so this accepts and classifies
 /// the peer's streams itself; the session's own wait in their queues to be
 /// stopped like any other. A stream still mid-header may be a QPACK stream, so
-/// it is spared until classified, and keeps this waiting.
+/// it is spared, without waiting on it: Chrome opens its QPACK streams without
+/// writing to them, and waiting out the grace lets the page open more streams
+/// under the capsule.
 fn quiesce(conn: &Connection, web: &Web, connect: super::stream::Id, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 	web.state.poll(waiter, |state, cx| {
 		while let Poll::Ready(Ok(recv)) = conn.poll_accept_uni(state.uni_park.hold(cx)) {
@@ -912,11 +914,8 @@ fn quiesce(conn: &Connection, web: &Web, connect: super::stream::Id, waiter: &ki
 			.chain(pending.map(driver_recv::Stream::id))
 			.chain([connect])
 			.collect();
-		ready!(conn.poll_quiesce(waiter, http3_code(WT_SESSION_GONE), &keep))?;
-		match state.pending_uni.is_empty() && state.pending_bi.is_empty() {
-			true => Poll::Ready(Ok(())),
-			false => Poll::Pending,
-		}
+		conn.poll_quiesce(waiter, http3_code(WT_SESSION_GONE), &keep)
+			.map_err(Error::from)
 	})
 }
 
