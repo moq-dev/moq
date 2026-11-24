@@ -5,7 +5,7 @@
  */
 
 import { Duration, Instant, now, sleepUntil } from "@moq/clock";
-import { Derived, type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
+import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import * as cache from "./cache.ts";
 import { Delivered } from "./delivered.ts";
 import { answered, type Change, type Edit, type JoinAsk, joinTick, Prefs, Subscriptions } from "./demand.ts";
@@ -499,7 +499,6 @@ export class Request {
 	#producer: Producer;
 	#pending: Set<Request>;
 	#lookups?: TrackRequestOptions["lookups"];
-	#wanted?: Getter<boolean>;
 
 	private constructor(options: TrackRequestOptions) {
 		this.name = options.name;
@@ -512,19 +511,12 @@ export class Request {
 	static {
 		hooks.makeRequest = (options) => new Request(options);
 		hooks.stageRequest = (request, info) => request.#stage(info);
-		hooks.requestWanted = (request) => {
-			const wanted = request.#producer.demand().wanted;
-			request.#wanted ??= request.#lookups
-				? new Derived([wanted, request.#lookups.pending], (subscribed, lookups) => subscribed || lookups > 0)
-				: wanted;
-			return request.#wanted;
-		};
 		hooks.keepRequest = (request) => {
 			if (request.#lookups) request.#lookups.opened = false;
 		};
 	}
 
-	/** Watch the subscribers waiting for this request. */
+	/** Watch the subscribers and info lookups waiting for this request. */
 	demand(): Demand {
 		return this.#producer.demand();
 	}
@@ -1349,6 +1341,8 @@ let makeDemand: (name: string, signals: DemandSignals, state: TrackState) => Dem
 // What a producer reports through its {@link Demand}.
 interface DemandSignals {
 	wanted: Getter<boolean>;
+	// Whether a subscriber, not just an info lookup, is attached.
+	subscribed: () => boolean;
 	refresh: Getter<boolean>;
 	asked: Getter<bigint | undefined>;
 }
@@ -1380,9 +1374,13 @@ export class Demand {
 		hooks.demandPriority = (demand) => demand.#state.info.peek()?.priority ?? DEFAULT_PRIORITY;
 		hooks.demandReleased = (demand) => demand.#state.closed;
 		hooks.demandAsked = (demand) => demand.#signals.asked;
+		hooks.demandSubscribed = (demand) => demand.#signals.subscribed();
 	}
 
-	/** Whether anyone subscribes to the open track. Watch it (`effect.get` / `.peek()`) to follow demand. */
+	/**
+	 * Whether anyone subscribes to the open track, or holds an info lookup on it, such as a relay
+	 * answering a downstream TRACK. Watch it (`effect.get` / `.peek()`) to follow demand.
+	 */
 	get wanted(): Getter<boolean> {
 		return this.#signals.wanted;
 	}
@@ -1500,8 +1498,10 @@ export class Producer {
 	// One independent downstream state per live subscriber.
 	#sinks = new Set<TrackState>();
 
-	// Whether any subscriber is attached, watched through {@link demand}.
+	// Whether any subscriber or held info lookup is attached, watched through {@link demand}.
 	#wanted = new Signal(false);
+	// The info lookups holding the track, which count as demand as subscribers do.
+	#holds = 0;
 	// Whether one asks for a new group now; see {@link Demand.refresh}.
 	#refreshing = new Signal(false);
 	// The group start asked for while it is past every key written; see `hooks.demandAsked`.
@@ -1549,6 +1549,7 @@ export class Producer {
 			name,
 			{
 				wanted: this.#wanted,
+				subscribed: () => this.#sinks.size > 0,
 				refresh: new Read(this.#refreshing, (asking) => asking && this.#sent()),
 				asked: new Read(this.#asked, (asked) => asked !== undefined && this.#sent()),
 			},
@@ -1853,6 +1854,14 @@ export class Producer {
 		};
 		hooks.cachedLargest = (producer) => producer.#cachedLargest();
 		hooks.acceptedInfo = (producer) => producer.#state.info.peek();
+		hooks.holdTrack = (producer) => {
+			producer.#holds++;
+			producer.#reportWanted();
+			return () => {
+				producer.#holds--;
+				producer.#reportWanted();
+			};
+		};
 		hooks.reportedLargest = (producer, largest, finished) => {
 			producer.#advanceObject(largest);
 			const current = producer.#state.largest.peek();
@@ -2253,9 +2262,9 @@ export class Producer {
 		return entry.arrived.checkedAdd(refresh.interval)?.max(current);
 	}
 
-	// Report the demand: whether anyone subscribes, and the group start asked for while it is
-	// past every key written, which is the next free key once a pending refresh is due. A
-	// deferred one arms a wakeup to report again when it comes due.
+	// Report the demand: whether anyone subscribes to or holds the open track, and the group start
+	// asked for while it is past every key written, which is the next free key once a pending
+	// refresh is due. A deferred one arms a wakeup to report again when it comes due.
 	#reportWanted(): void {
 		const current = now();
 		const request = this.#pending;
@@ -2263,10 +2272,12 @@ export class Producer {
 		const due = pending?.le(current) === true;
 		const start = due ? max(this.#received, this.#floor) : this.#floor;
 		const asked = start >= this.#received ? start : undefined;
-		const wanted = this.#sinks.size > 0;
 		this.#asked.set(asked);
-		this.#wanted.set(wanted);
-		const refreshing = wanted && asked !== undefined;
+		// A closed track wants nothing, though a lookup still holds it.
+		const open = this.#state.closed.peek() === undefined;
+		this.#wanted.set(open && (this.#sinks.size > 0 || this.#holds > 0));
+		// Only a subscriber reads the group a refresh asks for.
+		const refreshing = this.#sinks.size > 0 && asked !== undefined;
 		// A request due in the batch that ended the last one leaves the level unchanged, so it
 		// notifies anyway: the publisher must read it to send it.
 		if (refreshing && request !== undefined && due && request !== this.#announced) {
@@ -3248,6 +3259,7 @@ export class Producer {
 		// from another copy. Releasing it here would end that continuation at its next short close.
 		for (const sink of this.#sinks) closeTrackState(sink, abort);
 		this.#sinks.clear();
+		this.#reportWanted();
 		// The former live edge becomes evictable too, its idle window restarted, so the close
 		// never reclaims a group its subscribers have yet to drain.
 		const edge = this.#edgeEntry();
@@ -3499,11 +3511,10 @@ export class Subscriber {
 	// out earlier can outlive this subscriber, as one a resumed reader still writes from a copy
 	// it let go of, and its budget still runs from its successor's arrival.
 	#arrivals?: { key: bigint; arrived: Instant }[];
-	// The misses this reader asked a fill for, each judged once, and those asked again after the
-	// answer was evicted before this reader took it, which is never repeated: a slow reader's
-	// refills cannot evict each other without bound. Mirrors the Rust `Misses`.
+	// The misses this reader asked a fill for, each judged once, and asked again however often
+	// the answer is evicted before this reader takes it: a key a reader is owed is never lost
+	// to the cache. Mirrors the Rust `Misses`.
 	#asked: Run[] = [];
-	#refilled: Run[] = [];
 	// Fill-owed runs this reader gave up once its budget convicted them: never wanted again, so
 	// the fills withdraw them and their handlers hear, as the Rust `Misses` gives up a stale run.
 	#givenUp: Run[] = [];
@@ -3864,7 +3875,6 @@ export class Subscriber {
 		this.#reclip(this.#givenUp, start, end, (run) => this.#reads(run.start, run.end));
 		this.#reclip(this.#heads, start, end, (run) => this.#reads(run.start, run.end));
 		this.#reclip(this.#asked, start, end, (run) => this.#wants(run.start, run.end));
-		this.#reclip(this.#refilled, start, end, (run) => this.#wants(run.start, run.end));
 		fillsOf(producer).moved(asker, start, end);
 		this.#fillMoves.update((moves) => moves + 1);
 	}
@@ -3889,7 +3899,7 @@ export class Subscriber {
 			for (const run of given) fills.moved(this.#state.asker, run.start, run.end);
 		} else {
 			// At once, before the fills withdraw what it no longer reads: a widening back asks those
-			// groups afresh, never through the one refill an evicted answer is allowed.
+			// groups afresh.
 			this.#clipAsked();
 			fills.moved(this.#state.asker);
 		}
@@ -3903,9 +3913,6 @@ export class Subscriber {
 		if (this.#givenUp.length > 0) this.#givenUp = this.#givenUp.flatMap((run) => this.#reads(run.start, run.end));
 		if (this.#heads.length > 0) this.#heads = this.#heads.flatMap((run) => this.#reads(run.start, run.end));
 		if (this.#asked.length > 0) this.#asked = this.#asked.flatMap((run) => this.#wants(run.start, run.end));
-		if (this.#refilled.length > 0) {
-			this.#refilled = this.#refilled.flatMap((run) => this.#wants(run.start, run.end));
-		}
 	}
 
 	// Raise the key cursor to `floor`: what lies below it is passed for good.
@@ -4481,7 +4488,7 @@ export class Subscriber {
 			const asker = this.#askerOf();
 			// A moving read floor retires only its prefix: what lies above it stays asked.
 			const read = max(this.#cursor.peek().start, this.#nextKey);
-			for (const runs of [this.#asked, this.#refilled, this.#givenUp, this.#heads]) cutRun(runs, 0n, read);
+			for (const runs of [this.#asked, this.#givenUp, this.#heads]) cutRun(runs, 0n, read);
 			cutRun(this.#adopted, 0n, read);
 			const budget = drift.budget;
 			const coverage = this.#coverage();
@@ -4700,42 +4707,42 @@ export class Subscriber {
 	}
 
 	// Ask a fill for the missed run `[start, end)`, but for each stretch under one budget whose
-	// newest group is stale: what was never asked, and once more what was asked but is missed again.
+	// newest group is stale: what was never asked, and again what was asked but is missed again.
 	#askMiss(start: bigint, end: bigint, drift: Drift, asker: Asker): void {
 		for (const [run] of drift.budget.runs(start, end)) {
 			if (!this.#staleAt(run.end - 1n, drift)) this.#askRun(run.start, run.end, asker);
 		}
 	}
 
-	// Ask a fill for the missed run `[start, end)`: what was never asked, and once more what was
-	// asked but is missed again.
+	// Ask a fill for the missed run `[start, end)`: what was never asked, and again what was asked
+	// but is missed again.
 	#askRun(start: bigint, end: bigint, asker: Asker): void {
-		const fills = fillsOf(this.#state.producer as Producer);
-		// Asked before and missed again, unless a fill still brings it: its answer was evicted
-		// before this reader took it.
+		const producer = this.#state.producer as Producer;
+		const fills = fillsOf(producer);
+		// Asked before and missed again, unless a fill still brings it.
 		const again = intersect(this.#asked, start, end).flatMap((run) =>
-			runGaps(this.#refilled, run.start, run.end).flatMap((refill) =>
-				runGaps([...fills.covered(refill.start, refill.end, asker)], refill.start, refill.end),
-			),
+			runGaps([...fills.covered(run.start, run.end, asker)], run.start, run.end),
 		);
 		// Only what a fill took counts as asked: with no handler open, a miss no fill covers is
 		// left to ask once one opens.
 		for (const gap of runGaps(this.#asked, start, end)) {
 			for (const run of fills.ask(gap.start, gap.end, asker)) insertRun(this.#asked, run.start, run.end);
 		}
-		// Refilled and missed again, unless a fill still brings it: given up and named, never
-		// asked a third time, as the Rust `Misses` gives up a refill evicted again.
-		const lost = intersect(this.#refilled, start, end).flatMap((run) =>
-			runGaps([...fills.covered(run.start, run.end, asker)], run.start, run.end),
-		);
-		for (const refill of again) {
-			for (const run of fills.ask(refill.start, refill.end, asker)) insertRun(this.#refilled, run.start, run.end);
+		// An answer that failed is still cached, failed, and given up: asking again would repeat a
+		// source's failure without end. One evicted before this reader took it is asked again however
+		// often. Mirrors the Rust `Misses::next_filled`.
+		const failed: Run[] = [];
+		for (const run of again) {
+			for (const key of cachedIn(producer, run.start, run.end)) {
+				if (!cachedHolds(producer, key)) insertRun(failed, key, key + 1n);
+			}
+			for (const lost of runGaps(failed, run.start, run.end)) fills.ask(lost.start, lost.end, asker);
 		}
-		for (const run of lost) {
+		for (const run of failed) {
 			insertRun(this.#givenUp, run.start, run.end);
-			asker.refuse(run.start, run.end, new StreamError(StreamCode.NotFound, { message: "group evicted again" }));
+			asker.refuse(run.start, run.end, new StreamError(StreamCode.NotFound, { message: "fill answer failed" }));
 		}
-		if (lost.length > 0) this.#fillsMoved(lost);
+		if (failed.length > 0) this.#fillsMoved(failed);
 	}
 
 	// Whether `group` is one this reader hands out only from its first frame, which it lacks: the
