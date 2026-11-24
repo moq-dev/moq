@@ -9286,7 +9286,10 @@ impl Asked {
 			let since = &mut self.since;
 			let times = changes(&self.times, &times).into_iter().map(|(time, waits)| {
 				let at = match waits {
-					true => *since.entry(time).insert_entry(refusals).get(),
+					true => {
+						since.insert(time, refusals);
+						refusals
+					}
 					false => since.remove(&time).expect("a counted time"),
 				};
 				subs.ask(time, at, waits)
@@ -17554,7 +17557,10 @@ mod test {
 		producer.refuse_time(1500, Error::NotFound);
 		assert_eq!(asks(&producer), [1700], "its readers stop asking at once");
 		for subscriber in &mut waiting {
-			assert!(matches!(subscriber.refused(), Some(Error::NotFound)), "fails with its error");
+			assert!(
+				matches!(subscriber.refused(), Some(Error::NotFound)),
+				"fails with its error"
+			);
 		}
 		assert!(other.refused().is_none(), "another time still waits");
 
@@ -17562,7 +17568,11 @@ mod test {
 		assert!(later.refused().is_none(), "a later reader waits");
 		assert_eq!(asks(&producer), [1500, 1700], "and asks again");
 		drop(waiting);
-		assert_eq!(asks(&producer), [1500, 1700], "the failed readers leaving takes no other ask");
+		assert_eq!(
+			asks(&producer),
+			[1500, 1700],
+			"the failed readers leaving takes no other ask"
+		);
 		producer.refuse_time(1500, Error::Cancel);
 		assert!(matches!(later.refused(), Some(Error::Cancel)));
 		assert_eq!(asks(&producer), [1700]);
