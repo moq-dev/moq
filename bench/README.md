@@ -977,7 +977,7 @@ night on `main`, under stock Valgrind on a hosted runner, through
 [rust2-bench](https://github.com/kixel-ai/rust2/tree/main/bench/runner). Each
 benchmark runs alone in its own Valgrind process, and most counts repeat run to
 run, so a change of a few percent shows without the paired comparison's rounds;
-some still vary by up to 17%
+some still vary by up to 32%
 ([quest](/quest/m9/repeatable-instruction-counts.md)). It does not see syscalls,
 I/O, contention, or caches, and CodSpeed's Criterion, which counts them, skips
 `iter_custom` benches, so `just rs instructions` builds only single-threaded

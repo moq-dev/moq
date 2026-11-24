@@ -39,7 +39,7 @@
     # nixpkgs pins (`just rs instructions`). A bump that moves that Valgrind starts new
     # Kixel Quest series, since another Valgrind can count differently.
     rust2 = {
-      url = "github:kixel-ai/rust2/af1a76643700cf0314b7a2e02ef159c563712c2e";
+      url = "github:kixel-ai/rust2";
       inputs.flake-utils.follows = "flake-utils";
       inputs.quest.follows = "quest";
     };
