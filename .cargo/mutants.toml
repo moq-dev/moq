@@ -37,6 +37,10 @@ exclude_re = [
     # end, and `restate` already dropped this node's own claim first, with its source,
     # which wins the tie.
     'replace && with \|\| in Router<N, I, A>::publish$',
+    # The best route is picked from the usable ones and reselected whenever they change
+    # (`check` asserts it), so a best route not through the asker is a usable one: the
+    # shortcut only skips the walk.
+    'replace match guard Some\(best\.via\) != asker with false in Router<N, I, A>::awaits$',
     # resume.rs: the sweep of handed-out groups only bounds memory, since
     # `let_go` drops dead entries itself before anything reads `out`.
     'replace (== with !=|> with >=) in Reader::hand_out$',
