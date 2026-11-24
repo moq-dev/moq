@@ -392,13 +392,10 @@ export class Routed {
 			const by = BigInt(Path.parts(path).length - Path.parts(at).length);
 			for (const id of this.#byPath.get(at) ?? []) {
 				const live = this.#claim(id);
-				const shown = by === 0n ? live.claim : { ...live.claim, above: live.claim.above + by };
-				candidates.push({
-					prefix: at,
-					identity: live.identity,
-					filed: this.#candidate(live, live.claim),
-					shown: this.#candidate(live, shown),
-				});
+				const filed = this.#candidate(live, live.claim);
+				const shown =
+					by === 0n ? filed : this.#candidate(live, { ...live.claim, above: live.claim.above + by });
+				candidates.push({ prefix: at, identity: live.identity, filed, shown });
 			}
 		}
 		return candidates;
@@ -415,17 +412,34 @@ export class Routed {
 		if (visible(reader, path)) {
 			const candidates = this.#candidates(reader, path);
 			// The same pick a consume of `path` makes from the cache, ranked where each claim is
-			// filed, newest first at each filing.
-			const pick = (among: Candidate[]) =>
-				mostSpecific(
+			// filed, newest first at each filing. Grouped by filing in one pass, so a refresh stays
+			// linear in the claims shown.
+			const pick = (among: Candidate[]) => {
+				// Alone, it is the pick: nothing supersedes or outranks it.
+				if (among.length === 1) return among[0];
+				const filings = new Map<Path.Valid, Candidate[]>();
+				for (let i = among.length - 1; i >= 0; i--) {
+					const candidate = among[i];
+					const filing = filings.get(candidate.prefix);
+					if (filing) filing.push(candidate);
+					else filings.set(candidate.prefix, [candidate]);
+				}
+				return mostSpecific(
 					path,
-					(prefix) => among.filter((candidate) => candidate.prefix === prefix).reverse(),
+					(prefix) => filings.get(prefix) ?? [],
 					(candidate) => ({ identity: candidate.identity, route: candidate.filed }),
 				);
+			};
 			if (reader.claims) {
-				// Each instance's pick, as a consume pinned to it makes.
-				for (const instance of new Set(candidates.map((candidate) => candidate.filed.instance))) {
-					const best = pick(candidates.filter((candidate) => candidate.filed.instance === instance));
+				// Each instance's pick, as a consume pinned to it makes, from one pass over the claims.
+				const instances = new Map<Instance.Valid | undefined, Candidate[]>();
+				for (const candidate of candidates) {
+					const own = instances.get(candidate.filed.instance);
+					if (own) own.push(candidate);
+					else instances.set(candidate.filed.instance, [candidate]);
+				}
+				for (const [instance, own] of instances) {
+					const best = pick(own);
 					if (best) now.set(instance, best.shown);
 				}
 			} else {
