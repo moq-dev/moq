@@ -10989,6 +10989,58 @@ mod tests {
 		}
 	}
 
+	/// Claims of one prefix filed at different depths tie as one tier: the one announced
+	/// first keeps a path beneath both, whichever filing it has, and one announced again
+	/// ranks as newly arrived, as `js/net`'s `compareTie` has it.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn an_equal_claim_filed_elsewhere_keeps_the_one_in_use() {
+		let named = instance();
+		let route = |hop: u64, above: u8| {
+			RouteInfo::new()
+				.with_instance(named.clone(), 0)
+				.with_hops(hops(&[hop]))
+				.with_lane(Lane {
+					above,
+					..Lane::default()
+				})
+		};
+		// Hop 10 is filed at `src/a` a level above its own prefix, hop 11 at `src`.
+		let filing = |hop: u64| match hop {
+			10 => ("src/a", route(10, 1)),
+			_ => ("src", route(11, 0)),
+		};
+		for (first, second) in [(10, 11), (11, 10)] {
+			let producer = Config {
+				update_hold: Duration::ZERO,
+				..Config::from(origin(1))
+			}
+			.produce();
+			let peer = producer.clone().with_link(Link::Peer);
+			let resolved = || {
+				let table = producer.shared.read();
+				let path = Path::new("src/a/b").unwrap();
+				let entry = table.best_route(&path, Horizon::default(), &HashSet::new(), |_| true);
+				entry.map(|entry| entry.hops.clone())
+			};
+			let forward = |hop| {
+				let (prefix, route) = filing(hop);
+				peer.forward(prefix, route).unwrap()
+			};
+			let held = forward(first);
+			let _later = forward(second);
+			assert_eq!(resolved(), Some(hops(&[first])), "the later claim took requests");
+			drop(held);
+			assert_eq!(resolved(), Some(hops(&[second])));
+			let _again = forward(first);
+			assert_eq!(
+				resolved(),
+				Some(hops(&[second])),
+				"the claim announced again took requests"
+			);
+		}
+	}
+
 	/// A publisher that restarts while its old session lingers announces its own path under
 	/// a new first hop. The restart takes over at once whichever chain hashes lower, so new
 	/// requests never wait on the old session.

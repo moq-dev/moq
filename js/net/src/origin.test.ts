@@ -2406,7 +2406,7 @@ test("a covering root shows the local broadcast a request takes over an equal cl
 // A claim announced after starting hidden, or announced again after a withdrawal, is received then,
 // as Rust files a new entry for each announce, so beneath the path it yields a full tie across
 // filings to the claim held longer.
-test("a claim announced again is the most recently received", async () => {
+test("a claim announced again ranks as newly received", async () => {
 	const origin = new Producer();
 	const root = Path.from("src/a/b");
 	const instance = { id: Instance.parse("cam"), epoch: 0n };
