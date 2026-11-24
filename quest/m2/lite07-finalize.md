@@ -36,10 +36,9 @@ Routes and announces (finished in [moq-dev/moq#9202](https://github.com/moq-dev/
 not the later federation/P2P integrations. Decided 2026-10-13: routes now
 owns the tier/partition correctness tests, so they run before the cut.
 Reaffirmed 2026-11-14 (maintainer, the m2 triage, below). Peer
-grants and metadata-only subscriptions do not gate it: neither is clustering
-stability. Both are additive and, per the freeze policy, target whichever lite
-wip is current when they land. Decided 2026-10-25: no routing identity proof
-gates the cut, and lite-07 routing identities stay declared and unverified
+grants do not gate it: they are not clustering stability. Metadata-only
+subscriptions did not either until 2026-11-23 (below). Decided 2026-10-25: no
+routing identity proof gates the cut, and lite-07 routing identities stay declared and unverified
 (2026-11-02: peer grants are dropped and no key proof is planned). Reversed
 2026-11-04 (maintainer, /quest-unblock): a peer proves a route key before the
 cut, which landed as lite-07's Route Key Setup Parameter. Reversed again
@@ -244,8 +243,18 @@ not freeze with a wire-divergent migration hack, and this quest fixes the
 changelog typo at `drafts/draft-lcurley-moq-lite.md:2380` during the cut
 (rejected: leaving the temporary migration in place).
 
+Decided 2026-11-23 (maintainer, /quest-run): ✅ the wire for
+[metadata-only subscriptions](/quest/m3/route-health/meta.md) goes into
+lite-07 before the cut, not the implementation, so
+[route-health failover](/quest/m3/route-health/failover.md), which now has an
+immediate user, is not blocked on lite-08 (rejected: keeping it for lite-08).
+This reverses the rule above that metadata-only subscriptions don't gate the
+cut. [Metadata mode on the lite-07 wire](/quest/m2/lite07-metadata.md) joins
+Required; the implementation stays in m3 and lands on lite-07's wire.
+
 ## Required
 
+- [Metadata mode on the lite-07 wire](/quest/m2/lite07-metadata.md) - `Meta` on SUBSCRIBE, the payload-less FRAME, and the refusal a peer without metadata mode answers with
 - [Count lite-07 Path Keep by Path::parts](/quest/m2/lite07-path-keep-parts.md) - removes the temporary `raw_parts` / `base.split("/")` migration before lite-07 freezes
 - [Origin route rank](/quest/m1/lite07-routing/origin-route-rank.md) - bridged routes keep drain and priority, and the draft's rank text matches the code
 

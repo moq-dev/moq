@@ -3,8 +3,9 @@
 ## Goal
 
 Rust and JS subscribe to a track's group and frame progress without its
-payload, as a subscription of its own beside payload subscriptions, in
-whichever lite wip is current when this lands. A chain of relays forwards
+payload, as a subscription of its own beside payload subscriptions, on the
+lite-07 wire [lite07-metadata](/quest/m2/lite07-metadata.md) defines; a
+lite-07 peer of ours stops refusing the mode. A chain of relays forwards
 and aggregates that demand without pulling the media behind it. A reader
 that wants the payload opens a payload subscription from its first missing
 frame, and nothing changes mode in place.
@@ -13,7 +14,7 @@ frame, and nothing changes mode in place.
 
 Decided 2026-11-16 (maintainer, on
 [moq-dev/moq#8882](https://github.com/moq-dev/moq/pull/8882), which built
-the shape below it and stays a parked draft):
+the shape below it and is closed with its branch kept):
 
 - ✅ No promotion in place: "rethinking drop in promotion makes sense. Keep
   SUBSCRIBE and SUBSCRIBE_METADATA logically separate." A metadata
@@ -33,13 +34,19 @@ the shape below it and stays a parked draft):
   the mode marker in each group stream header goes, and SUBSCRIBE_UPDATE
   gains no field. This reverses 2026-10-13's marker, which existed for
   streams opened before a mode update.
-- Recommended, to confirm when this starts: on the wire, the existing
-  SUBSCRIBE with a mode set when it opens and never updated, since ranges,
-  priority, drops, and skips are the same for both (the alternative is a
-  message of its own, which the maintainer's "SUBSCRIBE_METADATA" may mean).
-  In the API, an entry and a consumer type of their own, so a payload read
-  of a header-only frame cannot be written: the C binding in that PR needed
-  an `Unsupported` error for it.
+
+Decided 2026-11-23 (maintainer, /quest-run): ✅ the wire goes into lite-07
+before the cut as [lite07-metadata](/quest/m2/lite07-metadata.md), and this
+quest is the implementation that rides on it (rejected: the whole quest in
+lite-08), since the [epic](/quest/m3/route-health/README.md) now has a
+user. That quest settles the wire this
+Plan recommended: a `Meta` byte on SUBSCRIBE, set when it opens, the
+payload-less FRAME, and a refusal code. Its Plan records what this quest's
+code must keep conforming to.
+
+- Recommended, to confirm when this starts: in the API, an entry and a
+  consumer type of their own, so a payload read of a header-only frame cannot
+  be written: the C binding in that PR needed an `Unsupported` error for it.
 
 Standing from 2026-10-13 and 2026-11-02 (maintainer), carried from the quest
 deleted in [moq-dev/moq#8423](https://github.com/moq-dev/moq/pull/8423)
@@ -58,12 +65,15 @@ deleted in [moq-dev/moq#8423](https://github.com/moq-dev/moq/pull/8423)
   leaves and metadata demand remains, the relay opens the metadata
   subscription and closes the payload one.
 - ✅ An older version never emulates it by fetching and discarding media: it
-  reports the mode unsupported. No moq-transport counterpart is needed.
+  reports the mode unsupported. No moq-transport counterpart is needed. A
+  lite-07 peer that refuses the mode is reported the same way, and a relay
+  whose upstream refuses refuses its own readers.
 
 What the parked PR learned, on branch `quest/m3/route-health/meta` at
 `c00addff48`:
 
-- Carries over: the payload-less FRAME in both codecs; a header read that
+- Carries over: the payload-less FRAME in both codecs, whose bytes
+  [lite07-metadata](/quest/m2/lite07-metadata.md) fixes; a header read that
   returns the declared size without waiting for or inflating a compressed
   frame (`read_info`, `readInfo`); the bindings' header read; the refusal on
   lite-06 and moq-transport; and the interop lane.
@@ -83,11 +93,14 @@ Tests: metadata-only traffic across several hops carries no payload; a relay
 whose last payload reader leaves keeps forwarding headers to its metadata
 readers; mixed demand; a payload subscription opened mid-group from a
 position seen as metadata; a fill while only metadata demand stands; empty
-frames; cancellation; refusal on an unsupported version. Sweep tracks,
-readers, and relay depth for bytes, wakes, and memory. Update
-`drafts/draft-lcurley-moq-lite.md` and both codecs together, and add the mode
-to `just test interop --all`.
+frames; cancellation; refusal on an unsupported version and by a lite-07
+peer without the mode. Sweep tracks, readers, and relay depth for bytes,
+wakes, and memory. Add the mode to `just test interop --all`.
 
-Public API: a metadata subscription in Rust, JS, and the bindings. Wire: in
-the current lite wip, the mode on SUBSCRIBE (or a message of its own) and
-payload-less FRAMEs.
+Public API: a metadata subscription in Rust, JS, and the bindings. Wire: none
+beyond [lite07-metadata](/quest/m2/lite07-metadata.md); a lite-07 publisher
+of ours serves the mode instead of refusing it.
+
+## Required
+
+- [Metadata mode on the lite-07 wire](/quest/m2/lite07-metadata.md) - the SUBSCRIBE mode, payload-less FRAME, and refusal this serves

@@ -57,6 +57,15 @@ nothing switches mode in place; the track moves as it moves between any two
 routes. The epic is deferred behind the route layer: "we don't have an
 immediate user".
 
+Decided 2026-11-23 (maintainer, /quest-run): ✅ Kixel is the immediate user
+the 2026-11-16 deferral lacked. Its robot failover
+([kixel-ai/kixel.ai#242](https://github.com/kixel-ai/kixel.ai/pull/242)) fixes
+a camera stuck on a silently dead LAN route through this epic's metadata
+standby and [failover](/quest/m3/route-health/failover.md). So the wire goes
+into lite-07 before the cut as
+[lite07-metadata](/quest/m2/lite07-metadata.md), and failover is not blocked
+on lite-08.
+
 New on 2026-11-15, from the prior art this is closest to:
 
 - The standby is a route whose path does not name this node, and one that
