@@ -1005,7 +1005,8 @@ Add `--benchmarks <file>`, one name a line, to build and count only those
 benchmarks' targets. `compare` selects the same packages and targets at both
 commits, so its base needs every package `sh/rs/instructions.sh` lists. It
 counts the base in another worktree, whose path alone can move a count, so
-recount a change it reports in one checkout before trusting it. It keeps each
+recount a change it reports in one checkout, with `--jobs 1` as CI counts,
+before trusting it. It keeps each
 checkout's base worktree and build under `~/.cache/rust2-bench` for the next
 compare; delete the directory, then `git worktree prune`, to reclaim them.
 
