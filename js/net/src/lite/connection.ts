@@ -591,7 +591,7 @@ export class Connection implements Session {
 	}
 
 	// Lite-07: everything the peer says about discovery and routing, in order, until it leaves.
-	// The peer may only finish the stream: a reset or a message cut short breaks the session.
+	// The peer leaves by finishing or resetting the stream; a message cut short breaks the session.
 	async #runAnnounce(stream: Reader) {
 		for (;;) {
 			let msg: AnnounceBroadcast | undefined;

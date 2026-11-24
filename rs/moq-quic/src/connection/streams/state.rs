@@ -460,7 +460,7 @@ impl StreamsState {
 
 	/// The streams this endpoint sends on that a quiesce ends, except `keep` and those the
 	/// application has yet to accept. A stream stays until the peer acknowledged its end.
-	pub(crate) fn sending(&self, keep: &[StreamId]) -> Vec<StreamId> {
+	pub(crate) fn sending(&self, keep: &FxHashSet<StreamId>) -> Vec<StreamId> {
 		self.send
 			.keys()
 			.filter(|&id| {
@@ -524,7 +524,7 @@ impl StreamsState {
 	/// A stream is asked once, and a stream the application already stopped was asked by its stop.
 	/// The readers keep reading: each stream ends with the peer's reset or FIN as usual. A stream
 	/// waiting to be accepted counts as open, since only the application can tell whether to keep it.
-	pub(crate) fn quiesce(&mut self, pending: &mut Retransmits, code: VarInt, keep: &[StreamId]) -> bool {
+	pub(crate) fn quiesce(&mut self, pending: &mut Retransmits, code: VarInt, keep: &FxHashSet<StreamId>) -> bool {
 		let mut open = false;
 		let mut asked = false;
 		for (&id, slot) in &mut self.recv {

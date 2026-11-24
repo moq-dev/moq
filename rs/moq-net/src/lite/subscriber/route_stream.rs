@@ -486,9 +486,10 @@ impl Running {
 					return Ok(true);
 				}
 				// The peer may only finish the stream: while the session lives, whatever else
-				// broke it lost what the peer said. An ending session's own end says why.
+				// broke it lost what the peer said. An ending session's own end says why, which a
+				// read can report before the session's close is seen.
 				Poll::Ready(Err(err)) => {
-					if subscriber.session.poll_ending(waiter).is_ready() {
+					if matches!(err, Error::Session(_)) || subscriber.session.poll_ending(waiter).is_ready() {
 						return Err(err);
 					}
 					tracing::debug!(%err, "the peer's Announce Stream broke");

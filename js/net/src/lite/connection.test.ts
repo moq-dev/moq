@@ -1227,6 +1227,9 @@ for (const name of ["resets", "stops"] as const) {
 				late.push(up.route(Path.from("up/late")));
 			}
 			expect(await atClient.next()).toMatchObject({ prefix: Path.from("down/room"), kind: "offline" });
+			// What the peer still sends on its own stream about the routes that ended, such as a
+			// claim it now withdraws, is ignored.
+			if (name === "stops") room.broadcast.close();
 			await settle();
 			expect(closed).toBe(false);
 

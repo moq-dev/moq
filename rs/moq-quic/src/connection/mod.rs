@@ -525,7 +525,9 @@ impl Connection {
 		if let Some(err) = self.streams.waits.lost() {
 			return Poll::Ready(Err(err.clone()));
 		}
-		let sending = self.streams.sending(keep);
+		// The peer's stalled streams can fill `keep`, so look it up in constant time.
+		let keep: rustc_hash::FxHashSet<StreamId> = keep.iter().copied().collect();
+		let sending = self.streams.sending(&keep);
 		// The writers stop, and what they wrote reaches the peer before any stream ends, so it
 		// reads that, such as a refusal, ahead of the resets and stops, whatever the packets do.
 		let mut unacked = false;
@@ -538,7 +540,7 @@ impl Connection {
 		}
 		self.reset_quiesced();
 		let pending = &mut self.spaces[SpaceId::Data].pending;
-		if !self.streams.quiesce(pending, code, keep) && sending.is_empty() {
+		if !self.streams.quiesce(pending, code, &keep) && sending.is_empty() {
 			return Poll::Ready(Ok(()));
 		}
 		// A stream the peer opens, or either half of one ending, may change the answer.

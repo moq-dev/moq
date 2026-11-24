@@ -472,9 +472,12 @@ export class Routed {
 		this.#release();
 	}
 
-	/** Apply one message the peer sent on its Announce Stream as a publisher. */
+	/**
+	 * Apply one message the peer sent on its Announce Stream as a publisher. Once the peer left,
+	 * whatever it still sends about the claims that ended with it is moot.
+	 */
 	async receive(msg: AnnounceBroadcast): Promise<void> {
-		if (this.#closing) return;
+		if (this.#closing || this.#finished) return;
 		switch (msg.status) {
 			case "ok":
 				this.#ok();
