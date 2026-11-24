@@ -15567,10 +15567,10 @@ mod test {
 		std::task::Wake::wake_by_ref(&repoll);
 		assert!(!repoll.known.load(Ordering::SeqCst), "a frameless header shows no edge");
 
-		group
-			.write_frame(crate::Timestamp::unscaled(5), &b"x"[..])
-			.unwrap();
+		group.write_frame(crate::Timestamp::unscaled(5), &b"x"[..]).unwrap();
 		assert!(repoll.known.load(Ordering::SeqCst), "the first frame wakes the reader");
+		// The waiter's waker holds the reader: drop it to free both.
+		repoll.reader.lock().unwrap().1 = None;
 	}
 
 	/// An idle copy that declared an end it has not reached yet still waits for the live
