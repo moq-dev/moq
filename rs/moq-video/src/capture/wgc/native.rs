@@ -91,6 +91,18 @@ fn framerate(config: &Config) -> FrameRate {
 	config.framerate.unwrap_or(FrameRate::integer(30))
 }
 
+/// The output size that `config` asks for, if any. A dimension it leaves out
+/// keeps the `native` one, as on macOS.
+fn scaled(config: &Config, native: Size) -> Option<Size> {
+	if config.width.is_none() && config.height.is_none() {
+		return None;
+	}
+	Some(Size::new(
+		config.width.unwrap_or(native.width),
+		config.height.unwrap_or(native.height),
+	))
+}
+
 fn interval(rate: FrameRate) -> Duration {
 	Duration::from_nanos(1_000_000_000 * u64::from(rate.denominator()) / u64::from(rate.numerator()))
 }
@@ -374,8 +386,10 @@ impl Capture {
 				let texture: ID3D11Texture2D =
 					unsafe { access.GetInterface() }.map_err(|e| error("read WGC texture", e))?;
 				// An owned NV12 copy, so the channel can hold it to repeat without
-				// keeping a WGC pool frame.
-				let texture = d3d11::Texture::capture(&self.device, &texture, opened.unwrap())?;
+				// keeping a WGC pool frame. It has the size the caller asked for,
+				// scaled in the same pass as the conversion.
+				let native = opened.unwrap();
+				let texture = d3d11::Texture::capture_scaled(&self.device, &texture, native, scaled(config, native))?;
 				chan.push_native(Surface::Texture(texture), timestamp);
 				startup.delivered();
 			}

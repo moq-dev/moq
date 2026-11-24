@@ -2260,7 +2260,53 @@ pub mod d3d11 {
 		/// render target) to an owned, even-sized NV12 texture.
 		#[cfg(any(feature = "capture", feature = "render"))]
 		pub(crate) fn capture(device: &ID3D11Device, source: &ID3D11Texture2D, size: Size) -> Result<Self, Error> {
-			let plan = Plan::capture(size)?;
+			Self::capture_scaled(device, source, size, None)
+		}
+
+		/// Like [`capture`](Self::capture), but scales the picture to `scaled`,
+		/// if set, so that a capture that wants a small picture of a large
+		/// screen never converts it at full size.
+		///
+		/// The conversion scales by up to a half, and the NV12 scaler does the
+		/// rest ([`Plan::capture_stage`]). Either way the frame has the color
+		/// [`Color::infer`] gives its output size.
+		#[cfg(any(feature = "capture", feature = "render"))]
+		pub(crate) fn capture_scaled(
+			device: &ID3D11Device,
+			source: &ID3D11Texture2D,
+			size: Size,
+			scaled: Option<Size>,
+		) -> Result<Self, Error> {
+			let Some(target) = scaled else {
+				let plan = Plan::capture(size, None)?;
+				return Self::convert(device, source, size, plan, Color::infer(plan.target));
+			};
+			// Validates the size the caller asked for, and evens it.
+			let target = Plan::capture(size, Some(target))?.target;
+			let picture = Size::new(size.width & !1, size.height & !1);
+			let stage = Plan::capture_stage(picture, target);
+			// The color of the output size, not of the stage, so that a source
+			// does not change its color when its size crosses a halving.
+			let color = Color::infer(target);
+			let plan = Plan::capture(size, Some(stage))?.with_color(color)?;
+			let converted = Self::convert(device, source, size, plan, color)?;
+			if stage == target {
+				Ok(converted)
+			} else {
+				converted.resize(target.width, target.height)
+			}
+		}
+
+		/// Converts `source` to NV12 in one video-processor pass, as `plan` says,
+		/// into `color`, which `plan` converts to.
+		#[cfg(any(feature = "capture", feature = "render"))]
+		fn convert(
+			device: &ID3D11Device,
+			source: &ID3D11Texture2D,
+			size: Size,
+			plan: Plan,
+			color: Color,
+		) -> Result<Self, Error> {
 			let mut desc = D3D11_TEXTURE2D_DESC::default();
 			unsafe { source.GetDesc(&mut desc) };
 			if desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM || desc.Width < size.width || desc.Height < size.height {
@@ -2273,7 +2319,7 @@ pub mod d3d11 {
 				texture: process(device, source, plan)?,
 				width: plan.target.width,
 				height: plan.target.height,
-				color: Some(Color::infer(plan.target)),
+				color: Some(color),
 			})
 		}
 

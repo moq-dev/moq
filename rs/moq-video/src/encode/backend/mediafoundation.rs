@@ -58,6 +58,11 @@ pub(crate) const NAME: &str = "mediafoundation";
 /// MFT echoes the sample time on its output, which is what pairs the two back up.
 const HNS_PER_SEC: i64 = 10_000_000;
 
+/// After this many frames in a row whose output did not come within a frame
+/// interval, the encoder stops waiting for its output
+/// ([`MediaFoundation::wait_for_output`]).
+const HELD_BACK: u32 = 3;
+
 pub(crate) struct MediaFoundation {
 	transform: IMFTransform,
 	events: IMFMediaEventGenerator,
@@ -75,10 +80,11 @@ pub(crate) struct MediaFoundation {
 	phase: Phase,
 	sample_index: i64,
 	/// Frames handed to the MFT that haven't come back out, oldest first: the
-	/// sample time we gave the codec paired with the frame's real timestamp. This
-	/// MFT buffers (output for frame N typically arrives while N+1 goes in), so its
-	/// output has to be matched against this rather than stamped with whatever is
-	/// being fed at the time.
+	/// sample time we gave the codec paired with the frame's real timestamp. An
+	/// MFT can buffer (output for frame N arriving while N+1 goes in, see
+	/// [`wait_for_output`](Self::wait_for_output)), so its output has to be
+	/// matched against this rather than stamped with whatever is being fed at the
+	/// time.
 	pending: VecDeque<(i64, Timestamp)>,
 	/// The last timestamp paired with an output, reused if the MFT ever hands back
 	/// more access units than we fed it frames. Repeating a time is far kinder to a
@@ -86,6 +92,9 @@ pub(crate) struct MediaFoundation {
 	last_timestamp: Option<Timestamp>,
 	/// Access units the MFT handed back and `receive` has not popped yet.
 	ready: VecDeque<Encoded>,
+	/// How many times in a row [`wait_for_output`](Self::wait_for_output) waited
+	/// a frame interval in vain. At [`HELD_BACK`] it stops waiting.
+	missed: u32,
 	/// Kept alive for the MFT's lifetime once a texture frame binds a device.
 	_manager: Option<IMFDXGIDeviceManager>,
 	_com: ComGuard,
@@ -166,6 +175,7 @@ impl MediaFoundation {
 			pending: VecDeque::new(),
 			last_timestamp: None,
 			ready: VecDeque::new(),
+			missed: 0,
 			_manager: None,
 			_com: com,
 		}))
@@ -460,6 +470,56 @@ impl MediaFoundation {
 		Ok(())
 	}
 
+	/// Waits up to one frame interval for the output of the frames fed so far.
+	///
+	/// A hardware MFT encodes asynchronously, so right after `ProcessInput` the
+	/// output of that frame is almost never queued yet. Collecting only what is
+	/// queued (as [`drain_ready`](Self::drain_ready) does) hands each frame out
+	/// when the next one goes in: one frame interval late, 50 ms at 20 fps on an
+	/// NVIDIA RTX 500. In low-latency mode the MFT emits each frame without
+	/// waiting for the next, so this polls for it. The poll ends at once when the
+	/// output arrives, a few ms after the input.
+	///
+	/// An MFT that holds a frame back anyway would make every frame wait out the
+	/// interval. So after [`HELD_BACK`] waits in a row time out, this stops
+	/// waiting. A single slow frame, such as the first one or one during a GPU
+	/// stall, does not stop it.
+	fn wait_for_output(&mut self) -> Result<(), Error> {
+		/// How often the poll looks for an event. The encode thread has nothing
+		/// else to do meanwhile.
+		const POLL: std::time::Duration = std::time::Duration::from_micros(250);
+		if self.missed >= HELD_BACK {
+			return self.drain_ready();
+		}
+		let deadline = kio::clock::Instant::now()
+			.saturating_add(std::time::Duration::from_nanos(self.tick().unsigned_abs() * 100));
+		while !self.pending.is_empty() {
+			match unsafe { self.events.GetEvent(MF_EVENT_FLAG_NO_WAIT) } {
+				Ok(event) => {
+					self.handle_event(&event)?;
+				}
+				Err(e) if e.code() == MF_E_NO_EVENTS_AVAILABLE => {
+					if kio::clock::Instant::now() >= deadline {
+						self.missed += 1;
+						if self.missed == HELD_BACK {
+							tracing::debug!("the encoder holds frames back; no longer waiting for its output");
+						}
+						return Ok(());
+					}
+					#[expect(
+						clippy::disallowed_methods,
+						reason = "the encode thread runs outside any runtime, so it blocks on the host clock"
+					)]
+					std::thread::sleep(POLL);
+				}
+				Err(e) => return Err(mf_err("GetEvent (output)", e)),
+			}
+		}
+		self.missed = 0;
+		// Also take the input request that usually follows the output.
+		self.drain_ready()
+	}
+
 	/// Drain events already queued without blocking (called after feeding input).
 	fn drain_ready(&mut self) -> Result<(), Error> {
 		loop {
@@ -688,7 +748,7 @@ impl Backend for MediaFoundation {
 		self.pending.push_back((sample_time, frame.timestamp));
 		self.sample_index += 1;
 
-		self.drain_ready()
+		self.wait_for_output()
 	}
 
 	fn receive(&mut self) -> Result<Option<Encoded>, Error> {
