@@ -9950,7 +9950,9 @@ mod serve_group_test {
 
 	/// A copy fed over a wire before lite-07, whose answers say nothing of the live edge, learns
 	/// it from its first live group: until one lands, a range from the oldest group is not
-	/// answered Empty.
+	/// answered Empty. Its answer says where the feed starts, and a group's header can land
+	/// after that and before the group's first frame, which alone shows the edge: that frame
+	/// wakes the run to answer.
 	#[kio::test]
 	async fn lite07_a_copy_from_an_older_wire_learns_its_edge_from_its_first_group() {
 		let mut track = track::Producer::new(
@@ -9960,12 +9962,24 @@ mod serve_group_test {
 		);
 		track.received();
 		track.edge_from_groups();
+		track.request_start(None).unwrap();
 		let (mut run, mut writer, log) = lite07_run_ranges(&track, &[lite::Range::span(None, 0, None, None)]);
-		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		let waiter = kio::Waiter::noop();
+		while run.poll_step(&mut writer, &waiter).is_ready() {}
 		assert!(responses(&mut writer, &log).await.is_empty());
 
-		write_group(&mut track, 5, 5);
-		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		track.start_resolved(5).unwrap();
+		let mut group = track.create_group(group::Info { start: 5 }).unwrap();
+		while run.poll_step(&mut writer, &waiter).is_ready() {}
+		assert!(
+			responses(&mut writer, &log).await.is_empty(),
+			"a frameless header shows no edge"
+		);
+
+		group
+			.write_frame(Timestamp::from_millis(5).unwrap(), b"x".as_slice())
+			.unwrap();
+		while run.poll_step(&mut writer, &waiter).is_ready() {}
 		let answered = responses(&mut writer, &log).await;
 		assert!(
 			matches!(
