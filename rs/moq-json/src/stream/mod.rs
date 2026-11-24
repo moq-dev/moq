@@ -377,7 +377,9 @@ mod test {
 
 		// Ask for history, so the first group is delivered rather than skipped by the default live
 		// join once a newer group exists. The track keeps it fresh with an unlimited max age.
-		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL]);
+		let subscription = moq_net::track::Subscription::default()
+			.with_ranges([moq_net::track::Range::ALL])
+			.with_order(moq_net::track::Order::Ascending);
 		let subscriber = track.subscribe(subscription);
 
 		// Both groups stay open, the way a publisher writing to two at once leaves them.

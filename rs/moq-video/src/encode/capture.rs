@@ -2089,12 +2089,12 @@ mod tests {
 					.track(&name)
 					.unwrap()
 					.subscribe(
-						moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
-							moq_net::track::Start::Live {
+						moq_net::track::Subscription::default()
+							.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
 								min: Some(Duration::from_secs(5)),
 								max: Some(Duration::from_secs(5)),
-							},
-						)]),
+							})])
+							.with_order(moq_net::track::Order::Ascending),
 					)
 					.await
 					.unwrap();
@@ -2280,18 +2280,18 @@ mod tests {
 			}
 		}
 
-		/// Subscribe to `name` with room to replay what it holds.
+		/// Subscribe to `name` with room to replay what it holds, oldest first.
 		async fn watch(consumer: &moq_net::broadcast::Consumer, name: &str) -> moq_net::track::Subscriber {
 			consumer
 				.track(name)
 				.unwrap()
 				.subscribe(
-					moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
-						moq_net::track::Start::Live {
+					moq_net::track::Subscription::default()
+						.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
 							min: Some(Duration::from_secs(60)),
 							max: Some(Duration::from_secs(60)),
-						},
-					)]),
+						})])
+						.with_order(moq_net::track::Order::Ascending),
 				)
 				.await
 				.unwrap()

@@ -86,7 +86,9 @@ class TrackConsumer(_Stream[GroupConsumer]):
         """Return the next group in arrival order. Returns `None` when the track ends.
 
         Groups are returned as they arrive on the wire, which may be out of start
-        order. Use this for live consumption where latency matters more than order.
+        order; those already held come in the subscription's group order, newest
+        first unless it asks ascending. Use this for live consumption where latency
+        matters more than order.
         """
         group = await self._inner.recv_group()
         if group is None:

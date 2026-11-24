@@ -107,8 +107,9 @@ type TrackConsumer struct {
 }
 
 // RecvGroup returns the next group in arrival order (possibly out of start order),
-// or (nil, nil) when the track ends. Prefer this for live, latency-sensitive
-// consumption.
+// or (nil, nil) when the track ends. Groups already held come in the
+// subscription's group order, newest first unless it asks ascending. Prefer this
+// for live, latency-sensitive consumption.
 func (t *TrackConsumer) RecvGroup(ctx context.Context) (*GroupConsumer, error) {
 	return t.group(ctx, t.inner.RecvGroup)
 }

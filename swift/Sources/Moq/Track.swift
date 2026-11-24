@@ -20,8 +20,9 @@ public final class TrackConsumer: AsyncSequence, Sendable {
         (try await ffi.nextGroup()).map(GroupConsumer.init)
     }
 
-    /// The next group in arrival order, which may be out of start order. `nil` once
-    /// the track ends.
+    /// The next group in arrival order, which may be out of start order: groups
+    /// already held come in the subscription's group order, newest first unless it
+    /// asks ascending. `nil` once the track ends.
     public func recvGroup() async throws -> GroupConsumer? {
         (try await ffi.recvGroup()).map(GroupConsumer.init)
     }
