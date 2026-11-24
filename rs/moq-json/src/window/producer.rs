@@ -421,6 +421,23 @@ impl Track {
 	}
 }
 
+// Records are indexed across the window's groups, and the next producer of this track would
+// number its own from zero, so a reader handed over would take them for records it already has:
+// an unfinished window that published a header ends with `Dropped` instead of being requested
+// again.
+impl Drop for Track {
+	fn drop(&mut self) {
+		if self.largest.is_none() || self.inner.finished().is_some() {
+			return;
+		}
+		if let Some(group) = self.group.take() {
+			let _ = group.abort(moq_net::Error::Dropped);
+		}
+		// A track already closed keeps its first reason.
+		let _ = self.inner.clone().abort(moq_net::Error::Dropped);
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use std::task::Poll;
@@ -428,6 +445,34 @@ mod tests {
 	use serde_json::{Value, json};
 
 	use super::*;
+
+	/// A reader of a window dropped unfinished reads `Dropped`, not the next producer's records.
+	#[test]
+	fn a_dropped_window_ends_rather_than_restarting() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let _requests = broadcast.requests();
+		let track = broadcast.create_track("test", moq_net::track::Info::default()).unwrap();
+		let mut groups = track.subscribe(None);
+		let mut producer = Producer::<Value>::new(track, Config::default());
+		producer
+			.push(&json!({ "n": 1 }), moq_net::Timestamp::unscaled(1))
+			.unwrap();
+
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(Some(mut group))) = groups.poll_recv_group(&waiter) else {
+			panic!("expected the window's group");
+		};
+		drop(producer);
+		let ended = loop {
+			match group.poll_read_frame(&waiter) {
+				Poll::Ready(Ok(Some(_))) => continue,
+				other => break other,
+			}
+		};
+		assert!(matches!(ended, Poll::Ready(Err(moq_net::Error::Dropped))), "{ended:?}");
+		let next = groups.poll_recv_group(&waiter);
+		assert!(matches!(next, Poll::Ready(Err(moq_net::Error::Dropped))));
+	}
 
 	/// A previous group already aborted fails the next header, which aborts the group it just
 	/// published with the same error rather than dropping it as `Dropped`.

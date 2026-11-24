@@ -280,3 +280,13 @@ impl Track {
 		Ok(())
 	}
 }
+
+// A log is one group, so the next producer of this track could not continue it for a reader
+// handed over: an unfinished log ends with `Dropped` instead of being requested again.
+impl Drop for Track {
+	fn drop(&mut self) {
+		if self.group.is_some() && self.inner.finished().is_none() {
+			self.abort(moq_net::Error::Dropped);
+		}
+	}
+}

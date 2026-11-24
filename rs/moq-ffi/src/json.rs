@@ -317,10 +317,12 @@ impl MoqJsonSnapshotConsumer {
 
 /// Publishes an ordered log of JSON records, one record per append.
 ///
-/// Released before its finish, it ends its track cleanly while nobody wants it; a reader that still
-/// does is served by the broadcast's next request for the track, or reads `Dropped` (seen elsewhere
-/// as `Internal`) with no request handler. Still open when its broadcast closes, it ends it with
-/// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
+/// Released before its finish, once it appended a record, it ends its track with `Dropped` (seen
+/// elsewhere as `Internal`), since another producer could not continue its log. Released before
+/// that, it ends its track cleanly while nobody wants it; a reader that still does is served by the
+/// broadcast's next request for the track, or reads `Dropped` with no request handler. Still open
+/// when its broadcast closes, it ends it with `Unroutable`, which a moq-transport reader sees as
+/// `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqJsonStreamProducer {
 	inner: std::sync::Mutex<Option<moq_mux::json::Stream<Value>>>,
@@ -444,10 +446,12 @@ impl MoqJsonStreamConsumer {
 /// A join that finds the open group's edits outweigh the track's `refresh.ratio` gets the window
 /// restated in a fresh group, by a task this producer runs until it is finished or dropped.
 ///
-/// Released before its finish, it ends its track cleanly while nobody wants it; a reader that still
-/// does is served by the broadcast's next request for the track, or reads `Dropped` (seen elsewhere
-/// as `Internal`) with no request handler. Still open when its broadcast closes, it ends it with
-/// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
+/// Released before its finish, once it pushed a record, it ends its track with `Dropped` (seen
+/// elsewhere as `Internal`), since another producer would number its records afresh. Released
+/// before that, it ends its track cleanly while nobody wants it; a reader that still does is served
+/// by the broadcast's next request for the track, or reads `Dropped` with no request handler. Still
+/// open when its broadcast closes, it ends it with `Unroutable`, which a moq-transport reader sees
+/// as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqJsonWindowProducer {
 	inner: Arc<std::sync::Mutex<Option<moq_json::window::Producer<Value>>>>,
