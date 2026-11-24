@@ -18,12 +18,12 @@ export VALGRIND_BUG_494162=1
 bench=(nix run --inputs-from . rust2#bench --)
 
 case "$command" in
-fingerprint) exec "${bench[@]}" "$@" ;;
-run | compare) ;;
-*)
-    echo "$usage" >&2
-    exit 2
-    ;;
+    fingerprint) exec "${bench[@]}" "$@" ;;
+    run | compare) ;;
+    *)
+        echo "$usage" >&2
+        exit 2
+        ;;
 esac
 
 # Only single-threaded targets without I/O, and not targets made only of `iter_custom`, which
