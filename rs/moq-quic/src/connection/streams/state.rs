@@ -458,6 +458,29 @@ impl StreamsState {
 		Ok(self.evict_after_arrival(transmit))
 	}
 
+	/// The streams this endpoint sends on that a quiesce ends, except `keep` and those the
+	/// application has yet to accept, each with whether it was reset already. A stream stays
+	/// until the peer acknowledged its end.
+	pub(crate) fn sending(&self, keep: &[StreamId]) -> Vec<(StreamId, bool)> {
+		self.send
+			.iter()
+			.filter(|&(id, _)| {
+				let unaccepted =
+					id.initiator() != self.side && id.index() >= self.next_reported_remote[Dir::Bi as usize];
+				!keep.contains(id) && !unaccepted
+			})
+			.map(|(&id, slot)| (id, slot.as_ref().is_some_and(|send| send.is_reset())))
+			.collect()
+	}
+
+	/// Have a writer of `id` see the stream stopped with `code`, as a peer's stop would end it,
+	/// once a quiesce reset it behind the writer's back.
+	pub(crate) fn stop_for_writer(&mut self, id: StreamId, code: VarInt) {
+		if let Some(Some(send)) = self.send.get_mut(&id) {
+			send.try_stop(code);
+		}
+	}
+
 	/// Ask the peer with STOP_SENDING to end every stream it may still send on, except `keep`
 	/// and those the application has yet to accept, returning whether any of them is still open.
 	///
@@ -1442,6 +1465,7 @@ impl StreamsState {
 				self.ensure_remote_streams(id.dir());
 			}
 		}
+		self.waits.wake_ended();
 		if half == StreamHalf::Send {
 			self.connection_blocked.swap_remove(&id);
 			self.send_streams -= 1;
@@ -1452,7 +1476,6 @@ impl StreamsState {
 				self.connection_blocked.shrink_to_fit();
 			}
 		} else {
-			self.waits.wake_ended();
 			// Contract geometrically, so a surviving stream cannot pin a burst's empty slots and
 			// removing a burst costs linear work overall. Empty tables release every slot.
 			if self.recv.capacity() > self.recv.len().saturating_mul(4) {

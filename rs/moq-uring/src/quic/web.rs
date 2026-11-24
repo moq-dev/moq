@@ -349,7 +349,7 @@ struct State {
 	ready_bi: VecDeque<(driver_send::Stream, driver_recv::Stream)>,
 	/// Streams held open, never read: control and QPACK, ours and theirs.
 	held_recv: [Option<driver_recv::Stream>; 3],
-	_control_send: Option<driver_send::Stream>,
+	control_send: Option<driver_send::Stream>,
 	/// The CONNECT stream's send half; taken exactly once by the close path.
 	connect_send: Option<driver_send::Stream>,
 }
@@ -468,7 +468,7 @@ impl Session {
 				ready_uni,
 				ready_bi: VecDeque::new(),
 				held_recv: held,
-				_control_send: Some(control),
+				control_send: Some(control),
 				connect_send: Some(send),
 			}),
 			closed: RefCell::new(None),
@@ -819,11 +819,11 @@ fn close(conn: &Connection, web: Option<&Rc<Web>>, code: u32, reason: &str) {
 	encode_varint(payload.len() as u64, &mut frame);
 	frame.extend_from_slice(&payload);
 
-	// First have the peer end every stream it sends on: Chrome's renderer
-	// crashes when the capsule arrives while the page still writes a stream
+	// First end every stream either side sends on: Chrome's renderer crashes
+	// when the capsule arrives while the page still reads and writes streams
 	// (https://issues.chromium.org/issues/589817008). The session is closed,
-	// so the stops carry WT_SESSION_GONE. A peer that leaves them open past
-	// the grace gets the capsule anyway.
+	// so the resets and stops carry WT_SESSION_GONE. A peer that leaves its
+	// streams open past the grace gets the capsule anyway.
 	//
 	// Then finish the capsule and give the peer a moment to act on it,
 	// closing either way once the grace period is up. The write goes in
@@ -886,14 +886,14 @@ fn close(conn: &Connection, web: Option<&Rc<Web>>, code: u32, reason: &str) {
 	});
 }
 
-/// Have the peer end every stream it sends on, as [`Connection::poll_quiesce`]
-/// does with WT_SESSION_GONE, sparing the CONNECT stream, `connect`, which
-/// carries its capsules, and its control and QPACK streams, since stopping one
-/// ends its HTTP/3 connection before the capsule.
+/// End every stream either side sends on, as [`Connection::poll_quiesce`] does
+/// with WT_SESSION_GONE, sparing the CONNECT stream, `connect`, which carries
+/// the capsules, and the control and QPACK streams, since ending one ends the
+/// HTTP/3 connection before the capsule.
 ///
 /// Nobody else accepts once the session closed, so this accepts and classifies
 /// the peer's streams itself; the session's own wait in their queues to be
-/// stopped like any other. A stream still mid-header may be a QPACK stream, so
+/// ended like any other. A stream still mid-header may be a QPACK stream, so
 /// it is spared, without waiting on it: Chrome opens its QPACK streams without
 /// writing to them, and waiting out the grace lets the page open more streams
 /// under the capsule.
@@ -910,8 +910,10 @@ fn quiesce(conn: &Connection, web: &Web, connect: super::stream::Id, waiter: &ki
 		let held = state.held_recv.iter().flatten().map(driver_recv::Stream::id);
 		let pending = state.pending_uni.iter().filter_map(|header| header.recv.as_ref());
 		let pending = pending.chain(state.pending_bi.iter().filter_map(|header| header.recv.as_ref()));
+		let ours = state.control_send.iter().map(driver_send::Stream::id);
 		let keep: Vec<_> = held
 			.chain(pending.map(driver_recv::Stream::id))
+			.chain(ours)
 			.chain([connect])
 			.collect();
 		conn.poll_quiesce(waiter, http3_code(WT_SESSION_GONE), &keep)

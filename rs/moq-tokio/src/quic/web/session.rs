@@ -79,10 +79,11 @@ struct Web {
 }
 
 impl Web {
-	/// The HTTP/3 streams a close must leave open besides the QPACK ones: the CONNECT stream,
-	/// which carries the peer's capsules, and the peer's control stream.
-	fn critical(&self) -> [crate::quic::driver::stream::Id; 2] {
-		[self.connect_id, self.settings.control_id()]
+	/// The HTTP/3 streams a close must leave open besides the peer's QPACK ones: the CONNECT
+	/// stream, which carries the capsules, and both control streams.
+	fn critical(&self) -> [crate::quic::driver::stream::Id; 3] {
+		let [peer, ours] = self.settings.control_ids();
+		[self.connect_id, peer, ours]
 	}
 }
 
@@ -411,14 +412,14 @@ impl Session {
 		capsule: web_transport_proto::Capsule,
 		code: u32,
 		timeout: std::time::Duration,
-		critical: [crate::quic::driver::stream::Id; 2],
+		critical: [crate::quic::driver::stream::Id; 3],
 	) {
 		let http3_code: crate::quic::driver::VarInt = web_transport_proto::error_to_http3(code).try_into().unwrap();
 
-		// Chrome's renderer crashes when the capsule arrives while the page still writes a
-		// stream (https://issues.chromium.org/issues/589817008), so stop every stream it sends
-		// on, the HTTP/3 ones aside, and send the capsule once it has reset them. The session
-		// is closed, so the stops carry WT_SESSION_GONE.
+		// Chrome's renderer crashes when the capsule arrives while the page still reads and
+		// writes streams (https://issues.chromium.org/issues/589817008), so end every stream
+		// either side sends on, the HTTP/3 ones aside, and send the capsule once the peer has
+		// reset its own. The session is closed, so the resets and stops carry WT_SESSION_GONE.
 		let gone = self.close.encode_stream_code(0);
 		let web = self.web().expect("a capsule close is HTTP/3");
 		let quiesce = kio::wait(|waiter| poll_quiesce_shared(&web.accept, waiter, gone, &critical));
@@ -893,12 +894,12 @@ impl SessionAccept {
 		}
 	}
 
-	/// Have the peer end every stream it sends on, sparing `critical` and the QPACK streams, as
+	/// End every stream either side sends on, sparing `critical` and the QPACK streams, as
 	/// [`Connection::poll_quiesce`](crate::quic::driver::connection::Connection::poll_quiesce)
 	/// does with `code`.
 	///
 	/// Nobody else accepts once the session closed, so this accepts and classifies the peer's
-	/// streams itself, dropping the session's, which stops them. A stream still mid-header may be
+	/// streams itself, dropping the session's, which ends them. A stream still mid-header may be
 	/// a QPACK stream, so it is spared, without waiting on it: Chrome opens its QPACK streams
 	/// without writing to them, and waiting out the grace lets the page open more streams under
 	/// the capsule. Poll it through [`poll_quiesce_shared`], which holds the wakes the
@@ -1597,9 +1598,9 @@ mod tests {
 		assert!(server.accept_bi().await.is_err());
 	}
 
-	/// A close stops every stream the peer sends on and sends its capsule only once the peer
-	/// reset them, since Chrome crashes on a capsule arriving under a write in flight
-	/// (https://issues.chromium.org/issues/589817008). It classifies the streams nobody accepted
+	/// A close resets every stream the server sends on, stops every stream the peer sends on,
+	/// and sends its capsule only once the peer reset them, since Chrome crashes on a capsule
+	/// arriving under a write in flight (https://issues.chromium.org/issues/589817008). It classifies the streams nobody accepted
 	/// yet itself, stopping the session's and sparing a QPACK stream and one still mid-header.
 	#[tokio::test]
 	async fn close_waits_for_the_peer_to_reset_its_streams() {
@@ -1609,13 +1610,16 @@ mod tests {
 			async { crate::quic::web::Request::accept(server_conn).await.unwrap().ok().await },
 		);
 		let (client, server) = (client.unwrap(), server.unwrap());
-		// The connection's own streams, whose stop the test sees directly: a session stream
-		// stopped with WT_SESSION_GONE waits for the capsule's reason instead. The server
-		// accepts none of them before the close.
+		// The connection's own streams, whose stop and reset the test sees directly: a session
+		// stream ended with WT_SESSION_GONE waits for the capsule's reason instead. The server
+		// accepts and holds one, as moq-net does, and none of the rest before the close.
 		let web = client.web().unwrap();
+		let (mut held, mut held_recv) = client.conn.open_bi(Default::default()).await.unwrap();
+		held.write_all(web.header_bi.clone()).await.unwrap();
+		let (mut held_writer, _held_reader) = server.accept_bi().await.unwrap();
 		let mut uni = client.conn.open_uni(Default::default()).await.unwrap();
 		uni.write_all(web.header_uni.clone()).await.unwrap();
-		let (mut bi, _recv) = client.conn.open_bi(Default::default()).await.unwrap();
+		let (mut bi, mut bi_recv) = client.conn.open_bi(Default::default()).await.unwrap();
 		bi.write_all(web.header_bi.clone()).await.unwrap();
 		let mut qpack = client.conn.open_uni(Default::default()).await.unwrap();
 		let mut header = Vec::new();
@@ -1644,10 +1648,17 @@ mod tests {
 		let gone = crate::quic::driver::VarInt::from_u64(super::super::error::WT_SESSION_GONE).unwrap();
 		assert_eq!(uni.closed().await.unwrap(), Some(gone));
 		assert_eq!(bi.closed().await.unwrap(), Some(gone));
+		assert_eq!(held.closed().await.unwrap(), Some(gone));
+		// The server's halves of the bidirectional streams are reset as well, ending the reads.
+		assert_eq!(bi_recv.received_reset().await.unwrap(), Some(gone));
+		assert_eq!(held_recv.received_reset().await.unwrap(), Some(gone));
+		// Its writer learns the session closed instead of writing on.
+		assert!(held_writer.write(&mut &b"late"[..]).await.is_err());
 		assert!(client.close.get().is_none(), "the capsule arrived before the resets");
 
 		uni.reset(gone);
 		bi.reset(gone);
+		held.reset(gone);
 		let err = client.closed().await;
 		assert!(
 			matches!(err, Error::Closed(2, ref reason) if reason == "unauthorized"),
@@ -1655,7 +1666,7 @@ mod tests {
 		);
 		assert_eq!(
 			server.conn.stats().frame_tx.stop_sending,
-			2,
+			3,
 			"a QPACK or unclassified stream was stopped"
 		);
 	}

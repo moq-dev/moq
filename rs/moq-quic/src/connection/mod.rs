@@ -507,23 +507,38 @@ impl Connection {
 		}
 	}
 
-	/// Ask the peer to end every stream it may still send on, except `keep`, and wait until it has
+	/// End every stream either side may still send on, except `keep`, and wait until both ends are
+	/// through
 	///
-	/// Each stream the application accepted or opened gets one STOP_SENDING with `code`, and is
-	/// done once its final size arrives with a reset or FIN. A stream waiting to be accepted is
-	/// left alone but keeps this waiting: accept it, and keep it by passing it in `keep` or let
-	/// the next poll stop it. The readers keep their streams. Ready once none is left open, or
-	/// with the reason the connection was lost first. A peer that keeps opening streams keeps
-	/// this waiting, so bound the wait.
+	/// Each stream the application accepted or opened is reset with `code`, still delivering what
+	/// was written, and gets one STOP_SENDING with it. It is done once the peer acknowledged the
+	/// reset, or every byte of a finish, and its final size arrived with a reset or FIN. A
+	/// stream waiting to be accepted is left alone but keeps this waiting: accept it, and keep it
+	/// by passing it in `keep` or let the next poll end it. The readers and writers keep their
+	/// streams, and learn of the ends by using them: a writer sees its stream stopped with
+	/// `code`, as if the peer had stopped it. Ready once none is left open, or with the
+	/// reason the connection was lost first. A peer that keeps opening streams keeps this
+	/// waiting, so bound the wait.
 	pub fn poll_quiesce(&mut self, waiter: &kio::Waiter, code: VarInt, keep: &[StreamId]) -> Poll<Result<(), Error>> {
 		if let Some(err) = self.streams.waits.lost() {
 			return Poll::Ready(Err(err.clone()));
 		}
+		let sending = self.streams.sending(keep);
+		for &(id, reset) in &sending {
+			if reset {
+				continue;
+			}
+			// What the application wrote is still delivered.
+			let mut send = self.send_stream(id);
+			let written = send.offset();
+			send.reset_at(written, code).expect("a stream still sending resets");
+			self.streams.stop_for_writer(id, code);
+		}
 		let pending = &mut self.spaces[SpaceId::Data].pending;
-		if !self.streams.quiesce(pending, code, keep) {
+		if !self.streams.quiesce(pending, code, keep) && sending.is_empty() {
 			return Poll::Ready(Ok(()));
 		}
-		// A stream the peer opens, or one ending, may change the answer.
+		// A stream the peer opens, or either half of one ending, may change the answer.
 		self.streams.waits.register_ended(waiter);
 		self.streams.waits.register_accept(Dir::Uni, waiter);
 		self.streams.waits.register_accept(Dir::Bi, waiter);

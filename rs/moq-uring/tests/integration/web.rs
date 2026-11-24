@@ -1210,8 +1210,8 @@ fn dropped_session_delivers_close(explicit: bool) {
 		.expect("worker");
 }
 
-/// A close stops every stream the peer sends on and writes its capsule only
-/// once the peer reset them, since Chrome crashes on a capsule arriving under a
+/// A close resets every stream the server sends on, stops every stream the peer
+/// sends on, and writes its capsule only once the peer reset them, since Chrome crashes on a capsule arriving under a
 /// write in flight (https://issues.chromium.org/issues/589817008). It
 /// classifies the streams nobody accepted itself, so the HTTP/3 control,
 /// QPACK, and CONNECT streams stay open, and so does one still mid-header.
@@ -1264,7 +1264,7 @@ fn a_close_waits_for_the_peer_to_reset_its_streams() {
 			let mut header = Vec::new();
 			web_transport_proto::StreamUni::QPACK_ENCODER.encode(&mut header);
 			write_raw(&mut qpack, &header).await;
-			let (mut bi, _bi_recv) = peer.open_bi(Default::default()).await.expect("bi");
+			let (mut bi, mut bi_recv) = peer.open_bi(Default::default()).await.expect("bi");
 			let mut header = Vec::new();
 			web_transport_proto::Frame::WEBTRANSPORT.encode(&mut header);
 			web_transport_proto::VarInt::try_from(session_id)
@@ -1301,8 +1301,14 @@ fn a_close_waits_for_the_peer_to_reset_its_streams() {
 				let stop = within(&handle, "the stop", stream.closed()).await.expect("stopped");
 				assert_eq!(stop, Some(gone));
 			}
-			let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+			// The server's half of the bidi stream is reset as well, ending the read.
 			let mut buf = [0u8; 64];
+			let read = within(&handle, "the reset", bi_recv.read(&mut &mut buf[..])).await;
+			assert!(
+				matches!(read, Err(quic::recv::Error::Reset(code)) if code == gone),
+				"{read:?}"
+			);
+			let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
 			match std::pin::pin!(control.closed()).poll(&mut cx) {
 				std::task::Poll::Pending => {}
 				other => panic!("the control stream was stopped: {other:?}"),

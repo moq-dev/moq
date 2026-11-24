@@ -5,10 +5,7 @@ use super::session::{Classifying, PendingUni, log_header_error, read_uni_header}
 use web_transport_proto::StreamUni;
 
 pub struct Settings {
-	#[allow(
-		dead_code,
-		reason = "a reference to the send/recv stream, so we don't close it until dropped"
-	)]
+	/// Our control stream, held so it stays open until dropped.
 	send: crate::quic::driver::send::Stream,
 
 	/// The peer's control stream, held so it stays open until dropped.
@@ -21,9 +18,9 @@ pub struct Settings {
 }
 
 impl Settings {
-	/// The peer's control stream, which a close must leave open.
-	pub(crate) fn control_id(&self) -> crate::quic::driver::stream::Id {
-		self.recv.id()
+	/// Both control streams, the peer's and ours, which a close must leave open.
+	pub(crate) fn control_ids(&self) -> [crate::quic::driver::stream::Id; 2] {
+		[self.recv.id(), self.send.id()]
 	}
 
 	// Establish the H3 connection.
