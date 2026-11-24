@@ -1585,7 +1585,12 @@ impl ServePublish {
 			Some(token) => {
 				let credit = kio::Producer::<()>::default();
 				let hold: crate::auth::Hold = std::sync::Arc::new(credit.consume());
-				let verdict = this.auth.verify_request(token.0, Some(hold));
+				let verdict = this.auth.verify_request(
+					token.0,
+					Some(hold),
+					crate::auth::RequestKind::Publish,
+					&msg.track_namespace,
+				);
 				ServePublishState::Verifying {
 					stream,
 					msg,

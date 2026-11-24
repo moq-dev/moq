@@ -73,6 +73,7 @@ fn grant(index: usize) -> crate::auth::Grant {
 		publish: Prefixes::new(),
 		subscribe: prefixes(GRANTS[index]),
 		expires: None,
+		..Default::default()
 	}
 }
 
@@ -777,6 +778,7 @@ fn a_grant_change_shows_what_it_keeps_before_synced() {
 			publish: Prefixes::new(),
 			subscribe: prefixes(subscribe),
 			expires: None,
+			..Default::default()
 		})
 	};
 	authorize(&["a/u/z/old", "a/drop"]);

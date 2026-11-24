@@ -84,17 +84,34 @@ pub(crate) enum Answer {
 ///
 /// The paths are relative to the session's root, the same paths the session
 /// announces and subscribes with. Each is a set of prefixes, each covering its whole
-/// subtree: the empty prefix grants everything. `Grant::default()` grants nothing; set
-/// the fields on it to grant more.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// subtree: the empty prefix grants everything. `Grant::default()` grants no paths and
+/// admits every [`RequestKind`]: set `publish` and `subscribe` to grant paths, and narrow
+/// `kinds` to hold a request's token to some kinds of request.
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Grant {
 	/// The broadcasts this side may publish to the peer.
 	pub publish: Prefixes,
 	/// The broadcasts this side may subscribe to from the peer.
 	pub subscribe: Prefixes,
+	/// The kinds of request a grant on a request's token admits: a later request reusing the
+	/// token is refused when its kind is missing, even at a path the prefixes cover. Every
+	/// kind by default. An AUTH token's grant joins the session's scope, which admits every
+	/// kind, so [`Request::accept`] and [`Issued::update`] refuse one that narrows this.
+	pub kinds: RequestKinds,
 	/// When the grant lapses, or `None` for never.
 	pub expires: Option<Instant>,
+}
+
+impl Default for Grant {
+	fn default() -> Self {
+		Self {
+			publish: Prefixes::new(),
+			subscribe: Prefixes::new(),
+			kinds: RequestKinds::all(),
+			expires: None,
+		}
+	}
 }
 
 impl Grant {
@@ -103,12 +120,13 @@ impl Grant {
 		Self {
 			publish: Prefixes::all(),
 			subscribe: Prefixes::all(),
-			expires: None,
+			..Self::default()
 		}
 	}
 
 	/// The paths any of `grants` allows, lapsing at the earliest expiry, which is when
-	/// the union next shrinks. Reduced once over all of them, not pairwise.
+	/// the union next shrinks. Reduced once over all of them, not pairwise. A union is
+	/// session scope, which ignores kinds, so it keeps the default.
 	fn union<'a>(grants: impl IntoIterator<Item = &'a Self>) -> Self {
 		let mut publish = Vec::new();
 		let mut subscribe = Vec::new();
@@ -122,15 +140,18 @@ impl Grant {
 			publish: publish.into_iter().collect(),
 			subscribe: subscribe.into_iter().collect(),
 			expires,
+			..Self::default()
 		}
 	}
 
-	/// The paths both grants allow, lapsing at the earlier expiry.
+	/// The paths both grants allow, lapsing at the earlier expiry. Session scope, as
+	/// [`union`](Self::union) is.
 	fn intersect(&self, other: &Self) -> Self {
 		Self {
 			publish: self.publish.intersect(&other.publish),
 			subscribe: self.subscribe.intersect(&other.subscribe),
 			expires: earliest(self.expires, other.expires),
+			..Self::default()
 		}
 	}
 }
@@ -801,7 +822,8 @@ impl Handle {
 	/// The session's scope for the peer is this grant and every grant issued to one of its
 	/// AUTH tokens through `server::Handshake::requests`; a session never authorized is bound
 	/// only by its origin handles. A request that carries its own token is decided by that
-	/// token instead, inside the scope or not.
+	/// token instead, inside the scope or not. The scope admits every kind of request, so
+	/// `grant.kinds` is not consulted here.
 	///
 	/// A narrower scope ends what falls outside at once, with [`Error::Unauthorized`]
 	/// where it has a reader: announcements to the peer retract, its new requests are
@@ -1055,7 +1077,15 @@ impl Link {
 	}
 
 	/// Verify a request token once per session while any naming request remains open.
-	pub(crate) fn verify_request(&self, token: crate::setup::Token, hold: Option<Hold>) -> RequestVerdict {
+	///
+	/// The acceptor sees the `kind` and `path` of the request that names it first.
+	pub(crate) fn verify_request(
+		&self,
+		token: crate::setup::Token,
+		hold: Option<Hold>,
+		kind: RequestKind,
+		path: &crate::Path,
+	) -> RequestVerdict {
 		let unsupported = || RequestVerdict {
 			issue: None,
 			_lifetime: None,
@@ -1094,7 +1124,7 @@ impl Link {
 		};
 		drop(stale);
 		if fresh {
-			queue.push(Request::new(token, lifetime.issue.clone()));
+			queue.push(Request::named(token, lifetime.issue.clone(), kind, path.clone()));
 		}
 		RequestVerdict {
 			issue: Some(lifetime.issue.clone()),
@@ -2018,6 +2048,8 @@ impl Drop for Serving {
 pub struct Request {
 	token: Bytes,
 	issue: Option<kio::Shared<Issue>>,
+	/// The moq-transport request the token rode on, and its path; `None` for an AUTH token.
+	named: Option<(RequestKind, crate::Path)>,
 }
 
 impl Request {
@@ -2025,6 +2057,16 @@ impl Request {
 		Self {
 			token,
 			issue: Some(issue),
+			named: None,
+		}
+	}
+
+	/// A token that rode on a moq-transport request of `kind` at `path`.
+	fn named(token: Bytes, issue: kio::Shared<Issue>, kind: RequestKind, path: crate::Path) -> Self {
+		Self {
+			token,
+			issue: Some(issue),
+			named: Some((kind, path)),
 		}
 	}
 
@@ -2038,6 +2080,24 @@ impl Request {
 		&self.token
 	}
 
+	/// The kind of moq-transport request the token rode on, or `None` for a token presented
+	/// on the AUTH stream, whose grant joins the session's scope.
+	///
+	/// Requests that reuse a token share its verification, so this is the request that
+	/// named it first. Each later one is still checked against the grant, so narrow the
+	/// grant's [`kinds`](Grant::kinds) to hold them to this kind too.
+	pub fn kind(&self) -> Option<RequestKind> {
+		self.named.as_ref().map(|(kind, _)| *kind)
+	}
+
+	/// The path the request named, in the terms the grant's prefixes match: the track's
+	/// namespace for a read or a [`RequestKind::Publish`], the announced namespace for a
+	/// [`RequestKind::PublishNamespace`], and the prefix for a [`RequestKind::Discover`].
+	/// `None` exactly when [`Self::kind`] is.
+	pub fn path(&self) -> Option<&crate::Path> {
+		self.named.as_ref().map(|(_, path)| path)
+	}
+
 	/// Wait for the peer to withdraw this unanswered token, end the request it rode on, or
 	/// close the session.
 	#[cfg(feature = "async")]
@@ -2048,10 +2108,19 @@ impl Request {
 	/// Grant the token. The grant holds until the returned [`Issued`] is revoked
 	/// or dropped, or the peer withdraws the token or ends its last naming request.
 	///
+	/// The grant's `kinds` hold only a token a request carried ([`Self::kind`] is `Some`).
+	/// An AUTH token's grant joins the session's scope, which admits every kind, so one
+	/// narrowing `kinds` is refused with [`SessionError::Unauthorized`] instead of widened.
+	///
 	/// Revoking an AUTH token's grant once `expires` passes is the acceptor's job; a grant
 	/// on a request lapses at `expires` by itself.
 	pub fn accept(mut self, grant: Grant) -> Issued {
 		let issue = self.issue.take().expect("answered once");
+		if narrows_scope(&issue, &grant) {
+			refuse(&issue, SessionError::Unauthorized, NARROWED_SCOPE.into());
+			issue.lock().hold = None;
+			return Issued { issue };
+		}
 		let mut locked = issue.lock();
 		locked.reply(Reply::Grant(grant));
 		locked.hold = None;
@@ -2080,6 +2149,15 @@ impl Drop for Request {
 	}
 }
 
+/// Why an AUTH token's grant that narrows its kinds is refused.
+const NARROWED_SCOPE: &str = "kinds narrow only a request's token";
+
+/// Whether `grant` narrows the kinds of an AUTH token's grant, which joins the session's
+/// scope, where every kind is admitted.
+fn narrows_scope(issue: &kio::Shared<Issue>, grant: &Grant) -> bool {
+	issue.read().scoped.is_some() && grant.kinds != RequestKinds::all()
+}
+
 fn refuse(issue: &kio::Shared<Issue>, code: SessionError, reason: String) {
 	let mut issue = issue.lock();
 	if !issue.done {
@@ -2088,13 +2166,20 @@ fn refuse(issue: &kio::Shared<Issue>, code: SessionError, reason: String) {
 	}
 }
 
-/// Which kind of moq-transport request a token rode on, and so which part of the [`Grant`]
-/// must cover it.
+/// Which kind of moq-transport request a token rode on, as [`Request::kind`] reports it, and
+/// so which part of the [`Grant`] must cover it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum RequestKind {
-	/// The peer reads a track: a SUBSCRIBE, a FETCH, or a TRACK_STATUS. Covered by the
-	/// grant's `subscribe` prefixes.
+#[non_exhaustive]
+pub enum RequestKind {
+	/// A SUBSCRIBE: the peer reads a track, and any FETCH joining the subscription. Covered by
+	/// the grant's `subscribe` prefixes.
 	Subscribe,
+	/// A standalone FETCH: the peer reads a range of a track's past groups. Covered by the
+	/// grant's `subscribe` prefixes.
+	Fetch,
+	/// A TRACK_STATUS: the peer asks for a track's latest location. Covered by the grant's
+	/// `subscribe` prefixes.
+	TrackStatus,
 	/// A PUBLISH_NAMESPACE: the peer announces a namespace it will publish under. Its
 	/// `publish` prefixes must cover the whole namespace.
 	PublishNamespace,
@@ -2106,17 +2191,99 @@ pub(crate) enum RequestKind {
 }
 
 impl RequestKind {
+	/// This kind's bit in a [`RequestKinds`]. Exhaustive, so a new kind needs a bit here.
+	const fn bit(self) -> u8 {
+		match self {
+			Self::Subscribe => 1 << 0,
+			Self::Fetch => 1 << 1,
+			Self::TrackStatus => 1 << 2,
+			Self::PublishNamespace => 1 << 3,
+			Self::Discover => 1 << 4,
+			Self::Publish => 1 << 5,
+		}
+	}
+}
+
+// `RequestKinds::KINDS` holds kinds in bit order with no gap, so `all()` sets exactly their
+// bits. A kind added to `bit()` but not to `KINDS` passes this; the exhaustive `place` match
+// in `a_grant_covers_only_its_kinds` forces a new kind to name an index; add it to `KINDS` at
+// that index, which nothing checks.
+const _: () = {
+	let kinds = RequestKinds::KINDS;
+	assert!(kinds.len() < u8::BITS as usize);
+	let mut i = 0;
+	while i < kinds.len() {
+		assert!(kinds[i].bit() == 1 << i);
+		i += 1;
+	}
+};
+
+impl RequestKind {
 	/// Whether `grant`, issued to the peer that presented the token, covers this request at
-	/// `path`. A grant names what its holder may do, so a request to read is covered by its
+	/// `path`. The grant must admit the kind, and a request to read is covered by its
 	/// `subscribe` prefixes and a request to announce by its `publish` prefixes. An announce
 	/// routes everything beneath its namespace, which a prefix covering the namespace covers
 	/// too.
 	pub(crate) fn covers(self, grant: &Grant, path: &str) -> bool {
-		match self {
-			Self::Subscribe => grant.subscribe.matches(path),
-			Self::Discover => !grant.subscribe.is_empty(),
-			Self::Publish | Self::PublishNamespace => grant.publish.matches(path),
-		}
+		grant.kinds.contains(self)
+			&& match self {
+				Self::Subscribe | Self::Fetch | Self::TrackStatus => grant.subscribe.matches(path),
+				Self::Discover => !grant.subscribe.is_empty(),
+				Self::Publish | Self::PublishNamespace => grant.publish.matches(path),
+			}
+	}
+}
+
+/// A set of [`RequestKind`]s, such as the ones a [`Grant`] admits: collect the kinds to
+/// admit, or remove some from [`all`](Self::all). A kind added in a later release joins
+/// `all()`, so a set built with [`without`](Self::without) admits it while a collected one
+/// does not.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RequestKinds(u8);
+
+impl RequestKinds {
+	const KINDS: [RequestKind; 6] = [
+		RequestKind::Subscribe,
+		RequestKind::Fetch,
+		RequestKind::TrackStatus,
+		RequestKind::PublishNamespace,
+		RequestKind::Discover,
+		RequestKind::Publish,
+	];
+
+	/// Every kind of request.
+	pub const fn all() -> Self {
+		Self((1 << Self::KINDS.len()) - 1)
+	}
+
+	/// Whether the set holds `kind`.
+	pub const fn contains(self, kind: RequestKind) -> bool {
+		self.0 & kind.bit() != 0
+	}
+
+	/// The set without `kind`.
+	pub const fn without(self, kind: RequestKind) -> Self {
+		Self(self.0 & !kind.bit())
+	}
+}
+
+impl std::fmt::Debug for RequestKinds {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_set()
+			.entries(Self::KINDS.iter().filter(|kind| self.contains(**kind)))
+			.finish()
+	}
+}
+
+impl From<RequestKind> for RequestKinds {
+	fn from(kind: RequestKind) -> Self {
+		Self(kind.bit())
+	}
+}
+
+impl FromIterator<RequestKind> for RequestKinds {
+	fn from_iter<I: IntoIterator<Item = RequestKind>>(kinds: I) -> Self {
+		Self(kinds.into_iter().fold(0, |set, kind| set | kind.bit()))
 	}
 }
 
@@ -2379,7 +2546,7 @@ impl RequestGrant {
 		hold: Option<Hold>,
 	) -> RequestVerdict {
 		let mut held = self.held();
-		let verdict = handle.verify_request(token, hold);
+		let verdict = handle.verify_request(token, hold, held.kind, &held.path);
 		held.renewing = verdict.issue.clone();
 		verdict
 	}
@@ -2471,8 +2638,13 @@ pub struct Issued {
 
 impl Issued {
 	/// Replace the grant, such as with a lowered expiry. A request's token whose new grant
-	/// no longer covers the request ends it.
+	/// no longer covers the request ends it. An AUTH token's grant that narrows `kinds` is
+	/// refused with [`SessionError::Unauthorized`], as [`Request::accept`] refuses one.
 	pub fn update(&self, grant: Grant) {
+		if narrows_scope(&self.issue, &grant) {
+			refuse(&self.issue, SessionError::Unauthorized, NARROWED_SCOPE.into());
+			return;
+		}
 		let mut issue = self.issue.lock();
 		if !issue.done {
 			issue.reply(Reply::Grant(grant));
@@ -2535,7 +2707,8 @@ pub(crate) struct Gate {
 	epoch: u64,
 	part: Part,
 	token: Option<RequestGrant>,
-	discovery: bool,
+	/// The kind of request this gate admits, for its token's grant to cover.
+	kind: RequestKind,
 	/// Whether the scope allowed the path at the last permit.
 	within_limit: bool,
 	admitted: bool,
@@ -2567,6 +2740,12 @@ enum Part {
 impl Gate {
 	pub(crate) fn new(handle: Link, path: crate::Path, direction: Direction) -> Self {
 		let within_limit = handle.within_limit(direction, path.as_str());
+		// A gate on what the peer publishes to us verifies only a PUBLISH_NAMESPACE's token; a
+		// PUBLISH's goes straight to [`Link::verify_request`].
+		let kind = match direction {
+			Direction::Publish => RequestKind::Subscribe,
+			Direction::Subscribe => RequestKind::PublishNamespace,
+		};
 		Self {
 			handle,
 			path,
@@ -2574,7 +2753,7 @@ impl Gate {
 			epoch: 0,
 			part: Part::Both,
 			token: None,
-			discovery: false,
+			kind,
 			within_limit,
 			admitted: false,
 			waiting: None,
@@ -2586,9 +2765,11 @@ impl Gate {
 		self.part = Part::Granted;
 	}
 
-	/// Filter a discovery request by the token rather than requiring its whole prefix.
-	pub(crate) fn discovery(mut self) -> Self {
-		self.discovery = true;
+	/// Admit this kind of request rather than the one its direction implies: a read other
+	/// than a SUBSCRIBE, or a discovery request, which the token filters rather than
+	/// requiring its whole prefix.
+	pub(crate) fn with_kind(mut self, kind: RequestKind) -> Self {
+		self.kind = kind;
 		self
 	}
 
@@ -2602,20 +2783,9 @@ impl Gate {
 		if let Some(token) = &self.token {
 			return token.renew(verdict, answer);
 		}
-		let token = RequestGrant::new(clock, verdict, answer, self.path.clone(), self.kind(), None)?;
+		let token = RequestGrant::new(clock, verdict, answer, self.path.clone(), self.kind, None)?;
 		self.bind(token);
 		Ok(())
-	}
-
-	/// The kind of request this gate admits, for its token's grant to cover. A gate on what
-	/// the peer publishes to us verifies only a PUBLISH_NAMESPACE's token; a PUBLISH's goes
-	/// straight to [`Link::verify_request`].
-	fn kind(&self) -> RequestKind {
-		match (self.discovery, self.direction) {
-			(true, _) => RequestKind::Discover,
-			(false, Direction::Publish) => RequestKind::Subscribe,
-			(false, Direction::Subscribe) => RequestKind::PublishNamespace,
-		}
 	}
 
 	/// Replace the session's authority with this request's token alone.
@@ -2689,7 +2859,7 @@ impl Gate {
 	pub(crate) fn verify(&self, token: crate::setup::Token, hold: Option<Hold>) -> RequestVerdict {
 		match &self.token {
 			Some(grant) => grant.verify_renewal_holding(&self.handle, token, hold),
-			None => self.handle.verify_request(token, hold),
+			None => self.handle.verify_request(token, hold, self.kind, &self.path),
 		}
 	}
 
@@ -3102,7 +3272,12 @@ mod tests {
 			kind: crate::setup::Token::OUT_OF_BAND,
 			value: b"jwt".to_vec(),
 		};
-		let _verdict = handle.verify_request(token, Some(slot.clone()));
+		let _verdict = handle.verify_request(
+			token,
+			Some(slot.clone()),
+			RequestKind::Subscribe,
+			&crate::Path::from_static("room"),
+		);
 		assert_eq!(
 			std::sync::Arc::strong_count(&slot),
 			2,
@@ -3153,6 +3328,7 @@ mod tests {
 			publish: prefixes(publish),
 			subscribe: prefixes(subscribe),
 			expires: None,
+			..Default::default()
 		}
 	}
 
@@ -3675,7 +3851,7 @@ mod request_token_tests {
 	async fn a_request_token_reaches_the_acceptor() {
 		let handle = Link::new(true);
 		let mut requests = handle.handle().requests();
-		let verdict = handle.verify_request(token(b"jwt", 0), None);
+		let verdict = handle.verify_request(token(b"jwt", 0), None, RequestKind::Subscribe, &subscribe_path());
 
 		let request = requests.next().await.expect("a request");
 		assert_eq!(request.token().as_ref(), b"jwt");
@@ -3685,12 +3861,202 @@ mod request_token_tests {
 		assert!(grant.publish.matches("room/alice"));
 	}
 
+	/// The acceptor learns the kind and path of the request that named a token first. A later
+	/// request of another kind reusing the token shares that verdict, never reaching the
+	/// acceptor, and is held to the grant's kinds.
+	#[kio::test]
+	async fn a_reused_token_is_held_to_the_grants_kinds() {
+		let runtime = crate::time::sim();
+		let handle = Link::new(true);
+		let mut requests = handle.handle().requests();
+		let first = handle.verify_request(token(b"shared", 0), None, RequestKind::Subscribe, &subscribe_path());
+		let request = requests.next().await.unwrap();
+		assert_eq!(request.kind(), Some(RequestKind::Subscribe));
+		assert_eq!(request.path(), Some(&subscribe_path()));
+		let _issued = request.accept(Grant {
+			kinds: RequestKind::Subscribe.into(),
+			..Grant::all()
+		});
+		let status = handle.verify_request(token(b"shared", 0), None, RequestKind::TrackStatus, &subscribe_path());
+		assert!(
+			requests.poll_next(&kio::Waiter::noop()).is_pending(),
+			"the verdict is shared"
+		);
+
+		let answered = first.grant().await;
+		let admitted = RequestGrant::new(
+			&runtime,
+			first,
+			answered,
+			subscribe_path(),
+			RequestKind::Subscribe,
+			None,
+		);
+		assert!(admitted.is_ok(), "the kind it admits");
+		let answered = status.grant().await;
+		let refused = RequestGrant::new(
+			&runtime,
+			status,
+			answered,
+			subscribe_path(),
+			RequestKind::TrackStatus,
+			None,
+		);
+		assert!(
+			matches!(&refused, Err(refusal) if matches!(refusal.error, Error::Unauthorized)),
+			"a kind it does not admit"
+		);
+	}
+
+	/// A token presented on its own AUTH stream names no request.
+	#[test]
+	fn an_auth_token_names_no_request() {
+		let request = Request::new(Bytes::from_static(b"jwt"), kio::Shared::new(Issue::default()));
+		assert_eq!(request.kind(), None);
+		assert_eq!(request.path(), None);
+	}
+
+	/// An AUTH token's grant joins the session's scope, which admits every kind, so a grant
+	/// narrowing its kinds is refused rather than silently widened, on accept or update.
+	#[test]
+	fn an_auth_token_refuses_a_narrowed_grant() {
+		let narrowed = || Grant {
+			kinds: RequestKind::Subscribe.into(),
+			..Grant::all()
+		};
+		let refused = |serving: &Serving| {
+			matches!(
+				serving.issue.read().outbox.back(),
+				Some(Reply::Refuse {
+					code: SessionError::Unauthorized,
+					..
+				})
+			)
+		};
+
+		let handle = Link::new(true);
+		handle.handle().authorize(&Grant::default());
+		let serving = Serving::new(handle.clone());
+		let _issued = Request::new(Bytes::from_static(b"jwt"), serving.issue.clone()).accept(narrowed());
+		assert!(refused(&serving), "accept");
+		assert!(!handle.allows(Direction::Subscribe, "room"), "the scope took nothing");
+
+		let handle = Link::new(true);
+		handle.handle().authorize(&Grant::default());
+		let serving = Serving::new(handle.clone());
+		let issued = Request::new(Bytes::from_static(b"jwt"), serving.issue.clone()).accept(Grant::all());
+		assert!(handle.allows(Direction::Subscribe, "room"), "every kind is granted");
+		issued.update(narrowed());
+		assert!(refused(&serving), "update");
+		assert!(
+			!handle.allows(Direction::Subscribe, "room"),
+			"the refusal leaves the scope"
+		);
+	}
+
+	/// A grant admitting every kind but the request's, without SUBSCRIBE here.
+	fn without_subscribe() -> Grant {
+		Grant {
+			kinds: RequestKinds::all().without(RequestKind::Subscribe),
+			..Grant::all()
+		}
+	}
+
+	/// An acceptor's update that drops the request's kind ends the request.
+	#[kio::test]
+	async fn an_update_dropping_the_kind_ends_the_request() {
+		let runtime = crate::time::sim();
+		let handle = Link::new(true);
+		let mut requests = handle.handle().requests();
+		let verdict = handle.verify_request(token(b"jwt", 0), None, RequestKind::Subscribe, &subscribe_path());
+		let issued = requests.next().await.unwrap().accept(Grant::all());
+		let answered = verdict.grant().await;
+		let request_grant = RequestGrant::new(
+			&runtime,
+			verdict,
+			answered,
+			subscribe_path(),
+			RequestKind::Subscribe,
+			None,
+		)
+		.unwrap();
+
+		issued.update(without_subscribe());
+		let refusal = kio::wait(|waiter| request_grant.poll_ended(waiter)).await;
+		assert!(matches!(refusal.error, Error::Unauthorized), "{refusal:?}");
+	}
+
+	/// A renewal granted without the request's kind is refused, and the old grant stays.
+	#[kio::test]
+	async fn a_renewal_dropping_the_kind_is_refused() {
+		let runtime = crate::time::sim();
+		let handle = Link::new(true);
+		let mut requests = handle.handle().requests();
+		let verdict = handle.verify_request(token(b"jwt", 0), None, RequestKind::Subscribe, &subscribe_path());
+		let _issued = requests.next().await.unwrap().accept(Grant::all());
+		let answered = verdict.grant().await;
+		let request_grant = RequestGrant::new(
+			&runtime,
+			verdict,
+			answered,
+			subscribe_path(),
+			RequestKind::Subscribe,
+			None,
+		)
+		.unwrap();
+
+		let renewal = request_grant.verify_renewal(&handle, token(b"jwt2", 0));
+		let _renewed = requests.next().await.unwrap().accept(without_subscribe());
+		let answered = renewal.grant().await;
+		let refused = request_grant.renew(renewal, answered);
+		assert!(
+			matches!(&refused, Err(refusal) if matches!(refusal.error, Error::Unauthorized)),
+			"a renewal without the kind"
+		);
+		assert_eq!(request_grant.grant(), Grant::all(), "the old grant stays in force");
+		assert!(
+			kio::wait(|waiter| request_grant.poll_ended(waiter))
+				.now_or_never()
+				.is_none(),
+			"the request stands"
+		);
+	}
+
+	/// Each gate reports its own request's kind and path to the acceptor, as the request that
+	/// named the token first.
+	#[kio::test]
+	async fn a_request_reports_the_kind_and_path_that_named_it() {
+		let cases = [
+			(Direction::Publish, None, RequestKind::Subscribe),
+			(Direction::Publish, Some(RequestKind::Fetch), RequestKind::Fetch),
+			(
+				Direction::Publish,
+				Some(RequestKind::TrackStatus),
+				RequestKind::TrackStatus,
+			),
+			(Direction::Publish, Some(RequestKind::Discover), RequestKind::Discover),
+			(Direction::Subscribe, None, RequestKind::PublishNamespace),
+		];
+		for (direction, kind, expected) in cases {
+			let handle = Link::new(true);
+			let mut requests = handle.handle().requests();
+			let mut gate = Gate::new(handle.clone(), subscribe_path(), direction);
+			if let Some(kind) = kind {
+				gate = gate.with_kind(kind);
+			}
+			let _verdict = gate.verify(token(b"jwt", 0), None);
+			let request = requests.next().await.unwrap();
+			assert_eq!(request.kind(), Some(expected), "{expected:?}");
+			assert_eq!(request.path(), Some(&subscribe_path()), "{expected:?}");
+		}
+	}
+
 	#[kio::test]
 	async fn naming_requests_share_verification_and_withdraw_together() {
 		let handle = Link::new(true);
 		let mut requests = handle.handle().requests();
-		let first = handle.verify_request(token(b"shared", 0), None);
-		let second = handle.verify_request(token(b"shared", 0), None);
+		let first = handle.verify_request(token(b"shared", 0), None, RequestKind::Subscribe, &subscribe_path());
+		let second = handle.verify_request(token(b"shared", 0), None, RequestKind::Subscribe, &subscribe_path());
 		let issued = requests.next().await.unwrap().accept(Grant::all());
 		assert!(requests.poll_next(&kio::Waiter::noop()).is_pending());
 		first.grant().await.unwrap();
@@ -3699,7 +4065,7 @@ mod request_token_tests {
 		assert!(issued.closed().now_or_never().is_none());
 		drop(second);
 		assert!(matches!(issued.closed().await, Error::Cancel));
-		let later = handle.verify_request(token(b"shared", 0), None);
+		let later = handle.verify_request(token(b"shared", 0), None, RequestKind::Subscribe, &subscribe_path());
 		let _issued = requests.next().await.unwrap().accept(Grant::default());
 		assert_eq!(later.grant().await.unwrap(), Grant::default());
 	}
@@ -3710,15 +4076,15 @@ mod request_token_tests {
 	async fn a_token_the_acceptor_dropped_verifies_again() {
 		let handle = Link::new(true);
 		let mut requests = handle.handle().requests();
-		let first = handle.verify_request(token(b"shared", 0), None);
+		let first = handle.verify_request(token(b"shared", 0), None, RequestKind::Subscribe, &subscribe_path());
 		let issued = requests.next().await.unwrap().accept(Grant::all());
 		first.grant().await.unwrap();
 		drop(issued);
-		let later = handle.verify_request(token(b"shared", 0), None);
+		let later = handle.verify_request(token(b"shared", 0), None, RequestKind::Subscribe, &subscribe_path());
 		let _issued = requests.next().await.unwrap().accept(Grant::default());
 		assert_eq!(later.grant().await.unwrap(), Grant::default());
 		drop(first);
-		let again = handle.verify_request(token(b"shared", 0), None);
+		let again = handle.verify_request(token(b"shared", 0), None, RequestKind::Subscribe, &subscribe_path());
 		assert!(
 			requests.poll_next(&kio::Waiter::noop()).is_pending(),
 			"the live verdict is shared"
@@ -3732,8 +4098,8 @@ mod request_token_tests {
 			let runtime = crate::time::sim();
 			let handle = Link::new(true);
 			let mut requests = handle.handle().requests();
-			let first = handle.verify_request(token(b"shared", 0), None);
-			let second = handle.verify_request(token(b"shared", 0), None);
+			let first = handle.verify_request(token(b"shared", 0), None, RequestKind::Subscribe, &subscribe_path());
+			let second = handle.verify_request(token(b"shared", 0), None, RequestKind::Subscribe, &subscribe_path());
 			let issued = requests.next().await.unwrap().accept(grant_in(&runtime, 60));
 			let mut grants = Vec::new();
 			for verdict in [first, second] {
@@ -3779,7 +4145,8 @@ mod request_token_tests {
 		let handle = Link::new(true);
 		handle.handle().authorize(&Grant::all());
 		let mut requests = handle.handle().requests();
-		let mut gate = Gate::new(handle.clone(), crate::Path::default(), Direction::Publish).discovery();
+		let mut gate =
+			Gate::new(handle.clone(), crate::Path::default(), Direction::Publish).with_kind(RequestKind::Discover);
 		let verdict = gate.verify(token(b"room", 0), None);
 		let issued = requests.next().await.unwrap().accept(subscribe_only("room"));
 		let answer = verdict.grant().await;
@@ -3808,7 +4175,8 @@ mod request_token_tests {
 		let handle = Link::new(true);
 		handle.handle().authorize(&Grant::all());
 		let mut requests = handle.handle().requests();
-		let mut gate = Gate::new(handle.clone(), crate::Path::default(), Direction::Publish).discovery();
+		let mut gate =
+			Gate::new(handle.clone(), crate::Path::default(), Direction::Publish).with_kind(RequestKind::Discover);
 		let verdict = gate.verify(token(b"room", 0), None);
 		let issued = requests.next().await.unwrap().accept(subscribe_only("room"));
 		let answer = verdict.grant().await;
@@ -3834,7 +4202,8 @@ mod request_token_tests {
 		let handle = Link::new(true);
 		handle.handle().authorize(&Grant::all());
 		let mut requests = handle.handle().requests();
-		let mut gate = Gate::new(handle.clone(), crate::Path::default(), Direction::Publish).discovery();
+		let mut gate =
+			Gate::new(handle.clone(), crate::Path::default(), Direction::Publish).with_kind(RequestKind::Discover);
 		let verdict = gate.verify(token(b"jwt", 0), None);
 		let _issued = requests.next().await.unwrap().accept(grant_in(&runtime, 60));
 		let answer = verdict.grant().await;
@@ -3865,7 +4234,7 @@ mod request_token_tests {
 		}
 		let handle = Link::new(true);
 		let mut requests = handle.handle().requests();
-		let first = handle.verify_request(token(b"warm", 0), None);
+		let first = handle.verify_request(token(b"warm", 0), None, RequestKind::Subscribe, &subscribe_path());
 		let _first = requests.next().await.unwrap().accept(Grant::all());
 		first.grant().await.unwrap();
 
@@ -3873,8 +4242,8 @@ mod request_token_tests {
 		let waiter = kio::Waiter::new(std::task::Waker::from(woken.clone()));
 		let mut epoch = 0;
 		while handle.poll_permit(Direction::Publish, &mut epoch, &waiter).is_ready() {}
-		let second = handle.verify_request(token(b"shared", 0), None);
-		let third = handle.verify_request(token(b"shared", 0), None);
+		let second = handle.verify_request(token(b"shared", 0), None, RequestKind::Subscribe, &subscribe_path());
+		let third = handle.verify_request(token(b"shared", 0), None, RequestKind::Subscribe, &subscribe_path());
 		drop((second, third));
 		assert!(
 			!woken.0.load(std::sync::atomic::Ordering::SeqCst),
@@ -3887,12 +4256,12 @@ mod request_token_tests {
 		let handle = Handle::new();
 		let first = Link::attach(&handle, false, true).unwrap();
 		let mut requests = handle.requests();
-		let verdict = first.verify_request(token(b"token", 0), None);
+		let verdict = first.verify_request(token(b"token", 0), None, RequestKind::Subscribe, &subscribe_path());
 		let issued = requests.next().await.unwrap().accept(Grant::all());
 		verdict.grant().await.unwrap();
 		first.close(Error::Cancel);
 		let second = Link::attach(&handle, false, true).unwrap();
-		let next = second.verify_request(token(b"token", 0), None);
+		let next = second.verify_request(token(b"token", 0), None, RequestKind::Subscribe, &subscribe_path());
 		let _next = requests.next().await.unwrap().accept(Grant::default());
 		assert_eq!(next.grant().await.unwrap(), Grant::default());
 		assert!(matches!(issued.closed().await, Error::Cancel));
@@ -3904,7 +4273,7 @@ mod request_token_tests {
 	async fn a_typed_request_token_is_unsupported() {
 		let handle = Link::new(true);
 		let mut requests = handle.handle().requests();
-		let verdict = handle.verify_request(token(b"cat", 1), None);
+		let verdict = handle.verify_request(token(b"cat", 1), None, RequestKind::Subscribe, &subscribe_path());
 		let err = verdict.grant().await.expect_err("a typed token");
 		assert!(matches!(err.error, Error::Unsupported), "{err:?}");
 		assert!(
@@ -3919,7 +4288,12 @@ mod request_token_tests {
 	fn an_empty_request_token_is_unsupported() {
 		let handle = Link::new(true);
 		let mut requests = handle.handle().requests();
-		let verdict = handle.verify_request(token(b"", crate::setup::Token::OUT_OF_BAND), None);
+		let verdict = handle.verify_request(
+			token(b"", crate::setup::Token::OUT_OF_BAND),
+			None,
+			RequestKind::Subscribe,
+			&subscribe_path(),
+		);
 		assert!(matches!(
 			verdict.poll_grant(&kio::Waiter::noop()),
 			Poll::Ready(Err(Refusal {
@@ -3939,7 +4313,7 @@ mod request_token_tests {
 	async fn a_request_token_is_verified_without_the_auth_stream() {
 		let handle = Link::new(false);
 		let mut requests = handle.handle().requests();
-		let verdict = handle.verify_request(token(b"jwt", 0), None);
+		let verdict = handle.verify_request(token(b"jwt", 0), None, RequestKind::Subscribe, &subscribe_path());
 		let request = requests.next().await.expect("a request reaches the acceptor");
 		let _issued = request.accept(Grant::all());
 		assert!(
@@ -3953,7 +4327,7 @@ mod request_token_tests {
 	#[kio::test]
 	async fn no_consumer_refuses_a_request_token_as_unsupported() {
 		let handle = Link::new(true);
-		let verdict = handle.verify_request(token(b"jwt", 0), None);
+		let verdict = handle.verify_request(token(b"jwt", 0), None, RequestKind::Subscribe, &subscribe_path());
 		let err = verdict.grant().await.expect_err("no verifier");
 		assert!(matches!(err.error, Error::Unsupported), "{err:?}");
 	}
@@ -3964,7 +4338,7 @@ mod request_token_tests {
 	async fn a_refused_request_token_is_unauthorized() {
 		let handle = Link::new(true);
 		let mut requests = handle.handle().requests();
-		let verdict = handle.verify_request(token(b"jwt", 0), None);
+		let verdict = handle.verify_request(token(b"jwt", 0), None, RequestKind::Subscribe, &subscribe_path());
 		requests.next().await.unwrap().reject(SessionError::Unauthorized, "no");
 		let err = verdict.grant().await.expect_err("refused");
 		assert!(
@@ -3980,14 +4354,14 @@ mod request_token_tests {
 		let handle = Link::new(true);
 		let mut requests = handle.handle().requests();
 
-		let verdict = handle.verify_request(token(b"jwt", 0), None);
+		let verdict = handle.verify_request(token(b"jwt", 0), None, RequestKind::Subscribe, &subscribe_path());
 		let issued = requests.next().await.unwrap().accept(Grant::all());
 		issued.revoke(SessionError::Unauthorized, "revoked");
 		let err = verdict.grant().await.expect_err("revoked before admission");
 		assert_eq!(err.reason, "revoked");
 		drop(verdict);
 
-		let verdict = handle.verify_request(token(b"jwt", 0), None);
+		let verdict = handle.verify_request(token(b"jwt", 0), None, RequestKind::Subscribe, &subscribe_path());
 		drop(requests.next().await.unwrap().accept(Grant::all()));
 		let err = verdict.grant().await.expect_err("dropped before admission");
 		assert!(
@@ -3996,7 +4370,7 @@ mod request_token_tests {
 		);
 		drop(verdict);
 
-		let verdict = handle.verify_request(token(b"jwt", 0), None);
+		let verdict = handle.verify_request(token(b"jwt", 0), None, RequestKind::Subscribe, &subscribe_path());
 		let issued = requests.next().await.unwrap().accept(Grant::all());
 		issued.update(Grant::default());
 		let grant = verdict.grant().await.expect("still granted");
@@ -4012,7 +4386,7 @@ mod request_token_tests {
 	async fn dropping_the_verdict_ends_the_grant() {
 		let handle = Link::new(true);
 		let mut requests = handle.handle().requests();
-		let verdict = handle.verify_request(token(b"jwt", 0), None);
+		let verdict = handle.verify_request(token(b"jwt", 0), None, RequestKind::Subscribe, &subscribe_path());
 		let issued = requests.next().await.unwrap().accept(Grant::all());
 		verdict.grant().await.expect("granted");
 		drop(verdict);
@@ -4026,7 +4400,7 @@ mod request_token_tests {
 	async fn a_request_token_never_joins_the_union() {
 		let handle = Link::new(true);
 		let mut requests = handle.handle().requests();
-		let verdict = handle.verify_request(token(b"jwt", 0), None);
+		let verdict = handle.verify_request(token(b"jwt", 0), None, RequestKind::Subscribe, &subscribe_path());
 		let _issued = requests.next().await.unwrap().accept(Grant::all());
 		verdict.grant().await.expect("granted");
 		// The union only reflects tokens presented on this side (none here), never a
@@ -4043,6 +4417,7 @@ mod request_token_tests {
 			publish: Prefixes::new(),
 			subscribe: crate::Prefix::try_from(prefix).unwrap().into(),
 			expires: None,
+			..Default::default()
 		}
 	}
 
@@ -4057,7 +4432,7 @@ mod request_token_tests {
 		assert!(!handle.allows(Direction::Publish, "room/bob"));
 
 		// A token on a request admits that request, and nothing else.
-		let verdict = handle.verify_request(token(b"request", 0), None);
+		let verdict = handle.verify_request(token(b"request", 0), None, RequestKind::Subscribe, &subscribe_path());
 		let _request = requests.next().await.unwrap().accept(subscribe_only("room/bob"));
 		verdict.grant().await.expect("granted");
 		assert!(
@@ -4136,6 +4511,7 @@ mod request_token_tests {
 			publish: Prefixes::new(),
 			subscribe: Prefixes::all(),
 			expires: runtime.now().checked_add(Duration::from_secs(secs)),
+			..Default::default()
 		}
 	}
 
@@ -4145,7 +4521,7 @@ mod request_token_tests {
 		let runtime = crate::time::sim();
 		let handle = Link::new(true);
 		let mut requests = handle.handle().requests();
-		let verdict = handle.verify_request(token(b"jwt", 0), None);
+		let verdict = handle.verify_request(token(b"jwt", 0), None, RequestKind::Subscribe, &subscribe_path());
 		let grant = grant_in(&runtime, 60);
 		let expires = grant.expires;
 		let _issued = requests.next().await.unwrap().accept(grant);
@@ -4175,7 +4551,7 @@ mod request_token_tests {
 			..grant_in(&runtime, 0)
 		};
 
-		let verdict = handle.verify_request(token(b"old", 0), None);
+		let verdict = handle.verify_request(token(b"old", 0), None, RequestKind::Subscribe, &subscribe_path());
 		let _issued = requests.next().await.unwrap().accept(expired());
 		let answered = verdict.grant().await;
 		let refused = RequestGrant::new(
@@ -4191,7 +4567,7 @@ mod request_token_tests {
 			"an expired grant admits nothing"
 		);
 
-		let verdict = handle.verify_request(token(b"jwt", 0), None);
+		let verdict = handle.verify_request(token(b"jwt", 0), None, RequestKind::Subscribe, &subscribe_path());
 		let _issued = requests.next().await.unwrap().accept(grant_in(&runtime, 60));
 		let answered = verdict.grant().await;
 		let request_grant = RequestGrant::new(
@@ -4203,7 +4579,7 @@ mod request_token_tests {
 			None,
 		)
 		.unwrap();
-		let renewal = handle.verify_request(token(b"old2", 0), None);
+		let renewal = handle.verify_request(token(b"old2", 0), None, RequestKind::Subscribe, &subscribe_path());
 		let _issued = requests.next().await.unwrap().accept(expired());
 		let renewed = renewal.grant().await;
 		assert!(
@@ -4219,7 +4595,7 @@ mod request_token_tests {
 		let handle = Link::new(true);
 		let mut requests = handle.handle().requests();
 
-		let verdict = handle.verify_request(token(b"jwt", 0), None);
+		let verdict = handle.verify_request(token(b"jwt", 0), None, RequestKind::Subscribe, &subscribe_path());
 		let first = grant_in(&runtime, 60);
 		let first_expires = first.expires;
 		let _issued = requests.next().await.unwrap().accept(first);
@@ -4235,7 +4611,7 @@ mod request_token_tests {
 		.unwrap();
 
 		// A REQUEST_UPDATE carrying a fresh token the acceptor accepts with a later expiry.
-		let renewal = handle.verify_request(token(b"jwt2", 0), None);
+		let renewal = handle.verify_request(token(b"jwt2", 0), None, RequestKind::Subscribe, &subscribe_path());
 		let second = grant_in(&runtime, 600);
 		let second_expires = second.expires;
 		let _issued2 = requests.next().await.unwrap().accept(second);
@@ -4256,7 +4632,7 @@ mod request_token_tests {
 		let runtime = crate::time::sim();
 		let handle = Link::new(true);
 		let mut requests = handle.handle().requests();
-		let verdict = handle.verify_request(token(b"jwt", 0), None);
+		let verdict = handle.verify_request(token(b"jwt", 0), None, RequestKind::Subscribe, &subscribe_path());
 		// Held for the request's life, so only the deadline (not a drop) ends it.
 		let _issued = requests.next().await.unwrap().accept(grant_in(&runtime, 60));
 		let answered = verdict.grant().await.unwrap();
@@ -4284,7 +4660,7 @@ mod request_token_tests {
 		let runtime = crate::time::sim();
 		let handle = Link::new(true);
 		let mut requests = handle.handle().requests();
-		let verdict = handle.verify_request(token(b"jwt", 0), None);
+		let verdict = handle.verify_request(token(b"jwt", 0), None, RequestKind::Subscribe, &subscribe_path());
 		let issued = requests.next().await.unwrap().accept(grant_in(&runtime, 60));
 		let answered = verdict.grant().await.unwrap();
 		let request_grant = RequestGrant::new(
@@ -4320,7 +4696,7 @@ mod request_token_tests {
 		let runtime = crate::time::sim();
 		let handle = Link::new(true);
 		let mut requests = handle.handle().requests();
-		let verdict = handle.verify_request(token(b"jwt", 0), None);
+		let verdict = handle.verify_request(token(b"jwt", 0), None, RequestKind::Subscribe, &subscribe_path());
 		let _issued = requests.next().await.unwrap().accept(grant_in(&runtime, 60));
 		let answered = verdict.grant().await.unwrap();
 		let request_grant = RequestGrant::new(
@@ -4358,7 +4734,7 @@ mod request_token_tests {
 		let runtime = crate::time::sim();
 		let handle = Link::new(true);
 		let mut requests = handle.handle().requests();
-		let verdict = handle.verify_request(token(b"jwt", 0), None);
+		let verdict = handle.verify_request(token(b"jwt", 0), None, RequestKind::Subscribe, &subscribe_path());
 		let first = grant_in(&runtime, 60);
 		let first_expires = first.expires;
 		let _issued = requests.next().await.unwrap().accept(first);
@@ -4374,7 +4750,7 @@ mod request_token_tests {
 		.unwrap();
 
 		// The renewal token is refused, so it renews nothing and the old grant is untouched.
-		let renewal = handle.verify_request(token(b"bad", 0), None);
+		let renewal = handle.verify_request(token(b"bad", 0), None, RequestKind::Subscribe, &subscribe_path());
 		requests
 			.next()
 			.await
@@ -4404,7 +4780,7 @@ mod request_token_tests {
 		let runtime = crate::time::sim();
 		let handle = Link::new(true);
 		let mut requests = handle.handle().requests();
-		let verdict = handle.verify_request(token(b"jwt", 0), None);
+		let verdict = handle.verify_request(token(b"jwt", 0), None, RequestKind::Subscribe, &subscribe_path());
 		let issued = requests.next().await.unwrap().accept(Grant::all());
 		let answered = verdict.grant().await.unwrap();
 		let request_grant = RequestGrant::new(
@@ -4441,16 +4817,65 @@ mod request_token_tests {
 			publish: Prefixes::new(),
 			subscribe: Prefixes::all(),
 			expires: None,
+			..Default::default()
 		};
 		let write_only = Grant {
 			publish: Prefixes::all(),
 			subscribe: Prefixes::new(),
 			expires: None,
+			..Default::default()
 		};
 		assert!(RequestKind::Subscribe.covers(&read_only, "room"));
 		assert!(!RequestKind::Subscribe.covers(&write_only, "room"));
 		assert!(RequestKind::PublishNamespace.covers(&write_only, "room"));
 		assert!(!RequestKind::PublishNamespace.covers(&read_only, "room"));
+	}
+
+	/// A grant covers a request only when its kinds admit the request's kind, which every
+	/// kind is by default, so reads beside a SUBSCRIBE can be refused at a covered path.
+	#[test]
+	fn a_grant_covers_only_its_kinds() {
+		const KINDS: [RequestKind; 6] = RequestKinds::KINDS;
+		// Exhaustive, so a new kind fails to compile until it names an index here; the loop
+		// then checks `RequestKinds::KINDS` holds each kind it lists at that index. A kind named
+		// here but left out of `KINDS` is not caught: add it to `KINDS` too.
+		let place = |kind| match kind {
+			RequestKind::Subscribe => 0,
+			RequestKind::Fetch => 1,
+			RequestKind::TrackStatus => 2,
+			RequestKind::PublishNamespace => 3,
+			RequestKind::Discover => 4,
+			RequestKind::Publish => 5,
+		};
+		for (i, kind) in KINDS.into_iter().enumerate() {
+			assert_eq!(place(kind), i, "{kind:?}");
+		}
+		let mut grant = Grant::all();
+		assert_eq!(grant.kinds, RequestKinds::all());
+		assert_eq!(Grant::default().kinds, RequestKinds::all());
+		for kind in KINDS {
+			assert!(kind.covers(&grant, "room"), "{kind:?} by default");
+		}
+
+		grant.kinds = RequestKind::Subscribe.into();
+		for kind in KINDS {
+			assert_eq!(kind.covers(&grant, "room"), kind == RequestKind::Subscribe, "{kind:?}");
+		}
+
+		grant.kinds = [RequestKind::Subscribe, RequestKind::Fetch].into_iter().collect();
+		assert!(RequestKind::Fetch.covers(&grant, "room"));
+		assert!(!RequestKind::TrackStatus.covers(&grant, "room"));
+
+		grant.kinds = RequestKinds::all().without(RequestKind::TrackStatus);
+		assert!(RequestKind::Fetch.covers(&grant, "room"));
+		assert!(!RequestKind::TrackStatus.covers(&grant, "room"));
+		assert_eq!(format!("{:?}", RequestKinds::from(RequestKind::Fetch)), "{Fetch}");
+
+		grant.kinds = std::iter::empty().collect();
+		assert!(
+			KINDS.iter().all(|kind| !kind.covers(&grant, "room")),
+			"an empty set admits nothing"
+		);
 	}
 
 	/// An announce routes its whole namespace, which the prefix naming it covers, and a
@@ -4461,6 +4886,7 @@ mod request_token_tests {
 			publish: crate::Prefix::try_from("room").unwrap().into(),
 			subscribe: Prefixes::new(),
 			expires: None,
+			..Default::default()
 		};
 		assert!(RequestKind::PublishNamespace.covers(&room, "room"));
 		assert!(RequestKind::PublishNamespace.covers(&room, "room/cam"));
@@ -4478,7 +4904,7 @@ mod request_token_tests {
 		let runtime = crate::time::sim();
 		let handle = Link::new(true);
 		let mut requests = handle.handle().requests();
-		let verdict = handle.verify_request(token(b"jwt", 0), None);
+		let verdict = handle.verify_request(token(b"jwt", 0), None, RequestKind::Subscribe, &subscribe_path());
 		// A grant that never expires, so only the revoke can end the request.
 		let issued = requests.next().await.unwrap().accept(Grant::all());
 		let answered = verdict.grant().await.unwrap();
