@@ -426,9 +426,9 @@ test("range table chain: a placed range is served before its join", async () => 
 		origin.write(c);
 		const { warmCopy, remote } = await chainOf(clock, origin, c.copy ?? [], cleanup);
 
-		// The origin's answers on the warm relay's open subscription wait, so the join it asks for
-		// there stays unplaced, while the relay's new requests, such as its TRACK, still flow.
-		warmCopy.server.holdOpen();
+		// Everything the origin sends the warm relay waits, so the join it asks for there stays
+		// unplaced, while the relay answers the TRACK from the copy it holds.
+		warmCopy.server.hold();
 		const reader = remote.track("data").subscribe(subscription(c.read));
 		cleanup.push(() => reader.close());
 		await got.read(clock, reader, 0);
@@ -461,10 +461,9 @@ test("range table chain: a placed range is served before older history", async (
 		const held = { start: 5000, end: 6000 };
 		const { warmCopy, remote } = await chainOf(clock, origin, [{ ranges: [held] }], cleanup);
 
-		// The origin's answers and Group Streams for the older range wait, so the warm relay can't
-		// place it from groups that arrive before its answer.
-		warmCopy.server.holdOpen();
-		warmCopy.server.holdUnis();
+		// Everything the origin sends the warm relay waits, so it can't place the older range from
+		// groups that arrive before its answer, while it answers the TRACK from the copy it holds.
+		warmCopy.server.hold();
 		const read = subscription({ ranges: [{ start: 1000, end: 2000 }, held] });
 		const reader = remote.track("data").subscribe({ ...read, order: "descending" });
 		cleanup.push(() => reader.close());

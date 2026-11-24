@@ -95,7 +95,10 @@ steps, as its own triage on 2026-11-23 found:
 The Nightly's `Media (firefox player)` failed the `replacement` case on 11-20, 11-21, and
 11-22, after [moq-dev/moq#9293](https://github.com/moq-dev/moq/pull/9293) and
 [moq-dev/moq#9300](https://github.com/moq-dev/moq/pull/9300). Each time an unrelated page
-underflowed with it, so the ARM runner starved; a child quest owns it.
+underflowed with it, so the ARM runner starved;
+[moq-dev/moq#9494](https://github.com/moq-dev/moq/pull/9494) idles the lifecycle pages through
+the section, and the [Firefox replacement](/quest/m0/interop-green/firefox-replacement.md) child
+owns the lite-06 fallback audio that remains.
 
 Decided 2026-11-12 (maintainer), since green scheduled Interop is this epic's goal and stale pins caused four of the last six red runs:
 
