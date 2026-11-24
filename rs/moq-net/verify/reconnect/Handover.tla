@@ -21,12 +21,16 @@
 (* `hold`, and the predecessor's cap are left to moq-tokio's tests.        *)
 (*                                                                         *)
 (* Scope: one target, redirects between endpoints the policy accepts plus  *)
-(* one it refuses, no retry window, no tokens, not connecting once, and no *)
-(* redirect-loop scoring. A session's age stands in for its tenure: 1 is   *)
-(* past `Backoff::healthy`. Until a session has been established, which   *)
-(* takes the peer accepting its credential or a GOAWAY, or on a silent     *)
-(* version (moq-lite 03/04, no answer) one past that bar, a failed dial or *)
-(* a closed session ends the policy (`Reconnect::established`).            *)
+(* one it refuses, no retry window, no token contents, not connecting      *)
+(* once, and no redirect-loop scoring. A session's age stands in for its   *)
+(* tenure: 1 is past `Backoff::healthy`. Until a session has been          *)
+(* established, which takes the peer accepting its credential or a GOAWAY, *)
+(* or on a silent version (moq-lite 03/04, no answer) one past that bar, a *)
+(* failed dial or a closed session ends the policy                         *)
+(* (`Reconnect::established`), unless `Dials` asks the caller for each     *)
+(* dial's tokens (`Reconnect::with_dials`): then every dial and probe      *)
+(* waits for its answer, which presents it or ends the policy, and a       *)
+(* failure retries, so the next answer decides.                            *)
 (***************************************************************************)
 EXTENDS Integers, Sequences, FiniteSets
 
@@ -35,6 +39,7 @@ CONSTANTS
     Start,        \* the configured target
     Refused,      \* a GOAWAY URI `Redirect::target` refuses
     Restart,      \* `Config::restart`: "redial" or "handoff"
+    Dials,        \* whether `Reconnect::with_dials` asks for each dial's tokens
     MaxSessions   \* sessions that connect in one behaviour
 
 Sessions == 1..MaxSessions
@@ -44,10 +49,10 @@ NoGoaway == "-"
 Uris == {""} \cup Endpoints \cup {Refused}
 
 VARIABLES
-    phase,     \* `Reconnect::phase`: "start" (Start and Next), "dialing", "live", "backoff", "done"
+    phase,     \* `Reconnect::phase`: "start" (Start and Next), "signing", "dialing", "live", "backoff", "done"
     live,      \* the live session (`Live::session`), or None
     watch,     \* whether `Live::goaway` is still watched
-    probe,     \* `Live::probe`: "none", "wait" (due later), "due", "dialing"
+    probe,     \* `Live::probe`: "none", "wait" (due later), "due", "signing", "dialing"
     pred,      \* `Reconnect::predecessor`'s session, or None
     target,    \* `Reconnect::targets`, one address
     queue,     \* `Reconnect::queue`, as action names
@@ -287,18 +292,71 @@ FollowPred ==
     \* Only an established session is probed, so the policy already is.
     /\ UNCHANGED established
 
-\* `Phase::Next`: ask for a dial.
+\* A failure retries once a session was established, or with `Dials` always:
+\* the next dial's answer decides (`walk_failed`, `closed`).
+Retries == established \/ Dials
+
+\* `Phase::Next`: ask for a dial, or with `Dials` for its tokens first
+\* (`Phase::Signing`). The deadline starts here, so signing spends it too.
 Dial ==
     /\ queue = <<>>
     /\ ~PredDue
     /\ ~PredGoaway
     /\ phase = "start"
-    /\ phase' = "dialing"
     /\ timer' = [timer EXCEPT !["dial"] = FALSE]
+    /\ IF Dials
+       THEN /\ phase' = "signing"
+            /\ UNCHANGED <<dial, dialTo, misdials>>
+       ELSE /\ phase' = "dialing"
+            /\ dial' = "dial"
+            /\ dialTo' = target
+            /\ misdials' = IF Misdial(target) THEN 1 ELSE misdials
+    /\ UNCHANGED <<live, watch, probe, pred, target, queue, sess, used>>
+    /\ CallerSame
+    /\ UNCHANGED lifeVars
+
+\* `Reconnect::signed`: the caller presented tokens, so the dial goes out.
+Signed ==
+    /\ queue = <<>>
+    /\ ~PredDue
+    /\ ~PredGoaway
+    /\ phase = "signing"
+    /\ ~timer["dial"]
+    /\ phase' = "dialing"
     /\ dial' = "dial"
     /\ dialTo' = target
     /\ misdials' = IF Misdial(target) THEN 1 ELSE misdials
-    /\ UNCHANGED <<live, watch, probe, pred, target, queue, sess, used>>
+    /\ UNCHANGED <<live, watch, probe, pred, target, queue, sess, used, timer>>
+    /\ CallerSame
+    /\ UNCHANGED lifeVars
+
+\* The caller failed the dial, or dropped it unanswered (`Failure::Unanswered`):
+\* the policy ends.
+SignRefused ==
+    /\ queue = <<>>
+    /\ ~PredDue
+    /\ ~PredGoaway
+    /\ phase = "signing"
+    /\ ~timer["dial"]
+    /\ Done
+    /\ Emit(<<"Done">>, None)
+    /\ UNCHANGED <<watch, probe, target, sess, used, timer, dial, dialTo, misdials>>
+    /\ UNCHANGED lifeVars
+
+\* The dial went unanswered past its deadline: `fail` with Retry. Nothing is in
+\* flight, so there is no `Action::Abandon`. With `Dials` a failed walk backs
+\* off, whether or not a session was established; the `Retrying` it queues
+\* changes no status, so it is left out.
+SignExpires ==
+    /\ queue = <<>>
+    /\ ~PredDue
+    /\ ~PredGoaway
+    /\ phase = "signing"
+    /\ timer["dial"]
+    /\ phase' = "backoff"
+    /\ timer' = [timer EXCEPT !["backoff"] = FALSE]
+    /\ target' = Start
+    /\ UNCHANGED <<live, watch, probe, pred, queue, sess, used, dial, dialTo, misdials>>
     /\ CallerSame
     /\ UNCHANGED lifeVars
 
@@ -313,13 +371,14 @@ Abandon ==
     /\ timer["dial"]
     /\ dial' = "none"
     /\ probing' = FALSE
-    /\ IF established
+    /\ IF Retries
        THEN /\ phase' = "backoff"
             /\ timer' = [timer EXCEPT !["backoff"] = FALSE]
             \* `walk_failed` drops a redirect target, as in Failed.
             /\ target' = Start
             /\ UNCHANGED <<live, pred, queue>>
-       \* A walk fails fast until then: `Action::Abandon`, then the `Done` it queued.
+       \* A walk with fixed tokens fails fast until then: `Action::Abandon`, then the
+       \* `Done` it queued.
        ELSE /\ Done
             /\ queue' = <<"Done">>
             /\ UNCHANGED <<timer, target>>
@@ -365,7 +424,7 @@ EndGoaway(s, uri) ==
          /\ UNCHANGED watch
 
 \* `Reconnect::closed`. Until a session has been established, a close ends the
-\* policy as a failed dial does: it is how a peer refuses a live session before
+\* policy as a failed dial does, unless `Dials` retries it: it is how a peer refuses a live session before
 \* accepting its credential. `poll` reads the acceptance and the healthy bar
 \* before the close, so a session either establishes would already have. After
 \* that, every close retries, whatever its error. A predecessor
@@ -374,7 +433,7 @@ EndGoaway(s, uri) ==
 EndClosed ==
     /\ UNCHANGED established
     /\ probe' = "none"
-    /\ IF established
+    /\ IF Retries
        THEN /\ live' = None
             /\ phase' = "backoff"
             /\ timer' = [timer EXCEPT !["backoff"] = FALSE]
@@ -441,10 +500,33 @@ ProbeAsk ==
     /\ ~Goaway(live)
     /\ sess[live].open
     /\ probe = "due"
-    /\ probe' = "dialing"
     /\ timer' = [timer EXCEPT !["probe"] = FALSE]
-    /\ probing' = TRUE
+    \* With `Dials`, the probe's tokens first (`Probing::Signing`).
+    /\ IF Dials
+       THEN /\ probe' = "signing"
+            /\ UNCHANGED probing
+       ELSE /\ probe' = "dialing"
+            /\ probing' = TRUE
     /\ UNCHANGED <<phase, live, watch, pred, target, queue, sess, used, dial,
+                   dialTo, misdials, lc, lcSess, migrating, spred, started, ended>>
+    /\ UNCHANGED lifeVars
+
+\* `Reconnect::probe_signed`: presented, the probe goes out on the deadline it
+\* started with; failed, dropped, or unanswered past that deadline
+\* (`Probe::poll`), it is skipped and the next one waits.
+ProbeSigned ==
+    /\ queue = <<>>
+    /\ ~PredDue
+    /\ phase = "live"
+    /\ ~Goaway(live)
+    /\ sess[live].open
+    /\ probe = "signing"
+    /\ \/ /\ ~timer["probe"]
+          /\ probe' = "dialing"
+          /\ probing' = TRUE
+       \/ /\ probe' = "wait"
+          /\ UNCHANGED probing
+    /\ UNCHANGED <<phase, live, watch, pred, target, queue, sess, used, timer, dial,
                    dialTo, misdials, lc, lcSess, migrating, spred, started, ended>>
     /\ UNCHANGED lifeVars
 
@@ -464,8 +546,9 @@ ProbeAbandon ==
                    dialTo, misdials, lc, lcSess, migrating, spred, started, ended>>
     /\ UNCHANGED lifeVars
 
-Policy == Pop \/ Retire \/ IdleClose \/ FollowPred \/ Dial \/ Abandon \/ BackoffEnds
-          \/ Establish \/ LiveEnds \/ ProbeAsk \/ ProbeAbandon
+Policy == Pop \/ Retire \/ IdleClose \/ FollowPred \/ Dial \/ Signed \/ SignRefused
+          \/ SignExpires \/ Abandon \/ BackoffEnds \/ Establish \/ LiveEnds \/ ProbeAsk
+          \/ ProbeSigned \/ ProbeAbandon
 
 (***************************************************************************)
 (* What `run` reports back to the policy.                                   *)
@@ -497,15 +580,15 @@ Connected ==
     /\ UNCHANGED <<pred, target, timer, dialTo, probing, misdials>>
     /\ UNCHANGED lifeVars
 
-\* A dial failed. Once a session has been established, every failure retries
-\* whatever its error (an unusable address is out of scope); until then, any
-\* failure ends the policy.
+\* A dial failed. Once a session has been established, or with `Dials`, every
+\* failure retries whatever its error (an unusable address is out of scope);
+\* until then, any failure ends the policy.
 Failed ==
     /\ dial # "none"
     /\ dial' = "none"
     /\ IF phase # "dialing"
        THEN UNCHANGED <<phase, live, pred, queue, timer, target, callerVars>>
-       ELSE IF established
+       ELSE IF Retries
             THEN /\ phase' = "backoff"
                  /\ timer' = [timer EXCEPT !["backoff"] = FALSE]
                  \* A redirect target that failed its walk is dropped: the next walk
@@ -585,7 +668,7 @@ Ages ==
        /\ sess' = [sess EXCEPT ![pred].idle = TRUE]
 
 Tick ==
-    \/ /\ phase = "dialing" /\ ~timer["dial"]
+    \/ /\ phase \in {"signing", "dialing"} /\ ~timer["dial"]
        /\ timer' = [timer EXCEPT !["dial"] = TRUE]
        /\ UNCHANGED probe
     \/ /\ phase = "backoff" /\ ~timer["backoff"]
@@ -594,7 +677,7 @@ Tick ==
     \/ /\ pred # None /\ ~timer["handover"]
        /\ timer' = [timer EXCEPT !["handover"] = TRUE]
        /\ UNCHANGED probe
-    \/ /\ phase = "live" /\ probe = "dialing" /\ ~timer["probe"]
+    \/ /\ phase = "live" /\ probe \in {"signing", "dialing"} /\ ~timer["probe"]
        /\ timer' = [timer EXCEPT !["probe"] = TRUE]
        /\ UNCHANGED probe
     \* `Probing::Due` reaches its instant.
@@ -636,9 +719,9 @@ Seen(s) ==
     ELSE [Unused EXCEPT !.by = sess[s].by, !.closing = sess[s].closing,
                         !.served = sess[s].served]
 Due(t) ==
-    CASE t = "dial" -> timer[t] /\ phase = "dialing"
+    CASE t = "dial" -> timer[t] /\ phase \in {"signing", "dialing"}
       [] t = "backoff" -> timer[t] /\ phase = "backoff"
-      [] t = "probe" -> timer[t] /\ probe = "dialing"
+      [] t = "probe" -> timer[t] /\ probe \in {"signing", "dialing"}
       [] t = "handover" -> timer[t] /\ pred # None
 View ==
     <<phase, live, watch, probe, pred, target, queue, [s \in Sessions |-> Seen(s)],
@@ -698,9 +781,10 @@ PresenceBalanced ==
 \* The policy fails fast: no failed dial or closed session backs off before a
 \* session has been established, so a setup mistake or a refusal ends the
 \* policy instead of looping. A GOAWAY establishes it: no refusal sends one.
-\* Only a session reported established establishes the policy.
+\* Only a session reported established establishes the policy. With `Dials`,
+\* the caller's answer to the next dial decides instead (`SignRefused`).
 FirstWalkFailsFast ==
-    /\ phase = "backoff" => established
+    /\ phase = "backoff" /\ ~Dials => established
     /\ established => \E s \in 1..used : sess[s].served
 
 \* A dial never goes elsewhere than where a session the policy still holds

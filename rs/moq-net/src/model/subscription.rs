@@ -65,7 +65,7 @@ pub struct Subscription {
 	pub(crate) cap: Option<Position>,
 	/// The time starts a received copy's readers wait on: the copy can't prove where the
 	/// publisher would start them, so its session asks its upstream with a range of its own
-	/// from each. Only an aggregate holds any.
+	/// from each, sorted. Only an aggregate holds any.
 	pub(crate) asks: Vec<u64>,
 	/// The live joins a received copy's readers wait on: the copy can't prove where the
 	/// publisher would start them, so its session asks its upstream with a range of its own
