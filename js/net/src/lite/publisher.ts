@@ -2237,9 +2237,14 @@ export class Publisher {
 					// A group given up, or held and not servable, cannot be where the feed starts. This
 					// stops at the first group out at the latest. Adjacent runs given up with different
 					// errors stay separate, so walk them all. Mirrors the Rust `TrackRun::start`.
+					// The start only rises, so one cursor walks the sorted runs once.
+					skipped.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
+					let run = 0;
 					while (startKey < group.start) {
 						const key = startKey;
-						const givenUp = skipped.find((range) => range.start <= key && range.end > key)?.end;
+						while (run < skipped.length && skipped[run].end <= key) run++;
+						const next = skipped.at(run);
+						const givenUp = next && next.start <= key ? next.end : undefined;
 						const end = givenUp ?? (hooks.heldAt(track, key) === "unservable" ? key + 1n : undefined);
 						if (end === undefined) break;
 						startKey = min(end, group.start);
