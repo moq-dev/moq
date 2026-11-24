@@ -10394,9 +10394,16 @@ impl Cursor {
 			let key = misses.lowest_filled(from)?;
 			state.lookup.get(&key).map(Slot::serving)
 		});
-		let lowest = [owed, filled].into_iter().flatten().min_by_key(|group| group.start).map(|group| group.consume());
+		let lowest = [owed, filled]
+			.into_iter()
+			.flatten()
+			.min_by_key(|group| group.start)
+			.map(|group| group.consume());
 		drop(state);
-		let head = self.heads.as_ref().and_then(|heads| heads.filled.range(from..).next().map(|(_, group)| group.clone()));
+		let head = self
+			.heads
+			.as_ref()
+			.and_then(|heads| heads.filled.range(from..).next().map(|(_, group)| group.clone()));
 		[lowest, head].into_iter().flatten().min_by_key(|group| group.start)
 	}
 
@@ -11078,7 +11085,10 @@ impl Cursor {
 			// subscription's order. A late lower group is owed once it arrives, never passed over.
 			let arrived = {
 				let index = Cell::new(self.index);
-				let arrived = self.state.read().poll_arrivals(&index, self.floor(), &self.filter.window);
+				let arrived = self
+					.state
+					.read()
+					.poll_arrivals(&index, self.floor(), &self.filter.window);
 				self.index = index.get();
 				arrived
 			};
@@ -19111,7 +19121,11 @@ mod test {
 		const FRAME: u64 = 2500; // micros, one Opus frame per group
 		const PARKED: u64 = 64;
 		let producer = track_producer("test", Info::timed());
-		let mut subscriber = producer.subscribe(Subscription::default().with_max(Duration::from_millis(200)).with_order(Order::Ascending));
+		let mut subscriber = producer.subscribe(
+			Subscription::default()
+				.with_max(Duration::from_millis(200))
+				.with_order(Order::Ascending),
+		);
 		// Left open, so every read parks instead of ending.
 		let _open: Vec<_> = (0..PARKED)
 			.map(|i| {
@@ -19188,7 +19202,11 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_parked_read_wakes_only_once_the_edge_reaches_its_deadline() {
 		let mut producer = track_producer("test", Info::timed());
-		let mut subscriber = producer.subscribe(Subscription::default().with_max(Duration::from_secs(10)).with_order(Order::Ascending));
+		let mut subscriber = producer.subscribe(
+			Subscription::default()
+				.with_max(Duration::from_secs(10))
+				.with_order(Order::Ascending),
+		);
 		let mut head = producer.append_next().unwrap();
 		head.write_frame(head.key_time(), bytes::Bytes::from_static(b"head"))
 			.unwrap();
@@ -19245,7 +19263,11 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_reordered_batch_wakes_the_group_pts_drift_deadline() {
 		let mut producer = track_producer("test", Info::timed());
-		let mut subscriber = producer.subscribe(Subscription::default().with_max(Duration::from_secs(10)).with_order(Order::Ascending));
+		let mut subscriber = producer.subscribe(
+			Subscription::default()
+				.with_max(Duration::from_secs(10))
+				.with_order(Order::Ascending),
+		);
 		let mut head = producer.append_next().unwrap();
 		head.write_frame(Timestamp::from_millis(0).unwrap(), bytes::Bytes::new())
 			.unwrap();
@@ -19484,7 +19506,11 @@ mod test {
 	#[cfg(feature = "async")]
 	fn an_adopted_high_pts_wakes_the_group_drift_deadline() {
 		let mut producer = track_producer("test", Info::timed());
-		let mut subscriber = producer.subscribe(Subscription::default().with_max(Duration::from_secs(10)).with_order(Order::Ascending));
+		let mut subscriber = producer.subscribe(
+			Subscription::default()
+				.with_max(Duration::from_secs(10))
+				.with_order(Order::Ascending),
+		);
 		let mut old = producer.append_next().unwrap();
 		old.write_frame(Timestamp::from_millis(0).unwrap(), bytes::Bytes::new())
 			.unwrap();
@@ -19525,7 +19551,11 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_parked_read_watches_its_edge_abort() {
 		let mut producer = track_producer("test", crate::track::Info::timed());
-		let mut subscriber = producer.subscribe(Subscription::default().with_max(Duration::from_secs(5)).with_order(Order::Ascending));
+		let mut subscriber = producer.subscribe(
+			Subscription::default()
+				.with_max(Duration::from_secs(5))
+				.with_order(Order::Ascending),
+		);
 		let mut head = producer.append_next().unwrap();
 		head.write_frame(head.key_time(), bytes::Bytes::from_static(b"head"))
 			.unwrap();
@@ -19575,7 +19605,11 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_parked_read_watches_the_replacement_for_an_aborted_successor() {
 		let mut producer = track_producer("test", Info::timed());
-		let mut subscriber = producer.subscribe(Subscription::default().with_max(Duration::from_millis(500)).with_order(Order::Ascending));
+		let mut subscriber = producer.subscribe(
+			Subscription::default()
+				.with_max(Duration::from_millis(500))
+				.with_order(Order::Ascending),
+		);
 		let mut head = producer.append_next().unwrap();
 		head.write_frame(head.key_time(), bytes::Bytes::from_static(b"head"))
 			.unwrap();
@@ -19630,7 +19664,11 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_parked_read_watches_its_overtaken_edge_abort() {
 		let mut producer = track_producer("test", crate::track::Info::timed());
-		let mut subscriber = producer.subscribe(Subscription::default().with_max(Duration::from_secs(5)).with_order(Order::Ascending));
+		let mut subscriber = producer.subscribe(
+			Subscription::default()
+				.with_max(Duration::from_secs(5))
+				.with_order(Order::Ascending),
+		);
 		let mut head = producer.append_next().unwrap();
 		head.write_frame(head.key_time(), bytes::Bytes::from_static(b"head"))
 			.unwrap();
@@ -19678,7 +19716,11 @@ mod test {
 	#[cfg(feature = "async")]
 	fn revealing_a_presented_group_wakes_a_read_it_expires() {
 		let mut producer = track_producer("test", Info::timed());
-		let mut subscriber = producer.subscribe(Subscription::default().with_max(Duration::from_millis(500)).with_order(Order::Ascending));
+		let mut subscriber = producer.subscribe(
+			Subscription::default()
+				.with_max(Duration::from_millis(500))
+				.with_order(Order::Ascending),
+		);
 		let mut head = producer.append_next().unwrap();
 		head.write_frame(head.key_time(), bytes::Bytes::from_static(b"head"))
 			.unwrap();
@@ -19890,7 +19932,11 @@ mod test {
 	async fn a_reordered_tail_keeps_the_group_pts_drift_verdict() {
 		for reordered in [false, true] {
 			let producer = track_producer("test", Info::timed());
-			let mut subscriber = producer.subscribe(Subscription::default().with_max(Duration::from_millis(80)).with_order(Order::Ascending));
+			let mut subscriber = producer.subscribe(
+				Subscription::default()
+					.with_max(Duration::from_millis(80))
+					.with_order(Order::Ascending),
+			);
 			for ms in [0, 100] {
 				let mut group = producer.append_next().unwrap();
 				group
@@ -20790,7 +20836,10 @@ mod test {
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_widened_history_read_offers_a_group_it_passed_over() {
-		for (order, want) in [(Order::Descending, [2, 1, 3, 4, 0]), (Order::Ascending, [1, 2, 3, 0, 4])] {
+		for (order, want) in [
+			(Order::Descending, [2, 1, 3, 4, 0]),
+			(Order::Ascending, [1, 2, 3, 0, 4]),
+		] {
 			let producer = track_producer("test", Info::timed());
 			let _everything = producer.subscribe(Subscription::default().with_ranges([Range::ALL]));
 			let subscription = |range| Subscription::default().with_ranges([range]).with_order(order);
@@ -27883,7 +27932,10 @@ mod test {
 			Window::new(&replay().ranges, None, &*state)
 		};
 		let walked = producer.state.read().poll_arrivals(&index, 0, &window);
-		assert!(matches!(walked, Poll::Ready(Ok(Some(ref keys))) if keys == &[0, 2]), "{walked:?}");
+		assert!(
+			matches!(walked, Poll::Ready(Ok(Some(ref keys))) if keys == &[0, 2]),
+			"{walked:?}"
+		);
 		// A reader takes it as the fill answer for the group the feed gave up, as it would
 		// have asked a fill for it, and the stale arrival entry adds nothing.
 		let mut subscriber = producer.subscribe(replay());

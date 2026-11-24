@@ -813,10 +813,7 @@ test("fill: a bounded reader keeps waiting on a fresh fill once an older one goe
 		write(5n);
 		const requests = track.requests();
 		const reader = track.subscribe(
-			withMax({ order: "ascending",
-				ranges: [{ start: 0n, end: 5n }],
-				delay: { max: Duration.millis(1000) },
-			}),
+			withMax({ order: "ascending", ranges: [{ start: 0n, end: 5n }], delay: { max: Duration.millis(1000) } }),
 		);
 		expect((await reader.recvGroup())?.start).toBe(2n);
 		expect((await reader.recvGroup())?.start).toBe(5n);

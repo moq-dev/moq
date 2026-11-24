@@ -1215,7 +1215,8 @@ test("a bounded read on a subscribed copy ends once its feed stops owing a hole"
 	const clock = manualTime(0);
 	try {
 		const producer = receivedTrack();
-		const reader = producer.subscribe({ order: "ascending",
+		const reader = producer.subscribe({
+			order: "ascending",
 			ranges: [{ start: { live: { min: Duration.ZERO, max: Duration.millis(1000) } }, end: 2n }],
 		});
 		putGroup(producer, 0n);
@@ -2631,7 +2632,9 @@ test("an abandoned open group ages out with no further write", async () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: null });
 	try {
 		// A budget past the cache window, so the eviction rather than the budget ends it.
-		const track = producer.subscribe(withMax({ order: "ascending", delay: { max: Duration.millis(2 * CACHE_WINDOW_MS) } }));
+		const track = producer.subscribe(
+			withMax({ order: "ascending", delay: { max: Duration.millis(2 * CACHE_WINDOW_MS) } }),
+		);
 		const stalled = hooks.appendNext(producer);
 		stalled.writeFrame(textFrame("first", Timestamp.fromMillis(Number(stalled.start))));
 		hooks.appendNext(producer);
@@ -2760,7 +2763,10 @@ test("an aborted live-edge anchor does not make older content stale", async () =
 
 	// A join reaching back past every group under a zero max: the aborted group is no live edge, so
 	// the older one is the newest it judges by.
-	const track = producer.subscribe({ order: "ascending", ranges: [{ start: { live: { min: null, max: Duration.ZERO } } }] });
+	const track = producer.subscribe({
+		order: "ascending",
+		ranges: [{ start: { live: { min: null, max: Duration.ZERO } } }],
+	});
 	expect((await track.recvGroup())?.start).toBe(1n);
 	track.close();
 });
@@ -3810,7 +3816,9 @@ test("a late subscriber to a closed unlimited track is released once the cache a
 test("an abort keeps finished groups for a slow reader, then reports it", async () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Duration.millis(10_000) });
 	const arrival = producer.subscribe(withMax({ order: "ascending", delay: { max: Duration.millis(10_000) } }));
-	const ordered = producer.subscribe(withMax({ order: "ascending", delay: { max: Duration.millis(10_000) } })).ordered();
+	const ordered = producer
+		.subscribe(withMax({ order: "ascending", delay: { max: Duration.millis(10_000) } }))
+		.ordered();
 	for (let i = 0; i < 2; i++) {
 		const group = hooks.appendNext(producer);
 		group.writeFrame(textFrame(`g${i}`, Timestamp.fromMillis(Number(group.start))));
@@ -3834,7 +3842,9 @@ test("an abort keeps finished groups for a slow reader, then reports it", async 
 test("an abort after the declared end settles ends clean", async () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Duration.millis(10_000) });
 	const arrival = producer.subscribe(withMax({ order: "ascending", delay: { max: Duration.millis(10_000) } }));
-	const ordered = producer.subscribe(withMax({ order: "ascending", delay: { max: Duration.millis(10_000) } })).ordered();
+	const ordered = producer
+		.subscribe(withMax({ order: "ascending", delay: { max: Duration.millis(10_000) } }))
+		.ordered();
 	for (let i = 0; i < 2; i++) {
 		const group = hooks.appendNext(producer);
 		group.writeFrame(textFrame(`g${i}`, Timestamp.fromMillis(Number(group.start))));
@@ -5044,46 +5054,46 @@ test("an untimed track takes groups in any order", () => {
 	}
 });
 
-test.each([
-	"descending",
-	"ascending",
-] as const)("replay and backlogs deliver sparse out-of-order arrivals in %s order without sorting", (order) => {
-	const producer = new TrackProducer("test").accept({ maxAge: null });
-	const all = withMax({ ranges: [{ start: 0n }], delay: { max: null }, order });
-	const write = (key: bigint) => {
-		const group = producer.createGroup(key);
-		group.writeFrame({ payload: enc.encode(`${key}`), timestamp: Timestamp.unscaled(group.start) });
-		group.finish();
-	};
-	const drain = (reader: ReturnType<typeof producer.subscribe>) => {
-		const seen: bigint[] = [];
-		for (let group = reader.tryRecvGroup(); group; group = reader.tryRecvGroup()) {
-			const frame = group.tryReadFrame();
-			expect(frame && dec.decode(frame.payload)).toBe(`${group.start}`);
-			seen.push(group.start);
+test.each(["descending", "ascending"] as const)(
+	"replay and backlogs deliver sparse out-of-order arrivals in %s order without sorting",
+	(order) => {
+		const producer = new TrackProducer("test").accept({ maxAge: null });
+		const all = withMax({ ranges: [{ start: 0n }], delay: { max: null }, order });
+		const write = (key: bigint) => {
+			const group = producer.createGroup(key);
+			group.writeFrame({ payload: enc.encode(`${key}`), timestamp: Timestamp.unscaled(group.start) });
+			group.finish();
+		};
+		const drain = (reader: ReturnType<typeof producer.subscribe>) => {
+			const seen: bigint[] = [];
+			for (let group = reader.tryRecvGroup(); group; group = reader.tryRecvGroup()) {
+				const frame = group.tryReadFrame();
+				expect(frame && dec.decode(frame.payload)).toBe(`${group.start}`);
+				seen.push(group.start);
+			}
+			return seen;
+		};
+		const sort = spyOn(Array.prototype, "sort");
+		try {
+			const live = producer.subscribe(all);
+			// Subscribing merges the subscribers' ranges, which sorts them; only arrivals are judged.
+			sort.mockClear();
+			for (const key of [40n, 10n, 30n, 0n, 20n]) write(key);
+			expect(sort).not.toHaveBeenCalled();
+			const joined = producer.subscribe(all);
+			sort.mockClear();
+			// Arrivals below, between and above the joiner's replayed cache.
+			for (const key of [25n, 50n, 5n, 35n]) write(key);
+			expect(sort).not.toHaveBeenCalled();
+			const ascending = [0n, 5n, 10n, 20n, 25n, 30n, 35n, 40n, 50n];
+			const expected = order === "ascending" ? ascending : ascending.toReversed();
+			expect(drain(live)).toEqual(expected);
+			expect(drain(joined)).toEqual(expected);
+		} finally {
+			sort.mockRestore();
 		}
-		return seen;
-	};
-	const sort = spyOn(Array.prototype, "sort");
-	try {
-		const live = producer.subscribe(all);
-		// Subscribing merges the subscribers' ranges, which sorts them; only arrivals are judged.
-		sort.mockClear();
-		for (const key of [40n, 10n, 30n, 0n, 20n]) write(key);
-		expect(sort).not.toHaveBeenCalled();
-		const joined = producer.subscribe(all);
-		sort.mockClear();
-		// Arrivals below, between and above the joiner's replayed cache.
-		for (const key of [25n, 50n, 5n, 35n]) write(key);
-		expect(sort).not.toHaveBeenCalled();
-		const ascending = [0n, 5n, 10n, 20n, 25n, 30n, 35n, 40n, 50n];
-		const expected = order === "ascending" ? ascending : ascending.toReversed();
-		expect(drain(live)).toEqual(expected);
-		expect(drain(joined)).toEqual(expected);
-	} finally {
-		sort.mockRestore();
-	}
-});
+	},
+);
 
 // A received track as a wire subscription leaves it: the feed starts at group 0 and its end is
 // pending, so lower groups may still arrive behind a higher one. Read from the oldest group unless
@@ -6120,7 +6130,8 @@ test("track: a placed join waits on an unanswered one to start", () => {
 test("track: a received copy places a live join only from a fresh answer", () => {
 	const producer = receivedTrack({ timescale: Timescale.MILLI });
 	hooks.answersJoins(producer);
-	const join = withMax({ order: "ascending",
+	const join = withMax({
+		order: "ascending",
 		delay: { max: null },
 		ranges: [{ start: { live: { min: Duration.millis(200), max: Duration.ZERO } }, end: 9000n }],
 	});

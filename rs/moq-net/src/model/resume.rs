@@ -8959,7 +8959,12 @@ mod test {
 					.with_max(HOUR)
 					.with_order(track::Order::Ascending);
 				let logical = if nested { &outer } else { &inner };
-				let mut sub = logical.consume().subscribe(subscription).now_or_never().unwrap().unwrap();
+				let mut sub = logical
+					.consume()
+					.subscribe(subscription)
+					.now_or_never()
+					.unwrap()
+					.unwrap();
 				let mut one = a.create_group(group::Info { start: 1 }).unwrap();
 				one.write_frame(ts(1), b"x".as_ref()).unwrap();
 				let one = one.finish().unwrap();

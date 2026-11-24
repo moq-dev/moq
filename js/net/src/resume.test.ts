@@ -6071,7 +6071,9 @@ test("an ended track's reader hands out nothing from the copy served after the e
 	const tb = copy(b);
 	const failure = new StreamError(StreamCode.SessionClosed);
 	front.serve(counted(a, () => Promise.reject(failure)).route);
-	const sub = front.consumer.track("seq").subscribe(withMax({ order: "ascending", delay: { max: Duration.millis(3_600_000) } }));
+	const sub = front.consumer
+		.track("seq")
+		.subscribe(withMax({ order: "ascending", delay: { max: Duration.millis(3_600_000) } }));
 	try {
 		const open = ta.write(1n, 1, false);
 		ta.write(3n);
