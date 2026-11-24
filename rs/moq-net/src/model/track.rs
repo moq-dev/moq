@@ -9303,6 +9303,27 @@ impl Asked {
 		}
 	}
 
+	/// Stop counting each time start the upstream refused since it was counted, so counting it
+	/// again asks afresh.
+	fn forget_refused(&mut self) {
+		let Some(subscriptions) = self.subscriptions.clone() else {
+			return;
+		};
+		let times: Vec<u64> = {
+			let subs = subscriptions.lock();
+			if !subs.has_refusals() {
+				return;
+			}
+			let times = self.times.iter().copied();
+			times
+				.filter(|time| subs.refusal(*time, self.since[time]).is_none())
+				.collect()
+		};
+		if times.len() < self.times.len() {
+			self.set(times, self.joins.clone(), || subscriptions);
+		}
+	}
+
 	/// Why the upstream refused a time start counted here since it was counted, if it did.
 	fn refused(&self) -> Option<Error> {
 		let subs = self.subscriptions.as_ref()?.lock();
@@ -9869,7 +9890,12 @@ impl Cursor {
 	/// and count the time starts it still waits on in the demand's asks. Returns whether the
 	/// window moved.
 	fn sync(&mut self) -> bool {
+		let resolved = self.filter.resolved;
 		let moved = self.sync_window();
+		// Ranges resolved afresh ask afresh, even before the reads took an earlier refusal.
+		if self.filter.resolved != resolved {
+			self.asked.forget_refused();
+		}
 		self.ask();
 		moved
 	}
@@ -17650,6 +17676,40 @@ mod test {
 				"finish={finish}"
 			);
 		}
+	}
+
+	/// A reader replacing its ranges asks again for a time start upstream refused, even one it
+	/// names again before its reads took the refusal.
+	#[test]
+	#[cfg(feature = "async")]
+	fn new_ranges_ask_again_for_a_refused_time_start() {
+		let from = |time, end| {
+			Subscription::default()
+				.with_ranges([Range {
+					start: crate::track::Start::Time(time),
+					end,
+				}])
+				.with_max(None)
+		};
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		write_group(&producer, 1000);
+		let mut reader = producer.subscribe(from(1500, None));
+		assert!(reader.refused().is_none());
+		producer.refuse_time(1500, Error::NotFound);
+		reader.update(from(1500, Some(5000))).unwrap();
+		assert!(reader.refused().is_none(), "the new ranges ask afresh");
+		let asks = producer.subscription().map(|aggregate| aggregate.asks);
+		assert_eq!(asks.unwrap_or_default(), [1500]);
+		producer.refuse_time(1500, Error::Cancel);
+		assert!(
+			matches!(reader.refused(), Some(Error::Cancel)),
+			"only a refusal since fails them"
+		);
+		drop(reader);
+		let asks = producer.subscription().map(|aggregate| aggregate.asks);
+		assert_eq!(asks.unwrap_or_default(), Vec::<u64>::new());
 	}
 
 	/// A time start's refusal wakes the demand's watchers with its lock released, since a
