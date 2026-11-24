@@ -1773,13 +1773,12 @@ impl TrackState {
 	/// one a fill holds for its reader, is lost to the cache, so a reader yet to take it asks
 	/// again while a fill could hold it; an expired one is stale for every reader instead.
 	fn evict_for_debt(&mut self, key: u64) {
-		if let Some(slot) = self.lookup.get(&key)
-			&& (slot.visible || self.fill_holds.holds(key))
-		{
-			let (size, fed) = (slot.cache_size(), slot.visible);
+		let slot = self.lookup.get(&key).expect("a cached group");
+		let (size, fed) = (slot.cache_size(), slot.visible);
+		if fed {
 			let now = self.cache.pool().now_wall();
 			self.lost.expire(now, self.miss_grace());
-			self.lost.evicted(key, now, size, fed);
+			self.lost.evicted(key, now, size);
 			// Paid out of what evicting the group frees, by the payment that evicts it.
 			let billed = self.lost.len() as u64 * miss::LOST_OVERHEAD;
 			let before = self.lost_bill.size();
@@ -1788,7 +1787,17 @@ impl TrackState {
 				None => self.lost_bill.sub(before - billed),
 			}
 		}
+		let holders = self.fill_holds.holders(key).to_vec();
 		self.evict_group(key, group::Abort::Evicted);
+		// Judged once its own hold is gone: whether it fits beside the pins and the other
+		// holds. Kept on each fill that held it, for its readers to read when they find the
+		// eviction, where neither a grace nor a debt forgets it.
+		if !holders.is_empty() && !self.cache.pool().hold_room(size) {
+			let fills = self.fills.read();
+			for id in holders {
+				fills.unfit(id, key);
+			}
+		}
 	}
 
 	/// [`Self::uncache`] a servable group to free the cache and abort it with `abort`, recording
@@ -30853,6 +30862,22 @@ mod test {
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_refill_too_big_to_hold_is_not_asked_again() {
+		refill_too_big_to_hold(false);
+	}
+
+	/// The verdict that a refill does not fit stays with the fill that held it, so a debt or
+	/// a grace forgetting what the pool evicted cannot send the reader back to asking again.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_refill_too_big_to_hold_is_not_asked_again_once_its_eviction_is_forgotten() {
+		refill_too_big_to_hold(true);
+	}
+
+	/// A reader of a 100 KB refill with 1 KB of room for a hold, its answer evicted for debt
+	/// each time it lands held, and the track's record of each eviction forgotten before the
+	/// reader looks if `forget`: it asks for the group once, then gives it up and reads on.
+	#[cfg(feature = "async")]
+	fn refill_too_big_to_hold(forget: bool) {
 		const SIZE: usize = 100_000;
 		let (producer, pool) = pooled_producer(u64::MAX - 1);
 		let requests = producer.requests();
@@ -30878,7 +30903,13 @@ mod test {
 			// Held past the capacity, so the next write's debt evicts it before the reader looks.
 			if producer.state.read().lookup.contains_key(&1) {
 				assert!(!pool.holds_fit(), "its hold does not fit");
-				producer.evict_for_debt(1);
+				let mut state = producer.modify().unwrap();
+				state.evict_for_debt(1);
+				// As a debt sheds the oldest, or the miss grace expires them.
+				if forget {
+					while state.lost.forget_oldest() {}
+					state.bill_lost();
+				}
 			}
 			if let Poll::Ready(Ok(Some(group))) = subscriber.poll_next_group(&waiter) {
 				read.push(group.start);

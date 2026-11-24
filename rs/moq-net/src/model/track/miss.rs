@@ -410,10 +410,11 @@ impl Misses {
 			self.filled.remove(&key);
 			let mut gone = RangeSet::new();
 			gone.insert(key..key + 1);
+			let unfit = self.unfit(&gone);
 			self.release(&gone);
 			match state.lookup.contains_key(&key) {
 				true => self.give_up(key..key + 1, given_up),
-				false => lost.extend(self.reask(state, gone, given_up)),
+				false => lost.extend(self.reask(state, gone, unfit, given_up)),
 			}
 		}
 	}
@@ -598,6 +599,7 @@ impl Misses {
 		waiter: &kio::Waiter,
 	) -> RangeSet<u64> {
 		let mut retry = RangeSet::new();
+		let mut unfit = RangeSet::new();
 		self.answered
 			.tasks
 			.lock()
@@ -693,6 +695,7 @@ impl Misses {
 								taken.remove(key..key + 1);
 							}
 						}
+						unfit.extend(self.unfit(&evicted));
 						retry.extend(evicted);
 						// Seen cached, though judging may not run again before it is evicted.
 						if let Some(inbox) = &self.inbox {
@@ -735,16 +738,37 @@ impl Misses {
 		}
 		match retry.is_empty() {
 			true => retry,
-			false => self.reask(&state.read(), retry, given_up),
+			false => self.reask(&state.read(), retry, unfit, given_up),
 		}
+	}
+
+	/// The keys of `lost` that a fill this reader joined held when a debt evicted them, with
+	/// no room to hold them again: read from the joins still holding them, so before they let
+	/// go.
+	fn unfit(&self, lost: &RangeSet<u64>) -> RangeSet<u64> {
+		let mut unfit = RangeSet::new();
+		for run in lost.iter() {
+			for (held, id) in self.holders.overlapping(run) {
+				let piece = held.start.max(run.start)..held.end.min(run.end);
+				let join = self.joins.get(id).expect("a holder names a join");
+				unfit.extend(join.outcome().read().unfit(&piece).iter().cloned());
+			}
+		}
+		unfit
 	}
 
 	/// What of `lost`, answered and evicted before this reader took it, to ask again: what a
 	/// fill could hold this time, so it reaches the reader. The rest is given up: writing it
 	/// puts the pool past its capacity, and the debt that write runs up evicts it again,
-	/// forever (see [`TrackState::unholdable`]).
-	fn reask(&mut self, state: &TrackState, mut lost: RangeSet<u64>, given_up: &mut GivenUp) -> RangeSet<u64> {
-		let mut unholdable = RangeSet::new();
+	/// forever. That is `unfit`, what its fills held when a debt evicted it with no room to
+	/// hold it again (see [`Self::unfit`]), and what [`TrackState::unholdable`] says of the rest.
+	fn reask(
+		&mut self,
+		state: &TrackState,
+		mut lost: RangeSet<u64>,
+		mut unholdable: RangeSet<u64>,
+		given_up: &mut GivenUp,
+	) -> RangeSet<u64> {
 		for run in lost.iter() {
 			unholdable.extend(state.unholdable(run.clone()));
 		}
@@ -1110,12 +1134,13 @@ impl Misses {
 				answered.insert(key..key + 1);
 			}
 		}
+		let unfit = self.unfit(&answered);
 		self.release(&answered);
 		for run in answered.iter() {
 			refills.remove(run.clone());
 		}
 		candidates.extend(refills);
-		candidates.extend(self.reask(state, answered, given_up));
+		candidates.extend(self.reask(state, answered, unfit, given_up));
 		self.ledger_revision = ledger.revision();
 		self.drops_revision = drops.revision();
 		self.budget = Some(drift.budget.clone());
@@ -1857,10 +1882,11 @@ impl TrackState {
 	}
 
 	/// The keys of `groups`, evicted before a reader took them, that a fill could not hold
-	/// again: all of them while the pool has no room for a hold, and otherwise each whose
-	/// size at eviction does not fit beside the pins and the holds. One that does not fit is
-	/// evicted again as it lands, which frees its hold, so asking for it again loops forever.
-	/// A key whose eviction left no record needs only room for a hold.
+	/// again: all of them while the pool has no room for a hold, and otherwise each live group
+	/// whose size at eviction does not fit beside the pins and the holds. One that does not
+	/// fit is evicted again as it lands, which frees its hold, so asking for it again loops
+	/// forever. A fill's answer keeps that verdict on its fill instead (`Outcome::unfit`),
+	/// and a key with neither needs only room for a hold.
 	pub(super) fn unholdable(&self, groups: ops::Range<u64>) -> RangeSet<u64> {
 		let pool = self.cache.pool();
 		let mut out = RangeSet::new();
@@ -1944,14 +1970,11 @@ pub(super) struct Unfed {
 	pub awaited: Vec<(ops::Range<u64>, Option<crate::time::Instant>)>,
 }
 
-/// The groups the pool evicted for debt that a reader may ask for again, by when it did and
-/// at what size: the live groups, and the answers a fill held for its reader.
-///
-/// A live group was delivered by the feed, so a reader that had not taken one yet asks for it
-/// again, whatever a fill told it before it arrived, instead of giving it up as never sent. Its
-/// size, and an answer's, says whether a fill could hold it again (see
-/// [`TrackState::unholdable`]): one bigger than the room beside the pins and the holds would be
-/// evicted again as it lands, and asked again, forever.
+/// The live groups the pool evicted after they arrived, by when it did and at what size. The
+/// feed delivered them, so a reader that had not taken one yet asks for it again, whatever a
+/// fill told it before it arrived, instead of giving it up as never sent. Its size says whether
+/// a fill could hold it again (see [`TrackState::unholdable`]): one bigger than the room beside
+/// the pins and the holds would be evicted again as it lands, and asked again, forever.
 ///
 /// Kept a miss grace, the window the arrivals hold a gap for: a group's successor arrived
 /// before it, so by then every reader's budget has given up on the group anyway. Evictions
@@ -1972,8 +1995,6 @@ struct Eviction {
 	at: crate::time::Instant,
 	/// What the group cost the pool when it was evicted.
 	size: u64,
-	/// Whether the live feed delivered it, rather than a fill.
-	fed: bool,
 }
 
 /// What one [`Lost`] entry bills: its slot in the eviction order, and its key's entry, at
@@ -1982,9 +2003,9 @@ pub(super) const LOST_OVERHEAD: u64 =
 	(size_of::<(crate::time::Instant, u64)>() + 2 * size_of::<(u64, Eviction)>()) as u64;
 
 impl Lost {
-	/// Record `key`, evicted at `now` at `size`, delivered by the live feed if `fed`.
-	pub fn evicted(&mut self, key: u64, now: crate::time::Instant, size: u64, fed: bool) {
-		self.keys.insert(key, Eviction { at: now, size, fed });
+	/// Record `key`, evicted at `now` at `size`.
+	pub fn evicted(&mut self, key: u64, now: crate::time::Instant, size: u64) {
+		self.keys.insert(key, Eviction { at: now, size });
 		self.order.push_back((now, key));
 	}
 
@@ -2030,7 +2051,7 @@ impl Lost {
 		self.order.len()
 	}
 
-	/// The keys in `hole` the live feed delivered, evicted less than `grace` before `now`.
+	/// The keys in `hole` evicted less than `grace` before `now`.
 	fn within(
 		&self,
 		hole: ops::Range<u64>,
@@ -2039,7 +2060,7 @@ impl Lost {
 	) -> impl Iterator<Item = u64> + '_ {
 		self.keys
 			.range(hole)
-			.filter(move |(_, eviction)| eviction.fed && now.duration_since(eviction.at) < grace)
+			.filter(move |(_, eviction)| now.duration_since(eviction.at) < grace)
 			.map(|(key, _)| *key)
 	}
 
@@ -2531,24 +2552,23 @@ mod tests {
 		let grace = Duration::from_millis(500);
 		let start = crate::time::Instant::ZERO;
 		let mut lost = Lost::default();
-		lost.evicted(1, start, 1, true);
-		lost.evicted(2, start.saturating_add(Duration::from_millis(100)), 1, true);
-		lost.evicted(3, start.saturating_add(Duration::from_millis(200)), 1, true);
-		lost.evicted(4, start.saturating_add(Duration::from_millis(300)), 1, false);
+		lost.evicted(1, start, 1);
+		lost.evicted(2, start.saturating_add(Duration::from_millis(100)), 1);
+		lost.evicted(3, start.saturating_add(Duration::from_millis(200)), 1);
 		lost.cached(3);
 		let at = start.saturating_add(Duration::from_millis(550));
 		assert_eq!(
 			lost.within(0..10, at, grace).collect::<Vec<_>>(),
 			vec![2],
-			"1 aged out, 3 cached again, 4 a fill's answer"
+			"1 aged out, 3 cached again"
 		);
 		lost.expire(at, grace);
 		assert_eq!(
 			lost.len(),
-			3,
+			2,
 			"the eviction still within the grace and the re-cached one wait"
 		);
-		lost.expire(start.saturating_add(Duration::from_millis(800)), grace);
+		lost.expire(start.saturating_add(Duration::from_millis(700)), grace);
 		assert_eq!(lost.len(), 0);
 		assert!(lost.keys.is_empty());
 	}

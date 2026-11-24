@@ -190,6 +190,11 @@ pub(crate) struct Outcome {
 	// The group a time start's fill accepted below the time, created or already cached, held so
 	// where it ends is known even once the cache lets it go.
 	answer: Option<group::Handle>,
+	// What it answered and held that a debt evicted with no room to hold it again beside the
+	// pins and the other holds: a refill would be evicted the same way, so a reader finding
+	// the eviction gives it up rather than asking again. Kept with the answer, until no join
+	// reads it, so neither a grace nor a debt forgets it.
+	unfit: RangeSet<u64>,
 }
 
 impl Outcome {
@@ -200,6 +205,14 @@ impl Outcome {
 
 	pub(super) fn is_accepted(&self, key: u64) -> bool {
 		self.accepted.contains(&key)
+	}
+
+	/// The keys of `groups` it answered that a debt evicted with no room to hold them again.
+	pub(super) fn unfit(&self, groups: &ops::Range<u64>) -> RangeSet<u64> {
+		self.unfit
+			.overlapping(groups)
+			.map(|run| run.start.max(groups.start)..run.end.min(groups.end))
+			.collect()
 	}
 
 	/// The group a time start's fill accepted below the time.
@@ -250,6 +263,7 @@ impl Outcome {
 	}
 
 	fn accept(&mut self, groups: ops::Range<u64>) {
+		self.unfit.remove(groups.clone());
 		self.accepted.insert(groups.clone());
 		self.resolved.insert(groups);
 	}
@@ -788,12 +802,24 @@ impl FillState {
 			for run in &unwanted {
 				outcome.refused.remove(run.clone());
 				outcome.accepted.remove(run.clone());
+				outcome.unfit.remove(run.clone());
 			}
 		}
 		for run in unwanted {
 			for range in self.routed(id, &run) {
 				self.covers.remove(range);
 			}
+		}
+	}
+
+	/// A debt evicted `key`, which fill `id` held, with no room to hold it again: see
+	/// `Outcome::unfit`. Only while a join still reads it, which bounds it by the fill's wants.
+	pub(super) fn unfit(&self, id: u64, key: u64) {
+		if let Some(pending) = self.pending.get(&id)
+			&& pending.wants.contains_key(&key)
+			&& let Ok(mut outcome) = pending.result.write()
+		{
+			outcome.unfit.insert(key..key + 1);
 		}
 	}
 
