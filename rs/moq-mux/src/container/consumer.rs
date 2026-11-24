@@ -428,7 +428,11 @@ impl Delay {
 			.iter()
 			.map(|range| {
 				let start = match (range.start, self.min.or(self.max)) {
-					(Start::Oldest, Some(min)) | (Start::Live { min, .. }, _) => Start::Live { min, max: self.max },
+					(Start::Oldest, Some(min)) => Start::Live {
+						min: Some(min),
+						max: self.max,
+					},
+					(Start::Live { min, .. }, _) => Start::Live { min, max: self.max },
 					(start, _) => start,
 				};
 				Range { start, ..*range }
@@ -473,13 +477,13 @@ impl Delay {
 }
 
 /// The playout delay `subscription` states: the furthest back any of its ranges joins live, or
-/// `None` when none does.
+/// `None` when none does. A join with no lag limit states none.
 fn stated(subscription: &moq_net::track::Subscription) -> Option<std::time::Duration> {
 	subscription
 		.ranges
 		.iter()
 		.filter_map(|range| match range.start {
-			moq_net::track::Start::Live { min, .. } => Some(min),
+			moq_net::track::Start::Live { min, .. } => min,
 			_ => None,
 		})
 		.max()
@@ -2114,7 +2118,7 @@ mod tests {
 			.update(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_secs(30),
+						min: Some(Duration::from_secs(30)),
 						max: Some(Duration::from_secs(30)),
 					},
 				)]),
@@ -2132,7 +2136,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_millis(500),
+						min: Some(Duration::from_millis(500)),
 						max: Some(Duration::from_millis(500)),
 					},
 				)]),
@@ -2194,7 +2198,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_secs(10),
+						min: Some(Duration::from_secs(10)),
 						max: Some(Duration::from_secs(10)),
 					},
 				)]),
@@ -2236,7 +2240,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_secs(10),
+						min: Some(Duration::from_secs(10)),
 						max: Some(Duration::from_secs(10)),
 					},
 				)]),
@@ -2358,7 +2362,7 @@ mod tests {
 			.subscribe_with(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_millis(100),
+						min: Some(Duration::from_millis(100)),
 						max: Some(Duration::from_millis(100)),
 					},
 				)]),
@@ -2412,7 +2416,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_secs(1),
+						min: Some(Duration::from_secs(1)),
 						max: Some(Duration::from_secs(1)),
 					},
 				)]),
@@ -2455,7 +2459,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_secs(10),
+						min: Some(Duration::from_secs(10)),
 						max: Some(Duration::from_secs(10)),
 					},
 				)]),
@@ -2527,7 +2531,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_secs(1),
+						min: Some(Duration::from_secs(1)),
 						max: Some(Duration::from_secs(1)),
 					},
 				)]),
@@ -2554,7 +2558,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_millis(50),
+						min: Some(Duration::from_millis(50)),
 						max: Some(Duration::from_millis(50)),
 					},
 				)]),
@@ -2638,7 +2642,7 @@ mod tests {
 			.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_secs(1),
+						min: Some(Duration::from_secs(1)),
 						max: Some(Duration::from_secs(1)),
 					},
 				)]),
@@ -2670,7 +2674,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_secs(1),
+						min: Some(Duration::from_secs(1)),
 						max: Some(Duration::from_secs(1)),
 					},
 				)]),
@@ -2716,7 +2720,7 @@ mod tests {
 			.subscribe_with(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: budget,
+						min: Some(budget),
 						max: Some(budget),
 					},
 				)]),
@@ -2792,7 +2796,7 @@ mod tests {
 			.subscribe_with(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_secs(1),
+						min: Some(Duration::from_secs(1)),
 						max: Some(Duration::from_secs(1)),
 					},
 				)]),
@@ -2844,7 +2848,7 @@ mod tests {
 			.subscribe_with(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: budget,
+						min: Some(budget),
 						max: Some(budget),
 					},
 				)]),
@@ -3140,7 +3144,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_secs(10),
+						min: Some(Duration::from_secs(10)),
 						max: Some(Duration::from_secs(10)),
 					},
 				)]),
@@ -3178,7 +3182,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_secs(10),
+						min: Some(Duration::from_secs(10)),
 						max: Some(Duration::from_secs(10)),
 					},
 				)]),
@@ -3213,7 +3217,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_secs(10),
+						min: Some(Duration::from_secs(10)),
 						max: Some(Duration::from_secs(10)),
 					},
 				)]),
@@ -3477,7 +3481,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_secs(10),
+						min: Some(Duration::from_secs(10)),
 						max: Some(Duration::from_secs(10)),
 					},
 				)]),
@@ -3511,7 +3515,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_secs(10),
+						min: Some(Duration::from_secs(10)),
 						max: Some(Duration::from_secs(10)),
 					},
 				)]),
@@ -3548,7 +3552,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_secs(10),
+						min: Some(Duration::from_secs(10)),
 						max: Some(Duration::from_secs(10)),
 					},
 				)]),
@@ -3580,7 +3584,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_secs(2),
+						min: Some(Duration::from_secs(2)),
 						max: Some(Duration::from_secs(2)),
 					},
 				)]),
@@ -3603,7 +3607,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_secs(2),
+						min: Some(Duration::from_secs(2)),
 						max: Some(Duration::from_secs(2)),
 					},
 				)]),
@@ -3630,7 +3634,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_secs(2),
+						min: Some(Duration::from_secs(2)),
 						max: Some(Duration::from_secs(2)),
 					},
 				)]),
@@ -3661,7 +3665,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_millis(500),
+						min: Some(Duration::from_millis(500)),
 						max: Some(Duration::from_millis(500)),
 					},
 				)]),
@@ -3687,7 +3691,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_secs(2),
+						min: Some(Duration::from_secs(2)),
 						max: Some(Duration::from_secs(2)),
 					},
 				)]),
@@ -3723,7 +3727,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_millis(500),
+						min: Some(Duration::from_millis(500)),
 						max: Some(Duration::from_millis(500)),
 					},
 				)]),
@@ -3749,7 +3753,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_millis(500),
+						min: Some(Duration::from_millis(500)),
 						max: Some(Duration::from_millis(500)),
 					},
 				)]),
@@ -4119,7 +4123,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_secs(2),
+						min: Some(Duration::from_secs(2)),
 						max: Some(Duration::from_secs(2)),
 					},
 				)]),
@@ -4142,7 +4146,7 @@ mod tests {
 			Consumer::new(
 				copy.subscribe_with(moq_net::track::Subscription::default().with_ranges([
 					moq_net::track::Range::from(moq_net::track::Start::Live {
-						min: Duration::from_secs(30),
+						min: Some(Duration::from_secs(30)),
 						max: Some(Duration::from_secs(30)),
 					}),
 				]))
@@ -4277,7 +4281,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_millis(500),
+						min: Some(Duration::from_millis(500)),
 						max: Some(Duration::from_millis(500)),
 					},
 				)]),
@@ -4315,7 +4319,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_millis(500),
+						min: Some(Duration::from_millis(500)),
 						max: Some(Duration::from_millis(500)),
 					},
 				)]),
@@ -4353,7 +4357,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_millis(500),
+						min: Some(Duration::from_millis(500)),
 						max: Some(Duration::from_millis(500)),
 					},
 				)]),
@@ -4392,7 +4396,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_millis(500),
+						min: Some(Duration::from_millis(500)),
 						max: Some(Duration::from_millis(500)),
 					},
 				)]),
@@ -4438,7 +4442,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_millis(500),
+						min: Some(Duration::from_millis(500)),
 						max: Some(Duration::from_millis(500)),
 					},
 				)]),
@@ -4482,7 +4486,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_millis(500),
+						min: Some(Duration::from_millis(500)),
 						max: Some(Duration::from_millis(500)),
 					},
 				)]),
@@ -4509,7 +4513,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_millis(500),
+						min: Some(Duration::from_millis(500)),
 						max: Some(Duration::from_millis(500)),
 					},
 				)]),
@@ -4535,7 +4539,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_millis(500),
+						min: Some(Duration::from_millis(500)),
 						max: Some(Duration::from_millis(500)),
 					},
 				)]),
@@ -4695,7 +4699,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_millis(100),
+						min: Some(Duration::from_millis(100)),
 						max: Some(Duration::from_millis(100)),
 					},
 				)]),
@@ -4756,7 +4760,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_millis(100),
+						min: Some(Duration::from_millis(100)),
 						max: Some(Duration::from_millis(100)),
 					},
 				)]),
@@ -4799,7 +4803,7 @@ mod tests {
 			.subscribe_with(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_millis(500),
+						min: Some(Duration::from_millis(500)),
 						max: Some(Duration::from_millis(500)),
 					},
 				)]),
@@ -4845,7 +4849,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_millis(500),
+						min: Some(Duration::from_millis(500)),
 						max: Some(Duration::from_millis(500)),
 					},
 				)]),
@@ -5194,7 +5198,7 @@ mod tests {
 			.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_millis(500),
+						min: Some(Duration::from_millis(500)),
 						max: Some(Duration::from_millis(500)),
 					},
 				)]),
@@ -5275,7 +5279,7 @@ mod tests {
 		assert_eq!(
 			subscription.ranges,
 			[moq_net::track::Range::from(moq_net::track::Start::Live {
-				min: Duration::from_millis(2_300),
+				min: Some(Duration::from_millis(2_300)),
 				max: Some(Duration::from_millis(500)),
 			})]
 		);
@@ -5300,7 +5304,7 @@ mod tests {
 		assert_eq!(
 			subscription.ranges,
 			[moq_net::track::Range::from(moq_net::track::Start::Live {
-				min: Duration::from_millis(100),
+				min: Some(Duration::from_millis(100)),
 				max: Some(Duration::from_millis(500)),
 			})]
 		);
@@ -5323,7 +5327,7 @@ mod tests {
 		assert_eq!(
 			subscribed(&consumer).subscription().ranges,
 			[moq_net::track::Range::from(moq_net::track::Start::Live {
-				min: Duration::from_millis(200) + DELAY_MAX,
+				min: Some(Duration::from_millis(200) + DELAY_MAX),
 				max: Some(Duration::from_millis(200) + DELAY_MAX),
 			})]
 		);
@@ -5478,7 +5482,7 @@ mod tests {
 		let track = track_producer("test", timed());
 		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 			moq_net::track::Start::Live {
-				min: Duration::from_secs(10),
+				min: Some(Duration::from_secs(10)),
 				max: Some(Duration::from_secs(10)),
 			},
 		)]);
@@ -5524,7 +5528,7 @@ mod tests {
 		let track = track_producer("test", timed());
 		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 			moq_net::track::Start::Live {
-				min: Duration::from_secs(10),
+				min: Some(Duration::from_secs(10)),
 				max: Some(Duration::from_secs(10)),
 			},
 		)]);
@@ -5552,7 +5556,7 @@ mod tests {
 		let track = track_producer("test", timed());
 		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 			moq_net::track::Start::Live {
-				min: Duration::from_secs(10),
+				min: Some(Duration::from_secs(10)),
 				max: Some(Duration::from_secs(10)),
 			},
 		)]);
@@ -5594,7 +5598,7 @@ mod tests {
 		let track = track_producer("test", timed());
 		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 			moq_net::track::Start::Live {
-				min: Duration::from_secs(10),
+				min: Some(Duration::from_secs(10)),
 				max: Some(Duration::from_secs(10)),
 			},
 		)]);
@@ -5628,7 +5632,7 @@ mod tests {
 		let track = track_producer("test", timed());
 		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 			moq_net::track::Start::Live {
-				min: Duration::from_secs(10),
+				min: Some(Duration::from_secs(10)),
 				max: Some(Duration::from_secs(10)),
 			},
 		)]);
@@ -5669,7 +5673,7 @@ mod tests {
 		let track = track_producer("test", timed());
 		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 			moq_net::track::Start::Live {
-				min: Duration::from_secs(10),
+				min: Some(Duration::from_secs(10)),
 				max: Some(Duration::from_secs(10)),
 			},
 		)]);
@@ -5695,7 +5699,7 @@ mod tests {
 		let track = track_producer("test", timed());
 		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 			moq_net::track::Start::Live {
-				min: Duration::from_secs(10),
+				min: Some(Duration::from_secs(10)),
 				max: Some(Duration::from_secs(10)),
 			},
 		)]);
@@ -5734,7 +5738,7 @@ mod tests {
 		let track = track_producer("test", timed());
 		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 			moq_net::track::Start::Live {
-				min: Duration::from_secs(10),
+				min: Some(Duration::from_secs(10)),
 				max: Some(Duration::from_secs(10)),
 			},
 		)]);
@@ -5789,7 +5793,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_millis(500),
+						min: Some(Duration::from_millis(500)),
 						max: Some(Duration::from_millis(500)),
 					},
 				)]),
@@ -5835,7 +5839,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_secs(10),
+						min: Some(Duration::from_secs(10)),
 						max: Some(Duration::from_secs(10)),
 					},
 				)]),
@@ -5889,7 +5893,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_secs(3700),
+						min: Some(Duration::from_secs(3700)),
 						max: Some(Duration::from_secs(3700)),
 					},
 				)]),
@@ -5913,7 +5917,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_secs(10),
+						min: Some(Duration::from_secs(10)),
 						max: Some(Duration::from_secs(10)),
 					},
 				)]),
@@ -5942,7 +5946,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_millis(110),
+						min: Some(Duration::from_millis(110)),
 						max: Some(Duration::from_millis(110)),
 					},
 				)]),
@@ -6002,7 +6006,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_millis(100),
+						min: Some(Duration::from_millis(100)),
 						max: Some(Duration::from_millis(100)),
 					},
 				)]),
@@ -6066,7 +6070,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_millis(500),
+						min: Some(Duration::from_millis(500)),
 						max: Some(Duration::from_millis(500)),
 					},
 				)]),
@@ -6106,7 +6110,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_millis(500),
+						min: Some(Duration::from_millis(500)),
 						max: Some(Duration::from_millis(500)),
 					},
 				)]),
@@ -6144,7 +6148,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_millis(500),
+						min: Some(Duration::from_millis(500)),
 						max: Some(Duration::from_millis(500)),
 					},
 				)]),
@@ -6307,7 +6311,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_millis(500),
+						min: Some(Duration::from_millis(500)),
 						max: Some(Duration::from_millis(500)),
 					},
 				)]),
@@ -6332,7 +6336,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_millis(500),
+						min: Some(Duration::from_millis(500)),
 						max: Some(Duration::from_millis(500)),
 					},
 				)]),
@@ -6359,7 +6363,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_millis(50),
+						min: Some(Duration::from_millis(50)),
 						max: Some(Duration::from_millis(50)),
 					},
 				)]),
@@ -6403,7 +6407,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_millis(100),
+						min: Some(Duration::from_millis(100)),
 						max: Some(Duration::from_millis(100)),
 					},
 				)]),
@@ -6507,7 +6511,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_millis(500),
+						min: Some(Duration::from_millis(500)),
 						max: Some(Duration::from_millis(500)),
 					},
 				)]),
@@ -6535,7 +6539,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_millis(500),
+						min: Some(Duration::from_millis(500)),
 						max: Some(Duration::from_millis(500)),
 					},
 				)]),
@@ -6580,7 +6584,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_millis(500),
+						min: Some(Duration::from_millis(500)),
 						max: Some(Duration::from_millis(500)),
 					},
 				)]),
@@ -6615,7 +6619,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_millis(500),
+						min: Some(Duration::from_millis(500)),
 						max: Some(Duration::from_millis(500)),
 					},
 				)]),
@@ -6652,7 +6656,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_millis(500),
+						min: Some(Duration::from_millis(500)),
 						max: Some(Duration::from_millis(500)),
 					},
 				)]),
@@ -6680,7 +6684,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_millis(500),
+						min: Some(Duration::from_millis(500)),
 						max: Some(Duration::from_millis(500)),
 					},
 				)]),
@@ -6732,7 +6736,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_secs(10),
+						min: Some(Duration::from_secs(10)),
 						max: Some(Duration::from_secs(10)),
 					},
 				)]),
@@ -6770,7 +6774,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_secs(10),
+						min: Some(Duration::from_secs(10)),
 						max: Some(Duration::from_secs(10)),
 					},
 				)]),
@@ -6800,7 +6804,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_secs(10),
+						min: Some(Duration::from_secs(10)),
 						max: Some(Duration::from_secs(10)),
 					},
 				)]),
@@ -6960,7 +6964,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_millis(100),
+						min: Some(Duration::from_millis(100)),
 						max: Some(Duration::from_millis(100)),
 					},
 				)]),
@@ -6991,7 +6995,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_secs(30),
+						min: Some(Duration::from_secs(30)),
 						max: Some(Duration::from_secs(30)),
 					},
 				)]),
@@ -7061,7 +7065,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_secs(30),
+						min: Some(Duration::from_secs(30)),
 						max: Some(Duration::from_secs(30)),
 					},
 				)]),
@@ -7340,7 +7344,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_millis(500),
+						min: Some(Duration::from_millis(500)),
 						max: Some(Duration::from_millis(500)),
 					},
 				)]),

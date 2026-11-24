@@ -2338,7 +2338,7 @@ mod tests {
 				_ => {
 					let join = |max| {
 						Range::from(Start::Live {
-							min: Duration::from_millis(1 + next(100)),
+							min: Some(Duration::from_millis(1 + next(100))),
 							max,
 						})
 					};

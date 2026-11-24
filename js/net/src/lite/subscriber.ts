@@ -3719,8 +3719,9 @@ function wireBudget(max: number | null): number {
 	return max ?? NO_MAX_DELAY;
 }
 
-// The live join `min` milliseconds behind the live edge through the time `end`, as one key.
-function joinKey(min: number, end: bigint | undefined): string {
+// The live join `min` milliseconds behind the live edge (null for no lag limit) through the time
+// `end`, as one key.
+function joinKey(min: number | null, end: bigint | undefined): string {
 	return `${min}:${end ?? ""}`;
 }
 

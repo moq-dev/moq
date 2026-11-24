@@ -22073,7 +22073,7 @@ impl ServeRange {
 /// expires short of the publisher's max age, since this draft's SUBSCRIBE carries none.
 fn live_join(subscription: &mut Subscription) {
 	*subscription = std::mem::take(subscription).with_ranges([track::Range::from(track::Start::Live {
-		min: Duration::ZERO,
+		min: Some(Duration::ZERO),
 		max: None,
 	})]);
 }

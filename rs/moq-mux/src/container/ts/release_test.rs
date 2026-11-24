@@ -54,7 +54,7 @@ async fn import(data: &[u8]) -> Imported {
 		.subscribe(
 			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 				moq_net::track::Start::Live {
-					min: RECORDING,
+					min: Some(RECORDING),
 					max: Some(RECORDING),
 				},
 			)]),

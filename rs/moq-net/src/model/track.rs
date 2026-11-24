@@ -829,7 +829,7 @@ pub(crate) struct TrackState {
 	// asking each live join, by its lag and end: only that answer places a reader's join, the
 	// live edge being the upstream's (see [`Subscriber::joins`]). Holds only the joins its
 	// live ranges still ask.
-	join_answers: BTreeMap<(Duration, Option<u64>), JoinAnswer>,
+	join_answers: BTreeMap<(Option<Duration>, Option<u64>), JoinAnswer>,
 	// Counts changes to how a time start is placed other than by groups arriving or drops:
 	// `time_starts`, `anchors`, and `starts_at_keys`. See [`Unplaced::mark`].
 	placing: u64,
@@ -1308,7 +1308,7 @@ impl Holdings for TrackState {
 	///
 	/// An idle copy waits as [`Self::latest_live`] does: what an ended feed left measures no
 	/// live edge, and the groups it missed since leave a hole the next feed may not fill.
-	fn join(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Join {
+	fn join(&self, min: Option<Duration>, end: Option<u64>, budget: Duration, since: u64) -> Join {
 		// Once the end is declared, nothing more is answered: it places as the groups held
 		// measure it, unless an answer already named a group (see `Window::place_range`).
 		if self.joins_answered() {
@@ -1329,15 +1329,13 @@ impl Holdings for TrackState {
 		// ends it: every group below the end arrived, even one still filling.
 		let ended = self.outcome.is_final() || self.is_complete();
 		let Some(scale) = info.timescale else {
-			let aged = self.walked(..).rev().find(|(_, slot)| self.aged(slot.arrived, min));
+			let aged = min.and_then(|min| self.walked(..).rev().find(|(_, slot)| self.aged(slot.arrived, min)));
 			return match aged {
 				Some((&key, _)) => Join::Group(key),
-				// This copy's arrivals don't reach back that far yet, but its upstream's may. One past
-				// every group no arrival ever reaches waits only on an upstream that answers joins,
-				// whose answer may still land until the read ends.
-				None if wire && (min < subscription::PAST_EVERY_GROUP || (self.answers_joins && !ended)) => {
-					Join::Unknown
-				}
+				// This copy's arrivals don't reach back that far yet, but its upstream's may. One with
+				// no lag limit, which no arrival ever reaches, waits only on an upstream that answers
+				// joins, whose answer may still land until the read ends.
+				None if wire && (min.is_some() || (self.answers_joins && !ended)) => Join::Unknown,
 				// It reaches back past every arrival, so it starts where a time start from 0
 				// does, taking a lower group that arrives late as the oldest group would. On a copy
 				// that asks upstream for any lower group the copy lacks, as on a timed track.
@@ -1349,21 +1347,23 @@ impl Holdings for TrackState {
 			.and_then(|edge| edge.timestamp.convert(scale).ok())
 			.map(Timestamp::value);
 		// Rounded up to whole ticks, so the start is never newer than the lag allows; one past
-		// every timestamp reaches back to the oldest group.
-		let back = u64::try_from(
-			min.as_nanos()
-				.saturating_mul(u128::from(scale.as_u64()))
-				.div_ceil(1_000_000_000),
-		)
-		.unwrap_or(u64::MAX);
+		// every timestamp, or with no lag limit, reaches back to the oldest group.
+		let back = min.map_or(u64::MAX, |min| {
+			u64::try_from(
+				min.as_nanos()
+					.saturating_mul(u128::from(scale.as_u64()))
+					.div_ceil(1_000_000_000),
+			)
+			.unwrap_or(u64::MAX)
+		});
 		if self.anchors == Anchors::Refused || self.starts_at_keys {
 			// Keys that aren't times: by when each group's first frame presented. No group
 			// presents before time 0, so a join reaching back that far starts as the oldest group
 			// does, taking a lower group that arrives late rather than starting at the oldest group
-			// this hop happens to hold. One past every group needs no frame to measure it by, so
+			// this hop happens to hold. One with no lag limit needs no frame to measure it by, so
 			// groups whose frames are still on their way place it all the same.
 			let target = match newest {
-				_ if min >= subscription::PAST_EVERY_GROUP => 0,
+				_ if min.is_none() => 0,
 				Some(newest) => newest.saturating_sub(back),
 				// No frame measures the edge yet, and the read ends before one must: it starts at
 				// the oldest group held.
@@ -1418,7 +1418,13 @@ impl Holdings for TrackState {
 		self.joins_answered()
 	}
 
-	fn answered_join(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Option<Option<u64>> {
+	fn answered_join(
+		&self,
+		min: Option<Duration>,
+		end: Option<u64>,
+		budget: Duration,
+		since: u64,
+	) -> Option<Option<u64>> {
 		Some(self.join_answer(min, end, budget, since)?.start)
 	}
 
@@ -1528,7 +1534,13 @@ impl TrackState {
 impl TrackState {
 	/// The upstream's answer to the live join `min` through `end`, recorded after join tick
 	/// `since` under a budget at least as wide as the reader's `budget`.
-	fn join_answer(&self, min: Duration, end: Option<u64>, budget: Duration, since: u64) -> Option<&JoinAnswer> {
+	fn join_answer(
+		&self,
+		min: Option<Duration>,
+		end: Option<u64>,
+		budget: Duration,
+		since: u64,
+	) -> Option<&JoinAnswer> {
 		let answer = self.join_answers.get(&(min, end))?;
 		(answer.tick > since && budget <= answer.budget).then_some(answer)
 	}
@@ -5430,7 +5442,13 @@ impl Producer {
 	/// places every reader of that join that began waiting before now, within the budget.
 	/// Returns the tick it was recorded at.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn answer_join(&self, min: Duration, end: Option<u64>, start: Option<u64>, budget: Duration) -> u64 {
+	pub(crate) fn answer_join(
+		&self,
+		min: Option<Duration>,
+		end: Option<u64>,
+		start: Option<u64>,
+		budget: Duration,
+	) -> u64 {
 		// Ticked first: a range added once the tick moved takes no answer recorded at it, and
 		// asks again.
 		let tick = demand::answered();
@@ -5448,7 +5466,7 @@ impl Producer {
 	/// Forget the answers of the live joins `keep` rejects: no live range asks them, so no
 	/// reader waits on them.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn retain_joins(&self, keep: impl Fn(Duration, Option<u64>) -> bool) {
+	pub(crate) fn retain_joins(&self, keep: impl Fn(Option<Duration>, Option<u64>) -> bool) {
 		let stale = |state: &TrackState| state.join_answers.keys().any(|&(min, end)| !keep(min, end));
 		if !stale(&self.state.read()) {
 			return;
@@ -14366,7 +14384,7 @@ mod test {
 	/// Helper: [`replay`]'s budget, joining live at the latest group.
 	fn live_join() -> Subscription {
 		replay().with_ranges([Range::from(Start::Live {
-			min: Duration::ZERO,
+			min: Some(Duration::ZERO),
 			max: Some(Duration::from_secs(30)),
 		})])
 	}
@@ -15290,7 +15308,7 @@ mod test {
 		let range = match (range.start, min.into()) {
 			(Start::Oldest, Some(min)) => Range {
 				start: Start::Live {
-					min,
+					min: Some(min),
 					max: Some(Duration::from_secs(30)),
 				},
 				..range
@@ -15353,7 +15371,7 @@ mod test {
 
 		let budget = Subscription::default()
 			.with_ranges([Range::from(Start::Live {
-				min: Duration::from_secs(2),
+				min: Some(Duration::from_secs(2)),
 				max: Some(std::time::Duration::ZERO),
 			})])
 			.with_max(Duration::from_secs(1));
@@ -17789,7 +17807,7 @@ mod test {
 		// Half a second behind the live edge at 2000 is time 1500.
 		let join = |max: Option<Duration>| {
 			Subscription::default().with_ranges([Range::from(Start::Live {
-				min: Duration::from_millis(500),
+				min: Some(Duration::from_millis(500)),
 				max,
 			})])
 		};
@@ -18153,7 +18171,7 @@ mod test {
 		// Half a second behind the live edge at 2000 is time 1500.
 		let mut ordered = producer
 			.subscribe(Subscription::default().with_ranges([Range::from(Start::Live {
-				min: Duration::from_millis(500),
+				min: Some(Duration::from_millis(500)),
 				max: Some(Duration::from_secs(1)),
 			})]))
 			.with_range(900..1600)
@@ -18430,7 +18448,7 @@ mod test {
 		producer.finish_at(Position::group(2)).unwrap();
 		assert_eq!(drain_groups(&mut reader), Vec::<u64>::new(), "waits on its upstream");
 
-		producer.answer_join(subscription::PAST_EVERY_GROUP, None, Some(0), Duration::ZERO);
+		producer.answer_join(None, None, Some(0), Duration::ZERO);
 		assert_eq!(drain_groups(&mut reader), vec![0]);
 	}
 
@@ -18464,7 +18482,7 @@ mod test {
 			"waits on the answer"
 		);
 
-		producer.answer_join(Duration::ZERO, None, Some(0), Duration::ZERO);
+		producer.answer_join(Some(Duration::ZERO), None, Some(0), Duration::ZERO);
 		assert!(reader.poll_start(&kio::Waiter::noop()).is_ready());
 		assert_eq!(starts(&mut reader), vec![Some(0), Some(0)]);
 	}
@@ -18513,7 +18531,7 @@ mod test {
 	fn a_complete_received_copy_places_a_timed_join_it_cannot_prove() {
 		let at = 1_000_000;
 		let join = Subscription::default().with_ranges([Range::from(Start::Live {
-			min: Duration::from_millis(10),
+			min: Some(Duration::from_millis(10)),
 			max: None,
 		})]);
 		let mut producer = track_producer(
@@ -18540,7 +18558,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_complete_received_copy_places_a_join_no_frame_measures() {
 		let join = Subscription::default().with_ranges([Range::from(Start::Live {
-			min: Duration::from_secs(40),
+			min: Some(Duration::from_secs(40)),
 			max: Some(Duration::from_secs(40)),
 		})]);
 		let mut producer = track_producer(
@@ -18567,7 +18585,7 @@ mod test {
 	fn a_received_copy_places_a_live_join_only_from_its_upstreams_answer() {
 		let join = |millis| {
 			Subscription::default().with_ranges([Range::from(Start::Live {
-				min: Duration::from_millis(millis),
+				min: Some(Duration::from_millis(millis)),
 				max: None,
 			})])
 		};
@@ -18589,12 +18607,12 @@ mod test {
 		assert_eq!(drain_groups(&mut live), Vec::<u64>::new(), "reads nothing meanwhile");
 		assert_eq!(
 			asked(&producer),
-			[(Duration::ZERO, None), (Duration::from_millis(2), None)]
+			[(Some(Duration::ZERO), None), (Some(Duration::from_millis(2)), None)]
 		);
 
 		// Upstream answers each join where its live edge was.
-		producer.answer_join(Duration::ZERO, None, Some(9), Duration::MAX);
-		producer.answer_join(Duration::from_millis(2), None, Some(7), Duration::MAX);
+		producer.answer_join(Some(Duration::ZERO), None, Some(9), Duration::MAX);
+		producer.answer_join(Some(Duration::from_millis(2)), None, Some(7), Duration::MAX);
 		write_group(&producer, 7);
 		assert_eq!((placed(&mut live), placed(&mut behind)), (Some(9), Some(7)));
 		let mut groups = drain_groups(&mut behind);
@@ -18606,8 +18624,8 @@ mod test {
 		// live edge has moved since. It asks again.
 		let mut later = producer.subscribe(join(2));
 		assert_eq!(placed(&mut later), None);
-		assert_eq!(asked(&producer), [(Duration::from_millis(2), None)]);
-		producer.answer_join(Duration::from_millis(2), None, Some(9), Duration::MAX);
+		assert_eq!(asked(&producer), [(Some(Duration::from_millis(2)), None)]);
+		producer.answer_join(Some(Duration::from_millis(2)), None, Some(9), Duration::MAX);
 		assert_eq!(placed(&mut later), Some(9));
 		assert_eq!(placed(&mut behind), Some(7), "an earlier reader stays where it started");
 	}
@@ -18617,7 +18635,7 @@ mod test {
 	/// copy's window places the range.
 	#[test]
 	fn a_copy_edited_with_a_readers_tick_places_from_an_earlier_answer() {
-		let lag = Duration::from_millis(2);
+		let lag = Some(Duration::from_millis(2));
 		let producer = track_producer("test", Info::timed());
 		producer.received();
 		producer.anchored();
@@ -18646,7 +18664,7 @@ mod test {
 	#[test]
 	fn a_reader_asking_one_join_twice_withdraws_it_once() {
 		let lag = Range::from(Start::Live {
-			min: Duration::from_millis(2),
+			min: Some(Duration::from_millis(2)),
 			max: Some(std::time::Duration::ZERO),
 		});
 		let asked = |producer: &Producer| producer.subscription().unwrap_or_default().joins.len();
@@ -18676,7 +18694,7 @@ mod test {
 	fn a_received_copy_shares_a_join_answer_within_its_budget() {
 		let join = |max| {
 			Subscription::default().with_ranges([Range::from(Start::Live {
-				min: Duration::from_millis(2),
+				min: Some(Duration::from_millis(2)),
 				max,
 			})])
 		};
@@ -18700,7 +18718,7 @@ mod test {
 		);
 
 		// An answer judged under a narrower max places only the readers within it.
-		producer.answer_join(Duration::from_millis(2), None, Some(7), second_budget);
+		producer.answer_join(Some(Duration::from_millis(2)), None, Some(7), second_budget);
 		assert_eq!(
 			[placed(&mut first), placed(&mut second), placed(&mut wider)],
 			[Some(7), Some(7), None]
@@ -18710,7 +18728,7 @@ mod test {
 			budgets.iter().map(|join| join.budget).collect::<Vec<_>>(),
 			[Duration::MAX]
 		);
-		producer.answer_join(Duration::from_millis(2), None, Some(7), Duration::MAX);
+		producer.answer_join(Some(Duration::from_millis(2)), None, Some(7), Duration::MAX);
 		assert_eq!(placed(&mut wider), Some(7));
 	}
 
@@ -18732,7 +18750,7 @@ mod test {
 		producer.finish_at(Position::group(6001)).unwrap();
 		let join = Subscription::default()
 			.with_ranges([Range::from(Start::Live {
-				min: Duration::from_millis(1000),
+				min: Some(Duration::from_millis(1000)),
 				max: Some(std::time::Duration::ZERO),
 			})])
 			.with_max(Duration::from_secs(10));
@@ -18756,7 +18774,7 @@ mod test {
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_received_copy_keeps_a_join_answer_past_its_declared_end() {
-		for min in [Duration::ZERO, Duration::from_millis(1000)] {
+		for min in [Some(Duration::ZERO), Some(Duration::from_millis(1000))] {
 			let mut producer = track_producer("test", Info::timed());
 			producer.received();
 			producer.anchored();
@@ -18786,7 +18804,7 @@ mod test {
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_received_copy_keeps_an_empty_join_answer_past_its_declared_end() {
-		let min = Duration::from_millis(200);
+		let min = Some(Duration::from_millis(200));
 		let mut producer = track_producer("test", Info::timed());
 		producer.received();
 		producer.anchored();
@@ -18815,7 +18833,7 @@ mod test {
 		producer.anchored();
 		producer.answers_joins();
 		write_group(&producer, 1000);
-		let min = Duration::from_millis(200);
+		let min = Some(Duration::from_millis(200));
 		let join = Subscription::default()
 			.with_ranges([Range {
 				start: Start::Live {
@@ -18848,7 +18866,7 @@ mod test {
 		}
 		let join = Subscription::default()
 			.with_ranges([Range::from(Start::Live {
-				min: Duration::from_millis(200),
+				min: Some(Duration::from_millis(200)),
 				max: Some(std::time::Duration::ZERO),
 			})])
 			.with_max(None);
@@ -20645,7 +20663,7 @@ mod test {
 		ten.finish().unwrap();
 		let run = Range {
 			start: Start::Live {
-				min: Duration::ZERO,
+				min: Some(Duration::ZERO),
 				max: Some(Duration::from_secs(15)),
 			},
 			end: Some(19),
@@ -20673,7 +20691,7 @@ mod test {
 			let subscription = Subscription::default()
 				.with_ranges([Range {
 					start: Start::Live {
-						min: Duration::ZERO,
+						min: Some(Duration::ZERO),
 						max: None,
 					},
 					end: Some(0),
@@ -21036,7 +21054,7 @@ mod test {
 		ten.finish().unwrap();
 		let run = Range {
 			start: Start::Live {
-				min: Duration::ZERO,
+				min: Some(Duration::ZERO),
 				max: Some(Duration::from_secs(15)),
 			},
 			end: Some(19),
@@ -23448,11 +23466,11 @@ mod test {
 		let budget = Duration::from_millis(50);
 		let mut both = Subscription::default().with_ranges([
 			Range::from(Start::Live {
-				min: Duration::ZERO,
+				min: Some(Duration::ZERO),
 				max: Some(budget),
 			}),
 			Range::from(Start::Live {
-				min: Duration::from_secs(1),
+				min: Some(Duration::from_secs(1)),
 				max: None,
 			}),
 		]);
@@ -23482,12 +23500,12 @@ mod test {
 		let budget = Duration::from_millis(50);
 		let mut both = Subscription::default().with_ranges([
 			Range::from(Start::Live {
-				min: Duration::ZERO,
+				min: Some(Duration::ZERO),
 				max: Some(budget),
 			}),
 			Range {
 				start: Start::Live {
-					min: Duration::from_secs(1),
+					min: Some(Duration::from_secs(1)),
 					max: None,
 				},
 				end: Some(2),
@@ -26806,7 +26824,7 @@ mod test {
 		let join = |millis| {
 			Subscription::default()
 				.with_ranges([Range::from(Start::Live {
-					min: Duration::from_millis(millis),
+					min: Some(Duration::from_millis(millis)),
 					max: Some(std::time::Duration::ZERO),
 				})])
 				.with_max(None)
@@ -30629,7 +30647,7 @@ mod test {
 
 		// Three milliseconds behind the live edge at group 18 is time 15, which group 14 holds.
 		let behind = Start::Live {
-			min: Duration::from_millis(3),
+			min: Some(Duration::from_millis(3)),
 			max: Some(Duration::ZERO),
 		};
 		subscriber.update(ascending(behind)).unwrap();
@@ -31511,7 +31529,7 @@ mod test {
 		let mut producer = quiet_track(5);
 		let mut ahead = producer.subscribe(replay().with_range(8..));
 		let lag = Range::from(Start::Live {
-			min: Duration::from_millis(2),
+			min: Some(Duration::from_millis(2)),
 			max: Some(Duration::from_secs(30)),
 		});
 		let mut behind = producer.subscribe(Subscription::default().with_ranges([lag]));
@@ -32000,7 +32018,7 @@ mod test {
 		// The latest group, so a join there lands on it rather than reaching below.
 		write_group(&producer, 3);
 		let mut above = producer.subscribe(Subscription::default().with_ranges([Range::from(Start::Live {
-			min: Duration::ZERO,
+			min: Some(Duration::ZERO),
 			max: Some(budget),
 		})]));
 		producer.give_up(1..3, Hole::stale(budget));
@@ -32047,7 +32065,7 @@ mod test {
 			end: Some(5),
 		};
 		let open = Range::from(Start::Live {
-			min: Duration::ZERO,
+			min: Some(Duration::ZERO),
 			max: Some(budget),
 		});
 		let mut reader = producer.subscribe(Subscription::default().with_ranges([first, open]));
@@ -32657,7 +32675,7 @@ mod test {
 		write_group(&producer, 0);
 		write_group(&producer, 6);
 		let live = Start::Live {
-			min: subscription::PAST_EVERY_GROUP,
+			min: None,
 			max: Some(Duration::from_secs(1)),
 		};
 		let mut subscriber = producer.subscribe(Subscription::default().with_ranges([

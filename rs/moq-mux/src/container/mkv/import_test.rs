@@ -1880,7 +1880,7 @@ async fn a_seek_mid_block_waits_for_the_block() {
 	let name = snapshot.audio.renditions.keys().next().unwrap();
 	let replay = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 		moq_net::track::Start::Live {
-			min: std::time::Duration::from_secs(3600),
+			min: Some(std::time::Duration::from_secs(3600)),
 			max: Some(std::time::Duration::from_secs(3600)),
 		},
 	)]);

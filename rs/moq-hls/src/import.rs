@@ -2528,7 +2528,7 @@ mod tests {
 		let before_name = name(&catalog.snapshot());
 		let replay = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 			moq_net::track::Start::Live {
-				min: Duration::from_secs(3600),
+				min: Some(Duration::from_secs(3600)),
 				max: Some(Duration::from_secs(3600)),
 			},
 		)]);
@@ -2643,7 +2643,7 @@ mod tests {
 			let name = catalog.snapshot().video.renditions.keys().next().unwrap().clone();
 			let replay = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 				moq_net::track::Start::Live {
-					min: Duration::from_secs(3600),
+					min: Some(Duration::from_secs(3600)),
 					max: Some(Duration::from_secs(3600)),
 				},
 			)]);
@@ -2812,7 +2812,7 @@ mod tests {
 	async fn stamps(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<u128> {
 		let replay = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 			moq_net::track::Start::Live {
-				min: std::time::Duration::from_secs(3600),
+				min: Some(std::time::Duration::from_secs(3600)),
 				max: Some(std::time::Duration::from_secs(3600)),
 			},
 		)]);

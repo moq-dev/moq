@@ -1,7 +1,7 @@
 import { Duration as ClockDuration } from "@moq/clock";
 import { fromTransport, ProtocolViolation, StreamCode, StreamError, toStreamCode } from "../error.ts";
 import type * as Instance from "../instance.ts";
-import { NO_MAX_DELAY, PAST_EVERY_GROUP } from "../internal.ts";
+import { NO_MAX_DELAY } from "../internal.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import type { Order, Position, Range, Start } from "../track.ts";
@@ -154,11 +154,12 @@ export interface WireJoined {
 }
 
 /**
- * A live join on the wire: its lag `min` behind the live edge, and the `max` its groups expire
- * past, `null` for no limit beyond the publisher's, both in whole milliseconds.
+ * A live join on the wire: its lag `min` behind the live edge, `null` for no lag limit, and the
+ * `max` its groups expire past, `null` for no limit beyond the publisher's, both in whole
+ * milliseconds.
  */
 export interface WireLive {
-	min: number;
+	min: number | null;
 	max: number | null;
 }
 
@@ -208,9 +209,12 @@ function wireAnchor(anchor: WireAnchor | undefined, end: boolean): [number, ...b
 	if (anchor?.live !== undefined) {
 		if (end) throw new Error("a range ends only at a group");
 		const { min, max } = anchor.live;
-		if (max !== null && (!Number.isSafeInteger(max) || max < 0))
-			throw new RangeError("duration exceeds safe milliseconds");
-		return [3, BigInt(min), max === null ? 0n : BigInt(max) + 1n];
+		for (const limit of [min, max]) {
+			if (limit !== null && (!Number.isSafeInteger(limit) || limit < 0))
+				throw new RangeError("duration exceeds safe milliseconds");
+		}
+		// Each plus one, so zero says no limit.
+		return [3, min === null ? 0n : BigInt(min) + 1n, max === null ? 0n : BigInt(max) + 1n];
 	}
 	if (anchor?.absolute !== undefined) {
 		if (anchor.frame) return [2, anchor.absolute, BigInt(anchor.frame)];
@@ -301,8 +305,8 @@ export function requestedRanges(msg: Span & { ranges?: WireRange[] }, legacy?: S
  */
 export function legacyStart(version: Version, maxDelay: number | null): Start | undefined {
 	if (hasRanges(version) || maxDelay === null) return undefined;
-	// A join past every group takes every group still within its max. Mirrors the Rust `Start::within`.
-	return { live: { min: PAST_EVERY_GROUP, max: ClockDuration.millis(maxDelay) } };
+	// A join with no lag limit takes every group still within its max. Mirrors the Rust `Start::within`.
+	return { live: { min: null, max: ClockDuration.millis(maxDelay) } };
 }
 
 /** The max age a pre-07 `legacy` start carries, undefined when it carries none. */
@@ -340,7 +344,8 @@ export function requestedRange(range: WireRange): Range {
 	const live = range.start?.live;
 	const joined = range.start?.joined;
 	const maxOf = (max: number | null) => (max === null || max >= NO_MAX_DELAY ? null : ClockDuration.millis(max));
-	if (live !== undefined) out.start = { live: { min: ClockDuration.millis(live.min), max: maxOf(live.max) } };
+	if (live !== undefined)
+		out.start = { live: { min: live.min === null ? null : ClockDuration.millis(live.min), max: maxOf(live.max) } };
 	// Placed already, so its lag places nothing: it starts where it was placed (see
 	// {@link requestedPlaced}) and expires as a live join under its max.
 	else if (joined !== undefined) out.start = { live: { min: ClockDuration.ZERO, max: maxOf(joined.max) } };
@@ -371,7 +376,12 @@ async function decodeAnchor(r: Reader, end: boolean): Promise<WireAnchor | undef
 		}
 		case 3:
 			if (end) throw new ProtocolViolation("a range ends at a live join");
-			return { live: { min: await r.u53(), max: (await Duration.decodeOptional(r)) ?? null } };
+			return {
+				live: {
+					min: (await Duration.decodeOptional(r)) ?? null,
+					max: (await Duration.decodeOptional(r)) ?? null,
+				},
+			};
 		case 4: {
 			if (end) throw new ProtocolViolation("a range ends at a live join");
 			const absolute = await r.u62();
@@ -733,7 +743,7 @@ export class LiveRanges {
 			// One already placed stays where it was placed.
 			const tuned: WireRange = {
 				...range,
-				start: joined ? { joined: { ...joined, max } } : { live: { min: live?.min ?? 0, max } },
+				start: joined ? { joined: { ...joined, max } } : { live: { min: live ? live.min : 0, max } },
 			};
 			this.#replace(id, tuned);
 			retuned.push([id, tuned]);

@@ -2,7 +2,7 @@
 import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { type Group, Time, Track } from "@moq/net";
-import { hooks, PAST_EVERY_GROUP } from "../src/internal.ts";
+import { hooks } from "../src/internal.ts";
 
 /** Read live frames after a retained window, checking every delivered payload. */
 export async function run(): Promise<void> {
@@ -18,7 +18,7 @@ export async function run(): Promise<void> {
 		// reaching back past every group, so it takes each still within that max.
 		const check = new Track.Producer("reordered").accept({ timescale: Time.Timescale.MILLI, maxAge: null });
 		const reader = check.subscribe({
-			ranges: [{ start: { live: { min: PAST_EVERY_GROUP, max: Duration.millis(80) } } }],
+			ranges: [{ start: { live: { min: null, max: Duration.millis(80) } } }],
 		});
 		try {
 			for (const timestamps of [[0], [100], [150, 200, 160]]) {
@@ -70,7 +70,7 @@ export async function run(): Promise<void> {
 											{
 												start: {
 													live: {
-														min: PAST_EVERY_GROUP,
+														min: null,
 														max: Duration.millis(
 															(retained +
 																Math.ceil((iterations + warmup) / offsets.length) +

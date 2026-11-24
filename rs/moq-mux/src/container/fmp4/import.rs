@@ -2584,7 +2584,7 @@ mod tests {
 	fn replay(output: &Output<()>) -> moq_net::track::Subscriber {
 		let replay = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 			moq_net::track::Start::Live {
-				min: std::time::Duration::from_secs(30),
+				min: Some(std::time::Duration::from_secs(30)),
 				max: Some(std::time::Duration::from_secs(30)),
 			},
 		)]);
