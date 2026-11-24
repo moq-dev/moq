@@ -2783,8 +2783,9 @@ test.each(["arrival", "ordered"] as const)("subscription bounds stay reader-loca
 		expect((await read())?.start).toBe(3n);
 		expect(await read()).toBeUndefined();
 		subscriber.update({ ranges: [{ end: 4n }] });
-		// The unread group below both old floors was passed over outside every range, so neither read
-		// goes back for it, as in Rust.
+		// Arrival readers can now offer the unread group below the old floors; ordered ones cannot
+		// rewind. Mirrors the Rust `a_widened_history_read_offers_a_group_it_passed_over`.
+		if (!ordered) expect((await read())?.start).toBe(0n);
 		expect((await read())?.start).toBe(4n);
 		expect(await read()).toBeUndefined();
 		// An open range parks at the live edge instead.

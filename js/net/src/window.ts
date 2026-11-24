@@ -668,12 +668,10 @@ export class Window {
 	 */
 	budget(): Budget {
 		if (this.#budget) return this.#budget;
-		const rest = this.#budgets.last() ?? 0;
 		this.#budget = new Budget({
 			layers: [...this.#layers].map(([budget, cover]) => [budget, cover.runs()] as const),
 			unplaced: this.#unplacedBudgets((key) => this.#ranges.get(key)),
-			rest,
-			widest: this.#histories > 0 ? NO_MAX_DELAY : rest,
+			widest: this.#histories > 0 ? NO_MAX_DELAY : (this.#budgets.last() ?? 0),
 		});
 		return this.#budget;
 	}
@@ -709,18 +707,10 @@ export class Window {
 			layers.set(budget, layer);
 			layer.add(span.reads.start, span.reads.end, 1);
 		}
-		let rest = 0;
-		let widest = 0;
-		for (const range of ranges.values()) {
-			if (isEmpty(range)) continue;
-			widest = Math.max(widest, rangeBudget(range));
-			if (liveMillis(range) !== undefined) rest = Math.max(rest, rangeBudget(range));
-		}
 		return new Budget({
 			layers: [...layers].map(([budget, cover]) => [budget, cover.runs()] as const),
 			unplaced: this.#unplacedBudgets((key) => ranges.get(key)),
-			rest,
-			widest,
+			widest: widest(ranges.values()),
 		});
 	}
 
@@ -1303,7 +1293,8 @@ export class Window {
  * set it: the widest budget among the ranges covering it, a live join's being its max, and a history
  * range's as long as the publisher keeps it ({@link NO_MAX_DELAY}). A range not yet placed may cover
  * any group up to its end. A group none covers, such as one handed out before the ranges moved, gets
- * the widest max. Immutable: a window hands out a new one when its ranges move. Mirrors the Rust
+ * the widest budget any range asks: it was reached through one of them, so a history range keeps it
+ * from going stale. Immutable: a window hands out a new one when its ranges move. Mirrors the Rust
  * `Budget`.
  */
 export class Budget {
@@ -1314,15 +1305,12 @@ export class Budget {
 	 * by end ascending, budget descending, leaving out any another covers at least as widely.
 	 */
 	readonly unplaced: readonly (readonly [bigint, number])[];
-	/** A group no range covers: the widest live join's max. */
-	readonly rest: number;
-	// The widest budget any range asks, placed or not.
+	// The widest budget any range asks, placed or not, which a group no range covers gets.
 	readonly #widest: number;
 
 	constructor(parts: {
 		layers: readonly (readonly [number, readonly Run[]])[];
 		unplaced: readonly (readonly [bigint, number])[];
-		rest: number;
 		widest: number;
 	}) {
 		this.layers = parts.layers.filter(([, runs]) => runs.length > 0).sort(([a], [b]) => b - a);
@@ -1334,13 +1322,12 @@ export class Budget {
 			if (wider === undefined || unplaced[i][1] > wider[1]) kept.push(unplaced[i]);
 		}
 		this.unplaced = kept.reverse();
-		this.rest = parts.rest;
 		this.#widest = parts.widest;
 	}
 
 	/** The same budget for every group. */
 	static uniform(budget: number): Budget {
-		return new Budget({ layers: [], unplaced: [], rest: budget, widest: budget });
+		return new Budget({ layers: [], unplaced: [], widest: budget });
 	}
 
 	/** This budget, each group's no wider than `bound`, undefined for none. */
@@ -1349,7 +1336,6 @@ export class Budget {
 		return new Budget({
 			layers: this.layers.map(([budget, runs]) => [Math.min(budget, bound), runs] as const),
 			unplaced: this.unplaced.map(([end, budget]) => [end, Math.min(budget, bound)] as const),
-			rest: Math.min(this.rest, bound),
 			widest: bound,
 		});
 	}
@@ -1366,7 +1352,7 @@ export class Budget {
 		}
 		const unplaced = this.unplaced[this.#unplacedFrom(key)];
 		if (unplaced !== undefined) at = Math.max(at ?? 0, unplaced[1]);
-		return at ?? this.rest;
+		return at ?? this.#widest;
 	}
 
 	/** The widest budget any group gets, counting a range not yet placed. */
@@ -1377,8 +1363,8 @@ export class Budget {
 	/** Whether every group gets the same budget. */
 	isUniform(): boolean {
 		return (
-			this.layers.every(([budget]) => budget === this.rest) &&
-			this.unplaced.every(([, budget]) => budget === this.rest)
+			this.layers.every(([budget]) => budget === this.#widest) &&
+			this.unplaced.every(([, budget]) => budget === this.#widest)
 		);
 	}
 
@@ -1387,7 +1373,6 @@ export class Budget {
 		if (other === this) return true;
 		return (
 			other !== undefined &&
-			this.rest === other.rest &&
 			this.#widest === other.#widest &&
 			this.layers.length === other.layers.length &&
 			this.layers.every(([budget, runs], i) => budget === other.layers[i][0] && runs === other.layers[i][1]) &&

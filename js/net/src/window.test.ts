@@ -338,6 +338,28 @@ describe("Window", () => {
 		}
 	});
 
+	// A group no range covers, such as one handed out before the ranges moved off it, takes the widest
+	// budget any range asks: none beside a history range, and the widest max beside live joins alone.
+	// Mirrors the Rust `a_group_none_covers_takes_the_widest_budget`.
+	test("a group none covers takes the widest budget", () => {
+		const held = new Keys(keys(0n, 10n));
+		// Placed at the latest group, 9.
+		const join: Range = { start: { live: { min: Duration.ZERO, max: Duration.millis(30) } } };
+		const history = range(3n, 3n);
+		for (const [ranges, rest] of [
+			[[history], NO_MAX_DELAY],
+			[[history, join], NO_MAX_DELAY],
+			[[join], 30],
+		] as const) {
+			const window = new Window(ranges, 9n, held);
+			expect([window.settled, window.contains(1n)]).toEqual([true, false]);
+			const keyed = new Map(ranges.map((range, i) => [BigInt(i), range] as const));
+			for (const budget of [window.budget(), window.budgetOf(keyed)]) {
+				expect([budget.at(1n), budget.widest()]).toEqual([rest, rest]);
+			}
+		}
+	});
+
 	// A history range a hop holding nothing leaves to its copies keeps every group it may cover from
 	// going stale before they place it, beside a live join judged by its max. Mirrors the Rust
 	// `a_pending_history_range_keeps_what_it_may_cover`.
