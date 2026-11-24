@@ -1,6 +1,6 @@
 ---
 name: verify-resume
-description: Model-check how a front's reader resumes one logical track across route changes (`rs/moq-net/src/model/resume.rs`) with TLA+. Use when a change touches `Reader::sync`, where a switch splits the subscription (`boundary`, `Copy::cap`), backfill (`backfill`, `backfill_gaps`), which replaced copies are kept or waited on (`let_go`, `Copy::retains`), how a group is picked and handed out once (`poll_lowest`, `deliverable`, `take`), or when the track ends (`poll_end`), or when a failover bug needs every ordering of arrivals, switches, and route failures checked rather than a random sweep.
+description: Model-check logical track resume across route switches (`rs/moq-net/src/model/resume.rs`) with TLA+. Use when changing switch boundaries, copy capping, backfill, copy retention, or track-end ordering.
 ---
 
 # Verify track resume
