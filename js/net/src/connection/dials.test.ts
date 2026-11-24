@@ -16,7 +16,7 @@ afterEach(() => {
 
 const URL_ = new URL("https://example.com/");
 const BACKOFF = { initial: Duration.millis(1), multiplier: 1, max: Duration.millis(1), timeout: null };
-const GRANT = { publish: Path.Prefixes.all(), subscribe: new Path.Prefixes() };
+const GRANT = { publish: new Path.Patterns([Path.Pattern.all()]), subscribe: new Path.Patterns() };
 
 /**
  * One session a relay accepted: its server side, the credential its URL's `auth` carried, and
