@@ -29,7 +29,7 @@ esac
 
 # Only single-threaded targets without I/O, and not targets made only of `iter_custom`, which
 # CodSpeed's Criterion skips; some still read the wall clock, so their counts move with the host's
-# load (quest/m9/repeatable-instruction-counts.md). Nightly still times them all.
+# load (quest/m0/repeatable-instruction-counts.md). Nightly still times them all.
 targets=(
     "kio tasks" "kio waiter"
     "moq-audio bus"

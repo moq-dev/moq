@@ -7,6 +7,8 @@ A bench whose count cannot be made repeatable leaves `sh/rs/instructions.sh`'s s
 
 ## Plan
 
+Decided 2026-11-24 (maintainer, pick round on [moq-dev/moq#9555](https://github.com/moq-dev/moq/pull/9555)): ✅ keep this quest and move it to `m0`, since noisy series now feed Kixel Quest's regression filing and bisects (rejected: drop it; keep it in `m9`). ✅ land rust2-bench counting every target meanwhile (rejected: leave the 11 noisy targets out until they repeat): "land now, we don't want hosted runners eventually anyway". The counts are expected to move off GitHub-hosted runners, so a fix must hold on any host rust2-bench runs on, not only on `ubuntu-24.04`; that move belongs here or in a quest of its own.
+
 Measured 2026-11-24 on rust2-bench at kixel-ai/rust2@6ead6d56 (fingerprint `x86_64-3059cd1d9e65`), with no code change between runs:
 
 - Two full runs in one checkout, each running 32 Valgrind jobs at once on a host other agents also loaded, agreed exactly on 527 of 1,284 benchmarks, with a median change of 0. 39 moved over 1%, from `rs/moq-mux/benches/containers.rs` (10), `rs/moq-net/benches/stats.rs` (7), `retirement.rs` (7), `rs/moq-mux/benches/catalog.rs` (5), `rs/moq-net/benches/announce.rs` (5), and a few others. The worst, `rs/moq-net/benches/auth.rs::benches::waiting::auth/waiting/moq-lite-07-wip::128[128]`, read 70,825,598 and 93,382,371 (32%).

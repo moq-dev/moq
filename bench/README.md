@@ -979,7 +979,7 @@ benchmark runs alone in its own Valgrind process, so a change of a few percent
 shows without the paired comparison's rounds. Some counts still move
 between runs of the same code: some benches read the wall clock and follow the
 host's load, by up to 32%, and some shift with the checkout's path
-([quest](/quest/m9/repeatable-instruction-counts.md)). CI counts one benchmark
+([quest](/quest/m0/repeatable-instruction-counts.md)). CI counts one benchmark
 at a time (`--jobs 1`), so a bisect step counts under the nightly's load. It does not see
 syscalls, I/O, contention, or caches, and CodSpeed's Criterion, which counts
 them, skips `iter_custom` benches, so `sh/rs/instructions.sh` selects only
