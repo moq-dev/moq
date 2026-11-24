@@ -5707,6 +5707,8 @@ export class Subscriber {
 	// Package-internal synchronous half of recvGroup. The lite publisher uses this so applying
 	// control state, popping the group, and positioning its frames are one JavaScript turn.
 	#tryRecvGroup(dispositions: Dispositions = false): Recv {
+		// A front never reports a failed group as a drop, whatever the mode: it reads its own copies
+		// for budget skips only, and continues a failed group through its recovery.
 		if (this.#resume) return this.#tryResumed(false, dispositions !== false);
 		const refused = this.#settle();
 		if (refused) return { kind: "error", error: refused };

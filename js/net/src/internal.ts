@@ -385,16 +385,16 @@ export function runGaps(runs: readonly Run[], start: bigint, end: bigint): Run[]
 }
 
 /**
- * What a non-blocking group read found, which is everything the caller needs to decide what
- * to do next: no second look at the track's closed state, and no ordering rule to get wrong.
- */
-/**
  * What a group read reports as a `drop` before the group: nothing, everything its cursor gives up,
  * or `"budget"`, only what its budget skips, still handing out a failed group so a front's read
  * continues it through its recovery, as a front reads its serving copy.
  */
 export type Dispositions = boolean | "budget";
 
+/**
+ * What a non-blocking group read found, which is everything the caller needs to decide what
+ * to do next: no second look at the track's closed state, and no ordering rule to get wrong.
+ */
 export type Recv =
 	/** A group to serve. It has already left the buffer, so dropping this is dropping the group. */
 	| { kind: "group"; group: GroupConsumer }
