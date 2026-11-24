@@ -77,7 +77,8 @@ export interface ConnectionProps {
 	/**
 	 * Credentials to present, kept apart from the URL; see {@link ConnectProps.tokens}. Pass a
 	 * `Signal` to replace them before they expire, or {@link Connection.Dials} to sign a set for
-	 * each dial when it starts. Implies a private loop.
+	 * each dial when it starts, which serves one connection: passing it to another throws.
+	 * Implies a private loop.
 	 */
 	tokens?: readonly string[] | Signal<readonly string[]> | DialsClass;
 
@@ -272,7 +273,11 @@ export class Connection {
 		const fixed = normalizeVersions({ ...props, versions: Array.isArray(given) ? given : undefined });
 		refuse(props);
 		this.#signals = new Effect();
-		if (props?.tokens instanceof DialsClass) this.#dials = props.tokens;
+		if (props?.tokens instanceof DialsClass) {
+			// One connection answers them: another would sign for this one's dials.
+			if (props.tokens.claimed) throw new TypeError("these dials already serve another connection");
+			this.#dials = props.tokens;
+		}
 
 		this.url = Signal.from(props?.url);
 		this.versions = Signal.from(Array.isArray(given) ? fixed : given);
@@ -293,6 +298,8 @@ export class Connection {
 
 		if (props && (props.share === false || requiresPrivate(props))) {
 			this.#runPrivate(props, href);
+			// Only once nothing above threw, so a rejected config leaves the dials free.
+			this.#dials?.claim();
 			return;
 		}
 
