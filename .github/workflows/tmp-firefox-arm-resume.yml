@@ -20,10 +20,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { variant: stops, shard: 1 }
-          - { variant: stops, shard: 2 }
-          - { variant: stops, shard: 3 }
-          - { variant: stops, shard: 4 }
+          - { variant: plain, shard: 1 }
+          - { variant: plain, shard: 2 }
+          - { variant: plain, shard: 3 }
+          - { variant: plain, shard: 4 }
+          - { variant: base, shard: 1 }
+          - { variant: base, shard: 2 }
+          - { variant: base, shard: 3 }
+          - { variant: base, shard: 4 }
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -49,7 +53,14 @@ jobs:
           engine=firefox
           cases=(--media-cases pause,rejoin,detach)
           case "$VARIANT" in
-            full | stops | profile-full) runs=3; cases=() ;;
+            full | stops | profile-full | plain) runs=3; cases=() ;;
+            base)
+              # The harness as on main, recording async stacks.
+              runs=3
+              cases=()
+              sed -i '/"javascript.options.asyncstack": false,/d' test/interop/clients/js/harness.ts
+              if grep -q asyncstack test/interop/clients/js/harness.ts; then exit 1; fi
+              ;;
             chromium) engine=chromium ;;
           esac
           pass=0
