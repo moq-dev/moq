@@ -4,9 +4,10 @@
 #
 # Usage: sh/rs/instructions.sh run|compare <base>|fingerprint [rust2-bench options]
 #
-# With `--benchmarks <file>`, Cargo builds only the targets its names live in, since each name
-# starts with its target's file (`rs/<package>/benches/<target>.rs::`): a bisect step builds its
-# suspects' targets alone, and a compare's base needs only those.
+# With `--benchmarks <file>`, Cargo builds only the bench targets its names live in, since each
+# name starts with its target's file (`rs/<package>/benches/<target>.rs::`), so a bisect step
+# builds its suspects' targets alone. It still selects every package and feature, so Cargo
+# resolves the same features, and the targets link the same code, as a full count's.
 set -euo pipefail
 
 usage="usage: sh/rs/instructions.sh run|compare <base>|fingerprint [rust2-bench options]"
@@ -18,7 +19,7 @@ export VALGRIND_BUG_494162=1
 bench=(nix run --inputs-from . rust2#bench --)
 
 case "$command" in
-    fingerprint) exec "${bench[@]}" "$@" ;;
+    fingerprint | help | -h | --help) exec "${bench[@]}" "$@" ;;
     run | compare) ;;
     *)
         echo "$usage" >&2
@@ -63,15 +64,15 @@ done
 
 packages=() benches=()
 for target in "${targets[@]}"; do
+    packages+=("${target% *}")
     if ((${#named[@]})); then
         wanted=false
         for name in "${named[@]}"; do [[ $name == "$target" ]] && wanted=true; done
         $wanted || continue
     fi
-    packages+=("${target% *}")
     benches+=("${target#* }")
 done
-if ((${#packages[@]} == 0)); then
+if ((${#benches[@]} == 0)); then
     echo "instructions.sh: --benchmarks names no benchmark in a target this counts" >&2
     exit 1
 fi

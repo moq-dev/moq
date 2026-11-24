@@ -34,7 +34,7 @@ jobs:
     runs-on: ubuntu-24.04
     # Only `main` writes the Rust cache; see .github/actions/rust-cache.
     environment: ${{ github.ref == 'refs/heads/main' && 'cache-write' || '' }}
-    timeout-minutes: 90
+    timeout-minutes: 120
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -50,7 +50,10 @@ jobs:
         env:
           BENCHMARKS: ${{ inputs.benchmarks }}
         run: |
-          args=(run --out kixel-metrics/metrics.json)
+          # One benchmark at a time: some read the wall clock, so their counts
+          # follow the host's load, and a bisect step must count under the same
+          # load as the nightly it is compared against.
+          args=(run --jobs 1 --out kixel-metrics/metrics.json)
           if [ -n "$BENCHMARKS" ]; then
             printf '%s\n' "$BENCHMARKS" > "$RUNNER_TEMP/benchmarks"
             args+=(--benchmarks "$RUNNER_TEMP/benchmarks")
