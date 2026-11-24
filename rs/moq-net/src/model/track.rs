@@ -17663,7 +17663,10 @@ mod test {
 		let waiter = kio::Waiter::new(std::task::Waker::from(reenter.clone()));
 		producer.watch_subscription(&waiter);
 		producer.refuse_time(1500, Error::NotFound);
-		assert!(reenter.unlocked.load(std::sync::atomic::Ordering::SeqCst), "woke under the demand's lock");
+		assert!(
+			reenter.unlocked.load(std::sync::atomic::Ordering::SeqCst),
+			"woke under the demand's lock"
+		);
 	}
 
 	/// A lite-07 copy holding a whole group places a time inside its span from that group
