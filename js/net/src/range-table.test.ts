@@ -30,6 +30,8 @@ type Case = {
 	name: string;
 	groups?: number[];
 	append?: boolean;
+	span?: number;
+	open?: number[];
 	copy?: Ask[];
 	evict?: boolean;
 	read: Ask;
@@ -58,6 +60,7 @@ const path = Path.from("room");
 // The origin's instance, which both routes of a switch carry, so the front resumes across them.
 const INSTANCE = Instance.parse("01900000-0000-7000-8000-000000000001");
 
+// Each live join under no max, so only its lag decides what it gets, and history otherwise.
 function subscription(ask: Ask): Subscription {
 	const ranges: Range[] = (ask.ranges ?? [{}]).map((range) => ({
 		start:
@@ -65,10 +68,10 @@ function subscription(ask: Ask): Subscription {
 				? undefined
 				: typeof range.start === "number"
 					? BigInt(range.start)
-					: { live: Duration.millis(range.start.live) },
+					: { live: { min: Duration.millis(range.start.live), max: null } },
 		end: range.end === undefined ? undefined : BigInt(range.end),
 	}));
-	return { delay: { max: null }, order: "ascending", ranges };
+	return { order: "ascending", ranges };
 }
 
 // The origin, holding every group it writes for good, and its empty track.
@@ -83,17 +86,19 @@ function source() {
 			group.writeFrame({ payload: new Uint8Array([0x78]), timestamp: Timestamp.fromMillis(start + frame) });
 		}
 	};
-	// Write the tail of a group `writeHead` left open, and finish it.
-	const writeTail = (live: { start: number; group: GroupProducer }) => {
+	// Write the tail of a group `writeHead` left open, and finish it, unless the case leaves it open.
+	const writeTail = (c: Case, live: { start: number; group: GroupProducer }) => {
 		frames(live.group, live.start, head, table.frames);
-		live.group.finish();
+		if (c.open?.includes(live.start)) return;
+		if (c.span === undefined) live.group.finish();
+		else live.group.finishAt(BigInt(live.start + c.span));
 	};
 	// Write every group but the tail of the last, returning it still open: the live edge
 	// mid-group, which a reader may have only the head of when its route changes.
 	const writeHead = (c: Case) => {
 		let live: { start: number; group: GroupProducer } | undefined;
 		for (const start of c.groups ?? table.groups) {
-			if (live) writeTail(live);
+			if (live) writeTail(c, live);
 			const time = Timestamp.fromMillis(start);
 			const group = c.append === false ? track.createGroup(BigInt(start)) : track.appendGroup(time);
 			frames(group, start, 0, head);
@@ -108,7 +113,7 @@ function source() {
 		writeTail,
 		write(c: Case) {
 			const live = writeHead(c);
-			if (live) writeTail(live);
+			if (live) writeTail(c, live);
 		},
 		close() {
 			track.close();
@@ -169,14 +174,14 @@ class Got {
 	}
 
 	// The groups in order, failing a group received twice, one missing any of its frames, or an
-	// error.
-	async delivered(clock: Manual): Promise<number[]> {
+	// error. A group in `open` never ends, so it is read only through its frames.
+	async delivered(clock: Manual, open: number[] = []): Promise<number[]> {
 		const starts = this.starts();
 		if (this.error !== undefined) throw new Error(`failed after ${starts}: ${this.error}`);
 		for (const group of this.groups) {
 			const start = Number(group.start);
 			const got: number[] = [];
-			for (;;) {
+			while (!(open.includes(start) && got.length === table.frames)) {
 				const frame = await clock.drive(timeout(ARRIVAL, group.readFrame()));
 				if (!frame) break;
 				got.push(frame.timestamp.value);
@@ -321,7 +326,7 @@ async function run(c: Case, mode: Mode): Promise<boolean> {
 				await clock.advance(Duration.millis(500));
 				closeA();
 				a.close();
-				if (live) origin.writeTail(live);
+				if (live) origin.writeTail(c, live);
 				await got.read(clock, reader, want);
 
 				const late = defined(request.active.peek()).track("data").subscribe(subscription(c.read));
@@ -332,9 +337,10 @@ async function run(c: Case, mode: Mode): Promise<boolean> {
 			}
 		}
 
-		const delivered = await got.delivered(clock);
+		const delivered = await got.delivered(clock, c.open);
 		expect(delivered, `${mode}: delivered`).toEqual(c.deliver);
-		if (after) expect(await after.delivered(clock), `${mode}: delivered after the switch`).toEqual(c.deliver);
+		if (after)
+			expect(await after.delivered(clock, c.open), `${mode}: delivered after the switch`).toEqual(c.deliver);
 		if (c.asks !== undefined && cached !== undefined) {
 			// Delivering nothing is answered alone only if the reader ended before upstream could answer.
 			const answered = cached === want && (want > 0 || endedWarm);
@@ -367,3 +373,110 @@ for (const mode of ["direct", "cold", "warm", "late", "switch"] as const) {
 		});
 	}
 }
+
+// The origin, then a warm relay holding what `copy` filled, a cold relay, and a front relay, each
+// pulling over the wire from the one before. Mirrors the Rust `Chain`.
+async function chainOf(clock: Manual, origin: ReturnType<typeof source>, copy: Ask[], cleanup: (() => void)[]) {
+	// An origin advertising the broadcast for the next hop and serving each request from `serve`, as
+	// a relay does: a session never announces a received broadcast to another.
+	const relay = (serve: () => BroadcastConsumer) => {
+		const published = new OriginProducer();
+		const claim = published.claim(path);
+		void (async () => {
+			for await (const request of claim.requested()) request.serve(serve());
+		})();
+		cleanup.push(
+			() => claim.close(),
+			() => published.close(),
+		);
+		return published;
+	};
+	const warmCopy = await copyOf(origin.origin);
+	cleanup.push(() => warmCopy.close());
+	const warmed = warmCopy.consume();
+	cleanup.push(() => warmed.close());
+	for (const ask of copy) {
+		const reader = warmed.track("data").subscribe(subscription(ask));
+		cleanup.push(() => reader.close());
+		const got = new Got();
+		await got.read(clock, reader, 0);
+		got.close();
+	}
+	const coldCopy = await copyOf(relay(warmCopy.consume));
+	cleanup.push(() => coldCopy.close());
+	const front = await copyOf(relay(coldCopy.consume));
+	cleanup.push(() => front.close());
+	const remote = front.consume();
+	cleanup.push(() => remote.close());
+	return { warmCopy, remote };
+}
+
+// Each range is answered on its own, through every hop: a cold relay behind a warm one serves a
+// time range its upstream placed from cache, over the wire, while a live join in the same
+// subscription still waits on the warm relay's held upstream. The join's groups follow once it is
+// placed. Mirrors the Rust `chain_serves_a_placed_range_before_its_join`.
+test("range table chain: a placed range is served before its join", async () => {
+	const c = defined(table.cases.find((c) => c.name === "a time range and a live join in one subscription"));
+	const clock = new Manual();
+	const installed = clock.install();
+	const origin = source();
+	const got = new Got();
+	const cleanup: (() => void)[] = [() => got.close()];
+	try {
+		origin.write(c);
+		const { warmCopy, remote } = await chainOf(clock, origin, c.copy ?? [], cleanup);
+
+		// Everything the origin sends the warm relay waits, so the join it asks for there stays
+		// unplaced, while the relay answers the TRACK from the copy it holds.
+		warmCopy.server.hold();
+		const reader = remote.track("data").subscribe(subscription(c.read));
+		cleanup.push(() => reader.close());
+		await got.read(clock, reader, 0);
+		expect(got.starts(), "the time range waited on the join").toEqual([1000n, 2000n]);
+
+		warmCopy.server.release();
+		await got.read(clock, reader, c.deliver.length);
+		expect(await got.delivered(clock)).toEqual(c.deliver);
+	} finally {
+		for (const close of cleanup.reverse()) close();
+		origin.close();
+		installed.close();
+	}
+});
+
+// As "a placed range is served before its join", for older history the warm relay lacks: its range
+// waits on the warm relay's held upstream while the range it holds goes out. Once placed, the older
+// range starts where its upstream placed it, below the range answered first. Read newest first, so
+// the reader holds no group for an older one. Mirrors the Rust
+// `chain_serves_a_placed_range_before_older_history`.
+test("range table chain: a placed range is served before older history", async () => {
+	const c = defined(table.cases.find((c) => c.name === "a time range and a live join in one subscription"));
+	const clock = new Manual();
+	const installed = clock.install();
+	const origin = source();
+	const got = new Got();
+	const cleanup: (() => void)[] = [() => got.close()];
+	try {
+		origin.write(c);
+		const held = { start: 5000, end: 6000 };
+		const { warmCopy, remote } = await chainOf(clock, origin, [{ ranges: [held] }], cleanup);
+
+		// Everything the origin sends the warm relay waits, so it can't place the older range from
+		// groups that arrive before its answer, while it answers the TRACK from the copy it holds.
+		warmCopy.server.hold();
+		const read = subscription({ ranges: [{ start: 1000, end: 2000 }, held] });
+		const reader = remote.track("data").subscribe({ ...read, order: "descending" });
+		cleanup.push(() => reader.close());
+		await got.read(clock, reader, 0);
+		const starts = got.starts().sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+		expect(starts, "the held range waited on the older one").toEqual([5000n, 6000n]);
+
+		warmCopy.server.release();
+		await got.read(clock, reader, 4);
+		expect(await got.delivered(clock)).toEqual([1000, 2000, 5000, 6000]);
+	} finally {
+		for (const close of cleanup.reverse()) close();
+		origin.close();
+		installed.close();
+	}
+});

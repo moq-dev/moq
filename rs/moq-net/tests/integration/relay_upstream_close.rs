@@ -13,13 +13,13 @@
 //! acknowledged on arrival, as QUIC does, so its close can drain before the relay reads
 //! them.
 
+use crate::WithMax as _;
 use crate::support;
-use moq_net::track::Delay;
 use support::AppendNext;
 
 use std::time::Duration;
 
-use moq_net::track::Subscription;
+use moq_net::track::{Range, Subscription};
 use moq_net::{Error, Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
@@ -131,9 +131,9 @@ async fn round(name: &str, end: End) -> Vec<Outcome> {
 
 	let mut readers = Vec::new();
 	for (index, track) in tracks.iter().enumerate() {
-		let subscription = Subscription::default()
-			.with_delay(Delay::default().with_max(MAX_DELAY))
-			.with_ranges([support::keys(0..)]);
+		// Every group still within the max age, as a subscription-wide max delay once asked:
+		// a time start would be history, which lite-03 never ends, declaring no end.
+		let subscription = Subscription::default().with_ranges([Range::ALL]).with_max(MAX_DELAY);
 		let sub = remote.track(&format!("track{index}")).unwrap().subscribe(subscription);
 		let sub = kio::clock::timeout(TIMEOUT, sub)
 			.await

@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use kio::clock::{sleep, timeout};
-use moq_net::track::{Delay, Order, Position, Subscription};
+use moq_net::track::{Order, Position, Subscription};
 use moq_net::{Timescale, Timestamp, broadcast, group, track};
 use object_store::ObjectStoreExt;
 use tokio::task::JoinHandle;
@@ -143,8 +143,7 @@ async fn subscribe(broadcast: &broadcast::Producer, track: &str) -> track::Order
 	let track = broadcast.consume().track(track).unwrap();
 	let subscription = Subscription::default()
 		.with_ranges([from(0)])
-		.with_order(Order::Ascending)
-		.with_delay(Delay::default().with_max(None));
+		.with_order(Order::Ascending);
 	track.subscribe(subscription).await.unwrap().ordered()
 }
 
@@ -312,7 +311,6 @@ async fn a_narrowed_read_skips_the_group_it_left() {
 	let gate = mock.stall_gets("rec/video/");
 	let ascending = |start| {
 		Subscription::default()
-			.with_delay(Delay::default().with_max(None))
 			.with_ranges([from(start)])
 			.with_order(Order::Ascending)
 	};
@@ -724,8 +722,7 @@ async fn read_range(broadcast: &broadcast::Producer, track: &str, range: track::
 	let track = broadcast.consume().track(track).unwrap();
 	let subscription = Subscription::default()
 		.with_ranges([range])
-		.with_order(Order::Ascending)
-		.with_delay(moq_net::track::Delay::default().with_max(None));
+		.with_order(Order::Ascending);
 	let mut reader = track.subscribe(subscription).await.unwrap().ordered();
 	let mut read = Vec::new();
 	while let Ok(group) = timeout(5 * REFRESH, reader.next_group()).await {
@@ -790,8 +787,7 @@ async fn a_time_range_resolves_from_the_archive() {
 	let track = broadcast.consume().track("video").unwrap();
 	let subscription = Subscription::default()
 		.with_ranges([range(7_002, None)])
-		.with_order(Order::Ascending)
-		.with_delay(moq_net::track::Delay::default().with_max(None));
+		.with_order(Order::Ascending);
 	let mut reader = track.subscribe(subscription).await.unwrap().ordered();
 	for expected in 7..10 {
 		assert_eq!(sequence(&mut reader).await, Some(expected * 1000));
@@ -821,8 +817,7 @@ async fn a_failed_time_lookup_fails_the_subscription() {
 				start: track::Start::Time(4_500),
 				end: None,
 			}])
-			.with_order(Order::Ascending)
-			.with_delay(moq_net::track::Delay::default().with_max(None));
+			.with_order(Order::Ascending);
 		let mut reader = track.subscribe(subscription).await.unwrap().ordered();
 		let read = timeout(5 * REFRESH, reader.next_group()).await.expect("answered");
 		let err = read.map(|group| group.map(|group| group.start)).unwrap_err();
@@ -1091,8 +1086,7 @@ async fn a_seek_finds_objects_retention_replaced_the_index_with() {
 	let track = broadcast.consume().track("video").unwrap();
 	let subscription = Subscription::default()
 		.with_ranges([from(500)])
-		.with_order(Order::Ascending)
-		.with_delay(Delay::default().with_max(None));
+		.with_order(Order::Ascending);
 	let mut reader = track.subscribe(subscription).await.unwrap().ordered();
 	assert!(sequence(&mut reader).await.is_some());
 	// Before any refresh lists after the cursor: yields, not time.
@@ -1209,8 +1203,7 @@ async fn a_reader_follows_a_real_dvr_through_its_rotations() {
 			let track = broadcast.consume().track("video").unwrap();
 			let subscription = Subscription::default()
 				.with_ranges([from(0)])
-				.with_order(Order::Ascending)
-				.with_delay(Delay::default().with_max(None));
+				.with_order(Order::Ascending);
 			let mut reader = track.subscribe(subscription).await.unwrap().ordered();
 			assert_eq!(
 				super::tests::sequence(&mut reader).await,

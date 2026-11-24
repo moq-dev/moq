@@ -77,6 +77,15 @@ export interface WebSocketProps {
 
 	/** Per-stream receive window in bytes (default: 4 MiB). Must be a positive safe integer. */
 	streamReceiveWindow?: number;
+
+	/**
+	 * How long the session may go without a frame before it closes, like `moq-tokio`'s
+	 * `connect.websocket.idle_timeout` (default: 30 s). It keeps a quiet session alive with a ping
+	 * every third of it. `null` turns it off when the server's is off too, so a quiet session sends
+	 * nothing and a dead link surfaces only as the WebSocket closing. Only QMux drafts 01 and later
+	 * negotiate it: a `qmux-00` session runs no idle timer. Must be positive.
+	 */
+	idleTimeout?: Duration | null;
 }
 
 /**
@@ -121,18 +130,21 @@ const VERSIONS: Record<string, { alpn: string; setup?: Lite.Version }> = {
 	"moq-lite-03": { alpn: Lite.ALPN_03, setup: Lite.Version.DRAFT_03 },
 	"moq-lite-02": { alpn: Lite.ALPN, setup: Lite.Version.DRAFT_02 },
 	"moq-lite-01": { alpn: Lite.ALPN, setup: Lite.Version.DRAFT_01 },
+	"moq-transport-23": { alpn: Ietf.ALPN.DRAFT_23 },
 	"moq-transport-22": { alpn: Ietf.ALPN.DRAFT_22 },
 	"moq-transport-20": { alpn: Ietf.ALPN.DRAFT_20 },
 	"moq-transport-18": { alpn: Ietf.ALPN.DRAFT_18 },
 };
 
-// Experimental lite-07 is offered only when named.
-const DEFAULT_VERSIONS = Object.keys(VERSIONS).filter((name) => name !== "moq-lite-07-wip");
+// Experimental lite-07 and the partial draft-23 port are offered only when named.
+const OPT_IN = new Set(["moq-lite-07-wip", "moq-transport-23"]);
+const DEFAULT_VERSIONS = Object.keys(VERSIONS).filter((name) => !OPT_IN.has(name));
 
 // moq-transport is pinned to qmux-01. Every other ALPN is currently
 // negotiated as `qmux-00.{alpn}`, but `null` lets the polyfill advertise every QMux draft
 // it knows and the server pick one.
 const QMUX: Record<string, QmuxVersion | QmuxVersion[] | null> = {
+	[Ietf.ALPN.DRAFT_23]: "qmux-01",
 	[Ietf.ALPN.DRAFT_22]: "qmux-01",
 	[Ietf.ALPN.DRAFT_20]: "qmux-01",
 	[Ietf.ALPN.DRAFT_18]: "qmux-01",
@@ -193,6 +205,13 @@ export function normalizeVersions(props?: {
 		if (value !== undefined && !(Number.isSafeInteger(value) && value > 0))
 			throw new RangeError(`websocket.${key} must be a positive safe integer: ${value}`);
 	}
+	const idleTimeout = props?.websocket?.idleTimeout;
+	if (
+		idleTimeout !== undefined &&
+		idleTimeout !== null &&
+		!(!idleTimeout.isZero() && Number.isSafeInteger(Math.ceil(idleTimeout.asMillis())))
+	)
+		throw new RangeError(`websocket.idleTimeout must be positive or null: ${idleTimeout}`);
 	return props?.versions === undefined ? undefined : checkVersions(props.versions);
 }
 
@@ -567,6 +586,7 @@ async function dialRace(
 						streamReceiveWindow: BigInt(
 							props.websocket?.streamReceiveWindow ?? DEFAULT_STREAM_RECEIVE_WINDOW,
 						),
+						idleTimeout: props.websocket?.idleTimeout,
 					},
 				})
 			: undefined;
@@ -645,13 +665,15 @@ async function negotiate(
 	console.debug(show(parse(url)), "negotiated ALPN:", protocol ?? "(none)");
 
 	const ietf =
-		protocol === Ietf.ALPN.DRAFT_22
-			? Ietf.Version.DRAFT_22
-			: protocol === Ietf.ALPN.DRAFT_20
-				? Ietf.Version.DRAFT_20
-				: protocol === Ietf.ALPN.DRAFT_18
-					? Ietf.Version.DRAFT_18
-					: undefined;
+		protocol === Ietf.ALPN.DRAFT_23
+			? Ietf.Version.DRAFT_23
+			: protocol === Ietf.ALPN.DRAFT_22
+				? Ietf.Version.DRAFT_22
+				: protocol === Ietf.ALPN.DRAFT_20
+					? Ietf.Version.DRAFT_20
+					: protocol === Ietf.ALPN.DRAFT_18
+						? Ietf.Version.DRAFT_18
+						: undefined;
 	if (ietf !== undefined) {
 		return await handshakeAlpn(url, session, ietf, wiring);
 	} else if (protocol === Lite.ALPN_07_WIP) {

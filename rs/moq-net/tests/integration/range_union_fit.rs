@@ -3,11 +3,12 @@
 //! A lite-07 relay whose viewers' ranges, merged, outgrow one message asks its upstream for a
 //! covering superset rather than give back the copy every viewer reads through.
 
+use crate::WithMax as _;
 use crate::support;
 
 use std::time::Duration;
 
-use moq_net::track::{Delay, Info, Range, Subscription};
+use moq_net::track::{Info, Range, Subscription};
 use moq_net::{Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
@@ -101,9 +102,7 @@ async fn a_union_too_large_for_one_message_asks_a_covering_superset() {
 	for index in 0..VIEWERS {
 		let (broadcast, session) = viewer(&relay, 4 + index).await;
 		let ranges = sparse(2 * index);
-		let subscription = Subscription::default()
-			.with_delay(Delay::default().with_max(None))
-			.with_ranges(ranges.clone());
+		let subscription = Subscription::default().with_ranges(ranges.clone()).with_max(None);
 		readers.push(
 			broadcast
 				.track("quiet")

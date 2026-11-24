@@ -5,7 +5,7 @@
  */
 
 import { Duration, Instant, now, sleepUntil } from "@moq/clock";
-import { Derived, type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
+import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import * as cache from "./cache.ts";
 import { Delivered } from "./delivered.ts";
 import { answered, type Change, type Edit, type JoinAsk, joinTick, Prefs, Subscriptions } from "./demand.ts";
@@ -37,7 +37,6 @@ import {
 	insertDrops,
 	insertRun,
 	type Land,
-	maxDelayOf,
 	NO_MAX_DELAY,
 	type Recv,
 	type ResumeSource,
@@ -59,15 +58,19 @@ import { floorAt, Timescale, type Timestamp } from "./time.ts";
 import { checkEnd, checkKey, max, min, UNBOUNDED } from "./util/key.ts";
 import { checkName } from "./util/utf8.ts";
 import {
+	Budget,
 	bounded,
 	type Containing,
 	type Found,
 	type Holdings,
 	type Join,
+	type Joining,
 	joinsLive,
+	placedAsTimes,
 	rangesOf,
 	UNHELD,
 	Window,
+	wireHeld,
 	wireSpan,
 } from "./window.ts";
 import { type Broadcast as BroadcastWire, registerTrackConsumer } from "./wire.ts";
@@ -323,44 +326,60 @@ export interface Range {
 /**
  * Where a {@link Range} starts, the `Start` Anchor on the moq-lite wire. Mirrors the Rust `Start`:
  *
- * - omitted, the oldest group still worth delivering: as far back as {@link Delay.max} allows, and
- *   the publisher still holds.
- * - a time, the group containing it: the newest one starting at or before it. A time resolves at
- *   the hop that serves it, from the starts of the groups it holds. When none does, a hop whose fill
- *   handler serves its history asks it for the group containing the time (see
- *   {@link FillGroups.floor}), reading nothing until it answers; otherwise, or when the handler
- *   can't tell, it reaches back to the oldest group. While no group is held at all it waits for one,
- *   reading only the groups from its time meanwhile. A relay copy that can't tell which group
- *   contains a time asks its upstream and waits for the answer.
- * - `{ live }`, a live join this far behind the live edge: the group containing the live edge minus
- *   this lag, so a player's buffer arrives full instead of filling in real time, and zero starts at
- *   the latest group. The hop serving it measures the live edge in media time, from the newest
- *   frame it holds, rounded up to whole ticks, and on a scale-less track by arrival on its own
- *   clock. It resolves that time as a time start, so a publisher looks it up in its history, and
- *   {@link Delay.max} still skips what has gone stale. A relay copy forwards each join to its
- *   upstream as its own range and starts it where that range's answer does. A range resolves once,
- *   so a live edge that moves later moves nothing already started. The lag is rounded up to a whole
- *   millisecond, as the wire carries it; a negative or non-finite one, or one past
- *   `Number.MAX_SAFE_INTEGER` milliseconds after rounding, is refused. moq-lite before 07 and
- *   moq-transport cannot carry it, so it goes out as an omitted start there.
+ * - omitted, the oldest group the publisher still holds: a floor for history, whose groups are
+ *   delivered in full, bounded only by how long the publisher keeps them ({@link Info.maxAge}).
+ * - a time, the group containing it: the newest one starting at or before it, unless that group
+ *   ended whole at or before the time ({@link GroupProducer.finishAt}): a time past a whole group's
+ *   span lies in a pause no group contains, so the range starts at the next group. A floor for
+ *   history, like an omitted start: its groups never go stale. A time resolves at the hop that
+ *   serves it, from the starts of the groups it holds. When none does, a hop whose fill handler
+ *   serves its history asks it for the group containing the time (see {@link FillGroups.floor}),
+ *   reading nothing until it answers; otherwise, or when the handler can't tell, it reaches back to
+ *   the oldest group. While no group is held at all it waits for one, reading only the groups from
+ *   its time meanwhile. A relay copy that can't tell which group contains a time asks its upstream
+ *   and waits for the answer.
+ * - `{ live }`, a live join `min` behind the live edge, whose groups go stale `max` behind it; see
+ *   {@link Live}.
  */
-export type Start = bigint | { live: Duration };
+export type Start = bigint | { live: Live };
 
 /**
- * How late a subscriber may fall behind the live edge, in milliseconds. Mirrors the Rust
- * `track::Delay`. The default is a zero maximum, which skips a superseded group at once. Where a
- * subscriber starts is each range's {@link Range.start}. The value is rounded up to a whole
- * millisecond, so one derived from a measurement is never shortened; a negative or non-finite
- * value, or one past `Number.MAX_SAFE_INTEGER` after rounding, is refused.
+ * A live join: where it starts behind the live edge, and how long its groups stay worth
+ * delivering. Mirrors the fields of the Rust `Start::Live`. Each is rounded up to a whole
+ * millisecond, as the wire carries it; a negative or non-finite one, or one past
+ * `Number.MAX_SAFE_INTEGER` milliseconds after rounding, is refused. moq-lite before 07 and
+ * moq-transport cannot carry a live join, so it goes out as an omitted start there, under the one
+ * subscription-wide max age those wires carry instead.
+ *
+ * Only a group reached through a live join alone can go stale. A group several ranges cover takes
+ * the largest `max` among them, and never goes stale while any history range covers it.
  */
-export interface Delay {
+export interface Live {
 	/**
-	 * How long a non-latest group stays worth delivering, by the same two clocks as
-	 * {@link Info.maxAge}: it is skipped once its successor arrived this long ago or starts this
-	 * far behind the live edge, and never past the publisher's {@link Info.maxAge}. Omitted
-	 * means `0`, the live edge only, timed or not. `null` sets no subscriber limit, so the
-	 * publisher's {@link Info.maxAge} alone bounds it, which is what a reader reaching back for
-	 * history wants; read in order, see {@link Ordered} for where that can block.
+	 * How far behind the live edge to join: the group containing the live edge minus this lag, so a
+	 * player's buffer arrives full instead of filling in real time, and zero starts at the latest
+	 * group; `null` sets no lag limit, so the join reaches back past every group and takes each one
+	 * `max` still allows. The hop serving it measures the live edge in media time, from the newest frame it holds,
+	 * rounded up to whole ticks, and on a scale-less track by arrival on its own clock. It resolves
+	 * that time as a time start would, so a publisher looks it up in its history; `max` does not
+	 * move it. A relay copy forwards each join to its upstream as its own range and starts it where
+	 * that range's answer does. A range resolves once, so a live edge that moves later moves nothing
+	 * already started.
+	 */
+	min: Duration | null;
+	/**
+	 * How long a superseded group stays worth delivering, measured from the live edge by the same
+	 * two clocks as {@link Info.maxAge}: it is skipped once its successor arrived this long ago or
+	 * starts this far behind the live edge, and never past the publisher's {@link Info.maxAge}.
+	 * Omitted means `0`, skipping a superseded group at once, timed or not; `null` sets no
+	 * subscriber limit, so the publisher's {@link Info.maxAge} alone bounds it. A larger budget
+	 * tolerates that much reordering before giving up, and never adds delay. Read in order, see
+	 * {@link Ordered} for where a long one can block. A `max` below `min` skips the join's own
+	 * oldest groups.
+	 *
+	 * Changing only `max` on a range already live, with {@link Subscriber.update}, keeps where it
+	 * joined, both here and upstream. Enforced at both ends: the publisher skips what the most
+	 * tolerant subscriber's budget convicts, and each subscriber applies its own again as it reads.
 	 */
 	max?: Duration | null;
 }
@@ -368,21 +387,20 @@ export interface Delay {
 /**
  * Per-subscription options, requested when a subscription opens and adjustable later via
  * {@link Subscriber.update}. Mirrors the Rust `Subscription`.
- * The obsolete `maxAge` and `maxDelay` fields are refused at runtime; use `delay`.
+ * The obsolete `delay`, `maxAge`, and `maxDelay` fields are refused at runtime: a live range's
+ * {@link Live.max} replaces them.
  */
 export interface Subscription {
 	/** Delivery priority relative to this session's other subscriptions (`-128..=127`, higher first). Defaults to `0`. */
 	priority?: number;
-	/** How late this subscriber may fall behind the live edge; see {@link Delay}. Omitted is a zero maximum. */
-	delay?: Delay;
 	/**
 	 * The spans of the track to deliver; see {@link Range}.
 	 *
-	 * Defaults to `[{}]`, which starts at the oldest group: everything {@link Delay.max} still
-	 * considers fresh. A live join is a range starting at `{ live }`. An empty list asks for
-	 * nothing. {@link Delay.max} caps every range: a range names what may be delivered, and
-	 * the budget skips what inside it has gone stale. A read whose ranges all end finishes once
-	 * nothing in them is left to deliver, as in Rust, while one left open follows the live edge.
+	 * Defaults to one range from `{ live: { min: Duration.ZERO } }`: the latest group, skipping each
+	 * the moment a newer one arrives. An empty list asks for nothing. A range whose start is a time
+	 * or omitted is history, delivered in full; a live join's {@link Live.max} skips what inside it
+	 * has gone stale. A read whose ranges all end finishes once nothing in them is left to deliver,
+	 * as in Rust, while one left open follows the live edge.
 	 *
 	 * A request to the publisher, aggregated across every live subscriber as the union of their
 	 * ranges, and this subscriber's read filter: it reads only the groups its own ranges cover,
@@ -401,6 +419,15 @@ export interface Subscription {
 	 * fresh. Each subscriber's own publisher still serves it in its own order.
 	 */
 	order?: Order;
+	/**
+	 * The group each live join among {@link ranges} was already placed at, by its index there: a
+	 * route switch asks a new copy for a join an earlier copy placed, which starts at that group as a
+	 * time start would and still goes stale past its max. Its lag places nothing. moq-lite-07 carries
+	 * one as a `Joined` start; older wires as a time start under the one max age, which takes its
+	 * max. Mirrors the Rust `Subscription::placed`.
+	 * @internal
+	 */
+	placed?: ReadonlyMap<number, bigint>;
 }
 
 /**
@@ -408,48 +435,46 @@ export interface Subscription {
  * first, so congestion sheds the backlog rather than the live edge) or `"ascending"` (oldest
  * first, draining a backlog in sequence order).
  *
- * A transmission order only: it never decides whether a group is delivered, which is
- * {@link Delay.max}'s job, so an ascending subscriber that wants a backlog needs a
- * budget that covers it.
+ * A transmission order only: it never decides whether a group is delivered. A history range
+ * delivers every group it covers, and a live join skips what its {@link Live.max} judges stale, so
+ * an ascending subscriber that wants a backlog drains it from a history range or a `max` that
+ * covers it.
  */
 export type Order = "ascending" | "descending";
 
 /** Constructors for {@link Subscription}. */
 export const Subscription: {
 	/**
-	 * The default subscription, used when none is passed: priority `0`, descending order, and
-	 * a {@link Delay} with a zero maximum that skips a superseded group at once. Mirrors the Rust
+	 * The default subscription, used when none is passed: priority `0`, descending order, and one
+	 * range joining at the latest group, which skips a superseded group at once. Mirrors the Rust
 	 * `Subscription::default()`. Spread it to change one field and keep the rest:
 	 * `{ ...Subscription.default(), priority: 2 }`.
 	 */
 	default(): Subscription;
 } = {
-	default: () => ({
-		priority: DEFAULT_PRIORITY,
-		delay: { max: Duration.ZERO },
-		order: "descending",
-	}),
+	default: () => ({ priority: DEFAULT_PRIORITY, ranges: [latest()], order: "descending" }),
 };
+
+// The default range: a live join at the latest group, skipping each the moment a newer one
+// arrives. Mirrors the Rust `Start::LATEST`.
+function latest(): Range {
+	return { start: { live: { min: Duration.ZERO, max: Duration.ZERO } } };
+}
 
 // Materialize the defaults at the model boundary so every layer observes a complete
 // subscription rather than interpreting an omitted field differently.
 function subscriptionDefaults(subscription: Subscription = Subscription.default()): Subscription {
-	if ("maxAge" in subscription || "maxDelay" in subscription) {
-		throw new TypeError("Subscriber maxAge and maxDelay are unsupported; use delay.max");
+	if ("delay" in subscription || "maxAge" in subscription || "maxDelay" in subscription) {
+		throw new TypeError("Subscription delay, maxAge, and maxDelay are unsupported; use a live range's max");
 	}
 	if ("groups" in subscription) throw new TypeError("Subscription groups is unsupported; use ranges");
-	const delay = subscription.delay ?? {};
-	return {
+	const out: Subscription = {
 		priority: priorityValue(subscription.priority ?? DEFAULT_PRIORITY),
-		delay: {
-			max:
-				delay.max === null
-					? Duration.millis(NO_MAX_DELAY)
-					: wireMillis("delay.max", delay.max ?? Duration.ZERO),
-		},
 		order: orderOf(subscription.order),
-		ranges: subscription.ranges === undefined ? [{}] : rangesOf(subscription.ranges),
+		ranges: subscription.ranges === undefined ? [latest()] : rangesOf(subscription.ranges),
 	};
+	if (subscription.placed !== undefined && subscription.placed.size > 0) out.placed = subscription.placed;
+	return out;
 }
 
 // A plain JS caller can pass anything, and silently serving a typo as descending would hide it.
@@ -474,7 +499,6 @@ export class Request {
 	#producer: Producer;
 	#pending: Set<Request>;
 	#lookups?: TrackRequestOptions["lookups"];
-	#wanted?: Getter<boolean>;
 
 	private constructor(options: TrackRequestOptions) {
 		this.name = options.name;
@@ -487,19 +511,12 @@ export class Request {
 	static {
 		hooks.makeRequest = (options) => new Request(options);
 		hooks.stageRequest = (request, info) => request.#stage(info);
-		hooks.requestWanted = (request) => {
-			const wanted = request.#producer.demand().wanted;
-			request.#wanted ??= request.#lookups
-				? new Derived([wanted, request.#lookups.pending], (subscribed, lookups) => subscribed || lookups > 0)
-				: wanted;
-			return request.#wanted;
-		};
 		hooks.keepRequest = (request) => {
 			if (request.#lookups) request.#lookups.opened = false;
 		};
 	}
 
-	/** Watch the subscribers waiting for this request. */
+	/** Watch the subscribers and info lookups waiting for this request. */
 	demand(): Demand {
 		return this.#producer.demand();
 	}
@@ -567,9 +584,6 @@ export interface FetchGroupOptions {
 	/** Delivery priority for the fetch stream. Defaults to `0`. */
 	priority?: number;
 
-	/** Maximum age behind the live edge this caller accepts. Omission leaves the publisher's {@link Info.maxAge} as the only bound. */
-	maxDelay?: Duration;
-
 	/**
 	 * Abandons this fetch, rejecting with the signal's reason. Concurrent fetches of the same
 	 * group share one stream, cancelled only once every caller has left. An already-aborted
@@ -602,12 +616,12 @@ export class Consumer {
 	/**
 	 * Open a live subscription to the track.
 	 *
-	 * It reads only the groups its {@link Subscription.ranges} cover.
-	 * {@link Delay.max} is what asks for data: delivery skips everything in range that the budget
-	 * convicts. Without options this is {@link Subscription.default}, whose budget of zero
-	 * delivers only the latest group; a larger one reaches back over what it can still use, and
-	 * `delay: { max: null }` reaches back over every group the publisher's {@link Info.maxAge} still
-	 * considers fresh.
+	 * It reads only the groups its {@link Subscription.ranges} cover. A live range's
+	 * {@link Live.max} is what asks for data: delivery skips every group it reached that the max
+	 * convicts. Without options this is {@link Subscription.default}, one live range whose max of
+	 * zero delivers only the latest group; a larger max reaches back over what it can still use,
+	 * and a history range (a key start) delivers every group the publisher's {@link Info.maxAge}
+	 * still considers fresh.
 	 */
 	subscribe(options?: Subscription): Subscriber {
 		return this.#broadcast.subscribe(this.name, options);
@@ -635,14 +649,31 @@ export class Consumer {
 		} catch (err) {
 			return Promise.reject(err);
 		}
-		if (options?.maxDelay !== undefined) {
-			options = { ...options, maxDelay: wireMillis("maxDelay", options.maxDelay) };
-		}
 		if (!this.#broadcast.fetchGroup) {
 			return Promise.reject(new Error("fetch group is not supported by this session's version"));
 		}
 		return this.#broadcast.fetchGroup(this.name, key, options);
 	}
+}
+
+// What a subscriber asks fills about keys its reader owes but does not read: the keys asked about
+// last, the part of them a fill took, the part given up as stale with the budget each was judged
+// under, and the asker its fills know it by.
+type KeptOut = { asker: Asker; unproven: Run[]; asked: Run[]; stale: (Run & { budget: number })[] };
+
+// Record `[start, end)` as given up under `budget` in sorted, disjoint `stale`, replacing what it
+// overlaps.
+function insertStale(stale: (Run & { budget: number })[], start: bigint, end: bigint, budget: number): void {
+	const kept = removeRun(stale, start, end);
+	kept.splice(runsFrom(kept, start), 0, { start, end, budget });
+	stale.splice(0, stale.length, ...kept);
+}
+
+// What `kept` needs not ask again: what a fill took, and what it gave up as stale.
+function keptDone(kept: KeptOut): Run[] {
+	const done = [...kept.asked];
+	for (const run of kept.stale) insertRun(done, run.start, run.end);
+	return done;
 }
 
 // The parts of sorted, disjoint `runs` inside `[start, end)`.
@@ -748,6 +779,8 @@ class TrackState {
 	producer?: Producer;
 	/** This sink's reader as the producer's fills know it, once it asked one. */
 	asker?: Asker;
+	/** The same for the kept-out keys its reader asks about (see `KeptOut`), once it asked. */
+	keptOut: Asker[] = [];
 	/**
 	 * Whether this sink's reader will still read group `key`: only a buffered group it will
 	 * read keeps its source wanted. Set once the reader exists.
@@ -780,9 +813,9 @@ class TrackState {
 	dropsAnchors = new Signal(false);
 	// Frames wake the key cursor only while an owed hole holds it.
 	waitingOrdered = false;
-	// The time starts its reader waits on that it counts in the producer's demand, each with the
-	// budget it waits under, and the live joins it waits on; see `countAsks`.
-	asks: (readonly [bigint, number])[] = [];
+	// The time starts its reader waits on that it counts in the producer's demand, and the live
+	// joins it waits on; see `countAsks`.
+	asks: bigint[] = [];
 	joins: JoinAsk[] = [];
 	// One-shot group reads need FETCH, even when metadata has not reported a live edge. A failed
 	// fill answer is a fetch's outcome, as a Rust fetch hears its fill's, so it is not withheld.
@@ -847,8 +880,11 @@ type Wire = {
 	starts: FillStarts;
 	// The first group its live feed serves (see `hooks.startTrack`), unset until its START
 	// resolves it, null for a resolved-empty range, and the floor its SUBSCRIBE requested.
-	// `resolved` when the publisher placed the start itself, whatever the wire.
-	served?: { start?: bigint | null; requested?: bigint; resolved?: boolean };
+	// `resolved` when the publisher placed the start itself, whatever the wire, and `restated` once
+	// an update had it placed afresh (see `hooks.restateTrack`).
+	served?: { start?: bigint | null; requested?: bigint; resolved?: boolean; restated?: boolean };
+	// Its upstream said where the live feed is (see `hooks.answerEdge`).
+	edge?: true;
 };
 
 // Settle a track state's closed Once. Idempotent: Once.set throws on a second settle, and a
@@ -984,8 +1020,13 @@ let owedRuns: (producer: Producer, start: bigint, end: bigint) => Iterable<Run &
 // Whether a wire subscription feeds the producer, so it owes every group it has not accounted for.
 let wireFed: (producer: Producer) => boolean;
 let owedGroup: (producer: Producer, start: bigint, end: bigint) => { key: bigint; folds?: Instant } | undefined;
+// The runs of `[start, end)` the feed has yet to account for, as #owedRuns finds them, but on a
+// local producer too, whose ledger waits for its gaps the same way: a key that arrived, was
+// evicted, or was given up and since forgotten is accounted. Mirrors the Rust `TrackState::unfed`.
+let awaitedRuns: (producer: Producer, start: bigint, end: bigint) => Iterable<Run & { folds?: Instant }>;
 let fillEdge: (producer: Producer) => bigint | undefined;
 let sourceStart: (producer: Producer) => bigint | "pending" | undefined;
+let knowsEdge: (producer: Producer) => boolean;
 // The lowest group a reader naming `named` asks a fill for; see `Producer.#fillFloor`.
 let fillFloor: (producer: Producer, named: bigint | undefined) => bigint | undefined;
 // The keys of the groups the producer caches, sorted: what time starts and live joins resolve
@@ -996,6 +1037,69 @@ let keysOf: (producer: Producer) => readonly bigint[];
 let wholeAround: (producer: Producer, key: bigint) => Run | undefined;
 // Where the held group at `key` ends, once finished whole; assigned in its static block.
 let wholeAt: (producer: Producer, key: bigint) => bigint | undefined;
+// The first time the held group at `key` can't place, undefined once it finished, and 0 with none
+// held. Mirrors the Rust `Slot::unplaced_from`; assigned in its static block.
+let unplacedFromAt: (producer: Producer, key: bigint) => bigint | undefined;
+
+// The group a lookup's floor is past: the held one just below it, or a whole one ending there.
+// Assigned in its static block.
+let belowFloor: (producer: Producer, floor: bigint) => { key: bigint; group: GroupProducer } | undefined;
+
+// Whether the held group at `key` places `time`: finished, or holding a frame past it.
+function placesAt(producer: Producer, key: bigint, time: bigint): boolean {
+	const from = unplacedFromAt(producer, key);
+	return from === undefined || time < from;
+}
+// The first key past the group held at `key` that its own End does not give up: its End once whole,
+// even after the skip its GROUP_END recorded expired, else the next key. Mirrors the Rust
+// `TrackState::past_span`.
+function pastSpan(producer: Producer, key: bigint): bigint {
+	const end = wholeAt(producer, key);
+	return end === undefined ? key + 1n : max(end, key + 1n);
+}
+
+// Where a time start a reader looks up through a fill stands. Each way out places the time where the
+// origin would, whatever the cache holds meanwhile. Mirrors the Rust `Look`.
+type Look =
+	// The fill is out, or absent with no handler to answer. `below` is the group held just under the
+	// floor when it was asked, the one the floor is past: should the fill find no group from the
+	// floor, that group's span places the time.
+	| { kind: "asked"; lookup?: Lookup; below?: { key: bigint; group: GroupProducer } }
+	// Answered by a group starting below the time, or by none above `below`: that group's span places
+	// the time, once it holds a frame past it or ends.
+	| { kind: "placing"; probe: Probe };
+
+// A reader of the group whose span places a looked-up time. It takes each frame as it lands, reading
+// none, so a writer pacing on its readers goes on, and holds the group's End once the cache lets it
+// go. Mirrors the Rust `Probe`.
+interface Probe {
+	key: bigint;
+	group: GroupProducer;
+	reader: GroupConsumer;
+}
+
+// Where a range from `time` starts once the probed group places it, or the abort that left where it
+// ends unknown; undefined until then. Mirrors the Rust `Probe::poll`.
+function probed(probe: Probe, time: bigint): bigint | Error | undefined {
+	hooks.skipGroupFrames(probe.reader);
+	const from = hooks.groupUnplacedFrom(probe.group);
+	if (from !== undefined && time >= from) return probe.group.closed.peek() ?? undefined;
+	return reached(probe.key, time, hooks.groupWholeEnd(probe.group));
+}
+
+// Stop a lookup: leave its fill, or close its probe.
+function leaveLook(stage: Look): void {
+	if (stage.kind === "asked") stage.lookup?.leave();
+	else stage.probe.reader.close();
+}
+
+// Where a range from `time` starts, the group at `key` being the newest starting at or before it and
+// `end` where it ended whole, if it did: there, unless it ended at or before the time, then at its
+// End, so at the next group, since no group contains a time past a whole group's span. A time at the
+// group's start names it whatever its End. Mirrors the Rust `reached`.
+function reached(key: bigint, time: bigint, end: bigint | undefined): bigint {
+	return end !== undefined && time > key && end <= time ? max(end, key + 1n) : key;
+}
 // How a received copy resolves its readers' time anchors, as its wire tells it; assigned in the
 // producer's static block. See `hooks.startsAtKeys` and `hooks.timeStarts`.
 let timeAnchors: (producer: Producer) => {
@@ -1022,53 +1126,50 @@ type JoinAnswer = {
 	/** The group the join starts at, undefined for nothing to deliver. */
 	start?: bigint;
 	/**
-	 * The narrowest budget in milliseconds the range was asked under before its answer: a start the
-	 * budget moved past older groups holds only for a reader within it.
+	 * The narrowest max the range was asked under before its answer, as a budget in milliseconds:
+	 * the publisher starts a join past the groups its max expired, so the start holds only for a
+	 * reader within it.
 	 */
 	budget: number;
 	/** When it was recorded: a reader that began waiting later takes only a newer answer, since the live edge moved on. */
 	tick: number;
 };
 
-// A live join's lag in milliseconds and end as one map key.
-function joinKey(min: number, end: bigint | undefined): string {
+// A live join's lag in milliseconds, null for no lag limit, and end as one map key.
+function joinKey(min: number | null, end: bigint | undefined): string {
 	return `${min}:${end ?? ""}`;
 }
 
 /**
  * How a received copy's publisher answered the ranges asked from one time: `start`, the lowest
- * group one started at, and `past`, the widest budget in milliseconds one was answered under with
- * no group at or before the time. The publisher starts a range at the oldest group its budget has
- * not expired from the one containing the time, so a start at or before the time is that group,
- * for every reader. A start past it, or no group to deliver, says only that no group at or before
- * it is left within the budget the range was answered under: a wider reader may still get one.
- * Mirrors the Rust `TimeStart`.
+ * group one started at, and `past`, whether one was answered with no group at or before the time.
+ * The publisher starts a history range at the group containing the time, or the oldest it holds
+ * past it, so a start at or before the time is that group. A start past the time is where a range
+ * from it starts: the time lies in the pause past a whole group, or no group at or before it is
+ * left. No group to deliver says none at or before it is left. Mirrors the Rust `TimeStart`.
  */
-type TimeStart = { start?: bigint; past?: number };
+type TimeStart = { start?: bigint; past: boolean };
 
-// Where `time` falls for a reader within `budget` by what `reported` answered for it, undefined
-// when no answer proves it. Mirrors the Rust `TimeStart::containing`.
-function timeStartContaining(reported: TimeStart | undefined, time: bigint, budget: number): Containing | undefined {
-	if (reported?.start !== undefined && reported.start <= time) return { group: reported.start };
-	if (reported?.past !== undefined && budget <= reported.past) return "before";
-	return undefined;
+// Where `time` falls by what `reported` answered for it, undefined when no answer proves it.
+// Mirrors the Rust `TimeStart::containing`.
+function timeStartContaining(reported: TimeStart | undefined, time: bigint): Containing | undefined {
+	if (reported?.start !== undefined && reported.start <= time) return { at: reported.start };
+	if (!reported?.past) return undefined;
+	// A start past the time is where a range from it starts: not before every group, since a whole
+	// one before the time may end short of it, and the oldest group this copy holds says nothing.
+	return reported.start === undefined ? "before" : { at: reported.start };
 }
 
-// Whether a received copy's range asked from `time` had no group at or before it for a reader
-// within `budget`: the live feed brings it none of the range's groups there. Assigned in the
-// producer's static block. Mirrors the Rust `TrackState::answered_empty`.
-let answeredEmpty: (producer: Producer, time: bigint, budget: number) => boolean;
+// Whether a received copy's range asked from `time` had no group at or before it: the live feed
+// brings it none of the range's groups there. Assigned in the producer's static block. Mirrors the
+// Rust `TrackState::answered_empty`.
+let answeredEmpty: (producer: Producer, time: bigint) => boolean;
 
-// Count `times`, each a time start a reader on a received lite-07 copy waits on with the budget it
-// waits under, and `joins`, each a live join it waits on, in the copy's demand instead of those
-// `sink` counted: the session asks its upstream to place each with a range of its own. Assigned in
-// the producer's static block. Mirrors the Rust `Asked::set`.
-let countAsks: (
-	producer: Producer,
-	sink: TrackState,
-	times: readonly (readonly [bigint, number])[],
-	joins: readonly JoinAsk[],
-) => void;
+// Count `times`, each a time start a reader on a received lite-07 copy waits on, and `joins`, each
+// a live join it waits on, in the copy's demand instead of those `sink` counted: the session asks
+// its upstream to place each with a range of its own. Assigned in the producer's static block.
+// Mirrors the Rust `Asked::set`.
+let countAsks: (producer: Producer, sink: TrackState, times: readonly bigint[], joins: readonly JoinAsk[]) => void;
 
 // The lowest key of `[start, end)` a received copy's live feed has not accounted for a reader, with
 // when its gap's grace folds; see `Producer.#unaccounted`. `settled` gives the runs of a gap that
@@ -1139,13 +1240,21 @@ function reaches(received: bigint, drops: DropSet, end: End, refused: readonly R
  * stale one does. A stale verdict holds for a reader no wider than the budget it was judged under
  * that reads every group above the run's start, past the live edge: its own successor and edge are
  * then no older than those the verdict was judged against, since a group's verdict looks only
- * above it. Mirrors the Rust `settles`.
+ * above it. A reader whose budget varies by group is held to its widest. Mirrors the Rust
+ * `settles`.
  */
-function settles(run: DropRun, budget: number, coverage: Coverage): boolean {
+// The parts of `drops` within `[start, end)`, each clipped there.
+function intersectDrops(drops: readonly DropRun[], start: bigint, end: bigint): DropRun[] {
+	const out: DropRun[] = [];
+	for (let i = runsFrom(drops, start); i < drops.length && drops[i].start < end; i++) {
+		out.push({ ...drops[i], start: max(drops[i].start, start), end: min(drops[i].end, end) });
+	}
+	return out;
+}
+
+function settles(run: DropRun, budget: Budget, coverage: Coverage): boolean {
 	if (run.stale === undefined) return true;
-	if (budget > run.stale) return false;
-	// Its own fill judged it against this reader's budget, not newer groups it may not read.
-	if (run.own) return true;
+	if ((budget.isUniform() ? budget.at(run.start) : budget.widest()) > run.stale) return false;
 	if (coverage === undefined || coverage.cap !== undefined) return false;
 	const above = run.start + 1n;
 	const held = coverage.runs.find((run) => run.start <= above && above < run.end);
@@ -1232,6 +1341,8 @@ let makeDemand: (name: string, signals: DemandSignals, state: TrackState) => Dem
 // What a producer reports through its {@link Demand}.
 interface DemandSignals {
 	wanted: Getter<boolean>;
+	// Whether a subscriber, not just an info lookup, is attached.
+	subscribed: () => boolean;
 	refresh: Getter<boolean>;
 	asked: Getter<bigint | undefined>;
 }
@@ -1263,9 +1374,13 @@ export class Demand {
 		hooks.demandPriority = (demand) => demand.#state.info.peek()?.priority ?? DEFAULT_PRIORITY;
 		hooks.demandReleased = (demand) => demand.#state.closed;
 		hooks.demandAsked = (demand) => demand.#signals.asked;
+		hooks.demandSubscribed = (demand) => demand.#signals.subscribed();
 	}
 
-	/** Whether anyone subscribes to the open track. Watch it (`effect.get` / `.peek()`) to follow demand. */
+	/**
+	 * Whether anyone subscribes to the open track, or holds an info lookup on it, such as a relay
+	 * answering a downstream TRACK. Watch it (`effect.get` / `.peek()`) to follow demand.
+	 */
 	get wanted(): Getter<boolean> {
 		return this.#signals.wanted;
 	}
@@ -1383,8 +1498,10 @@ export class Producer {
 	// One independent downstream state per live subscriber.
 	#sinks = new Set<TrackState>();
 
-	// Whether any subscriber is attached, watched through {@link demand}.
+	// Whether any subscriber or held info lookup is attached, watched through {@link demand}.
 	#wanted = new Signal(false);
+	// The info lookups holding the track, which count as demand as subscribers do.
+	#holds = 0;
 	// Whether one asks for a new group now; see {@link Demand.refresh}.
 	#refreshing = new Signal(false);
 	// The group start asked for while it is past every key written; see `hooks.demandAsked`.
@@ -1406,6 +1523,9 @@ export class Producer {
 	// The wire subscription feeding this copy, from `hooks.receiveTrack` until `hooks.cacheTrack`
 	// ends it: only a copy one feeds owes missing groups. Unset on a track's own publisher.
 	#wire?: Wire;
+	// A copy some wire subscription fed, which knows the live feed only from its upstream's answer,
+	// even between feeds; never set on a track's own publisher.
+	#copy = false;
 	// The misses its readers asked of a {@link Requests} handle.
 	#fills: FillState;
 	// The keys the live feed delivered as a group, and the drops a reclaim forgot, which `drops`
@@ -1429,6 +1549,7 @@ export class Producer {
 			name,
 			{
 				wanted: this.#wanted,
+				subscribed: () => this.#sinks.size > 0,
 				refresh: new Read(this.#refreshing, (asking) => asking && this.#sent()),
 				asked: new Read(this.#asked, (asked) => asked !== undefined && this.#sent()),
 			},
@@ -1448,6 +1569,7 @@ export class Producer {
 				if (entry === undefined || entry.group.closed.peek() instanceof Error) return false;
 				return hooks.groupHeadless(entry.group) ? "headless" : true;
 			},
+			cached: (key) => this.#cached.get(key)?.group,
 			closed: () => this.#state.closed.peek() !== undefined,
 			released: this.#state.closed,
 		});
@@ -1582,9 +1704,21 @@ export class Producer {
 				? producer.#state.largest.peek()?.group
 				: undefined;
 		hooks.receiveTrack = (producer, starts = {}) => {
+			// A new feed's answer says afresh where the live feed is.
 			producer.#wire = { starts, served: producer.#wire?.served };
+			producer.#copy = true;
 			producer.#placing++;
 		};
+		hooks.answerEdge = (producer) => {
+			if (!producer.#wire || producer.#wire.edge) return;
+			producer.#wire.edge = true;
+			for (const state of [producer.#state, ...producer.#sinks]) state.startChanged.update((rev) => rev + 1);
+		};
+		knowsEdge = (producer) =>
+			!producer.#copy ||
+			producer.#wire?.edge === true ||
+			producer.#state.closed.peek() !== undefined ||
+			producer.#state.end.peek() !== undefined;
 		hooks.receiveGroup = (producer, { start: sequence, offset: start, fill }) =>
 			producer.#createGroup(sequence, start, { fetched: fill });
 		hooks.arrivingGroup = (producer, key) => {
@@ -1602,6 +1736,18 @@ export class Producer {
 		wholeAt = (producer, key) => {
 			const entry = producer.#cached.get(key);
 			return entry && hooks.groupWholeEnd(entry.group);
+		};
+		belowFloor = (producer, floor) => {
+			const keys = producer.#keys;
+			const key = keys[keyIndex(keys, floor) - 1];
+			const entry = key === undefined ? undefined : producer.#cached.get(key);
+			if (key === undefined || entry === undefined) return undefined;
+			if (key + 1n !== floor && hooks.groupWholeEnd(entry.group) !== floor) return undefined;
+			return { key, group: entry.group };
+		};
+		unplacedFromAt = (producer, key) => {
+			const entry = producer.#cached.get(key);
+			return entry === undefined ? 0n : hooks.groupUnplacedFrom(entry.group);
 		};
 		wholeAround = (producer, key) => {
 			const keys = producer.#keys;
@@ -1632,11 +1778,11 @@ export class Producer {
 		};
 		hooks.timeStarts = (producer, starts) => {
 			const merged = new Map<bigint, TimeStart>();
-			for (const [time, start, budget] of starts) {
-				const held = merged.get(time) ?? {};
+			for (const [time, start] of starts) {
+				const held = merged.get(time) ?? { past: false };
 				merged.set(time, held);
 				if (start !== undefined) held.start = held.start === undefined ? start : min(held.start, start);
-				if (start === undefined || start > time) held.past = Math.max(held.past ?? budget, budget);
+				if (start === undefined || start > time) held.past = true;
 			}
 			const last = producer.#timeStarts;
 			const same =
@@ -1651,15 +1797,14 @@ export class Producer {
 			// The answer may place a time start an ordered read waits at.
 			for (const state of [producer.#state, ...producer.#sinks]) state.timelineChanged.update((rev) => rev + 1);
 		};
-		answeredEmpty = (producer, time, budget) =>
-			timeStartContaining(producer.#timeStarts.get(time), time, budget) === "before";
+		answeredEmpty = (producer, time) => timeStartContaining(producer.#timeStarts.get(time), time) === "before";
 		countAsks = (producer, sink, times, joins) => producer.#countAsks(sink, times, joins);
 		hooks.answersJoins = (producer) => {
 			producer.#answersJoins = true;
 			producer.#placing++;
 		};
 		hooks.answerJoin = (producer, min, end, start, budget) => {
-			// Every range added before now takes this answer.
+			// Every range added before now within `budget` takes this answer.
 			const tick = answered();
 			producer.#joinAnswers.set(joinKey(min, end), { start, budget, tick });
 			producer.#placing++;
@@ -1669,8 +1814,10 @@ export class Producer {
 		};
 		hooks.retainJoins = (producer, keep) => {
 			for (const key of producer.#joinAnswers.keys()) {
+				// The key's parts as `joinKey` writes them.
 				const [min, end] = key.split(":");
-				if (!keep(Number(min), end === "" ? undefined : BigInt(end))) producer.#joinAnswers.delete(key);
+				const lag = min === "null" ? null : Number(min);
+				if (!keep(lag, end === "" ? undefined : BigInt(end))) producer.#joinAnswers.delete(key);
 			}
 		};
 		hooks.producerLargest = (producer) => producer.#state.largest;
@@ -1698,7 +1845,23 @@ export class Producer {
 			producer.#owe();
 			for (const state of [producer.#state, ...producer.#sinks]) state.startChanged.update((rev) => rev + 1);
 		};
+		hooks.restateTrack = (producer) => {
+			const served = producer.#wire?.served;
+			if (!served || served.restated) return;
+			// The feed now reaches below the old START, so its gaps there are waited for afresh.
+			if (typeof served.start === "bigint") producer.#arrivals.demand(0n, served.start, now());
+			hooks.startTrack(producer, { ...served, restated: true });
+		};
 		hooks.cachedLargest = (producer) => producer.#cachedLargest();
+		hooks.acceptedInfo = (producer) => producer.#state.info.peek();
+		hooks.holdTrack = (producer) => {
+			producer.#holds++;
+			producer.#reportWanted();
+			return () => {
+				producer.#holds--;
+				producer.#reportWanted();
+			};
+		};
 		hooks.reportedLargest = (producer, largest, finished) => {
 			producer.#advanceObject(largest);
 			const current = producer.#state.largest.peek();
@@ -1776,8 +1939,22 @@ export class Producer {
 				grace: producer.#grace(),
 			});
 		};
+		awaitedRuns = (producer, start, end) =>
+			producer.#wire
+				? owedRuns(producer, start, end)
+				: producer.#landing({ start, end, floor: true, grace: producer.#grace() });
 		owedGroup = (producer, start, end) => {
-			for (const run of owedRuns(producer, start, end)) return { key: run.start, folds: run.folds };
+			if (!producer.#wire) return undefined;
+			const floor = feedFloor(producer);
+			const runs = producer.#landing({
+				start: max(start, floor ?? 0n),
+				end,
+				// A START still pending at no floor is waited on: groups arrive newest first, so the
+				// feed may start below the first to arrive. Mirrors the Rust `TrackState::owed`.
+				floor: floor !== undefined || producer.#feedStart() === "pending",
+				grace: producer.#grace(),
+			});
+			for (const run of runs) return { key: run.start, folds: run.folds };
 			return undefined;
 		};
 	}
@@ -1952,12 +2129,12 @@ export class Producer {
 	/**
 	 * An independent {@link Subscriber} reading this track's groups.
 	 *
-	 * It reads only the groups its {@link Subscription.ranges} cover.
-	 * {@link Delay.max} is what asks for data: delivery skips everything in range that the budget
-	 * convicts. Without options this is {@link Subscription.default}, whose budget of zero
-	 * delivers only the latest group; a larger one reaches back over what it can still use, and
-	 * `delay: { max: null }` reaches back over every group the publisher's {@link Info.maxAge} still
-	 * considers fresh.
+	 * It reads only the groups its {@link Subscription.ranges} cover. A live range's
+	 * {@link Live.max} is what asks for data: delivery skips every group it reached that the max
+	 * convicts. Without options this is {@link Subscription.default}, one live range whose max of
+	 * zero delivers only the latest group; a larger max reaches back over what it can still use,
+	 * and a history range (a key start) delivers every group the publisher's {@link Info.maxAge}
+	 * still considers fresh.
 	 */
 	subscribe(options: Subscription = Subscription.default()): Subscriber {
 		const sink = new TrackState(options);
@@ -2085,9 +2262,9 @@ export class Producer {
 		return entry.arrived.checkedAdd(refresh.interval)?.max(current);
 	}
 
-	// Report the demand: whether anyone subscribes, and the group start asked for while it is
-	// past every key written, which is the next free key once a pending refresh is due. A
-	// deferred one arms a wakeup to report again when it comes due.
+	// Report the demand: whether anyone subscribes to or holds the open track, and the group start
+	// asked for while it is past every key written, which is the next free key once a pending
+	// refresh is due. A deferred one arms a wakeup to report again when it comes due.
 	#reportWanted(): void {
 		const current = now();
 		const request = this.#pending;
@@ -2095,10 +2272,12 @@ export class Producer {
 		const due = pending?.le(current) === true;
 		const start = due ? max(this.#received, this.#floor) : this.#floor;
 		const asked = start >= this.#received ? start : undefined;
-		const wanted = this.#sinks.size > 0;
 		this.#asked.set(asked);
-		this.#wanted.set(wanted);
-		const refreshing = wanted && asked !== undefined;
+		// A closed track wants nothing, though a lookup still holds it.
+		const open = this.#state.closed.peek() === undefined;
+		this.#wanted.set(open && (this.#sinks.size > 0 || this.#holds > 0));
+		// Only a subscriber reads the group a refresh asks for.
+		const refreshing = this.#sinks.size > 0 && asked !== undefined;
 		// A request due in the batch that ended the last one leaves the level unchanged, so it
 		// notifies anyway: the publisher must read it to send it.
 		if (refreshing && request !== undefined && due && request !== this.#announced) {
@@ -2142,7 +2321,7 @@ export class Producer {
 
 		const closed = this.#state.closed.peek();
 		if (closed === undefined) {
-			if (joinsLive(sink.update.peek()?.ranges)) this.#ask("join");
+			if (joinsLive(sink.update.peek()?.ranges ?? [])) this.#ask("join");
 			this.#sinks.add(sink);
 			this.#reportWanted();
 
@@ -2159,6 +2338,7 @@ export class Producer {
 				const abort = c instanceof Error ? c : undefined;
 				this.#sinks.delete(sink);
 				if (sink.asker) this.#fills.leave(sink.asker);
+				for (const asker of sink.keptOut) this.#fills.leave(asker);
 				this.#leave(sink);
 				// Update demand: once the last subscriber leaves, the consumer wire (watching
 				// {@link Demand.wanted}) tears the upstream down instead of downloading to nobody.
@@ -2198,11 +2378,11 @@ export class Producer {
 	// change costs what it moved rather than every subscriber's ranges. The wire layer observes
 	// `#requested` and emits SUBSCRIBE_UPDATE.
 	//
-	// The max delay is the subscribers' own, not clamped to the track's maxAge: the publisher
-	// applies its own, as each reader's budget does, so the demand asked upstream is the same
-	// before and after the info lands.
+	// Each live join's max is the subscribers' own, not clamped to the track's maxAge: the
+	// publisher applies its own, as each reader's budget does, so the demand asked upstream is the
+	// same before and after the info lands.
 	#join(sink: TrackState): void {
-		this.#moved(sink, { after: sink.update.contribution(), gone: [], came: [...sink.update.ranges()] }, true);
+		this.#moved(sink, { after: sink.update.contribution(), gone: [], came: sink.update.held() }, true);
 		sink.update.watch = (change) => this.#moved(sink, change);
 		this.#subscribed();
 	}
@@ -2211,7 +2391,7 @@ export class Producer {
 	#leave(sink: TrackState): void {
 		sink.update.watch = undefined;
 		this.#countAsks(sink, [], []);
-		this.#moved(sink, { before: sink.update.contribution(), gone: [...sink.update.ranges()], came: [] });
+		this.#moved(sink, { before: sink.update.contribution(), gone: sink.update.held(), came: [] });
 		this.#counted.delete(sink);
 		this.#subscribed();
 	}
@@ -2220,16 +2400,15 @@ export class Producer {
 	// {@link countAsks}.
 	// Each counts once however many of the sink's ranges wait on it: the aggregate counts
 	// readers, so a count added once is taken once.
-	#countAsks(sink: TrackState, asked: readonly (readonly [bigint, number])[], asking: readonly JoinAsk[]): void {
-		const same = (a: readonly [bigint, number], b: readonly [bigint, number]) => a[0] === b[0] && a[1] === b[1];
+	#countAsks(sink: TrackState, asked: readonly bigint[], asking: readonly JoinAsk[]): void {
 		const sameJoin = (a: JoinAsk, b: JoinAsk) =>
 			a.min === b.min && a.end === b.end && a.budget === b.budget && a.since === b.since;
-		const times = asked.filter((ask, i) => asked.findIndex((other) => same(other, ask)) === i);
+		const times = [...new Set(asked)];
 		const joins = asking.filter((join, i) => asking.findIndex((other) => sameJoin(other, join)) === i);
 		const held = sink.asks;
-		if (times.length !== held.length || !times.every((ask, i) => same(ask, held[i]))) {
-			for (const ask of times) if (!held.some((h) => same(h, ask))) this.#requested.ask(ask[0], ask[1], true);
-			for (const ask of held) if (!times.some((t) => same(t, ask))) this.#requested.ask(ask[0], ask[1], false);
+		if (times.length !== held.length || !times.every((ask, i) => ask === held[i])) {
+			for (const ask of times) if (!held.includes(ask)) this.#requested.ask(ask, true);
+			for (const ask of held) if (!times.includes(ask)) this.#requested.ask(ask, false);
 			sink.asks = [...times];
 		}
 		const waiting = sink.joins;
@@ -2242,7 +2421,7 @@ export class Producer {
 	// Take a sink that became a fetch out of the live aggregate, before anyone sees it there.
 	#unlive(sink: TrackState): void {
 		if (!this.#counted.delete(sink)) return;
-		this.#live.replace({ before: sink.update.contribution(), gone: [...sink.update.ranges()], came: [] });
+		this.#live.replace({ before: sink.update.contribution(), gone: sink.update.held(), came: [] });
 		this.#subscribed();
 	}
 
@@ -2614,7 +2793,8 @@ export class Producer {
 	 *
 	 * Appending says the producer will not go back, so it skips every start below the new group
 	 * that it never produced, from just past its previous append (before the first, from the
-	 * lowest group it created), as {@link skipGroups} would, replacing any drop there:
+	 * lowest group it created, or from 0 when it creates the track's first group), as
+	 * {@link skipGroups} would, replacing any drop there:
 	 * consecutive appends name the span between their starts. Those starts are then final:
 	 * creating one throws {@link Skipped}.
 	 *
@@ -2697,11 +2877,16 @@ export class Producer {
 
 	// Settle an append at `key`: skip every key below it this track's own publisher
 	// never produced, from just past its previous append (before the first, from the lowest it
-	// produced), since appending says it will not go back. The skip replaces a drop given there,
-	// as `skipGroups` does.
+	// produced, or 0 when the append is its own track's first group), since appending says it will
+	// not go back. The skip replaces a drop given there, as `skipGroups` does. From 0, a reader
+	// asking from the oldest group of a time-keyed track never waits on keys below its first
+	// group's wall-clock start.
 	#settleAppend(key: bigint): void {
-		const from = this.#appended ?? this.#produced[0]?.start;
-		if (from !== undefined) {
+		// The append's own group may be in `#produced` already, so only one below it counts.
+		// A received copy records nothing it produced, so it skips below no first group.
+		const first = this.#produced[0]?.start;
+		const from = this.#appended ?? (first !== undefined && first < key ? first : this.#wire ? undefined : 0n);
+		if (from !== undefined && from < key) {
 			const kept = [...this.#produced];
 			for (const cached of this.#cached.keys()) {
 				if (cached >= from && cached < key) insertRun(kept, cached, cached + 1n);
@@ -2850,7 +3035,7 @@ export class Producer {
 		this.#owe();
 	}
 
-	// The grace the session's tail uses, from the max delay the track's subscribers ask for,
+	// The grace the session's tail uses, from the widest budget the track's subscribers ask for,
 	// bounded by how long the publisher keeps a superseded group fresh. The demand asked upstream is not.
 	#grace(): Duration {
 		const maxDelay = Duration.millis(this.#requested.maxDelay());
@@ -2884,12 +3069,22 @@ export class Producer {
 	// back restores the START. Without either, the first arrival stands in for it.
 	// Until the START arrives, the feed start is pending; the requested floor still bounds it.
 	// A local track has no feed, so what its subscribers ask bounds nothing, as in Rust.
+	// The floor the wire asks below which nothing is requested, a placed join from its group, as
+	// the subscriber sends it. Mirrors the Rust `Subscription::start`.
+	#requestedStart(): bigint | undefined {
+		const requested = this.#requested.peek();
+		if (requested === undefined) return undefined;
+		const { ranges, placed } = wireHeld(requested);
+		return wireSpan(placedAsTimes(ranges, placed)).start;
+	}
+
 	#feedStart(): bigint | "pending" | undefined {
 		if (!this.#wire) return undefined;
-		const ranges = this.#requested.peek()?.ranges;
-		const requested = ranges && wireSpan(ranges).start;
+		const requested = this.#requestedStart();
 		const served = this.#wire?.served;
 		if (!served || served.requested !== requested) return requested;
+		// Placed afresh by an update, which gets no new START, so the feed may reach any group.
+		if (served.restated) return 0n;
 		if (served.start === null) return requested;
 		if (served.start !== undefined) return served.start;
 		// A closed track never gets its START.
@@ -2904,17 +3099,23 @@ export class Producer {
 	#fillFloor(named: bigint | undefined): bigint | undefined {
 		const wire = this.#wire;
 		if (!wire) return undefined;
-		const feed = this.#feedStart();
+		// A restated feed reaches below the START, whose publisher re-offers what lies there: a fill
+		// still asks nothing below the START.
+		const restated = wire.served?.restated ? wire.served : undefined;
+		const feed = restated
+			? typeof restated.start === "bigint"
+				? restated.start
+				: restated.requested
+			: this.#feedStart();
 		const start = feed === "pending" ? wire.served?.requested : feed;
 		if (start === undefined || start === 0n) return undefined;
 		if (wire.starts.fillsFromStart) return start;
 		// The START applies only while the demand keeps the floor it answered, as `#feedStart`.
-		const ranges = this.#requested.peek()?.ranges;
 		const served = wire.served;
 		const resolved =
 			(wire.starts.resolvesStart === true || served?.resolved === true) &&
 			typeof served?.start === "bigint" &&
-			served.requested === (ranges && wireSpan(ranges).start);
+			served.requested === this.#requestedStart();
 		if (resolved) return undefined;
 		return named === undefined || named >= start ? start : undefined;
 	}
@@ -3059,15 +3260,12 @@ export class Producer {
 			this.#unlink(entry);
 			this.#uncache(entry);
 		}
-		for (const sink of this.#sinks) {
-			// A finished group stays readable, and a route failure continues it from another copy
-			// once a front takes it, so only an unfinished one ends with the track.
-			for (const group of sink.groups.peek()) {
-				if (hooks.groupFate(group)() !== undefined) hooks.releaseGroupReader(group, abort);
-			}
-			closeTrackState(sink, abort);
-		}
+		// A group still buffered for a subscriber is left to it: the abort above already ended an
+		// unfinished one, a finished one stays readable, and a front that takes either continues it
+		// from another copy. Releasing it here would end that continuation at its next short close.
+		for (const sink of this.#sinks) closeTrackState(sink, abort);
 		this.#sinks.clear();
+		this.#reportWanted();
 		// The former live edge becomes evictable too, its idle window restarted, so the close
 		// never reclaims a group its subscribers have yet to drain.
 		const edge = this.#edgeEntry();
@@ -3118,9 +3316,10 @@ export class Producer {
 
 // One read pass's view of the budget and the live edge; see Subscriber.#drift.
 type Drift = {
-	budget: number;
-	// The budget is the track's max age, which no widening passes: its verdicts are final.
-	bounded: boolean;
+	// How long each group stays worth delivering, clamped to the track's max age.
+	budget: Budget;
+	// The track's max age in milliseconds, which no widening passes: a verdict at it is final.
+	bound?: number;
 	// The live edge: its group, and the newest time it presents, in milliseconds. A scale-less
 	// track has none: its bare starts are no time, so it ages by arrival alone.
 	presentation?: { key: bigint; at: number };
@@ -3168,15 +3367,9 @@ type Successor = { key: bigint; arrived: Instant; fate: () => Error | undefined 
  */
 export interface Reported extends Run {
 	kind: "settled" | "dropped" | "skip";
-	/**
-	 * A drop the reader's own fill refused as stale: the budget it was judged under, which a
-	 * wider one takes back (see `Subscriber.#withdraw`). Kept here rather than read off the
-	 * refusal, which a group arriving later takes out while its gap stays reported.
-	 */
-	ownStale?: number;
 }
 
-const sameReport = (a: Reported, b: Reported) => a.kind === b.kind && a.ownStale === b.ownStale;
+const sameReport = (a: Reported, b: Reported) => a.kind === b.kind;
 
 // Whether `reported` stops `hole` going out over it: only a skip goes out over a drop, which it
 // replaces. Mirrors the Rust `Report::blocks`.
@@ -3251,7 +3444,7 @@ export class Subscriber {
 	// under, so a wider budget offers them again. Only a widening reverses a stale verdict, and
 	// an entry is kept only while its group is cached, since nothing could offer it again.
 	#skipped = new Map<bigint, number>();
-	// At most the narrowest budget in #skipped, so a read whose budget did not widen skips the scan.
+	// At most the narrowest budget in #skipped, so a read whose widest budget did not pass it skips the scan.
 	#narrowest = Number.POSITIVE_INFINITY;
 	// This reader closed itself, so lowering its floor offers nothing: a producer's clean close
 	// alone leaves the cache readable, but the reader leaving must stay terminal. Leaving also
@@ -3275,9 +3468,9 @@ export class Subscriber {
 	// The hull of what this reader reads now: its local bounds narrowed to the window's floor
 	// and end. A group inside it is read only if the window contains it too.
 	#cursor = new Signal<{ start: bigint; end?: bigint }>({ start: 0n });
-	// A FETCH's own budget in place of the subscription's; unlike SUBSCRIBE's zero
-	// default, an omitted one is unbounded, leaving the publisher's maxAge as the only bound.
-	#fetchBudget?: number;
+	// Whether this reads one group for a FETCH, which has no budget of its own: the publisher's
+	// maxAge alone bounds it.
+	#fetch = false;
 	// The first frame a fetch asks of its group: a copy starting past it lacks its head.
 	#fetchFrom = 0;
 	// The first frame a wire publisher serves of each group, which it reads whole from there. Set
@@ -3298,7 +3491,7 @@ export class Subscriber {
 		start: bigint;
 		end?: bigint;
 		revision: number;
-		budget: number;
+		budget: Budget;
 		coverage?: Coverage;
 	};
 	#reported = new Runs<Reported>(sameReport);
@@ -3324,14 +3517,18 @@ export class Subscriber {
 	// out earlier can outlive this subscriber, as one a resumed reader still writes from a copy
 	// it let go of, and its budget still runs from its successor's arrival.
 	#arrivals?: { key: bigint; arrived: Instant }[];
-	// The misses this reader asked a fill for, each judged once, and those asked again after the
-	// answer was evicted before this reader took it, which is never repeated: a slow reader's
-	// refills cannot evict each other without bound. Mirrors the Rust `Misses`.
+	// The misses this reader asked a fill for, each judged once, and asked again however often
+	// the answer is evicted before this reader takes it: a key a reader is owed is never lost
+	// to the cache. Mirrors the Rust `Misses`.
 	#asked: Run[] = [];
-	#refilled: Run[] = [];
 	// Fill-owed runs this reader gave up once its budget convicted them: never wanted again, so
 	// the fills withdraw them and their handlers hear, as the Rust `Misses` gives up a stale run.
 	#givenUp: Run[] = [];
+	// The track's drops that settled a hole this reader judged, taken as its own verdicts, stale ones
+	// under the budget the upstream judged them by: the track forgets its drop set under pool pressure
+	// or once it expires, which must not reopen what this reader already gave up. Only a wider budget
+	// takes a stale one back, and the read passing it forgets it. Mirrors the Rust `Misses::adopt_drops`.
+	#adopted: DropRun[] = [];
 	// The heads this reader asked a fill for, each once: one met again with no fill bringing it
 	// is given up, as the Rust `Heads` gives up a head whose fetch ended without one. Clipped to
 	// what it still reads, so a widening back over one asks it afresh.
@@ -3342,7 +3539,7 @@ export class Subscriber {
 	#unjudged: Run[] = [{ start: 0n, end: UNBOUNDED }];
 	#judgedAt?: {
 		producer: Producer;
-		budget: number;
+		budget: Budget;
 		coverage: Coverage;
 		opened: number;
 		drops: number;
@@ -3352,27 +3549,29 @@ export class Subscriber {
 	// under; see #unknownRuns.
 	#unknown?: {
 		drops: number;
-		budget: number;
+		budget: Budget;
 		coverage: Coverage;
 		runs: DropRun[];
 	};
 	// The last read waited on a fill, so the staleness deadline it armed wakes the next one: a
 	// fill that never answers cannot pin a reader in either order.
 	#fillWait = false;
+	// The kept-out keys this reader asks fills about; see #askKeptOut.
+	#keptOut?: KeptOut;
+	// The same for the keys a front's resumed reader owes and asks this route copy about, apart so
+	// neither moves what the other asks; see `hooks.askUnproven`.
+	#routedOut?: KeptOut;
 	// Bumped whenever the fills this reader joined are rejudged, which may withdraw groups it reads
 	// again by the time it looks (a narrowing undone in one turn moves no signal), so it asks anew.
 	#fillMoves = new Signal(0);
 	// The time starts this reader asked its fills to look up, each with the floor it asked from and
-	// its fill, absent when no handler could take it.
-	#lookups: { time: bigint; floor: bigint; lookup?: Lookup }[] = [];
+	// where it stands.
+	#lookups: { time: bigint; floor: bigint; stage: Look }[] = [];
 	// A time start's refusal, which every read fails with until the ranges change. Mirrors the Rust
 	// `Filter::refused`.
 	#refusal?: Error;
 
-	#drift(
-		scope = this.#fetchBudget !== undefined ? WHOLE : undefined,
-		end = scope ? undefined : this.#cursor.peek().end,
-	): Drift {
+	#drift(scope = this.#fetch ? WHOLE : undefined, end = scope ? undefined : this.#cursor.peek().end): Drift {
 		// A fetch judges its group against the whole track, as the Rust `fetch_group` does: a
 		// newer group outside its one-group window still supersedes it. A moved group's scope
 		// brings its own end, unbounded when its logical reader's is.
@@ -3393,28 +3592,17 @@ export class Subscriber {
 			break;
 		}
 
-		const update = this.#state.update.scalars();
-		const requested = this.#fetchBudget ?? (update ? maxDelayOf(update) : 0);
-		const fresh = info?.maxAge?.asMillis();
-		return {
-			budget: fresh === undefined ? requested : Math.min(requested, fresh),
-			bounded: fresh !== undefined && requested >= fresh,
-			presentation,
-			end,
-			scope,
-		};
+		// A fetch has no budget of its own, so only the publisher's max age applies.
+		const budget = this.#fetch ? Budget.uniform(NO_MAX_DELAY) : this.#window.budget();
+		const bound = info?.maxAge?.asMillis();
+		return { budget: budget.clamped(bound), bound, presentation, end, scope };
 	}
 
-	// {@link #drift} as a fetch judges its group, against the whole track, under the fetch's own
-	// budget in milliseconds in place of this reader's, still capped by the track's max age.
-	#driftWithin(budget: number): Drift {
-		const drift = this.#drift(WHOLE);
-		const fresh = this.#state.info.peek()?.maxAge?.asMillis();
-		return {
-			...drift,
-			budget: fresh === undefined ? budget : Math.min(budget, fresh),
-			bounded: fresh !== undefined && budget >= fresh,
-		};
+	// {@link #drift} as a fetch judges its group, against the whole track, bounded by the track's
+	// max age alone.
+	#driftFetched(): Drift {
+		const bound = this.#state.info.peek()?.maxAge?.asMillis();
+		return { ...this.#drift(WHOLE), budget: Budget.uniform(NO_MAX_DELAY).clamped(bound), bound };
 	}
 
 	// The group after `key` that bounds it: the first servable one below `end` that
@@ -3438,7 +3626,7 @@ export class Subscriber {
 
 	// Whether group `key` counts toward the drift edge: inside the window, or the `scope` judged
 	// within instead, every group for a fetch.
-	#judges(key: bigint, scope = this.#fetchBudget !== undefined ? WHOLE : undefined): boolean {
+	#judges(key: bigint, scope = this.#fetch ? WHOLE : undefined): boolean {
 		return scope ? scope(key) : this.#window.contains(key);
 	}
 
@@ -3495,15 +3683,47 @@ export class Subscriber {
 		// A group finished whole ages from its own end without a successor.
 		if (arrived === undefined && !this.#arrivals) arrived = this.#endedAt(key);
 		if (arrived === undefined) return false;
+		const budget = drift.budget.at(key);
 		// Plain arithmetic: an unenforced budget is infinite, which no duration brand holds.
-		const deadline = arrived.since(Instant.ZERO).asNanos() + drift.budget * 1_000_000;
+		const deadline = arrived.since(Instant.ZERO).asNanos() + budget * 1_000_000;
 		if (now().since(Instant.ZERO).asNanos() >= deadline) return true;
 		if (wake) this.#wakeAt(deadline);
 		// A closed subscriber keeps no timeline to bound the reach with, and only a live edge
 		// above `key` convicts it by media time.
 		if (this.#arrivals || drift.presentation === undefined || drift.presentation.key <= key) return false;
 		const reach = this.#reach(key, drift.end, drift.scope);
-		return reach !== undefined && drift.presentation.at - reach >= drift.budget;
+		return reach !== undefined && drift.presentation.at - reach >= budget;
+	}
+
+	// Where a live join this reader placed at `placed` starts for a reader within `budget`
+	// milliseconds, as its publisher reports it: past the groups held there and after that the budget
+	// expired, as delivery starts at the first group it serves.
+	//
+	// A copy whose upstream answers joins reports the answer that placed it, given under a max at
+	// least as wide: its upstream judged the groups, and those owed from there may not have arrived
+	// yet. Any other copy starts no lower than where its upstream said its feed starts, that wire's
+	// answer for the whole subscription unless an update placed it afresh since, and skips a stale
+	// group only once every key below it is given up for the reader, since a group still on its way
+	// there may be fresh. Mirrors the Rust `TrackState::join_start`.
+	#joinStart(placed: bigint, budget: number): bigint {
+		if (this.#resume) return this.#resume.joinStart(placed, budget);
+		const producer = this.#state.producer;
+		if (producer === undefined || timeAnchors(producer).answersJoins) return placed;
+		const whole = this.#drift(WHOLE);
+		const drift = { ...whole, budget: Budget.uniform(budget).clamped(whole.bound) };
+		const received = receivedCopy(producer);
+		const feed = received ? sourceStart(producer) : undefined;
+		let from = typeof feed === "bigint" ? max(placed, feed) : placed;
+		const timeline = this.#state.timeline;
+		for (let i = timelineIndex(timeline, from); i < timeline.length; i++) {
+			const group = timeline[i];
+			// An aborted group cannot start a join.
+			if (hooks.groupFailed(group)) continue;
+			if (received && !this.#state.drops.givenUp(from, group.start, budget)) break;
+			if (!this.#staleAt(group.start, drift)) return group.start;
+			from = group.start + 1n;
+		}
+		return from;
 	}
 
 	// The cached group starting at `key`, failed or not.
@@ -3661,7 +3881,6 @@ export class Subscriber {
 		this.#reclip(this.#givenUp, start, end, (run) => this.#reads(run.start, run.end));
 		this.#reclip(this.#heads, start, end, (run) => this.#reads(run.start, run.end));
 		this.#reclip(this.#asked, start, end, (run) => this.#wants(run.start, run.end));
-		this.#reclip(this.#refilled, start, end, (run) => this.#wants(run.start, run.end));
 		fillsOf(producer).moved(asker, start, end);
 		this.#fillMoves.update((moves) => moves + 1);
 	}
@@ -3686,7 +3905,7 @@ export class Subscriber {
 			for (const run of given) fills.moved(this.#state.asker, run.start, run.end);
 		} else {
 			// At once, before the fills withdraw what it no longer reads: a widening back asks those
-			// groups afresh, never through the one refill an evicted answer is allowed.
+			// groups afresh.
 			this.#clipAsked();
 			fills.moved(this.#state.asker);
 		}
@@ -3700,9 +3919,6 @@ export class Subscriber {
 		if (this.#givenUp.length > 0) this.#givenUp = this.#givenUp.flatMap((run) => this.#reads(run.start, run.end));
 		if (this.#heads.length > 0) this.#heads = this.#heads.flatMap((run) => this.#reads(run.start, run.end));
 		if (this.#asked.length > 0) this.#asked = this.#asked.flatMap((run) => this.#wants(run.start, run.end));
-		if (this.#refilled.length > 0) {
-			this.#refilled = this.#refilled.flatMap((run) => this.#wants(run.start, run.end));
-		}
 	}
 
 	// Raise the key cursor to `floor`: what lies below it is passed for good.
@@ -3717,10 +3933,11 @@ export class Subscriber {
 	// Forget the gaps in `delivered` below each group past this subscriber's budget now, whether
 	// this track holds it or not: one landing there would be written off. A group skipped as
 	// stale is not forgotten, since a wider budget offers it again.
-	#forgetPastBudget(delivered: Delivered): void {
+	#forgetPastBudget(delivered: Delivered, budget = this.#window.budget()): void {
 		if (delivered.aboveGap() === undefined) return;
 		// One edge for every group judged, so forgetting N gaps never resolves it N times.
-		const drift = this.#drift();
+		const own = this.#drift();
+		const drift = { ...own, budget: budget.clamped(own.bound) };
 		// Found once a gap is stale, so a hand-out that forgets nothing never scans #skipped. A
 		// skip whose group left the cache can never be offered again, so it is forgotten here
 		// rather than holding the gaps above it forever.
@@ -3728,7 +3945,12 @@ export class Subscriber {
 		let scanned = false;
 		let forgot: bigint | undefined;
 		for (let oldest = delivered.aboveGap(); oldest !== undefined; oldest = delivered.aboveGap()) {
-			if (!this.#staleAt(oldest, drift)) break;
+			// The gap below takes this verdict only judged under a budget at least as wide as its own.
+			let widest = drift.budget.at(oldest);
+			for (const gap of delivered.gaps(0n, oldest)) {
+				for (const [, budget] of drift.budget.runs(gap.start, gap.end)) widest = Math.max(widest, budget);
+			}
+			if (!this.#staleAt(oldest, { ...drift, budget: Budget.uniform(widest) })) break;
 			if (!scanned) {
 				scanned = true;
 				const producer = this.#state.producer;
@@ -3762,21 +3984,22 @@ export class Subscriber {
 		}
 	}
 
-	// Offer again the cached groups skipped as stale under a budget narrower than `budget`, now
-	// that it widened. Each stays recorded, judged under `budget`, until it is handed out or
-	// skipped again, so a newer one handed out first never folds it into #delivered. Costs the
-	// skipped groups, never the cache.
-	#reoffer(budget: number): void {
-		if (this.#skipped.size === 0 || budget <= this.#narrowest) return;
+	// Offer again the cached groups skipped as stale under a budget narrower than `budget` gives
+	// them, now that it widened. Each stays recorded, judged under what it gives now, until it is
+	// handed out or skipped again, so a newer one handed out first never folds it into #delivered.
+	// Costs the skipped groups, never the cache. Mirrors the Rust `Skipped::widened`.
+	#reoffer(budget: Budget): void {
+		if (this.#skipped.size === 0 || budget.widest() <= this.#narrowest) return;
 		const keys: bigint[] = [];
 		let narrowest = Number.POSITIVE_INFINITY;
 		for (const [key, judged] of this.#skipped) {
-			if (judged >= budget) {
+			const now = budget.at(key);
+			if (judged >= now) {
 				narrowest = Math.min(narrowest, judged);
 				continue;
 			}
-			this.#skipped.set(key, budget);
-			narrowest = budget;
+			this.#skipped.set(key, now);
+			narrowest = Math.min(narrowest, now);
 			keys.push(key);
 			// Judged again, so a stale drop not reported yet is withdrawn.
 			if (dropAt(this.#pending, key) instanceof Error) {
@@ -3832,8 +4055,7 @@ export class Subscriber {
 			scalars ? update.entries() : [[0n, {}]],
 			this.#latestGroup(),
 			this.#holdings(),
-			scalars ? maxDelayOf(scalars) : NO_MAX_DELAY,
-			(key) => update.since(key),
+			(key) => update.joining(key),
 		);
 		// Leaves the lookups the old ranges asked, which a settled window never reads again.
 		if (this.#lookups.length > 0) this.#lookUp();
@@ -3858,12 +4080,11 @@ export class Subscriber {
 		const joins = !this.#resume && timeAnchors(producer).answersJoins ? this.#window.joins() : [];
 		if (times.length === 0 && joins.length === 0 && this.#state.asks.length === 0 && this.#state.joins.length === 0)
 			return;
-		const budget = this.#window.budget;
 		countAsks(
 			producer,
 			this.#state,
-			times.map((time) => [time, budget] as const),
-			joins.map(([min, end, since]) => ({ min, end, budget, since })),
+			times,
+			joins.map(([min, end, budget, since]) => ({ min, end, budget, since })),
 		);
 	}
 
@@ -3881,14 +4102,15 @@ export class Subscriber {
 		// once nothing between them is still to arrive.
 		const wire = receivedCopy(producer) && !state.dropsAnchors.peek();
 		// A lite-07 copy places a live join only where its upstream answered a range asking the same
-		// join, recorded after the reader's range was added, under a budget at least as wide as the
-		// reader's: the live edge is the upstream's, which no group held here measures. Mirrors the
-		// Rust `Holdings::answers_joins for TrackState`.
+		// join, recorded after the reader's range was added: the live edge is the upstream's, which no
+		// group held here measures. Mirrors the Rust `Holdings::answers_joins for TrackState`.
 		const answers = anchors.answersJoins;
 		// The upstream's answer to a live join, recorded after the reader's range was added, under a
 		// budget at least as wide as the reader's. Mirrors the Rust `TrackState::join_answer`.
-		const joinAnswer = (min: Duration, end: bigint | undefined, budget: number, since: number) => {
-			const answer = anchors.joins.get(joinKey(Math.ceil(min.asMillis()), end));
+		// The upstream's answer to a live join, recorded after `since` under a budget at least as wide
+		// as the reader's: a start past groups a narrower max expired would skip groups it still wants.
+		const joinAnswer = (min: Duration | null, end: bigint | undefined, budget: number, since: number) => {
+			const answer = anchors.joins.get(joinKey(min && Math.ceil(min.asMillis()), end));
 			return answer && answer.tick > since && budget <= answer.budget ? answer : undefined;
 		};
 		// The times from `from` on that the drops from there leave open.
@@ -3901,24 +4123,35 @@ export class Subscriber {
 			containing: (time, budget) => {
 				// A fetch names its group by start: the one starting there, never an earlier one
 				// containing it, as a Rust fetch reads by key.
-				if (anchors.atKeys || state.fetch) return { group: time };
+				if (anchors.atKeys || state.fetch) return { at: time };
 				const index = keyIndex(keys, time + 1n);
 				const below = index > 0 ? keys[index - 1] : undefined;
+				// No group contains a time past a whole group's span, so one there starts at its End.
+				const at = (below: bigint): { at: bigint } => ({ at: reached(below, time, wholeAt(producer, below)) });
 				// A lite-07 copy holds only part of the track, so it places a time only where it can prove
 				// what its upstream would answer: at a group held before it once every key between is
-				// given up for this reader, before every group once every key through it is, or where its
+				// given up for this reader (a whole group's GROUP_END gives up the starts inside its span,
+				// so it alone proves every time there), or at its End once the time is past that span,
+				// before every group once every key through it is, or where its
 				// upstream answered a range asked from that time. Anything else waits, and the reader asks
 				// its upstream for it (see `askTimes`): a group held after the time says nothing of one
 				// between, nor does a stale drop of a reader wider than the budget it was judged under.
 				// Mirrors the Rust `TrackState::containing_received`.
 				if (wire) {
-					if (below !== undefined && drops.givenUp(below + 1n, time + 1n, budget)) return { group: below };
-					const reported = timeStartContaining(anchors.starts.get(time), time, budget);
+					// An open group's End may yet land at or before the time, so only a frame past it, or the
+					// group finishing, proves the group reaches it: an aborted copy may have lost its End.
+					if (
+						below !== undefined &&
+						(below === time || placesAt(producer, below, time)) &&
+						drops.givenUp(pastSpan(producer, below), time + 1n, budget)
+					)
+						return at(below);
+					const reported = timeStartContaining(anchors.starts.get(time), time);
 					if (reported !== undefined) return reported;
 					if (below === undefined && drops.givenUp(0n, time + 1n, budget)) return "before";
 					return "unknown";
 				}
-				if (below !== undefined) return { group: below };
+				if (below !== undefined) return at(below);
 				// Every key at or before it is gone, so whichever group held it will never arrive.
 				if (drops.covers(0n, time + 1n)) return "before";
 				return keys.length === 0 ? "unknown" : "before";
@@ -3939,8 +4172,16 @@ export class Subscriber {
 					// Below every group, up to the first, and above the last, past the drops after it.
 					const below = uncovered(0n);
 					if (below && below.start < first) runs.push({ start: below.start, end: first });
-					const above = uncovered(last + 1n);
-					if (above) runs.push(above);
+					// Past the newest group, a time is unplaced until the drops reach it, and past that
+					// group's newest frame until it finishes.
+					const above = uncovered(pastSpan(producer, last));
+					const from = unplacedFromAt(producer, last);
+					if (from === undefined) {
+						if (above) runs.push(above);
+					} else {
+						const start = max(from, last + 1n);
+						runs.push({ start: above ? min(above.start, start) : start, end: UNBOUNDED });
+					}
 				}
 				return { runs, mark };
 			},
@@ -3993,7 +4234,7 @@ export class Subscriber {
 	// which asks its upstream.
 	// Mirrors the Rust `TrackState::join`.
 	#join(
-		min: Duration,
+		min: Duration | null,
 		containing: (time: bigint) => Containing,
 		wire: boolean,
 		ended: () => boolean,
@@ -4009,10 +4250,15 @@ export class Subscriber {
 		const scale = info.timescale;
 		if (scale == null) {
 			const at = now();
-			// This copy's arrivals don't reach back that far, but its upstream's may.
-			const group =
-				newest((group) => at.since(hooks.groupArrived(group)).ge(min)) ?? (wire ? undefined : oldest());
-			return group && { group: group.start };
+			const group = min && newest((group) => at.since(hooks.groupArrived(group)).ge(min));
+			if (group) return { group: group.start };
+			// This copy's arrivals don't reach back that far yet, but its upstream's may.
+			if (wire && min !== null) return undefined;
+			// It reaches back past every arrival, so it starts where a time start from 0 does, taking a
+			// lower group that arrives late as the oldest group would. One with no lag limit never
+			// waits: no arrival reaches back that far, and on a copy it asks upstream for any lower
+			// group the copy lacks, as on a timed track.
+			return { time: 0n };
 		}
 		const stamped = newest((group) => hooks.groupTimestamp(group) !== undefined);
 		// In the track's own scale, which holds every timestamp it accepted. Floored exactly, as
@@ -4022,8 +4268,12 @@ export class Subscriber {
 			return latest && BigInt(floorAt(latest, scale));
 		};
 		const edge = reach(stamped);
-		// The lag rounds up to whole ticks, so the start is never newer than it allows.
-		const back = (BigInt(Math.ceil(min.asNanos())) * BigInt(scale) + 999_999_999n) / 1_000_000_000n;
+		// The lag rounds up to whole ticks, so the start is never newer than it allows; with no lag
+		// limit it reaches back past every timestamp.
+		const back =
+			min === null
+				? undefined
+				: (BigInt(Math.ceil(min.asNanos())) * BigInt(scale) + 999_999_999n) / 1_000_000_000n;
 		const producer = this.#state.producer;
 		if (!this.#state.dropsAnchors.peek() && !(producer && timeAnchors(producer).atKeys)) {
 			// Keys are group starts, so the newest group held starts no later than the edge. A copy's
@@ -4035,8 +4285,8 @@ export class Subscriber {
 				if (at !== undefined && (top === undefined || at > top)) top = at;
 			}
 			if (top === undefined) return undefined;
-			const target = top > back ? top - back : 0n;
-			if (!wire || containing(target) !== "unknown") return { time: target };
+			const target = back !== undefined && top > back ? top - back : 0n;
+			if (target === 0n || !wire || containing(target) !== "unknown") return { time: target };
 			// Groups never overlap in time, so one held starting by the target with a frame at or past
 			// it contains it: every later group starts after that frame.
 			const holder = newest((group) => group.start <= target);
@@ -4044,8 +4294,16 @@ export class Subscriber {
 			if (holder && through !== undefined && through >= target) return { group: holder.start };
 			return ended() ? { time: target } : undefined;
 		}
-		if (edge === undefined) return undefined;
-		const target = edge > back ? edge - back : 0n;
+		// Keys that aren't times: by when each group's first frame presented. No group presents
+		// before time 0, so a join reaching back that far starts as the oldest group does, taking a
+		// lower group that arrives late rather than starting at the oldest group this hop happens to
+		// hold. One with no lag limit needs no frame to measure it by, so groups whose frames are
+		// still on their way place it all the same.
+		let target: bigint;
+		if (back === undefined) target = 0n;
+		else if (edge === undefined) return undefined;
+		else target = edge > back ? edge - back : 0n;
+		if (target === 0n) return "oldest";
 		const group =
 			newest((group) => {
 				const start = hooks.groupTimestamp(group);
@@ -4072,7 +4330,7 @@ export class Subscriber {
 	// once, and take in the answers. A refused one fails the reads until the ranges change. Returns
 	// whether the groups in range moved. Mirrors the Rust `Cursor::look_up`.
 	#lookUp(): boolean {
-		if (this.#refusal) return false;
+		if (this.#refusal || this.#left) return false;
 		let moved = false;
 		// An answer the window takes in may look its time up again from lower down.
 		for (let again = true; again; ) {
@@ -4091,36 +4349,61 @@ export class Subscriber {
 		// The window stops looking once replaced, or looks again from lower down.
 		this.#lookups = this.#lookups.filter((lookup) => {
 			if (wanted.some((want) => want.time === lookup.time && want.floor === lookup.floor)) return true;
-			lookup.lookup?.leave();
+			leaveLook(lookup.stage);
 			return false;
 		});
 		for (const { time, floor } of wanted) {
 			if (this.#lookups.some((lookup) => lookup.time === time)) continue;
 			// With no handler open any more, nothing can answer.
 			const lookup = producer && fillsOf(producer).timeStart(time, floor, this.#askerOf());
-			this.#lookups.push({ time, floor, lookup });
+			const below = producer && belowFloor(producer, floor);
+			this.#lookups.push({ time, floor, stage: { kind: "asked", lookup, below } });
 		}
 		let moved = false;
 		let again = false;
 		for (const lookup of [...this.#lookups]) {
-			const answer = lookup.lookup?.answer();
-			if (answer === undefined && lookup.lookup && !lookup.lookup.done()) continue;
+			const { time, stage } = lookup;
+			let found: Found = { kind: "unanswered" };
+			let start: bigint | Error | undefined;
+			if (stage.kind === "placing") {
+				start = probed(stage.probe, time);
+				if (start === undefined) continue;
+			} else {
+				const answer = stage.lookup?.answer();
+				if (answer === undefined && stage.lookup && !stage.lookup.done()) continue;
+				stage.lookup?.leave();
+				// A group answered below the time, or the one below a floor no group starts from, may end
+				// whole before the time, which then lies in the pause past it: its span places the time,
+				// read through a probe of the lookup's own. Mirrors the Rust `Cursor::look_up_pass`.
+				const placing =
+					answer?.kind === "group" && answer.group < time
+						? answer.answer && { key: answer.group, group: answer.answer }
+						: answer?.kind === "dropped"
+							? stage.below
+							: undefined;
+				if (placing) {
+					const probe = { ...placing, reader: placing.group.consume() };
+					lookup.stage = { kind: "placing", probe };
+					start = probed(probe, time);
+					if (start === undefined) continue;
+				} else if (answer?.kind === "refused") start = answer.error;
+				else if (answer?.kind === "group") start = answer.group;
+				// No group from the floor and none held below it: from 0, before every group; otherwise
+				// the group the floor was past is gone, so look again from lower down rather than guess.
+				else if (answer?.kind === "dropped" && lookup.floor === 0n) found = { kind: "dropped", floor: 0n };
+			}
 			this.#lookups.splice(this.#lookups.indexOf(lookup), 1);
-			lookup.lookup?.leave();
-			// Where the time falls is unknown, so the reads fail rather than guess from the cache. The
-			// ranges resolve afresh once they change, asking again.
-			if (answer?.kind === "refused") {
-				this.#refusal = answer.error;
+			leaveLook(lookup.stage);
+			// Refused, or the group placing it aborted first: where the time falls is unknown, so the
+			// reads fail rather than guess from the cache. The ranges resolve afresh once they change,
+			// asking again.
+			if (start instanceof Error) {
+				this.#refusal = start;
 				return { moved: true, again: false };
 			}
-			const found: Found =
-				answer === undefined
-					? { kind: "unanswered" }
-					: answer.kind === "group"
-						? answer
-						: { kind: "dropped", floor: lookup.floor };
-			if (this.#window.found(lookup.time, found, this.#holdings())) moved = true;
-			if (this.#window.lookups().some((want) => want.time === lookup.time)) again = true;
+			if (start !== undefined) found = { kind: "group", group: start };
+			if (this.#window.found(time, found, this.#holdings())) moved = true;
+			if (this.#window.lookups().some((want) => want.time === time)) again = true;
 		}
 		return { moved, again };
 	}
@@ -4138,6 +4421,7 @@ export class Subscriber {
 		this.#judgedAt = undefined;
 		// A fill this reader alone waited on for a group it no longer reads is withdrawn.
 		this.#fillsMoved();
+		this.#letGoKeptOut();
 	}
 
 	// The parts of `[start, end)` this reader still reads: inside its cursor and window, not
@@ -4186,17 +4470,9 @@ export class Subscriber {
 		this.#state.asker ??= {
 			wants: (start, end) => this.#wants(start, end),
 			priority: () => this.#state.update.scalars()?.priority ?? 0,
-			maxDelay: () => this.#drift().budget,
 			order: () => this.#state.update.scalars()?.order ?? "descending",
-			refuse: (start, end, error, stale) => {
-				// A budget's verdict is no eviction: a widening asks it afresh, never through the
-				// one refill an evicted answer is allowed, as the Rust `Misses::resolve` retries it.
-				if (stale !== undefined) {
-					this.#asked = removeRun(this.#asked, start, end);
-					this.#refilled = removeRun(this.#refilled, start, end);
-					insertRun(this.#unjudged, start, end);
-				}
-				this.#state.refused.update((runs) => insertDrop(runs, start, end, { error, stale, own: true }));
+			refuse: (start, end, error) => {
+				this.#state.refused.update((runs) => insertDrop(runs, start, end, { error, own: true }));
 			},
 		};
 		return this.#state.asker;
@@ -4218,7 +4494,8 @@ export class Subscriber {
 			const asker = this.#askerOf();
 			// A moving read floor retires only its prefix: what lies above it stays asked.
 			const read = max(this.#cursor.peek().start, this.#nextKey);
-			for (const runs of [this.#asked, this.#refilled, this.#givenUp, this.#heads]) cutRun(runs, 0n, read);
+			for (const runs of [this.#asked, this.#givenUp, this.#heads]) cutRun(runs, 0n, read);
+			cutRun(this.#adopted, 0n, read);
 			const budget = drift.budget;
 			const coverage = this.#coverage();
 			this.#reopen(producer, fills, budget, coverage);
@@ -4264,7 +4541,14 @@ export class Subscriber {
 					)) {
 						// Judged from where it meets the asked run, as the reader would read it.
 						const clipped = { ...dropped, start: max(dropped.start, run.start) };
-						if (settles(clipped, budget, coverage)) insertRun(gone, clipped.start, dropped.end);
+						if (!settles(clipped, budget, coverage)) continue;
+						insertRun(gone, clipped.start, dropped.end);
+						// The track's drop, kept as this reader's own verdict; its own fill's refusal is one already.
+						if (!dropped.own) this.#adopt(clipped.start, min(dropped.end, run.end), dropped);
+					}
+					// What this reader gave up before, though the track forgot the drop that settled it.
+					for (const verdict of intersectDrops(this.#adopted, run.start, run.end)) {
+						if (settles(verdict, budget, coverage)) insertRun(gone, verdict.start, verdict.end);
 					}
 					for (const open of runGaps(gone, run.start, run.end)) {
 						let next = open.start;
@@ -4288,14 +4572,20 @@ export class Subscriber {
 		// a stale run is given up, and gives way to a later one the budget still wants.
 		let owed: bigint | undefined;
 		const stale: Run[] = [];
-		for (const run of fills.covered(start, end, asker)) {
+		for (const covered of fills.covered(start, end, asker)) {
 			drift ??= this.#drift();
-			if (this.#staleAt(run.end - 1n, drift, true)) {
-				stale.push(run);
-				continue;
+			// Starts never rewind, so a stretch under one budget whose newest group is stale under it
+			// is stale throughout.
+			for (const [run] of drift.budget.runs(covered.start, covered.end)) {
+				if (this.#staleAt(run.end - 1n, drift, true)) {
+					stale.push(run);
+					continue;
+				}
+				owed = run.start;
+				break;
 			}
+			if (owed === undefined) continue;
 			this.#fillWait = true;
-			owed = run.start;
 			break;
 		}
 		if (stale.length > 0) {
@@ -4312,7 +4602,7 @@ export class Subscriber {
 	// was judged under change, else the drop runs changed or forgotten, the groups the timeline
 	// lost with the gaps they were successor to, and what the received edge rose over, which
 	// arrives live no more.
-	#reopen(producer: Producer, fills: FillState, budget: number, coverage: Coverage): void {
+	#reopen(producer: Producer, fills: FillState, budget: Budget, coverage: Coverage): void {
 		const state = this.#state;
 		const at = this.#judgedAt;
 		const edge = max(state.received.peek(), (fillEdge(producer) ?? -1n) + 1n);
@@ -4323,7 +4613,7 @@ export class Subscriber {
 			!removed ||
 			!state.lost ||
 			at.producer !== producer ||
-			at.budget !== budget ||
+			!budget.equals(at.budget) ||
 			!sameCoverage(at.coverage, coverage) ||
 			at.opened !== opened
 		) {
@@ -4365,12 +4655,15 @@ export class Subscriber {
 	// that far back, the memo is rebuilt, at most once per a live set's worth of removals. A later start only narrows what a run asks the
 	// reader to read, so a run that settles here settles clipped too. Mirrors the Rust
 	// `Misses::unknown`.
-	#unknownRuns(budget: number, coverage: Coverage): readonly DropRun[] {
+	#unknownRuns(budget: Budget, coverage: Coverage): readonly DropRun[] {
 		const { drops } = this.#state;
 		const unsettled = (run: DropRun) => !settles(run, budget, coverage);
 		const memo = this.#unknown;
 		const removed =
-			memo && memo.budget === budget && sameCoverage(memo.coverage, coverage) && drops.removedSince(memo.drops);
+			memo &&
+			budget.equals(memo.budget) &&
+			sameCoverage(memo.coverage, coverage) &&
+			drops.removedSince(memo.drops);
 		if (memo && removed) {
 			if (memo.drops === drops.revision) return memo.runs;
 			// Updated in place: its one caller is done with the last answer.
@@ -4419,36 +4712,43 @@ export class Subscriber {
 		return this.#askFills(this.#cursor.peek().start, UNBOUNDED, drift);
 	}
 
-	// Ask a fill for the missed run `[start, end)`, unless its newest group is stale: what was
-	// never asked, and once more what was asked but is missed again.
+	// Ask a fill for the missed run `[start, end)`, but for each stretch under one budget whose
+	// newest group is stale: what was never asked, and again what was asked but is missed again.
 	#askMiss(start: bigint, end: bigint, drift: Drift, asker: Asker): void {
-		if (start >= end || this.#staleAt(end - 1n, drift)) return;
-		const fills = fillsOf(this.#state.producer as Producer);
-		// Asked before and missed again, unless a fill still brings it: its answer was evicted
-		// before this reader took it.
+		for (const [run] of drift.budget.runs(start, end)) {
+			if (!this.#staleAt(run.end - 1n, drift)) this.#askRun(run.start, run.end, asker);
+		}
+	}
+
+	// Ask a fill for the missed run `[start, end)`: what was never asked, and again what was asked
+	// but is missed again.
+	#askRun(start: bigint, end: bigint, asker: Asker): void {
+		const producer = this.#state.producer as Producer;
+		const fills = fillsOf(producer);
+		// Asked before and missed again, unless a fill still brings it.
 		const again = intersect(this.#asked, start, end).flatMap((run) =>
-			runGaps(this.#refilled, run.start, run.end).flatMap((refill) =>
-				runGaps([...fills.covered(refill.start, refill.end, asker)], refill.start, refill.end),
-			),
+			runGaps([...fills.covered(run.start, run.end, asker)], run.start, run.end),
 		);
 		// Only what a fill took counts as asked: with no handler open, a miss no fill covers is
 		// left to ask once one opens.
 		for (const gap of runGaps(this.#asked, start, end)) {
 			for (const run of fills.ask(gap.start, gap.end, asker)) insertRun(this.#asked, run.start, run.end);
 		}
-		// Refilled and missed again, unless a fill still brings it: given up and named, never
-		// asked a third time, as the Rust `Misses` gives up a refill evicted again.
-		const lost = intersect(this.#refilled, start, end).flatMap((run) =>
-			runGaps([...fills.covered(run.start, run.end, asker)], run.start, run.end),
-		);
-		for (const refill of again) {
-			for (const run of fills.ask(refill.start, refill.end, asker)) insertRun(this.#refilled, run.start, run.end);
+		// An answer that failed is still cached, failed, and given up: asking again would repeat a
+		// source's failure without end. One evicted before this reader took it is asked again however
+		// often. Mirrors the Rust `Misses::next_filled`.
+		const failed: Run[] = [];
+		for (const run of again) {
+			for (const key of cachedIn(producer, run.start, run.end)) {
+				if (!cachedHolds(producer, key)) insertRun(failed, key, key + 1n);
+			}
+			for (const lost of runGaps(failed, run.start, run.end)) fills.ask(lost.start, lost.end, asker);
 		}
-		for (const run of lost) {
+		for (const run of failed) {
 			insertRun(this.#givenUp, run.start, run.end);
-			asker.refuse(run.start, run.end, new StreamError(StreamCode.NotFound, { message: "group evicted again" }));
+			asker.refuse(run.start, run.end, new StreamError(StreamCode.NotFound, { message: "fill answer failed" }));
 		}
-		if (lost.length > 0) this.#fillsMoved(lost);
+		if (failed.length > 0) this.#fillsMoved(failed);
 	}
 
 	// Whether `group` is one this reader hands out only from its first frame, which it lacks: the
@@ -4530,8 +4830,9 @@ export class Subscriber {
 	// Whether this reader accounts for every key of `gaps` it did not hand out itself: each was
 	// dropped, or never will be, as one skipped as stale, one below where the feed started, or a
 	// hole the feed no longer owes, or lies outside its window, which it never reads. An open
-	// window, or one with a fill still out, accounts for nothing yet, and a key the cap keeps out
-	// stays owed, since the reader may raise it again.
+	// window, or one with a fill still out, accounts for nothing yet, and a key the local floor or
+	// cap keeps out stays owed, since the reader may move them again, until the track proves it
+	// gone: one the feed no longer owes and nothing proves is asked of a fill (see #askKeptOut).
 	// A local producer may still create any group it did not skip, so only an `ordered` read,
 	// which hands out the group it created above a hole before any created later below, passes
 	// that hole. Mirrors the Rust `Cursor::accounts`.
@@ -4550,6 +4851,7 @@ export class Subscriber {
 		const budget = this.#drift().budget;
 		const coverage = this.#coverage();
 		const { drops: all, refused } = this.#state;
+		const unproven: Run[] = [];
 		const lacking = gaps
 			.flatMap((gap) => this.#window.runs(gap.start, min(gap.end, end)))
 			.flatMap((gap) => this.#delivered.gaps(gap.start, gap.end));
@@ -4575,8 +4877,8 @@ export class Subscriber {
 				const under = { start: max(open.start, this.#nextKey), end: min(open.end, cursor.start) };
 				if (producer && under.start < under.end && cachedIn(producer, under.start, under.end).length > 0)
 					return false;
-				// Not received yet, so it may still arrive; a local producer may still create it.
-				if (open.end > received || (local && !ordered)) return false;
+				// Not received yet, so it may still arrive.
+				if (open.end > received) return false;
 				// Held, so a read still hands it out, skips it, or waits for the cap to rise.
 				const index = timelineIndex(held, open.start);
 				if (held[index] && held[index].start < open.end) return false;
@@ -4585,9 +4887,149 @@ export class Subscriber {
 					if (owed.folds !== undefined) this.#wakeAt(owed.folds.since(Instant.ZERO).asNanos());
 					return false;
 				}
+				// A local producer may still create a key this reader reads.
+				const read = { start: max(open.start, cursor.start), end: min(open.end, cursor.end ?? UNBOUNDED) };
+				if (local && !ordered && read.start < read.end) return false;
+				// One the cursor keeps out is unknown to it once the feed no longer waits for it,
+				// however the track came to forget it.
+				for (const out of runGaps([read], open.start, open.end)) {
+					// A local producer's ledger may still wait for it, as a wire feed's owes it above.
+					for (const awaited of local && producer ? awaitedRuns(producer, out.start, out.end) : []) {
+						if (awaited.folds !== undefined) this.#wakeAt(awaited.folds.since(Instant.ZERO).asNanos());
+						return false;
+					}
+					insertRun(unproven, out.start, out.end);
+				}
 			}
 		}
-		return true;
+		return this.#askKeptOut(unproven);
+	}
+
+	// Whether nothing of `unproven`, the kept-out keys #accounts found nothing to prove, is still
+	// owed. The rest is asked of a fill once, as for any key the cache cannot answer: its upstream's
+	// skip accounts for it, and a group it brings stays owed, held. One no fill takes, or that a
+	// fill refused or ended without proving, is given up, as a read under a lowered floor or raised
+	// cap would give it up. A key the track proved and later forgot, as its expiry window does, is
+	// asked again. Mirrors the Rust `Cursor::ask_kept_out`.
+	#askKeptOut(unproven: Run[]): boolean {
+		if (unproven.length === 0 && !this.#keptOut) return true;
+		this.#keptOut ??= this.#keptOutOf();
+		return this.#askUnproven(this.#keptOut, unproven).length === 0;
+	}
+
+	// Ask `kept`'s fills for the keys of `unproven` it has not asked yet, withdrawing what it no
+	// longer wants, and return the keys still out: the rest is given up.
+	#askUnproven(kept: KeptOut, unproven: Run[]): Run[] {
+		const producer = this.#state.producer;
+		if (!producer) return [];
+		const fills = fillsOf(producer);
+		const drift = this.#drift();
+		// A wider budget asks again what a narrower one gave up as stale.
+		const stale = kept.stale.length;
+		kept.stale = kept.stale.filter((run) =>
+			drift.budget.runs(run.start, run.end).every(([, budget]) => budget <= run.budget),
+		);
+		// What was proved since leaves what was asked, so a key forgotten again asks afresh.
+		const moved =
+			stale !== kept.stale.length ||
+			unproven.length !== kept.unproven.length ||
+			unproven.some((run, i) => run.start !== kept.unproven[i].start || run.end !== kept.unproven[i].end);
+		kept.asked = unproven.flatMap((run) => intersect(kept.asked, run.start, run.end));
+		kept.unproven = unproven;
+		// A fill nobody wants any more is withdrawn.
+		if (moved) fills.moved(kept.asker);
+		// Starts never rewind, so a stretch under one budget whose newest group is stale under it is
+		// given up whole: unasked, or withdrawn from the fill still out for it, as `#askFills` gives up
+		// an owed run.
+		const giveUp = (run: Run, budget: number) => {
+			kept.asked = removeRun(kept.asked, run.start, run.end);
+			insertStale(kept.stale, run.start, run.end, budget);
+			fills.moved(kept.asker, run.start, run.end);
+		};
+		for (const run of unproven) {
+			for (const gap of runGaps(keptDone(kept), run.start, run.end)) {
+				for (const [part, budget] of drift.budget.runs(gap.start, gap.end)) {
+					if (this.#staleAt(part.end - 1n, drift, true)) {
+						giveUp(part, budget);
+						continue;
+					}
+					for (const asked of fills.ask(part.start, part.end, kept.asker))
+						insertRun(kept.asked, asked.start, asked.end);
+				}
+			}
+		}
+		const out: Run[] = [];
+		for (const run of unproven) {
+			for (const covered of [...fills.covered(run.start, run.end, kept.asker)]) {
+				for (const [part, budget] of drift.budget.runs(covered.start, covered.end)) {
+					if (this.#staleAt(part.end - 1n, drift, true)) giveUp(part, budget);
+					else insertRun(out, part.start, part.end);
+				}
+			}
+		}
+		return out;
+	}
+
+	// The end of this read: nothing reads the kept-out keys now, so their fills are withdrawn, and a
+	// read polled again asks anew. Mirrors the Rust cursor dropping `kept_out` as its feed ends.
+	#done(): Recv {
+		this.#withdraw(this.#keptOut);
+		return { kind: "done" };
+	}
+
+	// Let go of the kept-out keys asked about, withdrawing the fills nobody else waits on, once what
+	// this reader reads moved: what is still owed is found and asked again once the read would
+	// otherwise end, and a window no longer bounded owes none. Mirrors the Rust
+	// `Cursor::let_go_kept_out`.
+	#letGoKeptOut(): void {
+		this.#withdraw(this.#keptOut);
+		this.#withdraw(this.#routedOut);
+	}
+
+	// Forget what `kept` asked about, withdrawing the fills nobody else waits on.
+	#withdraw(kept: KeptOut | undefined): void {
+		const producer = this.#state.producer;
+		if (!kept || !producer) return;
+		kept.unproven = [];
+		kept.asked = [];
+		kept.stale = [];
+		fillsOf(producer).moved(kept.asker);
+	}
+
+	// The parts of `runs` the cache holds nothing for and the feed no longer waits for, waking this
+	// reader when the next gap it waits for folds: what a fill may be asked, as the Rust
+	// `Misses::judge` asks a miss.
+	#unfed(producer: Producer, runs: readonly Run[]): Run[] {
+		const unfed: Run[] = [];
+		for (const run of runs) {
+			const fed: Run[] = cachedIn(producer, run.start, run.end).map((key) => ({ start: key, end: key + 1n }));
+			for (const awaited of awaitedRuns(producer, run.start, run.end)) {
+				if (awaited.folds !== undefined) this.#wakeAt(awaited.folds.since(Instant.ZERO).asNanos());
+				insertRun(fed, awaited.start, awaited.end);
+			}
+			for (const gap of runGaps(fed, run.start, run.end)) insertRun(unfed, gap.start, gap.end);
+		}
+		return unfed;
+	}
+
+	// A `KeptOut` whose asker wants only the keys it was asked about last that it has not given up
+	// as stale, and whose refusal wakes the read to give them up.
+	#keptOutOf(): KeptOut {
+		const main = this.#askerOf();
+		const kept: KeptOut = {
+			asker: {
+				wants: (start, end) =>
+					intersect(kept.unproven, start, end).flatMap((run) => runGaps(kept.stale, run.start, run.end)),
+				priority: () => main.priority(),
+				order: () => main.order(),
+				refuse: () => this.#fillMoves.update((moves) => moves + 1),
+			},
+			unproven: [],
+			asked: [],
+			stale: [],
+		};
+		this.#state.keptOut.push(kept.asker);
+		return kept;
 	}
 
 	static {
@@ -4603,11 +5045,20 @@ export class Subscriber {
 		};
 		hooks.skippedBelow = (subscriber, key) =>
 			subscriber.#resume ? subscriber.#resume.skippedBelow(key) : skippedBelow(subscriber.#state, key);
+		hooks.knowsEdge = (subscriber) => {
+			if (subscriber.#resume) return subscriber.#resume.knowsEdge();
+			const producer = subscriber.#state.producer;
+			return !producer || knowsEdge(producer);
+		};
 		hooks.sourceStart = (subscriber) => {
 			if (subscriber.#resume) return subscriber.#resume.start();
 			// A live join still pending reads every group, so a fill asked below would claim
 			// the history it never names. Mirrors the Rust `cursor.sync()` in `poll_start`.
 			subscriber.#settle();
+			// A live join still waiting to be placed has no start yet, and a start answered before it
+			// names none for it for good. A closed track places it at once, as nothing more arrives.
+			// Mirrors the Rust `poll_start`.
+			if (subscriber.#window.reaching && subscriber.#state.closed.peek() === undefined) return "pending";
 			const producer = subscriber.#state.producer;
 			const start = producer && sourceStart(producer);
 			if (start === "pending") return start;
@@ -4617,6 +5068,11 @@ export class Subscriber {
 			const filling = subscriber.#filling();
 			if (filling === undefined) return floor;
 			return floor === undefined ? filling : min(floor, filling);
+		};
+		hooks.placesAsUpstream = (subscriber) => {
+			if (subscriber.#resume) return subscriber.#resume.placesAsUpstream();
+			const producer = subscriber.#state.producer;
+			return producer !== undefined && receivedCopy(producer) && !subscriber.#state.dropsAnchors.peek();
 		};
 		hooks.tryRecvGroup = (subscriber, dispositions) => subscriber.#tryRecvGroup(dispositions);
 		hooks.parked = (subscriber) => {
@@ -4643,6 +5099,17 @@ export class Subscriber {
 				.filter((run) => run.skip)
 				.map((run) => ({ start: max(run.start, start), end: min(run.end, end) }));
 		hooks.tryDrop = (subscriber) => subscriber.#tryDrop();
+		// Mirrors the Rust `Subscriber::ask_unproven`: a copy that is another front's logical track
+		// asks its serving copy the same way, one level per nesting.
+		hooks.askUnproven = (subscriber, unproven) => {
+			if (subscriber.#resume) return subscriber.#resume.askUnproven(unproven);
+			const producer = subscriber.#state.producer;
+			if (!producer) return [];
+			subscriber.#routedOut ??= subscriber.#keptOutOf();
+			const unfed = subscriber.#unfed(producer, unproven);
+			const out = subscriber.#askUnproven(subscriber.#routedOut, unfed);
+			return unfed.flatMap((run) => runGaps(out, run.start, run.end));
+		};
 		// A reader following route copies leaves its ranges to the serving copy, which resolves
 		// their anchors against the groups it holds, then narrows them to its own local bounds.
 		hooks.gapHeld = (subscriber, at, end) => subscriber.#gapHeld(at, end);
@@ -4658,6 +5125,7 @@ export class Subscriber {
 			const end = subscriber.#resume.servingEnd();
 			return end === undefined ? undefined : min(end, cursor.end ?? end);
 		};
+		hooks.joinStart = (subscriber, placed, budget) => subscriber.#joinStart(placed, budget);
 		hooks.servingStarts = (subscriber, from) => {
 			const resumed = subscriber.#resume?.starts(from);
 			if (resumed) return resumed;
@@ -4687,19 +5155,18 @@ export class Subscriber {
 			return keys.map((key) => subscriber.#window.resolvedKey(key));
 		};
 		hooks.editSubscriber = (subscriber, edit) => subscriber.#edit(edit);
+		hooks.restateSubscriber = (subscriber, subscription) => subscriber.#update(subscription, false);
 		hooks.stampSubscriber = (subscriber, since) => subscriber.#stamp(since);
 		hooks.preferences = (subscriber) => subscriber.#state.update;
 		hooks.resolveRanges = (subscriber, subscription) => {
 			// A preview never takes an answer recorded before it: the live edge has moved since.
 			const tick = joinTick();
 			const ranges = (subscription.ranges ?? [{}]).map((range, index) => [BigInt(index), range] as const);
-			return Window.keyed(
-				ranges,
-				subscriber.#latestGroup(),
-				subscriber.#holdings(),
-				NO_MAX_DELAY,
-				() => tick,
-			).resolved();
+			const joining = (key: bigint): Joining => {
+				const at = subscription.placed?.get(Number(key));
+				return at === undefined ? { since: tick } : { at };
+			};
+			return Window.keyed(ranges, subscriber.#latestGroup(), subscriber.#holdings(), joining).resolved();
 		};
 		hooks.tryNextGroup = (subscriber, floor) => {
 			subscriber.#raiseNext(floor);
@@ -4709,12 +5176,31 @@ export class Subscriber {
 			if (ordered) subscriber.#raiseNext(floor);
 			return subscriber.#peekGroup(ordered);
 		};
-		hooks.forgetPastBudget = (subscriber, delivered) => subscriber.#forgetPastBudget(delivered);
+		hooks.forgetPastBudget = (subscriber, delivered, budget) => {
+			if (subscriber.#resume) subscriber.#resume.forgetPast(delivered, budget);
+			else subscriber.#forgetPastBudget(delivered, budget);
+		};
 		hooks.fold = (subscriber, at) => subscriber.#fold(at);
 		hooks.wire = (subscriber) => subscriber.#wireRecord();
 		hooks.deliveredRuns = (subscriber) => subscriber.#delivered.runs;
 		hooks.reportedRuns = (subscriber) => subscriber.#reported.size;
 		hooks.handedOut = (subscriber, key) => subscriber.#delivered.has(key);
+		hooks.taking = (subscriber) => {
+			// One staleness verdict for the whole walk, as the Rust `Subscriber::taking` takes.
+			const drift = subscriber.#resume ? undefined : subscriber.#drift();
+			return (key) => {
+				if (drift) {
+					if (key < subscriber.#nextKey) return false;
+					// Stale under the current budget, it is skipped when reached or already was, which
+					// stays so after the groups that convicted it leave: only a wider budget offers it
+					// again, and at the track's max age bound none does.
+					const judged = subscriber.#skipped.get(key);
+					if (judged !== undefined && judged >= drift.budget.at(key)) return false;
+					if (subscriber.#staleAt(key, drift)) return false;
+				}
+				return subscriber.#nextInRange(key) === key && !subscriber.#delivered.has(key);
+			};
+		};
 		hooks.hasUnreadGroup = (subscriber, start, end, delivered) =>
 			subscriber.#state.groups
 				.peek()
@@ -4729,12 +5215,16 @@ export class Subscriber {
 			(subscriber.#state.closed.peek() !== undefined || subscriber.#complete()) &&
 			!hooks.hasUnreadGroup(subscriber, start, end, delivered);
 		hooks.awaitsFill = (subscriber) => subscriber.#fillWait;
-		hooks.staleAt = (subscriber, key, budget, within) => {
+		hooks.staleAt = (subscriber, key, fetched, within) => {
 			const held: Superseded = {};
-			let drift = budget === undefined ? () => subscriber.#drift() : () => subscriber.#driftWithin(budget);
+			let drift = fetched ? () => subscriber.#driftFetched() : () => subscriber.#drift();
 			let changed = subscriber.#expiryChanged();
 			if (within) {
-				drift = () => subscriber.#drift(within.contains, within.end());
+				// Judged under the logical reader's budget, as the Rust `Recover::poll_budget` gives it.
+				drift = () => {
+					const own = subscriber.#drift(within.contains, within.end());
+					return { ...own, budget: within.budget().clamped(own.bound) };
+				};
 				changed = [...changed, ...within.changed];
 			}
 			return {
@@ -4807,6 +5297,7 @@ export class Subscriber {
 			subscriber.#resume = source({
 				subscription: state.update,
 				since: () => Array.from(state.update.entries(), ([key]) => state.update.since(key)),
+				retuned: () => state.update.retuned,
 				cursor: subscriber.#cursor,
 				closed: state.closed,
 				info: () => state.info.peek(),
@@ -4871,8 +5362,8 @@ export class Subscriber {
 		};
 		hooks.groupChanged = (subscriber, fn) => subscriber.#groupChanged(fn);
 		hooks.askFetch = (subscriber, key) => subscriber.#askFetch(key);
-		hooks.fetchBudget = (subscriber, maxDelay, frameStart = 0) => {
-			subscriber.#fetchBudget = maxDelay?.asMillis() ?? Number.POSITIVE_INFINITY;
+		hooks.fetchFrom = (subscriber, frameStart = 0) => {
+			subscriber.#fetch = true;
 			subscriber.#fetchFrom = frameStart;
 			subscriber.#state.fetch = true;
 			// Its group resolves by start now; see `#holdings`.
@@ -5134,6 +5625,9 @@ export class Subscriber {
 		if (this.#items?.held) hooks.releaseGroupReader(this.#items.held, abort);
 		if (this.#items) this.#items.held = undefined;
 		this.#state.timeline.length = 0;
+		// A lookup still out holds a fill, or a probe whose reader keeps its group wanted.
+		for (const { stage } of this.#lookups) leaveLook(stage);
+		this.#lookups = [];
 		this.#wall.timer?.abort();
 		this.#wall.timer = undefined;
 		// A deadline kept in #arrivals may still arm a wakeup.
@@ -5157,8 +5651,8 @@ export class Subscriber {
 	 * later reads return `undefined` immediately too, and widening the ranges with {@link update}
 	 * reads on without replaying groups already returned. A cap keeping a group out holds it
 	 * open, since the cap may rise.
-	 * A group whose presentation time is further behind the live edge than this
-	 * subscriber's `delay.max` is skipped. The default subscription's zero takes the live edge.
+	 * A group a live range reached whose presentation time is further behind the live edge than
+	 * that range's {@link Live.max} is skipped. The default subscription's zero takes the live edge.
 	 * The budget remains attached after return, so a pending frame read rejects if a stalled
 	 * group becomes stale while newer data advances.
 	 *
@@ -5243,7 +5737,7 @@ export class Subscriber {
 				// A group expired under this subscription's budget is a stale verdict.
 				const hole =
 					toStreamCode(failed) === StreamCode.Old
-						? { ...staleHole(drift.budget), error: failed }
+						? { ...staleHole(drift.budget.at(group.start)), error: failed }
 						: { error: failed };
 				const dropped = this.#report(group.start, group.start + 1n, hole);
 				if (dropped) return dropped;
@@ -5255,16 +5749,20 @@ export class Subscriber {
 			}
 			if (this.#staleAt(group.start, drift)) {
 				group.close();
-				// A re-offered group stale at the bound is final.
-				if (drift.bounded) this.#skipped.delete(group.start);
-				else this.#skip(group.start, drift.budget);
+				const budget = drift.budget.at(group.start);
+				let dropped: (Recv & { kind: "drop" }) | undefined;
 				if (dispositions) {
-					const dropped = this.#report(group.start, group.start + 1n, staleHole(drift.budget));
-					if (dropped) return dropped;
+					dropped = this.#report(group.start, group.start + 1n, staleHole(budget));
 				} else if (this.#dropsSeen) {
 					// A cursor #tryDrop reads reports it there.
-					this.#pending = insertDrop(this.#pending, group.start, group.start + 1n, staleHole(drift.budget));
+					this.#pending = insertDrop(this.#pending, group.start, group.start + 1n, staleHole(budget));
 				}
+				// Stale at the bound is final: settled as handed out, compacted the same way, as the
+				// Rust `retire_written_off` does, so nothing counts on this reader to hand it out once
+				// what convicted it leaves.
+				if (drift.bound !== undefined && budget >= drift.bound) this.#handOut(group.start, false);
+				else this.#skip(group.start, budget);
+				if (dropped) return dropped;
 				continue;
 			}
 			// A group missing its head comes from the fill asked for it, in its turn.
@@ -5283,16 +5781,17 @@ export class Subscriber {
 		const closed = this.#state.closed.peek();
 		if (closed instanceof Error) return { kind: "error", error: closed };
 		// A clean close completes this range, retaining groups a later cap raise can read.
-		if (closed !== undefined) return { kind: "done" };
+		if (closed !== undefined) return this.#done();
 		// Nothing buffered: ask a fill for what this reader misses, and wait while one owes it.
 		if (this.#askFills(start, end ?? UNBOUNDED, drift) !== undefined) return { kind: "idle" };
 		// A time start still looked up may yet take in a group held already.
 		if (this.#window.lookups().length > 0) return { kind: "idle" };
 		// A bounded window ends once nothing in it is left to deliver, as in Rust.
+		// Exhausted, nothing kept out is still asked, and what was given up stays given up.
 		if (this.#exhausted()) return { kind: "done" };
 		if (!this.#complete() || this.#starting(groups)) return { kind: "idle" };
 		// An open track can still raise the cap. Keep the groups beyond it.
-		return this.#parked(groups) ? { kind: "boundary" } : { kind: "done" };
+		return this.#parked(groups) ? { kind: "boundary" } : this.#done();
 	}
 
 	// The first part of `[from, to)` this cursor has not reported yet within its window, now
@@ -5314,28 +5813,8 @@ export class Subscriber {
 		const blocked = this.#reported.overlapping(start, to).filter((reported) => blocksHole(reported, hole));
 		const [gap] = runGaps(blocked, start, to);
 		if (!gap) return undefined;
-		const ownStale = hole.own && !hole.skip ? hole.stale : undefined;
-		this.#reported.set(gap.start, gap.end, { ...gap, kind: hole.skip ? "skip" : "dropped", ownStale });
+		this.#reported.set(gap.start, gap.end, { ...gap, kind: hole.skip ? "skip" : "dropped" });
 		return { kind: "drop", ...gap, error: hole.error, skip: hole.skip, stale: hole.stale };
-	}
-
-	// Take back the gaps an ordered read has yet to return for its own fills' refusals judged stale
-	// under a budget narrower than `budget`: a drop judged so never settles a wider reader, so it
-	// asks them again. A gap it returned stands, as does whatever a wire publisher told its wire.
-	// Read off the record, not the refusals: a group arriving and then failing takes its key out
-	// of the refusal while the gap stays queued. Mirrors the Rust `Cursor::rejudge`.
-	#withdraw(budget: number): void {
-		const items = this.#items;
-		if (!items || this.#wired) return;
-		for (const gap of [...items.gaps]) {
-			for (const told of this.#reported.overlapping(gap.start, gap.end)) {
-				if (told.kind !== "dropped" || told.ownStale === undefined || budget <= told.ownStale) continue;
-				const from = max(told.start, gap.start);
-				const to = min(told.end, gap.end);
-				this.#reported.set(from, to);
-				items.gaps = removeRun(items.gaps, from, to);
-			}
-		}
 	}
 
 	// The next run this cursor gave up and has not reported, without taking a group. From the
@@ -5368,11 +5847,10 @@ export class Subscriber {
 			seen.start !== start ||
 			seen.end !== end ||
 			seen.revision !== revision ||
-			seen.budget !== budget ||
+			!budget.equals(seen.budget) ||
 			!sameCoverage(seen.coverage, coverage);
 		const changed: Run[] = full ? [{ start, end: end ?? UNBOUNDED }] : drops.since(seen.drops);
 		if (full) this.#pending = this.#pending.filter((run) => !run.received);
-		if (seen && budget > seen.budget) this.#withdraw(budget);
 		this.#dropsSeen = {
 			drops: drops.revision,
 			refused: refused.peek(),
@@ -5515,7 +5993,13 @@ export class Subscriber {
 			this.#state.drops.version.changed(fn),
 			this.#state.refused.changed(fn),
 			this.#fillMoves.changed(fn),
-			...this.#lookups.flatMap((lookup) => (lookup.lookup ? [lookup.lookup.changed.changed(fn)] : [])),
+			...this.#lookups.flatMap(({ stage }) =>
+				stage.kind === "asked"
+					? stage.lookup
+						? [stage.lookup.changed.changed(fn)]
+						: []
+					: [stage.probe.group.closed.changed(fn), hooks.groupWrites(stage.probe.group).changed(fn)],
+			),
 			// A handler opening takes a miss nobody could ask before.
 			...(producer ? [fillsOf(producer).opened.changed(fn)] : []),
 			this.#state.startChanged.changed(fn),
@@ -5820,9 +6304,21 @@ export class Subscriber {
 				settles(drop, drift.budget, coverage),
 			).filter((drop) => settles({ ...drop, start: max(drop.start, run.start) }, drift.budget, coverage));
 			for (const passed of runGaps(settled, run.start, run.end)) {
-				this.#giveUp(passed, staleHole(drift.budget));
+				for (const [part, budget] of drift.budget.runs(passed.start, passed.end)) {
+					this.#giveUp(part, staleHole(budget));
+				}
 			}
 		}
+	}
+
+	// Hold `[start, end)` as given up by `drop`, its stale budget included, so it is never asked again
+	// unless a budget wider than that takes it back. Mirrors the Rust `Misses::hold_verdict`.
+	#adopt(start: bigint, end: bigint, drop: Hole): void {
+		if (start >= end) return;
+		const hole: Hole = { error: drop.error };
+		if (drop.skip) hole.skip = true;
+		if (drop.stale !== undefined) hole.stale = drop.stale;
+		this.#adopted = insertDrop(this.#adopted, start, end, hole);
 	}
 
 	// Keep a run the key cursor gave up, once the drop record started, so a read reports it.
@@ -5841,12 +6337,13 @@ export class Subscriber {
 				insertRun(runs, drop.start, drop.end);
 			}
 		}
-		// A refusal judged stale under a narrower budget is asked again once this reader widened.
 		for (const run of this.#state.refused.peek()) {
-			if (run.stale !== undefined && drift.budget > run.stale) continue;
 			if (run.start < end && start < run.end) insertRun(runs, run.start, run.end);
 		}
 		for (const run of intersect(this.#givenUp, start, end)) insertRun(runs, run.start, run.end);
+		for (const verdict of intersectDrops(this.#adopted, start, end)) {
+			if (settles(verdict, drift.budget, coverage)) insertRun(runs, verdict.start, verdict.end);
+		}
 		const timeline = this.#state.timeline;
 		for (let i = timelineIndex(timeline, start); i < timeline.length && timeline[i].start < end; i++) {
 			const group = timeline[i];
@@ -5876,7 +6373,7 @@ export class Subscriber {
 			}
 			// Its range had no group to deliver, so the feed lands none of it. Its successor is this
 			// group's or one below: the group containing the time is judged as an owed group at it would be.
-			if (producer && answeredEmpty(producer, time, drift.budget)) continue;
+			if (producer && answeredEmpty(producer, time)) continue;
 			if (this.#staleAt(time, drift, true)) continue;
 			waits = true;
 		}
@@ -5889,19 +6386,50 @@ export class Subscriber {
 	#waitOwed(start: bigint, end: bigint, drift: Drift): boolean {
 		const producer = this.#state.producer;
 		if (start >= end || !producer) return false;
-		// Only a hole in this reader's ranges is owed to it.
-		let owed: { key: bigint; folds?: Instant } | undefined;
+		let owes = false;
+		// The gap's first owed group stands for the rest only under its own budget, so each stretch
+		// under another is judged by its own first.
+		for (const [part] of drift.budget.runs(start, end)) {
+			const owed = this.#firstOwed(producer, part.start, part.end);
+			if (!owed) continue;
+			owes = true;
+			if (this.#holdsOrder(owed, drift)) return true;
+		}
+		if (owes) return false;
+		// A fill still owes a group below, which lands as a group does. Its staleness deadline wakes
+		// the cursor too, so a fill that never answers cannot pin it.
+		if (this.#askFills(start, end, drift) === undefined) return false;
+		this.#state.waitingOrdered = true;
+		return true;
+	}
+
+	// Whether a missing group the subscription owes in `[start, end)` under a budget wider than
+	// `than` still holds sequence order: a stale group above it passes only the owed groups its own
+	// budget gives up.
+	#waitWider(start: bigint, end: bigint, drift: Drift, than: number): boolean {
+		const producer = this.#state.producer;
+		if (!producer) return false;
+		for (const [part, budget] of drift.budget.runs(start, end)) {
+			if (budget <= than) continue;
+			const owed = this.#firstOwed(producer, part.start, part.end);
+			if (owed && this.#holdsOrder(owed, drift)) return true;
+		}
+		return false;
+	}
+
+	// The first missing group in `[start, end)` the live feed still owes this reader: only a hole in
+	// its ranges is owed to it.
+	#firstOwed(producer: Producer, start: bigint, end: bigint): { key: bigint; folds?: Instant } | undefined {
 		for (const run of this.#window.runs(start, end)) {
-			owed = owedGroup(producer, run.start, run.end);
-			if (owed) break;
+			const owed = owedGroup(producer, run.start, run.end);
+			if (owed) return owed;
 		}
-		if (!owed) {
-			// A fill still owes a group below, which lands as a group does. Its staleness deadline
-			// wakes the cursor too, so a fill that never answers cannot pin it.
-			if (this.#askFills(start, end, drift) === undefined) return false;
-			this.#state.waitingOrdered = true;
-			return true;
-		}
+		return undefined;
+	}
+
+	// Whether the owed group `owed` still holds sequence order within its budget, waking the read
+	// when that may change.
+	#holdsOrder(owed: { key: bigint; folds?: Instant }, drift: Drift): boolean {
 		if (this.#staleAt(owed.key, drift, true)) return false;
 		if (owed.folds !== undefined) this.#wakeAt(owed.folds.since(Instant.ZERO).asNanos());
 		this.#state.waitingOrdered = true;
@@ -5968,9 +6496,11 @@ export class Subscriber {
 			// Every frame this group could still hold is past the budget, so keep
 			// scanning: one pass walks a whole backlog off rather than replaying it.
 			if (this.#staleAt(group.start, drift)) {
-				// Passing it passes the owed keys below it too, which the budget gives up with it.
+				// Passing it passes the owed keys below it too, which the budget gives up with it, but
+				// for one a wider budget still holds.
+				if (this.#waitWider(start, group.start, drift, drift.budget.at(group.start))) return { kind: "idle" };
 				this.#passOwed(start, group.start, drift);
-				this.#giveUp({ start: group.start, end: group.start + 1n }, staleHole(drift.budget));
+				this.#giveUp({ start: group.start, end: group.start + 1n }, staleHole(drift.budget.at(group.start)));
 				const passed = this.#nextKey;
 				this.#pass(groups, index);
 				// The cursor passed what lies below it, which a fill no longer owes this reader.
@@ -6011,7 +6541,7 @@ export class Subscriber {
 		const closed = this.#state.closed.peek();
 		if (closed instanceof Error) return { kind: "error", error: closed };
 		// A clean close completes this range, retaining groups a later cap raise can read.
-		if (closed !== undefined) return { kind: "done" };
+		if (closed !== undefined) return this.#done();
 		// Nothing buffered: ask a fill for what this reader misses, and wait while one owes it.
 		if (this.#askFills(start, cursor.end ?? UNBOUNDED, drift) !== undefined) {
 			// Its staleness deadline wakes the cursor, as for any owed hole.
@@ -6030,7 +6560,7 @@ export class Subscriber {
 			!this.#starting(groups, start) &&
 			(this.#complete() || (end !== undefined && start >= finalKey(end)))
 		) {
-			return { kind: "done" };
+			return this.#done();
 		}
 		return { kind: "idle" };
 	}
@@ -6041,7 +6571,7 @@ export class Subscriber {
 	 *
 	 * Groups are acquired through the same key cursor as {@link Ordered.nextGroup},
 	 * so frames never run backwards: a late lower-key group is skipped, and so is
-	 * one every frame of which `delay.max` proves is too old. A group the budget abandons
+	 * one every frame of which its live range's {@link Live.max} proves is too old. A group the budget abandons
 	 * mid-stall ends cleanly and the cursor resyncs from the next group; a gap inside a
 	 * group still surfaces as `Evicted`, {@link TooFarBehind}, or {@link GroupTooLarge}.
 	 */
@@ -6162,22 +6692,23 @@ export class Subscriber {
 	// Edit the ranges by key, as `hooks.editSubscriber` does: only the ranges it adds resolve, and
 	// every other stays where it resolved. Mirrors the Rust `Subscriber::edit`.
 	#edit(edit: Edit): void {
-		const { ranges: _, ...scalars } = subscriptionDefaults({
+		const {
+			ranges: _,
+			placed: __,
+			...scalars
+		} = subscriptionDefaults({
 			priority: edit.priority,
-			delay: edit.delay,
 			order: edit.order,
 			ranges: [],
 		}) as Required<Subscription>;
 		const add = edit.add.map(([key, range]) => [key, rangesOf([range])[0]] as const);
 		const reordered = scalars.order !== this.#state.update.scalars()?.order;
-		const moved = this.#state.update.edit({ retire: edit.retire, add, ...scalars });
-		// A time start not yet placed is placed by the budget stated then.
-		this.#window.budget = maxDelayOf(scalars);
+		const moved = this.#state.update.edit({ retire: edit.retire, add, placed: edit.placed, ...scalars });
 		// A refused time start resolves every range again, as the Rust `Filter::stale` has it.
 		if (moved && this.#refusal) this.#resolve();
 		else if (moved) {
 			this.#window.edit(edit.retire, add, this.#latestGroup(), this.#holdings(), (key) =>
-				this.#state.update.since(key),
+				this.#state.update.joining(key),
 			);
 			// Leaves the lookups the retired ranges asked, which a settled window never reads again.
 			if (this.#lookups.length > 0) this.#lookUp();
@@ -6192,19 +6723,28 @@ export class Subscriber {
 	 * Update this subscription's options (e.g. priority), triggering a SUBSCRIBE_UPDATE to the
 	 * publisher. Replacing the ranges resolves them again, without redelivering groups already
 	 * read; an arrival reader can receive the unread groups it still holds that the new ranges
-	 * take in.
+	 * take in. Changing only a live join's {@link Live.max} keeps where it joined.
 	 * Mirrors the Rust `Subscriber::update`.
 	 */
 	update(options: Subscription) {
+		this.#update(options, true);
+	}
+
+	// {@link update}, keeping a live join whose max alone changed where it joined only with `retune`;
+	// without, as a subscription restated whole, every range is placed afresh. Mirrors the Rust
+	// `Subscriber::replace`.
+	#update(options: Subscription, retune: boolean): void {
 		const subscription = subscriptionDefaults(options);
 		const reordered = subscription.order !== this.#state.update.scalars()?.order;
-		const replaced = this.#state.update.set(subscription);
-		if (replaced) this.#resolve();
-		else {
-			// A time start or live join not yet placed is placed by the budget stated then.
-			this.#window.budget = maxDelayOf(subscription);
-			this.#ask();
-		}
+		const replaced = this.#state.update.set(subscription, retune);
+		if (replaced === "replaced" || (replaced && this.#refusal)) this.#resolve();
+		else if (replaced) {
+			// Only a live join's max changed: each keeps where it joined.
+			this.#window.edit([], replaced, this.#latestGroup(), this.#holdings(), (key) =>
+				this.#state.update.joining(key),
+			);
+			this.#moved();
+		} else this.#ask();
 		// A fill's order follows its readers, so its handler wakes to serve the new first group.
 		if (!replaced && reordered) this.#fillsMoved();
 	}
@@ -6219,7 +6759,7 @@ export class Subscriber {
  * reported as a gap rather than delivered out of turn, as is every group the read gives up on
  * (see {@link Ordered.nextGroup}).
  *
- * `delay.max` applies as this cursor reads, exactly as it does on the arrival cursor: a
+ * A live range's {@link Live.max} applies as this cursor reads, exactly as it does on the arrival cursor: a
  * group is skipped once its reach, where its immediate successor begins, is that far
  * behind the newest frame on the track. Nothing weaker convicts it, since the reach is
  * the only proof that every frame it could still hold is past the budget, so a backlog
@@ -6227,7 +6767,7 @@ export class Subscriber {
  * group already handed out too: a stalled group's pending frame read rejects once newer
  * content has pulled that far ahead.
  *
- * A history or VOD read sets `delay: { max: null }` (no limit). A subscribed track waits for a
+ * A history or VOD read asks a key range, which never goes stale. A subscribed track waits for a
  * missing group the feed still owes, within the budget, or until it resolves without one.
  * Local tracks skip missing groups. An unlimited or long budget
  * only avoids blocking where the feed signals its gaps: moq-lite, whose publisher sends
@@ -6322,7 +6862,8 @@ export class Ordered {
 	 * passing any gap {@link nextItem} would report below it. Mirrors the Rust `next_group`.
 	 *
 	 * Late arrivals (key at or below the last returned) are silently skipped, as is a
-	 * group whose every frame is further behind the live edge than `delay.max` (the default
+	 * group a live range reached whose every frame is further behind the live edge than its
+	 * {@link Live.max} (the default
 	 * subscription's zero keeps only what nothing newer has superseded). Honors the bounds set by
 	 * {@link withRange}. Like {@link Subscriber.recvGroup}, a read whose ranges all end
 	 * finishes once nothing in them is left to deliver; on a local track that includes a key
@@ -6351,7 +6892,7 @@ export class Ordered {
 	 * The next group, as {@link nextGroup} returns it, or a gap this reader gave up on below it.
 	 * Mirrors the Rust `next_item` and its `Item`.
 	 *
-	 * A gap is every group the publisher or a relay dropped, the transport evicted, `delay.max`
+	 * A gap is every group the publisher or a relay dropped, the transport evicted, a {@link Live.max}
 	 * aged out, a fill could not find, or that landed after the read passed its key. It carries
 	 * the keys it spans and is returned once, after any group the read still owes below it and
 	 * before the next group above it, or when the track ends. Keys the publisher declared skipped
@@ -6388,7 +6929,7 @@ export class Ordered {
 	 * Read the next frame across groups, in sequence order, with its group and frame numbers.
 	 *
 	 * Rides the same cursor as {@link nextGroup} and shares this handle's contract: a
-	 * buffered backlog is drained in full up to the point `delay.max` proves it useless.
+	 * buffered backlog is drained in full up to the point a {@link Live.max} proves it useless.
 	 * Treat the returned frame bytes as read-only; they are shared with other consumers.
 	 */
 	readFrame(): Promise<({ group: bigint; frame: number } & Frame) | undefined> {

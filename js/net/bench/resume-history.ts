@@ -33,7 +33,6 @@ import { Timestamp } from "../src/time.ts";
 import { wireOf } from "../src/wire.ts";
 
 const PAYLOAD = 4096;
-const MAX_DELAY = Duration.millis(1000);
 /** Past every cache's age-out, including the 30 s window a closed track's cache drains over. */
 const EXPIRY = Duration.millis(60_000);
 const url = new URL("https://localhost/resume-history");
@@ -120,7 +119,7 @@ async function read(front: Front, tracks: string[], access: Access, payloads: We
 			await track.info();
 			continue;
 		}
-		const subscriber = access === "subscribe" ? track.subscribe({ delay: { max: MAX_DELAY } }) : undefined;
+		const subscriber = access === "subscribe" ? track.subscribe({ ranges: [{}] }) : undefined;
 		const group = subscriber ? await subscriber.recvGroup() : await track.fetchGroup(0n);
 		const frame = await group?.readFrame();
 		group?.close();

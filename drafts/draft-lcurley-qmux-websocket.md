@@ -73,15 +73,23 @@ Deployments SHOULD use `wss`; an application that expects a TLS transport when r
 How the underlying connection is authenticated and authorized is out of scope for this document, as it is for [qmux].
 
 
-# Subprotocol Negotiation
+# Subprotocol Negotiation {#negotiation}
 QMux over TCP/TLS uses TLS ALPN [RFC8446] to agree on the application protocol.
-WebSocket has no ALPN exchange, so this binding uses the WebSocket subprotocol negotiation of [RFC6455] Section 1.9 (the `Sec-WebSocket-Protocol` header) in its place, carrying the same application protocol identifier.
+WebSocket has no ALPN exchange, so this binding uses the WebSocket subprotocol negotiation of [RFC6455] Section 1.9 (the `Sec-WebSocket-Protocol` header) in its place.
+Each subprotocol token names the QMux version, optionally followed by the application protocol:
 
-The subprotocol identifier is exactly the identifier the application would use as its ALPN over native QUIC, for example `moq-transport-18`.
-It also determines the QMux wire-format version, so there is no separate QMux version negotiation (see {{versions}}).
+~~~
+Subprotocol = Version [ "." ALPN ]
+Version     = "qmux-" 2DIGIT
+~~~
 
-A client offers one or more identifiers in the `Sec-WebSocket-Protocol` request header, in decreasing order of preference, one per protocol version it is willing to use.
-A server selects at most one, in its own order of preference, and echoes it in the response header; if it supports none of the offered identifiers, it MUST fail the handshake.
+`Version` names the revision of [qmux] whose wire format the connection uses: `qmux-01` is draft-ietf-quic-qmux-01.
+`ALPN` is the identifier the application would use as its ALPN over native QUIC, so `qmux-01.moq-transport-18` runs `moq-transport-18` over draft-ietf-quic-qmux-01.
+A bare `Version` token, such as `qmux-02`, agrees on the QMux version alone and leaves the application protocol to the endpoints, for example implied by the URL.
+An application protocol whose identifier contains a character not permitted in a token [RFC6455] cannot be carried by this binding.
+
+A client offers one or more tokens in the `Sec-WebSocket-Protocol` request header, in decreasing order of preference: one per pairing of QMux version and application protocol it is willing to use, optionally followed by bare `Version` tokens.
+A server selects at most one, in its own order of preference, and echoes it in the response header; if it supports none of the offered tokens, it MUST fail the handshake.
 A client MUST treat a response value it did not offer as a failed handshake per [RFC6455], and this binding additionally requires a selection: a client MUST treat the absence of a `Sec-WebSocket-Protocol` response header as a failed handshake too, since without one no QMux version was agreed.
 
 
@@ -99,10 +107,10 @@ WebSocket Binary Message {
 
 The frames inside a message are encoded exactly as in [qmux], including the in-order STREAM frame requirement: for each QUIC stream, a sender MUST send that stream's payload in order, so a receiver can deliver payload to the application as it arrives without reassembly.
 
-An endpoint MAY place multiple frames in a single binary message and MAY split a logical sequence of frames across multiple messages, subject to the constraint that each STREAM frame's payload bytes are delivered in order.
+An endpoint MAY place multiple frames in a single binary message, except as {{versions}} restricts, and MAY split a logical sequence of frames across multiple messages, subject to the constraint that each STREAM frame's payload bytes are delivered in order.
 An empty binary message (zero frames) is permitted and carries no frames; a receiver MUST accept it and treat it as a no-op.
 
-The maximum size of a binary message is bounded by the `max_record_size` transport parameter defined in [qmux] and by any WebSocket implementation limits.
+For a QMux version with the Record layer, the maximum size of a binary message is bounded by the `max_record_size` transport parameter defined in [qmux] and by any WebSocket implementation limits.
 An endpoint MUST NOT send a binary message whose payload exceeds the peer's advertised `max_record_size`, and MAY treat receipt of an oversized message as a connection error.
 
 
@@ -118,9 +126,12 @@ The first QMux frame sent by each endpoint MUST be the `QX_TRANSPORT_PARAMETERS`
 
 
 # QMux Version {#versions}
-The QMux version is not signaled on the wire.
-As with QMux over TLS, it is implied by the negotiated application protocol: each application protocol that runs over QMux specifies which QMux version each of its identifiers uses.
-An application protocol used with this binding MUST select a QMux version that provides the Record layer (see {{framing}}), i.e. [qmux] or later.
+The QMux version is the one named by the negotiated subprotocol ({{negotiation}}); there is no separate QMux version negotiation.
+An application protocol MAY restrict which QMux versions it pairs with.
+
+A QMux version without the Record layer, such as draft-ietf-quic-qmux-00, is framed as in {{framing}} except that each binary message carries exactly one frame, and a PADDING byte counts as a frame.
+A receiver MUST treat a message carrying more than one frame as a connection error of type FRAME_ENCODING_ERROR.
+The message is bounded by the peer's `max_frame_size`, initially 16384 bytes, instead of `max_record_size`: an endpoint MUST NOT send a frame larger than it, and MAY treat receipt of a larger one as a connection error of type FRAME_ENCODING_ERROR.
 
 
 # Keep-Alive and Idle Timeout {#keepalive}
@@ -156,14 +167,13 @@ In particular, this binding provides no transport-layer confidentiality or integ
 The keep-alive mechanism in {{keepalive}} causes an endpoint to send periodic Ping frames.
 An endpoint SHOULD bound the rate at which it sends and responds to Ping/Pong frames to avoid amplification or resource-exhaustion concerns.
 
-Because a server selects the subprotocol from a client-supplied list, a server MUST validate the selected identifier against its own supported set and MUST NOT echo an arbitrary client-supplied value, as required by [RFC6455].
+Because a server selects the subprotocol from a client-supplied list, a server MUST validate the selected token against its own supported set and MUST NOT echo an arbitrary client-supplied value, as required by [RFC6455].
 
 
 # IANA Considerations
 This document has no IANA actions.
 
-This binding defines no subprotocol identifiers of its own: the `Sec-WebSocket-Protocol` value is the application protocol identifier, which is owned by the application protocol's specification (for example, [moqt]).
-Whether those identifiers are registered in the WebSocket Subprotocol Name Registry [RFC6455] is therefore up to each application protocol, not this document.
+The subprotocol tokens of {{negotiation}} name Internet-Draft revisions of [qmux] and are not registered in the WebSocket Subprotocol Name Registry [RFC6455].
 
 
 --- back

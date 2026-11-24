@@ -2,7 +2,6 @@
  * Sweep a reader's fill probes, and its hand-outs of live groups between them, over the received
  * stale runs it cannot trust, and the readers.
  */
-import { Duration } from "@moq/clock";
 import { Producer as BroadcastProducer } from "../src/broadcast.ts";
 import { defined } from "../src/defined.test-util.ts";
 import { hooks, staleHole } from "../src/internal.ts";
@@ -29,7 +28,6 @@ for (const runs of [250, 1000, 4000, 16000]) {
 			track.subscribe({
 				// Capped, so the upstream's verdicts, judged under an open range, settle none of them.
 				ranges: [{ start: 2n, end: BigInt(8 + 2 * runs) - 1n }],
-				delay: { max: Duration.millis(30_000) },
 			}),
 		);
 		for (const sub of subs) {

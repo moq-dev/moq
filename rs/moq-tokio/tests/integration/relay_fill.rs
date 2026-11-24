@@ -10,7 +10,7 @@
 use std::{collections::BTreeMap, process::Stdio, time::Duration};
 
 use anyhow::Context;
-use moq_net::track::{Delay, Info, Range, Start, Subscription};
+use moq_net::track::{Info, Range, Start, Subscription};
 use moq_net::{Timescale, Timestamp, Version};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{ChildStdin, ChildStdout};
@@ -22,6 +22,9 @@ const GROUPS: u64 = 5;
 
 /// A group is as old as the start of the one after it, so this reaches groups 3 and up.
 const NARROW: Duration = Duration::from_millis(500);
+
+/// A live join's lag past every group, the largest every implementation carries losslessly.
+const REACH: Duration = Duration::from_millis((1 << 53) - 1);
 
 /// A WebSocket listener that accepts the relay's sessions in turn, each with the origin
 /// `origin` hands it: served to the relay, or fed from it.
@@ -255,9 +258,12 @@ async fn relay(version: Version) -> anyhow::Result<()> {
 	};
 
 	// The relay's copy starts where the publisher's budget put it: the live edge before lite-06.
-	let narrow = Subscription::default()
-		.with_delay(Delay::default().with_max(NARROW))
-		.with_ranges([Range::default()]);
+	// A join reaching back past every group takes each still within the budget, as a wire before
+	// lite-07 asks with its one max age.
+	let narrow = Subscription::default().with_ranges([Range::from(Start::Live {
+		min: Some(REACH),
+		max: Some(NARROW),
+	})]);
 	let mut first = relay.subscribe(narrow).await?;
 	let start = match version.alpn() {
 		"moq-lite-05" => GROUPS - 1,
@@ -267,12 +273,10 @@ async fn relay(version: Version) -> anyhow::Result<()> {
 
 	// Below the copy's start, a reader with no budget fills what it reaches. Before lite-06 it
 	// names the floor it reaches for; lite-06 has the publisher re-offer it instead.
-	let wide = Subscription::default()
-		.with_delay(Delay::default().with_max(None))
-		.with_ranges([match version.alpn() {
-			"moq-lite-05" => Range::from(Start::Time(0)),
-			_ => Range::default(),
-		}]);
+	let wide = Subscription::default().with_ranges([match version.alpn() {
+		"moq-lite-05" => Range::from(Start::Time(0)),
+		_ => Range::ALL,
+	}]);
 	let mut below = relay.subscribe(wide.clone()).await?;
 	expect(&mut below, groups(0..GROUPS), "below the start").await?;
 
@@ -332,7 +336,10 @@ fn table_subscription(ask: &serde_json::Value) -> Subscription {
 	let start = |range: &serde_json::Value| match range.get("start") {
 		None => Start::Oldest,
 		Some(start) => match start.get("live") {
-			Some(live) => Start::Live(Duration::from_millis(live.as_u64().expect("a lag"))),
+			Some(live) => Start::Live {
+				min: Some(Duration::from_millis(live.as_u64().expect("a lag"))),
+				max: None,
+			},
 			None => Start::Time(start.as_u64().expect("a time")),
 		},
 	};
@@ -344,10 +351,9 @@ fn table_subscription(ask: &serde_json::Value) -> Subscription {
 				end: range.get("end").and_then(serde_json::Value::as_u64),
 			})
 			.collect(),
-		None => vec![Range::default()],
+		None => vec![Range::ALL],
 	};
 	Subscription::default()
-		.with_delay(Delay::default().with_max(None))
 		.with_order(moq_net::track::Order::Ascending)
 		.with_ranges(ranges)
 }
@@ -388,6 +394,16 @@ async fn table_case(case: &serde_json::Value, groups: &[u64], frames: u64, warm:
 		None => groups.to_vec(),
 	};
 	let append = case.get("append").and_then(serde_json::Value::as_bool) != Some(false);
+	let span = case.get("span").and_then(serde_json::Value::as_u64);
+	let open: Vec<u64> = (case
+		.get("open")
+		.and_then(serde_json::Value::as_array)
+		.into_iter()
+		.flatten())
+	.filter_map(serde_json::Value::as_u64)
+	.collect();
+	// The groups the case leaves unfinished, held so they stay open.
+	let mut unfinished = Vec::new();
 	for start in starts {
 		let time = Timestamp::from_millis(start)?;
 		let mut group = match append {
@@ -397,7 +413,11 @@ async fn table_case(case: &serde_json::Value, groups: &[u64], frames: u64, warm:
 		for frame in 0..frames {
 			group.write_frame(Timestamp::from_millis(start + frame)?, b"x".to_vec())?;
 		}
-		group.finish()?;
+		match span {
+			_ if open.contains(&start) => unfinished.push(group),
+			Some(span) => drop(group.finish_at(start + span)?),
+			None => drop(group.finish()?),
+		}
 	}
 	broadcast.announce()?;
 	let version = "moq-lite-07-wip".parse().map_err(anyhow::Error::msg)?;

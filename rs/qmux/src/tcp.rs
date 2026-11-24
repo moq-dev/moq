@@ -99,6 +99,27 @@ mod tests {
 		}
 	}
 
+	/// As a wire source, a socket's statistics fill the counters with what the kernel says
+	/// each side carried, the TCP payload without headers.
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn socket_statistics_refresh_wire_counters() {
+		use moq_net::transport::{Wire, WireSource};
+		use std::io::{Read, Write};
+
+		let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+		let mut client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+		let (mut server, _) = listener.accept().unwrap();
+		client.write_all(&[7; 1000]).unwrap();
+		server.read_exact(&mut [0; 1000]).unwrap();
+
+		let (sent, received) = (Wire::new(), Wire::new());
+		crate::TcpStats::new(&client).unwrap().refresh(&sent);
+		crate::TcpStats::new(&server).unwrap().refresh(&received);
+		assert_eq!((sent.sent_bytes(), sent.received_bytes()), (1000, 0));
+		assert_eq!((received.sent_bytes(), received.received_bytes()), (0, 1000));
+	}
+
 	/// A driver that ends without closing its transport, such as one dropped, still ends
 	/// the connection while a session handle (and the socket statistics' duplicate of the
 	/// descriptor) outlives it.

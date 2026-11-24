@@ -48,42 +48,14 @@ fn resolve(base: Option<&Path>, path: PathRef) -> Result<Option<Path>, Error> {
 		return Ok(Some(path.rest));
 	};
 	let keep = usize::try_from(path.keep).map_err(|_| Error::ProtocolViolation)?;
-	let head = head(base, keep).ok_or(Error::ProtocolViolation)?;
+	let end = base.head_len(keep).ok_or(Error::ProtocolViolation)?;
+	let head = &base.as_str()[..end];
 	let suffix = match (head.is_empty(), path.rest.is_empty()) {
 		(true, _) => Ok(path.rest),
 		(false, true) => Path::new(head),
 		(false, false) => Path::concat(head, path.rest.as_str()),
 	};
 	Ok(suffix.ok().filter(|suffix| suffix.depth() <= Path::MAX_PARTS))
-}
-
-/// The first `keep` raw parts of `path`, or `None` if it has fewer.
-///
-/// TEMPORARY MIGRATION, delete at the next version cut (and count [`Path::parts`] here and
-/// wherever [`raw_parts`] is used): the previous release counts `keep` by every `/`, escaped
-/// or not, and also speaks lite-07, so a keep counted by segment would resolve to another
-/// path on a mixed-version link. A head may end inside an escape; the rest completes it, or
-/// the resolved path is invalid and refused.
-fn head(path: &Path, keep: usize) -> Option<&str> {
-	raw_head_len(path.as_str(), keep).map(|end| &path.as_str()[..end])
-}
-
-/// The byte length of the first `keep` raw parts of `s`, or `None` if it has fewer.
-/// TEMPORARY MIGRATION: see [`head`].
-fn raw_head_len(s: &str, keep: usize) -> Option<usize> {
-	if keep == 0 {
-		return Some(0);
-	}
-	s.match_indices('/')
-		.map(|(i, _)| i)
-		.chain((!s.is_empty()).then_some(s.len()))
-		.nth(keep - 1)
-}
-
-/// The parts of `path` split at every `/`, escaped or not. The empty path has none.
-/// TEMPORARY MIGRATION: see [`head`].
-fn raw_parts(path: &Path) -> impl Iterator<Item = &str> {
-	path.as_str().split_terminator('/')
 }
 
 /// Resolves the bases on a received announce stream. Only used on versions with
@@ -244,7 +216,7 @@ impl AnnounceEncoder {
 
 		// Distances count back from the id this START takes.
 		let path = self.path_ref(&suffix, id);
-		self.heads.insert(raw_parts(&suffix), id);
+		self.heads.insert(suffix.parts(), id);
 		self.live.suffixes.insert(id, suffix);
 		(Some(id), path)
 	}
@@ -255,18 +227,20 @@ impl AnnounceEncoder {
 			return;
 		}
 		let suffix = self.live.suffixes.remove(&id).expect("end for a live id");
-		self.heads.remove(raw_parts(&suffix), id);
+		self.heads.remove(suffix.parts(), id);
 	}
 
 	/// The wire form of `suffix`, sized from its parts so only the winner is built.
 	fn path_ref(&self, suffix: &Path, next: u64) -> PathRef {
 		let form: Form = self.version.into();
 		let literal = || PathRef::literal(suffix.clone());
-		let Some((keep, id)) = self.heads.longest(raw_parts(suffix)) else {
+		let Some((keep, id)) = self.heads.longest(suffix.parts()) else {
 			return literal();
 		};
 		// Where the segments after `keep` start, sharing the suffix's buffer.
-		let end = raw_head_len(suffix.as_str(), keep).expect("the longest shared head is within the suffix");
+		let end = suffix
+			.head_len(keep)
+			.expect("the longest shared head is within the suffix");
 		let rest = suffix.slice_from((end + 1).min(suffix.len()));
 
 		let base = next - id;
@@ -445,28 +419,58 @@ mod tests {
 		assert_eq!(wire, path(2, 2, "d"));
 	}
 
-	/// TEMPORARY MIGRATION, delete at the next version cut and expect whole segments: the
-	/// previous release counts a keep by every `/`, so both ends do until it is gone. These
-	/// are the wire values the previous release sends and resolves, so a mixed-version link
-	/// agrees in both directions.
+	/// An escaped `/` stays inside its part, and a run of `\\` before a `/` leaves that `/` bare,
+	/// so `keep` counts decoded parts and a head never ends inside an escape.
 	#[test]
-	fn keeps_raw_parts_across_an_escaped_slash() {
+	fn keeps_whole_parts_across_an_escape() {
 		let mut encoder = AnnounceEncoder::new(VERSION);
 		let mut decoder = AnnounceDecoder::default();
 		start(&mut encoder, &mut decoder, r"room/a\/b/cam-1");
-		let (_, wire) = encoder.start(Path::from_static(r"room/a\/b/cam-2"));
-		assert_eq!(wire, path(1, 3, "cam-2"));
-		let (_, wire) = encoder.start(Path::from_static(r"room/a\/c"));
-		assert_eq!(wire, path(1, 2, "c"));
+		start(&mut encoder, &mut decoder, r"room/c\\/d/cam-1");
 
-		// What the previous release sends for those resolves to the same paths.
-		let suffix = decoder.start(Some(path(1, 3, "cam-2"))).unwrap().unwrap();
+		// `room` and `a\/b` are two parts.
+		let (_, wire) = encoder.start(Path::from_static(r"room/a\/b/cam-2"));
+		assert_eq!(wire, path(2, 2, "cam-2"));
+		let suffix = decoder.start(Some(wire)).unwrap().unwrap();
 		assert_eq!(suffix.as_str(), r"room/a\/b/cam-2");
-		let suffix = decoder.start(Some(path(1, 2, "c"))).unwrap().unwrap();
-		assert_eq!(suffix.as_str(), r"room/a\/c");
-		// A head ending inside an escape that nothing completes is refused, its id assigned.
-		assert_eq!(decoder.start(Some(path(3, 2, ""))).unwrap(), None);
-		assert_eq!(decoder.last(), 3);
+
+		// `c\\` ends in an escaped backslash, so its `/` separates.
+		let (_, wire) = encoder.start(Path::from_static(r"room/c\\/e"));
+		assert_eq!(wire, path(2, 2, "e"));
+		let suffix = decoder.start(Some(wire)).unwrap().unwrap();
+		assert_eq!(suffix.as_str(), r"room/c\\/e");
+
+		// A keep of 2 on `room/a\/b/cam-1` is the whole `a\/b` part, never `room/a\`; the
+		// previous release would read it as 3 parts.
+		let suffix = decoder.start(Some(path(4, 2, "x"))).unwrap().unwrap();
+		assert_eq!(suffix.as_str(), r"room/a\/b/x");
+		// And one more than it has is refused.
+		assert!(matches!(
+			decoder.start(Some(path(5, 4, "x"))),
+			Err(Error::ProtocolViolation)
+		));
+	}
+
+	/// Every pair of paths up to depth three over parts that hold `\/` and `\\`: the encoder's
+	/// output for the second always resolves to it against the first.
+	#[test]
+	fn every_escaped_pair_round_trips() {
+		let parts = ["a", r"b\/c", r"d\\", r"e\\\/f"];
+		let mut paths = vec![];
+		for len in 1..=3u32 {
+			for n in 0..parts.len().pow(len) {
+				let picked: Vec<_> = (0..len).map(|i| parts[n / parts.len().pow(i) % parts.len()]).collect();
+				paths.push(picked.join("/"));
+			}
+		}
+		for first in &paths {
+			for second in &paths {
+				let mut encoder = AnnounceEncoder::new(VERSION);
+				let mut decoder = AnnounceDecoder::default();
+				start(&mut encoder, &mut decoder, first);
+				start(&mut encoder, &mut decoder, second);
+			}
+		}
 	}
 
 	#[test]
@@ -513,6 +517,30 @@ mod tests {
 		let hex: String = encoded.iter().map(|b| format!("{b:02x}")).collect();
 		assert_eq!(hex, GOLDEN);
 		assert_eq!(crate::fuzz::decode_announces(&encoded, true), golden());
+	}
+
+	/// A compressed stream whose bases keep parts holding `\/` and `\\`, pinned byte for byte;
+	/// `js/net/src/lite/announce.test.ts` decodes this hex too.
+	const GOLDEN_ESCAPED: &str = "001b00000f726f6f6d2f615c2f622f63616d2d3101610000000000ff00001701010b635c5c2f642f63616d2d3101610000000000ff00001102020563616d2d3201610000000000ff00000d0202016501610000000000ff00";
+
+	#[cfg(feature = "async")]
+	fn golden_escaped() -> Vec<crate::fuzz::Announced> {
+		use crate::fuzz::Announced;
+		vec![
+			Announced::Start(Path::from_static(r"room/a\/b/cam-1"), vec![]),
+			Announced::Start(Path::from_static(r"room/c\\/d/cam-1"), vec![]),
+			Announced::Start(Path::from_static(r"room/a\/b/cam-2"), vec![]),
+			Announced::Start(Path::from_static(r"room/c\\/e"), vec![]),
+		]
+	}
+
+	#[test]
+	#[cfg(feature = "async")]
+	fn golden_escaped_stream_is_pinned() {
+		let encoded = crate::fuzz::encode_announces(&golden_escaped(), true);
+		let hex: String = encoded.iter().map(|b| format!("{b:02x}")).collect();
+		assert_eq!(hex, GOLDEN_ESCAPED);
+		assert_eq!(crate::fuzz::decode_announces(&encoded, true), golden_escaped());
 	}
 
 	/// The literal lite-07 stream `js/net` writes for the same announcements, never picking a

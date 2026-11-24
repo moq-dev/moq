@@ -4,8 +4,8 @@
 //! reaches the next hop as finished, so a relay does not cache the frames it already has as
 //! the whole group: the served stream resets with `Old`.
 
+use crate::WithMax as _;
 use crate::support;
-use moq_net::track::Delay;
 use support::AppendNext;
 use support::AtStart;
 
@@ -20,7 +20,13 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const BUDGET: Duration = Duration::from_millis(500);
 
 /// IETF peers negotiate the same superseded-group budget as Lite peers.
-const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"];
+const VERSIONS: &[&str] = &[
+	"moq-lite-06",
+	"moq-lite-07-wip",
+	"moq-transport-18",
+	"moq-transport-22",
+	"moq-transport-23",
+];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
@@ -61,7 +67,7 @@ async fn round(version: &str) -> Option<Ended> {
 		remote
 			.track("data")
 			.unwrap()
-			.subscribe(Subscription::default().with_delay(Delay::default().with_max(BUDGET))),
+			.subscribe(Subscription::default().with_max(BUDGET)),
 	)
 	.await
 	.expect("subscribe timeout")
@@ -97,8 +103,8 @@ async fn round(version: &str) -> Option<Ended> {
 		TIMEOUT,
 		remote.track("data").unwrap().subscribe(
 			Subscription::default()
-				.with_delay(Delay::default().with_max(Duration::from_secs(3600)))
-				.with_ranges([support::keys(0..)]),
+				.with_ranges([support::keys(0..)])
+				.with_max(Duration::from_secs(3600)),
 		),
 	)
 	.await

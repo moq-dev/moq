@@ -4,12 +4,13 @@
 //! ends, on every wire, from the publisher directly or through a relay. A range reaching
 //! past the live edge ends once the groups up to its end arrive.
 
+use crate::WithMax as _;
 use crate::support;
 use support::AppendNext;
 
 use std::time::Duration;
 
-use moq_net::track::{Delay, Order, Subscription};
+use moq_net::track::{Order, Subscription};
 use moq_net::{Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
@@ -111,7 +112,7 @@ async fn fixture(
 fn one_range(groups: std::ops::Range<u64>) -> Subscription {
 	Subscription::default()
 		.with_ranges([support::keys(groups)])
-		.with_delay(Delay::default().with_max(None))
+		.with_max(None)
 		.with_order(Order::Ascending)
 }
 
@@ -203,6 +204,62 @@ async fn one_range_reads_back_to_back_each_complete() {
 						failures.push((version, relay, groups, hold));
 					}
 				}
+			}
+		}
+	}
+	assert!(failures.is_empty(), "failed: {failures:?}");
+}
+
+async fn moved_off(version: Version, relay: bool) {
+	let (remote, mut track, _held) = fixture(version, relay).await;
+	let mut open = track.append_next().unwrap();
+	open.write_frame(Timestamp::from_millis(3).unwrap(), payload(3, 0))
+		.unwrap();
+	let mut sub = remote
+		.track("video")
+		.unwrap()
+		.subscribe(one_range(3..10))
+		.await
+		.unwrap();
+	let mut held = kio::clock::timeout(TIMEOUT, sub.recv_group())
+		.await
+		.unwrap()
+		.unwrap()
+		.unwrap();
+	assert_eq!(held.start, 3);
+	let first = kio::clock::timeout(TIMEOUT, held.read_frame())
+		.await
+		.unwrap()
+		.unwrap()
+		.unwrap();
+	assert_eq!(first.payload.to_vec(), payload(3, 0));
+	for key in 4..6 {
+		write_group(&mut track, key);
+	}
+	sub.update(one_range(5..6)).unwrap();
+	kio::clock::sleep(Duration::from_millis(50)).await;
+	open.write_frame(Timestamp::from_millis(3).unwrap(), payload(3, 1))
+		.unwrap();
+	open.finish().unwrap();
+	let mut rest = Vec::new();
+	while let Some(frame) = kio::clock::timeout(TIMEOUT, held.read_frame())
+		.await
+		.expect("read timed out")
+		.unwrap_or_else(|err| panic!("{version} relay={relay}: {err}"))
+	{
+		rest.push(frame.payload.to_vec());
+	}
+	assert_eq!(rest, [payload(3, 1)], "{version} relay={relay}");
+}
+
+/// A group a history read holds stays owed in full once its ranges move off it.
+#[kio::test]
+async fn a_held_history_group_outlives_its_ranges_moving_off_it() {
+	let mut failures = Vec::new();
+	for version in support::every_version() {
+		for relay in [false, true] {
+			if kio::clock::sim::spawn(moved_off(version, relay)).await.is_err() {
+				failures.push((version, relay));
 			}
 		}
 	}

@@ -197,15 +197,7 @@ impl Future for ConnectionDriver {
 		conn.forward_endpoint_events();
 
 		// Every datagram sent or received passes through this poll.
-		{
-			let stats = conn.inner.stats();
-			this.conn.shared.wire.set_sent_bytes(stats.udp_tx.bytes);
-			this.conn.shared.wire.set_received_bytes(stats.udp_rx.bytes);
-			let credit = stats.send_credit;
-			this.conn.shared.wire.set_credit_stalls(credit.stalls, credit.stalled);
-			let held = stats.credit.held;
-			this.conn.shared.wire.set_credit_held(held.readers, held.evicted);
-		}
+		record(&this.conn.shared.wire, &conn.inner.stats());
 
 		// A local close still reaches a driver whose socket holds output back, which skips
 		// `poll_transmit` and so parks nothing there, to re-arm the timer for its closing
@@ -918,3 +910,15 @@ const MAX_TRANSMIT_DATAGRAMS: usize = 20;
 /// memory allocations when calling `poll_transmit()`. Benchmarks have shown
 /// that numbers around 10 are a good compromise.
 const MAX_TRANSMIT_SEGMENTS: usize = 10;
+
+/// Copy the connection's cumulative counters to its wire, which stats read without polling it.
+fn record(wire: &moq_net::transport::Wire, stats: &moq_quic::connection::Stats) {
+	wire.set_sent_bytes(stats.udp_tx.bytes);
+	wire.set_received_bytes(stats.udp_rx.bytes);
+	wire.set_lost_bytes(stats.path.lost_bytes);
+	let credit = stats.send_credit;
+	wire.set_credit_stalls(credit.stalls, credit.stalled);
+	let held = stats.credit.held;
+	wire.set_credit_held(held.readers, held.evicted);
+	wire.set_congestion_blocked(stats.path.cwnd_blocked, stats.path.pacing_blocked);
+}

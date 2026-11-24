@@ -174,6 +174,18 @@ export namespace Connection {
 		websocket?: Connection.WebSocketProps;
 		webtransport?: Connection.WebTransportProps;
 	}
+	export class Dial {
+		fail(err: Error): void;
+		readonly failure?: Error;
+		present(tokens: readonly string[]): void;
+		readonly signal: AbortSignal;
+		readonly url: URL;
+	}
+	export let Dials: typeof Connection.Dials;
+	export class Dials {
+		constructor();
+		next(): Promise<Connection.Dial | undefined>;
+	}
 	export interface Goaway {
 		readonly timeout?: Clock.Duration;
 		readonly uri: string;
@@ -195,7 +207,7 @@ export namespace Connection {
 		share?: boolean;
 		signal?: never;
 		timeout?: Clock.Duration;
-		tokens?: readonly string[] | Signals.Signal<readonly string[]>;
+		tokens?: readonly string[] | Signals.Signal<readonly string[]> | Connection.Dials;
 		transport?: never;
 		url?: URL | Signals.Signal<URL | undefined>;
 		urlAuth?: boolean;
@@ -234,6 +246,7 @@ export namespace Connection {
 	export interface WebSocketProps {
 		delay?: Clock.Duration;
 		enabled?: boolean;
+		idleTimeout?: Clock.Duration | null;
 		maxStreams?: number;
 		receiveWindow?: number;
 		streamReceiveWindow?: number;
@@ -259,6 +272,7 @@ export class Connection {
 	static readonly connect: (props: Connection.ConnectProps) => Promise<Connection.Session>;
 	enabled: Signals.Signal<boolean>;
 	readonly error: Signals.Getter<Error | undefined>;
+	readonly failure: Signals.Getter<Error | undefined>;
 	static readonly isWebTransportSupported: () => boolean;
 	readonly origin: Signals.Getter<Origin.Table | undefined>;
 	readonly probe: Signals.Getter<Connection.Probe | undefined>;
@@ -679,9 +693,6 @@ export namespace Track {
 		readonly name: string;
 		subscribe(options?: Track.Subscription): Track.Subscriber;
 	}
-	export interface Delay {
-		max?: Clock.Duration | null;
-	}
 	export class Demand {
 		get closed(): Signals.GetPromise<Error | null>;
 		readonly name: string;
@@ -689,7 +700,6 @@ export namespace Track {
 		get wanted(): Signals.Getter<boolean>;
 	}
 	export interface FetchGroupOptions {
-		maxDelay?: Clock.Duration;
 		priority?: number;
 		signal?: AbortSignal;
 	}
@@ -701,7 +711,6 @@ export namespace Track {
 		readonly end: bigint;
 		readonly floor: bigint;
 		isWanted(key: bigint): boolean;
-		get maxDelay(): Clock.Duration | null;
 		get order(): Track.Order;
 		get priority(): number;
 		refuseGroups(start: bigint, end: bigint, error: Error): void;
@@ -749,6 +758,10 @@ export namespace Track {
 		landed?: Clock.Instant;
 		start: bigint;
 	};
+	export interface Live {
+		max?: Clock.Duration | null;
+		min: Clock.Duration | null;
+	}
 	export type Order = "ascending" | "descending";
 	export class Ordered {
 		close(abort?: Error): void;
@@ -818,7 +831,7 @@ export namespace Track {
 		requestedFill(): Promise<Track.FillGroups | undefined>;
 	}
 	export type Start = bigint | {
-		live: Clock.Duration;
+		live: Track.Live;
 	};
 	export class Subscriber {
 		close(abort?: Error): void;
@@ -839,7 +852,6 @@ export namespace Track {
 		default(): Track.Subscription;
 	};
 	export interface Subscription {
-		delay?: Track.Delay;
 		order?: Track.Order;
 		priority?: number;
 		ranges?: Track.Range[];

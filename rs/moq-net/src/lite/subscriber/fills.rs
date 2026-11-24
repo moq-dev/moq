@@ -1,20 +1,20 @@
-//! Fills a lite-07 copy asks of its upstream through a subscription rather than FETCH.
+//! Fills a copy asks of its upstream through a subscription rather than FETCH: lite-07's
+//! own, or before it, one of its own per run.
 
 use std::{
 	collections::BTreeMap,
 	ops::Range,
 	task::{Poll, ready},
-	time::Duration,
 };
 
 use rangemap::{RangeMap, RangeSet};
 
-use super::{Establish, SubStream, Tail, TrackServe};
+use super::{Establish, Settle, SubStream, Tail, TrackServe};
 use crate::{
 	Error, StreamError,
 	coding::Recv,
 	group, lite,
-	track::{self, Delay, Order, Position, Subscription},
+	track::{self, Order, Position, Subscription},
 };
 
 /// What a lite-07 copy's held fills ask of its upstream subscription, beside the demand.
@@ -24,8 +24,6 @@ pub(super) struct FillAsk {
 	pub groups: RangeSet<u64>,
 	/// The most urgent priority a held fill asks with.
 	pub priority: i8,
-	/// The most tolerant budget a held fill asks with, `None` for the publisher's max age.
-	pub max_delay: Option<Duration>,
 	pub order: Order,
 }
 
@@ -34,7 +32,6 @@ impl Default for FillAsk {
 		Self {
 			groups: Default::default(),
 			priority: i8::MIN,
-			max_delay: Some(Duration::ZERO),
 			order: Order::Ascending,
 		}
 	}
@@ -48,10 +45,6 @@ impl FillAsk {
 	/// Count `fill`'s preferences in.
 	fn add(&mut self, fill: &track::FillGroups) {
 		self.priority = self.priority.max(fill.priority());
-		self.max_delay = match (self.max_delay, fill.max_delay()) {
-			(Some(ours), Some(theirs)) => Some(ours.max(theirs)),
-			_ => None,
-		};
 		if fill.order() == Order::Descending {
 			self.order = Order::Descending;
 		}
@@ -66,9 +59,9 @@ impl FillAsk {
 		})
 	}
 
-	/// `demand` asked with the fills' priority too. The demand's budget caps every range, so
-	/// the live feed never loosens for a fill: a group it drops as stale is recovered on its
-	/// own (see [`Recovery`]).
+	/// `demand` asked with the fills' priority too. A fill's range is its own, so the demand's
+	/// live joins keep their budgets and the live feed never loosens for a fill: a group it
+	/// drops as stale is recovered on its own (see [`Recovery`]).
 	pub fn merge(&self, demand: Subscription) -> Subscription {
 		let priority = demand.priority.max(self.priority);
 		demand.with_priority(priority)
@@ -79,7 +72,6 @@ impl FillAsk {
 		Subscription::default()
 			.with_ranges([])
 			.with_priority(self.priority)
-			.with_delay(Delay::default().with_max(self.max_delay))
 			.with_order(self.order)
 	}
 }
@@ -100,8 +92,17 @@ impl FillAsk {
 ///
 /// A group stays asked until its stream finishes, since narrowing the subscription under a
 /// stream still arriving would reset it.
+///
+/// Before lite-07 a subscription carries one range, so each run goes out on a [`Recovery`]
+/// of its own instead. Its publisher names no keys between two group starts (no GROUP_END
+/// or SUBSCRIBE_SKIP), and the keys of a timed track are its media time, so FETCHing a run
+/// key by key would cost a round trip per microsecond. A SUBSCRIBE from the run's first key
+/// answers in one round trip instead: its start is the first group at or past that key, and
+/// nothing below it is delivered.
 #[derive(Default)]
 pub(super) struct RangeFills {
+	/// Whether each run goes out on its own subscription, before lite-07.
+	per_run: bool,
 	held: Vec<track::FillGroups>,
 	/// What the upstream subscription asks for the fills now.
 	pub ask: FillAsk,
@@ -122,9 +123,39 @@ pub(super) struct RangeFills {
 	recovered: RangeSet<u64>,
 	/// The subscriptions recovering them.
 	recoveries: Vec<Recovery>,
+	/// TEMPORARY MIGRATION, see [`Recovery::walk`]: fills handed back to FETCH, one key at a time.
+	walking: Vec<track::FillGroups>,
 }
 
 impl RangeFills {
+	/// The fills of a copy whose upstream speaks `version`.
+	pub fn new(version: lite::Version) -> Self {
+		Self {
+			per_run: !version.has_ranges(),
+			..Default::default()
+		}
+	}
+
+	/// The fills of a copy whose subscription is over, each run on a subscription of its own,
+	/// which any version carries.
+	pub fn per_run() -> Self {
+		Self {
+			per_run: true,
+			..Default::default()
+		}
+	}
+
+	/// Take every held fill, which outlives the subscription that carried it.
+	pub fn take_held(&mut self) -> Vec<track::FillGroups> {
+		std::mem::take(&mut self.held)
+	}
+
+	/// TEMPORARY MIGRATION, see [`Recovery::walk`]: take the fills a stalled recovery handed back,
+	/// which FETCH walks a key at a time.
+	pub fn take_walks(&mut self) -> Vec<track::FillGroups> {
+		std::mem::take(&mut self.walking)
+	}
+
 	/// Whether no fill is held, asked for, or recovering.
 	pub fn is_empty(&self) -> bool {
 		self.held.is_empty() && self.ask.is_empty() && self.recoveries.is_empty()
@@ -226,10 +257,37 @@ impl RangeFills {
 		}
 	}
 
+	/// Record `groups` recovered once already.
+	#[cfg(test)]
+	pub fn recovered_once(&mut self, groups: Range<u64>) {
+		self.recovered.insert(groups);
+	}
+
+	/// Record `groups` answered skipped by a recovery.
+	#[cfg(test)]
+	pub fn refused_skipped(&mut self, groups: Range<u64>) {
+		self.refused.insert(groups, Refusal::skipped());
+	}
+
 	/// Whether a [`Recovery`] is still out, whose groups the subscription's tail does not wait
 	/// for.
 	pub fn recovering(&self) -> bool {
 		!self.recoveries.is_empty()
+	}
+
+	/// The keys of `groups` neither the subscription said it will not deliver nor the
+	/// subscriber's own range starts past: a refusal answers only its own keys, so a group
+	/// past a skipped run is still owed.
+	fn unrefused(&self, groups: Range<u64>) -> Vec<Range<u64>> {
+		let mut owed = RangeSet::new();
+		owed.insert(groups.clone());
+		for (refused, _) in self.refused.overlapping(&groups) {
+			owed.remove(refused.clone());
+		}
+		for (skipped, _) in self.skipped.overlapping(&groups) {
+			owed.remove(skipped.clone());
+		}
+		owed.iter().cloned().collect()
 	}
 
 	/// Why the subscription will not deliver the run of groups from `first`, if it said so.
@@ -266,31 +324,47 @@ impl RangeFills {
 		}
 		for groups in skipped {
 			for gap in self.refused.gaps(&groups).collect::<Vec<_>>() {
-				self.refused.insert(gap, Refusal::dropped(StreamError::NotFound));
+				self.refused.insert(gap, Refusal::skipped());
 			}
 		}
 		// The groups the subscription already accounted for, which it never sends again, are
-		// recovered on their own, once.
+		// recovered on their own, as often as the cache evicts them before a reader takes them
+		// while a fill could hold them: a fill holds the first to land until its reader takes
+		// it, so each recovery serves at least that one. Past that, the pool would evict a
+		// recovered group again as it lands, so one recovered already is refused rather than
+		// recovered again without end. A fill whose answer no reader picked up yet asks for
+		// nothing more.
 		if let Some(accounted) = accounted {
 			let tail = accounted.read();
 			let mut asked = RangeSet::new();
-			for fill in &self.held {
+			// A recovery a fill held that a debt evicted before the fill answered it, too big
+			// to hold again: as `unholdable` says of the groups whose eviction the track still
+			// records, kept with the fill so neither a grace nor a debt forgets it.
+			let mut unfit = RangeSet::new();
+			for fill in self.held.iter().filter(|fill| !fill.is_paced()) {
 				if let Some(run) = fill.next_run() {
 					asked.insert(run);
 				}
+				unfit.extend(fill.unfit());
 			}
 			for run in asked.iter() {
 				for gone in tail.accounted(run.clone()) {
 					for gap in self.recovering.gaps(&gone).collect::<Vec<_>>() {
-						for again in self.recovered.overlapping(&gap).cloned().collect::<Vec<_>>() {
-							let again = again.start.max(gap.start)..again.end.min(gap.end);
-							if self.refusal(again.start).is_none() {
-								// Recovered once for these fills; a later request may recover it again.
-								self.refused.insert(again, Refusal::passing(StreamError::NotFound));
+						for owed in self.unrefused(gap) {
+							for once in self.recovered.overlapping(&owed).cloned().collect::<Vec<_>>() {
+								let once = once.start.max(owed.start)..once.end.min(owed.end);
+								let mut unholdable = serving.unholdable(once.clone());
+								unholdable.extend(
+									unfit
+										.overlapping(&once)
+										.map(|run| run.start.max(once.start)..run.end.min(once.end)),
+								);
+								for unholdable in unholdable.iter() {
+									self.refused
+										.insert(unholdable.clone(), Refusal::passing(StreamError::NotFound));
+								}
 							}
-						}
-						for fresh in self.recovered.gaps(&gap).collect::<Vec<_>>() {
-							if self.refusal(fresh.start).is_none() {
+							for fresh in self.refused.gaps(&owed).collect::<Vec<_>>() {
 								self.recover.insert(fresh);
 							}
 						}
@@ -313,10 +387,14 @@ impl RangeFills {
 		}
 		// What a finished recovery did not deliver stands refused.
 		let mut done = Vec::new();
+		let mut walk = RangeSet::new();
 		let mut violation = None;
 		self.recoveries.retain_mut(|recovery| match recovery.poll(waiter) {
 			Poll::Ready(Ok(refused)) => {
 				done.push(refused);
+				for keys in recovery.walk.iter() {
+					walk.insert(keys.clone());
+				}
 				false
 			}
 			Poll::Ready(Err(err)) => {
@@ -334,15 +412,36 @@ impl RangeFills {
 			}
 		}
 		// What a recovery still out refused since the last poll answers the fills owing it now,
-		// rather than waiting on its other streams.
+		// rather than waiting on its other streams, including a fill handed to FETCH below.
 		let mut recoveries = std::mem::take(&mut self.recoveries);
 		for recovery in &mut recoveries {
 			self.take_refused(&mut recovery.fresh, &mut recovery.released);
 		}
 		self.recoveries = recoveries;
+		// TEMPORARY MIGRATION, see [`Recovery::walk`]: a fill owing keys a stalled recovery left
+		// goes to FETCH whole, as before per-run recoveries, once it takes what was refused
+		// already, which it may not have reached yet.
+		if !walk.is_empty() {
+			let (walking, held): (Vec<_>, _) = std::mem::take(&mut self.held)
+				.into_iter()
+				.partition(|fill| walk.overlaps(&(fill.start().group..fill.end())));
+			self.held = held;
+			for fill in &walking {
+				let span = fill.start().group..fill.end();
+				for (groups, refusal) in self.refused.overlapping(&span) {
+					refusal.answer(fill, groups.start.max(span.start)..groups.end.min(span.end));
+				}
+			}
+			self.walking.extend(walking);
+		}
 		// Rebuilt from those still out, so one ending leaves a later one's coverage of the same
 		// groups intact.
 		self.cover();
+		// A run's own subscription answers only below its start, so what lies past it is asked
+		// again rather than counted recovered.
+		if self.per_run {
+			self.recovered = self.recovering.clone();
+		}
 
 		let mut ask = FillAsk::default();
 		// Every run a held fill still owes, recovered or not.
@@ -362,8 +461,9 @@ impl RangeFills {
 			// Arms every input of the owed groups: readers, answers, and the cache.
 			let _ = fill.poll_wanted_changed(waiter);
 			loop {
+				// Answered, it is kept while a reader has yet to take what it holds.
 				let Some(run) = fill.next_run() else {
-					return false;
+					return fill.is_holding();
 				};
 				// `next_run` extends from the group owed first, which the subscription may have
 				// refused already. Refusing the run answers it, so the loop moves on.
@@ -377,8 +477,21 @@ impl RangeFills {
 					continue;
 				}
 				owed.insert(run.clone());
-				for gap in waiting.gaps(&run) {
-					ask.groups.insert(gap);
+				// With an answer no reader picked up yet, it keeps what it asked but asks for nothing
+				// more: what lands meanwhile the cache may evict before the reader gets to it.
+				let asked: Vec<Range<u64>> = match fill.is_paced() {
+					true => this
+						.ask
+						.groups
+						.overlapping(&run)
+						.map(|asked| asked.start.max(run.start)..asked.end.min(run.end))
+						.collect(),
+					false => vec![run],
+				};
+				for run in asked {
+					for gap in waiting.gaps(&run) {
+						ask.groups.insert(gap);
+					}
 				}
 				ask.add(fill);
 				return true;
@@ -387,6 +500,12 @@ impl RangeFills {
 		self.held = held;
 
 		self.forget_answered();
+
+		// Each run goes out on its own subscription, asked again by the next pass, which polls it.
+		if self.per_run && !ask.groups.is_empty() {
+			self.recover = std::mem::take(&mut ask.groups);
+			return self.poll(serve, serving, accounted, read, waiter);
+		}
 
 		// A recovery no held fill owes any group of is cancelled, once none of its streams is
 		// still being read or nobody reads the track, and a group is recovered once for the
@@ -405,8 +524,9 @@ impl RangeFills {
 		// A run stays asked whole while a fill still owes any of it, so the subscription
 		// changes once as a run is asked and once as it is done, and the streams of its
 		// answered groups keep arriving. One no fill owes stays while any of its streams is
-		// still being read, each group searched for once.
-		self.reading.retain(|_, group| group.poll_finished(waiter).is_pending());
+		// still being read, each group searched for once. The copy's own outcome says so: a
+		// reader's end would ask a flight for what the copy lacks, which nobody here reads.
+		self.reading.retain(|_, group| group.poll_closed(waiter).is_pending());
 		let edge = serving.consume();
 		let mut groups = ask.groups.clone();
 		let mut draining = RangeSet::new();
@@ -418,8 +538,8 @@ impl RangeFills {
 			// Only the groups the cache holds, so a wide run costs what it holds.
 			for gap in self.draining.gaps(run) {
 				for key in edge.cached_groups(gap) {
-					if let Some(mut group) = edge.peek_group(key)
-						&& group.poll_finished(waiter).is_pending()
+					if let Some(group) = edge.peek_group(key)
+						&& group.poll_closed(waiter).is_pending()
 					{
 						self.reading.insert(key, group);
 					}
@@ -440,7 +560,6 @@ impl RangeFills {
 		// What finishes a stream still asks with what its fills asked.
 		if self.held.is_empty() && !groups.is_empty() {
 			ask.priority = self.ask.priority;
-			ask.max_delay = self.ask.max_delay;
 			ask.order = self.ask.order;
 		}
 		ask.groups = groups;
@@ -477,13 +596,16 @@ impl RangeFills {
 
 /// Why the subscription that asked for groups will not deliver them.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Refusal {
+pub(super) struct Refusal {
 	err: StreamError,
 	/// Whether the source no longer has them, which the track records so no reader asks
 	/// again: only a genuine miss, which its publisher named. Anything else answers only the
 	/// fills owing them now, since another request may still get them: a stale drop judges
 	/// a budget, and a range starting past them is the subscriber's own choice.
 	lost: bool,
+	/// Whether the source never produced them (a SUBSCRIBE_SKIP), which the fill answers as a
+	/// skip: its readers pass over them rather than losing them.
+	skip: bool,
 }
 
 impl Refusal {
@@ -491,35 +613,72 @@ impl Refusal {
 	/// lost only when it never had them.
 	fn dropped(err: StreamError) -> Self {
 		let lost = err == StreamError::NotFound;
-		Self { err, lost }
+		Self { err, lost, skip: false }
 	}
 
 	/// Not delivered on this subscription, which says nothing of the source.
 	fn passing(err: StreamError) -> Self {
-		Self { err, lost: false }
+		Self {
+			err,
+			lost: false,
+			skip: false,
+		}
+	}
+
+	/// Never produced, as the publisher declared.
+	fn skipped() -> Self {
+		Self {
+			err: StreamError::NotFound,
+			lost: false,
+			skip: true,
+		}
 	}
 
 	/// Answer `groups` of `fill`: a lost group is named dropped, as a FETCH's miss is, and
 	/// anything else is refused for now, recorded nowhere.
 	fn answer(&self, fill: &track::FillGroups, groups: Range<u64>) {
+		if self.skip {
+			return fill.skip_groups(groups);
+		}
 		match &self.err {
 			StreamError::NotFound if self.lost => fill.drop_groups(groups),
-			StreamError::NotFound => fill.refuse_groups(groups, Error::NotFound),
-			StreamError::Old => fill.refuse_groups(groups, Error::Old),
-			err => fill.refuse_groups(groups, Error::Stream(err.clone())),
+			_ => fill.refuse_groups(groups, self.error()),
+		}
+	}
+
+	/// The error a reader asking for the groups gets.
+	pub(super) fn error(&self) -> Error {
+		match &self.err {
+			StreamError::NotFound => Error::NotFound,
+			StreamError::Old => Error::Old,
+			err => Error::Stream(err.clone()),
 		}
 	}
 }
 
 /// A subscription asking again, with no max delay, for groups another one dropped as stale,
-/// which a fill still owes. It lives until each group arrives and its stream is read, or the
-/// publisher gives it up, then FINs and waits for the publisher's FIN in reply.
-struct Recovery {
+/// which a fill still owes, or, on a finished copy, for a time start it can't place. It lives
+/// until each group arrives and its stream is read, or the publisher gives it up, then FINs
+/// and waits for the publisher's FIN in reply.
+pub(super) struct Recovery {
 	serve: TrackServe,
 	/// The copy the recovered groups land in, which records what the publisher skipped.
 	serving: track::Producer,
 	id: u64,
 	groups: Range<u64>,
+	/// Whether its range is final. Before lite-07 the subscription proves only the keys below
+	/// its start, so it asks open, then caps once at the first group that arrives.
+	capped: bool,
+	/// TEMPORARY MIGRATION, delete at the next version cut with [`Self::walk`]: armed once the
+	/// cap left keys below the first group unaccounted for.
+	stall: Option<Stall>,
+	/// TEMPORARY MIGRATION, delete at the next version cut, once no relay of the previous
+	/// release is left: the keys a stalled recovery leaves to FETCH. A relay of that release
+	/// starts the recovery at its floor, then sends the next group it holds and never accounts
+	/// for the keys between: it read a SUBSCRIBE asking no max delay as a 285,000-year grace,
+	/// so it never asks its own upstream. Its FETCH answers them, so once [`crate::tail::GRACE`] passes
+	/// they are walked a key at a time.
+	walk: RangeSet<u64>,
 	state: RecoveryState,
 	/// The groups this subscription said it will not deliver, and why.
 	refused: RangeMap<u64, Refusal>,
@@ -528,51 +687,84 @@ struct Recovery {
 	/// The groups it refused and handed over, which it no longer covers, so a later request
 	/// for them asks again rather than waiting on its other streams.
 	released: RangeSet<u64>,
+	/// Where the publisher started its range, once it said: `None` inside for no group to
+	/// deliver.
+	start: Option<Option<u64>>,
 }
 
 enum RecoveryState {
 	Establish(Box<Establish>),
-	/// Open, recording its SUBSCRIBE_START and SUBSCRIBE_FINISH as a subscription does.
+	/// Open, recording its SUBSCRIBE_START and SUBSCRIBE_END as a subscription does.
 	Active {
 		sub: Box<SubStream>,
 		/// Whether our FIN went out.
 		finished: bool,
+		/// Once the publisher FINs unprompted, as a finished track's does before lite-07, the
+		/// tail it leaves: group streams it opened may still be landing.
+		draining: Option<Box<Settle>>,
 	},
 	/// The subscription failed to open or was reset: everything left is refused.
 	Done,
 }
 
 impl Recovery {
-	fn new(serve: &TrackServe, serving: &track::Producer, groups: Range<u64>, priority: i8) -> Self {
+	pub(super) fn new(serve: &TrackServe, serving: &track::Producer, groups: Range<u64>, priority: i8) -> Self {
+		// Before lite-07 the start is the answer, which the publisher gives only once a group in
+		// range can start it, so the range stays open until the start caps it: only upstream
+		// knows which group it still holds past the run.
+		let one_start = !serve.subscriber.version.has_group_end();
+		let end = (!one_start).then_some(groups.end);
 		let subscription = Subscription::default()
-			.with_ranges(track::Range::span(Some(groups.start), Some(groups.end)))
+			.with_ranges(track::Range::span(Some(groups.start), end))
 			.with_priority(priority)
-			.with_delay(Delay::default().with_max(None))
 			.with_order(Order::Ascending);
 		let ranges = vec![lite::Range {
 			start: Some(lite::Anchor::Absolute(Position::group(groups.start))),
-			end: Some(lite::Anchor::Absolute(Position::group(groups.end))),
+			end: end.map(|end| lite::Anchor::Absolute(Position::group(end))),
 		}];
 		let copy = super::Accepted {
 			producer: serving.clone(),
 			framing: lite::Framing::new(serving.info(), serve.subscriber.version),
 		};
 		tracing::debug!(track = %serve.name, ?groups, "recovering stale groups");
-		let establish = serve.register(subscription, ranges, Some(copy));
+		// No max age: the groups it recovers are the ones a max age dropped.
+		let request = super::Request {
+			subscription,
+			ranges,
+			max_age: None,
+		};
+		let establish = serve.register(request, Some(copy));
 		Self {
 			serve: serve.clone(),
 			serving: serving.clone(),
 			id: establish.id,
 			groups,
+			capped: !one_start,
+			stall: None,
+			walk: RangeSet::new(),
 			state: RecoveryState::Establish(Box::new(establish)),
 			refused: Default::default(),
 			fresh: Default::default(),
 			released: Default::default(),
+			start: None,
+		}
+	}
+
+	/// Where the publisher started its range, once readers can read from there: it said no
+	/// group is left at or before its first key, or a start past that key, or the stream of
+	/// the group it starts at arrived. `None` inside for no group to deliver.
+	pub(super) fn landed(&self) -> Option<Option<u64>> {
+		let start = self.start?;
+		match (start, &self.state) {
+			(Some(group), RecoveryState::Active { sub, .. }) if group <= self.groups.start => {
+				sub.tail.read().first_group().is_some().then_some(start)
+			}
+			_ => Some(start),
 		}
 	}
 
 	/// Whether a stream of the subscription is still being read, which cancelling would cut.
-	fn reading(&self) -> bool {
+	pub(super) fn reading(&self) -> bool {
 		match &self.state {
 			RecoveryState::Active { sub, .. } => sub.tail.read().is_reading(),
 			_ => false,
@@ -581,7 +773,7 @@ impl Recovery {
 
 	/// End the subscription, refusing what is left of the groups with `err`, as nothing more
 	/// will arrive on it.
-	fn end(&mut self, err: StreamError) {
+	pub(super) fn end(&mut self, err: StreamError) {
 		let state = std::mem::replace(&mut self.state, RecoveryState::Done);
 		let mut owed = RangeSet::new();
 		owed.insert(self.groups.clone());
@@ -593,6 +785,9 @@ impl Recovery {
 		for (refused, _) in self.refused.iter() {
 			owed.remove(refused.clone());
 		}
+		for walked in self.walk.iter() {
+			owed.remove(walked.clone());
+		}
 		for gap in owed.iter() {
 			self.refused.insert(gap.clone(), Refusal::passing(err.clone()));
 			self.fresh.insert(gap.clone(), Refusal::passing(err.clone()));
@@ -600,14 +795,18 @@ impl Recovery {
 		self.serve.subscriber.remove_subscribe(self.id);
 		match state {
 			RecoveryState::Establish(est) => est.abort(&Error::Cancel),
-			RecoveryState::Active { sub, finished: false } => sub.stream.writer.abort(&Error::Cancel),
+			RecoveryState::Active {
+				sub,
+				finished: false,
+				draining: None,
+			} => sub.stream.writer.abort(&Error::Cancel),
 			_ => {}
 		}
 	}
 
 	/// Ready once the recovery is over, with the groups it refused, or with the protocol
 	/// violation its publisher committed, which the subscription's would be too.
-	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<RangeMap<u64, Refusal>, Error>> {
+	pub(super) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<RangeMap<u64, Refusal>, Error>> {
 		loop {
 			match &mut self.state {
 				RecoveryState::Establish(est) => match ready!(est.poll(waiter)) {
@@ -615,6 +814,7 @@ impl Recovery {
 						self.state = RecoveryState::Active {
 							sub: Box::new(active),
 							finished: false,
+							draining: None,
 						}
 					}
 					Err(err) => {
@@ -622,31 +822,95 @@ impl Recovery {
 						self.end(StreamError::from(&err));
 					}
 				},
-				RecoveryState::Active { sub: active, finished } => {
-					// FIN once every group is accounted for and read, as a subscriber does once
-					// its tail settles, and the publisher FINs in reply.
-					if !*finished {
-						let groups = self.groups.clone();
-						let settled = active
-							.tail
-							.consume()
-							.poll(waiter, |tail| match tail.covers(groups.clone()) && !tail.is_reading() {
-								true => Poll::Ready(()),
-								false => Poll::Pending,
-							})
-							.is_ready();
-						if settled {
-							let _ = active.stream.writer.finish();
-							*finished = true;
-						}
-					}
+				RecoveryState::Active {
+					sub: active,
+					finished,
+					draining,
+				} => {
 					if let Poll::Ready(Err(err)) = active.stream.writer.poll_flush(waiter) {
 						tracing::debug!(%err, "recovery subscribe write failed");
+					}
+					// The publisher is done, so only its streams still landing are waited for,
+					// at most the grace, before what is left is refused.
+					if let Some(settle) = draining {
+						let groups = self.groups.clone();
+						ready!(settle.poll(waiter, |tail| tail.covers(groups.clone())));
+						self.end(StreamError::NotFound);
+						continue;
+					}
+					// TEMPORARY MIGRATION, see [`Recovery::walk`]: what is still owed once the
+					// grace passed with no progress is left to FETCH.
+					if let Some(stall) = &mut self.stall {
+						let tail = active.tail.read();
+						if stall.poll(&tail, waiter).is_ready() && !tail.covers(self.groups.clone()) {
+							let mut walk = RangeSet::new();
+							walk.insert(self.groups.clone());
+							for arrived in tail.accounted(self.groups.clone()) {
+								walk.remove(arrived);
+							}
+							drop(tail);
+							for (refused, _) in self.refused.iter() {
+								walk.remove(refused.clone());
+							}
+							tracing::debug!(track = %self.serve.name, ?walk, "recovery stalled, fetching");
+							self.walk = walk;
+							self.end(StreamError::Cancel);
+							continue;
+						}
+					}
+					// FIN once every group is accounted for and read, as a subscriber does once
+					// its tail settles, and the publisher FINs in reply; after any update, whose
+					// flush wakes this again.
+					if !*finished && active.stream.writer.is_flushed() {
+						let groups = self.groups.clone();
+						// Before lite-07 a relay's start may be its source's, raised to the floor, which
+						// names no group: only a group that arrives proves one, so the range waits
+						// for one past the start, then stops there. What lies between is named by the
+						// publisher's drops, or given up with the grace.
+						let capping = !self.capped && active.started.is_some();
+						let seen = match active.tail.consume().poll(waiter, |tail| {
+							if capping
+								&& let Some(first) = tail.first_group()
+								&& first >= groups.start
+							{
+								return Poll::Ready(Some(first));
+							}
+							match tail.covers(groups.clone()) && !tail.is_reading() {
+								true => Poll::Ready(None),
+								false => Poll::Pending,
+							}
+						}) {
+							Poll::Ready(Ok(first)) => Some(first),
+							// The tail is gone, as the subscription ended.
+							Poll::Ready(Err(_)) => Some(None),
+							Poll::Pending => None,
+						};
+						match seen {
+							Some(Some(first)) => {
+								self.groups = groups.start..groups.end.min(first.saturating_add(1));
+								self.capped = true;
+								cap(&self.groups, active)?;
+								// TEMPORARY MIGRATION, see [`Recovery::walk`].
+								if !active.tail.read().covers(self.groups.clone()) {
+									self.stall = Some(Stall::new(&self.serve.subscriber.runtime, &active.tail.read()));
+								}
+								continue;
+							}
+							Some(None) => {
+								let _ = active.stream.writer.finish();
+								*finished = true;
+							}
+							None => {}
+						}
 					}
 					let res = ready!(active.stream.reader.poll_recv::<lite::SubscribeResponse>(waiter));
 					let now = self.serve.subscriber.runtime.now();
 					let version = self.serve.subscriber.version;
 					let groups = self.groups.clone();
+					// TEMPORARY MIGRATION, see [`Stall`]: the publisher is still answering.
+					if let Some(stall) = &mut self.stall {
+						stall.restart();
+					}
 					// What the publisher gives up of the groups, accounted for in the tail.
 					let mut given_up = |given: Range<u64>, refusal: Refusal| {
 						if let Ok(mut tail) = active.tail.write() {
@@ -661,15 +925,21 @@ impl Recovery {
 					match res {
 						// One start, for its one range.
 						Recv::Message(lite::SubscribeResponse::Start(start))
-							if active.started.is_none() && start.starts.len() == 1 =>
+							if active.started.is_none() && start.id == 0 =>
 						{
 							// Below its start the publisher delivers nothing.
-							let from = start.starts[0].unwrap_or(groups.end);
+							let from = start.start.unwrap_or(groups.end);
 							given_up(
 								groups.start..from.clamp(groups.start, groups.end),
 								Refusal::passing(StreamError::NotFound),
 							);
-							active.started = Some(start.starts[0]);
+							active.started = Some(start.start);
+							self.start = Some(start.start);
+							// Starting past the run answers all of it, so nothing more is asked.
+							if !self.capped && from >= groups.end {
+								self.capped = true;
+								cap(&self.groups, active)?;
+							}
 						}
 						Recv::Message(lite::SubscribeResponse::Drop(dropped)) => {
 							given_up(dropped.groups.clone(), Refusal::dropped(dropped.error(version)));
@@ -680,11 +950,11 @@ impl Recovery {
 						Recv::Message(lite::SubscribeResponse::Skip(skipped)) => {
 							if !skipped.groups.is_empty() {
 								self.serving.skip_received(skipped.groups.clone());
-								given_up(skipped.groups, Refusal::dropped(StreamError::NotFound));
+								given_up(skipped.groups, Refusal::skipped());
 							}
 						}
 						// Nothing at or past the track's end will be produced.
-						Recv::Message(lite::SubscribeResponse::Finish(finish)) if active.end.is_none() => {
+						Recv::Message(lite::SubscribeResponse::End(finish)) if active.end.is_none() => {
 							given_up(
 								finish.group.max(groups.start)..groups.end,
 								Refusal::dropped(StreamError::NotFound),
@@ -692,16 +962,25 @@ impl Recovery {
 							active.end = Some(finish);
 						}
 						Recv::Message(lite::SubscribeResponse::Ok(_)) => {}
-						// A second START or FINISH, or a STARTED for a range no update added.
+						// A second START or END, or a START for a range it never asked.
 						Recv::Message(msg) => {
 							tracing::warn!(?msg, "unexpected recovery subscribe response");
 							return Poll::Ready(Err(Error::ProtocolViolation));
 						}
-						// The publisher FINs in reply to ours, or once it finished the track.
-						Recv::Ended if *finished || active.end.is_some() => self.end(StreamError::NotFound),
+						// The publisher FINs in reply to ours, once the tail settled.
+						Recv::Ended if *finished => self.end(StreamError::NotFound),
+						// Or once it finished the track, before every stream it opened landed.
+						Recv::Ended if active.end.is_some() => {
+							// At most the grace: no max delay bounds the tail's own, and before lite-07
+							// nothing names a key after the FIN.
+							*draining = Some(Box::new(
+								Settle::new(&self.serve.subscriber.runtime, active.tail.consume())
+									.at_most(crate::tail::GRACE),
+							));
+						}
 
 						Recv::Ended => {
-							tracing::warn!("recovery subscribe ended without SUBSCRIBE_FINISH");
+							tracing::warn!("recovery subscribe ended without SUBSCRIBE_END");
 							return Poll::Ready(Err(Error::ProtocolViolation));
 						}
 						// Malformed bytes are a violation, as on the subscription itself.
@@ -721,6 +1000,57 @@ impl Recovery {
 			}
 		}
 	}
+}
+
+/// TEMPORARY MIGRATION, delete at the next version cut with [`Recovery::walk`]: how long a
+/// capped recovery may go without progress before what it still owes is left to FETCH.
+///
+/// A relay of the previous release never answers the keys below the first group. A current one
+/// answers them once its own upstream does, which may take longer than the grace behind a slow
+/// or deep chain, so the grace restarts on every response and data stream instead of running
+/// from the cap.
+struct Stall {
+	runtime: crate::time::Deadlines,
+	deadline: crate::time::Deadline,
+	/// The tail's streams received and whether one is being read, when last seen.
+	seen: (u64, bool),
+}
+
+impl Stall {
+	fn new(runtime: &crate::time::Deadlines, tail: &Tail) -> Self {
+		Self {
+			runtime: runtime.clone(),
+			deadline: crate::time::Deadline::after(runtime, crate::tail::GRACE),
+			seen: (tail.streams(), tail.is_reading()),
+		}
+	}
+
+	/// Restart the grace, as the publisher made progress.
+	fn restart(&mut self) {
+		self.deadline.set(self.runtime.now().checked_add(crate::tail::GRACE));
+	}
+
+	/// Ready once the grace passed with no stream arriving, being read, or finishing.
+	fn poll(&mut self, tail: &Tail, waiter: &kio::Waiter) -> Poll<()> {
+		let seen = (tail.streams(), tail.is_reading());
+		if seen != self.seen || seen.1 {
+			self.seen = seen;
+			self.restart();
+		}
+		self.deadline.poll(waiter)
+	}
+}
+
+/// Before lite-07, cap a recovery's open range at `groups`, those it waits for: nothing names
+/// the keys past a group, so the rest of the run is asked again. A stream already sent past
+/// the cap still lands.
+fn cap(groups: &Range<u64>, active: &mut SubStream) -> Result<(), Error> {
+	let range = lite::Range {
+		start: Some(lite::Anchor::Absolute(Position::group(groups.start))),
+		end: Some(lite::Anchor::Absolute(Position::group(groups.end))),
+	};
+	let (edit, _) = active.live.edit_keyed(&[((), range)], |_| ())?;
+	super::buffer_update(active, edit)
 }
 
 impl Drop for Recovery {
@@ -846,11 +1176,7 @@ mod tests {
 	fn ask(producer: &track::Producer, requests: &track::Requests) -> (track::Ordered, track::FillGroups) {
 		let waiter = kio::Waiter::noop();
 		let mut reader = producer
-			.subscribe(
-				Subscription::default()
-					.with_delay(Delay::default().with_max(None))
-					.with_range(0..3),
-			)
+			.subscribe(Subscription::default().with_max(None).with_range(0..3))
 			.ordered();
 		assert!(reader.poll_next_group(&waiter).is_pending(), "groups 0..3 are owed");
 		let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
@@ -894,17 +1220,28 @@ mod tests {
 		Refusal::dropped(StreamError::NotFound).answer(&fill, 0..3);
 		drop((reader, fill));
 		let mut reader = producer
-			.subscribe(
-				Subscription::default()
-					.with_delay(Delay::default().with_max(None))
-					.with_range(0..3),
-			)
+			.subscribe(Subscription::default().with_max(None).with_range(0..3))
 			.ordered();
 		let _ = reader.poll_next_group(&waiter);
 		assert!(
 			requests.poll_requested_fill(&waiter).is_pending(),
 			"a lost group is not asked again"
 		);
+	}
+
+	/// Groups a recovery's SUBSCRIBE_SKIP names were never produced: the reader passes over
+	/// them, not a gap, even once the pool forgets the skip the copy recorded to pay its debt.
+	#[test]
+	fn a_skip_answer_is_no_gap_once_the_cache_forgets_it() {
+		let waiter = kio::Waiter::noop();
+		let (producer, _requests, mut reader, fill) = missed();
+		Refusal::skipped().answer(&fill, 0..3);
+		producer.forget_drops(0..3);
+		assert!(
+			matches!(reader.poll_next_item(&waiter), Poll::Ready(Ok(None))),
+			"the read ends with no gap"
+		);
+		drop(fill);
 	}
 
 	/// A range starting past what it asked refuses those groups only while that range is live:

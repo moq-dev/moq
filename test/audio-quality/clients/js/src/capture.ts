@@ -44,15 +44,20 @@ export class Capture {
 				const decoder = format(config);
 				const active = broadcast.relativeBroadcast(effect, config.broadcast);
 				if (!active) return;
-				const track = active.track(name).subscribe({
-					priority: Catalog.PRIORITY.audio,
-					delay: {
-						max: maxDelay({
-							delay: input.delay.peek(),
-							maxDelay: input.maxDelay.peek(),
-						}).add(Duration.millis(config.warmup ?? 0)),
-					},
+				// The decoder's live join: its delay behind the live edge and its max, both with the warmup.
+				const asked = { priority: Catalog.PRIORITY.audio };
+				const playout = (delay: Duration, max: Duration, warmup: number): Container.Delay => ({
+					min: delay.add(Duration.millis(warmup)),
+					max: maxDelay({ delay, maxDelay: max }).add(Duration.millis(warmup)),
 				});
+				const track = active
+					.track(name)
+					.subscribe(
+						Container.subscription(
+							playout(input.delay.peek(), input.maxDelay.peek(), config.warmup ?? 0),
+							asked,
+						),
+					);
 				const groups = new Set<Group.Consumer>();
 				const tuned = Promise.withResolvers<void>();
 				effect.spawn(async () => {
@@ -67,17 +72,14 @@ export class Capture {
 					track.close();
 					for (const group of groups) group.close();
 				});
-				effect.run((inner) =>
-					track.update({
-						priority: Catalog.PRIORITY.audio,
-						delay: {
-							max: maxDelay({
-								delay: inner.get(input.delay),
-								maxDelay: inner.get(input.maxDelay),
-							}).add(Duration.millis(inner.get(input.config)?.warmup ?? 0)),
-						},
-					}),
-				);
+				effect.run((inner) => {
+					const delay = playout(
+						inner.get(input.delay),
+						inner.get(input.maxDelay),
+						inner.get(input.config)?.warmup ?? 0,
+					);
+					track.update(Container.update(delay, track.subscription.peek() ?? {}, asked));
+				});
 				effect.spawn(async () => {
 					try {
 						for (;;) {

@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use crate::bindings;
@@ -11,20 +12,115 @@ use crate::Surface;
 use crate::SurfaceMemoryDescriptor;
 use crate::VaError;
 
-/// Wrapper around `VAImage` that is tied to the lifetime of a given `Picture`.
-///
-/// An image is used to either get the surface data to client memory, or to copy image data in
-/// client memory to a surface.
-pub struct Image<'a> {
-	/// The display from which the image was created, so we can unmap it upon destruction.
+/// A `VAImage` libva created, destroyed on drop.
+struct Created {
 	display: Arc<Display>,
-	/// The `VAImage` returned by libva.
 	image: bindings::VAImage,
-	/// The mapped surface data.
-	///
-	/// The lifetime also allows us to ensure that the `Surface` we have been created from
-	/// does not drop or get changed while we exist.
-	data: &'a mut [u8],
+}
+
+impl Drop for Created {
+	fn drop(&mut self) {
+		// Safe since `self.image` is a valid `VAImage` of `self.display`.
+		unsafe {
+			bindings::va().vaDestroyImage(self.display.handle(), self.image.image_id);
+		}
+	}
+}
+
+/// A [`Created`] image whose buffer is mapped into our address space, unmapped
+/// on drop before the image is destroyed.
+struct Mapping {
+	created: Created,
+	data: *mut u8,
+	/// Cleared once the buffer is unmapped, so drop never unmaps it twice.
+	mapped: bool,
+}
+
+// Safe since `data` is plain client memory owned by the mapping, and the libva calls
+// that release it go through `Display`, which is thread-safe. `Image` reads it only
+// through `&self` and `ImageMut` writes it only through `&mut self`, so the borrow
+// rules still exclude a data race.
+unsafe impl Send for Mapping {}
+unsafe impl Sync for Mapping {}
+
+impl Mapping {
+	/// Maps `created`'s buffer, destroying the image if that fails.
+	fn new(created: Created, display_resolution: (u32, u32)) -> Result<Self, VaError> {
+		let mut addr = std::ptr::null_mut();
+		// Safe since `created.image` is a valid `VAImage` of `created.display`.
+		va_check(unsafe { bindings::va().vaMapBuffer(created.display.handle(), created.image.buf, &mut addr) })?;
+		let mapping = Self {
+			created,
+			data: addr.cast(),
+			mapped: true,
+		};
+
+		// The guard unmaps and destroys the image when the driver hands back a
+		// mapping we cannot use.
+		let image = &mapping.created.image;
+		if mapping.data.is_null()
+			|| u32::from(image.width) < display_resolution.0
+			|| u32::from(image.height) < display_resolution.1
+		{
+			return Err(VaError::status(bindings::VA_STATUS_ERROR_INVALID_IMAGE));
+		}
+		Ok(mapping)
+	}
+
+	fn image(&self) -> &bindings::VAImage {
+		&self.created.image
+	}
+
+	fn len(&self) -> usize {
+		self.created.image.data_size as usize
+	}
+
+	/// Unmaps the buffer, leaving the image to be destroyed on drop.
+	fn unmap(&mut self) -> Result<(), VaError> {
+		self.mapped = false;
+		// Safe since the buffer was mapped in `new` and not unmapped since.
+		va_check(unsafe { bindings::va().vaUnmapBuffer(self.created.display.handle(), self.created.image.buf) })
+	}
+}
+
+impl Drop for Mapping {
+	fn drop(&mut self) {
+		if self.mapped {
+			// Nothing to report a failure to; the image is destroyed regardless.
+			let _ = self.unmap();
+		}
+	}
+}
+
+/// Creates a `VAImage` in `format` at `coded_resolution`.
+fn create(
+	display: &Arc<Display>,
+	mut format: bindings::VAImageFormat,
+	coded_resolution: (u32, u32),
+) -> Result<Created, VaError> {
+	// An all-zero byte-pattern is a valid initial value for `VAImage`.
+	let mut image: bindings::VAImage = Default::default();
+	// Safe because `display` is a valid display handle.
+	va_check(unsafe {
+		bindings::va().vaCreateImage(
+			display.handle(),
+			&mut format,
+			coded_resolution.0 as i32,
+			coded_resolution.1 as i32,
+			&mut image,
+		)
+	})?;
+	Ok(Created {
+		display: Arc::clone(display),
+		image,
+	})
+}
+
+/// A read-only view of a surface's pixels in client memory, borrowing the surface.
+///
+/// For writing pixels into a surface, see [`ImageMut`].
+pub struct Image<'a> {
+	mapping: Mapping,
 	/// Whether the image was derived using the `vaDeriveImage` API or created using the
 	/// `vaCreateImage` API.
 	derived: bool,
@@ -32,58 +128,18 @@ pub struct Image<'a> {
 	/// free to enlarge this value as needed. In any case, we guarantee that an
 	/// image at least as large is returned.
 	display_resolution: (u32, u32),
-	/// Tracks whether the underlying data has possibly been written to, i.e. an encoder will create
-	/// an image and map its buffer in order to write to it, so we must writeback later.
-	dirty: bool,
-	/// The ID of the `Surface` we have been created from.
-	surface_id: u32,
+	/// Keeps the surface from being dropped or written through an [`ImageMut`] while we exist.
+	surface: PhantomData<&'a ()>,
 }
 
 impl<'a> Image<'a> {
-	/// Helper method to map a `VAImage` using `vaMapBuffer` and return an `Image`.
-	///
-	/// Returns an error if the mapping failed.
-	fn new<D: SurfaceMemoryDescriptor>(
-		surface: &'a Surface<D>,
-		image: bindings::VAImage,
-		derived: bool,
-		display_resolution: (u32, u32),
-	) -> Result<Self, VaError> {
-		let mut addr = std::ptr::null_mut();
-
-		// Safe since `picture.inner.context` represents a valid `VAContext` and `image` has been
-		// successfully created at this point.
-		match va_check(unsafe { bindings::va().vaMapBuffer(surface.display().handle(), image.buf, &mut addr) }) {
-			Ok(_) => {
-				// Assert that libva provided us with a coded resolution that is
-				// at least as large as `display_resolution`.
-				assert!(u32::from(image.width) >= display_resolution.0);
-				assert!(u32::from(image.height) >= display_resolution.1);
-
-				// Safe since `addr` points to data mapped onto our address space since we called
-				// `vaMapBuffer` above, which also guarantees that the data is valid for
-				// `image.data_size`.
-				let data = unsafe { std::slice::from_raw_parts_mut(addr as _, image.data_size as usize) };
-				Ok(Image {
-					display: Arc::clone(surface.display()),
-					image,
-					data,
-					derived,
-					display_resolution,
-					dirty: false,
-					surface_id: surface.id(),
-				})
-			}
-			Err(e) => {
-				// Safe because `picture.inner.context` represents a valid `VAContext` and `image`
-				// represents a valid `VAImage`.
-				unsafe {
-					bindings::va().vaDestroyImage(surface.display().handle(), image.image_id);
-				}
-
-				Err(e)
-			}
-		}
+	fn new(created: Created, derived: bool, display_resolution: (u32, u32)) -> Result<Self, VaError> {
+		Ok(Image {
+			mapping: Mapping::new(created, display_resolution)?,
+			derived,
+			display_resolution,
+			surface: PhantomData,
+		})
 	}
 
 	/// Create a new derived image from this `surface` using `vaDeriveImage`.
@@ -92,17 +148,42 @@ impl<'a> Image<'a> {
 	/// `surface`. On the other hand, not all `Surface`s can be derived.
 	///
 	/// `visible_rect` is the visible rectangle inside `surface` that we want to access.
+	///
+	/// The view is the surface's own memory, so it borrows the surface mutably:
+	/// nothing, not even a GPU operation taking `&Surface`, can write it while the
+	/// view is alive. It first waits for any write still in flight.
 	pub fn derive_from<D: SurfaceMemoryDescriptor>(
+		surface: &'a mut Surface<D>,
+		visible_rect: (u32, u32),
+	) -> Result<Self, VaError> {
+		surface.sync()?;
+		// Safe since the mutable borrow excludes every writer for `'a`, and the
+		// sync finished any that came before it.
+		unsafe { Self::derive_shared(surface, visible_rect) }
+	}
+
+	/// [`derive_from`](Self::derive_from) through a shared borrow.
+	///
+	/// # Safety
+	///
+	/// Nothing may write `surface`, through VA-API or otherwise, while the image
+	/// lives, nor still be writing it, such as a synced decoded picture the pool
+	/// hands out again only once every reference to it has dropped.
+	pub(crate) unsafe fn derive_shared<D: SurfaceMemoryDescriptor>(
 		surface: &'a Surface<D>,
 		visible_rect: (u32, u32),
 	) -> Result<Self, VaError> {
 		// An all-zero byte-pattern is a valid initial value for `VAImage`.
 		let mut image: bindings::VAImage = Default::default();
 
-		// Safe because `self` has a valid display handle and ID.
+		// Safe because `surface` has a valid display handle and ID.
 		va_check(unsafe { bindings::va().vaDeriveImage(surface.display().handle(), surface.id(), &mut image) })?;
+		let created = Created {
+			display: Arc::clone(surface.display()),
+			image,
+		};
 
-		Self::new(surface, image, true, visible_rect)
+		Self::new(created, true, visible_rect)
 	}
 
 	/// Create new image from `surface` using `vaCreateImage` and `vaGetImage`.
@@ -114,54 +195,32 @@ impl<'a> Image<'a> {
 	/// differ.
 	pub fn create_from<D: SurfaceMemoryDescriptor>(
 		surface: &'a Surface<D>,
-		mut format: bindings::VAImageFormat,
+		format: bindings::VAImageFormat,
 		coded_resolution: (u32, u32),
 		visible_rect: (u32, u32),
 	) -> Result<Image<'a>, VaError> {
-		// An all-zero byte-pattern is a valid initial value for `VAImage`.
-		let mut image: bindings::VAImage = Default::default();
-		let dpy = surface.display().handle();
+		let created = create(surface.display(), format, coded_resolution)?;
 
-		// Safe because `dpy` is a valid display handle.
+		// Safe because the display handle is valid, `surface` is a valid VASurface and
+		// `created.image` is a valid `VAImage`.
 		va_check(unsafe {
-			bindings::va().vaCreateImage(
-				dpy,
-				&mut format,
-				coded_resolution.0 as i32,
-				coded_resolution.1 as i32,
-				&mut image,
-			)
-		})?;
-
-		// Safe because `dpy` is a valid display handle, `picture.surface` is a valid VASurface and
-		// `image` is a valid `VAImage`.
-		match va_check(unsafe {
 			bindings::va().vaGetImage(
-				dpy,
+				surface.display().handle(),
 				surface.id(),
 				0,
 				0,
 				coded_resolution.0,
 				coded_resolution.1,
-				image.image_id,
+				created.image.image_id,
 			)
-		}) {
-			Ok(()) => Self::new(surface, image, false, visible_rect),
+		})?;
 
-			Err(e) => {
-				// Safe because `image` is a valid `VAImage`.
-				unsafe {
-					bindings::va().vaDestroyImage(dpy, image.image_id);
-				}
-
-				Err(e)
-			}
-		}
+		Self::new(created, false, visible_rect)
 	}
 
 	/// Get a reference to the underlying `VAImage` that describes this image.
 	pub fn image(&self) -> &bindings::VAImage {
-		&self.image
+		self.mapping.image()
 	}
 
 	/// Returns whether this image is directly derived from its underlying `Picture`, as opposed to
@@ -179,52 +238,162 @@ impl<'a> Image<'a> {
 	/// Returns the coded resolution. This value can be larger than the value
 	/// passed in when the image was created if the driver needs to.
 	pub fn coded_resolution(&self) -> (u32, u32) {
-		(self.image.width.into(), self.image.height.into())
+		(self.image().width.into(), self.image().height.into())
 	}
 }
 
-impl<'a> AsRef<[u8]> for Image<'a> {
+impl AsRef<[u8]> for Image<'_> {
 	fn as_ref(&self) -> &[u8] {
-		self.data
+		// Safe since the buffer stays mapped for `data_size` bytes while `self` lives, and
+		// nothing writes it: a created image is our own copy, and a derived one excludes
+		// every writer of the surface (see `derive_from`).
+		unsafe { std::slice::from_raw_parts(self.mapping.data, self.mapping.len()) }
 	}
 }
 
-impl<'a> AsMut<[u8]> for Image<'a> {
+/// Pixels to write into a surface, borrowing it mutably until [`put`](Self::put)
+/// copies them in.
+///
+/// Dropped without `put`, the image is discarded and the surface left as it was.
+///
+/// No other image of the surface, read or write, can exist alongside it:
+///
+/// ```compile_fail,E0502
+/// fn alias(surface: &mut moq_vaapi::Surface<()>, format: moq_vaapi::VAImageFormat) {
+/// 	let read = moq_vaapi::Image::create_from(surface, format, surface.size(), surface.size()).unwrap();
+/// 	let write = moq_vaapi::ImageMut::create_uninitialized(surface, format).unwrap();
+/// 	drop((read, write));
+/// }
+/// ```
+///
+/// Nor can a derived image share its surface with anything that writes it, a
+/// GPU operation through `&Surface` included:
+///
+/// ```compile_fail,E0502
+/// fn alias(surface: &mut moq_vaapi::Surface<()>) {
+/// 	let size = surface.size();
+/// 	let view = moq_vaapi::Image::derive_from(surface, size).unwrap();
+/// 	let shared: &moq_vaapi::Surface<()> = surface;
+/// 	drop((view, shared));
+/// }
+/// ```
+///
+/// An image unmaps and destroys itself only before its surface is destroyed:
+///
+/// ```compile_fail,E0505
+/// fn destroy_first(mut surface: moq_vaapi::Surface<()>) {
+/// 	let size = surface.size();
+/// 	let _view = moq_vaapi::Image::derive_from(&mut surface, size).unwrap();
+/// 	drop(surface);
+/// }
+/// ```
+///
+/// ```compile_fail,E0505
+/// fn destroy_first(mut surface: moq_vaapi::Surface<()>, format: moq_vaapi::VAImageFormat) {
+/// 	let _write = moq_vaapi::ImageMut::create_uninitialized(&mut surface, format).unwrap();
+/// 	drop(surface);
+/// }
+/// ```
+///
+/// ```compile_fail,E0499
+/// fn alias(surface: &mut moq_vaapi::Surface<()>, format: moq_vaapi::VAImageFormat) {
+/// 	let first = moq_vaapi::ImageMut::create_uninitialized(surface, format).unwrap();
+/// 	let second = moq_vaapi::ImageMut::create_uninitialized(surface, format).unwrap();
+/// 	drop((first, second));
+/// }
+/// ```
+#[must_use = "an image is written into its surface only by `put`"]
+pub struct ImageMut<'a> {
+	mapping: Mapping,
+	surface_id: bindings::VASurfaceID,
+	/// The surface's size, which the driver may have enlarged the image past.
+	size: (u32, u32),
+	surface: PhantomData<&'a mut ()>,
+}
+
+impl<'a> ImageMut<'a> {
+	/// Creates an image in `format` at `surface`'s size without reading the
+	/// surface back first, so every byte starts unspecified.
+	///
+	/// Write every pixel [`put`](Self::put) should not leave unspecified: it
+	/// copies the image's top-left area, the surface's size, into the surface.
+	pub fn create_uninitialized<D: SurfaceMemoryDescriptor>(
+		surface: &'a mut Surface<D>,
+		format: bindings::VAImageFormat,
+	) -> Result<Self, VaError> {
+		let size = surface.size();
+		let created = create(surface.display(), format, size)?;
+		Ok(Self {
+			mapping: Mapping::new(created, size)?,
+			surface_id: surface.id(),
+			size,
+			surface: PhantomData,
+		})
+	}
+
+	/// Get a reference to the underlying `VAImage` that describes this image.
+	pub fn image(&self) -> &bindings::VAImage {
+		self.mapping.image()
+	}
+
+	/// Copies the image into its surface with `vaPutImage`, returning once the
+	/// surface holds it.
+	pub fn put(mut self) -> Result<(), VaError> {
+		// libva requires the buffer unmapped before the driver reads it.
+		self.mapping.unmap()?;
+		let display = self.mapping.created.display.handle();
+		let (width, height) = self.size;
+		// Safe because the display handle is valid, `self.surface_id` is a surface we
+		// borrow, and the image is a valid, unmapped `VAImage` at least this large.
+		va_check(unsafe {
+			bindings::va().vaPutImage(
+				display,
+				self.surface_id,
+				self.mapping.image().image_id,
+				0,
+				0,
+				width,
+				height,
+				0,
+				0,
+				width,
+				height,
+			)
+		})?;
+		// The copy may still be in flight, and the borrow ends with `self`, so
+		// nothing after would know to wait for it.
+		// Safe for the same reasons as above.
+		va_check(unsafe { bindings::va().vaSyncSurface(display, self.surface_id) })
+	}
+}
+
+// The mapping that unmaps and destroys the image carries no lifetime, so these empty
+// drops are what make the drop checker hold the surface borrowed until it has run: libva
+// destroys an image only while its surface lives.
+impl Drop for Image<'_> {
+	fn drop(&mut self) {}
+}
+
+impl Drop for ImageMut<'_> {
+	fn drop(&mut self) {}
+}
+
+impl AsMut<[u8]> for ImageMut<'_> {
 	fn as_mut(&mut self) -> &mut [u8] {
-		self.dirty = true;
-		self.data
+		// Safe since the buffer stays mapped for `data_size` bytes while `self` lives, and
+		// `&mut self` makes this the only reference to it.
+		unsafe { std::slice::from_raw_parts_mut(self.mapping.data, self.mapping.len()) }
 	}
 }
 
-impl<'a> Drop for Image<'a> {
-	fn drop(&mut self) {
-		if !self.derived && self.dirty {
-			// Safe because `picture.inner.context` represents a valid `VAContext`,
-			// `picture.surface` represents a valid `VASurface` and `image` represents a valid
-			// `VAImage`.
-			unsafe {
-				bindings::va().vaPutImage(
-					self.display.handle(),
-					self.surface_id,
-					self.image.image_id,
-					0,
-					0,
-					self.image.width as u32,
-					self.image.height as u32,
-					0,
-					0,
-					self.image.width as u32,
-					self.image.height as u32,
-				);
-			}
-		}
+#[cfg(test)]
+mod tests {
+	use super::*;
 
-		unsafe {
-			// Safe since the buffer is mapped in `Image::new`, so `self.image.buf` points to a
-			// valid `VABufferID`.
-			bindings::va().vaUnmapBuffer(self.display.handle(), self.image.buf);
-			// Safe since `self.image` represents a valid `VAImage`.
-			bindings::va().vaDestroyImage(self.display.handle(), self.image.image_id);
-		}
+	#[test]
+	fn images_can_cross_threads() {
+		fn assert_send_sync<T: Send + Sync>() {}
+		assert_send_sync::<Image<'static>>();
+		assert_send_sync::<ImageMut<'static>>();
 	}
 }

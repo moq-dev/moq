@@ -10,10 +10,13 @@ so it only needs to stay green.
 
 ## Waiting
 
-- moq-dev/moq: the next scheduled Interop run on `main` passes, now that
-  [moq-dev/moq#8572](https://github.com/moq-dev/moq/pull/8572) (max age,
-  2026-11-12) and [moq-dev/moq#8635](https://github.com/moq-dev/moq/pull/8635)
-  (resumed audio, 2026-11-14) have landed. Check
+- moq-dev/moq: the next scheduled Interop run on `main` passes, now that the
+  catalog fix ([moq-dev/moq#9333](https://github.com/moq-dev/moq/pull/9333)),
+  the open-GOP fixture ([moq-dev/moq#9306](https://github.com/moq-dev/moq/pull/9306)),
+  the datagram assertion ([moq-dev/moq#9197](https://github.com/moq-dev/moq/pull/9197)),
+  and the range table's `relay-warm` marker
+  ([moq-dev/moq#9408](https://github.com/moq-dev/moq/pull/9408)) have landed. The
+  Chromium `reattach reaches live` failure of 2026-11-22 passed on 2026-11-23 (see Plan). Check
   with `gh run list --repo moq-dev/moq --workflow interop.yml --event schedule`,
   then the run's STEPS summary. The JS route port that [moq-dev/moq#8290](https://github.com/moq-dev/moq/pull/8290)
   waited on landed in [moq-dev/moq#8443](https://github.com/moq-dev/moq/pull/8443),
@@ -51,6 +54,71 @@ Object was a group's END_OF_GROUP status (fixed in
 The intermittent `go -> js` silent audio went to
 test flakes (fixed by the Go tone's start-anchored pacing), and the datagram
 cells are [moq-dev/moq#9197](https://github.com/moq-dev/moq/pull/9197)'s.
+
+Scheduled runs 2026-11-15 to 2026-11-21 (every one red) failed three causes, none a flake:
+
+- Harness regressions: `open-gop.browser.ts` since
+  [moq-dev/moq#9293](https://github.com/moq-dev/moq/pull/9293) made the player join
+  live. [moq-dev/moq#9306](https://github.com/moq-dev/moq/pull/9306) fixed the fixture
+  (merged 2026-11-22).
+- Interop (moq-transport): `datagram rust -> js-native-node` and `-bun` on moq-transport-18
+  fail every run, since [moq-dev/moq#8918](https://github.com/moq-dev/moq/pull/8918) gave
+  every JS datagram a timestamp. [moq-dev/moq#9197](https://github.com/moq-dev/moq/pull/9197)
+  fixed the assertion (merged 2026-11-22).
+- Interop (full matrix and moq-transport): `js -> js`, `js -> js-native-*`, and `go -> js`
+  timed out waiting for the catalog on moq-transport 18, 20, and 22, one to three cells per
+  pass, so a fresh retry always hid it. Root cause: a relay holding a group with its
+  END_OF_GROUP reports Largest at that status, which is no frame (and keeps doing so). The
+  next subscriber's head fill, cut one past that Largest, ran off the end of the group, so
+  the relay reset it NotFound, and the subscriber dropped the catalog group as headless.
+  Fixed in this quest's PR: a fill cut past the terminal object completes at it. A relay
+  copy resubscribing hit the same status as MalformedTrack in `judge`, which now compares
+  its answer with the last data object. It first showed in the 2026-11-15 run; the culprit
+  PR is not pinned, since bisecting a race that fails 0 to 2 of 6 cells locally found no
+  clean split.
+
+The 2026-11-22 scheduled run
+[45041226494](https://github.com/moq-dev/moq/actions/runs/45041226494), at 040a566d40 with
+both of those merged and before the catalog fix, passed the matrix and failed two other
+steps, as its own triage on 2026-11-23 found:
+
+- `Relay fills`: `relay_fill::relay_fill_range_table` failed one case, `warm: a time range
+  and a live join in one subscription: delivered [1000, 2000]` (the JavaScript relay's warm
+  copy drops the live join). The `publish error ... remote error: 1` lines are every case's
+  teardown. [moq-dev/moq#9408](https://github.com/moq-dev/moq/pull/9408) has since marked
+  that case known for `relay-warm`, and
+  [moq-dev/moq#9444](https://github.com/moq-dev/moq/pull/9444) fixed it.
+- `Media output and lifecycle`: Chromium's `reattach reaches live` on `moq-lite-06`, not
+  `replacement`. The relay did not abort the reattached player's groups: the six
+  `unknown uni stream err=old` were the fixture resetting streams before their first byte,
+  and the seven `group error err=old` its one lite-06 SUBSCRIBE_DROP (read as `Old` before
+  lite-07) of replayed history it gave up as stale. What failed the check was the player
+  page: its own clock shows its main thread stopped about 1.05 s on every resume of that
+  run, each time just before it skipped a gap of hundreds of thousands of audio keys, and
+  on the reattach the stop outlasted the 2 s window, so the harness compared the last
+  sample before it with the live fixture. The 2026-11-23 run
+  [45253796046](https://github.com/moq-dev/moq/actions/runs/45253796046), after
+  [moq-dev/moq#9377](https://github.com/moq-dev/moq/pull/9377) stopped lite-06 copies
+  (JS included) from filling such a gap one FETCH per key, shows neither the stops nor the
+  skips and passed the check. A recurrence now prints the pages' long animation frames,
+  the host's busiest processes, and how old the player's last sample was.
+
+The Nightly's `Media (firefox player)` failed the `replacement` case on 11-20, 11-21, and
+11-22, after [moq-dev/moq#9293](https://github.com/moq-dev/moq/pull/9293) and
+[moq-dev/moq#9300](https://github.com/moq-dev/moq/pull/9300). Each time an unrelated page
+underflowed with it, so the ARM runner starved;
+[moq-dev/moq#9494](https://github.com/moq-dev/moq/pull/9494) idles the lifecycle pages through
+the section. Measured on that runner class
+([run 45309593159](https://github.com/moq-dev/moq/actions/runs/45309593159), 20 of 20 focused
+runs passed), the `moq-lite-06` fallback takes 719 to 1028 ms against the 1039 ms bound
+(lite-07 314 to 438 ms, moq-transport 214 to 319 ms). A lite-06 SUBSCRIBE states no lag, so the
+viewer's audio join is a live join from the oldest group with the player's 2.13 s Max Age (2 s
+past its delay, so its jitter estimator sees every arrival), and the incumbent's
+`onDemand: "retain"` audio encodes those 2.13 s of retained PCM before its first live frame.
+Decided 2026-11-23 (maintainer, [moq-dev/moq#9511](https://github.com/moq-dev/moq/pull/9511)):
+that replay is correct, since the join gets exactly what it asks for; the quest that owned the
+fallback closed on the 20 of 20 (rejected: encoding live audio before the replay; a looser
+lite-06 bound; replaying nothing).
 
 Decided 2026-11-12 (maintainer), since green scheduled Interop is this epic's goal and stale pins caused four of the last six red runs:
 

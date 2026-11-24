@@ -3,8 +3,6 @@ plugins {
     application
 }
 
-repositories { mavenCentral() }
-
 dependencies {
     // Dynamic version: always resolve the latest published dev.moq:moq. No
     // dependency lockfile is committed, and caches of dynamic versions are

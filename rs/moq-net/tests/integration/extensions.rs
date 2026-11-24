@@ -16,7 +16,7 @@ use support::harness::{Extensions, MockConnectOptions, MockPair, connect_mock};
 const SETTLE: Duration = Duration::from_secs(1);
 
 /// Every moq-transport draft, each of which carries the SOLICIT option.
-const MOQT: [&str; 2] = ["moq-transport-18", "moq-transport-22"];
+const MOQT: [&str; 3] = ["moq-transport-18", "moq-transport-22", "moq-transport-23"];
 
 fn produce_origin(hop: u64) -> origin::Producer {
 	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
@@ -49,15 +49,18 @@ fn announced(origin: &origin::Producer, path: &str) -> bool {
 					| moq_net::origin::RouteKind::Update
 					| moq_net::origin::RouteKind::Restart,
 				announce: update,
+				..
 			} => {
 				live |= update.prefix.as_str() == path;
 			}
 			moq_net::origin::RouteEvent {
 				kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 				announce: update,
+				..
 			} => {
 				live &= update.prefix.as_str() != path;
 			}
+			other => panic!("unexpected route event {other:?}"),
 		}
 	}
 	live

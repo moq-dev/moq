@@ -1240,10 +1240,15 @@ mod tests {
 			.unwrap();
 		// Every group is written before anything reads, which the default
 		// REAL_TIME budget would collapse to the live edge.
-		let subscriber = track.subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(30))),
-		);
+		let subscriber =
+			track.subscribe(
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(Duration::from_secs(30)),
+						max: Some(Duration::from_secs(30)),
+					},
+				)]),
+			);
 		let config = crate::codec::opus::Config::new(48_000, 2);
 		let import = crate::codec::opus::Import::new(track, catalog.reserve(), config.into()).unwrap();
 		(import, subscriber)
@@ -1896,8 +1901,12 @@ mod tests {
 		assert_eq!((audio.sample_rate, audio.channel_count), (44_100, 2));
 
 		// Delay-tolerant, so the first group is still delivered once the second exists.
-		let replay = moq_net::track::Subscription::default()
-			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(30)));
+		let replay = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+			moq_net::track::Start::Live {
+				min: Some(Duration::from_secs(30)),
+				max: Some(Duration::from_secs(30)),
+			},
+		)]);
 		let mut track = consumer.track("audio").unwrap().subscribe(Some(replay)).await.unwrap();
 		for i in 0..4u64 {
 			if i == 2 {
@@ -1990,8 +1999,12 @@ mod tests {
 			.track("video")
 			.unwrap()
 			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(30))),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(Duration::from_secs(30)),
+						max: Some(Duration::from_secs(30)),
+					},
+				)]),
 			)
 			.await
 			.unwrap();

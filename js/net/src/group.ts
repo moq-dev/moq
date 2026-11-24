@@ -320,6 +320,8 @@ export class Producer {
 		};
 		hooks.groupOffset = (group) => group.#state.offset;
 		hooks.groupWholeEnd = (group) => (group.#state.closed.peek() === null ? group.#state.end : undefined);
+		hooks.groupUnplacedFrom = (group) => (group.#state.closed.peek() === null ? undefined : group.#highest());
+		hooks.groupWrites = (group) => group.#state.total;
 		hooks.groupHeadless = (group) => group.#state.index > 0 || headShed(group.#state.frames.peek().first);
 		hooks.holdGroup = (group) => {
 			group.#holds++;
@@ -1040,6 +1042,9 @@ export class Consumer {
 	#expiry?: Expiry;
 	// Carries the group across its logical track's route changes; see `resume.ts`.
 	#recover?: GroupRecover;
+	// Judges a short close the recovery left open again once its route changes, which may leave
+	// the close standing, so a caller awaiting `closed` without reading sees that too.
+	#rejudge?: Dispose;
 	// A replacement asked for while the copy being read stalls, raced against that copy.
 	#attempt?: Attempt;
 	// The frame a replacement copy resumes at: frames below it were read from an earlier copy.
@@ -1137,7 +1142,7 @@ export class Consumer {
 	}
 
 	/**
-	 * Settles with a `StreamError` of code `Old` once the subscription's `delay.max` gives up
+	 * Settles with a `StreamError` of code `Old` once the subscription's live max gives up
 	 * on this group, even after every frame was read or the group closed: a publisher still
 	 * writing or draining it races its writes against this, and against {@link closed}
 	 * settling with an error, and abandons the stream once either does. Peek it synchronously
@@ -1170,20 +1175,28 @@ export class Consumer {
 
 	// Whether a failure of the copy being read may still be continued from another route.
 	#recovers(failed: Error): boolean {
-		return !this.#verdict.peek() && !this.#torn() && this.#recover?.wants(failed) === true;
+		return (
+			!this.#verdict.peek() && !this.#torn() && this.#recover?.wants({ kind: "failed", error: failed }) === true
+		);
 	}
 
 	// Whether the read may go on past a close of the copy being read that names no end (a FIN
 	// without GROUP_END), with every frame it delivered read: the group may hold more, which the
 	// route that replaced the copy reads on from. A read that reaches the close (`decide`) judges
-	// it, once: it goes on while a newer route serves, and otherwise ends there for good, so every
-	// later look agrees. Until then it may go on, so the end is not yet final.
+	// it, once: it goes on while a newer route serves or is being spliced in, and otherwise ends
+	// there for good, so every later look agrees. Until then it may go on, so the end is not yet final.
 	#continues(decide: boolean): boolean {
 		if (this.#ended || this.#released || !this.#recover || this.#verdict.peek()) return false;
 		const state = this.#state;
 		if (state.closed.peek() !== null || state.end !== undefined || this.#bufferedFrames().length > 0) return false;
 		if (!decide) return true;
-		if (!this.#torn() && this.#recover.wants(undefined)) return true;
+		if (!this.#torn() && this.#recover.wants({ kind: "closed" })) {
+			this.#rejudge ??= this.#recover.changed.changed(() => {
+				this.#rejudge = undefined;
+				this.#refresh();
+			});
+			return true;
+		}
 		this.#end();
 		return false;
 	}
@@ -1211,7 +1224,7 @@ export class Consumer {
 	// again. Unless it may `decide`, a close no route took over yet is left for the next read to
 	// judge, as a wait for readability is no read.
 	async #readOn(decide: boolean): Promise<boolean> {
-		if (!this.#continues(false) || (!decide && !this.#recover?.wants(undefined)) || !this.#continues(true))
+		if (!this.#continues(false) || (!decide && !this.#recover?.wants({ kind: "closed" })) || !this.#continues(true))
 			return false;
 		if (this.#expiry?.expired()) {
 			this.#end(true);
@@ -1249,6 +1262,9 @@ export class Consumer {
 			group.#state.unverified = true;
 		};
 		hooks.groupArrived = (group) => group.#state.arrived;
+		hooks.skipGroupFrames = (group) => {
+			while (!group.#verdict.peek() && group.#readBufferedFrame(false, "stream")) {}
+		};
 		hooks.groupIndex = (group) => group.#index();
 		hooks.groupFirstFrame = (group) => group.#state.offset;
 		hooks.groupStarted = (group) =>
@@ -1347,7 +1363,7 @@ export class Consumer {
 	// once nothing can continue it, except past a short close, which then ends where it closed.
 	async #resume(cause: RecoverCause): Promise<boolean> {
 		const recover = this.#recover;
-		if (this.#torn() || !recover?.wants(cause.kind === "failed" ? cause.error : undefined)) return false;
+		if (this.#torn() || !recover?.wants(cause)) return false;
 		// A stall's attempt learns nothing of a failure or close since: ask again with it.
 		if (cause.kind !== "stalled" && this.#attempt && this.#attempt.cause !== cause.kind) this.#abandon();
 		let attempt = this.#attempt;
@@ -1557,7 +1573,7 @@ export class Consumer {
 				return;
 			}
 			if (this.#released || this.#expire()) return;
-			if (this.#recover?.wants(undefined)) {
+			if (this.#recover?.wants({ kind: "stalled" })) {
 				await this.#resume({ kind: "stalled" });
 				continue;
 			}
@@ -1635,7 +1651,7 @@ export class Consumer {
 			// drift budget bounds, and the only place it applies.
 			if (this.#expire()) continue;
 			// A stall while a newer route serves looks there too.
-			if (this.#recover?.wants(undefined)) {
+			if (this.#recover?.wants({ kind: "stalled" })) {
 				await this.#resume({ kind: "stalled" });
 				continue;
 			}
@@ -1705,6 +1721,8 @@ export class Consumer {
 			this.#fail(abort);
 		}
 		this.#abandon();
+		this.#rejudge?.();
+		this.#rejudge = undefined;
 		this.#recover?.close?.();
 		this.#recover = undefined;
 		// Closing is terminal for this reader, even with frames still unread.

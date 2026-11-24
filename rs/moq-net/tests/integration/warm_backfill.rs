@@ -9,10 +9,10 @@
 //! nor asks for them, and read only the live edge until it took the cached backfill as
 //! filled.
 
+use crate::WithMax as _;
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use moq_net::track::Delay;
 use moq_net::track::{Info, Subscription};
 use moq_net::{Timescale, Timestamp, Version, origin, track};
 
@@ -50,8 +50,8 @@ async fn subscribe(relay: &origin::Producer) -> track::Subscriber {
 		.unwrap()
 		.subscribe(
 			Subscription::default()
-				.with_delay(Delay::default().with_max(BUDGET))
-				.with_ranges([crate::support::keys(0..)]),
+				.with_ranges([crate::support::keys(0..)])
+				.with_max(BUDGET),
 		)
 		.await
 		.unwrap()
@@ -106,7 +106,7 @@ async fn a_newcomer_on_a_warm_relay_gets_the_backfill() {
 /// A refused history fill or FETCH never ends its live subscription.
 #[kio::test]
 async fn a_refused_transport_backfill_keeps_delivering_live() {
-	for version in ["moq-transport-18", "moq-transport-22"] {
+	for version in ["moq-transport-18", "moq-transport-22", "moq-transport-23"] {
 		let publisher = origin(1);
 		let relay = origin(2);
 		let _link = peer(version.parse::<Version>().unwrap(), &publisher, &relay).await;

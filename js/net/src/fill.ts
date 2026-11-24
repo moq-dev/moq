@@ -10,11 +10,10 @@
  *
  * @module
  */
-import { Duration } from "@moq/clock";
 import { type GetPromise, type Getter, Signal } from "@moq/signals";
 import { NotFound, StreamCode, toStreamCode } from "./error.ts";
 import type { Producer as GroupProducer } from "./group.ts";
-import { cutRun, insertRun, NO_MAX_DELAY, runGaps, runsFrom } from "./internal.ts";
+import { cutRun, insertRun, runGaps, runsFrom } from "./internal.ts";
 import type { Info, Order } from "./track.ts";
 import { checkEnd, checkKey, max, min } from "./util/key.ts";
 
@@ -42,6 +41,8 @@ export interface FillTrack {
 	 * its first frames, which a fill from frame 0 replaces.
 	 */
 	holds(key: bigint): boolean | "headless";
+	/** The group the track caches at `key`, if any. */
+	cached(key: bigint): GroupProducer | undefined;
 	/** Whether the track closed, so nothing more can be served. */
 	closed(): boolean;
 	/** Settles once the track closes. */
@@ -58,23 +59,17 @@ export interface Asker {
 	wants(start: bigint, end: bigint): Run[];
 	/** Its delivery priority. */
 	priority(): number;
-	/** Its age budget in milliseconds: `Infinity` for none, so the publisher's alone bounds it. */
-	maxDelay(): number;
 	/** Which end it reads first. */
 	order(): Order;
-	/**
-	 * Stop waiting for `[start, end)`, which a fill refused with `error`, without asking again.
-	 * With `stale`, the source judged them too old under that budget in milliseconds: a verdict
-	 * on this reader only while its own budget is no wider, so a widening asks again.
-	 */
-	refuse(start: bigint, end: bigint, error: Error, stale?: number): void;
+	/** Stop waiting for `[start, end)`, which a fill refused with `error`, without asking again. */
+	refuse(start: bigint, end: bigint, error: Error): void;
 }
 
 // The fill operations a handle runs against the state it came from; assigned in its static block.
 let fillOps: {
 	accept(state: FillState, pending: Pending, key: bigint, info: Info | undefined): GroupProducer | undefined;
 	drop(state: FillState, pending: Pending, start: bigint, end: bigint, hole?: { error: Error; stale?: number }): void;
-	refuse(state: FillState, pending: Pending, start: bigint, end: bigint, error: Error, stale?: number): void;
+	refuse(state: FillState, pending: Pending, start: bigint, end: bigint, error: Error): void;
 	settle(state: FillState, pending: Pending): void;
 	name(state: FillState): string;
 };
@@ -423,7 +418,10 @@ export class FillState {
 				const group = state.#track.holds(key) === true ? undefined : state.#track.accept(key, info);
 				// A time start's fill is no live part, and a group below its key lands nowhere it owes.
 				if (pending.exclusive && !pending.done) {
-					pending.answer = { kind: "group", group: key };
+					// Below the time, it holds the group it names, created or cached, so its End stays known
+					// once the cache lets it go.
+					const answer = key < pending.start ? (group ?? state.#track.cached(key)) : undefined;
+					pending.answer = { kind: "group", group: key, answer };
 					state.#resolve(pending, pending.start, pending.end);
 				}
 				return group;
@@ -435,12 +433,11 @@ export class FillState {
 					state.#track.drop(run.start, run.end, hole ?? { error: new NotFound(`group ${run.start}`) });
 				}
 				// A stale verdict settles only readers that read every group above it, so the readers
-				// waiting now are refused as well, as the Rust `Inner::drop_groups` does. It binds every
-				// reader, so the refusal carries no budget a wider one could see past.
+				// waiting now are refused as well, as the Rust `Inner::drop_groups` does.
 				if (hole?.stale !== undefined) fillOps.refuse(state, pending, start, end, hole.error);
 				else state.#resolve(pending, start, end);
 			},
-			refuse: (state, pending, start, end, error, stale) => {
+			refuse: (state, pending, start, end, error) => {
 				// A time start's refusal reaches its reader through the lookup, as the error its
 				// reads fail with, not as a group given up.
 				if (pending.exclusive) {
@@ -450,8 +447,7 @@ export class FillState {
 				}
 				for (const gap of pending.unresolved(start, end)) {
 					for (const asker of pending.askers) {
-						for (const run of asker.wants(gap.start, gap.end))
-							asker.refuse(run.start, run.end, error, stale);
+						for (const run of asker.wants(gap.start, gap.end)) asker.refuse(run.start, run.end, error);
 					}
 				}
 				state.#resolve(pending, start, end);
@@ -470,23 +466,17 @@ export let wantedRuns: (fill: FillGroups) => Run[];
  */
 export let fillChanged: (fill: FillGroups) => GetPromise<unknown>;
 /**
- * The budget in milliseconds an OLD answer was judged under, and whether that is the publisher's
- * max age, which binds every reader, rather than the request's own budget.
- *
- * @internal
- */
-export interface Judged {
-	budget: number;
-	everyone: boolean;
-}
-
-/**
  * What a time start's handler answered: the group containing the time, no group from the floor
  * through it, or a refusal saying nothing of where it falls. Mirrors the Rust `fill::TimeStart`.
  *
  * @internal
  */
-export type TimeStart = { kind: "group"; group: bigint } | { kind: "dropped" } | { kind: "refused"; error: Error };
+export type TimeStart =
+	/**
+	 * The group containing the time, and the group that answered it below the time, held so where it
+	 * ends is known once the cache lets it go.
+	 */
+	{ kind: "group"; group: bigint; answer?: GroupProducer } | { kind: "dropped" } | { kind: "refused"; error: Error };
 
 /**
  * A reader's time start, from {@link FillState.timeStart}.
@@ -505,14 +495,12 @@ export interface Lookup {
 }
 
 /**
- * Answer `[start, end)` of `fill` with its source's refusal of a request for them. An OLD one
- * says every older group of the fill is stale too, since a timed track's starts never rewind:
- * judged under the request's own budget, or a max age not known here (`judged` undefined), it is
- * refused to the readers waiting now, a verdict only on those no more tolerant, so a wider reader
- * asks again; under the publisher's max age it binds every reader, so the track records it as a
- * stale verdict under that age, which a new upstream subscription or the drop set's expiry window
- * forgets. Any other refusal answers only `[start, end)`, for now. Mirrors the Rust
- * `Fill::reject_groups`.
+ * Answer `[start, end)` of `fill` with its source's refusal of a request for them. An OLD one,
+ * past the publisher's max age `bound` in milliseconds, says every older group of the fill is
+ * stale too, since a timed track's starts never rewind: it binds every reader, so the track
+ * records it as a stale verdict under that age, which a new upstream subscription or the drop
+ * set's expiry window forgets. Any other refusal, or an OLD one with no max age known here,
+ * answers only `[start, end)`, for now. Mirrors the Rust `Inner::reject`.
  * @internal
  */
 export let rejectGroups: (
@@ -520,7 +508,7 @@ export let rejectGroups: (
 	start: bigint,
 	end: bigint,
 	error: Error,
-	judged: Judged | undefined,
+	bound: number | undefined,
 ) => void;
 
 // Constructs the public handles from within this module; assigned in their static blocks.
@@ -532,13 +520,6 @@ function priorityOf(pending: Pending): number {
 	let priority: number | undefined;
 	for (const asker of pending.askers) priority = Math.max(priority ?? asker.priority(), asker.priority());
 	return priority ?? 0;
-}
-
-// The most tolerant age budget among the readers waiting on `pending` now, or `null` for none.
-function maxDelayOf(pending: Pending): Duration | null {
-	let max = 0;
-	for (const asker of pending.askers) max = Math.max(max, asker.maxDelay());
-	return max < NO_MAX_DELAY ? Duration.millis(max) : null;
 }
 
 /**
@@ -615,7 +596,7 @@ export class Requests {
  * asks for the group containing that time as a fill one key wide, from the time, whose first group
  * may start below it: see {@link floor}.
  *
- * Its {@link priority}, {@link maxDelay}, and {@link order} follow its readers as they change, so
+ * Its {@link priority} and {@link order} follow its readers as they change, so
  * read them as each group is served. Call {@link accept} for each group the source has, writing
  * its frames into the returned producer, and {@link dropGroups} for those it does not. Readers
  * that leave, or narrow their ranges past a group, stop wanting it: serve {@link wanted} until it
@@ -635,14 +616,15 @@ export class FillGroups {
 	/**
 	 * The oldest group the first group may start at: {@link start}, unless that is a reader's time
 	 * start no cached group places. Then the first group is the one containing that time: the group
-	 * starting at it, or else the newest one starting before it, at or after the floor. A handler
+	 * starting at it, or else the newest one starting before it, at or after the floor; once that
+	 * group ends whole at or before the time, the reader starts past it, at its End. A handler
 	 * knowing its groups only by key serves that key as any other; one that can tell which group
 	 * holds the time, as from an index, may {@link accept} that group instead, or
 	 * {@link dropGroups} the key when none does. The reader starts where the answer says, never
 	 * where the cached groups happen to say: a drop, or the fill closed unanswered, says no group
-	 * starts from the floor through the time, so it starts at the group just below the floor, or
-	 * past the time when the floor is 0. A {@link refuseGroups refusal} fails the reader with its
-	 * error until its ranges change.
+	 * starts from the floor through the time, so it starts at the group just below the floor (at its
+	 * End once the time is past that group's span), or past the time when the floor is 0. A
+	 * {@link refuseGroups refusal} fails the reader with its error until its ranges change.
 	 */
 	readonly floor: bigint;
 
@@ -663,28 +645,15 @@ export class FillGroups {
 		makeGroups = (state, pending) => new FillGroups(state, pending);
 		wantedRuns = (fill) => fill.#pending.owed();
 		fillChanged = (fill) => Signal.race(fill.#pending.revision);
-		rejectGroups = (fill, start, end, error, judged) => {
-			if (toStreamCode(error) !== StreamCode.Old) {
-				fill.refuseGroups(start, end, error);
-			} else if (judged?.everyone) {
-				fillOps.drop(fill.#state, fill.#pending, fill.start, end, { error, stale: judged.budget });
-			} else {
-				fillOps.refuse(fill.#state, fill.#pending, fill.start, end, error, judged?.budget);
-			}
+		rejectGroups = (fill, start, end, error, bound) => {
+			if (toStreamCode(error) !== StreamCode.Old || bound === undefined) fill.refuseGroups(start, end, error);
+			else fillOps.drop(fill.#state, fill.#pending, fill.start, end, { error, stale: bound });
 		};
 	}
 
 	/** The most urgent delivery priority among the readers waiting on it now. */
 	get priority(): number {
 		return priorityOf(this.#pending);
-	}
-
-	/**
-	 * The most tolerant age budget among the readers waiting on it now, or `null` for none: the
-	 * publisher's {@link Info.maxAge} alone bounds it. Each reader still enforces its own.
-	 */
-	get maxDelay(): Duration | null {
-		return maxDelayOf(this.#pending);
 	}
 
 	/** Which end to fill first now: `"descending"`, newest first, if any reader asks it. */

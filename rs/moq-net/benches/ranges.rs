@@ -24,7 +24,6 @@
 
 use std::hint::black_box;
 use std::task::Poll;
-use std::time::Duration;
 
 use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
@@ -32,9 +31,6 @@ use moq_net::{Timestamp, broadcast, group, track};
 
 /// Ranges in the one subscription, up to about what a lite-07 SUBSCRIBE fits.
 const RANGES: [u64; 4] = [1, 64, 1024, 16_384];
-
-/// A budget the run never outlasts, so nothing goes stale.
-const BUDGET: Duration = Duration::from_secs(3600);
 
 /// Where the live feed starts, in milliseconds, past every time a range names.
 const LIVE: u64 = 1 << 32;
@@ -89,9 +85,8 @@ impl TimeEnds {
 		let track = broadcast.create_track("bench", timed()).unwrap();
 		land(&track, 0);
 		// Each range starts and ends far past the live edge, at a time of its own.
-		let subscription = track::Subscription::default()
-			.with_delay(track::Delay::default().with_max(BUDGET))
-			.with_ranges((0..ranges).map(|i| span(LIVE + i * 2, LIVE + i * 2 + 1)));
+		let subscription =
+			track::Subscription::default().with_ranges((0..ranges).map(|i| span(LIVE + i * 2, LIVE + i * 2 + 1)));
 		let mut reader = track.subscribe(subscription);
 		drain(&mut reader);
 		Self {
@@ -124,7 +119,6 @@ impl TimeCap {
 		land(&track, 0);
 		// The time end, then disjoint groups far past anything the run lands.
 		let subscription = track::Subscription::default()
-			.with_delay(track::Delay::default().with_max(BUDGET))
 			.with_ranges(std::iter::once(span(0, LIVE)).chain((1..ranges).map(|i| span(LIVE + i * 2, LIVE + i * 2))));
 		let mut reader = track.subscribe(subscription);
 		drain(&mut reader);
@@ -167,9 +161,8 @@ impl FillsOut {
 		let start = ranges * 2;
 		track.start_at(start).unwrap();
 		land(&track, start);
-		let subscription = track::Subscription::default()
-			.with_delay(track::Delay::default().with_max(BUDGET))
-			.with_ranges((0..ranges).map(|i| span(i * 2, i * 2)).chain([track::Range {
+		let subscription =
+			track::Subscription::default().with_ranges((0..ranges).map(|i| span(i * 2, i * 2)).chain([track::Range {
 				start: track::Start::Time(start),
 				end: None,
 			}]));
@@ -213,7 +206,6 @@ impl Sparse {
 			land(&track, i * STRIDE);
 		}
 		let subscription = track::Subscription::default()
-			.with_delay(track::Delay::default().with_max(BUDGET))
 			.with_ranges(std::iter::once(span(0, 0)).chain((1..=ranges).map(|i| span(i * STRIDE + 1, i * STRIDE + 1))));
 		let mut reader = track.subscribe(subscription);
 		let groups = usize::try_from(ranges).unwrap() + 1;
@@ -262,7 +254,6 @@ impl TimeGaps {
 		}
 		let live = span(ranges * GAP, LIVE);
 		let subscription = track::Subscription::default()
-			.with_delay(track::Delay::default().with_max(BUDGET))
 			.with_ranges((0..ranges).map(|i| span(i * GAP + 1, i * GAP + 5)).chain([live]));
 		let mut reader = track.subscribe(subscription);
 		let groups = usize::try_from(ranges).unwrap() + 1;

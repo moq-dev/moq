@@ -5,12 +5,13 @@
 //! below it. A handler that knows its groups' times answers with the group containing the
 //! time; one serving key by key serves the key, which is that group when one starts there.
 
+use crate::WithMax as _;
 use crate::support;
 
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use moq_net::track::{Delay, FillGroups, Info, Order, Range, Requests, Subscription};
+use moq_net::track::{FillGroups, Info, Order, Range, Requests, Subscription};
 use moq_net::{Timescale, Timestamp, Version};
 use support::harness::peer;
 
@@ -101,7 +102,7 @@ async fn read(range: Range, by_time: bool) -> (BTreeSet<u64>, Vec<(u64, u64)>) {
 		.unwrap();
 
 	let subscription = Subscription::default()
-		.with_delay(Delay::default().with_max(FOREVER))
+		.with_max(FOREVER)
 		.with_order(Order::Ascending)
 		.with_ranges([range]);
 	let mut reader = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription))

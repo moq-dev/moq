@@ -713,9 +713,13 @@ impl<O: Output> Media<O> {
 				// live edge, never at a warm copy's backlog, so it names no cached group
 				// for the shared publisher subscription to rewind to.
 				let subscriber = track
-					.subscribe(playout.subscription(
-						moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.video),
-					))
+					.subscribe(
+						playout.subscription(
+							moq_net::track::Subscription::default()
+								.with_priority(hang::catalog::PRIORITY.video)
+								.with_ranges([moq_net::track::Range::ALL]),
+						),
+					)
 					.await?;
 				let format = catalog::hang::Container::try_from(&config)?;
 				// The playout delay is the target latency, and the max how late a group may be.
@@ -2197,7 +2201,12 @@ mod tests {
 		let subscriber = video
 			.consume()
 			.subscribe(
-				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(delay)),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(delay),
+						max: Some(delay),
+					},
+				)]),
 			)
 			.await
 			.unwrap();
@@ -2332,7 +2341,12 @@ mod tests {
 		let subscriber = video
 			.consume()
 			.subscribe(
-				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(delay)),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(delay),
+						max: Some(delay),
+					},
+				)]),
 			)
 			.await
 			.unwrap();
@@ -2658,8 +2672,12 @@ mod tests {
 		let subscriber = video
 			.consume()
 			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(Duration::from_secs(10)),
+						max: Some(Duration::from_secs(10)),
+					},
+				)]),
 			)
 			.await
 			.unwrap();
@@ -3613,7 +3631,12 @@ mod tests {
 			.track("video")
 			.unwrap()
 			.subscribe(
-				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(delay)),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(delay),
+						max: Some(delay),
+					},
+				)]),
 			)
 			.await
 			.unwrap();

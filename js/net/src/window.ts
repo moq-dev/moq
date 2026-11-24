@@ -11,8 +11,8 @@
 
 import { Duration } from "@moq/clock";
 import { Counts, Cover } from "./cover.ts";
-import { NO_MAX_DELAY, wireMillis } from "./internal.ts";
-import type { Range, Start } from "./track.ts";
+import { NO_MAX_DELAY, runsFrom, wireMillis } from "./internal.ts";
+import type { Range, Start, Subscription } from "./track.ts";
 import { max, min, UNBOUNDED } from "./util/key.ts";
 import { Sorted } from "./util/sorted.ts";
 
@@ -32,12 +32,25 @@ function timeOf(field: string, value: unknown): bigint | undefined {
 	throw new TypeError(`${field} must be a time, a non-negative bigint`);
 }
 
-/** Check one start's shape: a time, or a live join's lag rounded up to a whole millisecond. */
+/**
+ * Check one start's shape: a time, or a live join, its lag and max each rounded up to a whole
+ * millisecond or null for no limit, an omitted max as zero.
+ */
 function checkStart(value: unknown): Start | undefined {
 	if (typeof value === "object" && value !== null && "live" in value) {
 		const live = (value as { live: unknown }).live;
-		if (!(live instanceof Duration)) throw new TypeError("a live range start must be a Duration");
-		return { live: wireMillis("live range start", live) };
+		if (typeof live !== "object" || live === null) throw new TypeError("a live range start must be { min, max }");
+		const { min, max } = live as { min: unknown; max?: unknown };
+		if (min !== null && !(min instanceof Duration))
+			throw new TypeError("a live range start's min must be a Duration or null");
+		if (max !== undefined && max !== null && !(max instanceof Duration))
+			throw new TypeError("a live range start's max must be a Duration or null");
+		return {
+			live: {
+				min: min === null ? null : wireMillis("live range start min", min),
+				max: max === null ? null : wireMillis("live range start max", max ?? Duration.ZERO),
+			},
+		};
 	}
 	return timeOf("range start", value);
 }
@@ -63,10 +76,56 @@ export function rangeTime(range: Range): bigint | undefined {
 
 /**
  * The lag of the live join `range` starts with, in whole milliseconds rounded up as the wire
- * carries it, undefined for a range that doesn't join live. Mirrors the Rust `live_millis`.
+ * carries it, null for no lag limit, and undefined for a range that doesn't join live. Mirrors
+ * the Rust `live_millis`.
  */
-export function liveMillis(range: Range): number | undefined {
-	return typeof range.start === "object" ? Math.ceil(range.start.live.asMillis()) : undefined;
+export function liveMillis(range: Range): number | null | undefined {
+	if (typeof range.start !== "object") return undefined;
+	const { min } = range.start.live;
+	return min && Math.ceil(min.asMillis());
+}
+
+/**
+ * A live join's max as a budget in milliseconds, rounded up: {@link NO_MAX_DELAY} for none, and
+ * zero when omitted. Mirrors the Rust `budget`.
+ */
+function budgetOf(max: Duration | null | undefined): number {
+	if (max === null) return NO_MAX_DELAY;
+	return max === undefined ? 0 : Math.min(Math.ceil(max.asMillis()), NO_MAX_DELAY);
+}
+
+/** A budget in milliseconds as a live join's max: {@link NO_MAX_DELAY} is no limit. Mirrors the Rust `max_of`. */
+export function maxOf(budget: number): Duration | null {
+	return budget >= NO_MAX_DELAY ? null : Duration.millis(budget);
+}
+
+/**
+ * The staleness budget in milliseconds of the groups `range` covers: its max for a live join, and
+ * none ({@link NO_MAX_DELAY}) for history. Mirrors the Rust `Range::budget`.
+ */
+export function rangeBudget(range: Range): number {
+	return typeof range.start === "object" ? budgetOf(range.start.live.max) : NO_MAX_DELAY;
+}
+
+/**
+ * The widest staleness budget in milliseconds any of `ranges` gives a group: none while a history
+ * range is asked for, and otherwise the largest live join's max, zero with no range. Mirrors the
+ * Rust `Subscription::widest`.
+ */
+export function widest(ranges: Iterable<Range>): number {
+	let widest = 0;
+	for (const range of ranges) if (!isEmpty(range)) widest = Math.max(widest, rangeBudget(range));
+	return widest;
+}
+
+/**
+ * The live join `range` asks, as its lag in milliseconds and its end, as one key: the key a join
+ * is placed and answered under, which a change of max alone keeps. Undefined for history. Mirrors
+ * the Rust `Range::join`.
+ */
+export function joinOf(range: Range): string | undefined {
+	const lag = liveMillis(range);
+	return lag === undefined ? undefined : `${lag}:${range.end ?? ""}`;
 }
 
 /**
@@ -93,15 +152,22 @@ export function isEmpty(range: Range): boolean {
  * live joins by lag, then by end, open first.
  */
 export function compare(a: Range, b: Range): number {
-	const rank = (range: Range): [number, bigint] => {
+	const rank = (range: Range): [number, bigint, bigint] => {
 		const live = liveMillis(range);
-		if (live !== undefined) return [2, BigInt(live)];
+		// A lag or max of none sorts first, as Rust's `Option` does.
+		if (live !== undefined) return [2, BigInt(live ?? -1), BigInt(liveMax(range))];
 		const time = rangeTime(range);
-		return time === undefined ? [0, 0n] : [1, time];
+		return time === undefined ? [0, 0n, 0n] : [1, time, 0n];
 	};
-	const [ra, va] = rank(a);
-	const [rb, vb] = rank(b);
-	return ra - rb || order(va, vb) || order(a.end ?? -1n, b.end ?? -1n);
+	const [ra, va, ma] = rank(a);
+	const [rb, vb, mb] = rank(b);
+	return ra - rb || order(va, vb) || order(ma, mb) || order(a.end ?? -1n, b.end ?? -1n);
+}
+
+// A live join's max as a sort key: -1 for none, so it sorts first, else its milliseconds.
+function liveMax(range: Range): number {
+	const budget = rangeBudget(range);
+	return budget >= NO_MAX_DELAY ? -1 : budget;
 }
 
 function order(a: bigint, b: bigint): number {
@@ -116,7 +182,7 @@ export function sameRanges(a: readonly Range[], b: readonly Range[]): boolean {
 /** A range as a string, equal exactly when the ranges are; JSON can't hold a bigint. */
 export function rangeKey(range: Range): string {
 	const live = liveMillis(range);
-	const start = live === undefined ? (rangeTime(range) ?? "") : `L${live}`;
+	const start = live === undefined ? (rangeTime(range) ?? "") : `L${live}/${liveMax(range)}`;
 	return `${start}..${range.end ?? ""}`;
 }
 
@@ -127,7 +193,8 @@ export function rangeKey(range: Range): string {
  * placed without the live edge, so only an open range drops what it certainly covers: the open
  * time span drops ranges starting inside it, and a range from the oldest group following the live
  * edge covers everything. A live join reaches no further back than its lag, so it covers nothing
- * else. Mirrors the Rust `union`.
+ * else, and live joins of the same lag and end are one range under the largest max among them:
+ * where a join lands doesn't depend on it. Mirrors the Rust `union`.
  */
 export function union(ranges: readonly Range[]): Range[] {
 	const kept = ranges.filter((range) => !isEmpty(range));
@@ -151,7 +218,17 @@ export function union(ranges: readonly Range[]): Range[] {
 		run.end === UNBOUNDED ? { start: run.start } : { start: run.start, end: run.end - 1n },
 	);
 	// A range with no time start can't be placed against the time spans.
-	for (const range of kept) if (rangeTime(range) === undefined) out.push(range);
+	const joins = new Map<string, Range>();
+	for (const range of kept) {
+		const join = joinOf(range);
+		if (join === undefined) {
+			if (rangeTime(range) === undefined) out.push(range);
+			continue;
+		}
+		const held = joins.get(join);
+		if (!held || rangeBudget(range) > rangeBudget(held)) joins.set(join, range);
+	}
+	out.push(...joins.values());
 
 	out.sort(compare);
 	return out.filter((range, index) => index === 0 || rangeKey(range) !== rangeKey(out[index - 1]));
@@ -191,6 +268,38 @@ export function wireRanges(ranges: readonly Range[]): Range[] {
 	return ranges.filter((range) => !isEmpty(range));
 }
 
+/**
+ * {@link wireRanges} of `subscription`, and the group each live join among them was
+ * {@link Subscription.placed | placed} at, by its index there.
+ */
+export function wireHeld(subscription: Subscription): { ranges: Range[]; placed: Map<number, bigint> } {
+	const ranges: Range[] = [];
+	const placed = new Map<number, bigint>();
+	for (const [index, range] of (subscription.ranges ?? [{}]).entries()) {
+		if (isEmpty(range)) continue;
+		const group = subscription.placed?.get(index);
+		if (group !== undefined) placed.set(ranges.length, group);
+		ranges.push(range);
+	}
+	return { ranges, placed };
+}
+
+/**
+ * `ranges` with each live join `placed` at a group, by index, as a time start there: how a wire
+ * before lite-07 narrows it, whose one max age still takes the join's max (see the original
+ * ranges). Mirrors the Rust `Subscription::times`.
+ */
+export function placedAsTimes(ranges: readonly Range[], placed: ReadonlyMap<number, bigint>): Range[] {
+	if (placed.size === 0) return [...ranges];
+	return ranges.map((range, index) => {
+		const group = placed.get(index);
+		if (group === undefined) return range;
+		const out: Range = { start: group };
+		if (range.end !== undefined) out.end = range.end;
+		return out;
+	});
+}
+
 /** Whether every range has an end, so a lite-07 publisher ends the subscription once it covers them. */
 export function bounded(ranges: readonly Range[]): boolean {
 	return ranges.every((range) => range.end !== undefined);
@@ -201,8 +310,8 @@ export function bounded(ranges: readonly Range[]): boolean {
  * from the oldest group, following it. A time start resumes a known group instead, such as a route
  * switch picking up where the reader stopped. Mirrors the Rust `Prefs::joins_live`.
  */
-export function joinsLive(ranges: readonly Range[] | undefined): boolean {
-	return (ranges ?? [{}]).some((range) => rangeTime(range) === undefined && range.end === undefined);
+export function joinsLive(ranges: readonly Range[]): boolean {
+	return ranges.some((range) => rangeTime(range) === undefined && range.end === undefined);
 }
 
 /**
@@ -259,10 +368,67 @@ export function clamped(
 	});
 }
 
+/**
+ * How a received copy places a live join's range: from an upstream answer recorded after join tick
+ * `since`, the live edge having moved since any earlier one (see {@link Holdings.join}), or `at`
+ * the group it was already placed at (see {@link Subscription.placed}). Mirrors the Rust `Joining`.
+ */
+export type Joining = { since: number; at?: never } | { at: bigint; since?: never };
+
+/** A live join placed from any answer. Mirrors the Rust `Joining::default`. */
+export const SINCE_ZERO: Joining = { since: 0 };
+
+// The group `joining` places a join at, if it was placed already.
+function placedAt(joining: Joining | undefined): bigint | undefined {
+	return joining?.at;
+}
+
+/**
+ * `ranges` as a copy asked from `floor` through the exclusive `end` asks for them, and the group each
+ * live join among them is {@link Subscription.placed | placed} at, by index: as {@link clamped} places
+ * them, except a live join with a max, which stays itself, placed at the group {@link clamped} starts
+ * it at. As a time start it would read as history, whose groups never go stale. A join `placed`
+ * already starts no earlier than where it was placed, and stays placed whatever the bounds. Mirrors
+ * the Rust `Range::asked` and the resume `asked`.
+ */
+export function asked(
+	ranges: readonly Range[],
+	floor: bigint | undefined,
+	end: bigint | undefined,
+	resolved: readonly (Resolved | undefined)[],
+	placed: ReadonlyMap<number, bigint> = new Map(),
+): { ranges: Range[]; placed: Map<number, bigint> } {
+	const out: Range[] = [];
+	const at = new Map<number, bigint>();
+	for (const [index, range] of ranges.entries()) {
+		const group = placed.get(index);
+		const clamp =
+			group === undefined
+				? clamped([range], floor, end, [resolved[index]])[0]
+				: clamped([range], floor === undefined ? group : max(floor, group), end, [
+						resolved[index] ?? { start: group, floored: true },
+					])[0];
+		const start = range.start;
+		if (typeof start !== "object" || start.live.max === null || typeof clamp.start !== "bigint" || isEmpty(clamp)) {
+			out.push(clamp);
+			continue;
+		}
+		const join: Range = { start };
+		if (clamp.end !== undefined) join.end = clamp.end;
+		at.set(index, clamp.start);
+		out.push(join);
+	}
+	return { ranges: out, placed: at };
+}
+
 /** Where a time falls among the groups a hop holds. Mirrors the Rust `Containing`. */
 export type Containing =
-	/** The newest group starting at or before it. */
-	| { group: bigint }
+	/**
+	 * A range from it starts at this key: the newest group starting at or before it, or, once that
+	 * group ended whole at or before the time, its End, so the range starts at the next group: a time
+	 * past a whole group's span lies in a span no group contains.
+	 */
+	| { at: bigint }
 	/** Every group held starts after it. */
 	| "before"
 	/** No group is held. */
@@ -285,9 +451,10 @@ export interface Holdings {
 	 */
 	defers?(): boolean;
 	/**
-	 * Where `time` falls among the groups held, for a reader whose max delay is `budget` in
-	 * milliseconds ({@link NO_MAX_DELAY} for none): a received copy proves some placements only for a
-	 * reader within the budget its upstream answered under. Mirrors the Rust `Holdings::containing`.
+	 * Where `time` falls among the groups held, for a range whose groups go stale past `budget` in
+	 * milliseconds ({@link NO_MAX_DELAY} for none): a received copy counts a group its upstream gave
+	 * up as stale only for a range within the budget it was judged under. Mirrors the Rust
+	 * `Holdings::containing`.
 	 */
 	containing(time: bigint, budget: number): Containing;
 	/** The lowest group held starting at or after `from`. */
@@ -301,12 +468,14 @@ export interface Holdings {
 	looksUp?(): boolean;
 	/**
 	 * Where a live join holding a nonzero `min` behind the live edge, ending at `end`, starts for a
-	 * reader within `budget` (see {@link containing}). Only an upstream's answer recorded after tick
-	 * `since` counts. Undefined while it can't tell yet: nothing held
+	 * range whose groups go stale past `budget` (see {@link containing}). Only an upstream's answer
+	 * recorded after tick `since`, under a budget at least as wide, counts: its publisher starts a
+	 * join past the groups its max expired, which a wider reader still wants. Undefined while it
+	 * can't tell yet: nothing held
 	 * measures the live edge, or a relay copy waits on upstream to answer for it. Absent where the
 	 * hop leaves its ranges to the copies it follows. Mirrors the Rust `Holdings::join`.
 	 */
-	join?(min: Duration, end: bigint | undefined, budget: number, since: number): Join | undefined;
+	join?(min: Duration | null, end: bigint | undefined, budget: number, since: number): Join | undefined;
 	/**
 	 * Whether this hop places a live join only where its upstream's answer to that join does, never
 	 * from the groups it holds: a lite-07 relay copy, whose wire carries each join and reports where
@@ -321,7 +490,7 @@ export interface Holdings {
 	 * for none. Mirrors the Rust `Holdings::answered_join`.
 	 */
 	answeredJoin?(
-		min: Duration,
+		min: Duration | null,
 		end: bigint | undefined,
 		budget: number,
 		since: number,
@@ -345,7 +514,7 @@ export interface Holdings {
  * or its upstream answered (`group`); or nowhere (`"empty"`), as the upstream answered a bounded
  * join. Mirrors the Rust `Join`.
  */
-export type Join = { group: bigint; time?: never } | { time: bigint; group?: never } | "empty";
+export type Join = { group: bigint; time?: never } | { time: bigint; group?: never } | "oldest" | "empty";
 
 /**
  * The times a {@link Holdings} can't place: sorted, disjoint runs, apart from the times a placement
@@ -370,7 +539,7 @@ export const UNHELD: Holdings = Object.freeze({
 export const AT_KEYS: Holdings = Object.freeze({
 	...UNHELD,
 	defers: () => false,
-	containing: (time: bigint) => ({ group: time }),
+	containing: (time: bigint) => ({ at: time }),
 });
 
 /** One non-empty range, resolved. */
@@ -389,6 +558,8 @@ type Span = {
 	looking?: Lookup;
 	/** A time start the groups held can't place yet: the span reads only the groups from that time until it can. */
 	waiting: boolean;
+	/** Its range's budget in milliseconds, which the groups it reads get. */
+	budget: number;
 	/** What it counts in the window's groups and missable groups, so taking it out uncounts exactly that. */
 	reads?: Run;
 	asks?: Run;
@@ -449,66 +620,113 @@ export class Window {
 	 * no reason to start at it.
 	 */
 	#reaching = new Set<bigint>();
-	/**
-	 * The join tick each live join's range was added at, by key: only an upstream's answer recorded
-	 * since places it.
-	 */
-	#since = new Map<bigint, number>();
+	/** How each live join's range is placed, by key. */
+	#joining = new Map<bigint, Joining>();
 	// How many spans name each start, and how many name none: see {@link start}.
 	#named = new Counts<bigint>();
 	#unnamed = 0;
-	/**
-	 * The subscriber's max delay in milliseconds, {@link NO_MAX_DELAY} for none: a received copy
-	 * places some time starts only for a reader within the budget its upstream answered under. Only
-	 * a range still to place reads it, so one already started stays where it started.
-	 */
-	get budget(): number {
-		return this.#budget;
-	}
-
-	set budget(budget: number) {
-		// An answer may place a waiting time start under the new budget with no change to the groups
-		// held, so each is tried again.
-		if (budget !== this.#budget) this.#waited = undefined;
-		this.#budget = budget;
-	}
-
-	#budget: number;
+	// The budgets of the live joins among the ranges, counted, for the widest asked.
+	#budgets = new Counts<number>();
+	// The non-empty history ranges among the ranges, placed or not.
+	#histories = 0;
+	// The groups the spans read, by the budget of their ranges.
+	#layers = new Map<number, Cover>();
+	// {@link budget} as last read, until the budgets, the layers, or the ranges not yet placed move.
+	#budget?: Budget;
 
 	/**
-	 * Resolve `ranges`, keyed by position, time starts from `holdings` within `budget` (see
-	 * {@link budget}), and a live join back by its lag from the live edge, `latest` being the latest
-	 * group.
+	 * Resolve `ranges`, keyed by position, time starts from `holdings`, and a live join back by its
+	 * lag from the live edge, `latest` being the latest group.
 	 */
-	constructor(
-		ranges: readonly Range[],
-		latest: bigint | undefined,
-		holdings: Holdings = UNHELD,
-		budget = NO_MAX_DELAY,
-	) {
-		this.#budget = budget;
-		for (const [index, range] of ranges.entries()) this.#ranges.set(BigInt(index), range);
+	constructor(ranges: readonly Range[], latest: bigint | undefined, holdings: Holdings = UNHELD) {
+		for (const [index, range] of ranges.entries()) {
+			this.#ranges.set(BigInt(index), range);
+			this.#countBudget(range, 1);
+		}
 		this.#place(latest, holdings);
 	}
 
 	/**
-	 * {@link Window} for ranges the caller keys itself, in key order, each live join's range added at
-	 * join tick `since` of its key (0 by default). Mirrors the Rust `Window::keyed_since`.
+	 * {@link Window} for ranges the caller keys itself, in key order, each live join's range placed as
+	 * `joining` of its key says (from join tick 0 by default). Mirrors the Rust `Window::keyed_since`.
 	 */
 	static keyed(
 		ranges: Iterable<readonly [bigint, Range]>,
 		latest: bigint | undefined,
 		holdings: Holdings = UNHELD,
-		budget = NO_MAX_DELAY,
-		since: (key: bigint) => number = () => 0,
+		joining: (key: bigint) => Joining = () => SINCE_ZERO,
 	): Window {
-		const window = new Window([], undefined, holdings, budget);
+		const window = new Window([], undefined, holdings);
 		for (const [key, range] of ranges) {
 			window.#ranges.set(key, range);
-			if (liveMillis(range) !== undefined) window.#since.set(key, since(key));
+			window.#countBudget(range, 1);
+			if (liveMillis(range) !== undefined) window.#joining.set(key, joining(key));
 		}
 		window.#place(latest, holdings);
 		return window;
+	}
+
+	/**
+	 * How long each group stays worth delivering once superseded, as these ranges set it: the same
+	 * value until the ranges or where they are placed move. Mirrors the Rust `Window::budget`.
+	 */
+	budget(): Budget {
+		if (this.#budget) return this.#budget;
+		this.#budget = new Budget({
+			layers: [...this.#layers].map(([budget, cover]) => [budget, cover.runs()] as const),
+			unplaced: this.#unplacedBudgets((key) => this.#ranges.get(key)),
+			widest: this.#histories > 0 ? NO_MAX_DELAY : (this.#budgets.last() ?? 0),
+		});
+		return this.#budget;
+	}
+
+	/**
+	 * Each range not yet placed, as `rangeOf` its key says, as the exclusive end of the groups it may
+	 * cover and its budget: a pending one may cover any up to its end, since every group is in range
+	 * meanwhile, and a live join still reaching may start at any. Mirrors the Rust
+	 * `Window::unplaced_budgets`.
+	 */
+	#unplacedBudgets(rangeOf: (key: bigint) => Range | undefined): [bigint, number][] {
+		const unplaced: [bigint, number][] = [];
+		for (const key of [...this.#pending, ...this.#reaching]) {
+			const range = rangeOf(key);
+			if (range === undefined || isEmpty(range)) continue;
+			unplaced.push([range.end === undefined ? UNBOUNDED : range.end + 1n, rangeBudget(range)]);
+		}
+		return unplaced;
+	}
+
+	/**
+	 * {@link budget} with each range's staleness taken from `ranges`, by key, rather than from the
+	 * range it was placed as: a front's reader places a live join where a copy resolved it, as a time
+	 * start, and the join's groups still go stale past its max. Mirrors the Rust `Window::budget_of`.
+	 */
+	budgetOf(ranges: ReadonlyMap<bigint, Range>): Budget {
+		const layers = new Map<number, Cover>();
+		for (const [key, span] of this.#spans) {
+			const range = ranges.get(key);
+			if (!span.reads || range === undefined) continue;
+			const budget = rangeBudget(range);
+			const layer = layers.get(budget) ?? new Cover();
+			layers.set(budget, layer);
+			layer.add(span.reads.start, span.reads.end, 1);
+		}
+		return new Budget({
+			layers: [...layers].map(([budget, cover]) => [budget, cover.runs()] as const),
+			unplaced: this.#unplacedBudgets((key) => ranges.get(key)),
+			widest: widest(ranges.values()),
+		});
+	}
+
+	// Count a live join's budget among {@link #budgets}, or a history range among {@link #histories},
+	// once more, or once less for a `delta` of -1.
+	#countBudget(range: Range, delta: 1 | -1): void {
+		if (liveMillis(range) === undefined) {
+			if (isEmpty(range)) return;
+			this.#histories += delta;
+		} else if (delta > 0) this.#budgets.add(rangeBudget(range));
+		else this.#budgets.remove(rangeBudget(range));
+		this.#budget = undefined;
 	}
 
 	/** What these were resolved from, in key order. Costs every range. */
@@ -518,31 +736,60 @@ export class Window {
 
 	/**
 	 * Retire the ranges keyed `retire`, then resolve `add`, leaving every other range where it
-	 * resolved. A key added again replaces its range in place; any other key added is past every
-	 * key held. Each live join's range is added at join tick `since` of its key (0 by default). Costs
-	 * the ranges edited, never the rest. Mirrors the Rust `Window::edit_since`.
+	 * resolved. A key added again replaces its range in place, but a live join added again with only
+	 * its max changed, and placed as it was, keeps where it started; any other key added is past every
+	 * key held. Each live join's range is placed as `joining` of its key says (from join tick 0 by
+	 * default). Costs the ranges edited, never the rest. Mirrors the Rust `Window::edit_since`.
 	 */
 	edit(
 		retire: Iterable<bigint>,
 		add: readonly (readonly [bigint, Range])[],
 		latest: bigint | undefined,
 		holdings: Holdings = UNHELD,
-		since: (key: bigint) => number = () => 0,
+		joining: (key: bigint) => Joining = () => SINCE_ZERO,
 	): void {
+		const retuned = new Set<bigint>();
+		for (const [key, range] of add) {
+			const join = joinOf(range);
+			const old = this.#ranges.get(key);
+			if (
+				join !== undefined &&
+				old !== undefined &&
+				joinOf(old) === join &&
+				placedAt(this.#joining.get(key)) === placedAt(joining(key))
+			)
+				retuned.add(key);
+		}
 		const readded = new Set(add.map(([key]) => key));
 		for (const key of retire) {
+			if (retuned.has(key)) continue;
 			this.#retire(key);
 			// One added again is replaced in place below, keeping its order.
 			if (!readded.has(key)) {
+				const range = this.#ranges.get(key);
+				if (range) this.#countBudget(range, -1);
 				this.#ranges.delete(key);
-				this.#since.delete(key);
+				this.#joining.delete(key);
 			}
 		}
 		for (const [key, range] of add) {
+			const old = this.#ranges.get(key);
+			if (old !== undefined) this.#countBudget(old, -1);
+			this.#countBudget(range, 1);
+			if (retuned.has(key)) {
+				this.#ranges.set(key, range);
+				// Its groups take the new budget where it stands.
+				const span = this.#spans.get(key);
+				if (span) {
+					this.#uncount(key, span);
+					this.#count(key, { ...span, budget: rangeBudget(range) });
+				}
+				continue;
+			}
 			this.#retire(key);
 			this.#ranges.set(key, range);
-			if (liveMillis(range) !== undefined) this.#since.set(key, since(key));
-			else this.#since.delete(key);
+			if (liveMillis(range) !== undefined) this.#joining.set(key, joining(key));
+			else this.#joining.delete(key);
 			if (!isEmpty(range)) this.#placeRange(key, latest, holdings);
 		}
 	}
@@ -550,8 +797,8 @@ export class Window {
 	/**
 	 * Note each live join range keyed in `since` as added at its tick instead (see
 	 * `Prefs.stamp`), placing again any still waiting on an answer, which an answer recorded since
-	 * that tick may now place. One already placed stays where it started. Returns whether the groups
-	 * in range moved.
+	 * that tick may now place. One already placed stays where it started, and one placed at a group
+	 * takes no tick. Returns whether the groups in range moved.
 	 */
 	stamp(
 		since: Iterable<readonly [bigint, number]>,
@@ -560,9 +807,10 @@ export class Window {
 	): boolean {
 		const placed = this.#spans.size;
 		for (const [key, tick] of since) {
-			if (!this.#since.has(key)) continue;
-			this.#since.set(key, tick);
+			if (!(this.#joining.get(key)?.since !== undefined)) continue;
+			this.#joining.set(key, { since: tick });
 			if (!this.#reaching.delete(key)) continue;
+			this.#budget = undefined;
 			this.#placeRange(key, latest, holdings);
 		}
 		return this.#spans.size > placed;
@@ -570,8 +818,8 @@ export class Window {
 
 	// Take out what the range keyed `key` placed, leaving the range itself.
 	#retire(key: bigint): void {
-		this.#pending.delete(key);
-		this.#reaching.delete(key);
+		const pending = this.#pending.delete(key);
+		if (this.#reaching.delete(key) || pending) this.#budget = undefined;
 		const span = this.#spans.get(key);
 		if (span) this.#uncount(key, span);
 	}
@@ -579,6 +827,14 @@ export class Window {
 	/** Whether a live join still waits on a first group. */
 	get pending(): boolean {
 		return this.#pending.size > 0;
+	}
+
+	/**
+	 * Whether a live join's reach back waits on its upstream's answer or a group held starting. Mirrors
+	 * the Rust `Window::is_reaching`.
+	 */
+	get reaching(): boolean {
+		return this.#reaching.size > 0;
 	}
 
 	/**
@@ -614,6 +870,7 @@ export class Window {
 			const placed = this.#spans.size;
 			const reaching = [...this.#reaching];
 			this.#reaching.clear();
+			this.#budget = undefined;
 			for (const key of reaching) this.#placeRange(key, latest, holdings);
 			moved = this.#spans.size > placed;
 		}
@@ -639,10 +896,11 @@ export class Window {
 		}
 		let started = false;
 		for (const entry of tried) {
-			const containing = holdings.containing(entry.time, this.budget);
+			// Every key waiting on one time waits under the widest budget among their ranges.
+			const containing = holdings.containing(entry.time, this.#widestOf(entry.keys));
 			let start: bigint;
 			let floored: boolean;
-			if (typeof containing === "object") [start, floored] = [containing.group, true];
+			if (typeof containing === "object") [start, floored] = [containing.at, true];
 			// The group holding it is older than any held, or nothing can arrive.
 			else if (containing === "before" || complete) [start, floored] = [0n, false];
 			else {
@@ -670,9 +928,8 @@ export class Window {
 	}
 
 	/**
-	 * The time starts still waiting on the groups held, lowest first, which wait under
-	 * {@link budget}: what a received copy asks its upstream to place. Mirrors the Rust
-	 * `Window::asks`.
+	 * The time starts still waiting on the groups held, lowest first: what a received copy asks its
+	 * upstream to place. Mirrors the Rust `Window::asks`.
 	 */
 	asks(): bigint[] {
 		const times: bigint[] = [];
@@ -681,16 +938,17 @@ export class Window {
 	}
 
 	/**
-	 * The live joins still waiting on an answer, as `[lag, end, since]`: the lag in milliseconds, the
-	 * range's end, and the join tick its range was added at. What a received copy asks its upstream
-	 * to place. Mirrors the Rust `Window::joins`.
+	 * The live joins still waiting on an answer, as `[lag, end, budget, since]`: the lag in
+	 * milliseconds (null for no lag limit), the range's end, its budget in milliseconds, and the join tick its range was added
+	 * at. What a received copy asks its upstream to place. Mirrors the Rust `Window::joins`.
 	 */
-	joins(): [number, bigint | undefined, number][] {
-		const joins: [number, bigint | undefined, number][] = [];
+	joins(): [number | null, bigint | undefined, number, number][] {
+		const joins: [number | null, bigint | undefined, number, number][] = [];
 		for (const key of this.#reaching) {
 			const range = this.#ranges.get(key);
 			const lag = range && liveMillis(range);
-			if (lag !== undefined) joins.push([lag, range?.end, this.#since.get(key) ?? 0]);
+			if (range && lag !== undefined)
+				joins.push([lag, range.end, rangeBudget(range), this.#joining.get(key)?.since ?? 0]);
 		}
 		return joins;
 	}
@@ -832,8 +1090,8 @@ export class Window {
 				span.start = found.floor > 0n ? found.floor - 1n : at;
 				span.floored = true;
 			} else {
-				const containing = holdings.containing(at, this.budget);
-				span.start = typeof containing === "object" ? containing.group : 0n;
+				const containing = holdings.containing(at, this.#budgetOf(key));
+				span.start = typeof containing === "object" ? containing.at : 0n;
 				span.floored = typeof containing === "object";
 				if (asked !== undefined) {
 					// Nothing held at or before the time any more, maybe nothing at all: the group containing
@@ -878,6 +1136,19 @@ export class Window {
 		return this.#waiting.size > 0 || this.#reaching.size > 0;
 	}
 
+	// The budget of the range keyed `key`, none for one not held.
+	#budgetOf(key: bigint): number {
+		const range = this.#ranges.get(key);
+		return range === undefined ? NO_MAX_DELAY : rangeBudget(range);
+	}
+
+	// The widest budget among the ranges keyed `keys`.
+	#widestOf(keys: Iterable<bigint>): number {
+		let widest = 0;
+		for (const key of keys) widest = Math.max(widest, this.#budgetOf(key));
+		return widest;
+	}
+
 	// Resolve every range again from scratch.
 	#place(latest: bigint | undefined, holdings: Holdings): void {
 		this.#reaching.clear();
@@ -887,6 +1158,8 @@ export class Window {
 		this.#looking = new ByTime();
 		this.#groups = new Cover();
 		this.#missable = new Cover();
+		this.#layers.clear();
+		this.#budget = undefined;
 		this.#named = new Counts();
 		this.#unnamed = 0;
 		for (const [key, range] of this.#ranges) {
@@ -902,10 +1175,18 @@ export class Window {
 		if (range === undefined) return;
 		const end = range.end === undefined ? UNBOUNDED : range.end + 1n;
 		let at = rangeTime(range);
-		const live = typeof range.start === "object" ? range.start.live : undefined;
+		const live = typeof range.start === "object" ? range.start.live.min : undefined;
+		const budget = rangeBudget(range);
+		// Placed already, where an earlier copy resolved it: its lag places nothing.
+		const placed = live === undefined ? undefined : this.#joining.get(key)?.at;
+		if (placed !== undefined) {
+			this.#count(key, { at: undefined, start: placed, end, floored: true, waiting: false, budget });
+			return;
+		}
 		// A hop whose copies place the join waits on them, as one with no group yet does.
 		if (live !== undefined && holdings.defers?.()) {
 			this.#pending.add(key);
+			this.#budget = undefined;
 			return;
 		}
 		// Placed already, where a copy resolved it: one left with no start reached back.
@@ -914,18 +1195,19 @@ export class Window {
 			if (holdings.answersJoins?.()) {
 				// Only its upstream's answer places it, whatever this hop holds: read none of the groups
 				// held until it does.
-				join = holdings.join?.(live, range.end, this.budget, this.#since.get(key) ?? 0);
+				join = holdings.join?.(live, range.end, budget, this.#joining.get(key)?.since ?? 0);
 				// Nothing to deliver: a start past its end holds nothing.
 				if (join === "empty" && range.end !== undefined) join = { group: range.end + 1n };
 				if (join === undefined || join === "empty") {
 					this.#reaching.add(key);
+					this.#budget = undefined;
 					return;
 				}
 			} else {
-				const since = this.#since.get(key) ?? 0;
+				const since = this.#joining.get(key)?.since ?? 0;
 				// Its upstream's answer places it, whatever the groups held measure: nothing to deliver
 				// starts it past its end, while an unbounded one measures.
-				const answer = holdings.answeredJoin?.(live, range.end, this.budget, since);
+				const answer = holdings.answeredJoin?.(live, range.end, budget, since);
 				const answered = answer?.start ?? (answer && range.end !== undefined ? range.end + 1n : undefined);
 				if (answered !== undefined) {
 					join = { group: answered };
@@ -933,47 +1215,57 @@ export class Window {
 					// Nothing to measure the live edge by yet: wait for the first group, reading everything
 					// meanwhile.
 					this.#pending.add(key);
+					this.#budget = undefined;
 					return;
-				} else if (live.asNanos() === 0) {
+				} else if (live?.asNanos() === 0) {
 					// The latest group holds the live edge. One made before any group then starts at the
 					// first, which was the latest when it was placed.
 					join = { group: latest };
 				} else {
-					join = holdings.join?.(live, range.end, this.budget, since);
+					join = holdings.join?.(live, range.end, budget, since);
 					// Nothing to measure the live edge by yet: read none of the groups held until it resolves.
 					if (join === undefined || join === "empty") {
 						this.#reaching.add(key);
+						this.#budget = undefined;
 						return;
 					}
 				}
 			}
-			// A group a join measured starts there; a time is placed among the groups held.
-			if (join.group !== undefined) {
-				this.#count(key, { at: undefined, start: join.group, end, floored: true, waiting: false });
+			// A group a join measured starts there; a time is placed among the groups held; one past
+			// every group starts as a range from the oldest group does.
+			if (join === "oldest") at = undefined;
+			else if (join.group !== undefined) {
+				this.#count(key, { at: undefined, start: join.group, end, floored: true, waiting: false, budget });
 				return;
-			}
-			at = join.time;
+			} else at = join.time;
 		}
-		const start = startOf(at, latest, this.budget, holdings);
+		const start = startOf(at, latest, budget, holdings);
 		if (start === "pending") {
 			this.#pending.add(key);
+			this.#budget = undefined;
 			return;
 		}
 		if (start === "waiting") {
 			// Reads only the groups from its time until the groups held place it; see #startWaiting.
-			this.#count(key, { at, start: 0n, end, floored: false, waiting: true });
+			this.#count(key, { at, start: 0n, end, floored: false, waiting: true, budget });
 			return;
 		}
 		// A time start the groups held can't place reads nothing until its lookup answers.
 		const floor = at === undefined ? undefined : unresolved(at, start.group, start.floored, holdings);
 		const looking = at !== undefined && floor !== undefined ? { time: at, floor } : undefined;
-		this.#count(key, { at, start: start.group, end, floored: start.floored, looking, waiting: false });
+		this.#count(key, { at, start: start.group, end, floored: start.floored, looking, waiting: false, budget });
 	}
 
 	// Hold `span` under `key`, counting the groups it reads and where it starts.
 	#count(key: bigint, span: Span): void {
 		[span.reads, span.asks] = spanReads(span);
-		if (span.reads) this.#groups.add(span.reads.start, span.reads.end, 1);
+		if (span.reads) {
+			this.#groups.add(span.reads.start, span.reads.end, 1);
+			const layer = this.#layers.get(span.budget) ?? new Cover();
+			this.#layers.set(span.budget, layer);
+			layer.add(span.reads.start, span.reads.end, 1);
+			this.#budget = undefined;
+		}
 		if (span.asks) this.#missable.add(span.asks.start, span.asks.end, 1);
 		if (span.floored) this.#named.add(span.start);
 		else this.#unnamed++;
@@ -984,13 +1276,163 @@ export class Window {
 
 	// Take back what {@link #count} counted for `span`, and take it out of the spans.
 	#uncount(key: bigint, span: Span): void {
-		if (span.reads) this.#groups.add(span.reads.start, span.reads.end, -1);
+		if (span.reads) {
+			this.#groups.add(span.reads.start, span.reads.end, -1);
+			const layer = this.#layers.get(span.budget);
+			layer?.add(span.reads.start, span.reads.end, -1);
+			if (layer?.lowest() === undefined) this.#layers.delete(span.budget);
+			this.#budget = undefined;
+		}
 		if (span.asks) this.#missable.add(span.asks.start, span.asks.end, -1);
 		if (span.floored) this.#named.remove(span.start);
 		else this.#unnamed--;
 		if (span.looking) this.#looking.remove(span.looking.time, key);
 		if (span.waiting) this.#waiting.remove(span.at ?? 0n, key);
 		this.#spans.delete(key);
+	}
+}
+
+/**
+ * How long each group stays worth delivering once superseded, in milliseconds, as a reader's ranges
+ * set it: the widest budget among the ranges covering it, a live join's being its max, and a history
+ * range's as long as the publisher keeps it ({@link NO_MAX_DELAY}). A range not yet placed may cover
+ * any group up to its end. A group none covers, such as one handed out before the ranges moved, gets
+ * the widest budget any range asks: it was reached through one of them, so a history range keeps it
+ * from going stale. Immutable: a window hands out a new one when its ranges move. Mirrors the Rust
+ * `Budget`.
+ */
+export class Budget {
+	/** The groups the placed ranges cover, by the budget they give, widest first, each sorted and disjoint. */
+	readonly layers: readonly (readonly [number, readonly Run[]])[];
+	/**
+	 * The ranges not yet placed, each as the exclusive end of the groups it may cover and its budget:
+	 * by end ascending, budget descending, leaving out any another covers at least as widely.
+	 */
+	readonly unplaced: readonly (readonly [bigint, number])[];
+	// The widest budget any range asks, placed or not, which a group no range covers gets.
+	readonly #widest: number;
+
+	constructor(parts: {
+		layers: readonly (readonly [number, readonly Run[]])[];
+		unplaced: readonly (readonly [bigint, number])[];
+		widest: number;
+	}) {
+		this.layers = parts.layers.filter(([, runs]) => runs.length > 0).sort(([a], [b]) => b - a);
+		// A range covering through a later group at least as widely hides one through an earlier.
+		const unplaced = [...parts.unplaced].sort(([a, x], [b, y]) => (a < b ? -1 : a > b ? 1 : x - y));
+		const kept: (readonly [bigint, number])[] = [];
+		for (let i = unplaced.length - 1; i >= 0; i--) {
+			const wider = kept.at(-1);
+			if (wider === undefined || unplaced[i][1] > wider[1]) kept.push(unplaced[i]);
+		}
+		this.unplaced = kept.reverse();
+		this.#widest = parts.widest;
+	}
+
+	/** The same budget for every group. */
+	static uniform(budget: number): Budget {
+		return new Budget({ layers: [], unplaced: [], widest: budget });
+	}
+
+	/** This budget, each group's no wider than `bound`, undefined for none. */
+	clamped(bound: number | undefined): Budget {
+		if (bound === undefined || this.#widest <= bound) return this;
+		return new Budget({
+			layers: this.layers.map(([budget, runs]) => [Math.min(budget, bound), runs] as const),
+			unplaced: this.unplaced.map(([end, budget]) => [end, Math.min(budget, bound)] as const),
+			widest: bound,
+		});
+	}
+
+	/** How long group `key` stays worth delivering once superseded. */
+	at(key: bigint): number {
+		let at: number | undefined;
+		for (const [budget, runs] of this.layers) {
+			const run = runs[runsFrom(runs, key)];
+			if (run !== undefined && run.start <= key) {
+				at = budget;
+				break;
+			}
+		}
+		const unplaced = this.unplaced[this.#unplacedFrom(key)];
+		if (unplaced !== undefined) at = Math.max(at ?? 0, unplaced[1]);
+		return at ?? this.#widest;
+	}
+
+	/** The widest budget any group gets, counting a range not yet placed. */
+	widest(): number {
+		return this.#widest;
+	}
+
+	/** Whether every group gets the same budget. */
+	isUniform(): boolean {
+		return (
+			this.layers.every(([budget]) => budget === this.#widest) &&
+			this.unplaced.every(([, budget]) => budget === this.#widest)
+		);
+	}
+
+	/** Whether `other` gives every group the same budget, as this one's copy. */
+	equals(other: Budget | undefined): boolean {
+		if (other === this) return true;
+		return (
+			other !== undefined &&
+			this.#widest === other.#widest &&
+			this.layers.length === other.layers.length &&
+			this.layers.every(([budget, runs], i) => budget === other.layers[i][0] && runs === other.layers[i][1]) &&
+			this.unplaced.length === other.unplaced.length &&
+			this.unplaced.every(([end, budget], i) => end === other.unplaced[i][0] && budget === other.unplaced[i][1])
+		);
+	}
+
+	/** `[start, end)` cut where the budget changes, each stretch with its budget, lowest first. */
+	runs(start: bigint, end: bigint): [Run, number][] {
+		const runs: [Run, number][] = [];
+		for (let at = start; at < end; ) {
+			const [budget, next] = this.stretch(at);
+			const to = next === undefined ? end : min(next, end);
+			runs.push([{ start: at, end: to }, budget]);
+			at = to;
+		}
+		return runs;
+	}
+
+	/** The budget of group `key`, and the next key whose budget differs, undefined for none. */
+	stretch(key: bigint): [number, bigint | undefined] {
+		const budget = this.at(key);
+		if (this.isUniform()) return [budget, undefined];
+		for (let cut = this.#cutAfter(key); cut !== undefined; cut = this.#cutAfter(cut)) {
+			if (this.at(cut) !== budget) return [budget, cut];
+		}
+		return [budget, undefined];
+	}
+
+	// The next key past `key` where a layer's run or an unplaced range starts or ends, so the budget
+	// may change.
+	#cutAfter(key: bigint): bigint | undefined {
+		let cut: bigint | undefined;
+		const take = (at: bigint) => {
+			if (at < UNBOUNDED) cut = cut === undefined ? at : min(cut, at);
+		};
+		for (const [, runs] of this.layers) {
+			const run = runs[runsFrom(runs, key)];
+			if (run !== undefined) take(run.start <= key ? run.end : run.start);
+		}
+		const unplaced = this.unplaced[this.#unplacedFrom(key)];
+		if (unplaced !== undefined) take(unplaced[0]);
+		return cut;
+	}
+
+	// The index of the first unplaced range that may cover `key`.
+	#unplacedFrom(key: bigint): number {
+		let lo = 0;
+		let hi = this.unplaced.length;
+		while (lo < hi) {
+			const mid = (lo + hi) >>> 1;
+			if (this.unplaced[mid][0] <= key) lo = mid + 1;
+			else hi = mid;
+		}
+		return lo;
 	}
 }
 
@@ -1134,7 +1576,7 @@ function startOf(
 	// No group starts before 0, so time 0 names group 0 whatever is held.
 	if (at === 0n) return { group: 0n, floored: true };
 	const containing = holdings.containing(at, budget);
-	if (typeof containing === "object") return { group: containing.group, floored: true };
+	if (typeof containing === "object") return { group: containing.at, floored: true };
 	// The group holding it is older than any held, so reach back to the oldest.
 	if (containing === "before") return { group: 0n, floored: false };
 	// Before any group, which a hop that holds none (such as a reader following route copies)
@@ -1157,7 +1599,10 @@ function startOf(
 function unresolved(at: bigint, start: bigint, floored: boolean, holdings: Holdings): bigint | undefined {
 	if (!holdings.looksUp?.()) return undefined;
 	if (!floored) return holdings.nextStart(0n) === undefined ? undefined : 0n;
-	const next = start + 1n;
+	// Past a group held at the start, or one starting at the time, which contains it whatever its End.
+	// A start below the time no group holds is a whole group's End, where a group the cache let go may
+	// start and end before the time, so the search takes it in. Mirrors the Rust `unresolved`.
+	const next = holdings.nextStart(start) === start || start >= at ? start + 1n : start;
 	const after = holdings.nextStart(next);
 	if (after === undefined) return undefined;
 	const gap = min(after, at + 1n);

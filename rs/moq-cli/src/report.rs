@@ -499,6 +499,7 @@ async fn write_echo(
 				let (announce, active) = match event {
 					moq_net::announce::Event::Present(announce) => (announce, true),
 					moq_net::announce::Event::Absent(announce) => (announce, false),
+					_ => continue,
 				};
 				let path = announce.prefix;
 				if !path.has_prefix(&prefix) || !hang::echo::is_echo(&path) {

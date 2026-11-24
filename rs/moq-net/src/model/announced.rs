@@ -7,6 +7,7 @@ use crate::{Error, Path};
 
 /// What an announcement listing reports for a path.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum AnnounceEvent {
 	/// A route now covers the path, which was absent. It may arrive unavailable; see
 	/// [`RouteInfo::available`](crate::origin::RouteInfo::available).

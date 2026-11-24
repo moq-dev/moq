@@ -17,11 +17,11 @@ The maintainer's manual deploy on 2026-10-05 created the `moq-sh` worker and
 its `moq.sh` custom domain; `curl -fsSL https://moq.sh | sh` installs the
 newest moq-cli.
 
-The token has the account-wide Workers Editor role and no Zone access.
-Cloudflare says custom domains do not support per-Worker roles yet, and
-`wrangler deploy` checks the `moq.sh` custom domain on every deploy. If the CI
-deploy is rejected on the custom domain, ask the maintainer to add
-Zone > Workers Routes > Edit on `moq.sh` to the token, then rerun it.
+Since 2026-11-07 the token holds account Workers Scripts Write and Account
+Settings Read, plus Workers Routes Write on the `moq.sh` zone, which
+`wrangler deploy` needs because it checks the `moq.sh` custom domain on every
+deploy. If the CI deploy is rejected, the error names the missing permission
+group: ask the maintainer to add it to the token, then rerun the deploy.
 
 ## Required
 

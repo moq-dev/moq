@@ -367,40 +367,49 @@ function installGatedWebAudio(addModule: () => Promise<void> = () => Promise.res
 // context that stayed suspended forever, since nothing ever resumed it. The worklet never posted, so the
 // format and with it the audio catalog never appeared, even after the user clicked.
 test("captures once a gesture resumes a context built before one", async () => {
-	using webaudio = installGatedWebAudio();
+	// On a manual clock, so no host pause between reads can move the stamp.
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		using webaudio = installGatedWebAudio();
 
-	const capture = new Capture({ enabled: true, source: new Signal(fakeSource()) as never });
-	await settle();
+		const capture = new Capture({ enabled: true, source: new Signal(fakeSource()) as never });
+		await settle();
 
-	// Suspended: no worklet stamping frames against a clock that isn't moving, and no format.
-	expect(webaudio.contexts[0].state).toBe("suspended");
-	expect(webaudio.worklets.length).toBe(0);
-	expect(capture.out.format.peek()).toBeUndefined();
-	// Blocked, so `<moq-publish>` doesn't hold its announce for audio that may never come.
-	expect(capture.blocked.peek()).toBe(true);
+		// Suspended: no worklet stamping frames against a clock that isn't moving, and no format.
+		expect(webaudio.contexts[0].state).toBe("suspended");
+		expect(webaudio.worklets.length).toBe(0);
+		expect(capture.out.format.peek()).toBeUndefined();
+		// Blocked, so `<moq-publish>` doesn't hold its announce for audio that may never come.
+		expect(capture.blocked.peek()).toBe(true);
 
-	const before = MediaClock.now().asMicros();
-	webaudio.gesture();
-	await settle();
+		// The page waits a while for the click.
+		clock.jump(Duration.millis(5_000));
+		webaudio.gesture();
+		await settle();
 
-	expect(webaudio.contexts[0].state).toBe("running");
-	expect(capture.blocked.peek()).toBe(false);
-	expect(webaudio.worklets.length).toBe(1);
+		expect(webaudio.contexts[0].state).toBe("running");
+		expect(capture.blocked.peek()).toBe(false);
+		expect(webaudio.worklets.length).toBe(1);
 
-	const effect = new Effect();
-	const reader = capture.out.frames.peek()?.subscribe(effect).getReader();
-	webaudio.worklets[0].render();
-	expect(capture.out.format.peek()).toEqual({ sampleRate: 48_000, channelCount: 1 });
+		const effect = new Effect();
+		const reader = capture.out.frames.peek()?.subscribe(effect).getReader();
+		const rendered = MediaClock.now().asMicros();
+		webaudio.worklets[0].render();
+		expect(capture.out.format.peek()).toEqual({ sampleRate: 48_000, channelCount: 1 });
 
-	// Audio is stamped when it was rendered, not when the source appeared, so it stays on the same
-	// media clock as video however long the page waited for the click. The render time is read in
-	// whole milliseconds, and the first sample was captured a quantum before it.
-	const quantum = (128 / 48_000) * 1_000_000;
-	expect((await reader?.read())?.value?.timestamp.asMicros()).toBeGreaterThanOrEqual(before - quantum - 1_000);
-	effect.close();
+		// Audio is stamped when it was rendered, not when the source appeared, so it stays on the same
+		// media clock as video however long the page waited for the click. The first sample was captured
+		// a quantum before the render.
+		const quantum = (128 / 48_000) * 1_000_000;
+		expect((await reader?.read())?.value?.timestamp.asMicros()).toBeCloseTo(rendered - quantum, 3);
+		effect.close();
 
-	capture.close();
-	await settle();
+		capture.close();
+		await settle();
+	} finally {
+		installed.close();
+	}
 });
 
 // Regression: the root's blanket disconnect ran before the worklet's own edge was removed, so removing

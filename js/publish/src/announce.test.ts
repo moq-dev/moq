@@ -95,7 +95,7 @@ test("a subscriber arriving at announce time sees every rendition in its first c
 
 	const net = env.broadcast.net.peek();
 	if (!net) throw new Error("expected a network producer once connected");
-	const subscriber = net.track(Broadcast.CATALOG_TRACK).subscribe({ delay: { max: null } });
+	const subscriber = net.track(Broadcast.CATALOG_TRACK).subscribe({ ranges: [{}] });
 	const group = await subscriber.ordered().nextGroup();
 	// Reaching back over every group, the oldest is also the newest: nothing was published before it.
 	expect(group?.start).toBe((await subscriber.largest())?.group);

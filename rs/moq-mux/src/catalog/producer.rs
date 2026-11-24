@@ -2631,8 +2631,7 @@ mod test {
 			let consumer = broadcast.consume();
 			let mut readers = Vec::new();
 			for name in [hang::Catalog::DEFAULT_NAME, moq_msf::DEFAULT_NAME, "video0"] {
-				let all =
-					moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(None));
+				let all = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL]);
 				let track = consumer.track(name).unwrap().subscribe(all).await.unwrap();
 				readers.push((name, track.ordered()));
 			}

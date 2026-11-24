@@ -593,7 +593,7 @@ impl ExportSource {
 			let subscription = match start.after {
 				Some(after) => moq_net::track::Subscription::default()
 					.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Time(after))]),
-				None => moq_net::track::Subscription::default(),
+				None => moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL]),
 			};
 			let subscription = self.delay.subscription(subscription);
 			let track = match broadcast.track(&self.target.track) {
@@ -1220,13 +1220,16 @@ mod tests {
 			let observed = kio::wait(|waiter| {
 				let _ = export.poll_read(waiter);
 				match live.track.subscription() {
-					Some(subscription) => Poll::Ready(subscription.delay.max),
+					Some(subscription) => Poll::Ready(subscription.ranges.iter().find_map(|range| match range.start {
+						moq_net::track::Start::Live { max, .. } => Some(max),
+						_ => None,
+					})),
 					None => Poll::Pending,
 				}
 			})
 			.await;
 
-			assert_eq!(observed, Some(max_delay), "live start: {live_start}");
+			assert_eq!(observed, Some(Some(max_delay)), "live start: {live_start}");
 		}
 	}
 
@@ -1266,7 +1269,7 @@ mod tests {
 		use crate::container::Container as _;
 		use crate::container::test_util::{Link, origin, raw_frame};
 
-		let (publisher, subscriber) = (origin(1), origin(2));
+		let (publisher, subscriber) = (origin(), origin());
 		let _link = Link::new(&publisher, &subscriber).await;
 
 		let broadcast = publisher
@@ -1348,12 +1351,12 @@ mod tests {
 		use crate::container::test_util::{Link, origin, raw_frame};
 
 		for relay in [false, true] {
-			let (publisher, subscriber) = (origin(1), origin(3));
+			let (publisher, subscriber) = (origin(), origin());
 			// SETUP and the Announce Stream take the first two uni streams; the third is
 			// the backlog's oldest group.
 			let (held, _downstream) = match relay {
 				true => {
-					let middle = origin(2);
+					let middle = origin();
 					let held = Link::held(&publisher, &middle, 3).await;
 					(held, Some(Link::new(&middle, &subscriber).await))
 				}
@@ -1427,15 +1430,10 @@ mod tests {
 				timestamps.push(timestamp);
 			}
 
-			// Group 84 was the newest when the export joined. Behind the relay the ordered reader
-			// hands out nothing until its start is placed, which the held streams delay past the
-			// next two PES, so the newest group by then is the start: either way nothing after it is
-			// skipped.
-			let start = match relay {
-				false => 84,
-				true => 94,
-			};
-			let expected: Vec<u128> = (start..95).map(|sequence| sequence * 24_000).collect();
+			// Group 84 was the newest when the export joined. A relay forwards the live join and
+			// starts it where the publisher's answer does, so it starts there too: either way
+			// nothing after it is skipped.
+			let expected: Vec<u128> = (84..95).map(|sequence| sequence * 24_000).collect();
 			assert_eq!(timestamps, expected, "relay: {relay}");
 			assert_eq!(export.skips(), 0, "relay: {relay}");
 		}
@@ -1529,10 +1527,15 @@ mod tests {
 			.produce()
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
-		let subscribed = track.subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
-		);
+		let subscribed =
+			track.subscribe(
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(Duration::from_secs(10)),
+						max: Some(Duration::from_secs(10)),
+					},
+				)]),
+			);
 		export.state = SourceState::Active(Box::new(Active {
 			_priority: export.source.control(subscribed.control()).unwrap(),
 			consumer: Consumer::new(subscribed, HangContainer::Legacy(crate::container::Kind::Audio)),

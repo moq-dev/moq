@@ -96,6 +96,10 @@ freshness:
     python3 update.test.py
     ./freshness.sh
 
+# Fail when the Kotlin client's Maven mirror lags Central's dev.moq:moq release.
+maven-mirror:
+    ./maven-mirror.sh
+
 # moq's root `just check` lints these scripts too. shfmt discovers every shell
 # script (incl. the extensionless clients/docker/* wrappers) and reads moq's
 # root .editorconfig for style; shellcheck lints the same set. Each tool is
