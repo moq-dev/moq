@@ -4123,8 +4123,9 @@ mod tests {
 		);
 	}
 
-	/// The owed groups start at the floor the demand last asked for, which an update can move
-	/// either way after SUBSCRIBE_START answered the SUBSCRIBE.
+	/// The owed groups start at the floor the demand last asked for, which an update can raise
+	/// after SUBSCRIBE_START answered the SUBSCRIBE, but not lower below that answer: nothing
+	/// says the publisher read the update before its FIN.
 	#[kio::test]
 	#[expect(
 		clippy::single_range_in_vec_init,
@@ -4217,8 +4218,8 @@ mod tests {
 		update(&mut sub, Some(1), vec![lite::Range::span(Some(1), 0, None, None)]);
 		assert_eq!(
 			sub.owed(None),
-			Some(vec![1..10]),
-			"a lowered floor owes what it newly asked for"
+			Some(vec![4..10]),
+			"a floor lowered below START owes nothing below it"
 		);
 		update(&mut sub, None, vec![lite::Range::span(None, 0, None, None)]);
 		assert_eq!(
@@ -4228,15 +4229,15 @@ mod tests {
 		);
 		update(
 			&mut sub,
-			Some(1),
+			Some(4),
 			vec![
-				lite::Range::span(Some(1), 0, Some(3), None),
-				lite::Range::span(Some(6), 0, None, None),
+				lite::Range::span(Some(4), 0, Some(5), None),
+				lite::Range::span(Some(7), 0, None, None),
 			],
 		);
 		assert_eq!(
 			sub.owed(None),
-			Some(vec![1..4, 6..10]),
+			Some(vec![4..6, 7..10]),
 			"nothing is owed between disjoint ranges"
 		);
 	}
@@ -8861,6 +8862,90 @@ mod tests {
 		}
 	}
 
+	/// Before lite-07 nothing answers a SUBSCRIBE_UPDATE, so a floor a reader lowers below
+	/// SUBSCRIBE_START as the publisher ends the track may never reach it: the publisher FINs
+	/// first and ignores the update. The copy then FINs its side at once, rather than after a
+	/// grace for groups nobody will send, which would hold the publisher's draining close.
+	#[kio::test]
+	async fn a_floor_lowered_as_the_publisher_ends_owes_nothing_below_start() {
+		use crate::transport::poll::{RecvStream as _, SendStream as _, Session as _};
+		for version in [Version::Lite05, Version::Lite06] {
+			let (session, peer) = crate::transport::memory::pair(Default::default());
+			let subscriber = Subscriber::new(SubscriberConfig {
+				runtime: crate::time::sim(),
+				session: crate::driver::Transport::new(session.clone()),
+				origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
+				recv_bandwidth: None,
+				version,
+				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+				peer_node: None,
+				cost: None,
+				going_away: Default::default(),
+				auth: crate::auth::Link::new(false),
+			});
+			let serve = TrackServe {
+				validity: Default::default(),
+				route: None,
+				source: None,
+				subscriber,
+				path: Path::from_static("room"),
+				instance: None,
+				node: None,
+				name: "video".into(),
+			};
+			let broadcast = crate::broadcast::Info::new().produce();
+			let mut serving = ServeLoop::new(&serve, broadcast.reserve_track("video").unwrap(), Default::default());
+			let _live = serving.serving.subscribe(None);
+			assert!(serving.poll(&serve, &kio::Waiter::noop()).is_pending());
+
+			let (mut send, mut recv) = kio::wait(|waiter| peer.poll_accept_bi(waiter)).await.unwrap();
+			let respond = |msg: lite::SubscribeResponse| {
+				let mut buf = Vec::new();
+				msg.encode(&mut crate::coding::Encoder::new(&mut buf, version.into()), version)
+					.unwrap();
+				buf
+			};
+			let start = respond(lite::SubscribeResponse::Start(lite::SubscribeStart {
+				id: 0,
+				start: Some(2),
+				largest: lite::Edge::Unknown,
+			}));
+			kio::wait(|waiter| send.poll_write(waiter, &start)).await.unwrap();
+			assert!(serving.poll(&serve, &kio::Waiter::noop()).is_pending());
+
+			// A reader asking from group 0 lowers the floor, which goes out as an update.
+			let _history = serving.serving.subscribe(Some(Subscription::default().with_start(0)));
+			assert!(serving.poll(&serve, &kio::Waiter::noop()).is_pending());
+
+			// The publisher had already ended the track, so it never applies the update.
+			let end = respond(lite::SubscribeResponse::End(lite::SubscribeEnd {
+				group: 2,
+				error: None,
+			}));
+			kio::wait(|waiter| send.poll_write(waiter, &end)).await.unwrap();
+			send.finish().unwrap();
+			let gate = serve.gate();
+			let mut running = TrackServeRun {
+				serve,
+				state: TrackRunState::Serve(serving),
+				gate,
+				datagrams: None,
+				finished: None,
+			};
+			let _ = poll_run(&mut running, &kio::Waiter::noop());
+
+			// No time passed, so no grace did: the SUBSCRIBE and its update, then the FIN.
+			let mut chunks = 0;
+			loop {
+				match recv.poll_read_chunk(&kio::Waiter::noop(), usize::MAX) {
+					Poll::Ready(Ok(Some(_))) => chunks += 1,
+					Poll::Ready(Ok(None)) => break,
+					other => panic!("{version:?}: no FIN after {chunks} chunks: {other:?}"),
+				}
+			}
+		}
+	}
+
 	/// Malformed bytes on a Subscribe Stream close the session at once, on every version, even
 	/// with a group stream still being read: the close never waits on a drain that a reader
 	/// leaving meanwhile would cut short.
@@ -11441,17 +11526,27 @@ impl SubStream {
 	/// owed from its reported start (see [`Self::range_start`]), which accounts for a skipped
 	/// prefix and resolves a relative or time start. The groups the SUBSCRIBE asked for below
 	/// its SUBSCRIBE_START are accounted for as unavailable when it arrives.
+	///
+	/// Before lite-07 nothing answers an update, and the publisher applies none once it has
+	/// sent its FIN, so a floor an update lowered may never have reached it: nothing below where
+	/// SUBSCRIBE_START served from is owed. One that arrives before the tail settles is still
+	/// delivered.
 	fn owed(&self, requested_end: Option<u64>) -> Option<Vec<std::ops::Range<u64>>> {
 		let end = self.end.as_ref()?.group;
 		let end = requested_end.map_or(end, |requested| requested.min(end));
 		if self.started.is_none() {
 			return Some(Vec::new());
 		}
+		let answered = match self.live.reports_starts() {
+			true => None,
+			false => self.started.flatten(),
+		};
 		let mut owed = Vec::new();
 		for (id, range) in self.live.iter() {
 			let Some(start) = self.range_start(id, range)? else {
 				continue;
 			};
+			let start = answered.map_or(start, |answered| start.max(answered));
 			// Our absolute ends name a group's first frame (see `wire_ranges`), and the rest
 			// go upstream open.
 			let stop = match range.end {

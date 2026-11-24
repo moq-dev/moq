@@ -2829,12 +2829,14 @@ export class Subscriber {
 			return window.runs(0n, end).every((run) => entry.tail.covers(run.start, run.end));
 		}
 		// Without SUBSCRIBE_START the publisher served no group at all. Otherwise each group is owed
-		// from the floor the demand last asked for, which an update can move either way, or where
-		// SUBSCRIBE_START resolved a live-edge one. The groups the SUBSCRIBE asked for below its
-		// SUBSCRIBE_START were accounted for when it arrived.
+		// from the floor the demand last asked for, or where SUBSCRIBE_START resolved a live-edge one,
+		// but never below that START: nothing answers an update, and the publisher applies none once it
+		// has sent its FIN, so a floor an update lowered may never have reached it. The groups the
+		// SUBSCRIBE asked for below its SUBSCRIBE_START were accounted for when it arrived.
 		if (entry.start === undefined || entry.start === null) return true;
 		const window = new Window(ranges, entry.track.largest()?.group);
-		return window.runs(floor ?? entry.start, end).every((run) => entry.tail.covers(run.start, run.end));
+		const from = max(floor ?? entry.start, entry.start);
+		return window.runs(from, end).every((run) => entry.tail.covers(run.start, run.end));
 	}
 
 	/**
