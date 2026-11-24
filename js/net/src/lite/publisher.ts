@@ -2002,7 +2002,12 @@ export class Publisher {
 					}
 					for (const range of skipped) {
 						const below = min(range.end, reach);
-						if (range.start < below) record?.untell(range.start, below);
+						if (range.start < below) {
+							// A stale run is untold, so a wider budget may still serve it. A final one is
+							// settled unnamed, so no update names it either.
+							if (range.stale !== undefined) record?.untell(range.start, below);
+							else record?.tell(range.start, below, reportOf(range));
+						}
 						if (!(await forward(max(range.start, reach), range.end, range))) return false;
 					}
 					skipped.length = 0;

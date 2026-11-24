@@ -6642,10 +6642,15 @@ impl TrackRun {
 			}
 			reach = range.start;
 		}
-		let tmp_unnamed = skipped.iter().filter(|(range, _)| range.start < reach).count();
-		tracing::info!(subscribe = self.ctx.id, track = %self.ctx.track_name, version = ?self.ctx.version, floor = self.floor, start, reach, runs = skipped.iter().count(), tmp_unnamed, "TMP resolve");
 		for (range, hole) in skipped.iter() {
-			self.track.record_mut().untell(range.start..range.end.min(reach));
+			let below = range.start..range.end.min(reach);
+			match hole.stale_budget() {
+				Some(_) => self.track.record_mut().untell(below),
+				None => {
+					let report = self.report(hole);
+					self.track.record_mut().tell(below, report);
+				}
+			}
 			self.forward_range(range.start.max(reach)..range.end, hole, writer)?;
 		}
 		// An end declared while this start was held follows it.
@@ -10740,8 +10745,9 @@ mod serve_group_test {
 	}
 
 	/// A join over a long history of gaps, as a lite-06 track keyed by timestamp carries one per
-	/// group, names only the gaps from the group below its start up: the older ones lie past a
-	/// group its budget skipped, so it reaches them only through a wider budget.
+	/// group, names only the gaps from the group below its start up, and an update keeping its
+	/// budget names none of the rest: they lie past a group its budget skipped, which the
+	/// subscriber is not owed.
 	#[kio::test]
 	async fn a_join_names_no_gap_past_a_skipped_group() {
 		for version in [Version::Lite05, Version::Lite06] {
@@ -10763,6 +10769,17 @@ mod serve_group_test {
 				.filter(|(first, _)| *first < start)
 				.collect();
 			assert_eq!(below, [(start - 19, start - 1)], "{version:?}: start {start}");
+
+			let named = drops(&mut writer, &log, version).await.len();
+			run.replace(lite::SubscribeUpdate {
+				wanted_group: None,
+				order: crate::track::Order::Descending,
+				priority: 1,
+				max_delay: Some(Duration::from_millis(100)),
+				ranges: vec![lite::Range::span(Some(0), 0, None, None)],
+			});
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			assert_eq!(drops(&mut writer, &log, version).await.len(), named, "{version:?}: after an update");
 		}
 	}
 

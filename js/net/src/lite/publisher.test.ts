@@ -3547,8 +3547,8 @@ test("runProbe rounds a fractional smoothedRtt instead of killing the stream", a
 });
 
 // A join over a long history of gaps, as a lite-06 track keyed by timestamp carries one per group,
-// names only the gaps from the group below its start up: the older ones lie past a group its
-// budget skipped, so it reaches them only through a wider budget. Mirrors the Rust
+// names only the gaps from the group below its start up, and an update keeping its budget names none
+// of the rest: they lie past a group its budget skipped, which the subscriber is not owed. Mirrors the Rust
 // `a_join_names_no_gap_past_a_skipped_group`.
 test("lite draft-06: a join names no gap past a skipped group", async () => {
 	const keys = Array.from({ length: 50 }, (_, i) => BigInt(i * 20));
@@ -3564,11 +3564,19 @@ test("lite draft-06: a join names no gap past a skipped group", async () => {
 		const start = response.start.start;
 		if (start === undefined) throw new Error("expected a start");
 		expect(start).toBeGreaterThan(0n);
-		const dropped = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
-		if (!("drop" in dropped)) throw new Error("expected SUBSCRIBE_DROP");
-		expect([dropped.drop.start, dropped.drop.end]).toEqual([start - 19n, start]);
-		const next = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
-		if ("drop" in next) expect(next.drop.start).toBeGreaterThan(start);
+		const drop = async () => {
+			const response = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
+			if (!("drop" in response)) throw new Error("expected SUBSCRIBE_DROP");
+			return [response.drop.start, response.drop.end];
+		};
+		// The gap below the start, then each above it.
+		for (let key = start - 20n; key < 1000n; key += 20n) expect(await drop()).toEqual([key + 1n, key + 20n]);
+
+		// An update keeping the budget names none of the older gaps either: the next drop is a new one.
+		await new SubscribeUpdate({ priority: 1, maxDelay: 100 }).encode(sub.client.writer, Version.DRAFT_06);
+		while (sub.track.subscription.peek()?.priority !== 1) await sub.track.subscription.changed();
+		hooks.dropTrackGroups(sub.track, 1001n, 1020n, { error: new StreamError(StreamCode.NotFound) });
+		expect(await drop()).toEqual([1001n, 1020n]);
 	} finally {
 		await sub.close();
 	}
