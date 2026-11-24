@@ -706,6 +706,28 @@ impl Holdings for Placed {
 	}
 }
 
+/// What a reader's copy held when it placed a time start before every group it held: the
+/// group holding it is older than any, so the range reaches back to the oldest group.
+struct ReachedBack;
+
+impl Holdings for ReachedBack {
+	fn resolves(&self) -> bool {
+		false
+	}
+
+	fn containing(&self, _: u64, _: Duration) -> Containing {
+		Containing::Before
+	}
+
+	fn next_start(&self, _: u64) -> Option<u64> {
+		None
+	}
+
+	fn complete(&self) -> bool {
+		true
+	}
+}
+
 /// The time start of `range` that a copy asked from `floor` raised to it, if any: that copy's
 /// resolution says nothing of which group holds it, which only a copy asked from below it
 /// places. Mirrors the JS `raised`.
@@ -1108,6 +1130,17 @@ impl Copy {
 						reader.waiter,
 					)
 				}) {
+				return Retains::Wait;
+			}
+			// A time start no copy placed at a group yet waits on the group holding its time,
+			// which starts at or before it and past any group held below it, and on the rest of
+			// its range under the cap. Below the copy's first arrival too: it was asked from there.
+			if reader.window.unplaced_times().any(|(time, last)| {
+				let held = (self.track.peek_before(time.saturating_add(1))).map_or(0, |group| group.start);
+				let end = last.map_or(end, |last| end.min(last.saturating_add(1)));
+				let groups = held.max(from)..end;
+				!groups.is_empty() && self.may_land(groups, true, grace, Some(reader.delivered), reader.waiter)
+			}) {
 				return Retains::Wait;
 			}
 			// A fill still owes what the reader owes under its bound and its own feed has not
@@ -2179,7 +2212,7 @@ impl Reader {
 	/// Place each unsettled [`Self::window`] range where a copy resolved it, on its own: one
 	/// whose start still waits leaves the rest placed, so a publisher names their starts.
 	fn resolve(&mut self, resolved: &BTreeMap<u64, Resolved>) {
-		let mut placed = Vec::new();
+		let (mut placed, mut reached) = (Vec::new(), Vec::new());
 		for key in self.window.unsettled() {
 			let Some(range) = self.mirrored.ranges.get(&key).copied() else {
 				continue;
@@ -2208,19 +2241,32 @@ impl Reader {
 				},
 				(end, _) => end,
 			};
-			// One that reached back to the oldest group still does, as on a plain reader.
+			// One that reached back to the oldest group still does, as on a plain reader. A time
+			// start keeps its time, which a replaced copy may still place: see [`Copy::retains`].
 			let start = match (waits || range.time().is_some(), resolved.floored) {
 				(true, true) => track::Start::Time(resolved.start),
+				(true, false) if range.time().is_some() => {
+					reached.push((
+						key,
+						track::Range {
+							start: range.start,
+							end,
+						},
+					));
+					continue;
+				}
 				(true, false) => track::Start::Oldest,
 				(false, _) => range.start,
 			};
 			placed.push((key, track::Range { start, end }));
 		}
 		// An edit restarts the window's coverage check, so one that places nothing is skipped.
-		if placed.is_empty() {
-			return;
+		if !placed.is_empty() {
+			self.window.edit([], &placed, None, &Placed);
 		}
-		self.window.edit([], &placed, None, &Placed);
+		if !reached.is_empty() {
+			self.window.edit([], &reached, None, &ReachedBack);
+		}
 	}
 
 	/// Follow the route: subscribe to a new copy, mark the ones it replaced, and mirror
@@ -11238,6 +11284,193 @@ mod test {
 
 		write(&b, 7);
 		assert_eq!(drain(&mut sub, false), [7]);
+	}
+
+	/// A reader whose time start no copy placed at a group yet keeps a replaced copy that may
+	/// still land the group holding that time, as a plain cursor on the logical track reads
+	/// it. The copy replacing it starts past the time: an anchored one leaves the start
+	/// waiting, and another reaches back past every group it holds.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_unplaced_time_start_waits_on_a_replaced_copy() {
+		for anchored in [true, false] {
+			let routes = Producer::new();
+			let front = logical(&routes);
+			let b = received_copy();
+			b.anchored();
+			routes.serve(b.consume());
+			let mut sub = front
+				.consume()
+				.subscribe(Subscription::default().with_ranges([track::Range {
+					start: crate::track::Start::Time(7),
+					end: Some(7),
+				}]))
+				.now_or_never()
+				.unwrap()
+				.unwrap();
+			write(&b, 8);
+			assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+
+			let mut c = received_copy();
+			if anchored {
+				c.anchored();
+			}
+			c.start_at(9).unwrap();
+			write(&c, 9);
+			routes.serve(c.consume());
+			assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+
+			let mut read = Vec::new();
+			for key in [6, 7] {
+				write(&b, key);
+				read.extend(drain(&mut sub, false));
+			}
+			assert_eq!(read, [7], "anchored={anchored}");
+			if anchored {
+				let resolved = sub.resolved_range(0).expect("placed");
+				assert_eq!((resolved.start, resolved.end), (7, Some(8)));
+			}
+			assert!(
+				matches!(sub.poll_recv_group(&kio::Waiter::noop()), Poll::Ready(Ok(None))),
+				"anchored={anchored}"
+			);
+		}
+	}
+
+	/// As [`an_unplaced_time_start_waits_on_a_replaced_copy`], with no group at the time: the
+	/// replaced copy declares it skipped, so the group holding the time starts below it, and
+	/// the reader waits for that group, as a plain cursor does.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_unplaced_time_start_waits_below_its_time_on_a_replaced_copy() {
+		let routes = Producer::new();
+		let front = logical(&routes);
+		let b = received_copy();
+		b.anchored();
+		routes.serve(b.consume());
+		let mut sub = front
+			.consume()
+			.subscribe(Subscription::default().with_ranges([track::Range {
+				start: crate::track::Start::Time(7),
+				end: Some(7),
+			}]))
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		write(&b, 8);
+		let mut c = received_copy();
+		c.anchored();
+		c.start_at(9).unwrap();
+		write(&c, 9);
+		routes.serve(c.consume());
+		b.skip_groups(7..8);
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+
+		write(&b, 6);
+		assert_eq!(drain(&mut sub, false), [6]);
+		let resolved = sub.resolved_range(0).expect("placed");
+		assert_eq!((resolved.start, resolved.end), (6, Some(8)));
+		assert!(matches!(
+			sub.poll_recv_group(&kio::Waiter::noop()),
+			Poll::Ready(Ok(None))
+		));
+	}
+
+	/// A time start that reached back past every group a copy held stays unplaced once read,
+	/// but waits on a replaced copy only up to its range's end: a group past it holds neither
+	/// the start nor anything in range.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_unplaced_time_start_waits_on_a_replaced_copy_only_to_its_end() {
+		let routes = Producer::new();
+		let front = logical(&routes);
+		let b = received_copy();
+		b.anchored();
+		routes.serve(b.consume());
+		let mut sub = front
+			.consume()
+			.subscribe(Subscription::default().with_ranges([track::Range {
+				start: crate::track::Start::Time(7),
+				end: Some(7),
+			}]))
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		write(&b, 9);
+		// Not anchored: its backfill reaches the range back past every group it holds.
+		let mut c = received_copy();
+		c.start_at(10).unwrap();
+		write(&c, 10);
+		routes.serve(c.consume());
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+
+		write(&b, 7);
+		assert_eq!(drain(&mut sub, false), [7]);
+		assert_eq!(copies(&routes), 1, "group 8 is past the range");
+		b.skip_groups(0..7);
+		assert!(matches!(
+			sub.poll_recv_group(&kio::Waiter::noop()),
+			Poll::Ready(Ok(None))
+		));
+	}
+
+	/// As [`an_unplaced_time_start_waits_on_a_replaced_copy`], for an outer front's backfill
+	/// through an inner front: the inner front's reader is the one whose time start is
+	/// unplaced when it replaces its copy.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_backfill_through_an_inner_front_waits_on_a_copy_replaced_before_placing() {
+		let routes = Producer::new();
+		let front = logical(&routes);
+		let a = received_copy();
+		write(&a, 6);
+		write(&a, 8);
+		routes.serve(a.consume());
+		let from = |time, end| {
+			Subscription::default().with_ranges([track::Range {
+				start: crate::track::Start::Time(time),
+				end,
+			}])
+		};
+		let mut sub = front
+			.consume()
+			.subscribe(from(8, None))
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		assert_eq!(drain(&mut sub, false), [8]);
+		let inner_routes = Producer::new();
+		let inner = logical(&inner_routes);
+		let b = received_copy();
+		b.anchored();
+		inner_routes.serve(b.consume());
+		routes.serve(inner.consume());
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		a.abort(Error::Cancel).unwrap();
+		sub.update(from(7, Some(7))).unwrap();
+		write(&b, 8);
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+
+		// The inner front moves on to a copy whose feed starts past the time.
+		let mut c = received_copy();
+		c.anchored();
+		c.start_at(9).unwrap();
+		write(&c, 9);
+		inner_routes.serve(c.consume());
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+
+		let mut read = Vec::new();
+		for key in [6, 7] {
+			write(&b, key);
+			read.extend(drain(&mut sub, false));
+		}
+		assert_eq!(read, [7]);
+		let resolved = sub.resolved_range(0).expect("placed");
+		assert_eq!((resolved.start, resolved.end), (7, Some(8)));
+		assert!(matches!(
+			sub.poll_recv_group(&kio::Waiter::noop()),
+			Poll::Ready(Ok(None))
+		));
 	}
 
 	/// A backfill's group that a range already placed holds goes out though another range
