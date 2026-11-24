@@ -1042,6 +1042,9 @@ export class Consumer {
 	#expiry?: Expiry;
 	// Carries the group across its logical track's route changes; see `resume.ts`.
 	#recover?: GroupRecover;
+	// Judges a short close the recovery left open again once its route changes, which may leave
+	// the close standing, so a caller awaiting `closed` without reading sees that too.
+	#rejudge?: Dispose;
 	// A replacement asked for while the copy being read stalls, raced against that copy.
 	#attempt?: Attempt;
 	// The frame a replacement copy resumes at: frames below it were read from an earlier copy.
@@ -1187,7 +1190,13 @@ export class Consumer {
 		const state = this.#state;
 		if (state.closed.peek() !== null || state.end !== undefined || this.#bufferedFrames().length > 0) return false;
 		if (!decide) return true;
-		if (!this.#torn() && this.#recover.wants({ kind: "closed" })) return true;
+		if (!this.#torn() && this.#recover.wants({ kind: "closed" })) {
+			this.#rejudge ??= this.#recover.changed.changed(() => {
+				this.#rejudge = undefined;
+				this.#refresh();
+			});
+			return true;
+		}
 		this.#end();
 		return false;
 	}
@@ -1712,6 +1721,8 @@ export class Consumer {
 			this.#fail(abort);
 		}
 		this.#abandon();
+		this.#rejudge?.();
+		this.#rejudge = undefined;
 		this.#recover?.close?.();
 		this.#recover = undefined;
 		// Closing is terminal for this reader, even with frames still unread.

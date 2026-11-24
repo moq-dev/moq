@@ -2296,12 +2296,17 @@ for (const spliced of [true, false]) {
 			expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
 			front.serve(handles[1]);
 			short.finish();
-			const reading = group.readFrame();
+			// A read waits for the splice; so does `closed` awaited without one, which a refusal settles.
+			const reading = spliced ? group.readFrame() : group.closed;
 			expect(await isPending(reading)).toBe(true);
 			if ("write" in next) next.write(0n, 2);
 			answer();
-			if (spliced) expect(dec.decode((await reading)?.payload)).toBe("0.1");
-			expect(await (spliced ? group.readFrame() : reading)).toBeUndefined();
+			if (spliced) {
+				expect(dec.decode((await reading)?.payload)).toBe("0.1");
+				expect(await group.readFrame()).toBeUndefined();
+			} else {
+				expect(await reading).toBeNull();
+			}
 		} finally {
 			sub.close();
 			front.consumer.close();

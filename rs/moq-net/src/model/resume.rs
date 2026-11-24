@@ -5801,17 +5801,23 @@ mod test {
 			whole.finish_at(2).unwrap();
 			let staged = routes.stage(b.consume());
 			short.finish().unwrap();
-			assert!(
-				reading.read_frame().now_or_never().is_none(),
-				"spliced={spliced}: waits for the staged copy"
-			);
 			if spliced {
+				assert!(
+					reading.read_frame().now_or_never().is_none(),
+					"waits for the staged copy"
+				);
 				routes.splice(b.consume(), staged);
 				assert_eq!(read(&mut reading), Some(b"b".to_vec()));
+				assert_eq!(read(&mut reading), None);
 			} else {
+				// Its end waits too, and wakes once the stage is dropped.
+				let wake = Arc::new(Wake::default());
+				let waiter = kio::Waiter::new(wake.clone().into());
+				assert!(reading.poll_finished(&waiter).is_pending(), "waits for the staged copy");
 				drop(staged);
+				assert!(wake.0.load(std::sync::atomic::Ordering::Relaxed), "woken once dropped");
+				assert!(matches!(reading.poll_finished(&waiter), Poll::Ready(Ok(1))));
 			}
-			assert_eq!(read(&mut reading), None, "spliced={spliced}");
 		}
 	}
 
