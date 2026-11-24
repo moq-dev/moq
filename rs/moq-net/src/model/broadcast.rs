@@ -830,7 +830,10 @@ impl Home {
 		let weak = request.weak();
 		if state.closing
 			|| state.requests.join(weak.name()).is_some()
-			|| state.tracks.get(weak.name()).is_some_and(|live| !live.same_channel(&weak))
+			|| state
+				.tracks
+				.get(weak.name())
+				.is_some_and(|live| !live.same_channel(&weak))
 		{
 			return Err(request);
 		}

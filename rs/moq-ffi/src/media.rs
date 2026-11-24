@@ -37,7 +37,8 @@ pub enum MoqDecodeStart {
 
 /// Catalog properties shared by every video rendition.
 ///
-/// Passing an absent field clears it from the next catalog snapshot rather than preserving the previous value.
+/// Passing an absent field clears it from the next catalog snapshot rather than preserving the
+/// previous value.
 #[derive(Clone, Default, uniffi::Record)]
 pub struct MoqVideoProperties {
 	/// Final rendered size after rotation, or absent to clear the explicit display size.
@@ -308,7 +309,8 @@ pub struct MoqVideoHint {
 	/// The encoded pixel dimensions.
 	#[uniffi(default = None)]
 	pub coded: Option<MoqDimensions>,
-	/// The aspect ratio the whole picture is displayed at, not the sample aspect. Absent means the decoded shape.
+	/// The aspect ratio the whole picture is displayed at, not the sample aspect. Absent means the
+	/// decoded shape.
 	#[uniffi(default = None)]
 	pub display_aspect: Option<MoqDimensions>,
 	/// The maximum bitrate in bits per second.
@@ -1074,8 +1076,9 @@ struct MediaStreamProducer {
 ///
 /// Released before its finish, it ends each track cleanly while nobody wants it; a reader that
 /// still does is served by the broadcast's next request for the track, or reads `Dropped` (seen
-/// elsewhere as `Internal`) with no request handler. Still open when its broadcast closes, it ends them with `Unroutable`, which a
-/// moq-transport reader sees as `Internal`: its wire has no such code.
+/// elsewhere as `Internal`) with no request handler. Still open when its broadcast closes, it ends
+/// them with `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such
+/// code.
 #[derive(uniffi::Object)]
 pub struct MoqMediaContainerProducer {
 	driver: crate::ffi::Background,
@@ -1085,10 +1088,10 @@ pub struct MoqMediaContainerProducer {
 
 /// Imports complete encoded frames onto one track.
 ///
-/// Released before its finish, it ends its track cleanly while nobody wants it; a reader that
-/// still does is served by the broadcast's next request for the track, or reads `Dropped` (seen
-/// elsewhere as `Internal`) with no request handler. Still open when its broadcast closes, it ends it with `Unroutable`, which a
-/// moq-transport reader sees as `Internal`: its wire has no such code.
+/// Released before its finish, it ends its track cleanly while nobody wants it; a reader that still
+/// does is served by the broadcast's next request for the track, or reads `Dropped` (seen elsewhere
+/// as `Internal`) with no request handler. Still open when its broadcast closes, it ends it with
+/// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqMediaTrackProducer {
 	inner: std::sync::Mutex<Option<MediaProducer>>,
@@ -1097,10 +1100,10 @@ pub struct MoqMediaTrackProducer {
 
 /// Imports a video byte stream onto one track.
 ///
-/// Released before its finish, it ends its track cleanly while nobody wants it; a reader that
-/// still does is served by the broadcast's next request for the track, or reads `Dropped` (seen
-/// elsewhere as `Internal`) with no request handler. Still open when its broadcast closes, it ends it with `Unroutable`, which a
-/// moq-transport reader sees as `Internal`: its wire has no such code.
+/// Released before its finish, it ends its track cleanly while nobody wants it; a reader that still
+/// does is served by the broadcast's next request for the track, or reads `Dropped` (seen elsewhere
+/// as `Internal`) with no request handler. Still open when its broadcast closes, it ends it with
+/// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqMediaTrackStreamProducer {
 	inner: std::sync::Mutex<Option<MediaStreamProducer>>,

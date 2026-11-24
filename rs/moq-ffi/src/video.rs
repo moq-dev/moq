@@ -352,14 +352,14 @@ fn panic_error() -> MoqError {
 
 /// Producer for a raw-video track.
 ///
-/// Constructed from a broadcast's media catalog. Each
-/// [`write`](Self::write) accepts a [`MoqVideoFrame`] whose `data` is in the
-/// pixel format declared by the [`MoqVideoEncoderInput`] passed at publish time.
+/// Constructed from a broadcast's media catalog. Each [`write`](Self::write) accepts a
+/// [`MoqVideoFrame`] whose `data` is in the pixel format declared by the [`MoqVideoEncoderInput`]
+/// passed at publish time.
 ///
-/// Released before its finish, it ends its track cleanly while nobody wants it; a reader that
-/// still does is served by the broadcast's next request for the track, or reads `Dropped` (seen
-/// elsewhere as `Internal`) with no request handler. Still open when its broadcast closes, it ends it with `Unroutable`, which a
-/// moq-transport reader sees as `Internal`: its wire has no such code.
+/// Released before its finish, it ends its track cleanly while nobody wants it; a reader that still
+/// does is served by the broadcast's next request for the track, or reads `Dropped` (seen elsewhere
+/// as `Internal`) with no request handler. Still open when its broadcast closes, it ends it with
+/// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqVideoProducer {
 	/// `None` once finished or aborted.
@@ -839,10 +839,11 @@ impl MoqVideoConsumer {
 	/// Subscribe to a video track and decode it inside the bindings.
 	///
 	/// `catalog_video` comes from the catalog (see
-	/// [`MoqMediaCatalogConsumer::next`](crate::media::MoqMediaCatalogConsumer::next)); the codec is read
-	/// from it. A codec or description this build cannot decode, or a stream every decoder's device
-	/// refuses, returns [`MoqError::UnsupportedConfig`] before decoding starts. Also fails with [`MoqError::Unsupported`] when
-	/// [`surface`](MoqVideoDecoderOutput::surface) is set on a platform with no surface to expose.
+	/// [`MoqMediaCatalogConsumer::next`](crate::media::MoqMediaCatalogConsumer::next)); the codec
+	/// is read from it. A codec or description this build cannot decode, or a stream every
+	/// decoder's device refuses, returns [`MoqError::UnsupportedConfig`] before decoding starts.
+	/// Also fails with [`MoqError::Unsupported`] when [`surface`](MoqVideoDecoderOutput::surface)
+	/// is set on a platform with no surface to expose.
 	///
 	/// A [disabled](crate::media::MoqVideo::enabled) rendition returns [`MoqError::NotFound`]: no
 	/// frames are coming.

@@ -216,9 +216,10 @@ enum Family {
 /// The track-publishing handles of one broadcast.
 ///
 /// A child that drops without finishing releases its track, which ends cleanly while nobody wants
-/// it, and closing the broadcast aborts every child still open. A finished track stops being served once its last producer drops, and an importer lets
-/// go of its producer when it finishes, so the broadcast keeps finished producers here instead:
-/// a subscriber arriving after the end still finds the track until the broadcast closes.
+/// it, and closing the broadcast aborts every child still open. A finished track stops being served
+/// once its last producer drops, and an importer lets go of its producer when it finishes, so the
+/// broadcast keeps finished producers here instead: a subscriber arriving after the end still finds
+/// the track until the broadcast closes.
 #[derive(Clone)]
 pub(crate) struct Children {
 	family: Arc<std::sync::Mutex<Family>>,
@@ -741,10 +742,10 @@ impl MoqTrackRequest {
 
 /// A stream track to which groups and frames can be published.
 ///
-/// Released before its finish, it ends its track cleanly while nobody wants it; a reader that
-/// still does is served by the broadcast's next request for the track, or reads `Dropped` (seen
-/// elsewhere as `Internal`) with no request handler. Still open when its broadcast closes, it ends it with `Unroutable`, which a
-/// moq-transport reader sees as `Internal`: its wire has no such code.
+/// Released before its finish, it ends its track cleanly while nobody wants it; a reader that still
+/// does is served by the broadcast's next request for the track, or reads `Dropped` (seen elsewhere
+/// as `Internal`) with no request handler. Still open when its broadcast closes, it ends it with
+/// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqTrackProducer {
 	phase: std::sync::Mutex<TrackPhase>,

@@ -960,12 +960,7 @@ mod tests {
 		let again = requests.requested_track().await.unwrap();
 		assert_eq!(again.name(), "audio");
 
-		let import = Track::audio(
-			again,
-			catalog.reserve(),
-			AudioInit::new(AudioFormat::Opus, opus_head()),
-		)
-		.unwrap();
+		let import = Track::audio(again, catalog.reserve(), AudioInit::new(AudioFormat::Opus, opus_head())).unwrap();
 		drop(track);
 		let demand = import.demand();
 		drop(import);

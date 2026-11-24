@@ -397,15 +397,14 @@ impl TryFrom<MoqAudioFrame> for moq_audio::Frame {
 
 /// Producer for a raw-audio track.
 ///
-/// Constructed from a broadcast's media catalog. Each
-/// [`write`](Self::write) accepts an [`MoqAudioFrame`] whose `data`
-/// is PCM in the format declared by the [`MoqAudioEncoderInput`]
+/// Constructed from a broadcast's media catalog. Each [`write`](Self::write) accepts an
+/// [`MoqAudioFrame`] whose `data` is PCM in the format declared by the [`MoqAudioEncoderInput`]
 /// passed at publish time.
 ///
-/// Released before its finish, it ends its track cleanly while nobody wants it; a reader that
-/// still does is served by the broadcast's next request for the track, or reads `Dropped` (seen
-/// elsewhere as `Internal`) with no request handler. Still open when its broadcast closes, it ends it with `Unroutable`, which a
-/// moq-transport reader sees as `Internal`: its wire has no such code.
+/// Released before its finish, it ends its track cleanly while nobody wants it; a reader that still
+/// does is served by the broadcast's next request for the track, or reads `Dropped` (seen elsewhere
+/// as `Internal`) with no request handler. Still open when its broadcast closes, it ends it with
+/// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqAudioProducer {
 	inner: std::sync::Mutex<Option<moq_audio::encode::Producer>>,
