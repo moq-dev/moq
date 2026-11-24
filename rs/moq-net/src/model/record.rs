@@ -381,7 +381,7 @@ impl Record {
 			walk.folded.push(0..floor.end);
 		}
 		let mut from = floor.end.max(self.floor);
-		while let Some(start) = self.next_told(from) {
+		while let Some(start) = self.next_stretch(from) {
 			let stretch = self.final_end(start, reader, beside, retire);
 			walk.gaps.extend(&stretch.gaps);
 			if fold && !stretch.gaps.is_empty() && stretch.runs > 2 {
@@ -435,7 +435,7 @@ impl Record {
 				self.settle_stretch(start..stretch.end);
 				folded.push(start..stretch.end);
 			}
-			from = self.next_told(stretch.end.max(start + 1));
+			from = self.next_stretch(stretch.end.max(start + 1));
 		}
 		folded
 	}
@@ -456,6 +456,18 @@ impl Record {
 		self.skipped.forget(stretch.clone());
 		self.written_off.remove(stretch.clone());
 		self.reported.insert(stretch, Report::Settled);
+	}
+
+	/// The lowest key from `key` on a final stretch may start at: one handed out or reported,
+	/// past each withheld run, which is not final however wide its report.
+	fn next_stretch(&self, mut key: u64) -> Option<u64> {
+		loop {
+			let next = self.next_told(key)?;
+			match self.withheld.get_key_value(&next) {
+				Some((run, _)) => key = run.end,
+				None => return Some(next),
+			}
+		}
 	}
 
 	/// The lowest key from `key` on that was handed out or reported.
@@ -784,6 +796,25 @@ mod test {
 		);
 		assert!(record.told(2), "the drops below it fold");
 		assert!(!record.told(3), "the handed group stays to be told");
+	}
+
+	/// A withheld run as wide as its report is passed whole, never key by key, by a fold or a
+	/// retirement.
+	#[test]
+	fn a_wide_withheld_run_is_passed_whole() {
+		let (pool, track) = account();
+		let mut record = Record::default();
+		record.reported.insert(0..1_000_000_001, Report::Dropped);
+		record.withhold(1..1_000_000_001, Hole::stale(Duration::ZERO));
+		record.settle(|| track.clone(), &mut (), Standing::default());
+		owe(&track, pool.used());
+		let reader = Standing {
+			from: 1,
+			handed: None,
+			ranges: Some(Cover::new([0..=0, 2_000_000_000..=2_000_000_000])),
+		};
+		record.settle(|| track.clone(), &mut (), reader);
+		assert_eq!(record.withheld_end(1), Some(1_000_000_001), "still withheld");
 	}
 
 	/// A stale run withheld from the wire bills like any run, and no fold passes it: it is
