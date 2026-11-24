@@ -120,6 +120,10 @@ export interface Advertised {
 	readonly route: WireRoute;
 	/** The absolute prefix a claim raised to its handle's root is filed at; unset when filed at its row. */
 	readonly filed?: Path.Valid;
+	/** Whether it is a broadcast published here, which serves only the path it is filed at. */
+	readonly exact?: boolean;
+	/** Its place, newest first, among the claims filed with it; unset when that is its place in its row. */
+	readonly order?: number;
 }
 
 /** What names a stream: an advertisement, and the instance its route serves. */
@@ -138,8 +142,9 @@ export function sameInstance(a: Served, b: Served): boolean {
 }
 
 /**
- * Every originated advertisement per prefix, most preferred first. A reader takes the first
- * one its scope admits, so a cheaper route it cannot use never hides one it can.
+ * Every originated advertisement per prefix, most preferred first. A reader ranks only what its
+ * scope admits, so a cheaper route it cannot use never hides one it can, and ranks the claims
+ * covering its root as one tier wherever each is filed.
  */
 export type Advertisements = ReadonlyMap<Path.Valid, readonly Advertised[]>;
 

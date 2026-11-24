@@ -139,7 +139,7 @@ export function presented(
 				covering.push({
 					prefix: candidate.filed ?? Path.join(root, covered),
 					depth,
-					order,
+					order: candidate.order ?? order,
 					arrival: arrival(candidate.identity),
 					candidate,
 					route: candidate.route,
@@ -151,8 +151,10 @@ export function presented(
 		const best = suffix !== null ? firstEligible(candidates, (candidate) => shows(candidate, covered)) : undefined;
 		if (suffix !== null && best) out.set(suffix, best);
 	}
-	// Hashed on the absolute path requested, as a request for it resolves.
-	const best = bestOfTier(Path.join(root, prefix), covering);
+	// Hashed on the absolute path requested, as a request for it resolves. A broadcast published
+	// above that path serves only its own, so a tier-mate that serves the path ranks ahead of it.
+	const at = Path.join(root, prefix);
+	const best = bestOfTier(at, covering, { serves: (entry) => !entry.candidate.exact || entry.prefix === at });
 	if (best) {
 		const snap = best.candidate;
 		const above = BigInt(Path.parts(prefix).length - best.depth);
@@ -206,14 +208,19 @@ export function arrival(identity: object): number {
  * The best of the most specific claims among `filed`, which all cover `path`: a claim shown above
  * its own prefix counts for the shallower prefix it is really at, and claims of one prefix rank
  * against each other wherever each is filed. Only an instance's highest epoch among them (and
- * `others`, of the same claim when `exact`) is eligible; {@link compareTier} ranks the rest, then
- * {@link compareTie}. Mirrors `RouteTable::best_route` in rs/moq-net.
+ * `others`, of the same claim when `exact`) is eligible; one that `serves` `path` ranks ahead, then
+ * {@link compareTier}, then {@link compareTie}. Mirrors `RouteTable::best_route` in rs/moq-net,
+ * and with `serves`, `TableCursor::best`.
  */
 export function bestOfTier<T>(
 	path: Path.Valid,
 	filed: readonly Filed<T>[],
-	others: (specificity: number) => readonly WireRoute[] = () => [],
+	options: {
+		others?: (specificity: number) => readonly WireRoute[];
+		serves?: (entry: Filed<T>) => boolean;
+	} = {},
 ): Filed<T> | undefined {
+	const { others = () => [], serves = () => true } = options;
 	const specificity = (entry: Filed<T>) => entry.depth - Number(entry.route.above ?? 0n);
 	// A loop, not a spread: a table may hold more candidates than a call takes arguments.
 	let most = Number.NEGATIVE_INFINITY;
@@ -224,7 +231,12 @@ export function bestOfTier<T>(
 	let best: Filed<T> | undefined;
 	for (const entry of tier) {
 		if (epochs.supersedes(entry.route)) continue;
-		if (best === undefined || (compareTier(path, entry, best) || compareTie(path, entry, best)) < 0) best = entry;
+		if (best === undefined) {
+			best = entry;
+			continue;
+		}
+		const serving = Number(serves(best)) - Number(serves(entry));
+		if ((serving || compareTier(path, entry, best) || compareTie(path, entry, best)) < 0) best = entry;
 	}
 	return best;
 }
@@ -1972,7 +1984,7 @@ export function mostSpecific<T>(
 		}
 		depth--;
 	}
-	return bestOfTier(path, filed, (specificity) => (specificity === exact ? others : []))?.candidate;
+	return bestOfTier(path, filed, { others: (specificity) => (specificity === exact ? others : []) })?.candidate;
 }
 
 /** Covering prefixes, most specific first, including the empty root. */

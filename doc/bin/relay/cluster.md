@@ -245,7 +245,8 @@ connect = [
 Prices aren't static. A publisher can re-price a live announcement, which is
 how a standby transcoder pool seeds a high cost and drops it once it's working.
 A GOAWAY is not a price: a relay receiving one ranks every route learned from
-that peer below every other eligible route, whatever the costs say. New
+that peer below every other available route, whatever the costs say, though
+still above a route held unavailable. New
 subscriptions go elsewhere when another route serves them, and an existing one
 moves to another route of the same stream if there is one, or else finishes on
 the draining peer. The drain is that relay's

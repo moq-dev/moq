@@ -192,16 +192,18 @@ class Scope {
 			if (covering.length === 0) out.set(Path.empty(), []);
 			// Raised to the root, a claim is that much further above it, so its Above names its own
 			// prefix: claims of one prefix supersede each other wherever each is filed. It keeps
-			// where it is filed, so a read beneath the root ranks it as a request there resolves.
+			// where it is filed, so a read beneath the root ranks it as a request there resolves, and
+			// its place among its filing's claims, which the merged row below no longer shows.
 			const raised = BigInt(rootDepth - Path.parts(path).length);
 			covering.push([
 				path,
-				visible.map((value) =>
+				visible.map((value, order) =>
 					raised === 0n
-						? value
+						? { ...value, order }
 						: {
 								...value,
 								filed: path,
+								order,
 								route: { ...value.route, above: (value.route.above ?? 0n) + raised },
 							},
 				),
@@ -212,11 +214,11 @@ class Scope {
 			// prefix rank against each other wherever each is filed, hashed on the root, as a
 			// request for it resolves.
 			const ranked = covering.flatMap(([prefix, visible]) =>
-				visible.map((value, order) => ({
+				visible.map((value) => ({
 					value,
 					prefix,
 					depth: Path.parts(prefix).length,
-					order,
+					order: value.order ?? 0,
 					arrival: arrival(value.identity),
 					route: value.route,
 				})),

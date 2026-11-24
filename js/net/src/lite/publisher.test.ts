@@ -5040,6 +5040,35 @@ test("a lite-07 rooted answer beneath its root shows the claim a request for tha
 	}
 });
 
+// A broadcast published above a handle's root serves only its own path, so a costlier claim of the
+// same prefix filed at the root, which serves it, is the one the answer carries, as a request for
+// the root takes it.
+test("a lite-07 rooted answer passes over a broadcast published above its root", async () => {
+	const origin = new OriginProducer();
+	const broadcast = publish(origin, Path.from("src"));
+	const filed = origin.scope(Path.empty(), Path.Prefixes.parse(["src/a"])).claim(Path.from("src"), { cost: 5n });
+	const { next, ok, close } = routedAnswer(origin.scope(Path.from("src/a"), Path.Prefixes.parse([""])));
+	try {
+		await ok();
+		const msgs: AnnounceBroadcast[] = [];
+		for (;;) {
+			const msg = await next();
+			msgs.push(msg);
+			if (msg.status === "synced") break;
+		}
+		const starts = msgs.flatMap((msg) => (msg.status === "start" ? [msg.instance] : []));
+		expect(starts).toEqual([filed.instance]);
+		const request = origin.consume().request(Path.from("src/a"));
+		await filed.requested().next();
+		request.close();
+	} finally {
+		broadcast.close();
+		filed.close();
+		close();
+		origin.close();
+	}
+});
+
 // Through a handle rooted beneath both filings, a broader claim filed above the root still gives
 // way to a more specific one filed beneath it, as a request there resolves.
 test("a lite-07 rooted answer shows the most specific claim filed on either side of its root", async () => {

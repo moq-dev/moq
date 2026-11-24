@@ -3032,6 +3032,41 @@ test("a publisher weighs a local broadcast against the routes it may forward onl
 	origin.close();
 });
 
+// A full tie beneath the path holds the claim received first, as a request does; the scope's
+// merged root row lists that claim first, which `presented` must not read as the newest.
+test("a scope's root row presents the tied claim a request holds", async () => {
+	const origin = new Producer();
+	const instance = { id: Instance.parse("cam"), epoch: 0n };
+	const older = origin.claim(Path.from("src"), { instance });
+	const newer = origin.claim(Path.from("src"), { instance });
+	const reader = origin.scope(Path.from("src/a"), Path.Prefixes.all()).consume();
+	await settle();
+	const all = wireOf(origin.consume()).advertised.peek()?.get(Path.from("src"));
+	const table = wireOf(reader).advertised.peek();
+	if (!all || !table) throw new Error("expected a table");
+	// Newest first at its own filing.
+	const held = all[1];
+	expect(presented(Path.empty(), table, () => true, { root: Path.from("src/a") }).get(Path.empty())?.identity).toBe(
+		held.identity,
+	);
+	const request = origin.consume().request(Path.from("src/a"));
+	const which = await Promise.race([
+		older
+			.requested()
+			.next()
+			.then(() => "older"),
+		newer
+			.requested()
+			.next()
+			.then(() => "newer"),
+	]);
+	expect(which).toBe("older");
+	request.close();
+	older.close();
+	newer.close();
+	origin.close();
+});
+
 test("a scope's merged covering prefixes never supersede across prefixes", async () => {
 	const origin = new Producer();
 	const instance = Instance.random();

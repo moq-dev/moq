@@ -37,14 +37,12 @@ reworks the router's told, gone, and ended bookkeeping, each keyed today by
 the filing a claim is shown from, so a claim's filing moving between rows is
 an in-place change rather than a withdrawal and a new claim.
 
-Verify with TLA+ as well as the tests, since the change alters which claim a
-relay forwards to and advertises:
-
-- `/verify-warm` (`rs/moq-net/verify/warm/WarmSettle.tla`): ranking across
-  filings still lets pulls settle, with adverts and answers in any order.
-- `/verify-failover` (`rs/moq-net/verify/failover/FailoverChain.tla`): along a
-  chain of relays, a route dying at a deeper filing fails over to the
-  covering claim instead of ending the track.
+Verify with the route rule's convergence proof as well as the tests, since
+the change alters which claim a relay forwards to and advertises: update
+`rs/moq-net/verify/route-algebra` (its claim rank) to rank a claim prefix's
+filings as one tier and run `just test route-proof`. `/verify-warm` and
+`/verify-failover` abstract routing to one broadcast and to any live upstream
+winning, so neither sees a filing.
 
 Put each run's result in the PR's Validation. No wire format changes; if the
 draft's text needs more than conformance, the change lands in the lite-07

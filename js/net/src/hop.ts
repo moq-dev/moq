@@ -161,8 +161,9 @@ export interface WireRoute {
 	readonly auth?: Credential;
 	/**
 	 * The session it arrived on is going away (the peer sent a GOAWAY): it ranks below every
-	 * other eligible route, whatever its cost, yet still serves when nothing else does. A
-	 * preference state, never a saturated cost. Local: never forwarded, and readers never see it.
+	 * other available route, whatever its cost, yet above one held unavailable, and still serves
+	 * when nothing else does. A preference state, never a saturated cost. Local: never forwarded,
+	 * and readers never see it.
 	 */
 	readonly draining?: boolean;
 	/** See {@link RouteInfo.available}; unset means available. */

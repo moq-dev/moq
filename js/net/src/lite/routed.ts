@@ -411,8 +411,10 @@ export class Routed {
 		const now = new Map<Instance.Valid | undefined, WireRoute>();
 		if (visible(reader, path)) {
 			const candidates = this.#candidates(reader, path);
-			// The same pick a consume of `path` makes from the cache, ranked where each claim is
-			// filed, newest first at each filing. Grouped by filing in one pass, so a refresh stays
+			// At the reader's own prefix, the same pick a consume of `path` makes from the cache,
+			// ranked where each claim is filed, newest first at each filing. Beneath it, the best
+			// claim filed at `path`, as the origin's listing shows each row: each carries its Above,
+			// so the reader holds every filing. Grouped by filing in one pass, so a refresh stays
 			// linear in the claims shown.
 			const pick = (among: Candidate[]) => {
 				// Alone, it is the pick: nothing supersedes or outranks it.
