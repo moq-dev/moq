@@ -33,6 +33,18 @@ Decided 2026-11-23 (maintainer): ✅ the cut waits for a
 publishes an API the next release removes (rejected: leaving them in m3,
 cutting first and deleting in the next breaking release).
 
+Decided 2026-11-24 (maintainer, /quest-plan of the exhaustive `moq-net`
+subscribe/fetch audit): ✅ the cut waits on
+[Redesign lite-07 subscribe and fetch](/quest/m2/lite07-subscribe/README.md),
+which adds `Previous Delta` to `GROUP` headers, requires `RESET_STREAM_AT` for
+opened Group Streams, removes `FETCH` and `SUBSCRIBE_SKIP` on lite-07, moves
+`Priority` and `Group Order` onto per-range wire fields and public
+`track::Range` across Rust, JS, and all FFI bindings, and adds judged `Max Age`
+to `SUBSCRIBE_DROP(OLD)` (rejected: bugfixes only without wire changes; drop).
+This supersedes `quest/m2/time-addressing/per-range-start.md` (#9491) and
+#9538; non-wire progress and cache-invariant fixes live independently in
+[m1](/quest/m1/subscribe-progress-fixes.md).
+
 Decided 2026-11-16 (maintainer, /quest-plan of an audit of everything on
 `main` since `release`, and of the lite-07 draft): the cut also waits on what
 that audit found. Fifteen reviewers judged about 480 work lines for a
