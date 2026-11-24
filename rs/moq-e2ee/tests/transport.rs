@@ -16,9 +16,8 @@ fn timed() -> moq_net::track::Info {
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
-fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+fn produce_origin() -> moq_net::origin::Producer {
+	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 	tokio::spawn(support::harness::run(driver));
 	producer
 }
@@ -46,8 +45,8 @@ async fn connect_protected(version: Version, label: &str) -> Fixture {
 	let generation = cred.produce();
 	let path = cred.path("meeting.hang").unwrap();
 
-	let publisher = produce_origin(1);
-	let consumer_origin = produce_origin(2);
+	let publisher = produce_origin();
+	let consumer_origin = produce_origin();
 
 	let options = moq_net::origin::RouteOptions::hidden().with_instance(generation.epoch().instance(), 0);
 	let broadcast = publisher.route(&path, options).unwrap();

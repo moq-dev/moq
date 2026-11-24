@@ -3202,6 +3202,36 @@ mod tests {
 	use crate::model::ProduceTest;
 	use futures::FutureExt;
 
+	/// A burst's answers naming the same largest position keep it ended if any says so, in
+	/// either order: a later one from a copy yet to see the end can't reopen the group.
+	#[test]
+	fn newer_keeps_an_ended_largest() {
+		let at = |ended| {
+			lite::Edge::Largest(lite::Largest {
+				position: Position { group: 5, frame: 3 },
+				ended,
+			})
+		};
+		assert_eq!(newer(at(true), at(false)), at(true));
+		assert_eq!(newer(at(false), at(true)), at(true));
+		assert_eq!(newer(at(false), at(false)), at(false));
+	}
+
+	/// The answer to a SUBSCRIBE's one range starting at group 0: on lite-07, `largest` says
+	/// where the track is, or that it has no group yet.
+	fn start_answer(version: Version, largest: Option<lite::Largest>) -> lite::SubscribeStart {
+		let largest = match largest {
+			_ if !version.has_ranges() => lite::Edge::Unknown,
+			Some(largest) => lite::Edge::Largest(largest),
+			None => lite::Edge::Empty,
+		};
+		lite::SubscribeStart {
+			id: 0,
+			start: Some(0),
+			largest,
+		}
+	}
+
 	const VERSION: Version = Version::Lite05;
 
 	/// A pre-lite-05 relay's track, untimed, with a fetch of `key` queued on it.
@@ -3237,6 +3267,7 @@ mod tests {
 			fill_groups: Default::default(),
 			tail: tail.clone(),
 			started: None,
+			went_live: false,
 			finishing: None,
 			parked: false,
 			starts: Default::default(),
@@ -3308,6 +3339,12 @@ mod tests {
 		assert_eq!(active.never_serves(largest), None, "a later range serves it");
 		active.starts.insert(1, None);
 		assert_eq!(active.never_serves(largest), largest, "that range served nothing");
+		active.starts.remove(&1);
+		assert_eq!(
+			active.never_serves(largest),
+			largest,
+			"an unanswered range is not waited on"
+		);
 
 		let open = lite::Range { end: None, ..later };
 		active.live = live(&[lite::Range::span(Some(0), 0, Some(3), None), open]);
@@ -3509,6 +3546,7 @@ mod tests {
 				fill_groups: Default::default(),
 				tail: Default::default(),
 				started: None,
+				went_live: false,
 				finishing: None,
 				parked: false,
 				starts: Default::default(),
@@ -3993,6 +4031,7 @@ mod tests {
 			fill_groups: Default::default(),
 			tail: Default::default(),
 			started: None,
+			went_live: false,
 			finishing: None,
 			parked: false,
 			starts: Default::default(),
@@ -4049,6 +4088,7 @@ mod tests {
 			fill_groups: Default::default(),
 			tail: Default::default(),
 			started: None,
+			went_live: false,
 			finishing: None,
 			parked: false,
 			starts: [(0, Some(4000)), (1, Some(4000))].into(),
@@ -4111,13 +4151,14 @@ mod tests {
 			fill_groups: Default::default(),
 			tail: Default::default(),
 			started: None,
+			went_live: false,
 			finishing: None,
 			parked: false,
 			starts: Default::default(),
 			join_ticks: Default::default(),
 			join_budgets: Default::default(),
 			declared: None,
-			end: Some(lite::SubscribeFinish { group: 10, error: None }),
+			end: Some(lite::SubscribeEnd { group: 10, error: None }),
 			wanted: None,
 			unanswered: None,
 			_working: crate::session::Work::default().start(),
@@ -4230,6 +4271,7 @@ mod tests {
 			fill_groups: Default::default(),
 			tail: Default::default(),
 			started: Some(Some(4)),
+			went_live: false,
 			finishing: None,
 			parked: false,
 			starts: [(0, Some(4))].into(),
@@ -4271,7 +4313,7 @@ mod tests {
 		assert!(!sub.fill_ids.contains(&2), "forgotten once started");
 	}
 
-	/// A lite-07 range an update adds owes nothing known until SUBSCRIBE_STARTED says where it
+	/// A lite-07 range an update adds owes nothing known until SUBSCRIBE_START says where it
 	/// starts, and then owes from there; one retired since owes nothing.
 	#[kio::test]
 	#[expect(
@@ -4300,13 +4342,14 @@ mod tests {
 			fill_groups: Default::default(),
 			tail: Default::default(),
 			started: Some(Some(4)),
+			went_live: false,
 			finishing: None,
 			parked: false,
 			starts: [(0, Some(4))].into(),
 			join_ticks: Default::default(),
 			join_budgets: Default::default(),
 			declared: None,
-			end: Some(lite::SubscribeFinish { group: 10, error: None }),
+			end: Some(lite::SubscribeEnd { group: 10, error: None }),
 			wanted: None,
 			unanswered: None,
 			_working: crate::session::Work::default().start(),
@@ -5258,7 +5301,7 @@ mod tests {
 	}
 
 	/// An idle copy that resubscribes gets its newest cached group again. That stream only
-	/// duplicates the cache, but lite-07's SUBSCRIBE_FINISH still counts it, so the tail must
+	/// duplicates the cache, but lite-07's SUBSCRIBE_END still counts it, so the tail must
 	/// too, or the subscription waits out the grace before it ends.
 	#[kio::test]
 	async fn a_duplicate_group_stream_still_counts_toward_the_end() {
@@ -5320,7 +5363,7 @@ mod tests {
 		assert!(matches!(res, Err(Error::Duplicate)), "{res:?}");
 		drop(group);
 
-		// SUBSCRIBE_FINISH counted one stream: the tail settles without the clock moving.
+		// SUBSCRIBE_END counted one stream: the tail settles without the clock moving.
 		let mut settle = Settle::new(&clock, tail.consume());
 		assert!(settle.poll(&kio::Waiter::noop(), |tail| tail.streams() >= 1).is_ready());
 	}
@@ -5612,23 +5655,20 @@ mod tests {
 		}
 	}
 
-	/// A SUBSCRIBE_FINISH below a group already received contradicts that group. lite-05
+	/// A SUBSCRIBE_END below a group already received contradicts that group. lite-05
 	/// specified an inclusive end, and `@moq/net` 0.1.3 to 0.1.9 sent one, so there it only
 	/// costs the early boundary; later drafts abort the track.
 	#[kio::test]
 	async fn a_subscribe_end_below_a_received_group() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			let mut responses = Vec::new();
-			lite::SubscribeResponse::Start(lite::SubscribeStart {
-				largest: None,
-				starts: vec![Some(0)],
-			})
-			.encode(
-				&mut crate::coding::Encoder::new(&mut responses, version.into()),
-				version,
-			)
-			.unwrap();
-			lite::SubscribeResponse::Finish(lite::SubscribeFinish { group: 2, error: None })
+			lite::SubscribeResponse::Start(start_answer(version, None))
+				.encode(
+					&mut crate::coding::Encoder::new(&mut responses, version.into()),
+					version,
+				)
+				.unwrap();
+			lite::SubscribeResponse::End(lite::SubscribeEnd { group: 2, error: None })
 				.encode(
 					&mut crate::coding::Encoder::new(&mut responses, version.into()),
 					version,
@@ -5754,13 +5794,10 @@ mod tests {
 
 		let mut answer = Vec::new();
 		let mut encoder = crate::coding::Encoder::new(&mut answer, version.into());
-		lite::SubscribeResponse::Start(lite::SubscribeStart {
-			largest: None,
-			starts: vec![Some(0)],
-		})
-		.encode(&mut encoder, version)
-		.unwrap();
-		lite::SubscribeResponse::Finish(lite::SubscribeFinish { group: 0, error: None })
+		lite::SubscribeResponse::Start(start_answer(version, None))
+			.encode(&mut encoder, version)
+			.unwrap();
+		lite::SubscribeResponse::End(lite::SubscribeEnd { group: 0, error: None })
 			.encode(&mut encoder, version)
 			.unwrap();
 		session.push(&answer);
@@ -5801,7 +5838,7 @@ mod tests {
 	}
 
 	/// Lite-07's SUBSCRIBE_START says where the track is, so a reader knows its largest
-	/// frame before any group arrives. The FIN with no SUBSCRIBE_FINISH then aborts the track,
+	/// frame before any group arrives. The FIN with no SUBSCRIBE_END then aborts the track,
 	/// and the stream ends with it.
 	#[kio::test]
 	async fn subscribe_start_reports_the_largest() {
@@ -5809,11 +5846,12 @@ mod tests {
 		let largest = track::Position { group: 4, frame: 2 };
 		let mut responses = Vec::new();
 		lite::SubscribeResponse::Start(lite::SubscribeStart {
-			largest: Some(lite::Largest {
+			id: 0,
+			start: Some(4),
+			largest: lite::Edge::Largest(lite::Largest {
 				position: largest,
 				ended: true,
 			}),
-			starts: vec![Some(4)],
 		})
 		.encode(
 			&mut crate::coding::Encoder::new(&mut responses, version.into()),
@@ -5863,11 +5901,42 @@ mod tests {
 		};
 		kio::wait(|waiter| kio::Task::poll(&mut running, waiter)).await;
 
-		// Recorded as ended, so a relay serving this copy says so in its own SUBSCRIBE_OK.
+		// Recorded as ended, so a relay serving this copy says so in its own SUBSCRIBE_START.
 		assert!(reader.largest_finished(largest));
 		assert_eq!(reader.largest().await, Some(largest));
 		assert_eq!(reader.largest().await, None, "the stream ends with the aborted track");
 		assert!(matches!(reader.recv_group().await, Err(Error::ProtocolViolation)));
+	}
+
+	/// Every lite-07 SUBSCRIBE_START says where the track is, so one answering a range after
+	/// the copy went live still moves its largest, and whether its group ended there, which a
+	/// relay serving the copy forwards in its own SUBSCRIBE_STARTs.
+	#[kio::test]
+	async fn a_later_subscribe_start_moves_the_largest() {
+		let (serve, mut serving, _tail, _broadcast) = lite07_serving(Duration::from_millis(500)).await;
+		let bounded = |start, end| lite::Range {
+			start: Some(lite::Anchor::Time(start)),
+			end: Some(lite::Anchor::Time(end)),
+		};
+		let Sub::Active(active) = &mut serving.sub else {
+			unreachable!("the helper opens a subscription");
+		};
+		active.live = lite::LiveRanges::new(Version::Lite07, &[bounded(0, 1000), bounded(1000, 2000)]);
+		let reader = serving.serving.subscribe(track::Subscription::default());
+		for (id, position, ended) in [
+			(0, track::Position { group: 4, frame: 2 }, false),
+			(1, track::Position { group: 6, frame: 1 }, true),
+		] {
+			let start = lite::SubscribeStart {
+				id,
+				start: Some(position.group),
+				largest: lite::Edge::Largest(lite::Largest { position, ended }),
+			};
+			let moved = serving.record_start(&serve, &start).unwrap();
+			serving.apply_starts(&serve, start.largest, moved).unwrap();
+			assert_eq!(serving.serving.largest(), Some(position), "range {id}");
+			assert_eq!(reader.largest_finished(position), ended, "range {id}");
+		}
 	}
 
 	/// A lite-07 subscription's serve loop with an active SUBSCRIBE under the max age `budget`,
@@ -5921,6 +5990,7 @@ mod tests {
 			fill_groups: Default::default(),
 			tail: tail.clone(),
 			started: None,
+			went_live: false,
 			finishing: None,
 			parked: false,
 			starts: Default::default(),
@@ -6294,8 +6364,9 @@ mod tests {
 	#[kio::test]
 	async fn a_stalled_recovery_walks_its_keys() {
 		let responses = lite06_responses([lite::SubscribeResponse::Start(lite::SubscribeStart {
-			largest: None,
-			starts: vec![Some(2)],
+			id: 0,
+			start: Some(2),
+			largest: lite::Edge::Unknown,
 		})]);
 		let Recovering {
 			serve,
@@ -6333,10 +6404,11 @@ mod tests {
 	async fn a_drained_recovery_gives_up_a_missing_key() {
 		let responses = lite06_responses([
 			lite::SubscribeResponse::Start(lite::SubscribeStart {
-				largest: None,
-				starts: vec![Some(2)],
+				id: 0,
+				start: Some(2),
+				largest: lite::Edge::Unknown,
 			}),
-			lite::SubscribeResponse::Finish(lite::SubscribeFinish { group: 6, error: None }),
+			lite::SubscribeResponse::End(lite::SubscribeEnd { group: 6, error: None }),
 		]);
 		let Recovering {
 			serve,
@@ -6598,10 +6670,7 @@ mod tests {
 			let mut responses = Vec::new();
 			let code = crate::coding::StreamCodes::encode_stream_code(&Version::Lite07, &crate::StreamError::App(5));
 			for resp in [
-				lite::SubscribeResponse::Start(lite::SubscribeStart {
-					largest: None,
-					starts: vec![Some(0)],
-				}),
+				lite::SubscribeResponse::Start(start_answer(version, None)),
 				lite::SubscribeResponse::Drop(lite::SubscribeDrop {
 					groups: 2..3,
 					error: code.into(),
@@ -6823,18 +6892,15 @@ mod tests {
 	fn fin_responses(version: Version, started: bool, clean: bool) -> Vec<u8> {
 		let mut responses = Vec::new();
 		if started {
-			lite::SubscribeResponse::Start(lite::SubscribeStart {
-				largest: None,
-				starts: vec![Some(0)],
-			})
-			.encode(
-				&mut crate::coding::Encoder::new(&mut responses, version.into()),
-				version,
-			)
-			.unwrap();
+			lite::SubscribeResponse::Start(start_answer(version, None))
+				.encode(
+					&mut crate::coding::Encoder::new(&mut responses, version.into()),
+					version,
+				)
+				.unwrap();
 		}
 		if clean {
-			lite::SubscribeResponse::Finish(lite::SubscribeFinish { group: 0, error: None })
+			lite::SubscribeResponse::End(lite::SubscribeEnd { group: 0, error: None })
 				.encode(
 					&mut crate::coding::Encoder::new(&mut responses, version.into()),
 					version,
@@ -6866,18 +6932,15 @@ mod tests {
 		}
 	}
 
-	/// SUBSCRIBE_START at group 0 and SUBSCRIBE_FINISH at 1: the publisher ended the track
+	/// SUBSCRIBE_START at group 0 and SUBSCRIBE_END at 1: the publisher ended the track
 	/// owing group 0.
 	fn owed_responses(version: Version) -> Vec<u8> {
 		let mut responses = Vec::new();
 		let mut encoder = crate::coding::Encoder::new(&mut responses, version.into());
-		lite::SubscribeResponse::Start(lite::SubscribeStart {
-			largest: None,
-			starts: vec![Some(0)],
-		})
-		.encode(&mut encoder, version)
-		.unwrap();
-		lite::SubscribeResponse::Finish(lite::SubscribeFinish { group: 1, error: None })
+		lite::SubscribeResponse::Start(start_answer(version, None))
+			.encode(&mut encoder, version)
+			.unwrap();
+		lite::SubscribeResponse::End(lite::SubscribeEnd { group: 1, error: None })
 			.encode(&mut encoder, version)
 			.unwrap();
 		responses
@@ -6951,15 +7014,12 @@ mod tests {
 		for wanted in [true, false] {
 			let version = Version::Lite06;
 			let mut responses = Vec::new();
-			lite::SubscribeResponse::Start(lite::SubscribeStart {
-				largest: None,
-				starts: vec![Some(0)],
-			})
-			.encode(
-				&mut crate::coding::Encoder::new(&mut responses, version.into()),
-				version,
-			)
-			.unwrap();
+			lite::SubscribeResponse::Start(start_answer(version, None))
+				.encode(
+					&mut crate::coding::Encoder::new(&mut responses, version.into()),
+					version,
+				)
+				.unwrap();
 			let session = crate::lite::test_transport::ScriptedSession::new(responses);
 			let subscriber = Subscriber::new(SubscriberConfig {
 				runtime: crate::time::sim(),
@@ -8602,7 +8662,7 @@ mod tests {
 
 	/// A session that dies before a tail settles hands the track back with the session's error,
 	/// even one the publisher ended, and the abort `TrackServeRun` commits then ends readers
-	/// cleanly only if the declared end settled: SUBSCRIBE_FINISH on lite-05+, the FIN before it.
+	/// cleanly only if the declared end settled: SUBSCRIBE_END on lite-05+, the FIN before it.
 	#[kio::test]
 	async fn internal_session_end_aborts_an_unsettled_tail() {
 		use crate::transport::poll::Session as _;
@@ -8724,7 +8784,7 @@ mod tests {
 				send.reset(crate::StreamError::NotFound.to_code());
 			} else {
 				let mut end = Vec::new();
-				lite::SubscribeResponse::Finish(lite::SubscribeFinish { group: 0, error: None })
+				lite::SubscribeResponse::End(lite::SubscribeEnd { group: 0, error: None })
 					.encode(&mut crate::coding::Encoder::new(&mut end, version.into()), version)
 					.unwrap();
 				kio::wait(|waiter| send.poll_write(waiter, &end)).await.unwrap();
@@ -10653,7 +10713,7 @@ mod tests {
 	/// its label as a close for its role.
 	#[kio::test]
 	async fn a_route_from_a_peer_without_a_node_counts_its_close() {
-		let node = crate::route::NodeId::new(7, 1);
+		let node = crate::route::NodeId::new(7);
 		let offer = crate::route::relay::Offer {
 			path: vec![crate::route::relay::Hop { node, session: 0 }].into(),
 			draining: false,
@@ -10769,7 +10829,6 @@ mod tests {
 		use crate::route::relay::{Hop, NodeId, Offer};
 		let node = NodeId {
 			relay: 7,
-			start: 1,
 			marked: false,
 		};
 		let hop = Hop { node, session: 0 };
@@ -11139,14 +11198,16 @@ struct SubStream {
 	/// The first group the publisher serves, once SUBSCRIBE_START says: `Some(None)` when it
 	/// starts no range.
 	started: Option<Option<u64>>,
-	/// The tail of a lite-07 subscription whose publisher sent SUBSCRIBE_FINISH: once it
+	/// Whether a lite-07 SUBSCRIBE_START took the copy live: later ones only move its edge.
+	went_live: bool,
+	/// The tail of a lite-07 subscription whose publisher sent SUBSCRIBE_END: once it
 	/// settles the copy finishes and FINs, while demand and responses keep flowing meanwhile.
 	finishing: Option<Settle>,
 	/// A pipelined subscription's group streams stay parked until the responses that beat the
 	/// accept are read, as they would have been without the wait: a SUBSCRIBE_START says where
 	/// the feed starts before its first group does.
 	parked: bool,
-	/// Where SUBSCRIBE_START or SUBSCRIBE_STARTED says each live range's delivery starts, by
+	/// Where each live range's SUBSCRIBE_START says its delivery starts, by
 	/// Range ID, `None` for one with nothing to deliver.
 	starts: std::collections::BTreeMap<u64, Option<u64>>,
 	/// The tick the copy recorded each live join range's answer at, by Range ID (see
@@ -11159,8 +11220,8 @@ struct SubStream {
 	/// What [`Self::declare`] last declared on the copy, so an unchanged one is not declared
 	/// again: each declaration restarts the grace of the gaps above it.
 	declared: Option<(Option<u64>, bool)>,
-	/// The track's exclusive end (SUBSCRIBE_FINISH), once declared.
-	end: Option<lite::SubscribeFinish>,
+	/// The track's exclusive end (SUBSCRIBE_END), once declared.
+	end: Option<lite::SubscribeEnd>,
 	/// The refresh join's wanted group, restated in every SUBSCRIBE_UPDATE.
 	wanted: Option<u64>,
 	/// Until the publisher's first response, what the source must still hold: a SUBSCRIBE
@@ -11180,7 +11241,7 @@ impl SubStream {
 
 	/// Lite-07's declaration of where the live feed starts: the lowest start the demand's live
 	/// ranges report, or the requested floor, pending, while SUBSCRIBE_START or a range's
-	/// SUBSCRIBE_STARTED has yet to say where one starts. `None` before lite-07, whose one start
+	/// SUBSCRIBE_START has yet to say where one starts. `None` before lite-07, whose one start
 	/// describes only the SUBSCRIBE's demand, and while the ranges ask only for fills.
 	fn feed_start(&self) -> Option<(Option<u64>, bool)> {
 		if !self.live.reports_starts() || self.demand.is_none() {
@@ -11275,7 +11336,9 @@ impl SubStream {
 	/// `largest`, when this bounded subscription's ranges, as SUBSCRIBE_START resolved them,
 	/// stop short of it, so the feed never delivers it. The range and arrival ledger then wait
 	/// for the groups it owes instead of an edge outside the requested history. A feed that
-	/// serves Largest waits for it, so an old cache is judged against that edge.
+	/// serves Largest waits for it, so an old cache is judged against that edge. A range still
+	/// unanswered is not waited on: going live is decided once, and it may yet answer with no
+	/// group, which would leave the wait unreleased, while the recorded Largest still bounds reads.
 	fn never_serves(&self, largest: Option<Position>) -> Option<Position> {
 		largest.filter(|largest| {
 			self.live.iter().all(|(_, range)| range.end.is_some())
@@ -11289,7 +11352,7 @@ impl SubStream {
 	/// for a range with no group to deliver.
 	///
 	/// Lite-07 reports every range's start: SUBSCRIBE_START the SUBSCRIBE's, and
-	/// SUBSCRIBE_STARTED each one an update added. Before it, the one start describes the
+	/// SUBSCRIBE_START each one an update added. Before it, the one start describes the
 	/// SUBSCRIBE's range, so a range an update replaced it with delivers from its absolute
 	/// start, or else from where delivery started.
 	fn range_start(&self, id: u64, range: &lite::Range) -> Option<Option<u64>> {
@@ -11325,8 +11388,8 @@ impl SubStream {
 	/// The groups the publisher still owes once it has ended the subscription, one run per
 	/// range: the publisher accounts for nothing between disjoint ranges.
 	///
-	/// `None` when nothing says which: drafts before SUBSCRIBE_FINISH only have the FIN, and a
-	/// lite-07 range an update added owes nothing known until SUBSCRIBE_STARTED says where it
+	/// `None` when nothing says which: drafts before SUBSCRIBE_END only have the FIN, and a
+	/// lite-07 range an update added owes nothing known until SUBSCRIBE_START says where it
 	/// starts. Without a SUBSCRIBE_START the publisher served no group at all. Each range is
 	/// owed from its reported start (see [`Self::range_start`]), which accounts for a skipped
 	/// prefix and resolves a relative or time start. The groups the SUBSCRIBE asked for below
@@ -11600,6 +11663,23 @@ fn through(end: Option<lite::Anchor>) -> Option<u64> {
 		lite::Anchor::Absolute(end) => Some(end.group),
 		lite::Anchor::Time(end) => Some(end),
 		lite::Anchor::Live { .. } | lite::Anchor::Joined { .. } => None,
+	}
+}
+
+/// The newer of two answers' edges: a Largest over none, the later of two. Two naming the same
+/// position say it ended if either does: one from a copy that has yet to see the end says nothing.
+fn newer(a: lite::Edge, b: lite::Edge) -> lite::Edge {
+	match (a, b) {
+		(lite::Edge::Largest(x), lite::Edge::Largest(y)) if x.position > y.position => a,
+		(lite::Edge::Largest(x), lite::Edge::Largest(y)) if x.position == y.position => {
+			lite::Edge::Largest(lite::Largest {
+				position: x.position,
+				ended: x.ended || y.ended,
+			})
+		}
+		(lite::Edge::Largest(_), lite::Edge::Empty | lite::Edge::Unknown) => a,
+		(_, lite::Edge::Largest(_) | lite::Edge::Empty) => b,
+		_ => a,
 	}
 }
 
@@ -12178,7 +12258,7 @@ impl TrackServe {
 							// start returns to the demand that produced it (see
 							// `SubStream::requested`).
 							// Lite-07 declares from each live range's reported start instead, pending
-							// while a range the update adds awaits SUBSCRIBE_STARTED.
+							// while a range the update adds awaits SUBSCRIBE_START.
 							if active.live.reports_starts() {
 								active.declare(producer);
 							} else if start_moved {
@@ -12659,6 +12739,7 @@ impl Establish {
 			requested: self.subscription.start(),
 			tail: self.tail.clone(),
 			started: None,
+			went_live: false,
 			finishing: None,
 			parked: self.parked,
 			starts: Default::default(),
@@ -13760,9 +13841,14 @@ impl ServeLoop {
 			true => request.request_start(None),
 			false => request,
 		};
-		// Marked received before any reader sees it, so none resolves an anchor this wire dropped.
+		// Marked received before any reader sees it, so none resolves an anchor this wire dropped,
+		// nor reads the live edge from what lands before the upstream says where it is.
 		let serving = request.stage(info);
 		serving.received();
+		match serve.subscriber.version.has_ranges() {
+			true => serving.await_edge(),
+			false => serving.edge_from_groups(),
+		}
 		if serve.subscriber.version.resolves_anchors() {
 			serving.anchored();
 		}
@@ -13875,40 +13961,106 @@ impl ServeLoop {
 		Ok(())
 	}
 
-	/// Record a single SUBSCRIBE_STARTED without yet publishing the full starts table to
-	/// the track, returning whether the range is still live and needs `report_starts`/`declare`.
-	fn record_started(&mut self, serve: &TrackServe, started: &lite::SubscribeStarted) -> Result<bool, Error> {
+	/// Lite-07: record where one range starts, from a SUBSCRIBE_START, without yet publishing
+	/// the full starts table to the track. Returns whether the range is still live. A range
+	/// that follows the live edge is answered with where the edge is.
+	fn record_start(&mut self, serve: &TrackServe, start: &lite::SubscribeStart) -> Result<bool, Error> {
 		let Sub::Active(active) = &mut self.sub else {
 			return Ok(false);
 		};
-		let id = started.id;
-		if active.started.is_none()
-			|| !active.live.assigned(id)
-			|| active.live.initial(id)
+		let id = start.id;
+		let range = active.live.get(id).copied();
+		if !active.live.assigned(id)
 			|| active.starts.contains_key(&id)
+			|| (start.largest == lite::Edge::Unknown && range.is_some_and(|range| range.follows_live()))
 		{
-			tracing::warn!(track = %serve.name, id, "unexpected subscribe started");
+			tracing::warn!(track = %serve.name, id, "unexpected subscribe start");
 			return Err(Error::ProtocolViolation);
 		}
 		// One retired since is owed nothing.
-		if active.live.get(id).is_some() {
-			active.starts.insert(id, started.start);
-			let now = serve.subscriber.runtime.now();
-			// A fill's range starting past where it asked skips groups it will not deliver.
-			if let Some(groups) = active.fill_range(id) {
-				let skipped = groups.start..started.start.unwrap_or(groups.end).clamp(groups.start, groups.end);
-				if let Ok(mut tail) = active.tail.write() {
-					tail.account(skipped.clone(), now);
-				}
-				self.range_fills.skip(groups, skipped);
-			}
-			// The tail judges what is owed again.
-			if let Ok(mut tail) = active.tail.write() {
-				tail.expire(now);
-			}
-			return Ok(true);
+		if range.is_none() {
+			return Ok(false);
 		}
-		Ok(false)
+		active.starts.insert(id, start.start);
+		let now = serve.subscriber.runtime.now();
+		// A fill's range starting past where it asked skips groups it will not deliver.
+		if let Some(groups) = active.fill_range(id) {
+			let skipped = groups.start..start.start.unwrap_or(groups.end).clamp(groups.start, groups.end);
+			if let Ok(mut tail) = active.tail.write() {
+				tail.account(skipped.clone(), now);
+			}
+			self.range_fills.skip(groups, skipped);
+		}
+		// The tail judges what is owed again.
+		if let Ok(mut tail) = active.tail.write() {
+			tail.expire(now);
+		}
+		Ok(true)
+	}
+
+	/// Lite-07: apply to the copy what a burst of SUBSCRIBE_STARTs said once their ranges are
+	/// recorded: where the live feed starts, the newest `largest` among them, and, when
+	/// `moved`, where each live range starts.
+	fn apply_starts(&mut self, serve: &TrackServe, largest: lite::Edge, moved: bool) -> Result<(), Error> {
+		let Sub::Active(active) = &mut self.sub else {
+			return Ok(());
+		};
+		// Where the live feed starts so far: the lowest start the demand's ranges report.
+		let served = active.feed_start().and_then(|(start, _)| start);
+		active.started = Some(served);
+		// Before the copy goes live, since a reader's live join resolves only then: where the
+		// publisher placed it, rather than at whichever group landed first.
+		if moved {
+			active.report_starts(&self.serving);
+		}
+		let (position, ended) = match largest {
+			lite::Edge::Largest(largest) => {
+				self.serving.report_edge(largest.position.group);
+				(Some(largest.position), Some(largest.ended))
+			}
+			lite::Edge::Empty | lite::Edge::Unknown => (None, None),
+		};
+		// The copy goes live at the first answer saying where the live feed is, or at the first
+		// answer at all when the demand never follows it; a later one only moves the edge above
+		// and the largest below. An answer behind the copy's cache fails it.
+		if active.demand.is_some() && !active.went_live {
+			let follows = active
+				.live
+				.iter()
+				.any(|(id, range)| active.feeds(id) && range.follows_live());
+			match (largest, active.never_serves(position)) {
+				(lite::Edge::Unknown, _) if follows => Ok(()),
+				(lite::Edge::Unknown, _) => self.serving.set_live_ahead(None, None, served),
+				(_, Some(largest)) => self.serving.set_live_ahead(Some(largest), ended, served),
+				(_, None) => self.serving.set_live(position, ended, served),
+			}
+			.inspect_err(|err| tracing::warn!(track = %serve.name, %err, "subscribe start behind the cache"))?;
+			active.went_live = largest != lite::Edge::Unknown || !follows;
+		} else if let lite::Edge::Largest(largest) = largest {
+			// Recorded whole, as going live did, so this copy's own answers forward it.
+			self.serving.report_largest(largest.position, largest.ended);
+		}
+		// An answer saying where the live feed is, or that the track holds nothing, tells this
+		// copy's own readers too, once what it said is recorded above: they would read an edge
+		// known before then as an empty track.
+		if largest != lite::Edge::Unknown {
+			self.serving.answer_edge();
+		}
+		// Only a live fill's or probe's Range ID matters from here.
+		let live = &active.live;
+		active.fill_ids.retain(|id| live.get(*id).is_some());
+		active.probe_ids.retain(|id| live.get(*id).is_some());
+		active.declare(&mut self.serving);
+		// The groups the SUBSCRIBE asked for below where every demand range starts are not waited
+		// for, whatever the demand asks later. One that still arrives is delivered, so they are
+		// not dropped.
+		if let Some(requested) = active.requested
+			&& let Some((Some(served), false)) = active.feed_start()
+			&& let Ok(mut tail) = active.tail.write()
+		{
+			tail.account(requested..served, serve.subscriber.runtime.now());
+		}
+		Ok(())
 	}
 
 	/// Apply one response read from the upstream subscription.
@@ -13917,12 +14069,12 @@ impl ServeLoop {
 			return Ok(());
 		};
 		match &msg {
-			// SUBSCRIBE_FINISH declares the track's exclusive final
+			// SUBSCRIBE_END declares the track's exclusive final
 			// key, which may arrive while trailing groups are
 			// still in flight. Record it on this segment's producer so
 			// consumers learn the boundary early; the tail then waits for
 			// the groups below it.
-			lite::SubscribeResponse::Finish(end) => {
+			lite::SubscribeResponse::End(end) => {
 				if active.end.is_some() {
 					tracing::warn!(track = %serve.name, group = end.group, "duplicate subscribe finish");
 					return Err(Error::ProtocolViolation);
@@ -13955,82 +14107,44 @@ impl ServeLoop {
 					active.finishing = Some(settle);
 				}
 			}
-			// SUBSCRIBE_START names where each range's delivery starts,
-			// the lowest being the first group this feed serves: the
-			// publisher skipped everything below it (e.g. it could not
-			// serve the requested frame). Record it as a drop signal,
-			// so a reader waiting on a skipped group fails over
-			// instead of stalling on a live route.
+			// Lite-07 answers each range on its own: where its delivery starts, and what the
+			// publisher knows of the largest position.
+			lite::SubscribeResponse::Start(start) if serve.subscriber.version.has_ranges() => {
+				let moved = self.record_start(serve, start)?;
+				self.apply_starts(serve, start.largest, moved)?;
+			}
+			// Before lite-07, SUBSCRIBE_START names where the one range's delivery starts, the
+			// first group this feed serves: the publisher skipped everything below it (e.g. it
+			// could not serve the requested frame). Record it as a drop signal, so a reader
+			// waiting on a skipped group fails over instead of stalling on a live route.
 			lite::SubscribeResponse::Start(start) => {
-				if active.started.is_some() && serve.subscriber.version.has_ranges() {
-					tracing::warn!(track = %serve.name, "duplicate subscribe start");
-					return Err(Error::ProtocolViolation);
+				let start = start.start;
+				// An update may have retired the range already, whose start says nothing now, though
+				// it still says where the SUBSCRIBE's demand was served from.
+				if active.live.get(0).is_some() {
+					active.starts.insert(0, start);
 				}
-				// One resolved start per range the SUBSCRIBE carried, by Range ID.
-				if start.starts.len() as u64 != active.live.initial_count() {
-					tracing::warn!(track = %serve.name, starts = start.starts.len(), ranges = active.live.initial_count(), "subscribe start resolves other ranges");
-					return Err(Error::ProtocolViolation);
-				}
-				// An update may have retired some already, whose starts say nothing now. A
-				// fill's range starting past where it asked skips groups it will not deliver.
 				let now = serve.subscriber.runtime.now();
-				let mut served: Option<u64> = None;
-				for (id, start) in (0..).zip(&start.starts) {
-					// One an update retired since owes nothing, though before lite-07 its start
-					// still says where the SUBSCRIBE's demand was served from.
-					if active.live.get(id).is_some() {
-						active.starts.insert(id, *start);
-					}
-					match active.fill_range(id) {
-						Some(groups) => {
-							let skipped = groups.start..start.unwrap_or(groups.end).clamp(groups.start, groups.end);
-							if let Ok(mut tail) = active.tail.write() {
-								tail.account(skipped.clone(), now);
-							}
-							self.range_fills.skip(groups, skipped);
+				let served = match active.fill_range(0) {
+					Some(groups) => {
+						let skipped = groups.start..start.unwrap_or(groups.end).clamp(groups.start, groups.end);
+						if let Ok(mut tail) = active.tail.write() {
+							tail.account(skipped.clone(), now);
 						}
-						// A fill an update retired since says nothing of the live feed either, nor
-						// does a probe.
-						None if !active.feeds(id) => {}
-						// Only the demand's ranges say where the live feed is served from. No range
-						// starting anywhere leaves nothing owed.
-						None => {
-							served = match (served, *start) {
-								(Some(served), Some(start)) => Some(served.min(start)),
-								(served, start) => served.or(start),
-							}
-						}
+						self.range_fills.skip(groups, skipped);
+						None
 					}
-				}
+					// A fill an update retired since says nothing of the live feed either, nor
+					// does a probe.
+					None if !active.feeds(0) => None,
+					None => start,
+				};
 				active.started = Some(served);
-				// Before the copy goes live, since a reader's live join resolves only then: where
-				// the publisher placed it, rather than at whichever group landed first.
-				active.report_starts(&self.serving);
-				if active.live.reports_starts()
-					&& let Some(largest) = start.largest
-				{
-					self.serving.report_edge(largest.position.group);
-				}
 				// Only a live fill's or probe's Range ID matters from here.
 				let live = &active.live;
 				active.fill_ids.retain(|id| live.get(*id).is_some());
 				active.probe_ids.retain(|id| live.get(*id).is_some());
-				// One asking only for fills feeds nothing live.
-				if active.demand.is_some() && serve.subscriber.version.has_largest() {
-					// A bounded feed that never delivers Largest goes live at the
-					// answer alone; one that does waits for it to show.
-					// An answer behind the copy's cache fails it.
-					let position = start.largest.map(|largest| largest.position);
-					// Recorded whole as the copy goes live, so a woken reader never takes the
-					// frames ahead of the answer for the largest, and a relay answers its own
-					// readers that the group ended.
-					let ended = start.largest.map(|largest| largest.ended);
-					match active.never_serves(position) {
-						Some(largest) => self.serving.set_live_ahead(largest, ended, served),
-						None => self.serving.set_live(position, ended, served),
-					}
-					.inspect_err(|err| tracing::warn!(track = %serve.name, %err, "subscribe start behind the cache"))?;
-				} else if active.demand.is_some()
+				if active.demand.is_some()
 					&& let Some(entry) = serve.subscriber.subscribes.lock().get_mut(&active.id)
 				{
 					entry.answered(served, None);
@@ -14041,12 +14155,7 @@ impl ServeLoop {
 				// that moved the start makes it stale, and one that
 				// moved back restores it); elsewhere the
 				// request-tracked floor stands rather than a guess.
-
-				// Lite-07 says where every live range starts, so the declaration follows them
-				// whatever an update changed since.
-				if active.live.reports_starts() {
-					active.declare(&mut self.serving);
-				} else if active.start == active.requested && active.demand.is_some() {
+				if active.start == active.requested && active.demand.is_some() {
 					let _ = match (serve.subscriber.version.resolves_start(), served) {
 						(true, Some(served)) => self.serving.start_resolved(served),
 						_ => self.serving.start_at(served),
@@ -14060,15 +14169,6 @@ impl ServeLoop {
 					&& let Ok(mut tail) = active.tail.write()
 				{
 					tail.account(requested..served, serve.subscriber.runtime.now());
-				}
-			}
-			// Where a range an update added starts, from which its groups are owed.
-			lite::SubscribeResponse::Started(started) => {
-				if self.record_started(serve, started)?
-					&& let Sub::Active(active) = &mut self.sub
-				{
-					active.report_starts(&self.serving);
-					active.declare(&mut self.serving);
 				}
 			}
 			// The publisher will never send these groups, so they
@@ -14146,7 +14246,7 @@ impl ServeLoop {
 	fn settle(serve: &TrackServe, serving: &track::Producer, active: &SubStream) -> Settle {
 		let budget = serving.subscription().map(|sub| sub.widest());
 		if let Ok(mut tail) = active.tail.write() {
-			// Lite-05+ declared the end with SUBSCRIBE_FINISH instead.
+			// Lite-05+ declared the end with SUBSCRIBE_END instead.
 			if !serve.subscriber.version.has_track_stream() {
 				tail.end();
 			}
@@ -14487,29 +14587,35 @@ impl ServeLoop {
 						let mut next = Some(res);
 						while let Some(res) = next.take() {
 							match res {
-								Recv::Message(lite::SubscribeResponse::Started(first)) => {
-									let mut dirty = match self.record_started(serve, &first) {
+								Recv::Message(lite::SubscribeResponse::Start(first))
+									if serve.subscriber.version.has_ranges() =>
+								{
+									let mut dirty = match self.record_start(serve, &first) {
 										Ok(changed) => changed,
 										Err(err) => return Poll::Ready(ServeEnd::GiveBack(err)),
 									};
-									// Drain any further ready SUBSCRIBE_STARTED messages in one pass
-									// before publishing the starts table, avoiding O(N^2) rebuilds when
-									// a multi-range update is answered in a burst.
-									let mut yielded = false;
-									loop {
-										if budget.poll_yield(waiter).is_pending() {
-											yielded = true;
-											break;
-										}
+									let mut largest = first.largest;
+									// Drain the rest of the burst before applying it: applied in pieces,
+									// each piece re-fits the demand, and an update sent between them
+									// retires ranges whose answers are still unread. Each SUBSCRIBE_START
+									// answers a Range ID this side assigned, at most once, so the drain
+									// stops at that many rather than at the task budget.
+									let mut left = match &self.sub {
+										Sub::Active(active) => active.live.next(),
+										Sub::None => 0,
+									};
+									while left > 0 {
+										left -= 1;
 										let Sub::Active(active) = &mut self.sub else {
 											break;
 										};
 										match active.stream.reader.poll_recv::<lite::SubscribeResponse>(waiter) {
-											Poll::Ready(Recv::Message(lite::SubscribeResponse::Started(started))) => {
-												match self.record_started(serve, &started) {
+											Poll::Ready(Recv::Message(lite::SubscribeResponse::Start(start))) => {
+												match self.record_start(serve, &start) {
 													Ok(changed) => dirty |= changed,
 													Err(err) => return Poll::Ready(ServeEnd::GiveBack(err)),
 												}
+												largest = newer(largest, start.largest);
 											}
 											Poll::Ready(other) => {
 												next = Some(other);
@@ -14518,12 +14624,11 @@ impl ServeLoop {
 											Poll::Pending => break,
 										}
 									}
-									if dirty && let Sub::Active(active) = &mut self.sub {
-										active.report_starts(&self.serving);
-										active.declare(&mut self.serving);
+									if let Err(err) = self.apply_starts(serve, largest, dirty) {
+										return Poll::Ready(ServeEnd::GiveBack(err));
 									}
-									if next.is_none() && yielded {
-										return Poll::Pending;
+									if next.is_none() {
+										ready!(budget.poll_yield(waiter));
 									}
 								}
 								Recv::Message(msg) => {
@@ -14539,7 +14644,7 @@ impl ServeLoop {
 										break;
 									};
 									// The publisher ends the subscription only once it declared the
-									// track's end: with SUBSCRIBE_FINISH from lite-05, which lite-07
+									// track's end: with SUBSCRIBE_END from lite-05, which lite-07
 									// reads into the tail without a FIN.
 									if serve.subscriber.version.has_track_stream() && active.end.is_none() {
 										return Poll::Ready(ServeEnd::GiveBack(Error::ProtocolViolation));

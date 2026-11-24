@@ -42,31 +42,31 @@
 		"expect": "refused"
 	},
 	{
-		"name": "a ROUTE carries a path of hops, each a Node ID, its Start, and a session, then flags, priority, and cost",
+		"name": "a ROUTE carries a path of hops, each a Node ID, its Marked, and a session, then flags, priority, and cost",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "070c020701000009020003018005",
+		"hex": "070a02070000090003018005",
 		"expect": "decoded"
 	},
 	{
 		"name": "a ROUTE's 0x2 flag marks a path through a draining node",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "07080109010000027f03",
+		"hex": "070701090000027f03",
 		"expect": "decoded"
 	},
 	{
 		"name": "a ROUTE flag no version defines is refused",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "07080109010000088003",
+		"hex": "070701090000088003",
 		"expect": "refused"
 	},
 	{
 		"name": "a ROUTE with more than 32 hops is refused",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "074088210101000002010000030100000401000005010000060100000701000008010000090100000a0100000b0100000c0100000d0100000e0100000f010000100100001101000012010000130100001401000015010000160100001701000018010000190100001a0100001b0100001c0100001d0100001e0100001f0100002001000021010000008001",
+		"hex": "074067210100000200000300000400000500000600000700000800000900000a00000b00000c00000d00000e00000f00001000001100001200001300001400001500001600001700001800001900001a00001b00001c00001d00001e00001f0000200000210000008001",
 		"expect": "refused"
 	},
 	{
@@ -80,35 +80,35 @@
 		"name": "a ROUTE missing a hop it counts is refused",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "07080307010000008003",
+		"hex": "070703070000008003",
 		"expect": "refused"
 	},
 	{
 		"name": "a ROUTE hop naming Node ID 0 is refused",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "07080100010000008001",
+		"hex": "070701000000008001",
 		"expect": "refused"
 	},
 	{
 		"name": "a ROUTE's first hop may name a marked Node ID, the node's own identity with its Marked set",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "070c020701010007010000017f00",
+		"hex": "070a02070100070000017f00",
 		"expect": "decoded"
 	},
 	{
 		"name": "a ROUTE naming a marked Node ID past its first hop is refused",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "070c020701000009020103008005",
+		"hex": "070a02070000090103008005",
 		"expect": "refused"
 	},
 	{
 		"name": "a Node ID whose Marked is neither 0 nor 1 is refused",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "07080109010200008003",
+		"hex": "070701090200008003",
 		"expect": "refused"
 	},
 	{
@@ -122,42 +122,42 @@
 		"name": "a DEAD names the hop whose session closed and the node at its far end",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "090707010002090100",
+		"hex": "09050700020900",
 		"expect": "decoded"
 	},
 	{
 		"name": "a DEAD naming Far Node ID 0 is refused",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "090707010002000100",
+		"hex": "09050700020000",
 		"expect": "refused"
 	},
 	{
 		"name": "a DEAD naming a marked Node ID, which holds no session, is refused",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "090707010002090101",
+		"hex": "09050700020901",
 		"expect": "refused"
 	},
 	{
 		"name": "a DRAIN names the node that sent GOAWAY",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "0a03070100",
+		"hex": "0a020700",
 		"expect": "decoded"
 	},
 	{
 		"name": "a DRAIN naming Node ID 0 is refused",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "0a03000100",
+		"hex": "0a020000",
 		"expect": "refused"
 	},
 	{
 		"name": "a DRAIN naming a marked Node ID is refused",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "0a03070101",
+		"hex": "0a020701",
 		"expect": "refused"
 	},
 	{

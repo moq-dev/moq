@@ -76,7 +76,7 @@ pub struct Subscription {
 /// A live join a received copy's readers wait on, by its [`Start::Live`] lag and its end, with
 /// the widest staleness budget one waits with and the newest answer any of them saw before it
 /// began waiting: only an answer recorded after that is fresh for every one of them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct JoinAsk {
 	pub min: Duration,
 	pub end: Option<u64>,

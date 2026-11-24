@@ -395,7 +395,7 @@ limit: the track then ends with `FRAME_TOO_LARGE` instead of going stale.
       "changed": 4, "rewritten": 120,
       "sent": { "dead": 1, "drain": 0 }, "received": { "dead": 0, "drain": 1 },
       "refused": { "path": 0, "scope": 0, "looped": 0 },
-      "closed": { "stalled": 0, "overrun": 0, "malformed": 0, "role": 0, "unasked": 0, "regressed": 0, "other": 0 }
+      "closed": { "stalled": 0, "overrun": 0, "malformed": 0, "role": 0, "unasked": 0, "other": 0 }
     }
   }
 }
@@ -526,7 +526,7 @@ neighbours':
 | `rewritten` | Broadcasts rewritten into the origin behind those changes: every broadcast the relay still claims, once per change. | Each change is costing the relay work in proportion to what lies behind it. Divide by `changed` for the cost of one. |
 | `sent` / `received` | DEAD (a relay-to-relay session closed) and DRAIN (a relay sent GOAWAY) withdrawals, by kind. | Relays restarting or draining. A DRAIN rate without matching DEADs is a drain that never finishes. |
 | `refused` | Refused routes and claims by reason: `path` (a path this relay cannot hold), `scope` (outside the session's root or grant, or what the relay serves), `looped` (the way already crosses this relay, or exceeds the hop limit). | `path` or `looped`: the releases disagree on route content. `scope`: a grant narrower than what the peer announces. |
-| `closed` | Sessions the route layer closed, by kind: `stalled` (the peer stopped reading its route stream), `overrun` (it read too slowly for what changed), `malformed` (it sent what the rule never builds, or broke the stream), `role` (what its role never sends), `unasked` (its stream fell out of step), `regressed` (its relay restarted with an older start, or two relays share an id), `other` (such as announcing past the session's cap). | Anything here on a canary that its neighbours lack: the releases disagree on the route wire. `stalled` and `overrun` alone point at an overloaded peer. |
+| `closed` | Sessions the route layer closed, by kind: `stalled` (the peer stopped reading its route stream), `overrun` (it read too slowly for what changed), `malformed` (it sent what the rule never builds, or broke the stream), `role` (what its role never sends), `unasked` (its stream fell out of step), `other` (such as announcing past the session's cap). | Anything here on a canary that its neighbours lack: the releases disagree on the route wire. `stalled` and `overrun` alone point at an overloaded peer. |
 
 A route that ended takes its claims with it, so they count as claims ending
 rather than in `rewritten`. On moq-lite-07 a route change updates a broadcast

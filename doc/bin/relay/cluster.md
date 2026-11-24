@@ -324,9 +324,7 @@ declares in SETUP on moq-lite-05 and later: a Hop ID added to each route's hop
 list, or on the opt-in `moq-lite-07-wip` a Node ID naming the route's origin,
 which it also adds to the hops of each route it forwards. It is random on every start, so a
 restarted relay is a new node to the rest of the mesh, and there is no setting
-to pin it. A Node ID also carries when the relay started, which orders the runs
-of an identity kept across restarts; a relay's is new each time, so its clock
-stepping back across a restart changes nothing.
+to pin it: a moq-lite-07 Relay ID names one run of a relay.
 
 A relay never dials its own `cluster.node`, so every relay can share one
 `cluster.connect` list or API response. Peer URLs that differ only in query,

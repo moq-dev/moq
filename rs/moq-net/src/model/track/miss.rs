@@ -410,6 +410,17 @@ impl Misses {
 		}
 	}
 
+	/// Let go of every group a fill answered, for a reader that never reads them: the cache
+	/// holds them, and their fills may serve the rest.
+	pub fn let_go_filled(&mut self) {
+		let filled: RangeSet<u64> = std::mem::take(&mut self.filled)
+			.into_iter()
+			.map(|key| key..key + 1)
+			.collect();
+		self.release(&filled);
+		self.pick_up();
+	}
+
 	/// Take `key` as handed out, if a fill answered it.
 	pub fn take_filled(&mut self, key: u64) {
 		if self.filled.remove(&key) {
@@ -1449,6 +1460,44 @@ impl Misses {
 				}
 			}
 			self.hold(joins);
+		}
+	}
+
+	/// Ask fills for `asks`, which [`Self::judge`] returned, take in what the fills answered, and
+	/// give up what a fill still owes past `drift`'s budget, parking `waiter` on the rest. Costs
+	/// nothing with nothing to ask, no fill to hear from, and no gap to time, when no answer can
+	/// arrive.
+	pub fn chase(
+		&mut self,
+		state: &kio::Consumer<TrackState>,
+		asks: &RangeSet<u64>,
+		asking: impl FnOnce() -> Asking,
+		drift: &Drift,
+		given_up: &mut GivenUp,
+		waiter: &kio::Waiter,
+	) {
+		if !asks.is_empty() || !self.is_idle() {
+			let asking = asking();
+			match asks.is_empty() {
+				false => {
+					let fills = state.read().fills.clone();
+					self.ask(state, &fills, asks, &asking, given_up);
+				}
+				// What the reader asks with still reaches the fills it joined.
+				true => self.update(&asking),
+			}
+			loop {
+				let retry = self.resolve(state, given_up, waiter);
+				if retry.is_empty() {
+					break;
+				}
+				let fills = state.read().fills.clone();
+				self.ask(state, &fills, &retry, &asking, given_up);
+			}
+		}
+		// Only what a fill still owes can expire.
+		if self.is_waiting() {
+			self.expire(&state.read(), drift, given_up, waiter);
 		}
 	}
 

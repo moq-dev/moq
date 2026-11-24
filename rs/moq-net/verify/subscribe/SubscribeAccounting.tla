@@ -39,7 +39,7 @@
 (* where it ends. Under `Pressure`, so is when the pool's debt folds the   *)
 (* publisher's record of the group.                                        *)
 (*                                                                         *)
-(* Scope: the subscription is already answered (SUBSCRIBE_OK) and covers   *)
+(* Scope: the subscription is already started (SUBSCRIBE_START) and covers *)
 (* every start in `Groups`; ranges, fills, frames, and the tail's grace    *)
 (* are left out. An End is at most one past the highest start, so a span   *)
 (* may run past the range. GROUP_END takeover is left out.                 *)

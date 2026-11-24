@@ -12,8 +12,8 @@ use moq_net::{Client, Server, Timestamp, Version, cache, origin, transport::memo
 
 /// An origin whose cache holds what the model scenario's does, so neither the relay's nor a
 /// viewer's grows with the groups a run delivers.
-fn origin(hop: u64) -> origin::Producer {
-	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+fn origin() -> origin::Producer {
+	let mut config = origin::Config::default();
 	config.pool = cache::Pool::new(cache::Config::default().with_capacity(64 * 1024));
 	let (producer, driver) = origin::Producer::new(config);
 	tokio::spawn(moq_net::time::run(driver));
@@ -51,8 +51,8 @@ fn main() {
 		.build()
 		.unwrap();
 	runtime.block_on(async move {
-		let relay = origin(1);
-		let publisher = origin(2);
+		let relay = origin();
+		let publisher = origin();
 		let ingest = link(
 			version,
 			Client::new()
@@ -69,8 +69,8 @@ fn main() {
 		broadcast.announce().unwrap();
 
 		let mut audience = Vec::new();
-		for viewer in 0..viewers {
-			let local = origin(3 + viewer);
+		for _ in 0..viewers {
+			let local = origin();
 			let sessions = link(
 				version,
 				Client::new()

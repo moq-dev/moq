@@ -972,8 +972,10 @@ sharing one can leave a bench linked against the other tree's library.
 
 ### CodSpeed
 
-The CodSpeed workflow adds nightly instruction counts for `main`, at
-<https://codspeed.io/moq-dev/moq>. Its CPU simulation runs
+The CodSpeed workflow adds instruction counts for each landing on `main` that
+touches Rust, at <https://codspeed.io/moq-dev/moq>. A landing waits for the
+running measurement and GitHub keeps only the newest pending one, so a run may
+cover several landings. Its CPU simulation runs
 each bench under Valgrind on a hosted runner, so a change of a few percent
 shows without the paired comparison's rounds. It does not see syscalls, I/O,
 contention, or caches, and skips `iter_custom` benches, so `just rs codspeed`
@@ -990,6 +992,21 @@ nix develop --command cargo codspeed run
 
 Run locally, the benches only check that each case runs; there is no
 measurement outside CodSpeed's runner.
+
+### Kixel Quest
+
+CodSpeed and Nightly also upload what they measured as `kixel-metrics`
+artifacts, which [Kixel Quest](https://kixel.quest) reads when the run finishes
+and turns a regression into an investigation quest in `quest/m0/`, bisected to
+the landing that caused it by dispatching CodSpeed on a `kixel-bisect/<commit>`
+branch. CodSpeed reports each bench's simulated instruction count, read from
+the Callgrind profiles its runner leaves (`just gh benchmark-report
+codspeed-metrics`); Nightly reports every successful source's report, without
+its `bench-*` prefix, and each paired comparison's base as a second observation
+of that commit (`just gh benchmark-report nightly-metrics`). A benchmark CSV
+column becomes a measure of its row. Kixel Quest reads at most 1 MiB of a run's
+metrics, and a full Nightly writes about 0.87 MiB, so the step fails rather than
+upload more.
 
 ## Local check capacity
 

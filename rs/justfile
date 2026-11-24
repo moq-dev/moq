@@ -170,6 +170,8 @@ macos-test:
     source sh/checks.sh
     run just rs test --manifest-path rs/moq-auth/Cargo.toml
     run just rs test -p kio -p hang -p moq-tokio -p moq-sock
+    # AVFoundation, the reader behind QuickTime Player and Safari, lists a finished MP4's chapters.
+    run just rs test -p moq-mux --lib -E 'test(=container::mp4::tests::apple_lists_the_chapters)'
     run just rs test -p moq-video --no-default-features -E 'test(encode::backend::videotoolbox::tests)'
     # Runner has no camera; these tests need none.
     run just rs test -p moq-video --no-default-features --features capture -E 'test(/^capture::avfoundation::tests::/)'

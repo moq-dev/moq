@@ -11,7 +11,7 @@
 //! extending a route never improves it. Among equal ranks it takes one with no marked link
 //! on its path, which it may send to more neighbours, and then stays on its next hop. A
 //! claim a node takes over a marked link, or one told it marked across a scoped grant, it
-//! announces under its marked Node ID, the same relay and start with the Marked bit set,
+//! announces under its marked Node ID, the same relay with the Marked bit set,
 //! whose route is marked from the start: the mark then keeps the claim off every other
 //! marked link, while each copy of a node's claims stays whole. The marked Node ID holds
 //! no session, so it files no session floor, and a path names it only as its first hop,
@@ -23,8 +23,8 @@
 //! live when it closes; one that closes while such a session lives is never named, and
 //! its routes go as any route change does, so no name covers a live session. Per pair of relays a node keeps the
 //! highest session it knows closed (the session floor), and refuses any path naming that
-//! pair at or below it: a session orders by its node's start and then its number, so a
-//! restart replaces the pair's entry. A floor only refuses stale routes sooner, so a node
+//! pair at or below it: a Relay ID names one run of a relay, whose sessions it numbers in
+//! order, and a restarted relay is a new one. A floor only refuses stale routes sooner, so a node
 //! keeps every floor of a pair a heard route joins and, of the rest, those heard routes
 //! stopped joining last, while they number no more than those pairs: the table is bounded
 //! by the heard routes. A node that sent GOAWAY is named once per neighbour in a
@@ -73,9 +73,11 @@
 //! metric is never used, and a claim's cost saturates there.
 //!
 //! The rule is the bake-off's pick (moq-dev/moq#8880): `tests/multi.rs` with `floor`,
-//! `epoch`, `batch`, `drain`, and `claimed`, which `tests/multicast.rs` compares it
-//! against. `tests/multicast_search.rs` searches every delivery order on small meshes,
-//! and `tests/multicast_cost.rs` sweeps what one event costs.
+//! `batch`, `drain`, and `claimed`, which `tests/multicast.rs` compares it against. It
+//! leaves out the pick's `epoch`, which bounded the floors by ordering a relay's runs: a
+//! Relay ID names one run, and the heard routes bound the floors.
+//! `tests/multicast_search.rs` searches every delivery order on small meshes, and
+//! `tests/multicast_cost.rs` sweeps what one event costs.
 
 use std::{
 	cmp::Reverse,
@@ -93,27 +95,20 @@ use super::prefix::{ancestors, below, within_any, within_set};
 use super::reader::Reader;
 use super::{Error, Event, Id, Item, Key, MAX_COST, MAX_HOPS, Metric, Rev, Shown};
 
-/// How a forwarding node names itself on a path: its relay, and which start of that
-/// relay's process. A start only grows; one that repeats or goes back gets the relay's
-/// new sessions refused.
+/// How a forwarding node names itself on a path: its Relay ID, which names one run of a
+/// relay's process, so a restarted relay is a new node.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct NodeId {
 	pub relay: Id,
-	pub start: u64,
 	/// The node's marked identity, which it announces what crossed a marked link under:
-	/// the same process at the same start, holding no session of its own, so it names
-	/// no start of any relay.
+	/// the same process, holding no session of its own.
 	pub marked: bool,
 }
 
 impl NodeId {
-	/// The node `relay` names itself at `start`.
-	pub fn new(relay: Id, start: u64) -> Self {
-		Self {
-			relay,
-			start,
-			marked: false,
-		}
+	/// The node relay `relay` names itself as.
+	pub fn new(relay: Id) -> Self {
+		Self { relay, marked: false }
 	}
 }
 
@@ -192,7 +187,7 @@ impl Offer {
 /// how it ranks it.
 pub(crate) struct Here<'a> {
 	/// Per pair of relays, the highest session known closed.
-	pub closed: &'a BTreeMap<(Id, Id), (u64, u64)>,
+	pub closed: &'a BTreeMap<(Id, Id), u64>,
 	/// Closed sessions a live heard route still names.
 	pub dead: &'a BTreeMap<Hop, NodeId>,
 	/// Nodes named as draining.
@@ -241,7 +236,7 @@ fn marked_id(me: NodeId) -> NodeId {
 	NodeId { marked: true, ..me }
 }
 
-/// Whether `path` crosses any start of `relay`.
+/// Whether `path` crosses `relay`, either of its identities.
 fn names(path: &[Hop], relay: Id) -> bool {
 	path.iter().any(|hop| hop.node.relay == relay)
 }
@@ -270,17 +265,16 @@ fn marked_well(path: &[Hop]) -> bool {
 	!rest.iter().any(|hop| hop.node.marked)
 }
 
-/// The pairs of relays a path joins, each with where its session stands in the pair's
-/// order: the node that learned the route over a session, the node at its far end, and
-/// that session as the first node's start and number.
-fn pairs(path: &[Hop]) -> impl Iterator<Item = ((Id, Id), (u64, u64))> + '_ {
+/// The pairs of relays a path joins, each with its session's number: the node that learned
+/// the route over a session, the node at its far end, and the first node's number for it.
+fn pairs(path: &[Hop]) -> impl Iterator<Item = ((Id, Id), u64)> + '_ {
 	path.windows(2).map(|pair| floor_of(pair[1], pair[0].node))
 }
 
-/// The pair of relays `hop`'s session joins, as the floor files it, and where the session
-/// stands in that pair's order.
-pub(crate) fn floor_of(hop: Hop, far: NodeId) -> ((Id, Id), (u64, u64)) {
-	((hop.node.relay, far.relay), (hop.node.start, hop.session))
+/// The pair of relays `hop`'s session joins, as the floor files it, and the session's
+/// number.
+pub(crate) fn floor_of(hop: Hop, far: NodeId) -> ((Id, Id), u64) {
+	((hop.node.relay, far.relay), hop.session)
 }
 
 /// Every hop of `node`, whatever its session.
@@ -793,9 +787,8 @@ pub(crate) struct Router<N, I, A> {
 	unnamed: (BTreeSet<Hop>, BTreeSet<NodeId>),
 	/// Closed sessions a live heard route still names, each with its far end.
 	dead: BTreeMap<Hop, NodeId>,
-	/// Per pair of relays, the highest session known closed, as the near relay's start
-	/// and its session number.
-	closed: BTreeMap<(Id, Id), (u64, u64)>,
+	/// Per pair of relays, the highest session known closed, as the near relay numbered it.
+	closed: BTreeMap<(Id, Id), u64>,
 	/// The floors of pairs no heard route joins, oldest first.
 	loose: Loose,
 	/// Nodes named as draining that a live heard route still crosses.
@@ -1049,15 +1042,6 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		}
 		if self.peers.contains_key(&peer) {
 			return Err(Error::Duplicate);
-		}
-		// A start only grows. Every path through a session of a start below one known
-		// closed is refused while its floor is kept, so a relay whose clock went back would
-		// peer and route nothing: refuse it here, where its operator sees why.
-		if let Role::Routing(node) = &port.role {
-			let known = (self.closed).range((node.relay, Id::MIN)..=(node.relay, Id::MAX));
-			if known.into_iter().any(|(_, (start, _))| *start > node.start) {
-				return Err(Error::Regressed);
-			}
 		}
 		self.sessions += 1;
 		let ask: BTreeSet<Path> = match &port.role {
@@ -3409,11 +3393,7 @@ mod tests {
 	}
 
 	fn node(relay: Id) -> NodeId {
-		NodeId {
-			relay,
-			start: 1,
-			marked: false,
-		}
+		NodeId { relay, marked: false }
 	}
 
 	fn port(role: Role) -> Port {
@@ -5426,7 +5406,6 @@ mod tests {
 		let me = Hop {
 			node: NodeId {
 				relay: 1,
-				start: 0,
 				marked: false,
 			},
 			session: 3,
@@ -5587,107 +5566,6 @@ mod tests {
 		}
 		router.disconnect(2);
 		assert_eq!(router.kept().closed, 0);
-	}
-
-	/// A relay that restarts under a higher start replaces its pair's floor rather than
-	/// adding one: its new sessions, numbered from 1 again, order above the old start's.
-	#[test]
-	fn a_restart_replaces_the_pairs_floor() {
-		let mut router = relay(1);
-		open(&mut router, 2, Role::Routing(node(2)));
-		for start in [5, 6] {
-			let through = Hop {
-				node: NodeId {
-					relay: 7,
-					start,
-					marked: false,
-				},
-				session: 1,
-			};
-			let path = vec![
-				Hop {
-					node: node(5),
-					session: 0,
-				},
-				through,
-				Hop {
-					node: node(2),
-					session: 1,
-				},
-			];
-			let offer = Offer {
-				path: path.into(),
-				draining: false,
-				priority: i8::MAX,
-				cost: 2,
-				marked: false,
-			};
-			let route = Msg::Route {
-				origin: node(5),
-				offer: Some(offer),
-			};
-			router.recv(2, route).unwrap();
-			assert!(router.best(node(5)).is_some(), "start {start} is above every floor");
-			let dead = Msg::Dead {
-				hop: through,
-				far: node(5),
-			};
-			router.recv(2, dead).unwrap();
-			assert_eq!(router.best(node(5)), None, "start {start} closed");
-			assert_eq!(router.kept().closed, 1, "one floor for the pair after start {start}");
-		}
-	}
-
-	/// A relay whose start is below one of its sessions known closed is refused as a
-	/// routing neighbour: every path through its new sessions would be, silently.
-	#[test]
-	fn a_start_that_went_back_is_refused() {
-		let mut router = relay(1);
-		open(&mut router, 2, Role::Routing(node(2)));
-		let started = |start| NodeId {
-			relay: 7,
-			start,
-			marked: false,
-		};
-		let origin = Hop {
-			node: node(5),
-			session: 0,
-		};
-		let through = Hop {
-			node: started(5),
-			session: 1,
-		};
-		let sender = Hop {
-			node: node(2),
-			session: 1,
-		};
-		let offer = Offer {
-			path: vec![origin, through, sender].into(),
-			draining: false,
-			priority: i8::MAX,
-			cost: 2,
-			marked: false,
-		};
-		let route = Msg::Route {
-			origin: node(5),
-			offer: Some(offer),
-		};
-		router.recv(2, route).unwrap();
-		let dead = Msg::Dead {
-			hop: through,
-			far: node(5),
-		};
-		router.recv(2, dead).unwrap();
-
-		assert_eq!(
-			router.connect(3, port(Role::Routing(started(4)))),
-			Err(Error::Regressed)
-		);
-		// The same run, and any later one, peers.
-		router.connect(3, port(Role::Routing(started(5)))).unwrap();
-		router.connect(4, port(Role::Routing(started(6)))).unwrap();
-		// Only a routing neighbour names a start.
-		router.connect(5, port(Role::Endpoint)).unwrap();
 	}
 
 	/// A claim lost with nothing to replace it shows unavailable for the debounce, then

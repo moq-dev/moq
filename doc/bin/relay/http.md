@@ -123,7 +123,7 @@ A few worth alerting on:
   `moq_relay_route_withdrawals_total` by `direction` (`sent`, `received`) and
   `kind` (`dead`, `drain`), `moq_relay_route_refusals_total` by `reason`
   (`path`, `scope`, `looped`), and `moq_relay_route_sessions_closed_total` by
-  `kind` (`stalled`, `overrun`, `malformed`, `role`, `unasked`, `regressed`,
+  `kind` (`stalled`, `overrun`, `malformed`, `role`, `unasked`,
   `other`). Compare a canary relay's rates with its neighbours' while rolling
   out a release.
 - `moq_relay_stale_bytes_total` and friends: content dropped for drifting past

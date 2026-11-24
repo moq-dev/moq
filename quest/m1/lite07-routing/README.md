@@ -16,8 +16,7 @@ bugs with scratch tests):
 
 - ✅ The cut waits on the high-severity fixes: the scoped peer, the route
   floors, and the origin's route rank in this epic, plus
-  [NodeId Start](/quest/m2/node-id-drop-start.md) and
-  origin proxy in m2 (rejected: the cut
+  NodeId Start and origin proxy in m2 (rejected: the cut
   waits on every quest here, relay config polish included; nothing gates
   the cut). [lite07-finalize](/quest/m2/lite07-finalize.md) lists them.
 - ✅ Warm routing stays after the cut, as decided 2026-11-20. lite-07 needs no
@@ -40,7 +39,6 @@ This epic has no work of its own.
 
 ## Related
 
-- [NodeId drops Start](/quest/m2/node-id-drop-start.md) - the audit's breaking wire fix
 - [Route wakes](/quest/m3/route-wakes.md) - the audit's route fan-out cost
 - [Federation](/quest/m3/cluster-routing/federation.md) - the audit's priority and outbound scoping gaps
 - [Warmth port](/quest/m3/cache-routing/select.md) - the audit's cache-aware routing gaps

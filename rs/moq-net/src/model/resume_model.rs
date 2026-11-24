@@ -439,7 +439,7 @@ struct Model {
 impl Model {
 	fn new() -> Self {
 		let origin = origin::Config {
-			node: std::num::NonZeroU64::MIN,
+			node: Some(std::num::NonZeroU64::MIN),
 			update_hold: Duration::ZERO,
 			..Default::default()
 		};

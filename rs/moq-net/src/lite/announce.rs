@@ -131,13 +131,12 @@ const UNAVAILABLE: u8 = 0x1;
 /// Claim flag: a marked link lies on the way to the claim, so it is never told over another.
 const CLAIM_MARKED: u8 = 0x4;
 
-/// Encode a Node ID: its relay, start, and Marked. No node names itself 0.
+/// Encode a Node ID: its relay and Marked. No node names itself 0.
 pub(super) fn encode_node(w: &mut Encoder<'_>, node: NodeId) -> Result<(), EncodeError> {
 	if node.relay == 0 {
 		return Err(EncodeError::InvalidState);
 	}
 	w.varint(node.relay)?;
-	w.varint(node.start)?;
 	w.bool(node.marked);
 	Ok(())
 }
@@ -148,9 +147,8 @@ pub(super) fn decode_node(r: &mut Decoder<'_>) -> Result<NodeId, DecodeError> {
 		0 => return Err(DecodeError::InvalidValue),
 		relay => relay,
 	};
-	let start = r.varint()?;
 	let marked = r.bool()?;
-	Ok(NodeId { relay, start, marked })
+	Ok(NodeId { relay, marked })
 }
 
 /// Decode the Node ID of a node that holds sessions, which is never a marked one.

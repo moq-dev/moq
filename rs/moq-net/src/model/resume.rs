@@ -1300,6 +1300,18 @@ impl Subscriber {
 		self.reader().skipped_in(groups, waiter)
 	}
 
+	/// Ask the serving copy's fills for `unproven`, kept-out keys a containing front's reader
+	/// owes, as that reader asks a plain copy; see [`track::Subscriber::ask_unproven`]. Returns
+	/// what those fills gave up, so a key this front's route cannot fill ends the outer read too.
+	pub(super) fn ask_unproven(&self, unproven: RangeSet<u64>, waiter: &kio::Waiter) -> RangeSet<u64> {
+		let mut reader = self.reader();
+		let groups = reader.groups;
+		match reader.copies.last_mut().map(|copy| copy.poll_ready(groups, waiter)) {
+			Some(Poll::Ready(Ok(sub))) => sub.ask_unproven(unproven, waiter),
+			_ => RangeSet::new(),
+		}
+	}
+
 	/// Whether this reader accounts for every key of `gaps`, which none of the readers that
 	/// handed out `taken` did, the first of which is its own; see [`Reader::accounts`].
 	pub(super) fn accounts(
@@ -1381,6 +1393,25 @@ impl Subscriber {
 		let mut reader = self.reader();
 		let window = reader.window();
 		window.is_settled().then(|| window.groups().cloned()).flatten()
+	}
+
+	/// Whether the serving copy places ranges as its publisher would; see
+	/// [`track::Subscriber::places_as_upstream`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(super) fn knows_edge(&mut self, waiter: &kio::Waiter) -> bool {
+		let mut reader = self.reader();
+		match reader.poll_serving(waiter) {
+			Poll::Ready(Some(sub)) => sub.knows_edge(waiter),
+			_ => false,
+		}
+	}
+
+	pub(super) fn places_as_upstream(&mut self, waiter: &kio::Waiter) -> bool {
+		let mut reader = self.reader();
+		match reader.poll_serving(waiter) {
+			Poll::Ready(Some(sub)) => sub.places_as_upstream(waiter),
+			_ => false,
+		}
 	}
 
 	/// The reader's ranges keyed in `keys` resolved; see [`track::Subscriber::resolved_keys`].
@@ -3006,9 +3037,9 @@ impl Reader {
 	///
 	/// Under the serving copy's resume point, a key the local floor and cap admit was the copies'
 	/// it replaced, each let go once it had nothing more. One they keep out stays owed, as on one
-	/// cursor, until a copy held now declares it skipped, and the serving route is asked for those
-	/// no copy does (see [`Self::ask`]), so its answer settles them however many copies came and
-	/// went. The serving copy judges the rest by where it placed the reader's ranges itself: a time
+	/// cursor, until a copy held now declares it skipped or the asked copy's fills give it up, and
+	/// the serving route is asked for those no copy does (see [`Self::ask`]), so its answer settles
+	/// them however many copies came and went. The serving copy judges the rest by where it placed the reader's ranges itself: a time
 	/// a copy held no group for places the reader's window at the time itself, wider than any group
 	/// the serving copy reads. A backfill still out is not judged yet, and a route between copies
 	/// has nothing to judge.
@@ -3048,10 +3079,14 @@ impl Reader {
 				above.push(split..gap.end);
 			}
 		}
-		if let (Some(first), Some(last)) = (open.iter().next(), open.iter().next_back()) {
-			let keys = first.start..last.end;
-			self.ask(keys, taken[0], waiter);
-			return false;
+		if !open.is_empty() {
+			// What the asked copy's fills gave up is accounted for, as on one cursor.
+			for run in self.ask(&open, taken[0], waiter).iter() {
+				open.remove(run.clone());
+			}
+			if !open.is_empty() {
+				return false;
+			}
 		}
 		match self.copies.last_mut() {
 			Some(Copy {
@@ -3061,17 +3096,24 @@ impl Reader {
 		}
 	}
 
-	/// Ask the serving route for `keys`, which hold a key the local floor or cap keeps out that
-	/// is neither recorded nor declared skipped by a copy held now. Its answer settles each such
-	/// key as it would on one cursor: a skip accounts for it, while a group or a drop leaves it
-	/// owed. A copy of that route already asked for them, kept by [`Self::let_go`] until
+	/// Ask the serving route for the hull of `open`, the keys the local floor or cap keeps out
+	/// that are neither recorded nor declared skipped by a copy held now. Its answer settles each such
+	/// key as it would on one cursor: a skip, or a fill that gives it up, accounts for it, while a
+	/// group or a drop leaves it owed. A copy of that route already asked for them, kept by [`Self::let_go`] until
 	/// [`Self::skipped`] records them, asks nothing more, so neither a reader waiting on the
-	/// answer nor one a group holds open asks again.
-	fn ask(&mut self, keys: std::ops::Range<u64>, delivered: &Delivered, waiter: &kio::Waiter) {
+	/// answer nor one a group holds open asks again. Its track may forget a skip it answered
+	/// before the rest lands, so it asks its fills for those it cannot prove (see
+	/// [`track::Subscriber::ask_unproven`]). Returns the keys of `open` those fills gave up.
+	fn ask(&mut self, open: &RangeSet<u64>, delivered: &Delivered, waiter: &kio::Waiter) -> RangeSet<u64> {
+		let mut given_up = RangeSet::new();
+		let (Some(first), Some(last)) = (open.iter().next(), open.iter().next_back()) else {
+			return given_up;
+		};
+		let keys = first.start..last.end;
 		self.backfill(keys.clone(), false, delivered);
 		let groups = self.groups;
 		let Some((serving, copies)) = self.copies.split_last_mut() else {
-			return;
+			return given_up;
 		};
 		let asked = copies.iter_mut().filter(|copy| {
 			copy.track.same_channel(&serving.track)
@@ -3082,7 +3124,11 @@ impl Reader {
 			// Another front's logical track asks its own routes only once subscribed.
 			let _ = copy.poll_ready(groups, waiter);
 			copy.skipped_in(keys.clone(), waiter);
+			if let Sub::Ready(sub) = &mut copy.sub {
+				given_up.extend(sub.ask_unproven(open.clone(), waiter));
+			}
 		}
+		given_up
 	}
 
 	/// Whether the track ended, once the serving copy's channel (as `done` reads it) ran
@@ -8789,11 +8835,11 @@ mod test {
 	}
 
 	/// A bounded read whose serving copy resumed past a gap no replaced copy filled ends once
-	/// those copies are let go, if its local range owes nothing there: a gap inside the local
-	/// floor and cap was given up with them, while one the local range keeps out stays owed.
+	/// those copies are let go: a gap inside the local floor and cap was given up with them, and
+	/// one the local range keeps out is given up by the asked copy's fills, as on one cursor.
 	#[kio::test]
-	async fn a_read_range_past_a_given_up_gap_ends_only_inside_its_local_range() {
-		for (start, end, ends) in [(2, 3, true), (2, 4, true), (0, 2, false)] {
+	async fn a_read_range_past_a_given_up_gap_ends() {
+		for (start, end) in [(2, 3), (2, 4), (0, 2)] {
 			let case = format!("{start}..{end}");
 			let routes = Producer::new();
 			let logical = logical(&routes);
@@ -8828,10 +8874,7 @@ mod test {
 			let res = sub
 				.poll_recv_group(&fresh())
 				.map(|res| res.map(|group| group.map(|group| group.start)));
-			match ends {
-				true => assert!(matches!(res, Poll::Ready(Ok(None))), "{case}: {res:?}"),
-				false => assert!(res.is_pending(), "{case}: {res:?}"),
-			}
+			assert!(matches!(res, Poll::Ready(Ok(None))), "{case}: {res:?}");
 		}
 	}
 
@@ -13626,6 +13669,162 @@ mod test {
 		assert!(matches!(sub.poll_recv_group(&fresh()), Poll::Ready(Ok(None))));
 	}
 
+	/// A kept-out key the asked copy's track forgot it was told is skipped, once the pool's expiry
+	/// window passed, is asked of that copy's fills: the route answered it once and will not
+	/// again unasked, and the copy kept for the ask would otherwise stand for an answer it lost.
+	#[kio::test]
+	async fn a_kept_out_skip_the_asked_copy_forgot_is_asked_again() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		write(&a, 0);
+		a.drop_groups(1..5, StreamError::NotFound);
+		write(&a, 5);
+		routes.serve(a.consume());
+		let subscription = Subscription::default().with_ranges([track::Range {
+			start: track::Start::Time(0),
+			end: Some(6),
+		}]);
+		let mut sub = logical
+			.consume()
+			.subscribe(subscription)
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		assert_eq!(drain(&mut sub, false), [0, 5]);
+		let pool = crate::cache::Pool::new(crate::cache::Config::default().with_expiry(Duration::from_secs(10)));
+		let b = track::Producer::new(
+			Arc::new(broadcast::Info {
+				pool: pool.clone(),
+				..Default::default()
+			}),
+			"video",
+			crate::track::Info::timed(),
+		);
+		b.received();
+		let dynamic = b.requests();
+		write(&b, 6);
+		routes.serve(b.consume());
+		let mut sub = sub.with_range(5..7);
+		assert_eq!(drain(&mut sub, false), [6]);
+		kio::clock::sleep(HOUR).await;
+		assert!(sub.poll_recv_group(&fresh()).is_pending(), "1 to 4 are owed");
+		assert!(asked_for(&b, 1), "{:?}", b.subscription());
+		// Past the grace, what the route has not answered is asked of a fill too: the copy's
+		// own miss of 5, which no budget makes stale, and the kept-out 1 to 4.
+		let Poll::Ready(Ok(missed)) = dynamic.poll_requested_fill(&fresh()) else {
+			panic!("the copy's miss is asked of its fills");
+		};
+		assert_eq!(missed.start().group..missed.end(), 5..6);
+		drop(missed);
+		write(&b, 5);
+		let Poll::Ready(Ok(overdue)) = dynamic.poll_requested_fill(&fresh()) else {
+			panic!("the overdue keys are asked of the copy's fills");
+		};
+		assert_eq!(overdue.start().group..overdue.end(), 1..5);
+		// The upstream answers part of it, and the fill stays out for the rest.
+		b.skip_groups(3..5);
+		assert!(sub.poll_recv_group(&fresh()).is_pending(), "1 and 2 are owed");
+
+		pool.step(Duration::from_secs(60));
+		pool.sweep();
+		b.skip_groups(1..3);
+		drop(overdue);
+		assert!(sub.poll_recv_group(&fresh()).is_pending(), "3 and 4 were forgotten");
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&fresh()) else {
+			panic!("the forgotten skip is asked of the copy's fills");
+		};
+		assert_eq!(fill.start().group..fill.end(), 3..5);
+		b.skip_groups(3..5);
+		assert!(matches!(sub.poll_recv_group(&fresh()), Poll::Ready(Ok(None))));
+	}
+
+	/// A single kept-out key the asked copy's track forgot, which its fill (a one-group FETCH on a
+	/// session) refuses, is given up as on one cursor, so the resumed read ends. An asked copy that
+	/// is another front's logical track asks its own serving copy and passes back what it gave up.
+	#[kio::test]
+	async fn a_forgotten_kept_out_key_a_fill_refused_ends_the_resumed_read() {
+		for nested in [false, true] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let mut fronts = Vec::new();
+			let mut serve = |copy: &track::Producer| match nested {
+				false => routes.serve(copy.consume()),
+				true => {
+					let inner_routes = Producer::new();
+					let inner = self::logical(&inner_routes);
+					inner_routes.serve(copy.consume());
+					routes.serve(inner.consume());
+					fronts.push((inner_routes, inner));
+				}
+			};
+			let a = copy();
+			write(&a, 0);
+			a.drop_groups(1..5, StreamError::NotFound);
+			write(&a, 5);
+			serve(&a);
+			let subscription = Subscription::default().with_ranges([track::Range {
+				start: track::Start::Time(0),
+				end: Some(6),
+			}]);
+			let mut sub = logical
+				.consume()
+				.subscribe(subscription)
+				.now_or_never()
+				.unwrap()
+				.unwrap();
+			assert_eq!(drain(&mut sub, false), [0, 5]);
+			let pool = crate::cache::Pool::new(crate::cache::Config::default().with_expiry(Duration::from_secs(10)));
+			let b = track::Producer::new(
+				Arc::new(broadcast::Info {
+					pool: pool.clone(),
+					..Default::default()
+				}),
+				"video",
+				crate::track::Info::timed(),
+			);
+			b.received();
+			let dynamic = b.requests();
+			write(&b, 6);
+			write(&b, 5);
+			serve(&b);
+			let mut sub = sub.with_range(5..7);
+			assert_eq!(drain(&mut sub, false), [6]);
+			kio::clock::sleep(HOUR).await;
+			assert!(
+				sub.poll_recv_group(&fresh()).is_pending(),
+				"nested={nested}: 1 to 4 are owed"
+			);
+			let Poll::Ready(Ok(overdue)) = dynamic.poll_requested_fill(&fresh()) else {
+				panic!("nested={nested}: the overdue keys are asked of the copy's fills");
+			};
+			assert_eq!(overdue.start().group..overdue.end(), 1..5);
+			b.skip_groups(4..5);
+			assert!(
+				sub.poll_recv_group(&fresh()).is_pending(),
+				"nested={nested}: 1 to 3 are owed"
+			);
+
+			pool.step(Duration::from_secs(60));
+			pool.sweep();
+			b.skip_groups(1..4);
+			drop(overdue);
+			assert!(
+				sub.poll_recv_group(&fresh()).is_pending(),
+				"nested={nested}: 4 was forgotten"
+			);
+			let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&fresh()) else {
+				panic!("nested={nested}: the forgotten key is asked of the copy's fills");
+			};
+			assert_eq!(fill.start().group..fill.end(), 4..5);
+			fill.reject_groups(4..5, Error::NotFound);
+			let res = sub
+				.poll_recv_group(&fresh())
+				.map(|res| res.map(|group| group.map(|group| group.start)));
+			assert!(matches!(res, Poll::Ready(Ok(None))), "nested={nested}: {res:?}");
+		}
+	}
+
 	/// A kept-out key the serving route answers with a group stays owed, as on one cursor, and is
 	/// asked once: the copy asked for it stays, so the read waits without asking again, and a
 	/// floor lowered under it hands that group out.
@@ -13744,6 +13943,8 @@ mod test {
 		let reading = recv(&mut sub);
 		assert_eq!(reading.start, 5);
 		let b = copy();
+		// The route answers fills, so its copy never gives 2 up as unfillable.
+		let _requests = b.requests();
 		b.skip_groups(1..2);
 		write(&b, 6);
 		routes.serve(b.consume());

@@ -664,6 +664,26 @@ export class Consumer {
 	}
 }
 
+// What a subscriber asks fills about keys its reader owes but does not read: the keys asked about
+// last, the part of them a fill took, the part given up as stale with the budget each was judged
+// under, and the asker its fills know it by.
+type KeptOut = { asker: Asker; unproven: Run[]; asked: Run[]; stale: (Run & { budget: number })[] };
+
+// Record `[start, end)` as given up under `budget` in sorted, disjoint `stale`, replacing what it
+// overlaps.
+function insertStale(stale: (Run & { budget: number })[], start: bigint, end: bigint, budget: number): void {
+	const kept = removeRun(stale, start, end);
+	kept.splice(runsFrom(kept, start), 0, { start, end, budget });
+	stale.splice(0, stale.length, ...kept);
+}
+
+// What `kept` needs not ask again: what a fill took, and what it gave up as stale.
+function keptDone(kept: KeptOut): Run[] {
+	const done = [...kept.asked];
+	for (const run of kept.stale) insertRun(done, run.start, run.end);
+	return done;
+}
+
 // The parts of sorted, disjoint `runs` inside `[start, end)`.
 function intersect(runs: readonly Run[], start: bigint, end: bigint): Run[] {
 	const found: Run[] = [];
@@ -767,6 +787,8 @@ class TrackState {
 	producer?: Producer;
 	/** This sink's reader as the producer's fills know it, once it asked one. */
 	asker?: Asker;
+	/** The same for the kept-out keys its reader asks about (see `KeptOut`), once it asked. */
+	keptOut: Asker[] = [];
 	/**
 	 * Whether this sink's reader will still read group `key`: only a buffered group it will
 	 * read keeps its source wanted. Set once the reader exists.
@@ -869,6 +891,8 @@ type Wire = {
 	// `resolved` when the publisher placed the start itself, whatever the wire, and `restated` once
 	// an update had it placed afresh (see `hooks.restateTrack`).
 	served?: { start?: bigint | null; requested?: bigint; resolved?: boolean; restated?: boolean };
+	// Its upstream said where the live feed is (see `hooks.answerEdge`).
+	edge?: true;
 };
 
 // Settle a track state's closed Once. Idempotent: Once.set throws on a second settle, and a
@@ -1004,8 +1028,13 @@ let owedRuns: (producer: Producer, start: bigint, end: bigint) => Iterable<Run &
 // Whether a wire subscription feeds the producer, so it owes every group it has not accounted for.
 let wireFed: (producer: Producer) => boolean;
 let owedGroup: (producer: Producer, start: bigint, end: bigint) => { key: bigint; folds?: Instant } | undefined;
+// The runs of `[start, end)` the feed has yet to account for, as #owedRuns finds them, but on a
+// local producer too, whose ledger waits for its gaps the same way: a key that arrived, was
+// evicted, or was given up and since forgotten is accounted. Mirrors the Rust `TrackState::unfed`.
+let awaitedRuns: (producer: Producer, start: bigint, end: bigint) => Iterable<Run & { folds?: Instant }>;
 let fillEdge: (producer: Producer) => bigint | undefined;
 let sourceStart: (producer: Producer) => bigint | "pending" | undefined;
+let knowsEdge: (producer: Producer) => boolean;
 // The lowest group a reader naming `named` asks a fill for; see `Producer.#fillFloor`.
 let fillFloor: (producer: Producer, named: bigint | undefined) => bigint | undefined;
 // The keys of the groups the producer caches, sorted: what time starts and live joins resolve
@@ -1494,6 +1523,9 @@ export class Producer {
 	// The wire subscription feeding this copy, from `hooks.receiveTrack` until `hooks.cacheTrack`
 	// ends it: only a copy one feeds owes missing groups. Unset on a track's own publisher.
 	#wire?: Wire;
+	// A copy some wire subscription fed, which knows the live feed only from its upstream's answer,
+	// even between feeds; never set on a track's own publisher.
+	#copy = false;
 	// The misses its readers asked of a {@link Requests} handle.
 	#fills: FillState;
 	// The keys the live feed delivered as a group, and the drops a reclaim forgot, which `drops`
@@ -1671,9 +1703,21 @@ export class Producer {
 				? producer.#state.largest.peek()?.group
 				: undefined;
 		hooks.receiveTrack = (producer, starts = {}) => {
+			// A new feed's answer says afresh where the live feed is.
 			producer.#wire = { starts, served: producer.#wire?.served };
+			producer.#copy = true;
 			producer.#placing++;
 		};
+		hooks.answerEdge = (producer) => {
+			if (!producer.#wire || producer.#wire.edge) return;
+			producer.#wire.edge = true;
+			for (const state of [producer.#state, ...producer.#sinks]) state.startChanged.update((rev) => rev + 1);
+		};
+		knowsEdge = (producer) =>
+			!producer.#copy ||
+			producer.#wire?.edge === true ||
+			producer.#state.closed.peek() !== undefined ||
+			producer.#state.end.peek() !== undefined;
 		hooks.receiveGroup = (producer, { start: sequence, offset: start, fill }) =>
 			producer.#createGroup(sequence, start, { fetched: fill });
 		hooks.arrivingGroup = (producer, key) => {
@@ -1806,6 +1850,7 @@ export class Producer {
 			hooks.startTrack(producer, { ...served, restated: true });
 		};
 		hooks.cachedLargest = (producer) => producer.#cachedLargest();
+		hooks.acceptedInfo = (producer) => producer.#state.info.peek();
 		hooks.reportedLargest = (producer, largest, finished) => {
 			producer.#advanceObject(largest);
 			const current = producer.#state.largest.peek();
@@ -1883,6 +1928,10 @@ export class Producer {
 				grace: producer.#grace(),
 			});
 		};
+		awaitedRuns = (producer, start, end) =>
+			producer.#wire
+				? owedRuns(producer, start, end)
+				: producer.#landing({ start, end, floor: true, grace: producer.#grace() });
 		owedGroup = (producer, start, end) => {
 			if (!producer.#wire) return undefined;
 			const floor = feedFloor(producer);
@@ -2276,6 +2325,7 @@ export class Producer {
 				const abort = c instanceof Error ? c : undefined;
 				this.#sinks.delete(sink);
 				if (sink.asker) this.#fills.leave(sink.asker);
+				for (const asker of sink.keptOut) this.#fills.leave(asker);
 				this.#leave(sink);
 				// Update demand: once the last subscriber leaves, the consumer wire (watching
 				// {@link Demand.wanted}) tears the upstream down instead of downloading to nobody.
@@ -3486,6 +3536,11 @@ export class Subscriber {
 	// The last read waited on a fill, so the staleness deadline it armed wakes the next one: a
 	// fill that never answers cannot pin a reader in either order.
 	#fillWait = false;
+	// The kept-out keys this reader asks fills about; see #askKeptOut.
+	#keptOut?: KeptOut;
+	// The same for the keys a front's resumed reader owes and asks this route copy about, apart so
+	// neither moves what the other asks; see `hooks.askUnproven`.
+	#routedOut?: KeptOut;
 	// Bumped whenever the fills this reader joined are rejudged, which may withdraw groups it reads
 	// again by the time it looks (a narrowing undone in one turn moves no signal), so it asks anew.
 	#fillMoves = new Signal(0);
@@ -4342,6 +4397,7 @@ export class Subscriber {
 		this.#judgedAt = undefined;
 		// A fill this reader alone waited on for a group it no longer reads is withdrawn.
 		this.#fillsMoved();
+		this.#letGoKeptOut();
 	}
 
 	// The parts of `[start, end)` this reader still reads: inside its cursor and window, not
@@ -4750,8 +4806,9 @@ export class Subscriber {
 	// Whether this reader accounts for every key of `gaps` it did not hand out itself: each was
 	// dropped, or never will be, as one skipped as stale, one below where the feed started, or a
 	// hole the feed no longer owes, or lies outside its window, which it never reads. An open
-	// window, or one with a fill still out, accounts for nothing yet, and a key the cap keeps out
-	// stays owed, since the reader may raise it again.
+	// window, or one with a fill still out, accounts for nothing yet, and a key the local floor or
+	// cap keeps out stays owed, since the reader may move them again, until the track proves it
+	// gone: one the feed no longer owes and nothing proves is asked of a fill (see #askKeptOut).
 	// A local producer may still create any group it did not skip, so only an `ordered` read,
 	// which hands out the group it created above a hole before any created later below, passes
 	// that hole. Mirrors the Rust `Cursor::accounts`.
@@ -4770,6 +4827,7 @@ export class Subscriber {
 		const budget = this.#drift().budget;
 		const coverage = this.#coverage();
 		const { drops: all, refused } = this.#state;
+		const unproven: Run[] = [];
 		const lacking = gaps
 			.flatMap((gap) => this.#window.runs(gap.start, min(gap.end, end)))
 			.flatMap((gap) => this.#delivered.gaps(gap.start, gap.end));
@@ -4795,8 +4853,8 @@ export class Subscriber {
 				const under = { start: max(open.start, this.#nextKey), end: min(open.end, cursor.start) };
 				if (producer && under.start < under.end && cachedIn(producer, under.start, under.end).length > 0)
 					return false;
-				// Not received yet, so it may still arrive; a local producer may still create it.
-				if (open.end > received || (local && !ordered)) return false;
+				// Not received yet, so it may still arrive.
+				if (open.end > received) return false;
 				// Held, so a read still hands it out, skips it, or waits for the cap to rise.
 				const index = timelineIndex(held, open.start);
 				if (held[index] && held[index].start < open.end) return false;
@@ -4805,9 +4863,149 @@ export class Subscriber {
 					if (owed.folds !== undefined) this.#wakeAt(owed.folds.since(Instant.ZERO).asNanos());
 					return false;
 				}
+				// A local producer may still create a key this reader reads.
+				const read = { start: max(open.start, cursor.start), end: min(open.end, cursor.end ?? UNBOUNDED) };
+				if (local && !ordered && read.start < read.end) return false;
+				// One the cursor keeps out is unknown to it once the feed no longer waits for it,
+				// however the track came to forget it.
+				for (const out of runGaps([read], open.start, open.end)) {
+					// A local producer's ledger may still wait for it, as a wire feed's owes it above.
+					for (const awaited of local && producer ? awaitedRuns(producer, out.start, out.end) : []) {
+						if (awaited.folds !== undefined) this.#wakeAt(awaited.folds.since(Instant.ZERO).asNanos());
+						return false;
+					}
+					insertRun(unproven, out.start, out.end);
+				}
 			}
 		}
-		return true;
+		return this.#askKeptOut(unproven);
+	}
+
+	// Whether nothing of `unproven`, the kept-out keys #accounts found nothing to prove, is still
+	// owed. The rest is asked of a fill once, as for any key the cache cannot answer: its upstream's
+	// skip accounts for it, and a group it brings stays owed, held. One no fill takes, or that a
+	// fill refused or ended without proving, is given up, as a read under a lowered floor or raised
+	// cap would give it up. A key the track proved and later forgot, as its expiry window does, is
+	// asked again. Mirrors the Rust `Cursor::ask_kept_out`.
+	#askKeptOut(unproven: Run[]): boolean {
+		if (unproven.length === 0 && !this.#keptOut) return true;
+		this.#keptOut ??= this.#keptOutOf();
+		return this.#askUnproven(this.#keptOut, unproven).length === 0;
+	}
+
+	// Ask `kept`'s fills for the keys of `unproven` it has not asked yet, withdrawing what it no
+	// longer wants, and return the keys still out: the rest is given up.
+	#askUnproven(kept: KeptOut, unproven: Run[]): Run[] {
+		const producer = this.#state.producer;
+		if (!producer) return [];
+		const fills = fillsOf(producer);
+		const drift = this.#drift();
+		// A wider budget asks again what a narrower one gave up as stale.
+		const stale = kept.stale.length;
+		kept.stale = kept.stale.filter((run) =>
+			drift.budget.runs(run.start, run.end).every(([, budget]) => budget <= run.budget),
+		);
+		// What was proved since leaves what was asked, so a key forgotten again asks afresh.
+		const moved =
+			stale !== kept.stale.length ||
+			unproven.length !== kept.unproven.length ||
+			unproven.some((run, i) => run.start !== kept.unproven[i].start || run.end !== kept.unproven[i].end);
+		kept.asked = unproven.flatMap((run) => intersect(kept.asked, run.start, run.end));
+		kept.unproven = unproven;
+		// A fill nobody wants any more is withdrawn.
+		if (moved) fills.moved(kept.asker);
+		// Starts never rewind, so a stretch under one budget whose newest group is stale under it is
+		// given up whole: unasked, or withdrawn from the fill still out for it, as `#askFills` gives up
+		// an owed run.
+		const giveUp = (run: Run, budget: number) => {
+			kept.asked = removeRun(kept.asked, run.start, run.end);
+			insertStale(kept.stale, run.start, run.end, budget);
+			fills.moved(kept.asker, run.start, run.end);
+		};
+		for (const run of unproven) {
+			for (const gap of runGaps(keptDone(kept), run.start, run.end)) {
+				for (const [part, budget] of drift.budget.runs(gap.start, gap.end)) {
+					if (this.#staleAt(part.end - 1n, drift, true)) {
+						giveUp(part, budget);
+						continue;
+					}
+					for (const asked of fills.ask(part.start, part.end, kept.asker))
+						insertRun(kept.asked, asked.start, asked.end);
+				}
+			}
+		}
+		const out: Run[] = [];
+		for (const run of unproven) {
+			for (const covered of [...fills.covered(run.start, run.end, kept.asker)]) {
+				for (const [part, budget] of drift.budget.runs(covered.start, covered.end)) {
+					if (this.#staleAt(part.end - 1n, drift, true)) giveUp(part, budget);
+					else insertRun(out, part.start, part.end);
+				}
+			}
+		}
+		return out;
+	}
+
+	// The end of this read: nothing reads the kept-out keys now, so their fills are withdrawn, and a
+	// read polled again asks anew. Mirrors the Rust cursor dropping `kept_out` as its feed ends.
+	#done(): Recv {
+		this.#withdraw(this.#keptOut);
+		return { kind: "done" };
+	}
+
+	// Let go of the kept-out keys asked about, withdrawing the fills nobody else waits on, once what
+	// this reader reads moved: what is still owed is found and asked again once the read would
+	// otherwise end, and a window no longer bounded owes none. Mirrors the Rust
+	// `Cursor::let_go_kept_out`.
+	#letGoKeptOut(): void {
+		this.#withdraw(this.#keptOut);
+		this.#withdraw(this.#routedOut);
+	}
+
+	// Forget what `kept` asked about, withdrawing the fills nobody else waits on.
+	#withdraw(kept: KeptOut | undefined): void {
+		const producer = this.#state.producer;
+		if (!kept || !producer) return;
+		kept.unproven = [];
+		kept.asked = [];
+		kept.stale = [];
+		fillsOf(producer).moved(kept.asker);
+	}
+
+	// The parts of `runs` the cache holds nothing for and the feed no longer waits for, waking this
+	// reader when the next gap it waits for folds: what a fill may be asked, as the Rust
+	// `Misses::judge` asks a miss.
+	#unfed(producer: Producer, runs: readonly Run[]): Run[] {
+		const unfed: Run[] = [];
+		for (const run of runs) {
+			const fed: Run[] = cachedIn(producer, run.start, run.end).map((key) => ({ start: key, end: key + 1n }));
+			for (const awaited of awaitedRuns(producer, run.start, run.end)) {
+				if (awaited.folds !== undefined) this.#wakeAt(awaited.folds.since(Instant.ZERO).asNanos());
+				insertRun(fed, awaited.start, awaited.end);
+			}
+			for (const gap of runGaps(fed, run.start, run.end)) insertRun(unfed, gap.start, gap.end);
+		}
+		return unfed;
+	}
+
+	// A `KeptOut` whose asker wants only the keys it was asked about last that it has not given up
+	// as stale, and whose refusal wakes the read to give them up.
+	#keptOutOf(): KeptOut {
+		const main = this.#askerOf();
+		const kept: KeptOut = {
+			asker: {
+				wants: (start, end) =>
+					intersect(kept.unproven, start, end).flatMap((run) => runGaps(kept.stale, run.start, run.end)),
+				priority: () => main.priority(),
+				order: () => main.order(),
+				refuse: () => this.#fillMoves.update((moves) => moves + 1),
+			},
+			unproven: [],
+			asked: [],
+			stale: [],
+		};
+		this.#state.keptOut.push(kept.asker);
+		return kept;
 	}
 
 	static {
@@ -4823,6 +5021,11 @@ export class Subscriber {
 		};
 		hooks.skippedBelow = (subscriber, key) =>
 			subscriber.#resume ? subscriber.#resume.skippedBelow(key) : skippedBelow(subscriber.#state, key);
+		hooks.knowsEdge = (subscriber) => {
+			if (subscriber.#resume) return subscriber.#resume.knowsEdge();
+			const producer = subscriber.#state.producer;
+			return !producer || knowsEdge(producer);
+		};
 		hooks.sourceStart = (subscriber) => {
 			if (subscriber.#resume) return subscriber.#resume.start();
 			// A live join still pending reads every group, so a fill asked below would claim
@@ -4841,6 +5044,11 @@ export class Subscriber {
 			const filling = subscriber.#filling();
 			if (filling === undefined) return floor;
 			return floor === undefined ? filling : min(floor, filling);
+		};
+		hooks.placesAsUpstream = (subscriber) => {
+			if (subscriber.#resume) return subscriber.#resume.placesAsUpstream();
+			const producer = subscriber.#state.producer;
+			return producer !== undefined && receivedCopy(producer) && !subscriber.#state.dropsAnchors.peek();
 		};
 		hooks.tryRecvGroup = (subscriber, dispositions) => subscriber.#tryRecvGroup(dispositions);
 		hooks.parked = (subscriber) => {
@@ -4867,6 +5075,17 @@ export class Subscriber {
 				.filter((run) => run.skip)
 				.map((run) => ({ start: max(run.start, start), end: min(run.end, end) }));
 		hooks.tryDrop = (subscriber) => subscriber.#tryDrop();
+		// Mirrors the Rust `Subscriber::ask_unproven`: a copy that is another front's logical track
+		// asks its serving copy the same way, one level per nesting.
+		hooks.askUnproven = (subscriber, unproven) => {
+			if (subscriber.#resume) return subscriber.#resume.askUnproven(unproven);
+			const producer = subscriber.#state.producer;
+			if (!producer) return [];
+			subscriber.#routedOut ??= subscriber.#keptOutOf();
+			const unfed = subscriber.#unfed(producer, unproven);
+			const out = subscriber.#askUnproven(subscriber.#routedOut, unfed);
+			return unfed.flatMap((run) => runGaps(out, run.start, run.end));
+		};
 		// A reader following route copies leaves its ranges to the serving copy, which resolves
 		// their anchors against the groups it holds, then narrows them to its own local bounds.
 		hooks.gapHeld = (subscriber, at, end) => subscriber.#gapHeld(at, end);
@@ -5538,16 +5757,17 @@ export class Subscriber {
 		const closed = this.#state.closed.peek();
 		if (closed instanceof Error) return { kind: "error", error: closed };
 		// A clean close completes this range, retaining groups a later cap raise can read.
-		if (closed !== undefined) return { kind: "done" };
+		if (closed !== undefined) return this.#done();
 		// Nothing buffered: ask a fill for what this reader misses, and wait while one owes it.
 		if (this.#askFills(start, end ?? UNBOUNDED, drift) !== undefined) return { kind: "idle" };
 		// A time start still looked up may yet take in a group held already.
 		if (this.#window.lookups().length > 0) return { kind: "idle" };
 		// A bounded window ends once nothing in it is left to deliver, as in Rust.
+		// Exhausted, nothing kept out is still asked, and what was given up stays given up.
 		if (this.#exhausted()) return { kind: "done" };
 		if (!this.#complete() || this.#starting(groups)) return { kind: "idle" };
 		// An open track can still raise the cap. Keep the groups beyond it.
-		return this.#parked(groups) ? { kind: "boundary" } : { kind: "done" };
+		return this.#parked(groups) ? { kind: "boundary" } : this.#done();
 	}
 
 	// The first part of `[from, to)` this cursor has not reported yet within its window, now
@@ -6297,7 +6517,7 @@ export class Subscriber {
 		const closed = this.#state.closed.peek();
 		if (closed instanceof Error) return { kind: "error", error: closed };
 		// A clean close completes this range, retaining groups a later cap raise can read.
-		if (closed !== undefined) return { kind: "done" };
+		if (closed !== undefined) return this.#done();
 		// Nothing buffered: ask a fill for what this reader misses, and wait while one owes it.
 		if (this.#askFills(start, cursor.end ?? UNBOUNDED, drift) !== undefined) {
 			// Its staleness deadline wakes the cursor, as for any owed hole.
@@ -6316,7 +6536,7 @@ export class Subscriber {
 			!this.#starting(groups, start) &&
 			(this.#complete() || (end !== undefined && start >= finalKey(end)))
 		) {
-			return { kind: "done" };
+			return this.#done();
 		}
 		return { kind: "idle" };
 	}

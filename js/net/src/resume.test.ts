@@ -5,6 +5,7 @@ import { race, Signal } from "@moq/signals";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer, type FetchFrom } from "./broadcast.ts";
 import { defined } from "./defined.test-util.ts";
 import { NotFound, SessionCode, SessionError, StreamCode, StreamError, toStreamCode } from "./error.ts";
+import type { FillGroups } from "./fill.ts";
 import { type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { WireRoute } from "./hop.ts";
 import type { Session as IetfSession } from "./ietf/session.ts";
@@ -1415,6 +1416,141 @@ test("a kept-out skip a let-go copy knew is asked upstream", async () => {
 		installed.close();
 	}
 });
+
+/**
+ * A kept-out key the asked copy's track forgot it was told is skipped, once the pool's idle window
+ * passed, is asked of that copy's fills: the route answered it once and will not again unasked, and
+ * the copy kept for the ask would otherwise stand for an answer it lost. Mirrors the Rust
+ * `a_kept_out_skip_the_asked_copy_forgot_is_asked_again`.
+ */
+test("a kept-out skip the asked copy forgot is asked again", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	ta.write(0n);
+	hooks.dropTrackGroups(ta.producer, 1n, 5n, { error: new StreamError(StreamCode.NotFound) });
+	ta.write(5n);
+	const front = new Front();
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe({ ranges: [{ start: 0n, end: 6n }] });
+	try {
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([0n, 5n]);
+		tb.write(6n);
+		front.serve(b.consume());
+		sub.withRange({ start: { included: 5n }, end: { excluded: 7n } });
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([6n]);
+		// Only now a source answers fills, so none stands in for the route's subscription above.
+		const requests = tb.producer.requests();
+		const fills: FillGroups[] = [];
+		void (async () => {
+			for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill())
+				fills.push(fill);
+		})();
+		const ended = sub.recvGroup();
+		await clock.advance(Duration.millis(3_600_000));
+		expect(await isPending(ended)).toBe(true);
+		expect(askedFor(tb.producer, 1n)).toBe(true);
+		// The copy's own miss of 5, which no budget makes stale, is asked of its fills and answered.
+		expect(fills.map((fill) => [fill.start, fill.end])).toEqual([[5n, 6n]]);
+		tb.write(5n);
+		// The upstream answers part of what the reader asked.
+		tb.producer.skipGroups(3n, 5n);
+		await clock.advance(Duration.ZERO);
+		expect(await isPending(ended)).toBe(true);
+		const asked = fills.length;
+
+		// Past the broadcast pool's idle window, the copy's track forgets that skip.
+		await clock.advance(Duration.millis(60_000));
+		tb.producer.skipGroups(1n, 3n);
+		await clock.advance(Duration.ZERO);
+		expect(await isPending(ended)).toBe(true);
+		expect(fills.slice(asked).map((fill) => [fill.start, fill.end])).toEqual([[3n, 5n]]);
+		tb.producer.skipGroups(3n, 5n);
+		expect(await ended).toBeUndefined();
+		requests.close();
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+		installed.close();
+	}
+});
+
+/**
+ * A single kept-out key the asked copy's track forgot, which its fill (a one-group FETCH on a
+ * session) refuses, is given up as on one cursor, so the resumed read ends. An asked copy that is
+ * another front's logical track asks its own serving copy and passes back what it gave up. Mirrors
+ * the Rust `a_forgotten_kept_out_key_a_fill_refused_ends_the_resumed_read`.
+ */
+for (const nested of [false, true]) {
+	test(`a forgotten kept-out key a fill refused ends the resumed read${nested ? " through an inner front" : ""}`, async () => {
+		const clock = new Manual();
+		const installed = clock.install();
+		const a = new BroadcastProducer();
+		const b = new BroadcastProducer();
+		const ta = copy(a);
+		const tb = copy(b);
+		ta.write(0n);
+		hooks.dropTrackGroups(ta.producer, 1n, 5n, { error: new StreamError(StreamCode.NotFound) });
+		ta.write(5n);
+		const front = new Front();
+		const inners: Front[] = [];
+		const serve = (broadcast: BroadcastProducer) => {
+			if (!nested) return front.serve(broadcast.consume());
+			const inner = new Front();
+			inner.serve(broadcast.consume());
+			front.serve(inner.consumer);
+			inners.push(inner);
+		};
+		serve(a);
+		const sub = front.consumer.track("seq").subscribe({ ranges: [{ start: 0n, end: 6n }] });
+		try {
+			await clock.advance(Duration.ZERO);
+			expect(drain(sub)).toEqual([0n, 5n]);
+			tb.write(6n);
+			tb.write(5n);
+			serve(b);
+			sub.withRange({ start: { included: 5n }, end: { excluded: 7n } });
+			await clock.advance(Duration.ZERO);
+			expect(drain(sub)).toEqual([6n]);
+			const requests = tb.producer.requests();
+			const fills: FillGroups[] = [];
+			void (async () => {
+				for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill())
+					fills.push(fill);
+			})();
+			const ended = sub.recvGroup();
+			await clock.advance(Duration.millis(3_600_000));
+			expect(await isPending(ended)).toBe(true);
+			expect(askedFor(tb.producer, 1n)).toBe(true);
+			// The upstream answers all but 4, then the rest once the copy's track forgot it.
+			tb.producer.skipGroups(4n, 5n);
+			await clock.advance(Duration.ZERO);
+			expect(await isPending(ended)).toBe(true);
+			await clock.advance(Duration.millis(60_000));
+			tb.producer.skipGroups(1n, 4n);
+			await clock.advance(Duration.ZERO);
+			expect(await isPending(ended)).toBe(true);
+			expect(fills.map((fill) => [fill.start, fill.end])).toEqual([[4n, 5n]]);
+			fills[0].refuseGroups(4n, 5n, new Error("not found"));
+			expect(await ended).toBeUndefined();
+			requests.close();
+		} finally {
+			sub.close();
+			front.consumer.close();
+			for (const inner of inners) inner.consumer.close();
+			a.close();
+			b.close();
+			installed.close();
+		}
+	});
+}
 
 /**
  * A kept-out key the serving route answers with a group stays owed, as on one cursor, and is asked

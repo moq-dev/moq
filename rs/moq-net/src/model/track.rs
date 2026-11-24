@@ -430,6 +430,23 @@ impl Feed {
 	}
 }
 
+/// How a track's readers learn where its live feed is. A lite copy is accepted live, so its
+/// readers read what lands before its upstream answers, but what it holds then says nothing of
+/// the edge.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum EdgeSource {
+	/// What it holds: a local track, or a copy accepted idle, which readers read nothing from
+	/// until its route answers.
+	#[default]
+	Cache,
+	/// A lite-07 copy: a SUBSCRIBE_START says where the live feed is, or that it holds nothing
+	/// (`answered`), once the copy recorded what it said.
+	Answer { answered: bool },
+	/// A lite copy before lite-07, whose answers say nothing of the edge: its first live group
+	/// does.
+	FirstGroup,
+}
+
 /// How far a track got toward a live [`Producer`]; each step replaces the last.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Publication {
@@ -807,6 +824,8 @@ pub(crate) struct TrackState {
 	// a lite-07 copy, whose ranges carry each join and whose publisher reports where each
 	// starts. Another copy measures the live edge from what it holds and its upstream's Largest.
 	answers_joins: bool,
+	// How readers learn where the live feed is; see [`Subscriber::knows_edge`].
+	edge: EdgeSource,
 	// Where the upstream publisher started each of a lite-07 copy's live wire ranges, by the
 	// time it asked from (0 for the oldest group): a copy holding part of the track cannot tell
 	// which group contains a time it holds no group at, so a reader's time start it can't place
@@ -4258,6 +4277,10 @@ impl TrackState {
 				})
 			});
 		self.feed = Feed::Idle { newest, held };
+		// The next feed's answer says afresh where the live feed is.
+		if let EdgeSource::Answer { answered } = &mut self.edge {
+			*answered = false;
+		}
 	}
 
 	/// The route answered with its largest position (`None` for nothing yet): the cache
@@ -4281,12 +4304,15 @@ impl TrackState {
 
 	/// [`Self::set_live`] for a feed that serves no group from `largest`'s on, such as a
 	/// bounded subscription of history: the cache can never show that group, so the answer
-	/// alone makes it current, and live joins measure from that group.
+	/// alone makes it current, and live joins measure from that group. `None` for an answer
+	/// that did not know the largest, which says nothing to judge the cache against.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	fn set_live_ahead(&mut self, largest: Position, finished: Option<bool>, start: Option<u64>) -> Result<()> {
-		self.judge(Some(largest))?;
-		self.report_answer(Some(largest), finished);
-		self.answered(Some(largest), start, false);
+	fn set_live_ahead(&mut self, largest: Option<Position>, finished: Option<bool>, start: Option<u64>) -> Result<()> {
+		if largest.is_some() {
+			self.judge(largest)?;
+		}
+		self.report_answer(largest, finished);
+		self.answered(largest, start, false);
 		Ok(())
 	}
 
@@ -5583,6 +5609,36 @@ impl Producer {
 		}
 	}
 
+	/// Have this lite-07 copy say nothing of the live edge until [`Self::answer_edge`]: it is
+	/// accepted live, so its readers read what lands before its upstream says where the feed
+	/// is. See [`Subscriber::knows_edge`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn await_edge(&self) {
+		if let Ok(mut state) = self.modify() {
+			state.edge = EdgeSource::Answer { answered: false };
+		}
+	}
+
+	/// Have this lite copy from before lite-07 say nothing of the live edge until it holds a live
+	/// group: no answer on those wires says where the feed is, so its first group does.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn edge_from_groups(&self) {
+		if let Ok(mut state) = self.modify() {
+			state.edge = EdgeSource::FirstGroup;
+		}
+	}
+
+	/// Record that this lite-07 copy's upstream said where the live feed is, or that it holds
+	/// nothing, once what it said is recorded; see [`Self::await_edge`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn answer_edge(&self) {
+		if let Ok(mut state) = self.modify()
+			&& state.edge == (EdgeSource::Answer { answered: false })
+		{
+			state.edge = EdgeSource::Answer { answered: true };
+		}
+	}
+
 	/// Have this received copy's readers ask no fills below the start its publisher resolved
 	/// from the budget, for a wire whose fills and timestamps cannot bound them by it.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
@@ -5863,11 +5919,12 @@ impl Producer {
 
 	/// [`Self::set_live`] for a feed that serves no group from `largest`'s on, such as a
 	/// bounded subscription of history: readers resume at once, live joins measuring from
-	/// `largest`'s group. A no-op unless idle, but for recording the largest.
+	/// `largest`'s group, or from the first the feed sends when the answer did not know it.
+	/// A no-op unless idle, but for recording the largest.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn set_live_ahead(
 		&mut self,
-		largest: Position,
+		largest: Option<Position>,
 		finished: Option<bool>,
 		start: Option<u64>,
 	) -> Result<()> {
@@ -5912,6 +5969,15 @@ impl Producer {
 	/// rather than from whichever group lands first. A no-op unless live.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn report_edge(&self, group: u64) {
+		// Most answers repeat an edge already recorded: skip the write lock that wakes every reader.
+		if let Feed::Live {
+			first: Some(_),
+			edge: Some(edge),
+		} = self.state.read().feed
+			&& edge >= group
+		{
+			return;
+		}
 		if let Ok(mut state) = self.modify()
 			&& let Feed::Live { first, edge } = &mut state.feed
 		{
@@ -5943,7 +6009,7 @@ impl Producer {
 	/// The source reported its largest frame, which [`Self::largest`] follows before the
 	/// frame itself arrives, and whether its group ended there, which a relay forwards. A
 	/// hint about the edge: it never makes the frame readable.
-	#[cfg(test)]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn report_largest(&self, largest: Position, finished: bool) {
 		self.state.read().cache.report_largest(largest, finished);
 	}
@@ -9405,6 +9471,12 @@ struct Cursor {
 	drops: Option<Box<DropCursor>>,
 	/// What this cursor misses and asks fills for, once it first reads.
 	misses: Option<Box<miss::Misses>>,
+	/// The keys a bounded window owes that the local floor or cap keeps out and the track
+	/// cannot prove skipped, asked of fills; see [`Self::ask_kept_out`].
+	kept_out: Option<Box<KeptOut>>,
+	/// The same for the keys a front's resumed reader owes and asks this route copy about
+	/// (see [`Subscriber::ask_unproven`]), apart so neither moves what the other asks.
+	routed_out: Option<Box<KeptOut>>,
 	/// Behind an [`Ordered`], whose dropped reports are gaps it has yet to return: the runs a
 	/// widening took back from them, for it to forget. `None` for a wire publisher, which
 	/// told its peer of every drop it reported, for good.
@@ -9423,6 +9495,20 @@ struct Cursor {
 	/// The time starts and live joins this cursor's window waits on that it counts in the
 	/// demand's asks.
 	asked: Asked,
+}
+
+/// What a [`Cursor`] asks fills for of the keys its bounded window owes that its local floor
+/// or cap keeps out.
+#[derive(Default)]
+struct KeptOut {
+	/// The keys asked about, as [`Cursor::unproven`] last found them.
+	unproven: RangeSet<u64>,
+	/// Bumped whenever `unproven` changes, so `misses` judges them again.
+	revision: u64,
+	/// The window revision and local bounds `unproven` was found under: once they move, what it
+	/// asked may no longer be owed (see [`Cursor::let_go_kept_out`]).
+	terms: (u64, u64, Option<u64>),
+	misses: miss::Misses,
 }
 
 /// The time starts and live joins a [`Cursor`] on a received lite-07 copy counts in its
@@ -9447,28 +9533,43 @@ impl Asked {
 		mut joins: Vec<JoinAsk>,
 		subscriptions: impl FnOnce() -> kio::Lock<Subscriptions>,
 	) {
-		fn dedup<T: PartialEq>(items: &mut Vec<T>) {
-			let mut kept = 0;
-			for index in 0..items.len() {
-				if !items[..kept].contains(&items[index]) {
-					items.swap(kept, index);
-					kept += 1;
-				}
-			}
-			items.truncate(kept);
-		}
-		dedup(&mut times);
-		dedup(&mut joins);
+		// Sorted, so taking duplicates out and diffing against what is counted stay linear past
+		// the sort: a copy's readers can wait on thousands of time starts, re-asked on every sync.
+		times.sort_unstable();
+		times.dedup();
+		joins.sort_unstable();
+		joins.dedup();
 		if times == self.times && joins == self.joins {
 			return;
 		}
 		let subscriptions = self.subscriptions.get_or_insert_with(subscriptions);
 		let wakes: Vec<kio::WaiterList> = {
 			let mut subs = subscriptions.lock();
-			fn changes<T: Copy + PartialEq>(old: &[T], new: &[T]) -> Vec<(T, bool)> {
-				let added = new.iter().filter(|ask| !old.contains(ask)).map(|ask| (*ask, true));
-				let gone = old.iter().filter(|ask| !new.contains(ask)).map(|ask| (*ask, false));
-				added.chain(gone).collect()
+			/// Each ask `new` adds (`true`) or `old` lost (`false`), both sorted without duplicates.
+			fn changes<T: Copy + Ord>(old: &[T], new: &[T]) -> Vec<(T, bool)> {
+				let (mut old, mut new) = (old.iter().peekable(), new.iter().peekable());
+				let mut changes = Vec::new();
+				loop {
+					match (old.peek(), new.peek()) {
+						(Some(gone), Some(came)) if gone == came => {
+							old.next();
+							new.next();
+						}
+						(Some(gone), Some(came)) if gone < came => {
+							changes.push((**gone, false));
+							old.next();
+						}
+						(_, Some(came)) => {
+							changes.push((**came, true));
+							new.next();
+						}
+						(Some(gone), None) => {
+							changes.push((**gone, false));
+							old.next();
+						}
+						(None, None) => return changes,
+					}
+				}
 			}
 			let times = changes(&self.times, &times)
 				.into_iter()
@@ -9925,6 +10026,8 @@ impl Cursor {
 			record: Record::default(),
 			drops: None,
 			misses: None,
+			kept_out: None,
+			routed_out: None,
 			withdrawn: None,
 			key_order: false,
 			heads: None,
@@ -10180,7 +10283,7 @@ impl Cursor {
 
 	/// Whether a bounded window has nothing left to deliver: every group in its ranges was
 	/// handed out, dropped, skipped as stale, or given up as unfillable (see [`Self::accounts`]).
-	fn is_exhausted(&self, ordered: bool) -> bool {
+	fn is_exhausted(&mut self, ordered: bool, waiter: &kio::Waiter) -> bool {
 		let window = &self.filter.window;
 		let Some(end) = window.end() else {
 			return false;
@@ -10193,28 +10296,38 @@ impl Cursor {
 				self.record.delivered.gaps(run)
 			})
 			.collect();
-		self.accounts(&gaps, ordered)
+		self.accounts(&gaps, ordered, waiter)
 	}
 
 	/// Whether this cursor accounts for every key of `gaps` it did not hand out itself: each
 	/// was dropped, skipped as stale, or given up as unfillable, or lies outside its window,
 	/// which it never reads. An open window, or one with a fill still out, accounts for nothing
-	/// yet, and a key the cap keeps out stays owed, since a reader may raise a cap again.
+	/// yet, and a key the local floor or cap keeps out stays owed, since a reader may lower or
+	/// raise them again, until the track proves it gone. One it cannot prove is asked of a fill
+	/// (see [`Self::ask_kept_out`]), parking `waiter` on the answer.
+	fn accounts(&mut self, gaps: &[ops::Range<u64>], ordered: bool, waiter: &kio::Waiter) -> bool {
+		match self.unproven(gaps, ordered) {
+			Some(unproven) => self.ask_kept_out(unproven, waiter),
+			None => false,
+		}
+	}
+
+	/// The keys of `gaps` the local floor or cap keeps out that nothing accounts for, once
+	/// every other key of them is: `None` while one this cursor reads is not.
 	///
 	/// An `ordered` read of the track's own publisher also passes a key below a group that
 	/// publisher created (see [`Self::passes`]). A received copy never does: only what its
 	/// feed proved, such as a whole group's GROUP_END, accounts for a key there.
-	fn accounts(&self, gaps: &[ops::Range<u64>], ordered: bool) -> bool {
+	fn unproven(&self, gaps: &[ops::Range<u64>], ordered: bool) -> Option<RangeSet<u64>> {
 		let window = &self.filter.window;
-		let Some(end) = window.end().filter(|_| !window.is_pending() && !self.awaits_fill()) else {
-			return false;
-		};
+		let end = window.end().filter(|_| !window.is_pending() && !self.awaits_fill())?;
 		let given_up = self.misses.as_ref().map(|misses| misses.given_up());
 		let coverage = self.coverage();
 		let state = self.state.read();
 		let budget = window.budget().clamped(state.max_age_bound());
 		let passes = ordered && !state.anchors.received();
-		let accounted = |gap: ops::Range<u64>| {
+		let mut unproven = RangeSet::new();
+		let mut accounted = |gap: ops::Range<u64>| {
 			let mut left = RangeSet::new();
 			left.insert(gap.clone());
 			for run in self.record.written_off.overlapping(&gap) {
@@ -10237,7 +10350,14 @@ impl Cursor {
 			for key in self.seek_pending.range(gap).map(|(key, _)| *key) {
 				left.remove(key..key + 1);
 			}
-			left.iter().all(|open| passes && Self::passes(&state, open))
+			for open in left.iter().filter(|open| !(passes && Self::passes(&state, open))) {
+				let read = open.start.max(self.min_key)..open.end.min(self.end_key.unwrap_or(u64::MAX));
+				if !read.is_empty() {
+					return false;
+				}
+				unproven.insert(open.clone());
+			}
+			true
 		};
 		gaps.iter()
 			.flat_map(|gap| {
@@ -10248,7 +10368,97 @@ impl Cursor {
 					.map(move |run| (*run.start()).max(gap.start)..run.end().saturating_add(1).min(gap_end))
 			})
 			.flat_map(|gap| self.record.delivered.gaps(gap))
-			.all(accounted)
+			.all(&mut accounted)
+			.then_some(unproven)
+	}
+
+	/// Whether nothing of `unproven`, the kept-out keys [`Self::unproven`] found, is still owed:
+	/// each was given up as unfillable or stale, as a read under a lowered floor or raised cap
+	/// would give it up. The rest is judged as a miss, as for any key the cache cannot answer:
+	/// once the feed is past it, a fill asks upstream, whose skip accounts for it. A track that
+	/// forgot a skip it was told, as its expiry window does, so asks again rather than keep it.
+	/// A group answered stays owed until the floor or cap admits it.
+	fn ask_kept_out(&mut self, unproven: RangeSet<u64>, waiter: &kio::Waiter) -> bool {
+		if unproven.is_empty() && self.kept_out.is_none() {
+			return true;
+		}
+		let mut kept = self.kept_out.take().unwrap_or_default();
+		let settled = self.judge_unproven(&mut kept, unproven, waiter);
+		// Nothing left to prove holds nothing to remember.
+		if !(settled && kept.unproven.is_empty()) {
+			self.kept_out = Some(kept);
+		}
+		settled
+	}
+
+	/// Let go of the kept-out keys asked about under a window or local bounds that have moved
+	/// since, withdrawing the fills nobody else waits on: what is still owed is found and asked
+	/// again once the read would otherwise end, and a window no longer bounded owes none.
+	fn let_go_kept_out(&mut self) {
+		let terms = self.kept_terms();
+		for slot in [&mut self.kept_out, &mut self.routed_out] {
+			if slot.as_ref().is_some_and(|kept| kept.terms != terms) {
+				*slot = None;
+			}
+		}
+	}
+
+	/// What [`KeptOut::terms`] records.
+	fn kept_terms(&self) -> (u64, u64, Option<u64>) {
+		(self.filter.revision, self.min_key, self.end_key)
+	}
+
+	/// Judge `unproven` as misses of `kept`, asking fills for what the feed no longer
+	/// delivers, and return whether `kept` gave up every key of it with nothing still asked.
+	fn judge_unproven(&mut self, kept: &mut KeptOut, unproven: RangeSet<u64>, waiter: &kio::Waiter) -> bool {
+		let Poll::Ready(Ok(drift)) = self.poll_drift(&self.servable, waiter) else {
+			return false;
+		};
+		kept.terms = self.kept_terms();
+		if kept.unproven != unproven {
+			kept.unproven = unproven;
+			kept.revision += 1;
+		}
+		let id = (0, kept.revision, None);
+		let owed = &kept.unproven;
+		let target = |span: ops::RangeInclusive<u64>| -> RangeInclusiveSet<u64> {
+			let span = *span.start()..span.end().saturating_add(1);
+			owed.overlapping(&span)
+				.map(|run| run.start.max(span.start)..=(run.end.min(span.end) - 1))
+				.collect()
+		};
+		let misses = &mut kept.misses;
+		// A wider budget asks again what a narrower one gave up as stale.
+		for run in misses.widen(&drift.budget).iter() {
+			misses.reopen(run.clone());
+		}
+		misses.retain(id, None, || target(0..=u64::MAX - 1));
+		// What it gives up is never read, so never reported as dropped.
+		let mut given_up = Vec::new();
+		let window = &self.filter.window;
+		let asks = misses.judge(
+			&self.state.read(),
+			id,
+			None,
+			window.named(),
+			window.end(),
+			target,
+			&self.record.delivered,
+			&drift,
+			&mut given_up,
+			waiter,
+		);
+		misses.chase(
+			&self.state,
+			&asks,
+			|| asking(&self.subscription, self.key_order),
+			&drift,
+			&mut given_up,
+			waiter,
+		);
+		// A group answered is held by the cache, where it stays owed, not by this reader.
+		misses.let_go_filled();
+		!misses.is_waiting() && owed.iter().all(|run| misses.given_up().gaps(run).next().is_none())
 	}
 
 	/// Whether an ordered read of its track's own publisher passes `gap` without a group: that
@@ -10910,6 +11120,7 @@ impl Cursor {
 	/// find nothing to ask and hold no fill: those skip the fills, the subscription, and
 	/// the answers entirely, paying only for the judgement that the new groups arrived.
 	fn probe(&mut self, from: u64, drift: &Drift, waiter: &kio::Waiter) {
+		self.let_go_kept_out();
 		self.look_up(waiter);
 		self.rejudge(&drift.budget);
 		let taken = &self.record.delivered;
@@ -10919,11 +11130,10 @@ impl Cursor {
 		misses.retain((from, revision, cap), window.missable_groups(), || {
 			below(window.missable(from), cap)
 		});
-		// One lock for the judgement and the fills it asks, since every subscriber of the
-		// track probes through it.
-		let (asks, fills) = {
+		// One lock for the judgement, since every subscriber of the track probes through it.
+		let asks = {
 			let state = self.state.read();
-			let asks = misses.judge(
+			misses.judge(
 				&state,
 				(from, revision, cap),
 				window.missable_groups(),
@@ -10944,32 +11154,16 @@ impl Cursor {
 				drift,
 				&mut given_up,
 				waiter,
-			);
-			// Only an ask needs the fills.
-			let fills = (!asks.is_empty()).then(|| state.fills.clone());
-			(asks, fills)
+			)
 		};
-		// Nothing to ask, no fill to hear from, and no gap to time: no answer can arrive.
-		if fills.is_some() || !misses.is_idle() {
-			let asking = asking(&self.subscription, self.key_order);
-			match &fills {
-				Some(fills) => misses.ask(&self.state, fills, &asks, &asking, &mut given_up),
-				// What the reader asks with still reaches the fills it joined.
-				None => misses.update(&asking),
-			}
-			loop {
-				let retry = misses.resolve(&self.state, &mut given_up, waiter);
-				if retry.is_empty() {
-					break;
-				}
-				let fills = self.state.read().fills.clone();
-				misses.ask(&self.state, &fills, &retry, &asking, &mut given_up);
-			}
-		}
-		// Only what a fill still owes can expire.
-		if misses.is_waiting() {
-			misses.expire(&self.state.read(), drift, &mut given_up, waiter);
-		}
+		misses.chase(
+			&self.state,
+			&asks,
+			|| asking(&self.subscription, self.key_order),
+			drift,
+			&mut given_up,
+			waiter,
+		);
 		if self.drops.is_some() {
 			for (run, hole) in given_up {
 				DropCursor::give_up(&mut self.record, run, hole);
@@ -11141,6 +11335,8 @@ impl Cursor {
 						if self.awaits_fill() {
 							return Poll::Pending;
 						}
+						// Nothing reads the kept-out keys now: a read polled again asks anew.
+						self.kept_out = None;
 						return Poll::Ready(Ok(None));
 					};
 					let consumer = producer.consume();
@@ -11453,6 +11649,8 @@ impl Cursor {
 				if self.awaits_fill() {
 					return Poll::Pending;
 				}
+				// Nothing reads the kept-out keys now: a read polled again asks anew.
+				self.kept_out = None;
 				// Deliberately no flush of `seek_pending` here: only a delivery commit
 				// may count a conviction. This `None` can be an artifact of a floor
 				// that will lower again. A conviction never committed is dropped
@@ -11911,7 +12109,7 @@ impl Subscriber {
 						Poll::Pending => {
 							// A read that only skipped since its last hand-out settles its write-offs too.
 							cursor.retire_written_off();
-							break match !self.parks && cursor.is_exhausted(ordered) {
+							break match !self.parks && cursor.is_exhausted(ordered, idle.waiter()) {
 								true => {
 									if ordered && let Some(end) = cursor.filter.window.end() {
 										cursor.pass_end(cursor.end_key.map_or(end, |cap| cap.min(end)));
@@ -11953,7 +12151,7 @@ impl Subscriber {
 		waiter: &kio::Waiter,
 	) -> bool {
 		match &mut self.inner {
-			Inner::Plain(cursor) => cursor.accounts(gaps, ordered),
+			Inner::Plain(cursor) => cursor.accounts(gaps, ordered, waiter),
 			Inner::Resume(resume, own) => {
 				let mut taken = Vec::with_capacity(logical.len() + 1);
 				taken.push(&own.record.delivered);
@@ -11965,6 +12163,34 @@ impl Subscriber {
 				resume.accounts(&taken, &gaps, ordered, waiter)
 			}
 		}
+	}
+
+	/// Ask this route copy's fills for the keys of `unproven` that a front's resumed reader
+	/// owes and its track cannot prove skipped, once its feed no longer delivers them, as
+	/// [`Cursor::ask_kept_out`] does for a cursor's own: its track forgets a skip it was told
+	/// once the pool's expiry window passes, and only a fill asks upstream again. A copy that
+	/// is another front's logical track asks its serving copy the same way, one level per nesting.
+	///
+	/// Returns the keys of `unproven` those fills gave up (refused, unfillable, or stale), which
+	/// the reader counts as accounted, as one cursor does.
+	pub(super) fn ask_unproven(&mut self, unproven: RangeSet<u64>, waiter: &kio::Waiter) -> RangeSet<u64> {
+		let cursor = match &mut self.inner {
+			Inner::Plain(cursor) => cursor,
+			Inner::Resume(resume, _) => return resume.ask_unproven(unproven, waiter),
+		};
+		let mut kept = cursor.routed_out.take().unwrap_or_default();
+		cursor.judge_unproven(&mut kept, unproven.clone(), waiter);
+		let given_up = kept.misses.given_up();
+		let given_up = unproven
+			.iter()
+			.flat_map(|run| {
+				given_up
+					.overlapping(run)
+					.map(|gone| gone.start.max(run.start)..gone.end.min(run.end))
+			})
+			.collect();
+		cursor.routed_out = Some(kept);
+		given_up
 	}
 
 	/// Whether a group in `groups` may still land for this subscriber, by the rule
@@ -12383,6 +12609,37 @@ impl Subscriber {
 					.collect()
 			}
 			Inner::Resume(resume, _) => resume.resolved_keys(keys),
+		}
+	}
+
+	/// Whether what this subscriber reads says where the live feed is: a local track does, and a
+	/// lite copy once its upstream answered with the edge, or on a wire before lite-07 once it
+	/// holds a live group, or once it ended (see [`Producer::await_edge`],
+	/// [`Producer::edge_from_groups`]). `false` while a front's reader has no copy serving.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn knows_edge(&mut self, waiter: &kio::Waiter) -> bool {
+		match &mut self.inner {
+			Inner::Plain(cursor) => {
+				let state = cursor.state.read();
+				let ended = state.outcome.is_final() || state.declared().is_some();
+				match state.edge {
+					EdgeSource::Cache => true,
+					EdgeSource::Answer { answered } => answered || ended,
+					EdgeSource::FirstGroup => state.largest().is_some() || ended,
+				}
+			}
+			Inner::Resume(resume, _) => resume.knows_edge(waiter),
+		}
+	}
+
+	/// Whether the copy this subscriber reads places a range only where its publisher would,
+	/// from that publisher's answer for it or groups proving it, so [`Self::resolved_keys`]
+	/// needs no other range answered first. `false` while a front's reader has no copy serving.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn places_as_upstream(&mut self, waiter: &kio::Waiter) -> bool {
+		match &mut self.inner {
+			Inner::Plain(cursor) => cursor.state.read().anchors == Anchors::Wire,
+			Inner::Resume(resume, _) => resume.places_as_upstream(waiter),
 		}
 	}
 
@@ -15168,6 +15425,25 @@ mod test {
 		assert_eq!(reader.poll_largest(&noop), Poll::Ready(Some(Position::group(3))));
 	}
 
+	/// A lite-07 copy knows the live edge only from its current feed's answer: one whose feed
+	/// went idle and came back answered Unknown, as a bounded feed is, knows nothing of it.
+	#[test]
+	fn an_idle_copy_forgets_its_answered_edge() {
+		let mut producer = track_producer("test", Info::default());
+		let noop = kio::Waiter::noop();
+		producer.await_edge();
+		producer.set_live(Some(Position::group(2)), Some(false), None).unwrap();
+		producer.answer_edge();
+		let mut reader = producer.subscribe(replay());
+		assert!(reader.knows_edge(&noop));
+
+		producer.set_idle();
+		producer.set_live_ahead(None, None, None).unwrap();
+		assert!(!reader.knows_edge(&noop), "the new feed has not said");
+		producer.answer_edge();
+		assert!(reader.knows_edge(&noop));
+	}
+
 	/// An idle copy that declared an end it has not reached yet still waits for the live
 	/// feed, while one that finished reports its settled largest.
 	#[test]
@@ -15242,7 +15518,7 @@ mod test {
 		producer.set_idle();
 		let mut reader = producer.subscribe(replay());
 		let _arriving = framed(&producer, 5, 7);
-		producer.set_live_ahead(answer, Some(false), None).unwrap();
+		producer.set_live_ahead(Some(answer), Some(false), None).unwrap();
 		assert_eq!(reader.poll_largest(&noop), Poll::Ready(Some(answer)));
 	}
 
@@ -15590,7 +15866,7 @@ mod test {
 
 		let mut producer = idle_copy();
 		assert!(matches!(
-			producer.set_live_ahead(Position::group(2), Some(false), None),
+			producer.set_live_ahead(Some(Position::group(2)), Some(false), None),
 			Err(Error::MalformedTrack)
 		));
 
@@ -32968,6 +33244,193 @@ mod test {
 		};
 		// With group 0, which expired too.
 		assert_eq!(fill.start().group..fill.end(), 0..2);
+	}
+
+	/// A bounded read owes the keys its local floor keeps out until a skip accounts for them.
+	/// One its track forgot once the pool's expiry window passed is unknown again, so the read
+	/// asks a fill for it rather than wait for good, and ends on the upstream's answer.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_bounded_read_asks_again_for_a_kept_out_skip_its_track_forgot() {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(10)));
+		let producer = track_producer_pooled("test", pool.clone());
+		producer.received();
+		let dynamic = producer.requests();
+		write_group(&producer, 0);
+		write_group(&producer, 6);
+		let mut subscriber = producer.subscribe(Subscription::default().with_range(0..7));
+		assert_eq!(drain_groups(&mut subscriber), [0, 6]);
+		let mut subscriber = subscriber.with_range(6..7);
+		let waiter = kio::Waiter::noop();
+		producer.skip_groups(3..6);
+		assert!(subscriber.poll_recv_group(&waiter).is_pending(), "1 and 2 are owed");
+		assert!(
+			dynamic.poll_requested_fill(&waiter).is_pending(),
+			"the feed still owes them"
+		);
+
+		elapse(&producer, Duration::from_secs(60));
+		pool.sweep();
+		producer.skip_groups(1..3);
+		assert!(
+			subscriber.poll_recv_group(&waiter).is_pending(),
+			"3 to 5 were forgotten"
+		);
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the forgotten skip is asked of a fill");
+		};
+		assert_eq!(fill.start().group..fill.end(), 3..6);
+		// The upstream's answer, which a session records as the subscription's own skip.
+		producer.skip_groups(3..6);
+		assert!(matches!(subscriber.poll_recv_group(&waiter), Poll::Ready(Ok(None))));
+	}
+
+	/// A read that ended once a fill refused its kept-out keys stays ended: polled again, it
+	/// asks nothing.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_kept_out_key_a_fill_refused_stays_given_up_once_the_read_ends() {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(10)));
+		let producer = track_producer_pooled("test", pool.clone());
+		producer.received();
+		let dynamic = producer.requests();
+		write_group(&producer, 0);
+		write_group(&producer, 6);
+		let mut subscriber = producer.subscribe(Subscription::default().with_range(0..7));
+		assert_eq!(drain_groups(&mut subscriber), [0, 6]);
+		let mut subscriber = subscriber.with_range(6..7);
+		let waiter = kio::Waiter::noop();
+		producer.skip_groups(3..6);
+		elapse(&producer, Duration::from_secs(60));
+		pool.sweep();
+		producer.skip_groups(1..3);
+		assert!(subscriber.poll_recv_group(&waiter).is_pending());
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the forgotten skip is asked of a fill");
+		};
+		fill.reject_groups(3..6, Error::NotFound);
+		assert!(matches!(subscriber.poll_recv_group(&waiter), Poll::Ready(Ok(None))));
+
+		assert!(matches!(subscriber.poll_recv_group(&waiter), Poll::Ready(Ok(None))));
+		assert!(
+			dynamic.poll_requested_fill(&waiter).is_pending(),
+			"nothing is asked again"
+		);
+	}
+
+	/// A forgotten kept-out run spanning a history range and a live join is judged per budget:
+	/// the live part gone stale is given up, while the history part, which never goes stale,
+	/// stays asked.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_forgotten_kept_out_run_is_judged_by_each_ranges_budget() {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(10)));
+		let producer = track_producer_pooled("test", pool.clone());
+		producer.received();
+		let dynamic = producer.requests();
+		write_group(&producer, 0);
+		write_group(&producer, 6);
+		let live = Start::Live {
+			min: subscription::PAST_EVERY_GROUP,
+			max: Some(Duration::from_secs(1)),
+		};
+		let mut subscriber = producer.subscribe(Subscription::default().with_ranges([
+			Range {
+				start: Start::Time(0),
+				end: Some(2),
+			},
+			Range {
+				start: live,
+				end: Some(7),
+			},
+		]));
+		assert_eq!(drain_groups(&mut subscriber), [0, 6]);
+		let mut subscriber = subscriber.with_range(6..8);
+		let waiter = kio::Waiter::noop();
+		producer.skip_groups(1..6);
+		assert!(subscriber.poll_recv_group(&waiter).is_pending(), "7 is owed");
+
+		// Past the pool's expiry window the track forgot the skip, so the read asks for it all
+		// once 7 would otherwise end it.
+		elapse(&producer, Duration::from_secs(60));
+		pool.sweep();
+		write_group(&producer, 7);
+		assert_eq!(drain_groups(&mut subscriber), [7]);
+		assert!(subscriber.poll_recv_group(&waiter).is_pending());
+		let mut fills = Vec::new();
+		while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) {
+			fills.push(fill);
+		}
+		let asked: Vec<_> = fills.iter().map(|fill| fill.start().group..fill.end()).collect();
+		assert!(asked.iter().any(|run| run.contains(&1)), "{asked:?}");
+
+		// 3 to 5 go stale behind 7, but 1 and 2 never do.
+		elapse(&producer, Duration::from_secs(2));
+		assert!(subscriber.poll_recv_group(&waiter).is_pending(), "1 and 2 are owed");
+		assert!(fills.iter().any(|fill| fill.is_wanted(1)));
+		assert!(!fills.iter().any(|fill| fill.is_wanted(3)));
+		producer.skip_groups(1..3);
+		assert!(matches!(subscriber.poll_recv_group(&waiter), Poll::Ready(Ok(None))));
+	}
+
+	/// A fill asked for a kept-out key is withdrawn once the reader's range moves: what the
+	/// new range still owes is asked again only once that read would otherwise end.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_kept_out_fill_is_withdrawn_when_the_range_moves() {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(10)));
+		let producer = track_producer_pooled("test", pool.clone());
+		producer.received();
+		let dynamic = producer.requests();
+		write_group(&producer, 0);
+		write_group(&producer, 6);
+		let mut subscriber = producer.subscribe(Subscription::default().with_range(0..7));
+		assert_eq!(drain_groups(&mut subscriber), [0, 6]);
+		let mut subscriber = subscriber.with_range(6..7);
+		let waiter = kio::Waiter::noop();
+		producer.skip_groups(3..6);
+		elapse(&producer, Duration::from_secs(60));
+		pool.sweep();
+		producer.skip_groups(1..3);
+		assert!(subscriber.poll_recv_group(&waiter).is_pending());
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the forgotten skip is asked of a fill");
+		};
+		assert!(fill.is_wanted(3));
+
+		let mut subscriber = subscriber.with_range(7..8);
+		assert!(subscriber.poll_recv_group(&waiter).is_pending(), "7 has yet to arrive");
+		assert!(!fill.is_wanted(3), "nobody waits on the kept-out fill");
+	}
+
+	/// A fill asked for a kept-out key is withdrawn once the feed ends the read: nothing reads
+	/// it, and a read polled again asks anew.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_kept_out_fill_is_withdrawn_when_the_feed_ends() {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(10)));
+		let mut producer = track_producer_pooled("test", pool.clone());
+		producer.received();
+		let dynamic = producer.requests();
+		write_group(&producer, 0);
+		write_group(&producer, 6);
+		let mut subscriber = producer.subscribe(Subscription::default().with_range(0..7));
+		assert_eq!(drain_groups(&mut subscriber), [0, 6]);
+		let mut subscriber = subscriber.with_range(6..7);
+		let waiter = kio::Waiter::noop();
+		producer.skip_groups(3..6);
+		elapse(&producer, Duration::from_secs(60));
+		pool.sweep();
+		producer.skip_groups(1..3);
+		assert!(subscriber.poll_recv_group(&waiter).is_pending());
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the forgotten skip is asked of a fill");
+		};
+		assert!(fill.is_wanted(3));
+
+		producer.finish_at(Position::group(7)).unwrap();
+		assert!(matches!(subscriber.poll_recv_group(&waiter), Poll::Ready(Ok(None))));
+		assert!(!fill.is_wanted(3), "nobody waits on the kept-out fill");
 	}
 
 	/// A source refusing a fill in disjoint groups pays for the runs it records, as a drop does.

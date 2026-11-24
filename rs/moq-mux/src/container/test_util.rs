@@ -385,10 +385,10 @@ pub(crate) fn common_offset(
 	offset.expect("frames were published")
 }
 
-/// An origin at `hop`, its driver spawned. It may be a middle hop, so it forwards what
+/// An origin, its driver spawned. It may be a middle hop, so it forwards what
 /// it learned as well as its own.
-pub(crate) fn origin(hop: u64) -> moq_net::origin::Producer {
-	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+pub(crate) fn origin() -> moq_net::origin::Producer {
+	let mut config = moq_net::origin::Config::default();
 	config.proxy = true;
 	let (producer, driver) = moq_net::origin::Producer::new(config);
 	tokio::spawn(moq_net::time::run(driver));

@@ -365,7 +365,7 @@ async fn close_without_announcements_waits_on_no_acknowledgement() {
 	}
 }
 
-/// The versions whose SUBSCRIBE_FINISH lets a subscriber settle its tail, and FIN, at once.
+/// The versions whose SUBSCRIBE_END lets a subscriber settle its tail, and FIN, at once.
 const SETTLED_TAIL: [&str; 3] = ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"];
 
 /// A transport ACK is not proof the subscriber read the final group: a receiver may drop

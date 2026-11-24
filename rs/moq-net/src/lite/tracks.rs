@@ -343,7 +343,6 @@ mod test {
 			instance: Some(instance.clone()),
 			node: Some(crate::route::NodeId {
 				relay: 0x7a3f,
-				start: 9,
 				marked: false,
 			}),
 		};
@@ -355,7 +354,6 @@ mod test {
 			got.node,
 			Some(crate::route::NodeId {
 				relay: 0x7a3f,
-				start: 9,
 				marked: false,
 			})
 		);

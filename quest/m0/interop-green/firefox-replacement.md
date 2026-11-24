@@ -9,44 +9,32 @@ older run's within 1039 ms of the newest withdrawing.
 
 ## Plan
 
-The case has failed on Firefox every night since it first ran there
-(2026-11-19), including after
-[moq-dev/moq#9293](https://github.com/moq-dev/moq/pull/9293) (live join) and
-[moq-dev/moq#9300](https://github.com/moq-dev/moq/pull/9300) landed:
+The case failed on Firefox every night from 2026-11-19 to 2026-11-23. Two
+causes stacked:
 
-| Run | Wire | Check |
-| --- | --- | --- |
-| [44767045952](https://github.com/moq-dev/moq/actions/runs/44767045952) (11-20) | `moq-lite-07-wip` | `live incumbent fallback plays` |
-| [44916717292](https://github.com/moq-dev/moq/actions/runs/44916717292) (11-21) | `moq-lite-06` | `live incumbent fallback plays` |
-| [45035580806](https://github.com/moq-dev/moq/actions/runs/45035580806) (11-22) | `moq-lite-07-wip` | `live replacement plays` |
+- Starvation, fixed in [moq-dev/moq#9494](https://github.com/moq-dev/moq/pull/9494):
+  the 4-vCPU `ubuntu-24.04-arm` runner, decoding in software, ran five media
+  pages through the section, and the lifecycle player underflowed with the
+  replacement viewer every night. The lifecycle player now detaches and the
+  lifecycle fixture stops encoding video for the section. Measured on that
+  runner class with focused runs
+  (`just test media --media-engines firefox --media-cases replacement`): 4 of 20
+  passed without it, 29 of 30 with it.
+- What remains: the `moq-lite-06` fallback. With the runner no longer starved,
+  every other step takes 130 to 420 ms on ARM, but the lite-06 fallback takes
+  716 to 1026 ms (x86: 308 ms), and its one failure of 30 ended with the
+  incumbent's picture playing and its audio unanchored (`audioStalled: true`,
+  `audioTimestamp: 0`) after two `skipping missing groups: track=audio` on the
+  viewer. The lite-06 replacement, which also builds a fresh subscription,
+  takes 157 to 284 ms, so the extra cost is the fallback's, not the wire's.
+  The relay's default log shows no `err=old` abort in that window, unlike
+  [reattach-old-groups](/quest/m0/interop-green/reattach-old-groups.md).
 
-Each failing state has `audioStalled: true` and `rms: 0`; on 11-22 the new
-run's picture had not painted either, 0.9 s after the relay saw the viewer
-subscribe to it (`relay.log` in the run's `media-firefox` artifact).
+Next: capture a failing lite-06 fallback on the ARM runner with the relay at
+`moq_net=trace` and the viewer's Playwright trace, to see which audio groups
+the relay sent the lite-06 viewer and when, and why they were missing; then fix
+the player or relay path that lets them go. Loosening the 1039 ms bound or
+retrying is not a fix. A temporary `pull_request` workflow running the focused
+case five times per `ubuntu-24.04-arm` job, as #9494's did, measures it.
 
-Every one of those nights, the lifecycle `[player]` page, which stays open and
-playing through the `replacement` section, underflowed at the same moment as
-the replacement viewer: 1506 ms on 11-20, 102 ms on 11-21, 1759 ms on 11-22.
-In the 11-22 trace that page's 50 ms state samples stretched to 310 ms just
-before. Nothing links that page to the replacement broadcast, so the runner
-(`ubuntu-24.04-arm`, 4 vCPUs, software decode) starved every page at once.
-During the section it runs five media pages: the lifecycle fixture and player,
-the old and new fixtures (each encoding), and the replacement viewer.
-
-Chromium on the x86 hosted runner passes the section in scheduled Interop
-(11-21, 11-22). Locally on `main` at `a5345c7dba`, on a host at load 20 to 28
-of 24 CPUs, `just test media --media-cases replacement --media-engines
-firefox` passed 6 of 6 (x86, so not the runner's decode cost); full Chromium `just test media` runs failed the section's
-audio tone 2 of 4 times with long animation frames in the player, the same
-starvation.
-
-Recommended, for review: detach the lifecycle player for the section (its
-page's `detach` command, `test/interop/clients/js/src/setup.ts`, then
-`reattach` before the cases after it), and give the lifecycle fixture a way to
-stop encoding there too. Measure it differentially: the Firefox
-media job's failure rate with and without, on the same runner class. If the
-case still fails with the runner idle, the cause is in the player (the audio
-ring never anchoring after a route switch) and this quest takes it. Loosening
-the 1039 ms bound or retrying is not a fix.
-
-Public API: none. Wire: none.
+Public API: none expected. Wire: none expected.

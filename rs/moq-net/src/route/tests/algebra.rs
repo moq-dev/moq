@@ -25,10 +25,9 @@ use crate::route::relay::{
 
 use super::*;
 
-/// The node receiving every route here: relay 0 at its first start.
+/// The node receiving every route here: relay 0.
 const ME: NodeId = NodeId {
 	relay: 0,
-	start: 1,
 	marked: false,
 };
 
@@ -64,16 +63,16 @@ const PRIORITIES: [i8; 5] = [i8::MIN, -1, 0, 5, i8::MAX];
 
 /// How the proof names a Node ID (`Named.agda`).
 fn named(node: NodeId) -> u64 {
-	1_000 * (2 * node.start + u64::from(node.marked)) + node.relay
+	1_000 * u64::from(node.marked) + node.relay
 }
 
 fn marked(node: NodeId) -> NodeId {
 	NodeId { marked: true, ..node }
 }
 
-/// A node: relays 1 to `relays` at their first or second start.
+/// A node: one of relays 1 to `relays`.
 fn node(rng: &mut Rng, relays: u64) -> NodeId {
-	NodeId::new(1 + rng.below(relays), 1 + rng.below(2))
+	NodeId::new(1 + rng.below(relays))
 }
 
 /// How far a priority sits below the highest.
@@ -160,7 +159,7 @@ struct Link {
 /// What the receiver holds.
 #[derive(Clone, Debug, Default)]
 struct State {
-	closed: BTreeMap<(Id, Id), (u64, u64)>,
+	closed: BTreeMap<(Id, Id), u64>,
 	dead: BTreeMap<Hop, NodeId>,
 	draining: BTreeSet<NodeId>,
 }
@@ -176,8 +175,7 @@ impl State {
 }
 
 /// A path to a node other than `neighbour`, as `neighbour` would hold it: through each
-/// relay once, and now and then through the receiver, another start of its relay, or a
-/// marked identity first.
+/// relay once, and now and then through the receiver, or a marked identity first.
 fn learned(rng: &mut Rng, neighbour: NodeId) -> Offer {
 	// Now and then long enough to reach the hop limit, with nothing on it that anything
 	// else refuses.
@@ -201,7 +199,7 @@ fn learned(rng: &mut Rng, neighbour: NodeId) -> Offer {
 	}
 	while (path.len() as u64) < len {
 		let id = match looped > 0 && rng.one_in(looped) {
-			true => NodeId::new(ME.relay, 1 + rng.below(2)),
+			true => ME,
 			false => node(rng, relays),
 		};
 		if id.relay != neighbour.relay && path.iter().all(|hop| hop.node.relay != id.relay) {
@@ -246,7 +244,7 @@ fn state(rng: &mut Rng) -> State {
 	for _ in 0..rng.below(4) {
 		// The receiver keeps no floor for its own sessions.
 		let pair = (1 + rng.below(6), rng.below(7));
-		state.closed.insert(pair, (1 + rng.below(2), rng.below(4)));
+		state.closed.insert(pair, rng.below(4));
 	}
 	for _ in 0..rng.below(3) {
 		state.draining.insert(node(rng, 6));
@@ -390,8 +388,8 @@ fn weight(offer: Option<&Offer>) -> String {
 /// The Agda term for the link from the receiver to a neighbour.
 fn agda_link(state: &State, port: &Port, draining: bool, marked_there: bool, claimed: bool, session: u64) -> String {
 	let mut floors = String::new();
-	for ((near, far), (start, session)) in &state.closed {
-		write!(floors, "floor {near} {far} {start} {session} ∷ ").unwrap();
+	for ((near, far), session) in &state.closed {
+		write!(floors, "floor {near} {far} {session} ∷ ").unwrap();
 	}
 	let mut named_draining = String::new();
 	for node in &state.draining {
@@ -494,7 +492,7 @@ fn route_vectors() -> String {
 					match &mut two.0.holds {
 						Holds::Learned(best) if rng.one_in(2) && best.path.len() < MAX_HOPS - 3 => {
 							let hop = Hop {
-								node: NodeId::new(100 + rng.below(100), 1),
+								node: NodeId::new(100 + rng.below(100)),
 								session: 1,
 							};
 							best.path = best.path.iter().copied().chain([hop]).collect();
@@ -589,7 +587,7 @@ impl Holding {
 	/// Its claimant, and the holder's key for its giver.
 	fn extra(&self) -> (NodeId, u64) {
 		match self.kind {
-			Kind::Published => (NodeId::new(0, 0), 0),
+			Kind::Published => (NodeId::new(0), 0),
 			Kind::Own { giver } => (
 				NodeId {
 					marked: self.claim.marked,
@@ -659,7 +657,7 @@ fn own(rng: &mut Rng, holder: NodeId) -> Holding {
 /// What the publisher announces.
 fn published(rng: &mut Rng) -> Holding {
 	Holding {
-		holder: NodeId::new(PUBLISHER, 0),
+		holder: NodeId::new(PUBLISHER),
 		claim: Claim {
 			item: Run {
 				epoch: rng.below(3),
@@ -676,9 +674,9 @@ fn published(rng: &mut Rng) -> Holding {
 	}
 }
 
-/// A relay of up to `relays`, at its first or second start.
+/// A relay of up to `relays`.
 fn relay(rng: &mut Rng, relays: u64) -> NodeId {
-	NodeId::new(2 + rng.below(relays), 1 + rng.below(2))
+	NodeId::new(2 + rng.below(relays))
 }
 
 /// A route a node holds to another of its routing domain: its rank and mark are all a
@@ -934,7 +932,7 @@ fn claim_weight(held: Option<&Holding>) -> String {
 	let (claimant, giver) = held.extra();
 	let claim = &held.claim;
 	format!(
-		"valid (route ({} , just {}) {} {} {} {} ({path}[]) (({} , {} , {}) , {giver}))",
+		"valid (route ({} , just {}) {} {} {} {} ({path}[]) (({} , {}) , {giver}))",
 		claim.item.above,
 		claim.item.epoch,
 		claim.draining,
@@ -942,7 +940,6 @@ fn claim_weight(held: Option<&Holding>) -> String {
 		claim.cost,
 		claim.marked,
 		claimant.relay,
-		claimant.start,
 		u64::from(claimant.marked),
 	)
 }
@@ -959,21 +956,19 @@ fn claim_step(taken: &Taken) -> String {
 			giver,
 			..
 		} => format!(
-			"step true {} {} {draining} {} {marked_there} true {by} nothing ({above} , just {epoch}) ({} , {}) {giver}",
+			"step true {} {} {draining} {} {marked_there} true {by} nothing ({above} , just {epoch}) {} {giver}",
 			port.cost,
 			penalty(port.priority),
 			port.upstream,
 			to.relay,
-			to.start,
 		),
 		Step::Over { route, .. } => format!(
-			"step true {} {} {} {} false false 0 nothing ({above} , just {epoch}) ({} , {}) 0",
+			"step true {} {} {} {} false false 0 nothing ({above} , just {epoch}) {} 0",
 			route.cost,
 			penalty(route.priority),
 			route.draining,
 			route.marked,
 			to.relay,
-			to.start,
 		),
 	};
 	let edge = (to.relay, from.nodes()[0]);

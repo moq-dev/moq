@@ -559,3 +559,110 @@ async fn chain() {
 async fn route_switch() {
 	table(Mode::Switch).await;
 }
+
+/// The origin, then a warm relay holding what `copy` filled, a cold relay, and a front
+/// relay, each pulling over the wire from the one before.
+struct Chain {
+	/// The warm relay's own upstream, slowed to show what the relays answer without it.
+	upstream: MockPair,
+	_readers: Vec<track::Subscriber>,
+	_links: [MockPair; 2],
+	/// The broadcast as the front relay serves it.
+	remote: moq_net::broadcast::Consumer,
+}
+
+impl Chain {
+	async fn new(source: &Source, copy: &[Ask]) -> Self {
+		let warm_relay = produce_origin(2, None);
+		let cold_relay = produce_origin(3, None);
+		let front = produce_origin(4, None);
+		let upstream = link(&source.origin, &warm_relay, None).await;
+		let warmed = broadcast(&warm_relay).await;
+		let mut readers = Vec::new();
+		for ask in copy {
+			let mut reader = subscribe(&warmed, ask).await.expect("a copy reader subscribes");
+			Got::default().read(&mut reader, 0).await;
+			readers.push(reader);
+		}
+		let links = [
+			link(&warm_relay, &cold_relay, None).await,
+			link(&cold_relay, &front, None).await,
+		];
+		Self {
+			upstream,
+			_readers: readers,
+			_links: links,
+			remote: broadcast(&front).await,
+		}
+	}
+}
+
+/// Each range is answered on its own, through every hop: a cold relay behind a warm one
+/// serves a time range its upstream placed from cache, over the wire, while a live join in
+/// the same subscription still waits on the warm relay's upstream, slowed past [`QUIET`]
+/// here. The join's groups follow once it is placed.
+#[kio::test]
+async fn chain_serves_a_placed_range_before_its_join() {
+	let case = cases()
+		.into_iter()
+		.find(|case| case.name == "a time range and a live join in one subscription")
+		.expect("the case is in the table");
+	let source = Source::new();
+	source.write(&case);
+	let chain = Chain::new(&source, &case.copy).await;
+
+	chain.upstream.client_transport.set_latency(UPSTREAM);
+	let mut reader = subscribe(&chain.remote, &case.read).await.unwrap();
+	let mut got = Got::default();
+	got.read(&mut reader, 0).await;
+	assert_eq!(got.starts(), [1000, 2000], "the time range waited on the join");
+
+	chain.upstream.client_transport.set_latency(Duration::ZERO);
+	got.read(&mut reader, case.deliver.len()).await;
+	assert_eq!(got.delivered(case.frames, &case.open).await.unwrap(), case.deliver);
+}
+
+/// As [`chain_serves_a_placed_range_before_its_join`], for older history the warm relay
+/// lacks: its range waits on the warm relay's upstream while the range it holds goes out.
+/// Once placed, the older range starts where its upstream placed it, below the range
+/// answered first. Read newest first, so the reader holds no group for an older one.
+#[kio::test]
+async fn chain_serves_a_placed_range_before_older_history() {
+	let case = cases()
+		.into_iter()
+		.find(|case| case.name == "a time range and a live join in one subscription")
+		.expect("the case is in the table");
+	let source = Source::new();
+	source.write(&case);
+	let held = Range {
+		start: Start::Time(5000),
+		end: Some(6000),
+	};
+	let chain = Chain::new(&source, &[Ask { ranges: vec![held] }]).await;
+
+	chain.upstream.client_transport.set_latency(UPSTREAM);
+	let older = Range {
+		start: Start::Time(1000),
+		end: Some(2000),
+	};
+	let read = Ask {
+		ranges: vec![older, held],
+	};
+	let subscription = read.subscription().with_order(Order::Descending);
+	let mut reader = kio::clock::timeout(ARRIVAL, chain.remote.track("data").unwrap().subscribe(subscription))
+		.await
+		.expect("the subscribe answers")
+		.unwrap();
+	let mut got = Got::default();
+	got.read(&mut reader, 0).await;
+	let mut starts = got.starts();
+	starts.sort_unstable();
+	assert_eq!(starts, [5000, 6000], "the held range waited on the older one");
+
+	chain.upstream.client_transport.set_latency(Duration::ZERO);
+	got.read(&mut reader, 4).await;
+	assert_eq!(
+		got.delivered(case.frames, &case.open).await.unwrap(),
+		[1000, 2000, 5000, 6000]
+	);
+}
