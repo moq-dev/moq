@@ -990,7 +990,7 @@ Each count's measure names the environment it ran in, such as `instructions
 (x86_64-3059cd1d9e65)`: Valgrind's simulated CPU, glibc's tunables, and the
 Valgrind version, which rust2's flake input pins. Counts compare only within one
 fingerprint, so a local count compares with CI's only when the two match, and
-a Valgrind bump starts new series. On x86_64 Linux:
+a Valgrind bump starts new series. On x86-64 Linux:
 
 ```bash
 nix develop --command just rs instructions run --out metrics.json
