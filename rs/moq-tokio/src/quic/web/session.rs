@@ -1633,6 +1633,15 @@ mod tests {
 				.unwrap();
 		}
 
+		// An accept parked as a session's reader keeps one, as moq-net does.
+		let parked = server.clone();
+		let _accepting = tokio::spawn(async move {
+			let mut held = Vec::new();
+			while let Ok(recv) = parked.accept_uni().await {
+				held.push(recv);
+			}
+		});
+		tokio::task::yield_now().await;
 		server.close(2, "unauthorized");
 		let gone = crate::quic::driver::VarInt::from_u64(super::super::error::WT_SESSION_GONE).unwrap();
 		assert_eq!(uni.closed().await.unwrap(), Some(gone));
