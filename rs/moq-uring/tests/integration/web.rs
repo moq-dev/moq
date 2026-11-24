@@ -1212,8 +1212,9 @@ fn dropped_session_delivers_close(explicit: bool) {
 
 /// A close stops every stream the peer sends on and writes its capsule only
 /// once the peer reset them, since Chrome crashes on a capsule arriving under a
-/// write in flight (https://issues.chromium.org/issues/589817008). The HTTP/3
-/// control and CONNECT streams stay open.
+/// write in flight (https://issues.chromium.org/issues/589817008). It
+/// classifies the streams nobody accepted itself, so the HTTP/3 control,
+/// QPACK, and CONNECT streams stay open.
 #[test]
 fn a_close_waits_for_the_peer_to_reset_its_streams() {
 	const WT_SESSION_GONE: u64 = 0x170d7b68;
@@ -1235,6 +1236,7 @@ fn a_close_waits_for_the_peer_to_reset_its_streams() {
 				.await
 				.expect("dial");
 			let conn = server.accept().await.expect("accept");
+			let watch = conn.clone();
 
 			let mut control = peer.open_uni(Default::default()).await.expect("control stream");
 			let mut settings = web_transport_proto::Settings::default();
@@ -1256,16 +1258,12 @@ fn a_close_waits_for_the_peer_to_reset_its_streams() {
 				.expect("handshake");
 			let session = request.ok().await.expect("respond");
 
-			// A uni and a bidi stream the page is still writing, which the
-			// session holds mid-read.
+			// A QPACK stream, and a bidi and a uni stream the page is still writing.
 			let session_id = u64::from(connect_send.id());
-			let mut uni = peer.open_uni(Default::default()).await.expect("uni");
+			let mut qpack = peer.open_uni(Default::default()).await.expect("qpack");
 			let mut header = Vec::new();
-			web_transport_proto::StreamUni::WEBTRANSPORT.encode(&mut header);
-			web_transport_proto::VarInt::try_from(session_id)
-				.unwrap()
-				.encode(&mut header);
-			write_raw(&mut uni, &header).await;
+			web_transport_proto::StreamUni::QPACK_ENCODER.encode(&mut header);
+			write_raw(&mut qpack, &header).await;
 			let (mut bi, _bi_recv) = peer.open_bi(Default::default()).await.expect("bi");
 			let mut header = Vec::new();
 			web_transport_proto::Frame::WEBTRANSPORT.encode(&mut header);
@@ -1273,16 +1271,24 @@ fn a_close_waits_for_the_peer_to_reset_its_streams() {
 				.unwrap()
 				.encode(&mut header);
 			write_raw(&mut bi, &header).await;
-			let _held = within(&handle, "the streams", async {
-				let uni = kio::wait(|waiter| session.poll_accept_uni(waiter))
-					.await
-					.expect("accept uni");
-				let bi = kio::wait(|waiter| session.poll_accept_bi(waiter))
-					.await
-					.expect("accept bi");
-				(uni, bi)
-			})
-			.await;
+			let mut uni = peer.open_uni(Default::default()).await.expect("uni");
+			let mut header = Vec::new();
+			web_transport_proto::StreamUni::WEBTRANSPORT.encode(&mut header);
+			web_transport_proto::VarInt::try_from(session_id)
+				.unwrap()
+				.encode(&mut header);
+			write_raw(&mut uni, &header).await;
+			// The session holds the uni stream but never accepts the bidi one,
+			// which the close classifies itself. The client resets neither
+			// until both are stopped, so the capsule cannot go before the bidi
+			// stream arrives, and the QPACK stream is spared whoever classifies it.
+			let _held = within(
+				&handle,
+				"the uni stream",
+				kio::wait(|waiter| session.poll_accept_uni(waiter)),
+			)
+			.await
+			.expect("accept uni");
 
 			session.close(CLOSE_CODE, CLOSE_REASON);
 			let gone = quic::VarInt::from_u64(WT_SESSION_GONE).unwrap();
@@ -1332,6 +1338,8 @@ fn a_close_waits_for_the_peer_to_reset_its_streams() {
 					reason: CLOSE_REASON.to_string(),
 				}
 			);
+			assert_eq!(watch.stats().frame_tx.stop_sending, 2, "the QPACK stream was stopped");
+			drop(qpack);
 		})
 		.expect("worker");
 }

@@ -35,8 +35,9 @@ fn stops_sent(pair: &mut Pair, ch: ConnectionHandle) -> u64 {
 	pair.server_conn_mut(ch).stats().frame_tx.stop_sending
 }
 
-/// Every stream the peer writes is stopped once, those it opens during the wait included, and
-/// the wait ends with their resets while the kept stream and the readers stay untouched.
+/// Every stream the peer writes is stopped once, those it opens during the wait included once
+/// accepted, and the wait ends with their resets while the kept stream and the readers stay
+/// untouched.
 #[test]
 fn waits_for_every_reset() {
 	let _guard = subscribe();
@@ -48,7 +49,8 @@ fn waits_for_every_reset() {
 
 	let waiter = Counter::new();
 	assert!(quiesce(&mut pair, server_ch, &waiter, &[kept]).is_pending());
-	// A stream opened before the stops arrive is asked too, once the wait sees it.
+	// A stream opened before the stops arrive waits for the application to accept it, and is
+	// asked once it has.
 	let late = pair
 		.client_streams(client_ch)
 		.open(Dir::Uni, Default::default())
@@ -56,6 +58,14 @@ fn waits_for_every_reset() {
 	pair.client_send(client_ch, late).write(&mut &b"late"[..]).unwrap();
 	pair.drive();
 	assert!(waiter.wakes() > 0);
+	assert!(quiesce(&mut pair, server_ch, &waiter, &[kept]).is_pending());
+	pair.drive();
+	assert_eq!(
+		stops_sent(&mut pair, server_ch),
+		2,
+		"an unaccepted stream is left to the application"
+	);
+	assert_eq!(pair.server_streams(server_ch).accept(Dir::Uni), Some(late));
 	assert!(quiesce(&mut pair, server_ch, &waiter, &[kept]).is_pending());
 	pair.drive();
 

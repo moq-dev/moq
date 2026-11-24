@@ -79,16 +79,10 @@ struct Web {
 }
 
 impl Web {
-	/// The HTTP/3 streams a close must leave open: the CONNECT stream and the peer's control and
-	/// QPACK streams, since stopping one ends the peer's HTTP/3 connection before the capsule.
-	fn critical(&self) -> Vec<crate::quic::driver::stream::Id> {
-		let accept = self.accept.lock().unwrap();
-		let qpack = [&accept.qpack_encoder, &accept.qpack_decoder];
-		let qpack = qpack.into_iter().flatten().map(|recv| recv.id());
+	/// The HTTP/3 streams a close must leave open besides the QPACK ones: the CONNECT stream,
+	/// which carries the peer's capsules, and the peer's control stream.
+	fn critical(&self) -> [crate::quic::driver::stream::Id; 2] {
 		[self.connect_id, self.settings.control_id()]
-			.into_iter()
-			.chain(qpack)
-			.collect()
 	}
 }
 
@@ -417,7 +411,7 @@ impl Session {
 		capsule: web_transport_proto::Capsule,
 		code: u32,
 		timeout: std::time::Duration,
-		critical: Vec<crate::quic::driver::stream::Id>,
+		critical: [crate::quic::driver::stream::Id; 2],
 	) {
 		let http3_code: crate::quic::driver::VarInt = web_transport_proto::error_to_http3(code).try_into().unwrap();
 
@@ -426,7 +420,8 @@ impl Session {
 		// on, the HTTP/3 ones aside, and send the capsule once it has reset them. The session
 		// is closed, so the stops carry WT_SESSION_GONE.
 		let gone = self.close.encode_stream_code(0);
-		let quiesce = kio::wait(|waiter| self.conn.poll_quiesce(waiter, gone, &critical));
+		let web = self.web().expect("a capsule close is HTTP/3");
+		let quiesce = kio::wait(|waiter| web.accept.lock().unwrap().poll_quiesce(waiter, gone, &critical));
 		match kio::clock::timeout(timeout, quiesce).await {
 			Ok(Ok(())) => {}
 			Ok(Err(e)) => {
@@ -854,6 +849,30 @@ impl SessionAccept {
 
 			// Keep looping if it's a stream we want to ignore.
 		}
+	}
+
+	/// Have the peer end every stream it sends on, sparing `critical` and the QPACK streams, as
+	/// [`Connection::poll_quiesce`](crate::quic::driver::connection::Connection::poll_quiesce)
+	/// does with `code`.
+	///
+	/// Nobody else accepts once the session closed, so this accepts and classifies the peer's
+	/// streams itself, dropping the session's, which stops them. It waits on any stream still
+	/// mid-header, which may be a QPACK stream, so that one is never stopped.
+	fn poll_quiesce(
+		&mut self,
+		waiter: &Waiter,
+		code: crate::quic::driver::VarInt,
+		critical: &[crate::quic::driver::stream::Id],
+	) -> Poll<Result<(), Error>> {
+		while let Poll::Ready(Ok(_)) = self.poll_accept_uni(waiter) {}
+		while let Poll::Ready(Ok(_)) = self.poll_accept_bi(waiter) {}
+		if !self.pending_uni.is_empty() || !self.pending_bi.is_empty() {
+			return Poll::Pending;
+		}
+		let qpack = [&self.qpack_encoder, &self.qpack_decoder];
+		let qpack = qpack.into_iter().flatten().map(|recv| recv.id());
+		let keep: Vec<_> = critical.iter().copied().chain(qpack).collect();
+		self.conn.poll_quiesce(waiter, code, &keep).map_err(Into::into)
 	}
 
 	// Reads the stream header, returning Some if it's a WebTransport stream.
@@ -1536,7 +1555,8 @@ mod tests {
 
 	/// A close stops every stream the peer sends on and sends its capsule only once the peer
 	/// reset them, since Chrome crashes on a capsule arriving under a write in flight
-	/// (https://issues.chromium.org/issues/589817008).
+	/// (https://issues.chromium.org/issues/589817008). It classifies the streams nobody accepted
+	/// yet itself, stopping the session's and sparing a QPACK stream.
 	#[tokio::test]
 	async fn close_waits_for_the_peer_to_reset_its_streams() {
 		let (client_conn, server_conn, _endpoints) = pair().await;
@@ -1546,14 +1566,22 @@ mod tests {
 		);
 		let (client, server) = (client.unwrap(), server.unwrap());
 		// The connection's own streams, whose stop the test sees directly: a session stream
-		// stopped with WT_SESSION_GONE waits for the capsule's reason instead.
+		// stopped with WT_SESSION_GONE waits for the capsule's reason instead. The server
+		// accepts none of them before the close.
 		let web = client.web().unwrap();
 		let mut uni = client.conn.open_uni(Default::default()).await.unwrap();
 		uni.write_all(web.header_uni.clone()).await.unwrap();
 		let (mut bi, _recv) = client.conn.open_bi(Default::default()).await.unwrap();
 		bi.write_all(web.header_bi.clone()).await.unwrap();
-		// The server holds both, mid-read, as a session does.
-		let _accepted = (server.accept_uni().await.unwrap(), server.accept_bi().await.unwrap());
+		let mut qpack = client.conn.open_uni(Default::default()).await.unwrap();
+		let mut header = Vec::new();
+		StreamUni::QPACK_ENCODER.encode(&mut header);
+		qpack.write_all(&header[..]).await.unwrap();
+		for stream in [&uni, &bi, &qpack] {
+			kio::wait(|waiter| stream.poll_acked(waiter, stream.offset()))
+				.await
+				.unwrap();
+		}
 
 		server.close(2, "unauthorized");
 		let gone = crate::quic::driver::VarInt::from_u64(super::super::error::WT_SESSION_GONE).unwrap();
@@ -1567,6 +1595,11 @@ mod tests {
 		assert!(
 			matches!(err, Error::Closed(2, ref reason) if reason == "unauthorized"),
 			"{err:?}"
+		);
+		assert_eq!(
+			server.conn.stats().frame_tx.stop_sending,
+			2,
+			"the QPACK stream was stopped"
 		);
 	}
 

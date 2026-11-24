@@ -797,21 +797,13 @@ fn close(conn: &Connection, web: Option<&Rc<Web>>, code: u32, reason: &str) {
 		*closed = Some(Error::Closed(code, reason.to_string()));
 	}
 
-	let (connect_send, critical) = {
-		let mut state = web.state.lock();
-		let held = state.held_recv.iter().flatten().map(driver_recv::Stream::id);
-		let critical: Vec<_> = held.collect();
-		(state.connect_send.take(), critical)
-	};
+	let connect_send = web.state.lock().connect_send.take();
 	let http3 = proto::error_to_http3(code);
 	let Some(send) = connect_send else {
 		conn.close_code(http3, reason);
 		return;
 	};
-	// The CONNECT stream carries the peer's capsules, and the control and QPACK streams end
-	// the peer's HTTP/3 connection if stopped, so the quiesce leaves them be.
-	let mut critical = critical;
-	critical.push(send.id());
+	let connect = send.id();
 
 	// The capsule is what carries the code and reason to a browser
 	// (`WebTransport.closed`); the connection close alone would lose the
@@ -859,7 +851,7 @@ fn close(conn: &Connection, web: Option<&Rc<Web>>, code: u32, reason: &str) {
 				return Poll::Ready(());
 			}
 			if quiescing {
-				match conn.poll_quiesce(waiter, http3_code(WT_SESSION_GONE), &critical) {
+				match quiesce(&conn, &web, connect, waiter) {
 					Poll::Ready(Ok(())) => {}
 					Poll::Ready(Err(_)) => return Poll::Ready(()),
 					Poll::Pending => {
@@ -892,6 +884,35 @@ fn close(conn: &Connection, web: Option<&Rc<Web>>, code: u32, reason: &str) {
 		// Only now, so the critical streams end with the connection.
 		drop((web, finished));
 	});
+}
+
+/// Have the peer end every stream it sends on, as [`Connection::poll_quiesce`]
+/// does with WT_SESSION_GONE, sparing the CONNECT stream, `connect`, which
+/// carries its capsules, and its control and QPACK streams, since stopping one
+/// ends its HTTP/3 connection before the capsule.
+///
+/// Nobody else accepts once the session closed, so this accepts and classifies
+/// the peer's streams itself; the session's own wait in their queues to be
+/// stopped like any other. It waits on any stream still mid-header, which may
+/// be a QPACK stream, so that one is never stopped.
+fn quiesce(conn: &Connection, web: &Web, connect: super::stream::Id, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+	web.state.poll(waiter, |state, cx| {
+		while let Poll::Ready(Ok(recv)) = conn.poll_accept_uni(state.uni_park.hold(cx)) {
+			state.pending_uni.push(PendingUni::new(recv));
+		}
+		while let Poll::Ready(Ok((send, recv))) = conn.poll_accept_bi(state.bi_park.hold(cx)) {
+			state.pending_bi.push(PendingBi::new(send, recv));
+		}
+		classify_uni(web.session_id, state, cx);
+		classify_bi(web.session_id, state, cx);
+		if !state.pending_uni.is_empty() || !state.pending_bi.is_empty() {
+			return Poll::Pending;
+		}
+		let held = state.held_recv.iter().flatten().map(driver_recv::Stream::id);
+		let keep: Vec<_> = held.chain([connect]).collect();
+		conn.poll_quiesce(waiter, http3_code(WT_SESSION_GONE), &keep)
+			.map_err(Error::from)
+	})
 }
 
 /// What every session clone and stream it handed out shares: the last to drop

@@ -458,11 +458,12 @@ impl StreamsState {
 		Ok(self.evict_after_arrival(transmit))
 	}
 
-	/// Ask the peer with STOP_SENDING to end every stream it may still send on, except `keep`,
-	/// returning whether any of them is still open.
+	/// Ask the peer with STOP_SENDING to end every stream it may still send on, except `keep`
+	/// and those the application has yet to accept, returning whether any of them is still open.
 	///
 	/// A stream is asked once, and a stream the application already stopped was asked by its stop.
-	/// The readers keep reading: each stream ends with the peer's reset or FIN as usual.
+	/// The readers keep reading: each stream ends with the peer's reset or FIN as usual. A stream
+	/// waiting to be accepted counts as open, since only the application can tell whether to keep it.
 	pub(crate) fn quiesce(&mut self, pending: &mut Retransmits, code: VarInt, keep: &[StreamId]) -> bool {
 		let mut open = false;
 		let mut asked = false;
@@ -475,7 +476,8 @@ impl StreamsState {
 				continue;
 			}
 			open = true;
-			if rs.reader == Reader::Stopped || mem::replace(&mut rs.quiesced, true) {
+			let unaccepted = id.initiator() != self.side && id.index() >= self.next_reported_remote[id.dir() as usize];
+			if unaccepted || rs.reader == Reader::Stopped || mem::replace(&mut rs.quiesced, true) {
 				continue;
 			}
 			pending.stop_sending.push(frame::StopSending { id, error_code: code });
