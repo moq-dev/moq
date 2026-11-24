@@ -51,6 +51,16 @@ pub fn into_setup(params: &mut Parameters, token: &Token, version: Version) -> R
 #[derive(Clone, PartialEq, Eq)]
 pub struct RequestToken(pub Token);
 
+impl RequestToken {
+	/// The token a request names a credential with, by value.
+	pub(crate) fn out_of_band(value: &[u8]) -> Self {
+		Self(Token {
+			kind: Token::OUT_OF_BAND,
+			value: value.to_vec(),
+		})
+	}
+}
+
 // A request message is logged with `Debug`, so the credential shows only its type and length.
 impl std::fmt::Debug for RequestToken {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

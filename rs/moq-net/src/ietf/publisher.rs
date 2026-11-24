@@ -3856,10 +3856,7 @@ impl Publisher {
 	/// The `AUTHORIZATION TOKEN` a request names `auth` with, by value.
 	fn request_token(&self, auth: &crate::auth::Credential) -> Option<super::token::RequestToken> {
 		let token = self.auth.token(auth)?;
-		Some(super::token::RequestToken(crate::setup::Token {
-			kind: crate::setup::Token::OUT_OF_BAND,
-			value: token.to_vec(),
-		}))
+		Some(super::token::RequestToken::out_of_band(&token))
 	}
 
 	/// Drop queued updates that no longer have anything to send, so the next one to take

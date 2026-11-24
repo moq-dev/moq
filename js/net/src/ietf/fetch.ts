@@ -9,6 +9,7 @@ import { DEFAULT_WIRE } from "./priority.ts";
 import * as Properties from "./properties.ts";
 import { RequestOk } from "./request.ts";
 import { GroupOrder } from "./subscribe.ts";
+import { tokenIntoRequest } from "./token.ts";
 import { type IetfVersion, isDraft23 } from "./version.ts";
 
 /**
@@ -95,6 +96,9 @@ export class Fetch {
 	/** Whether the requester wants Track Properties in FETCH_OK (INCLUDE_PROPERTIES, draft-22). */
 	propertiesWanted: boolean;
 
+	/** The AUTHORIZATION TOKEN to send, a value agreed out of band. Decoding leaves it unset. */
+	token?: Uint8Array;
+
 	constructor({
 		requestId,
 		type,
@@ -102,6 +106,7 @@ export class Fetch {
 		groupOrder,
 		rangeFilters = false,
 		propertiesWanted = true,
+		token,
 	}: {
 		requestId: bigint;
 		type: FetchType;
@@ -109,6 +114,7 @@ export class Fetch {
 		groupOrder?: Order;
 		rangeFilters?: boolean;
 		propertiesWanted?: boolean;
+		token?: Uint8Array;
 	}) {
 		this.requestId = requestId;
 		this.type = type;
@@ -116,6 +122,7 @@ export class Fetch {
 		this.groupOrder = groupOrder;
 		this.rangeFilters = rangeFilters;
 		this.propertiesWanted = propertiesWanted;
+		this.token = token;
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
@@ -158,6 +165,7 @@ export class Fetch {
 					throw new Error("filtered FETCH needs draft-22");
 			}
 		}
+		if (this.token) tokenIntoRequest(params, this.token);
 		await params.encode(w, version);
 	}
 

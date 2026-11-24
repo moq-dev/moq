@@ -914,6 +914,10 @@ struct TrackState {
 
 	// The data streams read so far, which PUBLISH_DONE's Stream Count is checked against.
 	tail: kio::Producer<Tail>,
+
+	// The credential the subscription's latest token named, which a renewal replaces. `None`
+	// for one that went out without a token: it stays under the session's scope.
+	auth: Option<crate::auth::Credential>,
 }
 
 impl TrackState {
@@ -955,6 +959,7 @@ impl TrackState {
 			fetch_id: None,
 			headless_through: None,
 			tail: Default::default(),
+			auth: None,
 		}
 	}
 }
@@ -1471,6 +1476,20 @@ impl Subscriber {
 	/// Take the origin request back out of a subscription that is still setting up.
 	fn take_pending(&self, request_id: RequestId) -> Option<track::Request> {
 		self.state.lock().subscribes.get_mut(&request_id)?.pending.take()
+	}
+
+	/// The credential a SUBSCRIBE, standalone FETCH, or TRACK_STATUS written now names, with
+	/// its token, or `None` to send it under the session's scope.
+	fn request_auth(&self) -> Option<(crate::auth::Credential, super::token::RequestToken)> {
+		let (auth, token) = self.auth.subscribe_auth()?;
+		Some((auth, super::token::RequestToken::out_of_band(&token)))
+	}
+
+	/// The credential renewing the token the subscription with `request_id` named, when it
+	/// was replaced since. `None` for one that went out without a token.
+	fn renewal(&self, request_id: RequestId) -> Option<(crate::auth::Credential, super::token::RequestToken)> {
+		let sent = self.state.lock().subscribes.get(&request_id)?.auth.clone()?;
+		self.request_auth().filter(|(auth, _)| *auth != sent)
 	}
 
 	fn remove_subscribe(&self, request_id: RequestId) -> Option<TrackState> {
@@ -4194,13 +4213,13 @@ impl SubscribeOnce {
 		});
 		let mut state = this.state.lock();
 		forget_retired_track(&state.aliases, broadcast_path, track_name);
-		// A resumed subscription keeps the alias it is bound to and the data streams it
-		// counted while it forwarded before.
-		let (alias, tail) = match held {
+		// A resumed subscription keeps the alias it is bound to, the data streams it
+		// counted while it forwarded before, and the credential its token named.
+		let (alias, tail, auth) = match held {
 			true => state
 				.subscribes
 				.remove(&request_id)
-				.map(|held| (held.alias, held.tail))
+				.map(|held| (held.alias, held.tail, held.auth))
 				.unwrap_or_default(),
 			false => Default::default(),
 		};
@@ -4211,6 +4230,7 @@ impl SubscribeOnce {
 				producer: target.producer().cloned(),
 				alias,
 				tail,
+				auth,
 				..TrackState::pending(track_name.to_owned(), broadcast_path.clone(), fill.clone())
 			},
 		);
@@ -4248,6 +4268,12 @@ impl SubscribeOnce {
 		let order = aggregate.map(|s| s.order).unwrap_or_default();
 		let request_id = req.id;
 		let join = &self.plan.join;
+		// A fresh SUBSCRIBE names the credential current now; a resume renews the token the
+		// held one named, if it was replaced meanwhile.
+		let auth = match &held {
+			Some(_) => this.renewal(request_id),
+			None => this.request_auth(),
+		};
 		// Buffered only: the wait for the answer flushes it, so the local terminals still end
 		// a request the peer's send window holds back.
 		let written = match &held {
@@ -4262,6 +4288,7 @@ impl SubscribeOnce {
 					priority: Some(sent.priority),
 					// Only a track declaring DYNAMIC_GROUPS takes one on an update.
 					new_group: sent.new_group.filter(|_| held.properties.dynamic_groups),
+					authorization_token: auth.as_ref().map(|(_, token)| token.clone()),
 				};
 				this.buffer_forward(&mut req.stream.writer, &forward)
 			}
@@ -4280,7 +4307,7 @@ impl SubscribeOnce {
 					forward: true,
 					rendezvous: false,
 					range_filters: false,
-					authorization_token: None,
+					authorization_token: auth.as_ref().map(|(_, token)| token.clone()),
 				},
 			),
 		};
@@ -4290,6 +4317,11 @@ impl SubscribeOnce {
 			this.entry_ended(&self.key, request_id, Err(err.clone()));
 			target.fail(err);
 			return Flow::Ready(None);
+		}
+		if let Some((auth, _)) = auth
+			&& let Some(held) = this.state.lock().subscribes.get_mut(&request_id)
+		{
+			held.auth = Some(auth);
 		}
 
 		tracing::debug!(broadcast = %crate::path::Rooted(this.origin.root(), broadcast_path), track = %track_name, "subscribe started");
@@ -4831,11 +4863,24 @@ impl SubscribeOnce {
 		} else {
 			None
 		};
+		// A replaced credential renews the token the subscription named. One that went out
+		// without a token stays under the session's scope.
+		let sent_auth = this
+			.state
+			.lock()
+			.subscribes
+			.get(&request_id)
+			.and_then(|held| held.auth.clone());
+		let auth = sent_auth.and_then(|sent| match this.auth.poll_subscribe_renewal(waiter, &sent) {
+			Poll::Ready((auth, token)) => Some((auth, ietf::token::RequestToken::out_of_band(&token))),
+			Poll::Pending => None,
+		});
 		let mut update = Update {
 			filter: ranges.as_ref().map(|join| join.filter),
 			fill: ranges.and_then(|join| join.fill),
 			priority: (live.priority != live.sent_priority).then_some(live.priority),
 			new_group,
+			auth,
 		};
 		let mut state = this.state.lock();
 		let Some(held) = state.subscribes.get_mut(&request_id) else {
@@ -4861,7 +4906,7 @@ impl SubscribeOnce {
 		} else {
 			None
 		};
-		if update.priority.is_none() && update.new_group.is_none() && update.filter.is_none() {
+		if update.priority.is_none() && update.new_group.is_none() && update.filter.is_none() && update.auth.is_none() {
 			return Poll::Pending;
 		}
 		let update_id = this.control.next_request_id();
@@ -4913,7 +4958,7 @@ impl SubscribeOnce {
 						subscriber_priority: update.priority.map(super::priority::to_wire),
 						forward: None,
 						filter: update.filter,
-						authorization_token: None,
+						authorization_token: update.auth.as_ref().map(|(_, token)| token.clone()),
 						new_group: update.new_group,
 						fill: update.fill,
 					},
@@ -4921,6 +4966,12 @@ impl SubscribeOnce {
 					tracing::debug!(%err, "failed to update the subscription");
 					let _ = live.track.clone().abort(err.clone());
 					return Served::Ended(Ending::Closed(Err(err)));
+				}
+				if let Some((auth, _)) = update.auth
+					&& let Some(held) = this.state.lock().subscribes.get_mut(&req.id)
+				{
+					tracing::debug!(broadcast = %crate::path::Rooted(this.origin.root(), broadcast_path), track = %track_name, "subscription token renewed");
+					held.auth = Some(auth);
 				}
 				if changed_range {
 					live.sent_bounds = bounds;
@@ -5819,7 +5870,7 @@ impl LearnTrackStatus {
 					let written = stream.writer.buffer_message(
 						ietf::TrackStatus::ID,
 						&ietf::TrackStatus {
-							authorization_token: None,
+							authorization_token: this.request_auth().map(|(_, token)| token),
 							request_id,
 							track_namespace: broadcast_path.clone(),
 							track_name: track_name.into(),
@@ -7456,7 +7507,7 @@ impl FetchRun {
 		let written = stream.writer.buffer_message(
 			ietf::Fetch::ID,
 			&ietf::Fetch {
-				authorization_token: None,
+				authorization_token: self.this.request_auth().map(|(_, token)| token),
 				request_id: fetch_id,
 				subscriber_priority: super::priority::to_wire(self.fill.priority()),
 				group_order: GroupOrder::Ascending,
@@ -14547,6 +14598,8 @@ struct Update {
 	priority: Option<i8>,
 	/// NEW_GROUP_REQUEST.
 	new_group: Option<u64>,
+	/// The credential renewing the subscription's token, with that token.
+	auth: Option<(crate::auth::Credential, ietf::token::RequestToken)>,
 }
 
 /// A subscription's single wire span: its start and exclusive end group, each open when `None`.
@@ -17989,6 +18042,17 @@ mod joining_fetch_tests {
 			session: ScriptedSession,
 			control: Control,
 		) -> Self {
+			Self::subscribe_on(version, subscription, session, control, None).await
+		}
+
+		/// [`Self::subscribe_to`], on the session side of `auth` when given.
+		async fn subscribe_on(
+			version: Version,
+			subscription: Option<track::Subscription>,
+			session: ScriptedSession,
+			control: Control,
+			auth: Option<crate::auth::Link>,
+		) -> Self {
 			let (tasks, _task_set) = crate::util::TaskSet::new();
 			let subscriber = Subscriber::new(
 				crate::time::sim(),
@@ -18003,6 +18067,10 @@ mod joining_fetch_tests {
 				tasks.clone(),
 				Default::default(),
 			);
+			let subscriber = match auth {
+				Some(auth) => subscriber.with_auth(auth),
+				None => subscriber,
+			};
 
 			let producer = crate::broadcast::Info::default().produce();
 			let mut dynamic = producer.requests();
@@ -18357,6 +18425,174 @@ mod joining_fetch_tests {
 				},
 				"{version}"
 			);
+		}
+	}
+
+	/// A session side whose handle names a subscribe credential, with the token `cred`.
+	fn credentialed() -> crate::auth::Link {
+		let link = crate::auth::Link::ietf();
+		let credential = link.handle().add("cred").unwrap();
+		link.handle().set_subscribe_auth(Some(credential));
+		link
+	}
+
+	/// The value of a request's AUTHORIZATION TOKEN, if it carried one.
+	fn token_value(token: Option<ietf::token::RequestToken>) -> Option<Vec<u8>> {
+		token.map(|token| token.0.value)
+	}
+
+	/// The body of the first `id` message the subscriber wrote.
+	fn written(log: &crate::lite::test_transport::Log, version: Version, id: u64) -> bytes::Bytes {
+		decode_messages(log, version)
+			.into_iter()
+			.find(|(written, _)| *written == id)
+			.unwrap_or_else(|| panic!("{version}: no message {id:#x}"))
+			.1
+	}
+
+	/// The subscribe credential rides the SUBSCRIBE, and not the joining FETCH its
+	/// subscription gates.
+	#[kio::test]
+	async fn a_subscribe_credential_rides_the_subscribe_but_not_its_joining_fetch() {
+		let largest = Some(ietf::Location { group: 4, object: 1 });
+		for version in JOINING_DRAFTS {
+			let scripts = vec![subscribe_ok(version, largest), fetch_ok(version)];
+			let run = JoinRun::subscribe_on(
+				version,
+				None,
+				ScriptedSession::per_stream(scripts),
+				Control::new(false),
+				Some(credentialed()),
+			)
+			.await;
+			let body = written(&run.session.log, version, ietf::Subscribe::ID);
+			let subscribe = crate::coding::decode_from(&mut &body[..], version, ietf::Subscribe::decode_msg).unwrap();
+			assert_eq!(
+				token_value(subscribe.authorization_token),
+				Some(b"cred".to_vec()),
+				"{version}"
+			);
+			let body = written(&run.session.log, version, ietf::Fetch::ID);
+			let fetch = crate::coding::decode_from(&mut &body[..], version, ietf::Fetch::decode_msg).unwrap();
+			assert!(
+				matches!(fetch.fetch_type, FetchType::RelativeJoining { .. }),
+				"{version}"
+			);
+			assert_eq!(token_value(fetch.authorization_token), None, "{version}");
+		}
+	}
+
+	/// A fetch-only reader's TRACK_STATUS and a group's standalone FETCH both carry the
+	/// subscribe credential.
+	#[kio::test]
+	async fn a_subscribe_credential_rides_track_status_and_a_group_fetch() {
+		for version in [Version::Draft18, Version::Draft22] {
+			let subscriber = |session: &ScriptedSession| {
+				let (tasks, _task_set) = crate::util::TaskSet::new();
+				Subscriber::new(
+					crate::time::sim(),
+					crate::driver::Transport::new(session.clone()),
+					crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
+					Control::new(false),
+					None,
+					peer::PeerSetup::declared(peer::Peer::default()),
+					crate::Hop::new(1).unwrap(),
+					None,
+					version,
+					tasks,
+					Default::default(),
+				)
+				.with_auth(credentialed())
+			};
+
+			let session = ScriptedSession::new(fetch_error(version));
+			let mut status = subscriber(&session);
+			let producer = crate::broadcast::Info::default().produce();
+			let mut dynamic = producer.requests();
+			let consumer = producer.consume();
+			let track = consumer.track("video").unwrap();
+			let mut info = Box::pin(track.info());
+			assert!(futures::poll!(info.as_mut()).is_pending());
+			let request = dynamic.requested_track().await.expect("no track requested");
+			status
+				.run_subscribe(Path::from_static("broadcast"), dynamic, None, request)
+				.await;
+			assert!(info.await.is_err(), "{version}: TRACK_STATUS was refused");
+			let body = written(&session.log, version, ietf::TrackStatus::ID);
+			let msg = crate::coding::decode_from(&mut &body[..], version, ietf::TrackStatus::decode_msg).unwrap();
+			assert_eq!(
+				token_value(msg.authorization_token),
+				Some(b"cred".to_vec()),
+				"{version}"
+			);
+
+			let session = ScriptedSession::new(fetch_error(version));
+			let fetcher = subscriber(&session);
+			let track = track::Producer::new(
+				std::sync::Arc::new(crate::broadcast::Info::default()),
+				"video",
+				track::Info::default().with_timescale(None),
+			);
+			let requests = track.requests();
+			let consumer = track.consume();
+			let mut fetch = std::pin::pin!(consumer.fetch_group(4, None));
+			assert!(futures::poll!(fetch.as_mut()).is_pending());
+			let request = requests.requested_fill().await.expect("no group requested");
+			fetcher
+				.run_group_fetch(Path::from_static("broadcast"), "video".into(), request, None)
+				.await;
+			assert!(fetch.await.is_err(), "{version}: FETCH was refused");
+			let body = written(&session.log, version, ietf::Fetch::ID);
+			let msg = crate::coding::decode_from(&mut &body[..], version, ietf::Fetch::decode_msg).unwrap();
+			assert!(
+				!matches!(msg.fetch_type, FetchType::RelativeJoining { .. }),
+				"{version}"
+			);
+			assert_eq!(
+				token_value(msg.authorization_token),
+				Some(b"cred".to_vec()),
+				"{version}"
+			);
+		}
+	}
+
+	/// Discovery stays under the session's scope: SUBSCRIBE_NAMESPACE carries no token.
+	#[kio::test]
+	async fn a_subscribe_credential_skips_subscribe_namespace() {
+		for version in [Version::Draft18, Version::Draft22] {
+			let session = ScriptedSession::new(Vec::new());
+			let (tasks, _task_set) = crate::util::TaskSet::new();
+			let mut subscriber = Subscriber::new(
+				crate::time::sim(),
+				crate::driver::Transport::new(session.clone()),
+				crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
+				Control::new(false),
+				None,
+				peer::PeerSetup::declared(peer::Peer::default()),
+				crate::Hop::new(1).unwrap(),
+				None,
+				version,
+				tasks,
+				Default::default(),
+			)
+			.with_auth(credentialed());
+			let live = kio::Producer::new(());
+			let _live = live.clone();
+			let live = live.consume();
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
+				.await
+				.unwrap();
+			let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(
+				stream,
+				Path::from_static("room"),
+				crate::model::Snapshot::landed(),
+				live
+			));
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			let body = written(&session.log, version, ietf::SubscribeNamespace::ID);
+			let msg =
+				crate::coding::decode_from(&mut &body[..], version, ietf::SubscribeNamespace::decode_msg).unwrap();
+			assert_eq!(token_value(msg.authorization_token), None, "{version}");
 		}
 	}
 

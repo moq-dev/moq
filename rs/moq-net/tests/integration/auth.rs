@@ -241,6 +241,213 @@ async fn moqt_22_dropping_the_old_grant_with_its_renewal_keeps_the_announce() {
 	.expect("timed out");
 }
 
+#[kio::test]
+async fn moqt_18_subscribe_auth_rides_and_renews_its_subscription() {
+	a_subscribe_auth_rides_and_renews_its_subscription(MOQT_18).await
+}
+
+#[kio::test]
+async fn moqt_22_subscribe_auth_rides_and_renews_its_subscription() {
+	a_subscribe_auth_rides_and_renews_its_subscription(MOQT_22).await
+}
+
+#[kio::test]
+async fn moqt_18_a_refused_subscribe_renewal_ends_only_its_subscription() {
+	a_refused_subscribe_renewal_ends_only_its_subscription(MOQT_18).await
+}
+
+#[kio::test]
+async fn moqt_22_a_refused_subscribe_renewal_ends_only_its_subscription() {
+	a_refused_subscribe_renewal_ends_only_its_subscription(MOQT_22).await
+}
+
+/// A moq-transport pair where the server publishes `room/x` with `tracks` and answers the
+/// client's request tokens, which subscribes into the returned origin.
+async fn connect_subscribe_auth(version: &'static str, tracks: &[&str]) -> SubscribeAuth {
+	let publisher = produce_origin(1);
+	let broadcast = publisher.route("room/x", origin::RouteOptions::hidden()).unwrap();
+	let published = tracks
+		.iter()
+		.map(|name| broadcast.broadcast().create_track(*name, timed()).unwrap())
+		.collect();
+	broadcast.announce().unwrap();
+	let received = produce_origin(2);
+	let pair = connect(Options {
+		version: Some(version),
+		client_subscribe: Some(received.clone()),
+		server_publish: Some(publisher),
+		server_requests: true,
+		..Default::default()
+	})
+	.await;
+	let remote = received
+		.consume()
+		.follow("room/x", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap()
+		.unwrap();
+	SubscribeAuth {
+		pair,
+		_route: broadcast,
+		published,
+		remote,
+	}
+}
+
+struct SubscribeAuth {
+	pair: Pair,
+	_route: origin::Route,
+	published: Vec<moq_net::track::Producer>,
+	remote: moq_net::broadcast::Consumer,
+}
+
+/// Write one finished group to `track`.
+fn write_group(track: &moq_net::track::Producer) {
+	let mut group = track.append_next().unwrap();
+	group
+		.write_frame(support::AtStart::at_start(&group), b"frame".as_ref())
+		.unwrap();
+	group.finish().unwrap();
+}
+
+/// Subscribe to `name` and wait for the subscription to reach `published`.
+async fn subscribe_to(
+	remote: &moq_net::broadcast::Consumer,
+	name: &str,
+	published: &moq_net::track::Producer,
+) -> moq_net::track::Subscriber {
+	let subscription = remote
+		.track(name)
+		.unwrap()
+		.subscribe(moq_net::track::Subscription::default())
+		.await
+		.unwrap();
+	support::harness::subscribed(published).await;
+	subscription
+}
+
+/// Answer the peer's tokens: accept one `verdict` grants, refuse the rest with
+/// UNAUTHORIZED, reporting each token and the grant it got.
+fn judge(
+	mut requests: auth::Requests,
+	verdict: impl Fn(&[u8]) -> Option<Grant> + 'static,
+) -> futures::channel::mpsc::UnboundedReceiver<(Vec<u8>, Option<auth::Issued>)> {
+	let (tx, rx) = futures::channel::mpsc::unbounded();
+	kio::clock::sim::spawn(async move {
+		while let Some(request) = requests.next().await {
+			let token = request.token().to_vec();
+			let issued = match verdict(&token) {
+				Some(grant) => Some(request.accept(grant)),
+				None => {
+					request.reject(SessionError::Unauthorized, "refused");
+					None
+				}
+			};
+			let _ = tx.unbounded_send((token, issued));
+		}
+	});
+	rx
+}
+
+/// The handle's subscribe credential reaches the peer's acceptor on the SUBSCRIBE, and
+/// swapping it renews the live subscription with the new token: the grant it replaces can
+/// end and the subscription carries on.
+async fn a_subscribe_auth_rides_and_renews_its_subscription(version: &'static str) {
+	within(async {
+		let SubscribeAuth {
+			mut pair,
+			_route,
+			published,
+			remote,
+		} = connect_subscribe_auth(version, &["video"]).await;
+		let mut tokens = judge(pair.requests.take().unwrap(), |_| Some(grant(&[], &["room"])));
+		let auth = pair.client.auth();
+		auth.set_subscribe_auth(Some(added(&auth, "first").await.expect("kept for requests")));
+
+		let mut subscription = subscribe_to(&remote, "video", &published[0]).await;
+		write_group(&published[0]);
+		let (token, first) = tokens.next().await.expect("the subscribe's token");
+		assert_eq!(token, b"first");
+		subscription.recv_group().await.unwrap().unwrap();
+
+		auth.set_subscribe_auth(Some(added(&auth, "second").await.expect("kept for requests")));
+		let (token, _second) = tokens.next().await.expect("the renewal's token");
+		assert_eq!(token, b"second");
+		drop(first);
+		kio::clock::sleep(Duration::from_secs(1)).await;
+
+		write_group(&published[0]);
+		subscription
+			.recv_group()
+			.await
+			.expect("the renewal ended the subscription")
+			.unwrap();
+		assert_eq!(pair.client_transport.close_reason(), None);
+	})
+	.await
+	.expect("timed out");
+}
+
+/// A renewal the peer refuses ends the subscription that sent it, and nothing else: a
+/// subscription made before the credential was set went out without a token, so it is never
+/// renewed and carries on under the session's scope.
+async fn a_refused_subscribe_renewal_ends_only_its_subscription(version: &'static str) {
+	within(async {
+		let SubscribeAuth {
+			mut pair,
+			_route,
+			published,
+			remote,
+		} = connect_subscribe_auth(version, &["audio", "video"]).await;
+		let mut tokens = judge(pair.requests.take().unwrap(), |token| {
+			(token == b"first").then(|| grant(&[], &["room"]))
+		});
+		let auth = pair.client.auth();
+		let mut audio = subscribe_to(&remote, "audio", &published[0]).await;
+		write_group(&published[0]);
+		audio.recv_group().await.unwrap().unwrap();
+
+		auth.set_subscribe_auth(Some(added(&auth, "first").await.expect("kept for requests")));
+		let mut video = subscribe_to(&remote, "video", &published[1]).await;
+		write_group(&published[1]);
+		let (token, _first) = tokens.next().await.expect("the subscribe's token");
+		assert_eq!(token, b"first");
+		video.recv_group().await.unwrap().unwrap();
+
+		auth.set_subscribe_auth(Some(added(&auth, "second").await.expect("kept for requests")));
+		let (token, refused) = tokens.next().await.expect("the renewal's token");
+		assert_eq!(token, b"second");
+		assert!(refused.is_none());
+		let ended = loop {
+			match video.recv_group().await {
+				Ok(Some(_)) => continue,
+				Ok(None) => break None,
+				Err(err) => break Some(err),
+			}
+		};
+		assert!(
+			ended.is_some(),
+			"the refused renewal finished the subscription instead of ending it"
+		);
+
+		write_group(&published[0]);
+		audio
+			.recv_group()
+			.await
+			.expect("the refusal ended the tokenless subscription")
+			.unwrap();
+		assert!(
+			futures::FutureExt::now_or_never(tokens.next()).is_none(),
+			"the tokenless subscription was renewed"
+		);
+		assert_eq!(pair.client_transport.close_reason(), None);
+	})
+	.await
+	.expect("timed out");
+}
+
 /// A moq-transport pair: every token the server sees rode a request, and the server
 /// declines MoQ Solicit, so the client announces with PUBLISH_NAMESPACE rather than
 /// answering a SUBSCRIBE_NAMESPACE.

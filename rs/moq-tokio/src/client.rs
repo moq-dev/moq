@@ -56,6 +56,8 @@ pub struct Client {
 	connect: Option<Url>,
 	/// The credentials each new connection starts presenting.
 	pub(crate) tokens: Vec<moq_net::auth::Token>,
+	/// The credential each new connection's subscriptions carry.
+	pub(crate) subscribe_token: Option<moq_net::auth::Token>,
 	/// Where the next connection asks for each dial's tokens instead, from [`Client::with_dials`].
 	pub(crate) dials: Option<crate::connection::Dials>,
 	/// The connect deadline, backoff, and GOAWAY handling each [`Connection`] runs under.
@@ -172,6 +174,7 @@ impl Client {
 			versions,
 			connect: config.url,
 			tokens: config.tokens,
+			subscribe_token: config.subscribe_token,
 			dials: None,
 			policy,
 			client_cert,
@@ -1016,6 +1019,24 @@ mod tests {
 		let config: crate::connect::Config = toml::from_str(r#"tokens = ["first"]"#).unwrap();
 		assert_eq!(config.tokens.len(), 1);
 		assert!(toml::from_str::<crate::connect::Config>(r#"tokens = [""]"#).is_err());
+	}
+
+	/// The subscribe token is its own setting, kept out of the connection's tokens.
+	#[test]
+	fn test_connect_subscribe_token() {
+		let config = Cli::config_from(["test", "--connect-subscribe-token", "sub"]);
+		assert_eq!(
+			config.subscribe_token.as_ref().map(moq_net::auth::Token::as_str),
+			Some("sub")
+		);
+		assert!(config.tokens.is_empty());
+
+		let config: crate::connect::Config = toml::from_str(r#"subscribe_token = "sub""#).unwrap();
+		assert_eq!(
+			config.subscribe_token.as_ref().map(moq_net::auth::Token::as_str),
+			Some("sub")
+		);
+		assert!(toml::from_str::<crate::connect::Config>(r#"subscribe_token = """#).is_err());
 	}
 
 	#[test]

@@ -234,6 +234,8 @@ class HandleState {
 	/** Every open session built on this handle, oldest first. */
 	readonly sessions: AuthSession[] = [];
 	acceptor: "undecided" | "default" | RequestQueue = "undecided";
+	/** The credential this side's subscriptions carry; see {@link Handle.setSubscribeAuth}. */
+	readonly subscribe = new Signal<Credential | undefined>(undefined);
 
 	/** The session the handle backs now: the newest one still open. */
 	get live(): AuthSession | undefined {
@@ -394,6 +396,24 @@ export class Handle {
 		// A copy, so the caller reusing its buffer never changes what a request carries.
 		const bytes = typeof token === "string" ? new TextEncoder().encode(token) : token.slice();
 		return stateOf(this).add(bytes);
+	}
+
+	/**
+	 * Name the credential this side's subscriptions carry on every session of this handle, one
+	 * {@link add} returned: the moq-transport `AUTHORIZATION TOKEN` on each SUBSCRIBE, standalone
+	 * FETCH, and TRACK_STATUS sent from now on. Undefined, the default, sends them under the
+	 * session's scope.
+	 *
+	 * Swapping it renews in place: each live subscription that went out with a token sends the
+	 * new one in a REQUEST_UPDATE, and one the peer refuses ends alone. A subscription that went
+	 * out without a token keeps the session's scope, and clearing the credential leaves the
+	 * token a subscription holds. A credential from another handle is never sent (the rule
+	 * `Route.setAuth` follows), nor one that ended: set a fresh one. On moq-lite the handle's
+	 * credentials ride AUTH and join the session's grant, so this sends nothing there. Mirrors
+	 * the Rust `Handle::set_subscribe_auth`.
+	 */
+	setSubscribeAuth(auth?: Credential): void {
+		stateOf(this).subscribe.set(auth);
 	}
 
 	/**
@@ -805,6 +825,11 @@ export class AuthSession {
 		const presented = this.#byToken.get(token);
 		if (!presented || presented.ended || presented.withdrawn) return undefined;
 		return presented.token;
+	}
+
+	/** The credential this side's subscriptions carry, which a renewal follows. */
+	get subscribeAuth(): Getter<Credential | undefined> {
+		return this.#state.subscribe;
 	}
 
 	/** Bumps whenever one of this session's tokens ends, so a request carrying it drops it. */

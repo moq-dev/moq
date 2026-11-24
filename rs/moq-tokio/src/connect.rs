@@ -516,6 +516,21 @@ pub struct Config {
 	)]
 	pub tokens: Vec<moq_net::auth::Token>,
 
+	/// A credential every subscription carries, kept apart from the connection credential.
+	///
+	/// On moq-transport it rides each SUBSCRIBE, standalone FETCH, and TRACK_STATUS as its
+	/// `AUTHORIZATION TOKEN`; on moq-lite it rides AUTH like any other connect token. Renew a
+	/// connection's through `Connection::auth`: add the new token, then name it with
+	/// `set_subscribe_auth`, and each live subscription that carried the old one renews.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	#[usage(
+		name = "connect-subscribe-token",
+		long = "connect-subscribe-token",
+		env = "MOQ_CONNECT_SUBSCRIBE_TOKEN",
+		setting = "connect.subscribe_token"
+	)]
+	pub subscribe_token: Option<moq_net::auth::Token>,
+
 	/// The released `connect` key, kept so [`deprecated`](Self::deprecated) can name [`url`](Self::url).
 	#[serde(default, skip_serializing)]
 	#[usage(skip)]

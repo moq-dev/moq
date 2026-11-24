@@ -15,7 +15,10 @@ import { accept as acceptSession, connect as connectSession, type Session } from
 import { defined } from "./defined.test-util.ts";
 import { SessionCode, SessionError, StreamCode, StreamError, toStreamCode } from "./error.ts";
 import { appendFrame } from "./frame.test-util.ts";
+import { Fetch } from "./ietf/fetch.ts";
 import * as Ietf from "./ietf/index.ts";
+import { Subscribe, SubscribeUpdate } from "./ietf/subscribe.ts";
+import { TrackStatusRequest } from "./ietf/track.ts";
 import { AuthMessage as LiteAuthMessage, LiteAuthWire } from "./lite/auth.ts";
 import * as Lite from "./lite/index.ts";
 import * as LiteMessage from "./lite/message.ts";
@@ -23,6 +26,7 @@ import { createMockTransportPair, type MockTransport, manual, settlesWithin, wai
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Stream, Writer } from "./stream.ts";
+import { withMax } from "./subscription.test-util.ts";
 import { abandoned } from "./util/demand.ts";
 import { withTimeout } from "./util/timeout.ts";
 import { wireOf } from "./wire.ts";
@@ -1254,6 +1258,99 @@ test.each([
 	client.abort();
 	server.abort();
 });
+
+// The subscribe credential rides each SUBSCRIBE, and swapping it renews a subscription that
+// carried one with a REQUEST_UPDATE; one that went out without a token is never renewed.
+test.each([Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_22])("%s renews a subscription's token in place", async (protocol) => {
+	const subscribes = spyOn(Subscribe.prototype, "encode");
+	const updates = spyOn(SubscribeUpdate.prototype, "encode");
+	const fetches = spyOn(Fetch.prototype, "encode");
+	const decode = new TextDecoder();
+	const sentTokens = () =>
+		(subscribes.mock.contexts as Subscribe[]).map((msg) => (msg.token ? decode.decode(msg.token) : undefined));
+	const renewals = () =>
+		(updates.mock.contexts as SubscribeUpdate[]).flatMap((msg) => {
+			const raw = msg.parameters.bytes.get(Ietf.AUTHORIZATION_TOKEN);
+			return raw ? [decode.decode(Ietf.tokenFromRequest(raw).value)] : [];
+		});
+
+	const serverOrigin = new OriginProducer();
+	const route = serverOrigin.route(Path.from("room/x"));
+	const audio = defined(route.broadcast.createTrack("audio"));
+	const video = defined(route.broadcast.createTrack("video"));
+	const { client, server } = await connect({ serverPublish: serverOrigin, protocol });
+	const broadcast = wireOf(client).consume(Path.from("room/x"));
+	try {
+		appendFrame(audio, new Uint8Array([1]));
+		const tokenless = broadcast.track("audio").subscribe().ordered();
+		expect(await tokenless.nextGroup()).toBeDefined();
+
+		client.auth.setSubscribeAuth(await answered(client.auth.add("first")));
+		appendFrame(video, new Uint8Array([1]));
+		const carried = broadcast.track("video").subscribe().ordered();
+		expect(await carried.nextGroup()).toBeDefined();
+		expect(sentTokens()).toEqual([undefined, "first"]);
+		// A draft-18 join's head FETCH is gated through its subscription, so it carries none.
+		expect(fetches.mock.contexts.length).toBe(protocol === Ietf.ALPN.DRAFT_18 ? 2 : 0);
+		for (const fetch of fetches.mock.contexts as Fetch[]) {
+			expect(fetch.type.kind).toBe("relativeJoining");
+			expect(fetch.token).toBeUndefined();
+		}
+
+		client.auth.setSubscribeAuth(await answered(client.auth.add("second")));
+		await settles(() => renewals().length > 0);
+		expect(renewals()).toEqual(["second"]);
+
+		appendFrame(video, new Uint8Array([2]));
+		expect(await carried.nextGroup()).toBeDefined();
+		tokenless.close();
+		carried.close();
+	} finally {
+		subscribes.mockRestore();
+		updates.mockRestore();
+		fetches.mockRestore();
+		client.abort();
+		server.abort();
+	}
+});
+
+// A history read learns the track from TRACK_STATUS and asks for its groups with a standalone
+// FETCH; both carry the subscribe credential.
+test.each([Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_22])(
+	"%s carries the subscribe credential on a history read",
+	async (protocol) => {
+		const statuses = spyOn(TrackStatusRequest.prototype, "encode");
+		const fetches = spyOn(Fetch.prototype, "encode");
+		const decode = new TextDecoder();
+		const tokens = (sent: { token?: Uint8Array }[]) =>
+			sent.map((msg) => (msg.token ? decode.decode(msg.token) : undefined));
+
+		const serverOrigin = new OriginProducer();
+		const route = serverOrigin.route(Path.from("room/x"));
+		const video = defined(route.broadcast.createTrack("video"));
+		for (let i = 0; i < 3; i++) appendFrame(video, new Uint8Array([i]));
+		const { client, server } = await connect({ serverPublish: serverOrigin, protocol });
+		client.auth.setSubscribeAuth(await answered(client.auth.add("first")));
+		const reader = wireOf(client)
+			.consume(Path.from("room/x"))
+			.track("video")
+			.subscribe(withMax({ ranges: [{ start: 0n, end: 1n }], delay: { max: null } }))
+			.ordered();
+		try {
+			void reader.nextGroup().catch(() => void 0);
+			// A TRACK_STATUS round trip comes before the FETCH, so this waits longer than `settles`.
+			for (let i = 0; i < 500 && fetches.mock.contexts.length === 0; i++) await yieldNow();
+			expect(tokens(statuses.mock.contexts as TrackStatusRequest[])).toEqual(["first"]);
+			expect(tokens(fetches.mock.contexts as Fetch[])).toContain("first");
+		} finally {
+			statuses.mockRestore();
+			fetches.mockRestore();
+			reader.close();
+			client.abort();
+			server.abort();
+		}
+	},
+);
 
 // lite-07 presents the connection's credential on an Auth Stream right away; lite-06 never
 // opens one.
