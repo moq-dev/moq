@@ -10779,7 +10779,11 @@ mod serve_group_test {
 				ranges: vec![lite::Range::span(Some(0), 0, None, None)],
 			});
 			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-			assert_eq!(drops(&mut writer, &log, version).await.len(), named, "{version:?}: after an update");
+			assert_eq!(
+				drops(&mut writer, &log, version).await.len(),
+				named,
+				"{version:?}: after an update"
+			);
 		}
 	}
 

@@ -1995,7 +1995,9 @@ export class Publisher {
 					// reaches lower only through a wider budget, which offers the groups there again and
 					// names the runs between them as it passes. Mirrors the Rust `TrackRun::resolve`.
 					let reach = startKey;
-					for (const range of [...skipped].sort((a, b) => (a.start > b.start ? -1 : a.start < b.start ? 1 : 0))) {
+					for (const range of [...skipped].sort((a, b) =>
+						a.start > b.start ? -1 : a.start < b.start ? 1 : 0,
+					)) {
 						if (range.start >= reach) continue;
 						if (range.end < reach || range.stale !== undefined) break;
 						reach = range.start;
