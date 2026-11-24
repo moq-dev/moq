@@ -42,8 +42,11 @@ pub struct Wire(std::sync::Arc<WireCounters>);
 ///
 /// Stats call it on every report and once more when the connection's stats end, so the
 /// counters are current whenever stats read them, and an idle connection needs no timer.
+/// Anyone else reading a sourced [`Wire`] sees the counts as of the last stats read.
 pub trait WireSource: Send + Sync + 'static {
 	/// Copy the counts this source tracks into `wire`, leaving the rest as they are.
+	///
+	/// Never keep a clone of `wire`: it owns this source, so the pair would never drop.
 	fn refresh(&self, wire: &Wire);
 }
 

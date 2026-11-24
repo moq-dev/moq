@@ -1554,6 +1554,8 @@ impl WireInner {
 		if last.closed {
 			return false;
 		};
+		// Refresh under `last`: a source's setters are plain stores, so two samplers refreshing
+		// unlocked could leave an older reading over a newer one and count the gap twice.
 		self.counters.refresh();
 		let read = WIRE.map(|read| read(&self.counters));
 		if let Some(presence) = &current.presence {
