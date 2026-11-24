@@ -8,15 +8,13 @@ live`, including its audio/video sync, because the player page's main thread no
 longer stops on a resume (pause, rejoin, or reattach) and so skips no audio
 groups as missing there.
 
-## Required
-
-- [Reattach old groups](/quest/m0/interop-green/reattach-old-groups.md) -
-  [moq-dev/moq#9492](https://github.com/moq-dev/moq/pull/9492) deletes it and
-  adds the `waitForLive` failure diagnostics this needs: how long ago the
-  player's latest sample arrived, the host's busiest processes, and, on
-  Chromium, both pages' long animation frames with their longest scripts.
-
 ## Plan
+
+[moq-dev/moq#9492](https://github.com/moq-dev/moq/pull/9492) adds the
+`waitForLive` failure diagnostics this needs: how long ago the player's
+latest sample arrived, the host's busiest processes, and, on Chromium,
+both pages' long animation frames with their longest scripts. It also
+closes the reattach-old-groups quest that was this quest's prerequisite.
 
 Decided 2026-11-23 (maintainer, /quest-run): plan this quest, reproducing on
 ARM with #9492's diagnostics first, then finding the cause (relay or player)
