@@ -100,7 +100,7 @@ async fn grouped_roundtrip(version: &str, payload: &[u8]) {
 				"video",
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_secs(60),
+						min: Some(Duration::from_secs(60)),
 						max: Some(Duration::from_secs(60)),
 					},
 				)]),

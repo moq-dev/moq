@@ -27,8 +27,9 @@ causes stacked:
   `audioTimestamp: 0`) after two `skipping missing groups: track=audio` on the
   viewer. The lite-06 replacement, which also builds a fresh subscription,
   takes 157 to 284 ms, so the extra cost is the fallback's, not the wire's.
-  The relay's default log shows no `err=old` abort in that window, unlike
-  [reattach-old-groups](/quest/m0/interop-green/reattach-old-groups.md).
+  The relay's default log shows no `err=old` abort in that window. The
+  [epic's Plan](/quest/m0/interop-green/README.md) traces the Chromium
+  reattach failure's `err=old` to the fixture, not the relay.
 
 Next: capture a failing lite-06 fallback on the ARM runner with the relay at
 `moq_net=trace` and the viewer's Playwright trace, to see which audio groups

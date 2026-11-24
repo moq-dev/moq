@@ -34,19 +34,20 @@ function timeOf(field: string, value: unknown): bigint | undefined {
 
 /**
  * Check one start's shape: a time, or a live join, its lag and max each rounded up to a whole
- * millisecond, an omitted max as zero.
+ * millisecond or null for no limit, an omitted max as zero.
  */
 function checkStart(value: unknown): Start | undefined {
 	if (typeof value === "object" && value !== null && "live" in value) {
 		const live = (value as { live: unknown }).live;
 		if (typeof live !== "object" || live === null) throw new TypeError("a live range start must be { min, max }");
 		const { min, max } = live as { min: unknown; max?: unknown };
-		if (!(min instanceof Duration)) throw new TypeError("a live range start's min must be a Duration");
+		if (min !== null && !(min instanceof Duration))
+			throw new TypeError("a live range start's min must be a Duration or null");
 		if (max !== undefined && max !== null && !(max instanceof Duration))
 			throw new TypeError("a live range start's max must be a Duration or null");
 		return {
 			live: {
-				min: wireMillis("live range start min", min),
+				min: min === null ? null : wireMillis("live range start min", min),
 				max: max === null ? null : wireMillis("live range start max", max ?? Duration.ZERO),
 			},
 		};
@@ -75,10 +76,13 @@ export function rangeTime(range: Range): bigint | undefined {
 
 /**
  * The lag of the live join `range` starts with, in whole milliseconds rounded up as the wire
- * carries it, undefined for a range that doesn't join live. Mirrors the Rust `live_millis`.
+ * carries it, null for no lag limit, and undefined for a range that doesn't join live. Mirrors
+ * the Rust `live_millis`.
  */
-export function liveMillis(range: Range): number | undefined {
-	return typeof range.start === "object" ? Math.ceil(range.start.live.min.asMillis()) : undefined;
+export function liveMillis(range: Range): number | null | undefined {
+	if (typeof range.start !== "object") return undefined;
+	const { min } = range.start.live;
+	return min && Math.ceil(min.asMillis());
 }
 
 /**
@@ -150,8 +154,8 @@ export function isEmpty(range: Range): boolean {
 export function compare(a: Range, b: Range): number {
 	const rank = (range: Range): [number, bigint, bigint] => {
 		const live = liveMillis(range);
-		// A max of none sorts first, as Rust's `Option` does.
-		if (live !== undefined) return [2, BigInt(live), BigInt(liveMax(range))];
+		// A lag or max of none sorts first, as Rust's `Option` does.
+		if (live !== undefined) return [2, BigInt(live ?? -1), BigInt(liveMax(range))];
 		const time = rangeTime(range);
 		return time === undefined ? [0, 0n, 0n] : [1, time, 0n];
 	};
@@ -471,7 +475,7 @@ export interface Holdings {
 	 * measures the live edge, or a relay copy waits on upstream to answer for it. Absent where the
 	 * hop leaves its ranges to the copies it follows. Mirrors the Rust `Holdings::join`.
 	 */
-	join?(min: Duration, end: bigint | undefined, budget: number, since: number): Join | undefined;
+	join?(min: Duration | null, end: bigint | undefined, budget: number, since: number): Join | undefined;
 	/**
 	 * Whether this hop places a live join only where its upstream's answer to that join does, never
 	 * from the groups it holds: a lite-07 relay copy, whose wire carries each join and reports where
@@ -486,7 +490,7 @@ export interface Holdings {
 	 * for none. Mirrors the Rust `Holdings::answered_join`.
 	 */
 	answeredJoin?(
-		min: Duration,
+		min: Duration | null,
 		end: bigint | undefined,
 		budget: number,
 		since: number,
@@ -935,11 +939,11 @@ export class Window {
 
 	/**
 	 * The live joins still waiting on an answer, as `[lag, end, budget, since]`: the lag in
-	 * milliseconds, the range's end, its budget in milliseconds, and the join tick its range was added
+	 * milliseconds (null for no lag limit), the range's end, its budget in milliseconds, and the join tick its range was added
 	 * at. What a received copy asks its upstream to place. Mirrors the Rust `Window::joins`.
 	 */
-	joins(): [number, bigint | undefined, number, number][] {
-		const joins: [number, bigint | undefined, number, number][] = [];
+	joins(): [number | null, bigint | undefined, number, number][] {
+		const joins: [number | null, bigint | undefined, number, number][] = [];
 		for (const key of this.#reaching) {
 			const range = this.#ranges.get(key);
 			const lag = range && liveMillis(range);
@@ -1213,7 +1217,7 @@ export class Window {
 					this.#pending.add(key);
 					this.#budget = undefined;
 					return;
-				} else if (live.asNanos() === 0) {
+				} else if (live?.asNanos() === 0) {
 					// The latest group holds the live edge. One made before any group then starts at the
 					// first, which was the latest when it was placed.
 					join = { group: latest };

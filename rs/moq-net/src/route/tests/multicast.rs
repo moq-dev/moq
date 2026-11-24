@@ -600,6 +600,8 @@ impl RelaySim {
 	pub fn chase(&self, from: Node, id: Id, claim: &Path) -> Option<(Vec<Node>, bool)> {
 		let broadcast = (claim.clone(), id);
 		let (mut at, mut named, mut hops) = (from, None, Vec::new());
+		// The relay a request came from, which it never goes back to.
+		let mut asker = None;
 		while hops.len() <= self.spots.len() {
 			let router = match &self.spots[at] {
 				Spot::Endpoint { claims, .. } => {
@@ -610,17 +612,19 @@ impl RelaySim {
 			let Some(origin) = named.or_else(|| router.pick(&broadcast)) else {
 				return (!hops.is_empty()).then_some((hops, false));
 			};
-			match router.step(origin, &broadcast) {
+			match router.step(origin, &broadcast, asker) {
 				// A request names the forwarding node its first hop chose.
 				Some(Next::Via(next)) => {
 					named = Some(origin);
 					hops.push(next);
+					asker = Some(at);
 					at = next;
 				}
 				// Past a claim's announcer the next node chooses again.
 				Some(Next::Local(next)) => {
 					named = None;
 					hops.push(next);
+					asker = Some(at);
 					at = next;
 				}
 				None => return Some((hops, false)),
@@ -1036,7 +1040,7 @@ fn a_scoped_neighbour_draining_drains_its_claims() {
 	sim.claim(3, "live/0", true);
 	quiesce(&mut sim);
 	let broadcast = (p("live/0"), 100);
-	let source = |sim: &RelaySim| sim.router(1).expect("a relay").step(sim.id(1), &broadcast);
+	let source = |sim: &RelaySim| sim.router(1).expect("a relay").step(sim.id(1), &broadcast, None);
 	assert_eq!(source(&sim), Some(Next::Local(0)));
 	sim.goaway(0);
 	quiesce(&mut sim);
@@ -1396,7 +1400,7 @@ fn whether_a_relay_announces_hangs_on_arrival_order() {
 		sim.release(late.0, late.1);
 		quiesce(&mut sim);
 		let relay = sim.router(2).expect("a relay");
-		let claimed = relay.step(sim.id(2), &(p("live/0"), 100)).is_some();
+		let claimed = relay.step(sim.id(2), &(p("live/0"), 100), None).is_some();
 		let routed = sim.router(0).expect("a relay").best(sim.id(2)).is_some();
 		(relay.announced(), claimed, routed)
 	};

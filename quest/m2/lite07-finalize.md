@@ -248,7 +248,6 @@ changelog typo at `drafts/draft-lcurley-moq-lite.md:2380` during the cut
 
 - [Count lite-07 Path Keep by Path::parts](/quest/m2/lite07-path-keep-parts.md) - removes the temporary `raw_parts` / `base.split("/")` migration before lite-07 freezes
 - [Origin route rank](/quest/m1/lite07-routing/origin-route-rank.md) - bridged routes keep drain and priority, and the draft's rank text matches the code
-- [Live Min Age None](/quest/m2/time-addressing/live-min-age-none.md) - the Live anchor's Min Age encodes "no lag limit" as 0 before lite-07 freezes
 
 ## Related
 

@@ -40,12 +40,6 @@ import type { Advertised, Advertisements } from "./wire.ts";
 /** A null {@link Live.max} in milliseconds, which the model holds as the largest value every peer can read. */
 export const NO_MAX_DELAY = Varint.MAX_U53;
 
-/**
- * A lag long past any group, so a join this far behind takes every group still within its max: the
- * largest every implementation carries losslessly. Mirrors the Rust `PAST_EVERY_GROUP`.
- */
-export const PAST_EVERY_GROUP = Duration.millis(NO_MAX_DELAY);
-
 /** A datagram track's properties as the stream track info a wire answers with: no groups, so no age, refresh, or compression. */
 export function datagramTrackInfo(info: datagram.Info): Info {
 	return {
@@ -876,7 +870,7 @@ export const hooks: {
 	 */
 	answerJoin: (
 		producer: Producer,
-		min: number,
+		min: number | null,
 		end: bigint | undefined,
 		start: bigint | undefined,
 		budget: number,
@@ -885,7 +879,7 @@ export const hooks: {
 	 * Forget the answers of the live joins `keep` rejects: no live range asks them, so no reader waits
 	 * on them. Mirrors the Rust `track::Producer::retain_joins`; assigned by `track.ts`.
 	 */
-	retainJoins: (producer: Producer, keep: (min: number, end: bigint | undefined) => boolean) => void;
+	retainJoins: (producer: Producer, keep: (min: number | null, end: bigint | undefined) => boolean) => void;
 	/** Mint a track {@link Request}; assigned by `track.ts`. */
 	makeRequest: (options: TrackRequestOptions) => Request;
 	/**

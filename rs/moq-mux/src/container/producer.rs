@@ -1489,7 +1489,7 @@ mod tests {
 	fn replay() -> moq_net::track::Subscription {
 		moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 			moq_net::track::Start::Live {
-				min: RECORDING_MAX_DELAY,
+				min: Some(RECORDING_MAX_DELAY),
 				max: Some(RECORDING_MAX_DELAY),
 			},
 		)])
@@ -1895,7 +1895,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: discontinuity_max_age,
+						min: Some(discontinuity_max_age),
 						max: Some(discontinuity_max_age),
 					},
 				)]),

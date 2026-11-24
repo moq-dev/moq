@@ -203,7 +203,7 @@ impl Shape {
 	fn subscription(&self) -> Option<track::Subscription> {
 		(self.burst > 1).then(|| {
 			track::Subscription::default().with_ranges([track::Range::from(track::Start::Live {
-				min: Duration::from_secs(30),
+				min: Some(Duration::from_secs(30)),
 				max: Some(Duration::from_secs(30)),
 			})])
 		})

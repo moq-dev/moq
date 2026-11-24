@@ -1388,7 +1388,7 @@ mod tests {
 					.subscribe(
 						moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 							moq_net::track::Start::Live {
-								min: RETAIN,
+								min: Some(RETAIN),
 								max: Some(RETAIN),
 							},
 						)]),
@@ -2091,7 +2091,7 @@ mod tests {
 					.subscribe(
 						moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 							moq_net::track::Start::Live {
-								min: Duration::from_secs(5),
+								min: Some(Duration::from_secs(5)),
 								max: Some(Duration::from_secs(5)),
 							},
 						)]),
@@ -2288,7 +2288,7 @@ mod tests {
 				.subscribe(
 					moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 						moq_net::track::Start::Live {
-							min: Duration::from_secs(60),
+							min: Some(Duration::from_secs(60)),
 							max: Some(Duration::from_secs(60)),
 						},
 					)]),
@@ -2701,7 +2701,7 @@ mod tests {
 				.subscribe(
 					moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 						moq_net::track::Start::Live {
-							min: Duration::from_secs(600),
+							min: Some(Duration::from_secs(600)),
 							max: Some(Duration::from_secs(600)),
 						},
 					)]),
