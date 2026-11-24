@@ -177,6 +177,12 @@ export class Connection {
 	readonly error: Getter<Error | undefined>;
 
 	/**
+	 * Why the connection is retrying: how its last attempt or session ended, cleared once a
+	 * session serves again or a new URL starts. Mirrors Rust's `Monitor::failure()`.
+	 */
+	readonly failure: Getter<Error | undefined>;
+
+	/**
 	 * The wire transport the current session runs over, or undefined while disconnected.
 	 *
 	 * The session itself is deliberately not exposed: it is shared, so no handle may close
@@ -248,6 +254,7 @@ export class Connection {
 	readonly #auth = new Signal<Auth.Handle | undefined>(undefined);
 	readonly #loop = new Signal<Reload | undefined>(undefined);
 	readonly #error = new Signal<Error | undefined>(undefined);
+	readonly #failure = new Signal<Error | undefined>(undefined);
 	#signals: Effect;
 
 	/**
@@ -272,6 +279,7 @@ export class Connection {
 		this.enabled = Signal.from(props?.enabled ?? true);
 		this.status = this.#status;
 		this.error = this.#error;
+		this.failure = this.#failure;
 		this.probe = new Follow(this.#probe);
 		this.origin = this.#origin;
 		this.allocator = this.#allocator;
@@ -312,6 +320,7 @@ export class Connection {
 			effect.run((nested) => nested.set(this.#established, nested.get(lease.connection.established), undefined));
 			effect.run((nested) => nested.set(this.#probe, lease.connection.probe, undefined));
 			effect.run((nested) => nested.set(this.#error, nested.get(lease.connection.error), undefined));
+			effect.run((nested) => nested.set(this.#failure, nested.get(lease.connection.failure), undefined));
 		});
 	}
 
@@ -365,6 +374,7 @@ export class Connection {
 			signals.run((effect) => effect.set(this.#established, effect.get(loop.established), undefined));
 			signals.run((effect) => effect.set(this.#probe, loop.probe, undefined));
 			signals.run((effect) => effect.set(this.#error, effect.get(loop.error), undefined));
+			signals.run((effect) => effect.set(this.#failure, effect.get(loop.failure), undefined));
 		};
 		start(this.versions.peek());
 		this.#signals.cleanup(this.versions.subscribe(start));

@@ -271,6 +271,7 @@ export class Connection {
 	static readonly connect: (props: Connection.ConnectProps) => Promise<Connection.Session>;
 	enabled: Signals.Signal<boolean>;
 	readonly error: Signals.Getter<Error | undefined>;
+	readonly failure: Signals.Getter<Error | undefined>;
 	static readonly isWebTransportSupported: () => boolean;
 	readonly origin: Signals.Getter<Origin.Table | undefined>;
 	readonly probe: Signals.Getter<Connection.Probe | undefined>;
