@@ -51,6 +51,7 @@ import { untilAborted } from "../util/abort.ts";
 import { nextChange } from "../util/change.ts";
 import { GivenUp } from "../util/given_up.ts";
 import { max, min, UNBOUNDED } from "../util/key.ts";
+import { Sorted } from "../util/sorted.ts";
 import { Budget } from "../util/yield.ts";
 import { ByTime, isEmpty, type Resolved, rangeKey, type Timed } from "../window.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
@@ -830,6 +831,125 @@ interface Asked {
 	live: boolean;
 	/** It starts at the oldest group, which places it at group 0 on a track with none yet. */
 	oldest: boolean;
+}
+
+/**
+ * Lite-07: where a live range stands with its SUBSCRIBE_START: waiting, as it was asked, or answered
+ * from `start` (undefined for no group), owing its groups from there to its end, with `unowed`
+ * bounding the keys it covers but does not owe (`0n` for none). Mirrors the Rust `Answer`.
+ */
+type RangeAnswer = { asked: Asked } | { start: bigint | undefined; unowed: bigint };
+
+/**
+ * Lite-07: each live range's `RangeAnswer`, by Range ID, indexed for the passes that look only at the
+ * ranges still waiting, or ask whether any is. Mirrors the Rust `Answers`.
+ */
+class Answers {
+	readonly #ranges = new Map<bigint, RangeAnswer>();
+	/** The ranges still waiting. */
+	readonly #waiting = new Map<bigint, Asked>();
+	/** Those of them asked from the oldest group. */
+	readonly #oldest = new Set<bigint>();
+	/** Each started range's `unowed` bound, counted, so the highest is at hand. */
+	readonly #unowed = new Sorted<bigint, { bound: bigint; count: number }>((entry) => entry.bound, compareIds);
+	/** The started ranges answered before they were placed here, whose bound waits on that. */
+	readonly #unplaced = new Set<bigint>();
+
+	/** Range `id` was asked as `asked` and waits for its SUBSCRIBE_START. */
+	ask(id: bigint, asked: Asked): void {
+		this.retire(id);
+		this.#ranges.set(id, { asked });
+		this.#waiting.set(id, asked);
+		if (asked.oldest) this.#oldest.add(id);
+	}
+
+	/** Range `id` retired. */
+	retire(id: bigint): void {
+		const answer = this.#ranges.get(id);
+		if (!answer) return;
+		this.#ranges.delete(id);
+		if ("asked" in answer) {
+			this.#waiting.delete(id);
+			this.#oldest.delete(id);
+		} else {
+			this.#unbound(answer.unowed);
+			this.#unplaced.delete(id);
+		}
+	}
+
+	/** Range `id` was answered from `start`, placed here as `resolved`. */
+	start(id: bigint, start: bigint | undefined, resolved: Resolved | undefined): void {
+		this.retire(id);
+		// Unplaced here, it owes nothing yet: see `owedRuns`.
+		if (!resolved) this.#unplaced.add(id);
+		const unowed = resolved ? Answers.#bound(start, resolved) : UNBOUNDED;
+		this.#bind(unowed);
+		this.#ranges.set(id, { start, unowed });
+	}
+
+	/** Bound again each started range placed here since it was answered unplaced, as `resolve` places it. */
+	place(resolve: (ids: bigint[]) => (Resolved | undefined)[]): void {
+		if (this.#unplaced.size === 0) return;
+		const ids = [...this.#unplaced];
+		for (const [index, resolved] of resolve(ids).entries()) {
+			const id = ids[index];
+			const answer = id === undefined ? undefined : this.#ranges.get(id);
+			if (id === undefined || !resolved || !answer || "asked" in answer) continue;
+			this.#unplaced.delete(id);
+			this.#unbound(answer.unowed);
+			const unowed = Answers.#bound(answer.start, resolved);
+			this.#bind(unowed);
+			this.#ranges.set(id, { start: answer.start, unowed });
+		}
+	}
+
+	/** Past every key a started range covers but does not owe, `0n` when none: with no range waiting, a key the cursor gives up past it is owed. */
+	get unowedEnd(): bigint {
+		return this.#unowed.last()?.bound ?? 0n;
+	}
+
+	/** Whether any range waits for its SUBSCRIBE_START. */
+	get anyWaiting(): boolean {
+		return this.#waiting.size > 0;
+	}
+
+	/** How range `id` was asked, while it waits for its SUBSCRIBE_START. */
+	waiting(id: bigint): Asked | undefined {
+		return this.#waiting.get(id);
+	}
+
+	/** Each range waiting for its SUBSCRIBE_START, by Range ID, as it was asked. */
+	waitingAll(): IterableIterator<[bigint, Asked]> {
+		return this.#waiting.entries();
+	}
+
+	/** Each range waiting for its SUBSCRIBE_START asked from the oldest group, by Range ID. */
+	waitingOldest(): IterableIterator<bigint> {
+		return this.#oldest.values();
+	}
+
+	/** Each started range's Range ID and where it starts, undefined for no group. */
+	*started(): Generator<[bigint, bigint | undefined]> {
+		for (const [id, answer] of this.#ranges) if (!("asked" in answer)) yield [id, answer.start];
+	}
+
+	// What a range answered from `start` and placed as `resolved` owes, it owes from its start to its end.
+	static #bound(start: bigint | undefined, resolved: Resolved): bigint {
+		if (start === undefined) return resolved.end ?? UNBOUNDED;
+		return start > resolved.start ? start : 0n;
+	}
+
+	#bind(unowed: bigint): void {
+		const entry = this.#unowed.ceil(unowed);
+		if (entry?.bound === unowed) entry.count++;
+		else this.#unowed.insert({ bound: unowed, count: 1 });
+	}
+
+	#unbound(unowed: bigint): void {
+		const entry = this.#unowed.ceil(unowed);
+		if (entry?.bound !== unowed) return;
+		if (--entry.count === 0) this.#unowed.delete(unowed);
+	}
 }
 
 function asked(range: WireRange): Asked {
@@ -1801,29 +1921,20 @@ export class Publisher {
 		};
 		const newest = () => newer(hooks.bufferedLargest(track), hooks.peekLargest(track).largest);
 		let endSent = false;
-		// Lite-07: the ranges no SUBSCRIBE_START answered yet, by Range ID, each as it was asked.
-		const unstarted = new Map<bigint, Asked>();
+		// Lite-07: where each live range stands with its SUBSCRIBE_START.
+		const answers = new Answers();
 		if (hasRanges(this.version)) {
 			for (let id = 0n; id < initial; id++) {
 				const range = controls.range(id);
-				if (range) unstarted.set(id, asked(range));
+				if (range) answers.ask(id, asked(range));
 			}
 		}
-		// Lite-07: what each range in `unstarted` waits on.
+		// Lite-07: what each range still waiting for its SUBSCRIBE_START waits on.
 		const waits = new Waits();
-		for (const id of unstarted.keys()) waits.wake(id);
+		for (const [id] of answers.waitingAll()) waits.wake(id);
 		// Wake the ranges waiting on the cursor telling of `[start, end)`; see `Waits.tell`.
 		const told = (start: bigint, end: bigint) =>
 			waits.tell(start, end, (hooks.nextHeld(track, start) ?? end) < end);
-		// Lite-07: where each range a SUBSCRIBE_START answered starts, by Range ID, undefined for
-		// one answered with no group: it owes its groups from there to its end. Mirrors the Rust
-		// `TrackRun::started`.
-		const started = new Map<bigint, bigint | undefined>();
-		// Lite-07: past every key a started range covers but does not owe (below its
-		// SUBSCRIBE_START, or every key of one answered with no group), never lowered: with no range
-		// waiting for its start, a stale run past it is owed whole, without resolving every range.
-		// Mirrors the Rust `TrackRun::unowed_end`.
-		let unowedEnd = 0n;
 		// Lite-07: the stale runs the cursor gave up that no started range owes but a range still
 		// waiting for its start covers; see `settleStale`. Mirrors the Rust `TrackRun::stale`.
 		const stale = new Runs<DropRun>(sameHole);
@@ -1833,20 +1944,13 @@ export class Publisher {
 		let withheld: SubscribeResponse[] | undefined = perRange ? [] : undefined;
 		// How many SUBSCRIBE_STARTs went out.
 		let answered = 0;
-		// Send a range's SUBSCRIBE_START, then whatever was withheld for the first one. The one place a
-		// range moves from waiting for its start to started.
-		const sendStart = async (start: SubscribeStart): Promise<boolean> => {
+		// Send a range's SUBSCRIBE_START, placed here as `resolved`, then whatever was withheld for the
+		// first one. The one place a range moves from waiting for its start to started.
+		const sendStart = async (start: SubscribeStart, resolved?: Resolved): Promise<boolean> => {
 			answered++;
 			if (perRange) {
-				unstarted.delete(start.id);
 				waits.remove(start.id);
-				started.set(start.id, start.start);
-				// What a range owes, it owes from its start to its end. Unplaced here, it owes nothing yet.
-				const [range] = hooks.servingResolvedKeys(track, [start.id]);
-				let unowed = UNBOUNDED;
-				if (range && start.start !== undefined) unowed = start.start > range.start ? start.start : 0n;
-				else if (range) unowed = range.end ?? UNBOUNDED;
-				unowedEnd = max(unowedEnd, unowed);
+				answers.start(start.id, start.start, resolved);
 			}
 			if (!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version)))) return false;
 			const held = withheld ?? [];
@@ -1942,7 +2046,7 @@ export class Publisher {
 		// end, and those a range still waiting for its start may come to owe. Mirrors the Rust
 		// `TrackRun::owed`.
 		const owedRuns = (): { owed: Run[]; pending: Run[] } => {
-			const starts = [...started].filter((entry): entry is [bigint, bigint] => entry[1] !== undefined);
+			const starts = [...answers.started()].filter((entry): entry is [bigint, bigint] => entry[1] !== undefined);
 			const owed: Run[] = [];
 			const resolution = hooks.servingResolvedKeys(
 				track,
@@ -1953,7 +2057,7 @@ export class Publisher {
 				if (range) insertRun(owed, start, range.end ?? UNBOUNDED);
 			}
 			const pending: Run[] = [];
-			const waiting = [...unstarted.keys()].filter((id) => controls.holds(id));
+			const waiting = [...answers.waitingAll()].map(([id]) => id).filter((id) => controls.holds(id));
 			// One not resolved yet may cover any key.
 			for (const range of hooks.servingResolvedKeys(track, waiting))
 				insertRun(pending, range?.start ?? 0n, range?.end ?? UNBOUNDED);
@@ -1964,28 +2068,37 @@ export class Publisher {
 		// on, for the caller to name. Each part a range still waiting for its start covers stays
 		// held; any other is forgotten, never named, so a wider budget may still serve it, as a
 		// stale run below a start before lite-07 is. Mirrors the Rust `TrackRun::settle_stale`.
-		const settleStale = (): DropRun[] => {
-			if (stale.size === 0) return [];
-			let sets: { owed: Run[]; pending: Run[] } | undefined;
+		//
+		// A `fresh` run the cursor just gave up is settled too. With every range started, its part past
+		// every key a started range covers but does not owe is owed whole, since the cursor gives up
+		// only keys in its ranges: only the rest resolves every range. Mirrors the Rust
+		// `TrackRun::settle_given_up`.
+		const settleStale = (fresh?: DropRun): DropRun[] => {
+			let whole: DropRun | undefined;
+			if (fresh) {
+				let split = fresh.end;
+				if (!answers.anyWaiting) {
+					answers.place((ids) => hooks.servingResolvedKeys(track, ids));
+					split = min(max(fresh.start, answers.unowedEnd), fresh.end);
+				}
+				if (split > fresh.start) stale.set(fresh.start, split, fresh);
+				if (fresh.end > split) whole = { ...fresh, start: split, end: fresh.end };
+			}
 			const named: DropRun[] = [];
-			const runs = [...stale.all];
-			stale.clear(runs);
-			for (const run of runs) {
-				// Every key the cursor gives up lies in a range, so one past every key not owed lies in a
-				// started one that owes it: that part is owed whole, without resolving each range.
-				const split = unstarted.size === 0 ? min(max(run.start, unowedEnd), run.end) : run.end;
-				if (split > run.start) {
-					sets ??= owedRuns();
-					const { owed, pending } = sets;
-					for (const part of coveredRuns(owed, run.start, split)) named.push({ ...run, ...part });
-					for (const gap of runGaps(owed, run.start, split)) {
+			if (stale.size > 0) {
+				const { owed, pending } = owedRuns();
+				const runs = [...stale.all];
+				stale.clear(runs);
+				for (const run of runs) {
+					for (const part of coveredRuns(owed, run.start, run.end)) named.push({ ...run, ...part });
+					for (const gap of runGaps(owed, run.start, run.end)) {
 						for (const part of coveredRuns(pending, gap.start, gap.end))
 							stale.set(part.start, part.end, run);
 						for (const rest of runGaps(pending, gap.start, gap.end)) record?.untell(rest.start, rest.end);
 					}
 				}
-				if (run.end > split) named.push({ ...run, start: split, end: run.end });
 			}
+			if (whole) named.push(whole);
 			return named;
 		};
 
@@ -1994,7 +2107,7 @@ export class Publisher {
 		// follows the live edge also waits until this hop knows where it is. No range waits on
 		// another. Mirrors the Rust `TrackRun::report_started`.
 		const reportStarted = async (finished: boolean): Promise<boolean> => {
-			if (!perRange || unstarted.size === 0) return true;
+			if (!perRange || !answers.anyWaiting) return true;
 			const largest = edge(newest());
 			const upstream = hooks.placesAsUpstream(track);
 			const source: Source = {
@@ -2006,14 +2119,16 @@ export class Publisher {
 			// the ranges something changed for. An update not taken yet retired one, and taking that
 			// update forgets it. In Range ID order, as the Rust `TrackRun::report_started` reports them.
 			const whole = `${upstream}|${source.oldest}|${source.feed}|${largest !== "unknown"}`;
-			const ids = finished ? [...unstarted.keys()].sort(compareIds) : waits.take(whole, hooks.takePlaced(track));
-			const held = ids.filter((id) => unstarted.has(id) && controls.holds(id));
+			const ids = finished
+				? [...answers.waitingAll()].map(([id]) => id).sort(compareIds)
+				: waits.take(whole, hooks.takePlaced(track));
+			const held = ids.filter((id) => answers.waiting(id) !== undefined && controls.holds(id));
 			const resolution = hooks.servingResolvedKeys(track, held);
 			let reported = false;
 			for (const [index, id] of held.entries()) {
 				// Or one taken while an earlier start went out.
 				if (!controls.holds(id)) continue;
-				const ask = unstarted.get(id);
+				const ask = answers.waiting(id);
 				// Never answered without the largest, even once nothing else can resolve it: this hop's
 				// feed answering or ending tells it.
 				if (ask?.live && largest === "unknown") {
@@ -2047,7 +2162,7 @@ export class Publisher {
 					}
 					start = range.end !== undefined && range.end <= placed ? undefined : placed;
 				}
-				if (!(await sendStart(new SubscribeStart({ id, start, largest })))) return false;
+				if (!(await sendStart(new SubscribeStart({ id, start, largest }), range))) return false;
 				reported = true;
 			}
 			if (reported) {
@@ -2061,12 +2176,15 @@ export class Publisher {
 		// learns the track is empty rather than wait on a group. A time start, or a live join, waits
 		// for a group to place it. Mirrors the Rust `TrackRun::resolve_empty`.
 		const resolveEmpty = async (): Promise<boolean | undefined> => {
-			if (!perRange || ![...unstarted.values()].some((ask) => ask.oldest)) return undefined;
+			if (!perRange || answers.waitingOldest().next().done) return undefined;
 			if (newest() !== undefined || !hooks.knowsEdge(track) || hooks.subscriberEnd(track) !== undefined)
 				return undefined;
-			for (const [id, ask] of [...unstarted]) {
-				if (!ask.oldest || !controls.holds(id)) continue;
-				if (!(await sendStart(new SubscribeStart({ id, start: 0n, largest: "empty" })))) return false;
+			const ids = [...answers.waitingOldest()].filter((id) => controls.holds(id));
+			const resolution = hooks.servingResolvedKeys(track, ids);
+			for (const [index, id] of ids.entries()) {
+				if (!controls.holds(id)) continue;
+				const start = new SubscribeStart({ id, start: 0n, largest: "empty" });
+				if (!(await sendStart(start, resolution[index]))) return false;
 			}
 			return true;
 		};
@@ -2241,7 +2359,7 @@ export class Publisher {
 				// While a range waits for its START, the wait below is armed before `reportStarted` reads
 				// what this hop knows, so an answer landing while this pass awaits still wakes it.
 				armed?.dispose();
-				armed = unstarted.size > 0 ? armSubscription(controls, track, drops) : undefined;
+				armed = answers.anyWaiting ? armSubscription(controls, track, drops) : undefined;
 				if (!(await reportStarted(false))) return false;
 				// Control before data, matching the Rust publisher: every control decoded while
 				// the loop was parked applies to the next pop, never to one already made. This
@@ -2265,18 +2383,17 @@ export class Publisher {
 							if (hasRanges(this.version)) {
 								// A range retired before its start resolved is owed no SUBSCRIBE_START.
 								for (const id of control.applied.retired) {
-									unstarted.delete(id);
+									answers.retire(id);
 									waits.remove(id);
-									started.delete(id);
 								}
 								// Retiring makes no stale run owed, so this names none.
 								settleStale();
 								for (const [id, range] of control.applied.added) {
-									unstarted.set(id, asked(range));
+									answers.ask(id, asked(range));
 									waits.wake(id);
 								}
 								// Replaced in place, a retuned range may land elsewhere.
-								for (const [id] of control.applied.retuned) if (unstarted.has(id)) waits.wake(id);
+								for (const [id] of control.applied.retuned) if (answers.waiting(id)) waits.wake(id);
 							}
 							console.debug(`subscribe update: broadcast=${broadcast} track=${track.name}`);
 							// `cursorFloor` pins an unfloored pre-06 SUBSCRIBE to the latest
@@ -2333,8 +2450,7 @@ export class Publisher {
 						if (!perRange && !startSent) skipped.push(recv);
 						else if (perRange && recv.stale !== undefined) {
 							told(recv.start, recv.end);
-							stale.set(recv.start, recv.end, recv);
-							for (const run of settleStale())
+							for (const run of settleStale(recv))
 								if (!(await forward(run.start, run.end, run))) return false;
 						} else if (!(await forward(recv.start, recv.end, recv))) return false;
 						continue;
@@ -2347,7 +2463,7 @@ export class Publisher {
 						// Lite-07 keeps a covered subscription open for an update. A bounded one that
 						// accounted for every group its ranges name has no group left to answer a range
 						// still waiting: answer it now, as the Rust publisher does.
-						const end = perRange && unstarted.size > 0 ? hooks.servingEnd(track) : undefined;
+						const end = perRange && answers.anyWaiting ? hooks.servingEnd(track) : undefined;
 						if (
 							end !== undefined &&
 							hooks.servingRuns(track, 0n, end).every((run) => !record?.untold(run.start, run.end).length)

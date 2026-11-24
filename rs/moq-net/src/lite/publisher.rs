@@ -5443,19 +5443,10 @@ struct TrackRun {
 	/// How many ranges the SUBSCRIBE carried, which take Range IDs from 0.
 	#[cfg(test)]
 	initial: u64,
-	/// Lite-07: the ranges no SUBSCRIBE_START answered yet, by Range ID, each as it was asked,
-	/// which a pin before the answer replaces.
-	unstarted: std::collections::BTreeMap<u64, Unstarted>,
-	/// Lite-07: what each range in [`Self::unstarted`] waits on.
+	/// Lite-07: where each live range stands with its SUBSCRIBE_START.
+	answers: Answers,
+	/// Lite-07: what each range still waiting for its SUBSCRIBE_START waits on.
 	waits: Waits,
-	/// Lite-07: where each range a SUBSCRIBE_START answered starts, by Range ID, `None` for one
-	/// answered with no group: it owes its groups from there to its end.
-	started: std::collections::BTreeMap<u64, Option<u64>>,
-	/// Lite-07: past every key a started range covers but does not owe (below its
-	/// SUBSCRIBE_START, or every key of one answered with no group), never lowered: with no
-	/// range waiting for its start, a stale run past it is owed whole, without resolving every
-	/// range (see [`Self::settle_stale`]).
-	unowed_end: u64,
 	/// Lite-07: the ranges whose start or end may still resolve; see [`Self::pin`].
 	unpinned: Unpinned,
 }
@@ -5657,6 +5648,149 @@ impl Waits {
 	}
 }
 
+/// Lite-07: where a live range stands with its SUBSCRIBE_START.
+#[derive(Clone, Copy, Debug)]
+enum Answer {
+	/// Waiting for it, as it was asked, which a pin before the answer replaces.
+	Waiting(Unstarted),
+	/// Answered from `start`, `None` for no group: it owes its groups from there to its end.
+	/// `unowed` bounds the keys it covers but does not owe, `0` for none.
+	Started { start: Option<u64>, unowed: u64 },
+}
+
+/// Lite-07: each live range's [`Answer`], by Range ID, indexed for the passes that look only at
+/// the ranges still waiting, or ask whether any is.
+#[derive(Debug, Default)]
+struct Answers {
+	ranges: std::collections::BTreeMap<u64, Answer>,
+	/// The ranges in [`Answer::Waiting`].
+	waiting: std::collections::BTreeSet<u64>,
+	/// Those of them asked from the oldest group.
+	oldest: std::collections::BTreeSet<u64>,
+	/// Each started range's `unowed` bound, counted, so the highest is at hand.
+	unowed: std::collections::BTreeMap<u64, usize>,
+	/// The started ranges answered before they were placed here, whose bound waits on that.
+	unplaced: std::collections::BTreeSet<u64>,
+}
+
+impl Answers {
+	/// Range `id` was asked as `asked` and waits for its SUBSCRIBE_START.
+	fn ask(&mut self, id: u64, asked: Unstarted) {
+		self.retire(id);
+		self.ranges.insert(id, Answer::Waiting(asked));
+		self.waiting.insert(id);
+		if asked.oldest {
+			self.oldest.insert(id);
+		}
+	}
+
+	/// Range `id` retired.
+	fn retire(&mut self, id: u64) {
+		match self.ranges.remove(&id) {
+			Some(Answer::Waiting(_)) => {
+				self.waiting.remove(&id);
+				self.oldest.remove(&id);
+			}
+			Some(Answer::Started { unowed, .. }) => {
+				self.unbound(unowed);
+				self.unplaced.remove(&id);
+			}
+			None => {}
+		}
+	}
+
+	/// Range `id` was answered from `start`, placed here as `resolved`.
+	fn start(&mut self, id: u64, start: Option<u64>, resolved: Option<crate::model::track::Resolved>) {
+		self.retire(id);
+		let unowed = match resolved {
+			Some(resolved) => Self::unowed(start, resolved),
+			// Unplaced here, it owes nothing yet: see [`TrackRun::owed`].
+			None => {
+				self.unplaced.insert(id);
+				u64::MAX
+			}
+		};
+		*self.unowed.entry(unowed).or_default() += 1;
+		self.ranges.insert(id, Answer::Started { start, unowed });
+	}
+
+	/// Bound again each started range placed here since it was answered unplaced, as
+	/// `resolve` places it.
+	fn place(&mut self, resolve: impl FnOnce(&[u64]) -> Vec<Option<crate::model::track::Resolved>>) {
+		if self.unplaced.is_empty() {
+			return;
+		}
+		let ids: Vec<u64> = self.unplaced.iter().copied().collect();
+		let resolved = resolve(&ids);
+		for (id, resolved) in ids.into_iter().zip(resolved) {
+			let (Some(resolved), Some(&Answer::Started { start, unowed })) = (resolved, self.ranges.get(&id)) else {
+				continue;
+			};
+			self.unplaced.remove(&id);
+			self.unbound(unowed);
+			let unowed = Self::unowed(start, resolved);
+			*self.unowed.entry(unowed).or_default() += 1;
+			self.ranges.insert(id, Answer::Started { start, unowed });
+		}
+	}
+
+	/// Past every key a range answered from `start` and placed as `resolved` covers but does
+	/// not owe: what it owes, it owes from its start to its end.
+	fn unowed(start: Option<u64>, resolved: crate::model::track::Resolved) -> u64 {
+		match start {
+			Some(start) if start > resolved.start => start,
+			Some(_) => 0,
+			None => resolved.end.unwrap_or(u64::MAX),
+		}
+	}
+
+	fn unbound(&mut self, unowed: u64) {
+		if let std::collections::btree_map::Entry::Occupied(mut count) = self.unowed.entry(unowed) {
+			*count.get_mut() -= 1;
+			if *count.get() == 0 {
+				count.remove();
+			}
+		}
+	}
+
+	/// Past every key a started range covers but does not owe, `0` when none: with no range
+	/// waiting, a key the cursor gives up past it is owed.
+	fn unowed_end(&self) -> u64 {
+		self.unowed.last_key_value().map_or(0, |(&end, _)| end)
+	}
+
+	/// Whether any range waits for its SUBSCRIBE_START.
+	fn any_waiting(&self) -> bool {
+		!self.waiting.is_empty()
+	}
+
+	/// How range `id` was asked, while it waits for its SUBSCRIBE_START.
+	fn waiting(&self, id: u64) -> Option<Unstarted> {
+		match self.ranges.get(&id)? {
+			Answer::Waiting(asked) => Some(*asked),
+			Answer::Started { .. } => None,
+		}
+	}
+
+	/// Each range waiting for its SUBSCRIBE_START, by Range ID, as it was asked.
+	fn waiting_all(&self) -> impl Iterator<Item = (u64, Unstarted)> + '_ {
+		(self.waiting.iter()).filter_map(|&id| Some((id, self.waiting(id)?)))
+	}
+
+	/// Each range waiting for its SUBSCRIBE_START asked from the oldest group, by Range ID.
+	fn waiting_oldest(&self) -> impl Iterator<Item = u64> + '_ {
+		self.oldest.iter().copied()
+	}
+
+	/// Each started range's Range ID and where it starts, `None` for no group.
+	fn started(&self) -> impl Iterator<Item = (u64, Option<u64>)> + '_ {
+		(self.ranges.iter()).filter_map(|(&id, answer)| match answer {
+			Answer::Started { start, .. } => Some((id, *start)),
+			Answer::Waiting(_) => None,
+		})
+	}
+}
+
 /// A live join's staleness budget, `None` for any other range.
 fn join_budget(range: &crate::track::Range) -> Option<Duration> {
 	matches!(range.start, crate::track::Start::Live { .. }).then(|| range.budget())
@@ -5709,22 +5843,20 @@ impl TrackRun {
 		ctx.outcomes.set_stops(&bounds.frames.stops);
 
 		let mut unpinned = Unpinned::default();
-		let mut unstarted = std::collections::BTreeMap::new();
+		let mut answers = Answers::default();
 		let mut waits = Waits::default();
 		if ctx.version.has_ranges() {
 			for (id, range) in (0..).zip(&bounds.ranges) {
 				unpinned.insert(id, due(range, false));
-				unstarted.insert(id, Unstarted::new(range, bounds.placed.contains_key(&id)));
+				answers.ask(id, Unstarted::new(range, bounds.placed.contains_key(&id)));
 				waits.wake(id);
 			}
 		}
 		Self {
 			#[cfg(test)]
 			initial,
-			unstarted,
+			answers,
 			waits,
-			started: Default::default(),
-			unowed_end: 0,
 			unpinned,
 			bounded,
 			requested: bounds.requested(0..),
@@ -5931,9 +6063,8 @@ impl TrackRun {
 		for id in &retired {
 			self.requested.remove(*id);
 			// A range retired before its start resolved is owed no SUBSCRIBE_START.
-			self.unstarted.remove(id);
+			self.answers.retire(*id);
 			self.waits.remove(*id);
-			self.started.remove(id);
 		}
 		// Retiring makes no stale run owed, so this names none.
 		let withheld = self.track.record_mut().take_withheld();
@@ -5942,7 +6073,7 @@ impl TrackRun {
 		for (id, range) in pins.into_iter().chain(retuned) {
 			self.requested.insert(id, range, placed.get(&id).copied());
 			// Replaced in place, it may land elsewhere.
-			if self.unstarted.contains_key(&id) {
+			if self.answers.waiting(id).is_some() {
 				self.waits.wake(id);
 			}
 		}
@@ -5956,8 +6087,7 @@ impl TrackRun {
 		for (id, range) in added {
 			self.requested.insert(id, range, placed.get(&id).copied());
 			self.unpinned.insert(id, due(&range, false));
-			self.unstarted
-				.insert(id, Unstarted::new(&range, placed.contains_key(&id)));
+			(self.answers).ask(id, Unstarted::new(&range, placed.contains_key(&id)));
 			self.waits.wake(id);
 		}
 		self.positions.extend(positions);
@@ -6069,7 +6199,7 @@ impl TrackRun {
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
 		waiter: &kio::Waiter,
 	) -> Result<bool, Error> {
-		if !self.start.per_range() || self.unstarted.is_empty() {
+		if !self.start.per_range() || !self.answers.any_waiting() {
 			return Ok(false);
 		}
 		// A track that ended before its first group is answered by its end alone, as is one that
@@ -6086,7 +6216,7 @@ impl TrackRun {
 		// Once nothing more can arrive every range is answered; until then a pass looks only at
 		// the ranges something changed for.
 		let ids: Vec<u64> = match finished {
-			true => self.unstarted.keys().copied().collect(),
+			true => self.answers.waiting_all().map(|(id, _)| id).collect(),
 			false => {
 				let placed = self.track.take_placed();
 				let whole = Whole {
@@ -6100,7 +6230,7 @@ impl TrackRun {
 		let resolved = self.track.resolved_keys(ids.iter().copied());
 		let waits = self.track.waiting_keys(ids.iter().copied());
 		for ((id, resolved), waits) in ids.into_iter().zip(resolved).zip(waits) {
-			let Some(&asked) = self.unstarted.get(&id) else {
+			let Some(asked) = self.answers.waiting(id) else {
 				continue;
 			};
 			// Never answered without the largest, even once nothing else can resolve it: this
@@ -6125,7 +6255,7 @@ impl TrackRun {
 					continue;
 				}
 			};
-			self.buffer_start(lite::SubscribeStart { id, start, largest }, writer)?;
+			self.buffer_start(lite::SubscribeStart { id, start, largest }, resolved, writer)?;
 			reported = true;
 		}
 		if reported {
@@ -6528,7 +6658,7 @@ impl TrackRun {
 	/// Whether a bounded lite-07 subscription with a range still unanswered has served or
 	/// given up every group its ranges name.
 	fn accounted(&mut self) -> bool {
-		if !self.bounded || self.unstarted.is_empty() || self.opening.is_some() {
+		if !self.bounded || !self.answers.any_waiting() || self.opening.is_some() {
 			return false;
 		}
 		self.track.told_all(self.floor)
@@ -6564,7 +6694,7 @@ impl TrackRun {
 			Start::Unresolved { skipped, .. } => skipped.insert(range, hole),
 			start if start.per_range() && hole.stale_budget().is_some() => {
 				self.told(range.clone());
-				for (groups, hole) in self.settle_stale([(range, hole)]) {
+				for (groups, hole) in self.settle_given_up(range, hole) {
 					self.forward_range(groups, &hole, writer)?;
 				}
 			}
@@ -6671,27 +6801,16 @@ impl TrackRun {
 		Ok(())
 	}
 
-	/// Send a range's SUBSCRIBE_START, then whatever was withheld for the first one. The one
-	/// place a range moves from waiting for its start to started.
+	/// Send a range's SUBSCRIBE_START, placed here as `resolved`, then whatever was withheld for
+	/// the first one. The one place a range moves from waiting for its start to started.
 	fn buffer_start(
 		&mut self,
 		start: lite::SubscribeStart,
+		resolved: Option<crate::model::track::Resolved>,
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
 	) -> Result<(), Error> {
-		self.unstarted.remove(&start.id);
 		self.waits.remove(start.id);
-		self.started.insert(start.id, start.start);
-		if self.start.per_range() {
-			let resolved = self.track.resolved_keys([start.id]).pop().flatten();
-			// What a range owes, it owes from its start to its end.
-			let unowed = match (start.start, resolved) {
-				(Some(at), Some(resolved)) => (at > resolved.start).then_some(at),
-				(None, Some(resolved)) => Some(resolved.end.unwrap_or(u64::MAX)),
-				// Unplaced here, it owes nothing yet: see [`Self::owed`].
-				(_, None) => Some(u64::MAX),
-			};
-			self.unowed_end = self.unowed_end.max(unowed.unwrap_or(0));
-		}
+		self.answers.start(start.id, start.start, resolved);
 		writer.buffer(&lite::SubscribeResponse::Start(start))?;
 		if let Start::Withholding(withheld) = std::mem::replace(&mut self.start, Start::Started) {
 			for (groups, hole) in withheld {
@@ -6711,36 +6830,45 @@ impl TrackRun {
 		if runs.peek().is_none() {
 			return Vec::new();
 		}
-		let mut sets = None;
+		let (owed, pending) = self.owed();
 		let mut named = Vec::new();
 		for (run, hole) in runs {
-			// Every key the cursor gives up lies in a range, so one past every key not owed lies
-			// in a started one that owes it: that part is owed whole, without resolving each range.
-			let split = match self.unstarted.is_empty() {
-				true => run.start.max(self.unowed_end).min(run.end),
-				false => run.end,
-			};
-			let below = run.start..split;
-			if !below.is_empty() {
-				let (owed, pending) = sets.get_or_insert_with(|| self.owed());
-				for part in owed.overlapping(&below) {
-					named.push((part.start.max(below.start)..part.end.min(below.end), hole.clone()));
+			for part in owed.overlapping(&run) {
+				named.push((part.start.max(run.start)..part.end.min(run.end), hole.clone()));
+			}
+			for gap in owed.gaps(&run) {
+				for part in pending.overlapping(&gap) {
+					let held = part.start.max(gap.start)..part.end.min(gap.end);
+					self.track.record_mut().withhold(held, hole.clone());
 				}
-				for gap in owed.gaps(&below) {
-					for part in pending.overlapping(&gap) {
-						let held = part.start.max(gap.start)..part.end.min(gap.end);
-						self.track.record_mut().withhold(held, hole.clone());
-					}
-					for rest in pending.gaps(&gap) {
-						self.track.record_mut().untell(rest);
-					}
+				for rest in pending.gaps(&gap) {
+					self.track.record_mut().untell(rest);
 				}
 			}
-			let whole = split..run.end;
-			if !whole.is_empty() {
-				debug_assert!(self.owed().0.gaps(&whole).next().is_none(), "{whole:?} is owed whole");
-				named.push((whole, hole));
-			}
+		}
+		named
+	}
+
+	/// Lite-07: [`Self::settle_stale`] for a stale `run` the cursor just gave up. With every
+	/// range started, its part past every key a started range covers but does not owe is owed
+	/// whole, since the cursor gives up only keys in its ranges: only the rest resolves every
+	/// range.
+	fn settle_given_up(&mut self, run: Range<u64>, hole: Hole) -> Vec<(Range<u64>, Hole)> {
+		let mut split = run.end;
+		if !self.answers.any_waiting() {
+			let track = &mut self.track;
+			self.answers.place(|ids| track.resolved_keys(ids.iter().copied()));
+			split = run.start.max(self.answers.unowed_end()).min(run.end);
+		}
+		let below = run.start..split;
+		let mut named = match below.is_empty() {
+			true => Vec::new(),
+			false => self.settle_stale([(below, hole.clone())]),
+		};
+		let whole = split..run.end;
+		if !whole.is_empty() {
+			debug_assert!(self.owed().0.gaps(&whole).next().is_none(), "{whole:?} is owed whole");
+			named.push((whole, hole));
 		}
 		named
 	}
@@ -6748,8 +6876,8 @@ impl TrackRun {
 	/// Lite-07: the keys each started range owes, from where its SUBSCRIBE_START placed it to
 	/// its end, and those a range still waiting for its start may come to owe.
 	fn owed(&mut self) -> (RangeSet<u64>, RangeSet<u64>) {
-		let started: Vec<(u64, u64)> = (self.started.iter())
-			.filter_map(|(&id, start)| start.map(|start| (id, start)))
+		let started: Vec<(u64, u64)> = (self.answers.started())
+			.filter_map(|(id, start)| start.map(|start| (id, start)))
 			.collect();
 		let mut owed = RangeSet::new();
 		let resolved = self.track.resolved_keys(started.iter().map(|(id, _)| *id));
@@ -6760,7 +6888,7 @@ impl TrackRun {
 			}
 		}
 		let mut pending = RangeSet::new();
-		let resolved = self.track.resolved_keys(self.unstarted.keys().copied());
+		let resolved = self.track.resolved_keys(self.answers.waiting_all().map(|(id, _)| id));
 		for resolved in resolved {
 			// One not resolved yet may cover any key.
 			let (start, end) = resolved.map_or((0, None), |resolved| (resolved.start, resolved.end));
@@ -6895,24 +7023,23 @@ impl TrackRun {
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
 		waiter: &kio::Waiter,
 	) -> Result<bool, Error> {
-		if !self.start.per_range() || !self.unstarted.values().any(|asked| asked.oldest) {
+		if !self.start.per_range() || self.answers.waiting_oldest().next().is_none() {
 			return Ok(false);
 		}
 		// A track that ended before its first group is answered by its end alone.
 		if self.largest(waiter) != lite::Edge::Empty || self.track.poll_finished(&kio::Waiter::noop()).is_ready() {
 			return Ok(false);
 		}
-		let ids: Vec<u64> = (self.unstarted.iter())
-			.filter(|(_, asked)| asked.oldest)
-			.map(|(id, _)| *id)
-			.collect();
-		for id in ids {
+		let ids: Vec<u64> = self.answers.waiting_oldest().collect();
+		let resolved = self.track.resolved_keys(ids.iter().copied());
+		for (id, resolved) in ids.into_iter().zip(resolved) {
 			self.buffer_start(
 				lite::SubscribeStart {
 					id,
 					start: Some(0),
 					largest: lite::Edge::Empty,
 				},
+				resolved,
 				writer,
 			)?;
 		}
@@ -7150,7 +7277,7 @@ impl CoverageBench {
 
 	/// A range is still unanswered, so each wake ends in the coverage check.
 	fn check(&self) {
-		assert!(!self.run.unstarted.is_empty(), "the open range is unanswered");
+		assert!(self.run.answers.any_waiting(), "the open range is unanswered");
 	}
 
 	/// One wake with nothing new to serve.
@@ -9278,10 +9405,10 @@ mod serve_group_test {
 	fn asked(run: &mut TrackRun, ranges: &[crate::track::Range]) {
 		run.initial = ranges.len() as u64;
 		run.requested = Requested::new((0..).zip(ranges.iter().copied()));
-		run.unstarted = (0..)
-			.zip(ranges)
-			.map(|(id, range)| (id, Unstarted::new(range, false)))
-			.collect();
+		run.answers = Answers::default();
+		for (id, range) in (0..).zip(ranges) {
+			run.answers.ask(id, Unstarted::new(range, false));
+		}
 		run.unpinned = Unpinned::default();
 		run.waits = Waits::default();
 		run.bounded = run.requested.bounded();
@@ -12000,7 +12127,7 @@ mod serve_group_test {
 		bench.wake();
 		bench.wake();
 		assert_eq!(
-			bench.run.unstarted.keys().copied().collect::<Vec<_>>(),
+			bench.run.answers.waiting_all().map(|(id, _)| id).collect::<Vec<_>>(),
 			[2],
 			"a range is still open"
 		);
@@ -12013,7 +12140,7 @@ mod serve_group_test {
 			}
 		}
 		assert!(
-			bench.run.unstarted.is_empty(),
+			!bench.run.answers.any_waiting(),
 			"every range is answered without a group"
 		);
 		assert!(bench.run.start.skipped().is_none(), "every held drop went out");
