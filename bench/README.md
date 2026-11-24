@@ -1001,8 +1001,9 @@ nix develop --command just rs instructions run --out metrics.json
 nix develop --command just rs instructions compare origin/main  # a table of each bench's change
 ```
 
-Add `--benchmarks <file>`, one name a line, to build and count only those
-benchmarks' targets. `compare` selects the same packages and targets at both
+Add `--benchmarks <file>`, one name a line, to count only those benchmarks and
+build only the bench targets of their names, plus any target of the same name in
+another listed package, since Cargo's `--bench` takes no package. `compare` selects the same packages and targets at both
 commits, so its base needs every package `sh/rs/instructions.sh` lists. It
 counts the base in another worktree, whose path alone can move a count, so
 recount a change it reports in one checkout, with `--jobs 1` as CI counts,
