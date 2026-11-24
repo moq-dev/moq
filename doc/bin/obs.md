@@ -58,7 +58,10 @@ it holds whatever else the settings say:
   can override the cap, and the log warns.
 - Every other encoder runs CBR at the cap: Quick Sync's ICQ and AMF's QVBR have
   no hard peak, VA-API's QVBR overshot the cap on the Mesa (AMD) and Intel
-  drivers we measured, and VideoToolbox's quality mode has not been checked.
+  drivers we measured, and OBS's VideoToolbox encoder passes its **Limit
+  bitrate** to macOS as an empty limit, so its CRF runs with no peak. On an
+  Intel Mac, OBS runs VideoToolbox's CBR as an average, so the cap holds only
+  on average there.
   VA-API's `ffmpeg_opts` are never rewritten either, so `rc_mode` or `qp` in
   them can override the cap, and the log warns.
 

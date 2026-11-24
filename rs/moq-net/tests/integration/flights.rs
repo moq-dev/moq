@@ -5,6 +5,7 @@
 //! shed, and the origin's handler serves it. The joiner hands over to the live copy once it
 //! catches up, and every flight in the chain then stops.
 
+use crate::WithMax as _;
 use std::sync::{
 	Arc,
 	atomic::{AtomicU64, Ordering},
@@ -45,9 +46,10 @@ fn info(payload: &Bytes) -> frame::Info {
 fn origin(hop: u64, pool: &cache::Pool) -> origin::Producer {
 	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
 	config.pool = pool.clone();
+	config.proxy = true;
 	let (origin, driver) = origin::Producer::new(config);
 	spawn(driver);
-	origin.with_proxy(true)
+	origin
 }
 
 /// Write `payload` once `group`'s fastest reader leaves room, or return `false` once no
@@ -246,7 +248,7 @@ async fn chain(version: &str, replay: Replay) {
 	let subscription = || {
 		track::Subscription::default()
 			.with_ranges([crate::support::keys(0..)])
-			.with_delay(track::Delay::default().with_max(Duration::from_secs(3600)))
+			.with_max(Duration::from_secs(3600))
 	};
 	let mut live_sub = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription()))
 		.await

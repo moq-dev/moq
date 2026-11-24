@@ -5,6 +5,8 @@ use std::time::Duration;
 
 use rangemap::{RangeInclusiveMap, RangeInclusiveSet};
 
+use super::subscription::Budget;
+
 /// The groups a reader skipped as stale and never handed out, with the budget each was
 /// judged under, as runs of consecutive keys.
 ///
@@ -62,28 +64,41 @@ impl Skipped {
 		}
 	}
 
-	/// The runs judged under a budget narrower than `budget`, lowest first, now judged
-	/// under `budget`: each stays until its group is handed out or skipped again, so a
+	/// The runs judged under a budget narrower than `budget` gives them, lowest first, now
+	/// judged under it: each stays until its group is handed out or skipped again, so a
 	/// newer group handed out first never folds it into the delivered floor.
-	pub fn widened(&mut self, budget: Duration) -> Vec<RangeInclusive<u64>> {
+	pub fn widened(&mut self, budget: &Budget) -> Vec<RangeInclusive<u64>> {
 		let Some(skipped) = self.0.as_mut().filter(|skipped| !skipped.runs.is_empty()) else {
 			return Vec::new();
 		};
-		if budget <= skipped.narrowest {
+		if budget.widest() <= skipped.narrowest {
 			return Vec::new();
 		}
-		let widened: Vec<_> = skipped
-			.runs
-			.iter()
-			.filter(|(_, judged)| **judged < budget)
-			.map(|(run, _)| run.clone())
+		let widened: Vec<_> = (skipped.runs.iter())
+			.flat_map(|(run, judged)| {
+				let judged = *judged;
+				budget
+					.runs(*run.start()..run.end().saturating_add(1))
+					.into_iter()
+					.filter(move |(_, now)| judged < *now)
+			})
+			.map(|(run, now)| (run.start..=run.end - 1, now))
 			.collect();
-		for run in &widened {
-			skipped.runs.insert(run.clone(), budget);
+		for (run, now) in &widened {
+			skipped.runs.insert(run.clone(), *now);
 		}
-		// Every run left was judged under `budget` or wider.
-		skipped.narrowest = budget;
-		widened
+		// Every run left was judged under this or wider.
+		skipped.narrowest = skipped.runs.iter().map(|(_, judged)| *judged).min().unwrap_or_default();
+		widened.into_iter().map(|(run, _)| run).collect()
+	}
+
+	/// Whether `key` is skipped under a budget narrower than `budget`, which widening to it
+	/// offers again.
+	pub fn widens(&self, key: u64, budget: Duration) -> bool {
+		self.0
+			.as_ref()
+			.and_then(|skipped| skipped.runs.get(&key))
+			.is_some_and(|judged| *judged < budget)
 	}
 
 	/// Whether no run is recorded.
@@ -175,12 +190,18 @@ mod test {
 		assert_eq!(skipped.runs(), 2);
 		assert_eq!(skipped.lowest(), Some(1));
 
-		assert!(skipped.widened(NARROW).is_empty(), "the same budget reverses nothing");
-		assert_eq!(skipped.widened(WIDE), vec![1..=2]);
-		assert!(skipped.widened(WIDE).is_empty(), "a run judged at the budget stays");
+		assert!(
+			skipped.widened(&Budget::uniform(NARROW)).is_empty(),
+			"the same budget reverses nothing"
+		);
+		assert_eq!(skipped.widened(&Budget::uniform(WIDE)), vec![1..=2]);
+		assert!(
+			skipped.widened(&Budget::uniform(WIDE)).is_empty(),
+			"a run judged at the budget stays"
+		);
 		assert_eq!(skipped.lowest(), Some(1), "a widened run stays until it is handed out");
 		// Rejudged under WIDE, the widened run now merges with the run already judged there.
-		assert_eq!(skipped.widened(WIDE * 2), vec![1..=2, 4..=4]);
+		assert_eq!(skipped.widened(&Budget::uniform(WIDE * 2)), vec![1..=2, 4..=4]);
 		skipped.remove(1);
 		skipped.remove(2);
 		assert_eq!(skipped.lowest(), Some(4));
@@ -193,7 +214,7 @@ mod test {
 			skipped.insert(key, NARROW);
 		}
 		skipped.remove(4);
-		assert_eq!(skipped.widened(WIDE), vec![3..=3, 5..=5]);
+		assert_eq!(skipped.widened(&Budget::uniform(WIDE)), vec![3..=3, 5..=5]);
 	}
 
 	#[test]
@@ -209,7 +230,7 @@ mod test {
 
 		// More runs than twice the cache prunes every one that holds nothing.
 		skipped.prune(0, |run| *run.start() != 5);
-		assert_eq!(skipped.widened(WIDE), vec![5..=5]);
+		assert_eq!(skipped.widened(&Budget::uniform(WIDE)), vec![5..=5]);
 	}
 
 	#[test]

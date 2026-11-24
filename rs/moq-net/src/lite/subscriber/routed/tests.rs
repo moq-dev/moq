@@ -14,19 +14,16 @@ use super::{Routed, Subscriber};
 /// The forwarding node the peer declares.
 const PEER: NodeId = NodeId {
 	relay: 7,
-	start: 1,
 	marked: false,
 };
 
 fn subscriber() -> (Subscriber, crate::origin::Consumer) {
-	super::super::tests::restart_subscriber(SinkSession::new(Default::default()))
+	super::super::tests::restart_subscriber(SinkSession::new(Default::default()), false)
 }
 
 /// A subscriber whose origin forwards, as a relay's does.
 fn forwarding() -> (Subscriber, crate::origin::Consumer) {
-	let (mut subscriber, consumer) = subscriber();
-	subscriber.origin = subscriber.origin.with_proxy(true);
-	(subscriber, consumer)
+	super::super::tests::restart_subscriber(SinkSession::new(Default::default()), true)
 }
 
 /// The peer's route to `node`, which it reaches itself or through the hops after it.
@@ -526,7 +523,6 @@ async fn a_route_to_the_same_node_keeps_its_route_id() {
 	let (subscriber, _consumer) = forwarding();
 	let other = NodeId {
 		relay: 9,
-		start: 1,
 		marked: false,
 	};
 	let mut routed = routing(&subscriber);

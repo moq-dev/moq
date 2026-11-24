@@ -138,8 +138,8 @@ impl<O: Output> Video<O> {
 	}
 
 	/// A subscription's budget with `held` on top of its own.
-	fn budget(&self, held: Duration) -> moq_net::track::Delay {
-		moq_net::track::Delay {
+	fn budget(&self, held: Duration) -> moq_mux::container::Delay {
+		moq_mux::container::Delay {
 			min: Some(self.min_delay + held),
 			max: Some(self.max_delay + held),
 		}
@@ -567,7 +567,12 @@ mod tests {
 		let subscriber = track
 			.consume()
 			.subscribe(
-				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(delay)),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(delay),
+						max: Some(delay),
+					},
+				)]),
 			)
 			.await
 			.unwrap();
@@ -607,7 +612,12 @@ mod tests {
 		let subscriber = track
 			.consume()
 			.subscribe(
-				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(budget)),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(budget),
+						max: Some(budget),
+					},
+				)]),
 			)
 			.await
 			.unwrap();
@@ -666,10 +676,11 @@ mod tests {
 		let subscriber = source
 			.consume()
 			.subscribe(
-				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay {
+				moq_mux::container::Delay {
 					min: Some(min),
 					max: Some(max),
-				}),
+				}
+				.subscription(moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL])),
 			)
 			.await
 			.unwrap();
@@ -699,13 +710,14 @@ mod tests {
 		assert_eq!(picture, 0, "the first picture was kept until it was due");
 		assert!((5_000..5_100).contains(&at), "played in sync with audio: {at}");
 		let held = shared - min;
+		// The live join resolved once, so only the budget follows the shared delay.
 		assert_eq!(
-			source.subscription().map(|subscription| subscription.delay),
-			Some(moq_net::track::Delay {
-				min: Some(min + held),
+			source.subscription().map(|subscription| subscription.ranges),
+			Some(vec![moq_net::track::Range::from(moq_net::track::Start::Live {
+				min: Some(min),
 				max: Some(max + held),
-			}),
-			"the subscription's budgets grow with the shared delay"
+			})]),
+			"the subscription's budget grows with the shared delay"
 		);
 		let _finished = producer.finish().unwrap();
 		task.await.unwrap().unwrap();
@@ -814,7 +826,12 @@ mod tests {
 		let subscriber = track
 			.consume()
 			.subscribe(
-				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(delay)),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(delay),
+						max: Some(delay),
+					},
+				)]),
 			)
 			.await
 			.unwrap();
@@ -869,7 +886,12 @@ mod tests {
 		let subscriber = published
 			.consume()
 			.subscribe(
-				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(delay)),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(delay),
+						max: Some(delay),
+					},
+				)]),
 			)
 			.await
 			.unwrap();
@@ -934,7 +956,12 @@ mod tests {
 		let subscriber = track
 			.consume()
 			.subscribe(
-				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(delay)),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(delay),
+						max: Some(delay),
+					},
+				)]),
 			)
 			.await
 			.unwrap();
@@ -978,7 +1005,12 @@ mod tests {
 		let subscriber = source
 			.consume()
 			.subscribe(
-				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(delay)),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(delay),
+						max: Some(delay),
+					},
+				)]),
 			)
 			.await
 			.unwrap();
@@ -1019,8 +1051,12 @@ mod tests {
 		let subscriber = source
 			.consume()
 			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(Duration::from_secs(10)),
+						max: Some(Duration::from_secs(10)),
+					},
+				)]),
 			)
 			.await
 			.unwrap();
@@ -1067,7 +1103,12 @@ mod tests {
 		let subscriber = source
 			.consume()
 			.subscribe(
-				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(delay)),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(delay),
+						max: Some(delay),
+					},
+				)]),
 			)
 			.await
 			.unwrap();
@@ -1128,7 +1169,12 @@ mod tests {
 		let subscriber = track
 			.consume()
 			.subscribe(
-				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(delay)),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(delay),
+						max: Some(delay),
+					},
+				)]),
 			)
 			.await
 			.unwrap();
@@ -1186,7 +1232,12 @@ mod tests {
 		let subscriber = source
 			.consume()
 			.subscribe(
-				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(delay)),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(delay),
+						max: Some(delay),
+					},
+				)]),
 			)
 			.await
 			.unwrap();
@@ -1304,8 +1355,10 @@ mod tests {
 		let subscriber = published
 			.consume()
 			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_min(delay).with_max(delay)),
+				moq_mux::container::Delay::default()
+					.with_min(delay)
+					.with_max(delay)
+					.subscription(moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL])),
 			)
 			.await
 			.unwrap();

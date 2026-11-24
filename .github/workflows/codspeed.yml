@@ -1,17 +1,38 @@
 name: CodSpeed
 
-# CPU-simulated instruction counts for the deterministic Criterion benches,
-# nightly on main. An extra signal beside Nightly's paired timing, which still
-# measures every bench and is the only gate; see bench/README.md.
+# CPU-simulated instruction counts for the deterministic Criterion benches, on
+# each landing that can change them. An extra signal beside Nightly's paired
+# timing, which still measures every bench; nothing gates on it. See
+# bench/README.md.
 on:
-  schedule:
-    - cron: "0 7 * * *"
+  push:
+    branches: [main]
+    paths:
+      - "rs/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "flake.nix"
+      - "flake.lock"
+      - "nix/**"
+      - "justfile"
+      - ".github/actions/**"
+      - ".github/workflows/codspeed.yml"
+      - "sh/gh/bench-report.py"
+  # Kixel Quest bisects a regression across the landings a coalesced run
+  # skipped by dispatching this workflow on a `kixel-bisect/<commit>` branch.
   workflow_dispatch:
+
+# A landing waits for the running measurement, and GitHub keeps only the newest
+# pending one, so `main` is measured as often as a run takes, never queued
+# behind a backlog. Keyed on the ref, so a bisect never coalesces with `main`.
+concurrency:
+  group: codspeed-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   codspeed:
     name: CodSpeed (${{ matrix.shard }})
-    if: github.ref == 'refs/heads/main'
     # One upload of every bench is over CodSpeed's per-run limit, so each shard
     # uploads separately and CodSpeed merges this workflow's shards.
     strategy:
@@ -20,7 +41,8 @@ jobs:
         shard: [net, mux, rest]
     # CodSpeed's simulation runner supports x86 hosted runners.
     runs-on: ubuntu-24.04
-    environment: cache-write
+    # Only `main` writes the Rust cache; see .github/actions/rust-cache.
+    environment: ${{ github.ref == 'refs/heads/main' && 'cache-write' || '' }}
     timeout-minutes: 90
     permissions:
       contents: read
@@ -43,8 +65,25 @@ jobs:
         run: |
           nix develop --command just rs codspeed ${{ matrix.shard }}
           echo "DEV_PATH=$(nix develop --command printenv PATH)" >> "$GITHUB_ENV"
+          mkdir "$RUNNER_TEMP/codspeed"
 
       - uses: CodSpeedHQ/action@af75f77f17a054769abefaa42fe8dc2975469b5f # v5.6.3
+        env:
+          # The runner leaves its Callgrind profiles in a folder under TMPDIR.
+          TMPDIR: ${{ runner.temp }}/codspeed
+          # CodSpeed's dashboard tracks `main`; a bisect only reports to Kixel Quest.
+          CODSPEED_SKIP_UPLOAD: ${{ github.ref != 'refs/heads/main' }}
         with:
           mode: simulation
           run: env PATH="$DEV_PATH" cargo codspeed run
+
+      - name: Write Kixel Quest metrics
+        run: nix develop --command just gh benchmark-report codspeed-metrics "$RUNNER_TEMP/codspeed" kixel-metrics/metrics.json
+
+      # Kixel Quest reads it once the run attempt finishes; a rerun overwrites it.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: kixel-metrics-${{ matrix.shard }}
+          path: kixel-metrics/metrics.json
+          overwrite: true
+          retention-days: 30

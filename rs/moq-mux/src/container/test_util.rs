@@ -319,8 +319,12 @@ pub(crate) async fn published<E>(
 
 	let mut out = std::collections::BTreeMap::new();
 	for (name, container) in containers {
-		let replay = moq_net::track::Subscription::default()
-			.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(3600)));
+		let replay = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+			moq_net::track::Start::Live {
+				min: Some(std::time::Duration::from_secs(3600)),
+				max: Some(std::time::Duration::from_secs(3600)),
+			},
+		)]);
 		let track = consumer.track(&name).unwrap().subscribe(replay).await.unwrap();
 		let mut reader = crate::container::Consumer::new(track, container);
 		let mut timestamps = Vec::new();
@@ -381,9 +385,11 @@ pub(crate) fn common_offset(
 	offset.expect("frames were published")
 }
 
-/// An origin at `hop`, its driver spawned.
-pub(crate) fn origin(hop: u64) -> moq_net::origin::Producer {
-	let config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+/// An origin, its driver spawned. It may be a middle hop, so it forwards what
+/// it learned as well as its own.
+pub(crate) fn origin() -> moq_net::origin::Producer {
+	let mut config = moq_net::origin::Config::default();
+	config.proxy = true;
 	let (producer, driver) = moq_net::origin::Producer::new(config);
 	tokio::spawn(moq_net::time::run(driver));
 	producer
@@ -420,10 +426,9 @@ impl Link {
 			gate: gate.clone(),
 			answers: true,
 		};
-		// `from` may be a middle hop, so it forwards what it learned as well as its own.
 		let client = moq_net::Client::new()
 			.with_versions(version.into())
-			.with_publisher(from.clone().with_proxy(true).consume());
+			.with_publisher(from.consume());
 		let server = moq_net::Server::new()
 			.with_versions(version.into())
 			.with_subscriber(to.clone());
@@ -475,7 +480,7 @@ impl Link {
 			.with_subscriber(to.clone());
 		let server = moq_net::Server::new()
 			.with_versions(version.into())
-			.with_publisher(from.clone().with_proxy(true).consume());
+			.with_publisher(from.consume());
 		let sessions = tokio::join!(
 			async {
 				let (session, driver) = client
@@ -621,4 +626,14 @@ impl std::task::Wake for Woken {
 	fn wake(self: std::sync::Arc<Self>) {
 		self.0.store(true, std::sync::atomic::Ordering::SeqCst);
 	}
+}
+
+/// A live join with no lag limit, so it takes each group still within `max` of the live edge:
+/// what a subscription-wide max age asked before moq-lite-07. Test groups often start at their
+/// sequence, not their time, so a join placed by time alone would land on the newest.
+pub(crate) fn within(max: std::time::Duration) -> moq_net::track::Subscription {
+	moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
+		min: None,
+		max: Some(max),
+	})])
 }

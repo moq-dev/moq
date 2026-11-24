@@ -5,9 +5,11 @@ use moq_net::{Version, origin, track};
 use std::time::Duration;
 
 fn origin(hop: u64) -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (origin, driver) = origin::Producer::new(config);
 	spawn(driver);
-	origin.with_proxy(true)
+	origin
 }
 
 /// The JSON owner answers demand across a publisher link, a cluster peer, and a reader link.
@@ -104,7 +106,16 @@ async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
 		kio::clock::sleep(Duration::from_secs(60)).await;
 		assert!(producer.poll_refresh(&kio::Waiter::noop()).is_pending());
 
-		let mut late = remote.subscribe(None).await.unwrap();
+		// A join reaching back past the cached group: one at the latest group may resolve
+		// upstream after the refresh it requests, at the fresh group.
+		let reach = track::Start::Live {
+			min: None,
+			max: Some(Duration::ZERO),
+		};
+		let mut late = remote
+			.subscribe(track::Subscription::default().with_ranges([track::Range::from(reach)]))
+			.await
+			.unwrap();
 		// Poll the new reader while the owner drives refresh: a front does not join its
 		// serving copy until read. Refresh is a request, not a hold, so the cached group
 		// arrives first, whole, and the fresh one follows.

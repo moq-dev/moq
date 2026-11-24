@@ -1891,8 +1891,12 @@ pub(crate) mod tests {
 			.track(&passthrough.track)
 			.unwrap()
 			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(RECORDING_MAX_AGE),
+						max: Some(RECORDING_MAX_AGE),
+					},
+				)]),
 			)
 			.await
 			.unwrap();
@@ -2062,8 +2066,12 @@ pub(crate) mod tests {
 			};
 			let recording = read(
 				start(
-					moq_net::track::Subscription::default()
-						.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+					moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+						moq_net::track::Start::Live {
+							min: Some(RECORDING_MAX_AGE),
+							max: Some(RECORDING_MAX_AGE),
+						},
+					)]),
 				)
 				.await,
 			);
@@ -2121,8 +2129,12 @@ pub(crate) mod tests {
 			if version.starts_with("moq-lite") {
 				let late = read(
 					start(
-						moq_net::track::Subscription::default()
-							.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
+						moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+							moq_net::track::Start::Live {
+								min: Some(Duration::from_secs(10)),
+								max: Some(Duration::from_secs(10)),
+							},
+						)]),
 					)
 					.await,
 				)
@@ -2176,7 +2188,10 @@ pub(crate) mod tests {
 			.value;
 		let clock = catalog.sync.clock.expect("the catalog advertises a clock");
 		let (name, config) = catalog.video.renditions.iter().next().expect("a video rendition");
-		let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
+		// The import already finished, so the default live join's zero max would age its last
+		// group out as the wall clock passes its span: read the whole clip as history instead.
+		let history = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL]);
+		let track = consumer.track(name).unwrap().subscribe(history).await.unwrap();
 		let container = moq_mux::catalog::hang::Container::try_from(config).unwrap();
 		let first = next_frame(&mut Consumer::new(track, container)).await.timestamp;
 		assert!(

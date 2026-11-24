@@ -3,6 +3,7 @@ import { Duration, type Installed } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { type Group, Time, Track, Varint } from "@moq/net";
 import { AudioConfigSchema } from "../catalog/audio.ts";
+import { within } from "../subscription.test-util.ts";
 import { Consumer } from "./consumer.ts";
 import { Format as LegacyFormat } from "./legacy.ts";
 
@@ -59,9 +60,9 @@ test("Consumer waits on a non-sequential hang group because it has no per-frame 
 	// the wait. The CMAF path (per-sample duration in the moof) is covered in consumer.test.ts.
 	// An unserved fill owes the missing groups, as a session's feed would, so the ordered read waits
 	// for them up to the max delay.
-	const track = new Track.Producer("test");
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MICRO, maxAge: null });
 	track.requests();
-	const subscriber = track.subscribe({ delay: { max: Duration.millis(5000) } });
+	const subscriber = track.subscribe(within(Duration.millis(5000)));
 	// Read from group A on, so nothing below it is owed.
 	subscriber.withRange({ start: { included: 1_000_000n } });
 	const consumer = new Consumer(subscriber, {
@@ -147,7 +148,7 @@ test("Consumer reads on without a gap past a group it skipped", async () => {
 // waiting on the sequences between them, while a missing one is still a gap.
 test("Consumer reads one-packet Opus groups at sparse sequences back to back", async () => {
 	// An unserved fill owes the missing groups, as a session's feed would.
-	const track = new Track.Producer("test");
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MICRO, maxAge: null });
 	track.requests();
 	const config = AudioConfigSchema.parse({
 		codec: "opus",
@@ -155,7 +156,7 @@ test("Consumer reads one-packet Opus groups at sparse sequences back to back", a
 		sampleRate: 48_000,
 		numberOfChannels: 2,
 	});
-	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(5000) } }), {
+	const consumer = new Consumer(track.subscribe(within(Duration.millis(5000))), {
 		format: new LegacyFormat(config),
 		delay: { min: null, max: Duration.millis(5000) },
 	});
@@ -190,14 +191,14 @@ test("Consumer reads one-packet Opus groups at sparse sequences back to back", a
 // lands. The finish says nothing of where that frame starts, so a step onto the group waits for it,
 // and a frame continuing the timeline reads on without a gap.
 test("Consumer judges a step onto a frameless group by its first frame, not the track's finish", async () => {
-	const track = new Track.Producer("test");
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MICRO, maxAge: null });
 	const config = AudioConfigSchema.parse({
 		codec: "opus",
 		container: { kind: "legacy" },
 		sampleRate: 48_000,
 		numberOfChannels: 2,
 	});
-	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(5000) } }), {
+	const consumer = new Consumer(track.subscribe(within(Duration.millis(5000))), {
 		format: new LegacyFormat(config),
 		delay: { min: null, max: Duration.millis(5000) },
 	});
@@ -287,7 +288,7 @@ test("Consumer buffers groups at sparse starts as one range", async () => {
 		const track = micro();
 		const delay = { min: Duration.millis(100), max: Duration.millis(5000) };
 		// Reaching back past the first group, so the start keeps every one.
-		const consumer = new Consumer(track.subscribe({ delay }), { format, delay });
+		const consumer = new Consumer(track.subscribe(within(delay.max)), { format, delay });
 		for (const start of [0, 20_000, 40_000]) {
 			const group = create(track, start);
 			group.writeFrame({
@@ -306,4 +307,136 @@ test("Consumer buffers groups at sparse starts as one range", async () => {
 		track.finish();
 		track.close();
 	}
+});
+
+// Legacy video groups, each keyed by its first frame's timestamp with nothing declared between them, as
+// a moq-lite-06 hop delivers them: the frames of each in decode order, with no duration. Returns what
+// the reader reads, as Rust's `legacy_video` test helper does.
+async function legacyVideo(groups: number[][]): Promise<string[]> {
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(track.subscribe({ ranges: [{}] }), {
+		format: new LegacyFormat("video"),
+		delay: { min: null, max: Duration.millis(10_000) },
+	});
+	for (const pictures of groups) {
+		const group = track.createGroup(BigInt(pictures[0]));
+		for (const at of pictures) {
+			group.writeFrame({
+				payload: encodeLegacyFrame(at, new Uint8Array([0xde])),
+				timestamp: Time.Timestamp.fromMicros(at),
+			});
+		}
+		group.finish();
+	}
+	track.finish();
+	const items: string[] = [];
+	for (;;) {
+		const next = await poll(consumer.next());
+		if (next === "pending") throw new Error(`the reader stalled after ${items.join(", ")}`);
+		if (!next) break;
+		if (next.kind === "frame") items.push(`${next.frame.timestamp.asMicros()}`);
+		else if (next.kind === "gap") items.push(`gap ${next.timestamp.asMicros()}+${next.duration.asMicros()}`);
+		else items.push(`end ${next.end.asMicros()}`);
+	}
+	consumer.close();
+	track.close();
+	return items;
+}
+
+// The second group is an open GOP: its leading pictures present between the first group's last picture
+// and its keyframe, so the two groups meet and nothing is lost.
+test("an open GOP that continues the previous video group is no gap", async () => {
+	expect(
+		await legacyVideo([
+			[0, 120_000, 40_000, 80_000],
+			[280_000, 160_000, 200_000, 240_000],
+		]),
+	).toEqual(["0", "120000", "40000", "80000", "280000", "160000", "200000", "240000"]);
+});
+
+// A closed GOP with B-frames starts one picture past the previous group's highest timestamp, which is
+// where its last picture starts rather than ends.
+test("a closed GOP one picture past the previous video group is no gap", async () => {
+	expect(
+		await legacyVideo([
+			[0, 120_000, 40_000, 80_000],
+			[160_000, 280_000, 200_000, 240_000],
+		]),
+	).toEqual(["0", "120000", "40000", "80000", "160000", "280000", "200000", "240000"]);
+});
+
+// Field-coded open GOPs: the keyframe's second field decodes ahead of the leading pictures, so the lowest
+// one comes third, within how far the first group reordered. A 40 ms frame among the second group's
+// 20 ms fields allows its last picture to be one too.
+test("field-coded open GOPs that continue each other are no gap", async () => {
+	const read = await legacyVideo([
+		[0, 20_000, 120_000, 140_000, 40_000, 60_000, 80_000, 100_000],
+		[240_000, 260_000, 160_000, 180_000, 220_000],
+		[380_000, 400_000, 300_000, 320_000, 340_000, 360_000],
+	]);
+	expect(read.filter((item) => item.startsWith("gap"))).toEqual([]);
+	expect(read).toHaveLength(19);
+});
+
+// A lost group is still a gap, read ahead of the next group's keyframe, though its leading pictures would
+// have presented nearer: the keyframe waits for them.
+test("an open GOP past a lost video group is a gap before its keyframe", async () => {
+	expect(
+		await legacyVideo([
+			[0, 120_000, 40_000, 80_000],
+			[280_000, 160_000, 200_000, 240_000],
+			// The group at 560 ms never arrives.
+			[840_000, 720_000, 760_000, 800_000],
+		]),
+	).toEqual([
+		"0",
+		"120000",
+		"40000",
+		"80000",
+		"280000",
+		"160000",
+		"200000",
+		"240000",
+		"gap 280000+560000",
+		"840000",
+		"720000",
+		"760000",
+		"800000",
+	]);
+});
+
+// MP2 codes 1152 samples per frame, so its groups bridge as Opus's do, while a lost one is a gap.
+test("MP2 groups at sparse sequences run back to back", async () => {
+	const track = new Track.Producer("test");
+	const config = AudioConfigSchema.parse({
+		codec: "mp2",
+		container: { kind: "legacy" },
+		sampleRate: 48_000,
+		numberOfChannels: 2,
+	});
+	const consumer = new Consumer(track.subscribe({ ranges: [{}] }), {
+		format: new LegacyFormat(config),
+		delay: { min: null, max: Duration.millis(10_000) },
+	});
+	// Two 24 ms frames per group. The group starting at 96 ms never arrives.
+	for (const start of [0, 48_000, 144_000]) {
+		const group = track.createGroup(BigInt(start));
+		for (const at of [start, start + 24_000]) {
+			group.writeFrame({
+				payload: encodeLegacyFrame(at, new Uint8Array([0xff, 0xfd])),
+				timestamp: Time.Timestamp.fromMicros(at),
+			});
+		}
+		group.finish();
+	}
+	track.finish();
+	const items: string[] = [];
+	for (let next = await poll(consumer.next()); next !== undefined; next = await poll(consumer.next())) {
+		if (next === "pending") throw new Error(`the reader stalled after ${items.join(", ")}`);
+		if (next.kind === "frame") items.push(`${next.frame.timestamp.asMicros()}`);
+		else if (next.kind === "gap") items.push(`gap ${next.timestamp.asMicros()}+${next.duration.asMicros()}`);
+	}
+	expect(items).toEqual(["0", "24000", "48000", "72000", "gap 96000+48000", "144000", "168000"]);
+	consumer.close();
+	track.close();
 });

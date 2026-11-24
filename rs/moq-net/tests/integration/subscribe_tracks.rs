@@ -35,10 +35,11 @@ const SUBSCRIBE_TRACKS: &[u8] = &[
 ];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// A client publishing one track to a server subscribed to it, plus the payloads the
@@ -131,6 +132,7 @@ async fn subscribe_tracks(pair: &MockPair) -> Vec<u8> {
 /// stream, and the subscription already on the session keeps going.
 #[kio::test]
 async fn subscribe_tracks_is_refused_per_request() {
+	// The request is a hand-built frame with a 16-bit length, so draft-23 is left out.
 	for version in ["moq-transport-18", "moq-transport-20", "moq-transport-22"] {
 		let mut setup = setup(version.parse().unwrap()).await;
 		deliver(&mut setup, b"before").await;

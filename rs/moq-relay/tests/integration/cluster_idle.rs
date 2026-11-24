@@ -114,6 +114,7 @@ async fn silent_peer_detected() {
 			if let moq_net::origin::RouteEvent {
 				kind: moq_net::origin::RouteKind::Start | moq_net::origin::RouteKind::Update,
 				announce: update,
+				..
 			} = event && update.prefix.as_str() == "peer"
 			{
 				break;
@@ -135,6 +136,7 @@ async fn silent_peer_detected() {
 			if let moq_net::origin::RouteEvent {
 				kind: moq_net::origin::RouteKind::Offline,
 				announce: update,
+				..
 			} = event && update.prefix.as_str() == "peer"
 			{
 				break;

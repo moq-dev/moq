@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { ProtocolViolation } from "../error.ts";
 import { toHop } from "../hop.ts";
 import { encodeVarint, Reader, Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
@@ -10,6 +11,7 @@ import { Version } from "./version.ts";
 const PARAM_PROBE = 0x1n;
 const PARAM_PATH = 0x2n;
 const PARAM_ROLE = 0x3n;
+const PARAM_COST = 0x4n;
 const PARAM_HOP = 0x5n;
 const PARAM_IMPLEMENTATION = 0x6n;
 
@@ -150,25 +152,27 @@ test("hop 0 decodes as absent", async () => {
 });
 
 // An endpoint declares no Node ID, so it sends none, and reads a peer's only to check its form:
-// a non-zero Node ID, then its Start.
+// a non-zero Node ID, then its Marked.
 test("lite-07 SETUP sends no Node ID and checks the one it is sent", async () => {
 	const v = Version.DRAFT_07;
 	const sent = await roundTrip(new Setup({ hop: toHop(7n) }), v);
 	expect(sent.hop).toBeUndefined();
 
-	const node = (id: bigint, start?: bigint, marked?: number) =>
-		concat([
-			encodeVarint(id, v),
-			...(start === undefined ? [] : [encodeVarint(start, v)]),
-			...(marked === undefined ? [] : [new Uint8Array([marked])]),
-		]);
-	expect((await decodeParam(PARAM_HOP, node(7n, 9n, 0), v)).hop).toBeUndefined();
-	await expect(decodeParam(PARAM_HOP, node(0n, 9n, 0), v)).rejects.toThrow();
+	const node = (id: bigint, marked?: number) =>
+		concat([encodeVarint(id, v), ...(marked === undefined ? [] : [new Uint8Array([marked])])]);
+	expect((await decodeParam(PARAM_HOP, node(7n, 0), v)).hop).toBeUndefined();
+	await expect(decodeParam(PARAM_HOP, node(0n, 0), v)).rejects.toThrow();
 	await expect(decodeParam(PARAM_HOP, node(7n), v)).rejects.toThrow();
-	await expect(decodeParam(PARAM_HOP, node(7n, 9n), v)).rejects.toThrow();
 	// A session's node is never a marked identity.
-	await expect(decodeParam(PARAM_HOP, node(7n, 9n, 1), v)).rejects.toThrow();
-	await expect(decodeParam(PARAM_HOP, concat([node(7n, 9n, 0), new Uint8Array([0])]), v)).rejects.toThrow();
+	await expect(decodeParam(PARAM_HOP, node(7n, 1), v)).rejects.toThrow();
+	await expect(decodeParam(PARAM_HOP, concat([node(7n, 0), new Uint8Array([0])]), v)).rejects.toThrow();
+});
+
+test("lite-07 SETUP refuses a zero link cost, which older versions ignore", async () => {
+	const cost = (value: bigint, v: Version) => decodeParam(PARAM_COST, encodeVarint(value, v), v);
+	await expect(cost(0n, Version.DRAFT_07)).rejects.toThrow(ProtocolViolation);
+	await cost(5n, Version.DRAFT_07);
+	await cost(0n, Version.DRAFT_06);
 });
 
 test("SETUP with implementation round-trips", async () => {
@@ -253,11 +257,11 @@ test("SETUP carries no Hop ID on lite-07, and reads past a peer's Node ID", asyn
 	const msg = new Setup({ hop: toHop(7n) });
 	// An endpoint forwards nothing, so it declares no Node ID.
 	expect([...(await bytes((w) => msg.encode(w, Version.DRAFT_07), Version.DRAFT_07))]).toEqual([0x01, 0x00]);
-	// A forwarding peer's Node ID, start, and Marked.
-	expect((await decodeParam(0x5n, new Uint8Array([7, 3, 0]), Version.DRAFT_07)).hop).toBeUndefined();
-	// A Node ID of 0 names nobody, a start and Marked must follow it, a session's node is never
-	// marked, and nothing may follow that.
-	for (const value of [[0, 3, 0], [7], [7, 3], [7, 3, 1], [7, 3, 2], [7, 3, 0, 1]]) {
+	// A forwarding peer's Node ID and Marked.
+	expect((await decodeParam(0x5n, new Uint8Array([7, 0]), Version.DRAFT_07)).hop).toBeUndefined();
+	// A Node ID of 0 names nobody, Marked must follow it, a session's node is never marked, and
+	// nothing may follow that.
+	for (const value of [[0, 0], [7], [7, 1], [7, 2], [7, 0, 1]]) {
 		await expect(decodeParam(0x5n, new Uint8Array(value), Version.DRAFT_07)).rejects.toThrow();
 	}
 });

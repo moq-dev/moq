@@ -7,8 +7,8 @@
 //! the hop into the subscriber and releases them by send order, the way a congested
 //! sender would transmit them.
 
+use crate::WithMax as _;
 use crate::support;
-use moq_net::track::Delay;
 
 use std::time::Duration;
 
@@ -25,10 +25,11 @@ const FOREVER: Duration = Duration::from_millis((1 << 53) - 1);
 const BACKLOG: [u64; 4] = [0, 1, 2, 3];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// Connect a session serving `publish` to a fresh subscribing origin.
@@ -57,8 +58,8 @@ fn read_arrivals(origin: moq_net::origin::Producer, order: Order) -> kio::clock:
 			.expect("broadcast resolves")
 			.unwrap();
 		let subscription = Subscription::default()
-			.with_delay(Delay::default().with_max(FOREVER))
 			.with_ranges([support::keys(0..)])
+			.with_max(FOREVER)
 			.with_order(order);
 		let mut sub = remote
 			.track("ordered")

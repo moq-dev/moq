@@ -5,6 +5,7 @@
 //! stream receive credit the relay's transport grants, capped at 16 MiB, half the group's
 //! live tail. A slower reader is never waited on: it falls off the group's front.
 
+use crate::WithMax as _;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -18,7 +19,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 
 const MB: usize = 1 << 20;
 
-const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"];
+const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip", "moq-transport-22", "moq-transport-23"];
 
 /// Receive windows whose stream credit, 64 MiB, is past the 16 MiB pacing cap.
 fn uncapped() -> ReceiveWindow {
@@ -26,9 +27,11 @@ fn uncapped() -> ReceiveWindow {
 }
 
 fn origin(hop: u64) -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (origin, driver) = origin::Producer::new(config);
 	spawn(driver);
-	origin.with_proxy(true)
+	origin
 }
 
 /// A publisher's track and a relay's subscription to it, over one peering.
@@ -61,10 +64,10 @@ async fn relay(version: &str) -> Relay {
 		.unwrap();
 	let subscriber = kio::clock::timeout(
 		TIMEOUT,
-		remote.track("data").unwrap().subscribe(
-			track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(3600))),
-		),
+		remote
+			.track("data")
+			.unwrap()
+			.subscribe(track::Subscription::default().with_max(Duration::from_secs(3600))),
 	)
 	.await
 	.expect("subscribe timeout")
@@ -324,9 +327,7 @@ async fn two_relays_bound_their_cache_and_resume_without_a_hole() {
 		let mut subscriber = remote
 			.track("data")
 			.unwrap()
-			.subscribe(
-				track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(3600))),
-			)
+			.subscribe(track::Subscription::default().with_max(Duration::from_secs(3600)))
 			.await
 			.unwrap();
 		crate::support::harness::subscribed(&track).await;

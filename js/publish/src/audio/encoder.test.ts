@@ -25,6 +25,11 @@ mock.module("./capture-worklet.ts?worklet", () => ({ default: async () => "blob:
 
 const Audio = await import("./index");
 
+// A live join reaching `ms` back, whose groups stay wanted that long.
+const within = (ms: number): Moq.Track.Subscription => ({
+	ranges: [{ start: { live: { min: Duration.millis(ms), max: Duration.millis(ms) } } }],
+});
+
 const captured: Format = { sampleRate: 48_000, channelCount: 2 };
 
 describe("resolve", () => {
@@ -1355,7 +1360,7 @@ test.each([undefined, "off", "all"] as const)(
 
 			await push(4);
 			expect(encoder.out.stats.peek().frames).toBe(onDemand === "off" ? 4 : 0);
-			late = net.track("audio").subscribe({ delay: { max: Duration.millis(10_000) } });
+			late = net.track("audio").subscribe(within(10_000));
 			await settle();
 			expect(encoder.out.active.peek()).toBe(true);
 			await push(3);
@@ -1434,7 +1439,7 @@ test("a backlog encode refusal aborts its rendition when demand arrives", async 
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected network broadcast");
 		// A live-edge budget would leave the retained frame unencoded.
-		subscriber = net.track("audio").subscribe({ delay: { max: null } });
+		subscriber = net.track("audio").subscribe({ ranges: [{}] });
 		await settle();
 		expect(encoder.out.error.peek()).toBe(failure);
 		expect(subscriber.closed.peek()).toBe(failure);
@@ -1472,7 +1477,7 @@ test("default audio replays the last second after three seconds without a subscr
 		expect(encoder.out.active.peek()).toBe(false);
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected network broadcast");
-		late = net.track("audio").subscribe({ delay: { max: Duration.millis(1000) } });
+		late = net.track("audio").subscribe(within(1000));
 		await settle();
 		expect(encoder.out.stats.peek().frames).toBe(50);
 		for (let index = 150; index < 153; index++) {
@@ -1499,19 +1504,15 @@ test("default audio replays the last second after three seconds without a subscr
 
 // Replayed groups reach the track as fresh arrivals, so only the encoder can tell they are old: a
 // live viewer rejoining after seconds idle would otherwise wade through all of them first. A live
-// join states how far back it plays as its min delay, which bounds the replay however far its max
-// delay reaches; one that states none (moq-transport, moq-lite before 07) is bounded by its max
-// alone, as is a reader asking for history.
-const LIVE = [{}];
+// join states how far back it plays as its lag, which bounds the replay however far its max reaches,
+// and a join reaching back further (as one before lite-07 does) is bounded by its max alone.
+const live = (min: number, max: number) => [
+	{ start: { live: { min: Duration.millis(min), max: Duration.millis(max) } } },
+];
 for (const [name, subscription] of [
-	["a live join's min delay", { delay: { min: Duration.millis(130), max: Duration.millis(10_000) }, ranges: LIVE }],
-	["an oldest reader's max delay, stating no min", { delay: { min: null, max: Duration.millis(130) }, ranges: LIVE }],
-	[
-		"a live join's max delay when that is shorter than its min",
-		{ delay: { min: Duration.millis(10_000), max: Duration.millis(130) }, ranges: LIVE },
-	],
-	["a history reader's max delay", { delay: { max: Duration.millis(130) } }],
-] as const) {
+	["a live join's lag", { ranges: live(130, 10_000) }],
+	["a live join's max when that is shorter than its lag", { ranges: live(10_000, 130) }],
+] as [string, Moq.Track.Subscription][]) {
 	test(`demand replays only the retained audio ${name} still wants`, async () => {
 		using _webcodecs = installFakeWebCodecs();
 		const clock = new Manual();
@@ -1567,7 +1568,7 @@ test("a fetch alone replays the whole retention", async () => {
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected network broadcast");
 		// A first viewer leaves group 0 in the cache for the fetch to find.
-		const first = net.track("audio").subscribe({ delay: { max: null } });
+		const first = net.track("audio").subscribe({ ranges: [{}] });
 		await settle();
 		await feed.push({ timestamp: Duration.micros(0), channels: [new Float32Array(960)] });
 		await feed.drain();
@@ -1619,7 +1620,7 @@ test("replayed raw audio raises no catalog delay", async () => {
 		new Estimator().write(150 * 20_000, broadcast.order, true);
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected network broadcast");
-		late = net.track("audio").subscribe({ delay: { max: Duration.millis(1000) } });
+		late = net.track("audio").subscribe(within(1000));
 		await settle();
 		for (let index = 150; index < 153; index++) {
 			await feed.push({ timestamp: Duration.micros(index * 20_000), channels: [new Float32Array(960)] });
@@ -1744,7 +1745,7 @@ test.each([false, true])("audio retained before a disable is encoded on demand (
 
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected network broadcast");
-		late = net.track("audio").subscribe({ delay: { max: Duration.millis(1000) } });
+		late = net.track("audio").subscribe(within(1000));
 		await settle();
 		expect(encoder.out.catalog.peek()?.enabled).toBe(false);
 		expect(encoder.out.active.peek()).toBe(false);
@@ -1811,7 +1812,7 @@ test("audio retained across a disable and re-enable is served before the break",
 
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected network broadcast");
-		late = net.track("audio").subscribe({ delay: { max: Duration.millis(1000) } });
+		late = net.track("audio").subscribe(within(1000));
 		await settle(20);
 		// The four retained frames, then the marker, then the three resumed.
 		expect(encoder.out.stats.peek().frames).toBe(7);
@@ -1878,7 +1879,7 @@ test("a capture gap inside replayed audio keeps every frame on both sides of it"
 
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected network broadcast");
-		late = net.track("audio").subscribe({ delay: { max: Duration.millis(1000) } });
+		late = net.track("audio").subscribe(within(1000));
 		await settle(20);
 		// Every frame on both sides of the gap.
 		expect(encoder.out.stats.peek().frames).toBe(8);
@@ -2003,7 +2004,7 @@ test("every disable retained before demand gets its own break", async () => {
 
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected network broadcast");
-		late = net.track("audio").subscribe({ delay: { max: Duration.millis(1000) } });
+		late = net.track("audio").subscribe(within(1000));
 		await settle(20);
 		expect(encoder.out.stats.peek().frames).toBe(7);
 		expect(discontinuity.mock.calls.map(([end]) => end)).toEqual([
@@ -2058,7 +2059,7 @@ test("a break after expired history keeps the resumed audio flowing", async () =
 
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected network broadcast");
-		late = net.track("audio").subscribe({ delay: { max: Duration.millis(1000) } });
+		late = net.track("audio").subscribe(within(1000));
 		await settle(20);
 		expect(encoder.out.stats.peek().frames).toBe(3);
 		await push(2_060_000, 2);
@@ -2109,7 +2110,7 @@ test("demand between a re-enable and the resumed audio still breaks after the re
 
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected network broadcast");
-		late = net.track("audio").subscribe({ delay: { max: Duration.millis(1000) } });
+		late = net.track("audio").subscribe(within(1000));
 		await settle(20);
 		expect(encoder.out.stats.peek().frames).toBe(4);
 		expect(discontinuity.mock.calls.map(([end]) => end)).toEqual([Duration.micros(80_000)]);

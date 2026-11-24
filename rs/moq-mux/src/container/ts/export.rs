@@ -1397,14 +1397,14 @@ impl SiTrack {
 			};
 			self.state = match resolved {
 				Ok((broadcast, name)) => match broadcast.track(&name) {
-					Ok(track) => SiState::Subscribing(
-						track.subscribe(
-							self.source.subscription(
-								moq_net::track::Subscription::default()
-									.with_delay(moq_net::track::Delay::default().with_max(self.max_age)),
-							),
-						),
-					),
+					Ok(track) => SiState::Subscribing(track.subscribe(self.source.subscription(
+						moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+							moq_net::track::Start::Live {
+								min: Some(self.max_age),
+								max: Some(self.max_age),
+							},
+						)]),
+					))),
 					Err(err) => {
 						tracing::warn!(%err, track = %name, "SI track unavailable; carrying the last snapshot");
 						SiState::Done
@@ -1552,7 +1552,11 @@ impl SiTrack {
 			} else {
 				si_due(timestamp, self.last_emit, floor)
 			};
-		let repeat = !self.clock && due(timestamp, self.last_emit, interval);
+		// A declared interval is the table's limit. The sections go out with the frame they are
+		// muxed ahead of, up to its send-ahead late on the media timeline, so they repeat at
+		// half of it.
+		let cadence = self.interval.map_or(PSI_INTERVAL, |limit| limit / 2);
+		let repeat = !self.clock && due(timestamp, self.last_emit, cadence);
 		if self.active.is_empty() || !(revision || repeat) {
 			return None;
 		}
@@ -4592,8 +4596,8 @@ fn video_kind(config: &VideoConfig, name: &str) -> Result<Kind> {
 
 /// The delay a track subscription states for an export running `delay` behind: all of it, as both
 /// bounds, so a relay resets a group only once it is that old.
-pub(super) fn subscribed(delay: Duration) -> moq_net::track::Delay {
-	moq_net::track::Delay::default().with_min(delay).with_max(delay)
+pub(super) fn subscribed(delay: Duration) -> crate::container::Delay {
+	crate::container::Delay::default().with_min(delay).with_max(delay)
 }
 
 /// Skip a stalled group once the group after it runs `delay` past it, and wait that long for a
@@ -4602,7 +4606,7 @@ pub(super) fn subscribed(delay: Duration) -> moq_net::track::Delay {
 /// first frames go out late. No min, unlike [`subscribed`], so a live start begins at the newest
 /// group rather than reach back the delay.
 pub(super) fn skipping(source: ExportSource, delay: Duration) -> ExportSource {
-	source.skipping_at(moq_net::track::Delay::default().with_min(None).with_max(delay))
+	source.skipping_at(crate::container::Delay::default().with_min(None).with_max(delay))
 }
 
 /// Start a media track's source at the live edge, the newest group, so the export does not
@@ -5248,7 +5252,7 @@ mod tests {
 		let source = super::ExportSource::for_stream(
 			&source,
 			"video",
-			moq_net::track::Delay::default().with_max(Duration::from_secs(2)),
+			crate::container::Delay::default().with_max(Duration::from_secs(2)),
 		)
 		.unwrap();
 		let mut track = super::Track::new(source, Kind::Video(mpeg2ts::es::StreamType::H264));
@@ -5368,7 +5372,7 @@ mod tests {
 				let source = super::ExportSource::for_stream(
 					&source,
 					name,
-					moq_net::track::Delay::default().with_max(Duration::from_secs(2)),
+					crate::container::Delay::default().with_max(Duration::from_secs(2)),
 				)
 				.unwrap();
 				let mut track = super::Track::new(source, kind);

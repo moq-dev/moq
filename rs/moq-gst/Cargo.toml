@@ -12,6 +12,9 @@ edition = "2024"
 rust-version = "1.92"
 publish = true
 
+keywords = ["quic", "webtransport", "gstreamer", "media", "live"]
+categories = ["multimedia", "network-programming"]
+
 [lib]
 name = "gstmoq"
 crate-type = ["cdylib", "rlib"]

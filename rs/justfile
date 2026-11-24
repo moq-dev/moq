@@ -51,18 +51,32 @@ check-test *args:
 # Everything `check` verifies besides clippy.
 [positional-arguments]
 lint *args:
-    python3 sh/rs/stats-docs.py
+    #!/usr/bin/env bash
+    set -euo pipefail
+    run() { "$@" || { echo "error: $* failed" >&2; return 1; }; }
+    pids=()
+    run python3 sh/rs/stats-docs.py & pids+=($!)
     # The environment is process-wide, so nothing writes it. A text check, because the
     # clock lint's test allowances also silence clippy's disallowed_methods.
-    git grep --untracked -nE '(^|[^[:alnum:]_])(set_var|remove_var)[[:space:]]*\(' -- 'rs/*.rs'; [ $? -eq 1 ] || { echo "error: a write to the process environment: pass the value down, or run a test in a child with test_env::Env" >&2; exit 1; }
-    cargo fmt --all --check
-    RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked --no-deps "$@"
-    cargo shear --deny-warnings
+    (
+        rc=0
+        git grep --untracked -nE '(^|[^[:alnum:]_])(set_var|remove_var)[[:space:]]*\(' -- 'rs/*.rs' || rc=$?
+        [ "$rc" -eq 1 ] || { echo "error: a write to the process environment: pass the value down, or run a test in a child with test_env::Env" >&2; exit 1; }
+    ) & pids+=($!)
+    run cargo fmt --all --check & pids+=($!)
+    RUSTDOCFLAGS="-D warnings" run bash sh/local.sh cargo doc --locked --no-deps "$@" & pids+=($!)
+    run cargo shear --deny-warnings & pids+=($!)
     # The workspace-hack's table order is `cargo hakari`'s, which `cargo sort` disagrees with.
-    cargo sort --check --no-format . $(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name != "workspace-hack") | .manifest_path | rtrimstr("/Cargo.toml")')
-    cargo hakari generate --diff
-    python3 sh/rs/hakari.py
-    python3 sh/rs/crypto.py
+    (
+        mapfile -t manifests < <(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name != "workspace-hack") | .manifest_path | rtrimstr("/Cargo.toml")')
+        run cargo sort --check --no-format . "${manifests[@]}"
+    ) & pids+=($!)
+    run cargo hakari generate --diff & pids+=($!)
+    run python3 sh/rs/hakari.py & pids+=($!)
+    run python3 sh/rs/crypto.py & pids+=($!)
+    fail=0
+    for pid in "${pids[@]}"; do wait "$pid" || fail=1; done
+    exit "$fail"
 
 # Auto-fix clippy/format/shear/sort.
 [positional-arguments]
@@ -156,6 +170,8 @@ macos-test:
     source sh/checks.sh
     run just rs test --manifest-path rs/moq-auth/Cargo.toml
     run just rs test -p kio -p hang -p moq-tokio -p moq-sock
+    # AVFoundation, the reader behind QuickTime Player and Safari, lists a finished MP4's chapters.
+    run just rs test -p moq-mux --lib -E 'test(=container::mp4::tests::apple_lists_the_chapters)'
     run just rs test -p moq-video --no-default-features -E 'test(encode::backend::videotoolbox::tests)'
     # Runner has no camera; these tests need none.
     run just rs test -p moq-video --no-default-features --features capture -E 'test(/^capture::avfoundation::tests::/)'
@@ -190,6 +206,7 @@ capture-test *args:
 # first); without one the tests skip, or fail under CI_STRICT.
 v4l2:
     just rs test -p moq-video --no-default-features --features capture --lib --run-ignored only -E 'test(/^capture::v4l2::tests::vivid::/)'
+    just rs test -p moq-v4l --lib --run-ignored only -E 'test(/::tests::vivid::/)'
 
 # Compare SHM and GetImage through production capture on the current X11 display.
 x11-bench:

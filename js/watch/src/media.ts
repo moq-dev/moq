@@ -1,16 +1,16 @@
-import type { Container } from "@moq/hang";
+import { Container } from "@moq/hang";
 import type * as Moq from "@moq/net";
 import { Error as NetError } from "@moq/net";
-import type { Effect, Getter } from "@moq/signals";
-
-// A live join: a range with no start, which the serving hop starts at the delay's min behind the live
-// edge, so a cold join, a replacement, or a fallback arrives with its buffer full rather than
-// replaying the retained backlog.
-const LIVE: Moq.Track.Range[] = [{}];
+import { type Effect, type Getter, type GetterInit, getter } from "@moq/signals";
 
 /**
- * Open a media subscription, joining live at its min delay, with its delay on the initial request
- * and every update.
+ * Open a media subscription, joining live at its min delay, with its priority and delay on the
+ * initial request, and its priority and max on every update. The serving hop starts the live join
+ * that far behind the live edge, so a cold join, a replacement, or a fallback arrives with its buffer
+ * full rather than replaying the retained backlog. An update keeps each live join's lag and retunes
+ * only its max (see `Container.update`): a changed lag resolves again, which would place the join
+ * anew and skip media
+ * buffered behind it.
  *
  * @internal
  */
@@ -19,17 +19,21 @@ export function subscribeMedia(
 	props: {
 		broadcast: Moq.Broadcast.Consumer;
 		track: string;
-		priority: number;
-		delay: Getter<Moq.Track.Delay>;
+		priority: GetterInit<number>;
+		delay: Getter<Container.Delay>;
 	},
 ): Moq.Track.Subscriber | undefined {
 	if (effect.get(props.broadcast.closed) !== undefined) return;
-	const subscription = () => ({ priority: props.priority, delay: props.delay.peek(), ranges: LIVE });
-	const subscriber = props.broadcast.track(props.track).subscribe(subscription());
+	const priority = getter(props.priority);
+	const subscriber = props.broadcast
+		.track(props.track)
+		.subscribe(Container.subscription(props.delay.peek(), { priority: priority.peek() }));
 	effect.cleanup(() => subscriber.close());
 
 	effect.run((inner) => {
-		subscriber.update({ priority: props.priority, delay: inner.get(props.delay), ranges: LIVE });
+		const asked = { priority: inner.get(priority) };
+		const delay = inner.get(props.delay);
+		subscriber.update(Container.update(delay, subscriber.subscription.peek() ?? {}, asked));
 	});
 
 	return subscriber;

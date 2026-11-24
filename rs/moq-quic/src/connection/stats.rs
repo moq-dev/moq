@@ -170,6 +170,15 @@ pub struct PathStats {
 	pub sent_bandwidth_probe_bytes: u64,
 	/// The number of times a black hole was detected in the path
 	pub black_holes_detected: u64,
+	/// Time data ready to send waited on a full congestion window
+	///
+	/// A wait ends once the window has room or the pacer's deadline passes, even if no transmit
+	/// follows. Time accrues as the connection is driven (receiving, timers, transmitting), so a
+	/// wait in progress counts up to the latest of those.
+	pub cwnd_blocked: Duration,
+	/// Time data ready to send waited on the pacer, which spreads sends at the congestion
+	/// controller's rate; accrues like `cwnd_blocked`
+	pub pacing_blocked: Duration,
 	/// Largest UDP payload size the path currently supports
 	pub current_mtu: u16,
 }
@@ -210,6 +219,22 @@ pub struct CreditStats {
 	/// The most credit the peer has had spent at once, leased or not yet read: how close the
 	/// connection came to filling its receive window
 	pub peak_spent: u64,
+	/// How long the peer had the whole window spent while eviction was held off
+	pub held: HeldStats,
+}
+
+/// Time the receive window stayed spent, the peer out of credit, while eviction waited, by what
+/// it waited on; see [`recv::Stream::poll_lease()`](crate::recv::Stream::poll_lease)
+///
+/// Time accrues as the connection is driven (receiving, timers, transmitting), so a hold in
+/// progress counts up to the latest of those.
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct HeldStats {
+	/// A reader had data it had not looked at yet, or waited behind a gap: a reader behind
+	pub readers: Duration,
+	/// An evicted reader had not stopped its stream, keeping the credit of bytes it took
+	pub evicted: Duration,
 }
 
 /// Connection-level send flow control: how long writers waited on the peer's credit

@@ -516,6 +516,7 @@ export namespace Origin {
 		reject(err: Error): void;
 		route(options?: Origin.RouteOptions): Origin.Route;
 		serve(source: Broadcast.Producer | Broadcast.Consumer): void;
+		unwanted(): Promise<void>;
 	}
 	export interface RequestOptions {
 		instance?: Instance.Valid;
@@ -678,10 +679,6 @@ export namespace Track {
 		readonly name: string;
 		subscribe(options?: Track.Subscription): Track.Subscriber;
 	}
-	export interface Delay {
-		max?: Clock.Duration | null;
-		min?: Clock.Duration | null;
-	}
 	export class Demand {
 		get closed(): Signals.GetPromise<Error | null>;
 		readonly name: string;
@@ -689,7 +686,6 @@ export namespace Track {
 		get wanted(): Signals.Getter<boolean>;
 	}
 	export interface FetchGroupOptions {
-		maxDelay?: Clock.Duration;
 		priority?: number;
 		signal?: AbortSignal;
 	}
@@ -701,7 +697,6 @@ export namespace Track {
 		readonly end: bigint;
 		readonly floor: bigint;
 		isWanted(key: bigint): boolean;
-		get maxDelay(): Clock.Duration | null;
 		get order(): Track.Order;
 		get priority(): number;
 		refuseGroups(start: bigint, end: bigint, error: Error): void;
@@ -749,6 +744,10 @@ export namespace Track {
 		landed?: Clock.Instant;
 		start: bigint;
 	};
+	export interface Live {
+		max?: Clock.Duration | null;
+		min: Clock.Duration | null;
+	}
 	export type Order = "ascending" | "descending";
 	export class Ordered {
 		close(abort?: Error): void;
@@ -802,7 +801,7 @@ export namespace Track {
 	}
 	export interface Range {
 		end?: bigint;
-		start?: bigint;
+		start?: Track.Start;
 	}
 	export interface Refresh {
 		interval: Clock.Duration | null;
@@ -817,6 +816,9 @@ export namespace Track {
 		get name(): string;
 		requestedFill(): Promise<Track.FillGroups | undefined>;
 	}
+	export type Start = bigint | {
+		live: Track.Live;
+	};
 	export class Subscriber {
 		close(abort?: Error): void;
 		get closed(): Signals.GetPromise<Error | null>;
@@ -836,7 +838,6 @@ export namespace Track {
 		default(): Track.Subscription;
 	};
 	export interface Subscription {
-		delay?: Track.Delay;
 		order?: Track.Order;
 		priority?: number;
 		ranges?: Track.Range[];

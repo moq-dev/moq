@@ -2,6 +2,7 @@
 
 //! A reader leaving and rejoining a track relayed over the in-memory mock transport.
 
+use crate::WithMax as _;
 use crate::support;
 use support::AppendNext;
 use support::AtStart;
@@ -24,10 +25,11 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Build an origin producer, spawning its driver on the ambient runtime.
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 async fn read_all(group: &mut group::Consumer) -> moq_net::Result<Vec<Vec<u8>>> {
@@ -72,9 +74,7 @@ async fn rejoin_recovers_the_group_reset_on_leave() {
 					.unwrap();
 
 				let ts = |ms| Timestamp::from_millis(ms).unwrap();
-				let prefs = || {
-					track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(10)))
-				};
+				let prefs = || track::Subscription::default().with_max(Duration::from_secs(10));
 
 				let mut group = track.append_next().unwrap();
 				group.write_frame(ts(0), b"a0".as_ref()).unwrap();
@@ -239,8 +239,7 @@ async fn rejoin_keeps_the_cache_when_the_backlog_lands_newest_first() {
 				.unwrap()
 				.unwrap();
 			let ts = |ms| Timestamp::from_millis(ms).unwrap();
-			let prefs =
-				|| track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(10)));
+			let prefs = || track::Subscription::default().with_max(Duration::from_secs(10));
 
 			// Held for fetches only: it keeps the relay's copy without subscribing.
 			let _held = remote.track("video").unwrap();
@@ -378,7 +377,7 @@ async fn rejoin_mid_group_keeps_the_head_for_later_readers() {
 /// downstream, rather than wait on a head that is never coming.
 #[kio::test]
 async fn rejoin_goes_live_without_the_join_head() {
-	for version in ["moq-transport-18", "moq-transport-22"] {
+	for version in ["moq-transport-18", "moq-transport-22", "moq-transport-23"] {
 		kio::clock::timeout(TEST_TIMEOUT, async {
 			let publisher = produce_origin(1);
 			let relay = produce_origin(2);
@@ -520,7 +519,7 @@ async fn rejoin_during_the_cancel_skips_the_cache() {
 /// first frame. Shown in between, it would leave the cached group without a stamped
 /// successor, and a reader at the live edge would be handed that older group first.
 #[kio::test]
-async fn rejoin_waits_for_the_answers_first_frame() {
+async fn rejoin_never_hands_the_cached_group_before_the_answer() {
 	// Lite01/02 carry no max age, so the publisher serves the relay's cached head again and
 	// that answer is what makes the cache current.
 	let unbudgeted = ["moq-lite-01", "moq-lite-02"];
@@ -571,15 +570,24 @@ async fn rejoin_waits_for_the_answers_first_frame() {
 
 			pair.server_transport.split_unis();
 			let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
-			let early = kio::clock::timeout(Duration::from_secs(1), sub.recv_group()).await;
-			assert!(
-				early.is_err(),
-				"{version}: the rejoining reader got the cached group {:?} first",
-				early.map(|group| group.unwrap().unwrap().start)
-			);
+			// A live join the route's answer placed may hand the route's group as its header
+			// lands, but never the cached group before it.
+			let early = kio::clock::timeout(Duration::from_secs(1), sub.recv_group())
+				.await
+				.ok()
+				.map(|group| group.unwrap().unwrap());
+			if let Some(group) = &early {
+				assert_eq!(
+					group.start, 1,
+					"{version}: the rejoining reader got the cached group first"
+				);
+			}
 
 			pair.server_transport.release_split();
-			let mut group = sub.recv_group().await.unwrap().unwrap();
+			let mut group = match early {
+				Some(group) => group,
+				None => sub.recv_group().await.unwrap().unwrap(),
+			};
 			// A track that arrives untimed has no media age to skip the cached group by, so
 			// its reader starts at the newest group cached and reads on from there.
 			if sub.info().timescale.is_none() && group.start == 0 {
@@ -692,7 +700,7 @@ async fn leaving_after_the_cache_window_keeps_the_latest_group() {
 /// the empty block the second one carries.
 #[kio::test]
 async fn rejoin_keeps_source_timestamps() {
-	for version in ["moq-transport-18", "moq-transport-22"] {
+	for version in ["moq-transport-18", "moq-transport-22", "moq-transport-23"] {
 		kio::clock::timeout(TEST_TIMEOUT, async {
 			let publisher = produce_origin(1);
 			let client = produce_origin(2);

@@ -5,7 +5,7 @@
 //! handler serves each fill it takes as one bounded run: [`FillGroups::accept`] for each group it
 //! has, [`FillGroups::drop_groups`] for the rest.
 //!
-//! A fill serves under what its readers ask now: a reader changing its priority, budget, or
+//! A fill serves under what its readers ask now: a reader changing its priority or
 //! order moves every fill it waits on, queued or taken. Only the first group's start frame
 //! stays as the handler took it, since a handler may have asked its source for it already;
 //! a reader wanting earlier frames of that group asks a fill of its own.
@@ -15,12 +15,11 @@ use std::{
 	ops,
 	sync::Arc,
 	task::Poll,
-	time::Duration,
 };
 
 use rangemap::{RangeMap, RangeSet};
 
-use super::{Info, Order, Position, TrackState, clamp_max_delay};
+use super::{Info, Order, Position, TrackState};
 use crate::{Error, Result, StreamError, group, util::SendCell};
 
 /// The fills a track's readers asked for, queued or taken by a handler, under one lock.
@@ -117,7 +116,6 @@ impl Pending {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::model) struct Asking {
 	pub priority: i8,
-	pub max_delay: Option<Duration>,
 	pub order: Order,
 }
 
@@ -126,19 +124,12 @@ pub(in crate::model) struct Asking {
 #[derive(Default)]
 struct Asks {
 	priorities: BTreeMap<i8, usize>,
-	budgets: BTreeMap<Duration, usize>,
-	// Joins with no budget of their own: only the publisher's max age, which none relaxes.
-	unbounded: usize,
 	descending: usize,
 }
 
 impl Asks {
 	fn add(&mut self, asking: &Asking) {
 		*self.priorities.entry(asking.priority).or_default() += 1;
-		match asking.max_delay {
-			Some(budget) => *self.budgets.entry(budget).or_default() += 1,
-			None => self.unbounded += 1,
-		}
 		if asking.order == Order::Descending {
 			self.descending += 1;
 		}
@@ -155,10 +146,6 @@ impl Asks {
 			}
 		}
 		take(&mut self.priorities, asking.priority);
-		match asking.max_delay {
-			Some(budget) => take(&mut self.budgets, budget),
-			None => self.unbounded -= 1,
-		}
 		if asking.order == Order::Descending {
 			self.descending -= 1;
 		}
@@ -167,15 +154,6 @@ impl Asks {
 	/// The most urgent priority asked.
 	fn priority(&self) -> i8 {
 		self.priorities.last_key_value().map_or(0, |(priority, _)| *priority)
-	}
-
-	/// The most tolerant budget asked: `None` is the publisher's max age alone, which no
-	/// explicit budget relaxes.
-	fn max_delay(&self) -> Option<Duration> {
-		match self.unbounded {
-			0 => self.budgets.last_key_value().map(|(budget, _)| *budget),
-			_ => None,
-		}
 	}
 
 	/// Newest first once any join asks for it, as any descending subscriber makes a
@@ -201,16 +179,24 @@ pub(crate) struct Outcome {
 	// Each accepted copy short of the whole group, which a later copy may displace from the
 	// cache before a reader takes it. A whole copy covers every other, so none displaces it.
 	partial: BTreeMap<u64, group::Handle>,
+	// The group a time start's fill accepted below the time, created or already cached, held so
+	// where it ends is known even once the cache lets it go.
+	answer: Option<group::Handle>,
 }
 
 impl Outcome {
-	/// Why `key` was refused, if it was, and the budget its source was asked under.
-	pub(crate) fn refused(&self, key: u64) -> Option<(&Error, Option<Duration>)> {
-		self.refused.get(&key).map(|refusal| (&refusal.err, refusal.asked))
+	/// Why `key` was refused, if it was.
+	pub(crate) fn refused(&self, key: u64) -> Option<&Error> {
+		self.refused.get(&key).map(|refusal| &refusal.err)
 	}
 
 	pub(super) fn is_accepted(&self, key: u64) -> bool {
 		self.accepted.contains(&key)
+	}
+
+	/// The group a time start's fill accepted below the time.
+	pub(super) fn answer(&self) -> Option<&group::Handle> {
+		self.answer.as_ref()
 	}
 
 	/// What a time start's fill answered, once `time`'s key is: `None` while it is out.
@@ -232,16 +218,8 @@ impl Outcome {
 		self.partial.get(&key).filter(|copy| copy.covers(frames)).cloned()
 	}
 
-	/// What was answered within `wanted`: accepted, or refused with why and the budget
-	/// the fill asked with.
-	#[expect(
-		clippy::type_complexity,
-		reason = "each answer pairs a run with its outcome; naming it would only move the type"
-	)]
-	pub(super) fn within(
-		&self,
-		wanted: &RangeSet<u64>,
-	) -> Vec<(ops::Range<u64>, std::result::Result<(), (Error, Option<Duration>)>)> {
+	/// What was answered within `wanted`: accepted, or refused with why.
+	pub(super) fn within(&self, wanted: &RangeSet<u64>) -> Vec<(ops::Range<u64>, std::result::Result<(), Error>)> {
 		let mut answers = Vec::new();
 		for run in wanted.iter() {
 			for accepted in self.accepted.overlapping(run) {
@@ -249,7 +227,7 @@ impl Outcome {
 			}
 			for (refused, refusal) in self.refused.overlapping(run) {
 				let groups = refused.start.max(run.start)..refused.end.min(run.end);
-				answers.push((groups, Err((refusal.err.clone(), refusal.asked))));
+				answers.push((groups, Err(refusal.err.clone())));
 			}
 		}
 		answers
@@ -260,21 +238,13 @@ impl Outcome {
 		self.resolved.insert(groups);
 	}
 
-	fn refuse(&mut self, groups: ops::Range<u64>, err: Error, asked: Option<Duration>, dropped: bool) {
+	fn refuse(&mut self, groups: ops::Range<u64>, err: Error, dropped: bool) {
 		if groups.is_empty() {
 			return;
 		}
 		let id = self.refusals;
 		self.refusals += 1;
-		self.refused.insert(
-			groups.clone(),
-			Refusal {
-				id,
-				err,
-				asked,
-				dropped,
-			},
-		);
+		self.refused.insert(groups.clone(), Refusal { id, err, dropped });
 		self.resolved.insert(groups);
 	}
 }
@@ -297,9 +267,6 @@ pub(super) enum TimeStart {
 struct Refusal {
 	id: u64,
 	err: Error,
-	// The budget its source was asked under, so a looser reader can tell that an
-	// [`Error::Old`] was not its own.
-	asked: Option<Duration>,
 	// Named dropped, the source's word that it has none of them, rather than refused for now.
 	dropped: bool,
 }
@@ -892,8 +859,8 @@ pub(super) fn poll_requested(
 /// It names `start.group` up to the exclusive [`end`](Self::end), the first group from
 /// [`start`](Self::start)'s frame. A reader's time start that no group the cache holds places
 /// asks for the group containing that time as a fill one key wide, from the time, whose first
-/// group may start below it: see [`floor`](Self::floor). Its [`priority`](Self::priority),
-/// [`max_delay`](Self::max_delay), and [`order`](Self::order) follow its readers as they
+/// group may start below it: see [`floor`](Self::floor). Its [`priority`](Self::priority)
+/// and [`order`](Self::order) follow its readers as they
 /// change, so read them as each group is served. The handler calls [`accept`](Self::accept) for each group
 /// it has and [`drop_groups`](Self::drop_groups) for the rest, one group at a time as
 /// [`poll_wanted_changed`](Self::poll_wanted_changed) yields them, so it writes no faster than its
@@ -951,13 +918,15 @@ impl FillGroups {
 	/// The oldest group the first group may start at: [`start`](Self::start)'s, unless that is a
 	/// reader's time start no group the cache holds places. Then the first group is the one
 	/// containing that time: the group starting at it, or else the newest one starting before
-	/// it, at or after the floor. A handler knowing its groups only by key serves that key as
+	/// it, at or after the floor; once that group ends whole at or before the time, the reader
+	/// starts past it, at its End. A handler knowing its groups only by key serves that key as
 	/// any other; one that can tell which group holds the time, as from an index, may
 	/// [`accept`](Self::accept) that group instead, or [`drop_groups`](Self::drop_groups) the
 	/// key when none does. The reader starts where the answer says, never where the groups
 	/// the cache holds happen to say: a drop, or the fill closed unanswered, says no group
-	/// starts from the floor through the time, so it starts at the group just below the floor,
-	/// or past the time when the floor is 0. A [refusal](Self::refuse_groups) fails the reader
+	/// starts from the floor through the time, so it starts at the group just below the floor
+	/// (at its End once the time is past that group's span), or past the time when the floor is
+	/// 0. A [refusal](Self::refuse_groups) fails the reader
 	/// with its error until its ranges change.
 	pub fn floor(&self) -> u64 {
 		self.inner.floor.unwrap_or(self.inner.start.group)
@@ -999,12 +968,6 @@ impl FillGroups {
 		self.inner.asks.read().priority()
 	}
 
-	/// The most tolerant age budget among the readers waiting on it now, or `None` for the
-	/// publisher's max age alone. Each reader still enforces its own.
-	pub fn max_delay(&self) -> Option<Duration> {
-		self.inner.max_delay()
-	}
-
 	/// Which end to fill first now: [`Order::Descending`] is newest first.
 	pub fn order(&self) -> Order {
 		self.inner.asks.read().order()
@@ -1033,12 +996,8 @@ impl FillGroups {
 	/// reader still reads count; the rest of the fill was never owed.
 	pub fn drop_groups(&self, groups: ops::Range<u64>) {
 		let owed = self.inner.owed(groups);
-		self.inner.drop_groups(
-			&owed,
-			Error::NotFound,
-			super::Hole::drop(StreamError::NotFound),
-			self.max_delay(),
-		);
+		self.inner
+			.drop_groups(&owed, Error::NotFound, super::Hole::drop(StreamError::NotFound));
 	}
 
 	/// Refuse `groups` with `err` without saying the source lost them, as when serving them
@@ -1047,7 +1006,7 @@ impl FillGroups {
 	/// count, as with [`Self::drop_groups`].
 	pub fn refuse_groups(&self, groups: ops::Range<u64>, err: Error) {
 		let owed = self.inner.owed(groups);
-		self.inner.refuse(&owed, err, self.max_delay());
+		self.inner.refuse(&owed, err);
 	}
 
 	/// Poll until no reader waits on this fill: it is withdrawn, so stop serving it.
@@ -1179,7 +1138,7 @@ impl FillGroups {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn refuse(&self, err: Error) {
 		let unresolved = self.inner.unresolved(self.inner.start.group..self.inner.end);
-		self.inner.refuse(&unresolved, err, self.max_delay());
+		self.inner.refuse(&unresolved, err);
 	}
 
 	/// The next run of groups still owed, in the fill's order: [`Self::wanted`]'s group,
@@ -1281,7 +1240,7 @@ impl FillGroups {
 	/// stale verdict under that age.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn reject_groups(&self, groups: ops::Range<u64>, err: Error) {
-		self.inner.reject(groups, err, self.max_delay());
+		self.inner.reject(groups, err);
 	}
 
 	/// Declare the track's exclusive final key, as the source answering a request
@@ -1301,7 +1260,6 @@ impl FillGroups {
 			frame_start: self.inner.frame_start(key),
 			frame_end: self.inner.bounds(key).end,
 			priority: self.priority(),
-			max_delay: self.max_delay(),
 		}
 	}
 }
@@ -1322,10 +1280,6 @@ impl Inner {
 			.pending
 			.get(&self.id)
 			.is_some_and(|pending| !pending.unseen.is_empty())
-	}
-
-	fn max_delay(&self) -> Option<Duration> {
-		self.asks.read().max_delay()
 	}
 
 	fn poll_unwanted(&self, key: u64, waiter: &kio::Waiter) -> Poll<()> {
@@ -1401,12 +1355,21 @@ impl Inner {
 				_ => false,
 			}
 		};
-		// Cache the group before answering: readers resolve an accept through the cache.
+		// Cache the group before answering: readers resolve an accept through the cache. A time
+		// start answered below its time holds the group it names, created or cached, under the
+		// same lock, so its End stays known once the cache lets it go.
+		let mut answer = None;
 		let res = TrackState::modify(&self.state).and_then(|mut state| {
 			let res = match self.flight {
 				true => state.insert_flight(key, frames, info).map(Some),
 				false => state.insert_group_request(key, frames, info),
 			};
+			if key < self.start.group {
+				answer = match &res {
+					Ok(Some(group)) => Some(group.handle()),
+					_ => state.cached_handle(key),
+				};
+			}
 			let deferred = state.deferred();
 			drop(state);
 			deferred.wake();
@@ -1426,14 +1389,17 @@ impl Inner {
 			{
 				outcome.partial.insert(key, group.handle());
 			}
+			if answer.is_some() {
+				outcome.answer = answer;
+			}
 		}
 		uncover(&self.fills, self.id, key..end);
 		res
 	}
 
-	/// Refuse `groups` with `err`, as the source answered under `asked`, recording them in the
-	/// track's drops as `hole` says, so the later readers it settles do not ask again.
-	fn drop_groups(&self, groups: &RangeSet<u64>, err: Error, hole: super::Hole, asked: Option<Duration>) {
+	/// Refuse `groups` with `err`, as the source answered, recording them in the track's drops
+	/// as `hole` says, so the later readers it settles do not ask again.
+	fn drop_groups(&self, groups: &RangeSet<u64>, err: Error, hole: super::Hole) {
 		if groups.is_empty() {
 			return;
 		}
@@ -1442,7 +1408,7 @@ impl Inner {
 				state.drop_unfed(groups.clone(), hole.clone());
 			}
 		}
-		self.answer(groups, err, asked, true);
+		self.answer(groups, err, true);
 	}
 
 	/// The part of `groups` inside the fill that a reader still reads and nothing answered yet.
@@ -1470,18 +1436,18 @@ impl Inner {
 		self.result.read().resolved.gaps(&groups).collect()
 	}
 
-	fn refuse(&self, groups: &RangeSet<u64>, err: Error, asked: Option<Duration>) {
-		self.answer(groups, err, asked, false);
+	fn refuse(&self, groups: &RangeSet<u64>, err: Error) {
+		self.answer(groups, err, false);
 	}
 
 	/// Answer `groups` with `err`, `dropped` when the source has none of them.
-	fn answer(&self, groups: &RangeSet<u64>, err: Error, asked: Option<Duration>, dropped: bool) {
+	fn answer(&self, groups: &RangeSet<u64>, err: Error, dropped: bool) {
 		if groups.is_empty() {
 			return;
 		}
 		if let Ok(mut outcome) = self.result.write() {
 			for groups in groups.iter() {
-				outcome.refuse(groups.clone(), err.clone(), asked, dropped);
+				outcome.refuse(groups.clone(), err.clone(), dropped);
 			}
 		}
 		for groups in groups.iter() {
@@ -1489,44 +1455,27 @@ impl Inner {
 		}
 	}
 
-	/// The publisher's max age, when an [`Error::Old`] answer under `asked` reached it rather
-	/// than that budget, which a more tolerant reader may exceed: the budget that binds every
-	/// reader. `None` while the max age is unknown.
+	/// Refuse `groups` with `err`, as their source answered a request for them.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	fn binding_max_age(&self, asked: Option<Duration>) -> Option<Duration> {
-		let bound = self.state.read().max_age_bound()?;
-		match asked {
-			Some(max_delay) if clamp_max_delay(max_delay, Some(bound)) < bound => None,
-			_ => Some(bound),
-		}
-	}
-
-	/// Refuse `groups` with `err`, as their source answered a request for them under `asked`.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	fn reject(&self, groups: ops::Range<u64>, err: Error, asked: Option<Duration>) {
-		match err {
-			// Stale under the fill's budget, and so is every group older than it: a timed
-			// track's starts never rewind. Under the publisher's max age it binds every reader,
-			// so the track holds it as a stale verdict under that age: retryable, it lasts only
-			// until new terms or the drop set's expiry window forget it. Under the fill's own
-			// budget, or a max age not known here, they are withdrawn, for a reader with a
-			// wider one.
-			Error::Old => {
+	fn reject(&self, groups: ops::Range<u64>, err: Error) {
+		// Hoisted: a guard in the scrutinee would live through the arms, deadlocking against
+		// the drop's write.
+		let bound = self.state.read().max_age_bound();
+		match (err, bound) {
+			// Past the publisher's max age, and so is every group older than it: a timed track's
+			// starts never rewind. The bound binds every reader, so the track holds it as a stale
+			// verdict under that age: retryable, it lasts only until new terms or the drop set's
+			// expiry window forget it.
+			(Error::Old, Some(bound)) => {
 				let older = self.start.group..groups.end;
-				match self.binding_max_age(asked) {
-					Some(bound) => self.drop_groups(&self.owed(older), Error::Old, super::Hole::stale(bound), asked),
-					None => {
-						let unresolved = self.unresolved(older);
-						self.refuse(&unresolved, Error::Old, asked);
-					}
-				}
+				self.drop_groups(&self.owed(older), Error::Old, super::Hole::stale(bound));
 			}
-			// Anything else, a miss included, answers only this request: one starting at
-			// another frame may still be served, such as the tail of a group whose head
-			// expired. Refused for now, recorded nowhere.
-			err => {
+			// Anything else, a miss or an age not known here included, answers only this request:
+			// one starting at another frame may still be served, such as the tail of a group whose
+			// head expired. Refused for now, recorded nowhere.
+			(err, _) => {
 				let unresolved = self.unresolved(groups);
-				self.refuse(&unresolved, err, asked);
+				self.refuse(&unresolved, err);
 			}
 		}
 	}
@@ -1564,7 +1513,6 @@ impl Drop for Inner {
 			wanted.iter().flat_map(|run| outcome.resolved.gaps(run)).collect()
 		};
 		if !left.is_empty() && self.result.wanted() {
-			let asked = self.max_delay();
 			if let Ok(mut state) = TrackState::modify(&self.state) {
 				// Unanswered is a miss downstream, as an explicit `drop_groups` would say.
 				for groups in left.iter() {
@@ -1573,7 +1521,7 @@ impl Drop for Inner {
 			}
 			if let Ok(mut outcome) = self.result.write() {
 				for groups in left.iter() {
-					outcome.refuse(groups.clone(), Error::Dropped, asked, true);
+					outcome.refuse(groups.clone(), Error::Dropped, true);
 				}
 			}
 		}
@@ -1586,7 +1534,7 @@ impl TrackState {
 	/// or the live feed may still deliver: a fill refused is no verdict on the feed.
 	fn drop_unfed(&mut self, groups: ops::Range<u64>, hole: super::Hole) {
 		// Until the serving session resolves where the feed starts, it may deliver anything.
-		if matches!(self.start, super::Start::Pending(_)) {
+		if matches!(self.start, super::FeedStart::Pending(_)) {
 			return;
 		}
 		let now = self.cache.pool().now_wall();
@@ -1641,7 +1589,6 @@ pub(crate) struct GroupFill {
 	frame_start: u64,
 	frame_end: Option<u64>,
 	priority: i8,
-	max_delay: Option<Duration>,
 }
 
 #[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
@@ -1654,12 +1601,6 @@ impl GroupFill {
 	/// The delivery priority the readers asked for when the group was taken.
 	pub(crate) fn priority(&self) -> i8 {
 		self.priority
-	}
-
-	/// The widest budget among the readers when the group was taken, for a handler that
-	/// forwards it.
-	pub(crate) fn max_delay(&self) -> Option<Duration> {
-		self.max_delay
 	}
 
 	/// The first frame of the group the readers want; 0 is the whole group.
@@ -1709,6 +1650,6 @@ impl GroupFill {
 	/// [`Error::Old`] under the publisher's max age (with every older group of the fill)
 	/// is recorded, as a stale verdict under that age.
 	pub(crate) fn reject(self, err: Error) {
-		self.inner.reject(self.key..self.key + 1, err, self.max_delay);
+		self.inner.reject(self.key..self.key + 1, err);
 	}
 }

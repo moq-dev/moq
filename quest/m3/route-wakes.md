@@ -32,9 +32,10 @@ Facts from `main` (`rs/moq-net/src/model/origin.rs`, since Wildcard landed in
   whatever the cost; the cheaper cost; a broadcast published on this origin;
   the shorter hop chain; then, on lite-07, the draft's Rendezvous Hash of
   the path and the claim's Instance (`rendezvous`) and the claimant's
-  relay, or on older versions a hash of the Instance and then of the chain,
-  lowest first; and last the newest entry. A broadcast published here for
-  exactly the path skips both hashes. A join moves only paths the newcomer
+  relay, lowest first, or on older versions a hash of a named Instance
+  (none for one a session minted) and then the route that has held its
+  rank longest; and last the newest entry. A broadcast published here for
+  exactly the path skips both. A join moves only paths the newcomer
   wins, a leave only paths the leaver was winning.
 - On lite-07 the route layer writes into this table through `route::node`,
   one write per broadcast whose way changed; a change to one route's cost

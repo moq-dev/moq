@@ -7,7 +7,7 @@
 //! The track is complete before the broadcast ends, and the session stays open, so
 //! the subscription must conclude normally. moq-lite, ANNOUNCE_END: "Retraction does
 //! not disturb subscriptions already in flight, which conclude normally with
-//! SUBSCRIBE_FINISH." Instead the track is aborted when the broadcast ends, and
+//! SUBSCRIBE_END." Instead the track is aborted when the broadcast ends, and
 //! whatever the session had not sent yet is gone.
 //!
 //! Deterministic: time is paused, the runtime is single-threaded, and the publisher
@@ -32,10 +32,11 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const PAYLOAD: &[u8] = b"frame";
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// Publish a one-frame track over one mock session, end it cleanly, and return what

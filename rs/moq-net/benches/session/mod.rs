@@ -202,7 +202,10 @@ impl Shape {
 	/// subscription writes off as late.
 	fn subscription(&self) -> Option<track::Subscription> {
 		(self.burst > 1).then(|| {
-			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(30)))
+			track::Subscription::default().with_ranges([track::Range::from(track::Start::Live {
+				min: Some(Duration::from_secs(30)),
+				max: Some(Duration::from_secs(30)),
+			})])
 		})
 	}
 
@@ -544,7 +547,7 @@ fn at(group: &group::Producer) -> Timestamp {
 /// The groups from the one starting at `key` onward.
 fn from(key: u64) -> track::Range {
 	track::Range {
-		start: Some(key),
+		start: track::Start::Time(key),
 		end: None,
 	}
 }
@@ -594,8 +597,7 @@ impl Backend for Model {
 	fn relay(id: u64, capacity: Option<u64>) -> (Self::Relay, cache::Pool) {
 		// A relay forwards the routes it learns, as moq-relay's cluster does; off, a
 		// moq-lite-07 viewer never learns the publisher's broadcasts.
-		let (origin, pool) = make_origin(id, capacity);
-		(origin.with_proxy(true), pool)
+		make_origin(id, capacity, true)
 	}
 
 	fn origin(relay: &Self::Relay) -> &origin::Producer {
@@ -631,7 +633,7 @@ impl Drop for Pair {
 	}
 }
 
-fn make_origin(id: u64, capacity: Option<u64>) -> (origin::Producer, cache::Pool) {
+fn make_origin(id: u64, capacity: Option<u64>, proxy: bool) -> (origin::Producer, cache::Pool) {
 	let mut config = origin::Config::new(std::num::NonZeroU64::new(id).unwrap());
 	let profiling = std::env::var_os("SESSION_EXPIRY_ONLY").is_some();
 	let pool = cache::Pool::new(if capacity.is_none() || profiling {
@@ -640,6 +642,7 @@ fn make_origin(id: u64, capacity: Option<u64>) -> (origin::Producer, cache::Pool
 		cache::Config::default().with_capacity(capacity)
 	});
 	config.pool = pool.clone();
+	config.proxy = proxy;
 	let (producer, driver) = origin::Producer::new(config);
 	harness::spawn(driver);
 	(producer, pool)
@@ -757,7 +760,7 @@ impl<B: Backend> Cluster<B> {
 
 	fn origin(&mut self, capacity: u64) -> (origin::Producer, cache::Pool) {
 		self.next_hop += 1;
-		make_origin(self.next_hop, (!self.expiry).then_some(capacity))
+		make_origin(self.next_hop, (!self.expiry).then_some(capacity), false)
 	}
 
 	/// Connect a viewer session to `relay`.
@@ -1410,11 +1413,7 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 							.watch(
 								&path(0),
 								&[TRACK],
-								Some(
-									track::Subscription::default()
-										.with_ranges([from(span)])
-										.with_delay(track::Delay::default().with_max(None)),
-								),
+								Some(track::Subscription::default().with_ranges([from(span)])),
 							)
 							.await;
 						viewers.push(viewer);
@@ -1430,11 +1429,7 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 							let future = next + span;
 							for viewer in &mut viewers {
 								viewer.subscribers[0]
-									.update(
-										track::Subscription::default()
-											.with_ranges([from(future)])
-											.with_delay(track::Delay::default().with_max(None)),
-									)
+									.update(track::Subscription::default().with_ranges([from(future)]))
 									.unwrap();
 							}
 							kio::wait(|waiter| {
@@ -1460,11 +1455,7 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 							let started = Instant::now();
 							for viewer in &mut viewers {
 								viewer.subscribers[0]
-									.update(
-										track::Subscription::default()
-											.with_ranges([from(future - 1)])
-											.with_delay(track::Delay::default().with_max(None)),
-									)
+									.update(track::Subscription::default().with_ranges([from(future - 1)]))
 									.unwrap();
 							}
 							for _ in 0..1 {

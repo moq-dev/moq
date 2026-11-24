@@ -5,7 +5,8 @@
 //! kernel already tracks a smoothed RTT and (on Linux) a delivery-rate estimate,
 //! so the figures are available immediately and cost no extra traffic. This is
 //! strictly better than QMux's own [`QX_PING`](crate::Config::rtt_interval)
-//! measurement, which needs a round trip before it can report anything.
+//! measurement, which needs a round trip before it can report anything. On Linux the kernel
+//! also counts the bytes the connection carried, which a session publishes as its wire counters.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,6 +27,14 @@ pub trait SocketStats: Send + Sync + 'static {
 		None
 	}
 
+	/// Bytes the connection has carried since it opened, if the transport counts them.
+	///
+	/// Cumulative, so a later read never reports less. TCP counts the payload above it, so a
+	/// TLS session includes its TLS records and a WebSocket one its framing.
+	fn bytes(&self) -> Option<SocketBytes> {
+		None
+	}
+
 	/// Hold the transport's own unsent queue to about one congestion window, returning that
 	/// bound in bytes, or `None` to leave the transport's buffering alone.
 	///
@@ -41,6 +50,16 @@ pub trait SocketStats: Send + Sync + 'static {
 	/// Shut the connection down, since the session's driver ended and this handle may hold
 	/// its socket open. Statistics stay readable afterward.
 	fn shutdown(&self) {}
+}
+
+/// What a connection has carried, as its transport counts it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SocketBytes {
+	/// Bytes sent, retransmissions included and the headers below the transport excluded.
+	pub sent: u64,
+	/// Bytes the transport delivered to the application. A peer's duplicate retransmission is
+	/// not counted: an accepted undercount.
+	pub received: u64,
 }
 
 /// A shared handle to a transport's statistics.
@@ -216,6 +235,14 @@ mod unix {
 			pub data_segs_in: u32,
 			/// Delivery-rate estimate in bytes per second (Linux 4.9+).
 			pub delivery_rate: u64,
+
+			pub busy_time: u64,
+			pub rwnd_limited: u64,
+			pub sndbuf_limited: u64,
+			pub delivered: u32,
+			pub delivered_ce: u32,
+			/// Payload bytes sent, retransmissions included (Linux 4.19+).
+			pub bytes_sent: u64,
 		}
 
 		const IPPROTO_TCP: libc::c_int = 6;
@@ -400,6 +427,25 @@ mod unix {
 			}
 		}
 
+		fn bytes(&self) -> Option<SocketBytes> {
+			// Only Linux is read: macOS counts too, but nothing here needs it yet. A Linux before
+			// 4.19 stops short of `bytes_sent`, and `bytes_received` precedes it.
+			#[cfg(target_os = "linux")]
+			{
+				let (info, len) = sys::tcp_info(self.borrow())?;
+				let offset = std::mem::offset_of!(sys::TcpInfo, bytes_sent);
+				sys::has_field(len, offset, size_of::<u64>()).then_some(SocketBytes {
+					sent: info.bytes_sent,
+					received: info.bytes_received,
+				})
+			}
+
+			#[cfg(not(target_os = "linux"))]
+			{
+				None
+			}
+		}
+
 		fn limit_unsent(&self) -> Option<usize> {
 			let window = sys::congestion_window(self.borrow()).filter(|&window| window > 0)?;
 			let window = u32::try_from(window).unwrap_or(u32::MAX);
@@ -418,6 +464,18 @@ mod unix {
 			// SAFETY: the descriptor is live for as long as `self`. A socket already shut down
 			// or reset refuses it, which leaves nothing to do.
 			unsafe { libc::shutdown(self.fd.as_raw_fd(), libc::SHUT_RDWR) };
+		}
+	}
+
+	/// Reads the kernel's byte counts into the counters, for a TCP connection that carries no
+	/// session of its own, such as a media gateway's. The duplicate descriptor delays the
+	/// socket's close until the counters drop, so drop them with the connection.
+	impl moq_net::transport::WireSource for TcpStats {
+		fn refresh(&self, wire: &moq_net::transport::Wire) {
+			if let Some(bytes) = self.bytes() {
+				wire.set_sent_bytes(bytes.sent);
+				wire.set_received_bytes(bytes.received);
+			}
 		}
 	}
 
@@ -458,6 +516,8 @@ mod unix {
 		fn linux_tcp_info_layout() {
 			assert_eq!(std::mem::offset_of!(super::sys::TcpInfo, rtt), 68);
 			assert_eq!(std::mem::offset_of!(super::sys::TcpInfo, delivery_rate), 160);
+			assert_eq!(std::mem::offset_of!(super::sys::TcpInfo, bytes_received), 128);
+			assert_eq!(std::mem::offset_of!(super::sys::TcpInfo, bytes_sent), 200);
 			// The app-limited flag shares byte 7 with `tcpi_fastopen_client_fail`.
 			assert_eq!(std::mem::offset_of!(super::sys::TcpInfo, app_limited), 7);
 			#[cfg(target_endian = "little")]

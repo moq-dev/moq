@@ -15,6 +15,7 @@ mod domains;
 mod failures;
 mod ingest;
 
+use crate::WithMax as _;
 use crate::path_routes::{DEBOUNCE, HOLD, cut, land, lite07};
 use crate::route_change::{produce_origin, timed};
 use crate::support;
@@ -351,11 +352,12 @@ impl Reader {
 				run += 1;
 				let instance = broadcast.info().instance.clone();
 				// From the live edge, and never skipping a group however late.
-				let prefs = track::Subscription::default().with_delay(
-					track::Delay::default()
-						.with_min(Duration::ZERO)
-						.with_max(Duration::from_secs(60)),
-				);
+				let prefs = track::Subscription::default()
+					.with_ranges([track::Range::from(track::Start::Live {
+						min: Some(Duration::ZERO),
+						max: None,
+					})])
+					.with_max(Duration::from_secs(60));
 				let Ok(mut sub) = broadcast.track(TRACK).unwrap().subscribe(prefs).await else {
 					continue;
 				};
@@ -506,6 +508,7 @@ pub(super) async fn shown_at(node: &origin::Producer, path: &str) -> Option<Show
 				instance: route.instance().clone(),
 			}),
 			origin::RouteKind::End | origin::RouteKind::Offline => None,
+			kind => panic!("unexpected route kind {kind:?}"),
 		};
 	}
 	shown
@@ -540,6 +543,7 @@ impl Watch {
 					origin::RouteKind::Restart => support::Kind::Restart,
 					origin::RouteKind::End => support::Kind::End,
 					origin::RouteKind::Offline => support::Kind::Offline,
+					kind => panic!("unexpected route kind {kind:?}"),
 				};
 				let seen = Seen {
 					kind,

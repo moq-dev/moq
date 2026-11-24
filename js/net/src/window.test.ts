@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { Duration } from "@moq/clock";
-import type { Range } from "./track.ts";
+import { NO_MAX_DELAY } from "./internal.ts";
+import type { Live, Range } from "./track.ts";
 import { UNBOUNDED } from "./util/key.ts";
 import {
 	AT_KEYS,
+	asked,
 	type Containing,
 	clamped,
 	EMPTY,
@@ -13,6 +15,7 @@ import {
 	type Join,
 	joinsLive,
 	type Run,
+	rangeKey,
 	rangesEnd,
 	rangesOf,
 	rangesStart,
@@ -27,7 +30,7 @@ import {
 
 const time = (start: bigint): bigint => start;
 
-/** A range from `start` through `end`, an omitted start being a live join or the oldest, and an omitted end open. */
+/** A range from `start` through `end`, an omitted start being the oldest group, and an omitted end open. */
 const range = (start: bigint | undefined, end?: bigint): Range => {
 	const out: Range = {};
 	if (start !== undefined) out.start = start;
@@ -39,12 +42,19 @@ const range = (start: bigint | undefined, end?: bigint): Range => {
 const groups = (start: bigint, end?: bigint): Range =>
 	range(time(start), end === undefined ? undefined : time(end - 1n));
 
+/** A live join `ms` behind the live edge, or with no lag limit for null, through `end` or onward for undefined. */
+const live = (ms: number | null, end?: bigint): Range => {
+	const out: Range = { start: { live: { min: ms === null ? null : Duration.millis(ms), max: Duration.ZERO } } };
+	if (end !== undefined) out.end = end;
+	return out;
+};
+
 const ascending = (a: bigint, b: bigint) => (a < b ? -1 : a > b ? 1 : 0);
 
 /**
  * The group starts a hop holds, the key runs its producer skipped, whether a handler serves its
  * history, where the dropped prefix ends, which places a time below it before every group, and
- * where a live join by a Min Age starts.
+ * where a live join by its lag starts.
  */
 class Keys implements Holdings {
 	held: Set<bigint>;
@@ -52,7 +62,9 @@ class Keys implements Holdings {
 	done = false;
 	looks = false;
 	dropped = 0n;
-	joins?: (min: Duration) => Join | undefined;
+	joins?: (min: Duration | null, end: bigint | undefined, budget: number, since: number) => Join | undefined;
+	// The tick of the upstream's answer to every live join, which alone places one when set.
+	answered?: number;
 
 	constructor(held: Iterable<bigint> = []) {
 		this.held = new Set(held);
@@ -69,7 +81,7 @@ class Keys implements Holdings {
 	containing(at: bigint): Containing {
 		const sorted = this.#sorted();
 		const group = sorted.filter((key) => key <= at).at(-1);
-		if (group !== undefined) return { group };
+		if (group !== undefined) return { at: group };
 		return sorted.length === 0 && at >= this.dropped ? "unknown" : "before";
 	}
 
@@ -81,8 +93,13 @@ class Keys implements Holdings {
 		return this.#sorted().find((key) => key >= from);
 	}
 
-	join(min: Duration): Join | undefined {
-		return this.joins?.(min);
+	join(min: Duration | null, end: bigint | undefined, budget: number, since: number): Join | undefined {
+		if (this.answered !== undefined && this.answered <= since) return undefined;
+		return this.joins?.(min, end, budget, since);
+	}
+
+	answersJoins(): boolean {
+		return this.answered !== undefined;
 	}
 
 	complete(): boolean {
@@ -101,7 +118,7 @@ class Keys implements Holdings {
 /** A hop holding every group from 0 through the latest, as contiguous starts do. */
 const CONTIGUOUS: Holdings = {
 	resolves: () => true,
-	containing: (at) => ({ group: at }),
+	containing: (at) => ({ at }),
 	nextStart: (from) => from,
 	complete: () => false,
 };
@@ -169,33 +186,30 @@ describe("Window", () => {
 		expect(window.missable(0n)[0]).toEqual({ start: 5n, end: UNBOUNDED });
 	});
 
-	test("a range with no start reaches back to the oldest group unless a Min Age is stated", () => {
+	test("a range with no start reaches back to the oldest group, and a live join by its lag", () => {
 		const held = new Keys([0n, 33n, 66n, 99n]);
-		held.joins = (min) => ({ time: 99n - BigInt(min.asMillis()) });
-		// Not stated: the oldest group, naming no floor, needing no latest group.
+		held.joins = (min) => ({ time: 99n - BigInt(min?.asMillis() ?? 99) });
+		// The oldest group, naming no floor, needing no latest group.
 		let window = new Window([{}], undefined, held);
 		expect([window.floor(), window.start(), window.settled]).toEqual([0n, undefined, true]);
-		// Stated: a time start at the live edge minus it, zero being the latest group.
-		window = new Window([{}], 99n, held, Duration.ZERO);
+		// A live join: a time start at the live edge minus its lag, zero being the latest group.
+		window = new Window([live(0)], 99n, held);
 		expect([covered(window, held.held), window.start()]).toEqual([[99n], 99n]);
-		window = new Window([{}], 99n, held, Duration.millis(40));
+		window = new Window([live(40)], 99n, held);
 		expect([covered(window, held.held), window.start()]).toEqual([[33n, 66n, 99n], 33n]);
-		// Ranges with a start ignore it.
-		window = new Window([groups(66n)], 99n, held, Duration.ZERO);
-		expect(window.start()).toBe(66n);
 	});
 
 	test("a live join looks its time start up, unlike a join to a group", () => {
 		const held = new Keys([4000n, 9000n]);
 		held.looks = true;
-		held.joins = (min) => ({ time: 9000n - BigInt(min.asMillis()) });
-		const window = new Window([{}], 9000n, held, Duration.millis(500));
+		held.joins = (min) => ({ time: 9000n - BigInt(min?.asMillis() ?? 9000) });
+		const window = new Window([live(500)], 9000n, held);
 		expect(window.lookups()).toEqual([{ time: 8500n, floor: 4001n }]);
 		expect(window.found(8500n, { kind: "group", group: 8000n }, held)).toBe(true);
 		expect(window.resolved()).toEqual([{ start: 8000n, end: undefined, floored: true }]);
 
 		held.joins = () => ({ group: 4000n });
-		const group = new Window([{}], 9000n, held, Duration.millis(500));
+		const group = new Window([live(500)], 9000n, held);
 		expect([group.lookups(), group.resolved()]).toEqual([[], [{ start: 4000n, end: undefined, floored: true }]]);
 	});
 
@@ -203,7 +217,7 @@ describe("Window", () => {
 		const held = new Keys();
 		let edge: bigint | undefined;
 		held.joins = () => (edge === undefined ? undefined : { group: edge });
-		const window = new Window([{}], undefined, held, Duration.millis(1));
+		const window = new Window([live(1)], undefined, held);
 		// Before any group: everything is in range.
 		expect([window.pending, window.contains(3n), window.floor()]).toEqual([true, true, undefined]);
 		expect(window.settle(undefined, held)).toBe(false);
@@ -221,18 +235,137 @@ describe("Window", () => {
 		expect(window.settle(5n, held)).toBe(true);
 		expect(covered(window, keys(0n, 8n))).toEqual([5n, 6n, 7n]);
 		expect(window.settled).toBe(true);
-		// Resolved once: a later group, or a new Min Age, never moves it.
+		// Resolved once: a later group never moves it.
 		held.held.add(9n);
 		edge = 9n;
-		window.min = Duration.secs(1);
 		expect(window.settle(9n, held)).toBe(false);
 		expect(window.start()).toBe(5n);
 	});
 
-	test("a zero Min Age starts a live join at the latest group, once there is one", () => {
+	// Mirrors the Rust `a_copy_places_a_live_join_only_from_a_fresh_answer`.
+	test("a copy places a live join only from an answer recorded after its range was added", () => {
+		const held = new Keys([0n, 33n, 66n, 99n]);
+		held.joins = () => ({ group: 33n });
+		for (const lag of [0, 40]) {
+			held.answered = 3;
+			const window = Window.keyed([[0n, live(lag)]], 99n, held, () => ({ since: 3 }));
+			expect([window.settled, window.contains(99n)]).toEqual([false, false]);
+			expect(window.joins()).toEqual([[lag, undefined, 0, 3]]);
+
+			// A newer answer places it, at exactly the group upstream answered.
+			held.answered = 4;
+			expect(window.settle(99n, held)).toBe(true);
+			expect(covered(window, held.held)).toEqual([33n, 66n, 99n]);
+			expect(window.joins()).toEqual([]);
+		}
+
+		// An answer of nothing places a join with an end past it, and keeps one without waiting.
+		held.answered = 3;
+		held.joins = () => "empty";
+		const bounded = Window.keyed([[0n, live(40, 50n)]], 99n, held, () => ({ since: 3 }));
+		const open = Window.keyed([[0n, live(40)]], 99n, held, () => ({ since: 3 }));
+		held.answered = 4;
+		expect(bounded.settle(99n, held)).toBe(true);
+		expect(covered(bounded, held.held)).toEqual([]);
+		expect(bounded.settled).toBe(true);
+		expect(open.settle(99n, held)).toBe(false);
+		expect(open.joins()).toEqual([[40, undefined, 0, 3]]);
+	});
+
+	// A live join already placed starts at that group on any hop, asking nothing and waiting on
+	// nothing, and its groups still go stale past its max. Mirrors the Rust
+	// `a_placed_join_starts_where_it_was_placed`.
+	test("a placed join starts where it was placed", () => {
+		const held = new Keys([0n, 33n, 66n, 99n]);
+		held.joins = () => ({ group: 66n });
+		held.answered = 3;
+		const max = Duration.secs(2);
+		const join: Range = { start: { live: { min: Duration.millis(40), max } } };
+		const placed = () => ({ at: 33n });
+		for (const window of [
+			Window.keyed([[0n, join]], 99n, held, placed),
+			Window.keyed([[0n, join]], undefined, UNHELD, placed),
+		]) {
+			expect(window.settled).toBe(true);
+			expect(window.joins()).toEqual([]);
+			expect(window.start()).toBe(33n);
+			const budget = window.budget();
+			expect([budget.at(66n), budget.widest()]).toEqual([2000, 2000]);
+		}
+		expect(covered(Window.keyed([[0n, join]], 99n, held, placed), held.held)).toEqual([33n, 66n, 99n]);
+
+		// Placed elsewhere by an edit, it moves there; retuned in place, it stays.
+		const window = Window.keyed([[0n, join]], 99n, held, placed);
+		window.edit([0n], [[0n, join]], 99n, held, () => ({ at: 66n }));
+		expect(window.start()).toBe(66n);
+		const wider: Range = { start: { live: { min: Duration.millis(40), max: null } } };
+		window.edit([0n], [[0n, wider]], 99n, held, () => ({ at: 66n }));
+		expect([window.start(), window.budget().at(66n)]).toEqual([66n, NO_MAX_DELAY]);
+	});
+
+	// A group takes the widest budget among the ranges covering it, not among every range: a finite
+	// live join alone keeps its max beside an unlimited one placed later, and a join still reaching
+	// may cover any group up to its end. Mirrors the Rust `a_group_takes_the_widest_budget_covering_it`.
+	test("a group takes the widest budget covering it", () => {
+		const held = new Keys(keys(0n, 100n));
+		held.answered = 0;
+		const join = (min: number, max: Duration | null, end?: bigint): Range => ({
+			start: { live: { min: Duration.millis(min), max } },
+			...(end === undefined ? {} : { end }),
+		});
+		const ranges = new Map<bigint, Range>([
+			[0n, join(40, Duration.millis(100))],
+			[1n, join(20, null, 59n)],
+			[2n, range(80n, 89n)],
+			[3n, join(60, Duration.millis(500), 20n)],
+		]);
+		const placed = (key: bigint) => (key === 0n ? { at: 10n } : key === 1n ? { at: 50n } : { since: 0 });
+		const window = Window.keyed(ranges, 99n, held, placed);
+		expect(window.reaching).toBe(true);
+		for (const budget of [window.budget(), window.budgetOf(ranges)]) {
+			expect(budget.runs(0n, 100n)).toEqual([
+				[{ start: 0n, end: 21n }, 500],
+				[{ start: 21n, end: 50n }, 100],
+				[{ start: 50n, end: 60n }, NO_MAX_DELAY],
+				[{ start: 60n, end: 80n }, 100],
+				[{ start: 80n, end: 90n }, NO_MAX_DELAY],
+				[{ start: 90n, end: 100n }, 100],
+			]);
+			expect(budget.stretch(30n)).toEqual([100, 50n]);
+			expect([budget.widest(), budget.isUniform()]).toEqual([NO_MAX_DELAY, false]);
+			const clamped = budget.clamped(200);
+			expect([clamped.at(55n), clamped.at(30n)]).toEqual([200, 100]);
+		}
+	});
+
+	// A history range a hop holding nothing leaves to its copies keeps every group it may cover from
+	// going stale before they place it, beside a live join judged by its max. Mirrors the Rust
+	// `a_pending_history_range_keeps_what_it_may_cover`.
+	test("a pending history range keeps what it may cover", () => {
+		const history = range(5001n, 8999n);
+		const join: Range = { start: { live: { min: Duration.ZERO, max: Duration.secs(1) } } };
+		const window = new Window([history, join], undefined, UNHELD);
+		expect(window.pending).toBe(true);
+		for (const budget of [
+			window.budget(),
+			window.budgetOf(
+				new Map([
+					[0n, history],
+					[1n, join],
+				]),
+			),
+		]) {
+			expect(budget.at(8000n)).toBe(NO_MAX_DELAY);
+			// The copies may place it at any group.
+			expect(budget.at(0n)).toBe(NO_MAX_DELAY);
+			expect(budget.at(9000n)).toBe(1000);
+		}
+	});
+
+	test("a zero lag starts a live join at the latest group, once there is one", () => {
 		const held = new Keys(keys(0n, 8n));
 		held.joins = () => ({ group: 2n });
-		const window = new Window([{}], undefined, held, Duration.ZERO);
+		const window = new Window([live(0)], undefined, held);
 		expect(window.pending).toBe(true);
 		expect(window.settle(7n, held)).toBe(true);
 		expect(window.start()).toBe(7n);
@@ -240,7 +373,7 @@ describe("Window", () => {
 
 	test("a hop that leaves its ranges to the copies it follows reaches a live join back", () => {
 		// The copy it follows placed the join already, so every group it delivers is in range.
-		const window = new Window([{}], 7n, AT_KEYS, Duration.millis(500));
+		const window = new Window([live(500)], 7n, AT_KEYS);
 		expect([window.pending, window.floor(), window.contains(0n), window.contains(7n)]).toEqual([
 			false,
 			0n,
@@ -252,16 +385,16 @@ describe("Window", () => {
 	test("the named start is the lowest unless one reaches back", () => {
 		const held = new Keys(keys(0n, 10n));
 		held.joins = () => ({ group: 9n });
-		const start = (ranges: Range[], latest: bigint | undefined) =>
-			new Window(ranges, latest, held, Duration.ZERO).start();
-		expect(start([groups(4n), {}], 9n)).toBe(4n);
+		const start = (ranges: Range[], latest: bigint | undefined) => new Window(ranges, latest, held).start();
+		expect(start([groups(4n), live(0)], 9n)).toBe(4n);
 		held.joins = () => ({ group: 2n });
-		expect(start([groups(4n), {}], 2n)).toBe(2n);
+		expect(start([groups(4n), live(1)], 2n)).toBe(2n);
 		// Time 0 names group 0 whatever is held.
 		expect(start([groups(0n)], undefined)).toBe(0n);
 		// Waiting on a first group.
 		held.joins = () => undefined;
-		expect(start([groups(4n), {}], undefined)).toBeUndefined();
+		expect(start([groups(4n), live(0)], undefined)).toBeUndefined();
+		// The oldest group names no start.
 		expect(new Window([groups(4n), {}], 9n, held).start()).toBeUndefined();
 	});
 
@@ -430,23 +563,22 @@ describe("Window", () => {
 		const joining: Holdings = {
 			...CONTIGUOUS,
 			join: (min) => {
-				const back = BigInt(min.asMillis());
+				const back = BigInt(min?.asMillis() ?? 7);
 				return { time: back < 7n ? 7n - back : 0n };
 			},
 		};
-		const floor = (ranges: Range[], latest: bigint | undefined, min = Duration.ZERO) =>
-			new Window(ranges, latest, joining, min).floor();
+		const floor = (ranges: Range[], latest: bigint | undefined) => new Window(ranges, latest, joining).floor();
 
-		expect(floor([{}], 7n)).toBe(7n);
-		expect(floor([{}], 7n, Duration.millis(3))).toBe(4n);
-		// A Min Age past the start clamps.
-		expect(floor([{}], 7n, Duration.millis(30))).toBe(0n);
+		expect(floor([live(0)], 7n)).toBe(7n);
+		expect(floor([live(3)], 7n)).toBe(4n);
+		// A lag past the start clamps.
+		expect(floor([live(30)], 7n)).toBe(0n);
 
 		expect(new Window([{}], undefined, CONTIGUOUS).floor()).toBe(0n);
 
 		// The lowest range wins.
-		expect(floor([groups(4n), {}], 3n, Duration.millis(4))).toBe(3n);
-		expect(floor([groups(4n), {}], 9n)).toBe(4n);
+		expect(floor([groups(4n), live(4)], 3n)).toBe(3n);
+		expect(floor([groups(4n), live(0)], 9n)).toBe(4n);
 
 		// Nothing asked for floors nowhere, and an empty range asks for nothing.
 		expect(floor([], undefined)).toBe(0n);
@@ -505,10 +637,23 @@ describe("ranges", () => {
 		// The oldest start covers everything.
 		expect(union([groups(2n, 5n), {}, range(undefined, time(3n))])).toEqual([{}]);
 
-		// A live join reaches back to no history, so time ranges stay beside it, no start first, and
-		// it covers the other ranges with no start, which start where it does.
-		expect(union([groups(4n), {}, range(undefined, time(3n))], true)).toEqual([{}, groups(4n)]);
-		expect(union([groups(4n), range(undefined, time(3n))], true)).toEqual([range(undefined, time(3n)), groups(4n)]);
+		// A live join reaches back to no history, so time ranges stay beside it, joins last, each lag
+		// and end a range of its own.
+		expect(union([live(2), groups(4n), live(2), live(2, 3n)])).toEqual([groups(4n), live(2), live(2, 3n)]);
+		// A range from the oldest group with an end is kept as it is, beside the time ranges.
+		expect(union([groups(4n), range(undefined, time(3n))])).toEqual([range(undefined, time(3n)), groups(4n)]);
+
+		// Joins of one lag land on the same group whatever their max, so they merge under the widest,
+		// and no limit is the widest of all. Mirrors the Rust `combined_ranges_are_the_union`.
+		const join = (max: Duration | null, end?: bigint): Range => {
+			const out: Range = { start: { live: { min: Duration.millis(2), max } } };
+			if (end !== undefined) out.end = end;
+			return out;
+		};
+		expect(union([join(Duration.millis(5)), live(2)])).toEqual([join(Duration.millis(5))]);
+		expect(union([join(Duration.millis(5)), join(null)])).toEqual([join(null)]);
+		// A join's end keeps it apart from an open one of the same lag.
+		expect(union([join(Duration.millis(5), 9n), live(2)])).toEqual([live(2), join(Duration.millis(5), 9n)]);
 
 		// Empty ranges ask for nothing.
 		expect(union([groups(5n, 5n)])).toEqual([]);
@@ -517,12 +662,12 @@ describe("ranges", () => {
 	});
 
 	test("the union is order-independent and settles", () => {
-		const a = [groups(2n, 5n), {}];
-		const b = [groups(4n, 9n)];
-		const combined = union([...a, ...b], true);
-		expect(union([...b, ...a], true)).toEqual(combined);
+		const a = [groups(2n, 5n), live(3)];
+		const b = [groups(4n, 9n), live(1, 7n)];
+		const combined = union([...a, ...b]);
+		expect(union([...b, ...a])).toEqual(combined);
 		// A subset adds nothing.
-		expect(union([...combined, ...a], true)).toEqual(combined);
+		expect(union([...combined, ...a])).toEqual(combined);
 	});
 
 	test("a wire without ranges carries one span covering them all", () => {
@@ -561,6 +706,41 @@ describe("ranges", () => {
 		expect(clamped(ranges, undefined, undefined, [])).toEqual(ranges);
 	});
 
+	// A copy asked from a floor gets a resolved live join with a max as that join, placed at the
+	// group it resolved to, raised to the floor, so its groups still go stale there; one with no
+	// max, and history, are asked from where they resolved. Mirrors the Rust
+	// `a_resolved_live_join_is_asked_placed_with_its_max`.
+	test("a resolved live join is asked placed with its max", () => {
+		const max = Duration.secs(2);
+		const join = (max: Duration | null, end?: bigint): Range => {
+			const out: Range = { start: { live: { min: Duration.millis(2), max } } };
+			if (end !== undefined) out.end = end;
+			return out;
+		};
+		const at = (start: bigint, end?: bigint) => [{ start, end, floored: true }];
+		const placed = (group?: bigint) => new Map(group === undefined ? [] : [[0, group]]);
+		// Placed at the floor it is raised to, still the join it was.
+		expect(asked([join(max)], 10n, undefined, at(8n))).toEqual({ ranges: [join(max)], placed: placed(10n) });
+		expect(asked([join(max)], 6n, undefined, at(8n))).toEqual({ ranges: [join(max)], placed: placed(8n) });
+		// Its end where it resolved, as a placed one's.
+		expect(asked([join(max, 500n)], 10n, undefined, at(8n, 12n))).toEqual({
+			ranges: [join(max, 11n)],
+			placed: placed(10n),
+		});
+		expect(asked([join(null)], 10n, undefined, at(8n))).toEqual({ ranges: [groups(10n)], placed: placed() });
+		expect(asked([groups(8n)], 10n, undefined, at(8n))).toEqual({ ranges: [groups(10n)], placed: placed() });
+		// Not yet resolved: asked as it is, for the copy to place.
+		expect(asked([join(max)], 10n, undefined, [])).toEqual({ ranges: [join(max)], placed: placed() });
+		// Capped at where it resolved: nothing, whatever its max.
+		expect(isEmpty(asked([join(max)], undefined, 8n, at(8n)).ranges[0])).toBe(true);
+		// Placed already: no lower than where it was, whatever the floor, and placed still.
+		expect(asked([join(max)], 4n, undefined, [], placed(6n))).toEqual({ ranges: [join(max)], placed: placed(6n) });
+		expect(asked([join(max)], undefined, undefined, [], placed(6n))).toEqual({
+			ranges: [join(max)],
+			placed: placed(6n),
+		});
+	});
+
 	test("ranges are checked rather than served widened", () => {
 		expect(rangesOf([range(time(1n))])).toEqual([range(time(1n))]);
 		expect(() => rangesOf([{ start: -1n }])).toThrow(TypeError);
@@ -572,11 +752,23 @@ describe("ranges", () => {
 		expect(() => rangesOf([null as unknown as Range])).toThrow(TypeError);
 	});
 
-	test("an open range with no start joins live", () => {
-		expect(joinsLive(undefined)).toBe(true);
+	test("an open range with no time start joins live", () => {
+		expect(joinsLive([live(0)])).toBe(true);
+		expect(joinsLive([groups(3n), live(500)])).toBe(true);
+		// From the oldest group, it follows the live edge too.
 		expect(joinsLive([{}])).toBe(true);
+		// A time start, or any range with an end, doesn't.
 		expect(joinsLive([groups(3n)])).toBe(false);
 		expect(joinsLive([range(undefined, time(2n))])).toBe(false);
+		expect(joinsLive([live(0, 2n)])).toBe(false);
+	});
+
+	test("a lag is checked and rounded up to whole milliseconds", () => {
+		expect(rangesOf([live(5)])).toEqual([live(5)]);
+		expect(() => rangesOf([{ start: { live: 5 as unknown as Live } }])).toThrow(TypeError);
+		expect(() => rangesOf([{ start: { live: Duration.millis(5) as unknown as Live } }])).toThrow(TypeError);
+		const sub = { start: { live: { min: Duration.micros(1500), max: Duration.ZERO } } };
+		expect(rangeKey(sub)).toBe(rangeKey(live(2)));
 	});
 });
 
@@ -589,7 +781,7 @@ function blind(keys: Keys): Holdings {
 		complete: () => keys.complete(),
 		containing: (at) => keys.containing(at),
 		nextStart: (from) => keys.nextStart(from),
-		join: (min) => keys.join(min),
+		join: (min, end, budget, since) => keys.join(min, end, budget, since),
 	};
 }
 
@@ -609,9 +801,12 @@ test("window: settling by steps matches trying every start and rebuilding from t
 		state: [window.settled, window.pending],
 	});
 	for (let round = 0; round < 3000; round++) {
+		// A range with no start is a live join by one lag, or the oldest group when none is drawn.
+		const lag = random(3) === 0 ? undefined : random(10);
 		const ranges = Array.from({ length: 1 + random(11) }, () => {
 			const start = random(5) === 0 ? undefined : time(BigInt(random(40)));
-			return range(start, random(3) === 0 ? undefined : time(BigInt(random(48))));
+			const end = random(3) === 0 ? undefined : time(BigInt(random(48)));
+			return start === undefined && lag !== undefined ? live(lag, end) : range(start, end);
 		});
 		const keys = new Keys();
 		keys.looks = random(2) === 0;
@@ -620,12 +815,12 @@ test("window: settling by steps matches trying every start and rebuilding from t
 		keys.joins = (min) => {
 			const newest = [...keys.held].sort(ascending).at(-1);
 			if (newest === undefined) return undefined;
-			const at = newest > BigInt(min.asMillis()) ? newest - BigInt(min.asMillis()) : 0n;
+			const back = min === null ? undefined : BigInt(min.asMillis());
+			const at = back !== undefined && newest > back ? newest - back : 0n;
 			return byTime ? { time: at } : { group: newest };
 		};
-		const min = random(3) === 0 ? undefined : Duration.millis(random(10));
-		const fast = new Window(ranges, undefined, keys, min);
-		const full = new Window(ranges, undefined, blind(keys), min);
+		const fast = new Window(ranges, undefined, keys);
+		const full = new Window(ranges, undefined, blind(keys));
 		for (let step = random(24); step > 0; step--) {
 			const value = BigInt(random(48));
 			const op = random(5);
@@ -667,9 +862,15 @@ test("window: an edit by key matches building the edited ranges afresh", () => {
 		return (seed >>> 16) % below;
 	};
 	const any = (): Range => {
-		const start = random(4) === 0 ? undefined : time(BigInt(random(40)));
+		const kind = random(8);
 		const end = random(3) === 0 ? undefined : time(BigInt(random(48)));
-		return range(start, end);
+		if (kind === 0) return range(undefined, end);
+		if (kind === 1) {
+			// One in eleven with no lag limit.
+			const lag = random(11);
+			return live(lag === 10 ? null : lag, end);
+		}
+		return range(time(BigInt(random(40))), end);
 	};
 	const seen = (window: Window) => ({
 		ranges: window.ranges,
@@ -686,14 +887,14 @@ test("window: an edit by key matches building the edited ranges afresh", () => {
 		keys.looks = random(2) === 0;
 		const latest = [...keys.held].sort(ascending).at(-1);
 		keys.joins = (age) => {
-			const back = BigInt(age.asMillis());
-			return latest === undefined ? undefined : { time: latest > back ? latest - back : 0n };
+			const back = age === null ? undefined : BigInt(age.asMillis());
+			if (latest === undefined) return undefined;
+			return { time: back !== undefined && latest > back ? latest - back : 0n };
 		};
-		const min = random(2) === 0 ? undefined : Duration.millis(random(10));
 		const held = new Map<bigint, Range>();
 		let next = 0n;
 		for (let count = random(8); count > 0; count--) held.set(next++, any());
-		const window = Window.keyed(held, latest, keys, min);
+		const window = Window.keyed(held, latest, keys);
 		for (let step = random(16); step > 0; step--) {
 			const retire: bigint[] = [];
 			const add: [bigint, Range][] = [];
@@ -704,7 +905,7 @@ test("window: an edit by key matches building the edited ranges afresh", () => {
 			for (const key of retire) if (!readded.has(key)) held.delete(key);
 			for (const [key, range] of add) held.set(key, range);
 			window.edit(retire, add, latest, keys);
-			expect(seen(window)).toEqual(seen(Window.keyed(held, latest, keys, min)));
+			expect(seen(window)).toEqual(seen(Window.keyed(held, latest, keys)));
 		}
 	}
 });

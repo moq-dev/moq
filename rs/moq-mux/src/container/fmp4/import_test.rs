@@ -12,7 +12,7 @@ const RECORDING_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(
 
 /// A replay window with that budget, for a test asserting every group is delivered.
 fn replay() -> moq_net::track::Subscription {
-	moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY))
+	crate::container::test_util::within(RECORDING_MAX_DELAY)
 }
 
 /// Drain every group currently buffered on the consumer without waiting for new ones.
@@ -1969,8 +1969,12 @@ async fn test_msf_catalog_roundtrip() {
 
 /// The start of every group a finished track published, in microseconds.
 async fn starts(consumer: &moq_net::broadcast::Consumer, track: &str) -> Vec<u64> {
-	let replay = moq_net::track::Subscription::default()
-		.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(3600)));
+	let replay = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+		moq_net::track::Start::Live {
+			min: Some(std::time::Duration::from_secs(3600)),
+			max: Some(std::time::Duration::from_secs(3600)),
+		},
+	)]);
 	let mut track = consumer
 		.track(track)
 		.unwrap()
@@ -2122,6 +2126,44 @@ fn opus_init(entry_rate: u16) -> (mp4_atom::Dops, Vec<u8>) {
 	};
 	let data = audio_init(super::build_audio_trak(1, 48_000, mp4_atom::Codec::from(opus)));
 	(dops, data)
+}
+
+/// An AAC rate past the sample entry's 16-bit field round trips through the AudioSpecificConfig,
+/// which also names what HE-AACv2 decodes to rather than its mono core.
+#[test]
+fn aac_rate_and_channels_come_from_the_esds() {
+	for (profile, rate, channels) in [(2, 96_000, 2), (29, 48_000, 2)] {
+		let asc = crate::codec::aac::Config::new(profile, rate, channels)
+			.encode()
+			.unwrap();
+		let mut config = hang::catalog::AudioConfig::new(
+			hang::catalog::AudioCodec::AAC(hang::catalog::AAC { profile }),
+			rate,
+			channels,
+		);
+		config.description = Some(asc);
+		let mut trak = super::synthesize_audio_trak(1, rate.into(), &config).unwrap();
+		let mp4_atom::Codec::Mp4a(mp4a) = &mut trak.mdia.minf.stbl.stsd.codecs[0] else {
+			panic!("expected mp4a");
+		};
+		// A writer that described the core, or wrapped the rate into 16 bits.
+		mp4a.audio.channel_count = 1;
+		mp4a.audio.sample_rate = mp4_atom::FixedPoint::from(rate as u16);
+
+		let catalog = run_fmp4(&audio_init(trak));
+		let a = catalog.audio.renditions.values().next().expect("aac rendition");
+		assert_eq!((a.sample_rate, a.channel_count), (rate, channels), "profile {profile}");
+	}
+}
+
+/// A synthesized sample entry refuses a zero rate or channel count, or one past its 16 bits,
+/// rather than wrapping it, and an Opus track without a head refuses more than stereo.
+#[test]
+fn synthesized_audio_refuses_what_its_sample_entry_cannot_hold() {
+	let opus = |rate, channels| hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, rate, channels);
+	for config in [opus(0, 2), opus(48_000, 0), opus(48_000, 65_538), opus(48_000, 6)] {
+		assert!(super::synthesize_audio_trak(1, 48_000, &config).is_err(), "{config:?}");
+	}
 }
 
 /// dOps becomes the OpusHead description, and a track re-exported from that description

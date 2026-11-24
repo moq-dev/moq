@@ -1,5 +1,4 @@
 import { beforeEach, expect, spyOn, test } from "bun:test";
-import { Duration } from "@moq/clock";
 import { StreamCode, Time, Track } from "@moq/net";
 import * as z from "zod/mini";
 import { key, resetKeys } from "../key.test-util.ts";
@@ -100,9 +99,9 @@ test("a second group is reported while the first is still open", async () => {
 	const second = track.appendGroup(Time.Timestamp.fromMillis(2));
 	second.writeFrame({ payload: encode({ n: 1 }), timestamp: Time.Timestamp.fromMillis(2) });
 
-	// Ask for a replay window, so the first group is delivered rather than skipped by the
-	// subscriber's default max delay budget once a newer group exists.
-	const consumer = new Consumer<Rec>({ track: track.subscribe({ delay: { max: Duration.millis(30_000) } }) });
+	// Read history, so the first group is delivered rather than skipped by the default live join
+	// once a newer group exists.
+	const consumer = new Consumer<Rec>({ track: track.subscribe({ ranges: [{}] }) });
 	expect((await consumer.next())?.value).toEqual({ n: 0 });
 	await expect(consumer.next()).rejects.toBeInstanceOf(Rolled);
 

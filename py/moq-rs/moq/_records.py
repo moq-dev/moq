@@ -157,8 +157,9 @@ class Range:
 
     ``start`` is ``None`` for no start, which the subscription's :class:`Delay` places: a stated
     ``min`` is a live join that far behind the live edge (zero is the latest group), and an
-    unstated one reaches back as far as ``max`` allows. ``end`` is ``None`` to keep following
-    the live edge.
+    unstated one reaches back as far as ``max`` allows. A range with a ``start`` is history:
+    every group it covers is delivered, bounded only by the publisher's max age, since ``max``
+    applies only to ranges with no start. ``end`` is ``None`` to keep following the live edge.
     """
 
     start: Timestamp | None = None
@@ -182,8 +183,8 @@ class Delay:
     no further back than the group covering the point ``max`` behind the live edge.
     ``max`` is how far a non-latest group may fall behind before it is skipped, and how far newer
     media may run past a missing group before a decoder gives it up; zero
-    skips at once, ``None`` sets no subscriber limit and leaves the publisher's max age
-    alone to bound it, and it caps every range.
+    skips at once, and ``None`` sets no subscriber limit and leaves the publisher's max age
+    alone to bound it. It bounds only ranges with no start; a range with a start is history.
 
     A bare ``Delay()`` is moq-net's default: no ``min`` and a zero ``max``.
     """

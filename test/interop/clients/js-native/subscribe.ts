@@ -121,7 +121,9 @@ function containerFormat(config: Catalog.VideoConfig | Catalog.AudioConfig, kind
 }
 
 async function video(bc: Moq.Broadcast.Consumer, name: string, config: Catalog.VideoConfig): Promise<number> {
-	const sub = bc.track(name).subscribe({ priority: 0, delay: { min: null, max: MAX_DELAY } });
+	const sub = bc
+		.track(name)
+		.subscribe({ priority: 0, ranges: [{ start: { live: { min: MAX_DELAY, max: MAX_DELAY } } }] });
 	const consumer = new Container.Consumer(sub, {
 		format: containerFormat(config, "video"),
 		delay: { min: null, max: MAX_DELAY },
@@ -188,9 +190,10 @@ async function audio(bc: Moq.Broadcast.Consumer, name: string, config: Catalog.A
 		description: config.codec === "opus" || !config.description ? undefined : Hex.toBytes(config.description),
 	});
 
-	const sub = bc
-		.track(name)
-		.subscribe({ priority: Catalog.PRIORITY.audio, delay: { min: null, max: AUDIO_MAX_DELAY } });
+	const sub = bc.track(name).subscribe({
+		priority: Catalog.PRIORITY.audio,
+		ranges: [{ start: { live: { min: AUDIO_MAX_DELAY, max: AUDIO_MAX_DELAY } } }],
+	});
 	const consumer = new Container.Consumer(sub, {
 		format: containerFormat(config, "audio"),
 		delay: { min: null, max: AUDIO_MAX_DELAY },

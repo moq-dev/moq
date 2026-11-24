@@ -10,7 +10,7 @@
 //! `Ok(None)` only after that FIN; any other ending is an error.
 //!
 //! The publisher opens the final group and writes its first frame (the group stream
-//! opens), finishes the track (SUBSCRIBE_FINISH goes out), then writes the rest, finishes
+//! opens), finishes the track (SUBSCRIBE_END goes out), then writes the rest, finishes
 //! the group and disconnects with no await in between, so the final group's tail and
 //! its FIN never leave. The close lands before the subscriber reads on. The subscriber
 //! must then either see every frame or end with an error; it must not end `Ok(None)`
@@ -38,10 +38,11 @@ const HEAD: [&[u8]; 2] = [b"head-a", b"head-b"];
 const TAIL: [&[u8]; 2] = [b"tail-a", b"tail-b"];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// Let the drivers run until nothing is runnable: under paused time an idle runtime
@@ -131,7 +132,7 @@ async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 		.expect("reader gone");
 
 	// The final group opens and its first frame is sent, then the track's end is
-	// declared: SUBSCRIBE_FINISH reaches the subscriber with the group still open, as it
+	// declared: SUBSCRIBE_END reaches the subscriber with the group still open, as it
 	// does whenever a finish races a group still in flight.
 	let mut tail = track.append_next().unwrap();
 	tail.write_frame(tail.at_start(), TAIL[0]).unwrap();

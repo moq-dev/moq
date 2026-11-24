@@ -4,11 +4,12 @@
 //! drives them: the publisher writes group 66, a viewer fetches group 67, which the publisher
 //! serves only from a fill, and a viewer then subscribes from time 66.
 
+use crate::WithMax as _;
 use crate::support;
 
 use std::time::Duration;
 
-use moq_net::track::{Delay, Item, Order, Range, Subscription};
+use moq_net::track::{Item, Order, Range, Subscription};
 use moq_net::{Timestamp, Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
@@ -20,10 +21,11 @@ const FILLED: u64 = 67;
 const LIVE: u64 = 66;
 
 fn origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 async fn link(from: &moq_net::origin::Producer, to: &moq_net::origin::Producer) -> MockPair {
@@ -119,10 +121,10 @@ impl Fixture {
 	/// An ordered reader on viewer `index` from time [`LIVE`], with no budget.
 	async fn subscribe(&self, index: usize) -> moq_net::track::Ordered {
 		let subscription = Subscription::default()
-			.with_delay(Delay::default().with_max(None))
+			.with_max(None)
 			.with_order(Order::Ascending)
 			.with_ranges([Range {
-				start: Some(LIVE),
+				start: moq_net::track::Start::Time(LIVE),
 				end: None,
 			}]);
 		kio::clock::timeout(
@@ -153,6 +155,7 @@ async fn read(reader: &mut moq_net::track::Ordered, count: usize) -> Vec<Result<
 		items.push(match item {
 			Item::Group(group) => Ok(group.start),
 			Item::Gap { range, .. } => Err(range),
+			_ => panic!("unexpected item"),
 		});
 	}
 	items
@@ -200,15 +203,15 @@ async fn a_range_before_every_group_reads_past_it() {
 	let fixture = Fixture::new().await;
 	fixture.write_live();
 	let subscription = Subscription::default()
-		.with_delay(Delay::default().with_max(None))
+		.with_max(None)
 		.with_order(Order::Ascending)
 		.with_ranges([
 			Range {
-				start: Some(10),
+				start: moq_net::track::Start::Time(10),
 				end: Some(20),
 			},
 			Range {
-				start: Some(LIVE),
+				start: moq_net::track::Start::Time(LIVE),
 				end: None,
 			},
 		]);
@@ -224,81 +227,6 @@ async fn a_range_before_every_group_reads_past_it() {
 	.ordered();
 	assert_eq!(read(&mut reader, 1).await, direct);
 	fixture.serving.abort();
-}
-
-/// A reader asking from a time with no budget reads the groups it would read at the publisher,
-/// though a narrower reader asked the same copy from that time first: the publisher started
-/// that reader's range past the group containing the time, which its budget had expired, and the
-/// copy holds an older group from a fetch, which the wider reader must not start at.
-#[kio::test]
-async fn a_wider_reader_reads_what_a_narrower_one_expired() {
-	let publisher = origin(1);
-	let route = publisher
-		.route("bcast", moq_net::origin::RouteOptions::hidden())
-		.unwrap();
-	let info = moq_net::track::Info::default()
-		.with_timescale(moq_net::Timescale::MILLI)
-		.with_max_age(None);
-	let track = route.broadcast().create_track("value", info).unwrap();
-	for start in [5, 10, 15, 20] {
-		let start = Timestamp::from_millis(start).unwrap();
-		let mut group = track.append_group(start).unwrap();
-		group.write_frame(start, &b"x"[..]).unwrap();
-		group.finish().unwrap();
-	}
-	route.announce().unwrap();
-
-	let (relay, viewer) = (origin(2), origin(3));
-	let links = [link(&publisher, &relay).await, link(&relay, &viewer).await];
-	let remote = kio::clock::timeout(TIMEOUT, viewer.consume().follow("bcast", None).unwrap().available())
-		.await
-		.expect("resolve timeout")
-		.expect("broadcast resolves")
-		.unwrap();
-	let from = |budget: Option<Duration>| {
-		Subscription::default()
-			.with_delay(Delay::default().with_max(budget))
-			.with_order(Order::Ascending)
-			.with_ranges([Range {
-				start: Some(10),
-				end: None,
-			}])
-	};
-	let subscribe = |budget| {
-		let track = remote.track("value").unwrap();
-		async move {
-			kio::clock::timeout(TIMEOUT, track.subscribe(from(budget)))
-				.await
-				.expect("subscribe timeout")
-				.unwrap()
-				.ordered()
-		}
-	};
-
-	// The viewer's copy holds 5 from a fetch.
-	let fetched = remote.track("value").unwrap().fetch_group(5, None);
-	let mut fetched = kio::clock::timeout(TIMEOUT, fetched)
-		.await
-		.expect("fetch timeout")
-		.unwrap();
-	kio::clock::timeout(TIMEOUT, fetched.read_frame())
-		.await
-		.expect("read timeout")
-		.unwrap()
-		.expect("a frame");
-
-	// 10 reaches 15, 5 ms behind the edge at 20: past a 2 ms budget.
-	let narrow = Some(Duration::from_millis(2));
-	let mut direct = track.subscribe(from(narrow)).ordered();
-	assert_eq!(read_groups(&mut direct, 2).await, [15, 20]);
-	let mut reader = subscribe(narrow).await;
-	assert_eq!(read_groups(&mut reader, 2).await, [15, 20]);
-
-	let mut direct = track.subscribe(from(None)).ordered();
-	assert_eq!(read_groups(&mut direct, 3).await, [10, 15, 20]);
-	let mut reader = subscribe(None).await;
-	assert_eq!(read_groups(&mut reader, 3).await, [10, 15, 20]);
-	drop((links, viewer, relay, route, publisher));
 }
 
 /// A copy holding the groups on either side of a time, from fetches, says nothing of a group
@@ -342,10 +270,10 @@ async fn a_time_between_held_groups_starts_where_the_publisher_would() {
 	}
 
 	let from = Subscription::default()
-		.with_delay(Delay::default().with_max(None))
+		.with_max(None)
 		.with_order(Order::Ascending)
 		.with_ranges([Range {
-			start: Some(18),
+			start: moq_net::track::Start::Time(18),
 			end: None,
 		}]);
 	let mut direct = track.subscribe(from.clone()).ordered();

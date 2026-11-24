@@ -27,12 +27,14 @@ import { Cursor, Reader, Stream, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import type { Producer as TrackProducer } from "../track.ts";
 import { unwanted } from "../util/demand.ts";
+import { liveMillis } from "../window.ts";
 import { wireOf } from "../wire.ts";
 import type * as Cluster from "./cluster.ts";
 import { ObjectDatagram } from "./datagram.ts";
 import { SubscribeRefused, toRequestCode } from "./error.ts";
 import { FetchHeader } from "./fetch.ts";
 import * as Filter from "./filter.ts";
+import { framed, unframed } from "./message.test-util.ts";
 import { decodeGroupGap, Frame, Group as GroupMessage } from "./object.ts";
 import { Parameters } from "./parameters.ts";
 import { toWire } from "./priority.ts";
@@ -177,7 +179,7 @@ function publisher(
 	};
 }
 
-const IETF_VERSIONS = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22] as const;
+const IETF_VERSIONS = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22, Version.DRAFT_23] as const;
 
 /** A request stream recording what the publisher writes, with the requester's side under test control. */
 function requestStream(version: IetfVersion) {
@@ -349,7 +351,7 @@ test("TRACK_STATUS outside the grant is refused on every draft", async () => {
 // Nothing answers a SUBSCRIBE while its broadcast resolves, yet the request stream is still
 // read: a second GOAWAY then closes the session at once, not once an answer goes out.
 test("a second GOAWAY on an unanswered SUBSCRIBE closes the session", async () => {
-	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22, Version.DRAFT_23]) {
 		const pair = createMockTransportPair(ALPNS[version]);
 		const session = new NativeSession(pair.server, version, true);
 		const { pub, origin } = publisher(pair.server, { session });
@@ -615,9 +617,10 @@ test("a live SUBSCRIBE asks its track for a live join with no Min Age", async ()
 		);
 		const asked = (track: TrackProducer) => {
 			const subscription = track.subscription.peek();
-			return { ranges: subscription?.ranges, min: subscription?.delay?.min?.asMillis() };
+			const range = subscription?.ranges?.[0];
+			return { count: subscription?.ranges?.length, live: range && liveMillis(range), end: range?.end };
 		};
-		const live = { ranges: [{}], min: 0 };
+		const live = { count: 1, live: 0, end: undefined };
 		try {
 			const track = await accepted;
 			expect(asked(track)).toEqual(live);
@@ -735,14 +738,14 @@ test("a relay forwards a resume refusal's retry interval", async () => {
 });
 
 test("Range Filters over MAX_FILTER_RANGES zero get INVALID_FILTER", async () => {
-	for (const version of [Version.DRAFT_22]) {
+	for (const version of [Version.DRAFT_22, Version.DRAFT_23]) {
 		const pair = createMockTransportPair(ALPNS[version]);
 		const { pub, origin } = publisher(pair.server, { session: new NativeSession(pair.server, version, true) });
 		const request = requestStream(version);
 		try {
 			const name = [1, 4, ...new TextEncoder().encode("test"), 5, ...new TextEncoder().encode("video")];
 			const fields = [7, ...name, 1, 0x25, 0];
-			const encoded = new Reader(undefined, Uint8Array.from([0, fields.length, ...fields]), version);
+			const encoded = new Reader(undefined, framed(fields, version), version);
 			await pub.runSubscribe(await Subscribe.decode(encoded, version), request.stream);
 			await request.stream.writer.closed;
 			const wire = request.wire();
@@ -756,7 +759,7 @@ test("Range Filters over MAX_FILTER_RANGES zero get INVALID_FILTER", async () =>
 });
 
 test("RENDEZVOUS_TIMEOUT has a zero cap with TIMEOUT for a requested wait", async () => {
-	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22, Version.DRAFT_23]) {
 		// A wait applies only to a missing publisher; a missing track on a live one does not exist.
 		for (const [namespace, trackName, live] of [
 			["missing", "video", false],
@@ -779,10 +782,7 @@ test("RENDEZVOUS_TIMEOUT has a zero cap with TIMEOUT for a requested wait", asyn
 					...new TextEncoder().encode(trackName),
 					...(millis === undefined ? [0] : [1, 0x04, millis]),
 				];
-				const msg = await Subscribe.decode(
-					new Reader(undefined, Uint8Array.from([0, fields.length, ...fields]), version),
-					version,
-				);
+				const msg = await Subscribe.decode(new Reader(undefined, framed(fields, version), version), version);
 				try {
 					await pub.runSubscribe(msg, request.stream);
 					await request.stream.writer.closed;
@@ -802,7 +802,7 @@ test("RENDEZVOUS_TIMEOUT has a zero cap with TIMEOUT for a requested wait", asyn
 });
 
 test("reserved namespace requests get DOES_NOT_EXIST while other dot namespaces are served", async () => {
-	for (const version of [Version.DRAFT_22]) {
+	for (const version of [Version.DRAFT_22, Version.DRAFT_23]) {
 		for (const path of [".", "./child", ".session", ".session/extension", ".application", ".sessionish"]) {
 			const pair = createMockTransportPair(ALPNS[version]);
 			const { pub, origin } = publisher(pair.server, { session: new NativeSession(pair.server, version, true) });
@@ -839,7 +839,7 @@ test("reserved namespace requests get DOES_NOT_EXIST while other dot namespaces 
 
 /** A request's USE_VALUE token decodes but grants nothing yet, so a SUBSCRIBE outside the grant is still refused. */
 test("a request token does not widen the grant", async () => {
-	for (const version of [Version.DRAFT_22] as const) {
+	for (const version of [Version.DRAFT_22, Version.DRAFT_23] as const) {
 		const pair = createMockTransportPair(ALPNS[version]);
 		const session = new NativeSession(pair.server, version, true);
 		const nothing = new Signal<Grant | undefined>({
@@ -852,10 +852,7 @@ test("a request token does not widen the grant", async () => {
 		const ascii = (text: string) => [...new TextEncoder().encode(text)];
 		const token = [0x03, 0x00, 0xaa]; // USE_VALUE, type 0
 		const body = [0, 1, 4, ...ascii("room"), 5, ...ascii("video"), 1, 0x03, token.length, ...token];
-		const msg = await Subscribe.decode(
-			new Reader(undefined, new Uint8Array([0, body.length, ...body]), version),
-			version,
-		);
+		const msg = await Subscribe.decode(new Reader(undefined, framed(body, version), version), version);
 
 		const written: Uint8Array[] = [];
 		const stream = new Stream({
@@ -874,7 +871,9 @@ test("a request token does not widen the grant", async () => {
 		// SUBSCRIBE_ERROR on draft-14, REQUEST_ERROR after; the code follows the Length and any Request ID.
 		const wire = written.flatMap((chunk) => Array.from(chunk));
 		expect(wire[0]).toBe(0x05);
-		expect(wire[3]).toBe(toRequestCode("unauthorized", "subscribe", version));
+		expect(unframed(Uint8Array.from(wire.slice(1)), version)[0]).toBe(
+			toRequestCode("unauthorized", "subscribe", version),
+		);
 	}
 });
 
@@ -2253,7 +2252,7 @@ test.each([
 });
 
 test("subscription completion sends PUBLISH_DONE on every supported draft", async () => {
-	const versions = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22] as const;
+	const versions = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22, Version.DRAFT_23] as const;
 
 	for (const version of versions) {
 		// A revocation bridged from upstream keeps its meaning: UNAUTHORIZED, not INTERNAL_ERROR.
@@ -2261,7 +2260,8 @@ test("subscription completion sends PUBLISH_DONE on every supported draft", asyn
 			[undefined, 0x2],
 			[new Error("failed"), 0x0],
 			[unauthorized("test"), 0x1],
-			[new SessionError(SessionCode.Expired), 0x1],
+			// Draft-23 registers EXPIRED_AUTH_TOKEN for an expired token; earlier drafts say UNAUTHORIZED.
+			[new SessionError(SessionCode.Expired), version === Version.DRAFT_23 ? 0x7 : 0x1],
 			// So does a malformed upstream: MALFORMED_TRACK, so the subscriber can tell it from a bug here.
 			[new StreamError(StreamCode.MalformedTrack), 0x12],
 		] as const) {
@@ -2349,6 +2349,7 @@ const ALPNS: Record<IetfVersion, string> = {
 	[Version.DRAFT_18]: ALPN.DRAFT_18,
 	[Version.DRAFT_20]: ALPN.DRAFT_20,
 	[Version.DRAFT_22]: ALPN.DRAFT_22,
+	[Version.DRAFT_23]: ALPN.DRAFT_23,
 };
 
 /**
@@ -3709,8 +3710,7 @@ test("REQUEST_UPDATE applies priority and preserves it when omitted", async () =
 		expect(await client.reader.u53()).toBe(RequestOk.id);
 		await RequestOk.decode(client.reader, fx.version);
 		expect(track.subscription.peek()?.priority).toBe(117);
-		// Only the priority changes; retention and the group range survive.
-		expect(track.subscription.peek()?.delay?.max).toEqual(before?.delay?.max);
+		// Only the priority changes; the group range, and so its retention, survives.
 		expect(track.subscription.peek()?.ranges).toEqual(before?.ranges);
 		await client.writer.write(new Uint8Array([0x02, 0, 2, 4, 0]));
 		expect(await client.reader.u53()).toBe(RequestOk.id);
@@ -4236,7 +4236,7 @@ test("namespace subscription survives requester FIN and stops on STOP_SENDING", 
 });
 
 test("namespace updates move the prefix after acknowledgement", async () => {
-	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22, Version.DRAFT_23]) {
 		const pair = createMockTransportPair(ALPNS[version]);
 		const { pub, origin } = publisher(pair.server, {
 			session: new NativeSession(pair.server, version, false),
@@ -4256,9 +4256,10 @@ test("namespace updates move the prefix after acknowledgement", async () => {
 			await RequestOk.decode(client.reader, version);
 			expect(await client.reader.u53()).toBe(SubscribeNamespaceEntry.id);
 			expect((await SubscribeNamespaceEntry.decode(client.reader, version)).suffix).toBe(Path.from("first"));
-			await client.writer.write(Uint8Array.from([0x02, 0, 8, 2, 1, 0x34]));
+			const update = [0x02, ...framed([2, 1, 0x34, 1, 3, 110, 101, 119], version)];
+			await client.writer.write(Uint8Array.from(update.slice(0, -5)));
 			// Finishing the same frame must apply it exactly once.
-			await client.writer.write(Uint8Array.from([1, 3, 110, 101, 119]));
+			await client.writer.write(Uint8Array.from(update.slice(-5)));
 			expect(await client.reader.u53()).toBe(SubscribeNamespaceEntryDone.id);
 			expect((await SubscribeNamespaceEntryDone.decode(client.reader, version)).suffix).toBe(Path.from("first"));
 			expect(await client.reader.u53()).toBe(RequestOk.id);
@@ -4266,7 +4267,7 @@ test("namespace updates move the prefix after acknowledgement", async () => {
 			expect(await client.reader.u53()).toBe(SubscribeNamespaceEntry.id);
 			expect((await SubscribeNamespaceEntry.decode(client.reader, version)).suffix).toBe(Path.from("second"));
 			if (version >= Version.DRAFT_20) {
-				await client.writer.write(Uint8Array.from([0x02, 0, 6, 4, 1, 0x34, 1, 1, 46]));
+				await client.writer.write(Uint8Array.from([0x02, ...framed([4, 1, 0x34, 1, 1, 46], version)]));
 				expect(await client.reader.u53()).toBe(RequestError.id);
 				expect((await RequestError.decode(client.reader, version)).errorCode).toBe(0x10);
 				await running;
@@ -5166,13 +5167,15 @@ test("a SUBSCRIBE carries no budget, so the publisher's own policy bounds it", a
 		}),
 	);
 	try {
-		const unbounded = Duration.millis(Number.MAX_SAFE_INTEGER);
-		expect(track.subscription.peek()?.delay?.max).toEqual(unbounded);
+		// With no group yet it asks history from time zero, whose groups only the publisher's max
+		// age expires.
+		const unbounded = [{ start: 0n }];
+		expect(track.subscription.peek()?.ranges).toEqual(unbounded);
 		await client.writer.u53(SubscribeUpdate.id);
 		await new SubscribeUpdate({ requestId: 2n }).encode(client.writer, fx.version);
 		expect(await client.reader.u53()).toBe(RequestOk.id);
 		await RequestOk.decode(client.reader, fx.version);
-		expect(track.subscription.peek()?.delay?.max).toEqual(unbounded);
+		expect(track.subscription.peek()?.ranges).toEqual(unbounded);
 	} finally {
 		client.close();
 		track.finish();

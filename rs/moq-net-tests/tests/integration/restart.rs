@@ -25,9 +25,11 @@ fn timed() -> moq_net::track::Info {
 const TEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// Have `to` pull everything `from` publishes.
@@ -71,16 +73,19 @@ async fn expect_replaced(version: Version, announced: &mut origin::Routes, prefi
 		origin::RouteEvent {
 			kind: origin::RouteKind::Restart,
 			announce,
+			..
 		} if restarts => assert_eq!(announce.prefix.as_str(), prefix),
 		origin::RouteEvent {
 			kind: origin::RouteKind::End,
 			announce,
+			..
 		} if !restarts => {
 			assert_eq!(announce.prefix.as_str(), prefix);
 			match next_event(announced).await {
 				origin::RouteEvent {
 					kind: origin::RouteKind::Start,
 					announce,
+					..
 				} => assert_eq!(announce.prefix.as_str(), prefix),
 				other => panic!("{version}: expected the start, got {other:?}"),
 			}
@@ -139,6 +144,7 @@ async fn relay_chain(version: &str) {
 		origin::RouteEvent {
 			kind: origin::RouteKind::Start,
 			announce,
+			..
 		} => assert_eq!(announce.prefix.as_str(), "live"),
 		other => panic!("{version}: expected the route, got {other:?}"),
 	}
@@ -253,6 +259,7 @@ async fn prefix_pool(version: &str) {
 		origin::RouteEvent {
 			kind: origin::RouteKind::Start,
 			announce,
+			..
 		} => advertised(announce),
 		other => panic!("{version}: expected the pool, got {other:?}"),
 	}
@@ -284,6 +291,7 @@ async fn prefix_pool(version: &str) {
 			origin::RouteEvent {
 				kind: origin::RouteKind::Restart,
 				announce,
+				..
 			} => advertised(announce),
 			other => panic!("{version}: expected a restart at most, got {other:?}"),
 		}
@@ -379,6 +387,7 @@ async fn dynamic_instance(version: &str, from: Option<Instance>, to: Instance) {
 		origin::RouteEvent {
 			kind: origin::RouteKind::Start,
 			announce,
+			..
 		} => assert_eq!(announce.prefix.as_str(), "live"),
 		other => panic!("{version}: expected the claim, got {other:?}"),
 	}

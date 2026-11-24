@@ -33,7 +33,7 @@ CI runs the matrix nightly, on pushes to `main` that touch `test/smoke/`, and on
 | Browser | publish, subscribe | npm [`@moq/watch`](https://www.npmjs.com/package/@moq/watch) + [`@moq/publish`](https://www.npmjs.com/package/@moq/publish), via vite, esbuild, or [jsDelivr](https://www.jsdelivr.com/) |
 | Native JS | subscribe | npm [`@moq/net`](https://www.npmjs.com/package/@moq/net) + [`@moq/hang`](https://www.npmjs.com/package/@moq/hang) under node and bun |
 | Swift | subscribe | SPM [`moq-dev/moq-swift`](https://github.com/moq-dev/moq-swift), macOS |
-| Kotlin | subscribe | Maven Central [`dev.moq:moq`](https://central.sonatype.com/artifact/dev.moq/moq) |
+| Kotlin | subscribe | Maven Central [`dev.moq:moq`](https://central.sonatype.com/artifact/dev.moq/moq), through Google's mirror (`just maven-mirror` checks it is current) |
 | C | subscribe | [`libmoq`](https://github.com/moq-dev/moq/releases) release tarball, linked by hand, pkg-config, or CMake |
 | GStreamer | subscribe | [`moq-gst`](https://github.com/moq-dev/moq/releases?q=moq-gst) plugin against system GStreamer |
 
@@ -44,7 +44,7 @@ This directory's own Nix flake carries the client toolchains, separate from moq'
 ```bash
 cd test/smoke
 nix develop
-cargo install moq-relay moq-cli   # or brew / apt
+cargo install moq-relay moq-cli   # or brew / apt install moq-relay moq
 just full
 just relays
 just cloudflare

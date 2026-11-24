@@ -1,29 +1,49 @@
 //! Incremental demand, separate from the track's cached content.
 use std::{
 	collections::{BTreeMap, BTreeSet, VecDeque},
-	sync::Arc,
+	sync::{
+		Arc,
+		atomic::{AtomicU64, Ordering},
+	},
 	task::Poll,
 	time::Duration,
 };
 
-use super::{Delay, Order, Position, Range, Subscription, TrackState, clamp_combined};
+use super::super::subscription::{Joining, max_of};
+use super::{JoinAsk, Order, Position, Range, Start, Subscription, TrackState, clamp_combined};
 
 mod ranges;
 use ranges::Ranges;
+
+/// How many answers to a received copy's live joins were recorded, on any track: a live join
+/// range a reader adds notes it, and takes only an answer recorded since (see
+/// [`Prefs::since`]). Counted process-wide, so a front's reader and the copies it reads
+/// compare their ticks.
+static JOIN_TICK: AtomicU64 = AtomicU64::new(0);
+
+/// How many join answers were recorded: see [`answered`].
+pub(in crate::model) fn join_tick() -> u64 {
+	JOIN_TICK.load(Ordering::SeqCst)
+}
+
+/// Note an answer to a live join recorded, returning its tick: greater than that of every
+/// range added before.
+pub(super) fn answered() -> u64 {
+	JOIN_TICK.fetch_add(1, Ordering::SeqCst) + 1
+}
 
 #[derive(Default)]
 pub(super) struct Subscriptions {
 	count: usize,
 	priority: BTreeMap<i8, usize>,
-	// Keyed by budget, so `None` counts as the widest of all.
+	/// Each non-empty range's staleness budget, counted: a history range's is the widest of all.
 	max_delay: BTreeMap<Duration, usize>,
-	// The stated minimums of the subscribers holding a range with no start, which alone a Min
-	// Age places.
-	min_delay: BTreeMap<Duration, usize>,
-	// How many subscribers holding a range with no start leave the minimum unstated: one
-	// reaches back as far as the budget allows, which counts as the largest.
-	unstated: usize,
 	ranges: Ranges,
+	/// The live joins already placed (see [`Subscription::placed`]), by the group each was
+	/// placed at and its end, with each one's staleness budget counted. Kept out of
+	/// [`Self::ranges`]: a placed join starts where it was placed, whatever its lag, so it
+	/// merges with no other range.
+	placed: BTreeMap<(u64, Option<u64>), BTreeMap<Duration, usize>>,
 	descending: usize,
 	/// Subscribers that need the live feed; see [`Subscription::feed`].
 	feed: usize,
@@ -31,9 +51,16 @@ pub(super) struct Subscriptions {
 	resumes: BTreeMap<Position, usize>,
 	/// How many subscribers resume, so the aggregate asks without summing [`Self::resumes`].
 	resuming: usize,
-	/// The time starts a received copy's readers wait on, by time, counted under the budget
-	/// each waits with: see [`Subscription::asks`].
-	asks: BTreeMap<u64, BTreeMap<Duration, usize>>,
+	/// The time starts a received copy's readers wait on, by time, counted: see
+	/// [`Subscription::asks`].
+	asks: BTreeMap<u64, usize>,
+	/// Where capping subscribers stop; see [`Subscription::cap`].
+	caps: BTreeMap<Position, usize>,
+	/// How many subscribers cap, so the aggregate asks without summing [`Self::caps`].
+	capping: usize,
+	/// The live joins a received copy's readers wait on, by lag and end: see
+	/// [`Subscription::joins`].
+	joins: BTreeMap<(Option<Duration>, Option<u64>), Waiting>,
 	/// The lowest group consumers want while no refresh is pending, never lowered.
 	wanted: u64,
 	/// A request for a group past every key written, until a group answers it or its
@@ -47,6 +74,14 @@ pub(super) struct Subscriptions {
 	waiters: kio::WaiterList,
 	/// [`super::Refreshing`] callers, woken when their request is sent or ends.
 	callers: kio::WaiterList,
+}
+
+/// The readers waiting on one live join, counted under the `max` each waits with and the
+/// newest answer each saw before it began waiting.
+#[derive(Default)]
+struct Waiting {
+	budgets: BTreeMap<Duration, usize>,
+	since: BTreeMap<u64, usize>,
 }
 
 /// A pending request for a group past every key written.
@@ -71,42 +106,92 @@ pub(super) enum Requested {
 }
 
 /// Everything the aggregate holds besides its ranges.
-type Scalars = (i8, Delay, Order, bool, Option<Position>);
+type Scalars = (i8, Order, bool, Option<Position>, Option<Position>);
 
 impl Subscriptions {
 	pub(super) fn combined(&self) -> Option<Subscription> {
-		let (priority, delay, order, feed, resume) = self.scalars()?;
+		let (priority, order, feed, resume, cap) = self.scalars()?;
+		let mut ranges = self.ranges.union();
+		let mut placed = BTreeMap::new();
+		// Each placed join once under the widest `max` asked of it; its lag places nothing.
+		for (&(group, end), budgets) in &self.placed {
+			let (budget, _) = budgets.last_key_value().expect("a counted placed join");
+			placed.insert(ranges.len() as u64, group);
+			ranges.push(Range {
+				start: Start::Live {
+					min: Some(Duration::ZERO),
+					max: max_of(*budget),
+				},
+				end,
+			});
+		}
 		Some(Subscription {
 			priority,
-			delay,
-			ranges: self.ranges.union(self.reaches_back()),
+			ranges,
 			order,
 			feed,
 			resume,
+			placed,
+			cap,
 			asks: self.asks(),
+			joins: self.joins(),
 		})
 	}
 
-	/// Each time start readers wait on, with the widest budget one waits under.
-	fn asks(&self) -> Vec<(u64, Duration)> {
-		(self.asks.iter())
-			.filter_map(|(time, budgets)| Some((*time, *budgets.last_key_value()?.0)))
+	/// Each live join readers wait on, with the widest budget one waits under and the newest
+	/// answer one saw before it began.
+	fn joins(&self) -> Vec<JoinAsk> {
+		(self.joins.iter())
+			.filter_map(|(&(min, end), waiting)| {
+				Some(JoinAsk {
+					min,
+					end,
+					budget: *waiting.budgets.last_key_value()?.0,
+					since: *waiting.since.last_key_value()?.0,
+				})
+			})
 			.collect()
 	}
 
-	/// Count a reader waiting on time start `time` under `budget`, or uncount one when not
-	/// `waits`, waking the aggregate's watchers when the widest budget at that time moves.
-	pub(super) fn ask(&mut self, time: u64, budget: Duration, waits: bool) -> kio::WaiterList {
-		let budgets = self.asks.entry(time).or_default();
-		let widest = budgets.last_key_value().map(|(budget, _)| *budget);
+	/// Count a reader waiting on `join`, or uncount one when not `waits`, waking the
+	/// aggregate's watchers when what [`Self::joins`] reports moves.
+	pub(super) fn join(&mut self, join: JoinAsk, waits: bool) -> kio::WaiterList {
+		let waiting = self.joins.entry((join.min, join.end)).or_default();
+		let before = (waiting.budgets.last_key_value().map(|(budget, _)| *budget))
+			.zip(waiting.since.last_key_value().map(|(since, _)| *since));
 		match waits {
-			true => _ = add(budgets, budget),
-			false => _ = remove(budgets, budget),
+			true => {
+				add(&mut waiting.budgets, join.budget);
+				add(&mut waiting.since, join.since);
+			}
+			false => {
+				remove(&mut waiting.budgets, join.budget);
+				remove(&mut waiting.since, join.since);
+			}
 		}
-		let moved = budgets.last_key_value().map(|(budget, _)| *budget) != widest;
-		if budgets.is_empty() {
-			self.asks.remove(&time);
+		let after = (waiting.budgets.last_key_value().map(|(budget, _)| *budget))
+			.zip(waiting.since.last_key_value().map(|(since, _)| *since));
+		if waiting.budgets.is_empty() {
+			self.joins.remove(&(join.min, join.end));
 		}
+		match before != after {
+			true => self.waiters.take(),
+			false => Default::default(),
+		}
+	}
+
+	/// Each time start readers wait on.
+	fn asks(&self) -> Vec<u64> {
+		self.asks.keys().copied().collect()
+	}
+
+	/// Count a reader waiting on time start `time`, or uncount one when not `waits`, waking the
+	/// aggregate's watchers when the first starts or the last stops waiting on it.
+	pub(super) fn ask(&mut self, time: u64, waits: bool) -> kio::WaiterList {
+		let moved = match waits {
+			true => add(&mut self.asks, time),
+			false => remove(&mut self.asks, time),
+		};
 		match moved {
 			true => self.waiters.take(),
 			false => Default::default(),
@@ -115,31 +200,21 @@ impl Subscriptions {
 
 	/// [`Self::combined`] without its ranges, costing none of them.
 	pub(super) fn terms(&self) -> Option<Subscription> {
-		let (priority, delay, order, feed, resume) = self.scalars()?;
+		let (priority, order, feed, resume, cap) = self.scalars()?;
 		Some(Subscription {
 			priority,
-			delay,
 			ranges: Vec::new(),
 			order,
 			feed,
 			resume,
+			placed: BTreeMap::new(),
+			cap,
 			asks: Vec::new(),
+			joins: Vec::new(),
 		})
 	}
 
-	/// Whether an open range with no start reaches back as far as the budget allows, so it
-	/// covers every other range: a subscriber holding one left its minimum unstated.
-	fn reaches_back(&self) -> bool {
-		self.unstated > 0
-	}
-
-	/// Whether a subscriber holding a range with no start states a Min Age, which the
-	/// aggregate's minimum hides once another leaves its own unstated.
-	pub(super) fn joins_stated(&self) -> bool {
-		!self.min_delay.is_empty()
-	}
-
-	/// The largest delay budget without materializing the subscription's ranges.
+	/// The widest staleness budget any range asks under, without materializing the ranges.
 	pub(super) fn max_delay(&self) -> Duration {
 		self.max_delay
 			.last_key_value()
@@ -150,15 +225,6 @@ impl Subscriptions {
 		(self.count != 0).then(|| {
 			(
 				*self.priority.last_key_value().unwrap().0,
-				Delay {
-					// The largest, so an upstream starts far enough back for the reader that buffers
-					// most, an unstated one reaching back furthest.
-					min: match self.reaches_back() {
-						true => None,
-						false => self.min_delay.last_key_value().map(|(min, _)| *min),
-					},
-					max: Some(*self.max_delay.last_key_value().unwrap().0).filter(|budget| *budget != Duration::MAX),
-				},
 				if self.descending == 0 {
 					Order::Ascending
 				} else {
@@ -168,6 +234,11 @@ impl Subscriptions {
 				// A subscriber asking for the whole group outweighs any resuming one.
 				match self.resuming == self.count {
 					true => self.resumes.first_key_value().map(|(resume, _)| *resume),
+					false => None,
+				},
+				// So does one asking for the rest of the group past any cap.
+				match self.capping == self.count {
+					true => self.caps.last_key_value().map(|(cap, _)| *cap),
 					false => None,
 				},
 			)
@@ -321,34 +392,22 @@ impl Subscriptions {
 		&mut self,
 		old: Option<Contribution>,
 		new: Option<Contribution>,
-		moved: (&[Range], &[Range]),
+		moved: (&[Held], &[Held]),
 	) -> kio::WaiterList {
 		let prev = self.scalars();
-		let reached_back = self.reaches_back();
-		if let Some(new) = &new {
-			match (new.joins, new.delay.min) {
-				(false, _) => {}
-				(true, Some(min)) => _ = add(&mut self.min_delay, min),
-				(true, None) => self.unstated += 1,
-			}
-		}
-		if let Some(old) = &old {
-			match (old.joins, old.delay.min) {
-				(false, _) => {}
-				(true, Some(min)) => _ = remove(&mut self.min_delay, min),
-				(true, None) => self.unstated -= 1,
-			}
-		}
-		// The union moves when whether the open range hides the rest does.
-		let reaches_back = self.reaches_back();
-		let mut reshaped = reached_back != reaches_back && self.ranges.has_open();
+		let mut reshaped = false;
 		// New ranges count before old ones leave, so a range both hold never reads as gone.
 		let (gone, came) = moved;
+		for (range, _) in came.iter().filter(|(range, _)| !range.is_empty()) {
+			add(&mut self.max_delay, range.budget());
+		}
+		for (range, _) in gone.iter().filter(|(range, _)| !range.is_empty()) {
+			remove(&mut self.max_delay, range.budget());
+		}
 		if let Some(new) = &new {
 			add(&mut self.priority, new.priority);
-			add(&mut self.max_delay, new.budget());
-			for range in came {
-				reshaped |= self.ranges.add(*range, reaches_back);
+			for held in came {
+				reshaped |= self.add_range(held);
 			}
 			self.descending += usize::from(new.order == Order::Descending);
 			self.feed += usize::from(new.feed);
@@ -356,19 +415,26 @@ impl Subscriptions {
 				add(&mut self.resumes, resume);
 				self.resuming += 1;
 			}
+			if let Some(cap) = new.cap {
+				add(&mut self.caps, cap);
+				self.capping += 1;
+			}
 			self.count += 1;
 		}
 		if let Some(old) = &old {
 			remove(&mut self.priority, old.priority);
-			remove(&mut self.max_delay, old.budget());
-			for range in gone {
-				reshaped |= self.ranges.remove(*range, reaches_back);
+			for held in gone {
+				reshaped |= self.remove_range(held);
 			}
 			self.descending -= usize::from(old.order == Order::Descending);
 			self.feed -= usize::from(old.feed);
 			if let Some(resume) = old.resume {
 				remove(&mut self.resumes, resume);
 				self.resuming -= 1;
+			}
+			if let Some(cap) = old.cap {
+				remove(&mut self.caps, cap);
+				self.capping -= 1;
 			}
 			self.count -= 1;
 		}
@@ -382,14 +448,44 @@ impl Subscriptions {
 	pub(super) fn len(&self) -> usize {
 		self.count
 	}
+
+	/// Count `held` into the ranges, returning whether their aggregate moved.
+	fn add_range(&mut self, (range, placed): &Held) -> bool {
+		let Some(group) = placed else {
+			return self.ranges.add(*range);
+		};
+		let budgets = self.placed.entry((*group, range.end)).or_default();
+		let widest = budgets.last_key_value().map(|(budget, _)| *budget);
+		add(budgets, range.budget());
+		widest != budgets.last_key_value().map(|(budget, _)| *budget)
+	}
+
+	/// Take back what [`Self::add_range`] counted, returning whether the aggregate moved.
+	fn remove_range(&mut self, (range, placed): &Held) -> bool {
+		let Some(group) = placed else {
+			return self.ranges.remove(*range);
+		};
+		let key = (*group, range.end);
+		let budgets = self.placed.get_mut(&key).expect("a counted placed join");
+		let widest = budgets.last_key_value().map(|(budget, _)| *budget);
+		remove(budgets, range.budget());
+		let after = budgets.last_key_value().map(|(budget, _)| *budget);
+		if budgets.is_empty() {
+			self.placed.remove(&key);
+		}
+		widest != after
+	}
 }
 
+/// A range as a subscriber holds it, with the group it was [placed](Subscription::placed) at.
+pub(super) type Held = (Range, Option<u64>);
+
 /// The ranges `old` holds more of than `new`, then those `new` holds more of than `old`.
-fn moved(old: &[Range], new: &[Range]) -> (Vec<Range>, Vec<Range>) {
+fn moved<T: Copy + Eq + std::hash::Hash>(old: &[T], new: &[T]) -> (Vec<T>, Vec<T>) {
 	if old == new {
 		return Default::default();
 	}
-	let mut counts = std::collections::HashMap::<Range, isize>::with_capacity(old.len());
+	let mut counts = std::collections::HashMap::<T, isize>::with_capacity(old.len());
 	for range in old {
 		*counts.entry(*range).or_default() += 1;
 	}
@@ -426,18 +522,10 @@ fn remove<T: Ord>(counts: &mut BTreeMap<T, usize>, value: T) -> bool {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct Contribution {
 	priority: i8,
-	delay: Delay,
 	order: Order,
 	feed: bool,
 	resume: Option<Position>,
-	/// Whether a range has no start, so the Min Age counts.
-	joins: bool,
-}
-
-impl Contribution {
-	fn budget(&self) -> Duration {
-		self.delay.budget()
-	}
+	cap: Option<Position>,
 }
 
 /// A change to a subscriber's preferences that edits its ranges by key: the ranges keyed
@@ -447,8 +535,10 @@ impl Contribution {
 pub(crate) struct Edit {
 	pub retire: Vec<u64>,
 	pub add: Vec<(u64, Range)>,
+	/// The group each live join among `add` was already placed at, by its key: see
+	/// [`Subscription::placed`].
+	pub placed: BTreeMap<u64, u64>,
 	pub priority: i8,
-	pub delay: Delay,
 	pub order: Order,
 }
 
@@ -457,17 +547,20 @@ pub(crate) struct Edit {
 /// a reader catches up on those alone.
 pub(in crate::model) struct Prefs {
 	pub priority: i8,
-	pub delay: Delay,
 	pub order: Order,
 	pub feed: bool,
 	pub resume: Option<Position>,
+	pub cap: Option<Position>,
 	/// In key order, which is the order given: a whole replacement keys by position, and each
 	/// key an edit adds is past every key before it.
 	ranges: BTreeMap<u64, Range>,
-	/// How many ranges have no start and no end: see [`Self::joins_live`].
+	/// The group each live join range was already placed at, by key: see
+	/// [`Subscription::placed`].
+	placed: BTreeMap<u64, u64>,
+	/// The join tick each live join range was added at, by key: see [`Self::since`].
+	since: BTreeMap<u64, u64>,
+	/// How many ranges join live and follow the live edge: see [`Self::joins_live`].
 	joining: usize,
-	/// How many ranges have no start, which a Min Age places.
-	unanchored: usize,
 	/// Bumped whenever the ranges change.
 	pub revision: u64,
 	/// The keys each change since `base` touched, by revision. Held to twice the ranges, so a
@@ -479,46 +572,87 @@ pub(in crate::model) struct Prefs {
 }
 
 impl Prefs {
-	fn new(value: Subscription) -> Self {
+	/// `value`, its live join ranges added at join tick `tick`.
+	fn new(value: Subscription, tick: u64) -> Self {
 		let mut prefs = Self {
 			priority: value.priority,
-			delay: value.delay,
 			order: value.order,
 			feed: value.feed,
 			resume: value.resume,
+			cap: value.cap,
 			ranges: BTreeMap::new(),
+			placed: BTreeMap::new(),
+			since: BTreeMap::new(),
 			joining: 0,
-			unanchored: 0,
 			revision: 0,
 			log: VecDeque::new(),
 			base: 0,
 		};
 		for (key, range) in (0..).zip(value.ranges) {
-			prefs.insert(key, range);
+			prefs.insert(key, (range, value.placed.get(&key).copied()), tick);
 		}
 		prefs
+	}
+
+	/// The join tick the live join range keyed `key` was added at, 0 for another: a received
+	/// copy places it only from an answer recorded since, the live edge having moved since any
+	/// earlier one.
+	pub fn since(&self, key: u64) -> u64 {
+		self.since.get(&key).copied().unwrap_or(0)
+	}
+
+	/// How a received copy places the live join range keyed `key`: where it was already
+	/// placed, or from an answer recorded since it was added.
+	pub fn joining(&self, key: u64) -> Joining {
+		match self.placed.get(&key) {
+			Some(group) => Joining::At(*group),
+			None => Joining::Since(self.since(key)),
+		}
 	}
 
 	/// These preferences as a [`Subscription`], its ranges in key order. Costs every range.
 	pub fn subscription(&self) -> Subscription {
 		Subscription {
 			priority: self.priority,
-			delay: self.delay,
 			ranges: self.ranges.values().copied().collect(),
 			order: self.order,
 			feed: self.feed,
 			resume: self.resume,
+			placed: self.placed_by_index(),
+			cap: self.cap,
 			asks: Vec::new(),
+			joins: Vec::new(),
 		}
 	}
 
-	pub fn budget(&self) -> Duration {
-		self.delay.budget()
+	/// The group each placed join was placed at, by its index in key order, as
+	/// [`Subscription::placed`] holds it.
+	fn placed_by_index(&self) -> BTreeMap<u64, u64> {
+		(0..)
+			.zip(self.ranges.keys())
+			.filter_map(|(index, key)| Some((index, *self.placed.get(key)?)))
+			.collect()
 	}
 
-	/// Whether a subscriber joins at the live edge: a range with no start following it. A
-	/// fixed start resumes a known group instead, such as a route switch picking up where the
-	/// reader stopped.
+	/// Every range in key order, with the group each was placed at.
+	fn held(&self) -> Vec<Held> {
+		(self.ranges.iter())
+			.map(|(key, range)| (*range, self.placed.get(key).copied()))
+			.collect()
+	}
+
+	/// The widest staleness budget any of these ranges gives a group.
+	pub fn widest(&self) -> Duration {
+		(self.ranges.values())
+			.filter(|range| !range.is_empty())
+			.map(Range::budget)
+			.max()
+			.unwrap_or(Duration::ZERO)
+	}
+
+	/// Whether a subscriber joins at the live edge: a live join following it. A time start
+	/// resumes a known group instead, such as a route switch picking up where the reader
+	/// stopped.
 	pub fn joins_live(&self) -> bool {
 		self.joining > 0
 	}
@@ -531,6 +665,11 @@ impl Prefs {
 	/// The range keyed `key`, if held.
 	pub fn range(&self, key: u64) -> Option<Range> {
 		self.ranges.get(&key).copied()
+	}
+
+	/// The group the live join range keyed `key` was placed at, if it was.
+	pub fn placed(&self, key: u64) -> Option<u64> {
+		self.placed.get(&key).copied()
 	}
 
 	/// The keys the changes since `revision` touched, or `None` once the log no longer
@@ -546,32 +685,49 @@ impl Prefs {
 	fn contribution(&self) -> Contribution {
 		Contribution {
 			priority: self.priority,
-			delay: self.delay,
 			order: self.order,
 			feed: self.feed,
 			resume: self.resume,
-			joins: self.unanchored > 0,
+			cap: self.cap,
 		}
 	}
 
-	fn insert(&mut self, key: u64, range: Range) {
-		self.count(&range, 1);
+	fn insert(&mut self, key: u64, (range, placed): Held, tick: u64) {
+		self.count(&range, placed, 1);
 		if let Some(old) = self.ranges.insert(key, range) {
-			self.count(&old, -1);
+			self.count(&old, self.placed.get(&key).copied(), -1);
+		}
+		match placed {
+			Some(group) => _ = self.placed.insert(key, group),
+			None => _ = self.placed.remove(&key),
+		}
+		match range.join() {
+			Some(_) => _ = self.since.insert(key, tick),
+			None => _ = self.since.remove(&key),
 		}
 	}
 
-	fn remove(&mut self, key: u64) -> Option<Range> {
-		let range = self.ranges.remove(&key)?;
-		self.count(&range, -1);
-		Some(range)
+	/// The join tick to add `range` under `key` at, `tick` for a new range: a live join that
+	/// changes only its `max` keeps the one it was added at, since it stays where it joined.
+	fn tick_for(&self, key: u64, range: &Range, tick: u64) -> u64 {
+		match self.ranges.get(&key) {
+			Some(old) if range.join().is_some() && old.join() == range.join() => self.since(key),
+			_ => tick,
+		}
 	}
 
-	/// Count `range` `by` more into [`Self::joining`] and [`Self::unanchored`].
-	fn count(&mut self, range: &Range, by: isize) {
-		let unanchored = range.start.is_none() && !range.is_empty();
-		self.unanchored = self.unanchored.wrapping_add_signed(by * isize::from(unanchored));
-		self.joining = self.joining.wrapping_add_signed(by * isize::from(range.is_open()));
+	fn remove(&mut self, key: u64) -> Option<Held> {
+		let range = self.ranges.remove(&key)?;
+		let placed = self.placed.remove(&key);
+		self.since.remove(&key);
+		self.count(&range, placed, -1);
+		Some((range, placed))
+	}
+
+	/// Count `range` `by` more into [`Self::joining`]: a placed join waits on no live edge.
+	fn count(&mut self, range: &Range, placed: Option<u64>, by: isize) {
+		let open = range.is_open() && placed.is_none();
+		self.joining = self.joining.wrapping_add_signed(by * isize::from(open));
 	}
 
 	/// Note that the ranges keyed `keys` changed.
@@ -589,8 +745,22 @@ impl Prefs {
 	/// reader resolves them all again.
 	fn rekey(&mut self, keys: impl IntoIterator<Item = u64>) {
 		let ranges = std::mem::take(&mut self.ranges);
+		let since = std::mem::take(&mut self.since);
+		let placed = std::mem::take(&mut self.placed);
 		let count = ranges.len();
-		self.ranges = keys.into_iter().zip(ranges.into_values()).collect();
+		let rekeyed: Vec<(u64, u64, Range)> = (keys.into_iter())
+			.zip(ranges)
+			.map(|(key, (old, range))| (key, old, range))
+			.collect();
+		for &(key, old, _) in &rekeyed {
+			if let Some(&tick) = since.get(&old) {
+				self.since.insert(key, tick);
+			}
+			if let Some(&group) = placed.get(&old) {
+				self.placed.insert(key, group);
+			}
+		}
+		self.ranges = rekeyed.into_iter().map(|(key, _, range)| (key, range)).collect();
 		debug_assert_eq!(self.ranges.len(), count, "one key per range");
 		self.revision += 1;
 		self.log.clear();
@@ -598,18 +768,38 @@ impl Prefs {
 	}
 
 	/// Replace every preference, rekeying the ranges by position when they change: every
-	/// reader resolves them all again.
-	fn replace(&mut self, next: Subscription) {
-		(self.priority, self.delay, self.order, self.feed, self.resume) =
-			(next.priority, next.delay, next.order, next.feed, next.resume);
-		if self.ranges.values().eq(&next.ranges) {
+	/// reader resolves them all again, its live joins added at join tick `tick`. With
+	/// `retune`, ranges that change only a live join's `max` keep their keys, so each stays
+	/// where it joined; without, as a restated subscription, every range is placed afresh.
+	fn replace(&mut self, next: Subscription, tick: u64, retune: bool) {
+		(self.priority, self.order, self.feed, self.resume, self.cap) =
+			(next.priority, next.order, next.feed, next.resume, next.cap);
+		let placed = self.placed_by_index();
+		if self.ranges.values().eq(&next.ranges) && placed == next.placed {
+			return;
+		}
+		let retunes = retune
+			&& self.ranges.len() == next.ranges.len()
+			&& placed == next.placed
+			&& (self.ranges.values().zip(&next.ranges))
+				.all(|(old, new)| old == new || (new.join().is_some() && old.join() == new.join()));
+		if retunes {
+			let changed: Vec<(u64, Range)> = (self.ranges.iter().zip(&next.ranges))
+				.filter(|((_, old), new)| old != new)
+				.map(|((key, _), new)| (*key, *new))
+				.collect();
+			for &(key, range) in &changed {
+				self.ranges.insert(key, range);
+			}
+			self.touched(changed.into_iter().map(|(key, _)| key));
 			return;
 		}
 		self.ranges.clear();
+		self.placed.clear();
+		self.since.clear();
 		self.joining = 0;
-		self.unanchored = 0;
 		for (key, range) in (0..).zip(next.ranges) {
-			self.insert(key, range);
+			self.insert(key, (range, next.placed.get(&key).copied()), tick);
 		}
 		self.revision += 1;
 		self.log.clear();
@@ -630,9 +820,9 @@ impl Preferences {
 	pub(super) fn register(state: kio::Ref<'_, TrackState>, value: Subscription) -> Self {
 		let subscriptions = (!state.is_closed()).then(|| state.subscriptions.clone());
 		drop(state);
-		let value = Prefs::new(value);
+		let value = Prefs::new(value, join_tick());
 		if let Some(subs) = &subscriptions {
-			let ranges: Vec<Range> = value.ranges.values().copied().collect();
+			let ranges = value.held();
 			let mut wakes = subs.lock().replace(None, Some(value.contribution()), (&[], &ranges));
 			wakes.wake();
 		}
@@ -643,29 +833,42 @@ impl Preferences {
 	}
 
 	/// Replace every preference, as [`super::Subscriber::update`] does: replaced ranges are
-	/// keyed afresh and resolve again.
+	/// keyed afresh and resolve again, except a live join whose `max` alone changed.
 	pub(in crate::model) fn update(&self, next: Subscription) -> crate::Result<()> {
+		self.replace(next, true)
+	}
+
+	/// Replace every preference, every range placed afresh, as
+	/// [`super::Subscriber::restate`] does.
+	pub(in crate::model) fn restate(&self, next: Subscription) -> crate::Result<()> {
+		self.replace(next, false)
+	}
+
+	fn replace(&self, next: Subscription, retune: bool) -> crate::Result<()> {
 		let mut value = self.0.value.write().map_err(|_| crate::Error::Closed)?;
-		let old: Vec<Range> = value.ranges.values().copied().collect();
+		let old = value.held();
 		let contribution = value.contribution();
 		let next_contribution = Contribution {
 			priority: next.priority,
-			delay: next.delay,
 			order: next.order,
 			feed: next.feed,
 			resume: next.resume,
-			joins: next.joins(),
+			cap: next.cap,
 		};
-		if contribution == next_contribution && old == next.ranges {
+		let new: Vec<Held> = (0..)
+			.zip(&next.ranges)
+			.map(|(index, range)| (*range, next.placed.get(&index).copied()))
+			.collect();
+		if contribution == next_contribution && old == new {
 			return Ok(());
 		}
 		// Found before taking the lock every subscriber shares.
-		let (gone, came) = moved(&old, &next.ranges);
+		let (gone, came) = moved(&old, &new);
 		let mut wakes = self.0.subscriptions.as_ref().map(|subs| {
 			subs.lock()
 				.replace(Some(contribution), Some(next_contribution), (&gone, &came))
 		});
-		value.replace(next);
+		value.replace(next, join_tick(), retune);
 		drop(value);
 		if let Some(wakes) = &mut wakes {
 			wakes.wake();
@@ -680,13 +883,13 @@ impl Preferences {
 		let contribution = value.contribution();
 		let scalars = Contribution {
 			priority: edit.priority,
-			delay: edit.delay,
 			order: edit.order,
 			..contribution
 		};
 		if contribution == scalars && edit.retire.is_empty() && edit.add.is_empty() {
 			return Ok(());
 		}
+		let tick = join_tick();
 		let mut gone = Vec::new();
 		let mut came = Vec::new();
 		let mut touched = Vec::with_capacity(edit.retire.len() + edit.add.len());
@@ -697,14 +900,16 @@ impl Preferences {
 			}
 		}
 		for (key, range) in edit.add {
+			let tick = value.tick_for(key, &range, tick);
 			if let Some(old) = value.remove(key) {
 				gone.push(old);
 			}
-			value.insert(key, range);
-			came.push(range);
+			let held = (range, edit.placed.get(&key).copied());
+			value.insert(key, held, tick);
+			came.push(held);
 			touched.push(key);
 		}
-		(value.priority, value.delay, value.order) = (edit.priority, edit.delay, edit.order);
+		(value.priority, value.order) = (edit.priority, edit.order);
 		if !touched.is_empty() {
 			value.touched(touched);
 		}
@@ -731,6 +936,19 @@ impl Preferences {
 		Ok(())
 	}
 
+	/// Note each live join range keyed in `since` as added at its tick instead, such as the
+	/// one a front's reader added it at, which the copy it reads asked for: an answer recorded
+	/// since then places it. Other ranges are left as they are.
+	pub(in crate::model) fn stamp(&self, since: impl IntoIterator<Item = (u64, u64)>) -> crate::Result<()> {
+		let mut value = self.0.value.write().map_err(|_| crate::Error::Closed)?;
+		for (key, tick) in since {
+			if let Some(stamped) = value.since.get_mut(&key) {
+				*stamped = tick;
+			}
+		}
+		Ok(())
+	}
+
 	pub(in crate::model) fn same_channel(&self, other: &Self) -> bool {
 		self.0.value.same_channel(&other.0.value)
 	}
@@ -752,7 +970,7 @@ impl Drop for Preference {
 	fn drop(&mut self) {
 		if let Some(subs) = &self.subscriptions {
 			let value = self.value.read();
-			let ranges: Vec<Range> = value.ranges.values().copied().collect();
+			let ranges = value.held();
 			let mut wakes = subs.lock().replace(Some(value.contribution()), None, (&ranges, &[]));
 			wakes.wake();
 		}
@@ -763,7 +981,7 @@ impl Drop for Preference {
 impl From<Subscription> for Preferences {
 	fn from(value: Subscription) -> Self {
 		Self(Arc::new(Preference {
-			value: kio::Producer::new(Prefs::new(value)),
+			value: kio::Producer::new(Prefs::new(value, 0)),
 			subscriptions: None,
 		}))
 	}
@@ -772,13 +990,13 @@ impl From<Subscription> for Preferences {
 #[cfg(test)]
 mod tests {
 	use super::super::super::subscription::Combined;
-	use super::super::Range;
+	use super::super::{Range, Start};
 
 	/// The ranges an update moves are its multiset difference, in either direction.
 	#[test]
 	fn an_update_moves_only_the_ranges_it_changes() {
 		let range = |start| Range {
-			start: Some(start),
+			start: Start::Time(start),
 			end: None,
 		};
 		let sorted = |(mut gone, mut came): (Vec<Range>, Vec<Range>)| {
@@ -807,24 +1025,31 @@ mod tests {
 		let mut slots: Vec<Option<(super::super::Subscriber, Subscription)>> = (0..64).map(|_| None).collect();
 		for step in 0..10_000 {
 			let index = rng.random_range(0..slots.len());
-			let anchor = |rng: &mut rand::rngs::StdRng| match rng.random_range(0..3) {
-				0 => None,
-				_ => Some(rng.random_range(0..8)),
+			let start = |rng: &mut rand::rngs::StdRng| match rng.random_range(0..4) {
+				0 => Start::Oldest,
+				1 => Start::Live {
+					min: (rng.random_bool(0.8)).then(|| Duration::from_millis(rng.random_range(0..8))),
+					max: rng
+						.random_bool(0.8)
+						.then(|| Duration::from_millis(rng.random_range(0..8))),
+				},
+				_ => Start::Time(rng.random_range(0..8)),
 			};
 			let ranges: Vec<Range> = (0..rng.random_range(0..3))
 				.map(|_| Range {
-					start: anchor(&mut rng),
-					end: rng.random_bool(0.75).then(|| anchor(&mut rng)).flatten(),
+					start: start(&mut rng),
+					end: rng.random_bool(0.5).then(|| rng.random_range(0..8)),
 				})
 				.collect();
+			// Some live joins already placed, as a route switch asks them.
+			let mut placed = BTreeMap::new();
+			for (index, range) in (0..).zip(&ranges) {
+				if range.join().is_some() && rng.random_bool(0.5) {
+					placed.insert(index, rng.random_range(0..8));
+				}
+			}
 			let next = Subscription {
 				priority: rng.random_range(0..8),
-				delay: Delay {
-					min: rng
-						.random_bool(0.75)
-						.then(|| Duration::from_millis(rng.random_range(0..8))),
-					max: Some(Duration::from_millis(rng.random_range(0..8))),
-				},
 				ranges,
 				order: if rng.random_bool(0.5) {
 					Order::Ascending
@@ -835,7 +1060,12 @@ mod tests {
 				resume: rng
 					.random_bool(0.5)
 					.then(|| Position::new(rng.random_range(0..8), rng.random_range(1..4))),
+				placed,
+				cap: rng
+					.random_bool(0.5)
+					.then(|| Position::new(rng.random_range(0..8), rng.random_range(1..4))),
 				asks: Vec::new(),
+				joins: Vec::new(),
 			};
 			match (&mut slots[index], rng.random_range(0..3)) {
 				(slot @ None, _) => *slot = Some((producer.subscribe(next.clone()), next)),
@@ -874,11 +1104,8 @@ mod tests {
 	fn unchanged_demand_does_not_wake_the_publisher() {
 		let broadcast = crate::broadcast::Info::default().produce();
 		let mut producer = broadcast.create_track("demand", None).unwrap();
-		let strong = producer.subscribe(
-			Subscription::default()
-				.with_priority(10)
-				.with_delay(Delay::default().with_max(Duration::from_secs(1))),
-		);
+		// History from the oldest group covers every range the weak reader adds.
+		let strong = producer.subscribe(Subscription::default().with_ranges([Range::ALL]).with_priority(10));
 		let count = Arc::new(Count(AtomicUsize::new(0)));
 		let waiter = kio::Waiter::new(std::task::Waker::from(count.clone()));
 		assert!(producer.poll_subscription_changed(&waiter).is_ready());

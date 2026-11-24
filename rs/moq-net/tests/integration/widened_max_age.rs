@@ -7,10 +7,10 @@
 //! Lite-06 relies on that re-offer alone: its FETCH carries no max age, so a reader asks no
 //! fills below the start the publisher resolved from the budget.
 
+use crate::WithMax as _;
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use moq_net::track::Delay;
 use moq_net::track::{Info, Range, Subscription};
 use moq_net::{Timescale, Timestamp, Version, origin, track};
 
@@ -36,9 +36,11 @@ const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip"];
 const VERSION: &str = "moq-lite-07-wip";
 
 fn origin(hop: u64) -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (origin, driver) = origin::Producer::new(config);
 	spawn(driver);
-	origin.with_proxy(true)
+	origin
 }
 
 /// A millisecond track with no publisher max age, so only a reader's budget skips its groups.
@@ -122,9 +124,7 @@ impl Chain {
 			.await
 			.unwrap()
 			.unwrap();
-		let subscription = Subscription::default()
-			.with_delay(Delay::default().with_max(budget))
-			.with_ranges([Range::default()]);
+		let subscription = Subscription::default().with_ranges([Range::ALL]).with_max(budget);
 		remote.track("video").unwrap().subscribe(subscription).await.unwrap()
 	}
 }
@@ -178,13 +178,18 @@ async fn a_tightened_start_leaves_history_fillable_by_an_intermediate_reader() {
 		let mut source = chain.source.clone();
 		while source.subscription_changed().await.unwrap().is_none() {}
 		first
-			.update(
-				Subscription::default()
-					.with_delay(Delay::default().with_max(NARROW))
-					.with_ranges([Range::default()]),
-			)
+			.update(Subscription::default().with_ranges([Range::ALL]).with_max(NARROW))
 			.unwrap();
-		while source.subscription_changed().await.unwrap().and_then(|s| s.delay.max) != Some(NARROW) {}
+		let narrowed = |s: &Subscription| {
+			(s.ranges.iter())
+				.all(|range| matches!(range.start, moq_net::track::Start::Live { max: Some(max), .. } if max == NARROW))
+		};
+		while !source
+			.subscription_changed()
+			.await
+			.unwrap()
+			.is_some_and(|s| narrowed(&s))
+		{}
 		chain.populate();
 		assert_eq!(received(&mut first).await, (6..GROUPS).collect());
 
@@ -217,16 +222,17 @@ async fn a_widened_reader_gets_what_was_skipped() {
 			let first = kio::clock::timeout(TIMEOUT, received(&mut reader)).await.unwrap();
 			assert_eq!(first, (6..GROUPS).collect(), "{version} relay={relay}");
 
-			let wide = Subscription::default()
-				.with_delay(Delay::default().with_max(WIDE))
-				.with_ranges([Range::default()]);
+			let wide = Subscription::default().with_ranges([Range::ALL]).with_max(WIDE);
 			reader.update(wide).unwrap();
 			let widened = kio::clock::timeout(TIMEOUT, received(&mut reader)).await.unwrap();
-			assert_eq!(
-				widened,
-				(2..6).collect(),
-				"{version} relay={relay}: only what was skipped"
-			);
+			// Lite-07 carries the live join, and widening only its max keeps where it started,
+			// past the groups the narrow max expired. A lite-06 hop carries only the max, so the
+			// join reaches back to the oldest group and takes the publisher's re-offer.
+			let skipped = match version {
+				VERSION => BTreeSet::new(),
+				_ => (2..6).collect(),
+			};
+			assert_eq!(widened, skipped, "{version} relay={relay}: only what was skipped");
 		}
 	}
 }
@@ -335,9 +341,7 @@ async fn wider_newcomers_after_the_first_pull_nothing_upstream() {
 			.await
 			.unwrap()
 			.unwrap();
-		let subscription = Subscription::default()
-			.with_delay(Delay::default().with_max(budget))
-			.with_ranges([Range::default()]);
+		let subscription = Subscription::default().with_ranges([Range::ALL]).with_max(budget);
 		let mut reader = remote.track("video").unwrap().subscribe(subscription).await.unwrap();
 		let got = received(&mut reader).await;
 		readers.push((viewer, reader));
@@ -391,7 +395,7 @@ async fn a_legacy_viewer_beating_a_relay_copy_joins_at_the_live_edge() {
 			.unwrap()
 			.expect("broadcast resolves");
 		upstream.server_transport.hold_unis();
-		let subscription = Subscription::default().with_delay(Delay::default().with_max(WIDE));
+		let subscription = Subscription::default().with_max(WIDE);
 		let mut reader = kio::clock::timeout(TIMEOUT, remote.track("video").unwrap().subscribe(subscription))
 			.await
 			.unwrap()

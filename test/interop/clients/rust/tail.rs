@@ -116,8 +116,8 @@ async fn main() -> anyhow::Result<()> {
 			let route = origin.route(&args[3], moq_net::origin::RouteOptions::hidden())?;
 			let broadcast = route.broadcast();
 			if datagram {
-				// Untimed: the OBJECT_DATAGRAM carries no timestamp, so the subscriber can
-				// check the payload alone. Stay open until each one is acknowledged.
+				// Untimed: each datagram's timestamp is unscaled at its sequence, which the
+				// OBJECT_DATAGRAM carries as its group ID. Stay open until each one is acknowledged.
 				let mut track = broadcast
 					.create_datagrams("tail", moq_net::datagram::Info::default())
 					.context("the track already exists")?;
@@ -237,7 +237,10 @@ async fn main() -> anyhow::Result<()> {
 						frame.payload.iter().all(|byte| *byte == sequence as u8),
 						"corrupt datagram"
 					);
-					ensure!(frame.timestamp.scale().is_none(), "unexpected IETF timestamp");
+					ensure!(
+						frame.timestamp == moq_net::Timestamp::unscaled(sequence),
+						"datagram timestamp is not its sequence"
+					);
 					println!("datagram {sequence}");
 				}
 				eprintln!("datagram clean groups=0,1,2,3 bytes=3600");
@@ -258,10 +261,14 @@ async fn main() -> anyhow::Result<()> {
 				return Ok(());
 			}
 			if late {
-				// No range: join the latest group as a player does, group 0, whose head predates
-				// the subscription.
-				let options = moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(5)));
+				// Join the latest group as a player does, group 0, whose head predates the
+				// subscription.
+				let options = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(Duration::ZERO),
+						max: Some(Duration::from_secs(5)),
+					},
+				)]);
 				let mut track = remote.subscribe(Some(options)).await?;
 				for sequence in 0..LATE_GROUPS {
 					let mut group = track.recv_group().await?.context("missing group")?;
@@ -279,11 +286,7 @@ async fn main() -> anyhow::Result<()> {
 				return Ok(());
 			}
 			let options = moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(if drop { 60 } else { 5 })))
-				.with_ranges([moq_net::track::Range {
-					start: Some(0),
-					end: None,
-				}]);
+				.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Time(0))]);
 			let mut track = remote.subscribe(Some(options)).await?;
 			if compress {
 				ensure!(

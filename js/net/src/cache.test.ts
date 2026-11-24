@@ -3,7 +3,8 @@ import { Duration, yieldNow } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import * as cache from "./cache.ts";
 import { StreamCode, StreamError, TooFarBehind } from "./error.ts";
-import { hooks, staleHole } from "./internal.ts";
+import { hooks } from "./internal.ts";
+import { withMax } from "./subscription.test-util.ts";
 import { Timestamp } from "./time.ts";
 import { Producer as TrackProducer } from "./track.ts";
 
@@ -35,7 +36,7 @@ function finished(producer: TrackProducer, size: number): bigint {
 // The sequences a fresh subscriber is handed: what the track still caches. Its mirrors are
 // released once its close settles.
 async function cached(producer: TrackProducer): Promise<bigint[]> {
-	const subscriber = producer.subscribe({ delay: { max: null } });
+	const subscriber = producer.subscribe(withMax({ delay: { max: null } }));
 	const keys: bigint[] = [];
 	for (let group = subscriber.tryRecvGroup(); group; group = subscriber.tryRecvGroup()) keys.push(group.start);
 	subscriber.close();
@@ -49,7 +50,7 @@ test("delivery restarts a group's idle window", async () => {
 	await withClock(async (clock) => {
 		const pool = new cache.Pool({ expiry: Duration.millis(10_000) });
 		const producer = pooled(pool);
-		const subscriber = producer.subscribe({ delay: { max: null } });
+		const subscriber = producer.subscribe(withMax({ delay: { max: null } }));
 		finished(producer, 1); // seq 0
 		finished(producer, 1); // seq 1 takes the live edge, so seq 0 can expire
 
@@ -87,7 +88,7 @@ test("the sweep expires idle groups across tracks without a write", async () => 
 
 // Every run a fresh reader of `producer` is told was given up: what the track still holds.
 function dropsHeld(producer: TrackProducer): bigint[] {
-	const reader = producer.subscribe({ delay: { max: null } });
+	const reader = producer.subscribe(withMax({ delay: { max: null } }));
 	const held: bigint[] = [];
 	for (let run = hooks.tryDrop(reader); run; run = hooks.tryDrop(reader)) held.push(run.start);
 	reader.close();
@@ -160,39 +161,49 @@ test("a final drop leaves a finished group", async () => {
 	expect(await cached(producer)).toContain(0n);
 });
 
-// A received stale run the pool forgets is accounted for, as an evicted group is: no reader waits
-// on it from the live feed, so a reader that wants it asks a fill. Mirrors Rust
-// `a_reader_asks_a_fill_for_a_forgotten_run_it_judged`.
-test("a forgotten stale run is asked of a fill", async () => {
+// A reader that judged a dropped run before the pool forgot it keeps that verdict as its own, so it
+// asks no fill for the run once the track forgets it; only a reader that never judged it finds it
+// unknown and asks. Mirrors Rust `a_forgotten_run_is_asked_only_by_a_reader_that_never_judged_it`.
+test("a forgotten run is asked only by a reader that never judged it", async () => {
 	await withClock(async (clock) => {
-		const pool = new cache.Pool({ expiry: Duration.millis(1_000) });
+		const pool = new cache.Pool({ expiry: Duration.millis(10_000) });
 		const producer = pooled(pool);
 		hooks.receiveTrack(producer);
 		const requests = producer.requests();
+		const patient = () =>
+			producer.subscribe(withMax({ ranges: [{ start: 0n }], delay: { max: Duration.secs(3600) } }));
+		const asked = async () => {
+			const runs: bigint[][] = [];
+			for (;;) {
+				const fill = await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]);
+				if (!fill) return runs;
+				runs.push([fill.start, fill.end]);
+			}
+		};
+		const reader = patient();
 		producer.createGroup(0n).finish();
-		hooks.dropTrackGroups(producer, 1n, 3n, staleHole(500));
-		producer.createGroup(3n).finish();
-		await clock.advance(2_000);
-
-		const reader = producer.subscribe({
-			ranges: [{ start: 1n }],
-			delay: { max: Duration.millis(60_000) },
-			order: "ascending",
-		});
-		// The live group first, in arrival order; the next read asks for what it misses.
-		expect((await reader.recvGroup())?.start).toBe(3n);
+		hooks.dropTrackGroups(producer, 1n, 2n, { error: new StreamError(StreamCode.Old) });
+		producer.createGroup(2n).finish();
+		expect((await reader.recvGroup())?.start).toBe(0n);
+		expect((await reader.recvGroup())?.start).toBe(2n);
+		// Waiting for more, the reader judges what it misses: the drop settles it.
 		const next = reader.recvGroup();
-		const asked: bigint[][] = [];
-		for (;;) {
-			const fill = await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]);
-			if (!fill) break;
-			asked.push([fill.start, fill.end]);
-		}
-		expect(asked).toEqual([[1n, 3n]]);
+		expect(await asked()).toEqual([]);
 
-		reader.close();
+		await clock.advance(40_000);
+		pool.sweep();
+		expect(dropsHeld(producer)).toEqual([]);
+		expect(await asked()).toEqual([]);
+
+		// With group 0, which expired too, once it waits past the group still cached.
+		const later = patient();
+		expect((await later.recvGroup())?.start).toBe(2n);
+		const first = later.recvGroup();
+		expect(await asked()).toEqual([[0n, 2n]]);
+
+		for (const sub of [reader, later]) sub.close();
 		requests.close();
-		await next.catch(() => undefined);
+		await Promise.allSettled([next, first]);
 	});
 });
 
@@ -203,7 +214,7 @@ test("a forgotten failed fill answer leaves its gap owed", async () => {
 		const pool = new cache.Pool({ expiry: Duration.millis(1_000) });
 		const producer = pooled(pool);
 		hooks.receiveTrack(producer);
-		const reader = producer.subscribe({ delay: { max: Duration.millis(60_000) } });
+		const reader = producer.subscribe(withMax({ delay: { max: Duration.millis(60_000) } }));
 		for (const key of [0n, 2n]) hooks.receiveGroup(producer, { start: key, offset: 0 }).finish();
 		hooks.receiveGroup(producer, { start: 1n, offset: 0, fill: true }).abort(new Error("archive failed"));
 		hooks.endTrack(producer, { group: 3n, frame: 0 });
@@ -225,7 +236,7 @@ test("a held failed fill answer stays readable", async () => {
 	const pool = new cache.Pool({});
 	const producer = pooled(pool);
 	hooks.receiveTrack(producer);
-	const reader = producer.subscribe({ delay: { max: Duration.millis(60_000) } });
+	const reader = producer.subscribe({ ranges: [{}] });
 	const answer = hooks.receiveGroup(producer, { start: 1n, offset: 0, fill: true });
 	answer.writeFrame({ payload: new Uint8Array(10_000), timestamp: Timestamp.unscaled(answer.start) });
 	const group = await reader.recvGroup();
@@ -253,13 +264,13 @@ test("a reached end outlives its forgotten skip", async () => {
 				recv.group.close();
 			}
 		};
-		const reader = producer.subscribe({ delay: { max: Duration.millis(60_000) } });
+		const reader = producer.subscribe(withMax({ delay: { max: Duration.millis(60_000) } }));
 		expect(done(reader)).toBe("done");
 
 		await clock.advance(3_000);
 		expect(dropsHeld(producer)).toEqual([]);
 		expect(done(reader)).toBe("done");
-		const late = producer.subscribe({ delay: { max: Duration.millis(60_000) } });
+		const late = producer.subscribe(withMax({ delay: { max: Duration.millis(60_000) } }));
 		expect(done(late)).toBe("done");
 		reader.close();
 		late.close();

@@ -5,58 +5,65 @@
 //! start between groups stands for the group containing it, which a range starting at or
 //! before it covers too, so spans merge as they do over starts. A treap keeps each
 //! subtree's sum and lowest running sum, so a change touches two boundaries and asks one
-//! range-minimum question, whatever else the audience holds. Ranges with no start can't be
-//! placed on that line and are counted by value instead.
+//! range-minimum question, whatever else the audience holds. Ranges with no time start can't
+//! be placed on that line and are counted by value instead, live joins by lag and end under
+//! the largest `max` among them, since where a join lands doesn't depend on it.
 
 use std::cell::OnceCell;
 use std::collections::BTreeMap;
 use std::hash::{BuildHasher, RandomState};
 
-use super::super::Range;
+use std::time::Duration;
+
+use super::super::{Range, Start};
 use super::{add, remove};
+use crate::model::subscription::max_of;
 
 /// Every subscriber's ranges, counted so that one change costs O(log n).
 #[derive(Default)]
 pub(super) struct Ranges {
-	/// Holders of an open range with no start, which covers every other range while it
-	/// reaches back as far as the budget allows.
+	/// Holders of a range from the oldest group following the live edge, which covers every
+	/// other range.
 	open: usize,
-	/// Ranges with a start, as spans of starts.
+	/// Ranges with a time start, as spans of starts.
 	time: Coverage,
-	/// Ranges with no start but an end, kept as they are.
-	bounded: BTreeMap<Range, usize>,
-	/// The last union read while the open range reaches back, and while it doesn't, until a
-	/// change moves it.
-	union: [OnceCell<Vec<Range>>; 2],
+	/// Ranges from the oldest group with an end, kept as they are.
+	others: BTreeMap<Range, usize>,
+	/// Live joins by lag and end, each with the budgets its holders ask under.
+	joins: BTreeMap<(Option<Duration>, Option<u64>), BTreeMap<Duration, usize>>,
+	/// The last union read, until a change moves it.
+	union: OnceCell<Vec<Range>>,
 }
 
 /// How [`Ranges`] counts one range.
 enum Shape {
 	Empty,
 	Open,
-	/// A range with a start, as the exclusive span of starts it covers.
+	/// A range with a time start, as the exclusive span of starts it covers.
 	Time(u64, Option<u64>),
-	Bounded,
+	/// A live join, by lag and end, and its budget.
+	Join((Option<Duration>, Option<u64>), Duration),
+	Other,
 }
 
 impl Shape {
 	fn of(range: &Range) -> Self {
 		match (range.start, range.end) {
 			_ if range.is_empty() => Self::Empty,
-			(None, None) => Self::Open,
-			(Some(start), None) => Self::Time(start, None),
+			(Start::Oldest, None) => Self::Open,
+			(Start::Time(start), None) => Self::Time(start, None),
 			// An end at the last start covers every group, as an open one does.
-			(Some(start), Some(end)) => Self::Time(start, end.checked_add(1)),
-			(None, Some(_)) => Self::Bounded,
+			(Start::Time(start), Some(end)) => Self::Time(start, end.checked_add(1)),
+			(Start::Live { min, .. }, end) => Self::Join((min, end), range.budget()),
+			(Start::Oldest, Some(_)) => Self::Other,
 		}
 	}
 }
 
 impl Ranges {
-	/// Count `range`, returning whether the union changed, the open range reaching back as
-	/// `reaches_back` says.
-	pub(super) fn add(&mut self, range: Range, reaches_back: bool) -> bool {
-		let hidden = self.open > 0 && reaches_back;
+	/// Count `range`, returning whether the union changed.
+	pub(super) fn add(&mut self, range: Range) -> bool {
+		let hidden = self.open > 0;
 		let changed = match Shape::of(&range) {
 			Shape::Empty => return false,
 			Shape::Open => {
@@ -68,16 +75,21 @@ impl Ranges {
 				self.time.add(start, end, 1);
 				uncovered && !hidden
 			}
-			Shape::Bounded => add(&mut self.bounded, range) && !hidden,
+			Shape::Join(join, budget) => {
+				let budgets = self.joins.entry(join).or_default();
+				let widest = budgets.last_key_value().map(|(widest, _)| *widest);
+				add(budgets, budget);
+				widest.is_none_or(|widest| budget > widest) && !hidden
+			}
+			Shape::Other => add(&mut self.others, range) && !hidden,
 		};
-		self.moved();
+		self.union.take();
 		changed
 	}
 
-	/// Uncount `range`, returning whether the union changed, the open range reaching back as
-	/// `reaches_back` says.
-	pub(super) fn remove(&mut self, range: Range, reaches_back: bool) -> bool {
-		let hidden = |ranges: &Self| ranges.open > 0 && reaches_back;
+	/// Uncount `range`, returning whether the union changed.
+	pub(super) fn remove(&mut self, range: Range) -> bool {
+		let hidden = |ranges: &Self| ranges.open > 0;
 		let changed = match Shape::of(&range) {
 			Shape::Empty => return false,
 			Shape::Open => {
@@ -88,51 +100,52 @@ impl Ranges {
 				self.time.add(start, end, -1);
 				!hidden(self) && self.time.min(start, end) == 0
 			}
-			Shape::Bounded => remove(&mut self.bounded, range) && !hidden(self),
+			Shape::Join(join, budget) => {
+				let budgets = self.joins.get_mut(&join).expect("registered join");
+				let widest = budgets.last_key_value().map(|(widest, _)| *widest);
+				remove(budgets, budget);
+				let moved = budgets.last_key_value().map(|(widest, _)| *widest) != widest;
+				if budgets.is_empty() {
+					self.joins.remove(&join);
+				}
+				moved && !hidden(self)
+			}
+			Shape::Other => remove(&mut self.others, range) && !hidden(self),
 		};
-		self.moved();
+		self.union.take();
 		changed
 	}
 
-	/// Whether an open range with no start is held, which hides every other range while it
-	/// reaches back.
-	pub(super) fn has_open(&self) -> bool {
-		self.open > 0
+	/// The union in [`Range`] order, costing its own length rather than the audience's.
+	pub(super) fn union(&self) -> Vec<Range> {
+		self.union.get_or_init(|| self.fold()).clone()
 	}
 
-	/// Drop the cached unions: whichever one the next read takes may have moved.
-	fn moved(&mut self) {
-		for union in &mut self.union {
-			union.take();
-		}
-	}
-
-	/// The union in [`Range`] order, costing its own length rather than the audience's. An
-	/// open range with no start hides the rest only when `reaches_back`.
-	pub(super) fn union(&self, reaches_back: bool) -> Vec<Range> {
-		self.union[usize::from(reaches_back)]
-			.get_or_init(|| self.fold(reaches_back))
-			.clone()
-	}
-
-	fn fold(&self, reaches_back: bool) -> Vec<Range> {
-		if self.open > 0 && reaches_back {
-			return vec![Range::default()];
+	fn fold(&self) -> Vec<Range> {
+		if self.open > 0 {
+			return vec![Range::ALL];
 		}
 		let mut union: Vec<Range> = self
 			.time
 			.runs()
 			.into_iter()
 			.map(|(start, end)| Range {
-				start: Some(start),
+				start: Start::Time(start),
 				// A run past its start ends at or past one more.
 				end: end.map(|end| end - 1),
 			})
 			.collect();
-		union.extend(self.bounded.keys());
-		if self.open > 0 {
-			union.push(Range::default());
-		}
+		union.extend(self.others.keys());
+		union.extend(self.joins.iter().filter_map(|(&(min, end), budgets)| {
+			let budget = *budgets.last_key_value()?.0;
+			Some(Range {
+				start: Start::Live {
+					min,
+					max: max_of(budget),
+				},
+				end,
+			})
+		}));
 		union.sort_unstable();
 		union
 	}
@@ -291,36 +304,38 @@ mod tests {
 	use rand::{RngExt, SeedableRng};
 
 	/// Each change reports exactly whether the union moved, and the union matches a full fold
-	/// of what is held, whether or not the open range reaches back.
+	/// of what is held.
 	#[test]
 	fn incremental_union_matches_a_full_fold() {
 		let mut rng = rand::rngs::StdRng::seed_from_u64(0x72616e676573);
-		let time = |rng: &mut rand::rngs::StdRng| rng.random_bool(0.8).then(|| rng.random_range(0..12));
+		let start = |rng: &mut rand::rngs::StdRng| match rng.random_range(0..10) {
+			0 => Start::Oldest,
+			1 => Start::Live {
+				// One in four with no lag limit.
+				min: [None, Some(0), Some(1), Some(2)][rng.random_range(0..4)].map(Duration::from_millis),
+				max: [None, Some(Duration::ZERO), Some(Duration::from_millis(5))][rng.random_range(0..3)],
+			},
+			_ => Start::Time(rng.random_range(0..12)),
+		};
 		let mut ranges = Ranges::default();
 		let mut held: Vec<Range> = Vec::new();
 		for step in 0..50_000 {
-			let reaches_back = step % 1000 < 500;
 			let grow = if held.len() < 24 { 0.65 } else { 0.35 };
-			let before = union(held.iter().copied(), reaches_back);
+			let before = union(held.iter().copied());
 			let changed = if held.is_empty() || rng.random_bool(grow) {
 				let range = Range {
-					start: time(&mut rng),
+					start: start(&mut rng),
 					end: rng.random_bool(0.6).then(|| rng.random_range(0..12)),
 				};
 				held.push(range);
-				ranges.add(range, reaches_back)
+				ranges.add(range)
 			} else {
 				let range = held.swap_remove(rng.random_range(0..held.len()));
-				ranges.remove(range, reaches_back)
+				ranges.remove(range)
 			};
-			let after = union(held.iter().copied(), reaches_back);
-			assert_eq!(ranges.union(reaches_back), after, "step {step}");
+			let after = union(held.iter().copied());
+			assert_eq!(ranges.union(), after, "step {step}");
 			assert_eq!(changed, before != after, "step {step}");
-			assert_eq!(
-				ranges.union(!reaches_back),
-				union(held.iter().copied(), !reaches_back),
-				"step {step}"
-			);
 		}
 	}
 }

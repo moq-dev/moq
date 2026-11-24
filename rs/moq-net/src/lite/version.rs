@@ -39,7 +39,7 @@ impl Version {
 		)
 	}
 
-	/// Whether SUBSCRIBE_OK carries the publisher's largest (group, frame), which a
+	/// Whether SUBSCRIBE_START carries the publisher's largest (group, frame), which a
 	/// subscriber takes as where the live feed is. Added in lite-07; an earlier answer
 	/// says nothing about the live edge.
 	pub(crate) fn has_largest(self) -> bool {
@@ -155,7 +155,7 @@ impl Version {
 
 	/// Whether SUBSCRIBE, SUBSCRIBE_UPDATE, FETCH, and GROUP carry frame indices
 	/// alongside their group keys, so a subscription or fetch can start partway through a
-	/// group. Added in lite-06; lite-07 bounds only a range's start.
+	/// group. Added in lite-06; lite-07 bounds a range's start or end at a Position.
 	///
 	/// Older versions only address whole groups, so a route change has to wait for the
 	/// next group before it can resume.
@@ -179,33 +179,6 @@ impl Version {
 	/// relative to the latest group, or at a presentation time. Added in lite-07; an earlier
 	/// subscription carries one span with absolute ends.
 	pub(crate) fn has_ranges(self) -> bool {
-		!matches!(
-			self,
-			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
-		)
-	}
-
-	/// Whether SUBSCRIBE and SUBSCRIBE_UPDATE carry the subscriber's optional
-	/// `Subscriber Min Age`. Added in lite-07; an earlier subscription decodes it as not stated.
-	pub(crate) fn has_min_delay(self) -> bool {
-		!matches!(
-			self,
-			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
-		)
-	}
-
-	/// Whether SUBSCRIBE and SUBSCRIBE_UPDATE's `Subscriber Max Age` is milliseconds plus one,
-	/// so 0 says no limit. Added in lite-07; earlier wires carry bare milliseconds.
-	pub(crate) fn has_unlimited_max_delay(self) -> bool {
-		!matches!(
-			self,
-			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
-		)
-	}
-
-	/// Whether FETCH carries the subscriber's optional max delay. Added in lite-07; an
-	/// earlier fetch is bounded by the publisher's max age alone.
-	pub(crate) fn has_fetch_max_delay(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
@@ -240,20 +213,20 @@ impl Version {
 	}
 
 	/// Whether a copy's fills stop at the start its publisher resolved from the budget.
-	/// Lite-06 resolves the start, but drops media time and sends FETCH without a max
-	/// delay, so nothing judges a group below that start against a reader's budget.
+	/// Lite-06 resolves the start but drops media time, so nothing judges a group below that
+	/// start against a reader's budget.
 	pub(crate) fn fills_from_start(self) -> bool {
-		self.resolves_start() && !self.has_media_time() && !self.has_fetch_max_delay()
+		self.resolves_start() && !self.has_media_time()
 	}
 
 	/// Whether subscription completion waits for the subscriber's FIN, which it sends once
-	/// its tail accounting settles. SUBSCRIBE_FINISH says which groups are owed, so that is
+	/// its tail accounting settles. SUBSCRIBE_END says which groups are owed, so that is
 	/// prompt from lite-05; before it, only the subscriber's grace settles the tail.
 	pub(crate) fn waits_for_subscriber_fin(self) -> bool {
 		self.has_track_stream()
 	}
 
-	/// Whether the Subscribe Stream stays open past SUBSCRIBE_FINISH and past a covered
+	/// Whether the Subscribe Stream stays open past SUBSCRIBE_END and past a covered
 	/// bounded subscription, so a SUBSCRIBE_UPDATE can still reach the track's history.
 	/// The subscriber FINs once it wants nothing more, and the publisher FINs in reply.
 	/// Added in lite-07; before it the publisher FINs once the track ends.
@@ -330,7 +303,7 @@ impl Version {
 		)
 	}
 
-	/// Whether SUBSCRIBE_FINISH carries the error the track ended with, so an errored end
+	/// Whether SUBSCRIBE_END carries the error the track ended with, so an errored end
 	/// keeps its history across a hop. Added in lite-07; earlier versions can only reset.
 	pub(crate) fn has_end_error(self) -> bool {
 		!matches!(

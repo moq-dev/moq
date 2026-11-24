@@ -25,26 +25,81 @@ pub enum Address {
 }
 
 /// One connection's cumulative wire counters, which its transport updates as it sends and receives:
-/// its bytes, and its sender's waits on the peer's connection-level credit.
+/// its bytes, its sender's losses and waits on the congestion controller and on the peer's
+/// connection-level credit, and its receiver's holds on a spent receive window.
 ///
 /// Clones share the counters, so stats read them without polling the session or keeping the
 /// connection alive, and the final totals stay readable after it closes. Each counter is
 /// independent: a transport records the ones it tracks, and the rest stay zero.
+///
+/// A transport whose counts live outside it, such as a TCP socket's in the kernel, builds its
+/// counters with [`Wire::from_source`] instead of pushing them as it carries traffic.
 #[derive(Clone, Debug, Default)]
 pub struct Wire(std::sync::Arc<WireCounters>);
 
-#[derive(Debug, Default)]
+/// Reads a connection's counters on demand, for a transport that cannot cheaply push them as
+/// it sends and receives, such as a TCP socket whose kernel counts its bytes.
+///
+/// Stats call it on every report and once more when the connection's stats end, so the
+/// counters are current whenever stats read them, and an idle connection needs no timer.
+/// Anyone else reading a sourced [`Wire`] sees the counts as of the last stats read.
+pub trait WireSource: Send + Sync + 'static {
+	/// Copy the counts this source tracks into `wire`, leaving the rest as they are.
+	///
+	/// Never keep a clone of `wire`: it owns this source, so the pair would never drop.
+	fn refresh(&self, wire: &Wire);
+}
+
+#[derive(Default)]
 struct WireCounters {
+	/// Dropped with the last clone of the counters, so a source must not hold its connection
+	/// open past the connection's own end.
+	source: Option<Box<dyn WireSource>>,
 	sent_bytes: std::sync::atomic::AtomicU64,
 	received_bytes: std::sync::atomic::AtomicU64,
 	credit_stalls: std::sync::atomic::AtomicU64,
 	credit_stalled_us: std::sync::atomic::AtomicU64,
+	credit_held_readers_us: std::sync::atomic::AtomicU64,
+	credit_held_evicted_us: std::sync::atomic::AtomicU64,
+	lost_bytes: std::sync::atomic::AtomicU64,
+	cwnd_blocked_us: std::sync::atomic::AtomicU64,
+	pacing_blocked_us: std::sync::atomic::AtomicU64,
+}
+
+/// A duration in whole microseconds, saturating.
+pub(crate) fn micros(time: Duration) -> u64 {
+	u64::try_from(time.as_micros()).unwrap_or(u64::MAX)
+}
+
+impl std::fmt::Debug for WireCounters {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("WireCounters")
+			.field("sourced", &self.source.is_some())
+			.field("sent_bytes", &self.sent_bytes)
+			.field("received_bytes", &self.received_bytes)
+			.finish_non_exhaustive()
+	}
 }
 
 impl Wire {
 	/// Create counters that start at zero.
 	pub fn new() -> Self {
 		Self::default()
+	}
+
+	/// Create counters that start at zero and that `source` refreshes whenever stats read them.
+	pub fn from_source(source: impl WireSource) -> Self {
+		Self(std::sync::Arc::new(WireCounters {
+			source: Some(Box::new(source)),
+			..Default::default()
+		}))
+	}
+
+	/// Copy the source's counts in, if these counters have one.
+	pub(crate) fn refresh(&self) {
+		if let Some(source) = &self.0.source {
+			source.refresh(self);
+		}
 	}
 
 	/// The bytes sent so far, including transport framing and retransmissions.
@@ -67,6 +122,37 @@ impl Wire {
 		self.0.received_bytes.store(total, std::sync::atomic::Ordering::Relaxed);
 	}
 
+	/// The sent bytes declared lost so far, part of [`Self::sent_bytes`].
+	pub fn lost_bytes(&self) -> u64 {
+		self.0.lost_bytes.load(std::sync::atomic::Ordering::Relaxed)
+	}
+
+	/// Record the cumulative sent bytes declared lost so far.
+	pub fn set_lost_bytes(&self, total: u64) {
+		self.0.lost_bytes.store(total, std::sync::atomic::Ordering::Relaxed);
+	}
+
+	/// How long data ready to send waited on a full congestion window.
+	pub fn cwnd_blocked(&self) -> Duration {
+		Duration::from_micros(self.0.cwnd_blocked_us.load(std::sync::atomic::Ordering::Relaxed))
+	}
+
+	/// How long data ready to send waited on the pacer.
+	pub fn pacing_blocked(&self) -> Duration {
+		Duration::from_micros(self.0.pacing_blocked_us.load(std::sync::atomic::Ordering::Relaxed))
+	}
+
+	/// Record the cumulative time data ready to send waited on the congestion controller: on a
+	/// full `cwnd`, or on the `pacing` that spreads sends at its rate.
+	pub fn set_congestion_blocked(&self, cwnd: Duration, pacing: Duration) {
+		self.0
+			.cwnd_blocked_us
+			.store(micros(cwnd), std::sync::atomic::Ordering::Relaxed);
+		self.0
+			.pacing_blocked_us
+			.store(micros(pacing), std::sync::atomic::Ordering::Relaxed);
+	}
+
 	/// How many times the sender blocked with all the peer's connection credit (`MAX_DATA`) spent.
 	pub fn credit_stalls(&self) -> u64 {
 		self.0.credit_stalls.load(std::sync::atomic::Ordering::Relaxed)
@@ -82,10 +168,32 @@ impl Wire {
 	/// the peer grants more; a write held by the local send window is not one.
 	pub fn set_credit_stalls(&self, stalls: u64, stalled: Duration) {
 		self.0.credit_stalls.store(stalls, std::sync::atomic::Ordering::Relaxed);
-		let micros = u64::try_from(stalled.as_micros()).unwrap_or(u64::MAX);
 		self.0
 			.credit_stalled_us
-			.store(micros, std::sync::atomic::Ordering::Relaxed);
+			.store(micros(stalled), std::sync::atomic::Ordering::Relaxed);
+	}
+
+	/// How long the peer had this side's whole receive window spent while a reader had data it
+	/// had not looked at yet: a reader behind holding the window.
+	pub fn credit_held_readers(&self) -> Duration {
+		Duration::from_micros(self.0.credit_held_readers_us.load(std::sync::atomic::Ordering::Relaxed))
+	}
+
+	/// How long the peer had this side's whole receive window spent while an evicted reader had
+	/// not stopped its stream.
+	pub fn credit_held_evicted(&self) -> Duration {
+		Duration::from_micros(self.0.credit_held_evicted_us.load(std::sync::atomic::Ordering::Relaxed))
+	}
+
+	/// Record the cumulative time the peer had the whole receive window spent while eviction
+	/// waited on `readers` behind or on `evicted` readers yet to stop their streams.
+	pub fn set_credit_held(&self, readers: Duration, evicted: Duration) {
+		self.0
+			.credit_held_readers_us
+			.store(micros(readers), std::sync::atomic::Ordering::Relaxed);
+		self.0
+			.credit_held_evicted_us
+			.store(micros(evicted), std::sync::atomic::Ordering::Relaxed);
 	}
 }
 

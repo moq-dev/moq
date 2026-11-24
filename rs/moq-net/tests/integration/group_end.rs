@@ -4,11 +4,12 @@
 //! fetch, and a closed one without it. Lite-07 says which with GROUP_END; earlier versions
 //! end every group with a bare FIN, so each arrives closed.
 
+use crate::WithMax as _;
 use crate::support;
 
 use std::time::Duration;
 
-use moq_net::track::{Delay, Info, Range, Subscription};
+use moq_net::track::{Info, Range, Subscription};
 use moq_net::{Timescale, Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
@@ -17,10 +18,11 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip"];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// Group 0 finished at 500ms and group 1000 closed, on a live track that keeps both.
@@ -74,11 +76,10 @@ async fn round(version: &str) -> (Vec<(u64, Option<u64>)>, Option<u64>) {
 		.unwrap();
 	let mut subscriber = kio::clock::timeout(
 		TIMEOUT,
-		remote.track("video").unwrap().subscribe(
-			Subscription::default()
-				.with_delay(Delay::default().with_max(None))
-				.with_ranges([Range::default()]),
-		),
+		remote
+			.track("video")
+			.unwrap()
+			.subscribe(Subscription::default().with_ranges([Range::ALL]).with_max(None)),
 	)
 	.await
 	.expect("subscribe timeout")

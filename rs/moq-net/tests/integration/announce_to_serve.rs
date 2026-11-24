@@ -31,9 +31,11 @@ const SETTLE: Duration = Duration::from_secs(1);
 const PATH: &str = "bcast";
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// Where the observing consumer sits relative to the publisher.
@@ -230,7 +232,7 @@ async fn remote_lite_consumer_sees_what_a_local_one_does() {
 async fn remote_ietf_consumer_sees_what_a_local_one_does() {
 	// Each request has its own stream, which has to end a finished track the way
 	// moq-lite does.
-	for version in ["moq-transport-18", "moq-transport-22"] {
+	for version in ["moq-transport-18", "moq-transport-22", "moq-transport-23"] {
 		assert_eq!(lifecycle(Observer::Remote(version)).await, EXPECTED, "{version}");
 	}
 }

@@ -46,8 +46,8 @@ RELAY="${RELAY_BIN:-moq-relay}"
 # so the wrapper binds the same name; ignored by the non-docker channels.
 RELAY_CONTAINER="${SMOKE_RELAY_CONTAINER:-moq-relay-smoke}"
 export SMOKE_RELAY_CONTAINER="$RELAY_CONTAINER"
-# The CLI binary under test. The package/crate is still distributed as moq-cli in
-# some channels, but the installed executable is `moq`. Honor CLI_BIN if set.
+# The CLI binary under test. Only the crates.io crate is still named moq-cli; the
+# other channels ship `moq`, which is also the executable. Honor CLI_BIN if set.
 MOQ="${CLI_BIN:-}"
 
 require_value() {
@@ -212,7 +212,7 @@ require_tools() {
     if [[ ${#EXTERNAL_RELAYS[@]} -eq 0 ]]; then
         have "$RELAY" || missing+=("$RELAY (cargo/brew/apt/nix install moq-relay)")
     fi
-    have "$MOQ" || missing+=("moq (cargo/brew/apt install moq-cli, or nix build github:moq-dev/moq#moq)")
+    have "$MOQ" || missing+=("moq (cargo install moq-cli, brew/apt install moq, or nix build github:moq-dev/moq#moq)")
     if [[ ${#missing[@]} -gt 0 ]]; then
         echo "error: missing required tools: ${missing[*]}" >&2
         exit 1
@@ -585,7 +585,7 @@ if needs swift; then
 fi
 
 if needs kotlin; then
-    echo "building kotlin client (dev.moq:moq from Maven Central)..."
+    echo "building kotlin client (dev.moq:moq from Google's Maven Central mirror)..."
     KOTLIN_SMOKE="$CLIENTS/kotlin/build/install/smoke/bin/smoke"
     # `latest.release` + disabled dynamic-version caching resolves the newest each run.
     if ! have gradle; then

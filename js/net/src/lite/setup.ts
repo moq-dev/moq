@@ -5,6 +5,7 @@
  * @module
  */
 
+import { ProtocolViolation } from "../error.ts";
 import { type Hop, toHop, wireHop } from "../hop.ts";
 import { encodeVarint, Reader, type Writer } from "../stream.ts";
 import { decodeUtf8 } from "../util/utf8.ts";
@@ -24,6 +25,8 @@ const PARAM_PROBE = 0x1n;
 const PARAM_PATH = 0x2n;
 /** Setup Parameter id for the client's intended {@link Role} (client-only). */
 const PARAM_ROLE = 0x3n;
+/** Setup Parameter id for the sender's link cost, which this endpoint never sends: it forwards nothing. */
+const PARAM_COST = 0x4n;
 /** Setup Parameter id for the endpoint's Hop ID, or from lite-07 a forwarding node's Node ID. */
 const PARAM_HOP = 0x5n;
 /** Setup Parameter id for the endpoint's implementation name and version. */
@@ -31,12 +34,11 @@ const PARAM_IMPLEMENTATION = 0x6n;
 /** Setup Parameter id for the client's connection credential (client-only, lite-07+). */
 const PARAM_TOKEN = 0x7n;
 
-/** Check a lite-07 Node ID parameter: a non-zero id, the node's start, a Marked of 0, since a
- * session's node is never a marked identity, and nothing after. */
+/** Check a lite-07 Node ID parameter: a non-zero id, a Marked of 0, since a session's node is
+ * never a marked identity, and nothing after. */
 async function checkNode(value: Uint8Array, version: Version): Promise<void> {
 	const r = new Reader(undefined, value, version);
 	const relay = await r.u62();
-	await r.u62();
 	const marked = await r.bool();
 	if (relay === 0n || marked || !(await r.done())) throw new Error("setup Node ID is malformed");
 }
@@ -297,8 +299,14 @@ export class Setup {
 		const roleCode = await params.getVarint(PARAM_ROLE, version);
 		const role = roleCode === undefined ? Role.Both : roleFromCode(roleCode);
 
+		// A free link would leave a route as cheap as the one it came from, so lite-07 refuses
+		// one. The value itself is unused: a browser forwards nothing.
+		if (hasRoutes(version) && (await params.getVarint(PARAM_COST, version)) === 0n) {
+			throw new ProtocolViolation("setup cost cannot be 0");
+		}
+
 		// Before lite-07, 0 carries no identity (it cannot be excluded), so it decodes as
-		// absent. A lite-07 Node ID is a non-zero id and the node's start, and nothing an
+		// absent. A lite-07 Node ID is a non-zero id and its Marked, and nothing an
 		// endpoint uses: a peer that declares one still sends this node claims alone.
 		let hop: Hop | undefined;
 		if (hasRoutes(version)) {

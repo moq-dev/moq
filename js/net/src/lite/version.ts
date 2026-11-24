@@ -236,8 +236,8 @@ export function hasRouteCost(version: Version): boolean {
 
 /** Whether SUBSCRIBE, SUBSCRIBE_UPDATE, FETCH, and GROUP carry frame indices alongside
  * their group keys, so a subscription or fetch can start partway through a group. Added in
- * lite-06; lite-07 bounds only a range's start. Older versions only address whole groups, so a
- * route change has to wait for the next group before it can resume.
+ * lite-06; lite-07 bounds a range's start or end at a Position. Older versions only address
+ * whole groups, so a route change has to wait for the next group before it can resume.
  *
  * SUBSCRIBE_OK is deliberately not in that list: the resolved start frame follows from
  * its group plus the subscriber's own request, so it needs no frame field. */
@@ -272,60 +272,9 @@ export function hasOrder(version: Version): boolean {
 	}
 }
 
-/** Whether SUBSCRIBE and SUBSCRIBE_UPDATE's `Subscriber Max Age` is milliseconds plus one, so 0
- * says no limit. Added in lite-07; earlier wires carry bare milliseconds. */
-export function hasUnlimitedMaxDelay(version: Version): boolean {
-	// Explicitly list older versions so future versions keep the lite-07+ behavior.
-	switch (version) {
-		case Version.DRAFT_01:
-		case Version.DRAFT_02:
-		case Version.DRAFT_03:
-		case Version.DRAFT_04:
-		case Version.DRAFT_05:
-		case Version.DRAFT_06:
-			return false;
-		default:
-			return true;
-	}
-}
-
-/** Whether SUBSCRIBE and SUBSCRIBE_UPDATE carry the optional `Subscriber Min Age`. Added in
- * lite-07; an earlier subscription decodes it as not stated. */
-export function hasMinDelay(version: Version): boolean {
-	// Explicitly list older versions so future versions keep the lite-07+ behavior.
-	switch (version) {
-		case Version.DRAFT_01:
-		case Version.DRAFT_02:
-		case Version.DRAFT_03:
-		case Version.DRAFT_04:
-		case Version.DRAFT_05:
-		case Version.DRAFT_06:
-			return false;
-		default:
-			return true;
-	}
-}
-
 /** Whether SUBSCRIBE and SUBSCRIBE_UPDATE carry a list of ranges. Added in lite-07; an
  * earlier subscription carries one span in its group and frame bounds. */
 export function hasRanges(version: Version): boolean {
-	// Explicitly list older versions so future versions keep the lite-07+ behavior.
-	switch (version) {
-		case Version.DRAFT_01:
-		case Version.DRAFT_02:
-		case Version.DRAFT_03:
-		case Version.DRAFT_04:
-		case Version.DRAFT_05:
-		case Version.DRAFT_06:
-			return false;
-		default:
-			return true;
-	}
-}
-
-/** Whether FETCH carries the subscriber's optional max delay. Added in lite-07; an earlier
- * fetch is bounded by the publisher's max age alone. */
-export function hasFetchMaxDelay(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.
 	switch (version) {
 		case Version.DRAFT_01:
@@ -385,18 +334,18 @@ export function resolvesStart(version: Version): boolean {
 
 /**
  * Whether a copy's fills stop at the start its publisher resolved from the budget. Lite-06
- * resolves the start, but drops media time and sends FETCH without a max delay, so nothing
- * judges a group below that start against a reader's budget: a widened budget reaches lower
- * groups through the feed's re-offer instead. Mirrors the Rust `Version::fills_from_start`.
+ * resolves the start but drops media time, so nothing judges a group below that start against a
+ * reader's budget: a widened budget reaches lower groups through the feed's re-offer instead.
+ * Mirrors the Rust `Version::fills_from_start`.
  */
 export function fillsFromStart(version: Version): boolean {
-	return resolvesStart(version) && !hasMediaTime(version) && !hasFetchMaxDelay(version);
+	return resolvesStart(version) && !hasMediaTime(version);
 }
 
 /**
  * Whether a served SUBSCRIBE completes only once the subscriber FINs or resets its half of the
  * Subscribe Stream. A subscriber FINs once its tail accounting settles, since a transport ACK
- * does not say the application read the tail. SUBSCRIBE_FINISH says which groups are owed, so that
+ * does not say the application read the tail. SUBSCRIBE_END says which groups are owed, so that
  * is prompt from lite-05; before it, only the subscriber's grace settles the tail.
  */
 export function waitsForSubscriberFin(version: Version): boolean {
@@ -404,7 +353,7 @@ export function waitsForSubscriberFin(version: Version): boolean {
 }
 
 /**
- * Whether the Subscribe Stream stays open past SUBSCRIBE_FINISH (SUBSCRIBE_END before lite-07)
+ * Whether the Subscribe Stream stays open past SUBSCRIBE_END
  * and past a covered bounded subscription, so a SUBSCRIBE_UPDATE can still reach the track's
  * history. The subscriber FINs once it wants nothing more, and the publisher FINs in reply.
  * Added in lite-07; before it the publisher FINs once the track ends.
@@ -616,7 +565,7 @@ export function hasSkip(version: Version): boolean {
 }
 
 /**
- * Whether SUBSCRIBE_FINISH carries the error the track ended with, so an errored end keeps its
+ * Whether SUBSCRIBE_END carries the error the track ended with, so an errored end keeps its
  * history across a hop. Added in lite-07; earlier versions can only reset.
  */
 export function hasEndError(version: Version): boolean {

@@ -96,6 +96,10 @@ const DELAY_BETA: f64 = 0.85;
 /// can be used by cross traffic (the value is 0.15).
 const HEADROOM: f64 = 0.15;
 
+/// How far above BBR.min_rtt a congested, application-limited window's lowest RTT may sit and
+/// still skip ProbeRTT: QUICHE's kSimilarMinRttThreshold.
+const SIMILAR_MIN_RTT: f64 = 1.125;
+
 /// equivalent to BBR.MinRTTFilterLen: A constant specifying the length of the BBR.min_rtt min
 /// filter window, BBR.MinRTTFilterLen is 10 secs.
 const MIN_RTT_FILTER_LEN: Duration = Duration::from_secs(10);
@@ -130,8 +134,8 @@ const MIN_PROBE_WAIT_MS: u64 = 2000;
 /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-07.html#section-5.3.3.8.3>
 const MAX_ADDED_PROBE_WAIT_MS: u64 = 1000;
 
-/// How often an application-limited sample advances the max-bw window, which no probe cycle
-/// finishes while the application holds the flow below its estimate: the longest
+/// How often an application-limited sample advances the reported estimate's window, which no
+/// probe cycle finishes while the application holds the flow below its estimate: the longest
 /// BBR.bw_probe_wait, so the window spans at least the time a bulk flow's does.
 const APP_LIMITED_CYCLE: Duration =
     Duration::from_millis(MIN_PROBE_WAIT_MS + MAX_ADDED_PROBE_WAIT_MS);
@@ -210,12 +214,6 @@ pub(crate) struct Bbr3 {
     /// ORs every cwnd-blocked send in the current round; snapshotted into `is_cwnd_limited` and
     /// cleared when the round advances.
     cwnd_limited_this_round: bool,
-    /// equivalent to BBR.cycle_count: The virtual time used by the BBR.max_bw filter window.
-    /// since the BBR.max_bw_filter only needs to track samples from two time slots: the previous
-    /// ProbeBW cycle and the current ProbeBW cycle.
-    cycle_count: u64,
-    /// When BBR.cycle_count last advanced, or the first sample if it never has
-    cycle_count_stamp: Option<Instant>,
     /// equivalent to C.cwnd: The transport sender's congestion window. When transmitting data, the
     /// sending connection ensures that C.inflight does not exceed C.cwnd.
     cwnd: u64,
@@ -362,9 +360,13 @@ pub(crate) struct Bbr3 {
     /// equivalent to BBR.inflight_latest: a 1-round-trip max of delivered volume of data
     /// (RS.delivered).
     inflight_latest: u64,
-    /// equivalent to BBR.max_bw_filter: the maximum RS.delivery_rate of each of the last
-    /// BBR.MaxBwFilterLen cycles, indexed by BBR.cycle_count, as Linux BBRv3's `bw_hi`
-    max_bw_filter: [f64; MAX_BW_FILTER_LEN],
+    /// equivalent to BBR.max_bw_filter, keyed on BBR.cycle_count, as Linux BBRv3's `bw_hi`
+    max_bw_filter: CycleMax,
+    /// The window the reported bandwidth estimate reads: BBR.max_bw_filter, also fed and aged by
+    /// application-limited samples (see [`Self::update_max_bw`])
+    aged_bw_filter: CycleMax,
+    /// When `aged_bw_filter` last advanced, or the first sample if it never has
+    aged_bw_stamp: Option<Instant>,
     /// equivalent to BBR.extra_acked_interval_start: The start of the time interval for estimating
     /// the excess amount of data acknowledged due to aggregation effects.
     extra_acked_interval_start: Option<Instant>,
@@ -418,14 +420,15 @@ pub(crate) struct Bbr3 {
     /// moved, which lets the due ProbeRTT be skipped. A flow that never ran out of data keeps
     /// entering ProbeRTT, where competing BBR flows converge.
     probe_rtt_skip_app_limited: bool,
-    /// Whether loss or CE signalled congestion since BBR.min_rtt_stamp last moved, which denies
-    /// a skip. The flow then shares a full queue whose delay only ProbeRTT re-measures: beside a
-    /// loss-based flow, skipping would hold BBR.min_rtt below the queue that flow keeps and yield
-    /// to it. Persistent loss thus never postpones ProbeRTT.
-    probe_rtt_skip_congested: bool,
-    /// `probe_rtt_skip_congested` when the current recovery episode began, restored if the
-    /// episode is declared spurious: a loss that never happened was not congestion.
-    undo_probe_rtt_skip_congested: bool,
+    /// Set once loss or CE signalled congestion since BBR.min_rtt_stamp last moved, holding the
+    /// lowest RTT sample since the latest signal. Above [`SIMILAR_MIN_RTT`] of BBR.min_rtt, it
+    /// denies a skip: the flow shares a full queue whose delay only ProbeRTT re-measures, and
+    /// beside a loss-based flow, skipping would hold BBR.min_rtt below the queue that flow keeps
+    /// and yield to it. Persistent loss with a queue thus never postpones ProbeRTT.
+    probe_rtt_congested: Option<Duration>,
+    /// `probe_rtt_congested` when the current recovery episode began, restored if the episode is
+    /// declared spurious: a loss that never happened was not congestion.
+    undo_probe_rtt_congested: Option<Duration>,
     /// equivalent to RS: Per-ACK Rate Sample State, from the last ACK that delivered a packet
     /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-07.html#section-2.3>
     rs: Option<Sample>,
@@ -572,8 +575,6 @@ impl Bbr3 {
             inflight: 0,
             is_cwnd_limited: false,
             cwnd_limited_this_round: false,
-            cycle_count: 0,
-            cycle_count_stamp: None,
             cwnd: initial_cwnd,
             pacing_rate,
             pacer: Pacer::new(init.rtt, initial_cwnd, init.mtu, init.now),
@@ -612,7 +613,9 @@ impl Bbr3 {
             undo_inflight_shortterm: u64::MAX,
             bw_latest: 0.0,
             inflight_latest: 0,
-            max_bw_filter: [0.0; MAX_BW_FILTER_LEN],
+            max_bw_filter: CycleMax::default(),
+            aged_bw_filter: CycleMax::default(),
+            aged_bw_stamp: None,
             extra_acked_interval_start: None,
             extra_acked_delivered: 0,
             extra_acked_filter: MaxFilter::new(EXTRA_ACKED_FILTER_LEN as u64),
@@ -631,8 +634,8 @@ impl Bbr3 {
             probe_rtt_duration: Duration::from_millis(PROBE_RTT_DURATION_MS),
             probe_rtt_cwnd: u64::MAX,
             probe_rtt_skip_app_limited: false,
-            probe_rtt_skip_congested: false,
-            undo_probe_rtt_skip_congested: false,
+            probe_rtt_congested: None,
+            undo_probe_rtt_congested: None,
             rs: None,
             ack_rs: None,
             rounds_since_bw_probe: 0,
@@ -731,14 +734,20 @@ impl Bbr3 {
     ///
     /// The draft discards an application-limited sample below BBR.max_bw and advances the window
     /// only as a probe ends, as Linux BBRv3 and QUICHE BBR2 do. A flow the application holds
-    /// below its estimate never probes, so it would keep a maximum the path may have long since
-    /// lost. While the transport reports the application ran out of data, this admits its
-    /// application-limited samples, and one advances the window once per [`APP_LIMITED_CYCLE`].
-    /// A sample below the maximum cannot lower it within the window, so BBR.max_bw falls only as
-    /// the window ages, to the most the flow has delivered since. Samples the controller marks
-    /// application-limited itself, as ProbeRTT does, still follow the draft, as does one that
-    /// delivered a single packet: it measures the round trip rather than the path, so keep-alives
-    /// across an idle period never age the window.
+    /// below its estimate never probes, so its readers would keep a maximum the path may have
+    /// long since lost. So the estimate it reports reads a second window, which also admits
+    /// application-limited samples while the transport reports the application ran out of data,
+    /// one of which advances it once per [`APP_LIMITED_CYCLE`]. A sample below the maximum
+    /// cannot lower it within the window, so the estimate falls only as the window ages, to the
+    /// most the flow has delivered since. Samples the controller marks application-limited
+    /// itself, as ProbeRTT does, still follow the draft, as does one that delivered a single
+    /// packet: it measures the round trip rather than the path, so keep-alives across an idle
+    /// period never age the window.
+    ///
+    /// BBR.max_bw itself follows the draft. It paces and sizes the window for whatever the
+    /// application sends next, and the most a flow delivered while its application held it back
+    /// says nothing of the path: aged to that, a backlog, such as a relay's after a blackout,
+    /// drains at the application's old rate until a probe finds the path again.
     fn update_max_bw(&mut self, prior_delivered: u64, app_limited: bool, now: Instant) {
         self.update_round(prior_delivered);
         let Some(rate_sample) = self.rs else {
@@ -747,16 +756,23 @@ impl Bbr3 {
         if rate_sample.delivery_rate <= 0.0 {
             return;
         }
+        let rate = rate_sample.delivery_rate.round();
+        if !rate_sample.is_app_limited || rate_sample.delivery_rate >= self.max_bw {
+            self.max_bw_filter.update(rate);
+            self.max_bw = self.max_bw_filter.max();
+        }
         let starved =
             app_limited && rate_sample.is_app_limited && rate_sample.delivered > self.smss;
-        let stamp = *self.cycle_count_stamp.get_or_insert(now);
+        let stamp = *self.aged_bw_stamp.get_or_insert(now);
         if starved && now >= stamp.checked_add(APP_LIMITED_CYCLE).unwrap_or(stamp) {
-            self.advance_max_bw_filter(now);
+            self.aged_bw_filter.advance();
+            self.aged_bw_stamp = Some(now);
         }
-        if starved || !rate_sample.is_app_limited || rate_sample.delivery_rate >= self.max_bw {
-            let slot = &mut self.max_bw_filter[self.cycle_count as usize % MAX_BW_FILTER_LEN];
-            *slot = slot.max(rate_sample.delivery_rate.round());
-            self.max_bw = self.max_bw_filter.iter().copied().fold(0.0, f64::max);
+        if starved
+            || !rate_sample.is_app_limited
+            || rate_sample.delivery_rate >= self.aged_bw_filter.max()
+        {
+            self.aged_bw_filter.update(rate);
         }
     }
 
@@ -1086,17 +1102,12 @@ impl Bbr3 {
 
     /// equivalent to BBRAdvanceMaxBwFilter <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-07.html#section-5.5.6>
     ///
-    /// The oldest cycle's samples leave the window. A cycle without samples is not a cycle, so
-    /// it keeps the window, as Linux BBRv3's `bbr_advance_max_bw_filter` does; otherwise two
-    /// advances in a row would empty it.
+    /// A probe's end ages the reported estimate's window too, which restarts its own cycle.
     fn advance_max_bw_filter(&mut self, now: Instant) {
-        self.cycle_count_stamp = Some(now);
-        if self.max_bw_filter[self.cycle_count as usize % MAX_BW_FILTER_LEN] == 0.0 {
-            return;
-        }
-        self.cycle_count = self.cycle_count.saturating_add(1);
-        self.max_bw_filter[self.cycle_count as usize % MAX_BW_FILTER_LEN] = 0.0;
-        self.max_bw = self.max_bw_filter.iter().copied().fold(0.0, f64::max);
+        self.max_bw_filter.advance();
+        self.max_bw = self.max_bw_filter.max();
+        self.aged_bw_filter.advance();
+        self.aged_bw_stamp = Some(now);
     }
 
     /// equivalent to BBRIsTimeToProbeBW <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-07.html#section-5.3.3.8.3>
@@ -1220,6 +1231,12 @@ impl Bbr3 {
     /// An application-limited flow without congestion since the stamp skips the due ProbeRTT,
     /// as QUICHE BBRv1's kBBR8 does, which spares media its periodic window cut. Its near-floor
     /// kBBR7 also requires an application-limited interval, so kBBR8 covers it.
+    /// Congestion denies the skip only while the lowest sample since its latest signal sits
+    /// above [`SIMILAR_MIN_RTT`] of BBR.min_rtt, as QUICHE's `probe_rtt_skipped_if_similar_rtt_`
+    /// does: a flow beside a full queue measures that queue, while one whose samples returned to
+    /// BBR.min_rtt has none to drain. A one-off overflow, such as a startup overshoot, would
+    /// otherwise cut a media flow below its own rate for a round and leave it a backlog that it
+    /// drains only at its application-limited estimate, seconds behind live.
     /// <https://quiche.googlesource.com/quiche.git/+/59748eb0effcf74602957379bf5a8ce0f5aec770/quic/core/congestion_control/bbr_sender.cc>
     /// A skip adopts the expired window's lowest sample after the one that set BBR.min_rtt, so a
     /// base RTT that rose is learned without ProbeRTT: an application-limited flow keeps little
@@ -1235,10 +1252,13 @@ impl Bbr3 {
         let Some(rate_sample) = self.rs else {
             return;
         };
-        if self.min_rtt_expired
-            && !self.idle_restart
-            && self.probe_rtt_skip_app_limited
-            && !self.probe_rtt_skip_congested
+        if let Some(congested) = &mut self.probe_rtt_congested {
+            *congested = Ord::min(*congested, rate_sample.rtt);
+        }
+        let queued = self.probe_rtt_congested.is_some_and(|congested| {
+            congested.as_secs_f64() > self.min_rtt.as_secs_f64() * SIMILAR_MIN_RTT
+        });
+        if self.min_rtt_expired && !self.idle_restart && self.probe_rtt_skip_app_limited && !queued
         {
             self.min_rtt_expired = false;
             self.min_rtt = Ord::min(self.later_min_rtt, rate_sample.rtt);
@@ -1257,8 +1277,8 @@ impl Bbr3 {
         self.min_rtt_stamp = Some(now);
         self.later_min_rtt = Duration::from_secs(u64::MAX);
         self.probe_rtt_skip_app_limited = false;
-        self.probe_rtt_skip_congested = false;
-        self.undo_probe_rtt_skip_congested = false;
+        self.probe_rtt_congested = None;
+        self.undo_probe_rtt_congested = None;
     }
 
     /// equivalent to BBRCheckProbeRTT <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-07.html#section-5.3.4.3>
@@ -1490,16 +1510,19 @@ impl Bbr3 {
     /// The delayed-ACK term accounts for the QUIC ACK frequency extension:
     /// `min(Ack-Eliciting Threshold, Requested Max Ack Delay * BBR.max_bw)`.
     fn update_offload_budget(&mut self) {
-        let base = self.send_quantum;
+        self.offload_budget = self.offload_budget_at(self.send_quantum, self.max_bw);
+    }
 
+    /// The offload budget of a sender sending `quantum` at a time with `max_bw` as BBR.max_bw.
+    fn offload_budget_at(&self, quantum: u64, max_bw: f64) -> u64 {
         // Ack-Eliciting Threshold is a packet count in the ACK_FREQUENCY frame; convert to
         // bytes using the current SMSS. A threshold of 0 requires an immediate ACK per packet,
         // so the delayed-ACK term contributes nothing in that case.
         let threshold_bytes = self.ack_eliciting_threshold.saturating_mul(self.smss);
-        let delay_bytes = (self.max_ack_delay.as_secs_f64() * self.max_bw).round() as u64;
+        let delay_bytes = (self.max_ack_delay.as_secs_f64() * max_bw).round() as u64;
         let delayed_ack_term = Ord::min(threshold_bytes, delay_bytes);
 
-        self.offload_budget = base.saturating_add(delayed_ack_term);
+        quantum.saturating_add(delayed_ack_term)
     }
 
     /// equivalent to BBRBoundCwndForProbeRTT <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-07.html#section-5.6.4.5>
@@ -1586,13 +1609,16 @@ impl Bbr3 {
 
     /// equivalent to BBRSetSendQuantum <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-07.html#section-5.6.3>
     fn set_send_quantum(&mut self) {
-        // C.pacing_rate is in bytes/sec, so multiplying by 1ms is dividing by 1000.
-        let mut quantum = (self.pacing_rate / 1000.0) as u64;
-        quantum = Ord::min(quantum, HIGH_PACE_MAX_QUANTUM);
+        self.send_quantum = self.send_quantum_at(self.pacing_rate);
+    }
+
+    /// The send quantum of a sender pacing at `pacing_rate` bytes per second.
+    fn send_quantum_at(&self, pacing_rate: f64) -> u64 {
+        // Bytes per second times 1ms is dividing by 1000.
+        let quantum = Ord::min((pacing_rate / 1000.0) as u64, HIGH_PACE_MAX_QUANTUM);
         // One datagram is enough at low rates. A two-datagram floor forces packet pairs
         // even when earning that pair takes longer than the RTT.
-        quantum = Ord::max(quantum, self.smss);
-        self.send_quantum = quantum;
+        Ord::max(quantum, self.smss)
     }
 
     /// equivalent to BBRHandleLostPacket <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-07.html#section-5.5.10.2>
@@ -1632,7 +1658,8 @@ impl Bbr3 {
                 marks.loss_round = true;
             }
         }
-        self.probe_rtt_skip_congested = true;
+        // Infinity, as for `min_rtt`, until a sample after this signal arrives.
+        self.probe_rtt_congested = Some(Duration::from_secs(u64::MAX));
     }
 
     /// Responds to newly reported CE marks as classic ECN: congestion that the bottleneck
@@ -1686,7 +1713,7 @@ impl Bbr3 {
             _ => self.cwnd,
         };
         self.undo_state = None;
-        self.undo_probe_rtt_skip_congested = self.probe_rtt_skip_congested;
+        self.undo_probe_rtt_congested = self.probe_rtt_congested;
         self.undo_prev_probe_too_high = self.prev_probe_too_high;
         self.undo_prev_probe_precautionary = self.prev_probe_precautionary;
         self.undo_bw_shortterm = self.bw_shortterm;
@@ -1795,7 +1822,10 @@ impl Bbr3 {
     /// samples measure the path rather than the application.
     ///
     /// The probe fills to `BBRInflight(BBR.bw, ProbeBwUpPacingGain)`, the inflight ProbeBW_UP
-    /// sustains over BBR.bw. Past that the probe only queues at the bottleneck, which Linux
+    /// sustains over BBR.bw, or over the reported estimate once that has aged below BBR.bw: the
+    /// probe looks for the path above what the flow has lately delivered, and filling over a
+    /// maximum the path may have lost would only queue. Past that the probe only queues at the
+    /// bottleneck, which Linux
     /// BBRv3 takes as its cue to leave PROBE_UP. Startup gets the same bound rather than its own
     /// gain: an application-limited flow never leaves Startup, so ProbeBW_UP alone would never
     /// probe, and Startup's own gain would queue nearly twice the BDP at the bottleneck.
@@ -1819,12 +1849,19 @@ impl Bbr3 {
         if !probing || self.min_rtt == Duration::from_secs(u64::MAX) {
             return None;
         }
-        let bdp = self.bw * self.min_rtt.as_secs_f64();
+        let bw = self.bw.min(self.aged_bw_filter.max());
+        let bdp = bw * self.min_rtt.as_secs_f64();
         let inflight = (self.probe_bw_up_pacing_gain * bdp) as u64;
         // BBRQuantizationBudget, without the side effects `get_inflight` has on BBR.bdp, nor the
         // 2 SMSS ProbeBW_UP adds: the gain already reaches past BBR.bw, and on a small BDP two
-        // more packets only queue ahead of the next frame, over a round trip at 10ms
-        let inflight = Ord::max(inflight, self.offload_budget);
+        // more packets only queue ahead of the next frame, over a round trip at 10ms.
+        // The offload budget is taken at the aged rates: at BBR.max_bw's pacing rate, a fast
+        // path that slowed would keep a floor of up to 64 KiB queued.
+        let aged_max_bw = self.max_bw.min(self.aged_bw_filter.max());
+        let scale = if self.bw > 0.0 { bw / self.bw } else { 1.0 };
+        let quantum = self.send_quantum_at(self.pacing_rate * scale);
+        let floor = self.offload_budget_at(quantum, aged_max_bw);
+        let inflight = Ord::max(inflight, floor);
         Some(Ord::max(inflight, self.min_pipe_cwnd))
     }
 
@@ -2030,7 +2067,10 @@ impl Controller for Bbr3 {
         self.bound_cwnd_for_probe_rtt();
         self.loss_in_round = false;
         self.loss_events_in_round = 0;
-        self.probe_rtt_skip_congested = self.undo_probe_rtt_skip_congested;
+        // An earlier signal still stands, and the samples since this episode began followed it.
+        self.probe_rtt_congested = self
+            .undo_probe_rtt_congested
+            .map(|undo| Ord::min(undo, self.probe_rtt_congested.unwrap_or(undo)));
         self.reset_full_bw();
         self.prev_probe_too_high = self.undo_prev_probe_too_high;
         // A precautionary stop still waiting for its feedback round waits again; once that
@@ -2109,10 +2149,18 @@ impl Controller for Bbr3 {
 
     fn metrics(&self) -> Metrics {
         // BBR.bw, recomputed since a short-term model reset or a spurious-loss undo lands
-        // between ACKs: a loss-driven `bw_shortterm` and the delay bound's `bw_delay` both mark
-        // the path slower than `max_bw`, so a bandwidth follower, such as an encoder, should
-        // follow them. Both are infinite while unset.
-        let estimate = self.max_bw.min(self.bw_shortterm).min(self.bw_delay);
+        // between ACKs, and aged while the application holds the flow back: a loss-driven
+        // `bw_shortterm` and the delay bound's `bw_delay` both mark the path slower than
+        // `max_bw`, so a bandwidth follower, such as an encoder, should follow them. Both are
+        // infinite while unset.
+        let estimate = [
+            self.max_bw,
+            self.aged_bw_filter.max(),
+            self.bw_shortterm,
+            self.bw_delay,
+        ]
+        .into_iter()
+        .fold(f64::INFINITY, f64::min);
         Metrics {
             congestion_window: self.window(),
             ssthresh: None,
@@ -2128,6 +2176,40 @@ impl Controller for Bbr3 {
 
     fn clone_box(&self) -> Box<dyn Controller> {
         Box::new(self.clone())
+    }
+}
+
+/// The maximum delivery rate of each of the last BBR.MaxBwFilterLen cycles
+#[derive(Debug, Clone, Default)]
+struct CycleMax {
+    /// Each cycle's maximum, the current one at `cycle` modulo the length
+    slots: [f64; MAX_BW_FILTER_LEN],
+    /// equivalent to BBR.cycle_count: the current cycle, whose slot takes new samples
+    cycle: u64,
+}
+
+impl CycleMax {
+    /// Takes `rate` into the current cycle
+    fn update(&mut self, rate: f64) {
+        let slot = &mut self.slots[self.cycle as usize % MAX_BW_FILTER_LEN];
+        *slot = slot.max(rate);
+    }
+
+    /// Starts a new cycle, dropping the oldest one's samples
+    ///
+    /// A cycle without samples is not a cycle, so it keeps the window, as Linux BBRv3's
+    /// `bbr_advance_max_bw_filter` does; otherwise two advances in a row would empty it.
+    fn advance(&mut self) {
+        if self.slots[self.cycle as usize % MAX_BW_FILTER_LEN] == 0.0 {
+            return;
+        }
+        self.cycle = self.cycle.saturating_add(1);
+        self.slots[self.cycle as usize % MAX_BW_FILTER_LEN] = 0.0;
+    }
+
+    /// The maximum over the window, zero before any sample
+    fn max(&self) -> f64 {
+        self.slots.iter().copied().fold(0.0, f64::max)
     }
 }
 
@@ -5664,7 +5746,7 @@ mod test {
                 if !cut && matches!(bbr.state, BbrState::ProbeBw(_)) && bbr.max_bw >= 0.9 * BW_HI {
                     cut = true;
                     cut_max_bw = bbr.max_bw;
-                    cut_cycle = bbr.cycle_count;
+                    cut_cycle = bbr.max_bw_filter.cycle;
                     btl_service_ns = (MSS as f64 / BW_LO * 1e9).round() as u64;
                 }
 
@@ -5677,7 +5759,7 @@ mod test {
                     // max_bw collapses to the new rate once the stale high sample ages out of the
                     // MAX_BW_FILTER_LEN-wide window (keyed on cycle_count).
                     if adapt_cycles.is_none() && bbr.max_bw <= 1.15 * BW_LO {
-                        adapt_cycles = Some(bbr.cycle_count - cut_cycle);
+                        adapt_cycles = Some(bbr.max_bw_filter.cycle - cut_cycle);
                         break;
                     }
                 }
@@ -7678,13 +7760,13 @@ mod test {
     #[test]
     fn probe_feedback_finishes_once() {
         let mut sim = probed();
-        let cycle = sim.bbr.cycle_count;
+        let cycle = sim.bbr.max_bw_filter.cycle;
         // Cruise at half the probed rate for longer than the filter window.
         for i in 0..5 {
             sim.round(10 * MS + i * 20 * MS, 100, 20 * MS);
         }
         assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Cruise));
-        assert_eq!(sim.bbr.cycle_count, cycle + 1);
+        assert_eq!(sim.bbr.max_bw_filter.cycle, cycle + 1);
         assert_eq!(sim.bbr.max_bw, 12_000_000.0);
         assert!(!sim.bbr.check_probe_loss);
 
@@ -7704,7 +7786,7 @@ mod test {
     #[test]
     fn app_limited_probe_feedback_finishes_once() {
         let mut sim = probed();
-        let cycle = sim.bbr.cycle_count;
+        let cycle = sim.bbr.max_bw_filter.cycle;
         sim.starve();
         sim.round(10 * MS, 100, 20 * MS);
         assert!(sim.bbr.rs.unwrap().is_app_limited);
@@ -7714,14 +7796,15 @@ mod test {
             sim.round(10 * MS + i * 20 * MS, 100, 20 * MS);
         }
         assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Cruise));
-        assert_eq!(sim.bbr.cycle_count, cycle);
+        assert_eq!(sim.bbr.max_bw_filter.cycle, cycle);
         assert_eq!(sim.bbr.max_bw, 12_000_000.0);
     }
 
-    /// A flow the application holds below its maximum ages the max-bw window once per
-    /// `APP_LIMITED_CYCLE`, so the maximum falls to the rate it delivers after two of them.
+    /// A flow the application holds below its maximum ages the reported estimate's window once
+    /// per `APP_LIMITED_CYCLE`, so the estimate and the probe's fill fall to the rate it delivers
+    /// after two of them, while BBR.max_bw keeps pacing a backlog at the probed rate.
     #[test]
-    fn app_limited_flow_ages_max_bw() {
+    fn app_limited_flow_ages_the_estimate() {
         let mut sim = probed();
         let cycle = APP_LIMITED_CYCLE.as_nanos() as u64;
         // Rounds of 10 packets every 10ms deliver 1.2 MB/s, each after the application ran dry.
@@ -7737,9 +7820,45 @@ mod test {
             } else {
                 1_200_000.0
             };
-            assert_eq!(sim.bbr.max_bw, expected, "at {}ms", (now + 10 * MS) / MS);
+            let estimate = sim.bbr.metrics().bandwidth_estimate;
+            assert_eq!(
+                estimate,
+                Some(expected as u64),
+                "at {}ms",
+                (now + 10 * MS) / MS
+            );
+            assert_eq!(sim.bbr.max_bw, 12_000_000.0);
             now += 10 * MS;
         }
+
+        // The bandwidth probe fills over the aged estimate, not over the stale maximum, and so
+        // does its offload floor: at the maximum's pacing rate, a 12 KB quantum would fill past both.
+        sim.bbr.state = BbrState::ProbeBw(ProbeBwSubstate::Up);
+        sim.bbr.bw_probe_fill = true;
+        let floor = sim.bbr.offload_budget_at(sim.bbr.smss, 1_200_000.0);
+        for rtt_ms in [10, 1] {
+            sim.bbr.min_rtt = Duration::from_millis(rtt_ms);
+            let bdp = 1_200_000.0 * sim.bbr.min_rtt.as_secs_f64();
+            let fill = (sim.bbr.probe_bw_up_pacing_gain * bdp) as u64;
+            let fill = fill.max(floor).max(sim.bbr.min_pipe_cwnd);
+            assert!(sim.bbr.offload_budget > fill, "the stale floor would bind");
+            assert_eq!(sim.bbr.probe_inflight(), Some(fill), "at {rtt_ms}ms");
+        }
+
+        // A loss bound under the aged estimate leaves the fill's rate unscaled, and the floor's
+        // delayed-ACK term still reads the aged maximum, not BBR.max_bw.
+        bound_bw(&mut sim, 600_000.0);
+        sim.bbr.min_rtt = Duration::from_millis(10);
+        // A peer acking every 64 packets, so the delayed-ACK term follows the rate.
+        sim.bbr.ack_eliciting_threshold = 64;
+        let quantum = sim.bbr.send_quantum_at(sim.bbr.pacing_rate);
+        let floor = sim.bbr.offload_budget_at(quantum, 1_200_000.0);
+        let stale = sim.bbr.offload_budget_at(quantum, sim.bbr.max_bw);
+        assert!(stale > floor, "the stale delayed-ACK term would bind");
+        let fill = (sim.bbr.probe_bw_up_pacing_gain * 600_000.0 * 0.01) as u64;
+        let fill = fill.max(floor).max(sim.bbr.min_pipe_cwnd);
+        assert!(stale > fill, "the stale floor would bind");
+        assert_eq!(sim.bbr.probe_inflight(), Some(fill));
     }
 
     /// ProbeRTT entered mid-probe ends the probe's feedback: the window ages once, on entry, and
@@ -7751,14 +7870,14 @@ mod test {
         sim.bbr.start_probe_bw_up();
         sim.round(10 * MS, 100, 10 * MS);
         assert!(sim.bbr.check_probe_loss && !sim.bbr.is_bw_probe_stopping);
-        let cycle = sim.bbr.cycle_count;
+        let cycle = sim.bbr.max_bw_filter.cycle;
 
         // The min RTT expires on the next round.
         sim.bbr.min_rtt_filter_len = Duration::ZERO;
         sim.round(20 * MS, 100, 10 * MS);
         sim.bbr.min_rtt_filter_len = MIN_RTT_FILTER_LEN;
         assert_eq!(sim.bbr.state, BbrState::ProbeRtt);
-        assert_eq!(sim.bbr.cycle_count, cycle + 1);
+        assert_eq!(sim.bbr.max_bw_filter.cycle, cycle + 1);
 
         let mut now = 30 * MS;
         while sim.bbr.state == BbrState::ProbeRtt {
@@ -7767,13 +7886,13 @@ mod test {
             assert!(now < 1000 * MS, "ProbeRTT never ended");
         }
         assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Cruise));
-        assert_eq!(sim.bbr.cycle_count, cycle + 1);
+        assert_eq!(sim.bbr.max_bw_filter.cycle, cycle + 1);
         assert!(!sim.bbr.check_probe_loss);
 
         for i in 0..5 {
             sim.round(now + i * 10 * MS, 100, 10 * MS);
         }
-        assert_eq!(sim.bbr.cycle_count, cycle + 1);
+        assert_eq!(sim.bbr.max_bw_filter.cycle, cycle + 1);
     }
 
     /// A scripted `Sim` that has just entered ProbeRTT after measuring 12 MB/s over a 10ms RTT,
@@ -7784,7 +7903,7 @@ mod test {
         sim.round(10 * MS, 100, 10 * MS);
         sim.bbr.min_rtt_filter_len = MIN_RTT_FILTER_LEN;
         assert_eq!(sim.bbr.state, BbrState::ProbeRtt);
-        sim.bbr.max_bw_filter = [0.0; MAX_BW_FILTER_LEN];
+        sim.bbr.max_bw_filter.slots = [0.0; MAX_BW_FILTER_LEN];
         sim
     }
 
@@ -8026,20 +8145,30 @@ mod test {
         assert!(sim.bbr.min_rtt_stamp.unwrap() > sim.at(20_000 * MS));
     }
 
-    /// Loss or CE in the interval means the flow shares a full queue, so an application-limited
-    /// flow enters ProbeRTT, and BBR.min_rtt expires into the higher RTT it measured.
+    /// Loss or CE in the interval, with every later sample above [`SIMILAR_MIN_RTT`] of
+    /// BBR.min_rtt, means the flow shares a full queue, so an application-limited flow enters
+    /// ProbeRTT, and BBR.min_rtt expires into the higher RTT it measured. Samples within it
+    /// show no queue to drain, so the flow skips and adopts the window's lowest sample.
     #[test]
     fn congested_interval_enters_probe_rtt() {
         for ce in [false, true] {
-            let mut sim = probed();
-            sim.send(10 * MS, 1);
-            match ce {
-                true => sim.ack_ce(20 * MS, [sim.pn - 1]),
-                false => sim.lose(20 * MS, sim.pn - 1),
+            for (rtt_us, entries) in [(20_000, 1), (11_300, 1), (11_200, 0), (10_000, 0)] {
+                let mut sim = probed();
+                sim.send(10 * MS, 1);
+                match ce {
+                    true => sim.ack_ce(20 * MS, [sim.pn - 1]),
+                    false => sim.lose(20 * MS, sim.pn - 1),
+                }
+                let got = pipeline(&mut sim, 20 * MS, 12_000 * MS, |_| rtt_us * 1000, true);
+                assert_eq!(got, entries, "ce={ce} rtt={rtt_us}us");
+                // A skip adopts the window's lowest sample, which the CE-marked packet's is.
+                let min_us = if ce && entries == 0 { 10_000 } else { rtt_us };
+                assert_eq!(
+                    sim.bbr.min_rtt,
+                    Duration::from_micros(min_us),
+                    "ce={ce} rtt={rtt_us}us"
+                );
             }
-            let entries = pipeline(&mut sim, 20 * MS, 12_000 * MS, |_| 20 * MS, true);
-            assert_eq!(entries, 1, "ce={ce}");
-            assert_eq!(sim.bbr.min_rtt, Duration::from_millis(20), "ce={ce}");
         }
     }
 
@@ -8056,7 +8185,7 @@ mod test {
             // A packet sent after any earlier episode began opens a new one.
             sim.send(25 * MS, 1);
             sim.lose(30 * MS, sim.pn - 1);
-            assert!(sim.bbr.probe_rtt_skip_congested);
+            assert!(sim.bbr.probe_rtt_congested.is_some());
             if restart {
                 // A lower RTT sample restarts the min_rtt filter, and the interval with it.
                 sim.send(40 * MS, 1);
@@ -8064,7 +8193,8 @@ mod test {
                 assert_eq!(sim.bbr.min_rtt, Duration::from_millis(5));
             }
             sim.bbr.on_spurious_loss();
-            let got = pipeline(&mut sim, 50 * MS, 12_000 * MS, |_| 10 * MS, true);
+            // Queued samples, so only the skip's congestion evidence decides.
+            let got = pipeline(&mut sim, 50 * MS, 12_000 * MS, |_| 20 * MS, true);
             assert_eq!(got, entries, "earlier={earlier} restart={restart}");
         }
     }
@@ -8798,6 +8928,7 @@ mod test {
     fn bounds_cap_the_bandwidth_estimate() {
         let mut sim = scripted();
         sim.bbr.max_bw = 1_000_000.0;
+        sim.bbr.aged_bw_filter.update(1_000_000.0);
         assert_eq!(sim.bbr.metrics().bandwidth_estimate, Some(1_000_000));
         sim.bbr.bw_delay = 400_000.0;
         assert_eq!(sim.bbr.metrics().bandwidth_estimate, Some(400_000));

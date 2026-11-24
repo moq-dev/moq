@@ -68,11 +68,25 @@ internal sessions and the stats feed. Compare them with payload to spot
 transport overhead and idle traffic. Transports that do not report them
 contribute zero.
 
+`moq_relay_wire_lost_bytes_total`, `moq_relay_cwnd_blocked_microseconds_total`,
+and `moq_relay_pacing_blocked_microseconds_total` sum the per-session
+[congestion counters](/concept/stats#presence) by `tier`: the sent bytes
+declared lost, which over `moq_relay_wire_tx_bytes_total` is the loss rate, and how long data
+ready to send waited on a full congestion window or on the pacer. Wait time
+growing while credit stays flat points at the network rather than connection
+credit; a tier sums many sessions, and stream-level credit is not counted, so
+it cannot rule a peer out.
+
 `moq_relay_credit_stalls_total` and `moq_relay_credit_stalled_microseconds_total`
 sum the per-session [credit stalls](/concept/stats#presence) by `tier`: how often
 and how long a connection's writes waited on the peer's connection-level
 flow-control credit (`MAX_DATA`). Time growing here, while loss stays flat, means
 peers stopped granting credit rather than the network slowing delivery.
+The receiving side says why: `moq_relay_credit_held_readers_microseconds_total`
+and `moq_relay_credit_held_evicted_microseconds_total` sum, by `tier`, how long
+peers had a connection's whole receive window spent while this relay evicted
+nothing, waiting on a reader that had not looked at its data yet (a reader
+behind) or on an evicted reader yet to stop its stream.
 
 `moq_relay_control_tx_bytes_total` and `moq_relay_control_rx_bytes_total`
 count control-message bytes by `tier` and `class` (`session`, `announce`, `track_info`, `subscribe`, `fetch`,
@@ -109,7 +123,7 @@ A few worth alerting on:
   `moq_relay_route_withdrawals_total` by `direction` (`sent`, `received`) and
   `kind` (`dead`, `drain`), `moq_relay_route_refusals_total` by `reason`
   (`path`, `scope`, `looped`), and `moq_relay_route_sessions_closed_total` by
-  `kind` (`stalled`, `overrun`, `malformed`, `role`, `unasked`, `regressed`,
+  `kind` (`stalled`, `overrun`, `malformed`, `role`, `unasked`,
   `other`). Compare a canary relay's rates with its neighbours' while rolling
   out a release.
 - `moq_relay_stale_bytes_total` and friends: content dropped for drifting past

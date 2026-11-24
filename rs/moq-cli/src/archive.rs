@@ -101,7 +101,7 @@ pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: Exp
 							follower.abort();
 						}
 					}
-					moq_net::announce::Event::Present(_) => {}
+					_ => {}
 				}
 				continue;
 			}

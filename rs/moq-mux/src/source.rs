@@ -651,12 +651,10 @@ mod tests {
 		independent.isolate();
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast.create_track("audio", None).unwrap();
-		let preferences = moq_net::track::Subscription::default()
-			.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(3)))
-			.with_ranges([moq_net::track::Range {
-				start: Some(5),
-				end: Some(10),
-			}]);
+		let preferences = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range {
+			start: moq_net::track::Start::Time(5),
+			end: Some(10),
+		}]);
 		let first = track.subscribe(preferences.clone());
 		let held = source.control(first.control()).unwrap();
 		let other = track.subscribe(preferences.clone());

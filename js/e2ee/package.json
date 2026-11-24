@@ -16,7 +16,7 @@
 	},
 	"scripts": {
 		"build": "rm -rf dist && tsc -b tsconfig.build.json && bun ../common/package.ts && tsc --project test-dts/tsconfig.json",
-		"check": "tsc --noEmit && tsc --noEmit --project bench/tsconfig.json",
+		"check": "bun check --no-script && bun check --no-script -p bench/tsconfig.json",
 		"test": "bun test --only-failures"
 	},
 	"dependencies": {
@@ -24,7 +24,6 @@
 		"uuid": "^14.0.3"
 	},
 	"devDependencies": {
-		"@moq/clock": "workspace:^",
 		"@types/bun": "^1.4.4",
 		"typescript": "7.0.2"
 	}

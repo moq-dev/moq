@@ -11,6 +11,7 @@
 //! subscription. A moq-transport `B` carries none, so `S` mints one for it, and the move
 //! onto it is a restart that ends the subscription rather than stitching onto it.
 
+use crate::WithMax as _;
 use crate::support;
 use support::AppendNext;
 
@@ -37,9 +38,11 @@ const A: u64 = 2;
 const A_COST: u64 = 100;
 
 fn produce_origin(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// Let every task settle. Time is paused, so this returns once the runtime is idle.
@@ -138,11 +141,13 @@ fn via_a(announce: &origin::RouteEvent) -> bool {
 		origin::RouteEvent {
 			kind: origin::RouteKind::Start | origin::RouteKind::Update | origin::RouteKind::Restart,
 			announce: a,
+			..
 		} => &a.route,
 		origin::RouteEvent {
 			kind: origin::RouteKind::End | origin::RouteKind::Offline,
 			..
 		} => return false,
+		other => panic!("unexpected route event {other:?}"),
 	};
 	route.cost().value() >= A_COST
 }
@@ -200,8 +205,7 @@ impl Topology {
 
 	async fn subscribe(&self) -> mpsc::UnboundedReceiver<Delivery> {
 		let remote = self.subscriber.consume().request("live", None).await.unwrap();
-		let prefs =
-			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60)));
+		let prefs = track::Subscription::default().with_max(Duration::from_secs(60));
 		read(remote.track("video").unwrap().subscribe(prefs).await.unwrap())
 	}
 

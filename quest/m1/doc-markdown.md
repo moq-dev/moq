@@ -1,31 +1,29 @@
-# [XS] doc.moq.dev answers agents in Markdown
+# [XS] doc.moq.dev's robots.txt carries no managed preamble
 
 ## Goal
 
-A request to doc.moq.dev whose `Accept` lists `text/markdown` gets the page's
-Markdown copy, the same file its `.md` URL serves, with `Vary: Accept`;
-browsers still get HTML. The site serves a sitemap, and its robots.txt names
-it and says `Content-Signal: search=yes, ai-input=yes, ai-train=yes`, in
-place of Cloudflare's managed preamble, which declares no signal.
+`https://doc.moq.dev/robots.txt` is exactly the file `doc/public/robots.txt`:
+it names the sitemap and says `Content-Signal: search=yes, ai-input=yes,
+ai-train=yes`, with no Cloudflare "managed robots.txt" preamble above it, which
+declares a conflicting signal.
 
 ## Plan
 
-Decided 2026-11-21 (maintainer, `/quest-plan`): ✅ negotiate on `Accept`
-with the site's own `.md` copies (rejected: Cloudflare's "Markdown for
-Agents" zone toggle, which converts HTML less cleanly than the copies the
-docs already build; serving by user agent, which search engines treat as
-cloaking). ✅ All three content signals yes (rejected: `ai-train=no`; leaving
-them unset): the docs are open source, and a model trained on them can
-recommend MoQ for a question that doesn't name it. Coding agents such as
-Claude Code already send `Accept: text/markdown`.
+The worker, sitemap, and robots.txt shipped on `main` in
+[moq-dev/moq#9375](https://github.com/moq-dev/moq/pull/9375), but Workers
+Builds deploys `moq-doc` from `release`, which lacks them, so the origin
+answers `/robots.txt` with a 404.
+Checked 2026-11-22: the zone's managed robots.txt (AI Crawl Control → Signals,
+"Enable Bot Preference Sync") is already off, so the preamble is what
+Cloudflare serves a Free-plan domain that has no robots.txt of its own, and it
+[serves an origin's file unchanged](https://developers.cloudflare.com/bots/additional-configurations/managed-robots-txt/).
+No zone setting changes.
 
-Recommendations:
+## Waiting
 
-- `doc/worker.js` already fronts the assets for redirects; add the `Accept`
-  check there, falling through to HTML when a page has no `.md` copy.
-- VitePress's `sitemap.hostname` option builds the sitemap.
-- The managed preamble is a zone setting; turn it off where the zone is
-  declared, or record a `Maintainer:` item if no tofu owns it.
+- moq-dev/moq: the next release cut deploys `doc/`. Check with
+  `curl https://doc.moq.dev/robots.txt`: the first line is `User-agent: *`
+  from the repository's file, not a Cloudflare comment.
 
 ## Related
 

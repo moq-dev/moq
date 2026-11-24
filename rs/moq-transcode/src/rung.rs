@@ -795,7 +795,7 @@ async fn drop_gap(
 	fill: &moq_net::track::FillGroups,
 	sequence: u64,
 ) -> Result<(), Error> {
-	use moq_net::track::{Delay, Order, Range, Subscription};
+	use moq_net::track::{Order, Range, Start, Subscription};
 
 	// The miss is the source's answer, so its readers have it at once, whatever the lookup for
 	// the rest of the gap waits on.
@@ -818,12 +818,11 @@ async fn drop_gap(
 	let from = if below { first } else { sequence };
 	let subscription = Subscription::default()
 		.with_ranges([Range {
-			start: Some(from),
+			start: Start::Time(from),
 			end: Some(last),
 		}])
 		.with_order(Order::Ascending)
-		.with_priority(fill.priority())
-		.with_delay(Delay::default().with_max(None));
+		.with_priority(fill.priority());
 
 	let around = async {
 		let mut groups = track.subscribe(subscription).await?.ordered();
@@ -1195,9 +1194,8 @@ mod tests {
 		let fills = track.requests();
 		let ascending = |from| {
 			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(None))
 				.with_ranges([moq_net::track::Range {
-					start: Some(from),
+					start: moq_net::track::Start::Time(from),
 					end: None,
 				}])
 				.with_order(moq_net::track::Order::Ascending)
@@ -1337,9 +1335,8 @@ mod tests {
 		let fills = track.requests();
 		let mut reader = track.subscribe(
 			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(None))
 				.with_ranges([moq_net::track::Range {
-					start: Some(1),
+					start: moq_net::track::Start::Time(1),
 					end: None,
 				}])
 				.with_order(order),
@@ -1402,9 +1399,8 @@ mod tests {
 		let fills = track.requests();
 		let mut reader = track.subscribe(
 			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(None))
 				.with_ranges([moq_net::track::Range {
-					start: Some(7),
+					start: moq_net::track::Start::Time(7),
 					end: None,
 				}])
 				.with_order(moq_net::track::Order::Ascending),

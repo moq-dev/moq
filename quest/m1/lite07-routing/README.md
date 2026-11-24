@@ -16,15 +16,13 @@ bugs with scratch tests):
 
 - ✅ The cut waits on the high-severity fixes: the scoped peer, the route
   floors, and the origin's route rank in this epic, plus
-  [NodeId Start](/quest/m2/node-id-drop-start.md) and
-  [origin proxy](/quest/m2/origin-proxy-config.md) in m2 (rejected: the cut
+  NodeId Start and origin proxy in m2 (rejected: the cut
   waits on every quest here, relay config polish included; nothing gates
   the cut). [lite07-finalize](/quest/m2/lite07-finalize.md) lists them.
 - ✅ Warm routing stays after the cut, as decided 2026-11-20. lite-07 needs no
   hook for it: it arrives as a new wip version or a SETUP parameter, so
   Gemini's proposal to skip unknown Subscribe Stream messages is rejected,
-  and [the announce stream rejects unknown types](/quest/m1/precut-audit/net-lite07-protocol-violations.md)
-  instead.
+  and the announce stream rejects unknown types instead.
 - ✅ Dropped (rejected: m3 quests for each): the hardcoded 800 ms debounce
   and the route outbox limit, with no measured failure (revisit if moq.pro
   sees premature offlines or overrun cuts); and per-peer TLS identities, a
@@ -41,9 +39,6 @@ This epic has no work of its own.
 
 ## Related
 
-- [NodeId drops Start](/quest/m2/node-id-drop-start.md) - the audit's breaking wire fix
-- [Origin proxy in Config](/quest/m2/origin-proxy-config.md) - the audit's breaking API fix
-- [Remove Peer.egress](/quest/m2/relay-peer-egress.md) - the audit's config break
 - [Route wakes](/quest/m3/route-wakes.md) - the audit's route fan-out cost
 - [Federation](/quest/m3/cluster-routing/federation.md) - the audit's priority and outbound scoping gaps
 - [Warmth port](/quest/m3/cache-routing/select.md) - the audit's cache-aware routing gaps

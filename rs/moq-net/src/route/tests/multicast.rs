@@ -73,9 +73,6 @@ pub(super) struct RelaySim {
 	mutant: Option<relay::Mutant>,
 	/// Whether each router rebuilds its indexes after every input to compare.
 	checked: bool,
-	/// A relay that resets comes back under a new identity, as a device replaced by
-	/// another, rather than as a new start of the same relay.
-	pub mint: bool,
 	/// Every router sends what it has after each change to the network, as the bake-off
 	/// runs it; the search flushes each router as a step of its own instead.
 	pub auto: bool,
@@ -120,7 +117,6 @@ impl RelaySim {
 			histories: BTreeMap::new(),
 			mutant: None,
 			checked: true,
-			mint: false,
 			auto: true,
 		};
 		sim.spots = (0..nodes).map(|node| Spot::Relay(Box::new(sim.fresh(node)))).collect();
@@ -132,21 +128,10 @@ impl RelaySim {
 		self.now
 	}
 
-	/// How `node` names itself on a path as it runs now.
+	/// How `node` names itself on a path as it runs now: a restart is a new relay.
 	pub fn id(&self, node: Node) -> NodeId {
 		let generation = u64::from(self.restarts[node]);
-		match self.mint {
-			true => NodeId {
-				relay: node as Id | generation << 32,
-				start: 1,
-				marked: false,
-			},
-			false => NodeId {
-				relay: node as Id,
-				start: generation + 1,
-				marked: false,
-			},
-		}
+		NodeId::new(node as Id | generation << 32)
 	}
 
 	fn fresh(&self, node: Node) -> Router {
@@ -615,6 +600,8 @@ impl RelaySim {
 	pub fn chase(&self, from: Node, id: Id, claim: &Path) -> Option<(Vec<Node>, bool)> {
 		let broadcast = (claim.clone(), id);
 		let (mut at, mut named, mut hops) = (from, None, Vec::new());
+		// The relay a request came from, which it never goes back to.
+		let mut asker = None;
 		while hops.len() <= self.spots.len() {
 			let router = match &self.spots[at] {
 				Spot::Endpoint { claims, .. } => {
@@ -625,17 +612,19 @@ impl RelaySim {
 			let Some(origin) = named.or_else(|| router.pick(&broadcast)) else {
 				return (!hops.is_empty()).then_some((hops, false));
 			};
-			match router.step(origin, &broadcast) {
+			match router.step(origin, &broadcast, asker) {
 				// A request names the forwarding node its first hop chose.
 				Some(Next::Via(next)) => {
 					named = Some(origin);
 					hops.push(next);
+					asker = Some(at);
 					at = next;
 				}
 				// Past a claim's announcer the next node chooses again.
 				Some(Next::Local(next)) => {
 					named = None;
 					hops.push(next);
+					asker = Some(at);
 					at = next;
 				}
 				None => return Some((hops, false)),
@@ -1051,7 +1040,7 @@ fn a_scoped_neighbour_draining_drains_its_claims() {
 	sim.claim(3, "live/0", true);
 	quiesce(&mut sim);
 	let broadcast = (p("live/0"), 100);
-	let source = |sim: &RelaySim| sim.router(1).expect("a relay").step(sim.id(1), &broadcast);
+	let source = |sim: &RelaySim| sim.router(1).expect("a relay").step(sim.id(1), &broadcast, None);
 	assert_eq!(source(&sim), Some(Next::Local(0)));
 	sim.goaway(0);
 	quiesce(&mut sim);
@@ -1356,39 +1345,6 @@ fn a_gateway_takes_no_claim_it_first_hears_unavailable() {
 	}
 }
 
-/// A relay that restarts is a new node, but its neighbours file the session floor per
-/// pair of relays with the restart in the session's order, so a restart replaces the
-/// entry instead of adding one.
-#[test]
-fn a_session_floor_keeps_an_entry_per_pair_of_relays() {
-	let mut sim = RelaySim::new(5, relay::debounce(HOP));
-	let links = [(0, 1), (1, 2), (0, 2), (0, 3)];
-	for (a, b) in links {
-		sim.link(a, b, 1, Tie::Peer);
-	}
-	// A publisher behind the relay that restarts, so 1 and 2 offer each other routes
-	// through their sessions to it, and name those sessions closed when it goes.
-	sim.client(4);
-	sim.publish(4, 100);
-	sim.link(4, 3, 1, Tie::Peer);
-	sim.claim(4, "live", true);
-	quiesce(&mut sim);
-	let mut kept = Vec::new();
-	for _ in 0..8 {
-		sim.reset(0);
-		quiesce(&mut sim);
-		for peer in [1, 2, 3] {
-			sim.open(0, peer);
-		}
-		quiesce(&mut sim);
-		kept.push(sim.kept().closed);
-	}
-	// Two ways round each link at most.
-	assert!(kept[0] > 0, "the restart closed sessions routes crossed: {kept:?}");
-	assert!(kept.iter().all(|&pairs| pairs <= 2 * links.len()), "{kept:?}");
-	assert_eq!(kept[0], kept[7], "{kept:?}");
-}
-
 /// A route learned over an upstream link is marked, and a marked route is never sent over
 /// another upstream link. Relay 3 hears two routes of equal rank to relay 0: through 2,
 /// over a link it marked upstream, and through 1, over a peer link. Were the mark below the
@@ -1444,7 +1400,7 @@ fn whether_a_relay_announces_hangs_on_arrival_order() {
 		sim.release(late.0, late.1);
 		quiesce(&mut sim);
 		let relay = sim.router(2).expect("a relay");
-		let claimed = relay.step(sim.id(2), &(p("live/0"), 100)).is_some();
+		let claimed = relay.step(sim.id(2), &(p("live/0"), 100), None).is_some();
 		let routed = sim.router(0).expect("a relay").best(sim.id(2)).is_some();
 		(relay.announced(), claimed, routed)
 	};
@@ -1454,12 +1410,11 @@ fn whether_a_relay_announces_hangs_on_arrival_order() {
 
 /// The floor's growth with identities that never return: each round a relay under a new
 /// identity joins a ring as a chord with a publisher of its own, announces, and leaves for
-/// good. Every relay that heard a route across one of its sessions keeps that pair's floor
-/// for as long as it runs, at most one entry per direction of each departed session: the
-/// epoch bounds only restarts of one relay, so nothing here replaces or removes an entry.
-/// The quest's PR brings eviction as a decision.
+/// good. A floor no heard route joins is kept only while such floors number no more than
+/// the pairs heard routes join, so the departures stop adding to the table once those
+/// floors fill that room.
 #[test]
-fn a_relay_that_leaves_for_good_leaves_its_floors() {
+fn a_relay_that_leaves_for_good_takes_its_floors() {
 	let (stable, rounds) = (8, 12);
 	let mut sim = RelaySim::new(stable + 2 * rounds + 1, relay::debounce(HOP));
 	let home = stable + 2 * rounds;
@@ -1498,18 +1453,19 @@ fn a_relay_that_leaves_for_good_leaves_its_floors() {
 		assert!(kept.iter().all(|&entries| entries <= 4 * (round + 1)), "{kept:?}");
 		sums.push(kept.iter().sum::<usize>());
 	}
-	assert!(sums.windows(2).all(|pair| pair[1] > pair[0]), "{sums:?}");
+	let (early, late) = sums.split_at(rounds / 2);
+	let most = early.iter().max().expect("a round");
+	assert!(late.iter().all(|sum| sum <= most), "{sums:?}");
 }
 
-/// What the floors cost on the bake-off's shapes as half the relays are replaced, one at
-/// a time and over and over, each restarting under its own identity or coming back under
-/// a new one: the floor entries a relay of the other half, which never restarts, holds on
-/// average after each round of replacements. A restart clears a relay's own table, so a
-/// replaced relay's says nothing about growth.
+/// What the floors cost on the bake-off's shapes as half the relays restart, one at a
+/// time and over and over, each under a new Relay ID: the floor entries a relay of the
+/// other half, which never restarts, holds on average after each round of restarts. A
+/// restart clears a relay's own table, so a restarted relay's says nothing about growth.
 #[test]
 #[ignore = "a sweep; Nightly runs it from test/route-sweep.sh"]
 fn benchmark_relay_floor_growth() {
-	println!("shape,relays,links,identity,replaced,floors_per_lasting_relay");
+	println!("shape,relays,links,replaced,floors_per_lasting_relay");
 	for relays in [12, 32] {
 		for shape in shapes(relays, 2) {
 			let mesh = &shape.mesh;
@@ -1517,30 +1473,26 @@ fn benchmark_relay_floor_growth() {
 			// among them, stay.
 			let replaced: Vec<Node> = (1..mesh.relays).step_by(2).collect();
 			let lasting: Vec<Node> = (0..mesh.relays).step_by(2).collect();
-			for mint in [false, true] {
-				let mut sim = RelaySim::new(mesh.relays + mesh.homes.len(), relay::debounce(HOP));
-				sim.mint = mint;
-				sim.unchecked();
-				let mut lab = Lab::with(Box::new(sim), mesh);
-				let mut count = 0;
-				for _ in 0..4 {
-					for &relay in &replaced {
-						lab.crash(relay);
-						lab.settle();
-						lab.revive(relay);
-						lab.settle();
-						count += 1;
-					}
-					let held = lab.net.floors(&lasting);
-					println!(
-						"{},{},{},{},{count},{:.1}",
-						shape.name,
-						mesh.relays,
-						mesh.links.len(),
-						if mint { "new" } else { "same" },
-						held as f64 / lasting.len() as f64,
-					);
+			let mut sim = RelaySim::new(mesh.relays + mesh.homes.len(), relay::debounce(HOP));
+			sim.unchecked();
+			let mut lab = Lab::with(Box::new(sim), mesh);
+			let mut count = 0;
+			for _ in 0..4 {
+				for &relay in &replaced {
+					lab.crash(relay);
+					lab.settle();
+					lab.revive(relay);
+					lab.settle();
+					count += 1;
 				}
+				let held = lab.net.floors(&lasting);
+				println!(
+					"{},{},{},{count},{:.1}",
+					shape.name,
+					mesh.relays,
+					mesh.links.len(),
+					held as f64 / lasting.len() as f64,
+				);
 			}
 		}
 	}

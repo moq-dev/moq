@@ -21,10 +21,7 @@ fn store() -> Store<Mock> {
 
 /// No flush or gap verdict lands unless a test waits for it.
 fn config() -> Config {
-	Config::default()
-		.with_duration(2 * SECOND)
-		.with_flush(100 * SECOND)
-		.with_max_delay(10 * SECOND)
+	Config::default().with_duration(2 * SECOND).with_flush(100 * SECOND)
 }
 
 fn spawn(store: &Store<Mock>, broadcast: &broadcast::Producer, config: Config) -> JoinHandle<Result<()>> {
@@ -32,7 +29,7 @@ fn spawn(store: &Store<Mock>, broadcast: &broadcast::Producer, config: Config) -
 }
 
 /// A millisecond source track with no publisher max age, so the recorder reaches superseded
-/// groups and only its own max delay bounds the wait for a missing one.
+/// groups and only the publisher's verdict ends the wait for a missing one.
 fn timed() -> track::Info {
 	track::Info::default()
 		.with_timescale(Timescale::MILLI)
@@ -194,7 +191,7 @@ async fn a_late_group_is_a_gap_that_never_stalls_later_groups() {
 	let store = store();
 	let broadcast = broadcast::Info::new().produce();
 	let video = broadcast.create_track("video", timed()).unwrap();
-	let config = config().with_flush(SECOND).with_max_delay(2 * SECOND);
+	let config = config().with_flush(SECOND);
 	let task = spawn(&store, &broadcast, config);
 	subscribed(&video).await;
 
@@ -524,6 +521,21 @@ async fn another_version_fails_the_resume() {
 	let err = spawn(&store, &broadcast, config()).await.unwrap().unwrap_err();
 	assert!(matches!(err, Error::Version(4)), "{err}");
 	assert_eq!(get(&store, "video/.info").await.as_deref(), Some(&v4[..]));
+}
+
+/// A foreign object beside the broadcast's `.end` is refused, even when the listing puts the
+/// `.end` first.
+#[tokio::test(start_paused = true)]
+async fn a_foreign_object_beside_the_end_fails_the_resume() {
+	let store = store();
+	for key in ["rec/.end", "rec/stray"] {
+		let path = object_store::path::Path::from(key);
+		store.inner().put(&path, Vec::new().into()).await.unwrap();
+	}
+	let broadcast = broadcast::Info::new().produce();
+	let _video = broadcast.create_track("video", timed()).unwrap();
+	let err = spawn(&store, &broadcast, config()).await.unwrap().unwrap_err();
+	assert!(matches!(&err, Error::Path(path) if path.ends_with("stray")), "{err}");
 }
 
 #[tokio::test(start_paused = true)]

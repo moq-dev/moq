@@ -290,7 +290,7 @@ See [Authentication](/bin/relay/auth).
 
 ```toml
 [cluster]
-connect = ["https://us-east.example.com/?cost=10"]   # Peers to dial. ?cost prices the link, or use {url, cost, egress, token, upstream} objects.
+connect = ["https://us-east.example.com/?cost=10"]   # Peers to dial. ?cost prices the link, or use {url, cost, token, upstream} objects.
 node = "https://us-west.example.com/"                 # This relay's own URL.
 token = "cluster.jwt"                                 # JWT for dials without an inline ?jwt=.
 max_hops = 32                                         # Legacy: longest hop path on moq-lite-03 to 06 (1 to 32).
@@ -298,6 +298,12 @@ max_hops = 32                                         # Legacy: longest hop path
 [cluster.api]
 url = "https://api.example.com/peers"                  # Live JSON peer list; a local file also works.
 # root = ["api-ca.pem"]                               # API server trust, independent from connect.tls.
+
+[cluster.listen]                                      # A QUIC port for peers alone, apart from [listen].
+bind = "[::]:4443"
+cert = ["cluster.pem"]                                # Served to peers, selected by SNI.
+key = ["cluster.key"]
+root = ["cluster-ca.pem"]                             # Required: a client without a certificate chaining here is refused.
 
 [cluster.lan]                                         # Find peers on the LAN over mDNS.
 enabled = true
@@ -388,6 +394,7 @@ interval = "1s"                      # Time between snapshots. Default.
 node = "sjc/1"                       # Required with stats enabled on a clustered relay, so nodes do not overwrite each other.
 depth = 1                            # One bucket track per first N path segments (per tenant).
 linger = "5m"                        # Keep an empty bucket's track listed this long. Default.
+roots = true                         # Also give each root its own stats under <root>/<prefix>. Default false.
 ```
 
 Each node publishes its traffic and session counters as MoQ tracks, split by a
@@ -401,7 +408,10 @@ node's totals count everything since its run began, so billing reads those;
 a bucket's per-path traffic and per-label sessions and HTTP requests are for
 dashboards. Session counters report how close sessions come to the
 per-session limits, past which one is closed with `TOO_MANY_REQUESTS`.
-[Stats](/concept/stats) describes the paths, tracks, and encodings; read them
+With `roots`, a session also reads its own root's stats at `<prefix>/node/<node>`
+under that root with a grant on the root alone, and sees nothing of other roots;
+leave it off when a root's members should not see its traffic.
+[Stats](/concept/stats#root-broadcasts) describes the paths, tracks, and encodings; read them
 with the [`moq-stats`](https://docs.rs/moq-stats) crate.
 
 ## Shutdown

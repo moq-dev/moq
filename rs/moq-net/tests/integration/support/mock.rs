@@ -493,6 +493,10 @@ struct Side {
 	probe: moq_net::transport::Probe,
 	/// What [`poll::Session::receive_window`] reports instead of the memory transport's, if set.
 	receive_window: Mutex<Option<Option<moq_net::transport::ReceiveWindow>>>,
+	/// Whether this side's own close goes unconfirmed; see [`MockSession::withhold_close_confirmation`].
+	withhold_close: AtomicBool,
+	/// Whether this side closed the transport.
+	closed_here: AtomicBool,
 }
 
 /// The connection statistics a [`MockSession`] reports. Unavailable by default.
@@ -659,10 +663,14 @@ impl poll::Session for MockSession {
 	}
 
 	fn close(&self, code: u32, reason: &str) {
+		self.side.closed_here.store(true, Ordering::Relaxed);
 		self.inner.close(code, reason);
 	}
 
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Self::Error> {
+		if self.side.withhold_close.load(Ordering::Relaxed) && self.side.closed_here.load(Ordering::Relaxed) {
+			return Poll::Pending;
+		}
 		self.inner.poll_closed(waiter)
 	}
 
@@ -756,6 +764,12 @@ impl MockSession {
 		self.side.panic_on_stats.store(true, Ordering::Relaxed);
 	}
 
+	/// Never confirm a close this side makes, as a WebTransport close waits for a peer
+	/// that is gone to acknowledge its capsule.
+	pub fn withhold_close_confirmation(&self) {
+		self.side.withhold_close.store(true, Ordering::Relaxed);
+	}
+
 	/// Drop the FIN of the bidi streams this side opens, keeping them open.
 	pub fn withhold_bidi_fins(&self) {
 		self.side.withhold_bidi_fins.store(true, Ordering::Relaxed);
@@ -803,6 +817,24 @@ impl MockSession {
 			let _ = link.ready_uni.try_push(stream);
 		}
 		held.len()
+	}
+
+	/// How many uni streams this side opened are held back.
+	pub fn held_unis(&self) -> usize {
+		let link = &self.side.out;
+		link.settle();
+		link.held_uni.lock().unwrap().as_ref().map_or(0, Vec::len)
+	}
+
+	/// Deliver only the oldest held uni stream, and keep holding the rest.
+	pub fn release_oldest_uni(&self) {
+		let link = &self.side.out;
+		link.settle();
+		let mut held = link.held_uni.lock().unwrap();
+		let held = held.as_mut().expect("not holding");
+		if !held.is_empty() {
+			let _ = link.ready_uni.try_push(held.remove(0));
+		}
 	}
 
 	/// Deliver the held uni streams newest first, and stop holding.
@@ -994,6 +1026,8 @@ pub fn create_mock_session_pair(config: memory::Config) -> (MockSession, MockSes
 			wire: Default::default(),
 			probing: Default::default(),
 			probe: Default::default(),
+			withhold_close: Default::default(),
+			closed_here: Default::default(),
 		}),
 	};
 

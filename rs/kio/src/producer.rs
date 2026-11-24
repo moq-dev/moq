@@ -62,6 +62,24 @@ impl<T> Producer<T> {
 		consumer::consume(&self.state, &self.counts)
 	}
 
+	/// Join the consumers already reading, or `None` when there are none.
+	///
+	/// Unlike checking [`wanted`](Self::wanted) and then calling [`consume`](Self::consume),
+	/// this never takes the count from zero, so once it reads zero it stays there until a
+	/// `consume`: a holder that saw the channel unwanted never finds it wanted again.
+	pub fn join(&self) -> Option<Consumer<T>> {
+		self.counts
+			.consumers
+			.fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+				(count > 0).then(|| count + 1)
+			})
+			.ok()?;
+		Some(Consumer {
+			state: self.state.clone(),
+			counts: self.counts.clone(),
+		})
+	}
+
 	/// Acquire mutable access only while nothing is consuming the channel.
 	///
 	/// The count is read under the lock [`consume`](Self::consume) takes when
@@ -287,6 +305,21 @@ pub enum Unwanted<'a, T> {
 #[cfg(test)]
 mod test {
 	use super::*;
+
+	/// `join` adds to the readers present and never revives a channel they all left.
+	#[test]
+	fn join_only_while_wanted() {
+		let producer = Producer::<u32>::default();
+		assert!(producer.join().is_none(), "nobody reads yet");
+
+		let first = producer.consume();
+		let joined = producer.join().expect("a reader is present");
+		drop(first);
+		assert!(producer.wanted(), "the joined reader keeps it wanted");
+		drop(joined);
+		assert!(producer.join().is_none(), "every reader left");
+		assert!(!producer.wanted());
+	}
 
 	#[test]
 	fn poll_gates_on_predicate_then_writes() {

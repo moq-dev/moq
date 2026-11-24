@@ -20,7 +20,7 @@ use crate::{
 	coding::{BufMutExt, FrameBuf},
 	connection::ConnectionTag,
 	connection::rate::Bucket,
-	connection::stats::{CreditStats, FrameStats, SendCreditStats},
+	connection::stats::{CreditStats, FrameStats, HeldStats, SendCreditStats},
 	connection::waits::{Wait, Waits},
 	frame::{self, FrameStruct, StreamMetaVec},
 	transport_parameters::TransportParameters,
@@ -153,6 +153,31 @@ pub(crate) struct StreamsState {
 	pub(super) data_blocked_limit: Option<u64>,
 	/// Episodes and time a writer spent blocked on the peer's connection credit
 	pub(super) send_stalls: SendStalls,
+	/// Time the peer had the receive window spent while eviction waited
+	pub(super) holds: Holds,
+}
+
+/// The receiver's holds: the peer has spent the whole window and the stuck pass evicts nothing,
+/// waiting on a reader or on an evicted stream's stop
+///
+/// The last pass names the holder, and time accrues whenever the connection is driven with a
+/// `now` while the window stays spent, so it trails a hold in progress by at most one call.
+#[derive(Debug, Default)]
+pub(super) struct Holds {
+	/// What the last stuck pass waited on, if it found the window spent
+	pub(super) by: Option<Holder>,
+	/// The holder at the last `now`, up to which `stats` counts
+	since: Option<(Instant, Holder)>,
+	stats: HeldStats,
+}
+
+/// What holds eviction off while the receive window is spent
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Holder {
+	/// A reader may progress without new credit
+	Readers,
+	/// An evicted reader has yet to stop its stream
+	Evicted,
 }
 
 /// The sender's waits on the peer's connection-level credit (`MAX_DATA`)
@@ -239,6 +264,7 @@ impl StreamsState {
 			open_refused: [false, false],
 			data_blocked_limit: None,
 			send_stalls: SendStalls::default(),
+			holds: Holds::default(),
 		}
 	}
 
@@ -268,8 +294,10 @@ impl StreamsState {
 	/// Ensure we have space for at least a full flow control window of remotely-initiated streams
 	/// to be open, and notify the peer if the window has moved
 	fn ensure_remote_streams(&mut self, dir: Dir) {
-		let new_count =
-			self.max_concurrent_remote_count[dir as usize].saturating_sub(self.allocated_remote_count[dir as usize]);
+		// RFC 9000 caps a stream count at 2^60: a peer refuses a larger MAX_STREAMS.
+		let new_count = self.max_concurrent_remote_count[dir as usize]
+			.saturating_sub(self.allocated_remote_count[dir as usize])
+			.min(MAX_STREAM_COUNT.saturating_sub(self.max_remote[dir as usize]));
 		self.allocated_remote_count[dir as usize] += new_count;
 		self.max_remote[dir as usize] += new_count;
 	}
@@ -533,11 +561,12 @@ impl StreamsState {
 		true
 	}
 
-	/// Accrue the time a writer has waited on the peer's connection credit, up to `now`
+	/// Accrue the time a writer has waited on the peer's connection credit, and the time the peer
+	/// had the receive window spent while eviction waited, up to `now`
 	///
 	/// Called wherever the connection is driven with a `now`: after it handles what it received
-	/// or a timeout, before it transmits, and once it closes, which ends a wait.
-	pub(crate) fn observe_send_credit(&mut self, now: Instant, closed: bool) {
+	/// or a timeout, before it transmits, and once it closes, which ends both.
+	pub(crate) fn observe_credit(&mut self, now: Instant, closed: bool) {
 		let waiting = !closed && self.data_sent == self.max_data && !self.connection_blocked.is_empty();
 		let stalls = &mut self.send_stalls;
 		if let Episode::Since(since) = stalls.episode {
@@ -547,6 +576,19 @@ impl StreamsState {
 			Episode::Blocked | Episode::Since(_) if waiting => Episode::Since(now),
 			_ => Episode::Clear,
 		};
+
+		let holds = &mut self.holds;
+		if let Some((since, holder)) = holds.since {
+			let total = match holder {
+				Holder::Readers => &mut holds.stats.readers,
+				Holder::Evicted => &mut holds.stats.evicted,
+			};
+			*total += now.saturating_duration_since(since);
+		}
+		// Only an arrival spends the window, and every arrival reruns the stuck pass, so a
+		// spent window's holder is the last pass's.
+		let spent = !closed && self.window_max_data <= self.data_recvd;
+		holds.since = holds.by.filter(|_| spent).map(|holder| (now, holder));
 	}
 
 	pub(crate) fn send_credit_stats(&self) -> SendCreditStats {
@@ -1319,6 +1361,7 @@ impl StreamsState {
 			available: self.local_max_data.saturating_sub(self.data_recvd),
 			evicted: self.evicted,
 			peak_spent: self.peak_spent,
+			held: self.holds.stats,
 		}
 	}
 
@@ -1879,27 +1922,27 @@ mod tests {
 
 		// Taking the last credited byte is no wait.
 		assert_eq!(write(&mut server, b"abcd"), Poll::Ready(Ok(4)));
-		server.observe_send_credit(at(1), false);
+		server.observe_credit(at(1), false);
 		assert_eq!(stats(&server), (0, Duration::ZERO));
 
 		assert_eq!(write(&mut server, b"e"), Poll::Pending);
 		assert_eq!(stats(&server), (1, Duration::ZERO));
-		server.observe_send_credit(at(2), false);
+		server.observe_credit(at(2), false);
 		// Retrying at the same limit continues the episode.
 		assert_eq!(write(&mut server, b"e"), Poll::Pending);
-		server.observe_send_credit(at(5), false);
+		server.observe_credit(at(5), false);
 		assert_eq!(stats(&server), (1, Duration::from_secs(3)));
 
 		server.received_max_data(8u32.into());
-		server.observe_send_credit(at(6), false);
-		server.observe_send_credit(at(9), false);
+		server.observe_credit(at(6), false);
+		server.observe_credit(at(9), false);
 		assert_eq!(stats(&server), (1, Duration::from_secs(4)));
 
 		assert_eq!(write(&mut server, b"efghi"), Poll::Ready(Ok(4)));
 		assert_eq!(write(&mut server, b"i"), Poll::Pending);
-		server.observe_send_credit(at(10), false);
-		server.observe_send_credit(at(12), true);
-		server.observe_send_credit(at(20), true);
+		server.observe_credit(at(10), false);
+		server.observe_credit(at(12), true);
+		server.observe_credit(at(20), true);
 		assert_eq!(stats(&server), (2, Duration::from_secs(6)));
 	}
 
@@ -1938,8 +1981,8 @@ mod tests {
 		assert_eq!(written, Poll::Ready(Ok(4)));
 		let written = stream(&mut server, &mut pending, first).try_write(&mut &b"e"[..]);
 		assert_eq!(written, Poll::Pending);
-		server.observe_send_credit(at(1), false);
-		server.observe_send_credit(at(2), false);
+		server.observe_credit(at(1), false);
+		server.observe_credit(at(2), false);
 		assert_eq!(server.send_credit_stats().stalls, 0);
 		assert_eq!(server.send_credit_stats().stalled, Duration::ZERO);
 
@@ -1948,10 +1991,10 @@ mod tests {
 		let written = stream(&mut server, &mut pending, second).try_write(&mut &b"x"[..]);
 		assert_eq!(written, Poll::Pending);
 		stream(&mut server, &mut pending, first).reset(0u32.into()).unwrap();
-		server.observe_send_credit(at(3), false);
+		server.observe_credit(at(3), false);
 		stream(&mut server, &mut pending, second).reset(0u32.into()).unwrap();
-		server.observe_send_credit(at(5), false);
-		server.observe_send_credit(at(9), false);
+		server.observe_credit(at(5), false);
+		server.observe_credit(at(9), false);
 		assert_eq!(server.send_credit_stats().stalls, 1);
 		assert_eq!(server.send_credit_stats().stalled, Duration::from_secs(2));
 	}
@@ -1990,14 +2033,14 @@ mod tests {
 		assert_eq!(written, Poll::Ready(Ok(4)));
 		let written = stream(&mut server, &mut pending, first).try_write(&mut &b"e"[..]);
 		assert_eq!(written, Poll::Pending);
-		server.observe_send_credit(at(1), false);
+		server.observe_credit(at(1), false);
 		stream(&mut server, &mut pending, first).reset(0u32.into()).unwrap();
-		server.observe_send_credit(at(2), false);
+		server.observe_credit(at(2), false);
 
 		let written = stream(&mut server, &mut pending, second).try_write(&mut &b"x"[..]);
 		assert_eq!(written, Poll::Pending);
-		server.observe_send_credit(at(4), false);
-		server.observe_send_credit(at(7), false);
+		server.observe_credit(at(4), false);
+		server.observe_credit(at(7), false);
 		assert_eq!(server.send_credit_stats().stalls, 2);
 		assert_eq!(server.send_credit_stats().stalled, Duration::from_secs(4));
 	}
@@ -4537,10 +4580,16 @@ mod tests {
 	}
 
 	/// Bytes a reader took outlive an eviction until it stops the stream, so their credit
-	/// returns only then, and nothing else is evicted meanwhile.
+	/// returns only then, and nothing else is evicted meanwhile: the window is held by the
+	/// evicted reader until it stops.
 	#[test]
 	fn evicted_taken_bytes_keep_credit_until_stop() {
 		const WINDOW: u64 = 1000;
+		let at = |secs| Instant::ZERO.saturating_add(Duration::from_secs(secs));
+		let held = |client: &StreamsState| {
+			let held = client.credit_stats().held;
+			(held.readers, held.evicted)
+		};
 		let (mut client, ids) = stuck(WINDOW);
 		let mut readers = Readers::park(&mut client, &ids);
 		let mut pending = Retransmits::default();
@@ -4560,6 +4609,9 @@ mod tests {
 		assert_eq!(client.credit_stats().leased, 2 * WINDOW, "taken credit stays held");
 		assert!(matches!(wait(&mut client, ids[0], 1), Poll::Pending));
 		assert_eq!(client.credit_stats().evicted, 1, "waits for the stop");
+		client.observe_credit(at(1), false);
+		client.observe_credit(at(3), false);
+		assert_eq!(held(&client), (Duration::ZERO, Duration::from_secs(2)));
 		// A reader watching for a reset instead of reading learns of it too.
 		assert_eq!(
 			recv(&mut client, &mut pending, ids[1]).received_reset(),
@@ -4580,6 +4632,10 @@ mod tests {
 		let _ = stop(&mut client, ids[0], 0);
 		assert_eq!(client.credit_stats().leased, 0);
 		assert_eq!(client.local_max_data, max_data + WINDOW);
+		// The first look after the last stop ends the hold, up to which it counts.
+		client.observe_credit(at(4), false);
+		client.observe_credit(at(8), false);
+		assert_eq!(held(&client), (Duration::ZERO, Duration::from_secs(3)));
 	}
 
 	/// Once the peer has spent the window and every reader waits for more than it has, the
@@ -4770,18 +4826,29 @@ mod tests {
 	}
 
 	/// A stream nobody has leased yet may have a reader about to run, so it holds eviction off
-	/// until its reader looks.
+	/// until its reader looks, and the window counts as held by readers meanwhile.
 	#[test]
 	fn unleased_stream_holds_eviction_off() {
 		const WINDOW: u64 = 1000;
+		let at = |secs| Instant::ZERO.saturating_add(Duration::from_secs(secs));
+		let held = |client: &StreamsState| {
+			let held = client.credit_stats().held;
+			(held.readers, held.evicted)
+		};
 		let (mut client, [waiting, fresh]) = stuck(WINDOW);
 		data(&mut client, waiting, 0, WINDOW as usize, false);
 		assert_eq!(lease(&mut client, waiting), WINDOW as usize);
+		// Half the window spent holds nothing.
+		client.observe_credit(at(1), false);
 		data(&mut client, fresh, 0, WINDOW as usize, false);
 		let mut pending = Retransmits::default();
 		recv(&mut client, &mut pending, fresh).set_priority(-1);
 		assert!(matches!(wait(&mut client, waiting, 2000), Poll::Pending));
 		assert_eq!(client.credit_stats().evicted, 0);
+		assert_eq!(held(&client), (Duration::ZERO, Duration::ZERO));
+		client.observe_credit(at(2), false);
+		client.observe_credit(at(5), false);
+		assert_eq!(held(&client), (Duration::from_secs(3), Duration::ZERO));
 
 		assert_eq!(lease(&mut client, fresh), WINDOW as usize);
 		let (blocked, transmit) = wait_transmit(&mut client, fresh, 2000);
@@ -4789,6 +4856,25 @@ mod tests {
 		assert!(transmit);
 		assert_eq!(wait(&mut client, fresh, 1), Poll::Ready(Err(recv::Error::Evicted)));
 		assert_eq!(lease(&mut client, waiting), WINDOW as usize);
+		// The eviction freed the window; it took nothing, so nothing holds the window after.
+		client.observe_credit(at(6), false);
+		client.observe_credit(at(9), false);
+		assert_eq!(held(&client), (Duration::from_secs(4), Duration::ZERO));
+	}
+
+	/// A close ends a hold on the spent window, which counts up to the close.
+	#[test]
+	fn close_ends_a_hold() {
+		const WINDOW: u64 = 1000;
+		let at = |secs| Instant::ZERO.saturating_add(Duration::from_secs(secs));
+		let (mut client, ids) = stuck(WINDOW);
+		for id in ids {
+			data(&mut client, id, 0, WINDOW as usize, false);
+		}
+		client.observe_credit(at(1), false);
+		client.observe_credit(at(3), true);
+		client.observe_credit(at(10), true);
+		assert_eq!(client.credit_stats().held.readers, Duration::from_secs(2));
 	}
 
 	/// An evicted stream whose final size is already known is freed by its reader's stop, which
@@ -5238,6 +5324,60 @@ mod tests {
 
 		assert_eq!(client.received_max_stream_data(id, 1), Ok(()));
 		assert!(client.received_stop_sending(id, 0u32.into()).is_ok());
+	}
+
+	/// A stream window as large as a varint, added to what the reader took, still encodes.
+	#[test]
+	fn max_stream_data_stays_a_varint() {
+		let mut server = StreamsState::new(
+			Side::Server,
+			1u32.into(),
+			1u32.into(),
+			1024 * 1024,
+			VarInt::MAX,
+			VarInt::MAX,
+		);
+		let id = StreamId::new(Side::Client, Dir::Uni, 0);
+		data(&mut server, id, 0, 1, false);
+		assert_eq!(Streams::new(&mut server, false).accept(Dir::Uni), Some(id));
+		let mut pending = Retransmits::default();
+		let mut stream = recv(&mut server, &mut pending, id);
+		let mut chunks = stream.read().unwrap();
+		assert_eq!(chunks.next(1).unwrap().unwrap().bytes.len(), 1);
+		chunks.finalize();
+
+		pending.max_stream_data.insert(id);
+		server.write_control_frames(
+			&mut Vec::new(),
+			&mut pending,
+			&mut ThinRetransmits::default(),
+			&mut FrameStats::default(),
+			1200,
+		);
+		let rs = server.recv[&id].as_ref().unwrap();
+		assert_eq!(
+			rs.max_stream_data(VarInt::MAX.into_inner()),
+			(VarInt::MAX.into_inner(), false)
+		);
+	}
+
+	/// Streams the peer frees never raise MAX_STREAMS past the 2^60 a peer accepts.
+	#[test]
+	fn max_streams_stays_under_the_stream_count_cap() {
+		let cap = VarInt::from_u64(MAX_STREAM_COUNT).unwrap();
+		let mut server = StreamsState::new(Side::Server, cap, cap, 1024 * 1024, VarInt::MAX, VarInt::MAX);
+		let mut pending = Retransmits::default();
+		for index in 0..2 {
+			let id = StreamId::new(Side::Client, Dir::Uni, index);
+			data(&mut server, id, 0, 1, true);
+			assert_eq!(Streams::new(&mut server, false).accept(Dir::Uni), Some(id));
+			let mut stream = recv(&mut server, &mut pending, id);
+			let mut chunks = stream.read().unwrap();
+			assert_eq!(chunks.next(1).unwrap().unwrap().bytes.len(), 1);
+			assert!(chunks.next(1).unwrap().is_none());
+			chunks.finalize();
+		}
+		assert_eq!(server.max_remote[Dir::Uni as usize], MAX_STREAM_COUNT);
 	}
 
 	#[test]

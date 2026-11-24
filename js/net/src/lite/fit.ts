@@ -132,8 +132,8 @@ export function fit(
 		(gap) => avoid.some((run) => run.start < gap.end && gap.start < run.end),
 	);
 
-	// The other ranges have no start, so no gap between them is measured: when even one span per
-	// list leaves them no room, they collapse to the one range covering them.
+	// The other ranges have no time start, so no gap between them is measured: when even one span per
+	// list leaves them no room, they collapse to one range per kind covering them.
 	const costOf = (ranges: readonly WireRange[]) =>
 		ranges.reduce((sum, range) => sum + (cost(budget, range) ?? Number.POSITIVE_INFINITY), 0);
 	if (costOf(others) + spans.least() + runs.least() > budget.bytes) others = collapse(others);
@@ -265,15 +265,37 @@ function bySpan(a: Span, b: Span): number {
 }
 
 /**
- * One range covering every range with no start, from where they start to the latest end. A time
- * or absolute start is a span, so only ranges with no start are left, and they all start at the
- * same group.
+ * One range per kind of start covering every range of that kind, from the earliest start to the
+ * latest end. A time or absolute start is a span, so only ranges with no start and live joins are
+ * left: those with no start all start at the same group, and the join reaching furthest back,
+ * under the widest max, delivers what each of the others does. Mirrors the Rust `collapse`.
  */
 function collapse(ranges: readonly WireRange[]): WireRange[] {
-	const [first, ...rest] = ranges;
-	if (!first) return [];
-	const cover: WireRange = { ...first };
-	for (const range of rest) {
+	const kinds: WireRange[] = [];
+	const kind = (range: WireRange) => (range.start?.live ? 1 : range.start?.joined ? 2 : 0);
+	const widest = (a: number | null, b: number | null) => (a === null || b === null ? null : Math.max(a, b));
+	for (const range of ranges) {
+		const live = range.start?.live;
+		const joined = range.start?.joined;
+		const cover = kinds.find((cover) => kind(cover) === kind(range));
+		if (!cover) {
+			kinds.push({ ...range });
+			continue;
+		}
+		// The join reaching furthest back, none past one with no lag limit, under the widest max,
+		// delivers what each of the others does.
+		const held = cover.start?.live;
+		if (held !== undefined && live !== undefined)
+			cover.start = { live: { min: widest(held.min, live.min), max: widest(held.max, live.max) } };
+		// The join placed earliest, under the widest max.
+		const placed = cover.start?.joined;
+		if (placed !== undefined && joined !== undefined) {
+			const earlier =
+				joined.absolute < placed.absolute ||
+				(joined.absolute === placed.absolute && joined.frame < placed.frame);
+			const at = earlier ? joined : placed;
+			cover.start = { joined: { absolute: at.absolute, frame: at.frame, max: widest(placed.max, joined.max) } };
+		}
 		const [a, b] = [cover.end, range.end];
 		if (a?.absolute !== undefined && b?.absolute !== undefined)
 			cover.end = { absolute: max(a.absolute, b.absolute) };
@@ -281,5 +303,5 @@ function collapse(ranges: readonly WireRange[]): WireRange[] {
 		// An exclusive and an inclusive end, or an open one: follow the edge.
 		else delete cover.end;
 	}
-	return [cover];
+	return kinds;
 }

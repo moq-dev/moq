@@ -102,13 +102,7 @@ pub(crate) struct Relay {
 /// Serve `cluster` on `addr` through `auth`: each session the server accepts runs a relay
 /// [`Connection`] on its own simulator task.
 pub(crate) async fn serve(network: &Network, addr: SocketAddr, cluster: &cluster::Cluster, auth: &auth::Auth) -> Relay {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
-	let mut config = moq_tokio::server::Config::default();
-	config.listen.bind = Some(moq_tokio::listen::Bind::Addr(addr));
-	config.listen.tls.generate = vec!["localhost".into()];
-	config.sim = Some(network.host(addr.ip()));
-	let mut listener = config.init().expect("init server").listen().await.expect("listen");
-	let fingerprints = listener.certificates().fingerprints();
+	let (mut listener, relay) = listen(network, addr).await;
 	let (cluster, auth) = (cluster.clone(), auth.clone());
 	drop(kio::clock::sim::spawn(async move {
 		while let Ok(request) = listener.accept().await {
@@ -116,7 +110,63 @@ pub(crate) async fn serve(network: &Network, addr: SocketAddr, cluster: &cluster
 			drop(kio::clock::sim::spawn(Connection::new(request, cluster, auth).run()));
 		}
 	}));
-	Relay { addr, fingerprints }
+	relay
+}
+
+/// A QUIC listener on `addr`, with a generated certificate
+async fn listen(network: &Network, addr: SocketAddr) -> (moq_tokio::Listener, Relay) {
+	let _ = rind_rustls::default_provider().unwrap().install_default();
+	let mut config = moq_tokio::server::Config::default();
+	config.listen.bind = Some(moq_tokio::listen::Bind::Addr(addr));
+	config.listen.tls.generate = vec!["localhost".into()];
+	config.sim = Some(network.host(addr.ip()));
+	let listener = config.init().expect("init server").listen().await.expect("listen");
+	let fingerprints = listener.certificates().fingerprints();
+	(listener, Relay { addr, fingerprints })
+}
+
+/// A drain deadline does not wait for a WebTransport peer that vanished to acknowledge
+/// the close capsule, which it never will, until the idle timeout. The listener closes
+/// after the drain, as `Relay::run`'s does.
+#[test]
+fn a_drain_waits_on_no_vanished_peer() {
+	memory::run(|| async {
+		let network = Network::new(0);
+		let addr = SocketAddr::new(ip(1), PORT);
+		let auth = memory::public(&[""], &[], &[]);
+		let cluster = memory::start(memory::cluster(), moq_tokio::connect::Config::default()).await;
+		let (trigger, observer) = moq_relay::shutdown::Observer::new(Duration::ZERO);
+		let (mut listener, relay) = listen(&network, addr).await;
+		let served = kio::clock::sim::spawn(async move {
+			let accept = async {
+				while let Ok(request) = listener.accept().await {
+					let connection =
+						Connection::new(request, cluster.clone(), auth.clone()).with_shutdown(observer.clone());
+					drop(kio::clock::sim::spawn(connection.run()));
+				}
+			};
+			futures::future::select(std::pin::pin!(accept), std::pin::pin!(observer.drained())).await;
+			listener.close().await;
+		});
+
+		let url: url::Url = format!("https://{addr}/").parse().unwrap();
+		let _vanished = client(&network, PUBLISHER, &relay)
+			.with_reconnect(false)
+			.connect(url)
+			.established()
+			.await
+			.expect("connect");
+		let gone = SocketAddr::new(PUBLISHER, CLIENT_PORT);
+		for (from, to) in [(gone, addr), (addr, gone)] {
+			network.path(from, to, |path| path.link.loss = 1.0);
+		}
+
+		trigger.start();
+		kio::clock::timeout(Duration::from_secs(1), served)
+			.await
+			.expect("the drain waited on the vanished peer")
+			.unwrap();
+	});
 }
 
 /// Publish [`GROUPS`] groups to `publish` from [`PUBLISHER`], subscribe from `subscribe` on
@@ -170,7 +220,12 @@ async fn deliver(network: &Network, publish: &Relay, subscribe: &Relay) -> Vec<u
 			.unwrap()
 			// A budget spanning the run, so recovery has to deliver every group, however late.
 			.subscribe(
-				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(TIMEOUT)),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(TIMEOUT),
+						max: Some(TIMEOUT),
+					},
+				)]),
 			)
 			.await
 			.unwrap();
@@ -333,8 +388,12 @@ async fn bulk(tracks: usize, chunk: usize, read: usize) {
 				.track(&name)
 				.unwrap()
 				.subscribe(
-					moq_net::track::Subscription::default()
-						.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(600))),
+					moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+						moq_net::track::Start::Live {
+							min: Some(Duration::from_secs(600)),
+							max: Some(Duration::from_secs(600)),
+						},
+					)]),
 				)
 				.await
 				.unwrap();

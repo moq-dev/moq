@@ -1,7 +1,8 @@
 #![cfg(feature = "async")]
 
-//! Relays forward their subscribers' delay: the most tolerant negotiated max, and the largest stated min.
+//! Relays forward their subscribers' live joins: the most tolerant max age wins.
 
+use crate::WithMax as _;
 use std::time::Duration;
 
 use moq_net::{Version, origin, track};
@@ -11,9 +12,22 @@ use crate::support::AtStart;
 use crate::support::harness::{peer, spawn};
 
 fn origin(hop: u64) -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (origin, driver) = origin::Producer::new(config);
 	spawn(driver);
-	origin.with_proxy(true)
+	origin
+}
+
+/// The widest max age any live join of `subscription` asks, `Duration::MAX` for no limit.
+fn widest(subscription: &track::Subscription) -> Duration {
+	(subscription.ranges.iter())
+		.filter_map(|range| match range.start {
+			track::Start::Live { max, .. } => Some(max.unwrap_or(Duration::MAX)),
+			_ => None,
+		})
+		.max()
+		.unwrap_or_default()
 }
 
 async fn budget(track: &mut track::Producer, millis: u64, version: Version) {
@@ -21,7 +35,7 @@ async fn budget(track: &mut track::Producer, millis: u64, version: Version) {
 		loop {
 			if track
 				.subscription()
-				.is_some_and(|subscription| subscription.delay.max == Some(Duration::from_millis(millis)))
+				.is_some_and(|subscription| widest(&subscription) == Duration::from_millis(millis))
 			{
 				return;
 			}
@@ -65,9 +79,7 @@ async fn relay_forwards_the_most_tolerant_subscriber_max_age() {
 			.unwrap()
 			.unwrap();
 		let cache = remote.track("catalog").unwrap();
-		let prefs = |millis| {
-			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_millis(millis)))
-		};
+		let prefs = |millis| track::Subscription::default().with_max(Duration::from_millis(millis));
 		let mut short = cache.subscribe(prefs(250)).await.unwrap();
 		budget(&mut source, 250, version).await;
 		let tolerant = cache.subscribe(prefs(2000)).await.unwrap();
@@ -86,91 +98,4 @@ async fn relay_forwards_the_most_tolerant_subscriber_max_age() {
 			b"catalog".as_slice()
 		);
 	}
-}
-
-async fn min_delay(track: &mut track::Producer, min: Option<Duration>) {
-	settles(track, |subscription| subscription.delay.min == min).await;
-}
-
-async fn settles(track: &mut track::Producer, wanted: impl Fn(&track::Subscription) -> bool) {
-	kio::clock::timeout(Duration::from_secs(5), async {
-		loop {
-			if track.subscription().is_some_and(|subscription| wanted(&subscription)) {
-				return;
-			}
-			track.subscription_changed().await.unwrap();
-		}
-	})
-	.await
-	.unwrap_or_else(|_| panic!("publisher has {:?}", track.subscription()));
-}
-
-/// A lite-07 relay forwards the largest stated min delay upstream, so its copy reaches back for
-/// the reader that buffers most. A lite-06 subscriber with no start, whose wire cannot state a
-/// min, counts as unstated, which reaches back furthest, until it leaves.
-#[kio::test]
-async fn relay_forwards_the_largest_stated_min_delay() {
-	let lite07: Version = "moq-lite-07-wip".parse().unwrap();
-	let lite06: Version = "moq-lite-06".parse().unwrap();
-	let publisher = origin(1);
-	let relay = origin(2);
-	let modern = origin(3);
-	let legacy = origin(4);
-	let _upstream = peer(lite07, &publisher, &relay).await;
-	let _modern = peer(lite07, &relay, &modern).await;
-	let _legacy = peer(lite06, &relay, &legacy).await;
-	let broadcast = publisher
-		.route("live", moq_net::origin::RouteOptions::hidden())
-		.unwrap();
-	let mut source = broadcast
-		.broadcast()
-		.create_track(
-			"catalog",
-			track::Info::default().with_timescale(moq_net::Timescale::MILLI),
-		)
-		.unwrap();
-	let mut group = source.append_next().unwrap();
-	group.write_frame(group.at_start(), b"catalog").unwrap();
-	group.finish().unwrap();
-	broadcast.announce().unwrap();
-
-	let cache = |origin: &origin::Producer| {
-		let origin = origin.clone();
-		async move {
-			let remote = origin
-				.consume()
-				.follow("live", None)
-				.unwrap()
-				.available()
-				.await
-				.unwrap()
-				.unwrap();
-			remote.track("catalog").unwrap()
-		}
-	};
-	let prefs = |min: Option<u64>| {
-		track::Subscription::default().with_delay(track::Delay::default().with_min(min.map(Duration::from_millis)))
-	};
-
-	let modern = cache(&modern).await;
-	let fast = modern.subscribe(prefs(Some(100))).await.unwrap();
-	min_delay(&mut source, Some(Duration::from_millis(100))).await;
-	let slow = modern.subscribe(prefs(Some(500))).await.unwrap();
-	min_delay(&mut source, Some(Duration::from_millis(500))).await;
-	// Its wire carries no min, so the relay holds it unstated.
-	let unstated = cache(&legacy).await.subscribe(prefs(Some(0))).await.unwrap();
-	min_delay(&mut source, None).await;
-	drop(unstated);
-	min_delay(&mut source, Some(Duration::from_millis(500))).await;
-	drop(slow);
-	// A Min Age places only a range with no start: once the fast reader's join resolved, its
-	// range names the group it started at, and the relay forwards no Min Age for it.
-	let fast_min = Some(Duration::from_millis(100));
-	settles(&mut source, |subscription| match subscription.delay.min {
-		None => subscription.ranges.iter().all(|range| range.start.is_some()),
-		min => min == fast_min,
-	})
-	.await;
-	drop(fast);
-	min_delay(&mut source, None).await;
 }

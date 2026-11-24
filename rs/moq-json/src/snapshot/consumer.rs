@@ -26,12 +26,12 @@ pub struct Config {
 	/// [`Subscription::priority`](moq_net::track::Subscription::priority).
 	pub priority: i8,
 
-	/// The reader's playout delay behind the live edge, the subscription's
-	/// [`Delay`](moq_net::track::Delay) `min` and `max`.
+	/// The reader's playout delay behind the live edge: the subscription's
+	/// [`Start::Live`](moq_net::track::Start::Live) join, as both its `min` and its `max`.
 	///
 	/// Zero (the default) skips a snapshot the moment a newer one arrives. A reader that holds each
 	/// snapshot until media reaches its timestamp sets its delay, so a superseded snapshot it may
-	/// still need stays deliverable that long and [`Consumer::next`] yields it.
+	/// still need stays deliverable that long and [`Consumer::poll_next`] yields it.
 	pub delay: std::time::Duration,
 }
 
@@ -43,7 +43,7 @@ pub struct Config {
 /// directly.
 ///
 /// A snapshot is superseded the moment a newer one exists, so by default the consumer subscribes
-/// itself at a zero [`max`](moq_net::track::Delay::max) delay and keeps that subscription to
+/// itself at [`Start::LATEST`](moq_net::track::Start::LATEST) and keeps that subscription to
 /// itself: a group is skipped once a newer one arrives, and a lower group the subscription still
 /// owes never holds up a newer one. [`Config::delay`] keeps superseded groups for a reader that
 /// applies each snapshot at its timestamp.
@@ -68,11 +68,10 @@ impl<T: DeserializeOwned> Consumer<T> {
 	pub fn new(track: moq_net::track::Consumer, config: Config) -> Self {
 		let subscription = moq_net::track::Subscription::default()
 			.with_priority(config.priority)
-			.with_delay(
-				moq_net::track::Delay::default()
-					.with_min(config.delay)
-					.with_max(config.delay),
-			);
+			.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
+				min: Some(config.delay),
+				max: Some(config.delay),
+			})]);
 		let name = track.name().to_string();
 		let mut track = Track::Subscribing(track.subscribe(subscription).into_inner());
 		// Join now when the track already resolves, as an in-process one does, so the publisher
@@ -230,7 +229,10 @@ mod subscription {
 		let _consumer = Consumer::<serde_json::Value>::new(track.consume(), config);
 		let subscription = track.subscription().expect("the consumer subscribed");
 		assert_eq!(subscription.priority, 5);
-		assert_eq!(subscription.delay.max, Some(std::time::Duration::ZERO));
+		assert_eq!(
+			subscription.ranges,
+			[moq_net::track::Range::from(moq_net::track::Start::LATEST)]
+		);
 	}
 
 	#[test]
@@ -246,8 +248,13 @@ mod subscription {
 		};
 		let _consumer = Consumer::<serde_json::Value>::new(track.consume(), config);
 		let subscription = track.subscription().expect("the consumer subscribed");
-		assert_eq!(subscription.delay.min, Some(delay));
-		assert_eq!(subscription.delay.max, Some(delay));
+		assert_eq!(
+			subscription.ranges,
+			[moq_net::track::Range::from(moq_net::track::Start::Live {
+				min: Some(delay),
+				max: Some(delay),
+			})]
+		);
 	}
 }
 

@@ -8,6 +8,7 @@ import { GRACE } from "../ledger.ts";
 import { createMockTransportPair, manual } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
+import { withMax } from "../subscription.test-util.ts";
 import { type GroupFlags, Group as GroupMessage } from "./object.ts";
 import { PublishDone } from "./publish.ts";
 import { NativeSession } from "./session.ts";
@@ -62,7 +63,12 @@ async function subscribed(largest?: bigint) {
 	const reader = subscriber
 		.consume(Path.from("room"))
 		.track("video")
-		.subscribe({ ranges: [{}], delay: { min: Duration.ZERO, max: Duration.millis(60_000) } });
+		.subscribe(
+			withMax({
+				ranges: [{ start: { live: { min: Duration.ZERO, max: Duration.ZERO } } }],
+				delay: { max: Duration.millis(60_000) },
+			}),
+		);
 
 	const peer = await Stream.accept(pair.client, VERSION);
 	if (!peer) throw new Error("the subscriber never opened a subscribe stream");

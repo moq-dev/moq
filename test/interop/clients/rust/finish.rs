@@ -145,11 +145,7 @@ async fn main() -> anyhow::Result<()> {
 				.track(name)?
 				.subscribe(Some(
 					moq_net::track::Subscription::default()
-						.with_delay(moq_net::track::Delay::default().with_min(None).with_max(args.timeout))
-						.with_ranges([moq_net::track::Range {
-							start: Some(0),
-							end: None,
-						}]),
+						.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Time(0))]),
 				))
 				.await?;
 			let format = moq_mux::catalog::hang::Container::try_from(config)?;

@@ -960,24 +960,24 @@ impl Finished {
 	}
 }
 
-/// How far back a subscription wants retained audio replayed. A live join, a range with no start
-/// and a stated min delay, starts that far behind the live edge, which a player states as its
-/// playout delay plus the codec's warmup, so that bounds it within the max delay. Any other range,
-/// or one with no start stating no min (an oldest reader, as moq-transport and moq-lite before 07
-/// carry), wants all its max delay keeps; `None` leaves the retention.
+/// How far back a subscription wants retained audio replayed. A live join
+/// ([`Start::Live`](moq_net::track::Start::Live) with no end) starts its lag behind the live edge,
+/// which a player states as its playout delay plus the codec's warmup, bounded by the join's own
+/// max, so when every range is one the furthest of those bounds it. Any other range is history,
+/// such as one from the oldest group (as moq-transport and moq-lite before 07 carry every join),
+/// which wants everything kept: `None` leaves the retention.
 #[cfg(any(feature = "capture", test))]
 fn replay_budget(subscription: &moq_net::track::Subscription) -> Option<std::time::Duration> {
-	let live = !subscription.ranges.is_empty()
-		&& subscription
-			.ranges
-			.iter()
-			.all(|range| range.start.is_none() && range.end.is_none());
-	let max = subscription.delay.max;
-	match (subscription.delay.min.filter(|_| live), max) {
-		(Some(min), Some(max)) => Some(min.min(max)),
-		(Some(min), None) => Some(min),
-		(None, max) => max,
-	}
+	let joins: Option<Vec<std::time::Duration>> = subscription
+		.ranges
+		.iter()
+		.map(|range| match (range.start, range.end) {
+			// Unbounded by both, it wants everything kept.
+			(moq_net::track::Start::Live { min, max }, None) => min.into_iter().chain(max).min(),
+			_ => None,
+		})
+		.collect();
+	joins?.into_iter().max()
 }
 
 #[cfg(test)]
@@ -1127,8 +1127,12 @@ mod tests {
 			.track("audio")
 			.unwrap()
 			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(Duration::from_secs(1)),
+						max: Some(Duration::from_secs(1)),
+					},
+				)]),
 			)
 			.await
 			.unwrap();
@@ -1167,33 +1171,21 @@ mod tests {
 
 	/// Replayed groups reach the track as fresh arrivals, so only the encoder can tell they are old:
 	/// a live viewer rejoining after seconds idle would otherwise receive all of them first. A live
-	/// join states how far back it plays as its min delay, which bounds the replay however far its
-	/// max delay reaches; a range with no start that states none (an oldest reader, as
-	/// moq-transport and moq-lite before 07 carry) is bounded by its max alone, as is a reader
-	/// asking for history from a time.
+	/// join states how far back it plays as its lag, which bounds the replay however far its max
+	/// reaches, and its max bounds the replay however far its lag reaches, as with a join a wire
+	/// before lite-07 makes of its one max age.
 	#[tokio::test(start_paused = true)]
-	async fn demand_replays_only_the_history_its_delay_wants() {
+	async fn demand_replays_only_the_history_its_live_join_wants() {
 		let budget = Duration::from_millis(130);
 		let long = Duration::from_secs(10);
-		let open = || vec![moq_net::track::Range::default()];
-		for (delay, ranges) in [
-			(moq_net::track::Delay::default().with_min(budget).with_max(long), open()),
-			(moq_net::track::Delay::default().with_min(None).with_max(budget), open()),
-			(moq_net::track::Delay::default().with_min(long).with_max(budget), open()),
-			// A reader reaching back for history from a time, such as an archive resuming, wants
-			// all its max delay keeps whatever min it states.
-			(
-				moq_net::track::Delay::default().with_min(long).with_max(budget),
-				vec![moq_net::track::Range {
-					start: Some(0),
-					end: None,
-				}],
-			),
-		] {
+		for (min, max) in [(budget, long), (long, budget)] {
 			replays_from(
-				moq_net::track::Subscription::default()
-					.with_delay(delay)
-					.with_ranges(ranges),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(min),
+						max: Some(max),
+					},
+				)]),
 			)
 			.await;
 		}
@@ -1296,8 +1288,12 @@ mod tests {
 			.track("audio")
 			.unwrap()
 			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60))),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(Duration::from_secs(60)),
+						max: Some(Duration::from_secs(60)),
+					},
+				)]),
 			)
 			.await
 			.unwrap();
@@ -1342,8 +1338,12 @@ mod tests {
 			.track("audio")
 			.unwrap()
 			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60))),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(Duration::from_secs(60)),
+						max: Some(Duration::from_secs(60)),
+					},
+				)]),
 			)
 			.await
 			.unwrap();
@@ -1575,8 +1575,12 @@ mod tests {
 					.track("audio")
 					.unwrap()
 					.subscribe(
-						moq_net::track::Subscription::default()
-							.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60))),
+						moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+							moq_net::track::Start::Live {
+								min: Some(Duration::from_secs(60)),
+								max: Some(Duration::from_secs(60)),
+							},
+						)]),
 					)
 					.await
 					.unwrap();
@@ -1649,8 +1653,12 @@ mod tests {
 				.track("audio")
 				.unwrap()
 				.subscribe(
-					moq_net::track::Subscription::default()
-						.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+					moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+						moq_net::track::Start::Live {
+							min: Some(Duration::from_secs(1)),
+							max: Some(Duration::from_secs(1)),
+						},
+					)]),
 				)
 				.await
 				.unwrap(),
@@ -1860,8 +1868,12 @@ mod tests {
 			.track("audio")
 			.unwrap()
 			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60))),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(Duration::from_secs(60)),
+						max: Some(Duration::from_secs(60)),
+					},
+				)]),
 			)
 			.await
 			.unwrap();
@@ -1994,8 +2006,12 @@ mod tests {
 			.track("audio")
 			.unwrap()
 			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60))),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(Duration::from_secs(60)),
+						max: Some(Duration::from_secs(60)),
+					},
+				)]),
 			)
 			.await
 			.unwrap();
@@ -2154,8 +2170,12 @@ mod tests {
 				.track("audio")
 				.unwrap()
 				.subscribe(
-					moq_net::track::Subscription::default()
-						.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+					moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+						moq_net::track::Start::Live {
+							min: Some(Duration::from_secs(1)),
+							max: Some(Duration::from_secs(1)),
+						},
+					)]),
 				)
 				.await
 				.unwrap();
@@ -2199,8 +2219,12 @@ mod tests {
 				.track("audio")
 				.unwrap()
 				.subscribe(
-					moq_net::track::Subscription::default()
-						.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+					moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+						moq_net::track::Start::Live {
+							min: Some(Duration::from_secs(1)),
+							max: Some(Duration::from_secs(1)),
+						},
+					)]),
 				)
 				.await
 				.unwrap();
@@ -2310,8 +2334,12 @@ mod tests {
 				.track("audio")
 				.unwrap()
 				.subscribe(
-					moq_net::track::Subscription::default()
-						.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+					moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+						moq_net::track::Start::Live {
+							min: Some(Duration::from_secs(1)),
+							max: Some(Duration::from_secs(1)),
+						},
+					)]),
 				)
 				.await
 				.unwrap();
@@ -2365,8 +2393,12 @@ mod tests {
 				.track("audio")
 				.unwrap()
 				.subscribe(
-					moq_net::track::Subscription::default()
-						.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+					moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+						moq_net::track::Start::Live {
+							min: Some(Duration::from_secs(1)),
+							max: Some(Duration::from_secs(1)),
+						},
+					)]),
 				)
 				.await
 				.unwrap();
@@ -2422,8 +2454,12 @@ mod tests {
 			.track("audio")
 			.unwrap()
 			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(Duration::from_secs(1)),
+						max: Some(Duration::from_secs(1)),
+					},
+				)]),
 			)
 			.await
 			.unwrap();
@@ -2483,8 +2519,12 @@ mod tests {
 			.track("audio")
 			.unwrap()
 			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(Duration::from_secs(1)),
+						max: Some(Duration::from_secs(1)),
+					},
+				)]),
 			)
 			.await
 			.unwrap();

@@ -35,7 +35,7 @@ Share `Media.Timebase(broadcast:)` through `ContainerInit` when several imports 
 source timeline; omitting it keeps an independent offset. A timebase belongs to its
 broadcast and does not keep it open. `ContainerProducer` takes chunks split anywhere,
 so a raw byte stream needs no other importer.
-`.fmp4` splits each fragment into one frame per sample.
+`.fmp4()` splits each fragment into one frame per sample.
 For arrival-order reads, decode each group from `TrackConsumer.recvGroup()` with
 `Media.GroupConsumer(group:container:)`; frames carry container media time as they land.
 
@@ -74,13 +74,13 @@ for try await event in try session.consume.announced(prefix: "live/", filter: "*
 // Hidden until the catalog is filled; hold the route while it should stay announced.
 let route = try session.publish.route(path: "my-stream.hang", hidden: true)
 let broadcast = route.broadcast
-let audio = try Media.TrackProducer.audio(broadcast: broadcast, initData: Media.AudioInit(format: .opus, data: opusInit))
+let audio = try Media.TrackProducer.audio(broadcast: broadcast, initData: Media.AudioInit(format: .opus(), data: opusInit))
 try audio.writeFrame(packet, timestamp: Timestamp(value: 20, scale: 1_000))
 try audio.cut() // audio has no keyframes, so this is what gives it groups
 
 let video = try Video.Producer(
     catalog: Media.CatalogProducer(broadcast: broadcast),
-    input: VideoEncoderInput(format: .rgba, width: 1280, height: 720, framerate: Video.FrameRate(numerator: 30000, denominator: 1001)),
+    input: VideoEncoderInput(format: .rgba(), width: 1280, height: 720, framerate: Video.FrameRate(numerator: 30000, denominator: 1001)),
     output: VideoEncoderOutput(codec: VideoCodec.h264(), kind: .auto),
     track: "camera"
 )

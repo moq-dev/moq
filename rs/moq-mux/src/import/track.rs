@@ -129,7 +129,7 @@ fn build_av1<E: CatalogExt>(
 	// av1C (leading 0x81, ISO/IEC 14496-15) is an out-of-band config record, not an
 	// OBU stream, so it's read for config (above) and dropped here. Raw OBUs are the
 	// leading bytes of the stream and feed the splitter.
-	let frames = if init.len() >= 16 && init[0] == 0x81 {
+	let frames = if crate::codec::av1::is_av1c(init) {
 		Vec::new()
 	} else {
 		split.decode(init, None)?
@@ -787,7 +787,7 @@ impl TrackStream {
 				import.initialize(data)?;
 				// av1C (leading 0x81) is an out-of-band config record, not an OBU
 				// stream; read for config above and dropped here.
-				let frames = if data.len() >= 16 && data[0] == 0x81 {
+				let frames = if crate::codec::av1::is_av1c(data) {
 					Vec::new()
 				} else {
 					split.decode(data, None)?
@@ -1240,10 +1240,15 @@ mod tests {
 			.unwrap();
 		// Every group is written before anything reads, which the default
 		// REAL_TIME budget would collapse to the live edge.
-		let subscriber = track.subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(30))),
-		);
+		let subscriber =
+			track.subscribe(
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(Duration::from_secs(30)),
+						max: Some(Duration::from_secs(30)),
+					},
+				)]),
+			);
 		let config = crate::codec::opus::Config::new(48_000, 2);
 		let import = crate::codec::opus::Import::new(track, catalog.reserve(), config.into()).unwrap();
 		(import, subscriber)
@@ -1771,6 +1776,28 @@ mod tests {
 		headers_survive_reset(VideoFormat::Av01, av1c[4..].to_vec(), vec![0x32, 0x01, 0x10]).await;
 	}
 
+	/// An av1C with no configOBUs, just its 4-byte header, is a config record the importer
+	/// reads, not an OBU stream for the splitter to refuse.
+	#[tokio::test(start_paused = true)]
+	async fn av01_header_only_av1c_init_is_a_config_record() {
+		let (av1c, keyframe) = av1_init_and_keyframe();
+		let (broadcast, catalog) = new_broadcast();
+		let consumer = broadcast.consume();
+		let mut import = Track::video(
+			broadcast.reserve_track("video").unwrap(),
+			catalog.reserve(),
+			VideoInit::new(VideoFormat::Av01, av1c[..4].to_vec()),
+		)
+		.unwrap();
+		let timestamp = Timestamp::from_micros(1_000).unwrap();
+		import.decode(&keyframe, Some(timestamp)).unwrap();
+		let _finished = import.finish().unwrap();
+		assert_eq!(
+			first_frame(&consumer, "video").await.payload.as_ref(),
+			keyframe.as_slice()
+		);
+	}
+
 	/// A keyframe after a pre-picture seek carries the retained init header ahead of its own. The
 	/// keyframe's own, which the decoder applies, configures the catalog.
 	#[tokio::test(start_paused = true)]
@@ -1874,8 +1901,12 @@ mod tests {
 		assert_eq!((audio.sample_rate, audio.channel_count), (44_100, 2));
 
 		// Delay-tolerant, so the first group is still delivered once the second exists.
-		let replay = moq_net::track::Subscription::default()
-			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(30)));
+		let replay = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+			moq_net::track::Start::Live {
+				min: Some(Duration::from_secs(30)),
+				max: Some(Duration::from_secs(30)),
+			},
+		)]);
 		let mut track = consumer.track("audio").unwrap().subscribe(Some(replay)).await.unwrap();
 		for i in 0..4u64 {
 			if i == 2 {
@@ -1968,8 +1999,12 @@ mod tests {
 			.track("video")
 			.unwrap()
 			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(30))),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(Duration::from_secs(30)),
+						max: Some(Duration::from_secs(30)),
+					},
+				)]),
 			)
 			.await
 			.unwrap();

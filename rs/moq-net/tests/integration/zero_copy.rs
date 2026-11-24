@@ -17,7 +17,13 @@ use support::harness::{now, spawn, subscribed};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-const VERSIONS: &[&str] = &["moq-lite-03", "moq-lite-06", "moq-lite-07-wip", "moq-transport-22"];
+const VERSIONS: &[&str] = &[
+	"moq-lite-03",
+	"moq-lite-06",
+	"moq-lite-07-wip",
+	"moq-transport-22",
+	"moq-transport-23",
+];
 
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));

@@ -81,8 +81,12 @@ async fn one_packet_opus_groups_read_on_without_a_gap() {
 			.expect("remote broadcast")
 			.unwrap();
 		let track = remote.track("audio").expect("track");
-		let subscription = moq_net::track::Subscription::default()
-			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(5)));
+		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+			moq_net::track::Start::Live {
+				min: Some(Duration::from_secs(5)),
+				max: Some(Duration::from_secs(5)),
+			},
+		)]);
 		let subscribed = kio::clock::timeout(TIMEOUT, track.subscribe(subscription))
 			.await
 			.expect("subscribed")
@@ -135,11 +139,12 @@ async fn a_dropped_run_waits_for_the_next_groups_first_packet() {
 			.expect("announced")
 			.expect("remote broadcast")
 			.unwrap();
-		let subscription = moq_net::track::Subscription::default().with_delay(
-			moq_net::track::Delay::default()
-				.with_min(None)
-				.with_max(Duration::from_secs(5)),
-		);
+		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+			moq_net::track::Start::Live {
+				min: Some(Duration::from_secs(5)),
+				max: Some(Duration::from_secs(5)),
+			},
+		)]);
 		let subscribed = kio::clock::timeout(TIMEOUT, remote.track("audio").expect("track").subscribe(subscription))
 			.await
 			.expect("subscribed")
@@ -194,8 +199,12 @@ async fn an_old_publishers_marker_group_reads_as_an_end() {
 			.expect("announced")
 			.expect("remote broadcast")
 			.unwrap();
-		let subscription = moq_net::track::Subscription::default()
-			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(5)));
+		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+			moq_net::track::Start::Live {
+				min: Some(Duration::from_secs(5)),
+				max: Some(Duration::from_secs(5)),
+			},
+		)]);
 		let subscribed = kio::clock::timeout(TIMEOUT, remote.track("audio").expect("track").subscribe(subscription))
 			.await
 			.expect("subscribed")

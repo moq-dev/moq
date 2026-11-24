@@ -3,21 +3,23 @@
 //! moq-transport carries group keys verbatim as Group IDs through a relay on every
 //! supported draft.
 
+use crate::WithMax as _;
 use crate::support;
 
 use std::time::Duration;
 
-use moq_net::track::{Delay, Info, Subscription};
+use moq_net::track::{Info, Subscription};
 use moq_net::{Timescale, Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 fn origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// Appended groups keep their keys, and the time they carry, through a relay. Each
@@ -65,8 +67,8 @@ async fn a_relay_keeps_keys_and_the_gaps_between_them() {
 				.unwrap()
 				.subscribe(
 					Subscription::default()
-						.with_delay(Delay::default().with_max(None))
-						.with_ranges([support::keys(2..=8)]),
+						.with_ranges([support::keys(2..=8)])
+						.with_max(None),
 				)
 				.await
 				.unwrap();

@@ -66,18 +66,32 @@ impl Node {
 	/// asks this node to admit the dialer as its upstream.
 	fn dial(&self, upstream: bool, as_upstream: bool) -> Peer {
 		let path = if as_upstream { "upstream" } else { "peer" };
+		self.dial_at(path, upstream)
+	}
+
+	/// Dial this node at `path`, which its decider reads (see [`grant`]).
+	fn dial_at(&self, path: &str, upstream: bool) -> Peer {
 		Peer::new(format!("tls://127.0.0.1:{}/{path}", self.port)).with_upstream(upstream)
 	}
 }
 
 /// What the embedded decider grants a dial at `path`: everything, as a peer,
-/// upstream when asked.
+/// upstream when asked, or only `tenant-a` at `/scoped`.
 fn grant(path: &str) -> Grant {
 	let all = moq_net::Prefixes::all();
-	let mut grant = Grant::new(all.clone(), all);
+	let mut grant = match path {
+		"/scoped" => {
+			let tenant: moq_net::Prefixes = ["tenant-a"]
+				.map(|prefix| prefix.parse().expect("a path"))
+				.into_iter()
+				.collect();
+			Grant::new(tenant.clone(), tenant)
+		}
+		_ => Grant::new(all.clone(), all),
+	};
 	grant.root = Some(String::new());
 	grant.link = Some(match path {
-		"/upstream" => moq_auth::Link::Upstream,
+		"/upstream" | "/scoped" => moq_auth::Link::Upstream,
 		_ => moq_auth::Link::Peer,
 	});
 	grant
@@ -203,8 +217,12 @@ async fn read_frame(origin: &origin::Producer, path: &str) {
 	.await
 	.unwrap_or_else(|err| panic!("{path} unroutable: {err}"))
 	.expect("the first change is an instance");
-	let subscription = moq_net::track::Subscription::default()
-		.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1)));
+	let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+		moq_net::track::Start::Live {
+			min: Some(Duration::from_secs(1)),
+			max: Some(Duration::from_secs(1)),
+		},
+	)]);
 	let mut track = within(
 		&format!("subscribe to {path}"),
 		broadcast.track("video").expect("track handle").subscribe(subscription),
@@ -245,6 +263,7 @@ async fn routes_when(
 				let origin::RouteEvent {
 					kind: origin::RouteKind::Start,
 					announce,
+					..
 				} = event
 				else {
 					panic!("an initial set is only starts: got {event:?}");
@@ -438,4 +457,38 @@ async fn uplink_transits_both_ways_inner() {
 	let _cdn = publish(&cdn.origin, "cdn/cam");
 	read_frame(&cdn.origin, "mesh/cam").await;
 	read_frame(&mesh.origin, "cdn/cam").await;
+}
+
+/// A link whose grant covers only one tenant exchanges claims for it, as it does over
+/// lite-06, instead of the relay that admits the grant declaring a Node ID and closing the
+/// session Unauthorized: the tenant's broadcasts cross both ways and nothing else does.
+#[test]
+fn scoped_link_exchanges_claims() {
+	run_cluster_test(scoped_link_exchanges_claims_inner());
+}
+
+async fn scoped_link_exchanges_claims_inner() {
+	// The listener admits the dial at `/scoped`: link upstream, root "", and the tenant's
+	// prefix alone.
+	let cdn = node(vec![]).await;
+	let edge = node(vec![cdn.dial_at("scoped", true)]).await;
+
+	let _outside = publish(&cdn.origin, "other/cam");
+	let _cdn = publish(&cdn.origin, "tenant-a/cdn");
+	let _edge = publish(&edge.origin, "tenant-a/edge");
+	routes_when("the edge learns the tenant", &edge.origin, |routes| {
+		has(routes, &["tenant-a/cdn"])
+	})
+	.await;
+	routes_when("the cdn learns the tenant", &cdn.origin, |routes| {
+		has(routes, &["tenant-a/edge"])
+	})
+	.await;
+	read_frame(&edge.origin, "tenant-a/cdn").await;
+	read_frame(&cdn.origin, "tenant-a/edge").await;
+	let at_edge = routes_when("the edge settles", &edge.origin, |routes| {
+		has(routes, &["tenant-a/edge"])
+	})
+	.await;
+	assert!(!at_edge.contains_key("other/cam"), "the grant leaked: {at_edge:?}");
 }

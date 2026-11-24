@@ -2981,7 +2981,7 @@ fn subscription_ranges_parse() {
 			ranges_len: ranges.len(),
 			order: 0,
 		};
-		unsafe { crate::api::parse_subscription(&subscription) }.map(|subscription| subscription.ranges)
+		unsafe { crate::api::parse_subscription(&subscription) }.map(|(subscription, _)| subscription.ranges)
 	};
 	let span = moq_range {
 		start: time(1_500),
@@ -2992,20 +2992,20 @@ fn subscription_ranges_parse() {
 	assert_eq!(
 		parse(&[span], false).unwrap(),
 		vec![moq_net::track::Range {
-			start: Some(1_500),
+			start: moq_net::track::Start::Time(1_500),
 			end: Some(1_999),
 		}]
 	);
 	assert_eq!(parse(&[], false).unwrap(), Vec::new());
 	assert_eq!(
 		parse(&[], true).unwrap(),
-		moq_net::track::Subscription::default().ranges,
-		"NULL keeps the default"
+		[moq_net::track::Range::ALL],
+		"NULL is one range with no start, which the delay places"
 	);
 
 	assert_eq!(
 		parse(&[moq_range::default()], false).unwrap(),
-		vec![moq_net::track::Range::default()]
+		vec![moq_net::track::Range::ALL]
 	);
 	// An absent time is never read, so its scale is never checked.
 	assert_eq!(
@@ -3019,7 +3019,7 @@ fn subscription_ranges_parse() {
 			false
 		)
 		.unwrap(),
-		vec![moq_net::track::Range::default()]
+		vec![moq_net::track::Range::ALL]
 	);
 	assert!(matches!(
 		parse(&[moq_range { end: micros(1), ..span }], false),
@@ -5484,9 +5484,8 @@ fn a_group_request_nobody_reads_is_withdrawn() {
 
 	let ascending = |start, end: Option<u64>| {
 		moq_net::track::Subscription::default()
-			.with_delay(moq_net::track::Delay::default().with_max(None))
 			.with_ranges([moq_net::track::Range {
-				start: Some(start),
+				start: moq_net::track::Start::Time(start),
 				end,
 			}])
 			.with_order(moq_net::track::Order::Ascending)
@@ -5571,12 +5570,8 @@ fn a_freed_time_start_reads_on_and_an_aborted_one_fails() {
 			}
 			producer.subscribe(
 				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(None))
 					.with_order(moq_net::track::Order::Ascending)
-					.with_ranges([moq_net::track::Range {
-						start: Some(time),
-						end: None,
-					}]),
+					.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Time(time))]),
 			)
 		};
 		// Nothing is read before the time start is answered.
@@ -5600,11 +5595,7 @@ fn a_freed_time_start_reads_on_and_an_aborted_one_fails() {
 				let producer = state.publish.track_producer(Id::try_from(track).unwrap()).unwrap();
 				producer.subscribe(
 					moq_net::track::Subscription::default()
-						.with_delay(moq_net::track::Delay::default().with_max(None))
-						.with_ranges([moq_net::track::Range {
-							start: Some(time),
-							end: None,
-						}]),
+						.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Time(time))]),
 				)
 			};
 			let request = id(group_cb.recv_reading(&mut again));
@@ -5685,12 +5676,10 @@ fn a_rejected_group_request_binds_only_its_readers() {
 		drop(producer.clone().finish().unwrap());
 	}
 	let subscribe = || {
-		let subscription = moq_net::track::Subscription::default()
-			.with_delay(moq_net::track::Delay::default().with_max(None))
-			.with_ranges([moq_net::track::Range {
-				start: Some(6),
-				end: Some(6),
-			}]);
+		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range {
+			start: moq_net::track::Start::Time(6),
+			end: Some(6),
+		}]);
 		let mut state = State::lock();
 		let producer = state.publish.track_producer(Id::try_from(track).unwrap()).unwrap();
 		producer.subscribe(subscription)
@@ -8015,18 +8004,24 @@ fn a_zeroed_config_is_the_defaults() {
 	assert!(parsed.quic.resolve().keylog.is_none());
 }
 
-/// `moq_subscription_defaults` and a zeroed struct both read back as moq-net's defaults, and
-/// the flags reach the stated minimum and the unlimited max.
+/// `moq_subscription_defaults` and a zeroed struct both read back as one range with no start
+/// under the default delay, which places it as moq-net's default, and the flags reach the stated
+/// minimum and the unlimited max.
 #[test]
 fn subscription_defaults_are_moq_net_defaults() {
+	let expected = (
+		moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL]),
+		moq_mux::container::Delay::default(),
+	);
 	let defaults = unsafe { crate::api::parse_subscription(&moq_subscription_defaults()) }.unwrap();
-	assert_eq!(defaults, moq_net::track::Subscription::default());
-
-	let mut zeroed: moq_subscription = unsafe { std::mem::zeroed() };
+	assert_eq!(defaults, expected);
 	assert_eq!(
-		unsafe { crate::api::parse_subscription(&zeroed) }.unwrap(),
+		defaults.1.subscription(defaults.0),
 		moq_net::track::Subscription::default()
 	);
+
+	let mut zeroed: moq_subscription = unsafe { std::mem::zeroed() };
+	assert_eq!(unsafe { crate::api::parse_subscription(&zeroed) }.unwrap(), expected);
 
 	zeroed.delay = moq_delay {
 		min_us: 5,
@@ -8034,12 +8029,12 @@ fn subscription_defaults_are_moq_net_defaults() {
 		max_unlimited: true,
 		min_stated: false,
 	};
-	let flagged = unsafe { crate::api::parse_subscription(&zeroed) }.unwrap();
-	assert_eq!(flagged.delay, moq_net::track::Delay { min: None, max: None });
+	let (_, flagged) = unsafe { crate::api::parse_subscription(&zeroed) }.unwrap();
+	assert_eq!(flagged, moq_mux::container::Delay { min: None, max: None });
 
 	zeroed.delay.min_stated = true;
-	let stated = unsafe { crate::api::parse_subscription(&zeroed) }.unwrap();
-	assert_eq!(stated.delay.min, Some(Duration::from_micros(5)));
+	let (_, stated) = unsafe { crate::api::parse_subscription(&zeroed) }.unwrap();
+	assert_eq!(stated.min, Some(Duration::from_micros(5)));
 }
 
 /// `moq_client_defaults` has to agree with what a zeroed struct actually dials,

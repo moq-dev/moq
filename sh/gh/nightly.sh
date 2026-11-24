@@ -117,7 +117,7 @@ case "$1" in
         nextest just rs bench-tests --no-fail-fast --run-ignored only \
             -p moq-bench -p moq-congestion -p moq-quic -p moq-net -p moq-tokio -p moq-uring \
             --features moq-net/async,moq-congestion/lab --lib --bin moq-bench --test integration \
-            -E 'test(benchmark_observation_contention) | test(benchmark_readiness_establishment) | test(benchmark_per_packet) | test(benchmark_feed_fetch_wakes) | test(=mesh_sweep::benchmark_route_mesh) | test(benchmark_route_rules) | test(benchmark_route_churn) | test(benchmark_receive_credit) | test(benchmark_receive_windows) | test(benchmark_datagram_delivery) | test(benchmark_socket_queues)'
+            -E 'test(benchmark_observation_contention) | test(benchmark_readiness_establishment) | test(benchmark_per_packet) | test(benchmark_feed_fetch_wakes) | test(=mesh_sweep::benchmark_route_mesh) | test(benchmark_route_rules) | test(benchmark_route_churn) | test(benchmark_receive_credit) | test(benchmark_receive_windows) | test(benchmark_join_lag) | test(benchmark_datagram_delivery) | test(benchmark_socket_queues)'
         ;;
     rust-test-apps)
         export NEXTEST_PROFILE=bench NEXTEST_TEST_THREADS=1
@@ -135,8 +135,6 @@ case "$1" in
         SESSION_CPU=1 criterion net-cpu -p moq-net --features fuzz --bench session -- session_delivery_group_cost_cpu
         # Measure each kio routine, including the contended bench's worker threads.
         criterion kio --no-fail-fast -p kio --bench '*'
-        # moq-gst's catalog bench shares a target name with moq-mux's, so it runs on its own.
-        criterion gst -p moq-gst --bench catalog
         ;;
     rust-shared)
         # One invocation unifies this release build instead of rebuilding shared crates
@@ -155,6 +153,8 @@ case "$1" in
     rust-extra)
         criterion qmux --manifest-path rs/qmux/Cargo.toml --bench receive
         criterion msf -p moq-msf --bench catalog
+        # moq-gst's catalog bench shares a target name with moq-mux's, so it runs on its own.
+        criterion gst -p moq-gst --bench catalog
         # The allocation/window/play-buffer/batch/receive-bursts/openh264 tables keep their stdout in the run;
         # only Criterion estimates enter the trend report.
         criterion extra --no-fail-fast -p moq-e2ee -p moq-json -p moq-archive -p moq-cli -p moq-mux -p moq-audio \

@@ -16,7 +16,8 @@
 (*  - A switch splits the subscription at one boundary, the largest group  *)
 (*    any copy holds or a reader got: it asks the new copy from there, or  *)
 (*    from the lowest gap below it no live copy holds, and caps every copy *)
-(*    it replaces there (`Reader::sync`, `backfill_gaps`, `Copy::cap`,     *)
+(*    it replaces there, stopping the boundary group at the frame the new  *)
+(*    copy resumes it (`Reader::sync`, `backfill_gaps`, `Copy::cap`,       *)
 (*    `verify-resume`). A reader hands each group out once, from any copy  *)
 (*    its relay holds, and ends cleanly once its serving copy is complete  *)
 (*    and nothing a replaced copy may still deliver is missing             *)
@@ -34,7 +35,7 @@
 (* Scope: the origin O never fails, writes each group whole, and E never   *)
 (* dies, so the client always has its one hop; a dead relay never returns; *)
 (* every hop subscribes before the first group, and a copy's range is      *)
-(* resolved from its first group (SUBSCRIBE_OK), so a relay knows which    *)
+(* resolved from its first group (SUBSCRIBE_START), so a relay knows which *)
 (* groups its copy owes. A fetch reaches the serving route while that      *)
 (* route lives, and a relay whose track ended still moves to another route *)
 (* for the reads that hold it, forgetting the track only once none does.   *)
@@ -93,17 +94,19 @@ vars == <<org, alive, deaths, cp, front, left>>
 (*  src    src[g]: the upstream's copy its reader reads g from (`Recover`).*)
 (*  lent   lent[g]: frames of g a switch lent it, which it holds from the  *)
 (*         moment g is handed out, asking the upstream only for the rest.  *)
+(*  stop   stop[g]: frames of g its subscription asks for, F unless a      *)
+(*         switch replaced it partway through g (a Position end).          *)
 (***************************************************************************)
 
 Fresh(ask) ==
     [st |-> "live", ask |-> ask, fetch |-> {}, fr |-> [g \in Groups |-> -1],
      bad |-> {}, fin |-> FALSE, src |-> [g \in Groups |-> None],
-     lent |-> [g \in Groups |-> 0]]
+     lent |-> [g \in Groups |-> 0], stop |-> [g \in Groups |-> F]]
 
 Gone ==
     [st |-> "none", ask |-> {}, fetch |-> {}, fr |-> [g \in Groups |-> -1],
      bad |-> {}, fin |-> FALSE, src |-> [g \in Groups |-> None],
-     lent |-> [g \in Groups |-> 0]]
+     lent |-> [g \in Groups |-> 0], stop |-> [g \in Groups |-> F]]
 
 Live(e) == cp[e].st = "live"
 Held(e) == cp[e].st # "none"
@@ -145,6 +148,30 @@ ResumeAsk(e) ==
 \* Where a switch caps the copies it replaces at u: every open reader's
 \* boundary, as the copy's subscription folds them (`Copy::cap`).
 CapAt(u) == Max({-1} \cup {Boundary(e) : e \in {x \in Downs(u) : Live(x) /\ ~cp[x].fin}})
+
+\* Where a switch at u stops the boundary group on the copies it replaces (`Reader::sync`'s
+\* stop, `Subscription::cap`): each open reader's boundary group, past the most frames of it
+\* a copy at u holds; the highest, as the subscription folds them, and none unless every
+\* reader stops.
+StopAt(u) ==
+    LET readers == {e \in Downs(u) : Live(e) /\ ~cp[e].fin}
+        At(e) ==
+            LET bnd == Boundary(e)
+                held == IF bnd < 0 THEN 0
+                        ELSE Max({SrcFr(u, s, bnd) : s \in Srcs(u)} \cup {0})
+            IN IF held = 0 THEN {} ELSE {<<bnd, held>>}
+        at == UNION {At(e) : e \in readers}
+    IN IF readers = {} \/ \E e \in readers : At(e) = {} THEN {}
+       ELSE {CHOOSE p \in at : \A q \in at : q[1] < p[1] \/ (q[1] = p[1] /\ q[2] <= p[2])}
+
+\* A replaced copy stopped at a position: a stop only narrows (`Copy::cap`).
+Stopped(c, at) ==
+    IF at = {} THEN c
+    ELSE LET p == CHOOSE p \in at : TRUE IN
+         [c EXCEPT !.stop[p[1]] = IF @ < p[2] THEN @ ELSE p[2]]
+
+\* A copy serving again asks every group whole.
+Unstopped(c) == [c EXCEPT !.stop = [g \in Groups |-> F]]
 
 \* Where a switch at u resumes its readers (`Producer::subscription`, `Reader::resume_at`):
 \* each open reader's boundary group, past the most frames of it a copy at u holds; the
@@ -203,22 +230,36 @@ Whole(e) ==
     /\ have # {}
     /\ \A g \in Groups : g >= Min(have) => cp[e].fr[g] = F \/ g \in cp[e].bad
 
-\* A held copy at u may still land g: it is live, asked for g, and is not done.
+\* A held copy at u may still land g: it is live, lacks g, and either its
+\* subscription asked for g and is not done or it fetched g, which lands after
+\* the end too.
 MayLand(u, g) ==
     \E s \in Up(u) :
         /\ Live(<<u, s>>)
-        /\ g \in cp[<<u, s>>].ask
         /\ cp[<<u, s>>].fr[g] = -1
-        /\ ~cp[<<u, s>>].fin
+        /\ \/ g \in cp[<<u, s>>].ask /\ ~cp[<<u, s>>].fin
+           \/ g \in cp[<<u, s>>].fetch
+
+\* The relay at u can still ask upstream for g: the copy its reads go to first is
+\* live and never asked for g, so its end proves nothing about g (`Fetching`).
+Askable(u, g) ==
+    /\ u \in Relays
+    /\ front[u].end # "err"
+    /\ Live(Answering(u))
+    /\ g \notin cp[Answering(u)].ask \cup cp[Answering(u)].fetch
+    /\ cp[Answering(u)].fr[g] = -1
 
 \* The reader at u has handed out all it can: every group its copy asks for is
-\* out, or no copy at u holds it or may still land it (`poll_end`).
+\* out, or no copy at u holds it, may still land it, or could be asked for it
+\* (`poll_end`). A reader that joined a copy asked from a later group waits for
+\* the rest, as a copy waits for a recovery after its track finished.
 Drained(e) ==
     LET u == e[2] IN
     \A g \in cp[e].ask :
         \/ cp[e].fr[g] >= 0
         \/ /\ \A s \in Srcs(u) : SrcFr(u, s, g) < 0
            /\ ~MayLand(u, g)
+           /\ ~Askable(u, g)
 
 \* Where a short group can continue at u: a copy holding it whose source is
 \* still alive or holds a frame past the reader's (`Recover::held`).
@@ -272,10 +313,12 @@ HandOut(e, g, s) ==
     /\ cp' = [cp EXCEPT ![e].fr[g] = cp[e].lent[g], ![e].src[g] = s]
     /\ UNCHANGED <<org, alive, deaths, front, left>>
 
-\* The next frame of a group crosses the hop.
+\* The next frame of a group crosses the hop, up to where the subscription stops it; a
+\* fetch asks for the rest.
 Frame(e, g) ==
     /\ Short(e, g)
     /\ SrcFr(e[2], cp[e].src[g], g) > cp[e].fr[g]
+    /\ g \in cp[e].fetch \/ cp[e].fr[g] < cp[e].stop[g]
     /\ cp' = [cp EXCEPT ![e].fr[g] = @ + 1]
     /\ UNCHANGED <<org, alive, deaths, front, left>>
 
@@ -355,8 +398,8 @@ Subscribe(u) ==
 \* the switches last (`Producer::splice`). A copy it still holds of that route
 \* is asked again from the boundary, as is one whose subscription ended under
 \* a cap short of the end (a new subscription, `Action::Query`); otherwise a
-\* new one is. Every other copy it holds is capped at the boundary at once, so it sends
-\* nothing newer; while nothing is held nor handed out, they are dropped. A
+\* new one is. Every other copy it holds is capped at the boundary at once, its group
+\* stopped where the new copy resumes it, so it sends nothing newer; while nothing is held nor handed out, they are dropped. A
 \* track that ended moves too, for the group reads and fetches still holding
 \* it (`Action::Reroute`): its readers stay on the copy it ended on, so a
 \* copy asked for them subscribes nothing, and one still held is left as is.
@@ -365,6 +408,7 @@ Switch(u, w) ==
         e1 == <<u, w>>
         open == front[u].end = "open"
         cap == CapAt(u)
+        stop == StopAt(u)
     IN
     /\ u \in Relays
     /\ front[u].end # "err"
@@ -375,15 +419,16 @@ Switch(u, w) ==
     /\ front' = [front EXCEPT ![u].cur = w, ![u].sw = @ + (IF usable THEN 1 ELSE 0)]
     /\ cp' = [e \in Edges |->
                 IF e = e1 THEN
-                    IF Live(e1) /\ ~cp[e1].fin /\ open THEN Lend(u, [cp[e1] EXCEPT !.ask = Demand(u)])
+                    IF Live(e1) /\ ~cp[e1].fin /\ open
+                        THEN Lend(u, Unstopped([cp[e1] EXCEPT !.ask = Demand(u)]))
                     ELSE IF Live(e1) /\ ~Whole(e1) /\ open
-                        THEN Lend(u, [cp[e1] EXCEPT !.ask = Demand(u), !.fin = FALSE])
-                    ELSE IF Live(e1) THEN cp[e1]
+                        THEN Lend(u, Unstopped([cp[e1] EXCEPT !.ask = Demand(u), !.fin = FALSE]))
+                    ELSE IF Live(e1) THEN Unstopped(cp[e1])
                     ELSE IF open THEN Lend(u, Fresh(Demand(u)))
                     ELSE Fresh({})
                 ELSE IF open /\ e[1] = u /\ Live(e) /\ ~cp[e].fin
                     THEN IF cap < 0 /\ HeldAt(u) = {} THEN Gone
-                         ELSE [cp[e] EXCEPT !.ask = {g \in @ : g <= cap}]
+                         ELSE Stopped([cp[e] EXCEPT !.ask = {g \in @ : g <= cap}], stop)
                 ELSE cp[e]]
     /\ UNCHANGED <<org, alive, deaths, left>>
 
@@ -539,7 +584,8 @@ TypeOK ==
     /\ \A e \in Edges :
         /\ cp[e].st \in {"none", "live", "failed"}
         /\ cp[e].bad \subseteq Groups
-        /\ \A g \in Groups : cp[e].fr[g] \in -1 .. F /\ cp[e].lent[g] \in 0 .. F
+        /\ \A g \in Groups :
+            cp[e].fr[g] \in -1 .. F /\ cp[e].lent[g] \in 0 .. F /\ cp[e].stop[g] \in 1 .. F
     /\ \A r \in Relays : front[r].end \in {"open", "ok", "err"}
     /\ \A r \in Relays : alive[r] \in {"up", "shown", "down"}
 

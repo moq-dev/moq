@@ -138,6 +138,42 @@ jobs:
           HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
+      # The same multiplex split into a broadcast per program, and one program exported late:
+      # it must start within 3 s, carry that program alone, and lose nothing once joined.
+      - name: TS late join to one program of an MPTS
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --mpts --program 2 --join 5
+        env:
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
+      # Passthrough over an unflagged encoder switch: halfway through, every PID moves onto a clock
+      # 16,844.5 s back (then ahead), breaking its continuity counter once, with nothing in the
+      # stream marking it. The capture must be the source in place, its breaks the source's own.
+      - name: TS passthrough of an encoder switch
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --passthrough --splice
+        env:
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
+      - name: TS passthrough of an encoder switch forward
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --passthrough --splice forward
+        env:
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
+      # The import killed 10 s into a live UDP feed and restarted 0.5 s later, a new instance,
+      # under a running `export ts --passthrough --stitch`: one gap, no longer than the
+      # downtime plus the restarted import's first group.
+      - name: TS passthrough across a restarted import
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --passthrough --restart 10
+        env:
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
       # The same round-trip at 2 Mb/s, where every keyframe outgrows a 25 ms PCR slot,
       # so the export has to spread it over the slots before its DTS and still keep
       # the constant-rate schedule.

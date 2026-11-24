@@ -3,6 +3,7 @@
 //! A reader stalled before its first read, behind a relay serving it one stream at a time,
 //! loses none of the groups its budget covers: they wait at the relay for stream credit.
 
+use crate::WithMax as _;
 use std::collections::BTreeSet;
 use std::time::Duration;
 
@@ -12,16 +13,18 @@ use crate::support::harness::{MockConnectOptions, connect_mock, spawn, subscribe
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-const VERSIONS: [&str; 3] = ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"];
+const VERSIONS: [&str; 4] = ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22", "moq-transport-23"];
 
 /// Groups published one per second while the reader is stalled, which resumes a second
 /// after the last: group N ends `GROUPS - N - 1` seconds behind the clock then.
 const GROUPS: u64 = 5;
 
 fn origin(hop: u64) -> origin::Producer {
-	let (origin, driver) = origin::Producer::new(origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (origin, driver) = origin::Producer::new(config);
 	spawn(driver);
-	origin.with_proxy(true)
+	origin
 }
 
 /// The groups a reader subscribed with `budget` receives once it resumes from a stall
@@ -63,7 +66,7 @@ async fn stalled_read(version: Version, budget: Duration) -> BTreeSet<u64> {
 	let consumer = viewer.consume();
 	crate::support::announced(&consumer, "live").await;
 	let remote = consumer.request("live", None).await.unwrap();
-	let subscription = track::Subscription::default().with_delay(track::Delay::default().with_max(budget));
+	let subscription = track::Subscription::default().with_max(budget);
 	let mut reader = remote.track("audio").unwrap().subscribe(subscription).await.unwrap();
 	kio::clock::timeout(TIMEOUT, subscribed(&source)).await.unwrap();
 

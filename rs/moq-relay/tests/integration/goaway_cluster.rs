@@ -103,7 +103,7 @@ fn drain_session_with_zero_timeout_closes_at_once() {
 /// once rather than awaiting a peer under no deadline to leave.
 async fn drain_session_with_zero_timeout_closes_at_once_inner() {
 	let net = Net::new();
-	let mut accepted = net.upstream("upstream", &sim::origin());
+	let mut accepted = net.upstream("upstream", &sim::relay_origin());
 
 	let client_connection = within(
 		"client connects",
@@ -131,7 +131,7 @@ fn cluster_continues_a_group_split_by_goaway() {
 /// holding it, and the next group after it, never the split group a second time.
 async fn cluster_continues_a_group_split_by_goaway_inner() {
 	let net = Net::new();
-	let upstream_origin = sim::origin();
+	let upstream_origin = sim::relay_origin();
 	let broadcast = upstream_origin
 		.route("cam", moq_net::origin::RouteOptions::default())
 		.expect("create broadcast");
@@ -186,6 +186,7 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 		moq_net::origin::RouteEvent {
 			kind: moq_net::origin::RouteKind::Start,
 			announce: update,
+			..
 		} => update.route.instance().clone(),
 		other => panic!("expected A's route, got {other:?}"),
 	};
@@ -203,6 +204,7 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 					| moq_net::origin::RouteKind::Update
 					| moq_net::origin::RouteKind::Restart,
 				announce: update,
+				..
 			} = event && *update.route.instance() != instance_a
 			{
 				break;
@@ -239,7 +241,7 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 async fn cluster_migrates_on_upstream_goaway_inner() {
 	// ── the shared "live" broadcast both siblings can serve ─────────
 	let net = Net::new();
-	let upstream_origin = sim::origin();
+	let upstream_origin = sim::relay_origin();
 	let broadcast = upstream_origin
 		.route("cam", moq_net::origin::RouteOptions::default())
 		.expect("create broadcast");
@@ -373,7 +375,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	lite07.version = vec![LITE_07.parse().unwrap()];
 
 	// ── TOP: origin server serving the same broadcast to both mids ──────
-	let top_origin = sim::origin();
+	let top_origin = sim::relay_origin();
 	let broadcast = top_origin
 		.route("diamond", moq_net::origin::RouteOptions::default())
 		.expect("create broadcast");
@@ -389,7 +391,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	let _mid_b_session = accept("TOP accepts MID-B", &mut top_accepted).await;
 
 	// ── MID-A: mini-relay consuming TOP, serving BOTTOM, drains later ───
-	let mid_a_origin = sim::origin();
+	let mid_a_origin = sim::relay_origin();
 	// An upstream link: MID-A relays for BOTTOM, so it asks TOP for everything.
 	let mid_a_upstream = within(
 		"MID-A connects to TOP",
@@ -445,10 +447,16 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	// must preserve is that every group arrives, exactly once, with its frames intact.
 	let mut sub = within(
 		"subscribe to the video track",
-		bc.track("video").expect("track handle").subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60))),
-		),
+		bc.track("video")
+			.expect("track handle")
+			.subscribe(
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(Duration::from_secs(60)),
+						max: Some(Duration::from_secs(60)),
+					},
+				)]),
+			),
 	)
 	.await
 	.expect("subscribe");
@@ -647,7 +655,7 @@ fn goaway_handover_is_enforced_while_the_replacement_dial_hangs() {
 /// closed on schedule rather than held for as long as the dial takes.
 async fn goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner() {
 	let net = Net::new();
-	let mut accepted = net.upstream("upstream", &sim::origin());
+	let mut accepted = net.upstream("upstream", &sim::relay_origin());
 	// Never answers: the dial hangs in the transport handshake.
 	let mut black_hole = net.black_hole("black-hole");
 

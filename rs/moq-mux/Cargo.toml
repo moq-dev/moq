@@ -50,7 +50,6 @@ serde_with = { workspace = true, features = ["base64"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros"] }
 tracing = { workspace = true }
-url = { workspace = true }
 webm-iterable = "0.7"
 
 [dev-dependencies]
@@ -72,6 +71,12 @@ workspace-hack = { path = "../workspace-hack" }
 # The ts_schedule bench pins glibc's heap.
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dev-dependencies]
 libc = { workspace = true }
+
+# Reads a finished file's chapters the way Apple's players do.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+block2 = { workspace = true }
+objc2-av-foundation = { workspace = true, features = ["objc2-core-media"] }
+objc2-foundation = { workspace = true }
 
 # Writes the generated fuzzer corpus to disk. Needs the `fuzz` feature, so a default
 # `--all-targets` build skips it rather than failing to find the module.

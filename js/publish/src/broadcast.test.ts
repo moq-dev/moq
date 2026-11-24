@@ -380,7 +380,7 @@ test("serves no catalog until announced, so the first snapshot is the one at ann
 	const net = broadcast.net.peek();
 	if (!net) throw new Error("expected a network producer once connected");
 
-	const subscriber = net.track(Broadcast.CATALOG_TRACK).subscribe({ delay: { max: null } });
+	const subscriber = net.track(Broadcast.CATALOG_TRACK).subscribe({ ranges: [{}] });
 	const group = await subscriber.ordered().nextGroup();
 	// Reaching back over every group, the oldest is also the newest: nothing was published before it.
 	expect(group?.start).toBe((await subscriber.largest())?.group);

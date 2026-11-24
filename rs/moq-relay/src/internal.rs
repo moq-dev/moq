@@ -828,6 +828,21 @@ impl Scrape {
 				|p| p.wire_rx,
 			),
 			(
+				"moq_relay_wire_lost_bytes",
+				"Transport bytes sent and declared lost; over moq_relay_wire_tx_bytes, the loss rate.",
+				|p| p.wire_lost,
+			),
+			(
+				"moq_relay_cwnd_blocked_microseconds",
+				"Time connections had data ready to send held back by a full congestion window.",
+				|p| p.cwnd_blocked_us,
+			),
+			(
+				"moq_relay_pacing_blocked_microseconds",
+				"Time connections had data ready to send held back by the congestion controller's pacer.",
+				|p| p.pacing_blocked_us,
+			),
+			(
 				"moq_relay_credit_stalls",
 				"Times a connection's write blocked with all the peer's connection-level credit (MAX_DATA) spent.",
 				|p| p.credit_stalls,
@@ -836,6 +851,16 @@ impl Scrape {
 				"moq_relay_credit_stalled_microseconds",
 				"Time connections spent with a write blocked on the peer's connection-level credit (MAX_DATA).",
 				|p| p.credit_stalled_us,
+			),
+			(
+				"moq_relay_credit_held_readers_microseconds",
+				"Time peers had a connection's whole receive window spent while a reader behind held eviction off.",
+				|p| p.credit_held_readers_us,
+			),
+			(
+				"moq_relay_credit_held_evicted_microseconds",
+				"Time peers had a connection's whole receive window spent while an evicted reader had yet to stop its stream.",
+				|p| p.credit_held_evicted_us,
 			),
 			("moq_relay_requests", "Admitted request/response exchanges.", |p| {
 				p.requests
@@ -1379,11 +1404,14 @@ mod tests {
 					| moq_net::origin::RouteKind::Update
 					| moq_net::origin::RouteKind::Restart,
 				announce: route,
+				..
 			} => Some((route, true)),
 			moq_net::origin::RouteEvent {
 				kind: moq_net::origin::RouteKind::End | moq_net::origin::RouteKind::Offline,
 				announce: route,
+				..
 			} => Some((route, false)),
+			other => panic!("unexpected route event {other:?}"),
 		}
 	}
 
@@ -1736,7 +1764,7 @@ mod tests {
 		drop(
 			stats
 				.tier(moq_net::stats::Tier::new(moq_net::Path::from_static(tier)))
-				.request(moq_net::Path::from_static("root")),
+				.request(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("root"))),
 		);
 		let body = render_metrics(&stats.snapshot(), &[], &[]);
 		assert!(
@@ -1755,7 +1783,7 @@ mod tests {
 		let stats = moq_net::stats::Registry::new(Default::default());
 		let request = stats
 			.tier(moq_net::stats::Tier::new(moq_net::Path::from_static("http")))
-			.request(moq_net::Path::from_static("root"));
+			.request(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("root")));
 		drop(request);
 		let body = render_metrics(&stats.snapshot(), &[], &[]);
 		assert!(body.contains("# TYPE moq_relay_requests counter"), "{body}");
@@ -1900,7 +1928,15 @@ mod tests {
 		let (update, active) = next_update(&mut announced).await.unwrap();
 		assert!(active);
 		let bc = egress.request(update.prefix.clone(), None).await.unwrap();
-		let mut egress_sub = bc.track("video").unwrap().subscribe(None).await.unwrap();
+		// A join reaching back past the first group, which its zero budget then skips as stale
+		// once the second supersedes it.
+		let join = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+			moq_net::track::Start::Live {
+				min: Some(std::time::Duration::from_secs(60)),
+				max: Some(std::time::Duration::ZERO),
+			},
+		)]);
+		let mut egress_sub = bc.track("video").unwrap().subscribe(join).await.unwrap();
 		{
 			let mut group = pub_track
 				.append_group(
@@ -2097,7 +2133,7 @@ mod tests {
 		let origin = moq_tokio::origin::spawn()
 			.with_stats(edge.session(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("root"))));
 		let _broadcast = origin.route("demo", moq_net::origin::RouteOptions::default()).unwrap();
-		drop(edge.request(moq_net::Path::from_static("root")));
+		drop(edge.request(moq_net::stats::SessionInfo::new(moq_net::Path::from_static("root"))));
 		let refusals = crate::refusals::Refusals::default();
 		refusals.record(crate::refusals::RefusalKind::Unavailable);
 		let (_trigger, shutdown) = crate::shutdown::Observer::new(std::time::Duration::from_secs(1));
@@ -2145,14 +2181,18 @@ mod tests {
 # TYPE moq_relay_control_rx_messages_total counter
 # TYPE moq_relay_control_tx_bytes_total counter
 # TYPE moq_relay_control_tx_messages_total counter
+# TYPE moq_relay_credit_held_evicted_microseconds_total counter
+# TYPE moq_relay_credit_held_readers_microseconds_total counter
 # TYPE moq_relay_credit_stalled_microseconds_total counter
 # TYPE moq_relay_credit_stalls_total counter
+# TYPE moq_relay_cwnd_blocked_microseconds_total counter
 # TYPE moq_relay_datagrams_total counter
 # TYPE moq_relay_draining_sessions gauge
 # TYPE moq_relay_fetches_total counter
 # TYPE moq_relay_frames_total counter
 # TYPE moq_relay_groups_total counter
 # TYPE moq_relay_inflated_bytes_total counter
+# TYPE moq_relay_pacing_blocked_microseconds_total counter
 # TYPE moq_relay_panics_total counter
 # TYPE moq_relay_requests_total counter
 # TYPE moq_relay_route_changes_total counter
@@ -2172,6 +2212,7 @@ mod tests {
 # TYPE moq_relay_subscriptions_opened_total counter
 # TYPE moq_relay_viewers_closed_total counter
 # TYPE moq_relay_viewers_opened_total counter
+# TYPE moq_relay_wire_lost_bytes_total counter
 # TYPE moq_relay_wire_rx_bytes_total counter
 # TYPE moq_relay_wire_tx_bytes_total counter
 counter moq_relay_accept_failures_total{class="connection",listener="tcp"} 0
@@ -2183,8 +2224,11 @@ counter moq_relay_announces_started_total{role="publisher",tier="edge"} 0
 counter moq_relay_announces_started_total{role="subscriber",tier="edge"} 1
 counter moq_relay_bytes_total{role="publisher",tier="edge"} 0
 counter moq_relay_bytes_total{role="subscriber",tier="edge"} 0
+counter moq_relay_credit_held_evicted_microseconds_total{tier="edge"} 0
+counter moq_relay_credit_held_readers_microseconds_total{tier="edge"} 0
 counter moq_relay_credit_stalled_microseconds_total{tier="edge"} 0
 counter moq_relay_credit_stalls_total{tier="edge"} 0
+counter moq_relay_cwnd_blocked_microseconds_total{tier="edge"} 0
 counter moq_relay_datagrams_total{role="publisher",tier="edge"} 0
 counter moq_relay_datagrams_total{role="subscriber",tier="edge"} 0
 counter moq_relay_fetches_total{role="publisher",tier="edge"} 0
@@ -2195,6 +2239,7 @@ counter moq_relay_groups_total{role="publisher",tier="edge"} 0
 counter moq_relay_groups_total{role="subscriber",tier="edge"} 0
 counter moq_relay_inflated_bytes_total{role="publisher",tier="edge"} 0
 counter moq_relay_inflated_bytes_total{role="subscriber",tier="edge"} 0
+counter moq_relay_pacing_blocked_microseconds_total{tier="edge"} 0
 counter moq_relay_requests_total{tier="edge"} 1
 counter moq_relay_route_changes_total{tier="edge"} 0
 counter moq_relay_route_refusals_total{reason="looped",tier="edge"} 0
@@ -2204,7 +2249,6 @@ counter moq_relay_route_rewrites_total{tier="edge"} 0
 counter moq_relay_route_sessions_closed_total{kind="malformed",tier="edge"} 0
 counter moq_relay_route_sessions_closed_total{kind="other",tier="edge"} 0
 counter moq_relay_route_sessions_closed_total{kind="overrun",tier="edge"} 0
-counter moq_relay_route_sessions_closed_total{kind="regressed",tier="edge"} 0
 counter moq_relay_route_sessions_closed_total{kind="role",tier="edge"} 0
 counter moq_relay_route_sessions_closed_total{kind="stalled",tier="edge"} 0
 counter moq_relay_route_sessions_closed_total{kind="unasked",tier="edge"} 0
@@ -2238,6 +2282,7 @@ counter moq_relay_viewers_closed_total{role="publisher",tier="edge"} 0
 counter moq_relay_viewers_closed_total{role="subscriber",tier="edge"} 0
 counter moq_relay_viewers_opened_total{role="publisher",tier="edge"} 0
 counter moq_relay_viewers_opened_total{role="subscriber",tier="edge"} 0
+counter moq_relay_wire_lost_bytes_total{tier="edge"} 0
 counter moq_relay_wire_rx_bytes_total{tier="edge"} 0
 counter moq_relay_wire_tx_bytes_total{tier="edge"} 0
 gauge moq_relay_accept_stalled_seconds{listener="tcp"} 0

@@ -32,6 +32,7 @@ import {
 	hiddenBelow,
 	hooks,
 	insertRun,
+	NO_MAX_DELAY,
 	presented,
 	type Run,
 	runGaps,
@@ -61,21 +62,24 @@ import { Group as GroupMessage } from "./group.ts";
 import { Probe } from "./probe.ts";
 import {
 	type Applied,
+	type Edge,
 	encodeSubscribeResponse,
 	LiveRanges,
+	legacyStart,
 	positionFrames,
+	positionStops,
 	rangeBounds,
 	rangesOf,
+	requestedPlaced,
 	requestedRange,
 	requestedRanges,
 	type Subscribe,
 	SubscribeDrop,
-	SubscribeFinish,
+	SubscribeEnd,
 	SubscribeOk,
 	type SubscribeResponse,
 	SubscribeSkip,
 	SubscribeStart,
-	SubscribeStarted,
 	SubscribeUpdate,
 	spanBetween,
 	type WireRange,
@@ -253,6 +257,14 @@ interface RunGroup {
 	end?: number;
 
 	/**
+	 * Lite-07: where each group a range ends partway through stops, by group (see
+	 * {@link FrameBounds.stops}). The stream parks there with the stream open, and sends the rest
+	 * on it once an update moves the end. `ended` settles once the subscription's run ends, which
+	 * resets a parked stream: no update will move its stop any more.
+	 */
+	stops?: { at: Getter<ReadonlyMap<bigint, number>>; ended: Promise<void> };
+
+	/**
 	 * Lite-07: called as the stream buffers GROUP_END with the group's end, so the starts inside
 	 * the group's span are accounted for.
 	 */
@@ -279,7 +291,48 @@ type FrameBounds = {
 	starts: ReadonlyMap<bigint, number>;
 	/** Lite-07: {@link starts} as each decoded update leaves them, until the run applies that update. */
 	startsAfter: WeakMap<SubscribeUpdate, ReadonlyMap<bigint, number>>;
+	/**
+	 * Lite-07: the frame each group a range ends partway through stops before (see
+	 * {@link positionStops}), which a group already streaming follows as an update moves it.
+	 */
+	stops: Signal<ReadonlyMap<bigint, number>>;
+	/** Lite-07: {@link stops} as each decoded update leaves them, until the run applies that update. */
+	stopsAfter: WeakMap<SubscribeUpdate, ReadonlyMap<bigint, number>>;
 };
+
+/** Whether two frame-end tables hold the same stops. */
+function sameStops(a: ReadonlyMap<bigint, number>, b: ReadonlyMap<bigint, number>): boolean {
+	if (a.size !== b.size) return false;
+	for (const [group, frame] of a) if (b.get(group) !== frame) return false;
+	return true;
+}
+
+/**
+ * Wait while frame `index` of group `key` is at or past where `stops` stop it, until an update moves
+ * the stop. Throws why the group was given up, or once `gone` settles, which resets the stream: a
+ * parked stream holds its credit only until the group expires, the stream closes, or the
+ * subscription ends.
+ *
+ * `gone` is made once per stream and reused, so moving the stop many times attaches no reaction
+ * per move.
+ */
+async function parkAt(
+	stops: Getter<ReadonlyMap<bigint, number>>,
+	key: bigint,
+	index: number,
+	givenUp: GivenUp,
+	gone: () => Promise<true>,
+): Promise<void> {
+	for (;;) {
+		const stop = stops.peek().get(key);
+		if (stop === undefined || index < stop) return;
+		const stopped = await givenUp.write(async () => {
+			const left = await race([stops.changed().then(() => false), gone()]);
+			if (left === true) throw new Error("parked at a range's end until the stream or subscription ended");
+		});
+		if (stopped) throw stopped;
+	}
+}
 
 /**
  * The frames of `key` a subscription asked for, as a start index and an inclusive end.
@@ -360,7 +413,12 @@ class SubscriptionControls {
 	#live: LiveRanges;
 	// The latest update the loop has yet to take, with every edit since the last one it took: a
 	// range added then retired before then was never live, so it is in neither.
-	#update?: { update: SubscribeUpdate; retired: bigint[]; added: Map<bigint, WireRange> };
+	#update?: {
+		update: SubscribeUpdate;
+		retired: bigint[];
+		added: Map<bigint, WireRange>;
+		retuned: Map<bigint, WireRange>;
+	};
 	// Sticky, first one wins: null once the stream is over, an Error once it failed.
 	#end?: Error | null;
 	#ended: Promise<Error | null>;
@@ -395,7 +453,7 @@ class SubscriptionControls {
 			return {
 				kind: "update",
 				update: update.update,
-				applied: { retired: update.retired, added: [...update.added] },
+				applied: { retired: update.retired, added: [...update.added], retuned: [...update.retuned] },
 			};
 		if (this.#end === undefined) return undefined;
 		return this.#end === null ? { kind: "done" } : { kind: "error", error: this.#end };
@@ -413,6 +471,17 @@ class SubscriptionControls {
 	/** Whether the track model holds Range ID `id`, as {@link positions} would index it. */
 	holds(id: bigint): boolean {
 		return this.#live.get(id) !== undefined;
+	}
+
+	/** The live range with Range ID `id`, as the subscriber asked it. */
+	range(id: bigint): WireRange | undefined {
+		return this.#live.get(id);
+	}
+
+	/** The staleness budget in milliseconds of Range ID `id` when it is live and a live join. */
+	joinBudget(id: bigint): number | undefined {
+		const range = this.#live.get(id);
+		return range && joinBudget(range);
 	}
 
 	/** Whether {@link take} has a control to answer with now. */
@@ -474,9 +543,19 @@ class SubscriptionControls {
 					update,
 					retired: [] as bigint[],
 					added: new Map<bigint, WireRange>(),
+					retuned: new Map<bigint, WireRange>(),
 				};
 				pending.update = update;
-				for (const id of edit.retired) if (!pending.added.delete(id)) pending.retired.push(id);
+				for (const id of edit.retired) {
+					pending.retuned.delete(id);
+					if (!pending.added.delete(id)) pending.retired.push(id);
+				}
+				// A later retune of a range this added is that range added as it now reads, and one
+				// of a range this retuned replaces that retune. Mirrors the Rust `Applied::then`.
+				for (const [id, range] of edit.retuned) {
+					if (pending.added.has(id)) pending.added.set(id, range);
+					else pending.retuned.set(id, range);
+				}
 				for (const [id, range] of edit.added) pending.added.set(id, range);
 				this.#update = pending;
 				this.#changed.update((value) => value + 1);
@@ -596,20 +675,36 @@ class Unpinned {
 }
 
 /**
- * The lowest latest group start that could resolve `range`'s start, a time or a live join, unless
- * `started`, then its time end. Undefined once neither can move. Mirrors the Rust `due`.
+ * The lowest latest group start that could resolve `range`'s time start, unless `started`, then
+ * its time end. Undefined once neither can move. A live join is never pinned: as a time start its
+ * groups would turn from live ones that expire past its max into history, and the model already
+ * keeps it placed by its Range ID. Mirrors the Rust `due`.
  */
 function due(range: WireRange, started: boolean): bigint | undefined {
-	if (isEmpty(requestedRange(range))) return undefined;
-	if (!started && range.start?.absolute === undefined) return 0n;
+	if (range.start?.live !== undefined || range.start?.joined !== undefined || isEmpty(requestedRange(range)))
+		return undefined;
+	if (!started && range.start !== undefined && range.start.absolute === undefined) return 0n;
 	if (range.end?.time !== undefined) return range.end.time + 1n;
 	return undefined;
 }
 
+// Whether `range` starts partway through its group: a Position start, or a placed join's.
+function framed(range: WireRange): boolean {
+	const start = range.start?.joined ?? range.start;
+	return start?.absolute !== undefined && !!start.frame;
+}
+
+// A live join's staleness budget in milliseconds, undefined for any other range, one already placed
+// included: it answers no join. Mirrors the Rust `join_budget`.
+function joinBudget(range: WireRange): number | undefined {
+	const live = range.start?.live;
+	return live && (live.max ?? NO_MAX_DELAY);
+}
+
 // `entry`, a range this subscription already held, resolved as it was: a range resolves once, so
-// an update that leaves it live never looks a time start up again in newer holdings, nor places a
-// live join again under a newer Min Age. A start reaching back to the oldest group held stays as
-// it was, since an absolute start would turn it into a floor the subscriber never named.
+// an update that leaves it live never looks a time start up again in newer holdings. A live join
+// stays as asked (see `due`). A start reaching back to the oldest group held stays as it was, since
+// an absolute start would turn it into a floor the subscriber never named.
 function pin(asked: WireRange, resolved: Resolved | undefined): WireRange {
 	if (!resolved) return asked;
 	const range = { ...asked };
@@ -617,6 +712,21 @@ function pin(asked: WireRange, resolved: Resolved | undefined): WireRange {
 	// An end resolves once it settles; until then it is reported open.
 	if (range.end?.time !== undefined && resolved.end !== undefined) range.end = { absolute: resolved.end };
 	return range;
+}
+
+/** A lite-07 range still waiting for its SUBSCRIBE_START, as it was asked. Mirrors the Rust `Unstarted`. */
+interface Asked {
+	/** Its staleness budget in milliseconds when it starts with a live join not yet placed, which starts past the groups that budget expired. */
+	joins: number | undefined;
+	/** It follows the live edge, starting with a live join or ending at none, so its answer waits until this hop knows the largest position. */
+	live: boolean;
+	/** It starts at the oldest group, which places it at group 0 on a track with none yet. */
+	oldest: boolean;
+}
+
+function asked(range: WireRange): Asked {
+	const live = range.start?.live !== undefined || range.end === undefined;
+	return { joins: joinBudget(range), live, oldest: range.start === undefined };
 }
 
 // The later of two locations, either of which may be unknown.
@@ -633,18 +743,32 @@ function waitForSubscription(
 	subscriber: track.Subscriber,
 	drops: Signal<number>,
 ): Promise<void> {
-	return new Promise((resolve) => {
-		let settled = false;
-		const dispose: Dispose[] = [];
+	return armSubscription(controls, subscriber, drops).woke;
+}
+
+// `waitForSubscription`, registered now and awaited later, so a change between the two still wakes
+// it. `dispose` drops a registration left unawaited.
+function armSubscription(
+	controls: SubscriptionControls,
+	subscriber: track.Subscriber,
+	drops: Signal<number>,
+): { woke: Promise<void>; dispose: Dispose } {
+	const dispose: Dispose[] = [];
+	let settled = false;
+	const settle = () => {
+		if (settled) return false;
+		settled = true;
+		for (const close of dispose) close();
+		return true;
+	};
+	const woke = new Promise<void>((resolve) => {
 		const wake = () => {
-			if (settled) return;
-			settled = true;
-			for (const close of dispose) close();
-			resolve();
+			if (settle()) resolve();
 		};
 		dispose.push(controls.changed(wake), hooks.groupChanged(subscriber, wake));
 		dispose.push(drops.changed(wake));
 	});
+	return { woke, dispose: () => void settle() };
 }
 
 /** Resolves once the subscriber's next control (an update, its FIN, or a failure) arrives. */
@@ -655,11 +779,6 @@ function waitForControl(controls: SubscriptionControls): Promise<void> {
 			resolve();
 		});
 	});
-}
-
-/** The budget a SUBSCRIBE's `Subscriber Max Age` asks for: `null` for no limit, as lite-01/02 decode. */
-function servingMaxDelay(requested: number | null): Duration | null {
-	return requested === null ? null : Duration.millis(requested);
 }
 
 /**
@@ -1094,18 +1213,17 @@ export class Publisher {
 		}
 
 		const consumer = front.track(msg.track);
-		const subscription = (ranges: track.Range[]): track.Subscription => ({
-			priority: msg.priority,
-			order: msg.order,
-			delay: {
-				max: servingMaxDelay(msg.maxDelay),
-				min: msg.minDelay === undefined ? null : Duration.millis(msg.minDelay),
-			},
-			ranges,
-		});
+		// The live joins already placed, which start where they were placed.
+		const absent = legacyStart(this.version, msg.maxDelay);
+		const placed = requestedPlaced(msg, absent);
+		const subscription = (ranges: track.Range[]): track.Subscription => {
+			const out: track.Subscription = { priority: msg.priority, order: msg.order, ranges };
+			if (placed.size > 0) out.placed = placed;
+			return out;
+		};
 		let ranges: track.Range[];
 		try {
-			ranges = requestedRanges(msg);
+			ranges = requestedRanges(msg, absent);
 		} catch (err: unknown) {
 			stream.writer.reset(error(err));
 			return;
@@ -1131,6 +1249,10 @@ export class Publisher {
 			endFrame: msg.endFrame,
 			starts: hasRanges(this.version) ? positionFrames(msg.ranges ?? []) : new Map(),
 			startsAfter: new WeakMap(),
+			stops: new Signal<ReadonlyMap<bigint, number>>(
+				hasRanges(this.version) ? positionStops(msg.ranges ?? []) : new Map(),
+			),
+			stopsAfter: new WeakMap(),
 		};
 		// A group is served whole from the frame asked: the reader fetches what its copy lacks.
 		hooks.wholeGroups(track, (key) => frameRange(bounds, key).start);
@@ -1187,7 +1309,7 @@ export class Publisher {
 			if (hasTrackStream(this.version)) {
 				// Lite-05+ accepts implicitly: no SUBSCRIBE_OK (the immutable
 				// properties live in TRACK_INFO), and the resolved range arrives as
-				// SUBSCRIBE_START / SUBSCRIBE_FINISH emitted from #runTrack.
+				// SUBSCRIBE_START / SUBSCRIBE_END emitted from #runTrack.
 				//
 				// The timescale is an immutable property, so serving MUST use exactly
 				// what TRACK_INFO advertised. It comes from the producer's accept(), so
@@ -1227,15 +1349,18 @@ export class Publisher {
 			// Lite-07: the Range IDs of the live ranges that start partway through a group, so an
 			// edit recomputes the frame starts only while one is live.
 			const positions = new Set<bigint>();
+			for (const [id, range] of asked.entries()) if (framed(range)) positions.add(BigInt(id));
+			// Lite-07: the Range IDs of the live ranges that end partway through a group, likewise.
+			const stopping = new Set<bigint>();
 			for (const [id, range] of asked.entries())
-				if (range.start?.absolute !== undefined && range.start.frame) positions.add(BigInt(id));
+				if (range.end?.absolute !== undefined && range.end.frame) stopping.add(BigInt(id));
 			// Lite-07: the ranges whose starts or time ends may still resolve.
 			const unpinned = new Unpinned();
 			if (hasRanges(this.version))
 				for (const [id, range] of asked.entries()) unpinned.insert(BigInt(id), due(range, false));
 			// Each live range due once the latest group reached where it may resolve, with its start and
 			// end replaced by the groups they resolved to: a range resolves once, so an update that
-			// leaves it live never places a live join again under a newer Min Age, nor looks a time
+			// leaves it live never places a live join again against a newer live edge, nor looks a time
 			// start up again in newer holdings, here or on a relay's copies. Only the ranges still
 			// waiting are asked, and each is let go once its anchors settle, so this costs those ranges
 			// rather than every range. Mirrors the Rust `TrackRun::pin`.
@@ -1272,7 +1397,7 @@ export class Publisher {
 				writer: stream.writer,
 				version: this.version,
 				live: new LiveRanges(this.version, asked),
-				apply: (update, { retired, added }) => {
+				apply: (update, { retired, added, retuned }) => {
 					legacyPriority.set(update.priority);
 					if (wireOf(front).localDatagrams) legacy?.setPriority(update.priority);
 					// Every update restates the wanted group. Past our largest it is a refresh, which
@@ -1280,43 +1405,58 @@ export class Publisher {
 					const largest = hooks.peekLargest(track).largest?.group;
 					if (update.wantedGroup !== undefined && (largest === undefined || update.wantedGroup > largest))
 						hooks.askSubscriber(track, "refresh");
-					const delay = {
-						max: servingMaxDelay(update.maxDelay),
-						min: update.minDelay === undefined ? null : Duration.millis(update.minDelay),
-					};
 					if (!hasRanges(this.version)) {
-						// An older update restates its one span, replacing every range.
-						track.update({
+						// An older update restates its one span, replacing every range: an absent start is
+						// placed afresh within the new max age rather than retuned where the old one joined.
+						const absent = legacyStart(this.version, update.maxDelay);
+						const restated: track.Subscription = {
 							priority: update.priority,
 							order: update.order,
-							delay,
-							ranges: requestedRanges(update),
-						});
+							ranges: requestedRanges(update, absent),
+						};
+						const placed = requestedPlaced(update, absent);
+						if (placed.size > 0) restated.placed = placed;
+						hooks.restateSubscriber(track, restated);
 						return;
 					}
 					// Lite-07 hands the model the edit by Range ID, so it costs the ranges it names
-					// whatever else is live. A pinned range is replaced in place, keeping its Range ID.
+					// whatever else is live. A pinned or retuned range is replaced in place, keeping its
+					// Range ID: a live join is never pinned (see `due`), so a retune replaces it as it
+					// stands, and the model keeps it placed where it was.
 					for (const id of retired) unpinned.remove(id);
 					const pins = pinDue();
+					const replaced = [...pins, ...retuned];
 					for (const id of retired) requested.remove(id);
-					for (const [id, range] of [...pins, ...added]) requested.insert(id, range);
+					for (const [id, range] of [...replaced, ...added]) requested.insert(id, range);
 					for (const [id, range] of added) unpinned.insert(id, due(range, false));
 					for (const id of retired) positions.delete(id);
-					for (const [id, range] of added)
-						if (range.start?.absolute !== undefined && range.start.frame) positions.add(id);
+					for (const [id, range] of added) if (framed(range)) positions.add(id);
 					bounds.startsAfter.set(
 						update,
 						positions.size > 0 ? positionFrames([...requested.values()]) : new Map(),
 					);
+					for (const id of retired) stopping.delete(id);
+					for (const [id, range] of added)
+						if (range.end?.absolute !== undefined && range.end.frame) stopping.add(id);
+					bounds.stopsAfter.set(
+						update,
+						stopping.size > 0 ? positionStops([...requested.values()]) : new Map(),
+					);
 					// Refused before the model moves, as one SUBSCRIBE asking for nothing is.
 					Object.assign(update, spanBetween(this.version, requested.start(), requested.end()));
-					const add = [...pins, ...added].map(([id, range]) => [id, requestedRange(range)] as const);
+					const add = [...replaced, ...added].map(([id, range]) => [id, requestedRange(range)] as const);
+					// A placed join, added or retuned, stays placed where it was.
+					const placed = new Map<bigint, bigint>();
+					for (const [id, range] of [...replaced, ...added]) {
+						const at = range.start?.joined?.absolute;
+						if (at !== undefined) placed.set(id, at);
+					}
 					hooks.editSubscriber(track, {
-						retire: [...retired, ...pins.map(([id]) => id)],
+						retire: [...retired, ...replaced.map(([id]) => id)],
 						add,
+						placed,
 						priority: update.priority,
 						order: update.order,
-						delay,
 					});
 				},
 			});
@@ -1439,7 +1579,6 @@ export class Publisher {
 				// FETCH's slot until the requester leaves.
 				const options: track.FetchGroupOptions & broadcast.FetchFrom = {
 					priority: msg.priority,
-					maxDelay: msg.maxDelay === undefined ? undefined : Duration.millis(msg.maxDelay),
 					signal: left.signal,
 					// A copy holding the frames asked on serves them; one missing them is filled whole.
 					frameStart: msg.startFrame,
@@ -1515,7 +1654,7 @@ export class Publisher {
 			// The read cursor's floor; see {@link cursorFloor}.
 			floor: bigint;
 			bounds: FrameBounds;
-			// How many ranges the SUBSCRIBE carried, whose starts SUBSCRIBE_START reports.
+			// How many ranges the SUBSCRIBE carried, which take Range IDs from 0.
 			initial: bigint;
 		},
 	): Promise<boolean> {
@@ -1533,7 +1672,7 @@ export class Publisher {
 			moveCursor();
 		};
 		// Lite-05+ resolves the range on the subscribe stream: SUBSCRIBE_START once the
-		// first group is known, SUBSCRIBE_FINISH when the track finishes.
+		// first group is known, SUBSCRIBE_END when the track finishes.
 		const emitRange = hasTrackStream(this.version);
 		let startSent = false;
 		// Dispositions before START refine its boundary; later ones must be named as drops.
@@ -1543,47 +1682,166 @@ export class Publisher {
 		// The first group and the edge seen before it was popped, held until the source
 		// resolves where its feed starts.
 		let first: { group: group.Consumer; largest: track.Position | undefined } | undefined;
-		// The largest as SUBSCRIBE_OK reports it, with whether its group ended.
-		const answered = (position: track.Position | undefined) =>
-			position && { position, ended: hooks.largestFinished(track, position) };
+		// What this hop knows of the largest position, `position` the newest it saw: nothing on a
+		// relay's copy its upstream has yet to answer, whatever its cache holds. Mirrors the Rust
+		// `TrackRun::largest`.
+		const edge = (position: track.Position | undefined): Edge => {
+			if (!hooks.knowsEdge(track)) return "unknown";
+			return position ? { position, ended: hooks.largestFinished(track, position) } : "empty";
+		};
+		const newest = () => newer(hooks.bufferedLargest(track), hooks.peekLargest(track).largest);
 		let endSent = false;
-		// Lite-07: the Range IDs an update added whose start no SUBSCRIBE_STARTED reported yet.
-		const unstarted = new Set<bigint>();
+		// Lite-07: the ranges no SUBSCRIBE_START answered yet, by Range ID, each as it was asked.
+		const unstarted = new Map<bigint, Asked>();
+		if (hasRanges(this.version)) {
+			for (let id = 0n; id < initial; id++) {
+				const range = controls.range(id);
+				if (range) unstarted.set(id, asked(range));
+			}
+		}
+		// Lite-07: the drops and skips given up once delivery resolved, while no range's SUBSCRIBE_START
+		// has gone out yet, as a range following an edge this hop does not know yet leaves it. A
+		// subscriber reads none before the subscription's first START. Mirrors the Rust `TrackRun::withheld`.
+		let withheld: SubscribeResponse[] | undefined;
+		// Send a range's SUBSCRIBE_START, then whatever was withheld for the first one.
+		const sendStart = async (start: SubscribeStart): Promise<boolean> => {
+			if (!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version)))) return false;
+			const held = withheld ?? [];
+			withheld = undefined;
+			for (const msg of held) {
+				if (!(await controls.response(encodeSubscribeResponse(stream, msg, this.version)))) return false;
+			}
+			return true;
+		};
+		// Send a drop or skip, or withhold it until the first SUBSCRIBE_START.
+		const sendHole = (msg: SubscribeResponse): Promise<boolean> => {
+			if (!withheld) return controls.response(encodeSubscribeResponse(stream, msg, this.version));
+			withheld.push(msg);
+			return Promise.resolve(true);
+		};
+		// Lite-07: whether the track is a relay's copy that places each range only where its upstream
+		// would, from that upstream's answer for it or groups proving it, so a range it placed waits
+		// on no other. A copy that places ranges from whatever groups it holds, or a local track,
+		// waits for where its whole feed starts. Mirrors the Rust `TrackRun::per_range`.
+		const perRange = () => hasRanges(this.version) && hooks.placesAsUpstream(track);
 
-		// Where each of the SUBSCRIBE's ranges starts once delivery starts at `from`, by Range ID,
-		// undefined for one with no group there or an update retired: SUBSCRIBE_STARTED answers
-		// each one an update added. Before lite-07 there is one range, which starts there.
-		const rangeStarts = (from: bigint): (bigint | undefined)[] => {
-			if (!hasRanges(this.version)) return [from];
-			const starts = hooks.servingStarts(track, from);
-			const positions = controls.positions();
-			return Array.from({ length: Number(initial) }, (_, id) => {
-				const index = positions.get(BigInt(id));
-				return index === undefined ? undefined : starts[index];
-			});
+		// Resolve delivery at `from`, `position` the newest this hop saw, and answer each of the
+		// SUBSCRIBE's ranges resolved there. Before lite-07 the one start answers the subscription.
+		// A lite-07 range still waiting, or one following the live edge before this hop knows where
+		// it is, is answered later by `reportStarted`. Mirrors the Rust `TrackRun::resolve`.
+		const resolveStart = async (from: bigint, position: track.Position | undefined): Promise<boolean> => {
+			startSent = true;
+			startKey = from;
+			if (!hasRanges(this.version))
+				return sendStart(new SubscribeStart({ id: 0n, start: from, largest: "unknown" }));
+			// Until a range's START goes out, which one following an edge this hop does not know yet
+			// may trail delivery resolving.
+			withheld = [];
+			const largest = edge(position);
+			const ids = [...unstarted.keys()].filter((id) => id < initial && controls.holds(id));
+			const resolution = hooks.servingResolvedKeys(track, ids);
+			// A range reaching back to the oldest group, on a copy placing each range as its upstream
+			// answered it, starts where the copy's feed does, which it may not know yet.
+			const reaches = perRange() && hooks.sourceStart(track) === "pending";
+			for (const [index, id] of ids.entries()) {
+				const range = resolution[index];
+				// An update taken while an earlier start went out may have retired it.
+				if (!range || !controls.holds(id) || (unstarted.get(id)?.live && largest === "unknown")) continue;
+				// A live join starts where it was placed, past the groups its max expired, which may be
+				// below where delivery starts: a relay serves first the groups it holds, before those the
+				// join is owed arrive. It moves delivery down to it. Any other range starts no earlier
+				// than delivery.
+				const budget = unstarted.get(id)?.joins;
+				if (budget === undefined && reaches && !range.floored) continue;
+				const start =
+					budget !== undefined ? hooks.joinStart(track, range.start, budget) : max(range.start, from);
+				unstarted.delete(id);
+				const at = range.end === undefined || range.end > start ? start : undefined;
+				if (at !== undefined) startKey = min(startKey, at);
+				if (!(await sendStart(new SubscribeStart({ id, start: at, largest })))) return false;
+			}
+			// A range an update added before this start is answered with it, before the drops held
+			// for it, which a subscriber reads only once a range has started.
+			return reportStarted(false);
 		};
 
-		// Report where each range an update added starts, once it resolves, or with no start once
-		// nothing can resolve it (`finished`). SUBSCRIBE_START goes first.
+		// While the source has yet to say where its whole feed starts, `position` the newest this hop
+		// saw: whether a range still unanswered, one the SUBSCRIBE carried or an update added since,
+		// names a group the copy placed as its upstream answered (see `perRange`), so `resolveStart`
+		// answers it now rather than wait on a live join or older history upstream still places.
+		// Mirrors the Rust `TrackRun::places_any`.
+		const placesAny = (position: track.Position | undefined): boolean => {
+			if (!perRange()) return false;
+			const known = edge(position) !== "unknown";
+			const ids = [...unstarted.keys()].filter((id) => controls.holds(id));
+			const resolution = hooks.servingResolvedKeys(track, ids);
+			return ids.some((id, index) => resolution[index]?.floored && (known || !unstarted.get(id)?.live));
+		};
+
+		// Answer each range still waiting for its SUBSCRIBE_START once it resolves, or with no start
+		// once nothing can resolve it (`finished`). One following the live edge also waits until this
+		// hop knows where it is. The first answers go out with `resolveStart`. Mirrors the Rust
+		// `TrackRun::report_started`.
 		const reportStarted = async (finished: boolean): Promise<boolean> => {
 			if (startKey === undefined || unstarted.size === 0) return true;
-			// An update not taken yet retired one, and taking that update forgets it.
-			const held = [...unstarted].filter((id) => controls.holds(id));
+			const largest = edge(newest());
+			// An update not taken yet retired one, and taking that update forgets it. In Range ID
+			// order, as the Rust `TrackRun::report_started` reports them.
+			const held = [...unstarted.keys()]
+				.filter((id) => controls.holds(id))
+				.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+			// Every range clamps against where delivery started before this batch, so one reported
+			// later isn't clamped against a start an earlier join in the batch lowered.
+			const from = startKey;
+			const per = perRange();
 			const resolution = hooks.servingResolvedKeys(track, held);
 			for (const [index, id] of held.entries()) {
 				// Or one taken while an earlier start went out.
 				if (!controls.holds(id)) continue;
+				const ask = unstarted.get(id);
+				// Never answered without the largest, even once nothing else can resolve it: this hop's
+				// feed answering or ending tells it.
+				if (ask?.live && largest === "unknown") continue;
 				const range = resolution[index];
 				if (!range && !finished) continue;
 				let start: bigint | undefined;
 				if (range) {
-					start = max(range.start, startKey);
+					// A live join placed behind where delivery started, further from the live edge than
+					// the first ranges, starts where it was placed, past the groups its max expired: the
+					// subscriber reads its answer as the join's start, so its groups from there are owed,
+					// and delivery now starts there too. So does a range naming a group on a copy that
+					// places it as its upstream answered. One reaching back there starts where the copy's
+					// feed does, once the copy knows. Any other range starts no earlier than delivery.
+					if (ask?.joins !== undefined) start = hooks.joinStart(track, range.start, ask.joins);
+					else if (per && range.floored) start = range.start;
+					else if (per) {
+						const source = hooks.sourceStart(track);
+						if (source === "pending" && !finished) continue;
+						start = max(range.start, source === "pending" ? from : (source ?? from));
+					} else start = max(range.start, from);
 					if (range.end !== undefined && range.end <= start) start = undefined;
+					else startKey = min(startKey, start);
 				}
-				const started = new SubscribeStarted(id, start);
-				if (!(await controls.response(encodeSubscribeResponse(stream, { started }, this.version))))
-					return false;
 				unstarted.delete(id);
+				if (!(await sendStart(new SubscribeStart({ id, start, largest })))) return false;
+			}
+			return true;
+		};
+
+		// Lite-07, on a track this hop knows has no group yet: answer each range starting at the
+		// oldest group at once, since every group the track produces is owed, so the subscriber
+		// learns the track is empty rather than wait on a group. A time start above the floor, or a
+		// live join, waits for a group to place it; one at or below the floor starts where delivery
+		// does. Mirrors the Rust `TrackRun::resolve_empty`.
+		const resolveEmpty = async (): Promise<boolean | undefined> => {
+			if (!hasRanges(this.version) || ![...unstarted.values()].some((ask) => ask.oldest)) return undefined;
+			if (newest() !== undefined || !hooks.knowsEdge(track) || hooks.subscriberEnd(track) !== undefined)
+				return undefined;
+			if (!(await resolveStart(0n, undefined))) return false;
+			for (const [id, ask] of [...unstarted]) {
+				if (!ask.oldest || !controls.holds(id)) continue;
+				unstarted.delete(id);
+				if (!(await sendStart(new SubscribeStart({ id, start: 0n, largest: "empty" })))) return false;
 			}
 			return true;
 		};
@@ -1625,8 +1883,7 @@ export class Publisher {
 				const from = around && streaming.has(around.start) ? min(around.end, gap.end) : gap.start;
 				if (from >= gap.end) continue;
 				record.tell(from, gap.end, report);
-				const msg = holeMessage(from, gap.end, hole);
-				if (!(await controls.response(encodeSubscribeResponse(stream, msg, this.version)))) return false;
+				if (!(await sendHole(holeMessage(from, gap.end, hole)))) return false;
 			}
 			return true;
 		};
@@ -1638,10 +1895,10 @@ export class Publisher {
 			if (!record || start >= end) return true;
 			if (!hole.skip) end = reach(end);
 			record.tell(start, end, reportOf(hole));
-			return controls.response(encodeSubscribeResponse(stream, holeMessage(start, end, hole), this.version));
+			return sendHole(holeMessage(start, end, hole));
 		};
 
-		// The track's exclusive final boundary. A Rust subscriber feeds SUBSCRIBE_FINISH
+		// The track's exclusive final boundary. A Rust subscriber feeds SUBSCRIBE_END
 		// straight into finish_at, so it must name the track's boundary (which counts
 		// datagram sequences too), not the delivered range: a subscription cap can hold
 		// produced groups back. The latest() fallback covers a subscription torn down
@@ -1661,7 +1918,7 @@ export class Publisher {
 			const endError = hooks.subscriberEndError(track);
 			const code = endError && hasEndError(this.version) ? toStreamCode(endError) : undefined;
 			return controls.response(
-				encodeSubscribeResponse(stream, { finish: new SubscribeFinish(boundary(), code) }, this.version),
+				encodeSubscribeResponse(stream, { end: new SubscribeEnd(boundary(), code) }, this.version),
 			);
 		};
 
@@ -1674,7 +1931,25 @@ export class Publisher {
 			if (end instanceof Error) throw end;
 			return end === done;
 		};
-		// Before lite-07 an errored end is only the reset at that end: a clean SUBSCRIBE_FINISH sent
+		// Lite-07: true once every group settled, or `undefined` once a control is there to take,
+		// its FIN or failure included. An update may move a stop a group is parked at, which only
+		// the loop applies, so the drain waits for it no longer. Each wait is disposed once it
+		// wakes, so updates that leave a group parked leave nothing behind.
+		const drainedOrControl = async (): Promise<true | undefined> => {
+			for (;;) {
+				if (controls.pending()) return undefined;
+				if (groups.size === 0) return true;
+				const dispose: Dispose[] = [];
+				await new Promise<void>((resolve) => {
+					dispose.push(
+						controls.changed(resolve),
+						groupEnded.changed(() => resolve()),
+					);
+				});
+				for (const close of dispose) close();
+			}
+		};
+		// Before lite-07 an errored end is only the reset at that end: a clean SUBSCRIBE_END sent
 		// early could let the subscriber settle before the reset arrives. A subscription capped
 		// short of the end is owed no error, so its boundary goes out.
 		const declareEarly = () =>
@@ -1687,6 +1962,8 @@ export class Publisher {
 
 		// Every group this subscription started serving, until its stream finishes or resets.
 		const groups = new Set<Promise<void>>();
+		// Bumped each time one of `groups` ends.
+		const groupEnded = new Signal(0);
 		const drops = new Signal(0);
 		// Groups whose stream failed, with why, for the control stream to name, as runs: a group held
 		// whole names its span.
@@ -1696,9 +1973,18 @@ export class Publisher {
 		// a track that ran out of groups still has to flush the ones already queued, and the
 		// caller FINs the subscribe stream to say so.
 		let finished = false;
+		let armed: { woke: Promise<void>; dispose: Dispose } | undefined;
+		// Park until the subscription changes, from the wait armed this pass if any.
+		const park = () => armed?.woke ?? waitForSubscription(controls, track, drops);
 		let unsubscribe!: () => void;
 		const unsubscribed = new Promise<void>((resolve) => {
 			unsubscribe = resolve;
+		});
+		// Unlike `unsubscribed`, settles however the run ends: a group parked at a stop waits on an
+		// update, which no longer comes.
+		let end!: () => void;
+		const ended = new Promise<void>((resolve) => {
+			end = resolve;
 		});
 		try {
 			for (;;) {
@@ -1721,11 +2007,14 @@ export class Publisher {
 						// The rest of the span is told with it; the served start keeps its record.
 						for (const gap of record?.untold(start, end) ?? [])
 							record?.tell(gap.start, gap.end, reportOf({ error }));
-						const msg = SubscribeDrop.given(start, end, error, this.version);
-						if (!(await controls.response(encodeSubscribeResponse(stream, { drop: msg }, this.version))))
+						if (!(await sendHole({ drop: SubscribeDrop.given(start, end, error, this.version) })))
 							return false;
 					}
 				}
+				// While a range waits for its START, the wait below is armed before `reportStarted` reads
+				// what this hop knows, so an answer landing while this pass awaits still wakes it.
+				armed?.dispose();
+				armed = unstarted.size > 0 ? armSubscription(controls, track, drops) : undefined;
 				if (!(await reportStarted(false))) return false;
 				// Control before data, matching the Rust publisher: every control decoded while
 				// the loop was parked applies to the next pop, never to one already made. This
@@ -1747,9 +2036,9 @@ export class Publisher {
 							finished = false;
 							const update = control.update;
 							if (hasRanges(this.version)) {
-								// A range retired before its start resolved is owed no SUBSCRIBE_STARTED.
+								// A range retired before its start resolved is owed no SUBSCRIBE_START.
 								for (const id of control.applied.retired) unstarted.delete(id);
-								for (const [id] of control.applied.added) if (id >= initial) unstarted.add(id);
+								for (const [id, range] of control.applied.added) unstarted.set(id, asked(range));
 							}
 							console.debug(`subscribe update: broadcast=${broadcast} track=${track.name}`);
 							// `cursorFloor` pins an unfloored pre-06 SUBSCRIBE to the latest
@@ -1780,6 +2069,8 @@ export class Publisher {
 							bounds.endGroup = update.endGroup;
 							bounds.endFrame = update.endFrame;
 							bounds.starts = bounds.startsAfter.get(update) ?? new Map();
+							const stops = bounds.stopsAfter.get(update);
+							if (stops && !sameStops(stops, bounds.stops.peek())) bounds.stops.set(stops);
 							moveCursor();
 							// A microtask is too short: decoding one framed update crosses several
 							// awaits, each of which can requeue behind the serving continuation. A
@@ -1814,40 +2105,12 @@ export class Publisher {
 						else if (!(await forward(recv.start, recv.end, recv))) return false;
 						continue;
 					case "idle":
-						// A start past everything the track has (a subscriber resuming just after
-						// what it holds) is answered at once with the largest position, on
-						// versions that carry it: a quiet track may not reach that start for a
-						// while, and the subscriber judges what it holds against the answer.
-						if (emitRange && !startSent && hasLargest(this.version) && bounds.startGroup !== undefined) {
-							const startFrame = bounds.startFrame;
-							if (
-								largest !== undefined &&
-								(bounds.startGroup > largest.group ||
-									(bounds.startGroup === largest.group && startFrame > largest.frame))
-							) {
-								startSent = true;
-								startKey = bounds.startGroup;
-								if (!hasRanges(this.version)) raiseFloor(bounds.startGroup);
-								const start = new SubscribeStart(rangeStarts(bounds.startGroup), answered(largest));
-								if (
-									!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version)))
-								)
-									return false;
-								continue;
-							}
-						}
 						// A lite-07 window whose bounded ranges all resolved empty owes nothing: say so at
 						// once, and the subscription ends as covered below. No group would ever answer it.
 						if (emitRange && !startSent && hasRanges(this.version)) {
 							const end = hooks.servingEnd(track);
 							if (end !== undefined && hooks.servingRuns(track, 0n, end).length === 0) {
-								startSent = true;
-								startKey = end;
-								const start = new SubscribeStart(rangeStarts(end), answered(largest));
-								if (
-									!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version)))
-								)
-									return false;
+								if (!(await resolveStart(end, largest))) return false;
 								continue;
 							}
 						}
@@ -1868,17 +2131,16 @@ export class Publisher {
 								runs.length > 0 &&
 								runs.every((run) => runGaps(given, run.start, run.end).length === 0)
 							) {
-								startSent = true;
-								startKey = runs[0].start;
-								const start = new SubscribeStart(rangeStarts(startKey), answered(largest));
-								if (
-									!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version)))
-								)
-									return false;
+								if (!(await resolveStart(runs[0].start, largest))) return false;
 								continue;
 							}
 						}
-						await waitForSubscription(controls, track, drops);
+						if (emitRange && !startSent) {
+							const empty = await resolveEmpty();
+							if (empty === false) return false;
+							if (empty) continue;
+						}
+						await park();
 						continue;
 					case "boundary":
 						// The producer finished but is still holding groups above the cap.
@@ -1887,7 +2149,7 @@ export class Publisher {
 							if (!(await sendEnd())) return false;
 							continue;
 						}
-						await waitForSubscription(controls, track, drops);
+						await park();
 						continue;
 					case "done": {
 						const endError = hooks.subscriberEndError(track);
@@ -1901,11 +2163,8 @@ export class Publisher {
 						// any group resolved the start still says where delivery starts; the loop then
 						// names what it held back, and the drops below account for the rest.
 						if (keepsSubscribeOpen(this.version) && !startSent && boundary() > 0n) {
-							startSent = true;
-							startKey = hooks.servingRuns(track, 0n, boundary())[0]?.start ?? boundary();
-							const start = new SubscribeStart(rangeStarts(startKey), answered(largest));
-							if (!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version))))
-								return false;
+							const from = hooks.servingRuns(track, 0n, boundary())[0]?.start ?? boundary();
+							if (!(await resolveStart(from, largest))) return false;
 							continue;
 						}
 						// Nothing arrives to resolve a range still waiting on the live feed.
@@ -1927,9 +2186,11 @@ export class Publisher {
 							if (!(await sendEnd())) return false;
 							continue;
 						}
-						if (!(await drained())) return false;
+						const drain = keepsSubscribeOpen(this.version) ? await drainedOrControl() : await drained();
+						if (drain === undefined) continue;
+						if (!drain) return false;
 						if (pendingDrops.length > 0) continue;
-						// Lite-07 keeps the stream open past SUBSCRIBE_FINISH: an update may still ask
+						// Lite-07 keeps the stream open past SUBSCRIBE_END: an update may still ask
 						// for the ended track's history, and the subscriber FINs once it wants nothing
 						// more.
 						if (keepsSubscribeOpen(this.version)) {
@@ -1953,15 +2214,20 @@ export class Publisher {
 				const range = frameRange(bounds, group.start);
 
 				if (emitRange && !startSent) {
-					const source = hooks.sourceStart(track);
+					let source = hooks.sourceStart(track);
 					// A group stream can beat the upstream START on its own stream, and resolving
-					// from the group alone would give up the backlog that START still promises.
+					// from the group alone would give up the backlog that START still promises. On
+					// lite-07, one of the SUBSCRIBE's ranges placed already resolves it, with delivery
+					// at the floor, at or below where any range still unplaced starts, so its answer
+					// later is never raised past its own start.
 					if (source === "pending") {
-						first = { group, largest };
-						await waitForSubscription(controls, track, drops);
-						continue;
+						if (!placesAny(largest)) {
+							first = { group, largest };
+							await park();
+							continue;
+						}
+						source = floor;
 					}
-					startSent = true;
 					// Newest-first delivery can put a group ahead of where the source's feed
 					// starts. Preserve that start so a resumed subscriber still waits for the backlog.
 					startKey = min(group.start, source ?? group.start);
@@ -1976,16 +2242,7 @@ export class Publisher {
 					// Group Start is the latest group, and this key becomes the floor.
 					// Lite-06 encodes a floor of group 0 as 0, so an omitted start is not pinned.
 					if (bounds.startGroup === undefined && !resolvesStart(this.version)) raiseFloor(startKey);
-					if (
-						!(await controls.response(
-							encodeSubscribeResponse(
-								stream,
-								{ start: new SubscribeStart(rangeStarts(startKey), answered(largest)) },
-								this.version,
-							),
-						))
-					)
-						return false;
+					if (!(await resolveStart(startKey, largest))) return false;
 				}
 				record?.tell(group.start, group.start + 1n, { kind: "settled" });
 				streaming.add(group.start);
@@ -2000,6 +2257,7 @@ export class Publisher {
 					unsubscribed,
 					start: range.start,
 					end: range.end,
+					stops: hasRanges(this.version) ? { at: bounds.stops, ended } : undefined,
 					// The starts inside a group sent whole are accounted for by its GROUP_END, so the
 					// end-of-track scan never drops them.
 					ended: (end) => {
@@ -2026,12 +2284,15 @@ export class Publisher {
 				groups.add(task);
 				void task.finally(() => {
 					groups.delete(task);
+					groupEnded.update((ended) => ended + 1);
 				});
 			}
 		} finally {
+			armed?.dispose();
 			// A group held for the upstream START has no one left to read it.
 			first?.group.close();
 			if (!finished) unsubscribe();
+			end();
 			// A lite-07 subscriber FINs once it read the finished track's tail, or once it wants
 			// nothing more, even while a reply is still being written. Either way the groups still
 			// waiting for a slot are cancelled, but an opened stream may be a final group whose FIN
@@ -2340,12 +2601,16 @@ export class Publisher {
 		);
 		try {
 			const info = await untilAborted(track.info(), signal);
-			await encodeSubscribeResponse(stream.writer, { start: new SubscribeStart([0n]) }, this.version);
+			await encodeSubscribeResponse(
+				stream.writer,
+				{ start: new SubscribeStart({ id: 0n, start: 0n, largest: "unknown" }) },
+				this.version,
+			);
 			const end = await untilAborted(
 				this.#runDatagrams(track, { sub: msg.id, stamp: stamping(this.version, info) }),
 				signal,
 			);
-			await encodeSubscribeResponse(stream.writer, { finish: new SubscribeFinish(end) }, this.version);
+			await encodeSubscribeResponse(stream.writer, { end: new SubscribeEnd(end) }, this.version);
 			stream.writer.close();
 			await updates;
 		} finally {
@@ -2517,7 +2782,7 @@ export class Publisher {
 	 * @internal
 	 */
 	async #serveGroup(stream: Writer, options: RunGroup) {
-		const { sub, group, givenUp, stamp, compress, priority, start: startFrame, end: endFrame } = options;
+		const { sub, group, givenUp, stamp, compress, priority, start: startFrame, end: endFrame, stops } = options;
 		// The header names the requested position, so a copy missing it must be refused.
 		const msg = new GroupMessage({ subscribe: sub, key: group.start, frameStart: startFrame });
 		// The subscription's budget, or an eviction of what is left to read, may give up on the
@@ -2548,6 +2813,15 @@ export class Publisher {
 			let reached = hooks.groupIndex(group) === startFrame;
 			// Whether every frame went out, which a finished group's GROUP_END then claims.
 			let whole = false;
+			// What ends a park at a stop (see parkAt), made on the first park and reused.
+			let left: Promise<true> | undefined;
+			const gone = () => {
+				left ??= race(stops ? [stream.closed, stops.ended] : [stream.closed]).then(
+					() => true as const,
+					() => true as const,
+				);
+				return left;
+			};
 
 			for (;;) {
 				const read = await race([hooks.readGroupFrame(group, compress), stream.closed]);
@@ -2567,6 +2841,9 @@ export class Publisher {
 				// numbers what it gets from `startFrame`.
 				if (read.index < startFrame) continue;
 				if (endFrame !== undefined && read.index > endFrame) break;
+				// Lite-07: hold a frame past a Position end, the stream open, until an update moves the
+				// end. A group ending at the end reads as its end above, so its stream ends as usual.
+				if (stops) await parkAt(stops.at, group.start, read.index, givenUp, gone);
 
 				let delta: bigint | undefined;
 				if (stamp !== undefined) {

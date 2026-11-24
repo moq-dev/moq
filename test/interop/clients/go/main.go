@@ -174,7 +174,7 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 	if err != nil {
 		return err
 	}
-	media, err := moqmedia.NewVideoTrackStreamProducer(producer, moqmedia.Named{}, moqmedia.VideoInit{Format: moqmedia.VideoFormatH264, Data: nil})
+	media, err := moqmedia.NewVideoTrackStreamProducer(producer, moqmedia.Named{}, moqmedia.VideoInit{Format: moqmedia.H264VideoFormat(), Data: nil})
 	if err != nil {
 		return err
 	}

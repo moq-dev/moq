@@ -24,7 +24,7 @@ export class Consumer {
 }
 
 export interface ConsumerProps {
-	delay?: Signals.GetterInit<Net.Track.Delay>;
+	delay?: Signals.GetterInit<Delay>;
 	format: Format;
 	ordered?: Net.Track.Ordered;
 	predecessor?: Consumer;
@@ -32,6 +32,11 @@ export interface ConsumerProps {
 }
 
 export const DELAY_MAX: Net.Clock.Duration;
+
+export interface Delay {
+	max?: Net.Clock.Duration | null;
+	min?: Net.Clock.Duration | null;
+}
 
 export interface Format {
 	decode(payload: Uint8Array, timestamp: Net.Time.Timestamp): Frame[];
@@ -104,5 +109,9 @@ export type TrackInfoOptions = {
 
 export function mergeBufferedRanges(a: BufferedRanges, b: BufferedRanges): BufferedRanges;
 
+export function subscription(delay: Delay, subscription?: Net.Track.Subscription): Net.Track.Subscription;
+
 export function trackInfo(options: TrackInfoOptions): Net.Track.InfoInit;
+
+export function update(delay: Delay, current: Net.Track.Subscription, asked?: Net.Track.Subscription): Net.Track.Subscription;
 ```

@@ -39,6 +39,8 @@ export class Tail {
 	// Group streams whose header arrived, and those still being read and holding the end.
 	#streams = 0;
 	#active = 0;
+	// The lowest group a stream's header named, which proves the group exists.
+	#first: bigint | undefined;
 	// Streams still being read that the end waits for at most the grace, until a settle gives up
 	// on them, as the ledger does on a gap.
 	#excused = new Set<object>();
@@ -62,9 +64,15 @@ export class Tail {
 		return this.#streams;
 	}
 
+	/** The lowest group whose stream's header arrived. */
+	get first(): bigint | undefined {
+		return this.#first;
+	}
+
 	/** Record a group stream whose header arrived, held until it is read to its end. */
 	open(key: bigint): Counted {
 		this.#streams += 1;
+		if (this.#first === undefined || key < this.#first) this.#first = key;
 		this.#active += 1;
 		this.#account(key, key + 1n);
 
@@ -174,15 +182,16 @@ export class Tail {
 	 * A stream still being read is waited for: a group ends on its own stream's FIN or reset,
 	 * never because its track ended. The grace gives up on streams that never arrived, and on
 	 * excused ones: a browser can lose a stream's reset, leaving it open forever, and the
-	 * publisher's drop already accounted for its group.
+	 * publisher's drop already accounted for its group. `limit` caps the grace.
 	 */
-	async settle(complete: () => boolean, closed: GetPromise<unknown>): Promise<void> {
+	async settle(complete: () => boolean, closed: GetPromise<unknown>, limit?: Duration): Promise<void> {
 		// A gap that aged past the grace since the last insert is no longer waited for either.
 		this.#ledger.expire(now(), this.#grace());
 
 		let expired = false;
 		const timer = new AbortController();
-		void sleep(this.#grace(), { signal: timer.signal }).then(
+		const grace = this.#grace();
+		void sleep(limit === undefined ? grace : grace.min(limit), { signal: timer.signal }).then(
 			() => {
 				expired = true;
 				this.#bump();

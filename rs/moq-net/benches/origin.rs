@@ -565,8 +565,9 @@ fn bench_announce_duplicate(c: &mut Criterion) {
 }
 
 /// Re-price a live mesh route with cursors watching different scopes.
-/// The challenger alternates between winning and losing, so selection must
-/// honor each cursor's scope rather than reuse one global winner.
+/// Each claim is broader than its grant, so it is filed at each granted prefix and
+/// contends there. The challenger alternates between winning and losing, so selection
+/// must honor each cursor's scope rather than reuse one global winner.
 fn bench_reprice_duplicate(c: &mut Criterion) {
 	let mut group = c.benchmark_group("origin/reprice_duplicate");
 	for incumbent_cost in [INCUMBENT_COST, MAX_COST - 1] {
@@ -592,9 +593,18 @@ fn bench_reprice_duplicate(c: &mut Criterion) {
 						.unwrap()
 					})
 					.collect();
+				// Through both grants, so the challenger is filed beside the incumbents at each.
+				let both = producer
+					.scope(
+						"",
+						&(0..2)
+							.map(|i| Prefix::try_from(format!("{PATH}/p{i}")).unwrap())
+							.collect::<Prefixes>(),
+					)
+					.unwrap();
 				let challenger = duplicates as u64 + 1;
 				let route = moq_net::fuzz::requests_route(
-					&producer,
+					&both,
 					moq_net::Path::new(PATH).unwrap(),
 					peer_route(challenger, incumbent_cost + 1),
 				)
@@ -625,6 +635,7 @@ fn bench_reprice_duplicate(c: &mut Criterion) {
 							let moq_net::origin::RouteEvent {
 								kind: moq_net::origin::RouteKind::Restart,
 								announce: update,
+								..
 							} = event
 							else {
 								panic!("expected a restart: got {event:?}");
@@ -1783,8 +1794,10 @@ async fn resume_overlap(shape: ResumeShape, ordered: bool) -> ResumeOverlap {
 		.expect("front refused");
 	let track = resolved.track("0").unwrap();
 	// A budget covering every group, so none is written off as late.
-	let subscription =
-		track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(3600)));
+	let subscription = track::Subscription::default().with_ranges([track::Range::from(track::Start::Live {
+		min: Some(Duration::from_secs(3600)),
+		max: Some(Duration::from_secs(3600)),
+	})]);
 	let mut subscribers = Vec::with_capacity(readers);
 	for _ in 0..readers {
 		let subscriber = kio::clock::timeout(COPY_WAIT, track.subscribe(subscription.clone()))

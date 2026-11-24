@@ -11,6 +11,7 @@
 //! overlapping claims, restarts, and a grant union crossing a scoped boundary. Last, a
 //! client listing one prefix of a relay holds routes only to the origins meeting it.
 
+use crate::WithMax as _;
 use crate::path_routes::{DEBOUNCE, HOLD, land, lite07, quiesce};
 use crate::route_change::{Delivery, produce_origin, read, timed};
 use crate::support;
@@ -132,6 +133,7 @@ impl Watch {
 					origin::RouteKind::Restart => Kind::Restart,
 					origin::RouteKind::End => Kind::End,
 					origin::RouteKind::Offline => Kind::Offline,
+					kind => panic!("unexpected route kind {kind:?}"),
 				};
 				let route = &event.announce.route;
 				let live = matches!(kind, Kind::Start | Kind::Update | Kind::Restart);
@@ -190,7 +192,7 @@ async fn subscribe(
 	let broadcast = (node.consume().follow(path, None).unwrap().available().await)
 		.unwrap()
 		.unwrap();
-	let prefs = track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60)));
+	let prefs = track::Subscription::default().with_max(Duration::from_secs(60));
 	let sub = broadcast.track("video").unwrap().subscribe(prefs).await.unwrap();
 	(broadcast, read(sub))
 }
@@ -947,6 +949,7 @@ impl Listing {
 				origin::RouteKind::Restart => Kind::Restart,
 				origin::RouteKind::End => Kind::End,
 				origin::RouteKind::Offline => Kind::Offline,
+				kind => panic!("unexpected route kind {kind:?}"),
 			};
 			seen.push((event.announce.prefix.to_string(), kind));
 		}

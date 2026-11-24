@@ -182,12 +182,22 @@ enum Confirm {
 	Refused,
 }
 
+/// Whether a slot is still wanted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stay {
+	Wanted,
+	/// Unwanted, and kept until a wanted one serves the claim. `ended` once its publisher
+	/// withdrew it, which outlasts the wait.
+	Leaving {
+		ended: bool,
+	},
+}
+
 /// One claim served through one session.
 struct Slot {
 	served: Served,
 	confirm: Confirm,
-	/// Unwanted, and kept until a wanted one serves the claim.
-	leaving: bool,
+	stay: Stay,
 	/// What its session left behind when it closed.
 	orphan: Option<Box<dyn Orphan>>,
 }
@@ -345,16 +355,9 @@ impl Node {
 		}
 	}
 
-	/// A node for the origin whose node is `relay`, named by it and by when it started,
-	/// which only grows across the restarts of one relay, that `forwards` as the origin does.
+	/// A node for the origin whose node is `relay`, that `forwards` as the origin does.
 	pub fn origin(relay: std::num::NonZeroU64, forwards: bool, clock: Deadlines) -> Self {
-		let started = kio::clock::Wall::now().saturating_duration_since(kio::clock::Wall::UNIX_EPOCH);
-		let me = NodeId {
-			relay: relay.get(),
-			start: u64::try_from(started.as_micros()).unwrap_or(u64::MAX),
-			marked: false,
-		};
-		Self::new(me, forwards, clock)
+		Self::new(NodeId::new(relay.get()), forwards, clock)
 	}
 
 	/// Whether `other` is this node, rather than another origin's.
@@ -762,7 +765,7 @@ impl State {
 			for ((_, session), slot) in slots.iter_mut() {
 				if *session == key {
 					slot.served.available = false;
-					slot.leaving = true;
+					slot.leave(false);
 				}
 			}
 			if slots.is_empty() {
@@ -895,14 +898,14 @@ impl State {
 			}
 		} else {
 			for slot in slots.values_mut() {
-				slot.leaving = true;
+				slot.leave(false);
 			}
 			for (key, served) in wanted {
 				let (origin, session) = key;
 				self.serving.entry(session).or_default().insert(broadcast.clone());
 				match slots.get_mut(&key) {
 					Some(slot) => {
-						slot.leaving = false;
+						slot.stay = Stay::Wanted;
 						if slot.served != served {
 							slot.served = served;
 							outputs.push((session, slot.output(origin, broadcast)));
@@ -912,7 +915,7 @@ impl State {
 						let slot = Slot {
 							served,
 							confirm: Confirm::Waiting,
-							leaving: false,
+							stay: Stay::Wanted,
 							orphan: None,
 						};
 						outputs.push((session, slot.output(origin, broadcast)));
@@ -939,29 +942,37 @@ impl State {
 			self.lanes.remove(broadcast);
 			return;
 		}
-		let staying = || slots.values().filter(|slot| !slot.leaving);
+		// Ended now, they end however long they wait.
+		for slot in slots.values_mut() {
+			if slot.stay != Stay::Wanted {
+				slot.leave(ended);
+			}
+		}
+		let staying = || slots.values().filter(|slot| slot.stay == Stay::Wanted);
 		// Served elsewhere, or by nothing that may carry it.
 		let served = staying().any(|slot| slot.confirm == Confirm::Serving)
 			|| (staying().next().is_some() && staying().all(|slot| slot.confirm == Confirm::Refused));
 		if shown && !served {
 			return;
 		}
-		// Unshown, every slot leaves at once, so each tells its copy all of them go: the
-		// origin then drops them together rather than showing the rest in turn. Shown, the
-		// staying slots share the leaving ones' showing, so a leaving slot speaks only for
-		// its own copy.
-		let gone = match (shown, ended) {
-			(false, true) => Gone::Ended,
-			(false, false) => Gone::Lost,
-			(true, true) => Gone::Withdrawn,
-			(true, false) => Gone::Moved,
-		};
-		let leaving: Vec<SlotKey> = (slots.iter())
-			.filter(|(_, slot)| slot.leaving)
-			.map(|(key, _)| *key)
+		// Unshown, every slot leaves at once, so each tells its copy all of them go, for why
+		// the reader lets go now: the origin then drops them together rather than showing
+		// the rest in turn. Shown, the staying slots share the leaving ones' showing, so a
+		// leaving slot speaks only for its own copy, ended if it ever was.
+		let leaving: Vec<(SlotKey, bool)> = (slots.iter())
+			.filter_map(|(key, slot)| match slot.stay {
+				Stay::Wanted => None,
+				Stay::Leaving { ended } => Some((*key, ended)),
+			})
 			.collect();
 		let mut outputs = Vec::new();
-		for key in leaving {
+		for (key, withdrawn) in leaving {
+			let gone = match (shown, ended, withdrawn) {
+				(false, true, _) => Gone::Ended,
+				(false, false, _) => Gone::Lost,
+				(true, _, true) => Gone::Withdrawn,
+				(true, _, false) => Gone::Moved,
+			};
 			let slot = slots.remove(&key).expect("listed above");
 			let (origin, session) = key;
 			if let Some(serving) = self.serving.get_mut(&session) {
@@ -1003,10 +1014,10 @@ impl State {
 		let Some(origin) = named.or_else(|| self.router.pick(broadcast)) else {
 			return Some(None);
 		};
-		let Some(next) = self.router.step(origin, broadcast) else {
+		let Some(next) = self.router.step(origin, broadcast, from) else {
 			// Shown available with no way yet: hold the request rather than answer it
 			// unroutable, which nothing this node shows would ever make its sender retry.
-			return match self.router.awaits(origin, broadcast) {
+			return match self.router.awaits(origin, broadcast, from) {
 				true => None,
 				false => Some(None),
 			};
@@ -1041,6 +1052,12 @@ impl State {
 }
 
 impl Slot {
+	/// Unwanted from here, keeping that its publisher withdrew it, or marking it so.
+	fn leave(&mut self, ended: bool) {
+		let was = matches!(self.stay, Stay::Leaving { ended: true });
+		self.stay = Stay::Leaving { ended: was || ended };
+	}
+
 	fn output(&self, origin: NodeId, (path, instance): &Broadcast) -> Output {
 		Output::Serve {
 			origin,

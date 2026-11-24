@@ -835,7 +835,9 @@ pub struct moq_delay {
 	pub min_us: u64,
 	/// How far a non-latest group may fall behind the live edge before it is skipped, in
 	/// microseconds. Zero skips immediately. Enforced by the publisher's cache and by any
-	/// local buffering, and it caps every range. It bounds lateness only, never the start.
+	/// local buffering. It bounds only ranges with no start: a range with a start is history,
+	/// delivered in full and bounded only by the publisher's max age. It bounds lateness, never
+	/// the start.
 	/// Ignored when `max_unlimited` is set.
 	pub max_us: u64,
 	/// No subscriber max: wait on a stalled group as long as the publisher's max age allows.
@@ -845,7 +847,7 @@ pub struct moq_delay {
 	pub min_stated: bool,
 }
 
-impl From<moq_delay> for moq_net::track::Delay {
+impl From<moq_delay> for moq_mux::container::Delay {
 	fn from(delay: moq_delay) -> Self {
 		Self {
 			min: delay.min_stated.then(|| std::time::Duration::from_micros(delay.min_us)),
@@ -854,8 +856,8 @@ impl From<moq_delay> for moq_net::track::Delay {
 	}
 }
 
-impl From<moq_net::track::Delay> for moq_delay {
-	fn from(delay: moq_net::track::Delay) -> Self {
+impl From<moq_mux::container::Delay> for moq_delay {
+	fn from(delay: moq_mux::container::Delay) -> Self {
 		Self {
 			min_us: delay.min.map(micros).unwrap_or_default(),
 			max_us: delay.max.map(micros).unwrap_or_default(),
@@ -869,7 +871,7 @@ impl From<moq_net::track::Delay> for moq_delay {
 ///
 /// # Safety
 /// - `delay` must be null or point to a valid [moq_delay].
-pub(crate) unsafe fn parse_delay(delay: *const moq_delay) -> moq_net::track::Delay {
+pub(crate) unsafe fn parse_delay(delay: *const moq_delay) -> moq_mux::container::Delay {
 	unsafe { delay.as_ref() }.copied().unwrap_or_default().into()
 }
 
@@ -905,8 +907,9 @@ pub struct moq_subscription {
 /// `end`. A zeroed one has neither: a range with no start that follows the live edge.
 ///
 /// Every start is the first frame of its group, and every end includes its whole group. A time
-/// names the group containing it, the newest one starting at or before it, so a group's start
-/// names exactly it. Both are unscaled (`has_scale` false), with `value` in the track's
+/// names the group containing it, the newest one starting at or before it unless that group ended
+/// whole at or before the time, so a group's start names exactly it. A start in the pause past a
+/// whole group's end begins at the next group. Both are unscaled (`has_scale` false), with `value` in the track's
 /// timescale; a scaled one is refused with a timestamp mismatch.
 ///
 /// A range with no start is placed by the subscription's `delay`. A raw track consumer joins it
@@ -949,11 +952,14 @@ fn parse_range_time(timestamp: &moq_timestamp) -> Result<u64, Error> {
 	}
 }
 
+/// The subscription without its delay, each range with no start still from the oldest group,
+/// and that delay, whose `min` the caller places such ranges at.
+///
 /// # Safety
 /// - `subscription->ranges` must be NULL or point to `subscription->ranges_len` ranges.
 pub(crate) unsafe fn parse_subscription(
 	subscription: &moq_subscription,
-) -> Result<moq_net::track::Subscription, Error> {
+) -> Result<(moq_net::track::Subscription, moq_mux::container::Delay), Error> {
 	let order = match subscription.order {
 		v if v == moq_order::MOQ_ORDER_DESCENDING as u32 => moq_net::track::Order::Descending,
 		v if v == moq_order::MOQ_ORDER_ASCENDING as u32 => moq_net::track::Order::Ascending,
@@ -961,25 +967,25 @@ pub(crate) unsafe fn parse_subscription(
 	};
 	let mut out = moq_net::track::Subscription::default()
 		.with_priority(subscription.priority)
-		.with_order(order);
-	out = out.with_delay(subscription.delay.into());
+		.with_order(order)
+		.with_ranges([moq_net::track::Range::ALL]);
 	if !subscription.ranges.is_null() {
 		let ranges = unsafe { std::slice::from_raw_parts(subscription.ranges, subscription.ranges_len) };
 		let ranges = ranges
 			.iter()
 			.map(|range| {
 				Ok(moq_net::track::Range {
-					start: range
-						.start_present
-						.then(|| parse_range_time(&range.start))
-						.transpose()?,
+					start: match range.start_present {
+						true => moq_net::track::Start::Time(parse_range_time(&range.start)?),
+						false => moq_net::track::Start::Oldest,
+					},
 					end: range.end_present.then(|| parse_range_time(&range.end)).transpose()?,
 				})
 			})
 			.collect::<Result<Vec<_>, Error>>()?;
 		out = out.with_ranges(ranges);
 	}
-	Ok(out)
+	Ok((out, subscription.delay.into()))
 }
 
 /// A borrowed UTF-8 string slice, NOT NULL terminated.
@@ -1463,7 +1469,7 @@ pub extern "C" fn moq_subscription_defaults() -> moq_subscription {
 	};
 	moq_subscription {
 		priority: defaults.priority,
-		delay: defaults.delay.into(),
+		delay: moq_mux::container::Delay::default().into(),
 		ranges: std::ptr::null(),
 		ranges_len: 0,
 		order: order as u32,
@@ -5010,6 +5016,9 @@ pub unsafe extern "C" fn moq_consume_track(
 /// Update a raw track subscription's delivery preferences.
 ///
 /// Pass NULL for `subscription` to reset to moq-net defaults.
+///
+/// A range with no start that the subscription already asks, with the same end, keeps the live
+/// join it was subscribed with: a changed `delay.min_us` joins only the ranges the update adds.
 ///
 /// Returns a zero on success, or a negative code on failure, such as a range time on an
 /// untimed track, which leaves the subscription as it was. An update made before the

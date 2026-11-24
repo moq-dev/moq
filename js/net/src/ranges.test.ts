@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
+import { Duration } from "@moq/clock";
 import { Counts, Cover } from "./cover.ts";
 import { Ranges } from "./ranges.ts";
-import type { Range } from "./track.ts";
+import type { Range, Start } from "./track.ts";
 import { max, min, UNBOUNDED } from "./util/key.ts";
-import { union } from "./window.ts";
+import { rangeKey, union } from "./window.ts";
 
 // A seeded generator, so a failure reproduces.
 function rng(seed: number): (below: number) => number {
@@ -18,27 +19,28 @@ function rng(seed: number): (below: number) => number {
 }
 
 // Each change reports exactly whether the union moved, and the union matches a full fold of what
-// is held, whether the ranges with no start join live or reach back to the oldest group.
+// is held: time ranges, live joins by lag, and ranges from the oldest group.
 test("the incremental union matches a full fold", () => {
 	const random = rng(0x72616e67);
 	const int = (below: number) => Math.floor(random(below));
-	const time = (): bigint | undefined => (int(6) < 2 ? undefined : BigInt(int(12)));
+	const start = (): Start | undefined => {
+		const kind = int(10);
+		if (kind === 0) return undefined;
+		if (kind === 1) return { live: { min: Duration.millis(int(3)), max: Duration.millis(int(3)) } };
+		return BigInt(int(12));
+	};
+	const keys = (ranges: readonly Range[]) => ranges.map(rangeKey);
 	const ranges = new Ranges();
 	const held: Range[] = [];
-	let joins = false;
 	for (let step = 0; step < 50_000; step++) {
 		const grow = held.length < 24 ? 0.65 : 0.35;
-		const before = union(held, joins);
+		const before = keys(union(held));
 		let changed: boolean;
-		if (random(1) < 0.05) {
-			joins = !joins;
-			changed = ranges.joins(joins);
-		} else if (held.length === 0 || random(1) < grow) {
+		if (held.length === 0 || random(1) < grow) {
 			const range: Range = {};
-			const start = time();
-			if (start !== undefined) range.start = start;
-			const end = random(1) < 0.6 ? time() : undefined;
-			if (end !== undefined) range.end = end;
+			const from = start();
+			if (from !== undefined) range.start = from;
+			if (random(1) < 0.6) range.end = BigInt(int(12));
 			held.push(range);
 			changed = ranges.add(range);
 		} else {
@@ -46,10 +48,24 @@ test("the incremental union matches a full fold", () => {
 			const [range] = held.splice(index, 1);
 			changed = ranges.remove(range);
 		}
-		const after = union(held, joins);
-		expect(ranges.union()).toEqual(after);
+		const after = keys(union(held));
+		expect(keys(ranges.union())).toEqual(after);
 		expect(changed).toBe(!Bun.deepEquals(before, after));
 	}
+});
+
+// A live join reaches back only by its lag, so the history beside it stays asked, and each lag is a
+// range of its own, unless a reader starts at the oldest group. Mirrors the Rust
+// `combined_ranges_union`.
+test("a live join covers nothing but itself", () => {
+	const two = { start: { live: { min: Duration.secs(2), max: Duration.ZERO } } };
+	const five = { start: { live: { min: Duration.secs(5), max: Duration.ZERO } } };
+	const history = { start: 2n, end: 4n };
+	expect(union([history, two, five, two]).map(rangeKey)).toEqual([history, two, five].map(rangeKey));
+	expect(union([history, two, {}])).toEqual([{}]);
+	// A join with an end is a range of its own too, apart from the same lag without one.
+	const bounded = { ...two, end: 9n };
+	expect(union([two, bounded]).map(rangeKey)).toEqual([two, bounded].map(rangeKey));
 });
 
 // Every query matches a count kept per key.

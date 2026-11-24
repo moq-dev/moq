@@ -100,11 +100,16 @@ const AUDIO_BUDGET = 5000;
 
 /**
  * The subscription fields holding the latency budget, which releases spelled `maxAge`, then
- * `maxDelay`, and the checkout spells `delay: { max }`.
+ * `maxDelay`, then `delay: { max }`, and the checkout spells as the live join's `max`.
  */
 function budget(millis: number): Record<string, unknown> {
 	// Each version refuses the older names, which a throwaway local track shows without a session.
-	const spellings = [{ maxAge: millis }, { maxDelay: millis }, { delay: { max: duration(millis) } }];
+	const spellings = [
+		{ maxAge: millis },
+		{ maxDelay: millis },
+		{ delay: { max: duration(millis) } },
+		{ ranges: [{ start: { live: { min: duration(0), max: duration(millis) } } }] },
+	];
 	const broadcast = new Moq.Broadcast.Producer();
 	try {
 		for (const spelling of spellings.slice(0, -1)) {

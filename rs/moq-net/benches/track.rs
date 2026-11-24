@@ -68,15 +68,16 @@
 //! on the next one, re-polling whichever reader the write woke: a frame wakes no track
 //! reader, so waking them shows up as a slope over the subscribers.
 //!
-//! `track_fetch_expiry` polls budgeted fetched readers over independent fanout and
-//! retained-history axes, so expiry work that scans either table appears as a slope.
+//! `track_fetch_expiry` polls fetched readers expiring at the track's max age over
+//! independent fanout and retained-history axes, so expiry work that scans either table
+//! appears as a slope.
 //!
-//! `track_fetch_budgets` writes the frame that crosses every budgeted fetch's deadline, over
-//! live readers and finished fetches with budgets of their own: deadlines the finished
-//! fetches left indexed show up as a slope over them.
+//! `track_fetch_budgets` writes the frame that crosses every fetch's max-age deadline, over
+//! live readers and finished fetches: deadlines the finished fetches left registered show up
+//! as a slope over them.
 //!
-//! `track_fetch_park` parks one more budgeted fetch beside live readers on deadlines of their
-//! own, so a park that sweeps the whole index shows up as a slope over the readers.
+//! `track_fetch_park` parks one more fetch beside live readers waiting on the same max age,
+//! so a park that sweeps every registered deadline shows up as a slope over the readers.
 //!
 //! `track_range_demand` moves one reader between ranges nobody else holds, over readers
 //! holding a given number of distinct overlapping ranges: both axes must stay flat, since
@@ -161,7 +162,7 @@ fn at(key: u64) -> Timestamp {
 /// The groups from the one containing `start` through the one containing `end`.
 fn span(start: u64, end: u64) -> track::Range {
 	track::Range {
-		start: Some(start),
+		start: track::Start::Time(start),
 		end: Some(end),
 	}
 }
@@ -169,7 +170,7 @@ fn span(start: u64, end: u64) -> track::Range {
 /// The groups from the one containing `start` onward.
 fn from(start: u64) -> track::Range {
 	track::Range {
-		start: Some(start),
+		start: track::Start::Time(start),
 		end: None,
 	}
 }
@@ -227,7 +228,8 @@ const AGED_TRACKS: [usize; 4] = [1, 64, 1_024, 10_000];
 /// Groups cached per track behind its parked read.
 const AGED_GROUPS: [usize; 3] = [1, 32, 1_024];
 
-/// The budget a parked read's wall deadline is armed for, past any setup on the real clock.
+/// The budget a parked read's wall deadline is armed for, past any setup on the real clock:
+/// a live join's `max`, or the max age a fetched read expires at.
 const AGED_BUDGET: Duration = Duration::from_secs(3600);
 
 /// Fetched readers and retained groups sweep both sides of the expiry lookup.
@@ -244,7 +246,9 @@ struct FetchReaders {
 impl FetchReaders {
 	fn new(readers: usize, history: usize) -> Self {
 		let broadcast = broadcast::Producer::new(broadcast::Info::default());
-		let track = broadcast.create_track("bench", timed()).unwrap();
+		let track = broadcast
+			.create_track("bench", timed().with_max_age(AGED_BUDGET))
+			.unwrap();
 		let mut open = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
 		open.write_frame(Timestamp::ZERO, Bytes::from_static(b"f")).unwrap();
 		for key in 1..=history as u64 {
@@ -254,11 +258,10 @@ impl FetchReaders {
 		}
 
 		let consumer = track.consume();
-		let options = moq_net::group::Fetch::default().with_max_delay(AGED_BUDGET);
 		let waiter = kio::Waiter::noop();
 		let mut fetched = Vec::with_capacity(readers);
 		for _ in 0..readers {
-			let mut pending = consumer.fetch_group(0, options.clone());
+			let mut pending = consumer.fetch_group(0, None);
 			let Poll::Ready(Ok(mut group)) = kio::Task::poll(&mut *pending, &waiter) else {
 				panic!("cached fetch must resolve");
 			};
@@ -582,9 +585,12 @@ impl Aged {
 				let track = broadcast
 					.create_track(format!("bench{i}"), moq_net::track::Info::default().with_max_age(None))
 					.unwrap();
-				let mut sub = track.subscribe(
-					track::Subscription::default().with_delay(track::Delay::default().with_max(AGED_BUDGET)),
-				);
+				let mut sub = track.subscribe(track::Subscription::default().with_ranges([track::Range::from(
+					track::Start::Live {
+						min: Some(AGED_BUDGET),
+						max: Some(AGED_BUDGET),
+					},
+				)]));
 				let mut held = track.append_group(Timestamp::unscaled(0)).unwrap();
 				held.write_frame(moq_net::Timestamp::unscaled(held.start), Bytes::from_static(b"x"))
 					.unwrap();
@@ -833,9 +839,9 @@ fn bench_fanout_frame(c: &mut Criterion) {
 	group.finish();
 }
 
-/// A track with groups presenting at 0..4 s and the last still open, `readers` budgeted
-/// fetches of group 2 parked on its expiry, and `history` finished fetches of it, each with
-/// its own budget, so each indexed a deadline of its own.
+/// A track with groups presenting at 0..4 s and the last still open, `readers` fetches of
+/// group 2 parked on its expiry at the track's 1.5 s max age, and `history` finished fetches
+/// of it.
 struct FetchBudgets {
 	_broadcast: broadcast::Producer,
 	_track: track::Producer,
@@ -848,7 +854,9 @@ struct FetchBudgets {
 impl FetchBudgets {
 	fn new(readers: usize, history: usize) -> Self {
 		let broadcast = broadcast::Producer::new(broadcast::Info::default());
-		let track = broadcast.create_track("bench", timed()).unwrap();
+		let track = broadcast
+			.create_track("bench", timed().with_max_age(Duration::from_millis(1_500)))
+			.unwrap();
 		for key in (0..4u64).map(|second| second * 1000) {
 			let mut group = track.append_group(Timestamp::from_millis(key).unwrap()).unwrap();
 			group.write_frame(at(key), Bytes::from_static(b"f")).unwrap();
@@ -864,43 +872,36 @@ impl FetchBudgets {
 			open,
 			_readers: Vec::with_capacity(readers),
 		};
-		for i in 0..history {
-			drop(fetched.fetch(readers + i));
+		for _ in 0..history {
+			drop(fetched.fetch());
 		}
-		fetched._readers = (0..readers).map(|i| fetched.fetch(i)).collect();
+		fetched._readers = (0..readers).map(|_| fetched.fetch()).collect();
 		fetched
 	}
 
-	/// Fetch the group at 2 seconds with budget `i`, distinct from every other, returning the
-	/// waiter that keeps its deadlines registered.
-	fn fetch(&self, i: usize) -> kio::Waiter {
+	/// Fetch the group at 2 seconds, returning the waiter that keeps its deadlines registered.
+	fn fetch(&self) -> kio::Waiter {
 		let waiter = kio::Waiter::noop();
-		let budget = Duration::from_millis(1_500) + Duration::from_micros(i as u64);
-		let options = moq_net::group::Fetch::default().with_max_delay(budget);
-		let mut pending = self.consumer.fetch_group(2000, options);
+		let mut pending = self.consumer.fetch_group(2000, None);
 		assert!(matches!(kio::Task::poll(&mut *pending, &waiter), Poll::Ready(Ok(_))));
 		waiter
 	}
 }
 
-/// One more budgeted fetch, with a budget of its own, beside `readers` live ones: parking it
-/// must not scan the deadlines the live readers hold, so a sweep per park shows up as a slope.
+/// One more fetch beside `readers` live ones: parking it must not scan the deadlines the live
+/// readers hold, so a sweep per park shows up as a slope.
 fn bench_fetch_park(c: &mut Criterion) {
 	let mut group = c.benchmark_group("track_fetch_park");
 	for readers in [1, 64, 1_024] {
 		group.bench_with_input(BenchmarkId::from_parameter(readers), &readers, |b, &readers| {
 			let fetched = FetchBudgets::new(readers, 0);
-			let mut next = readers;
-			b.iter(|| {
-				next += 1;
-				fetched.fetch(next)
-			});
+			b.iter(|| fetched.fetch());
 		});
 	}
 	group.finish();
 }
 
-/// The write that crosses every budgeted fetch's deadline, beside live readers and the
+/// The write that crosses every fetch's deadline, beside live readers and the
 /// finished fetches before them: the write must cost what the live readers do, so deadlines
 /// left indexed by fetches that already finished show up as a slope over the history.
 fn bench_fetch_budgets(c: &mut Criterion) {
@@ -1121,13 +1122,15 @@ fn bench_subscriber_preferences(c: &mut Criterion) {
 		let i = i as u64;
 		track::Subscription::default()
 			.with_priority(((i % 255) as i16 - 128) as i8)
-			.with_delay(track::Delay::default().with_max(Duration::from_micros(i)))
 			.with_ranges([span(100 + i, 199 + i)])
 			.with_order(track::Order::Ascending)
 	};
 	let extreme = track::Subscription::default()
 		.with_priority(i8::MAX)
-		.with_delay(track::Delay::default().with_max(Duration::from_secs(10)));
+		.with_ranges([track::Range::from(track::Start::Live {
+			min: Some(Duration::from_secs(10)),
+			max: Some(Duration::from_secs(10)),
+		})]);
 	let mut group = c.benchmark_group("track_subscriber_preferences");
 	for steady in STEADY {
 		for touched in CHURN {
@@ -1250,12 +1253,10 @@ fn bench_range_serving(c: &mut Criterion) {
 					.unwrap();
 				group.finish().unwrap();
 			}
-			let subscription = track::Subscription::default()
-				.with_delay(track::Delay::default().with_max(AGED_BUDGET))
-				.with_ranges((0..ranges).map(|i| {
-					let start = i * (width + 1);
-					span(start, start + width - 1)
-				}));
+			let subscription = track::Subscription::default().with_ranges((0..ranges).map(|i| {
+				let start = i * (width + 1);
+				span(start, start + width - 1)
+			}));
 
 			group.throughput(Throughput::Elements(ranges * width));
 			group.bench_function(BenchmarkId::new(format!("span_{width}"), ranges), |b| {
@@ -1319,8 +1320,12 @@ fn bench_parked_read(c: &mut Criterion) {
 						.checked_mul(MICROS_PER_GROUP)
 						.unwrap(),
 				);
-				let mut sub = track
-					.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(max_delay)));
+				let mut sub = track.subscribe(track::Subscription::default().with_ranges([track::Range::from(
+					track::Start::Live {
+						min: Some(max_delay),
+						max: Some(max_delay),
+					},
+				)]));
 				let mut micros = 0;
 				let mut open = Vec::with_capacity(parked);
 				let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1397,9 +1402,12 @@ impl Sparse {
 	fn new(info: track::Info, gaps: u64) -> Self {
 		let broadcast = broadcast::Info::default().produce();
 		let track = broadcast.create_track("bench", info.clone()).unwrap();
-		let sub = track.subscribe(
-			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(3600))),
-		);
+		let sub = track.subscribe(track::Subscription::default().with_ranges([track::Range::from(
+			track::Start::Live {
+				min: Some(Duration::from_secs(3600)),
+				max: Some(Duration::from_secs(3600)),
+			},
+		)]));
 		let mut sparse = Self {
 			_broadcast: broadcast,
 			track,
@@ -1512,8 +1520,12 @@ impl Idle {
 		let waiter = kio::Waiter::noop();
 		let (mut recv, mut next) = (Vec::new(), Vec::new());
 		for _ in 0..readers {
-			let reader = track
-				.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(AGED_BUDGET)));
+			let reader = track.subscribe(track::Subscription::default().with_ranges([track::Range::from(
+				track::Start::Live {
+					min: Some(AGED_BUDGET),
+					max: Some(AGED_BUDGET),
+				},
+			)]));
 			if ordered {
 				let mut reader = reader.ordered();
 				assert!(matches!(reader.poll_next_group(&waiter), Poll::Ready(Ok(Some(_)))));
@@ -1574,8 +1586,10 @@ impl Expiring {
 		sparse
 			.sub
 			.update(
-				track::Subscription::default()
-					.with_delay(track::Delay::default().with_max(Duration::from_millis(gaps))),
+				track::Subscription::default().with_ranges([track::Range::from(track::Start::Live {
+					min: Some(Duration::from_millis(gaps)),
+					max: Some(Duration::from_millis(gaps)),
+				})]),
 			)
 			.unwrap();
 		let pool = sparse._broadcast.info().pool.clone();
@@ -1641,9 +1655,12 @@ impl GapFlush {
 	fn new(gaps: u64) -> Self {
 		let broadcast = broadcast::Info::default().produce();
 		let track = broadcast.create_track("bench", timed()).unwrap();
-		let mut sub = track.subscribe(
-			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(3600))),
-		);
+		let mut sub = track.subscribe(track::Subscription::default().with_ranges([track::Range::from(
+			track::Start::Live {
+				min: Some(Duration::from_secs(3600)),
+				max: Some(Duration::from_secs(3600)),
+			},
+		)]));
 		let mut hand_out = |key: u64| {
 			let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
 			group.write_frame(at(key), Bytes::from_static(b"x")).unwrap();
@@ -1751,7 +1768,10 @@ impl EmptyRun {
 			Run::Fresh => (Duration::from_millis(HOUR), run as usize + 2),
 			Run::Retired => (Duration::ZERO, 1),
 		};
-		let budget = track::Subscription::default().with_delay(track::Delay::default().with_max(budget));
+		let budget = track::Subscription::default().with_ranges([track::Range::from(track::Start::Live {
+			min: Some(budget),
+			max: Some(budget),
+		})]);
 		Self {
 			readers: (0..readers).map(|_| track.subscribe(budget.clone())).collect(),
 			_broadcast: broadcast,
@@ -1820,9 +1840,7 @@ fn bench_range_widening(c: &mut Criterion) {
 							.unwrap();
 						group.finish().unwrap();
 					}
-					let narrow = track::Subscription::default()
-						.with_delay(track::Delay::default().with_max(AGED_BUDGET))
-						.with_ranges([span(0, 0)]);
+					let narrow = track::Subscription::default().with_ranges([span(0, 0)]);
 					let mid = cached / 2;
 					let wide = narrow.clone().with_ranges([span(0, 0), span(mid, mid + WIDENED - 1)]);
 					let waiter = kio::Waiter::noop();
@@ -1869,7 +1887,10 @@ impl BudgetWidening {
 	fn new(readers: usize, cached: u64, runs: u64) -> Self {
 		let broadcast = broadcast::Info::default().produce();
 		let track = broadcast.create_track("bench", timed()).unwrap();
-		let narrow = track::Subscription::default().with_delay(track::Delay::default().with_max(Self::NARROW));
+		let narrow = track::Subscription::default().with_ranges([track::Range::from(track::Start::Live {
+			min: Some(Self::NARROW),
+			max: Some(Self::NARROW),
+		})]);
 		let mut reader = track.subscribe(narrow.clone());
 		let beside = (0..readers).map(|_| track.subscribe(narrow.clone())).collect();
 		let waiter = kio::Waiter::noop();
@@ -1902,7 +1923,10 @@ impl BudgetWidening {
 	}
 
 	fn widen(&mut self) {
-		let wide = track::Subscription::default().with_delay(track::Delay::default().with_max(AGED_BUDGET));
+		let wide = track::Subscription::default().with_ranges([track::Range::from(track::Start::Live {
+			min: Some(AGED_BUDGET),
+			max: Some(AGED_BUDGET),
+		})]);
 		self.reader.update(wide).unwrap();
 		let waiter = kio::Waiter::noop();
 		let mut offered = 0;
@@ -1955,9 +1979,7 @@ impl TimeEnd {
 			.unwrap();
 		zero.finish().unwrap();
 		// Group 1 never arrives, and the budget outlasts the run, so the end never settles.
-		let subscription = track::Subscription::default()
-			.with_delay(track::Delay::default().with_max(AGED_BUDGET))
-			.with_ranges([span(0, u64::from(u32::MAX) * 1000)]);
+		let subscription = track::Subscription::default().with_ranges([span(0, u64::from(u32::MAX) * 1000)]);
 		let waiter = kio::Waiter::noop();
 		let readers = (0..readers)
 			.map(|_| {
@@ -2022,7 +2044,7 @@ struct Fills {
 }
 
 impl Fills {
-	fn new(readers: usize, runs: u64, budget: Option<Duration>) -> Self {
+	fn new(readers: usize, runs: u64) -> Self {
 		let broadcast = broadcast::Info::default().produce();
 		let mut track = broadcast.create_track("bench", timed()).unwrap();
 		let dynamic = track.requests();
@@ -2036,9 +2058,7 @@ impl Fills {
 		group.finish().unwrap();
 		// One range per run, with a key between each that no reader asks for.
 		let ranges = (0..runs).map(|run| span(run * 2, run * 2)).chain([from(start)]);
-		let subscription = track::Subscription::default()
-			.with_ranges(ranges)
-			.with_delay(track::Delay::default().with_max(budget));
+		let subscription = track::Subscription::default().with_ranges(ranges);
 		let readers = (0..readers).map(|_| track.subscribe(subscription.clone())).collect();
 		Self {
 			_broadcast: broadcast,
@@ -2052,7 +2072,8 @@ impl Fills {
 	/// Every reader reads what is cached and asks for its misses, then raises its priority,
 	/// which reaches every fill it waits on. A run past the first starts at a time below the
 	/// feed's start, whose group each reader asks a fill of its own for first: the handler
-	/// can't resolve times, so it refuses each, and the readers then ask that run as a miss.
+	/// can't resolve times, so it closes each unanswered, and the readers then ask that run
+	/// as a miss.
 	/// The handler drops each fill they share, and every reader settles the drops.
 	fn run(&mut self) {
 		let waiter = kio::Waiter::noop();
@@ -2072,7 +2093,7 @@ impl Fills {
 				assert_eq!(fill.priority(), 1, "the update reached the fill");
 				match fill.floor() < fill.start().group {
 					true => {
-						fill.refuse_groups(fill.start().group..fill.end(), moq_net::Error::NotFound);
+						drop(fill);
 						lookups += 1;
 					}
 					false => {
@@ -2099,23 +2120,17 @@ impl Fills {
 /// swept over the readers and the runs. Each reader must pay the same per run, so a cost
 /// that grows with the audience or the runs shows up as a slope.
 fn bench_fill(c: &mut Criterion) {
-	for (name, budget) in [("track_fill", Some(AGED_BUDGET)), ("track_fill_unlimited", None)] {
-		let mut group = c.benchmark_group(name);
-		group.sample_size(10);
-		for readers in [1usize, 8, 64] {
-			for runs in [1u64, 64, 1024] {
-				group.throughput(Throughput::Elements(runs * readers as u64));
-				group.bench_function(BenchmarkId::new(format!("{readers}r"), runs), |b| {
-					b.iter_batched_ref(
-						|| Fills::new(readers, runs, budget),
-						Fills::run,
-						BatchSize::PerIteration,
-					);
-				});
-			}
+	let mut group = c.benchmark_group("track_fill");
+	group.sample_size(10);
+	for readers in [1usize, 8, 64] {
+		for runs in [1u64, 64, 1024] {
+			group.throughput(Throughput::Elements(runs * readers as u64));
+			group.bench_function(BenchmarkId::new(format!("{readers}r"), runs), |b| {
+				b.iter_batched_ref(|| Fills::new(readers, runs), Fills::run, BatchSize::PerIteration);
+			});
 		}
-		group.finish();
 	}
+	group.finish();
 }
 
 /// Readers whose disjoint ranges all fall below where the feed starts, and the handler that
@@ -2142,12 +2157,10 @@ impl RangeFills {
 			.write_frame(Timestamp::from_millis(start).unwrap(), Bytes::from_static(b"x"))
 			.unwrap();
 		group.finish().unwrap();
-		let subscription = track::Subscription::default()
-			.with_delay(track::Delay::default().with_max(AGED_BUDGET))
-			.with_ranges((0..ranges).map(|i| {
-				let first = i * (width + 1) + 1;
-				span(first, first + width - 1)
-			}));
+		let subscription = track::Subscription::default().with_ranges((0..ranges).map(|i| {
+			let first = i * (width + 1) + 1;
+			span(first, first + width - 1)
+		}));
 		let readers = (0..readers).map(|_| track.subscribe(subscription.clone())).collect();
 		Self {
 			_broadcast: broadcast,
@@ -2161,7 +2174,8 @@ impl RangeFills {
 	/// The readers ask for their misses, the handler accepts every group of every fill once,
 	/// and each reader drains what they filled. Each range starts at a time below the feed's
 	/// start, whose group each reader asks a fill of its own for first: the handler can't
-	/// resolve times, so it refuses each, and the readers then ask that range as a miss.
+	/// resolve times, so it closes each unanswered, and the readers then ask that range as a
+	/// miss.
 	fn run(&mut self) {
 		let waiter = kio::Waiter::noop();
 		for reader in &mut self.readers {
@@ -2171,8 +2185,8 @@ impl RangeFills {
 		// The time starts go out first, and the misses they leave behind them.
 		for _ in 0..2 {
 			while let Poll::Ready(Ok(fill)) = self.dynamic.poll_requested_fill(&waiter) {
+				// A refusal would fail the reader instead.
 				if fill.floor() < fill.start().group {
-					fill.refuse_groups(fill.start().group..fill.end(), moq_net::Error::NotFound);
 					continue;
 				}
 				while let Some(key) = fill.wanted() {
@@ -2252,11 +2266,7 @@ impl RefusedFill {
 		let waiter = kio::Waiter::noop();
 		let readers = (0..readers)
 			.map(|_| {
-				let mut reader = track.subscribe(
-					track::Subscription::default()
-						.with_ranges([from(0)])
-						.with_delay(track::Delay::default().with_max(AGED_BUDGET)),
-				);
+				let mut reader = track.subscribe(track::Subscription::default().with_ranges([from(0)]));
 				let Poll::Ready(Ok(Some(group))) = reader.poll_recv_group(&waiter) else {
 					panic!("the live group is cached");
 				};

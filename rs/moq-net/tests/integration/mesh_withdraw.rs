@@ -18,18 +18,20 @@ use support::harness::{MockConnectOptions, MockPair, connect_mock, peer, peer_wi
 use support::{Kind, Rng, drain, watch};
 
 pub(super) fn produce_origin(hop: u64) -> origin::Producer {
-	produce(hop, origin::Config::default().update_hold())
+	produce(hop, origin::Config::default().update_hold(), true)
 }
 
 /// An origin holding route updates for `hold`. Its cache never expires idle
 /// groups: nothing here carries media, and the expiry sweep would keep a timer
 /// armed forever, so [`kio::clock::sim::idle`] could never see the mesh settle.
-fn produce(hop: u64, hold: Duration) -> origin::Producer {
+/// It forwards what it learned when `proxy`, as a relay does.
+fn produce(hop: u64, hold: Duration, proxy: bool) -> origin::Producer {
 	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()).with_update_hold(hold);
 	config.pool = cache::Pool::unbounded();
+	config.proxy = proxy;
 	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// `n` relays meshed over `edges`, watched from the last one.
@@ -281,17 +283,26 @@ struct Cluster {
 }
 
 impl Cluster {
-	async fn new(version: &str, edges: &[Link], mut config: origin::Config, publisher: usize, watcher: usize) -> Self {
+	async fn new(
+		version: &str,
+		edges: &[Link],
+		mut template: origin::Config,
+		publisher: usize,
+		watcher: usize,
+	) -> Self {
 		let version: Version = version.parse().unwrap();
 		let n = edges.iter().map(|&((a, b), _)| a.max(b) + 1).max().unwrap();
-		config.pool = cache::Pool::unbounded();
+		template.pool = cache::Pool::unbounded();
 		let relays: Vec<_> = (1..=n as u64)
 			.map(|id| {
-				let mut config = config.clone();
-				config.node = std::num::NonZeroU64::new(id).unwrap();
+				let node = std::num::NonZeroU64::new(id).unwrap();
+				let mut config = origin::Config::new(node).with_update_hold(template.update_hold());
+				config.max_hops = template.max_hops;
+				config.pool = template.pool.clone();
+				config.proxy = true;
 				let (origin, driver) = origin::Producer::new(config);
 				support::harness::spawn(driver);
-				origin.with_proxy(true)
+				origin
 			})
 			.collect();
 		let mut pairs = Vec::new();
@@ -299,13 +310,13 @@ impl Cluster {
 			pairs.push(peer_with_latency(version, &relays[a], &relays[b], latency).await);
 		}
 
-		let publishing = produce(1000, Duration::ZERO);
+		let publishing = produce(1000, Duration::ZERO, true);
 		let mut options = MockConnectOptions::new(version);
 		options.client_publish = Some(publishing.consume());
 		options.server_subscribe = Some(relays[publisher].clone());
 		pairs.push(connect_mock(options).await);
 
-		let watching = produce(1001, Duration::ZERO);
+		let watching = produce(1001, Duration::ZERO, true);
 		let mut options = MockConnectOptions::new(version);
 		options.server_publish = Some(relays[watcher].consume());
 		options.client_subscribe = Some(watching.clone());
@@ -423,12 +434,12 @@ async fn late_better_path(mesh: &str, client: &str) -> (Vec<Kind>, Vec<Kind>) {
 	for &((a, b), latency) in LATE_BETTER_PATH {
 		pairs.push(peer_with_latency(mesh, &relays[a], &relays[b], latency).await);
 	}
-	let publishing = produce(1000, Duration::ZERO);
+	let publishing = produce(1000, Duration::ZERO, true);
 	let mut options = MockConnectOptions::new(client);
 	options.client_publish = Some(publishing.consume());
 	options.server_subscribe = Some(relays[0].clone());
 	pairs.push(connect_mock(options).await);
-	let watching = produce(1001, Duration::ZERO);
+	let watching = produce(1001, Duration::ZERO, true);
 	let mut options = MockConnectOptions::new(client);
 	options.server_publish = Some(relays[3].consume());
 	options.client_subscribe = Some(watching.clone());
@@ -823,7 +834,7 @@ async fn a_node_that_does_not_proxy_keeps_what_it_learned_over_lite06() {
 	let lite07: Version = "moq-lite-07-wip".parse().unwrap();
 	let lite06: Version = "moq-lite-06".parse().unwrap();
 	let first = produce_origin(1);
-	let app = produce_origin(2).with_proxy(false);
+	let app = produce(2, origin::Config::default().update_hold(), false);
 	let second = produce_origin(3);
 	let mut pairs = Vec::new();
 	for (version, relay) in [(lite06, &first), (lite07, &second)] {

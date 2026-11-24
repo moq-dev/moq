@@ -11,7 +11,7 @@
 //! extending a route never improves it. Among equal ranks it takes one with no marked link
 //! on its path, which it may send to more neighbours, and then stays on its next hop. A
 //! claim a node takes over a marked link, or one told it marked across a scoped grant, it
-//! announces under its marked Node ID, the same relay and start with the Marked bit set,
+//! announces under its marked Node ID, the same relay with the Marked bit set,
 //! whose route is marked from the start: the mark then keeps the claim off every other
 //! marked link, while each copy of a node's claims stays whole. The marked Node ID holds
 //! no session, so it files no session floor, and a path names it only as its first hop,
@@ -19,11 +19,16 @@
 //!
 //! A closed session is named once per neighbour in a fixed-size [`Msg::Dead`], which ends
 //! every route its sender offered through it until the sender offers it again or ends
-//! it. Per pair of relays a node keeps, for good, the highest session it knows closed
-//! (the session floor), and refuses any path naming that pair at or below it: a session
-//! orders by its node's start and then its number, so a restart replaces the pair's
-//! entry. A node that sent GOAWAY is named once per neighbour in a [`Msg::Drain`], and
-//! every route through it ranks as draining. A node advertises once per burst of input,
+//! it. A node names its own session only if none it numbered lower to the same relay is
+//! live when it closes; one that closes while such a session lives is never named, and
+//! its routes go as any route change does, so no name covers a live session. Per pair of relays a node keeps the
+//! highest session it knows closed (the session floor), and refuses any path naming that
+//! pair at or below it: a Relay ID names one run of a relay, whose sessions it numbers in
+//! order, and a restarted relay is a new one. A floor only refuses stale routes sooner, so a node
+//! keeps every floor of a pair a heard route joins and, of the rest, those heard routes
+//! stopped joining last, while they number no more than those pairs: the table is bounded
+//! by the heard routes. A node that sent GOAWAY is named once per neighbour in a
+//! [`Msg::Drain`], and every route through it ranks as draining. A node advertises once per burst of input,
 //! when the caller drains it. There is no hold, no doubt, and no routing timer: the only
 //! clock is the reader's debounce from unavailable to offline, which runs from when the
 //! reader first showed the claim unavailable. The route exchange between routing nodes
@@ -68,9 +73,11 @@
 //! metric is never used, and a claim's cost saturates there.
 //!
 //! The rule is the bake-off's pick (moq-dev/moq#8880): `tests/multi.rs` with `floor`,
-//! `epoch`, `batch`, `drain`, and `claimed`, which `tests/multicast.rs` compares it
-//! against. `tests/multicast_search.rs` searches every delivery order on small meshes,
-//! and `tests/multicast_cost.rs` sweeps what one event costs.
+//! `batch`, `drain`, and `claimed`, which `tests/multicast.rs` compares it against. It
+//! leaves out the pick's `epoch`, which bounded the floors by ordering a relay's runs: a
+//! Relay ID names one run, and the heard routes bound the floors.
+//! `tests/multicast_search.rs` searches every delivery order on small meshes, and
+//! `tests/multicast_cost.rs` sweeps what one event costs.
 
 use std::{
 	cmp::Reverse,
@@ -86,29 +93,22 @@ use crate::Path;
 
 use super::prefix::{ancestors, below, within_any, within_set};
 use super::reader::Reader;
-use super::{Error, Event, Id, Item, Key, MAX_HOPS, Metric, Rev, Shown};
+use super::{Error, Event, Id, Item, Key, MAX_COST, MAX_HOPS, Metric, Rev, Shown};
 
-/// How a forwarding node names itself on a path: its relay, and which start of that
-/// relay's process. A start only grows; one that repeats or goes back gets the relay's
-/// new sessions refused.
+/// How a forwarding node names itself on a path: its Relay ID, which names one run of a
+/// relay's process, so a restarted relay is a new node.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct NodeId {
 	pub relay: Id,
-	pub start: u64,
 	/// The node's marked identity, which it announces what crossed a marked link under:
-	/// the same process at the same start, holding no session of its own, so it names
-	/// no start of any relay.
+	/// the same process, holding no session of its own.
 	pub marked: bool,
 }
 
 impl NodeId {
-	/// The node `relay` names itself at `start`.
-	pub fn new(relay: Id, start: u64) -> Self {
-		Self {
-			relay,
-			start,
-			marked: false,
-		}
+	/// The node relay `relay` names itself as.
+	pub fn new(relay: Id) -> Self {
+		Self { relay, marked: false }
 	}
 }
 
@@ -187,7 +187,7 @@ impl Offer {
 /// how it ranks it.
 pub(crate) struct Here<'a> {
 	/// Per pair of relays, the highest session known closed.
-	pub closed: &'a BTreeMap<(Id, Id), (u64, u64)>,
+	pub closed: &'a BTreeMap<(Id, Id), u64>,
 	/// Closed sessions a live heard route still names.
 	pub dead: &'a BTreeMap<Hop, NodeId>,
 	/// Nodes named as draining.
@@ -236,7 +236,7 @@ fn marked_id(me: NodeId) -> NodeId {
 	NodeId { marked: true, ..me }
 }
 
-/// Whether `path` crosses any start of `relay`.
+/// Whether `path` crosses `relay`, either of its identities.
 fn names(path: &[Hop], relay: Id) -> bool {
 	path.iter().any(|hop| hop.node.relay == relay)
 }
@@ -265,17 +265,16 @@ fn marked_well(path: &[Hop]) -> bool {
 	!rest.iter().any(|hop| hop.node.marked)
 }
 
-/// The pairs of relays a path joins, each with where its session stands in the pair's
-/// order: the node that learned the route over a session, the node at its far end, and
-/// that session as the first node's start and number.
-fn pairs(path: &[Hop]) -> impl Iterator<Item = ((Id, Id), (u64, u64))> + '_ {
+/// The pairs of relays a path joins, each with its session's number: the node that learned
+/// the route over a session, the node at its far end, and the first node's number for it.
+fn pairs(path: &[Hop]) -> impl Iterator<Item = ((Id, Id), u64)> + '_ {
 	path.windows(2).map(|pair| floor_of(pair[1], pair[0].node))
 }
 
-/// The pair of relays `hop`'s session joins, as the floor files it, and where the session
-/// stands in that pair's order.
-pub(crate) fn floor_of(hop: Hop, far: NodeId) -> ((Id, Id), (u64, u64)) {
-	((hop.node.relay, far.relay), (hop.node.start, hop.session))
+/// The pair of relays `hop`'s session joins, as the floor files it, and the session's
+/// number.
+pub(crate) fn floor_of(hop: Hop, far: NodeId) -> ((Id, Id), u64) {
+	((hop.node.relay, far.relay), hop.session)
 }
 
 /// Every hop of `node`, whatever its session.
@@ -329,7 +328,7 @@ impl<A: Item> Claim<A> {
 		let rank = (
 			draining || self.draining,
 			Reverse(priority.min(self.priority)),
-			cost.saturating_add(self.cost),
+			cost.saturating_add(self.cost).min(MAX_COST),
 		);
 		(rank, self.marked || route.marked)
 	}
@@ -371,7 +370,7 @@ impl<A: Item> Claim<A> {
 		let mut claim = self.clone();
 		// Saturating, as `model::origin`'s claim cost does, so a claim's cost never
 		// decides whether it can serve.
-		claim.cost = claim.cost.saturating_add(port.cost);
+		claim.cost = claim.cost.saturating_add(port.cost).min(MAX_COST);
 		claim.priority = claim.priority.min(port.priority);
 		claim.marked |= port.upstream;
 		stamp(&mut claim.chain, me, forwards);
@@ -642,6 +641,40 @@ impl<I, A> Default for Known<I, A> {
 	}
 }
 
+/// Pairs of relays in the order they were added, each once.
+#[derive(Clone, Debug, Default)]
+struct Loose {
+	next: u64,
+	by_age: BTreeMap<u64, (Id, Id)>,
+	age: BTreeMap<(Id, Id), u64>,
+}
+
+impl Loose {
+	fn len(&self) -> usize {
+		self.age.len()
+	}
+
+	fn insert(&mut self, pair: (Id, Id)) {
+		if let std::collections::btree_map::Entry::Vacant(entry) = self.age.entry(pair) {
+			entry.insert(self.next);
+			self.by_age.insert(self.next, pair);
+			self.next += 1;
+		}
+	}
+
+	fn remove(&mut self, pair: &(Id, Id)) {
+		if let Some(age) = self.age.remove(pair) {
+			self.by_age.remove(&age);
+		}
+	}
+
+	fn pop_oldest(&mut self) -> Option<(Id, Id)> {
+		let (_, pair) = self.by_age.pop_first()?;
+		self.age.remove(&pair);
+		Some(pair)
+	}
+}
+
 /// The route this node uses, as it stands here: the heard offer with the link added.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Best<N> {
@@ -715,7 +748,7 @@ pub(crate) struct Kept {
 	pub told: usize,
 	/// Dead hops and draining nodes.
 	pub pending: usize,
-	/// Pairs of relays with a session known closed, kept for good.
+	/// Pairs of relays with a session known closed, as the floors keep them.
 	pub closed: usize,
 	/// Claims shown unavailable while the reader waits to show them offline.
 	pub waiting: usize,
@@ -754,9 +787,10 @@ pub(crate) struct Router<N, I, A> {
 	unnamed: (BTreeSet<Hop>, BTreeSet<NodeId>),
 	/// Closed sessions a live heard route still names, each with its far end.
 	dead: BTreeMap<Hop, NodeId>,
-	/// Per pair of relays, the highest session known closed, as the near relay's start
-	/// and its session number.
-	closed: BTreeMap<(Id, Id), (u64, u64)>,
+	/// Per pair of relays, the highest session known closed, as the near relay numbered it.
+	closed: BTreeMap<(Id, Id), u64>,
+	/// The floors of pairs no heard route joins, oldest first.
+	loose: Loose,
 	/// Nodes named as draining that a live heard route still crosses.
 	draining: BTreeSet<NodeId>,
 	/// Forwarding nodes whose route changed since the neighbours were last told.
@@ -874,6 +908,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			unnamed: (BTreeSet::new(), BTreeSet::new()),
 			dead: BTreeMap::new(),
 			closed: BTreeMap::new(),
+			loose: Loose::default(),
 			draining: BTreeSet::new(),
 			stale: BTreeSet::new(),
 			best: BTreeMap::new(),
@@ -1007,15 +1042,6 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		}
 		if self.peers.contains_key(&peer) {
 			return Err(Error::Duplicate);
-		}
-		// A start only grows. Every path through a session of a start below one known
-		// closed is refused for good, so a relay whose clock went back would peer and
-		// route nothing: refuse it here, where its operator sees why.
-		if let Role::Routing(node) = &port.role {
-			let known = (self.closed).range((node.relay, Id::MIN)..=(node.relay, Id::MAX));
-			if known.into_iter().any(|(_, (start, _))| *start > node.start) {
-				return Err(Error::Regressed);
-			}
 		}
 		self.sessions += 1;
 		let ask: BTreeSet<Path> = match &port.role {
@@ -1191,13 +1217,21 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		}
 		// The session is named before any route it carried is withdrawn: a neighbour that
 		// hears only the withdrawal still takes the routes others offer through it.
+		// A floor covers every session of its pair at or below it, so a session closing while
+		// an older one to the same relay lives is never named: its floor would cover the
+		// older, live one, and every route still crossing it. Its routes go by replacement.
 		if let Role::Routing(far) = gone.port.role {
-			let hop = Hop {
-				node: self.me,
-				session: gone.session,
-			};
-			self.closed(hop, far, None, &mut touched);
+			let older = (self.peers.values())
+				.any(|peer| peer.session < gone.session && peer.routing().is_some_and(|id| id.relay == far.relay));
+			if !older {
+				let hop = Hop {
+					node: self.me,
+					session: gone.session,
+				};
+				self.closed(hop, far, None, &mut touched);
+			}
 		}
+		self.forget();
 		for &origin in &gone.offers {
 			self.unheard(origin);
 		}
@@ -1353,11 +1387,10 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			Msg::Ask(edit) => return self.edit(from, edit),
 			Msg::Edited => {
 				// It answers this node's oldest edit, which takes effect here for both.
+				// Removed first, as the peer applies it: a prefix removed and added again
+				// is asked for afresh.
 				let edit = peer.asking.pop_front().ok_or(Error::Unasked)?;
 				peer.answering = true;
-				for prefix in &edit.add {
-					peer.asked.insert(prefix.clone(), false);
-				}
 				let mut lost = Vec::new();
 				for prefix in &edit.remove {
 					peer.asked.remove(prefix);
@@ -1367,6 +1400,9 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 							.filter(|(path, _)| super::prefix::within(path, prefix))
 							.cloned(),
 					);
+				}
+				for prefix in &edit.add {
+					peer.asked.insert(prefix.clone(), false);
 				}
 				for broadcast in lost {
 					self.peers.get_mut(&from).expect("a neighbour").given.remove(&broadcast);
@@ -1590,6 +1626,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		}
 		for (pair, _) in pairs(path) {
 			self.rx_pairs.entry(pair).or_default().insert((origin, from));
+			self.loose.remove(&pair);
 		}
 	}
 
@@ -1616,6 +1653,9 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				routes.remove(&(origin, from));
 				if routes.is_empty() {
 					self.rx_pairs.remove(&pair);
+					if self.closed.contains_key(&pair) {
+						self.loose.insert(pair);
+					}
 				}
 			}
 		}
@@ -1631,8 +1671,15 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		}
 	}
 
-	/// Forget each dead hop and draining node no live heard route names.
+	/// Forget each dead hop and draining node no live heard route names, and the oldest
+	/// floors no heard route joins while they outnumber the pairs heard routes join.
 	fn forget(&mut self) {
+		// Bounded by the heard routes, as the floors they join are.
+		while self.loose.len() > self.rx_pairs.len() {
+			self.visit();
+			let pair = self.loose.pop_oldest().expect("a loose floor");
+			self.closed.remove(&pair);
+		}
 		for hop in std::mem::take(&mut self.unnamed.0) {
 			self.visit();
 			if !self.live.contains_key(&hop) && !mutated!(self, KeepDead) {
@@ -2508,8 +2555,9 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		self.closest(&(from, instance.clone())).map(|(origin, _)| origin)
 	}
 
-	/// Where a request for `broadcast` naming `origin` goes from here. `None` fails it.
-	pub fn step(&self, origin: NodeId, (path, instance): &Broadcast<I>) -> Option<Next<N>> {
+	/// Where a request for `broadcast` naming `origin` goes from here, never back to the
+	/// neighbour `asker` that sent it. `None` fails it.
+	pub fn step(&self, origin: NodeId, (path, instance): &Broadcast<I>, asker: Option<N>) -> Option<Next<N>> {
 		match self.is_self(origin) {
 			// As `pick`, the claim at the most specific path covering it that the reader
 			// shows: the neighbour behind it if it is this node's own, available, and of the
@@ -2533,21 +2581,33 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 					.map(|above| (above, instance.clone()))
 					.find(|claim| known.is_some_and(|known| known.items.contains_key(claim)));
 				match claim {
-					Some(claim) => self.lead(origin, &claim).map(Next::Via),
-					None => self.best.get(&origin).map(|best| Next::Via(best.via)),
+					Some(claim) => self.lead(origin, &claim, asker).map(Next::Via),
+					None => (self.best.get(&origin))
+						.filter(|best| Some(best.via) != asker)
+						.map(|best| Next::Via(best.via)),
 				}
 			}
 		}
 	}
 
-	/// Whether a request for `broadcast` naming `origin`, which [`Self::step`] has nowhere
-	/// to send, waits for a way rather than fails: this node routes to `origin` and knows its
-	/// claim available and of the best precedence, so it shows the claim, but no neighbour's
-	/// copy holds it yet. A route arrives before the claims behind it, and a copy that held
-	/// the claim can leave with its session while this node's own copy stays, so nothing it
-	/// shows changes when a way appears: a request it refused now would never be asked again.
-	pub fn awaits(&self, origin: NodeId, (path, instance): &Broadcast<I>) -> bool {
-		if self.is_self(origin) || !self.best.contains_key(&origin) {
+	/// Whether a request for `broadcast` naming `origin` from `asker`, which [`Self::step`]
+	/// has nowhere to send, waits for a way rather than fails: this node routes to `origin`
+	/// other than through `asker` and knows its claim available and of the best precedence,
+	/// so it shows the claim, but no other neighbour's copy holds it yet. A route arrives
+	/// before the claims behind it, and a copy that held the claim can leave with its session
+	/// while this node's own copy stays, so nothing it shows changes when a way appears: a
+	/// request it refused now would never be asked again.
+	pub fn awaits(&self, origin: NodeId, (path, instance): &Broadcast<I>, asker: Option<N>) -> bool {
+		if self.is_self(origin) {
+			return false;
+		}
+		// The asker's own copy is no way, so a route only through it leads nowhere.
+		let routed = match self.best.get(&origin) {
+			None => false,
+			Some(best) if Some(best.via) != asker => true,
+			Some(_) => self.usable(origin).iter().any(|route| Some(route.via) != asker),
+		};
+		if !routed {
 			return false;
 		}
 		let Some(known) = self.known.get(&origin) else {
@@ -2578,15 +2638,17 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			.is_some_and(|heard| !heard.unavailable && precedence(&heard.item) == precedence(&known.item))
 	}
 
-	/// The neighbour a request for `origin`'s claim of `broadcast` leaves by: the route to
-	/// `origin` when its neighbour holds the claim, else the best usable route whose does.
-	fn lead(&self, origin: NodeId, broadcast: &Broadcast<I>) -> Option<N> {
+	/// The neighbour a request for `origin`'s claim of `broadcast` from `asker` leaves by:
+	/// the route to `origin` when its neighbour holds the claim, else the best usable route
+	/// whose does, never `asker`'s.
+	fn lead(&self, origin: NodeId, broadcast: &Broadcast<I>, asker: Option<N>) -> Option<N> {
 		let best = self.best.get(&origin)?;
-		if self.holds(origin, best.via, broadcast) {
+		let leads = |via: N| Some(via) != asker && self.holds(origin, via, broadcast);
+		if leads(best.via) {
 			return Some(best.via);
 		}
 		(self.usable(origin).into_iter())
-			.filter(|route| self.holds(origin, route.via, broadcast))
+			.filter(|route| leads(route.via))
 			.min_by_key(|route| order(route, Some(best.via)))
 			.map(|route| route.via)
 	}
@@ -2645,7 +2707,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			}
 			// Every usable route to its claimant whose neighbour holds the claim serves it,
 			// for the same reason.
-			let lead = self.lead(origin, broadcast);
+			let lead = self.lead(origin, broadcast, None);
 			for route in self.usable(origin) {
 				if !self.holds(origin, route.via, broadcast) {
 					continue;
@@ -3103,6 +3165,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			unnamed,
 			dead,
 			closed,
+			loose,
 			draining,
 			stale,
 			best,
@@ -3142,9 +3205,11 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		let since: BTreeMap<&Broadcast<I>, Duration> = (since.iter())
 			.map(|(broadcast, at)| (broadcast, now.saturating_duration_since(*at).min(*debounce)))
 			.collect();
+		// Only the order the loose floors go in matters, not the count behind it.
+		let loose: Vec<&(Id, Id)> = loose.by_age.values().collect();
 		let state = (
 			(me, forwards, debounce, sessions, peers, routing, fresh, heard, unnamed),
-			(dead, closed, draining, stale, best, marks, known, revs),
+			(dead, closed, loose, draining, stale, best, marks, known, revs),
 			(sources, ended, dirty, waiting, since, gone, reader.shown(), out),
 			withdrawn,
 		);
@@ -3178,6 +3243,15 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		}
 		assert_eq!(self.rx_hops, rx_hops, "heard hops");
 		assert_eq!(self.rx_pairs, rx_pairs, "heard pairs");
+		let loose: BTreeSet<&(Id, Id)> = self
+			.closed
+			.keys()
+			.filter(|pair| !rx_pairs.contains_key(*pair))
+			.collect();
+		assert_eq!(self.loose.age.keys().collect::<BTreeSet<_>>(), loose, "loose floors");
+		assert_eq!(self.loose.by_age.len(), loose.len(), "loose order");
+		assert!(loose.len() <= rx_pairs.len(), "loose floors outnumber the joined pairs");
+
 		assert_eq!(self.live, live, "live hops");
 		let mut tx_hops: BTreeMap<Hop, BTreeMap<N, BTreeSet<NodeId>>> = BTreeMap::new();
 		let mut sent_to: BTreeMap<NodeId, BTreeSet<N>> = BTreeMap::new();
@@ -3334,11 +3408,7 @@ mod tests {
 	}
 
 	fn node(relay: Id) -> NodeId {
-		NodeId {
-			relay,
-			start: 1,
-			marked: false,
-		}
+		NodeId { relay, marked: false }
 	}
 
 	fn port(role: Role) -> Port {
@@ -3471,11 +3541,11 @@ mod tests {
 		for (path, endpoint) in [("live", 2), ("live/b/x", 2), ("live/a", 3), ("live/a/x", 3)] {
 			let broadcast = (p(path), 7);
 			assert_eq!(router.pick(&broadcast), Some(me), "{path}");
-			assert_eq!(router.step(me, &broadcast), Some(Next::Local(endpoint)), "{path}");
+			assert_eq!(router.step(me, &broadcast, None), Some(Next::Local(endpoint)), "{path}");
 		}
 		for broadcast in [(p("other"), 7), (p("live/a"), 8)] {
 			assert_eq!(router.pick(&broadcast), None, "{broadcast:?}");
-			assert_eq!(router.step(me, &broadcast), None, "{broadcast:?}");
+			assert_eq!(router.step(me, &broadcast, None), None, "{broadcast:?}");
 		}
 		// The narrower claim lost, a request under it fails closed, even one already
 		// naming this node, until the reader lets it go.
@@ -3489,10 +3559,10 @@ mod tests {
 			.unwrap();
 		let under = (p("live/a/x"), 7);
 		assert_eq!(router.pick(&under), None);
-		assert_eq!(router.step(me, &under), None);
+		assert_eq!(router.step(me, &under, None), None);
 		router.timeout(router.deadline().expect("a debounce"));
 		assert_eq!(router.pick(&under), Some(me));
-		assert_eq!(router.step(me, &under), Some(Next::Local(2)));
+		assert_eq!(router.step(me, &under, None), Some(Next::Local(2)));
 	}
 
 	/// A neighbour routes to a node before that node's claims reach it, and refuses a request
@@ -3520,10 +3590,10 @@ mod tests {
 				.collect::<Vec<_>>()
 		};
 		assert_eq!(ways(&router), [(Next::Via(3), true)]);
-		assert_eq!(router.step(node(5), &broadcast), Some(Next::Via(3)));
+		assert_eq!(router.step(node(5), &broadcast, None), Some(Next::Via(3)));
 		router.recv(2, claims(1)).unwrap();
 		assert_eq!(ways(&router), [(Next::Via(2), true), (Next::Via(3), false)]);
-		assert_eq!(router.step(node(5), &broadcast), Some(Next::Via(2)));
+		assert_eq!(router.step(node(5), &broadcast, None), Some(Next::Via(2)));
 	}
 
 	/// A neighbour whose copy holds the claim only unavailable refuses a request for it too,
@@ -3555,10 +3625,10 @@ mod tests {
 				.collect::<Vec<_>>()
 		};
 		assert_eq!(ways(&router), [(Next::Via(3), true)]);
-		assert_eq!(router.step(node(5), &broadcast), Some(Next::Via(3)));
+		assert_eq!(router.step(node(5), &broadcast, None), Some(Next::Via(3)));
 		router.recv(2, claims(false, 3)).unwrap();
 		assert_eq!(ways(&router), [(Next::Via(2), true), (Next::Via(3), false)]);
-		assert_eq!(router.step(node(5), &broadcast), Some(Next::Via(2)));
+		assert_eq!(router.step(node(5), &broadcast, None), Some(Next::Via(2)));
 	}
 
 	/// Among claims of one Instance at one path, one exactly there outranks a broader one
@@ -3578,14 +3648,14 @@ mod tests {
 		router.recv(3, announce(claim(run(2), 9))).unwrap();
 		let me = router.me();
 		assert_eq!(
-			router.step(me, &broadcast),
+			router.step(me, &broadcast, None),
 			Some(Next::Local(3)),
 			"a newer epoch, however dear"
 		);
 		assert_eq!(router.own().1[&broadcast].item, run(2));
 		router.recv(2, announce(claim(Run { epoch: 3, above: 1 }, 0))).unwrap();
 		assert_eq!(
-			router.step(me, &broadcast),
+			router.step(me, &broadcast, None),
 			Some(Next::Local(3)),
 			"a broader claim, however new"
 		);
@@ -3601,7 +3671,7 @@ mod tests {
 		router.recv(4, claims(run(2), 2)).unwrap();
 		assert_eq!(router.pick(&broadcast), Some(node(5)), "the same run, closer");
 		assert_eq!(
-			router.step(me, &broadcast),
+			router.step(me, &broadcast, None),
 			Some(Next::Local(3)),
 			"named, its own run serves"
 		);
@@ -3609,20 +3679,24 @@ mod tests {
 		assert_eq!(router.pick(&broadcast), Some(me), "a broader claim, however new");
 		router.recv(4, claims(run(3), 4)).unwrap();
 		assert_eq!(router.pick(&broadcast), Some(node(5)), "a newer claim");
-		assert_eq!(router.step(me, &broadcast), None, "named, its older run never serves");
+		assert_eq!(
+			router.step(me, &broadcast, None),
+			None,
+			"named, its older run never serves"
+		);
 		// The newer claim's route goes while its claim stays known: the older run never
 		// stands in for it.
 		router.recv(4, route(5, 4, Metric::MAX)).unwrap();
 		assert_eq!(router.best(node(5)), None);
 		assert_eq!(router.pick(&broadcast), None);
-		assert_eq!(router.step(me, &broadcast), None, "named, still closed");
+		assert_eq!(router.step(me, &broadcast, None), None, "named, still closed");
 		let shown = &router.shown()[&(7, p("live"))];
 		assert_eq!((shown.item, shown.available), (run(3), false));
 	}
 
 	/// A route whose cost a link would carry past the metric is never used, and never wraps
-	/// round to a cheap one. A claim's cost saturates there instead, so it never decides
-	/// whether the claim can serve.
+	/// round to a cheap one. A claim's cost saturates at the wire ceiling instead, so it
+	/// never decides whether the claim can serve.
 	#[test]
 	fn a_route_past_the_metric_is_never_used() {
 		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
@@ -3650,7 +3724,7 @@ mod tests {
 		let told = router.drain().into_iter().any(|(to, msg)| {
 			to == 3
 				&& matches!(&msg, Msg::Announce { changes } if changes.iter().any(|(broadcast, change)| {
-					*broadcast == far && matches!(change, Change::Live(claim) if claim.cost == Metric::MAX)
+					*broadcast == far && matches!(change, Change::Live(claim) if claim.cost == MAX_COST)
 				}))
 		});
 		assert!(told, "told at the metric's ceiling");
@@ -3658,7 +3732,7 @@ mod tests {
 			changes: vec![((p("near"), 7), claim(run(0), Metric::MAX))],
 		};
 		router.recv(3, announce).unwrap();
-		assert_eq!(router.own().1[&(p("near"), 7)].cost, Metric::MAX, "an endpoint's claim");
+		assert_eq!(router.own().1[&(p("near"), 7)].cost, MAX_COST, "an endpoint's claim");
 	}
 
 	/// A route that moves onto another path at the same rank changes no way to its claims,
@@ -4857,6 +4931,49 @@ mod tests {
 		router.ask(2, add("x/z")).unwrap();
 	}
 
+	/// A prefix this node removes and adds again in one edit is asked for afresh once
+	/// answered: what it covered goes, and the peer's SYNCED for it is expected again.
+	#[test]
+	fn a_prefix_asked_again_in_one_edit_is_asked_afresh() {
+		let mut router = relay(1);
+		router.connect(2, port(Role::Scoped(Vec::new()))).unwrap();
+		let room = (p("live/room"), 7);
+		router
+			.ask(
+				2,
+				Edit {
+					remove: Vec::new(),
+					add: vec![p("live")],
+				},
+			)
+			.unwrap();
+		router.recv(2, Msg::Edited).unwrap();
+		let announce = Msg::Announce {
+			changes: vec![(room.clone(), live(0))],
+		};
+		router.recv(2, announce.clone()).unwrap();
+		router.recv(2, Msg::Synced(p("live"))).unwrap();
+		assert_eq!(router.is_synced(2, &p("live")), Some(true));
+		assert!(router.peers[&2].given.contains_key(&room));
+
+		router
+			.ask(
+				2,
+				Edit {
+					remove: vec![p("live")],
+					add: vec![p("live")],
+				},
+			)
+			.unwrap();
+		router.recv(2, Msg::Edited).unwrap();
+		assert_eq!(router.is_synced(2, &p("live")), Some(false));
+		assert!(!router.peers[&2].given.contains_key(&room), "the peer dropped it too");
+		router.recv(2, announce).unwrap();
+		router.recv(2, Msg::Synced(p("live"))).unwrap();
+		assert_eq!(router.is_synced(2, &p("live")), Some(true));
+		assert!(router.peers[&2].given.contains_key(&room));
+	}
+
 	/// A request from a marked neighbour never follows a claim that reached this node
 	/// over a marked link, which that neighbour is never told; another neighbour's may.
 	#[test]
@@ -5308,7 +5425,6 @@ mod tests {
 		let me = Hop {
 			node: NodeId {
 				relay: 1,
-				start: 0,
 				marked: false,
 			},
 			session: 3,
@@ -5344,56 +5460,131 @@ mod tests {
 		assert_eq!(router.recv(2, Msg::Drain { node: node(5) }), Err(Error::Unrouted));
 	}
 
-	/// A relay whose start is below one of its sessions known closed is refused as a
-	/// routing neighbour: every path through its new sessions would be, silently.
+	/// Relays exchanging messages until none is left. Each keys a neighbour as
+	/// `10 * relay + link`, so two relays may hold more than one session.
+	struct Mesh(BTreeMap<Id, Relay>);
+
+	impl Mesh {
+		fn new(relays: &[Id]) -> Self {
+			Self(relays.iter().map(|&id| (id, relay(id))).collect())
+		}
+
+		fn link(&mut self, a: Id, b: Id, link: usize) {
+			for (x, y) in [(a, b), (b, a)] {
+				let (key, router) = (10 * y as usize + link, self.0.get_mut(&x).unwrap());
+				router.connect(key, port(Role::Routing(node(y)))).unwrap();
+			}
+			self.settle();
+		}
+
+		fn close(&mut self, a: Id, b: Id, link: usize) {
+			for (x, y) in [(a, b), (b, a)] {
+				self.0.get_mut(&x).unwrap().disconnect(10 * y as usize + link);
+			}
+			self.settle();
+		}
+
+		/// An endpoint at `relay` claims `live`, so the relay offers a route to itself.
+		fn claim(&mut self, relay: Id) {
+			let router = self.0.get_mut(&relay).unwrap();
+			open(router, 0, Role::Endpoint);
+			let changes = vec![((p("live"), 7), live(0))];
+			router.recv(0, Msg::Announce { changes }).unwrap();
+			self.settle();
+		}
+
+		fn settle(&mut self) {
+			loop {
+				let mut sent = Vec::new();
+				for (&id, router) in &mut self.0 {
+					for (key, msg) in router.drain() {
+						sent.push((key / 10, 10 * id as usize + key % 10, msg));
+					}
+				}
+				let mut delivered = false;
+				for (to, from, msg) in sent {
+					if let Some(router) = self.0.get_mut(&(to as Id)) {
+						router.recv(from, msg).unwrap();
+						delivered = true;
+					}
+				}
+				if !delivered {
+					return;
+				}
+			}
+		}
+
+		fn routes(&self, at: Id, to: Id) -> bool {
+			self.0[&at].best(node(to)).is_some()
+		}
+	}
+
+	/// Two sessions between the same pair of relays: whichever closes first, even the one
+	/// the route crosses, a relay that reaches the far one only through them keeps its
+	/// route.
 	#[test]
-	fn a_start_that_went_back_is_refused() {
+	fn a_second_session_keeps_the_route() {
+		for (older, used) in [(1, 1), (1, 2), (2, 1), (2, 2)] {
+			let mut mesh = Mesh::new(&[1, 2, 3]);
+			mesh.link(1, 2, older);
+			mesh.link(1, 2, 3 - older);
+			mesh.link(1, 3, 1);
+			mesh.claim(2);
+			assert!(mesh.routes(3, 2), "routed before any close");
+			// Close the link the route crosses, or the other one, first.
+			let via = mesh.0[&1].best(node(2)).expect("a route").0 % 10;
+			let first = if used == 1 { via } else { 3 - via };
+			mesh.close(1, 2, first);
+			assert!(mesh.routes(3, 2), "closing link {first} first keeps the route");
+			mesh.close(1, 2, 3 - first);
+			assert!(!mesh.routes(3, 2), "both closed");
+		}
+	}
+
+	/// A routing neighbour naming made-up relays on its routes, and each of their sessions
+	/// closed, grows the floors only by what its live routes hold, and they go with it.
+	#[test]
+	fn a_peer_naming_made_up_relays_leaves_no_floors() {
 		let mut router = relay(1);
 		open(&mut router, 2, Role::Routing(node(2)));
-		let started = |start| NodeId {
-			relay: 7,
-			start,
-			marked: false,
-		};
-		let origin = Hop {
-			node: node(5),
-			session: 0,
-		};
-		let through = Hop {
-			node: started(5),
-			session: 1,
-		};
-		let sender = Hop {
-			node: node(2),
-			session: 1,
-		};
-		let offer = Offer {
-			path: vec![origin, through, sender].into(),
-			draining: false,
-			priority: i8::MAX,
-			cost: 2,
-			marked: false,
-		};
-		let route = Msg::Route {
-			origin: node(5),
-			offer: Some(offer),
-		};
-		router.recv(2, route).unwrap();
-		let dead = Msg::Dead {
-			hop: through,
-			far: node(5),
-		};
-		router.recv(2, dead).unwrap();
-
-		assert_eq!(
-			router.connect(3, port(Role::Routing(started(4)))),
-			Err(Error::Regressed)
-		);
-		// The same run, and any later one, peers.
-		router.connect(3, port(Role::Routing(started(5)))).unwrap();
-		router.connect(4, port(Role::Routing(started(6)))).unwrap();
-		// Only a routing neighbour names a start.
-		router.connect(5, port(Role::Endpoint)).unwrap();
+		for made_up in 100..300 {
+			let through = Hop {
+				node: node(made_up),
+				session: 1,
+			};
+			let path = vec![
+				Hop {
+					node: node(5),
+					session: 0,
+				},
+				through,
+				Hop {
+					node: node(2),
+					session: 1,
+				},
+			];
+			let offer = Offer {
+				path: path.into(),
+				draining: false,
+				priority: i8::MAX,
+				cost: 2,
+				marked: false,
+			};
+			let route = Msg::Route {
+				origin: node(5),
+				offer: Some(offer),
+			};
+			router.recv(2, route).unwrap();
+			let dead = Msg::Dead {
+				hop: through,
+				far: node(5),
+			};
+			router.recv(2, dead).unwrap();
+			// The pairs one route joins, and as many it stopped joining.
+			assert!(router.kept().closed <= 4, "{:?}", router.kept());
+		}
+		router.disconnect(2);
+		assert_eq!(router.kept().closed, 0);
 	}
 
 	/// A claim lost with nothing to replace it shows unavailable for the debounce, then
@@ -5452,11 +5643,11 @@ mod tests {
 		let kinds = |router: &mut Relay| router.events().into_iter().map(|event| event.kind).collect::<Vec<_>>();
 		let request = (p("live/x"), 7);
 		router.recv(2, claim(live(0))).unwrap();
-		assert_eq!(router.step(node(1), &request), Some(Next::Local(2)));
+		assert_eq!(router.step(node(1), &request, None), Some(Next::Local(2)));
 		let since = Instant::ZERO;
 		router.recv(2, claim(unavailable.clone())).unwrap();
 		assert_eq!(kinds(&mut router), [Kind::Start, Kind::Unavailable]);
-		assert_eq!(router.step(node(1), &request), None, "fails closed");
+		assert_eq!(router.step(node(1), &request, None), None, "fails closed");
 		assert_eq!(router.pick(&request), None, "fails closed");
 		assert_eq!(router.deadline(), None, "a claim kept waits for nothing");
 		router.timeout(since.saturating_add(debounce(HOP) / 2));
@@ -5508,19 +5699,19 @@ mod tests {
 		assert!(router.events().is_empty());
 		router.recv(2, told(1, false)).unwrap();
 		assert_eq!(own(&router), Some((1, false)), "then available");
-		assert_eq!(router.step(me, &broadcast), Some(Next::Local(2)));
+		assert_eq!(router.step(me, &broadcast, None), Some(Next::Local(2)));
 
 		// Two neighbours give the run; the one still available serves.
 		router.recv(3, told(1, false)).unwrap();
 		router.recv(2, told(1, true)).unwrap();
 		assert_eq!(own(&router), Some((1, false)));
-		assert_eq!(router.step(me, &broadcast), Some(Next::Local(3)));
+		assert_eq!(router.step(me, &broadcast, None), Some(Next::Local(3)));
 		router.recv(3, told(1, true)).unwrap();
 		assert_eq!(own(&router), Some((1, true)), "every one unavailable");
-		assert_eq!(router.step(me, &broadcast), None, "fails closed");
+		assert_eq!(router.step(me, &broadcast, None), None, "fails closed");
 		assert_eq!(router.pick(&broadcast), None, "fails closed");
 		router.recv(2, told(1, false)).unwrap();
-		assert_eq!(router.step(me, &broadcast), Some(Next::Local(2)));
+		assert_eq!(router.step(me, &broadcast, None), Some(Next::Local(2)));
 		assert_eq!(
 			(router.events().into_iter().map(|event| event.kind)).collect::<Vec<_>>(),
 			[Kind::Start, Kind::Unavailable, Kind::Available]
@@ -5532,19 +5723,19 @@ mod tests {
 		router.recv(2, told(2, true)).unwrap();
 		assert_eq!(own(&router), Some((1, false)), "the older run stands");
 		assert_eq!(
-			router.step(me, &broadcast),
+			router.step(me, &broadcast, None),
 			Some(Next::Local(3)),
 			"where it is still given"
 		);
 		router.recv(4, told(2, true)).unwrap();
 		assert_eq!(own(&router), Some((1, false)), "the older run stands");
-		assert_eq!(router.step(me, &broadcast), Some(Next::Local(3)));
+		assert_eq!(router.step(me, &broadcast, None), Some(Next::Local(3)));
 		router.recv(4, told(2, false)).unwrap();
 		assert_eq!(own(&router), Some((2, false)), "taken, the newer run outranks");
-		assert_eq!(router.step(me, &broadcast), Some(Next::Local(4)));
+		assert_eq!(router.step(me, &broadcast, None), Some(Next::Local(4)));
 		router.recv(4, told(2, true)).unwrap();
 		assert_eq!(own(&router), Some((2, true)), "unavailable or not");
-		assert_eq!(router.step(me, &broadcast), None);
+		assert_eq!(router.step(me, &broadcast, None), None);
 		// The last neighbour giving the older run moves to the newer one unavailable: the
 		// older run is lost, and the newer one, which neighbour 4 gave, stays.
 		router.recv(3, told(2, true)).unwrap();

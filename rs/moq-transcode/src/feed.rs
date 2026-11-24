@@ -198,11 +198,10 @@ async fn decode(inner: &Inner, sender: &broadcast::Sender<Item>) -> Result<(), E
 	// own keyframe, so there is nothing for a sequence cursor to buy.
 	let subscription = moq_net::track::Subscription::default()
 		.with_order(moq_net::track::Order::Ascending)
-		.with_delay(
-			moq_net::track::Delay::default()
-				.with_min(std::time::Duration::ZERO)
-				.with_max(SUPERSEDED),
-		);
+		.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
+			min: Some(std::time::Duration::ZERO),
+			max: Some(SUPERSEDED),
+		})]);
 	let mut subscriber = inner.broadcast.track(&inner.name)?.subscribe(subscription).await?;
 
 	while let Some(mut group) = subscriber.recv_group().await? {

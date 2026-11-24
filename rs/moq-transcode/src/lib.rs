@@ -997,12 +997,10 @@ mod tests {
 		})
 		.await;
 
-		let past = moq_net::track::Subscription::default()
-			.with_ranges([moq_net::track::Range {
-				start: Some(3),
-				end: Some(4),
-			}])
-			.with_delay(moq_net::track::Delay::default().with_max(None));
+		let past = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range {
+			start: moq_net::track::Start::Time(3),
+			end: Some(4),
+		}]);
 		let rung = consumer.track("video/120p").unwrap();
 		let _subscriber = rung.subscribe(past).await.unwrap();
 
@@ -2016,12 +2014,26 @@ mod tests {
 		// delivering, so its tail is not given up just because the next one began,
 		// but the publisher's history is not: a cold start begins at the live edge.
 		let asked = source._track.subscription().expect("the feed's subscription");
+		let [
+			moq_net::track::Range {
+				start: moq_net::track::Start::Live { min, max },
+				end: None,
+			},
+		] = asked.ranges[..]
+		else {
+			panic!("the feed asks one live join: {:?}", asked.ranges);
+		};
+		assert_eq!(
+			min,
+			Some(std::time::Duration::ZERO),
+			"a cold start begins at the live edge"
+		);
 		assert_ne!(
-			asked.delay.max,
+			max,
 			Some(std::time::Duration::ZERO),
 			"the feed gives up every superseded group"
 		);
-		assert!(asked.delay.max.is_some(), "the feed asks for its publisher's history");
+		assert!(max.is_some(), "the feed asks for its publisher's history");
 
 		// The live path opens output group 0 on the source's first frame.
 		let mut lost = source._track.create_group(0u64.into()).unwrap();
@@ -2177,7 +2189,7 @@ mod tests {
 		let mut subscriber = rung
 			.subscribe(
 				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_min(std::time::Duration::ZERO)),
+					.with_ranges([moq_net::track::Range::from(moq_net::track::Start::LATEST)]),
 			)
 			.await
 			.unwrap()

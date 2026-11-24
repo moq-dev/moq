@@ -290,8 +290,10 @@ impl Recv {
 			.window
 			.map_or(stream_receive_window, |window| window.min(stream_receive_window));
 		let window = stream_receive_window.max(self.lease.wanted());
+		// A limit past a varint cannot be encoded, and a peer can never send that far anyway.
+		let limit = |credit: u64| credit.min(VarInt::MAX.into_inner());
 		// A window shrunk since the last announcement cannot take back credit already granted.
-		let max_stream_data = (taken + window).max(self.sent_max_stream_data);
+		let max_stream_data = limit(taken + window).max(self.sent_max_stream_data);
 
 		// Only announce a window update if it's significant enough
 		// to make it worthwhile sending a MAX_STREAM_DATA frame.
@@ -303,7 +305,7 @@ impl Recv {
 		// A reader waiting on more than the peer may send gets it however small: nothing it
 		// takes in the meantime would add to it.
 		let diff = max_stream_data - self.sent_max_stream_data;
-		let short = self.sent_max_stream_data < taken + self.lease.wanted();
+		let short = self.sent_max_stream_data < limit(taken + self.lease.wanted());
 		// At least a byte, so a tiny window never resends an unchanged limit.
 		let threshold = (stream_receive_window / 8).max(1);
 		let transmit = self.can_send_flow_control() && (diff >= threshold || short);

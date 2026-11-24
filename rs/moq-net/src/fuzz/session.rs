@@ -513,8 +513,8 @@ async fn read_broadcast(broadcast: broadcast::Consumer, read: Rc<RefCell<Vec<Vec
 	let Ok(track) = broadcast.track(TRACK) else {
 		return;
 	};
-	// Never skip a superseded group, so every one the publisher wrote must arrive.
-	let every = track::Subscription::default().with_delay(track::Delay::default().with_max(None));
+	// History from the oldest group skips nothing, so every one the publisher wrote must arrive.
+	let every = track::Subscription::default().with_ranges([track::Range::ALL]);
 	let Ok(mut subscriber) = track.subscribe(every).await else {
 		return;
 	};
@@ -573,9 +573,9 @@ impl Relay {
 		let mut config = origin::Config::new(1.try_into().expect("a nonzero hop"));
 		// The cache's idle expiry is the longest wait in the drain, so keep it short.
 		config.pool = cache::Pool::new(cache::Config::default().with_expiry(EXPIRY));
-		let (origin, driver) = origin::Producer::new(config);
 		// A relay carries every peer's routes on to the others.
-		let origin = origin.with_proxy(true);
+		config.proxy = true;
+		let (origin, driver) = origin::Producer::new(config);
 		let driver = Rc::new(RefCell::new(driver));
 		let driving = {
 			let driver = driver.clone();

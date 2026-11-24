@@ -4,22 +4,24 @@
 //! ends, on every wire, from the publisher directly or through a relay. A range reaching
 //! past the live edge ends once the groups up to its end arrive.
 
+use crate::WithMax as _;
 use crate::support;
 use support::AppendNext;
 
 use std::time::Duration;
 
-use moq_net::track::{Delay, Order, Subscription};
+use moq_net::track::{Order, Subscription};
 use moq_net::{Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 fn write_group(track: &mut moq_net::track::Producer, key: u64) {
@@ -110,7 +112,7 @@ async fn fixture(
 fn one_range(groups: std::ops::Range<u64>) -> Subscription {
 	Subscription::default()
 		.with_ranges([support::keys(groups)])
-		.with_delay(Delay::default().with_max(None))
+		.with_max(None)
 		.with_order(Order::Ascending)
 }
 

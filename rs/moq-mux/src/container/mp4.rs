@@ -13,7 +13,9 @@
 //!
 //! A finished file lists [`Chapter`]s two ways, so every player finds them: Nero's `chpl` box
 //! in the `moov`, and a QuickTime chapter text track that the first track references with
-//! `tref chap`. The text lies in an `mdat` between the media and the `moov`.
+//! `tref chap`. The text lies in an `mdat` between the media and the `moov`. Apple's
+//! AVFoundation, behind QuickTime Player and Safari, reads only the text track; FFmpeg reads
+//! either.
 //!
 //! A rendition that joins after the fragmented `moov` is written into `free` boxes, which a
 //! reader of the unfinished file skips. Before a track's first fragment, and again whenever
@@ -58,7 +60,8 @@ const NON_SYNC: u32 = 0x0001_0000;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Chapter {
 	/// When the chapter starts on the recorded broadcast's timeline, the clock its frames'
-	/// timestamps are on. One before the first sample or after the last is dropped.
+	/// timestamps are on. One before the first sample or after the last is dropped, and of
+	/// chapters that start together only the last given is kept.
 	pub time: Timestamp,
 
 	/// The chapter's name, at most 255 bytes. The limits on titles and on how many chapters
@@ -184,7 +187,7 @@ impl<S: Stream> Export<S> {
 	}
 
 	/// Set how far behind the live edge each per-track source plays; see [`fmp4::Export::with_delay`].
-	pub fn with_delay(mut self, delay: moq_net::track::Delay) -> Self {
+	pub fn with_delay(mut self, delay: crate::container::Delay) -> Self {
 		self.fmp4 = self.fmp4.with_delay(delay);
 		self
 	}
@@ -589,11 +592,21 @@ impl Atom {
 		}))
 	}
 
-	/// Read and decode the whole box.
+	/// Read and decode the whole box, held to the bounds a recording checked it against when
+	/// it was written, since a damaged or crafted file can declare anything.
 	fn decode<F: Read + Seek, T: Decode>(&self, file: &mut F) -> Result<T> {
+		let body = self.end - self.body;
+		if body > fmp4::MAX_METADATA_BYTES as u64 {
+			return Err(Error::MetadataTooLarge {
+				kind: String::from_utf8_lossy(&self.kind).into_owned(),
+				size: usize::try_from(body).unwrap_or(usize::MAX),
+			}
+			.into());
+		}
 		let mut data = vec![0u8; (self.end - self.start) as usize];
 		file.seek(SeekFrom::Start(self.start))?;
 		file.read_exact(&mut data)?;
+		fmp4::metadata::check(&data)?;
 		T::decode(&mut std::io::Cursor::new(data.as_slice())).map_err(crate::Error::mp4)
 	}
 }
@@ -686,6 +699,10 @@ struct Sample {
 impl Index {
 	/// Index a file whose reserved box starts at `reserved`, followed by the fragmented `moov`.
 	fn new(reserved: u64, moov: &mp4_atom::Moov) -> Result<Self> {
+		// Every movie and media tick count is divided by its timescale.
+		if moov.mvhd.timescale == 0 {
+			return Err(Error::Unrepairable("its moov declares a zero timescale").into());
+		}
 		let mut index = Self {
 			reserved,
 			timescale: moov.mvhd.timescale,
@@ -705,6 +722,9 @@ impl Index {
 			let Some(trex) = trexs.iter().find(|trex| trex.track_id == id) else {
 				return Err(unindexable(id, "the track has no trex").into());
 			};
+			if trak.mdia.mdhd.timescale == 0 {
+				return Err(unindexable(id, "the track declares a zero timescale").into());
+			}
 			self.descriptions.insert(id, Description::new(trak, trex));
 		}
 		Ok(())
@@ -924,8 +944,16 @@ impl Index {
 				placed.push((snap(start, self.timescale) as u64, chapter.title.as_str()));
 			}
 		}
-		// A list a player reads in order, equal starts keeping the order given.
+		// A list a player reads in order. Of chapters that start together only the last given
+		// stays: Apple's readers drop the others, which would last no time, so both forms agree.
 		placed.sort_by_key(|&(start, _)| start);
+		placed.dedup_by(|later, kept| {
+			let same = later.0 == kept.0;
+			if same {
+				*kept = *later;
+			}
+			same
+		});
 		if placed.len() > CHPL_LIMIT {
 			return Err(Error::TooManyChapters(placed.len()).into());
 		}
@@ -1316,7 +1344,7 @@ mod tests {
 
 	async fn export(live: &Live) -> super::Export<crate::catalog::Consumer> {
 		super::Export::new(live.source().await, live.catalog_stream().await)
-			.with_delay(moq_net::track::Delay::default().with_max(MAX_DELAY))
+			.with_delay(crate::container::Delay::default().with_max(MAX_DELAY))
 	}
 
 	/// Append everything the export writes without waiting for more input.
@@ -2174,18 +2202,14 @@ mod tests {
 		(chpl, track)
 	}
 
-	/// Both forms list the chapters that fall in the recording, in order, and the first track
-	/// points at the text.
+	/// Both forms list the chapters that fall in the recording, in order and only the last of
+	/// those that start together, and the first track points at the text.
 	#[tokio::test(start_paused = true)]
 	async fn a_finish_lists_chapters_both_ways() {
 		let (mut file, finish) = recorded(&chapters()).await;
 		apply(finish, &mut file);
 		let moov = moov(atoms(&file));
-		let expected = vec![
-			(0, "First \u{1f3ac}".to_string()),
-			(100, "Second".to_string()),
-			(100, "Also second".to_string()),
-		];
+		let expected = vec![(0, "First \u{1f3ac}".to_string()), (100, "Also second".to_string())];
 		let (chpl, track) = listed(&file, &moov);
 		assert_eq!(chpl, expected);
 		assert_eq!(track, expected);
@@ -2245,7 +2269,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_chapter_list_over_its_limits_is_refused() {
 		let mut live = Live::avc3();
-		for i in 0..6u64 {
+		for i in 0..10u64 {
 			live.track.write(video_frame(i * 33_000, i % 3 == 0)).unwrap();
 		}
 		let mut export = export(&live).await;
@@ -2253,8 +2277,12 @@ mod tests {
 		record(&mut export, &mut file).await;
 		let index = export.index.expect("a header");
 		let end = file.len() as u64;
-		assert!(index.finish(end, &vec![chapter(0, "a"); 255]).is_ok());
-		assert!(index.finish(end, &vec![chapter(0, "a"); 256]).is_err());
+		// A millisecond apart, so none start together.
+		let spread = |count: u64| -> Vec<super::Chapter> { (0..count).map(|i| chapter(i, "a")).collect() };
+		assert!(index.finish(end, &spread(255)).is_ok());
+		assert!(index.finish(end, &spread(256)).is_err());
+		// Those that start together count once.
+		assert!(index.finish(end, &vec![chapter(0, "a"); 256]).is_ok());
 		assert!(index.finish(end, &[chapter(0, &"a".repeat(255))]).is_ok());
 		assert!(index.finish(end, &[chapter(0, &"a".repeat(256))]).is_err());
 
@@ -2438,6 +2466,42 @@ mod tests {
 		assert!(repair(&file).is_err());
 	}
 
+	/// A crafted fragment or moov is held to the bounds a recording writes it within, so a
+	/// repair refuses it instead of expanding it.
+	#[tokio::test(start_paused = true)]
+	async fn repaired_metadata_is_bounded() {
+		use crate::container::fmp4::metadata::tests::{attacks, boxed, measure};
+		let (file, _) = recorded(&[]).await;
+		let first = file.windows(4).position(|kind| kind == b"moof").expect("a moof") - 4;
+		let mut bounded = true;
+		for (name, moof) in attacks(b"moof") {
+			let mut crafted = file[..first].to_vec();
+			crafted.extend_from_slice(&moof);
+			crafted.extend(boxed(b"mdat", &[]));
+			bounded &= measure(name, || repair(&crafted).is_err());
+		}
+		for (name, moov) in attacks(b"moov") {
+			let mut crafted = file[..first].to_vec();
+			crafted.extend(boxed(b"free", &moov));
+			bounded &= measure(name, || repair(&crafted).is_err());
+		}
+		assert!(bounded);
+	}
+
+	/// A zero movie or media timescale, which every tick count is divided by, is refused.
+	#[tokio::test(start_paused = true)]
+	async fn a_zero_timescale_is_refused() {
+		let (file, _) = recorded(&[]).await;
+		for kind in [b"mvhd", b"mdhd"] {
+			let mut crafted = file.clone();
+			let at = crafted.windows(4).position(|window| window == kind).expect("the box");
+			// The version picks 32- or 64-bit creation and modification times before it.
+			let timescale = at + 4 + 4 + if crafted[at + 4] == 1 { 16 } else { 8 };
+			crafted[timescale..timescale + 4].fill(0);
+			assert!(repair(&crafted).is_err(), "{}", String::from_utf8_lossy(kind));
+		}
+	}
+
 	/// The text track takes the next id, so a trailer advertising an occupied one is finished
 	/// again.
 	#[tokio::test(start_paused = true)]
@@ -2516,5 +2580,66 @@ mod tests {
 				.unwrap()
 				.is_none()
 		);
+	}
+
+	/// Apple's AVFoundation, the reader behind QuickTime Player and Safari, lists the chapters
+	/// `chpl` holds, which it reads from the text track alone.
+	#[cfg(target_os = "macos")]
+	#[tokio::test(start_paused = true)]
+	async fn apple_lists_the_chapters() {
+		let (mut file, finish) = recorded(&chapters()).await;
+		apply(finish, &mut file);
+		let (chpl, _) = listed(&file, &moov(atoms(&file)));
+		let path = std::env::temp_dir().join(format!("moq-mux-chapters-{}.mp4", std::process::id()));
+		std::fs::write(&path, &file).unwrap();
+		let apple = avfoundation_chapters(&path);
+		std::fs::remove_file(&path).unwrap();
+		assert_eq!(apple, chpl);
+	}
+
+	/// The chapters AVFoundation lists for the file at `path`, asked in the undetermined
+	/// language a finish declares them in.
+	#[cfg(target_os = "macos")]
+	fn avfoundation_chapters(path: &std::path::Path) -> Listed {
+		use objc2_av_foundation::{AVMetadataCommonKeyTitle, AVTimedMetadataGroup, AVURLAsset};
+		use objc2_foundation::{NSArray, NSError, NSString, NSURL};
+
+		let url = NSURL::fileURLWithPath(&NSString::from_str(path.to_str().unwrap()));
+		let asset = unsafe { AVURLAsset::URLAssetWithURL_options(&url, None) };
+		let languages = NSArray::from_retained_slice(&[NSString::from_str("und")]);
+		let (tx, rx) = std::sync::mpsc::channel();
+		let handler = block2::RcBlock::new(move |groups: *mut NSArray<AVTimedMetadataGroup>, error: *mut NSError| {
+			// A panic must not unwind into AVFoundation's frames, so it travels to the test thread.
+			let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+				// SAFETY: AVFoundation passes the groups, or the error when there are none.
+				let Some(groups) = (unsafe { groups.as_ref() }) else {
+					return Err(unsafe { error.as_ref() }.map(|error| error.to_string()));
+				};
+				let title = unsafe { AVMetadataCommonKeyTitle }.expect("a title key");
+				let listed = groups
+					.iter()
+					.map(|group| {
+						let start = unsafe { group.timeRange() }.start;
+						let value = u64::try_from(start.value).expect("a start at or after zero");
+						let timescale = u64::try_from(start.timescale).ok().filter(|t| *t > 0);
+						let millis = value * 1000 / timescale.expect("a valid start time");
+						let item = unsafe { group.items() }
+							.iter()
+							.find(|item| unsafe { item.commonKey() }.is_some_and(|key| *key == *title))
+							.expect("a chapter title");
+						(millis, unsafe { item.stringValue() }.expect("a string").to_string())
+					})
+					.collect();
+				Ok(listed)
+			}));
+			// Nor may a failed send unwind; the test thread waits on the receiver until this runs.
+			let _ = tx.send(read);
+		});
+		unsafe {
+			asset.loadChapterMetadataGroupsBestMatchingPreferredLanguages_completionHandler(&languages, &handler)
+		};
+		let read = rx.recv().expect("AVFoundation calls the completion handler");
+		read.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+			.expect("AVFoundation read the chapters")
 	}
 }

@@ -5,12 +5,13 @@
 //! below it. A handler that knows its groups' times answers with the group containing the
 //! time; one serving key by key serves the key, which is that group when one starts there.
 
+use crate::WithMax as _;
 use crate::support;
 
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use moq_net::track::{Delay, FillGroups, Info, Order, Range, Requests, Subscription};
+use moq_net::track::{FillGroups, Info, Order, Range, Requests, Subscription};
 use moq_net::{Timescale, Timestamp, Version};
 use support::harness::peer;
 
@@ -23,10 +24,11 @@ const FOREVER: Duration = Duration::from_millis((1 << 53) - 1);
 const HISTORY: [u64; 4] = [0, 1000, 2000, 3000];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 fn info() -> Info {
@@ -100,7 +102,7 @@ async fn read(range: Range, by_time: bool) -> (BTreeSet<u64>, Vec<(u64, u64)>) {
 		.unwrap();
 
 	let subscription = Subscription::default()
-		.with_delay(Delay::default().with_max(FOREVER))
+		.with_max(FOREVER)
 		.with_order(Order::Ascending)
 		.with_ranges([range]);
 	let mut reader = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription))
@@ -125,7 +127,7 @@ async fn read(range: Range, by_time: bool) -> (BTreeSet<u64>, Vec<(u64, u64)>) {
 #[kio::test]
 async fn a_time_start_is_answered_by_the_group_containing_it() {
 	let range = Range {
-		start: Some(2500),
+		start: moq_net::track::Start::Time(2500),
 		end: Some(4500),
 	};
 	let (read, seen) = read(range, true).await;
@@ -141,7 +143,7 @@ async fn a_time_start_is_answered_by_the_group_containing_it() {
 #[kio::test]
 async fn a_time_start_at_a_key_is_served_key_by_key() {
 	let range = Range {
-		start: Some(2000),
+		start: moq_net::track::Start::Time(2000),
 		end: Some(4500),
 	};
 	let (read, seen) = read(range, false).await;

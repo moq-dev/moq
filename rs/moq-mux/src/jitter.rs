@@ -440,7 +440,8 @@ pub(crate) struct Ready<K, T> {
 	pub generation: u64,
 	pub item: T,
 	decode: Decode,
-	deadline: Instant,
+	/// When it was due, on the clock that follows the source's.
+	pub deadline: Instant,
 	/// Whether it is the first frame of its track to go out.
 	pub first: bool,
 	bytes: usize,
@@ -596,7 +597,7 @@ const LEADS: usize = (RATE_WINDOW / STEER.as_secs_f64()) as usize;
 const RESPONSE: f64 = 600.0;
 /// The furthest the clock runs off ours: 810 Hz of the 27 MHz system clock (ISO/IEC 13818-1
 /// 2.4.2.1).
-const MAX_DRIFT: f64 = 810.0 / 27e6;
+pub(crate) const MAX_DRIFT: f64 = 810.0 / 27e6;
 /// How fast that may change, per second: 0.075 Hz/s of 27 MHz (ISO/IEC 13818-1 2.4.2.1).
 const MAX_SLEW: f64 = 0.075 / 27e6;
 /// How close two tracks' depths under their envelopes are to fit them equally, in seconds: a
@@ -2921,29 +2922,46 @@ mod tests {
 	/// 10 ms once converged; at the limit the clock cannot run past the source's to win back
 	/// what reaching its rate under the slew limit cost, 30 ppm squared over twice the slew
 	/// (162 ms), so it holds there.
+	async fn assert_clock_follows_drifting_source(ppm: f64, bound: f64) {
+		let run = drift(ppm, 24.0, 16.0, |_| Duration::ZERO).await;
+		assert!(run.err.is_none(), "{ppm} ppm: {:?}", run.err);
+		assert!(run.worst <= bound, "{ppm} ppm: held {} s off the delay", run.worst);
+		// One track queued nowhere: every frame's spare is its slack, the delay and the offset.
+		let offset = run.offset.expect("an offset");
+		assert!(offset.abs() <= bound, "{ppm} ppm: offset {offset} s");
+		let margin = run.margin.expect("a margin");
+		assert!(
+			(margin - 0.5 - offset).abs() < 0.001,
+			"{ppm} ppm: margin {margin} s, offset {offset} s"
+		);
+		let drift = run.drift.expect("a measurement") * 1e6;
+		assert!((drift + ppm).abs() < 0.1, "{ppm} ppm: measured {drift} ppm");
+		assert!(
+			(run.clock * 1e6 - ppm).abs() < 0.5,
+			"{ppm} ppm: the clock settled at {}",
+			run.clock * 1e6
+		);
+		assert_eq!(run.out_of_tolerance, 0, "{ppm} ppm");
+	}
+
 	#[tokio::test(start_paused = true)]
-	async fn the_clock_follows_a_drifting_source_for_a_day() {
-		for (ppm, bound) in [(30.0, 0.170), (-30.0, 0.170), (25.0, 0.010), (-25.0, 0.010)] {
-			let run = drift(ppm, 24.0, 16.0, |_| Duration::ZERO).await;
-			assert!(run.err.is_none(), "{ppm} ppm: {:?}", run.err);
-			assert!(run.worst <= bound, "{ppm} ppm: held {} s off the delay", run.worst);
-			// One track queued nowhere: every frame's spare is its slack, the delay and the offset.
-			let offset = run.offset.expect("an offset");
-			assert!(offset.abs() <= bound, "{ppm} ppm: offset {offset} s");
-			let margin = run.margin.expect("a margin");
-			assert!(
-				(margin - 0.5 - offset).abs() < 0.001,
-				"{ppm} ppm: margin {margin} s, offset {offset} s"
-			);
-			let drift = run.drift.expect("a measurement") * 1e6;
-			assert!((drift + ppm).abs() < 0.1, "{ppm} ppm: measured {drift} ppm");
-			assert!(
-				(run.clock * 1e6 - ppm).abs() < 0.5,
-				"{ppm} ppm: the clock settled at {}",
-				run.clock * 1e6
-			);
-			assert_eq!(run.out_of_tolerance, 0, "{ppm} ppm");
-		}
+	async fn the_clock_follows_a_drifting_source_for_a_day_plus_30() {
+		assert_clock_follows_drifting_source(30.0, 0.170).await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn the_clock_follows_a_drifting_source_for_a_day_minus_30() {
+		assert_clock_follows_drifting_source(-30.0, 0.170).await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn the_clock_follows_a_drifting_source_for_a_day_plus_25() {
+		assert_clock_follows_drifting_source(25.0, 0.010).await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn the_clock_follows_a_drifting_source_for_a_day_minus_25() {
+		assert_clock_follows_drifting_source(-25.0, 0.010).await;
 	}
 
 	/// A spell of queueing lowers the floor only while it lasts, so four minutes of 200 ms

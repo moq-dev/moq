@@ -227,9 +227,9 @@ and switching rules in `rs/moq-net/AGENTS.md` before the cut):
   puts the strong rule in the draft as a publisher MUST: a group's span,
   [Group Start, End) since 2026-11-21, never overlaps another's. Expiry relies on it,
   and first-party producers keep it ([moq-dev/moq#9317](https://github.com/moq-dev/moq/pull/9317)).
-- ✅ [The frame cap](/quest/m1/switch-frame-cap.md) is not Required, like the
-  warmth port: if it has landed when the cut is made, its Position end is in
-  lite-07, and otherwise it moves to the next wip version.
+- ✅ The frame cap is not Required, like the warmth port. It landed on
+  lite-07-wip in [moq-dev/moq#9402](https://github.com/moq-dev/moq/pull/9402):
+  a Range may end at a Position.
 - The audit's other gaps change no wire and don't gate the cut: a relay
   asking upstream for a missing group head, the switch's group cap, a
   replaced copy's short group, and expiry by a higher group's lowest
@@ -242,12 +242,7 @@ full-codebase audit): ✅ this quest fixes the changelog typo at
 
 ## Required
 
-- [A time anchor lands by group spans](/quest/m2/time-addressing/span-time-anchors.md) - the draft's Time Anchor rule resolves a time inside a skipped span or a whole group's span
-- [A scoped peer exchanges claims](/quest/m1/lite07-routing/scoped-peer-node-id.md) - a peer with a scoped grant at the root is no longer closed Unauthorized on lite-07
-- [Route floors](/quest/m1/lite07-routing/route-floors.md) - the draft's rule for when DEAD is sent, so two sessions between a pair never black-hole routes
 - [Origin route rank](/quest/m1/lite07-routing/origin-route-rank.md) - bridged routes keep drain and priority, and the draft's rank text matches the code
-- [NodeId drops Start](/quest/m2/node-id-drop-start.md) - NodeId's wire shape
-- [Origin proxy in Config](/quest/m2/origin-proxy-config.md) - claims are marked and stamped the same whatever handle connects first
 
 ## Related
 

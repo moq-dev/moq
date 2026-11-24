@@ -7,45 +7,50 @@ import { nextMedia, subscribeMedia } from "./media";
 
 const flush = () => yieldNow();
 
-test("media joins live, with its delay on the initial subscription and later updates", async () => {
+test("media joins live at its min delay, retunes only the join's max, and updates its priority", async () => {
 	let initial: Moq.Track.Subscription | undefined;
 	const updates: Moq.Track.Subscription[] = [];
+	const current = new Signal<Moq.Track.Subscription | undefined>(undefined);
 	const subscriber = {
 		close: () => undefined,
-		update: (subscription: Moq.Track.Subscription) => updates.push(subscription),
+		subscription: current,
+		update: (subscription: Moq.Track.Subscription) => {
+			updates.push(subscription);
+			current.set(subscription);
+		},
 	} as unknown as Moq.Track.Subscriber;
 	const broadcast = {
 		closed: new Once<Error | null>(),
 		track: () => ({
 			subscribe: (subscription: Moq.Track.Subscription) => {
 				initial = subscription;
+				current.set(subscription);
 				return subscriber;
 			},
 		}),
 	} as unknown as Moq.Broadcast.Consumer;
-	const delay = new Signal<Moq.Track.Delay>({ min: Duration.millis(100), max: Duration.millis(250) });
+	const delay = new Signal<Container.Delay>({ min: Duration.millis(100), max: Duration.millis(250) });
+	const priority = new Signal(7);
 	const effect = new Effect();
 
-	subscribeMedia(effect, {
-		broadcast,
-		track: "media",
-		priority: 7,
-		delay,
-	});
-	const live = [{}];
-	expect(initial).toEqual({
-		priority: 7,
-		delay: { min: Duration.millis(100), max: Duration.millis(250) },
-		ranges: live,
-	});
+	subscribeMedia(effect, { broadcast, track: "media", priority, delay });
+	// A live join its min delay behind the live edge, under its max.
+	const live = (max: number) => [{ start: { live: { min: Duration.millis(100), max: Duration.millis(max) } } }];
+	expect(initial).toEqual({ priority: 7, ranges: live(250) });
 
 	delay.set({ min: Duration.millis(100), max: Duration.millis(500) });
 	await flush();
-	expect(updates.at(-1)).toEqual({
-		priority: 7,
-		delay: { min: Duration.millis(100), max: Duration.millis(500) },
-		ranges: live,
-	});
+	expect(updates.at(-1)).toEqual({ priority: 7, ranges: live(500) });
+
+	// A new min moves no join: the range resolves once, and placing it anew would skip media
+	// buffered behind the new start.
+	delay.set({ min: Duration.millis(300), max: Duration.millis(500) });
+	await flush();
+	expect(updates.at(-1)).toEqual({ priority: 7, ranges: live(500) });
+
+	priority.set(-3);
+	await flush();
+	expect(updates.at(-1)).toEqual({ priority: -3, ranges: live(500) });
 
 	effect.close();
 });
@@ -102,7 +107,7 @@ test("media does not subscribe through a closed broadcast handle", () => {
 				broadcast: handle,
 				track: "video",
 				priority: 0,
-				delay: new Signal<Moq.Track.Delay>({}),
+				delay: new Signal<Container.Delay>({}),
 			}),
 		).toBeUndefined();
 	} finally {

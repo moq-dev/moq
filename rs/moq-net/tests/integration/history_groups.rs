@@ -8,8 +8,8 @@
 //! would drop the older group for good. The mock holds the publisher's group streams and
 //! releases them newest first to make that race deterministic.
 
+use crate::WithMax as _;
 use crate::support;
-use moq_net::track::Delay;
 
 use std::time::Duration;
 
@@ -31,10 +31,11 @@ const VERSIONS: &[&str] = &[
 ];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
-	let (producer, driver) =
-		moq_net::origin::Producer::new(moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()));
+	let mut config = moq_net::origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	config.proxy = true;
+	let (producer, driver) = moq_net::origin::Producer::new(config);
 	support::harness::spawn(driver);
-	producer.with_proxy(true)
+	producer
 }
 
 /// Publish a finished group 5 (three frames) then an open group 6 (two frames), optionally
@@ -84,8 +85,8 @@ async fn round(version: &str, relay: bool, newest_first: bool) -> Vec<(u64, usiz
 
 	let reader = kio::clock::sim::spawn(async move {
 		let subscription = Subscription::default()
-			.with_delay(Delay::default().with_max(FOREVER))
-			.with_ranges([support::keys(0..)]);
+			.with_ranges([support::keys(0..)])
+			.with_max(FOREVER);
 		let mut sub = remote
 			.track("history")
 			.unwrap()
@@ -237,8 +238,8 @@ async fn a_late_subscriber_receives_the_relays_cached_history() {
 		.unwrap()
 		.unwrap();
 	let subscription = Subscription::default()
-		.with_delay(Delay::default().with_max(FOREVER))
-		.with_ranges([support::keys(0..)]);
+		.with_ranges([support::keys(0..)])
+		.with_max(FOREVER);
 	let first_subscription = subscription.clone();
 	let first_reader = kio::clock::sim::spawn(async move {
 		let mut sub = remote

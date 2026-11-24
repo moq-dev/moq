@@ -1,5 +1,5 @@
 use bytes::{Bytes, BytesMut};
-use hang::catalog::{AAC, AudioCodec, AudioConfig, Container, H264, H265, VP9, VideoCodec, VideoConfig};
+use hang::catalog::{AudioCodec, AudioConfig, Container, H264, H265, VP9, VideoCodec, VideoConfig};
 use moq_net::Timestamp;
 use mp4_atom::{Atom, DecodeMaybe, Encode, Moof, Moov, Trak};
 use std::collections::{HashMap, HashSet};
@@ -988,18 +988,14 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				// and let the frame-size detector fill it instead of publishing a bogus 0.
 				let bitrate = desc.avg_bitrate.max(desc.max_bitrate);
 				let dec_specific = desc.dec_specific.as_ref().ok_or(Error::MissingDecoderSpecific)?;
-				let profile = dec_specific.profile;
-				let sample_rate = mp4a.audio.sample_rate.integer() as u32;
-				let channel_count = mp4a.audio.channel_count as u32;
 
-				// Keep the complete AudioSpecificConfig so SBR/PS extensions reach the decoder.
-				let description = bytes::Bytes::copy_from_slice(&dec_specific.raw);
-
-				let mut config = AudioConfig::new(AAC { profile }, sample_rate, channel_count);
+				// The AudioSpecificConfig, kept whole so SBR/PS extensions reach the decoder, also
+				// holds the rate and channels: the sample entry's 16-bit fields can't hold 96 kHz,
+				// and describe the core rather than what SBR and PS decode to.
+				let mut config = crate::codec::aac::config(&dec_specific.raw)?;
 				if bitrate > 0 {
 					config.bitrate = Some(bitrate.into());
 				}
-				config.description = Some(description);
 				config.container = container;
 				config
 			}
@@ -2586,8 +2582,12 @@ mod tests {
 	}
 
 	fn replay(output: &Output<()>) -> moq_net::track::Subscriber {
-		let replay = moq_net::track::Subscription::default()
-			.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(30)));
+		let replay = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+			moq_net::track::Start::Live {
+				min: Some(std::time::Duration::from_secs(30)),
+				max: Some(std::time::Duration::from_secs(30)),
+			},
+		)]);
 		match output {
 			Output::Audio(output) => output.subscribe(replay),
 			Output::Passthrough(output) => output.track.subscribe(replay),
