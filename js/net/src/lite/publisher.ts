@@ -1819,6 +1819,11 @@ export class Publisher {
 		// one answered with no group: it owes its groups from there to its end. Mirrors the Rust
 		// `TrackRun::started`.
 		const started = new Map<bigint, bigint | undefined>();
+		// Lite-07: past every key a started range covers but does not owe (below its
+		// SUBSCRIBE_START, or every key of one answered with no group), never lowered: with no range
+		// waiting for its start, a stale run past it is owed whole, without resolving every range.
+		// Mirrors the Rust `TrackRun::unowed_end`.
+		let unowedEnd = 0n;
 		// Lite-07: the stale runs the cursor gave up that no started range owes but a range still
 		// waiting for its start covers; see `settleStale`. Mirrors the Rust `TrackRun::stale`.
 		const stale = new Runs<DropRun>(sameHole);
@@ -1828,10 +1833,21 @@ export class Publisher {
 		let withheld: SubscribeResponse[] | undefined = perRange ? [] : undefined;
 		// How many SUBSCRIBE_STARTs went out.
 		let answered = 0;
-		// Send a range's SUBSCRIBE_START, then whatever was withheld for the first one.
+		// Send a range's SUBSCRIBE_START, then whatever was withheld for the first one. The one place a
+		// range moves from waiting for its start to started.
 		const sendStart = async (start: SubscribeStart): Promise<boolean> => {
 			answered++;
-			if (perRange) started.set(start.id, start.start);
+			if (perRange) {
+				unstarted.delete(start.id);
+				waits.remove(start.id);
+				started.set(start.id, start.start);
+				// What a range owes, it owes from its start to its end. Unplaced here, it owes nothing yet.
+				const [range] = hooks.servingResolvedKeys(track, [start.id]);
+				let unowed = UNBOUNDED;
+				if (range && start.start !== undefined) unowed = start.start > range.start ? start.start : 0n;
+				else if (range) unowed = range.end ?? UNBOUNDED;
+				unowedEnd = max(unowedEnd, unowed);
+			}
 			if (!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version)))) return false;
 			const held = withheld ?? [];
 			withheld = undefined;
@@ -1950,16 +1966,25 @@ export class Publisher {
 		// stale run below a start before lite-07 is. Mirrors the Rust `TrackRun::settle_stale`.
 		const settleStale = (): DropRun[] => {
 			if (stale.size === 0) return [];
-			const { owed, pending } = owedRuns();
+			let sets: { owed: Run[]; pending: Run[] } | undefined;
 			const named: DropRun[] = [];
 			const runs = [...stale.all];
 			stale.clear(runs);
 			for (const run of runs) {
-				for (const part of coveredRuns(owed, run.start, run.end)) named.push({ ...run, ...part });
-				for (const gap of runGaps(owed, run.start, run.end)) {
-					for (const part of coveredRuns(pending, gap.start, gap.end)) stale.set(part.start, part.end, run);
-					for (const rest of runGaps(pending, gap.start, gap.end)) record?.untell(rest.start, rest.end);
+				// Every key the cursor gives up lies in a range, so one past every key not owed lies in a
+				// started one that owes it: that part is owed whole, without resolving each range.
+				const split = unstarted.size === 0 ? min(max(run.start, unowedEnd), run.end) : run.end;
+				if (split > run.start) {
+					sets ??= owedRuns();
+					const { owed, pending } = sets;
+					for (const part of coveredRuns(owed, run.start, split)) named.push({ ...run, ...part });
+					for (const gap of runGaps(owed, run.start, split)) {
+						for (const part of coveredRuns(pending, gap.start, gap.end))
+							stale.set(part.start, part.end, run);
+						for (const rest of runGaps(pending, gap.start, gap.end)) record?.untell(rest.start, rest.end);
+					}
 				}
+				if (run.end > split) named.push({ ...run, start: split, end: run.end });
 			}
 			return named;
 		};
@@ -2022,8 +2047,6 @@ export class Publisher {
 					}
 					start = range.end !== undefined && range.end <= placed ? undefined : placed;
 				}
-				unstarted.delete(id);
-				waits.remove(id);
 				if (!(await sendStart(new SubscribeStart({ id, start, largest })))) return false;
 				reported = true;
 			}
@@ -2043,8 +2066,6 @@ export class Publisher {
 				return undefined;
 			for (const [id, ask] of [...unstarted]) {
 				if (!ask.oldest || !controls.holds(id)) continue;
-				unstarted.delete(id);
-				waits.remove(id);
 				if (!(await sendStart(new SubscribeStart({ id, start: 0n, largest: "empty" })))) return false;
 			}
 			return true;

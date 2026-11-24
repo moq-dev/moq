@@ -5451,6 +5451,11 @@ struct TrackRun {
 	/// Lite-07: where each range a SUBSCRIBE_START answered starts, by Range ID, `None` for one
 	/// answered with no group: it owes its groups from there to its end.
 	started: std::collections::BTreeMap<u64, Option<u64>>,
+	/// Lite-07: past every key a started range covers but does not owe (below its
+	/// SUBSCRIBE_START, or every key of one answered with no group), never lowered: with no
+	/// range waiting for its start, a stale run past it is owed whole, without resolving every
+	/// range (see [`Self::settle_stale`]).
+	unowed_end: u64,
 	/// Lite-07: the ranges whose start or end may still resolve; see [`Self::pin`].
 	unpinned: Unpinned,
 }
@@ -5719,6 +5724,7 @@ impl TrackRun {
 			unstarted,
 			waits,
 			started: Default::default(),
+			unowed_end: 0,
 			unpinned,
 			bounded,
 			requested: bounds.requested(0..),
@@ -6119,8 +6125,6 @@ impl TrackRun {
 					continue;
 				}
 			};
-			self.unstarted.remove(&id);
-			self.waits.remove(id);
 			self.buffer_start(lite::SubscribeStart { id, start, largest }, writer)?;
 			reported = true;
 		}
@@ -6667,13 +6671,27 @@ impl TrackRun {
 		Ok(())
 	}
 
-	/// Send a range's SUBSCRIBE_START, then whatever was withheld for the first one.
+	/// Send a range's SUBSCRIBE_START, then whatever was withheld for the first one. The one
+	/// place a range moves from waiting for its start to started.
 	fn buffer_start(
 		&mut self,
 		start: lite::SubscribeStart,
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
 	) -> Result<(), Error> {
+		self.unstarted.remove(&start.id);
+		self.waits.remove(start.id);
 		self.started.insert(start.id, start.start);
+		if self.start.per_range() {
+			let resolved = self.track.resolved_keys([start.id]).pop().flatten();
+			// What a range owes, it owes from its start to its end.
+			let unowed = match (start.start, resolved) {
+				(Some(at), Some(resolved)) => (at > resolved.start).then_some(at),
+				(None, Some(resolved)) => Some(resolved.end.unwrap_or(u64::MAX)),
+				// Unplaced here, it owes nothing yet: see [`Self::owed`].
+				(_, None) => Some(u64::MAX),
+			};
+			self.unowed_end = self.unowed_end.max(unowed.unwrap_or(0));
+		}
 		writer.buffer(&lite::SubscribeResponse::Start(start))?;
 		if let Start::Withholding(withheld) = std::mem::replace(&mut self.start, Start::Started) {
 			for (groups, hole) in withheld {
@@ -6693,20 +6711,35 @@ impl TrackRun {
 		if runs.peek().is_none() {
 			return Vec::new();
 		}
-		let (owed, pending) = self.owed();
+		let mut sets = None;
 		let mut named = Vec::new();
 		for (run, hole) in runs {
-			for part in owed.overlapping(&run) {
-				named.push((part.start.max(run.start)..part.end.min(run.end), hole.clone()));
+			// Every key the cursor gives up lies in a range, so one past every key not owed lies
+			// in a started one that owes it: that part is owed whole, without resolving each range.
+			let split = match self.unstarted.is_empty() {
+				true => run.start.max(self.unowed_end).min(run.end),
+				false => run.end,
+			};
+			let below = run.start..split;
+			if !below.is_empty() {
+				let (owed, pending) = sets.get_or_insert_with(|| self.owed());
+				for part in owed.overlapping(&below) {
+					named.push((part.start.max(below.start)..part.end.min(below.end), hole.clone()));
+				}
+				for gap in owed.gaps(&below) {
+					for part in pending.overlapping(&gap) {
+						let held = part.start.max(gap.start)..part.end.min(gap.end);
+						self.track.record_mut().withhold(held, hole.clone());
+					}
+					for rest in pending.gaps(&gap) {
+						self.track.record_mut().untell(rest);
+					}
+				}
 			}
-			for gap in owed.gaps(&run) {
-				for part in pending.overlapping(&gap) {
-					let held = part.start.max(gap.start)..part.end.min(gap.end);
-					self.track.record_mut().withhold(held, hole.clone());
-				}
-				for rest in pending.gaps(&gap) {
-					self.track.record_mut().untell(rest);
-				}
+			let whole = split..run.end;
+			if !whole.is_empty() {
+				debug_assert!(self.owed().0.gaps(&whole).next().is_none(), "{whole:?} is owed whole");
+				named.push((whole, hole));
 			}
 		}
 		named
@@ -6874,8 +6907,6 @@ impl TrackRun {
 			.map(|(id, _)| *id)
 			.collect();
 		for id in ids {
-			self.unstarted.remove(&id);
-			self.waits.remove(id);
 			self.buffer_start(
 				lite::SubscribeStart {
 					id,
