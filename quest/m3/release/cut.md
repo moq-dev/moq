@@ -22,6 +22,14 @@ web-transport's latest 0.3.x, a different API. `js/qmux` must publish above that
 the maintainer picks the version (found 2026-11-07 by the API shape audit).
 Recommended 2026-11-12 (/quest-audit): 0.4.0, so a consumer of
 web-transport's `^0.3` never resolves to the new API.
+Also before publishing, recreate the npm trusted publishers of `@moq/clock`,
+`@moq/libav`, `@moq/stats`, and `@moq/video`, which were claimed as `0.0.0`
+placeholders on 2026-11-24. npm expires a trusted publisher that no OIDC
+exchange has validated about 48 hours after it is created, and only the
+package's Settings page shows it as Expired. Revoke each (`npm trust list`,
+`npm trust revoke --id`) and run `npm trust github @moq/<name> --file
+release-js.yml --repository moq-dev/moq --environment npm --allow-publish
+--allow-stage-publish`, then publish within 48 hours.
 Before publishing, confirm moq-dev/web-transport's release config no longer
 publishes `@moq/qmux` or `qmux` (the freeze step of
 [qmux-js-retire](/quest/m3/release/qmux-js-retire.md) and
@@ -303,4 +311,3 @@ candidate:
 - [Cargo feature review](/quest/m3/release/feature-flags.md) - every Cargo feature was judged against the feature rules, and approved changes landed
 - [Interop and Video pass on main](/quest/m0/interop-green/README.md) - the cut PR's release gate runs `interop.yml`, which failed on `main` every day through 2026-11-12
 - [Nightly passes on main](/quest/m0/nightly/README.md) - the release gate runs `features.yml`, red in the 2026-11-12 Nightly
-- [Claim new npm names](/quest/m3/release/npm-first-publish.md) - trusted publishing can publish every new `@moq/*` package
