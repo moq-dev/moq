@@ -1,7 +1,7 @@
 use std::{
 	fmt,
 	ops::{Deref, DerefMut},
-	sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError},
+	sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
 
 /// A cloneable mutex wrapper backed by `Arc<Mutex<T>>`.
@@ -50,16 +50,6 @@ impl<T> Lock<T> {
 		LockGuard {
 			inner: self.inner.lock().unwrap_or_else(PoisonError::into_inner),
 		}
-	}
-
-	/// Lock the state if it is free, or `None` while another holder has it.
-	pub fn try_lock(&self) -> Option<LockGuard<'_, T>> {
-		let inner = match self.inner.try_lock() {
-			Ok(inner) => inner,
-			Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-			Err(TryLockError::WouldBlock) => return None,
-		};
-		Some(LockGuard { inner })
 	}
 
 	/// Whether both handles point at the same state.
@@ -137,15 +127,5 @@ mod tests {
 		}));
 		assert!(panicked.is_err());
 		assert_eq!(*lock.lock(), 2, "every other handle keeps the state");
-		assert_eq!(lock.try_lock().map(|guard| *guard), Some(2), "nor does trying fail");
-	}
-
-	#[test]
-	fn try_lock_is_none_while_held() {
-		let lock = Lock::new(1);
-		let held = lock.lock();
-		assert!(lock.clone().try_lock().is_none());
-		drop(held);
-		assert_eq!(lock.try_lock().map(|guard| *guard), Some(1));
 	}
 }

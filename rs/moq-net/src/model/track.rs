@@ -36,7 +36,7 @@ use rangemap::{RangeInclusiveSet, RangeMap, RangeSet};
 mod demand;
 pub(crate) use demand::Edit;
 pub(super) use demand::Preferences;
-use demand::Subscriptions;
+use demand::SubscriptionsLock;
 
 mod fill;
 mod hole;
@@ -900,10 +900,10 @@ pub(crate) struct TrackState {
 	// below this group is unjudgeable for readers with a finite delay budget.
 	live_floor: Option<u64>,
 
-	// Active subscriptions, in their own [`kio::Lock`] so a read-only `Consumer`
+	// Active subscriptions, under their own lock so a read-only `Consumer`
 	// registers under that lock instead of writing back into the track state.
 	// Kept here (rather than threaded through every handle) so any holder reaches it.
-	subscriptions: kio::Lock<Subscriptions>,
+	subscriptions: SubscriptionsLock,
 
 	// Demand wakes a write owes, fired once the state guard is released (see
 	// [`Self::deferred`]). A woken waker may read this track, so none fires under its lock.
@@ -1649,7 +1649,7 @@ impl TrackState {
 	}
 
 	/// When a request as `ask` takes effect, if the track's [`Refresh`] lets it ask at all.
-	fn admit(state: kio::Ref<'_, TrackState>, ask: Ask) -> Option<(crate::time::Instant, kio::Lock<Subscriptions>)> {
+	fn admit(state: kio::Ref<'_, TrackState>, ask: Ask) -> Option<(crate::time::Instant, SubscriptionsLock)> {
 		let refresh = state.info.as_ref().map(|info| info.refresh).filter(Refresh::enabled)?;
 		let latest = state.latest_group?;
 		let slot = state.lookup.get(&latest);
@@ -6383,7 +6383,7 @@ impl Drop for Alive {
 
 /// Poll the counted aggregate without registering on individual readers.
 fn poll_combined_changed(
-	subs: &kio::Lock<Subscriptions>,
+	subs: &SubscriptionsLock,
 	bound: Option<Duration>,
 	prev: &mut Option<Subscription>,
 	waiter: &kio::Waiter,
@@ -6398,7 +6398,7 @@ fn watch_combined(state: &kio::Producer<TrackState>, waiter: &kio::Waiter) {
 }
 
 /// Read the counted aggregate without walking the audience.
-fn snapshot_subscription(subs: &kio::Lock<Subscriptions>, bound: Option<Duration>) -> Option<Subscription> {
+fn snapshot_subscription(subs: &SubscriptionsLock, bound: Option<Duration>) -> Option<Subscription> {
 	clamp_combined(subs.lock().combined(), bound)
 }
 
@@ -9228,7 +9228,7 @@ struct Cursor {
 #[derive(Default)]
 struct Asked {
 	/// The demand counting them, once one is counted.
-	subscriptions: Option<kio::Lock<Subscriptions>>,
+	subscriptions: Option<SubscriptionsLock>,
 	times: Vec<u64>,
 	/// The demand's refusals when each of `times` was first counted, so only a refusal since
 	/// fails it.
@@ -9240,12 +9240,7 @@ impl Asked {
 	/// Count `times` and `joins` instead of those counted now, each once however many of the
 	/// window's ranges wait on it: the demand counts readers, so a count added once is taken
 	/// once.
-	fn set(
-		&mut self,
-		mut times: Vec<u64>,
-		mut joins: Vec<JoinAsk>,
-		subscriptions: impl FnOnce() -> kio::Lock<Subscriptions>,
-	) {
+	fn set(&mut self, mut times: Vec<u64>, mut joins: Vec<JoinAsk>, subscriptions: impl FnOnce() -> SubscriptionsLock) {
 		// Sorted, so taking duplicates out and diffing against what is counted stay linear past
 		// the sort: a copy's readers can wait on thousands of time starts, re-asked on every sync.
 		times.sort_unstable();
@@ -12142,8 +12137,11 @@ impl Subscriber {
 		let start = ready!(Consumer::poll_state_start(&cursor.state, waiter));
 		cursor.sync();
 		let floor = cursor.min_key;
-		let unplaced = |window: &Window| window.is_waiting_above(floor) || window.is_reaching();
-		if unplaced(&cursor.filter.window) {
+		// A refused read places nothing more: its next read fails with the refusal.
+		let unplaced = |filter: &Filter| {
+			filter.refused.is_none() && (filter.window.is_waiting_above(floor) || filter.window.is_reaching())
+		};
+		if unplaced(&cursor.filter) {
 			// Registered before syncing again, so a change placing it after this wakes it, such
 			// as the upstream's answer to the range asked, or a live group starting. A closed
 			// track places it at once, since nothing more can arrive.
@@ -12155,7 +12153,7 @@ impl Subscriber {
 				})
 				.is_ready();
 			cursor.sync();
-			if !closed && unplaced(&cursor.filter.window) {
+			if !closed && unplaced(&cursor.filter) {
 				return Poll::Pending;
 			}
 		}
@@ -12896,7 +12894,7 @@ impl Failover {
 /// A caller's claim on a pending request: [`Refreshing`] without the parked waiter.
 struct Ticket {
 	state: kio::ConsumerWeak<TrackState>,
-	subscriptions: kio::Lock<Subscriptions>,
+	subscriptions: SubscriptionsLock,
 	epoch: u64,
 }
 
@@ -17624,13 +17622,45 @@ mod test {
 		assert_eq!(asks(&producer), Vec::<u64>::new());
 	}
 
+	/// A refused time start places its reader's start, so a publisher waiting on that start
+	/// goes on to the read, which fails with the refusal, finished copy or not.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_refused_time_start_places_its_readers_start() {
+		for finish in [false, true] {
+			let producer = track_producer("test", Info::timed());
+			producer.received();
+			producer.anchored();
+			write_group(&producer, 1000);
+			if finish {
+				producer.clone().finish().unwrap();
+			}
+			let mut waiting = producer.subscribe(
+				Subscription::default()
+					.with_ranges([Range {
+						start: crate::track::Start::Time(1500),
+						end: None,
+					}])
+					.with_max(None),
+			);
+			let waiter = kio::Waiter::noop();
+			assert!(waiting.poll_start(&waiter).is_pending(), "finish={finish}");
+			producer.refuse_time(1500, Error::NotFound);
+			assert!(waiting.poll_start(&waiter).is_ready(), "finish={finish}");
+			assert!(
+				matches!(waiting.poll_recv_group(&waiter), Poll::Ready(Err(Error::NotFound))),
+				"finish={finish}"
+			);
+		}
+	}
+
 	/// A time start's refusal wakes the demand's watchers with its lock released, since a
 	/// watcher may read the demand inline from its wake.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_refused_time_start_wakes_its_watchers_unlocked() {
 		struct Reenter {
-			subscriptions: kio::Lock<Subscriptions>,
+			subscriptions: SubscriptionsLock,
 			unlocked: std::sync::atomic::AtomicBool,
 		}
 		impl std::task::Wake for Reenter {
@@ -17638,7 +17668,8 @@ mod test {
 				self.wake_by_ref();
 			}
 			fn wake_by_ref(self: &Arc<Self>) {
-				let unlocked = self.subscriptions.try_lock().is_some();
+				// Re-entering the lock this thread holds would deadlock the test instead of failing it.
+				let unlocked = !self.subscriptions.is_held();
 				self.unlocked.store(unlocked, std::sync::atomic::Ordering::SeqCst);
 			}
 		}

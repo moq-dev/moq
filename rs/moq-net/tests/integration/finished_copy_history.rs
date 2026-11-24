@@ -216,6 +216,13 @@ async fn a_finished_copy_fails_a_time_upstream_refuses() {
 	place_time(Ask::Refused).await;
 }
 
+/// Upstream's refusal reaches a reader of the finished copy over the wire too, rather than
+/// leaving the range it asks waiting for a start.
+#[kio::test]
+async fn a_finished_copy_fails_a_time_upstream_refuses_downstream() {
+	place_time(Ask::RefusedDownstream).await;
+}
+
 /// A finished copy lets go of the range placing a time once nobody reads the copy, even while
 /// the group it placed is still arriving.
 #[kio::test]
@@ -232,6 +239,8 @@ enum Ask {
 	Finished,
 	/// Once the copy finished and upstream no longer lists the track.
 	Refused,
+	/// As `Refused`, read through a session downstream of the copy.
+	RefusedDownstream,
 	/// Once the copy finished, leaving before the placed group's frames arrive.
 	Abandoned,
 }
@@ -334,19 +343,44 @@ async fn place_time(ask: Ask) {
 
 	match ask {
 		// The track leaves upstream's listing, so a range asking it is refused.
-		Ask::Refused => ended = None,
+		Ask::Refused | Ask::RefusedDownstream => ended = None,
 		// The placed group's header lands, and its frame is held.
 		Ask::Abandoned => upstream.server_transport.split_unis(),
 		Ask::DuringTail | Ask::Finished => {}
 	}
+	let mut downstream = None;
 	let mut second = match second {
 		Some(second) => second,
+		None if ask == Ask::RefusedDownstream => {
+			let mut config = origin::Config::new(std::num::NonZeroU64::new(3).unwrap());
+			config.proxy = true;
+			let (client, driver) = origin::Producer::new(config);
+			support::harness::spawn(driver);
+			let mut options = MockConnectOptions::new(version);
+			options.server_publish = Some(relay.consume());
+			options.client_subscribe = Some(client.clone());
+			downstream = Some(connect_mock(options).await);
+			let remote = client
+				.consume()
+				.follow("bcast", None)
+				.unwrap()
+				.available()
+				.await
+				.unwrap()
+				.unwrap();
+			remote
+				.track("video")
+				.unwrap()
+				.subscribe(Subscription::default().with_ranges([support::keys(18_000..=18_000)]))
+				.await
+				.unwrap()
+		}
 		None => history(support::keys(18_000..=18_000)).await,
 	};
 	let group = kio::clock::timeout(TIMEOUT, second.recv_group())
 		.await
 		.unwrap_or_else(|_| panic!("{ask:?}: the copy asks upstream for time 18 s"));
-	if ask == Ask::Refused {
+	if matches!(ask, Ask::Refused | Ask::RefusedDownstream) {
 		let err = group.err();
 		assert!(err.is_some(), "upstream's refusal fails the reader");
 		// Only that reader: the copy still serves the group it holds.
@@ -357,7 +391,7 @@ async fn place_time(ask: Ask) {
 			.unwrap()
 			.expect("the held group");
 		assert_eq!(group.start, 25_000);
-		drop((broadcast, upstream, publisher, relay, written, first));
+		drop((broadcast, upstream, downstream, publisher, relay, written, first));
 		return;
 	}
 	let mut group = group.unwrap().expect("the group containing it");

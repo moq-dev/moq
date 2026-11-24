@@ -32,6 +32,63 @@ pub(super) fn answered() -> u64 {
 	JOIN_TICK.fetch_add(1, Ordering::SeqCst) + 1
 }
 
+/// A track's demand, under one lock shared by its producer and readers.
+#[derive(Clone, Default)]
+pub(in crate::model) struct SubscriptionsLock {
+	lock: kio::Lock<Subscriptions>,
+	/// Guards out now, so a test can tell a wake runs with the lock released.
+	#[cfg(test)]
+	held: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl SubscriptionsLock {
+	/// Lock the demand, blocking until it is free.
+	pub(super) fn lock(&self) -> SubscriptionsGuard<'_> {
+		let guard = self.lock.lock();
+		#[cfg(test)]
+		self.held.fetch_add(1, Ordering::SeqCst);
+		SubscriptionsGuard {
+			guard,
+			#[cfg(test)]
+			held: &self.held,
+		}
+	}
+
+	/// Whether a guard is out, as a waker running under it would see.
+	#[cfg(test)]
+	pub(super) fn is_held(&self) -> bool {
+		self.held.load(Ordering::SeqCst) > 0
+	}
+}
+
+/// The locked demand. Releases the lock on drop.
+pub(super) struct SubscriptionsGuard<'a> {
+	guard: kio::LockGuard<'a, Subscriptions>,
+	#[cfg(test)]
+	held: &'a std::sync::atomic::AtomicUsize,
+}
+
+impl std::ops::Deref for SubscriptionsGuard<'_> {
+	type Target = Subscriptions;
+
+	fn deref(&self) -> &Subscriptions {
+		&self.guard
+	}
+}
+
+impl std::ops::DerefMut for SubscriptionsGuard<'_> {
+	fn deref_mut(&mut self) -> &mut Subscriptions {
+		&mut self.guard
+	}
+}
+
+#[cfg(test)]
+impl Drop for SubscriptionsGuard<'_> {
+	fn drop(&mut self) {
+		self.held.fetch_sub(1, Ordering::SeqCst);
+	}
+}
+
 #[derive(Default)]
 pub(super) struct Subscriptions {
 	count: usize,
@@ -877,7 +934,7 @@ pub(in crate::model) struct Preferences(Arc<Preference>);
 
 struct Preference {
 	value: kio::Producer<Prefs>,
-	subscriptions: Option<kio::Lock<Subscriptions>>,
+	subscriptions: Option<SubscriptionsLock>,
 }
 
 impl Preferences {

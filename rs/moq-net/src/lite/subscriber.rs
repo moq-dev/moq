@@ -12660,14 +12660,16 @@ impl FinishedServe {
 			(self.asks, self.priority) = demand.map_or((Vec::new(), 0), |demand| (demand.asks, demand.priority));
 		}
 		let asks = &self.asks;
+		// Sorted, as the demand counts them by time: a copy's readers can wait on thousands.
+		let asked = |time: &u64| asks.binary_search(time).is_ok();
 		// A time nobody waits on any more is owed nothing.
 		let before = self.placed.len();
-		self.placed.retain(|time, _| asks.contains(time));
+		self.placed.retain(|time, _| asked(time));
 		let mut moved = self.placed.len() != before;
 		// Its readers placed or gone, a probe stays only while its group is still arriving to
 		// someone reading the copy, which ending it would cut.
 		self.probes.retain(|time, probe| {
-			let keep = asks.contains(time) || (read && probe.reading());
+			let keep = asked(time) || (read && probe.reading());
 			if !keep {
 				probe.end(crate::StreamError::Cancel);
 			}
@@ -12690,7 +12692,7 @@ impl FinishedServe {
 				Poll::Ready(refused) => Some(refused?),
 				Poll::Pending => None,
 			};
-			if asks.contains(&time) && !self.placed.contains_key(&time) {
+			if asked(&time) && !self.placed.contains_key(&time) {
 				match (probe.landed(), &refused) {
 					(Some(start), _) => {
 						self.placed.insert(time, start);
