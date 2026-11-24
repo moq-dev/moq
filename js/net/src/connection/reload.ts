@@ -633,7 +633,7 @@ export class Reload {
 					if (!tokens && this.#dials) {
 						let signed: Signed;
 						try {
-							signed = await this.#sign(this.#dials, dialing, signal);
+							signed = await this.#sign(this.#dials, dialing, signal, this.#failure.peek());
 						} catch (err) {
 							this.#setDialing(false);
 							throw err;
@@ -857,7 +857,7 @@ export class Reload {
 	 * signing spends: the tokens and the timeout left for the dial, or the app's refusal. Rejects
 	 * with `ConnectTimeout` once the timeout passes unanswered, or with the teardown once `signal` aborts.
 	 */
-	async #sign(dials: Dials, dialing: URL, signal: AbortSignal, failure = this.#failure.peek()): Promise<Signed> {
+	async #sign(dials: Dials, dialing: URL, signal: AbortSignal, failure: Error | undefined): Promise<Signed> {
 		const limit = this.timeout ?? DEFAULT_TIMEOUT;
 		const started = now();
 		const bound = new AbortController();

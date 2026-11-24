@@ -56,8 +56,9 @@ pub struct Client {
 	connect: Option<Url>,
 	/// The credentials each new connection starts presenting.
 	pub(crate) tokens: Vec<moq_net::auth::Token>,
-	/// Where the next connection asks for each dial's tokens instead, from [`Client::with_dials`].
-	pub(crate) dials: Option<crate::connection::Dials>,
+	/// Where the next connection asks for each dial's tokens instead, from [`Client::with_dials`],
+	/// until a connection takes it.
+	pub(crate) dials: Option<std::sync::Arc<std::sync::Mutex<Option<crate::connection::Dials>>>>,
 	/// The connect deadline, backoff, and GOAWAY handling each [`Connection`] runs under.
 	pub(crate) policy: moq_net::reconnect::Config,
 	/// Whether dials present an mTLS client certificate, refusing schemes that can't.
@@ -271,10 +272,12 @@ impl Client {
 
 	/// Ask `dials` for the tokens of every dial the next [`Connection`] makes, as the dial starts,
 	/// instead of presenting [`with_tokens`](Self::with_tokens)' fixed ones: for a credential that
-	/// must be fresh when it is presented. See [`Dials`](crate::connection::Dials); it serves one
-	/// connection.
+	/// must be fresh when it is presented. See [`Dials`](crate::connection::Dials).
+	///
+	/// They serve one connection: the first this client or a clone of it connects takes them,
+	/// and a later one ends at once with [`Error::DialsTaken`].
 	pub fn with_dials(mut self, dials: crate::connection::Dials) -> Self {
-		self.dials = Some(dials);
+		self.dials = Some(std::sync::Arc::new(std::sync::Mutex::new(Some(dials))));
 		self
 	}
 

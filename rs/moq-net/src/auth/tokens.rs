@@ -690,8 +690,6 @@ mod tests {
 		assert!(!presented(&set, old), "the replaced token was never withdrawn");
 	}
 
-	/// Previewing a dial, as a probe does, leaves the live session's grant alone: a rotated
-	/// connection credential it holds in band stays presented until the dial is committed.
 	/// A dial built on a signed set, as [`dial`] is on the configured one.
 	fn signed(set: &Tokens, names: &[&str]) -> Session {
 		let url = "moqt://relay.example.com/".parse().unwrap();
@@ -739,6 +737,8 @@ mod tests {
 		assert_eq!(state.configured.as_ref().unwrap().tokens, tokens(&["proof-2", "extra"]));
 	}
 
+	/// Previewing a dial, as a probe does, leaves the live session's grant alone: a rotated
+	/// connection credential it holds in band stays presented until the dial is committed.
 	#[test]
 	fn a_preview_leaves_the_live_grant_alone() {
 		let set = Tokens::new(tokens(&["first", "extra"]));

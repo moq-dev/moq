@@ -517,8 +517,6 @@ struct Shared {
 	closed: CloseGuard,
 	/// The auth handle every session is built on, ended after the loop and any close drain.
 	auth: moq_net::auth::Handle,
-	/// The tokens every dial presents, on `auth`'s sessions.
-	tokens: moq_net::auth::Tokens,
 }
 
 impl Shared {
@@ -1006,6 +1004,8 @@ impl Connection {
 		let state = producer.consume();
 		let tokens = moq_net::auth::Tokens::new(client.tokens.clone());
 		let auth = tokens.handle();
+		// Built before the task, so dials it takes close with it even if the task never runs.
+		let policy = Self::policy(&client, &addrs, &tokens);
 
 		// The loop feeds these across every reconnect, so a consumer's handle survives session churn
 		// (unlike a session's own bandwidth consumer, which dies with the session).
@@ -1034,7 +1034,6 @@ impl Connection {
 			recv_bw,
 			closed: task_closed,
 			auth: auth.clone(),
-			tokens: tokens.clone(),
 		};
 
 		let running = std::sync::Arc::new(Running { shared });
@@ -1044,7 +1043,7 @@ impl Connection {
 			let reconnect = !client.policy.once;
 			// Isolated inside `shared`, so a panic still records a terminal error
 			// instead of closing the channels as if the caller had stopped it.
-			let res = crate::panic::isolate(Self::run(shared, client, addrs))
+			let res = crate::panic::isolate(Self::run(shared, client, policy))
 				.await
 				.unwrap_or(Err(Error::Panic));
 			if let Err(err) = res {
@@ -1219,15 +1218,30 @@ impl Connection {
 		taken
 	}
 
-	/// Drive moq-net's policy: dial each attempt it asks for and publish what it does.
-	async fn run(shared: &Shared, client: Client, addrs: Addrs) -> crate::Result<()> {
-		let mut client = client;
-		let mut policy = moq_net::Reconnect::new(client.policy, addrs.as_slice().to_vec(), kio::clock::now())
+	/// moq-net's policy for `client` dialing `addrs`, presenting `tokens` or the client's dials,
+	/// which it takes: they serve one connection.
+	fn policy(
+		client: &Client,
+		addrs: &Addrs,
+		tokens: &moq_net::auth::Tokens,
+	) -> crate::Result<moq_net::Reconnect<crate::connect::Addr, Error>> {
+		let policy = moq_net::Reconnect::new(client.policy, addrs.as_slice().to_vec(), kio::clock::now())
 			.map_err(|_| Error::BackoffHealthy)?
-			.with_tokens(shared.tokens.clone());
-		if let Some(dials) = client.dials.take() {
-			policy = policy.with_dials(dials);
-		}
+			.with_tokens(tokens.clone());
+		let Some(slot) = &client.dials else {
+			return Ok(policy);
+		};
+		let dials = slot.lock().unwrap().take().ok_or(Error::DialsTaken)?;
+		Ok(policy.with_dials(dials))
+	}
+
+	/// Drive moq-net's policy: dial each attempt it asks for and publish what it does.
+	async fn run(
+		shared: &Shared,
+		mut client: Client,
+		policy: crate::Result<moq_net::Reconnect<crate::connect::Addr, Error>>,
+	) -> crate::Result<()> {
+		let mut policy = policy?;
 		// The dial in flight, and the address it was asked for. It owns its client, so a
 		// fresh port can replace the loop's between walks.
 		let mut dial: Option<(url::Url, std::pin::Pin<Box<Handshake>>)> = None;
@@ -2164,14 +2178,12 @@ mod tests {
 	}
 
 	fn shared() -> Shared {
-		let tokens = moq_net::auth::Tokens::new(Vec::new());
 		Shared {
 			state: kio::Producer::default(),
 			send_bw: BandwidthProducer::new(),
 			recv_bw: BandwidthProducer::new(),
 			closed: CloseGuard::default(),
-			auth: tokens.handle(),
-			tokens,
+			auth: moq_net::auth::Tokens::new(Vec::new()).handle(),
 		}
 	}
 
@@ -3760,13 +3772,17 @@ mod tests {
 			}
 			failures
 		});
+		let client = client.with_dials(dials);
+		let url = "moqt://relay.example.com/".parse::<Url>().unwrap();
 		let connection = client
-			.with_dials(dials)
-			.connect("moqt://relay.example.com/".parse::<Url>().unwrap())
+			.connect(url.clone())
 			.established()
 			.await
 			.expect("gave up on a peer unreachable at first");
 		assert_eq!(attempts.load(std::sync::atomic::Ordering::Relaxed), 3);
+		// The dials serve one connection: a clone's later one ends instead of sharing them.
+		let again = client.clone().connect(url).established().await;
+		assert!(matches!(again, Err(Error::DialsTaken)), "{:?}", again.err());
 		connection.close().await.unwrap();
 		let failures = failures.await.unwrap();
 		assert_eq!(failures.len(), 3);

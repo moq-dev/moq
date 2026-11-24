@@ -71,17 +71,22 @@ impl<E> Dials<E> {
 			true => Poll::Ready(()),
 			false => Poll::Pending,
 		};
-		let mut queue = match self.queue.poll(waiter, |queue| ready(queue)) {
-			Poll::Ready(Ok(queue)) => queue,
-			Poll::Ready(Err(_)) => return Poll::Ready(None),
-			Poll::Pending => return Poll::Pending,
-		};
-		while let Some(dial) = queue.waiting.pop_front() {
-			if dial.wanted() {
-				return Poll::Ready(Some(dial));
+		loop {
+			let mut queue = match self.queue.poll(waiter, |queue| ready(queue)) {
+				Poll::Ready(Ok(queue)) => queue,
+				Poll::Ready(Err(_)) => return Poll::Ready(None),
+				Poll::Pending => return Poll::Pending,
+			};
+			while let Some(dial) = queue.waiting.pop_front() {
+				if dial.wanted() {
+					return Poll::Ready(Some(dial));
+				}
 			}
+			if queue.closed {
+				return Poll::Ready(None);
+			}
+			// Every dial seen wanted was abandoned since: wait again rather than report an end.
 		}
-		Poll::Ready(None)
 	}
 
 	/// Ask for the tokens of a dial to `url`, after `failure`. Once closed, the dial goes
