@@ -97,8 +97,10 @@ The Nightly's `Media (firefox player)` failed the `replacement` case on 11-20, 1
 [moq-dev/moq#9300](https://github.com/moq-dev/moq/pull/9300). Each time an unrelated page
 underflowed with it, so the ARM runner starved;
 [moq-dev/moq#9494](https://github.com/moq-dev/moq/pull/9494) idles the lifecycle pages through
-the section, and the [Firefox replacement](/quest/m0/interop-green/firefox-replacement.md) child
-owns the lite-06 fallback audio that remains.
+the section. The lite-06 fallback's audio still took 717 to 1023 ms on ARM against the 1039 ms
+bound, because a join with no lag limit made the incumbent's `onDemand: "retain"` audio encode
+its whole 2.13 s max ahead of the live edge;
+[moq-dev/moq#9511](https://github.com/moq-dev/moq/pull/9511) replays nothing for such a join.
 
 Decided 2026-11-12 (maintainer), since green scheduled Interop is this epic's goal and stale pins caused four of the last six red runs:
 
