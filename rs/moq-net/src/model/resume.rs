@@ -706,6 +706,28 @@ impl Holdings for Placed {
 	}
 }
 
+/// What a reader's copy held when it placed a time start before every group it held: the
+/// group holding it is older than any, so the range reaches back to the oldest group.
+struct ReachedBack;
+
+impl Holdings for ReachedBack {
+	fn resolves(&self) -> bool {
+		false
+	}
+
+	fn containing(&self, _: u64, _: Duration) -> Containing {
+		Containing::Before
+	}
+
+	fn next_start(&self, _: u64) -> Option<u64> {
+		None
+	}
+
+	fn complete(&self) -> bool {
+		true
+	}
+}
+
 /// The time start of `range` that a copy asked from `floor` raised to it, if any: that copy's
 /// resolution says nothing of which group holds it, which only a copy asked from below it
 /// places. Mirrors the JS `raised`.
@@ -1113,7 +1135,7 @@ impl Copy {
 			// A time start no copy placed at a group yet waits on the group holding its time,
 			// which starts at or before it and past any group held below it, and on the rest of
 			// its range under the cap. Below the copy's first arrival too: it was asked from there.
-			if reader.unplaced().any(|(time, last)| {
+			if reader.window.unplaced_times().any(|(time, last)| {
 				let held = (self.track.peek_before(time.saturating_add(1))).map_or(0, |group| group.start);
 				let end = last.map_or(end, |last| end.min(last.saturating_add(1)));
 				let groups = held.max(from)..end;
@@ -1173,8 +1195,6 @@ struct Retain<'a> {
 	/// The widest budget any of the reader's groups gets.
 	widest: Duration,
 	groups_read: bool,
-	/// The reader's ranges as it asked them, by key.
-	ranges: &'a BTreeMap<u64, track::Range>,
 	/// The newest group the serving copy has.
 	edge: Option<u64>,
 	delivered: &'a Delivered,
@@ -1184,19 +1204,6 @@ struct Retain<'a> {
 	/// declared it skipped. Empty for an unbounded reader, which no gap ends early.
 	owed: &'a RangeSet<u64>,
 	waiter: &'a kio::Waiter,
-}
-
-impl Retain<'_> {
-	/// The time starts of the reader's ranges no copy placed at a group yet, each with its
-	/// range's end. Only a time start a copy placed at a group names it: one that reached back
-	/// past every group a copy held, or waits, still looks for the group holding its time.
-	/// The window rewrites one that reached back to the oldest group, so the time comes from
-	/// the mirrored range. Costs the starts naming no group, nothing once all do.
-	fn unplaced(&self) -> impl Iterator<Item = (u64, Option<u64>)> + '_ {
-		(self.window.unnamed_keys())
-			.filter_map(|key| self.ranges.get(&key))
-			.filter_map(|range| Some((range.time()?, range.end)))
-	}
 }
 
 /// How a reader still needs a replaced copy; see [`Copy::retains`].
@@ -2205,7 +2212,7 @@ impl Reader {
 	/// Place each unsettled [`Self::window`] range where a copy resolved it, on its own: one
 	/// whose start still waits leaves the rest placed, so a publisher names their starts.
 	fn resolve(&mut self, resolved: &BTreeMap<u64, Resolved>) {
-		let mut placed = Vec::new();
+		let (mut placed, mut reached) = (Vec::new(), Vec::new());
 		for key in self.window.unsettled() {
 			let Some(range) = self.mirrored.ranges.get(&key).copied() else {
 				continue;
@@ -2234,19 +2241,32 @@ impl Reader {
 				},
 				(end, _) => end,
 			};
-			// One that reached back to the oldest group still does, as on a plain reader.
+			// One that reached back to the oldest group still does, as on a plain reader. A time
+			// start keeps its time, which a replaced copy may still place: see [`Copy::retains`].
 			let start = match (waits || range.time().is_some(), resolved.floored) {
 				(true, true) => track::Start::Time(resolved.start),
+				(true, false) if range.time().is_some() => {
+					reached.push((
+						key,
+						track::Range {
+							start: range.start,
+							end,
+						},
+					));
+					continue;
+				}
 				(true, false) => track::Start::Oldest,
 				(false, _) => range.start,
 			};
 			placed.push((key, track::Range { start, end }));
 		}
 		// An edit restarts the window's coverage check, so one that places nothing is skipped.
-		if placed.is_empty() {
-			return;
+		if !placed.is_empty() {
+			self.window.edit([], &placed, None, &Placed);
 		}
-		self.window.edit([], &placed, None, &Placed);
+		if !reached.is_empty() {
+			self.window.edit([], &reached, None, &ReachedBack);
+		}
 	}
 
 	/// Follow the route: subscribe to a new copy, mark the ones it replaced, and mirror
@@ -2603,7 +2623,6 @@ impl Reader {
 			window: &self.window,
 			widest: self.mirrored.widest(),
 			groups_read: self.groups_read,
-			ranges: &self.mirrored.ranges,
 			edge,
 			delivered,
 			out: &self.out,
