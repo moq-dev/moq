@@ -2315,7 +2315,7 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 - Replaced Warm and Cold Route Cost with one cost, which each link adds to.
 - The Cost parameter must be at least 1.
 - Added `Above` to ANNOUNCE_START and ANNOUNCE_UPDATE: how many segments broader than the requested prefix a presented claim is. A claim presented at the requested prefix from above otherwise looked exactly like a claim at the prefix, so a broadcast nested under another's path could lose to the broader claim covering it, depending on the order a relay listed them in. Receivers take a claim to cover its path less its Above, and rank the claims of one prefix as one tier wherever each is shown.
-- Replaced the shortest-path, Hop ID, Instance Hash, and Chain Hash tie-breaks with the claim's unavailability, then its drain, then its priority, its cost, and a Rendezvous Hash of the requested path and the claim's Instance, a standard FNV-1a.
+- Replaced the shortest-path, Hop ID, Instance Hash, and Chain Hash tie-breaks with the claim's unavailability, then its drain, then its priority, its cost, and a Rendezvous Hash of the requested path and the claim's Instance, a standard FNV-1a. A claim shown at exactly the requested path, got on a session exchanging no routes, skips the hash, so the most recently received of those wins.
 - Removed the standby-ordering deployment requirements on Route Cost seeds and bounds.
 
 ### Tracks {#changelog-07-tracks}

@@ -6781,9 +6781,15 @@ impl OriginState {
 					// its routes once, then take each cursor's first eligible visible entry.
 					let candidates = candidates.get_or_insert_with(|| {
 						// All of one prefix, so the most specific claim is the least above it.
+						// Ranked as [`TableCursor::best`] ranks a replayed row.
 						let mut entries: Vec<_> = routes
 							.at(prefix)
-							.map(|entry| ((entry.lane.above, route_order(prefix, entry)), entry))
+							.map(|entry| {
+								(
+									(entry.lane.above, !entry.serves(prefix), route_order(prefix, entry)),
+									entry,
+								)
+							})
 							.collect();
 						entries.sort_unstable_by_key(|(order, _)| *order);
 						entries
@@ -11781,6 +11787,38 @@ mod tests {
 			assert_eq!(advertised, resolved, "{case:?}");
 			drop((held, broadcast));
 		}
+	}
+
+	/// A stream's row beneath its root ranks a route that serves its prefix ahead of a cheaper
+	/// one that serves nothing, whether the row was synced as the routes arrived or replayed
+	/// for a stream that started after them.
+	#[test]
+	fn a_row_ranks_a_serving_route_alike_synced_or_replayed() {
+		let producer = Config {
+			update_hold: Duration::ZERO,
+			..Config::from(origin(1))
+		}
+		.produce();
+		let mut synced = producer.consume().routes();
+		let (advertised, serving) = (crate::Instance::random(), crate::Instance::random());
+		let route = |instance: &crate::Instance, node, cost: u64| {
+			RouteInfo::new()
+				.with_instance(instance.clone(), 0)
+				.with_hops(hops(&[node]))
+				.with_cost(cost)
+		};
+		let _advertised = producer.announce("src", route(&advertised, 10, 1)).unwrap();
+		let _serving = producer.forward("src", route(&serving, 11, 5)).unwrap();
+		let mut replayed = producer.consume().routes();
+		let last = |announced: &mut Routes| {
+			let mut last = None;
+			while let Some(event) = announced.try_next() {
+				last = Some(event.announce.route.instance().clone());
+			}
+			last
+		};
+		assert_eq!(last(&mut synced), Some(serving.clone()));
+		assert_eq!(last(&mut replayed), Some(serving));
 	}
 
 	/// A draining route still reaches its origin, so it outranks one held unavailable,
