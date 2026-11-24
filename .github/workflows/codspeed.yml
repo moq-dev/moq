@@ -8,16 +8,17 @@ on:
   schedule:
     - cron: "0 7 * * *"
   # Kixel Quest bisects a regression by dispatching this workflow on a
-  # `kixel-bisect/<commit>` branch, naming the suspect benchmarks so each step
-  # counts only those.
+  # `kixel-bisect/<run>/<commit>` branch of its own, naming the suspect
+  # benchmarks so each step builds and counts only those.
   workflow_dispatch:
     inputs:
       benchmarks:
-        description: "Benchmark names to count, one per line; empty counts every one."
+        description: "Benchmark names to count, one per line (the form takes one; pass several with `gh workflow run -f` or the API); empty counts every one."
         required: false
         default: ""
 
-# Keyed on the ref, so a bisect step never waits behind or cancels `main`.
+# Keyed on the ref, so a bisect step never waits behind or cancels `main`, and
+# each bisect's steps run on branches of their own.
 concurrency:
   group: instructions-${{ github.ref }}
   cancel-in-progress: false
@@ -55,7 +56,15 @@ jobs:
             args+=(--benchmarks "$RUNNER_TEMP/benchmarks")
           fi
           nix develop --command just rs instructions "${args[@]}"
-          nix develop --command just gh benchmark-report kixel-check kixel-metrics/metrics.json
+
+      # rust2-bench keeps a failed job's output and Valgrind log here.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: failure()
+        with:
+          name: rust2-bench-jobs
+          path: target/rust2-bench/
+          if-no-files-found: ignore
+          retention-days: 7
 
       # Kixel Quest reads it once the run attempt finishes; a rerun overwrites it.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

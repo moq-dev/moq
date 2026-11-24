@@ -529,7 +529,10 @@ async fn read_broadcast(broadcast: broadcast::Consumer, read: Rc<RefCell<Vec<Vec
 
 /// An origin with a fixed hop, so the run does not depend on a random one.
 fn produce(hop: u64) -> origin::Producer {
-	let (producer, driver) = origin::Producer::new(origin::Config::new(hop.try_into().expect("a nonzero hop")));
+	let (producer, driver) = origin::Producer::new(origin::Config {
+		node: Some(hop.try_into().expect("a nonzero hop")),
+		..Default::default()
+	});
 	spawn(driver);
 	producer
 }
@@ -570,7 +573,10 @@ struct Victim {
 
 impl Relay {
 	async fn new(version: Version) -> Self {
-		let mut config = origin::Config::new(1.try_into().expect("a nonzero hop"));
+		let mut config = origin::Config {
+			node: Some(1.try_into().expect("a nonzero hop")),
+			..Default::default()
+		};
 		// The cache's idle expiry is the longest wait in the drain, so keep it short.
 		config.pool = cache::Pool::new(cache::Config::default().with_expiry(EXPIRY));
 		// A relay carries every peer's routes on to the others.

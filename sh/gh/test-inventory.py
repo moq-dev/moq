@@ -566,10 +566,9 @@ def workflow_steps(root: Path) -> list[tuple[str, str, Path]]:
             matrix = matrix_values(job)
             directory = ((job.get("defaults") or {}).get("run") or {}).get("working-directory", defaults)
             for step in job.get("steps") or []:
-                # An action that runs a command takes it as `with: run:`, like
-                # CodSpeed's, or `with: script:`, like android-emulator-runner's.
-                inputs = step.get("with") or {}
-                run = step.get("run") or inputs.get("run") or inputs.get("script")
+                # An action that runs a command takes it as `with: script:`, like
+                # android-emulator-runner's.
+                run = step.get("run") or (step.get("with") or {}).get("script")
                 if not isinstance(run, str):
                     continue
                 cwd = (root / step.get("working-directory", directory)).resolve()

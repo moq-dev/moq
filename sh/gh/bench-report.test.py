@@ -484,25 +484,6 @@ class ReportTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             report.kixel(many, {})
 
-    def test_kixel_check_reads_another_tools_metrics(self):
-        path = self.root / "metrics.json"
-        measure = "instructions (x86_64-3059cd1d9e65)"
-
-        def write(benchmark, measure, pad=0):
-            sample = {"metrics": {benchmark: {measure: {"value": 1}}}}
-            path.write_text(json.dumps({"units": {measure: "instructions"}, "samples": [sample]}) + " " * pad)
-
-        write("rs/a.rs::b", measure)
-        report.kixel_check(path)
-        for benchmark, name, pad in (
-            ("a" * 1025, measure, 0),
-            ("rs/a.rs::b", "m" * 65, 0),
-            ("rs/a.rs::b", measure, report.KIXEL_LIMIT),
-        ):
-            write(benchmark, name, pad)
-            with self.assertRaises(ValueError):
-                report.kixel_check(path)
-
     def history(self, kind, runs):
         """Store runs of (commit, day, {name: value}) the way github-action-benchmark does."""
         unit = "MB/s" if kind == "rates" else "ns"

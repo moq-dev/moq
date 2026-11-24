@@ -322,7 +322,8 @@ def kixel(head, bases):
                 benchmark, measure = entry["name"], MEASURES.get(entry["unit"], entry["unit"])
             else:
                 measure = column
-            named(benchmark, measure)
+            if len(benchmark) > 1024 or len(measure) > 64:
+                raise ValueError(f"name too long for Kixel Quest: {entry['name']}")
             # A column's name implies its unit, and MEASURES names no column, so a measure keeps one unit.
             units[measure] = entry["unit"]
             measures = result.setdefault(benchmark, {})
@@ -337,30 +338,11 @@ def kixel(head, bases):
             raise ValueError(f"paired base is not a full commit ID: {commit!r}")
         samples.append({"commit": commit, "metrics": metrics(entries)})
     text = json.dumps({"units": units, "samples": samples}, separators=(",", ":"), ensure_ascii=False) + "\n"
-    fits(len(text.encode()))
-    return text
-
-
-def named(benchmark, measure):
-    """Fail on a name longer than Kixel Quest keeps."""
-    if len(benchmark) > 1024 or len(measure) > 64:
-        raise ValueError(f"name too long for Kixel Quest: {benchmark} {measure}")
-
-
-def fits(size):
-    """Fail on a metrics.json larger than Kixel Quest reads, rather than upload one it skips."""
+    size = len(text.encode())
     if size > KIXEL_LIMIT:
         raise ValueError(f"metrics.json is {size} bytes, over the {KIXEL_LIMIT} Kixel Quest reads")
     print(f"metrics.json: {size} bytes of {KIXEL_LIMIT}")
-
-
-def kixel_check(path):
-    """Check a metrics.json another tool wrote, such as rust2-bench's, against Kixel Quest's limits."""
-    fits(path.stat().st_size)
-    for sample in json.loads(path.read_text())["samples"]:
-        for benchmark, measures in sample["metrics"].items():
-            for measure in measures:
-                named(benchmark, measure)
+    return text
 
 
 def nightly_metrics(directory):
@@ -662,8 +644,6 @@ def main():
         sub = commands.add_parser(command)
         sub.add_argument("directory", type=Path)
         sub.add_argument("output", type=Path)
-    sub = commands.add_parser("kixel-check")
-    sub.add_argument("metrics", type=Path)
     sub = commands.add_parser("status")
     sub.add_argument("status", choices=("success", "failure", "cancelled", "skipped"))
     sub.add_argument("directory", type=Path)
@@ -688,8 +668,6 @@ def main():
         write(args.output, sizes(args.directory))
     elif args.command == "prepare":
         prepare(args.directory, args.output)
-    elif args.command == "kixel-check":
-        kixel_check(args.metrics)
     elif args.command == "nightly-metrics":
         text = nightly_metrics(args.directory)
         if text is not None:
