@@ -5,7 +5,7 @@
  */
 
 import { Duration, Instant, now, sleepUntil } from "@moq/clock";
-import { Derived, type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
+import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import * as cache from "./cache.ts";
 import { Delivered } from "./delivered.ts";
 import { answered, type Change, type Edit, type JoinAsk, joinTick, Prefs, Subscriptions } from "./demand.ts";
@@ -499,7 +499,6 @@ export class Request {
 	#producer: Producer;
 	#pending: Set<Request>;
 	#lookups?: TrackRequestOptions["lookups"];
-	#wanted?: Getter<boolean>;
 
 	private constructor(options: TrackRequestOptions) {
 		this.name = options.name;
@@ -512,19 +511,12 @@ export class Request {
 	static {
 		hooks.makeRequest = (options) => new Request(options);
 		hooks.stageRequest = (request, info) => request.#stage(info);
-		hooks.requestWanted = (request) => {
-			const wanted = request.#producer.demand().wanted;
-			request.#wanted ??= request.#lookups
-				? new Derived([wanted, request.#lookups.pending], (subscribed, lookups) => subscribed || lookups > 0)
-				: wanted;
-			return request.#wanted;
-		};
 		hooks.keepRequest = (request) => {
 			if (request.#lookups) request.#lookups.opened = false;
 		};
 	}
 
-	/** Watch the subscribers waiting for this request. */
+	/** Watch the subscribers and info lookups waiting for this request. */
 	demand(): Demand {
 		return this.#producer.demand();
 	}
@@ -1349,6 +1341,8 @@ let makeDemand: (name: string, signals: DemandSignals, state: TrackState) => Dem
 // What a producer reports through its {@link Demand}.
 interface DemandSignals {
 	wanted: Getter<boolean>;
+	// Whether a subscriber, not just an info lookup, is attached.
+	subscribed: () => boolean;
 	refresh: Getter<boolean>;
 	asked: Getter<bigint | undefined>;
 }
@@ -1380,9 +1374,13 @@ export class Demand {
 		hooks.demandPriority = (demand) => demand.#state.info.peek()?.priority ?? DEFAULT_PRIORITY;
 		hooks.demandReleased = (demand) => demand.#state.closed;
 		hooks.demandAsked = (demand) => demand.#signals.asked;
+		hooks.demandSubscribed = (demand) => demand.#signals.subscribed();
 	}
 
-	/** Whether anyone subscribes to the open track. Watch it (`effect.get` / `.peek()`) to follow demand. */
+	/**
+	 * Whether anyone subscribes to the open track, or holds an info lookup on it, such as a relay
+	 * answering a downstream TRACK. Watch it (`effect.get` / `.peek()`) to follow demand.
+	 */
 	get wanted(): Getter<boolean> {
 		return this.#signals.wanted;
 	}
@@ -1500,8 +1498,10 @@ export class Producer {
 	// One independent downstream state per live subscriber.
 	#sinks = new Set<TrackState>();
 
-	// Whether any subscriber is attached, watched through {@link demand}.
+	// Whether any subscriber or held info lookup is attached, watched through {@link demand}.
 	#wanted = new Signal(false);
+	// The info lookups holding the track, which count as demand as subscribers do.
+	#holds = 0;
 	// Whether one asks for a new group now; see {@link Demand.refresh}.
 	#refreshing = new Signal(false);
 	// The group start asked for while it is past every key written; see `hooks.demandAsked`.
@@ -1549,6 +1549,7 @@ export class Producer {
 			name,
 			{
 				wanted: this.#wanted,
+				subscribed: () => this.#sinks.size > 0,
 				refresh: new Read(this.#refreshing, (asking) => asking && this.#sent()),
 				asked: new Read(this.#asked, (asked) => asked !== undefined && this.#sent()),
 			},
@@ -1853,6 +1854,14 @@ export class Producer {
 		};
 		hooks.cachedLargest = (producer) => producer.#cachedLargest();
 		hooks.acceptedInfo = (producer) => producer.#state.info.peek();
+		hooks.holdTrack = (producer) => {
+			producer.#holds++;
+			producer.#reportWanted();
+			return () => {
+				producer.#holds--;
+				producer.#reportWanted();
+			};
+		};
 		hooks.reportedLargest = (producer, largest, finished) => {
 			producer.#advanceObject(largest);
 			const current = producer.#state.largest.peek();
@@ -2253,9 +2262,9 @@ export class Producer {
 		return entry.arrived.checkedAdd(refresh.interval)?.max(current);
 	}
 
-	// Report the demand: whether anyone subscribes, and the group start asked for while it is
-	// past every key written, which is the next free key once a pending refresh is due. A
-	// deferred one arms a wakeup to report again when it comes due.
+	// Report the demand: whether anyone subscribes to or holds the open track, and the group start
+	// asked for while it is past every key written, which is the next free key once a pending
+	// refresh is due. A deferred one arms a wakeup to report again when it comes due.
 	#reportWanted(): void {
 		const current = now();
 		const request = this.#pending;
@@ -2263,10 +2272,12 @@ export class Producer {
 		const due = pending?.le(current) === true;
 		const start = due ? max(this.#received, this.#floor) : this.#floor;
 		const asked = start >= this.#received ? start : undefined;
-		const wanted = this.#sinks.size > 0;
 		this.#asked.set(asked);
-		this.#wanted.set(wanted);
-		const refreshing = wanted && asked !== undefined;
+		// A closed track wants nothing, though a lookup still holds it.
+		const open = this.#state.closed.peek() === undefined;
+		this.#wanted.set(open && (this.#sinks.size > 0 || this.#holds > 0));
+		// Only a subscriber reads the group a refresh asks for.
+		const refreshing = this.#sinks.size > 0 && asked !== undefined;
 		// A request due in the batch that ended the last one leaves the level unchanged, so it
 		// notifies anyway: the publisher must read it to send it.
 		if (refreshing && request !== undefined && due && request !== this.#announced) {
@@ -3248,6 +3259,7 @@ export class Producer {
 		// from another copy. Releasing it here would end that continuation at its next short close.
 		for (const sink of this.#sinks) closeTrackState(sink, abort);
 		this.#sinks.clear();
+		this.#reportWanted();
 		// The former live edge becomes evictable too, its idle window restarted, so the close
 		// never reclaims a group its subscribers have yet to drain.
 		const edge = this.#edgeEntry();

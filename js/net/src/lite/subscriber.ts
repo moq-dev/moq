@@ -54,7 +54,7 @@ import { untilAborted } from "../util/abort.ts";
 import { closeUnwanted } from "../util/announce.ts";
 import { toNumber } from "../util/bigint.ts";
 import { Deadline } from "../util/deadline.ts";
-import { isAbandoned, isUnrequested, unrequested, unwanted } from "../util/demand.ts";
+import { isAbandoned, unwanted } from "../util/demand.ts";
 import { max, min, UNBOUNDED } from "../util/key.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { Budget } from "../util/yield.ts";
@@ -1327,11 +1327,11 @@ export class Subscriber {
 			for (;;) {
 				const ready = await this.#auth?.ready(broadcast, "subscribe", {
 					signal: consumed.valid,
-					until: () => unrequested(request),
+					until: () => unwanted(request.demand()),
 				});
 				if (ready !== false) break;
 				// Demand returning before we commit is not abandonment, matching the serving loop.
-				if (!isUnrequested(request)) continue;
+				if (!isAbandoned(request.demand())) continue;
 				request.reject(new Error("subscribe abandoned before it was authorized"));
 				return;
 			}
@@ -1392,16 +1392,15 @@ export class Subscriber {
 		// metadata acceptance to reader attachment. Release it when the last owner leaves.
 		const left = new AbortController();
 		const demand = request.demand();
-		const wanted = hooks.requestWanted(request);
 		let unwatch: Dispose | undefined;
 		const watch = () => {
-			if (isUnrequested(request)) {
+			if (isAbandoned(demand)) {
 				left.abort(
 					new StreamError(StreamCode.Cancel, { message: "subscribe abandoned before it was accepted" }),
 				);
 				state.cancel.abort(left.signal.reason);
 			} else {
-				unwatch = Signal.race(wanted, hooks.demandReleased(demand)).changed(watch);
+				unwatch = Signal.race(demand.wanted, hooks.demandReleased(demand)).changed(watch);
 			}
 		};
 		watch();
@@ -3615,9 +3614,10 @@ class ConsumeBroadcast extends broadcast.Consumer {
 			resolveTrackInfo: async (name, hold) => {
 				hold?.throwIfAborted();
 				// A copy already accepted holds the instance's immutable info, so it answers without
-				// waiting on its upstream, as the Rust broadcast answers from the track it holds.
-				const held = hooks.heldInfo(this, name);
-				if (held) return held;
+				// waiting on its upstream, as the Rust broadcast answers from the track it holds. The
+				// lookup holds that copy, and so its upstream subscription, until `hold` aborts.
+				const held = hooks.resolveHeld(this, name, hold);
+				if (held !== undefined) return held;
 				if (!consumed.valid) return subscriber.resolveTrackInfo(path, name, consumed, hold);
 				// Retirement cancels setup, but a one-shot query still releases its TRACK
 				// as soon as it answers instead of holding it for the broadcast's lifetime.
