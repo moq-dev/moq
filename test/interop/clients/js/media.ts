@@ -440,8 +440,8 @@ async function observe(
 	playerErrors: BrowserErrors,
 	label: string,
 ): Promise<{ samples: Sample[]; grade: (checks?: () => void) => Promise<void> }> {
-	const host = watchHost(label);
 	const start = Date.now();
+	const host = watchHost(label);
 	const samples = await collect(player, playerErrors, WINDOW_MS);
 	const bounds = { start, end: Date.now() };
 	const grade = async (checks?: () => void) => {
@@ -475,16 +475,17 @@ const HOST_INTERVAL_S = 0.5;
  */
 function watchHost(
 	label: string,
-): { process: Bun.Subprocess<"ignore", "pipe", "ignore">; output: Promise<string> } | undefined {
+): { process: Bun.Subprocess<"ignore", "pipe", "ignore">; output: Promise<string>; started: number } | undefined {
 	if (process.platform !== "linux") return undefined;
 	const iterations = Math.ceil(WINDOW_MS / 1000 / HOST_INTERVAL_S) + 1;
 	// Evidence only: a host without `top` loses this part of a failure's explanation, not the window.
 	try {
+		const started = Date.now();
 		const top = Bun.spawn(
 			["top", "-b", "-c", "-w", "512", "-d", String(HOST_INTERVAL_S), "-n", String(iterations)],
 			{ stdin: "ignore", stdout: "pipe", stderr: "ignore" },
 		);
-		return { process: top, output: new Response(top.stdout).text() };
+		return { process: top, output: new Response(top.stdout).text(), started };
 	} catch (err) {
 		console.error(`  ${label}: host processes unavailable: ${err}`);
 		return undefined;
@@ -556,7 +557,10 @@ async function explainStalls(
 	if (!host) return;
 	host.process.kill();
 	const snapshots = (await host.output).split(/^top - /m).slice(1);
-	console.error(`  ${label}: busiest host processes every ${HOST_INTERVAL_S}s from the window's start`);
+	// `top` may start after the window does, as a resumed wait's does once playback moves, so its
+	// snapshots count from the same start as the frames above.
+	const offset = (host.started - start) / 1000;
+	console.error(`  ${label}: busiest host processes every ${HOST_INTERVAL_S}s`);
 	for (const [index, snapshot] of snapshots.entries()) {
 		const lines = snapshot.split("\n");
 		const idle = lines.find((line) => line.startsWith("%Cpu"))?.match(/([\d.]+) id/)?.[1];
@@ -566,7 +570,9 @@ async function explainStalls(
 			.map((line) => line.trim().split(/\s+/))
 			.filter((fields) => fields.length >= 12)
 			.map((fields) => `${processName(fields.slice(11).join(" "))} ${fields[8]}%`);
-		console.error(`    +${(index * HOST_INTERVAL_S).toFixed(1)}s idle ${idle ?? "?"}%: ${busiest.join(", ")}`);
+		console.error(
+			`    +${(offset + index * HOST_INTERVAL_S).toFixed(2)}s idle ${idle ?? "?"}%: ${busiest.join(", ")}`,
+		);
 	}
 }
 
