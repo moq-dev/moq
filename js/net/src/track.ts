@@ -1261,7 +1261,7 @@ function settles(run: DropRun, budget: Budget, coverage: Coverage): boolean {
 	return held !== undefined && held.end >= UNBOUNDED;
 }
 // Actual object metadata outlives cached payloads, unlike empty group heads in model largest.
-let objectLargest: (producer: Producer) => Position | undefined;
+let objectLargest: (producer: Producer, timed?: boolean) => Position | undefined;
 // The fills serving the producer's misses; assigned in its static block.
 let fillsOf: (producer: Producer) => FillState;
 
@@ -1519,6 +1519,7 @@ export class Producer {
 	#demand: Demand;
 	// Only real objects or upstream metadata advance this, never the head of an empty group.
 	#objectLargest?: Position;
+	#timedLargest?: Position;
 
 	// The wire subscription feeding this copy, from `hooks.receiveTrack` until `hooks.cacheTrack`
 	// ends it: only a copy one feeds owes missing groups. Unset on a track's own publisher.
@@ -1852,7 +1853,7 @@ export class Producer {
 			if (typeof served.start === "bigint") producer.#arrivals.demand(0n, served.start, now());
 			hooks.startTrack(producer, { ...served, restated: true });
 		};
-		hooks.cachedLargest = (producer) => producer.#cachedLargest();
+		hooks.cachedLargest = (producer, timed) => producer.#cachedLargest(timed);
 		hooks.acceptedInfo = (producer) => producer.#state.info.peek();
 		hooks.holdTrack = (producer) => {
 			producer.#holds++;
@@ -1869,7 +1870,7 @@ export class Producer {
 				producer.#finishLargest(largest.group);
 		};
 		hooks.reportedGroup = (producer, group) => producer.#advanceLargest({ group, frame: 0 });
-		objectLargest = (producer) => producer.#objectLargest;
+		objectLargest = (producer, timed) => (timed ? producer.#timedLargest : producer.#objectLargest);
 		fillsOf = (producer) => producer.#fills;
 		cachedHolds = (producer, key, whole = false) => {
 			const entry = producer.#cached.get(key);
@@ -2582,7 +2583,7 @@ export class Producer {
 
 	// The newest frame in the cache, as {@link Subscriber.largest} reads it from a sink:
 	// unknown once the newest group is evicted, since what is left cannot say where the edge is.
-	#cachedLargest(): Position | undefined {
+	#cachedLargest(timed = false): Position | undefined {
 		const latest = this.#state.latest;
 		if (latest === undefined || !this.#cached.has(latest)) return undefined;
 
@@ -2590,7 +2591,8 @@ export class Producer {
 		for (const { group } of this.#cache) {
 			const count = hooks.groupFrameCount(group);
 			if (count > hooks.groupOffset(group) && (largest === undefined || group.start > largest.group)) {
-				largest = { group: group.start, frame: count - 1 };
+				const frame = timed ? (hooks.groupLastObject(group) ?? count - 1) : count - 1;
+				largest = { group: group.start, frame };
 			}
 		}
 		return largest;
@@ -2607,9 +2609,10 @@ export class Producer {
 		}
 	}
 
-	#advanceObject(object: Position | undefined, largest: Position | undefined = object): void {
+	#advanceObject(object: Position | undefined, timed: Position | undefined = object): void {
 		if (object && (!this.#objectLargest || after(object, this.#objectLargest))) this.#objectLargest = object;
-		this.#advanceLargest(largest);
+		if (timed && (!this.#timedLargest || after(timed, this.#timedLargest))) this.#timedLargest = timed;
+		this.#advanceLargest(object);
 	}
 
 	/** The track's largest location: its newest group at the newest frame, or undefined before any. */
@@ -2711,8 +2714,8 @@ export class Producer {
 		const stop = hooks.groupProgress(group, (total) => {
 			if (total > hooks.groupOffset(group)) {
 				this.#advanceObject(
-					{ group: group.start, frame: hooks.groupLastObject(group) ?? total - 1 },
 					{ group: group.start, frame: total - 1 },
+					{ group: group.start, frame: hooks.groupLastObject(group) ?? total - 1 },
 				);
 			}
 			// A frame can change an owed hole's reach or drift edge without adding a group.
@@ -5327,10 +5330,10 @@ export class Subscriber {
 		hooks.latestKey = (subscriber) => (subscriber.#resume ? subscriber.#resume.latest() : subscriber.#state.latest);
 		hooks.arrived = (subscriber) => (subscriber.#resume ? 0 : subscriber.#state.arrived);
 		hooks.bufferedLargest = (subscriber) => subscriber.#bufferedLargest();
-		hooks.objectLargest = (subscriber) => {
-			if (subscriber.#resume) return subscriber.#resume.objectLargest();
+		hooks.objectLargest = (subscriber, timed) => {
+			if (subscriber.#resume) return subscriber.#resume.objectLargest(timed);
 			const producer = subscriber.#state.producer;
-			return producer && objectLargest(producer);
+			return producer && objectLargest(producer, timed);
 		};
 		hooks.largestFinished = (subscriber, position) => {
 			if (subscriber.#resume) return subscriber.#resume.largestFinished(position);

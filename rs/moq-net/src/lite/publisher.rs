@@ -3266,6 +3266,7 @@ impl Request for FetchServe {
 							writer,
 							shared.version,
 							batched.frame.timestamp,
+							batched.mono_ts,
 							batched.inflated,
 							batched.frame.payload.len() as u64,
 							*stamp,
@@ -3305,6 +3306,7 @@ impl Request for FetchServe {
 									writer,
 									shared.version,
 									next.timestamp,
+									next.mono_ts,
 									next.inflated,
 									next.size,
 									*stamp,
@@ -4647,6 +4649,7 @@ fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 	writer: &mut Writer<W, Version>,
 	version: Version,
 	timestamp: crate::Timestamp,
+	mono_ts: u64,
 	inflated: Option<u64>,
 	size: u64,
 	stamp: Option<Stamp>,
@@ -4661,8 +4664,14 @@ fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 		writer.buffer_varint(length)?;
 	}
 	if let Some(stamp) = stamp {
+		// On lite-07+, use the group's precomputed monotonic timestamp so a resumed or fetched
+		// slice emits the exact same wire timestamp as a full stream from frame 0.
+		let wire = match version.has_unsigned_timestamps() && timestamp.scale().is_some() {
+			true => mono_ts,
+			false => stamp.wire(timestamp)?,
+		};
 		let delta = clock
-			.encode_delta(stamp.wire(timestamp)?)
+			.encode_delta(wire)
 			.ok_or(Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
 		writer.buffer_varint(delta)?;
 	}
@@ -7454,6 +7463,7 @@ impl GroupServe {
 											writer,
 											self.ctx.version,
 											batched.frame.timestamp,
+											batched.mono_ts,
 											batched.inflated,
 											batched.frame.payload.len() as u64,
 											self.ctx.stamp,
@@ -7524,6 +7534,7 @@ impl GroupServe {
 													writer,
 													self.ctx.version,
 													next.timestamp,
+													next.mono_ts,
 													next.inflated,
 													next.size,
 													self.ctx.stamp,

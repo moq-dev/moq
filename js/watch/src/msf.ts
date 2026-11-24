@@ -43,6 +43,10 @@ function toContainer(track: Msf.Track): ContainerInfo | undefined {
 			return { container: { kind: "loc" }, description };
 		case "legacy":
 			return { container: { kind: "legacy" }, description };
+		case "raw":
+			return { container: { kind: "raw" }, description };
+		case "cts":
+			return { container: { kind: "cts" }, description };
 		default:
 			return undefined;
 	}

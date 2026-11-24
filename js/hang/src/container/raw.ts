@@ -31,7 +31,6 @@ export class Format implements ContainerFormat {
 	/** Decode one raw frame using its MoQ transport timestamp. Throws on an untimed track. */
 	decode(frame: Uint8Array, timestamp: Time.Timestamp): Frame[] {
 		if (timestamp.scale === undefined) throw new Moq.Error.TimestampMismatch();
-		if (this.kind === "data" && frame.byteLength === 0) return [];
 		const duration = frame.byteLength > 0 ? this.#duration?.(frame) : undefined;
 		return [
 			{

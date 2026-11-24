@@ -75,7 +75,7 @@ moq-lite structures content into a hierarchy:
 - **Broadcast**: A collection of Tracks named by a path and an Instance.
 - **Track**: Either a series of independently deliverable Groups, or a stream of unreliable Datagrams.
 - **Group**: An append-only, in-order series of Frames (typically one independent decodable unit, such as a GOP).
-- **Frame**: A sized, opaque payload of bytes at a presentation timestamp.
+- **Frame**: A sized, opaque payload of bytes at a transport timestamp.
 
 ## Broadcast {#broadcast}
 A Broadcast is named by a UTF-8 **path** (corresponding to a {{moqt}} track namespace): non-empty segments joined by `/` (`0x2F`), with no leading, trailing, or consecutive `/`.
@@ -114,7 +114,7 @@ A Group ends in one of three states:
 
 ## Frame {#frame}
 Frames within a Group are indexed sequentially from `0` in write order, implied by position from `GROUP`'s `Frame Start` (or `FETCH`'s `Frame Start`).
-Each frame carries a presentation timestamp `< 2^61` in the Track's `Timescale` (larger values are a malformed Track).
+Each frame carries a monotonic transport timestamp `< 2^61` in the Track's `Timescale` (larger values are a malformed Track).
 When `Timescale = 0` (scale-less), frames carry no timestamp delta and inherit their Group's start.
 
 Unless a negotiated extension specifies otherwise, a publisher MUST NOT start a Group's frame 0 at or before that of any lower-start Group; a receiver MAY reset violating streams (`STOP_SENDING`) with `TIMESTAMP_MISMATCH`.
@@ -157,7 +157,7 @@ Authentication of the underlying connection is out of scope.
 A subscriber holding an Auth Stream needs credit for at least 3 concurrent bidirectional streams (`AUTH`, `TRACK`, `SUBSCRIBE`) and 2 unidirectional streams (`Setup`, `Announce`) alongside Group Streams.
 
 ## Stream Termination
-To avoid half-open bidirectional streams, when either endpoint closes its send side (`FIN`), the peer MUST also close its send side.
+To avoid half-open bidirectional streams, when either endpoint closes its send side (`FIN`), the peer MUST also close its send side (except where a stream rule specifies a handoff, such as {{track-stream}}).
 Long-lived transactions end when their stream closes (`FIN` for graceful flush, `RESET_STREAM` for immediate abort; an endpoint resetting its send side MAY also send `STOP_SENDING`).
 
 ## Error Codes {#error-codes}
@@ -438,7 +438,7 @@ A subscriber that already read the complete Group through `GROUP_END` + `FIN` ke
 Most messages begin with `Message Length (i)` giving the payload bytes that follow (excluding the length varint itself).
 Every message except `FRAME` MUST have `Message Length <= 65,535` bytes (receivers MAY reject longer messages from the length prefix alone; `SETUP` MUST close with `PROTOCOL_VIOLATION` if longer).
 
-Decode errors (field/length mismatch, forbidden values) on Setup, Announce, or any bidirectional stream MUST close the session with `PROTOCOL_VIOLATION`.
+Decode errors (field/length mismatch, forbidden values) on Setup, Announce, or any bidirectional stream (other than `GROUP`/`FRAME` on a Fetch Stream, below) MUST close the session with `PROTOCOL_VIOLATION`.
 Truncated streams terminate only that stream (except Setup, Announce, and Auth).
 Malformed `GROUP`/`FRAME` messages reset only their Group/Fetch Stream.
 
@@ -787,7 +787,7 @@ Both ends are inclusive (except a Position `End` excludes `Frame`).
 
 #### Anchor Resolution & Relay Caching Rules
 A Range resolves once (updates keeping it live never re-resolve it).
-- **History (`None`, `Time`, `Position`)**: `Start` is an absolute floor (never delivers older Groups; never expires for staleness; a floor past latest waits). A relay resolves a `Time` Start locally only when provably matching origin (at the highest held Group `<= time` once all intervening starts are accounted for, at a finished Group's `End <= time`, or from a previously answered Range Start for that time, excluding `Max Age`-limited Joined answers); otherwise it asks upstream.
+- **History (`None`, `Time`, `Position`)**: `Start` is an absolute floor (never delivers older Groups; never expires for staleness; a floor past latest waits). A relay resolves a `Time` Start locally only when provably matching origin (at the highest held Group `<= time` once all intervening starts are accounted for, or from a previously answered Range Start for that time, excluding `Max Age`-limited Joined answers); otherwise it asks upstream.
 - **Live**: a relay places a `Live` Start only from an upstream Range Start answered *after* the downstream Range was added with matching `Min Age`, `End`, and upstream `Max Age >= downstream Max Age` (or locally as a `Time` Start once the Track ended and all Groups below end settled, or when upstream lacks `Live` Anchors).
 - **Position `End`**: reaching a Position `End` pauses sending on that Group Stream without closing it, so a later `SUBSCRIBE_UPDATE` widening the Range can resume on the same stream (closing normally if the Group ends `<= Frame`, or resetting on expiration/unsubscribe).
 

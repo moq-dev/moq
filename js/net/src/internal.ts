@@ -412,6 +412,10 @@ export interface ReadGroupFrame {
 	inflated?: number;
 	/** The payload to stream instead of `frame.payload`, for a frame written in pieces. */
 	chunks?: FrameConsumer;
+	/** The frame's moq-timestamp Object ID (DTS offset from group start), assigned at write time. */
+	timedOid?: bigint;
+	/** The frame's monotonic clamped timestamp in the track's timescale, assigned at write time. */
+	monoTs?: bigint;
 }
 
 /**
@@ -622,7 +626,7 @@ export interface ResumeSource {
 	/** The serving copy's newest buffered frame, which a wire answer names as its edge. */
 	bufferedLargest(): Position | undefined;
 	/** The serving copy's newest actual object, including metadata retained past cache eviction. */
-	objectLargest(): Position | undefined;
+	objectLargest(timed?: boolean): Position | undefined;
 	/** The serving copy's largest location now, and whether it can still advance. */
 	peekLargest(): { largest?: Position; ended: boolean };
 	/** Whether `position` is the serving copy's largest and its group ended there. */
@@ -890,7 +894,7 @@ export const hooks: {
 	 */
 	stageRequest: (request: Request, info: InfoInit) => StagedTrack;
 	/** The newest frame a producer's cache holds, read without subscribing; assigned by `track.ts`. */
-	cachedLargest: (producer: Producer) => Position | undefined;
+	cachedLargest: (producer: Producer, timed?: boolean) => Position | undefined;
 	/** A producer's committed {@link Info}, or undefined before it is accepted; assigned by `track.ts`. */
 	acceptedInfo: (producer: Producer) => Info | undefined;
 	/** Count an info lookup as the track's demand until the returned release, called once, runs; assigned by `track.ts`. */
@@ -939,7 +943,7 @@ export const hooks: {
 	/** The newest frame still buffered for a subscriber; assigned by `track.ts`. */
 	bufferedLargest: (subscriber: Subscriber) => Position | undefined;
 	/** The newest actual object received or reported upstream, independent of cache retention. */
-	objectLargest: (subscriber: Subscriber) => Position | undefined;
+	objectLargest: (subscriber: Subscriber, timed?: boolean) => Position | undefined;
 	/** Call `fn` with a group's frame count now and on every change; assigned by `group.ts`. */
 	groupProgress: (group: GroupProducer, fn: (total: number) => void) => Dispose;
 	/**
@@ -1212,6 +1216,8 @@ export const hooks: {
 	/** Frame count without creating a read handle. */
 	groupFrameCount: (group: GroupProducer) => number;
 	groupLastObject: (group: GroupProducer) => number | undefined;
+	/** Wire Object ID immediately past `frameCount` frames in a timed group, or undefined if unknown. */
+	groupOidAfterFrame: (group: GroupConsumer, frameCount: number) => number | undefined;
 	/**
 	 * Cap a group at `frames` for a track end inside it, so later writes past it throw.
 	 * Throws `ProtocolViolation` if a frame at or past the cap already exists.
@@ -1698,6 +1704,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	groupLastObject: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupOidAfterFrame: () => {
 		throw new Error("group.ts not loaded");
 	},
 	bindGroupTimed: () => {

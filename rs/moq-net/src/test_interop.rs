@@ -685,6 +685,7 @@ fn ietf_track_status_interop() {
 					// The max age is never sent as MAX_CACHE_DURATION.
 					max_cache_duration: None,
 					timescale: Some(crate::Timescale::MILLI),
+					timestamp_ids: version.timestamp_object_ids(),
 					// The JS track's priority 2, lower-first on the wire as `127 - 2`.
 					priority: Some(125),
 					group_order: Some(ietf::GroupOrder::Descending),

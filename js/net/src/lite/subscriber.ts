@@ -138,6 +138,7 @@ import {
 	hasSynced,
 	hasTrackStream,
 	hasTracks,
+	hasUnsignedTimestamps,
 	keepsSubscribeOpen,
 	resolvesStart,
 	updateSupported,
@@ -2085,9 +2086,9 @@ export class Subscriber {
 		}
 	}
 
-	// Read the FETCH response (bare frames, zigzag-delta-timestamped unless `timescale` is 0)
-	// into the group, then FIN. A stream-level failure aborts the group so its reader observes
-	// the gap.
+	// Read the FETCH response (bare frames, delta-timestamped unless `timescale` is 0; unsigned
+	// monotonic deltas on lite-07, zigzag-encoded signed deltas before it) into the group, then FIN.
+	// A stream-level failure aborts the group so its reader observes the gap.
 	async #runFetchResponse(stream: Stream, group: netGroup.Producer, info: TrackInfo): Promise<void> {
 		try {
 			// One guard covers both header waits and a stalled payload. Abandonment aborts
@@ -2098,6 +2099,7 @@ export class Subscriber {
 					scale: info.timescale ?? 0,
 					compress: info.compress,
 					lengthFirst: hasLengthFirst(this.version),
+					unsignedTimestamps: hasUnsignedTimestamps(this.version),
 				}),
 			);
 
@@ -2549,6 +2551,7 @@ export class Subscriber {
 					scale: framing.timescale,
 					compress: framing.compress,
 					lengthFirst: hasLengthFirst(this.version),
+					unsignedTimestamps: hasUnsignedTimestamps(this.version),
 				}),
 			);
 			// Whole at a GROUP_END's end, else without one: every frame sent arrived.
@@ -3242,7 +3245,12 @@ export class Subscriber {
 			// owed whatever dropped the earlier one.
 			if (reading && !owed && dropped) counted.excuse();
 
-			const format = { scale: timescale, compress: entry.compress, lengthFirst: hasLengthFirst(this.version) };
+			const format = {
+				scale: timescale,
+				compress: entry.compress,
+				lengthFirst: hasLengthFirst(this.version),
+				unsignedTimestamps: hasUnsignedTimestamps(this.version),
+			};
 			const frames = readFrames(stream, producer, format);
 			const end = await (entry.filling ? untilAbandoned(producer, frames) : frames);
 

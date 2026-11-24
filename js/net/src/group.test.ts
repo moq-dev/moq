@@ -7,7 +7,7 @@ import { encodable } from "./flate/group.ts";
 import { Producer } from "./group.ts";
 import { hooks, type Replacement } from "./internal.ts";
 import { textFrame } from "./mock.ts";
-import { Timestamp } from "./time.ts";
+import { Timescale, Timestamp } from "./time.ts";
 import { Producer as TrackProducer } from "./track.ts";
 
 const dec = new TextDecoder();
@@ -919,4 +919,49 @@ test("a drained unfinished group fails with Old when its budget gives up", async
 	await expect(consumer.readFrame()).rejects.toBe(err);
 	expect(consumer.done).toBe(true);
 	expect(await consumer.closed).toBe(err as StreamError);
+});
+
+test("createFrame rescales timestamps into the track timescale for groupLastObject", () => {
+	const producer = new Producer(1000n);
+	hooks.bindGroupTimed(producer, {
+		timescale: Timescale.MILLI,
+		priority: 0,
+		maxAge: null,
+		compression: "none",
+		refresh: { ratio: null, interval: null },
+	});
+	// 1_033_000us rescales to 1033ms -> timed Object ID 33 (not 1_032_000).
+	const open = producer.createFrame({ size: 2, timestamp: Timestamp.fromMicros(1_033_000) });
+	open.write(new Uint8Array([1, 2]));
+	open.finish();
+	expect(hooks.groupLastObject(producer)).toBe(33);
+	producer.finish();
+});
+
+test("timed frames assign slice-independent monotonic timestamps", async () => {
+	const producer = new Producer(1000n);
+	hooks.bindGroupTimed(producer, {
+		timescale: Timescale.MILLI,
+		priority: 0,
+		maxAge: null,
+		compression: "none",
+		refresh: { ratio: null, interval: null },
+	});
+	producer.writeFrame({ payload: new Uint8Array([0]), timestamp: Timestamp.fromMillis(1000) });
+	producer.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(1100) });
+	producer.writeFrame({ payload: new Uint8Array([2]), timestamp: Timestamp.fromMillis(1033) });
+	producer.finish();
+
+	const full = producer.consume();
+	const f0 = await hooks.readGroupFrame(full, false);
+	const f1 = await hooks.readGroupFrame(full, false);
+	const f2 = await hooks.readGroupFrame(full, false);
+	expect([f0?.monoTs, f1?.monoTs, f2?.monoTs]).toEqual([1000n, 1100n, 1100n]);
+	expect([f0?.timedOid, f1?.timedOid, f2?.timedOid]).toEqual([0n, 100n, 101n]);
+
+	// Starting at frame 2 still observes the same monotonic timestamp (1100n), not 1033n.
+	const sliced = producer.consume();
+	const s2 = await hooks.readGroupFrame(sliced, false, 2);
+	expect(s2?.monoTs).toBe(1100n);
+	expect(s2?.timedOid).toBe(101n);
 });

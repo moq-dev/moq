@@ -48,14 +48,16 @@ async function active(origin: Origin.Producer, path: Path.Valid): Promise<Broadc
 	}
 }
 
-// Whether the wire carries the route's instance. Every transport carries per-frame timestamps.
+// Whether the wire carries the route's instance and per-frame timestamps.
+// Draft-18..22 uses legacy 0x08 (group-level timestamps) for rollout compatibility; draft-23 uses ID_TIMESCALE.
 const transports = [
-	["moq-lite-07", "moq-lite-07-wip", true],
-	["moq-lite-05", "moq-lite-05", false],
-	["moq-transport-18", "moqt-18", false],
+	["moq-lite-07", "moq-lite-07-wip", true, true],
+	["moq-lite-05", "moq-lite-05", false, true],
+	["moq-transport-18", "moqt-18", false, false],
+	["moq-transport-23", "moqt-23", false, true],
 ] as const;
 
-for (const [name, protocol, routed] of transports) {
+for (const [name, protocol, routed, perFrame] of transports) {
 	test(`${name}: grouped frames roundtrip encrypted`, async () => {
 		const { publisher, subscriber, close } = await session(protocol);
 		const cred = credential();
@@ -89,7 +91,7 @@ for (const [name, protocol, routed] of transports) {
 		expect(received.start).toBe(0n);
 		const first = await received.readFrame();
 		expect(decoder.decode(first?.plaintext)).toBe("keyframe");
-		expect(first?.timestamp?.as(Time.Timescale.MILLI)).toBe(1);
+		expect(first?.timestamp?.as(Time.Timescale.MILLI)).toBe(perFrame ? 1 : 0);
 		expect(decoder.decode((await received.readFrame())?.plaintext)).toBe("delta");
 
 		// Later frames on the open group, and a second group.

@@ -199,6 +199,8 @@ fn container_from_msf(track: &moq_msf::Track, init_cache: &mut InitDataCache) ->
 		// timestamp prefix. Reading one as the other misparses the head of every frame.
 		moq_msf::Packaging::Loc => Ok(Some(Container::Loc)),
 		moq_msf::Packaging::Legacy => Ok(Some(Container::Legacy)),
+		moq_msf::Packaging::Unknown(kind) if kind == "raw" => Ok(Some(Container::Raw)),
+		moq_msf::Packaging::Unknown(kind) if kind == "cts" => Ok(Some(Container::Cts)),
 		moq_msf::Packaging::Cmaf => {
 			let init =
 				decode_init_data(track, init_cache)?.ok_or_else(|| Error::MissingCmafInit(track.name.clone()))?;
@@ -242,8 +244,9 @@ fn decode_init_data(track: &moq_msf::Track, init_cache: &mut InitDataCache) -> R
 /// CMAF tracks carry their config inside `Container::Cmaf::init`, so this
 /// returns `Ok(None)` for them to avoid duplicating the bytes.
 fn legacy_description(track: &moq_msf::Track, init_cache: &mut InitDataCache) -> Result<Option<bytes::Bytes>> {
-	match track.packaging {
+	match &track.packaging {
 		moq_msf::Packaging::Loc | moq_msf::Packaging::Legacy => decode_init_data(track, init_cache),
+		moq_msf::Packaging::Unknown(kind) if kind == "raw" || kind == "cts" => decode_init_data(track, init_cache),
 		_ => Ok(None),
 	}
 }

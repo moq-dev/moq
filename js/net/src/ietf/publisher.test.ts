@@ -266,6 +266,7 @@ test("TRACK_STATUS is answered on every draft without subscribing", async () => 
 					? {}
 					: {
 							timescale: Timescale.MILLI,
+							...(version === Version.DRAFT_23 ? { timestampIds: true } : {}),
 							priority: toWire(2),
 							groupOrder: GroupOrder.Descending,
 						};
@@ -3019,10 +3020,11 @@ test("LARGEST_OBJECT is the live edge", async () => {
 	}
 });
 
-/** INCLUDE_PROPERTIES=0 opts the response out of Track Properties; objects carry none either way. */
+/** INCLUDE_PROPERTIES=0 opts the response out of Track Properties; objects stay dense without ID_TIMESCALE. */
 test.each([
 	[ALPN.DRAFT_20, Version.DRAFT_20],
 	[ALPN.DRAFT_22, Version.DRAFT_22],
+	[ALPN.DRAFT_23, Version.DRAFT_23],
 ] as const)("%s: opt-out omits the Track Properties", async (_alpn, version) => {
 	for (const propertiesWanted of [true, false]) {
 		const fx = fixture(version);
@@ -3047,10 +3049,11 @@ test.each([
 		const served = await nextUni(fx.uni);
 		const reader = new Reader(served, undefined, version);
 		const header = await GroupMessage.decode(reader, version);
-		expect(header.flags.hasExtensions).toBe(true);
+		const expectsTimedIds = propertiesWanted && version === Version.DRAFT_23;
+		expect(header.flags.hasExtensions).toBe(expectsTimedIds);
 
 		await reader.u53(); // object id delta
-		expect(await reader.u53()).toBe(0); // empty properties block
+		if (expectsTimedIds) expect(await reader.u53()).toBe(0); // empty properties block
 		expect(await reader.read(await reader.u53())).toEqual(new TextEncoder().encode("0.0"));
 
 		fx.close();
@@ -5253,4 +5256,101 @@ test("a max age is never sent as MAX_CACHE_DURATION", () => {
 		true,
 	);
 	expect(properties.maxCacheDuration).toBeUndefined();
+});
+
+test("draft-23: TRACK_STATUS reports sparse objectLargest only when properties are wanted", async () => {
+	const version = Version.DRAFT_23;
+	for (const propertiesWanted of [true, false]) {
+		const pair = createMockTransportPair(ALPNS[version]);
+		const session = new NativeSession(pair.server, version, true);
+		const { pub, origin } = publisher(pair.server, { session });
+		const broadcast = publish(origin, Path.from("room"));
+		const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
+		const group = track.createGroup(1000n);
+		group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(1000) });
+		group.writeFrame({ payload: new Uint8Array([2]), timestamp: Timestamp.fromMillis(1033) });
+
+		const { stream, wire } = requestStream(version);
+		await pub.runTrackStatusRequest(trackStatus("room", propertiesWanted), stream);
+		const r = wire();
+		expect(await r.u53()).toBe(TrackStatusOk.id);
+		const ok = await TrackStatusOk.decode(r, version);
+		expect(ok.largest).toEqual({ groupId: 1000n, objectId: propertiesWanted ? 33n : 1n });
+		origin.close();
+	}
+});
+
+test("draft-23: bounded filter does not emit END_OF_TRACK from an excluded or truncated group", async () => {
+	const version = Version.DRAFT_23;
+	const fx = fixture(version);
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "absolute", startGroup: 1000n, startObject: 0n, endGroup: 1000n, endObject: 10n },
+		}),
+	);
+	try {
+		const group = track.createGroup(1000n);
+		group.writeFrame({ payload: new TextEncoder().encode("f0"), timestamp: Timestamp.fromMillis(1000) });
+		group.writeFrame({ payload: new TextEncoder().encode("f1"), timestamp: Timestamp.fromMillis(1033) });
+		group.finish();
+		track.finish();
+
+		const stream = await nextUni(fx.uni);
+		const reader = new Reader(stream, undefined, version);
+		const header = await GroupMessage.decode(reader, version);
+		expect(header.groupId).toBe(1000n);
+		const idDelta = await reader.u53();
+		expect(idDelta).toBe(0);
+		expect(await reader.u53()).toBe(0); // extensions len
+		expect(new TextDecoder().decode(await reader.read(await reader.u53()))).toBe("f0");
+		// Capped at endObject=10: stream closes right after f0 with no END_OF_TRACK status.
+		expect(await reader.done()).toBe(true);
+	} finally {
+		fx.close();
+		client.close();
+	}
+});
+
+test("draft-23: standalone END_OF_TRACK translates final frame ordinal to sparse wire Object ID", async () => {
+	const version = Version.DRAFT_23;
+	const fx = fixture(version);
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+		}),
+	);
+	try {
+		const group = track.createGroup(1000n);
+		group.writeFrame({ payload: new TextEncoder().encode("f0"), timestamp: Timestamp.fromMillis(1000) });
+		group.writeFrame({ payload: new TextEncoder().encode("f1"), timestamp: Timestamp.fromMillis(1033) });
+		group.finish();
+		// Drain the group stream before finishing the track so END_OF_TRACK goes standalone.
+		const groupStream = await nextUni(fx.uni);
+		await readGroup(groupStream);
+
+		track.finishAt({ group: 1000n, frame: 2 });
+		const endStream = await nextUni(fx.uni);
+		const reader = new Reader(endStream, undefined, version);
+		const header = await GroupMessage.decode(reader, version);
+		expect(header.groupId).toBe(1000n);
+		// Frame 0 -> oid 0, frame 1 -> oid 33 => END_OF_TRACK at wire Object ID 34 (not ordinal 2).
+		expect(await reader.u53()).toBe(34);
+		expect(await reader.u53()).toBe(0);
+		expect(await reader.u53()).toBe(0x04);
+		expect(await reader.done()).toBe(true);
+	} finally {
+		fx.close();
+		client.close();
+	}
 });

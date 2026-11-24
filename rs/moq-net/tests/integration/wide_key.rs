@@ -234,3 +234,62 @@ async fn a_later_wide_group_fails_only_that_subscription() {
 	let mut group = sub.recv_group().await.unwrap().unwrap();
 	assert_eq!(group.read_frame().await.unwrap().unwrap().payload, b"narrow".as_ref());
 }
+
+/// On lite-07, a timed group whose start exceeds `Timestamp::MAX` clamps its frame's wire
+/// timestamp to the group's start (`delta = 0`), which exceeds the receiver's valid Timestamp
+/// range and aborts only that group/subscription without harming other tracks.
+#[kio::test]
+async fn wide_key_timed_under_lite_07_aborts_out_of_range_timestamp() {
+	const WIDE: u64 = 1 << 62;
+
+	let publisher = produce_origin(1);
+	let client = produce_origin(2);
+
+	let broadcast = publisher
+		.route("bench", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	let wide = broadcast.broadcast().create_track("wide", timed()).unwrap();
+	let narrow = broadcast.broadcast().create_track("narrow", timed()).unwrap();
+	broadcast.announce().unwrap();
+
+	let mut group = wide.create_group(moq_net::group::Info { start: WIDE }).unwrap();
+	group.write_frame(latest(), b"wide".as_ref()).unwrap();
+	group.finish().unwrap();
+	let mut group = narrow.append_next().unwrap();
+	group.write_frame(Timestamp::ZERO, b"narrow".as_ref()).unwrap();
+	group.finish().unwrap();
+
+	let mut options = MockConnectOptions::new("moq-lite-07-wip".parse::<Version>().unwrap());
+	options.server_publish = Some(publisher.consume());
+	options.client_subscribe = Some(client.clone());
+	let _conn = connect_mock(options).await;
+
+	let remote = client
+		.consume()
+		.follow("bench", None)
+		.unwrap()
+		.available()
+		.await
+		.unwrap()
+		.unwrap();
+
+	let mut sub = remote.track("wide").unwrap().subscribe(None).await.unwrap();
+	let mut group = kio::clock::timeout(Duration::from_secs(5), sub.recv_group())
+		.await
+		.expect("wide group timed out")
+		.unwrap()
+		.unwrap();
+	assert_eq!(group.start, WIDE);
+	let err = kio::clock::timeout(Duration::from_secs(5), group.read_frame())
+		.await
+		.expect("wide frame timed out")
+		.unwrap_err();
+	assert!(
+		matches!(err, moq_net::Error::Stream(_) | moq_net::Error::Decode(_)),
+		"expected out-of-range timed wide key to fail its group read, got {err:?}"
+	);
+
+	let mut sub = remote.track("narrow").unwrap().subscribe(None).await.unwrap();
+	let mut group = sub.recv_group().await.unwrap().unwrap();
+	assert_eq!(group.read_frame().await.unwrap().unwrap().payload, b"narrow".as_ref());
+}

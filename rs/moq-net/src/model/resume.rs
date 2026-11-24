@@ -3674,12 +3674,14 @@ impl Clone for Recover {
 impl Recover {
 	/// Whether to look past the copy being read: it stalled, closed short, or failed with a
 	/// verdict on the group while a newer route serves, or it failed delivering the group, or
-	/// it closed short on a route that failed since, which the front is to replace. A route
-	/// that returns to serve the copy being read is no change.
-	pub(super) fn wants(&mut self, err: Option<&Error>, waiter: &kio::Waiter) -> bool {
-		match err {
-			Some(err) if self.undelivered(err) => return true,
-			None if copy_failed(&self.copy) => return true,
+	/// it closed short on a route that failed since, or while the front stages the copy to
+	/// replace it, which the front is to splice. A route that returns to serve the copy being
+	/// read is no change.
+	pub(super) fn wants(&mut self, cause: &Cause, waiter: &kio::Waiter) -> bool {
+		match cause {
+			Cause::Failed(err) if self.undelivered(err) => return true,
+			Cause::Stalled | Cause::Closed if copy_failed(&self.copy) => return true,
+			Cause::Closed if self.route.consumer().read().staged.is_some() => return true,
 			_ => {}
 		}
 		while self
@@ -3756,18 +3758,9 @@ impl Recover {
 	/// Poll for the serving route's copy of the group, positioned at frame `index`, once the
 	/// copy being read looks past itself for `cause`.
 	///
-	/// When `sparse` is true, Object IDs differ from frame ordinals so ordinal recovery onto
-	/// another copy cannot stitch and is refused once a replacement would be fetched.
-	///
 	/// Returns the error that ends the group when nothing can continue it; for
 	/// [`Cause::Closed`], why the close stands.
-	pub(super) fn poll(
-		&mut self,
-		index: u64,
-		cause: &Cause,
-		sparse: bool,
-		waiter: &kio::Waiter,
-	) -> Poll<Result<Replacement>> {
+	pub(super) fn poll(&mut self, index: u64, cause: &Cause, waiter: &kio::Waiter) -> Poll<Result<Replacement>> {
 		let failed = cause.error();
 		// The copy being read will deliver nothing more of the group.
 		let settled = !matches!(cause, Cause::Stalled);
@@ -3778,25 +3771,28 @@ impl Recover {
 			reader.sync(waiter);
 		}
 		loop {
-			let (generation, serving, end, moves) = {
+			let (generation, serving, end, moves, staged) = {
 				let route = self.route.consumer().read();
 				(
 					route.generation,
 					route.copy.clone(),
 					route.phase.end(),
 					route.phase.moves(),
+					route.staged.as_ref().map(|(id, _)| *id),
 				)
 			};
 			// Once no front will replace the copy, nothing comes after it.
 			let done = !moves;
 			// Registered before looking, so a route change from here on wakes the reader, a
-			// finished track's too. Not through the watch: `generation` is the one just read,
-			// not `self.generation`.
+			// finished track's too, and so does a stage coming or going, which a short close
+			// waits on. Not through the watch: `generation` is the one just read, not
+			// `self.generation`.
 			let moved = self
 				.route
 				.consumer()
 				.poll(waiter, |route| {
-					match route.generation != generation || !route.phase.moves() {
+					let restaged = route.staged.as_ref().map(|(id, _)| *id) != staged;
+					match route.generation != generation || restaged || !route.phase.moves() {
 						true => Poll::Ready(()),
 						false => Poll::Pending,
 					}
@@ -3814,9 +3810,6 @@ impl Recover {
 			if failed.is_some()
 				&& let Some(replacement) = self.held(index)
 			{
-				if sparse {
-					return Poll::Ready(Err(Error::Unsupported));
-				}
 				return Poll::Ready(Ok(replacement));
 			}
 			// A verdict would repeat from the route that gave it.
@@ -3851,16 +3844,13 @@ impl Recover {
 				match cause {
 					// The copy being read still serves: only a failure asks it again.
 					Cause::Stalled => return Poll::Pending,
-					// Its route failed, so the next one may hold more, unless none will come.
-					Cause::Closed if copy_failed(&self.copy) && !done => return Poll::Pending,
+					// Its route failed, or the front stages the copy to replace it, so that one
+					// may hold more, unless none will come.
+					Cause::Closed if (copy_failed(&self.copy) || staged.is_some()) && !done => return Poll::Pending,
 					// It serves on with no front to replace it, so its close stands.
 					Cause::Closed => return Poll::Ready(Err(Error::NotFound)),
 					Cause::Failed(_) => {}
 				}
-			}
-			if sparse {
-				// An ordinal FETCH would request different content after an Object ID gap.
-				return Poll::Ready(Err(Error::Unsupported));
 			}
 			let res = self.poll_serving(generation, &serving, index, settled, withdrawn.is_none(), waiter);
 			// The serving route failed too, or will not fetch the rest while its subscription
@@ -4098,7 +4088,8 @@ pub(super) enum Cause {
 	/// The copy stalled while a newer route serves.
 	Stalled,
 	/// The copy closed the group short of a known end, a FIN without GROUP_END, after the
-	/// front replaced it: the route that replaced it may hold more.
+	/// front replaced it or while it stages a replacement: the route replacing it may hold
+	/// more.
 	Closed,
 	/// The copy failed with this error.
 	Failed(Error),
@@ -5796,6 +5787,51 @@ mod test {
 		routes.serve(b.consume());
 		assert_eq!(read(&mut reading), Some(b"b".to_vec()));
 		assert_eq!(read(&mut reading), None);
+	}
+
+	/// A group the serving copy closed short while the front stages the copy to replace it
+	/// waits for that copy: it reads on once the copy is spliced, and ends where it closed
+	/// once the stage is dropped.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_short_group_waits_for_a_staged_replacement() {
+		for spliced in [true, false] {
+			let routes = Producer::new();
+			let front = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&front, HOUR);
+			let mut short = a.create_group(group::Info { start: 0 }).unwrap();
+			short.write_frame(ts(0), b"a".as_ref()).unwrap();
+			let mut reading = recv(&mut sub);
+			assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+
+			let b = copy();
+			let mut whole = b.create_group(group::Info { start: 0 }).unwrap();
+			for (ms, frame) in [(0, b"a"), (1, b"b")] {
+				whole.write_frame(ts(ms), frame.as_ref()).unwrap();
+			}
+			whole.finish_at(2).unwrap();
+			let staged = routes.stage(b.consume());
+			short.finish().unwrap();
+			if spliced {
+				assert!(
+					reading.read_frame().now_or_never().is_none(),
+					"waits for the staged copy"
+				);
+				routes.splice(b.consume(), staged);
+				assert_eq!(read(&mut reading), Some(b"b".to_vec()));
+				assert_eq!(read(&mut reading), None);
+			} else {
+				// Its end waits too, and wakes once the stage is dropped.
+				let wake = Arc::new(Wake::default());
+				let waiter = kio::Waiter::new(wake.clone().into());
+				assert!(reading.poll_finished(&waiter).is_pending(), "waits for the staged copy");
+				drop(staged);
+				assert!(wake.0.load(std::sync::atomic::Ordering::Relaxed), "woken once dropped");
+				assert!(matches!(reading.poll_finished(&waiter), Poll::Ready(Ok(1))));
+			}
+		}
 	}
 
 	/// A replacement that holds none of a short group is asked for the rest, which continues

@@ -109,7 +109,7 @@ This operates independently of QMux's `max_idle_timeout` and `QX_PING`, either o
 
 
 # Connection Close {#close}
-An endpoint terminates the connection by sending a WebSocket Close frame {{RFC6455}} and closing the underlying transport; no draining period is required.
+An endpoint terminates the connection by sending a WebSocket Close frame {{RFC6455}} and closing the WebSocket stream (or underlying transport for HTTP/1.1); no draining period is required.
 A QMux `CONNECTION_CLOSE` frame, if used, SHOULD be sent in a final binary message beforehand.
 Receipt of a WebSocket Close frame or transport loss terminates the QMux connection and all streams.
 

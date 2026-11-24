@@ -116,7 +116,7 @@ export class Source {
 	 */
 	#select(renditions: Record<string, Catalog.AudioConfig>): string | undefined {
 		const entries = Object.entries(renditions);
-		for (const kind of ["legacy", "loc", "cmaf"]) {
+		for (const kind of ["legacy", "raw", "cts", "loc", "cmaf"]) {
 			const found = entries.find(([, config]) => config.container.kind === kind);
 			if (found) return found[0];
 		}

@@ -144,6 +144,10 @@ pub(super) struct Partial {
 	// Plain bytes a local producer streams into a compressed group: compressed when the
 	// frame commits, so no reader sees them, and uncharged until then.
 	scratch: bool,
+	// The moq-timestamp Object ID assigned when this frame opened.
+	timed_oid: u64,
+	// The monotonic clamped timestamp in the track's timescale for lite-07 egress.
+	mono_ts: u64,
 }
 
 /// A completed frame as a group stores it, with what egress needs beside it.
@@ -156,6 +160,10 @@ pub(super) struct Entry {
 	inflated: u64,
 	// Where the frame ends on its copy's [`Pace`] scale, set as it enters the log.
 	end: u64,
+	// The moq-timestamp Object ID assigned when this frame entered the group.
+	timed_oid: u64,
+	// The monotonic clamped timestamp in the track's timescale for lite-07 egress.
+	mono_ts: u64,
 }
 
 impl Clone for Entry {
@@ -166,6 +174,8 @@ impl Clone for Entry {
 			fields: self.fields.clone(),
 			inflated: self.inflated,
 			end: self.end,
+			timed_oid: self.timed_oid,
+			mono_ts: self.mono_ts,
 		}
 	}
 }
@@ -180,18 +190,21 @@ impl Entry {
 
 	/// A frame without object fields.
 	fn plain(frame: Cached, inflated: u64) -> Self {
+		let mono_ts = frame.timestamp.value();
 		Self {
 			owner: Mutex::new(None),
 			frame,
 			fields: None,
 			inflated,
 			end: 0,
+			timed_oid: 0,
+			mono_ts,
 		}
 	}
 
 	/// The header and whole payload a reader gets: on a `compressed` group, the stored
 	/// slice with its inflated size.
-	fn read(&self, compressed: bool) -> (frame::Header, frame::Source) {
+	fn read(&self, compressed: bool) -> (frame::Header, frame::Source, u64, u64) {
 		let info = frame::Info {
 			size: self.frame.payload.len() as u64,
 			timestamp: self.frame.timestamp,
@@ -201,7 +214,12 @@ impl Entry {
 			fields: self.fields.clone(),
 			inflated: compressed.then_some(self.inflated),
 		};
-		(header, frame::Source::Complete(self.frame.payload.clone()))
+		(
+			header,
+			frame::Source::Complete(self.frame.payload.clone()),
+			self.timed_oid,
+			self.mono_ts,
+		)
 	}
 }
 
@@ -243,10 +261,17 @@ pub(super) struct GroupState {
 	// production stopped, and an abort is exactly when it asks.
 	next_index: usize,
 
+	// The group's start key, kept on the state so timing assignments run inside `commit`.
+	group_start: u64,
+
 	// The last moq-timestamp Object ID assigned to a local or moq-lite timed group's frame
-	// (`oid = max(dts - group_start, prev_oid + 1)`), so moq-transport Largest Object and
-	// terminal markers agree with the wire Object IDs without walking the group.
+	// (`oid = max(dts - group_start, prev_oid + 1)`), so moq-transport Largest Object,
+	// positioning, and terminal markers agree with the wire Object IDs.
 	last_timed_oid: Option<u64>,
+
+	// The running monotonic timestamp in the track's timescale for lite-07 egress, seeded at
+	// `group_start` so every frame's clamped wire timestamp is independent of slice start.
+	last_mono_ts: Option<u64>,
 
 	// Exclusive cap on `next_index`, set when the track ends inside this group: a write
 	// past the track's end is refused rather than served as content that does not exist.
@@ -688,8 +713,8 @@ impl Plain {
 	fn source(&self, local: usize) -> Option<Source> {
 		let state = self.lock();
 		let entry = state.frames.get(local.checked_sub(state.base)?)?;
-		let (header, source) = entry.read(false);
-		Some(Source::Ready(header, source))
+		let (header, source, timed_oid, mono_ts) = entry.read(false);
+		Some(Source::Ready(header, source, timed_oid, mono_ts))
 	}
 
 	/// What holding an inflated frame costs: its payload, its slot, and its fields.
@@ -811,6 +836,8 @@ impl Inflate {
 						fields: slice.fields.clone(),
 						inflated: 0,
 						end: slice.end,
+						timed_oid: slice.timed_oid,
+						mono_ts: slice.mono_ts,
 					};
 					let cost = Plain::cost(&entry);
 					self.plain.bill.add(cost);
@@ -847,13 +874,15 @@ impl Inflate {
 /// A frame resolved under the group's guard, by [`GroupState::poll_frame_source`].
 enum Source {
 	/// Ready to hand out.
-	Ready(frame::Header, frame::Source),
+	Ready(frame::Header, frame::Source, u64, u64),
 	/// A plain read of a compressed group: local frame `local` once `job` inflates it.
 	Inflate {
 		job: Inflate,
 		local: usize,
 		timestamp: Timestamp,
 		fields: Option<Arc<super::object::Fields>>,
+		timed_oid: u64,
+		mono_ts: u64,
 	},
 }
 
@@ -1175,14 +1204,46 @@ impl GroupState {
 		slots
 	}
 
+	/// Assign the per-frame moq-timestamp Object ID and lite-07 monotonic wire timestamp
+	/// once as a frame enters the group, advancing `last_timed_oid` and `last_mono_ts`.
+	fn assign_timing(
+		&mut self,
+		timestamp: Timestamp,
+		fields: Option<&super::object::Fields>,
+		ordinal: usize,
+	) -> (u64, u64) {
+		let mono_ts = if timestamp.scale().is_some() {
+			let prev = self.last_mono_ts.unwrap_or(self.group_start);
+			let mono = timestamp.value().max(prev);
+			self.last_mono_ts = Some(mono);
+			mono
+		} else {
+			timestamp.value()
+		};
+		let timed_oid = match fields {
+			Some(fields) => fields.id,
+			None if self.wire().is_none() && timestamp.scale().is_some() => {
+				let (oid, _) =
+					crate::ietf::object::timestamp_object_id(self.group_start, self.last_timed_oid, timestamp.value());
+				self.last_timed_oid = Some(oid);
+				oid
+			}
+			None => ordinal as u64,
+		};
+		(timed_oid, mono_ts)
+	}
+
 	/// Store a whole frame: count its bytes, extend the timeline, and charge its slot plus,
 	/// unless canonical content already owns the payload, its bytes.
 	///
 	/// Returns the coarse tick it stamped, like [`cache::Charge::add`].
-	fn commit(&mut self, entry: Entry) -> Option<u64> {
+	fn commit(&mut self, mut entry: Entry) -> Option<u64> {
 		let size = entry.frame.payload.len() as u64;
 		self.cache += size;
 		self.stamp(entry.frame.timestamp);
+		let (timed_oid, mono_ts) = self.assign_timing(entry.frame.timestamp, entry.fields.as_deref(), self.committed());
+		entry.timed_oid = timed_oid;
+		entry.mono_ts = mono_ts;
 		let slots = self.push(entry);
 		self.charge.add(slots + if self.content.is_none() { size } else { 0 })
 	}
@@ -1296,11 +1357,13 @@ impl GroupState {
 					local: index,
 					timestamp: entry.frame.timestamp,
 					fields: entry.fields.clone(),
+					timed_oid: entry.timed_oid,
+					mono_ts: entry.mono_ts,
 				})));
 			}
-			let (header, source) = entry.read(self.flate.is_some());
+			let (header, source, timed_oid, mono_ts) = entry.read(self.flate.is_some());
 			self.pace.took(entry.end);
-			return Poll::Ready(Ok(Some(Source::Ready(header, source))));
+			return Poll::Ready(Ok(Some(Source::Ready(header, source, timed_oid, mono_ts))));
 		}
 		if index == self.committed()
 			&& let Some(p) = &self.partial
@@ -1321,6 +1384,8 @@ impl GroupState {
 					inflated: p.inflated,
 				},
 				frame::Source::Partial(p.buf.clone()),
+				p.timed_oid,
+				p.mono_ts,
 			))));
 		}
 		ready!(self.poll_terminal(index))?;
@@ -1827,6 +1892,7 @@ impl Producer {
 					charge.extra(),
 				)));
 			}
+			state.group_start = info.start;
 			state.charge = charge;
 			(state.log.reader(), state.pace.clone())
 		};
@@ -1987,14 +2053,6 @@ impl Producer {
 			return Err(self.abort_conflict(state, err));
 		}
 		let now = state.commit(entry);
-		if state.wire().is_none() && timestamp.scale().is_some() {
-			let (oid, _) = crate::ietf::object::timestamp_object_id(
-				self.handle.info.start,
-				state.last_timed_oid,
-				timestamp.value(),
-			);
-			state.last_timed_oid = Some(oid);
-		}
 		state.next_index = next_index;
 		state.wrote = true;
 		let bound = state.settle(origin);
@@ -2126,13 +2184,7 @@ impl Producer {
 			prepared.push(entry);
 		}
 		for entry in prepared {
-			let ts = entry.frame.timestamp;
 			now = state.commit(entry);
-			if state.wire().is_none() && ts.scale().is_some() {
-				let (oid, _) =
-					crate::ietf::object::timestamp_object_id(self.handle.info.start, state.last_timed_oid, ts.value());
-				state.last_timed_oid = Some(oid);
-			}
 		}
 		// A batch past the tail on its own, payloads or slots, sheds its own front.
 		state.trim(0);
@@ -2263,6 +2315,9 @@ impl Producer {
 			None => FrameBuf::admitted(frame.size as usize, self.handle.cache.frames()),
 		};
 		let now = state.charge.record_write();
+		let frame_index = state.next_index;
+		let next_index = frame_index + 1;
+		let (timed_oid, mono_ts) = state.assign_timing(timestamp, header.fields.as_deref(), frame_index);
 		state.partial = Some(Partial {
 			timestamp,
 			fields: header.fields,
@@ -2270,6 +2325,8 @@ impl Producer {
 			charged: 0,
 			inflated: header.inflated,
 			scratch,
+			timed_oid,
+			mono_ts,
 		});
 		if metadata_bytes > 0 {
 			state.relay().bytes += metadata_bytes;
@@ -2282,14 +2339,11 @@ impl Producer {
 			.map_or(state.next_index as u64, |fields| fields.id);
 		if let Some(wire) = state.wire_mut() {
 			wire.last = Some(object_id);
-			wire.sparse |= object_id != (next_index - 1) as u64;
-		} else if timestamp.scale().is_some() {
-			let (oid, _) = crate::ietf::object::timestamp_object_id(
-				self.handle.info.start,
-				state.last_timed_oid,
-				timestamp.value(),
-			);
-			state.last_timed_oid = Some(oid);
+			// On a timed track, Object IDs are timestamp offsets (sparse by design), not missing
+			// objects; only untimed Object ID gaps break ordinal alignment across copies.
+			if self.handle.track.timescale.is_none() {
+				wire.sparse |= object_id != (next_index - 1) as u64;
+			}
 		}
 		state.next_index = next_index;
 		state.wrote = true;
@@ -2381,13 +2435,22 @@ impl Producer {
 			.filter(|partial| !partial.scratch && state.content.is_some())
 			.map(|partial| partial.buf.shared());
 		let owned = owner.is_some();
-		let fields = partial.and_then(|partial| partial.fields);
+		let (fields, timed_oid, mono_ts) = match partial {
+			Some(partial) => (partial.fields, partial.timed_oid, partial.mono_ts),
+			None => (
+				None,
+				(state.next_index.saturating_sub(1)) as u64,
+				frame.timestamp.value(),
+			),
+		};
 		let mut entry = Entry {
 			owner: Mutex::new(owner),
 			frame,
 			fields,
 			inflated,
 			end: 0,
+			timed_oid,
+			mono_ts,
 		};
 		if !owned && state.content.is_some() {
 			state.canonicalize(state.next_index - 1, &mut entry)?;
@@ -3682,6 +3745,10 @@ struct Batch {
 	fields: Option<Box<[Option<Arc<super::object::Fields>>; Prefetch::CAP]>>,
 	// Inflated sizes for `frames`, filled only by a batch of a compressed group's stored slices.
 	inflated: Option<Box<[u64; Prefetch::CAP]>>,
+	// Precomputed moq-timestamp Object IDs for `frames`.
+	timed_oid: [u64; Prefetch::CAP],
+	// Precomputed monotonic lite-07 wire timestamps for `frames`.
+	mono_ts: [u64; Prefetch::CAP],
 	pos: usize,
 	len: usize,
 }
@@ -3693,6 +3760,22 @@ impl Prefetch {
 	fn take_inflated(&self) -> Option<u64> {
 		let batch = self.batch.as_ref()?;
 		batch.inflated.as_ref()?.get(batch.pos.checked_sub(1)?).copied()
+	}
+
+	/// The moq-timestamp Object ID of the frame [`Self::pop`] just returned.
+	fn take_timed_oid(&self) -> u64 {
+		let Some(batch) = self.batch.as_ref() else {
+			return 0;
+		};
+		batch.pos.checked_sub(1).map_or(0, |at| batch.timed_oid[at])
+	}
+
+	/// The monotonic lite-07 wire timestamp of the frame [`Self::pop`] just returned.
+	fn take_mono_ts(&self) -> u64 {
+		let Some(batch) = self.batch.as_ref() else {
+			return 0;
+		};
+		batch.pos.checked_sub(1).map_or(0, |at| batch.mono_ts[at])
 	}
 
 	/// Take the next buffered frame whole, copying a segmented payload into one buffer.
@@ -3782,6 +3865,8 @@ impl Prefetch {
 				chains: None,
 				fields: None,
 				inflated: None,
+				timed_oid: [0; Self::CAP],
+				mono_ts: [0; Self::CAP],
 				pos: 0,
 				len: 0,
 			})
@@ -3812,6 +3897,8 @@ impl Prefetch {
 		if inflated {
 			batch.inflated.get_or_insert_default()[at] = entry.inflated;
 		}
+		batch.timed_oid[at] = entry.timed_oid;
+		batch.mono_ts[at] = entry.mono_ts;
 		batch.len += 1;
 		entry.end
 	}
@@ -4189,6 +4276,99 @@ impl Consumer {
 		}
 	}
 
+	/// The ordinal of the last frame written (for dense/untimed MOQT Largest Object).
+	#[cfg(feature = "async")]
+	pub(crate) fn last_frame(&self) -> Option<u64> {
+		let state = self.cursor.state.read();
+		(state.next_index as u64).checked_sub(1)
+	}
+
+	/// The wire Object ID immediately following `frame` frames on a timed group (`0` when `frame == 0`).
+	#[cfg(feature = "async")]
+	pub(crate) fn oid_after_frame(&self, frame: u64) -> Option<u64> {
+		if frame == 0 {
+			return Some(0);
+		}
+		let state = self.cursor.state.read();
+		let prev = usize::try_from(frame - 1).ok()?;
+		if prev + 1 == state.next_index {
+			if let Some(wire) = state.wire() {
+				return wire.last.map(|oid| oid.saturating_add(1));
+			}
+			if let Some(last) = state.last_timed_oid {
+				return Some(last.saturating_add(1));
+			}
+		}
+		if prev == state.committed()
+			&& let Some(partial) = &state.partial
+		{
+			return Some(partial.timed_oid.saturating_add(1));
+		}
+		if let Some(entry) = state.entry(prev) {
+			return Some(entry.timed_oid.saturating_add(1));
+		}
+		None
+	}
+
+	/// The frame ordinal of the first frame whose moq-timestamp Object ID is `>= skip`,
+	/// binary-searching only held frames so shed prefixes never cause spurious `Evicted`/`Lagged`.
+	#[cfg(feature = "async")]
+	pub(crate) fn ordinal_for_oid(&self, skip: u64) -> u64 {
+		if skip == 0 {
+			return 0;
+		}
+		let state = self.cursor.state.read();
+		let held = state.held();
+		let committed = state.committed();
+		if held < committed {
+			let first_oid = state.entry(held).expect("held < committed").timed_oid;
+			if first_oid == skip {
+				return held as u64;
+			}
+			if first_oid > skip {
+				// If earlier frames were shed or never held, stop below `held` so the caller
+				// observes `Evicted`/`Lagged` rather than silently skipping an object in range.
+				return if held == 0 { 0 } else { (held - 1) as u64 };
+			}
+			// Binary search [held, committed) for first entry with timed_oid >= skip.
+			let mut lo = held;
+			let mut hi = committed;
+			while lo < hi {
+				let mid = lo + (hi - lo) / 2;
+				if state.entry(mid).expect("in [held, committed)").timed_oid < skip {
+					lo = mid + 1;
+				} else {
+					hi = mid;
+				}
+			}
+			if lo < committed {
+				return lo as u64;
+			}
+		} else if held > 0 {
+			// All committed frames were shed (or offset > 0 with no committed frames yet).
+			return (held - 1) as u64;
+		}
+		// All committed frames had timed_oid < skip; check the in-flight partial frame.
+		if let Some(partial) = &state.partial {
+			return if partial.timed_oid < skip {
+				(committed + 1) as u64
+			} else {
+				committed as u64
+			};
+		}
+		committed as u64
+	}
+
+	/// Advance the cursor to the first frame whose moq-timestamp Object ID is `>= skip`.
+	#[cfg(feature = "async")]
+	pub(crate) fn skip_to_oid(&mut self, skip: u64) {
+		if skip == 0 {
+			return;
+		}
+		let ordinal = self.ordinal_for_oid(skip);
+		self.skip_to(ordinal);
+	}
+
 	#[cfg(feature = "async")]
 	pub(crate) fn wire(&self) -> Option<Wire> {
 		self.cursor.state.read().wire().cloned()
@@ -4396,7 +4576,7 @@ impl Consumer {
 				Poll::Ready(Err(err)) => Cause::Failed(err.clone()),
 				Poll::Pending => Cause::Stalled,
 			};
-			if !recover.wants(cause.error(), waiter) {
+			if !recover.wants(&cause, waiter) {
 				match &cause {
 					Cause::Failed(err) => recover.failed(index, err),
 					// The copy being read still serves and holds no more than was read, so
@@ -4469,10 +4649,12 @@ impl Consumer {
 	/// The serving route's copy to continue this group from once its copy looks past itself for
 	/// `cause`, or the error that ends the read instead.
 	fn replacement(&mut self, cause: Cause, waiter: &kio::Waiter) -> Poll<Result<super::resume::Replacement>> {
-		let sparse = self.cursor.state.read().sparse();
+		if self.cursor.state.read().sparse() {
+			return Poll::Ready(Err(Error::Unsupported));
+		}
 		let index = self.cursor.index as u64;
 		let recover = self.recover_mut().expect("only a recovering group needs a replacement");
-		let replacement = ready!(recover.poll(index, &cause, sparse, waiter))?;
+		let replacement = ready!(recover.poll(index, &cause, waiter))?;
 		let failed = match cause {
 			Cause::Failed(err) => Some(err),
 			Cause::Stalled | Cause::Closed => None,
@@ -4811,6 +4993,8 @@ impl Consumer {
 			frame,
 			fields: self.cursor.prefetch.take_fields(),
 			inflated: self.cursor.prefetch.take_inflated(),
+			timed_oid: self.cursor.prefetch.take_timed_oid(),
+			mono_ts: self.cursor.prefetch.take_mono_ts(),
 		})))
 	}
 
@@ -5473,7 +5657,8 @@ impl Cursor {
 				fields: self.prefetch.take_fields(),
 				inflated: self.prefetch.take_inflated(),
 			};
-			let frame = frame::Consumer::new(self.state.clone(), header, source);
+			let frame = frame::Consumer::new(self.state.clone(), header, source)
+				.with_timing(self.prefetch.take_timed_oid(), self.prefetch.take_mono_ts());
 			return Poll::Ready(Ok(Some(match expiry {
 				Some(expiry) => frame.with_expiry(expiry.for_frame(tail, false)),
 				None => frame,
@@ -5490,20 +5675,22 @@ impl Cursor {
 			}),
 			false => None,
 		};
-		let (info, source) = match committed {
+		let (info, source, timed_oid, mono_ts) = match committed {
 			Some(read) => {
 				self.refresh_if_stale();
 				read
 			}
 			None => match ready!(self.poll(waiter, |state| state.poll_frame_source(index, raw))?) {
 				None => return Poll::Ready(Ok(None)),
-				Some(Source::Ready(info, source)) => (info, source),
+				Some(Source::Ready(info, source, timed_oid, mono_ts)) => (info, source, timed_oid, mono_ts),
 				// Inflated with the group's guard released.
 				Some(Source::Inflate {
 					job,
 					local,
 					timestamp,
 					fields,
+					timed_oid,
+					mono_ts,
 				}) => {
 					job.run(stats);
 					let payload = job.get(local);
@@ -5518,7 +5705,7 @@ impl Cursor {
 						fields,
 						inflated: None,
 					};
-					(header, frame::Source::Complete(payload.into()))
+					(header, frame::Source::Complete(payload.into()), timed_oid, mono_ts)
 				}
 			},
 		};
@@ -5528,7 +5715,9 @@ impl Cursor {
 		// A direct read (not prefetched): count the frame here; the frame::Consumer
 		// counts its bytes per chunk as they're read out.
 		stats.frames(1);
-		let frame = frame::Consumer::new(self.state.clone(), info, source).with_meter(stats.clone());
+		let frame = frame::Consumer::new(self.state.clone(), info, source)
+			.with_timing(timed_oid, mono_ts)
+			.with_meter(stats.clone());
 		Poll::Ready(Ok(Some(match expiry {
 			Some(expiry) => frame.with_expiry(expiry.for_frame(self.index..end, true)),
 			None => frame,
@@ -6412,6 +6601,8 @@ mod test {
 					fields: fields(1),
 					inflated: 0,
 					end: 0,
+					mono_ts: 0,
+					timed_oid: None,
 				},
 			],
 			compressed: false,

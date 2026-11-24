@@ -27,6 +27,11 @@ const MAX_KVP_VALUE_LEN: usize = (1 << 16) - 1;
 /// MAX_CACHE_DURATION (0x04): how long a relay may serve an object from its cache.
 const MAX_CACHE_DURATION: u64 = 0x04;
 
+/// Legacy `TIMESCALE` (0x08), kept on Draft18..Draft22 as a temporary migration shim for
+/// `moq-net-v0.3.24` rolling upgrades (delete next bump). On Draft23+ 0x08 passes through
+/// opaquely as LOC's TIMESCALE.
+pub(super) const LEGACY_TIMESCALE: u64 = 0x08;
+
 /// ID_TIMESCALE (0x40B70), from draft-lcurley-moq-timestamp.
 ///
 /// Track scope: it declares the units of the track's Group IDs and Object IDs (`dts =
@@ -61,6 +66,11 @@ pub struct Properties {
 	/// `None` declares no timeline, so the subscriber times objects by arrival.
 	pub timescale: Option<Timescale>,
 
+	/// Whether `ID_TIMESCALE` (0x40B70) was declared, opting the track into sparse
+	/// timestamp-derived Object IDs (`dts = Group ID + Object ID - TIMESTAMP_TIE`).
+	/// False for untimed tracks and for legacy `TIMESCALE` (0x08) migration peers.
+	pub timestamp_ids: bool,
+
 	/// Publisher priority for groups whose header omits it. Draft-22 section 10.4
 	/// assigns property 0x0e and defaults to wire priority 128 when absent.
 	pub priority: Option<u8>,
@@ -93,6 +103,7 @@ impl Properties {
 		Self {
 			max_cache_duration: None,
 			timescale: info.timescale,
+			timestamp_ids: info.timescale.is_some(),
 			priority: Some(super::priority::to_wire(info.priority)),
 			group_order: Some(GroupOrder::Descending),
 			// A track opted in to refresh answers a NEW_GROUP_REQUEST as a join.
@@ -121,7 +132,11 @@ impl Properties {
 			known.push(int(MAX_CACHE_DURATION, millis));
 		}
 		if let Some(timescale) = self.timescale {
-			known.push(int(TIMESCALE, u64::from(timescale)));
+			let id = match version.timestamp_object_ids() {
+				true => TIMESCALE,
+				false => LEGACY_TIMESCALE,
+			};
+			known.push(int(id, u64::from(timescale)));
 		}
 		if let Some(priority) = self.priority {
 			known.push(int(DEFAULT_PUBLISHER_PRIORITY, u64::from(priority)));
@@ -141,7 +156,13 @@ impl Properties {
 
 		let mut properties: Vec<_> = known
 			.iter()
-			.filter(|property| !sealed_keys(&self.unknown, version).any(|id| id == property.id))
+			.filter(|property| {
+				!sealed_keys(&self.unknown, version).any(|id| {
+					id == property.id
+						|| (property.id == LEGACY_TIMESCALE && id == TIMESCALE)
+						|| (property.id == TIMESCALE && !version.timestamp_object_ids() && id == LEGACY_TIMESCALE)
+				})
+			})
 			.chain(&self.unknown)
 			.collect();
 		// Delta types require ascending order. Equal types keep the publisher's order.
@@ -192,7 +213,7 @@ impl Properties {
 			if abs % 2 == 0 {
 				// Even type: single varint value
 				let value = r.varint()?;
-				if !properties.known(abs, value, &mut seen)? {
+				if !properties.known(abs, value, version, &mut seen)? {
 					properties.unknown.push(Property {
 						id: abs,
 						value: Value::Int(value),
@@ -210,7 +231,12 @@ impl Properties {
 					if immutable(&properties.unknown).is_some() {
 						return Err(DecodeError::InvalidValue);
 					}
-					sealed(&mut Decoder::new(value, version.into()), &mut properties, &mut seen)?;
+					sealed(
+						&mut Decoder::new(value, version.into()),
+						version,
+						&mut properties,
+						&mut seen,
+					)?;
 				}
 				// A small kept property must not pin the message's larger buffer.
 				properties.unknown.push(Property {
@@ -226,16 +252,28 @@ impl Properties {
 	/// Apply a property we understand, returning `false` for any other. Each holds one
 	/// value and is searched in both lists, so a second occurrence, mutable or sealed, is
 	/// malformed: forwarding the sealed one would contradict the one we act on.
-	fn known(&mut self, id: u64, value: u64, seen: &mut Vec<u64>) -> Result<bool, DecodeError> {
-		match id {
-			MAX_CACHE_DURATION => self.max_cache_duration = Some(Duration::from_millis(value)),
+	fn known(&mut self, id: u64, value: u64, version: Version, seen: &mut Vec<u64>) -> Result<bool, DecodeError> {
+		let seen_id = match id {
+			MAX_CACHE_DURATION => {
+				self.max_cache_duration = Some(Duration::from_millis(value));
+				id
+			}
 			TIMESCALE => {
 				// A zero timescale is invalid; treat it as no declaration rather than
 				// failing the whole message over one property we could have ignored.
 				self.timescale = Timescale::new(value).ok();
+				self.timestamp_ids = self.timescale.is_some();
+				TIMESCALE
+			}
+			LEGACY_TIMESCALE if !version.timestamp_object_ids() => {
+				// Temporary migration shim for moq-net-v0.3.24 on Draft18..22 (delete next bump).
+				self.timescale = Timescale::new(value).ok();
+				self.timestamp_ids = false;
+				TIMESCALE
 			}
 			DEFAULT_PUBLISHER_PRIORITY => {
 				self.priority = Some(u8::try_from(value).map_err(|_| DecodeError::InvalidValue)?);
+				id
 			}
 			DEFAULT_PUBLISHER_GROUP_ORDER => {
 				// Only Ascending and Descending are defined: 0x0 has no "publisher
@@ -245,20 +283,25 @@ impl Properties {
 					2 => Some(GroupOrder::Descending),
 					_ => return Err(DecodeError::InvalidValue),
 				};
+				id
 			}
-			DYNAMIC_GROUPS => self.dynamic_groups = dynamic_groups(value)?,
+			DYNAMIC_GROUPS => {
+				self.dynamic_groups = dynamic_groups(value)?;
+				id
+			}
 			super::flate::COMPRESSION => {
 				if value != 1 {
 					return Err(DecodeError::InvalidValue);
 				}
 				self.compress = true;
+				id
 			}
 			_ => return Ok(false),
-		}
-		if seen.contains(&id) {
+		};
+		if seen.contains(&seen_id) {
 			return Err(DecodeError::InvalidValue);
 		}
-		seen.push(id);
+		seen.push(seen_id);
 		Ok(true)
 	}
 }
@@ -288,6 +331,7 @@ pub(crate) const MAX_FORWARDED: usize = MAX_PROPERTIES as usize - UNDERSTOOD.len
 pub(crate) fn check_immutable(block: &[u8], version: Version) -> Result<(), DecodeError> {
 	sealed(
 		&mut Decoder::new(block, version.into()),
+		version,
 		&mut Properties::default(),
 		&mut Vec::new(),
 	)
@@ -361,7 +405,7 @@ impl TrackProperties {
 		let mut seen = Vec::new();
 		let r = &mut Decoder::new(block, self.version.into());
 		// Ingress checked the block, so a malformed one cannot occur and is refused.
-		if self::sealed(r, &mut sealed, &mut seen).is_err() {
+		if self::sealed(r, self.version, &mut sealed, &mut seen).is_err() {
 			return true;
 		}
 		seen.into_iter().any(|id| match id {
@@ -397,12 +441,17 @@ pub(super) fn dynamic_groups(value: u64) -> Result<bool, DecodeError> {
 /// Check the keys inside an Immutable Properties value, applying the ones we understand,
 /// which the draft makes a processor search too. Its pairs are delta-encoded like the outer
 /// list, and nesting another Immutable Properties makes the track malformed.
-fn sealed(r: &mut Decoder<'_>, properties: &mut Properties, seen: &mut Vec<u64>) -> Result<(), DecodeError> {
+fn sealed(
+	r: &mut Decoder<'_>,
+	version: Version,
+	properties: &mut Properties,
+	seen: &mut Vec<u64>,
+) -> Result<(), DecodeError> {
 	let mut id: u64 = 0;
 	while !r.is_empty() {
 		id = id.checked_add(r.varint()?).ok_or(DecodeError::BoundsExceeded)?;
 		if id.is_multiple_of(2) {
-			properties.known(id, r.varint()?, seen)?;
+			properties.known(id, r.varint()?, version, seen)?;
 		} else {
 			if id == IMMUTABLE {
 				return Err(DecodeError::InvalidValue);
@@ -474,6 +523,7 @@ mod tests {
 			unknown: Default::default(),
 			max_cache_duration: None,
 			timescale: Some(Timescale::MICRO),
+			timestamp_ids: false,
 			priority: Some(37),
 			group_order: Some(GroupOrder::Descending),
 			dynamic_groups: true,
@@ -528,6 +578,7 @@ mod tests {
 			compress: false,
 			max_cache_duration: None,
 			timescale: None,
+			timestamp_ids: false,
 			priority: None,
 			group_order: Some(GroupOrder::Descending),
 		};
@@ -709,6 +760,7 @@ mod tests {
 		let properties = Properties {
 			max_cache_duration: Some(Duration::from_secs(1)),
 			timescale: Some(Timescale::MILLI),
+			timestamp_ids: false,
 			priority: Some(1),
 			group_order: Some(GroupOrder::Descending),
 			dynamic_groups: true,

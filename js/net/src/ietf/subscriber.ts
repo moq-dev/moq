@@ -74,7 +74,7 @@ import { joinFilter, Subscribe, SubscribeOk, SubscribeUpdate } from "./subscribe
 import { SubscribeNamespace, SubscribeNamespaceEntry, SubscribeNamespaceEntryDone } from "./subscribe_namespace.ts";
 import { MalformedAuthToken } from "./token.ts";
 import { TrackStatusOk, TrackStatusRequest } from "./track.ts";
-import { isDraft23 } from "./version.ts";
+import { hasTimestampObjectIds, isDraft23 } from "./version.ts";
 
 /** A fetch stream the head cannot be stitched from, which costs only that head. */
 class JoinUnsupported extends Error {
@@ -99,6 +99,8 @@ type Subscription = {
 	join?: Join;
 	// The track's TIMESCALE, the units of its Group IDs, which time the head's fetch objects too.
 	timescale?: Timescale;
+	// Whether Object IDs encode `DTS - Group ID` (ID_TIMESCALE, sparse IDs + TIMESTAMP_TIE).
+	timestampIds: boolean;
 	// The request IDs the head's fetch stream may name, registered until the subscription ends.
 	fetchIds: bigint[];
 };
@@ -208,10 +210,9 @@ export class Subscriber {
 	#aliases = new TrackAliases<Binding>();
 	#receiveYield?: Promise<void>;
 
-	// Units for each track's Group IDs, from the TIMESCALE Track Property in
-	// SUBSCRIBE_OK. A track missing from this map declared no timeline, so its frames
-	// arrive untimed.
-	#timescales = new Map<bigint, Timescale>();
+	// Units and Object ID timing mode for each track, from the TIMESCALE / ID_TIMESCALE
+	// Track Property in SUBSCRIBE_OK. A track missing from this map declared no timeline.
+	#timing = new Map<bigint, { timescale?: Timescale; timestampIds: boolean }>();
 
 	// The requests a fetch stream may answer, mapped to the subscription whose head it brings:
 	// a draft-18 joining FETCH's own request ID, or a draft-22 SUBSCRIBE's, whose fill can
@@ -908,7 +909,7 @@ export class Subscriber {
 					state.binding &&
 					this.#aliases.retire(state.registeredAlias, state.binding)
 				) {
-					this.#timescales.delete(state.registeredAlias);
+					this.#timing.delete(state.registeredAlias);
 				}
 
 				// A refusal already ended the request, so end ours cleanly: a reset would tell the
@@ -1039,7 +1040,7 @@ export class Subscriber {
 			disposeGrant?.();
 			// Only the owner tears down the alias metadata: a later subscription may have
 			// reclaimed the alias and installed its own timescale.
-			if (this.#aliases.retire(trackAlias, binding)) this.#timescales.delete(trackAlias);
+			if (this.#aliases.retire(trackAlias, binding)) this.#timing.delete(trackAlias);
 		}
 	}
 
@@ -1313,7 +1314,8 @@ export class Subscriber {
 				fill,
 				first: start,
 				track: producer,
-				timescale: info.timescale ?? undefined,
+				timescale: ok.properties.timescale ?? info.timescale ?? undefined,
+				timestampIds: ok.properties.timestampIds ?? (info.timescale != null && hasTimestampObjectIds(version)),
 				last: covered,
 				bound: bound === undefined ? undefined : Number(bound),
 				version,
@@ -1675,7 +1677,14 @@ export class Subscriber {
 		hooks.startsAtKeys(producer);
 		if (!known) state.requests = producer.requests();
 		const tail = new Tail();
-		const subscription: Subscription = { track: producer, tail, timescale: ok.properties.timescale, fetchIds: [] };
+		const timestampIds = ok.properties.timestampIds ?? false;
+		const subscription: Subscription = {
+			track: producer,
+			tail,
+			timescale: ok.properties.timescale,
+			timestampIds,
+			fetchIds: [],
+		};
 		const binding = subscription;
 		state.binding = binding;
 		// A live join starts at Largest's group: a filterless one from its first object, and Next
@@ -1724,7 +1733,7 @@ export class Subscriber {
 			this.#aliases.set(ok.trackAlias, binding, { broadcast, name: request.name });
 			const timescale = ok.properties.timescale;
 			if (timescale !== undefined) {
-				this.#timescales.set(ok.trackAlias, timescale);
+				this.#timing.set(ok.trackAlias, { timescale, timestampIds });
 			}
 		} catch (err) {
 			// Only one alias naming two different tracks is the session's problem. A publisher
@@ -1970,8 +1979,9 @@ export class Subscriber {
 			// header priority inherits it (draft-22 section 10.4).
 			if (!group.flags.hasPriority) group.publisherPriority = toWire((await track.info()).priority);
 
-			const timescale = this.#timescales.get(group.trackAlias);
-			const sparse = timescale !== undefined;
+			const timing = this.#timing.get(group.trackAlias);
+			const timescale = timing?.timescale;
+			const sparse = timing?.timestampIds ?? false;
 			// A stream for the group a join is fetching the head of may start partway
 			// through it, at or past the Object ID the head ends before (see Join).
 			const join = subscription.join?.key === group.groupId ? subscription.join : undefined;
@@ -2049,10 +2059,14 @@ export class Subscriber {
 					// the track ends with it, and at object 0 it ends before it.
 					if (producer && !sparse && frame.idDelta !== 0) throw new ObjectIdGap(frame.idDelta);
 					await last();
-					const end = {
-						group: group.groupId,
-						frame: priorObject === undefined ? frame.idDelta : Number(priorObject + 1n) + frame.idDelta,
-					};
+					const wireObject =
+						priorObject === undefined ? frame.idDelta : Number(priorObject + 1n) + frame.idDelta;
+					const end =
+						sparse && wireObject > 0
+							? producer
+								? { group: group.groupId, frame: hooks.groupFrameCount(producer) }
+								: { group: group.groupId + 1n, frame: 0 }
+							: { group: group.groupId, frame: wireObject };
 					producer?.finish();
 					try {
 						hooks.endTrack(track, end);
@@ -2086,7 +2100,9 @@ export class Subscriber {
 				const objectId =
 					priorObject === undefined ? BigInt(frame.idDelta) : priorObject + 1n + BigInt(frame.idDelta);
 				priorObject = objectId;
-				const timestamp = objectTime(timescale, group.groupId, objectId, frame.tie ?? 0n);
+				const timestamp = sparse
+					? objectTime(timescale, group.groupId, objectId, frame.tie ?? 0n)
+					: objectTime(timescale, group.groupId);
 				if (frame.payload) open().writeFrame({ payload: frame.payload, timestamp });
 				else if (!(await receiveFrame(stream, open(), { size: frame.streamed ?? 0, timestamp }))) break;
 			}
@@ -2172,7 +2188,7 @@ export class Subscriber {
 		const subscription = await this.#fetches.get(requestId);
 		// Nothing of ours asked: the publisher is answering a FETCH or fill we never sent.
 		if (!subscription?.join) throw new Error(`unexpected fetch stream: request=${requestId}`);
-		const { join, track, tail, timescale } = subscription;
+		const { join, track, tail, timescale, timestampIds } = subscription;
 		// A draft-22 fill is one of the subscription's own data streams, which PUBLISH_DONE
 		// counts. A draft-18 joining FETCH is a request of its own; the join holds the end for it.
 		const read = isDraft20(version) ? tail.open(join.key) : undefined;
@@ -2233,7 +2249,7 @@ export class Subscriber {
 					if (object.group !== join.key) {
 						throw new JoinUnsupported(`the head answered group ${object.group}, not ${join.key}`);
 					}
-					if (timescale === undefined && object.object !== 0) {
+					if (!timestampIds && object.object !== 0) {
 						throw new JoinUnsupported("the head does not start at object 0");
 					}
 					oid = BigInt(object.object ?? 0);
@@ -2243,7 +2259,7 @@ export class Subscriber {
 					oid = BigInt(next);
 				} else {
 					const step = object.object + objectDeltaBias(version);
-					if (timescale === undefined && step !== 1) {
+					if (!timestampIds && step !== 1) {
 						throw new JoinUnsupported("a gap in the head cannot be stitched");
 					}
 					if (step < 1) {
@@ -2252,7 +2268,9 @@ export class Subscriber {
 					oid = BigInt(next - 1 + step);
 				}
 
-				const timestamp = objectTime(timescale, join.key, oid, object.tie ?? 0n);
+				const timestamp = timestampIds
+					? objectTime(timescale, join.key, oid, object.tie ?? 0n)
+					: objectTime(timescale, join.key);
 				if (first) {
 					producer = join.open(() => hooks.receiveGroup(track, { start: join.key, offset: 0 }));
 					if (!producer) {
@@ -2348,6 +2366,7 @@ export class Subscriber {
 		const binding = alias?.datagrams && {
 			producer: alias.datagrams.producer,
 			timescale: alias.timescale,
+			timestampIds: alias.timestampIds,
 		};
 		if (!binding) {
 			console.debug(`dropping a datagram for an unknown alias: alias=${datagram.trackAlias}`);
@@ -2381,7 +2400,9 @@ export class Subscriber {
 		// Its time is its key (with optional tie), as a group's is its ID.
 		let timestamp: Timestamp;
 		try {
-			timestamp = objectTime(binding.timescale, datagram.groupId, 0n, tie);
+			timestamp = binding.timestampIds
+				? objectTime(binding.timescale, datagram.groupId, 0n, tie)
+				: objectTime(binding.timescale, datagram.groupId);
 		} catch {
 			console.debug(
 				`dropping a datagram whose sequence is past the latest timestamp: alias=${datagram.trackAlias} group=${datagram.groupId}`,

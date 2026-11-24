@@ -186,7 +186,9 @@ test("TrackStatusOk: round trip on every draft", async () => {
 		const decoded = await decodeVersioned(encoded, Track.TrackStatusOk.decode, version);
 
 		expect(decoded.largest).toEqual({ groupId: 4n, objectId: 1n });
-		expect(decoded.properties).toEqual(properties);
+		expect(decoded.properties).toEqual(
+			version === Version.DRAFT_23 ? { ...properties, timestampIds: true } : properties,
+		);
 	}
 });
 

@@ -476,7 +476,7 @@ Consumers MUST ignore renditions with unrecognized `kind`; a missing string `kin
 - Empty groups (zero objects) are permitted and mean nothing.
 
 ## Discontinuities
-- On audio/video tracks, a group containing a single empty codec payload is a walk-now discontinuity marker (consumers MUST NOT pass it to a decoder); a zero-byte object is malformed, as is a marker sharing a group with another object.
+- On audio/video tracks, a group containing a single empty codec payload is a walk-now discontinuity marker (consumers MUST NOT pass it to a decoder); a zero-byte object is malformed (except in `raw`, where an empty codec payload is a zero-byte object), as is a marker sharing a group with another object.
 - On data tracks (where empty payloads are valid data), the discontinuity marker is a group of one zero-byte object.
 - Publishers pausing on a track that may resume SHOULD emit a discontinuity marker when stopping so the preceding group does not appear live across the pause.
 
@@ -598,7 +598,7 @@ This document has no IANA actions.
 - Defined `bitrate`, `jitter`, `delay`, `enabled` (replacing `stalled`), video `preference`, `reorder`, `displayAspectWidth`/`displayAspectHeight`, `color`, `projection`, `stereo`, `interlaced`, audio `layout`, `warmup`, Opus pre-skip, ADTS vs raw AAC, `ttml` framing, and MSF text conversion.
 - Added optional `bitrate`, `jitter`, and `delay` fields to `json` and `binary` track entries.
 - Replaced the live-edge floor with non-overlapping group spans and open-GOP continuation rules.
-- A data track marks a discontinuity with a group of one object with no bytes; an object with no bytes on an audio or video track, or sharing its group, is malformed.
+- A data track marks a discontinuity with a group of one object with no bytes; an object with no bytes on an audio or video track (outside `raw`), or sharing its group, is malformed.
 - Timed CMAF samples from the frame timestamp; `tfdt` is relative within the fragment.
 - A `loc` frame's codec payload uses the `legacy` framing.
 - Added `raw` (zero-byte header, `PTS = transport_timestamp`) and `cts` (QUIC varint `CTS` in track `Timescale`, `PTS = transport_timestamp + CTS`) containers, both requiring a timed track.

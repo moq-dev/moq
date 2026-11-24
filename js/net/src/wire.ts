@@ -32,7 +32,7 @@ export interface Broadcast {
 	/** The track's properties; `hold` keeps the track wanted until it aborts, the way a held TRACK stream does, and aborting it before the answer abandons the lookup. */
 	resolveTrackInfo(name: string, hold?: AbortSignal): Promise<track.Info>;
 	/** The newest frame the track's cache holds, read without subscribing; `undefined` while it holds none. */
-	largest(name: string): track.Position | undefined;
+	largest(name: string, timed?: boolean): track.Position | undefined;
 	/** Fetch one group; absent when the session's version has no FETCH, so callers never ask. */
 	fetchGroup?(name: string, key: bigint, options?: track.FetchGroupOptions): Promise<GroupConsumer>;
 	requested(): Promise<track.Request | undefined>;

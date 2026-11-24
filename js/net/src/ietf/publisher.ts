@@ -87,7 +87,7 @@ import {
 } from "./subscribe_namespace.ts";
 import { MalformedAuthToken } from "./token.ts";
 import { TrackStatusOk, type TrackStatusRequest } from "./track.ts";
-import { type IetfVersion, isDraft23 } from "./version.ts";
+import { hasTimestampObjectIds, type IetfVersion, isDraft23 } from "./version.ts";
 
 /** First wait before re-offering a namespace the peer refused or we couldn't open for. */
 const RETRY_BASE = 100;
@@ -250,6 +250,8 @@ interface RunGroup {
 
 	/** The subscription's data stream count, which PUBLISH_DONE reports. */
 	streams: StreamCount;
+	/** Whether this subscription emits moq-timestamp Object IDs and TIMESTAMP_TIE. */
+	timed: boolean;
 }
 
 /** How many data streams a subscription opened, fill streams included. */
@@ -299,6 +301,8 @@ interface RunFill {
 
 	/** The subscription's data stream count, which PUBLISH_DONE reports. */
 	streams: StreamCount;
+	/** Whether this subscription emits moq-timestamp Object IDs and TIMESTAMP_TIE. */
+	timed: boolean;
 }
 
 // The condition a request that failed for `err` is refused with, mirroring Rust's `to_code`: a
@@ -754,7 +758,8 @@ export class Publisher {
 			// fill ends exactly where a Next Object subscription begins, which is what lets
 			// the draft's current-group join (Next Object plus a StartGroup=1 fill) cover the
 			// group with no gap and no overlap.
-			const edge = liveEdge(track);
+			const timed = msg.propertiesWanted && info.timescale != null && hasTimestampObjectIds(version);
+			const edge = liveEdge(track, timed);
 			const fill =
 				msg.fill && msg.forward && Filter.isDraft20(version)
 					? fillRange(msg.fill, msg.filter, edge.largest)
@@ -855,6 +860,7 @@ export class Publisher {
 					unsubscribed,
 					cancelled: fillAbort.signal,
 					streams,
+					timed,
 				}).finally(() => {
 					if (filling === fill) filling = undefined;
 				});
@@ -882,6 +888,7 @@ export class Publisher {
 					bounds,
 					unsubscribed,
 					streams,
+					timed,
 				});
 				groups.add(task);
 				void task.finally(() => groups.delete(task));
@@ -907,7 +914,7 @@ export class Publisher {
 						// A fill holds one cache view. At most this decoded update waits behind
 						// it; request parsing then backpressures any further fill requests.
 						if (params.fillParameters) await filling;
-						const snapshot = liveEdge(track);
+						const snapshot = liveEdge(track, timed);
 						this.#applyPublished(msg, params);
 						const selected =
 							msg.fill && Filter.isDraft20(version)
@@ -1079,7 +1086,9 @@ export class Publisher {
 			if (!datagramTrack && ended && !publishError && final !== undefined && reached && !streams.terminalSent) {
 				await this.#runEndOfTrack({
 					requestId: msg.requestId,
+					track,
 					final,
+					timed,
 					publisherPriority,
 					unsubscribed,
 					streams,
@@ -1227,7 +1236,8 @@ export class Publisher {
 	 * Runs a group and sends its frames using ObjectStream (Subgroup delivery mode).
 	 */
 	async #runGroup(options: RunGroup) {
-		const { requestId, track, group, publisherPriority, ranking, live, bounds, unsubscribed, streams } = options;
+		const { requestId, track, group, publisherPriority, ranking, live, bounds, unsubscribed, streams, timed } =
+			options;
 		const { slice } = live;
 		const excluded = Promise.withResolvers<void>();
 		let rangeError: Error | undefined;
@@ -1280,7 +1290,7 @@ export class Publisher {
 
 			// Object 0 names the keys just below this group the track declared skipped, a
 			// best-effort drop signal; a stream starting past object 0 carries no object 0.
-			const timescale = (await track.info()).timescale ?? undefined;
+			const timescale = timed ? ((await track.info()).timescale ?? undefined) : undefined;
 			const groupGap = slice.skip === 0 ? hooks.skippedBelow(track, group.start) : 0n;
 			const header = new GroupMessage({
 				trackAlias: requestId,
@@ -1358,9 +1368,15 @@ export class Publisher {
 					let tie: bigint | undefined;
 					if (timescale !== undefined) {
 						const dts = BigInt(floorAt(read.frame.timestamp, timescale));
-						const computed = timestampObjectId(group.start, servedOid, dts);
-						id = computed.id;
-						tie = computed.tie > 0n ? computed.tie : undefined;
+						if (read.timedOid !== undefined) {
+							id = read.timedOid;
+							const tieVal = group.start + id > dts ? group.start + id - dts : 0n;
+							tie = tieVal > 0n ? tieVal : undefined;
+						} else {
+							const computed = timestampObjectId(group.start, servedOid, dts);
+							id = computed.id;
+							tie = computed.tie > 0n ? computed.tie : undefined;
+						}
 						servedOid = id;
 					} else {
 						id = BigInt(read.index);
@@ -1387,16 +1403,19 @@ export class Publisher {
 				const last =
 					timescale !== undefined ? (servedOid === undefined ? 0 : Number(servedOid) + 1) : group.frameCount;
 				const end = hooks.subscriberEnd(track);
-				const marked = end?.group === group.start && end.frame === group.frameCount;
+				const inRange = last >= slice.skip && (slice.until === undefined || last < slice.until);
+				const marked = ended && inRange && end?.group === group.start && end.frame === group.frameCount;
 				// A finished group ends with END_OF_GROUP one past its last object, unless the
 				// END_OF_TRACK below marks that place or the range misses it: a filter starting
 				// past the group's end, or one stopping short of it.
-				if (ended && !marked && last >= slice.skip && (slice.until === undefined || last < slice.until)) {
+				if (ended && !marked && inRange) {
 					const endDelta = priorObject === undefined ? BigInt(last) : BigInt(last) - priorObject - 1n;
 					await send(() => new Frame().encode(stream, header.flags, this.#session.version, endDelta));
 				} else if (marked) {
 					const endDelta = priorObject === undefined ? BigInt(last) : BigInt(last) - priorObject - 1n;
-					await new Frame({ endOfTrack: true }).encode(stream, header.flags, this.#session.version, endDelta);
+					await send(() =>
+						new Frame({ endOfTrack: true }).encode(stream, header.flags, this.#session.version, endDelta),
+					);
 				}
 
 				stream.close();
@@ -1436,13 +1455,29 @@ export class Publisher {
 	/** Preserve the original terminal on a separate stream when its group already sent FIN. */
 	async #runEndOfTrack(options: {
 		requestId: bigint;
+		track: TrackSubscriber;
 		final: TrackPosition;
+		timed: boolean;
 		publisherPriority: number;
 		unsubscribed: Promise<void>;
 		streams: StreamCount;
 	}) {
-		const { requestId, final, publisherPriority, unsubscribed, streams } = options;
+		const { requestId, track, final, timed, publisherPriority, unsubscribed, streams } = options;
 		const version = this.#session.version;
+		let wireObject = final.frame;
+		if (timed && final.frame > 0) {
+			const cached = hooks.cachedGroup(track, final.group);
+			if (cached) {
+				try {
+					wireObject = hooks.groupOidAfterFrame(cached, final.frame) ?? final.frame;
+				} finally {
+					cached.close();
+				}
+			} else {
+				const largest = hooks.objectLargest(track, true);
+				if (largest?.group === final.group) wireObject = largest.frame + 1;
+			}
+		}
 		const stream = await Writer.tryOpen(this.#quic, { cancel: unsubscribed, version }).catch(() => undefined);
 		if (!stream) return;
 		streams.opened += 1;
@@ -1459,11 +1494,11 @@ export class Publisher {
 					hasSubgroupObject: false,
 					hasEnd: false,
 					hasPriority: true,
-					firstObject: final.frame === 0,
+					firstObject: wireObject === 0,
 				},
 			});
 			await header.encode(stream, version);
-			await new Frame({ endOfTrack: true }).encode(stream, header.flags, version, final.frame);
+			await new Frame({ endOfTrack: true }).encode(stream, header.flags, version, wireObject);
 			stream.close();
 		} catch (err: unknown) {
 			stream.reset(error(err));
@@ -1478,7 +1513,7 @@ export class Publisher {
 	 * fill-failure signal. Nothing here touches the subscription either way.
 	 */
 	async #runFill(options: RunFill) {
-		const { requestId, ranking, fill, cache, publisherPriority, unsubscribed, cancelled, streams } = options;
+		const { requestId, ranking, fill, cache, publisherPriority, unsubscribed, cancelled, streams, timed } = options;
 		const version = this.#session.version;
 
 		// Everything is inside the try so the cache fork is released on every path out,
@@ -1514,7 +1549,7 @@ export class Publisher {
 			const group = hooks.judgedGroup(cache, fill.start.group);
 			if (!group) throw new NotFound("fill group unavailable");
 			const given = untilGivenUp(group, cancelled);
-			const timescale = (await cache.info()).timescale ?? undefined;
+			const timescale = timed ? ((await cache.info()).timescale ?? undefined) : undefined;
 			try {
 				await this.#writeFetchGroup({
 					out,
@@ -1593,10 +1628,17 @@ export class Publisher {
 			let tie: bigint | undefined;
 			if (timescale !== undefined) {
 				const dts = BigInt(floorAt(frame.frame.timestamp, timescale));
-				const computed = timestampObjectId(group.start, servedOid, dts);
-				servedOid = computed.id;
-				oid = Number(computed.id);
-				tie = computed.tie > 0n ? computed.tie : undefined;
+				if (frame.timedOid !== undefined) {
+					servedOid = frame.timedOid;
+					oid = Number(frame.timedOid);
+					const tieVal = group.start + frame.timedOid > dts ? group.start + frame.timedOid - dts : 0n;
+					tie = tieVal > 0n ? tieVal : undefined;
+				} else {
+					const computed = timestampObjectId(group.start, servedOid, dts);
+					servedOid = computed.id;
+					oid = Number(computed.id);
+					tie = computed.tie > 0n ? computed.tie : undefined;
+				}
 			} else {
 				oid = frame.index;
 			}
@@ -2277,7 +2319,8 @@ export class Publisher {
 			try {
 				const broadcast = await this.#resolve(name, hold.signal);
 				const info = await wireOf(broadcast).resolveTrackInfo(msg.trackName, hold.signal);
-				const largest = wireOf(broadcast).largest(msg.trackName);
+				const timed = msg.propertiesWanted && info.timescale != null && hasTimestampObjectIds(version);
+				const largest = wireOf(broadcast).largest(msg.trackName, timed);
 				answer = new TrackStatusOk({
 					largest: largest && { groupId: largest.group, objectId: BigInt(largest.frame) },
 					properties: trackProperties(info, msg.propertiesWanted),
@@ -2614,9 +2657,9 @@ type FillServe =
 	| { kind: "unsupported" };
 
 /** Snapshot the live edge of a track. */
-function liveEdge(track: TrackSubscriber): LiveEdge {
+function liveEdge(track: TrackSubscriber, timed: boolean): LiveEdge {
 	const latest = hooks.latestKey(track);
-	const largest = hooks.objectLargest(track);
+	const largest = hooks.objectLargest(track, timed);
 	if (!largest) return latest === undefined ? {} : { latest, next: { group: latest, object: 0n } };
 
 	const group = largest.group;

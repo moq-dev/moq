@@ -1,12 +1,18 @@
 import type { Reader, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import { toNumber } from "../util/bigint.ts";
-import type { IetfVersion } from "./version.ts";
+import { hasTimestampObjectIds, type IetfVersion } from "./version.ts";
+
+// Legacy timescale property (0x08), emitted on draft-18..22 for side-by-side rollout compatibility
+// with released moq-net-v0.3.24 peers (which use dense ordinal Object IDs). On draft-23+, 0x08 is
+// LOC's TIMESCALE and passes through untouched while ID_TIMESCALE (0x40B70) carries moq-timestamp.
+// Temporary migration shim: delete when draft-22 compatibility is retired.
+const LEGACY_TIMESCALE = 0x08n;
 
 // ID_TIMESCALE (0x40B70), from draft-lcurley-moq-timestamp.
 // Track scope: it declares the units of the track's Group IDs and Object IDs (`dts =
 // Group ID + Object ID - TIMESTAMP_TIE`), and its presence is what makes the track timed.
-// Distinct from LOC's TIMESCALE (0x08), which is skipped as an unknown property.
+// Distinct from LOC's TIMESCALE (0x08), which is skipped as an unknown property on draft-23+.
 const TIMESCALE = 0x40b70n;
 
 // DEFAULT_PUBLISHER_GROUP_ORDER (0x22), the publisher's delivery preference for the track.
@@ -32,6 +38,10 @@ export interface Properties {
 	/// `undefined` declares no timeline, so the track and its objects are untimed.
 	timescale?: Timescale;
 
+	/// Whether Object IDs encode `DTS - Group ID` (`ID_TIMESCALE`, sparse IDs + `TIMESTAMP_TIE`).
+	/// False/undefined for legacy `0x08` on draft-18..22 (dense ordinal IDs).
+	timestampIds?: boolean;
+
 	/// Publisher priority for a group header without its priority flag. Omitted, it is the wire default 128, priority -1.
 	priority?: number;
 
@@ -46,13 +56,20 @@ export interface Properties {
 /// the caller must not append anything after it.
 ///
 /// Properties are serialized in ascending order by type, delta-encoded.
-export async function encode(w: Writer, properties: Properties, _version: IetfVersion): Promise<void> {
+export async function encode(w: Writer, properties: Properties, version: IetfVersion): Promise<void> {
 	let prevType = 0n;
+	const sparseIds = hasTimestampObjectIds(version);
 
 	if (properties.maxCacheDuration !== undefined) {
 		await w.u62(4n);
 		await w.u62(properties.maxCacheDuration);
 		prevType = 4n;
+	}
+
+	if (!sparseIds && properties.timescale !== undefined) {
+		await w.u62(LEGACY_TIMESCALE - prevType);
+		await w.u62(BigInt(properties.timescale));
+		prevType = LEGACY_TIMESCALE;
 	}
 
 	if (properties.priority !== undefined) {
@@ -70,7 +87,7 @@ export async function encode(w: Writer, properties: Properties, _version: IetfVe
 		prevType = DEFAULT_PUBLISHER_GROUP_ORDER;
 	}
 
-	if (properties.timescale !== undefined) {
+	if (sparseIds && properties.timescale !== undefined) {
 		await w.u62(TIMESCALE - prevType);
 		await w.u62(BigInt(properties.timescale));
 		prevType = TIMESCALE;
@@ -85,8 +102,9 @@ export async function encode(w: Writer, properties: Properties, _version: IetfVe
 ///
 /// Unlike an unknown message parameter, an unknown property is skipped rather than fatal,
 /// which is what lets a relay forward properties it does not implement.
-export async function decode(r: Reader, _version: IetfVersion): Promise<Properties> {
+export async function decode(r: Reader, version: IetfVersion): Promise<Properties> {
 	const properties: Properties = {};
+	const sparseIds = hasTimestampObjectIds(version);
 	let prevType = 0n;
 	let i = 0;
 
@@ -104,6 +122,9 @@ export async function decode(r: Reader, _version: IetfVersion): Promise<Properti
 			} else if (abs === TIMESCALE && value > 0n) {
 				// A zero timescale is invalid; treat it as no declaration rather than
 				// failing the whole message over one property we could have ignored.
+				properties.timescale = Timescale(toNumber(value));
+				properties.timestampIds = true;
+			} else if (!sparseIds && abs === LEGACY_TIMESCALE && value > 0n) {
 				properties.timescale = Timescale(toNumber(value));
 			} else if (abs === DEFAULT_PUBLISHER_PRIORITY) {
 				if (value > 255n) throw new Error(`invalid publisher priority: ${value}`);

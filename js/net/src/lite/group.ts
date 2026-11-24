@@ -107,10 +107,14 @@ export interface FrameFormat {
 	compress?: boolean;
 	/**
 	 * Whether every frame leads with its `Payload Length`, the payload size plus one (lite-07),
-	 * rather than ending its header with the size. Lite-07 also carries unsigned non-negative
-	 * timestamp deltas instead of zigzag-encoded signed deltas.
+	 * rather than ending its header with the size.
 	 */
 	lengthFirst?: boolean;
+	/**
+	 * Whether timestamps use unsigned non-negative monotonic deltas (lite-07) instead of
+	 * zigzag-encoded signed deltas. Defaults to `lengthFirst` when omitted.
+	 */
+	unsignedTimestamps?: boolean;
 }
 
 /**
@@ -129,9 +133,10 @@ export function frameDecoder({
 	start = 0n,
 	compress = false,
 	lengthFirst = false,
+	unsignedTimestamps = lengthFirst,
 }: FrameFormat): (c: Cursor) => WireFrame | GroupEnd {
 	const timescale = scale === 0 ? undefined : Time.Timescale(scale);
-	let prevTs = lengthFirst ? start : 0n;
+	let prevTs = unsignedTimestamps ? start : 0n;
 	// The highest timestamp decoded so far, which a GROUP_END's End counts from.
 	let highest: bigint | undefined;
 	return (c) => {
@@ -145,7 +150,7 @@ export function frameDecoder({
 			}
 			size = length - 1;
 		}
-		const delta = timescale !== undefined ? (lengthFirst ? c.u62() : unzigzag(c.u62())) : 0n;
+		const delta = timescale !== undefined ? (unsignedTimestamps ? c.u62() : unzigzag(c.u62())) : 0n;
 		const inflated = compress ? c.u53() : undefined;
 		if (!lengthFirst) size = c.u53();
 		// A compressed frame is stored whole; a plain one past a segment streams in after this,

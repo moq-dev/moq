@@ -4,8 +4,6 @@
 //! followed by the raw codec payload. Presentation timestamp is `transport_timestamp + CTS`.
 //! Requires a timed track.
 
-use bytes::BytesMut;
-
 use crate::container::{Container, Frame, Kind, legacy};
 
 /// CTS hang wire format configured for the track's media role.
@@ -27,27 +25,17 @@ impl Container for Wire {
 
 	fn finish_group(
 		&self,
-		group: &mut moq_net::group::Producer,
-		end: Option<moq_net::Timestamp>,
+		_group: &mut moq_net::group::Producer,
+		_end: Option<moq_net::Timestamp>,
 	) -> Result<(), Self::Error> {
-		if self.0 == Kind::Video
-			&& let Some(timestamp) = end
-		{
-			// CTS = 0, empty codec payload.
-			group.write_frame(timestamp, bytes::Bytes::from_static(&[0]))?;
-		}
-		Ok(())
+		// CTS encoding requires a separate DTS per frame (not yet carried by `container::Frame`).
+		Err(moq_net::Error::Unsupported.into())
 	}
 
-	fn write(&self, group: &mut moq_net::group::Producer, frames: &[Frame]) -> Result<(), Self::Error> {
-		for frame in frames {
-			let mut buf = BytesMut::with_capacity(1 + frame.payload.len());
-			// Container Frame carries PTS without DTS, so write CTS = 0 (non-reordered).
-			moq_net::varint::encode_quic(0, &mut buf).map_err(moq_net::Error::from)?;
-			buf.extend_from_slice(&frame.payload);
-			group.write_frame(frame.timestamp, buf.freeze())?;
-		}
-		Ok(())
+	fn write(&self, _group: &mut moq_net::group::Producer, _frames: &[Frame]) -> Result<(), Self::Error> {
+		// Refuse to emit CTS = 0 with PTS as the transport timestamp: on reordered video,
+		// lite-07 monotonic clamping would corrupt B-frame presentation times.
+		Err(moq_net::Error::Unsupported.into())
 	}
 
 	fn decode(&self, mut frame: moq_net::frame::Frame) -> Result<Vec<Frame>, Self::Error> {
@@ -91,7 +79,7 @@ pub(crate) fn decode_audio(audio: &legacy::Audio, frame: moq_net::frame::Frame) 
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use bytes::Bytes;
+	use bytes::{Bytes, BytesMut};
 	use moq_net::{Timescale, Timestamp};
 
 	fn cts_payload(cts: u64, body: &[u8]) -> Bytes {
@@ -137,5 +125,22 @@ mod tests {
 			.decode(moq_net::frame::Frame::new(ts, Bytes::new()))
 			.unwrap();
 		assert!(data.is_empty());
+	}
+
+	#[test]
+	fn write_and_finish_group_return_unsupported() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("video", moq_net::track::Info::default().with_timescale(Timescale::MILLI))
+			.unwrap();
+		let mut group = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
+		let frame = Frame {
+			timestamp: Timestamp::from_millis(33).unwrap(),
+			payload: Bytes::from_static(b"pkt"),
+			keyframe: true,
+			duration: None,
+		};
+		assert!(Wire(Kind::Video).write(&mut group, &[frame.clone()]).is_err());
+		assert!(Wire(Kind::Video).finish_group(&mut group, Some(frame.timestamp)).is_err());
 	}
 }

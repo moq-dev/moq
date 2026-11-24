@@ -183,7 +183,7 @@ A receiver MAY fail an active subscription over to another advertisement of the 
 A session advertises a given namespace at most once, forwards only its best eligible path, and serves each subscription from one source at a time.
 
 ## Exclusion (Loop Prevention)
-An endpoint MUST NOT advertise or dispatch a subscription to any path whose `HOP_PATH` contains the peer's declared Hop ID.
+An endpoint MUST NOT advertise or dispatch a subscription to any path whose `HOP_PATH` contains the peer's non-zero declared Hop ID (or locally assigned identity per {{assigned}}).
 Of the remaining paths, it advertises the best (giving a peer whose own copy is active the best standby for failover) and advertises nothing if all paths are excluded.
 If only excluded sources remain for a subscription, the subscription is unroutable.
 

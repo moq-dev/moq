@@ -270,6 +270,10 @@ pub(crate) struct Object {
 	/// The inflated size of a compressed frame read in its stored form (see
 	/// [`group::Consumer::compressed`]), whose `payload` is then the DEFLATE slice.
 	pub inflated: Option<u64>,
+	/// The moq-timestamp Object ID assigned when this frame entered the group.
+	pub timed_oid: u64,
+	/// The monotonic clamped timestamp in the track's timescale for lite-07 egress.
+	pub mono_ts: u64,
 }
 
 #[cfg(feature = "async")]
@@ -1526,6 +1530,12 @@ pub struct Consumer {
 	/// [`group::Consumer::compressed`]), whose payload is then the DEFLATE slice.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) inflated: Option<u64>,
+	/// The moq-timestamp Object ID assigned when this frame entered the group.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) timed_oid: u64,
+	/// The monotonic clamped timestamp in the track's timescale for lite-07 egress.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) mono_ts: u64,
 	source: Source,
 	// Byte offset consumed so far.
 	read_idx: usize,
@@ -1571,6 +1581,8 @@ impl Consumer {
 			info: header.info,
 			fields: header.fields,
 			inflated: header.inflated,
+			timed_oid: 0,
+			mono_ts: header.info.timestamp.value(),
 			source,
 			read_idx: 0,
 			stats: stats::Meter::default(),
@@ -1578,6 +1590,12 @@ impl Consumer {
 			expired: false,
 			resume: Resume::None,
 		}
+	}
+
+	pub(super) fn with_timing(mut self, timed_oid: u64, mono_ts: u64) -> Self {
+		self.timed_oid = timed_oid;
+		self.mono_ts = mono_ts;
+		self
 	}
 
 	/// Carry this frame across a front's route changes; see [`super::resume`].
@@ -1634,12 +1652,14 @@ impl Consumer {
 				Resume::None => return res,
 				Resume::Route(route) => {
 					let (recover, index) = &mut **route;
-					if !recover.wants(failed.as_ref(), waiter) {
+					let cause = failed.map_or(super::resume::Cause::Stalled, super::resume::Cause::Failed);
+					if !recover.wants(&cause, waiter) {
 						return res;
 					}
-					let sparse = self.state.read().sparse();
-					let cause = failed.map_or(super::resume::Cause::Stalled, super::resume::Cause::Failed);
-					let mut replacement = match recover.poll(*index, &cause, sparse, waiter) {
+					if self.state.read().sparse() {
+						return Poll::Ready(Err(Error::Unsupported));
+					}
+					let mut replacement = match recover.poll(*index, &cause, waiter) {
 						Poll::Ready(Ok(group)) => group,
 						Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
 						Poll::Pending => return Poll::Pending,
@@ -1688,10 +1708,17 @@ impl Consumer {
 					}
 				}
 			};
-			// This copy was dense through its frame, so the replacement's must be the same
-			// Object ID: a copy that begins past a gap holds different content there.
-			if frame.fields.as_ref().is_some_and(|fields| fields.id != index) {
-				return Poll::Ready(Err(Error::Unsupported));
+			// A dense untimed copy expects the same Object ID; a timed copy carrying wire fields
+			// expects the same Object ID as the frame it is continuing.
+			if let Some(fields) = frame.fields.as_ref() {
+				let expected = match (&self.fields, self.info.timestamp.scale()) {
+					(Some(own), _) => Some(own.id),
+					(None, Some(_)) => None,
+					(None, None) => Some(index),
+				};
+				if expected.is_some_and(|expected| fields.id != expected) {
+					return Poll::Ready(Err(Error::Unsupported));
+				}
 			}
 			// Same name, same content: a different size is the routes disagreeing.
 			if frame.info.size != self.info.size || frame.inflated != self.inflated {

@@ -148,6 +148,10 @@ class GroupState {
 	from = 0;
 	// The last moq-timestamp Object ID assigned to a timed group's frame.
 	lastTimedOid?: bigint;
+	// The last monotonic clamped timestamp (in track timescale) assigned to a timed group's frame.
+	lastMonoTs?: bigint;
+	// Per-frame timing (wire Object ID and monotonic timestamp), keyed by frame ordinal.
+	readonly timings = new Map<number, { oid: bigint; monoTs: bigint }>();
 
 	constructor(start: bigint) {
 		this.start = start;
@@ -179,17 +183,26 @@ function checkTimed(track: TrackInfo | undefined, start: bigint, frame: Frame) {
 function appendFrame(state: GroupState, frame: Frame) {
 	if (state.closed.peek() !== undefined) throw new Error("group is closed");
 
+	const index = state.total.peek();
 	// Media time only: a scale-less frame's key says nothing about when it presents.
 	const timed = frame.timestamp.scale === undefined ? undefined : frame.timestamp;
 	state.timestamp ??= timed;
 	if (timed === undefined) state.latest = undefined;
 	else {
 		if (state.latest === undefined || state.latest.isBefore(timed)) state.latest = timed;
-		const dts = BigInt(Math.floor(timed.value));
+		const dts = state.track?.timescale
+			? BigInt(floorAt(timed, state.track.timescale))
+			: BigInt(Math.floor(timed.value));
+		const minMono = state.lastMonoTs ?? state.start;
+		let monoTs = minMono;
+		if (dts > monoTs) monoTs = dts;
+		state.lastMonoTs = monoTs;
 		const minOid = state.lastTimedOid === undefined ? 0n : state.lastTimedOid + 1n;
 		const desired = dts > state.start ? dts - state.start : 0n;
-		state.lastTimedOid = minOid;
-		if (desired > minOid) state.lastTimedOid = desired;
+		let oid = minOid;
+		if (desired > oid) oid = desired;
+		state.lastTimedOid = oid;
+		state.timings.set(index, { oid, monoTs });
 	}
 	state.frames.mutate((frames) => {
 		frames.push(frame);
@@ -459,6 +472,7 @@ export class Producer {
 	 */
 	mirror(): Consumer {
 		const dst = new GroupState(this.start);
+		dst.track = this.#state.track;
 		dst.timestamp = this.#state.timestamp;
 		dst.latest = this.#state.latest;
 		dst.flate = this.#state.flate;
@@ -473,6 +487,8 @@ export class Producer {
 			const closed = this.#state.closed.peek();
 			dst.closed.set(closed instanceof Error ? closed : evicted());
 		}
+		dst.lastTimedOid = this.#state.lastTimedOid;
+		dst.lastMonoTs = this.#state.lastMonoTs;
 		dst.index = dst.closed.peek() instanceof Error ? this.#state.offset : this.#state.index;
 		dst.offset = this.#state.offset;
 		// The replay only covers what is still buffered, so the count has to come from the
@@ -549,8 +565,14 @@ export class Producer {
 	 * written until this one finishes.
 	 */
 	createFrame(info: FrameInfo): FrameProducer {
-		const { size, timestamp } = info;
+		const { size } = info;
+		let { timestamp } = info;
 		if (!Number.isSafeInteger(size) || size < 0) throw new RangeError("invalid frame size");
+		const track = this.#state.track;
+		if (track) {
+			timestamp = rescaleIn(track, timestamp, this.#state.start);
+		}
+		const normalized = timestamp === info.timestamp ? info : { size, timestamp };
 		const frame = { payload: EMPTY, timestamp };
 		if (this.#state.flate) {
 			// A compressed frame is encoded whole once written, as `writeFrame` does.
@@ -558,7 +580,7 @@ export class Producer {
 			this.#admit(frame);
 			const payload = new Uint8Array(size);
 			let written = 0;
-			const open = makeFrameProducer(info, {
+			const open = makeFrameProducer(normalized, {
 				written: () => written,
 				write: (chunk) => {
 					if (this.#open !== open) throw new Error("group is closed");
@@ -577,9 +599,9 @@ export class Producer {
 		}
 
 		const commits = this.#admit(frame);
-		const entry = new Chunked(info);
+		const entry = new Chunked(normalized);
 		this.#append(entry, commits);
-		const open = makeFrameProducer(info, {
+		const open = makeFrameProducer(normalized, {
 			written: () => entry.written.peek(),
 			write: (chunk) => {
 				if (this.#open !== open) throw new Error("group is closed");
@@ -704,6 +726,7 @@ export class Producer {
 		const front = state.frames.peek().shift() as Frame;
 		state.cacheBytes -= frameBytes(front);
 		if (front instanceof Chunked) front.release();
+		state.timings.delete(state.index);
 		state.index++;
 	}
 
@@ -1294,6 +1317,15 @@ export class Consumer {
 			}
 		};
 		hooks.readGroupFrame = (group, compressed, from = 0) => group.#readFrame(from, compressed, true);
+		hooks.groupOidAfterFrame = (group, frameCount) => {
+			if (frameCount <= 0) return 0;
+			const state = group.#state;
+			if (frameCount === state.total.peek() && state.lastTimedOid !== undefined) {
+				return Number(state.lastTimedOid) + 1;
+			}
+			const entry = state.timings.get(frameCount - 1);
+			return entry === undefined ? undefined : Number(entry.oid) + 1;
+		};
 		hooks.evictGroup = (group, lost) => group.#evict(lost);
 		hooks.refreshGroup = (group) => group.#state.charge?.touch();
 		hooks.onShedRead = (group, notify) => {
@@ -1451,6 +1483,7 @@ export class Consumer {
 		// A resumed copy repeats the frames an earlier one already delivered.
 		while (this.#state.index < this.#skip && frames.length > 0) {
 			frames.shift();
+			this.#state.timings.delete(this.#state.index);
 			this.#state.index++;
 		}
 		return frames;
@@ -1479,11 +1512,19 @@ export class Consumer {
 			if (take === "stream" || (take === "collect" && front.done.peek() === undefined)) {
 				frames.shift();
 				const index = this.#state.index++;
+				const timing = this.#state.timings.get(index);
+				this.#state.timings.delete(index);
 				this.#delivered = index + 1;
 				this.#streamed = front;
 				this.#refresh();
 				this.#state.charge?.touch();
-				return { index, frame: front, chunks: makeFrameConsumer(index, front) };
+				return {
+					index,
+					frame: front,
+					chunks: makeFrameConsumer(index, front),
+					timedOid: timing?.oid,
+					monoTs: timing?.monoTs,
+				};
 			}
 			if (front.done.peek() === undefined) return undefined;
 		}
@@ -1504,10 +1545,12 @@ export class Consumer {
 		}
 		if (frames.length === 0 && this.#state.closed.peek() !== undefined) this.#state.flate = undefined;
 		const index = this.#state.index++;
+		const timing = this.#state.timings.get(index);
+		this.#state.timings.delete(index);
 		this.#delivered = index + 1;
 		this.#refresh();
 		this.#state.charge?.touch();
-		return { index, frame, inflated: slice?.inflated };
+		return { index, frame, inflated: slice?.inflated, timedOid: timing?.oid, monoTs: timing?.monoTs };
 	}
 
 	/** True once no further frames can be read: this handle or the group has closed, and every buffered frame is read. */
@@ -1627,7 +1670,7 @@ export class Consumer {
 					this.#delivered = delivered;
 					continue;
 				}
-				if (read.chunks && !streaming) return this.#join(read.index, read.chunks);
+				if (read.chunks && !streaming) return this.#join(read.index, read.chunks, read.timedOid, read.monoTs);
 				return read;
 			}
 
@@ -1660,7 +1703,12 @@ export class Consumer {
 	}
 
 	// Read a streamed frame whole. Losing any of it ends this reader, since the frame is gone.
-	async #join(index: number, chunks: FrameConsumer): Promise<ReadGroupFrame | undefined> {
+	async #join(
+		index: number,
+		chunks: FrameConsumer,
+		timedOid?: bigint,
+		monoTs?: bigint,
+	): Promise<ReadGroupFrame | undefined> {
 		const parts: Uint8Array[] = [];
 		let size = 0;
 		try {
@@ -1685,7 +1733,12 @@ export class Consumer {
 				await Signal.race(...chunkChanged(chunks), this.#state.closed, ...(this.#expiry?.changed ?? []));
 			}
 			const payload = parts.length === 0 ? EMPTY : joined(parts, size);
-			return { index, frame: { payload, timestamp: chunks.timestamp, arrived: chunks.arrived } };
+			return {
+				index,
+				frame: { payload, timestamp: chunks.timestamp, arrived: chunks.arrived },
+				timedOid,
+				monoTs,
+			};
 		} catch (error) {
 			const verdict = this.#fail(error);
 			this.#refresh();
