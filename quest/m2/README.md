@@ -41,6 +41,12 @@ fixes, TLA+ sync drift, and CI hardening), [m3](/quest/m3/README.md) (softer
 edge cases and low-severity cleanups), and
 [m4](/quest/m4/fuzz-binary-parsers.md) (binary-parser fuzz targets).
 
+Decided 2026-11-23 (maintainer): ✅ the cut waits for a
+[safe on-demand drop](/quest/m2/on-demand-drop.md) and
+[deleting `abort_unwanted`](/quest/m2/abort-unwanted-delete.md), so 0.22 never
+publishes an API the next release removes (rejected: leaving them in m3,
+cutting first and deleting in the next breaking release).
+
 Decided 2026-11-16 (maintainer, /quest-plan of an audit of everything on
 `main` since `release`, and of the lite-07 draft): the cut also waits on what
 that audit found. Fifteen reviewers judged about 480 work lines for a

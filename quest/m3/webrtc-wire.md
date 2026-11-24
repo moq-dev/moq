@@ -30,7 +30,11 @@ for video).
   protocol layer count once, rather than summing per-protocol estimates.
 - A shared or muxed socket (see [one port](/quest/m3/one-port/README.md))
   attributes each datagram to the session its demux routes it to; a datagram
-  for no session (a stray STUN probe) counts nowhere.
+  for no session (a stray STUN probe) counts nowhere. The demux sends a STUN
+  answer to both an address's holder and its claimant, so count received
+  bytes in the ICE agent rather than at the demux, and count a STUN answer
+  only in the agent whose sent checks hold its transaction ID (the list
+  `answers_check` in `ice/agent.rs` already keeps).
 - Test with a loopback WHIP publish and WHEP play: each side's wire bytes are
   at least its payload plus the SRTP overhead per packet, and the sender's
   sent bytes match the receiver's received bytes on a lossless link.
