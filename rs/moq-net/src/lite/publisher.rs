@@ -3370,7 +3370,7 @@ mod test {
 		let mut unpinned = served();
 		assert_eq!(
 			drain(&mut unpinned),
-			vec![0, 1, 2],
+			vec![2, 1, 0],
 			"the unbounded budget alone resolves to the whole cache"
 		);
 
@@ -3387,7 +3387,7 @@ mod test {
 		// On lite-06 the declared budget is what resolves the start, so it stands.
 		let declared = producer.subscribe(track::Subscription::default().with_max(std::time::Duration::from_secs(5)));
 		let mut declared = declared.with_range(cursor_floor(Version::Lite06, None, producer.latest_key())..);
-		assert_eq!(drain(&mut declared), vec![0, 1, 2]);
+		assert_eq!(drain(&mut declared), vec![2, 1, 0]);
 	}
 
 	/// An unfloored join adopts the first served group: the cursor rises to it, so a
@@ -4818,14 +4818,17 @@ async fn recv_next(track: &mut track::Subscriber, emit_boundary: bool) -> Result
 /// asked for a partial group, so it must be skipped: a group is the unit of decodability,
 /// and only the subscriber knows whether a partial one is any use to it.
 fn position_group(group: group::Consumer, frames: &Frames, capped: bool) -> Option<group::Consumer> {
-	if group.start < frames.floor {
+	if !servable(&group, frames) {
 		return None;
 	}
 	let expected = frames.start(group.start);
 	let end = frames.end(group.start).filter(|_| capped);
-	group
-		.fetches_from(expected)
-		.then(|| group.with_end(end).fetching_from(expected))
+	Some(group.with_end(end).fetching_from(expected))
+}
+
+/// Whether [`position_group`] can serve `group` at all.
+fn servable(group: &group::Consumer, frames: &Frames) -> bool {
+	group.start >= frames.floor && group.fetches_from(frames.start(group.start))
 }
 
 /// The frame bounds of a subscription, which the model leaves to the publisher: it reads
@@ -6502,15 +6505,33 @@ impl TrackRun {
 		source: Option<u64>,
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
 	) -> Result<(), Error> {
-		let mut start = source.map_or(group.start, |source| source.min(group.start));
-		// A group given up cannot be where the feed starts. This stops at the held group
-		// at the latest, since it was not skipped.
+		// Newest first, the cursor still holds groups below the first to go out: delivery
+		// starts at the lowest it can serve.
+		let mut lowest = group.start;
+		let mut from = 0;
+		while let Some(held) = self.track.lowest_unread(from).filter(|held| held.start < group.start) {
+			from = held.start + 1;
+			if servable(&held, &self.frames) {
+				lowest = held.start;
+				break;
+			}
+		}
+		let mut start = source.map_or(lowest, |source| source.min(lowest));
+		// A group given up, or held and not servable, cannot be where the feed starts. This
+		// stops at the held group at the latest, since it was not skipped.
 		// Adjacent runs given up with different errors stay separate, so walk them all.
-		if let Start::Unresolved { skipped, .. } = &self.start {
-			while start < group.start
-				&& let Some((given_up, _)) = skipped.get_key_value(&start)
-			{
-				start = given_up.end.min(group.start);
+		while start < group.start {
+			let given_up = match &self.start {
+				Start::Unresolved { skipped, .. } => skipped.get_key_value(&start).map(|(run, _)| run.end),
+				_ => None,
+			};
+			let unservable = || {
+				let held = self.track.lowest_unread(start)?;
+				(held.start == start && !servable(&held, &self.frames)).then_some(start + 1)
+			};
+			match given_up.or_else(unservable) {
+				Some(end) => start = end.min(group.start),
+				None => break,
 			}
 		}
 		self.resolve(start, writer)?;
@@ -9192,7 +9213,7 @@ mod serve_group_test {
 			[(0, 0), (1, 0)],
 			"each stream joins the subscription's group"
 		);
-		assert_eq!(log.orders(), [(0, 1), (1, 3)], "newer groups first");
+		assert_eq!(log.orders(), [(0, 3), (1, 1)], "newer groups first");
 		assert!(log.priorities().is_empty(), "the session queue ranks no stream");
 
 		run.replace(lite::SubscribeUpdate {
@@ -9213,7 +9234,8 @@ mod serve_group_test {
 		);
 		let mut flipped = log.orders()[2..].to_vec();
 		flipped.sort();
-		assert_eq!(flipped, [(0, 1), (1, -1)], "older groups first");
+		// Stream 0 carries group 1, which went first.
+		assert_eq!(flipped, [(0, -1), (1, 1)], "older groups first");
 	}
 
 	/// A group with more frames ready than one poll's budget drains over several polls,

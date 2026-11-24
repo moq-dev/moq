@@ -155,7 +155,8 @@ async fn a_union_too_large_for_one_message_asks_a_covering_superset() {
 	write_group(&track, BASE + 3);
 	write_group(&track, BASE + 2 * VIEWERS + 2);
 	write_group(&track, key);
-	for want in [BASE + 2, BASE + 2 * VIEWERS + 2] {
+	// Both held by the time it reads, the newer first.
+	for want in [BASE + 2 * VIEWERS + 2, BASE + 2] {
 		let got = kio::clock::timeout(TIMEOUT, readers[1].recv_group())
 			.await
 			.unwrap()

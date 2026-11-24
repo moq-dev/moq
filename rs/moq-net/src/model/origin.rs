@@ -16404,11 +16404,12 @@ mod tests {
 		let mut group = track.append_next().unwrap();
 		group.write_frame(group.key_time(), b"live".as_ref()).unwrap();
 		group.finish().unwrap();
-		let mut group = subscription.recv_group().await.unwrap().unwrap();
-		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"cached");
-		drop(group);
+		// Both held at once, the newest goes first.
 		let mut group = subscription.recv_group().await.unwrap().unwrap();
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"live");
+		drop(group);
+		let mut group = subscription.recv_group().await.unwrap().unwrap();
+		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"cached");
 		drop(group);
 		drop(subscription);
 

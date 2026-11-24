@@ -7571,7 +7571,7 @@ mod tests {
 		for _ in 0..3 {
 			read.push(consumer.recv_group().await.unwrap().unwrap().start);
 		}
-		assert_eq!(read, [1, 2, 3]);
+		assert_eq!(read, [3, 2, 1]);
 	}
 
 	/// A parked stream that fails before taking its group withdraws it: the accept opens none

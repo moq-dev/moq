@@ -347,6 +347,11 @@ impl Misses {
 		!self.filled.is_empty()
 	}
 
+	/// The lowest group at or above `from` a fill answered, not handed out yet.
+	pub fn lowest_filled(&self, from: u64) -> Option<u64> {
+		self.filled.range(from..).next().copied()
+	}
+
 	/// The lowest key asked and not answered yet.
 	pub fn lowest_wanted(&self) -> Option<u64> {
 		self.wanted.iter().next().map(|run| run.start)
