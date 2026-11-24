@@ -20,8 +20,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { variant: profile-full, shard: 1 }
-          - { variant: profile-full, shard: 2 }
+          - { variant: stops, shard: 1 }
+          - { variant: stops, shard: 2 }
+          - { variant: stops, shard: 3 }
+          - { variant: stops, shard: 4 }
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
