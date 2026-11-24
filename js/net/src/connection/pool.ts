@@ -27,6 +27,7 @@ import {
 	type WebSocketProps as WebSocketPropsType,
 	type WebTransportProps as WebTransportPropsType,
 } from "./connect.ts";
+import { Dials as DialsClass, type Dial as DialType } from "./dials.ts";
 import { DISCOVERY_REMOVED } from "./forward.ts";
 import type { Goaway as GoawayType, Handover as HandoverType, Redirect as RedirectType } from "./goaway.ts";
 import { type Backoff as BackoffType, pumpAnnounced, Reload, type ReloadStatus } from "./reload.ts";
@@ -75,9 +76,11 @@ export interface ConnectionProps {
 
 	/**
 	 * Credentials to present, kept apart from the URL; see {@link ConnectProps.tokens}. Pass a
-	 * `Signal` to replace them before they expire. Implies a private loop.
+	 * `Signal` to replace them before they expire, or {@link Connection.Dials} to sign a set for
+	 * each dial when it starts, which serves one connection: passing it to another throws.
+	 * Implies a private loop.
 	 */
-	tokens?: readonly string[] | Signal<readonly string[]>;
+	tokens?: readonly string[] | Signal<readonly string[]> | DialsClass;
 
 	/**
 	 * Carry the connection credential, the first token, in the URL's `auth` query parameter
@@ -134,6 +137,10 @@ export interface ConnectionProps {
  * @public
  */
 export class Connection {
+	/** Tokens a connection asks for at each dial: pass one as `tokens` and answer its {@link Dials.next} dials. */
+	// fallow-ignore-next-line unused-class-member
+	static readonly Dials = DialsClass;
+
 	/** Establish a one-shot session; a supplied transport belongs here, not in the reconnect loop. */
 	static readonly connect = connect;
 
@@ -169,6 +176,12 @@ export class Connection {
 	 * starts another key, not on a page hide/show.
 	 */
 	readonly error: Getter<Error | undefined>;
+
+	/**
+	 * Why the connection is retrying: how its last attempt or session ended, cleared once a
+	 * session serves again or a new URL starts. Mirrors Rust's `Monitor::failure()`.
+	 */
+	readonly failure: Getter<Error | undefined>;
 
 	/**
 	 * The wire transport the current session runs over, or undefined while disconnected.
@@ -231,6 +244,8 @@ export class Connection {
 	}
 
 	#closed = new Once<Error | null>();
+	// Ended with this handle, so whoever answers its dials stops.
+	readonly #dials?: DialsClass;
 	readonly #status = new Signal<ReloadStatus>("disconnected");
 	readonly #established = new Signal<SessionType | undefined>(undefined);
 	readonly #probe = new Signal<Getter<ProbeType | undefined> | undefined>(undefined);
@@ -240,6 +255,7 @@ export class Connection {
 	readonly #auth = new Signal<Auth.Handle | undefined>(undefined);
 	readonly #loop = new Signal<Reload | undefined>(undefined);
 	readonly #error = new Signal<Error | undefined>(undefined);
+	readonly #failure = new Signal<Error | undefined>(undefined);
 	#signals: Effect;
 
 	/**
@@ -257,12 +273,18 @@ export class Connection {
 		const fixed = normalizeVersions({ ...props, versions: Array.isArray(given) ? given : undefined });
 		refuse(props);
 		this.#signals = new Effect();
+		if (props?.tokens instanceof DialsClass) {
+			// One connection answers them: another would sign for this one's dials.
+			if (props.tokens.claimed) throw new TypeError("these dials already serve another connection");
+			this.#dials = props.tokens;
+		}
 
 		this.url = Signal.from(props?.url);
 		this.versions = Signal.from(Array.isArray(given) ? fixed : given);
 		this.enabled = Signal.from(props?.enabled ?? true);
 		this.status = this.#status;
 		this.error = this.#error;
+		this.failure = this.#failure;
 		this.probe = new Follow(this.#probe);
 		this.origin = this.#origin;
 		this.allocator = this.#allocator;
@@ -276,6 +298,8 @@ export class Connection {
 
 		if (props && (props.share === false || requiresPrivate(props))) {
 			this.#runPrivate(props, href);
+			// Only once nothing above threw, so a rejected config leaves the dials free.
+			this.#dials?.claim();
 			return;
 		}
 
@@ -303,6 +327,7 @@ export class Connection {
 			effect.run((nested) => nested.set(this.#established, nested.get(lease.connection.established), undefined));
 			effect.run((nested) => nested.set(this.#probe, lease.connection.probe, undefined));
 			effect.run((nested) => nested.set(this.#error, nested.get(lease.connection.error), undefined));
+			effect.run((nested) => nested.set(this.#failure, nested.get(lease.connection.failure), undefined));
 		});
 	}
 
@@ -356,6 +381,7 @@ export class Connection {
 			signals.run((effect) => effect.set(this.#established, effect.get(loop.established), undefined));
 			signals.run((effect) => effect.set(this.#probe, loop.probe, undefined));
 			signals.run((effect) => effect.set(this.#error, effect.get(loop.error), undefined));
+			signals.run((effect) => effect.set(this.#failure, effect.get(loop.failure), undefined));
 		};
 		start(this.versions.peek());
 		this.#signals.cleanup(this.versions.subscribe(start));
@@ -451,6 +477,7 @@ export class Connection {
 	 */
 	close(abort?: Error): void {
 		this.#signals.close();
+		this.#dials?.close();
 		if (this.#closed.peek() === undefined) this.#closed.set(abort ?? null);
 	}
 }
@@ -488,6 +515,10 @@ export namespace Connection {
 	export type CertificateHash = CertificateHashType;
 	/** An established MoQ session, as a one-shot connect or accept returns it. @reexport */
 	export type Session = SessionType;
+	/** Tokens a connection asks for at each dial. @reexport */
+	export type Dials = DialsClass;
+	/** One dial waiting for its tokens. @reexport */
+	export type Dial = DialType;
 }
 
 /** The checked copy of `versions` to dial with, or why it cannot be offered. */
