@@ -529,10 +529,8 @@ impl Connection {
 		// The writers stop, and what they wrote reaches the peer before any stream ends, so it
 		// reads that, such as a refusal, ahead of the resets and stops, whatever the packets do.
 		let mut unacked = false;
-		for &(id, resettable) in &sending {
-			if resettable {
-				unacked |= self.streams.stop_for_writer(id, code);
-			}
+		for &(id, _) in &sending {
+			unacked |= self.streams.stop_for_writer(id, code);
 		}
 		if unacked {
 			self.streams.waits.register_ended(waiter);

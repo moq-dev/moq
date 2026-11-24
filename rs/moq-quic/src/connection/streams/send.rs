@@ -678,10 +678,13 @@ impl<'a> Stream<'a> {
 		}
 		// An offset is minted from what was written, which only grows until a reset.
 		debug_assert!(offset <= stream.offset(), "reset past the data written");
-		// The peer that sent STOP_SENDING will not read the prefix
-		let reliable_size = match stream.stop_reason {
-			Some(_) => 0,
-			None => offset,
+		let reliable_size = match (stream.stop_reason, stream.quiesced) {
+			// The peer that sent STOP_SENDING will not read the prefix
+			(Some(_), _) => 0,
+			// A quiesce stopped the writer so what it wrote reaches the peer, whatever the
+			// writer's own reset asks.
+			(None, Some(_)) => stream.offset(),
+			(None, None) => offset,
 		};
 
 		// Restore the portion of the send window consumed by the data that we aren't about to

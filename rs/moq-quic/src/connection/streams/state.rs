@@ -476,13 +476,17 @@ impl StreamsState {
 
 	/// Have a writer of `id` see the stream stopped with `code`, as a peer's stop would end it,
 	/// so a quiesce can end it behind the writer's back, returning whether data written to it is
-	/// still unacknowledged.
+	/// still unacknowledged, which a reset since then still delivers.
 	pub(crate) fn stop_for_writer(&mut self, id: StreamId, code: VarInt) -> bool {
 		let max_data = self.max_send_data(id);
 		let Ok(send) = Self::send_mut(&mut self.send, id, max_data) else {
 			return false;
 		};
-		send.quiesced.get_or_insert(code);
+		if !send.is_reset() && send.quiesced.is_none() {
+			send.quiesced = Some(code);
+			self.waits.wake(id, Wait::Write);
+			self.waits.wake(id, Wait::End);
+		}
 		!send.pending.is_fully_acked()
 	}
 

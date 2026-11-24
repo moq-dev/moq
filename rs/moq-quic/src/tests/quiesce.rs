@@ -162,6 +162,62 @@ fn writes_arrive_before_anything_ends() {
 	assert_eq!(quiesce(&mut pair, server_ch, &waiter, &[]), Poll::Ready(Ok(())));
 }
 
+/// A writer that resets its stream once the quiesce stopped it, as a dropped handle echoes a
+/// stop, still delivers what it wrote, and nothing else ends until the peer acknowledged it.
+#[test]
+fn a_writers_reset_keeps_what_it_wrote() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	let (client_ch, server_ch) = pair.connect();
+	let theirs = open(&mut pair, client_ch, server_ch, Dir::Uni);
+	let ours = pair
+		.server_streams(server_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	pair.server_send(server_ch, ours).write(&mut &b"refused"[..]).unwrap();
+
+	let waiter = Counter::new();
+	assert!(quiesce(&mut pair, server_ch, &waiter, &[]).is_pending());
+	pair.server_send(server_ch, ours).reset(VarInt(5)).unwrap();
+	assert!(quiesce(&mut pair, server_ch, &waiter, &[]).is_pending());
+	pair.drive_server();
+	assert_eq!(stops_sent(&mut pair, server_ch), 0);
+
+	pair.drive();
+	assert!(quiesce(&mut pair, server_ch, &waiter, &[]).is_pending());
+	pair.drive();
+	assert_eq!(stops_sent(&mut pair, server_ch), 1);
+	assert_eq!(
+		reset_seen(&mut pair, client_ch, ours),
+		(b"refused".to_vec(), Some(VarInt(5)))
+	);
+	answer(&mut pair, client_ch, &[theirs]);
+	assert_eq!(quiesce(&mut pair, server_ch, &waiter, &[]), Poll::Ready(Ok(())));
+}
+
+/// A writer parked on its stream wakes when the quiesce stops it, before the data it wrote lets
+/// the stream be reset.
+#[test]
+fn parked_writers_wake() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	let (_, server_ch) = pair.connect();
+	let ours = pair
+		.server_streams(server_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	pair.server_send(server_ch, ours).write(&mut &b"unacked"[..]).unwrap();
+	let writer = Counter::new();
+	assert!(pair.server_send(server_ch, ours).poll_stopped(&writer).is_pending());
+
+	assert!(quiesce(&mut pair, server_ch, &Counter::new(), &[]).is_pending());
+	assert!(writer.wakes() > 0);
+	assert_eq!(
+		pair.server_send(server_ch, ours).poll_stopped(&writer),
+		Poll::Ready(Ok(Some(CODE)))
+	);
+}
+
 /// With nothing left for the peer to end, the wait lasts until it acknowledged the resets.
 #[test]
 fn waits_for_its_resets_to_be_acknowledged() {
