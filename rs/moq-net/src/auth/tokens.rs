@@ -174,10 +174,11 @@ impl Tokens {
 	/// session it builds.
 	pub(crate) fn commit(&self, dial: &Dial) {
 		let mut state = self.handle.state.lock();
+		// The verdict so far belongs to the set being replaced, so it is recorded first.
+		state.record();
 		if let Some(tokens) = &dial.signed {
 			state.replace(tokens.clone());
 		}
-		state.record();
 		let configured = state.configured.as_mut().expect("built by Tokens::new");
 		configured.dialed = Some(dial.connection.clone());
 		configured.session = None;
@@ -691,6 +692,33 @@ mod tests {
 
 	/// Previewing a dial, as a probe does, leaves the live session's grant alone: a rotated
 	/// connection credential it holds in band stays presented until the dial is committed.
+	/// A dial built on a signed set, as [`dial`] is on the configured one.
+	fn signed(set: &Tokens, names: &[&str]) -> Session {
+		let url = "moqt://relay.example.com/".parse().unwrap();
+		set.commit(&Tokens::preview_signed(&url, tokens(names)));
+		let link = Link::attach(&set.handle, true, false).unwrap();
+		let credential = Some(link.present(Bytes::new(), true).unwrap());
+		set.connect(link.id(), credential.as_ref());
+		Session { link, credential }
+	}
+
+	/// A refusal of the set a signed dial replaced stays that set's: the new one is judged alone.
+	#[test]
+	fn a_signed_set_is_judged_apart_from_the_set_it_replaced() {
+		let set = Tokens::new(Vec::new());
+		let first = signed(&set, &["first", "extra-1"]);
+		first.grant_credential();
+		first.refuse(id(&set, "extra-1"), SessionError::Unauthorized);
+		refused(&set, SessionError::Unauthorized);
+		first.lost();
+
+		let second = signed(&set, &["second", "extra-2"]);
+		assert!(answered(&set).is_pending(), "the replaced set's refusal answered the new one");
+		second.grant_credential();
+		second.link.grant(id(&set, "extra-2"), Grant::all());
+		ok(&set);
+	}
+
 	/// A signed set replaces the tokens only as its dial commits, so a session still draining
 	/// never takes the new connection credential in band, and its own was never held.
 	#[test]

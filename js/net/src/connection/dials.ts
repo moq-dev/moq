@@ -84,7 +84,9 @@ export class Dials {
 	request(url: URL, signal: AbortSignal, failure?: Error): Promise<Answer> {
 		if (this.#closed) return Promise.reject(new Error("connection closed"));
 		const [dial, answer] = makeDial(url, signal, failure);
-		this.#waiting.push(dial);
+		// Dials the loop abandoned unread go now, so an app that stops reading holds at most one.
+		const live = this.#waiting.filter((waiting) => !waiting.signal.aborted);
+		this.#waiting.splice(0, this.#waiting.length, ...live, dial);
 		this.#queued.update((n) => n + 1);
 		return answer;
 	}
