@@ -6146,11 +6146,9 @@ mod tests {
 		assert_eq!(group.start, 0);
 	}
 
-	/// A group recovered once already is refused rather than recovered again while no hold
-	/// fits, as in a pool its live edges fill: the pool would evict the copy landing unheld,
-	/// and each recovery after it would go the same way.
-	#[kio::test]
-	async fn a_recovered_group_is_not_recovered_again_without_hold_room() {
+	/// Whether a fill owing group 0, recovered once already as `size` bytes and evicted for
+	/// debt, recovers it again once `room` resizes the pool.
+	async fn recovers_again(size: usize, room: impl FnOnce(&crate::cache::Pool)) -> bool {
 		let (serve, _serving, tail, _broadcast) = lite07_serving(Duration::from_millis(500)).await;
 		let waiter = kio::Waiter::noop();
 		let pool = crate::cache::Pool::unbounded();
@@ -6167,12 +6165,13 @@ mod tests {
 		let requests = copy.requests();
 		for key in 0..3 {
 			let mut group = copy.create_group(group::Info { start: key }).unwrap();
+			let frame = vec![0u8; if key == 0 { size } else { 1 }];
 			group
-				.write_frame(crate::Timestamp::from_millis(key * 1000).unwrap(), b"x".as_slice())
+				.write_frame(crate::Timestamp::from_millis(key * 1000).unwrap(), frame)
 				.unwrap();
 			group.finish().unwrap();
 		}
-		copy.evict(0);
+		copy.evict_for_debt(0);
 		let mut reader = copy
 			.subscribe(crate::track::Subscription::default().with_range(0..1))
 			.ordered();
@@ -6188,11 +6187,30 @@ mod tests {
 		accounted.account(0..1, serve.subscriber.runtime.now());
 		drop(accounted);
 		fills.recovered_once(0..1);
-		// What a pool its live edges fill leaves for holds.
-		pool.resize(0);
+		room(&pool);
 		fills.poll(&serve, &copy, Some(&tail), true, &waiter).unwrap();
-		assert!(!fills.recovering(), "not recovered again");
-		assert!(fills.is_empty(), "the fill is refused");
+		let again = fills.recovering();
+		assert_eq!(fills.is_empty(), !again, "refused unless recovered");
+		again
+	}
+
+	/// A group recovered once already is refused rather than recovered again while no hold
+	/// fits, as in a pool its live edges fill: the pool would evict the copy landing unheld,
+	/// and each recovery after it would go the same way.
+	#[kio::test]
+	async fn a_recovered_group_is_not_recovered_again_without_hold_room() {
+		assert!(!recovers_again(1, |pool| pool.resize(0)).await);
+	}
+
+	/// A group recovered once already is refused rather than recovered again when it is bigger
+	/// than the room the pool has for a hold, however much room that is: it would land held
+	/// past the capacity, be evicted again, and be recovered again, forever.
+	#[kio::test]
+	async fn a_recovered_group_too_big_to_hold_is_not_recovered_again() {
+		// Room for a hold beside what the copy caches, though not for group 0.
+		let room = |pool: &crate::cache::Pool| pool.resize(pool.used() + 1_000);
+		assert!(!recovers_again(100_000, room).await);
+		assert!(recovers_again(100, room).await, "one that fits is recovered again");
 	}
 
 	/// A group evicted after the subscription delivered it is recovered again even when the

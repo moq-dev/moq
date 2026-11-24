@@ -1769,14 +1769,17 @@ impl TrackState {
 		Some(slot)
 	}
 
-	/// Evict cached group `key` to pay the pool's debt. A group the live feed delivered is
-	/// lost to the cache, so a reader yet to take it asks again; an expired one is stale for
-	/// every reader instead.
+	/// Evict cached group `key` to pay the pool's debt. A group the live feed delivered, or
+	/// one a fill holds for its reader, is lost to the cache, so a reader yet to take it asks
+	/// again while a fill could hold it; an expired one is stale for every reader instead.
 	fn evict_for_debt(&mut self, key: u64) {
-		if self.lookup.get(&key).is_some_and(|slot| slot.visible) {
+		if let Some(slot) = self.lookup.get(&key)
+			&& (slot.visible || self.fill_holds.holds(key))
+		{
+			let (size, fed) = (slot.cache_size(), slot.visible);
 			let now = self.cache.pool().now_wall();
 			self.lost.expire(now, self.miss_grace());
-			self.lost.evicted(key, now);
+			self.lost.evicted(key, now, size, fed);
 			// Paid out of what evicting the group frees, by the payment that evicts it.
 			let billed = self.lost.len() as u64 * miss::LOST_OVERHEAD;
 			let before = self.lost_bill.size();
@@ -5762,11 +5765,11 @@ impl Producer {
 		self.state.read().skipped_in(groups)
 	}
 
-	/// Whether the pool could hold one more answered group for its reader (see
-	/// [`cache::Pool::hold_room`]): a group recovered again past that is evicted unheld.
+	/// The keys of `groups` the pool could not hold for a reader if recovered again (see
+	/// [`TrackState::unholdable`]): each would be evicted again as it lands.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn hold_room(&self) -> bool {
-		self.state.read().cache.pool().hold_room()
+	pub(crate) fn unholdable(&self, groups: ops::Range<u64>) -> RangeSet<u64> {
+		self.state.read().unholdable(groups)
 	}
 
 	/// Forget every run held as stale: a new upstream subscription judges them afresh, and
@@ -6051,6 +6054,12 @@ impl Producer {
 	#[cfg(all(test, feature = "async"))]
 	pub(crate) fn evict(&self, key: u64) {
 		self.modify().unwrap().evict_group(key, group::Abort::Evicted);
+	}
+
+	/// Evict group `key` from the cache, as the pool's debt does.
+	#[cfg(all(test, feature = "async"))]
+	pub(crate) fn evict_for_debt(&self, key: u64) {
+		self.modify().unwrap().evict_for_debt(key);
 	}
 
 	/// The exclusive end, once [`Self::finish`] or [`Self::finish_at`] declared one.
@@ -30836,6 +30845,48 @@ mod test {
 			"{} bytes cached against a {CAPACITY} byte capacity",
 			pool.used()
 		);
+	}
+
+	/// A refill bigger than the room the pins and holds leave is given up once evicted, not
+	/// asked again: it would land held past the capacity, be evicted as the holds no longer
+	/// fit, which frees its hold, and be asked again, forever, however little room is free.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_refill_too_big_to_hold_is_not_asked_again() {
+		const SIZE: usize = 100_000;
+		let (producer, pool) = pooled_producer(u64::MAX - 1);
+		let requests = producer.requests();
+		let mut subscriber = producer.subscribe(replay().with_order(Order::Ascending));
+		for key in 0..3 {
+			write_sized(producer.create_group(group::Info { start: key }).map(Some), key, SIZE);
+		}
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(Some(_))) = subscriber.poll_next_group(&waiter) else {
+			panic!("group 0 is cached");
+		};
+		assert!(drained_drops(&mut subscriber).is_empty(), "nothing given up yet");
+		producer.evict(0);
+		producer.evict(1);
+		// Room for a hold beside the live edge, though not for one of these groups.
+		pool.resize(pool.pinned() + 1_000);
+		assert!(pool.hold_room(1) && !pool.hold_room(SIZE as u64));
+		let mut fills = Vec::new();
+		let mut asked = 0;
+		let mut read = Vec::new();
+		for _ in 0..10 {
+			asked += serve_fills(&requests, &mut fills, SIZE);
+			// Held past the capacity, so the next write's debt evicts it before the reader looks.
+			if producer.state.read().lookup.contains_key(&1) {
+				assert!(!pool.holds_fit(), "its hold does not fit");
+				producer.evict_for_debt(1);
+			}
+			if let Poll::Ready(Ok(Some(group))) = subscriber.poll_next_group(&waiter) {
+				read.push(group.start);
+			}
+		}
+		assert_eq!(asked, 1, "group 1 is asked once");
+		assert_eq!(read, [2], "the reader moves past it to the live edge");
+		assert_eq!(drained_drops(&mut subscriber), [(1, 2)], "group 1 is given up");
 	}
 
 	/// The live groups the pool evicts are kept for readers to ask again, billed to the pool

@@ -298,10 +298,10 @@ impl Pool {
 		self.pinned().saturating_add(self.held()) <= self.inner.capacity.load(Ordering::Relaxed)
 	}
 
-	/// Whether a fill could hold one more group: the capacity leaves room beside the pins and
-	/// every hold.
-	pub(super) fn hold_room(&self) -> bool {
-		self.pinned().saturating_add(self.held()) < self.inner.capacity.load(Ordering::Relaxed)
+	/// Whether a fill could hold one more group of `size` bytes: it fits the capacity beside
+	/// the pins and every hold.
+	pub(super) fn hold_room(&self, size: u64) -> bool {
+		self.pinned().saturating_add(self.held()).saturating_add(size) <= self.inner.capacity.load(Ordering::Relaxed)
 	}
 
 	/// What eviction spares: the pins, and the holds while they fit.
@@ -2509,7 +2509,7 @@ mod test {
 		assert_eq!(pool.pinned(), ENTRY_OVERHEAD + 1_600);
 		assert_eq!(pool.pinned(), pool.used());
 		assert_eq!(pool.excess(), None, "held past its capacity by pins alone");
-		assert!(!pool.hold_room(), "no room for a hold");
+		assert!(!pool.hold_room(1), "no room for a hold");
 		assert_eq!(pool.accrue(1_000), None);
 
 		charge.sub(400);

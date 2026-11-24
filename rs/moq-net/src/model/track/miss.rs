@@ -739,18 +739,20 @@ impl Misses {
 		}
 	}
 
-	/// What of `lost`, answered and evicted before this reader took it, to ask again: all of
-	/// it while the pool has room for a fill to hold it, so it reaches the reader this time.
-	/// With none, nothing holds a refill either: writing it puts the pool past its capacity,
-	/// and the debt that write runs up evicts it, forever, so it is given up.
-	fn reask(&mut self, state: &TrackState, lost: RangeSet<u64>, given_up: &mut GivenUp) -> RangeSet<u64> {
-		if state.cache.pool().hold_room() {
-			return lost;
-		}
+	/// What of `lost`, answered and evicted before this reader took it, to ask again: what a
+	/// fill could hold this time, so it reaches the reader. The rest is given up: writing it
+	/// puts the pool past its capacity, and the debt that write runs up evicts it again,
+	/// forever (see [`TrackState::unholdable`]).
+	fn reask(&mut self, state: &TrackState, mut lost: RangeSet<u64>, given_up: &mut GivenUp) -> RangeSet<u64> {
+		let mut unholdable = RangeSet::new();
 		for run in lost.iter() {
+			unholdable.extend(state.unholdable(run.clone()));
+		}
+		for run in unholdable.iter() {
+			lost.remove(run.clone());
 			self.give_up(run.clone(), given_up);
 		}
-		RangeSet::new()
+		lost
 	}
 
 	/// Tell each fill this reader joined that a read picked up what it answered, so its
@@ -1854,6 +1856,26 @@ impl TrackState {
 		}
 	}
 
+	/// The keys of `groups`, evicted before a reader took them, that a fill could not hold
+	/// again: all of them while the pool has no room for a hold, and otherwise each whose
+	/// size at eviction does not fit beside the pins and the holds. One that does not fit is
+	/// evicted again as it lands, which frees its hold, so asking for it again loops forever.
+	/// A key whose eviction left no record needs only room for a hold.
+	pub(super) fn unholdable(&self, groups: ops::Range<u64>) -> RangeSet<u64> {
+		let pool = self.cache.pool();
+		let mut out = RangeSet::new();
+		if !pool.hold_room(1) {
+			out.insert(groups);
+			return out;
+		}
+		for (key, size) in self.lost.sizes(groups) {
+			if !pool.hold_room(size) {
+				out.insert(key..key + 1);
+			}
+		}
+		out
+	}
+
 	/// Split `hole`, which the cache holds nothing for, into what the live feed will never
 	/// deliver, what it delivered and the pool evicted since, and the gaps it still waits
 	/// for, with when each stops being waited for.
@@ -1922,9 +1944,14 @@ pub(super) struct Unfed {
 	pub awaited: Vec<(ops::Range<u64>, Option<crate::time::Instant>)>,
 }
 
-/// The live groups the pool evicted after they arrived, by when it did. The feed delivered
-/// them, so a reader that had not taken one yet asks for it again, whatever a fill told it
-/// before it arrived, instead of giving it up as never sent.
+/// The groups the pool evicted for debt that a reader may ask for again, by when it did and
+/// at what size: the live groups, and the answers a fill held for its reader.
+///
+/// A live group was delivered by the feed, so a reader that had not taken one yet asks for it
+/// again, whatever a fill told it before it arrived, instead of giving it up as never sent. Its
+/// size, and an answer's, says whether a fill could hold it again (see
+/// [`TrackState::unholdable`]): one bigger than the room beside the pins and the holds would be
+/// evicted again as it lands, and asked again, forever.
 ///
 /// Kept a miss grace, the window the arrivals hold a gap for: a group's successor arrived
 /// before it, so by then every reader's budget has given up on the group anyway. Evictions
@@ -1933,20 +1960,31 @@ pub(super) struct Unfed {
 /// early is given up as never sent, as one past the grace is.
 #[derive(Default)]
 pub(super) struct Lost {
-	keys: BTreeMap<u64, crate::time::Instant>,
+	keys: BTreeMap<u64, Eviction>,
 	// Every eviction still within the grace, one re-arrived since included until it expires,
 	// which bounds this by the evictions in a grace.
 	order: VecDeque<(crate::time::Instant, u64)>,
 }
 
+/// One group [`Lost`] holds.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Eviction {
+	at: crate::time::Instant,
+	/// What the group cost the pool when it was evicted.
+	size: u64,
+	/// Whether the live feed delivered it, rather than a fill.
+	fed: bool,
+}
+
 /// What one [`Lost`] entry bills: its slot in the eviction order, and its key's entry, at
 /// the half-packed node a `BTreeMap` averages.
-pub(super) const LOST_OVERHEAD: u64 = 3 * size_of::<(crate::time::Instant, u64)>() as u64;
+pub(super) const LOST_OVERHEAD: u64 =
+	(size_of::<(crate::time::Instant, u64)>() + 2 * size_of::<(u64, Eviction)>()) as u64;
 
 impl Lost {
-	/// Record `key`, evicted at `now`.
-	pub fn evicted(&mut self, key: u64, now: crate::time::Instant) {
-		self.keys.insert(key, now);
+	/// Record `key`, evicted at `now` at `size`, delivered by the live feed if `fed`.
+	pub fn evicted(&mut self, key: u64, now: crate::time::Instant, size: u64, fed: bool) {
+		self.keys.insert(key, Eviction { at: now, size, fed });
 		self.order.push_back((now, key));
 	}
 
@@ -1962,9 +2000,7 @@ impl Lost {
 				break;
 			}
 			self.order.pop_front();
-			if self.keys.get(&key) == Some(&at) {
-				self.keys.remove(&key);
-			}
+			self.forget(key, at);
 		}
 	}
 
@@ -1973,10 +2009,15 @@ impl Lost {
 		let Some((at, key)) = self.order.pop_front() else {
 			return false;
 		};
-		if self.keys.get(&key) == Some(&at) {
+		self.forget(key, at);
+		true
+	}
+
+	/// Forget `key`'s eviction at `at`, unless it was evicted again since.
+	fn forget(&mut self, key: u64, at: crate::time::Instant) {
+		if self.keys.get(&key).is_some_and(|eviction| eviction.at == at) {
 			self.keys.remove(&key);
 		}
-		true
 	}
 
 	/// Whether it holds no eviction, expired or not.
@@ -1989,7 +2030,7 @@ impl Lost {
 		self.order.len()
 	}
 
-	/// The keys in `hole` evicted less than `grace` before `now`.
+	/// The keys in `hole` the live feed delivered, evicted less than `grace` before `now`.
 	fn within(
 		&self,
 		hole: ops::Range<u64>,
@@ -1998,8 +2039,13 @@ impl Lost {
 	) -> impl Iterator<Item = u64> + '_ {
 		self.keys
 			.range(hole)
-			.filter(move |(_, at)| now.duration_since(**at) < grace)
+			.filter(move |(_, eviction)| eviction.fed && now.duration_since(eviction.at) < grace)
 			.map(|(key, _)| *key)
+	}
+
+	/// The keys in `groups` it holds, with the size each was evicted at.
+	pub(super) fn sizes(&self, groups: ops::Range<u64>) -> impl Iterator<Item = (u64, u64)> + '_ {
+		self.keys.range(groups).map(|(key, eviction)| (*key, eviction.size))
 	}
 }
 
@@ -2485,23 +2531,24 @@ mod tests {
 		let grace = Duration::from_millis(500);
 		let start = crate::time::Instant::ZERO;
 		let mut lost = Lost::default();
-		lost.evicted(1, start);
-		lost.evicted(2, start.saturating_add(Duration::from_millis(100)));
-		lost.evicted(3, start.saturating_add(Duration::from_millis(200)));
+		lost.evicted(1, start, 1, true);
+		lost.evicted(2, start.saturating_add(Duration::from_millis(100)), 1, true);
+		lost.evicted(3, start.saturating_add(Duration::from_millis(200)), 1, true);
+		lost.evicted(4, start.saturating_add(Duration::from_millis(300)), 1, false);
 		lost.cached(3);
 		let at = start.saturating_add(Duration::from_millis(550));
 		assert_eq!(
 			lost.within(0..10, at, grace).collect::<Vec<_>>(),
 			vec![2],
-			"1 aged out, 3 cached again"
+			"1 aged out, 3 cached again, 4 a fill's answer"
 		);
 		lost.expire(at, grace);
 		assert_eq!(
 			lost.len(),
-			2,
+			3,
 			"the eviction still within the grace and the re-cached one wait"
 		);
-		lost.expire(start.saturating_add(Duration::from_millis(700)), grace);
+		lost.expire(start.saturating_add(Duration::from_millis(800)), grace);
 		assert_eq!(lost.len(), 0);
 		assert!(lost.keys.is_empty());
 	}
