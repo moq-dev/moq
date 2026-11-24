@@ -136,14 +136,18 @@ impl RangeFills {
 		}
 	}
 
-	/// Take the held fills a FETCH asked or joined, which outlive the subscription; its tail
-	/// settles the rest.
-	pub fn take_fetches(&mut self) -> Vec<track::FillGroups> {
-		let (fetches, held) = std::mem::take(&mut self.held)
-			.into_iter()
-			.partition(|fill| fill.is_fetch());
-		self.held = held;
-		fetches
+	/// The fills of a copy whose subscription is over, each run on a subscription of its own,
+	/// which any version carries.
+	pub fn per_run() -> Self {
+		Self {
+			per_run: true,
+			..Default::default()
+		}
+	}
+
+	/// Take every held fill, which outlives the subscription that carried it.
+	pub fn take_held(&mut self) -> Vec<track::FillGroups> {
+		std::mem::take(&mut self.held)
 	}
 
 	/// TEMPORARY MIGRATION, see [`Recovery::walk`]: take the fills a stalled recovery handed back,
@@ -592,7 +596,7 @@ impl RangeFills {
 
 /// Why the subscription that asked for groups will not deliver them.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Refusal {
+pub(super) struct Refusal {
 	err: StreamError,
 	/// Whether the source no longer has them, which the track records so no reader asks
 	/// again: only a genuine miss, which its publisher named. Anything else answers only the
@@ -638,17 +642,25 @@ impl Refusal {
 		}
 		match &self.err {
 			StreamError::NotFound if self.lost => fill.drop_groups(groups),
-			StreamError::NotFound => fill.refuse_groups(groups, Error::NotFound),
-			StreamError::Old => fill.refuse_groups(groups, Error::Old),
-			err => fill.refuse_groups(groups, Error::Stream(err.clone())),
+			_ => fill.refuse_groups(groups, self.error()),
+		}
+	}
+
+	/// The error a reader asking for the groups gets.
+	pub(super) fn error(&self) -> Error {
+		match &self.err {
+			StreamError::NotFound => Error::NotFound,
+			StreamError::Old => Error::Old,
+			err => Error::Stream(err.clone()),
 		}
 	}
 }
 
 /// A subscription asking again, with no max delay, for groups another one dropped as stale,
-/// which a fill still owes. It lives until each group arrives and its stream is read, or the
-/// publisher gives it up, then FINs and waits for the publisher's FIN in reply.
-struct Recovery {
+/// which a fill still owes, or, on a finished copy, for a time start it can't place. It lives
+/// until each group arrives and its stream is read, or the publisher gives it up, then FINs
+/// and waits for the publisher's FIN in reply.
+pub(super) struct Recovery {
 	serve: TrackServe,
 	/// The copy the recovered groups land in, which records what the publisher skipped.
 	serving: track::Producer,
@@ -675,6 +687,9 @@ struct Recovery {
 	/// The groups it refused and handed over, which it no longer covers, so a later request
 	/// for them asks again rather than waiting on its other streams.
 	released: RangeSet<u64>,
+	/// Where the publisher started its range, once it said: `None` inside for no group to
+	/// deliver.
+	start: Option<Option<u64>>,
 }
 
 enum RecoveryState {
@@ -693,7 +708,7 @@ enum RecoveryState {
 }
 
 impl Recovery {
-	fn new(serve: &TrackServe, serving: &track::Producer, groups: Range<u64>, priority: i8) -> Self {
+	pub(super) fn new(serve: &TrackServe, serving: &track::Producer, groups: Range<u64>, priority: i8) -> Self {
 		// Before lite-07 the start is the answer, which the publisher gives only once a group in
 		// range can start it, so the range stays open until the start caps it: only upstream
 		// knows which group it still holds past the run.
@@ -731,11 +746,25 @@ impl Recovery {
 			refused: Default::default(),
 			fresh: Default::default(),
 			released: Default::default(),
+			start: None,
+		}
+	}
+
+	/// Where the publisher started its range, once readers can read from there: it said no
+	/// group is left at or before its first key, or a start past that key, or the stream of
+	/// the group it starts at arrived. `None` inside for no group to deliver.
+	pub(super) fn landed(&self) -> Option<Option<u64>> {
+		let start = self.start?;
+		match (start, &self.state) {
+			(Some(group), RecoveryState::Active { sub, .. }) if group <= self.groups.start => {
+				sub.tail.read().first_group().is_some().then_some(start)
+			}
+			_ => Some(start),
 		}
 	}
 
 	/// Whether a stream of the subscription is still being read, which cancelling would cut.
-	fn reading(&self) -> bool {
+	pub(super) fn reading(&self) -> bool {
 		match &self.state {
 			RecoveryState::Active { sub, .. } => sub.tail.read().is_reading(),
 			_ => false,
@@ -744,7 +773,7 @@ impl Recovery {
 
 	/// End the subscription, refusing what is left of the groups with `err`, as nothing more
 	/// will arrive on it.
-	fn end(&mut self, err: StreamError) {
+	pub(super) fn end(&mut self, err: StreamError) {
 		let state = std::mem::replace(&mut self.state, RecoveryState::Done);
 		let mut owed = RangeSet::new();
 		owed.insert(self.groups.clone());
@@ -777,7 +806,7 @@ impl Recovery {
 
 	/// Ready once the recovery is over, with the groups it refused, or with the protocol
 	/// violation its publisher committed, which the subscription's would be too.
-	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<RangeMap<u64, Refusal>, Error>> {
+	pub(super) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<RangeMap<u64, Refusal>, Error>> {
 		loop {
 			match &mut self.state {
 				RecoveryState::Establish(est) => match ready!(est.poll(waiter)) {
@@ -905,6 +934,7 @@ impl Recovery {
 								Refusal::passing(StreamError::NotFound),
 							);
 							active.started = Some(start.start);
+							self.start = Some(start.start);
 							// Starting past the run answers all of it, so nothing more is asked.
 							if !self.capped && from >= groups.end {
 								self.capped = true;

@@ -37,7 +37,7 @@ mod demand;
 pub(super) use demand::Changes;
 pub(crate) use demand::Edit;
 pub(super) use demand::Preferences;
-use demand::Subscriptions;
+use demand::SubscriptionsLock;
 
 /// Move the process-wide join tick, as another track's answer to a live join does.
 #[cfg(all(test, feature = "async"))]
@@ -914,10 +914,10 @@ pub(crate) struct TrackState {
 	// below this group is unjudgeable for readers with a finite delay budget.
 	live_floor: Option<u64>,
 
-	// Active subscriptions, in their own [`kio::Lock`] so a read-only `Consumer`
+	// Active subscriptions, under their own lock so a read-only `Consumer`
 	// registers under that lock instead of writing back into the track state.
 	// Kept here (rather than threaded through every handle) so any holder reaches it.
-	subscriptions: kio::Lock<Subscriptions>,
+	subscriptions: SubscriptionsLock,
 
 	// Demand wakes a write owes, fired once the state guard is released (see
 	// [`Self::deferred`]). A woken waker may read this track, so none fires under its lock.
@@ -1309,7 +1309,9 @@ impl Holdings for TrackState {
 	}
 
 	fn complete(&self) -> bool {
-		self.outcome.is_final()
+		// A finished lite-07 copy still served takes what it can't place from its upstream,
+		// which its session asks (see [`Subscriber::asks`]).
+		self.outcome.is_final() && !(self.anchors == Anchors::Wire && self.fills.read().has_handlers())
 	}
 
 	/// In media time, from the newest frame held, or the newest group still served when it
@@ -1681,7 +1683,7 @@ impl TrackState {
 	}
 
 	/// When a request as `ask` takes effect, if the track's [`Refresh`] lets it ask at all.
-	fn admit(state: kio::Ref<'_, TrackState>, ask: Ask) -> Option<(crate::time::Instant, kio::Lock<Subscriptions>)> {
+	fn admit(state: kio::Ref<'_, TrackState>, ask: Ask) -> Option<(crate::time::Instant, SubscriptionsLock)> {
 		let refresh = state.info.as_ref().map(|info| info.refresh).filter(Refresh::enabled)?;
 		let latest = state.latest_group?;
 		let slot = state.lookup.get(&latest);
@@ -1983,10 +1985,24 @@ impl TrackState {
 
 	/// Settle an append at `key`: skip every key below it that this track's own
 	/// publisher never produced, from just past its previous append (before the first, from
-	/// the lowest it produced), since appending says it will not go back. The skip replaces a
-	/// drop given there, as [`Self::skip_groups`] does.
+	/// the lowest it produced, or 0 when the append is its own track's first group), since
+	/// appending says it will not go back. The skip replaces a drop given there, as
+	/// [`Self::skip_groups`] does.
+	///
+	/// A first group that is appended skips from 0: a reader asking from the oldest group of
+	/// an empty track is owed every key from 0, so a time-keyed track whose first group starts
+	/// at its wall-clock time would otherwise leave it waiting on keys no one will produce.
 	fn appended(&mut self, key: u64) {
-		if let Some(from) = self.appended.or(self.produced.iter().next().map(|run| run.start))
+		// The append's own group is in `produced` already, so only one below it counts.
+		let first = self
+			.produced
+			.iter()
+			.next()
+			.map(|run| run.start)
+			.filter(|start| *start < key);
+		// A received copy records nothing it produced, so it skips below no first group.
+		let own = (!self.anchors.received()).then_some(0);
+		if let Some(from) = self.appended.or(first).or(own)
 			&& from < key
 		{
 			let mut left = RangeSet::new();
@@ -5394,9 +5410,9 @@ impl Producer {
 	///
 	/// Appending says the producer will not go back, so it skips every start below the new
 	/// group that it never produced, from just past its previous append (before the first,
-	/// from the lowest group it created), as [`Self::skip_groups`] would, replacing any drop
-	/// there: consecutive appends name the span between their starts. Those starts are then
-	/// final: creating one is refused. A `start` at or before a group this track holds is
+	/// from the lowest group it created, or from 0 when it creates the track's first group), as
+	/// [`Self::skip_groups`] would, replacing any drop there: consecutive appends name the span
+	/// between their starts. Those starts are then final: creating one is refused. A `start` at or before a group this track holds is
 	/// [`Error::TimestampMismatch`], like a rewound frame.
 	///
 	/// The same broadcast, track, and group start always name the same content, and nothing
@@ -5703,6 +5719,21 @@ impl Producer {
 			&& state.time_starts != merged
 		{
 			state.time_starts = merged;
+			state.placing += 1;
+		}
+	}
+
+	/// Fail the readers of this lite-07 copy waiting now on time start `time` with `err`, as its
+	/// upstream refused the range asked to place it, the way a refused fill fails the readers
+	/// of its groups. A reader waiting on it later asks again.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn refuse_time(&self, time: u64, err: Error) {
+		let subscriptions = self.state.read().subscriptions.clone();
+		// Woken once the lock is released, so a watcher reading the demand at once finds it free.
+		let mut wakes = subscriptions.lock().refuse(time, err);
+		wakes.wake();
+		// Recorded first, so a reader woken here finds it.
+		if let Ok(mut state) = self.modify() {
 			state.placing += 1;
 		}
 	}
@@ -6490,8 +6521,6 @@ pub struct Requests {
 	// Shared with the track's producers: a handler still serving fills keeps the
 	// track alive, like a producer clone does.
 	alive: Arc<Alive>,
-	// Takes only fetches; see [`Self::fetches_only`].
-	fetches_only: bool,
 }
 
 impl Requests {
@@ -6503,20 +6532,7 @@ impl Requests {
 			state,
 			fills,
 			alive,
-			fetches_only: false,
 		}
-	}
-
-	/// Take only [`Consumer::fetch_group`]'s fills from now on, as a session does for a
-	/// copy whose subscription ended: a reader's miss settles at once, as with no handler,
-	/// while a fetch still goes upstream. Queued misses are dropped; taken fills stay.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn fetches_only(mut self) -> Self {
-		if !self.fetches_only {
-			self.fills.lock().fetches_only();
-			self.fetches_only = true;
-		}
-		self
 	}
 
 	/// The track's name, unique within its broadcast.
@@ -6554,16 +6570,12 @@ impl Requests {
 impl Clone for Requests {
 	fn clone(&self) -> Self {
 		// Count each live handle (mirrors `broadcast::Requests`).
-		match self.fetches_only {
-			true => self.fills.lock().add_fetcher(),
-			false => self.fills.lock().add_handler(),
-		}
+		self.fills.lock().add_handler();
 		Self {
 			name: self.name.clone(),
 			state: self.state.clone(),
 			fills: self.fills.clone(),
 			alive: self.alive.clone(),
-			fetches_only: self.fetches_only,
 		}
 	}
 }
@@ -6574,10 +6586,7 @@ impl Drop for Requests {
 		// a live `Producer` may still be serving the subscription. It just stops serving
 		// fills: a queued one no handler will ever take closes, so its readers stop
 		// waiting on it, while one already taken stays with its `Fill`.
-		match self.fetches_only {
-			true => self.fills.lock().remove_fetcher(),
-			false => self.fills.lock().remove_handler(),
-		}
+		self.fills.lock().remove_handler();
 	}
 }
 
@@ -6698,7 +6707,7 @@ impl Drop for Alive {
 
 /// Poll the counted aggregate without registering on individual readers.
 fn poll_combined_changed(
-	subs: &kio::Lock<Subscriptions>,
+	subs: &SubscriptionsLock,
 	bound: Option<Duration>,
 	prev: &mut Option<Subscription>,
 	waiter: &kio::Waiter,
@@ -6713,7 +6722,7 @@ fn watch_combined(state: &kio::Producer<TrackState>, waiter: &kio::Waiter) {
 }
 
 /// Read the counted aggregate without walking the audience.
-fn snapshot_subscription(subs: &kio::Lock<Subscriptions>, bound: Option<Duration>) -> Option<Subscription> {
+fn snapshot_subscription(subs: &SubscriptionsLock, bound: Option<Duration>) -> Option<Subscription> {
 	clamp_combined(subs.lock().combined(), bound)
 }
 
@@ -8286,7 +8295,6 @@ fn queue(fills: &kio::Shared<FillState>, key: u64, request: &FetchOptions) -> Op
 			// One group either way, so it never turns a wider fill it joins newest first.
 			order: Order::Ascending,
 		},
-		fetch: true,
 	};
 	// The handler gate is atomic with a handler dropping (no fill stranded on a queue
 	// nobody drains); with no handler, `Fetching::poll` fails fast.
@@ -8486,7 +8494,7 @@ impl Fetching {
 			}
 			// Never queued: no handler existed when the fetch was made. Fail fast while
 			// that's still true; a handler that appeared since may yet fill the cache.
-			return match fills.poll(waiter, |fills| match fills.takes_fetches() {
+			return match fills.poll(waiter, |fills| match fills.has_handlers() {
 				false => Poll::Ready(()),
 				true => Poll::Pending,
 			}) {
@@ -9573,8 +9581,11 @@ struct KeptOut {
 #[derive(Default)]
 struct Asked {
 	/// The demand counting them, once one is counted.
-	subscriptions: Option<kio::Lock<Subscriptions>>,
+	subscriptions: Option<SubscriptionsLock>,
 	times: Vec<u64>,
+	/// The demand's refusals when each of `times` was first counted, so only a refusal since
+	/// fails it.
+	since: BTreeMap<u64, u64>,
 	joins: Vec<JoinAsk>,
 }
 
@@ -9582,12 +9593,7 @@ impl Asked {
 	/// Count `times` and `joins` instead of those counted now, each once however many of the
 	/// window's ranges wait on it: the demand counts readers, so a count added once is taken
 	/// once.
-	fn set(
-		&mut self,
-		mut times: Vec<u64>,
-		mut joins: Vec<JoinAsk>,
-		subscriptions: impl FnOnce() -> kio::Lock<Subscriptions>,
-	) {
+	fn set(&mut self, mut times: Vec<u64>, mut joins: Vec<JoinAsk>, subscriptions: impl FnOnce() -> SubscriptionsLock) {
 		// Sorted, so taking duplicates out and diffing against what is counted stay linear past
 		// the sort: a copy's readers can wait on thousands of time starts, re-asked on every sync.
 		times.sort_unstable();
@@ -9626,9 +9632,18 @@ impl Asked {
 					}
 				}
 			}
-			let times = changes(&self.times, &times)
-				.into_iter()
-				.map(|(time, waits)| subs.ask(time, waits));
+			let refusals = subs.refusals();
+			let since = &mut self.since;
+			let times = changes(&self.times, &times).into_iter().map(|(time, waits)| {
+				let at = match waits {
+					true => {
+						since.insert(time, refusals);
+						refusals
+					}
+					false => since.remove(&time).expect("a counted time"),
+				};
+				subs.ask(time, at, waits)
+			});
 			let times: Vec<_> = times.collect();
 			let joins = changes(&self.joins, &joins)
 				.into_iter()
@@ -9639,6 +9654,36 @@ impl Asked {
 		for mut wakes in wakes {
 			wakes.wake();
 		}
+	}
+
+	/// Stop counting each time start the upstream refused since it was counted, so counting it
+	/// again asks afresh.
+	fn forget_refused(&mut self) {
+		let Some(subscriptions) = self.subscriptions.clone() else {
+			return;
+		};
+		let times: Vec<u64> = {
+			let subs = subscriptions.lock();
+			if !subs.has_refusals() {
+				return;
+			}
+			let times = self.times.iter().copied();
+			times
+				.filter(|time| subs.refusal(*time, self.since[time]).is_none())
+				.collect()
+		};
+		if times.len() < self.times.len() {
+			self.set(times, self.joins.clone(), || subscriptions);
+		}
+	}
+
+	/// Why the upstream refused a time start counted here since it was counted, if it did.
+	fn refused(&self) -> Option<Error> {
+		let subs = self.subscriptions.as_ref()?.lock();
+		if !subs.has_refusals() {
+			return None;
+		}
+		(self.times.iter()).find_map(|time| subs.refusal(*time, self.since[time]))
 	}
 }
 
@@ -10207,7 +10252,12 @@ impl Cursor {
 	/// and count the time starts it still waits on in the demand's asks. Returns whether the
 	/// window moved.
 	fn sync(&mut self) -> bool {
+		let resolved = self.filter.resolved;
 		let moved = self.sync_window();
+		// Ranges resolved afresh ask afresh, even before the reads took an earlier refusal.
+		if self.filter.resolved != resolved {
+			self.asked.forget_refused();
+		}
 		self.ask();
 		moved
 	}
@@ -10226,7 +10276,8 @@ impl Cursor {
 			return;
 		}
 		let state = self.state.read();
-		let times = match state.anchors == Anchors::Wire {
+		// A failed read waits on no time start until its ranges change.
+		let times = match state.anchors == Anchors::Wire && self.filter.refused.is_none() {
 			true => times.collect(),
 			false => Vec::new(),
 		};
@@ -10244,7 +10295,13 @@ impl Cursor {
 		let subscriptions = state.subscriptions.clone();
 		// Released first, so the two locks never nest.
 		drop(state);
-		self.asked.set(times, joins, || subscriptions);
+		self.asked.set(times, joins.clone(), || subscriptions.clone());
+		// The upstream refused to place one: the reads fail with its error, as a refused
+		// lookup's do, and a later reader asks again.
+		if let Some(err) = self.asked.refused() {
+			(self.filter.refused, self.filter.stale) = (Some(err), true);
+			self.asked.set(Vec::new(), joins, || subscriptions);
+		}
 	}
 
 	/// [`Self::sync`] without the asks. Returns whether the window moved.
@@ -12619,8 +12676,11 @@ impl Subscriber {
 		let start = ready!(Consumer::poll_state_start(&cursor.state, waiter));
 		cursor.sync();
 		let floor = cursor.min_key;
-		let unplaced = |window: &Window| window.is_waiting_above(floor) || window.is_reaching();
-		if unplaced(&cursor.filter.window) {
+		// A refused read places nothing more: its next read fails with the refusal.
+		let unplaced = |filter: &Filter| {
+			filter.refused.is_none() && (filter.window.is_waiting_above(floor) || filter.window.is_reaching())
+		};
+		if unplaced(&cursor.filter) {
 			// Registered before syncing again, so a change placing it after this wakes it, such
 			// as the upstream's answer to the range asked, or a live group starting. A closed
 			// track places it at once, since nothing more can arrive.
@@ -12632,7 +12692,7 @@ impl Subscriber {
 				})
 				.is_ready();
 			cursor.sync();
-			if !closed && unplaced(&cursor.filter.window) {
+			if !closed && unplaced(&cursor.filter) {
 				return Poll::Pending;
 			}
 		}
@@ -13371,7 +13431,7 @@ impl Failover {
 /// A caller's claim on a pending request: [`Refreshing`] without the parked waiter.
 struct Ticket {
 	state: kio::ConsumerWeak<TrackState>,
-	subscriptions: kio::Lock<Subscriptions>,
+	subscriptions: SubscriptionsLock,
 	epoch: u64,
 }
 
@@ -18001,6 +18061,212 @@ mod test {
 		assert_eq!(placed(&mut past), Some((2000, true)));
 		drop(past);
 		assert_eq!(asks(&producer), Vec::<u64>::new());
+	}
+
+	/// Upstream refusing to place a time start fails only the readers waiting on it then, with
+	/// its error, and they stop asking for it; a reader waiting on it later asks again.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_refused_time_start_fails_only_the_readers_waiting_then() {
+		let from = |time| {
+			Subscription::default()
+				.with_ranges([Range {
+					start: crate::track::Start::Time(time),
+					end: None,
+				}])
+				.with_max(None)
+		};
+		let asks = |producer: &Producer| -> Vec<u64> {
+			let asks = producer.subscription().map(|aggregate| aggregate.asks);
+			asks.unwrap_or_default()
+		};
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		write_group(&producer, 1000);
+		let mut waiting = [producer.subscribe(from(1500)), producer.subscribe(from(1500))];
+		let mut other = producer.subscribe(from(1700));
+		for subscriber in waiting.iter_mut().chain([&mut other]) {
+			assert!(subscriber.refused().is_none());
+		}
+		assert_eq!(asks(&producer), [1500, 1700]);
+
+		producer.refuse_time(1500, Error::NotFound);
+		assert_eq!(asks(&producer), [1700], "its readers stop asking at once");
+		for subscriber in &mut waiting {
+			assert!(
+				matches!(subscriber.refused(), Some(Error::NotFound)),
+				"fails with its error"
+			);
+		}
+		assert!(other.refused().is_none(), "another time still waits");
+
+		let mut later = producer.subscribe(from(1500));
+		assert!(later.refused().is_none(), "a later reader waits");
+		assert_eq!(asks(&producer), [1500, 1700], "and asks again");
+		drop(waiting);
+		assert_eq!(
+			asks(&producer),
+			[1500, 1700],
+			"the failed readers leaving takes no other ask"
+		);
+		producer.refuse_time(1500, Error::Cancel);
+		assert!(matches!(later.refused(), Some(Error::Cancel)));
+		assert_eq!(asks(&producer), [1700]);
+		drop(later);
+		assert_eq!(asks(&producer), [1700]);
+	}
+
+	/// Each refusal of a time start fails its own readers with its own error: a reader the
+	/// first failed reads that error even after a later refusal of the same time fails another
+	/// reader, and each leaving takes only its own count.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_second_refusal_of_a_time_start_keeps_the_first_ones_error() {
+		let from = |time| {
+			Subscription::default()
+				.with_ranges([Range {
+					start: crate::track::Start::Time(time),
+					end: None,
+				}])
+				.with_max(None)
+		};
+		let asks = |producer: &Producer| -> Vec<u64> {
+			let asks = producer.subscription().map(|aggregate| aggregate.asks);
+			asks.unwrap_or_default()
+		};
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		write_group(&producer, 1000);
+		let mut first = producer.subscribe(from(1500));
+		assert!(first.refused().is_none());
+		producer.refuse_time(1500, Error::NotFound);
+		// `first` reads its refusal only after the second.
+		let mut second = producer.subscribe(from(1500));
+		assert!(second.refused().is_none());
+		producer.refuse_time(1500, Error::Cancel);
+		assert!(matches!(first.refused(), Some(Error::NotFound)), "keeps its own error");
+		assert!(matches!(second.refused(), Some(Error::Cancel)));
+
+		let mut third = producer.subscribe(from(1500));
+		assert_eq!(asks(&producer), [1500]);
+		drop(second);
+		drop(first);
+		assert_eq!(asks(&producer), [1500], "the failed readers leaving takes no other ask");
+		assert!(third.refused().is_none());
+		drop(third);
+		assert_eq!(asks(&producer), Vec::<u64>::new());
+	}
+
+	/// A refused time start places its reader's start, so a publisher waiting on that start
+	/// goes on to the read, which fails with the refusal, finished copy or not.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_refused_time_start_places_its_readers_start() {
+		for finish in [false, true] {
+			let producer = track_producer("test", Info::timed());
+			producer.received();
+			producer.anchored();
+			write_group(&producer, 1000);
+			let _finished = finish.then(|| producer.clone().finish().unwrap());
+			let mut waiting = producer.subscribe(
+				Subscription::default()
+					.with_ranges([Range {
+						start: crate::track::Start::Time(1500),
+						end: None,
+					}])
+					.with_max(None),
+			);
+			let waiter = kio::Waiter::noop();
+			assert!(waiting.poll_start(&waiter).is_pending(), "finish={finish}");
+			producer.refuse_time(1500, Error::NotFound);
+			assert!(waiting.poll_start(&waiter).is_ready(), "finish={finish}");
+			assert!(
+				matches!(waiting.poll_recv_group(&waiter), Poll::Ready(Err(Error::NotFound))),
+				"finish={finish}"
+			);
+		}
+	}
+
+	/// A reader replacing its ranges asks again for a time start upstream refused, even one it
+	/// names again before its reads took the refusal.
+	#[test]
+	#[cfg(feature = "async")]
+	fn new_ranges_ask_again_for_a_refused_time_start() {
+		let from = |time, end| {
+			Subscription::default()
+				.with_ranges([Range {
+					start: crate::track::Start::Time(time),
+					end,
+				}])
+				.with_max(None)
+		};
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		write_group(&producer, 1000);
+		let mut reader = producer.subscribe(from(1500, None));
+		assert!(reader.refused().is_none());
+		producer.refuse_time(1500, Error::NotFound);
+		reader.update(from(1500, Some(5000))).unwrap();
+		assert!(reader.refused().is_none(), "the new ranges ask afresh");
+		let asks = producer.subscription().map(|aggregate| aggregate.asks);
+		assert_eq!(asks.unwrap_or_default(), [1500]);
+		producer.refuse_time(1500, Error::Cancel);
+		assert!(
+			matches!(reader.refused(), Some(Error::Cancel)),
+			"only a refusal since fails them"
+		);
+		drop(reader);
+		let asks = producer.subscription().map(|aggregate| aggregate.asks);
+		assert_eq!(asks.unwrap_or_default(), Vec::<u64>::new());
+	}
+
+	/// A time start's refusal wakes the demand's watchers with its lock released, since a
+	/// watcher may read the demand inline from its wake.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_refused_time_start_wakes_its_watchers_unlocked() {
+		struct Reenter {
+			subscriptions: SubscriptionsLock,
+			unlocked: std::sync::atomic::AtomicBool,
+		}
+		impl std::task::Wake for Reenter {
+			fn wake(self: Arc<Self>) {
+				self.wake_by_ref();
+			}
+			fn wake_by_ref(self: &Arc<Self>) {
+				// Re-entering the lock this thread holds would deadlock the test instead of failing it.
+				let unlocked = !self.subscriptions.is_held();
+				self.unlocked.store(unlocked, std::sync::atomic::Ordering::SeqCst);
+			}
+		}
+
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		write_group(&producer, 1000);
+		let mut waiting = producer.subscribe(
+			Subscription::default()
+				.with_ranges([Range {
+					start: crate::track::Start::Time(1500),
+					end: None,
+				}])
+				.with_max(None),
+		);
+		assert!(waiting.refused().is_none());
+		let reenter = Arc::new(Reenter {
+			subscriptions: producer.state.read().subscriptions.clone(),
+			unlocked: Default::default(),
+		});
+		let waiter = kio::Waiter::new(std::task::Waker::from(reenter.clone()));
+		producer.watch_subscription(&waiter);
+		producer.refuse_time(1500, Error::NotFound);
+		assert!(
+			reenter.unlocked.load(std::sync::atomic::Ordering::SeqCst),
+			"woke under the demand's lock"
+		);
 	}
 
 	/// A lite-07 copy holding a whole group places a time inside its span from that group
@@ -31644,35 +31910,6 @@ mod test {
 		assert_eq!(drained_drops(&mut subscriber), [(0, 2)]);
 	}
 
-	/// A handler that takes only fetches leaves a reader's miss to settle as with none, and
-	/// still takes a fetch.
-	#[test]
-	#[cfg(feature = "async")]
-	fn a_fetch_only_handler_takes_fetches_alone() {
-		let (producer, dynamic, mut subscriber) = started_late();
-		let dynamic = dynamic.fetches_only();
-		let waiter = kio::Waiter::noop();
-		let mut read = Vec::new();
-		while let Poll::Ready(Ok(Some(group))) = subscriber.poll_recv_group(&waiter) {
-			read.push(group.start);
-		}
-		assert_eq!(read, [2, 3]);
-		elapse(&producer, Duration::from_secs(31));
-		assert_eq!(drained_drops(&mut subscriber), [(0, 2)]);
-		assert!(
-			dynamic.poll_requested_fill(&waiter).is_pending(),
-			"the miss asked nothing"
-		);
-
-		let mut fetch = producer.consume().fetch_group(1, None);
-		assert!(kio::Task::poll(&mut *fetch, &waiter).is_pending());
-		let Poll::Ready(Ok(fill)) = dynamic.clone().poll_requested_fill(&waiter) else {
-			panic!("the fetch is taken");
-		};
-		assert_eq!((fill.start().group, fill.end()), (1, 2));
-		assert!(fill.is_fetch());
-	}
-
 	/// A fill whose handler leaves before taking it settles by run: a peer that starts its
 	/// feed far past the reader's floor makes the miss wide, and walking it group by group
 	/// would never finish.
@@ -34132,8 +34369,27 @@ mod test {
 		assert!(producer.state.read().skipped(2));
 	}
 
+	/// An appended first group skips every key below it, down to 0: a time-keyed track's first
+	/// group starts at its wall-clock time, and a reader asking from the oldest group must not
+	/// wait on the keys below it. A received copy's append skips nothing below its first group.
+	#[test]
+	#[cfg(feature = "async")]
+	fn appending_the_first_group_skips_everything_below() {
+		let producer = track_producer("test", Info::timed());
+		let mut subscriber = producer.subscribe(replay().with_range(0..));
+		let waiter = kio::Waiter::noop();
+		producer.append_key(5).unwrap().finish().unwrap();
+		assert_eq!(subscriber.poll_drop(&waiter), Poll::Ready((0..5, Hole::Skip)));
+		assert_eq!(drain_groups(&mut subscriber), [5]);
+
+		let copy = track_producer("test", Info::timed());
+		copy.received();
+		copy.append_key(5).unwrap().finish().unwrap();
+		assert!(copy.state.read().drops.is_empty());
+	}
+
 	/// Appending and a first group leave no gap, so they skip nothing; nor is anything below
-	/// a track's first group skipped.
+	/// a track's first group skipped when that group was created.
 	#[test]
 	#[cfg(feature = "async")]
 	fn appending_and_a_first_group_skip_nothing() {
