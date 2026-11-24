@@ -82,10 +82,11 @@ their Environment. npm: `npm` is set and verified on `@moq/net`, `auth`,
 `boy`, `hang`, `json`, `loc`, `msf`, `pattern`, `publish`, `room`, `watch`,
 and `signals` (the last two by hand, since npm's Cloudflare blocked the
 automated save). `@moq/qmux` is published by
-moq-dev/web-transport, so it is out of scope here; `@moq/clock`, `libav`,
-`ui`, and `video` are not published yet, and
-[npm-first-publish](/quest/m3/release/npm-first-publish.md) claims them with
-the `npm` Environment. PyPI: `moq-rs` already required `pypi`, and `moq-ffi`'s
+moq-dev/web-transport, so it is out of scope here. `@moq/clock`, `libav`,
+`stats`, and `video` were claimed with `0.0.0` placeholders on 2026-11-24,
+each trusting `release-js.yml` with the `npm` Environment. Those trusts
+expire unvalidated, so the [cut](/quest/m3/release/cut.md) recreates them
+before it publishes; `@moq/ui` is workspace-private. PyPI: `moq-rs` already required `pypi`, and `moq-ffi`'s
 any-environment publisher was replaced by one requiring `pypi` (verified on
 its settings page). pub.dev: the maintainer set the required environment
 `pub.dev` on `moq` and `moq_ffi` and reported both pages show it; agents

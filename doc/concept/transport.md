@@ -58,6 +58,16 @@ Each side lets the other hold 10,000 streams open in each direction, as over
 QUIC, since MoQ holds one per subscription and per live group. Set it with
 `websocket.maxStreams` in `@moq/net` and `quic.max_streams` in `moq-tokio`.
 
+A dialed WebSocket session closes after 30 s without a frame and pings when
+quiet to stay open. Set `websocket.idleTimeout` in `@moq/net` or
+`connect.websocket.idle_timeout` in `moq-tokio` to change it, or to `null` and
+`0s` to turn it off when the server's is off too: a quiet session then sends
+nothing, which lets a server that sleeps between messages stay asleep, and a
+dead link surfaces as the WebSocket closing. QMux negotiates the timeout only on
+drafts 01 and later, so `@moq/net` runs no idle timer on a `qmux-00` session;
+`moq-tokio` also pings at the WebSocket layer, which covers `qmux-00`, and
+probes RTT every second; both turn off with the rest.
+
 QUIC gets a head start in the race: 500 ms in `@moq/net` and 200 ms in
 `moq-tokio`. Once WebSocket wins against a server, identified by the host and
 port the fallback dials, later connects to that server race both transports at

@@ -54,7 +54,7 @@ import { untilAborted } from "../util/abort.ts";
 import { closeUnwanted } from "../util/announce.ts";
 import { toNumber } from "../util/bigint.ts";
 import { Deadline } from "../util/deadline.ts";
-import { isAbandoned, isUnrequested, unrequested, unwanted } from "../util/demand.ts";
+import { isAbandoned, unwanted } from "../util/demand.ts";
 import { max, min, UNBOUNDED } from "../util/key.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { Budget } from "../util/yield.ts";
@@ -1327,11 +1327,11 @@ export class Subscriber {
 			for (;;) {
 				const ready = await this.#auth?.ready(broadcast, "subscribe", {
 					signal: consumed.valid,
-					until: () => unrequested(request),
+					until: () => unwanted(request.demand()),
 				});
 				if (ready !== false) break;
 				// Demand returning before we commit is not abandonment, matching the serving loop.
-				if (!isUnrequested(request)) continue;
+				if (!isAbandoned(request.demand())) continue;
 				request.reject(new Error("subscribe abandoned before it was authorized"));
 				return;
 			}
@@ -1392,16 +1392,15 @@ export class Subscriber {
 		// metadata acceptance to reader attachment. Release it when the last owner leaves.
 		const left = new AbortController();
 		const demand = request.demand();
-		const wanted = hooks.requestWanted(request);
 		let unwatch: Dispose | undefined;
 		const watch = () => {
-			if (isUnrequested(request)) {
+			if (isAbandoned(demand)) {
 				left.abort(
 					new StreamError(StreamCode.Cancel, { message: "subscribe abandoned before it was accepted" }),
 				);
 				state.cancel.abort(left.signal.reason);
 			} else {
-				unwatch = Signal.race(wanted, hooks.demandReleased(demand)).changed(watch);
+				unwatch = Signal.race(demand.wanted, hooks.demandReleased(demand)).changed(watch);
 			}
 		};
 		watch();
@@ -1509,10 +1508,6 @@ export class Subscriber {
 			let tailSettled = false;
 			const closed = responses.then(async () => {
 				await this.#settleTail(entry);
-				// A run recovered on a subscription of its own outlives this one, as in Rust's tail:
-				// releasing the copy would cancel it before upstream answered.
-				while (entry.fills?.recovering && hooks.trackReleased(producer).peek() === undefined)
-					await race([Signal.race(entry.fillsChanged), hooks.trackReleased(producer)]);
 				tailSettled = true;
 			});
 			// A reset that lands after the race below settled is moot; the race observes one before.
@@ -1554,6 +1549,14 @@ export class Subscriber {
 			// Only a received SUBSCRIBE_END, or before lite-05 a FIN, declares the track's end: a
 			// subscription nobody wants anymore is a released copy, not finished content.
 			if (tailSettled && entry.stream.kind === "finished") producer.finish();
+			// A run recovered on a subscription of its own outlives this one, as in Rust's finished
+			// copy: the copy and its datagrams end now, but releasing it would cancel the run before
+			// upstream answered.
+			if (tailSettled && entry.fills?.recovering) {
+				if (entry.datagrams) await this.#endDatagrams(id, entry, producer);
+				while (entry.fills?.recovering && hooks.trackReleased(producer).peek() === undefined)
+					await race([Signal.race(entry.fillsChanged), hooks.trackReleased(producer)]);
+			}
 			hooks.releaseTrack(producer);
 		} catch (err) {
 			const e = await sessionCause(this.#quic, err);
@@ -1565,23 +1568,29 @@ export class Subscriber {
 			entry.tail.close();
 			entry.unanswered?.held.close();
 			entry.datagramDemand?.();
-			if (entry.datagrams) {
-				// The stream track's end is its datagrams' end: those received with it route first.
-				if (entry.end !== undefined && !(hooks.trackReleased(producer).peek() instanceof Error)) {
-					entry.datagrams.ended = true;
-					await this.#datagramsRouted(id);
-				}
-				const closed = hooks.trackReleased(producer).peek();
-				if (closed instanceof Error) entry.datagrams.producer.abort(closed);
-				else if (entry.end !== undefined) entry.datagrams.producer.finish();
-				else entry.datagrams.producer.abort(new StreamError(StreamCode.Cancel));
-				this.#datagrams.delete(id);
-				if (entry.legacyKey && this.#legacyDatagrams.get(entry.legacyKey) === entry.datagrams)
-					this.#legacyDatagrams.delete(entry.legacyKey);
-			}
+			if (entry.datagrams) await this.#endDatagrams(id, entry, producer);
 
 			this.#subscribes.delete(id);
 		}
+	}
+
+	// Lite-05/06: end the datagrams the subscription carried as its stream track ended, once.
+	async #endDatagrams(id: bigint, entry: SubscribeEntry, producer: track.Producer): Promise<void> {
+		const datagrams = entry.datagrams;
+		if (!datagrams) return;
+		entry.datagrams = undefined;
+		// The stream track's end is its datagrams' end: those received with it route first.
+		if (entry.end !== undefined && !(hooks.trackReleased(producer).peek() instanceof Error)) {
+			datagrams.ended = true;
+			await this.#datagramsRouted(id);
+		}
+		const closed = hooks.trackReleased(producer).peek();
+		if (closed instanceof Error) datagrams.producer.abort(closed);
+		else if (entry.end !== undefined) datagrams.producer.finish();
+		else datagrams.producer.abort(new StreamError(StreamCode.Cancel));
+		this.#datagrams.delete(id);
+		if (entry.legacyKey && this.#legacyDatagrams.get(entry.legacyKey) === datagrams)
+			this.#legacyDatagrams.delete(entry.legacyKey);
 	}
 
 	// Open the subscribe stream and accept the request (so the application's track.Subscriber
@@ -2830,12 +2839,14 @@ export class Subscriber {
 			return window.runs(0n, end).every((run) => entry.tail.covers(run.start, run.end));
 		}
 		// Without SUBSCRIBE_START the publisher served no group at all. Otherwise each group is owed
-		// from the floor the demand last asked for, which an update can move either way, or where
-		// SUBSCRIBE_START resolved a live-edge one. The groups the SUBSCRIBE asked for below its
-		// SUBSCRIBE_START were accounted for when it arrived.
+		// from the floor the demand last asked for, or where SUBSCRIBE_START resolved a live-edge one,
+		// but never below that START: nothing answers an update, and the publisher applies none once it
+		// has sent its FIN, so a floor an update lowered may never have reached it. The groups the
+		// SUBSCRIBE asked for below its SUBSCRIBE_START were accounted for when it arrived.
 		if (entry.start === undefined || entry.start === null) return true;
 		const window = new Window(ranges, entry.track.largest()?.group);
-		return window.runs(floor ?? entry.start, end).every((run) => entry.tail.covers(run.start, run.end));
+		const from = max(floor ?? entry.start, entry.start);
+		return window.runs(from, end).every((run) => entry.tail.covers(run.start, run.end));
 	}
 
 	/**
@@ -2879,6 +2890,17 @@ export class Subscriber {
 		// The time starts and live joins the readers waited on as the last update went out.
 		let sentAsks: bigint[] = [];
 		let sentJoins: JoinAsk[] = [];
+		// The terms the publisher last heard; an update restating them tells it nothing, as when a
+		// join's tick moves while its probe is still unanswered.
+		let live = new SubscribeUpdate({
+			priority: msg.priority,
+			order: msg.order,
+			maxDelay: msg.maxDelay,
+			startGroup: msg.startGroup,
+			endGroup: msg.endGroup,
+			startFrame: msg.startFrame,
+			endFrame: msg.endFrame,
+		});
 		const asked = hooks.demandAsked(track.demand());
 		const edge = hooks.producerLargest(track);
 		for (;;) {
@@ -3033,23 +3055,26 @@ export class Subscriber {
 			});
 			// Encoded apart from the write, so a bound the wire can't carry still fails the track.
 			const encoded = await Writer.collect(this.version, (w) => update.encode(w, this.version));
-			// A failed write means the publisher stopped reading, as it does once it finishes the
-			// track. The responses decide how the track ends, cleanly at the FIN or with a reset's error.
-			try {
-				await stream.writer.write(encoded);
-			} catch {
-				return;
+			if (!restates(this.version, update, live)) {
+				// A failed write means the publisher stopped reading, as it does once it finishes the
+				// track. The responses decide how the track ends, cleanly at the FIN or with a reset's error.
+				try {
+					await stream.writer.write(encoded);
+				} catch {
+					return;
+				}
+				entry.sent += 1;
+				// A tail settling past SUBSCRIBE_END re-judges what the update now asks for.
+				entry.tail.touch();
+				console.debug(`subscribe update: id=${id} broadcast=${broadcast} track=${track.name}`);
 			}
+			live = update;
 			if (refresh !== undefined) sentWanted = refresh;
-			entry.sent += 1;
-			// A tail settling past SUBSCRIBE_END re-judges what the update now asks for.
-			entry.tail.touch();
 			lastSent = { ...current };
 			sentFills = fillGroups;
 			sentPriority = priority;
 			sentAsks = asks;
 			sentJoins = joins;
-			console.debug(`subscribe update: id=${id} broadcast=${broadcast} track=${track.name}`);
 		}
 	}
 
@@ -3601,9 +3626,10 @@ class ConsumeBroadcast extends broadcast.Consumer {
 			resolveTrackInfo: async (name, hold) => {
 				hold?.throwIfAborted();
 				// A copy already accepted holds the instance's immutable info, so it answers without
-				// waiting on its upstream, as the Rust broadcast answers from the track it holds.
-				const held = hooks.heldInfo(this, name);
-				if (held) return held;
+				// waiting on its upstream, as the Rust broadcast answers from the track it holds. The
+				// lookup holds that copy, and so its upstream subscription, until `hold` aborts.
+				const held = hooks.resolveHeld(this, name, hold);
+				if (held !== undefined) return held;
 				if (!consumed.valid) return subscriber.resolveTrackInfo(path, name, consumed, hold);
 				// Retirement cancels setup, but a one-shot query still releases its TRACK
 				// as soon as it answers instead of holding it for the broadcast's lifetime.
@@ -3749,6 +3775,24 @@ function narrowest(live: LiveRanges): number {
 function maxAge(ranges: readonly track.Range[]): number | null {
 	const budget = widest(ranges);
 	return budget < NO_MAX_DELAY ? budget : null;
+}
+
+// Whether `update` restates `live`, the terms the publisher last heard: the same terms, and on
+// lite-07 no range edited, or before it the same span. Mirrors the Rust `begin_subscription`.
+function restates(version: Version, update: SubscribeUpdate, live: SubscribeUpdate): boolean {
+	const terms =
+		update.wantedGroup === live.wantedGroup &&
+		update.priority === live.priority &&
+		update.order === live.order &&
+		update.maxDelay === live.maxDelay;
+	if (!terms) return false;
+	if (hasRanges(version)) return update.ranges?.length === 0 && !update.remove?.length && !update.retune?.length;
+	return (
+		update.startGroup === live.startGroup &&
+		update.endGroup === live.endGroup &&
+		update.startFrame === live.startFrame &&
+		update.endFrame === live.endFrame
+	);
 }
 
 // Whether two lists of live joins asked are the same.

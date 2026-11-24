@@ -1388,6 +1388,13 @@ impl Subscriber {
 		self.reader().window().start()
 	}
 
+	/// The groups the reader's ranges hold, once nothing in them is left to place.
+	pub(super) fn ranges(&self) -> Option<Cover> {
+		let mut reader = self.reader();
+		let window = reader.window();
+		window.is_settled().then(|| window.groups().cloned()).flatten()
+	}
+
 	/// Whether the serving copy places ranges as its publisher would; see
 	/// [`track::Subscriber::places_as_upstream`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
@@ -1784,6 +1791,12 @@ impl Fold {
 				return Default::default();
 			}
 			current.changes(folded.revision)
+		};
+		// Each range refolds where the reader's copy resolved it, so an overflowed log refolds
+		// them all rather than diffing.
+		let changes = match changes {
+			track::Changes::Keys(keys) => Some(keys),
+			track::Changes::Overflowed | track::Changes::Restated => None,
 		};
 		let retire = match &changes {
 			Some(keys) => keys.iter().filter_map(|key| folded.keys.remove(key)).collect(),
@@ -2226,8 +2239,13 @@ impl Reader {
 			let moved = scalars != (mirrored.priority, mirrored.order, mirrored.feed);
 			if sub.revision != revision {
 				// The keys the changes since touched, each with its range now, or every range
-				// once the log no longer reaches back that far.
-				let ranges = match sub.changes(revision) {
+				// once they were replaced whole.
+				let keys = match sub.changes(revision) {
+					track::Changes::Keys(keys) => Some(keys),
+					track::Changes::Overflowed => Some(sub.differ(&mirrored.ranges, &mirrored.joining)),
+					track::Changes::Restated => None,
+				};
+				let ranges = match keys {
 					Some(keys) => Ok(keys
 						.into_iter()
 						.map(|key| (key, sub.range(key).map(|range| (range, sub.joining(key)))))
@@ -2290,20 +2308,6 @@ impl Reader {
 						}));
 					}
 					Change::Edit(edited.into_iter().map(|(key, _)| key).collect())
-				}
-				// Unchanged only if each live join also keeps its tick: one added again under the
-				// same key asks its copies anew.
-				Some(Err(ranges))
-					if ranges
-						.iter()
-						.map(|(key, (range, _))| (key, range))
-						.eq(&self.mirrored.ranges)
-						&& (ranges.iter())
-							.filter(|(_, (range, _))| range.join().is_some())
-							.map(|(key, (_, since))| (key, since))
-							.eq(&self.mirrored.joining) =>
-				{
-					Change::Scalars
 				}
 				Some(Err(ranges)) => {
 					let mut mirrored = Mirrored {
@@ -2882,10 +2886,8 @@ impl Reader {
 				}
 				// The copy's own record bills to its track as a direct reader's does, including
 				// what a peek skipped before it parked.
-				let mut res = sub.poll_peek_group(ordered, waiter);
-				if let Err(err) = sub.settle_record(None) {
-					res = Poll::Ready(Err(err));
-				}
+				let res = sub.poll_peek_group(ordered, waiter);
+				sub.settle_record(None);
 				match res {
 					Poll::Pending => break,
 					Poll::Ready(Ok(Some(reserved))) => {
@@ -3011,15 +3013,21 @@ impl Reader {
 		}
 	}
 
+	/// Where the reader's window ends, once it is placed and bounded.
+	fn bounded_end(&mut self) -> Option<u64> {
+		let window = self.window();
+		window.end().filter(|_| !window.is_pending())
+	}
+
 	/// Whether a bounded window has nothing left to deliver, once no replaced copy may still
 	/// deliver a group under its bound: every group of the whole window is handed out (in any
 	/// of `taken`, the logical readers' records, the reader's own first) or accounted for, as
 	/// [`Self::accounts`] judges.
 	fn exhausted(&mut self, taken: &[&Delivered], ordered: bool, waiter: &kio::Waiter) -> bool {
-		let window = self.window();
-		let Some(end) = window.end().filter(|_| !window.is_pending()) else {
+		let Some(end) = self.bounded_end() else {
 			return false;
 		};
+		let window = &self.window;
 		let gaps: Vec<std::ops::Range<u64>> = window
 			.runs(window.floor().unwrap_or(0))
 			.take_while(|run| *run.start() < end)
@@ -3048,8 +3056,7 @@ impl Reader {
 		if self.resumed.is_some() {
 			return false;
 		}
-		let window = self.window();
-		if window.end().is_none() || window.is_pending() {
+		if self.bounded_end().is_none() {
 			return false;
 		}
 		let serving = self.copies.last().filter(|copy| {
@@ -3070,9 +3077,8 @@ impl Reader {
 				open.extend(skipped.gaps(&run));
 			}
 			let split = resumed.clamp(gap.start, gap.end);
-			if split < gap.end {
-				above.push(split..gap.end);
-			}
+			// Empty at or past the resume point, which accounts for itself.
+			above.push(split..gap.end);
 		}
 		if !open.is_empty() {
 			// What the asked copy's fills gave up is accounted for, as on one cursor.
@@ -3661,12 +3667,14 @@ impl Clone for Recover {
 impl Recover {
 	/// Whether to look past the copy being read: it stalled, closed short, or failed with a
 	/// verdict on the group while a newer route serves, or it failed delivering the group, or
-	/// it closed short on a route that failed since, which the front is to replace. A route
-	/// that returns to serve the copy being read is no change.
-	pub(super) fn wants(&mut self, err: Option<&Error>, waiter: &kio::Waiter) -> bool {
-		match err {
-			Some(err) if self.undelivered(err) => return true,
-			None if copy_failed(&self.copy) => return true,
+	/// it closed short on a route that failed since, or while the front stages the copy to
+	/// replace it, which the front is to splice. A route that returns to serve the copy being
+	/// read is no change.
+	pub(super) fn wants(&mut self, cause: &Cause, waiter: &kio::Waiter) -> bool {
+		match cause {
+			Cause::Failed(err) if self.undelivered(err) => return true,
+			Cause::Stalled | Cause::Closed if copy_failed(&self.copy) => return true,
+			Cause::Closed if self.route.consumer().read().staged.is_some() => return true,
 			_ => {}
 		}
 		while self
@@ -3756,25 +3764,28 @@ impl Recover {
 			reader.sync(waiter);
 		}
 		loop {
-			let (generation, serving, end, moves) = {
+			let (generation, serving, end, moves, staged) = {
 				let route = self.route.consumer().read();
 				(
 					route.generation,
 					route.copy.clone(),
 					route.phase.end(),
 					route.phase.moves(),
+					route.staged.as_ref().map(|(id, _)| *id),
 				)
 			};
 			// Once no front will replace the copy, nothing comes after it.
 			let done = !moves;
 			// Registered before looking, so a route change from here on wakes the reader, a
-			// finished track's too. Not through the watch: `generation` is the one just read,
-			// not `self.generation`.
+			// finished track's too, and so does a stage coming or going, which a short close
+			// waits on. Not through the watch: `generation` is the one just read, not
+			// `self.generation`.
 			let moved = self
 				.route
 				.consumer()
 				.poll(waiter, |route| {
-					match route.generation != generation || !route.phase.moves() {
+					let restaged = route.staged.as_ref().map(|(id, _)| *id) != staged;
+					match route.generation != generation || restaged || !route.phase.moves() {
 						true => Poll::Ready(()),
 						false => Poll::Pending,
 					}
@@ -3826,8 +3837,9 @@ impl Recover {
 				match cause {
 					// The copy being read still serves: only a failure asks it again.
 					Cause::Stalled => return Poll::Pending,
-					// Its route failed, so the next one may hold more, unless none will come.
-					Cause::Closed if copy_failed(&self.copy) && !done => return Poll::Pending,
+					// Its route failed, or the front stages the copy to replace it, so that one
+					// may hold more, unless none will come.
+					Cause::Closed if (copy_failed(&self.copy) || staged.is_some()) && !done => return Poll::Pending,
 					// It serves on with no front to replace it, so its close stands.
 					Cause::Closed => return Poll::Ready(Err(Error::NotFound)),
 					Cause::Failed(_) => {}
@@ -4069,7 +4081,8 @@ pub(super) enum Cause {
 	/// The copy stalled while a newer route serves.
 	Stalled,
 	/// The copy closed the group short of a known end, a FIN without GROUP_END, after the
-	/// front replaced it: the route that replaced it may hold more.
+	/// front replaced it or while it stages a replacement: the route replacing it may hold
+	/// more.
 	Closed,
 	/// The copy failed with this error.
 	Failed(Error),
@@ -5767,6 +5780,51 @@ mod test {
 		routes.serve(b.consume());
 		assert_eq!(read(&mut reading), Some(b"b".to_vec()));
 		assert_eq!(read(&mut reading), None);
+	}
+
+	/// A group the serving copy closed short while the front stages the copy to replace it
+	/// waits for that copy: it reads on once the copy is spliced, and ends where it closed
+	/// once the stage is dropped.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_short_group_waits_for_a_staged_replacement() {
+		for spliced in [true, false] {
+			let routes = Producer::new();
+			let front = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&front, HOUR);
+			let mut short = a.create_group(group::Info { start: 0 }).unwrap();
+			short.write_frame(ts(0), b"a".as_ref()).unwrap();
+			let mut reading = recv(&mut sub);
+			assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+
+			let b = copy();
+			let mut whole = b.create_group(group::Info { start: 0 }).unwrap();
+			for (ms, frame) in [(0, b"a"), (1, b"b")] {
+				whole.write_frame(ts(ms), frame.as_ref()).unwrap();
+			}
+			whole.finish_at(2).unwrap();
+			let staged = routes.stage(b.consume());
+			short.finish().unwrap();
+			if spliced {
+				assert!(
+					reading.read_frame().now_or_never().is_none(),
+					"waits for the staged copy"
+				);
+				routes.splice(b.consume(), staged);
+				assert_eq!(read(&mut reading), Some(b"b".to_vec()));
+				assert_eq!(read(&mut reading), None);
+			} else {
+				// Its end waits too, and wakes once the stage is dropped.
+				let wake = Arc::new(Wake::default());
+				let waiter = kio::Waiter::new(wake.clone().into());
+				assert!(reading.poll_finished(&waiter).is_pending(), "waits for the staged copy");
+				drop(staged);
+				assert!(wake.0.load(std::sync::atomic::Ordering::Relaxed), "woken once dropped");
+				assert!(matches!(reading.poll_finished(&waiter), Poll::Ready(Ok(1))));
+			}
+		}
 	}
 
 	/// A replacement that holds none of a short group is asked for the rest, which continues
@@ -10525,7 +10583,10 @@ mod test {
 		assert!(routes.follow(&mut held, &weak));
 		{
 			let asked = held.sub.preferences().read();
-			assert!(asked.changes(revision).is_some(), "asked as an edit, not whole");
+			assert!(
+				matches!(asked.changes(revision), track::Changes::Keys(_)),
+				"asked as an edit, not whole"
+			);
 			assert_eq!(asked.subscription().order, track::Order::Ascending);
 		}
 
@@ -11706,6 +11767,69 @@ mod test {
 		assert_eq!(start(), crate::track::Start::Time(20));
 		preferences.update(ranges(3)).unwrap();
 		assert_eq!(start(), join(3), "left for the copy to place");
+	}
+
+	/// A live join the reader placed stays where it was placed after more edits than the
+	/// change log holds, whether they leave the other ranges as they were or not: placing it
+	/// afresh against the copy's cache now would pass over groups the reader still owes.
+	#[test]
+	fn a_placed_live_join_keeps_its_place_once_the_change_log_overflows() {
+		// Holds no group this test writes, so it changes only the ranges.
+		let later = track::Range {
+			start: track::Start::Time(500),
+			end: Some(600),
+		};
+		for left in [None, Some(later)] {
+			let routes = Producer::new();
+			let a = copy();
+			for sequence in 0..=10 {
+				write(&a, sequence);
+			}
+			routes.serve(a.consume());
+			let join = track::Range {
+				start: track::Start::Live {
+					min: Some(Duration::from_millis(5)),
+					max: None,
+				},
+				end: Some(1_000_000),
+			};
+			let preferences = track::Preferences::from(Subscription::default().with_ranges([join]));
+			let mut sub = routes.consume().subscribe(preferences.clone());
+			let mut delivered = Delivered::default();
+			let mut next = |sub: &mut Subscriber| {
+				let Poll::Ready(Ok(Some(candidate))) =
+					sub.poll_peek_group(false, false, &mut delivered, &kio::Waiter::noop())
+				else {
+					panic!("a group to reserve")
+				};
+				sub.take(candidate).unwrap().start
+			};
+			assert_eq!(next(&mut sub), 5);
+			for sequence in 11..=20 {
+				write(&a, sequence);
+			}
+			// Add and retire another range until the log no longer reaches the reader's revision.
+			for _ in 0..40 {
+				let add = track::Edit {
+					add: vec![(1, track::Range::ALL)],
+					..Default::default()
+				};
+				preferences.edit(add).unwrap();
+				let retire = track::Edit {
+					retire: vec![1],
+					..Default::default()
+				};
+				preferences.edit(retire).unwrap();
+			}
+			if let Some(range) = left {
+				let add = track::Edit {
+					add: vec![(2, range)],
+					..Default::default()
+				};
+				preferences.edit(add).unwrap();
+			}
+			assert_eq!(next(&mut sub), 6, "{left:?}: still placed at 5");
+		}
 	}
 
 	/// Every live reader counts toward the demand on a new copy however many readers came
@@ -14069,5 +14193,52 @@ mod test {
 			sub.poll_recv_group(&kio::Waiter::noop()),
 			Poll::Ready(Ok(None))
 		));
+	}
+
+	/// A front reader reaching back to the oldest group of a sparse-key track, as a viewer
+	/// joining a relay does, never settles the keys below the first group it read. Once the
+	/// pool shrinks under the gaps its publisher reported, it folds what it settled from
+	/// there, rather than end with [`Error::Lagged`].
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_reader_folds_from_the_oldest_group_it_read() {
+		const BASE: u64 = 1_000_000;
+		const GAP: u64 = 100;
+		let pool = crate::cache::Pool::new(crate::cache::Config::default().with_capacity(1 << 30));
+		let broadcast = Arc::new(broadcast::Info {
+			pool: pool.clone(),
+			..Default::default()
+		});
+		let routes = Producer::new();
+		let logical = track::Request::new(broadcast.clone(), "audio")
+			.routes(routes.consume())
+			.accept(crate::track::Info::timed());
+		let a = track::Producer::new(broadcast, "audio", crate::track::Info::timed());
+		routes.serve(a.consume());
+		let mut sub = None;
+		let mut read = |i: u64, size: usize| {
+			let key = BASE + i * GAP;
+			let mut group = a.create_group(group::Info { start: key }).unwrap();
+			group.write_frame(ts(key), vec![0u8; size]).unwrap();
+			group.finish().unwrap();
+			let sub = sub.get_or_insert_with(|| subscribe(&logical, HOUR));
+			match sub.poll_recv_group(&kio::Waiter::noop()) {
+				Poll::Ready(Ok(Some(group))) => assert_eq!(group.start, key),
+				res => panic!(
+					"the reader runs on at {key}: {:?}",
+					res.map(|res| res.map(|group| group.map(|group| group.start)))
+				),
+			}
+			// What a wire publisher tells its peer of the keys between groups.
+			sub.record_mut()
+				.tell(key + 1..key + GAP, crate::model::record::Report::Dropped);
+		};
+		for i in 0..1000 {
+			read(i, 1);
+		}
+		pool.resize(64 * 1024);
+		for i in 1000..1064 {
+			read(i, 16 * 1024);
+		}
 	}
 }

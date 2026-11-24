@@ -48,6 +48,9 @@ class Link:
     # The build whose relays dial this link, or None for every build: a roll that also changes
     # the graph, as when the new build renders its dial set by a new rule.
     build: str | None = None
+    # The one build whose dialers price the link with `cost`, or None for every build: a roll whose new
+    # build prices links by a new rule while the old build's relays still dial them unpriced.
+    cost_build: str | None = None
 
     @property
     def name(self) -> str:
@@ -62,6 +65,10 @@ class Link:
     def dialed_on(self, build: str) -> bool:
         """Whether a dialer on `build` dials this link."""
         return self.build is None or self.build == build
+
+    def cost_on(self, build: str) -> int | None:
+        """The cost a dialer on `build` dials this link at, or None when it dials it unpriced."""
+        return self.cost if self.cost_build in (None, build) else None
 
 
 @dataclass
@@ -120,7 +127,7 @@ class Mesh:
 
 NAME = re.compile(r"^[a-z0-9][a-z0-9_]*$")
 SHAPE_KEYS = {"delay", "rate", "queue"}
-LINK_KEYS = {"dial", "accept", "cost", "upstream", "shape", "build"}
+LINK_KEYS = {"dial", "accept", "cost", "upstream", "shape", "build", "cost_build"}
 
 
 def load_mesh(path: Path) -> Mesh:
@@ -165,7 +172,16 @@ def load_mesh(path: Path) -> Mesh:
         upstream = bool(raw.get("upstream", False))
         if upstream and build == "old":
             raise ValueError(f"{path}: link {dial}-{accept} is marked upstream, which only the new build reads")
-        links.append(Link(dial, accept, cost, upstream, {**shape, **own}, build))
+        cost_build = raw.get("cost_build")
+        if cost_build not in (None, "old", "new"):
+            raise ValueError(f"{path}: link {dial}-{accept} cost_build is `old` or `new`")
+        if cost_build and cost is None:
+            raise ValueError(f"{path}: link {dial}-{accept} names a cost_build but no cost")
+        if cost_build and build and cost_build != build:
+            raise ValueError(
+                f"{path}: link {dial}-{accept} is priced on the {cost_build} build, which does not dial it"
+            )
+        links.append(Link(dial, accept, cost, upstream, {**shape, **own}, build, cost_build))
     mesh = Mesh(doc.get("name", path.stem), relays, links)
     for build in mesh.builds():
         mesh.diameter(build)
@@ -634,8 +650,9 @@ class Relay:
             if link.dial != self.name or not link.dialed_on(build.name):
                 continue
             entry = f'url = "https://127.0.0.1:{run.shaper_port[link.name]}/", token = "peer.{self.name}"'
-            if link.cost is not None:
-                entry += f", cost = {link.cost}"
+            cost = link.cost_on(build.name)
+            if cost is not None:
+                entry += f", cost = {cost}"
             # The mark is the new build's config: a release before it rejects the field, so the old
             # build's link is unmarked, as a deployment rolling off that release configures it.
             if link.upstream and build.name == "new":
@@ -1315,7 +1332,14 @@ class Run:
                 # Written in place, so a shaper killed mid-write leaves it torn: report that, not crash.
                 stats = {"error": f"{path.name}: {err}"}
             out.append(
-                {"link": link.name, "cost": link.cost, "upstream": link.upstream, "build": link.build, "shaper": stats}
+                {
+                    "link": link.name,
+                    "cost": link.cost,
+                    "cost_build": link.cost_build,
+                    "upstream": link.upstream,
+                    "build": link.build,
+                    "shaper": stats,
+                }
             )
         return out
 

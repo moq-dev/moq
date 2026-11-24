@@ -19,17 +19,31 @@ records each decision.
 
 Decided 2026-11-21 (maintainer, /quest-plan of an exhaustive full-codebase
 audit before the `0.22.0` cut, covering both pre-release and new code): the cut
-also waits on the breaking fixes that audit surfaced across the wire, vendored
-native crates, and public APIs:
-
-- **Wire and drafts.** Delete the temporary `raw_parts` / `base.split("/")`
-  `Path Keep` migration before lite-07 finalizes
-  ([lite07-path-keep-parts](/quest/m2/lite07-path-keep-parts.md)).
+also waited on the breaking fixes that audit surfaced across the wire, vendored
+native crates, and public APIs, and all of them have landed.
 
 Non-breaking findings from the same audit live in
 [m0](/quest/m0/README.md) (release-cut pipeline and packaging blockers),
 [m3](/quest/m3/README.md) (softer edge cases and low-severity cleanups), and
 [m4](/quest/m4/fuzz-binary-parsers.md) (binary-parser fuzz targets).
+
+Decided 2026-11-23 (maintainer): ✅ the cut waits for a
+[safe on-demand drop](/quest/m2/on-demand-drop.md) and
+[deleting `abort_unwanted`](/quest/m2/abort-unwanted-delete.md), so 0.22 never
+publishes an API the next release removes (rejected: leaving them in m3,
+cutting first and deleting in the next breaking release).
+
+Decided 2026-11-24 (maintainer, /quest-plan of the exhaustive `moq-net`
+subscribe/fetch audit): ✅ the cut waits on
+[Redesign lite-07 subscribe and fetch](/quest/m2/lite07-subscribe/README.md),
+which adds `Previous Delta` to `GROUP` headers, requires `RESET_STREAM_AT` for
+opened Group Streams, removes `FETCH` and `SUBSCRIBE_SKIP` on lite-07, moves
+`Priority` and `Group Order` onto per-range wire fields and public
+`track::Range` across Rust, JS, and all FFI bindings, and adds judged `Max Age`
+to `SUBSCRIBE_DROP(OLD)` (rejected: bugfixes only without wire changes; drop).
+This supersedes `quest/m2/time-addressing/per-range-start.md` (#9491) and
+#9538; non-wire progress and cache-invariant fixes live independently in
+[m1](/quest/m1/subscribe-progress-fixes.md).
 
 Decided 2026-11-16 (maintainer, /quest-plan of an audit of everything on
 `main` since `release`, and of the lite-07 draft): the cut also waits on what

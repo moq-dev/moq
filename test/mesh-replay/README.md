@@ -58,10 +58,16 @@ queue = "250ms"  # how long a datagram waits behind the rate limit before it is 
 dial = "a"
 accept = "b"
 cost = 2         # optional, ?cost on the dialer's peer URL
+cost_build = "new"  # optional: only a dialer on this build prices it; the other dials it unpriced
 upstream = true  # optional: `dial` marks `accept` upstream, on the new build only
 shape = { delay = "40ms" }   # optional, over [shape]
 build = "new"    # optional: only a dialer on this build dials it
 ```
+
+A link naming a `cost_build` models a roll that also prices its links, such as a new build
+whose relays dial a measured cost while the old build's dial unpriced: the old fleet keeps
+routing by fewest links until it rolls. It needs a `cost`, and a link naming a `build` can
+only name that one.
 
 A link naming a `build` models a roll that also changes the graph, such as a new
 build that renders its dial set by a new rule: mid-roll, a link exists while its

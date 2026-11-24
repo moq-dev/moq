@@ -158,13 +158,24 @@ impl Skipped {
 			.map(|(run, _)| run.end().saturating_add(1))
 	}
 
-	/// Forget every run below `floor`, which a fold settled.
-	pub fn forget_below(&mut self, floor: u64) {
+	/// The lowest key from `key` on that was skipped.
+	pub fn next_from(&self, key: u64) -> Option<u64> {
+		let skipped = self.0.as_ref()?;
+		skipped
+			.runs
+			.overlapping(&(key..=u64::MAX))
+			.next()
+			.map(|(run, _)| (*run.start()).max(key))
+	}
+
+	/// Forget every run in `groups`, which a fold settled.
+	pub fn forget(&mut self, groups: std::ops::Range<u64>) {
 		if let Some(skipped) = &mut self.0
-			&& let Some(below) = floor.checked_sub(1)
+			&& let Some(last) = groups.end.checked_sub(1)
+			&& !groups.is_empty()
 			&& !skipped.runs.is_empty()
 		{
-			skipped.runs.remove(0..=below);
+			skipped.runs.remove(groups.start..=last);
 		}
 	}
 

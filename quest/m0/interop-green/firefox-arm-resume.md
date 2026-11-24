@@ -2,86 +2,72 @@
 
 ## Goal
 
-On the Nightly's runner class (`ubuntu-24.04-arm`), `just test media
---media-engines firefox` passes `rejoin reaches live` and `reattach reaches
-live`, including its audio/video sync, because the player page's main thread no
-longer stops on a resume (pause, rejoin, or reattach) and so skips no audio
-groups as missing there.
-
-## Required
-
-- [Reattach old groups](/quest/m0/interop-green/reattach-old-groups.md) -
-  [moq-dev/moq#9492](https://github.com/moq-dev/moq/pull/9492) deletes it and
-  adds the `waitForLive` failure diagnostics this needs: how long ago the
-  player's latest sample arrived, the host's busiest processes, and, on
-  Chromium, both pages' long animation frames with their longest scripts.
+On the Nightly's runner class (`ubuntu-24.04-arm`), a full `just test media
+--media-engines firefox` run's lifecycle player skips no audio groups as missing
+after a resume (pause, rejoin, or reattach), because its main thread no longer
+stops for hundreds of milliseconds applying the resume's burst of `moq-lite-06`
+responses and replayed groups.
 
 ## Plan
 
-Decided 2026-11-23 (maintainer, /quest-run): plan this quest, reproducing on
-ARM with #9492's diagnostics first, then finding the cause (relay or player)
-before fixing.
+[moq-dev/moq#9524](https://github.com/moq-dev/moq/pull/9524) found and removed a
+harness-only third of the stop: Playwright's Juggler makes every page a
+debuggee, so Firefox recorded an async stack at every await and promise
+reaction (`js::SavedStacks::saveCurrentStack`, 24 to 33% of the resume's
+samples), which no user pays. With `javascript.options.asyncstack` off in the
+harness, 12 plain full Firefox runs on ARM passed 12 of 12 (11 of 12 before),
+and resume audio skips over 0.5 s fell from 17 to 9, in
+[run 45338455063](https://github.com/moq-dev/moq/actions/runs/45338455063):
 
-Found while validating [moq-dev/moq#9494](https://github.com/moq-dev/moq/pull/9494):
-two full Firefox runs on `ubuntu-24.04-arm` (jobs
-[fix-full 1](https://github.com/moq-dev/moq/actions/runs/45269012363/job/138023508756)
-and its sibling in [run 45269012363](https://github.com/moq-dev/moq/actions/runs/45269012363),
-at `42318ce123`, on `moq-lite-06`) failed before the `replacement` section, in
-code #9494 does not change:
+| Resume | Skips, harness as on main | Skips, async stacks off | Typical skip |
+| --- | --- | --- | --- |
+| Pause | 7 of 12 runs | 4 of 12 | 3.0 to 3.5 s |
+| Rejoin (unsubscribe) | 7 of 12 | 5 of 12 | 1.2 to 2.2 s |
+| Reattach (detach) | 3 of 12 | 0 of 12 | 2.8 to 3.0 s |
 
-- `FAIL rejoin reaches live: held a frame 2033ms behind the fixture 2000ms
-  after the first frame ...; audio running and buffering with nothing anchored`
-- `FAIL resume audio/video sync: reattach reaches live: offset 800ms`
+What remains, measured in that PR with Gecko profiles (`MOZ_PROFILER_STARTUP=1`,
+`MOZ_PROFILER_SHUTDOWN=<dir>/p-%p.json`, `MOZ_PROFILER_STARTUP_FEATURES=nostacksampling`
+for LongTask markers alone, `js,cpu` for stacks; Playwright's Firefox honors them):
 
-What the artifacts show:
+- Each resume is one long task on the player's main thread, a WebSocket
+  `message` event (the Firefox player falls back to QMux over WebSocket, which
+  packs records up to 16382 bytes into one message). On ARM with async stacks
+  off, markers only: pause 60 to 530 ms, rejoin a median near 260 ms, reattach
+  near 360 ms. On x86 the same tasks are 70 to 90 ms.
+- The burst grows with the track's history, not the join's window. The audio
+  track is keyed by µs timestamps, and before lite-07 there is no SKIP, so the
+  relay sends one SUBSCRIBE_DROP per gap between groups (about 52 a second), and
+  at each join `TrackRun::resolve` in `rs/moq-net/src/lite/publisher.rs`
+  forwards every final drop below the start too, deliberately, for a
+  downstream relay filling below it. A group key sits between each pair of
+  gaps, so none merge. Locally the bursts were 140 drops at the pause resume,
+  394 at the rejoin, and 627 at the reattach.
+- Stacks with async stacks off spread the cost: the lite subscriber's
+  `runResponses` about 15%, `Track` `#askFills` about 14%, zod parsing about
+  6%, and the rest across `#tryRecvGroup`, `#tryDrop`, `#drop` (which walks
+  every `#cached` entry per drop), and hang's consumer.
+- Ruled out: applying a burst's buffered responses together. Decoding them
+  first awaits once per response, so the replayed group streams land while the
+  drops are still unapplied, and each arrival judges hundreds of open gaps
+  (`#askFills`, `#landing`, `Ledger.gaps`): a full local run's rejoin stop grew
+  from 71 to 250 ms and ARM's doubled. Only the pause resume improved.
+- Ruled out by [moq-dev/moq#9511](https://github.com/moq-dev/moq/pull/9511):
+  the retained-audio replay of 2.13 s.
 
-- Neither is a relay drop. The rejoin run's only `group error err=old`
-  (21:28:58.82, `media-9880.hang`) is the `control: leaked session` case's
-  broadcast, after the lifecycle case's connections closed at 21:28:26. The
-  lifecycle window (`media-8089.hang`) has one `fetch abandoned track=video`
-  and nothing else. #9494's body attributes the rejoin failure to that `err=old`;
-  it does not apply.
-- Both are the player page stopping, the signature #9492 found in Chromium's
-  scheduled Interop failure of 2026-11-22. In the Playwright trace,
-  consecutive `__moqInteropSample`s (`seq` n to n+1) jump on the page clock at
-  each resume, and the pause and rejoin jumps are followed at once by
-  `skipping missing groups` on audio covering more than a second:
+Next, cut the per-resume work to what the join's window needs, at the root:
 
-  | Run | Pause resume | Rejoin | Reattach |
-  | --- | --- | --- | --- |
-  | rejoin failed | 392 ms, skips 2.74 s | 910 + 710 ms, skips 1.16 s | not reached |
-  | reattach failed | 648 ms, skips 3.20 s | 807 ms, skips 1.56 s | 775 ms |
+1. Decide whether a relay must name a lite-06 subscriber's final drops below
+   its start. They exist so a downstream relay filling below the start learns
+   the keys' fate; a player never reads there. Options: name them as runs
+   coalesced across the groups between (needs a wire change, so lite-07 or
+   later only), or send them only once the subscriber asks below its start (a
+   fill already answers a missing key). Model it with `/verify-subscribe`.
+2. Profile the rest on x86 with `taskset` to one or two CPUs, where it shows
+   the same shape, and remove per-drop or per-arrival walks over the whole
+   cache or drop set in `js/net/src/track.ts`.
 
-  So every resume stops the page; a check fails when the stop outlasts its
-  catch-up window.
-- This runs after [moq-dev/moq#9377](https://github.com/moq-dev/moq/pull/9377),
-  which #9492 named as the likeliest fix for the Chromium stop (a lite-05/06
-  copy's per-key fill walk). Either #9377 did not remove the whole stop, or
-  this is another task on the same resume path that the slower ARM CPU
-  exposes.
+Measure the stop and the skips on ARM before and after with a temporary
+`pull_request` workflow, as #9524 did. Loosening the bounds or retrying is not
+a fix.
 
-Next: reproduce on `ubuntu-24.04-arm` with a temporary `pull_request` workflow
-running `just test media --media-engines chromium,firefox --media-cases
-pause,rejoin,detach` several times per job, as #9494's did, once #9492's
-diagnostics have landed. On Firefox they show only that the page stopped (the
-latest sample's age and the host's busiest processes): long animation frames
-are Chromium-only, so `test/interop/clients/js/src/stalls.ts` logs nothing
-there. To name the script, use a Chromium player that stops the same way, or
-capture a Gecko profile of the Firefox player across the resumes (for example
-`MOZ_PROFILER_STARTUP=1` with `MOZ_PROFILER_SHUTDOWN=<path>`, kept on
-failure; confirm Playwright's Firefox build honors them). Candidates are work proportional to the span of audio keys (µs
-timestamps) rather than to the groups held, such as the gap handling in
-`js/hang/src/container/consumer.ts` or the lite-06 fill in
-`js/net/src/lite/fills.ts`. Confirm it on x86 on fewer CPUs (`taskset`), then fix
-it at the root and measure the stop on ARM before and after. If no stop
-recurs, the relay becomes the suspect again: rerun with the relay at
-`moq_net=trace`. Loosening the bounds or retrying is not a fix.
-
-Public API: none expected. Wire: none expected.
-
-## Related
-
-- [Firefox replacement](/quest/m0/interop-green/firefox-replacement.md) -
-  [moq-dev/moq#9494](https://github.com/moq-dev/moq/pull/9494) rewrites it to
-  the `moq-lite-06` fallback's audio on ARM, which also ends unanchored after
-  `skipping missing groups: track=audio`. The same page stop may explain it.
+Public API: none expected. Wire: none unless option 1 picks the coalesced runs.

@@ -236,12 +236,20 @@ and switching rules in `rs/moq-net/AGENTS.md` before the cut):
   [moq-dev/moq#9265](https://github.com/moq-dev/moq/pull/9265)'s.
 
 Decided 2026-11-21 (maintainer, /quest-plan of the exhaustive pre-cut
-full-codebase audit): ✅ the cut waits on deleting the temporary `raw_parts` /
-`base.split("/")` `Path Keep` migration in Rust and JS
-([lite07-path-keep-parts](/quest/m2/lite07-path-keep-parts.md)) so lite-07 does
-not freeze with a wire-divergent migration hack, and this quest fixes the
-changelog typo at `drafts/draft-lcurley-moq-lite.md:2380` during the cut
-(rejected: leaving the temporary migration in place).
+full-codebase audit): ✅ this quest fixes the changelog typo at
+`drafts/draft-lcurley-moq-lite.md:2380` during the cut.
+
+Decided 2026-11-24 (maintainer, /quest-plan of the exhaustive `moq-net`
+subscribe/fetch audit): ✅ the cut waits on
+[Redesign lite-07 subscribe and fetch](/quest/m2/lite07-subscribe/README.md)
+(rejected: bugfixes only without wire changes; drop). That epic freezes
+`Previous Delta` on `GROUP` headers, requires `RESET_STREAM_AT` for opened
+Group Streams (superseding the 2026-11-14 `SUBSCRIBE_DROP` note for publisher
+and peer resets), removes `FETCH` (`0x3`) and `SUBSCRIBE_SKIP` (superseding the
+2026-10-20 `SUBSCRIBE_SKIP` note), allows `Anchor::Position` with `Frame == 0`
+and exclusive `End` plus one-shot `SUBSCRIBE` + immediate `FIN`, moves
+`Priority` and `Group Order` onto each `Range` and `Retune`, and adds judged
+`Max Age` to `SUBSCRIBE_DROP(OLD)`.
 
 Decided 2026-11-23 (maintainer, /quest-run): ✅ the wire for
 [metadata-only subscriptions](/quest/m3/route-health/meta.md) goes into
@@ -255,8 +263,8 @@ Required; the implementation stays in m3 and lands on lite-07's wire.
 ## Required
 
 - [Metadata mode on the lite-07 wire](/quest/m2/lite07-metadata.md) - `Meta` on SUBSCRIBE, the payload-less FRAME, and the refusal a peer without metadata mode answers with
-- [Count lite-07 Path Keep by Path::parts](/quest/m2/lite07-path-keep-parts.md) - removes the temporary `raw_parts` / `base.split("/")` migration before lite-07 freezes
 - [Origin route rank](/quest/m1/lite07-routing/origin-route-rank.md) - bridged routes keep drain and priority, and the draft's rank text matches the code
+- [Redesign lite-07 subscribe and fetch](/quest/m2/lite07-subscribe/README.md) - data-layer Previous Delta, RESET_STREAM_AT, FETCH and SUBSCRIBE_SKIP removal, per-range Priority and Order, and judged OLD drops freeze into lite-07
 
 ## Related
 
