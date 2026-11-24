@@ -56,7 +56,3 @@ Where the sentinel lives on `main`:
 
 A breaking API change (`!`): `min` becomes optional in Rust, JS, and
 `moq-ffi` if it exposes it. Migration: `Duration` → `Some(Duration)`.
-
-## Related
-
-- [Per-range start](/quest/m2/time-addressing/per-range-start.md) - rewrites the same join placement in `TrackRun`; land whichever is first, then merge
