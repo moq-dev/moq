@@ -487,7 +487,8 @@ impl Running {
 				}
 				// The peer may only finish the stream: while the session lives, whatever else
 				// broke it lost what the peer said. An ending session's own end says why, which a
-				// read can report before the session's close is seen.
+				// read can report before the session's close is seen: `transport_error` makes an
+				// `Error::Session` only of the transport's session close, never of a stream reset.
 				Poll::Ready(Err(err)) => {
 					if matches!(err, Error::Session(_)) || subscriber.session.poll_ending(waiter).is_ready() {
 						return Err(err);

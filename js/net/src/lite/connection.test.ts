@@ -1154,9 +1154,9 @@ for (const [name, violate] of [
 	});
 }
 
-// Reach the Announce Stream `quic` opens: `reset` resets it, and `stop` fails its writes from
-// then on with the error a peer's STOP_SENDING raises.
-function announceWriter(quic: MockTransport): { reset(): void; stop(): void } {
+// Reach the Announce Stream `quic` opens: `reset` resets it with `code`, 0 as a browser reports a closing
+// session's, and `stop` fails its writes from then on with the error a peer's STOP_SENDING raises.
+function announceWriter(quic: MockTransport): { reset(code?: number): void; stop(): void } {
 	let announce: WritableStreamDefaultWriter<Uint8Array> | undefined;
 	let stopped = false;
 	const create = quic.createUnidirectionalStream.bind(quic);
@@ -1182,7 +1182,8 @@ function announceWriter(quic: MockTransport): { reset(): void; stop(): void } {
 		return stream;
 	};
 	return {
-		reset: () => void defined(announce).abort(new Error("gone")),
+		reset: (code = 0) =>
+			void defined(announce).abort(Object.assign(new Error("gone"), { source: "stream", streamErrorCode: code })),
 		stop: () => {
 			stopped = true;
 		},
@@ -1247,6 +1248,65 @@ for (const name of ["resets", "stops"] as const) {
 		}
 	});
 }
+
+// A reset carrying an application code of its own is no closing session's: it breaks the session.
+test("an Announce Stream the peer resets with a code closes moq-lite-07 with PROTOCOL_VIOLATION", async () => {
+	const pair = createMockTransportPair(ALPN_07_WIP);
+	const serverAnnounce = announceWriter(pair.server);
+	const down = new Producer();
+	const fromServer = new Producer();
+	const url = new URL("https://localhost/test");
+	const [client, server] = await Promise.all([
+		connect({ url, transport: pair.client, consume: fromServer }),
+		accept({ url, transport: pair.server, publish: down.consume() }),
+	]);
+	const room = down.route(Path.from("down/room"));
+	const atClient = fromServer.routes();
+	try {
+		expect(await atClient.next()).toMatchObject({ prefix: Path.from("down/room"), kind: "start" });
+		serverAnnounce.reset(7);
+		expect((await pair.client.closed).closeCode).toBe(SessionCode.ProtocolViolation);
+	} finally {
+		atClient.close();
+		client.abort();
+		server.abort();
+		room.broadcast.close();
+		for (const origin of [down, fromServer]) origin.close();
+	}
+});
+
+// A peer that stops this side's Announce Stream as it asks for a prefix is leaving too: the reader
+// waiting on that ANNOUNCE_REQUEST is not failed with the stop, and the session stays open.
+test("an ANNOUNCE_REQUEST the peer stops leaves its reader and the session open", async () => {
+	const pair = createMockTransportPair(ALPN_07_WIP);
+	const clientAnnounce = announceWriter(pair.client);
+	const down = new Producer();
+	const url = new URL("https://localhost/test");
+	const [client, server] = await Promise.all([
+		connect({ url, transport: pair.client }),
+		accept({ url, transport: pair.server, publish: down.consume() }),
+	]);
+	let closed = false;
+	void pair.client.closed.then(() => {
+		closed = true;
+	});
+	clientAnnounce.stop();
+	const listing = client.announced(Path.Pattern.literal(ROOM));
+	let ended: unknown;
+	void listing.closed.then((err) => {
+		ended = err ?? "closed";
+	});
+	try {
+		await settle();
+		expect(ended).toBeUndefined();
+		expect(closed).toBe(false);
+	} finally {
+		listing.close();
+		client.abort();
+		server.abort();
+		down.close();
+	}
+});
 
 // The peer finishing its Announce Stream is leaving: its routes end, the session stays, and the
 // prefixes it asked for are still answered.

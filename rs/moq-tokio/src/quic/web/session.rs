@@ -357,6 +357,11 @@ impl Session {
 	/// When there is a session ID (WebTransport over HTTP/3), a `CloseWebTransportSession`
 	/// capsule is written on the CONNECT stream before the QUIC connection is closed.
 	/// This allows browser clients to receive the close code and reason via `WebTransport.closed`.
+	/// First, every stream either side sends on, the HTTP/3 ones aside, is ended with
+	/// `WT_SESSION_GONE`: writers see their streams stopped, and the capsule waits until the peer
+	/// acknowledged what was written and reset its own streams, for up to `max(3 RTT, 100 ms)`,
+	/// since Chrome crashes on a capsule arriving under live streams
+	/// (<https://issues.chromium.org/issues/589817008>).
 	///
 	/// The capsule write and connection close happen asynchronously in a spawned task
 	/// that keeps the session alive until then, so the caller may drop it right away.

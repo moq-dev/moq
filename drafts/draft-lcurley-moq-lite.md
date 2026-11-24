@@ -379,7 +379,7 @@ A routing node is an endpoint that forwards and sends the [Node ID Parameter](#n
 
 An endpoint that opens the stream keeps it for the session, so no message it sends about routing overtakes another.
 An endpoint MUST close the session with a PROTOCOL_VIOLATION if its peer opens a second Announce Stream or resets one.
-An endpoint whose transport cannot tell a reset from its session closing, such as a browser's WebTransport, which reports a closing session's WT_SESSION_GONE as an application error code of 0, instead treats its peer resetting its Announce Stream, or stopping the endpoint's, as the peer leaving, as a finished stream does, and leaves the session's close to say why.
+An endpoint whose transport cannot tell a reset from its session closing, such as a browser's WebTransport, which reports a closing session's WT_SESSION_GONE as an application error code of 0, instead treats its peer resetting its Announce Stream with code 0, or stopping the endpoint's with it, as the peer leaving, as a finished stream does, and leaves the session's close to say why.
 An endpoint finishes its stream only when it is leaving the session, which ends every route and claim it sent.
 Its peer keeps answering the prefixes the endpoint asked for, which it can no longer edit.
 

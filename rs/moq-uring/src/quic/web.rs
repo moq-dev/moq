@@ -665,6 +665,12 @@ impl Session {
 		}
 	}
 	/// Close the session with an application code and reason.
+	///
+	/// Over HTTP/3, every stream either side sends on, the HTTP/3 ones aside, is first ended with
+	/// `WT_SESSION_GONE`: writers see their streams stopped, and the close capsule waits until the
+	/// peer acknowledged what was written and reset its own streams, for up to the close's 1 s
+	/// grace, since Chrome crashes on a capsule arriving under live streams
+	/// (<https://issues.chromium.org/issues/589817008>).
 	pub fn close(&self, code: u32, reason: &str) {
 		close(&self.conn, self.web.as_ref(), code, reason);
 	}

@@ -621,14 +621,17 @@ export function sessionClosed(err: unknown): boolean {
 }
 
 /**
- * Whether a stream failed because the peer reset or stopped it, as the transport reports that
- * either raw or through {@link fromTransport}, rather than on a local error or a session close.
+ * Whether a stream failed because the peer reset or stopped it without an application code of its
+ * own, as a browser reports a closing session's WT_SESSION_GONE (as code 0), either raw or through
+ * {@link fromTransport}, rather than on a local error, a session close, or a reset with a code.
  *
  * @internal
  */
 export function peerEnded(err: unknown): boolean {
 	const raw = err instanceof Stream ? err.cause : err;
-	return typeof raw === "object" && raw !== null && (raw as StreamErrorLike).source === "stream";
+	if (typeof raw !== "object" || raw === null) return false;
+	const { source, streamErrorCode } = raw as StreamErrorLike;
+	return source === "stream" && (streamErrorCode === 0 || streamErrorCode === null);
 }
 
 /**

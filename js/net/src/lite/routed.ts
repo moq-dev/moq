@@ -15,7 +15,7 @@ import type * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
 import type { Goaway } from "../connection/goaway.ts";
 import type { BroadcastCache } from "../consume.ts";
-import { error, ProtocolViolation } from "../error.ts";
+import { error, ProtocolViolation, peerEnded } from "../error.ts";
 import { routesEqual, WireRoute } from "../hop.ts";
 import type * as Instance from "../instance.ts";
 import { bestCandidate, coveringPrefixes, hiddenBelow, scopeCaptures, scopeOverlaps } from "../internal.ts";
@@ -243,9 +243,12 @@ export class Routed {
 		}
 		this.#editing = { remove, add: added };
 		console.debug(`announced: remove=${remove.join(",")} add=${add.map(({ prefix }) => prefix).join(",")}`);
-		// However large, the edit goes whole, in as many messages as it takes.
+		// However large, the edit goes whole, in as many messages as it takes. A peer that stopped
+		// the stream is leaving, which the session's own handling of the stop ends these routes for.
 		for (const part of requestParts(remove, add, this.#session.version)) {
-			this.#session.send(part).catch((err: unknown) => this.close(error(err)));
+			this.#session.send(part).catch((err: unknown) => {
+				if (!peerEnded(err)) this.close(error(err));
+			});
 		}
 	}
 
