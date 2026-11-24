@@ -60,4 +60,5 @@ payload-less FRAME, and the stream code.
 ## Related
 
 - [Finalize moq-lite-07](/quest/m2/lite07-finalize.md) - the cut waits on this
+- [Redesign lite-07 subscribe and fetch](/quest/m2/lite07-subscribe/README.md) - moves Priority and Group Order onto per-range fields, adds Previous Delta to GROUP, and removes FETCH and SUBSCRIBE_SKIP; `Meta` stays one byte on SUBSCRIBE independently
 - [Metadata-only subscriptions](/quest/m3/route-health/meta.md) - the implementation that serves this wire
