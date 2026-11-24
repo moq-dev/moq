@@ -44,6 +44,10 @@ export const AudioConfigSchema: ZodMiniObject<{
 		kind: ZodMiniLiteral<"cmaf">;
 	}, $strip>, ZodMiniObject<{
 		kind: ZodMiniLiteral<"loc">;
+	}, $strip>, ZodMiniObject<{
+		kind: ZodMiniLiteral<"raw">;
+	}, $strip>, ZodMiniObject<{
+		kind: ZodMiniLiteral<"cts">;
 	}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
 		kind: ZodMiniString<string>;
 	}, $loose>, ZodMiniTransform<{
@@ -81,6 +85,10 @@ export const AudioSchema: ZodMiniObject<{
 			kind: "cmaf";
 		} | {
 			kind: "loc";
+		} | {
+			kind: "raw";
+		} | {
+			kind: "cts";
 		} | {
 			kind: "unknown";
 			raw: {
@@ -187,6 +195,10 @@ export const ContainerSchema: ZodMiniDefault<ZodMiniUnion<readonly [ZodMiniDiscr
 	kind: ZodMiniLiteral<"cmaf">;
 }, $strip>, ZodMiniObject<{
 	kind: ZodMiniLiteral<"loc">;
+}, $strip>, ZodMiniObject<{
+	kind: ZodMiniLiteral<"raw">;
+}, $strip>, ZodMiniObject<{
+	kind: ZodMiniLiteral<"cts">;
 }, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
 	kind: ZodMiniString<string>;
 }, $loose>, ZodMiniTransform<{
@@ -329,6 +341,10 @@ export const RootSchema: ZodMiniObject<{
 			} | {
 				kind: "loc";
 			} | {
+				kind: "raw";
+			} | {
+				kind: "cts";
+			} | {
 				kind: "unknown";
 				raw: {
 					[x: string]: unknown;
@@ -402,6 +418,10 @@ export const RootSchema: ZodMiniObject<{
 			} | {
 				kind: "loc";
 			} | {
+				kind: "raw";
+			} | {
+				kind: "cts";
+			} | {
 				kind: "unknown";
 				raw: {
 					[x: string]: unknown;
@@ -468,6 +488,10 @@ export const RootSchema: ZodMiniObject<{
 				kind: "cmaf";
 			} | {
 				kind: "loc";
+			} | {
+				kind: "raw";
+			} | {
+				kind: "cts";
 			} | {
 				kind: "unknown";
 				raw: {
@@ -538,6 +562,10 @@ export const TextConfigSchema: ZodMiniObject<{
 		kind: ZodMiniLiteral<"cmaf">;
 	}, $strip>, ZodMiniObject<{
 		kind: ZodMiniLiteral<"loc">;
+	}, $strip>, ZodMiniObject<{
+		kind: ZodMiniLiteral<"raw">;
+	}, $strip>, ZodMiniObject<{
+		kind: ZodMiniLiteral<"cts">;
 	}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
 		kind: ZodMiniString<string>;
 	}, $loose>, ZodMiniTransform<{
@@ -576,6 +604,10 @@ export const TextSchema: ZodMiniObject<{
 			kind: "cmaf";
 		} | {
 			kind: "loc";
+		} | {
+			kind: "raw";
+		} | {
+			kind: "cts";
 		} | {
 			kind: "unknown";
 			raw: {
@@ -685,6 +717,10 @@ export const Video: {
 			} | {
 				kind: "loc";
 			} | {
+				kind: "raw";
+			} | {
+				kind: "cts";
+			} | {
 				kind: "unknown";
 				raw: {
 					[x: string]: unknown;
@@ -774,6 +810,10 @@ export const VideoConfigSchema: ZodMiniObject<{
 		kind: ZodMiniLiteral<"cmaf">;
 	}, $strip>, ZodMiniObject<{
 		kind: ZodMiniLiteral<"loc">;
+	}, $strip>, ZodMiniObject<{
+		kind: ZodMiniLiteral<"raw">;
+	}, $strip>, ZodMiniObject<{
+		kind: ZodMiniLiteral<"cts">;
 	}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
 		kind: ZodMiniString<string>;
 	}, $loose>, ZodMiniTransform<{
@@ -869,6 +909,10 @@ export const VideoSchema: ZodMiniObject<{
 			kind: "cmaf";
 		} | {
 			kind: "loc";
+		} | {
+			kind: "raw";
+		} | {
+			kind: "cts";
 		} | {
 			kind: "unknown";
 			raw: {

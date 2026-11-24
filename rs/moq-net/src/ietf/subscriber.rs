@@ -378,10 +378,14 @@ impl Fill {
 	///
 	/// `start` is the Object ID the tail stream starts at, or `None` for a tail with no
 	/// objects of its own, which takes the head whatever it ends at.
-	fn claim(&mut self, key: u64, start: Option<u64>) -> Result<Option<(group::Producer, u64)>, Error> {
+	fn claim(&mut self, key: u64, start: Option<u64>, sparse: bool) -> Result<Option<(group::Producer, u64)>, Error> {
 		match *self {
 			Fill::Ready { key: s, next, .. } if s == key => {
-				if start.is_some_and(|start| start != next) {
+				let mismatch = match sparse {
+					true => start.is_some_and(|start| start < next),
+					false => start.is_some_and(|start| start != next),
+				};
+				if mismatch {
 					// A head that stops somewhere other than where the tail starts leaves a
 					// hole the model cannot express, so neither half of the group is usable.
 					tracing::warn!(key, next, start, "the fill does not meet the live tail");
@@ -6040,18 +6044,21 @@ impl Subscriber {
 			return Ok(None);
 		}
 
-		if let Some(raw) = &datagram.properties
-			&& let Err(err) = super::object::read(&bytes::Bytes::copy_from_slice(raw), self.version)
-		{
-			tracing::debug!(%err, "dropping a datagram with unreadable object properties");
-			return Ok(None);
-		}
-		// Its time is its sequence, as a group's is its ID.
-		let Ok(timestamp) = object_time(timescale, datagram.group_id) else {
+		let tie = match &datagram.properties {
+			Some(raw) => match super::object::read(&bytes::Bytes::copy_from_slice(raw), self.version) {
+				Ok(decoded) => decoded.tie.unwrap_or(0),
+				Err(err) => {
+					tracing::debug!(%err, "dropping a datagram with unreadable object properties");
+					return Ok(None);
+				}
+			},
+			None => 0,
+		};
+		let Ok(timestamp) = object_time(timescale, datagram.group_id, 0, tie) else {
 			tracing::debug!(
 				alias = datagram.track_alias,
 				group = datagram.group_id,
-				"dropping a datagram whose sequence is past the latest time"
+				"dropping a datagram whose timestamp is out of range"
 			);
 			return Ok(None);
 		};
@@ -6235,7 +6242,7 @@ impl RecvGroup {
 		// Otherwise dropping the local subscriber cannot end this handler.
 		let passthrough: bool = !fill.read().outstanding();
 		let mut opening: track::Producer = track.clone();
-		let mut open: OpenGroup = OpenGroup::new(headless);
+		let mut open: OpenGroup = OpenGroup::new(headless, timescale);
 		let opened = wait!(Open => match track.poll_aborted(waiter) {
 			Poll::Ready(err) => Poll::Ready(Err(err)),
 			Poll::Pending => open.poll(waiter, stream, opening, fill, group, reading),
@@ -6369,6 +6376,8 @@ impl RecvGroup {
 struct OpenGroup {
 	/// Whether a fill an update replaced failed to head this group, or a later one.
 	headless: bool,
+	/// The track's declared `ID_TIMESCALE`, allowing sparse Object IDs.
+	timescale: Option<Timescale>,
 	step: OpenStep,
 }
 
@@ -6386,9 +6395,10 @@ enum OpenStep {
 }
 
 impl OpenGroup {
-	fn new(headless: bool) -> Self {
+	fn new(headless: bool, timescale: Option<Timescale>) -> Self {
 		Self {
 			headless,
+			timescale,
 			step: OpenStep::PeekId,
 		}
 	}
@@ -6434,7 +6444,15 @@ impl OpenGroup {
 					};
 				}
 				OpenStep::ClaimEarly => {
-					if let Some((producer, next)) = ready!(poll_claim_fill(fill, track, key, None, reading, waiter))? {
+					if let Some((producer, next)) = ready!(poll_claim_fill(
+						fill,
+						track,
+						key,
+						None,
+						self.timescale.is_some(),
+						reading,
+						waiter
+					))? {
 						return Poll::Ready(Ok(Opened::Group(producer, next)));
 					}
 					self.step = OpenStep::PeekFirst;
@@ -6493,8 +6511,10 @@ impl OpenGroup {
 						// A group delivered from its start stands alone, unless the fill already
 						// headed this very key: the publisher then served those objects
 						// twice, and the model has one producer per group. Refuse both unfinished
-						// pieces rather than cache a cut group as complete.
-						Some(0) => {
+						// pieces rather than cache a cut group as complete. On a timed track, a
+						// group's first object may sit past Object ID 0 when its DTS exceeds the
+						// Group ID, marked by FIRST_OBJECT.
+						Some(id) if id == 0 || (header.flags.first_object && self.timescale.is_some()) => {
 							let headed = matches!(*fill.read(), Fill::Ready { key: s, .. } if s == key);
 							if headed {
 								tracing::warn!(key, "a whole group arrived for one the fill already headed");
@@ -6504,7 +6524,7 @@ impl OpenGroup {
 								return Poll::Ready(Err(Error::Unsupported));
 							}
 
-							return Poll::Ready(Ok(Opened::Group(create(track)?, 0)));
+							return Poll::Ready(Ok(Opened::Group(create(track)?, id)));
 						}
 						// A group starting partway through is the tail of one the fill began, and
 						// without that head it has a hole at the front. A stream that ends without
@@ -6520,7 +6540,15 @@ impl OpenGroup {
 					return Poll::Ready(Ok(Opened::EndOfTrack { object, properties }));
 				}
 				OpenStep::ClaimTail(start) => {
-					let claimed = ready!(poll_claim_fill(fill, track, key, start, reading, waiter))?;
+					let claimed = ready!(poll_claim_fill(
+						fill,
+						track,
+						key,
+						start,
+						self.timescale.is_some(),
+						reading,
+						waiter
+					))?;
 					return Poll::Ready(match (start, claimed) {
 						(Some(start), Some((producer, _))) => Ok(Opened::Group(producer, start)),
 						(Some(start), None) => {
@@ -6555,6 +6583,7 @@ fn poll_claim_fill(
 	track: &track::Producer,
 	key: u64,
 	start: Option<u64>,
+	sparse: bool,
 	reading: &mut Reading,
 	waiter: &kio::Waiter,
 ) -> Poll<Result<Option<(group::Producer, u64)>, Error>> {
@@ -6585,7 +6614,7 @@ fn poll_claim_fill(
 				debug_assert!(false, "fill closed while claiming its head");
 				Error::Cancel
 			})?
-			.claim(key, start),
+			.claim(key, start, sparse),
 	)
 }
 
@@ -6607,6 +6636,8 @@ pub(crate) struct GroupIngest {
 	gap: Option<u64>,
 	/// The object's Prior Group ID Gap, applied only once the object proves to be a frame.
 	group_gap: Option<u64>,
+	/// The object's Timestamp Tie (`0x40B72`), subtracted from `Group ID + Object ID`.
+	tie: Option<u64>,
 	inflated: Option<u64>,
 	phase: IngestPhase,
 }
@@ -6645,6 +6676,7 @@ impl GroupIngest {
 			raw: bytes::Bytes::new(),
 			gap: None,
 			group_gap: None,
+			tie: None,
 			inflated: None,
 			phase: IngestPhase::Delta,
 		}
@@ -7029,7 +7061,7 @@ impl RunFill {
 		if id < expected {
 			return Err(Error::ProtocolViolation);
 		}
-		if id > expected && decoded.gap.is_none_or(|gap| gap < id - expected) {
+		if self.timescale.is_none() && id > expected && decoded.gap.is_none_or(|gap| gap < id - expected) {
 			return Err(Error::Unsupported);
 		}
 		let current = self
@@ -7981,7 +8013,7 @@ impl GroupFetchObjects {
 			}
 			let raw = bytes::Bytes::from(object.properties.unwrap_or_default());
 			let decoded = super::object::read(&raw, self.version)?;
-			if id > next && decoded.gap.is_none_or(|gap| gap < id - next) {
+			if timescale.is_none() && id > next && decoded.gap.is_none_or(|gap| gap < id - next) {
 				return Poll::Ready(Err(Error::Unsupported));
 			}
 			let payload = match writer.producer() {
@@ -8082,7 +8114,7 @@ impl FetchPayloadRecv {
 		producer.mark_gap(payload.id, payload.decoded.gap)?;
 		let size = wait!(Size => stream.poll_varint(waiter))?;
 		let FetchPayload { decoded, timescale, id } = payload;
-		let timestamp = object_time(timescale, producer.key)?;
+		let timestamp = object_time(timescale, producer.key, id, decoded.tie.unwrap_or(0))?;
 		let plain = id == producer.frame_count() as u64 && decoded.properties.is_empty();
 		let fields = (!plain).then(|| {
 			std::sync::Arc::new(crate::model::object::Fields {
@@ -8314,13 +8346,17 @@ fn first_piece(run: std::ops::Range<u64>, group: u64, order: track::Order) -> st
 	piece.expect("the run holds the group")
 }
 
-/// A received object's timestamp: its group's `key`, in the track's `timescale` when it
-/// declares one. Nothing reads time from an object's properties, which pass between
-/// moq-transport peers untouched, so every object of a group shares its start.
-fn object_time(timescale: Option<Timescale>, key: u64) -> Result<crate::Timestamp, Error> {
+/// A received object's timestamp: `Group ID + Object ID - tie` in the track's `ID_TIMESCALE`
+/// when declared (per draft-lcurley-moq-timestamp), else unscaled `Group ID`.
+fn object_time(timescale: Option<Timescale>, key: u64, object_id: u64, tie: u64) -> Result<crate::Timestamp, Error> {
 	match timescale {
-		// A key past the latest time is a group we cannot carry.
-		Some(timescale) => crate::Timestamp::new(key, timescale).map_err(|_| Error::Unsupported),
+		Some(timescale) => {
+			let dts = key
+				.checked_add(object_id)
+				.and_then(|sum| sum.checked_sub(tie))
+				.ok_or(Error::MalformedTrack)?;
+			crate::Timestamp::new(dts, timescale).map_err(|_| Error::Unsupported)
+		}
 		None => Ok(crate::Timestamp::unscaled(key)),
 	}
 }
@@ -8393,7 +8429,11 @@ impl GroupIngest {
 						return Poll::Ready(Ok(Ended::Group));
 					};
 					let id = next_object_id(self.prior_object, id_delta)?;
-					if self.prior_object.is_none() && self.expected_first.is_some_and(|expected| expected != id) {
+					let bad_first = match self.timescale.is_some() {
+						true => self.expected_first.is_some_and(|expected| id < expected),
+						false => self.expected_first.is_some_and(|expected| expected != id),
+					};
+					if self.prior_object.is_none() && bad_first {
 						return Poll::Ready(Err(Error::Unsupported));
 					}
 					self.prior_object = Some(id);
@@ -8401,6 +8441,7 @@ impl GroupIngest {
 					self.raw = bytes::Bytes::new();
 					self.gap = None;
 					self.group_gap = None;
+					self.tie = None;
 					self.inflated = None;
 					self.phase = match self.has_extensions {
 						true => IngestPhase::ExtSize,
@@ -8415,6 +8456,7 @@ impl GroupIngest {
 					let ext = ready!(reader.poll_read_exact(waiter, *size))?;
 					let decoded = super::object::read(&ext, self.version)?;
 					self.group_gap = decoded.group_gap;
+					self.tie = decoded.tie;
 					self.properties = decoded.properties;
 					self.raw = ext;
 					self.gap = decoded.gap;
@@ -8427,7 +8469,8 @@ impl GroupIngest {
 						self.phase = IngestPhase::Status;
 						continue;
 					}
-					let timestamp = object_time(self.timescale, group.start)?;
+					let id = self.prior_object.expect("payload follows object ID");
+					let timestamp = object_time(self.timescale, group.start, id, self.tie.unwrap_or(0))?;
 					let header = self.header(group, frame::Info { size, timestamp })?;
 					self.phase = IngestPhase::Admit { header };
 				}
@@ -8450,7 +8493,8 @@ impl GroupIngest {
 				IngestPhase::Status => {
 					let status = ready!(reader.poll_varint(waiter))?;
 					if status == 0 {
-						let timestamp = object_time(self.timescale, group.start)?;
+						let id = self.prior_object.expect("status follows object ID");
+						let timestamp = object_time(self.timescale, group.start, id, self.tie.unwrap_or(0))?;
 						let header = self.header(group, frame::Info { size: 0, timestamp })?;
 						self.phase = IngestPhase::Admit { header };
 						continue;
@@ -15259,8 +15303,8 @@ mod stitch_tests {
 			frames,
 			vec![
 				(key_time(KEY), b"head-0".to_vec()),
-				(key_time(KEY), b"head-1".to_vec()),
-				(key_time(KEY), b"tail-2".to_vec()),
+				(key_time(KEY + 1), b"head-1".to_vec()),
+				(key_time(KEY + 2), b"tail-2".to_vec()),
 			]
 		);
 		assert!(matches!(*h.fill.read(), Fill::Done), "the head was claimed");
@@ -15301,7 +15345,7 @@ mod stitch_tests {
 		assert_eq!(key, KEY);
 		assert_eq!(
 			frames,
-			vec![(key_time(KEY), b"head".to_vec()), (key_time(KEY), b"tail".to_vec())]
+			vec![(key_time(KEY), b"head".to_vec()), (key_time(KEY + 1), b"tail".to_vec())]
 		);
 		assert!(matches!(*h.fill.read(), Fill::Done));
 	}
@@ -17059,15 +17103,16 @@ mod stitch_tests {
 	}
 
 	/// A head that stops short of where the tail starts would leave a hole in the middle of
-	/// the group. Refusing it aborts the incomplete group instead of caching a cut prefix.
+	/// an untimed group. Refusing it aborts the incomplete group instead of caching a cut prefix.
 	#[kio::test]
 	async fn a_head_that_misses_the_tail_is_refused() {
-		let h = Harness::new(
-			Fill::Serving(Some(Timescale::MICRO)),
+		let h = Harness::with_timescale(
+			Fill::Serving(None),
 			vec![
 				fill_stream(KEY, &[b"head-0", b"head-1"]),
 				tail_stream(KEY, 5, &[b"tail-5"]),
 			],
+			None,
 		);
 		let mut consumer = h.track.subscribe(None);
 
@@ -17082,6 +17127,41 @@ mod stitch_tests {
 		));
 
 		assert!(matches!(head.read_frame().await, Err(Error::Unsupported)));
+	}
+
+	/// On a timed track (draft-lcurley-moq-timestamp), Object IDs are sparse timestamp offsets,
+	/// so a tail starting past the head's next Object ID stitches cleanly.
+	#[kio::test]
+	async fn a_sparse_timed_tail_stitches_onto_its_head() {
+		let h = Harness::new(
+			Fill::Serving(Some(Timescale::MICRO)),
+			vec![
+				fill_stream(KEY, &[b"head-0", b"head-1"]),
+				tail_stream(KEY, 5, &[b"tail-5"]),
+			],
+		);
+		let mut consumer = h.track.subscribe(None);
+
+		let mut fill = h.stream().await;
+		let mut tail = h.stream().await;
+
+		let mut serve_tail = h.subscriber.clone();
+		let mut serve_fill = h.subscriber.clone();
+		let (tail, head) = futures::join!(serve_tail.recv_group(&mut tail), serve_fill.recv_fill(&mut fill));
+		head.expect("fill");
+		tail.expect("tail");
+
+		let (key, frames) = read_group(&mut consumer).await;
+		assert_eq!(key, KEY);
+		assert_eq!(
+			frames,
+			vec![
+				(key_time(KEY), b"head-0".to_vec()),
+				(key_time(KEY + 1), b"head-1".to_vec()),
+				(key_time(KEY + 5), b"tail-5".to_vec()),
+			]
+		);
+		assert!(matches!(*h.fill.read(), Fill::Done), "the head was claimed");
 	}
 
 	#[kio::test]

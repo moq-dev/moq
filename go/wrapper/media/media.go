@@ -52,6 +52,10 @@ type (
 	ContainerCmaf = ffi.MoqContainerCmaf
 	// ContainerLoc is the low-overhead container variant of Container; build one with LocContainer.
 	ContainerLoc = ffi.MoqContainerLoc
+	// ContainerRaw is the zero-overhead raw container variant of Container; build one with RawContainer.
+	ContainerRaw = ffi.MoqContainerRaw
+	// ContainerCts is the CTS-varint container variant of Container; build one with CtsContainer.
+	ContainerCts = ffi.MoqContainerCts
 	// ContainerUnknown is a container this version of the bindings cannot name yet.
 	ContainerUnknown = ffi.MoqContainerUnknown
 	// Rendition is a catalog rendition: its ID (catalog key) and config. Build one with VideoRendition or AudioRendition.
@@ -347,6 +351,16 @@ func CmafContainer(init []byte) Container {
 // LocContainer selects the low-overhead container for a media subscription.
 func LocContainer() Container {
 	return ContainerLoc{}
+}
+
+// RawContainer selects the zero-overhead raw container for a media subscription.
+func RawContainer() Container {
+	return ContainerRaw{}
+}
+
+// CtsContainer selects the CTS-varint container for a media subscription.
+func CtsContainer() Container {
+	return ContainerCts{}
 }
 
 // AacAudioFormat selects Advanced Audio Coding, configured by an AudioSpecificConfig.

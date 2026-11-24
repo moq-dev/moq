@@ -1200,8 +1200,17 @@ impl LiteSample {
 		match self {
 			Self::Video | Self::Audio => {
 				for (delta, size) in self.frames() {
-					w.varint(varint::zigzag(delta)).unwrap();
-					w.varint(size).unwrap();
+					let wire = match version.has_unsigned_timestamps() {
+						true => delta as u64,
+						false => varint::zigzag(delta),
+					};
+					if version.has_length_first() {
+						w.varint(size + 1).unwrap();
+						w.varint(wire).unwrap();
+					} else {
+						w.varint(wire).unwrap();
+						w.varint(size).unwrap();
+					}
 				}
 			}
 			Self::Group => lite::Group {

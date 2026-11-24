@@ -48,16 +48,14 @@ async function active(origin: Origin.Producer, path: Path.Valid): Promise<Broadc
 	}
 }
 
-// Whether the wire carries the route's instance, and whether a frame's time is its group's
-// key, as on moq-transport, rather than its own timestamp. Neither is authenticated, so the
-// frames open either way.
+// Whether the wire carries the route's instance. Every transport carries per-frame timestamps.
 const transports = [
-	["moq-lite-07", "moq-lite-07-wip", true, false],
-	["moq-lite-05", "moq-lite-05", false, false],
-	["moq-transport-18", "moqt-18", false, true],
+	["moq-lite-07", "moq-lite-07-wip", true],
+	["moq-lite-05", "moq-lite-05", false],
+	["moq-transport-18", "moqt-18", false],
 ] as const;
 
-for (const [name, protocol, routed, keyed] of transports) {
+for (const [name, protocol, routed] of transports) {
 	test(`${name}: grouped frames roundtrip encrypted`, async () => {
 		const { publisher, subscriber, close } = await session(protocol);
 		const cred = credential();
@@ -91,7 +89,7 @@ for (const [name, protocol, routed, keyed] of transports) {
 		expect(received.start).toBe(0n);
 		const first = await received.readFrame();
 		expect(decoder.decode(first?.plaintext)).toBe("keyframe");
-		expect(first?.timestamp?.as(Time.Timescale.MILLI)).toBe(keyed ? 0 : 1);
+		expect(first?.timestamp?.as(Time.Timescale.MILLI)).toBe(1);
 		expect(decoder.decode((await received.readFrame())?.plaintext)).toBe("delta");
 
 		// Later frames on the open group, and a second group.

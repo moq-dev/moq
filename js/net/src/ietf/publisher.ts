@@ -37,6 +37,7 @@ import { sendPayload } from "../payload.ts";
 import { Priority, sendOrder } from "../priority.ts";
 import { routeFailed } from "../resume.ts";
 import { type Stream, Writer } from "../stream.ts";
+import { floorAt, type Timescale } from "../time.ts";
 import {
 	type Groups,
 	type Info,
@@ -61,7 +62,7 @@ import { FetchHeader } from "./fetch.ts";
 import * as Filter from "./filter.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
-import { FetchFrame, Frame, Group as GroupMessage } from "./object.ts";
+import { FetchFrame, Frame, Group as GroupMessage, timestampObjectId } from "./object.ts";
 import { Parameters } from "./parameters.ts";
 import { fromWire, toWire } from "./priority.ts";
 import * as Properties from "./properties.ts";
@@ -1279,6 +1280,7 @@ export class Publisher {
 
 			// Object 0 names the keys just below this group the track declared skipped, a
 			// best-effort drop signal; a stream starting past object 0 carries no object 0.
+			const timescale = (await track.info()).timescale ?? undefined;
 			const groupGap = slice.skip === 0 ? hooks.skippedBelow(track, group.start) : 0n;
 			const header = new GroupMessage({
 				trackAlias: requestId,
@@ -1286,8 +1288,8 @@ export class Publisher {
 				subGroupId: 0n,
 				publisherPriority,
 				flags: {
-					// Only the Prior Group ID Gap is ever written as a property.
-					hasExtensions: groupGap > 0n,
+					// A timed track may emit TIMESTAMP_TIE on any frame, so carry extension lengths.
+					hasExtensions: groupGap > 0n || timescale !== undefined,
 					hasSubgroup: false,
 					hasSubgroupObject: false,
 					// A FIN never claims the group's end: an explicit END_OF_GROUP does, once the
@@ -1329,13 +1331,8 @@ export class Publisher {
 
 			try {
 				await send(() => header.encode(stream, this.#session.version));
-				// The first written object goes on the wire as its absolute id, so a trimmed
-				// head shows the true numbering rather than a silently renumbered group.
-				let first = true;
-				// The next object id that could be written, which starts at the filter rather
-				// than at zero. A backwards range (`startObject` above `endObject` in the same
-				// group) is empty, and starting here is what lets the check below see that
-				// before the read parks on an object the range already excludes.
+				let priorObject: bigint | undefined;
+				let servedOid: bigint | undefined;
 				let next = slice.skip;
 				// Whether the group finished, rather than the range or a stop ending the read.
 				let ended = false;
@@ -1345,24 +1342,41 @@ export class Publisher {
 					// outside the requested range, so stop without waiting for the group's end.
 					if (slice.until !== undefined && next >= slice.until) break;
 
-					// Reading from the filter's start drops the objects below it: they are outside
-					// the requested range, so skipping them is not a gap.
-					const read = await race([hooks.readGroupFrame(group, false, slice.skip), closed, stopped]);
+					// On an untimed track `slice.skip` is a frame ordinal; on a timed track Object IDs
+					// are timestamp offsets so walk from frame 0 to compute them accurately.
+					const read = await race([
+						hooks.readGroupFrame(group, false, timescale === undefined ? slice.skip : 0),
+						closed,
+						stopped,
+					]);
 					if (left) throw left;
 					if (rangeError) throw rangeError;
 					if (read === undefined) ended = true;
 					if (!read) break;
-					next = read.index + 1;
-					if (slice.until !== undefined && read.index >= slice.until) break;
+
+					let id: bigint;
+					let tie: bigint | undefined;
+					if (timescale !== undefined) {
+						const dts = BigInt(floorAt(read.frame.timestamp, timescale));
+						const computed = timestampObjectId(group.start, servedOid, dts);
+						id = computed.id;
+						tie = computed.tie > 0n ? computed.tie : undefined;
+						servedOid = id;
+					} else {
+						id = BigInt(read.index);
+					}
+					next = Number(id) + 1;
+					if (slice.until !== undefined && Number(id) >= slice.until) break;
+					if (Number(id) < slice.skip) continue;
 
 					// A frame written in pieces streams its payload after the header.
 					const chunks = read.chunks;
 					const gap = read.index === 0 ? groupGap : undefined;
 					const obj = chunks?.size
-						? new Frame({ streamed: chunks.size, groupGap: gap })
-						: new Frame({ payload: chunks ? new Uint8Array(0) : read.frame.payload, groupGap: gap });
-					const delta = first ? read.index : 0;
-					first = false;
+						? new Frame({ streamed: chunks.size, groupGap: gap, tie })
+						: new Frame({ payload: chunks ? new Uint8Array(0) : read.frame.payload, groupGap: gap, tie });
+					const delta = priorObject === undefined ? id : id - priorObject - 1n;
+					priorObject = id;
 					await send(() => obj.encode(stream, header.flags, this.#session.version, delta));
 					// Even an empty one: it is an object only once committed, and may still be aborted.
 					if (chunks) await send(() => sendPayload(chunks, (chunk) => stream.write(chunk), stream.closed));
@@ -1370,23 +1384,19 @@ export class Publisher {
 
 				// The track ends right after this group's last object, so the marker rides this
 				// stream rather than a separate one.
+				const last =
+					timescale !== undefined ? (servedOid === undefined ? 0 : Number(servedOid) + 1) : group.frameCount;
 				const end = hooks.subscriberEnd(track);
-				const marked = end?.group === group.start && end.frame === next;
+				const marked = end?.group === group.start && end.frame === group.frameCount;
 				// A finished group ends with END_OF_GROUP one past its last object, unless the
 				// END_OF_TRACK below marks that place or the range misses it: a filter starting
 				// past the group's end, or one stopping short of it.
-				const last = group.frameCount;
 				if (ended && !marked && last >= slice.skip && (slice.until === undefined || last < slice.until)) {
-					// Every object below `last` was written, so only an empty stream names it.
-					await send(() => new Frame().encode(stream, header.flags, this.#session.version, first ? last : 0));
-					first = false;
+					const endDelta = priorObject === undefined ? BigInt(last) : BigInt(last) - priorObject - 1n;
+					await send(() => new Frame().encode(stream, header.flags, this.#session.version, endDelta));
 				} else if (marked) {
-					await new Frame({ endOfTrack: true }).encode(
-						stream,
-						header.flags,
-						this.#session.version,
-						first ? next : 0,
-					);
+					const endDelta = priorObject === undefined ? BigInt(last) : BigInt(last) - priorObject - 1n;
+					await new Frame({ endOfTrack: true }).encode(stream, header.flags, this.#session.version, endDelta);
 				}
 
 				stream.close();
@@ -1504,11 +1514,13 @@ export class Publisher {
 			const group = hooks.judgedGroup(cache, fill.start.group);
 			if (!group) throw new NotFound("fill group unavailable");
 			const given = untilGivenUp(group, cancelled);
+			const timescale = (await cache.info()).timescale ?? undefined;
 			try {
 				await this.#writeFetchGroup({
 					out,
 					group,
 					slice: groupSlice(fill, group.start),
+					timescale,
 					cancelled: given.signal,
 				});
 				stream.close();
@@ -1549,14 +1561,17 @@ export class Publisher {
 		out,
 		group,
 		slice,
+		timescale,
 		cancelled,
 	}: {
 		out: FetchWriter;
 		group: group.Consumer;
 		slice: GroupSlice;
+		timescale?: Timescale;
 		cancelled: AbortSignal;
 	}): Promise<void> {
 		let next = slice.skip;
+		let servedOid: bigint | undefined;
 
 		// The subscriber leaving has to end the fill too. An absolute filter ending below the
 		// edge with no end object leaves `until` unset, so this reads until the group closes,
@@ -1567,15 +1582,28 @@ export class Publisher {
 			// subscription, so stop without waiting for the group's end.
 			if (slice.until !== undefined && next >= slice.until) break;
 
-			// Reading from the fill's start drops everything below it; see the same read in #runGroup.
+			// Reading from the fill's start drops everything below it on untimed tracks; on timed
+			// tracks walk from frame 0 to compute timestamp Object IDs accurately.
 			const frame = await untilAborted(
-				race([hooks.readGroupFrame(group, false, slice.skip), out.stream.closed]),
+				race([hooks.readGroupFrame(group, false, timescale === undefined ? slice.skip : 0), out.stream.closed]),
 				cancelled,
 			);
 			if (!frame) break;
-			next = frame.index + 1;
-			if (slice.until !== undefined && frame.index >= slice.until) break;
-			await out.object(group.start, frame, cancelled);
+			let oid: number;
+			let tie: bigint | undefined;
+			if (timescale !== undefined) {
+				const dts = BigInt(floorAt(frame.frame.timestamp, timescale));
+				const computed = timestampObjectId(group.start, servedOid, dts);
+				servedOid = computed.id;
+				oid = Number(computed.id);
+				tie = computed.tie > 0n ? computed.tie : undefined;
+			} else {
+				oid = frame.index;
+			}
+			next = oid + 1;
+			if (slice.until !== undefined && oid >= slice.until) break;
+			if (oid < slice.skip) continue;
+			await out.object(group.start, frame, cancelled, oid, tie);
 		}
 	}
 
@@ -2411,6 +2439,7 @@ class FetchWriter {
 	/** The track's Publisher Priority on the wire, which the first object states for all. */
 	readonly #priority: number;
 	#written = false;
+	#previousObject?: number;
 
 	constructor({ stream, version, priority }: { stream: Writer; version: IetfVersion; priority: number }) {
 		this.stream = stream;
@@ -2419,17 +2448,25 @@ class FetchWriter {
 	}
 
 	/** Write `read` of group `key`, following the prior object of that group, if any. */
-	async object(key: bigint, read: ReadGroupFrame, stop: AbortSignal): Promise<void> {
+	async object(
+		key: bigint,
+		read: ReadGroupFrame,
+		stop: AbortSignal,
+		object = read.index,
+		tie?: bigint,
+	): Promise<void> {
 		const chunks = read.chunks;
 		const obj = new FetchFrame({
 			payload: chunks ? undefined : read.frame.payload,
 			streamed: chunks?.size || undefined,
 			priority: this.#priority,
+			tie,
 		});
 		const position = {
 			group: key,
-			object: read.index,
+			object,
 			first: !this.#written,
+			previousObject: this.#previousObject,
 		};
 		await untilAborted(obj.encode(this.stream, position, this.#version), stop);
 		// Even an empty payload: the object exists only once committed, and may still be aborted.
@@ -2439,6 +2476,7 @@ class FetchWriter {
 				stop,
 			);
 		this.#written = true;
+		this.#previousObject = object;
 	}
 }
 

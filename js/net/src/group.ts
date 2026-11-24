@@ -146,6 +146,8 @@ class GroupState {
 	// The first frame the group teeing into this mirror wrote here. A copy that took over a failed
 	// one tees from where that one stopped, so the frames below came from the failed copy.
 	from = 0;
+	// The last moq-timestamp Object ID assigned to a timed group's frame.
+	lastTimedOid?: bigint;
 
 	constructor(start: bigint) {
 		this.start = start;
@@ -181,7 +183,14 @@ function appendFrame(state: GroupState, frame: Frame) {
 	const timed = frame.timestamp.scale === undefined ? undefined : frame.timestamp;
 	state.timestamp ??= timed;
 	if (timed === undefined) state.latest = undefined;
-	else if (state.latest === undefined || state.latest.isBefore(timed)) state.latest = timed;
+	else {
+		if (state.latest === undefined || state.latest.isBefore(timed)) state.latest = timed;
+		const dts = BigInt(Math.floor(timed.value));
+		const minOid = state.lastTimedOid === undefined ? 0n : state.lastTimedOid + 1n;
+		const desired = dts > state.start ? dts - state.start : 0n;
+		state.lastTimedOid = minOid;
+		if (desired > minOid) state.lastTimedOid = desired;
+	}
 	state.frames.mutate((frames) => {
 		frames.push(frame);
 	});
@@ -378,6 +387,8 @@ export class Producer {
 		hooks.writeGroupFrame = (group, frame, inflated) => group.#writeFrame(frame, inflated);
 		hooks.groupCacheBytes = (group) => group.#state.flate?.bytes ?? group.#state.cacheBytes;
 		hooks.groupFrameCount = (group) => group.#state.total.peek();
+		hooks.groupLastObject = (group) =>
+			group.#state.lastTimedOid === undefined ? undefined : Number(group.#state.lastTimedOid);
 		hooks.groupProgress = (group, fn) => {
 			const state = group.#state;
 			fn(state.total.peek());

@@ -12643,6 +12643,19 @@ impl Subscriber {
 		}
 	}
 
+	/// Peek a cached group by key without advancing the subscription or refreshing cache order.
+	#[cfg(feature = "async")]
+	pub(crate) fn peek_group(&self, key: u64) -> Option<group::Consumer> {
+		match &self.inner {
+			Inner::Plain(cursor) => {
+				let state = cursor.state.read();
+				let slot = state.lookup.get(&key).filter(|slot| slot.serves_end())?;
+				Some(slot.serving().consume())
+			}
+			Inner::Resume(resume, _) => resume.peek_group(key),
+		}
+	}
+
 	/// The track's declared exclusive end position, or the cause on an abort. See
 	/// [`Producer::finish_at`] for what the position means.
 	///

@@ -808,7 +808,11 @@ class Rendition {
 		const format =
 			this.config.container.kind === "loc"
 				? new Container.Loc.Format("video")
-				: new Container.Legacy.Format(this.config);
+				: this.config.container.kind === "raw"
+					? new Container.Raw.Format(this.config)
+					: this.config.container.kind === "cts"
+						? new Container.Cts.Format(this.config)
+						: new Container.Legacy.Format(this.config);
 		const consumer = this.#consume(effect, sub, format);
 
 		// Combine network jitter buffer with decode buffer

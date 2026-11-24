@@ -243,6 +243,11 @@ pub(super) struct GroupState {
 	// production stopped, and an abort is exactly when it asks.
 	next_index: usize,
 
+	// The last moq-timestamp Object ID assigned to a local or moq-lite timed group's frame
+	// (`oid = max(dts - group_start, prev_oid + 1)`), so moq-transport Largest Object and
+	// terminal markers agree with the wire Object IDs without walking the group.
+	last_timed_oid: Option<u64>,
+
 	// Exclusive cap on `next_index`, set when the track ends inside this group: a write
 	// past the track's end is refused rather than served as content that does not exist.
 	limit: Option<usize>,
@@ -1384,7 +1389,11 @@ impl GroupState {
 	/// it. Anything but a timed frame 0 checked under an open local track is unchecked.
 	fn check_start(&self, neighbors: Option<&track::Neighbors>, timestamp: Timestamp) -> Result<Origin> {
 		match (neighbors, timestamp.timed()) {
-			(Some(neighbors), Some(start)) if self.next_index == 0 => neighbors.admit(start),
+			(Some(neighbors), Some(start))
+				if self.next_index == 0 && !self.wire().is_some_and(|wire| !wire.first_object) =>
+			{
+				neighbors.admit(start)
+			}
 			_ => Ok(self.origin),
 		}
 	}
@@ -1939,6 +1948,14 @@ impl Producer {
 			return Err(self.abort_conflict(state, err));
 		}
 		let now = state.commit(entry);
+		if state.wire().is_none() && timestamp.scale().is_some() {
+			let (oid, _) = crate::ietf::object::timestamp_object_id(
+				self.handle.info.start,
+				state.last_timed_oid,
+				timestamp.value(),
+			);
+			state.last_timed_oid = Some(oid);
+		}
 		state.next_index = next_index;
 		state.wrote = true;
 		let bound = state.settle(origin);
@@ -2070,7 +2087,13 @@ impl Producer {
 			prepared.push(entry);
 		}
 		for entry in prepared {
+			let ts = entry.frame.timestamp;
 			now = state.commit(entry);
+			if state.wire().is_none() && ts.scale().is_some() {
+				let (oid, _) =
+					crate::ietf::object::timestamp_object_id(self.handle.info.start, state.last_timed_oid, ts.value());
+				state.last_timed_oid = Some(oid);
+			}
 		}
 		// A batch past the tail on its own, payloads or slots, sheds its own front.
 		state.trim(0);
@@ -2221,6 +2244,13 @@ impl Producer {
 		if let Some(wire) = state.wire_mut() {
 			wire.last = Some(object_id);
 			wire.sparse |= object_id != (next_index - 1) as u64;
+		} else if timestamp.scale().is_some() {
+			let (oid, _) = crate::ietf::object::timestamp_object_id(
+				self.handle.info.start,
+				state.last_timed_oid,
+				timestamp.value(),
+			);
+			state.last_timed_oid = Some(oid);
 		}
 		state.next_index = next_index;
 		state.wrote = true;
@@ -2625,7 +2655,11 @@ impl Handle {
 				return Err(Error::MalformedTrack);
 			}
 			// A first object's gap may also cover IDs below where this copy starts.
-			wire.fetchable &= missing == 0 || gap.is_some_and(|gap| gap >= missing);
+			// On a timed track (draft-lcurley-moq-timestamp), Object IDs are sparse timestamp
+			// offsets without Prior Object ID Gap, so gaps between objects stay fetchable.
+			if self.track.timescale.is_none() {
+				wire.fetchable &= missing == 0 || gap.is_some_and(|gap| gap >= missing);
+			}
 		}
 		Ok(())
 	}
@@ -4070,7 +4104,9 @@ impl Consumer {
 		let state = self.cursor.state.read();
 		match state.wire() {
 			Some(wire) => wire.last,
-			None => (state.next_index as u64).checked_sub(1),
+			None => state
+				.last_timed_oid
+				.or_else(|| (state.next_index as u64).checked_sub(1)),
 		}
 	}
 
@@ -4360,13 +4396,10 @@ impl Consumer {
 	/// The serving route's copy to continue this group from once its copy looks past itself for
 	/// `cause`, or the error that ends the read instead.
 	fn replacement(&mut self, cause: Cause, waiter: &kio::Waiter) -> Poll<Result<super::resume::Replacement>> {
-		// An ordinal FETCH would request different content after an Object ID gap.
-		if self.cursor.state.read().sparse() {
-			return Poll::Ready(Err(Error::Unsupported));
-		}
+		let sparse = self.cursor.state.read().sparse();
 		let index = self.cursor.index as u64;
 		let recover = self.recover_mut().expect("only a recovering group needs a replacement");
-		let replacement = ready!(recover.poll(index, &cause, waiter))?;
+		let replacement = ready!(recover.poll(index, &cause, sparse, waiter))?;
 		let failed = match cause {
 			Cause::Failed(err) => Some(err),
 			Cause::Stalled | Cause::Closed => None,
@@ -5690,7 +5723,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_leading_gap_may_reach_below_where_the_copy_starts() {
 		for (gap, fetchable) in [(Some(6), true), (Some(4), true), (Some(3), false), (None, false)] {
-			let mut group = Info { start: 0 }.produce();
+			let mut group = Info { start: 0 }.produce_untimed();
 			group.start_at(2).unwrap();
 			group
 				.set_wire(Wire {

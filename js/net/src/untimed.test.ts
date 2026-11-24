@@ -26,11 +26,6 @@ interface Wire {
 	declares: boolean;
 	/** Whether an untimed track arrives timed in milliseconds at its group keys, as on lite-05/06. */
 	keys: boolean;
-	/**
-	 * Whether a timed track's frames arrive at their group's key in its units rather than their
-	 * own times, as on moq-transport, which carries no Timestamp.
-	 */
-	keyed?: boolean;
 }
 
 const WIRES: Wire[] = [
@@ -40,7 +35,7 @@ const WIRES: Wire[] = [
 	{ name: "lite-05", protocol: Lite.ALPN_05, declares: true, keys: true },
 	{ name: "lite-06", protocol: Lite.ALPN_06, declares: true, keys: true },
 	{ name: "lite-07-wip", protocol: Lite.ALPN_07_WIP, declares: true, keys: false },
-	{ name: "ietf-22", protocol: Ietf.ALPN.DRAFT_22, declares: true, keys: false, keyed: true },
+	{ name: "ietf-22", protocol: Ietf.ALPN.DRAFT_22, declares: true, keys: false },
 ];
 
 /**
@@ -197,11 +192,7 @@ for (const wire of WIRES) {
 		]);
 		expect(frames.map((frame) => frame.payload[0])).toEqual([0, 1]);
 
-		if (wire.keyed) {
-			// TIMESCALE declares the units of the Group IDs, so each frame starts at its group, 0.
-			expect(info.timescale).toBe(Timescale.MICRO);
-			expect(frames.map((frame) => frame.timestamp?.asMicros())).toEqual([0, 0]);
-		} else if (wire.declares) {
+		if (wire.declares) {
 			expect(info.timescale).toBe(Timescale.MICRO);
 			expect(frames.map((frame) => frame.timestamp?.asMicros())).toEqual([1_000, 1_234]);
 		} else {

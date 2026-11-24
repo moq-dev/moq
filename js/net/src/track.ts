@@ -2596,8 +2596,8 @@ export class Producer {
 		}
 	}
 
-	#advanceObject(largest: Position | undefined): void {
-		if (largest && (!this.#objectLargest || after(largest, this.#objectLargest))) this.#objectLargest = largest;
+	#advanceObject(object: Position | undefined, largest: Position | undefined = object): void {
+		if (object && (!this.#objectLargest || after(object, this.#objectLargest))) this.#objectLargest = object;
 		this.#advanceLargest(largest);
 	}
 
@@ -2698,7 +2698,12 @@ export class Producer {
 		}
 		// Follow the group's frames as they land, past the head `#advance` already named.
 		const stop = hooks.groupProgress(group, (total) => {
-			if (total > hooks.groupOffset(group)) this.#advanceObject({ group: group.start, frame: total - 1 });
+			if (total > hooks.groupOffset(group)) {
+				this.#advanceObject(
+					{ group: group.start, frame: hooks.groupLastObject(group) ?? total - 1 },
+					{ group: group.start, frame: total - 1 },
+				);
+			}
 			// A frame can change an owed hole's reach or drift edge without adding a group.
 			for (const sink of this.#sinks)
 				if (sink.waitingOrdered) sink.timelineChanged.update((revision) => revision + 1);

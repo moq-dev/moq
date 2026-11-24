@@ -21,6 +21,25 @@ pub(crate) const END_OF_TRACK: u64 = 0x4;
 const PRIOR_GROUP_ID_GAP: u64 = 0x3c;
 /// Object property: how many Object IDs just below this object's never exist.
 const PRIOR_OBJECT_ID_GAP: u64 = 0x3e;
+/// Object property (draft-lcurley-moq-timestamp): subtracted from `Group ID + Object ID`
+/// when consecutive objects share a decode timestamp (`dts = Group ID + Object ID - tie`).
+pub(crate) const TIMESTAMP_TIE: u64 = 0x40B72;
+
+/// Compute the wire `(object_id, timestamp_tie)` for a frame at `dts` in group `group_id`
+/// following `prior` (the previous frame's Object ID, if any), per draft-lcurley-moq-timestamp.
+///
+/// Always satisfies `group_id + object_id - tie == dts` (modulo u64 saturation) and strictly
+/// increasing Object IDs within the group.
+pub(crate) const fn timestamp_object_id(group_id: u64, prior: Option<u64>, dts: u64) -> (u64, u64) {
+	let min_oid = match prior {
+		None => 0,
+		Some(prev) => prev.saturating_add(1),
+	};
+	let desired = dts.saturating_sub(group_id);
+	let oid = if desired > min_oid { desired } else { min_oid };
+	let tie = group_id.saturating_add(oid).saturating_sub(dts);
+	(oid, tie)
+}
 
 /// Whether the Object Status `status` is defined, 0 being Normal.
 pub(crate) fn status_defined(status: u64) -> bool {
@@ -43,6 +62,8 @@ pub(crate) struct Decoded {
 	/// The Prior Group ID Gap, which also stays in the block.
 	pub group_gap: Option<u64>,
 	pub inflated: Option<u64>,
+	/// The Timestamp Tie (`0x40B72`), which also stays in the block.
+	pub tie: Option<u64>,
 }
 
 /// The largest properties block an object may carry, which a relay forwards unchanged.
@@ -55,6 +76,7 @@ struct List {
 	group_gap: Option<u64>,
 	inflated: Option<u64>,
 	sealed_inflated: Option<u64>,
+	tie: Option<u64>,
 	immutable: bool,
 }
 
@@ -67,6 +89,7 @@ fn list(data: &Bytes, version: Version, immutable: bool) -> Result<List, Error> 
 		group_gap: None,
 		inflated: None,
 		sealed_inflated: None,
+		tie: None,
 		immutable: false,
 	};
 	let mut previous = 0u64;
@@ -80,6 +103,7 @@ fn list(data: &Bytes, version: Version, immutable: bool) -> Result<List, Error> 
 				PRIOR_OBJECT_ID_GAP => result.gap.replace(value).is_some(),
 				PRIOR_GROUP_ID_GAP => result.group_gap.replace(value).is_some(),
 				super::flate::INFLATED => result.inflated.replace(value).is_some(),
+				TIMESTAMP_TIE => result.tie.replace(value).is_some(),
 				_ => false,
 			};
 			if repeated {
@@ -103,6 +127,7 @@ fn list(data: &Bytes, version: Version, immutable: bool) -> Result<List, Error> 
 					(&mut result.inflated, nested.inflated),
 					(&mut result.gap, nested.gap),
 					(&mut result.group_gap, nested.group_gap),
+					(&mut result.tie, nested.tie),
 				] {
 					if let Some(value) = inner
 						&& outer.replace(value).is_some()
@@ -136,13 +161,25 @@ fn serialize<'a>(values: impl IntoIterator<Item = &'a Property>, version: Versio
 	Ok(out)
 }
 
-/// The properties our own group's first object carries: a Prior Group ID Gap of `gap`.
-pub(crate) fn group_gap(gap: u64, version: Version) -> Result<Vec<u8>, Error> {
-	let property = Property {
-		id: PRIOR_GROUP_ID_GAP,
-		value: Value::Int(gap),
-	};
-	serialize([&property], version)
+/// The properties our own object carries: an optional Prior Group ID Gap and/or Timestamp Tie.
+pub(crate) fn own_properties(group_gap: Option<u64>, tie: Option<u64>, version: Version) -> Result<Vec<u8>, Error> {
+	let mut values = Vec::with_capacity(2);
+	if let Some(gap) = group_gap {
+		values.push(Property {
+			id: PRIOR_GROUP_ID_GAP,
+			value: Value::Int(gap),
+		});
+	}
+	if let Some(tie) = tie {
+		values.push(Property {
+			id: TIMESTAMP_TIE,
+			value: Value::Int(tie),
+		});
+	}
+	if values.is_empty() {
+		return Ok(Vec::new());
+	}
+	serialize(&values, version)
 }
 
 /// Encode `values` as the block of an object whose properties arrived on `version`, or
@@ -265,6 +302,7 @@ fn decode(data: &Bytes, version: Version, framed: bool) -> Result<Decoded, Error
 		gap: parsed.gap,
 		group_gap: parsed.group_gap,
 		inflated: parsed.inflated,
+		tie: parsed.tie,
 	})
 }
 
@@ -395,7 +433,7 @@ mod tests {
 	#[test]
 	fn the_prior_group_id_gap_is_read_and_kept() {
 		for version in DRAFTS {
-			let outer = Bytes::from(group_gap(2, version).unwrap());
+			let outer = Bytes::from(own_properties(Some(2), None, version).unwrap());
 			let decoded = read(&outer, version).unwrap();
 			assert_eq!(decoded.group_gap, Some(2), "{version}");
 			assert_eq!(decoded.gap, None, "{version}");
@@ -558,6 +596,73 @@ mod compression_tests {
 			));
 			let repeated = serialize([&sealed, &property(super::super::flate::INFLATED, 23)], version).unwrap();
 			assert!(read(&repeated.into(), version).is_err());
+		}
+	}
+
+	/// `timestamp_object_id` encodes monotonic, tied, and backwards DTS values into strictly
+	/// increasing Object IDs with an optional `TIMESTAMP_TIE (0x40B72)` property.
+	#[test]
+	fn timestamp_object_id_and_tie_roundtrip() {
+		let group = 1000u64;
+
+		// Monotonic: oid = dts - group, tie = 0.
+		let mut prior = None;
+		let mono: Vec<_> = [1000u64, 1033, 1066]
+			.into_iter()
+			.map(|dts| {
+				let pair = timestamp_object_id(group, prior, dts);
+				prior = Some(pair.0);
+				pair
+			})
+			.collect();
+		assert_eq!(mono, [(0, 0), (33, 0), (66, 0)]);
+
+		// Consecutive ties: oid increments by 1, tie tracks offset.
+		let mut prior = None;
+		let tied: Vec<_> = [1000u64, 1000, 1000]
+			.into_iter()
+			.map(|dts| {
+				let pair = timestamp_object_id(group, prior, dts);
+				prior = Some(pair.0);
+				pair
+			})
+			.collect();
+		assert_eq!(tied, [(0, 0), (1, 1), (2, 2)]);
+
+		// Backwards DTS bridging: oid increments by 1, tie absorbs the delta.
+		let mut prior = None;
+		let backwards: Vec<_> = [1000u64, 1100, 1033]
+			.into_iter()
+			.map(|dts| {
+				let pair = timestamp_object_id(group, prior, dts);
+				prior = Some(pair.0);
+				pair
+			})
+			.collect();
+		assert_eq!(backwards, [(0, 0), (100, 0), (101, 68)]);
+
+		// Roundtrip TIMESTAMP_TIE alone, with PRIOR_GROUP_ID_GAP, inside Immutable Properties,
+		// and reject duplicates.
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
+			let tie_only = Bytes::from(own_properties(None, Some(7), version).unwrap());
+			let decoded = read(&tie_only, version).unwrap();
+			assert_eq!(decoded.group_gap, None, "{version}");
+			assert_eq!(decoded.tie, Some(7), "{version}");
+
+			let both = Bytes::from(own_properties(Some(3), Some(12), version).unwrap());
+			let decoded = read(&both, version).unwrap();
+			assert_eq!(decoded.group_gap, Some(3), "{version}");
+			assert_eq!(decoded.tie, Some(12), "{version}");
+
+			let sealed = Property {
+				id: 0x0b,
+				value: Value::Bytes(serialize([&property(TIMESTAMP_TIE, 9)], version).unwrap().into()),
+			};
+			let wire = serialize([&sealed], version).unwrap();
+			assert_eq!(read(&wire.into(), version).unwrap().tie, Some(9), "{version}");
+
+			let repeated = serialize([&sealed, &property(TIMESTAMP_TIE, 2)], version).unwrap();
+			assert!(matches!(read(&repeated.into(), version), Err(Error::MalformedTrack)));
 		}
 	}
 }

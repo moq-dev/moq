@@ -27,11 +27,12 @@ const MAX_KVP_VALUE_LEN: usize = (1 << 16) - 1;
 /// MAX_CACHE_DURATION (0x04): how long a relay may serve an object from its cache.
 const MAX_CACHE_DURATION: u64 = 0x04;
 
-/// TIMESCALE (0x08), from the MOQ Properties registry shared with draft-ietf-moq-loc-04.
+/// ID_TIMESCALE (0x40B70), from draft-lcurley-moq-timestamp.
 ///
-/// Track scope: it declares the units of every object Timestamp on the track, and its
-/// presence is what opts the track into timestamps at all.
-pub(super) const TIMESCALE: u64 = 0x08;
+/// Track scope: it declares the units of the track's Group IDs and Object IDs (`dts =
+/// Group ID + Object ID - TIMESTAMP_TIE`), and its presence is what opts the track into
+/// transport timestamps. Distinct from LOC's TIMESCALE (0x08), which passes through opaquely.
+pub(super) const TIMESCALE: u64 = 0x40B70;
 
 /// DEFAULT_PUBLISHER_GROUP_ORDER (0x22), the publisher's delivery preference for the track.
 ///
@@ -668,10 +669,10 @@ mod tests {
 
 		let mut both = Vec::new();
 		let mut w = Encoder::new(&mut both, Version::Draft22.into());
-		w.varint(TIMESCALE).unwrap();
-		w.varint(90_000).unwrap();
-		w.varint(IMMUTABLE - TIMESCALE).unwrap();
+		w.varint(IMMUTABLE).unwrap();
 		w.bytes(&sealed).unwrap();
+		w.varint(TIMESCALE - IMMUTABLE).unwrap();
+		w.varint(90_000).unwrap();
 		assert!(matches!(decode_draft22(&both), Err(DecodeError::InvalidValue)));
 	}
 

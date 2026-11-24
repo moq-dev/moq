@@ -135,7 +135,7 @@ export function frameHeader(
 ) {
 	const parts: Uint8Array[] = [];
 	if (lengthFirst) parts.push(encodeVarint(size + 1, version));
-	if (delta !== undefined) parts.push(encodeVarint(zigzag(delta), version));
+	if (delta !== undefined) parts.push(encodeVarint(lengthFirst ? delta : zigzag(delta), version));
 	if (inflated !== undefined) parts.push(encodeVarint(inflated, version));
 	if (!lengthFirst) parts.push(encodeVarint(size, version));
 	return concat(parts);
@@ -2692,7 +2692,8 @@ export class Publisher {
 			}
 		}
 
-		// Lite-07 counts the first delta from the group's start, and GROUP_END from the highest.
+		// Lite-07 counts the first unsigned delta from the group's start, and GROUP_END from the last.
+		const lengthFirst = hasLengthFirst(this.version);
 		let prevTs = hasGroupEnd(this.version) ? group.start : 0n;
 		let highest: bigint | undefined;
 		for (let index = startFrame; endFrame === undefined || index <= endFrame; index++) {
@@ -2703,18 +2704,17 @@ export class Publisher {
 			let delta: bigint | undefined;
 			if (stamp !== undefined) {
 				const ts = wireTime(frame.timestamp, stamp);
-				delta = ts - prevTs;
-				prevTs = ts;
-				highest = max(highest ?? ts, ts);
+				if (lengthFirst) {
+					delta = ts > prevTs ? ts - prevTs : 0n;
+					prevTs += delta;
+				} else {
+					delta = ts - prevTs;
+					prevTs = ts;
+				}
+				highest = max(highest ?? prevTs, prevTs);
 			}
 
-			const header = frameHeader(
-				stream.version,
-				delta,
-				read.inflated,
-				readSize(read),
-				hasLengthFirst(this.version),
-			);
+			const header = frameHeader(stream.version, delta, read.inflated, readSize(read), lengthFirst);
 			const chunks = read.chunks;
 			// One budget race covers the frame's header and payload.
 			await write(async () => {
@@ -2804,8 +2804,9 @@ export class Publisher {
 				await msg.encode(stream, this.version);
 			});
 
-			// Lite-07 counts the first delta from the group's start, whatever frame the stream starts
-			// at, and GROUP_END from the highest timestamp sent, since B-frames go backwards.
+			// Lite-07 counts the first unsigned delta from the group's start, whatever frame the stream
+			// starts at, and GROUP_END from the last frame's timestamp.
+			const lengthFirst = hasLengthFirst(this.version);
 			let prevTs = hasGroupEnd(this.version) ? group.start : 0n;
 			let highest: bigint | undefined;
 			// Whether the cursor ever reached the requested start, which decides how the
@@ -2849,18 +2850,17 @@ export class Publisher {
 				if (stamp !== undefined) {
 					// Convert each frame to the track's wire timescale.
 					const ts = wireTime(read.frame.timestamp, stamp);
-					delta = ts - prevTs;
-					prevTs = ts;
-					highest = max(highest ?? ts, ts);
+					if (lengthFirst) {
+						delta = ts > prevTs ? ts - prevTs : 0n;
+						prevTs += delta;
+					} else {
+						delta = ts - prevTs;
+						prevTs = ts;
+					}
+					highest = max(highest ?? prevTs, prevTs);
 				}
 
-				const header = frameHeader(
-					stream.version,
-					delta,
-					read.inflated,
-					readSize(read),
-					hasLengthFirst(this.version),
-				);
+				const header = frameHeader(stream.version, delta, read.inflated, readSize(read), lengthFirst);
 				const chunks = read.chunks;
 				const payload = chunks ? undefined : read.frame.payload;
 				// One budget race covers the frame's header and payload.

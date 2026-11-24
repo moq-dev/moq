@@ -1600,11 +1600,9 @@ impl Consumer {
 			if !recover.wants(failed.as_ref(), waiter) {
 				return res;
 			}
-			if self.state.read().sparse() {
-				return Poll::Ready(Err(Error::Unsupported));
-			}
+			let sparse = self.state.read().sparse();
 			let cause = failed.map_or(super::resume::Cause::Stalled, super::resume::Cause::Failed);
-			let mut replacement = match recover.poll(*index, &cause, waiter) {
+			let mut replacement = match recover.poll(*index, &cause, sparse, waiter) {
 				Poll::Ready(Ok(group)) => group,
 				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
 				Poll::Pending => return Poll::Pending,

@@ -1129,7 +1129,7 @@ fn write_tag(out: &mut BytesMut, tag_type: u8, timestamp_ms: u32, body: &[u8]) -
 
 fn ensure_legacy(container: &Container, kind: &'static str, name: &str) -> crate::Result<()> {
 	match container {
-		Container::Legacy | Container::Loc => Ok(()),
+		Container::Legacy | Container::Loc | Container::Raw | Container::Cts => Ok(()),
 		Container::Cmaf { .. } => Err(Error::UnsupportedContainer {
 			kind,
 			name: name.to_string(),

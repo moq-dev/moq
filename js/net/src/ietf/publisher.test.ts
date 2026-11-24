@@ -2730,7 +2730,10 @@ test.each(["nextObject", "unfiltered"] as const)(
 		writeGroup(track, 1);
 		const group = hooks.appendNext(track);
 		for (let i = 0; i < 2; i++) {
-			group.writeFrame({ payload: new TextEncoder().encode(`1.${i}`), timestamp: Timestamp.now() });
+			group.writeFrame({
+				payload: new TextEncoder().encode(`1.${i}`),
+				timestamp: Timestamp.fromMillis(Number(group.start) + i),
+			});
 		}
 
 		const { client, ok } = await runSubscribe(
@@ -2760,7 +2763,10 @@ test.each(["nextObject", "unfiltered"] as const)(
 			});
 
 			// Everything past the snapshot belongs to the subscription, not the fill.
-			group.writeFrame({ payload: new TextEncoder().encode("1.2"), timestamp: Timestamp.now() });
+			group.writeFrame({
+				payload: new TextEncoder().encode("1.2"),
+				timestamp: Timestamp.fromMillis(Number(group.start) + 2),
+			});
 			group.finish();
 
 			const live = await nextUni(fx.uni);
@@ -2799,7 +2805,10 @@ test("draft-22: a fill never rewinds an absolute live join", async () => {
 			{ group: 0, id: 1, payload: "0.1" },
 		]);
 		const group = hooks.appendNext(track);
-		group.writeFrame({ payload: new TextEncoder().encode("1.0"), timestamp: Timestamp.now() });
+		group.writeFrame({
+			payload: new TextEncoder().encode("1.0"),
+			timestamp: Timestamp.fromMillis(Number(group.start)),
+		});
 		group.finish();
 		const live = await nextUni(fx.uni);
 		expect(await readGroup(live)).toEqual({
@@ -2824,7 +2833,10 @@ test("draft-22: an open group with a shed front refuses a tail join", async () =
 
 	const group = hooks.appendNext(track);
 	for (let i = 0; i < 40; i++) {
-		group.writeFrame({ payload: new Uint8Array(1024 * 1024), timestamp: Timestamp.now() });
+		group.writeFrame({
+			payload: new Uint8Array(1024 * 1024),
+			timestamp: Timestamp.fromMillis(Number(group.start) + i),
+		});
 	}
 
 	const { client, ok } = await runSubscribe(
@@ -2917,7 +2929,10 @@ test.each(["ascending", "descending"] as const)("draft-22: a wider fill is refus
 		expect(served.reset).toBeInstanceOf(StreamError);
 		expect(served.objects).toEqual([]);
 		const live = hooks.appendNext(track);
-		live.writeFrame({ payload: new TextEncoder().encode("live"), timestamp: Timestamp.now() });
+		live.writeFrame({
+			payload: new TextEncoder().encode("live"),
+			timestamp: Timestamp.fromMillis(Number(live.start)),
+		});
 		live.finish();
 		const objects = [];
 		while (objects.length === 0) {
@@ -2968,7 +2983,10 @@ async function subscribeOkLargest(version: IetfVersion): Promise<SubscribeOk["la
 
 	const group = track.createGroup(5n);
 	for (let i = 0; i < 4; i++) {
-		group.writeFrame({ payload: new TextEncoder().encode(`5.${i}`), timestamp: Timestamp.now() });
+		group.writeFrame({
+			payload: new TextEncoder().encode(`5.${i}`),
+			timestamp: Timestamp.fromMillis(Number(group.start) + i),
+		});
 	}
 	group.finish();
 
@@ -3029,9 +3047,10 @@ test.each([
 		const served = await nextUni(fx.uni);
 		const reader = new Reader(served, undefined, version);
 		const header = await GroupMessage.decode(reader, version);
-		expect(header.flags.hasExtensions).toBe(false);
+		expect(header.flags.hasExtensions).toBe(true);
 
 		await reader.u53(); // object id delta
+		expect(await reader.u53()).toBe(0); // empty properties block
 		expect(await reader.read(await reader.u53())).toEqual(new TextEncoder().encode("0.0"));
 
 		fx.close();
@@ -3374,7 +3393,10 @@ test("draft-22: a fill works on a dynamically requested track", async () => {
 		const track = request.accept({ timescale: Timescale.MILLI });
 		const group = hooks.appendNext(track);
 		for (let i = 0; i < 2; i++) {
-			group.writeFrame({ payload: new TextEncoder().encode(`0.${i}`), timestamp: Timestamp.now() });
+			group.writeFrame({
+				payload: new TextEncoder().encode(`0.${i}`),
+				timestamp: Timestamp.fromMillis(Number(group.start) + i),
+			});
 		}
 		return group;
 	})();
@@ -4559,7 +4581,10 @@ test("draft-22: Next Object behind an upstream group report still delivers its f
 	try {
 		expect(ok.largest).toBeUndefined();
 		expect(group.start).toBe(0n);
-		group.writeFrame({ payload: new TextEncoder().encode("first"), timestamp: Timestamp.now() });
+		group.writeFrame({
+			payload: new TextEncoder().encode("first"),
+			timestamp: Timestamp.fromMillis(Number(group.start)),
+		});
 		group.finish();
 		const stream = await nextUni(fx.uni);
 		expect((await readGroup(stream)).objects).toEqual([{ id: 0, payload: "first" }]);
@@ -4589,7 +4614,10 @@ test("draft-22: Next Object on an empty group still delivers its first object", 
 	);
 	try {
 		expect(ok.largest).toBeUndefined();
-		group.writeFrame({ payload: new TextEncoder().encode("first"), timestamp: Timestamp.now() });
+		group.writeFrame({
+			payload: new TextEncoder().encode("first"),
+			timestamp: Timestamp.fromMillis(Number(group.start)),
+		});
 		group.finish();
 		const stream = await nextUni(fx.uni);
 		expect((await readGroup(stream)).objects).toEqual([{ id: 0, payload: "first" }]);

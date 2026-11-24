@@ -263,14 +263,20 @@ impl Version {
 	}
 
 	/// Whether a Group or Fetch Stream ends a finished group with GROUP_END, its end counted
-	/// from the stream's highest timestamp, and a closed one with a bare FIN, and counts its
-	/// first FRAME's timestamp from the group's start. Added in lite-07; earlier versions end
-	/// every group with a bare FIN and count the first timestamp from 0.
+	/// from the stream's last timestamp, and a closed one with a bare FIN, and counts its
+	/// first FRAME's unsigned timestamp delta from the group's start. Added in lite-07; earlier
+	/// versions end every group with a bare FIN and zigzag-encode signed deltas from 0.
 	pub(crate) fn has_group_end(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
 		)
+	}
+
+	/// Whether FRAME's `Timestamp Delta` is an unsigned non-negative delta (monotonic DTS),
+	/// rather than a zigzag-encoded signed delta. Added in lite-07.
+	pub(crate) fn has_unsigned_timestamps(self) -> bool {
+		self.has_group_end()
 	}
 
 	/// Whether SUBSCRIBE_DROP's Error Code is a stream error code, ending a dropped group's

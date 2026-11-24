@@ -4,7 +4,7 @@ abbrev: "moq-ietf"
 category: info
 
 docname: draft-lcurley-moq-ietf-latest
-submissiontype: IETF  # also: "independent", "editorial", "IAB", or "IRTF"
+submissiontype: IETF
 number:
 date:
 v: 3
@@ -24,9 +24,9 @@ informative:
 
 --- abstract
 
-This document defines an extension for moq-lite {{moql}} that carries the object state of MoQ Transport {{moqt}} across a moq-lite session between two relays.
-A track a MoQ Transport publisher sends through relay A, then over moq-lite to relay B, reaches a MoQ Transport subscriber of relay B as it would through one relay: with its Object IDs, gaps, properties, and END_OF_GROUP status.
-A datagram track keeps only what moq-lite carries.
+This document defines an extension for moq-lite {{moql}} that carries MoQ Transport {{moqt}} track and object state across a moq-lite hop between two relays.
+A track published over MoQ Transport crosses a moq-lite relay link and reaches a downstream MoQ Transport subscriber with its Object IDs, gaps, properties, and END_OF_GROUP status intact.
+Tracks published over moq-lite and datagram tracks are unaffected.
 
 --- note_Note_to_Readers
 
@@ -38,175 +38,143 @@ Submit an [issue](https://github.com/moq-dev/moq/issues) or [PR](https://github.
 # Conventions and Definitions
 {::boilerplate bcp14-tagged}
 
-A **relayed** group arrived from a MoQ Transport publisher, so it has object state that moq-lite cannot express.
-A **plain** one has none: its Object IDs are its frame indices, it has no properties, and its group ends where its last frame does.
-A track's **Version** is the {{moqt}} version its original publisher spoke, which serialized every property it carries, or none for a track published over moq-lite ([Track Stream](#track)).
+A **relayed** group originated from a {{moqt}} publisher and carries object state that {{moql}} cannot express natively.
+A **plain** group has none: its Object IDs equal its frame indices, it has no properties, and it ends at its last frame.
+A track's **Version** is the {{moqt}} version its original publisher spoke (which defines the wire serialization of its properties), or `0` for a track published over {{moql}} ({{track}}).
 
 
 # Introduction
-moq-lite numbers the frames of a group consecutively from 0 and carries nothing else about them.
-{{moqt}} objects carry more: Object IDs that may skip, properties, and an END_OF_GROUP status object at its own Object ID.
-A relay preserves this state between MoQ Transport peers, but loses it on a moq-lite hop, so a track crossing two relays arrives changed.
+{{moql}} numbers frames consecutively from `0` and carries no per-object metadata.
+{{moqt}} objects can skip Object IDs, carry properties, and end with an `END_OF_GROUP` status object at its own Object ID.
+Without this extension, a relay loses that state when forwarding across a {{moql}} hop.
 
-This extension carries that state across the hop.
-It is meant for relays: an endpoint that does not relay MoQ Transport content would receive state it can only discard.
+This extension is intended for relay-to-relay links.
+Only subgroup 0 of a {{moqt}} group is carried.
+Datagram tracks have no Track Stream and therefore no Version; they carry only what {{moql}} defines.
 
 
 # Setup Negotiation
-An endpoint offers the extension with the following Setup Parameter ({{moql}} SETUP):
+An endpoint offers this extension with the `IETF` Setup Parameter in SETUP ({{moql}}):
 
-|------------|------|-------------|
-|  ID        | Name | Value       |
-|-----------:|:-----|:------------|
-| 0x49455446 | IETF | (empty)     |
-|------------|------|-------------|
+| ID         | Name | Value   |
+|:-----------|:-----|:--------|
+| 0x49455446 | IETF | (empty) |
 
 The value MUST be empty; a receiver MUST close the session with a PROTOCOL_VIOLATION otherwise.
-The extension is negotiated only when both endpoints offer it, and only on moq-lite-07 and later.
-An endpoint MUST NOT send any field this document defines unless the extension is negotiated, and MUST NOT parse a Group Stream, FETCH response, or Track Stream from the peer until it has the peer's SETUP and so knows whether it was.
-A Group Stream or FETCH response is read with the Version of its track, which the Track Stream carries before any subscription or fetch opens.
+The extension is negotiated only on moq-lite-07 and later when both endpoints offer it.
+
+An endpoint MUST NOT send any field defined by this document unless negotiated, and MUST buffer incoming Track Streams, Group Streams, and FETCH responses until the peer's SETUP arrives.
+Group Streams and FETCH responses are parsed using the track's Version learned on its Track Stream ({{track}}).
 
 
-# Group Streams {#group}
-When the extension is negotiated, a Group Stream of a track with a Version carries a Group State after the GROUP message, and an Object Record before each FRAME.
-A FETCH response for such a track carries the same, with the Group State first.
-A Group Stream or FETCH response of a track without a Version is exactly as {{moql}} defines it, so the extension costs a track published over moq-lite nothing.
-Datagrams are unchanged too: a datagram track ({{moql}}) has no Track Stream and so no Version.
+# Track Stream {#track}
+When negotiated, the publisher sends `TRACK_PROPERTIES` immediately after `TRACK_INFO` on the Track Stream:
+
+~~~
+TRACK_PROPERTIES Message {
+  Message Length (i),
+  Version (i),
+  Property List (..),
+}
+~~~
+
+**Version**:
+The {{moqt}} version code its original publisher spoke (e.g., `0xff000012` for draft 18), or `0` for a track published over {{moql}} (in which case `Property List` MUST be empty).
+A receiver MUST treat an unrecognized non-zero Version as malformed.
+Each track has one immutable Version.
+
+**Property List**:
+The {{moqt}} Track Properties forwarded without interpretation, delta-encoded in ascending ID order using the track Version's varints.
+At most one Immutable Properties block (`0x0b`) may appear, forwarded verbatim in the same encoding.
+
+A message MUST NOT carry more than 64 properties, nor any of the six properties a relay interprets into `TRACK_INFO`: `MAX_CACHE_DURATION` (`0x04`), `DEFAULT_PUBLISHER_PRIORITY` (`0x0e`), `DEFAULT_PUBLISHER_GROUP_ORDER` (`0x22`), `DYNAMIC_GROUPS` (`0x30`), `COMPRESSION` (`0x40B6C`), and `ID_TIMESCALE` (`0x40B70`).
+Violating either rule is malformed.
+
+Because a relay restates up to five of those from `TRACK_INFO` (never `MAX_CACHE_DURATION`), it forwards at most 58 opaque properties and refuses a track with more as unsupported.
+Dropping understood properties can widen the delta spanning them; a relay also refuses as unsupported any track whose remaining `Property List` does not fit a `TRACK_PROPERTIES` message beside its Version.
+
+Immutable Properties (`0x0b`) MAY still seal an understood property, in which case the relay forwards it in place of restating a mutable copy and MUST NOT restate any key present inside `0x0b`.
+Because the relay acts on `TRACK_INFO`, sealed `ID_TIMESCALE`, `DEFAULT_PUBLISHER_PRIORITY`, `DYNAMIC_GROUPS`, and `COMPRESSION` MUST match `TRACK_INFO` (`DYNAMIC_GROUPS` matching whether `Refresh` is non-zero); a relay refuses a mismatching track as unsupported.
+Sealed `DEFAULT_PUBLISHER_GROUP_ORDER` and `MAX_CACHE_DURATION` are advisory and forwarded unchanged.
+
+A relay neither processes nor forwards Mandatory Track Properties (`0x4000`–`0x7FFF`), mutable or sealed; a receiver refuses such a track with an unsupported extension error.
+
+Because `TRACKS_ADD` ({{moql}}) embeds `TRACK_INFO` without `TRACK_PROPERTIES`, a subscriber MUST still read the Track Stream before parsing Group Streams when this extension is negotiated.
+
+
+# Group Streams and FETCH {#group}
+When negotiated, a Group Stream (after `GROUP`) or FETCH response (before the first `FRAME`) for a track with a non-zero Version carries a `Group State` followed by an `Object Record` before each `FRAME`:
 
 ~~~
 Group Stream {
-  GROUP Message
-  Group State (i)
-  Object (..) ...
+  GROUP Message,
+  Group State (i),
+  Object (..) ...,
 }
 
 Object {
-  Object Record
-  [FRAME Message]
+  Object Record,
+  [FRAME Message],
 }
 ~~~
 
+Tracks with Version `0` are unchanged from {{moql}}, so native {{moql}} tracks pay zero overhead.
+
 ## Group State
-A bit field describing the group's relay state, or 0 for a plain group:
+A bit field describing the group's relay state, or `0` for a plain group:
 
-- `0x1` **RELAYED**: The group is relayed. Every other bit requires it.
-- `0x2` **FIRST_OBJECT**: The first record is the group's first object, as the FIRST_OBJECT state of a {{moqt}} subgroup.
-- `0x4` **EXTENSIONS**: The {{moqt}} subgroup header said its objects carry properties. Without it, every record's Properties are empty.
-- `0x8` **END_OF_GROUP**: The stream's end ends the group, as a {{moqt}} subgroup that contains the end of its group.
+- `0x1` **RELAYED**: The group is relayed. Every other bit requires `RELAYED`.
+- `0x2` **FIRST_OBJECT**: The first record is the group's first object.
+- `0x4` **EXTENSIONS**: Objects may carry properties; when clear, every record's `Properties` MUST be empty.
+- `0x8` **END_OF_GROUP**: The stream's end ends the group.
 
-A receiver MUST reset the stream with a PROTOCOL_VIOLATION on any other bit, a bit without RELAYED, or a record with Properties when EXTENSIONS is clear.
-A publisher MUST clear FIRST_OBJECT when the stream starts after the first frame it holds, and END_OF_GROUP when the stream may stop before the end of the group, such as at a subscription's end frame.
-A stream that stops at an end frame carries no END_OF_GROUP record, even when that frame is the group's last.
-
-Only subgroup 0 of a {{moqt}} group is carried.
+A receiver MUST reset the stream with a PROTOCOL_VIOLATION on any unknown bit, any bit without `RELAYED`, or a non-empty `Properties` when `EXTENSIONS` is clear.
+A publisher MUST clear `FIRST_OBJECT` when starting past the first held frame, and MUST clear `END_OF_GROUP` when the stream stops at a frame cap (and omit any `END_OF_GROUP` record even if the cap lands on the last frame).
 
 ## Object Record
 
 ~~~
 Object Record {
-  Object (i)
-  Properties Length (i)
-  Properties (..)
+  Object (i),
+  Properties Length (i),
+  Properties (..),
 }
 ~~~
 
 **Object**:
 `(Skip << 1) | End`.
-`Skip` is the Object ID for the first record on the stream, and the number of Object IDs skipped since the previous record afterwards.
-`End` is 1 for the END_OF_GROUP record, which has no FRAME and is the last record on the stream: a receiver MUST reset the stream with a PROTOCOL_VIOLATION if anything follows it.
+`Skip` is the Object ID for the first record on the stream, and the number of Object IDs skipped since the previous record thereafter.
+`End` is `1` for an `END_OF_GROUP` record, which has no `FRAME`, carries no properties, and MUST be the last record on the stream; any trailing record or non-empty properties on an `END_OF_GROUP` record MUST reset the stream with a PROTOCOL_VIOLATION.
 
 **Properties**:
-The object's [properties](#properties), in `Properties Length` bytes.
-An empty one means the object has none.
-A receiver MUST reset the stream if the length exceeds 65,536, the largest Property Block.
+The object's [properties](#properties) in `Properties Length` bytes (empty if none).
+A receiver MUST reset the stream if `Properties Length` exceeds 65,536.
 
-In a plain group, every record has a `Skip` of 0 after the first, whose Object ID is the index of its frame, no properties, and `End` of 0.
-A receiver MUST reset the stream with a PROTOCOL_VIOLATION on any other record in a plain group.
+In a plain group (`Group State = 0`), the first record has `Skip` equal to the first frame's index, every later record has `Skip = 0`, `Properties` is empty, and `End = 0`; any violation MUST reset the stream with a PROTOCOL_VIOLATION.
 
-A frame index stays the position of a FRAME in the group, as in {{moql}}.
-The Object ID is relay state beside it, so a plain subscriber still reads consecutive frames.
+Frame indices remain positional as in {{moql}}; Object IDs travel beside them so plain readers still observe consecutive frames.
 
 
 # Properties {#properties}
-An object's properties, as one Property Block in the encoding of its track's Version.
-A relay forwards the block to a peer of that encoding unchanged, so the block never grows on a hop, and holds it as received rather than as a decoded list many times its size.
-
-**Property Block**:
-Every property of the object, serialized as the track's Version serializes an object's properties, in ascending ID order.
-Immutable Properties (0x0b) are in the same encoding, as the publisher sent them.
-It MUST NOT be empty or longer than 65,536 bytes.
-A receiver MUST treat a block the track's Version would refuse as malformed, as it MUST a block on an object that Version could not send with properties.
-Only draft 14 lets a status object carry them, so a block on the END_OF_GROUP record needs a Version of draft 14.
-The Version also gives each property its meaning: drafts 18 and 19 serialize a block alike, but only drafts 19 and later assign property 0x06 to SUBGROUP_DELIVERY_TIMEOUT, so a relay knows not to forward a 0x06 to a draft that would read it differently.
-Other properties are opaque to this extension.
+Each non-empty `Properties` field is one Property Block serialized in the track Version's encoding (ascending ID order, with any `0x0b` Immutable Properties preserved verbatim), at most 65,536 bytes.
+A receiver MUST treat a block invalid under the track's Version as malformed.
+The track's Version also scopes version-dependent property IDs (such as `0x06`, `SUBGROUP_DELIVERY_TIMEOUT` from draft 19 onward), preventing a relay from forwarding a property to a version that interprets it differently.
 
 ## Timestamps {#timestamps}
-A relay MUST preserve a relayed track's Timescale and timestamps across a negotiated hop.
-A nonzero Version identifies a track from MoQ Transport, whose objects take their time from their Group ID, in the track's Timescale.
-
-The FRAME's Timestamp is the object's time.
-A Timestamp property (0x10) a {{moqt}} publisher attached, mutable or sealed, is opaque like any other: it stays in the Property Block, and a relay neither reads nor restates it.
-
-
-# Track Stream {#track}
-When the extension is negotiated, the publisher sends a TRACK_PROPERTIES message after TRACK_INFO.
-
-~~~
-TRACK_PROPERTIES Message {
-  Message Length (i)
-  Version (i)
-  Property List (..)
-}
-~~~
-
-**Version**:
-The track's Version: the {{moqt}} version its original publisher spoke, as {{moqt}} numbers it, such as 0xff000012 for draft 18.
-It is 0 for a track published over moq-lite, which carries no {{moqt}} state, and then the Property List MUST be empty.
-A receiver MUST treat a Version that names no {{moqt}} version it implements as malformed.
-A track has one Version, since each publisher is its own track: a relay forwards it unchanged, and a track from another publisher is another track.
-
-**Property List**:
-The {{moqt}} Track Properties a relay forwards without interpreting, serialized as the Version serializes them: in ascending ID order, with delta-encoded IDs and the varints of that version.
-Track Properties start at draft 16, so the list MUST be empty for drafts 14 and 15.
-A relay keeps the Version's encoding, so a repeated ID still costs a one-byte delta and the list never grows on a hop.
-Immutable Properties (0x0b), at most one, are forwarded as the publisher's bytes, in the same encoding.
-
-A message MUST NOT carry more than 64 properties, nor any a relay interprets rather than forwards: MAX_CACHE_DURATION (0x04), TIMESCALE (0x08), DEFAULT_PUBLISHER_PRIORITY (0x0e), DEFAULT_PUBLISHER_GROUP_ORDER (0x22), and DYNAMIC_GROUPS (0x30).
-TRACK_INFO carries what a relay keeps of them, so a second copy could only contradict it.
-A message that breaks either rule is malformed.
-
-A relay restates up to four of those from TRACK_INFO, never MAX_CACHE_DURATION, and it forwards at most 59 properties, and it refuses a track with more, from a {{moqt}} publisher or over this extension, as unsupported.
-Dropping those five can widen the delta that spans them, so a relay also refuses a {{moqt}} track whose remaining list would not fit a TRACK_PROPERTIES message beside its Version, as unsupported.
-
-The Immutable Properties may still hold one of the properties a relay restates, which it forwards in place of the one it would restate.
-A sealed MAX_CACHE_DURATION has no restated counterpart, so it travels beside none and is never compared.
-A relay acts on TRACK_INFO, so a sealed TIMESCALE MUST equal the Timescale, DEFAULT_PUBLISHER_PRIORITY the priority, and DYNAMIC_GROUPS whether its Refresh is nonzero.
-A sealed DEFAULT_PUBLISHER_GROUP_ORDER or MAX_CACHE_DURATION is advisory: a relay serves its own order and Max Age and forwards the sealed value unchanged, whatever it says.
-A relay refuses a track whose sealed value breaks that rule, from a {{moqt}} publisher or over this extension, as unsupported.
-
-A relay neither processes nor forwards a track with a Mandatory Track Property (0x4000 to 0x7FFF), mutable or inside the Immutable Properties, so a publisher never sends one.
-A receiver refuses such a track as {{moqt}} ingress does, with an unsupported extension error.
-
-The receiver parses the keys inside the Immutable Properties from its value, which a relay MUST NOT restate as mutable.
-It SHOULD read them from the value when needed rather than hold them beside it, as a list of IDs can cost several times the value.
-
-A TRACKS_ADD ({{moql}} Tracks Stream) embeds TRACK_INFO without TRACK_PROPERTIES, so when the extension is negotiated a subscriber MUST NOT skip the Track Stream for a track it learned from a listing.
-Lacking the Version, a TRACKS_ADD cannot say whether the track's Group Streams carry Object Records ({{group}}).
+A relay MUST preserve a relayed track's `Timescale` and timestamps across a negotiated hop.
+The `FRAME` timestamp is the object's transport time.
+Any `TIMESTAMP` property (`0x10`) attached by a {{moqt}} publisher stays opaque inside the Property Block and is neither read nor restated.
 
 
 # Security Considerations
-A peer sets how much state a receiver holds for each object, up to a 65,536-byte Property Block.
-A receiver SHOULD hold the block as received, not decoded, and charge it to the group's cache budget like a payload.
-A TRACK_PROPERTIES message is bounded by its Message Length and the 64-property limit, and is held once per track.
-
-The extension adds no authority.
-A relay applies the same authorization to a relayed group as to a plain one.
+A peer controls up to 65,536 bytes of properties per object; a receiver SHOULD store each Property Block verbatim and charge it to the group's cache budget alongside payload bytes.
+`TRACK_PROPERTIES` is bounded by `Message Length` and the 64-property limit.
+This extension adds no authorization scope.
 
 
 # IANA Considerations
 
-This document requests one registration in the moq-lite Setup Parameters registry, if one is established.
-A high, distinctive value is used to avoid collisions with the low values {{moql}} assigns.
+This document requests one registration in the moq-lite Setup Parameters registry, if established:
 
 | Value      | Name | Reference     |
 |:-----------|:-----|:--------------|

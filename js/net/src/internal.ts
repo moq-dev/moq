@@ -1207,6 +1207,7 @@ export const hooks: {
 	chargeGroup: (group: GroupProducer, charge: Charge | undefined) => void;
 	/** Frame count without creating a read handle. */
 	groupFrameCount: (group: GroupProducer) => number;
+	groupLastObject: (group: GroupProducer) => number | undefined;
 	/**
 	 * Cap a group at `frames` for a track end inside it, so later writes past it throw.
 	 * Throws `ProtocolViolation` if a frame at or past the cap already exists.
@@ -1683,6 +1684,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	groupFrameCount: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupLastObject: () => {
 		throw new Error("group.ts not loaded");
 	},
 	bindGroupTimed: () => {

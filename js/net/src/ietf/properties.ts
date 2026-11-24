@@ -3,10 +3,11 @@ import { Timescale } from "../time.ts";
 import { toNumber } from "../util/bigint.ts";
 import type { IetfVersion } from "./version.ts";
 
-// TIMESCALE (0x08), from the MOQ Properties registry shared with draft-ietf-moq-loc-04.
-// Track scope: it declares the units of the track's Group IDs, which are its groups' starts,
-// and its presence is what makes the track timed at all.
-const TIMESCALE = 0x08n;
+// ID_TIMESCALE (0x40B70), from draft-lcurley-moq-timestamp.
+// Track scope: it declares the units of the track's Group IDs and Object IDs (`dts =
+// Group ID + Object ID - TIMESTAMP_TIE`), and its presence is what makes the track timed.
+// Distinct from LOC's TIMESCALE (0x08), which is skipped as an unknown property.
+const TIMESCALE = 0x40b70n;
 
 // DEFAULT_PUBLISHER_GROUP_ORDER (0x22), the publisher's delivery preference for the track.
 // It shares its number with the GROUP_ORDER *message parameter*, which is a different
@@ -54,12 +55,6 @@ export async function encode(w: Writer, properties: Properties, _version: IetfVe
 		prevType = 4n;
 	}
 
-	if (properties.timescale !== undefined) {
-		await w.u62(TIMESCALE - prevType);
-		await w.u62(BigInt(properties.timescale));
-		prevType = TIMESCALE;
-	}
-
 	if (properties.priority !== undefined) {
 		if (!Number.isInteger(properties.priority) || properties.priority < 0 || properties.priority > 255) {
 			throw new RangeError(`invalid publisher priority: ${properties.priority}`);
@@ -72,6 +67,13 @@ export async function encode(w: Writer, properties: Properties, _version: IetfVe
 	if (properties.groupOrder !== undefined) {
 		await w.u62(DEFAULT_PUBLISHER_GROUP_ORDER - prevType);
 		await w.u62(BigInt(properties.groupOrder));
+		prevType = DEFAULT_PUBLISHER_GROUP_ORDER;
+	}
+
+	if (properties.timescale !== undefined) {
+		await w.u62(TIMESCALE - prevType);
+		await w.u62(BigInt(properties.timescale));
+		prevType = TIMESCALE;
 	}
 }
 

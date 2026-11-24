@@ -113,7 +113,7 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])("a FRAME round-trips on %s", asy
 	const frames = [
 		{ delta: 100n, payload: [1] },
 		{ delta: 20_000n, payload: [2, 2] },
-		{ delta: -50n, payload: [] },
+		{ delta: lengthFirst ? 50n : -50n, payload: [] },
 	];
 	const encoded = frames.map(({ delta, payload }) =>
 		concat([frameHeader(version, delta, undefined, payload.length, lengthFirst), new Uint8Array(payload)]),
@@ -217,21 +217,21 @@ test.each([
 	expect((err as StreamError).code).toBe(StreamCode.MalformedTrack);
 });
 
-// A lite-07 GROUP_END's End is a delta from the highest timestamp the stream carried, or from the
+// A lite-07 GROUP_END's End is a delta from the last timestamp the stream carried, or from the
 // group's start when it carried none: 0 ends the group there.
-test("a lite-07 GROUP_END counts from the stream's highest timestamp", async () => {
+test("a lite-07 GROUP_END counts from the stream's last timestamp", async () => {
 	expect(await readLite07(lite07(0, 0), 5n)).toBe(5n);
 	expect(await readLite07(lite07(0, 3), 5n)).toBe(8n);
 	// Frame 0 at the start (delta 0), then one 40 later: End is 40 + 20 past the start.
-	expect(await readLite07(lite07(2, 0, 7, 2, 80, 8, 0, 20), 1000n)).toBe(1060n);
+	expect(await readLite07(lite07(2, 0, 7, 2, 40, 8, 0, 20), 1000n)).toBe(1060n);
 });
 
-// The first lite-07 FRAME on a stream counts its delta from the Group Start, so frame 0 carries 0;
-// later ones count from the frame before. Before lite-07 the first delta counts from 0.
+// The first lite-07 FRAME on a stream counts its unsigned delta from the Group Start, so frame 0
+// carries 0; later ones count from the frame before. Before lite-07 the first delta counts from 0.
 test("a lite-07 stream's first delta counts from the group's start", async () => {
 	const producer = new Producer(1000n);
 	const consumer = producer.consume();
-	await readFrames(streamOf([lite07(2, 0, 7, 2, 66, 8)], Version.DRAFT_07), producer, {
+	await readFrames(streamOf([lite07(2, 0, 7, 2, 33, 8)], Version.DRAFT_07), producer, {
 		scale: SCALE,
 		lengthFirst: true,
 	});
@@ -251,7 +251,7 @@ test("a resumed lite-07 stream counts its first delta from the group's start", a
 	hooks.startGroup(producer, 3);
 	const consumer = producer.consume();
 	// Frame 3 sits 99 past the start, and the group ends 33 past it.
-	const end = await readFrames(streamOf([lite07(2, 198, 7, 0, 33)], Version.DRAFT_07), producer, {
+	const end = await readFrames(streamOf([lite07(2, 99, 7, 0, 33)], Version.DRAFT_07), producer, {
 		scale: SCALE,
 		lengthFirst: true,
 	});
@@ -267,18 +267,18 @@ test("a resumed lite-07 stream counts its first delta from the group's start", a
 	expect(await fetched.decode(decode)).toEqual({ end: 2010n });
 });
 
-// B-frames send timestamps backwards within a group, so GROUP_END counts from the highest one, not
-// the last.
-test("a lite-07 group with B-frames ends at a delta from its highest frame", async () => {
+// Lite-07 deltas are unsigned (non-decreasing, including zero ties), so GROUP_END counts from the
+// last frame's timestamp.
+test("a lite-07 group with monotonic deltas and ties ends from its last frame", async () => {
 	const producer = new Producer(0n);
 	const consumer = producer.consume();
-	// Presentation order 0, 100, 33, 66: the highest is 100, and the group ends at 133.
-	const bytes = lite07(2, 0, 1, 2, 200, 2, 2, 133, 3, 2, 66, 4, 0, 33);
+	// Decode times 0, 33, 33, 66, and the group ends at 99.
+	const bytes = lite07(2, 0, 1, 2, 33, 2, 2, 0, 3, 2, 33, 4, 0, 33);
 	const end = await readFrames(streamOf([bytes], Version.DRAFT_07), producer, { scale: SCALE, lengthFirst: true });
-	expect(end).toBe(133n);
+	expect(end).toBe(99n);
 	const times = [];
 	for (let i = 0; i < 4; i++) times.push((await consumer.readFrame())?.timestamp?.value);
-	expect(times).toEqual([0, 100, 33, 66]);
+	expect(times).toEqual([0, 33, 33, 66]);
 	producer.finishAt(end as bigint);
 });
 

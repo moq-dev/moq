@@ -4662,9 +4662,9 @@ fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 	}
 	if let Some(stamp) = stamp {
 		let delta = clock
-			.delta(stamp.wire(timestamp)?)
+			.encode_delta(stamp.wire(timestamp)?)
 			.ok_or(Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
-		writer.buffer_varint(crate::coding::varint::zigzag(delta))?;
+		writer.buffer_varint(delta)?;
 	}
 	// Only a compressed group read in its stored form has one, and only on lite-07.
 	if let Some(inflated) = inflated {
@@ -8142,11 +8142,11 @@ mod serve_group_test {
 
 			let (bytes, fin) = first_stream(&log);
 			assert!(fin, "finished={finished}: no FIN");
-			// The frame: its length plus one, the timestamp delta from the group's start, and the
-			// payload; then GROUP_END, its End 3 past the frame at 2.
+			// The frame: its length plus one, the unsigned timestamp delta from the group's start,
+			// and the payload; then GROUP_END, its End 3 past the frame at 2.
 			let tail: &[u8] = match finished {
-				true => &[2, 4, b'x', 0, 3],
-				false => &[2, 4, b'x'],
+				true => &[2, 2, b'x', 0, 3],
+				false => &[2, 2, b'x'],
 			};
 			assert!(bytes.ends_with(tail), "finished={finished}: {bytes:?}");
 			assert!(log.resets().is_empty(), "finished={finished}");

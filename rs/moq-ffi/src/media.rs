@@ -65,6 +65,10 @@ pub enum MoqContainer {
 	},
 	/// LOC, the low-overhead container.
 	Loc,
+	/// Zero-byte header: raw codec payload timed by the MoQ transport timestamp (DTS == PTS).
+	Raw,
+	/// QUIC varint composition time offset (in track timescale) followed by the raw codec payload.
+	Cts,
 	/// A container this version of the bindings cannot name yet. Subscribing to it fails.
 	Unknown,
 }
@@ -79,6 +83,8 @@ impl MoqContainer {
 			hang::catalog::Container::Legacy => Some(Self::Legacy),
 			hang::catalog::Container::Cmaf { init, .. } => Some(Self::Cmaf { init: init.to_vec() }),
 			hang::catalog::Container::Loc => Some(Self::Loc),
+			hang::catalog::Container::Raw => Some(Self::Raw),
+			hang::catalog::Container::Cts => Some(Self::Cts),
 			hang::catalog::Container::Unknown(unknown) => {
 				tracing::warn!(kind = unknown.kind(), "ignoring unknown container");
 				None
@@ -95,6 +101,8 @@ impl TryFrom<MoqContainer> for hang::catalog::Container {
 			MoqContainer::Legacy => Self::Legacy,
 			MoqContainer::Cmaf { init } => Self::Cmaf { init: init.into() },
 			MoqContainer::Loc => Self::Loc,
+			MoqContainer::Raw => Self::Raw,
+			MoqContainer::Cts => Self::Cts,
 			MoqContainer::Unknown => {
 				return Err(MoqError::UnsupportedConfig {
 					reason: "unknown container".into(),

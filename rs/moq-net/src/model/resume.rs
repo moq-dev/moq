@@ -1366,6 +1366,13 @@ impl Subscriber {
 		}
 	}
 
+	/// Peek a cached group by key from any active copy without advancing the subscription.
+	#[cfg(feature = "async")]
+	pub(super) fn peek_group(&self, key: u64) -> Option<group::Consumer> {
+		let reader = self.reader();
+		reader.copies.iter().rev().find_map(|copy| copy.track.peek_group(key))
+	}
+
 	/// Poll for the track's declared exclusive end.
 	pub(super) fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<Position>> {
 		self.reader().poll_finished(waiter)
@@ -3743,9 +3750,18 @@ impl Recover {
 	/// Poll for the serving route's copy of the group, positioned at frame `index`, once the
 	/// copy being read looks past itself for `cause`.
 	///
+	/// When `sparse` is true, Object IDs differ from frame ordinals so ordinal recovery onto
+	/// another copy cannot stitch and is refused once a replacement would be fetched.
+	///
 	/// Returns the error that ends the group when nothing can continue it; for
 	/// [`Cause::Closed`], why the close stands.
-	pub(super) fn poll(&mut self, index: u64, cause: &Cause, waiter: &kio::Waiter) -> Poll<Result<Replacement>> {
+	pub(super) fn poll(
+		&mut self,
+		index: u64,
+		cause: &Cause,
+		sparse: bool,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<Replacement>> {
 		let failed = cause.error();
 		// The copy being read will deliver nothing more of the group.
 		let settled = !matches!(cause, Cause::Stalled);
@@ -3792,6 +3808,9 @@ impl Recover {
 			if failed.is_some()
 				&& let Some(replacement) = self.held(index)
 			{
+				if sparse {
+					return Poll::Ready(Err(Error::Unsupported));
+				}
 				return Poll::Ready(Ok(replacement));
 			}
 			// A verdict would repeat from the route that gave it.
@@ -3832,6 +3851,10 @@ impl Recover {
 					Cause::Closed => return Poll::Ready(Err(Error::NotFound)),
 					Cause::Failed(_) => {}
 				}
+			}
+			if sparse {
+				// An ordinal FETCH would request different content after an Object ID gap.
+				return Poll::Ready(Err(Error::Unsupported));
 			}
 			let res = self.poll_serving(generation, &serving, index, settled, withdrawn.is_none(), waiter);
 			// The serving route failed too, or will not fetch the rest while its subscription

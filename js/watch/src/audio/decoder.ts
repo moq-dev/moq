@@ -707,7 +707,13 @@ export class Decoder {
 				.asMicros(),
 		);
 		const format =
-			config.container.kind === "loc" ? new Container.Loc.Format("audio") : new Container.Legacy.Format(config);
+			config.container.kind === "loc"
+				? new Container.Loc.Format("audio")
+				: config.container.kind === "raw"
+					? new Container.Raw.Format(config)
+					: config.container.kind === "cts"
+						? new Container.Cts.Format(config)
+						: new Container.Legacy.Format(config);
 		// Create consumer with slightly less latency than the render worklet to avoid underflowing.
 		// TODO include JITTER_UNDERHEAD
 		const { consumer, read } = this.#consume(effect, sub, format, { config, path, ordered });

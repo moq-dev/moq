@@ -1485,6 +1485,8 @@ fn packaging_of(container: &hang::catalog::Container) -> moq_msf::Packaging {
 		hang::catalog::Container::Cmaf { .. } => moq_msf::Packaging::Cmaf,
 		hang::catalog::Container::Loc => moq_msf::Packaging::Loc,
 		hang::catalog::Container::Legacy => moq_msf::Packaging::Legacy,
+		hang::catalog::Container::Raw => moq_msf::Packaging::Unknown("raw".to_string()),
+		hang::catalog::Container::Cts => moq_msf::Packaging::Unknown("cts".to_string()),
 		hang::catalog::Container::Unknown(unknown) => moq_msf::Packaging::Unknown(unknown.kind().to_string()),
 	}
 }

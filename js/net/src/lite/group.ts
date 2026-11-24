@@ -95,7 +95,7 @@ export interface GroupEnd {
 
 /** How {@link frameDecoder} reads each frame's optional fields. */
 export interface FrameFormat {
-	/** The wire timescale; non-zero means every frame carries a zigzag-delta timestamp. */
+	/** The wire timescale; non-zero means every frame carries a delta timestamp. */
 	scale: number;
 	/**
 	 * The group's start, which a lite-07 stream's first timestamp delta counts from and a
@@ -107,7 +107,8 @@ export interface FrameFormat {
 	compress?: boolean;
 	/**
 	 * Whether every frame leads with its `Payload Length`, the payload size plus one (lite-07),
-	 * rather than ending its header with the size.
+	 * rather than ending its header with the size. Lite-07 also carries unsigned non-negative
+	 * timestamp deltas instead of zigzag-encoded signed deltas.
 	 */
 	lengthFirst?: boolean;
 }
@@ -118,9 +119,10 @@ export interface FrameFormat {
  * closes the group; before it the size ends the header, and stream end at the frame's first field
  * ends the group.
  *
- * On lite-07 the first delta counts from the group's `start`, whatever frame the stream starts at,
- * and GROUP_END's End counts from the highest timestamp the stream carried (B-frames go
- * backwards), or from `start` when it carried none. Mirrors the Rust `FrameIngest`.
+ * On lite-07 the first delta is an unsigned offset from the group's `start`, whatever frame the
+ * stream starts at, later deltas are unsigned offsets from the prior frame, and GROUP_END's End
+ * counts from the last frame's timestamp, or from `start` when the stream carried none. Mirrors
+ * the Rust `FrameIngest`.
  */
 export function frameDecoder({
 	scale,
@@ -143,7 +145,7 @@ export function frameDecoder({
 			}
 			size = length - 1;
 		}
-		const delta = timescale !== undefined ? unzigzag(c.u62()) : 0n;
+		const delta = timescale !== undefined ? (lengthFirst ? c.u62() : unzigzag(c.u62())) : 0n;
 		const inflated = compress ? c.u53() : undefined;
 		if (!lengthFirst) size = c.u53();
 		// A compressed frame is stored whole; a plain one past a segment streams in after this,
