@@ -8,9 +8,11 @@ of a plain track does. Today it hands out the group and never reports the gap.
 
 ## Plan
 
-Found while building the arrival read in Group Order: the lite-06
-`drop_record` integration test only passed because the arrival read took group 0 last. It is as
-old as the front's ordered reader, and reproduces on the commit before that PR.
+Found while building [moq-dev/moq#9529](https://github.com/moq-dev/moq/pull/9529): on lite-06,
+`drop_record::an_ordered_reader_is_told_of_every_group_the_origin_evicted` hit it once the origin
+served its queued groups newest first. That PR lets group 0 go out before the rest queue, which
+keeps the test on what it checks. The bug is as old as the front's ordered reader, and the repro
+below fails on the commit before that PR too.
 
 Repro, as a test in `rs/moq-net/src/model/resume.rs`'s `mod test`: serve one copy, subscribe
 `ordered()` with `Range::groups(from..)` and an hour's budget, then `a.drop_groups(from..4,

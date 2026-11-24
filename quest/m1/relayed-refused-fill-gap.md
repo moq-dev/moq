@@ -9,7 +9,7 @@ gaps before every read.
 
 ## Plan
 
-Found while building the arrival read in Group Order, with the fix
+Found while building [moq-dev/moq#9529](https://github.com/moq-dev/moq/pull/9529), with the fix
 [A front's ordered reader reports a drop that lands with the group above it](/quest/m1/front-drop-with-next-group.md)
 plans applied: `waiting_time_start::a_range_before_every_group_reads_past_it` in
 `rs/moq-net/tests/integration/` fails there, the relayed reader reporting a NotFound gap over
