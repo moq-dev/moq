@@ -30941,7 +30941,10 @@ mod test {
 		let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
 			panic!("below the start is a miss");
 		};
-		assert!(fill.next_run().is_some_and(|run| run.contains(&9)), "the fill awaits group 9");
+		assert!(
+			fill.next_run().is_some_and(|run| run.contains(&9)),
+			"the fill awaits group 9"
+		);
 		// Group 9 lands from elsewhere, held for the fill, and a debt evicts it with no room to
 		// hold it again.
 		write_sized(producer.create_group(group::Info { start: 9 }).map(Some), 9, 100_000);
