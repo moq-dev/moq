@@ -1505,7 +1505,7 @@ test("default audio replays the last second after three seconds without a subscr
 // Replayed groups reach the track as fresh arrivals, so only the encoder can tell they are old: a
 // live viewer rejoining after seconds idle would otherwise wade through all of them first. A live
 // join states how far back it plays as its lag, which bounds the replay however far its max reaches,
-// and a join reaching back further (as one before lite-07 does) is bounded by its max alone.
+// and a lag past its max is bounded by the max.
 const live = (min: number, max: number) => [
 	{ start: { live: { min: Duration.millis(min), max: Duration.millis(max) } } },
 ];
@@ -1550,6 +1550,46 @@ for (const [name, subscription] of [
 		}
 	});
 }
+
+// A join with no lag limit, as one before lite-07 is, states no target to fill: replaying its whole
+// max would hold the live edge back by encoding seconds of history its player skips.
+test("a join with no lag limit replays no retained audio", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	const clock = new Manual();
+	const installed = clock.install();
+	const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name: Moq.Path.from("legacy.hang") });
+	const feed = new Feed();
+	const configuring = configured();
+	const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(feed) as never });
+	let late: Moq.Track.Subscriber | undefined;
+	try {
+		await configuring;
+		await settle();
+		for (let index = 0; index < 150; index++) {
+			await feed.push({ timestamp: Duration.micros(index * 20_000), channels: [new Float32Array(960)] });
+			await feed.drain();
+			await clock.advance(Duration.millis(20));
+		}
+		const net = broadcast.net.peek();
+		if (!net) throw new Error("expected network broadcast");
+		late = net
+			.track("audio")
+			.subscribe({ ranges: [{ start: { live: { min: null, max: Duration.millis(2_000) } } }] });
+		await settle();
+		expect(encoder.out.stats.peek().frames).toBe(0);
+		await feed.push({ timestamp: Duration.micros(150 * 20_000), channels: [new Float32Array(960)] });
+		await feed.drain();
+		const group = await late.ordered().nextGroup();
+		const frame = await group?.readFrame();
+		if (!frame) throw new Error("expected a live frame");
+		expect(Moq.Varint.decode(frame.payload)[0]).toBe(150 * 20_000);
+	} finally {
+		late?.close();
+		encoder.close();
+		broadcast.close();
+		installed.close();
+	}
+});
 
 // A fetch's own budget judges only the group it asks for, so it must not narrow what the encoder
 // replays for the live subscribers that come later.

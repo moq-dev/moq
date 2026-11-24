@@ -963,17 +963,26 @@ impl Finished {
 /// How far back a subscription wants retained audio replayed. A live join
 /// ([`Start::Live`](moq_net::track::Start::Live) with no end) starts its lag behind the live edge,
 /// which a player states as its playout delay plus the codec's warmup, bounded by the join's own
-/// max, so when every range is one the furthest of those bounds it. Any other range is history,
-/// such as one from the oldest group (as moq-transport and moq-lite before 07 carry every join),
-/// which wants everything kept: `None` leaves the retention.
+/// max, so when every range is one the furthest of those bounds it. A join with no lag limit, as
+/// every join before moq-lite-07 is, states no target to fill, so it replays nothing: encoding its
+/// whole max first would hold the live edge back by that encode, for history its player skips.
+/// Any other range is history, such as one from the oldest group (as moq-transport carries every
+/// join), which wants everything kept, as does a join bounded by neither: `None` leaves the retention.
 #[cfg(any(feature = "capture", test))]
 fn replay_budget(subscription: &moq_net::track::Subscription) -> Option<std::time::Duration> {
 	let joins: Option<Vec<std::time::Duration>> = subscription
 		.ranges
 		.iter()
 		.map(|range| match (range.start, range.end) {
-			// Unbounded by both, it wants everything kept.
-			(moq_net::track::Start::Live { min, max }, None) => min.into_iter().chain(max).min(),
+			(moq_net::track::Start::Live { min: None, max: None }, None) => None,
+			(
+				moq_net::track::Start::Live {
+					min: None,
+					max: Some(_),
+				},
+				None,
+			) => Some(std::time::Duration::ZERO),
+			(moq_net::track::Start::Live { min: Some(min), max }, None) => Some(max.map_or(min, |max| min.min(max))),
 			_ => None,
 		})
 		.collect();
@@ -1189,6 +1198,44 @@ mod tests {
 			)
 			.await;
 		}
+	}
+
+	/// A join with no lag limit, as one before moq-lite-07 is, states no target to fill: replaying
+	/// its whole max would hold the live edge back by encoding seconds of history its player skips.
+	#[tokio::test(start_paused = true)]
+	async fn a_join_with_no_lag_limit_replays_nothing() {
+		let input = Input::default();
+		let options = Options {
+			track: Some("audio".into()),
+			config: Config::from_input(super::super::Codec::Pcm, &input),
+			..Options::default()
+		};
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let mut producer = Producer::new(&mut broadcast, catalog, input, &options).unwrap();
+		let at = |index: u64| Timestamp::from_micros(1_000_000 + index * 20_000).unwrap();
+		producer.set_active(false, at(0)).unwrap();
+		let frame = |index: u64| pcm_frame(&vec![index as f32; 1920], at(index).as_micros().unwrap() as u64);
+		for index in 0..150 {
+			producer.write(&frame(index)).unwrap();
+		}
+		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+			moq_net::track::Start::Live {
+				min: None,
+				max: Some(Duration::from_secs(2)),
+			},
+		)]);
+		let track = consumer.track("audio").unwrap().subscribe(subscription).await.unwrap();
+		let mut reader =
+			moq_mux::container::Consumer::new(track, moq_mux::container::legacy::Wire(moq_mux::container::Kind::Audio));
+		producer.set_active(true, at(150)).unwrap();
+		producer.write(&frame(150)).unwrap();
+		let Some(moq_mux::container::Read::Frame { frame, .. }) = reader.read().await.unwrap() else {
+			panic!("expected a live frame");
+		};
+		assert_eq!(frame.timestamp, at(150));
+		let _finished = producer.finish().unwrap();
 	}
 
 	async fn replays_from(subscription: moq_net::track::Subscription) {
