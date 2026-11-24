@@ -11282,13 +11282,10 @@ mod test {
 			routes.serve(b.consume());
 			let mut sub = front
 				.consume()
-				.subscribe(
-					Subscription::default()
-						.with_ranges([track::Range {
-							start: crate::track::Start::Time(7),
-							end: Some(7),
-						}]),
-				)
+				.subscribe(Subscription::default().with_ranges([track::Range {
+					start: crate::track::Start::Time(7),
+					end: Some(7),
+				}]))
 				.now_or_never()
 				.unwrap()
 				.unwrap();
@@ -11334,13 +11331,10 @@ mod test {
 		routes.serve(b.consume());
 		let mut sub = front
 			.consume()
-			.subscribe(
-				Subscription::default()
-					.with_ranges([track::Range {
-						start: crate::track::Start::Time(7),
-						end: Some(7),
-					}]),
-			)
+			.subscribe(Subscription::default().with_ranges([track::Range {
+				start: crate::track::Start::Time(7),
+				end: Some(7),
+			}]))
 			.now_or_never()
 			.unwrap()
 			.unwrap();
@@ -11376,13 +11370,10 @@ mod test {
 		routes.serve(b.consume());
 		let mut sub = front
 			.consume()
-			.subscribe(
-				Subscription::default()
-					.with_ranges([track::Range {
-						start: crate::track::Start::Time(7),
-						end: Some(7),
-					}]),
-			)
+			.subscribe(Subscription::default().with_ranges([track::Range {
+				start: crate::track::Start::Time(7),
+				end: Some(7),
+			}]))
 			.now_or_never()
 			.unwrap()
 			.unwrap();
@@ -11417,11 +11408,10 @@ mod test {
 		write(&a, 8);
 		routes.serve(a.consume());
 		let from = |time, end| {
-			Subscription::default()
-				.with_ranges([track::Range {
-					start: crate::track::Start::Time(time),
-					end,
-				}])
+			Subscription::default().with_ranges([track::Range {
+				start: crate::track::Start::Time(time),
+				end,
+			}])
 		};
 		let mut sub = front
 			.consume()
