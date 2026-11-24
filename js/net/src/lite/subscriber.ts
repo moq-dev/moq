@@ -3584,10 +3584,11 @@ async function untilAbandoned<T>(group: netGroup.Producer, step: Promise<T>): Pr
 }
 
 /**
- * A broadcast consumed from a lite session. It resolves `track.Consumer.info()` and
- * `.fetchGroup()` over the wire (lite-05+ TRACK / FETCH streams) by reaching into the
- * {@link Subscriber} it was opened from, the way the Rust `BroadcastConsumer` holds its
- * session. Live subscribes still flow through the inherited requested() queue.
+ * A broadcast consumed from a lite session. It resolves `track.Consumer.info()` from a copy it
+ * holds, else over the wire, and `.fetchGroup()` over the wire (lite-05+ TRACK / FETCH streams),
+ * by reaching into the {@link Subscriber} it was opened from, the way the Rust
+ * `BroadcastConsumer` holds its session. Live subscribes still flow through the inherited
+ * requested() queue.
  */
 class ConsumeBroadcast extends broadcast.Consumer {
 	#subscriber: Subscriber;
@@ -3598,6 +3599,11 @@ class ConsumeBroadcast extends broadcast.Consumer {
 		super(state);
 		overrideBroadcastWire(this, {
 			resolveTrackInfo: async (name, hold) => {
+				hold?.throwIfAborted();
+				// A copy already accepted holds the instance's immutable info, so it answers without
+				// waiting on its upstream, as the Rust broadcast answers from the track it holds.
+				const held = hooks.heldInfo(this, name);
+				if (held) return held;
 				if (!consumed.valid) return subscriber.resolveTrackInfo(path, name, consumed, hold);
 				// Retirement cancels setup, but a one-shot query still releases its TRACK
 				// as soon as it answers instead of holding it for the broadcast's lifetime.
@@ -3713,8 +3719,9 @@ function wireBudget(max: number | null): number {
 	return max ?? NO_MAX_DELAY;
 }
 
-// The live join `min` milliseconds behind the live edge through the time `end`, as one key.
-function joinKey(min: number, end: bigint | undefined): string {
+// The live join `min` milliseconds behind the live edge (null for no lag limit) through the time
+// `end`, as one key.
+function joinKey(min: number | null, end: bigint | undefined): string {
 	return `${min}:${end ?? ""}`;
 }
 

@@ -1033,16 +1033,17 @@ export function resolve(captured: Format, selected: Codec): Resolved {
 
 // How far back a subscription wants retained audio replayed. A live join starts its lag behind the
 // live edge, which a player states as its playout delay plus the codec's warmup, and never reaches
-// past its own max, so the largest of those bounds it; a join before lite-07 reaches past every
-// group, so only its max does. Any other range is history, which wants the whole retention, as does
-// no subscription.
+// past its own max, so the largest of those bounds it; a join with no lag limit, as before lite-07,
+// reaches past every group, so only its max does. Any other range is history, which wants the whole
+// retention, as does no subscription or a join bounded by neither.
 function replayBudget(subscription: Moq.Track.Subscription | undefined): Duration | undefined {
 	if (!subscription) return undefined;
 	let reach: Duration | undefined;
 	for (const range of subscription.ranges ?? [{}]) {
 		if (typeof range.start !== "object") return undefined;
 		const { min, max = Duration.ZERO } = range.start.live;
-		const join = max === null ? min : min.min(max);
+		const join = max === null ? min : min === null ? max : min.min(max);
+		if (join === null) return undefined;
 		reach = reach === undefined ? join : reach.max(join);
 	}
 	return reach;

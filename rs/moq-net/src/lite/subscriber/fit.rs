@@ -284,10 +284,10 @@ fn collapse(ranges: Vec<Range>) -> Vec<Range> {
 		cover.start = match (cover.start, range.start) {
 			(Some(Anchor::Time(a)), Some(Anchor::Time(b))) => Some(Anchor::Time(a.min(b))),
 			(Some(Anchor::Absolute(a)), Some(Anchor::Absolute(b))) => Some(Anchor::Absolute(a.min(b))),
-			// The join reaching furthest back, under the widest max age, delivers what each of
-			// the others does.
+			// The join reaching furthest back, none past one with no lag limit, under the widest
+			// max age, delivers what each of the others does.
 			(Some(Anchor::Live { min: a, max: x }), Some(Anchor::Live { min: b, max: y })) => Some(Anchor::Live {
-				min: a.max(b),
+				min: a.zip(b).map(|(a, b)| a.max(b)),
 				max: x.zip(y).map(|(x, y)| x.max(y)),
 			}),
 			// The join placed earliest, under the widest max age.

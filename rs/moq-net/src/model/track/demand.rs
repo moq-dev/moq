@@ -60,7 +60,7 @@ pub(super) struct Subscriptions {
 	capping: usize,
 	/// The live joins a received copy's readers wait on, by lag and end: see
 	/// [`Subscription::joins`].
-	joins: BTreeMap<(Duration, Option<u64>), Waiting>,
+	joins: BTreeMap<(Option<Duration>, Option<u64>), Waiting>,
 	/// The lowest group consumers want while no refresh is pending, never lowered.
 	wanted: u64,
 	/// A request for a group past every key written, until a group answers it or its
@@ -119,7 +119,7 @@ impl Subscriptions {
 			placed.insert(ranges.len() as u64, group);
 			ranges.push(Range {
 				start: Start::Live {
-					min: Duration::ZERO,
+					min: Some(Duration::ZERO),
 					max: max_of(*budget),
 				},
 				end,
@@ -1028,7 +1028,7 @@ mod tests {
 			let start = |rng: &mut rand::rngs::StdRng| match rng.random_range(0..4) {
 				0 => Start::Oldest,
 				1 => Start::Live {
-					min: Duration::from_millis(rng.random_range(0..8)),
+					min: (rng.random_bool(0.8)).then(|| Duration::from_millis(rng.random_range(0..8))),
 					max: rng
 						.random_bool(0.8)
 						.then(|| Duration::from_millis(rng.random_range(0..8))),

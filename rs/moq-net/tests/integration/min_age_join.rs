@@ -132,7 +132,10 @@ impl Chain {
 
 	/// Wait until the publisher is asked for a live join `min` behind the live edge.
 	async fn asked(&self, min: Duration) {
-		let join = track::Range::from(track::Start::Live { min, max: Some(MAX) });
+		let join = track::Range::from(track::Start::Live {
+			min: Some(min),
+			max: Some(MAX),
+		});
 		let mut source = self.source.clone();
 		while source
 			.subscription()
@@ -149,7 +152,10 @@ const MAX: Duration = Duration::from_secs(30);
 /// A live join `min` behind the live edge, or a range from the oldest group for `None`.
 fn joining(min: Option<Duration>) -> track::Subscription {
 	let start = match min {
-		Some(min) => track::Start::Live { min, max: Some(MAX) },
+		Some(min) => track::Start::Live {
+			min: Some(min),
+			max: Some(MAX),
+		},
 		None => track::Start::Oldest,
 	};
 	track::Subscription::default()
@@ -234,7 +240,7 @@ async fn a_join_ending_before_its_start_ends_empty_through_a_relay() {
 	let bounded = || {
 		joining(None).with_ranges([track::Range {
 			start: track::Start::Live {
-				min: Duration::from_secs(1),
+				min: Some(Duration::from_secs(1)),
 				max: Some(MAX),
 			},
 			end: Some(1000),
@@ -372,7 +378,7 @@ async fn a_moq_transport_live_join_asks_the_route_for_no_backlog() {
 		// Asked as a live join, which the publisher pins where it started: nothing below it.
 		let joined = |ranges: &[track::Range]| {
 			ranges.iter().all(|range| match range.start {
-				track::Start::Live { min, .. } => min.is_zero(),
+				track::Start::Live { min, .. } => min == Some(Duration::ZERO),
 				track::Start::Time(start) => start >= 5000,
 				track::Start::Oldest => false,
 			})
@@ -427,7 +433,7 @@ async fn a_live_join_reopening_an_idle_copy_stays_a_live_join() {
 		assert_eq!(
 			asked.ranges,
 			[track::Range::from(track::Start::Live {
-				min: Duration::ZERO,
+				min: Some(Duration::ZERO),
 				max: Some(MAX)
 			})]
 		);
@@ -461,7 +467,7 @@ async fn a_join_asked_but_unanswered_is_placed_when_an_oldest_reader_hides_it() 
 		let lag = Duration::from_secs(1);
 		let mut live = track.subscribe(joining(Some(lag))).await.unwrap().ordered();
 		let join = track::Range::from(track::Start::Live {
-			min: lag,
+			min: Some(lag),
 			max: Some(MAX),
 		});
 		let mut asked = source.clone();

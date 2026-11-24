@@ -4913,7 +4913,7 @@ impl Bounds {
 			let start = match range.start {
 				None => legacy.unwrap_or(Start::Oldest),
 				Some(lite::Anchor::Absolute(_)) if legacy_max.is_some() => Start::Live {
-					min: Duration::ZERO,
+					min: Some(Duration::ZERO),
 					max: legacy_max,
 				},
 				Some(lite::Anchor::Absolute(position)) => Start::Time(position.group),
@@ -4922,7 +4922,7 @@ impl Bounds {
 				// Placed already, so its lag places nothing: it starts where it was placed and
 				// expires as a live join under its max age.
 				Some(lite::Anchor::Joined { max, .. }) => Start::Live {
-					min: Duration::ZERO,
+					min: Some(Duration::ZERO),
 					max,
 				},
 			};
@@ -7958,7 +7958,7 @@ mod serve_group_test {
 		assert_eq!(
 			groups.ranges,
 			[crate::track::Range::from(crate::track::Start::Live {
-				min: Duration::ZERO,
+				min: Some(Duration::ZERO),
 				max
 			})]
 		);
@@ -9525,7 +9525,7 @@ mod serve_group_test {
 			.with_ranges([
 				// A live join a second behind the newest frame, at 4 s.
 				Range::from(crate::track::Start::Live {
-					min: Duration::from_secs(1),
+					min: Some(Duration::from_secs(1)),
 					max: Some(std::time::Duration::ZERO),
 				}),
 				Range {
@@ -9537,7 +9537,7 @@ mod serve_group_test {
 				// Empty only once its join resolves to group 3000.
 				Range {
 					start: crate::track::Start::Live {
-						min: Duration::from_secs(1),
+						min: Some(Duration::from_secs(1)),
 						max: Some(std::time::Duration::ZERO),
 					},
 					end: Some(1999),
@@ -9682,7 +9682,7 @@ mod serve_group_test {
 		// A live join two seconds behind the newest frame, at 4 s: group 2000, before delivery.
 		let back = lite::Range {
 			start: Some(lite::Anchor::Live {
-				min: Duration::from_secs(2),
+				min: Some(Duration::from_secs(2)),
 				max: None,
 			}),
 			end: None,
@@ -9698,7 +9698,7 @@ mod serve_group_test {
 		assert_eq!(
 			run.track.subscription().ranges[1].start,
 			crate::track::Start::Live {
-				min: Duration::from_secs(2),
+				min: Some(Duration::from_secs(2)),
 				max: None
 			},
 			"still a live join"
@@ -9740,7 +9740,7 @@ mod serve_group_test {
 		// nothing within 1.5 s of it.
 		let back = lite::Range {
 			start: Some(lite::Anchor::Live {
-				min: Duration::from_secs(4),
+				min: Some(Duration::from_secs(4)),
 				max: Some(Duration::from_millis(1500)),
 			}),
 			end: None,
@@ -9781,7 +9781,7 @@ mod serve_group_test {
 		// A live join two seconds behind the newest frame, at 4 s: group 2000.
 		let back = lite::Range {
 			start: Some(lite::Anchor::Live {
-				min: Duration::from_secs(2),
+				min: Some(Duration::from_secs(2)),
 				max: None,
 			}),
 			end: None,
@@ -9812,7 +9812,7 @@ mod serve_group_test {
 			run.track.subscription().ranges[1],
 			track::Range {
 				start: crate::track::Start::Live {
-					min: Duration::from_secs(2),
+					min: Some(Duration::from_secs(2)),
 					max: None
 				},
 				end: None,

@@ -556,7 +556,7 @@ mod tests {
 	async fn subscribe(broadcast: &moq_net::broadcast::Consumer, max: Duration) -> Track<Wire> {
 		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 			moq_net::track::Start::Live {
-				min: max,
+				min: Some(max),
 				max: Some(max),
 			},
 		)]);

@@ -219,7 +219,7 @@ async fn read_frame(origin: &origin::Producer, path: &str) {
 	.expect("the first change is an instance");
 	let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 		moq_net::track::Start::Live {
-			min: Duration::from_secs(1),
+			min: Some(Duration::from_secs(1)),
 			max: Some(Duration::from_secs(1)),
 		},
 	)]);

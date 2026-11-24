@@ -1932,7 +1932,7 @@ mod tests {
 		// once the second supersedes it.
 		let join = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 			moq_net::track::Start::Live {
-				min: std::time::Duration::from_secs(60),
+				min: Some(std::time::Duration::from_secs(60)),
 				max: Some(std::time::Duration::ZERO),
 			},
 		)]);

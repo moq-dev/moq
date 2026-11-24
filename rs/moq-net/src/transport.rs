@@ -31,11 +31,30 @@ pub enum Address {
 /// Clones share the counters, so stats read them without polling the session or keeping the
 /// connection alive, and the final totals stay readable after it closes. Each counter is
 /// independent: a transport records the ones it tracks, and the rest stay zero.
+///
+/// A transport whose counts live outside it, such as a TCP socket's in the kernel, builds its
+/// counters with [`Wire::from_source`] instead of pushing them as it carries traffic.
 #[derive(Clone, Debug, Default)]
 pub struct Wire(std::sync::Arc<WireCounters>);
 
-#[derive(Debug, Default)]
+/// Reads a connection's counters on demand, for a transport that cannot cheaply push them as
+/// it sends and receives, such as a TCP socket whose kernel counts its bytes.
+///
+/// Stats call it on every report and once more when the connection's stats end, so the
+/// counters are current whenever stats read them, and an idle connection needs no timer.
+/// Anyone else reading a sourced [`Wire`] sees the counts as of the last stats read.
+pub trait WireSource: Send + Sync + 'static {
+	/// Copy the counts this source tracks into `wire`, leaving the rest as they are.
+	///
+	/// Never keep a clone of `wire`: it owns this source, so the pair would never drop.
+	fn refresh(&self, wire: &Wire);
+}
+
+#[derive(Default)]
 struct WireCounters {
+	/// Dropped with the last clone of the counters, so a source must not hold its connection
+	/// open past the connection's own end.
+	source: Option<Box<dyn WireSource>>,
 	sent_bytes: std::sync::atomic::AtomicU64,
 	received_bytes: std::sync::atomic::AtomicU64,
 	credit_stalls: std::sync::atomic::AtomicU64,
@@ -52,10 +71,35 @@ pub(crate) fn micros(time: Duration) -> u64 {
 	u64::try_from(time.as_micros()).unwrap_or(u64::MAX)
 }
 
+impl std::fmt::Debug for WireCounters {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("WireCounters")
+			.field("sourced", &self.source.is_some())
+			.field("sent_bytes", &self.sent_bytes)
+			.field("received_bytes", &self.received_bytes)
+			.finish_non_exhaustive()
+	}
+}
+
 impl Wire {
 	/// Create counters that start at zero.
 	pub fn new() -> Self {
 		Self::default()
+	}
+
+	/// Create counters that start at zero and that `source` refreshes whenever stats read them.
+	pub fn from_source(source: impl WireSource) -> Self {
+		Self(std::sync::Arc::new(WireCounters {
+			source: Some(Box::new(source)),
+			..Default::default()
+		}))
+	}
+
+	/// Copy the source's counts in, if these counters have one.
+	pub(crate) fn refresh(&self) {
+		if let Some(source) = &self.0.source {
+			source.refresh(self);
+		}
 	}
 
 	/// The bytes sent so far, including transport framing and retransmissions.
