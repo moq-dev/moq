@@ -85,8 +85,3 @@ the player's latest sample 401 ms old and a 1.56 s audio skip after the rejoin
 So the page stop has another cause.
 
 Public API: none expected. Wire: none expected.
-
-## Related
-
-- [Firefox replacement](/quest/m0/interop-green/firefox-replacement.md) -
-  the `moq-lite-06` fallback's audio on ARM, slowed by the same replay.
