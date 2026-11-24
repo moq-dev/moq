@@ -1,5 +1,5 @@
 name: Install just
-description: Install the pinned just for jobs outside the nix dev shell, which already provides it.
+description: Install the pinned just for jobs outside the nix dev shell, which already provides it, and make Windows' jq write LF for the scripts it runs.
 
 runs:
   using: composite
@@ -15,3 +15,18 @@ runs:
       if: runner.environment != 'self-hosted'
       with:
         tool: just@1.58.0
+
+    # The runner's native jq.exe writes CRLF unless given `--binary`, and Git
+    # Bash's `$(...)` strips only a trailing CR, so every line of a multi-line
+    # result but the last would keep one. Shadow it for every later step.
+    - name: Make jq write LF
+      if: runner.os == 'Windows'
+      shell: bash
+      run: | # zizmor: ignore[github-env] a runner-temp shim over the image's own jq; nothing from the event names it.
+        jq=$(command -v jq)
+        dir="$RUNNER_TEMP/jq-lf"
+        mkdir -p "$dir"
+        printf '#!/usr/bin/env bash\nexec %q --binary "$@"\n' "$jq" >"$dir/jq"
+        chmod +x "$dir/jq"
+        [[ $("$dir/jq" -rn '"a", "b"' | od -An -c | tr -d ' \n') == 'a\nb\n' ]]
+        cygpath -w "$dir" >>"$GITHUB_PATH"
