@@ -350,7 +350,10 @@ impl Producer {
 		// this they would be stranded, since the name is taken the moment the
 		// track exists, so no handler could ever serve their queue entry.
 		if let Some(request) = state.requests.take(name.as_ref()) {
-			let track = request.with_stats(self.stats.clone()).accept(info.clone());
+			let track = request
+				.with_stats(self.stats.clone())
+				.homed(Home(self.state.clone()))
+				.accept(info.clone());
 			// Cache it like a served request so concurrent lookups coalesce; a
 			// live same-name entry cannot exist (its presence would have kept
 			// the request from queuing).
@@ -359,7 +362,9 @@ impl Producer {
 			return Some(track.listed(unlist));
 		}
 
-		let track = track::Producer::new(self.info.clone(), name.clone(), info.clone()).with_stats(self.stats.clone());
+		let track = track::Producer::new(self.info.clone(), name.clone(), info.clone())
+			.with_stats(self.stats.clone())
+			.homed(Home(self.state.clone()));
 		if !state.insert_track(track.weak()) {
 			return None;
 		}
@@ -439,7 +444,9 @@ impl Producer {
 	pub fn reserve_track(&self, name: impl Into<Arc<str>>) -> Option<track::Request> {
 		let name = name.into();
 		let mut state = self.state.lock();
-		let request = track::Request::new(self.info.clone(), name.clone()).with_stats(self.stats.clone());
+		let request = track::Request::new(self.info.clone(), name.clone())
+			.with_stats(self.stats.clone())
+			.homed(Home(self.state.clone()));
 		if !state.insert_track(request.weak()) {
 			return None;
 		}
@@ -457,7 +464,9 @@ impl Producer {
 	/// broadcast can read the track by name.
 	pub fn reserve_unlisted_track(&self, name: impl Into<Arc<str>>) -> Option<track::Request> {
 		let mut state = self.state.lock();
-		let request = track::Request::new(self.info.clone(), name.into()).with_stats(self.stats.clone());
+		let request = track::Request::new(self.info.clone(), name.into())
+			.with_stats(self.stats.clone())
+			.homed(Home(self.state.clone()));
 		state.insert_track(request.weak()).then_some(request)
 	}
 
@@ -797,6 +806,28 @@ impl Drop for Handler {
 				request.reject(Error::Dropped);
 			}
 		}
+	}
+}
+
+/// The broadcast a track was created or requested in, through which a track its last
+/// producer left while readers still want it is requested again.
+#[derive(Clone)]
+pub(super) struct Home(kio::Shared<BroadcastState>);
+
+impl Home {
+	/// Queue `request` for a [`Requests`] to serve, as a lookup of its name would, handing it
+	/// back when none can: the broadcast ended, no handler is alive, or another track or
+	/// request holds the name.
+	pub(super) fn request(&self, request: track::Request) -> Result<(), track::Request> {
+		let mut state = self.0.lock();
+		let weak = request.weak();
+		if state.closing
+			|| state.requests.join(weak.name()).is_some()
+			|| state.tracks.get(weak.name()).is_some_and(|live| !live.same_channel(&weak))
+		{
+			return Err(request);
+		}
+		state.requests.insert(weak.name().clone(), request)
 	}
 }
 
@@ -1207,7 +1238,7 @@ impl Consumer {
 		// requests map, and the FIFO order. The request inherits the broadcast's
 		// cache pool through its `Arc<Info>`, same as a producer-created track.
 		let name: Arc<str> = name.into();
-		let request = track::Request::new(self.info.clone(), name.clone());
+		let request = track::Request::new(self.info.clone(), name.clone()).homed(Home(self.state.clone()));
 		let resolved = request.join(subscription);
 
 		// With no handler alive to serve it, the request is dropped: `NotFound` beats
@@ -2067,7 +2098,8 @@ mod test {
 		let mut group = second.append_next().unwrap();
 		assert_eq!(group.start, 0);
 		group.write_frame(at(500), b"b".as_slice()).unwrap();
-		drop((group, second, track));
+		// Nobody reads it when it goes, so nothing asks for it again.
+		drop((track, group, second));
 
 		let mut third = producer.create_track("media", crate::track::Info::timed()).unwrap();
 		third.finish_at(crate::track::Position::group(0)).unwrap();
@@ -2534,6 +2566,99 @@ mod test {
 		assert!(matches!(consumer.track("video"), Err(Error::NotFound)));
 
 		producer.close();
+	}
+
+	/// The race a safe drop closes: the publisher sees nobody wants the track, a reader looks
+	/// it up before the producer drops, and the drop hands that reader to a fresh request
+	/// rather than failing it. A lookup handle made before the drop reads the replacement on
+	/// its next request too.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_drop_hands_a_joining_reader_to_the_next_producer() {
+		let producer = Info::new().produce();
+		let mut dynamic = producer.requests();
+		let consumer = producer.consume();
+		let handle = consumer.track("video").unwrap();
+
+		let first = handle.subscribe(None);
+		let track = dynamic.assert_request().accept(crate::track::Info::timed());
+		let mut first = first.await.unwrap();
+		track.append_next().unwrap().finish().unwrap();
+		assert_eq!(first.recv_group().await.unwrap().unwrap().start, 0);
+		drop(first);
+
+		// The idle report the publisher acts on, then a reader joining before the drop.
+		let mut demand = track.demand();
+		assert!(!demand.wanted_changed().await.unwrap());
+		let joined = consumer.track("video").unwrap().subscribe(None);
+		drop((demand, track));
+
+		let next = dynamic.assert_request().accept(crate::track::Info::timed());
+		dynamic.assert_no_request();
+		let mut joined = joined.await.unwrap();
+		next.append_next().unwrap().finish().unwrap();
+		let mut starts = Vec::new();
+		while starts.last() != Some(&1) {
+			starts.push(joined.recv_group().await.unwrap().unwrap().start);
+		}
+
+		let mut later = handle.subscribe(None).await.unwrap();
+		next.append_next().unwrap().finish().unwrap();
+		while later.recv_group().await.unwrap().unwrap().start != 2 {}
+		dynamic.assert_no_request();
+	}
+
+	/// A track nobody wants ends cleanly when its producer drops, with no `Dropped` for a
+	/// handle still watching, and a later lookup asks for it afresh.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn an_unwanted_drop_ends_cleanly() {
+		let producer = Info::new().produce();
+		let mut dynamic = producer.requests();
+		let consumer = producer.consume();
+
+		let reader = consumer.track("video").unwrap().subscribe(None);
+		let track = dynamic.assert_request().accept(crate::track::Info::timed());
+		drop(reader.await.unwrap());
+		track.append_next().unwrap().finish().unwrap();
+		let open = track.append_next().unwrap();
+		let demand = track.demand();
+		drop(track);
+
+		assert!(matches!(demand.closed().await, Ok(())));
+		assert!(open.is_aborted(), "nobody can finish the open group");
+		dynamic.assert_no_request();
+		let _again = consumer.track("video").unwrap().subscribe(None);
+		dynamic.assert_request();
+	}
+
+	/// A track the producer created follows the same rule: a reader still holding it when it
+	/// drops is served by the broadcast's handler, as a later lookup of the name would be.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_created_track_dropped_while_read_is_requested_again() {
+		let producer = Info::new().produce();
+		let mut dynamic = producer.requests();
+		let consumer = producer.consume();
+		let track = producer.create_track("video", crate::track::Info::timed()).unwrap();
+		let mut reader = consumer.track("video").unwrap().subscribe(None).await.unwrap();
+		drop(track);
+
+		let next = dynamic.assert_request().accept(crate::track::Info::timed());
+		next.append_next().unwrap().finish().unwrap();
+		assert_eq!(reader.recv_group().await.unwrap().unwrap().start, 0);
+	}
+
+	/// With no handler to ask, a reader still holding a dropped track reads `Dropped`, as before.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_drop_nothing_can_request_again_fails_its_reader() {
+		let producer = Info::new().produce();
+		let consumer = producer.consume();
+		let track = producer.create_track("video", crate::track::Info::timed()).unwrap();
+		let mut reader = consumer.track("video").unwrap().subscribe(None).await.unwrap();
+		drop(track);
+		assert!(matches!(reader.recv_group().await, Err(Error::Dropped)));
 	}
 
 	#[test]

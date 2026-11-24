@@ -5235,6 +5235,12 @@ impl Producer {
 		self
 	}
 
+	/// Ask `home` for the track again if the last producer leaves while a reader wants it.
+	pub(super) fn homed(self, home: broadcast::Home) -> Self {
+		let _ = self.alive.home.set(home);
+		self
+	}
+
 	/// The track's name, unique within its broadcast.
 	pub fn name(&self) -> &str {
 		&self.name
@@ -6180,20 +6186,12 @@ impl Producer {
 
 	/// Abort an unwanted track, returning the producer unchanged if consumers remain.
 	///
-	/// This is how an on-demand publisher ends a track once [`Demand::poll_wanted_changed`]
-	/// reports nobody wants it. Dropping the producer instead races a reader joining in
-	/// between, which then reads [`Error::Dropped`].
-	///
-	/// Consumer creation and the unwanted check share a lock, so demand returning
-	/// after [`Demand::wanted`] went to `None` prevents the abort. `Ok(())` means
-	/// the track is closed, including when it was already closed; existing handles
-	/// may still observe its final state, and a later lookup requests the track afresh.
-	/// `Err(producer)` leaves the track unchanged so the caller can continue serving and
-	/// wait for `None` on a fresh clone of its [`Demand`]: one that already returned `None`
-	/// misses a reader that came and went, and waits on.
-	///
-	/// The abort is the same as [`Self::abort`]. A reader still in a group it was handed
-	/// counts as a consumer until it reads the group's end.
+	/// For a session that keeps serving a reader that joined since the track went idle on the
+	/// upstream subscription it already holds, rather than dropping the producer, which asks
+	/// for the track again. Consumer creation and the unwanted check share a lock. `Ok(())`
+	/// means the track is closed, including when it was already closed. The abort is the same
+	/// as [`Self::abort`]. A reader still in a group it was handed counts as a consumer until
+	/// it reads the group's end.
 	#[cfg_attr(
 		target_pointer_width = "64",
 		expect(
@@ -6201,7 +6199,8 @@ impl Producer {
 			reason = "return the owned producer without allocating on an idle check"
 		)
 	)]
-	pub fn abort_unwanted(self, err: Error) -> std::result::Result<(), Self> {
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn abort_unwanted(self, err: Error) -> std::result::Result<(), Self> {
 		let wanted = match self.state.write_unwanted() {
 			kio::Unwanted::Idle(guard) => {
 				commit_abort(guard, err, None).abort();
@@ -6220,8 +6219,9 @@ impl Producer {
 	}
 
 	/// Resolves once the track's outcome is final: `Ok` once its declared end is reached
-	/// (its error, if declared with one), or the abort error, or [`Error::Dropped`] once every
-	/// producer left without either.
+	/// (its error, if declared with one), or the abort error. Every producer leaving without
+	/// either ends it cleanly at its live edge while nobody wants it, and with
+	/// [`Error::Dropped`] while a reader does and no broadcast asks for it again.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
 		TrackState::settle(self.state.poll_ref(waiter, |state| state.poll_outcome(waiter)))
@@ -6610,6 +6610,10 @@ struct Alive {
 	// it and closed when this guard drops.
 	stats: OnceLock<stats::Subscription>,
 
+	// The broadcast a reader looked the track up in, which this guard asks for the track
+	// again when it drops while a reader still wants the track.
+	home: OnceLock<broadcast::Home>,
+
 	// The broadcast's listing of a track its producer created, withdrawn once the track
 	// leaves the table: on abort, or when this guard drops.
 	listed: kio::Lock<Option<broadcast::Unlist>>,
@@ -6622,6 +6626,7 @@ impl Alive {
 			state,
 			published: Default::default(),
 			stats: Default::default(),
+			home: OnceLock::new(),
 			listed: kio::Lock::new(None),
 		})
 	}
@@ -6665,43 +6670,102 @@ impl Drop for Alive {
 		if !self.published.load(Ordering::Relaxed) {
 			return;
 		}
-		// The last producer going away ends the track: nothing protects its live edge
-		// anymore, so the pool's idle expiry reclaims what a stale consumer would pin.
-		// Without a finish it is an abrupt teardown, the same as an explicit abort:
-		// the open groups go and the finished ones stay for readers still draining.
-		// `abort()` closes the channel, so `write()` returns `Err(Ref)`. `finish()`
-		// leaves it open with `end` set, so inspect both outcomes.
-		match self.state.write() {
-			Ok(mut state) => match std::mem::take(&mut state.outcome) {
-				Outcome::Open => {
-					tracing::warn!(
-						track = %self.name,
-						"track::Producer dropped without finish() or abort()"
-					);
-					let (resume, open) = state.tear_down(Error::Dropped);
-					state.outcome = Outcome::Dropped { resume };
-					state.close_cache();
-					drop(state);
-					open.abort();
-				}
-				// Groups still missing below the boundary can no longer arrive, so a reader
-				// waiting on one ends cleanly instead of with `Dropped`.
-				Outcome::Ending(end) => {
-					state.outcome = Outcome::Sealed(end);
-					state.close_cache();
-				}
-				outcome => state.outcome = outcome,
+		// Decided under the lock a lookup joins the track under: a reader either joins in
+		// time to be handed to the next producer, or finds the track closed and asks afresh.
+		let mut state = match self.state.write_unwanted() {
+			kio::Unwanted::Idle(state) => return Self::close_unwanted(state),
+			kio::Unwanted::Wanted => match self.state.write() {
+				Ok(state) => state,
+				Err(_) => return,
 			},
-			Err(state) => {
-				if !matches!(state.outcome, Outcome::Open) {
-					return;
-				}
-				tracing::warn!(
-					track = %self.name,
-					"track::Producer dropped without finish() or abort()"
-				);
+			kio::Unwanted::Closed => return,
+		};
+		// The last producer going away ends what it declared: nothing protects its live edge
+		// anymore, so the pool's idle expiry reclaims what a stale consumer would pin.
+		match std::mem::take(&mut state.outcome) {
+			Outcome::Open => {}
+			// Groups still missing below the boundary can no longer arrive, so a reader
+			// waiting on one ends cleanly instead of with `Dropped`.
+			Outcome::Ending(end) => {
+				state.outcome = Outcome::Sealed(end);
+				state.close_cache();
+				return;
+			}
+			outcome => {
+				state.outcome = outcome;
+				return;
 			}
 		}
+		let Some(home) = self.home.get().cloned() else {
+			return Self::drop_wanted(state, &self.name);
+		};
+		// A reader still wants the track, so its broadcast asks for it again, as a later lookup
+		// would, and the reader waits on the same state for the next producer. The groups this
+		// producer left open end, since nobody can finish them now.
+		let (_, open) = state.tear_down(Error::Cancel);
+		state.publication = Publication::Pending;
+		drop(state);
+		open.abort();
+		let request = Request::renew(self.name.clone(), self.state.clone(), home.clone());
+		let Err(request) = home.request(request) else {
+			return;
+		};
+		// Nothing will serve it again, so its readers end as at an abrupt teardown, unless the
+		// broadcast's end already refused them.
+		if let Ok(state) = request.state.write()
+			&& state.publication == Publication::Pending
+			&& matches!(state.outcome, Outcome::Open)
+		{
+			Self::drop_wanted(state, &self.name);
+		}
+	}
+}
+
+impl Alive {
+	/// End a track nobody wants, cleanly at its live edge: no reader is left to tell, and a
+	/// later lookup finds it closed and requests it afresh. Closed under the lock a lookup
+	/// joins under, so none joins in between.
+	fn close_unwanted(mut state: kio::Mut<'_, TrackState>) {
+		let open = match std::mem::take(&mut state.outcome) {
+			Outcome::Open => {
+				let (resume, open) = state.tear_down(Error::Cancel);
+				let end = Position::group(state.next_key());
+				state.outcome = match state.declare(end, None, None, true) {
+					Ok(()) => match std::mem::take(&mut state.outcome) {
+						Outcome::Ending(end) => Outcome::Sealed(end),
+						_ => unreachable!("declare sets the end"),
+					},
+					Err(_) => Outcome::Dropped { resume },
+				};
+				Some(open)
+			}
+			Outcome::Ending(end) => {
+				state.outcome = Outcome::Sealed(end);
+				None
+			}
+			// Aborted already, which closed it.
+			outcome => {
+				state.outcome = outcome;
+				return;
+			}
+		};
+		state.close_cache();
+		state.close();
+		if let Some(open) = open {
+			open.abort();
+		}
+	}
+
+	/// End a track a reader still wants and no broadcast will ask for again, abruptly, as an
+	/// abort with [`Error::Dropped`] does: the open groups go and the finished ones stay for
+	/// readers still draining.
+	fn drop_wanted(mut state: kio::Mut<'_, TrackState>, name: &str) {
+		tracing::warn!(track = %name, "track::Producer dropped without finish() or abort()");
+		let (resume, open) = state.tear_down(Error::Dropped);
+		state.outcome = Outcome::Dropped { resume };
+		state.close_cache();
+		drop(state);
+		open.abort();
 	}
 }
 
@@ -6834,10 +6898,9 @@ pub(super) struct TrackWeak {
 impl TrackWeak {
 	/// Join the cached track's demand, or `None` once it has closed.
 	///
-	/// The count moves under the same lock the close takes, which is the other half
-	/// of [`Producer::abort_unwanted`]: a request either joins in time to decline the
-	/// teardown, or gets nothing and re-requests the track. It is never handed a track
-	/// that is already on its way out.
+	/// The count moves under the same lock an idle teardown closes the track under: a
+	/// request either joins in time to be served by the next producer, or gets nothing and
+	/// re-requests the track. It is never handed a track that is already on its way out.
 	pub(super) fn try_consume(
 		&self,
 		subscription: Option<&Subscription>,
@@ -7027,7 +7090,8 @@ impl Demand {
 	///
 	/// So `while demand.wanted_changed().await? {}` runs while anyone wants the track, and
 	/// `while !demand.wanted_changed().await? {}` waits for someone to. End a track nobody
-	/// wants with [`Producer::abort_unwanted`], which keeps it for a reader that joined since.
+	/// wants by dropping its [`Producer`]: a reader that joined since is served by the next
+	/// request for it.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_wanted_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<bool>> {
 		let active = match self.poll_state(waiter) {
@@ -14070,8 +14134,17 @@ enum RequestedStart {
 
 impl Request {
 	pub(super) fn new(broadcast: Arc<broadcast::Info>, name: impl Into<Arc<str>>) -> Self {
-		let name = name.into();
-		let state = TrackState::spawn(broadcast.clone());
+		Self::with_state(name.into(), TrackState::spawn(broadcast))
+	}
+
+	/// Ask for a track again on the state its last producer left, so the readers still
+	/// waiting on it are served by the producer accepting this.
+	fn renew(name: Arc<str>, state: kio::Producer<TrackState>, home: broadcast::Home) -> Self {
+		Self::with_state(name, state).homed(home)
+	}
+
+	fn with_state(name: Arc<str>, state: kio::Producer<TrackState>) -> Self {
+		let broadcast = state.read().broadcast.clone();
 		let alive = Alive::new(name.clone(), state.clone());
 		let dynamic = Requests::new(name.clone(), state.clone(), alive.clone());
 		Self {
@@ -14091,6 +14164,12 @@ impl Request {
 	/// List the track in its broadcast once accepted: the producer reserved it.
 	pub(super) fn listed(mut self, list: broadcast::ListOnAccept) -> Self {
 		self.list = Some(list);
+		self
+	}
+
+	/// Ask `home` for the track again if its last producer leaves while a reader wants it.
+	pub(super) fn homed(self, home: broadcast::Home) -> Self {
+		let _ = self.alive.home.set(home);
 		self
 	}
 
@@ -23270,7 +23349,8 @@ mod test {
 		assert!(matches!(demand.closed().now_or_never(), Some(Ok(()))));
 	}
 
-	/// An abort short of the end, or the last producer leaving without one, is the outcome.
+	/// An abort short of the end is the outcome, and so is the last producer leaving a reader
+	/// nothing can ask for the track again; leaving nobody, the track ends cleanly.
 	#[test]
 	#[cfg(feature = "async")]
 	fn closed_reports_an_unfinished_end() {
@@ -23279,10 +23359,19 @@ mod test {
 		aborted.clone().abort(Error::Timeout).unwrap();
 		assert!(matches!(aborted.poll_closed(&waiter), Poll::Ready(Err(Error::Timeout))));
 
-		let dropped = track_producer("dropped", Info::timed());
-		let demand = dropped.demand();
-		drop(dropped);
+		let read = track_producer("read", Info::timed());
+		let demand = read.demand();
+		let reader = read.subscribe(None);
+		drop(read);
 		assert!(matches!(demand.closed().now_or_never(), Some(Err(Error::Dropped))));
+		drop(reader);
+
+		let unwanted = track_producer("unwanted", Info::timed());
+		unwanted.append_next().unwrap().finish().unwrap();
+		let _open = unwanted.append_next().unwrap();
+		let demand = unwanted.demand();
+		drop(unwanted);
+		assert!(matches!(demand.closed().now_or_never(), Some(Ok(()))));
 	}
 
 	/// An abort short of the end keeps the groups that finished for a reader that has not
