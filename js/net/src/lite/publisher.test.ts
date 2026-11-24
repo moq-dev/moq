@@ -1,7 +1,7 @@
 import { expect, mock, spyOn, test } from "bun:test";
 import { Duration, yieldNow } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
-import { Signal } from "@moq/signals";
+import { type Getter, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
 import { accept as acceptSession, connect as connectSession } from "../connection/index.ts";
@@ -4154,6 +4154,71 @@ test("lite draft-07: a relayed fetch sent whole resets as too old when it goes s
 		origin.close();
 	}
 });
+
+// A relay answers a downstream TRACK from the copy it holds, and that TRACK keeps the copy, and so its
+// upstream subscription, after the copy's last reader leaves, as a Rust `Resolving` counts as its
+// track's demand while held: the SUBSCRIBE that follows the TRACK then joins the copy rather than
+// asking upstream afresh.
+test("lite draft-07: a relay keeps its copy's upstream subscription while a downstream TRACK holds it", async () => {
+	using clock = manual();
+	// Upstream: the broadcast's origin, consumed by the relay over a session.
+	const upstream = createMockTransportPair(ALPN_07_WIP);
+	const source = new OriginProducer();
+	const broadcast = publish(source, Path.from("live"));
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
+	const url = new URL("https://localhost:4443/test");
+	const [session, upstreamServer] = await Promise.all([
+		connectSession({ url, transport: upstream.client }),
+		acceptSession({ transport: upstream.server, url, publish: source.consume() }),
+	]);
+	const front = new Front();
+	front.serve(wireOf(session).consume(Path.from("live")));
+
+	// Downstream: the relay's publisher, answering with the front.
+	const pair = createMockTransportPair(ALPN_07_WIP);
+	const origin = new OriginProducer();
+	const dynamic = origin.claim(Path.from("live"));
+	void (async () => {
+		for await (const request of dynamic.requested()) request.serve(front.consumer);
+	})();
+	const publisher = new Publisher(pair.server, Version.DRAFT_07, randomHop(), origin.consume());
+	const subscribed = track.demand();
+
+	const live = front.consumer.track("video").subscribe();
+	let client: Stream | undefined;
+	try {
+		// The reader's copy subscribes upstream.
+		expect(await settlesWithin(until(subscribed.wanted, true), clock, Duration.millis(1000))).toBe(true);
+
+		client = await Stream.open(pair.client, { version: Version.DRAFT_07 });
+		const server = await Stream.accept(pair.server, Version.DRAFT_07);
+		if (!server) throw new Error("the publisher never accepted the TRACK stream");
+		void publisher.runTrackInfo(new TrackMessage(Path.from("live"), "video"), server);
+		await TrackInfo.decode(client.reader, Version.DRAFT_07);
+
+		live.close();
+		expect(await settlesWithin(until(subscribed.wanted, false), clock, Duration.millis(1000))).toBe(false);
+
+		client.writer.close();
+		expect(await settlesWithin(until(subscribed.wanted, false), clock, Duration.millis(1000))).toBe(true);
+	} finally {
+		live.close();
+		client?.close();
+		publisher.close();
+		dynamic.close();
+		front.consumer.close();
+		session.close();
+		upstreamServer.close();
+		broadcast.close();
+		source.close();
+		origin.close();
+	}
+});
+
+// Resolve once `getter` reads `value`.
+async function until(getter: Getter<boolean>, value: boolean): Promise<void> {
+	while (getter.peek() !== value) await Signal.race(getter);
+}
 
 test.each([0, 1])("lite draft-07 reports the cached largest position when starting at time %s", async (start) => {
 	const startGroup = BigInt(start);

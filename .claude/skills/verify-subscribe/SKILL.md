@@ -1,6 +1,6 @@
 ---
 name: verify-subscribe
-description: Model-check how a lite-07 subscription accounts for each group (`rs/moq-net/src/lite/publisher.rs` `TrackRun` and `GroupServe`, `lite/subscriber.rs` `ServeLoop::apply_response`, `src/tail.rs`) with TLA+. Use when a change touches SUBSCRIBE_DROP, SUBSCRIBE_SKIP, stale (OLD) drops, which groups a publisher serves or names once, Group Stream resets, preemption, and expiry (a stream reset with OLD when its group expires, even after its FIN), a whole group's span (its GROUP_END's End, which accounts for the starts inside it, and the drop that names it), or the subscriber's tail, or when a drop bug needs every ordering of the Subscribe Stream against the Group Streams checked.
+description: Model-check lite-07 subscription group accounting (`rs/moq-net/verify/subscribe/`) with TLA+. Use when changing `SUBSCRIBE_DROP`/`SKIP`, group stream resets, preemption/expiry, or subscriber tail in `rs/moq-net`.
 ---
 
 # Verify subscription accounting
@@ -31,7 +31,7 @@ Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path on th
 
 ## Coverage
 
-Sync commit: `e40a7a4340a31162319e14592283b3b1d54d82ed`. Run `git log e40a7a4340.. -- rs/moq-net/src/lite/publisher.rs rs/moq-net/src/lite/subscriber.rs rs/moq-net/src/tail.rs rs/moq-net/src/model/track.rs rs/moq-net/src/model/record.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
+Sync commit: `d791d549a6690b31dd6e6f5173d776fd8ed45573`. Run `git log d791d549a6.. -- rs/moq-net/src/lite/publisher.rs rs/moq-net/src/lite/subscriber.rs rs/moq-net/src/tail.rs rs/moq-net/src/model/track.rs rs/moq-net/src/model/record.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
 
 | Code | Model |
 | --- | --- |
