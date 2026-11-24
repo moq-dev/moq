@@ -1039,6 +1039,34 @@ test("lite-07 a range starts at a group arriving below the first held", async ()
 	}
 });
 
+// A bounded range whose own keys are all accounted for is answered as it would be alone, while an
+// open sibling still waits for a group. Mirrors the Rust
+// `lite07_a_bounded_range_is_answered_beside_an_open_one`.
+test.each([[false], [true]])("lite-07 a bounded range is answered beside an open one (sibling %p)", async (sibling) => {
+	const version = Version.DRAFT_07;
+	const ranges: Subscribe["ranges"] = [{ start: { absolute: 5n }, end: { absolute: 6n } }];
+	if (sibling) ranges.push({ start: { absolute: 20n } });
+	const sub = await servedSubscription({ version, ranges });
+	try {
+		const whole = sub.track.createGroup(0n);
+		whole.writeFrame(textFrame("x", Timestamp.fromMillis(0)));
+		// Time 5 lies past the whole group, and nothing starts from 4 to past it.
+		whole.finishAt(4n);
+		sub.track.skipGroups(4n, 6n);
+		await flush();
+		// A group the sibling takes, which would answer the range only after waiting on it.
+		if (sibling) sub.serve(25n);
+		for (;;) {
+			const resp = await decodeSubscribeResponse(sub.client.reader, version);
+			if (!("start" in resp) || resp.start.id !== 0n) continue;
+			expect(resp.start.start).toBe(4n);
+			break;
+		}
+	} finally {
+		await sub.close();
+	}
+});
+
 // A group whose stream the session reset to make room is a final drop on every version: the
 // publisher names it in SUBSCRIBE_DROP with TOO_FAR_BEHIND and opens no second stream for it.
 test.each([

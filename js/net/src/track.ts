@@ -5081,7 +5081,14 @@ export class Subscriber {
 		};
 		hooks.nextInRange = (subscriber, from) => subscriber.#nextInRange(from);
 		hooks.takePlaced = (subscriber) => {
-			if (subscriber.#resume) return subscriber.#resume.takePlaced();
+			if (subscriber.#resume) {
+				// A reader following route copies keys its ranges by position, in key order (see
+				// `servingResolvedKeys`), so each goes back to its Range ID.
+				const placed = subscriber.#resume.takePlaced();
+				if (placed.size === 0) return placed;
+				const ids = [...subscriber.#state.update.entries()].map(([id]) => id);
+				return new Set([...placed].flatMap((index) => ids[Number(index)] ?? []));
+			}
 			subscriber.#settle();
 			return subscriber.#window.takePlaced();
 		};

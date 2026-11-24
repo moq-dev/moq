@@ -415,6 +415,33 @@ test("a resumed reader's replaced ranges reach its serving copy", async () => {
 	}
 });
 
+// A publisher wakes the ranges a resumed reader placed by their Range IDs, which an edit leaves
+// apart from their positions.
+test("a resumed reader names the ranges it placed by Range ID", async () => {
+	const clock = new Manual();
+	const installed = install(clock);
+	const front = new Front();
+	const source = new BroadcastProducer();
+	const handle = source.consume();
+	const t = copy(source);
+	front.serve(handle);
+	const sub = front.consumer.track("seq").subscribe({ ranges: [{ start: 0n }] });
+	try {
+		hooks.editSubscriber(sub, { retire: [0n], add: [[3n, { start: 6n }]], priority: 0, order: "ascending" });
+		await clock.advance(Duration.ZERO);
+		hooks.takePlaced(sub);
+		t.write(6n);
+		await clock.advance(Duration.ZERO);
+		expect([...hooks.takePlaced(sub)]).toEqual([3n]);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		handle.close();
+		source.close();
+		installed.close();
+	}
+});
+
 test("a group the window dropped above the serving copy's resume point is backfilled once ranges widen to it", async () => {
 	const clock = new Manual();
 	const installed = install(clock);

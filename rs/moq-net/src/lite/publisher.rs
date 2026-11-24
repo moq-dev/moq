@@ -6103,19 +6103,15 @@ impl TrackRun {
 				self.waits.park(id, Wait::Track);
 				continue;
 			}
-			let placed = match resolved {
-				Some(resolved) => (self.range_start(asked, resolved, &source, finished))
-					.map(|start| resolved.end.is_none_or(|end| end > start).then_some(start)),
-				// A time start still waiting at or below the floor, as an update before the start
-				// leaves one: whichever group contains it is out of range, so the range starts
-				// at the first group from the floor.
-				None => match waits {
-					Some((time, end)) if time <= self.floor => (self.first_start(self.floor, &source, finished))
-						.map(|start| end.is_none_or(|end| end > start).then_some(start)),
-					_ if finished => Ok(None),
-					_ => Err(Wait::Placed(waits.map(|(time, _)| time))),
-				},
-			};
+			let mut placed = self.place(asked, resolved, waits, &source, finished);
+			// A walk that passed a bounded range's end left no key in it a group may still take, so
+			// nothing more can arrive for it, whatever its siblings still wait on.
+			let end = resolved.map_or(waits.and_then(|(_, end)| end), |resolved| resolved.end);
+			if let Err(Wait::Told(key) | Wait::Held(key)) = placed
+				&& end.is_some_and(|end| key >= end)
+			{
+				placed = self.place(asked, resolved, waits, &source, true);
+			}
 			let start = match placed {
 				Ok(start) => start,
 				Err(wait) => {
@@ -6135,6 +6131,31 @@ impl TrackRun {
 			}
 		}
 		Ok(reported)
+	}
+
+	/// Where a range asked as `asked` starts, `None` for no group, or what that waits on: placed
+	/// here as `resolved`, or with its time start still waiting as `waits` says.
+	fn place(
+		&mut self,
+		asked: Unstarted,
+		resolved: Option<crate::model::track::Resolved>,
+		waits: Option<(u64, Option<u64>)>,
+		source: &Source,
+		finished: bool,
+	) -> Result<Option<u64>, Wait> {
+		match resolved {
+			Some(resolved) => (self.range_start(asked, resolved, source, finished))
+				.map(|start| resolved.end.is_none_or(|end| end > start).then_some(start)),
+			// A time start still waiting at or below the floor, as an update before the start
+			// leaves one: whichever group contains it is out of range, so the range starts at the
+			// first group from the floor.
+			None => match waits {
+				Some((time, end)) if time <= self.floor => (self.first_start(self.floor, source, finished))
+					.map(|start| end.is_none_or(|end| end > start).then_some(start)),
+				_ if finished => Ok(None),
+				_ => Err(Wait::Placed(waits.map(|(time, _)| time))),
+			},
+		}
 	}
 
 	/// Where a range asked as `asked` and placed here as `resolved` starts, or what that waits
@@ -9227,6 +9248,7 @@ mod serve_group_test {
 			.collect();
 		run.unpinned = Unpinned::default();
 		run.waits = Waits::default();
+		run.bounded = run.requested.bounded();
 		for (id, range) in (0..).zip(ranges) {
 			run.unpinned.insert(id, due(range, false));
 			run.waits.wake(id);
@@ -10163,6 +10185,36 @@ mod serve_group_test {
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		assert_eq!(run.ctx.outcomes.opened.load(Ordering::Relaxed), 1, "group 2 is served");
 		assert_eq!(starts(&responses(&mut writer, &log).await), [(0, Some(2))]);
+	}
+
+	/// A bounded range whose own keys are all accounted for is answered as it would be alone,
+	/// while an open sibling still waits for a group.
+	#[kio::test]
+	async fn lite07_a_bounded_range_is_answered_beside_an_open_one() {
+		let mut answers = Vec::new();
+		for sibling in [false, true] {
+			let mut track = track::Producer::new(
+				Arc::new(broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed(),
+			);
+			let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(0).unwrap(), b"x".as_slice())
+				.unwrap();
+			group.finish_at(4).unwrap();
+			// Time 5 lies past the whole group, and nothing starts from 4 to past it.
+			track.skip_groups(4..6);
+			let mut ranges = vec![lite::Range::span(Some(5), 0, Some(5), None)];
+			if sibling {
+				ranges.push(lite::Range::span(Some(20), 0, None, None));
+			}
+			let (mut run, mut writer, log) = lite07_run_ranges(&track, &ranges);
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			answers.push(starts(&responses(&mut writer, &log).await));
+		}
+		assert!(!answers[0].is_empty(), "answered alone");
+		assert_eq!(answers[0], answers[1], "an open sibling holds nothing back");
 	}
 
 	/// A relay's fresh copy is readable before its upstream answers, but says nothing of the live

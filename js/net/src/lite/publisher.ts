@@ -2000,7 +2000,14 @@ export class Publisher {
 					let placed: bigint | Wait;
 					if (ask?.joins !== undefined) placed = hooks.joinStart(track, range.start, ask.joins);
 					else if (range.floored && upstream) placed = range.start;
-					else placed = firstStart(range.start, source, finished);
+					else {
+						placed = firstStart(range.start, source, finished);
+						// A walk that passed a bounded range's end left no key in it a group may still
+						// take, so nothing more can arrive for it, whatever its siblings still wait on.
+						const key = typeof placed === "object" ? ("told" in placed ? placed.told : placed.held) : undefined;
+						if (key !== undefined && range.end !== undefined && key >= range.end)
+							placed = firstStart(range.start, source, true);
+					}
 					if (typeof placed !== "bigint") {
 						waits.park(id, placed);
 						continue;
