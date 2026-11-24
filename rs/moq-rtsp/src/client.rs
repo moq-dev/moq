@@ -139,9 +139,13 @@ impl Client {
 	/// Publishes the session's H.264 and H.265 video and AAC audio, starting on a keyframe.
 	/// Audio the stack cannot play is skipped with a warning. The session keeps the camera's
 	/// timestamps, counted from PLAY, and places them on the catalog's clock (see
-	/// [`Client::with_report_wait`]), which the catalog waits for. Several sessions can publish
-	/// renditions of one broadcast by sharing its catalog, but only the first places its clock: a
-	/// later session, like one on a clock fixed beforehand, keeps its timestamps and logs a warning.
+	/// [`Client::with_report_wait`]), which the catalog waits for. Without a sender report, only the
+	/// first frame is placed, at its arrival, and the later frames' wall times are estimates from it.
+	/// Several sessions can publish renditions of one broadcast by sharing its catalog, but only
+	/// the first places its clock: a later session, like one on a clock fixed beforehand, keeps its
+	/// timestamps, counted from its own PLAY, and logs a warning. Its frames line up with the first
+	/// session's only when both started together; publish independent sessions as separate
+	/// broadcasts.
 	///
 	/// Never reconnects: returns once the session ends or its timeline jumps, finishing its
 	/// tracks, or fails, aborting them, including when a request or the media stalls. The
@@ -201,7 +205,7 @@ impl Client {
 				gate: timebase.reserve(),
 				timebase: timebase.clone(),
 				catalog: catalog.clone(),
-				deadline: None,
+				wait: self.report_wait,
 				held: Vec::new(),
 				reports: vec![None; session.streams().len()],
 			})),
@@ -258,26 +262,41 @@ impl Client {
 			let mut session = self.within(session.play(play)).await??.demuxed()?;
 			tracing::info!(%url, streams = tracks.len(), "RTSP session playing");
 			let playing = kio::clock::now();
-			ingest.timing.start(playing.saturating_add(self.report_wait));
 			// Measured from the last frame, so RTCP reports alone cannot keep a dead camera alive.
 			let mut deadline = playing.saturating_add(self.timeout);
-			while let Some(item) = kio::clock::timeout(deadline - kio::clock::now(), session.next())
-				.await
-				.map_err(|_| Error::Stalled(self.timeout))?
-			{
+			let end = loop {
+				// A report wait that ends first releases the frames it held, with or without another.
+				let due = ingest.timing.due(playing).filter(|due| *due < deadline);
+				let item = match kio::clock::timeout_at(due.unwrap_or(deadline), session.next()).await {
+					Ok(item) => item,
+					Err(_) if due.is_some() => match ingest.release(session.streams())? {
+						Some(Jump) => break End::Jumped,
+						None => continue,
+					},
+					Err(_) => return Err(Error::Stalled(self.timeout)),
+				};
+				let Some(item) = item else {
+					// A session ending during a report wait still publishes what it held.
+					match ingest.release(session.streams())? {
+						Some(Jump) => break End::Jumped,
+						None => break End::Closed,
+					}
+				};
 				let item = item?;
 				if matches!(item, CodecItem::VideoFrame(_) | CodecItem::AudioFrame(_)) {
 					deadline = kio::clock::now().saturating_add(self.timeout);
 				}
-				if ingest.push(item, session.streams())?.is_some() {
-					tracing::warn!(%url, "RTSP timeline jumped, ending the session");
-					return Ok(End::Jumped);
+				if ingest.push(item, session.streams(), playing)?.is_some() {
+					break End::Jumped;
 				}
 				if ingest.awaiting_keyframe(playing, KEYFRAME_TIMEOUT) {
 					return Err(Error::Stalled(KEYFRAME_TIMEOUT));
 				}
+			};
+			if end == End::Jumped {
+				tracing::warn!(%url, "RTSP timeline jumped, ending the session");
 			}
-			Ok(End::Closed)
+			Ok(end)
 		}
 		.await;
 
@@ -444,8 +463,8 @@ struct Waiting {
 	timebase: moq_mux::catalog::Timebase,
 	/// To check the placement took: a clock something fixed earlier keeps its mapping.
 	catalog: moq_mux::catalog::Producer,
-	/// When to stop waiting for a sender report, set once PLAY returns.
-	deadline: Option<kio::clock::Instant>,
+	/// How long after PLAY to wait for a sender report: [`Client::with_report_wait`].
+	wait: std::time::Duration,
 	/// Every item received while waiting, published in order once placed.
 	held: Vec<CodecItem>,
 	/// Each stream's latest sender report.
@@ -462,9 +481,11 @@ struct Report {
 }
 
 impl Timing {
-	fn start(&mut self, deadline: kio::clock::Instant) {
-		if let Self::Waiting(waiting) = self {
-			waiting.deadline = Some(deadline);
+	/// When a report wait holding frames ends, for a session that started `playing`.
+	fn due(&self, playing: kio::clock::Instant) -> Option<kio::clock::Instant> {
+		match self {
+			Self::Waiting(waiting) if !waiting.held.is_empty() => Some(playing.saturating_add(waiting.wait)),
+			_ => None,
 		}
 	}
 }
@@ -485,9 +506,9 @@ impl Waiting {
 	}
 
 	/// Place the session on the catalog's clock once it can: on a held frame whose stream has a
-	/// sender report, or on the first held frame's arrival once the wait is over or a report
-	/// proved unusable. Returns whether the session is placed (or left verbatim) now.
-	fn place(&mut self) -> bool {
+	/// sender report, or on the first held frame's arrival once a report proved unusable or the
+	/// wait is `over`. Returns whether the session is placed (or left verbatim) now.
+	fn place(&mut self, over: bool) -> bool {
 		let now = kio::clock::now();
 		let wall = unix_micros(kio::clock::wall());
 		let arrival =
@@ -522,7 +543,7 @@ impl Waiting {
 		let Some((_, timestamp, received)) = self.held.iter().find_map(media) else {
 			return false;
 		};
-		if !unusable && self.deadline.is_none_or(|deadline| now < deadline) {
+		if !over && !unusable {
 			return false;
 		}
 		self.anchor(timestamp, arrival(received), "arrival", 0)
@@ -627,7 +648,12 @@ struct Jump;
 impl Ingest {
 	/// Publish one depacketized item, or report that the timeline jumped. Until the session is
 	/// placed on the catalog's clock, items are held, then published in order.
-	fn push(&mut self, item: CodecItem, streams: &[retina::client::Stream]) -> Result<Option<Jump>> {
+	fn push(
+		&mut self,
+		item: CodecItem,
+		streams: &[retina::client::Stream],
+		playing: kio::clock::Instant,
+	) -> Result<Option<Jump>> {
 		let Timing::Waiting(waiting) = &mut self.timing else {
 			return self.publish(item, streams);
 		};
@@ -636,9 +662,29 @@ impl Ingest {
 		} else if media(&item).is_some_and(|(stream_id, ..)| self.streams.get(stream_id).is_some_and(Option::is_some)) {
 			waiting.held.push(item);
 		}
-		if !waiting.place() {
+		// Checked here too, not only when the pull loop wakes for it: a timeout polls the session
+		// first, so frames that keep arriving ready would hold that wake off.
+		let over = kio::clock::now() >= playing.saturating_add(waiting.wait);
+		if !waiting.place(over) {
 			return Ok(None);
 		}
+		self.replay(streams)
+	}
+
+	/// Place a session still waiting on its first held frame's arrival, and publish what it held:
+	/// once its report wait is over, or once it ends. The pull loop wakes for the first.
+	fn release(&mut self, streams: &[retina::client::Stream]) -> Result<Option<Jump>> {
+		let Timing::Waiting(waiting) = &mut self.timing else {
+			return Ok(None);
+		};
+		if !waiting.place(true) {
+			return Ok(None);
+		}
+		self.replay(streams)
+	}
+
+	/// Publish the frames held while waiting, now that the session is placed.
+	fn replay(&mut self, streams: &[retina::client::Stream]) -> Result<Option<Jump>> {
 		let Timing::Waiting(waiting) = std::mem::replace(&mut self.timing, Timing::Placed) else {
 			unreachable!("matched above");
 		};
@@ -1572,6 +1618,50 @@ mod tests {
 		assert_eq!(frames.len(), 2, "the frames held during the wait publish");
 		let wall = wall_of(&snapshot, &frames[0]);
 		assert!(wall >= sent, "timed {} µs before the first frame was sent", sent - wall);
+	}
+
+	/// A report wait that ends with no frame after the held ones still releases them.
+	#[tokio::test]
+	async fn the_end_of_a_report_wait_releases_its_frames_alone() {
+		kio::clock::host_time();
+		let server = Server::bind(vec![Media::H265]).await;
+		let client = Client::new(server.url())
+			.unwrap()
+			.with_report_wait(Duration::from_millis(200));
+		let (broadcast, catalog, pull) = pull(client);
+
+		let mut session = within("PLAY", server.accept(0)).await;
+		session.video(0, 0, H265_KEYFRAME).await;
+		// Nothing else arrives, yet the keyframe publishes once the wait is over, before the end.
+		let snapshot = catalog_with(&catalog, 1, 0).await;
+		let reader = subscribe(&broadcast, video_track(&snapshot)).await;
+		session.close().await;
+		assert_eq!(within("the pull", pull).await.unwrap().unwrap(), End::Closed);
+		assert_eq!(frames(reader).await.len(), 1, "the held keyframe publishes");
+	}
+
+	/// A session ending during its report wait still publishes the frames it held.
+	#[tokio::test]
+	async fn a_session_ending_during_its_report_wait_publishes_what_it_held() {
+		let server = Server::bind(vec![Media::H265]).await;
+		let client = Client::new(server.url()).unwrap().with_report_wait(10 * WAIT);
+		let (broadcast, _catalog, pull) = pull(client);
+
+		let mut session = within("PLAY", server.accept(0)).await;
+		// Read from before the end, as no catalog lists the track until the session is placed:
+		// `0.hev1` is the first name `unique_track` mints for H.265 on a fresh broadcast.
+		let reader = subscribe(
+			&broadcast,
+			(
+				"0.hev1".to_string(),
+				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
+			),
+		)
+		.await;
+		session.video(0, 0, H265_KEYFRAME).await;
+		session.close().await;
+		assert_eq!(within("the pull", pull).await.unwrap().unwrap(), End::Closed);
+		assert_eq!(frames(reader).await.len(), 1, "the held keyframe publishes");
 	}
 
 	/// AAC alone lists its rendition before any frame, yet the catalog still waits for the
