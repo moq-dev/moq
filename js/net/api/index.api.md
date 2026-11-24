@@ -176,6 +176,7 @@ export namespace Connection {
 	}
 	export class Dial {
 		fail(err: Error): void;
+		readonly failure?: Error;
 		present(tokens: readonly string[]): void;
 		readonly signal: AbortSignal;
 		readonly url: URL;

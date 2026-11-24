@@ -13,6 +13,8 @@ enum TestError {
 	Policy(#[from] Failure),
 	#[error("dial failed")]
 	Dial,
+	#[error("gave up")]
+	GaveUp,
 }
 
 fn url(value: &str) -> Url {
@@ -138,6 +140,8 @@ struct Run {
 	accepts: Vec<(Url, Instant)>,
 	/// The URL of every dial.
 	dials: Vec<Url>,
+	/// The connection credential each dial carried.
+	tokens: Vec<Option<String>>,
 	/// Every action other than a dial, a wait, or the end, by name.
 	events: Vec<&'static str>,
 	/// The server sides still serving.
@@ -186,6 +190,7 @@ async fn drive<A: Target>(
 		};
 		let url = attempt.target().url().clone();
 		run.dials.push(url.clone());
+		run.tokens.push(attempt.token.clone());
 		let (_, peer) = peers.iter().find(|(peer, _)| *peer == url).expect("an unknown peer");
 		match peer {
 			Peer::Hang => {}
@@ -1624,4 +1629,161 @@ fn pacing_grows_to_the_cap() {
 	assert_eq!(pacing.next(Duration::from_millis(100)), Duration::from_millis(200));
 	assert_eq!(pacing.next(Duration::from_millis(200)), Duration::from_millis(400));
 	assert_eq!(pacing.next(Duration::from_millis(400)), Duration::from_millis(400));
+}
+
+/// What [`answer`] does with one dial, given how many came before it.
+enum Reply {
+	/// Present `sig-<n>`, counting dials from 1.
+	Sign,
+	/// Fail it, which ends the policy.
+	Fail,
+	/// Hold it unanswered, as a stuck signer would.
+	Hold,
+	/// Drop it unanswered.
+	Drop,
+}
+
+/// Answer each of `dials` by `reply`, recording every dial's failure, until the policy ends.
+fn answer(
+	dials: &Dials<TestError>,
+	mut reply: impl FnMut(usize) -> Reply + Send + 'static,
+) -> std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>> {
+	let failures = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+	let (dials, record) = (dials.clone(), failures.clone());
+	drop(kio::clock::sim::spawn(async move {
+		let mut held = Vec::new();
+		while let Some(dial) = dials.next().await {
+			let n = {
+				let mut record = record.lock().unwrap();
+				record.push(dial.failure().map(ToString::to_string));
+				record.len()
+			};
+			match reply(n) {
+				Reply::Sign => dial.present(vec![format!("sig-{n}").parse().unwrap()]),
+				Reply::Fail => dial.fail(TestError::GaveUp),
+				Reply::Hold => held.push(dial),
+				Reply::Drop => drop(dial),
+			}
+		}
+	}));
+	failures
+}
+
+/// With dials, a peer never reached is retried on the backoff rather than ending the policy:
+/// each dial carries its own answer and the last one's failure, until the caller fails one.
+#[kio::test]
+async fn dials_retry_a_peer_never_reached_until_one_fails() {
+	let peer = url("tcp://peer:1/");
+	let dials = Dials::new();
+	let failures = answer(&dials, |n| if n < 4 { Reply::Sign } else { Reply::Fail });
+	let started = kio::clock::now();
+	let mut machine = Reconnect::new(config(INITIAL, None), vec![peer.clone()], started)
+		.unwrap()
+		.with_dials(dials);
+	let mut run = Run::default();
+
+	let ended = drive(&mut machine, &[(peer, Peer::Fail(Verdict::Retry))], &mut run, |_| false).await;
+	assert!(matches!(ended, Some(Err(TestError::GaveUp))), "{ended:?}");
+	assert_eq!(
+		run.tokens,
+		[Some("sig-1".into()), Some("sig-2".into()), Some("sig-3".into())]
+	);
+	assert_eq!(
+		*failures.lock().unwrap(),
+		[
+			None,
+			Some("dial failed".into()),
+			Some("dial failed".into()),
+			Some("dial failed".into())
+		]
+	);
+	assert_eq!(run.events, ["retrying", "retrying", "retrying"]);
+	assert!(
+		kio::clock::now() - started >= INITIAL / 2 + INITIAL,
+		"retried without backing off"
+	);
+}
+
+/// With dials, a first session closed before acceptance, a refused credential, is retried with
+/// the refusal on the next dial; an established session clears it, so a GOAWAY's handover
+/// reports none.
+#[kio::test]
+async fn dials_report_a_refusal_on_the_next_dial_until_established() {
+	let peer = url("tcp://peer:1/");
+	let dials = Dials::new();
+	let failures = answer(&dials, |_| Reply::Sign);
+	let mut machine = Reconnect::new(config(INITIAL, None), vec![peer.clone()], kio::clock::now())
+		.unwrap()
+		.with_dials(dials);
+	let mut run = Run::default();
+
+	drive(&mut machine, &[(peer.clone(), Peer::Withhold)], &mut run, |run| {
+		!run.accepts.is_empty()
+	})
+	.await;
+	run.servers.remove(0).abort(Error::Unauthorized);
+	drive(&mut machine, &[(peer.clone(), Peer::Serve)], &mut run, |run| {
+		run.events.contains(&"established")
+	})
+	.await;
+	run.servers[0].goaway(goaway::Goaway::new()).unwrap();
+	drive(&mut machine, &[(peer, Peer::Serve)], &mut run, |run| {
+		run.accepts.len() == 3
+	})
+	.await;
+
+	let failures = failures.lock().unwrap();
+	assert_eq!(failures.len(), 3);
+	assert!(failures[0].is_none());
+	assert!(failures[1].is_some(), "the refusal was not reported");
+	assert!(
+		failures[2].is_none(),
+		"a handover reported a failure: {:?}",
+		failures[2]
+	);
+	assert_eq!(
+		run.tokens,
+		[Some("sig-1".into()), Some("sig-2".into()), Some("sig-3".into())]
+	);
+}
+
+/// A dial left unanswered spends the connect timeout, failing as a slow dial does, and the
+/// next dial reports it; one dropped unanswered ends the policy.
+#[kio::test]
+async fn an_unanswered_dial_times_out_and_a_dropped_one_ends_the_policy() {
+	const TIMEOUT: Duration = Duration::from_secs(1);
+	let peer = url("tcp://peer:1/");
+	let dials = Dials::new();
+	let failures = answer(&dials, |n| match n {
+		1 => Reply::Hold,
+		2 => Reply::Sign,
+		_ => Reply::Drop,
+	});
+	let mut config = config(INITIAL, None);
+	config.timeout = Some(TIMEOUT);
+	let started = kio::clock::now();
+	let mut machine = Reconnect::new(config, vec![peer.clone()], started)
+		.unwrap()
+		.with_dials(dials);
+	let mut run = Run::default();
+
+	drive(&mut machine, &[(peer.clone(), Peer::Close)], &mut run, |run| {
+		!run.accepts.is_empty()
+	})
+	.await;
+	assert!(
+		kio::clock::now() - started >= TIMEOUT,
+		"the held dial did not spend the timeout"
+	);
+	assert_eq!(run.tokens, [Some("sig-2".into())]);
+	let ended = drive(&mut machine, &[(peer, Peer::Close)], &mut run, |_| false).await;
+	assert!(
+		matches!(ended, Some(Err(TestError::Policy(Failure::Unanswered)))),
+		"{ended:?}"
+	);
+	let failures = failures.lock().unwrap();
+	assert_eq!(
+		failures[1].as_deref(),
+		Some(Failure::Timeout(TIMEOUT).to_string().as_str())
+	);
 }

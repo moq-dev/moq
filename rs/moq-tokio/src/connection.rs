@@ -17,6 +17,12 @@ use crate::{Addrs, Client, Error};
 
 pub use moq_net::reconnect::Restart;
 
+/// Tokens a [`Connection`] asks for at each dial; pass one to [`Client::with_dials`].
+pub type Dials = moq_net::reconnect::Dials<Error>;
+
+/// One dial of a [`Connection`], waiting for the tokens it presents.
+pub type Dial = moq_net::reconnect::Dial<Error>;
+
 /// Close a predecessor still finishing a handover, aborting it at its deadline.
 async fn close_predecessor(predecessor: Option<(moq_net::Session, kio::clock::Instant)>) -> Result<(), moq_net::Error> {
 	match predecessor {
@@ -903,7 +909,9 @@ pub struct Snapshot {
 /// redials with exponential backoff. Until the peer has accepted a session's credential or
 /// drained a session with a GOAWAY
 /// (or, on moq-lite 03/04, which never answer it, a session stayed up 1s), nothing retries: a failed dial, or a session the peer closes, as a relay refusing a
-/// credential does, stops the loop with its error, so a setup mistake surfaces at once. The read surface
+/// credential does, stops the loop with its error, so a setup mistake surfaces at once. A loop
+/// given [`Client::with_dials`] asks at every dial instead, so it retries from the first failure
+/// until a dial is failed. The read surface
 /// mirrors [`moq_net::Session`] so a caller can treat it like a session that transparently reconnects:
 /// [`version`](Self::version), [`send_bandwidth`](Self::send_bandwidth),
 /// and [`recv_bandwidth`](Self::recv_bandwidth) track the live session and reset while disconnected.
@@ -1217,9 +1225,12 @@ impl Connection {
 		let mut policy = moq_net::Reconnect::new(client.policy, addrs.as_slice().to_vec(), kio::clock::now())
 			.map_err(|_| Error::BackoffHealthy)?
 			.with_tokens(shared.tokens.clone());
+		if let Some(dials) = client.dials.take() {
+			policy = policy.with_dials(dials);
+		}
 		// The dial in flight, and the address it was asked for. It owns its client, so a
 		// fresh port can replace the loop's between walks.
-		let mut dial: Option<(url::Url, std::pin::Pin<Box<Dial>>)> = None;
+		let mut dial: Option<(url::Url, std::pin::Pin<Box<Handshake>>)> = None;
 		// The QUIC probe in flight while the live session runs on the WebSocket fallback, and
 		// the address whose race that fallback won, which its end makes QUIC's again.
 		let (mut probe, mut fallback): (Option<Probing>, Option<url::Url>) = (None, None);
@@ -1532,10 +1543,10 @@ impl Connection {
 }
 
 /// A dial in flight.
-pub(crate) type Dial = dyn Future<Output = crate::Result<crate::client::Dialed>> + Send;
+pub(crate) type Handshake = dyn Future<Output = crate::Result<crate::client::Dialed>> + Send;
 
 /// A QUIC probe in flight, resolving to the MoQ handshake to finish over what it reached.
-type Probe = dyn Future<Output = crate::Result<std::pin::Pin<Box<Dial>>>> + Send;
+type Probe = dyn Future<Output = crate::Result<std::pin::Pin<Box<Handshake>>>> + Send;
 
 /// The address a probe dials, and the probe in flight.
 type Probing = (url::Url, std::pin::Pin<Box<Probe>>);
@@ -3666,6 +3677,105 @@ mod tests {
 		assert!(
 			connection.connected() && connection.connects() == 1,
 			"the session closed before the configured token was answered"
+		);
+	}
+
+	/// With dials, a peer unreachable at first is retried instead of ending the loop: every dial
+	/// asks for its own tokens and reads why the last one failed, and failing one ends the loop.
+	#[tokio::test(start_paused = true)]
+	async fn dials_retry_a_peer_unreachable_at_first() {
+		let version: moq_net::Version = "moq-lite-07-wip".parse().unwrap();
+		let config = crate::connect::Config {
+			version: vec![version],
+			..Default::default()
+		};
+		let mut client = config.init(Default::default()).expect("build client");
+		let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+		let counted = attempts.clone();
+		client.dialer = Some(std::sync::Arc::new(
+			move |_addr: crate::connect::Addr, moq: moq_net::Client| {
+				let attempt = counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+				Box::pin(async move {
+					if attempt < 2 {
+						return Err(Error::Io(std::sync::Arc::new(std::io::Error::other("unreachable"))));
+					}
+					let versions = moq_net::Versions::from(version);
+					let config = || {
+						let mut config = qmux::Config::new(qmux::Version::QMux01);
+						config.protocol =
+							qmux::Protocol::Negotiate(versions.alpns().iter().map(|alpn| alpn.to_string()).collect());
+						config
+					};
+					let (client, server) = tokio::io::duplex(64 * 1024);
+					let (client, server) = tokio::try_join!(
+						qmux::Session::connect(qmux::transport::Stream::new(client), config()),
+						qmux::Session::accept(qmux::transport::Stream::new(server), config())
+					)
+					.unwrap();
+					let (client, server) = (crate::spawn_qmux(client), crate::spawn_qmux(server));
+					let now = moq_net::time::Instant::now();
+					let client = moq.connect(now, client);
+					let server = async {
+						let mut request = moq_net::Server::new()
+							.with_versions(versions.clone())
+							.handshake(now, server)
+							.await
+							.unwrap();
+						let mut requests = request.requests();
+						let (session, driver) = request.ok().await.unwrap();
+						tokio::spawn(moq_net::time::run(driver));
+						tokio::spawn(async move {
+							let mut issued = Vec::new();
+							while let Some(request) = requests.next().await {
+								issued.push(request.accept(moq_net::auth::Grant::all()));
+							}
+						});
+						session
+					};
+					let client = async {
+						let (session, driver) = client.await.unwrap();
+						tokio::spawn(moq_net::time::run(driver));
+						session
+					};
+					let (session, server) = tokio::join!(client, server);
+					tokio::spawn(async move {
+						kio::clock::sleep(Duration::from_secs(3600)).await;
+						drop(server)
+					});
+					Ok(crate::client::Dialed {
+						session,
+						transport: crate::Transport::Tcp,
+					})
+				})
+			},
+		));
+
+		let dials = Dials::new();
+		let answerer = dials.clone();
+		let failures = tokio::spawn(async move {
+			let mut failures = Vec::new();
+			while let Some(dial) = answerer.next().await {
+				failures.push(dial.failure().map(ToString::to_string));
+				dial.present(vec![format!("sig-{}", failures.len()).parse().unwrap()]);
+			}
+			failures
+		});
+		let connection = client
+			.with_dials(dials)
+			.connect("moqt://relay.example.com/".parse::<Url>().unwrap())
+			.established()
+			.await
+			.expect("gave up on a peer unreachable at first");
+		assert_eq!(attempts.load(std::sync::atomic::Ordering::Relaxed), 3);
+		connection.close().await.unwrap();
+		let failures = failures.await.unwrap();
+		assert_eq!(failures.len(), 3);
+		assert!(failures[0].is_none());
+		assert!(
+			failures[1..]
+				.iter()
+				.all(|failure| failure.as_deref().is_some_and(|f| f.contains("unreachable"))),
+			"{failures:?}"
 		);
 	}
 }

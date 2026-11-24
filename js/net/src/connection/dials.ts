@@ -1,42 +1,55 @@
 import { Signal } from "@moq/signals";
 
+/** How the app answered a dial: the tokens to present, or why the connection should stop. @internal */
+export type Answer = { tokens: readonly string[] } | { refused: Error };
+
 // Set by Dial's static block, which alone may call its private constructor.
-let makeDial: (url: URL, signal: AbortSignal) => [Dial, Promise<readonly string[]>];
+let makeDial: (url: URL, signal: AbortSignal, failure?: Error) => [Dial, Promise<Answer>];
 
 /** One dial of a connection, waiting for the tokens it presents. */
 export class Dial {
 	/** Where the dial goes: the connection's URL, or the relay a GOAWAY redirected it to. */
 	readonly url: URL;
 
-	/** Aborted once the connection no longer waits for this dial's tokens, such as on close. */
+	/**
+	 * Why the previous attempt or session ended, such as a refused credential, or undefined when
+	 * nothing failed since a session last served, as for the first dial or a GOAWAY's handover.
+	 */
+	readonly failure?: Error;
+
+	/** Aborted once the connection no longer waits for this dial's tokens: on close, or past the connect timeout. */
 	readonly signal: AbortSignal;
 
-	readonly #tokens = Promise.withResolvers<readonly string[]>();
+	readonly #answer = Promise.withResolvers<Answer>();
 
-	private constructor(url: URL, signal: AbortSignal) {
+	private constructor(url: URL, signal: AbortSignal, failure?: Error) {
 		this.url = url;
 		this.signal = signal;
+		this.failure = failure;
 		// A dial its connection abandoned rejects unread.
-		this.#tokens.promise.catch(() => {});
-		if (signal.aborted) this.#tokens.reject(signal.reason);
-		else signal.addEventListener("abort", () => this.#tokens.reject(signal.reason), { once: true });
+		this.#answer.promise.catch(() => {});
+		if (signal.aborted) this.#answer.reject(signal.reason);
+		else signal.addEventListener("abort", () => this.#answer.reject(signal.reason), { once: true });
 	}
 
 	static {
-		makeDial = (url, signal) => {
-			const dial = new Dial(url, signal);
-			return [dial, dial.#tokens.promise];
+		makeDial = (url, signal, failure) => {
+			const dial = new Dial(url, signal, failure);
+			return [dial, dial.#answer.promise];
 		};
 	}
 
 	/** Present `tokens` on this dial, as a fixed list would be; the first answer counts. */
 	present(tokens: readonly string[]): void {
-		this.#tokens.resolve([...tokens]);
+		this.#answer.resolve({ tokens: [...tokens] });
 	}
 
-	/** Fail this dial with `err`, as an unreachable peer would: the connection retries or gives up as for any failed dial. */
+	/**
+	 * Stop the connection with `err` instead of dialing, as for a {@link failure} no retry can
+	 * repair. A probe back to WebTransport, which the serving session does without, is skipped instead.
+	 */
 	fail(err: Error): void {
-		this.#tokens.reject(err);
+		this.#answer.resolve({ refused: err });
 	}
 }
 
@@ -46,6 +59,10 @@ export class Dial {
  * a connection's `tokens` and answer each {@link next} dial: every dial waits for its answer,
  * whatever starts it, a reconnect, a GOAWAY's handover, a page resuming, or a probe back to
  * WebTransport, so none presents tokens signed for another.
+ *
+ * Answering is also how a connection retries: unlike fixed tokens, which stop at the first
+ * failure of a URL never reached, it backs off and asks again, with the reason on
+ * {@link Dial.failure}, until a dial {@link Dial.fail}s.
  */
 export class Dials {
 	readonly #waiting: Dial[] = [];
@@ -63,13 +80,13 @@ export class Dials {
 		}
 	}
 
-	/** Ask for the tokens of a dial to `url`, until `signal` aborts. @internal */
-	request(url: URL, signal: AbortSignal): Promise<readonly string[]> {
+	/** Ask for the tokens of a dial to `url`, until `signal` aborts, which rejects it. @internal */
+	request(url: URL, signal: AbortSignal, failure?: Error): Promise<Answer> {
 		if (this.#closed) return Promise.reject(new Error("connection closed"));
-		const [dial, tokens] = makeDial(url, signal);
+		const [dial, answer] = makeDial(url, signal, failure);
 		this.#waiting.push(dial);
 		this.#queued.update((n) => n + 1);
-		return tokens;
+		return answer;
 	}
 
 	/** End {@link next}, failing every dial still waiting. @internal */
