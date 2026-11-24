@@ -940,10 +940,12 @@ keeps three numbers: `owed`, the playhead movement the pace asked for that no
 splice took yet; its `direction`; and an `allowance`, which starts at `span`.
 
 At each hop boundary, before anything else, the allowance refills by
-`CAP * hop`, up to `span`. If the pace's sign differs from `direction`, it
-becomes the direction and `owed` resets to zero. A hold returns no splice.
-Otherwise `owed` adds `pace * hop`, clamped to ±`span`, and a splice is tried
-once `direction * owed >= hop`, or at once when urgent. The shift's range is
+`CAP * hop`, up to `span`. A hold returns no splice and keeps `owed`, so a lag
+flickering across half a hop, as clock readings jitter, still adds up to one.
+Otherwise, if the pace's sign differs from `direction`, it becomes the
+direction and `owed` resets to zero; then `owed` adds `pace * hop`, clamped
+to ±`span`, and a splice is tried once `direction * owed >= hop`, or at once
+when urgent. The shift's range is
 the decision's `[low, high]`, within ±`floor(allowance)`, at least `-head` (the
 history held) and at most what is held past the playhead less a hop; when not
 urgent, also within a hop of `owed`, `[ceil(owed) - hop, floor(owed) + hop]`.
