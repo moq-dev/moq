@@ -6071,6 +6071,14 @@ impl Producer {
 		self.modify().unwrap().evict_for_debt(key);
 	}
 
+	/// Forget every group the pool evicted, as a debt or the miss grace does.
+	#[cfg(all(test, feature = "async"))]
+	pub(crate) fn forget_lost(&self) {
+		let mut state = self.modify().unwrap();
+		while state.lost.forget_oldest() {}
+		state.bill_lost();
+	}
+
 	/// The exclusive end, once [`Self::finish`] or [`Self::finish_at`] declared one.
 	///
 	/// `None` while the track is still open ended. Both methods reject a second end, so
@@ -30903,12 +30911,9 @@ mod test {
 			// Held past the capacity, so the next write's debt evicts it before the reader looks.
 			if producer.state.read().lookup.contains_key(&1) {
 				assert!(!pool.holds_fit(), "its hold does not fit");
-				let mut state = producer.modify().unwrap();
-				state.evict_for_debt(1);
-				// As a debt sheds the oldest, or the miss grace expires them.
+				producer.evict_for_debt(1);
 				if forget {
-					while state.lost.forget_oldest() {}
-					state.bill_lost();
+					producer.forget_lost();
 				}
 			}
 			if let Poll::Ready(Ok(Some(group))) = subscriber.poll_next_group(&waiter) {
@@ -30918,6 +30923,36 @@ mod test {
 		assert_eq!(asked, 1, "group 1 is asked once");
 		assert_eq!(read, [2], "the reader moves past it to the live edge");
 		assert_eq!(drained_drops(&mut subscriber), [(1, 2)], "group 1 is given up");
+	}
+
+	/// The verdict that a group a fill held, landing before the fill answered it, would not fit
+	/// a hold again goes once no reader reads it, as an answer does.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_unfit_verdict_goes_with_its_last_reader() {
+		let (mut producer, pool) = pooled_producer(u64::MAX - 1);
+		let requests = producer.requests();
+		let descending = |groups: Range| replay().with_ranges([groups]).with_order(Order::Descending);
+		let mut subscriber = producer.subscribe(descending(Range::groups(0..)));
+		producer.start_at(10).unwrap();
+		write_group(&producer, 10);
+		let waiter = kio::Waiter::noop();
+		while let Poll::Ready(Ok(Some(_))) = subscriber.poll_recv_group(&waiter) {}
+		let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
+			panic!("below the start is a miss");
+		};
+		assert!(fill.next_run().is_some_and(|run| run.contains(&9)), "the fill awaits group 9");
+		// Group 9 lands from elsewhere, held for the fill, and a debt evicts it with no room to
+		// hold it again.
+		write_sized(producer.create_group(group::Info { start: 9 }).map(Some), 9, 100_000);
+		assert!(producer.state.read().fill_holds.holds(9), "held as it lands");
+		pool.resize(pool.pinned() + 1_000);
+		producer.evict_for_debt(9);
+		assert_eq!(fill.unfit().iter().cloned().collect::<Vec<_>>(), [9..10]);
+
+		subscriber.update(descending(Range::groups(0..8))).unwrap();
+		assert!(subscriber.poll_recv_group(&waiter).is_pending());
+		assert!(fill.unfit().is_empty(), "nobody reads group 9 now");
 	}
 
 	/// The live groups the pool evicts are kept for readers to ask again, billed to the pool

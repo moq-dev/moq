@@ -333,10 +333,15 @@ impl RangeFills {
 		if let Some(accounted) = accounted {
 			let tail = accounted.read();
 			let mut asked = RangeSet::new();
+			// A recovery a fill held that a debt evicted before the fill answered it, too big
+			// to hold again: as `unholdable` says of the groups whose eviction the track still
+			// records, kept with the fill so neither a grace nor a debt forgets it.
+			let mut unfit = RangeSet::new();
 			for fill in self.held.iter().filter(|fill| !fill.is_paced()) {
 				if let Some(run) = fill.next_run() {
 					asked.insert(run);
 				}
+				unfit.extend(fill.unfit());
 			}
 			for run in asked.iter() {
 				for gone in tail.accounted(run.clone()) {
@@ -344,7 +349,13 @@ impl RangeFills {
 						for owed in self.unrefused(gap) {
 							for once in self.recovered.overlapping(&owed).cloned().collect::<Vec<_>>() {
 								let once = once.start.max(owed.start)..once.end.min(owed.end);
-								for unholdable in serving.unholdable(once).iter() {
+								let mut unholdable = serving.unholdable(once.clone());
+								unholdable.extend(
+									unfit
+										.overlapping(&once)
+										.map(|run| run.start.max(once.start)..run.end.min(once.end)),
+								);
+								for unholdable in unholdable.iter() {
 									self.refused
 										.insert(unholdable.clone(), Refusal::passing(StreamError::NotFound));
 								}

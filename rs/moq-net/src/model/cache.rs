@@ -269,7 +269,7 @@ impl Pool {
 
 	/// Bytes no eviction can reclaim while their tracks live: every live track's newest group
 	/// and spare encoder.
-	pub(super) fn pinned(&self) -> u64 {
+	pub(crate) fn pinned(&self) -> u64 {
 		self.inner.pinned.load(Ordering::Relaxed).max(0).unsigned_abs()
 	}
 

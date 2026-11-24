@@ -190,10 +190,10 @@ pub(crate) struct Outcome {
 	// The group a time start's fill accepted below the time, created or already cached, held so
 	// where it ends is known even once the cache lets it go.
 	answer: Option<group::Handle>,
-	// What it answered and held that a debt evicted with no room to hold it again beside the
-	// pins and the other holds: a refill would be evicted the same way, so a reader finding
-	// the eviction gives it up rather than asking again. Kept with the answer, until no join
-	// reads it, so neither a grace nor a debt forgets it.
+	// What it held, answered or still landing, that a debt evicted with no room to hold it
+	// again beside the pins and the other holds: a refill would be evicted the same way, so a
+	// reader finding the eviction gives it up, and a lite-07 recovery is not asked again.
+	// Kept until no join reads it, so neither a grace nor a debt forgets it.
 	unfit: RangeSet<u64>,
 }
 
@@ -794,9 +794,9 @@ impl FillState {
 		let unwanted = pending.unwant(groups);
 		let answered = {
 			let outcome = pending.result.read();
-			unwanted
-				.iter()
-				.any(|run| outcome.refused.overlaps(run) || outcome.accepted.overlaps(run))
+			unwanted.iter().any(|run| {
+				outcome.refused.overlaps(run) || outcome.accepted.overlaps(run) || outcome.unfit.overlaps(run)
+			})
 		};
 		if answered && let Ok(mut outcome) = pending.result.write() {
 			for run in &unwanted {
@@ -1300,6 +1300,13 @@ impl FillGroups {
 			}
 			None => Poll::Ready(()),
 		}
+	}
+
+	/// What this fill held that a debt evicted with no room to hold it again, answered or
+	/// still landing: asking for it again would see it evicted the same way.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn unfit(&self) -> RangeSet<u64> {
+		self.inner.result.read().unfit.clone()
 	}
 
 	/// Whether a group this fill answered has yet to reach a reader, so it asks for nothing
