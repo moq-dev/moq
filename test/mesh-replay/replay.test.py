@@ -89,6 +89,15 @@ class MeshTest(unittest.TestCase):
             ('relays = ["a", "b", "c"]\n[[links]]\ndial = "a"\naccept = "b"', "not connected"),
             ('relays = ["a", "b"]\n[[links]]\ndial = "a"\naccept = "b"\ncost = 0', "at least 1"),
             ('relays = ["a", "b"]\nlinks = []\nextra = 1', "unknown keys"),
+            (
+                'relays = ["a", "b"]\n[[links]]\ndial = "a"\naccept = "b"\ncost = 2\ncost_build = "mid"',
+                "`old` or `new`",
+            ),
+            ('relays = ["a", "b"]\n[[links]]\ndial = "a"\naccept = "b"\ncost_build = "new"', "no cost"),
+            (
+                'relays = ["a", "b"]\n[[links]]\ndial = "a"\naccept = "b"\ncost = 2\ncost_build = "new"\nbuild = "old"',
+                "does not dial it",
+            ),
             ('relays = ["a", "b"]\n[[links]]\ndial = "a"\naccept = "b"\nbuild = "mid"', "`old` or `new`"),
             ('relays = ["a", "b"]\n[[links]]\ndial = "a"\naccept = "b"\nbuild = "old"\nupstream = true', "upstream"),
             (
@@ -471,6 +480,20 @@ class BuildTest(unittest.TestCase):
         new = relay.config(replay.Build("new", "relay", []))
         self.assertNotIn("127.0.0.1:1/", new)
         self.assertIn("127.0.0.1:5/", new)
+
+    def test_a_link_is_priced_on_the_build_that_names_it(self):
+        run, _ = self.fake_run(None, None)
+        run.mesh.links = [
+            replay.Link("a", "b", 3, False, {}, None, "new"),
+            replay.Link("a", "c", 4, False, {}),
+        ]
+        run.shaper_port = {"a-b": 1, "a-c": 5}
+        relay = replay.Relay.__new__(replay.Relay)
+        relay.run, relay.name, relay.port, relay.internal = run, "a", 2, 3
+        for build, priced in [("old", ""), ("new", ", cost = 3")]:
+            config = relay.config(replay.Build(build, "relay", []))
+            self.assertIn(f'peer.a"{priced} }}', config.split("127.0.0.1:1/")[1], build)
+            self.assertIn('127.0.0.1:5/", token = "peer.a", cost = 4', config, build)
 
     def test_only_the_new_build_marks_a_link_upstream(self):
         run, _ = self.fake_run(None, None)
