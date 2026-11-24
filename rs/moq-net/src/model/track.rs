@@ -38,6 +38,12 @@ pub(crate) use demand::Edit;
 pub(super) use demand::Preferences;
 use demand::Subscriptions;
 
+/// Move the process-wide join tick, as another track's answer to a live join does.
+#[cfg(all(test, feature = "async"))]
+pub(crate) fn answer_elsewhere() {
+	demand::answered();
+}
+
 mod fill;
 mod hole;
 mod miss;

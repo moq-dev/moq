@@ -9086,10 +9086,12 @@ mod tests {
 			wanted
 		};
 
-		// The deltas outweigh the first frame, so every join asks for group 1.
+		// The deltas outweigh the first frame, so every join asks for group 1. Each joins
+		// after another track's answer, so the joins differ in the tick they wait past.
 		arrive(&serving, 0);
 		let mut joins = Vec::new();
 		for _ in 0..8 {
+			crate::model::track::answer_elsewhere();
 			joins.push(track.subscribe(None).await.unwrap());
 			assert!(serving.poll(&h.serve, &kio::Waiter::noop()).is_pending());
 		}
@@ -12020,6 +12022,8 @@ impl TrackServe {
 						// Downstream preferences changed: forward them upstream as a
 						// SUBSCRIBE_UPDATE (Lite03+ only; older peers can't carry one).
 						let start_moved = demand.is_some() && active.start != subscription.start();
+						let terms = (active.priority, active.order, active.max_delay);
+						let live = active.live.unchanged();
 						active.priority = subscription.priority;
 						active.order = subscription.order;
 						active.max_delay = max_age;
@@ -12070,7 +12074,11 @@ impl TrackServe {
 							} else if start_moved {
 								let _ = producer.start_at(active.start);
 							}
-							buffer_update(active, edit)?;
+							// One restating what is live tells the publisher nothing, as when a join's
+							// tick moves while its probe is still unanswered: joins coalesce.
+							if edit != live || terms != (active.priority, active.order, active.max_delay) {
+								buffer_update(active, edit)?;
+							}
 						}
 						Ok(Begin::None)
 					}
