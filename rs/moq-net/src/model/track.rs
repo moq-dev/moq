@@ -2262,38 +2262,38 @@ impl TrackState {
 		};
 	}
 
-	/// Find the next live group at or after `index` in arrival order, for a reader reading
-	/// `window`.
+	/// Take in the live groups that arrived at or after `index`, for a reader reading `window`
+	/// from `min_key` to pick from in its Group Order: their keys, in arrival order.
 	///
-	/// Returns the group and its absolute index so the consumer can advance past it.
-	/// The cached producer rather than a consumer: `consume` reads the clock and can
-	/// take the group's own lock, which the caller does once the track guard is gone.
+	/// Moves `index` past every entry it looks at, the dead ones and those below `min_key`
+	/// included, which a lower floor re-offers from the cache instead. It stays only on a
+	/// trailing entry not handed out yet, which a fetched head may revive, so a wake walks
+	/// only what arrived since, however many stale entries did.
 	///
-	/// Moves `index` past the leading entries this reader is never handed: dead, or below
-	/// `min_key`, which a lower floor re-offers from the cache instead. So a wake walks
-	/// only what the reader may still be handed, however many stale entries arrived.
-	fn poll_recv_group(
-		&self,
-		index: &Cell<usize>,
-		min_key: u64,
-		window: &Window,
-	) -> Poll<Result<Option<(group::Handle, usize)>>> {
+	/// Ready with nothing once the track completed, or with its abort.
+	fn poll_arrivals(&self, index: &Cell<usize>, min_key: u64, window: &Window) -> Poll<Result<Option<Vec<u64>>>> {
+		let mut arrived = Vec::new();
 		if self.serves_bounded(window) {
-			let mut passed = true;
+			let mut stop = None;
+			let mut past = index.get();
 			for entry in self.arrivals_from(index.get()) {
+				past = entry.at + 1;
 				let slot = self.lookup.get(&entry.key).filter(|slot| slot.stamp == entry.stamp);
 				let Some(slot) = slot.filter(|_| entry.key >= min_key) else {
-					if passed {
-						index.set(entry.at + 1);
-					}
 					continue;
 				};
 				// A cut group is handed out too, so its reader sees why it ended.
 				if slot.is_read() {
-					return Poll::Ready(Ok(Some((slot.serving().clone(), entry.at))));
+					arrived.push(entry.key);
+					stop = None;
+				} else {
+					stop.get_or_insert(entry.at);
 				}
-				passed = false;
 			}
+			index.set(stop.unwrap_or(past));
+		}
+		if !arrived.is_empty() {
+			return Poll::Ready(Ok(Some(arrived)));
 		}
 
 		// TODO once we have drop notifications, check if index == final_key.
@@ -9192,7 +9192,7 @@ struct Cursor {
 	cache: Arc<cache::Track>,
 
 	subscription: Preferences,
-	/// Arrival-order cursor used by `recv_group`.
+	/// How far `recv_group` took in the track's arrivals, which it owes until handed out.
 	index: usize,
 	/// Minimum key to return from any `recv` method. Set by `set_range`.
 	min_key: u64,
@@ -9417,9 +9417,7 @@ pub(super) struct Peeked {
 /// Where a recv-order candidate came from, which taking it advances past.
 #[derive(Clone, Copy)]
 enum Taken {
-	/// The arrival walk, which moves to this index.
-	Walk(usize),
-	/// What a widening owes.
+	/// What this cursor owes: an arrival, or what a widening newly covers.
 	Owed,
 	/// What a fill answered.
 	Filled,
@@ -9720,9 +9718,10 @@ struct Filter {
 	admitted: Admitted,
 	/// The floor, [`Self::revision`], and cap [`Self::admitted`] was taken at.
 	admitted_at: Option<(u64, u64, Option<u64>)>,
-	/// The spans a widening newly covers, from the ranges, the floor, the cap, or the
-	/// budget, scanned in the cache in the subscription's order and handed out ahead of the
-	/// walk: each cached group in them is visited once.
+	/// What the arrival read holds unread: the arrivals it took in and not handed out yet,
+	/// and the spans a widening newly covers, from the ranges, the floor, the cap, or the
+	/// budget. Scanned in the cache in the subscription's order, so each cached group in
+	/// them is visited once.
 	owed: RangeInclusiveSet<u64>,
 	/// The time starts [`Self::window`] looks up from the track's history, each asked once.
 	lookups: Vec<Lookup>,
@@ -10337,8 +10336,8 @@ impl Cursor {
 	}
 
 	/// The next cached group still owed in the subscription's order, newest first unless
-	/// ascending, consuming the spans scanned on the way: only one the walk could have read,
-	/// never fetched backfill or a withheld group. The group itself stays owed until
+	/// ascending, consuming the spans scanned on the way: only one the arrivals could have
+	/// delivered, never fetched backfill or a withheld group. The group itself stays owed until
 	/// [`Self::advance_arrival`] takes it, so a peek keeps it.
 	fn next_owed(&mut self) -> Option<group::Handle> {
 		if self.filter.owed.is_empty() {
@@ -11050,26 +11049,49 @@ impl Cursor {
 		self.poll_heads(waiter);
 		self.expire_heads(&drift, waiter);
 		loop {
-			// Re-offer what a widening newly covers ahead of the arrival walk, in the
-			// subscription's order: it is the oldest thing still owed. A group the walk has
-			// yet to reach comes again from it, and the subscriber's delivered set drops the
-			// repeat.
-			let owed = match self.next_owed() {
-				Some(producer) => Some((producer.consume(), Taken::Owed)),
-				// A fill answered what the walk never reaches: backfill is not in it.
-				None => match self.next_filled() {
-					Some(producer) => Some((producer.consume(), Taken::Filled)),
-					None => self.next_head().map(|group| (group, Taken::Head)),
-				},
+			// What arrived since the last look is owed too, so the pick below sees every group
+			// held unread, buffered or re-offered by a widening, and hands out the first in the
+			// subscription's order. A late lower group is owed once it arrives, never passed over.
+			let arrived = {
+				let index = Cell::new(self.index);
+				let arrived = self.state.read().poll_arrivals(&index, self.floor(), &self.filter.window);
+				self.index = index.get();
+				arrived
 			};
-			let (consumer, taken) = match owed {
+			if let Poll::Ready(Ok(Some(arrived))) = arrived
+				&& self.owe_arrivals(arrived)
+			{
+				drift = ready!(self.poll_drift(&self.servable, waiter))?;
+			}
+			// A fill answers what the arrivals never deliver, backfill and heads, which go in the
+			// same order. A tie goes to the arrival.
+			let (owed, filled, head) = (self.next_owed(), self.next_filled(), self.next_head());
+			let ascending = self.subscription.read().order == Order::Ascending;
+			let keys = [
+				owed.as_ref().map(|group| (group.start, Taken::Owed)),
+				filled.as_ref().map(|group| (group.start, Taken::Filled)),
+				head.as_ref().map(|group| (group.start, Taken::Head)),
+			];
+			let pick = keys.into_iter().flatten().reduce(|first, next| {
+				let goes_first = match ascending {
+					true => next.0 < first.0,
+					false => next.0 > first.0,
+				};
+				if goes_first { next } else { first }
+			});
+			// Only the group handed out is consumed.
+			let first = match pick.map(|(_, taken)| taken) {
+				Some(Taken::Owed) => owed.map(|group| (group.consume(), Taken::Owed)),
+				Some(Taken::Filled) => filled.map(|group| (group.consume(), Taken::Filled)),
+				Some(Taken::Head) => head.map(|group| (group, Taken::Head)),
+				None => None,
+			};
+			let (consumer, taken) = match first {
 				Some((consumer, taken)) => (consumer, taken),
 				None => {
-					let floor = self.floor();
 					let index = Cell::new(self.index);
-					let polled = self.poll(waiter, |state| {
-						state.poll_recv_group(&index, floor, &self.filter.window)
-					});
+					let floor = self.floor();
+					let polled = self.poll(waiter, |state| state.poll_arrivals(&index, floor, &self.filter.window));
 					self.index = index.get();
 					// A moved window moved the servable edge `drift` was judged against.
 					if polled.is_pending() && self.watch_time() {
@@ -11078,7 +11100,7 @@ impl Cursor {
 						self.expire_heads(&drift, waiter);
 						continue;
 					}
-					let Some((producer, found_index)) = ready!(polled)? else {
+					let Some(arrived) = ready!(polled)? else {
 						// The feed ended, but a fill still owes a group. Its answer wakes us.
 						if self.awaits_fill() {
 							return Poll::Pending;
@@ -11087,31 +11109,10 @@ impl Cursor {
 						self.kept_out = None;
 						return Poll::Ready(Ok(None));
 					};
-					let consumer = producer.consume();
-
-					// The first group to arrive places a live join, which may land above it,
-					// and a later one may settle where a time end falls.
-					if !self.filter.window.is_settled() {
-						self.sync();
-						self.admit();
-						// The snapshot saw the pending window, which serves everything.
-						if !self.filter.window.is_pending() {
-							drift = ready!(self.poll_drift(&self.servable, waiter))?;
-						}
-						if consumer.start < self.floor() {
-							self.index = found_index + 1;
-							continue;
-						}
+					if self.owe_arrivals(arrived) {
+						drift = ready!(self.poll_drift(&self.servable, waiter))?;
 					}
-
-					// Pass a group beyond the cap or outside the ranges, holding nothing: a
-					// widening finds it in the cache again. Keep scanning so an in-range group
-					// that arrived behind it still flows.
-					if !self.admits(consumer.start) {
-						self.index = found_index + 1;
-						continue;
-					}
-					(consumer, Taken::Walk(found_index + 1))
+					continue;
 				}
 			};
 
@@ -11132,6 +11133,27 @@ impl Cursor {
 				arrival: Some(taken),
 			})));
 		}
+	}
+
+	/// Owe the `arrived` groups this cursor reads, for [`Self::next_owed`] to pick from. A
+	/// group beyond the cap or outside the ranges is passed holding nothing: a widening finds
+	/// it in the cache again. The first group to arrive places a live join, which may land
+	/// above it, and a later one may settle where a time end falls. Returns whether that
+	/// moved a placed window, and with it the servable edge a drift was judged against.
+	fn owe_arrivals(&mut self, arrived: Vec<u64>) -> bool {
+		let moved = !self.filter.window.is_settled() && {
+			self.sync();
+			self.admit();
+			// The snapshot saw the pending window, which serves everything.
+			!self.filter.window.is_pending()
+		};
+		let floor = self.floor();
+		for key in arrived {
+			if key >= floor && self.admits(key) {
+				self.filter.owed.insert(key..=key);
+			}
+		}
+		moved
 	}
 
 	/// Write off group `key`, which the drift budget gave up on, as dropped `Old`:
@@ -11159,11 +11181,10 @@ impl Cursor {
 		}
 	}
 
-	/// Move the arrival cursor past a group it read: from the walk, to `index`; from what
-	/// a widening owes, out of the owed spans.
+	/// Move the arrival read past a group it read: out of the owed spans, the fills
+	/// answered, or the heads asked.
 	fn advance_arrival(&mut self, key: u64, taken: Taken) {
 		match taken {
-			Taken::Walk(index) => self.index = index,
 			Taken::Owed => self.filter.owed.remove(key..=key),
 			Taken::Filled => {
 				if let Some(misses) = &mut self.misses {
@@ -11713,11 +11734,14 @@ impl Subscriber {
 		}
 	}
 
-	/// The next group in arrival order.
+	/// The next group to arrive, picking from those held unread in the subscription's
+	/// [`Order`].
 	///
-	/// Returns each group it delivers exactly once, in the order it landed on the wire,
-	/// which may be out of key due to network reordering or loss. Use
-	/// [`Self::ordered`] if you only want groups whose key is higher than any
+	/// Returns each group it delivers exactly once. A reader that keeps up gets each group
+	/// as it lands, out of key under network reordering or loss. One holding several unread,
+	/// a backlog or a replayed cache, gets the newest first unless [`Order::Ascending`]: ask
+	/// ascending to read them oldest first. A lower group that lands late is still
+	/// delivered. Use [`Self::ordered`] if you only want groups whose key is higher than any
 	/// previously returned.
 	///
 	/// Once means once per key: a group the publisher aborts and re-creates, or that
@@ -11733,8 +11757,8 @@ impl Subscriber {
 	/// tolerates is skipped rather than handed over, so a single read walks off a whole
 	/// backlog. The default [`Start::LATEST`] takes the live edge and writes the rest off;
 	/// a history range (a time, position, or oldest start) reads every group it covers. [`Consumer::fetch_group`] is the way to ask for one old group outright.
-	/// Across same-instance route copies, the lowest next buffered group is delivered
-	/// first; a lower group that arrives later is still delivered in arrival order.
+	/// Across same-instance route copies, the first group any copy holds in that order is
+	/// delivered first.
 	/// The budget remains attached to a returned group: if it stalls while newer data
 	/// advances, its pending frame read ends with [`Error::Old`].
 	///
@@ -27781,17 +27805,13 @@ mod test {
 
 		// The backfill serves by key, but never in arrival order.
 		assert!(consumer.peek_group(1).is_some());
-		let mut walked = Vec::new();
 		let index = Cell::new(0);
 		let window = {
 			let state = producer.state.read();
 			Window::new(&replay().ranges, None, &*state)
 		};
-		while let Poll::Ready(Ok(Some((group, next)))) = producer.state.read().poll_recv_group(&index, 0, &window) {
-			walked.push(group.start);
-			index.set(next + 1);
-		}
-		assert_eq!(walked, [0, 2]);
+		let walked = producer.state.read().poll_arrivals(&index, 0, &window);
+		assert!(matches!(walked, Poll::Ready(Ok(Some(ref keys))) if keys == &[0, 2]), "{walked:?}");
 		// A reader takes it as the fill answer for the group the feed gave up, as it would
 		// have asked a fill for it, and the stale arrival entry adds nothing.
 		let mut subscriber = producer.subscribe(replay());

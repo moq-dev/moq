@@ -1228,8 +1228,8 @@ impl Mirror {
 }
 
 impl Subscriber {
-	/// Reserve the lowest next group not in `delivered` across copies, without handing it
-	/// out: in arrival order, or in key order for `ordered`.
+	/// Reserve the next group not in `delivered` across copies, without handing it out: the
+	/// first any copy holds in the subscription's Group Order, or the lowest for `ordered`.
 	/// Unless it `parks`, a bounded reader ends once its window has nothing left on any copy;
 	/// see [`Reader::exhausted`].
 	///
@@ -1262,7 +1262,7 @@ impl Subscriber {
 			// even on a path that parks without looking at the route.
 			reader.route.register(waiter);
 			let polled = loop {
-				if let Some(result) = reader.poll_lowest(ordered, parks, delivered, waiter) {
+				if let Some(result) = reader.poll_first(ordered, parks, delivered, waiter) {
 					break result;
 				}
 			};
@@ -2624,7 +2624,7 @@ impl Reader {
 				owed.remove(run.clone());
 			}
 			for copy in &self.copies {
-				// Only a copy `poll_lowest` still reads delivers: not ran out, failed, or past
+				// Only a copy `poll_first` still reads delivers: not ran out, failed, or past
 				// the budget.
 				if copy.done.is_some() || copy.expired(budget, waiter) {
 					continue;
@@ -2818,9 +2818,10 @@ impl Reader {
 		Ok(self.hand_out(index, group))
 	}
 
-	/// Choose without consuming a candidate, so a newer copy cannot overtake a lower
-	/// group still buffered on an older one. A tie favors the newer copy.
-	fn poll_lowest(
+	/// Choose without consuming a candidate, so a newer copy cannot overtake a group still
+	/// buffered on an older one that goes first: the lowest for an `ordered` read, else the
+	/// first in the subscription's Group Order. A tie favors the newer copy.
+	fn poll_first(
 		&mut self,
 		ordered: bool,
 		parks: bool,
@@ -2834,7 +2835,8 @@ impl Reader {
 		// A copy is let go as a whole, so it waits out the widest budget any group gets.
 		let budget = self.mirrored.widest();
 		let floor = if ordered { delivered.floor() } else { 0 };
-		let mut lowest: Option<Candidate> = None;
+		let ascending = ordered || self.subscription.read().order == track::Order::Ascending;
+		let mut first: Option<Candidate> = None;
 		let mut held = false;
 		for index in 0..self.copies.len() {
 			let copy = &mut self.copies[index];
@@ -2932,8 +2934,12 @@ impl Reader {
 							}
 							continue;
 						}
-						if lowest.as_ref().is_none_or(|lowest| key <= lowest.key()) {
-							lowest = Some(Candidate {
+						let goes_first = |first: &Candidate| match ascending {
+							true => key <= first.key(),
+							false => key >= first.key(),
+						};
+						if first.as_ref().is_none_or(goes_first) {
+							first = Some(Candidate {
 								lease: self.copies[index].lease.clone(),
 								reserved,
 							});
@@ -2985,13 +2991,13 @@ impl Reader {
 					.get_or_insert_with(|| Resumed::Route(None, BTreeMap::new()));
 			}
 		}
-		// A later copy placed the window this pass: a group held back above may now be the lowest.
+		// A later copy placed the window this pass: a group held back above may now go first.
 		if held && !self.window().is_pending() {
-			drop(lowest);
-			return self.poll_lowest(ordered, parks, delivered, waiter);
+			drop(first);
+			return self.poll_first(ordered, parks, delivered, waiter);
 		}
-		if let Some(lowest) = lowest {
-			return Some(Poll::Ready(Ok(Some(lowest))));
+		if let Some(first) = first {
+			return Some(Poll::Ready(Ok(Some(first))));
 		}
 		// A copy answering this pass may have placed the ranges the switch's backfill waits
 		// for: ask for it now, since no later group is sure to wake the read.
