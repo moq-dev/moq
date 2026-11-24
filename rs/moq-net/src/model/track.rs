@@ -32675,7 +32675,7 @@ mod test {
 		write_group(&producer, 0);
 		write_group(&producer, 6);
 		let live = Start::Live {
-			min: subscription::PAST_EVERY_GROUP,
+			min: None,
 			max: Some(Duration::from_secs(1)),
 		};
 		let mut subscriber = producer.subscribe(Subscription::default().with_ranges([

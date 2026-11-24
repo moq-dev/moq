@@ -6702,7 +6702,7 @@ test("a forgotten kept-out run is judged by each range's budget", async () => {
 		const sub = producer.subscribe({
 			ranges: [
 				{ start: 0n, end: 2n },
-				{ start: { live: { min: PAST_EVERY_GROUP, max: Duration.millis(1_000) } }, end: 7n },
+				{ start: { live: { min: null, max: Duration.millis(1_000) } }, end: 7n },
 			],
 		});
 		expect(sub.tryRecvGroup()?.start).toBe(0n);
