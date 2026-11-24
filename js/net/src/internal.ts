@@ -623,6 +623,8 @@ export interface ResumeSource {
 	bufferedLargest(): Position | undefined;
 	/** The lowest group any copy holds unread below `below`; see `hooks.lowestUnread`. */
 	lowestUnread(below: bigint): bigint | undefined;
+	/** Whether any copy holds group `key` unread; see `hooks.heldAt`. */
+	heldAt(key: bigint): "servable" | "unservable" | undefined;
 	/** The serving copy's newest actual object, including metadata retained past cache eviction. */
 	objectLargest(): Position | undefined;
 	/** The serving copy's largest location now, and whether it can still advance. */
@@ -946,6 +948,11 @@ export const hooks: {
 	 * `track::Subscriber::lowest_unread`; assigned by `track.ts`.
 	 */
 	lowestUnread: (subscriber: Subscriber, below: bigint) => bigint | undefined;
+	/**
+	 * Whether the subscriber holds group `key` unread in its window, and whether it is whole from the
+	 * frame asked: a publisher's start passes a held group it cannot serve. Assigned by `track.ts`.
+	 */
+	heldAt: (subscriber: Subscriber, key: bigint) => "servable" | "unservable" | undefined;
 	/** The newest actual object received or reported upstream, independent of cache retention. */
 	objectLargest: (subscriber: Subscriber) => Position | undefined;
 	/** Call `fn` with a group's frame count now and on every change; assigned by `group.ts`. */
@@ -1037,7 +1044,10 @@ export const hooks: {
 	 * Rust `Subscriber::resolve_ranges`. Assigned by `track.ts`.
 	 */
 	resolveRanges: (subscriber: Subscriber, subscription: Subscription) => (Resolved | undefined)[];
-	/** The lowest buffered candidate, which an ordered take may wait below; `floor` passes keys taken on other copies. */
+	/**
+	 * The buffered candidate the next take hands out: the lowest for an ordered take, which may wait
+	 * below it, else the first in the subscription's Group Order. `floor` passes keys taken on other copies.
+	 */
 	peekGroup: (subscriber: Subscriber, ordered: boolean, floor?: bigint) => bigint | undefined;
 	/** Take the next group in sequence order without waiting, as {@link tryRecvGroup} does in arrival order. */
 	tryNextGroup: (subscriber: Subscriber, floor?: bigint) => Recv;
@@ -1519,6 +1529,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	lowestUnread: () => {
+		throw new Error("track.ts not loaded");
+	},
+	heldAt: () => {
 		throw new Error("track.ts not loaded");
 	},
 	objectLargest: () => {

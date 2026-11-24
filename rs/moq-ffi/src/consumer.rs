@@ -84,7 +84,8 @@ pub struct MoqSubscription {
 	/// subscription's read filter: it reads only the groups its own ranges cover.
 	#[uniffi(default = None)]
 	pub ranges: Option<Vec<MoqRange>>,
-	/// Which pending group the publisher sends first, or null for newest first.
+	/// Which group comes first, as the publisher sends them and `recv_group` returns those held,
+	/// or null for newest first.
 	#[uniffi(default = None)]
 	pub order: Option<MoqOrder>,
 }
@@ -128,7 +129,8 @@ pub struct MoqRange {
 	pub end: Option<MoqTimestamp>,
 }
 
-/// Which of a subscription's pending groups the publisher sends first, mirroring
+/// Which of a subscription's groups comes first, as the publisher sends them and `recv_group`
+/// returns those held, mirroring
 /// [`moq_net::track::Order`].
 #[derive(Clone, Copy, uniffi::Enum)]
 pub enum MoqOrder {

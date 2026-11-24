@@ -157,7 +157,8 @@ extension Subscription {
     /// (zero is the latest group), and an unstated one reaches back as far as `max` allows. A
     /// `nil` `end` keeps following the live edge.
     public typealias Range = MoqFFI.MoqRange
-    /// Which pending group the publisher sends first: `.ascending` or `.descending`.
+    /// Which group comes first, as the publisher sends them and `recvGroup` returns those held:
+    /// `.ascending` or `.descending`.
     public typealias Order = MoqFFI.MoqOrder
 
     /// moq-net's defaults, whose `delay` (no `min`, a zero `max`) starts at the newest group and

@@ -63,8 +63,9 @@ public final class TrackConsumer: AsyncSequence, Sendable {
         ffi.cancel()
     }
 
-    /// Groups in arrival order, including out-of-order deliveries. The default
-    /// `AsyncSequence` iteration uses start order instead.
+    /// Groups in arrival order, including out-of-order deliveries. Groups already held come in
+    /// the subscription's order, newest first unless it asks ascending, as `recvGroup` returns
+    /// them. The default `AsyncSequence` iteration uses start order instead.
     public var groupsAsArrived: AsyncThrowingStream<GroupConsumer, Swift.Error> {
         moqStream(cancel: { [ffi] in ffi.cancel() }) { [ffi] in
             (try await ffi.recvGroup()).map(GroupConsumer.init)

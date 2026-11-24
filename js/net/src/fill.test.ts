@@ -1450,6 +1450,31 @@ test.each(["arrival", "sequence"])(
 	},
 );
 
+// A resumed reader picks across copies by what each peeks, so a peek offers the group the take hands
+// out: newest first, a bounded reader passes a group whose head a fill still owes.
+test("fill: a bounded newest-first reader peeks the group its take hands out, past a headless one", async () => {
+	const broadcast = new BroadcastProducer();
+	const track = defined(broadcast.createTrack("video", { maxAge: null }));
+	const whole = track.createGroup(2n);
+	whole.writeFrame({ payload: enc.encode("c0"), timestamp: Timestamp.unscaled(2n) });
+	whole.finish();
+	const tail = hooks.receiveGroup(track, { start: 3n, offset: 1 });
+	tail.writeFrame({ payload: enc.encode("d1"), timestamp: Timestamp.unscaled(3n) });
+	tail.finish();
+	// Asked, never answered: the head of group 3 stays owed.
+	const requests = track.requests();
+	const reader = track.subscribe(withMax({ ranges: [{ start: 2n, end: 3n }], delay: { max: null } }));
+	await yieldNow();
+
+	expect(hooks.peekGroup(reader, false)).toBe(2n);
+	const recv = hooks.tryRecvGroup(reader, false);
+	expect(recv.kind === "group" ? recv.group.start : recv.kind).toBe(2n);
+
+	reader.close();
+	requests.close();
+	broadcast.close();
+});
+
 test("fill: a refused head gives its group up, and the bounded reader moves past it", async () => {
 	const { broadcast, track } = headless();
 	const requests = track.requests();

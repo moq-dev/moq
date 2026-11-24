@@ -899,7 +899,8 @@ pub struct moq_subscription {
 	/// The number of entries in `ranges`.
 	pub ranges_len: usize,
 
-	/// `moq_order` discriminant: which pending group the publisher sends first.
+	/// `moq_order` discriminant: which group comes first, as the publisher sends them and a read
+	/// in arrival order returns those held.
 	pub order: u32,
 }
 
@@ -932,7 +933,8 @@ pub struct moq_range {
 	pub end_present: bool,
 }
 
-/// Which of a subscription's pending groups the publisher sends first. Zero is the default.
+/// Which of a subscription's groups comes first, as the publisher sends them and a read in
+/// arrival order returns those held. Zero is the default.
 #[repr(C)]
 #[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug)]

@@ -207,8 +207,8 @@ class Subscription:
     ``priority`` is in ``-128..=127``, higher first, and defaults to 0, the midpoint.
     ``delay`` is where a range with no start begins and how far a non-latest group may fall
     behind before it is skipped. ``ranges`` are the spans of the track to deliver, ``None`` for
-    one :class:`Range` with no start. ``order`` is which pending group the publisher
-    sends first, ``None`` for newest first.
+    one :class:`Range` with no start. ``order`` is which group comes first, as the
+    publisher sends them and :meth:`recv_group` returns those held, ``None`` for newest first.
 
     A bare ``Subscription()`` has moq-net's defaults, as :meth:`default` does.
     """

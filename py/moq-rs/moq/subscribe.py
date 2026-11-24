@@ -73,6 +73,9 @@ class TrackConsumer(_Stream[GroupConsumer]):
     async def groups_as_arrived(self) -> AsyncIterator[GroupConsumer]:
         """Iterate groups in arrival order, including out-of-order deliveries.
 
+        Groups already held come in the subscription's order, newest first unless it asks
+        ascending, as :meth:`recv_group` returns them.
+
         The default iteration uses start order instead. Use this for live
         consumption where latency matters more than order.
         """

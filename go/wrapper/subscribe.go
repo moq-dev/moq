@@ -176,7 +176,8 @@ func (t *TrackConsumer) Groups(ctx context.Context) iter.Seq2[*GroupConsumer, er
 }
 
 // GroupsAsArrived ranges over groups in arrival order, including
-// out-of-order deliveries.
+// out-of-order deliveries. Groups already held come in the subscription's
+// order, newest first unless it asks ascending, as RecvGroup returns them.
 func (t *TrackConsumer) GroupsAsArrived(ctx context.Context) iter.Seq2[*GroupConsumer, error] {
 	return bridge.Seq(ctx, t.inner.Cancel, t.RecvGroup)
 }

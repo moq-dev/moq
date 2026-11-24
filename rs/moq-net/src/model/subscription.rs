@@ -113,9 +113,10 @@ pub(crate) fn max_of(budget: Duration) -> Option<Duration> {
 	Some(budget).filter(|budget| *budget != Duration::MAX)
 }
 
-/// Which of a subscription's pending groups the publisher sends first.
+/// Which of a subscription's groups comes first: the publisher sends its pending groups in
+/// this order, and `recv_group` hands out the groups it holds in it.
 ///
-/// A transmission order only: it never decides *whether* a group is delivered. A history
+/// An order only: it never decides *whether* a group is delivered. A history
 /// range ([`Start::Time`] or [`Start::Oldest`]) delivers every group it covers, and a
 /// [`Start::Live`] range skips what its `max` judges stale, so an ascending subscriber that
 /// wants a backlog drains it from a history range or a `max` that covers it.

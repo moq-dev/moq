@@ -40,7 +40,7 @@ exclude_re = [
     # Polling a covered copy hands out nothing, so polling it anyway only costs work. An
     # expired copy's groups are past the reader's own budget too: the copy expires a budget
     # after the newer group that makes them stale, and `let_go` arms the same timer.
-    ':\d+:13: replace \|\| with && in Reader::poll_lowest$',
+    ':\d+:13: replace \|\| with && in Reader::poll_first$',
     # A run starting at the window's end or the resume point clips to an empty range, which
     # has no gaps.
     'replace < with <= in Reader::(exhausted|lacking)$',
@@ -69,9 +69,9 @@ exclude_re = [
     'replace == with != in Consumer::subscribe$',
     # A backfill fails only with its route's track, so asking that route again for what it
     # refused fails at once too and is let go: skipping the ask only saves the subscribe.
-    # `poll_lowest` records that refusal for the skip.
+    # `poll_first` records that refusal for the skip.
     ':\d+:19: replace <= with > in Reader::backfill$',
-    ':\d+:30: replace == with != in Reader::poll_lowest$',
+    ':\d+:30: replace == with != in Reader::poll_first$',
     # With no resume point `raised` names no start, and a settled window has no unsettled
     # range: each guard only skips the walk.
     'replace \|\| with && in Reader::raised$',

@@ -409,7 +409,8 @@ export interface Subscription {
 	 */
 	ranges?: Range[];
 	/**
-	 * Which pending group the publisher sends first. Defaults to `"descending"`.
+	 * Which group comes first, as the publisher sends them and {@link Subscriber.recvGroup} returns
+	 * those held. Defaults to `"descending"`.
 	 *
 	 * Carried by moq-lite 07 and moq-transport (fixed at subscribe time there); older
 	 * moq-lite versions are served newest first whatever this says.
@@ -431,11 +432,12 @@ export interface Subscription {
 }
 
 /**
- * Which of a subscription's pending groups the publisher sends first: `"descending"` (newest
- * first, so congestion sheds the backlog rather than the live edge) or `"ascending"` (oldest
- * first, draining a backlog in sequence order).
+ * Which of a subscription's groups comes first, as the publisher sends its pending groups and
+ * {@link Subscriber.recvGroup} hands out the groups it holds: `"descending"` (newest first, so
+ * congestion sheds the backlog rather than the live edge) or `"ascending"` (oldest first, draining
+ * a backlog in sequence order).
  *
- * A transmission order only: it never decides whether a group is delivered. A history range
+ * An order only: it never decides whether a group is delivered. A history range
  * delivers every group it covers, and a live join skips what its {@link Live.max} judges stale, so
  * an ascending subscriber that wants a backlog drains it from a history range or a `max` that
  * covers it.
@@ -5323,6 +5325,7 @@ export class Subscriber {
 		hooks.arrived = (subscriber) => (subscriber.#resume ? 0 : subscriber.#state.arrived);
 		hooks.bufferedLargest = (subscriber) => subscriber.#bufferedLargest();
 		hooks.lowestUnread = (subscriber, below) => subscriber.#lowestUnread(below);
+		hooks.heldAt = (subscriber, key) => subscriber.#heldAt(key);
 		hooks.objectLargest = (subscriber) => {
 			if (subscriber.#resume) return subscriber.#resume.objectLargest();
 			const producer = subscriber.#state.producer;
@@ -5539,6 +5542,17 @@ export class Subscriber {
 			if (!this.#lacksHead(group) || this.#fetchesHead(group.start)) return group.start;
 		}
 		return undefined;
+	}
+
+	// Whether group `key` is held unread in the window, and whether it is servable from the frame
+	// asked, as #lowestUnread judges. Mirrors the Rust publisher's `servable` on `lowest_unread`.
+	#heldAt(key: bigint): "servable" | "unservable" | undefined {
+		if (this.#resume) return this.#resume.heldAt(key);
+		if (key < this.#cursor.peek().start) return undefined;
+		const groups = this.#state.groups.peek();
+		const group = groups[timelineIndex(groups, key)];
+		if (group?.start !== key || !this.#window.contains(key) || this.#delivered.has(key)) return undefined;
+		return !this.#lacksHead(group) || this.#fetchesHead(key) ? "servable" : "unservable";
 	}
 
 	// Whether the head of held group `key` can still come from a fill, which {@link #askHead}
@@ -6516,26 +6530,31 @@ export class Subscriber {
 
 	// The first buffered candidate in range that the budget spares: the lowest for an ordered
 	// take, else the first in the subscription's Group Order, as #tryRecvGroup picks it. An ordered
-	// take may still wait on an owed hole below it, so a resumed reader must keep its place.
+	// take may still wait on an owed hole below it, so a resumed reader must keep its place. An
+	// arrival take passes a group missing its head, so its peek does too: a resumed reader picks
+	// across copies by what each offers.
 	#peekGroup(ordered: boolean): bigint | undefined {
 		this.#settle();
 		const cursor = this.#cursor.peek();
 		const start = ordered ? max(cursor.start, this.#nextKey) : cursor.start;
 		const drift = this.#drift();
 		const groups = this.#state.groups.peek();
+		const offers = (group: GroupConsumer) =>
+			!this.#delivered.has(group.start) &&
+			!this.#staleAt(group.start, drift) &&
+			(ordered || !this.#lacksHead(group));
 		if (!ordered && this.#state.update.scalars()?.order !== "ascending") {
 			const below = timelineIndex(groups, cursor.end ?? UNBOUNDED);
 			for (let index = below - 1; index >= 0 && groups[index].start >= start; index--) {
-				const key = groups[index].start;
-				if (!this.#window.contains(key)) continue;
-				if (!this.#delivered.has(key) && !this.#staleAt(key, drift)) return key;
+				const group = groups[index];
+				if (this.#window.contains(group.start) && offers(group)) return group.start;
 			}
 			return undefined;
 		}
 		for (const group of groups) {
 			if (group.start < start || !this.#window.contains(group.start)) continue;
 			if (cursor.end !== undefined && group.start >= cursor.end) return undefined;
-			if (!this.#delivered.has(group.start) && !this.#staleAt(group.start, drift)) {
+			if (offers(group)) {
 				if (ordered && this.#waitTimeStart(start, group.start, drift)) return undefined;
 				return group.start;
 			}

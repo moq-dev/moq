@@ -1351,7 +1351,7 @@ class Reader implements ResumeSource {
 	// Whether a copy's next group, `key`, waits for the reader's window to be placed, which decides
 	// whether it goes out: a failed copy's, until a copy continuing the track places it, and a
 	// backfill's that no range placed so far holds, since only a placed range bounds the groups under
-	// the resume point. Mirrors the Rust `Reader::poll_lowest`.
+	// the resume point. Mirrors the Rust `Reader::poll_first`.
 	#waits(copy: Copy, key: bigint): boolean {
 		if (!this.#mayWait(copy)) return false;
 		const failed = !this.route.concluded && copyFailed(copy);
@@ -1472,7 +1472,7 @@ class Reader implements ResumeSource {
 		// group already. A replaced copy that failed this pass owes the serving route a backfill
 		// once the window is placed: ask now, since its close already fired and no later group is
 		// sure to wake the read. A backfill that failed is not asked again (`#refused`), so this
-		// ends. Mirrors the Rust `Reader::poll_lowest`.
+		// ends. Mirrors the Rust `Reader::poll_first`.
 		const backfill = owed && this.#resumed && this.#window().floor() !== undefined;
 		if (end.kind === "idle" && (this.route.generation !== generation || backfill)) {
 			return this.tryGroup(ordered, delivered, dispositions);
@@ -1680,7 +1680,7 @@ class Reader implements ResumeSource {
 	// A copy that ran out cleanly still takes a group in flight below its end while the read stays
 	// open, as a cursor still reading it would. One landing on the serving copy may lie under its
 	// resume point, which is not that copy's to read, and a backfill that already ran out was let
-	// go: ask its route again. Mirrors the Rust `Reader::poll_lowest`.
+	// go: ask its route again. Mirrors the Rust `Reader::poll_first`.
 	#reopen(): void {
 		const serving = this.#serving();
 		for (const copy of this.#copies) {
@@ -2389,6 +2389,17 @@ class Reader implements ResumeSource {
 			if (key !== undefined) lowest = key;
 		}
 		return lowest;
+	}
+
+	// Servable if any copy can serve it.
+	heldAt(key: bigint): "servable" | "unservable" | undefined {
+		let held: "unservable" | undefined;
+		for (const copy of this.#copies) {
+			const state = hooks.heldAt(copy.sub, key);
+			if (state === "servable") return state;
+			held ??= state;
+		}
+		return held;
 	}
 
 	objectLargest(): track.Position | undefined {

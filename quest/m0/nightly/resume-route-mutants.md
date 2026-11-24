@@ -40,12 +40,12 @@ time that differs from its group's key, or skips and refusals on a replaced copy
 - `Reader::drained` returning `true`: differs only when the route ended cleanly while the
   serving copy failed or no copy serves, where the track then waits for the replaced copies
   instead of ending.
-- `Reader::poll_lowest` 2874:9 deleting `!` (a replaced copy's refusal fails the read):
+- `Reader::poll_first` 2874:9 deleting `!` (a replaced copy's refusal fails the read):
   a replaced copy that refuses a moved time start had its refusal cleared before it was
   polled again in the one staged case (the serving copy's placement resends the ranges,
   which resets the refusal), and a copy that ran out is not polled at all. A test needs a
   replaced copy still draining whose refusal outlives the serving copy's placement.
-- `Reader::poll_lowest` 2969:33 `&&` to `||` (a backfill copy of the serving route that
+- `Reader::poll_first` 2969:33 `&&` to `||` (a backfill copy of the serving route that
   reads late counts as serving): that copy reruns `backfill_gaps`, whose widening of a
   reused backfill resets that copy's `since`. A test would need that later budget to matter.
 - `Reader::backfill` 3430:18 `|=` to `&=`: needs a b→c→b flap that widens a reused
