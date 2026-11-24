@@ -1551,7 +1551,8 @@ impl TrackState {
 
 impl TrackState {
 	/// The upstream's answer to the live join `min` through `end`, recorded after join tick
-	/// `since` under a budget at least as wide as the reader's `budget`.
+	/// `since` under a budget at least as wide as the reader's `budget`, capped by the cache
+	/// ceiling as the copy's own ask is.
 	fn join_answer(
 		&self,
 		min: Option<Duration>,
@@ -1560,6 +1561,9 @@ impl TrackState {
 		since: u64,
 	) -> Option<&JoinAnswer> {
 		let answer = self.join_answers.get(&(min, end))?;
+		// Judged as asked: the copy asks a join capped by its cache ceiling, so a reader wanting
+		// more is still placed by an answer to that cap. Nothing wider is ever asked.
+		let budget = clamp_max_delay(budget, self.demand_bound());
 		(answer.tick > since && budget <= answer.budget).then_some(answer)
 	}
 
@@ -18951,6 +18955,62 @@ mod test {
 		producer.answer_join(Some(Duration::from_millis(2)), None, Some(9), Duration::MAX);
 		assert_eq!(placed(&mut later), Some(9));
 		assert_eq!(placed(&mut behind), Some(7), "an earlier reader stays where it started");
+	}
+
+	/// A relay's cache ceiling caps the live join its copy asks upstream, so the answer comes
+	/// back under that cap. It still places a reader asking no limit, whose join is the one
+	/// asked: the copy asks nothing wider, so waiting for a wider answer would wait forever.
+	/// Under no ceiling, a narrower answer places only the readers within it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_live_join_takes_the_answer_its_cache_ceiling_capped() {
+		let ceiling = Duration::from_secs(30);
+		for (cache_duration, max, placed) in [
+			(Some(ceiling), None, true),
+			(Some(ceiling), Some(ceiling * 2), true),
+			(Some(ceiling), Some(ceiling), true),
+			(None, None, false),
+			(None, Some(ceiling * 2), false),
+			(None, Some(ceiling), true),
+		] {
+			let case = format!("ceiling={cache_duration:?} max={max:?}");
+			let producer = Producer::new(
+				Arc::new(broadcast::Info {
+					cache_duration,
+					..Default::default()
+				}),
+				"test",
+				Info::timed(),
+			);
+			producer.received();
+			producer.await_edge();
+			producer.anchored();
+			producer.answers_joins();
+			let mut reader = producer.subscribe(Subscription::default().with_ranges([Range::from(Start::Live {
+				min: Some(Duration::ZERO),
+				max,
+			})]));
+			// What the copy asks upstream: the reader's join, capped by the ceiling.
+			let asked = producer.subscription().unwrap().widest();
+			let wanted = subscription::budget(max);
+			assert_eq!(asked, cache_duration.map_or(wanted, |cap| cap.min(wanted)), "{case}");
+
+			// The group's stream lands before the answer that places the join there, which
+			// comes back under the ceiling.
+			let mut group = producer.create_group(group::Info { start: 3513 }).unwrap();
+			let mut live = producer.clone();
+			live.answer_join(Some(Duration::ZERO), None, Some(3513), ceiling);
+			live.report_edge(3513);
+			live.set_live(Some(Position { group: 3513, frame: 0 }), Some(true), Some(3513))
+				.unwrap();
+			live.answer_edge();
+			group
+				.write_frame(Timestamp::from_millis(3513).unwrap(), &b"x"[..])
+				.unwrap();
+			group.finish().unwrap();
+			let expected: &[u64] = if placed { &[3513] } else { &[] };
+			assert_eq!(drain_groups(&mut reader), expected, "{case}");
+		}
 	}
 
 	/// A front's copy, edited to add a live join its reader added before the copy's upstream
