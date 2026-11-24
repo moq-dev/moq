@@ -138,7 +138,7 @@ public final class TrackDemand: Sendable {
 
     /// Suspend until `wanted` changes and return it. The first call returns at once.
     /// End a track nobody wants by releasing its producer once this returns false: a reader
-    /// that joined since is served by the next request for the track.
+    /// that joined since is served by the next request for the track while a request handler is live.
     public func wantedChanged() async throws -> Bool {
         try await ffi.wantedChanged()
     }

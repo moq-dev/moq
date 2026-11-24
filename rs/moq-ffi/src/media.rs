@@ -1111,7 +1111,9 @@ pub struct MoqMediaTrackStreamProducer {
 }
 
 // A media handle closed with its broadcast before its finish ends its tracks with the close's
-// cause; one released instead lets its tracks end the way a dropped track does.
+// cause. A released track handle lets its track end the way a dropped track does; a released
+// container ends its tracks with `Dropped`, since its importer would otherwise finish them as if
+// the input had ended, and it serves no on-demand track.
 impl Child for MoqMediaContainerProducer {
 	fn abort(&self, err: moq_net::Error) {
 		let _guard = crate::ffi::enter();
@@ -1123,8 +1125,7 @@ impl Child for MoqMediaContainerProducer {
 
 impl Drop for MoqMediaContainerProducer {
 	fn drop(&mut self) {
-		let _guard = crate::ffi::enter();
-		drop(self.inner.get_mut().unwrap().take());
+		self.abort(moq_net::Error::Dropped);
 	}
 }
 

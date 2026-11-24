@@ -93,7 +93,7 @@ func (p *SnapshotProducer) Demand() (*moq.TrackDemand, error) {
 
 // Close releases the producer on the calling goroutine without finishing its track: a
 // track nobody wants ends cleanly, and a reader that joined since is served by the next
-// request for it. The producer is unusable afterwards.
+// request for it while a request handler is live. The producer is unusable afterwards.
 func (p *SnapshotProducer) Close() { p.inner.Destroy() }
 
 // Finish closes the snapshot track.
@@ -138,7 +138,7 @@ func (p *StreamProducer) Demand() (*moq.TrackDemand, error) {
 
 // Close releases the producer on the calling goroutine without finishing its track: a
 // track nobody wants ends cleanly, and a reader that joined since is served by the next
-// request for it. The producer is unusable afterwards.
+// request for it while a request handler is live. The producer is unusable afterwards.
 func (p *StreamProducer) Close() { p.inner.Destroy() }
 
 // Finish closes the stream track.
@@ -304,7 +304,7 @@ func (p *WindowProducer) Demand() (*moq.TrackDemand, error) {
 
 // Close releases the producer on the calling goroutine without finishing its track: a
 // track nobody wants ends cleanly, and a reader that joined since is served by the next
-// request for it. The producer is unusable afterwards.
+// request for it while a request handler is live. The producer is unusable afterwards.
 func (p *WindowProducer) Close() { p.inner.Destroy() }
 
 // Finish closes the window track.

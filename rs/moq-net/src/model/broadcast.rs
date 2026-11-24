@@ -2618,6 +2618,33 @@ mod test {
 		dynamic.assert_no_request();
 	}
 
+	/// A reader that joined in the race and holds the group the producer left open reads that
+	/// group's end as superseded, as past a group gone old, then the next producer's group.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_joining_reader_moves_past_the_group_a_drop_left_open() {
+		let producer = Info::new().produce();
+		let mut dynamic = producer.requests();
+		let consumer = producer.consume();
+
+		let first = consumer.track("video").unwrap().subscribe(None);
+		let track = dynamic.assert_request().accept(crate::track::Info::timed());
+		drop(first);
+		let mut open = track.append_next().unwrap();
+		open.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"a".as_slice())
+			.unwrap();
+
+		let mut joined = consumer.track("video").unwrap().subscribe(None).await.unwrap();
+		let mut held = joined.recv_group().await.unwrap().unwrap();
+		assert!(held.read_frame().await.unwrap().is_some());
+		drop((track, open));
+
+		assert!(matches!(held.read_frame().await, Err(Error::Old)));
+		let next = dynamic.assert_request().accept(crate::track::Info::timed());
+		next.append_next().unwrap().finish().unwrap();
+		assert_eq!(joined.recv_group().await.unwrap().unwrap().start, 1);
+	}
+
 	/// A track nobody wants ends cleanly when its producer drops, with no `Dropped` for a
 	/// handle still watching, and a later lookup asks for it afresh.
 	#[kio::test]

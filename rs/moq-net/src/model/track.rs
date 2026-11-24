@@ -6701,8 +6701,9 @@ impl Drop for Alive {
 		};
 		// A reader still wants the track, so its broadcast asks for it again, as a later lookup
 		// would, and the reader waits on the same state for the next producer. The groups this
-		// producer left open end, since nobody can finish them now.
-		let (_, open) = state.tear_down(Error::Cancel);
+		// producer left open end as superseded: nobody can finish them, and the next producer's
+		// groups replace them, so a reader holding one moves on as past any group gone old.
+		let (_, open) = state.tear_down(Error::Old);
 		state.publication = Publication::Pending;
 		drop(state);
 		open.abort();
@@ -6743,7 +6744,8 @@ impl Alive {
 				state.outcome = Outcome::Sealed(end);
 				None
 			}
-			// Aborted already, which closed it.
+			// Only an abort, which closes the channel, leaves another outcome while a producer
+			// remains, and `write_unwanted` found it open.
 			outcome => {
 				state.outcome = outcome;
 				return;

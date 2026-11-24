@@ -161,7 +161,7 @@ func (d *TrackDemand) Wanted() bool {
 
 // WantedChanged blocks until Wanted changes and returns it. The first call returns at once.
 // End a track nobody wants by closing its producer once this returns false: a
-// reader that joined since is served by the next request for the track.
+// reader that joined since is served by the next request for the track while a request handler is live.
 func (d *TrackDemand) WantedChanged(ctx context.Context) (bool, error) {
 	return d.inner.WantedChanged(ctx)
 }
@@ -243,7 +243,7 @@ func (t *TrackProducer) Abort(errorCode uint16) error {
 
 // Close releases the producer on the calling goroutine without finishing its track: a
 // track nobody wants ends cleanly, and a reader that joined since is served by the next
-// request for it. The producer is unusable afterwards.
+// request for it while a request handler is live. The producer is unusable afterwards.
 func (t *TrackProducer) Close() { t.inner.Destroy() }
 
 // Consume reads directly from this producer's track. subscription tunes delivery

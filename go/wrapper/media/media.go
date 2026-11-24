@@ -485,7 +485,7 @@ func (m *TrackProducer) Seek(start uint64) error {
 
 // Close releases the producer on the calling goroutine without finishing its track: a
 // track nobody wants ends cleanly, and a reader that joined since is served by the next
-// request for it. The producer is unusable afterwards.
+// request for it while a request handler is live. The producer is unusable afterwards.
 func (m *TrackProducer) Close() { m.inner.Destroy() }
 
 // Finish closes the media track.
@@ -560,7 +560,7 @@ func (m *TrackStreamProducer) SetEnabled(enabled bool) error {
 
 // Close releases the producer on the calling goroutine without finishing its track: a
 // track nobody wants ends cleanly, and a reader that joined since is served by the next
-// request for it. The producer is unusable afterwards.
+// request for it while a request handler is live. The producer is unusable afterwards.
 func (m *TrackStreamProducer) Close() { m.inner.Destroy() }
 
 // Finish closes the stream.
