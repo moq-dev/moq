@@ -120,6 +120,15 @@ that replay is correct, since the join gets exactly what it asks for; the quest 
 fallback closed on the 20 of 20 (rejected: encoding live audio before the replay; a looser
 lite-06 bound; replaying nothing).
 
+The same scheduled run's Chromium x64 job still failed `live incumbent fallback plays` on
+`moq-lite-06`, with the player's audio never starting. The replay's cost was its groups: at the
+20 ms audio join, 2.13 s is 106 one-frame groups, a stream each at every hop, over the 100 a
+peer grants by default, so the live edge queued for credit behind history the player then
+skipped as stale. `@moq/publish` now groups replayed history as coarsely as the catalog's
+`sync.interval` allows (a few streams; live audio keeps its join), within the decision above:
+the join still gets all 2.13 s. Rust's twin is
+[audio-replay-groups](/quest/m3/audio-replay-groups.md).
+
 Decided 2026-11-12 (maintainer), since green scheduled Interop is this epic's goal and stale pins caused four of the last six red runs:
 
 - ✅ the release-remeasure pipeline is a child quest of quest/m0/interop-green/ (rejected: quest/m3/release/; drop the follow-up).
