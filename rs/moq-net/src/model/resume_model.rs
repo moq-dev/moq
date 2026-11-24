@@ -1207,6 +1207,52 @@ fn regressions() {
 		drops,
 	};
 	let cases = [
+		// Draining the replaced copies once the track finishes leaves the serving copy's
+		// budget alone, so a short-budget read ends after its route flaps back.
+		Case {
+			ops: vec![
+				Op::Join {
+					reader: 0,
+					spec: spec(false, Budget::Short, None, false),
+				},
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: Some(8),
+					frames: 1,
+				},
+				Op::Up { instance: 0, slot: 1 },
+				Op::Down { instance: 0, slot: 1 },
+				Op::Advance { ms: 30 },
+			],
+			finish: true,
+		},
+		// A backfill already asked of the route covers a gap only up to its own end, so one
+		// capped below the gap's end leaves the rest to ask for.
+		Case {
+			ops: vec![
+				Op::Join {
+					reader: 0,
+					spec: spec(false, Budget::Hour, None, false),
+				},
+				Op::Up { instance: 0, slot: 1 },
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: Some(1),
+					frames: 2,
+				},
+				Op::Write {
+					instance: 0,
+					slot: 1,
+					group: Some(3),
+					frames: 1,
+				},
+				Op::Up { instance: 0, slot: 2 },
+				Op::Down { instance: 0, slot: 2 },
+			],
+			finish: false,
+		},
 		// A range moved under the serving copy's resume point starts at the group holding its
 		// start time, which only a backfill from below that point places, not at a key equal
 		// to the time.

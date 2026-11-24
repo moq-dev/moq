@@ -34,6 +34,7 @@ pub use super::subscription::{Order, Position, Range, Start, Subscription};
 use rangemap::{RangeInclusiveSet, RangeMap, RangeSet};
 
 mod demand;
+pub(super) use demand::Changes;
 pub(crate) use demand::Edit;
 pub(super) use demand::Preferences;
 use demand::Subscriptions;
@@ -9952,7 +9953,14 @@ impl Cursor {
 			(preferences.revision != self.filter.resolved).then(|| {
 				let keys = match self.filter.stale {
 					true => None,
-					false => preferences.changes(self.filter.resolved),
+					false => match preferences.changes(self.filter.resolved) {
+						demand::Changes::Keys(keys) => Some(keys),
+						demand::Changes::Overflowed => {
+							let (ranges, joining) = self.filter.window.ranges();
+							Some(preferences.differ(ranges, joining))
+						}
+						demand::Changes::Restated => None,
+					},
 				};
 				let change = match keys {
 					Some(keys) => Change::Edit(keys.into_iter().map(|key| (key, preferences.range(key))).collect()),
@@ -31157,6 +31165,70 @@ mod test {
 				whole.runs_in_range(0, 30_000),
 				"step {step}"
 			);
+		}
+	}
+
+	/// A live join the subscriber placed stays where it was placed after more edits than the
+	/// change log holds: the subscriber reads what one that saw only the last edit reads,
+	/// whatever that edit did to the other ranges, rather than placing the join afresh at the
+	/// live edge, past groups it still owes.
+	#[test]
+	fn a_placed_live_join_keeps_its_place_once_the_change_log_overflows() {
+		let read = |overflow: bool, last: Edit| {
+			let producer = track_producer("test", Info::timed());
+			for key in 0..=10 {
+				write_group(&producer, key);
+			}
+			let join = Range {
+				start: Start::Live {
+					min: Some(Duration::from_millis(5)),
+					max: None,
+				},
+				end: Some(8),
+			};
+			let ahead = Range {
+				start: Start::Time(15),
+				end: Some(17),
+			};
+			let mut subscriber = producer.subscribe(Subscription::default().with_ranges([join, ahead]));
+			let Poll::Ready(Ok(Some(group))) = subscriber.poll_recv_group(&kio::Waiter::noop()) else {
+				panic!("a group to read")
+			};
+			assert_eq!(group.start, 5);
+			for key in 11..=20 {
+				write_group(&producer, key);
+			}
+			// Edited behind the subscriber's back until the log no longer reaches its revision.
+			let preferences = subscriber.preferences().clone();
+			for _ in 0..if overflow { 40 } else { 0 } {
+				let add = Edit {
+					add: vec![(2, Range::ALL)],
+					..Default::default()
+				};
+				preferences.edit(add).unwrap();
+				let retire = Edit {
+					retire: vec![2],
+					..Default::default()
+				};
+				preferences.edit(retire).unwrap();
+			}
+			preferences.edit(last).unwrap();
+			drain_groups(&mut subscriber)
+		};
+		let lasts = [
+			Edit::default(),
+			Edit {
+				add: vec![(3, Range::span(Some(500), Some(600)).unwrap())],
+				..Default::default()
+			},
+			Edit {
+				retire: vec![1],
+				..Default::default()
+			},
+		];
+		for last in lasts {
+			let name = format!("{last:?}");
+			assert_eq!(read(true, last.clone()), read(false, last), "{name}");
 		}
 	}
 
