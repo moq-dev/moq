@@ -7,7 +7,9 @@ name: Central check
 # release template does on a tag.
 #
 # Dispatch it on `release`, the one ref the `publish` environment admits that publishes
-# nothing by being pushed: gh workflow run central-check.yml --ref release -f run=<id>
+# nothing by being pushed, with a finished rust2 run on its `main`, such as a Nightly:
+# gh workflow run central-check.yml --ref release -f run=<id>
+# rust2 is public, so this repository's token reads the run and its artifact.
 on:
   workflow_dispatch:
     inputs:
@@ -23,13 +25,16 @@ jobs:
   validate:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    if: github.ref == 'refs/heads/release'
     environment: publish
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/just
-      # The run's own commit, from rust2 itself rather than a fork's PR.
+      # The commit of a finished run on rust2's own main, as one whose other jobs failed
+      # still holds the bundle, whose script alone sees the
+      # signing key: not a fork's, a PR's, or an unreviewed branch's.
       - id: run
         env:
           GH_TOKEN: ${{ github.token }}
@@ -37,11 +42,14 @@ jobs:
         run: |
           [[ "$RUN" =~ ^[0-9]+$ ]] || { echo "::error::run is a run ID, not '$RUN'"; exit 1; }
           run=$(gh api "repos/kixel-ai/rust2/actions/runs/$RUN")
-          repo=$(jq -r .head_repository.full_name <<< "$run")
-          if [[ "$repo" != kixel-ai/rust2 ]]; then
-            echo "::error::run $RUN built $repo's commit, not kixel-ai/rust2's"
-            exit 1
-          fi
+          where=$(jq -r '"\(.head_repository.full_name):\(.head_branch) \(.event) \(.status)"' <<< "$run")
+          case $where in
+            "kixel-ai/rust2:main push completed" | "kixel-ai/rust2:main schedule completed" | "kixel-ai/rust2:main workflow_dispatch completed") ;;
+            *)
+              echo "::error::run $RUN is $where, not a finished run on kixel-ai/rust2's main"
+              exit 1
+              ;;
+          esac
           echo "sha=$(jq -er .head_sha <<< "$run")" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
