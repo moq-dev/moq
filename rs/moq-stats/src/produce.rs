@@ -687,18 +687,10 @@ impl<T: Serialize> Snapshot<T> {
 		Ok(self.track.clone().finish().map(drop)?)
 	}
 
-	/// End the track, unlisting it, only while nobody wants it, returning whether it ended. The
-	/// check and the end are one step on the track, so a reader joining in between keeps it
-	/// instead of finding it ended. Nobody reads the abort that ends it.
-	fn reclaim(&mut self) -> bool {
-		if self.track.clone().abort_unwanted(moq_net::Error::Cancel).is_err() {
-			return false;
-		}
-		// The track's abort already failed the open group.
-		if let Some(group) = self.group.take() {
-			let _ = group.abort(moq_net::Error::Cancel);
-		}
-		true
+	/// Whether nobody wants the track, so dropping it ends it. A reader joining before the drop
+	/// is handed back to the broadcast's handler as a fresh request.
+	fn unwanted(&self) -> bool {
+		!self.track.demand().wanted()
 	}
 }
 
@@ -761,9 +753,9 @@ impl<V: Serialize> Output<V> {
 		}
 	}
 
-	/// End the track if nobody wants it, returning whether it ended; see [`Snapshot::reclaim`].
-	fn reclaim(&mut self) -> bool {
-		self.snapshot.reclaim()
+	/// Whether nobody wants the track, so dropping it ends it; see [`Snapshot::unwanted`].
+	fn unwanted(&self) -> bool {
+		self.snapshot.unwanted()
 	}
 
 	/// Publish this drain's entries (`{}` when there are none) and clear them
@@ -1435,10 +1427,10 @@ impl NodePublisher {
 	/// Any other name is rejected: a bucket's track is served only while it is
 	/// listed.
 	fn serve_requests(&mut self, report: &Report, tick: u64, stamp: Stamp) {
-		// Reclaim before adopting, so a request for a track just reclaimed is
+		// Drop the unwanted before adopting, so a reader that joined as one dropped is
 		// served again by this very drain.
-		self.presence.retain(|_, track| !track.output.reclaim());
-		self.prefixes.retain(|_, track| !track.output.reclaim());
+		self.presence.retain(|_, track| !track.output.unwanted());
+		self.prefixes.retain(|_, track| !track.output.unwanted());
 
 		// Pop everything queued, keeping one request per name so each track is
 		// built from an actual request.
@@ -1639,28 +1631,33 @@ mod tests {
 		}
 	}
 
-	/// Reclaiming ends a track only while nobody wants it, in one step with a reader's
-	/// arrival: a reader that joined since the last drain keeps the track open and live.
-	#[test]
-	fn reclaim_spares_a_track_a_reader_joined() {
+	/// Dropping a track nobody wants ends it cleanly, and a reader that joined before the drop
+	/// is handed to the broadcast's handler as a fresh request rather than failing.
+	#[kio::test]
+	async fn dropping_an_unwanted_track_serves_a_late_reader_again() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
-		let track = broadcast.create_track("t.json", info()).unwrap();
-		let mut snapshot = Snapshot::<Frame<u64>>::new(track.clone(), config());
+		let mut requests = broadcast.requests();
+		let consumer = broadcast.consume();
 		let frame = |n| Frame {
 			entries: vec![(Path::from_static("a"), n)],
 		};
+
+		let mut snapshot = Snapshot::<Frame<u64>>::new(broadcast.create_track("t.json", info()).unwrap(), config());
 		snapshot.update(&frame(1), stamp(1)).unwrap();
-		assert!(!track.demand().wanted(), "nobody reads it yet");
+		assert!(snapshot.unwanted(), "nobody reads it yet");
+		let demand = snapshot.track.demand();
+		drop(snapshot);
+		assert!(matches!(demand.closed().await, Ok(())));
 
-		// Joins after the unwanted reading a two-step check acted on.
-		let reader = track.subscribe(None);
-		assert!(!snapshot.reclaim(), "the reader keeps it");
-		assert!(!track.is_closed());
-		assert!(snapshot.update(&frame(2), stamp(2)).unwrap().is_some(), "still live");
-
+		let mut snapshot = Snapshot::<Frame<u64>>::new(broadcast.create_track("t.json", info()).unwrap(), config());
+		snapshot.update(&frame(1), stamp(1)).unwrap();
+		assert!(snapshot.unwanted());
+		// Joins after the unwanted reading the drain acted on.
+		let reader = consumer.track("t.json").unwrap().subscribe(None).await.unwrap();
+		drop(snapshot);
+		let again = requests.requested_track().await.unwrap();
+		assert_eq!(again.name(), "t.json");
 		drop(reader);
-		assert!(snapshot.reclaim(), "unwanted again");
-		assert!(track.is_closed());
 	}
 
 	/// A joiner once the deltas outweigh the track's ratio gets a fresh snapshot group in

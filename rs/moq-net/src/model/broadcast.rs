@@ -818,6 +818,13 @@ impl Home {
 	/// Queue `request` for a [`Requests`] to serve, as a lookup of its name would, handing it
 	/// back when none can: the broadcast ended, no handler is alive, or another track or
 	/// request holds the name.
+	#[cfg_attr(
+		target_pointer_width = "64",
+		expect(
+			clippy::result_large_err,
+			reason = "hand the request back to end its readers without allocating"
+		)
+	)]
 	pub(super) fn request(&self, request: track::Request) -> Result<(), track::Request> {
 		let mut state = self.0.lock();
 		let weak = request.weak();

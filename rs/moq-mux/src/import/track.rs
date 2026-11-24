@@ -467,52 +467,6 @@ impl Track {
 		import!(self.kind, import => import.abort(err))
 	}
 
-	/// [`abort`](Self::abort) the track only while nobody wants it, handing the importer back
-	/// unchanged when a reader does; see
-	/// [`Producer::abort_unwanted`](crate::container::Producer::abort_unwanted).
-	///
-	/// This is how an on-demand publisher ends a track once its [`demand`](Self::demand) reports
-	/// nobody wants it: dropping or aborting it instead fails a reader that joined in between.
-	#[expect(
-		clippy::result_large_err,
-		reason = "hand the importer back to keep serving without allocating on an idle check"
-	)]
-	pub fn abort_unwanted(self, err: moq_net::Error) -> std::result::Result<(), Self> {
-		let Self {
-			kind,
-			group_start,
-			warned,
-		} = self;
-		let kind = match kind {
-			TrackKind::H264 { split, import } => import
-				.abort_unwanted(err)
-				.map_err(|import| TrackKind::H264 { split, import }),
-			TrackKind::Avc1 { length_size, import } => import
-				.abort_unwanted(err)
-				.map_err(|import| TrackKind::Avc1 { length_size, import }),
-			TrackKind::H265 { split, import } => import
-				.abort_unwanted(err)
-				.map_err(|import| TrackKind::H265 { split, import }),
-			TrackKind::Hvc1 { length_size, import } => import
-				.abort_unwanted(err)
-				.map_err(|import| TrackKind::Hvc1 { length_size, import }),
-			TrackKind::Av01 { split, import } => import
-				.abort_unwanted(err)
-				.map_err(|import| TrackKind::Av01 { split, import }),
-			TrackKind::Vp8(import) => import.abort_unwanted(err).map_err(TrackKind::Vp8),
-			TrackKind::Vp9(import) => import.abort_unwanted(err).map_err(TrackKind::Vp9),
-			TrackKind::Aac(import) => import.abort_unwanted(err).map_err(TrackKind::Aac),
-			TrackKind::Opus(import) => import.abort_unwanted(err).map_err(TrackKind::Opus),
-			TrackKind::Mp3(import) => import.abort_unwanted(err).map_err(TrackKind::Mp3),
-			TrackKind::Flac(import) => import.abort_unwanted(err).map_err(TrackKind::Flac),
-		};
-		kind.map_err(|kind| Self {
-			kind,
-			group_start,
-			warned,
-		})
-	}
-
 	/// Cut the current group at `end` without finishing the track.
 	///
 	/// This is how an audio track gets group boundaries at all: call it per frame for one group
@@ -858,28 +812,6 @@ impl TrackStream {
 		stream!(self.kind, _, import => import.abort(err))
 	}
 
-	/// [`abort`](Self::abort) the track only while nobody wants it, handing the importer back
-	/// unchanged when a reader does; see [`Track::abort_unwanted`].
-	#[expect(
-		clippy::result_large_err,
-		reason = "hand the importer back to keep serving without allocating on an idle check"
-	)]
-	pub fn abort_unwanted(self, err: moq_net::Error) -> std::result::Result<(), Self> {
-		let Self { kind, gate } = self;
-		let kind = match kind {
-			TrackStreamKind::H264 { split, import } => import
-				.abort_unwanted(err)
-				.map_err(|import| TrackStreamKind::H264 { split, import }),
-			TrackStreamKind::H265 { split, import } => import
-				.abort_unwanted(err)
-				.map_err(|import| TrackStreamKind::H265 { split, import }),
-			TrackStreamKind::Av01 { split, import } => import
-				.abort_unwanted(err)
-				.map_err(|import| TrackStreamKind::Av01 { split, import }),
-		};
-		kind.map_err(|kind| Self { kind, gate })
-	}
-
 	/// Cut the current group at `end` without finishing the track.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> Result<()> {
 		stream!(&mut self.kind, _, import => import.cut(end))
@@ -1004,11 +936,13 @@ mod tests {
 		let _finished = import.finish().unwrap();
 	}
 
-	/// An idle abort leaves a track a reader joined, rendition and open group included, and once
-	/// that reader leaves it ends the track and retires the rendition.
+	/// Dropping an importer retires its rendition. A reader that still holds its track is
+	/// handed to the broadcast's handler as a fresh request; once nobody does, the track ends
+	/// cleanly and a later lookup asks for it afresh.
 	#[tokio::test(start_paused = true)]
-	async fn abort_unwanted_keeps_a_wanted_track() {
+	async fn a_dropped_importer_hands_its_reader_to_the_next_request() {
 		let (broadcast, catalog) = new_broadcast();
+		let mut requests = broadcast.requests();
 		let consumer = broadcast.consume();
 		let mut import = Track::audio(
 			broadcast.reserve_track("audio").unwrap(),
@@ -1020,28 +954,24 @@ mod tests {
 			.decode(b"opus payload", Some(Timestamp::from_micros(1_000).unwrap()))
 			.unwrap();
 
-		let mut track = consumer.track("audio").unwrap().subscribe(None).await.unwrap();
-		let mut import = import
-			.abort_unwanted(moq_net::Error::App(7))
-			.expect_err("the reader keeps the track");
-		assert!(catalog.snapshot().audio.renditions.contains_key("audio"));
-		import
-			.decode(b"opus payload", Some(Timestamp::from_micros(21_000).unwrap()))
-			.unwrap();
-		let mut group = track.recv_group().await.unwrap().expect("the open group");
-		assert!(
-			group.read_frame().await.unwrap().is_some(),
-			"the write before the check"
-		);
-		assert!(group.read_frame().await.unwrap().is_some(), "the write after the check");
-
-		drop(group);
-		drop(track);
-		import
-			.abort_unwanted(moq_net::Error::App(7))
-			.ok()
-			.expect("nobody wants it");
+		let track = consumer.track("audio").unwrap().subscribe(None).await.unwrap();
+		drop(import);
 		assert!(!catalog.snapshot().audio.renditions.contains_key("audio"));
+		let again = requests.requested_track().await.unwrap();
+		assert_eq!(again.name(), "audio");
+
+		let import = Track::audio(
+			again,
+			catalog.reserve(),
+			AudioInit::new(AudioFormat::Opus, opus_head()),
+		)
+		.unwrap();
+		drop(track);
+		let demand = import.demand();
+		drop(import);
+		assert!(matches!(demand.closed().await, Ok(())));
+		let _later = consumer.track("audio").unwrap().subscribe(None);
+		assert_eq!(requests.requested_track().await.unwrap().name(), "audio");
 	}
 
 	#[tokio::test(start_paused = true)]

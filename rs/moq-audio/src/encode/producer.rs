@@ -910,20 +910,6 @@ impl Producer {
 	pub fn abort(self, err: moq_net::Error) {
 		self.track.abort(err);
 	}
-
-	/// [`abort`](Self::abort) the track only while nobody wants it, handing the producer back
-	/// unchanged when a reader does.
-	///
-	/// This is how an on-demand publisher ends a track once its [`demand`](Self::demand) reports
-	/// nobody wants it: dropping or aborting it instead fails a reader that joined in between.
-	/// See [`moq_net::track::Producer::abort_unwanted`].
-	#[expect(
-		clippy::result_large_err,
-		reason = "hand the producer back to keep serving without allocating on an idle check"
-	)]
-	pub fn abort_unwanted(self, err: moq_net::Error) -> Result<(), Self> {
-		self.track.abort_unwanted(err).map_err(|track| Self { track, ..self })
-	}
 }
 
 /// An audio track whose [`Producer`] [finished](Producer::finish) it: every packet is published,

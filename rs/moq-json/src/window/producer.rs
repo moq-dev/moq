@@ -132,24 +132,6 @@ impl<T> Producer<T> {
 		self.inner.lock().unwrap().abort(err.into());
 		Ok(())
 	}
-
-	/// [`abort`](Self::abort) the track only while nobody wants it, handing the handle back
-	/// unchanged when a reader does.
-	///
-	/// This is how an on-demand publisher ends a track once its [`demand`](Self::demand) reports
-	/// nobody wants it: dropping or aborting it instead fails a reader that joined in between.
-	/// See [`moq_net::track::Producer::abort_unwanted`]. Clones sharing the track see it as
-	/// [`abort`](Self::abort) leaves it.
-	pub fn abort_unwanted(self, err: moq_net::Error) -> std::result::Result<(), Self> {
-		let mut inner = self.inner.lock().unwrap();
-		// The check and the abort are one step on the track; the rest is the same cleanup.
-		if inner.track.inner.clone().abort_unwanted(err.clone()).is_err() {
-			drop(inner);
-			return Err(self);
-		}
-		inner.abort(err.into());
-		Ok(())
-	}
 }
 
 impl<T: Serialize> Producer<T> {
