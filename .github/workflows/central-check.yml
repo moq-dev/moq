@@ -1,0 +1,67 @@
+name: Central check
+
+# Has Maven Central's Portal validate the Kotlin bundle rust2's release builder writes for
+# moq-ffi, signed with this repository's key, then drops it: nothing is published. rust2's
+# test of moq's stand-in builds dev.moq:moq-ffi:0.0.0 as its `moq-ffi-maven` artifact, and
+# rust2's ffi/release/central.sh, from the same commit, signs and uploads it, as rust2's
+# release template does on a tag.
+#
+# Dispatch it on `release`, the one ref the `publish` environment admits that publishes
+# nothing by being pushed: gh workflow run central-check.yml --ref release -f run=<id>
+on:
+  workflow_dispatch:
+    inputs:
+      run:
+        description: The kixel-ai/rust2 run whose moq-ffi-maven artifact to validate
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    environment: publish
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/just
+      # The run's own commit, from rust2 itself rather than a fork's PR.
+      - id: run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN: ${{ inputs.run }}
+        run: |
+          [[ "$RUN" =~ ^[0-9]+$ ]] || { echo "::error::run is a run ID, not '$RUN'"; exit 1; }
+          run=$(gh api "repos/kixel-ai/rust2/actions/runs/$RUN")
+          repo=$(jq -r .head_repository.full_name <<< "$run")
+          if [[ "$repo" != kixel-ai/rust2 ]]; then
+            echo "::error::run $RUN built $repo's commit, not kixel-ai/rust2's"
+            exit 1
+          fi
+          echo "sha=$(jq -er .head_sha <<< "$run")" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: kixel-ai/rust2
+          ref: ${{ steps.run.outputs.sha }}
+          path: rust2
+          sparse-checkout: ffi/release/central.sh
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: moq-ffi-maven
+          path: maven
+          repository: kixel-ai/rust2
+          run-id: ${{ inputs.run }}
+          github-token: ${{ github.token }}
+      - name: Validate
+        env:
+          USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+          SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
+        run: just gh central-check rust2 maven
