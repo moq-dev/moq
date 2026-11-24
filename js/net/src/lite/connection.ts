@@ -337,10 +337,18 @@ export class Connection implements Session {
 	}
 
 	// Whether the session is ending, so its own end says why a stream broke: it closed, or the
-	// peer refused its connection credential and is closing it. A server closing a session resets
-	// its streams before the close arrives, with a code Chrome reports as an application's 0.
+	// peer refused its connection credential and nothing else grants anything, so it is closing
+	// it. A server closing a session resets its streams before the close arrives, with a code
+	// Chrome reports as an application's 0.
 	#ending(): boolean {
-		return this.#transportClosed || this.#phase.kind === "closed" || this.#auth.credential.peek() instanceof Error;
+		if (this.#transportClosed || this.#phase.kind === "closed") return true;
+		const grant = this.#auth.grant.peek();
+		return (
+			this.#auth.credential.peek() instanceof Error &&
+			grant !== undefined &&
+			grant.publish.size === 0 &&
+			grant.subscribe.size === 0
+		);
 	}
 
 	// End the received tracks with the session's end, then tear down the rest.
