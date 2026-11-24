@@ -56,6 +56,7 @@ impl SubscriptionsLock {
 
 	/// Whether a guard is out, as a waker running under it would see.
 	#[cfg(test)]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn is_held(&self) -> bool {
 		self.held.load(Ordering::SeqCst) > 0
 	}

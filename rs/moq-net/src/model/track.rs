@@ -17632,9 +17632,7 @@ mod test {
 			producer.received();
 			producer.anchored();
 			write_group(&producer, 1000);
-			if finish {
-				producer.clone().finish().unwrap();
-			}
+			let _finished = finish.then(|| producer.clone().finish().unwrap());
 			let mut waiting = producer.subscribe(
 				Subscription::default()
 					.with_ranges([Range {
