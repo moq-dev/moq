@@ -302,7 +302,7 @@ async fn place_time(ask: Ask) {
 	// A live reader keeps the copy up without asking for history, which would fill the evicted
 	// groups back in. The copy expires all but the newest group.
 	let mut first = history(track::Range::from(track::Start::Live {
-		min: Duration::ZERO,
+		min: Some(Duration::ZERO),
 		max: None,
 	}))
 	.await;
