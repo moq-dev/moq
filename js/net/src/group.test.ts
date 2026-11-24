@@ -110,7 +110,7 @@ test("a frame read late keeps the instant it landed, plain, compressed, or resum
 		replacement.writeFrame(textFrame("b"));
 		hooks.recoverGroup(resumed, {
 			changed: new Signal(0),
-			wants: (failed) => failed !== undefined,
+			wants: (cause) => cause.kind === "failed",
 			replace: async () => ({
 				group: replacement.mirror(),
 				expiry: { expired: () => false, changed: [] },
@@ -155,7 +155,7 @@ test("a group read late keeps the instant it joined, alone, on a track, or resum
 		replacement.writeFrame(textFrame("b"));
 		hooks.recoverGroup(resumed, {
 			changed: new Signal(0),
-			wants: (failed) => failed !== undefined,
+			wants: (cause) => cause.kind === "failed",
 			replace: async () => ({
 				group: replacement.mirror(),
 				expiry: { expired: () => false, changed: [] },
@@ -764,7 +764,7 @@ test("a group that ends on its own abandons the replacement it asked for", async
 	hooks.recoverGroup(consumer, {
 		changed: route,
 		// A stall looks past the copy once the route moved.
-		wants: (failed) => failed !== undefined || route.peek() > 0,
+		wants: (cause) => cause.kind === "failed" || route.peek() > 0,
 		replace: (_index, _failed, abort) => {
 			signal = abort;
 			return new Promise(() => {});
@@ -799,7 +799,7 @@ test.each([false, true])("a group ending beside its replacement discards it (con
 		close: () => {
 			released++;
 		},
-		wants: (failed) => failed !== undefined || route.peek() > 0,
+		wants: (cause) => cause.kind === "failed" || route.peek() > 0,
 		replace: () =>
 			new Promise((r) => {
 				resolve = r;
@@ -843,7 +843,7 @@ test("a group recovered twice reads on and settles", async () => {
 	let next = 0;
 	hooks.recoverGroup(consumer, {
 		changed: route,
-		wants: (failed) => failed !== undefined,
+		wants: (cause) => cause.kind === "failed",
 		replace: async () => ({
 			group: replacements[next++].mirror(),
 			expiry: { expired: () => false, changed: [] },
@@ -885,7 +885,7 @@ test("a stalled group whose copy then fails asks again with the failure", async 
 	const verdict = new Error("refused");
 	hooks.recoverGroup(consumer, {
 		changed: route,
-		wants: (failed) => failed !== undefined || route.peek() > 0,
+		wants: (cause) => cause.kind === "failed" || route.peek() > 0,
 		// A stall waits for the route; a failure gets the route's verdict.
 		replace: (_index, cause) => (cause.kind === "failed" ? Promise.reject(verdict) : new Promise(() => {})),
 	});

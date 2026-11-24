@@ -149,18 +149,22 @@ pub struct Config {
 	/// published here never wait.
 	///
 	/// A new route, a removed one, and another instance are delivered at once; only an
-	/// update waits, and a newer change during the wait replaces it. When a publisher
-	/// withdraws, a relay that loses its best route but still holds routes derived from
-	/// the withdrawn one sends nothing while the withdrawal wave removes them, then one
-	/// retraction, instead of advertising each stale path in turn. It must outlast
+	/// update waits, and a newer change during the wait replaces it. A hop-chain wire
+	/// carries no instance, so each session mints its own, and a fall back onto another
+	/// session's worse path to the same publisher (first hop) reads as another instance:
+	/// it waits like an update. When a publisher withdraws, a relay that loses its best
+	/// route but still holds routes derived from the withdrawn one sends nothing while
+	/// the withdrawal wave removes them, then one retraction, instead of advertising
+	/// each stale path in turn. It must outlast
 	/// the wave's spread across the mesh. Defaults to 300 ms, longer than a withdrawal
 	/// takes to cross a global mesh, with margin; zero delivers updates at once.
 	///
 	/// A relay further out can still pass a stale path to a cursor that already
 	/// retracted the prefix, which would announce it anew. So for two seconds after
 	/// a retraction, an announcement from the same publisher (first hop, instance and
-	/// epoch) on a strictly worse route waits. A republish ranks the same and a restart
-	/// carries a new instance or epoch, so neither waits. Zero disables this too.
+	/// epoch, or any session's instance for a hop chain) on a strictly worse route waits.
+	/// A republish ranks the same and a restart carries a new instance, epoch, or
+	/// publisher, so neither waits. Zero disables this too.
 	pub(crate) update_hold: Duration,
 }
 
@@ -188,6 +192,29 @@ pub(super) mod lite06_churn {
 	/// and one published here crossed no hop.
 	pub(super) fn hunts(hops: &super::Hops, node: Option<crate::route::NodeId>) -> bool {
 		node.is_none() && !hops.is_empty()
+	}
+
+	/// The publisher a hop chain starts at, if it names one.
+	pub(super) fn publisher(hops: &super::Hops) -> Option<super::Hop> {
+		hops.iter().next().copied().filter(|hop| *hop != super::Hop::UNKNOWN)
+	}
+
+	/// Whether `instance` and `other` may be one broadcast that reached here over two
+	/// sessions: each session mints its own instance for a hop chain, which carries none.
+	pub(super) fn same_stream(instance: &crate::Instance, other: &crate::Instance) -> bool {
+		instance == other || (instance.is_minted() && other.is_minted())
+	}
+
+	/// Whether a restart onto `meta` may be a fall back from the `delivered` route onto
+	/// a worse path to its publisher, which a withdrawal hunts through: the update hold
+	/// waits it out as it does an update. A replacement session ranks the same and
+	/// another publisher's broadcast names another first hop, so neither waits.
+	pub(super) fn falls_back(delivered: &super::Delivered, meta: &super::RouteMeta) -> bool {
+		hunts(&meta.0, meta.6)
+			&& delivered.publisher.is_some()
+			&& delivered.publisher == publisher(&meta.0)
+			&& same_stream(&delivered.instance, &meta.3)
+			&& (meta.1, meta.0.len()) > delivered.rank
 	}
 }
 use lite06_churn::{DEFAULT_UPDATE_HOLD, RETRACT_QUARANTINE};
@@ -1033,14 +1060,34 @@ struct Quarantine {
 
 impl Quarantine {
 	/// Whether `meta` could be a stale path to the retracted publisher: the same
-	/// first hop, instance and epoch, ranked strictly worse. A republish ranks the same
-	/// and a restart carries a new instance or epoch, so neither waits.
+	/// first hop, instance (see [`lite06_churn::same_stream`]) and epoch, ranked
+	/// strictly worse. A republish ranks the same and a restart carries a new instance
+	/// or epoch, so neither waits.
 	fn holds(&self, meta: &RouteMeta) -> bool {
 		lite06_churn::hunts(&meta.0, meta.6)
 			&& self.publisher.is_some_and(|hop| meta.0.iter().next() == Some(&hop))
-			&& meta.3 == self.instance.0
+			&& lite06_churn::same_stream(&meta.3, &self.instance.0)
 			&& meta.4 == self.instance.1
 			&& (meta.1, meta.0.len()) > self.rank
+	}
+}
+
+/// What a [`Routes`] last delivered as an announce at a prefix.
+struct Delivered {
+	instance: Instance,
+	/// The publisher and rank, which tell a hop chain's fall back onto a worse session's
+	/// path from a restart; see [`lite06_churn::falls_back`].
+	publisher: Option<Hop>,
+	rank: (Cost, usize),
+}
+
+impl Delivered {
+	fn new(meta: &RouteMeta) -> Self {
+		Self {
+			instance: meta.3.clone(),
+			publisher: lite06_churn::publisher(&meta.0),
+			rank: (meta.1, meta.0.len()),
+		}
 	}
 }
 
@@ -1109,6 +1156,26 @@ struct Pending {
 	held: Option<Held>,
 }
 
+impl Pending {
+	/// When a poll at `now` looks at this held entry again, or `None` once its hold ended.
+	fn hold(&mut self, now: Instant, hold: Duration) -> Option<Instant> {
+		// The clock reads the driver's last advance, which may be stale: anchor the hold
+		// on the first advance after the update arrived, by waking the driver.
+		match self.held {
+			None => {
+				self.held = Some(Held::Anchoring(now));
+				Some(now.saturating_add(Duration::from_nanos(1)))
+			}
+			Some(Held::Anchoring(seen)) if now <= seen => Some(seen.saturating_add(Duration::from_nanos(1))),
+			Some(Held::Anchoring(_)) => {
+				self.held = Some(Held::Until(now.saturating_add(hold)));
+				Some(now.saturating_add(hold))
+			}
+			Some(Held::Until(until)) => Some(until).filter(|until| *until > now),
+		}
+	}
+}
+
 /// Pending updates keep their insertion order when metadata changes. Fully removing
 /// cancelled entries bounds memory by prefixes with outstanding work.
 ///
@@ -1128,7 +1195,7 @@ struct OriginConsumerState {
 	/// unseen initial announce (a retraction cancels it entirely) or a metadata
 	/// update on a route the consumer already observed (a retraction must still be
 	/// delivered). The instance tells a restart back to it from one onto another.
-	delivered: BTreeMap<Path, Instance>,
+	delivered: BTreeMap<Path, Delivered>,
 	/// Set by the origin's teardown: the cursor drains `pending`, then reports
 	/// the end instead of parking forever on a table that can never fire again.
 	ended: bool,
@@ -1244,7 +1311,13 @@ impl OriginConsumerState {
 			}
 			// Back to the instance the consumer holds, before it saw the restart away:
 			// one continuous stream, so a metadata update.
-			_ if self.delivered.get(&prefix) == Some(&meta.0.3) => PendingUpdate::Announce(meta),
+			_ if self
+				.delivered
+				.get(&prefix)
+				.is_some_and(|delivered| delivered.instance == meta.0.3) =>
+			{
+				PendingUpdate::Announce(meta)
+			}
 			Some(PendingUpdate::Restart(_)) => PendingUpdate::Restart(meta),
 			_ if self.delivered.contains_key(&prefix) => PendingUpdate::Restart(meta),
 			// The consumer never saw the old instance, so this is its first announce.
@@ -1329,23 +1402,15 @@ impl OriginConsumerState {
 				PendingUpdate::Announce((meta, _))
 					if self.delivered.contains_key(prefix) && lite06_churn::hunts(&meta.0, meta.6) =>
 				{
-					// The clock reads the driver's last advance, which may be stale: anchor
-					// the hold on the first advance after the update arrived, by waking the
-					// driver.
-					match pending.held {
-						None => {
-							pending.held = Some(Held::Anchoring(now));
-							Some(now.saturating_add(Duration::from_nanos(1)))
-						}
-						Some(Held::Anchoring(seen)) if now <= seen => {
-							Some(seen.saturating_add(Duration::from_nanos(1)))
-						}
-						Some(Held::Anchoring(_)) => {
-							pending.held = Some(Held::Until(now.saturating_add(hold)));
-							Some(now.saturating_add(hold))
-						}
-						Some(Held::Until(until)) => Some(until).filter(|until| *until > now),
-					}
+					pending.hold(now, hold)
+				}
+				PendingUpdate::Restart((meta, _))
+					if self
+						.delivered
+						.get(prefix)
+						.is_some_and(|delivered| lite06_churn::falls_back(delivered, meta)) =>
+				{
+					pending.hold(now, hold)
 				}
 				PendingUpdate::Announce((meta, _)) => match retracted.get(prefix).filter(|q| q.holds(meta)) {
 					Some(Quarantine {
@@ -1386,14 +1451,14 @@ impl OriginConsumerState {
 		let ((meta, captures), kind) = match pending.update.unwrap() {
 			PendingUpdate::Announce(meta) => {
 				// The consumer has seen this prefix before, so it is a metadata update.
-				let kind = match self.delivered.insert(prefix.clone(), meta.0.3.clone()) {
+				let kind = match self.delivered.insert(prefix.clone(), Delivered::new(&meta.0)) {
 					None => RouteKind::Start,
 					Some(_) => RouteKind::Update,
 				};
 				(meta, kind)
 			}
 			PendingUpdate::Restart(meta) => {
-				self.delivered.insert(prefix.clone(), meta.0.3.clone());
+				self.delivered.insert(prefix.clone(), Delivered::new(&meta.0));
 				(meta, RouteKind::Restart)
 			}
 			PendingUpdate::Unannounce(meta, gone) => {
@@ -8821,13 +8886,7 @@ impl Routes {
 			return;
 		}
 		// An anonymous route names no publisher, so its quarantine holds nothing.
-		let publisher = update
-			.route
-			.hops
-			.iter()
-			.next()
-			.copied()
-			.filter(|hop| *hop != Hop::UNKNOWN);
+		let publisher = lite06_churn::publisher(&update.route.hops);
 		// The reading may be stale; [`Self::settle`] starts the quarantine on a fresh one.
 		let quarantine = Quarantine {
 			held: Held::Anchoring(now),
@@ -13543,111 +13602,152 @@ mod tests {
 
 	/// A new route and a removal are delivered at once. A change of the best route
 	/// within one instance waits out the update hold, and a newer change during the
-	/// wait replaces it.
+	/// wait replaces it. So does a switch between hop-chain routes to one publisher that
+	/// each session minted its own instance for, since the wire carries none: it is
+	/// delivered as a restart, once. One onto another publisher goes at once.
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_changed_route_waits_out_the_hold() {
+		for minted in [false, true] {
+			let producer = origin(1).produce();
+			let peer = producer.clone().with_link(Link::Peer);
+			let mut announced = producer.consume().routes();
+			// Holds count on the driver's clock, which starts at its first poll.
+			kio::clock::sleep(Duration::from_millis(1)).await;
+
+			let named = instance();
+			let route = |chain: &[u64], via| {
+				let instance = match minted {
+					true => Instance::minted(),
+					false => named.clone(),
+				};
+				RouteInfo::new()
+					.with_instance(instance, 0)
+					.with_hops(hops(chain))
+					.with_via(origin(via))
+			};
+			let near = peer.forward("room", route(&[9, 2], 2)).unwrap();
+			announced.expect_next_active("room").await;
+
+			// The best route changes twice; the consumer sees only the last, once.
+			let far = peer.forward("room", route(&[9, 3, 4], 4)).unwrap();
+			let farther = peer.forward("room", route(&[9, 5, 6, 7], 7)).unwrap();
+			let start = kio::clock::now();
+			drop(near);
+			drop(far);
+			let kind = match minted {
+				true => RouteKind::Restart,
+				false => RouteKind::Update,
+			};
+			let event = announced.next().await.unwrap();
+			assert_eq!(event.kind, kind, "minted {minted}: {event:?}");
+			assert_eq!(event.announce.route.hops, hops(&[9, 5, 6, 7]));
+			assert_eq!(kio::clock::now() - start, DEFAULT_UPDATE_HOLD, "minted {minted}");
+			announced.assert_next_wait();
+
+			// The last route goes: retracted at once.
+			drop(farther);
+			announced.expect_next_offline("room").await;
+		}
+
+		// Another publisher's broadcast at the path restarts it at once.
 		let producer = origin(1).produce();
 		let peer = producer.clone().with_link(Link::Peer);
 		let mut announced = producer.consume().routes();
-		// Holds count on the driver's clock, which starts at its first poll.
 		kio::clock::sleep(Duration::from_millis(1)).await;
-
-		// One instance, so the winner moving between routes is an update, not a restart.
 		let route = |chain: &[u64], via| {
 			RouteInfo::new()
-				.with_instance(instance(), 0)
+				.with_instance(Instance::minted(), 0)
 				.with_hops(hops(chain))
 				.with_via(origin(via))
 		};
-		let near = peer.forward("room", route(&[9, 2], 2)).unwrap();
+		let old = peer.forward("room", route(&[9, 2], 2)).unwrap();
 		announced.expect_next_active("room").await;
-
-		// The best route changes twice; the consumer sees only the last, once.
-		let far = peer.forward("room", route(&[9, 3, 4], 4)).unwrap();
-		let farther = peer.forward("room", route(&[9, 5, 6, 7], 7)).unwrap();
+		let _new = peer.forward("room", route(&[8, 3, 4], 4)).unwrap();
 		let start = kio::clock::now();
-		drop(near);
-		drop(far);
-		match announced.next().await.unwrap() {
-			RouteEvent {
-				kind: RouteKind::Update,
-				announce: update,
-			} => assert_eq!(update.route.hops, hops(&[9, 5, 6, 7])),
-			other => panic!("should be an update: got {other:?}"),
-		}
-		assert_eq!(kio::clock::now() - start, DEFAULT_UPDATE_HOLD);
-		announced.assert_next_wait();
-
-		// The last route goes: retracted at once.
-		drop(farther);
-		announced.expect_next_offline("room").await;
+		drop(old);
+		let event = announced.next().await.unwrap();
+		assert_eq!(event.kind, RouteKind::Restart, "{event:?}");
+		assert_eq!(event.announce.route.hops, hops(&[8, 3, 4]));
+		assert_eq!(kio::clock::now(), start);
 	}
 
 	/// After a retraction, a worse path to the same publisher waits out the
-	/// quarantine. An anonymous route names no publisher, so one after it is not held.
+	/// quarantine, under its instance or, for a hop chain, any instance a session
+	/// minted. An anonymous route names no publisher, so one after it is not held.
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_retraction_quarantines_a_named_publisher() {
-		let producer = origin(1).produce();
-		let peer = producer.clone().with_link(Link::Peer);
-		let mut announced = producer.consume().routes();
-		kio::clock::sleep(Duration::from_millis(1)).await;
+		for minted in [false, true] {
+			let producer = origin(1).produce();
+			let peer = producer.clone().with_link(Link::Peer);
+			let mut announced = producer.consume().routes();
+			kio::clock::sleep(Duration::from_millis(1)).await;
 
-		// Every path is to one publisher, so to one instance.
-		let route = |chain: &[u64], via| {
-			RouteInfo::new()
-				.with_instance(instance(), 0)
-				.with_hops(hops(chain))
-				.with_via(origin(via))
-		};
+			// Every path is to one publisher, so to one instance, unless each session
+			// minted its own.
+			let named = instance();
+			let route = |chain: &[u64], via| {
+				let instance = match minted {
+					true => Instance::minted(),
+					false => named.clone(),
+				};
+				RouteInfo::new()
+					.with_instance(instance, 0)
+					.with_hops(hops(chain))
+					.with_via(origin(via))
+			};
 
-		let near = peer.forward("named", route(&[9, 2], 2)).unwrap();
-		announced.expect_next_active("named").await;
-		drop(near);
-		announced.expect_next_offline("named").await;
-		let start = kio::clock::now();
-		let _stale = peer.forward("named", route(&[9, 3, 4], 4)).unwrap();
-		match announced.next().await.unwrap() {
-			RouteEvent {
-				kind: RouteKind::Start,
-				announce,
-			} => assert_eq!(announce.route.hops, hops(&[9, 3, 4])),
-			other => panic!("should be a start: got {other:?}"),
-		}
-		assert!(kio::clock::now() - start >= RETRACT_QUARANTINE);
+			let near = peer.forward("named", route(&[9, 2], 2)).unwrap();
+			announced.expect_next_active("named").await;
+			drop(near);
+			announced.expect_next_offline("named").await;
+			let start = kio::clock::now();
+			let _stale = peer.forward("named", route(&[9, 3, 4], 4)).unwrap();
+			match announced.next().await.unwrap() {
+				RouteEvent {
+					kind: RouteKind::Start,
+					announce,
+				} => assert_eq!(announce.route.hops, hops(&[9, 3, 4])),
+				other => panic!("should be a start: got {other:?}"),
+			}
+			assert!(kio::clock::now() - start >= RETRACT_QUARANTINE, "minted {minted}");
+			if minted {
+				continue;
+			}
 
-		let near = peer.forward("anonymous", route(&[0, 2], 2)).unwrap();
-		announced.expect_next_active("anonymous").await;
-		drop(near);
-		announced.expect_next_offline("anonymous").await;
-		let _other = peer.forward("anonymous", route(&[0, 3, 4], 4)).unwrap();
-		announced.expect_next_active("anonymous").await;
+			let near = peer.forward("anonymous", route(&[0, 2], 2)).unwrap();
+			announced.expect_next_active("anonymous").await;
+			drop(near);
+			announced.expect_next_offline("anonymous").await;
+			let _other = peer.forward("anonymous", route(&[0, 3, 4], 4)).unwrap();
+			announced.expect_next_active("anonymous").await;
 
-		// Retract and announce cycles at one clock reading queue the prefix once,
-		// whether or not the route names its publisher.
-		let queued = announced.anchoring.len();
-		for chain in [[9, 2], [0, 2], [9, 2], [0, 2]] {
-			let churn = peer.forward("churn", route(&chain, 2)).unwrap();
-			announced.expect_next_active("churn").await;
-			drop(churn);
-			announced.expect_next_offline("churn").await;
-		}
-		assert_eq!(announced.anchoring.len(), queued + 1);
+			// Retract and announce cycles at one clock reading queue the prefix once,
+			// whether or not the route names its publisher.
+			let queued = announced.anchoring.len();
+			for chain in [[9, 2], [0, 2], [9, 2], [0, 2]] {
+				let churn = peer.forward("churn", route(&chain, 2)).unwrap();
+				announced.expect_next_active("churn").await;
+				drop(churn);
+				announced.expect_next_offline("churn").await;
+			}
+			assert_eq!(announced.anchoring.len(), queued + 1);
 
-		// A quarantine is forgotten once it ends: the cursor wakes to anchor it,
-		// then again to drop it.
-		let gone = peer.forward("gone", route(&[9, 2], 2)).unwrap();
-		announced.expect_next_active("gone").await;
-		drop(gone);
-		announced.expect_next_offline("gone").await;
-		assert!(!announced.retracted.is_empty());
-		for _ in 0..2 {
+			// A quarantine is forgotten once it ends: the cursor wakes to anchor it,
+			// then again to drop it.
+			let gone = peer.forward("gone", route(&[9, 2], 2)).unwrap();
+			announced.expect_next_active("gone").await;
+			drop(gone);
+			announced.expect_next_offline("gone").await;
+			assert!(!announced.retracted.is_empty());
+			for _ in 0..2 {
+				announced.assert_next_wait();
+				kio::clock::sleep(RETRACT_QUARANTINE).await;
+			}
 			announced.assert_next_wait();
-			kio::clock::sleep(RETRACT_QUARANTINE).await;
+			assert!(announced.retracted.is_empty(), "the ended quarantine is still held");
 		}
-		announced.assert_next_wait();
-		assert!(announced.retracted.is_empty(), "the ended quarantine is still held");
 	}
 
 	/// A peer withdrawing a prefix hides the routes there through it, so the next

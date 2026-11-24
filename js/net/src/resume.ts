@@ -237,6 +237,11 @@ class Route {
 	incumbent?: Source;
 	/** The source a read idles on, having lost the route; cleared once asked again or replaced. */
 	#stranded?: Source;
+	/**
+	 * The source the front is splicing in while its copy's info is in flight: a short close on the
+	 * serving copy waits for it rather than standing. Mirrors the Rust route's `staged`.
+	 */
+	staged?: Source;
 	/** Bumped on every change above, waking parked reads. */
 	readonly changed = new Signal(0);
 	readonly readers = new Set<Reader>();
@@ -289,10 +294,27 @@ class Route {
 	 * stays the incumbent until a later one delivers, as a replacement's would.
 	 */
 	park(): void {
-		if (!this.source) return;
+		if (!this.source) {
+			if (this.staged) this.unstage(this.staged);
+			return;
+		}
+		this.staged = undefined;
 		this.generation++;
 		if (!this.incumbent) this.#hold(this.source);
 		this.source = undefined;
+		this.#bump();
+	}
+
+	/** The front asks `source` to take over, until {@link unstage} settles it. */
+	stage(source: Source): void {
+		this.staged = source;
+		this.#bump();
+	}
+
+	/** The front settled whether `source` takes over, unless a later stage replaced it. */
+	unstage(source: Source): void {
+		if (this.staged !== source) return;
+		this.staged = undefined;
 		this.#bump();
 	}
 
@@ -329,6 +351,7 @@ class Route {
 	conclude(): void {
 		if (this.concluded) return;
 		this.concluded = true;
+		this.staged = undefined;
 		this.#hold(undefined);
 		this.source = undefined;
 		this.#bump();
@@ -2664,13 +2687,15 @@ class Recover implements GroupRecover {
 		return this.#reader.route.changed;
 	}
 
-	wants(failed: Error | undefined): boolean {
+	wants(cause: RecoverCause): boolean {
 		const copy = this.#copy;
 		if (!copy) return false;
-		if (failed && this.#undelivered(failed, copy)) return true;
-		// A short close on a copy whose route failed looks to the route replacing it.
-		if (!failed && copyFailed(copy)) return true;
 		const route = this.#reader.route;
+		if (cause.kind === "failed" && this.#undelivered(cause.error, copy)) return true;
+		// A short close on a copy whose route failed, or while the front stages the copy to
+		// replace it, looks to the route replacing it. Mirrors the Rust `Recover::wants`.
+		if (cause.kind !== "failed" && copyFailed(copy)) return true;
+		if (cause.kind === "closed" && route.staged) return true;
 		return route.generation !== copy.generation || route.concluded;
 	}
 
@@ -2746,8 +2771,8 @@ class Recover implements GroupRecover {
 				if (failed && route.concluded) throw failed;
 			} else if (closed && generation === current.generation) {
 				// It serves on with no front to replace it, so its close stands, unless its route
-				// failed: then the next one may hold more.
-				if (!copyFailed(current) || route.concluded) throw standing();
+				// failed or the front stages the copy to replace it: then that one may hold more.
+				if ((!copyFailed(current) && !route.staged) || route.concluded) throw standing();
 			} else if (generation !== current.generation || failed) {
 				// The serving route gave the group up, which ends it with that route's error however
 				// a fetch of the rest would answer. A copy that failed dropped its open groups with
@@ -3124,6 +3149,7 @@ export class Front {
 		// answered yet is asked too, so a swap racing its first answer is still checked.
 		source.retain();
 		previous?.retain();
+		route.stage(source);
 		// Abandoned once another route supersedes this one, releasing both.
 		const retired = this.#retire.signal;
 		const expected = recorded
@@ -3142,6 +3168,7 @@ export class Front {
 		Promise.all([expected, ask(source, route.name, retired)])
 			.then(
 				([expected, info]) => {
+					route.unstage(source);
 					if (this.#source !== source) return;
 					// The copy it replaces never answered, so this one says what the track is.
 					if (!expected) this.#record(route.name, info, source);
@@ -3151,6 +3178,7 @@ export class Front {
 					else route.refuse(new Incompatible(route.name));
 				},
 				(err: unknown) => {
+					route.unstage(source);
 					if (this.#source !== source) return;
 					const error = err instanceof Error ? err : new Error(String(err));
 					// A route that lost the content leaves the replaced copy feeding the read, which asks
@@ -3301,8 +3329,8 @@ export class Front {
 		// no copy of its own to find the rest in.
 		hooks.recoverGroup(fetched.group, {
 			changed: this.#changed,
-			wants: (failed) => {
-				if (failed && undelivered(failed)) return true;
+			wants: (cause) => {
+				if (cause.kind === "failed" && undelivered(cause.error)) return true;
 				return this.#source !== undefined && this.#source !== current;
 			},
 			replace: async (_index, cause, signal) => {
