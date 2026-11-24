@@ -893,8 +893,8 @@ fn close(conn: &Connection, web: Option<&Rc<Web>>, code: u32, reason: &str) {
 ///
 /// Nobody else accepts once the session closed, so this accepts and classifies
 /// the peer's streams itself; the session's own wait in their queues to be
-/// stopped like any other. It waits on any stream still mid-header, which may
-/// be a QPACK stream, so that one is never stopped.
+/// stopped like any other. A stream still mid-header may be a QPACK stream, so
+/// it is spared until classified, and keeps this waiting.
 fn quiesce(conn: &Connection, web: &Web, connect: super::stream::Id, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 	web.state.poll(waiter, |state, cx| {
 		while let Poll::Ready(Ok(recv)) = conn.poll_accept_uni(state.uni_park.hold(cx)) {
@@ -905,13 +905,18 @@ fn quiesce(conn: &Connection, web: &Web, connect: super::stream::Id, waiter: &ki
 		}
 		classify_uni(web.session_id, state, cx);
 		classify_bi(web.session_id, state, cx);
-		if !state.pending_uni.is_empty() || !state.pending_bi.is_empty() {
-			return Poll::Pending;
-		}
 		let held = state.held_recv.iter().flatten().map(driver_recv::Stream::id);
-		let keep: Vec<_> = held.chain([connect]).collect();
-		conn.poll_quiesce(waiter, http3_code(WT_SESSION_GONE), &keep)
-			.map_err(Error::from)
+		let pending = state.pending_uni.iter().filter_map(|header| header.recv.as_ref());
+		let pending = pending.chain(state.pending_bi.iter().filter_map(|header| header.recv.as_ref()));
+		let keep: Vec<_> = held
+			.chain(pending.map(driver_recv::Stream::id))
+			.chain([connect])
+			.collect();
+		ready!(conn.poll_quiesce(waiter, http3_code(WT_SESSION_GONE), &keep))?;
+		match state.pending_uni.is_empty() && state.pending_bi.is_empty() {
+			true => Poll::Ready(Ok(())),
+			false => Poll::Pending,
+		}
 	})
 }
 

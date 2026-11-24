@@ -421,7 +421,7 @@ impl Session {
 		// is closed, so the stops carry WT_SESSION_GONE.
 		let gone = self.close.encode_stream_code(0);
 		let web = self.web().expect("a capsule close is HTTP/3");
-		let quiesce = kio::wait(|waiter| web.accept.lock().unwrap().poll_quiesce(waiter, gone, &critical));
+		let quiesce = kio::wait(|waiter| poll_quiesce_shared(&web.accept, waiter, gone, &critical));
 		match kio::clock::timeout(timeout, quiesce).await {
 			Ok(Ok(())) => {}
 			Ok(Err(e)) => {
@@ -618,6 +618,24 @@ fn poll_accept_uni_shared(accept: &Mutex<SessionAccept>, waiter: &Waiter) -> Pol
 	result
 }
 
+// [`SessionAccept::poll_quiesce`] under the accept lock, holding back both lists' wakes as the
+// accepts above do, since it drives both.
+fn poll_quiesce_shared(
+	accept: &Mutex<SessionAccept>,
+	waiter: &Waiter,
+	code: crate::quic::driver::VarInt,
+	critical: &[crate::quic::driver::stream::Id],
+) -> Poll<Result<(), Error>> {
+	let (result, holds) = {
+		let mut accept = accept.lock().unwrap();
+		let holds = (accept.uni_waiters.hold(), accept.bi_waiters.hold());
+		(accept.poll_quiesce(waiter, code, critical), holds)
+	};
+	// Dropped after the accept lock, for the reason `poll_accept_uni_shared` gives.
+	drop(holds);
+	result
+}
+
 fn poll_accept_bi_shared(
 	accept: &Mutex<SessionAccept>,
 	waiter: &Waiter,
@@ -643,6 +661,27 @@ fn poll_accept_bi_shared(
 	}
 
 	result
+}
+
+/// A stream whose header is being read, with its ID, which a close spares until it knows the
+/// stream's type.
+pub(crate) struct Classifying<T: ?Sized> {
+	id: crate::quic::driver::stream::Id,
+	header: Pin<Box<T>>,
+}
+
+impl<T: ?Sized> Classifying<T> {
+	pub(crate) fn new(id: crate::quic::driver::stream::Id, header: Pin<Box<T>>) -> Self {
+		Self { id, header }
+	}
+}
+
+impl<T: Future + ?Sized> Future for Classifying<T> {
+	type Output = T::Output;
+
+	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<T::Output> {
+		self.header.as_mut().poll(cx)
+	}
 }
 
 /// A unidirectional stream's header: its type, the session a WebTransport stream names, and the
@@ -673,8 +712,8 @@ struct SessionAccept {
 	bi_end: Option<Error>,
 
 	// Keep track of work being done to read/write the WebTransport stream header.
-	pending_uni: FuturesUnordered<Pin<Box<PendingUni>>>,
-	pending_bi: FuturesUnordered<Pin<Box<PendingBi>>>,
+	pending_uni: FuturesUnordered<Classifying<PendingUni>>,
+	pending_bi: FuturesUnordered<Classifying<PendingBi>>,
 
 	// Waiters from concurrent callers of accept_bi / accept_uni.
 	// Every clone of the session polls this one struct, so an arrival has to be fanned
@@ -698,7 +737,7 @@ impl SessionAccept {
 		conn: crate::quic::driver::connection::Connection,
 		session_id: VarInt,
 		close: Arc<CloseReason>,
-		early: Vec<Pin<Box<PendingUni>>>,
+		early: Vec<Classifying<PendingUni>>,
 	) -> Self {
 		let bi_waiters = Fan::default();
 		let uni_waiters = Fan::default();
@@ -759,7 +798,9 @@ impl SessionAccept {
 				// Start decoding the header and add the future to the list of pending streams.
 				match res {
 					Ok(recv) => {
-						self.pending_uni.push(Box::pin(read_uni_header(recv)));
+						let id = recv.id();
+						self.pending_uni
+							.push(Classifying::new(id, Box::pin(read_uni_header(recv))));
 						continue;
 					}
 					Err(err) => self.uni_end = Some(err.into()),
@@ -820,8 +861,9 @@ impl SessionAccept {
 				// Start decoding the header and add the future to the list of pending streams.
 				match res {
 					Ok((send, recv)) => {
-						self.pending_bi
-							.push(Box::pin(Self::decode_bi(send, recv, self.session_id)));
+						let id = recv.id();
+						let header = Box::pin(Self::decode_bi(send, recv, self.session_id));
+						self.pending_bi.push(Classifying::new(id, header));
 						continue;
 					}
 					Err(err) => self.bi_end = Some(err.into()),
@@ -856,8 +898,9 @@ impl SessionAccept {
 	/// does with `code`.
 	///
 	/// Nobody else accepts once the session closed, so this accepts and classifies the peer's
-	/// streams itself, dropping the session's, which stops them. It waits on any stream still
-	/// mid-header, which may be a QPACK stream, so that one is never stopped.
+	/// streams itself, dropping the session's, which stops them. A stream still mid-header may be
+	/// a QPACK stream, so it is spared until classified, and keeps this waiting. Poll it through
+	/// [`poll_quiesce_shared`], which holds the wakes the classification causes.
 	fn poll_quiesce(
 		&mut self,
 		waiter: &Waiter,
@@ -866,13 +909,16 @@ impl SessionAccept {
 	) -> Poll<Result<(), Error>> {
 		while let Poll::Ready(Ok(_)) = self.poll_accept_uni(waiter) {}
 		while let Poll::Ready(Ok(_)) = self.poll_accept_bi(waiter) {}
-		if !self.pending_uni.is_empty() || !self.pending_bi.is_empty() {
-			return Poll::Pending;
-		}
 		let qpack = [&self.qpack_encoder, &self.qpack_decoder];
 		let qpack = qpack.into_iter().flatten().map(|recv| recv.id());
-		let keep: Vec<_> = critical.iter().copied().chain(qpack).collect();
-		self.conn.poll_quiesce(waiter, code, &keep).map_err(Into::into)
+		let pending = self.pending_uni.iter().map(|header| header.id);
+		let pending = pending.chain(self.pending_bi.iter().map(|header| header.id));
+		let keep: Vec<_> = critical.iter().copied().chain(qpack).chain(pending).collect();
+		std::task::ready!(self.conn.poll_quiesce(waiter, code, &keep))?;
+		match self.pending_uni.is_empty() && self.pending_bi.is_empty() {
+			true => Poll::Ready(Ok(())),
+			false => Poll::Pending,
+		}
 	}
 
 	// Reads the stream header, returning Some if it's a WebTransport stream.
@@ -1556,7 +1602,7 @@ mod tests {
 	/// A close stops every stream the peer sends on and sends its capsule only once the peer
 	/// reset them, since Chrome crashes on a capsule arriving under a write in flight
 	/// (https://issues.chromium.org/issues/589817008). It classifies the streams nobody accepted
-	/// yet itself, stopping the session's and sparing a QPACK stream.
+	/// yet itself, stopping the session's and sparing a QPACK stream and one still mid-header.
 	#[tokio::test]
 	async fn close_waits_for_the_peer_to_reset_its_streams() {
 		let (client_conn, server_conn, _endpoints) = pair().await;
@@ -1577,7 +1623,11 @@ mod tests {
 		let mut header = Vec::new();
 		StreamUni::QPACK_ENCODER.encode(&mut header);
 		qpack.write_all(&header[..]).await.unwrap();
-		for stream in [&uni, &bi, &qpack] {
+		// And one stalled mid-header, which may yet turn out to be QPACK: it holds the capsule
+		// off until the close's grace runs out, but not the other streams' stops.
+		let mut stalled = client.conn.open_uni(Default::default()).await.unwrap();
+		stalled.write_all(&[0x40][..]).await.unwrap();
+		for stream in [&uni, &bi, &qpack, &stalled] {
 			kio::wait(|waiter| stream.poll_acked(waiter, stream.offset()))
 				.await
 				.unwrap();
@@ -1599,7 +1649,7 @@ mod tests {
 		assert_eq!(
 			server.conn.stats().frame_tx.stop_sending,
 			2,
-			"the QPACK stream was stopped"
+			"a QPACK or unclassified stream was stopped"
 		);
 	}
 

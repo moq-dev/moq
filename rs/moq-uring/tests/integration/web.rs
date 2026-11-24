@@ -1214,7 +1214,7 @@ fn dropped_session_delivers_close(explicit: bool) {
 /// once the peer reset them, since Chrome crashes on a capsule arriving under a
 /// write in flight (https://issues.chromium.org/issues/589817008). It
 /// classifies the streams nobody accepted itself, so the HTTP/3 control,
-/// QPACK, and CONNECT streams stay open.
+/// QPACK, and CONNECT streams stay open, and so does one still mid-header.
 #[test]
 fn a_close_waits_for_the_peer_to_reset_its_streams() {
 	const WT_SESSION_GONE: u64 = 0x170d7b68;
@@ -1278,6 +1278,11 @@ fn a_close_waits_for_the_peer_to_reset_its_streams() {
 				.unwrap()
 				.encode(&mut header);
 			write_raw(&mut uni, &header).await;
+			// And one stalled mid-header, which may yet turn out to be QPACK:
+			// it holds the capsule off until the close's grace runs out, but not
+			// the other streams' stops.
+			let mut stalled = peer.open_uni(Default::default()).await.expect("stalled");
+			write_raw(&mut stalled, &[0x40]).await;
 			// The session holds the uni stream but never accepts the bidi one,
 			// which the close classifies itself. The client resets neither
 			// until both are stopped, so the capsule cannot go before the bidi
@@ -1338,8 +1343,12 @@ fn a_close_waits_for_the_peer_to_reset_its_streams() {
 					reason: CLOSE_REASON.to_string(),
 				}
 			);
-			assert_eq!(watch.stats().frame_tx.stop_sending, 2, "the QPACK stream was stopped");
-			drop(qpack);
+			assert_eq!(
+				watch.stats().frame_tx.stop_sending,
+				2,
+				"a QPACK or unclassified stream was stopped"
+			);
+			drop((qpack, stalled));
 		})
 		.expect("worker");
 }
