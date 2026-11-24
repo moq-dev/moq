@@ -20,7 +20,9 @@ logged `disabling binary cache 'https://nix.moq.dev' for 60 seconds`, and
 with `fallback = true` (`flake.nix`) that job built from source whatever it
 needed in that window, `uniffi-bindgen-go` (and once `uniffi-bindgen-cpp`)
 included. The other ~90 jobs in each run substituted the same paths, so the
-objects had not expired: the 14-day expiry is not the cause. The
+objects had not expired: the 14-day expiry is not the cause. Across the 11
+Nightly runs of 2026-11-13 to 11-23, 14 jobs in 5 runs logged the cache
+disabled this way. The
 `nix-ci-moq-dev` bucket logged 993 `500 Internal Server Error` and 134
 `429 Too Many Requests` responses over 2026-10-25 to 11-24 (R2 metrics), a
 likely source of the broken streams.
