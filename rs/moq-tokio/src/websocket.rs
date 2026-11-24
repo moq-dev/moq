@@ -420,10 +420,14 @@ pub struct Resolved {
 impl Resolved {
 	/// `session` with this idle timeout applied to both layers that enforce one: QMux's,
 	/// which only drafts 01 and later negotiate, and the WebSocket Ping keep-alive, which
-	/// covers `qmux-00` too. Off turns off both, so a quiet session sends nothing.
+	/// covers `qmux-00` too. Off turns off both, and QMux's RTT probe, so a quiet session
+	/// sends nothing; it then reports no RTT.
 	fn session(&self, session: &qmux::Config) -> Session {
 		let mut config = session.clone();
 		config.idle_timeout = self.idle_timeout;
+		if self.idle_timeout.is_none() {
+			config.rtt_interval = None;
+		}
 		// A sixth keeps the 5s ping against the 30s default.
 		let keep_alive = self
 			.idle_timeout
@@ -1707,6 +1711,87 @@ mod idle_timeout_tests {
 		let session = off.resolve().session(&session);
 		assert_eq!(session.config.idle_timeout, None);
 		assert!(session.keep_alive.is_none());
+	}
+
+	/// IO that counts the bytes written through it.
+	struct Counted(tokio::io::DuplexStream, Arc<std::sync::atomic::AtomicUsize>);
+
+	impl AsyncRead for Counted {
+		fn poll_read(
+			mut self: std::pin::Pin<&mut Self>,
+			cx: &mut std::task::Context<'_>,
+			buf: &mut tokio::io::ReadBuf<'_>,
+		) -> std::task::Poll<std::io::Result<()>> {
+			std::pin::Pin::new(&mut self.0).poll_read(cx, buf)
+		}
+	}
+
+	impl AsyncWrite for Counted {
+		fn poll_write(
+			mut self: std::pin::Pin<&mut Self>,
+			cx: &mut std::task::Context<'_>,
+			buf: &[u8],
+		) -> std::task::Poll<std::io::Result<usize>> {
+			let written = std::task::ready!(std::pin::Pin::new(&mut self.0).poll_write(cx, buf))?;
+			self.1.fetch_add(written, std::sync::atomic::Ordering::Relaxed);
+			std::task::Poll::Ready(Ok(written))
+		}
+		fn poll_flush(
+			mut self: std::pin::Pin<&mut Self>,
+			cx: &mut std::task::Context<'_>,
+		) -> std::task::Poll<std::io::Result<()>> {
+			std::pin::Pin::new(&mut self.0).poll_flush(cx)
+		}
+		fn poll_shutdown(
+			mut self: std::pin::Pin<&mut Self>,
+			cx: &mut std::task::Context<'_>,
+		) -> std::task::Poll<std::io::Result<()>> {
+			std::pin::Pin::new(&mut self.0).poll_shutdown(cx)
+		}
+	}
+
+	/// Bytes a dialed session with `config` sends over two quiet minutes, against a server
+	/// whose own idle timeout and probes are off.
+	async fn quiet_bytes(config: Config) -> usize {
+		const ALPN: &str = "qmux-02.moq-lite-06";
+		let session = config.resolve().session(&crate::qmux_default());
+		let (client_io, server_io) = tokio::io::duplex(1 << 16);
+		let sent = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+		let mut client =
+			qmux::ws::Upgraded::new(Counted(client_io, sent.clone()), ALPN).with_session_config(session.config);
+		if let Some(keep_alive) = session.keep_alive {
+			client = client.with_keep_alive(keep_alive);
+		}
+		let mut quiet = crate::qmux_default();
+		quiet.idle_timeout = None;
+		quiet.rtt_interval = None;
+		let server = qmux::ws::Upgraded::new(server_io, ALPN).with_session_config(quiet);
+		let (client, server) = tokio::join!(client.connect(), server.accept());
+		let (_client, client_driver) = client.unwrap();
+		let (_server, server_driver) = server.unwrap();
+		tokio::spawn(client_driver);
+		tokio::spawn(server_driver);
+		// Let the handshake's last frames settle before counting.
+		tokio::time::advance(time::Duration::from_millis(1)).await;
+		tokio::task::yield_now().await;
+		let before = sent.load(std::sync::atomic::Ordering::Relaxed);
+		for _ in 0..120 {
+			tokio::time::advance(time::Duration::from_secs(1)).await;
+			tokio::task::yield_now().await;
+		}
+		sent.load(std::sync::atomic::Ordering::Relaxed) - before
+	}
+
+	/// With the idle timeout off, a quiet session sends nothing at all: no QMux keep-alive,
+	/// RTT probe, or WebSocket Ping. The default keeps pinging.
+	#[tokio::test(start_paused = true)]
+	async fn an_idle_timeout_off_leaves_a_quiet_session_silent() {
+		assert!(quiet_bytes(Config::default()).await > 0);
+		let off = Config {
+			idle_timeout: Some(time::Duration::ZERO.into()),
+			..Default::default()
+		};
+		assert_eq!(quiet_bytes(off).await, 0);
 	}
 
 	#[test]

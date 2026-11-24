@@ -65,8 +65,8 @@ quiet to stay open. Set `websocket.idleTimeout` in `@moq/net` or
 nothing, which lets a server that sleeps between messages stay asleep, and a
 dead link surfaces as the WebSocket closing. QMux negotiates the timeout only on
 drafts 01 and later, so `@moq/net` runs no idle timer on a `qmux-00` session;
-`moq-tokio` also pings at the WebSocket layer, which covers `qmux-00` and turns
-off with the rest.
+`moq-tokio` also pings at the WebSocket layer, which covers `qmux-00`, and
+probes RTT every second; both turn off with the rest.
 
 QUIC gets a head start in the race: 500 ms in `@moq/net` and 200 ms in
 `moq-tokio`. Once WebSocket wins against a server, identified by the host and
