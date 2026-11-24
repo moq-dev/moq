@@ -17,6 +17,8 @@ pub(super) type Pending<E> = kio::Consumer<Option<Answer<E>>>;
 
 struct Queue<E> {
 	waiting: VecDeque<Dial<E>>,
+	/// Whether a policy took the queue: one feeds it.
+	claimed: bool,
 	closed: bool,
 }
 
@@ -33,7 +35,8 @@ struct Queue<E> {
 /// [`Dial::failure`], until a dial is [failed](Dial::fail).
 ///
 /// Cheap to clone; every clone shares one queue, which one policy feeds: once that policy ends,
-/// [`next`](Self::next) returns `None` and a policy given it later ends at its first dial.
+/// [`next`](Self::next) returns `None`, and a policy given the queue after another took it ends
+/// at once with [`Failure::Taken`](super::Failure::Taken).
 pub struct Dials<E> {
 	queue: kio::Producer<Queue<E>>,
 }
@@ -58,6 +61,7 @@ impl<E> Dials<E> {
 		Self {
 			queue: kio::Producer::new(Queue {
 				waiting: VecDeque::new(),
+				claimed: false,
 				closed: false,
 			}),
 		}
@@ -103,6 +107,14 @@ impl<E> Dials<E> {
 		pending
 	}
 
+	/// Take the queue for one policy: `false` once another took it.
+	pub(super) fn claim(&self) -> bool {
+		let Ok(mut queue) = self.queue.write() else {
+			return false;
+		};
+		!std::mem::replace(&mut queue.claimed, true)
+	}
+
 	/// End [`next`](Self::next), dropping every dial still waiting.
 	pub(super) fn close(&self) {
 		if let Ok(mut queue) = self.queue.write() {
@@ -128,15 +140,20 @@ impl<E> Dial<E> {
 		&self.url
 	}
 
-	/// Why the previous attempt or session ended, such as a refused credential, or `None` when
-	/// nothing failed since a session was last established, as for the first dial or a GOAWAY's
-	/// handover. Mirrors the connection's own record of why it is retrying.
+	/// Why the previous attempt or session ended, such as a refused credential or a redirect
+	/// before the session was healthy, or `None` when nothing failed since a session was last
+	/// established, as for the first dial or a healthy session's GOAWAY handover. Mirrors the
+	/// connection's own record of why it is retrying.
 	pub fn failure(&self) -> Option<&E> {
 		self.failure.as_ref()
 	}
 
 	/// Present `tokens` on this dial, as [`Reconnect::with_tokens`](super::Reconnect::with_tokens)
 	/// would: the first is the connection credential, and the rest ride AUTH on its session.
+	///
+	/// Only the credential is this dial's alone. The rest join the connection's shared set,
+	/// which a successor attaches to before its own answer replaces them, so a single-use
+	/// token belongs first.
 	pub fn present(self, tokens: Vec<Token>) {
 		self.answer(Answer::Present(tokens));
 	}

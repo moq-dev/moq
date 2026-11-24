@@ -1747,6 +1747,34 @@ async fn dials_report_a_refusal_on_the_next_dial_until_established() {
 	);
 }
 
+/// Dials serve one policy: another given them ends at once, leaving them to the first.
+#[kio::test]
+async fn dials_serve_one_policy() {
+	let peer = url("tcp://peer:1/");
+	let dials = Dials::new();
+	let now = kio::clock::now();
+	let mut first = Reconnect::new(config(INITIAL, None), vec![peer.clone()], now)
+		.unwrap()
+		.with_dials(dials.clone());
+	let mut second = Reconnect::new(config(INITIAL, None), vec![peer.clone()], now)
+		.unwrap()
+		.with_dials(dials.clone());
+	let ended = drive(&mut second, &[], &mut Run::default(), |_| false).await;
+	assert!(
+		matches!(ended, Some(Err(TestError::Policy(Failure::Taken)))),
+		"{ended:?}"
+	);
+	drop(second);
+
+	answer(&dials, |_| Reply::Sign);
+	let mut run = Run::default();
+	drive(&mut first, &[(peer, Peer::Serve)], &mut run, |run| {
+		!run.accepts.is_empty()
+	})
+	.await;
+	assert_eq!(run.tokens, [Some("sig-1".into())]);
+}
+
 /// A dial left unanswered spends the connect timeout, failing as a slow dial does, and the
 /// next dial reports it; one dropped unanswered ends the policy.
 #[kio::test]

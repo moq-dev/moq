@@ -280,6 +280,9 @@ pub enum Failure {
 	/// A [`Dial`] was dropped without an answer.
 	#[error("a dial was dropped unanswered")]
 	Unanswered,
+	/// The [`Dials`] given to [`Reconnect::with_dials`] already serve another policy.
+	#[error("these dials already serve another connection")]
+	Taken,
 }
 
 /// Invalid input to [`Reconnect::new`].
@@ -577,10 +580,16 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 
 	/// Ask `dials` for the tokens of every dial, as it starts, instead of presenting fixed ones;
 	/// see [`Dials`]. Each answer replaces the tokens from [`with_tokens`](Self::with_tokens), or
-	/// from a handle of their own without one. Attach one policy per `dials`.
+	/// from a handle of their own without one.
+	///
+	/// They serve one policy: given dials another policy took, even one that ended since, this
+	/// one ends at once with [`Failure::Taken`], leaving them to the other.
 	pub fn with_dials(mut self, dials: Dials<E>) -> Self {
 		self.tokens.get_or_insert_with(|| auth::Tokens::new(Vec::new()));
-		self.dials = Some(dials);
+		match dials.claim() {
+			true => self.dials = Some(dials),
+			false => self.done(Err(Failure::Taken.into())),
+		}
 		self
 	}
 

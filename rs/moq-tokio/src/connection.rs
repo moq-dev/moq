@@ -1228,11 +1228,10 @@ impl Connection {
 		let policy = moq_net::Reconnect::new(client.policy, addrs.as_slice().to_vec(), kio::clock::now())
 			.map_err(|_| Error::BackoffHealthy)?
 			.with_tokens(tokens.clone());
-		let Some(slot) = &client.dials else {
-			return Ok(policy);
-		};
-		let dials = slot.lock().unwrap().take().ok_or(Error::DialsTaken)?;
-		Ok(policy.with_dials(dials))
+		Ok(match &client.dials {
+			Some(dials) => policy.with_dials(dials.clone()),
+			None => policy,
+		})
 	}
 
 	/// Drive moq-net's policy: dial each attempt it asks for and publish what it does.
@@ -1540,7 +1539,8 @@ impl Connection {
 
 	/// The tokens every dial of this connection presents, seeded from
 	/// [`connect.tokens`](crate::connect::Config::tokens). Set new ones before the old
-	/// ones expire, and read the peer's answer from them.
+	/// ones expire, and read the peer's answer from them. With
+	/// [`Client::with_dials`], each dial's answer replaces them, so set none yourself.
 	pub fn tokens(&self) -> moq_net::auth::Tokens {
 		self.tokens.clone()
 	}
@@ -3782,7 +3782,11 @@ mod tests {
 		assert_eq!(attempts.load(std::sync::atomic::Ordering::Relaxed), 3);
 		// The dials serve one connection: a clone's later one ends instead of sharing them.
 		let again = client.clone().connect(url).established().await;
-		assert!(matches!(again, Err(Error::DialsTaken)), "{:?}", again.err());
+		let err = again.err().expect("a second connection shared the dials");
+		assert_eq!(
+			err.to_string(),
+			Error::from(moq_net::reconnect::Failure::Taken).to_string()
+		);
 		connection.close().await.unwrap();
 		let failures = failures.await.unwrap();
 		assert_eq!(failures.len(), 3);

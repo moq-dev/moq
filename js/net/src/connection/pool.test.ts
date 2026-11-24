@@ -99,6 +99,16 @@ test("urlAuth: false is the default carrier, so it shares; true needs a private 
 	second.close();
 });
 
+test("one Dials serves one connection", () => {
+	const dials = new Connection.Dials();
+	const first = new Connection({ tokens: dials, enabled: false });
+	// Even once the first closed: its answerer would sign for the other's dials.
+	first.close();
+	expect(() => new Connection({ tokens: dials, enabled: false })).toThrow(
+		"these dials already serve another connection",
+	);
+});
+
 test("the connection closes after the last handle and the linger window", async () => {
 	const dials = stubTransports();
 

@@ -91,11 +91,6 @@ pub enum Error {
 	#[error("the healthy backoff bar must be non-zero")]
 	BackoffHealthy,
 
-	/// The [`Client::with_dials`](crate::Client::with_dials) handle already went to another
-	/// connection: it serves one.
-	#[error("these dials already serve another connection")]
-	DialsTaken,
-
 	/// The config was parsed from released spellings that no longer work. The
 	/// payload is the migration to print.
 	#[error("{0}")]

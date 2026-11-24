@@ -67,10 +67,10 @@ function sign(dials: Dials): string[] {
 	return signed;
 }
 
-async function goaway(server: WebTransport) {
+async function goaway(server: WebTransport, uri = "") {
 	const stream = await Stream.open(server, { version: Lite.Version.DRAFT_07 });
 	await stream.writer.u53(Lite.StreamId.Goaway);
-	await new Lite.Goaway("").encode(stream.writer, Lite.Version.DRAFT_07);
+	await new Lite.Goaway(uri).encode(stream.writer, Lite.Version.DRAFT_07);
 }
 
 for (const urlAuth of [true, false]) {
@@ -219,6 +219,35 @@ test("a dial left unanswered times out like a slow attempt, and the loop asks ag
 		second?.present(["late"]);
 		await clock.drive(reload.answered());
 		expect(reload.status.peek()).toBe("connected");
+	} finally {
+		reload.close();
+		dials.close();
+	}
+});
+
+test("a redirect's dial left unanswered falls back to the URL", async () => {
+	using clock = manual();
+	const served = relay();
+	const dials = new Dials();
+	const reload = new Reload({
+		url: URL_,
+		websocket: { enabled: false },
+		tokens: dials,
+		backoff: BACKOFF,
+		timeout: Duration.millis(50),
+	});
+	try {
+		(await clock.drive(dials.next()))?.present(["sig-1"]);
+		await clock.drive(waitFor(reload.status, (status) => status === "connected"));
+		const moved = "https://example.com:4443/";
+		await goaway(served[0].server, moved);
+
+		const redirected = await clock.drive(dials.next());
+		expect(redirected?.url.href).toBe(moved);
+		const next = await clock.drive(dials.next());
+		expect(redirected?.signal.aborted).toBe(true);
+		expect(next?.url.href).toBe(URL_.href);
+		next?.present(["sig-2"]);
 	} finally {
 		reload.close();
 		dials.close();

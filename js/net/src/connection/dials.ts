@@ -12,8 +12,9 @@ export class Dial {
 	readonly url: URL;
 
 	/**
-	 * Why the previous attempt or session ended, such as a refused credential, or undefined when
-	 * nothing failed since a session last served, as for the first dial or a GOAWAY's handover.
+	 * Why the previous attempt or session ended, such as a refused credential or a redirect before
+	 * the session was healthy, or undefined when nothing failed since a session last served, as
+	 * for the first dial or a healthy session's GOAWAY handover.
 	 */
 	readonly failure?: Error;
 
@@ -39,7 +40,12 @@ export class Dial {
 		};
 	}
 
-	/** Present `tokens` on this dial, as a fixed list would be; the first answer counts. */
+	/**
+	 * Present `tokens` on this dial, as a fixed list would be; the first answer counts. Only the
+	 * first, the connection credential, is this dial's alone: the rest join the connection's
+	 * shared set, which a successor attaches to before its own answer replaces them, so a
+	 * single-use token belongs first.
+	 */
 	present(tokens: readonly string[]): void {
 		this.#answer.resolve({ tokens: [...tokens] });
 	}
@@ -67,7 +73,15 @@ export class Dial {
 export class Dials {
 	readonly #waiting: Dial[] = [];
 	readonly #queued = new Signal(0);
+	#claimed = false;
 	#closed = false;
+
+	/** Take these dials for one connection: false once another took them. @internal */
+	claim(): boolean {
+		if (this.#claimed) return false;
+		this.#claimed = true;
+		return true;
+	}
 
 	/** The next dial waiting for its tokens, or undefined once the connection closed. */
 	async next(): Promise<Dial | undefined> {
