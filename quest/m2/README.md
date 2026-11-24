@@ -13,9 +13,8 @@ Decided 2026-11-21 (maintainer, /quest-plan of the main → release routing
 audit): the cut also waits on the routing fixes that audit found. NodeId
 drops Start, whether an origin forwards moves into its config, and moq-relay's
 cluster peers lose `egress`.
-[lite07-finalize](/quest/m2/lite07-finalize.md) also requires three m1 fixes
-from [lite07-routing](/quest/m1/lite07-routing/README.md), whose Plan
-records each decision.
+That audit's three m1 fixes (the scoped peer, the route floors, and the
+origin's route rank) have landed.
 
 Decided 2026-11-21 (maintainer, /quest-plan of an exhaustive full-codebase
 audit before the `0.22.0` cut, covering both pre-release and new code): the cut

@@ -3791,7 +3791,13 @@ impl AnnounceProducer {
 			let Some(entry) = shared.routes.entry_mut(prefix, *id) else {
 				return Err(Error::Closed);
 			};
-			let held = (entry.live(), entry.specificity(), route_rank(entry), entry.instance.clone(), entry.epoch);
+			let held = (
+				entry.live(),
+				entry.specificity(),
+				route_rank(entry),
+				entry.instance.clone(),
+				entry.epoch,
+			);
 			let next = match &lent {
 				Some(lent) => Some((lent.instance.clone(), lent.epoch)),
 				None => route.instance.clone().map(|instance| (instance, route.epoch)),
@@ -3831,7 +3837,14 @@ impl AnnounceProducer {
 			entry.available = route.available;
 			entry.marked = route.marked;
 			entry.advertised = true;
-			if held != (true, entry.specificity(), route_rank(entry), entry.instance.clone(), entry.epoch) {
+			if held
+				!= (
+					true,
+					entry.specificity(),
+					route_rank(entry),
+					entry.instance.clone(),
+					entry.epoch,
+				) {
 				entry.since = stamp;
 			}
 			let claim = entry.claim.clone();
