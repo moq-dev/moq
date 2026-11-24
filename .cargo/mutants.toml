@@ -25,6 +25,9 @@ exclude_re = [
     # count as an upper bound.
     'replace Router<N, I, A>::(visit|count) with \(\)$',
     'replace \+ with (-|\*) in Router<N, I, A>::withdraw$',
+    # Each session takes the next number, and the closed one already left `peers`, so no
+    # live session ties it.
+    'replace < with <= in Router<N, I, A>::disconnect$',
     # A pick's key ends in its next hop or its claimant, so no two keys tie.
     'replace < with <= in Router<N, I, A>::(reselect|closest)$',
     # A session closed at a floor already recorded touches routes that stay as they
@@ -89,6 +92,10 @@ exclude_re = [
     # A copy leaves a non-empty range starting at the oldest group or time 0 unresolved
     # only when a cap at 0 empties every range, so a waiting range stops the window too.
     'replace && with \|\| in Reader::resolve$',
+    # A capped copy resolves an end its cap leaves whole one past the range's own (keys are
+    # times), so `resolve` places the same end whether it keeps that one or drops it, and no
+    # resolved end passes the cap.
+    ':\d+:68: replace < with > in Reader::window$',
     # `owes_below` is asked only of a key outside the window, where no run starts.
     'replace < with <= in Reader::owes_below$',
     # Walking again before anything the read parked on fires returns the same
