@@ -228,7 +228,7 @@ export class Connection implements Session {
 		// session's own end says why.
 		if (hasRoutes(version)) {
 			void AnnounceStream.of(quic, version).broken.then((err) => {
-				if (this.#transportClosed || this.#phase.kind === "closed") return;
+				if (this.#ending()) return;
 				this.#fail(error(err));
 			});
 		}
@@ -334,6 +334,13 @@ export class Connection implements Session {
 		} catch {
 			// ignore
 		}
+	}
+
+	// Whether the session is ending, so its own end says why a stream broke: it closed, or the
+	// peer refused its connection credential and is closing it. A server closing a session resets
+	// its streams before the close arrives, with a code Chrome reports as an application's 0.
+	#ending(): boolean {
+		return this.#transportClosed || this.#phase.kind === "closed" || this.#auth.credential.peek() instanceof Error;
 	}
 
 	// End the received tracks with the session's end, then tear down the rest.
@@ -599,7 +606,7 @@ export class Connection implements Session {
 				// While the session lives, whatever broke the stream, a reset, a message cut
 				// short, or one that does not decode, lost what the peer said. An ending
 				// session's own end says why.
-				if (this.#transportClosed || this.#phase.kind === "closed") throw err;
+				if (this.#ending()) throw err;
 				throw new ProtocolViolation("Announce Stream broke", { cause: err });
 			}
 			if (!msg) break;
