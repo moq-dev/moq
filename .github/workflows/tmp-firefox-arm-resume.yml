@@ -59,7 +59,7 @@ jobs:
             extra=(HARNESS_KEEP=1)
             if [[ "$VARIANT" == stops ]]; then
               # Markers only: LongTask durations without stack sampling's overhead.
-              extra+=(MOZ_PROFILER_STARTUP=1 MOZ_PROFILER_SHUTDOWN="$RUNNER_TEMP/profile-$i.json"
+              extra+=(MOZ_PROFILER_STARTUP=1 MOZ_PROFILER_SHUTDOWN="$RUNNER_TEMP/profile-$i-%p.json"
                 MOZ_PROFILER_STARTUP_FEATURES=nostacksampling MOZ_PROFILER_STARTUP_ENTRIES=16777216)
             fi
             if [[ "$VARIANT" == profile ]]; then
@@ -76,10 +76,9 @@ jobs:
               echo "run $i: fail"
             fi
             grep -E '^\s+(FAIL|PASS) |resumed [0-9]+ frames|stall' "$log" | cut -c1-400 || true
-            if [[ -f "$RUNNER_TEMP/profile-$i.json" ]]; then
-              ls -la "$RUNNER_TEMP/profile-$i.json"
-              gzip "$RUNNER_TEMP/profile-$i.json"
-            fi
+            for f in "$RUNNER_TEMP"/profile-"$i"*.json; do
+              [[ -f "$f" ]] && gzip "$f"
+            done
           done
           echo "RESULT $VARIANT: $pass pass, $fail fail of $runs" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Preserve logs
