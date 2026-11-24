@@ -4648,6 +4648,53 @@ mod test {
 		drop(arriving);
 	}
 
+	/// A routed frame waiting on the flight that continues its evicted copy still follows the
+	/// front to a new route, which may already hold the rest.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_routed_frame_on_a_flight_follows_a_route_change() {
+		let noop = kio::Waiter::noop();
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		let requests = a.requests();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		let live = a.create_group(group::Info { start: 0 }).unwrap();
+		let handle = live.handle();
+		let payload = bytes::Bytes::from(vec![7; 16]);
+		let info = crate::frame::Info {
+			size: payload.len() as u64,
+			timestamp: ts(0),
+		};
+		let mut arriving = live.create_frame(info).unwrap();
+		arriving.write(payload.slice(..2)).unwrap();
+		let mut group = recv(&mut sub);
+		let Poll::Ready(Ok(Some(mut frame))) = group.poll_next_frame(&noop) else {
+			panic!("the arriving frame");
+		};
+		assert!(matches!(frame.poll_read_chunk(&noop), Poll::Ready(Ok(Some(chunk))) if chunk == payload[..2]));
+		handle.shed_all();
+		assert!(frame.poll_read_chunk(&noop).is_pending(), "boarding a flight");
+		assert!(requests.poll_requested_fill(&noop).is_ready(), "a flight is asked");
+
+		let b = copy();
+		let mut whole = b.create_group(group::Info { start: 0 }).unwrap();
+		whole.write_frame(ts(0), payload.clone()).unwrap();
+		whole.finish().unwrap();
+		routes.serve(b.consume());
+		let mut rest = Vec::new();
+		loop {
+			match frame.poll_read_chunk(&noop) {
+				Poll::Ready(Ok(Some(chunk))) => rest.extend_from_slice(&chunk),
+				Poll::Ready(Ok(None)) => break,
+				other => panic!("the rest from the new route: {:?}", other.map(|res| res.map(|_| ()))),
+			}
+		}
+		assert_eq!(rest, payload[2..], "past the bytes already read");
+		drop(arriving);
+	}
+
 	/// The serving copy failing to deliver is no verdict on the track's end: the end waits for
 	/// the copy the front serves next.
 	#[test]
