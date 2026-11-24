@@ -673,14 +673,21 @@ impl Recovery {
 		}
 	}
 
-	/// Where the publisher started its range, once it said: `None` inside for no group to
-	/// deliver.
-	pub(super) fn start(&self) -> Option<Option<u64>> {
-		self.start
+	/// Where the publisher started its range, once readers can read from there: it said no
+	/// group is left at or before its first key, or a start past that key, or the stream of
+	/// the group it starts at arrived. `None` inside for no group to deliver.
+	pub(super) fn landed(&self) -> Option<Option<u64>> {
+		let start = self.start?;
+		match (start, &self.state) {
+			(Some(group), RecoveryState::Active { sub, .. }) if group <= self.groups.start => {
+				sub.tail.read().first_group().is_some().then_some(start)
+			}
+			_ => Some(start),
+		}
 	}
 
 	/// Whether a stream of the subscription is still being read, which cancelling would cut.
-	fn reading(&self) -> bool {
+	pub(super) fn reading(&self) -> bool {
 		match &self.state {
 			RecoveryState::Active { sub, .. } => sub.tail.read().is_reading(),
 			_ => false,

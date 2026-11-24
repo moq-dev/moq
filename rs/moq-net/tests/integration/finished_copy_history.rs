@@ -310,11 +310,22 @@ async fn place_time(during_tail: bool) {
 		Some(second) => second,
 		None => history(support::keys(18_000..=18_000)).await,
 	};
-	let group = kio::clock::timeout(TIMEOUT, second.recv_group())
+	let mut group = kio::clock::timeout(TIMEOUT, second.recv_group())
 		.await
 		.unwrap_or_else(|_| panic!("during tail {during_tail}: the copy asks upstream for time 18 s"))
 		.unwrap()
 		.expect("the group containing it");
 	assert_eq!(group.start, 15_000, "during tail {during_tail}");
+	// Whole: the probe that placed the reader outlives its ask until the group is read.
+	let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
+		.await
+		.expect("frame timeout")
+		.unwrap()
+		.expect("its frame");
+	assert_eq!(&frame.payload[..], b"x");
+	let end = kio::clock::timeout(TIMEOUT, group.read_frame())
+		.await
+		.expect("group end timeout");
+	assert!(matches!(end, Ok(None)), "during tail {during_tail}: {end:?}");
 	drop((broadcast, upstream, publisher, relay, written, first));
 }

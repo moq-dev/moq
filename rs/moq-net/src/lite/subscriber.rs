@@ -6610,6 +6610,7 @@ mod tests {
 			priority: 0,
 			probes: Default::default(),
 			placed: Default::default(),
+			failed: Default::default(),
 			closed: serve_loop.closed,
 		};
 		// A reader holds the finished copy.
@@ -12640,16 +12641,19 @@ struct FinishedServe {
 	/// Each of those asked on a subscription of its own from that time, as a live copy probes
 	/// them on its subscription, by time.
 	probes: BTreeMap<u64, Recovery>,
-	/// Where each settled probe's publisher started, by time, which places the readers
-	/// waiting on it, while they still do.
+	/// Where each probe's publisher started, by time, which places the readers waiting on
+	/// it, while they still do.
 	placed: BTreeMap<u64, Option<u64>>,
+	/// The times whose probe failed, not asked again while their readers still wait.
+	failed: BTreeSet<u64>,
 	closed: Transport,
 }
 
 impl FinishedServe {
 	/// Ask upstream for each time start readers wait on that no probe asks yet, and place
-	/// the readers once a probe settles. Ends the copy with the error a probe failed with
-	/// before saying where its range starts: nothing else can place its readers.
+	/// those readers once upstream said where it starts and its group is arriving. A probe
+	/// that fails before saying leaves its readers waiting and is not asked again while they
+	/// do: the failure is upstream's, and ending the copy would cut every other reader of it.
 	fn probe(&mut self, serve: &TrackServe, waiter: &kio::Waiter) -> Result<(), Error> {
 		let Some(serving) = &mut self.serving else {
 			return Ok(());
@@ -12658,59 +12662,59 @@ impl FinishedServe {
 			(self.asks, self.priority) = demand.map_or((Vec::new(), 0), |demand| (demand.asks, demand.priority));
 		}
 		let asks = &self.asks;
-		// A reader placed, or gone, is owed nothing more.
+		// A time nobody waits on any more is owed nothing.
 		let before = self.placed.len();
 		self.placed.retain(|time, _| asks.contains(time));
 		let mut moved = self.placed.len() != before;
+		self.failed.retain(|time| asks.contains(time));
+		// Its readers placed or gone, a probe stays only while its group is still arriving,
+		// which ending it would cut.
 		self.probes.retain(|time, probe| {
-			let keep = asks.contains(time);
+			let keep = asks.contains(time) || probe.reading();
 			if !keep {
 				probe.end(crate::StreamError::Cancel);
 			}
 			keep
 		});
 		for &time in asks {
-			if self.placed.contains_key(&time) || self.probes.contains_key(&time) {
+			if self.placed.contains_key(&time) || self.probes.contains_key(&time) || self.failed.contains(&time) {
 				continue;
 			}
 			// No group starts at the last key, so no range from it holds one.
 			let Some(end) = time.checked_add(1) else {
 				continue;
 			};
-			let groups = time..end;
 			self.probes
-				.insert(time, Recovery::new(serve, serving, groups, self.priority));
+				.insert(time, Recovery::new(serve, serving, time..end, self.priority));
 		}
-		// Placed only once its group is read, so the readers it places find it held rather
-		// than FETCH it again.
-		let mut failed = None;
+		let mut done = Vec::new();
 		for (&time, probe) in &mut self.probes {
-			let Poll::Ready(refused) = probe.poll(waiter) else {
-				continue;
+			let over = match probe.poll(waiter) {
+				Poll::Ready(refused) => {
+					refused?;
+					true
+				}
+				Poll::Pending => false,
 			};
-			let refused = refused?;
-			match probe.start() {
-				Some(start) => {
-					self.placed.insert(time, start);
-					moved = true;
+			if asks.contains(&time) && !self.placed.contains_key(&time) {
+				match probe.landed() {
+					Some(start) => {
+						self.placed.insert(time, start);
+						moved = true;
+					}
+					None if over => {
+						tracing::debug!(track = %serve.name, time, "time probe failed");
+						self.failed.insert(time);
+					}
+					None => {}
 				}
-				None => {
-					let err = refused.get(&time).map_or(Error::Cancel, |refusal| refusal.error());
-					failed.get_or_insert(err);
-				}
+			}
+			if over {
+				done.push(time);
 			}
 		}
-		self.probes.retain(|time, _| !self.placed.contains_key(time));
-		if let Some(err) = failed {
-			for probe in self.probes.values_mut() {
-				probe.end(crate::StreamError::Cancel);
-			}
-			self.probes.clear();
-			if let Some(serving) = self.serving.take() {
-				serve.close_if_ending();
-				let _ = serving.abort(err);
-			}
-			return Ok(());
+		for time in done {
+			self.probes.remove(&time);
 		}
 		// Replacing what the subscription last reported, whose ranges are over.
 		if moved {
@@ -13207,6 +13211,7 @@ impl TrackServeRun {
 									priority,
 									probes: Default::default(),
 									placed: Default::default(),
+									failed: Default::default(),
 									demand: serve_loop.demand,
 									dynamic: serve_loop.dynamic,
 									fetches: serve_loop.fetches,
