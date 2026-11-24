@@ -19,12 +19,8 @@ records each decision.
 
 Decided 2026-11-21 (maintainer, /quest-plan of an exhaustive full-codebase
 audit before the `0.22.0` cut, covering both pre-release and new code): the cut
-also waits on the breaking fixes that audit surfaced across the wire, vendored
-native crates, and public APIs:
-
-- **Wire and drafts.** Delete the temporary `raw_parts` / `base.split("/")`
-  `Path Keep` migration before lite-07 finalizes
-  ([lite07-path-keep-parts](/quest/m2/lite07-path-keep-parts.md)).
+also waited on the breaking fixes that audit surfaced across the wire, vendored
+native crates, and public APIs, and all of them have landed.
 
 Non-breaking findings from the same audit live in
 [m0](/quest/m0/README.md) (release-cut pipeline and packaging blockers),
