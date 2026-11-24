@@ -2587,8 +2587,8 @@ impl Cluster {
 		// the drained session leaves within its handover. A redial that reaches the
 		// draining process again is drained at once, and serves on until the node
 		// closes it rather than redialing for the rest of its window; its routes
-		// already rank below every other available one, and the redial after that close finds the
-		// replacement.
+		// already rank as draining, below the replacement's once those are eligible in the
+		// same claim, and the redial after that close finds the replacement.
 		let client = client.with_reconnect(true).with_restart(moq_tokio::Restart::Handoff);
 		let connect = |id: u64, tokens: Vec<moq_net::auth::Token>| {
 			Leg::new(id, client.clone().with_tokens(tokens).connect(addrs.clone()))

@@ -18,7 +18,15 @@ import type { BroadcastCache } from "../consume.ts";
 import { error, ProtocolViolation } from "../error.ts";
 import { routesEqual, WireRoute } from "../hop.ts";
 import type * as Instance from "../instance.ts";
-import { arrival, coveringPrefixes, hiddenBelow, mostSpecific, scopeCaptures, scopeOverlaps } from "../internal.ts";
+import {
+	arrival,
+	bestOfTier,
+	coveringPrefixes,
+	type Filed,
+	hiddenBelow,
+	scopeCaptures,
+	scopeOverlaps,
+} from "../internal.ts";
 import * as Path from "../path.ts";
 import { SlotMap, type Slots } from "../util/limits.ts";
 import {
@@ -145,7 +153,10 @@ export class Routed {
 		// A draining peer ranks its claims last from the GOAWAY itself.
 		this.#stopDrain = session.goaway?.changed(() => {
 			if (this.#closing) return;
-			for (const [id, live] of this.#claims) this.#serve(id, live, false, false);
+			// As one change, so a path its claims cover never passes through another route.
+			session.consumes.batch(() => {
+				for (const [id, live] of this.#claims) this.#serve(id, live, false, false);
+			});
 		});
 		this.#granted = session.grant?.peek()?.subscribe;
 		this.#stopGrant = session.grant?.subscribe(() => {
@@ -414,23 +425,28 @@ export class Routed {
 			// At the reader's own prefix, the same pick a consume of `path` makes from the cache,
 			// ranked where each claim is filed, newest first at each filing. Beneath it, the best
 			// claim filed at `path`, as the origin's listing shows each row: each carries its Above,
-			// so the reader holds every filing. Grouped by filing in one pass, so a refresh stays
-			// linear in the claims shown.
+			// so the reader holds every filing. Ranked from the claims alone, never walking the
+			// prefixes they are not filed at, so a refresh stays linear in the claims shown.
+			const depths = new Map<Path.Valid, number>();
 			const pick = (among: Candidate[]) => {
 				// Alone, it is the pick: nothing supersedes or outranks it.
 				if (among.length === 1) return among[0];
-				const filings = new Map<Path.Valid, Candidate[]>();
+				const orders = new Map<Path.Valid, number>();
+				const filed: Filed<Candidate>[] = [];
+				// Newest first at each filing, as mostSpecific numbers them.
 				for (let i = among.length - 1; i >= 0; i--) {
 					const candidate = among[i];
-					const filing = filings.get(candidate.prefix);
-					if (filing) filing.push(candidate);
-					else filings.set(candidate.prefix, [candidate]);
+					const { prefix, identity } = candidate;
+					let depth = depths.get(prefix);
+					if (depth === undefined) {
+						depth = Path.parts(prefix).length;
+						depths.set(prefix, depth);
+					}
+					const order = orders.get(prefix) ?? 0;
+					orders.set(prefix, order + 1);
+					filed.push({ prefix, depth, order, arrival: arrival(identity), candidate, route: candidate.filed });
 				}
-				return mostSpecific(
-					path,
-					(prefix) => filings.get(prefix) ?? [],
-					(candidate) => ({ identity: candidate.identity, route: candidate.filed }),
-				);
+				return bestOfTier(path, filed)?.candidate;
 			};
 			if (reader.claims) {
 				// Each instance's pick, as a consume pinned to it makes, from one pass over the claims.

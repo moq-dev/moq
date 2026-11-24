@@ -3,6 +3,7 @@ import { yieldNow } from "@moq/clock";
 import { getter, Once, race, Signal } from "@moq/signals";
 import { announcedView } from "./announced.test-util";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
+import { askedFirst } from "./claim.test-util.ts";
 import { defined } from "./defined.test-util.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import { type Cost, toHop, WireRoute } from "./hop.ts";
@@ -3048,17 +3049,7 @@ test("a scope's root row presents the tied claim a request holds", async () => {
 		held.identity,
 	);
 	const request = origin.consume().request(Path.from("src/a"));
-	const which = await Promise.race([
-		older
-			.requested()
-			.next()
-			.then(() => "older"),
-		newer
-			.requested()
-			.next()
-			.then(() => "newer"),
-	]);
-	expect(which).toBe("older");
+	expect(await askedFirst(Path.from("src/a"), [older, newer])).toBe(older);
 	request.close();
 	older.close();
 	newer.close();

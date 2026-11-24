@@ -4,6 +4,7 @@ import { Manual } from "@moq/clock/test";
 import { type Getter, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
+import { askedFirst } from "../claim.test-util.ts";
 import { accept as acceptSession, connect as connectSession } from "../connection/index.ts";
 import { defined } from "../defined.test-util.ts";
 import { fromTransport, ProtocolViolation, SessionCode, StreamCode, StreamError, toStreamCode } from "../error.ts";
@@ -4921,17 +4922,7 @@ test("a lite-07 answer shows the most specific of the claims filed at a grant", 
 
 			// A request there resolves through the same claim.
 			const request = origin.consume().request(Path.join(asked, Path.from("x")));
-			const which = await Promise.race([
-				narrow
-					.requested()
-					.next()
-					.then(() => "narrow"),
-				broad
-					.requested()
-					.next()
-					.then(() => "broad"),
-			]);
-			expect(which).toBe("narrow");
+			expect(await askedFirst(Path.join(asked, Path.from("x")), [narrow, broad])).toBe(narrow);
 			request.close();
 		} finally {
 			narrow.close();
@@ -4968,16 +4959,7 @@ test("a lite-07 rooted answer shows the claim a request for its root takes", asy
 			}
 			const starts = msgs.flatMap((msg) => (msg.status === "start" ? [msg.instance] : []));
 			const request = origin.consume().request(root);
-			const which = await Promise.race([
-				shallow
-					.requested()
-					.next()
-					.then(() => shallow.instance),
-				deep
-					.requested()
-					.next()
-					.then(() => deep.instance),
-			]);
+			const which = (await askedFirst(root, [shallow, deep])).instance;
 			expect(starts).toEqual([which]);
 			request.close();
 		} finally {
@@ -5019,16 +5001,7 @@ test("a lite-07 rooted answer beneath its root shows the claim a request for tha
 			}
 			const starts = msgs.flatMap((msg) => (msg.status === "start" ? [msg.instance] : []));
 			const request = origin.consume().request(Path.from("src/a/x"));
-			const which = await Promise.race([
-				shallow
-					.requested()
-					.next()
-					.then(() => shallow.instance),
-				deep
-					.requested()
-					.next()
-					.then(() => deep.instance),
-			]);
+			const which = (await askedFirst(Path.from("src/a/x"), [shallow, deep])).instance;
 			expect(starts).toEqual([which]);
 			request.close();
 		} finally {
@@ -5059,7 +5032,7 @@ test("a lite-07 rooted answer passes over a broadcast published above its root",
 		const starts = msgs.flatMap((msg) => (msg.status === "start" ? [msg.instance] : []));
 		expect(starts).toEqual([filed.instance]);
 		const request = origin.consume().request(Path.from("src/a"));
-		await filed.requested().next();
+		await askedFirst(Path.from("src/a"), [filed]);
 		request.close();
 	} finally {
 		broadcast.close();
@@ -5091,17 +5064,7 @@ test("a lite-07 rooted answer shows the most specific claim filed on either side
 		expect(starts.map((msg) => msg.instance)).toEqual([narrow.instance]);
 
 		const request = origin.consume().request(Path.from("a/b/c/d/x"));
-		const which = await Promise.race([
-			narrow
-				.requested()
-				.next()
-				.then(() => "narrow"),
-			broad
-				.requested()
-				.next()
-				.then(() => "broad"),
-		]);
-		expect(which).toBe("narrow");
+		expect(await askedFirst(Path.from("a/b/c/d/x"), [narrow, broad])).toBe(narrow);
 		request.close();
 	} finally {
 		narrow.close();

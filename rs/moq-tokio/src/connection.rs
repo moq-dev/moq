@@ -1141,9 +1141,9 @@ impl Connection {
 	/// GOAWAY ("reconnect to me"), until the peer closes it or it carries no
 	/// subscription or fetch ([`moq_net::Session::idle`]) and no [`Hold`] is left,
 	/// when this side closes it as [`close`](Self::close) does. A peer relay never
-	/// closes it on its own: it ranks the session's routes below every other available one of
-	/// their claim that is not draining and keeps serving it, so its readers move to another route and the session
-	/// goes idle.
+	/// closes it on its own: it ranks the session's routes as draining, below every eligible
+	/// route of their claim that is not, and keeps serving it, so its readers can move to another
+	/// route and the session go idle; with no such route, they stay until `timeout`.
 	///
 	/// At `timeout` the session is closed with [`moq_net::Error::GoawayTimeout`] on
 	/// this side's own timer, so a peer stalling the GOAWAY's write, or still reading

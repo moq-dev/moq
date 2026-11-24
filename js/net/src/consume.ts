@@ -62,6 +62,29 @@ export class BroadcastCache {
 	#blind = new Map<Path.Valid, Blind>();
 	#blindPrefixes = new Map<Path.Valid, Set<Path.Valid>>();
 	#paths = new Map<Path.Valid, Set<Path.Valid>>();
+	// The prefixes a batch changed, rechecked once it ends.
+	#batched?: Set<Path.Valid>;
+
+	/**
+	 * Apply several changes as one: each path they touch is rechecked once, after the last, so
+	 * a selection that only passes through another route on the way never retires a request.
+	 */
+	batch(apply: () => void): void {
+		if (this.#batched) {
+			apply();
+			return;
+		}
+		const batched = new Set<Path.Valid>();
+		this.#batched = batched;
+		try {
+			apply();
+		} finally {
+			this.#batched = undefined;
+		}
+		const paths = new Set<Path.Valid>();
+		for (const prefix of batched) for (const path of this.#paths.get(prefix) ?? []) paths.add(path);
+		for (const path of paths) this.#check(path);
+	}
 
 	/** Record this interest's live advertisement, preserving identity across route updates. */
 	announce(path: Path.Valid, owner: object, route: WireRoute, restart = false): void {
@@ -204,6 +227,10 @@ export class BroadcastCache {
 	}
 
 	#update(prefix: Path.Valid): void {
+		if (this.#batched) {
+			this.#batched.add(prefix);
+			return;
+		}
 		for (const path of this.#paths.get(prefix) ?? []) this.#check(path);
 	}
 

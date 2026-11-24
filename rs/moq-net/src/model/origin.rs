@@ -1084,6 +1084,8 @@ struct Delivered {
 	/// path from a restart; see [`lite06_churn::falls_back`].
 	publisher: Option<Hop>,
 	rank: (Cost, usize),
+	/// Whether a ranked cursor delivered the route draining; see [`Delivered::drains`].
+	draining: bool,
 }
 
 impl Delivered {
@@ -1092,8 +1094,21 @@ impl Delivered {
 			instance: meta.3.clone(),
 			publisher: lite06_churn::publisher(&meta.0),
 			rank: (meta.1, meta.0.len()),
+			draining: draining(meta),
 		}
 	}
+
+	/// Whether `meta` is the route starting to drain, which the update hold never delays: it
+	/// damps path hunting, which a drain is not, and a peer closing within the hold would
+	/// end the route before a ranked cursor's reader learned it drains.
+	fn drains(&self, meta: &RouteMeta) -> bool {
+		!self.draining && draining(meta)
+	}
+}
+
+/// Whether a ranked cursor delivers `meta` draining.
+fn draining(meta: &RouteMeta) -> bool {
+	meta.9.is_some_and(|(draining, _)| draining)
 }
 
 /// A pending update's hold, kept with it in its [`Routes`]'s queue.
@@ -1405,7 +1420,11 @@ impl OriginConsumerState {
 			let pending = self.pending.get_mut(prefix).unwrap();
 			let wake = match pending.update.as_ref().unwrap() {
 				PendingUpdate::Announce((meta, _))
-					if self.delivered.contains_key(prefix) && lite06_churn::hunts(&meta.0, meta.6) =>
+					if self
+						.delivered
+						.get(prefix)
+						.is_some_and(|delivered| !delivered.drains(meta))
+						&& lite06_churn::hunts(&meta.0, meta.6) =>
 				{
 					pending.hold(now, hold)
 				}
@@ -1714,13 +1733,15 @@ pub(crate) fn filed(scope: &Prefixes, requested: &Path, publishes: impl Fn(&Path
 	if scope.matches(requested.as_str()) {
 		return vec![(requested.clone(), 0)];
 	}
-	let depth = requested.depth();
+	// Count segments, not every `/` as the wire limit does: an escaped `/` must not push the
+	// claim's own prefix (`RouteEntry::claimed`) above the requested one.
+	let segments = requested.parts().count();
 	(scope.iter())
 		// A prefix too long for a path holds nothing a request could name.
 		.filter_map(|prefix| Path::new(prefix.as_str()).ok())
 		.filter(|prefix| prefix.has_prefix(requested) && prefix.depth() <= Path::MAX_PARTS && publishes(prefix))
 		.map(|prefix| {
-			let below = u8::try_from(prefix.depth() - depth).expect("a path has at most 32 segments");
+			let below = u8::try_from(prefix.parts().count() - segments).expect("a path has at most 32 segments");
 			(prefix, below)
 		})
 		.collect()
@@ -7641,6 +7662,11 @@ impl Requesting {
 	pub fn poll_ok(&mut self, waiter: &kio::Waiter) -> Poll<Result<broadcast::Consumer, Error>> {
 		loop {
 			if let Some(discovery) = &mut self.discovery {
+				// Sync is an event, not a deadline: sessions hold it from the moment the
+				// interest is created until the initial announcement set is delivered. Read it
+				// before draining the routes, so a session delivering its set and syncing
+				// between the two reads never leaves that set unseen.
+				let synced = discovery.poll_synced(waiter).is_ready();
 				loop {
 					match discovery.poll_next(waiter) {
 						Poll::Ready(Some(RouteEvent {
@@ -7655,9 +7681,6 @@ impl Requesting {
 						Poll::Pending => break,
 					}
 				}
-				// Sync is an event, not a deadline: sessions hold it from the moment the
-				// interest is created until the initial announcement set is delivered.
-				let synced = discovery.poll_synced(waiter).is_ready();
 				// The winner says nothing of a pinned instance, which follows its own routes: a pinned
 				// request concludes only from a lookup the routes have not moved since.
 				let absent = self.instance.is_none() && !self.routed;
@@ -11702,13 +11725,31 @@ mod tests {
 		let filed = producer.forward("src/a", claim_route(&pinned, 10, 1, 5)).unwrap();
 		let _made = producer.forward("src", claim_route(&other, 11, 0, 1)).unwrap();
 		drop(snapshot);
-		let (result, request) = futures::join!(
-			kio::clock::timeout(Duration::from_secs(1), pending),
-			kio::clock::timeout(Duration::from_secs(1), queued(&filed)),
+		let answer = async {
+			let request = kio::clock::timeout(Duration::from_secs(1), queued(&filed))
+				.await
+				.expect("the pinned instance was never asked");
+			assert_eq!(request.path().as_str(), "src/a/b");
+			let source = broadcast::Info::new().produce();
+			request.serve(&source);
+			source
+		};
+		let (result, _source) = futures::join!(kio::clock::timeout(Duration::from_secs(1), pending), answer);
+		let resolved = result.expect("the pinned request never resolved").expect("resolves");
+		assert_eq!(resolved.info().instance, Some(pinned));
+	}
+
+	/// An escaped `/` belongs to its segment, so a claim filed beneath a scope's escaped prefix
+	/// sits one segment below its own prefix, not two, and keeps that prefix's tier.
+	#[test]
+	fn a_filing_counts_an_escaped_slash_as_part_of_its_segment() {
+		let mut scope = Prefixes::new();
+		scope.insert(r"src/a\/b".parse().unwrap());
+		let requested = Path::new("src").unwrap();
+		assert_eq!(
+			filed(&scope, &requested, |_| true),
+			[(Path::new(r"src/a\/b").unwrap(), 1)]
 		);
-		let request =
-			request.unwrap_or_else(|_| panic!("the pinned instance was never asked: {:?}", result.map(|r| r.err())));
-		assert_eq!(request.path().as_str(), "src/a/b");
 	}
 
 	/// Claims of one tier filed at different depths that tie through every rank hash on the path
@@ -11917,15 +11958,15 @@ mod tests {
 
 	/// A route learned over an older version reaches the route node with its link priority
 	/// and its drain, so the claim this node announces for it ranks as the route does here.
-	/// A drain that changes nothing a reader sees still reaches the node.
+	/// A drain that changes nothing a reader sees still reaches the node, at once: the update
+	/// hold damps path hunting, which a drain is not, and a peer closing within the hold would
+	/// otherwise end the route before the node ever learned it drains.
 	#[test]
 	fn the_route_node_learns_a_bridged_routes_priority_and_drain() {
 		use crate::route::relay;
-		let producer = Config {
-			update_hold: Duration::ZERO,
-			..Config::from(origin(1))
-		}
-		.produce();
+		let config = Config::from(origin(1));
+		assert!(!config.update_hold().is_zero());
+		let producer = config.produce();
 		let route = RouteInfo::new().with_hops(hops(&[10])).with_cost(3);
 		let bridged = (producer.clone().with_link(Link::Peer))
 			.with_priority(Priority::new(-5))
