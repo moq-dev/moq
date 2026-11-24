@@ -1862,12 +1862,13 @@ export class Publisher {
 			return key;
 		};
 
-		// Lite-07: the first group from `from` the cursor served or dropped, undefined while it has
-		// yet to reach the next group held here in its ranges. It passes the keys the cursor told
-		// start none, the stale runs still held, and those no group held here starts at, which a
-		// group arriving later may take: the source's feed accounts for that. Mirrors the Rust
-		// `TrackRun::first_group`.
-		const firstGroup = (from: bigint): bigint | Wait => {
+		// Lite-07: the first group from `from` before `end` the cursor served or dropped, or what that
+		// waits on: the cursor reaching the next group held here in its ranges, or a group held at
+		// all. It passes the keys the cursor told start none, the stale runs still held, and those no
+		// group held here starts at, which a group arriving later may take: the source's feed
+		// accounts for that. A walk reaching `end` waits there, or at a key it passed that a group may
+		// still take. Mirrors the Rust `TrackRun::first_group`.
+		const firstGroup = (from: bigint, end: bigint | undefined): bigint | Wait => {
 			let at = from;
 			// The first key passed with no group held there, where one arriving changes the answer.
 			let gap: bigint | undefined;
@@ -1875,6 +1876,8 @@ export class Publisher {
 			const wait = (wait: Wait): Wait => (gap === undefined ? wait : { held: gap });
 			for (;;) {
 				at = passStale(at);
+				// A group past the range's end is not its start, whatever a sibling was told there.
+				if (end !== undefined && at >= end) return wait({ held: at });
 				const report = record?.reportAt(at);
 				if (report?.kind === "skip") {
 					at = report.end;
@@ -1896,19 +1899,24 @@ export class Publisher {
 			}
 		};
 
-		// Lite-07: where a range starting at or past group `from` starts, undefined until this hop
-		// knows. On a copy placing each range as its upstream answered, one reaching back to the
+		// Lite-07: where a range starting at or past group `from`, and ending before `end`, starts, or
+		// what that waits on until this hop knows. On a copy placing each range as its upstream answered, one reaching back to the
 		// oldest group takes that upstream's answer to a range asked from the oldest group, or else
 		// where the copy's whole feed starts. Anywhere else, a range starts at the first group from
 		// `from` the cursor served or dropped, unless the source's feed starts lower. Once nothing
 		// more arrives, it starts at the feed or the floor. Mirrors the Rust `TrackRun::first_start`.
-		const firstStart = (from: bigint, source: Source, finished: boolean): bigint | Wait => {
+		const firstStart = (
+			from: bigint,
+			end: bigint | undefined,
+			source: Source,
+			finished: boolean,
+		): bigint | Wait => {
 			if (source.upstream && source.oldest !== undefined) return max(from, source.oldest);
 			if (source.feed === "pending" && !finished) return "track";
 			const feed =
 				source.feed === "pending" || source.feed === undefined ? undefined : passStale(max(from, source.feed));
 			if (source.upstream && feed !== undefined) return feed;
-			const first = firstGroup(from);
+			const first = firstGroup(from, end);
 			if (typeof first === "bigint") return feed === undefined ? first : min(feed, first);
 			if (!finished) return first;
 			return feed ?? max(from, floor);
@@ -2001,13 +2009,12 @@ export class Publisher {
 					if (ask?.joins !== undefined) placed = hooks.joinStart(track, range.start, ask.joins);
 					else if (range.floored && upstream) placed = range.start;
 					else {
-						placed = firstStart(range.start, source, finished);
+						placed = firstStart(range.start, range.end, source, finished);
 						// A walk that passed a bounded range's end left no key in it a group may still
 						// take, so nothing more can arrive for it, whatever its siblings still wait on.
-						const key =
-							typeof placed === "object" ? ("told" in placed ? placed.told : placed.held) : undefined;
+						const key = typeof placed === "object" && "held" in placed ? placed.held : undefined;
 						if (key !== undefined && range.end !== undefined && key >= range.end)
-							placed = firstStart(range.start, source, true);
+							placed = firstStart(range.start, range.end, source, true);
 					}
 					if (typeof placed !== "bigint") {
 						waits.park(id, placed);

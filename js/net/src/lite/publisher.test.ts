@@ -1042,6 +1042,31 @@ test("lite-07 a range starts at a group arriving below the first held", async ()
 // A bounded range whose own keys are all accounted for is answered as it would be alone, while an
 // open sibling still waits for a group. Mirrors the Rust
 // `lite07_a_bounded_range_is_answered_beside_an_open_one`.
+// A bounded range whose first held group lies past its end waits for a group arriving below that,
+// even once a sibling has been served that group. Mirrors the Rust
+// `lite07_a_bounded_range_waits_past_a_group_a_sibling_was_served`.
+test.each([[false], [true]])(
+	"lite-07 a bounded range waits past a group a sibling was served (sibling %p)",
+	async (sibling) => {
+		const version = Version.DRAFT_07;
+		const ranges: Subscribe["ranges"] = [{ end: { absolute: 5n } }];
+		if (sibling) ranges.push({ start: { absolute: 10n } });
+		const sub = await servedSubscription({ version, prefill: [10n], ranges });
+		try {
+			await flush();
+			sub.serve(2n);
+			for (;;) {
+				const resp = await decodeSubscribeResponse(sub.client.reader, version);
+				if (!("start" in resp) || resp.start.id !== 0n) continue;
+				expect(resp.start.start).toBe(2n);
+				break;
+			}
+		} finally {
+			await sub.close();
+		}
+	},
+);
+
 test.each([[false], [true]])("lite-07 a bounded range is answered beside an open one (sibling %p)", async (sibling) => {
 	const version = Version.DRAFT_07;
 	const ranges: Subscribe["ranges"] = [{ start: { absolute: 5n }, end: { absolute: 6n } }];

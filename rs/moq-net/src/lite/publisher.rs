@@ -6107,7 +6107,7 @@ impl TrackRun {
 			// A walk that passed a bounded range's end left no key in it a group may still take, so
 			// nothing more can arrive for it, whatever its siblings still wait on.
 			let end = resolved.map_or(waits.and_then(|(_, end)| end), |resolved| resolved.end);
-			if let Err(Wait::Told(key) | Wait::Held(key)) = placed
+			if let Err(Wait::Held(key)) = placed
 				&& end.is_some_and(|end| key >= end)
 			{
 				placed = self.place(asked, resolved, waits, &source, true);
@@ -6150,7 +6150,7 @@ impl TrackRun {
 			// leaves one: whichever group contains it is out of range, so the range starts at the
 			// first group from the floor.
 			None => match waits {
-				Some((time, end)) if time <= self.floor => (self.first_start(self.floor, source, finished))
+				Some((time, end)) if time <= self.floor => (self.first_start(self.floor, end, source, finished))
 					.map(|start| end.is_none_or(|end| end > start).then_some(start)),
 				_ if finished => Ok(None),
 				_ => Err(Wait::Placed(waits.map(|(time, _)| time))),
@@ -6178,11 +6178,11 @@ impl TrackRun {
 		if resolved.floored && source.upstream {
 			return Ok(resolved.start);
 		}
-		self.first_start(resolved.start, source, finished)
+		self.first_start(resolved.start, resolved.end, source, finished)
 	}
 
-	/// Where a range starting at or past group `from` starts, or what that waits on until this
-	/// hop knows.
+	/// Where a range starting at or past group `from`, and ending before `end`, starts, or what
+	/// that waits on until this hop knows.
 	///
 	/// On a copy placing each range as its upstream answered, one reaching back to the oldest
 	/// group takes that upstream's answer to a range asked from the oldest group, or else where
@@ -6191,7 +6191,7 @@ impl TrackRun {
 	/// start where the range names, and a relay caches groups in upstream arrival order, where
 	/// a newer group's stream can beat an older one. Once nothing more arrives, it starts at
 	/// the feed or the floor, and the drops account for what is missing.
-	fn first_start(&mut self, from: u64, source: &Source, finished: bool) -> Result<u64, Wait> {
+	fn first_start(&mut self, from: u64, end: Option<u64>, source: &Source, finished: bool) -> Result<u64, Wait> {
 		if source.upstream
 			&& let Some(answered) = source.oldest
 		{
@@ -6207,7 +6207,7 @@ impl TrackRun {
 		{
 			return Ok(feed);
 		}
-		match (feed, self.first_group(from)) {
+		match (feed, self.first_group(from, end)) {
 			(feed, Ok(told)) => Ok(feed.map_or(told, |feed| feed.min(told))),
 			(Some(feed), Err(_)) if finished => Ok(feed),
 			(None, Err(_)) if finished => Ok(from.max(self.floor)),
@@ -6224,17 +6224,22 @@ impl TrackRun {
 		key
 	}
 
-	/// The first group from `from` the cursor served or dropped, or what that waits on: the
-	/// cursor reaching the next group held here in its ranges, or a group held at all. It
-	/// passes the keys the cursor told start none, the stale runs still withheld, and those no
-	/// group held here starts at, which a group arriving later may take: the source's feed
-	/// accounts for that (see [`Self::first_start`]).
-	fn first_group(&mut self, from: u64) -> Result<u64, Wait> {
+	/// The first group from `from` before `end` the cursor served or dropped, or what that
+	/// waits on: the cursor reaching the next group held here in its ranges, or a group held at
+	/// all. It passes the keys the cursor told start none, the stale runs still withheld, and
+	/// those no group held here starts at, which a group arriving later may take: the source's
+	/// feed accounts for that (see [`Self::first_start`]). A walk reaching `end` waits there,
+	/// or at a key it passed that a group may still take.
+	fn first_group(&mut self, from: u64, end: Option<u64>) -> Result<u64, Wait> {
 		let mut at = from;
 		// The first key passed with no group held there, where one arriving changes the answer.
 		let mut gap = None;
 		let wait = loop {
 			at = self.pass_stale(at);
+			// A group past the range's end is not its start, whatever a sibling was told there.
+			if end.is_some_and(|end| at >= end) {
+				break Wait::Held(at);
+			}
 			match self.track.record().report_at(at) {
 				Some((end, Report::Skip)) => at = end,
 				Some(_) => return Ok(at),
@@ -10185,6 +10190,38 @@ mod serve_group_test {
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		assert_eq!(run.ctx.outcomes.opened.load(Ordering::Relaxed), 1, "group 2 is served");
 		assert_eq!(starts(&responses(&mut writer, &log).await), [(0, Some(2))]);
+	}
+
+	/// A bounded range whose first held group lies past its end waits for a group arriving
+	/// below that, even once a sibling has been served that group.
+	#[kio::test]
+	async fn lite07_a_bounded_range_waits_past_a_group_a_sibling_was_served() {
+		let mut answers = Vec::new();
+		for sibling in [false, true] {
+			let mut track = track::Producer::new(
+				Arc::new(broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed(),
+			);
+			write_group(&mut track, 10, 10_000);
+			let mut ranges = vec![lite::Range::span(None, 0, Some(4), None)];
+			if sibling {
+				ranges.push(lite::Range::span(Some(10), 0, None, None));
+			}
+			let (mut run, mut writer, log) = lite07_run_ranges(&track, &ranges);
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			let mut answer = vec![starts(&responses(&mut writer, &log).await)];
+
+			write_group(&mut track, 2, 2_000);
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			answer.push(starts(&responses(&mut writer, &log).await));
+			for starts in &mut answer {
+				starts.retain(|(id, _)| *id == 0);
+			}
+			answers.push(answer);
+		}
+		assert_eq!(answers[0], [vec![], vec![(0, Some(2))]], "alone");
+		assert_eq!(answers[1], answers[0], "a served sibling changes nothing");
 	}
 
 	/// A bounded range whose own keys are all accounted for is answered as it would be alone,
