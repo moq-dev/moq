@@ -7176,6 +7176,7 @@ pub struct CoverageBench {
 	drops: Vec<(Range<u64>, StreamError)>,
 	/// The lowest group [`Self::stale`]'s open range holds.
 	stale: u64,
+	/// The far end of the session, held open; a test reads the subscribe stream from it.
 	_peer: crate::transport::memory::Session,
 }
 
@@ -10410,20 +10411,41 @@ mod serve_group_test {
 		assert_eq!(starts(&responses(&mut writer, &log).await), [(0, Some(2))]);
 	}
 
-	/// The `publisher_stale` bench gives up stale groups that a started range owes, which names
-	/// each, whether or not another range still waits for its start.
+	/// The `publisher_stale` bench gives up stale groups that a started range owes, each named
+	/// in a SUBSCRIBE_DROP, whether or not another range still waits for its start.
 	#[kio::test]
 	async fn the_stale_bench_names_each_stale_group() {
+		use crate::transport::poll::{self, Session as _};
 		for waiting in [false, true] {
 			let mut bench = CoverageBench::stale(4, waiting);
+			let waiter = kio::Waiter::noop();
+			let Poll::Ready(Ok(mut stream)) = bench._peer.poll_accept_uni(&waiter) else {
+				panic!("the subscribe stream opened first");
+			};
+			let mut read = |bench: &mut CoverageBench| {
+				assert!(bench.writer.poll_flush(&waiter).is_ready(), "flushed");
+				let mut wire = Vec::new();
+				while let Poll::Ready(Ok(Some(chunk))) =
+					poll::Chunks::poll_read_chunk(stream.get_mut(), &waiter, usize::MAX)
+				{
+					wire.extend_from_slice(&chunk);
+				}
+				let mut buf = wire.as_slice();
+				let mut drops = Vec::new();
+				while !buf.is_empty() {
+					let (msg, size) = lite::SubscribeResponse::decode_slice(buf, Version::Lite07).unwrap();
+					buf = &buf[size..];
+					if let lite::SubscribeResponse::Drop(drop) = msg {
+						drops.push(drop.groups);
+					}
+				}
+				drops
+			};
+			read(&mut bench);
 			let edge = bench.stale;
 			bench.give_up_stale(3);
-			for key in (1..=3).map(|step| edge - step * 1000) {
-				assert!(
-					matches!(bench.run.track.record().report_at(key), Some((_, Report::Dropped))),
-					"group {key} is named, waiting: {waiting}"
-				);
-			}
+			let named: Vec<_> = (1..=3).map(|step| edge - step * 1000).map(|key| key..key + 1).collect();
+			assert_eq!(read(&mut bench), named, "waiting: {waiting}");
 		}
 	}
 
