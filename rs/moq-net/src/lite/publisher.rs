@@ -6627,11 +6627,11 @@ impl TrackRun {
 		// The subscriber now owes itself everything from the start, so a range given up
 		// above it is named as it would have been after the start. Below it, nothing is owed. The
 		// final runs reaching up to it unbroken are named all the same, so a reader filling below
-		// the start (a relay whose reader reaches lower) learns nothing there exists. Past a stale
-		// run, a group still held, or a key nothing gave up, a final run is settled unnamed, by
-		// this start and every update after it: naming those would send every gap in the track's
-		// history, as a lite-06 track keyed by timestamp holds one per group. A stale run is never
-		// named, so a wider budget may still serve it.
+		// the start (a relay whose reader reaches lower) learns nothing there exists. The rest,
+		// past a stale run, a group still held, or a key nothing gave up, stay untold: naming them
+		// would send every gap in the track's history, as a lite-06 track keyed by timestamp holds
+		// one per group. An update that asks below the start names them then, and a wider budget
+		// may still serve a stale one.
 		let mut reach = start;
 		for (range, hole) in skipped.iter().rev() {
 			if range.start >= reach {
@@ -6644,13 +6644,7 @@ impl TrackRun {
 		}
 		for (range, hole) in skipped.iter() {
 			let below = range.start..range.end.min(reach);
-			match hole.stale_budget() {
-				Some(_) => self.track.record_mut().untell(below),
-				None => {
-					let report = self.report(hole);
-					self.track.record_mut().tell(below, report);
-				}
-			}
+			self.track.record_mut().untell(below);
 			self.forward_range(range.start.max(reach)..range.end, hole, writer)?;
 		}
 		// An end declared while this start was held follows it.
@@ -10746,8 +10740,8 @@ mod serve_group_test {
 
 	/// A join over a long history of gaps, as a lite-06 track keyed by timestamp carries one per
 	/// group, names only the gaps from the group below its start up, and an update keeping its
-	/// budget names none of the rest: they lie past a group its budget skipped, which the
-	/// subscriber is not owed.
+	/// start names none of the rest: they lie past a group its budget skipped, which the
+	/// subscriber is not owed. One lowering its start asks for them, so they are named then.
 	#[kio::test]
 	async fn a_join_names_no_gap_past_a_skipped_group() {
 		for version in [Version::Lite05, Version::Lite06] {
@@ -10770,20 +10764,29 @@ mod serve_group_test {
 				.collect();
 			assert_eq!(below, [(start - 19, start - 1)], "{version:?}: start {start}");
 
-			let named = drops(&mut writer, &log, version).await.len();
-			run.replace(lite::SubscribeUpdate {
+			let update = |start| lite::SubscribeUpdate {
 				wanted_group: None,
 				order: crate::track::Order::Descending,
 				priority: 1,
 				max_delay: Some(Duration::from_millis(100)),
-				ranges: vec![lite::Range::span(Some(0), 0, None, None)],
-			});
+				ranges: vec![lite::Range::span(start, 0, None, None)],
+			};
+			let named = drops(&mut writer, &log, version).await.len();
+			run.replace(update(None));
 			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-			assert_eq!(
-				drops(&mut writer, &log, version).await.len(),
-				named,
-				"{version:?}: after an update"
-			);
+			let after = drops(&mut writer, &log, version).await;
+			assert_eq!(after.len(), named, "{version:?}: an update keeping the start");
+
+			// One lowering the start asks for those keys, so each gap there is named then.
+			run.replace(update(Some(1)));
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			let lowered: Vec<_> = drops(&mut writer, &log, version).await.split_off(named);
+			for key in (0..start - 20).step_by(20) {
+				assert!(
+					lowered.contains(&(key + 1, key + 19)),
+					"{version:?}: gap {key} after a lowered start"
+				);
+			}
 		}
 	}
 

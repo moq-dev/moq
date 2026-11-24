@@ -1991,9 +1991,10 @@ export class Publisher {
 				if (startKey !== undefined && skipped.length > 0) {
 					// Nothing below the start is owed. The final runs reaching up to it unbroken are named all
 					// the same, so a reader filling below the start (a relay whose reader reaches lower) learns
-					// nothing there exists. Past a stale run, a group still held, or a key nothing gave up, a
-					// final run is settled unnamed: naming those would send every gap in the track's history,
-					// as a lite-06 track keyed by timestamp holds one per group. Mirrors the Rust
+					// nothing there exists. The rest, past a stale run, a group still held, or a key nothing
+					// gave up, stay untold: naming them would send every gap in the track's history, as a
+					// lite-06 track keyed by timestamp holds one per group. An update that asks below the start
+					// names them then, and a wider budget may still serve a stale one. Mirrors the Rust
 					// `TrackRun::resolve`.
 					let reach = startKey;
 					for (const range of [...skipped].sort((a, b) =>
@@ -2005,11 +2006,7 @@ export class Publisher {
 					}
 					for (const range of skipped) {
 						const below = min(range.end, reach);
-						if (range.start < below) {
-							// A stale run is untold, so a wider budget may still serve it.
-							if (range.stale !== undefined) record?.untell(range.start, below);
-							else record?.tell(range.start, below, reportOf(range));
-						}
+						if (range.start < below) record?.untell(range.start, below);
 						if (!(await forward(max(range.start, reach), range.end, range))) return false;
 					}
 					skipped.length = 0;

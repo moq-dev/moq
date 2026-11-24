@@ -3547,8 +3547,9 @@ test("runProbe rounds a fractional smoothedRtt instead of killing the stream", a
 });
 
 // A join over a long history of gaps, as a lite-06 track keyed by timestamp carries one per group,
-// names only the gaps from the group below its start up, and an update keeping its budget names none
-// of the rest: they lie past a group its budget skipped, which the subscriber is not owed. Mirrors the Rust
+// names only the gaps from the group below its start up, and an update keeping its start names none
+// of the rest: they lie past a group its budget skipped, which the subscriber is not owed. One lowering
+// its start asks for them, so they are named then. Mirrors the Rust
 // `a_join_names_no_gap_past_a_skipped_group`.
 test("lite draft-06: a join names no gap past a skipped group", async () => {
 	const keys = Array.from({ length: 50 }, (_, i) => BigInt(i * 20));
@@ -3572,11 +3573,21 @@ test("lite draft-06: a join names no gap past a skipped group", async () => {
 		// The gap below the start, then each above it.
 		for (let key = start - 20n; key < 1000n; key += 20n) expect(await drop()).toEqual([key + 1n, key + 20n]);
 
-		// An update keeping the budget names none of the older gaps either: the next drop is a new one.
+		// An update keeping the start names none of the older gaps either: the next drop is a new one.
 		await new SubscribeUpdate({ priority: 1, maxDelay: 100 }).encode(sub.client.writer, Version.DRAFT_06);
 		while (sub.track.subscription.peek()?.priority !== 1) await sub.track.subscription.changed();
 		hooks.dropTrackGroups(sub.track, 1001n, 1020n, { error: new StreamError(StreamCode.NotFound) });
 		expect(await drop()).toEqual([1001n, 1020n]);
+
+		// One lowering the start asks for those keys, so each gap there is named then.
+		await new SubscribeUpdate({ priority: 2, maxDelay: 100, startGroup: 1n }).encode(
+			sub.client.writer,
+			Version.DRAFT_06,
+		);
+		const named = new Set<string>();
+		while (!named.has(String([1n, 20n])) || !named.has(String([start - 39n, start - 20n])))
+			named.add(String(await drop()));
+		for (let key = 0n; key < start - 20n; key += 20n) expect(named.has(String([key + 1n, key + 20n]))).toBe(true);
 	} finally {
 		await sub.close();
 	}
