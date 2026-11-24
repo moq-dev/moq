@@ -3219,7 +3219,7 @@ export class Producer {
 	}
 
 	/**
-	 * Release this producer, like dropping the last Rust producer. Idempotent.
+	 * Release this producer. Idempotent.
 	 *
 	 * With an end declared ({@link finish}, {@link finishAt}, or {@link fail}), the track ends
 	 * there and its subscribers drain to it. Without one, the track aborts: nothing finished it.
@@ -3418,7 +3418,7 @@ export interface Finished {
 	subscribe(options?: Subscription): Subscriber;
 	/** Abort the track; see {@link Producer.abort}. */
 	abort(error: Error): void;
-	/** Release the track, like dropping the last Rust handle; see {@link Producer.close}. */
+	/** Release the track; see {@link Producer.close}. */
 	close(): void;
 }
 
