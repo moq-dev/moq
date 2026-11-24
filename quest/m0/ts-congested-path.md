@@ -27,3 +27,7 @@ include `3d1bb40f2a` (a live join asked upstream per join,
 candidate for the later audio start. Reproduce locally through `quest gate`
 and bisect that range before changing anything; neither run's failure was
 rerun to see whether it repeats.
+
+Decided 2026-11-24 (maintainer, /quest-plan, from
+[moq-dev/moq#9551](https://github.com/moq-dev/moq/pull/9551)): ✅ keep this quest in m0
+(rejected: m1, drop), since it fails every scheduled TS run and m0 owns CI failures on `main`.
