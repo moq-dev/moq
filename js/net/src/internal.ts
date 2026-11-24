@@ -621,6 +621,8 @@ export interface ResumeSource {
 	finished(): Promise<Position>;
 	/** The serving copy's newest buffered frame, which a wire answer names as its edge. */
 	bufferedLargest(): Position | undefined;
+	/** The lowest group any copy holds unread below `below`; see `hooks.lowestUnread`. */
+	lowestUnread(below: bigint): bigint | undefined;
 	/** The serving copy's newest actual object, including metadata retained past cache eviction. */
 	objectLargest(): Position | undefined;
 	/** The serving copy's largest location now, and whether it can still advance. */
@@ -934,6 +936,12 @@ export const hooks: {
 	knowsEdge: (subscriber: Subscriber) => boolean;
 	/** The newest frame still buffered for a subscriber; assigned by `track.ts`. */
 	bufferedLargest: (subscriber: Subscriber) => Position | undefined;
+	/**
+	 * The lowest group the subscriber holds unread below `below`, in its window and whole from the
+	 * frame asked: where a newest-first read's delivery starts. Mirrors the Rust
+	 * `track::Subscriber::lowest_unread`; assigned by `track.ts`.
+	 */
+	lowestUnread: (subscriber: Subscriber, below: bigint) => bigint | undefined;
 	/** The newest actual object received or reported upstream, independent of cache retention. */
 	objectLargest: (subscriber: Subscriber) => Position | undefined;
 	/** Call `fn` with a group's frame count now and on every change; assigned by `group.ts`. */
@@ -1497,6 +1505,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	bufferedLargest: () => {
+		throw new Error("track.ts not loaded");
+	},
+	lowestUnread: () => {
 		throw new Error("track.ts not loaded");
 	},
 	objectLargest: () => {

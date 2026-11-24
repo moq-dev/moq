@@ -813,7 +813,7 @@ test("fill: a bounded reader keeps waiting on a fresh fill once an older one goe
 		write(5n);
 		const requests = track.requests();
 		const reader = track.subscribe(
-			withMax({
+			withMax({ order: "ascending",
 				ranges: [{ start: 0n, end: 5n }],
 				delay: { max: Duration.millis(1000) },
 			}),

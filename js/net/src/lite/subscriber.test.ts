@@ -2958,9 +2958,9 @@ test.each([Version.DRAFT_05, Version.DRAFT_06])("version %p passes received time
 			got.push([group?.start, frame?.payload.length, frame?.timestamp?.value]);
 		}
 		expect(got).toEqual([
-			[3n, 1, 2000],
-			[4n, 1, 1000],
 			[5n, 1, 500],
+			[4n, 1, 1000],
+			[3n, 1, 2000],
 		]);
 		expect((await track.info()).timescale).toBe(Timescale.MILLI);
 		expect(track.closed.peek()).toBeUndefined();

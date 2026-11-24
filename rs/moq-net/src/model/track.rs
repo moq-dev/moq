@@ -11845,7 +11845,7 @@ impl Subscriber {
 		self.poll_group_in(false, admit, waiter)
 	}
 
-	/// The next group in arrival order, or in key order for `ordered`, skipping any
+	/// The next group an arrival read picks, or in key order for `ordered`, skipping any
 	/// already handed out.
 	fn poll_group(&mut self, ordered: bool, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
 		self.poll_group_in(ordered, (ops::Bound::Unbounded, ops::Bound::Unbounded), waiter)
@@ -24341,7 +24341,7 @@ mod test {
 		let producer = track_producer("test", Info::timed());
 		let mut consumer = producer.subscribe(replay()).ordered();
 
-		// Seq 3 arrives first, then seq 5. Both should be returned in arrival order.
+		// Seq 3 arrives first, then seq 5. Both should be returned in key order.
 		producer
 			.create_group(group::Info { start: 3 })
 			.unwrap()

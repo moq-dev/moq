@@ -2278,9 +2278,10 @@ test.each([Version.DRAFT_01, Version.DRAFT_02])(
 		const sub = await servedSubscription({ version, pending: true });
 		try {
 			await sub.accept([0n, 3n, 7n]);
-			expect(await sub.servedHeader()).toBe(0n);
-			expect(await sub.servedHeader()).toBe(3n);
+			// Newest first, the default Group Order these versions cannot change.
 			expect(await sub.servedHeader()).toBe(7n);
+			expect(await sub.servedHeader()).toBe(3n);
+			expect(await sub.servedHeader()).toBe(0n);
 		} finally {
 			await sub.close();
 		}

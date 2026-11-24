@@ -2228,9 +2228,12 @@ export class Publisher {
 						}
 						source = floor;
 					}
-					// Newest-first delivery can put a group ahead of where the source's feed
-					// starts. Preserve that start so a resumed subscriber still waits for the backlog.
-					startKey = min(group.start, source ?? group.start);
+					// Newest first, this reader still holds groups below the first to go out: delivery
+					// starts at the lowest it can serve. A newer group's stream can also beat where the
+					// source's feed starts: preserve that start so a resumed subscriber still waits for
+					// the backlog.
+					const lowest = hooks.lowestUnread(track, group.start) ?? group.start;
+					startKey = min(lowest, source ?? lowest);
 					// A group given up cannot be where the feed starts. Adjacent runs given up with
 					// different errors stay separate, so walk them in order.
 					skipped.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));

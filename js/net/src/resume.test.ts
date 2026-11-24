@@ -303,7 +303,7 @@ test("a returning route backfills below the reader's newest", async () => {
 		await clock.advance(Duration.ZERO);
 		tb.write(10n);
 		tb.write(20n);
-		expect(drain(sub)).toEqual([10n, 20n]);
+		expect(drain(sub)).toEqual([20n, 10n]);
 		ta.write(15n);
 		front.serve(handles[0]);
 		await clock.advance(Duration.ZERO);
@@ -350,7 +350,7 @@ test("a returning route keeps the reader's bounded end across its cap", async ()
 		await clock.advance(Duration.ZERO);
 		tb.write(10n);
 		tb.write(20n);
-		expect(drain(sub)).toEqual([10n, 20n]);
+		expect(drain(sub)).toEqual([20n, 10n]);
 		front.serve(handles[0]);
 		await clock.advance(Duration.ZERO);
 		ta.write(30n);
@@ -405,7 +405,7 @@ test("a resumed reader's replaced ranges reach its serving copy", async () => {
 		tb.write(70n);
 		await clock.advance(Duration.ZERO);
 		// 30 holds time 50, so the new range starts there; 70 is past its end.
-		expect(drain(sub)).toEqual([30n, 55n]);
+		expect(drain(sub)).toEqual([55n, 30n]);
 	} finally {
 		sub.close();
 		front.consumer.close();
@@ -426,6 +426,7 @@ test("a group the window dropped above the serving copy's resume point is backfi
 	ta.write(50n);
 	front.serve(handles[0]);
 	const sub = front.consumer.track("seq").subscribe({
+		order: "ascending",
 		ranges: [
 			{ start: 10n, end: 10n },
 			{ start: 50n, end: 50n },
@@ -644,7 +645,7 @@ test("a backfill through an inner front waits on a copy it replaced", async () =
 	const sub = front.consumer.track("seq").subscribe(withMax({ delay }));
 	try {
 		await clock.advance(Duration.ZERO);
-		expect(drain(sub)).toEqual([6n, 8n]);
+		expect(drain(sub)).toEqual([8n, 6n]);
 		tb.write(6n);
 		tb.write(8n);
 		inner.serve(handles[1]);
@@ -834,7 +835,7 @@ test("a group below the replacement's resume point is backfilled", async () => {
 		tb.write(2n);
 		tb.write(6n);
 		await clock.advance(Duration.ZERO);
-		expect(drain(sub)).toEqual([2n, 6n]);
+		expect(drain(sub)).toEqual([6n, 2n]);
 		tb.write(4n);
 		await clock.advance(Duration.ZERO);
 		expect(drain(sub)).toEqual([4n]);
@@ -1133,7 +1134,7 @@ test("a front's reader places a live join from an answer its copy recorded befor
 		front.serve(a.consume());
 		await settle();
 		await settle();
-		expect(drain(sub)).toEqual([3n, 4n]);
+		expect(drain(sub)).toEqual([4n, 3n]);
 		expect(hooks.requested(ta.producer).joins()).toEqual([]);
 	} finally {
 		sub.close();
@@ -1154,10 +1155,10 @@ test("a bounded read through routes ends once its window is read, across a route
 	front.serve(a.consume());
 	const sub = front.consumer
 		.track("seq")
-		.subscribe(withMax({ delay: { max: null }, ranges: [{ start: 1n, end: 4n }] }));
+		.subscribe(withMax({ order: "ascending", delay: { max: null }, ranges: [{ start: 1n, end: 4n }] }));
 	const floored = front.consumer
 		.track("seq")
-		.subscribe(withMax({ delay: { max: null }, ranges: [{ start: 1n, end: 4n }] }))
+		.subscribe(withMax({ order: "ascending", delay: { max: null }, ranges: [{ start: 1n, end: 4n }] }))
 		.withRange({ start: { included: 3n } });
 	try {
 		expect((await sub.recvGroup())?.start).toBe(1n);
@@ -1209,7 +1210,7 @@ test("a skip under the resume point the local floor keeps out ends the read", as
 		.subscribe(withMax({ delay: { max: Duration.millis(3_600_000) }, ranges: [{ start: 0n, end: 3n }] }));
 	try {
 		await settle();
-		expect(drain(sub)).toEqual([0n, 2n]);
+		expect(drain(sub)).toEqual([2n, 0n]);
 		tb.write(3n);
 		front.serve(b.consume());
 		sub.withRange({ start: { included: 2n }, end: { excluded: 4n } });
@@ -1247,7 +1248,7 @@ test("a kept-out key is asked through an inner front", async () => {
 		.subscribe(withMax({ delay: { max: Duration.millis(3_600_000) }, ranges: [{ start: 0n, end: 3n }] }));
 	try {
 		await settle();
-		expect(drain(sub)).toEqual([0n, 2n]);
+		expect(drain(sub)).toEqual([2n, 0n]);
 		tb.write(3n);
 		inner.serve(b.consume());
 		front.serve(inner.consumer);
@@ -1294,7 +1295,7 @@ test("a skip starting a gap the local floor keeps out ends the read", async () =
 		.subscribe(withMax({ delay: { max: Duration.millis(3_600_000) }, ranges: [{ end: 4n }] }));
 	try {
 		await clock.advance(Duration.ZERO);
-		expect(drain(sub)).toEqual([0n, 3n]);
+		expect(drain(sub)).toEqual([3n, 0n]);
 		tb.write(4n);
 		front.serve(b.consume());
 		sub.withRange({ start: { included: 2n }, end: { excluded: 5n } });
@@ -1343,7 +1344,7 @@ test("a skip split between a replaced and the serving copy ends the read", async
 		.subscribe(withMax({ delay: { max: Duration.millis(3_600_000) }, ranges: [{ end: 5n }] }));
 	try {
 		await clock.advance(Duration.ZERO);
-		expect(drain(sub)).toEqual([0n, 4n]);
+		expect(drain(sub)).toEqual([4n, 0n]);
 		tb.producer.skipGroups(1n, 2n);
 		tb.write(5n);
 		front.serve(b.consume());
@@ -1388,7 +1389,7 @@ test("a kept-out skip a let-go copy knew is asked upstream", async () => {
 		.subscribe(withMax({ delay: { max: Duration.millis(3_600_000) }, ranges: [{ start: 0n, end: 6n }] }));
 	try {
 		await clock.advance(Duration.ZERO);
-		expect(drain(sub)).toEqual([0n, 5n]);
+		expect(drain(sub)).toEqual([5n, 0n]);
 		tb.write(6n);
 		front.serve(b.consume());
 		sub.withRange({ start: { included: 3n }, end: { excluded: 7n } });
@@ -1438,7 +1439,7 @@ test("a kept-out skip the asked copy forgot is asked again", async () => {
 	const sub = front.consumer.track("seq").subscribe({ ranges: [{ start: 0n, end: 6n }] });
 	try {
 		await clock.advance(Duration.ZERO);
-		expect(drain(sub)).toEqual([0n, 5n]);
+		expect(drain(sub)).toEqual([5n, 0n]);
 		tb.write(6n);
 		front.serve(b.consume());
 		sub.withRange({ start: { included: 5n }, end: { excluded: 7n } });
@@ -1512,7 +1513,7 @@ for (const nested of [false, true]) {
 		const sub = front.consumer.track("seq").subscribe({ ranges: [{ start: 0n, end: 6n }] });
 		try {
 			await clock.advance(Duration.ZERO);
-			expect(drain(sub)).toEqual([0n, 5n]);
+			expect(drain(sub)).toEqual([5n, 0n]);
 			tb.write(6n);
 			tb.write(5n);
 			serve(b);
@@ -1573,7 +1574,7 @@ test("a kept-out group is asked once and stays owed", async () => {
 	const subscribed = spyOn(tb.producer, "subscribe");
 	try {
 		await settle();
-		expect(drain(sub)).toEqual([0n, 2n]);
+		expect(drain(sub)).toEqual([2n, 0n]);
 		tb.write(3n);
 		front.serve(b.consume());
 		sub.withRange({ start: { included: 2n }, end: { excluded: 4n } });
@@ -1635,7 +1636,7 @@ test("a window moved down under the cursor keeps one ask", async () => {
 	});
 	try {
 		await clock.advance(Duration.ZERO);
-		expect(drain(sub)).toEqual([10n, 11n]);
+		expect(drain(sub)).toEqual([11n, 10n]);
 		front.serve(b.consume());
 		sub.withRange({ start: { included: 10n }, end: { excluded: 13n } });
 		await clock.advance(Duration.ZERO);
@@ -1690,7 +1691,7 @@ test("a skip behind an inner switch ends the read", async () => {
 		.subscribe(withMax({ delay: { max: Duration.millis(3_600_000) }, ranges: [{ start: 0n, end: 4n }] }));
 	try {
 		await clock.advance(Duration.ZERO);
-		expect(drain(sub)).toEqual([0n, 2n]);
+		expect(drain(sub)).toEqual([2n, 0n]);
 		tb.write(3n);
 		inner.serve(b.consume());
 		await clock.advance(Duration.ZERO);
@@ -1735,7 +1736,7 @@ test("a skip under the local floor ends a single route read", async () => {
 		.withRange({ start: { included: 1n }, end: { excluded: 3n } });
 	try {
 		await settle();
-		expect(drain(sub)).toEqual([1n, 2n]);
+		expect(drain(sub)).toEqual([2n, 1n]);
 		expect(await isPending(sub.recvGroup())).toBe(false);
 		expect(await sub.recvGroup()).toBeUndefined();
 	} finally {
@@ -1834,7 +1835,7 @@ test.each(["conclude", "park"] as const)("a fork made after the front's %s repla
 	front[end]();
 	const fork = parent.fork(withMax({ delay: { max: Duration.millis(10_000) } }));
 	try {
-		expect(drain(fork)).toEqual([0n, 1n]);
+		expect(drain(fork)).toEqual([1n, 0n]);
 	} finally {
 		parent.close();
 		fork.close();
@@ -1859,7 +1860,7 @@ test("a resumed fork has its own preferences and replay cursor", async () => {
 	expect(drain(parent)).toEqual([1n]);
 	const fork = parent.fork(withMax({ priority: 7, delay: { max: Duration.millis(10_000) } }));
 	try {
-		expect(drain(fork)).toEqual([0n, 1n]);
+		expect(drain(fork)).toEqual([1n, 0n]);
 		fork.update({ priority: 9 });
 		expect(parent.subscription.peek()?.priority).toBe(2);
 		expect(fork.subscription.peek()?.priority).toBe(9);
@@ -2006,17 +2007,20 @@ test("a lagging same-instance replica resumes from one publisher's bytes exactly
 			last.writeFrame({ payload: enc.encode(`2.${frame}`), timestamp: Timestamp.unscaled(last.start) });
 		last.finish();
 
-		// The standby holds the complete original while the incumbent cannot pass 1.1.
-		for (let key = 0n; key < 3n; key++) {
+		// The standby holds the complete original while the incumbent cannot pass 1.1, in whatever
+		// order its groups landed.
+		const warmed: bigint[] = [];
+		for (let read = 0; read < 3; read++) {
 			const group = await warm.recvGroup();
 			if (!group) throw new Error("expected a warmed group");
-			expect(group.start).toBe(key);
+			warmed.push(group.start);
 			for (let frame = 0; frame < 4; frame++) {
-				expect(dec.decode((await group.readFrame())?.payload)).toBe(`${key}.${frame}`);
+				expect(dec.decode((await group.readFrame())?.payload)).toBe(`${group.start}.${frame}`);
 			}
 			expect(await group.readFrame()).toBeUndefined();
 			group.close();
 		}
+		expect(warmed.sort((x, y) => Number(x - y))).toEqual([0n, 1n, 2n]);
 		disposeB = serve(origin, b.broadcast, 9n);
 		await clock.advance(Duration.nanos(0));
 		expect(request.active.peek()).toBe(active);
@@ -2070,7 +2074,7 @@ test("a subscription reads on across a same-instance route swap, each group once
 	await swap();
 	expect(request.active.peek()).toBe(active);
 	tb.write(2n);
-	expect(drain(sub)).toEqual([1n, 2n]);
+	expect(drain(sub)).toEqual([2n, 1n]);
 
 	// The replaced route's later groups are the new route's to deliver.
 	ta.write(3n);
@@ -4220,8 +4224,8 @@ test("a resumed reader reports a drop once and still serves a late group", async
 	// Re-created under a run already reported dropped.
 	ta.write(3n);
 	ta.write(4n);
-	expect(recvDisposition(sub)).toBe(3n);
 	expect(recvDisposition(sub)).toBe(4n);
+	expect(recvDisposition(sub)).toBe(3n);
 	expect(recvDisposition(sub)).toBe("idle");
 
 	sub.close();
@@ -4474,8 +4478,8 @@ test("a front serving another front reports the inner serving route's drop", asy
 	// Re-created under a run already reported dropped.
 	ta.write(2n);
 	ta.write(3n);
-	expect(recvDisposition(sub)).toBe(2n);
 	expect(recvDisposition(sub)).toBe(3n);
+	expect(recvDisposition(sub)).toBe(2n);
 	expect(recvDisposition(sub)).toBe("idle");
 
 	sub.close();
@@ -5277,7 +5281,7 @@ test("an arrival read takes a replaced copy's buffered group before the new copy
 	tb.write(2n);
 	front.serve(b.consume());
 	await settle();
-	expect(drain(sub)).toEqual([1n, 2n]);
+	expect(drain(sub)).toEqual([2n, 1n]);
 
 	sub.close();
 	front.consumer.close();
@@ -5409,7 +5413,7 @@ test.each(["lands", "dropped", "expired"])(
 			front.serve(b.consume());
 			await settle();
 			tb.write(3n);
-			expect(drain(sub)).toEqual([2n, 3n]);
+			expect(drain(sub)).toEqual([3n, 2n]);
 			expect(drain(sub)).toEqual([]);
 			expect(ta.producer.demand().wanted.peek()).toBe(true);
 
@@ -5616,7 +5620,7 @@ test("a clean end waits for a group the replaced copy still carries", async () =
 	try {
 		ta.write(0n);
 		ta.write(2n);
-		expect(drain(sub)).toEqual([0n, 2n]);
+		expect(drain(sub)).toEqual([2n, 0n]);
 
 		// The new route has only the group already handed out, and ends there.
 		tb.write(2n);
@@ -5842,7 +5846,7 @@ test.each(["lands", "expired"])(
 		try {
 			ta.write(0n);
 			ta.write(2n);
-			expect(drain(sub)).toEqual([0n, 2n]);
+			expect(drain(sub)).toEqual([2n, 0n]);
 
 			// The new route has only the group already handed out, and ends there. Nothing reads.
 			tb.write(2n);
@@ -5905,7 +5909,7 @@ test.each([
 			sub.withRange({ start: { included: 4n } });
 			await clock.advance(Duration.ZERO);
 			for (let key = 0n; key < 6n; key++) ta.write(key);
-			expect(read()).toEqual([4n, 5n]);
+			expect(read()).toEqual(ordered ? [4n, 5n] : [5n, 4n]);
 
 			if (cached) for (let key = 0n; key < 6n; key++) tb.write(key);
 			front.serve(b.consume());
@@ -5923,7 +5927,7 @@ test.each([
 				expect(read()).toEqual([]);
 				for (let key = 1n; key < 4n; key++) tb.write(key);
 			}
-			expect(read()).toEqual(ordered ? [] : [1n, 2n, 3n]);
+			expect(read()).toEqual(ordered ? [] : [3n, 2n, 1n]);
 			tb.write(7n);
 			expect(read()).toEqual([7n]);
 		} finally {
@@ -6067,7 +6071,7 @@ test("an ended track's reader hands out nothing from the copy served after the e
 	const tb = copy(b);
 	const failure = new StreamError(StreamCode.SessionClosed);
 	front.serve(counted(a, () => Promise.reject(failure)).route);
-	const sub = front.consumer.track("seq").subscribe(withMax({ delay: { max: Duration.millis(3_600_000) } }));
+	const sub = front.consumer.track("seq").subscribe(withMax({ order: "ascending", delay: { max: Duration.millis(3_600_000) } }));
 	try {
 		const open = ta.write(1n, 1, false);
 		ta.write(3n);
@@ -6114,7 +6118,7 @@ test("a retained copy declaring another end after a clean end fails nothing", as
 	try {
 		ta.write(0n);
 		ta.write(2n);
-		expect(drain(sub)).toEqual([0n, 2n]);
+		expect(drain(sub)).toEqual([2n, 0n]);
 
 		// The new route ends at 3, while the old one still owes group 1.
 		tb.write(2n);
@@ -6731,7 +6735,7 @@ test("a failed copy holding a group back is still subscribed afresh", async () =
 			group.close();
 		}
 	}
-	expect(read).toEqual([66n, 67n]);
+	expect(read).toEqual([67n, 66n]);
 	expect(sub.closed.peek()).toBeUndefined();
 
 	sub.close();
@@ -6771,7 +6775,7 @@ test("failed copies holding groups back are each subscribed afresh", async () =>
 	again.write(66n);
 	again.write(67n);
 	await poll();
-	expect(read).toEqual([66n, 67n]);
+	expect(read).toEqual([67n, 66n]);
 	expect(sub.closed.peek()).toBeUndefined();
 
 	sub.close();

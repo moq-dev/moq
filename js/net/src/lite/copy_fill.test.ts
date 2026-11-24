@@ -144,7 +144,7 @@ test("copy fill: lite-07 fills below a start resolved from the budget, as far as
 	try {
 		populate(peer.track);
 		const narrow = peer.remote.track("video").subscribe(NARROW);
-		expect((await narrow.recvGroup())?.start).toBe(3n);
+		expect(sorted(await take(narrow, 2)).map(([key]) => key)).toEqual([3n, 4n]);
 		const before = peer.fetches();
 
 		// The copy cannot tell which budget picked its start, so it fills what this one reaches,
@@ -261,7 +261,7 @@ test("copy fill: lite-06 asks nothing below a start resolved from the budget, an
 	try {
 		populate(peer.track);
 		const narrow = peer.remote.track("video").subscribe(NARROW);
-		expect((await narrow.recvGroup())?.start).toBe(3n);
+		expect(sorted(await take(narrow, 2)).map(([key]) => key)).toEqual([3n, 4n]);
 		const before = peer.fetches();
 
 		// The widened budget has the publisher re-offer them: lite-06 FETCH carries no budget.
@@ -581,15 +581,16 @@ test("copy fill: a group reset to make room ends", async () => {
 		live?.close();
 		// Two groups, so the fill rides the subscription's ranges.
 		const history = remote.track("video").subscribe({ ...WIDE, ranges: [{ start: 0n, end: 1n }] });
-		const group = await history.recvGroup();
-		expect(group?.start).toBe(0n);
+		// The copy's upstream subscription keeps the live reader's Group Order, so either may land first.
+		const got = [await history.recvGroup(), await history.recvGroup()];
+		const group = got.find((held) => held?.start === 0n);
+		const one = got.find((held) => held?.start === 1n);
 		expect(dec.decode((await group?.readFrame())?.payload)).toBe("old 0");
 		await archived;
 
 		// The session resets the group's stream to make room, so the publisher drops it on the
 		// subscription the fill rides.
-		const one = await history.recvGroup();
-		expect(one?.start).toBe(1n);
+		expect(one).toBeDefined();
 		while (await one?.readFrame());
 		// The live stream has finished, so the archived group's is the only one still open.
 		await clock.advance(Duration.ZERO);

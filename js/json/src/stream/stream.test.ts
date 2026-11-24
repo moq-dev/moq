@@ -99,9 +99,9 @@ test("a second group is reported while the first is still open", async () => {
 	const second = track.appendGroup(Time.Timestamp.fromMillis(2));
 	second.writeFrame({ payload: encode({ n: 1 }), timestamp: Time.Timestamp.fromMillis(2) });
 
-	// Read history, so the first group is delivered rather than skipped by the default live join
-	// once a newer group exists.
-	const consumer = new Consumer<Rec>({ track: track.subscribe({ ranges: [{}] }) });
+	// Read history oldest first, so the first group is delivered first rather than skipped by the
+	// default live join once a newer group exists.
+	const consumer = new Consumer<Rec>({ track: track.subscribe({ order: "ascending", ranges: [{}] }) });
 	expect((await consumer.next())?.value).toEqual({ n: 0 });
 	await expect(consumer.next()).rejects.toBeInstanceOf(Rolled);
 

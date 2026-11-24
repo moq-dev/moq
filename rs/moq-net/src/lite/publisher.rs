@@ -4736,12 +4736,14 @@ fn final_key(end: track::Position) -> u64 {
 /// Every group key, for [`poll_recv_next`] to hand out any.
 const ALL: (Bound<u64>, Bound<u64>) = (Bound::Unbounded, Bound::Unbounded);
 
-/// Poll a single [`track::Subscriber`] for the next group (cap-aware, in arrival order).
+/// Poll a single [`track::Subscriber`] for the next group (cap-aware, as an arrival read).
 ///
-/// Groups are served in arrival order (`poll_recv_group`), not key order: on a relay, a
-/// burst can be ingested micro-reordered by the upstream leg, and a key cursor would then
-/// permanently skip the older group even though it is cached and in demand. Staleness is
-/// governed by max age and the subscriber's max delay, not arrival raciness.
+/// Groups are served as an arrival read (`poll_recv_group`) serves them, not by a key cursor:
+/// of the groups held unread, the first in the subscription's Group Order, and never past a
+/// lower one that lands late. On a relay, a burst can be ingested micro-reordered by the
+/// upstream leg, and a key cursor would then permanently skip the older group even though it
+/// is cached and in demand. Staleness is governed by max age and the subscriber's max delay,
+/// not arrival raciness.
 ///
 /// The cursor hands out the next group only if its key lies in `groups`, leaving it in
 /// the cache otherwise, and without `groups` none at all. Either way it then never reports
@@ -6098,7 +6100,7 @@ impl TrackRun {
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
 
-		// One cursor drives the whole subscription: poll the cap-aware arrival-order group.
+		// One cursor drives the whole subscription: poll the cap-aware arrival read.
 		let order = self.ctx.steer_current().order;
 		let stuck = self.stuck();
 		let emit_boundary = self.start.emits_range() && !self.end_sent;

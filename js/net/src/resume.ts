@@ -1376,14 +1376,15 @@ class Reader implements ResumeSource {
 			const dropped = this.#tryDrop(delivered);
 			if (dropped) return dropped;
 		}
-		// The lowest group any copy holds next, in either order: a replaced copy's buffered group
-		// comes before a later one the serving copy already has. Arrival order still delivers a
-		// lower group that truly arrives later.
+		// The first group any copy holds next: the lowest for an ordered read, else the first in
+		// the subscription's Group Order. A replaced copy's buffered group comes before a later one
+		// the serving copy already has. An arrival read still delivers a lower group that truly
+		// arrives later.
 		let owing: Copy[];
 		for (;;) {
-			const lowest = this.#lowest(ordered, delivered);
-			owing = lowest.owing;
-			const next = lowest.next;
+			const first = this.#first(ordered, delivered);
+			owing = first.owing;
+			const next = first.next;
 			if (!next) break;
 			const recv = take(next, ordered, this.#newest === undefined ? undefined : this.#newest + 1n);
 			if (recv.kind === "group") {
@@ -1701,13 +1702,15 @@ class Reader implements ResumeSource {
 		copy.dropped = max(copy.dropped ?? 0n, key + 1n);
 	}
 
-	// The copy whose next group is the lowest deliverable one in the reader's window, dropping any
+	// The copy whose next group is the first deliverable one in the reader's window, dropping any
 	// it holds next that are not, and the copies whose ordered cursor is left on such a group
-	// because the window still owes a lower one that may yet land there.
-	#lowest(ordered: boolean, delivered: Delivered): { next?: Copy; owing: Copy[] } {
-		let lowest: { copy: Copy; key: bigint } | undefined;
+	// because the window still owes a lower one that may yet land there. First is the lowest for an
+	// ordered read, else the first in the subscription's Group Order. Mirrors the Rust `poll_first`.
+	#first(ordered: boolean, delivered: Delivered): { next?: Copy; owing: Copy[] } {
+		let first: { copy: Copy; key: bigint } | undefined;
 		const owing: Copy[] = [];
 		const floor = ordered ? (delivered.runEnd(0n) ?? 0n) : 0n;
+		const ascending = ordered || this.#shell.subscription.peek()?.order === "ascending";
 		for (const copy of this.#copies) {
 			if (!this.#feeds(copy)) continue;
 			for (;;) {
@@ -1721,7 +1724,7 @@ class Reader implements ResumeSource {
 				if (deliverable && this.#inWindow(key)) {
 					// A tie goes to the newer copy, so the serving one hands out its first group and
 					// bounds the copies it replaced.
-					if (!lowest || key <= lowest.key) lowest = { copy, key: key };
+					if (!first || (ascending ? key <= first.key : key >= first.key)) first = { copy, key };
 					break;
 				}
 				// Skipping an ordered cursor past a group the window still owes below would lose it.
@@ -1735,7 +1738,7 @@ class Reader implements ResumeSource {
 				recv.group.close();
 			}
 		}
-		return { next: lowest?.copy, owing };
+		return { next: first?.copy, owing };
 	}
 
 	/**
@@ -2377,6 +2380,15 @@ class Reader implements ResumeSource {
 		this.sync();
 		const serving = this.#serving();
 		return serving && hooks.bufferedLargest(serving.sub);
+	}
+
+	lowestUnread(below: bigint): bigint | undefined {
+		let lowest: bigint | undefined;
+		for (const copy of this.#copies) {
+			const key = hooks.lowestUnread(copy.sub, lowest ?? below);
+			if (key !== undefined) lowest = key;
+		}
+		return lowest;
 	}
 
 	objectLargest(): track.Position | undefined {
