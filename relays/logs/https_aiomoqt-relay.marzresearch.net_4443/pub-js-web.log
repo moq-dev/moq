@@ -1,14 +1,14 @@
-publishing smoke-js-web-4256-6415.hang (fake camera, vite) to https://aiomoqt-relay.marzresearch.net:4443/
+publishing smoke-js-web-4201-13150.hang (fake camera, vite) to https://aiomoqt-relay.marzresearch.net:4443/
 [page] negotiated protocol: moqt-22
-[page] subscribe_namespace written: requestId=2
+[page] subscribe_namespace written: requestId=0
 [page] announced: broadcast=openmoq/ffmpeg/artemis active=true
 [page] announced: broadcast=openmoq/aiomoqt/mtt_00/bbb_4k30/cmaf/h264/1080/30/aac/2 active=true
-[page] announced: broadcast=openmoq/aiomoqt/mtt_00/akamai_cmaf/loc/h264/720/29_97/opus/2 active=true
 [page] announced: broadcast=openmoq/aiomoqt/mtt_00/bbb_4k30/cmaf/h264/1080/30/aac/2/msf/catalog/2000/1/0/alt4 active=true
+[page] announced: broadcast=openmoq/aiomoqt/mtt_00/akamai_cmaf/loc/h264/720/29_97/opus/2 active=true
 [page] announced: broadcast=openmoq/aiomoqt/mtt_00/clock/loc/h264/720/30/aac/2 active=true
 [page] announced: broadcast=openmoq/aiomoqt/mtt_00/clock/cmaf/h264/1080/30/aac/2 active=true
 [page] announced: broadcast=openmoq/aiomoqt/mtt_00/bbb_4k60/loc/h264/1080/60/aac/2 active=true
 [page] announced: broadcast=openmoq/aiomoqt/mtt_00/clock/loc/h264/720/30/opus/2/msf/catalog/2000/dgram active=true
-[page] announced: broadcast=smoke-js-web-4256-6415.hang active=true
-[page] publish ok: broadcast=smoke-js-web-4256-6415.hang track=catalog.json
-[page] publish ok: broadcast=smoke-js-web-4256-6415.hang track=video
+[page] announced: broadcast=smoke-js-web-4201-13150.hang active=true
+[page] publish ok: broadcast=smoke-js-web-4201-13150.hang track=catalog.json
+[page] publish ok: broadcast=smoke-js-web-4201-13150.hang track=video
