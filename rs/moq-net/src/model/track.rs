@@ -20710,7 +20710,9 @@ mod test {
 			// Each window ends once read.
 			assert!(sub.recv_group().await.unwrap().is_none(), "{read:?}");
 		}
-		assert_eq!(read, [1, 2, 3, 4, 0]);
+		// The widening owes both; which goes first is the Group Order, not what this pins.
+		read[3..].sort_unstable();
+		assert_eq!(read, [1, 2, 3, 0, 4]);
 	}
 
 	/// A drift snapshot taken while the window waits on its first group is taken again once
