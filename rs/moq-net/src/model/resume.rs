@@ -2458,10 +2458,12 @@ impl Reader {
 		};
 		// Only a time start a copy placed at a group names it: one that reached back past every
 		// group a copy held, or waits, still looks for the group holding its time.
+		// Only time ranges pay the window lookup, and none allocates unless one is unplaced.
 		let unplaced: Vec<(u64, Option<u64>)> = match replaced {
 			true => (self.mirrored.ranges.iter())
-				.filter(|(key, _)| !self.window.resolved_key(**key).is_some_and(|resolved| resolved.floored))
-				.filter_map(|(_, range)| Some((range.time()?, range.end)))
+				.filter_map(|(key, range)| Some((*key, range.time()?, range.end)))
+				.filter(|(key, ..)| !self.window.resolved_key(*key).is_some_and(|resolved| resolved.floored))
+				.map(|(_, time, end)| (time, end))
 				.collect(),
 			false => Vec::new(),
 		};
