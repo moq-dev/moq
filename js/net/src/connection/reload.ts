@@ -641,9 +641,10 @@ export class Reload {
 						}
 						tokens = signed.tokens;
 						timeout = signed.left;
-						this.tokens.set(tokens);
 					}
 					tokens ??= this.tokens.peek();
+					// A probe's dial signed its own set too, which `answered()` judges from here.
+					if (this.#dials) this.tokens.set(tokens);
 					let connection: Session;
 					const reusing = reached;
 					reached = undefined;
@@ -1160,6 +1161,8 @@ export class Reload {
 
 	/**
 	 * Resolve once the peer first answers the latest {@link tokens}, like Rust's `Tokens::poll_answered`.
+	 * With {@link Dials}, that is the set the latest dial was answered with, none before the first:
+	 * read a refusal from the next dial's `failure` instead.
 	 *
 	 * It covers the tokens the latest set newly presented, or the initial ones before any set:
 	 * each is granted in band, or is the connection credential a dial carried and the peer
