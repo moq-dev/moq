@@ -1095,7 +1095,7 @@ impl Copy {
 			// A time start no copy placed at a group yet waits on the group holding its time,
 			// which starts at or before it and past any group held below it, and on the rest of
 			// its range under the cap. Below the copy's first arrival too: it was asked from there.
-			if reader.unplaced().iter().any(|&(time, last)| {
+			if reader.unplaced().any(|(time, last)| {
 				let held = (self.track.peek_before(time.saturating_add(1))).map_or(0, |group| group.start);
 				let end = last.map_or(end, |last| end.min(last.saturating_add(1)));
 				let groups = held.max(from)..end;
@@ -1153,8 +1153,6 @@ struct Retain<'a> {
 	groups: (u64, Option<u64>),
 	window: &'a Window,
 	groups_read: bool,
-	/// See [`Self::unplaced`].
-	unplaced: std::cell::OnceCell<Vec<(u64, Option<u64>)>>,
 	/// The newest group the serving copy has.
 	edge: Option<u64>,
 	mirrored: &'a Mirrored,
@@ -1171,16 +1169,12 @@ impl Retain<'_> {
 	/// The time starts of the reader's ranges no copy placed at a group yet, each with its
 	/// range's end. Only a time start a copy placed at a group names it: one that reached back
 	/// past every group a copy held, or waits, still looks for the group holding its time.
-	/// Found once, by the first copy still waiting on groups, so a copy only leased costs
-	/// nothing, and only time ranges pay the window lookup.
-	fn unplaced(&self) -> &[(u64, Option<u64>)] {
-		self.unplaced.get_or_init(|| {
-			(self.mirrored.ranges.iter())
-				.filter_map(|(key, range)| Some((*key, range.time()?, range.end)))
-				.filter(|(key, ..)| !self.window.resolved_key(*key).is_some_and(|resolved| resolved.floored))
-				.map(|(_, time, end)| (time, end))
-				.collect()
-		})
+	/// The window rewrites one that reached back to the oldest group, so the time comes from
+	/// the mirrored range. Costs the starts naming no group, nothing once all do.
+	fn unplaced(&self) -> impl Iterator<Item = (u64, Option<u64>)> + '_ {
+		(self.window.unnamed_keys())
+			.filter_map(|key| self.mirrored.ranges.get(&key))
+			.filter_map(|range| Some((range.time()?, range.end)))
 	}
 }
 
@@ -2489,7 +2483,6 @@ impl Reader {
 			groups: self.groups,
 			window: &self.window,
 			groups_read: self.groups_read,
-			unplaced: Default::default(),
 			edge,
 			mirrored: &self.mirrored,
 			delivered,
@@ -11304,6 +11297,7 @@ mod test {
 		sub.update(subscription(&[from(7), waiting])).unwrap();
 		assert_eq!(drain(&mut sub, false), [7]);
 	}
+
 	/// A copy updated while pending, then answering, hands its own resolution of the
 	/// updated ranges to the copy replacing it, rather than leaving the replacement to
 	/// resolve them from whatever it caches.

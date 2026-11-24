@@ -236,8 +236,8 @@ pub(in crate::model) struct Window {
 	/// How many spans start at each group they name, so a probe reads the lowest without a
 	/// walk: see [`Self::named`] and [`Self::start`].
 	named: BTreeMap<u64, usize>,
-	/// How many spans reach back to the oldest group instead of naming one.
-	unnamed: usize,
+	/// The keys of the spans that reach back to the oldest group instead of naming one.
+	unnamed: BTreeSet<u64>,
 }
 
 /// One non-empty range, resolved.
@@ -319,7 +319,7 @@ impl Window {
 			missable: Cover::default(),
 			covered: None,
 			named: BTreeMap::new(),
-			unnamed: 0,
+			unnamed: BTreeSet::new(),
 		};
 		window.place(latest, holdings);
 		window
@@ -553,7 +553,7 @@ impl Window {
 	/// The lowest group the ranges name, `None` while one reaches back to the oldest group
 	/// or an anchor waits.
 	pub fn start(&self) -> Option<u64> {
-		match self.is_pending() || !self.reaching.is_empty() || self.unnamed > 0 {
+		match self.is_pending() || !self.reaching.is_empty() || !self.unnamed.is_empty() {
 			true => None,
 			false => self.lowest_named(),
 		}
@@ -625,6 +625,20 @@ impl Window {
 		keys.extend(self.waiting.iter().map(|(_, key)| *key));
 		keys.extend(self.looking.iter().map(|(_, key)| *key));
 		keys
+	}
+
+	/// The keys of the ranges whose start names no group yet, which [`Self::resolved_key`]
+	/// leaves unresolved or unfloored: waiting on a first group or a live edge, reaching back
+	/// to the oldest group, or waiting on or looking up a time start. Costs those, nothing
+	/// once every start names a group.
+	pub fn unnamed_keys(&self) -> impl Iterator<Item = u64> + '_ {
+		// A span waiting on its time start, or looking one up from the oldest group, is unfloored.
+		let looking = (self.looking.iter())
+			.map(|(_, key)| *key)
+			.filter(|key| self.spans[key].floored);
+		(self.pending.iter().chain(&self.reaching).chain(&self.unnamed))
+			.copied()
+			.chain(looking)
 	}
 
 	/// The exclusive end past every group in range, `None` when one stays open or an anchor
@@ -781,7 +795,7 @@ impl Window {
 		self.groups = Cover::default();
 		self.missable = Cover::default();
 		self.named.clear();
-		self.unnamed = 0;
+		self.unnamed.clear();
 		let keys: Vec<u64> = self
 			.ranges
 			.iter()
@@ -903,7 +917,7 @@ impl Window {
 		}
 		match span.floored {
 			true => *self.named.entry(span.start).or_default() += 1,
-			false => self.unnamed += 1,
+			false => _ = self.unnamed.insert(key),
 		}
 		if let Some(looking) = span.looking {
 			self.looking.insert((looking.time, key));
@@ -930,7 +944,7 @@ impl Window {
 					self.named.remove(&span.start);
 				}
 			}
-			false => self.unnamed -= 1,
+			false => _ = self.unnamed.remove(&key),
 		}
 		if let Some(looking) = span.looking {
 			self.looking.remove(&(looking.time, key));
@@ -1283,8 +1297,27 @@ mod tests {
 				fast.settle(latest, &keys);
 				full.settle(latest, &Blind(&keys));
 				proptest::prop_assert_eq!(seen(&fast), seen(&full));
+				proptest::prop_assert_eq!(unnamed_keys(&fast), unnamed_by_scan(&fast));
+				proptest::prop_assert_eq!(unnamed_keys(&full), unnamed_by_scan(&full));
 			}
 		}
+	}
+
+	/// [`Window::unnamed_keys`], sorted, checking it lists none twice.
+	fn unnamed_keys(window: &Window) -> Vec<u64> {
+		let mut keys: Vec<u64> = window.unnamed_keys().collect();
+		keys.sort_unstable();
+		let len = keys.len();
+		keys.dedup();
+		assert_eq!(keys.len(), len, "a key listed twice");
+		keys
+	}
+
+	/// The keys [`Window::unnamed_keys`] lists, found by resolving every range.
+	fn unnamed_by_scan(window: &Window) -> Vec<u64> {
+		(window.ranges.keys().copied())
+			.filter(|key| !window.resolved_key(*key).is_some_and(|resolved| resolved.floored))
+			.collect()
 	}
 
 	/// A range from time `start`, or reaching back to the oldest group with none.
