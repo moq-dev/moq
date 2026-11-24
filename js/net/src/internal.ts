@@ -463,7 +463,7 @@ export interface Expiry {
 /**
  * Why a group read looks past the copy it reads, as the Rust `resume::Cause`: the copy failed,
  * stalled while a newer route serves, or closed the group short of a known end (a FIN without
- * GROUP_END) after a newer route took over, which may hold more.
+ * GROUP_END) after a newer route took over or while one is being spliced in, which may hold more.
  */
 export type RecoverCause = { kind: "failed"; error: Error } | { kind: "stalled" } | { kind: "closed" };
 
@@ -477,10 +477,10 @@ export interface GroupRecover {
 	/** Release the route held by this group when its consumer closes. */
 	close?(): void;
 	/**
-	 * Whether to look past the copy being read: it failed with `failed` and that is no verdict
-	 * on the group, or (with none) it stalled or closed short while a newer route serves.
+	 * Whether to look past the copy being read for `cause`: it failed and that is no verdict on
+	 * the group, or it stalled or closed short while a newer route serves.
 	 */
-	wants(failed: Error | undefined): boolean;
+	wants(cause: RecoverCause): boolean;
 	/** Wakes a stalled read once the route changes. */
 	readonly changed: Getter<unknown>;
 	/**

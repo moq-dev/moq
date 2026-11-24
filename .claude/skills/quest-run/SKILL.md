@@ -4,4 +4,4 @@ description: Run a project's quest work from one session, starting ready quests 
 ---
 
 Run `quest skill run` and follow its output.
-If `quest` is not installed, follow https://github.com/moq-dev/quest/blob/main/SETUP.md first.
+If `quest` is not installed, follow https://github.com/kixel-ai/quest/blob/main/SETUP.md first.
