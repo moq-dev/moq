@@ -1095,7 +1095,7 @@ impl Copy {
 			// A time start no copy placed at a group yet waits on the group holding its time,
 			// which starts at or before it and past any group held below it, and on the rest of
 			// its range under the cap. Below the copy's first arrival too: it was asked from there.
-			if reader.unplaced.iter().any(|&(time, last)| {
+			if reader.unplaced().iter().any(|&(time, last)| {
 				let held = (self.track.peek_before(time.saturating_add(1))).map_or(0, |group| group.start);
 				let end = last.map_or(end, |last| end.min(last.saturating_add(1)));
 				let groups = held.max(from)..end;
@@ -1153,9 +1153,8 @@ struct Retain<'a> {
 	groups: (u64, Option<u64>),
 	window: &'a Window,
 	groups_read: bool,
-	/// The time starts of the reader's ranges no copy placed at a group yet, each with its
-	/// range's end.
-	unplaced: &'a [(u64, Option<u64>)],
+	/// See [`Self::unplaced`].
+	unplaced: std::cell::OnceCell<Vec<(u64, Option<u64>)>>,
 	/// The newest group the serving copy has.
 	edge: Option<u64>,
 	mirrored: &'a Mirrored,
@@ -1166,6 +1165,23 @@ struct Retain<'a> {
 	/// declared it skipped. Empty for an unbounded reader, which no gap ends early.
 	owed: &'a RangeSet<u64>,
 	waiter: &'a kio::Waiter,
+}
+
+impl Retain<'_> {
+	/// The time starts of the reader's ranges no copy placed at a group yet, each with its
+	/// range's end. Only a time start a copy placed at a group names it: one that reached back
+	/// past every group a copy held, or waits, still looks for the group holding its time.
+	/// Found once, by the first copy still waiting on groups, so a copy only leased costs
+	/// nothing, and only time ranges pay the window lookup.
+	fn unplaced(&self) -> &[(u64, Option<u64>)] {
+		self.unplaced.get_or_init(|| {
+			(self.mirrored.ranges.iter())
+				.filter_map(|(key, range)| Some((*key, range.time()?, range.end)))
+				.filter(|(key, ..)| !self.window.resolved_key(*key).is_some_and(|resolved| resolved.floored))
+				.map(|(_, time, end)| (time, end))
+				.collect()
+		})
+	}
 }
 
 /// How a reader still needs a replaced copy; see [`Copy::retains`].
@@ -2451,21 +2467,9 @@ impl Reader {
 		self.out.retain(|(_, out)| out.strong_count() > 0);
 		// Only a replaced copy is judged against the edge, which costs the serving track's
 		// lock: a reader following one route never pays it.
-		let replaced = self.copies.iter().any(|copy| copy.replaced);
-		let edge = match replaced {
+		let edge = match self.copies.iter().any(|copy| copy.replaced) {
 			true => self.copies.last().and_then(|copy| copy.track.latest_key()),
 			false => None,
-		};
-		// Only a time start a copy placed at a group names it: one that reached back past every
-		// group a copy held, or waits, still looks for the group holding its time.
-		// Only time ranges pay the window lookup, and none allocates unless one is unplaced.
-		let unplaced: Vec<(u64, Option<u64>)> = match replaced {
-			true => (self.mirrored.ranges.iter())
-				.filter_map(|(key, range)| Some((*key, range.time()?, range.end)))
-				.filter(|(key, ..)| !self.window.resolved_key(*key).is_some_and(|resolved| resolved.floored))
-				.map(|(_, time, end)| (time, end))
-				.collect(),
-			false => Vec::new(),
 		};
 		let asking = self.asking(delivered, waiter);
 		let serving = self.copies.last().filter(|copy| !copy.replaced);
@@ -2485,7 +2489,7 @@ impl Reader {
 			groups: self.groups,
 			window: &self.window,
 			groups_read: self.groups_read,
-			unplaced: &unplaced,
+			unplaced: Default::default(),
 			edge,
 			mirrored: &self.mirrored,
 			delivered,
