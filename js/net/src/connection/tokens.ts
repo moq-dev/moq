@@ -287,6 +287,8 @@ export class Verdict {
 	#held?: Held;
 	// Why the loop ended, which answers a set no session will.
 	#closed?: Error;
+	// Whether a dial is waiting for a set of its own from `Dials`, which no answer yet covers.
+	#signing = false;
 	// Why the loop stopped retrying its URL, such as a refused first dial: no session will answer
 	// until a new key dials, so a waiting set fails with it, but it is no verdict to latch.
 	#gaveUp?: Error;
@@ -329,6 +331,24 @@ export class Verdict {
 		this.#dialed = undefined;
 		this.#connected = undefined;
 		this.#release();
+		this.#notify();
+	}
+
+	/** The dial waits for a set of its own (see `Dials`): until it has one, no answer counts. */
+	signing(): void {
+		this.#sync();
+		this.#record();
+		this.#signing = true;
+		this.#latched = undefined;
+		this.#notify();
+	}
+
+	/** The set a dial signed for itself, which is new even when it repeats the last. */
+	signed(tokens: readonly string[]): void {
+		this.#signing = false;
+		this.#tokens = tokens;
+		this.#fresh = [...new Set(tokens)];
+		this.#latched = undefined;
 		this.#notify();
 	}
 
@@ -424,6 +444,7 @@ export class Verdict {
 	#answer(): Error | null | undefined {
 		if (this.#latched) return this.#latched.outcome;
 		if (this.#closed) return this.#closed;
+		if (this.#signing) return undefined;
 		const ended = this.#held?.ended(this.#tokens);
 		if (ended) return ended;
 		const credential = this.#named() === undefined ? undefined : this.#credential();

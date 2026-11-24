@@ -19,6 +19,7 @@ import {
 	type WebSocketProps,
 	type WebTransportProps,
 } from "./connect.ts";
+import { Dials } from "./dials.ts";
 import { parse } from "./endpoint.ts";
 import { DISCOVERY_REMOVED } from "./forward.ts";
 import { DEFAULT_HANDOVER, dialed, type Goaway, type Handover, handover, pinnedTransport, target } from "./goaway.ts";
@@ -108,8 +109,11 @@ export type ReloadProps = Omit<
 	ConnectProps,
 	"url" | "signal" | "transport" | "implementation" | "tokens" | "viewers"
 > & {
-	/** See {@link ConnectProps.tokens}; pass a `Signal` to replace them before they expire. */
-	tokens?: readonly string[] | Signal<readonly string[]>;
+	/**
+	 * See {@link ConnectProps.tokens}; pass a `Signal` to replace them before they expire, or
+	 * {@link Dials} to sign a set for each dial when it starts.
+	 */
+	tokens?: readonly string[] | Signal<readonly string[]> | Dials;
 
 	/** A reload owns the abort signal for each connection attempt. */
 	signal?: never;
@@ -216,9 +220,13 @@ export class Reload {
 	/**
 	 * Credentials every dial presents; see {@link ConnectProps.tokens}. Replacing them reaches
 	 * the next dial and, on a live session with AUTH, presents the new tokens at once,
-	 * withdrawing the replaced ones once every new one has its answer.
+	 * withdrawing the replaced ones once every new one has its answer. With {@link Dials}, the set
+	 * the latest dial signed, which only that dial presents.
 	 */
 	tokens: Signal<readonly string[]>;
+
+	// Where each dial asks for its tokens, instead of reading `tokens`.
+	readonly #dials?: Dials;
 
 	/**
 	 * Current connection status. A session reads as connected only once its peer accepts the
@@ -408,7 +416,9 @@ export class Reload {
 		if (props && "discovery" in props) throw new TypeError(DISCOVERY_REMOVED);
 		this.url = Signal.from(props?.url);
 		this.enabled = Signal.from(props?.enabled ?? true);
-		this.tokens = Signal.from(props?.tokens ?? []);
+		const tokens = props?.tokens ?? [];
+		this.#dials = tokens instanceof Dials ? tokens : undefined;
+		this.tokens = Signal.from(tokens instanceof Dials ? [] : tokens);
 		this.#verdict = new Verdict(this.tokens, this.auth);
 		this.backoff = props?.backoff ?? {};
 		// Validated here, like the timeout, rather than by every retry.
@@ -509,6 +519,8 @@ export class Reload {
 			const tokens = effect.get(this.tokens);
 			// Before the held tokens change, so a token the set kept is judged by what it was.
 			this.#verdict.refresh();
+			// A signed set belongs to its own dial: another session presenting it would spend it.
+			if (this.#dials) return;
 			const connection = effect.get(this.established);
 			if (connection) heldOf(connection)?.update(tokens);
 		});
@@ -600,7 +612,21 @@ export class Reload {
 
 					this.#setDialing(true);
 					this.#verdict.dialing();
-					const tokens = reached?.tokens ?? this.tokens.peek();
+					let tokens = reached?.tokens;
+					if (!tokens && this.#dials) {
+						this.#verdict.signing();
+						try {
+							tokens = await this.#dials.request(dialing, signal);
+						} catch (err) {
+							this.#setDialing(false);
+							throw err;
+						}
+					}
+					tokens ??= this.tokens.peek();
+					if (this.#dials) {
+						this.tokens.set(tokens);
+						this.#verdict.signed(tokens);
+					}
 					let connection: Session;
 					const reusing = reached;
 					reached = undefined;
@@ -813,8 +839,18 @@ export class Reload {
 		try {
 			for (let delay = PROBE_INITIAL; ; delay = delay.mul(2).min(PROBE_MAX)) {
 				await sleep(delay.mul(0.5 + Math.random() / 2), { signal });
+				let tokens = this.tokens.peek();
+				if (this.#dials) {
+					try {
+						tokens = await this.#dials.request(dialing, signal);
+					} catch (err) {
+						if (signal.aborted) throw err;
+						console.warn("could not sign a probe's tokens:", err);
+						continue;
+					}
+				}
 				const props = {
-					tokens: this.tokens.peek(),
+					tokens,
 					urlAuth: this.urlAuth,
 					versions: this.versions,
 					webtransport: this.webtransport,
