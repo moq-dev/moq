@@ -32,6 +32,9 @@ const INFO: track.Info = {
 	refresh: { ratio: null, interval: null },
 };
 
+/** {@link copy}'s track with a different max age, which a front refuses as a replacement. */
+const INFO_REFUSED = { maxAge: Duration.secs(1) };
+
 const INSTANCE = Instance.parse("01900000-0000-7000-8000-000000000001");
 const NEWER = Instance.parse("01900000-0000-7000-8000-000000000002");
 const path = Path.from("live");
@@ -2243,6 +2246,65 @@ for (const taken of ["before", "after"]) {
 
 		sub.close();
 		close();
+	});
+}
+
+/** A route serving `source` whose track info answers only once `gate` resolves, through every handle the front clones. */
+function gated(source: BroadcastProducer, gate: Promise<void>): BroadcastConsumer {
+	class Gated extends BroadcastConsumer {
+		constructor(shared?: never) {
+			super(shared);
+			const original = wireOf(this).resolveTrackInfo;
+			overrideBroadcastWire(this, {
+				resolveTrackInfo: async (name, signal) => {
+					await gate;
+					return original(name, signal);
+				},
+			});
+		}
+
+		override clone(): Gated {
+			return new Gated(this.shareState());
+		}
+	}
+	return new Gated((source.consume() as Gated).shareState());
+}
+
+// The front splices a copy in once its info answers; a short close the serving copy makes
+// meanwhile waits for that answer. Mirrors `a_short_group_waits_for_a_staged_replacement`.
+for (const spliced of [true, false]) {
+	test(`a short group waits for the copy the front is splicing in (spliced: ${spliced})`, async () => {
+		const clock = new Manual();
+		const installed = install(clock);
+		const front = new Front();
+		const sources = [new BroadcastProducer(), new BroadcastProducer()];
+		let answer = () => {};
+		const handles = [sources[0].consume(), gated(sources[1], new Promise((resolve) => (answer = resolve)))];
+		const short = copy(sources[0]).write(0n, 1, false);
+		// A copy claiming other metadata is refused, so the close stands.
+		const next = spliced ? copy(sources[1]) : { producer: defined(sources[1].createTrack("seq", INFO_REFUSED)) };
+		front.serve(handles[0]);
+		const sub = front.consumer.track("seq").subscribe({ ranges: [{}] });
+		try {
+			await clock.advance(Duration.ZERO);
+			const group = sub.tryRecvGroup();
+			if (!group) throw new Error("expected group 0");
+			expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+			front.serve(handles[1]);
+			short.finish();
+			const reading = group.readFrame();
+			expect(await isPending(reading)).toBe(true);
+			if ("write" in next) next.write(0n, 2);
+			answer();
+			if (spliced) expect(dec.decode((await reading)?.payload)).toBe("0.1");
+			expect(await (spliced ? group.readFrame() : reading)).toBeUndefined();
+		} finally {
+			sub.close();
+			front.consumer.close();
+			for (const handle of handles) handle.close();
+			for (const source of sources) source.close();
+			installed.close();
+		}
 	});
 }
 

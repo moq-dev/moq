@@ -1172,7 +1172,9 @@ export class Consumer {
 
 	// Whether a failure of the copy being read may still be continued from another route.
 	#recovers(failed: Error): boolean {
-		return !this.#verdict.peek() && !this.#torn() && this.#recover?.wants(failed) === true;
+		return (
+			!this.#verdict.peek() && !this.#torn() && this.#recover?.wants({ kind: "failed", error: failed }) === true
+		);
 	}
 
 	// Whether the read may go on past a close of the copy being read that names no end (a FIN
@@ -1185,7 +1187,7 @@ export class Consumer {
 		const state = this.#state;
 		if (state.closed.peek() !== null || state.end !== undefined || this.#bufferedFrames().length > 0) return false;
 		if (!decide) return true;
-		if (!this.#torn() && this.#recover.wants(undefined)) return true;
+		if (!this.#torn() && this.#recover.wants({ kind: "closed" })) return true;
 		this.#end();
 		return false;
 	}
@@ -1213,7 +1215,7 @@ export class Consumer {
 	// again. Unless it may `decide`, a close no route took over yet is left for the next read to
 	// judge, as a wait for readability is no read.
 	async #readOn(decide: boolean): Promise<boolean> {
-		if (!this.#continues(false) || (!decide && !this.#recover?.wants(undefined)) || !this.#continues(true))
+		if (!this.#continues(false) || (!decide && !this.#recover?.wants({ kind: "closed" })) || !this.#continues(true))
 			return false;
 		if (this.#expiry?.expired()) {
 			this.#end(true);
@@ -1352,7 +1354,7 @@ export class Consumer {
 	// once nothing can continue it, except past a short close, which then ends where it closed.
 	async #resume(cause: RecoverCause): Promise<boolean> {
 		const recover = this.#recover;
-		if (this.#torn() || !recover?.wants(cause.kind === "failed" ? cause.error : undefined)) return false;
+		if (this.#torn() || !recover?.wants(cause)) return false;
 		// A stall's attempt learns nothing of a failure or close since: ask again with it.
 		if (cause.kind !== "stalled" && this.#attempt && this.#attempt.cause !== cause.kind) this.#abandon();
 		let attempt = this.#attempt;
@@ -1562,7 +1564,7 @@ export class Consumer {
 				return;
 			}
 			if (this.#released || this.#expire()) return;
-			if (this.#recover?.wants(undefined)) {
+			if (this.#recover?.wants({ kind: "stalled" })) {
 				await this.#resume({ kind: "stalled" });
 				continue;
 			}
@@ -1640,7 +1642,7 @@ export class Consumer {
 			// drift budget bounds, and the only place it applies.
 			if (this.#expire()) continue;
 			// A stall while a newer route serves looks there too.
-			if (this.#recover?.wants(undefined)) {
+			if (this.#recover?.wants({ kind: "stalled" })) {
 				await this.#resume({ kind: "stalled" });
 				continue;
 			}

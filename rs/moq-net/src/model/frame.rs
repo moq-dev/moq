@@ -1597,13 +1597,13 @@ impl Consumer {
 				Poll::Pending => None,
 			};
 			let (recover, index) = &mut **recover;
-			if !recover.wants(failed.as_ref(), waiter) {
+			let cause = failed.map_or(super::resume::Cause::Stalled, super::resume::Cause::Failed);
+			if !recover.wants(&cause, waiter) {
 				return res;
 			}
 			if self.state.read().sparse() {
 				return Poll::Ready(Err(Error::Unsupported));
 			}
-			let cause = failed.map_or(super::resume::Cause::Stalled, super::resume::Cause::Failed);
 			let mut replacement = match recover.poll(*index, &cause, waiter) {
 				Poll::Ready(Ok(group)) => group,
 				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),

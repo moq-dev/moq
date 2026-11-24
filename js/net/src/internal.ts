@@ -477,10 +477,10 @@ export interface GroupRecover {
 	/** Release the route held by this group when its consumer closes. */
 	close?(): void;
 	/**
-	 * Whether to look past the copy being read: it failed with `failed` and that is no verdict
-	 * on the group, or (with none) it stalled or closed short while a newer route serves.
+	 * Whether to look past the copy being read for `cause`: it failed and that is no verdict on
+	 * the group, or it stalled or closed short while a newer route serves.
 	 */
-	wants(failed: Error | undefined): boolean;
+	wants(cause: RecoverCause): boolean;
 	/** Wakes a stalled read once the route changes. */
 	readonly changed: Getter<unknown>;
 	/**
