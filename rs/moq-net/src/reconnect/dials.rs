@@ -179,6 +179,9 @@ impl<E> Dial<E> {
 
 impl<E> std::fmt::Debug for Dial<E> {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		f.debug_struct("Dial").field("url", &self.url).finish_non_exhaustive()
+		// The URL may carry a credential, which a log never shows.
+		f.debug_struct("Dial")
+			.field("url", &format_args!("{}", super::redirect::Shown(&self.url)))
+			.finish_non_exhaustive()
 	}
 }

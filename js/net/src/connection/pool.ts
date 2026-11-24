@@ -275,7 +275,7 @@ export class Connection {
 		this.#signals = new Effect();
 		if (props?.tokens instanceof DialsClass) {
 			// One connection answers them: another would sign for this one's dials.
-			if (!props.tokens.claim()) throw new TypeError("these dials already serve another connection");
+			if (props.tokens.claimed) throw new TypeError("these dials already serve another connection");
 			this.#dials = props.tokens;
 		}
 
@@ -298,6 +298,8 @@ export class Connection {
 
 		if (props && (props.share === false || requiresPrivate(props))) {
 			this.#runPrivate(props, href);
+			// Only once nothing above threw, so a rejected config leaves the dials free.
+			this.#dials?.claim();
 			return;
 		}
 

@@ -76,11 +76,14 @@ export class Dials {
 	#claimed = false;
 	#closed = false;
 
-	/** Take these dials for one connection: false once another took them. @internal */
-	claim(): boolean {
-		if (this.#claimed) return false;
+	/** Whether a connection took these dials, which serve one. @internal */
+	get claimed(): boolean {
+		return this.#claimed;
+	}
+
+	/** Take these dials for one connection. @internal */
+	claim(): void {
 		this.#claimed = true;
-		return true;
 	}
 
 	/** The next dial waiting for its tokens, or undefined once the connection closed. */

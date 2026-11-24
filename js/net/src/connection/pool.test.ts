@@ -101,6 +101,8 @@ test("urlAuth: false is the default carrier, so it shares; true needs a private 
 
 test("one Dials serves one connection", () => {
 	const dials = new Connection.Dials();
+	// A config the connection rejects leaves them free.
+	expect(() => new Connection({ tokens: dials, enabled: false, backoff: { healthy: Duration.ZERO } })).toThrow();
 	const first = new Connection({ tokens: dials, enabled: false });
 	// Even once the first closed: its answerer would sign for the other's dials.
 	first.close();

@@ -586,6 +586,10 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 	/// one ends at once with [`Failure::Taken`], leaving them to the other.
 	pub fn with_dials(mut self, dials: Dials<E>) -> Self {
 		self.tokens.get_or_insert_with(|| auth::Tokens::new(Vec::new()));
+		// Dials replaced here end as a policy's would, so their answerer stops.
+		if let Some(replaced) = self.dials.take() {
+			replaced.close();
+		}
 		match dials.claim() {
 			true => self.dials = Some(dials),
 			false => self.done(Err(Failure::Taken.into())),

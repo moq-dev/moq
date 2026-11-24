@@ -1775,6 +1775,18 @@ async fn dials_serve_one_policy() {
 	assert_eq!(run.tokens, [Some("sig-1".into())]);
 }
 
+/// Dials a policy replaced end as if it had, so their answerer stops.
+#[kio::test]
+async fn replaced_dials_end() {
+	let replaced = Dials::<TestError>::new();
+	let _policy =
+		Reconnect::<Url, TestError>::new(config(INITIAL, None), vec![url("tcp://peer:1/")], kio::clock::now())
+			.unwrap()
+			.with_dials(replaced.clone())
+			.with_dials(Dials::new());
+	assert!(replaced.next().await.is_none());
+}
+
 /// A dial left unanswered spends the connect timeout, failing as a slow dial does, and the
 /// next dial reports it; one dropped unanswered ends the policy.
 #[kio::test]
