@@ -11227,6 +11227,76 @@ mod test {
 		));
 	}
 
+	/// The serving copy refusing to place a time start fails the read at once, as a plain
+	/// reader's refusal does, though a copy it replaced still has a late group to hand out.
+	#[test]
+	fn the_serving_copys_refusal_fails_the_read_over_a_replaced_copys_late_group() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		write(&a, 0);
+		write(&a, 2);
+		routes.serve(a.consume());
+		let mut sub = logical
+			.consume()
+			.subscribe(from_times(&[0]))
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		assert_eq!(drain(&mut sub, false), [0, 2]);
+		let b = received_copy();
+		b.anchored();
+		routes.serve(b.consume());
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		// The new copy resumes the range at the boundary, a time it holds no group for.
+		b.refuse_time(2, Error::NotFound);
+		write(&a, 1);
+		let res = sub
+			.poll_recv_group(&kio::Waiter::noop())
+			.map(|res| res.map(|group| group.map(|group| group.start)));
+		assert!(matches!(res, Poll::Ready(Err(Error::NotFound))), "{res:?}");
+	}
+
+	/// A failed copy's late group waits for the window to place while a range still waits on
+	/// the copy continuing the track, though a range already placed holds the group.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_failed_copys_group_a_placed_range_holds_waits_for_the_window() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		for key in [5, 6, 8] {
+			write(&a, key);
+		}
+		routes.serve(a.consume());
+		let mut sub = logical
+			.consume()
+			.subscribe(from_times(&[0]))
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		let mut read = drain(&mut sub, false);
+		read.sort_unstable();
+		assert_eq!(read, [5, 6, 8]);
+		let b = track::Request::new(Arc::new(broadcast::Info::default()), "video");
+		routes.serve(b.consume());
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		// Late on the old route, which then fails.
+		write(&a, 7);
+		a.abort(Error::Cancel).unwrap();
+		// Time 0 places as it is; time 20 waits on the next copy.
+		sub.update(from_times(&[0, 20])).unwrap();
+		let held = drain(&mut sub, false);
+		assert_eq!(held, Vec::<u64>::new(), "held until the window places");
+
+		let b = b.accept(crate::track::Info::timed());
+		b.received();
+		write(&b, 20);
+		let mut read = drain(&mut sub, false);
+		read.sort_unstable();
+		assert_eq!(read, [7, 20]);
+	}
+
 	/// As [`a_backfill_places_a_raised_start_under_an_end_past_the_resume_point`], with the
 	/// replacement behind an inner front: the backfill through it places the start as a plain
 	/// copy's would, so the read ends once the range is read.
