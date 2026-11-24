@@ -154,8 +154,10 @@ test("a refused credential arrives as the next dial's failure, and a URL never r
 		expect(second?.failure).toBeInstanceOf(SessionError);
 		expect((second?.failure as SessionError | undefined)?.code).toBe(SessionCode.Unauthorized);
 		expect(reload.error.peek()).toBeUndefined();
+		expect(reload.failure.peek()).toBe(second?.failure);
 		second?.present(["fresh"]);
 		await clock.drive(waitFor(reload.status, (status) => status === "connected"));
+		expect(reload.failure.peek()).toBeUndefined();
 		expect(served.map((session) => session.credential)).toEqual(["spent", "fresh"]);
 
 		// A session that served clears it: the next dial after a clean drop reads only that drop.

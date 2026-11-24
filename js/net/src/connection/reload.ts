@@ -235,8 +235,12 @@ export class Reload {
 
 	// Where each dial asks for its tokens, instead of reading `tokens`.
 	readonly #dials?: Dials;
-	// Why the last attempt or session ended since one last served, which the next dial reads.
-	#failure?: Error;
+	/**
+	 * Why the loop is retrying: how the last attempt or session ended since a session last served,
+	 * or undefined. The next {@link Dials} dial reads it. Mirrors Rust's `Monitor::failure()`.
+	 */
+	readonly failure: Getter<Error | undefined>;
+	readonly #failure = new Signal<Error | undefined>(undefined);
 
 	/**
 	 * Current connection status. A session reads as connected only once its peer accepts the
@@ -464,6 +468,7 @@ export class Reload {
 		}
 
 		this.error = this.#error;
+		this.failure = this.#failure;
 
 		const win = globalThis.window;
 		const doc = globalThis.document;
@@ -707,7 +712,7 @@ export class Reload {
 					) {
 						// The replacement serves now; a predecessor keeps draining its groups in flight.
 						this.#serve(connection);
-						this.#failure = undefined;
+						this.#failure.set(undefined);
 					}
 					this.#setDialing(false);
 
@@ -852,7 +857,7 @@ export class Reload {
 	 * signing spends: the tokens and the timeout left for the dial, or the app's refusal. Rejects
 	 * with `ConnectTimeout` once the timeout passes unanswered, or with the teardown once `signal` aborts.
 	 */
-	async #sign(dials: Dials, dialing: URL, signal: AbortSignal, failure = this.#failure): Promise<Signed> {
+	async #sign(dials: Dials, dialing: URL, signal: AbortSignal, failure = this.#failure.peek()): Promise<Signed> {
 		const limit = this.timeout ?? DEFAULT_TIMEOUT;
 		const started = now();
 		const bound = new AbortController();
@@ -1104,7 +1109,7 @@ export class Reload {
 	 * `cause` the error that killed it, if it died with one.
 	 */
 	#retry(effect: Effect, connected: Instant | undefined, cause?: unknown): void {
-		this.#failure = cause === undefined ? new Error("connection closed") : error(cause);
+		this.#failure.set(cause === undefined ? new Error("connection closed") : error(cause));
 		// A healthy session's end clears the backoff and starts a fresh retry window: a one-off
 		// drop should reconnect promptly. Anything shorter is a peer that accepts and soon
 		// severs, which has to keep escalating or we hammer it forever at the initial delay.
@@ -1151,7 +1156,7 @@ export class Reload {
 	}
 
 	#resetSequence(): void {
-		this.#failure = undefined;
+		this.#failure.set(undefined);
 		this.#delay = undefined;
 		this.#deadline = undefined;
 		this.#sequenceHref = undefined;
