@@ -2793,7 +2793,8 @@ export class Producer {
 	 *
 	 * Appending says the producer will not go back, so it skips every start below the new group
 	 * that it never produced, from just past its previous append (before the first, from the
-	 * lowest group it created), as {@link skipGroups} would, replacing any drop there:
+	 * lowest group it created, or from 0 when it creates the track's first group), as
+	 * {@link skipGroups} would, replacing any drop there:
 	 * consecutive appends name the span between their starts. Those starts are then final:
 	 * creating one throws {@link Skipped}.
 	 *
@@ -2876,11 +2877,16 @@ export class Producer {
 
 	// Settle an append at `key`: skip every key below it this track's own publisher
 	// never produced, from just past its previous append (before the first, from the lowest it
-	// produced), since appending says it will not go back. The skip replaces a drop given there,
-	// as `skipGroups` does.
+	// produced, or 0 when the append is its own track's first group), since appending says it will
+	// not go back. The skip replaces a drop given there, as `skipGroups` does. From 0, a reader
+	// asking from the oldest group of a time-keyed track never waits on keys below its first
+	// group's wall-clock start.
 	#settleAppend(key: bigint): void {
-		const from = this.#appended ?? this.#produced[0]?.start;
-		if (from !== undefined) {
+		// The append's own group may be in `#produced` already, so only one below it counts.
+		// A received copy records nothing it produced, so it skips below no first group.
+		const first = this.#produced[0]?.start;
+		const from = this.#appended ?? (first !== undefined && first < key ? first : this.#wire ? undefined : 0n);
+		if (from !== undefined && from < key) {
 			const kept = [...this.#produced];
 			for (const cached of this.#cached.keys()) {
 				if (cached >= from && cached < key) insertRun(kept, cached, cached + 1n);
