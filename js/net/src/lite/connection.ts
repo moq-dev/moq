@@ -7,7 +7,7 @@ import type { Goaway as Received } from "../connection/goaway.ts";
 import type { Session } from "../connection/session.ts";
 import { detect, type Probe, type Stats, statsOf, type TransportStats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
-import { closeError, error, fromClose, ProtocolViolation, StreamCode, sessionCause } from "../error.ts";
+import { closeError, error, fromClose, ProtocolViolation, peerEnded, StreamCode, sessionCause } from "../error.ts";
 import { type Hop, randomHop } from "../hop.ts";
 import { IMPLEMENTATION } from "../implementation.ts";
 import { lines } from "../open.ts";
@@ -223,12 +223,14 @@ export class Connection implements Session {
 			(info) => this.#closed.set(fromClose(info)),
 			(err: unknown) => this.#closed.set(error(err)),
 		);
-		// Lite-07: a send on this endpoint's Announce Stream failed while the session lives, so
-		// what it said is lost and the session cannot go on, as rs/moq-net closes it. An ending
-		// session's own end says why.
+		// Lite-07: a send on this endpoint's Announce Stream failed while the session lives. A peer
+		// that stopped it is leaving, as a server closing the session stops it before its close
+		// arrives: the peer's routes end, and the session's close says why. Otherwise what this
+		// endpoint said is lost and the session cannot go on, as rs/moq-net closes it.
 		if (hasRoutes(version)) {
 			void AnnounceStream.of(quic, version).broken.then((err) => {
-				if (this.#ending()) return;
+				if (this.#transportClosed || this.#phase.kind === "closed") return;
+				if (peerEnded(err)) return this.#subscriber.announceFinished();
 				this.#fail(error(err));
 			});
 		}
@@ -334,21 +336,6 @@ export class Connection implements Session {
 		} catch {
 			// ignore
 		}
-	}
-
-	// Whether the session is ending, so its own end says why a stream broke: it closed, or the
-	// peer refused its connection credential and nothing else grants anything, so it is closing
-	// it. A server closing a session resets its streams before the close arrives, with a code
-	// Chrome reports as an application's 0.
-	#ending(): boolean {
-		if (this.#transportClosed || this.#phase.kind === "closed") return true;
-		const grant = this.#auth.grant.peek();
-		return (
-			this.#auth.credential.peek() instanceof Error &&
-			grant !== undefined &&
-			grant.publish.size === 0 &&
-			grant.subscribe.size === 0
-		);
 	}
 
 	// End the received tracks with the session's end, then tear down the rest.
@@ -611,10 +598,12 @@ export class Connection implements Session {
 			try {
 				msg = await decodeAnnounceBroadcastMaybe(stream, this.#version);
 			} catch (err: unknown) {
-				// While the session lives, whatever broke the stream, a reset, a message cut
-				// short, or one that does not decode, lost what the peer said. An ending
-				// session's own end says why.
-				if (this.#ending()) throw err;
+				// An ending session's own end says why. A peer that reset the stream is leaving,
+				// as a server closing the session resets it before its close arrives, with a code
+				// Chrome reports as an application's 0. A message cut short, or one that does not
+				// decode, lost what the peer said.
+				if (this.#transportClosed || this.#phase.kind === "closed") throw err;
+				if (peerEnded(err)) break;
 				throw new ProtocolViolation("Announce Stream broke", { cause: err });
 			}
 			if (!msg) break;

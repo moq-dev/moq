@@ -621,6 +621,16 @@ export function sessionClosed(err: unknown): boolean {
 }
 
 /**
+ * Whether a stream failed because the peer reset or stopped it, as {@link fromTransport} reports
+ * that, rather than on a local error or a session close.
+ *
+ * @internal
+ */
+export function peerEnded(err: unknown): boolean {
+	return err instanceof Stream && streamCode(err.cause) !== undefined;
+}
+
+/**
  * Report a failure the session's close caused as the session's own error, which carries the
  * peer's close code; any other failure passes through.
  *

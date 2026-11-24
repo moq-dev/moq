@@ -11,7 +11,7 @@ import { hooks } from "../internal.ts";
 import { createMockTransportPair, type MockTransport, manual, settlesWithin, textFrame } from "../mock.ts";
 import { Producer } from "../origin.ts";
 import * as Path from "../path.ts";
-import { acceptBudget, type Reader, Readers, Stream, Writer } from "../stream.ts";
+import { acceptBudget, Readers, Stream, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import { wireOf } from "../wire.ts";
 import { type AnnounceBroadcast, decodeAnnounceBroadcast, encodeAnnounceBroadcast } from "./announce.ts";
@@ -1053,34 +1053,6 @@ async function announceStream(pair: { server: MockTransport }) {
 	return { writer, send };
 }
 
-// Lite-07: the server's Announce Stream once the client has identified it, after granting its
-// credential, the server's reader of the client's, and the credential's AUTH stream.
-async function identifiedAnnounceStream(pair: { server: MockTransport }) {
-	// The client answers once its peer grants its credential.
-	const auth = await Stream.accept(pair.server, Version.DRAFT_07);
-	if (!auth || (await auth.reader.u53()) !== StreamId.Auth) throw new Error("the peer never presented a credential");
-	await AuthMessage.decode(auth.reader, Version.DRAFT_07);
-	const all = Path.Prefixes.all();
-	await new AuthOk(all, all).encode(auth.writer, Version.DRAFT_07);
-	const { writer, send } = await announceStream(pair);
-	await send({ status: "request", more: false, remove: [], add: [{ prefix: ROOM, hidden: false }] });
-	// A reset discards what the peer has not read, and a stream whose type byte is lost is not
-	// known to be an Announce Stream, so it cannot break the session. Reset only once the
-	// ANNOUNCE_OK answering the request shows the stream was identified.
-	const readers = new Readers(pair.server, Version.DRAFT_07);
-	try {
-		for (;;) {
-			const theirs = await readers.next();
-			if (!theirs) throw new Error("the peer never answered");
-			if ((await theirs.u53()) !== DataType.Announce) continue;
-			expect(await decodeAnnounceBroadcast(theirs, Version.DRAFT_07)).toEqual({ status: "ok" });
-			return { writer, theirs, auth };
-		}
-	} finally {
-		readers.close();
-	}
-}
-
 const ROOM = Path.from("room");
 
 for (const [name, violate] of [
@@ -1089,13 +1061,6 @@ for (const [name, violate] of [
 		async (pair) => {
 			await announceStream(pair);
 			await announceStream(pair);
-		},
-	],
-	[
-		"a reset Announce Stream",
-		async (pair) => {
-			const { writer } = await identifiedAnnounceStream(pair);
-			writer.reset(new Error("gone"));
 		},
 	],
 	[
@@ -1190,35 +1155,91 @@ for (const [name, violate] of [
 	});
 }
 
-// A server revoking a session's credential then closes it, resetting its streams before the
-// close arrives, with a code Chrome reports as an application's 0: the close still says why.
-for (const [name, end] of [
-	["reset", ({ writer }) => writer.reset(new Error("gone"))],
-	["stopped", ({ theirs }) => theirs.stop(new Error("gone"))],
-] as [string, (streams: { writer: Writer; theirs: Reader }) => void][]) {
-	test(`an Announce Stream ${name} after a refused credential leaves the session's close to say why`, async () => {
+// Reach the Announce Stream `quic` opens: `reset` resets it, and `stop` fails its writes from
+// then on with the error a peer's STOP_SENDING raises.
+function announceWriter(quic: MockTransport): { reset(): void; stop(): void } {
+	let announce: WritableStreamDefaultWriter<Uint8Array> | undefined;
+	let stopped = false;
+	const create = quic.createUnidirectionalStream.bind(quic);
+	quic.createUnidirectionalStream = async (options) => {
+		const stream = await create(options);
+		const getWriter = stream.getWriter.bind(stream);
+		stream.getWriter = () => {
+			const writer = getWriter();
+			const write = writer.write.bind(writer);
+			let first = true;
+			writer.write = (chunk) => {
+				if (first && chunk?.[0] === DataType.Announce) announce = writer;
+				first = false;
+				if (stopped && writer === announce) {
+					return Promise.reject(Object.assign(new Error("stopped"), { source: "stream", streamErrorCode: 0 }));
+				}
+				return write(chunk);
+			};
+			return writer;
+		};
+		return stream;
+	};
+	return {
+		reset: () => void defined(announce).abort(new Error("gone")),
+		stop: () => {
+			stopped = true;
+		},
+	};
+}
+
+// A server closing a session resets its Announce Stream and stops the client's before its close
+// arrives, with a code Chrome reports as an application's 0: the client takes the server for
+// leaving, its routes end, and the session's close says why.
+for (const name of ["resets", "stops"] as const) {
+	test(`an Announce Stream the peer ${name} ends its routes and leaves the session's close to say why`, async () => {
 		const pair = createMockTransportPair(ALPN_07_WIP);
-		const origin = new Producer();
-		const connection = new Connection({
-			url: new URL("https://relay.example/"),
-			quic: pair.client,
-			version: Version.DRAFT_07,
-			publish: origin.consume(),
+		const serverAnnounce = announceWriter(pair.server);
+		const clientAnnounce = announceWriter(pair.client);
+		const up = new Producer();
+		const down = new Producer();
+		const fromClient = new Producer();
+		const fromServer = new Producer();
+		const url = new URL("https://localhost/test");
+		const [client, server] = await Promise.all([
+			connect({ url, transport: pair.client, publish: up.consume(), consume: fromServer }),
+			accept({ url, transport: pair.server, publish: down.consume(), consume: fromClient }),
+		]);
+		const cam = up.route(Path.from("up/cam"));
+		const room = down.route(Path.from("down/room"));
+		const atServer = fromClient.routes();
+		const atClient = fromServer.routes();
+		let closed = false;
+		void pair.client.closed.then(() => {
+			closed = true;
 		});
+		const late: { broadcast: { close(): void } }[] = [];
 		try {
-			const streams = await identifiedAnnounceStream(pair);
-			await new AuthError(SessionCode.Unauthorized, "certificate revoked").encode(
-				streams.auth.writer,
-				Version.DRAFT_07,
-			);
+			expect(await atServer.next()).toMatchObject({ prefix: Path.from("up/cam"), kind: "start" });
+			expect(await atClient.next()).toMatchObject({ prefix: Path.from("down/room"), kind: "start" });
+
+			if (name === "resets") {
+				serverAnnounce.reset();
+			} else {
+				clientAnnounce.stop();
+				// The client learns of the stop on its next send.
+				late.push(up.route(Path.from("up/late")));
+			}
+			expect(await atClient.next()).toMatchObject({ prefix: Path.from("down/room"), kind: "offline" });
 			await settle();
-			end(streams);
-			await settle();
-			pair.server.close({ closeCode: 2, reason: "unauthorized" });
-			expect(await pair.client.closed).toEqual({ closeCode: 2, reason: "unauthorized" });
+			expect(closed).toBe(false);
+
+			pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
+			expect(await pair.client.closed).toEqual({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
 		} finally {
-			connection.abort();
-			origin.close();
+			atServer.close();
+			atClient.close();
+			client.abort();
+			server.abort();
+			cam.broadcast.close();
+			room.broadcast.close();
+			for (const route of late) route.broadcast.close();
+			for (const origin of [up, down, fromClient, fromServer]) origin.close();
 		}
 	});
 }
