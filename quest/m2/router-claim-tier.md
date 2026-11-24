@@ -14,8 +14,10 @@ of the same claim filed deeper.
 
 Found by the local review's Codex shadow on
 [moq-dev/moq#9371](https://github.com/moq-dev/moq/pull/9371), which fixed the
-origin and left the router, by the maintainer's pick taken while they were
-away. The router still stops at the deepest filing: `Router::pick` takes the
+origin and left the router: the maintainer chose to land that PR now and
+fix the router here before the lite-07 cut (2026-11-24, ✅ land now,
+rejected: keep the origin's deepest-filing rule until this lands; fix the
+router in that PR). The router still stops at the deepest filing: `Router::pick` takes the
 first ancestor of the path the reader holds a claim at, and `step`, `awaits`,
 `lead`, `shown_to`, and `stands` follow the same filing. Its doc says so
 ("reachable or not ... fails it closed"), so the behavior is by design, and
@@ -29,8 +31,9 @@ failing the request, though the endpoint's claim at `src` serves it. A peer's
 narrow ANNOUNCE_REQUEST at `src/a` is likewise told only the unavailable
 copy. The test fails on `main` and passes with the fix.
 
-Until this lands, the origin and the router of one relay can disagree, which
-a later review of that PR read from the source (not yet run): relay R owns
+This must also fix a regression that PR causes, which its local review read
+from the source (not yet run): the origin and the router of one relay
+disagree. Relay R owns
 claim (`src`, I), and its reader also holds node P's copy shown at (`src/a`,
 I, Above 1). Downstream D's origin picks R's cheaper claim for `src/a/b` and
 names R, but R's `step` starts at `src/a`, finds no claim of its own there,

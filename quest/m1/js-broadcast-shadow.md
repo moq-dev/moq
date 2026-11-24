@@ -12,7 +12,9 @@ announces for a path then matches what a request for that path resolves to.
 ## Plan
 
 Found by the local review of
-[moq-dev/moq#9371](https://github.com/moq-dev/moq/pull/9371). `OriginState`'s
+[moq-dev/moq#9371](https://github.com/moq-dev/moq/pull/9371), and kept by the
+maintainer when picking that PR to merge (2026-11-24, ✅ keep, rejected:
+drop). `OriginState`'s
 `bestEntry` (`js/net/src/origin.ts`) hands `mostSpecific` a local broadcast
 only at the exact path requested, so one published above the path neither
 shadows nor supersedes there. Rust's `RouteTable::best_route` ranks it in the
