@@ -5432,7 +5432,9 @@ impl Producer {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn refuse_time(&self, time: u64, err: Error) {
 		let subscriptions = self.state.read().subscriptions.clone();
-		subscriptions.lock().refuse(time, err).wake();
+		// Woken once the lock is released, so a watcher reading the demand at once finds it free.
+		let mut wakes = subscriptions.lock().refuse(time, err);
+		wakes.wake();
 		// Recorded first, so a reader woken here finds it.
 		if let Ok(mut state) = self.modify() {
 			state.placing += 1;
@@ -17578,6 +17580,90 @@ mod test {
 		assert_eq!(asks(&producer), [1700]);
 		drop(later);
 		assert_eq!(asks(&producer), [1700]);
+	}
+
+	/// Each refusal of a time start fails its own readers with its own error: a reader the
+	/// first failed reads that error even after a later refusal of the same time fails another
+	/// reader, and each leaving takes only its own count.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_second_refusal_of_a_time_start_keeps_the_first_ones_error() {
+		let from = |time| {
+			Subscription::default()
+				.with_ranges([Range {
+					start: crate::track::Start::Time(time),
+					end: None,
+				}])
+				.with_max(None)
+		};
+		let asks = |producer: &Producer| -> Vec<u64> {
+			let asks = producer.subscription().map(|aggregate| aggregate.asks);
+			asks.unwrap_or_default()
+		};
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		write_group(&producer, 1000);
+		let mut first = producer.subscribe(from(1500));
+		assert!(first.refused().is_none());
+		producer.refuse_time(1500, Error::NotFound);
+		// `first` reads its refusal only after the second.
+		let mut second = producer.subscribe(from(1500));
+		assert!(second.refused().is_none());
+		producer.refuse_time(1500, Error::Cancel);
+		assert!(matches!(first.refused(), Some(Error::NotFound)), "keeps its own error");
+		assert!(matches!(second.refused(), Some(Error::Cancel)));
+
+		let mut third = producer.subscribe(from(1500));
+		assert_eq!(asks(&producer), [1500]);
+		drop(second);
+		drop(first);
+		assert_eq!(asks(&producer), [1500], "the failed readers leaving takes no other ask");
+		assert!(third.refused().is_none());
+		drop(third);
+		assert_eq!(asks(&producer), Vec::<u64>::new());
+	}
+
+	/// A time start's refusal wakes the demand's watchers with its lock released, since a
+	/// watcher may read the demand inline from its wake.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_refused_time_start_wakes_its_watchers_unlocked() {
+		struct Reenter {
+			subscriptions: kio::Lock<Subscriptions>,
+			unlocked: std::sync::atomic::AtomicBool,
+		}
+		impl std::task::Wake for Reenter {
+			fn wake(self: Arc<Self>) {
+				self.wake_by_ref();
+			}
+			fn wake_by_ref(self: &Arc<Self>) {
+				let unlocked = self.subscriptions.try_lock().is_some();
+				self.unlocked.store(unlocked, std::sync::atomic::Ordering::SeqCst);
+			}
+		}
+
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		write_group(&producer, 1000);
+		let mut waiting = producer.subscribe(
+			Subscription::default()
+				.with_ranges([Range {
+					start: crate::track::Start::Time(1500),
+					end: None,
+				}])
+				.with_max(None),
+		);
+		assert!(waiting.refused().is_none());
+		let reenter = Arc::new(Reenter {
+			subscriptions: producer.state.read().subscriptions.clone(),
+			unlocked: Default::default(),
+		});
+		let waiter = kio::Waiter::new(std::task::Waker::from(reenter.clone()));
+		producer.watch_subscription(&waiter);
+		producer.refuse_time(1500, Error::NotFound);
+		assert!(reenter.unlocked.load(std::sync::atomic::Ordering::SeqCst), "woke under the demand's lock");
 	}
 
 	/// A lite-07 copy holding a whole group places a time inside its span from that group

@@ -54,9 +54,11 @@ pub(super) struct Subscriptions {
 	/// The time starts a received copy's readers wait on, by time, counted: see
 	/// [`Subscription::asks`].
 	asks: BTreeMap<u64, usize>,
-	/// The time starts whose upstream lookup failed, by time: the readers that waited then,
-	/// counted apart from [`Self::asks`] until each lets go, and what they fail with.
-	refused: BTreeMap<u64, RefusedTime>,
+	/// The time starts whose upstream lookup failed, by time and then by the [`Self::refusals`]
+	/// each refusal was at: the readers that waited then, counted apart from [`Self::asks`]
+	/// until each lets go, and what they fail with. Kept per refusal, so a later one fails
+	/// only its own readers with its own error.
+	refused: BTreeMap<u64, BTreeMap<u64, RefusedTime>>,
 	/// Bumped by each refusal, so a reader can tell whether it began waiting before one.
 	refusals: u64,
 	/// Where capping subscribers stop; see [`Subscription::cap`].
@@ -91,8 +93,6 @@ struct Waiting {
 
 /// The readers a time start's refusal failed, which still count it.
 struct RefusedTime {
-	/// The [`Subscriptions::refusals`] it was refused at: a reader asking since then waits.
-	epoch: u64,
 	err: crate::Error,
 	count: usize,
 }
@@ -205,11 +205,16 @@ impl Subscriptions {
 		let moved = match waits {
 			true => add(&mut self.asks, time),
 			// One a refusal failed is counted there instead.
-			false => match self.refused.get_mut(&time).filter(|refused| refused.epoch > since) {
-				Some(refused) => {
+			false => match self.refused_since(time, since).map(|(epoch, _)| epoch) {
+				Some(epoch) => {
+					let refusals = self.refused.get_mut(&time).expect("a refused time");
+					let refused = refusals.get_mut(&epoch).expect("its refusal");
 					refused.count -= 1;
 					if refused.count == 0 {
-						self.refused.remove(&time);
+						refusals.remove(&epoch);
+						if refusals.is_empty() {
+							self.refused.remove(&time);
+						}
 					}
 					false
 				}
@@ -235,20 +240,21 @@ impl Subscriptions {
 			return Default::default();
 		};
 		self.refusals += 1;
-		let refused = self.refused.entry(time).or_insert(RefusedTime {
-			epoch: 0,
-			err: err.clone(),
-			count: 0,
-		});
-		(refused.epoch, refused.err) = (self.refusals, err);
-		refused.count += count;
+		let refused = RefusedTime { err, count };
+		self.refused.entry(time).or_default().insert(self.refusals, refused);
 		self.waiters.take()
 	}
 
 	/// Why time start `time` failed for a reader waiting on it since refusal `since`, if it did.
 	pub(super) fn refusal(&self, time: u64, since: u64) -> Option<crate::Error> {
-		let refused = self.refused.get(&time)?;
-		(refused.epoch > since).then(|| refused.err.clone())
+		Some(self.refused_since(time, since)?.1.err.clone())
+	}
+
+	/// The refusal of time start `time` that failed a reader waiting on it since refusal
+	/// `since`, with its epoch: the first after `since`, which took the reader out of the asks.
+	fn refused_since(&self, time: u64, since: u64) -> Option<(u64, &RefusedTime)> {
+		let (&epoch, refused) = self.refused.get(&time)?.range(since + 1..).next()?;
+		Some((epoch, refused))
 	}
 
 	/// Whether any time start's refusal still fails a reader.
