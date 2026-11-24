@@ -67,10 +67,6 @@ exclude_re = [
     # `Weak::upgrade`, and `subscribe` sweeps the list again.
     'replace > with >= in Producer::serve_from$',
     'replace == with != in Consumer::subscribe$',
-    # Ranges a reader asks again unchanged, with each live join's tick, once its log no
-    # longer reaches back: asked whole they place and backfill as before, and each copy's
-    # replace of equal ranges is a no-op, so treating them as unchanged only saves that work.
-    'replace match guard ranges \.iter\(\) .* with false in Reader::sync$',
     # A backfill fails only with its route's track, so asking that route again for what it
     # refused fails at once too and is let go: skipping the ask only saves the subscribe.
     # `poll_lowest` records that refusal for the skip.

@@ -65,8 +65,8 @@ since the night before. Rerun on the merge above, 19 still survive besides the
 `Reader::resumed` and `Reader::resolve` ones listed above; `Reader::ask`'s
 `floor <= keys.start` and `end >= keys.end` mutants are caught since
 [moq-dev/moq#9468](https://github.com/moq-dev/moq/pull/9468), and `Reader::sync`'s
-unchanged-ranges guard to `false` is excluded with the same reason as before. Not yet
-probed:
+unchanged-ranges guard is gone: a reader whose change log overflowed now edits only the
+ranges that differ. Not yet probed:
 
 - `Copy::cap`, from [moq-dev/moq#9402](https://github.com/moq-dev/moq/pull/9402): every
   mutant of `narrower` (945:52 `&&` to `||`; 950:11 `<` to `==` and `<=`; 950:20 `||` to
