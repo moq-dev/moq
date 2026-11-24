@@ -464,9 +464,9 @@ impl Session {
 	///
 	/// [`poll`](goaway::Consumer::poll) it with a no-op waiter for a synchronous check, or
 	/// wait on it for one. Once a GOAWAY arrives, this session's routes rank below
-	/// every other available route of their claim, whatever their preference or cost,
-	/// though a more specific claim still shadows a broader one, on this node
-	/// only: requests keep opening on it until a replacement session's route
+	/// every other available route of their claim that is not draining, whatever their
+	/// preference or cost, though a more specific claim still shadows a broader one, on
+	/// this node only: requests keep opening on it until a replacement session's route
 	/// outranks it, and existing subscriptions keep flowing until the session
 	/// closes. A relay still forwards the routes at their real cost.
 	pub fn draining(&self) -> goaway::Consumer {
