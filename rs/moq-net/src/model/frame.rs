@@ -1708,15 +1708,15 @@ impl Consumer {
 					}
 				}
 			};
-			// A dense untimed copy expects the same Object ID; a timed copy carrying wire fields
-			// expects the same Object ID as the frame it is continuing.
+			// A dense copy expects the same Object ID: for a relayed copy its own wire ID,
+			// otherwise the frame's ordinal (or moq-timestamp Object ID on a timed track).
 			if let Some(fields) = frame.fields.as_ref() {
-				let expected = match (&self.fields, self.info.timestamp.scale()) {
-					(Some(own), _) => Some(own.id),
-					(None, Some(_)) => None,
-					(None, None) => Some(index),
+				let matches = match (&self.fields, self.info.timestamp.scale()) {
+					(Some(own), _) => fields.id == own.id,
+					(None, Some(_)) => fields.id == index || fields.id == self.timed_oid,
+					(None, None) => fields.id == index,
 				};
-				if expected.is_some_and(|expected| fields.id != expected) {
+				if !matches {
 					return Poll::Ready(Err(Error::Unsupported));
 				}
 			}

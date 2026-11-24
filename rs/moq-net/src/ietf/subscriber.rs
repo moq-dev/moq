@@ -561,6 +561,9 @@ struct RangeWriter {
 	slot: kio::Producer<GroupFetch>,
 	/// The group being written, with its producer unless its objects are read past.
 	current: Option<(u64, Option<crate::recv::Group>)>,
+	/// Leading objects in the current group to skip before writing into `producer`, used when
+	/// a `Draft23` timed FETCH starts at wire Object ID 0 for a non-zero model frame ordinal.
+	skip_frames: u64,
 	/// The first group not opened yet.
 	next: u64,
 }
@@ -572,6 +575,7 @@ impl RangeWriter {
 			fetch,
 			slot,
 			current: None,
+			skip_frames: 0,
 		}
 	}
 
@@ -607,8 +611,13 @@ impl RangeWriter {
 		fill.drop_groups(self.next..key);
 		self.next = key + 1;
 
-		let start = match key == self.fetch.first {
+		let wire_start = match key == self.fetch.first {
 			true => self.fetch.start,
+			false => 0,
+		};
+		let frame_start = fill.frame_start(key);
+		self.skip_frames = match self.fetch.timing.timestamp_ids && wire_start == 0 {
+			true => frame_start,
 			false => 0,
 		};
 		let producer = match datagram {
@@ -630,19 +639,19 @@ impl RangeWriter {
 		}
 		self.current = Some((key, producer));
 		if let Some(producer) = self.producer() {
-			// The objects keep the IDs they have in the group rather than restarting at 0.
-			producer.start_at(start)?;
+			// The objects keep the frame indices they have in the group rather than restarting at 0.
+			producer.start_at(frame_start)?;
 			producer.set_wire(group::Wire {
 				sparse: false,
-				first_object: start == 0,
-				first_id: start,
+				first_object: frame_start == 0,
+				first_id: wire_start,
 				extensions: true,
 				has_end: true,
 				fetchable: true,
 				last: None,
 			})?;
 		}
-		Ok(start)
+		Ok(wire_start)
 	}
 
 	/// Finish the current group: its objects end where the next group's begin. The slot
@@ -8078,9 +8087,14 @@ impl GroupFetchObjects {
 			if !timing.timestamp_ids && id > next && decoded.gap.is_none_or(|gap| gap < id - next) {
 				return Poll::Ready(Err(Error::Unsupported));
 			}
-			let payload = match writer.producer() {
-				Some(_) => FetchPayloadRead::Write(FetchPayloadRecv::new(FetchPayload { decoded, timing, id })),
-				None => FetchPayloadRead::Skip(SkipPayload::new()),
+			let payload = if writer.skip_frames > 0 {
+				writer.skip_frames -= 1;
+				FetchPayloadRead::Skip(SkipPayload::new())
+			} else {
+				match writer.producer() {
+					Some(_) => FetchPayloadRead::Write(FetchPayloadRecv::new(FetchPayload { decoded, timing, id })),
+					None => FetchPayloadRead::Skip(SkipPayload::new()),
+				}
 			};
 			self.payload = Some((key, id, payload));
 		}
@@ -9546,7 +9560,7 @@ mod tests {
 		let mut consumer = {
 			let mut state = subscriber.state.lock();
 			let track = state.subscribes.get_mut(&RequestId(11)).unwrap();
-			track.timescale = Some(Timescale::MILLI);
+			track.timing.timescale = Some(Timescale::MILLI);
 			track.producer.as_ref().unwrap().subscribe(None)
 		};
 
@@ -9593,7 +9607,7 @@ mod tests {
 			// Only the datagram model half is present in this receive fixture.
 			track.producer = None;
 			track.datagram = Some(producer);
-			track.timescale = Some(Timescale::MILLI);
+			track.timing.timescale = Some(Timescale::MILLI);
 		}
 
 		let mut properties = Vec::new();
@@ -15213,6 +15227,13 @@ mod stitch_tests {
 				VERSION,
 			);
 			let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", info);
+			let timing = match &fill {
+				Fill::Serving(timing) => *timing,
+				_ => ObjectTiming {
+					timescale,
+					timestamp_ids: timescale.is_some() && VERSION.timestamp_object_ids(),
+				},
+			};
 			let fill = kio::Producer::new(fill);
 
 			{
@@ -15221,7 +15242,7 @@ mod stitch_tests {
 					REQUEST,
 					TrackState {
 						alias: Some(ALIAS),
-						timing: ObjectTiming::timed(timescale),
+						timing,
 						..TrackState::new(track.clone(), Path::from_static("broadcast"), fill.clone())
 					},
 				);
@@ -20660,7 +20681,10 @@ mod compression_negotiation_tests {
 			insert_track_alias(&state.aliases, 7, RequestId(1)).unwrap();
 		}
 
-		let raw = crate::driver::Transport::new(session).accept_uni().await.unwrap();
+		let (_, raw) = crate::driver::Transport::new(session)
+			.open_bi(Default::default())
+			.await
+			.unwrap();
 		let mut stream = Reader::new(raw, version);
 		subscriber.clone().recv_group(&mut stream).await.unwrap();
 

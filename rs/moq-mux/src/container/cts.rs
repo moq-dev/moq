@@ -131,7 +131,10 @@ mod tests {
 	fn write_and_finish_group_return_unsupported() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
-			.create_track("video", moq_net::track::Info::default().with_timescale(Timescale::MILLI))
+			.create_track(
+				"video",
+				moq_net::track::Info::default().with_timescale(Timescale::MILLI),
+			)
 			.unwrap();
 		let mut group = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
 		let frame = Frame {
@@ -140,7 +143,15 @@ mod tests {
 			keyframe: true,
 			duration: None,
 		};
-		assert!(Wire(Kind::Video).write(&mut group, &[frame.clone()]).is_err());
-		assert!(Wire(Kind::Video).finish_group(&mut group, Some(frame.timestamp)).is_err());
+		assert!(
+			Wire(Kind::Video)
+				.write(&mut group, std::slice::from_ref(&frame))
+				.is_err()
+		);
+		assert!(
+			Wire(Kind::Video)
+				.finish_group(&mut group, Some(frame.timestamp))
+				.is_err()
+		);
 	}
 }

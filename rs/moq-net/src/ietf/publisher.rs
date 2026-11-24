@@ -98,8 +98,10 @@ fn track_properties(
 	if !wanted {
 		return Ok(ietf::Properties::default());
 	}
+	let mut restated = ietf::Properties::restated(info);
+	restated.timestamp_ids = info.timescale.is_some() && version.timestamp_object_ids();
 	let Some(track) = info.properties.as_deref() else {
-		return Ok(ietf::Properties::restated(info));
+		return Ok(restated);
 	};
 	let mut unknown = track.values.clone();
 	// Between draft-18 and draft-22, forwarding 0x06 would give it a different meaning, as for object
@@ -110,10 +112,7 @@ fn track_properties(
 		}
 		unknown.retain(|property| property.id != 0x06);
 	}
-	Ok(ietf::Properties {
-		unknown,
-		..ietf::Properties::restated(info)
-	})
+	Ok(ietf::Properties { unknown, ..restated })
 }
 
 /// The rendezvous cap is zero, but asking to wait still makes a missing publisher a timeout.
@@ -8870,12 +8869,10 @@ mod group_priority_test {
 				assert!(!header.flags.has_end);
 				if !finished {
 					for _ in 0..5 {
-						assert_eq!(&bytes.split_to(4)[..], &[0, 0, 1, b'x']);
+						assert_eq!(&bytes.split_to(3)[..], &[0, 1, b'x']);
 					}
-					assert_eq!(&bytes[..], &[0, 0, 0, END_OF_TRACK as u8]);
-				} else {
-					assert_eq!(&bytes[..], &[5, 0, END_OF_TRACK as u8]);
 				}
+				assert_eq!(&bytes[..], &[if finished { 5 } else { 0 }, 0, END_OF_TRACK as u8]);
 			}
 		}
 	}
@@ -23142,7 +23139,8 @@ mod compression_tests {
 			"video",
 			track::Info::timed().with_timescale(Timescale::MILLI),
 		);
-		let mut group = track.append_group(Timestamp::from_millis(1000).unwrap()).unwrap();
+		let group = track.append_group(Timestamp::from_millis(1000).unwrap()).unwrap();
+		let consumer = group.consume();
 		// Frame 0 (ordinal 0) has timestamp 1033ms -> wire Object ID 33.
 		let mut frame = group
 			.create_frame(crate::frame::Info {
@@ -23168,7 +23166,7 @@ mod compression_tests {
 			session,
 			msg,
 			Rank::solo(priority),
-			group.consume(),
+			consumer,
 			Version::Draft23,
 			GroupSlice {
 				skip: 10,
@@ -23181,11 +23179,12 @@ mod compression_tests {
 		});
 		kio::clock::sleep(Duration::from_millis(1)).await;
 		frame.write(bytes::Bytes::from_static(b"llo")).unwrap();
-		frame.finish().unwrap();
+		let _group = frame.finish().unwrap();
 		// Group stays open (no second frame, no finish); GroupServe must still complete cleanly.
 		kio::clock::timeout(Duration::from_secs(1), task)
 			.await
-			.expect("GroupServe waited past slice.until");
+			.expect("GroupServe waited past slice.until")
+			.unwrap();
 		let written = log.writes.lock().unwrap().clone();
 		let mut r = crate::coding::Decoder::new(&written, Version::Draft23.into());
 		let header = ietf::GroupHeader::decode(&mut r, Version::Draft23).unwrap();

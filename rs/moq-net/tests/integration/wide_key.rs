@@ -285,8 +285,8 @@ async fn wide_key_timed_under_lite_07_aborts_out_of_range_timestamp() {
 		.expect("wide frame timed out")
 		.unwrap_err();
 	assert!(
-		matches!(err, moq_net::Error::Stream(_) | moq_net::Error::Decode(_)),
-		"expected out-of-range timed wide key to fail its group read, got {err:?}"
+		matches!(err, moq_net::Error::BoundsExceeded(_)),
+		"expected out-of-range timed wide key to fail with BoundsExceeded, got {err:?}"
 	);
 
 	let mut sub = remote.track("narrow").unwrap().subscribe(None).await.unwrap();

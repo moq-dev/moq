@@ -2337,12 +2337,24 @@ impl Producer {
 			.as_ref()
 			.and_then(|partial| partial.fields.as_ref())
 			.map_or(state.next_index as u64, |fields| fields.id);
+		let offset = state.offset;
+		let group_start = state.group_start;
 		if let Some(wire) = state.wire_mut() {
+			let prev_id = wire.last;
 			wire.last = Some(object_id);
-			// On a timed track, Object IDs are timestamp offsets (sparse by design), not missing
-			// objects; only untimed Object ID gaps break ordinal alignment across copies.
-			if self.handle.track.timescale.is_none() {
-				wire.sparse |= object_id != (next_index - 1) as u64;
+			let ordinal_id = (next_index - 1) as u64;
+			let matches_id = object_id == ordinal_id
+				|| (self.handle.track.timescale.is_some()
+					&& object_id
+						== crate::ietf::object::timestamp_object_id(group_start, prev_id, timestamp.value()).0);
+			// Both dense ordinals (Draft18..22 / untimed) and deterministic moq-timestamp
+			// Object IDs (Draft23+) stay ordinal-aligned across copies; a real Object ID gap
+			// or a copy joined mid-group at ordinal 0 (`!first_object && first_id > 0`) still
+			// marks the group sparse and refuses ordinal recovery.
+			if offset == 0 {
+				wire.sparse |= !matches_id || (!wire.first_object && wire.first_id > 0);
+			} else if self.handle.track.timescale.is_none() {
+				wire.sparse |= object_id != ordinal_id;
 			}
 		}
 		state.next_index = next_index;
@@ -6602,7 +6614,7 @@ mod test {
 					inflated: 0,
 					end: 0,
 					mono_ts: 0,
-					timed_oid: None,
+					timed_oid: 1,
 				},
 			],
 			compressed: false,
