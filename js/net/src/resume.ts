@@ -3324,8 +3324,8 @@ export class Front {
 		// no copy of its own to find the rest in.
 		hooks.recoverGroup(fetched.group, {
 			changed: this.#changed,
-			wants: (failed) => {
-				if (failed && undelivered(failed)) return true;
+			wants: (cause) => {
+				if (cause.kind === "failed" && undelivered(cause.error)) return true;
 				return this.#source !== undefined && this.#source !== current;
 			},
 			replace: async (_index, cause, signal) => {
