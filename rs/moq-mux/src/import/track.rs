@@ -1244,7 +1244,7 @@ mod tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_secs(30),
+						min: Some(Duration::from_secs(30)),
 						max: Some(Duration::from_secs(30)),
 					},
 				)]),
@@ -1903,7 +1903,7 @@ mod tests {
 		// Delay-tolerant, so the first group is still delivered once the second exists.
 		let replay = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 			moq_net::track::Start::Live {
-				min: Duration::from_secs(30),
+				min: Some(Duration::from_secs(30)),
 				max: Some(Duration::from_secs(30)),
 			},
 		)]);
@@ -2001,7 +2001,7 @@ mod tests {
 			.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_secs(30),
+						min: Some(Duration::from_secs(30)),
 						max: Some(Duration::from_secs(30)),
 					},
 				)]),

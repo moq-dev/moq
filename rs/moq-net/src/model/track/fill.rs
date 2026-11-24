@@ -54,9 +54,16 @@ struct Pending {
 	flight: bool,
 	// How many joins still read each key: one a reader narrowed away is no longer owed.
 	wants: RangeMap<u64, u32>,
-	// What its handler accepted that no join has picked up yet, which holds back the next
-	// group: see [`FillGroups::poll_wanted_changed`].
+	// What it answered that no join has picked up yet, which holds back the next group: see
+	// [`FillGroups::poll_wanted_changed`].
 	unseen: RangeSet<u64>,
+	// What it answered that no join took yet: the first in its order is held in the cache for
+	// them (see [`super::held`]). A join taking a group, or no longer reading it, takes it for
+	// all.
+	untaken: RangeSet<u64>,
+	// How many joins are their reader's front, the fill holding the next group that reader
+	// takes: only a fill some reader fronts holds a group, so each reader holds one at most.
+	fronts: u32,
 	// Readers hold consumers, so it counts the fill's demand; the handler's copy says what
 	// became of each key.
 	result: kio::Producer<Outcome>,
@@ -80,6 +87,7 @@ impl Pending {
 	/// reads any more.
 	fn unwant(&mut self, groups: ops::Range<u64>) -> Vec<ops::Range<u64>> {
 		self.unseen.remove(groups.clone());
+		self.untaken.remove(groups.clone());
 		let counts: Vec<(ops::Range<u64>, u32)> = self
 			.wants
 			.overlapping(&groups)
@@ -177,6 +185,11 @@ pub(crate) struct Outcome {
 	// The group a time start's fill accepted below the time, created or already cached, held so
 	// where it ends is known even once the cache lets it go.
 	answer: Option<group::Handle>,
+	// What it held, answered or still landing, that a debt evicted with no room to hold it
+	// again beside the pins and the other holds: a refill would be evicted the same way, so a
+	// reader finding the eviction gives it up, and a lite-07 recovery is not asked again.
+	// Kept until no join reads it, so neither a grace nor a debt forgets it.
+	unfit: RangeSet<u64>,
 }
 
 impl Outcome {
@@ -187,6 +200,14 @@ impl Outcome {
 
 	pub(super) fn is_accepted(&self, key: u64) -> bool {
 		self.accepted.contains(&key)
+	}
+
+	/// The keys of `groups` it answered that a debt evicted with no room to hold them again.
+	pub(super) fn unfit(&self, groups: &ops::Range<u64>) -> RangeSet<u64> {
+		self.unfit
+			.overlapping(groups)
+			.map(|run| run.start.max(groups.start)..run.end.min(groups.end))
+			.collect()
 	}
 
 	/// The group a time start's fill accepted below the time.
@@ -200,7 +221,7 @@ impl Outcome {
 			return Some(TimeStart::Group(run.start));
 		}
 		match self.refused.get(&time) {
-			Some(refusal) if refusal.dropped => Some(TimeStart::Dropped),
+			Some(refusal) if refusal.hole.is_some() => Some(TimeStart::Dropped),
 			Some(refusal) => Some(TimeStart::Refused(refusal.err.clone())),
 			// Answered and forgotten: nobody reads it any more.
 			None if self.resolved.contains(&time) => Some(TimeStart::Unanswered),
@@ -213,8 +234,16 @@ impl Outcome {
 		self.partial.get(&key).filter(|copy| copy.covers(frames)).cloned()
 	}
 
-	/// What was answered within `wanted`: accepted, or refused with why.
-	pub(super) fn within(&self, wanted: &RangeSet<u64>) -> Vec<(ops::Range<u64>, std::result::Result<(), Error>)> {
+	/// What was answered within `wanted`: accepted, or refused with why and the hole its source
+	/// named, if any.
+	#[expect(
+		clippy::type_complexity,
+		reason = "each answer pairs a run with its outcome; naming it would only move the type"
+	)]
+	pub(super) fn within(
+		&self,
+		wanted: &RangeSet<u64>,
+	) -> Vec<(ops::Range<u64>, std::result::Result<(), (Error, Option<super::Hole>)>)> {
 		let mut answers = Vec::new();
 		for run in wanted.iter() {
 			for accepted in self.accepted.overlapping(run) {
@@ -222,24 +251,25 @@ impl Outcome {
 			}
 			for (refused, refusal) in self.refused.overlapping(run) {
 				let groups = refused.start.max(run.start)..refused.end.min(run.end);
-				answers.push((groups, Err(refusal.err.clone())));
+				answers.push((groups, Err((refusal.err.clone(), refusal.hole.clone()))));
 			}
 		}
 		answers
 	}
 
 	fn accept(&mut self, groups: ops::Range<u64>) {
+		self.unfit.remove(groups.clone());
 		self.accepted.insert(groups.clone());
 		self.resolved.insert(groups);
 	}
 
-	fn refuse(&mut self, groups: ops::Range<u64>, err: Error, dropped: bool) {
+	fn refuse(&mut self, groups: ops::Range<u64>, err: Error, hole: Option<super::Hole>) {
 		if groups.is_empty() {
 			return;
 		}
 		let id = self.refusals;
 		self.refusals += 1;
-		self.refused.insert(groups.clone(), Refusal { id, err, dropped });
+		self.refused.insert(groups.clone(), Refusal { id, err, hole });
 		self.resolved.insert(groups);
 	}
 }
@@ -262,8 +292,9 @@ pub(super) enum TimeStart {
 struct Refusal {
 	id: u64,
 	err: Error,
-	// Named dropped, the source's word that it has none of them, rather than refused for now.
-	dropped: bool,
+	// The hole the source named, its word that it has none of them (or never produced them),
+	// rather than refused for now.
+	hole: Option<super::Hole>,
 }
 
 impl PartialEq for Refusal {
@@ -296,6 +327,8 @@ pub(super) struct Join {
 	// What this reader asks the fill with, counted in its asks.
 	asking: Asking,
 	asks: kio::Shared<Asks>,
+	// Whether this is its reader's front, counted in the fill's fronts.
+	front: bool,
 }
 
 impl Join {
@@ -326,6 +359,9 @@ impl Drop for Join {
 		if !fills.pending.get(&self.id).is_some_and(|pending| self.is_ours(pending)) {
 			return;
 		}
+		if self.front {
+			fills.pending.get_mut(&self.id).expect("checked above").fronts -= 1;
+		}
 		for run in std::mem::take(&mut self.held).iter() {
 			fills.unwant(self.id, run.clone());
 		}
@@ -350,7 +386,25 @@ impl Join {
 		self.held.is_empty()
 	}
 
-	/// The reader picked up `groups` the fill accepted, so its handler may serve the next one.
+	/// Make this its reader's front, the fill holding the next group the reader takes, or
+	/// stop: a reader fronts one fill at a time, so it holds one group at most.
+	pub(super) fn set_front(&mut self, front: bool) {
+		if self.front == front {
+			return;
+		}
+		self.front = front;
+		let mut fills = self.fills.lock();
+		if let Some(pending) = fills.pending.get_mut(&self.id)
+			&& self.is_ours(pending)
+		{
+			match front {
+				true => pending.fronts += 1,
+				false => pending.fronts -= 1,
+			}
+		}
+	}
+
+	/// The reader picked up `groups` the fill answered, so its handler may serve the next one.
 	pub(super) fn saw(&self, groups: &RangeSet<u64>) {
 		let mut fills = self.fills.lock();
 		// Read first: a mutable borrow wakes every poll parked on the fills.
@@ -365,6 +419,24 @@ impl Join {
 		for run in groups.iter() {
 			unseen.remove(run.clone());
 		}
+	}
+
+	/// The caller took `key`, which it still reads through the fill: the fill holds it no
+	/// longer and may serve its next group.
+	pub(super) fn took(&self, key: u64) {
+		let Some(end) = key.checked_add(1) else {
+			return;
+		};
+		let mut fills = self.fills.lock();
+		// Read first: a mutable borrow wakes every poll parked on the fills.
+		if !fills.pending.get(&self.id).is_some_and(|pending| {
+			self.is_ours(pending) && (pending.unseen.contains(&key) || pending.untaken.contains(&key))
+		}) {
+			return;
+		}
+		let pending = fills.pending.get_mut(&self.id).expect("checked above");
+		pending.unseen.remove(key..end);
+		pending.untaken.remove(key..end);
 	}
 
 	/// Stop reading `lost`, so the fill no longer owes this reader any of it.
@@ -485,6 +557,7 @@ impl FillState {
 				attempt: pending.result.weak(),
 				asking: ask.asking,
 				asks: pending.asks.clone(),
+				front: false,
 			});
 		}
 		// Queued in the reader's order, so a descending reader's newest fragment goes first.
@@ -517,6 +590,7 @@ impl FillState {
 				attempt: result.weak(),
 				asking: ask.asking,
 				asks: asks.clone(),
+				front: false,
 			});
 			// A taken fill's first group split off above keeps that fill, routed here instead.
 			self.covers.insert(groups.clone(), id);
@@ -532,6 +606,8 @@ impl FillState {
 					flight: false,
 					wants: RangeMap::from_iter([(groups.clone(), 1)]),
 					unseen: RangeSet::new(),
+					untaken: RangeSet::new(),
+					fronts: 0,
 					result,
 				},
 			);
@@ -583,6 +659,8 @@ impl FillState {
 						flight: true,
 						wants: RangeMap::from_iter([(groups.clone(), 1)]),
 						unseen: RangeSet::new(),
+						untaken: RangeSet::new(),
+						fronts: 0,
 						result: Default::default(),
 					},
 				);
@@ -600,6 +678,7 @@ impl FillState {
 			attempt: pending.result.weak(),
 			asking,
 			asks: pending.asks.clone(),
+			front: false,
 		})
 	}
 
@@ -634,6 +713,7 @@ impl FillState {
 			attempt: result.weak(),
 			asking,
 			asks: asks.clone(),
+			front: true,
 		};
 		self.pending.insert(
 			id,
@@ -647,6 +727,8 @@ impl FillState {
 				flight: false,
 				wants: RangeMap::from_iter([(groups, 1)]),
 				unseen: RangeSet::new(),
+				untaken: RangeSet::new(),
+				fronts: 1,
 				result,
 			},
 		);
@@ -666,14 +748,15 @@ impl FillState {
 		let unwanted = pending.unwant(groups);
 		let answered = {
 			let outcome = pending.result.read();
-			unwanted
-				.iter()
-				.any(|run| outcome.refused.overlaps(run) || outcome.accepted.overlaps(run))
+			unwanted.iter().any(|run| {
+				outcome.refused.overlaps(run) || outcome.accepted.overlaps(run) || outcome.unfit.overlaps(run)
+			})
 		};
 		if answered && let Ok(mut outcome) = pending.result.write() {
 			for run in &unwanted {
 				outcome.refused.remove(run.clone());
 				outcome.accepted.remove(run.clone());
+				outcome.unfit.remove(run.clone());
 			}
 		}
 		for run in unwanted {
@@ -683,11 +766,35 @@ impl FillState {
 		}
 	}
 
+	/// A debt evicted `key`, which fill `id` held, with no room to hold it again: see
+	/// `Outcome::unfit`. Only while a join still reads it, which bounds it by the fill's wants.
+	pub(super) fn unfit(&self, id: u64, key: u64) {
+		if let Some(pending) = self.pending.get(&id)
+			&& pending.wants.contains_key(&key)
+			&& let Ok(mut outcome) = pending.result.write()
+		{
+			outcome.unfit.insert(key..key + 1);
+		}
+	}
+
 	/// Whether a join of fill `id` still reads `key`.
-	fn wants(&self, id: u64, key: u64) -> bool {
+	pub(super) fn wants(&self, id: u64, key: u64) -> bool {
 		self.pending
 			.get(&id)
 			.is_some_and(|pending| pending.wants.contains_key(&key))
+	}
+
+	/// Whether fill `id` holds `key` for a reader: a join still reads it, and some reader
+	/// fronts the fill.
+	pub(super) fn holds_for(&self, id: u64, key: u64) -> bool {
+		self.pending
+			.get(&id)
+			.is_some_and(|pending| pending.fronts > 0 && pending.wants.contains_key(&key))
+	}
+
+	/// Whether some reader fronts fill `id`.
+	fn fronted(&self, id: u64) -> bool {
+		self.pending.get(&id).is_some_and(|pending| pending.fronts > 0)
 	}
 
 	/// Whether a join of fill `id` still reads any of `groups`.
@@ -950,6 +1057,14 @@ impl FillGroups {
 		self.inner.refuse(&owed, err);
 	}
 
+	/// Name `groups` as never produced, as the source answered a request for them: readers
+	/// pass over them, as over a skip the track recorded, however soon the cache forgets it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn skip_groups(&self, groups: ops::Range<u64>) {
+		let owed = self.inner.owed(groups);
+		self.inner.drop_groups(&owed, Error::Skipped, super::Hole::Skip);
+	}
+
 	/// Poll until no reader waits on this fill: it is withdrawn, so stop serving it.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn poll_withdrawn(&self, waiter: &kio::Waiter) -> Poll<()> {
@@ -970,6 +1085,12 @@ impl FillGroups {
 		self.inner.poll_unwanted(key, waiter)
 	}
 
+	/// The fill's id, which its holds go by.
+	#[cfg(all(test, feature = "async"))]
+	pub(super) fn id(&self) -> u64 {
+		self.inner.id
+	}
+
 	/// How many answer runs the fill still holds for its readers.
 	#[cfg(all(test, feature = "async"))]
 	pub(super) fn answers(&self) -> usize {
@@ -986,7 +1107,7 @@ impl FillGroups {
 	/// The next group still owed in the fill's order: a reader still reads it, and it was
 	/// neither answered nor delivered live since it was asked. `None` once none is owed or
 	/// no reader waits on the fill, so stop serving it. It does not wait for the readers to
-	/// pick up what was served before it; [`poll_wanted_changed`](Self::poll_wanted_changed) does.
+	/// take what was served before it; [`poll_wanted_changed`](Self::poll_wanted_changed) does.
 	pub fn wanted(&self) -> Option<u64> {
 		self.wanted_except(None)
 	}
@@ -1008,7 +1129,12 @@ impl FillGroups {
 					Order::Ascending => gaps.next().map(|gap| gap.start),
 					Order::Descending => gaps.last().map(|gap| gap.end - 1),
 				}
-			}?;
+			};
+			let front = self.inner.untaken_front();
+			let Some(key) = key else {
+				self.inner.sync_holds(front, None);
+				return None;
+			};
 			// The live feed may have delivered it since: answered by the cache, not the source.
 			// Never a flight's, which the cached copy shed.
 			let cached = !self.inner.flight
@@ -1019,26 +1145,46 @@ impl FillGroups {
 					.covering_range(key, self.inner.bounds(key))
 					.is_some();
 			if !cached {
+				// Waiting on a run, the fill holds its first group to land, unless it holds one
+				// a reader has yet to take.
+				let awaiting = front
+					.is_none()
+					.then(|| (self.run_from(key, self.inner.owed_around(key)), self.order()));
+				self.inner.sync_holds(front, awaiting);
 				return Some(key);
 			}
-			let Ok(mut outcome) = self.inner.result.write() else {
+			// Held as it is answered, if it is the first a reader has yet to take and a reader
+			// fronts the fill: the pool may evict anything else before the reader gets to it.
+			// Checked again under the lock that holds it, since an eviction may have taken it
+			// since.
+			if front.is_none() && self.inner.fills.read().fronted(self.inner.id) {
+				let Ok(mut state) = TrackState::modify(&self.inner.state) else {
+					return Some(key);
+				};
+				if state.covering_range(key, self.inner.bounds(key)).is_none() {
+					continue;
+				}
+				state.hold_fill(self.inner.id, Some(key), None);
+			}
+			if !self.inner.answer_cached(key) {
 				return Some(key);
-			};
-			outcome.accept(key..key + 1);
-			drop(outcome);
-			uncover(&self.inner.fills, self.inner.id, key..key + 1);
+			}
 		}
 	}
 
 	/// The next group to serve: [`wanted`](Self::wanted) once it differs from what this handle
-	/// last returned and every group this fill accepted reached a reader, which picks it up
-	/// when it next reads. `None`, once the fill is withdrawn or answered, never waits. The
-	/// first call returns at once, unless a group already accepted has yet to reach a reader.
+	/// last returned and every group this fill answered reached a reader, which picks it up
+	/// when it next reads. `None` once the fill is withdrawn, or answered and taken: keep the
+	/// fill until then, since the cache holds what a reader has yet to take only while the
+	/// fill lives. The first call returns at once, unless a group already answered has yet to
+	/// reach a reader.
 	///
 	/// So `while let Some(key) = fill.wanted_changed().await` writes one group at a time
-	/// as the fastest reader reads on, rather than a batch the cache may evict before it is
-	/// read. A reader reading in another order than the fill's picks up groups it cannot take
-	/// yet, so those wait in the cache.
+	/// as the fastest reader reads on. The cache holds the first group in the fill's order that
+	/// a reader has yet to take, which no eviction takes before it does: a fill holds at most
+	/// one group, however far its readers fall behind, and a reader asks again for any other
+	/// it loses. A reader reading in another order than the fill's picks up groups it cannot
+	/// take yet, so the fill moves on.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_wanted_changed(&mut self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
 		// Arm every input of `wanted` before reading it, so a change in between still wakes:
@@ -1050,14 +1196,18 @@ impl FillGroups {
 		let _ = self.inner.fills.poll(waiter, |_| Poll::Pending);
 		let _ = self.inner.asks.poll(waiter, |_| Poll::Pending);
 		let wanted = self.wanted();
-		if self.prev == Some(wanted) || (wanted.is_some() && self.inner.is_unseen()) {
+		let waits = match wanted {
+			Some(_) => self.inner.is_unseen(),
+			None => self.inner.untaken_front().is_some(),
+		};
+		if self.prev == Some(wanted) || waits {
 			return Poll::Pending;
 		}
 		self.prev = Some(wanted);
 		Poll::Ready(wanted)
 	}
 
-	/// Poll until every group this fill accepted reached a reader, or nobody waits on the
+	/// Poll until every group this fill answered reached a reader, or nobody waits on the
 	/// fill, as [`Self::poll_wanted_changed`] paces.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn poll_paced(&self, waiter: &kio::Waiter) -> Poll<()> {
@@ -1072,6 +1222,46 @@ impl FillGroups {
 				_ => Poll::Ready(()),
 			})
 			.map(drop)
+	}
+
+	/// Poll until a reader took every group this fill answered, or nobody waits on the fill:
+	/// the cache holds what a reader has yet to take only while the fill lives.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn poll_taken(&self, waiter: &kio::Waiter) -> Poll<()> {
+		if self.poll_withdrawn(waiter).is_ready() {
+			return Poll::Ready(());
+		}
+		let _ = self.inner.fills.poll(waiter, |_| Poll::<()>::Pending);
+		let _ = self.inner.asks.poll(waiter, |_| Poll::<()>::Pending);
+		match self.inner.untaken_front() {
+			// The hold moves on as readers take what it answered.
+			Some(front) => {
+				self.inner.sync_holds(Some(front), None);
+				Poll::Pending
+			}
+			None => Poll::Ready(()),
+		}
+	}
+
+	/// What this fill held that a debt evicted with no room to hold it again, answered or
+	/// still landing: asking for it again would see it evicted the same way.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn unfit(&self) -> RangeSet<u64> {
+		self.inner.result.read().unfit.clone()
+	}
+
+	/// Whether a group this fill answered has yet to reach a reader, so it asks for nothing
+	/// more for now.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn is_paced(&self) -> bool {
+		self.inner.is_unseen()
+	}
+
+	/// Whether a reader has yet to take a group this fill answered, which the cache holds
+	/// only while the fill lives.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn is_holding(&self) -> bool {
+		self.inner.untaken_front().is_some()
 	}
 
 	/// Refuse every group still owed with `err`, which says nothing about whether the source
@@ -1214,13 +1404,74 @@ impl Inner {
 		self.result.wanted() && self.fills.read().wants(self.id, key)
 	}
 
-	/// Whether a group this fill accepted has yet to reach a reader.
+	/// Whether a group this fill answered has yet to reach a reader.
 	fn is_unseen(&self) -> bool {
 		self.fills
 			.read()
 			.pending
 			.get(&self.id)
 			.is_some_and(|pending| !pending.unseen.is_empty())
+	}
+
+	/// The first group in the fill's order that it answered and no reader took yet, which the
+	/// fill holds.
+	fn untaken_front(&self) -> Option<u64> {
+		let order = self.asks.read().order();
+		let fills = self.fills.read();
+		let untaken = &fills.pending.get(&self.id)?.untaken;
+		match order {
+			Order::Ascending => untaken.iter().next().map(|run| run.start),
+			Order::Descending => untaken.iter().next_back().map(|run| run.end - 1),
+		}
+	}
+
+	/// Hold `front` and await `awaiting` for the fill's readers from now on, or nothing while
+	/// no reader fronts the fill, unless the track does already: a change takes the track's
+	/// lock, which wakes everything parked on it. A flight's copy is its readers' own, which no
+	/// eviction takes from them.
+	fn sync_holds(&self, front: Option<u64>, awaiting: Option<(ops::Range<u64>, Order)>) {
+		if self.flight {
+			return;
+		}
+		let (front, awaiting) = match self.fills.read().fronted(self.id) {
+			true => (front, awaiting),
+			false => (None, None),
+		};
+		if self.state.read().fill_holds_as(self.id, front, &awaiting) {
+			return;
+		}
+		if let Ok(mut state) = TrackState::modify(&self.state) {
+			state.hold_fill(self.id, front, awaiting);
+		}
+	}
+
+	/// Answer `key` from the cache, for the readers that still read it to take. Returns
+	/// whether the answer went out.
+	fn answer_cached(&self, key: u64) -> bool {
+		// Recorded before the answer goes out, as `accept_from` does: a reader may pick it up
+		// and take it the moment it does, which must clear it.
+		let untaken = {
+			let mut fills = self.fills.lock();
+			match fills.pending.get_mut(&self.id) {
+				Some(pending) if pending.wants.contains_key(&key) => {
+					pending.unseen.insert(key..key + 1);
+					pending.untaken.insert(key..key + 1);
+					true
+				}
+				_ => false,
+			}
+		};
+		let Ok(mut outcome) = self.result.write() else {
+			if untaken && let Some(pending) = self.fills.lock().pending.get_mut(&self.id) {
+				pending.unseen.remove(key..key + 1);
+				pending.untaken.remove(key..key + 1);
+			}
+			return false;
+		};
+		outcome.accept(key..key + 1);
+		drop(outcome);
+		uncover(&self.fills, self.id, key..key + 1);
+		true
 	}
 
 	fn poll_unwanted(&self, key: u64, waiter: &kio::Waiter) -> Poll<()> {
@@ -1283,28 +1534,37 @@ impl Inner {
 		if self.result.read().resolved.overlaps(&answered) {
 			return Ok(None);
 		}
-		// Written for a reader that has yet to pick it up, which the next group waits on.
+		// Written for a reader that has yet to pick it up, which the next group waits on, and
+		// to take it, which the cache holds it for.
 		// Recorded before the group is cached, since a reader may take it from the cache and
 		// release it before the answer goes out, which must clear it.
-		let unseen = {
+		let untaken = {
 			let mut fills = self.fills.lock();
 			match fills.pending.get_mut(&self.id) {
 				Some(pending) if pending.wants.contains_key(&key) => {
 					pending.unseen.insert(key..end);
+					pending.untaken.insert(key..end);
 					true
 				}
 				_ => false,
 			}
 		};
-		// Cache the group before answering: readers resolve an accept through the cache. A time
-		// start answered below its time holds the group it names, created or cached, under the
-		// same lock, so its End stays known once the cache lets it go.
+		let front = self.untaken_front();
+		let fronted = self.fills.read().fronted(self.id);
+		// Cache the group before answering: readers resolve an accept through the cache. Held
+		// as it is cached, if it is the first a reader has yet to take and this is that
+		// reader's front fill: the pool may evict anything else before the reader gets to it. A time start answered below its time
+		// holds the group it names, created or cached, under the same lock, so its End stays
+		// known once the cache lets it go.
 		let mut answer = None;
 		let res = TrackState::modify(&self.state).and_then(|mut state| {
 			let res = match self.flight {
 				true => state.insert_flight(key, frames, info).map(Some),
 				false => state.insert_group_request(key, frames, info),
 			};
+			if !self.flight && fronted && matches!(res, Ok(Some(_))) {
+				state.hold_fill(self.id, front, None);
+			}
 			if key < self.start.group {
 				answer = match &res {
 					Ok(Some(group)) => Some(group.handle()),
@@ -1316,11 +1576,12 @@ impl Inner {
 			deferred.wake();
 			res
 		});
-		if unseen
+		if untaken
 			&& !matches!(res, Ok(Some(_)))
 			&& let Some(pending) = self.fills.lock().pending.get_mut(&self.id)
 		{
 			pending.unseen.remove(key..end);
+			pending.untaken.remove(key..end);
 		}
 		if let Ok(mut outcome) = self.result.write() {
 			outcome.accept(key..end);
@@ -1349,7 +1610,7 @@ impl Inner {
 				state.drop_unfed(groups.clone(), hole.clone());
 			}
 		}
-		self.answer(groups, err, true);
+		self.answer(groups, err, Some(hole));
 	}
 
 	/// The part of `groups` inside the fill that a reader still reads and nothing answered yet.
@@ -1378,17 +1639,17 @@ impl Inner {
 	}
 
 	fn refuse(&self, groups: &RangeSet<u64>, err: Error) {
-		self.answer(groups, err, false);
+		self.answer(groups, err, None);
 	}
 
-	/// Answer `groups` with `err`, `dropped` when the source has none of them.
-	fn answer(&self, groups: &RangeSet<u64>, err: Error, dropped: bool) {
+	/// Answer `groups` with `err`, and the `hole` the source named when it has none of them.
+	fn answer(&self, groups: &RangeSet<u64>, err: Error, hole: Option<super::Hole>) {
 		if groups.is_empty() {
 			return;
 		}
 		if let Ok(mut outcome) = self.result.write() {
 			for groups in groups.iter() {
-				outcome.refuse(groups.clone(), err.clone(), dropped);
+				outcome.refuse(groups.clone(), err.clone(), hole.clone());
 			}
 		}
 		for groups in groups.iter() {
@@ -1462,9 +1723,21 @@ impl Drop for Inner {
 			}
 			if let Ok(mut outcome) = self.result.write() {
 				for groups in left.iter() {
-					outcome.refuse(groups.clone(), Error::Dropped, true);
+					outcome.refuse(
+						groups.clone(),
+						Error::Dropped,
+						Some(super::Hole::drop(StreamError::NotFound)),
+					);
 				}
 			}
+		}
+		// What it held is the cache's again: a reader that has yet to take it asks again if
+		// it is evicted.
+		if !self.flight
+			&& !self.state.read().fill_holds_as(self.id, None, &None)
+			&& let Ok(mut state) = TrackState::modify(&self.state)
+		{
+			state.release_fill(self.id);
 		}
 		self.fills.lock().end(self.id);
 	}
@@ -1481,7 +1754,10 @@ impl TrackState {
 		let now = self.cache.pool().now_wall();
 		let mut dropped = RangeSet::new();
 		for hole in super::miss::holes(self, groups) {
-			for groups in self.unfed(hole, now).0.iter() {
+			// A group lost to the cache since it arrived is the source's to name too: the live
+			// feed delivers it no more.
+			let unfed = self.unfed(hole, now);
+			for groups in unfed.never.iter().chain(unfed.lost.iter()) {
 				dropped.insert(groups.clone());
 			}
 		}

@@ -261,7 +261,7 @@ async fn relay(version: Version) -> anyhow::Result<()> {
 	// A join reaching back past every group takes each still within the budget, as a wire before
 	// lite-07 asks with its one max age.
 	let narrow = Subscription::default().with_ranges([Range::from(Start::Live {
-		min: REACH,
+		min: Some(REACH),
 		max: Some(NARROW),
 	})]);
 	let mut first = relay.subscribe(narrow).await?;
@@ -337,7 +337,7 @@ fn table_subscription(ask: &serde_json::Value) -> Subscription {
 		None => Start::Oldest,
 		Some(start) => match start.get("live") {
 			Some(live) => Start::Live {
-				min: Duration::from_millis(live.as_u64().expect("a lag")),
+				min: Some(Duration::from_millis(live.as_u64().expect("a lag"))),
 				max: None,
 			},
 			None => Start::Time(start.as_u64().expect("a time")),

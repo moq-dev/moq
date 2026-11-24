@@ -1289,7 +1289,7 @@ async fn raw_track_update_keeps_the_join_a_range_was_subscribed_with() {
 	let consumer = track.consume(Some(subscription(1, None))).unwrap();
 	let joined = |min: u64, end: Option<u64>| Range {
 		start: Start::Live {
-			min: Duration::from_secs(min),
+			min: Some(Duration::from_secs(min)),
 			max: None,
 		},
 		end,

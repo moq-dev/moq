@@ -234,6 +234,7 @@ export namespace Connection {
 	export interface WebSocketProps {
 		delay?: Clock.Duration;
 		enabled?: boolean;
+		idleTimeout?: Clock.Duration | null;
 		maxStreams?: number;
 		receiveWindow?: number;
 		streamReceiveWindow?: number;
@@ -746,7 +747,7 @@ export namespace Track {
 	};
 	export interface Live {
 		max?: Clock.Duration | null;
-		min: Clock.Duration;
+		min: Clock.Duration | null;
 	}
 	export type Order = "ascending" | "descending";
 	export class Ordered {

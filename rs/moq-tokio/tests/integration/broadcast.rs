@@ -1266,7 +1266,7 @@ async fn rejoin_skips_a_stale_warm_cache(version: &str) {
 		.expect("broadcast resolves");
 	let budget = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 		moq_net::track::Start::Live {
-			min: Duration::from_millis(100),
+			min: Some(Duration::from_millis(100)),
 			max: Some(Duration::from_millis(100)),
 		},
 	)]);

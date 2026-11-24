@@ -132,10 +132,10 @@ impl WithMax for moq_net::track::Subscription {
 		let max = max.into();
 		for range in &mut self.ranges {
 			range.start = match range.start {
-				// A lag long past every group takes every group still within `max`.
+				// No lag limit takes every group still within `max`.
 				Start::Oldest | Start::LATEST => match max {
 					Some(max) => Start::Live {
-						min: std::time::Duration::from_millis((1 << 53) - 1),
+						min: None,
 						max: Some(max),
 					},
 					None => Start::Oldest,

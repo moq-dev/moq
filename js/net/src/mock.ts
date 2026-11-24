@@ -213,9 +213,6 @@ export class MockTransport implements WebTransport {
 	// The stream data this side wrote while held.
 	#held: Held = {};
 
-	// What the streams open at each `holdOpen` stall, released with the rest.
-	#heldOpen: Held[] = [];
-
 	// While set, each uni stream this side opens holds its own data, oldest first.
 	#heldUnis?: Held[];
 
@@ -320,22 +317,10 @@ export class MockTransport implements WebTransport {
 	}
 
 	/**
-	 * Stall the stream data this side writes on the streams open now, as {@link hold} does on
-	 * every stream: one opened later, by either side, delivers at once. As a slow answer on one
-	 * exchange, such as an update's, while new requests still flow.
-	 */
-	holdOpen(): void {
-		this.#held.queue ??= [];
-		this.#heldOpen.push(this.#held);
-		this.#held = {};
-	}
-
-	/**
-	 * Deliver what {@link hold}, {@link holdOpen}, and {@link holdUnis} stalled, each stream's in
+	 * Deliver what {@link hold} and {@link holdUnis} stalled, each stream's in
 	 * the order it was written, and stop holding.
 	 */
 	release(): void {
-		for (const held of this.#heldOpen.splice(0)) deliver(held);
 		deliver(this.#held);
 		for (const held of this.#heldUnis?.splice(0) ?? []) deliver(held);
 		this.#heldUnis = undefined;

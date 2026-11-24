@@ -28,6 +28,23 @@
 //! `Server::with_stats`. Publishing the counters as MoQ broadcasts lives in the
 //! `moq-stats` crate.
 //!
+//! ## Wire invariants
+//! - **Stream instances**: a subscription stays on its starting instance while that instance
+//!   has a route, even after a newer route wins the path. When none remains, it ends with an
+//!   error (never a clean end, never stitched onto another instance). A clean end means only a
+//!   deliberate publisher finish; apps restart on announcements, never request errors.
+//! - **Live position**: largest group / live edge comes only from an open upstream
+//!   subscription (`SUBSCRIBE_OK`); a copy with none open waits, and a partial group hit still
+//!   asks upstream for missing frames.
+//! - **Group expiry**: groups never overlap in time (frames within a group may reorder for
+//!   B-frames). Expire a group by timestamp (from `GROUP_END` once whole, else lowest timestamp
+//!   known in any higher group) and by wall clock once its successor arrived longer ago than
+//!   the budget; the latest group never expires.
+//! - **Route switch**: for the same instance, split at one boundary (largest group any copy
+//!   holds, past its contiguous frames): the new subscription starts there while the old caps
+//!   there and drains below within budget, delivering each frame once from whichever arrives
+//!   first.
+//!
 //! ## Compatibility
 //! The API exposes the intersection of features supported by both protocols, intentionally
 //! keeping it small rather than polluting it with half-baked features.

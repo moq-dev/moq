@@ -1505,13 +1505,14 @@ test("default audio replays the last second after three seconds without a subscr
 // Replayed groups reach the track as fresh arrivals, so only the encoder can tell they are old: a
 // live viewer rejoining after seconds idle would otherwise wade through all of them first. A live
 // join states how far back it plays as its lag, which bounds the replay however far its max reaches,
-// and a join reaching back further (as one before lite-07 does) is bounded by its max alone.
+// and a lag past its max, or no lag limit at all (as a join before lite-07 has), is bounded by the max.
 const live = (min: number, max: number) => [
 	{ start: { live: { min: Duration.millis(min), max: Duration.millis(max) } } },
 ];
 for (const [name, subscription] of [
 	["a live join's lag", { ranges: live(130, 10_000) }],
 	["a live join's max when that is shorter than its lag", { ranges: live(10_000, 130) }],
+	["a join with no lag limit's max", { ranges: [{ start: { live: { min: null, max: Duration.millis(130) } } }] }],
 ] as [string, Moq.Track.Subscription][]) {
 	test(`demand replays only the retained audio ${name} still wants`, async () => {
 		using _webcodecs = installFakeWebCodecs();
@@ -1542,6 +1543,46 @@ for (const [name, subscription] of [
 			const frame = await group?.readFrame();
 			if (!frame) throw new Error("expected a replayed frame");
 			expect(Moq.Varint.decode(frame.payload)[0]).toBe(143 * 20_000);
+		} finally {
+			late?.close();
+			encoder.close();
+			broadcast.close();
+			installed.close();
+		}
+	});
+}
+
+// A range with an end asks for history up to it, so it gets the whole retention whatever its max, as
+// Rust's twin does, and a join bounded by neither lag nor max drops nothing.
+for (const [name, subscription] of [
+	[
+		"a join with an end",
+		{ ranges: [{ start: { live: { min: null, max: Duration.millis(2_000) } }, end: 150n * 20_000n }] },
+	],
+	["a join bounded by neither lag nor max", { ranges: [{ start: { live: { min: null, max: null } } }] }],
+] as [string, Moq.Track.Subscription][]) {
+	test(`${name} replays the whole retention`, async () => {
+		using _webcodecs = installFakeWebCodecs();
+		const clock = new Manual();
+		const installed = clock.install();
+		const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name: Moq.Path.from("history.hang") });
+		const feed = new Feed();
+		const configuring = configured();
+		const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(feed) as never });
+		let late: Moq.Track.Subscriber | undefined;
+		try {
+			await configuring;
+			await settle();
+			for (let index = 0; index < 150; index++) {
+				await feed.push({ timestamp: Duration.micros(index * 20_000), channels: [new Float32Array(960)] });
+				await feed.drain();
+				await clock.advance(Duration.millis(20));
+			}
+			const net = broadcast.net.peek();
+			if (!net) throw new Error("expected network broadcast");
+			late = net.track("audio").subscribe(subscription);
+			await settle();
+			expect(encoder.out.stats.peek().frames).toBe(150);
 		} finally {
 			late?.close();
 			encoder.close();

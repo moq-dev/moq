@@ -40,12 +40,6 @@ import type { Advertised, Advertisements } from "./wire.ts";
 /** A null {@link Live.max} in milliseconds, which the model holds as the largest value every peer can read. */
 export const NO_MAX_DELAY = Varint.MAX_U53;
 
-/**
- * A lag long past any group, so a join this far behind takes every group still within its max: the
- * largest every implementation carries losslessly. Mirrors the Rust `PAST_EVERY_GROUP`.
- */
-export const PAST_EVERY_GROUP = Duration.millis(NO_MAX_DELAY);
-
 /** A datagram track's properties as the stream track info a wire answers with: no groups, so no age, refresh, or compression. */
 export function datagramTrackInfo(info: datagram.Info): Info {
 	return {
@@ -606,6 +600,8 @@ export interface ResumeSource {
 	serving(): boolean;
 	/** The parts of `[start, end)` any copy held or let go says its publisher skipped; see `hooks.skippedIn`. */
 	skippedIn(start: bigint, end: bigint): Run[];
+	/** Ask the serving copy's fills for kept-out keys an outer front owes; see `hooks.askUnproven`. */
+	askUnproven(unproven: Run[]): Run[];
 	/** Whether a group in `land` may still land on a copy this reader keeps; see `hooks.mayLand`. */
 	mayLand(land: Land): boolean;
 	/** Where the run of keys from `key` the serving copy says no group arrives at ends; see `hooks.holeEnd`. */
@@ -656,8 +652,8 @@ export interface TrackRequestOptions {
 	producer: Producer;
 	/** Requests not yet accepted or rejected by the publisher. */
 	pending: Set<Request>;
-	/** Metadata-only readers holding this request, if its broadcast supports them. */
-	lookups?: { pending: Getter<number>; opened: boolean };
+	/** Whether a metadata-only lookup opened this request, if its broadcast supports them. */
+	lookups?: { opened: boolean };
 }
 
 /**
@@ -742,6 +738,8 @@ export const hooks: {
 	 * Mirrors the Rust `Demand::asked`; assigned by `track.ts`.
 	 */
 	demandAsked: (demand: Demand) => Getter<bigint | undefined>;
+	/** Whether a subscriber, not just a held info lookup, wants the track; assigned by `track.ts`. */
+	demandSubscribed: (demand: Demand) => boolean;
 	/** Whether the producer declared the track's end, released or not. Assigned by `track.ts`. */
 	trackFinished: (producer: Producer) => boolean;
 	/**
@@ -874,7 +872,7 @@ export const hooks: {
 	 */
 	answerJoin: (
 		producer: Producer,
-		min: number,
+		min: number | null,
 		end: bigint | undefined,
 		start: bigint | undefined,
 		budget: number,
@@ -883,7 +881,7 @@ export const hooks: {
 	 * Forget the answers of the live joins `keep` rejects: no live range asks them, so no reader waits
 	 * on them. Mirrors the Rust `track::Producer::retain_joins`; assigned by `track.ts`.
 	 */
-	retainJoins: (producer: Producer, keep: (min: number, end: bigint | undefined) => boolean) => void;
+	retainJoins: (producer: Producer, keep: (min: number | null, end: bigint | undefined) => boolean) => void;
 	/** Mint a track {@link Request}; assigned by `track.ts`. */
 	makeRequest: (options: TrackRequestOptions) => Request;
 	/**
@@ -893,6 +891,10 @@ export const hooks: {
 	stageRequest: (request: Request, info: InfoInit) => StagedTrack;
 	/** The newest frame a producer's cache holds, read without subscribing; assigned by `track.ts`. */
 	cachedLargest: (producer: Producer) => Position | undefined;
+	/** A producer's committed {@link Info}, or undefined before it is accepted; assigned by `track.ts`. */
+	acceptedInfo: (producer: Producer) => Info | undefined;
+	/** Count an info lookup as the track's demand until the returned release, called once, runs; assigned by `track.ts`. */
+	holdTrack: (producer: Producer) => () => void;
 	/** The publisher priority from a demanded track's committed {@link Info}; assigned by `track.ts`. */
 	demandPriority: (demand: Demand) => number;
 	/**
@@ -954,6 +956,12 @@ export const hooks: {
 	 * kept for it, so a resumed reader takes groups the plain way and drops from here.
 	 */
 	tryDrop: (subscriber: Subscriber) => (Recv & { kind: "drop" }) | undefined;
+	/**
+	 * Ask a route copy's fills for the keys of `unproven` a front's resumed reader owes that its
+	 * track cannot prove skipped, once its feed no longer waits for them, returning those its fills
+	 * gave up. Assigned by `track.ts`.
+	 */
+	askUnproven: (subscriber: Subscriber, unproven: Run[]) => Run[];
 	/**
 	 * The runs of `[start, end)` a subscriber reads: inside its ranges and its local bounds.
 	 * Assigned by `track.ts`.
@@ -1295,8 +1303,11 @@ export const hooks: {
 	onClosed: (producer: BroadcastProducer, fn: () => void) => Dispose;
 	/** Reserve an on-demand track without listing it or enabling a request handler. */
 	reserveUnlistedTrack: (producer: BroadcastProducer, name: string) => Request;
-	/** Whether a subscriber or a metadata lookup still holds a requested track. */
-	requestWanted: (request: Request) => Getter<boolean>;
+	/**
+	 * Answer an info lookup from the accepted copy of `name` a broadcast holds open, holding the copy
+	 * until `hold` aborts; undefined with no such copy. Assigned by `broadcast.ts`.
+	 */
+	resolveHeld: (broadcast: BroadcastConsumer, name: string, hold?: AbortSignal) => Promise<Info> | undefined;
 	/** Transfer a metadata-opened request to its session's producer lifetime. */
 	keepRequest: (request: Request) => void;
 	/** Observe the peer's reset without waiting for routed delivery recovery. */
@@ -1350,6 +1361,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	demandAsked: () => {
+		throw new Error("track.ts not loaded");
+	},
+	demandSubscribed: () => {
 		throw new Error("track.ts not loaded");
 	},
 	trackFinished: () => {
@@ -1457,6 +1471,12 @@ export const hooks: {
 	cachedLargest: () => {
 		throw new Error("track.ts not loaded");
 	},
+	acceptedInfo: () => {
+		throw new Error("track.ts not loaded");
+	},
+	holdTrack: () => {
+		throw new Error("track.ts not loaded");
+	},
 	demandPriority: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -1500,6 +1520,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	tryDrop: () => {
+		throw new Error("track.ts not loaded");
+	},
+	askUnproven: () => {
 		throw new Error("track.ts not loaded");
 	},
 	tryNextGroup: () => {
@@ -1766,8 +1789,8 @@ export const hooks: {
 	reserveUnlistedTrack: () => {
 		throw new Error("broadcast.ts not loaded");
 	},
-	requestWanted: () => {
-		throw new Error("track.ts not loaded");
+	resolveHeld: () => {
+		throw new Error("broadcast.ts not loaded");
 	},
 	keepRequest: () => {
 		throw new Error("track.ts not loaded");

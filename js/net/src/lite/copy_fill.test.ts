@@ -215,9 +215,9 @@ test("copy fill: lite-07 asks upstream for a live join reaching back past what t
 		const far = peer.remote.track("video").subscribe(joining(2500));
 		expect(sorted(await take(far, 4))).toEqual(timed(1_000n));
 		const asked = peer.track.subscription.peek()?.ranges ?? [];
-		expect(asked.some((range) => typeof range.start === "object" && range.start.live.min.asMillis() === 2500)).toBe(
-			true,
-		);
+		expect(
+			asked.some((range) => typeof range.start === "object" && range.start.live.min?.asMillis() === 2500),
+		).toBe(true);
 		const origin = peer.track.subscribe(joining(2500));
 		expect(sorted(await take(origin, 4))).toEqual(timed(1_000n));
 		near.close();

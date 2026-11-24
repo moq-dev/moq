@@ -351,7 +351,7 @@ async fn subscribe_live(
 	let broadcast = source.resolve(rel, instance).await?;
 	let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 		moq_net::track::Start::Live {
-			min: MAX_DELAY,
+			min: Some(MAX_DELAY),
 			max: Some(MAX_DELAY),
 		},
 	)]);

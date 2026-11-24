@@ -2,12 +2,13 @@ import { expect, spyOn, test } from "bun:test";
 import { Duration, Instant, Wall, yieldNow } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { race } from "@moq/signals";
-import { DEFAULT_EXPIRY } from "./cache.ts";
+import { DEFAULT_EXPIRY, Pool } from "./cache.ts";
 import { joinTick } from "./demand.ts";
 import { ProtocolViolation, Skipped, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
+import type { FillGroups } from "./fill.ts";
 import type { Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
-import { hooks, NO_MAX_DELAY, PAST_EVERY_GROUP, skipHole, staleHole } from "./internal.ts";
+import { hooks, NO_MAX_DELAY, skipHole, staleHole } from "./internal.ts";
 import { GRACE } from "./ledger.ts";
 import { textFrame } from "./mock.ts";
 import { rescale, rescaleIn } from "./rescale.ts";
@@ -324,7 +325,7 @@ test("an ordered reader owes the groups below a restated START", async () => {
 	for (let key = 5n; key < 10n; key++) putGroup(producer, key, Number(key) * 1000);
 	await clock.advance(10);
 	const reader = producer
-		.subscribe({ ranges: [{ start: { live: { min: PAST_EVERY_GROUP, max: Duration.millis(6500) } } }] })
+		.subscribe({ ranges: [{ start: { live: { min: null, max: Duration.millis(6500) } } }] })
 		.ordered();
 	hooks.restateTrack(producer);
 	try {
@@ -2759,7 +2760,7 @@ test("an aborted live-edge anchor does not make older content stale", async () =
 
 	// A join reaching back past every group under a zero max: the aborted group is no live edge, so
 	// the older one is the newest it judges by.
-	const track = producer.subscribe({ ranges: [{ start: { live: { min: PAST_EVERY_GROUP, max: Duration.ZERO } } }] });
+	const track = producer.subscribe({ ranges: [{ start: { live: { min: null, max: Duration.ZERO } } }] });
 	expect((await track.recvGroup())?.start).toBe(1n);
 	track.close();
 });
@@ -2782,9 +2783,13 @@ test.each(["arrival", "ordered"] as const)("subscription bounds stay reader-loca
 		expect((await read())?.start).toBe(3n);
 		expect(await read()).toBeUndefined();
 		subscriber.update({ ranges: [{ end: 4n }] });
-		// The unread group below both old floors was passed over outside every range, so neither read
-		// goes back for it, as in Rust.
-		expect((await read())?.start).toBe(4n);
+		// Arrival readers can now offer the unread group below the old floors; ordered ones cannot
+		// rewind. Which goes first is the Group Order, not what this pins. Mirrors the Rust
+		// `a_widened_history_read_offers_a_group_it_passed_over`.
+		const widened: (bigint | undefined)[] = [];
+		for (let count = ordered ? 1 : 2; count > 0; count--) widened.push((await read())?.start);
+		widened.sort((a, b) => Number((a ?? 0n) - (b ?? 0n)));
+		expect(widened).toEqual(ordered ? [4n] : [0n, 4n]);
 		expect(await read()).toBeUndefined();
 		// An open range parks at the live edge instead.
 		subscriber.update({ ranges: [{ start: 5n }] });
@@ -6536,5 +6541,256 @@ test("the counted aggregates match a full fold of every subscriber", async () =>
 			expect(producer.subscription.peek()).toEqual(foldSubscriptions(live));
 		}
 		producer.close();
+	}
+});
+
+// A fill asked for a kept-out key is withdrawn once the reader's range moves: what the new range
+// still owes is asked again only once that read would otherwise end. Mirrors the Rust
+// `a_kept_out_fill_is_withdrawn_when_the_range_moves`.
+test("a kept-out fill is withdrawn when the range moves", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const pool = new Pool({ expiry: Duration.millis(10_000) });
+	const unpooled = new TrackProducer("test");
+	hooks.poolTrack(unpooled, pool);
+	const producer = unpooled.accept({ maxAge: null });
+	hooks.receiveTrack(producer);
+	const requests = producer.requests();
+	const fills: FillGroups[] = [];
+	void (async () => {
+		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) fills.push(fill);
+	})();
+	try {
+		for (const key of [0n, 6n]) {
+			const group = producer.createGroup(key);
+			group.writeFrame({ payload: new Uint8Array(1), timestamp: Timestamp.unscaled(key) });
+			group.finish();
+		}
+		const sub = producer.subscribe({ ranges: [{ start: 0n, end: 6n }] });
+		expect(sub.tryRecvGroup()?.start).toBe(0n);
+		expect(sub.tryRecvGroup()?.start).toBe(6n);
+		sub.withRange({ start: { included: 6n }, end: { excluded: 7n } });
+		const ended = sub.recvGroup();
+		producer.skipGroups(3n, 6n);
+		await clock.advance(Duration.millis(60_000));
+		producer.skipGroups(1n, 3n);
+		await clock.advance(Duration.ZERO);
+		expect(await isPending(ended)).toBe(true);
+		expect(fills.map((fill) => [fill.start, fill.end])).toEqual([[3n, 6n]]);
+		expect(fills[0].isWanted(3n)).toBe(true);
+
+		sub.withRange({ start: { included: 7n }, end: { excluded: 8n } });
+		await clock.advance(Duration.ZERO);
+		// 7 has yet to arrive, and nobody waits on the kept-out fill.
+		expect(await isPending(ended)).toBe(true);
+		expect(fills[0].isWanted(3n)).toBe(false);
+		sub.close();
+	} finally {
+		requests.close();
+		producer.close();
+		installed.close();
+	}
+});
+
+// A fill asked for a kept-out key is withdrawn once the feed ends the read: nothing reads it, and a
+// read polled again asks anew. Mirrors the Rust `a_kept_out_fill_is_withdrawn_when_the_feed_ends`.
+test("a kept-out fill is withdrawn when the feed ends", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const pool = new Pool({ expiry: Duration.millis(10_000) });
+	const unpooled = new TrackProducer("test");
+	hooks.poolTrack(unpooled, pool);
+	const producer = unpooled.accept({ maxAge: null });
+	hooks.receiveTrack(producer);
+	const requests = producer.requests();
+	const fills: FillGroups[] = [];
+	void (async () => {
+		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) fills.push(fill);
+	})();
+	try {
+		for (const key of [0n, 6n]) {
+			const group = producer.createGroup(key);
+			group.writeFrame({ payload: new Uint8Array(1), timestamp: Timestamp.unscaled(key) });
+			group.finish();
+		}
+		const sub = producer.subscribe({ ranges: [{ start: 0n, end: 6n }] });
+		expect(sub.tryRecvGroup()?.start).toBe(0n);
+		expect(sub.tryRecvGroup()?.start).toBe(6n);
+		sub.withRange({ start: { included: 6n }, end: { excluded: 7n } });
+		const ended = sub.recvGroup();
+		producer.skipGroups(3n, 6n);
+		await clock.advance(Duration.millis(60_000));
+		producer.skipGroups(1n, 3n);
+		await clock.advance(Duration.ZERO);
+		expect(await isPending(ended)).toBe(true);
+		expect(fills[0].isWanted(3n)).toBe(true);
+
+		producer.finishAt({ group: 7n, frame: 0 });
+		expect(await ended).toBeUndefined();
+		expect(fills[0].isWanted(3n)).toBe(false);
+		sub.close();
+	} finally {
+		requests.close();
+		producer.close();
+		installed.close();
+	}
+});
+
+// A read that ended once a fill refused its kept-out keys stays ended: polled again, it asks nothing.
+test("a kept-out key a fill refused stays given up once the read ends", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const pool = new Pool({ expiry: Duration.millis(10_000) });
+	const unpooled = new TrackProducer("test");
+	hooks.poolTrack(unpooled, pool);
+	const producer = unpooled.accept({ maxAge: null });
+	hooks.receiveTrack(producer);
+	const requests = producer.requests();
+	const fills: FillGroups[] = [];
+	void (async () => {
+		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) fills.push(fill);
+	})();
+	try {
+		for (const key of [0n, 6n]) {
+			const group = producer.createGroup(key);
+			group.writeFrame({ payload: new Uint8Array(1), timestamp: Timestamp.unscaled(key) });
+			group.finish();
+		}
+		const sub = producer.subscribe({ ranges: [{ start: 0n, end: 6n }] });
+		expect(sub.tryRecvGroup()?.start).toBe(0n);
+		expect(sub.tryRecvGroup()?.start).toBe(6n);
+		sub.withRange({ start: { included: 6n }, end: { excluded: 7n } });
+		const ended = sub.recvGroup();
+		producer.skipGroups(3n, 6n);
+		await clock.advance(Duration.millis(60_000));
+		producer.skipGroups(1n, 3n);
+		await clock.advance(Duration.ZERO);
+		expect(fills.map((fill) => [fill.start, fill.end])).toEqual([[3n, 6n]]);
+		fills[0].refuseGroups(3n, 6n, new Error("not found"));
+		expect(await ended).toBeUndefined();
+
+		expect(await sub.recvGroup()).toBeUndefined();
+		await clock.advance(Duration.ZERO);
+		expect(fills).toHaveLength(1);
+		sub.close();
+	} finally {
+		requests.close();
+		producer.close();
+		installed.close();
+	}
+});
+
+// A forgotten kept-out run spanning a history range and a live join is judged per budget: the live
+// part gone stale is given up, while the history part, which never goes stale, stays asked.
+test("a forgotten kept-out run is judged by each range's budget", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const pool = new Pool({ expiry: Duration.millis(10_000) });
+	const unpooled = new TrackProducer("test");
+	hooks.poolTrack(unpooled, pool);
+	const producer = unpooled.accept({ maxAge: null });
+	hooks.receiveTrack(producer);
+	const requests = producer.requests();
+	const fills: FillGroups[] = [];
+	void (async () => {
+		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) fills.push(fill);
+	})();
+	const write = (key: bigint) => {
+		const group = producer.createGroup(key);
+		group.writeFrame({ payload: new Uint8Array(1), timestamp: Timestamp.unscaled(key) });
+		group.finish();
+	};
+	try {
+		write(0n);
+		write(6n);
+		const sub = producer.subscribe({
+			ranges: [
+				{ start: 0n, end: 2n },
+				{ start: { live: { min: null, max: Duration.millis(1_000) } }, end: 7n },
+			],
+		});
+		expect(sub.tryRecvGroup()?.start).toBe(0n);
+		expect(sub.tryRecvGroup()?.start).toBe(6n);
+		sub.withRange({ start: { included: 6n }, end: { excluded: 8n } });
+		const next = sub.recvGroup();
+		producer.skipGroups(1n, 6n);
+		await clock.advance(Duration.ZERO);
+		expect(await isPending(next)).toBe(true);
+
+		// Past the pool's idle window the track forgot the skip, so the read asks for it all once 7
+		// would otherwise end it, a run per budget.
+		await clock.advance(Duration.millis(60_000));
+		write(7n);
+		expect((await next)?.start).toBe(7n);
+		const ended = sub.recvGroup();
+		await clock.advance(Duration.ZERO);
+		expect(await isPending(ended)).toBe(true);
+		expect(fills.map((fill) => [fill.start, fill.end])).toEqual([
+			[1n, 3n],
+			[3n, 6n],
+		]);
+
+		// 3 to 5 go stale behind 7, but 1 and 2 never do.
+		await clock.advance(Duration.millis(2_000));
+		expect(await isPending(ended)).toBe(true);
+		expect(fills[0].isWanted(1n)).toBe(true);
+		expect(fills[1].isWanted(3n)).toBe(false);
+		producer.skipGroups(1n, 3n);
+		expect(await ended).toBeUndefined();
+		sub.close();
+	} finally {
+		requests.close();
+		producer.close();
+		installed.close();
+	}
+});
+
+// A bounded read owes the keys its local floor keeps out until a skip accounts for them. One its
+// track forgot once the pool's idle window passed is unknown again, so the read asks a fill for it
+// rather than wait for good, and ends on the upstream's answer. Mirrors the Rust
+// `a_bounded_read_asks_again_for_a_kept_out_skip_its_track_forgot`.
+test("a bounded read asks again for a kept-out skip its track forgot", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const pool = new Pool({ expiry: Duration.millis(10_000) });
+	const unpooled = new TrackProducer("test");
+	hooks.poolTrack(unpooled, pool);
+	const producer = unpooled.accept({ maxAge: null });
+	hooks.receiveTrack(producer);
+	const requests = producer.requests();
+	const fills: FillGroups[] = [];
+	void (async () => {
+		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) fills.push(fill);
+	})();
+	try {
+		for (const key of [0n, 6n]) {
+			const group = producer.createGroup(key);
+			group.writeFrame({ payload: new Uint8Array(1), timestamp: Timestamp.unscaled(key) });
+			group.finish();
+		}
+		const sub = producer.subscribe({ ranges: [{ start: 0n, end: 6n }] });
+		expect(sub.tryRecvGroup()?.start).toBe(0n);
+		expect(sub.tryRecvGroup()?.start).toBe(6n);
+		sub.withRange({ start: { included: 6n }, end: { excluded: 7n } });
+		const ended = sub.recvGroup();
+		producer.skipGroups(3n, 6n);
+		await clock.advance(Duration.ZERO);
+		expect(await isPending(ended)).toBe(true);
+		// The feed still owes 1 and 2.
+		expect(fills).toEqual([]);
+
+		await clock.advance(Duration.millis(60_000));
+		producer.skipGroups(1n, 3n);
+		await clock.advance(Duration.ZERO);
+		expect(await isPending(ended)).toBe(true);
+		expect(fills.map((fill) => [fill.start, fill.end])).toEqual([[3n, 6n]]);
+		// The upstream's answer, which a session records as the subscription's own skip.
+		producer.skipGroups(3n, 6n);
+		expect(await ended).toBeUndefined();
+		sub.close();
+	} finally {
+		requests.close();
+		producer.close();
+		installed.close();
 	}
 });
