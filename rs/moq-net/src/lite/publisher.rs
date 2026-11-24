@@ -5951,7 +5951,8 @@ impl TrackRun {
 
 	/// Move where delivery starts down to `start`, once resolved. The stale runs taken back
 	/// below the old start that it now owes are judged again, so the wire learns their fate:
-	/// the cursor reported them once already, and reports nothing twice.
+	/// the cursor reported them once already, and reports nothing twice. Only what the wire
+	/// still was not told is reopened: a verdict forwarded since the take-back is final.
 	fn lower_start(&mut self, start: u64) {
 		let Start::Resolved(resolved) = &mut self.start else {
 			return;
@@ -5966,7 +5967,10 @@ impl TrackRun {
 			.collect();
 		for run in runs {
 			self.taken_back.remove(run.clone());
-			self.track.reopen(run);
+			let untold = self.track.record_mut().untold(run);
+			for gap in untold.iter() {
+				self.track.reopen(gap.clone());
+			}
 		}
 	}
 
@@ -9833,11 +9837,13 @@ mod serve_group_test {
 	/// A relay's ceiling makes the history below its copy's only group stale to a reader with
 	/// no budget of its own, so the oldest range starts at that group and the stale run below
 	/// goes unnamed. A range an update adds over that run starts below it, and so owes the
-	/// run's fate, routed or not: a subscriber waits on that range until it learns it.
+	/// run's fate, routed or not: a subscriber waits on that range until it learns it. A fate
+	/// the copy learned and the wire was told before the update is not told again.
 	#[kio::test]
 	async fn lite07_a_range_added_below_the_start_learns_the_stale_runs_fate() {
 		const LIVE: u64 = 100_000;
-		for routed in [false, true] {
+		for (routed, upstream_dropped) in [(false, false), (true, false), (false, true), (true, true)] {
+			let case = format!("routed: {routed}, upstream dropped: {upstream_dropped}");
 			let ceiling = broadcast::Info {
 				cache_duration: Some(Duration::from_secs(30)),
 				..Default::default()
@@ -9877,6 +9883,10 @@ mod serve_group_test {
 			let (mut run, mut writer, log) = lite07_run(SinkSession::new(Log::default()), subscriber);
 			asked(&mut run, &bounds.ranges);
 			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			if upstream_dropped {
+				copy.drop_groups(0..LIVE, StreamError::NotFound);
+				while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			}
 
 			let below = lite::Range {
 				start: Some(lite::Anchor::Absolute(track::Position::group(0))),
@@ -9885,14 +9895,18 @@ mod serve_group_test {
 			run.update(lite07_add(&run, &[(0, oldest[0])], 1, &[below]));
 			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 			let sent = responses(&mut writer, &log).await;
-			assert_eq!(starts(&sent), [(0, Some(LIVE)), (1, Some(0))], "routed: {routed}");
+			assert_eq!(starts(&sent), [(0, Some(LIVE)), (1, Some(0))], "{case}");
 			let drops: Vec<_> = (sent.iter())
 				.filter_map(|msg| match msg {
 					lite::SubscribeResponse::Drop(drop) => Some((drop.groups.clone(), drop.error(Version::Lite07))),
 					_ => None,
 				})
 				.collect();
-			assert_eq!(drops, [(0..LIVE, StreamError::Old)], "routed: {routed}");
+			let fate = match upstream_dropped {
+				true => StreamError::NotFound,
+				false => StreamError::Old,
+			};
+			assert_eq!(drops, [(0..LIVE, fate)], "{case}");
 		}
 	}
 
