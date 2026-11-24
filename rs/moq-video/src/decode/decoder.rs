@@ -364,9 +364,9 @@ impl Decoder {
 	/// afterwards (VAAPI). A surface with no CPU path fails here rather than
 	/// arriving GPU-resident at a caller that said it could not take one.
 	fn deliver(&mut self, frame: Frame) -> Result<Frame, Error> {
-		// Output is in presentation order, and nothing decoded after a keyframe is
-		// shown before it, so a picture's timestamp says which side of a switch it
-		// is on.
+		// Every backend returns pictures in presentation order, and nothing decoded
+		// after a keyframe is shown before it, so a picture's timestamp says which
+		// side of a switch it is on.
 		while let Some(&(at, color)) = self.switches.front()
 			&& frame.timestamp >= at
 		{

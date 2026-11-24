@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The VideoToolbox decoder returns pictures in presentation order. It used to return them in decode order, so a stream with B-frames played out of order on macOS and iOS. Each sample now carries its access unit's presentation time and goes in with temporal processing on, so VideoToolbox reorders, and a flush still returns the pictures it holds back.
 - The openh264 decoder outputs a Main or High H.264 picture as soon as it decodes when the SPS rules reordering out (picture order count type 2, or a VUI `max_num_reorder_frames` of 0). openh264 used to hold each such picture until the next access unit arrived, a frame interval of decode latency (50 ms at 20 fps) for streams from hardware encoders such as VA-API.
 - The VA-API backend no longer holds every H.264 picture until the next access unit arrives: a stream without B-frames comes out as it decodes, which took a frame interval off decode latency (100 ms at 10 fps).
 - NVIDIA transcodes no longer serialize the whole GPU: NVDEC skips the multi-millisecond decoder-caps query when a flush's new parser keeps the decoder, decoded frames reuse pooled device memory instead of a `cuMemAlloc` and `cuMemFree` each, and each NVENC session scales CUDA frames into one input it registers once and reuses one output bitstream, where it used to allocate, register, and free all of them per frame.

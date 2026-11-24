@@ -132,8 +132,9 @@ impl From<Codec> for Stream {
 }
 
 /// An opened decoder. Submit prepared access units in decode order, then
-/// receive zero or more decoded frames (zero while the decoder is still
-/// buffering, e.g. before the first keyframe's parameter sets).
+/// receive zero or more decoded frames in presentation order (zero while the
+/// decoder is still buffering, e.g. before the first keyframe's parameter sets,
+/// or holding a picture back to reorder it).
 ///
 /// A backend that readies pictures synchronously holds them in a reused queue,
 /// so no call allocates to hand them back.
