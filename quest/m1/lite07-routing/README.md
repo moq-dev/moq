@@ -33,7 +33,7 @@ bugs with scratch tests):
   suppression (`stale_copy`) catches real bugs, and 11 router tests fail
   without it; JS `u62()` reads full 64-bit varints despite its name; and the
   raw `/` Path Keep split is
-  [already owned](/quest/m2/lite07-path-keep-parts.md).
+  fixed by counting parts.
 
 This epic has no work of its own.
 

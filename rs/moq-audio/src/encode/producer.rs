@@ -963,9 +963,11 @@ impl Finished {
 /// How far back a subscription wants retained audio replayed. A live join
 /// ([`Start::Live`](moq_net::track::Start::Live) with no end) starts its lag behind the live edge,
 /// which a player states as its playout delay plus the codec's warmup, bounded by the join's own
-/// max, so when every range is one the furthest of those bounds it. Any other range is history,
-/// such as one from the oldest group (as moq-transport and moq-lite before 07 carry every join),
-/// which wants everything kept: `None` leaves the retention.
+/// max, so when every range is one the furthest of those bounds it. A join with no lag limit, as
+/// every join before moq-lite-07 is, starts from the oldest group but drops anything older than its
+/// max, so its max alone bounds it. Any other range is history, such as one from the oldest group
+/// (as moq-transport carries every join), which wants everything kept, as does a join bounded by
+/// neither: `None` leaves the retention.
 #[cfg(any(feature = "capture", test))]
 fn replay_budget(subscription: &moq_net::track::Subscription) -> Option<std::time::Duration> {
 	let joins: Option<Vec<std::time::Duration>> = subscription
@@ -1186,12 +1188,42 @@ mod tests {
 						max: Some(max),
 					},
 				)]),
+				143,
 			)
 			.await;
 		}
 	}
 
-	async fn replays_from(subscription: moq_net::track::Subscription) {
+	/// A join with no lag limit, as one before moq-lite-07 is, starts from the oldest group but drops
+	/// anything older than its max, so its max alone bounds the replay.
+	#[tokio::test(start_paused = true)]
+	async fn a_join_with_no_lag_limit_replays_its_max() {
+		replays_from(
+			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+				moq_net::track::Start::Live {
+					min: None,
+					max: Some(Duration::from_millis(130)),
+				},
+			)]),
+			143,
+		)
+		.await;
+	}
+
+	/// A join bounded by neither lag nor max drops nothing, so it replays the whole retention.
+	#[tokio::test(start_paused = true)]
+	async fn a_join_bounded_by_neither_replays_the_whole_retention() {
+		replays_from(
+			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+				moq_net::track::Start::Live { min: None, max: None },
+			)]),
+			0,
+		)
+		.await;
+	}
+
+	/// Replays 150 retained frames to `subscription` and checks the first one it reads is `first`.
+	async fn replays_from(subscription: moq_net::track::Subscription, first: u64) {
 		let input = Input::default();
 		let options = Options {
 			track: Some("audio".into()),
@@ -1218,11 +1250,12 @@ mod tests {
 		// One replay turn, read at once as a network subscriber is served: the group it wrote is
 		// the newest the track holds, so the subscriber's own budget cannot judge it stale.
 		producer.set_active(true, at(150)).unwrap();
-		// A 130 ms budget at frame 150 still wants the frames ending after it: 143 onward.
+		// A 130 ms budget at frame 150 still wants the frames ending after it, 143 onward, and the
+		// whole retention starts at 0.
 		let Some(moq_mux::container::Read::Frame { frame, .. }) = reader.read().await.unwrap() else {
 			panic!("expected a replayed frame");
 		};
-		assert_eq!(frame.timestamp, at(143));
+		assert_eq!(frame.timestamp, at(first));
 		let _finished = producer.finish().unwrap();
 	}
 

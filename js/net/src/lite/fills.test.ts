@@ -395,6 +395,50 @@ test("range fills: a range start past the asked groups refuses only the fills ow
 	peer.close();
 });
 
+// As in Rust: a group the subscription delivered, recovered once and evicted again before its
+// reader took it, is recovered again rather than refused, since a key a reader is owed is never
+// lost to the cache.
+test("range fills: an accounted group evicted again is recovered again", async () => {
+	const peer = await missing();
+	const { opened, recover } = recoveries();
+	const fills = new RangeFills(peer.track, Version.DRAFT_07, recover);
+	const tail = new Tail();
+	tail.account(1n, 2n);
+	fills.push(peer.fill);
+	fills.poll(tail, true);
+	expect(opened.map((entry) => entry.groups)).toEqual([{ start: 1n, end: 2n }]);
+	// The recovery delivered group 1, which the cache evicted again before the reader took it.
+	opened[0]?.finish([]);
+	await Promise.resolve();
+	fills.poll(tail, true);
+	fills.poll(tail, true);
+	expect(opened.map((entry) => entry.groups)).toEqual([
+		{ start: 1n, end: 2n },
+		{ start: 1n, end: 2n },
+	]);
+
+	fills.close();
+	peer.close();
+});
+
+// A group the subscription already accounted for is recovered even when the run owing it starts
+// with keys the subscription will not deliver: a refusal answers only its own keys.
+test("range fills: an accounted group past a refused run is recovered", async () => {
+	const peer = await missing();
+	const { opened, recover } = recoveries();
+	const fills = new RangeFills(peer.track, Version.DRAFT_07, recover);
+	const tail = new Tail();
+	tail.account(0n, 4n);
+	fills.push(peer.fill);
+	// The subscription's range starts past group 0.
+	fills.skip({ start: 0n, end: 4n }, 0n, 1n);
+	fills.poll(tail, true);
+	expect(opened.map((entry) => entry.groups)).toEqual([{ start: 1n, end: 4n }]);
+
+	fills.close();
+	peer.close();
+});
+
 // A recovery opened on the first poll that holds its fill asks with that fill's priority, not the
 // empty ask's lowest.
 test("range fills: a recovery the first poll opens asks with the fill's priority", async () => {

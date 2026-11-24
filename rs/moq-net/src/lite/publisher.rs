@@ -6683,11 +6683,6 @@ impl TrackRun {
 			false => self.track.poll_queued_drop(waiter),
 		};
 		let Poll::Ready((range, hole)) = polled else {
-			// A reader the pool ended reports no drop: end the subscription now, rather than once
-			// a group waiting on stream credit reads the failure.
-			if self.track.lagged() {
-				return Err(Error::Lagged);
-			}
 			return Ok(false);
 		};
 		match &mut self.start {

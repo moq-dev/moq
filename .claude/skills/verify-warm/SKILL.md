@@ -1,6 +1,6 @@
 ---
 name: verify-warm
-description: Model-check whether warm pulls settle (`rs/moq-net/verify/warm/WarmSettle.tla`) with TLA+, for the rules the warmth simulator measures (`rs/moq-net/src/route/tests/warm.rs`): ranked readers, settled pulls, and the rejected price-moving pick. Use when a change touches how a relay chooses where to pull a broadcast from (its route or a neighbour's warm copy), what a warm advert or subscribe answer carries (cost, path, rank), which neighbours a relay advertises to, or when a relay chooses again, or when a warmth bug needs every ordering of adverts, answers, and ranks checked rather than a random churn sweep.
+description: Model-check warm-pull routing convergence (`rs/moq-net/verify/warm/WarmSettle.tla`) with TLA+. Use when changing relay route/warm-copy selection, warm adverts, or neighbor ranking in `rs/moq-net`.
 ---
 
 # Verify warm pulls settle
