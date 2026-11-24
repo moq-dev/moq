@@ -137,6 +137,7 @@ export interface ConnectionProps {
  */
 export class Connection {
 	/** Tokens a connection asks for at each dial: pass one as `tokens` and answer its {@link Dials.next} dials. */
+	// fallow-ignore-next-line unused-class-member
 	static readonly Dials = DialsClass;
 
 	/** Establish a one-shot session; a supplied transport belongs here, not in the reconnect loop. */
