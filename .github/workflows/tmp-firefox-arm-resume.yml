@@ -1,0 +1,99 @@
+name: Temporary Firefox ARM resume measurement
+
+# Temporary: reproduces quest/m0/interop-green/firefox-arm-resume.md's page stop on the Nightly's
+# runner class, with a Gecko profile of the Firefox player. Deleted before the PR is ready for review.
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/tmp-firefox-arm-resume.yml
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    name: ARM resume (${{ matrix.variant }} ${{ matrix.shard }})
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { variant: stops, shard: 1 }
+          - { variant: stops, shard: 2 }
+          - { variant: stops, shard: 3 }
+          - { variant: stops, shard: 4 }
+          - { variant: plain, shard: 1 }
+          - { variant: plain, shard: 2 }
+          - { variant: plain, shard: 3 }
+          - { variant: plain, shard: 4 }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/nix
+      - name: Rust cache
+        uses: ./.github/actions/rust-cache
+        with:
+          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
+      - name: Install publisher and player engines
+        run: |
+          nix develop --command env PLAYWRIGHT_BROWSERS_PATH="${{ runner.temp }}/playwright" bash -c "just js install frozen && bunx playwright install --with-deps chromium firefox"
+          sudo apt-get install -y libpulse0
+      - name: Measure
+        env:
+          VARIANT: ${{ matrix.variant }}
+          PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS: 1
+          BROWSERS: ${{ runner.temp }}/playwright
+        run: |
+          runs=5
+          engine=firefox
+          cases=(--media-cases pause,rejoin,detach)
+          case "$VARIANT" in
+            full | stops | profile-full | plain) runs=3; cases=() ;;
+            chromium) engine=chromium ;;
+          esac
+          pass=0
+          fail=0
+          for i in $(seq "$runs"); do
+            log="$RUNNER_TEMP/run-$i.log"
+            extra=(HARNESS_KEEP=1)
+            if [[ "$VARIANT" == stops ]]; then
+              # Markers only: LongTask durations without stack sampling's overhead.
+              extra+=(MOZ_PROFILER_STARTUP=1 MOZ_PROFILER_SHUTDOWN="$RUNNER_TEMP/profile-$i-%p.json"
+                MOZ_PROFILER_STARTUP_FEATURES=nostacksampling MOZ_PROFILER_STARTUP_ENTRIES=16777216)
+            fi
+            if [[ "$VARIANT" == profile* ]]; then
+              extra+=(MOZ_PROFILER_STARTUP=1 MOZ_PROFILER_SHUTDOWN="$RUNNER_TEMP/profile-$i-%p.json"
+                MOZ_PROFILER_STARTUP_FEATURES=js,cpu MOZ_PROFILER_STARTUP_INTERVAL=1
+                MOZ_PROFILER_STARTUP_ENTRIES=67108864)
+            fi
+            if nix develop --command env PLAYWRIGHT_BROWSERS_PATH="$BROWSERS" HARNESS_RUNS="$RUNNER_TEMP/runs-$i" "${extra[@]}" \
+              just test media --media-engines "$engine" "${cases[@]}" >"$log" 2>&1; then
+              pass=$((pass + 1))
+              echo "run $i: pass"
+            else
+              fail=$((fail + 1))
+              echo "run $i: fail"
+            fi
+            grep -E '^\s+(FAIL|PASS) |resumed [0-9]+ frames|stall' "$log" | cut -c1-400 || true
+            for f in "$RUNNER_TEMP"/profile-"$i"*.json; do
+              [[ -f "$f" ]] && gzip "$f"
+            done
+          done
+          echo "RESULT $VARIANT: $pass pass, $fail fail of $runs" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Preserve logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: arm-resume-${{ matrix.variant }}-${{ matrix.shard }}
+          path: |
+            ${{ runner.temp }}/run-*.log
+            ${{ runner.temp }}/profile-*.json.gz
+            ${{ runner.temp }}/runs-*/*/relay.log
+            ${{ runner.temp }}/runs-*/*/media-*.log
+            ${{ runner.temp }}/runs-*/**/*.trace.zip
+          if-no-files-found: ignore
