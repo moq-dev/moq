@@ -4,10 +4,11 @@ import type * as Announce from "../announced.ts";
 import { Handle as AuthHandle } from "../auth.ts";
 import { ended } from "../auth_session.ts";
 import { Allocator, reserved, Viewers } from "../bandwidth.ts";
-import { error, reason } from "../error.ts";
+import { ConnectTimeout, error, reason } from "../error.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Follow } from "../util/observed.ts";
+import { after } from "../util/timer.ts";
 import { wireOf } from "../wire.ts";
 import { isWebTransportSupported } from "./browser.ts";
 import {
@@ -19,9 +20,11 @@ import {
 	type WebSocketProps,
 	type WebTransportProps,
 } from "./connect.ts";
+import { type Answer, Dials } from "./dials.ts";
 import { parse } from "./endpoint.ts";
 import { DISCOVERY_REMOVED } from "./forward.ts";
 import { DEFAULT_HANDOVER, dialed, type Goaway, type Handover, handover, pinnedTransport, target } from "./goaway.ts";
+import { DEFAULT_TIMEOUT } from "./handshake.ts";
 import type { Session } from "./session.ts";
 import { estimates, type Probe } from "./stats.ts";
 import { tick } from "./ticker.ts";
@@ -35,6 +38,9 @@ const PROBE_INITIAL = Duration.secs(10);
 
 /** The longest wait between WebTransport probes, before jitter. */
 const PROBE_MAX = Duration.secs(300);
+
+/** A dial's signed tokens and the connect timeout they left it, or the app's refusal. */
+type Signed = { tokens: readonly string[]; left: Duration } | Extract<Answer, { refused: Error }>;
 
 /**
  * Exponential backoff settings for the reconnect loop.
@@ -51,6 +57,8 @@ const PROBE_MAX = Duration.secs(300);
  * including an attempt that outlives {@link ConnectProps.timeout}, until
  * {@link Backoff.timeout} runs out, whatever the error, an auth rejection included; only a
  * refused GOAWAY redirect stops the current URL sooner. A new URL or a disable/re-enable starts another sequence.
+ * Tokens from {@link Dials} retry from the first failure too: each dial asks the app, which
+ * reads why the last one failed and stops the URL by failing the dial.
  *
  * A GOAWAY off a session that outlived {@link Backoff.healthy} migrates at once, unless it
  * sends the connection back to an endpoint that already redirected it elsewhere and the
@@ -108,8 +116,11 @@ export type ReloadProps = Omit<
 	ConnectProps,
 	"url" | "signal" | "transport" | "implementation" | "tokens" | "viewers"
 > & {
-	/** See {@link ConnectProps.tokens}; pass a `Signal` to replace them before they expire. */
-	tokens?: readonly string[] | Signal<readonly string[]>;
+	/**
+	 * See {@link ConnectProps.tokens}; pass a `Signal` to replace them before they expire, or
+	 * {@link Dials} to sign a set for each dial when it starts.
+	 */
+	tokens?: readonly string[] | Signal<readonly string[]> | Dials;
 
 	/** A reload owns the abort signal for each connection attempt. */
 	signal?: never;
@@ -203,6 +214,7 @@ export type ReloadStatus = "connecting" | "connected" | "disconnected";
  * rather than retrying, so a setup mistake such as an
  * untrusted certificate or no version in common surfaces at once. A page opened before its
  * relay is reachable therefore stays disconnected until a new URL or a disable/re-enable.
+ * With {@link Dials}, which ask the app at every dial, it backs off and asks again instead.
  *
  * @internal
  */
@@ -216,9 +228,19 @@ export class Reload {
 	/**
 	 * Credentials every dial presents; see {@link ConnectProps.tokens}. Replacing them reaches
 	 * the next dial and, on a live session with AUTH, presents the new tokens at once,
-	 * withdrawing the replaced ones once every new one has its answer.
+	 * withdrawing the replaced ones once every new one has its answer. With {@link Dials}, the set
+	 * the latest dial signed, which only that dial presents.
 	 */
 	tokens: Signal<readonly string[]>;
+
+	// Where each dial asks for its tokens, instead of reading `tokens`.
+	readonly #dials?: Dials;
+	/**
+	 * Why the loop is retrying: how the last attempt or session ended since a session last served,
+	 * or undefined. The next {@link Dials} dial reads it. Mirrors Rust's `Monitor::failure()`.
+	 */
+	readonly failure: Getter<Error | undefined>;
+	readonly #failure = new Signal<Error | undefined>(undefined);
 
 	/**
 	 * Current connection status. A session reads as connected only once its peer accepts the
@@ -408,7 +430,9 @@ export class Reload {
 		if (props && "discovery" in props) throw new TypeError(DISCOVERY_REMOVED);
 		this.url = Signal.from(props?.url);
 		this.enabled = Signal.from(props?.enabled ?? true);
-		this.tokens = Signal.from(props?.tokens ?? []);
+		const tokens = props?.tokens ?? [];
+		this.#dials = tokens instanceof Dials ? tokens : undefined;
+		this.tokens = Signal.from(tokens instanceof Dials ? [] : tokens);
 		this.#verdict = new Verdict(this.tokens, this.auth);
 		this.backoff = props?.backoff ?? {};
 		// Validated here, like the timeout, rather than by every retry.
@@ -444,6 +468,7 @@ export class Reload {
 		}
 
 		this.error = this.#error;
+		this.failure = this.#failure;
 
 		const win = globalThis.window;
 		const doc = globalThis.document;
@@ -509,6 +534,8 @@ export class Reload {
 			const tokens = effect.get(this.tokens);
 			// Before the held tokens change, so a token the set kept is judged by what it was.
 			this.#verdict.refresh();
+			// A signed set belongs to its own dial: another session presenting it would spend it.
+			if (this.#dials) return;
 			const connection = effect.get(this.established);
 			if (connection) heldOf(connection)?.update(tokens);
 		});
@@ -600,7 +627,33 @@ export class Reload {
 
 					this.#setDialing(true);
 					this.#verdict.dialing();
-					const tokens = reached?.tokens ?? this.tokens.peek();
+					let tokens = reached?.tokens;
+					// Signing spends the attempt's own timeout, so a stuck signer fails like a slow dial.
+					let timeout = this.timeout;
+					if (!tokens && this.#dials) {
+						let signed: Signed;
+						try {
+							signed = await this.#sign(this.#dials, dialing, signal, this.#failure.peek());
+						} catch (err) {
+							this.#setDialing(false);
+							// A redirect's target left unanswered falls back to the URL, as one that failed does.
+							redirectFailed = this.#redirect.peek() !== undefined;
+							throw err;
+						}
+						// A teardown that closed the dials is no refusal.
+						if (signal.aborted) return;
+						if ("refused" in signed) {
+							this.#setDialing(false);
+							console.warn("dial refused by its signer, not retrying:", signed.refused);
+							this.#giveUp(signed.refused);
+							return;
+						}
+						tokens = signed.tokens;
+						timeout = signed.left;
+					}
+					tokens ??= this.tokens.peek();
+					// A probe's dial signed its own set too, which `answered()` judges from here.
+					if (this.#dials) this.tokens.set(tokens);
 					let connection: Session;
 					const reusing = reached;
 					reached = undefined;
@@ -616,7 +669,7 @@ export class Reload {
 									: this.websocket,
 								versions: this.versions,
 								webtransport: this.webtransport,
-								timeout: this.timeout,
+								timeout,
 								publish: this.publish,
 								consume: this.consume,
 								auth: this.auth,
@@ -663,6 +716,7 @@ export class Reload {
 					) {
 						// The replacement serves now; a predecessor keeps draining its groups in flight.
 						this.#serve(connection);
+						this.#failure.set(undefined);
 					}
 					this.#setDialing(false);
 
@@ -696,8 +750,8 @@ export class Reload {
 					if (ended === null || ended instanceof Error) {
 						// Until a session was established, a close stops the URL as a failed attempt
 						// does: it is how a relay refuses a live session before accepting its credential.
-						// No error kind is read.
-						if (this.#establishedHref !== href) {
+						// No error kind is read. With Dials, the next dial's answer decides instead.
+						if (this.#establishedHref !== href && !this.#dials) {
 							console.warn(`connection closed, not retrying: ${ended ? reason(ended) : "no error"}`);
 							current = undefined;
 							this.#serve(undefined);
@@ -786,7 +840,8 @@ export class Reload {
 
 				// Attempts fail fast until a session was established: a URL whose peer never accepted
 				// one is more likely misconfigured than restarting, and only the app can fix that.
-				if (this.#establishedHref !== href) {
+				// With Dials the app is asked at every dial anyway, so its answer decides.
+				if (this.#establishedHref !== href && !this.#dials) {
 					console.warn("connection failed, not retrying:", err);
 					this.#giveUp(error(err));
 					return;
@@ -802,6 +857,33 @@ export class Reload {
 	}
 
 	/**
+	 * Ask `dials` for the tokens of a dial to `dialing`, within the connect timeout, which the
+	 * signing spends: the tokens and the timeout left for the dial, or the app's refusal. Rejects
+	 * with `ConnectTimeout` once the timeout passes unanswered, or with the teardown once `signal` aborts.
+	 */
+	async #sign(dials: Dials, dialing: URL, signal: AbortSignal, failure: Error | undefined): Promise<Signed> {
+		const limit = this.timeout ?? DEFAULT_TIMEOUT;
+		const started = now();
+		const bound = new AbortController();
+		const abort = () => bound.abort(signal.reason);
+		if (signal.aborted) abort();
+		else signal.addEventListener("abort", abort, { once: true });
+		const disarm = limit.isZero() ? () => {} : after(limit, () => bound.abort(new ConnectTimeout(limit)));
+		try {
+			const answer = await dials.request(dialing, bound.signal, failure);
+			if ("refused" in answer) return answer;
+			if (limit.isZero()) return { tokens: answer.tokens, left: limit };
+			// Zero would wait forever, so a dial with no time left times out here instead.
+			const left = limit.saturatingSub(now().since(started));
+			if (left.isZero()) throw new ConnectTimeout(limit);
+			return { tokens: answer.tokens, left };
+		} finally {
+			signal.removeEventListener("abort", abort);
+			disarm();
+		}
+	}
+
+	/**
 	 * Resolve with the WebTransport session that reaches `dialing` while `connection` runs on the
 	 * WebSocket fallback, probing on a jittered backoff from {@link PROBE_INITIAL} up to {@link PROBE_MAX}.
 	 * Never resolves for a session on another transport, where WebTransport is unsupported, or
@@ -813,13 +895,32 @@ export class Reload {
 		try {
 			for (let delay = PROBE_INITIAL; ; delay = delay.mul(2).min(PROBE_MAX)) {
 				await sleep(delay.mul(0.5 + Math.random() / 2), { signal });
+				let tokens = this.tokens.peek();
+				let timeout = this.timeout;
+				if (this.#dials) {
+					let signed: Signed;
+					try {
+						// The serving session is fine, so the probe reports no failure.
+						signed = await this.#sign(this.#dials, dialing, signal, undefined);
+					} catch (err) {
+						if (signal.aborted) throw err;
+						console.warn("a probe's tokens timed out:", err);
+						continue;
+					}
+					if ("refused" in signed) {
+						console.warn("a probe's dial was refused by its signer:", signed.refused);
+						continue;
+					}
+					tokens = signed.tokens;
+					timeout = signed.left;
+				}
 				const props = {
-					tokens: this.tokens.peek(),
+					tokens,
 					urlAuth: this.urlAuth,
 					versions: this.versions,
 					webtransport: this.webtransport,
 					websocket: this.#redirect.peek() ? undefined : this.websocket,
-					timeout: this.timeout,
+					timeout,
 				};
 				const reached = await reachable(dialing, props, signal);
 				if (reached) return reached;
@@ -1012,6 +1113,7 @@ export class Reload {
 	 * `cause` the error that killed it, if it died with one.
 	 */
 	#retry(effect: Effect, connected: Instant | undefined, cause?: unknown): void {
+		this.#failure.set(cause === undefined ? new Error("connection closed") : error(cause));
 		// A healthy session's end clears the backoff and starts a fresh retry window: a one-off
 		// drop should reconnect promptly. Anything shorter is a peer that accepts and soon
 		// severs, which has to keep escalating or we hammer it forever at the initial delay.
@@ -1058,6 +1160,7 @@ export class Reload {
 	}
 
 	#resetSequence(): void {
+		this.#failure.set(undefined);
 		this.#delay = undefined;
 		this.#deadline = undefined;
 		this.#sequenceHref = undefined;
@@ -1067,6 +1170,8 @@ export class Reload {
 
 	/**
 	 * Resolve once the peer first answers the latest {@link tokens}, like Rust's `Tokens::poll_answered`.
+	 * With {@link Dials}, that is the set the latest dial was answered with, none before the first:
+	 * read a refusal from the next dial's `failure` instead.
 	 *
 	 * It covers the tokens the latest set newly presented, or the initial ones before any set:
 	 * each is granted in band, or is the connection credential a dial carried and the peer

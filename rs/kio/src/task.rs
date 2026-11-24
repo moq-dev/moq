@@ -380,18 +380,6 @@ impl<T> Tasks<T> {
 		}
 	}
 
-	/// Cancel every task `keep` rejects.
-	pub fn retain(&mut self, mut keep: impl FnMut(&T) -> bool) {
-		for (index, slot) in self.children.iter_mut().enumerate() {
-			if slot.as_ref().is_some_and(|occupant| !keep(&occupant.task)) {
-				// A wake bit left set costs the slot's next occupant one spurious poll at most.
-				*slot = None;
-				self.free.push(index);
-				self.len -= 1;
-			}
-		}
-	}
-
 	/// Take a task out of the set before it finishes, cancelling it there.
 	///
 	/// `None` when the task already finished or was removed.
@@ -668,50 +656,6 @@ mod tests {
 		assert!(tasks.poll(&waiter).is_pending(), "b is still live");
 		assert_eq!(a_polls.load(Ordering::SeqCst), 2, "a was woken");
 		assert_eq!(b_polls.load(Ordering::SeqCst), 1, "b was not");
-	}
-
-	/// A task named by its tag, finishing when its gate opens.
-	struct Tagged {
-		tag: usize,
-		gate: crate::Consumer<bool>,
-	}
-
-	impl Task for Tagged {
-		type Output = ();
-
-		fn poll(&mut self, waiter: &Waiter) -> Poll<()> {
-			self.gate
-				.poll(waiter, |open| if **open { Poll::Ready(()) } else { Poll::Pending })
-				.map(|_| ())
-		}
-	}
-
-	/// A rejected task is cancelled and its slot reused, while a kept one still runs.
-	#[test]
-	fn retain_cancels_only_the_rejected() {
-		let mut tasks = Tasks::new();
-		let gates: Vec<_> = (0..3).map(|_| crate::Producer::new(false)).collect();
-		for (tag, gate) in gates.iter().enumerate() {
-			tasks.push(Tagged {
-				tag,
-				gate: gate.consume(),
-			});
-		}
-		let waiter = Waiter::noop();
-		assert!(tasks.poll(&waiter).is_pending());
-
-		tasks.retain(|task| task.tag == 1);
-		assert_eq!(tasks.len(), 1);
-		assert_eq!(tasks.iter().map(|task| task.tag).collect::<Vec<_>>(), [1]);
-
-		tasks.push(Tagged {
-			tag: 3,
-			gate: gates[0].consume(),
-		});
-		assert_eq!(tasks.children.len(), 3, "a freed slot is reused");
-		open(&gates[0]);
-		open(&gates[1]);
-		assert!(tasks.poll(&waiter).is_ready(), "the kept task still finishes");
 	}
 
 	/// Finished tasks retire, their slots are reused, and an empty set is Ready.

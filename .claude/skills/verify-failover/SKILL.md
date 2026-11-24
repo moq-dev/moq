@@ -1,6 +1,6 @@
 ---
 name: verify-failover
-description: Model-check failover along a chain of relays (`rs/moq-net/verify/failover/FailoverChain.tla`) with TLA+. Use when a change touches how a relay's front switches routes or ends a track (`model/front.rs` `track_ended`, `model/origin.rs` `Action::Finish`, `park`), how a switch asks the new copy (`model/resume.rs` `Reader::sync`, `backfill_gaps`, `Producer::subscription`), how a group continues on another copy mid-read (`Recover`, `Fetching`), or when a failover bug spans more than one hop and needs every ordering of deaths, switches, and frames checked rather than a random sweep.
+description: Model-check multi-hop relay failover (`rs/moq-net/verify/failover/FailoverChain.tla`) with TLA+. Use when changing front switching, track finish, resume/backfill, or mid-read recovery across relays in `rs/moq-net`.
 ---
 
 # Verify failover along a relay chain

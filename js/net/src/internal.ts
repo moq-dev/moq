@@ -652,8 +652,8 @@ export interface TrackRequestOptions {
 	producer: Producer;
 	/** Requests not yet accepted or rejected by the publisher. */
 	pending: Set<Request>;
-	/** Metadata-only readers holding this request, if its broadcast supports them. */
-	lookups?: { pending: Getter<number>; opened: boolean };
+	/** Whether a metadata-only lookup opened this request, if its broadcast supports them. */
+	lookups?: { opened: boolean };
 }
 
 /**
@@ -738,6 +738,8 @@ export const hooks: {
 	 * Mirrors the Rust `Demand::asked`; assigned by `track.ts`.
 	 */
 	demandAsked: (demand: Demand) => Getter<bigint | undefined>;
+	/** Whether a subscriber, not just a held info lookup, wants the track; assigned by `track.ts`. */
+	demandSubscribed: (demand: Demand) => boolean;
 	/** Whether the producer declared the track's end, released or not. Assigned by `track.ts`. */
 	trackFinished: (producer: Producer) => boolean;
 	/**
@@ -891,6 +893,8 @@ export const hooks: {
 	cachedLargest: (producer: Producer) => Position | undefined;
 	/** A producer's committed {@link Info}, or undefined before it is accepted; assigned by `track.ts`. */
 	acceptedInfo: (producer: Producer) => Info | undefined;
+	/** Count an info lookup as the track's demand until the returned release, called once, runs; assigned by `track.ts`. */
+	holdTrack: (producer: Producer) => () => void;
 	/** The publisher priority from a demanded track's committed {@link Info}; assigned by `track.ts`. */
 	demandPriority: (demand: Demand) => number;
 	/**
@@ -1300,10 +1304,11 @@ export const hooks: {
 	onClosed: (producer: BroadcastProducer, fn: () => void) => Dispose;
 	/** Reserve an on-demand track without listing it or enabling a request handler. */
 	reserveUnlistedTrack: (producer: BroadcastProducer, name: string) => Request;
-	/** The properties of the accepted copy of `name` a broadcast holds open, if any; assigned by `broadcast.ts`. */
-	heldInfo: (broadcast: BroadcastConsumer, name: string) => Info | undefined;
-	/** Whether a subscriber or a metadata lookup still holds a requested track. */
-	requestWanted: (request: Request) => Getter<boolean>;
+	/**
+	 * Answer an info lookup from the accepted copy of `name` a broadcast holds open, holding the copy
+	 * until `hold` aborts; undefined with no such copy. Assigned by `broadcast.ts`.
+	 */
+	resolveHeld: (broadcast: BroadcastConsumer, name: string, hold?: AbortSignal) => Promise<Info> | undefined;
 	/** Transfer a metadata-opened request to its session's producer lifetime. */
 	keepRequest: (request: Request) => void;
 	/** Observe the peer's reset without waiting for routed delivery recovery. */
@@ -1357,6 +1362,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	demandAsked: () => {
+		throw new Error("track.ts not loaded");
+	},
+	demandSubscribed: () => {
 		throw new Error("track.ts not loaded");
 	},
 	trackFinished: () => {
@@ -1465,6 +1473,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	acceptedInfo: () => {
+		throw new Error("track.ts not loaded");
+	},
+	holdTrack: () => {
 		throw new Error("track.ts not loaded");
 	},
 	demandPriority: () => {
@@ -1782,11 +1793,8 @@ export const hooks: {
 	reserveUnlistedTrack: () => {
 		throw new Error("broadcast.ts not loaded");
 	},
-	heldInfo: () => {
+	resolveHeld: () => {
 		throw new Error("broadcast.ts not loaded");
-	},
-	requestWanted: () => {
-		throw new Error("track.ts not loaded");
 	},
 	keepRequest: () => {
 		throw new Error("track.ts not loaded");

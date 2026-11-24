@@ -795,6 +795,11 @@ impl Window {
 		self.count(key, span);
 	}
 
+	/// The ranges by key, and how each live join among them is placed, as given.
+	pub fn ranges(&self) -> (&BTreeMap<u64, Range>, &BTreeMap<u64, Joining>) {
+		(&self.ranges, &self.joining)
+	}
+
 	/// Whether group `key` is in range. Everything is while a live join waits on a first group.
 	pub fn contains(&self, key: u64) -> bool {
 		self.is_pending() || self.groups.contains(key)

@@ -393,10 +393,13 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		expect(await reader.closed).toBeNull();
 	});
 
-	test("a lowered floor owes the groups it newly asked for", async () => {
+	// Lite-07 answers the lowered range with a SUBSCRIBE_START of its own. Before it nothing answers
+	// an update, so the publisher may have sent its FIN before reading one: what it newly asked for
+	// below SUBSCRIBE_START is not waited for, which would hold the publisher's draining close.
+	test(`a lowered floor ${hasRanges(version) ? "owes the groups it newly asked for" : "owes nothing below SUBSCRIBE_START"}`, async () => {
 		using clock = manual();
 		const maxDelay = Duration.millis(60_000);
-		const { subscriber, respond, update, fin } = await subscribed(version, maxDelay, {
+		const { subscriber, respond, update, fin, subscriberFin } = await subscribed(version, maxDelay, {
 			start: 3n,
 		});
 		await respond({ start: answer(version, 3n) });
@@ -420,7 +423,9 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		await respond({ end: new SubscribeEnd(4n) });
 		await fin();
 		// Long enough for a subscription that owed nothing more to have ended.
-		await clock.advance(Duration.millis(50));
+		const finished = await settlesWithin(subscriberFin(), clock, Duration.millis(50));
+		expect(finished).toBe(!hasRanges(version));
+		if (!hasRanges(version)) return;
 
 		// QUIC does not order streams, so the lowered groups land after the FIN.
 		for (const key of [1n, 2n]) {

@@ -1332,6 +1332,9 @@ test.each([undefined, "off", "all"] as const)(
 	"a late subscriber reaches captured audio with either encoding policy (%p)",
 	async (onDemand) => {
 		using _webcodecs = installFakeWebCodecs();
+		// The feed stamps capture from zero, so the media clock must too: at a real clock past the
+		// subscription's 10s budget, the retained audio would already be stale.
+		using _now = manualAt(0);
 		const broadcast = new Broadcast({
 			origin: new Moq.Origin.Producer(),
 			name: Moq.Path.from("eager.hang"),
