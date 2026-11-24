@@ -1979,10 +1979,24 @@ impl TrackState {
 
 	/// Settle an append at `key`: skip every key below it that this track's own
 	/// publisher never produced, from just past its previous append (before the first, from
-	/// the lowest it produced), since appending says it will not go back. The skip replaces a
-	/// drop given there, as [`Self::skip_groups`] does.
+	/// the lowest it produced, or 0 when the append is its own track's first group), since
+	/// appending says it will not go back. The skip replaces a drop given there, as
+	/// [`Self::skip_groups`] does.
+	///
+	/// A first group that is appended skips from 0: a reader asking from the oldest group of
+	/// an empty track is owed every key from 0, so a time-keyed track whose first group starts
+	/// at its wall-clock time would otherwise leave it waiting on keys no one will produce.
 	fn appended(&mut self, key: u64) {
-		if let Some(from) = self.appended.or(self.produced.iter().next().map(|run| run.start))
+		// The append's own group is in `produced` already, so only one below it counts.
+		let first = self
+			.produced
+			.iter()
+			.next()
+			.map(|run| run.start)
+			.filter(|start| *start < key);
+		// A received copy records nothing it produced, so it skips below no first group.
+		let own = (!self.anchors.received()).then_some(0);
+		if let Some(from) = self.appended.or(first).or(own)
 			&& from < key
 		{
 			let mut left = RangeSet::new();
@@ -5390,8 +5404,8 @@ impl Producer {
 	///
 	/// Appending says the producer will not go back, so it skips every start below the new
 	/// group that it never produced, from just past its previous append (before the first,
-	/// from the lowest group it created), as [`Self::skip_groups`] would, replacing any drop
-	/// there: consecutive appends name the span between their starts. Those starts are then
+	/// from the lowest group it created, or from 0 when it creates the track's first group), as
+	/// [`Self::skip_groups`] would, replacing any drop there: consecutive appends name the span between their starts. Those starts are then
 	/// final: creating one is refused. A `start` at or before a group this track holds is
 	/// [`Error::TimestampMismatch`], like a rewound frame.
 	///
@@ -34072,8 +34086,27 @@ mod test {
 		assert!(producer.state.read().skipped(2));
 	}
 
+	/// An appended first group skips every key below it, down to 0: a time-keyed track's first
+	/// group starts at its wall-clock time, and a reader asking from the oldest group must not
+	/// wait on the keys below it. A received copy's append skips nothing below its first group.
+	#[test]
+	#[cfg(feature = "async")]
+	fn appending_the_first_group_skips_everything_below() {
+		let producer = track_producer("test", Info::timed());
+		let mut subscriber = producer.subscribe(replay().with_range(0..));
+		let waiter = kio::Waiter::noop();
+		producer.append_key(5).unwrap().finish().unwrap();
+		assert_eq!(subscriber.poll_drop(&waiter), Poll::Ready((0..5, Hole::Skip)));
+		assert_eq!(drain_groups(&mut subscriber), [5]);
+
+		let copy = track_producer("test", Info::timed());
+		copy.received();
+		copy.append_key(5).unwrap().finish().unwrap();
+		assert!(copy.state.read().drops.is_empty());
+	}
+
 	/// Appending and a first group leave no gap, so they skip nothing; nor is anything below
-	/// a track's first group skipped.
+	/// a track's first group skipped when that group was created.
 	#[test]
 	#[cfg(feature = "async")]
 	fn appending_and_a_first_group_skip_nothing() {

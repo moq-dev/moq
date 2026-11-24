@@ -5817,6 +5817,19 @@ test("fail ends at the live edge and leaves an end already given", async () => {
 // append says the producer will not go back, so it skips every hole below it that was never
 // produced, replacing a drop already given and reported. A received copy's groups arrive in any
 // order, so its gap is not skipped. Mirrors Rust.
+// An appended first group skips every key below it, down to 0: a time-keyed track's first group
+// starts at its wall-clock time, and a reader asking from the oldest group must not wait on the
+// keys below it. Mirrors the Rust `appending_the_first_group_skips_everything_below`.
+test("an appended first group skips everything below it", () => {
+	const producer = new TrackProducer("test");
+	producer.accept({ timescale: Timescale.MILLI, maxAge: null });
+	const reader = producer.subscribe(withMax({ delay: { max: null } }));
+	producer.appendGroup(Timestamp.fromMillis(5)).finish();
+	expect(hooks.tryRecvGroup(reader, true)).toMatchObject({ kind: "drop", start: 0n, end: 5n, skip: true });
+	expect(hooks.tryRecvGroup(reader, true)).toMatchObject({ kind: "group" });
+	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "idle" });
+});
+
 test("an append skips the holes created groups left below it", () => {
 	const producer = new TrackProducer("test");
 	producer.accept({ maxAge: null });

@@ -100,6 +100,7 @@ mod subscription_end_integrity;
 mod support;
 mod switch_frame_cap;
 mod synced;
+mod time_keyed_start;
 mod time_start_fill;
 mod track_abort_over_session;
 mod track_info_cancel;
