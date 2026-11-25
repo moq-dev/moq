@@ -23,6 +23,18 @@ nightly.yml --branch main --event schedule`), never a dispatch on a branch.
 
 ## Plan
 
+Decided 2026-11-24 (maintainer, /quest-run on
+[moq-dev/moq#9558](https://github.com/moq-dev/moq/pull/9558)): ✅ after the
+first warm scheduled Nightly on mbx 1.31.0, which ships
+[jdx/mr-boxington#951](https://github.com/jdx/mr-boxington/pull/951), post
+its per-OS cache summaries to
+[jdx/mr-boxington#950](https://github.com/jdx/mr-boxington/discussions/950)
+as the after-numbers for #951 (rejected: posting nothing upstream). Reread
+that repository's AI policy before posting; the disclosure rules in the
+draft below still apply. A dispatched pair of runs on `main` already showed
+1.31.0 reading R2 (488, 26 and 158 hits across its three cached jobs, run
+45525263480), but only scheduled runs count here.
+
 Decided 2026-11-13 (maintainer, /quest-complete): ✅ after the first
 scheduled Nightly past [#8631](https://github.com/moq-dev/moq/pull/8631),
 add the Windows numbers to
