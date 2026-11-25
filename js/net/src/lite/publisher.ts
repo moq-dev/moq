@@ -100,6 +100,7 @@ import {
 	hasLengthFirst,
 	hasProbeRtt,
 	hasRanges,
+	hasReliableReset,
 	hasRouteCost,
 	hasRoutes,
 	hasSkip,
@@ -194,6 +195,19 @@ function wireTime(timestamp: Timestamp, stamp: Stamp): bigint {
  */
 function acknowledged(writer: Writer): Promise<void> {
 	return writer.closed.catch(() => {});
+}
+
+/**
+ * Lite-07: whether a Group Stream this side just reset still accounts for its group, `held` once
+ * a reset delivers its whole header. A reset of this side's delivers the held header, which does.
+ * A STOP_SENDING owes a drop only when it evicted the stream before the peer acknowledged the
+ * header, since the subscriber may never have read which group it carried; any other the
+ * subscriber sent knowing the group, or wanting none of it. Mirrors the Rust `accounts`.
+ */
+async function accounts(stream: Writer, held: boolean): Promise<boolean> {
+	const stop = stream.stopped;
+	if (stop === undefined) return held;
+	return stop !== StreamCode.Evicted || (await stream.heldAcknowledged());
 }
 
 // The TRACK_INFO a TRACK stream, or a listing's TRACKS_ADD, answers for a track.
@@ -2284,7 +2298,8 @@ export class Publisher {
 					},
 				};
 				// The FIN waits for every stream to finish or reset, including one that has not opened yet.
-				// A stream reset to make room fails the group like any other reset, so it is dropped.
+				// A stream reset to make room fails the group like any other reset, so it is dropped,
+				// unless a lite-07 reset delivered its header, which accounts for the group.
 				const task = (async () => {
 					const writer = await this.#openGroup(options);
 					let failed: Error | undefined;
@@ -2796,7 +2811,8 @@ export class Publisher {
 	}
 
 	/**
-	 * Serves one group on the stream {@link #openGroup} opened for it.
+	 * Serves one group on the stream {@link #openGroup} opened for it, resolving the error a
+	 * SUBSCRIBE_DROP names it with, or undefined when the stream accounts for the group.
 	 *
 	 * @internal
 	 */
@@ -2810,6 +2826,8 @@ export class Publisher {
 			const stop = await givenUp.write(op);
 			if (stop) throw stop;
 		};
+		// Lite-07: the transport took the whole GROUP header, which every later reset still delivers.
+		let held = false;
 		// Everything past this point runs inside the cleanup scope, so a failure never leaves
 		// a finished group's stream being ranked.
 		try {
@@ -2822,6 +2840,7 @@ export class Publisher {
 				await stream.u53(0); // stream type
 				await msg.encode(stream, this.version);
 			});
+			if (hasReliableReset(this.version)) held = stream.hold();
 
 			// Lite-07 counts the first delta from the group's start, whatever frame the stream starts
 			// at, and GROUP_END from the highest timestamp sent, since B-frames go backwards.
@@ -2898,16 +2917,18 @@ export class Publisher {
 			}
 			stream.close();
 			group.close();
-			// A stream that fails after its FIN may have lost its header, so report it for a DROP.
-			// Its bytes still hold the connection until acknowledged, so a group gone stale meanwhile
-			// is reset like one still serving, as the Rust `GroupServe` does: stale bytes must not fill
-			// the send window ahead of the streams behind them.
+			// A stream that fails after its FIN may have lost its header, so report it for a DROP,
+			// unless a lite-07 reset still delivers it. Its bytes still hold the connection until
+			// acknowledged, so a group gone stale meanwhile is reset like one still serving, as the
+			// Rust `GroupServe` does: stale bytes must not fill the send window ahead of the streams
+			// behind them.
 			await write(() => stream.closed);
 			return undefined;
 		} catch (err: unknown) {
 			const e = error(err);
 			stream.reset(e);
 			hooks.releaseGroupReader(group, e);
+			if (hasReliableReset(this.version) && (await accounts(stream, held))) return undefined;
 			return e;
 		} finally {
 			priority.remove(stream);

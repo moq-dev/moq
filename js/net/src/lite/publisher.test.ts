@@ -12,7 +12,7 @@ import { Consumer as GroupConsumer, type Producer as GroupProducer } from "../gr
 import { randomHop } from "../hop.ts";
 import * as Instance from "../instance.ts";
 import { hooks, NO_MAX_DELAY, staleHole } from "../internal.ts";
-import { createMockTransportPair, manual, settlesWithin, textFrame } from "../mock.ts";
+import { createMockTransportPair, type MockTransport, manual, settlesWithin, textFrame } from "../mock.ts";
 import { lines } from "../open.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -751,6 +751,65 @@ function gateWrites(target: WritableStream<Uint8Array>, hold: boolean) {
 	return { writable, parked, release };
 }
 
+/** How {@link reliableStreams} acknowledges and finishes, and the resets it logged. */
+interface Reliable {
+	/** Whether the peer acknowledges what a stream wrote. */
+	acked: boolean;
+	/** Whether a stream opened from now on delivers its FIN, rather than withholding it forever. */
+	fin: boolean;
+	/** Every reset of a stream: the prefix it still delivers, if any, and its code. */
+	resets: { offset?: number; code?: number }[];
+}
+
+/**
+ * Make `quic`'s uni streams look like a qmux session's to the publisher: each reports acknowledging
+ * what it wrote as `state.acked` says, and can reset while still delivering a prefix.
+ */
+function reliableStreams(quic: MockTransport, state: Reliable) {
+	Object.defineProperty(quic, "transport", { value: "websocket" });
+	const create = quic.createUnidirectionalStream.bind(quic);
+	quic.createUnidirectionalStream = async (options) => {
+		const inner = (await create(options)).getWriter();
+		const fin = state.fin;
+		let written = 0;
+		let controller!: WritableStreamDefaultController;
+		const reset = (offset: number | undefined, reason: unknown) => {
+			const { streamErrorCode: code } = reason as { streamErrorCode?: number };
+			state.resets.push(offset === undefined ? { code } : { offset, code });
+			void inner.abort(reason);
+		};
+		const stream = new WritableStream<Uint8Array>({
+			start(c) {
+				controller = c;
+				c.signal.addEventListener("abort", () => reset(undefined, c.signal.reason));
+			},
+			async write(chunk) {
+				await inner.write(chunk);
+				written += chunk.byteLength;
+			},
+			close: () => (fin ? inner.close() : new Promise<void>(() => undefined)),
+		});
+		// The peer's stop fails the stream, as on a real transport.
+		inner.closed.catch((err: unknown) => controller.error(err));
+		return Object.assign(stream, {
+			getStats: async () => ({ bytesAcknowledged: state.acked ? written : 0 }),
+			resetAt(offset: number, reason: unknown) {
+				reset(offset, reason);
+				controller.error(reason);
+			},
+		});
+	};
+}
+
+/** The bytes of group `key`'s stream before its first frame: the stream type and GROUP header. */
+async function headerSize(version: Version, key: bigint): Promise<number> {
+	const header = await Writer.collect(version, async (w) => {
+		await w.u53(0);
+		await new GroupMessage({ subscribe: 0n, key, frameStart: 0 }).encode(w, version);
+	});
+	return header.byteLength;
+}
+
 // Opens a served subscription and returns the machinery to write groups and observe
 // which of them the publisher put on the wire (each group gets its own uni stream).
 //
@@ -784,11 +843,16 @@ async function servedSubscription(
 		pending?: boolean;
 		// The `Subscriber Max Age` as decoded, in place of the scheduling tests' wide one.
 		maxDelay?: number | null;
+		// Give each group stream acknowledgements and a reset that still delivers a prefix, as a
+		// qmux one has, which `reliable` on the result controls and logs.
+		reliable?: boolean;
 	} = {},
 ) {
 	const version = options.version ?? Version.DRAFT_05;
 	const frames = options.frames ?? ["hello"];
 	const pair = createMockTransportPair(version === Version.DRAFT_06 ? ALPN_06 : ALPN_05);
+	const reliable: Reliable = { acked: true, fin: true, resets: [] };
+	if (options.reliable) reliableStreams(pair.server, reliable);
 	if (options.maxDatagramSize !== undefined)
 		Object.defineProperty(pair.server.datagrams, "maxDatagramSize", { value: options.maxDatagramSize });
 	const origin = new OriginProducer();
@@ -870,6 +934,7 @@ async function servedSubscription(
 
 	return {
 		client,
+		reliable,
 		// The publisher's end of the session.
 		quic: pair.server,
 		datagrams: pair.client.datagrams.readable,
@@ -980,6 +1045,19 @@ async function servedSubscription(
 			if (next.done) throw new Error("the publisher opened no group stream");
 			await next.value.cancel({ source: "stream", streamErrorCode: code });
 		},
+		// Stop the next group stream the publisher opened with `code` once its header arrived, as a
+		// subscriber that wants none of the group it names does.
+		async stopAfterHeader(code: number): Promise<bigint> {
+			const next = await opened.read();
+			if (next.done) throw new Error("the publisher opened no group stream");
+			const reader = new Reader(next.value, undefined, version);
+			await reader.u53(); // stream type
+			const key = (await GroupMessage.decode(reader, version)).key;
+			// The publisher holds the header once its write resolves.
+			await flush();
+			reader.stop(code);
+			return key;
+		},
 		// The sequence alone, for tests that only care which groups reached the wire.
 		async servedSequence(): Promise<bigint | undefined> {
 			return (await this.servedGroup())?.key;
@@ -1033,8 +1111,9 @@ test("lite-07 SUBSCRIBE_START names each resolved range start", async () => {
 	}
 });
 
-// A group whose stream the session reset to make room is a final drop on every version: the
-// publisher names it in SUBSCRIBE_DROP with TOO_FAR_BEHIND and opens no second stream for it.
+// A group whose stream the session reset to make room is a final drop on every version over a
+// browser's WebTransport, whose reset may lose the header: the publisher names it in SUBSCRIBE_DROP
+// with TOO_FAR_BEHIND and opens no second stream for it.
 test.each([
 	{ name: "lite-06", version: Version.DRAFT_06 },
 	{ name: "lite-07", version: Version.DRAFT_07 },
@@ -1527,7 +1606,8 @@ test("lite-07 drops a whole group's span", async () => {
 		const group = sub.track.createGroup(0n);
 		group.writeFrame(textFrame("x", Timestamp.fromMillis(0)));
 		group.finishAt(500n);
-		await sub.stopServed(StreamCode.Cancel);
+		// Lite-07 names a stopped stream only for an eviction before the header is acknowledged.
+		await sub.stopServed(StreamCode.Evicted);
 		expect(await holesToFinish(sub.client.reader, 1)).toEqual([["drop", 0n, 500n]]);
 	} finally {
 		await sub.close();
@@ -1541,7 +1621,7 @@ test("lite-07 names the span of a group that finished whole after its stream fai
 	try {
 		const group = sub.track.createGroup(0n);
 		group.writeFrame(textFrame("x", Timestamp.fromMillis(0)));
-		await sub.stopServed(StreamCode.Cancel);
+		await sub.stopServed(StreamCode.Evicted);
 		expect(await holesToFinish(sub.client.reader, 1)).toEqual([["drop", 0n, 1n]]);
 		group.finishAt(500n);
 		sub.serve(1000n);
@@ -1566,7 +1646,7 @@ test("lite-07 sends a skip ahead of a drop of the group above it", async () => {
 		const above = sub.track.createGroup(3n);
 		above.writeFrame(textFrame("hello", Timestamp.fromMillis(3)));
 		sub.track.skipGroups(1n, 3n);
-		await sub.stopServed(StreamCode.Cancel);
+		await sub.stopServed(StreamCode.Evicted);
 		expect(await holesToFinish(sub.client.reader, 2)).toEqual([
 			["skip", 1n, 3n],
 			["drop", 3n, 4n],
@@ -1742,6 +1822,101 @@ test.each([
 	} finally {
 		await sub.close();
 		installed.close();
+	}
+});
+
+// Lite-07 on a transport that resets reliably: a stream sent whole that goes stale before its FIN is
+// acknowledged resets with OLD, still delivering its GROUP header, which accounts for the group, so no
+// drop names it. Mirrors the Rust `a_stale_unacknowledged_fin_is_never_served_again`.
+test("lite draft-07: a stale stream sent whole resets at its header and is not dropped", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const budget = 1_000;
+	const version = Version.DRAFT_07;
+	const sub = await servedSubscription({ version, startGroup: 0n, reliable: true });
+	try {
+		sub.serve(0n);
+		expect(await sub.servedSequence()).toBe(0n);
+		expect("start" in (await decodeSubscribeResponse(sub.client.reader, version))).toBe(true);
+		await new SubscribeUpdate({ priority: 1, remove: [0n], ranges: [within(budget)] }).encode(
+			sub.client.writer,
+			version,
+		);
+		expect("start" in (await decodeSubscribeResponse(sub.client.reader, version))).toBe(true);
+
+		// Its FIN is never acknowledged.
+		sub.reliable.fin = false;
+		sub.serve(1n);
+		expect(await sub.servedHeader()).toBe(1n);
+		await flush();
+		sub.reliable.fin = true;
+		await clock.advance(Duration.millis(budget * 10));
+		sub.serve(2n);
+		expect(await sub.servedSequence()).toBe(2n);
+		await clock.advance(Duration.millis(budget));
+		await flush();
+		expect(sub.reliable.resets).toEqual([{ offset: await headerSize(version, 1n), code: StreamCode.Old }]);
+
+		sub.track.finish();
+		sub.track.close();
+		expect(await holesToEnd(sub.client.reader)).toEqual([]);
+	} finally {
+		await sub.close();
+		installed.close();
+	}
+});
+
+// Lite-07: a group stream this side resets after its header, whatever for, still delivers that header
+// where the transport can, which accounts for the group, so no drop names it. A browser's WebTransport
+// cannot, so there a drop still does. Mirrors the Rust
+// `lite07_a_reset_after_the_header_delivers_it_and_names_nothing`.
+test.each([
+	["a transport that resets reliably", true],
+	["a browser's WebTransport", false],
+])("lite-07 over %s: a group aborted after its header", async (_, reliable) => {
+	const version = Version.DRAFT_07;
+	const sub = await servedSubscription({ version, startGroup: 0n, reliable });
+	try {
+		const group = sub.track.createGroup(0n);
+		group.writeFrame(textFrame("x", Timestamp.fromMillis(0)));
+		expect(await sub.servedHeader()).toBe(0n);
+		await flush();
+		group.abort(new StreamError(StreamCode.Evicted, { message: "evicted" }));
+		await flush();
+		sub.track.finish();
+		sub.track.close();
+		expect(await holesToEnd(sub.client.reader)).toEqual(reliable ? [] : [["drop", 0n, 1n]]);
+		const resets = reliable ? [{ offset: await headerSize(version, 0n), code: StreamCode.Evicted }] : [];
+		expect(sub.reliable.resets).toEqual(resets);
+	} finally {
+		await sub.close();
+	}
+});
+
+// Lite-07 names a stopped group stream in SUBSCRIBE_DROP only when the stop evicted it before the peer
+// acknowledged its GROUP header: otherwise the subscriber read which group the stream carried, and
+// stopped it knowing, as a duplicate (CANCEL) or wanting none of it. Mirrors the Rust
+// `lite07_names_only_an_eviction_before_the_header_is_acknowledged`.
+test.each([
+	["EVICTED before the header is acknowledged", StreamCode.Evicted, false, true],
+	["EVICTED after the header is acknowledged", StreamCode.Evicted, true, false],
+	["CANCEL", StreamCode.Cancel, false, false],
+	["OLD", StreamCode.Old, false, false],
+] as const)("lite-07 a group stream stopped with %s", async (_, code, acked, named) => {
+	const version = Version.DRAFT_07;
+	const sub = await servedSubscription({ version, startGroup: 0n, reliable: true });
+	try {
+		sub.reliable.acked = acked;
+		// Left open, so only the stop ends its stream.
+		const group = sub.track.createGroup(0n);
+		group.writeFrame(textFrame("x", Timestamp.fromMillis(0)));
+		expect(await sub.stopAfterHeader(code)).toBe(0n);
+		await flush();
+		sub.track.finish();
+		sub.track.close();
+		expect(await holesToEnd(sub.client.reader)).toEqual(named ? [["drop", 0n, 1n]] : []);
+	} finally {
+		await sub.close();
 	}
 });
 

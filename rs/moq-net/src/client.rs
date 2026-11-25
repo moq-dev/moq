@@ -963,6 +963,8 @@ mod tests {
 
 		fn reset(&mut self, _code: u32) {}
 
+		fn reset_at(&mut self, _offset: &(), _code: u32) {}
+
 		fn poll_closed(&self, _waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>> {
 			Poll::Ready(Ok(()))
 		}

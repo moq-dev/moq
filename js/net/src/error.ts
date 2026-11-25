@@ -337,7 +337,12 @@ export { Session as SessionError, Stream as StreamError, TooFarBehind as Lagged 
 /** The WebTransport-shaped fields a stream reset code arrives in. */
 type StreamErrorLike = { source?: unknown; streamErrorCode?: unknown };
 
-function streamCode(err: unknown): StreamCode | undefined {
+/**
+ * The raw code a transport's stream error carries, or undefined for any other error.
+ *
+ * @internal
+ */
+export function streamCode(err: unknown): StreamCode | undefined {
 	if (typeof err !== "object" || err === null) return undefined;
 
 	const { source, streamErrorCode } = err as StreamErrorLike;

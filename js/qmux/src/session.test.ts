@@ -2970,15 +2970,9 @@ describe("STREAM frame size", () => {
 	});
 });
 
-/** Encode a RESET_STREAM_AT (0x24) frame, which our own encoder never emits. */
+/** Encode a RESET_STREAM_AT (0x24) frame. */
 function resetStreamAt(id: Stream.Id, code: number, finalSize: bigint, reliableSize: bigint): Uint8Array {
-	let buffer = new Uint8Array(new ArrayBuffer(1 + 8 * 4), 0, 1);
-	buffer[0] = 0x24;
-	buffer = id.value.encode(buffer);
-	buffer = VarInt.from(code).encode(buffer);
-	buffer = VarInt.from(finalSize).encode(buffer);
-	buffer = VarInt.from(reliableSize).encode(buffer);
-	return buffer;
+	return Frame.encode({ type: "reset_stream", id, code: VarInt.from(code), finalSize, reliableSize }, "qmux-02");
 }
 
 describe("RESET_STREAM_AT (qmux-02)", () => {
@@ -3070,6 +3064,61 @@ describe("RESET_STREAM_AT (qmux-02)", () => {
 		await session.incomingUnidirectionalStreams.cancel();
 		await waitFor(() => peer.has("max_data"));
 		expect((peer.received().find((f) => f.type === "max_data") as Frame.MaxData).max).toBe(20n);
+		session.close();
+	});
+
+	/** A server session negotiating `protocol` whose peer advertised `reset_stream_at` or not,
+	 *  with a uni stream of its own that already sent `data`. */
+	async function sending(protocol: string, advertised: boolean, data: number[]) {
+		const { session, peer } = accept({ protocol });
+		peer.send({ type: "transport_parameters", params: peerParams({ resetStreamAt: advertised }) });
+		await session.ready;
+		const writable = await session.createUnidirectionalStream();
+		const writer = writable.getWriter();
+		await writer.write(new Uint8Array(data));
+		return { session, peer, writable, writer };
+	}
+
+	// Only a qmux-02 peer that advertised the parameter accepts a RESET_STREAM_AT; any other still
+	// gets the prefix, ahead of a plain RESET_STREAM.
+	for (const [protocol, advertised, reliable] of [
+		["qmux-02", true, true],
+		["qmux-02", false, false],
+		["qmux-01", true, false],
+	] as const) {
+		test(`resetAt on ${protocol} ${advertised ? "with" : "without"} reset_stream_at sends ${reliable ? "RESET_STREAM_AT" : "RESET_STREAM"} after the prefix`, async () => {
+			const { session, peer, writable, writer } = await sending(protocol, advertised, [1, 2, 3, 4]);
+			const reason = new StreamError(7, "reset");
+			writable.resetAt(2, reason);
+			expect(await settleTo(writer.closed)).toBe(reason);
+
+			await waitFor(() => peer.has("reset_stream"));
+			const frames = peer.received().filter((f) => f.type === "stream" || f.type === "reset_stream");
+			expect(frames.map((f) => f.type)).toEqual(["stream", "reset_stream"]);
+			expect((frames[0] as Frame.Data).data).toEqual(new Uint8Array([1, 2, 3, 4]));
+			const reset = frames[1] as Frame.ResetStream;
+			expect(reset.code.value).toBe(7n);
+			expect(reset.finalSize).toBe(4n);
+			expect(reset.reliableSize).toBe(reliable ? 2n : undefined);
+			session.close();
+		});
+	}
+
+	test("resetAt leaves a stream the peer stopped as it is", async () => {
+		const { session, peer, writable, writer } = await sending("qmux-02", true, [1, 2, 3]);
+		peer.send({ type: "stop_sending", id: await firstStreamId(peer), code: VarInt.from(9) });
+		expect(await settleTo(writer.closed)).toBeInstanceOf(StreamError);
+
+		writable.resetAt(3, new StreamError(7, "reset"));
+		await settle();
+		const resets = peer.received().filter((f) => f.type === "reset_stream") as Frame.ResetStream[];
+		expect(resets.map((f) => [f.code.value, f.reliableSize])).toEqual([[9n, undefined]]);
+		session.close();
+	});
+
+	test("resetAt refuses an offset past the bytes sent", async () => {
+		const { session, writable } = await sending("qmux-02", true, [1, 2, 3]);
+		expect(() => writable.resetAt(4)).toThrow(RangeError);
 		session.close();
 	});
 

@@ -31,6 +31,7 @@ normative:
   RFC6455:
   RFC9000:
   RFC9002:
+  reliable-reset: I-D.ietf-quic-reliable-stream-reset
 
 informative:
   I-D.lcurley-moq-cluster:
@@ -858,9 +859,9 @@ A Max Age of zero follows from the same rule without a special case.
 Timestamp age means a burst of groups delivered together still reads as its true age, so catching up never resets the clock.
 Arrival age bounds what timestamps cannot: a publisher whose timestamps stop advancing, a successor that never presents a frame, and a run of empty groups.
 
-A publisher stops sending an expired group: it resets the group's Group Stream with OLD and names the group in a [SUBSCRIBE_DROP](#subscribe-drop) with OLD, as it does a group it opened no stream for.
+A publisher stops sending an expired group: it resets the group's [Group Stream](#group-stream) with OLD, or names a group it sent no GROUP message for in a [SUBSCRIBE_DROP](#subscribe-drop) with OLD.
 This includes a stream whose GROUP_END was sent but not yet acknowledged, whose bytes would otherwise hold flow control the streams behind it need.
-A subscriber that already read such a stream whole, through its GROUP_END and FIN, keeps the group: the OLD drop changes nothing for its readers.
+A subscriber that already read such a stream whole, through its GROUP_END and FIN, keeps the group: the reset arrives too late to cut it, and an OLD drop changes nothing for its readers.
 
 ## Unidirectional Streams
 Unidirectional streams are used for data transmission, the session's setup, and discovery and routing.
@@ -904,9 +905,13 @@ Both the publisher and subscriber MAY reset the stream at any time.
 This is not a fatal error and the session remains active.
 The subscriber MAY cache the error and potentially retry later.
 
+A publisher that resets a Group Stream after sending its GROUP message MUST still deliver that message: it sends RESET_STREAM_AT [reliable-reset] with a Reliable Size at the end of the GROUP message, or, toward a peer that did not negotiate it, holds the RESET_STREAM until the peer acknowledged the GROUP message.
+The GROUP message then accounts for the Group and the reset ends its readers with its error, so the publisher names the Group in no [SUBSCRIBE_DROP](#subscribe-drop).
+An acknowledgment only means the peer's transport holds the GROUP message, which a RESET_STREAM lets it discard unread, so without RESET_STREAM_AT a subscriber SHOULD read a Group Stream's GROUP message as soon as the stream arrives; one that loses it waits out its grace period for the Group.
+A publisher whose transport can do neither, such as a browser's WebTransport, names each Group whose stream it resets in a SUBSCRIBE_DROP with the reset's error instead, as it does a Group whose stream it resets before sending the GROUP message.
+
 A publisher out of the peer's stream credit MAY reset the lowest-priority Group Stream with TOO_FAR_BEHIND to make room for a higher-priority one.
-That gives the Group up on the subscription: the publisher names it in [SUBSCRIBE_DROP](#subscribe-drop), and a subscriber that wants the rest of it FETCHes the Group from the first frame it lacks (see [Positions](#positions)).
-The drop settles the Group even where the subscriber's transport loses the reset or its error code, as a browser can.
+That gives the Group up on the subscription, and a subscriber that wants the rest of it FETCHes the Group from the first frame it lacks (see [Positions](#positions)).
 
 ## Datagrams
 QUIC datagrams provide unreliable, unordered delivery for latency-sensitive content that does not need retransmission.
@@ -1924,7 +1929,7 @@ The publisher SHOULD send SUBSCRIBE_END as soon as the end is known, even while 
 
 ## SUBSCRIBE_DROP {#subscribe-drop}
 
-A publisher names starts where it holds a group it will not deliver, or holds none to deliver, with SUBSCRIBE_DROP on the Subscribe Stream: an aborted or reset group, one evicted or expired with no copy left to serve it, or one past the subscriber's budget (OLD).
+A publisher names starts where it holds a group it will not deliver, or holds none to deliver, with SUBSCRIBE_DROP on the Subscribe Stream: a group it gives up before sending its GROUP message (see [Group Stream](#group-stream)), as aborted, as evicted or expired with no copy left to serve it, or as past the subscriber's budget (OLD).
 Starts the publisher declared it will never produce are named by [SUBSCRIBE_SKIP](#subscribe-skip) instead.
 A start the publisher never had but never declared skipped, such as a gap between the Groups it created or one a relay never received, might have held a group, so it is named in SUBSCRIBE_DROP: with OLD when it is past the subscriber's budget, otherwise with NOT_FOUND.
 
@@ -1954,11 +1959,9 @@ A subscriber that already ended readers on the drop does not deliver anything ag
 A drop that follows a skip of the same starts changes nothing.
 
 For every start in the subscription's range, the publisher MUST send a Group Stream, account for it with a [GROUP_END](#group-end), or name it in SUBSCRIBE_SKIP or SUBSCRIBE_DROP.
-This includes streams reset before their headers were delivered, and streams the subscriber stopped (STOP_SENDING), which it may have discarded unread; such a drop carries the STOP_SENDING's Error Code.
 A GROUP_END accounts for the starts strictly between its Group Start and End.
 A drop of a Group the publisher holds whole names its span, with a `Group End` of its End or its start plus one, whichever is higher, since the GROUP_END may never arrive.
-A drop naming a stopped duplicate of a Group that another Group Stream already completed changes nothing for that Group: its readers keep it whole.
-A reliably delivered reset retaining the Group Stream header accounts for that group instead, unless it answers a STOP_SENDING.
+A Group Stream the subscriber stopped (STOP_SENDING) with EVICTED before the publisher's transport acknowledged its GROUP message, which the subscriber may have discarded unread, is named in a drop with EVICTED; no other stop is, since the subscriber sent it knowing the Group or wanting none of it.
 The publisher SHOULD name a start as soon as it gives it up, without waiting for SUBSCRIBE_END.
 
 ## SUBSCRIBE_SKIP {#subscribe-skip}
@@ -2351,7 +2354,8 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 - Added `Error Code` to SUBSCRIBE_END: a track can end with an error while keeping the groups below its end.
 - Restored SUBSCRIBE_DROP (type 0x2), replacing Stream Count on SUBSCRIBE_END. Every start is accounted for by a Group Stream, a GROUP_END, a SUBSCRIBE_SKIP, or a drop; a publisher SHOULD send a drop as soon as it gives a start up.
 - SUBSCRIBE_DROP's Error Code is a stream error code, which ends the dropped groups' readers, including one still arriving.
-- A Group Stream the subscriber stopped (STOP_SENDING) is named in SUBSCRIBE_DROP with the STOP_SENDING's Error Code, even after a reliable reset.
+- A publisher resets a Group Stream after its GROUP message with RESET_STREAM_AT, or a RESET_STREAM held until the GROUP message is acknowledged, and names no such Group in SUBSCRIBE_DROP; a publisher whose transport can do neither, such as a browser's WebTransport, still does.
+- A Group Stream the subscriber stopped (STOP_SENDING) is named in SUBSCRIBE_DROP only with EVICTED, before its GROUP message was acknowledged.
 - SUBSCRIBE_DROP and SUBSCRIBE_SKIP name a span of starts, from `Group Start` up to an exclusive `Group End`, in place of an inclusive `Group End`. An empty or inverted span is a PROTOCOL_VIOLATION.
 - Added SUBSCRIBE_SKIP (type 0x3) for starts the publisher declared it will never produce, which ends no reader and is final: a Group is never created at a skipped start. A skip overrides an earlier drop of the same starts, whatever its Error Code, without re-delivering to readers the drop already ended, and never overrides a Group that arrived. A gap between starts is not a skip, since Groups may be created out of order; a start never had and never declared skipped is named in SUBSCRIBE_DROP. SUBSCRIBE_DROP no longer names declared skips.
 - Every SUBSCRIBE_DROP is final on its subscription, OLD included: no SUBSCRIBE_UPDATE reopens a drop, and a subscriber that still wants the Group asks for it with a SUBSCRIBE of its own.
@@ -2369,7 +2373,7 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 - Added GROUP_END, a `Payload Length` of 0 followed by the Group's exclusive End, as a non-negative delta from the highest frame timestamp on the stream, or from the Group Start: a Group or Fetch Stream ends with it when its Group finished, a FIN alone ends a closed Group whose frames may not all exist, and a reset aborts. A Group's own End bounds its reach.
 - A Group's span runs from its start to its End, [start, End), and spans never overlap; every frame of a lower Group presents before every frame of a higher one. The publisher names the starts between one Group's End and the next Group's start with SUBSCRIBE_SKIP. A GROUP_END accounts for the starts strictly between its Group Start and End, and a drop of a Group the publisher holds whole names its span. A time past a whole Group's End and before the next Group's start belongs to no Group: a Time `Start` there starts at the next Group, a Time `End` there stops after the whole Group, a relay's copy places a time inside a whole Group's span from that Group alone, and a Range Start past the time places it there.
 - Expiration also measures a group's arrival age, the time since its successor arrived at this hop, and only that on a scale-less Track.
-- A relay closes a Group it holds only the start of, without a GROUP_END. A publisher resets the Group Stream of a group that expires with OLD, even one whose GROUP_END it sent but is not yet acknowledged, and names the group in a SUBSCRIBE_DROP with OLD.
+- A relay closes a Group it holds only the start of, without a GROUP_END. A publisher resets the Group Stream of a group that expires with OLD, even one whose GROUP_END it sent but is not yet acknowledged.
 - FRAME leads with `Payload Length`, the payload size plus one, in place of the trailing `Message Length`; 0 is malformed.
 - A publisher SHOULD drop a datagram rather than block when the transport has no room for it, where it previously sent one only if the congestion controller could transmit it immediately.
 - A receiver drops a claim whose resolved path it cannot hold, such as one past the path limits once joined beneath its own root, rather than closing the session ([Announce](#announce)).
