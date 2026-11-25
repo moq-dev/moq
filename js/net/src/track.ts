@@ -1645,7 +1645,7 @@ export class Producer {
 		if (this.#dropsOldest === undefined || now < this.#dropsOldest) return false;
 		const kept = this.#keptDrops();
 		const expired = this.#dropsBorn.all
-			.filter((run) => now >= run.expires && run.start < kept)
+			.filter((run) => now >= run.expires && run.start < kept && !this.#pinsDrops(run.start))
 			.map(({ start, end }) => ({ start, end: min(end, kept) }));
 		// In one pass: runs given up in the same quarter of the window expire together.
 		if (expired.length > 0) {
@@ -1655,9 +1655,21 @@ export class Producer {
 		}
 		this.#dropsOldest = undefined;
 		for (const run of this.#dropsBorn.all) {
-			if (run.start < kept) this.#dropsOldest = Math.min(this.#dropsOldest ?? run.expires, run.expires);
+			if (run.start < kept && !this.#pinsDrops(run.start))
+				this.#dropsOldest = Math.min(this.#dropsOldest ?? run.expires, run.expires);
 		}
 		return expired.length > 0;
+	}
+
+	// Whether the dropped run holding `key` lies directly above a group a local track still caches,
+	// which keeps it: forgetting it would read like evicted groups between two held ones, a gap its
+	// publisher never left. Each cached group keeps at most one run, until it leaves (see
+	// `#uncache`). A received copy keeps none, since upstream answers for what it forgets. Mirrors
+	// the Rust `TrackState::pins_drops`.
+	#pinsDrops(key: bigint): boolean {
+		if (this.#wire) return false;
+		const run = this.#state.drops.keysAt(key);
+		return run !== undefined && run.start > 0n && this.#cached.has(run.start - 1n);
 	}
 
 	// Account `forgotten`, runs a reclaim took out of the drop set, in the arrivals as an evicted
@@ -1695,13 +1707,14 @@ export class Producer {
 		return this.#wire || this.#state.closed.peek() !== undefined ? UNBOUNDED : this.#received;
 	}
 
-	// The runs from `from` up to `#keptDrops` were kept and are now reclaimable: date the oldest so
-	// the next idle scan finds it, and have the sweep visit the track for them.
-	#rearmDrops(from: bigint): void {
-		const runs = this.#dropsBorn.overlapping(from, this.#keptDrops());
+	// The runs in `[from, to)` below `#keptDrops` were kept and are now reclaimable: date the oldest
+	// so the next idle scan finds it, and have the sweep visit the track for them.
+	#rearmDrops(from: bigint, to = UNBOUNDED): void {
+		const end = min(to, this.#keptDrops());
+		if (from >= end) return;
+		const runs = this.#dropsBorn.overlapping(from, end);
 		for (const run of runs) this.#dropsOldest = Math.min(this.#dropsOldest ?? run.expires, run.expires);
-		if (this.#state.drops.overlapping(from, this.#keptDrops()).length > 0)
-			this.#account.pool.register(this.#account);
+		if (this.#state.drops.overlapping(from, end).length > 0) this.#account.pool.register(this.#account);
 	}
 
 	static {
@@ -2552,6 +2565,9 @@ export class Producer {
 			const below = this.#departed[timelineIndex(this.#departed, key) - 1];
 			const held = this.#keys[keyIndex(this.#keys, key) - 1];
 			if (below && (held === undefined || below.start > held)) this.#forgetDepartedAbove(key);
+			// The run it kept above it may expire now.
+			const above = this.#state.drops.keysAt(key + 1n);
+			if (above?.start === key + 1n) this.#rearmDrops(above.start, above.end);
 		}
 		this.#unbound(entry, evicted);
 		this.#account.remove(entry);
