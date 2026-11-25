@@ -51,8 +51,8 @@ that reserved `rs/moq-opus` for a separate safe crate:
   they are; under (b) to (d), the picked code replaces its c2rust internals
   behind the same crate. No second Opus crate is added or deleted.
 
-Milestone m3: the maintainer asked for this to follow #9578, and it is
-additive with no API change.
+Milestone m3: the maintainer asked for this to follow #9578, and it keeps
+moq-audio's public API unchanged.
 
 Posting to a repository outside `kixelated`, `kixel-ai`, and `moq-dev`
 (such as opus-pure's) needs the maintainer's OK first.
