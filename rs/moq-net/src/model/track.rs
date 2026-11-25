@@ -10576,7 +10576,7 @@ impl Cursor {
 		};
 		let misses = &mut kept.misses;
 		// A wider budget asks again what a narrower one gave up as stale.
-		for run in misses.widen(&drift.budget).iter() {
+		for run in misses.retake(&drift).iter() {
 			misses.reopen(run.clone());
 		}
 		misses.retain(id, None, || target(0..=u64::MAX - 1));
@@ -11270,7 +11270,7 @@ impl Cursor {
 	fn probe(&mut self, from: u64, drift: &Drift, waiter: &kio::Waiter) {
 		self.let_go_kept_out();
 		self.look_up(waiter);
-		self.rejudge(&drift.budget);
+		self.rejudge(drift);
 		let taken = &self.record.delivered;
 		let (window, cap, revision) = (&self.filter.window, self.end_key, self.filter.revision);
 		let misses = self.misses.get_or_insert_with(Box::default);
@@ -11325,16 +11325,17 @@ impl Cursor {
 		}
 	}
 
-	/// Judge again what this cursor's misses gave up as stale under a budget narrower than
-	/// `budget`, as [`Self::reoffer`] does for the cached groups it skipped: a drop judged
-	/// under a narrower budget never settles a wider reader. What it already told stands: a
+	/// Judge again what this cursor's misses gave up as stale that `drift` no longer settles,
+	/// as [`Self::reoffer`] does for the cached groups it skipped: a drop judged under a
+	/// narrower budget never settles a wider reader, nor one judged within a cap another
+	/// reader's does not share. What it already told stands: a
 	/// gap an [`Ordered`] returned, or any drop a wire publisher reported. A gap an
 	/// [`Ordered`] has yet to return is taken back from it.
-	fn rejudge(&mut self, budget: &Budget) {
+	fn rejudge(&mut self, drift: &Drift) {
 		let Some(misses) = &mut self.misses else {
 			return;
 		};
-		let widened = misses.widen(budget);
+		let widened = misses.retake(drift);
 		let record = &mut self.record;
 		let mut untold = false;
 		for run in widened.iter() {

@@ -98,8 +98,12 @@ pub(super) struct Misses {
 	/// dropped, whatever the cache still records of it.
 	skipped: RangeSet<u64>,
 	/// The part of `given_up` judged stale, with the budget each run was judged under: a
-	/// wider budget asks it again (see [`Self::widen`]).
-	stale: RangeMap<u64, Duration>,
+	/// wider budget asks it again (see [`Self::widen`]), and so does terms that no longer
+	/// settle a verdict adopted from the track (see [`Self::retake`]).
+	stale: RangeMap<u64, Stale>,
+	/// The coverage the adopted verdicts in `stale` were last found to settle under, `None`
+	/// while it holds none.
+	adopted_under: Option<super::Coverage>,
 	/// No wider than the narrowest budget in `stale`, so [`Self::widen`] looks only when a
 	/// budget wider than it could take a run back.
 	narrowest: Option<Duration>,
@@ -121,6 +125,31 @@ pub(super) struct Misses {
 	unknown_at: Option<(u64, Budget, super::Coverage)>,
 	/// The [`Forgotten`] revision this reader judged again up to.
 	forgotten: u64,
+}
+
+/// A stale verdict a reader holds: the budget it was judged under, and whose judgement it is.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Stale {
+	budget: Duration,
+	/// The upstream's cap when the track's drop was adopted as this reader's verdict, `None`
+	/// inside for a drop with none; `None` for the reader's own judgement. An adopted verdict
+	/// rests on what the upstream saw, so it stands only while the reader still settles on it.
+	adopted: Option<Option<u64>>,
+}
+
+impl Stale {
+	fn own(budget: Duration) -> Self {
+		Self { budget, adopted: None }
+	}
+
+	/// Whether this verdict over a run from `start` still settles a reader judging as `drift`,
+	/// which only an adopted one can stop doing: the reader's own judgement stands on its own.
+	fn settles(&self, start: u64, drift: &Drift) -> bool {
+		match self.adopted {
+			None => true,
+			Some(cap) => drift.settles(start, &Hole::stale(self.budget).capped(cap)),
+		}
+	}
 }
 
 /// A run of misses the reader gives up, for the drop cursor to name, with the budget it was
@@ -954,9 +983,9 @@ impl Misses {
 			self.skipped = clip(&self.skipped);
 			if !self.stale.is_empty() {
 				let mut stale = RangeMap::new();
-				for (run, budget) in self.stale.iter() {
+				for (run, verdict) in self.stale.iter() {
 					for kept in self.given_up.overlapping(run) {
-						stale.insert(kept.start.max(run.start)..kept.end.min(run.end), *budget);
+						stale.insert(kept.start.max(run.start)..kept.end.min(run.end), *verdict);
 					}
 				}
 				self.stale = stale;
@@ -1642,12 +1671,15 @@ impl Misses {
 		let mut left = unsettled(state, hole.clone(), drift);
 		let mut given: RangeSet<u64> = self.given_up.overlapping(&hole).cloned().collect();
 		// A run given up stale under a narrower budget is no verdict for this reader, even
-		// before its next probe takes it back (see `Self::widen`).
+		// before its next probe takes it back (see `Self::retake`).
 		for (run, judged) in self.stale.overlapping(&hole) {
-			for (run, budget) in drift.budget.runs(run.clone()) {
-				if *judged < budget {
-					given.remove(run);
+			for (part, budget) in drift.budget.runs(run.clone()) {
+				if judged.budget < budget {
+					given.remove(part);
 				}
+			}
+			if !judged.settles(run.start, drift) {
+				given.remove(run.clone());
 			}
 		}
 		for run in given.iter() {
@@ -1695,26 +1727,26 @@ impl Misses {
 
 	/// Give up `groups` as stale under `budget`, a verdict a wider budget reverses.
 	fn give_up_stale(&mut self, groups: ops::Range<u64>, budget: Duration, given_up: &mut GivenUp) {
-		self.give_up_judged(groups, Some(budget), given_up);
+		self.give_up_judged(groups, Some(Stale::own(budget)), given_up);
 	}
 
-	fn give_up_judged(&mut self, groups: ops::Range<u64>, stale: Option<Duration>, given_up: &mut GivenUp) {
+	fn give_up_judged(&mut self, groups: ops::Range<u64>, stale: Option<Stale>, given_up: &mut GivenUp) {
 		if groups.is_empty() {
 			return;
 		}
 		self.hold_verdict(groups.clone(), stale);
-		given_up.push((groups, Hole::missed(stale)));
+		given_up.push((groups, Hole::missed(stale.map(|stale| stale.budget))));
 	}
 
-	/// Hold `groups` as given up, judged stale under `stale` if it was, so it is never asked
-	/// again unless a budget wider than `stale` takes it back.
-	fn hold_verdict(&mut self, groups: ops::Range<u64>, stale: Option<Duration>) {
+	/// Hold `groups` as given up, judged stale as `stale` if it was, so it is never asked
+	/// again unless a budget wider than it, or terms that no longer settle it, take it back.
+	fn hold_verdict(&mut self, groups: ops::Range<u64>, stale: Option<Stale>) {
 		self.given_up.insert(groups.clone());
 		self.skipped.remove(groups.clone());
 		match stale {
-			Some(budget) => {
-				self.stale.insert(groups, budget);
-				self.narrowest = Some(self.narrowest.map_or(budget, |narrowest| narrowest.min(budget)));
+			Some(stale) => {
+				self.narrowest = Some(self.narrowest.map_or(stale.budget, |narrowest| narrowest.min(stale.budget)));
+				self.stale.insert(groups, stale);
 			}
 			None => self.stale.remove(groups),
 		}
@@ -1728,7 +1760,12 @@ impl Misses {
 		for (run, gone) in state.drops.overlapping(&hole) {
 			let run = run.start.max(hole.start)..run.end.min(hole.end);
 			if !run.is_empty() && drift.settles(run.start, gone) {
-				self.hold_verdict(run, gone.stale_budget());
+				let stale = gone.stale_budget().map(|budget| Stale {
+					budget,
+					adopted: Some(gone.stale_cap()),
+				});
+				self.hold_verdict(run, stale);
+				self.adopted_under = Some(drift.coverage.clone());
 			}
 		}
 	}
@@ -1744,17 +1781,41 @@ impl Misses {
 		given_up.push((groups, Hole::Skip));
 	}
 
-	/// Take back the runs given up as stale under a budget narrower than `budget`, returning
-	/// them for the caller to reopen with [`Self::reopen`]: only a widening reverses a stale
-	/// verdict. Looks only when `budget` is wider than the narrowest it holds, whichever
-	/// budget a verdict was judged under and whenever it arrived.
-	pub fn widen(&mut self, budget: &Budget) -> RangeSet<u64> {
+	/// Take back the runs given up as stale that `drift` no longer settles, returning them for
+	/// the caller to reopen with [`Self::reopen`]: a wider budget reverses a stale verdict, and
+	/// so does a coverage that no longer reads what a verdict adopted from the track rests on,
+	/// such as the cap the upstream judged it within.
+	pub fn retake(&mut self, drift: &Drift) -> RangeSet<u64> {
+		let mut taken = self.widen(&drift.budget);
+		if self.adopted_under.as_ref().is_some_and(|under| *under != drift.coverage) {
+			let unsettled: Vec<ops::Range<u64>> = (self.stale.iter())
+				.filter(|(run, verdict)| !verdict.settles(run.start, drift))
+				.map(|(run, _)| run.clone())
+				.collect();
+			for run in unsettled {
+				self.stale.remove(run.clone());
+				taken.insert(run);
+			}
+			self.narrowest = self.stale.iter().map(|(_, verdict)| verdict.budget).min();
+			self.adopted_under = self
+				.stale
+				.iter()
+				.any(|(_, verdict)| verdict.adopted.is_some())
+				.then(|| drift.coverage.clone());
+		}
+		taken
+	}
+
+	/// Take back the runs given up as stale under a budget narrower than `budget`. Looks only
+	/// when `budget` is wider than the narrowest it holds, whichever budget a verdict was
+	/// judged under and whenever it arrived.
+	fn widen(&mut self, budget: &Budget) -> RangeSet<u64> {
 		if self.narrowest.is_none_or(|narrowest| budget.widest() <= narrowest) {
 			return RangeSet::new();
 		}
 		let widened: RangeSet<u64> = (self.stale.iter())
 			.flat_map(|(run, judged)| {
-				let judged = *judged;
+				let judged = judged.budget;
 				budget
 					.runs(run.clone())
 					.into_iter()
@@ -1765,7 +1826,7 @@ impl Misses {
 		for run in widened.iter() {
 			self.stale.remove(run.clone());
 		}
-		self.narrowest = self.stale.iter().map(|(_, judged)| *judged).min();
+		self.narrowest = self.stale.iter().map(|(_, judged)| judged.budget).min();
 		widened
 	}
 
@@ -2238,6 +2299,60 @@ mod tests {
 				"handled={handled}: the refusal's grace wakes the reader"
 			);
 		}
+	}
+
+	/// A stale drop adopted as the reader's own verdict rests on the groups the upstream saw
+	/// under its cap: the reader lowering its cap afterwards no longer reads them, so it asks
+	/// the run again instead of keeping a verdict it never saw the grounds of.
+	#[kio::test]
+	async fn an_adopted_stale_verdict_is_asked_again_once_the_cap_moves() {
+		let broadcast = crate::broadcast::Info::default().produce();
+		let track = broadcast
+			.create_track("adopted", crate::track::Info::default())
+			.unwrap();
+		let budget = Duration::from_secs(5);
+		let _reader = track.subscribe(Subscription::default().with_max(budget));
+		for key in [4, 0] {
+			track
+				.create_group(crate::group::Info { start: key })
+				.unwrap()
+				.finish()
+				.unwrap();
+		}
+		track.give_up(1..3, Hole::stale(budget).capped(Some(5)));
+		let state = track.state.read();
+		let coverage = |cap: u64| Some((Cover::new([0..=cap - 1]), Some(cap)));
+		let drift = |cap: u64| Drift {
+			budget: Budget::uniform(budget),
+			bound: None,
+			edge: state.drift_edge(&Servable::ALL),
+			coverage: coverage(cap),
+		};
+		let mut misses = Misses::default();
+		let mut given_up = Vec::new();
+		let waiter = kio::Waiter::noop();
+		misses.judge(
+			&state,
+			(0, 0, Some(5)),
+			None,
+			None,
+			None,
+			|span| [span].into_iter().collect(),
+			&Delivered::default(),
+			&drift(5),
+			&mut given_up,
+			&waiter,
+		);
+		assert!(misses.given_up.contains(&1) && misses.given_up.contains(&2), "adopted");
+		assert!(misses.retake(&drift(5)).is_empty(), "the cap it was judged within still holds");
+		assert!(misses.unanswered(&state, 1..3, &drift(5)).is_empty());
+
+		// Lowered to 4, the reader never sees what lies at 4, which the upstream's verdict
+		// may rest on.
+		assert_eq!(misses.unanswered(&state, 1..3, &drift(4)).iter().cloned().collect::<Vec<_>>(), [1..3]);
+		let taken = misses.retake(&drift(4));
+		assert_eq!(taken.iter().cloned().collect::<Vec<_>>(), [1..3]);
+		assert!(misses.stale.is_empty() && misses.adopted_under.is_none());
 	}
 
 	#[kio::test]
