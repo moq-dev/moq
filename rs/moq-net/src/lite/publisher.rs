@@ -7250,7 +7250,8 @@ impl GroupServe {
 			},
 		};
 		// A higher-priority open waiting for credit can reset this stream: the reader fell too
-		// far behind the publisher's streams, and the control stream drops the group.
+		// far behind the publisher's streams. Like any reset, it accounts for the group or the
+		// control stream drops it (see `accounts`).
 		let preempt = self.ctx.version.encode_stream_code(&StreamError::TooFarBehind);
 		let stream = match ready!(session.poll_open_group(&mut self.open, waiter, options, preempt)) {
 			Ok(stream) => stream,
