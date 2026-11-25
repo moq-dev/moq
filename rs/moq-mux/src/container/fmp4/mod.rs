@@ -25,7 +25,7 @@ pub use muxer::*;
 /// any of it is staged. It matches moq-net's 32 MiB frame bound,
 /// which the rewritten sample must fit.
 /// Media samples stream into their frames and have no such bound.
-const MAX_HELD_BYTES: usize = 32 * 1024 * 1024;
+pub(crate) const MAX_HELD_BYTES: usize = 32 * 1024 * 1024;
 
 /// The largest metadata box body parsed on import or from received CMAF.
 ///
@@ -449,6 +449,10 @@ pub enum Error {
 		/// The sample's size.
 		size: u32,
 	},
+
+	/// A track's data reference says its media lies in another file.
+	#[error("the track's media lies in another file")]
+	ExternalData,
 
 	/// A regular MP4 streamed into an import holds more media ahead of its `moov` than the
 	/// import holds.

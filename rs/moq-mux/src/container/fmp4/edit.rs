@@ -96,11 +96,12 @@ impl Edit {
 		};
 		// A duration of zero is unknown, as a fragmented file's edit declares it, and one past the
 		// media timeline trims nothing. An edit list this shape can't express plays the media
-		// whole, so it trims nothing either.
+		// whole, so it trims nothing either. The end rounds up, so a sample presenting before a
+		// fractional end is kept.
 		let end = match (entry.segment_duration, movie_timescale) {
 			(0, _) | (_, 0) => None,
 			_ if unsupported.is_some() => None,
-			(duration, scale) => u64::try_from(u128::from(duration) * timescale / u128::from(scale))
+			(duration, scale) => u64::try_from((u128::from(duration) * timescale).div_ceil(u128::from(scale)))
 				.ok()
 				.and_then(|duration| media_time.checked_add(duration)),
 		};
@@ -260,6 +261,10 @@ mod tests {
 		assert_eq!(edit.end(), Some(960 + 48_000));
 		let edit = Edit::new(&trak(Some(vec![entry(0, Some(960), 1)]), false), 1000).unwrap();
 		assert_eq!(edit.end(), None);
+		// A fractional end rounds up: one movie tick in a 7000 tick movie is 6.86 media ticks, so
+		// the sample at tick 6 presents before the end and is kept.
+		let edit = Edit::new(&trak(Some(vec![entry(1, Some(0), 1)]), false), 7000).unwrap();
+		assert_eq!(edit.end(), Some(7));
 		// An Opus edit ends where its media does, wherever the pre-skip moves its start.
 		let edit = Edit::new(&trak(Some(vec![entry(1000, Some(312), 1)]), true), 1000).unwrap();
 		assert_eq!(

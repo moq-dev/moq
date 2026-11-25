@@ -1671,7 +1671,8 @@ mod tests {
 	}
 
 	/// A recording reads back through a [`Reader`](super::Reader) sample for sample, fragmented
-	/// while it grows and regular once finished.
+	/// while it grows and regular once finished, with the audio starting 100 ms after the video in
+	/// both.
 	#[tokio::test(start_paused = true)]
 	async fn a_recording_reads_back() {
 		let mut live = Live::avc3();
@@ -1681,7 +1682,7 @@ mod tests {
 			live.track.write(frame.clone()).unwrap();
 		}
 		for i in 0..12u64 {
-			audio.write(raw_frame(i * 20_000, OPUS, i % 5 == 0)).unwrap();
+			audio.write(raw_frame(100_000 + i * 20_000, OPUS, i % 5 == 0)).unwrap();
 		}
 		live.track.end_with(None).unwrap();
 		let _finished = audio.finish().unwrap();
@@ -1697,18 +1698,22 @@ mod tests {
 			let mut reader = super::Reader::new(std::io::Cursor::new(data)).unwrap();
 			let tracks = reader.tracks().to_vec();
 			assert_eq!(tracks.len(), 2);
+			let micros = |track: &super::Track, sample: &super::Sample| {
+				sample.timestamp(track.timescale).unwrap().as_micros().unwrap()
+			};
+			// Both tracks count from the earliest sample of either.
+			let origin = tracks
+				.iter()
+				.map(|track| micros(track, &track.samples[0]))
+				.min()
+				.unwrap();
 			let mut read = |track: &super::Track| -> Vec<(u128, bool, Vec<u8>)> {
-				let first = track.samples[0]
-					.timestamp(track.timescale)
-					.unwrap()
-					.as_micros()
-					.unwrap();
 				track
 					.samples
 					.iter()
 					.map(|sample| {
-						let at = sample.timestamp(track.timescale).unwrap().as_micros().unwrap();
-						(at - first, sample.keyframe, reader.read(sample).unwrap().to_vec())
+						let at = micros(track, sample) - origin;
+						(at, sample.keyframe, reader.read(sample).unwrap().to_vec())
 					})
 					.collect()
 			};
@@ -1720,7 +1725,9 @@ mod tests {
 				.map(|i| (i * 33_000, i % 3 == 0, written[i as usize].clone()))
 				.collect();
 			assert_eq!(read(video_track), expected);
-			let expected: Vec<_> = (0..12u128).map(|i| (i * 20_000, true, OPUS.to_vec())).collect();
+			let expected: Vec<_> = (0..12u128)
+				.map(|i| (100_000 + i * 20_000, true, OPUS.to_vec()))
+				.collect();
 			assert_eq!(read(audio_track), expected);
 		}
 	}
