@@ -3465,7 +3465,6 @@ impl TrackState {
 		self.max_key.map_or(0, |max| max + 1)
 	}
 
-
 	/// The copy of the feed's `key` that still answers from `frame_start`, if any.
 	///
 	/// A dead (aborted or evicted) copy holds nothing, and neither does one that starts
@@ -6716,12 +6715,7 @@ impl Drop for Alive {
 		}
 		// A producer that served a renewal and produced nothing is not asked for again: a
 		// handler that fails at once would otherwise loop for as long as the reader stays.
-		let Some(home) = self
-			.home
-			.get()
-			.cloned()
-			.filter(|_| state.renewal.is_none())
-		else {
+		let Some(home) = self.home.get().cloned().filter(|_| state.renewal.is_none()) else {
 			return Self::drop_wanted(state, &self.name);
 		};
 		// A reader still wants the track, so its broadcast asks for it again, as a later lookup
