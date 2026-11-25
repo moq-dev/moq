@@ -343,6 +343,18 @@ export class Producer {
 		this.#marked = true;
 	}
 
+	/**
+	 * Close the current group without breaking the timeline, mirroring the Rust `container::Producer::cut`.
+	 * Call it when no more frames are coming for a while but the media that follows continues this
+	 * one, so a reader of the group, such as a fetch, finishes now rather than at the next keyframe.
+	 * `end` is where the group's content stops, else it is estimated from the frame cadence; the group
+	 * ends whole there, so a group starting at it reads as continuing this one. No marker is written.
+	 * Throws if `end` precedes a frame of the open group.
+	 */
+	cut(end?: Duration) {
+		this.#close(end === undefined ? undefined : micros(end));
+	}
+
 	// Flush and close the current group at the supplied or estimated end timestamp, whole at the
 	// `whole` marker start when one follows it.
 	#close(end?: number, whole?: Time.Timestamp) {

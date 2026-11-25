@@ -151,6 +151,8 @@ type Pipeline = {
 	channelCount: number;
 	push(frame: AudioFrame): void;
 	drain(): void;
+	// Encoding stopped: end the open group where the submitted audio ends, keeping the timeline.
+	stop(): void;
 };
 
 /**
@@ -478,6 +480,8 @@ export class Encoder {
 			});
 		});
 
+		// Whether the previous run encoded, which this run's cleanup has already cleared from #encoding.
+		let encoding = false;
 		effect.run((effect) => {
 			const enabled = effect.get(this.in.enabled) && !effect.get(this.muted);
 			const capture = effect.get(this.in.capture);
@@ -494,10 +498,15 @@ export class Encoder {
 			const subscription = track && effect.get(track.subscription);
 			this.#budget = replayBudget(subscription);
 			// Not gated on `enabled` or `muted`: a paused rendition takes no capture, but still encodes what it retained.
-			this.#encoding = !!format && !!track && !fatal && (!onDemand || subscription !== undefined);
-			effect.set(this.#out.active, enabled && this.#encoding, false);
+			const was = encoding;
+			encoding = !!format && !!track && !fatal && (!onDemand || subscription !== undefined);
+			this.#encoding = encoding;
+			effect.set(this.#out.active, enabled && encoding, false);
 			try {
-				if (this.#encoding) this.#pipeline?.drain();
+				// Nothing reads on, so the open group ends where the submitted audio does: a reader of it,
+				// such as a fetch, finishes while the audio is retained rather than when a subscriber returns.
+				if (was && !encoding) this.#pipeline?.stop();
+				if (encoding) this.#pipeline?.drain();
 			} catch (error) {
 				this.#abort(error);
 			}
@@ -690,6 +699,15 @@ export class Encoder {
 		live.start = undefined;
 	}
 
+	// End the open group at `end` without a marker (see Container.Legacy.Producer.cut): the epoch
+	// continues, so the audio that follows opens the next group as its continuation.
+	#endGroup(end: Duration): void {
+		const live = this.#live;
+		if (!live || live.track.closed.peek() !== undefined) return;
+		live.producer.cut(end);
+		live.start = undefined;
+	}
+
 	// Encode captured audio frames into whichever track producer is live. The broadcast owns the
 	// track's lifetime, so this never closes it; a fatal encoder error aborts only the live track.
 	#encode(order: Order, format: Format, retention: Duration, effect: Effect): void {
@@ -727,17 +745,19 @@ export class Encoder {
 					? new Gate({ sampleRate: config.sampleRate, frame: frameDuration(resolved) })
 					: undefined;
 
-				// What the codec still owes, in submission order: each input's timestamp, or a break whose
-				// marker goes down once every chunk before it is out. Chunks are stamped from here, never
-				// by the codec: Chrome and Firefox stamp input after a gap as if it were contiguous.
-				// Every browser emits one chunk per input, in order, so a codec that holds a chunk only
-				// delays its stamp, and a break needs no flush.
-				const owed: ({ timestamp: Duration } | { cut: Duration })[] = [];
-				// Write the marker of every break the codec has caught up with.
+				// What the codec still owes, in submission order: each input's timestamp, a break whose
+				// marker goes down once every chunk before it is out, or the end of the open group when
+				// encoding stopped. Chunks are stamped from here, never by the codec: Chrome and Firefox
+				// stamp input after a gap as if it were contiguous. Every browser emits one chunk per
+				// input, in order, so a codec that holds a chunk only delays its stamp, and neither a
+				// break nor a stop needs a flush.
+				const owed: ({ timestamp: Duration } | { cut: Duration } | { close: Duration })[] = [];
+				// Write every break and group end the codec has caught up with.
 				const settle = () => {
-					for (let next = owed[0]; next && "cut" in next; next = owed[0]) {
+					for (let next = owed[0]; next && !("timestamp" in next); next = owed[0]) {
 						owed.shift();
-						this.#cut(next.cut);
+						if ("cut" in next) this.#cut(next.cut);
+						else this.#endGroup(next.close);
 					}
 				};
 
@@ -747,7 +767,7 @@ export class Encoder {
 							throw new Error("only key frames are supported");
 						}
 						const input = owed.shift();
-						if (!input || "cut" in input) {
+						if (!input || !("timestamp" in input)) {
 							this.#abort(new Error("the audio encoder emitted a chunk for no input"));
 							return;
 						}
@@ -898,6 +918,12 @@ export class Encoder {
 							breakPending = false;
 							cut();
 						}
+					},
+					// Unlike a break, the next frame still continues this one, so `contiguous` stays.
+					stop: () => {
+						if (contiguous === undefined) return;
+						owed.push({ close: contiguous });
+						settle();
 					},
 					push: (captured: AudioFrame) => {
 						if (paused) return;

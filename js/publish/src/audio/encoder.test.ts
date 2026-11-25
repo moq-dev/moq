@@ -1645,6 +1645,72 @@ test("demand without a subscription keeps the retention for the subscription tha
 	}
 });
 
+// A fetch no longer resumes encoding, so a group open when the last subscriber leaves has to end
+// then, where the submitted audio does, or a fetch of it waits for a subscriber to return. It ends
+// only after the codec emits what it owes for that group, which a lagging codec holds until the
+// resume, and with no marker: the audio that follows continues it.
+test.each([0, 1])("the group open when the subscriber leaves ends for a fetch (codec lag %p)", async (lag) => {
+	using _webcodecs = installFakeWebCodecs();
+	FakeAudioEncoder.LAG = lag;
+	const clock = new Manual();
+	const installed = clock.install();
+	const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name: Moq.Path.from("stop.hang") });
+	const feed = new Feed();
+	const configuring = configured();
+	const encoder = new Encoder("audio", {
+		broadcast,
+		capture: fakeCapture(feed) as never,
+		join: Duration.millis(100),
+	});
+	let viewer: Moq.Track.Subscriber | undefined;
+	let fetched: Moq.Group.Consumer | undefined;
+	const push = async (index: number) => {
+		await feed.push({ timestamp: Duration.micros(index * 20_000), channels: [new Float32Array(960)] });
+		await feed.drain();
+	};
+	try {
+		await configuring;
+		await settle();
+		const net = broadcast.net.peek();
+		if (!net) throw new Error("expected network broadcast");
+		viewer = net.track("audio").subscribe({ ranges: [{}] });
+		await settle();
+		await push(0);
+		await push(1);
+		viewer.close();
+		await settle();
+		fetched = await net.track("audio").fetchGroup(0n);
+		await settle();
+		expect(fetched.end).toBe(lag ? undefined : 40_000n);
+
+		// The codec owes the group's last frame until input resumes.
+		viewer = net.track("audio").subscribe({ ranges: [{}] });
+		await settle();
+		await push(2);
+		await settle();
+		expect(fetched.end).toBe(40_000n);
+		expect([fetched.tryReadFrame(), fetched.tryReadFrame(), fetched.tryReadFrame()].map((f) => !!f)).toEqual([
+			true,
+			true,
+			false,
+		]);
+		// The resumed audio opens the next group with no marker before it.
+		await push(3);
+		await settle();
+		const next = await net.track("audio").fetchGroup(40_000n);
+		const first = next.tryReadFrame();
+		if (!first) throw new Error("expected the resumed frame");
+		expect(Moq.Varint.decode(first.payload)).toEqual([40_000, expect.any(Uint8Array)]);
+		next.close();
+	} finally {
+		viewer?.close();
+		fetched?.close();
+		encoder.close();
+		broadcast.close();
+		installed.close();
+	}
+});
+
 // Replay catches up behind the live edge another rendition already reached; advertising that as
 // `delay` would buffer playback by the retention for the rest of the broadcast.
 test("replayed raw audio raises no catalog delay", async () => {
