@@ -8178,6 +8178,52 @@ mod test {
 		assert_eq!(read(), ["group 1000", "gap 1500..1600", "group 2000"]);
 	}
 
+	/// A front's key-order read of a live track whose groups start at sparse keys keeps a
+	/// bounded record, though each group's end skips the keys up to the next only after the
+	/// read handed the group out: the read passes those keys before any drop poll reports
+	/// them, and since nothing lands where the publisher skipped, they settle with the group
+	/// above them.
+	#[test]
+	fn a_front_ordered_read_of_a_sparse_track_keeps_a_bounded_record() {
+		const SPACING: u64 = 17;
+		// Live groups start well above key 0, as a timestamp does.
+		const BASE: u64 = 1_000_003;
+		let pool = crate::cache::Pool::new(
+			crate::cache::Config::default()
+				.with_capacity(1 << 40)
+				.with_expiry(crate::cache::DEFAULT_EXPIRY),
+		);
+		let routes = Producer::new();
+		let info = broadcast::Info {
+			pool: pool.clone(),
+			..Default::default()
+		};
+		let logical = track::Request::new(Arc::new(info), "video")
+			.routes(routes.consume())
+			.accept(crate::track::Info::timed());
+		let a = received_copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR).ordered();
+		let waiter = kio::Waiter::noop();
+		let mut most = 0;
+		for n in 0..2000 {
+			let key = BASE + n * SPACING;
+			write(&a, key);
+			let mut items = Vec::new();
+			while let Poll::Ready(Ok(Some(item))) = sub.poll_next_item(&waiter) {
+				items.push(match item {
+					track::Item::Group(group) => group.start,
+					track::Item::Gap { range, .. } => panic!("gap {range:?}"),
+				});
+			}
+			assert_eq!(items, [key]);
+			// The group's end, read after the group, as its stream delivers it.
+			a.skip_groups(key + 1..key + SPACING);
+			most = most.max(pool.recorded() / crate::model::record::RUN_OVERHEAD);
+		}
+		assert!(most <= 8, "the record grew to {most} runs");
+	}
+
 	/// A front's key-order reader reports a group that lands on its copy after the read passed
 	/// its key, as old, with when it landed, and never one it handed out.
 	#[test]

@@ -245,9 +245,9 @@ enum Fold {
 	/// again.
 	Retire { below: u64 },
 	/// As the record grows: only what nothing can change any more, which folds at no cost to
-	/// what the reader offers or reports later. Skips and settled reports, as a group handed
-	/// out and told; never a drop a skip may still replace, a stale skip a wider budget owes
-	/// again, or a key not reported yet, even one handed out.
+	/// what the reader offers or reports later. Skips and settled reports, and a group handed
+	/// out that the skip after it shows landed; never a drop a skip may still replace, a stale
+	/// skip a wider budget owes again, or any other key not reported yet.
 	Final,
 }
 
@@ -538,8 +538,16 @@ impl Record {
 		let mut gaps = Vec::new();
 		loop {
 			let next = match self.reported.get_key_value(&end) {
-				// A skip may still go out over a drop, which folding would stop.
-				Some((_, Report::Dropped)) if fold == Fold::Final => break,
+				// A skip may still go out over a drop, which folding would stop, unless the drop
+				// is of one group a skip reported from the next key on proves was produced.
+				Some((run, Report::Dropped)) if fold == Fold::Final => {
+					let produced =
+						run.end - run.start == 1 && matches!(self.reported.get(&run.end), Some(Report::Skip));
+					if !produced {
+						break;
+					}
+					run.end
+				}
 				Some((run, _)) => run.end,
 				None if self.pending.contains_key(&end) => break,
 				None => {
@@ -551,10 +559,17 @@ impl Record {
 							beside.given_up_end(end),
 						],
 						Fold::Retire { .. } => [self.delivered.run_end(end), None, None, None],
-						// Only what the record reported is final: a key handed out, or passed in
-						// key order, and never reported may still be reported dropped, as a group
-						// cut after it went out or one landing late below an ordered read.
-						Fold::Final => [None; 4],
+						// A key handed out, or passed in key order, and never reported may still be
+						// reported dropped, as a group landing late below an ordered read. A skip
+						// reported from the next key on proves the group here landed, as the
+						// append or the group end that skipped it, so one it passed was found
+						// late and reported before that skip was: this one went out.
+						Fold::Final => {
+							let landed = end
+								.checked_add(1)
+								.filter(|next| matches!(self.reported.get(next), Some(Report::Skip)));
+							[landed.filter(|_| self.delivered.contains(end)), None, None, None]
+						}
 					};
 					let Some(run_end) = local.into_iter().flatten().max() else {
 						let Fold::Retire { below } = fold else {
@@ -671,6 +686,38 @@ mod test {
 		let mut untold = RangeSet::new();
 		untold.insert(u64::MAX / 2 + 2..u64::MAX / 2 + 3);
 		assert_eq!(record.untold(0..u64::MAX / 2 + 3), untold);
+	}
+
+	/// Without a debt, a growing record folds the drop of one group once a skip reported from
+	/// the next key on proves the group was produced, since no skip goes out over it; a drop of
+	/// more keys stays, as a skip may still replace part of it.
+	#[test]
+	fn a_growing_record_folds_a_dropped_group_a_skip_proves() {
+		let pool = cache::Pool::new(cache::Config::default());
+		let track = cache::Track::new(pool.clone(), Default::default(), Default::default(), kio::Weak::new());
+		let mut record = Record::default();
+		record.reported.insert(10..12, Report::Dropped);
+		record.reported.insert(12..20, Report::Skip);
+		for key in (20..2_000).step_by(10) {
+			record.reported.insert(key..key + 1, Report::Dropped);
+			record.reported.insert(key + 1..key + 10, Report::Skip);
+		}
+		record.settle(|| track.clone(), &mut (), Standing::default());
+		assert!(
+			pool.used() <= 4 * RUN_OVERHEAD,
+			"{} runs left",
+			pool.used() / RUN_OVERHEAD
+		);
+		assert_eq!(
+			record.report(500..501, &Hole::Skip),
+			None,
+			"a folded drop takes no skip"
+		);
+		assert_eq!(
+			record.report(10..12, &Hole::Skip),
+			Some(10..12),
+			"a wider drop still does"
+		);
 	}
 
 	/// A reader that joined above key 0, as at a sparse-key track's live edge or its oldest

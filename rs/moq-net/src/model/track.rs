@@ -13812,8 +13812,21 @@ impl Ordered {
 		}
 		let read = self.inner.poll_next_group(waiter);
 		if let Poll::Ready(Ok(Some(group))) = &read {
-			// Handed out, so no later cut or drop of it is a gap.
-			self.inner.settle(group.start);
+			// Handed out, so no later cut or drop of it is a gap. So are the keys it passed
+			// that the publisher skipped, where nothing can land late: settled with the group,
+			// a live read of a sparse-key track keeps one run rather than one per group. A gap
+			// still waiting there keeps them open, for the skip that replaces it.
+			let key = group.start;
+			let passed = self.at..key;
+			let waiting = self
+				.gaps
+				.range(..key)
+				.next_back()
+				.is_some_and(|(_, (end, _))| *end > self.at);
+			match !passed.is_empty() && !waiting && self.inner.is_skipped(passed.clone()) {
+				true => self.inner.settle_range(passed.start..key.saturating_add(1)),
+				false => self.inner.settle(key),
+			}
 		}
 		read
 	}
@@ -32693,41 +32706,76 @@ mod test {
 	}
 
 	/// A live reader of a track whose groups start at sparse keys keeps a bounded record however
-	/// long the track runs, under a pool with room to spare: the keys between groups are
-	/// skipped for good, by the publisher's append or the upstream's group end, and each group
-	/// served is told, as a lite-07 publisher does, so what the reader settled folds as it goes
-	/// rather than waiting for pool pressure.
+	/// long the track runs, under a pool with room to spare, whether the keys between groups
+	/// are skipped by the publisher's append or by the upstream's group end: what it settled
+	/// folds as it goes rather than waiting for pool pressure. Each kind of reader: a wire
+	/// publisher that tells each group it serves, a front's copy that tells none, and a
+	/// key-order read.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_sparse_live_track_keeps_a_bounded_record() {
+		#[derive(Clone, Copy, Debug)]
+		enum Reader {
+			Told,
+			Untold,
+			Ordered,
+		}
 		const GROUPS: u64 = 2000;
 		const SPACING: u64 = 17;
-		for received in [false, true] {
-			let (producer, pool) = pooled_producer(1 << 40);
-			if received {
-				producer.received();
-			}
-			let mut subscriber = producer.subscribe(Subscription::default());
-			let mut most = 0;
-			for n in 0..GROUPS {
-				let key = n * SPACING;
-				let mut group = match received {
-					false => producer.append_group(Timestamp::from_millis(key).unwrap()).unwrap(),
-					true => producer.create_group(group::Info { start: key }).unwrap(),
-				};
-				group
-					.write_frame(Timestamp::from_millis(key).unwrap(), &b"x"[..])
-					.unwrap();
-				group.finish().unwrap();
+		// Live groups start well above key 0, as a timestamp does.
+		const BASE: u64 = 1_000_003;
+		for reader in [Reader::Told, Reader::Untold, Reader::Ordered] {
+			for received in [false, true] {
+				let (producer, pool) = pooled_producer(1 << 40);
 				if received {
-					producer.skip_groups(key + 1..key + SPACING);
+					producer.received();
 				}
-				assert_eq!(drain_groups(&mut subscriber), [key], "received={received}");
-				subscriber.record_mut().tell(key..key + 1, Report::Settled);
-				drained_drops(&mut subscriber);
-				most = most.max(pool.recorded() / super::super::record::RUN_OVERHEAD);
+				let mut subscriber = Some(producer.subscribe(Subscription::default()));
+				let mut ordered = match reader {
+					Reader::Ordered => subscriber.take().map(Subscriber::ordered),
+					_ => None,
+				};
+				let mut most = 0;
+				for n in 0..GROUPS {
+					let key = BASE + n * SPACING;
+					let mut group = match received {
+						false => producer.append_group(Timestamp::from_millis(key).unwrap()).unwrap(),
+						true => producer.create_group(group::Info { start: key }).unwrap(),
+					};
+					group
+						.write_frame(Timestamp::from_millis(key).unwrap(), &b"x"[..])
+						.unwrap();
+					group.finish().unwrap();
+					if received {
+						producer.skip_groups(key + 1..key + SPACING);
+					}
+					match (&mut subscriber, &mut ordered) {
+						(Some(subscriber), _) => {
+							assert_eq!(drain_groups(subscriber), [key], "{reader:?} received={received}");
+							if let Reader::Told = reader {
+								subscriber.record_mut().tell(key..key + 1, Report::Settled);
+							}
+							drained_drops(subscriber);
+						}
+						(None, Some(ordered)) => {
+							let mut items = Vec::new();
+							while let Poll::Ready(Ok(Some(item))) = ordered.poll_next_item(&kio::Waiter::noop()) {
+								items.push(match item {
+									Item::Group(group) => group.start,
+									Item::Gap { range, .. } => panic!("{reader:?} received={received}: gap {range:?}"),
+								});
+							}
+							assert_eq!(items, [key], "{reader:?} received={received}");
+						}
+						(None, None) => unreachable!(),
+					}
+					most = most.max(pool.recorded() / super::super::record::RUN_OVERHEAD);
+				}
+				assert!(
+					most <= 8,
+					"{reader:?} received={received}: the record grew to {most} runs"
+				);
 			}
-			assert!(most <= 8, "received={received}: the record grew to {most} runs");
 		}
 	}
 
