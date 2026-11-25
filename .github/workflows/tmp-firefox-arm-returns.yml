@@ -62,6 +62,9 @@ jobs:
             # The return: from the last replacement wire's end to the end of the lifecycle log.
             for life in "$RUNNER_TEMP"/runs-"$i"/*/media-*lifecycle*.log; do
               [[ -f "$life" ]] || continue
+              # The fixture's audio demand and the player's audio gaps at cold start, rejoin, and reattach.
+              awk '/^=== (cold start|unsubscribe and rejoin|detach and reattach)/{on=1; print; next} /^=== /{on=0} on && /tmp-audio|skipping (missing|slow) groups: track=audio|audio underflow|reaches live|FAIL/' "$life" \
+                | cut -c1-200 | head -60 | sed "s/^/  run $i: /" || true
               start=$(grep -n 'moq-transport-22: replacement' "$life" | tail -1 | cut -d: -f1)
               [[ -n "$start" ]] || continue
               ret=$(tail -n +"$start" "$life" | sed '/=== stop and republish ===/q')

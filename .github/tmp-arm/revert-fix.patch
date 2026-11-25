@@ -1,42 +1,11 @@
-diff --git a/js/publish/src/audio/encoder.ts b/js/publish/src/audio/encoder.ts
-index c392aa16ed..ded115dc24 100644
 --- a/js/publish/src/audio/encoder.ts
 +++ b/js/publish/src/audio/encoder.ts
-@@ -222,8 +222,8 @@ export class Encoder {
- 	#pipeline: Pipeline | undefined;
- 	#encoding = false;
- 	// How far back retained audio is replayed (see replayBudget): the live joins' reach, and for
--	// history the retention. Replayed groups land as fresh arrivals, so only this cut keeps a
--	// rejoining live viewer from receiving all the retained audio before the live edge.
-+	// history or fetches alone the retention. Replayed groups land as fresh arrivals, so only this
-+	// cut keeps a rejoining live viewer from receiving all the retained audio before the live edge.
- 	#budget: Duration | undefined;
- 
- 	// The rendition's track and producer, kept across subscriber changes.
-@@ -488,13 +488,11 @@ export class Encoder {
- 			const fatal = effect.get(this.#out.error);
- 
- 			const onDemand = effect.get(broadcast.in.onDemand) !== "off";
--			// Only a live subscription states how far back it reaches, which sizes the replay. Other
--			// demand, such as a relay's TRACK ahead of its SUBSCRIBE or a fetch, keeps the audio
--			// retained for the subscription that follows rather than replaying all of it.
--			const subscription = track && effect.get(track.subscription);
--			this.#budget = replayBudget(subscription);
-+			const demanded = !!track && effect.get(track.demand().wanted);
-+			// Demand from fetches alone carries no subscription, so no budget beyond the retention.
-+			this.#budget = replayBudget(track && effect.get(track.subscription));
+@@ -494,7 +494,7 @@
+ 			const subscription = track && effect.get(track.subscription);
+ 			this.#budget = replayBudget(subscription);
  			// Not gated on `enabled` or `muted`: a paused rendition takes no capture, but still encodes what it retained.
 -			this.#encoding = !!format && !!track && !fatal && (!onDemand || subscription !== undefined);
-+			this.#encoding = !!format && !!track && !fatal && (!onDemand || demanded);
++			this.#encoding = !!format && !!track && !fatal && (!onDemand || (!!track && effect.get(track.demand().wanted)));
  			effect.set(this.#out.active, enabled && this.#encoding, false);
- 			try {
- 				if (this.#encoding) this.#pipeline?.drain();
-@@ -1038,7 +1036,7 @@ export function resolve(captured: Format, selected: Codec): Resolved {
- // past its own max, so the largest of those bounds it. A join with no lag limit, as every join before
- // lite-07 is, starts from the oldest group but drops anything older than its max, so its max alone
- // bounds it. Any other range, one with an end included, is history, which wants the whole retention,
--// as does a join bounded by neither. Without a subscription nothing is replayed, so none is needed.
-+// as does no subscription or a join bounded by neither.
- function replayBudget(subscription: Moq.Track.Subscription | undefined): Duration | undefined {
- 	if (!subscription) return undefined;
- 	let reach: Duration | undefined;
+ 			// TMP(firefox-arm-returns): demand trace, deleted before review.
+ 			console.debug(
