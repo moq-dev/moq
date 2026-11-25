@@ -13,7 +13,9 @@ It passed on the 2026-11-21 run at `d1c532d3e4` and failed on the next two:
 
 - [45040473444](https://github.com/moq-dev/moq/actions/runs/45040473444) at
   `f2eab6d3c2`: each audio PID shed frames (MP2 PIDs 4, 12 and 37 frames,
-  AC-3 2), which `holes.py` fails since only video may shed.
+  AC-3 2). `holes.py` grades audio under `--shed` with the same whole-group
+  rule as video, so these losses fail only if the run reports a mid-group
+  resume, unmatched frames, a lost tail, or a late start for that PID.
 - [45251919956](https://github.com/moq-dev/moq/actions/runs/45251919956) at
   `a04b99fbc9`: no audio shed, but each audio PID starts 3.008 to 3.024 s
   after its source (at 4.49 s of 1.47 s), one frame past the 3.0 s join
