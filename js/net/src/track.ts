@@ -996,6 +996,8 @@ let cachedMirror: (producer: Producer, key: bigint, from: number) => GroupConsum
 // Whether the producer still caches a group that has not failed, with `whole` only one held from
 // its first frame; assigned in its static block.
 let cachedHolds: (producer: Producer, key: bigint, whole?: boolean) => boolean;
+// How many cached groups the pool evicted from the producer; assigned in its static block.
+let evictions: (producer: Producer) => number;
 // Whether the producer is a copy a session receives, whose handler fetches by group alone.
 let receivedCopy: (producer: Producer) => boolean;
 // The keys in `[start, end)` the producer caches, unsorted, costing the smaller of the span
@@ -1507,6 +1509,9 @@ export class Producer {
 	// The newest frame of any live group the cache let go of: the live edge a join measures stays
 	// where its publisher reached. Mirrors the Rust `TrackState::departed_edge`.
 	#departedEdge?: Timestamp;
+	// How many cached groups the pool evicted, so a reader that left a group to this copy to read
+	// learns it may be gone. Mirrors the Rust `TrackState::evicted_groups`.
+	#evictions = 0;
 	// This track's account against its broadcast's cache pool (a pool of its own when it has no
 	// broadcast), which evicts the cached groups once idle.
 	#account: cache.Track<CachedGroup>;
@@ -1607,6 +1612,7 @@ export class Producer {
 				this.#evict(entry);
 				this.#uncache(entry, true);
 				if (!entry.fetched && span.started && !span.failed) this.#depart(entry, span);
+				this.#evictions++;
 			},
 			settle: () => this.#settle(),
 			expireDrops: (now) => this.#expireDrops(now),
@@ -1903,6 +1909,7 @@ export class Producer {
 		hooks.reportedGroup = (producer, group) => producer.#advanceLargest({ group, frame: 0 });
 		objectLargest = (producer) => producer.#objectLargest;
 		fillsOf = (producer) => producer.#fills;
+		evictions = (producer) => producer.#evictions;
 		cachedHolds = (producer, key, whole = false) => {
 			const entry = producer.#cached.get(key);
 			if (entry === undefined || entry.group.closed.peek() instanceof Error) return false;
@@ -5338,6 +5345,10 @@ export class Subscriber {
 			if (subscriber.#resume) return subscriber.#resume.landed(start, end);
 			const producer = subscriber.#state.producer;
 			return producer && cachedLanded(producer, start, end);
+		};
+		hooks.evictions = (subscriber) => {
+			const producer = subscriber.#state.producer;
+			return producer === undefined ? 0 : evictions(producer);
 		};
 		hooks.holdsGroup = (subscriber, key, whole) => {
 			const producer = subscriber.#state.producer;
