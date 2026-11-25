@@ -139,7 +139,11 @@ rust2-ffi with rust2's std sysroot, so moq's stable cargo runs it.
     maps it), and the `.sha256` release assets (`release.json` pins them).
     Floors are Flutter's defaults, Android 24, iOS 13.0, and macOS 10.15, and
     the Dart SDK stays at 3.10. List the changes in `moq_ffi`'s `MIGRATE.md`.
-    See `Waiting` for the open decision on these.
+  - Decided 2026-11-25 (maintainer, /quest-run): ✅ `moq_ffi` accepts rust2's
+    pub package as it is, losing these three, as for Python and Swift, so a
+    pin bump stays a re-init and every binding ships one way (rejected:
+    adding `x86_64-apple-ios` to rust2's builder; keeping moq's own hook
+    beside the export's).
   - [Dart on iOS](/quest/m4/dart-ios.md)'s verdict then applies to rust2's
     package: dropping the iOS targets, if it comes to that, is a change in
     rust2's builder rather than in `release-dart-ffi.yml`.
@@ -227,13 +231,3 @@ becomes `MoqFfi`, moq-ffi's floors rise to Python 3.11, macOS 13, and Swift
 x86_64 iOS simulator library, and any other generated name the wrappers
 re-export may change, each listed in the PR.
 Wire: none.
-
-## Waiting
-
-- Maintainer: does `moq_ffi` accept rust2's pub package as it is, losing the
-  hook's `user_defines` library override, the Intel iOS simulator library, and
-  the `.sha256` assets (see the Dart FFI release bullet)? Recommended: accept,
-  as for Python and Swift, so a pin bump stays a re-init and every binding
-  ships one way. Rejected: adding `x86_64-apple-ios` to rust2's builder (an
-  extra build per release for the simulator on Intel Macs); carrying moq's own hook beside the export's, which keeps the
-  packaging the switch deletes.
