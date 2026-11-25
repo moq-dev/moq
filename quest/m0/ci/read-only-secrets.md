@@ -122,8 +122,9 @@ checking that every job on `main` and `release` reads them through `publish`
 or gates the step to tags, the maintainer deleted 15 repository secrets: the
 twelve `publish` secrets above, the unreferenced `GCP_SERVICE_ACCOUNT_KEY`,
 and Pullfrog's `CLAUDE_CODE_OAUTH_TOKEN` and `META_MODEL_API_KEY`. The
-repository secrets left are `CACHIX_AUTH_TOKEN` (owned by `cachix-retire`)
-and the read-only `MBX_R2_ACCESS_KEY_ID` and `MBX_R2_SECRET_ACCESS_KEY`.
+repository secrets left are the read-only `MBX_R2_ACCESS_KEY_ID` and
+`MBX_R2_SECRET_ACCESS_KEY` (`CACHIX_AUTH_TOKEN` was deleted 2026-11-07 by
+[moq-dev/moq#8048](https://github.com/moq-dev/moq/pull/8048)).
 
 Decided 2026-11-06 (maintainer, /quest-unblock): ✅ Pullfrog gets no
 provider keys from this repository, so `pullfrog.yml` passes none; its
