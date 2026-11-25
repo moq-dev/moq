@@ -57,7 +57,8 @@ const AV1_SEQUENCE_HEADER_MAX_LEN: u64 = (3139 + 1u64).div_ceil(8);
 /// - FLAC (`A_FLAC`)
 /// - MP3 (`A_MPEG/L3`)
 ///
-/// Laced blocks require a positive TrackEntry DefaultDuration to timestamp each frame.
+/// Laced blocks space their frames by a BlockDuration that precedes the Block in its BlockGroup,
+/// else by the track's positive DefaultDuration; a block with neither fails the import.
 ///
 /// Unsupported track roles are skipped; malformed tracks and unsupported codecs fail the import.
 ///
