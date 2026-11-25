@@ -785,6 +785,12 @@ pub(crate) struct TrackState {
 	// so one at most per cached group and one below them all. It is still the immediate
 	// successor of the group below it, which a read judges by and a time start past it is
 	// not placed in (see [`Self::departed_above`]).
+	//
+	// That bound is deliberate: keeping every departure a reader's disjoint ranges might
+	// judge by would grow with eviction history rather than with the cache. A reader whose
+	// ranges skip the lowest departure in a gap judges the group below that gap by the next
+	// cached group instead, and so may find it fresh where it was stale. That needs a reader
+	// with several ranges plus a group evicted, fetched back, and evicted again between them.
 	departed: BTreeMap<u64, Departed>,
 	// The newest live group the cache let go of, by key, and its newest frame: the live edge a
 	// join measures stays where its publisher reached once the cache lets the newest group go.
@@ -1406,12 +1412,12 @@ impl Holdings for TrackState {
 		// The newest group's newest frame, held, expired in place by an ended track's sweep, or
 		// let go of by the cache: its publisher reached it. An older group's later frames don't
 		// move it, held or not.
-		// Down to the held edge at most, past groups that present nothing.
+		// Held or released alike, down to the first that presents a frame: a group with none,
+		// still cached or not, measures nothing, as `live_edge` skips it.
 		let expired = self
 			.lookup
 			.iter()
 			.rev()
-			.take_while(|(_, slot)| !slot.is_shown())
 			.filter(|(_, slot)| slot.succeeds() && slot.group.is_started())
 			.find_map(|(&key, slot)| Some((key, slot.group.latest().or_else(|| self.started_at(slot))?)));
 		let newest = self
@@ -17594,6 +17600,68 @@ mod test {
 			}
 		}
 		assert!(!groups.contains(&1000), "3000 measures the edge: {groups:?}");
+	}
+
+	/// A live join on an ended sequence-keyed track measures the edge by the newest group with
+	/// a frame, expired in place, past an empty final group still cached.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_sequence_keyed_join_measures_past_a_cached_empty_group() {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY));
+		let producer = track_producer_pooled("test", pool.clone());
+		producer.received();
+		producer.starts_at_keys();
+		for key in 1..=3 {
+			let mut group = producer.create_group(group::Info { start: key }).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(key * 1000).unwrap(), &b"x"[..])
+				.unwrap();
+			group.finish().unwrap();
+		}
+		let state = producer.state.downgrade();
+		let consumer = producer.consume();
+		let mut subscriber = producer.subscribe(Subscription::default().with_start(0).with_max(None));
+
+		// Reading 1 and 2 keeps them cached past 3's idle window, as an empty 4 created then is.
+		let waiter = kio::Waiter::noop();
+		pool.sweep();
+		pool.step(cache::DEFAULT_EXPIRY / 2);
+		producer.create_group(group::Info { start: 4 }).unwrap().finish().unwrap();
+		drop(producer.finish().unwrap());
+		let mut held = Vec::new();
+		for key in [1, 2] {
+			let mut group = subscriber.assert_group();
+			assert_eq!(group.start, key);
+			assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
+			held.push(group);
+		}
+		pool.sweep();
+		pool.step(cache::DEFAULT_EXPIRY / 2 + Duration::from_secs(2));
+		pool.sweep();
+		assert_eq!(
+			state.read(|state| [1, 2, 3, 4].map(|key| state.lookup.get(&key).is_some_and(Slot::is_aborted))),
+			Some([false, false, true, false]),
+			"only 3 expired in place"
+		);
+
+		let mut ordered = consumer
+			.subscribe(Subscription::default().with_ranges([Range {
+				start: crate::track::Start::Live {
+					min: Some(Duration::from_millis(1000)),
+					max: None,
+				},
+				end: None,
+			}]))
+			.await
+			.unwrap()
+			.ordered();
+		let mut groups = Vec::new();
+		while let Some(Ok(Some(item))) = ordered.next_item().now_or_never() {
+			if let Item::Group(group) = item {
+				groups.push(group.start);
+			}
+		}
+		assert_eq!(groups.first(), Some(&2), "3 measures the edge: {groups:?}");
 	}
 
 	/// Empty groups are handed out like any other and retired by the wall clock like an
