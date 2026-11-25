@@ -408,6 +408,9 @@ pub(in crate::model) struct Window {
 	named: BTreeMap<u64, usize>,
 	/// How many spans reach back to the oldest group instead of naming one.
 	unnamed: usize,
+	/// The keys of the time-start ranges among those, so [`Self::unplaced_times`] visits no
+	/// other span.
+	reached_back: BTreeSet<u64>,
 }
 
 /// One non-empty range, resolved.
@@ -493,6 +496,7 @@ impl Window {
 			covered: None,
 			named: BTreeMap::new(),
 			unnamed: 0,
+			reached_back: BTreeSet::new(),
 		};
 		for range in ranges.values() {
 			window.count_budget(range);
@@ -897,6 +901,22 @@ impl Window {
 		keys
 	}
 
+	/// Each time start that names no group yet, with its range's end: waiting on a first
+	/// group, reaching back past every group held, waiting on one, or looking one up. Costs
+	/// those, nothing once every time start names a group.
+	pub fn unplaced_times(&self) -> impl Iterator<Item = (u64, Option<u64>)> + '_ {
+		// One waiting, or looking up from the oldest group, is unfloored, so reached back.
+		let looking = (self.looking.iter())
+			.map(|(_, key)| *key)
+			.filter(|key| self.spans[key].floored);
+		(self.pending.iter().chain(&self.reached_back).copied())
+			.chain(looking)
+			.filter_map(|key| {
+				let range = self.ranges[&key];
+				Some((range.time()?, range.end))
+			})
+	}
+
 	/// The exclusive end past every group in range, `None` when one stays open or an anchor
 	/// waits.
 	pub fn end(&self) -> Option<u64> {
@@ -1053,6 +1073,7 @@ impl Window {
 		self.layers.clear();
 		self.named.clear();
 		self.unnamed = 0;
+		self.reached_back.clear();
 		let keys: Vec<u64> = self
 			.ranges
 			.iter()
@@ -1186,7 +1207,12 @@ impl Window {
 		}
 		match span.floored {
 			true => *self.named.entry(span.start).or_default() += 1,
-			false => self.unnamed += 1,
+			false => {
+				self.unnamed += 1;
+				if self.ranges[&key].time().is_some() {
+					self.reached_back.insert(key);
+				}
+			}
 		}
 		if let Some(looking) = span.looking {
 			self.looking.insert((looking.time, key));
@@ -1218,7 +1244,10 @@ impl Window {
 					self.named.remove(&span.start);
 				}
 			}
-			false => self.unnamed -= 1,
+			false => {
+				self.unnamed -= 1;
+				self.reached_back.remove(&key);
+			}
 		}
 		if let Some(looking) = span.looking {
 			self.looking.remove(&(looking.time, key));
@@ -1580,8 +1609,27 @@ mod tests {
 				fast.settle(latest, &keys);
 				full.settle(latest, &Blind(&keys));
 				proptest::prop_assert_eq!(seen(&fast), seen(&full));
+				proptest::prop_assert_eq!(unplaced_times(&fast), unplaced_by_scan(&fast));
+				proptest::prop_assert_eq!(unplaced_times(&full), unplaced_by_scan(&full));
 			}
 		}
+	}
+
+	/// [`Window::unplaced_times`], sorted.
+	fn unplaced_times(window: &Window) -> Vec<(u64, Option<u64>)> {
+		let mut times: Vec<_> = window.unplaced_times().collect();
+		times.sort_unstable();
+		times
+	}
+
+	/// What [`Window::unplaced_times`] lists, found by resolving every range.
+	fn unplaced_by_scan(window: &Window) -> Vec<(u64, Option<u64>)> {
+		let mut times: Vec<_> = (window.ranges.iter())
+			.filter(|(key, _)| !window.resolved_key(**key).is_some_and(|resolved| resolved.floored))
+			.filter_map(|(_, range)| Some((range.time()?, range.end)))
+			.collect();
+		times.sort_unstable();
+		times
 	}
 
 	/// A range from time `start`, or reaching back to the oldest group with none.

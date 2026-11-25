@@ -65,10 +65,10 @@ runs:
           echo "MBX_REMOTE_S3_REGION=auto"
           # The action store's size budget also caps what one build downloads,
           # and a hosted disk scales it to 5 GiB on Linux and 10 on Windows.
-          # Prefetching predictions every job shares spends that early, so the
-          # job's own results then fail to restore, compile again, and re-upload
-          # objects the bucket already holds, each a refused but billed put.
-          # 20 GiB covers the most any job downloaded with the cap lifted.
+          # mbx stops prefetching at half of it, so a job's own results still
+          # restore, but 20 GiB covers the most any job downloaded before that,
+          # and a refused restore compiles again and re-uploads objects the
+          # bucket already holds, each a refused but billed put.
           echo "MBX_GC_MAX_SIZE=20GiB"
           if [ "$WRITE" = "true" ]; then
             echo "MBX_REMOTE_MODE=read-write"
@@ -93,7 +93,7 @@ runs:
     - uses: jdx/mr-boxington-action@88acf2bb50552c7c508cbac13e5f8c576b95b1de # v1.7.3
       id: mbx
       with:
-        version: 1.30.0
+        version: 1.31.0
         backend: ${{ runner.environment != 'self-hosted' && inputs.access-key-id != '' && inputs.secret-access-key != '' && 'remote' || 'local' }}
         remote-url: s3://mbx-moq-dev
         namespace: ${{ runner.os }}-${{ runner.arch }}

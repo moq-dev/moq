@@ -182,11 +182,12 @@ export class Stretch {
 		this.#until = this.hop;
 		this.#allowance = Math.min(this.#allowance + CAP * this.hop, this.span);
 		const direction = Math.sign(decision.pace);
+		// A hold keeps the pace owed, so a lag flickering across half a hop still adds up to a splice.
+		if (direction === 0) return 0;
 		if (direction !== this.#direction) {
 			this.#direction = direction;
 			this.#owed = 0;
 		}
-		if (direction === 0) return 0;
 		this.#owed = Math.min(Math.max(this.#owed + decision.pace * this.hop, -this.span), this.span);
 		if (!decision.urgent && direction * this.#owed < this.hop) return 0;
 

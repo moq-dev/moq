@@ -256,12 +256,13 @@ impl Stretch {
 		} else {
 			0
 		};
+		// A hold keeps the pace owed, so a lag flickering across half a hop still adds up to a splice.
+		if direction == 0 {
+			return 0;
+		}
 		if direction != self.direction {
 			self.direction = direction;
 			self.owed = 0.0;
-		}
-		if direction == 0 {
-			return 0;
 		}
 		self.owed = (self.owed + decision.pace * hop).clamp(-span, span);
 		if !decision.urgent && f64::from(direction) * self.owed < hop {

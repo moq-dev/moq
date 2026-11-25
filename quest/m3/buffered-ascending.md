@@ -49,6 +49,14 @@ Decided 2026-10-23 by the maintainer:
   has no `order` field, so it ships in the next minor, not a 0.6.x patch.
   Not chosen: m2; wiring it now behind the lite-07 gate.
 
+Decided 2026-11-24 (maintainer, /quest-plan of [audio groups span
+200 ms](/quest/m1/audio-group-200ms.md)): ✅ live audio stays newest-first
+(rejected: always ascending for audio; measure first). With 200 ms groups, the
+race ascending fixes (G-1's retransmitted tail queued behind G) happens only
+once per group boundary. Newest-first is what lets a live player skip a backlog
+after a stall, where ascending would first send audio the player then trims.
+The sweep that favored ascending never measured trimmed audio.
+
 Implementation:
 
 - `subscribeMedia` (`js/watch/src/media.ts`) takes the order. Audio and video

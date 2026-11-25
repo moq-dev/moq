@@ -35,6 +35,14 @@
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
+    # rust2-bench, which counts each bench's instructions under the Valgrind rust2's own
+    # nixpkgs pins (`just rs instructions`). A bump that moves that Valgrind starts new
+    # Kixel Quest series, since another Valgrind can count differently.
+    rust2 = {
+      url = "github:kixel-ai/rust2";
+      inputs.flake-utils.follows = "flake-utils";
+      inputs.quest.follows = "quest";
+    };
   };
 
   outputs =
@@ -110,24 +118,6 @@
           }
         );
 
-        # The CodSpeed Criterion build (`just rs codspeed`). 6.0 runs each benchmark in its own
-        # process, so allocator state no longer carries between them; nixpkgs still has 5.x.
-        cargo-codspeed = pkgs.cargo-codspeed.overrideAttrs (
-          finalAttrs: old: {
-            version = "6.0.0";
-            src = pkgs.fetchFromGitHub {
-              owner = "CodSpeedHQ";
-              repo = "codspeed-rust";
-              tag = "v${finalAttrs.version}";
-              hash = "sha256-qY+IQx2apIOGTkRXUnbNCJT4Jo6TESY/80SXyknUBWY=";
-            };
-            cargoDeps = pkgs.rustPlatform.fetchCargoVendor {
-              inherit (finalAttrs) pname version src;
-              hash = "sha256-qiyA74h80sT3tM/TToZxPDGMmnEwB8MYhFM84Wu2ySs=";
-            };
-          }
-        );
-
         # Rust dependencies
         rustDeps =
           with pkgs;
@@ -162,7 +152,6 @@
             cargo-nextest
             # Mutation testing of the route and resume code (`just rs mutants`).
             cargo-mutants
-            cargo-codspeed
             # Sets versions for a release cut; `sh/version.py` needs 0.4.1 or newer.
             release-plz
             # Source-based test coverage (`just rs coverage`).

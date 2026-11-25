@@ -274,7 +274,7 @@ async fn retracted_relay_ignores_a_stale_path() {
 /// sends, as a browser's announce stream does. The relays speak lite-07, which
 /// carries the broadcast's instance, so a relay moving to another path updates it.
 /// Older versions carry none, so every relay mints its own and a move between
-/// neighbors is a restart the update hold does not absorb.
+/// neighbors is a restart, which the update hold waits out only onto a worse path.
 struct Cluster {
 	_pairs: Vec<MockPair>,
 	publisher: origin::Producer,
@@ -367,12 +367,20 @@ impl Cluster {
 
 /// #4349: a publisher on one relay cleanly closes a broadcast, and a client
 /// watching from another relay sees one retraction and no re-announce, with no
-/// update hold or retraction quarantine, which lite-07 routes skip. Lite-06 still
-/// re-announces: see [`cross_node_close_reannounces_on_lite06`] and
+/// update hold or retraction quarantine, which lite-07 routes skip. Lite-06 needs
+/// them: see [`cross_node_close_reannounces_on_lite06_without_the_hold`] and
 /// [`slow_ring_retracts_once`].
 #[kio::test]
 async fn cross_node_close_retracts_once_lite07() {
 	cross_node_close_retracts_once("moq-lite-07-wip").await;
+}
+
+/// The update hold waits out a lite-06 relay's fall back onto a stale path, though each
+/// relay mints its own instance for what a neighbor announces, so the fall back reads
+/// as a restart.
+#[kio::test]
+async fn cross_node_close_retracts_once_lite06() {
+	cross_node_close_retracts_once("moq-lite-06").await;
 }
 
 async fn cross_node_close_retracts_once(version: &str) {
@@ -396,23 +404,16 @@ async fn cross_node_close_retracts_once(version: &str) {
 	}
 }
 
-/// The lite-06 residual of [`cross_node_close_retracts_once`]: the client sees the
-/// broadcast come back before it ends, with the update hold and the quarantine or
-/// without. Each lite-06 relay mints its own instance for what a neighbor
-/// announces, so falling back onto a stale path is a restart, which the hold does
-/// not absorb, under an instance the quarantine does not recognize.
+/// What the update hold absorbs in [`cross_node_close_retracts_once_lite06`]: without it,
+/// a lite-06 relay falls back onto a stale path, and the client sees the broadcast come
+/// back before it ends.
 #[kio::test]
-async fn cross_node_close_reannounces_on_lite06() {
-	for config in [
-		origin::Config::default(),
-		origin::Config::default().with_update_hold(Duration::ZERO),
-	] {
-		let hold = config.update_hold();
-		let mut cluster = Cluster::new("moq-lite-06", STALE_PATHS, config, 7, 1).await;
-		let (broadcast, _) = cluster.publish("room/a").await;
-		let (client, _) = cluster.close("room/a", broadcast).await;
-		assert_eq!(client, [Kind::End, Kind::Start, Kind::End], "hold {hold:?}");
-	}
+async fn cross_node_close_reannounces_on_lite06_without_the_hold() {
+	let config = origin::Config::default().with_update_hold(Duration::ZERO);
+	let mut cluster = Cluster::new("moq-lite-06", STALE_PATHS, config, 7, 1).await;
+	let (broadcast, _) = cluster.publish("room/a").await;
+	let (client, _) = cluster.close("room/a", broadcast).await;
+	assert_eq!(client, [Kind::End, Kind::Start, Kind::End]);
 }
 
 /// Relay 3 hears a broadcast published on relay 0 first over the longer, faster
