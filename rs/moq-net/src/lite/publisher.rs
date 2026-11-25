@@ -6813,9 +6813,7 @@ impl TrackRun {
 			),
 		};
 		debug_assert!(self.opening.is_none(), "one group waits for stream credit at a time");
-		self.opening = Some(
-			GroupServe::new(self.ctx.group_context(), key, frame_start, end, rank, group).gapped(gap),
-		);
+		self.opening = Some(GroupServe::new(self.ctx.group_context(), key, frame_start, end, rank, group).gapped(gap));
 	}
 }
 
@@ -10349,7 +10347,11 @@ mod serve_group_test {
 		// Nothing above 7 and 8 before the end at 9.
 		track.skip_groups(7..9);
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-		assert_eq!(holes(&mut writer, &log).await, [("drop", 4..6)], "group 9 may still come");
+		assert_eq!(
+			holes(&mut writer, &log).await,
+			[("drop", 4..6)],
+			"group 9 may still come"
+		);
 		track.finish_at(track::Position::group(9)).unwrap();
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		assert_eq!(holes(&mut writer, &log).await, [("drop", 4..6), ("drop", 7..9)]);
@@ -10554,7 +10556,10 @@ mod serve_group_test {
 					drops.push(drop.groups);
 				}
 			}
-			assert_eq!(drops, [1..3], "{version}");
+			assert!(
+				matches!(drops.as_slice(), [only] if *only == (1..3)),
+				"{version}: {drops:?}"
+			);
 		}
 	}
 

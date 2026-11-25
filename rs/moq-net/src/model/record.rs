@@ -166,8 +166,7 @@ impl Record {
 		let reported = self
 			.reported
 			.overlapping(&range)
-			.filter(|(_, report)| **report != Report::Skip)
-			.last()
+			.rfind(|(_, report)| **report != Report::Skip)
 			.map(|(run, _)| run.end.min(range.end) - 1);
 		let folded = (range.start < self.floor).then(|| self.floor.min(range.end) - 1);
 		reported.max(folded)

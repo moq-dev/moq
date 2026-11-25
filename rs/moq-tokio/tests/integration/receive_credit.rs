@@ -633,6 +633,8 @@ fn group_stream(subscribe: u64, sequence: u64, size: usize) -> Vec<u8> {
 	varint(&mut header, sequence);
 	// Frame Start: the stream carries the group from its first frame.
 	varint(&mut header, 0);
+	// Previous Delta: nothing said about the keys below.
+	varint(&mut header, 0);
 
 	// GROUP, then its size-prefixed header.
 	let mut bytes = vec![0x00];
