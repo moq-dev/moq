@@ -1,10 +1,18 @@
 {
-	"rules": [
+	"nix-moq-dev": [
 		{
-			"id": "expire",
-			"enabled": true,
-			"conditions": { "prefix": "" },
-			"deleteObjectsTransition": { "condition": { "type": "Age", "maxAge": 1209600 } }
+			"fileNamePrefix": "",
+			"daysFromUploadingToHiding": null,
+			"daysFromHidingToDeleting": 1,
+			"daysFromStartingToCancelingUnfinishedLargeFiles": 1
+		}
+	],
+	"nix-ci-moq-dev": [
+		{
+			"fileNamePrefix": "",
+			"daysFromUploadingToHiding": 14,
+			"daysFromHidingToDeleting": 1,
+			"daysFromStartingToCancelingUnfinishedLargeFiles": 1
 		}
 	]
 }

@@ -1,33 +1,34 @@
 set fallback
 
-endpoint := "dd618f5dbd5da77b8296f1613c301f5c.r2.cloudflarestorage.com"
+endpoint := "s3.us-east-005.backblazeb2.com"
+region := "us-east-005"
 
-# The `r2:` remote for rclone, with the same credentials `nix copy` reads.
-export RCLONE_CONFIG_R2_TYPE := "s3"
-export RCLONE_CONFIG_R2_PROVIDER := "Cloudflare"
-export RCLONE_CONFIG_R2_ENDPOINT := "https://" + endpoint
-export RCLONE_CONFIG_R2_ACCESS_KEY_ID := env("AWS_ACCESS_KEY_ID", "")
-export RCLONE_CONFIG_R2_SECRET_ACCESS_KEY := env("AWS_SECRET_ACCESS_KEY", "")
-# The CI token can write objects but not create buckets, and rclone's default
+# The `b2:` remote for rclone, with the same credentials `nix copy` reads.
+export RCLONE_CONFIG_B2_TYPE := "s3"
+export RCLONE_CONFIG_B2_PROVIDER := "Other"
+export RCLONE_CONFIG_B2_ENDPOINT := "https://" + endpoint
+export RCLONE_CONFIG_B2_REGION := region
+export RCLONE_CONFIG_B2_ACCESS_KEY_ID := env("AWS_ACCESS_KEY_ID", "")
+export RCLONE_CONFIG_B2_SECRET_ACCESS_KEY := env("AWS_SECRET_ACCESS_KEY", "")
+# The CI key can write objects but not create buckets, and rclone's default
 # upload first tries to create the bucket.
-export RCLONE_CONFIG_R2_NO_CHECK_BUCKET := "true"
+export RCLONE_CONFIG_B2_NO_CHECK_BUCKET := "true"
 
 # Deploy the nix.moq.dev worker.
 deploy:
     bun install --frozen-lockfile
     bun wrangler deploy
 
-# Create the release and CI R2 buckets and the CI bucket's lifecycle rule. Run once.
-create:
-    bun install --frozen-lockfile
-    bun wrangler r2 bucket create nix-moq-dev --update-config=false
-    bun wrangler r2 bucket create nix-ci-moq-dev --update-config=false
-    just lifecycle
-
-# Replace the CI bucket's lifecycle rules with lifecycle.json.
+# Replace each bucket's lifecycle rules with lifecycle.json's, with a B2 key allowed writeBuckets.
 lifecycle:
-    bun install --frozen-lockfile
-    bun wrangler r2 bucket lifecycle set nix-ci-moq-dev --file lifecycle.json --force
+    #!/usr/bin/env bash
+    set -euo pipefail
+    : "${B2_APPLICATION_KEY_ID:?not set; use a key with writeBuckets on both buckets}"
+    : "${B2_APPLICATION_KEY:?not set}"
+    b2=$(nix build --no-link --print-out-paths --inputs-from ../.. nixpkgs#backblaze-b2)/bin/backblaze-b2
+    for bucket in $(jq -r 'keys[]' lifecycle.json); do
+        "$b2" bucket update --lifecycle-rules "$(jq -c --arg bucket "$bucket" '.[$bucket]' lifecycle.json)" "$bucket" >/dev/null
+    done
 
 # Sign store paths and upload them, with their closures, to a nix.moq.dev bucket.
 [no-cd]
@@ -41,7 +42,7 @@ push bucket +paths:
     key=$(mktemp)
     trap 'rm -f "$key"' EXIT
     printf '%s' "$NIX_SIGNING_KEY" >"$key"
-    nix copy --to "s3://{{ bucket }}?endpoint={{ endpoint }}&region=auto&compression=zstd&secret-key=$key" {{ paths }}
+    nix copy --to "s3://{{ bucket }}?endpoint={{ endpoint }}&region={{ region }}&compression=zstd&secret-key=$key" {{ paths }}
 
 # Record the store paths a CI job pushed for a commit, so `refresh` can find their closures.
 [no-cd]
@@ -51,7 +52,7 @@ roots bucket rev name +paths:
     : "${AWS_ACCESS_KEY_ID:?not set}"
     : "${AWS_SECRET_ACCESS_KEY:?not set}"
     PATH="$(nix build --no-link --print-out-paths --inputs-from {{ quote(source_directory() / "../..") }} nixpkgs#rclone^out)/bin:$PATH"
-    readlink -f {{ paths }} | rclone rcat "r2:{{ bucket }}/roots/{{ rev }}/{{ name }}"
+    readlink -f {{ paths }} | rclone rcat "b2:{{ bucket }}/roots/{{ rev }}/{{ name }}"
 
 # Restart the upload age of every object in a commit's recorded closures older than a week.
 refresh bucket rev:
@@ -64,8 +65,8 @@ refresh bucket rev:
     : "${AWS_ACCESS_KEY_ID:?not set}"
     : "${AWS_SECRET_ACCESS_KEY:?not set}"
     PATH="$(nix build --no-link --print-out-paths --inputs-from ../.. nixpkgs#rclone^out)/bin:$PATH"
-    remote="r2:{{ bucket }}/"
-    store="s3://{{ bucket }}?endpoint={{ endpoint }}&region=auto"
+    remote="b2:{{ bucket }}/"
+    store="s3://{{ bucket }}?endpoint={{ endpoint }}&region={{ region }}"
     work=$(mktemp -d)
     trap 'rm -rf "$work"' EXIT
 
@@ -89,7 +90,8 @@ refresh bucket rev:
     list() { rclone lsf -R --files-only --files-from "$work/keys" --format tp --time-format unix --use-server-modtime "$remote"; }
     cutoff=$(($(date +%s) - 7 * 24 * 60 * 60))
     list | awk -F';' -v cutoff="$cutoff" '$1 < cutoff { print $2 }' >"$work/stale"
-    # Touching an S3 object copies it onto itself, which restarts its age.
+    # Touching an S3 object copies it onto itself as a new version, which
+    # restarts its age; the lifecycle deletes the superseded version a day later.
     rclone touch -R --files-from "$work/stale" "$remote"
     echo "refreshed $(wc -l <"$work/stale") of $(wc -l <"$work/keys") objects for {{ rev }}"
 

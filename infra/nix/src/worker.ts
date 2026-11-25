@@ -1,5 +1,6 @@
 // Cloudflare Worker for nix.moq.dev, the project's Nix binary cache. Serves two
-// R2 buckets as one cache, written by `just infra nix push` through `nix copy`:
+// private Backblaze B2 buckets as one cache, written by `just infra nix push`
+// through `nix copy`:
 //
 //   nix-moq-dev      released packages, kept forever
 //   nix-ci-moq-dev   CI dev shells, expired by a lifecycle rule
@@ -7,11 +8,23 @@
 //   /nix-cache-info             cache metadata, answered here
 //   /<hash>.narinfo             signed path metadata, pointing into nar/
 //   /nar/<filehash>.nar.zst     compressed archive, named by its own hash
+//
+// Each read is signed with a read-only key for the two buckets, so nobody can
+// list them or download from B2 directly, where egress is billed. Egress from
+// B2 to Cloudflare is free.
+
+import { AwsClient } from "aws4fetch";
 
 interface Env {
-	RELEASE: R2Bucket;
-	CI: R2Bucket;
+	B2_ACCESS_KEY_ID: string;
+	B2_SECRET_ACCESS_KEY: string;
 }
+
+const ENDPOINT = "https://s3.us-east-005.backblazeb2.com";
+
+// Releases first, since they never expire. A NAR is named by its hash, so
+// whichever bucket holds it serves the same bytes.
+const BUCKETS = ["nix-moq-dev", "nix-ci-moq-dev"];
 
 // Priority 41 puts this right after cache.nixos.org (40), so Nix only asks here
 // for paths nixpkgs doesn't serve. Answered here rather than from a bucket so
@@ -34,15 +47,26 @@ function cacheControl(key: string): string {
 	return "public, max-age=300";
 }
 
-// Resumes a body R2 fails to finish. The response already sent its status and
+// B2 answers a throttle or an outage this way; Nix should build from source
+// rather than disable the cache, which it does on a server error.
+function unavailable(status: number): boolean {
+	return status === 429 || status >= 500;
+}
+
+// Resumes a body B2 fails to finish. The response already sent its status and
 // Content-Length, so the only other outcome is a reset connection, which Nix
 // answers by disabling the whole cache for a minute. Resumes are capped per
 // response so a persistently failing object can't loop; past the cap the
 // stream errors as it would have.
 const RESUMES = 5;
 
-function resume(bucket: R2Bucket, key: string, object: R2ObjectBody): ReadableStream<Uint8Array> {
-	let reader = object.body.getReader();
+function resume(
+	client: AwsClient,
+	url: string,
+	key: string,
+	first: { body: ReadableStream<Uint8Array>; size: number; etag: string },
+): ReadableStream<Uint8Array> {
+	let reader = first.body.getReader();
 	let sent = 0;
 	let resumes = 0;
 	let cancelled = false;
@@ -54,6 +78,8 @@ function resume(bucket: R2Bucket, key: string, object: R2ObjectBody): ReadableSt
 				try {
 					chunk = await reader.read();
 				} catch (error) {
+					// Every byte already arrived; only the end of the stream was lost.
+					if (sent === first.size) return controller.close();
 					if (resumes++ >= RESUMES) {
 						console.error(`Nix cache body failed at byte ${sent}, out of resumes: ${key}`, error);
 						return controller.error(error);
@@ -66,15 +92,20 @@ function resume(bucket: R2Bucket, key: string, object: R2ObjectBody): ReadableSt
 					return controller.enqueue(chunk.value);
 				}
 
-				// Only the same object continues the stream: the etag guard turns
-				// an overwrite into a body-less result, which ends the stream.
+				// Only the same object continues the stream: the etag guard turns an
+				// overwrite into 412, which ends the stream instead of splicing bytes.
 				try {
-					const next = await bucket.get(key, {
-						range: { offset: sent },
-						onlyIf: { etagMatches: object.etag },
+					const next = await client.fetch(url, {
+						headers: { Range: `bytes=${sent}-`, "If-Match": first.etag },
 					});
-					if (!next || !("body" in next))
+					if (next.status === 412) {
+						await next.body?.cancel();
 						return controller.error(new Error(`object changed mid-read: ${key}`));
+					}
+					if (next.status !== 206 || !next.body) {
+						await next.body?.cancel();
+						throw new Error(`ranged read answered ${next.status}`);
+					}
 					if (cancelled) return next.body.cancel();
 					reader = next.body.getReader();
 				} catch (error) {
@@ -109,46 +140,68 @@ export default {
 			});
 		}
 
-		// Releases first, since they never expire. A NAR is named by its hash, so
-		// whichever bucket holds it serves the same bytes.
-		let unavailable = false;
-		for (const bucket of [env.RELEASE, env.CI]) {
-			let object: R2ObjectBody | null;
-			// A misconfigured binding is a deploy error, not a read failure.
-			const get = bucket.get.bind(bucket);
+		// A missing secret throws here: a deploy error, not a read failure.
+		// No retries: a failed read is a miss now, not seconds of backoff while
+		// Nix waits.
+		const client = new AwsClient({
+			accessKeyId: env.B2_ACCESS_KEY_ID,
+			secretAccessKey: env.B2_SECRET_ACCESS_KEY,
+			service: "s3",
+			region: "us-east-005",
+			retries: 0,
+		});
+
+		let failed = false;
+		for (const bucket of BUCKETS) {
+			const url = `${ENDPOINT}/${bucket}/${key}`;
+			let response: Response;
 			try {
-				object = await get(key);
+				response = await client.fetch(url, { method: request.method });
 			} catch (error) {
-				// R2 exposes no typed error, and its message text is not an interface,
-				// so every failed read is one. Treat it as a miss, so the other bucket
-				// can still serve the path and Nix otherwise builds it from source
-				// without disabling the cache.
-				console.error(`Nix cache read unavailable: ${key}`, error);
-				unavailable = true;
+				console.error(`Nix cache read unavailable: ${bucket}/${key}`, error);
+				failed = true;
 				continue;
 			}
-			if (!object) continue;
+			if (response.status === 404 || unavailable(response.status)) {
+				await response.body?.cancel();
+				// Treat an unavailable read as a miss, so the other bucket can still
+				// serve the path and Nix otherwise builds it from source without
+				// disabling the cache.
+				if (response.status !== 404) {
+					console.error(`Nix cache read unavailable: ${bucket}/${key} answered ${response.status}`);
+					failed = true;
+				}
+				continue;
+			}
+
+			// Anything else, such as a rejected key, is a deploy error.
+			const size = Number(response.headers.get("Content-Length"));
+			const etag = response.headers.get("ETag");
+			if (response.status !== 200 || !Number.isSafeInteger(size) || !etag) {
+				await response.body?.cancel();
+				throw new Error(`${bucket}/${key} answered ${response.status} without a usable length and etag`);
+			}
 
 			const headers = {
 				"Content-Type": contentType(key),
 				"Cache-Control": cacheControl(key),
-				"Content-Length": object.size.toString(),
+				"Content-Length": size.toString(),
 			};
-			if (request.method === "HEAD") return new Response(null, { headers });
+			if (request.method === "HEAD" || !response.body) return new Response(null, { headers });
 
 			// A plain stream drops Content-Length from the response, and with it
 			// Nix's check for a short body. The fixed-length stream keeps it, and
 			// errors, rather than ends, if the resumed bytes don't add up.
-			const { readable, writable } = new FixedLengthStream(object.size);
+			const { readable, writable } = new FixedLengthStream(size);
 			// A failed pipe already errored `readable`, which resets the client.
-			resume(bucket, key, object)
+			resume(client, url, key, { body: response.body, size, etag })
 				.pipeTo(writable)
 				.catch(() => {});
 			return new Response(readable, { headers });
 		}
 
 		// Keep intermediaries from caching a transient failure as missing.
-		const headers = unavailable ? { "Cache-Control": "no-store" } : undefined;
+		const headers = failed ? { "Cache-Control": "no-store" } : undefined;
 		return new Response("Not Found", { status: 404, headers });
 	},
 };
