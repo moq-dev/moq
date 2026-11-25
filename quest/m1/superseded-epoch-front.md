@@ -15,6 +15,8 @@ refuses.
 
 ## Plan
 
+Decided 2026-11-24 (maintainer, /quest-run pick on moq-dev/moq#9371): ✅ keep this quest (rejected: drop).
+
 Found by CodeRabbit on
 [moq-dev/moq#9371](https://github.com/moq-dev/moq/pull/9371) and read from
 the source, not yet run. Both languages key a front's continuity on the
