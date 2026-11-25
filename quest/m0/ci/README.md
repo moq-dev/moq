@@ -104,7 +104,7 @@ rustc, without Cranelift (decided 2026-10-27) or the parallel frontend
 queue's test build after a moq-net edit (jobs 8, 12 CPUs, 5 interleaved
 runs each), the pinned nightly's `--jobs-frontend=8` took 15% longer and
 21% more CPU than the same nightly without it, against a 6% A/A spread, and
-did not shorten the critical `moq-net` test unit. moq-dev/rust2's nightly
+did not shorten the critical `moq-net` test unit. kixel-ai/rust2's nightly
 benchmark agrees across 8 runs: clean builds 1-7% slower, a hub edit 2-6%
 faster, for 8-15% more CPU. The ceiling is small anyway: the queue's test
 build is 37% of its job time, and cargo runs fewer than 8 units for only
@@ -163,7 +163,7 @@ so the work is making builds identical enough to hit it (flags in
 already does. Nix builds run sandboxed and cannot reach R2, so they stay on crane
 for packaging only (superseded 2026-11-13, below: per crate); CI builds with cargo
 and mbx. Decided 2026-10-26 from
-moq-dev/rust2's [Nix build benchmark](https://github.com/moq-dev/rust2/pull/63),
+kixel-ai/rust2's [Nix build benchmark](https://github.com/kixel-ai/rust2/pull/63),
 in billions of instructions over a clean build, a second package, the moq-net edit,
 and a lockfile bump: cargo with mbx totals 9,692 and crane 14,756. crate2nix built
 to the release profile totals 14,538: it wins only the lockfile bump (1,255 against
@@ -191,7 +191,7 @@ Decided 2026-10-25 (maintainer), from a profile of moq-net: monomorphized
 generics dominate its build (53% of the library's CPU), and its test target
 costs 3x the library. A "thin generics" profile shrinks them: generic entry
 points delegate to non-generic bodies, and BTreeMap instantiations are shared.
-moq-dev/rust2's driver lints the rule later. Making IETF support a cargo
+kixel-ai/rust2's driver lints the rule later. Making IETF support a cargo
 feature was considered and not planned: the churn outweighs the build saving.
 
 Measure each change against a current baseline and record the result in its PR.

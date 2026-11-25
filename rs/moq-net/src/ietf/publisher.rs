@@ -7394,6 +7394,15 @@ impl<T: crate::transport::poll::SendStream> crate::transport::poll::SendStream f
 		inner.stream.reset(code);
 	}
 
+	fn reset_at(&mut self, offset: &Self::Offset, code: u32) {
+		let inner = self.get_mut();
+		let code = match inner.lapse.as_ref().is_some_and(Lapse::lapsed) {
+			true => super::error::EXPIRED_AUTH_TOKEN,
+			false => code,
+		};
+		inner.stream.reset_at(offset, code);
+	}
+
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>> {
 		let mut inner = self.inner.lock().unwrap();
 		inner.follow(waiter);
@@ -17655,6 +17664,7 @@ mod serve_tests {
 			}
 			group.finish().unwrap();
 		};
+		// The track's first group, appended, so keys 0 and 1 never exist.
 		write(track.append_group(crate::Timestamp::unscaled(2)).unwrap());
 		// Appending says the producer will not go back, so keys 3 and 4 never exist.
 		write(track.append_group(crate::Timestamp::unscaled(5)).unwrap());
@@ -17689,13 +17699,13 @@ mod serve_tests {
 		}
 		assert_eq!(groups.keys().copied().collect::<Vec<_>>(), [2, 5, 7]);
 		let plain = [0, 2, b'a', b'a', 0, 2, b'b', b'b'];
-		let (extensions, body) = &groups[&2];
-		assert!(!extensions);
-		assert_eq!(&body[..], plain);
 		// Object 0 with a one-property block, 0x3c = 2; object 1 with an empty one.
-		let (extensions, body) = &groups[&5];
-		assert!(extensions);
-		assert_eq!(&body[..], [0, 2, 0x3c, 2, 2, b'a', b'a', 0, 0, 2, b'b', b'b']);
+		let gapped = [0, 2, 0x3c, 2, 2, b'a', b'a', 0, 0, 2, b'b', b'b'];
+		for key in [2, 5] {
+			let (extensions, body) = &groups[&key];
+			assert!(extensions, "group {key}");
+			assert_eq!(&body[..], gapped, "group {key}");
+		}
 		let (extensions, body) = &groups[&7];
 		assert!(!extensions);
 		assert_eq!(&body[..], plain);
@@ -22073,7 +22083,7 @@ impl ServeRange {
 /// expires short of the publisher's max age, since this draft's SUBSCRIBE carries none.
 fn live_join(subscription: &mut Subscription) {
 	*subscription = std::mem::take(subscription).with_ranges([track::Range::from(track::Start::Live {
-		min: Duration::ZERO,
+		min: Some(Duration::ZERO),
 		max: None,
 	})]);
 }

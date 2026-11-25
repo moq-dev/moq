@@ -4,12 +4,36 @@ import { Sorted } from "./sorted.ts";
 
 type Op = { insert: boolean; key: number };
 
-// Enough distinct keys and operations to split, merge, and empty chunks of 256.
-const ops = fc.array(fc.record({ insert: fc.boolean(), key: fc.integer({ min: 0, max: 3000 }) }), {
-	maxLength: 4000,
-	size: "max",
-});
+// Fill, delete a random share in random order, then churn: enough distinct keys and operations
+// to split, merge, and empty chunks of 256.
+const ops = fc
+	.uniqueArray(fc.integer({ min: 0, max: 3000 }), { maxLength: 1500, size: "max" })
+	.chain((fill) =>
+		fc.tuple(
+			fc.constant(fill),
+			fc.shuffledSubarray(fill),
+			fc.array(fc.record({ insert: fc.boolean(), key: fc.integer({ min: 0, max: 3000 }) }), { maxLength: 500 }),
+		),
+	)
+	.map(([fill, drain, churn]): Op[] => [
+		...fill.map((key) => ({ insert: true, key })),
+		...drain.map((key) => ({ insert: false, key })),
+		...churn,
+	]);
 
+// The first index whose key is above `key`, or at or above it when `inclusive`.
+function bound(keys: number[], key: number, inclusive: boolean): number {
+	let lo = 0;
+	let hi = keys.length;
+	while (lo < hi) {
+		const mid = (lo + hi) >>> 1;
+		if (inclusive ? keys[mid] >= key : keys[mid] > key) hi = mid;
+		else lo = mid + 1;
+	}
+	return lo;
+}
+
+// The model is a sorted array of keys, so a lookup is a bisection rather than a scan.
 test("agrees with a sorted array on every lookup after any inserts and deletes", () => {
 	fc.assert(
 		fc.property(ops, fc.integer({ min: -1, max: 3001 }), (ops: Op[], probe) => {
@@ -17,30 +41,37 @@ test("agrees with a sorted array on every lookup after any inserts and deletes",
 				(value) => value.key,
 				(a, b) => a - b,
 			);
-			const model = new Set<number>();
+			const keys: number[] = [];
 			for (const { insert, key } of ops) {
-				if (insert && !model.has(key)) {
+				const at = bound(keys, key, true);
+				const present = keys[at] === key;
+				if (insert && !present) {
 					sorted.insert({ key });
-					model.add(key);
+					keys.splice(at, 0, key);
 				} else if (!insert) {
 					sorted.delete(key);
-					model.delete(key);
+					if (present) keys.splice(at, 1);
 				}
 			}
-			const keys = [...model].sort((a, b) => a - b);
 			expect(sorted.size).toBe(keys.length);
 			expect([...sorted.from(-1)].map((value) => value.key)).toEqual(keys);
 			expect(sorted.first()?.key).toBe(keys[0]);
 			expect(sorted.last()?.key).toBe(keys.at(-1));
-			for (const key of [probe, ...keys.slice(0, 50)]) {
-				expect(sorted.ceil(key)?.key).toBe(keys.find((k) => k >= key));
-				expect(sorted.higher(key)?.key).toBe(keys.find((k) => k > key));
-				expect(sorted.floor(key)?.key).toBe(keys.findLast((k) => k <= key));
-				expect(sorted.lower(key)?.key).toBe(keys.findLast((k) => k < key));
-				expect([...sorted.from(key)].map((value) => value.key)).toEqual(keys.filter((k) => k >= key));
+			// The probe plus held keys spread across every chunk.
+			const stride = Math.max(1, keys.length >>> 4);
+			const probes = [probe];
+			for (let i = 0; i < keys.length; i += stride) probes.push(keys[i]);
+			for (const key of probes) {
+				const lo = bound(keys, key, true);
+				const hi = bound(keys, key, false);
+				expect(sorted.ceil(key)?.key).toBe(keys[lo]);
+				expect(sorted.higher(key)?.key).toBe(keys[hi]);
+				expect(sorted.floor(key)?.key).toBe(keys[hi - 1]);
+				expect(sorted.lower(key)?.key).toBe(keys[lo - 1]);
+				expect([...sorted.from(key)].map((value) => value.key)).toEqual(keys.slice(lo));
 			}
 		}),
-		{ numRuns: 100 },
+		{ numRuns: 30 },
 	);
 });
 

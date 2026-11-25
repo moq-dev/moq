@@ -91,6 +91,11 @@ impl Decoder {
 		self.delay_remaining = self.delay;
 	}
 
+	/// Whether an empty packet now conceals one lost packet.
+	pub(super) fn conceals(&self) -> bool {
+		self.backend.conceals()
+	}
+
 	/// How much startup delay is still to be trimmed, in native-rate frames.
 	///
 	/// Trimmed samples are media the packet covered even though nothing came out of
@@ -110,7 +115,8 @@ impl Decoder {
 	/// An empty Opus packet marks one lost packet and conceals as much audio as the
 	/// last packet that decoded held, so a lost 20 ms packet yields 20 ms. It is
 	/// refused with [`Error::Decode`] before any packet has decoded, since there is
-	/// no length to conceal. Loss during DTX remains classified as DTX, while loss
+	/// no length to conceal, and after a SILK or hybrid packet, which the bundled
+	/// decoder cannot conceal. Loss during DTX remains classified as DTX, while loss
 	/// during active audio remains active.
 	pub fn decode(&mut self, packet: &[u8]) -> Result<(), Error> {
 		self.backend.decode(packet)
@@ -483,10 +489,37 @@ pub(crate) mod tests {
 		for packet in &packets {
 			crate::single(decoder.decode_all(packet).unwrap());
 		}
+		assert!(decoder.conceals());
 		assert_eq!(crate::single(decoder.decode_all(&[]).unwrap()).samples.len(), 960);
 
 		// Concealment doesn't change the length: the next loss is the same size.
 		assert_eq!(crate::single(decoder.decode_all(&[]).unwrap()).samples.len(), 960);
+	}
+
+	/// unsafe-libopus 0.2 conceals SILK at full scale, so loss after a SILK packet is refused.
+	#[test]
+	fn opus_refuses_to_conceal_after_silk() {
+		let mut encoder = crate::encode::Encoder::new(&crate::encode::Config {
+			kind: Some(crate::encode::Kind::Voice),
+			bitrate: Some(moq_net::bandwidth::Rate::from_bps(12_000)),
+			..crate::encode::Config::new(48_000, Layout::Mono)
+		})
+		.unwrap();
+		let pcm: Vec<f32> = (0..encoder.frame_size())
+			.map(|i| (std::f32::consts::TAU * 440.0 * i as f32 / 48_000.0).sin() * 0.5)
+			.collect();
+		let packet = crate::single(encoder.encode_all(&pcm).unwrap()).payload;
+		assert!(packet[0] >> 3 < 16, "expected a SILK packet");
+		let mut decoder = Decoder::new(&encoder.catalog(), &Config::default()).unwrap();
+		crate::single(decoder.decode_all(&packet).unwrap());
+		assert!(!decoder.conceals());
+		// CELT DTX and one-byte frames decode as a loss in the SILK mode before them, so they
+		// conceal nothing either.
+		for packet in [&[0xf8][..], &[0xf8, 0xaa]] {
+			crate::single(decoder.decode_all(packet).unwrap());
+			assert!(!decoder.conceals());
+		}
+		assert!(matches!(decoder.decode(&[]), Err(Error::Decode(_))));
 	}
 
 	#[test]

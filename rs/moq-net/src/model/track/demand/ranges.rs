@@ -30,7 +30,7 @@ pub(super) struct Ranges {
 	/// Ranges from the oldest group with an end, kept as they are.
 	others: BTreeMap<Range, usize>,
 	/// Live joins by lag and end, each with the budgets its holders ask under.
-	joins: BTreeMap<(Duration, Option<u64>), BTreeMap<Duration, usize>>,
+	joins: BTreeMap<(Option<Duration>, Option<u64>), BTreeMap<Duration, usize>>,
 	/// The last union read, until a change moves it.
 	union: OnceCell<Vec<Range>>,
 }
@@ -42,7 +42,7 @@ enum Shape {
 	/// A range with a time start, as the exclusive span of starts it covers.
 	Time(u64, Option<u64>),
 	/// A live join, by lag and end, and its budget.
-	Join((Duration, Option<u64>), Duration),
+	Join((Option<Duration>, Option<u64>), Duration),
 	Other,
 }
 
@@ -311,7 +311,8 @@ mod tests {
 		let start = |rng: &mut rand::rngs::StdRng| match rng.random_range(0..10) {
 			0 => Start::Oldest,
 			1 => Start::Live {
-				min: Duration::from_millis(rng.random_range(0..3)),
+				// One in four with no lag limit.
+				min: [None, Some(0), Some(1), Some(2)][rng.random_range(0..4)].map(Duration::from_millis),
 				max: [None, Some(Duration::ZERO), Some(Duration::from_millis(5))][rng.random_range(0..3)],
 			},
 			_ => Start::Time(rng.random_range(0..12)),

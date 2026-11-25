@@ -8,7 +8,7 @@ import { ProtocolViolation, Skipped, StreamCode, StreamError, TimestampMismatch,
 import type { FillGroups } from "./fill.ts";
 import type { Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
-import { hooks, NO_MAX_DELAY, PAST_EVERY_GROUP, skipHole, staleHole } from "./internal.ts";
+import { hooks, NO_MAX_DELAY, skipHole, staleHole } from "./internal.ts";
 import { GRACE } from "./ledger.ts";
 import { textFrame } from "./mock.ts";
 import { rescale, rescaleIn } from "./rescale.ts";
@@ -325,7 +325,7 @@ test("an ordered reader owes the groups below a restated START", async () => {
 	for (let key = 5n; key < 10n; key++) putGroup(producer, key, Number(key) * 1000);
 	await clock.advance(10);
 	const reader = producer
-		.subscribe({ ranges: [{ start: { live: { min: PAST_EVERY_GROUP, max: Duration.millis(6500) } } }] })
+		.subscribe({ ranges: [{ start: { live: { min: null, max: Duration.millis(6500) } } }] })
 		.ordered();
 	hooks.restateTrack(producer);
 	try {
@@ -2760,7 +2760,7 @@ test("an aborted live-edge anchor does not make older content stale", async () =
 
 	// A join reaching back past every group under a zero max: the aborted group is no live edge, so
 	// the older one is the newest it judges by.
-	const track = producer.subscribe({ ranges: [{ start: { live: { min: PAST_EVERY_GROUP, max: Duration.ZERO } } }] });
+	const track = producer.subscribe({ ranges: [{ start: { live: { min: null, max: Duration.ZERO } } }] });
 	expect((await track.recvGroup())?.start).toBe(1n);
 	track.close();
 });
@@ -2783,9 +2783,13 @@ test.each(["arrival", "ordered"] as const)("subscription bounds stay reader-loca
 		expect((await read())?.start).toBe(3n);
 		expect(await read()).toBeUndefined();
 		subscriber.update({ ranges: [{ end: 4n }] });
-		// The unread group below both old floors was passed over outside every range, so neither read
-		// goes back for it, as in Rust.
-		expect((await read())?.start).toBe(4n);
+		// Arrival readers can now offer the unread group below the old floors; ordered ones cannot
+		// rewind. Which goes first is the Group Order, not what this pins. Mirrors the Rust
+		// `a_widened_history_read_offers_a_group_it_passed_over`.
+		const widened: (bigint | undefined)[] = [];
+		for (let count = ordered ? 1 : 2; count > 0; count--) widened.push((await read())?.start);
+		widened.sort((a, b) => Number((a ?? 0n) - (b ?? 0n)));
+		expect(widened).toEqual(ordered ? [4n] : [0n, 4n]);
 		expect(await read()).toBeUndefined();
 		// An open range parks at the live edge instead.
 		subscriber.update({ ranges: [{ start: 5n }] });
@@ -5809,6 +5813,19 @@ test("fail ends at the live edge and leaves an end already given", async () => {
 	expect(aborted.closed.peek()).toBe(cause);
 });
 
+// An appended first group skips every key below it, down to 0: a time-keyed track's first group
+// starts at its wall-clock time, and a reader asking from the oldest group must not wait on the
+// keys below it. Mirrors the Rust `appending_the_first_group_skips_everything_below`.
+test("an appended first group skips everything below it", () => {
+	const producer = new TrackProducer("test");
+	producer.accept({ timescale: Timescale.MILLI, maxAge: null });
+	const reader = producer.subscribe(withMax({ delay: { max: null } }));
+	producer.appendGroup(Timestamp.fromMillis(5)).finish();
+	expect(hooks.tryRecvGroup(reader, true)).toMatchObject({ kind: "drop", start: 0n, end: 5n, skip: true });
+	expect(hooks.tryRecvGroup(reader, true)).toMatchObject({ kind: "group" });
+	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "idle" });
+});
+
 // Creating a group says nothing about the gap it leaves: groups may be created out of order. An
 // append says the producer will not go back, so it skips every hole below it that was never
 // produced, replacing a drop already given and reported. A received copy's groups arrive in any
@@ -6702,7 +6719,7 @@ test("a forgotten kept-out run is judged by each range's budget", async () => {
 		const sub = producer.subscribe({
 			ranges: [
 				{ start: 0n, end: 2n },
-				{ start: { live: { min: PAST_EVERY_GROUP, max: Duration.millis(1_000) } }, end: 7n },
+				{ start: { live: { min: null, max: Duration.millis(1_000) } }, end: 7n },
 			],
 		});
 		expect(sub.tryRecvGroup()?.start).toBe(0n);

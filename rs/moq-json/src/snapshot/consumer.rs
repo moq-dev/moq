@@ -69,7 +69,7 @@ impl<T: DeserializeOwned> Consumer<T> {
 		let subscription = moq_net::track::Subscription::default()
 			.with_priority(config.priority)
 			.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
-				min: config.delay,
+				min: Some(config.delay),
 				max: Some(config.delay),
 			})]);
 		let name = track.name().to_string();
@@ -251,7 +251,7 @@ mod subscription {
 		assert_eq!(
 			subscription.ranges,
 			[moq_net::track::Range::from(moq_net::track::Start::Live {
-				min: delay,
+				min: Some(delay),
 				max: Some(delay),
 			})]
 		);

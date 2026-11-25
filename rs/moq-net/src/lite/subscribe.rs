@@ -64,12 +64,12 @@ pub enum Anchor {
 	/// The group containing this time in the track's timescale (the highest start at or
 	/// below it), included as an end. Lite07+ only.
 	Time(u64),
-	/// The group containing the live edge minus `min`, whose groups expire once they fall
-	/// `max` behind the live edge (`None` for no limit beyond the publisher's). Both are
-	/// carried in whole milliseconds, rounded up. A start only, lite07+ only: an older wire
-	/// carries it as no start.
+	/// The group containing the live edge minus `min` (`None` for no lag limit, reaching back
+	/// past every group), whose groups expire once they fall `max` behind the live edge (`None`
+	/// for no limit beyond the publisher's). Both are carried in whole milliseconds, rounded up.
+	/// A start only, lite07+ only: an older wire carries it as no start.
 	Live {
-		min: std::time::Duration,
+		min: Option<std::time::Duration>,
 		max: Option<std::time::Duration>,
 	},
 	/// A live join already placed at this position, whose groups expire once they fall `max`
@@ -339,8 +339,8 @@ pub(super) fn range_size(range: &Range, form: Form) -> Option<usize> {
 
 /// Decode one lite-07 range end: its type, then the fields that type carries. Type 0 is no
 /// anchor, a start the max age places and the live edge as an end. Type 2 is a position
-/// partway through a group, never at frame 0, which type 1 says. Type 3, a live join's lag in
-/// milliseconds then its max age in milliseconds plus one, zero for no limit, is a start only,
+/// partway through a group, never at frame 0, which type 1 says. Type 3, a live join's lag then
+/// its max age, each in milliseconds plus one with zero for no limit, is a start only,
 /// so `end` refuses it. So is type 4, a live join already placed: its group's start, a frame
 /// that may be 0, then its max age as type 3 carries it.
 fn decode_anchor(r: &mut Decoder<'_>, end: bool) -> Result<Option<Anchor>, DecodeError> {
@@ -356,7 +356,7 @@ fn decode_anchor(r: &mut Decoder<'_>, end: bool) -> Result<Option<Anchor>, Decod
 			Some(Anchor::Absolute(crate::track::Position { group, frame }))
 		}
 		3 if !end => Some(Anchor::Live {
-			min: std::time::Duration::from_millis(r.varint()?),
+			min: r.varint_opt()?.map(std::time::Duration::from_millis),
 			max: r.varint_opt()?.map(std::time::Duration::from_millis),
 		}),
 		4 if !end => Some(Anchor::Joined {
@@ -376,18 +376,19 @@ fn decode_anchor(r: &mut Decoder<'_>, end: bool) -> Result<Option<Anchor>, Decod
 /// is, and an exclusive end as the inclusive time just before it, an end at group 0 holding
 /// nothing a time can say. One partway through a group goes out as a position, its group's
 /// start then the frame: a start from that frame, an end before it. A live join goes out as its
-/// lag then its max age, each in milliseconds rounded up, and one already placed as its
+/// lag then its max age, each in milliseconds rounded up, plus one so zero says no limit, and one already placed as its
 /// position then its max age, each only as a start.
 fn wire_anchor(anchor: Option<Anchor>, end: bool) -> Result<(u64, [Option<u64>; 3]), EncodeError> {
 	// Plus one, so zero says no limit.
-	let max_age =
-		|max: Option<std::time::Duration>| max.map_or(0, |max| crate::track::live_millis(max).saturating_add(1));
+	let millis = |limit: Option<std::time::Duration>| {
+		limit.map_or(0, |limit| crate::track::live_millis(limit).saturating_add(1))
+	};
 	Ok(match anchor {
 		None => (0, [None, None, None]),
 		Some(Anchor::Time(time)) => (1, [Some(time), None, None]),
 		Some(Anchor::Live { .. } | Anchor::Joined { .. }) if end => return Err(EncodeError::InvalidState),
-		Some(Anchor::Live { min, max }) => (3, [Some(crate::track::live_millis(min)), Some(max_age(max)), None]),
-		Some(Anchor::Joined { at, max }) => (4, [Some(at.group), Some(at.frame), Some(max_age(max))]),
+		Some(Anchor::Live { min, max }) => (3, [Some(millis(min)), Some(millis(max)), None]),
+		Some(Anchor::Joined { at, max }) => (4, [Some(at.group), Some(at.frame), Some(millis(max))]),
 		Some(Anchor::Absolute(position)) if position.frame != 0 => {
 			(2, [Some(position.group), Some(position.frame), None])
 		}
@@ -2224,7 +2225,10 @@ mod test {
 	fn a_live_starts_max_age_roundtrips_on_lite07() {
 		let ms = std::time::Duration::from_millis;
 		let live = |max| Range {
-			start: Some(Anchor::Live { min: ms(100), max }),
+			start: Some(Anchor::Live {
+				min: Some(ms(100)),
+				max,
+			}),
 			end: None,
 		};
 		for (max, wire) in [
@@ -2336,7 +2340,10 @@ mod test {
 		let ms = std::time::Duration::from_millis;
 		let version = Version::Lite07;
 		let live = |min, max| Range {
-			start: Some(Anchor::Live { min: ms(min), max }),
+			start: Some(Anchor::Live {
+				min: Some(ms(min)),
+				max,
+			}),
 			end: None,
 		};
 		let time = Range {
@@ -2404,11 +2411,11 @@ mod test {
 	}
 
 	/// Lite-07 carries a live join's lag as a start Anchor in whole milliseconds, rounded up,
-	/// on SUBSCRIBE and SUBSCRIBE_UPDATE alike; an end refuses it. An older wire carries it as
-	/// no start.
+	/// or none for no lag limit, on SUBSCRIBE and SUBSCRIBE_UPDATE alike; an end refuses it.
+	/// An older wire carries it as no start.
 	#[test]
 	fn a_live_start_roundtrips_only_on_lite07() {
-		let ms = std::time::Duration::from_millis;
+		let ms = |millis| Some(std::time::Duration::from_millis(millis));
 		let live = |min| Range {
 			start: Some(Anchor::Live { min, max: None }),
 			end: Some(Anchor::Time(9)),
@@ -2416,7 +2423,8 @@ mod test {
 		for (min, wire) in [
 			(ms(0), ms(0)),
 			(ms(250), ms(250)),
-			(std::time::Duration::from_micros(1500), ms(2)),
+			(Some(std::time::Duration::from_micros(1500)), ms(2)),
+			(None, None),
 		] {
 			let mut msg = subscribe_sample();
 			msg.ranges = vec![live(min)];
@@ -2435,6 +2443,11 @@ mod test {
 					.unwrap();
 			assert!(matches!(got.ranges, RangeEdit::Edit { add, .. } if add == [live(wire)]));
 		}
+
+		// The lag rides plus one, so zero says no lag limit, as the max age beside it does.
+		let anchor = |min| wire_anchor(Some(Anchor::Live { min, max: None }), false).unwrap();
+		assert_eq!(anchor(ms(250)), (3, [Some(251), Some(0), None]));
+		assert_eq!(anchor(None), (3, [Some(0), Some(0), None]));
 
 		// No start on a wire without the Anchor.
 		let mut msg = subscribe_sample();

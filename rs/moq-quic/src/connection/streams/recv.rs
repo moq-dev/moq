@@ -162,6 +162,8 @@ pub(super) struct Recv {
 	/// The credit its reader lets the peer send past what it took, when smaller than the
 	/// connection's stream receive window; see [`Stream::set_window`](super::lease).
 	window: Option<u64>,
+	/// Whether a quiesce asked the peer to stop, which leaves the reader reading
+	pub(super) quiesced: bool,
 }
 
 /// Whether the application still reads a receive stream
@@ -187,6 +189,7 @@ impl Recv {
 			reader: Reader::Reading,
 			lease: Leased::default(),
 			window: None,
+			quiesced: false,
 		})
 	}
 

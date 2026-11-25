@@ -819,7 +819,7 @@ mod tests {
 			// keeping each group that long.
 			let delay = Duration::from_millis(500);
 			let join = moq_net::track::Start::Live {
-				min: delay,
+				min: Some(delay),
 				max: Some(delay),
 			};
 			let mut reader = track

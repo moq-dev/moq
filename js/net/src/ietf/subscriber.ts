@@ -36,7 +36,7 @@ import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { closeUnwanted } from "../util/announce.ts";
 import { Deadline } from "../util/deadline.ts";
-import { abandoned as demandAbandoned, isAbandoned, unrequested, unwanted } from "../util/demand.ts";
+import { abandoned as demandAbandoned, isAbandoned, unwanted } from "../util/demand.ts";
 import { min } from "../util/key.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { Budget } from "../util/yield.ts";
@@ -312,7 +312,7 @@ export class Subscriber {
 		return this.#goaway?.peek() !== undefined;
 	}
 
-	// A route ranks last, at its real cost, once the peer has asked us to leave.
+	// A route ranks below every available one, at its real cost, once the peer has asked us to leave.
 	#drained(route: WireRoute): WireRoute {
 		if (!this.#goingAway() || route.draining) return route;
 		return { ...route, draining: true };
@@ -817,7 +817,8 @@ export class Subscriber {
 			return;
 		}
 
-		if (!known && (bounded(request.subscription.ranges ?? [{}]) || !request.demand().wanted.peek())) {
+		// An info lookup alone reads no groups, so it asks for the track's status rather than subscribing.
+		if (!known && (bounded(request.subscription.ranges ?? [{}]) || !hooks.demandSubscribed(request.demand()))) {
 			await this.#runHistory(broadcast, request, valid);
 			return;
 		}
@@ -1104,7 +1105,7 @@ export class Subscriber {
 			const ok = await untilAborted(
 				race([
 					deadline.wait(setup()),
-					unrequested(request).then((): never => {
+					unwanted(request.demand()).then((): never => {
 						throw new Error("history read abandoned");
 					}),
 				]),

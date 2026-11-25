@@ -69,7 +69,7 @@ moving `CACHIX_AUTH_TOKEN`. `release`'s `cachix.yml` still reads it on
 `moq-relay-v*`, `moq-cli-v*`, `moq-boy-v*`, `libmoq-v*`, and `moq-gst-v*`
 tags; that job names `publish`, which lacks it, so it reads the repository
 copy. (`release`'s `cache.yml` also reads it but fires only on pushes to
-`main`, so it never runs there.) The m0 quest [cachix-retire](/quest/m0/ci/cachix-retire.md),
+`main`, so it never runs there.) The m0 quest cachix-retire ([moq-dev/moq#8048](https://github.com/moq-dev/moq/pull/8048)),
 from [moq-dev/moq#7982](https://github.com/moq-dev/moq/pull/7982), backports
 `release-nix.yml` to `release`, drops `cachix.yml` there, and deletes
 `CACHIX_AUTH_TOKEN` and the `kixelated` cache once a release tag proves
@@ -82,10 +82,11 @@ their Environment. npm: `npm` is set and verified on `@moq/net`, `auth`,
 `boy`, `hang`, `json`, `loc`, `msf`, `pattern`, `publish`, `room`, `watch`,
 and `signals` (the last two by hand, since npm's Cloudflare blocked the
 automated save). `@moq/qmux` is published by
-moq-dev/web-transport, so it is out of scope here; `@moq/clock`, `libav`,
-`ui`, and `video` are not published yet, and
-[npm-first-publish](/quest/m3/release/npm-first-publish.md) claims them with
-the `npm` Environment. PyPI: `moq-rs` already required `pypi`, and `moq-ffi`'s
+moq-dev/web-transport, so it is out of scope here. `@moq/clock`, `libav`,
+`stats`, and `video` were claimed with `0.0.0` placeholders on 2026-11-24,
+each trusting `release-js.yml` with the `npm` Environment. Those trusts
+expire unvalidated, so the [cut](/quest/m3/release/cut.md) recreates them
+before it publishes; `@moq/ui` is workspace-private. PyPI: `moq-rs` already required `pypi`, and `moq-ffi`'s
 any-environment publisher was replaced by one requiring `pypi` (verified on
 its settings page). pub.dev: the maintainer set the required environment
 `pub.dev` on `moq` and `moq_ffi` and reported both pages show it; agents
@@ -121,26 +122,18 @@ checking that every job on `main` and `release` reads them through `publish`
 or gates the step to tags, the maintainer deleted 15 repository secrets: the
 twelve `publish` secrets above, the unreferenced `GCP_SERVICE_ACCOUNT_KEY`,
 and Pullfrog's `CLAUDE_CODE_OAUTH_TOKEN` and `META_MODEL_API_KEY`. The
-repository secrets left are `CACHIX_AUTH_TOKEN` (owned by `cachix-retire`)
-and the read-only `MBX_R2_ACCESS_KEY_ID` and `MBX_R2_SECRET_ACCESS_KEY`.
-
-Decided 2026-11-06 (maintainer, /quest-unblock): ✅ Pullfrog gets no
-provider keys from this repository, so `pullfrog.yml` passes none; its
-model access comes from the Pullfrog console, which the action reaches with
-the job's OIDC token through the `pullfrog` Environment (main only). Not
-chosen: moving the keys into the `pullfrog` Environment.
+repository secrets left are the read-only `MBX_R2_ACCESS_KEY_ID` and
+`MBX_R2_SECRET_ACCESS_KEY` (`CACHIX_AUTH_TOKEN` was deleted 2026-11-07 by
+[moq-dev/moq#8048](https://github.com/moq-dev/moq/pull/8048)).
 
 Decided 2026-11-06 (maintainer, /quest-unblock): ✅ leave the organization
 secret `DISCORD_WEBHOOK` visible to all repositories; this repository's
 `alert` job reads the `alert` Environment's copy. Not chosen: narrowing it to
 selected repositories.
 
-Once `cachix-retire` deletes `CACHIX_AUTH_TOKEN`, an agent runs the
+`CACHIX_AUTH_TOKEN` was deleted 2026-11-07 (see
+[moq-dev/moq#8048](https://github.com/moq-dev/moq/pull/8048)), so an agent runs the
 throwaway-branch check in the Goal, which also confirms each Environment
 refuses the branch, then deletes the branch. The branch may still see
 `MBX_R2_*` and `DISCORD_WEBHOOK`, by the decisions above; any other secret
 fails the check.
-
-## Required
-
-- [Retire Cachix](/quest/m0/ci/cachix-retire.md) - deletes `CACHIX_AUTH_TOKEN`, which the throwaway-branch check needs gone

@@ -65,7 +65,7 @@ pub struct Subscription {
 	pub(crate) cap: Option<Position>,
 	/// The time starts a received copy's readers wait on: the copy can't prove where the
 	/// publisher would start them, so its session asks its upstream with a range of its own
-	/// from each. Only an aggregate holds any.
+	/// from each, sorted. Only an aggregate holds any.
 	pub(crate) asks: Vec<u64>,
 	/// The live joins a received copy's readers wait on: the copy can't prove where the
 	/// publisher would start them, so its session asks its upstream with a range of its own
@@ -78,7 +78,7 @@ pub struct Subscription {
 /// began waiting: only an answer recorded after that is fresh for every one of them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct JoinAsk {
-	pub min: Duration,
+	pub min: Option<Duration>,
 	pub end: Option<u64>,
 	/// The widest [`Start::Live`] `max` among the readers waiting, as a budget.
 	pub budget: Duration,
@@ -179,7 +179,8 @@ pub enum Start {
 	Live {
 		/// How far behind the live edge to join: the group containing the live edge minus this
 		/// lag, so a player's buffer arrives full instead of filling in real time, and zero
-		/// starts at the latest group.
+		/// starts at the latest group. `None` sets no lag limit: the join reaches back past
+		/// every group, taking each one `max` still allows.
 		///
 		/// The hop serving it measures the live edge in media time, from the newest frame it
 		/// holds, rounded up to whole ticks, and on a scale-less track by arrival on its own
@@ -187,7 +188,7 @@ pub enum Start {
 		/// up in its history, then starts past any group there that `max` already expired. A relay's copy forwards each join to its
 		/// upstream as its own range and starts it where that range's answer does. A range
 		/// resolves once, so a live edge that moves later moves nothing already started.
-		min: Duration,
+		min: Option<Duration>,
 		/// How long a superseded group stays worth delivering, measured from the live edge, or
 		/// `None` for as long as the publisher keeps it.
 		///
@@ -247,17 +248,16 @@ impl Start {
 	/// The latest group, skipping each the moment a newer one arrives: a live viewer holding
 	/// no buffer.
 	pub const LATEST: Self = Self::Live {
-		min: Duration::ZERO,
+		min: Some(Duration::ZERO),
 		max: Some(Duration::ZERO),
 	};
 
-	/// A live join reaching back past every group, so it takes every group still within `max`
-	/// of the live edge: what a wire before lite-07 asks with its one `Subscriber Max Age` and
-	/// no start.
+	/// A live join with no lag limit, so it takes every group still within `max` of the live
+	/// edge: what a wire before lite-07 asks with its one `Subscriber Max Age` and no start.
 	#[cfg(any(feature = "async", test))]
 	pub(crate) const fn within(max: Duration) -> Self {
 		Self::Live {
-			min: PAST_EVERY_GROUP,
+			min: None,
 			max: Some(max),
 		}
 	}
@@ -295,7 +295,7 @@ impl Range {
 
 	/// This range as a live join of the same lag and end, which a change of `max` alone
 	/// keeps: the key a join is placed and answered under.
-	pub(crate) fn join(&self) -> Option<(Duration, Option<u64>)> {
+	pub(crate) fn join(&self) -> Option<(Option<Duration>, Option<u64>)> {
 		match self.start {
 			Start::Live { min, .. } => Some((min, self.end)),
 			Start::Oldest | Start::Time(_) => None,
@@ -336,10 +336,6 @@ impl Range {
 	}
 }
 
-/// A lag long past any group, so a join this far behind takes every group still within its
-/// `max`: the largest every implementation carries losslessly.
-pub(crate) const PAST_EVERY_GROUP: Duration = Duration::from_millis((1 << 53) - 1);
-
 /// A live join's lag in whole milliseconds, rounded up, as the wire carries it, so a start is
 /// never newer than the lag allows.
 pub(crate) fn live_millis(min: Duration) -> u64 {
@@ -361,7 +357,7 @@ pub(super) fn union(ranges: impl IntoIterator<Item = Range>) -> Vec<Range> {
 	if ranges.contains(&Range::ALL) {
 		return vec![Range::ALL];
 	}
-	let mut joins = std::collections::BTreeMap::<(Duration, Option<u64>), Duration>::new();
+	let mut joins = std::collections::BTreeMap::<(Option<Duration>, Option<u64>), Duration>::new();
 	for range in &ranges {
 		if let Some(join) = range.join() {
 			let widest = joins.entry(join).or_default();
@@ -675,7 +671,7 @@ impl Combined {
 			combined.placed.insert(combined.ranges.len() as u64, group);
 			combined.ranges.push(Range {
 				start: Start::Live {
-					min: Duration::ZERO,
+					min: Some(Duration::ZERO),
 					max: max_of(budget),
 				},
 				end,
@@ -785,7 +781,7 @@ mod tests {
 	}
 
 	fn join(min: Duration, max: Option<Duration>) -> Range {
-		Range::from(Start::Live { min, max })
+		Range::from(Start::Live { min: Some(min), max })
 	}
 
 	fn joining(min: Duration) -> Subscription {
@@ -927,7 +923,7 @@ mod tests {
 		let max = Duration::from_secs(2);
 		let join = |max, end| Range {
 			start: Start::Live {
-				min: Duration::from_millis(2),
+				min: Some(Duration::from_millis(2)),
 				max,
 			},
 			end,

@@ -222,7 +222,7 @@ async fn deliver(network: &Network, publish: &Relay, subscribe: &Relay) -> Vec<u
 			.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: TIMEOUT,
+						min: Some(TIMEOUT),
 						max: Some(TIMEOUT),
 					},
 				)]),
@@ -390,7 +390,7 @@ async fn bulk(tracks: usize, chunk: usize, read: usize) {
 				.subscribe(
 					moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 						moq_net::track::Start::Live {
-							min: Duration::from_secs(600),
+							min: Some(Duration::from_secs(600)),
 							max: Some(Duration::from_secs(600)),
 						},
 					)]),

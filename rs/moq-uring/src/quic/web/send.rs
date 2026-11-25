@@ -87,8 +87,8 @@ impl Stream {
 	/// A raw QUIC session sends the code as is. Does nothing once already reset.
 	///
 	/// A WebTransport header already written still reaches the peer, so it can tell which
-	/// session the reset belongs to.
-	fn reset_mut(&mut self, code: u32) {
+	/// session the reset belongs to, and so do the bytes before `offset` when given.
+	fn reset_mut(&mut self, offset: Option<send::Offset>, code: u32) {
 		self.ended = match &self.state {
 			State::Open(stream) => Ended {
 				offset: stream.offset(),
@@ -101,6 +101,7 @@ impl Stream {
 			State::Reset(_) | State::Unsent => return,
 		};
 		let code = self.close.encode_stream_code(code);
+		let at = self.reset_offset(offset);
 		// The connection is driven on this thread, so no STOP_SENDING lands between this check
 		// and the reset: what the stream reports now is what the reset settles.
 		let stopped = match &self.state {
@@ -113,15 +114,27 @@ impl Stream {
 			Poll::Pending => Ok(None),
 		};
 		match std::mem::replace(&mut self.state, State::Reset(stopped)) {
-			State::Open(stream) => match self.header {
-				Some(header) => stream.reset_at(header, code),
+			State::Open(stream) => match at {
+				Some(at) => stream.reset_at(at, code),
 				None => stream.reset(code),
 			},
-			State::Finished(stream) => match self.header {
-				Some(header) => stream.reset_at(header, code),
+			State::Finished(stream) => match at {
+				Some(at) => stream.reset_at(at, code),
 				None => stream.reset(code),
 			},
 			State::Reset(_) | State::Unsent => unreachable!(),
+		}
+	}
+
+	/// Where a reset delivers everything before: the later of `offset` and the WebTransport
+	/// header, or nothing while the header is only partly written, since data never precedes it.
+	fn reset_offset(&self, offset: Option<send::Offset>) -> Option<send::Offset> {
+		if self.unwritten.has_remaining() {
+			return None;
+		}
+		match (self.header, offset) {
+			(Some(header), Some(offset)) if u64::from(offset) < u64::from(header) => Some(header),
+			(header, offset) => offset.or(header),
 		}
 	}
 
@@ -159,7 +172,16 @@ impl Stream {
 
 	/// Reset the stream while still delivering its WebTransport header.
 	pub fn reset(mut self, code: u32) {
-		self.reset_mut(code);
+		self.reset_mut(None, code);
+	}
+
+	/// Reset the stream while still delivering its WebTransport header and the data before
+	/// `offset`. See [`send::Stream::reset_at`].
+	///
+	/// # Panics
+	/// - when `offset` came from another stream
+	pub fn reset_at(mut self, offset: send::Offset, code: u32) {
+		self.reset_mut(Some(offset), code);
 	}
 
 	/// Write what is left of the WebTransport header, ready once none is left.
@@ -215,7 +237,7 @@ impl Stream {
 			Poll::Ready(Ok(())) => {}
 			Poll::Ready(Err(err)) => return Err(err),
 			Poll::Pending => {
-				self.reset_mut(0);
+				self.reset_mut(None, 0);
 				self.state = State::Unsent;
 				return Err(Error::Unsent);
 			}
@@ -340,7 +362,10 @@ impl moq_net::transport::poll::SendStream for Stream {
 		Self::finish_mut(self)
 	}
 	fn reset(&mut self, code: u32) {
-		Self::reset_mut(self, code);
+		Self::reset_mut(self, None, code);
+	}
+	fn reset_at(&mut self, offset: &send::Offset, code: u32) {
+		Self::reset_mut(self, Some(*offset), code);
 	}
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>> {
 		Self::poll_closed(self, waiter).map(|result| match result {
@@ -372,6 +397,10 @@ impl Finished {
 	/// Reset the stream while still delivering its WebTransport header.
 	pub fn reset(self, code: u32) {
 		self.stream.reset(code);
+	}
+	/// Reset the stream while still delivering the data before `offset`. See [`Stream::reset_at`].
+	pub fn reset_at(self, offset: send::Offset, code: u32) {
+		self.stream.reset_at(offset, code);
 	}
 	/// Set the stream's priority within its send group.
 	pub fn set_priority(&mut self, priority: i64) {

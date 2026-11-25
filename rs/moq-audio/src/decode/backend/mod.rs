@@ -52,6 +52,12 @@ pub(crate) trait Backend: Send + std::panic::UnwindSafe + std::panic::RefUnwindS
 	/// The layout this backend decodes to, which may differ from the catalog's.
 	fn layout(&self) -> Layout;
 
+	/// Whether an empty packet now conceals one lost packet, continuing the audio
+	/// from the codec's history.
+	fn conceals(&self) -> bool {
+		false
+	}
+
 	/// Frames at the start of the stream that are codec priming, not media.
 	fn delay(&self) -> usize {
 		0

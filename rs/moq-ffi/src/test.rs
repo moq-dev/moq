@@ -1289,7 +1289,7 @@ async fn raw_track_update_keeps_the_join_a_range_was_subscribed_with() {
 	let consumer = track.consume(Some(subscription(1, None))).unwrap();
 	let joined = |min: u64, end: Option<u64>| Range {
 		start: Start::Live {
-			min: Duration::from_secs(min),
+			min: Some(Duration::from_secs(min)),
 			max: None,
 		},
 		end,
@@ -6865,13 +6865,15 @@ async fn follow_hands_out_the_instance_again_after_an_end() {
 		.unwrap()
 		.unwrap();
 
-	// A covering claim answering under the same instance.
-	let dynamic = serve(&origin, "");
+	// The path goes unserved, then a covering claim answers under the same instance.
 	first_route.withdraw().unwrap();
-	let again = tokio::spawn(async move {
-		assert!(followed.available().await?.is_none(), "the end comes first");
-		followed.available().await
-	});
+	let end = kio::clock::timeout(TIMEOUT, followed.available())
+		.await
+		.expect("timed out waiting for the end")
+		.unwrap();
+	assert!(end.is_none(), "the end comes first");
+	let dynamic = serve(&origin, "");
+	let again = tokio::spawn(async move { followed.available().await });
 	let request = kio::clock::timeout(TIMEOUT, requested(&dynamic))
 		.await
 		.expect("the instance never asked the route above the path")

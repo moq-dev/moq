@@ -480,7 +480,7 @@ async fn record(profile: Profile) -> Recording {
 			.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: Duration::from_secs(300),
+						min: Some(Duration::from_secs(300)),
 						max: Some(Duration::from_secs(300)),
 					},
 				)]),

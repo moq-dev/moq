@@ -8,46 +8,24 @@ use crate::{Error, Instance, Path, broadcast};
 /// going offline. Created by [`Consumer::routes`].
 ///
 /// Several routes can cover the path at once, such as the path itself and a prefix above it,
-/// and a request resolves through the most specific one, so only that route's events come
-/// through. Another route taking over is a [`Restart`](RouteKind::Restart), unless both
-/// carry the same instance: those serve one continuous stream, so it is an
-/// [`Update`](RouteKind::Update), as for a job's route continuing the prefix route it
-/// answered. Routes beneath the path serve other broadcasts and are ignored.
+/// and the cursor is rooted at the path, so it presents only the one a request resolves through,
+/// ranked as a request ranks them. Another route taking over is a
+/// [`Restart`](RouteKind::Restart), unless both carry the same instance: those serve one
+/// continuous stream, so it is an [`Update`](RouteKind::Update), as for a job's route
+/// continuing the prefix route it answered. An end followed by a start is a gap that ended any
+/// request on the old route, even when both routes carry one instance. Routes beneath the path
+/// serve other broadcasts and are ignored.
 pub(crate) struct Follow {
 	announced: Routes,
-	path: Path,
-	/// Every route standing over the path.
-	covering: Vec<Standing>,
-	/// How many events the cursor has delivered.
-	taken: u64,
-	/// What `taken` was when the cursor last ran dry, so held no end.
-	dry: u64,
-	/// Nothing has been reported serving the path since the last end.
-	idle: bool,
-}
-
-/// A route standing over the followed path.
-///
-/// The cursor delivers by prefix, not in order, so a route's end may have happened before
-/// another prefix's start that it delivers first. Taking an event for a prefix proves no end
-/// was queued there yet, so any route that started before that take stood before its end.
-struct Standing {
-	announce: Announce,
-	/// When its start was taken.
-	since: u64,
-	/// When its latest event was taken.
-	seen: u64,
+	/// The route serving the path, as last reported.
+	serving: Option<Announce>,
 }
 
 impl Follow {
-	pub(super) fn new(announced: Routes, path: Path) -> Self {
+	pub(super) fn new(announced: Routes) -> Self {
 		Self {
 			announced,
-			path,
-			covering: Vec::new(),
-			taken: 0,
-			dry: 0,
-			idle: true,
+			serving: None,
 		}
 	}
 
@@ -58,51 +36,12 @@ impl Follow {
 	}
 
 	/// Poll for the next change, registering `waiter` when there is none yet.
-	///
-	/// While nothing serves the path, every announcement already on hand is folded into one
-	/// start, so the replay a late follower begins with (a covering prefix, then the exact path
-	/// beneath it) starts on the route serving the path rather than starting and restarting.
-	/// Once something serves it, each change comes through on its own: an end followed by a
-	/// start is a gap that ended any request on the old route, even when both routes carry one
-	/// instance. A route whose start came after the serving route's last event, with the cursor
-	/// never running dry in between, may have arrived after its end, so taking over from it is
-	/// reported as that gap.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<RouteEvent>> {
-		if self.idle {
-			let ended = loop {
-				match self.poll_announced(waiter) {
-					Poll::Ready(Some(event)) => {
-						self.fold(event);
-					}
-					Poll::Ready(None) => break true,
-					Poll::Pending => break false,
-				}
-			};
-			return match (self.serving().map(|standing| standing.announce.clone()), ended) {
-				(Some(serving), _) => {
-					self.idle = false;
-					Poll::Ready(Some(RouteEvent {
-						kind: RouteKind::Start,
-						announce: serving,
-					}))
-				}
-				(None, true) => Poll::Ready(None),
-				(None, false) => Poll::Pending,
-			};
-		}
-
 		loop {
-			let Some(event) = ready!(self.poll_announced(waiter)) else {
+			let Some(event) = ready!(self.announced.poll_next(waiter)) else {
 				return Poll::Ready(None);
 			};
 			if let Some(event) = self.fold(event) {
-				self.idle = matches!(
-					event,
-					RouteEvent {
-						kind: RouteKind::End | RouteKind::Offline,
-						..
-					}
-				);
 				return Poll::Ready(Some(event));
 			}
 		}
@@ -115,116 +54,37 @@ impl Follow {
 		self.announced.poll_synced(waiter)
 	}
 
-	/// The cursor's next event, counting what it delivers and when it runs dry.
-	fn poll_announced(&mut self, waiter: &kio::Waiter) -> Poll<Option<RouteEvent>> {
-		let poll = self.announced.poll_next(waiter);
-		match poll {
-			Poll::Ready(Some(_)) => self.taken += 1,
-			Poll::Pending => self.dry = self.taken,
-			Poll::Ready(None) => {}
-		}
-		poll
+	/// The route serving the path, which is the one a request resolves.
+	fn serving(&self) -> Option<&Announce> {
+		self.serving.as_ref()
 	}
 
-	/// The most specific route covering the path, which is the one a request resolves.
-	fn serving(&self) -> Option<&Standing> {
-		self.covering
-			.iter()
-			.max_by_key(|standing| standing.announce.prefix.as_str().len())
-	}
-
-	/// Apply one route's event, returning what it means for the path, if anything.
+	/// Apply one event of the cursor, returning what it means for the path, if anything.
 	fn fold(&mut self, event: RouteEvent) -> Option<RouteEvent> {
-		let prefix = event.announce.prefix.clone();
-		if !self.path.has_prefix(&prefix) {
+		// Every claim covering the path presents at the cursor's root.
+		if !event.announce.prefix.is_empty() {
 			return None;
 		}
-		// A route that went reports its own way of going: ended by its origin, or let go.
-		let gone = match event.kind {
-			RouteKind::Offline => RouteKind::Offline,
-			_ => RouteKind::End,
-		};
-		let before = self
-			.serving()
-			.map(|standing| (standing.announce.clone(), standing.seen));
-
-		let standing = self
-			.covering
-			.iter()
-			.position(|standing| standing.announce.prefix == prefix)
-			.map(|index| self.covering.swap_remove(index).since);
-		let (announce, since, restart) = match event {
-			RouteEvent {
-				kind: RouteKind::End | RouteKind::Offline,
-				..
-			} => (None, None, false),
-			RouteEvent {
-				kind: RouteKind::Start,
-				announce,
-			} => (Some(announce), None, false),
-			RouteEvent {
-				kind: RouteKind::Update,
-				announce,
-			} => (Some(announce), standing, false),
-			RouteEvent {
-				kind: RouteKind::Restart,
-				announce,
-			} => (Some(announce), standing, true),
-		};
-		if let Some(announce) = announce {
-			self.covering.push(Standing {
-				announce,
-				since: since.unwrap_or(self.taken),
-				seen: self.taken,
-			});
-		}
-
-		let after = self
-			.serving()
-			.map(|standing| (standing.announce.clone(), standing.since));
-		match (before, after) {
-			(None, None) => None,
-			(None, Some((after, _))) => Some(RouteEvent {
-				kind: RouteKind::Start,
-				announce: after,
-			}),
-			(Some((before, _)), None) => Some(RouteEvent {
-				kind: gone,
-				announce: before,
-			}),
-			// The serving route ended, and the one left may have started after it did.
-			(Some((before, seen)), Some((after, since)))
-				if before.prefix == prefix && before.prefix != after.prefix && since > self.dry.max(seen) =>
-			{
-				Some(RouteEvent {
-					kind: gone,
-					announce: before,
-				})
+		let kind = match (event.kind, &self.serving) {
+			(RouteKind::End | RouteKind::Offline, None) => return None,
+			(kind @ (RouteKind::End | RouteKind::Offline), Some(_)) => {
+				self.serving = None;
+				kind
 			}
-			(Some((before, _)), Some((after, _))) if before.prefix != after.prefix => {
-				let same = before.route.instance == after.route.instance;
-				Some(match same {
-					true => RouteEvent {
-						kind: RouteKind::Update,
-						announce: after,
-					},
-					false => RouteEvent {
-						kind: RouteKind::Restart,
-						announce: after,
-					},
-				})
-			}
-			// A route less specific than the serving one changed, which no request sees.
-			(Some(_), Some((after, _))) if after.prefix != prefix => None,
-			(Some(_), Some((after, _))) if restart => Some(RouteEvent {
-				kind: RouteKind::Restart,
-				announce: after,
-			}),
-			(Some(_), Some((after, _))) => Some(RouteEvent {
-				kind: RouteKind::Update,
-				announce: after,
-			}),
+			(_, None) => RouteKind::Start,
+			(RouteKind::Start, Some(before)) => match before.route.instance == event.announce.route.instance {
+				true => RouteKind::Update,
+				false => RouteKind::Restart,
+			},
+			(kind, Some(_)) => kind,
+		};
+		if !matches!(kind, RouteKind::End | RouteKind::Offline) {
+			self.serving = Some(event.announce.clone());
 		}
+		Some(RouteEvent {
+			kind,
+			announce: event.announce,
+		})
 	}
 }
 
@@ -458,34 +318,21 @@ mod tests {
 		origin::{Cost, RouteInfo, RouteOptions},
 	};
 
-	/// The follower's next event, which must arrive within a second.
-	async fn followed(follow: &mut Follow) -> (&'static str, String) {
+	/// The follower's next event, which must arrive within a second, and the cost of the route
+	/// it names, which tells the tests' routes apart.
+	async fn followed(follow: &mut Follow) -> (&'static str, u64) {
 		let event = kio::clock::timeout(Duration::from_secs(1), follow.next())
 			.await
 			.expect("no event")
 			.expect("the origin closed");
-		match event {
-			RouteEvent {
-				kind: RouteKind::Start,
-				announce,
-			} => ("start", announce.prefix.to_string()),
-			RouteEvent {
-				kind: RouteKind::Update,
-				announce,
-			} => ("update", announce.prefix.to_string()),
-			RouteEvent {
-				kind: RouteKind::Restart,
-				announce,
-			} => ("restart", announce.prefix.to_string()),
-			RouteEvent {
-				kind: RouteKind::End,
-				announce,
-			} => ("end", announce.prefix.to_string()),
-			RouteEvent {
-				kind: RouteKind::Offline,
-				announce,
-			} => ("offline", announce.prefix.to_string()),
-		}
+		let kind = match event.kind {
+			RouteKind::Start => "start",
+			RouteKind::Update => "update",
+			RouteKind::Restart => "restart",
+			RouteKind::End => "end",
+			RouteKind::Offline => "offline",
+		};
+		(kind, event.announce.route.cost.value())
 	}
 
 	/// The follower stays quiet for a second.
@@ -510,34 +357,34 @@ mod tests {
 		let instance = Instance::random();
 
 		// A prefix above the path covers it.
-		let pool = origin.forward("pool", route(&instance)).unwrap();
-		assert_eq!(followed(&mut follow).await, ("start", "pool".into()));
+		let pool = origin.forward("pool", route(&instance).with_cost(1)).unwrap();
+		assert_eq!(followed(&mut follow).await, ("start", 1));
 
 		// A route beneath the path serves another broadcast.
 		let _beneath = origin.route("pool/job/thumbnail", RouteOptions::default()).unwrap();
 		quiet(&mut follow).await;
 
 		// The path itself, from the same instance, takes over without a restart.
-		let exact = origin.route("pool/job", options(&instance)).unwrap();
-		assert_eq!(followed(&mut follow).await, ("update", "pool/job".into()));
+		let exact = origin.route("pool/job", options(&instance).with_cost(2)).unwrap();
+		assert_eq!(followed(&mut follow).await, ("update", 2));
 
 		// The covering prefix no longer serves the path, so its changes are not seen.
 		pool.update(pool.route().unwrap().with_cost(5)).unwrap();
 		quiet(&mut follow).await;
 
 		// Another instance at the path.
-		exact.announce_info(route(&Instance::random())).unwrap();
-		assert_eq!(followed(&mut follow).await, ("restart", "pool/job".into()));
+		exact.announce_info(route(&Instance::random()).with_cost(2)).unwrap();
+		assert_eq!(followed(&mut follow).await, ("restart", 2));
 
 		// It goes, so the prefix serves the path again: another instance.
 		drop(exact);
-		assert_eq!(followed(&mut follow).await, ("restart", "pool".into()));
+		assert_eq!(followed(&mut follow).await, ("restart", 5));
 
 		pool.update(pool.route().unwrap().with_cost(9)).unwrap();
-		assert_eq!(followed(&mut follow).await, ("update", "pool".into()));
+		assert_eq!(followed(&mut follow).await, ("update", 9));
 
 		drop(pool);
-		assert_eq!(followed(&mut follow).await, ("offline", "pool".into()));
+		assert_eq!(followed(&mut follow).await, ("offline", 9));
 	}
 
 	/// A follower that joins late starts on the route serving the path, not on whichever
@@ -545,11 +392,11 @@ mod tests {
 	#[kio::test]
 	async fn follow_starts_on_the_serving_route_when_joining_late() {
 		let origin = Hop::new(1).unwrap().produce();
-		let _pool = origin.forward("pool", RouteInfo::new()).unwrap();
-		let _exact = origin.route("pool/job", RouteOptions::default()).unwrap();
+		let _pool = origin.forward("pool", RouteInfo::new().with_cost(1)).unwrap();
+		let _exact = origin.route("pool/job", RouteOptions::default().with_cost(2)).unwrap();
 
 		let mut follow = origin.consume().path_routes("pool/job").unwrap();
-		assert_eq!(followed(&mut follow).await, ("start", "pool/job".into()));
+		assert_eq!(followed(&mut follow).await, ("start", 2));
 		quiet(&mut follow).await;
 	}
 
@@ -559,40 +406,39 @@ mod tests {
 	async fn follow_keeps_a_gap_between_routes_of_one_instance() {
 		let origin = Hop::new(1).unwrap().produce();
 		let instance = Instance::random();
-		let exact = origin.route("pool/job", options(&instance)).unwrap();
+		let exact = origin.route("pool/job", options(&instance).with_cost(2)).unwrap();
 		let mut follow = origin.consume().path_routes("pool/job").unwrap();
-		assert_eq!(followed(&mut follow).await, ("start", "pool/job".into()));
+		assert_eq!(followed(&mut follow).await, ("start", 2));
 
-		// Both land before the follower reads again, and the cursor delivers the prefix's start
-		// ahead of the path's end, but the path went unserved in between.
+		// Both land before the follower reads again, but the path went unserved in between.
 		drop(exact);
-		let _pool = origin.forward("pool", route(&instance)).unwrap();
-		assert_eq!(followed(&mut follow).await, ("end", "pool/job".into()));
-		assert_eq!(followed(&mut follow).await, ("start", "pool".into()));
+		let _pool = origin.forward("pool", route(&instance).with_cost(1)).unwrap();
+		assert_eq!(followed(&mut follow).await, ("end", 2));
+		assert_eq!(followed(&mut follow).await, ("start", 1));
 
 		// A prefix standing while the path's route goes takes over in place.
-		let exact = origin.route("pool/job", options(&instance)).unwrap();
-		assert_eq!(followed(&mut follow).await, ("update", "pool/job".into()));
+		let exact = origin.route("pool/job", options(&instance).with_cost(2)).unwrap();
+		assert_eq!(followed(&mut follow).await, ("update", 2));
 		drop(exact);
-		assert_eq!(followed(&mut follow).await, ("update", "pool".into()));
+		assert_eq!(followed(&mut follow).await, ("update", 1));
 	}
 
 	/// A prefix that started before the serving route's last change stood before the route's
-	/// end, so it takes over in place even when the cursor never ran dry in between.
+	/// end, so it takes over in place even when the follower never read in between.
 	#[kio::test]
 	async fn follow_hands_over_to_a_prefix_that_started_before_the_last_change() {
 		let origin = Hop::new(1).unwrap().produce();
-		let exact = origin.route("pool/job", RouteOptions::default()).unwrap();
+		let exact = origin.route("pool/job", RouteOptions::default().with_cost(2)).unwrap();
 		let mut follow = origin.consume().path_routes("pool/job").unwrap();
-		assert_eq!(followed(&mut follow).await, ("start", "pool/job".into()));
+		assert_eq!(followed(&mut follow).await, ("start", 2));
 
 		let instance = Instance::random();
-		let _pool = origin.forward("pool", route(&instance)).unwrap();
-		exact.announce_info(route(&instance)).unwrap();
-		assert_eq!(followed(&mut follow).await, ("restart", "pool/job".into()));
+		let _pool = origin.forward("pool", route(&instance).with_cost(1)).unwrap();
+		exact.announce_info(route(&instance).with_cost(2)).unwrap();
+		assert_eq!(followed(&mut follow).await, ("restart", 2));
 
 		drop(exact);
-		assert_eq!(followed(&mut follow).await, ("update", "pool".into()));
+		assert_eq!(followed(&mut follow).await, ("update", 1));
 	}
 
 	/// Under another instance nothing says two routes serve the same bytes.
@@ -601,11 +447,11 @@ mod tests {
 		let origin = Hop::new(1).unwrap().produce();
 		let mut follow = origin.consume().path_routes("pool/job").unwrap();
 
-		let _pool = origin.forward("pool", RouteInfo::new()).unwrap();
-		assert_eq!(followed(&mut follow).await, ("start", "pool".into()));
+		let _pool = origin.forward("pool", RouteInfo::new().with_cost(1)).unwrap();
+		assert_eq!(followed(&mut follow).await, ("start", 1));
 
-		let _exact = origin.route("pool/job", RouteOptions::default()).unwrap();
-		assert_eq!(followed(&mut follow).await, ("restart", "pool/job".into()));
+		let _exact = origin.route("pool/job", RouteOptions::default().with_cost(2)).unwrap();
+		assert_eq!(followed(&mut follow).await, ("restart", 2));
 	}
 
 	/// A route whose claim covers only paths beneath the followed one never serves it, so it
@@ -763,9 +609,9 @@ mod tests {
 		let exact = origin.route("live", options(&instance)).unwrap();
 		let first = available(&mut announced).await;
 
-		let dynamic = origin.forward("", route(&instance)).unwrap();
 		exact.withdraw();
 		ended(&mut announced).await;
+		let dynamic = origin.forward("", route(&instance)).unwrap();
 		let served = broadcast::Info::new().produce();
 		let (again, ()) = futures::join!(available(&mut announced), async {
 			requested(&dynamic).await.serve(&served);
@@ -893,6 +739,60 @@ mod tests {
 			available(&mut announced).await.info().instance.as_ref(),
 			Some(&instance)
 		);
+	}
+
+	/// A refusal is asked again once a covering claim takes over from the refusing one, even when
+	/// the two announce alike.
+	#[kio::test]
+	async fn announced_retries_a_refusal_on_a_covering_claim_announced_alike() {
+		let origin = Hop::new(1).unwrap().produce();
+		let instance = Instance::random();
+		let above = origin.claim("", options(&instance)).unwrap();
+		let exact = origin.claim("live", options(&instance)).unwrap();
+		let mut announced = origin.consume().follow("live", None).unwrap();
+		let (result, ()) = futures::join!(
+			kio::clock::timeout(Duration::from_secs(1), announced.available()),
+			async {
+				requested(&exact).await.reject(Error::Unroutable);
+			}
+		);
+		assert!(matches!(
+			result.expect("the refusal must answer"),
+			Err(Error::Unroutable)
+		));
+
+		drop(exact);
+		let served = broadcast::Info::new().produce();
+		let (_again, ()) = futures::join!(available(&mut announced), async {
+			requested(&above).await.serve(&served);
+		});
+	}
+
+	/// A refusal is asked again once another handler at the same filing takes over, even when the
+	/// two announce alike.
+	#[kio::test]
+	async fn announced_retries_a_refusal_on_another_handler_announced_alike() {
+		let origin = Hop::new(1).unwrap().produce();
+		let instance = Instance::random();
+		let first = origin.claim("live", options(&instance)).unwrap();
+		let second = origin.claim("live", options(&instance)).unwrap();
+		let mut announced = origin.consume().follow("live", None).unwrap();
+		let (result, ()) = futures::join!(
+			kio::clock::timeout(Duration::from_secs(1), announced.available()),
+			async {
+				requested(&second).await.reject(Error::Unroutable);
+			}
+		);
+		assert!(matches!(
+			result.expect("the refusal must answer"),
+			Err(Error::Unroutable)
+		));
+
+		drop(second);
+		let served = broadcast::Info::new().produce();
+		let (_again, ()) = futures::join!(available(&mut announced), async {
+			requested(&first).await.serve(&served);
+		});
 	}
 
 	/// A refusal is reported once, and the follower then waits for the serving route to change

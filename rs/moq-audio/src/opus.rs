@@ -128,6 +128,27 @@ pub(crate) fn multistream_activity(packet: &[u8], streams: u8, in_dtx: bool) -> 
 	}
 }
 
+/// Update whether each stream of a decoded multistream packet now decodes in CELT-only mode
+/// (RFC 6716 §3.1: TOC configurations 16 to 31), rather than SILK or hybrid. A stream whose
+/// frames are all at most one byte keeps its mode, since libopus decodes such a frame as a
+/// loss in the mode before. A packet whose framing does not parse marks every stream as not CELT.
+pub(crate) fn track_celt(mut packet: &[u8], celt: &mut [bool]) {
+	let streams = celt.len();
+	for index in 0..streams {
+		let parsed = match index + 1 == streams {
+			true => largest_frame(packet).map(|largest| (largest, packet.len())),
+			false => self_delimited(packet),
+		};
+		let (Some(toc), Some((largest, offset))) = (packet.first(), parsed) else {
+			return celt.fill(false);
+		};
+		if largest > 1 {
+			celt[index] = toc >> 3 >= 16;
+		}
+		packet = &packet[offset..];
+	}
+}
+
 /// Whether every stream in a multistream packet coded no audio.
 fn streams_carry_nothing(mut packet: &[u8], streams: u8) -> bool {
 	for index in 0..streams {
@@ -135,10 +156,10 @@ fn streams_carry_nothing(mut packet: &[u8], streams: u8) -> bool {
 		if last {
 			return carries_nothing(packet);
 		}
-		let Some((silent, offset)) = self_delimited(packet) else {
+		let Some((largest, offset)) = self_delimited(packet) else {
 			return false;
 		};
-		if !silent {
+		if largest > 0 {
 			return false;
 		}
 		packet = &packet[offset..];
@@ -146,12 +167,12 @@ fn streams_carry_nothing(mut packet: &[u8], streams: u8) -> bool {
 	false
 }
 
-/// One self-delimited Opus packet at the front of `data`: whether every frame is
-/// empty, and how many bytes it occupies, including its trailing padding.
+/// One self-delimited Opus packet at the front of `data`: its largest frame in bytes,
+/// and how many bytes it occupies, including its trailing padding.
 ///
 /// `None` when the bytes are not that packet. The length of the last frame is
 /// coded where libopus puts it, before the frame payloads.
-fn self_delimited(data: &[u8]) -> Option<(bool, usize)> {
+fn self_delimited(data: &[u8]) -> Option<(usize, usize)> {
 	if data.is_empty() {
 		return None;
 	}
@@ -258,8 +279,8 @@ fn self_delimited(data: &[u8]) -> Option<(bool, usize)> {
 	if offset == 0 || offset > data.len() {
 		return None;
 	}
-	let silent = sizes[..count].iter().all(|&frame| frame == 0);
-	Some((silent, offset))
+	let largest = sizes[..count].iter().copied().max()?;
+	Some((usize::try_from(largest).ok()?, offset))
 }
 
 /// The self-delimited length prefix (RFC 6716 §3.2.5), or `None` when it is cut off.
@@ -296,6 +317,12 @@ pub(crate) fn carries_nothing(packet: &[u8]) -> bool {
 		Some(sizes) => !sizes.is_empty() && sizes.iter().all(|&size| size == 0),
 		None => false,
 	}
+}
+
+/// The largest coded frame in an accepted packet, in bytes.
+fn largest_frame(packet: &[u8]) -> Option<usize> {
+	let (sizes, count) = frame_sizes(packet)?;
+	usize::try_from(*sizes.get(..count)?.iter().max()?).ok()
 }
 
 /// Sizes of the coded frames in an accepted packet, with padding parsed off.
@@ -376,6 +403,33 @@ mod tests {
 		// Loss carries the last real packet's classification.
 		assert_eq!(activity(&[], true), Activity::Dtx);
 		assert_eq!(activity(&[], false), Activity::Active);
+	}
+
+	/// Each stream's mode follows its last coded frame, as libopus decodes it.
+	#[test]
+	fn track_celt_follows_each_coded_stream() {
+		// A coded stream takes its TOC's mode: CELT, SILK, CELT.
+		let mut celt = [false; 3];
+		track_celt(
+			&[0xfc, 0x02, 0xaa, 0xaa, 0x48, 0x02, 0xaa, 0xaa, 0xf8, 0xaa, 0xaa],
+			&mut celt,
+		);
+		assert_eq!(celt, [true, false, true]);
+		// A stream of empty or one-byte frames keeps its mode, whatever its TOC says.
+		track_celt(&[0xfc, 0x00, 0xfc, 0x02, 0xaa, 0xaa, 0x48, 0xaa], &mut celt);
+		assert_eq!(celt, [true, true, true]);
+
+		let mut celt = [false];
+		track_celt(&[0xf8], &mut celt);
+		assert_eq!(celt, [false], "a CELT DTX packet decodes in the SILK mode before it");
+		track_celt(&[0xf8, 0xaa], &mut celt);
+		assert_eq!(celt, [false], "libopus decodes a one-byte frame as a loss too");
+		track_celt(&[0xf8, 0xaa, 0xaa], &mut celt);
+		assert_eq!(celt, [true]);
+		track_celt(&[0x48], &mut celt);
+		assert_eq!(celt, [true], "a SILK DTX packet decodes in the CELT mode before it");
+		track_celt(&[], &mut celt);
+		assert_eq!(celt, [false], "unparsed framing conceals nothing");
 	}
 
 	/// A surround packet is one self-delimited Opus packet per stream, then a
