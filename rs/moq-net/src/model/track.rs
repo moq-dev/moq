@@ -10758,15 +10758,16 @@ impl Cursor {
 		self.prune_skipped();
 	}
 
-	/// Forget the skipped runs no cached group is left in: nothing can offer them again.
+	/// Forget the skipped runs left with no cached group, nor a lost one a widening asks for
+	/// again as it does any lost group: nothing can offer them again.
 	fn prune_skipped(&mut self) {
 		// Most cursors never skip, and this runs on every hand-out.
 		if self.record.skipped.is_empty() {
 			return;
 		}
 		let state = self.state.read();
-		self.record.skipped.prune(state.lookup.len(), |run| {
-			!state.lookup.range(run.clone()).any(|(_, slot)| slot.is_read())
+		self.record.skipped.prune(state.lookup.len() + state.lost.len(), |run| {
+			!state.lookup.range(run.clone()).any(|(_, slot)| slot.is_read()) && !state.lost.holds(run.clone())
 		});
 	}
 
@@ -34999,6 +35000,42 @@ mod test {
 
 		subscriber.update(narrow.with_max(Duration::from_secs(10))).unwrap();
 		assert!(subscriber.taking().may_take(1), "a wider budget offers it again");
+	}
+
+	/// A widening owes a stale skip whether or not the pool evicted it meanwhile: one it lost
+	/// is asked of the fills, as any lost group a reader has yet to take is.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_widening_asks_again_for_a_lost_stale_skip() {
+		let read = |lost: bool| {
+			let mut producer = track_producer("test", Info::timed());
+			let requests = producer.requests();
+			let narrow = Subscription::default().with_max(Duration::from_millis(1500));
+			let mut subscriber = producer.subscribe(narrow.clone());
+			append_at(&mut producer, 0);
+			assert_eq!(drain(&mut subscriber), vec![0]);
+			for millis in [1000, 2000, 3000, 6000] {
+				append_at(&mut producer, millis);
+			}
+			assert_eq!(drain(&mut subscriber), vec![3, 4]);
+			if lost {
+				producer.evict_for_debt(1);
+				producer.evict_for_debt(2);
+			}
+			// Handing out a group prunes the skipped runs.
+			append_at(&mut producer, 7000);
+			assert_eq!(drain(&mut subscriber), vec![5]);
+			subscriber.update(narrow.with_max(Duration::from_secs(10))).unwrap();
+			let mut fills = Vec::new();
+			let mut read = drain(&mut subscriber);
+			while serve_fills(&requests, &mut fills, 1) > 0 {
+				read.extend(drain(&mut subscriber));
+			}
+			read.sort();
+			read
+		};
+		assert_eq!(read(false), [1, 2]);
+		assert_eq!(read(true), [1, 2], "the lost skip is asked again");
 	}
 
 	/// Re-offered under a budget the track's max age bounds, a group still stale there is
