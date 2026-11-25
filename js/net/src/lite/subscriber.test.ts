@@ -47,6 +47,7 @@ import {
 } from "./announce.ts";
 import { closeViolation } from "./error.ts";
 import { Group } from "./group.ts";
+import * as Fit from "./fit.ts";
 import { Probe } from "./probe.ts";
 import { ProbeLevel, Setup } from "./setup.ts";
 import { DataType, StreamId } from "./stream.ts";
@@ -63,7 +64,7 @@ import {
 	SubscribeStart,
 	SubscribeUpdate,
 } from "./subscribe.ts";
-import { fittedReasks, joinProbes, Minted, Subscriber } from "./subscriber.ts";
+import { fittedReasks, joinProbes, Minted, Subscriber, wantedProbes } from "./subscriber.ts";
 import { Track, TrackInfo } from "./track.ts";
 import { hasLengthFirst, hasRanges, hasTrackStream, Version, versionName } from "./version.ts";
 
@@ -103,6 +104,26 @@ test("a join range retuned wider before its answer is probed", () => {
 		probeIds: new Set(),
 	} as unknown as Parameters<typeof joinProbes>[0];
 	expect(joinProbes(entry, [join], [demand])).toEqual({ probes: [demand], reasked: [] });
+});
+
+// A flood of time starts the copy's readers wait on leaves room for a live join's probe, so a reader
+// joining live is not held behind history readers, nor they behind joins. Mirrors the Rust
+// `time_probes_leave_room_for_a_join`.
+test("time probes leave room for a join", () => {
+	const asks = Array.from({ length: 10_000 }, (_, n) => BigInt(n));
+	const join = { min: 1000, end: undefined, budget: 300, since: 0 };
+	const entry = {
+		live: new LiveRanges(Version.DRAFT_07, []),
+		joinBudgets: new Map(),
+		joinTicks: new Map(),
+		starts: new Map(),
+		fillIds: new Set(),
+		probeIds: new Set(),
+	} as unknown as Parameters<typeof wantedProbes>[0];
+	const { probes } = wantedProbes(entry, asks, [join], []);
+	const fitted = Fit.fitAfter(Fit.budget(0, 0n, probes.length), [], probes);
+	expect(fitted.length).toBeLessThan(asks.length);
+	expect(fitted).toContainEqual({ start: { live: { min: 1000, max: 300 } } });
 });
 
 test("closing the subscriber suppresses probe stream warnings", async () => {

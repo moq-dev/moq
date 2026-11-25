@@ -17,6 +17,12 @@ import { rangeSize, varintSize, type WireRange } from "./subscribe.ts";
  */
 export const UPDATE_FIELDS = 9 * 9 + 1;
 
+/**
+ * The most one range takes besides its Range ID: each end's type, then at most three varints of
+ * nine bytes for a start and two for an end.
+ */
+const RANGE_FIELDS = 2 + 5 * 9;
+
 /** What lite-07 ranges may take on the wire. */
 export interface Budget {
 	/** The bytes every range and its Range ID may take together. */
@@ -31,15 +37,17 @@ export interface Budget {
  *
  * Half a message, so that the ranges sent last, retired by Range ID, and the ranges replacing
  * them fit one SUBSCRIBE_UPDATE however little the two share: a relay never narrows its ask in
- * between, which would reset group streams still arriving.
+ * between, which would reset group streams still arriving. Never more than leaves room in a
+ * SUBSCRIBE for one range past it, which {@link fitAfter} takes.
  */
 export function budget(fields: number, next: bigint, count: number): Budget {
 	const half = Math.floor((MAX_MESSAGE_SIZE - UPDATE_FIELDS) / 2);
 	const largest = next + BigInt(count);
+	// Past the varint's reach it takes the most a varint can.
+	const id = largest >= 1n << 64n ? 9 : varintSize(largest);
 	return {
-		bytes: Math.min(half, Math.max(0, MAX_MESSAGE_SIZE - fields)),
-		// Past the varint's reach it takes the most a varint can.
-		id: largest >= 1n << 64n ? 9 : varintSize(largest),
+		bytes: Math.min(half, Math.max(0, MAX_MESSAGE_SIZE - fields - RANGE_FIELDS - id)),
+		id,
 	};
 }
 
@@ -57,7 +65,7 @@ function cost(budget: Budget, range: WireRange): number | undefined {
 
 /**
  * As many of `ranges`, in order, as fit `budget` beside the `spent` ones, at least the first: one
- * range past them still fits the message, since the budget is half of it. Mirrors the Rust
+ * range past them still fits the message, which the budget leaves room for. Mirrors the Rust
  * `Budget::fit_after`.
  */
 export function fitAfter(budget: Budget, spent: readonly WireRange[], ranges: readonly WireRange[]): WireRange[] {

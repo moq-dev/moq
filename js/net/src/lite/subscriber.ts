@@ -2983,11 +2983,10 @@ export class Subscriber {
 				}));
 				// The probes the readers' asks and joins need, as many as fit beside the rest: those left
 				// out go once an answer lets the readers waiting on others go.
-				const wanted = probes(asks, fitted.ranges);
-				const joined = joinProbes(entry, joins, fitted.ranges);
-				const probed = Fit.fitAfter(budget, [...fitted.ranges, ...fillRanges], [...wanted, ...joined.probes]);
+				const wanted = wantedProbes(entry, asks, joins, fitted.ranges);
+				const probed = Fit.fitAfter(budget, [...fitted.ranges, ...fillRanges], wanted.probes);
 				// A live probe asked afresh is retired and added again, which the publisher answers anew.
-				const renew = fittedReasks(joined.reasked, entry.live, probed);
+				const renew = fittedReasks(wanted.reasked, entry.live, probed);
 				// The demand's ranges, then the probes, then the fills'.
 				const kindOf = (id: bigint): RangeKind =>
 					entry.fillIds.has(id) ? "fill" : entry.probeIds.has(id) ? "probe" : "demand";
@@ -3656,6 +3655,30 @@ class ConsumeBroadcast extends broadcast.Consumer {
 	override clone(): ConsumeBroadcast {
 		return new ConsumeBroadcast(this.#subscriber, this.#path, this.#consumed, this.shareState());
 	}
+}
+
+/**
+ * The probes to ask for `asks` and `joins` beside the demand's `ranges` (see `probes` and
+ * `joinProbes`), and the live probes to ask afresh. A time start's and a join's in turn, then
+ * whichever kind is left, so a flood of either leaves the other its share of what fits. Mirrors the
+ * Rust `wanted_probes`.
+ *
+ * @internal
+ */
+export function wantedProbes(
+	entry: SubscribeEntry,
+	asks: readonly bigint[],
+	joins: readonly JoinAsk[],
+	ranges: readonly WireRange[],
+): { probes: WireRange[]; reasked: bigint[] } {
+	const times = probes(asks, ranges);
+	const joined = joinProbes(entry, joins, ranges);
+	const wanted: WireRange[] = [];
+	for (let i = 0; i < Math.max(times.length, joined.probes.length); i++) {
+		if (i < times.length) wanted.push(times[i]);
+		if (i < joined.probes.length) wanted.push(joined.probes[i]);
+	}
+	return { probes: wanted, reasked: joined.reasked };
 }
 
 // The probes to ask for `asks`, each a time start the copy's readers wait on, beside the demand's

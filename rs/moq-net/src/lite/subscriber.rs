@@ -4258,6 +4258,24 @@ mod tests {
 		assert!(reasked.is_empty());
 	}
 
+	/// A flood of time starts the copy's readers wait on leaves room for a live join's probe, so
+	/// a reader joining live is not held behind history readers, nor they behind joins.
+	#[test]
+	fn time_probes_leave_room_for_a_join() {
+		let asks: Vec<u64> = (0..10_000).collect();
+		let join = track::JoinAsk {
+			min: Some(Duration::from_secs(1)),
+			end: None,
+			budget: Duration::from_millis(300),
+			since: 0,
+		};
+		let (wanted, _) = wanted_probes(None, &asks, &[join], &[]);
+		let budget = fit::Budget::new(Version::Lite07, 0, 0, wanted.len());
+		let fitted = budget.fit_after(std::iter::empty(), wanted);
+		assert!(fitted.len() < asks.len(), "not every time start fits");
+		assert!(fitted.contains(&join_probe(&join)), "the join is starved");
+	}
+
 	/// The owed groups start at the floor the demand last asked for, which an update can raise
 	/// after SUBSCRIBE_START answered the SUBSCRIBE, but not lower below that answer: nothing
 	/// says the publisher read the update before its FIN.
@@ -11868,6 +11886,28 @@ impl SubStream {
 	}
 }
 
+/// The probes to ask for `asks` and `joins` beside the demand's `ranges` (see [`probes`] and
+/// [`join_probes`]), and the live probes to ask afresh. A time start's and a join's in turn,
+/// then whichever kind is left, so a flood of either leaves the other its share of what fits.
+fn wanted_probes(
+	active: Option<&SubStream>,
+	asks: &[u64],
+	joins: &[track::JoinAsk],
+	ranges: &[lite::Range],
+) -> (Vec<lite::Range>, std::collections::BTreeSet<u64>) {
+	let times = probes(asks, ranges);
+	let (joined, reasked) = join_probes(active, joins, ranges);
+	let mut wanted = Vec::with_capacity(times.len() + joined.len());
+	let (mut times, mut joined) = (times.into_iter(), joined.into_iter());
+	loop {
+		match (times.next(), joined.next()) {
+			(None, None) => break,
+			(time, join) => wanted.extend(time.into_iter().chain(join)),
+		}
+	}
+	(wanted, reasked)
+}
+
 /// The probes to ask for `asks`, each a time start the copy's readers wait on, beside the
 /// demand's `ranges`: a demand range from the same time answers it already.
 fn probes(asks: &[u64], ranges: &[lite::Range]) -> Vec<lite::Range> {
@@ -12490,9 +12530,7 @@ impl TrackServe {
 					Sub::Active(active) => Some(active),
 					Sub::None => None,
 				};
-				let mut probes = probes(asks, &demand_ranges);
-				let (joined, reasked) = join_probes(active, joins, &demand_ranges);
-				probes.extend(joined);
+				let (probes, reasked) = wanted_probes(active, asks, joins, &demand_ranges);
 				let fill_ranges: Vec<_> = FillAsk::wire(&groups).collect();
 				let probes = budget.fit_after(demand_ranges.iter().chain(&fill_ranges), probes);
 				let reasked = fitted_reasks(active, reasked, &probes);

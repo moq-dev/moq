@@ -22,6 +22,10 @@ use crate::{
 /// varints of at most nine bytes, and the priority byte.
 const UPDATE_FIELDS: usize = 9 * 9 + 1;
 
+/// The most one range takes besides its Range ID: each end's type, then at most three varints
+/// of nine bytes for a start and two for an end.
+const RANGE_FIELDS: usize = 2 + 5 * 9;
+
 /// What ranges may take on the wire.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Budget {
@@ -38,14 +42,17 @@ impl Budget {
 	///
 	/// Half a message, so that the ranges sent last, retired by Range ID, and the ranges
 	/// replacing them fit one SUBSCRIBE_UPDATE however little the two share: a relay never
-	/// narrows its ask in between, which would reset group streams still arriving.
+	/// narrows its ask in between, which would reset group streams still arriving. Never more
+	/// than leaves room in a SUBSCRIBE for one range past it, which [`Self::fit_after`] takes.
 	pub fn new(version: lite::Version, fields: usize, next: u64, count: usize) -> Self {
 		let form = version.into();
 		let half = (MAX_MESSAGE_SIZE - UPDATE_FIELDS) / 2;
+		let id = varint::size(next.saturating_add(count as u64), form).unwrap_or(9);
+		let room = MAX_MESSAGE_SIZE.saturating_sub(fields).saturating_sub(RANGE_FIELDS + id);
 		Self {
-			bytes: half.min(MAX_MESSAGE_SIZE.saturating_sub(fields)),
+			bytes: half.min(room),
 			form,
-			id: varint::size(next.saturating_add(count as u64), form).unwrap_or(9),
+			id,
 		}
 	}
 
@@ -55,7 +62,7 @@ impl Budget {
 	}
 
 	/// As many of `ranges`, in order, as fit beside the `spent` ones, at least the first: one
-	/// range past them still fits the message, since the budget is half of it.
+	/// range past them still fits the message, which the budget leaves room for.
 	pub fn fit_after<'a>(&self, spent: impl IntoIterator<Item = &'a Range>, ranges: Vec<Range>) -> Vec<Range> {
 		let mut used = (spent.into_iter())
 			.map(|range| self.cost(range).unwrap_or(usize::MAX))
@@ -446,6 +453,28 @@ mod tests {
 			let next = wide(&mut rng, live.next(), [50, 14][round % 2]);
 			let edit = live.edit(&next).unwrap();
 			widest(edit).encode_bytes(version).unwrap();
+		}
+	}
+
+	/// The range [`Budget::fit_after`] takes past a full budget still fits the message beside
+	/// the fields a SUBSCRIBE carries, however much of it those take.
+	#[test]
+	fn a_range_past_a_full_budget_fits_the_message() {
+		let version = lite::Version::Lite07;
+		let small = span(Position::group(0), Some(Position::group(1)));
+		let probe = span(Position::group(u64::MAX - 2), Some(Position::group(u64::MAX - 1)));
+		for fields in [0, MAX_MESSAGE_SIZE / 2, MAX_MESSAGE_SIZE - 100] {
+			let budget = Budget::new(version, fields, 0, 1_000);
+			let cost = |ranges: &[Range]| ranges.iter().map(|range| budget.cost(range).unwrap()).sum::<usize>();
+			// As many as the budget holds.
+			let spent = vec![small; budget.bytes / cost(&[small])];
+			let taken = budget.fit_after(&spent, vec![probe]);
+			assert_eq!(taken, [probe], "fields {fields}");
+			assert!(
+				fields + cost(&spent) + cost(&taken) <= MAX_MESSAGE_SIZE,
+				"fields {fields}: overflows by {}",
+				fields + cost(&spent) + cost(&taken) - MAX_MESSAGE_SIZE
+			);
 		}
 	}
 

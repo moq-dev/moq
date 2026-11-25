@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import { insertRun, type Run, removeRun, runGaps } from "../internal.ts";
+import { MAX_MESSAGE_SIZE } from "./message.ts";
 import { Writer } from "../stream.ts";
-import { type Budget, budget as budgetOf, fit, UPDATE_FIELDS } from "./fit.ts";
+import { type Budget, budget as budgetOf, fit, fitAfter, UPDATE_FIELDS } from "./fit.ts";
 import { LiveRanges, rangeSize, SubscribeUpdate, type WireAnchor, type WireRange } from "./subscribe.ts";
 import { Version } from "./version.ts";
 
@@ -148,6 +149,23 @@ test("fit leaves any edit between fitted ranges one message", async () => {
 	for (let round = 0; round < 4; round++) {
 		const next = wide(live.next(), [50, 14][round % 2]);
 		await encode(widest(live.edit(next)));
+	}
+});
+
+// The range fitAfter takes past a full budget still fits the message beside the fields a SUBSCRIBE
+// carries, however much of it those take. Mirrors the Rust
+// `a_range_past_a_full_budget_fits_the_message`.
+test("a range past a full budget fits the message", () => {
+	const small: WireRange = { start: { absolute: 0n }, end: { absolute: 1n } };
+	const probe: WireRange = { start: { absolute: (1n << 64n) - 3n }, end: { absolute: (1n << 64n) - 2n } };
+	for (const fields of [0, Math.floor(MAX_MESSAGE_SIZE / 2), MAX_MESSAGE_SIZE - 100]) {
+		const limit = budgetOf(fields, 0n, 1_000);
+		const cost = (ranges: readonly WireRange[]) => total(limit, ranges, []);
+		// As many as the budget holds.
+		const spent = Array.from({ length: Math.floor(limit.bytes / cost([small])) }, () => small);
+		const taken = fitAfter(limit, spent, [probe]);
+		expect(taken).toEqual([probe]);
+		expect(fields + cost(spent) + cost(taken)).toBeLessThanOrEqual(MAX_MESSAGE_SIZE);
 	}
 });
 
