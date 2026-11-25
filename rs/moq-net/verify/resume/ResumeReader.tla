@@ -18,7 +18,10 @@
 (* once, and a reader that joins before any group lands. A route declares  *)
 (* its end once it holds the last group, a gap below it may still land,    *)
 (* even once its session settled that end, and a route that declared its   *)
-(* end never fails.                                                        *)
+(* end never fails. Only a route no longer served evicts, up to MaxEvicts   *)
+(* groups in all, and a group a route evicted is owed only by the routes   *)
+(* still holding it: a cursor of its own would ask a fill for it, which is *)
+(* not modelled.                                                           *)
 (***************************************************************************)
 EXTENDS Integers, Sequences, FiniteSets
 
@@ -26,7 +29,9 @@ CONSTANTS
     G,            \* groups 0 .. G - 1; a finished route declares its end at G
     MaxTracks,    \* routes that come up, each a fresh track (`Op::Up`)
     MaxSwitches,  \* front switches to a live route other than a failed one
-    Hold          \* whether the reader holds a group while it reads it, keeping its copy
+    Hold,         \* whether the reader holds a group while it reads it, keeping its copy
+    MaxEvicts,    \* groups the caches of routes no longer served evict, in all
+    ReArm         \* whether an eviction re-arms the backfill; FALSE only to see a rule fail
 
 Groups == 0 .. G - 1
 Tracks == 1 .. MaxTracks
@@ -44,17 +49,23 @@ Min(S) == CHOOSE x \in S : \A y \in S : x <= y
 Max2(a, b) == IF a >= b THEN a ELSE b
 
 VARIABLES
-    trk,       \* trk[t]: route t's track: made, failed, fin, and arr (arrival order)
+    trk,       \* trk[t]: route t's track: made, failed, fin, arr (arrival order), and gone (evicted)
     front,     \* the front: cur (serving track), gen, end, switches
     rd,        \* the reader (`Reader`), see Init
     reading    \* groups handed out and still read, each holding its copy's lease
 
 vars == <<trk, front, rd, reading>>
 
-Landed(t) == {trk[t].arr[i] : i \in 1 .. Len(trk[t].arr)}
+\* Every group that ever landed on the track, evicted or not.
+Arrived(t) == {trk[t].arr[i] : i \in 1 .. Len(trk[t].arr)}
+\* The groups its cache still holds.
+Landed(t) == Arrived(t) \ trk[t].gone
+\* `track::Consumer::evicted`: how many groups its cache evicted so far.
+Evicted(t) == Cardinality(trk[t].gone)
 Live(t) == trk[t].made /\ ~trk[t].failed
-\* `track::Consumer::latest_key` (`TrackState::max_key`): the newest group the track holds.
-Latest(t) == IF Landed(t) = {} THEN None ELSE Max(Landed(t))
+\* `track::Consumer::latest_key` (`TrackState::max_key`): the newest group the
+\* track got, which an eviction keeps.
+Latest(t) == IF Arrived(t) = {} THEN None ELSE Max(Arrived(t))
 
 \* `TrackState::is_complete`: the end is declared and the tail holds every group
 \* from where the feed starts (its first arrival) up to it. Sealing records what
@@ -66,7 +77,7 @@ Seal(x) ==
         THEN [x EXCEPT !.whole = TRUE, !.held = got]
         ELSE x
 \* What a track owes its readers: what it held once complete, else all it holds.
-Held(t) == IF trk[t].whole THEN trk[t].held ELSE Landed(t)
+Held(t) == (IF trk[t].whole THEN trk[t].held ELSE Landed(t)) \ trk[t].gone
 
 (***************************************************************************)
 (* A copy and its cursor (`Copy` plus its `track::Subscriber`).            *)
@@ -81,10 +92,12 @@ Admits(floor, until, g) ==
     /\ g >= (IF floor = None THEN 0 ELSE floor)
     /\ (until = NoBound \/ g <= until)
 
+\* `drains` is `Copy::drains`: the track's eviction count when `BackfillGaps`
+\* last left the copy a group to drain, else None.
 NewCopy(id, t, gen, floor, rep, until) ==
     [id |-> id, t |-> t, gen |-> gen, floor |-> floor, rep |-> rep,
      until |-> until, done |-> "no", drained |-> 0, idx |-> 1,
-     took |-> {}, owed |-> {}]
+     took |-> {}, owed |-> {}, drains |-> None]
 
 \* The wire asks for [floor, until] instead (`Copy::cap`, or `Copy::send` on a
 \* reuse or a widening; neither reopens a drained copy): the cursor
@@ -110,7 +123,7 @@ Deliverable(c, g, dlv) ==
 \* and the group it reserves (None when pending or done), and where it came from.
 RECURSIVE Peek(_, _, _)
 Peek(c, dlv, fuel) ==
-    LET ow == {g \in c.owed : Admits(c.floor, c.until, g) /\ g \notin c.took}
+    LET ow == {g \in c.owed : Admits(c.floor, c.until, g) /\ g \notin c.took /\ g \notin trk[c.t].gone}
         arr == trk[c.t].arr
     IN
     IF fuel = 0 THEN [c |-> c, g |-> None, src |-> "none"]
@@ -132,7 +145,7 @@ Peek(c, dlv, fuel) ==
             ELSE [c |-> c, g |-> None, src |-> "none"]
     ELSE
         LET g == arr[c.idx] IN
-        IF ~Admits(c.floor, c.until, g) \/ g \in c.took
+        IF ~Admits(c.floor, c.until, g) \/ g \in c.took \/ g \in trk[c.t].gone
             THEN Peek([c EXCEPT !.idx = @ + 1], dlv, fuel - 1)
         ELSE IF Deliverable(c, g, dlv)
             THEN [c |-> c, g |-> g, src |-> "walk"]
@@ -149,14 +162,14 @@ MayLand(t, lo, hi, floored, dlv) ==
     /\ Live(t)
     /\ \E g \in lo .. (IF hi > G THEN G ELSE hi) - 1 :
         /\ g \notin dlv
-        /\ g \notin Landed(t)
-        /\ floored \/ (Landed(t) # {} /\ g >= Min(Landed(t)))
+        /\ g \notin Arrived(t)
+        /\ floored \/ (Arrived(t) # {} /\ g >= Min(Arrived(t)))
 
 \* `track::Subscriber::has_unread_group`: a group the walk has yet to take, or
 \* a widening owes, in [Start, end), that the reader lacks.
 HasUnread(c, end, dlv) ==
     LET arr == trk[c.t].arr
-        ahead == {arr[i] : i \in c.idx .. Len(arr)} \cup c.owed
+        ahead == ({arr[i] : i \in c.idx .. Len(arr)} \cup c.owed) \ trk[c.t].gone
     IN /\ ~trk[c.t].failed
        /\ \E g \in ahead : g >= Start(c) /\ g < end /\ g < End(c) /\ g \notin dlv
 
@@ -203,7 +216,7 @@ Sync(r, f) ==
         IF at # 0 THEN
             \* Returning to a route reuses its copy, from the boundary.
             LET c == reps[at]
-                c2 == Window([c EXCEPT !.gen = f.gen, !.rep = FALSE, !.done = "no"],
+                c2 == Window([c EXCEPT !.gen = f.gen, !.rep = FALSE, !.done = "no", !.drains = None],
                              Max2(c.floor, bnd), NoBound)
                 rest == [j \in 1 .. Len(reps) - 1 |-> IF j < at THEN reps[j] ELSE reps[j + 1]]
             IN [r EXCEPT !.gen = f.gen, !.resumed = TRUE, !.copies = rest \o <<c2>>]
@@ -239,7 +252,8 @@ Backfill(r, lo, hi) ==
 
 \* `Reader::backfill_gaps`: after a switch, ask the serving route for what the
 \* reader lacks below its copy's resume point, from the lowest gap no replaced
-\* copy still drains: a live one holding it under its cap.
+\* copy still drains: a live one holding it under its cap. Each copy left a
+\* group under that gap records its track's eviction count (`Copy::drains`).
 BackfillGaps(r) ==
     IF ~r.resumed THEN r
     ELSE
@@ -249,21 +263,28 @@ BackfillGaps(r) ==
         IF n = 0 \/ r.copies[n].floor = None THEN r1
         ELSE
             LET at == r.copies[n].floor
-                drains(g) ==
-                    \E i \in 1 .. n :
-                        LET c == r.copies[i] IN
-                        /\ c.rep /\ c.done = "no"
-                        /\ Start(c) <= g /\ g < End(c)
-                        /\ ~trk[c.t].failed
-                        /\ g \in Landed(c.t)
+                drainsBy(i, g) ==
+                    LET c == r.copies[i] IN
+                    /\ c.rep /\ c.done = "no"
+                    /\ Start(c) <= g /\ g < End(c)
+                    /\ ~trk[c.t].failed
+                    /\ g \in Landed(c.t)
+                drains(g) == \E i \in 1 .. n : drainsBy(i, g)
                 gaps == {g \in 0 .. at - 1 : g \notin r.dlv /\ ~drains(g)}
-            IN IF gaps = {} THEN r1 ELSE Backfill(r1, Min(gaps), at)
+                below == IF gaps = {} THEN at ELSE Min(gaps)
+                \* The first copy that drains each group under the lowest gap, as
+                \* the walk finds it.
+                left == {Min({i \in 1 .. n : drainsBy(i, g)}) : g \in {h \in 0 .. below - 1 : h \notin r.dlv}}
+                r2 == [r1 EXCEPT !.copies = [i \in 1 .. n |->
+                        [r.copies[i] EXCEPT !.drains = IF i \in left THEN Evicted(r.copies[i].t) ELSE None]]]
+            IN IF gaps = {} THEN r2 ELSE Backfill(r2, Min(gaps), at)
 
 \* The copy loop of `poll_lowest`: peek each copy, keeping the lowest group;
 \* a tie goes to the newer copy. A copy that ran out cleanly is read again
 \* once a group arrived on it since (`Copy::drained`); one arriving on the
 \* serving copy, which resumed at a floor, may be under it (`late`), as may
-\* what a replaced copy that just failed still had to drain.
+\* what a replaced copy that just failed still had to drain, or one whose
+\* cache evicted since `BackfillGaps` left it a group to drain.
 RECURSIVE Scan(_, _, _, _, _, _)
 Scan(cs, dlv, gen, i, best, late) ==
     IF i > Len(cs) THEN [cs |-> cs, best |-> best, late |-> late]
@@ -278,11 +299,12 @@ Scan(cs, dlv, gen, i, best, late) ==
             THEN Scan(cs, dlv, gen, i + 1, best, late)
         ELSE
             LET p == Peek(c, dlv, Fuel)
-                cs2 == [cs EXCEPT ![i] = p.c]
+                lost == ReArm /\ c.rep /\ c.drains # None /\ c.drains # Evicted(c.t)
+                cs2 == [cs EXCEPT ![i] = IF lost THEN [p.c EXCEPT !.drains = None] ELSE p.c]
                 better == p.g # None /\ (best.g = None \/ p.g <= best.g)
             IN Scan(cs2, dlv, gen, i + 1,
                     IF better THEN [i |-> i, g |-> p.g, src |-> p.src] ELSE best,
-                    late \/ (reopens /\ serves) \/ (c.rep /\ p.c.done = "err"))
+                    late \/ (reopens /\ serves) \/ (c.rep /\ p.c.done = "err") \/ lost)
 
 NoBest == [i |-> 0, g |-> None, src |-> "none"]
 
@@ -377,7 +399,7 @@ Late(r) ==
             /\ c.rep /\ c.done = "no"
             /\ Admits(c.floor, c.until, g)
             /\ \/ /\ ~trk[c.t].failed
-                  /\ g \in {trk[c.t].arr[k] : k \in c.idx .. Len(trk[c.t].arr)} \cup c.owed
+                  /\ g \in ({trk[c.t].arr[k] : k \in c.idx .. Len(trk[c.t].arr)} \cup c.owed) \ trk[c.t].gone
                \/ MayLand(c.t, g, g + 1, c.floor # None, r.dlv)}
 
 (***************************************************************************)
@@ -386,7 +408,7 @@ Late(r) ==
 
 Init ==
     /\ trk = [t \in Tracks |-> [made |-> t = 1, failed |-> FALSE, fin |-> FALSE, arr |-> <<>>,
-                                whole |-> FALSE, held |-> {}]]
+                                gone |-> {}, whole |-> FALSE, held |-> {}]]
     /\ front = [cur |-> 1, gen |-> 1, end |-> "open", switches |-> 0]
     \* Subscribed to the serving copy at once (`Consumer::subscribe`).
     /\ rd = [gen |-> 1, next |-> 2, newest |-> None, dlv |-> {}, resumed |-> TRUE,
@@ -410,14 +432,14 @@ Down(t) ==
 \* A group lands on a route's track (`Op::Write`), even past its declared end.
 Land(t, g) ==
     /\ Live(t)
-    /\ g \notin Landed(t)
+    /\ g \notin Arrived(t)
     /\ trk' = [trk EXCEPT ![t] = Seal([@ EXCEPT !.arr = Append(@, g)])]
     /\ UNCHANGED <<front, rd, reading>>
 
 \* A route declares the end at G once it holds the last group (`Op::End`).
 Finish(t) ==
     /\ Live(t) /\ ~trk[t].fin
-    /\ G - 1 \in Landed(t)
+    /\ G - 1 \in Arrived(t)
     /\ trk' = [trk EXCEPT ![t] = Seal([@ EXCEPT !.fin = TRUE])]
     /\ UNCHANGED <<front, rd, reading>>
 
@@ -427,7 +449,16 @@ Finish(t) ==
 \* the end may land afterwards, and is not owed by the route.
 Settle(t) ==
     /\ Live(t) /\ trk[t].fin /\ ~trk[t].whole
-    /\ trk' = [trk EXCEPT ![t].whole = TRUE, ![t].held = Landed(t)]
+    /\ trk' = [trk EXCEPT ![t].whole = TRUE, ![t].held = Arrived(t)]
+    /\ UNCHANGED <<front, rd, reading>>
+
+\* The cache of a route no longer served evicts a group (`TrackState::evict_group`,
+\* by expiry or the pool's debt): its copies hand it out no more.
+Evict(t, g) ==
+    /\ Live(t) /\ t # front.cur
+    /\ g \in Landed(t)
+    /\ Cardinality(UNION {trk[u].gone : u \in Tracks}) < MaxEvicts
+    /\ trk' = [trk EXCEPT ![t].gone = @ \cup {g}]
     /\ UNCHANGED <<front, rd, reading>>
 
 \* The front serves another live route (`Producer::splice`), and every reader
@@ -483,7 +514,7 @@ Done ==
 
 Next ==
     \/ \E t \in Tracks : Up(t) \/ Down(t) \/ Finish(t) \/ Settle(t) \/ Serve(t)
-    \/ \E t \in Tracks, g \in Groups : Land(t, g)
+    \/ \E t \in Tracks, g \in Groups : Land(t, g) \/ Evict(t, g)
     \/ FrontFinish \/ FrontFail
     \/ Read
     \/ \E x \in reading : Drop(x)
@@ -535,16 +566,18 @@ QuietIsSettled ==
 \* of it still subscribed, however many times it flaps. A drained copy waits
 \* only for the next parked poll to let it go. A route failing may add one
 \* backfill below an earlier one: the groups its replaced copy was to drain,
-\* under where that backfill starts, which a backfill only widens upward.
+\* under where that backfill starts, which a backfill only widens upward. So
+\* may each group a replaced copy was to drain and its cache evicted.
 CopiesBounded ==
     \A t \in Tracks :
         Cardinality({i \in 1 .. Len(rd.copies) :
                         rd.copies[i].t = t /\ rd.copies[i].done = "no"})
-            <= 2 + Cardinality({u \in Tracks : trk[u].failed})
+            <= 2 + Cardinality({u \in Tracks : trk[u].failed}) + Cardinality(UNION {trk[u].gone : u \in Tracks})
 
 TypeOK ==
     /\ rd.ended \in {"no", "ok", "err"}
     /\ rd.dlv \subseteq Groups
     /\ \A i \in 1 .. Len(rd.copies) : rd.copies[i].done \in {"no", "ok", "err"}
+    /\ \A t \in Tracks : trk[t].gone \subseteq Arrived(t)
 
 =============================================================================
