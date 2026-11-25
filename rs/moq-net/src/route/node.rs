@@ -1024,7 +1024,7 @@ impl State {
 		};
 		let (Next::Via(session) | Next::Local(session)) = next;
 		let (path, instance) = broadcast;
-		// The claim it follows: the most specific one covering the path.
+		// A claim of the broadcast's Instance, filed at a path covering it.
 		let claim = |above: Path| (above, instance.clone());
 		// A session not filed here yet is told nothing, so any claim may serve it.
 		let admits = |claim: &Broadcast| from.is_none_or(|from| self.router.admits(from, origin, claim));
@@ -1035,8 +1035,10 @@ impl State {
 		if Some(session) == from {
 			return Some(None);
 		}
-		let slot = (ancestors(path).rev()).find_map(|above| {
-			let claim = claim(above);
+		// The lane of the filing the router followed, not a deeper one of the same claimant
+		// that may be unavailable.
+		let slot = self.router.filed(origin, broadcast).and_then(|from| {
+			let claim = claim(from);
 			let slot = self.lanes.get(&claim)?.get(&(origin, session))?;
 			Some((admits(&claim), slot))
 		});
