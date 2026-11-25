@@ -29,5 +29,7 @@ followed #9604's merge, so count runs from 2026-11-26.
 - moq-dev/moq: a week of scheduled Nightly runs on `main` from 2026-11-26
   (`gh run list --workflow nightly.yml --branch main --event schedule`). Grep
   each job's log for `disabling binary cache 'https://nix.moq.dev'`; done when
-  seven runs show none. `wrangler tail` shows only Worker logs and cannot
+  seven runs show none. Count only runs whose Nix jobs got past their Nix
+  setup step, so a run cancelled before it substitutes anything never counts
+  as clean. `wrangler tail` shows only Worker logs and cannot
   confirm this. If the B2 cutover deploys mid-week, say which runs it covers.
