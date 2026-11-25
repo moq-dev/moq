@@ -4607,6 +4607,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "moq-libopus"
+version = "0.1.0"
+dependencies = [
+ "arrayref",
+ "hex",
+ "num-complex",
+ "num-traits",
+ "workspace-hack",
+]
+
+[[package]]
 name = "moq-loc"
 version = "0.2.19"
 dependencies = [
