@@ -10841,7 +10841,17 @@ impl Cursor {
 				self.record.pending.remove(range);
 			}
 		}
+		let state = self.state.read();
 		for owed in self.filter.admitted.overlapping(run) {
+			// A fill's answer is no live-feed slot, which is all the owed set reads: it goes
+			// back to the fills answered.
+			if let Some(misses) = &mut self.misses {
+				for (key, slot) in state.lookup.range(owed.clone()) {
+					if !slot.visible && slot.serves_end() {
+						misses.refill(*key);
+					}
+				}
+			}
 			self.filter.owed.insert(owed);
 		}
 	}
@@ -31194,7 +31204,7 @@ mod test {
 
 	/// Newest first, a stale group a fill answered is written off with the stale owed ones
 	/// below the first fresh group, so the lowest group held unread, where a lite publisher
-	/// starts, is one the read still hands out.
+	/// starts, is one the read still hands out. A widened budget owes it again with the rest.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_stale_filled_group_is_written_off_before_the_newest_goes_out() {
@@ -31230,6 +31240,14 @@ mod test {
 		write(5);
 		assert_eq!(next(&mut subscriber), 5);
 		assert_eq!(subscriber.lowest_unread(0).map(|group| group.start), Some(4));
+		assert_eq!(next(&mut subscriber), 4);
+		// A widened budget owes the stale groups again, the filled one included.
+		subscriber.update(subscriber.subscription().with_max(None)).unwrap();
+		let mut widened = Vec::new();
+		while let Poll::Ready(Ok(Some(group))) = subscriber.poll_recv_group(&waiter) {
+			widened.push(group.start);
+		}
+		assert_eq!(widened, [2, 1, 0]);
 	}
 
 	/// A live arrival judged on its own keeps the history a resumed copy's live floor sits

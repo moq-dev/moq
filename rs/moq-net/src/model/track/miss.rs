@@ -436,6 +436,11 @@ impl Misses {
 		self.pick_up();
 	}
 
+	/// Offer `key`, a fill's answer still cached, again: a widened budget owes it once more.
+	pub fn refill(&mut self, key: u64) {
+		self.filled.insert(key);
+	}
+
 	/// Take `key` as handed out, if a fill answered it.
 	pub fn take_filled(&mut self, key: u64) {
 		if self.filled.remove(&key) {
