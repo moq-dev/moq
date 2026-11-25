@@ -101,9 +101,9 @@ pub(super) struct Misses {
 	/// wider budget asks it again (see [`Self::widen`]), and so does terms that no longer
 	/// settle a verdict adopted from the track (see [`Self::retake`]).
 	stale: RangeMap<u64, Stale>,
-	/// The coverage the adopted verdicts in `stale` were last found to settle under, `None`
-	/// while it holds none.
-	adopted_under: Option<super::Coverage>,
+	/// The budget and coverage the adopted verdicts in `stale` were last found to settle
+	/// under, `None` while it holds none.
+	adopted_under: Option<(Budget, super::Coverage)>,
 	/// No wider than the narrowest budget in `stale`, so [`Self::widen`] looks only when a
 	/// budget wider than it could take a run back.
 	narrowest: Option<Duration>,
@@ -1776,6 +1776,7 @@ impl Misses {
 	/// already gave up. Only its record's fold forgets them. The drop poll names them, so
 	/// nothing is reported here.
 	fn adopt_drops(&mut self, state: &TrackState, hole: ops::Range<u64>, drift: &Drift) {
+		let mut adopted = false;
 		for (run, gone) in state.drops.overlapping(&hole) {
 			let run = run.start.max(hole.start)..run.end.min(hole.end);
 			if !run.is_empty() && drift.settles(run.start, gone) {
@@ -1784,8 +1785,11 @@ impl Misses {
 					adopted: Some(gone.stale_cap()),
 				});
 				self.hold_verdict(run, stale);
-				self.adopted_under = Some(drift.coverage.clone());
+				adopted |= stale.is_some();
 			}
+		}
+		if adopted {
+			self.adopted_under = Some((drift.budget.clone(), drift.coverage.clone()));
 		}
 	}
 
@@ -1802,14 +1806,14 @@ impl Misses {
 
 	/// Take back the runs given up as stale that `drift` no longer settles, returning them for
 	/// the caller to reopen with [`Self::reopen`]: a wider budget reverses a stale verdict, and
-	/// so does a coverage that no longer reads what a verdict adopted from the track rests on,
-	/// such as the cap the upstream judged it within.
+	/// so does a budget or coverage that no longer reads what a verdict adopted from the track
+	/// rests on, such as the cap the upstream judged it within.
 	pub fn retake(&mut self, drift: &Drift) -> RangeSet<u64> {
 		let mut taken = self.widen(&drift.budget);
 		if self
 			.adopted_under
 			.as_ref()
-			.is_some_and(|under| *under != drift.coverage)
+			.is_some_and(|(budget, coverage)| *budget != drift.budget || *coverage != drift.coverage)
 		{
 			let unsettled: Vec<ops::Range<u64>> = (self.stale.iter())
 				.map(|(run, verdict)| verdict.unsettled(run, drift))
@@ -1824,7 +1828,7 @@ impl Misses {
 				.stale
 				.iter()
 				.any(|(_, verdict)| verdict.adopted.is_some())
-				.then(|| drift.coverage.clone());
+				.then(|| (drift.budget.clone(), drift.coverage.clone()));
 		}
 		taken
 	}
@@ -2432,6 +2436,70 @@ mod tests {
 		assert_eq!(kept, std::iter::once(2..4).collect(), "the rest stays adopted");
 		assert!(misses.adopted_under.is_some());
 		assert!(misses.retake(&drift(3..=4)).is_empty());
+	}
+
+	/// A budget that varies by group is held to its widest, so a range that widens it asks an
+	/// adopted verdict again though no group's own budget grew.
+	#[kio::test]
+	async fn an_adopted_stale_verdict_is_asked_again_once_the_budget_varies() {
+		use super::super::super::subscription::{Joining, Unheld, Window};
+		use crate::track::{Range, Start};
+
+		let broadcast = crate::broadcast::Info::default().produce();
+		let track = broadcast.create_track("varied", crate::track::Info::default()).unwrap();
+		let budget = Duration::from_secs(5);
+		let _reader = track.subscribe(Subscription::default().with_max(budget));
+		for key in [4, 0] {
+			track
+				.create_group(crate::group::Info { start: key })
+				.unwrap()
+				.finish()
+				.unwrap();
+		}
+		track.give_up(1..3, Hole::stale(budget).capped(Some(5)));
+		let state = track.state.read();
+		let groups = Cover::new(std::iter::once(0..=4));
+		let drift = |budget: Budget| Drift {
+			budget,
+			bound: None,
+			edge: state.drift_edge(&Servable::ALL),
+			coverage: Some((groups.clone(), Some(5))),
+		};
+		let mut misses = Misses::default();
+		let mut given_up = Vec::new();
+		let waiter = kio::Waiter::noop();
+		let uniform = drift(Budget::uniform(budget));
+		misses.judge(
+			&state,
+			(0, 0, Some(5)),
+			None,
+			None,
+			None,
+			|span| [span].into_iter().collect(),
+			&Delivered::default(),
+			&uniform,
+			&mut given_up,
+			&waiter,
+		);
+		assert!(misses.given_up.contains(&1) && misses.given_up.contains(&2), "adopted");
+
+		// A second join twice as wide raises the widest budget past the verdict's, while the
+		// groups the verdict covers still get the budget they were judged under.
+		let join = |max| {
+			Range::from(Start::Live {
+				min: None,
+				max: Some(max),
+			})
+		};
+		let ranges = [(0, join(budget)), (1, join(budget * 2))];
+		let placed = |key| Joining::At(if key == 0 { 1 } else { 4 });
+		let varied = Window::keyed_since(ranges, placed, None, &Unheld).budget();
+		assert!(!varied.is_uniform() && varied.at(1) == budget && varied.widest() == budget * 2);
+		let varied = drift(varied);
+		let run: RangeSet<u64> = std::iter::once(1..3).collect();
+		assert_eq!(misses.unanswered(&state, 1..3, &varied), run);
+		assert_eq!(misses.retake(&varied), run);
+		assert!(misses.stale.is_empty() && misses.adopted_under.is_none());
 	}
 
 	#[kio::test]
