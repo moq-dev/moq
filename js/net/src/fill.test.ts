@@ -1489,7 +1489,8 @@ test.each(["arrival", "sequence"])("fill: a %s read gives up a head still asked 
 		const ordered = mode === "sequence" ? reader.ordered() : undefined;
 		const next = () => (ordered ? ordered.nextGroup() : reader.recvGroup());
 		if (!ordered) expect((await next())?.start).toBe(3n);
-		let took: bigint | undefined | null = null;
+		// Null until the read resolves: cast, since TypeScript would narrow it to null for good.
+		let took = null as bigint | undefined | null;
 		const read = next().then((group) => {
 			took = group?.start;
 		});
@@ -1505,7 +1506,7 @@ test.each(["arrival", "sequence"])("fill: a %s read gives up a head still asked 
 		await yieldNow();
 		expect(took).toBeNull();
 
-		clock.advance(Duration.millis(200));
+		await clock.advance(Duration.millis(200));
 		await read;
 		expect(took).toBe(ordered ? 3n : undefined);
 
