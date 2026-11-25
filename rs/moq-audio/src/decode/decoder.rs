@@ -513,9 +513,12 @@ pub(crate) mod tests {
 		let mut decoder = Decoder::new(&encoder.catalog(), &Config::default()).unwrap();
 		crate::single(decoder.decode_all(&packet).unwrap());
 		assert!(!decoder.conceals());
-		// A CELT DTX packet decodes as a loss in the SILK mode before it, so it conceals nothing either.
-		crate::single(decoder.decode_all(&[0xf8]).unwrap());
-		assert!(!decoder.conceals());
+		// CELT DTX and one-byte frames decode as a loss in the SILK mode before them, so they
+		// conceal nothing either.
+		for packet in [&[0xf8][..], &[0xf8, 0xaa]] {
+			crate::single(decoder.decode_all(packet).unwrap());
+			assert!(!decoder.conceals());
+		}
 		assert!(matches!(decoder.decode(&[]), Err(Error::Decode(_))));
 	}
 
