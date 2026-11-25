@@ -402,10 +402,10 @@ impl ExportSource {
 	}
 
 	/// Start at the newest group, the live edge, rather than the oldest one the max delay still
-	/// reaches. The subscription joins at the edge too, whatever the delay's min, so no hop spends
-	/// the path on groups this reader skips. It carries the max delay from the start: under a zero budget every
-	/// hop drops each group a newer one supersedes, and raising it later cannot recover the
-	/// groups that follow the edge.
+	/// reaches. The subscription asks to join at the edge too, whatever the delay's min, so a hop
+	/// whose protocol carries a join's min spends no path on groups this reader skips. It carries
+	/// the max delay from the start: under a zero budget every hop drops each group a newer one
+	/// supersedes, and raising it later cannot recover the groups that follow the edge.
 	pub fn live(mut self) -> Self {
 		self.start().live = true;
 		self
