@@ -10810,8 +10810,10 @@ impl Cursor {
 			return;
 		}
 		let state = self.state.read();
+		// A fill's answer counts too: a widening hands it back to the fills (see `reowe`).
+		let refills = self.misses.is_some();
 		self.record.skipped.prune(state.lookup.len(), |run| {
-			!state.lookup.range(run.clone()).any(|(_, slot)| slot.is_read())
+			!(state.lookup.range(run.clone())).any(|(_, slot)| slot.is_read() || (refills && slot.serves_end()))
 		});
 	}
 
@@ -31248,6 +31250,56 @@ mod test {
 			widened.push(group.start);
 		}
 		assert_eq!(widened, [2, 1, 0]);
+	}
+
+	/// A skipped run whose only cached group is a fill's answer is still held for a widening
+	/// to re-offer, as a run holding a live group is.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_skipped_run_holding_only_a_fill_answer_is_re_offered() {
+		let budget = Duration::from_millis(100);
+		let producer = track_producer("test", None);
+		let dynamic = producer.requests();
+		let mut subscriber = producer.subscribe(Subscription::default().with_max(budget));
+		let write = |key: u64| {
+			let mut group = producer.create_group(group::Info { start: key }).unwrap();
+			group.write_frame(Timestamp::unscaled(key), &b"x"[..]).unwrap();
+			group.finish().unwrap();
+		};
+		for key in 0..4 {
+			write(key);
+		}
+		evict(&producer, 1);
+		let waiter = kio::Waiter::noop();
+		let next = |subscriber: &mut Subscriber| match subscriber.poll_recv_group(&waiter) {
+			Poll::Ready(Ok(Some(group))) => group.start,
+			_ => panic!("a group is cached"),
+		};
+		assert_eq!(next(&mut subscriber), 3);
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("group 1 is a miss");
+		};
+		producer.broadcast.pool.step(budget);
+		let mut filled = fill.accept(1, None).unwrap().expect("a fresh group");
+		filled.write_frame(Timestamp::unscaled(1), &b"x"[..]).unwrap();
+		filled.finish().unwrap();
+		drop(fill);
+		write(4);
+		write(5);
+		assert_eq!(next(&mut subscriber), 5);
+		assert_eq!(next(&mut subscriber), 4);
+		// The live groups of the skipped run go, leaving the fill's answer alone in it, and a
+		// hand-out prunes the skipped runs.
+		evict(&producer, 0);
+		evict(&producer, 2);
+		write(6);
+		assert_eq!(next(&mut subscriber), 6);
+		subscriber.update(subscriber.subscription().with_max(None)).unwrap();
+		let mut widened = Vec::new();
+		while let Poll::Ready(Ok(Some(group))) = subscriber.poll_recv_group(&waiter) {
+			widened.push(group.start);
+		}
+		assert_eq!(widened, [1]);
 	}
 
 	/// A live arrival judged on its own keeps the history a resumed copy's live floor sits
