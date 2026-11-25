@@ -1231,7 +1231,7 @@ impl SubscribeDrop {
 	}
 }
 
-/// A SUBSCRIBE_DROP or SUBSCRIBE_SKIP range: `Group Start` and an exclusive `Group End` past
+/// A SUBSCRIBE_DROP range: `Group Start` and an exclusive `Group End` past
 /// it on lite-07, an inclusive `Group End` before. Either way it ends by the reserved key
 /// `u64::MAX`, so it never names that group.
 fn decode_groups(r: &mut Decoder<'_>, version: Version) -> Result<std::ops::Range<u64>, DecodeError> {

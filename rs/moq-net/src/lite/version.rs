@@ -295,8 +295,7 @@ impl Version {
 		)
 	}
 
-	/// Whether SUBSCRIBE_DROP and SUBSCRIBE_SKIP carry `Group Start` and an exclusive
-	/// `Group End` past it. Added in lite-07; earlier versions carry an inclusive `Group End`.
+	/// Whether SUBSCRIBE_DROP carries `Group Start` and an exclusive `Group End` past it. Added in lite-07; earlier versions carry an inclusive `Group End`.
 	pub(crate) fn has_group_span(self) -> bool {
 		!matches!(
 			self,

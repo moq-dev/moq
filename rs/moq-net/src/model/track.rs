@@ -852,7 +852,7 @@ pub(crate) struct TrackState {
 	// Counts changes to how a time start is placed other than by groups arriving or drops:
 	// `time_starts`, `anchors`, and `starts_at_keys`. See [`Unplaced::mark`].
 	placing: u64,
-	// Keys the upstream publisher gave up, with why: an incoming SUBSCRIBE_SKIP or
+	// Keys the upstream publisher gave up, with why: an incoming Previous Delta or
 	// SUBSCRIBE_DROP, or a producer cut. Kept apart from the cache so reclaiming a slot
 	// cannot erase a disposition a relay must forward, and as ranges so a wide one costs
 	// one entry.
@@ -5839,8 +5839,8 @@ impl Producer {
 
 	/// Declare that this producer will never produce `groups`: none will arrive, so a reader
 	/// waiting on one moves past it, the declared end does not wait for them, and a relay
-	/// serving this track forwards the skip (lite-07 SUBSCRIBE_SKIP). Unlike a drop, it ends
-	/// no reader.
+	/// serving this track forwards the skip (a lite-07 GROUP's Previous Delta). Unlike a drop,
+	/// it ends no reader.
 	///
 	/// This and [`Self::append_group`] are the only sources of a skip: a gap between created
 	/// groups says nothing, since groups may be created out of order, so only the producer
@@ -18502,7 +18502,7 @@ mod test {
 		assert_eq!(start(&mut paused), None, "a group may still start in 1400..=1700");
 		assert_eq!(drain(&mut paused), Vec::<u64>::new(), "reads from the time meanwhile");
 
-		// The publisher names the pause with SUBSCRIBE_SKIP.
+		// The next group's Previous Delta proves the pause empty.
 		producer.skip_groups(1400..2000);
 		assert_eq!(start(&mut paused), Some(1400));
 		write_group(&producer, 2000);

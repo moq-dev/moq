@@ -1565,7 +1565,7 @@ test("a received copy places a time from a whole group's span", () => {
 	expect(holdings.containing(1700n, NO_MAX_DELAY)).toBe("unknown");
 	expect(drainGroups(paused)).toEqual([]);
 
-	// The publisher names the pause with SUBSCRIBE_SKIP.
+	// The next group's Previous Delta proves the pause empty.
 	hooks.skipTrackGroups(producer, 1400n, 2000n);
 	expect(holdings.containing(1700n, NO_MAX_DELAY)).toEqual({ at: 1400n });
 	putGroup(producer, 2000n, 2000);

@@ -130,7 +130,7 @@ export interface FillAsk {
  * still arriving would reset it.
  *
  * Before lite-07 a subscription carries one range, so each run goes out on a recovery of its own
- * instead. Its publisher names no keys between two group starts (no GROUP_END or SUBSCRIBE_SKIP),
+ * instead. Its publisher names no keys between two group starts (no GROUP_END or Previous Delta),
  * and the keys of a timed track are its media time, so FETCHing a run key by key would cost a
  * round trip per microsecond. A SUBSCRIBE from the run's first key answers in one round trip
  * instead: its start is the first group at or past that key, and nothing below it is delivered.

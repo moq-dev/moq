@@ -8339,7 +8339,7 @@ impl GroupIngest {
 			return Ok(());
 		};
 		// A group that arrived was produced after all: it keeps the group, and the session
-		// goes on, as for a lite SUBSCRIBE_SKIP.
+		// goes on, as for a lite GROUP's Previous Delta.
 		if let Some(cached) = track.skip_received(start..key).iter().next() {
 			tracing::warn!(
 				track = %track.name(),

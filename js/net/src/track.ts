@@ -791,7 +791,7 @@ class TrackState {
 	// How many groups were mirrored in, whatever this sink reads: one arriving after its reader
 	// ran out is still in flight below the end.
 	arrived = 0;
-	// Keys the upstream publisher gave up, with why: an incoming SUBSCRIBE_SKIP or
+	// Keys the upstream publisher gave up, with why: an incoming Previous Delta or
 	// SUBSCRIBE_DROP, or a producer cut. Kept apart from the cache so reclaim cannot
 	// erase a disposition a downstream publisher still has to forward, and as runs so a wide
 	// DROP costs one entry. A sink shares its producer's, which the pool's idle window forgets.
@@ -2831,7 +2831,7 @@ export class Producer {
 	/**
 	 * Declare that this producer will never produce `[start, end)`: none will arrive, so a reader
 	 * waiting on one moves past it, the declared end does not wait for them, and a relay serving
-	 * this track forwards the skip (lite-07 SUBSCRIBE_SKIP). Unlike a drop, it ends no reader.
+	 * this track forwards the skip (a lite-07 GROUP's Previous Delta). Unlike a drop, it ends no reader.
 	 *
 	 * This and {@link appendGroup} are the only sources of a skip: a gap between created groups
 	 * says nothing, since groups may be created out of order, so only the producer knows a

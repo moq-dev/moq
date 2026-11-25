@@ -314,8 +314,8 @@ impl RangeFills {
 		waiter: &kio::Waiter,
 	) -> Result<bool, Error> {
 		// What the copy records skipped is never produced, such as the starts inside a whole
-		// group's span, which its GROUP_END names rather than a SUBSCRIBE_SKIP: a fill owing one
-		// is answered as a SUBSCRIBE_SKIP answers it, rather than asked or recovered again.
+		// group's span its GROUP_END names, or a gap a GROUP's Previous Delta proves: a fill owing
+		// one is answered as a skip, rather than asked or recovered again.
 		let mut skipped = Vec::new();
 		for fill in &self.held {
 			if let Some(run) = fill.next_run() {
@@ -603,7 +603,7 @@ pub(super) struct Refusal {
 	/// fills owing them now, since another request may still get them: a stale drop judges
 	/// a budget, and a range starting past them is the subscriber's own choice.
 	lost: bool,
-	/// Whether the source never produced them (a SUBSCRIBE_SKIP), which the fill answers as a
+	/// Whether the source never produced them (a GROUP's Previous Delta), which the fill answers as a
 	/// skip: its readers pass over them rather than losing them.
 	skip: bool,
 }
@@ -1217,7 +1217,7 @@ mod tests {
 		);
 	}
 
-	/// Groups a recovery's SUBSCRIBE_SKIP names were never produced: the reader passes over
+	/// Groups a recovery's Previous Delta proves empty were never produced: the reader passes over
 	/// them, not a gap, even once the pool forgets the skip the copy recorded to pay its debt.
 	#[test]
 	fn a_skip_answer_is_no_gap_once_the_cache_forgets_it() {

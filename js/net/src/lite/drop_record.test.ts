@@ -29,7 +29,7 @@ afterEach(() => mock.restore());
 // A hop of the chain: the publisher to the relay, or the relay to the viewer.
 type Hop = "up" | "down";
 
-// A SUBSCRIBE_DROP or SUBSCRIBE_SKIP a subscriber decoded, and on which hop.
+// A SUBSCRIBE_DROP a subscriber decoded, and on which hop.
 interface Heard {
 	hop: Hop;
 	// Heard on a subscription opened after the chain's two, such as a recovery: its drops refuse

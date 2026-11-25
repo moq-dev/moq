@@ -10692,8 +10692,7 @@ mod serve_group_test {
 		drops
 	}
 
-	/// The lite-07 SUBSCRIBE_SKIP and SUBSCRIBE_DROP a run loop's subscribe stream carried, in
-	/// order, once flushed.
+	/// The lite-07 SUBSCRIBE_DROP a run loop's subscribe stream carried, in order, once flushed.
 	async fn holes(
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
 		log: &Log,
