@@ -2,10 +2,10 @@
 
 ## Goal
 
-moq-audio encodes and decodes Opus through an implementation whose codec
-logic compiles under `#![forbid(unsafe_code)]`, and the vendored c2rust crate
-`rs/moq-libopus` is deleted. Output stays correct by the bar in the Plan, and
-moq-audio's public API does not change.
+The vendored c2rust crate `rs/moq-opus` is made safe where it is: moq-audio
+encodes and decodes Opus through it, and its codec logic compiles under
+`#![forbid(unsafe_code)]`. Output stays correct by the bar in the Plan, and
+moq-audio's public API does not change; `moq-opus`'s own API may.
 
 Not here: new Opus features (in-band FEC, DRED, libopus 1.5+ neural PLC or
 LACE), the browser side (`@moq/watch` decodes through WebCodecs), and the
@@ -16,12 +16,12 @@ platform backends (AudioToolbox, Media Foundation).
 Decided 2026-11-24 (maintainer, /quest-plan):
 
 - ✅ Spike first, then land the winning path (rejected: committing to
-  safe-ifying moq-libopus up front; committing to a pure-Rust crate up front;
+  safe-ifying moq-opus up front; committing to a pure-Rust crate up front;
   dropping, since the vendored crate is contained and bit-exact with C). The
-  reason: `rs/moq-libopus` ([moq-dev/moq#9578](https://github.com/moq-dev/moq/pull/9578))
+  reason: `rs/moq-opus` ([moq-dev/moq#9578](https://github.com/moq-dev/moq/pull/9578))
   is 55k lines of c2rust output from libopus 1.3.1, raw pointers throughout,
   and the decoder runs it on packets from the network.
-- ✅ Four candidates: (a) make moq-libopus safe module by module; (b) adopt
+- ✅ Four candidates: (a) make moq-opus safe module by module; (b) adopt
   or contribute to a pure-Rust crate, opus-pure first; (c) a clean port of C
   libopus to idiomatic safe Rust; (d) our own implementation written from
   RFC 6716 and RFC 8251. #9578's Decisions section surveys the existing
@@ -40,10 +40,16 @@ Decided 2026-11-24 (maintainer, /quest-plan):
 - ✅ The maintainer picks the winning path from the spike's numbers (rejected:
   the implementer picks), since it likely commits moq to owning an Opus
   codec for years.
-- ✅ The safe implementation is the crate `rs/moq-opus` (maintainer, after
-  planning). Under path (a), code moves into it from moq-libopus as it is
-  converted; under (b), it holds a fork if one is needed. An external crate
-  used unchanged needs no crate of ours.
+
+Decided 2026-11-25 (maintainer, /quest-run), replacing the 2026-11-24 entry
+that reserved `rs/moq-opus` for a separate safe crate:
+
+- ✅ The safe implementation is `rs/moq-opus` itself, the c2rust crate #9578
+  vendored, made safe in place (rejected: renaming #9578's crate to
+  `moq-libopus` and building a separate safe `moq-opus` beside it, then
+  deleting `moq-libopus`). Under path (a), its modules are converted where
+  they are; under (b) to (d), the picked code replaces its c2rust internals
+  behind the same crate. No second Opus crate is added or deleted.
 
 Milestone m3: the maintainer asked for this to follow #9578, and it is
 additive with no API change.

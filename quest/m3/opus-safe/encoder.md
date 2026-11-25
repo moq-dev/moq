@@ -1,11 +1,11 @@
-# [L] Encode Opus without unsafe code, and delete moq-libopus
+# [L] Encode Opus without unsafe code
 
 ## Goal
 
-moq-audio's Opus encoder backend (float encode with bitrate, DTX, signal, and
-application settings) runs on the picked path under
-`#![forbid(unsafe_code)]` and passes the harness. `rs/moq-libopus` and its
-workspace entries are deleted.
+`rs/moq-opus`'s encode path (float encode with bitrate, DTX, signal, and
+application settings) runs on the picked path and passes the harness, and
+the whole crate compiles under a crate-level `#![forbid(unsafe_code)]`, its
+remaining c2rust code deleted. moq-audio encodes through that safe API.
 
 ## Required
 
