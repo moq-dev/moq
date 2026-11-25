@@ -861,7 +861,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					.filter(|step| !step.is_zero())
 					.ok_or(Error::LacingDuration)?,
 			),
-			(false, TrackKind::Audio) => block_duration.map(std::time::Duration::from_nanos).or(track.default_duration),
+			(false, TrackKind::Audio) => block_duration
+				.map(std::time::Duration::from_nanos)
+				.or(track.default_duration),
 			(false, TrackKind::Video) => None,
 		};
 		// Validate the last timestamp before publishing any part of this block.

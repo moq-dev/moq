@@ -2320,7 +2320,11 @@ async fn audio_block_duration_overrides_the_default() {
 		assert_eq!(published.values().next().unwrap(), &expected, "before {before}");
 
 		let name = snapshot.audio.renditions.keys().next().unwrap();
-		assert_eq!(groups(&consumer, name).await, [(0, 20), (100_000, 20)], "before {before}");
+		assert_eq!(
+			groups(&consumer, name).await,
+			[(0, 20), (100_000, 20)],
+			"before {before}"
+		);
 	}
 }
 
@@ -2494,6 +2498,10 @@ async fn a_seek_after_a_deferred_one_wins() {
 
 	let snapshot = catalog.snapshot();
 	let name = snapshot.video.renditions.keys().next().unwrap();
-	let starts: Vec<u64> = groups(&consumer, name).await.into_iter().map(|(start, _)| start).collect();
+	let starts: Vec<u64> = groups(&consumer, name)
+		.await
+		.into_iter()
+		.map(|(start, _)| start)
+		.collect();
 	assert_eq!(starts, [0, 2_000_000]);
 }
