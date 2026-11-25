@@ -42,8 +42,8 @@ Decisions (maintainer, 2026-10-13):
   Superseded 2026-11-23: both move to Backblaze B2 for its startup credits.
   The Rust cache reads and writes B2 since
   [moq-dev/moq#9624](https://github.com/moq-dev/moq/pull/9624), with
-  [R2's teardown](/quest/m0/ci/mbx-b2.md) left; [Nix](/quest/m0/ci/nix-b2.md)
-  follows.
+  [R2's teardown](/quest/m0/ci/mbx-b2.md) left. `nix.moq.dev` serves from B2
+  since [moq-dev/moq#9625](https://github.com/moq-dev/moq/pull/9625), with its R2 buckets deleted.
 - Untrusted runs only read. Write credentials live in GitHub Environments
   whose deployment policy allows only `main` (plus release tags for the Nix
   signing key), so a pull request job cannot read them even from the same
