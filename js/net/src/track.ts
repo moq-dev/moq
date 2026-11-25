@@ -6151,10 +6151,10 @@ export class Subscriber {
 			// A range still to be placed may come to hold it too: it was in range when read, so passing
 			// it could lose a group the ranges still name. Settled first, so a range the groups or an
 			// upstream answer placed since counts where it placed. A refused lookup fails every read
-			// until the ranges change, this one included.
+			// until the ranges change, this one included, keeping the group for them to judge afresh.
 			const refused = this.#settle();
 			if (refused) {
-				held.close();
+				items.held = held;
 				return { kind: "error", error: refused };
 			}
 			if (this.#covered(held.start, held.start + 1n).length > 0 || this.#mayHold(held.start, held.end)) {

@@ -13849,7 +13849,11 @@ impl Ordered {
 				Held::Keep => return Poll::Ready(Ok(Some(*group))),
 				Held::Wait => self.held = Some(group),
 				Held::Pass => {}
-				Held::Refused(err) => return Poll::Ready(Err(err)),
+				// Kept, so the ranges changing again judges it afresh.
+				Held::Refused(err) => {
+					self.held = Some(group);
+					return Poll::Ready(Err(err));
+				}
 			}
 		}
 		let read = self.inner.poll_next_group(waiter);
@@ -18617,7 +18621,7 @@ mod test {
 	}
 
 	/// A group held behind a gap fails with a refusal of an update's time start, as every
-	/// read does until the ranges change, rather than being handed out.
+	/// read does until the ranges change, rather than being handed out, and stays held for them.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_held_group_fails_with_a_time_starts_refusal() {
@@ -18643,6 +18647,13 @@ mod test {
 		assert!(ordered.inner.refused().is_none(), "counted as an ask");
 		producer.refuse_time(5, Error::NotFound);
 		assert!(matches!(ordered.next_item().now_or_never(), Some(Err(Error::NotFound))));
+		// Ranges that no longer refuse take it up again.
+		ordered.update(Subscription::default().with_max(None)).unwrap();
+		assert_eq!(
+			held_next(&mut ordered),
+			Some(Ok(2)),
+			"the held group survives the refusal"
+		);
 	}
 
 	/// A group held behind a gap is passed once an update's time start, still waiting, lies
