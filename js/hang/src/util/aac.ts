@@ -115,8 +115,9 @@ const SYNC_EXTENSION_PS = 0x548;
  * Mirrors `aac::Config::parse` in rs/moq-mux: SBR and PS report the extension rate and stereo, not
  * their AAC-LC core, whether signaled explicitly or by a backward-compatible sync extension. A sync
  * extension behind fields this doesn't follow reports the core. Undefined when the config is
- * truncated, names a reserved rate or channelConfiguration, or, other than under explicit PS, takes
- * its channels from a program config element.
+ * truncated, names a reserved rate or channelConfiguration, or takes its channels from a program
+ * config element, except under explicit PS, which is stereo whatever that element says and is
+ * accepted without parsing it.
  */
 export function parseConfig(asc: Uint8Array): Config | undefined {
 	const bits = asc.byteLength * 8;
@@ -148,7 +149,8 @@ export function parseConfig(asc: Uint8Array): Config | undefined {
 
 	const type = objectType();
 	let rate = sampleRate();
-	let numberOfChannels = CHANNEL_COUNTS[read(4)];
+	const channelConfiguration = read(4);
+	let numberOfChannels = CHANNEL_COUNTS[channelConfiguration];
 	// Explicit SBR (5) or PS (29) plays at the extension rate that follows, over a core object type.
 	const explicit = type === 5 || type === 29;
 	let core = type;
@@ -157,8 +159,9 @@ export function parseConfig(asc: Uint8Array): Config | undefined {
 		core = objectType();
 		// extensionChannelConfiguration, only for ER BSAC.
 		if (core === 22) read(4);
-		// PS always decodes to stereo, even over a core whose channels a program config element names.
-		if (type === 29) numberOfChannels = 2;
+		// PS always decodes to stereo, even over a core whose channels a program config element
+		// names, which isn't parsed here; a reserved channelConfiguration is still refused.
+		if (type === 29 && (channelConfiguration === 0 || numberOfChannels !== undefined)) numberOfChannels = 2;
 	}
 	if (truncated || rate === undefined || numberOfChannels === undefined) return undefined;
 	const config = { sampleRate: rate, numberOfChannels };

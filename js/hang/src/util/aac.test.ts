@@ -100,8 +100,11 @@ describe("parseConfig", () => {
 	it("reports explicit SBR and PS output", () => {
 		expect(parseConfig(new Uint8Array([0x2b, 0x11, 0x88]))).toEqual({ sampleRate: 48000, numberOfChannels: 2 });
 		expect(parseConfig(new Uint8Array([0xeb, 0x09, 0x88]))).toEqual({ sampleRate: 48000, numberOfChannels: 2 });
-		// PS decodes to stereo even when a program config element names the core's channels.
+		// PS decodes to stereo even when a program config element names the core's channels, and the
+		// element isn't parsed, so this channelConfiguration-0 config without one is still accepted.
 		expect(parseConfig(new Uint8Array([0xeb, 0x01, 0x88]))).toEqual({ sampleRate: 48000, numberOfChannels: 2 });
+		// A reserved channelConfiguration (8) under PS is refused.
+		expect(parseConfig(new Uint8Array([0xeb, 0x41, 0x88]))).toBeUndefined();
 	});
 
 	// An AAC-LC core followed by a backward-compatible sync extension plays at the signaled output.
