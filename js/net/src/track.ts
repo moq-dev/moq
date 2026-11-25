@@ -3935,7 +3935,9 @@ export class Subscriber {
 
 	// Forget the gaps in `delivered` below each group past this subscriber's budget now, whether
 	// this track holds it or not: one landing there would be written off. A group skipped as
-	// stale is not forgotten, since a wider budget offers it again.
+	// stale is not forgotten, since a wider budget offers it again, and neither is one still
+	// buffered unread: it may have arrived after a newer one, so its own successor may be fresh.
+	// Mirrors the Rust `Cursor::forget_past_budget` keeping what the arrivals still owe.
 	#forgetPastBudget(delivered: Delivered, budget = this.#window.budget()): void {
 		if (delivered.aboveGap() === undefined) return;
 		// One edge for every group judged, so forgetting N gaps never resolves it N times.
@@ -3961,6 +3963,8 @@ export class Subscriber {
 					if (producer && !cachedHolds(producer, key)) this.#skipped.delete(key);
 					else skipped = min(skipped ?? key, key);
 				}
+				const owed = this.#lowestBuffered(delivered);
+				if (owed !== undefined) skipped = min(skipped ?? owed, owed);
 			}
 			if (skipped !== undefined && skipped < oldest) {
 				delivered.forgetBelow(skipped);
@@ -3972,6 +3976,18 @@ export class Subscriber {
 		}
 		// A buffered group in a gap forgotten here is never handed out.
 		if (forgot !== undefined && delivered === this.#delivered) this.#judge(0n, forgot);
+	}
+
+	// The lowest group buffered unread within this reader's range and window, not in `delivered`.
+	#lowestBuffered(delivered: Delivered): bigint | undefined {
+		const groups = this.#state.groups.peek();
+		const { start, end } = this.#cursor.peek();
+		for (let index = timelineIndex(groups, start); index < groups.length; index++) {
+			const key = groups[index].start;
+			if (end !== undefined && key >= end) return undefined;
+			if (this.#window.contains(key) && !delivered.has(key)) return key;
+		}
+		return undefined;
 	}
 
 	// Record `key` as skipped stale under `budget`, so a wider one offers it again.

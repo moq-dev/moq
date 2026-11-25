@@ -2456,6 +2456,9 @@ class Reader implements ResumeSource {
 		this.#delivered = delivered;
 		this.sync();
 		if (this.#closed) return undefined;
+		// As the take does, so a late group on a copy that ran out is offered here too. A serving
+		// copy it reopens owes a backfill, which the next take asks.
+		this.#reopen();
 		const { next } = this.#first(ordered, delivered);
 		if (!next) return undefined;
 		return hooks.peekGroup(next.sub, ordered, this.#newest === undefined ? undefined : this.#newest + 1n);

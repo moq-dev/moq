@@ -1490,6 +1490,32 @@ test("a scale-less track ages by arrival alone", () => {
 	}
 });
 
+// Retiring a group written off at the bound keeps a lower group still buffered: it arrived after
+// a newer one, so its own successor may be fresh. Mirrors the Rust
+// `a_group_written_off_at_the_bound_keeps_a_fresh_lower_one_owed`.
+test("a group written off at the bound keeps a fresh lower one buffered", () => {
+	const clock = manualTime(0);
+	try {
+		const producer = new TrackProducer("test").accept({ maxAge: Duration.millis(100) });
+		const reader = producer.subscribe(withMax({ delay: { max: Duration.millis(100) } }));
+		const write = (key: bigint) => {
+			const group = producer.createGroup(key);
+			group.writeFrame(textFrame("x", Timestamp.unscaled(key)));
+			group.finishAt(key + 1n);
+		};
+		write(3n);
+		clock.set(140);
+		write(2n);
+		write(1n);
+		// 2 went stale when 3 arrived a full budget ago, but 1's successor 2 arrived 10 ms ago.
+		clock.set(150);
+		expect(readable(reader)).toEqual([3n, 1n]);
+		producer.close();
+	} finally {
+		clock.installed.close();
+	}
+});
+
 // A time start resolves on keys alone: groups opened before their first frames, below a
 // reached end, are read from the one containing it. Mirrors the Rust `a_time_start_needs_no_frame`.
 test("a time start resolves on keys alone, before any group's first frame", () => {

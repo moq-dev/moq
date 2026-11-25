@@ -1106,6 +1106,42 @@ test("a late group on a drained serving copy is read", async () => {
 	}
 });
 
+test("a late group on a drained serving copy is peeked as the take hands it out", async () => {
+	const clock = new Manual();
+	const installed = install(clock);
+	const front = new Front();
+	const sources = [new BroadcastProducer(), new BroadcastProducer()];
+	const handles = sources.map((source) => source.consume());
+	const [ta, tb] = sources.map(copy);
+	hooks.receiveTrack(ta.producer);
+	hooks.receiveTrack(tb.producer);
+	front.serve(handles[0]);
+	const sub = front.consumer.track("seq").subscribe({ ranges: [{}] });
+	try {
+		await clock.advance(Duration.ZERO);
+		ta.write(0n);
+		ta.write(2n);
+		front.serve(handles[1]);
+		await clock.advance(Duration.ZERO);
+		tb.write(3n);
+		tb.write(5n);
+		tb.producer.finish();
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([5n, 3n, 2n, 0n]);
+		// The serving copy ran out; a group landing on it late is what the next take hands out.
+		tb.write(4n);
+		await clock.advance(Duration.ZERO);
+		expect(hooks.peekGroup(sub, false)).toBe(4n);
+		expect(drain(sub)).toEqual([4n]);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		for (const handle of handles) handle.close();
+		for (const source of sources) source.close();
+		installed.close();
+	}
+});
+
 // A replacement that ends cleanly before delivering any group doesn't end the read while the
 // replaced copy may still deliver a group the reader lacks under its cap.
 test("a replacement ending before any group waits for the replaced copy's late group", async () => {

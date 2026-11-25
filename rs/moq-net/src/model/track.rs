@@ -2333,7 +2333,8 @@ impl TrackState {
 	/// Moves `index` past every entry it looks at, the dead ones and those below `min_key`
 	/// included, which a lower floor re-offers from the cache instead. It stays only on a
 	/// trailing entry not handed out yet, which a fetched head may revive, so a wake walks
-	/// only what arrived since, however many stale entries did.
+	/// only that trailing run and what arrived since, however many stale entries did. The run
+	/// holds only groups that arrived cut short after the last readable one.
 	///
 	/// Ready with nothing once the track completed, or with its abort.
 	fn poll_arrivals(&self, index: &Cell<usize>, min_key: u64, window: &Window) -> Poll<Result<Option<Vec<u64>>>> {
@@ -32788,6 +32789,22 @@ mod test {
 			elapse(&producer, budget);
 			assert_eq!(drain_groups(&mut subscribe()), [base + 20_000], "from {base}");
 		}
+	}
+
+	/// Retiring a group written off at the bound keeps a lower group still owed: it arrived
+	/// after a newer one, so its own successor may be fresh.
+	#[test]
+	fn a_group_written_off_at_the_bound_keeps_a_fresh_lower_one_owed() {
+		let budget = Duration::from_millis(100);
+		let producer = track_producer("test", Info::default().with_max_age(budget));
+		let mut reader = producer.subscribe(Subscription::default().with_max(budget));
+		write_untimed_group(&producer, 3);
+		elapse(&producer, Duration::from_millis(140));
+		write_untimed_group(&producer, 2);
+		write_untimed_group(&producer, 1);
+		// 2 went stale when 3 arrived a full budget ago, but 1's successor 2 arrived 10 ms ago.
+		elapse(&producer, Duration::from_millis(10));
+		assert_eq!(drain_groups(&mut reader), [3, 1]);
 	}
 
 	/// A scale-less group's end is a bare number, no time, so a group finished whole ages only
