@@ -4277,6 +4277,7 @@ mod tests {
 			id: 0,
 			max_delay: None,
 			stale_budget: Duration::ZERO,
+			stale_cap: None,
 			start: None,
 			priority: 0,
 			requested: None,
