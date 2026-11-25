@@ -5094,16 +5094,17 @@ impl FrontServe {
 		.is_some_and(|best| best.id == route)
 	}
 
-	/// Whether an answer `route` gave for `asked` would serve another instance than the
-	/// front's, or an epoch of it that no longer stands: the route has since moved off it,
-	/// before the front resolved another instance won the path while the request was in
-	/// flight, or a higher epoch of the route's claim did.
-	fn stale(&self, route: u64, asked: &Instance) -> bool {
+	/// Whether an answer `route` gave for `asked` (an instance and its epoch) would serve
+	/// another instance than the front's, or an epoch of it that no longer stands: the route
+	/// has since moved off it, before the front resolved another instance won the path while
+	/// the request was in flight, or a higher epoch of the route's claim did, including one
+	/// that replaced the route in the table.
+	fn stale(&self, route: u64, asked: &(Instance, u64)) -> bool {
 		let table = self.shared.read();
-		let Some(entry) = table.routes.covering(&self.path).find(|entry| entry.id == route) else {
-			return false;
-		};
-		if entry.instance != *asked || self.resolved.as_ref().is_some_and(|resolved| resolved != asked) {
+		let entry = table.routes.covering(&self.path).find(|entry| entry.id == route);
+		if let Some(entry) = entry
+			&& (entry.instance != asked.0 || self.resolved.as_ref().is_some_and(|resolved| *resolved != asked.0))
+		{
 			return true;
 		}
 		let best = pick(
@@ -5113,8 +5114,11 @@ impl FrontServe {
 			&self.front,
 			self.resolved.as_ref().or(self.pin.as_ref()),
 		);
-		best.is_some_and(|best| {
-			best.instance != *asked || (best.claimed() == entry.claimed() && best.epoch > entry.epoch)
+		best.is_some_and(|best| match entry {
+			Some(entry) => best.instance != asked.0 || (best.claimed() == entry.claimed() && best.epoch > entry.epoch),
+			// The route left the table: its answer still serves its instance, unless a higher
+			// epoch of it wins now.
+			None => best.instance == asked.0 && best.epoch > asked.1,
 		})
 	}
 
@@ -5759,7 +5763,7 @@ impl kio::Task for FrontServe {
 								standing: false,
 							}),
 						},
-						Ok(_) if self.stale(route, &asked.0) => Event::Resolved {
+						Ok(_) if self.stale(route, &asked) => Event::Resolved {
 							route,
 							result: Err(Refusal {
 								err: Error::Unroutable,
@@ -15980,6 +15984,41 @@ mod tests {
 		// The newer epoch wins before the front hears the older one's answer.
 		let newer = producer.forward("src", epoch_claim(2, 11, 0)).unwrap();
 		asked.serve(broadcast::Info::new().produce());
+		let switch = queued(&newer).await;
+		assert!(
+			(&mut fresh).now_or_never().is_none(),
+			"the older epoch's answer must not resolve the request"
+		);
+
+		switch.reject(Error::Unroutable);
+		let mut result = None;
+		settle(|| {
+			result = (&mut fresh).now_or_never();
+			result.is_some()
+		})
+		.await;
+		assert!(matches!(result.unwrap(), Err(Error::Unroutable)));
+	}
+
+	/// An older epoch's answer whose route left the table before the front heard it never
+	/// resolves the request either: the newer epoch that replaced it is asked instead.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn an_older_epochs_answer_never_resolves_once_its_route_left() {
+		let producer = Config {
+			update_hold: Duration::ZERO,
+			..Config::from(origin(1))
+		}
+		.produce();
+		let consumer = producer.consume();
+		let filed = producer.forward("src/a", epoch_claim(1, 10, 1)).unwrap();
+		let mut fresh = Box::pin(consumer.request("src/a/b", None));
+		let asked = queued(&filed).await;
+
+		// The newer epoch replaces the older one's route before the front hears its answer.
+		let newer = producer.forward("src", epoch_claim(2, 11, 0)).unwrap();
+		asked.serve(broadcast::Info::new().produce());
+		drop(filed);
 		let switch = queued(&newer).await;
 		assert!(
 			(&mut fresh).now_or_never().is_none(),

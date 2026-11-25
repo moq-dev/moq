@@ -382,6 +382,13 @@ function unservable(instance: Instance.Valid | undefined): (entry: RouteEntry) =
 	return (entry) => received(entry) || entry.route.peek().instance !== instance;
 }
 
+/** Whether `slot` still serves an older epoch while it waits on its instance's newer one: nobody joins it meanwhile. */
+function outdated(slot: RequestSlot): boolean {
+	const current = slot.route.peek();
+	if (current?.front === undefined || slot.failover === undefined) return false;
+	return (slot.failover.route.peek().epoch ?? 0n) !== (current.epoch ?? 0n);
+}
+
 function unroutable(): StreamError {
 	return new StreamError(StreamCode.Unroutable, { message: "unroutable" });
 }
@@ -1136,7 +1143,8 @@ class OriginState {
 			for (const slot of slots) this.reroute(path, slot);
 		}
 		for (const path of this.requests.peek().keys()) if (Path.hasPrefix(prefix, path)) this.forget(path);
-		for (const [path] of detached) if (Path.hasPrefix(prefix, path)) this.forget(path);
+		// Read again: a slot rerouting may have retired into it, releasing what it waited on.
+		for (const path of this.detached.keys()) if (Path.hasPrefix(prefix, path)) this.forget(path);
 	}
 
 	/** Rebuild the publisher-facing originated table after an advertisement write. */
@@ -2426,7 +2434,7 @@ export class Consumer implements Reader {
 			pin === undefined
 				? requests.get(path)
 				: [...(this.#state.detached.get(path) ?? [])].find(
-						(other) => other.pin === pin && !this.#state.retained.has(other),
+						(other) => other.pin === pin && !this.#state.retained.has(other) && !outdated(other),
 					);
 		if (!slot && pin !== undefined) {
 			const created: RequestSlot = {

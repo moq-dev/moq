@@ -1523,3 +1523,66 @@ test("a superseded epoch never answers a fresh request", async () => {
 	filed.close();
 	origin.close();
 });
+
+// A pinned request is held to the same rule: while its instance's newer epoch has yet to answer,
+// a fresh request pinned to it never joins the slot still serving the older one.
+test("a superseded epoch never answers a fresh pinned request", async () => {
+	const origin = new Producer();
+	const path = Path.from("room/audio");
+	const pinned = Instance.random();
+	const older = origin.claim(path, { instance: { id: pinned, epoch: 1n }, cost: 9n });
+	const winning = origin.claim(path, { instance: { id: Instance.random(), epoch: 0n }, cost: 1n });
+	const held = origin.request(path, { instance: pinned });
+	const source = new BroadcastProducer();
+	defined((await older.requested().next()).value).serve(source.consume());
+	const reader = await held.broadcast();
+
+	const newer = origin.claim(path, { instance: { id: pinned, epoch: 2n }, cost: 9n });
+	const switching = defined((await newer.requested().next()).value);
+	const fresh = origin.request(path, { instance: pinned });
+	await settle();
+	expect(fresh.active.peek()).toBeUndefined();
+	expect(readsFrom(reader, source)).toBe(true);
+
+	const refused = new StreamError(StreamCode.Unroutable);
+	switching.reject(refused);
+	await settle();
+	expect(fresh.closed.peek()).toBe(refused);
+
+	fresh.close();
+	held.close();
+	source.close();
+	newer.close();
+	winning.close();
+	older.close();
+	origin.close();
+});
+
+// A newer epoch taking the path releases the cheaper route of the older one the request was
+// moving to: nothing waits on its answer any more.
+test("a held request is unwanted once a newer epoch wins", async () => {
+	const origin = new Producer();
+	const path = Path.from("room/alice");
+	const id = Instance.random();
+	const serving = origin.claim(Path.from("room"), { instance: { id, epoch: 1n }, cost: 5n });
+	const requester = origin.request(path);
+	const source = new BroadcastProducer();
+	defined((await serving.requested().next()).value).serve(source.consume());
+	await requester.broadcast();
+
+	const cheaper = origin.claim(Path.from("room"), { instance: { id, epoch: 1n }, cost: 1n });
+	const held = defined((await cheaper.requested().next()).value);
+	const left = unwanted(held);
+	await settle();
+	expect(left()).toBe(false);
+
+	const newer = origin.claim(Path.from("room"), { instance: { id, epoch: 2n }, cost: 10n });
+	await settle();
+	expect(left()).toBe(true);
+	requester.close();
+	source.close();
+	newer.close();
+	cheaper.close();
+	serving.close();
+	origin.close();
+});
