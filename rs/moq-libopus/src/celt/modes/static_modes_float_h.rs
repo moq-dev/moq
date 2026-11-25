@@ -25,9 +25,7 @@ pub static window120: [opus_val16; 120] = [
     0.99970802, 0.99981248, 0.99988613, 0.99993565, 0.99996697,
     0.99998518, 0.99999457, 0.99999859, 0.99999982, 1.0000000,
 ];
-pub static logN400: [i16; 21] = [
-    0, 0, 0, 0, 0, 0, 0, 0, 8, 8, 8, 8, 16, 16, 16, 21, 21, 24, 29, 34, 36,
-];
+pub static logN400: [i16; 21] = [0, 0, 0, 0, 0, 0, 0, 0, 8, 8, 8, 8, 16, 16, 16, 21, 21, 24, 29, 34, 36];
 #[rustfmt::skip]
 pub static cache_index50: [i16; 105] = [
     -1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, 41, 41, 41,
@@ -85,9 +83,9 @@ pub static cache_caps50: [u8; 168] = [
 ];
 
 macro_rules! c {
-    ($re:literal, $im:literal) => {
-        kiss_twiddle_cpx::new($re, $im)
-    };
+	($re:literal, $im:literal) => {
+		kiss_twiddle_cpx::new($re, $im)
+	};
 }
 
 #[rustfmt::skip]
@@ -406,72 +404,36 @@ pub static fft_bitrev60: [i16; 60] = [
     3, 15, 27, 39, 51, 7, 19, 31, 43, 55, 11, 23, 35, 47, 59,
 ];
 pub static fft_state48000_960_0: kiss_fft_state = kiss_fft_state {
-    nfft: 480,
-    scale: 0.002083333,
-    shift: -1,
-    factors: [
-        (5, 96),
-        (3, 32),
-        (4, 8),
-        (2, 4),
-        (4, 1),
-        (0, 0),
-        (0, 0),
-        (0, 0),
-    ],
-    bitrev: &fft_bitrev480,
-    twiddles: &fft_twiddles48000_960,
+	nfft: 480,
+	scale: 0.002083333,
+	shift: -1,
+	factors: [(5, 96), (3, 32), (4, 8), (2, 4), (4, 1), (0, 0), (0, 0), (0, 0)],
+	bitrev: &fft_bitrev480,
+	twiddles: &fft_twiddles48000_960,
 };
 pub static fft_state48000_960_1: kiss_fft_state = kiss_fft_state {
-    nfft: 240,
-    scale: 0.004166667,
-    shift: 1,
-    factors: [
-        (5, 48),
-        (3, 16),
-        (4, 4),
-        (4, 1),
-        (0, 0),
-        (0, 0),
-        (0, 0),
-        (0, 0),
-    ],
-    bitrev: &fft_bitrev240,
-    twiddles: &fft_twiddles48000_960,
+	nfft: 240,
+	scale: 0.004166667,
+	shift: 1,
+	factors: [(5, 48), (3, 16), (4, 4), (4, 1), (0, 0), (0, 0), (0, 0), (0, 0)],
+	bitrev: &fft_bitrev240,
+	twiddles: &fft_twiddles48000_960,
 };
 pub static fft_state48000_960_2: kiss_fft_state = kiss_fft_state {
-    nfft: 120,
-    scale: 0.008333333,
-    shift: 2,
-    factors: [
-        (5, 24),
-        (3, 8),
-        (2, 4),
-        (4, 1),
-        (0, 0),
-        (0, 0),
-        (0, 0),
-        (0, 0),
-    ],
-    bitrev: &fft_bitrev120,
-    twiddles: &fft_twiddles48000_960,
+	nfft: 120,
+	scale: 0.008333333,
+	shift: 2,
+	factors: [(5, 24), (3, 8), (2, 4), (4, 1), (0, 0), (0, 0), (0, 0), (0, 0)],
+	bitrev: &fft_bitrev120,
+	twiddles: &fft_twiddles48000_960,
 };
 pub static fft_state48000_960_3: kiss_fft_state = kiss_fft_state {
-    nfft: 60,
-    scale: 0.016666667,
-    shift: 3,
-    factors: [
-        (5, 12),
-        (3, 4),
-        (4, 1),
-        (0, 0),
-        (0, 0),
-        (0, 0),
-        (0, 0),
-        (0, 0),
-    ],
-    bitrev: &fft_bitrev60,
-    twiddles: &fft_twiddles48000_960,
+	nfft: 60,
+	scale: 0.016666667,
+	shift: 3,
+	factors: [(5, 12), (3, 4), (4, 1), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0)],
+	bitrev: &fft_bitrev60,
+	twiddles: &fft_twiddles48000_960,
 };
 #[rustfmt::skip]
 pub static mdct_twiddles960: [&[f32]; 4] = [
@@ -842,39 +804,38 @@ pub static mdct_twiddles960: [&[f32]; 4] = [
     ]
 ];
 pub static mut mode48000_960_120: OpusCustomMode = OpusCustomMode {
-    Fs: 48000,
-    overlap: 120,
-    nbEBands: 21,
-    effEBands: 21,
-    preemph: [0.85000610f32, 0.0000000f32, 1.0000000f32, 1.0000000f32],
-    eBands: eband5ms.as_ptr(),
-    maxLM: 3,
-    nbShortMdcts: 8,
-    shortMdctSize: 120,
-    nbAllocVectors: 11,
-    allocVectors: band_allocation.as_ptr(),
-    logN: logN400.as_ptr(),
-    window: window120.as_ptr(),
-    mdct: mdct_lookup {
-        n: 1920,
-        maxshift: 3,
-        kfft: [
-            &fft_state48000_960_0,
-            &fft_state48000_960_1,
-            &fft_state48000_960_2,
-            &fft_state48000_960_3,
-        ],
-        trig: &mdct_twiddles960,
-    },
-    cache: PulseCache {
-        size: 392,
-        index: cache_index50.as_ptr(),
-        bits: cache_bits50.as_ptr(),
-        caps: cache_caps50.as_ptr(),
-    },
+	Fs: 48000,
+	overlap: 120,
+	nbEBands: 21,
+	effEBands: 21,
+	preemph: [0.85000610f32, 0.0000000f32, 1.0000000f32, 1.0000000f32],
+	eBands: eband5ms.as_ptr(),
+	maxLM: 3,
+	nbShortMdcts: 8,
+	shortMdctSize: 120,
+	nbAllocVectors: 11,
+	allocVectors: band_allocation.as_ptr(),
+	logN: logN400.as_ptr(),
+	window: window120.as_ptr(),
+	mdct: mdct_lookup {
+		n: 1920,
+		maxshift: 3,
+		kfft: [
+			&fft_state48000_960_0,
+			&fft_state48000_960_1,
+			&fft_state48000_960_2,
+			&fft_state48000_960_3,
+		],
+		trig: &mdct_twiddles960,
+	},
+	cache: PulseCache {
+		size: 392,
+		index: cache_index50.as_ptr(),
+		bits: cache_bits50.as_ptr(),
+		caps: cache_caps50.as_ptr(),
+	},
 };
-pub static mut static_mode_list: [*const OpusCustomMode; 1] =
-    unsafe { [&mode48000_960_120 as *const OpusCustomMode] };
+pub static mut static_mode_list: [*const OpusCustomMode; 1] = unsafe { [&mode48000_960_120 as *const OpusCustomMode] };
 
 use super::arch_h::opus_val16;
 use super::{band_allocation, eband5ms};

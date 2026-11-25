@@ -8,10 +8,10 @@ pub const OPUS_SET_FORCE_MODE_REQUEST: i32 = 11002;
 
 #[inline]
 pub fn align(i: i32) -> i32 {
-    let alignment: u32 = 8 as u64 as u32;
-    return (i as u32)
-        .wrapping_add(alignment)
-        .wrapping_sub(1)
-        .wrapping_div(alignment)
-        .wrapping_mul(alignment) as i32;
+	let alignment: u32 = 8 as u64 as u32;
+	return (i as u32)
+		.wrapping_add(alignment)
+		.wrapping_sub(1)
+		.wrapping_div(alignment)
+		.wrapping_mul(alignment) as i32;
 }
