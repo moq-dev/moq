@@ -5116,9 +5116,9 @@ impl FrontServe {
 		);
 		best.is_some_and(|best| match entry {
 			Some(entry) => best.instance != asked.0 || (best.claimed() == entry.claimed() && best.epoch > entry.epoch),
-			// The route left the table: its answer still serves its instance, unless a higher
-			// epoch of it wins now.
-			None => best.instance == asked.0 && best.epoch > asked.1,
+			// The route left the table: its answer still serves its instance, unless another
+			// instance or a higher epoch of it wins now.
+			None => best.instance != asked.0 || best.epoch > asked.1,
 		})
 	}
 
@@ -16033,6 +16033,48 @@ mod tests {
 		})
 		.await;
 		assert!(matches!(result.unwrap(), Err(Error::Unroutable)));
+	}
+
+	/// Nor when the newer epoch, superseding it, leaves another instance winning: the
+	/// request resolves on that instance, never on the older epoch's departed answer.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn an_older_epochs_departed_answer_never_resolves_once_another_instance_wins() {
+		let producer = Config {
+			update_hold: Duration::ZERO,
+			..Config::from(origin(1))
+		}
+		.produce();
+		let consumer = producer.consume();
+		let filed = producer.forward("src", epoch_claim(1, 10, 0).with_cost(1)).unwrap();
+		let other = RouteInfo::new()
+			.with_instance(crate::Instance::random(), 0)
+			.with_hops(hops(&[12]))
+			.with_node(Some(node_id(12)))
+			.with_cost(5);
+		let other = producer.forward("src", other).unwrap();
+		let mut fresh = Box::pin(consumer.request("src/b", None));
+		let asked = queued(&filed).await;
+
+		// The newer epoch supersedes the older one, which leaves, so the other instance wins.
+		let newer = producer.forward("src", epoch_claim(2, 11, 0).with_cost(9)).unwrap();
+		asked.serve(broadcast::Info::new().produce());
+		drop(filed);
+		let switch = queued(&other).await;
+		assert!(
+			(&mut fresh).now_or_never().is_none(),
+			"the older epoch's answer must not resolve the request"
+		);
+
+		switch.reject(Error::Unroutable);
+		let mut result = None;
+		settle(|| {
+			result = (&mut fresh).now_or_never();
+			result.is_some()
+		})
+		.await;
+		assert!(matches!(result.unwrap(), Err(Error::Unroutable)));
+		drop(newer);
 	}
 
 	/// A pool host that is full withdraws its route: a path it won moves to another host's
