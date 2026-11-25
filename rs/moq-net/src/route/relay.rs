@@ -2617,15 +2617,15 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			.map(|((.., origin), from, claim)| (origin, from, claim))
 	}
 
-	/// The filing of `origin`'s claim a request for `broadcast` naming `origin` follows from
-	/// here: the deepest of its tier where `origin`'s claim is available and of the tier's
-	/// precedence, or else, for another node, the one [`Self::named`] gives, which a
-	/// neighbour may still hold.
-	pub fn filed(&self, origin: NodeId, (path, instance): &Broadcast<I>) -> Option<Path> {
+	/// The filing of `origin`'s claim a request for `broadcast` naming `origin` from `asker`
+	/// follows from here: the deepest of its tier where `origin`'s claim is available and of
+	/// the tier's precedence, or else, for another node, the one [`Self::named`] gives, which
+	/// a neighbour may still hold.
+	pub fn filed(&self, origin: NodeId, (path, instance): &Broadcast<I>, asker: Option<N>) -> Option<Path> {
 		let eligible = self.eligible(origin, path, instance);
 		match self.is_self(origin) {
 			true => eligible,
-			false => eligible.or_else(|| self.named(origin, path, instance)),
+			false => eligible.or_else(|| self.named(origin, path, instance, asker)),
 		}
 		.map(|(from, _)| from)
 	}
@@ -2645,24 +2645,26 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		})
 	}
 
-	/// The filing of `origin`'s claim of `instance` a request at `path` naming `origin`
-	/// follows when none of its tier may serve, as for an asker that does not know the tier
-	/// whole: of the ones this node knows covering the path, the best lowered to it, as
-	/// [`Self::tier`] ranks them, then one of the best precedence where it is filed, which
+	/// The filing of `origin`'s claim of `instance` a request at `path` naming `origin` from
+	/// `asker` follows when none of its tier may serve, as for an asker that does not know
+	/// the tier whole: of the ones this node knows covering the path, the best lowered to
+	/// it, as [`Self::tier`] ranks them, then one a neighbour other than `asker` holds (see
+	/// [`Self::lead`]), then one of the best precedence where it is filed, which
 	/// [`Self::ways`] serves, then the deepest.
-	fn named(&self, origin: NodeId, path: &Path, instance: &I) -> Option<Broadcast<I>> {
+	fn named(&self, origin: NodeId, path: &Path, instance: &I, asker: Option<N>) -> Option<Broadcast<I>> {
 		let known = self.known.get(&origin)?;
 		let depth = path.parts().count();
-		let mut pick: Option<((Precedence, bool), Broadcast<I>)> = None;
+		let mut pick: Option<((Precedence, bool, bool), Broadcast<I>)> = None;
 		for from in ancestors(path).rev() {
 			let by = (depth - from.parts().count()) as u64;
 			let claim = (from, instance.clone());
 			let Some(held) = known.items.get(&claim) else {
 				continue;
 			};
+			let stranded = self.lead(origin, &claim, asker).is_none();
 			let outranked = (self.reader.get(instance.clone(), &claim.0))
 				.is_none_or(|shown| precedence(&shown.item) != precedence(&held.item));
-			let lowered = (precedence_at(&held.item, by), outranked);
+			let lowered = (precedence_at(&held.item, by), stranded, outranked);
 			if pick.as_ref().is_none_or(|(best, _)| lowered < *best) {
 				pick = Some((lowered, claim));
 			}
@@ -2685,12 +2687,14 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			}
 			// The best route whose neighbour holds the claim: one that has yet to hear it
 			// would refuse the request.
-			false => match (self.eligible(origin, path, instance)).or_else(|| self.named(origin, path, instance)) {
-				Some(claim) => self.lead(origin, &claim, asker).map(Next::Via),
-				None => (self.best.get(&origin))
-					.filter(|best| Some(best.via) != asker)
-					.map(|best| Next::Via(best.via)),
-			},
+			false => {
+				match (self.eligible(origin, path, instance)).or_else(|| self.named(origin, path, instance, asker)) {
+					Some(claim) => self.lead(origin, &claim, asker).map(Next::Via),
+					None => (self.best.get(&origin))
+						.filter(|best| Some(best.via) != asker)
+						.map(|best| Next::Via(best.via)),
+				}
+			}
 		}
 	}
 
@@ -3930,7 +3934,7 @@ mod tests {
 		router.recv(4, claims).unwrap();
 		let under = (p("src/a/b"), 7);
 		assert_eq!(router.pick(&under), Some(node(5)));
-		assert_eq!(router.filed(node(5), &under), Some(p("src")));
+		assert_eq!(router.filed(node(5), &under, None), Some(p("src")));
 		assert_eq!(router.step(node(5), &under, None), Some(Next::Via(4)));
 	}
 
@@ -3961,7 +3965,7 @@ mod tests {
 		router.recv(4, claims).unwrap();
 		let under = (p("src/a/b"), 7);
 		assert_eq!(router.pick(&under), Some(node(6)));
-		assert_eq!(router.filed(node(5), &under), Some(p("src")));
+		assert_eq!(router.filed(node(5), &under, None), Some(p("src")));
 		assert_eq!(router.step(node(5), &under, None), Some(Next::Via(4)));
 		let ways = |at: &str| {
 			(router.ways(&(p(at), 7)).into_iter())
@@ -3969,6 +3973,45 @@ mod tests {
 				.collect::<Vec<_>>()
 		};
 		assert_eq!((ways("src"), ways("src/a")), (vec![node(5)], vec![node(6)]));
+	}
+
+	/// Of a named node's equal copies outside the tier, a request follows one a next hop
+	/// holds available, not a broader filing no neighbour can serve that wins where it is
+	/// filed.
+	#[test]
+	fn a_named_request_outside_its_tier_follows_a_copy_a_next_hop_holds() {
+		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
+		open(&mut router, 3, Role::Routing(node(3)));
+		open(&mut router, 4, Role::Routing(node(4)));
+		router.recv(3, route(6, 3, 1)).unwrap();
+		router.recv(4, route(5, 4, 1)).unwrap();
+		let exact = Msg::Claims {
+			origin: node(6),
+			changes: vec![((p("src/a"), 7), claim(run(1), 0))],
+			floor: 1,
+		};
+		router.recv(3, exact).unwrap();
+		let unavailable = match claim(run(1), 0) {
+			Change::Live(claim) => Change::Live(Claim {
+				unavailable: true,
+				..claim
+			}),
+			other => other,
+		};
+		let claims = Msg::Claims {
+			origin: node(5),
+			changes: vec![
+				((p("src"), 7), unavailable),
+				((p("src/a"), 7), claim(Run { epoch: 1, above: 1 }, 0)),
+			],
+			floor: 1,
+		};
+		router.recv(4, claims).unwrap();
+		let under = (p("src/a/b"), 7);
+		assert_eq!(router.pick(&under), Some(node(6)));
+		assert_eq!(router.filed(node(5), &under, None), Some(p("src/a")));
+		assert_eq!(router.step(node(5), &under, None), Some(Next::Via(4)));
+		assert_eq!(router.step(node(5), &under, Some(4)), None, "never back to the asker");
 	}
 
 	/// A relay that owns a claim serves a request naming it under a copy of the same claim

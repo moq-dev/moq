@@ -1037,7 +1037,7 @@ impl State {
 		}
 		// The lane of the filing the router followed, not a deeper one of the same claimant
 		// that may be unavailable.
-		let slot = self.router.filed(origin, broadcast).and_then(|from| {
+		let slot = self.router.filed(origin, broadcast, from).and_then(|from| {
 			let claim = claim(from);
 			let slot = self.lanes.get(&claim)?.get(&(origin, session))?;
 			Some((admits(&claim), slot))
