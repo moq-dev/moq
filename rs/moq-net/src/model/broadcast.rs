@@ -2656,6 +2656,39 @@ mod test {
 		assert_eq!(later.await.unwrap().info(), &compressed);
 	}
 
+	/// A conflicting renewal also ends the unfinished groups its request filled before the
+	/// accept, so their readers read `Duplicate` instead of waiting on a writer nobody serves.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_conflicting_renewal_aborts_the_groups_its_request_filled() {
+		let producer = Info::new().produce();
+		let mut dynamic = producer.requests();
+		let consumer = producer.consume();
+
+		let first = consumer.track("video").unwrap().subscribe(None);
+		let track = dynamic.assert_request().accept(crate::track::Info::timed());
+		drop(first);
+		let handle = consumer.track("video").unwrap();
+		let _joined = handle.subscribe(None).await.unwrap();
+		drop(track);
+
+		let request = dynamic.assert_request();
+		let fills = request.requests();
+		let fetch = handle.fetch_group(5, None);
+		let fill = fills.requested_fill().await.unwrap();
+		let mut group = fill.accept(5, None).unwrap().expect("a fresh group");
+		group
+			.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"a".as_slice())
+			.unwrap();
+		let mut held = fetch.await.unwrap();
+		assert!(held.read_frame().await.unwrap().is_some());
+
+		let compressed = crate::track::Info::timed().with_compression(crate::track::Compression::Deflate);
+		let _next = request.accept(compressed);
+		assert!(matches!(held.read_frame().await, Err(Error::Duplicate)));
+		drop(group);
+	}
+
 	/// `create_track` leaves a renewal whose info it would change to the handler, as a live track
 	/// holding the name, and fulfils one it would not.
 	#[kio::test]

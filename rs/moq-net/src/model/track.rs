@@ -14311,10 +14311,10 @@ impl Request {
 		// tolerate it: the Producer we hand back simply can't write.
 		let open = match self.state.write() {
 			// Its readers, and the peers they forward to, already hold the info the track was
-			// first accepted with, which nothing may change under them.
-			Ok(mut state) if conflicts => {
-				state.reject(Error::Duplicate, None);
-				state.close();
+			// first accepted with, which nothing may change under them. Aborted as a producer
+			// would abort it: a fill answered before this accept may have opened groups.
+			Ok(state) if conflicts => {
+				commit_abort(state, Error::Duplicate, None).abort();
 				false
 			}
 			Ok(mut state) => {
