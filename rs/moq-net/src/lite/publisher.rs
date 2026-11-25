@@ -9850,6 +9850,48 @@ mod serve_group_test {
 		assert!(served.contains(&4000), "served {served:?}");
 	}
 
+	/// The gaps a lite-07 subscription's hopping ranges left behind were never served, so a
+	/// range added back over them gets their groups rather than waiting on keys the wire
+	/// never hears of.
+	#[kio::test]
+	async fn lite07_a_range_added_back_gets_the_gaps_left_behind() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		for key in 0..8 {
+			write_group(&mut track, key, key);
+		}
+		let single = |key| lite::Range::span(Some(key), 0, Some(key), None);
+		let bounds = Bounds::new(&[single(0)], None);
+		let subscriber = track.subscribe(track::Subscription::default().with_ranges(bounds.ranges.iter().copied()));
+		let session = Log::default();
+		let (mut run, mut writer, log) = lite07_run(SinkSession::new(session.clone()), subscriber);
+		asked(&mut run, &bounds.ranges);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		for (id, key) in [(1, 2), (2, 4), (3, 6)] {
+			run.update(lite07_add(&run, &[], id, &[single(key)]));
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		}
+		assert_eq!(group_headers(&session, Version::Lite07), [0, 2, 4, 6]);
+
+		run.update(lite07_add(
+			&run,
+			&[],
+			4,
+			&[lite::Range::span(Some(0), 0, Some(7), None)],
+		));
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		let mut served = group_headers(&session, Version::Lite07);
+		served.dedup();
+		assert_eq!(served, (0..8).collect::<Vec<_>>(), "every key of the range is served");
+		let holes: Vec<_> = (responses(&mut writer, &log).await.into_iter())
+			.filter(|msg| matches!(msg, lite::SubscribeResponse::Drop(_) | lite::SubscribeResponse::Skip(_)))
+			.collect();
+		assert!(holes.is_empty(), "nothing was given up: {holes:?}");
+	}
+
 	/// A range retired before SUBSCRIBE_START reported it gets none, and one still waiting
 	/// once the track ends is reported with no start.
 	#[kio::test]
@@ -10070,6 +10112,31 @@ mod serve_group_test {
 			),
 			"{answered:?}"
 		);
+	}
+
+	/// A relay's copy that finished holding only groups past a range's time answers that range
+	/// only once its upstream placed the time, never empty for want of the history it doesn't
+	/// hold: the subscriber reads an empty answer as no group at or before the time.
+	#[kio::test]
+	async fn lite07_a_finished_copy_answers_a_time_only_once_placed() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		track.received();
+		track.anchored();
+		track.request_start(Some(0)).unwrap();
+		let (mut run, mut writer, log) = lite07_run_ranges(&track, &[lite::Range::span(Some(1000), 0, None, None)]);
+		write_group(&mut track, 5000, 5000);
+		write_group(&mut track, 6000, 6000);
+		track.finish_shared().unwrap();
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(starts(&responses(&mut writer, &log).await), []);
+
+		track.time_starts([(1000, Some(1000))]);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(starts(&responses(&mut writer, &log).await), [(0, Some(1000))]);
 	}
 
 	/// A relay's copy that placed one range from its upstream's answer, which also asked for

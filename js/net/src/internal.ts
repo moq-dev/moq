@@ -1272,6 +1272,11 @@ export const hooks: {
 	 */
 	holdsGroup: (subscriber: Subscriber, key: bigint, whole?: boolean) => boolean;
 	/**
+	 * How many cached groups the subscriber's track evicted so far. Mirrors the Rust
+	 * `Consumer::evicted`.
+	 */
+	evictions: (subscriber: Subscriber) => number;
+	/**
 	 * When the latest group the subscriber's track caches in `[start, end)` landed, undefined when
 	 * it caches none; a routed reader asks every copy. Mirrors the Rust `Subscriber::landed`.
 	 */
@@ -1351,6 +1356,12 @@ export const hooks: {
 	groupHeadless: (group: GroupProducer) => boolean;
 	/** Where a source copy finished whole ends, undefined while it is open or ended without one. */
 	groupWholeEnd: (group: GroupProducer) => bigint | undefined;
+	/**
+	 * Whether a source copy counts as content (its first frame landed, or it ended), whether it
+	 * failed, and its first and newest timestamps: what the groups below it are judged by once it
+	 * leaves the cache. Assigned by `group.ts`.
+	 */
+	groupSpan: (group: GroupProducer) => { started: boolean; failed: boolean; first?: Timestamp; latest?: Timestamp };
 	/**
 	 * The first time a source copy can't place, undefined once it finished: it places a time it holds
 	 * a timed frame past, which puts its End past the time too. An aborted copy may have lost its End.
@@ -1760,6 +1771,9 @@ export const hooks: {
 	holdsGroup: () => {
 		throw new Error("track.ts not loaded");
 	},
+	evictions: () => {
+		throw new Error("track.ts not loaded");
+	},
 	landed: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -1842,6 +1856,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	groupWholeEnd: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupSpan: () => {
 		throw new Error("group.ts not loaded");
 	},
 	groupUnplacedFrom: () => {

@@ -444,6 +444,11 @@ interface Copy {
 	 * nothing resolved, and that copy offers a group the window leaves out: the reader takes it.
 	 */
 	dropped?: bigint;
+	/**
+	 * The track's eviction count when {@link Reader.backfillGaps} last left it a group the reader
+	 * lacks to drain, so an eviction since asks the serving route again.
+	 */
+	drains?: number;
 }
 
 /**
@@ -1226,12 +1231,18 @@ class Reader implements ResumeSource {
 		// spent its drain budget delivers nothing more, even while a read still leases it, and one
 		// holding a group without its head may give that group up, so neither counts.
 		const cursor = this.#shell.cursor.peek().start;
+		// Each replaced copy's evictions so far, counted before the walk looks at what it holds, so a
+		// group it is left to drain and loses after is asked of the serving route then.
+		const evictions = new Map(
+			this.#copies.filter((copy) => copy.replaced).map((copy) => [copy, hooks.evictions(copy.sub)]),
+		);
 		// Each replaced copy's staleness verdict, taken once for the whole walk.
 		const taking = new Map(
 			this.#copies.filter((copy) => copy.replaced).map((copy) => [copy, hooks.taking(copy.sub)]),
 		);
+		// The copy left to drain group `key`, if any.
 		const drains = (key: bigint) =>
-			this.#copies.some(
+			this.#copies.find(
 				(copy) =>
 					copy.replaced &&
 					this.#feeds(copy) &&
@@ -1241,15 +1252,21 @@ class Reader implements ResumeSource {
 					!copyFailed(copy) &&
 					hooks.holdsGroup(copy.sub, key, true),
 			);
+		const left = new Set<Copy>();
 		let start: bigint | undefined;
 		for (const gap of delivered.gaps(max(floor, cursor), resumed)) {
 			let key = gap.start;
-			while (key < gap.end && drains(key)) key++;
+			for (; key < gap.end; key++) {
+				const copy = drains(key);
+				if (!copy) break;
+				left.add(copy);
+			}
 			if (key < gap.end) {
 				start = key;
 				break;
 			}
 		}
+		for (const copy of this.#copies) copy.drains = left.has(copy) ? evictions.get(copy) : undefined;
 		// A raised start is asked from its time whatever the local floor, so the backfill places it,
 		// and the group holding it is read once the floor lets it.
 		for (const time of owed) start = start === undefined ? time : min(start, time);
@@ -1746,6 +1763,13 @@ class Reader implements ResumeSource {
 			if (typeof copy.done !== "number" || hooks.arrived(copy.sub) <= copy.done) continue;
 			copy.done = undefined;
 			if (copy === serving && !copy.replaced && copy.floor !== undefined) this.#resumed = true;
+		}
+		// A group the switch left a replaced copy to drain may be gone from its cache since: the
+		// serving route is asked for it after all, as a cursor on the track would ask again.
+		for (const copy of this.#copies) {
+			if (copy.drains === undefined || hooks.evictions(copy.sub) === copy.drains) continue;
+			copy.drains = undefined;
+			this.#resumed = true;
 		}
 	}
 

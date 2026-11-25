@@ -15,4 +15,3 @@ Public API: none. Wire: none.
 ## Related
 
 - [A widened resumed ordered reader asks its copies' stale give-ups again](/quest/m3/widened-front-reader-asks-stale-again.md) - widening half moved to m3 behind judged OLD drops
-- [Fix non-wire subscribe progress, wakeup, and cache-invariant bugs](/quest/m1/subscribe-progress-fixes.md) - other non-wire subscribe progress bugs

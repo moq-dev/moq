@@ -68,6 +68,23 @@ test("a live join covers nothing but itself", () => {
 	expect(union([two, bounded]).map(rangeKey)).toEqual([two, bounded].map(rangeKey));
 });
 
+// A range from the oldest group with an end takes in every one ending before it, so only the furthest
+// end moves the union. Mirrors the Rust `ranges_from_the_oldest_keep_only_the_furthest_end`.
+test("ranges from the oldest keep only the furthest end", () => {
+	const oldest = (end: bigint): Range => ({ end });
+	expect(union([oldest(5n), oldest(3n), oldest(5n)])).toEqual([oldest(5n)]);
+	const ranges = new Ranges();
+	expect(ranges.add(oldest(3n))).toBe(true);
+	expect(ranges.add(oldest(5n))).toBe(true);
+	expect(ranges.add(oldest(4n))).toBe(false);
+	expect(ranges.add(oldest(5n))).toBe(false);
+	expect(ranges.union()).toEqual([oldest(5n)]);
+	expect(ranges.remove(oldest(5n))).toBe(false);
+	expect(ranges.remove(oldest(3n))).toBe(false);
+	expect(ranges.remove(oldest(5n))).toBe(true);
+	expect(ranges.union()).toEqual([oldest(4n)]);
+});
+
 // Every query matches a count kept per key.
 test("a cover answers as its counts do", () => {
 	const random = rng(0x636f76);

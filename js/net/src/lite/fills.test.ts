@@ -116,6 +116,33 @@ test("range fills: a fill of more than one group joins the subscription's ranges
 	peer.close();
 });
 
+// A run no fill owes stays asked for a stream of it still arriving only while someone reads the
+// track: once nobody does, the fills ask for nothing, so the subscription they hold can end.
+// Mirrors the Rust `a_drained_run_goes_once_nobody_reads`.
+test("range fills: a drained run goes once nobody reads", async () => {
+	const broadcast = new BroadcastProducer();
+	const track = defined(broadcast.createTrack("video", { maxAge: null }));
+	const arriving = track.createGroup(0n);
+	arriving.writeFrame({ payload: enc.encode("0"), timestamp: Timestamp.unscaled(0n) });
+	const reader = track.subscribe(withMax({ ranges: [{ start: 0n }], delay: { max: null } }));
+	const { recover } = recoveries();
+	const fills = new RangeFills(track, Version.DRAFT_07, recover);
+	const tail = new Tail();
+	fills.ask = { groups: [{ start: 0n, end: 1n }], priority: 0 };
+	expect(fills.poll(tail, true)).toBe(false);
+	expect(fills.isEmpty()).toBe(false);
+
+	// The reader leaving wakes the fills.
+	const woken = fills.changed(tail, track.demand());
+	reader.close();
+	await woken;
+	expect(fills.poll(tail, false)).toBe(true);
+	expect(fills.isEmpty()).toBe(true);
+
+	fills.close();
+	broadcast.close();
+});
+
 // TEMPORARY MIGRATION, delete with `RecoveryHandle.walk`: behind a relay of the previous release a
 // lite-06 recovery stalls on keys that relay never accounts for, and the fill owing them goes to
 // FETCH instead. Mirrors the Rust `a_stalled_recovery_walks_its_keys`.
@@ -344,7 +371,7 @@ test("range fills: a lost wait releases what it listened to", async () => {
 	try {
 		// Woken by the tail each time, as live groups arriving wake the serve loop.
 		for (let key = 10n; key < 110n; key++) {
-			const wait = fills.changed(tail);
+			const wait = fills.changed(tail, peer.track.demand());
 			tail.account(key, key + 1n);
 			await wait;
 		}
@@ -521,7 +548,7 @@ test("range fills: a recovery's refusal answers before it is over", async () => 
 	expect(peer.fill.wanted()).toBe(1n);
 
 	// Group 1 is refused while group 2's stream is still out.
-	const woken = fills.changed(tail);
+	const woken = fills.changed(tail, peer.track.demand());
 	opened[0]?.refuse({ start: 1n, end: 2n, refusal: dropped(new StreamError(StreamCode.NotFound)) });
 	await woken;
 	fills.poll(tail, true);
@@ -686,7 +713,7 @@ test("range fills: a recovery's stream ending wakes the fills", async () => {
 	fills.poll(tail, true);
 	expect(recovery.cancelled).toBe(false);
 
-	const wait = fills.changed(tail).then(() => true);
+	const wait = fills.changed(tail, peer.track.demand()).then(() => true);
 	recovery.reading = false;
 	recovery.readingChanged.update((revision) => revision + 1);
 	const idle = (async () => {

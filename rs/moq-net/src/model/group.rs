@@ -3265,6 +3265,12 @@ impl Handle {
 		self.alive.fall() != Fall::Live
 	}
 
+	/// Whether the group was aborted only to free its cache, by cache policy or after it
+	/// finished, rather than failed. Reads the mirror, like [`Self::is_aborted`].
+	pub(super) fn is_released(&self) -> bool {
+		self.alive.fall() == Fall::Released
+	}
+
 	/// Why the publisher gave this group up, once it did, rather than cache policy
 	/// skipping it.
 	///
