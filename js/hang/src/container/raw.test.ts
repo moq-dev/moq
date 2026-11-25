@@ -32,7 +32,7 @@ test("raw decodes payload with transport timestamp and audio packet duration", (
 
 test("raw rejects untimed tracks and handles empty markers", () => {
 	const video = new Raw.Format("video");
-	expect(() => video.decode(new Uint8Array([1]), Time.Timestamp.unscaled(0n))).toThrow(Moq.Error.TimestampMismatch);
+	expect(() => video.decode(new Uint8Array([1]), Time.Timestamp.unscaled(0n))).toThrow("requires a timed track");
 
 	const ts = Time.Timestamp.fromMillis(500);
 	const [marker] = video.decode(new Uint8Array(), ts);
@@ -53,7 +53,7 @@ test("cts adds CTS varint in track timescale to transport timestamp", () => {
 
 test("cts rejects untimed tracks and empty media objects, handles empty markers", () => {
 	const video = new Cts.Format("video");
-	expect(() => video.decode(ctsFrame(0, [1]), Time.Timestamp.unscaled(0n))).toThrow(Moq.Error.TimestampMismatch);
+	expect(() => video.decode(ctsFrame(0, [1]), Time.Timestamp.unscaled(0n))).toThrow("requires a timed track");
 	expect(() => video.decode(new Uint8Array(), Time.Timestamp.fromMillis(100))).toThrow();
 
 	const ts = Time.Timestamp.fromMillis(500);

@@ -22,6 +22,9 @@ pub struct GroupConsumer<F: Container> {
 
 	// How many media frames we have returned, so the first one can be marked a keyframe.
 	index: u64,
+
+	// An error the lookahead hit, returned once the frames before it are.
+	fault: Option<F::Error>,
 }
 
 impl<F: Container> GroupConsumer<F> {
@@ -32,6 +35,7 @@ impl<F: Container> GroupConsumer<F> {
 			format,
 			pending: VecDeque::new(),
 			index: 0,
+			fault: None,
 		}
 	}
 
@@ -41,36 +45,48 @@ impl<F: Container> GroupConsumer<F> {
 	}
 
 	/// Read the next frame, or `None` once the group ends.
+	///
+	/// Frames that precede a failed read or decode are returned before the error.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_read(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Frame>, F::Error>> {
 		// Peek past an untimed video frame for a marker or successor that times it, but only
 		// at what has already landed: a live group returns the frame now rather than waiting.
-		while self.pending.front().is_none_or(|frame| {
-			self.format.kind() == super::Kind::Video && frame.duration.is_none() && self.pending.len() < 2
-		}) {
-			let next = match self.group.poll_read_frame(waiter)? {
+		while self.fault.is_none()
+			&& self.pending.front().is_none_or(|frame| {
+				self.format.kind() == super::Kind::Video && frame.duration.is_none() && self.pending.len() < 2
+			}) {
+			let next = match self.group.poll_read_frame(waiter) {
 				Poll::Ready(next) => next,
 				Poll::Pending if self.pending.is_empty() => return Poll::Pending,
 				Poll::Pending => break,
 			};
-			match next {
-				Some(frame) => {
-					for frame in self.format.decode(frame)? {
-						if let Some(bound) = self.format.end(&frame) {
-							if self.format.kind() == super::Kind::Video
-								&& let Some(last) = self.pending.back_mut()
-							{
-								super::close_duration(last, bound);
-							}
-						} else {
-							self.pending.push_back(frame);
-						}
-					}
+			let frames = match next.map_err(F::Error::from).and_then(|next| match next {
+				Some(frame) => self.format.decode(frame).map(Some),
+				None => Ok(None),
+			}) {
+				Ok(Some(frames)) => frames,
+				Ok(None) => break,
+				Err(err) => {
+					self.fault = Some(err);
+					break;
 				}
-				None => return Poll::Ready(Ok(self.pop_media())),
+			};
+			for frame in frames {
+				if let Some(bound) = self.format.end(&frame) {
+					if self.format.kind() == super::Kind::Video
+						&& let Some(last) = self.pending.back_mut()
+					{
+						super::close_duration(last, bound);
+					}
+				} else {
+					self.pending.push_back(frame);
+				}
 			}
 		}
-		Poll::Ready(Ok(self.pop_media()))
+		match self.pop_media() {
+			Some(frame) => Poll::Ready(Ok(Some(frame))),
+			None => Poll::Ready(self.fault.take().map_or(Ok(None), Err)),
+		}
 	}
 
 	fn pop_media(&mut self) -> Option<Frame> {
@@ -230,6 +246,33 @@ mod tests {
 		assert!(live.read().now_or_never().is_none(), "the open group has nothing more");
 
 		group.finish().unwrap();
+		assert!(live.read().await.unwrap().is_none());
+	}
+
+	/// A video frame looked ahead of a malformed object is returned before the decode error.
+	#[tokio::test]
+	async fn a_frame_before_a_malformed_object_is_returned_first() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast.create_track("media", timed()).unwrap();
+		let format = Hang::Legacy(crate::container::Kind::Video);
+		let mut group = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
+		let mut live = GroupConsumer::new(group.consume(), Hang::Legacy(crate::container::Kind::Video));
+
+		format
+			.write(&mut group, &[frame(1_000_000, b"keyframe", true)])
+			.unwrap();
+		// A truncated timestamp varint.
+		group
+			.write_frame(
+				moq_net::Timestamp::from_millis(1_020).unwrap(),
+				bytes::Bytes::from_static(&[0xff]),
+			)
+			.unwrap();
+		group.finish().unwrap();
+
+		let first = live.read().await.unwrap().unwrap();
+		assert_eq!(first.payload, b"keyframe".as_slice());
+		assert!(live.read().await.is_err());
 		assert!(live.read().await.unwrap().is_none());
 	}
 

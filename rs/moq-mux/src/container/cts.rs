@@ -131,6 +131,29 @@ mod tests {
 		assert!(data.is_empty());
 	}
 
+	/// A buffering producer refuses the first CTS write on entry, so it never opens a group it
+	/// could not flush.
+	#[test]
+	fn a_buffered_producer_refuses_before_opening_a_group() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let mut producer = crate::container::Producer::new(track, crate::catalog::hang::Container::Cts(Kind::Video))
+			.with_buffer(std::time::Duration::from_secs(1));
+		let err = producer.write(Frame {
+			timestamp: Timestamp::from_millis(0).unwrap(),
+			payload: Bytes::from_static(b"pkt"),
+			keyframe: true,
+			duration: None,
+		});
+		assert!(
+			matches!(err, Err(crate::Error::Moq(moq_net::Error::Unsupported))),
+			"{err:?}"
+		);
+		assert!(producer.track().largest().is_none(), "opened a group");
+	}
+
 	#[test]
 	fn write_and_finish_group_return_unsupported() {
 		let broadcast = moq_net::broadcast::Info::new().produce();

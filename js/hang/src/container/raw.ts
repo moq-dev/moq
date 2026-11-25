@@ -1,5 +1,4 @@
 import { Duration } from "@moq/clock";
-import * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 import type { AudioConfig, VideoConfig } from "../catalog/index.ts";
 import type { Format as ContainerFormat } from "./format.ts";
@@ -30,7 +29,8 @@ export class Format implements ContainerFormat {
 
 	/** Decode one raw frame using its MoQ transport timestamp. Throws on an untimed track. */
 	decode(frame: Uint8Array, timestamp: Time.Timestamp): Frame[] {
-		if (timestamp.scale === undefined) throw new Moq.Error.TimestampMismatch();
+		// A plain error, so a reader fails loudly rather than reading a stream error as the track ending.
+		if (timestamp.scale === undefined) throw new Error("raw container requires a timed track");
 		// On a data track a zero-byte object is only ever the discontinuity marker (decodes to no
 		// frames), so an empty payload has no encoding and one sharing its group is malformed.
 		if (this.kind === "data" && frame.byteLength === 0) return [];

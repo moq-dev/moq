@@ -263,12 +263,12 @@ pub trait Container {
 		Ok(())
 	}
 
-	/// Refuse a frame this format has no encoding for.
+	/// Refuse a frame this format has no encoding for, by default any frame of an unwritable format.
 	///
 	/// A [`Producer`] checks each frame on entry, before it cuts a group or buffers anything, so a
 	/// refused frame leaves the open group and the buffered frames as they were.
 	fn check(&self, _frame: &Frame) -> Result<(), Self::Error> {
-		Ok(())
+		self.writable()
 	}
 
 	/// Write any format-specific endpoint before the producer closes the group.

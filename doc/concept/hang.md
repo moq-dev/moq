@@ -185,14 +185,17 @@ The `container.kind` on each rendition says how frames are framed:
 
 | Kind | Frame layout | Use |
 | --- | --- | --- |
-| `legacy` | varint microsecond timestamp + codec payload | The default. Cheapest. |
+| `legacy` | varint microsecond timestamp + codec payload | The default. Carries its own timestamp on any transport. |
 | `cmaf` | `moof` + `mdat` | fMP4 passthrough for HLS/DASH interop; ~100 bytes per frame. |
 | `loc` | small property block + payload | The IETF [LOC](/concept/standard#loc) container. |
 | `raw` | codec payload; the transport timestamp is the presentation time | No overhead, for streams without B-frames. |
 | `cts` | varint composition offset (track timescale) + codec payload | Reordered video on a decode-ordered track. Decode only for now. |
 
-`raw` and `cts` take the time from the track's timescale, so they need a timed
-track. Publishers refuse `cts` until they can write it. A consumer skips
+`raw` and `cts` take the time from each frame's transport timestamp, so they
+need a timed track whose every hop carries per-frame timestamps. moq-lite does;
+a moq-transport hop gives every object its group's time until
+[moq-timestamp](/draft/moq-timestamp) object timestamps land, so use `legacy`
+or `loc` for viewers behind one. Publishers refuse `cts` until they can write it. A consumer skips
 renditions with a kind it doesn't recognize and carries them through when
 republishing the catalog.
 

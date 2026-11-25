@@ -104,7 +104,7 @@ A Group is an append-only sequence of Frames addressed by its **start**: a times
 No two Groups of a Track share a start; moq-lite carries no Group sequence numbers.
 
 A Group's span is `[start, End)` ({{group-end}}).
-Spans never overlap: no Group starts strictly inside a finished Group's span, and every frame of a lower Group presents before every frame of a higher Group (frames within a Group may reorder; a higher Group's leading frames may fall inside a lower Group's span and resolve to the lower Group).
+Spans never overlap: no Group starts strictly inside a finished Group's span, and every frame of a lower Group is timestamped before every frame of a higher Group (frames within a Group may reorder; a higher Group's leading frames may fall inside a lower Group's span and resolve to the lower Group).
 A gap between one Group's `End` and the next Group's start is declared skipped with `SUBSCRIBE_SKIP`.
 Group start `2^64 - 1` is reserved; receiving a Group Stream naming it is a malformed Track.
 
@@ -115,7 +115,7 @@ A Group ends in one of three states:
 
 ## Frame {#frame}
 Frames within a Group are indexed sequentially from `0` in write order, implied by position from `GROUP`'s `Frame Start` (or `FETCH`'s `Frame Start`).
-Each frame carries a presentation timestamp `< 2^61` in the Track's `Timescale` (larger values are a malformed Track), used by moq-lite for [expiration](#expiration).
+Each frame carries a transport timestamp `< 2^61` in the Track's `Timescale` (larger values are a malformed Track), used by moq-lite for [expiration](#expiration). Whether it is a presentation or a decode time is up to the payload format: a format that carries its own composition offset, such as hang's `cts` container, sends decode-order timestamps.
 When `Timescale = 0` (scale-less), frames carry no timestamp delta and inherit their Group's start.
 
 Unless a negotiated extension specifies otherwise, a publisher MUST NOT start a Group's frame 0 at or before that of any lower-start Group; a receiver MAY reset violating streams (`STOP_SENDING`) with `TIMESTAMP_MISMATCH`.
@@ -1101,6 +1101,7 @@ This document has no IANA actions.
 - Replaced `SUBSCRIBE` bounds with multi-Range Anchors (`None`, `Time`, `Position`, `Live` with `Min Age`/`Max Age`, `Joined`), `Group Order`, per-Range `SUBSCRIBE_START` (with `Largest`), `SUBSCRIBE_UPDATE` range edits/retuning, half-open `SUBSCRIBE_DROP`/`SUBSCRIBE_SKIP` spans, and `SUBSCRIBE_END.Error Code`; Subscribe Streams remain open until subscriber FIN.
 - Replaced group datagrams with separate datagram Tracks (`0x9` Datagrams Stream: `DATAGRAMS`/`UPDATE`/`INFO`) and typed Track Datagrams (`Type = 0x0`).
 - `FRAME` leads with `Payload Length` (`len + 1`, with `0` marking `GROUP_END`), a zigzag `Timestamp Delta` (omitted when scale-less), and optional `Inflated Size`.
+- A frame's timestamp is transport time, presentation or decode order as its payload format chooses, rather than always a presentation time.
 - Expiration adds arrival age (sole metric for scale-less tracks) and resets expired Group Streams with `OLD` even after unacknowledged `GROUP_END`.
 - A publisher resets a Group Stream after its `GROUP` message with `RESET_STREAM_AT`, or a `RESET_STREAM` held until the `GROUP` message is acknowledged, and names no such Group in `SUBSCRIBE_DROP`; a publisher whose transport can do neither, such as a browser's WebTransport, still does. A stopped Group Stream is named in `SUBSCRIBE_DROP` only with `EVICTED`, before its `GROUP` message was acknowledged.
 - A reset of the Announce Stream closes the session unless the transport cannot tell the reset from the session closing.

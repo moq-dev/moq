@@ -31,7 +31,8 @@ export class Format implements ContainerFormat {
 
 	/** Decode one CTS frame using its MoQ transport timestamp plus CTS (in track timescale). Throws on an untimed track. */
 	decode(frame: Uint8Array, timestamp: Time.Timestamp): Frame[] {
-		if (timestamp.scale === undefined) throw new Moq.Error.TimestampMismatch();
+		// A plain error, so a reader fails loudly rather than reading a stream error as the track ending.
+		if (timestamp.scale === undefined) throw new Error("CTS container requires a timed track");
 		if (this.kind === "data" && frame.byteLength === 0) return [];
 		const [cts, data] = Moq.Varint.decode(frame);
 		const pts = new Time.Timestamp(timestamp.value + cts, timestamp.scale);

@@ -102,45 +102,98 @@ export interface Config {
 	numberOfChannels: number;
 }
 
+// The object types whose specific config is a GASpecificConfig, which a sync extension follows.
+const GENERAL_AUDIO: ReadonlySet<number> = new Set([1, 2, 3, 4, 6, 7, 17, 19, 20, 21, 22, 23]);
+
+// The syncExtensionTypes that signal SBR, then PS, after the specific config.
+const SYNC_EXTENSION_SBR = 0x2b7;
+const SYNC_EXTENSION_PS = 0x548;
+
 /**
  * Read the decoded sample rate and channel count from an AudioSpecificConfig (ISO 14496-3 §1.6.2.1).
  *
- * Mirrors `aac::Config::parse` in rs/moq-mux for explicitly signaled SBR and PS. A backward-compatible
- * sync extension isn't followed, so it reports the core. Undefined when the config is truncated,
- * names a reserved rate or channelConfiguration, or takes its channels from a program config element.
+ * Mirrors `aac::Config::parse` in rs/moq-mux: SBR and PS report the extension rate and stereo, not
+ * their AAC-LC core, whether signaled explicitly or by a backward-compatible sync extension. A sync
+ * extension behind fields this doesn't follow reports the core. Undefined when the config is
+ * truncated, names a reserved rate or channelConfiguration, or takes its channels from a program
+ * config element.
  */
 export function parseConfig(asc: Uint8Array): Config | undefined {
+	const bits = asc.byteLength * 8;
 	let bit = 0;
-	const read = (n: number): number | undefined => {
-		if (bit + n > asc.byteLength * 8) return undefined;
+	let truncated = false;
+	// Reads 0 past the end, marking the config truncated.
+	const read = (n: number): number => {
+		if (bit + n > bits) {
+			truncated = true;
+			bit = bits;
+			return 0;
+		}
 		let value = 0;
 		for (const end = bit + n; bit < end; bit++) value = value * 2 + ((asc[bit >> 3] >> (7 - (bit & 7))) & 1);
 		return value;
 	};
 	// audioObjectType, escaped to 32 and above by 31 and a 6-bit extension.
-	const objectType = (): number | undefined => {
+	const objectType = (): number => {
 		const type = read(5);
-		if (type !== 31) return type;
-		const extension = read(6);
-		return extension === undefined ? undefined : 32 + extension;
+		return type === 31 ? 32 + read(6) : type;
 	};
 	// samplingFrequencyIndex, escaped to an explicit 24-bit rate by 15.
 	const sampleRate = (): number | undefined => {
 		const index = read(4);
-		if (index !== 15) return index === undefined ? undefined : SAMPLE_RATE_TABLE[index];
+		if (index !== 15) return SAMPLE_RATE_TABLE[index];
 		const rate = read(24);
 		return rate === 0 ? undefined : rate;
 	};
 
 	const type = objectType();
 	let rate = sampleRate();
-	const channelConfig = read(4);
-	if (type === undefined || channelConfig === undefined) return undefined;
-	// Explicit SBR (5) or PS (29) plays at the extension rate that follows.
-	if (type === 5 || type === 29) rate = sampleRate();
-	const numberOfChannels = type === 29 ? 2 : CHANNEL_COUNTS[channelConfig];
-	if (rate === undefined || numberOfChannels === undefined) return undefined;
-	return { sampleRate: rate, numberOfChannels };
+	let numberOfChannels = CHANNEL_COUNTS[read(4)];
+	// Explicit SBR (5) or PS (29) plays at the extension rate that follows, over a core object type.
+	const explicit = type === 5 || type === 29;
+	let core = type;
+	if (explicit) {
+		rate = sampleRate();
+		core = objectType();
+		// extensionChannelConfiguration, only for ER BSAC.
+		if (core === 22) read(4);
+		if (type === 29 && numberOfChannels !== undefined) numberOfChannels = 2;
+	}
+	if (truncated || rate === undefined || numberOfChannels === undefined) return undefined;
+	const config = { sampleRate: rate, numberOfChannels };
+	if (explicit || !GENERAL_AUDIO.has(core)) return config;
+
+	// The rest of the GASpecificConfig: frameLengthFlag, dependsOnCoreCoder (then a 14-bit
+	// coreCoderDelay), and extensionFlag.
+	read(1);
+	if (read(1) === 1) read(14);
+	const extension = read(1) === 1;
+	// layerNr.
+	if (core === 6 || core === 20) read(3);
+	if (extension) {
+		// numOfSubFrame and layer_length, or the section, scalefactor, and spectral data resilience flags.
+		if (core === 22) read(16);
+		else if (core === 17 || core === 19 || core === 20 || core === 23) read(3);
+		// extensionFlag3.
+		if (read(1) === 1) return config;
+	}
+	// The error resilient object types' epConfig, whose values 2 and 3 add an ErrorProtectionSpecificConfig.
+	if ((core === 17 || (core >= 19 && core <= 23)) && read(2) >= 2) return config;
+
+	// A sync extension signals SBR and PS behind a core that older decoders play alone.
+	if (bits - bit < 16 || read(11) !== SYNC_EXTENSION_SBR) return config;
+	const extensionType = objectType();
+	if (extensionType !== 5 && extensionType !== 22) return config;
+	// sbrPresentFlag, then the extension rate.
+	if (read(1) !== 1) return config;
+	const extensionRate = sampleRate();
+	if (truncated || extensionRate === undefined) return config;
+	config.sampleRate = extensionRate;
+	// psPresentFlag, which ER BSAC (22) doesn't carry.
+	if (extensionType === 5 && bits - bit >= 12 && read(11) === SYNC_EXTENSION_PS && read(1) === 1) {
+		config.numberOfChannels = 2;
+	}
+	return config;
 }
 
 /**

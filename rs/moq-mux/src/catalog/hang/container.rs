@@ -130,6 +130,8 @@ impl ContainerTrait for Container {
 	fn check(&self, frame: &Frame) -> Result<(), Self::Error> {
 		match self {
 			Self::Raw(kind) => raw::Wire(*kind).check(frame),
+			Self::Cts(kind) => cts::Wire(*kind).check(frame),
+			Self::CtsAudio(_) => cts::Wire(Kind::Audio).check(frame),
 			_ => Ok(()),
 		}
 	}
