@@ -886,11 +886,12 @@ class OriginState {
 			this.follow(path, slot, slot.pin, undefined);
 			return;
 		}
+		// A detached slot follows its instance once resolved, parked or not.
+		if (current?.source && this.detached.get(path)?.has(slot)) {
+			this.follow(path, slot, current.instance, current.source);
+			return;
+		}
 		if (current?.front && current.source) {
-			if (this.detached.get(path)?.has(slot)) {
-				this.follow(path, slot, current.instance, current.source);
-				return;
-			}
 			if (!this.serves(path, current.source, current.instance, false)) {
 				this.drop(path, slot, unroutable());
 				return;
@@ -956,7 +957,7 @@ class OriginState {
 			else slot.route.set(undefined);
 			return;
 		}
-		if (entry.identity === source && current?.front?.closed.peek() === undefined) {
+		if (entry.identity === source && current?.front !== undefined && current.front.closed.peek() === undefined) {
 			// Already on the cheapest, still answering: a takeover still pending speaks for nobody.
 			slot.failover = undefined;
 			return;
@@ -967,6 +968,10 @@ class OriginState {
 			slot.failover = entry;
 			entry.server.enqueue(path);
 			if (!source) slot.route.set({ instance });
+			// Its answer closed: readers park on the instance until the route answers again.
+			else if (current?.front?.closed.peek() !== undefined) {
+				slot.route.set({ instance, epoch: current?.epoch, source });
+			}
 			return;
 		}
 		slot.failover = undefined;

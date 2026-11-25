@@ -5046,7 +5046,9 @@ impl FrontServe {
 			if pending.selected != entry.instance {
 				pending.selected = entry.instance.clone();
 			}
-			pending.epoch = entry.epoch;
+			if pending.epoch != entry.epoch {
+				pending.epoch = entry.epoch;
+			}
 		}
 		// Only a received route carries a hop chain or a claiming node: a local one needs
 		// no discovery.

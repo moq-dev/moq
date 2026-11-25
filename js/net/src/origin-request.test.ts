@@ -1544,11 +1544,15 @@ test("a request that moved epochs re-requests a closed answer", async () => {
 
 	moved.close();
 	await settle();
+	// The reader parks meanwhile rather than ask the closed answer.
+	const info = reader.track("video").info();
 	const again = await Promise.race([asked.next().then((next) => next.value), settle().then(() => undefined)]);
 	const replacement = new BroadcastProducer();
+	replacement.createTrack("video");
 	defined(again).serve(replacement.consume());
 	await settle();
 	expect(readsFrom(reader, replacement)).toBe(true);
+	expect(await info).toBeDefined();
 
 	held.close();
 	source.close();
