@@ -335,8 +335,9 @@ const LOSSLESS: usize = 12;
 
 /// Write `tracks` tracks of one group each, [`BULK`] bytes in `chunk`-byte frames, through
 /// one relay, and read the first `read` bytes of each slower than they are written. Track `i`
-/// has publisher priority `i - 128`, ordered for up to 256 tracks: the [`LOSSLESS`] highest must arrive whole, and a lower one may
-/// end early with an error but never delivers a wrong frame.
+/// has publisher priority `i - 128`, ordered for up to 256 tracks: the [`LOSSLESS`] highest
+/// must arrive whole, and a lower one may end early with an error but never delivers a wrong
+/// frame.
 async fn bulk(tracks: usize, chunk: usize, read: usize) {
 	let network = Network::new(0);
 	let auth = memory::public(&[""], &[], &[]);

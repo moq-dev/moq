@@ -14,7 +14,3 @@ A first attempt, in [moq-dev/moq#9439](https://github.com/moq-dev/moq/pull/9439)
 - A long compressed group trims its slices while keeping their inflated frames for a plain reader (`a_long_compressed_group_sheds_its_front`). Bounding by the slice front sheds frames past `read`.
 
 Recommended: bound by each inflated entry's own `end`, which `Inflate` copies from its slice (`entry.end <= read`). Also pin the frames of inflate jobs in flight in `PlainState`, for example the lowest index a running job keeps, as `Inflate::keep` does for the `MAX_CACHE_BYTES` trim. Test it with mock time: a plain reader mid-prefetch, a session past its budget, and a second compressed edge.
-
-## Related
-
-- [Pool pinned debt](/quest/m1/pool-pinned-debt.md) - the pool-side bound on live edges

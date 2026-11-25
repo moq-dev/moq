@@ -27997,14 +27997,15 @@ mod test {
 		let broadcast = session_broadcast(&pool, Some(25_000));
 		let producer = Producer::new(broadcast.clone(), "test", Info::timed());
 		let mut group = producer.append_next().unwrap();
+		// No reader holds the group yet, so none took a frame: each shed still keeps the newest.
 		for _ in 0..5 {
 			group
 				.write_frame(group.key_time(), bytes::Bytes::from(vec![0u8; 10_000]))
 				.unwrap();
+			let held = broadcast.edges.used();
+			assert!(held <= 25_000, "the open edge holds {held}");
+			assert!(held >= 10_000, "the newest frame went too: {held}");
 		}
-		let held = broadcast.edges.used();
-		assert!(held <= 25_000, "the open edge holds {held}");
-		assert!(held >= 10_000, "the newest frame went too: {held}");
 
 		// Demoting the edge stops billing the session.
 		let mut next = producer.append_next().unwrap();

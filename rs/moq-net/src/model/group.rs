@@ -2905,16 +2905,13 @@ impl Handle {
 		}
 	}
 
-	/// Shed the frames this copy's fastest reader took, see [`GroupState::shed_taken`], or
-	/// every committed frame while no reader holds the copy, which no reader is owed.
+	/// Shed the frames this copy's fastest reader took, see [`GroupState::shed_taken`]. A copy
+	/// no reader holds keeps the rest: one not yet handed out is still owed downstream.
 	pub(super) fn shed_taken(&self) {
 		let Ok(mut state) = self.state.write() else {
 			return;
 		};
-		match self.state.wanted() {
-			true => state.shed_taken(self.alive.pace.read()),
-			false => state.shed_all(),
-		}
+		state.shed_taken(self.alive.pace.read());
 	}
 
 	pub(super) fn delivery_size(&self) -> u64 {
