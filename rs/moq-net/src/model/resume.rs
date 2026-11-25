@@ -8854,7 +8854,7 @@ mod test {
 			},
 		]);
 		let mut sub = logical.consume().subscribe(ranges).now_or_never().unwrap().unwrap();
-		assert_eq!(drain(&mut sub, false), [0, 2, 5]);
+		assert_eq!(drain(&mut sub, false), [5, 2, 0]);
 		let b = received_copy();
 		routes.serve(b.consume());
 		write(&b, 6);
