@@ -14,12 +14,6 @@
 #   RUN_REF           head_branch: a branch name, or a tag for tag-triggered runs.
 #   RUN_TITLE         display_title, usually the commit subject.
 #   RUN_ACTOR         Triggering actor login.
-#   ALERT_ONCE        "true" to post only a streak's first failure, and its
-#                     first failure of each UTC day.
-#   RUN_WORKFLOW_ID   workflow_id, with ALERT_ONCE.
-#   RUN_NUMBER        run_number, with ALERT_ONCE.
-#   RUN_CREATED_AT    created_at, with ALERT_ONCE.
-#   GITHUB_REPOSITORY owner/repo, with ALERT_ONCE; GH_TOKEN needs actions: read.
 
 set -euo pipefail
 
@@ -31,11 +25,6 @@ WORKFLOWS_DIR="$(cd "$SCRIPT_DIR/../../.github/workflows" && pwd)"
 # malformed JSON.
 discord() {
     : "${DISCORD_WEBHOOK:?DISCORD_WEBHOOK is required}"
-
-    if [[ "${ALERT_ONCE:-}" == true ]] && reported_today; then
-        echo "An earlier $RUN_EVENT run of $RUN_NAME on $RUN_REF failed today, so this failure is already reported"
-        return 0
-    fi
 
     local payload
     payload=$(jq -n \
@@ -68,39 +57,6 @@ discord() {
         -H "Content-Type: application/json" \
         -d "$payload" \
         "$DISCORD_WEBHOOK"
-}
-
-# Whether this failure continues a streak already reported today: the latest
-# earlier run of this workflow, branch, and event that reached a verdict failed,
-# and was created on this run's UTC day. A landing-triggered workflow fails on
-# every landing until it is fixed, so it alerts on the run that broke it and
-# then once a day, which bounds a lost post to a day. Coalesced runs end
-# cancelled without a verdict, so they are passed over. A failed lookup counts
-# as unreported: a duplicate alert beats a lost one.
-reported_today() {
-    : "${GITHUB_REPOSITORY:?}" "${RUN_WORKFLOW_ID:?}" "${RUN_REF:?}" "${RUN_EVENT:?}"
-    [[ "${RUN_NUMBER:-}" =~ ^[0-9]+$ ]] || {
-        echo "alert.sh: RUN_NUMBER must be a run number, got '${RUN_NUMBER:-}'" >&2
-        return 2
-    }
-    # GitHub reports timestamps in UTC, so the first 10 characters are the UTC day.
-    [[ "${RUN_CREATED_AT:-}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T.*Z$ ]] || {
-        echo "alert.sh: RUN_CREATED_AT must be a UTC timestamp, got '${RUN_CREATED_AT:-}'" >&2
-        return 2
-    }
-
-    local runs
-    if ! runs=$(gh api -X GET "repos/$GITHUB_REPOSITORY/actions/workflows/$RUN_WORKFLOW_ID/runs" \
-        -f branch="$RUN_REF" -f event="$RUN_EVENT" -f status=completed -f per_page=100); then
-        echo "alert.sh: cannot read earlier runs, so posting" >&2
-        return 1
-    fi
-    jq -e --argjson number "$RUN_NUMBER" --arg day "${RUN_CREATED_AT:0:10}" '
-        [.workflow_runs[]
-            | select(.run_number < $number)
-            | select(.conclusion == "success" or .conclusion == "failure" or .conclusion == "timed_out")]
-        | max_by(.run_number)
-        | . != null and .conclusion != "success" and (.created_at | .[0:10]) == $day' <<<"$runs" >/dev/null
 }
 
 # Watch cron and publishing workflows. Ordinary CI stays on GitHub, avoiding
