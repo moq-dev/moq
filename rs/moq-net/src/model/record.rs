@@ -411,7 +411,12 @@ impl Record {
 			self.raise(floor);
 			folded.push(0..floor);
 		}
-		let mut from = Some(reader.from.max(self.lowest_settled().unwrap_or(0))).filter(|from| *from > self.floor);
+		let lowest = match mode {
+			// Only a report starts what it folds.
+			Fold::Final => self.next_reported(self.floor.saturating_add(1)),
+			_ => self.lowest_settled(),
+		};
+		let mut from = Some(reader.from.max(lowest.unwrap_or(0))).filter(|from| *from > self.floor);
 		while let Some(start) = from {
 			// Folded, a stretch costs two runs: only one spanning more is worth it.
 			let stretch = self.final_end(start, reader, beside, mode);
@@ -419,7 +424,15 @@ impl Record {
 				self.settle_stretch(start..stretch.end);
 				folded.push(start..stretch.end);
 			}
-			from = self.next_told(stretch.end.max(start + 1));
+			from = match mode {
+				// A stretch stopped where it started, at a drop, passes the whole report.
+				Fold::Final if stretch.end == start => {
+					let past = self.reported.get_key_value(&start).map_or(start + 1, |(run, _)| run.end);
+					self.next_reported(past)
+				}
+				Fold::Final => self.next_reported(stretch.end),
+				_ => self.next_told(stretch.end.max(start + 1)),
+			};
 		}
 		folded
 	}
@@ -442,13 +455,17 @@ impl Record {
 		self.reported.insert(stretch, Report::Settled);
 	}
 
+	/// The lowest key from `key` on that was reported.
+	fn next_reported(&self, key: u64) -> Option<u64> {
+		self.reported
+			.overlapping(&(key..u64::MAX))
+			.next()
+			.map(|(run, _)| run.start.max(key))
+	}
+
 	/// The lowest key from `key` on that was handed out or reported.
 	fn next_told(&self, key: u64) -> Option<u64> {
-		let reported = self.reported.overlapping(&(key..u64::MAX)).next();
-		[
-			self.delivered.next_from(key),
-			reported.map(|(run, _)| run.start.max(key)),
-		]
+		[self.delivered.next_from(key), self.next_reported(key)]
 		.into_iter()
 		.flatten()
 		.min()
