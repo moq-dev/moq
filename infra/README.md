@@ -293,13 +293,11 @@ commit, the one Smoke pins, therefore substitutes in full while `main` keeps
 merging; older commits' paths still expire. `flake.nix` sets `fallback = true` because
 that expiry can remove a path before one that depends on it.
 
-The Worker logs R2 internal errors (10001) and service-unavailable errors
-(10043) and treats the failed read as a miss: the other bucket can still
-serve the path, and otherwise the 404 is non-cacheable so Nix builds from
-source.
-Other errors, including invalid object names, permissions, and bucket
-configuration, still fail the request. A failure after the archive body
-starts streaming remains a failed download, covered by `fallback`.
+The Worker logs a failed R2 read and treats it as a miss: the other bucket
+can still serve the path, and otherwise the 404 is non-cacheable so Nix builds
+from source. A body that fails after it starts streaming resumes with a ranged
+read of the same object (a few times, then the stream errors), since a reset
+connection makes Nix disable the whole cache for a minute.
 
 Nix only trusts paths signed by the key in `flake.nix`, so the signing key is
 the trust boundary, not the bucket keys. It lives in the `cache-write`
