@@ -1136,6 +1136,27 @@ class OriginState {
 		for (const [path] of detached) if (Path.hasPrefix(prefix, path)) this.forget(path);
 	}
 
+	/**
+	 * Recompute `path` and every request beneath it, after a broadcast there changed: as a claim
+	 * on its subtree it can shadow or supersede what those resolve to. Found through the watch
+	 * trie, which holds every request's path, so a publish costs its own subtree rather than a
+	 * scan of every open request.
+	 */
+	refreshBeneath(path: Path.Valid): void {
+		this.refresh(path);
+		let node: WatchNode | undefined = this.#watches;
+		for (const part of Path.parts(path)) node = node?.children.get(part);
+		if (!node) return;
+		// Collected first: a reroute can end a request, which prunes the trie.
+		const beneath: Path.Valid[] = [];
+		const stack = [...node.children.values()];
+		for (let next = stack.pop(); next; next = stack.pop()) {
+			if (next.count > 0) beneath.push(next.path);
+			stack.push(...next.children.values());
+		}
+		for (const covered of beneath) this.refresh(covered);
+	}
+
 	/** Rebuild the publisher-facing originated table after an advertisement write. */
 	rebuildOriginated(): void {
 		if (this.closed.peek() !== undefined) {
@@ -1635,7 +1656,7 @@ export class Producer implements Table {
 			advertised.set(path, route);
 		});
 		this.#state.rebuildOriginated();
-		this.#state.refresh(path);
+		this.#state.refreshBeneath(path);
 	}
 
 	#retractExact(path: Path.Valid, front: broadcast.Consumer): void {
@@ -1647,7 +1668,7 @@ export class Producer implements Table {
 			advertised.delete(path);
 		});
 		this.#state.rebuildOriginated();
-		this.#state.refresh(path);
+		this.#state.refreshBeneath(path);
 	}
 
 	/**

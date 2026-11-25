@@ -3107,6 +3107,23 @@ test("a broadcast above a request shadows a broader claim, as the root row annou
 	origin.close();
 });
 
+// A broadcast's announce and retract change what every path beneath it resolves to.
+test("a request beneath a broadcast resolves the broader claim once the broadcast goes", async () => {
+	const origin = new Producer();
+	const broad = origin.claim(Path.empty());
+	const asked = watchAsked(broad);
+	const broadcast = origin.route(Path.from("src"));
+	const request = origin.consume().request(Path.from("src/a"));
+	await settle();
+	expect(asked()).toBe(false);
+	broadcast.close();
+	await settle();
+	expect(asked()).toBe(true);
+	request.close();
+	broad.close();
+	origin.close();
+});
+
 // Rust's a_broadcast_here_shadows_a_broader_claim_shown_at_its_prefix, with a claim of the
 // broadcast's own prefix filed deeper: of one tier, a claim that serves the request outranks the
 // broadcast, unless the broadcast carries its instance at a higher epoch.
