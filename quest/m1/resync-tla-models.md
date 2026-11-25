@@ -9,6 +9,8 @@ its models still check.
 
 ## Plan
 
+Decided 2026-11-25 (maintainer, /quest-run): ✅ keep (rejected: drop); ✅ it blocks the 0.22 cut (rejected: not a cut blocker); ✅ all four models, `verify-resume`, `verify-failover`, `verify-credit`, and `verify-warm` (rejected: resume and failover only).
+
 Found by the 2026-11-23 pre-0.22 test coverage audit (`890ea4e531`). Commits on
 `main` touching each skill's covered files since its sync commit, counted
 2026-11-25 with the `git log` line in each skill's Coverage section:

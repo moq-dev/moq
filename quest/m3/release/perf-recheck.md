@@ -6,6 +6,8 @@
 
 ## Plan
 
+Decided 2026-11-25 (maintainer, /quest-run): ✅ keep (rejected: drop); ✅ it blocks the 0.22 cut (rejected: not a blocker).
+
 Found by the 2026-11-23 pre-0.22 performance audit (`890ea4e531`):
 
 - `.github/release-perf.md` was last updated 2026-11-17 (`8c9e13577c`), **479 commits** ago, before the late `m1`/`m2` routing, time-addressing, `Max Age`, and `NodeId` changes landed.
