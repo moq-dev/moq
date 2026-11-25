@@ -956,8 +956,8 @@ class OriginState {
 			else slot.route.set(undefined);
 			return;
 		}
-		if (entry.identity === source) {
-			// Already on the cheapest: a takeover still pending speaks for nobody.
+		if (entry.identity === source && current?.front?.closed.peek() === undefined) {
+			// Already on the cheapest, still answering: a takeover still pending speaks for nobody.
 			slot.failover = undefined;
 			return;
 		}

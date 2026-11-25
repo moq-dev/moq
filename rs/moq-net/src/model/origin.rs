@@ -5042,9 +5042,11 @@ impl FrontServe {
 		if self.resolved.is_none()
 			&& let Some(entry) = best
 			&& let Ok(mut pending) = self.request.write()
-			&& pending.selected != entry.instance
 		{
-			pending.selected = entry.instance.clone();
+			if pending.selected != entry.instance {
+				pending.selected = entry.instance.clone();
+			}
+			pending.epoch = entry.epoch;
 		}
 		// Only a received route carries a hop chain or a claiming node: a local one needs
 		// no discovery.
@@ -7273,9 +7275,10 @@ struct PendingBroadcast {
 /// this carries no handle that would keep the front held.
 struct PendingFront {
 	resolved: Option<Result<Instance, Error>>,
-	/// The epoch of the route the front serves from, once resolved. A front still serving a
-	/// superseded epoch keeps its readers while it moves to the newer one, but admits nobody:
-	/// a request selecting the newer epoch must never resolve through the older one.
+	/// The epoch of the route the front serves from once resolved, and of the one it selected
+	/// until then. A front still serving or resolving a superseded epoch keeps its readers while
+	/// it moves to the newer one, but admits nobody: a request selecting the newer epoch must
+	/// never resolve through the older one, whose answer may already be on its way.
 	epoch: u64,
 	/// The instance the front resolves on unless the table moves first: the winner it
 	/// was minted for, then each one it selects. Written under the table's lock, so a
@@ -8725,16 +8728,18 @@ impl Consumer {
 		// hold that instance's source, and hand this request an instance it saw lose. So
 		// does a front serving an older epoch of the winner: it moves its readers onto the
 		// newer one, but an older epoch never stands in for a newer one that has yet to
-		// answer. A front still resolving answers only from the epoch that wins then.
+		// answer. Nor does a front still resolving an older epoch: that epoch's answer may
+		// already have passed its check and be on its way to resolving it.
 		let key = (absolute.clone(), horizon, pin.clone());
 		if let Some(front) = state.fronts.get(&key) {
 			let current = {
 				let pending = front.request.read();
-				match &pending.resolved {
-					None => pending.selected == best,
-					Some(Ok(resolved)) => *resolved == best && pending.epoch == epoch,
-					Some(Err(_)) => false,
-				}
+				pending.epoch == epoch
+					&& match &pending.resolved {
+						None => pending.selected == best,
+						Some(Ok(resolved)) => *resolved == best,
+						Some(Err(_)) => false,
+					}
 			};
 			// Held from here on, so the front cannot retire under this requester. A
 			// retiring front closes atomically with this mint: found closed, it is
@@ -15998,6 +16003,40 @@ mod tests {
 		})
 		.await;
 		assert!(matches!(result.unwrap(), Err(Error::Unroutable)));
+	}
+
+	/// A front still resolving the older epoch admits no request that selects the newer one,
+	/// since the older epoch's answer may already have passed its staleness check before the
+	/// newer epoch won, and resolve the front on its way out.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_front_resolving_an_older_epoch_admits_no_request_for_the_newer_one() {
+		let producer = Config {
+			update_hold: Duration::ZERO,
+			..Config::from(origin(1))
+		}
+		.produce();
+		let consumer = producer.consume();
+		let filed = producer.forward("src/a", epoch_claim(1, 10, 1)).unwrap();
+		let first = consumer.lookup(Path::new("src/a/b").unwrap(), None);
+		let _asked = queued(&filed).await;
+		let key = (consumer.absolute("src/a/b").unwrap(), Horizon::default(), None);
+		let request = producer.shared.lock().fronts.get(&key).unwrap().request.clone();
+
+		// The newer epoch wins before the front selects again.
+		let _newer = producer.forward("src", epoch_claim(2, 11, 0)).unwrap();
+		let fresh = consumer.lookup(Path::new("src/a/b").unwrap(), None).into_inner();
+		// The older epoch's answer lands, as the front publishes one that passed its check.
+		if let Ok(mut pending) = request.write() {
+			pending.resolved = Some(Ok(instance()));
+			pending.epoch = 1;
+		}
+		let waiter = kio::Waiter::noop();
+		assert!(first.into_inner().poll_ok(&waiter).is_ready(), "the older epoch's requester resolves");
+		assert!(
+			fresh.poll_ok(&waiter).is_pending(),
+			"a request selecting the newer epoch must not resolve through the older one"
+		);
 	}
 
 	/// An older epoch's answer whose route left the table before the front heard it never

@@ -1524,6 +1524,40 @@ test("a superseded epoch never answers a fresh request", async () => {
 	origin.close();
 });
 
+// A request that moved onto a newer epoch asks it again once its answer closes while the claim
+// still serves, as one that never switched epochs does.
+test("a request that moved epochs re-requests a closed answer", async () => {
+	const origin = new Producer();
+	const path = Path.from("src/a/b");
+	const filed = wireOf(origin).receive(Path.from("src/a"), epochClaim(1n, 1n));
+	const held = origin.request(path);
+	const source = new BroadcastProducer();
+	defined((await filed.requested().next()).value).serve(source.consume());
+	const reader = await held.broadcast();
+
+	const newer = wireOf(origin).receive(Path.from("src"), epochClaim(2n));
+	const asked = newer.requested();
+	const moved = new BroadcastProducer();
+	defined((await asked.next()).value).serve(moved.consume());
+	await settle();
+	expect(readsFrom(reader, moved)).toBe(true);
+
+	moved.close();
+	await settle();
+	const again = await Promise.race([asked.next().then((next) => next.value), settle().then(() => undefined)]);
+	const replacement = new BroadcastProducer();
+	defined(again).serve(replacement.consume());
+	await settle();
+	expect(readsFrom(reader, replacement)).toBe(true);
+
+	held.close();
+	source.close();
+	replacement.close();
+	newer.close();
+	filed.close();
+	origin.close();
+});
+
 // A pinned request is held to the same rule: while its instance's newer epoch has yet to answer,
 // a fresh request pinned to it never joins the slot still serving the older one.
 test("a superseded epoch never answers a fresh pinned request", async () => {
