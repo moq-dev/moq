@@ -919,9 +919,13 @@ export class Encoder {
 							cut();
 						}
 					},
-					// Unlike a break, the next frame still continues this one, so `contiguous` stays.
+					// Unlike a break, the next frame still continues this one, so `contiguous` stays. A
+					// stop with no input since the last one owes nothing new, so subscription churn can't
+					// grow the queue behind a chunk the codec holds.
 					stop: () => {
 						if (contiguous === undefined) return;
+						const last = owed.at(-1);
+						if (last && "close" in last) return;
 						owed.push({ close: contiguous });
 						settle();
 					},

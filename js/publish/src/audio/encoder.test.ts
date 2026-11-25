@@ -1711,6 +1711,64 @@ test.each([0, 1])("the group open when the subscriber leaves ends for a fetch (c
 	}
 });
 
+// A codec holding the group's last frame keeps every group end owed behind it, so a peer churning
+// its subscription with no audio in between must not grow that queue.
+test("subscription churn with no new audio owes one group end", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	FakeAudioEncoder.LAG = 1;
+	const clock = new Manual();
+	const installed = clock.install();
+	const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name: Moq.Path.from("churn.hang") });
+	const feed = new Feed();
+	const configuring = configured();
+	const encoder = new Encoder("audio", {
+		broadcast,
+		capture: fakeCapture(feed) as never,
+		join: Duration.millis(100),
+	});
+	using cut = spyOn(Container.Legacy.Producer.prototype, "cut");
+	let viewer: Moq.Track.Subscriber | undefined;
+	const push = async (index: number) => {
+		await feed.push({ timestamp: Duration.micros(index * 20_000), channels: [new Float32Array(960)] });
+		await feed.drain();
+	};
+	try {
+		await configuring;
+		await settle();
+		const net = broadcast.net.peek();
+		if (!net) throw new Error("expected network broadcast");
+		viewer = net.track("audio").subscribe({ ranges: [{}] });
+		await settle();
+		await push(0);
+		for (let i = 0; i < 3; i++) {
+			viewer.close();
+			await settle();
+			viewer = net.track("audio").subscribe({ ranges: [{}] });
+			await settle();
+			// Each resume drains an empty backlog, which releases nothing the codec still holds.
+			await feed.drain();
+		}
+		// The held frame comes out with the next input, releasing what was owed behind it.
+		await push(1);
+		await settle();
+		expect(cut).toHaveBeenCalledTimes(1);
+
+		// Audio submitted since the last stop owes a new end.
+		viewer.close();
+		await settle();
+		viewer = net.track("audio").subscribe({ ranges: [{}] });
+		await settle();
+		await push(2);
+		await settle();
+		expect(cut).toHaveBeenCalledTimes(2);
+	} finally {
+		viewer?.close();
+		encoder.close();
+		broadcast.close();
+		installed.close();
+	}
+});
+
 // Replay catches up behind the live edge another rendition already reached; advertising that as
 // `delay` would buffer playback by the retention for the rest of the broadcast.
 test("replayed raw audio raises no catalog delay", async () => {
