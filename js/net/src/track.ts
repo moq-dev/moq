@@ -3449,6 +3449,8 @@ export class Subscriber {
 	#skipped = new Map<bigint, number>();
 	// At most the narrowest budget in #skipped, so a read whose widest budget did not pass it skips the scan.
 	#narrowest = Number.POSITIVE_INFINITY;
+	// The budget #reoffer last judged #skipped under, so a read under an equal one skips the scan.
+	#reofferedUnder: Budget | undefined;
 	// This reader closed itself, so lowering its floor offers nothing: a producer's clean close
 	// alone leaves the cache readable, but the reader leaving must stay terminal. Leaving also
 	// settles the shared `#state.closed`, so a guard for either close reads that alone.
@@ -4008,6 +4010,9 @@ export class Subscriber {
 	// handed out or skipped again, so a newer one handed out first never folds it into #delivered.
 	// Costs the skipped groups, never the cache. Mirrors the Rust `Skipped::widened`.
 	#reoffer(budget: Budget): void {
+		// A skip is judged under the budget current then, so an equal one offers nothing again.
+		if (this.#reofferedUnder?.equals(budget)) return;
+		this.#reofferedUnder = budget;
 		if (this.#skipped.size === 0 || budget.widest() <= this.#narrowest) return;
 		const keys: bigint[] = [];
 		let narrowest = Number.POSITIVE_INFINITY;
@@ -4031,7 +4036,7 @@ export class Subscriber {
 		}
 		this.#narrowest = narrowest;
 		const producer = this.#state.producer;
-		if (producer && !this.#left) reofferKeys(producer, this.#state, keys);
+		if (producer && !this.#left && keys.length > 0) reofferKeys(producer, this.#state, keys);
 	}
 
 	// The publisher's view of this reader's record.
@@ -5801,7 +5806,6 @@ export class Subscriber {
 		// floor, or down from below the cap. A beyond-cap group stays held without blocking an
 		// in-range one, which sorts in front of it.
 		let index = ascending ? floor : timelineIndex(groups, end ?? UNBOUNDED) - 1;
-		const step = ascending ? 1 : -1;
 
 		for (;;) {
 			if (index < floor) break;
@@ -5809,7 +5813,7 @@ export class Subscriber {
 			if (!group || (end !== undefined && group.start >= end)) break;
 			// Kept, like a group below the floor: replacing the ranges can take it in.
 			if (!this.#window.contains(group.start)) {
-				index += step;
+				index = this.#pastExcluded(groups, group.start, ascending);
 				continue;
 			}
 			groups.splice(index, 1);
@@ -5866,6 +5870,18 @@ export class Subscriber {
 		return this.#parked(groups) ? { kind: "boundary" } : this.#done();
 	}
 
+	// Where a walk of the key-sorted `groups` resumes past `key`, which the window leaves out: the
+	// next group the window admits in the walk's direction, or past either end. One seek over the
+	// excluded groups, which stay buffered for a widening, rather than a step per group.
+	#pastExcluded(groups: readonly GroupConsumer[], key: bigint, ascending: boolean): number {
+		if (ascending) {
+			const next = this.#window.next(key);
+			return next === undefined ? groups.length : timelineIndex(groups, next);
+		}
+		const below = this.#window.runs(0n, key).at(-1);
+		return below === undefined ? -1 : timelineIndex(groups, below.end) - 1;
+	}
+
 	// Write off the stale groups at the oldest end of `groups` within `[start, end)`, up to the first
 	// one still fresh. Mirrors the Rust `Cursor::write_off_oldest`.
 	#writeOffOldest(
@@ -5880,7 +5896,7 @@ export class Subscriber {
 			const group = groups[index];
 			if (!group || (end !== undefined && group.start >= end)) return undefined;
 			if (!this.#window.contains(group.start)) {
-				index++;
+				index = this.#pastExcluded(groups, group.start, true);
 				continue;
 			}
 			if (this.#delivered.has(group.start)) {
@@ -6575,20 +6591,31 @@ export class Subscriber {
 			!this.#staleAt(group.start, drift) &&
 			(ordered || !this.#lacksHead(group));
 		if (!ordered && this.#state.update.scalars()?.order !== "ascending") {
-			const below = timelineIndex(groups, cursor.end ?? UNBOUNDED);
-			for (let index = below - 1; index >= 0 && groups[index].start >= start; index--) {
+			let index = timelineIndex(groups, cursor.end ?? UNBOUNDED) - 1;
+			while (index >= 0 && groups[index].start >= start) {
 				const group = groups[index];
-				if (this.#window.contains(group.start) && offers(group)) return group.start;
+				if (!this.#window.contains(group.start)) {
+					index = this.#pastExcluded(groups, group.start, false);
+					continue;
+				}
+				if (offers(group)) return group.start;
+				index--;
 			}
 			return undefined;
 		}
-		for (const group of groups) {
-			if (group.start < start || !this.#window.contains(group.start)) continue;
+		let index = timelineIndex(groups, start);
+		while (index < groups.length) {
+			const group = groups[index];
 			if (cursor.end !== undefined && group.start >= cursor.end) return undefined;
+			if (!this.#window.contains(group.start)) {
+				index = this.#pastExcluded(groups, group.start, true);
+				continue;
+			}
 			if (offers(group)) {
 				if (ordered && this.#waitTimeStart(start, group.start, drift)) return undefined;
 				return group.start;
 			}
+			index++;
 		}
 		return undefined;
 	}

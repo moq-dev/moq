@@ -1544,6 +1544,32 @@ test("a peek offers a group a widened budget re-offers", () => {
 	}
 });
 
+// A read of disjoint ranges seeks past the cached groups between them in either Group Order, and
+// keeps them for a widening.
+test("an arrival read of disjoint ranges seeks past the groups between them", () => {
+	for (const [order, expected] of [
+		["descending", [8n, 7n, 2n, 1n, 0n]],
+		["ascending", [0n, 1n, 2n, 7n, 8n]],
+	] as const) {
+		const producer = new TrackProducer("test").accept({ maxAge: null });
+		for (let key = 0n; key < 10n; key++) {
+			const group = producer.createGroup(key);
+			group.writeFrame(textFrame("x", Timestamp.unscaled(key)));
+			group.finishAt(key + 1n);
+		}
+		const ranges = [
+			{ start: 0n, end: 2n },
+			{ start: 7n, end: 8n },
+		];
+		const reader = producer.subscribe(withMax({ delay: { max: null }, order, ranges }));
+		expect(hooks.peekGroup(reader, false)).toBe(expected[0]);
+		expect(readable(reader)).toEqual([...expected]);
+		reader.update(withMax({ delay: { max: null }, order, ranges: [{ start: 0n, end: 9n }] }));
+		expect(readable(reader).sort()).toEqual([3n, 4n, 5n, 6n, 9n]);
+		producer.close();
+	}
+});
+
 // A time start resolves on keys alone: groups opened before their first frames, below a
 // reached end, are read from the one containing it. Mirrors the Rust `a_time_start_needs_no_frame`.
 test("a time start resolves on keys alone, before any group's first frame", () => {
