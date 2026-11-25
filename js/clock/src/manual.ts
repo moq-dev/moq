@@ -17,6 +17,8 @@ export class Manual {
 	// Wall time is derived from an anchor so tiny advances don't vanish into an epoch-sized float.
 	#wallAnchor = wallMillis(Manual.WALL_START);
 	#wallAnchorAt = 0;
+	// The wall time at instant zero, which a wall step moves and a suspend leaves.
+	#origin = wallMillis(Manual.WALL_START);
 	#timers: Timer[] = [];
 	#order = 0;
 	#revision = 0;
@@ -28,7 +30,7 @@ export class Manual {
 	#backend: Backend = {
 		now: () => this.#now,
 		wall: () => this.#wall(),
-		origin: () => this.#wallAnchor - this.#wallAnchorAt / 1_000_000,
+		origin: () => this.#origin,
 		arm: (at, ready) => {
 			const timer = { at, order: this.#order++, index: this.#timers.length, ready };
 			this.#timers.push(timer);
@@ -134,9 +136,19 @@ export class Manual {
 		return await done;
 	}
 
-	/** Set wall time forward or backward without passing monotonic time. */
+	/** Set wall time forward or backward without passing monotonic time, moving the origin with it. */
 	stepWall(wall: Wall): void {
 		this.#wallAnchor = wallMillis(wall);
+		this.#wallAnchorAt = this.#now;
+		this.#origin = this.#wallAnchor - this.#now / 1_000_000;
+	}
+
+	/**
+	 * Sleep the host for `duration`: wall time jumps forward while monotonic time and the origin
+	 * stand still, as a page sees across a system suspend.
+	 */
+	suspend(duration: Duration): void {
+		this.#wallAnchor = this.#wall() + duration.asMillis();
 		this.#wallAnchorAt = this.#now;
 	}
 
