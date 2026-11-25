@@ -2771,7 +2771,7 @@ mod test {
 		let waiter = kio::Waiter::new(std::task::Waker::from(reenter.clone()));
 		assert!(pending.poll_ok(&waiter).is_pending());
 		let track = producer.unique_track(".opus", crate::track::Info::timed());
-		assert_eq!(&*track.name(), "0.opus");
+		assert_eq!(track.name(), "0.opus");
 		assert!(reenter.woken.load(std::sync::atomic::Ordering::SeqCst));
 	}
 
