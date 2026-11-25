@@ -125,12 +125,6 @@ and Pullfrog's `CLAUDE_CODE_OAUTH_TOKEN` and `META_MODEL_API_KEY`. The
 repository secrets left are `CACHIX_AUTH_TOKEN` (owned by `cachix-retire`)
 and the read-only `MBX_R2_ACCESS_KEY_ID` and `MBX_R2_SECRET_ACCESS_KEY`.
 
-Decided 2026-11-06 (maintainer, /quest-unblock): ✅ Pullfrog gets no
-provider keys from this repository, so `pullfrog.yml` passes none; its
-model access comes from the Pullfrog console, which the action reaches with
-the job's OIDC token through the `pullfrog` Environment (main only). Not
-chosen: moving the keys into the `pullfrog` Environment.
-
 Decided 2026-11-06 (maintainer, /quest-unblock): ✅ leave the organization
 secret `DISCORD_WEBHOOK` visible to all repositories; this repository's
 `alert` job reads the `alert` Environment's copy. Not chosen: narrowing it to

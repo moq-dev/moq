@@ -1749,7 +1749,10 @@ export class Publisher {
 				const { changed, dispose } = nextChange(this.#advertised, this.#grant, this.#auth?.ended);
 
 				const advertised = this.#advertised.peek();
-				const updated = advertised ? presented(prefix, advertised, carries) : new Map<Path.Valid, Advertised>();
+				const root = this.#publish && wireOf(this.#publish).root;
+				const updated = advertised
+					? presented(prefix, advertised, carries, { root })
+					: new Map<Path.Valid, Advertised>();
 				// A fresh pass sends a NAMESPACE for every entry, ahead of any change.
 				if (!answered) {
 					answered = true;

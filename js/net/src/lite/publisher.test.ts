@@ -4,6 +4,7 @@ import { Manual } from "@moq/clock/test";
 import { type Getter, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
+import { askedFirst } from "../claim.test-util.ts";
 import { accept as acceptSession, connect as connectSession } from "../connection/index.ts";
 import { defined } from "../defined.test-util.ts";
 import { fromTransport, ProtocolViolation, SessionCode, StreamCode, StreamError, toStreamCode } from "../error.ts";
@@ -770,10 +771,13 @@ async function servedSubscription(
 		version?: Version;
 		maxDatagramSize?: number;
 		// Answer the subscription with a front's broadcast, as an application forwarding a
-		// routed one does, so the track reads through the front's serving route.
-		routed?: boolean;
+		// routed one does, so the track reads through the front's serving route. `"nested"` serves
+		// that front from another front, so its route copy is a front's track too.
+		routed?: boolean | "nested";
 		// Groups the track holds before the SUBSCRIBE arrives, stamped by sequence.
 		prefill?: bigint[];
+		// Runs the track's source gave up before the SUBSCRIBE arrives, as a relay's copy records.
+		dropped?: [bigint, bigint][];
 		// A newer largest group the track's source reported before the SUBSCRIBE arrives.
 		reported?: bigint;
 		// Leave the track unresolved until `accept`, as an on-demand track the SUBSCRIBE beats.
@@ -795,7 +799,11 @@ async function servedSubscription(
 	if (options.routed) {
 		broadcast = new BroadcastProducer();
 		const front = new Front();
-		front.serve(broadcast.consume());
+		if (options.routed === "nested") {
+			const inner = new Front();
+			inner.serve(broadcast.consume());
+			front.serve(inner.consumer);
+		} else front.serve(broadcast.consume());
 		const dynamic = origin.claim(Path.from("test"));
 		void (async () => {
 			for await (const request of dynamic.requested()) request.serve(front.consumer);
@@ -812,6 +820,10 @@ async function servedSubscription(
 		const group = track.createGroup(key);
 		for (const frame of frames) group.writeFrame(textFrame(frame, Timestamp.fromMillis(Number(key))));
 		group.finish();
+	}
+	for (const [start, end] of options.dropped ?? []) {
+		if (!track) throw new Error("a pending track holds nothing to drop");
+		hooks.dropTrackGroups(track, start, end, { error: new StreamError(StreamCode.NotFound) });
 	}
 	if (options.reported !== undefined) {
 		if (!track) throw new Error("a pending track has no source to report");
@@ -3540,6 +3552,80 @@ test("runProbe rounds a fractional smoothedRtt instead of killing the stream", a
 	}
 });
 
+// A join over a long history of gaps, as a lite-06 track keyed by timestamp carries one per group,
+// names only the gaps from the group below its start up, and an update keeping its start names none
+// of the rest: they lie past a group its budget skipped, which the subscriber is not owed. One lowering
+// its start asks for them, so they are named then, on a front too, whose copies reported them once
+// already. Mirrors the Rust `a_join_names_no_gap_past_a_skipped_group`.
+for (const routed of [false, true, "nested"] as const) {
+	const on = routed === "nested" ? " on a front of a front" : routed ? " on a front" : "";
+	test(`lite draft-06: a join names no gap past a skipped group${on}`, async () => {
+		const keys = Array.from({ length: 50 }, (_, i) => BigInt(i * 20));
+		const sub = await servedSubscription({
+			version: Version.DRAFT_06,
+			prefill: keys,
+			dropped: keys.map((key) => [key + 1n, key + 20n]),
+			maxDelay: 100,
+			routed,
+		});
+		try {
+			const response = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
+			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
+			const start = response.start.start;
+			if (start === undefined) throw new Error("expected a start");
+			expect(start).toBeGreaterThan(0n);
+			const drop = async () => {
+				const response = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
+				if (!("drop" in response)) throw new Error("expected SUBSCRIBE_DROP");
+				return [response.drop.start, response.drop.end];
+			};
+			// The gap below the start, then each above it.
+			for (let key = start - 20n; key < 1000n; key += 20n) expect(await drop()).toEqual([key + 1n, key + 20n]);
+
+			// An update keeping the start names none of the older gaps either: the next drop is a new one.
+			await new SubscribeUpdate({ priority: 1, maxDelay: 100 }).encode(sub.client.writer, Version.DRAFT_06);
+			while (sub.track.subscription.peek()?.priority !== 1) await sub.track.subscription.changed();
+			hooks.dropTrackGroups(sub.track, 1001n, 1020n, { error: new StreamError(StreamCode.NotFound) });
+			expect(await drop()).toEqual([1001n, 1020n]);
+
+			// One lowering the start asks for those keys, so each gap there is named then.
+			await new SubscribeUpdate({ priority: 2, maxDelay: 100, startGroup: 1n }).encode(
+				sub.client.writer,
+				Version.DRAFT_06,
+			);
+			const named = new Set<string>();
+			while (!named.has(String([1n, 20n])) || !named.has(String([start - 39n, start - 20n])))
+				named.add(String(await drop()));
+			for (let key = 0n; key < start - 20n; key += 20n)
+				expect(named.has(String([key + 1n, key + 20n]))).toBe(true);
+		} finally {
+			await sub.close();
+		}
+	});
+}
+
+// A skip a reader reports over a run it already gave up, both before the start, replaces that run,
+// so the final runs reaching up to the start are still named. Mirrors the Rust `RangeMap` of runs
+// given up before the start.
+test("lite draft-06: a skip below the start replaces the drop it covers", async () => {
+	const sub = await servedSubscription({ version: Version.DRAFT_06, maxDelay: 100 });
+	try {
+		hooks.dropTrackGroups(sub.track, 5n, 6n, { error: new StreamError(StreamCode.NotFound) });
+		await flush();
+		sub.track.skipGroups(3n, 8n);
+		await flush();
+		sub.serve(8n);
+		const response = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
+		if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
+		expect(response.start.start).toBe(8n);
+		const drop = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
+		if (!("drop" in drop)) throw new Error("expected SUBSCRIBE_DROP");
+		expect([drop.drop.start, drop.drop.end]).toEqual([3n, 8n]);
+	} finally {
+		await sub.close();
+	}
+});
+
 test("a version without the latency field serves a non-dropping budget", async () => {
 	for (const version of [Version.DRAFT_01, Version.DRAFT_02]) {
 		// These drafts carry no max age, which decodes as no limit: history from the oldest group,
@@ -4921,17 +5007,7 @@ test("a lite-07 answer shows the most specific of the claims filed at a grant", 
 
 			// A request there resolves through the same claim.
 			const request = origin.consume().request(Path.join(asked, Path.from("x")));
-			const which = await Promise.race([
-				narrow
-					.requested()
-					.next()
-					.then(() => "narrow"),
-				broad
-					.requested()
-					.next()
-					.then(() => "broad"),
-			]);
-			expect(which).toBe("narrow");
+			expect(await askedFirst(Path.join(asked, Path.from("x")), [narrow, broad])).toBe(narrow);
 			request.close();
 		} finally {
 			narrow.close();
@@ -4939,6 +5015,115 @@ test("a lite-07 answer shows the most specific of the claims filed at a grant", 
 			close();
 			origin.close();
 		}
+	}
+});
+
+// Claims of one prefix filed above and below a handle's root that tie on rank hash on the root,
+// as a request for it resolves, though the handle shows both at its root: the answer carries
+// what the request takes, whichever claim is newer.
+test("a lite-07 rooted answer shows the claim a request for its root takes", async () => {
+	const root = Path.from("src/a/b");
+	for (const [i, swap] of [...Array(16).keys()].flatMap((i) => [[i, false] as const, [i, true] as const])) {
+		const origin = new OriginProducer();
+		// Names whose hash order differs between paths.
+		const pair = [`cam${i * 7}`, `pub${i * 13}`];
+		const names = swap ? pair.toReversed() : pair;
+		const instance = (name: string) => ({ id: Instance.parse(name), epoch: 0n });
+		const shallow = origin.claim(Path.from("src"), { instance: instance(names[0]) });
+		const deep = origin
+			.scope(Path.empty(), Path.Prefixes.parse(["src/a"]))
+			.claim(Path.from("src"), { instance: instance(names[1]) });
+		const { next, ok, close } = routedAnswer(origin.scope(root, Path.Prefixes.parse([""])));
+		try {
+			await ok();
+			const msgs: AnnounceBroadcast[] = [];
+			for (;;) {
+				const msg = await next();
+				msgs.push(msg);
+				if (msg.status === "synced") break;
+			}
+			const starts = msgs.flatMap((msg) => (msg.status === "start" ? [msg.instance] : []));
+			const request = origin.consume().request(root);
+			const which = (await askedFirst(root, [shallow, deep])).instance;
+			expect(starts).toEqual([which]);
+			request.close();
+		} finally {
+			shallow.close();
+			deep.close();
+			close();
+			origin.close();
+		}
+	}
+});
+
+// Read beneath a handle's root, claims of one prefix filed above and at the root that tie on rank
+// hash on the absolute path read, as a request for it resolves, not on the path from the root:
+// the answer carries the claim the request takes.
+test("a lite-07 rooted answer beneath its root shows the claim a request for that path takes", async () => {
+	const root = Path.from("src/a");
+	for (const [i, swap] of [...Array(16).keys()].flatMap((i) => [[i, false] as const, [i, true] as const])) {
+		const origin = new OriginProducer();
+		// Names whose hash order differs between the absolute path and the path from the root.
+		const pair = [`cam${i * 7}`, `pub${i * 13}`];
+		const names = swap ? pair.toReversed() : pair;
+		const instance = (name: string) => ({ id: Instance.parse(name), epoch: 0n });
+		const shallow = origin.claim(Path.from("src"), { instance: instance(names[0]) });
+		const deep = origin
+			.scope(Path.empty(), Path.Prefixes.parse(["src/a"]))
+			.claim(Path.from("src"), { instance: instance(names[1]) });
+		const { next, ok, close } = routedAnswer(
+			origin.scope(root, Path.Prefixes.parse([""])),
+			undefined,
+			Path.from("x"),
+		);
+		try {
+			await ok();
+			const msgs: AnnounceBroadcast[] = [];
+			for (;;) {
+				const msg = await next();
+				msgs.push(msg);
+				if (msg.status === "synced") break;
+			}
+			const starts = msgs.flatMap((msg) => (msg.status === "start" ? [msg.instance] : []));
+			const request = origin.consume().request(Path.from("src/a/x"));
+			const which = (await askedFirst(Path.from("src/a/x"), [shallow, deep])).instance;
+			expect(starts).toEqual([which]);
+			request.close();
+		} finally {
+			shallow.close();
+			deep.close();
+			close();
+			origin.close();
+		}
+	}
+});
+
+// A broadcast published above a handle's root serves only its own path, so a costlier claim of the
+// same prefix filed at the root, which serves it, is the one the answer carries, as a request for
+// the root takes it.
+test("a lite-07 rooted answer passes over a broadcast published above its root", async () => {
+	const origin = new OriginProducer();
+	const broadcast = publish(origin, Path.from("src"));
+	const filed = origin.scope(Path.empty(), Path.Prefixes.parse(["src/a"])).claim(Path.from("src"), { cost: 5n });
+	const { next, ok, close } = routedAnswer(origin.scope(Path.from("src/a"), Path.Prefixes.parse([""])));
+	try {
+		await ok();
+		const msgs: AnnounceBroadcast[] = [];
+		for (;;) {
+			const msg = await next();
+			msgs.push(msg);
+			if (msg.status === "synced") break;
+		}
+		const starts = msgs.flatMap((msg) => (msg.status === "start" ? [msg.instance] : []));
+		expect(starts).toEqual([filed.instance]);
+		const request = origin.consume().request(Path.from("src/a"));
+		await askedFirst(Path.from("src/a"), [filed]);
+		request.close();
+	} finally {
+		broadcast.close();
+		filed.close();
+		close();
+		origin.close();
 	}
 });
 
@@ -4964,17 +5149,7 @@ test("a lite-07 rooted answer shows the most specific claim filed on either side
 		expect(starts.map((msg) => msg.instance)).toEqual([narrow.instance]);
 
 		const request = origin.consume().request(Path.from("a/b/c/d/x"));
-		const which = await Promise.race([
-			narrow
-				.requested()
-				.next()
-				.then(() => "narrow"),
-			broad
-				.requested()
-				.next()
-				.then(() => "broad"),
-		]);
-		expect(which).toBe("narrow");
+		expect(await askedFirst(Path.from("a/b/c/d/x"), [narrow, broad])).toBe(narrow);
 		request.close();
 	} finally {
 		narrow.close();

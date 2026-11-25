@@ -59,10 +59,6 @@ Recommendations:
 
 Public API and wire: none expected.
 
-## Required
-
-- [Origin route rank](/quest/m1/lite07-routing/origin-route-rank.md) - moq-dev/moq#9371 changes the ranking this quest makes incremental and adds the JS bench
-
 ## Related
 
 - [Route wakes](/quest/m3/route-wakes.md) - the fronts' half of a route change's cost

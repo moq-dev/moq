@@ -87,7 +87,8 @@ export function play(
 		allowance = Math.min(allowance + CAP * h, span);
 		let shift = 0;
 		const sign = Math.sign(decision.pace);
-		if (sign !== direction) {
+		// A hold keeps the pace owed, so a lag flickering across half a hop still adds up to a splice.
+		if (sign !== 0 && sign !== direction) {
 			direction = sign;
 			owed = 0;
 		}

@@ -313,7 +313,7 @@ export class Subscriber {
 		return this.#goaway?.peek() !== undefined;
 	}
 
-	// A route ranks last, at its real cost, once the peer has asked us to leave.
+	// A route ranks below every available one, at its real cost, once the peer has asked us to leave.
 	#drained(route: WireRoute): WireRoute {
 		if (!this.#goingAway() || route.draining) return route;
 		return { ...route, draining: true };

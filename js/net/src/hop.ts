@@ -108,8 +108,9 @@ export interface RouteInfo {
 	/**
 	 * Whether a usable path reaches the route's origin. An unavailable route is held: the
 	 * network lost every path to it but may recover one, so the announcement stays. It ranks
-	 * with a draining route, below every available one, and requests through it may fail until
-	 * it recovers: request again once it turns available.
+	 * below every available claim of its prefix, a draining one included, though a more specific
+	 * claim still shadows a broader one, and requests through it may fail until it recovers:
+	 * request again once it turns available.
 	 */
 	readonly available: boolean;
 }
@@ -160,8 +161,9 @@ export interface WireRoute {
 	readonly auth?: Credential;
 	/**
 	 * The session it arrived on is going away (the peer sent a GOAWAY): it ranks below every
-	 * other eligible route, whatever its cost, yet still serves when nothing else does. A
-	 * preference state, never a saturated cost. Local: never forwarded, and readers never see it.
+	 * other available route, whatever its cost, yet above one held unavailable, and still serves
+	 * when nothing else does. A preference state, never a saturated cost. Local: never forwarded,
+	 * and readers never see it.
 	 */
 	readonly draining?: boolean;
 	/** See {@link RouteInfo.available}; unset means available. */
