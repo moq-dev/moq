@@ -186,6 +186,9 @@ export class Producer {
 	#marked = false;
 	// The newest frame timestamp written in any group, which a marker never starts below.
 	#newest?: number;
+	// Where the latest group that ended whole ends, in the track's timescale. Its span runs to there,
+	// so a marker never starts below it.
+	#ended?: bigint;
 
 	/** Wrap a track to publish legacy-container frames into it. */
 	constructor(track: Moq.Track.Producer, format: Format) {
@@ -295,7 +298,8 @@ export class Producer {
 	 * its successor's first frame, so the group before a pause reads as live until whatever resumes
 	 * it, and a subscriber joining mid-break is handed that stale media. The marker bounds it, and it
 	 * is the latest group a joiner lands on. The marker never starts below a frame the closing group
-	 * holds, a video track's end marker at `end` included, so on a video track a keyframe resuming at
+	 * holds, a video track's end marker at `end` included, nor inside the span of a group a cut ended
+	 * whole, so on a video track a keyframe resuming at
 	 * `end` is stamped one unit of the track's timescale later. An empty payload is data on a data track, so its marker is one object with no bytes
 	 * at all. No marker is written until a frame follows the last one. Throws if `end` precedes a
 	 * frame of the open group.
@@ -318,6 +322,7 @@ export class Producer {
 			const endpoint = this.#group && this.#format.kind === "video" && !this.#reordered ? end : undefined;
 			const newest = keyOf(this.#track, Math.max(this.#newest ?? 0, endpoint ?? 0));
 			if (start < newest) start = newest;
+			if (this.#ended !== undefined && start < this.#ended) start = this.#ended;
 			const largest = this.#track.largest()?.group;
 			if (largest !== undefined && start <= largest) start = largest + 1n;
 			// keyOf vouched for the timescale.
@@ -368,8 +373,10 @@ export class Producer {
 		// A group ends whole where its content stops, which bounds its reach without a successor.
 		const at =
 			whole !== undefined ? BigInt(whole.value) : bound === undefined ? undefined : keyOf(this.#track, bound);
-		if (at !== undefined && at > this.#group.start) this.#group.finishAt(at);
-		else this.#group.finish();
+		if (at !== undefined && at > this.#group.start) {
+			this.#group.finishAt(at);
+			this.#ended = at;
+		} else this.#group.finish();
 		this.#group = undefined;
 		if (this.#end !== undefined) {
 			this.#liveEdge = this.#liveEdge === undefined ? this.#end : Math.max(this.#liveEdge, this.#end);

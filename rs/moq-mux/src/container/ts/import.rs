@@ -3332,6 +3332,14 @@ impl<E: catalog::Catalog> Stream<E> {
 	/// lost, so the producer refuses them until a keyframe opens the next group. Left open,
 	/// the group would close a GOP later at that keyframe, with an end past its content.
 	fn lost(&mut self) -> Result<()> {
+		// An audio group closes at its last intact frame, so recovered frames open a fresh group
+		// rather than join the audio from before the loss.
+		match self {
+			Stream::Aac(stream) => stream.close_group()?,
+			Stream::Legacy(stream) => stream.close_group()?,
+			Stream::Opus(stream) => stream.close_group()?,
+			_ => {}
+		}
 		self.desync();
 		match self {
 			Stream::H264 { import, .. } => import.cut(None)?,
@@ -4109,6 +4117,14 @@ impl<E: CatalogExt> AacStream<E> {
 		Ok(())
 	}
 
+	/// Close the open group where its last frame stops.
+	fn close_group(&mut self) -> Result<()> {
+		if let (Some(end), Some(import)) = (self.group.take(), &mut self.import) {
+			import.cut(Some(end))?;
+		}
+		Ok(())
+	}
+
 	/// The partial frame will never see its end, and whatever vouched for the next frame
 	/// boundary no longer applies.
 	fn desync(&mut self) {
@@ -4201,6 +4217,14 @@ impl OpusStream {
 			self.import.cut(Some(end))?;
 		}
 		Ok(published)
+	}
+
+	/// Close the open group where its last packet stops.
+	fn close_group(&mut self) -> Result<()> {
+		if let Some(end) = self.group.take() {
+			self.import.cut(Some(end))?;
+		}
+		Ok(())
 	}
 
 	fn discontinuity(&mut self, published: bool) -> Result<()> {
@@ -4724,6 +4748,14 @@ impl<E: CatalogExt> LegacyStream<E> {
 		self.desync();
 		if let Some(import) = &mut self.import {
 			import.seek(start)?;
+		}
+		Ok(())
+	}
+
+	/// Close the open group where its last frame stops.
+	fn close_group(&mut self) -> Result<()> {
+		if let (Some(end), Some(import)) = (self.group.take(), &mut self.import) {
+			import.cut(Some(end))?;
 		}
 		Ok(())
 	}
@@ -10560,6 +10592,56 @@ pub(super) mod test {
 				vec![0x30, 0x31, 0x32, 0x40, 0x41, 0x42],
 				vec![0x50, 0x51, 0x52],
 			]
+		);
+	}
+
+	/// A continuity break closes the open group at its last intact frame, though it holds under
+	/// 100 ms, so the PES recovered after it opens a fresh group rather than joining stale audio.
+	#[tokio::test(start_paused = true)]
+	async fn aac_group_closes_at_a_continuity_break() {
+		const AAC_PID: u16 = 0x0060;
+		// 1024 samples at 48 kHz, in 90 kHz ticks.
+		const AAC_FRAME: u64 = 1024 * 90_000 / 48_000;
+		let mut mux = Mux {
+			out: synth_pmt(&[(StreamType::AdtsAac, AAC_PID)], false),
+			..Default::default()
+		};
+		for pes in 0..3u8 {
+			let mut payload = Vec::new();
+			for i in 0..3 {
+				payload.extend_from_slice(&adts_frame(17, (0x10 * (pes + 1)) | i));
+			}
+			// A packet lost before the second PES, while the open group holds 64 ms.
+			if pes == 1 {
+				mux.cc(AAC_PID);
+			}
+			let cc = mux.cc(AAC_PID);
+			let pts = 90_000 + u64::from(pes) * 3 * AAC_FRAME;
+			mux.out.extend_from_slice(&audio_pes_packet(AAC_PID, cc, pts, &payload));
+		}
+		let (consumer, catalog, _import) = import_all(&mux.out).unwrap();
+
+		let name = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
+		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+			moq_net::track::Start::Live {
+				min: Some(Duration::from_secs(3600)),
+				max: Some(Duration::from_secs(3600)),
+			},
+		)]);
+		let mut track = consumer.track(&name).unwrap().subscribe(subscription).await.unwrap();
+		let mut groups = Vec::new();
+		while let Ok(Ok(Some(mut group))) = kio::clock::timeout(Duration::from_millis(50), track.recv_group()).await {
+			let mut fills = Vec::new();
+			while let Some(mut frame) = group.next_frame().await.unwrap() {
+				let frame = hang::container::Frame::decode(frame.read_all().await.unwrap()).unwrap();
+				fills.extend(frame.payload.first().copied());
+			}
+			groups.push(fills);
+		}
+		assert_eq!(
+			groups,
+			[vec![0x10, 0x11, 0x12], vec![0x20, 0x21, 0x22, 0x30, 0x31, 0x32]],
+			"{groups:x?}"
 		);
 	}
 

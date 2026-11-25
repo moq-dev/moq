@@ -92,6 +92,24 @@ test("Legacy Producer ends an audio group whole at its discontinuity marker", as
 	]);
 });
 
+test("Legacy Producer starts a discontinuity marker after a cut audio group's end", async () => {
+	const media = track(Time.Timescale.MICRO);
+	const subscriber = media.subscribe({ ranges: [{}] });
+	const producer = new Producer(media, new Format("audio"));
+	producer.encode(new Uint8Array([1]), Duration.micros(0), true);
+	producer.encode(new Uint8Array([1]), Duration.micros(20_000), false);
+	// The frame that fills the group closes it, then the source pauses right where it stopped.
+	producer.cut(Duration.micros(40_000));
+	producer.discontinuity(Duration.micros(40_000));
+	producer.finish();
+
+	expect(await groups(subscriber)).toEqual([
+		{ start: 0n, end: 40_000n, frames: [0, 20_000] },
+		// Not a unit before the end, inside the span the cut ended whole.
+		{ start: 40_000n, end: undefined, frames: [40_000] },
+	]);
+});
+
 test("Legacy Producer starts video resuming at a discontinuity's end past its marker", async () => {
 	for (const [scale, at] of [
 		[Time.Timescale.MICRO, 33_001],
