@@ -27765,6 +27765,51 @@ mod test {
 		assert!(kept(&old) && kept(&new), "a subscribed or newer edge paid");
 	}
 
+	/// Edges that move while a reclaim runs wait for the next one: a publisher opening empty
+	/// groups on its lowest-ranked tracks mid-pass never uses up the pass before it reaches
+	/// a lower-ranked edge than the writer's that covers the excess.
+	#[test]
+	#[cfg(feature = "async")]
+	fn edges_moved_during_a_reclaim_wait_for_the_next() {
+		const FRAME: usize = 8_000;
+		let pool = cache::Pool::unbounded();
+		let broadcast = session_broadcast(&pool, Some(25_000));
+		let track =
+			|name: &str, priority| Producer::new(broadcast.clone(), name, Info::timed().with_priority(priority));
+		let (mut low, mut mid, writer) = (track("low", -10), track("mid", -5), track("writer", 0));
+		let empty = [track("e1", -10), track("e2", -10)];
+		let opened = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+		// The lowest edge frees too little to cover the excess.
+		finished_group(&mut low, 1_000);
+		finished_group(&mut mid, 2 * FRAME);
+		// Once the pass starts, empty edges open at the lowest rank, after `low`'s.
+		broadcast.edges.on_pass({
+			let opened = opened.clone();
+			let empty = empty.clone();
+			move || {
+				let groups = empty.iter().map(|track| track.append_next().unwrap());
+				opened.lock().unwrap().extend(groups);
+			}
+		});
+		// The writer's two frames pass the budget.
+		let mut open = writer.append_next().unwrap();
+		for _ in 0..2 {
+			open.write_frame(open.key_time(), bytes::Bytes::from(vec![0u8; FRAME]))
+				.unwrap();
+		}
+		assert_eq!(opened.lock().unwrap().len(), 2, "no pass started");
+		assert!(broadcast.edges.used() <= 25_000, "{:?}", broadcast.edges);
+		let mut first = writer.consume().peek_group(0).expect("the edge stays cached");
+		assert!(
+			matches!(first.read_frame().now_or_never(), Some(Ok(Some(_)))),
+			"the writer paid while a lower edge still held its frame"
+		);
+		let mut shed = mid.consume().peek_group(0).expect("the edge stays cached");
+		assert!(matches!(shed.read_frame().now_or_never(), Some(Err(Error::Evicted))));
+		drop(open);
+	}
+
 	/// Frames a reader took pay before any frame a reader is owed, whatever their priority:
 	/// a higher-priority edge whose reader caught up sheds what it read, and a lower one
 	/// whose reader lags keeps its frame.

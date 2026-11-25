@@ -46,6 +46,7 @@
 
 use crate::util::SendCell;
 use std::collections::BTreeMap;
+use std::ops::Bound;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI8, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, PoisonError, Weak};
@@ -789,6 +790,9 @@ struct EdgesInner {
 	// Held through a reclaim, so one that finds no taken frame listed never sheds a whole
 	// edge while another is still shedding the taken frames it popped.
 	reclaiming: Mutex<()>,
+	// Run once when a reclaim's whole-edge pass starts, so a test can move edges mid-pass.
+	#[cfg(test)]
+	started: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 /// A track's place among its session's edges with taken frames: its [`EdgeKey`], then its
@@ -807,6 +811,8 @@ impl Edges {
 				tracks: AtomicUsize::new(0),
 				taken: Mutex::default(),
 				reclaiming: Mutex::default(),
+				#[cfg(test)]
+				started: Mutex::default(),
 			})
 		}))
 	}
@@ -817,6 +823,14 @@ impl Edges {
 		self.0
 			.as_ref()
 			.is_some_and(|inner| inner.reclaiming.try_lock().is_err())
+	}
+
+	/// Run `hook` once the next reclaim's whole-edge pass starts.
+	#[cfg(all(test, feature = "async"))]
+	pub(super) fn on_pass(&self, hook: impl FnOnce() + Send + 'static) {
+		if let Some(inner) = &self.0 {
+			*inner.started.lock().unwrap() = Some(Box::new(hook));
+		}
 	}
 
 	/// Bytes the session's live edges bill now.
@@ -880,17 +894,31 @@ impl Edges {
 		}
 		// The writer pays in its turn, or after every queued edge when it has no entry.
 		let mut paid = false;
-		// Each step resumes after the last key, so an entry is visited once. Visits are bounded
-		// by the entries present now, since a publisher inserting groups requeues its edge after
-		// `after` and could otherwise keep this pass, and the lock, going.
-		let mut offers = inner.order.lock().unwrap_or_else(PoisonError::into_inner).len();
-		let mut after = None;
+		// Each step resumes after the last key, so an entry is visited once. The pass covers
+		// only the edges that last moved before it started: one a publisher moves meanwhile
+		// sorts after its own, so publishing faster than this pass could otherwise keep it, and
+		// the lock, going, or use up its visits on empty new groups. Visits are also bounded by
+		// the entries present now, since a rerank requeues an edge at its old age.
+		let (mut offers, start) = {
+			let order = inner.order.lock().unwrap_or_else(PoisonError::into_inner);
+			(order.len(), inner.moves.load(Ordering::Relaxed))
+		};
+		#[cfg(test)]
+		if let Some(hook) = inner.started.lock().unwrap().take() {
+			hook();
+		}
+		let mut from = Bound::Unbounded;
 		while offers > 0
 			&& self.excess().is_some()
-			&& let Some((key, track, moves)) = self.next(after)
+			&& let Some((key, track, moves)) = self.next(from)
 		{
+			// Moved since the pass started, as has every later edge at its rank.
+			if key.1 >= start {
+				from = Bound::Included((key.0 + 1, 0));
+				continue;
+			}
 			offers -= 1;
-			after = Some(key);
+			from = Bound::Excluded(key);
 			if std::ptr::eq(Arc::as_ptr(&track), writer) {
 				paid = true;
 				writer.shed_own(self);
@@ -940,22 +968,18 @@ impl Edges {
 		}
 	}
 
-	/// The first current entry in the order past `after`, dropping the stale ones before it.
-	fn next(&self, mut after: Option<EdgeKey>) -> Option<(EdgeKey, Arc<Track>, u64)> {
+	/// The first current entry in the order from `from` on, dropping the stale ones before it.
+	fn next(&self, mut from: Bound<EdgeKey>) -> Option<(EdgeKey, Arc<Track>, u64)> {
 		let inner = self.0.as_ref()?;
 		let mut order = inner.order.lock().unwrap_or_else(PoisonError::into_inner);
 		loop {
-			let (key, (weak, moves)) = match after {
-				None => order.range(..),
-				Some(key) => order.range((std::ops::Bound::Excluded(key), std::ops::Bound::Unbounded)),
-			}
-			.next()?;
+			let (key, (weak, moves)) = order.range((from, Bound::Unbounded)).next()?;
 			let (key, moves) = (*key, *moves);
 			match weak.upgrade().filter(|track| track.queued_at(key, moves)) {
 				Some(track) => return Some((key, track, moves)),
 				None => {
 					order.remove(&key);
-					after = Some(key);
+					from = Bound::Excluded(key);
 				}
 			}
 		}
