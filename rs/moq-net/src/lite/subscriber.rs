@@ -3257,6 +3257,7 @@ mod tests {
 			id: 0,
 			max_delay: Some(Duration::ZERO),
 			stale_budget: Duration::ZERO,
+			stale_cap: None,
 			start: None,
 			priority: 0,
 			requested: None,
@@ -3536,6 +3537,7 @@ mod tests {
 				id: 0,
 				max_delay: Some(Duration::ZERO),
 				stale_budget: Duration::ZERO,
+				stale_cap: None,
 				start: Some(floor),
 				priority: 0,
 				requested: Some(floor),
@@ -4021,6 +4023,7 @@ mod tests {
 			id: 0,
 			max_delay: None,
 			stale_budget: Duration::ZERO,
+			stale_cap: None,
 			start: None,
 			priority: 0,
 			requested: None,
@@ -4078,6 +4081,7 @@ mod tests {
 			id: 0,
 			max_delay: None,
 			stale_budget: Duration::ZERO,
+			stale_cap: None,
 			start: None,
 			priority: 0,
 			requested: None,
@@ -4142,6 +4146,7 @@ mod tests {
 			id: 0,
 			max_delay: Some(Duration::ZERO),
 			stale_budget: Duration::ZERO,
+			stale_cap: None,
 			start: Some(2),
 			priority: 0,
 			requested: Some(2),
@@ -4262,6 +4267,7 @@ mod tests {
 			id: 0,
 			max_delay: Some(Duration::ZERO),
 			stale_budget: Duration::ZERO,
+			stale_cap: None,
 			start: Some(4),
 			priority: 0,
 			requested: Some(4),
@@ -4333,6 +4339,7 @@ mod tests {
 			id: 0,
 			max_delay: Some(Duration::ZERO),
 			stale_budget: Duration::ZERO,
+			stale_cap: None,
 			start: Some(4),
 			priority: 0,
 			requested: Some(4),
@@ -5981,6 +5988,7 @@ mod tests {
 			id: 0,
 			max_delay: Some(budget),
 			stale_budget: budget,
+			stale_cap: None,
 			start: None,
 			priority: 0,
 			requested: None,
@@ -6534,6 +6542,74 @@ mod tests {
 			reader.poll_drop(&waiter),
 			Poll::Ready((4..5, track::Hole::stale(budget)))
 		);
+	}
+
+	/// A stale drop is recorded within the cap its subscription asked under, so a reader capped
+	/// alike settles on it, though the groups above the run have not arrived, instead of
+	/// fetching a group they would convict. A cap that varied, or none, settles no capped reader.
+	#[kio::test]
+	async fn a_stale_drop_carries_the_cap_it_was_asked_under() {
+		let version = Version::Lite07;
+		let budget = Duration::from_millis(500);
+		let (serve, mut serving, _tail, _broadcast) = lite07_serving(budget).await;
+		let lag = Some(Duration::from_secs(10));
+		let live = lite::Range {
+			start: Some(lite::Anchor::Live {
+				min: lag,
+				max: Some(budget),
+			}),
+			end: Some(lite::Anchor::Time(3)),
+		};
+		let Sub::Active(active) = &mut serving.sub else {
+			unreachable!("an active subscription");
+		};
+		active.live = lite::LiveRanges::new(version, &[live]);
+		active.stale_cap = cap_of(&active.live);
+		assert_eq!(active.stale_cap, Some(4), "an inclusive time end caps one past it");
+
+		let mut capped = serving
+			.serving
+			.subscribe(crate::track::Subscription::default().with_ranges([crate::track::Range {
+				start: crate::track::Start::Live {
+					min: lag,
+					max: Some(budget),
+				},
+				end: Some(3),
+			}]));
+		serving.serving.answer_join(lag, Some(3), Some(0), Duration::MAX);
+		let old = lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(1..3, &crate::StreamError::Old, version));
+		serving.apply_response(&serve, old).unwrap();
+		assert_eq!(
+			capped.poll_drop(&kio::Waiter::noop()),
+			Poll::Ready((1..3, track::Hole::stale(budget).capped(Some(4))))
+		);
+	}
+
+	/// The cap of a subscription is where its last range ends: none while one follows the live
+	/// edge, and an empty range reaches nothing.
+	#[test]
+	fn the_cap_is_where_the_last_range_ends() {
+		let version = Version::Lite07;
+		let ending = |end: Option<lite::Anchor>| lite::Range { start: None, end };
+		let cap = |ranges: &[lite::Range]| cap_of(&lite::LiveRanges::new(version, ranges));
+		let position = |group: u64, frame: u64| lite::Anchor::Absolute(crate::track::Position::new(group, frame));
+		assert_eq!(cap(&[ending(Some(lite::Anchor::Time(3)))]), Some(4));
+		assert_eq!(
+			cap(&[ending(Some(position(5, 0)))]),
+			Some(5),
+			"a whole group ends before it"
+		);
+		assert_eq!(
+			cap(&[ending(Some(position(5, 2)))]),
+			Some(6),
+			"a partial one includes it"
+		);
+		assert_eq!(cap(&[ending(Some(position(0, 0)))]), Some(0), "nothing to reach");
+		assert_eq!(
+			cap(&[ending(Some(lite::Anchor::Time(3))), ending(Some(position(9, 0)))]),
+			Some(9)
+		);
+		assert_eq!(cap(&[ending(Some(lite::Anchor::Time(3))), ending(None)]), None);
 	}
 
 	/// A group that arrives over a lite-07 stale (OLD) drop wins over it in the copy, whichever
@@ -11316,6 +11392,12 @@ struct SubStream {
 	/// publisher's max age, which binds every reader alike. Too narrow costs a wider reader a
 	/// request of its own; too wide would settle it on a group it could still get.
 	stale_budget: Duration,
+	/// The exclusive group end every live range the SUBSCRIBE and each SUBSCRIBE_UPDATE asked
+	/// ended at, `None` once one followed the live edge or two ended apart: the cap a lite-07
+	/// stale drop is recorded within, so a reader capped alike settles on it. Like the budget,
+	/// the wire does not say which update a drop crossed, so a cap that ever varied settles no
+	/// capped reader.
+	stale_cap: Option<u64>,
 	/// The lowest absolute start among the ranges, or `None` when one counts back from
 	/// the latest group: the floor below which nothing is asked for.
 	start: Option<u64>,
@@ -11663,6 +11745,9 @@ impl SubStream {
 			self.probe_ids.retain(|id| live.get(*id).is_some());
 		}
 		self.stale_budget = self.stale_budget.min(narrowest(&self.live));
+		if cap_of(&self.live) != self.stale_cap {
+			self.stale_cap = None;
+		}
 		for (id, (kind, _)) in added {
 			match kind {
 				Kind::Fill => _ = self.fill_ids.insert(id),
@@ -11815,6 +11900,19 @@ fn narrowest(live: &lite::LiveRanges) -> Duration {
 		})
 		.min()
 		.unwrap_or(Duration::MAX)
+}
+
+/// The exclusive group end past every range among `live`, `None` when one follows the live
+/// edge: the cap a stale drop is judged within.
+fn cap_of(live: &lite::LiveRanges) -> Option<u64> {
+	let mut cap = None;
+	for (_, range) in live.iter() {
+		range.end?;
+		// A range ending before the first group reaches none.
+		let reach = through(range.end).map_or(0, |last| last.saturating_add(1));
+		cap = Some(cap.unwrap_or(0).max(reach));
+	}
+	cap
 }
 
 /// The last time a live range reaches, as its own inclusive time: an exclusive group end stops
@@ -12895,6 +12993,7 @@ impl Establish {
 			id: self.id,
 			max_delay: self.max_age,
 			stale_budget: narrowest(&live),
+			stale_cap: cap_of(&live),
 			start: self.subscription.start(),
 			live,
 			demand: self.demand.clone(),
@@ -14507,8 +14606,10 @@ impl ServeLoop {
 							given.remove(asked.clone());
 						}
 						for given in given.iter() {
-							self.serving
-								.give_up(given.clone(), track::Hole::stale(active.stale_budget));
+							self.serving.give_up(
+								given.clone(),
+								track::Hole::stale(active.stale_budget).capped(active.stale_cap),
+							);
 						}
 					}
 					false => {
