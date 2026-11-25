@@ -450,8 +450,9 @@ enum EdgeSource {
 	/// (`answered`), once the copy recorded what it said.
 	Answer { answered: bool },
 	/// A lite copy before lite-07, whose answers say nothing of the edge: its first live group
-	/// does.
-	FirstGroup,
+	/// does. A group starting writes no track state, so the first to start on a feed writes
+	/// `shown` to wake the readers waiting on the edge.
+	FirstGroup { shown: bool },
 }
 
 /// How far a track got toward a live [`Producer`]; each step replaces the last.
@@ -3583,8 +3584,8 @@ impl TrackState {
 	}
 
 	/// Count `group` as content now that its first frame opened or it finished, if it
-	/// still holds its slot: wake the reads it succeeds. Returns whether an answer waits on
-	/// it, which the caller shows with [`Self::shown`] under the write lock.
+	/// still holds its slot: wake the reads it succeeds. Returns whether an answer or the
+	/// edge waits on it, which the caller shows with [`Self::shown`] under the write lock.
 	///
 	/// Takes the read lock so a group starting wakes only the reads it can move, not every
 	/// reader parked on the track.
@@ -3596,6 +3597,7 @@ impl TrackState {
 		}
 		self.wake_landed(key);
 		matches!(self.feed, Feed::Answered { from } if key >= from)
+			|| self.edge == (EdgeSource::FirstGroup { shown: false })
 	}
 
 	/// Wake the reads a group landing at `key` succeeds.
@@ -3609,8 +3611,12 @@ impl TrackState {
 		self.cache.wakes().landed(below, key, oldest);
 	}
 
-	/// Content at `key` became readable: an answer waiting on it now shows.
+	/// Content at `key` became readable: an answer waiting on it now shows, and so does the
+	/// edge of a copy that learns it from its first group.
 	pub(super) fn shown(&mut self, key: u64) {
+		if let EdgeSource::FirstGroup { shown } = &mut self.edge {
+			*shown = true;
+		}
 		if let Feed::Answered { from } = self.feed
 			&& key >= from
 		{
@@ -4328,9 +4334,11 @@ impl TrackState {
 				})
 			});
 		self.feed = Feed::Idle { newest, held };
-		// The next feed's answer says afresh where the live feed is.
-		if let EdgeSource::Answer { answered } = &mut self.edge {
-			*answered = false;
+		// The next feed's answer, or its first group, says afresh where the live feed is.
+		match &mut self.edge {
+			EdgeSource::Answer { answered } => *answered = false,
+			EdgeSource::FirstGroup { shown } => *shown = false,
+			EdgeSource::Cache => {}
 		}
 	}
 
@@ -5675,7 +5683,7 @@ impl Producer {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn edge_from_groups(&self) {
 		if let Ok(mut state) = self.modify() {
-			state.edge = EdgeSource::FirstGroup;
+			state.edge = EdgeSource::FirstGroup { shown: false };
 		}
 	}
 
@@ -12624,6 +12632,20 @@ impl Subscriber {
 		}
 	}
 
+	/// Forget what this reader reported of `range`, which its publisher never told its wire: a
+	/// run given up below where delivery starts. Ranges that later ask for it report it again,
+	/// on a front through whichever copy serves then.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn untell(&mut self, range: ops::Range<u64>) {
+		match &mut self.inner {
+			Inner::Plain(cursor) => cursor.record.untell(range),
+			Inner::Resume(resume, logical) => {
+				logical.record.untell(range.clone());
+				resume.untell(range);
+			}
+		}
+	}
+
 	/// How many runs of groups written off as stale this subscriber remembers.
 	#[cfg(test)]
 	fn written_off_runs(&self) -> usize {
@@ -12879,16 +12901,27 @@ impl Subscriber {
 	/// lite copy once its upstream answered with the edge, or on a wire before lite-07 once it
 	/// holds a live group, or once it ended (see [`Producer::await_edge`],
 	/// [`Producer::edge_from_groups`]). `false` while a front's reader has no copy serving.
+	/// Registers `waiter` for the answer, the end, or the first live group starting.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn knows_edge(&mut self, waiter: &kio::Waiter) -> bool {
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
-				let state = cursor.state.read();
-				let ended = state.outcome.is_final() || state.declared().is_some();
-				match state.edge {
-					EdgeSource::Cache => true,
-					EdgeSource::Answer { answered } => answered || ended,
-					EdgeSource::FirstGroup => state.largest().is_some() || ended,
+				let known = |state: &TrackState| {
+					let ended = state.outcome.is_final() || state.declared().is_some();
+					match state.edge {
+						EdgeSource::Cache => true,
+						EdgeSource::Answer { answered } => answered || ended,
+						EdgeSource::FirstGroup { .. } => state.largest().is_some() || ended,
+					}
+				};
+				let polled = cursor.state.poll(waiter, |state| match known(state) {
+					true => Poll::Ready(()),
+					false => Poll::Pending,
+				});
+				match polled {
+					Poll::Ready(Ok(())) => true,
+					Poll::Ready(Err(state)) => known(&state),
+					Poll::Pending => false,
 				}
 			}
 			Inner::Resume(resume, _) => resume.knows_edge(waiter),
@@ -15707,6 +15740,53 @@ mod test {
 		assert!(!reader.knows_edge(&noop), "the new feed has not said");
 		producer.answer_edge();
 		assert!(reader.knows_edge(&noop));
+	}
+
+	/// A copy from before lite-07 learns the edge from its first group's first frame, which
+	/// wakes a reader parked on the edge while the group was a frameless header. The reader
+	/// polls again inside each wake, so a wake that fires before the group counts as started
+	/// leaves it parked on nothing.
+	#[test]
+	fn a_first_frame_wakes_a_reader_waiting_on_the_edge() {
+		struct Repoll {
+			// The reader and the one waiter it parks with, as a task keeps across polls.
+			reader: std::sync::Mutex<(Subscriber, Option<kio::Waiter>)>,
+			again: AtomicBool,
+			known: AtomicBool,
+		}
+		impl std::task::Wake for Repoll {
+			fn wake(self: Arc<Self>) {
+				self.wake_by_ref();
+			}
+			fn wake_by_ref(self: &Arc<Self>) {
+				self.again.store(true, Ordering::SeqCst);
+				// A wake while this polls is taken by the loop below.
+				let Ok(mut reader) = self.reader.try_lock() else {
+					return;
+				};
+				let (reader, waiter) = &mut *reader;
+				let waiter = waiter.get_or_insert_with(|| kio::Waiter::new(std::task::Waker::from(self.clone())));
+				while self.again.swap(false, Ordering::SeqCst) {
+					self.known.store(reader.knows_edge(waiter), Ordering::SeqCst);
+				}
+			}
+		}
+
+		let producer = track_producer("test", Info::default());
+		producer.edge_from_groups();
+		let repoll = Arc::new(Repoll {
+			reader: std::sync::Mutex::new((producer.subscribe(replay()), None)),
+			again: AtomicBool::new(false),
+			known: AtomicBool::new(false),
+		});
+		let mut group = producer.create_group(group::Info { start: 5 }).unwrap();
+		std::task::Wake::wake_by_ref(&repoll);
+		assert!(!repoll.known.load(Ordering::SeqCst), "a frameless header shows no edge");
+
+		group.write_frame(crate::Timestamp::unscaled(5), &b"x"[..]).unwrap();
+		assert!(repoll.known.load(Ordering::SeqCst), "the first frame wakes the reader");
+		// The waiter's waker holds the reader: drop it to free both.
+		repoll.reader.lock().unwrap().1 = None;
 	}
 
 	/// An idle copy that declared an end it has not reached yet still waits for the live

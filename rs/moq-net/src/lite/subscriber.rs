@@ -47,8 +47,8 @@ pub(super) struct SubscriberConfig {
 	/// Local policy for what pulling from this peer costs, overriding whatever it
 	/// declared in its SETUP. `None` charges the peer's declared price.
 	pub cost: Option<u64>,
-	/// Set once the peer sends a GOAWAY; this session's routes then rank last
-	/// (draining), so a replacement session outranks it.
+	/// Set once the peer sends a GOAWAY; this session's routes then rank below every
+	/// available route (draining), so a replacement session outranks it.
 	pub going_away: crate::goaway::GoingAway,
 	/// Our tokens' grants: a subscription the union stops covering is cancelled.
 	pub auth: crate::auth::Link,

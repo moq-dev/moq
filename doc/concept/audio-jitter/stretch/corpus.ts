@@ -286,11 +286,19 @@ export const cases: Case[] = [
 	),
 	stretch(
 		"turns-around",
-		"A change of direction starts the pace from nothing, and holding forgets it too.",
+		"A change of direction starts the pace from nothing, even across a hold.",
 		8000,
 		1,
 		voiced(8000, ms(8000, 340), 150, 250, 5),
 		[...Array(11).fill(behind(8000)), ...Array(11).fill(ahead(8000)), HOLD, ...Array(11).fill(behind(8000))],
+	),
+	stretch(
+		"flickers",
+		"A hold keeps the pace owed, so a lag flickering across half a hop still splices once its pace adds up to a hop.",
+		8000,
+		1,
+		voiced(8000, ms(8000, 340), 180, 220, 19),
+		Array.from({ length: 24 }, (_, i) => (i % 2 === 0 ? behind(8000) : HOLD)),
 	),
 	stretch(
 		"narrow-range",

@@ -68,8 +68,8 @@
 //! knows the claim available, the request waits: the node shows the claim available, so it
 //! never answers it unroutable. Among the claims
 //! of one Instance at one path, only the one shown closest to its own path, at the newest
-//! epoch among those, may serve, reachable or not, as `model::origin` ranks them; a
-//! route's rank chooses among those alone. A route whose cost a link would carry past the
+//! epoch among those, may serve, reachable or not; a route's rank chooses among those
+//! alone. `model::origin` and the draft instead rank every filing of one claim as one tier. A route whose cost a link would carry past the
 //! metric is never used, and a claim's cost saturates there.
 //!
 //! The rule is the bake-off's pick (moq-dev/moq#8880): `tests/multi.rs` with `floor`,

@@ -1549,10 +1549,20 @@ enum Resume {
 	/// Handed out still arriving as frame `frame` of group `key`, which a flight of the group
 	/// from it continues once the pool evicts the copy.
 	Arriving { key: u64, frame: u64 },
-	/// A front's logical track, across route changes, with this frame's index in its group.
-	Route(Box<(super::resume::Recover, u64)>),
+	/// A front's logical track, across route changes.
+	Route(Box<Routed>),
 	/// The flight continuing it since the pool evicted the copy.
 	Flight(Box<super::track::Refly>),
+}
+
+/// A frame of a front's logical track.
+#[derive(Clone)]
+struct Routed {
+	recover: super::resume::Recover,
+	/// The frame's index in its group.
+	index: u64,
+	/// The flight continuing it since the pool evicted the copy, while the route serves on.
+	flight: Option<super::track::Refly>,
 }
 
 impl std::ops::Deref for Consumer {
@@ -1582,7 +1592,11 @@ impl Consumer {
 
 	/// Carry this frame across a front's route changes; see [`super::resume`].
 	pub(super) fn with_recover(mut self, recover: super::resume::Recover, index: u64) -> Self {
-		self.resume = Resume::Route(Box::new((recover, index)));
+		self.resume = Resume::Route(Box::new(Routed {
+			recover,
+			index,
+			flight: None,
+		}));
 		self
 	}
 
@@ -1595,15 +1609,39 @@ impl Consumer {
 
 	/// The flight continuing this frame, asked of its track once the pool evicted the copy.
 	fn flight(&mut self) -> Option<&mut super::track::Refly> {
-		if let Resume::Arriving { key, frame } = self.resume {
-			let cache = self.state.read().account()?.clone();
-			let asking = super::group::asking(self.expiry.as_ref().map(|expiry| &expiry.policy));
-			self.resume = Resume::Flight(Box::new(super::track::Refly::new(cache, key, frame, asking)));
+		match &self.resume {
+			Resume::Arriving { key, frame } => {
+				let refly = self.refly(*key, *frame)?;
+				self.resume = Resume::Flight(Box::new(refly));
+			}
+			Resume::Route(routed) if routed.flight.is_none() => {
+				let refly = self.refly(routed.recover.key(), routed.index)?;
+				if let Resume::Route(routed) = &mut self.resume {
+					routed.flight = Some(refly);
+				}
+			}
+			_ => {}
 		}
 		match &mut self.resume {
 			Resume::Flight(refly) => Some(refly),
+			Resume::Route(routed) => routed.flight.as_mut(),
 			_ => None,
 		}
+	}
+
+	/// A flight of group `key` from frame `frame`, asked of the track holding this frame's copy.
+	fn refly(&self, key: u64, frame: u64) -> Option<super::track::Refly> {
+		let cache = self.state.read().account()?.clone();
+		let asking = super::group::asking(self.expiry.as_ref().map(|expiry| &expiry.policy));
+		Some(super::track::Refly::new(cache, key, frame, asking))
+	}
+
+	/// Poll the flight continuing this frame for the frame and its index, `None` when nothing
+	/// can ask one.
+	fn poll_flight(&mut self, waiter: &kio::Waiter) -> Option<Poll<Result<(Consumer, u64)>>> {
+		let refly = self.flight()?;
+		let index = refly.frame();
+		Some(refly.poll_frame(waiter).map(|res| res.map(|frame| (frame, index))))
 	}
 
 	/// Run `read`, and once this copy fails with its route, or stalls while a newer route
@@ -1630,17 +1668,24 @@ impl Consumer {
 				Poll::Ready(Err(err)) => Some(err.clone()),
 				Poll::Pending => None,
 			};
+			let evicted = failed.is_some() && self.evicted();
+			let cause = failed.map_or(super::resume::Cause::Stalled, super::resume::Cause::Failed);
+			let reroute = match &mut self.resume {
+				Resume::Route(routed) => {
+					routed.recover.wants(&cause, waiter)
+						// A route that would only repeat the eviction, as one the front concluded on
+						// this copy does, leaves the frame to its flight.
+						&& !(evicted && cause.error().is_some_and(|err| routed.recover.repeats(err)))
+				}
+				_ => false,
+			};
 			let (route, frame, index) = match &mut self.resume {
 				Resume::None => return res,
-				Resume::Route(route) => {
-					let (recover, index) = &mut **route;
-					if !recover.wants(failed.as_ref(), waiter) {
-						return res;
-					}
+				Resume::Route(routed) if reroute => {
+					let Routed { recover, index, .. } = &mut **routed;
 					if self.state.read().sparse() {
 						return Poll::Ready(Err(Error::Unsupported));
 					}
-					let cause = failed.map_or(super::resume::Cause::Stalled, super::resume::Cause::Failed);
 					let mut replacement = match recover.poll(*index, &cause, waiter) {
 						Poll::Ready(Ok(group)) => group,
 						Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
@@ -1664,29 +1709,22 @@ impl Consumer {
 						Poll::Pending => return self.poll_expired_or(waiter, Poll::Pending),
 					}
 				}
-				// Only the pool's eviction: any other failure is the group's own. A flight asks
-				// from the frame's ordinal, which names the frame only on a dense copy.
-				Resume::Arriving { .. } | Resume::Flight(_) => {
-					let evicted = {
-						let state = self.state.read();
-						state.outcome.evicted() && !state.sparse()
-					};
-					if failed.is_none() || !evicted || flown {
+				// Only the pool's eviction: any other failure is the group's own. It is no route's
+				// doing either, so a routed frame takes a flight too, until its route moves.
+				Resume::Arriving { .. } | Resume::Flight(_) | Resume::Route(_) => {
+					if !evicted || flown {
 						return res;
 					}
-					let Some(refly) = self.flight() else {
-						return res;
-					};
-					let index = refly.frame();
-					match refly.poll_frame(waiter) {
-						Poll::Ready(Ok(frame)) => {
+					match self.poll_flight(waiter) {
+						Some(Poll::Ready(Ok((frame, index)))) => {
 							flown = true;
 							(None, frame, index)
 						}
 						// The flight's verdict, such as `Old` for a group refused as stale.
-						Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+						Some(Poll::Ready(Err(err))) => return Poll::Ready(Err(err)),
 						// A read waiting on its flight is stalled like one waiting on its bytes.
-						Poll::Pending => return self.poll_expired_or(waiter, Poll::Pending),
+						Some(Poll::Pending) => return self.poll_expired_or(waiter, Poll::Pending),
+						None => return res,
 					}
 				}
 			};
@@ -1699,12 +1737,21 @@ impl Consumer {
 			if frame.info.size != self.info.size || frame.inflated != self.inflated {
 				return Poll::Ready(Err(Error::ProtocolViolation));
 			}
-			if let (Some(replacement), Resume::Route(route)) = (&route, &mut self.resume) {
-				route.0.adopt(replacement);
+			if let (Some(replacement), Resume::Route(routed)) = (&route, &mut self.resume) {
+				routed.recover.adopt(replacement);
+				// A flight of the replaced copy brings nothing the new copy lacks.
+				routed.flight = None;
 			}
 			self.state = frame.state;
 			self.source = frame.source;
 		}
+	}
+
+	/// Whether the pool evicted this frame's copy, which a flight continues only when dense:
+	/// a flight asks from the frame's ordinal, which names the frame only on a dense copy.
+	fn evicted(&self) -> bool {
+		let state = self.state.read();
+		state.outcome.evicted() && !state.sparse()
 	}
 
 	/// `Old` once the drift budget gives up on a stalled read, else `res`.
@@ -1747,7 +1794,7 @@ impl Consumer {
 			return false;
 		};
 		let recover = match &self.resume {
-			Resume::Route(route) => Some(&route.0),
+			Resume::Route(routed) => Some(&routed.recover),
 			_ => None,
 		};
 		if !expiry.policy.is_expired(recover, waiter) {
