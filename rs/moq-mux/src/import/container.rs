@@ -25,7 +25,9 @@ impl<E: crate::container::ts::Catalog> ContainerImpl<E> {
 	) -> Self {
 		use crate::container::{flv, fmp4, mkv, ts};
 		match format {
-			ContainerFormat::Fmp4 => Self::Fmp4(Box::new(fmp4::Import::new(broadcast, reserved).with_timebase(timebase))),
+			ContainerFormat::Fmp4 => {
+				Self::Fmp4(Box::new(fmp4::Import::new(broadcast, reserved).with_timebase(timebase)))
+			}
 			ContainerFormat::Mkv => Self::Mkv(Box::new(mkv::Import::new(broadcast, reserved).with_timebase(timebase))),
 			ContainerFormat::Ts => Self::Ts(Box::new(ts::Import::new(broadcast, reserved).with_timebase(timebase))),
 			ContainerFormat::Flv => Self::Flv(Box::new(flv::Import::new(broadcast, reserved).with_timebase(timebase))),

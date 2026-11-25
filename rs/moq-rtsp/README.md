@@ -37,23 +37,20 @@ loop {
 }
 ```
 
-A session keeps the camera's own timestamps, counted from PLAY, and places them
-on the catalog's clock, so `sync.clock` gives each frame its wall time: where
-the camera's RTCP sender report says it was captured, or else when it arrived,
-which trails the capture by the camera's encoding and the network. Without a
-report, only the first frame is placed at its arrival: the later ones keep the
-camera's spacing from it, so their times are estimates, and one delayed less
-than the first reads as captured after it arrived. The catalog waits for that
-placement. `Client::with_report_wait` holds the start for a first report,
-publishing the frames held meanwhile once placed; by default a session is placed
-on its first frame, on a report only when one came first.
+Each frame lands on the catalog's clock at its capture, so `sync.clock` gives
+its wall time: where the camera's RTCP sender report for its stream says it was
+taken, or, for a stream without a usable report, no later than any of its
+frames arrived, which trails the capture by the camera's encoding and the
+network. A session waits up to one report interval (5 s) after its first frame
+for every stream's report, holding the catalog and each stream's frames since
+its latest keyframe meanwhile. Each stream is placed on its own, since a
+camera's `rtptime` need not align them.
 
-Two sessions, such as a camera's SD and HD URLs, can publish renditions of one
-broadcast by sharing its catalog: run both pulls and restart both when either
-returns. Only the first places the catalog's clock; a later session, like one on
-a clock fixed beforehand, keeps its timestamps, counted from its own PLAY, and
-logs a warning. Its frames line up with the first session's only when both
-started together, so publish independent sessions as separate broadcasts.
+A clock fixed before the session, by a shared catalog or
+`Config::with_clock`, is shifted onto. Two sessions, such as a camera's SD and
+HD URLs, can publish renditions of one broadcast by sharing its catalog: their
+frames line up by wall time. Run both pulls and restart both when either
+returns.
 
 Credentials ride the URL's userinfo, as every RTSP tool takes them; they are
 taken out of the URL before dialing and never logged.

@@ -245,7 +245,11 @@ mod tests {
 		);
 		sink.on_frame("0".into(), frame(40_000)).unwrap();
 		let next = track.next().await.unwrap().unwrap();
-		assert_eq!(next.timestamp_us - first.timestamp_us, 20_000, "the next keeps its distance");
+		assert_eq!(
+			next.timestamp_us - first.timestamp_us,
+			20_000,
+			"the next keeps its distance"
+		);
 	}
 
 	/// Dropping a sink before its session ends, as when shutdown cancels a pull, aborts its

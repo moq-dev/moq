@@ -1,7 +1,7 @@
 use std::sync::{Arc, OnceLock};
 
-use super::hang::CatalogExt;
 use super::Producer;
+use super::hang::CatalogExt;
 
 /// One source's timestamp base on a catalog, shared by every importer reading it.
 ///

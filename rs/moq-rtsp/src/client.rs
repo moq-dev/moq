@@ -568,7 +568,8 @@ impl Waiting {
 		if let Some((stream_id, ..)) = media(&item) {
 			self.since.get_or_insert_with(kio::clock::now);
 			if matches!(&item, CodecItem::VideoFrame(frame) if frame.is_random_access_point()) {
-				self.held.retain(|(held, _)| media(held).is_none_or(|(id, ..)| id != stream_id));
+				self.held
+					.retain(|(held, _)| media(held).is_none_or(|(id, ..)| id != stream_id));
 			}
 		}
 		self.held.push((item, params));
@@ -684,7 +685,8 @@ impl Ingest {
 					&& let Some(stream) = self.streams.get_mut(stream_id).and_then(Option::as_mut)
 				{
 					let now = kio::clock::now();
-					let arrival = unix_micros(kio::clock::wall()) - now.saturating_duration_since(received).as_micros() as i128;
+					let arrival =
+						unix_micros(kio::clock::wall()) - now.saturating_duration_since(received).as_micros() as i128;
 					stream.arrived(timestamp.elapsed(), timestamp.clock_rate().get(), arrival);
 				}
 			}
@@ -1711,9 +1713,7 @@ mod tests {
 	async fn the_end_of_a_report_wait_releases_its_frames_alone() {
 		kio::clock::host_time();
 		let server = Server::bind(vec![Media::H265]).await;
-		let client = Client::new(server.url())
-			.unwrap()
-			.waiting(Duration::from_millis(200));
+		let client = Client::new(server.url()).unwrap().waiting(Duration::from_millis(200));
 		let (broadcast, catalog, pull) = pull(client);
 
 		let mut session = within("PLAY", server.accept(0)).await;

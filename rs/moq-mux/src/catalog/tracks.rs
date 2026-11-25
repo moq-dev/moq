@@ -438,7 +438,10 @@ pub struct Reserved<E: CatalogExt = ()> {
 impl<E: CatalogExt> Reserved<E> {
 	pub(super) fn new(catalog: Producer<E>) -> Self {
 		catalog.add_reserver();
-		Self { catalog, interval: None }
+		Self {
+			catalog,
+			interval: None,
+		}
 	}
 
 	/// Declare the track's longest group (its GOP), which the catalog's `sync.interval`
@@ -520,7 +523,8 @@ impl<E: CatalogExt> Reserved<E> {
 		crate::Error: From<C::Error>,
 	{
 		let rendition = self.init(track.name())?;
-		self.catalog.media(track, container, rendition, config.into(), self.interval)
+		self.catalog
+			.media(track, container, rendition, config.into(), self.interval)
 	}
 
 	/// Resolve a timestamp on the broadcast's shared clock (see [`Producer::timestamp`]).

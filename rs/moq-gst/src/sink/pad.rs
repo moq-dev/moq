@@ -907,36 +907,37 @@ impl Pad {
 				let result: Result<()> = match shifted.map(|micros| (micros, &mut publishing.track)) {
 					Err(err) => Err(err),
 					Ok((micros, track)) => match track {
-					Sink::Media(media) => match media.write(&data, micros) {
-						Ok(false) => {
-							gst::debug!(
-								CAT,
-								"dropping frame until the next decodable frame at or beyond the live edge"
-							);
-							return Ok(PushOutcome::Dropped);
-						}
-						result => result.map(|_| ()),
-					},
-					Sink::Text(text) => match std::str::from_utf8(&data) {
-						// A cue with no duration would never be dismissed, so drop it rather than pin it
-						// on screen; the demuxer supplies one for every real subtitle sample.
-						Ok(cue) => match duration {
-							Some(duration) => text.write(cue, micros, duration.useconds()),
-							None => {
-								gst::warning!(CAT, "dropping subtitle cue without a duration");
+						Sink::Media(media) => match media.write(&data, micros) {
+							Ok(false) => {
+								gst::debug!(
+									CAT,
+									"dropping frame until the next decodable frame at or beyond the live edge"
+								);
 								return Ok(PushOutcome::Dropped);
 							}
+							result => result.map(|_| ()),
 						},
-						Err(err) => Err(anyhow::anyhow!("subtitle cue is not valid UTF-8: {err}")),
+						Sink::Text(text) => match std::str::from_utf8(&data) {
+							// A cue with no duration would never be dismissed, so drop it rather than pin it
+							// on screen; the demuxer supplies one for every real subtitle sample.
+							Ok(cue) => match duration {
+								Some(duration) => text.write(cue, micros, duration.useconds()),
+								None => {
+									gst::warning!(CAT, "dropping subtitle cue without a duration");
+									return Ok(PushOutcome::Dropped);
+								}
+							},
+							Err(err) => Err(anyhow::anyhow!("subtitle cue is not valid UTF-8: {err}")),
+						},
+						Sink::Opaque(producer) => {
+							let Some(ts) = hang::container::Timestamp::from_micros(micros).ok() else {
+								gst::warning!(CAT, "dropping frame: timestamp out of range");
+								return Ok(PushOutcome::Dropped);
+							};
+							producer.write_frame(ts, &data).map_err(Into::into)
+						}
 					},
-					Sink::Opaque(producer) => {
-						let Some(ts) = hang::container::Timestamp::from_micros(micros).ok() else {
-							gst::warning!(CAT, "dropping frame: timestamp out of range");
-							return Ok(PushOutcome::Dropped);
-						};
-						producer.write_frame(ts, &data).map_err(Into::into)
-					}
-				}};
+				};
 				match result {
 					Ok(()) => Ok(PushOutcome::Published),
 					Err(err) => {
