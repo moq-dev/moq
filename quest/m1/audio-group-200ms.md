@@ -66,6 +66,13 @@ With these changes the harness's Opus row publishes 100 ms groups.
 
 Public API: none (a default changes). Wire: none.
 
+Status ([moq-dev/moq#9561](https://github.com/moq-dev/moq/pull/9561), draft):
+every publisher above, plus moq-gst, moq-rtsp, the FLV, MKV, and TS imports,
+and OBS, groups by 100 ms; the binding `cut()` docs recommend it. Remaining:
+rerun `just test audio-quality --duration 40` at 100 ms against the 11-24
+baseline (the after-pass so far ran at 200 ms), and settle the PR's
+`## Waiting` decisions. Delete this quest when they land.
+
 ## Related
 
 - [Buffered playback subscribes in ascending order](/quest/m3/buffered-ascending.md) - live audio stays newest-first even with 100 ms groups
