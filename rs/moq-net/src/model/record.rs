@@ -34,8 +34,8 @@ pub(crate) struct Record {
 	pub(super) pending: RangeMap<u64, Pending>,
 	/// Every key already reported, with how.
 	pub(super) reported: RangeMap<u64, Report>,
-	/// Everything below was settled for good and folded away under pool pressure: handed
-	/// out, or reported final, so none is handed out or reported again.
+	/// Everything below was settled for good and folded away (see [`Fold`]): handed out, or
+	/// reported final, so none is handed out or reported again.
 	floor: u64,
 	/// What the runs above the floor bill to the track's account, opened on the first run.
 	bill: Option<cache::Reader>,

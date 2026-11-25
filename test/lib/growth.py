@@ -65,17 +65,29 @@ class Process:
     def wait_ready(self):
         deadline = time.monotonic() + READY_SECONDS
         while READY not in ANSI.sub("", self.log.read_text(errors="replace")):
-            if not Path(f"/proc/{self.pid}").exists():
+            if not self.alive():
                 raise SystemExit(f"error: {self.label} (pid {self.pid}) exited before it answered SIGUSR1")
             if time.monotonic() > deadline:
                 raise SystemExit(f"error: {self.label} never logged {READY!r}; is it built with the jemalloc feature?")
             time.sleep(0.05)
+
+    def alive(self):
+        """Whether the process still runs: an exited child of the harness lingers as a zombie
+        until reaped, with its /proc entry but no memory."""
+        try:
+            stat = Path(f"/proc/{self.pid}/stat").read_text()
+        except FileNotFoundError:
+            return False
+        # The state follows the command name, which may itself hold spaces or parentheses.
+        return stat.rpartition(")")[2].split()[0] not in ("Z", "X")
 
     def sample(self):
         try:
             status = proc_fields(f"/proc/{self.pid}/status")
             io = proc_fields(f"/proc/{self.pid}/io")
         except FileNotFoundError:
+            status = {}
+        if not self.alive() or "VmRSS" not in status:
             raise SystemExit(f"error: {self.label} (pid {self.pid}) exited while being sampled")
         # VmRSS reads `1234 kB`.
         rss = int(status["VmRSS"].split()[0]) * 1024
@@ -186,16 +198,18 @@ def judge(args):
                 f"{label:>8} {measure:>9}: {human(slope):>14} (limit {human(limit)}), "
                 f"{points[0][1] / 2**20:.1f} -> {points[-1][1] / 2**20:.1f} MiB  {verdict}"
             )
-        # A process that moved no data after warm-up is idle, and an idle process has nothing to leak.
+        # A process that stops moving data is idle, and an idle process has nothing to leak: every
+        # interval after warm-up must move media, so a stall late in the run fails as one at its start.
         if label in flows:
             counter = flows[label]
-            moved = after[-1][counter] - after[0][counter]
-            entry[counter] = moved
-            rate = moved / span if span else 0
-            print(f"{label:>8} {counter:>9}: {rate / 1024:.1f} KiB/s after warm-up")
-            if rate < args.min_flow:
+            entry[counter] = after[-1][counter] - after[0][counter]
+            rates = [(b[counter] - a[counter]) / (b["t"] - a["t"]) for a, b in zip(after, after[1:]) if b["t"] > a["t"]]
+            slowest = min(rates, default=0)
+            print(f"{label:>8} {counter:>9}: {slowest / 1024:.1f} KiB/s in its slowest interval after warm-up")
+            if slowest < args.min_flow:
                 failures.append(
-                    f"{label} moved {rate:.0f} B/s after warm-up, under {args.min_flow} B/s: the chain stalled"
+                    f"{label} moved {slowest:.0f} B/s in an interval after warm-up, under {args.min_flow:.0f} B/s: "
+                    "the chain stalled"
                 )
         report["processes"][label] = entry
     for label in flows:
@@ -227,7 +241,9 @@ def main(argv=None):
         "--max", action="append", default=[], required=True, help="measure=bytes-per-second (rss, allocated, resident)"
     )
     j.add_argument("--flow", action="append", default=[], help="label=rchar|wchar, a counter that must keep moving")
-    j.add_argument("--min-flow", type=float, default=1024, help="bytes per second each --flow must move")
+    j.add_argument(
+        "--min-flow", type=float, default=1024, help="bytes per second each --flow must move in every interval"
+    )
     j.add_argument("--min-samples", type=int, default=10, help="samples each process needs after warm-up")
     j.add_argument("--report", help="JSON summary to write")
 

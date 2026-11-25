@@ -32,6 +32,9 @@ FPS=60
 INTERVAL=5
 # Live heap bytes each group may leave behind in a process, on average, before the run fails.
 PER_GROUP_ALLOCATED=32
+# Bytes a second the import must read and the export write in every interval: the media moves
+# about 130 KiB/s, while each tick's heap dump and log lines add under 4 KiB/s on their own.
+MIN_FLOW=32768
 
 value() {
     if [[ $# -lt 2 || ! "$2" =~ ^[1-9][0-9]*$ ]]; then
@@ -175,6 +178,8 @@ python3 "$STEADY_DIR/../lib/growth.py" sample --out "$HARNESS_RUN/samples.jsonl"
     "relay=$RELAY_PID=$HARNESS_RUN/relay.log" \
     "export=$EXPORT_PID=$HARNESS_RUN/export.log" || status=$?
 
+# A kept run directory is uploaded, and opening a FIFO with no writer blocks forever.
+rm -f "$SOURCE"
 if harness_exited "$SOURCE_PID"; then
     echo "error: the source ended before sampling did" >&2
     sed 's/^/  source: /' "$HARNESS_RUN/source.log" >&2 || true
@@ -184,7 +189,7 @@ fi
 if ((status == 0)); then
     python3 "$STEADY_DIR/../lib/growth.py" judge "$HARNESS_RUN/samples.jsonl" --warmup "$WARMUP" \
         --max "allocated=$((PER_GROUP_ALLOCATED * FPS))" \
-        --flow import=rchar --flow export=wchar --report "$HARNESS_RUN/report.json" || status=$?
+        --flow import=rchar --flow export=wchar --min-flow "$MIN_FLOW" --report "$HARNESS_RUN/report.json" || status=$?
 fi
 
 if ((status != 0)); then

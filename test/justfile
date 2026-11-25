@@ -269,8 +269,8 @@ drain *args:
     ./drain/run.sh {{ args }}
 
 # One steady passthrough broadcast (ffmpeg | import ts --passthrough -> relay -> export ts
-# --passthrough) at 60 groups/s, failing when any process's heap or resident memory keeps
-# growing after warm-up. See steady/README.md.
+# --passthrough) at 60 groups/s, failing when any process's allocated heap keeps growing after
+# warm-up. See steady/README.md.
 
 # Memory growth on one steady broadcast.
 steady *args:

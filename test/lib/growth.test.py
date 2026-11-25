@@ -68,6 +68,15 @@ class Judge(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertIn("the chain stalled", err)
 
+    def test_stall_late_in_the_run_fails(self):
+        # Media moving for most of the window, then only the sampler's own trickle.
+        samples = records("export", [30 * MIB] * 40, counter=lambda i: min(i, 30) * 500_000 + i * 4096)
+        status, err, _ = self.judge(
+            samples, "--warmup", "60", "--max", "allocated=1024", "--flow", "export=wchar", "--min-flow", "32768"
+        )
+        self.assertEqual(status, 1)
+        self.assertIn("the chain stalled", err)
+
     def test_too_few_samples_after_warmup_is_an_error(self):
         with self.assertRaises(SystemExit):
             self.judge(records("relay", [MIB] * 12), "--warmup", "30", "--max", "allocated=1")
