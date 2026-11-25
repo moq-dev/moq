@@ -24640,11 +24640,11 @@ mod test {
 		assert_eq!(items(&mut ordered), ["group 3", "pending"]);
 	}
 
-	/// A skip replaces a drop still waiting for the groups below it, so the keys it names are
-	/// no gap, and the part of a drop it leaves still is.
+	/// A skip leaves a drop still waiting for the groups below it: every drop is final, and the
+	/// wire carries no skip over one.
 	#[test]
 	#[cfg(feature = "async")]
-	fn a_skip_replaces_a_buffered_gap() {
+	fn a_skip_leaves_a_buffered_gap() {
 		let producer = received_producer(None);
 		let mut ordered = producer.subscribe(Subscription::default().with_max(None)).ordered();
 		put(&producer, 0, None);
@@ -24660,12 +24660,7 @@ mod test {
 		put(&producer, 3, None);
 		assert_eq!(
 			items(&mut ordered),
-			[
-				"group 3",
-				"gap 4..5 (delivery timeout)",
-				"gap 7..8 (delivery timeout)",
-				"pending"
-			]
+			["group 3", "gap 4..8 (delivery timeout)", "pending"]
 		);
 	}
 
@@ -34804,41 +34799,6 @@ mod test {
 			.map(|(run, hole)| (run.clone(), hole.clone()))
 			.collect();
 		assert_eq!(drops, [(0..1, Hole::Skip), (2..5, Hole::Skip)]);
-	}
-
-	/// A skip after a drop already reported goes out again, replacing it, while a reader that
-	/// moved past the drop is not handed anything again; one already reported as a skip is
-	/// not reported twice, and a later drop leaves it skipped.
-	#[test]
-	#[cfg(feature = "async")]
-	fn a_skip_is_reported_over_a_reported_drop() {
-		let producer = track_producer("test", Info::timed());
-		let mut subscriber = producer.subscribe(replay().with_range(0..));
-		let waiter = kio::Waiter::noop();
-		write_group(&producer, 0);
-		producer.give_up(1..3, Hole::drop(StreamError::Cancel));
-		producer.give_up(4..5, Hole::drop(StreamError::NotFound));
-		write_group(&producer, 5);
-		assert_eq!(
-			subscriber.poll_drop(&waiter),
-			Poll::Ready((1..3, Hole::drop(StreamError::Cancel)))
-		);
-		assert_eq!(
-			subscriber.poll_drop(&waiter),
-			Poll::Ready((4..5, Hole::drop(StreamError::NotFound)))
-		);
-		assert!(subscriber.poll_drop(&waiter).is_pending());
-		assert_eq!(drain_groups(&mut subscriber), [0, 5]);
-
-		// Group 0 arrived, so the skip leaves it; both drops and the gap between become one skip.
-		producer.skip_groups(0..5);
-		assert_eq!(subscriber.poll_drop(&waiter), Poll::Ready((1..5, Hole::Skip)));
-		assert!(subscriber.poll_drop(&waiter).is_pending());
-		assert!(drain_groups(&mut subscriber).is_empty(), "nothing is delivered again");
-
-		producer.give_up(2..3, Hole::drop(StreamError::Cancel));
-		assert!(subscriber.poll_drop(&waiter).is_pending(), "the skip stands");
-		assert!(producer.state.read().skipped(2));
 	}
 
 	/// An appended first group skips every key below it, down to 0: a time-keyed track's first

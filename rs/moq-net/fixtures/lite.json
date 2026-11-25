@@ -341,15 +341,36 @@
 		"name": "a group sequence at 2^64-1, the largest a u64 holds",
 		"version": "moq-lite-07-wip",
 		"message": "group",
-		"hex": "0b00ffffffffffffffffff00",
+		"hex": "0c00ffffffffffffffffff0000",
 		"expect": "decoded"
 	},
 	{
 		"name": "a lite-07 group starting partway through, at a Frame Start",
 		"version": "moq-lite-07-wip",
 		"message": "group",
-		"hex": "03010704",
+		"hex": "0401070400",
 		"expect": "decoded"
+	},
+	{
+		"name": "a lite-07 group 10 whose Previous Delta names group 3 just below the keys it proves empty",
+		"version": "moq-lite-07-wip",
+		"message": "group",
+		"hex": "04010a0008",
+		"expect": "decoded"
+	},
+	{
+		"name": "a lite-07 group 10 whose Previous Delta proves every key below it empty, as the track's first",
+		"version": "moq-lite-07-wip",
+		"message": "group",
+		"hex": "04010a0001",
+		"expect": "decoded"
+	},
+	{
+		"name": "a lite-07 group 10 whose Previous Delta names a start below 0",
+		"version": "moq-lite-07-wip",
+		"message": "group",
+		"hex": "04010a000c",
+		"expect": "refused"
 	},
 	{
 		"name": "a server pinned to a version the client offered selects it",

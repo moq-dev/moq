@@ -389,6 +389,19 @@ impl TrackEntry {
 			return Err(Error::Cancel);
 		};
 		let group_info = group::Info { start: hdr.key };
+		// Lite-07's Previous Delta proves the keys just below the group hold none, which the
+		// copy records skipped before the group lands, so a reader past it never waits for them.
+		// A group that arrived there was produced after all: it keeps the group, and the session
+		// goes on, since the draft requires no more.
+		let gap = hdr.empty_below();
+		if let Some(cached) = producer.skip_received(gap.clone()).iter().next() {
+			tracing::warn!(
+				group = hdr.key,
+				gap = ?gap,
+				cached = cached.start,
+				"protocol error: a GROUP's Previous Delta covers a group that arrived; keeping the group"
+			);
+		}
 		// Stats (groups/frames/bytes) are counted in the model as the group
 		// is written, through the tagged `track::Producer`. The track counts
 		// it as content once its first frame lands.
@@ -399,6 +412,7 @@ impl TrackEntry {
 		// cache holds the group, so a fetch held for the feed that sees it
 		// accounted also finds it.
 		let reading = Reading::open(&self.tail, Some(hdr.key), now);
+		reading.account(gap, now);
 		// A route's first group says where its live feed is, when its answer does
 		// not: even one the cache already holds, as an idle copy asked from its
 		// head gets back. The copy goes live once the cache shows that group.
@@ -4658,6 +4672,7 @@ mod tests {
 					subscribe: 7,
 					key: 3,
 					frame_start: 0,
+					gap: 0,
 				}
 				.encode(&mut crate::coding::Encoder::new(&mut bytes, version.into()), version)
 				.unwrap();
@@ -4744,6 +4759,7 @@ mod tests {
 			subscribe: 7,
 			key,
 			frame_start: 0,
+			gap: 0,
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
 		.unwrap();
@@ -4849,6 +4865,7 @@ mod tests {
 			subscribe: 7,
 			key: 0,
 			frame_start: 0,
+			gap: 0,
 		};
 		receive_lite07(framing, true, header, body).await
 	}
@@ -4937,6 +4954,26 @@ mod tests {
 			subscribe: 7,
 			key,
 			frame_start: 0,
+			gap: 0,
+		}
+	}
+
+	/// A GROUP's Previous Delta proves the keys just below it hold no group: the copy records
+	/// them skipped before the group lands, so a reader passes over them.
+	#[kio::test]
+	async fn previous_delta_skips_the_gap_below() {
+		let x = u64::from(b'x');
+		for (gap, skipped) in [(6, Some(4..10)), (10, Some(0..10)), (0, None)] {
+			let header = lite::Group {
+				gap,
+				..lite07_header(10)
+			};
+			let (res, track, _) = receive_lite07(lite07(Some(Timescale::MILLI)), false, header, &[2, 0, x]).await;
+			res.unwrap();
+			let mut expected = rangemap::RangeSet::new();
+			expected.extend(skipped);
+			assert_eq!(track.skipped(0..20), expected, "gap {gap}");
+			assert!(track.consume().peek_group(10).is_some());
 		}
 	}
 
@@ -5147,6 +5184,7 @@ mod tests {
 			subscribe: 7,
 			key: 5,
 			frame_start: 0,
+			gap: 0,
 		}
 		.encode(&mut encoder, version)
 		.unwrap();
@@ -5314,6 +5352,7 @@ mod tests {
 			subscribe: 7,
 			key: 3,
 			frame_start: 0,
+			gap: 0,
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
 		.unwrap();
@@ -5384,6 +5423,7 @@ mod tests {
 				subscribe: 7,
 				key: 3,
 				frame_start,
+				gap: 0,
 			}
 			.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
 			.unwrap();
@@ -5470,6 +5510,7 @@ mod tests {
 				subscribe: 7,
 				key: 3,
 				frame_start: 0,
+				gap: 0,
 			}
 			.encode(&mut encoder, version)
 			.unwrap();
@@ -5586,6 +5627,7 @@ mod tests {
 				subscribe: 7,
 				key: 3,
 				frame_start: 0,
+				gap: 0,
 			}
 			.encode(&mut encoder, version)
 			.unwrap();
@@ -6589,124 +6631,6 @@ mod tests {
 		frame(three).expect("the update leaves a group still arriving");
 	}
 
-	/// A SKIP, or any final drop, that follows an OLD drop of the same groups replaces it in
-	/// the copy, and an update reopens none of them. An empty range names nothing.
-	#[kio::test]
-	async fn a_skip_or_final_drop_replaces_an_earlier_stale_one() {
-		let version = Version::Lite07;
-		let budget = Duration::from_millis(500);
-		let (serve, mut serving, tail, _broadcast) = lite07_serving(budget).await;
-		let code = u64::from(crate::coding::StreamCodes::encode_stream_code(
-			&version,
-			&crate::StreamError::Old,
-		));
-		let old = |first, last: u64| {
-			lite::SubscribeResponse::Drop(lite::SubscribeDrop {
-				groups: first..last + 1,
-				error: code,
-			})
-		};
-		let covers = |groups: std::ops::Range<u64>| tail.read().covers(groups);
-
-		serving.apply_response(&serve, old(1, 2)).unwrap();
-		serving.apply_response(&serve, old(4, 4)).unwrap();
-		serving
-			.apply_response(
-				&serve,
-				lite::SubscribeResponse::Skip(lite::SubscribeSkip { groups: 1..3 }),
-			)
-			.unwrap();
-		serving
-			.apply_response(
-				&serve,
-				lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(4..5, &crate::StreamError::App(5), version)),
-			)
-			.unwrap();
-		// Empty ranges.
-		serving.apply_response(&serve, old(6, 5)).unwrap();
-		serving
-			.apply_response(
-				&serve,
-				lite::SubscribeResponse::Skip(lite::SubscribeSkip { groups: 6..6 }),
-			)
-			.unwrap();
-
-		{
-			let Sub::Active(active) = &mut serving.sub else {
-				unreachable!("an active subscription");
-			};
-			let ranges = active.live.unchanged();
-			buffer_update(active, ranges).unwrap();
-		}
-		assert!(covers(1..3), "the skip is final");
-		assert!(covers(4..5), "the drop is final");
-		assert!(
-			matches!(
-				serving.serving.create_group(crate::group::Info { start: 1 }),
-				Err(Error::Skipped)
-			),
-			"still skipped after the update"
-		);
-	}
-
-	/// A SKIP replaces an earlier final DROP of the same groups too: "never produced" is the
-	/// most authoritative verdict. A later DROP leaves the skip in place, and a SKIP naming a
-	/// group that arrived keeps the group, without ending the session.
-	#[kio::test]
-	async fn a_skip_replaces_a_final_drop_but_not_a_cached_group() {
-		let version = Version::Lite07;
-		let (serve, mut serving, tail, _broadcast) = lite07_serving(Duration::from_millis(500)).await;
-		let drop = |first, last: u64, error: &crate::StreamError| {
-			lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(first..last + 1, error, version))
-		};
-		let skip = |first, last: u64| {
-			lite::SubscribeResponse::Skip(lite::SubscribeSkip {
-				groups: first..last + 1,
-			})
-		};
-		let mut group = serving.serving.create_group(crate::group::Info { start: 5 }).unwrap();
-		group
-			.write_frame(crate::Timestamp::from_millis(5).unwrap(), &b"x"[..])
-			.unwrap();
-		group.finish().unwrap();
-
-		serving
-			.apply_response(&serve, drop(1, 2, &crate::StreamError::App(5)))
-			.unwrap();
-		serving.apply_response(&serve, skip(1, 2)).unwrap();
-		assert!(
-			matches!(
-				serving.serving.create_group(crate::group::Info { start: 2 }),
-				Err(Error::Skipped)
-			),
-			"the skip replaced the final drop"
-		);
-		serving
-			.apply_response(&serve, drop(2, 2, &crate::StreamError::NotFound))
-			.unwrap();
-		assert!(
-			matches!(
-				serving.serving.create_group(crate::group::Info { start: 2 }),
-				Err(Error::Skipped)
-			),
-			"a later drop leaves the skip"
-		);
-
-		// Group 5 arrived, so the skip names only 4 and 6.
-		serving.apply_response(&serve, skip(4, 6)).unwrap();
-		assert!(tail.read().covers(4..7));
-		let mut reader = serving
-			.serving
-			.subscribe(crate::track::Subscription::default().with_ranges([crate::track::Range::groups(0..)]));
-		let waiter = kio::Waiter::noop();
-		assert_eq!(reader.poll_drop(&waiter), Poll::Ready((1..3, track::Hole::Skip)));
-		assert_eq!(reader.poll_drop(&waiter), Poll::Ready((4..5, track::Hole::Skip)));
-		assert_eq!(reader.poll_drop(&waiter), Poll::Ready((6..7, track::Hole::Skip)));
-		assert!(reader.poll_drop(&waiter).is_pending());
-		let group = reader.recv_group().await.unwrap().unwrap();
-		assert_eq!(group.start, 5, "the group that arrived is kept");
-	}
-
 	/// A SUBSCRIBE_DROP ends a group still arriving now, with its Error Code on lite-07.
 	/// Earlier versions carry an application code there, so the same bytes read as
 	/// OLD.
@@ -7697,6 +7621,7 @@ mod tests {
 				subscribe: 0,
 				key,
 				frame_start: 0,
+				gap: 0,
 			}
 			.encode(&mut w, version)
 			.unwrap();
@@ -7773,6 +7698,7 @@ mod tests {
 				subscribe: 0,
 				key,
 				frame_start: 0,
+				gap: 0,
 			}
 			.encode(&mut w, version)
 			.unwrap();
@@ -7828,6 +7754,7 @@ mod tests {
 			subscribe: 0,
 			key,
 			frame_start: 0,
+			gap: 0,
 		};
 		let mut entry = TrackEntry::new(None, Default::default());
 		let (_early_wait, early) = entry.park(&header(1));
@@ -11185,6 +11112,7 @@ mod tests {
 				subscribe: 7,
 				key: 0,
 				frame_start: start,
+				gap: 0,
 			}
 			.encode(&mut encoder, version)
 			.unwrap();
@@ -14492,7 +14420,7 @@ impl ServeLoop {
 				if let Ok(mut tail) = active.tail.write() {
 					tail.account(groups.clone(), serve.subscriber.runtime.now());
 				}
-				match serve.subscriber.version.has_skip() && error == crate::StreamError::Old {
+				match serve.subscriber.version.has_previous() && error == crate::StreamError::Old {
 					// Lite-07 judged it stale, recorded under the narrowest max age it may have been
 					// judged under (see [`SubStream::stale_budget`]). A reader no wider settles on it; a wider one asks for the group
 					// on a request of its own, since this subscription never delivers it. A key already skipped stays
@@ -14514,30 +14442,6 @@ impl ServeLoop {
 					}
 				}
 				self.range_fills.refuse(groups, error);
-			}
-			// Never produced, so nothing is waited for and no reader ends. A skip replaces any
-			// drop of the same groups, stale or final; a reader a drop already ended stays ended.
-			lite::SubscribeResponse::Skip(skipped) => {
-				let groups = skipped.groups.clone();
-				if groups.is_empty() {
-					return Ok(());
-				}
-				if let Ok(mut tail) = active.tail.write() {
-					tail.account(groups.clone(), serve.subscriber.runtime.now());
-				}
-				// A fill owing them is answered: the source never had them.
-				self.range_fills.refuse(groups.clone(), crate::StreamError::NotFound);
-				// A group that arrived was produced after all, so the skip contradicts it: it
-				// keeps the group, and the session goes on, since the draft requires no more.
-				let cached = self.serving.skip_received(groups);
-				if let Some(first) = cached.iter().next() {
-					tracing::warn!(
-						track = %serve.name,
-						groups = ?skipped.groups,
-						cached = first.start,
-						"protocol error: SUBSCRIBE_SKIP names a group that arrived; keeping the group"
-					);
-				}
 			}
 			// OK just resolves the range (the producer already orders
 			// groups).
