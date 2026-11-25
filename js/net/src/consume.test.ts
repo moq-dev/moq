@@ -198,3 +198,48 @@ test("the newest stream wins a tie at its own prefix", () => {
 	cache.announce(path, older, z, true);
 	expect(cache.instance(path).route.instance).toBe(z.instance);
 });
+
+// A GOAWAY drains every claim of a session at once: a request on the claim selected before and
+// after stays valid, though draining the claims one by one would pass the path through another.
+test("a batch rechecks a path once, after its last change", () => {
+	const cache = new BroadcastCache();
+	const path = Path.from("room");
+	const [cheap, dear] = [{}, {}];
+	cache.announce(path, cheap, { ...WireRoute.default, cost: 1n });
+	cache.announce(path, dear, { ...WireRoute.default, cost: 5n });
+	const source = new Producer();
+	const selected = cache.instance(path);
+	const held = cache.insert(path, selected, source.consume());
+	const signal = selected.validity?.signal;
+	cache.batch(() => {
+		cache.announce(path, cheap, { ...WireRoute.default, cost: 1n, draining: true });
+		cache.announce(path, dear, { ...WireRoute.default, cost: 5n, draining: true });
+	});
+	expect(signal?.aborted).toBe(false);
+	cache.announce(path, cheap, { ...WireRoute.default, cost: 1n, draining: true, available: false });
+	expect(signal?.aborted).toBe(true);
+	held.close();
+	source.close();
+});
+
+test("a cached broadcast is reused only within the epoch it was consumed through", () => {
+	const cache = new BroadcastCache();
+	const path = Path.from("room");
+	const owner = {};
+	const instance = Instance.random();
+	cache.announce(path, owner, { ...WireRoute.default, instance, epoch: 1n });
+	const source = new Producer();
+	const held = cache.insert(path, cache.instance(path), source.consume());
+	cache.announce(path, owner, { ...WireRoute.default, instance, epoch: 2n });
+	// A fresh request asks Epoch 2, which may refuse, rather than share Epoch 1's subscription.
+	expect(cache.get(path, cache.instance(path))).toBeUndefined();
+	const replacement = new Producer();
+	const fresh = cache.insert(path, cache.instance(path), replacement.consume());
+	const shared = cache.get(path, cache.instance(path));
+	expect(shared?.closed).toBe(fresh.closed);
+	// The Epoch-1 reader keeps its broadcast until it lets go.
+	expect(held.closed.peek()).toBeUndefined();
+	for (const consumer of [held, fresh, shared]) consumer?.close();
+	source.close();
+	replacement.close();
+});

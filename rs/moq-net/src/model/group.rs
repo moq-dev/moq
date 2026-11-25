@@ -746,6 +746,8 @@ impl Plain {
 struct Inflate {
 	release: Arc<Release>,
 	plain: Arc<Plain>,
+	// The group copy's reader progress, told when inflating lets a reclaim shed more slices.
+	pace: Arc<Pace>,
 	// Local index of the first slice: the copy's inflated length when the read took them.
 	from: usize,
 	// The first frame the read needs, which shedding the inflated copy stops short of.
@@ -762,6 +764,8 @@ impl Inflate {
 	/// lock held, since settling the debt takes the track's.
 	fn run(&self, meter: &stats::Meter) {
 		self.inflate(meter);
+		// Slices a raw reader took that a taken-frame shed kept for this copy may go now.
+		self.pace.retake();
 		// The inflated bytes are written like a producer's, so they pay the pool's debt the
 		// same way: a finished track has no writer left to settle it.
 		self.plain.bill.settle();
@@ -1157,6 +1161,40 @@ impl GroupState {
 		}
 	}
 
+	/// Shed the front frames the fastest reader took, those ending at or below `read` on the
+	/// pace scale: a reader on the group loses nothing it has yet to take, though a slower one
+	/// falls off as after any shed. Frames adopted from a head are off that scale, so the shed
+	/// stops at them. So does a started plain copy's inflated prefix: inflating slices to shed
+	/// them would bill the session more than it frees.
+	fn shed_taken(&mut self, read: u64) {
+		if self.outcome.error().is_some() {
+			return;
+		}
+		let inflated = match &self.flate {
+			Some(flate) => match flate.plain.len.load(Ordering::Acquire) {
+				0 => usize::MAX,
+				len => len,
+			},
+			None => usize::MAX,
+		};
+		let mut end = self.held();
+		while end < inflated
+			&& let Some(entry) = self.entry(end)
+			&& entry.end != 0
+			&& entry.end <= read
+		{
+			end += 1;
+		}
+		self.shed_frames(end, false);
+	}
+
+	/// Whether a frame still arriving bills the session: its payload or its header's fields.
+	fn arriving(&self) -> bool {
+		self.partial
+			.as_ref()
+			.is_some_and(|partial| !partial.scratch && (partial.charged > 0 || partial.fields.is_some()))
+	}
+
 	/// Whether this copy holds no committed frame.
 	fn is_empty(&self) -> bool {
 		self.front.is_empty() && self.log.base() == self.log.end()
@@ -1260,6 +1298,7 @@ impl GroupState {
 				.clone()
 				.ok_or_else(|| self.outcome.error().cloned().unwrap_or(Error::Dropped))?,
 			plain: flate.plain.clone(),
+			pace: self.pace.clone(),
 			from,
 			keep: first,
 			slices: self.entries(from, last + 1).cloned().collect(),
@@ -1817,6 +1856,9 @@ impl Producer {
 					Arc::new(Plain::new(charge.extra())),
 					charge.extra(),
 				)));
+			}
+			if let Some(report) = cache.report(&charge) {
+				state.pace.report(report);
 			}
 			state.charge = charge;
 			(state.log.reader(), state.pace.clone())
@@ -2875,14 +2917,18 @@ impl Handle {
 			return;
 		};
 		state.shed_all();
-		// Its payload and its header's fields both bill the session.
-		if state
-			.partial
-			.as_ref()
-			.is_some_and(|partial| !partial.scratch && (partial.charged > 0 || partial.fields.is_some()))
-		{
+		if state.arriving() {
 			self.commit_abort(state, Abort::Evicted);
 		}
+	}
+
+	/// Shed the frames this copy's fastest reader took, see [`GroupState::shed_taken`]. A copy
+	/// no reader holds keeps the rest: one not yet handed out is still owed downstream.
+	pub(super) fn shed_taken(&self) {
+		let Ok(mut state) = self.state.write() else {
+			return;
+		};
+		state.shed_taken(self.alive.pace.read());
 	}
 
 	pub(super) fn delivery_size(&self) -> u64 {
@@ -4360,7 +4406,7 @@ impl Consumer {
 				Poll::Ready(Err(err)) => Cause::Failed(err.clone()),
 				Poll::Pending => Cause::Stalled,
 			};
-			if !recover.wants(cause.error(), waiter) {
+			if !recover.wants(&cause, waiter) {
 				match &cause {
 					Cause::Failed(err) => recover.failed(index, err),
 					// The copy being read still serves and holds no more than was read, so

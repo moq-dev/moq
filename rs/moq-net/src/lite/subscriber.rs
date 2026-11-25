@@ -47,8 +47,8 @@ pub(super) struct SubscriberConfig {
 	/// Local policy for what pulling from this peer costs, overriding whatever it
 	/// declared in its SETUP. `None` charges the peer's declared price.
 	pub cost: Option<u64>,
-	/// Set once the peer sends a GOAWAY; this session's routes then rank last
-	/// (draining), so a replacement session outranks it.
+	/// Set once the peer sends a GOAWAY; this session's routes then rank below every
+	/// available route (draining), so a replacement session outranks it.
 	pub going_away: crate::goaway::GoingAway,
 	/// Our tokens' grants: a subscription the union stops covering is cancelled.
 	pub auth: crate::auth::Link,
@@ -10526,6 +10526,19 @@ mod tests {
 			matches!(result, Poll::Ready(Err(Error::ProtocolViolation))),
 			"a reset stream: {result:?}"
 		);
+
+		// A read that fails with the session's close, before the session reports it ending,
+		// ends with that close, as a WebTransport reader learns of the close first.
+		let session = ScriptedSession::new(script());
+		let (mut routes, _consumer) = root_prefix(VERSION, session.clone());
+		assert!(routes.poll(&waiter).is_pending());
+		session.close(Close::Reset);
+		let result = routes.poll(&waiter);
+		assert!(
+			matches!(result, Poll::Ready(Err(Error::Session(_)))),
+			"a session's close: {result:?}"
+		);
+		assert!(session.log.closes().is_empty(), "{:?}", session.log.closes());
 
 		let session = ScriptedSession::new(script());
 		let (mut routes, consumer) = root_prefix(VERSION, session.clone());

@@ -463,11 +463,13 @@ impl Session {
 	/// Observe a GOAWAY from the peer, telling us to migrate elsewhere.
 	///
 	/// [`poll`](goaway::Consumer::poll) it with a no-op waiter for a synchronous check, or
-	/// wait on it for one. Once a GOAWAY arrives, this session's routes rank below
-	/// every other eligible route, whatever their preference or cost, on this node
-	/// only: requests keep opening on it until a replacement session's route
-	/// outranks it, and existing subscriptions keep flowing until the session
-	/// closes. A relay still forwards the routes at their real cost.
+	/// wait on it for one. Once a GOAWAY arrives, this session's routes rank as draining:
+	/// below every eligible route of their claim that is not, whatever their preference or
+	/// cost, though a more specific claim still shadows a broader one. Requests keep opening
+	/// on it until a replacement session's route outranks it, and existing subscriptions keep
+	/// flowing until the session closes. A relay still forwards the routes at their real
+	/// cost, and tells a moq-lite-07 peer they drain so it ranks them alike; an older version
+	/// carries no drain, so its peers rank them as before.
 	pub fn draining(&self) -> goaway::Consumer {
 		self.goaway.consumer()
 	}
@@ -1190,8 +1192,10 @@ pub struct Limits {
 	///
 	/// The cache never evicts a live track's newest group, so a peer holding many quiet
 	/// tracks would otherwise hold one group each past any cache capacity. Past this, the
-	/// session sheds the frames of its own live edges, the one that moved longest ago first,
-	/// and then the older frames of the one being written. `None` leaves them unbounded.
+	/// session sheds its own live edges in delivery's priority order, the lowest-priority
+	/// track and then the edge that moved longest ago first: the frames readers took (a
+	/// compressed track's inflated copies aside), then whole edges, of which the one being
+	/// written keeps its newest frame. `None` leaves them unbounded.
 	pub live_edges: Option<u64>,
 }
 

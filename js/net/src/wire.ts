@@ -110,24 +110,26 @@ export interface OriginConsumer {
 	covers(prefix: Path.Valid): boolean;
 	/** The root-relative prefixes the handle's scope admits; unset for every path. */
 	readonly allowed?: Path.Prefixes;
+	/** The absolute path the handle's root-relative paths hang from. */
+	readonly root: Path.Valid;
 }
 
 /** One originated advertisement exposed to the publishing wire. */
 export interface Advertised {
 	readonly identity: object;
 	readonly route: WireRoute;
-	/**
-	 * The prefix the route was advertised at, when a scope's projection merged several covering
-	 * prefixes under one key; unset when the key is its prefix. Supersession compares only routes
-	 * of one prefix.
-	 */
-	readonly prefix?: Path.Valid;
+	/** The absolute prefix a claim raised to its handle's root is filed at; unset when filed at its row. */
+	readonly filed?: Path.Valid;
+	/** Whether it is a broadcast published here, which serves only the path it is filed at. */
+	readonly exact?: boolean;
+	/** Its place, newest first, among the claims filed with it; unset when that is its place in its row. */
+	readonly order?: number;
 }
 
 /** What names a stream: an advertisement, and the instance its route serves. */
 export interface Served {
 	readonly identity: object;
-	readonly route: Pick<WireRoute, "instance">;
+	readonly route: Pick<WireRoute, "instance" | "epoch">;
 }
 
 /**
@@ -140,8 +142,9 @@ export function sameInstance(a: Served, b: Served): boolean {
 }
 
 /**
- * Every originated advertisement per prefix, most preferred first. A reader takes the first
- * one its scope admits, so a cheaper route it cannot use never hides one it can.
+ * Every originated advertisement per prefix, most preferred first. A reader ranks only what its
+ * scope admits, so a cheaper route it cannot use never hides one it can, and ranks the claims
+ * covering its root as one tier wherever each is filed.
  */
 export type Advertisements = ReadonlyMap<Path.Valid, readonly Advertised[]>;
 

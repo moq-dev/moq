@@ -98,4 +98,4 @@ format.
 
 ## Required
 
-- [moq-transcribe with an OpenAI backend](/quest/m3/transcribe/crate.md) - the source transcript it translates
+- [moq-transcribe with a Deepgram backend](/quest/m3/transcribe/crate.md) - the source transcript it translates

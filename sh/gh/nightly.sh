@@ -177,7 +177,7 @@ case "$1" in
         done
         ;;
     js)
-        for benchmark in broadcasts requests fills fill-probe forward reader frames drift ledger bandwidth replay varint lite-varint track resume priority subscribe-drop window-drop publisher-update refresh observed compression datagrams; do
+        for benchmark in broadcasts requests fills fill-probe forward reader frames drift ledger bandwidth replay varint lite-varint track resume priority subscribe-drop window-drop publisher-update refresh observed compression datagrams routed-claims; do
             javascript "$benchmark" just js bench "$benchmark"
         done
         javascript catalog just js catalog-bench

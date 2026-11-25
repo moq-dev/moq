@@ -120,6 +120,16 @@ that replay is correct, since the join gets exactly what it asks for; the quest 
 fallback closed on the 20 of 20 (rejected: encoding live audio before the replay; a looser
 lite-06 bound; replaying nothing).
 
+After [moq-dev/moq#9508](https://github.com/moq-dev/moq/pull/9508), every full Firefox run on ARM
+failed `lifecycle player returns`, the reattach after the lifecycle pages idle through the
+replacement section. The relay's TRACK reached the fixture ahead of its SUBSCRIBE, and since #9508
+that held lookup counts as demand. So the retaining audio encoder replayed its whole 30 s retention
+as fresh groups ahead of the live edge. [moq-dev/moq#9572](https://github.com/moq-dev/moq/pull/9572)
+replays retained audio only for a live subscription, in JS and Rust: 20 of 20 runs that reached the
+return passed it, against 1 of 24 without the fix. Its validation left 5 of 24 runs failing the
+earlier rejoin or reattach step, which the [rejoin replay](/quest/m0/interop-green/rejoin-replay.md)
+child owns.
+
 Decided 2026-11-12 (maintainer), since green scheduled Interop is this epic's goal and stale pins caused four of the last six red runs:
 
 - ✅ the release-remeasure pipeline is a child quest of quest/m0/interop-green/ (rejected: quest/m3/release/; drop the follow-up).

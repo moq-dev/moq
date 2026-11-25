@@ -409,7 +409,7 @@ quic-sim:
     # Forward delay against RTT as a queue-growth signal: deterministic in the simulation, then over real sockets through each cellular moq-shaper preset, one at a time so they do not add to each other's noise.
     bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-quic --lib --run-ignored only --no-capture -E 'test(/^tests::receive_ts::/)'
     bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-tokio --test integration --run-ignored only --no-capture --test-threads 1 -E 'test(/^receive_ts::/)'
-    # A hundred bulk transfers on one relay connection all pause losslessly, where the merge gate runs twelve.
+    # A hundred bulk transfers on one relay connection, past its live-edge budget: the highest-priority ones arrive losslessly. The merge gate runs twelve.
     bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-relay --features test-support --test integration --run-ignored only -E 'test(/^quic_sim::many_/)'
     # Each realtime congestion controller against BBR3 over sim replicas of the cellular presets: queueing delay, throughput, reaction to the drop, and share beside CUBIC.
     bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-quic --lib --run-ignored only --no-capture -E 'test(/^tests::realtime::/)'
@@ -558,45 +558,14 @@ package-gst *args:
 gst-smoke *args:
     rs/moq-gst/smoke.sh "$@"
 
-# Build the Criterion benches CodSpeed simulates; CI runs them with `cargo codspeed run`.
-# Only single-threaded benches without I/O, whose instruction counts repeat. CodSpeed skips
-# `iter_custom`, so targets made only of it are left out too. Nightly still measures them all.
-# Valgrind runs ADX but hides it from CPUID (https://bugs.kde.org/show_bug.cgi?id=494162), so
-# rind is built to skip that one startup check, or it refuses the simulated CPU.
-# CodSpeed rejects an upload of more than about 1,000 benchmarks, so CI builds and uploads each
-# shard (net, mux, rest) as its own matrix job, and CodSpeed merges them into one report.
-codspeed shard:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    build() { VALGRIND_BUG_494162=1 cargo codspeed build --locked -m simulation "$@"; }
-    case "{{ shard }}" in
-    net)
-        build -p moq-net --features moq-net/fuzz \
-            --bench announce --bench auth --bench bandwidth --bench canonical --bench codec --bench frame \
-            --bench interests --bench priority --bench retirement --bench schedule --bench stats \
-            --bench synced --bench tail --bench tracks --bench varint --bench viewers
-        ;;
-    mux)
-        build -p moq-mux \
-            --bench catalog --bench containers --bench decode_clock --bench export --bench jitter \
-            --bench parameter_sets --bench sync --bench ts_programs --bench ts_schedule --bench ts_video
-        ;;
-    rest)
-        build -p kio -p moq-audio -p moq-e2ee -p moq-json -p moq-pattern -p moq-quic -p moq-rtmp \
-            --features moq-json/bench,moq-quic/fuzz \
-            --bench tasks --bench waiter --bench bus --bench protect --bench codec --bench table \
-            --bench matching --bench endpoint --bench receive --bench sent_packets --bench streams \
-            --bench chunk_interleaving
-        # moq-auth's published release is its own dev-dependency, so `-p moq-auth` is ambiguous and
-        # cargo-codspeed takes no `--manifest-path`: build it from its own directory. Each build
-        # replaces only its own packages' benches, so `cargo codspeed run` runs both.
-        cd rs/moq-auth && build --bench jwt
-        ;;
-    *)
-        echo "unknown shard '{{ shard }}': expected net, mux, or rest" >&2
-        exit 1
-        ;;
-    esac
+# Count the deterministic Criterion benches' instructions under stock Valgrind with rust2-bench
+# (x86-64 Linux), as CI's nightly count does: `just rs instructions run --out metrics.json`,
+# `just rs instructions compare <base>` for each bench's change since a commit, or `just rs
+# instructions fingerprint`. `--benchmarks <file>` counts, and builds the targets of, only the
+# benchmarks it names; bench/README.md has the rest.
+[positional-arguments]
+instructions *args:
+    sh/rs/instructions.sh "$@"
 
 # Run the tests the arguments select in a release build, printing their output; benchmarks add `--run-ignored only`.
 [positional-arguments]

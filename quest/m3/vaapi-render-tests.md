@@ -18,7 +18,7 @@ The ignored `vaapi_1080p_ladder_stays_on_the_gpu` encode test in
 
 ## Plan
 
-Found by the m1 [coverage audit](/quest/m3/audit-test-coverage.md): no recipe
+Found by the m1 [coverage audit](/quest/m3/audit-tests.md): no recipe
 or quest named these tests. The m0 run mapped them to [GPU CI](/quest/m3/gpu-ci.md),
 which covers only NVIDIA.
 

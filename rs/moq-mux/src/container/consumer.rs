@@ -4678,8 +4678,13 @@ mod tests {
 		assert_eq!(frame.timestamp, ts(1_000_000));
 		assert!(frame.keyframe);
 		assert_eq!(consumer.current, 1);
+		// Once the front settles on the newest route, whose info may still be in flight: a
+		// short close waits to see whether that route holds more.
 		assert!(
-			matches!(consumer.poll_event(&waiter), Poll::Ready(Ok(Some(Event::GroupEnd)))),
+			matches!(
+				kio::wait(|waiter| consumer.poll_event(waiter)).await,
+				Ok(Some(Event::GroupEnd))
+			),
 			"the complete successor still emits its clean boundary"
 		);
 		assert_eq!(consumer.read_frame().await.unwrap().unwrap().timestamp, ts(2_000_000));
