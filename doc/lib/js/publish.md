@@ -75,8 +75,9 @@ with a warning, since every viewer would refuse it.
 Video encodes while enabled, so its recent groups wait in the track's cache for
 a late live join's `max`, a history range, or a fetch. The cache keeps an idle group for
 30 seconds whatever `maxAge` says; `maxAge` only bounds how far back a reader
-may reach into it. Audio keeps raw PCM while nobody listens, then encodes the part of
-that history a subscriber wants ahead of live audio when one arrives: from a live join's
+may reach into it. Audio keeps raw PCM while nobody subscribes (a track info lookup or a
+fetch alone does not count), then encodes the part of that history a subscriber wants ahead
+of live audio when one arrives: from a live join's
 lag (its playout delay plus the codec's warmup), bounded by its max delay. A join with no
 lag limit, as every join before moq-lite-07 is, gets the retained audio within its max delay. Raw audio keeps up to
 `maxAge`, which for media defaults to 30 seconds (about 11.5 MB for 48 kHz

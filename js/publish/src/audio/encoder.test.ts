@@ -1604,9 +1604,10 @@ for (const [name, subscription] of [
 	});
 }
 
-// A fetch's own budget judges only the group it asks for, so it must not narrow what the encoder
-// replays for the live subscribers that come later.
-test("a fetch alone replays the whole retention", async () => {
+// Demand without a live subscription, such as a fetch or a relay's TRACK sent ahead of its
+// SUBSCRIBE, states no reach, so it replays nothing: the subscription that follows replays only what
+// it reaches, instead of the whole retention arriving as fresh groups ahead of the live edge.
+test("demand without a subscription keeps the retention for the subscription that follows", async () => {
 	using _webcodecs = installFakeWebCodecs();
 	const clock = new Manual();
 	const installed = clock.install();
@@ -1615,6 +1616,7 @@ test("a fetch alone replays the whole retention", async () => {
 	const configuring = configured();
 	const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(feed) as never });
 	let fetched: Moq.Group.Consumer | undefined;
+	let late: Moq.Track.Subscriber | undefined;
 	try {
 		await configuring;
 		await settle();
@@ -1633,13 +1635,143 @@ test("a fetch alone replays the whole retention", async () => {
 			await feed.push({ timestamp: Duration.micros(index * 20_000), channels: [new Float32Array(960)] });
 			await feed.drain();
 		}
-		expect(encoder.out.stats.peek().frames).toBe(encoded);
-		// Held open, the fetched group keeps the fetch's demand alive while the encoder reacts.
+		// Held open, the fetched group keeps the track wanted with no subscription.
 		fetched = await net.track("audio").fetchGroup(0n);
 		await settle();
-		expect(encoder.out.stats.peek().frames).toBe(encoded + 150);
+		expect(encoder.out.active.peek()).toBe(false);
+		expect(encoder.out.stats.peek().frames).toBe(encoded);
+
+		// At 3000 ms, a 130 ms budget still wants the frames ending after 2870 ms: 143 to 150.
+		late = net.track("audio").subscribe(within(130));
+		await settle();
+		expect(encoder.out.stats.peek().frames).toBe(encoded + 8 - FakeAudioEncoder.LAG);
 	} finally {
+		late?.close();
 		fetched?.close();
+		encoder.close();
+		broadcast.close();
+		installed.close();
+	}
+});
+
+// A fetch no longer resumes encoding, so a group open when the last subscriber leaves has to end
+// then, where the submitted audio does, or a fetch of it waits for a subscriber to return. It ends
+// only after the codec emits what it owes for that group, which a lagging codec holds until the
+// resume, and with no marker: the audio that follows continues it.
+test.each([0, 1])("the group open when the subscriber leaves ends for a fetch (codec lag %p)", async (lag) => {
+	using _webcodecs = installFakeWebCodecs();
+	FakeAudioEncoder.LAG = lag;
+	const clock = new Manual();
+	const installed = clock.install();
+	const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name: Moq.Path.from("stop.hang") });
+	const feed = new Feed();
+	const configuring = configured();
+	const encoder = new Encoder("audio", {
+		broadcast,
+		capture: fakeCapture(feed) as never,
+		join: Duration.millis(100),
+	});
+	let viewer: Moq.Track.Subscriber | undefined;
+	let fetched: Moq.Group.Consumer | undefined;
+	const push = async (index: number) => {
+		await feed.push({ timestamp: Duration.micros(index * 20_000), channels: [new Float32Array(960)] });
+		await feed.drain();
+	};
+	try {
+		await configuring;
+		await settle();
+		const net = broadcast.net.peek();
+		if (!net) throw new Error("expected network broadcast");
+		viewer = net.track("audio").subscribe({ ranges: [{}] });
+		await settle();
+		await push(0);
+		await push(1);
+		viewer.close();
+		await settle();
+		fetched = await net.track("audio").fetchGroup(0n);
+		await settle();
+		expect(fetched.end).toBe(lag ? undefined : 40_000n);
+
+		// The codec owes the group's last frame until input resumes.
+		viewer = net.track("audio").subscribe({ ranges: [{}] });
+		await settle();
+		await push(2);
+		await settle();
+		expect(fetched.end).toBe(40_000n);
+		expect([fetched.tryReadFrame(), fetched.tryReadFrame(), fetched.tryReadFrame()].map((f) => !!f)).toEqual([
+			true,
+			true,
+			false,
+		]);
+		// The resumed audio opens the next group with no marker before it.
+		await push(3);
+		await settle();
+		const next = await net.track("audio").fetchGroup(40_000n);
+		const first = next.tryReadFrame();
+		if (!first) throw new Error("expected the resumed frame");
+		expect(Moq.Varint.decode(first.payload)).toEqual([40_000, expect.any(Uint8Array)]);
+		next.close();
+	} finally {
+		viewer?.close();
+		fetched?.close();
+		encoder.close();
+		broadcast.close();
+		installed.close();
+	}
+});
+
+// A codec holding the group's last frame keeps every group end owed behind it, so a peer churning
+// its subscription with no audio in between must not grow that queue.
+test("subscription churn with no new audio owes one group end", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	FakeAudioEncoder.LAG = 1;
+	const clock = new Manual();
+	const installed = clock.install();
+	const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name: Moq.Path.from("churn.hang") });
+	const feed = new Feed();
+	const configuring = configured();
+	const encoder = new Encoder("audio", {
+		broadcast,
+		capture: fakeCapture(feed) as never,
+		join: Duration.millis(100),
+	});
+	using cut = spyOn(Container.Legacy.Producer.prototype, "cut");
+	let viewer: Moq.Track.Subscriber | undefined;
+	const push = async (index: number) => {
+		await feed.push({ timestamp: Duration.micros(index * 20_000), channels: [new Float32Array(960)] });
+		await feed.drain();
+	};
+	try {
+		await configuring;
+		await settle();
+		const net = broadcast.net.peek();
+		if (!net) throw new Error("expected network broadcast");
+		viewer = net.track("audio").subscribe({ ranges: [{}] });
+		await settle();
+		await push(0);
+		for (let i = 0; i < 3; i++) {
+			viewer.close();
+			await settle();
+			viewer = net.track("audio").subscribe({ ranges: [{}] });
+			await settle();
+			// Each resume drains an empty backlog, which releases nothing the codec still holds.
+			await feed.drain();
+		}
+		// The held frame comes out with the next input, releasing what was owed behind it.
+		await push(1);
+		await settle();
+		expect(cut).toHaveBeenCalledTimes(1);
+
+		// Audio submitted since the last stop owes a new end.
+		viewer.close();
+		await settle();
+		viewer = net.track("audio").subscribe({ ranges: [{}] });
+		await settle();
+		await push(2);
+		await settle();
+		expect(cut).toHaveBeenCalledTimes(2);
+	} finally {
+		viewer?.close();
 		encoder.close();
 		broadcast.close();
 		installed.close();

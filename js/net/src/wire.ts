@@ -129,7 +129,7 @@ export interface Advertised {
 /** What names a stream: an advertisement, and the instance its route serves. */
 export interface Served {
 	readonly identity: object;
-	readonly route: Pick<WireRoute, "instance">;
+	readonly route: Pick<WireRoute, "instance" | "epoch">;
 }
 
 /**

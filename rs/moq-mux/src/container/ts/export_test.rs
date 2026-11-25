@@ -3939,8 +3939,8 @@ async fn si_pids_are_re_emitted_on_their_own_interval() {
 	// follow it.
 	assert_eq!(
 		count(0x0000),
-		24,
-		"PAT on every frame, and repeated while the next is queued"
+		12,
+		"PAT once in each frame's slot, which the grid's repeat waiting for it shares"
 	);
 	// SDT every second from 0 to 12s, half its 2s limit.
 	assert_eq!(count(0x0011), 13, "SDT re-emitted at half its 2s interval");
@@ -4030,8 +4030,8 @@ async fn inline_si_form_is_re_emitted() {
 	};
 	assert_eq!(
 		count(0x0000),
-		24,
-		"PAT on every frame, and repeated while the next is queued"
+		12,
+		"PAT once in each frame's slot, which the grid's repeat waiting for it shares"
 	);
 	// SDT every second from 0 to 12s, byte-for-byte the inline section.
 	assert_eq!(count(0x0011), 13, "inline SDT re-emitted at half its 2s interval");
@@ -4274,8 +4274,9 @@ async fn discontinuity_re_emits_tables_and_resumes_the_clock() {
 	write(&mut producer, 50, 600_000_000);
 	let before = drain_frames(&mut export).await;
 	assert_eq!(export.discontinuity(), 0, "no rewind yet");
-	// Ten on the media's 500ms cadence, and the grid's copy in the 100ms periods between.
-	assert_eq!(count_pid(&before, 0x0000), 59, "PAT on its cadence and the grid's");
+	// Ten on the media's 500ms cadence, and the grid's copy in the 100ms periods between, a
+	// slot laying each version once.
+	assert_eq!(count_pid(&before, 0x0000), 50, "PAT on its cadence and the grid's");
 	assert_eq!(count_pid(&before, 0x0011), 5, "SDT every second, half its 2s limit");
 
 	// A forward marker must flush the last old frame instead of discarding it.
@@ -4346,7 +4347,7 @@ async fn reordered_video_keeps_the_table_cadence() {
 	assert_eq!(discontinuities, 0, "a reorder is not a rewind");
 	assert_eq!(
 		count_pid(&out, 0x0000),
-		47,
+		43,
 		"PAT once per slot and period, not per reorder"
 	);
 	assert_eq!(count_pid(&out, 0x0011), 5, "SDT once per 1s slot, not per reorder");

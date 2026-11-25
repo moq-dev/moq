@@ -2,10 +2,11 @@
 
 ## Goal
 
-moq-audio's Opus decoder backend runs on the path the maintainer picks:
+`rs/moq-opus`'s decode path runs on the path the maintainer picks:
 multistream float decode, PLC, gain, reset, and the packet parse helpers moq-audio
-calls, all under `#![forbid(unsafe_code)]` and passing the harness's
-correctness bar. moq-audio stops calling moq-libopus for decoding.
+calls, all in modules under `#![forbid(unsafe_code)]` and passing the harness's
+correctness bar. moq-audio decodes through that safe API, with no `unsafe`
+block of its own.
 
 ## Plan
 
