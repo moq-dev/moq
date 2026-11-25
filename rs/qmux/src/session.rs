@@ -502,14 +502,19 @@ impl SendStream {
 		}
 	}
 
-	fn reset_with(&mut self, code: u32) {
+	/// Reset with `code`, still delivering the bytes before `offset` when given.
+	fn reset_with(&mut self, offset: Option<send::Offset>, code: u32) {
 		if self.end == SendEnd::Reset {
 			return;
 		}
 		let code = VarInt::from_u32(code);
 		let mut state = self.inner.lock();
+		let mut stream = state.conn.send_stream(self.id);
 		// Err means the stream is already gone, which is what we wanted.
-		let _ = state.conn.send_stream(self.id).reset(code);
+		let _ = match offset {
+			Some(offset) => stream.reset_at(offset, code),
+			None => stream.reset(code),
+		};
 		self.end = SendEnd::Reset;
 	}
 }
@@ -591,7 +596,13 @@ impl poll::SendStream for SendStream {
 	}
 
 	fn reset(&mut self, code: u32) {
-		self.reset_with(code);
+		self.reset_with(None, code);
+	}
+
+	/// RESET_STREAM_AT toward a peer that accepts it, otherwise a RESET_STREAM once the link
+	/// took the bytes before `offset`.
+	fn reset_at(&mut self, offset: &send::Offset, code: u32) {
+		self.reset_with(Some(*offset), code);
 	}
 
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
