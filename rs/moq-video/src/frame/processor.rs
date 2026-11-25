@@ -34,7 +34,8 @@ impl Plan {
 	/// rest. That writes a quarter of the pixels of a full-size conversion.
 	#[cfg(any(feature = "capture", all(target_os = "windows", feature = "render"), test))]
 	pub fn capture_stage(picture: Size, scaled: Size) -> Size {
-		if scaled.width * 2 <= picture.width && scaled.height * 2 <= picture.height {
+		// `scaled * 2 <= picture`, without the overflow.
+		if scaled.width <= picture.width / 2 && scaled.height <= picture.height / 2 {
 			Size::new((picture.width / 2) & !1, (picture.height / 2) & !1)
 		} else {
 			scaled
@@ -136,6 +137,10 @@ mod tests {
 		// Less than a halving, or a halving in one direction only, is one pass.
 		assert_eq!(Plan::capture_stage(Size::new(1278, 1080), target), target);
 		assert_eq!(Plan::capture_stage(Size::new(1920, 700), target), target);
+		// An upscale is one pass, and no size overflows the comparison.
+		assert_eq!(Plan::capture_stage(Size::new(320, 180), target), target);
+		let huge = Size::new(u32::MAX, u32::MAX);
+		assert_eq!(Plan::capture_stage(target, huge), huge);
 	}
 
 	#[test]

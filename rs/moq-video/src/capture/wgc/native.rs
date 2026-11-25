@@ -92,14 +92,14 @@ fn framerate(config: &Config) -> FrameRate {
 }
 
 /// The output size that `config` asks for, if any. A dimension it leaves out
-/// keeps the `native` one, as on macOS.
+/// keeps the `native` one, and one under 2 pixels becomes 2, as on macOS.
 fn scaled(config: &Config, native: Size) -> Option<Size> {
 	if config.width.is_none() && config.height.is_none() {
 		return None;
 	}
 	Some(Size::new(
-		config.width.unwrap_or(native.width),
-		config.height.unwrap_or(native.height),
+		config.width.map_or(native.width, |width| width.max(2)),
+		config.height.map_or(native.height, |height| height.max(2)),
 	))
 }
 
