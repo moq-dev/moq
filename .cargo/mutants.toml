@@ -25,6 +25,9 @@ exclude_re = [
     # count as an upper bound.
     'replace Router<N, I, A>::(visit|count) with \(\)$',
     'replace \+ with (-|\*) in Router<N, I, A>::withdraw$',
+    # Each session takes the next number, and the closed one already left `peers`, so no
+    # live session ties it.
+    'replace < with <= in Router<N, I, A>::disconnect$',
     # A pick's key ends in its next hop or its claimant, so no two keys tie.
     'replace < with <= in Router<N, I, A>::(reselect|closest)$',
     # A session closed at a floor already recorded touches routes that stay as they
@@ -34,6 +37,10 @@ exclude_re = [
     # end, and `restate` already dropped this node's own claim first, with its source,
     # which wins the tie.
     'replace && with \|\| in Router<N, I, A>::publish$',
+    # The best route is picked from the usable ones and reselected whenever they change
+    # (`check` asserts it), so a best route not through the asker is a usable one: the
+    # shortcut only skips the walk.
+    'replace match guard Some\(best\.via\) != asker with false in Router<N, I, A>::awaits$',
     # resume.rs: the sweep of handed-out groups only bounds memory, since
     # `let_go` drops dead entries itself before anything reads `out`.
     'replace (== with !=|> with >=) in Reader::hand_out$',
@@ -75,6 +82,13 @@ exclude_re = [
     # With no resume point `raised` names no start, and a settled window has no unsettled
     # range: each guard only skips the walk.
     'replace \|\| with && in Reader::raised$',
+    # `resolve` with nothing to place places only the unsettled ranges no copy's answer moves
+    # (an oldest start, time 0, or an empty range). `window()` just placed those unless no
+    # answered copy serves, and the first to answer places them the same, while nothing
+    # reads them before then.
+    ':\d+:17: replace < with <= in Reader::backfill_gaps$',
+    # `may_take` already confines a drained key to the copy's ranges, which end at its cap.
+    ':\d+:42: replace < with <= in Reader::backfill_gaps$',
     # Dead: every write of `until` also writes `since`, so the superseded check
     # never runs. `ResumeReader.tla` models it, so it goes with the model.
     'replace >= with < in Copy::retains$',
@@ -89,6 +103,10 @@ exclude_re = [
     # A copy leaves a non-empty range starting at the oldest group or time 0 unresolved
     # only when a cap at 0 empties every range, so a waiting range stops the window too.
     'replace && with \|\| in Reader::resolve$',
+    # A capped copy resolves an end its cap leaves whole one past the range's own (keys are
+    # times), so `resolve` places the same end whether it keeps that one or drops it, and no
+    # resolved end passes the cap.
+    ':\d+:68: replace < with > in Reader::window$',
     # `owes_below` is asked only of a key outside the window, where no run starts.
     'replace < with <= in Reader::owes_below$',
     # Walking again before anything the read parked on fires returns the same
