@@ -6493,44 +6493,24 @@ impl TrackRun {
 	///
 	/// A relay caches groups in upstream arrival order, and a newer group's stream can
 	/// beat an older one, so the first group here need not be the oldest the source
-	/// serves. `source` is where the source's feed starts, raised to this cursor's floor,
-	/// so the resolved start is the lower of the two: resolving from the later group would
-	/// drop the older one for good.
+	/// serves. `source` is where the source's feed starts, raised to this cursor's floor;
+	/// see [`track::Subscriber::delivery_start`].
 	fn start(
 		&mut self,
 		group: group::Consumer,
 		source: Option<u64>,
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
 	) -> Result<(), Error> {
-		// Newest first, the cursor still holds groups below the first to go out: delivery
-		// starts at the lowest it can serve.
-		let mut lowest = group.start;
-		let mut from = 0;
-		while let Some(held) = self.track.lowest_unread(from).filter(|held| held.start < group.start) {
-			from = held.start + 1;
-			if servable(&held, &self.frames) {
-				lowest = held.start;
-				break;
-			}
-		}
-		let mut start = source.map_or(lowest, |source| source.min(lowest));
-		// A group given up, or held and not servable, cannot be where the feed starts. This
-		// stops at the held group at the latest, since it was not skipped.
-		// Adjacent runs given up with different errors stay separate, so walk them all.
-		while start < group.start {
-			let given_up = match &self.start {
-				Start::Unresolved { skipped, .. } => skipped.get_key_value(&start).map(|(run, _)| run.end),
-				_ => None,
-			};
-			let unservable = || {
-				let held = self.track.lowest_unread(start)?;
-				(held.start == start && !servable(&held, &self.frames)).then_some(start + 1)
-			};
-			match given_up.or_else(unservable) {
-				Some(end) => start = end.min(group.start),
-				None => break,
-			}
-		}
+		let Start::Unresolved { skipped, .. } = &self.start else {
+			unreachable!("a start resolves once");
+		};
+		// A group given up, or held and not servable, cannot be where the feed starts.
+		let start = self.track.delivery_start(track::Opening {
+			first: group.start,
+			source,
+			given_up: skipped,
+			serves: &|held| servable(held, &self.frames),
+		});
 		self.resolve(start, writer)?;
 		// SUBSCRIBE_START names where delivery starts. Groups already skipped between
 		// the requested floor and this group are not served. A later group at or above an

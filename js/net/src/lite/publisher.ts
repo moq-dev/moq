@@ -2267,22 +2267,8 @@ export class Publisher {
 						}
 						source = floor;
 					}
-					// Newest first, this reader still holds groups below the first to go out: delivery
-					// starts at the lowest it can serve. A newer group's stream can also beat where the
-					// source's feed starts: preserve that start so a resumed subscriber still waits for
-					// the backlog.
-					const lowest = hooks.lowestUnread(track, group.start) ?? group.start;
-					startKey = min(lowest, source ?? lowest);
-					// A group given up, or held and not servable, cannot be where the feed starts. This
-					// stops at the first group out at the latest. Adjacent runs given up with different
-					// errors stay separate, so walk them all. Mirrors the Rust `TrackRun::start`.
-					while (startKey < group.start) {
-						const key = startKey;
-						const end =
-							skipped.at(key)?.end ?? (hooks.heldAt(track, key) === "unservable" ? key + 1n : undefined);
-						if (end === undefined) break;
-						startKey = min(end, group.start);
-					}
+					// A group given up, or held and not servable, cannot be where the feed starts.
+					startKey = hooks.deliveryStart(track, { first: group.start, source, givenUp: skipped });
 					// A later group above an explicit floor is still delivered, so the cursor stays put.
 					// A pre-06 subscribe that named no group is the exception: an absent
 					// Group Start is the latest group, and this key becomes the floor.

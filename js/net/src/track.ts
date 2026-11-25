@@ -32,6 +32,7 @@ import {
 	type FillStarts,
 	finalKey,
 	groupBounds,
+	type Held,
 	type Hole,
 	hooks,
 	insertDrop,
@@ -39,6 +40,7 @@ import {
 	insertRun,
 	type Land,
 	NO_MAX_DELAY,
+	type Opening,
 	type Recv,
 	type ResumeSource,
 	type Run,
@@ -5499,8 +5501,8 @@ export class Subscriber {
 		hooks.latestKey = (subscriber) => (subscriber.#resume ? subscriber.#resume.latest() : subscriber.#state.latest);
 		hooks.arrived = (subscriber) => (subscriber.#resume ? 0 : subscriber.#state.arrived);
 		hooks.bufferedLargest = (subscriber) => subscriber.#bufferedLargest();
-		hooks.lowestUnread = (subscriber, below) => subscriber.#lowestUnread(below);
-		hooks.heldAt = (subscriber, key) => subscriber.#heldAt(key);
+		hooks.deliveryStart = (subscriber, opening) => subscriber.#deliveryStart(opening);
+		hooks.lowestHeld = (subscriber, from, below, servable) => subscriber.#lowestHeld(from, below, servable);
 		hooks.objectLargest = (subscriber) => {
 			if (subscriber.#resume) return subscriber.#resume.objectLargest();
 			const producer = subscriber.#state.producer;
@@ -5704,30 +5706,40 @@ export class Subscriber {
 		}
 	}
 
-	// The lowest group held unread below `below`, in the window and servable from the frame asked.
-	// Mirrors the Rust `Cursor::lowest_unread` and the publisher's `servable`.
-	#lowestUnread(below: bigint): bigint | undefined {
-		if (this.#resume) return this.#resume.lowestUnread(below);
-		const { start } = this.#cursor.peek();
+	// Where delivery starts once `first` goes out first: the lowest group below it this read holds
+	// unread and serves, or no higher than `source`, where the source's feed starts, passing every
+	// group from there that was given up or is held and can't be served. Never above `first`. A
+	// newest-first read has yet to deliver what it holds below the first out, and a newer group's
+	// stream can beat where the source's feed starts. Mirrors the Rust
+	// `track::Subscriber::delivery_start`.
+	#deliveryStart({ first, source, givenUp }: Opening): bigint {
+		const lowest = this.#lowestHeld(0n, first, true)?.key ?? first;
+		let start = source === undefined ? lowest : min(source, lowest);
+		// This stops at the lowest servable group at the latest. Adjacent runs given up with
+		// different errors stay separate, so walk them all.
+		while (start < first) {
+			const held = this.#lowestHeld(start, start + 1n, false);
+			const end = givenUp.at(start)?.end ?? (held?.servable === false ? start + 1n : undefined);
+			if (end === undefined) break;
+			start = min(end, first);
+		}
+		return start;
+	}
+
+	// The lowest group at or above `from` and below `below` this read holds unread in its window,
+	// only one whole from the frame asked when `servable`, and whether it is, on any copy it reads.
+	// Mirrors the Rust `track::Subscriber::lowest_unread` and the publisher's `servable`.
+	#lowestHeld(from: bigint, below: bigint, servable: boolean): Held | undefined {
+		if (this.#resume) return this.#resume.lowestHeld(from, below, servable);
 		const groups = this.#state.groups.peek();
-		for (let index = timelineIndex(groups, start); index < groups.length; index++) {
+		for (let index = timelineIndex(groups, max(from, this.#cursor.peek().start)); index < groups.length; index++) {
 			const group = groups[index];
 			if (group.start >= below) return undefined;
 			if (!this.#window.contains(group.start) || this.#delivered.has(group.start)) continue;
-			if (!this.#lacksHead(group) || this.#fetchesHead(group.start)) return group.start;
+			const whole = !this.#lacksHead(group) || this.#fetchesHead(group.start);
+			if (whole || !servable) return { key: group.start, servable: whole };
 		}
 		return undefined;
-	}
-
-	// Whether group `key` is held unread in the window, and whether it is servable from the frame
-	// asked, as #lowestUnread judges. Mirrors the Rust publisher's `servable` on `lowest_unread`.
-	#heldAt(key: bigint): "servable" | "unservable" | undefined {
-		if (this.#resume) return this.#resume.heldAt(key);
-		if (key < this.#cursor.peek().start) return undefined;
-		const groups = this.#state.groups.peek();
-		const group = groups[timelineIndex(groups, key)];
-		if (group?.start !== key || !this.#window.contains(key) || this.#delivered.has(key)) return undefined;
-		return !this.#lacksHead(group) || this.#fetchesHead(key) ? "servable" : "unservable";
 	}
 
 	// Whether the head of held group `key` can still come from a fill, which {@link #askHead}

@@ -8853,6 +8853,19 @@ impl Fetching {
 	}
 }
 
+/// What a publisher knows of where its delivery can start; see [`Subscriber::delivery_start`].
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+pub(crate) struct Opening<'a> {
+	/// The first group going out.
+	pub first: u64,
+	/// Where the source's feed starts (see [`Subscriber::poll_start`]), if it names one.
+	pub source: Option<u64>,
+	/// The runs the publisher gave up before delivery started, which it can't start in.
+	pub given_up: &'a RangeMap<u64, Hole>,
+	/// Whether the publisher can serve a held group from the frames asked of it.
+	pub serves: &'a dyn Fn(&group::Consumer) -> bool,
+}
+
 /// A live subscription to a track, used to read its groups.
 ///
 /// Created via [`Consumer::subscribe`](Consumer::subscribe), or
@@ -13184,11 +13197,53 @@ impl Subscriber {
 		}
 	}
 
-	/// The lowest group at or above `from` an arrival read holds unread, on any copy it reads:
-	/// a read handing out the newest first has yet to deliver it, so where its delivery starts
-	/// is no higher, unless it cannot serve that group.
+	/// Where delivery starts once `opening.first` goes out first: the lowest group below it this
+	/// read holds unread and `opening.serves`, or no higher than where the source's feed starts,
+	/// passing every group from there that was given up or is held and can't be served. Never
+	/// above the first group out, which is served.
+	///
+	/// A read handing out the newest first has yet to deliver the groups it holds below the
+	/// first out, and a newer group's stream can beat where the source's feed starts: resolving
+	/// from the first group alone would drop the older ones for good.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn lowest_unread(&self, from: u64) -> Option<group::Consumer> {
+	pub(crate) fn delivery_start(&self, opening: Opening<'_>) -> u64 {
+		let Opening {
+			first,
+			source,
+			given_up,
+			serves,
+		} = opening;
+		let held_below = |from: u64| self.lowest_unread(from).filter(|held| held.start < first);
+		let mut lowest = first;
+		let mut from = 0;
+		while let Some(held) = held_below(from) {
+			from = held.start + 1;
+			if serves(&held) {
+				lowest = held.start;
+				break;
+			}
+		}
+		let mut start = source.map_or(lowest, |source| source.min(lowest));
+		// This stops at the lowest servable group at the latest. Adjacent runs given up with
+		// different errors stay separate, so walk them all.
+		while start < first {
+			let given_up = given_up.get_key_value(&start).map(|(run, _)| run.end);
+			let unservable = || {
+				let held = held_below(start)?;
+				(held.start == start && !serves(&held)).then_some(start + 1)
+			};
+			match given_up.or_else(unservable) {
+				Some(end) => start = end.min(first),
+				None => break,
+			}
+		}
+		start
+	}
+
+	/// The lowest group at or above `from` an arrival read holds unread, on any copy it reads:
+	/// a read handing out the newest first has yet to deliver it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(super) fn lowest_unread(&self, from: u64) -> Option<group::Consumer> {
 		match &self.inner {
 			Inner::Plain(cursor) => cursor.lowest_unread(from),
 			Inner::Resume(resume, _) => resume.lowest_unread(from),
@@ -32487,6 +32542,58 @@ mod test {
 		assert_eq!(subscriber.lowest_unread(1).map(|group| group.start), Some(1));
 		evict(&producer, 1);
 		assert_eq!(subscriber.lowest_unread(1).map(|group| group.start), Some(2));
+	}
+
+	proptest::proptest! {
+		/// Where a publisher's delivery starts, over random held groups (whole or headless) and
+		/// runs given up: from the lower of the source's start and the lowest held group it
+		/// serves, the first group neither given up nor held unservable, and never past the
+		/// first group out.
+		#[test]
+		#[cfg(feature = "async")]
+		fn delivery_starts_at_the_first_group_it_can_serve(
+			held in proptest::collection::btree_map(0u64..16, proptest::bool::ANY, 1..10),
+			given_up in proptest::collection::vec((0u64..16, 1u64..4), 0..4),
+			source in proptest::option::of(0u64..20),
+		) {
+			let producer = track_producer("test", Info::timed());
+			let mut subscriber = producer.subscribe(replay());
+			// The first group out is served whole.
+			let first = *held.keys().last().unwrap();
+			for (&key, &whole) in &held {
+				let mut group = producer.create_group(group::Info { start: key }).unwrap();
+				if !whole && key != first {
+					group.start_at(1).unwrap();
+				}
+				group.write_frame(Timestamp::from_millis(key).unwrap(), &b"x"[..]).unwrap();
+				group.finish().unwrap();
+			}
+			// Newest first, the read hands out the last group written and holds the rest.
+			let Poll::Ready(Ok(Some(out))) = subscriber.poll_recv_group(&kio::Waiter::noop()) else {
+				panic!("a group is cached");
+			};
+			proptest::prop_assert_eq!(out.start, first);
+			// Alternating errors keep adjacent runs separate entries.
+			let mut runs = RangeMap::new();
+			for (index, &(start, len)) in given_up.iter().enumerate() {
+				let error = if index % 2 == 0 { StreamError::Old } else { StreamError::Cancel };
+				runs.insert(start..start + len, Hole::drop(error));
+			}
+			let got = subscriber.delivery_start(Opening {
+				first,
+				source,
+				given_up: &runs,
+				serves: &|group| group.fetches_from(0),
+			});
+			let lowest = (held.iter())
+				.find(|&(&key, &whole)| key < first && whole)
+				.map_or(first, |(&key, _)| key);
+			let from = source.map_or(lowest, |source| source.min(lowest));
+			let want = (from..first)
+				.find(|key| !runs.contains_key(key) && held.get(key) != Some(&false))
+				.unwrap_or(first);
+			proptest::prop_assert_eq!(got, want);
+		}
 	}
 
 	/// Newest first, a stale group a fill answered is written off with the stale owed ones
