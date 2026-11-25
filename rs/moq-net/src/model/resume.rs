@@ -12433,6 +12433,56 @@ mod test {
 		}
 	}
 
+	/// A live join that came placed keeps its place in the demand on a new copy once the reader
+	/// changes its other ranges, before its copies hear of it: resolved afresh against the
+	/// serving copy's cache, it would start nearer the live edge than where it was placed.
+	#[test]
+	fn the_fronts_subscription_keeps_a_placed_join_across_an_unmirrored_edit() {
+		for max in [None, Some(HOUR)] {
+			let routes = Producer::new();
+			let a = copy();
+			for sequence in 0..=10 {
+				write(&a, sequence);
+			}
+			routes.serve(a.consume());
+			let join = track::Range {
+				start: track::Start::Live {
+					min: Some(Duration::from_millis(5)),
+					max,
+				},
+				end: Some(1_000_000),
+			};
+			// Holds no group this test writes.
+			let later = track::Range {
+				start: track::Start::Time(500),
+				end: Some(600),
+			};
+			let placed = |ranges: Vec<track::Range>| Subscription {
+				placed: [(0, 3)].into(),
+				..Subscription::default().with_ranges(ranges)
+			};
+			let preferences = track::Preferences::from(placed(vec![join]));
+			let mut sub = routes.consume().subscribe(preferences.clone());
+			// Peeked, not taken: the reader handed out nothing, so no boundary raises the join.
+			let mut delivered = Delivered::default();
+			let Poll::Ready(Ok(Some(candidate))) =
+				sub.poll_peek_group(false, false, &mut delivered, &kio::Waiter::noop())
+			else {
+				panic!("a group to reserve")
+			};
+			assert_eq!(candidate.key(), 3);
+			preferences.update(placed(vec![join, later])).unwrap();
+			let asked = routes.subscription(Subscription::default(), 1);
+			match max {
+				None => assert_eq!(asked.ranges[0].start, track::Start::Time(3)),
+				Some(_) => {
+					assert_eq!(asked.ranges[0].start, join.start);
+					assert_eq!(asked.placed.get(&0), Some(&3), "max={max:?}");
+				}
+			}
+		}
+	}
+
 	/// The demand on a new copy keeps each reader's live join where its copy resolved it,
 	/// raised to the boundary a switch splits at. Ranges the reader changed since its
 	/// copies last heard resolve against the newest
