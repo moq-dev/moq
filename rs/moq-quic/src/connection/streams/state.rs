@@ -13,7 +13,7 @@ use tracing::{debug, trace};
 use super::{
 	Next, Reader, Recv, Retransmits, Schedule, Send, SendState, StreamHalf, ThinRetransmits,
 	lease::Rank,
-	send::{End, Error},
+	send::{End, Error, Stop},
 };
 use crate::{
 	Dir, Duration, Instant, MAX_STREAM_COUNT, Rate, Side, StreamId, TransportError, VarInt,
@@ -327,7 +327,11 @@ impl StreamsState {
 			return Ok(false);
 		}
 
+		let fin = frame.fin;
 		let (new_bytes, closed) = rs.ingest(frame, payload_len, self.data_recvd, self.local_max_data)?;
+		if fin {
+			self.waits.wake_ended();
+		}
 		let (stopped, evicted) = (rs.reader != Reader::Reading, rs.reader == Reader::Evicted);
 		let rank = (!stopped).then(|| rs.lease.arrived(id)).flatten();
 		self.spend(new_bytes);
@@ -423,6 +427,7 @@ impl StreamsState {
 			// Redundant reset
 			return Ok(false);
 		};
+		self.waits.wake_ended();
 		let (stopped, evicted) = (rs.reader != Reader::Reading, rs.reader == Reader::Evicted);
 		let rank = (!stopped).then(|| rs.lease.arrived(id)).flatten();
 		self.spend(new_bytes);
@@ -453,10 +458,106 @@ impl StreamsState {
 		Ok(self.evict_after_arrival(transmit))
 	}
 
+	/// The streams this endpoint sends on that a quiesce ends, except `keep` and those the
+	/// application has yet to accept. A stream stays until the peer acknowledged its end.
+	pub(crate) fn sending(&self, keep: &FxHashSet<StreamId>) -> Vec<StreamId> {
+		self.send
+			.keys()
+			.filter(|&id| {
+				let unaccepted =
+					id.initiator() != self.side && id.index() >= self.next_reported_remote[Dir::Bi as usize];
+				!keep.contains(id) && !unaccepted
+			})
+			.copied()
+			.collect()
+	}
+
+	/// Whether a quiesce still has `id` to reset: not reset yet, nor released by its
+	/// application, which left it to finish
+	pub(crate) fn resettable(&self, id: StreamId) -> bool {
+		let send = self.send.get(&id).and_then(|slot| slot.as_ref());
+		send.is_some_and(|send| !send.is_reset() && !send.released)
+	}
+
+	/// The streams a quiesce stopped, which the peer has not stopped since, each with its code
+	pub(crate) fn quiesced(&self) -> Vec<(StreamId, VarInt)> {
+		self.send
+			.iter()
+			.filter_map(|(&id, slot)| match slot.as_ref()?.stopped {
+				Some(Stop::Quiesce(code)) => Some((id, code)),
+				_ => None,
+			})
+			.collect()
+	}
+
+	/// Have a writer of `id` see the stream stopped with `code`, as a peer's stop would end it,
+	/// so a quiesce can end it behind the writer's back, returning whether data written to it is
+	/// still unacknowledged, which a reset or release since then still delivers.
+	///
+	/// A writer's own reset from then on keeps what was written and is held for
+	/// [`Self::release_quiesced_resets`].
+	pub(crate) fn stop_for_writer(&mut self, id: StreamId, code: VarInt) -> bool {
+		let max_data = self.max_send_data(id);
+		let Some(slot) = self.send.get_mut(&id) else {
+			return false;
+		};
+		let send = slot.get_or_insert_with(|| Send::new(max_data));
+		if !send.is_reset() && !send.released && send.stopped.is_none() {
+			send.stopped = Some(Stop::Quiesce(code));
+			self.waits.wake(id, Wait::Write);
+			self.waits.wake(id, Wait::End);
+		}
+		!send.pending.is_fully_acked()
+	}
+
+	/// Send every reset held since its stream was quiesced
+	pub(crate) fn release_quiesced_resets(&mut self, pending: &mut Retransmits) {
+		let before = pending.reset_stream.len();
+		for (&id, slot) in &mut self.send {
+			if let Some(reliable_size) = slot.as_mut().and_then(|send| send.take_quiesced_reset()) {
+				pending.reset_stream.push((id, reliable_size));
+			}
+		}
+		if pending.reset_stream.len() > before {
+			self.waits.wake_transmit();
+		}
+	}
+
+	/// Ask the peer with STOP_SENDING to end every stream it may still send on, except `keep`
+	/// and those the application has yet to accept, returning whether any of them is still open.
+	///
+	/// A stream is asked once, and a stream the application already stopped was asked by its stop.
+	/// The readers keep reading: each stream ends with the peer's reset or FIN as usual. A stream
+	/// waiting to be accepted counts as open, since only the application can tell whether to keep it.
+	pub(crate) fn quiesce(&mut self, pending: &mut Retransmits, code: VarInt, keep: &FxHashSet<StreamId>) -> bool {
+		let mut open = false;
+		let mut asked = false;
+		for (&id, slot) in &mut self.recv {
+			if keep.contains(&id) {
+				continue;
+			}
+			let rs = get_or_insert_recv(slot, self.initial_stream_receive_window);
+			if !rs.final_offset_unknown() {
+				continue;
+			}
+			open = true;
+			let unaccepted = id.initiator() != self.side && id.index() >= self.next_reported_remote[id.dir() as usize];
+			if unaccepted || rs.reader == Reader::Stopped || mem::replace(&mut rs.quiesced, true) {
+				continue;
+			}
+			pending.stop_sending.push(frame::StopSending { id, error_code: code });
+			asked = true;
+		}
+		if asked {
+			self.waits.wake_transmit();
+		}
+		open
+	}
+
 	/// Process incoming `STOP_SENDING` frame
 	///
 	/// Returns the Reliable Size of 0 for a reset to send now, since the peer will not read the
-	/// data a reset still delivers.
+	/// data a reset still delivers: one already reset, or one a quiesce stopped and nobody reset.
 	pub(crate) fn received_stop_sending(
 		&mut self,
 		id: StreamId,
@@ -475,10 +576,23 @@ impl StreamsState {
 		let stream = stream_opt.get_or_insert_with(|| Send::new(max_send_data));
 
 		self.connection_blocked.swap_remove(&id);
+		// A stream a quiesce stopped is reset by the quiesce, which the peer's stop replaces: it
+		// reads nothing more, so it is reset now, keeping nothing.
+		let quiesced = match stream.stopped {
+			Some(Stop::Quiesce(code)) if !stream.is_reset() && !stream.released => Some(code),
+			_ => None,
+		};
 		let stopped = stream.try_stop(error_code);
 		let buffered = stream.pending.buffered();
-		let reset = stream.abandon_reliable();
+		let reset = match quiesced {
+			Some(code) => stream.reset(code, 0, self.peer_reset_stream_at),
+			None => stream.abandon_reliable(),
+		};
 		self.buffered_data -= buffered - stream.pending.buffered();
+		if reset.is_some() {
+			// The reset dropped what the peer had yet to acknowledge, which a quiesce waits for.
+			self.waits.wake_ended();
+		}
 		let waiting = stream.take_waiting();
 		if !stream.is_pending() {
 			self.pending.remove(&mut stream.slot);
@@ -611,7 +725,7 @@ impl StreamsState {
 		let stream = self.send.get(&id)?.as_ref()?;
 		stream
 			.data_blocked_limit
-			.filter(|&limit| stream.is_writable() && stream.stop_reason.is_none() && limit == stream.max_data)
+			.filter(|&limit| stream.is_writable() && !stream.peer_stopped() && limit == stream.max_data)
 	}
 
 	pub(in crate::connection) fn write_control_frames(
@@ -911,7 +1025,7 @@ impl StreamsState {
 		self.send
 			.get(&id)?
 			.as_deref()
-			.filter(|stream| !stream.is_reset() && stream.stop_reason.is_none())
+			.filter(|stream| !stream.is_reset() && !stream.peer_stopped())
 	}
 
 	/// Process the acknowledgement of stream data
@@ -942,6 +1056,10 @@ impl StreamsState {
 			self.pending.remove(&mut stream.slot);
 		}
 		let acked = stream.take_acked();
+		if stream.pending.is_fully_acked() {
+			// A quiesce waits for the data written before it to arrive.
+			self.waits.wake_ended();
+		}
 		// The stream is unfinished or may still need retransmits
 		let held = (!finished).then(|| stream.take_held_reset());
 		// A reset is not reported as finished, like one without a Reliable Size
@@ -1029,7 +1147,7 @@ impl StreamsState {
 	/// Wake the writer of a stream whose flow control limit just rose past what it has written
 	fn send_unblocked(&mut self, id: StreamId) {
 		let stream = self.send.get(&id).and_then(|s| s.as_ref()).unwrap();
-		if !stream.is_writable() || stream.stop_reason.is_some() {
+		if !stream.is_writable() || stream.peer_stopped() {
 			return;
 		}
 		if self.write_limit() > 0 {
@@ -1067,7 +1185,7 @@ impl StreamsState {
 
 			// If it's no longer sensible to write to a stream (even to detect an error) then don't
 			// report it.
-			if stream.is_writable() && stream.stop_reason.is_none() && stream.max_data > stream.offset() {
+			if stream.is_writable() && !stream.peer_stopped() && stream.max_data > stream.offset() {
 				self.waits.wake(id, Wait::Write);
 			}
 		}
@@ -1406,6 +1524,7 @@ impl StreamsState {
 				self.ensure_remote_streams(id.dir());
 			}
 		}
+		self.waits.wake_ended();
 		if half == StreamHalf::Send {
 			self.connection_blocked.swap_remove(&id);
 			self.send_streams -= 1;

@@ -626,6 +626,20 @@ export function sessionClosed(err: unknown): boolean {
 }
 
 /**
+ * Whether a stream failed because the peer reset or stopped it without an application code of its
+ * own, as a browser reports a closing session's WT_SESSION_GONE (as code 0), either raw or through
+ * {@link fromTransport}, rather than on a local error, a session close, or a reset with a code.
+ *
+ * @internal
+ */
+export function peerEnded(err: unknown): boolean {
+	const raw = err instanceof Stream ? err.cause : err;
+	if (typeof raw !== "object" || raw === null) return false;
+	const { source, streamErrorCode } = raw as StreamErrorLike;
+	return source === "stream" && (streamErrorCode === 0 || streamErrorCode === null);
+}
+
+/**
  * Report a failure the session's close caused as the session's own error, which carries the
  * peer's close code; any other failure passes through.
  *
