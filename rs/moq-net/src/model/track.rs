@@ -17626,7 +17626,11 @@ mod test {
 		let waiter = kio::Waiter::noop();
 		pool.sweep();
 		pool.step(cache::DEFAULT_EXPIRY / 2);
-		producer.create_group(group::Info { start: 4 }).unwrap().finish().unwrap();
+		producer
+			.create_group(group::Info { start: 4 })
+			.unwrap()
+			.finish()
+			.unwrap();
 		drop(producer.finish().unwrap());
 		let mut held = Vec::new();
 		for key in [1, 2] {
