@@ -32710,6 +32710,29 @@ mod test {
 		}
 	}
 
+	/// A gap a hopping reader's ranges left behind was never handed out, so ranges that cover
+	/// it again still get its group. The record forgot the stretch around it, so a group
+	/// handed out there before may come again.
+	#[test]
+	fn a_reader_hopping_back_gets_the_gaps_it_left() {
+		let (producer, _pool) = pooled_producer(1 << 30);
+		for key in 0..8 {
+			write_group(&producer, key);
+		}
+		let mut subscriber = producer.subscribe(Subscription::default().with_range(0..1));
+		for key in [0, 2, 4, 6] {
+			subscriber
+				.update(Subscription::default().with_range(key..key + 1))
+				.unwrap();
+			assert_eq!(drain_groups(&mut subscriber), [key]);
+		}
+		subscriber.update(Subscription::default().with_range(0..8)).unwrap();
+		let served = drain_groups(&mut subscriber);
+		for gap in [1, 3, 5, 7] {
+			assert!(served.contains(&gap), "{gap} missing from {served:?}");
+		}
+	}
+
 	/// A reader whose ranges never move, with no delay budget, at capacity 0, whose upstream
 	/// takes every fill and never answers one: the cache evicts every other group before the
 	/// reader takes it, each a gap of its own. Its unanswered asks stay within its allowance,
