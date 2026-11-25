@@ -1,6 +1,6 @@
 set fallback
 
 # Replace the mbx-moq-dev B2 bucket's lifecycle rules with lifecycle.json,
-# under a key from `b2 account authorize` that may update the bucket.
+# using B2_APPLICATION_KEY_ID and B2_APPLICATION_KEY (the mbx-write key may).
 lifecycle:
     nix run nixpkgs#backblaze-b2 -- bucket update --lifecycle-rules "$(cat lifecycle.json)" mbx-moq-dev

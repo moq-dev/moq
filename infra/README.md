@@ -181,14 +181,24 @@ branch, which leaves out Nightly's schedule, so the action sets
 
 All of this runs once and is done.
 
-1. **Create the bucket and its lifecycle rule** in the B2 web console
-   (Buckets -> Create a Bucket): `mbx-moq-dev`, private, no encryption or
-   object lock. Then set its lifecycle from `lifecycle.json`, either as a
-   custom rule in the console (Lifecycle Settings) or with an account key:
+1. **Create the bucket** in the B2 web console (Buckets -> Create a Bucket):
+   `mbx-moq-dev`, private, with the default SSE-B2 encryption and no object
+   lock.
+
+2. **Create two application keys** in the console (Application Keys -> Add a
+   New Application Key), both restricted to `mbx-moq-dev`. Each shows its
+   keyID and applicationKey once:
+
+   - `mbx-read`: **Read Only**.
+   - `mbx-write`: **Read and Write**, which also lets it set the bucket's
+     lifecycle rules.
+
+   Then apply `lifecycle.json` with `mbx-write` (or any key that may update
+   the bucket). The console's lifecycle form cannot cancel unfinished large
+   files, so use the recipe:
 
    ```bash
-   nix run nixpkgs#backblaze-b2 -- account authorize
-   just infra mbx lifecycle
+   B2_APPLICATION_KEY_ID=... B2_APPLICATION_KEY=... just infra mbx lifecycle
    ```
 
    `lifecycle.json` hides every object 30 days after upload, deletes hidden
@@ -196,13 +206,6 @@ All of this runs once and is done.
    day. mbx writes each compilation once and never refreshes it, so a result
    still in use expires too; the next writer that misses it compiles and
    uploads it again.
-
-2. **Create two application keys** in the console (Application Keys -> Add a
-   New Application Key), both restricted to `mbx-moq-dev`. Each shows its
-   keyID and applicationKey once:
-
-   - `mbx-read`: **Read Only**.
-   - `mbx-write`: **Read and Write**.
 
 3. **Create the `cache-write` Environment**, deployable from `main` and the
    protected release tags configured below.
