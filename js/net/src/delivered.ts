@@ -111,6 +111,12 @@ export class Delivered {
 		return index >= 0 && key <= this.#runs[index][1] ? this.#runs[index][1] + 1n : undefined;
 	}
 
+	/** One past the highest key handed out. */
+	end(): bigint | undefined {
+		const last = this.#runs.at(-1);
+		return last && last[1] + 1n;
+	}
+
 	/** How many runs it holds: one per gap, plus the floor. */
 	get runs(): number {
 		return this.#runs.length;

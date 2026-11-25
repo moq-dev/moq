@@ -3939,8 +3939,9 @@ export class Subscriber {
 	// this track holds it or not: one landing there would be written off. A group skipped as
 	// stale is not forgotten, since a wider budget offers it again, and neither is one still
 	// buffered unread: it may have arrived after a newer one, so its own successor may be fresh.
-	// Mirrors the Rust `Cursor::forget_past_budget` keeping what the arrivals still owe. No gap at
-	// or above `keep` is forgotten either.
+	// Nor is a cached group no range covers, which a range added later owes. Mirrors the Rust
+	// `Cursor::forget_past_budget` keeping what the arrivals still owe. No gap at or above `keep`
+	// is forgotten either.
 	#forgetPastBudget(delivered: Delivered, budget = this.#window.budget(), keep?: bigint): void {
 		if (delivered.aboveGap() === undefined) return;
 		// One edge for every group judged, so forgetting N gaps never resolves it N times.
@@ -3968,6 +3969,8 @@ export class Subscriber {
 				}
 				const owed = this.#lowestBuffered(delivered);
 				if (owed !== undefined) skipped = min(skipped ?? owed, owed);
+				const uncovered = this.#lowestUncovered(delivered);
+				if (uncovered !== undefined) skipped = min(skipped ?? uncovered, uncovered);
 				if (keep !== undefined) skipped = min(skipped ?? keep, keep);
 			}
 			if (skipped !== undefined && skipped < oldest) {
@@ -3990,6 +3993,23 @@ export class Subscriber {
 			const key = groups[index].start;
 			if (end !== undefined && key >= end) return undefined;
 			if (this.#window.contains(key) && !delivered.has(key)) return key;
+		}
+		return undefined;
+	}
+
+	// The lowest cached group in a gap of `delivered` that the ranges don't cover: the budget never
+	// judged it, and a range added later that covers it owes it. While a range is still being
+	// placed, any cached group in a gap may be one.
+	#lowestUncovered(delivered: Delivered): bigint | undefined {
+		const end = delivered.end();
+		if (end === undefined) return undefined;
+		const groups = this.#state.groups.peek();
+		for (const gap of delivered.gaps(0n, end)) {
+			for (let index = timelineIndex(groups, gap.start); index < groups.length; index++) {
+				const key = groups[index].start;
+				if (key >= gap.end) break;
+				if (this.#window.pending || !this.#window.holds(key)) return key;
+			}
 		}
 		return undefined;
 	}
