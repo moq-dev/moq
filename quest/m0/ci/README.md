@@ -39,8 +39,11 @@ Decisions (maintainer, 2026-10-13):
 - Caches move to Cloudflare R2: mbx's S3 backend for Rust, and `nix.moq.dev`
   replacing Cachix for Nix. The infra lives in `infra/` beside apt and rpm,
   checked in where wrangler allows; one-time commands where it does not.
-  Superseded 2026-11-23: both move to Backblaze B2 for its startup credits
-  ([Rust](/quest/m0/ci/mbx-b2.md), [Nix](/quest/m0/ci/nix-b2.md)).
+  Superseded 2026-11-23: both move to Backblaze B2 for its startup credits.
+  The Rust cache reads and writes B2 since
+  [moq-dev/moq#9624](https://github.com/moq-dev/moq/pull/9624), with
+  [R2's teardown](/quest/m0/ci/mbx-b2.md) left; [Nix](/quest/m0/ci/nix-b2.md)
+  follows.
 - Untrusted runs only read. Write credentials live in GitHub Environments
   whose deployment policy allows only `main` (plus release tags for the Nix
   signing key), so a pull request job cannot read them even from the same
@@ -50,7 +53,7 @@ Decisions (maintainer, 2026-10-13):
   PR is about to land. Rust cache writers are the jobs on `main` and in its
   queue, and no separate warm rebuilds what landed. Since
   [#6040](https://github.com/moq-dev/moq/pull/6040) the queue runs on the
-  self-hosted `moq-queue` runner with mbx's local store, so the R2 writers are
+  self-hosted `moq-queue` runner with mbx's local store, so the cache writers are
   the hosted scheduled jobs on `main`: Nightly and the workflows it calls,
   CodSpeed, Interop and TS.
 - Self-hosted CI is dropped: hosted runners plus the R2 caches replace the

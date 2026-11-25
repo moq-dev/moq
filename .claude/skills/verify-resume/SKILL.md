@@ -42,7 +42,7 @@ Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path as a 
 
 ## Coverage
 
-Sync commit: `8c939bc9d05e5e882fb4e042a9efbf2db227b721`, plus [moq-dev/moq#9103](https://github.com/moq-dev/moq/pull/9103), which reads a group landing late on a drained copy, [moq-dev/moq#9276](https://github.com/moq-dev/moq/pull/9276), which splits a switch at one boundary, and [moq-dev/moq#9529](https://github.com/moq-dev/moq/pull/9529), which picks in Group Order. Run `git log 8c939bc9d0.. -- rs/moq-net/src/model/resume.rs rs/moq-net/src/model/track.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
+Sync commit: `7cab21e65bd3dfd031d76e02a1a2f62df3918faf`. Run `git log 7cab21e65b.. -- rs/moq-net/src/model/resume.rs rs/moq-net/src/model/track.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
 
 | Code | Model |
 | --- | --- |
