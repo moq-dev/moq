@@ -1046,6 +1046,13 @@ impl Slot {
 		self.is_live() && self.group.is_started()
 	}
 
+	/// Whether this live-feed group bounds the one before it: no failure took it back, so it
+	/// is still held or only aged out of the cache, as an ended track's sweep leaves it in
+	/// place. Either way it arrived, as an evicted one did (see [`TrackState::departed_above`]).
+	fn succeeds(&self) -> bool {
+		self.visible && (!self.group.is_aborted() || self.group.is_released())
+	}
+
 	/// Whether a group-only reader may treat this slot as reaching the original end.
 	fn serves_end(&self) -> bool {
 		let group = self.serving();
@@ -2207,7 +2214,7 @@ impl TrackState {
 		let expired: Vec<_> = self
 			.drops_born
 			.iter()
-			.filter(|(run, expires)| now >= **expires && run.start < kept)
+			.filter(|(run, expires)| now >= **expires && run.start < kept && !self.pins_drops(run.start))
 			.map(|(run, _)| run.start..run.end.min(kept))
 			.collect();
 		for run in expired {
@@ -2216,9 +2223,23 @@ impl TrackState {
 		self.drops_oldest = self
 			.drops_born
 			.iter()
-			.filter(|(run, _)| run.start < kept)
+			.filter(|(run, _)| run.start < kept && !self.pins_drops(run.start))
 			.map(|(_, expires)| *expires)
 			.min();
+	}
+
+	/// Whether the dropped run holding `key` lies directly above a group a local track still
+	/// caches, which keeps it: forgetting it would read like evicted groups between two held
+	/// ones, a gap its publisher never left. Each cached group keeps at most one run, until it
+	/// leaves (see [`Self::remove_slot`]). A received copy keeps none, since upstream answers
+	/// for what it forgets.
+	fn pins_drops(&self, key: u64) -> bool {
+		!self.anchors.received()
+			&& self
+				.dropped
+				.get(&key)
+				.and_then(|run| run.start.checked_sub(1))
+				.is_some_and(|below| self.lookup.contains_key(&below))
 	}
 
 	/// Where the runs a reclaim may forget end: every run on a received copy, whose tail
@@ -2232,14 +2253,14 @@ impl TrackState {
 		}
 	}
 
-	/// The runs from `from` up to [`Self::kept_drops`] were kept and are now reclaimable: date
+	/// The runs in `runs` below [`Self::kept_drops`] were kept and are now reclaimable: date
 	/// the oldest of them, which the expiry scan skipped, so the next scan finds it.
-	fn rearm_drops(&mut self, from: u64) {
-		let due = self
-			.drops_born
-			.overlapping(&(from..self.kept_drops()))
-			.map(|(_, expires)| *expires)
-			.min();
+	fn rearm_drops(&mut self, runs: ops::Range<u64>) {
+		let runs = runs.start..runs.end.min(self.kept_drops());
+		if runs.is_empty() {
+			return;
+		}
+		let due = self.drops_born.overlapping(&runs).map(|(_, expires)| *expires).min();
 		if let Some(due) = due {
 			self.drops_oldest = Some(self.drops_oldest.map_or(due, |oldest| oldest.min(due)));
 		}
@@ -2252,15 +2273,19 @@ impl TrackState {
 	fn shed_drops(&mut self, cap: u64) -> u64 {
 		let mut paid = 0u64;
 		let kept = self.kept_drops();
-		while self.debt > 0 && paid < cap {
+		// Past the runs found kept, so each is skipped once.
+		let mut from = 0;
+		while self.debt > 0 && paid < cap && from < kept {
 			let Some(run) = self
-				.drops
-				.first_range_value()
+				.dropped
+				.overlapping(&(from..kept))
+				.find(|run| !self.pins_drops(run.start))
+				.and_then(|run| self.drops.overlapping(run).next())
 				.map(|(run, _)| run.start..run.end.min(kept))
-				.filter(|run| !run.is_empty())
 			else {
 				break;
 			};
+			from = run.start;
 			let billed = self.drops_bill.size();
 			self.forget_drops(run);
 			let freed = billed.saturating_sub(self.drops_bill.size());
@@ -2770,11 +2795,12 @@ impl TrackState {
 		slot.arrived.checked_add(Duration::try_from(span).ok()?)
 	}
 
-	/// The group after `key` that bounds it: the first servable one in `servable` whose
-	/// first frame opened or that finished, stamped or not, empty or not.
+	/// The group after `key` that bounds it: the first servable one in `servable` that
+	/// [`Slot::succeeds`] it and whose first frame opened or that finished, stamped or not,
+	/// empty or not.
 	fn successor(&self, key: u64, servable: &Servable) -> Option<&Slot> {
 		self.find_servable(servable, key.checked_add(1)?, false, |slot| {
-			slot.is_shown().then_some(slot)
+			(slot.succeeds() && slot.group.is_started()).then_some(slot)
 		})
 	}
 
@@ -2783,14 +2809,16 @@ impl TrackState {
 	/// before it as the origin does, even if its first frame never comes.
 	fn arrival(&self, key: u64, servable: &Servable) -> Option<&Slot> {
 		self.find_servable(servable, key.checked_add(1)?, false, |slot| {
-			slot.is_live().then_some(slot)
+			slot.succeeds().then_some(slot)
 		})
 	}
 
 	/// The slot `select` picks, with `waiter` parked on its abort.
 	///
-	/// An abort only closes the group, never touching the track, so one that landed before
-	/// registering re-selects, or the replacement would go unwatched.
+	/// An abort only closes the group, never touching the track, so one that failed before
+	/// registering re-selects, or the replacement would go unwatched. One that only freed its
+	/// cache still bounds the group before it, so it stays selected once the mirror `select`
+	/// reads says so.
 	fn watch_abort<'a>(
 		&'a self,
 		waiter: &kio::Waiter,
@@ -2798,7 +2826,7 @@ impl TrackState {
 	) -> Option<&'a Slot> {
 		loop {
 			match select(self) {
-				Some(slot) if slot.group.poll_aborted(waiter).is_ready() => continue,
+				Some(slot) if slot.group.poll_aborted(waiter).is_ready() && !slot.group.is_released() => continue,
 				slot => return slot,
 			}
 		}
@@ -3412,6 +3440,12 @@ impl TrackState {
 		}) {
 			self.forget_departed_above(key);
 		}
+		// The run it kept above it may expire now.
+		if let Some(above) = key.checked_add(1)
+			&& let Some(run) = self.dropped.get(&above).filter(|run| run.start == above).cloned()
+		{
+			self.rearm_drops(run);
+		}
 		self.bounds
 			.get_mut()
 			.unwrap_or_else(PoisonError::into_inner)
@@ -3574,9 +3608,7 @@ impl TrackState {
 	fn advance(&mut self, key: u64, answers: bool) {
 		let kept = self.kept_drops();
 		self.max_key = Some(self.max_key.map_or(key, |max| max.max(key)));
-		if self.kept_drops() > kept {
-			self.rearm_drops(kept);
-		}
+		self.rearm_drops(kept..u64::MAX);
 		self.cache.advance_largest(Position::group(key));
 		let wakes = self.subscriptions.lock().wrote(key, answers);
 		self.deferred
@@ -17419,6 +17451,44 @@ mod test {
 		assert!(!held.poll_expired(&waiter), "early");
 
 		pool.step(budget - idle);
+		assert!(held.poll_expired(&waiter), "the successor arrived a budget ago");
+	}
+
+	/// A successor an ended track's sweep expired in place before any reader judged the group
+	/// below it still bounds that group, as an evicted one does: the cache letting it go does
+	/// not keep the group before it fresh.
+	#[test]
+	fn an_ended_track_judges_by_a_successor_it_expired_in_place() {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY));
+		let mut producer = track_producer_pooled("test", pool.clone());
+		let budget = cache::DEFAULT_EXPIRY * 2;
+		let waiter = kio::Waiter::noop();
+
+		append_frozen(&mut producer);
+		pool.step(Duration::from_secs(1));
+		append_frozen(&mut producer); // the successor
+		let state = producer.state.downgrade();
+		let mut subscriber = producer.subscribe(Subscription::default().with_max(budget));
+		let producer = producer.finish().unwrap();
+		drop(producer);
+
+		// Reading group 0 keeps it cached past the successor's idle window.
+		pool.sweep();
+		pool.step(cache::DEFAULT_EXPIRY / 2);
+		let mut held = subscriber.assert_group();
+		assert_eq!(held.start, 0);
+		assert!(matches!(held.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
+		pool.sweep();
+		pool.step(cache::DEFAULT_EXPIRY / 2 + Duration::from_secs(2));
+		pool.sweep();
+		assert_eq!(
+			state.read(|state| [0, 1].map(|key| state.lookup.get(&key).is_some_and(Slot::is_aborted))),
+			Some([false, true]),
+			"only the successor expired in place"
+		);
+		assert!(!held.poll_expired(&waiter), "early");
+
+		pool.step(budget - cache::DEFAULT_EXPIRY);
 		assert!(held.poll_expired(&waiter), "the successor arrived a budget ago");
 	}
 
@@ -34188,6 +34258,68 @@ mod test {
 		assert!(producer.state.read().drops.is_empty());
 		assert_eq!(pool.used(), used);
 		assert!(local.state.read().skipped(5), "a local skip above the edge stays");
+	}
+
+	/// A local track keeps the skip directly above each cached group while that group stays,
+	/// so a read across two held groups never finds a gap its publisher did not leave; once
+	/// the group below leaves, its run expires like any other.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_local_skip_between_held_groups_outlives_its_expiry() {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(10)));
+		let producer = track_producer_pooled("test", pool.clone());
+		let read = || {
+			let mut ordered = producer
+				.subscribe(Subscription::default().with_range(0..).with_max(None))
+				.ordered();
+			let mut items = Vec::new();
+			while let Some(Ok(Some(item))) = ordered.next_item().now_or_never() {
+				items.push(match item {
+					Item::Group(group) => format!("g{}", group.start),
+					Item::Gap { range, .. } => format!("gap{range:?}"),
+				});
+			}
+			items
+		};
+		for millis in [1000, 3000, 4000] {
+			producer
+				.clone()
+				.write_frame(Timestamp::from_millis(millis).unwrap(), &b"x"[..])
+				.unwrap();
+		}
+		let held = read();
+		// Reading them again keeps the groups past their runs' expiry.
+		elapse(&producer, Duration::from_secs(6));
+		assert_eq!(read(), held);
+		elapse(&producer, Duration::from_secs(7));
+		pool.sweep();
+		// Only the history below the oldest held group reads as forgotten.
+		assert_eq!(held, ["g1000", "g3000", "g4000"]);
+		assert_eq!(read(), ["gap0..1000", "g1000", "g3000", "g4000"]);
+
+		elapse(&producer, Duration::from_secs(11));
+		pool.sweep();
+		assert!(
+			producer.state.read().drops.is_empty(),
+			"the runs expire once their groups go"
+		);
+	}
+
+	/// Paying eviction debt also keeps the skip directly above each group a local track holds.
+	#[test]
+	fn paying_debt_keeps_a_local_skip_between_held_groups() {
+		let producer = track_producer("test", Info::timed());
+		for millis in [1000, 3000, 4000] {
+			producer
+				.clone()
+				.write_frame(Timestamp::from_millis(millis).unwrap(), &b"x"[..])
+				.unwrap();
+		}
+		let mut state = producer.state.write().ok().unwrap();
+		state.debt = u64::MAX;
+		state.shed_drops(u64::MAX);
+		let held: Vec<_> = state.dropped.iter().cloned().collect();
+		assert_eq!(held, [1001..3000, 3001..4000]);
 	}
 
 	/// A forgotten run reaching a local track's first arrival extends it down, so a group
