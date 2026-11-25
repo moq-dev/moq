@@ -9,14 +9,15 @@ infrastructure.
 | `infra/rpm` | `rpm.moq.dev`   | `rpm-moq-dev`   | Fedora/RHEL package repository          |
 | `infra/moq-sh` | `moq.sh`     |                 | The `moq` installer script              |
 | `infra/mbx` |                 | `mbx-moq-dev` (B2) | Private Rust build cache for CI      |
-| `infra/nix` | `nix.moq.dev`   | `nix-moq-dev`, `nix-ci-moq-dev` | Nix binary cache        |
+| `infra/nix` | `nix.moq.dev`   | `nix-moq-dev`, `nix-ci-moq-dev` (B2) | Nix binary cache   |
 | `infra/corpus` | `corpus.moq.dev` | `corpus-moq-dev`, `corpus-private-moq-dev` | Video-quality corpus |
 | `infra/go`  | `go.moq.dev`    | `go-moq-dev`    | Go module proxy for `moq.dev/moq-ffi`   |
 
 Each worker is a standalone bun package with a `wrangler.jsonc` and a
 small TypeScript handler. The apt, rpm, and go workers proxy GETs out of the R2
 bucket with appropriate `Content-Type` and `Cache-Control` headers for the
-file kind, and the nix worker does the same across its two buckets. The
+file kind, and the nix worker does the same across its two private Backblaze
+B2 buckets, signing each read. The
 moq.sh worker serves `install.sh` from its bundle at every path, with the
 newest `moq-cli` release filled in as the default version.
 `infra/mbx` has no Worker: CI reaches its Backblaze B2 bucket directly
@@ -296,8 +297,8 @@ rebuilds only the crates whose source, features, or dependencies changed. The ot
 platforms have no Smoke nix lane. Runtime warms serialize: the active run
 finishes and new pushes replace only the pending run, avoiding duplicate
 builds without starving publication or delaying the dev-shell matrix.
-Its lifecycle rule (`infra/nix/lifecycle.json`) deletes each object 14 days
-after upload. `nix copy` never re-uploads a path the bucket already has, so a
+Its lifecycle rule (`infra/nix/lifecycle.json`) hides each object 14 days
+after its newest upload and deletes it a day later. `nix copy` never re-uploads a path the bucket already has, so a
 path many commits reuse keeps its first upload's age. Each job therefore
 records the store paths it pushed under `roots/<commit>/`, the runtime job its
 dependency crates too, since no runtime closure references them, then copies every
@@ -307,15 +308,26 @@ commit, the one Smoke pins, therefore substitutes in full while `main` keeps
 merging; older commits' paths still expire. `flake.nix` sets `fallback = true` because
 that expiry can remove a path before one that depends on it.
 
-The Worker logs a failed R2 read and treats it as a miss: the other bucket
-can still serve the path, and otherwise the 404 is non-cacheable so Nix builds
-from source. A body that fails after it starts streaming resumes with a ranged
-read of the same object (a few times, then the stream errors), since a reset
-connection makes Nix disable the whole cache for a minute.
+Both buckets live in Backblaze B2's `us-east-005` region. They are private:
+the Worker signs each read (SigV4) with the bucket's read-only key, so nobody
+can list them or download from B2 directly, where egress is billed; egress to
+Cloudflare is free. B2 keeps a new version on every overwrite, including each
+refresh, and counts the CI bucket's 14 days from the newest; both buckets
+delete a superseded or expired version a day later.
+
+The Worker logs a read B2 answers with a 5xx or 429, or never answers, and
+treats it as a miss: the other bucket can still serve the path, and otherwise
+the 404 is non-cacheable so Nix builds from source. A 401 or 403, a rejected
+key, fails the request; the account sets no storage or download cap (Caps &
+Alerts), which would otherwise also answer 403. Any other refusal, such as a
+key too long, is a plain miss. A body that fails after it starts streaming
+resumes with a ranged read guarded by the first response's etag (a few times,
+then the stream errors), since a reset connection makes Nix disable the whole
+cache for a minute.
 
 Nix only trusts paths signed by the key in `flake.nix`, so the signing key is
 the trust boundary, not the bucket keys. It lives in the `cache-write`
-Environment beside one R2 token for both buckets. Only `main` and the five
+Environment beside each bucket's B2 write key. Only `main` and the five
 release tag patterns can deploy there; anything that can reach
 the key can sign any path, so a second Environment for releases would only
 guard the bucket. Readers need no secret.
@@ -348,14 +360,15 @@ done.
    EOF
    ```
 
-2. **Create the buckets and deploy the Worker** under your `wrangler login`:
-
-   ```bash
-   just infra nix create   # both buckets, plus the CI lifecycle rule
-   just infra nix deploy   # nix.moq.dev
-   ```
-
-   After editing the rules, `just infra nix lifecycle` applies them.
+2. **Create the buckets** in the B2 console of the `us-east-005` account
+   (Buckets -> Create a Bucket): `nix-moq-dev` and `nix-ci-moq-dev`, both
+   Private, with Object Lock off. Set their Lifecycle Settings to match
+   `infra/nix/lifecycle.json`: "Keep only the last version" for
+   `nix-moq-dev`, and one custom rule (empty prefix, hide after 14 days,
+   delete a day later) for `nix-ci-moq-dev`. After editing the file,
+   apply it with `just infra nix lifecycle <bucket>`, given a short-lived
+   Read and Write key for that bucket in `AWS_ACCESS_KEY_ID` and
+   `AWS_SECRET_ACCESS_KEY`; delete the key afterward.
 
 3. **Admit the release tags to `cache-write`**, which the Rust build cache
    bootstrap created:
@@ -367,14 +380,35 @@ done.
    done
    ```
 
-4. **Create one R2 API token** in the dashboard (R2 -> Manage API tokens ->
-   Create Account API token) with **Object Read & Write** on `nix-moq-dev` and
-   `nix-ci-moq-dev` only. Wrangler cannot create R2 tokens.
+4. **Create four application keys** (Application Keys -> Add a New
+   Application Key), each allowed one bucket, since the console offers one
+   bucket or all of them. Each shows its keyID and applicationKey once; put
+   them straight into their secrets, with no other copy. To rotate one,
+   create a new key, replace its secrets, check reads or pushes, then delete
+   the old key. The
+   console's Read and Write keys also carry `writeBuckets`, so a writer could
+   change its bucket's settings; only `cache-write` jobs hold them.
 
-   ```bash
-   gh secret set NIX_R2_ACCESS_KEY_ID --env cache-write --repo moq-dev/moq
-   gh secret set NIX_R2_SECRET_ACCESS_KEY --env cache-write --repo moq-dev/moq
-   ```
+   - `nix-release-read` and `nix-ci-read`, **Read Only**, for the Worker.
+     Set each pair in one request, since each secret change deploys, and a
+     Worker signing with one key's ID and another's secret fails every read:
+
+     ```bash
+     cd infra/nix
+     # {"B2_RELEASE_ACCESS_KEY_ID": "<keyID>", "B2_RELEASE_SECRET_ACCESS_KEY": "<applicationKey>"}
+     bun wrangler secret bulk   # reads the JSON from stdin; again for B2_CI_*
+     just infra nix deploy      # nix.moq.dev
+     ```
+
+   - `nix-release-write` and `nix-ci-write`, **Read and Write**, for
+     `release-nix.yml` and `cache.yml`:
+
+     ```bash
+     gh secret set NIX_B2_RELEASE_ACCESS_KEY_ID --env cache-write --repo moq-dev/moq
+     gh secret set NIX_B2_RELEASE_SECRET_ACCESS_KEY --env cache-write --repo moq-dev/moq
+     gh secret set NIX_B2_CI_ACCESS_KEY_ID --env cache-write --repo moq-dev/moq
+     gh secret set NIX_B2_CI_SECRET_ACCESS_KEY --env cache-write --repo moq-dev/moq
+     ```
 
 5. **Generate the signing key.** This stores it as `NIX_SIGNING_KEY` in
    `cache-write` without writing it to disk, and prints the public key:
