@@ -2900,10 +2900,13 @@ test.each(
 		await answerTrackInfo(streams[0], version, 1000);
 		await (await opened(1)).reading;
 		await drainReactions();
+		// The first group starts what watches the copy for good, such as its fills.
+		await subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), await groupStream(0, version));
+		await drainReactions();
 		const before = counters.map((counter) => counter.count());
 		expect(before).toHaveLength(3);
 		expect(before.every((count) => count > 0)).toBe(true);
-		for (let key = 0n; key < 50n; key++) {
+		for (let key = 1n; key < 50n; key++) {
 			await subscriber.runGroup(new Group({ subscribe: 0n, key: key }), await groupStream(Number(key), version));
 			await drainReactions();
 		}

@@ -2174,7 +2174,7 @@ export class Subscriber {
 				entry.fillsChanged.update((revision) => revision + 1);
 			};
 			for (const fill of fills.takeWalks()) void fetch(fill).then(walked, walked);
-			await fills.changed(entry.tail);
+			await fills.changed(entry.tail, demand);
 		}
 		entry.fillsChanged.update((revision) => revision + 1);
 	}

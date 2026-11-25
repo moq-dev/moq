@@ -6052,6 +6052,34 @@ mod tests {
 		drop(arriving);
 	}
 
+	/// A run no fill owes stays asked for a stream of it still arriving only while someone reads
+	/// the track: once nobody does, the fills ask for nothing, so the subscription they hold
+	/// and the copy's linger can end.
+	#[kio::test]
+	async fn a_drained_run_goes_once_nobody_reads() {
+		let (serve, _serving, _tail, _broadcast) = lite07_serving(Duration::from_millis(500)).await;
+		let waiter = kio::Waiter::noop();
+		let copy = crate::track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			crate::track::Info::default()
+				.with_timescale(crate::Timescale::MILLI)
+				.with_max_age(None),
+		);
+		let mut arriving = copy.create_group(group::Info { start: 0 }).unwrap();
+		arriving
+			.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"x".as_slice())
+			.unwrap();
+		let mut fills = fills::RangeFills::default();
+		fills.ask.groups.insert(0..1);
+		assert!(!fills.poll(&serve, &copy, None, true, &waiter).unwrap());
+		assert!(!fills.is_empty(), "its stream still arrives for a reader");
+
+		assert!(fills.poll(&serve, &copy, None, false, &waiter).unwrap());
+		assert!(fills.is_empty(), "nobody reads the stream still arriving");
+		drop(arriving);
+	}
+
 	/// A stale drop of part of a fill's run recovers that part on its own subscription, which
 	/// takes it out of the copy's ranges at once, though the rest of the run stays asked: the
 	/// subscription that dropped it never delivers it.
