@@ -14,15 +14,13 @@ grep the week's Nightly job logs the way
 5 of 11 runs before). If lines remain, read the Worker's logs for `body read
 failed` and `resume failed` at those timestamps: a resume cap hit means R2
 itself kept failing, which the B2 move
-([moq-dev/moq#9625](https://github.com/moq-dev/moq/pull/9625)) changes, and
+([moq-dev/moq#9514](https://github.com/moq-dev/moq/pull/9514)) changes, and
 no hop in between remains to fix. That move replaces `bucket.get` with a
 signed `fetch`, so it carries the resume over as a `Range` request guarded by
 `If-Match` on the first response's etag.
 
 ## Waiting
 
-- moq-dev/moq: the B2 move
-  ([moq-dev/moq#9625](https://github.com/moq-dev/moq/pull/9625)) deploys the
-  Worker with the resume once its buckets exist; its PR body records the
-  deploy. Then check a week of Nightly runs for no cache-disabled line.
+- Maintainer: run `just infra nix deploy` (the Worker deploys by hand with
+  Cloudflare credentials); check a Nightly run for no cache-disabled line.
   `wrangler tail` shows only Worker logs and cannot confirm this.
