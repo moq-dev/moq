@@ -383,6 +383,7 @@ impl Info {
 
 	/// Whether the upstream moq-transport publisher declared `ID_TIMESCALE`, or `None` for a
 	/// native moq-lite track.
+	#[cfg(feature = "async")]
 	pub(crate) fn timestamp_ids(&self) -> Option<bool> {
 		self.properties.as_ref().map(|properties| properties.timestamp_ids)
 	}
