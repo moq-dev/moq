@@ -11964,11 +11964,14 @@ impl Cursor {
 				drift = ready!(self.poll_drift(&self.servable, waiter))?;
 				continue;
 			}
+			// A head the walk passed as stale is owed no more, so its fill holds nothing: with no
+			// later group to hand out, open feed or ended, it would hold a bounded read's end.
+			if !matches!(polled, Poll::Ready(Ok((Some(_), _)))) {
+				self.expire_heads(&drift, waiter);
+			}
 			let (producer, cached) = ready!(polled)?;
 			let began = *seen.get_or_insert(cached);
 			let Some(producer) = producer else {
-				// A head the walk passed as stale is owed no more, so its fill holds nothing.
-				self.expire_heads(&drift, waiter);
 				// The feed ended, but a fill still owes a group. Its answer wakes us.
 				if self.awaits_fill() {
 					return Poll::Pending;
@@ -27048,34 +27051,44 @@ mod test {
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_bounded_ordered_read_ends_past_its_last_head_gone_stale() {
-		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.requests();
+		for finished in [false, true] {
+			let producer = track_producer("test", Info::timed());
+			let dynamic = producer.requests();
 
-		let mut first = producer.create_group(group::Info { start: 0 }).unwrap();
-		first
-			.write_frame(first.key_time(), bytes::Bytes::from_static(b"x"))
-			.unwrap();
-		first.finish().unwrap();
-		// Its GROUP_END ages it from its own end, with no successor.
-		let mut live = producer.create_group(group::Info { start: 1 }).unwrap();
-		live.start_at(1).unwrap();
-		live.write_frame(Timestamp::from_millis(1).unwrap(), bytes::Bytes::from_static(b"delta"))
-			.unwrap();
-		live.finish_at(2).unwrap();
-		producer.finish_shared().unwrap();
+			let mut first = producer.create_group(group::Info { start: 0 }).unwrap();
+			first
+				.write_frame(first.key_time(), bytes::Bytes::from_static(b"x"))
+				.unwrap();
+			first.finish().unwrap();
+			// Its GROUP_END ages it from its own end, with no successor.
+			let mut live = producer.create_group(group::Info { start: 1 }).unwrap();
+			live.start_at(1).unwrap();
+			live.write_frame(Timestamp::from_millis(1).unwrap(), bytes::Bytes::from_static(b"delta"))
+				.unwrap();
+			live.finish_at(2).unwrap();
+			if finished {
+				producer.finish_shared().unwrap();
+			}
 
-		let mut ordered = producer.subscribe(within(Duration::from_millis(100), 1)).ordered();
-		let (flag, waiter) = Flag::waiter();
-		assert!(matches!(ordered.poll_next_group(&waiter), Poll::Ready(Ok(Some(group))) if group.start == 0));
-		assert!(ordered.poll_next_group(&waiter).is_pending(), "the head is still asked");
-		let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
-		assert_eq!(request.key(), 1);
-		flag.take();
+			let mut ordered = producer.subscribe(within(Duration::from_millis(100), 1)).ordered();
+			let (flag, waiter) = Flag::waiter();
+			assert!(matches!(ordered.poll_next_group(&waiter), Poll::Ready(Ok(Some(group))) if group.start == 0));
+			assert!(ordered.poll_next_group(&waiter).is_pending(), "the head is still asked");
+			let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
+			assert_eq!(request.key(), 1);
+			flag.take();
 
-		elapse(&producer, Duration::from_millis(200));
-		assert!(flag.take(), "the budget giving up the head wakes the read");
-		assert!(matches!(ordered.poll_next_group(&waiter), Poll::Ready(Ok(None))));
-		drop(request);
+			elapse(&producer, Duration::from_millis(200));
+			assert!(
+				flag.take(),
+				"the budget giving up the head wakes the read, finished {finished}"
+			);
+			assert!(
+				matches!(ordered.poll_next_group(&waiter), Poll::Ready(Ok(None))),
+				"finished {finished}"
+			);
+			drop(request);
+		}
 	}
 
 	/// A head still asked when a newer group in the reader's window supersedes it is

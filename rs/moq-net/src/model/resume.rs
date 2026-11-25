@@ -3058,9 +3058,10 @@ impl Reader {
 			if lost {
 				self.copies[index].drains = None;
 			}
-			if rearm {
-				self.resumed
-					.get_or_insert_with(|| Resumed::Route(None, BTreeMap::new()));
+			// A walk of the whole route: one an edit queued for its own ranges starts above what
+			// this copy was left to drain.
+			if rearm && !matches!(self.resumed, Some(Resumed::Route(..))) {
+				self.resumed = Some(Resumed::Route(None, BTreeMap::new()));
 			}
 		}
 		// A later copy placed the window this pass: a group held back above may now be the lowest.
