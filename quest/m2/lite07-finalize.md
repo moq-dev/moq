@@ -260,10 +260,17 @@ and exclusive `End` plus one-shot `SUBSCRIBE` + immediate `FIN`, moves
 `Priority` and `Group Order` onto each `Range` and `Retune`, and adds judged
 `Max Age` to `SUBSCRIBE_DROP(OLD)`.
 
+Decided 2026-11-25 (maintainer, the pick round on
+[moq-dev/moq#9553](https://github.com/moq-dev/moq/pull/9553)): ✅ the cut waits
+for [unsigned lite timestamp deltas](/quest/m2/timestamp-ids.md), so lite-07's
+`FRAME` deltas freeze unsigned and non-decreasing (rejected: the next wip
+version after the cut).
+
 ## Required
 
 - [The router ranks one claim prefix's filings as one tier](/quest/m2/router-claim-tier.md) - the lite-07 router follows the draft's one-tier ranking instead of stopping at the deepest filing
 - [Redesign lite-07 subscribe and fetch](/quest/m2/lite07-subscribe/README.md) - data-layer Previous Delta, RESET_STREAM_AT, FETCH and SUBSCRIBE_SKIP removal, per-range Priority and Order, and judged OLD drops freeze into lite-07
+- [moq-timestamp-03 Object IDs and unsigned lite timestamp deltas](/quest/m2/timestamp-ids.md) - lite-07 `FRAME` timestamps freeze as unsigned decode-order deltas, refused at the producer when backwards, with first-party encoders on `cts`
 
 ## Related
 

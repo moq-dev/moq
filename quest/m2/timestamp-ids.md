@@ -30,6 +30,19 @@ holds a tied frame first computes Object IDs and timestamps the origin never
 sent. A copy must serve the received wire values, or refuse to serve what it
 cannot prove matches them.
 
+Decided 2026-11-25 (maintainer, the pick round on
+[moq-dev/moq#9553](https://github.com/moq-dev/moq/pull/9553)):
+
+- ✅ lite-07 carries the unsigned decode-order deltas, so the
+  [lite-07 cut](/quest/m2/lite07-finalize.md) waits for this quest (rejected:
+  the next wip version after the cut, with the `cts` encoder switch).
+- ✅ A producer refuses a frame whose timestamp is below its predecessor's,
+  where the frame is created (rejected: egress clamping it up to the previous
+  timestamp, as the branch does, which silently rewrites B-frame presentation
+  times and needs per-copy clamp state). First-party encoders therefore switch
+  to `cts` in the same change, since a `legacy` B-frame stream's presentation
+  timestamps go backwards.
+
 - A `cts` track's Group Starts are decode-order times while HLS/DASH grid
   lines are presentation times (`rs/moq-hls/src/export/grid.rs`). When `cts`
   encoders land, decide which time segment placement uses on a `cts` track and
@@ -42,8 +55,3 @@ cannot prove matches them.
   delivery), `drafts/draft-lcurley-moq-lite.md` (FRAME and GROUP_END), the
   code point table in `drafts/README.md`, `doc/concept/moq-lite.md`, and
   `doc/concept/standard.md` with the code, as the branch already does.
-
-## Waiting
-
-- Maintainer: which lite version carries unsigned decode-order deltas. Options: lite-07 before its freeze, adding this to [Finalize moq-lite-07](/quest/m2/lite07-finalize.md)'s Required; or the next wip version after the cut, together with the `cts` encoder switch. Recommended: the next wip version, since lite-07's freeze should not wait on a timing redesign, and the deltas only pay off once encoders send `cts`.
-- Maintainer: how a backwards timestamp is handled under unsigned deltas. Options: the producer refuses a frame whose timestamp is below its predecessor's, where the frame is created; or egress clamps it up to the previous timestamp, as the branch does. Recommended: refuse at the producer once encoders send `cts`, which removes the per-copy clamp state behind the open findings; clamping silently rewrites B-frame presentation times.
