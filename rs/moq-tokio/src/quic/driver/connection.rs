@@ -350,8 +350,8 @@ impl Connection {
 
 	/// Give up a quiesce that is not ready, as
 	/// [`moq_quic::connection::Connection::abandon_quiesce`] does.
-	pub(crate) fn abandon_quiesce(&self) {
-		self.0.state.lock().inner.abandon_quiesce();
+	pub(crate) fn abandon_quiesce(&self, code: VarInt, keep: &[StreamId]) {
+		self.0.state.lock().inner.abandon_quiesce(code, keep);
 	}
 
 	/// Receive an application datagram

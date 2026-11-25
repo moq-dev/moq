@@ -550,12 +550,16 @@ impl Connection {
 		Poll::Pending
 	}
 
-	/// Give up a [`Self::poll_quiesce`] that is not ready: reset now the streams it stopped, and
-	/// send the writers' resets it held, without waiting for the peer to acknowledge what was
-	/// written. Until this or a ready poll, those resets stay held.
-	pub fn abandon_quiesce(&mut self) {
+	/// Give up a [`Self::poll_quiesce`] that is not ready, with the same `code` and `keep`: reset
+	/// now the streams it stopped, send the writers' resets it held, and ask the peer to end the
+	/// streams it sends on, without waiting for the peer to acknowledge what was written. Until
+	/// this or a ready poll, those resets and stops stay held.
+	pub fn abandon_quiesce(&mut self, code: VarInt, keep: &[StreamId]) {
 		let quiesced = self.streams.quiesced();
 		self.reset_quiesced(quiesced);
+		let keep: rustc_hash::FxHashSet<StreamId> = keep.iter().copied().collect();
+		self.streams
+			.quiesce(&mut self.spaces[SpaceId::Data].pending, code, &keep);
 	}
 
 	/// Reset each of `streams` still open with its code, keeping what was written, which a peer

@@ -360,28 +360,37 @@ fn a_reset_dropping_unacked_data_wakes_the_wait() {
 	assert_eq!(quiesce(&mut pair, server_ch, &waiter, &[]), Poll::Ready(Ok(())));
 }
 
-/// Abandoning a quiesce that is not ready resets the streams it stopped and sends the resets
-/// their writers asked for, which it held for the peer to acknowledge what was written.
+/// Abandoning a quiesce that is not ready resets the streams it stopped, sends the resets their
+/// writers asked for, and stops the peer's streams, all of which it held for the peer to
+/// acknowledge what was written.
 #[test]
-fn abandoning_sends_the_held_resets() {
+fn abandoning_sends_the_held_resets_and_stops() {
 	let _guard = subscribe();
 	let mut pair = Pair::default();
 	let (client_ch, server_ch) = pair.connect();
+	let theirs = open(&mut pair, client_ch, server_ch, Dir::Uni);
+	let kept = open(&mut pair, client_ch, server_ch, Dir::Uni);
 	let reset = open_ours(&mut pair, server_ch);
 	let open = open_ours(&mut pair, server_ch);
 	lose_writes(&mut pair, server_ch, &[reset]);
 
 	let waiter = Counter::new();
-	assert!(quiesce(&mut pair, server_ch, &waiter, &[]).is_pending());
+	assert!(quiesce(&mut pair, server_ch, &waiter, &[kept]).is_pending());
 	pair.server_send(server_ch, reset).reset(VarInt(5)).unwrap();
 	pair.drive_server();
 	pair.client.inbound.clear();
 	assert_eq!(pair.server_conn_mut(server_ch).stats().frame_tx.reset_stream, 0);
+	assert_eq!(stops_sent(&mut pair, server_ch), 0);
 
-	pair.server_conn_mut(server_ch).abandon_quiesce();
+	pair.server_conn_mut(server_ch).abandon_quiesce(CODE, &[kept]);
 	pair.drive();
 	assert_eq!(reset_seen(&mut pair, client_ch, reset).1, Some(VarInt(5)));
 	assert_eq!(reset_seen(&mut pair, client_ch, open), (b"unread".to_vec(), Some(CODE)));
+	assert_eq!(
+		pair.client_send(client_ch, theirs).end(),
+		Ok(Some(send::End::Stopped(CODE)))
+	);
+	assert_eq!(pair.client_send(client_ch, kept).end(), Ok(None));
 	// Nothing is held any longer: the stream the quiesce stopped is already reset.
 	assert_eq!(
 		pair.server_send(server_ch, open).reset(VarInt(5)),

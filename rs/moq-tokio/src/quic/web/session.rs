@@ -354,14 +354,14 @@ impl Session {
 
 	/// Close the session with an error code and reason.
 	///
-	/// When there is a session ID (WebTransport over HTTP/3), a `CloseWebTransportSession`
-	/// capsule is written on the CONNECT stream before the QUIC connection is closed.
-	/// This allows browser clients to receive the close code and reason via `WebTransport.closed`.
-	/// First, every stream either side sends on, the HTTP/3 ones aside, is ended with
-	/// `WT_SESSION_GONE`: writers see their streams stopped, and the capsule waits until the peer
-	/// acknowledged what was written and reset its own streams, for up to `max(3 RTT, 100 ms)`,
-	/// since Chrome crashes on a capsule arriving under live streams
-	/// (<https://issues.chromium.org/issues/589817008>).
+	/// When there is a session ID (WebTransport over HTTP/3), every stream either side sends on,
+	/// the HTTP/3 ones aside, is first ended with `WT_SESSION_GONE`: writers see their streams
+	/// stopped, and the close waits until the peer acknowledged what was written and reset its
+	/// own streams, for up to `max(3 RTT, 100 ms)`, since Chrome crashes on a capsule arriving
+	/// under live streams (<https://issues.chromium.org/issues/589817008>). Then a
+	/// `CloseWebTransportSession` capsule is written on the CONNECT stream before the QUIC
+	/// connection is closed, so browser clients receive the close code and reason via
+	/// `WebTransport.closed`.
 	///
 	/// The capsule write and connection close happen asynchronously in a spawned task
 	/// that keeps the session alive until then, so the caller may drop it right away.
@@ -436,7 +436,7 @@ impl Session {
 			}
 			Err(_) => {
 				tracing::debug!("peer left streams open past the deadline; closing anyway");
-				self.conn.abandon_quiesce();
+				web.accept.lock().unwrap().abandon_quiesce(gone, &critical);
 			}
 		}
 
@@ -920,12 +920,24 @@ impl SessionAccept {
 	) -> Poll<Result<(), Error>> {
 		while let Poll::Ready(Ok(_)) = self.poll_accept_uni(waiter) {}
 		while let Poll::Ready(Ok(_)) = self.poll_accept_bi(waiter) {}
+		let keep = self.quiesce_keep(critical);
+		self.conn.poll_quiesce(waiter, code, &keep).map_err(Into::into)
+	}
+
+	/// Give up a quiesce that is not ready, as
+	/// [`Connection::abandon_quiesce`](crate::quic::driver::connection::Connection::abandon_quiesce)
+	/// does, sparing what [`Self::poll_quiesce`] last spared.
+	fn abandon_quiesce(&self, code: crate::quic::driver::VarInt, critical: &[crate::quic::driver::stream::Id]) {
+		self.conn.abandon_quiesce(code, &self.quiesce_keep(critical));
+	}
+
+	// The streams a quiesce spares: `critical`, the QPACK streams, and those still mid-header.
+	fn quiesce_keep(&self, critical: &[crate::quic::driver::stream::Id]) -> Vec<crate::quic::driver::stream::Id> {
 		let qpack = [&self.qpack_encoder, &self.qpack_decoder];
 		let qpack = qpack.into_iter().flatten().map(|recv| recv.id());
 		let pending = self.pending_uni.iter().map(|header| header.id);
 		let pending = pending.chain(self.pending_bi.iter().map(|header| header.id));
-		let keep: Vec<_> = critical.iter().copied().chain(qpack).chain(pending).collect();
-		self.conn.poll_quiesce(waiter, code, &keep).map_err(Into::into)
+		critical.iter().copied().chain(qpack).chain(pending).collect()
 	}
 
 	// Reads the stream header, returning Some if it's a WebTransport stream.

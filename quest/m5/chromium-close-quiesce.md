@@ -24,11 +24,13 @@ on a revocation's close. The reproduction, a 100-line aioquic
 server and a 30-line page with no MoQ, is attached to the Chromium issue below.
 
 Once a shipping Chrome carries the fix, drop the wait from both closes, along
-with `poll_quiesce` and `abandon_quiesce` and the drivers' wrappers,
-`StreamsState::sending`, `quiesced_open`, `stop_for_writer`, and
-`release_quiesced_resets`, the `quiesced` fields on moq-quic's `Recv` and
-`Send`, the wakes of the `ended` list on an accept, an acknowledgment, and a
-reset dropping unacknowledged data, the `ended` waiter list itself, the close's
+with `poll_quiesce`, `abandon_quiesce`, `reset_quiesced` and the drivers'
+wrappers and `quiesce_keep`s, `StreamsState::sending`, `resettable`,
+`quiesced`, `stop_for_writer`, and `release_quiesced_resets`, the `quiesced`
+field on moq-quic's `Recv`, `Stop::Quiesce` and `Held::UntilQuiesced` on its
+`Send`, the reset of a quiesced stream on the peer's STOP_SENDING, the wakes of
+the `ended` list on an accept, an acknowledgment, and a reset dropping
+unacknowledged data, the `ended` waiter list itself, the close's
 classification of the peer's streams (`Classifying` in moq-tokio), and their
 tests (`tests/quiesce.rs`,
 `close_waits_for_the_peer_to_reset_its_streams` in moq-tokio, and

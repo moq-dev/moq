@@ -861,7 +861,7 @@ fn close(conn: &Connection, web: Option<&Rc<Web>>, code: u32, reason: &str) {
 					Poll::Pending => {
 						ready!(deadline.poll(waiter));
 						tracing::debug!("peer left streams open past the grace; closing anyway");
-						conn.abandon_quiesce();
+						abandon_quiesce(&conn, &web, connect);
 					}
 				}
 				closing = closing.take().map(Closing::write);
@@ -942,18 +942,29 @@ fn quiesce(conn: &Connection, web: &Web, connect: super::stream::Id, waiter: &ki
 		}
 		classify_uni(web.session_id, state, cx);
 		classify_bi(web.session_id, state, cx);
-		let held = state.held_recv.iter().flatten().map(driver_recv::Stream::id);
-		let pending = state.pending_uni.iter().filter_map(|header| header.recv.as_ref());
-		let pending = pending.chain(state.pending_bi.iter().filter_map(|header| header.recv.as_ref()));
-		let ours = state.control_send.iter().map(driver_send::Stream::id);
-		let keep: Vec<_> = held
-			.chain(pending.map(driver_recv::Stream::id))
-			.chain(ours)
-			.chain([connect])
-			.collect();
-		conn.poll_quiesce(waiter, http3_code(WT_SESSION_GONE), &keep)
+		conn.poll_quiesce(waiter, http3_code(WT_SESSION_GONE), &quiesce_keep(state, connect))
 			.map_err(Error::from)
 	})
+}
+
+/// Give up a [`quiesce`] that is not ready, as [`Connection::abandon_quiesce`]
+/// does, sparing what it last spared.
+fn abandon_quiesce(conn: &Connection, web: &Web, connect: super::stream::Id) {
+	let keep = quiesce_keep(&web.state.lock(), connect);
+	conn.abandon_quiesce(http3_code(WT_SESSION_GONE), &keep);
+}
+
+// The streams a quiesce spares: `connect`, the control and QPACK streams, and
+// those still mid-header.
+fn quiesce_keep(state: &State, connect: super::stream::Id) -> Vec<super::stream::Id> {
+	let held = state.held_recv.iter().flatten().map(driver_recv::Stream::id);
+	let pending = state.pending_uni.iter().filter_map(|header| header.recv.as_ref());
+	let pending = pending.chain(state.pending_bi.iter().filter_map(|header| header.recv.as_ref()));
+	let ours = state.control_send.iter().map(driver_send::Stream::id);
+	held.chain(pending.map(driver_recv::Stream::id))
+		.chain(ours)
+		.chain([connect])
+		.collect()
 }
 
 /// What every session clone and stream it handed out shares: the last to drop
