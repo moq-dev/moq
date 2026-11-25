@@ -620,6 +620,16 @@ impl Producer {
 			self.reset_pending = true;
 			self.pending_discontinuity = true;
 		}
+		// Nothing reads on, so the open group ends where its last packet does: a reader of it,
+		// such as a fetch, finishes while the audio is retained. The epoch continues, so the
+		// replay that follows opens the next group with no marker.
+		if self.active && !active && !self.track.needs_keyframe() {
+			let end = match self.in_flight.front() {
+				Some(held) => held.start,
+				None => Timestamp::from_micros(self.stamped)?,
+			};
+			self.track.cut(Some(end))?;
+		}
 		self.active = active;
 		// One codec frame per turn lets capture keep draining while catching up.
 		if active && let Some(raw) = self.backlog.pop() {
@@ -1168,6 +1178,47 @@ mod tests {
 			.write(&pcm_frame(&vec![0.5; 1920], at(151).as_micros().unwrap() as u64))
 			.unwrap();
 		assert_eq!(packet(&mut reader).await.unwrap().timestamp, at(151));
+		let _finished = producer.finish().unwrap();
+	}
+
+	/// A group the join left open when encoding stops ends where its last packet does, so a reader
+	/// of it, such as a fetch, finishes while the audio is retained rather than waiting for a
+	/// subscriber to return. The replay that follows opens the next group with no marker.
+	#[tokio::test(start_paused = true)]
+	async fn stopping_ends_the_open_group() {
+		let input = Input::default();
+		let options = Options {
+			track: Some("audio".into()),
+			config: Config::from_input(super::super::Codec::Pcm, &input),
+			join: Duration::from_millis(100),
+			..Options::default()
+		};
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = moq_mux::catalog::Producer::new(
+			&mut broadcast,
+			moq_mux::catalog::Config::default().with_max_age(Duration::from_secs(30)),
+		)
+		.unwrap();
+		let mut producer = Producer::new(&mut broadcast, catalog, input, &options).unwrap();
+		let at = |index: u64| Timestamp::from_micros(1_000_000 + index * 20_000).unwrap();
+		producer.set_active(true, at(0)).unwrap();
+		producer
+			.write(&pcm_frame(&vec![0.5; 1920], at(0).as_micros().unwrap() as u64))
+			.unwrap();
+		let open = producer.track().largest().expect("a group opened").group;
+		producer.set_active(false, at(1)).unwrap();
+		producer
+			.write(&pcm_frame(&vec![0.5; 1920], at(1).as_micros().unwrap() as u64))
+			.unwrap();
+
+		let mut group = consumer.track("audio").unwrap().fetch_group(open, None).await.unwrap();
+		assert!(group.read_frame().await.unwrap().is_some());
+		let end = now_or_never(group.read_frame()).expect("the open group ended");
+		assert!(end.unwrap().is_none());
+
+		producer.set_active(true, at(2)).unwrap();
+		assert_eq!(producer.track().largest().unwrap().group, at(1).as_micros().unwrap() as u64);
 		let _finished = producer.finish().unwrap();
 	}
 
