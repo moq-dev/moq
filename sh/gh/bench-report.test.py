@@ -484,66 +484,6 @@ class ReportTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             report.kixel(many, {})
 
-    def profile(self, name, text):
-        folder = self.root / "profile.abc.out"
-        folder.mkdir(exist_ok=True)
-        (folder / name).write_text(text)
-
-    def test_codspeed_metrics_read_each_benchmark_part(self):
-        header = "# callgrind format\nversion: 1\ncreator: callgrind-3.26.0.codspeed\npid: 7\ncmd: bench\n"
-
-        # As CodSpeed's Callgrind writes them: a zero `summary`, and the part's cost in its `totals`.
-        def part(number, trigger, totals):
-            return (
-                f"\npart: {number}\n\ndesc: I1 cache: 32768 B, 64 B, 8-way associative\n"
-                f"desc: Timerange: Basic block 0 - 9\ndesc: Trigger: {trigger}\n\n"
-                "positions: line\nevents: Ir Dr Dw I1mr\nsummary: 0\n\n"
-                f"ob=(1) /bench\nfl=(1) ???\nfn=(1) main\n0 12 3\n\n\ntotals: {totals}\n"
-            )
-
-        self.profile(
-            "7.out",
-            header
-            + part(1, "Client Request: Metadata: codspeed-rust 6.0.0", "0")
-            + part(2, "Client Request: rs/moq-net/benches/varint.rs::varint::encode[1]", "12345 3 4 1")
-            + part(3, "Client Request: rs/moq-net/benches/varint.rs::varint::decode", "6789")
-            + part(4, "Program termination", "0")
-            + "totals: 0\n",
-        )
-        self.profile("8.out", header + part(1, "Program termination", "0"))
-        # Other files in the folder, such as Valgrind's logs, are not profiles.
-        self.profile("valgrind.7.log", "")
-        metrics = json.loads(report.codspeed_metrics(self.root))
-        self.assertEqual(
-            metrics,
-            {
-                "units": {"instructions": "instructions"},
-                "samples": [
-                    {
-                        "metrics": {
-                            "rs/moq-net/benches/varint.rs::varint::encode[1]": {"instructions": {"value": 12345}},
-                            "rs/moq-net/benches/varint.rs::varint::decode": {"instructions": {"value": 6789}},
-                        }
-                    }
-                ],
-            },
-        )
-        for broken in (
-            "not a profile\n",
-            header + part(1, "Client Request", "5"),
-            header + part(1, "Client Request: rs/a.rs::b", "0"),
-            header + part(1, "Client Request: rs/a.rs::b", "5").replace("totals: 5\n", ""),
-            header + part(1, "Client Request: rs/a.rs::b", "5").replace("events: Ir", "events: Dr"),
-        ):
-            self.profile("9.out", broken)
-            with self.assertRaises(ValueError):
-                report.codspeed_metrics(self.root)
-        # A run that measured nothing reports nothing rather than an empty file.
-        for path in (self.root / "profile.abc.out").glob("*.out"):
-            path.unlink()
-        with self.assertRaises(ValueError):
-            report.codspeed_metrics(self.root)
-
     def history(self, kind, runs):
         """Store runs of (commit, day, {name: value}) the way github-action-benchmark does."""
         unit = "MB/s" if kind == "rates" else "ns"

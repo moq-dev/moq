@@ -706,6 +706,28 @@ impl Holdings for Placed {
 	}
 }
 
+/// What a reader's copy held when it placed a time start before every group it held: the
+/// group holding it is older than any, so the range reaches back to the oldest group.
+struct ReachedBack;
+
+impl Holdings for ReachedBack {
+	fn resolves(&self) -> bool {
+		false
+	}
+
+	fn containing(&self, _: u64, _: Duration) -> Containing {
+		Containing::Before
+	}
+
+	fn next_start(&self, _: u64) -> Option<u64> {
+		None
+	}
+
+	fn complete(&self) -> bool {
+		true
+	}
+}
+
 /// The time start of `range` that a copy asked from `floor` raised to it, if any: that copy's
 /// resolution says nothing of which group holds it, which only a copy asked from below it
 /// places. Mirrors the JS `raised`.
@@ -867,9 +889,10 @@ impl Copy {
 		match change {
 			Change::Scalars => self.send(reader, []),
 			Change::Edit(keys) => {
-				let added: Vec<(u64, track::Range)> = keys
+				let added: Vec<u64> = keys
 					.iter()
-					.filter_map(|key| Some((*key, *reader.ranges.get(key)?)))
+					.copied()
+					.filter(|key| reader.ranges.contains_key(key))
 					.collect();
 				for key in keys {
 					self.resolved.remove(key);
@@ -877,8 +900,8 @@ impl Copy {
 				// Added ranges resolve against this copy's cache now, as any subscriber's do;
 				// a copy still unanswered resolves them once it answers.
 				if let Sub::Ready(sub) = &mut self.sub {
-					let subscription = reader.with_ranges(added.iter().map(|(_, range)| *range).collect());
-					for ((key, _), resolved) in added.iter().zip(sub.resolve_ranges(&subscription)) {
+					let subscription = reader.subscription(added.iter().copied());
+					for (key, resolved) in added.iter().zip(sub.resolve_ranges(&subscription)) {
 						if let Some(resolved) = resolved {
 							self.resolved.insert(*key, resolved);
 						}
@@ -892,7 +915,7 @@ impl Copy {
 				self.resolved = match &mut self.sub {
 					Sub::Ready(sub) => keyed_resolution(
 						reader.ranges.keys().copied(),
-						sub.resolve_ranges(&reader.subscription()),
+						sub.resolve_ranges(&reader.subscription(reader.ranges.keys().copied())),
 					),
 					Sub::Pending(_) => BTreeMap::new(),
 				};
@@ -935,23 +958,20 @@ impl Copy {
 	}
 
 	/// Take nothing past group `until` from this replaced copy, and ask for nothing past it on
-	/// the wire, nor past `stop` in it: the copy replacing it starts there. A cap only narrows
-	/// what it may deliver, so a copy that ran out stays out: reopened, it would be waited on
-	/// with nothing left to wake the reader.
+	/// the wire, nor past `stop`, a frame of it past its first: the copy replacing it starts
+	/// there. A cap only narrows what it may deliver, so a copy that ran out stays out:
+	/// reopened, it would be waited on with nothing left to wake the reader.
 	///
 	/// The rest of the group at `until` comes from the copy replacing it: a read of it here
 	/// stalls at `stop`, and its [`Recover`] moves to that copy.
 	fn cap(&mut self, until: u64, stop: Option<Position>, reader: &Mirrored) {
-		let cap = stop.filter(|stop| stop.group == until && stop.frame != 0);
-		let narrower = match self.until {
-			None => true,
-			Some(None) => false,
-			Some(Some(capped)) => {
-				until < capped || until == capped && cap.is_some_and(|cap| self.cap.is_none_or(|capped| cap < capped))
-			}
-		};
-		if !narrower {
-			return;
+		// Where a cap stops: a frame of its last group, or past every frame.
+		let limit = |until: u64, stop: Option<Position>| (until, stop.is_none(), stop.map(|stop| stop.frame));
+		match self.until {
+			None => {}
+			Some(None) => return,
+			Some(Some(capped)) if limit(until, stop) >= limit(capped, self.cap) => return,
+			Some(Some(_)) => {}
 		}
 		self.until = Some(Some(until));
 		// Its own resolution, which capping its end must not move.
@@ -959,11 +979,11 @@ impl Copy {
 			let keys = reader.ranges.keys().copied();
 			self.resolved = keyed_resolution(reader.ranges.keys().copied(), sub.resolved_keys(keys));
 		}
-		match cap == self.cap {
+		match stop == self.cap {
 			true => self.send(reader, reader.ranges.keys().copied()),
 			// An edit carries no cap, so a new one is asked whole.
 			false => {
-				self.cap = cap;
+				self.cap = stop;
 				self.ask_whole(reader);
 			}
 		}
@@ -1093,21 +1113,30 @@ impl Copy {
 			// owes what the reader's window hands out below its floor too.
 			let floor = self.floor;
 			let from = self.start(start);
-			// A group still to land is waited for, as a gap is.
+			// A group still to land is waited for, as a gap is, but not one a copy declared
+			// skipped: its publisher never produced it, so no route will.
 			if reader
 				.window
 				.runs(from)
 				.take_while(|run| *run.start() < end)
 				.any(|run| {
 					let end = run.end().saturating_add(1).min(end);
-					self.may_land(
-						*run.start()..end,
-						floor.is_some(),
-						grace,
-						Some(reader.delivered),
-						reader.waiter,
-					)
+					reader
+						.skipped
+						.gaps(&(*run.start()..end))
+						.any(|open| self.may_land(open, floor.is_some(), grace, Some(reader.delivered), reader.waiter))
 				}) {
+				return Retains::Wait;
+			}
+			// A time start no copy placed at a group yet waits on the group holding its time,
+			// which starts at or before it and past any group held below it, and on the rest of
+			// its range under the cap. Below the copy's first arrival too: it was asked from there.
+			if reader.window.unplaced_times().any(|(time, last)| {
+				let held = (self.track.peek_before(time.saturating_add(1))).map_or(0, |group| group.start);
+				let end = last.map_or(end, |last| end.min(last.saturating_add(1)));
+				let groups = held.max(from)..end;
+				!groups.is_empty() && self.may_land(groups, true, grace, Some(reader.delivered), reader.waiter)
+			}) {
 				return Retains::Wait;
 			}
 			// A fill still owes what the reader owes under its bound and its own feed has not
@@ -1170,6 +1199,9 @@ struct Retain<'a> {
 	/// still deliver: no copy holds it, no other replaced copy still feeds it, and no copy
 	/// declared it skipped. Empty for an unbounded reader, which no gap ends early.
 	owed: &'a RangeSet<u64>,
+	/// What the reader recorded skipped or a copy declared skipped, under the replaced copies'
+	/// caps: no copy waits for it.
+	skipped: &'a RangeSet<u64>,
 	waiter: &'a kio::Waiter,
 }
 
@@ -1300,6 +1332,18 @@ impl Subscriber {
 		self.reader().skipped_in(groups, waiter)
 	}
 
+	/// Ask the serving copy's fills for `unproven`, kept-out keys a containing front's reader
+	/// owes, as that reader asks a plain copy; see [`track::Subscriber::ask_unproven`]. Returns
+	/// what those fills gave up, so a key this front's route cannot fill ends the outer read too.
+	pub(super) fn ask_unproven(&self, unproven: RangeSet<u64>, waiter: &kio::Waiter) -> RangeSet<u64> {
+		let mut reader = self.reader();
+		let groups = reader.groups;
+		match reader.copies.last_mut().map(|copy| copy.poll_ready(groups, waiter)) {
+			Some(Poll::Ready(Ok(sub))) => sub.ask_unproven(unproven, waiter),
+			_ => RangeSet::new(),
+		}
+	}
+
 	/// Whether this reader accounts for every key of `gaps`, which none of the readers that
 	/// handed out `taken` did, the first of which is its own; see [`Reader::accounts`].
 	pub(super) fn accounts(
@@ -1374,6 +1418,13 @@ impl Subscriber {
 	/// The lowest group the reader's ranges name; see [`track::Subscriber::floor`].
 	pub(super) fn floor(&self) -> Option<u64> {
 		self.reader().window().start()
+	}
+
+	/// The groups the reader's ranges hold, once nothing in them is left to place.
+	pub(super) fn ranges(&self) -> Option<Cover> {
+		let mut reader = self.reader();
+		let window = reader.window();
+		window.is_settled().then(|| window.groups().cloned()).flatten()
 	}
 
 	/// Whether the serving copy places ranges as its publisher would; see
@@ -1504,6 +1555,12 @@ impl Subscriber {
 		waiter: &kio::Waiter,
 	) -> Poll<(std::ops::Range<u64>, track::Hole)> {
 		self.reader().poll_drop(delivered, probe, waiter)
+	}
+
+	/// Forget every copy's report of `range`; see [`track::Subscriber::untell`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(super) fn untell(&mut self, range: std::ops::Range<u64>) {
+		self.reader().untell(range)
 	}
 
 	/// Assign the local read floor and exclusive cap; see [`track::Subscriber::with_range`].
@@ -1773,6 +1830,12 @@ impl Fold {
 			}
 			current.changes(folded.revision)
 		};
+		// Each range refolds where the reader's copy resolved it, so an overflowed log refolds
+		// them all rather than diffing.
+		let changes = match changes {
+			track::Changes::Keys(keys) => Some(keys),
+			track::Changes::Overflowed | track::Changes::Restated => None,
+		};
 		let retire = match &changes {
 			Some(keys) => keys.iter().filter_map(|key| folded.keys.remove(key)).collect(),
 			None => std::mem::take(&mut folded.keys).into_values().collect(),
@@ -1854,9 +1917,15 @@ impl Mirrored {
 		}
 	}
 
-	/// These preferences, the ranges in key order. Costs every range.
-	fn subscription(&self) -> Subscription {
-		self.with_ranges(self.ranges.values().copied().collect())
+	/// These preferences with the ranges keyed `keys`, in that order, each live join placed
+	/// where the reader placed it, so a copy resolves it there rather than afresh.
+	fn subscription(&self, keys: impl IntoIterator<Item = u64>) -> Subscription {
+		let (ranges, placed) =
+			split((keys.into_iter()).filter_map(|key| Some((*self.ranges.get(&key)?, self.placed(key)))));
+		Subscription {
+			placed,
+			..self.with_ranges(ranges)
+		}
 	}
 
 	/// [`Self::subscription`] from no earlier than `floor` and through no later than the
@@ -2154,14 +2223,14 @@ impl Reader {
 	/// Place each unsettled [`Self::window`] range where a copy resolved it, on its own: one
 	/// whose start still waits leaves the rest placed, so a publisher names their starts.
 	fn resolve(&mut self, resolved: &BTreeMap<u64, Resolved>) {
-		let mut placed = Vec::new();
+		let (mut placed, mut reached) = (Vec::new(), Vec::new());
 		for key in self.window.unsettled() {
 			let Some(range) = self.mirrored.ranges.get(&key).copied() else {
 				continue;
 			};
 			// A time past 0, or a live join, which only a copy can place.
 			let waits = match range.start {
-				track::Start::Time(start) => start > 0,
+				track::Start::Time(start) => start != 0,
 				track::Start::Live { .. } => true,
 				track::Start::Oldest => false,
 			};
@@ -2183,19 +2252,32 @@ impl Reader {
 				},
 				(end, _) => end,
 			};
-			// One that reached back to the oldest group still does, as on a plain reader.
+			// One that reached back to the oldest group still does, as on a plain reader. A time
+			// start keeps its time, which a replaced copy may still place: see [`Copy::retains`].
 			let start = match (waits || range.time().is_some(), resolved.floored) {
 				(true, true) => track::Start::Time(resolved.start),
+				(true, false) if range.time().is_some() => {
+					reached.push((
+						key,
+						track::Range {
+							start: range.start,
+							end,
+						},
+					));
+					continue;
+				}
 				(true, false) => track::Start::Oldest,
 				(false, _) => range.start,
 			};
 			placed.push((key, track::Range { start, end }));
 		}
 		// An edit restarts the window's coverage check, so one that places nothing is skipped.
-		if placed.is_empty() {
-			return;
+		if !placed.is_empty() {
+			self.window.edit([], &placed, None, &Placed);
 		}
-		self.window.edit([], &placed, None, &Placed);
+		if !reached.is_empty() {
+			self.window.edit([], &reached, None, &ReachedBack);
+		}
 	}
 
 	/// Follow the route: subscribe to a new copy, mark the ones it replaced, and mirror
@@ -2214,8 +2296,13 @@ impl Reader {
 			let moved = scalars != (mirrored.priority, mirrored.order, mirrored.feed);
 			if sub.revision != revision {
 				// The keys the changes since touched, each with its range now, or every range
-				// once the log no longer reaches back that far.
-				let ranges = match sub.changes(revision) {
+				// once they were replaced whole.
+				let keys = match sub.changes(revision) {
+					track::Changes::Keys(keys) => Some(keys),
+					track::Changes::Overflowed => Some(sub.differ(&mirrored.ranges, &mirrored.joining)),
+					track::Changes::Restated => None,
+				};
+				let ranges = match keys {
 					Some(keys) => Ok(keys
 						.into_iter()
 						.map(|key| (key, sub.range(key).map(|range| (range, sub.joining(key)))))
@@ -2279,30 +2366,14 @@ impl Reader {
 					}
 					Change::Edit(edited.into_iter().map(|(key, _)| key).collect())
 				}
-				// Unchanged only if each live join also keeps its tick: one added again under the
-				// same key asks its copies anew.
-				Some(Err(ranges))
-					if ranges
-						.iter()
-						.map(|(key, (range, _))| (key, range))
-						.eq(&self.mirrored.ranges)
-						&& (ranges.iter())
-							.filter(|(_, (range, _))| range.join().is_some())
-							.map(|(key, (_, since))| (key, since))
-							.eq(&self.mirrored.joining) =>
-				{
-					Change::Scalars
-				}
 				Some(Err(ranges)) => {
-					let mut mirrored = Mirrored {
-						ranges: BTreeMap::new(),
-						joining: BTreeMap::new(),
-						..std::mem::take(&mut self.mirrored)
-					};
+					let mirrored = &mut self.mirrored;
+					mirrored.ranges.clear();
+					// Only bounds memory: every read of an entry goes by a key of `ranges`.
+					mirrored.joining.clear();
 					for (key, (range, since)) in ranges {
 						mirrored.insert(key, range, since);
 					}
-					self.mirrored = mirrored;
 					self.window = mirrored_window(&self.mirrored);
 					// The serving copy's resume point may cut off groups the new ranges cover,
 					// judged by the reader's window.
@@ -2556,6 +2627,14 @@ impl Reader {
 			true => self.owed(delivered, waiter),
 			false => RangeSet::new(),
 		};
+		let capped = (self.copies.iter())
+			.filter(|copy| copy.replaced && copy.done.is_none())
+			.filter_map(|copy| copy.end())
+			.max();
+		let skipped = match capped {
+			Some(end) => self.skipped_in(self.groups.0..end, waiter),
+			None => RangeSet::new(),
+		};
 		let reader = Retain {
 			groups: self.groups,
 			window: &self.window,
@@ -2565,6 +2644,7 @@ impl Reader {
 			delivered,
 			out: &self.out,
 			owed: &owed,
+			skipped: &skipped,
 			waiter,
 		};
 		let mut waits = false;
@@ -2870,10 +2950,8 @@ impl Reader {
 				}
 				// The copy's own record bills to its track as a direct reader's does, including
 				// what a peek skipped before it parked.
-				let mut res = sub.poll_peek_group(ordered, waiter);
-				if let Err(err) = sub.settle_record(None) {
-					res = Poll::Ready(Err(err));
-				}
+				let res = sub.poll_peek_group(ordered, waiter);
+				sub.settle_record(None);
 				match res {
 					Poll::Pending => break,
 					Poll::Ready(Ok(Some(reserved))) => {
@@ -2999,15 +3077,21 @@ impl Reader {
 		}
 	}
 
+	/// Where the reader's window ends, once it is placed and bounded.
+	fn bounded_end(&mut self) -> Option<u64> {
+		let window = self.window();
+		window.end().filter(|_| !window.is_pending())
+	}
+
 	/// Whether a bounded window has nothing left to deliver, once no replaced copy may still
 	/// deliver a group under its bound: every group of the whole window is handed out (in any
 	/// of `taken`, the logical readers' records, the reader's own first) or accounted for, as
 	/// [`Self::accounts`] judges.
 	fn exhausted(&mut self, taken: &[&Delivered], ordered: bool, waiter: &kio::Waiter) -> bool {
-		let window = self.window();
-		let Some(end) = window.end().filter(|_| !window.is_pending()) else {
+		let Some(end) = self.bounded_end() else {
 			return false;
 		};
+		let window = &self.window;
 		let gaps: Vec<std::ops::Range<u64>> = window
 			.runs(window.floor().unwrap_or(0))
 			.take_while(|run| *run.start() < end)
@@ -3020,9 +3104,9 @@ impl Reader {
 	///
 	/// Under the serving copy's resume point, a key the local floor and cap admit was the copies'
 	/// it replaced, each let go once it had nothing more. One they keep out stays owed, as on one
-	/// cursor, until a copy held now declares it skipped, and the serving route is asked for those
-	/// no copy does (see [`Self::ask`]), so its answer settles them however many copies came and
-	/// went. The serving copy judges the rest by where it placed the reader's ranges itself: a time
+	/// cursor, until a copy held now declares it skipped or the asked copy's fills give it up, and
+	/// the serving route is asked for those no copy does (see [`Self::ask`]), so its answer settles
+	/// them however many copies came and went. The serving copy judges the rest by where it placed the reader's ranges itself: a time
 	/// a copy held no group for places the reader's window at the time itself, wider than any group
 	/// the serving copy reads. A backfill still out is not judged yet, and a route between copies
 	/// has nothing to judge.
@@ -3036,8 +3120,7 @@ impl Reader {
 		if self.resumed.is_some() {
 			return false;
 		}
-		let window = self.window();
-		if window.end().is_none() || window.is_pending() {
+		if self.bounded_end().is_none() {
 			return false;
 		}
 		let serving = self.copies.last().filter(|copy| {
@@ -3058,14 +3141,17 @@ impl Reader {
 				open.extend(skipped.gaps(&run));
 			}
 			let split = resumed.clamp(gap.start, gap.end);
-			if split < gap.end {
-				above.push(split..gap.end);
-			}
+			// Empty at or past the resume point, which accounts for itself.
+			above.push(split..gap.end);
 		}
-		if let (Some(first), Some(last)) = (open.iter().next(), open.iter().next_back()) {
-			let keys = first.start..last.end;
-			self.ask(keys, taken[0], waiter);
-			return false;
+		if !open.is_empty() {
+			// What the asked copy's fills gave up is accounted for, as on one cursor.
+			for run in self.ask(&open, taken[0], waiter).iter() {
+				open.remove(run.clone());
+			}
+			if !open.is_empty() {
+				return false;
+			}
 		}
 		match self.copies.last_mut() {
 			Some(Copy {
@@ -3075,17 +3161,24 @@ impl Reader {
 		}
 	}
 
-	/// Ask the serving route for `keys`, which hold a key the local floor or cap keeps out that
-	/// is neither recorded nor declared skipped by a copy held now. Its answer settles each such
-	/// key as it would on one cursor: a skip accounts for it, while a group or a drop leaves it
-	/// owed. A copy of that route already asked for them, kept by [`Self::let_go`] until
+	/// Ask the serving route for the hull of `open`, the keys the local floor or cap keeps out
+	/// that are neither recorded nor declared skipped by a copy held now. Its answer settles each such
+	/// key as it would on one cursor: a skip, or a fill that gives it up, accounts for it, while a
+	/// group or a drop leaves it owed. A copy of that route already asked for them, kept by [`Self::let_go`] until
 	/// [`Self::skipped`] records them, asks nothing more, so neither a reader waiting on the
-	/// answer nor one a group holds open asks again.
-	fn ask(&mut self, keys: std::ops::Range<u64>, delivered: &Delivered, waiter: &kio::Waiter) {
+	/// answer nor one a group holds open asks again. Its track may forget a skip it answered
+	/// before the rest lands, so it asks its fills for those it cannot prove (see
+	/// [`track::Subscriber::ask_unproven`]). Returns the keys of `open` those fills gave up.
+	fn ask(&mut self, open: &RangeSet<u64>, delivered: &Delivered, waiter: &kio::Waiter) -> RangeSet<u64> {
+		let mut given_up = RangeSet::new();
+		let (Some(first), Some(last)) = (open.iter().next(), open.iter().next_back()) else {
+			return given_up;
+		};
+		let keys = first.start..last.end;
 		self.backfill(keys.clone(), false, delivered);
 		let groups = self.groups;
 		let Some((serving, copies)) = self.copies.split_last_mut() else {
-			return;
+			return given_up;
 		};
 		let asked = copies.iter_mut().filter(|copy| {
 			copy.track.same_channel(&serving.track)
@@ -3096,7 +3189,11 @@ impl Reader {
 			// Another front's logical track asks its own routes only once subscribed.
 			let _ = copy.poll_ready(groups, waiter);
 			copy.skipped_in(keys.clone(), waiter);
+			if let Sub::Ready(sub) = &mut copy.sub {
+				given_up.extend(sub.ask_unproven(open.clone(), waiter));
+			}
 		}
+		given_up
 	}
 
 	/// Whether the track ended, once the serving copy's channel (as `done` reads it) ran
@@ -3300,6 +3397,17 @@ impl Reader {
 		// up) may still land, and is handed out if it does.
 		self.remove_drop(open.clone());
 		Poll::Ready((open, err))
+	}
+
+	/// Forget every copy's report of `range`, so the copy serving when the reader's ranges ask
+	/// for it again reports it again: each copy's record would otherwise hold it as reported.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	fn untell(&mut self, range: std::ops::Range<u64>) {
+		for copy in &mut self.copies {
+			if let Sub::Ready(sub) = &mut copy.sub {
+				sub.untell(range.clone());
+			}
+		}
 	}
 
 	/// Forget `run` as queued, received or not.
@@ -3531,11 +3639,11 @@ impl Reader {
 		// does one still unanswered, whose ranges are not placed yet.
 		let start = self.groups.0;
 		let budget = self.mirrored.widest();
-		// Each replaced copy's staleness verdict, taken once for the whole walk.
+		// Each answered copy's staleness verdict, taken once for the whole walk.
 		let taking: Vec<Option<track::Taking<'_>>> = (self.copies.iter())
 			.map(|copy| match &copy.sub {
-				Sub::Ready(sub) if copy.replaced => Some(sub.taking()),
-				_ => None,
+				Sub::Ready(sub) => Some(sub.taking()),
+				Sub::Pending(_) => None,
 			})
 			.collect();
 		let drains = |key: u64| {
@@ -3632,14 +3740,21 @@ impl Clone for Recover {
 }
 
 impl Recover {
+	/// The group it carries.
+	pub(super) fn key(&self) -> u64 {
+		self.key
+	}
+
 	/// Whether to look past the copy being read: it stalled, closed short, or failed with a
 	/// verdict on the group while a newer route serves, or it failed delivering the group, or
-	/// it closed short on a route that failed since, which the front is to replace. A route
-	/// that returns to serve the copy being read is no change.
-	pub(super) fn wants(&mut self, err: Option<&Error>, waiter: &kio::Waiter) -> bool {
-		match err {
-			Some(err) if self.undelivered(err) => return true,
-			None if copy_failed(&self.copy) => return true,
+	/// it closed short on a route that failed since, or while the front stages the copy to
+	/// replace it, which the front is to splice. A route that returns to serve the copy being
+	/// read is no change.
+	pub(super) fn wants(&mut self, cause: &Cause, waiter: &kio::Waiter) -> bool {
+		match cause {
+			Cause::Failed(err) if self.undelivered(err) => return true,
+			Cause::Stalled | Cause::Closed if copy_failed(&self.copy) => return true,
+			Cause::Closed if self.route.consumer().read().staged.is_some() => return true,
 			_ => {}
 		}
 		while self
@@ -3713,6 +3828,17 @@ impl Recover {
 			|| (self.reader.is_none() && matches!(StreamError::from(err), StreamError::Old | StreamError::Evicted))
 	}
 
+	/// Whether the route would answer `err`, a failure of the copy being read, with `err`
+	/// again: it still serves that copy, as a clean end or conclusion leaves it, and `err`
+	/// judged the group rather than its delivery. The reader's other copies go unasked.
+	pub(super) fn repeats(&self, err: &Error) -> bool {
+		if self.undelivered(err) {
+			return false;
+		}
+		let route = self.route.consumer().read();
+		route.generation == self.generation && !matches!(route.phase, Phase::Failed(_))
+	}
+
 	/// Poll for the serving route's copy of the group, positioned at frame `index`, once the
 	/// copy being read looks past itself for `cause`.
 	///
@@ -3729,25 +3855,28 @@ impl Recover {
 			reader.sync(waiter);
 		}
 		loop {
-			let (generation, serving, end, moves) = {
+			let (generation, serving, end, moves, staged) = {
 				let route = self.route.consumer().read();
 				(
 					route.generation,
 					route.copy.clone(),
 					route.phase.end(),
 					route.phase.moves(),
+					route.staged.as_ref().map(|(id, _)| *id),
 				)
 			};
 			// Once no front will replace the copy, nothing comes after it.
 			let done = !moves;
 			// Registered before looking, so a route change from here on wakes the reader, a
-			// finished track's too. Not through the watch: `generation` is the one just read,
-			// not `self.generation`.
+			// finished track's too, and so does a stage coming or going, which a short close
+			// waits on. Not through the watch: `generation` is the one just read, not
+			// `self.generation`.
 			let moved = self
 				.route
 				.consumer()
 				.poll(waiter, |route| {
-					match route.generation != generation || !route.phase.moves() {
+					let restaged = route.staged.as_ref().map(|(id, _)| *id) != staged;
+					match route.generation != generation || restaged || !route.phase.moves() {
 						true => Poll::Ready(()),
 						false => Poll::Pending,
 					}
@@ -3799,8 +3928,9 @@ impl Recover {
 				match cause {
 					// The copy being read still serves: only a failure asks it again.
 					Cause::Stalled => return Poll::Pending,
-					// Its route failed, so the next one may hold more, unless none will come.
-					Cause::Closed if copy_failed(&self.copy) && !done => return Poll::Pending,
+					// Its route failed, or the front stages the copy to replace it, so that one
+					// may hold more, unless none will come.
+					Cause::Closed if (copy_failed(&self.copy) || staged.is_some()) && !done => return Poll::Pending,
 					// It serves on with no front to replace it, so its close stands.
 					Cause::Closed => return Poll::Ready(Err(Error::NotFound)),
 					Cause::Failed(_) => {}
@@ -4042,7 +4172,8 @@ pub(super) enum Cause {
 	/// The copy stalled while a newer route serves.
 	Stalled,
 	/// The copy closed the group short of a known end, a FIN without GROUP_END, after the
-	/// front replaced it: the route that replaced it may hold more.
+	/// front replaced it or while it stages a replacement: the route replacing it may hold
+	/// more.
 	Closed,
 	/// The copy failed with this error.
 	Failed(Error),
@@ -4553,6 +4684,188 @@ mod test {
 			sub.poll_finished(&kio::Waiter::noop()).map(|result| result.unwrap()),
 			Poll::Ready(end)
 		);
+	}
+
+	/// A frame read through a front, still arriving when the pool evicts the serving copy,
+	/// reads the rest of its bytes from a flight of the group from that frame: the eviction is
+	/// no route's doing, so no route continues it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_routed_frame_evicted_while_arriving_resumes_on_a_flight() {
+		let noop = kio::Waiter::noop();
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let source = copy();
+		let requests = source.requests();
+		routes.serve(source.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		let live = source.create_group(group::Info { start: 0 }).unwrap();
+		let handle = live.handle();
+		let payload = bytes::Bytes::from(vec![7; 16]);
+		let info = crate::frame::Info {
+			size: payload.len() as u64,
+			timestamp: ts(0),
+		};
+		let mut arriving = live.create_frame(info).unwrap();
+		arriving.write(payload.slice(..2)).unwrap();
+		let mut group = recv(&mut sub);
+		let Poll::Ready(Ok(Some(mut frame))) = group.poll_next_frame(&noop) else {
+			panic!("the arriving frame");
+		};
+		assert!(matches!(frame.poll_read_chunk(&noop), Poll::Ready(Ok(Some(chunk))) if chunk == payload[..2]));
+		handle.shed_all();
+
+		let res = frame.poll_read_chunk(&noop);
+		assert!(
+			res.is_pending(),
+			"boarding a flight: {:?}",
+			res.map(|res| res.map(|_| ()))
+		);
+		let fill = match requests.poll_requested_fill(&noop) {
+			Poll::Ready(fill) => fill.unwrap(),
+			Poll::Pending => panic!("a flight is asked"),
+		};
+		assert_eq!(fill.start(), Position { group: 0, frame: 0 });
+		let flight = fill.accept(0, None).unwrap().expect("a fresh group");
+		let mut flying = flight.create_frame(info).unwrap();
+		flying.write(payload.clone()).unwrap();
+		let mut rest = Vec::new();
+		loop {
+			match frame.poll_read_chunk(&noop) {
+				Poll::Ready(Ok(Some(chunk))) => rest.extend_from_slice(&chunk),
+				Poll::Ready(Ok(None)) => break,
+				other => panic!("the rest of the frame: {:?}", other.map(|res| res.map(|_| ()))),
+			}
+		}
+		assert_eq!(rest, payload[2..], "past the bytes already read");
+		drop(arriving);
+	}
+
+	/// A front that ends cleanly on the evicted copy, or concludes on it, replaces nothing, so
+	/// the frame still reads the rest from its flight, whether the front ended before the
+	/// eviction or while the flight was pending. A front that fails the track ends the frame.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_routed_frame_keeps_its_flight_once_the_front_ends_cleanly() {
+		let noop = kio::Waiter::noop();
+		// `None` concludes the front; `Some` ends the track with that result.
+		for ending in [None, Some(Ok(())), Some(Err(Error::Unauthorized))] {
+			for boarded in [false, true] {
+				let case = format!("ending={ending:?} boarded={boarded}");
+				let routes = Producer::new();
+				let logical = logical(&routes);
+				let source = copy();
+				let requests = source.requests();
+				routes.serve(source.consume());
+				let mut sub = subscribe(&logical, HOUR);
+				let live = source.create_group(group::Info { start: 0 }).unwrap();
+				let handle = live.handle();
+				let payload = bytes::Bytes::from(vec![7; 16]);
+				let info = crate::frame::Info {
+					size: payload.len() as u64,
+					timestamp: ts(0),
+				};
+				let mut arriving = live.create_frame(info).unwrap();
+				arriving.write(payload.slice(..2)).unwrap();
+				let mut group = recv(&mut sub);
+				let Poll::Ready(Ok(Some(mut frame))) = group.poll_next_frame(&noop) else {
+					panic!("{case}: the arriving frame");
+				};
+				assert!(matches!(frame.poll_read_chunk(&noop), Poll::Ready(Ok(Some(chunk))) if chunk == payload[..2]));
+				let end = || match &ending {
+					None => routes.conclude(),
+					Some(result) => routes.end(result.clone()),
+				};
+				if !boarded {
+					end();
+				}
+				handle.shed_all();
+				if boarded {
+					let res = frame.poll_read_chunk(&noop);
+					assert!(
+						res.is_pending(),
+						"{case}: boarding a flight: {:?}",
+						res.map(|res| res.map(|_| ()))
+					);
+					end();
+				}
+				if let Some(Err(_)) = &ending {
+					let res = frame.poll_read_chunk(&noop).map(|res| res.map(|_| ()));
+					assert!(matches!(res, Poll::Ready(Err(Error::Unauthorized))), "{case}: {res:?}");
+					continue;
+				}
+				let res = frame.poll_read_chunk(&noop);
+				assert!(
+					res.is_pending(),
+					"{case}: on a flight: {:?}",
+					res.map(|res| res.map(|_| ()))
+				);
+				let fill = match requests.poll_requested_fill(&noop) {
+					Poll::Ready(fill) => fill.unwrap(),
+					Poll::Pending => panic!("{case}: a flight is asked"),
+				};
+				let flight = fill.accept(0, None).unwrap().expect("a fresh group");
+				let mut flying = flight.create_frame(info).unwrap();
+				flying.write(payload.clone()).unwrap();
+				let mut rest = Vec::new();
+				loop {
+					match frame.poll_read_chunk(&noop) {
+						Poll::Ready(Ok(Some(chunk))) => rest.extend_from_slice(&chunk),
+						Poll::Ready(Ok(None)) => break,
+						other => panic!("{case}: the rest of the frame: {:?}", other.map(|res| res.map(|_| ()))),
+					}
+				}
+				assert_eq!(rest, payload[2..], "{case}");
+				drop(arriving);
+			}
+		}
+	}
+
+	/// A routed frame waiting on the flight that continues its evicted copy still follows the
+	/// front to a new route, which may already hold the rest.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_routed_frame_on_a_flight_follows_a_route_change() {
+		let noop = kio::Waiter::noop();
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		let requests = a.requests();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		let live = a.create_group(group::Info { start: 0 }).unwrap();
+		let handle = live.handle();
+		let payload = bytes::Bytes::from(vec![7; 16]);
+		let info = crate::frame::Info {
+			size: payload.len() as u64,
+			timestamp: ts(0),
+		};
+		let mut arriving = live.create_frame(info).unwrap();
+		arriving.write(payload.slice(..2)).unwrap();
+		let mut group = recv(&mut sub);
+		let Poll::Ready(Ok(Some(mut frame))) = group.poll_next_frame(&noop) else {
+			panic!("the arriving frame");
+		};
+		assert!(matches!(frame.poll_read_chunk(&noop), Poll::Ready(Ok(Some(chunk))) if chunk == payload[..2]));
+		handle.shed_all();
+		assert!(frame.poll_read_chunk(&noop).is_pending(), "boarding a flight");
+		assert!(requests.poll_requested_fill(&noop).is_ready(), "a flight is asked");
+
+		let b = copy();
+		let mut whole = b.create_group(group::Info { start: 0 }).unwrap();
+		whole.write_frame(ts(0), payload.clone()).unwrap();
+		whole.finish().unwrap();
+		routes.serve(b.consume());
+		let mut rest = Vec::new();
+		loop {
+			match frame.poll_read_chunk(&noop) {
+				Poll::Ready(Ok(Some(chunk))) => rest.extend_from_slice(&chunk),
+				Poll::Ready(Ok(None)) => break,
+				other => panic!("the rest from the new route: {:?}", other.map(|res| res.map(|_| ()))),
+			}
+		}
+		assert_eq!(rest, payload[2..], "past the bytes already read");
+		drop(arriving);
 	}
 
 	/// The serving copy failing to deliver is no verdict on the track's end: the end waits for
@@ -5103,7 +5416,7 @@ mod test {
 		// The copy's aggregate, where a placed join's lag places nothing.
 		let asked = next.subscription().unwrap();
 		let placed = track::Start::Live {
-			min: Duration::ZERO,
+			min: Some(Duration::ZERO),
 			max: Some(HOUR),
 		};
 		assert_eq!(asked.ranges, [track::Range::from(placed)]);
@@ -5742,6 +6055,51 @@ mod test {
 		assert_eq!(read(&mut reading), None);
 	}
 
+	/// A group the serving copy closed short while the front stages the copy to replace it
+	/// waits for that copy: it reads on once the copy is spliced, and ends where it closed
+	/// once the stage is dropped.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_short_group_waits_for_a_staged_replacement() {
+		for spliced in [true, false] {
+			let routes = Producer::new();
+			let front = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&front, HOUR);
+			let mut short = a.create_group(group::Info { start: 0 }).unwrap();
+			short.write_frame(ts(0), b"a".as_ref()).unwrap();
+			let mut reading = recv(&mut sub);
+			assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+
+			let b = copy();
+			let mut whole = b.create_group(group::Info { start: 0 }).unwrap();
+			for (ms, frame) in [(0, b"a"), (1, b"b")] {
+				whole.write_frame(ts(ms), frame.as_ref()).unwrap();
+			}
+			whole.finish_at(2).unwrap();
+			let staged = routes.stage(b.consume());
+			short.finish().unwrap();
+			if spliced {
+				assert!(
+					reading.read_frame().now_or_never().is_none(),
+					"waits for the staged copy"
+				);
+				routes.splice(b.consume(), staged);
+				assert_eq!(read(&mut reading), Some(b"b".to_vec()));
+				assert_eq!(read(&mut reading), None);
+			} else {
+				// Its end waits too, and wakes once the stage is dropped.
+				let wake = Arc::new(Wake::default());
+				let waiter = kio::Waiter::new(wake.clone().into());
+				assert!(reading.poll_finished(&waiter).is_pending(), "waits for the staged copy");
+				drop(staged);
+				assert!(wake.0.load(std::sync::atomic::Ordering::Relaxed), "woken once dropped");
+				assert!(matches!(reading.poll_finished(&waiter), Poll::Ready(Ok(1))));
+			}
+		}
+	}
+
 	/// A replacement that holds none of a short group is asked for the rest, which continues
 	/// the group; a refusal leaves it to the replacement's subscription.
 	#[test]
@@ -6038,6 +6396,65 @@ mod test {
 		assert_eq!(a.subscription().unwrap().cap, None, "serving again");
 		assert_eq!(b.subscription().unwrap().cap, None, "b holds none of the group's head");
 		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+	}
+
+	/// A later switch at the same boundary only narrows a replaced copy's cap: a frame that
+	/// landed on it since leaves the cap where it was, and a head first held since stops a copy
+	/// asked for the group whole.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_later_switch_only_narrows_a_replaced_copys_cap() {
+		let routes = Producer::new();
+		let track = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&track, HOUR);
+		let mut old = a.create_group(group::Info { start: 0 }).unwrap();
+		old.write_frame(ts(0), b"a".as_ref()).unwrap();
+		old.write_frame(ts(1), b"b".as_ref()).unwrap();
+		let mut reading = recv(&mut sub);
+		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+		let b = copy();
+		routes.serve(b.consume());
+		assert_eq!(a.subscription().unwrap().cap, Some(Position::new(0, 2)));
+		// In flight on the old route, so the next copy resumes past it.
+		old.write_frame(ts(2), b"c".as_ref()).unwrap();
+		let c = copy();
+		routes.serve(c.consume());
+		assert_eq!(c.subscription().unwrap().resume, Some(Position::new(0, 3)));
+		assert_eq!(b.subscription().unwrap().cap, Some(Position::new(0, 3)));
+		assert_eq!(
+			a.subscription().unwrap().cap,
+			Some(Position::new(0, 2)),
+			"never widened"
+		);
+
+		// The group lands on the first route without its head, so it is capped whole.
+		let routes = Producer::new();
+		let track = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&track, HOUR);
+		let track::Received::Group(mut tail) = a.create_group_at(group::Info { start: 0 }, 1, 0..0).unwrap() else {
+			panic!("nothing else holds the group");
+		};
+		tail.write_frame(ts(1), b"b".as_ref()).unwrap();
+		let _reading = recv(&mut sub);
+		let b = copy();
+		routes.serve(b.consume());
+		assert_eq!(b.subscription().unwrap().resume, None);
+		assert_eq!(a.subscription().unwrap().cap, None, "the group whole");
+		let mut whole = b.create_group(group::Info { start: 0 }).unwrap();
+		whole.write_frame(ts(0), b"a".as_ref()).unwrap();
+		whole.write_frame(ts(1), b"b".as_ref()).unwrap();
+		let c = copy();
+		routes.serve(c.consume());
+		assert_eq!(c.subscription().unwrap().resume, Some(Position::new(0, 2)));
+		assert_eq!(
+			a.subscription().unwrap().cap,
+			Some(Position::new(0, 2)),
+			"stopped where the next copy resumes"
+		);
 	}
 
 	/// A copy asked past the frames a reader held of a group adopts them once the rest lands,
@@ -7287,6 +7704,82 @@ mod test {
 		assert_eq!(dropped(&mut sub), []);
 	}
 
+	/// A run the serving copy's own cursor wrote off as stale is its verdict, not a received one
+	/// a new upstream subscription supersedes: it is still reported after the copy lets go of a
+	/// stale run its upstream judged.
+	#[kio::test]
+	async fn a_stale_run_judged_here_outlives_a_superseded_one() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		routes.serve(a.consume());
+		let budget = Duration::from_secs(1);
+		let mut sub = subscribe(&logical, budget);
+		assert_eq!(dropped(&mut sub), []);
+		write(&a, 2000);
+		assert_eq!(drain(&mut sub, false), [2000]);
+		// Lands late, then ages past the budget under 2000: the copy writes it off.
+		write(&a, 3);
+		a.drop_groups(1..2, StreamError::NotFound);
+		kio::clock::sleep(budget * 2).await;
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		let first = sub
+			.poll_drop(&kio::Waiter::noop())
+			.map(|(run, hole)| (run, hole.error()));
+		assert_eq!(first, Poll::Ready((0..1, StreamError::Old)));
+		// The upstream judged 5000 stale, then a new upstream subscription superseded it.
+		a.give_up(5000..5001, track::Hole::stale(budget));
+		a.supersede_stale();
+		assert_eq!(
+			dropped(&mut sub),
+			[(1..2, StreamError::NotFound), (2..2000, StreamError::Old)]
+		);
+	}
+
+	/// A reader floored at the last sequence holds back nothing for a copy the front parked
+	/// either: nothing it may deliver is in range.
+	#[test]
+	fn a_parked_copy_holds_back_nothing_past_the_last_sequence() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		write(&a, 0);
+		assert_eq!(drain(&mut sub, false), [0]);
+		let b = copy();
+		routes.serve(b.consume());
+		routes.park();
+		let mut sub = sub.with_range(u64::MAX..);
+		assert_eq!(dropped(&mut sub), []);
+	}
+
+	/// A route returning to serve resumes the boundary group past the frames another copy now
+	/// holds from its first, though it was asked for none of them before.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_returning_route_resumes_past_the_head_held_since() {
+		let routes = Producer::new();
+		let track = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&track, HOUR);
+		// Lands on the first route without its head, so no copy holds the group from its first.
+		let track::Received::Group(mut tail) = a.create_group_at(group::Info { start: 0 }, 1, 0..0).unwrap() else {
+			panic!("nothing else holds the group");
+		};
+		tail.write_frame(ts(1), b"b".as_ref()).unwrap();
+		let _reading = recv(&mut sub);
+		let b = copy();
+		routes.serve(b.consume());
+		assert_eq!(a.subscription().unwrap().resume, None);
+		let mut whole = b.create_group(group::Info { start: 0 }).unwrap();
+		whole.write_frame(ts(0), b"a".as_ref()).unwrap();
+		whole.write_frame(ts(1), b"b".as_ref()).unwrap();
+		routes.serve(a.consume());
+		assert_eq!(a.subscription().unwrap().resume, Some(Position::new(0, 2)));
+	}
+
 	/// A reader floored at the last sequence holds back nothing for a replaced copy that may
 	/// still deliver, since nothing it may deliver is in range.
 	#[test]
@@ -8365,7 +8858,7 @@ mod test {
 			add: vec![(
 				1,
 				track::Range::from(track::Start::Live {
-					min: Duration::from_millis(6),
+					min: Some(Duration::from_millis(6)),
 					max: Some(HOUR),
 				}),
 			)],
@@ -8803,11 +9296,11 @@ mod test {
 	}
 
 	/// A bounded read whose serving copy resumed past a gap no replaced copy filled ends once
-	/// those copies are let go, if its local range owes nothing there: a gap inside the local
-	/// floor and cap was given up with them, while one the local range keeps out stays owed.
+	/// those copies are let go: a gap inside the local floor and cap was given up with them, and
+	/// one the local range keeps out is given up by the asked copy's fills, as on one cursor.
 	#[kio::test]
-	async fn a_read_range_past_a_given_up_gap_ends_only_inside_its_local_range() {
-		for (start, end, ends) in [(2, 3, true), (2, 4, true), (0, 2, false)] {
+	async fn a_read_range_past_a_given_up_gap_ends() {
+		for (start, end) in [(2, 3), (2, 4), (0, 2)] {
 			let case = format!("{start}..{end}");
 			let routes = Producer::new();
 			let logical = logical(&routes);
@@ -8842,10 +9335,7 @@ mod test {
 			let res = sub
 				.poll_recv_group(&fresh())
 				.map(|res| res.map(|group| group.map(|group| group.start)));
-			match ends {
-				true => assert!(matches!(res, Poll::Ready(Ok(None))), "{case}: {res:?}"),
-				false => assert!(res.is_pending(), "{case}: {res:?}"),
-			}
+			assert!(matches!(res, Poll::Ready(Ok(None))), "{case}: {res:?}");
 		}
 	}
 
@@ -10400,7 +10890,7 @@ mod test {
 		// No `max`, so the new copy is asked for it where it resolved; see `Range::asked`.
 		let behind = Subscription::default().with_ranges([track::Range {
 			start: track::Start::Live {
-				min: Duration::from_millis(1500),
+				min: Some(Duration::from_millis(1500)),
 				max: None,
 			},
 			end: Some(1_000_000),
@@ -10501,7 +10991,10 @@ mod test {
 		assert!(routes.follow(&mut held, &weak));
 		{
 			let asked = held.sub.preferences().read();
-			assert!(asked.changes(revision).is_some(), "asked as an edit, not whole");
+			assert!(
+				matches!(asked.changes(revision), track::Changes::Keys(_)),
+				"asked as an edit, not whole"
+			);
 			assert_eq!(asked.subscription().order, track::Order::Ascending);
 		}
 
@@ -10648,7 +11141,7 @@ mod test {
 		assert!(copy.poll_ready((0, None), &kio::Waiter::noop()).is_ready());
 		// Two behind the newest frame, at 4.
 		let updated = Subscription::default().with_ranges([track::Range::from(track::Start::Live {
-			min: Duration::from_millis(2),
+			min: Some(Duration::from_millis(2)),
 			max: None,
 		})]);
 		let updated = Mirrored::of(&updated);
@@ -10691,6 +11184,52 @@ mod test {
 			rest.push(group.start);
 		}
 		assert_eq!(rest, vec![0, 1000, 2000, 3000, 4000, 6000]);
+	}
+
+	/// A reader that moves its start to exactly the replacement's resume point, while that
+	/// replacement is an empty received copy, takes no late group below it: group 8, which
+	/// holds time 8, already went out from the old route, and group 7 lies under the window
+	/// whichever copy it lands on, as for a plain reader of the route. So too once the old
+	/// route failed, leaving the empty replacement the only copy that can place the start.
+	#[test]
+	fn a_start_moved_to_the_resume_point_takes_no_late_group_below_it() {
+		for fail in [false, true] {
+			for ordered in [false, true] {
+				let routes = Producer::new();
+				let logical = logical(&routes);
+				let a = received_copy();
+				for key in [5, 6, 8] {
+					write(&a, key);
+				}
+				routes.serve(a.consume());
+				let mut sub = history(&logical);
+				let mut got = drain(&mut sub, ordered);
+				let b = received_copy();
+				routes.serve(b.consume());
+				got.extend(drain(&mut sub, ordered));
+				if fail {
+					a.clone()
+						.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+						.unwrap();
+					got.extend(drain(&mut sub, ordered));
+				}
+				let from = sub.subscription().with_ranges([track::Range {
+					start: track::Start::Time(8),
+					end: None,
+				}]);
+				sub.update(from).unwrap();
+				got.extend(drain(&mut sub, ordered));
+				if !fail {
+					write(&a, 7);
+					got.extend(drain(&mut sub, ordered));
+				}
+				write(&b, 7);
+				got.extend(drain(&mut sub, ordered));
+				write(&b, 9);
+				got.extend(drain(&mut sub, ordered));
+				assert_eq!(got, [5, 6, 8, 9], "fail={fail} ordered={ordered}");
+			}
+		}
 	}
 
 	/// Ranges widened while only an unanswered replacement can place them keep the switch's
@@ -11064,6 +11603,76 @@ mod test {
 		));
 	}
 
+	/// The serving copy refusing to place a time start fails the read at once, as a plain
+	/// reader's refusal does, though a copy it replaced still has a late group to hand out.
+	#[test]
+	fn the_serving_copys_refusal_fails_the_read_over_a_replaced_copys_late_group() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		write(&a, 0);
+		write(&a, 2);
+		routes.serve(a.consume());
+		let mut sub = logical
+			.consume()
+			.subscribe(from_times(&[0]))
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		assert_eq!(drain(&mut sub, false), [0, 2]);
+		let b = received_copy();
+		b.anchored();
+		routes.serve(b.consume());
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		// The new copy resumes the range at the boundary, a time it holds no group for.
+		b.refuse_time(2, Error::NotFound);
+		write(&a, 1);
+		let res = sub
+			.poll_recv_group(&kio::Waiter::noop())
+			.map(|res| res.map(|group| group.map(|group| group.start)));
+		assert!(matches!(res, Poll::Ready(Err(Error::NotFound))), "{res:?}");
+	}
+
+	/// A failed copy's late group waits for the window to place while a range still waits on
+	/// the copy continuing the track, though a range already placed holds the group.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_failed_copys_group_a_placed_range_holds_waits_for_the_window() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		for key in [5, 6, 8] {
+			write(&a, key);
+		}
+		routes.serve(a.consume());
+		let mut sub = logical
+			.consume()
+			.subscribe(from_times(&[0]))
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		let mut read = drain(&mut sub, false);
+		read.sort_unstable();
+		assert_eq!(read, [5, 6, 8]);
+		let b = track::Request::new(Arc::new(broadcast::Info::default()), "video");
+		routes.serve(b.consume());
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		// Late on the old route, which then fails.
+		write(&a, 7);
+		a.abort(Error::Cancel).unwrap();
+		// Time 0 places as it is; time 20 waits on the next copy.
+		sub.update(from_times(&[0, 20])).unwrap();
+		let held = drain(&mut sub, false);
+		assert_eq!(held, Vec::<u64>::new(), "held until the window places");
+
+		let b = b.accept(crate::track::Info::timed());
+		b.received();
+		write(&b, 20);
+		let mut read = drain(&mut sub, false);
+		read.sort_unstable();
+		assert_eq!(read, [7, 20]);
+	}
+
 	/// As [`a_backfill_places_a_raised_start_under_an_end_past_the_resume_point`], with the
 	/// replacement behind an inner front: the backfill through it places the start as a plain
 	/// copy's would, so the read ends once the range is read.
@@ -11153,6 +11762,198 @@ mod test {
 
 		write(&b, 7);
 		assert_eq!(drain(&mut sub, false), [7]);
+	}
+
+	/// A reader whose time start no copy placed at a group yet keeps a replaced copy that may
+	/// still land the group holding that time, as a plain cursor on the logical track reads
+	/// it. The copy replacing it starts past the time: an anchored one leaves the start
+	/// waiting, and another reaches back past every group it holds.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_unplaced_time_start_waits_on_a_replaced_copy() {
+		for anchored in [true, false] {
+			let routes = Producer::new();
+			let front = logical(&routes);
+			let b = received_copy();
+			b.anchored();
+			routes.serve(b.consume());
+			let mut sub = front
+				.consume()
+				.subscribe(Subscription::default().with_ranges([track::Range {
+					start: crate::track::Start::Time(7),
+					end: Some(7),
+				}]))
+				.now_or_never()
+				.unwrap()
+				.unwrap();
+			write(&b, 8);
+			assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+
+			let mut c = received_copy();
+			if anchored {
+				c.anchored();
+			}
+			c.start_at(9).unwrap();
+			write(&c, 9);
+			routes.serve(c.consume());
+			assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+
+			let mut read = Vec::new();
+			for key in [6, 7] {
+				write(&b, key);
+				read.extend(drain(&mut sub, false));
+			}
+			assert_eq!(read, [7], "anchored={anchored}");
+			if anchored {
+				let resolved = sub.resolved_range(0).expect("placed");
+				assert_eq!((resolved.start, resolved.end), (7, Some(8)));
+			}
+			assert!(
+				matches!(sub.poll_recv_group(&kio::Waiter::noop()), Poll::Ready(Ok(None))),
+				"anchored={anchored}"
+			);
+		}
+	}
+
+	/// As [`an_unplaced_time_start_waits_on_a_replaced_copy`], with no group at the time: the
+	/// replaced copy declares it skipped, so the group holding the time starts below it, and
+	/// the reader waits for that group, as a plain cursor does. Once read, the skipped group is
+	/// waited for on no copy, whether or not the serving copy's START lies past it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_unplaced_time_start_waits_below_its_time_on_a_replaced_copy() {
+		for started in [true, false] {
+			let routes = Producer::new();
+			let front = logical(&routes);
+			let b = received_copy();
+			b.anchored();
+			routes.serve(b.consume());
+			let mut sub = front
+				.consume()
+				.subscribe(Subscription::default().with_ranges([track::Range {
+					start: crate::track::Start::Time(7),
+					end: Some(7),
+				}]))
+				.now_or_never()
+				.unwrap()
+				.unwrap();
+			write(&b, 8);
+			let mut c = received_copy();
+			c.anchored();
+			if started {
+				c.start_at(9).unwrap();
+			}
+			write(&c, 9);
+			routes.serve(c.consume());
+			b.skip_groups(7..8);
+			assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+
+			write(&b, 6);
+			assert_eq!(drain(&mut sub, false), [6]);
+			let resolved = sub.resolved_range(0).expect("placed");
+			assert_eq!((resolved.start, resolved.end), (6, Some(8)));
+			assert!(
+				matches!(sub.poll_recv_group(&kio::Waiter::noop()), Poll::Ready(Ok(None))),
+				"started={started}"
+			);
+		}
+	}
+
+	/// A time start that reached back past every group a copy held stays unplaced once read,
+	/// but waits on a replaced copy only up to its range's end: a group past it holds neither
+	/// the start nor anything in range.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_unplaced_time_start_waits_on_a_replaced_copy_only_to_its_end() {
+		let routes = Producer::new();
+		let front = logical(&routes);
+		let b = received_copy();
+		b.anchored();
+		routes.serve(b.consume());
+		let mut sub = front
+			.consume()
+			.subscribe(Subscription::default().with_ranges([track::Range {
+				start: crate::track::Start::Time(7),
+				end: Some(7),
+			}]))
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		write(&b, 9);
+		// Not anchored: its backfill reaches the range back past every group it holds.
+		let mut c = received_copy();
+		c.start_at(10).unwrap();
+		write(&c, 10);
+		routes.serve(c.consume());
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+
+		write(&b, 7);
+		assert_eq!(drain(&mut sub, false), [7]);
+		assert_eq!(copies(&routes), 1, "group 8 is past the range");
+		b.skip_groups(0..7);
+		assert!(matches!(
+			sub.poll_recv_group(&kio::Waiter::noop()),
+			Poll::Ready(Ok(None))
+		));
+	}
+
+	/// As [`an_unplaced_time_start_waits_on_a_replaced_copy`], for an outer front's backfill
+	/// through an inner front: the inner front's reader is the one whose time start is
+	/// unplaced when it replaces its copy.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_backfill_through_an_inner_front_waits_on_a_copy_replaced_before_placing() {
+		let routes = Producer::new();
+		let front = logical(&routes);
+		let a = received_copy();
+		write(&a, 6);
+		write(&a, 8);
+		routes.serve(a.consume());
+		let from = |time, end| {
+			Subscription::default().with_ranges([track::Range {
+				start: crate::track::Start::Time(time),
+				end,
+			}])
+		};
+		let mut sub = front
+			.consume()
+			.subscribe(from(8, None))
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		assert_eq!(drain(&mut sub, false), [8]);
+		let inner_routes = Producer::new();
+		let inner = logical(&inner_routes);
+		let b = received_copy();
+		b.anchored();
+		inner_routes.serve(b.consume());
+		routes.serve(inner.consume());
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		a.abort(Error::Cancel).unwrap();
+		sub.update(from(7, Some(7))).unwrap();
+		write(&b, 8);
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+
+		// The inner front moves on to a copy whose feed starts past the time.
+		let mut c = received_copy();
+		c.anchored();
+		c.start_at(9).unwrap();
+		write(&c, 9);
+		inner_routes.serve(c.consume());
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+
+		let mut read = Vec::new();
+		for key in [6, 7] {
+			write(&b, key);
+			read.extend(drain(&mut sub, false));
+		}
+		assert_eq!(read, [7]);
+		let resolved = sub.resolved_range(0).expect("placed");
+		assert_eq!((resolved.start, resolved.end), (7, Some(8)));
+		assert!(matches!(
+			sub.poll_recv_group(&kio::Waiter::noop()),
+			Poll::Ready(Ok(None))
+		));
 	}
 
 	/// A backfill's group that a range already placed holds goes out though another range
@@ -11260,7 +12061,7 @@ mod test {
 		// Two behind the newest frame, at 10.
 		// No `max`, so the replacement is asked for it where it resolved; see `Range::asked`.
 		let subscription = Subscription::default().with_ranges([track::Range::from(track::Start::Live {
-			min: Duration::from_millis(2),
+			min: Some(Duration::from_millis(2)),
 			max: None,
 		})]);
 		let mut sub = logical
@@ -11296,7 +12097,7 @@ mod test {
 		routes.serve(a.consume());
 		let range = track::Range {
 			start: track::Start::Live {
-				min: Duration::ZERO,
+				min: Some(Duration::ZERO),
 				max: None,
 			},
 			end: Some(1_000_000),
@@ -11344,7 +12145,7 @@ mod test {
 		let joined = sub
 			.subscription()
 			.with_ranges([track::Range::from(track::Start::Live {
-				min: Duration::ZERO,
+				min: Some(Duration::ZERO),
 				max: None,
 			})])
 			.with_max(Duration::from_secs(30));
@@ -11357,7 +12158,7 @@ mod test {
 			sub.recv_group().now_or_never().is_none(),
 			"only its upstream's answer places it"
 		);
-		b.answer_join(Duration::ZERO, None, Some(1000), Duration::MAX);
+		b.answer_join(Some(Duration::ZERO), None, Some(1000), Duration::MAX);
 		let group = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
 		assert_eq!(group.start, 1000);
 	}
@@ -11470,7 +12271,7 @@ mod test {
 		// Two behind the newest frame, at 10: group 8.
 		// No `max`, so the capped copy is asked for it where it resolved; see `Range::asked`.
 		let subscription = Subscription::default().with_ranges([track::Range::from(track::Start::Live {
-			min: Duration::from_millis(2),
+			min: Some(Duration::from_millis(2)),
 			max: None,
 		})]);
 		let sub = routes.consume().subscribe(subscription.into());
@@ -11632,6 +12433,56 @@ mod test {
 		}
 	}
 
+	/// A live join that came placed keeps its place in the demand on a new copy once the reader
+	/// changes its other ranges, before its copies hear of it: resolved afresh against the
+	/// serving copy's cache, it would start nearer the live edge than where it was placed.
+	#[test]
+	fn the_fronts_subscription_keeps_a_placed_join_across_an_unmirrored_edit() {
+		for max in [None, Some(HOUR)] {
+			let routes = Producer::new();
+			let a = copy();
+			for sequence in 0..=10 {
+				write(&a, sequence);
+			}
+			routes.serve(a.consume());
+			let join = track::Range {
+				start: track::Start::Live {
+					min: Some(Duration::from_millis(5)),
+					max,
+				},
+				end: Some(1_000_000),
+			};
+			// Holds no group this test writes.
+			let later = track::Range {
+				start: track::Start::Time(500),
+				end: Some(600),
+			};
+			let placed = |ranges: Vec<track::Range>| Subscription {
+				placed: [(0, 3)].into(),
+				..Subscription::default().with_ranges(ranges)
+			};
+			let preferences = track::Preferences::from(placed(vec![join]));
+			let mut sub = routes.consume().subscribe(preferences.clone());
+			// Peeked, not taken: the reader handed out nothing, so no boundary raises the join.
+			let mut delivered = Delivered::default();
+			let Poll::Ready(Ok(Some(candidate))) =
+				sub.poll_peek_group(false, false, &mut delivered, &kio::Waiter::noop())
+			else {
+				panic!("a group to reserve")
+			};
+			assert_eq!(candidate.key(), 3);
+			preferences.update(placed(vec![join, later])).unwrap();
+			let asked = routes.subscription(Subscription::default(), 1);
+			match max {
+				None => assert_eq!(asked.ranges[0].start, track::Start::Time(3)),
+				Some(_) => {
+					assert_eq!(asked.ranges[0].start, join.start);
+					assert_eq!(asked.placed.get(&0), Some(&3), "max={max:?}");
+				}
+			}
+		}
+	}
+
 	/// The demand on a new copy keeps each reader's live join where its copy resolved it,
 	/// raised to the boundary a switch splits at. Ranges the reader changed since its
 	/// copies last heard resolve against the newest
@@ -11648,7 +12499,7 @@ mod test {
 		// A live join `back` behind the newest frame, a range of its own for each.
 		// No `max`, so a copy is asked for it where it resolved; see `Range::asked`.
 		let join = |back| track::Start::Live {
-			min: Duration::from_millis(back),
+			min: Some(Duration::from_millis(back)),
 			max: None,
 		};
 		let ranges = |back| {
@@ -11682,6 +12533,217 @@ mod test {
 		assert_eq!(start(), crate::track::Start::Time(20));
 		preferences.update(ranges(3)).unwrap();
 		assert_eq!(start(), join(3), "left for the copy to place");
+	}
+
+	/// A serving copy whose route failed places none of the ranges the reader changed since its
+	/// copies last heard: it placed them as if nothing followed its last group, and the copy
+	/// continuing the track places them instead.
+	#[test]
+	fn the_fronts_subscription_leaves_changed_ranges_past_a_failed_copy() {
+		let routes = Producer::new();
+		let a = copy();
+		for sequence in 0..=10 {
+			write(&a, sequence);
+		}
+		routes.serve(a.consume());
+		let join = |back| track::Start::Live {
+			min: Some(Duration::from_millis(back)),
+			max: None,
+		};
+		let ranges = |back| {
+			Subscription::default().with_ranges([track::Range {
+				start: join(back),
+				end: Some(1_000_000 + back),
+			}])
+		};
+		let preferences = track::Preferences::from(ranges(5));
+		let mut sub = routes.consume().subscribe(preferences.clone());
+		let mut delivered = Delivered::default();
+		let Poll::Ready(Ok(Some(candidate))) = sub.poll_peek_group(false, false, &mut delivered, &kio::Waiter::noop())
+		else {
+			panic!("a group to reserve")
+		};
+		assert_eq!(sub.take(candidate).unwrap().start, 5);
+		let start = || routes.subscription(Subscription::default(), 1).ranges[0].start;
+		assert_eq!(start(), crate::track::Start::Time(10));
+
+		a.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+			.unwrap();
+		// Changed, but not yet mirrored into the copies.
+		preferences.update(ranges(3)).unwrap();
+		assert_eq!(start(), join(3), "left for the next copy to place");
+	}
+
+	/// The demand on a new copy starts a time range at the group the serving copy resolves it
+	/// to, raised to the boundary: a range the reader added since its copies last heard
+	/// resolves against that copy's cache now, and one an answered copy holds nothing for is
+	/// left for the new copy to place, whatever the copies it replaced placed it at.
+	#[test]
+	fn the_fronts_subscription_starts_a_time_range_where_the_serving_copy_resolves_it() {
+		let past = track::Range {
+			start: track::Start::Time(100),
+			end: None,
+		};
+		let first = track::Range {
+			start: track::Start::Time(0),
+			end: Some(0),
+		};
+		for switched in [false, true] {
+			let routes = Producer::new();
+			let a = copy();
+			for sequence in [0, 4, 8] {
+				write(&a, sequence);
+			}
+			routes.serve(a.consume());
+			let ranges = match switched {
+				false => vec![first],
+				true => vec![first, past],
+			};
+			let preferences = track::Preferences::from(Subscription::default().with_ranges(ranges));
+			let mut sub = routes.consume().subscribe(preferences.clone());
+			let mut delivered = Delivered::default();
+			let Poll::Ready(Ok(Some(candidate))) =
+				sub.poll_peek_group(false, false, &mut delivered, &kio::Waiter::noop())
+			else {
+				panic!("a group to reserve")
+			};
+			assert_eq!(sub.take(candidate).unwrap().start, 0);
+			let start = || {
+				routes
+					.subscription(Subscription::default(), 1)
+					.ranges
+					.last()
+					.unwrap()
+					.start
+			};
+			assert_eq!(start(), track::Start::Time(8), "raised to the boundary");
+			let b = copy();
+			match switched {
+				// Not yet mirrored into the copies: group 8 holds time 100.
+				false => preferences
+					.update(Subscription::default().with_ranges([first, past]))
+					.unwrap(),
+				// The new copy answered, holding nothing yet.
+				true => {
+					routes.serve(b.consume());
+					assert!(matches!(
+						sub.poll_peek_group(false, false, &mut delivered, &kio::Waiter::noop()),
+						Poll::Ready(Ok(Some(_)))
+					));
+				}
+			}
+			let expected = match switched {
+				false => track::Start::Time(8),
+				true => track::Start::Time(100),
+			};
+			assert_eq!(start(), expected, "switched={switched}");
+		}
+	}
+
+	/// A live join the reader placed stays where it was placed after more edits than the
+	/// change log holds, whether they leave the other ranges as they were or not: placing it
+	/// afresh against the copy's cache now would pass over groups the reader still owes.
+	#[test]
+	fn a_placed_live_join_keeps_its_place_once_the_change_log_overflows() {
+		// Holds no group this test writes, so it changes only the ranges.
+		let later = track::Range {
+			start: track::Start::Time(500),
+			end: Some(600),
+		};
+		for left in [None, Some(later)] {
+			let routes = Producer::new();
+			let a = copy();
+			for sequence in 0..=10 {
+				write(&a, sequence);
+			}
+			routes.serve(a.consume());
+			let join = track::Range {
+				start: track::Start::Live {
+					min: Some(Duration::from_millis(5)),
+					max: None,
+				},
+				end: Some(1_000_000),
+			};
+			let preferences = track::Preferences::from(Subscription::default().with_ranges([join]));
+			let mut sub = routes.consume().subscribe(preferences.clone());
+			let mut delivered = Delivered::default();
+			let mut next = |sub: &mut Subscriber| {
+				let Poll::Ready(Ok(Some(candidate))) =
+					sub.poll_peek_group(false, false, &mut delivered, &kio::Waiter::noop())
+				else {
+					panic!("a group to reserve")
+				};
+				sub.take(candidate).unwrap().start
+			};
+			assert_eq!(next(&mut sub), 5);
+			for sequence in 11..=20 {
+				write(&a, sequence);
+			}
+			// Add and retire another range until the log no longer reaches the reader's revision.
+			for _ in 0..40 {
+				let add = track::Edit {
+					add: vec![(1, track::Range::ALL)],
+					..Default::default()
+				};
+				preferences.edit(add).unwrap();
+				let retire = track::Edit {
+					retire: vec![1],
+					..Default::default()
+				};
+				preferences.edit(retire).unwrap();
+			}
+			if let Some(range) = left {
+				let add = track::Edit {
+					add: vec![(2, range)],
+					..Default::default()
+				};
+				preferences.edit(add).unwrap();
+			}
+			assert_eq!(next(&mut sub), 6, "{left:?}: still placed at 5");
+		}
+	}
+
+	/// A front's reader retires the gaps its ranges left behind once they move, as a plain
+	/// reader does: past one per run the ranges hold, lowest first.
+	#[test]
+	fn a_front_reader_retires_the_gaps_its_ranges_left() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = history(&logical);
+		for key in (0..=50).step_by(10) {
+			write(&a, key);
+		}
+		assert_eq!(drain(&mut sub, false), [0, 10, 20, 30, 40, 50]);
+		assert_eq!(sub.delivered_runs(), 6, "every gap is still owed");
+		sub.update(Subscription::default().with_range(50..=50)).unwrap();
+		assert_eq!(sub.delivered_runs(), 2, "0 through 40, then 50");
+	}
+
+	/// A front's reader knows the live edge only once its serving copy does, and places ranges
+	/// as its publisher would only while that copy does.
+	#[test]
+	fn a_front_reader_answers_for_its_serving_copy() {
+		let noop = kio::Waiter::noop();
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let mut sub = history(&logical);
+		assert!(!sub.knows_edge(&noop), "no copy serves");
+		assert!(!sub.places_as_upstream(&noop), "no copy serves");
+
+		let a = received_copy();
+		a.await_edge();
+		routes.serve(a.consume());
+		assert!(!sub.knows_edge(&noop), "the copy's upstream has not said");
+		assert!(!sub.places_as_upstream(&noop), "the copy places ranges itself");
+		a.answer_edge();
+		assert!(sub.knows_edge(&noop));
+
+		let b = received_copy();
+		b.anchored();
+		routes.serve(b.consume());
+		assert!(sub.places_as_upstream(&noop));
 	}
 
 	/// Every live reader counts toward the demand on a new copy however many readers came
@@ -12257,7 +13319,10 @@ mod test {
 		// The old route gives 3 up and finishes, so it ran out under its cap without it.
 		a.drop_groups(3..4, StreamError::NotFound);
 		let _finished = a.finish().unwrap();
-		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		assert!(
+			sub.poll_recv_group(&fresh()).is_pending(),
+			"only the fill may deliver 3"
+		);
 		write(&b, 3);
 		assert_eq!(drain(&mut sub, false), [3]);
 	}
@@ -12970,7 +14035,7 @@ mod test {
 		// One behind the newest frame, at 5.
 		let subscription = Subscription::default()
 			.with_ranges([track::Range::from(track::Start::Live {
-				min: Duration::from_millis(1),
+				min: Some(Duration::from_millis(1)),
 				max: Some(std::time::Duration::ZERO),
 			})])
 			.with_max(Duration::from_secs(10));
@@ -13030,7 +14095,7 @@ mod test {
 			.with_ranges([
 				track::Range::groups(0..1),
 				track::Range::from(track::Start::Live {
-					min: Duration::from_millis(1),
+					min: Some(Duration::from_millis(1)),
 					max: Some(std::time::Duration::ZERO),
 				}),
 			])
@@ -13052,7 +14117,7 @@ mod test {
 		for start in [
 			track::Start::Time(0),
 			track::Start::Live {
-				min: Duration::ZERO,
+				min: Some(Duration::ZERO),
 				max: Some(std::time::Duration::ZERO),
 			},
 		] {
@@ -13640,6 +14705,269 @@ mod test {
 		assert!(matches!(sub.poll_recv_group(&fresh()), Poll::Ready(Ok(None))));
 	}
 
+	/// A serving copy that drains cleanly before any group past the cap supersedes what the copy
+	/// it replaced holds: an unread group there, kept out by the local cap, is waited for a
+	/// budget from the drain, and the track then ends.
+	#[kio::test]
+	async fn a_clean_drain_ends_the_wait_for_a_replaced_copys_unread_group_after_a_budget() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		write(&a, 0);
+		write(&a, 1);
+		routes.serve(a.consume());
+		let budget = Duration::from_secs(1);
+		let mut sub = subscribe(&logical, budget);
+		assert_eq!(recv(&mut sub).start, 0);
+		sub.set_range(..1);
+		let b = copy();
+		routes.serve(b.consume());
+		let _b = b.finish().unwrap();
+		assert!(sub.poll_recv_group(&fresh()).is_pending(), "group 1 is still unread");
+		kio::clock::sleep(2 * budget).await;
+		assert!(matches!(sub.poll_recv_group(&fresh()), Poll::Ready(Ok(None))));
+	}
+
+	/// A backfill of the serving route goes once it delivered what it was asked for, when the
+	/// only key the local floor keeps out under the resume point is skipped: nothing is left to
+	/// ask that route, so no copy is kept for the ask.
+	#[test]
+	fn a_backfill_goes_once_every_kept_out_key_is_skipped() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		write(&a, 0);
+		a.skip_groups(1..2);
+		write(&a, 3);
+		routes.serve(a.consume());
+		let mut sub = subscribe_until(&logical, 5);
+		assert_eq!(drain(&mut sub, false), [0, 3]);
+		let mut sub = sub.with_range(2..6);
+		let b = copy();
+		write(&b, 4);
+		routes.serve(b.consume());
+		assert_eq!(drain(&mut sub, false), [4]);
+		assert!(asked_for(&b, 2), "{:?}", b.subscription());
+		write(&b, 2);
+		assert_eq!(drain(&mut sub, false), [2]);
+		assert!(!asked_for(&b, 2), "{:?}", b.subscription());
+	}
+
+	/// An unbounded reader asks the serving route for no key its local floor keeps out, so a
+	/// backfill that delivered the rest of what it was asked for goes, though it was asked from
+	/// below that floor.
+	#[test]
+	fn an_unbounded_read_keeps_no_backfill_for_a_kept_out_key() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		write(&a, 0);
+		a.drop_groups(1..2, StreamError::NotFound);
+		write(&a, 3);
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		assert_eq!(drain(&mut sub, false), [0, 3]);
+		let b = copy();
+		write(&b, 4);
+		routes.serve(b.consume());
+		assert_eq!(drain(&mut sub, false), [4]);
+		assert!(asked_for(&b, 1), "{:?}", b.subscription());
+		let mut sub = sub.with_range(2..);
+		b.drop_groups(1..2, StreamError::NotFound);
+		write(&b, 2);
+		assert_eq!(drain(&mut sub, false), [2]);
+		assert!(!asked_for(&b, 2), "{:?}", b.subscription());
+	}
+
+	/// A kept-out key is asked of the serving route alone: a copy of another route, though it
+	/// was asked for that key and stays for a group still read from it, is not asked to fill it.
+	#[kio::test]
+	async fn a_kept_out_key_is_asked_of_no_replaced_route() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		for key in [0, 1, 2] {
+			write(&a, key);
+		}
+		routes.serve(a.consume());
+		let mut sub = subscribe_until(&logical, 9);
+		assert_eq!(drain(&mut sub, false), [0, 1, 2]);
+		// Asked from 2, it never gets 3.
+		let b = received_copy();
+		let b_fills = b.requests();
+		routes.serve(b.consume());
+		write(&b, 4);
+		let held = recv(&mut sub);
+		assert_eq!(held.start, 4);
+		let c = received_copy();
+		routes.serve(c.consume());
+		write(&c, 5);
+		let mut sub = sub.with_range(4..10);
+		assert_eq!(drain(&mut sub, false), [5]);
+		assert!(asked_for(&c, 3), "{:?}", c.subscription());
+		// Past the grace, the asked copy asks its own fills, and nothing asks b's.
+		kio::clock::sleep(HOUR).await;
+		assert!(sub.poll_recv_group(&fresh()).is_pending(), "3 is owed");
+		assert!(b_fills.poll_requested_fill(&fresh()).is_pending());
+		drop(held);
+	}
+
+	/// A kept-out key the asked copy's track forgot it was told is skipped, once the pool's expiry
+	/// window passed, is asked of that copy's fills: the route answered it once and will not
+	/// again unasked, and the copy kept for the ask would otherwise stand for an answer it lost.
+	#[kio::test]
+	async fn a_kept_out_skip_the_asked_copy_forgot_is_asked_again() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		write(&a, 0);
+		a.drop_groups(1..5, StreamError::NotFound);
+		write(&a, 5);
+		routes.serve(a.consume());
+		let subscription = Subscription::default().with_ranges([track::Range {
+			start: track::Start::Time(0),
+			end: Some(6),
+		}]);
+		let mut sub = logical
+			.consume()
+			.subscribe(subscription)
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		assert_eq!(drain(&mut sub, false), [0, 5]);
+		let pool = crate::cache::Pool::new(crate::cache::Config::default().with_expiry(Duration::from_secs(10)));
+		let b = track::Producer::new(
+			Arc::new(broadcast::Info {
+				pool: pool.clone(),
+				..Default::default()
+			}),
+			"video",
+			crate::track::Info::timed(),
+		);
+		b.received();
+		let dynamic = b.requests();
+		write(&b, 6);
+		routes.serve(b.consume());
+		let mut sub = sub.with_range(5..7);
+		assert_eq!(drain(&mut sub, false), [6]);
+		kio::clock::sleep(HOUR).await;
+		assert!(sub.poll_recv_group(&fresh()).is_pending(), "1 to 4 are owed");
+		assert!(asked_for(&b, 1), "{:?}", b.subscription());
+		// Past the grace, what the route has not answered is asked of a fill too: the copy's
+		// own miss of 5, which no budget makes stale, and the kept-out 1 to 4.
+		let Poll::Ready(Ok(missed)) = dynamic.poll_requested_fill(&fresh()) else {
+			panic!("the copy's miss is asked of its fills");
+		};
+		assert_eq!(missed.start().group..missed.end(), 5..6);
+		drop(missed);
+		write(&b, 5);
+		let Poll::Ready(Ok(overdue)) = dynamic.poll_requested_fill(&fresh()) else {
+			panic!("the overdue keys are asked of the copy's fills");
+		};
+		assert_eq!(overdue.start().group..overdue.end(), 1..5);
+		// The upstream answers part of it, and the fill stays out for the rest.
+		b.skip_groups(3..5);
+		assert!(sub.poll_recv_group(&fresh()).is_pending(), "1 and 2 are owed");
+
+		pool.step(Duration::from_secs(60));
+		pool.sweep();
+		b.skip_groups(1..3);
+		drop(overdue);
+		assert!(sub.poll_recv_group(&fresh()).is_pending(), "3 and 4 were forgotten");
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&fresh()) else {
+			panic!("the forgotten skip is asked of the copy's fills");
+		};
+		assert_eq!(fill.start().group..fill.end(), 3..5);
+		b.skip_groups(3..5);
+		assert!(matches!(sub.poll_recv_group(&fresh()), Poll::Ready(Ok(None))));
+	}
+
+	/// A single kept-out key the asked copy's track forgot, which its fill (a one-group FETCH on a
+	/// session) refuses, is given up as on one cursor, so the resumed read ends. An asked copy that
+	/// is another front's logical track asks its own serving copy and passes back what it gave up.
+	#[kio::test]
+	async fn a_forgotten_kept_out_key_a_fill_refused_ends_the_resumed_read() {
+		for nested in [false, true] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let mut fronts = Vec::new();
+			let mut serve = |copy: &track::Producer| match nested {
+				false => routes.serve(copy.consume()),
+				true => {
+					let inner_routes = Producer::new();
+					let inner = self::logical(&inner_routes);
+					inner_routes.serve(copy.consume());
+					routes.serve(inner.consume());
+					fronts.push((inner_routes, inner));
+				}
+			};
+			let a = copy();
+			write(&a, 0);
+			a.drop_groups(1..5, StreamError::NotFound);
+			write(&a, 5);
+			serve(&a);
+			let subscription = Subscription::default().with_ranges([track::Range {
+				start: track::Start::Time(0),
+				end: Some(6),
+			}]);
+			let mut sub = logical
+				.consume()
+				.subscribe(subscription)
+				.now_or_never()
+				.unwrap()
+				.unwrap();
+			assert_eq!(drain(&mut sub, false), [0, 5]);
+			let pool = crate::cache::Pool::new(crate::cache::Config::default().with_expiry(Duration::from_secs(10)));
+			let b = track::Producer::new(
+				Arc::new(broadcast::Info {
+					pool: pool.clone(),
+					..Default::default()
+				}),
+				"video",
+				crate::track::Info::timed(),
+			);
+			b.received();
+			let dynamic = b.requests();
+			write(&b, 6);
+			write(&b, 5);
+			serve(&b);
+			let mut sub = sub.with_range(5..7);
+			assert_eq!(drain(&mut sub, false), [6]);
+			kio::clock::sleep(HOUR).await;
+			assert!(
+				sub.poll_recv_group(&fresh()).is_pending(),
+				"nested={nested}: 1 to 4 are owed"
+			);
+			let Poll::Ready(Ok(overdue)) = dynamic.poll_requested_fill(&fresh()) else {
+				panic!("nested={nested}: the overdue keys are asked of the copy's fills");
+			};
+			assert_eq!(overdue.start().group..overdue.end(), 1..5);
+			b.skip_groups(4..5);
+			assert!(
+				sub.poll_recv_group(&fresh()).is_pending(),
+				"nested={nested}: 1 to 3 are owed"
+			);
+
+			pool.step(Duration::from_secs(60));
+			pool.sweep();
+			b.skip_groups(1..4);
+			drop(overdue);
+			assert!(
+				sub.poll_recv_group(&fresh()).is_pending(),
+				"nested={nested}: 4 was forgotten"
+			);
+			let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&fresh()) else {
+				panic!("nested={nested}: the forgotten key is asked of the copy's fills");
+			};
+			assert_eq!(fill.start().group..fill.end(), 4..5);
+			fill.reject_groups(4..5, Error::NotFound);
+			let res = sub
+				.poll_recv_group(&fresh())
+				.map(|res| res.map(|group| group.map(|group| group.start)));
+			assert!(matches!(res, Poll::Ready(Ok(None))), "nested={nested}: {res:?}");
+		}
+	}
+
 	/// A kept-out key the serving route answers with a group stays owed, as on one cursor, and is
 	/// asked once: the copy asked for it stays, so the read waits without asking again, and a
 	/// floor lowered under it hands that group out.
@@ -13758,6 +15086,8 @@ mod test {
 		let reading = recv(&mut sub);
 		assert_eq!(reading.start, 5);
 		let b = copy();
+		// The route answers fills, so its copy never gives 2 up as unfillable.
+		let _requests = b.requests();
 		b.skip_groups(1..2);
 		write(&b, 6);
 		routes.serve(b.consume());
@@ -13887,5 +15217,52 @@ mod test {
 			sub.poll_recv_group(&kio::Waiter::noop()),
 			Poll::Ready(Ok(None))
 		));
+	}
+
+	/// A front reader reaching back to the oldest group of a sparse-key track, as a viewer
+	/// joining a relay does, never settles the keys below the first group it read. Once the
+	/// pool shrinks under the gaps its publisher reported, it folds what it settled from
+	/// there, rather than end with [`Error::Lagged`].
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_reader_folds_from_the_oldest_group_it_read() {
+		const BASE: u64 = 1_000_000;
+		const GAP: u64 = 100;
+		let pool = crate::cache::Pool::new(crate::cache::Config::default().with_capacity(1 << 30));
+		let broadcast = Arc::new(broadcast::Info {
+			pool: pool.clone(),
+			..Default::default()
+		});
+		let routes = Producer::new();
+		let logical = track::Request::new(broadcast.clone(), "audio")
+			.routes(routes.consume())
+			.accept(crate::track::Info::timed());
+		let a = track::Producer::new(broadcast, "audio", crate::track::Info::timed());
+		routes.serve(a.consume());
+		let mut sub = None;
+		let mut read = |i: u64, size: usize| {
+			let key = BASE + i * GAP;
+			let mut group = a.create_group(group::Info { start: key }).unwrap();
+			group.write_frame(ts(key), vec![0u8; size]).unwrap();
+			group.finish().unwrap();
+			let sub = sub.get_or_insert_with(|| subscribe(&logical, HOUR));
+			match sub.poll_recv_group(&kio::Waiter::noop()) {
+				Poll::Ready(Ok(Some(group))) => assert_eq!(group.start, key),
+				res => panic!(
+					"the reader runs on at {key}: {:?}",
+					res.map(|res| res.map(|group| group.map(|group| group.start)))
+				),
+			}
+			// What a wire publisher tells its peer of the keys between groups.
+			sub.record_mut()
+				.tell(key + 1..key + GAP, crate::model::record::Report::Dropped);
+		};
+		for i in 0..1000 {
+			read(i, 1);
+		}
+		pool.resize(64 * 1024);
+		for i in 1000..1064 {
+			read(i, 16 * 1024);
+		}
 	}
 }

@@ -26,7 +26,7 @@ type Shape =
 	/** A time range, as the exclusive span of starts it covers, {@link UNBOUNDED} when open. */
 	| { kind: "time"; start: bigint; end: bigint }
 	/** A live join, by lag and end, and its budget. */
-	| { kind: "join"; join: string; min: Duration; budget: number }
+	| { kind: "join"; join: string; min: Duration | null; budget: number }
 	/** The rest: a range from the oldest group with an end. */
 	| { kind: "other" };
 
@@ -54,7 +54,7 @@ export class Ranges {
 	#others = new Map<string, { range: Range; count: number }>();
 	// Live joins by lag and end, each with the budgets its holders ask under, and the range asking
 	// the widest.
-	#joins = new Map<string, { budgets: Counts<number>; min: Duration; end: bigint | undefined }>();
+	#joins = new Map<string, { budgets: Counts<number>; min: Duration | null; end: bigint | undefined }>();
 	// The last union read, until a change moves it.
 	#union?: Range[];
 

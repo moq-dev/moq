@@ -240,7 +240,7 @@ async fn read_until(
 ) -> (Vec<crate::container::Frame>, Result<bool, String>) {
 	let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 		moq_net::track::Start::Live {
-			min: Duration::from_secs(3600),
+			min: Some(Duration::from_secs(3600)),
 			max: Some(Duration::from_secs(3600)),
 		},
 	)]);

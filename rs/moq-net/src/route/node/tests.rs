@@ -768,6 +768,122 @@ fn a_request_for_a_claim_shown_available_waits_for_a_copy_that_holds_it() {
 	);
 }
 
+/// A neighbour asks for a claim this node knows only from that neighbour's own copy,
+/// though it now routes to the claim's node another way: a link to it reopened, and its
+/// routes arrive before the claims behind them. The way back to the asker is none, so the
+/// request waits for the new route's copy rather than fail: the asker heard the claim
+/// from this node over the new route, and nothing it hears changes when that copy
+/// arrives, so a request refused meanwhile would never be asked again. It waits too when
+/// the asker's route is the cheaper one, since the new route still avoids the asker.
+#[test]
+fn a_request_from_the_only_holder_waits_for_another_copy() {
+	for (asker_cost, reopened_cost) in [(2, 1), (1, 2)] {
+		let (node, _clock) = node();
+		let room = cast("room");
+		let far = id(9);
+		let route = |via: u64, cost| Msg::Route {
+			origin: far,
+			offer: Some(Offer {
+				path: [
+					Hop { node: far, session: 0 },
+					Hop {
+						node: id(via),
+						session: 1,
+					},
+				]
+				.into(),
+				draining: false,
+				priority: i8::MAX,
+				cost,
+				marked: false,
+			}),
+		};
+		let claims = Msg::Claims {
+			origin: far,
+			changes: vec![(room.clone(), live(0))],
+			floor: 1,
+		};
+		let asker = node.connect(1, port(Role::Routing(id(7)))).unwrap();
+		asker.recv(Msg::Edited).unwrap();
+		asker.recv(route(7, asker_cost)).unwrap();
+		asker.recv(claims.clone()).unwrap();
+		asker.flush();
+		assert_eq!(confirm(&asker), 1);
+		let reopened = node.connect(2, port(Role::Routing(id(8)))).unwrap();
+		reopened.recv(Msg::Edited).unwrap();
+		reopened.recv(route(8, reopened_cost)).unwrap();
+		reopened.flush();
+		assert!(serves(&reopened).is_empty(), "its copy lacks the claim");
+		let (flag, waiter) = flag();
+		assert!(node.poll_forward(1, Some(far), &room, &waiter).is_pending());
+
+		reopened.recv(claims).unwrap();
+		reopened.flush();
+		assert_eq!(confirm(&reopened), 1);
+		assert!(flag.woken(), "a way appeared");
+		assert_eq!(
+			node.poll_forward(1, Some(far), &room, &waiter),
+			Poll::Ready(Some(Via::Route { node: far }))
+		);
+	}
+}
+
+/// A request from the only neighbour whose copy holds a claim fails once every route to the
+/// claim's node leads back to that neighbour, whichever route is cheaper: nothing else will
+/// ever hold the claim.
+#[test]
+fn a_request_from_the_only_holder_fails_once_only_its_route_is_left() {
+	for (asker_cost, reopened_cost) in [(2, 1), (1, 2)] {
+		let (node, _clock) = node();
+		let room = cast("room");
+		let far = id(9);
+		let route = |via: u64, cost| Msg::Route {
+			origin: far,
+			offer: Some(Offer {
+				path: [
+					Hop { node: far, session: 0 },
+					Hop {
+						node: id(via),
+						session: 1,
+					},
+				]
+				.into(),
+				draining: false,
+				priority: i8::MAX,
+				cost,
+				marked: false,
+			}),
+		};
+		let asker = node.connect(1, port(Role::Routing(id(7)))).unwrap();
+		asker.recv(Msg::Edited).unwrap();
+		asker.recv(route(7, asker_cost)).unwrap();
+		asker
+			.recv(Msg::Claims {
+				origin: far,
+				changes: vec![(room.clone(), live(0))],
+				floor: 1,
+			})
+			.unwrap();
+		asker.flush();
+		confirm(&asker);
+		assert_eq!(
+			node.poll_forward(1, Some(far), &room, &kio::Waiter::noop()),
+			Poll::Ready(None)
+		);
+
+		let reopened = node.connect(2, port(Role::Routing(id(8)))).unwrap();
+		reopened.recv(Msg::Edited).unwrap();
+		reopened.recv(route(8, reopened_cost)).unwrap();
+		reopened.flush();
+		let (flag, waiter) = flag();
+		assert!(node.poll_forward(1, Some(far), &room, &waiter).is_pending());
+
+		drop(reopened);
+		assert!(flag.woken(), "the other route went");
+		assert_eq!(node.poll_forward(1, Some(far), &room, &waiter), Poll::Ready(None));
+	}
+}
+
 /// A request waiting for a way to a claim fails once the node no longer routes to the
 /// claim's node, which shows the claim unavailable.
 #[test]

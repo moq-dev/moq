@@ -109,7 +109,7 @@ async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
 		// A join reaching back past the cached group: one at the latest group may resolve
 		// upstream after the refresh it requests, at the fresh group.
 		let reach = track::Start::Live {
-			min: Duration::from_millis((1 << 53) - 1),
+			min: None,
 			max: Some(Duration::ZERO),
 		};
 		let mut late = remote

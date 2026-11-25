@@ -37,11 +37,11 @@ Decided 2026-11-17 (maintainer, `/quest-plan`):
   WebVTT; WebVTT plus a JSON track). Why: WebVTT has no interim or final
   state, confidence, or machine-readable words, which AI consumers want;
   exporters still write WebVTT. See [the format](/quest/m3/transcribe/format.md).
-- ✅ Provider backends behind one interface, and a hosted one first: OpenAI
-  `gpt-live-transcribe`, chosen for latency (rejected: self-hosted first;
-  AWS Transcribe first for its word timing). Word timing is optional, filled
-  by backends that return it. A self-hosted backend follows
-  ([whisper](/quest/m4/transcribe-local.md)).
+- ✅ Provider backends behind one interface, and a hosted one first
+  (rejected: self-hosted first). Word timing is optional, filled by backends
+  that return it. A self-hosted backend follows
+  ([whisper](/quest/m4/transcribe-local.md)). The hosted backend is
+  Deepgram, decided 2026-11-24 below.
 - ✅ A fetch of past transcript transcribes the requested span plus a few
   seconds of preceding source audio, and returns only the requested
   segments (rejected: live only, which leaves rewinds without captions).
@@ -77,3 +77,11 @@ Decided 2026-11-23 (maintainer, `/quest-run`):
   ([translate](/quest/m3/transcribe/translate.md)), and the self-hosted
   transcriber on whisper.cpp through `whisper-rs`
   ([transcribe-local](/quest/m4/transcribe-local.md)).
+
+Decided 2026-11-24 (maintainer, `/quest-plan`): ✅ Deepgram Nova-3 is the
+only hosted transcription backend (rejected: OpenAI `gpt-live-transcribe`
+first, which 2026-11-17 picked for latency; OpenAI first with Deepgram
+second; AWS Transcribe). Why: Deepgram streams interim and final results,
+utterance ends, word timing, and each word's language, which the format
+wants and OpenAI's live model lacks, at about a third of its price per
+minute. The translator stays on OpenAI, since it translates text.

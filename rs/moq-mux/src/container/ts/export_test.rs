@@ -1913,7 +1913,7 @@ async fn export_scte35_roundtrip() {
 		.subscribe(
 			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 				moq_net::track::Start::Live {
-					min: RECORDING_MAX_AGE,
+					min: Some(RECORDING_MAX_AGE),
 					max: Some(RECORDING_MAX_AGE),
 				},
 			)]),
@@ -2131,7 +2131,7 @@ async fn export_pes_packet_roundtrip() {
 		.subscribe(
 			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 				moq_net::track::Start::Live {
-					min: RECORDING_MAX_AGE,
+					min: Some(RECORDING_MAX_AGE),
 					max: Some(RECORDING_MAX_AGE),
 				},
 			)]),
@@ -2293,7 +2293,7 @@ async fn programs_without_video_roundtrip_opaque_tracks() {
 				.subscribe(
 					moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 						moq_net::track::Start::Live {
-							min: RECORDING_MAX_AGE,
+							min: Some(RECORDING_MAX_AGE),
 							max: Some(RECORDING_MAX_AGE),
 						},
 					)]),
@@ -2344,7 +2344,7 @@ async fn read_frames(consumer: &moq_net::broadcast::Consumer, name: &str, kind: 
 		.subscribe(
 			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 				moq_net::track::Start::Live {
-					min: RECORDING_MAX_AGE,
+					min: Some(RECORDING_MAX_AGE),
 					max: Some(RECORDING_MAX_AGE),
 				},
 			)]),
@@ -3164,7 +3164,7 @@ async fn read_cues(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<(
 		.subscribe(
 			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 				moq_net::track::Start::Live {
-					min: RECORDING_MAX_AGE,
+					min: Some(RECORDING_MAX_AGE),
 					max: Some(RECORDING_MAX_AGE),
 				},
 			)]),
@@ -10634,7 +10634,7 @@ async fn a_subscription_states_the_whole_delay() {
 	assert_eq!(
 		subscription.ranges,
 		[moq_net::track::Range::from(moq_net::track::Start::Live {
-			min: delay,
+			min: Some(delay),
 			max: Some(delay),
 		})]
 	);

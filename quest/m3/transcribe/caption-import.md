@@ -18,6 +18,10 @@ Decided 2026-11-23 (maintainer, on
 Decided 2026-11-23 (maintainer, `/quest-run`): ✅ plan it here (rejected:
 leaving it to that PR's author). That PR's `cc_data` parser and tests
 (`js/watch/src/video/ccdata.ts`) are a starting point for the decode step.
+[moq-dev/moq#9442](https://github.com/moq-dev/moq/issues/9442) asks for the
+rejected player-side option, an opt-in `DecoderInput.emitSei`; this quest
+answers its need, so it closes the issue (decided 2026-11-23, maintainer,
+/quest-import).
 
 Extract in the codec importers (`rs/moq-mux/src/codec/h264/import.rs`,
 `rs/moq-mux/src/codec/h265/import.rs`), which see every container's frames in
@@ -49,6 +53,10 @@ structurally malformed `cc_data` fails the import like any malformed input.
 
 Public API: none beyond the new text tracks in an import's catalog. Wire:
 none.
+
+## Closes
+
+- [#9442](https://github.com/moq-dev/moq/issues/9442) - a player wants to draw a feed's in-band A/53 captions
 
 ## Related
 

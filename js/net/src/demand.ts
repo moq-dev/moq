@@ -69,13 +69,13 @@ export interface Contribution {
 }
 
 /**
- * A live join a received copy's readers wait on, by its lag in milliseconds and its end, with the
+ * A live join a received copy's readers wait on, by its lag in milliseconds (null for no lag limit) and its end, with the
  * widest max in milliseconds one waits with, as a budget, and the newest answer tick any of them saw
  * before it began waiting: only an answer recorded after that is fresh for every one of them.
  * Mirrors the Rust `JoinAsk`.
  */
 export interface JoinAsk {
-	min: number;
+	min: number | null;
 	end: bigint | undefined;
 	budget: number;
 	since: number;
@@ -404,7 +404,7 @@ export class Subscriptions implements Getter<Subscription | undefined> {
 	// and the answer tick each began waiting at counted: see {@link joins}.
 	#joins = new Map<
 		string,
-		{ min: number; end: bigint | undefined; budgets: Counts<number>; since: Counts<number> }
+		{ min: number | null; end: bigint | undefined; budgets: Counts<number>; since: Counts<number> }
 	>();
 	#revision = new Signal(0);
 	// The aggregate as last read, until it changes; null for none read yet.
@@ -534,9 +534,10 @@ export class Subscriptions implements Getter<Subscription | undefined> {
 			const tick = since.last();
 			if (budget !== undefined && tick !== undefined) joins.push({ min, end, budget, since: tick });
 		}
-		// By lag, then end, the open one first, as the Rust map orders them.
+		// By lag, no limit first, then end, the open one first, as the Rust map orders them.
 		const end = (join: JoinAsk) => (join.end === undefined ? -1n : join.end);
-		return joins.sort((a, b) => a.min - b.min || (end(a) < end(b) ? -1 : end(a) > end(b) ? 1 : 0));
+		const lag = (join: JoinAsk) => join.min ?? -1;
+		return joins.sort((a, b) => lag(a) - lag(b) || (end(a) < end(b) ? -1 : end(a) > end(b) ? 1 : 0));
 	}
 
 	/** The widest staleness budget in milliseconds any range asks under, without reading the ranges. */

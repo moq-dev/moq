@@ -1424,7 +1424,7 @@ impl Rendition {
 		let track = std::task::ready!(self.media.poll_track(binding, waiter));
 		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 			moq_net::track::Start::Live {
-				min: FEED_MAX_DELAY,
+				min: Some(FEED_MAX_DELAY),
 				max: Some(FEED_MAX_DELAY),
 			},
 		)]);
@@ -2385,7 +2385,7 @@ impl WatchMedia {
 					let subscription =
 						moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 							moq_net::track::Start::Live {
-								min: FEED_MAX_DELAY,
+								min: Some(FEED_MAX_DELAY),
 								max: Some(FEED_MAX_DELAY),
 							},
 						)]);

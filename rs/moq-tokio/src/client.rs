@@ -56,6 +56,8 @@ pub struct Client {
 	connect: Option<Url>,
 	/// The credentials each new connection starts presenting.
 	pub(crate) tokens: Vec<moq_net::auth::Token>,
+	/// Where the next connection asks for each dial's tokens instead, from [`Client::with_dials`].
+	pub(crate) dials: Option<crate::connection::Dials>,
 	/// The connect deadline, backoff, and GOAWAY handling each [`Connection`] runs under.
 	pub(crate) policy: moq_net::reconnect::Config,
 	/// Whether dials present an mTLS client certificate, refusing schemes that can't.
@@ -121,6 +123,7 @@ impl Client {
 
 		quic.validate()?;
 		config.backoff.validate()?;
+		config.websocket.validate()?;
 
 		// Only the rustls-backed transports use this. The plaintext qmux
 		// transports must not require a rustls crypto provider.
@@ -169,6 +172,7 @@ impl Client {
 			versions,
 			connect: config.url,
 			tokens: config.tokens,
+			dials: None,
 			policy,
 			client_cert,
 			failover_delay,
@@ -263,6 +267,17 @@ impl Client {
 	/// connection's with [`Connection::tokens`].
 	pub fn with_tokens(mut self, tokens: Vec<moq_net::auth::Token>) -> Self {
 		self.tokens = tokens;
+		self
+	}
+
+	/// Ask `dials` for the tokens of every dial the next [`Connection`] makes, as the dial starts,
+	/// instead of presenting [`with_tokens`](Self::with_tokens)' fixed ones: for a credential that
+	/// must be fresh when it is presented. See [`Dials`](crate::connection::Dials).
+	///
+	/// They serve one connection: the first this client or a clone of it connects takes them,
+	/// and a later one ends at once with [`Failure::Taken`](moq_net::reconnect::Failure::Taken).
+	pub fn with_dials(mut self, dials: crate::connection::Dials) -> Self {
+		self.dials = Some(dials);
 		self
 	}
 
@@ -447,7 +462,7 @@ impl Client {
 	pub(crate) async fn probe(
 		&self,
 		attempt: moq_net::reconnect::Attempt<crate::connect::Addr>,
-	) -> crate::Result<std::pin::Pin<Box<crate::connection::Dial>>> {
+	) -> crate::Result<std::pin::Pin<Box<crate::connection::Handshake>>> {
 		let (addr, client) = self.attempt(&attempt);
 		let url = addr.url().clone();
 		let transport = quic_transport(&url);

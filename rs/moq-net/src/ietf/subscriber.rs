@@ -1140,8 +1140,8 @@ pub(super) struct Subscriber {
 	state: Lock<State>,
 	tasks: Tasks,
 	version: Version,
-	// Set once the peer sends a GOAWAY; this session's routes then rank last
-	// (draining), so a replacement session outranks it. Requests keep opening,
+	// Set once the peer sends a GOAWAY; this session's routes then rank below every
+	// available route (draining), so a replacement session outranks it. Requests keep opening,
 	// deliberately past draft-22 section 9.2's SHOULD NOT: refusing them would
 	// fail requests that land before the replacement is up.
 	going_away: crate::goaway::GoingAway,
@@ -11122,7 +11122,7 @@ mod tests {
 		// What we are publishing to the peer: a real upstream route.
 		let upstream = crate::Hops::try_from(vec![crate::Hop::new(7).unwrap()]).unwrap();
 		let _source = origin
-			.announce("room/host", crate::origin::RouteInfo::new().with_hops(upstream.clone()))
+			.forward("room/host", crate::origin::RouteInfo::new().with_hops(upstream.clone()))
 			.unwrap();
 		announced.expect_next_active("room/host").await;
 		let _advertised = publishing.expect_next_active("room/host").await;
@@ -14714,7 +14714,7 @@ mod filter_tests {
 		let live = |min: Option<Duration>, start: u64| {
 			let first = match min {
 				Some(min) => track::Range::from(track::Start::Live {
-					min,
+					min: Some(min),
 					max: Some(std::time::Duration::ZERO),
 				}),
 				None => track::Range::ALL,
@@ -14761,7 +14761,7 @@ mod filter_tests {
 		assert_eq!(wire_bounds(&asking(&bounded), None), (Some(0), Some(5)));
 		// A live join alone asks from the live edge, whatever its max.
 		let patient = track::Range::from(track::Start::Live {
-			min: Duration::ZERO,
+			min: Some(Duration::ZERO),
 			max: Some(Duration::from_secs(10)),
 		});
 		for subscription in [asking(&[live]), asking(&[patient])] {

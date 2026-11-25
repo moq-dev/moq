@@ -108,9 +108,11 @@ describe("replay", () => {
 	// missing media are owed. Media that overlaps the group below counts as back to back, as the consumer
 	// reads it.
 	it("waits out only the keys around missing media when groups are keyed by timestamp", async () => {
-		const options = { rate: RATE, config: CONFIG, delay: Duration.millis(100), duration: observed(10) };
+		// A second is enough to play past the gap: the replay costs CPU per simulated second, and four of
+		// them run here.
+		const options = { rate: RATE, config: CONFIG, delay: Duration.millis(100), duration: observed(1) };
 		const keyed = (duration: number) =>
-			paced(10, () => 30).map((arrival) => ({ ...arrival, group: arrival.timestamp * 1000, duration }));
+			paced(1, () => 30).map((arrival) => ({ ...arrival, group: arrival.timestamp * 1000, duration }));
 		// Audio heard, in ms: owed keys nobody sends would starve the whole replay.
 		const heard = async (trace: Arrival[]) => {
 			let samples = 0;
@@ -118,10 +120,10 @@ describe("replay", () => {
 			return (samples * 1000) / RATE;
 		};
 		const whole = await heard(keyed(20));
-		expect(whole).toBeGreaterThan(9000);
+		expect(whole).toBeGreaterThan(850);
 		expect(await heard(keyed(22))).toBe(whole);
 		expect(await underruns(keyed(20), options)).toBe(0);
-		const missing = keyed(20).filter((arrival) => arrival.timestamp !== 5000);
+		const missing = keyed(20).filter((arrival) => arrival.timestamp !== 500);
 		expect(await underruns(missing, options)).toBeGreaterThan(0);
 	});
 

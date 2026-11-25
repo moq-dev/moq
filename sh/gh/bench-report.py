@@ -359,52 +359,6 @@ def nightly_metrics(directory):
     return kixel(head, {commit: entries for commit, entries in bases.items() if entries}) if head else None
 
 
-def callgrind(path):
-    """Each benchmark's instruction count in one Callgrind profile, as CodSpeed's instrumented Criterion dumps it."""
-    parts, events = [], None
-    with path.open("rb") as stream:
-        if stream.readline().rstrip(b"\n") != b"# callgrind format":
-            raise ValueError(f"not a Callgrind profile: {path}")
-        # Only a part's header lines begin with these keys; its cost lines begin with positions or `key=`.
-        for line in stream:
-            if line.startswith(b"part:"):
-                parts.append({"trigger": None, "events": events, "totals": None})
-            elif not parts:
-                continue
-            elif line.startswith(b"desc: Trigger: "):
-                parts[-1]["trigger"] = line[len(b"desc: Trigger: ") :].rstrip(b"\n").decode()
-            elif line.startswith(b"events:"):
-                events = parts[-1]["events"] = line.split()[1:]
-            # CodSpeed's Callgrind leaves each part's `summary` 0 and closes the part with its `totals`.
-            elif line.startswith(b"totals:") and parts[-1]["totals"] is None:
-                parts[-1]["totals"] = line.split()[1:]
-    entries = []
-    for part in parts:
-        trigger = part["trigger"]
-        # Each benchmark dumps its own part; codspeed-rust also dumps its version, and Valgrind dumps at exit.
-        request = (trigger or "").removeprefix("Client Request: ")
-        if trigger == "Program termination" or request.startswith("Metadata: "):
-            continue
-        if request == (trigger or ""):
-            raise ValueError(f"unexpected Callgrind dump {trigger!r}: {path}")
-        if part["events"] is None or b"Ir" not in part["events"] or part["totals"] is None:
-            raise ValueError(f"Callgrind part {request} counts no instructions: {path}")
-        # Callgrind drops trailing zero costs.
-        index, totals = part["events"].index(b"Ir"), part["totals"]
-        instructions = int(totals[index]) if index < len(totals) else 0
-        if instructions == 0:
-            raise ValueError(f"{request} ran no simulated instructions: {path}")
-        entries.append({"name": request, "unit": "instructions", "value": instructions})
-    return entries
-
-
-def codspeed_metrics(directory):
-    """Kixel Quest's metrics of every benchmark in the Callgrind profiles CodSpeed's runner left in its temp folder."""
-    # Each run part's profile folder, holding a `<pid>.out` for each process.
-    profiles = sorted(directory.glob("profile.*.out/*.out"))
-    return kixel([entry for path in profiles for entry in callgrind(path)], {})
-
-
 HISTORY_PREFIX = "window.BENCHMARK_DATA = "
 BASELINE = 7
 TREND = 30
@@ -686,7 +640,7 @@ def index(directory, commit=None, paired_path=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    for command in ("rust", "rust-test", "js", "size", "prepare", "nightly-metrics", "codspeed-metrics"):
+    for command in ("rust", "rust-test", "js", "size", "prepare", "nightly-metrics"):
         sub = commands.add_parser(command)
         sub.add_argument("directory", type=Path)
         sub.add_argument("output", type=Path)
@@ -714,9 +668,8 @@ def main():
         write(args.output, sizes(args.directory))
     elif args.command == "prepare":
         prepare(args.directory, args.output)
-    elif args.command in ("nightly-metrics", "codspeed-metrics"):
-        metrics = nightly_metrics if args.command == "nightly-metrics" else codspeed_metrics
-        text = metrics(args.directory)
+    elif args.command == "nightly-metrics":
+        text = nightly_metrics(args.directory)
         if text is not None:
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(text)

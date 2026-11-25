@@ -22,6 +22,14 @@ web-transport's latest 0.3.x, a different API. `js/qmux` must publish above that
 the maintainer picks the version (found 2026-11-07 by the API shape audit).
 Recommended 2026-11-12 (/quest-audit): 0.4.0, so a consumer of
 web-transport's `^0.3` never resolves to the new API.
+Also before publishing, recreate the npm trusted publishers of `@moq/clock`,
+`@moq/libav`, `@moq/stats`, and `@moq/video`, which were claimed as `0.0.0`
+placeholders on 2026-11-24. npm expires a trusted publisher that no OIDC
+exchange has validated about 48 hours after it is created, and only the
+package's Settings page shows it as Expired. Revoke each (`npm trust list`,
+`npm trust revoke --id`) and run `npm trust github @moq/<name> --file
+release-js.yml --repository moq-dev/moq --environment npm --allow-publish
+--allow-stage-publish`, then publish within 48 hours.
 Before publishing, confirm moq-dev/web-transport's release config no longer
 publishes `@moq/qmux` or `qmux` (the freeze step of
 [qmux-js-retire](/quest/m3/release/qmux-js-retire.md) and
@@ -217,7 +225,9 @@ Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit):
 - ✅ The FFI's `abort_unwanted`
   ([moq-dev/moq#8897](https://github.com/moq-dev/moq/pull/8897)) lands first: it adds a
   method to an existing binding object, which the API diff counts as a
-  break once 0.22 is published.
+  break once 0.22 is published. Superseded 2026-11-23 (maintainer): it
+  landed, and [abort-unwanted-delete](/quest/m2/abort-unwanted-delete.md)
+  in m2 deletes it before 0.22 publishes it.
 - ✅ End-to-end encryption does not publish at this cut
   ([its own unpublished crate](https://github.com/moq-dev/moq/pull/8947)),
   so `moq-e2ee` is no longer a retired name, and the paragraph above about
@@ -304,4 +314,3 @@ candidate:
 - [Resync drifted TLA+ models](/quest/m1/resync-tla-models.md) - formal models match the finalized lite-07 code before it ships
 - [Port recent quinn fixes](/quest/m1/quinn-upstream-sync.md) - upstream quinn-proto correctness fixes since 2026-11-03 land in moq-quic before 0.22
 - [Re-run release performance baseline](/quest/m3/release/perf-recheck.md) - fresh `main` vs `origin/release` baseline and Nightly paired regression triage once m2 finishes
-- [Claim new npm names](/quest/m3/release/npm-first-publish.md) - trusted publishing can publish every new `@moq/*` package

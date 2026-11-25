@@ -146,6 +146,19 @@ impl Delivered {
 			.map(|(_, last)| last + 1)
 	}
 
+	/// The lowest key from `key` on that was handed out.
+	pub fn next_from(&self, key: u64) -> Option<u64> {
+		match self.contains(key) {
+			true => Some(key),
+			false => self.runs.range(key..).next().map(|(first, _)| *first),
+		}
+	}
+
+	/// One past the highest key handed out.
+	pub fn end(&self) -> Option<u64> {
+		self.runs.last_key_value().map(|(_, last)| last + 1)
+	}
+
 	/// How many runs it holds: one per gap, plus the floor.
 	pub fn runs(&self) -> usize {
 		self.runs.len()

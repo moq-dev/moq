@@ -69,7 +69,7 @@ impl Ask {
 			None => Start::Oldest,
 			Some(start) => match start.get("live") {
 				Some(live) => Start::Live {
-					min: Duration::from_millis(live.as_u64().expect("a lag")),
+					min: Some(Duration::from_millis(live.as_u64().expect("a lag"))),
 					max: None,
 				},
 				None => Start::Time(start.as_u64().expect("a time")),
