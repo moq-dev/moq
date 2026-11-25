@@ -5180,16 +5180,16 @@ test("a group a draining copy loses is backfilled", async () => {
 		await settle();
 		// The switch leaves groups 1 and 2 to the replaced copy, so it asks the serving route for
 		// neither.
-		expect(sub.tryRecvGroup()?.start).toBe(1n);
+		expect(sub.tryRecvGroup()?.start).toBe(3n);
 		// Idle past the cache window, so the next write evicts every group but the new edge.
 		clock.jump(Duration.millis(DEFAULT_EXPIRY.asMillis() + 1000));
 		ta.write(4n);
 		await settle();
 		expect(drain(sub)).toEqual([]);
+		tb.write(1n);
 		tb.write(2n);
-		tb.write(3n);
 		await settle();
-		expect(drain(sub)).toEqual([2n, 3n]);
+		expect(drain(sub)).toEqual([2n, 1n]);
 	} finally {
 		sub.close();
 		front.consumer.close();

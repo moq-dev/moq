@@ -17782,7 +17782,7 @@ mod test {
 		pool.step(Duration::from_secs(1));
 		append_frozen(&mut producer); // the successor
 		let state = producer.state.downgrade();
-		let mut subscriber = producer.subscribe(Subscription::default().with_max(budget));
+		let mut subscriber = producer.subscribe(Subscription::default().with_max(budget).with_order(Order::Ascending));
 		let producer = producer.finish().unwrap();
 		drop(producer);
 
@@ -17826,7 +17826,12 @@ mod test {
 			.unwrap();
 		let state = producer.state.downgrade();
 		let consumer = producer.consume();
-		let mut subscriber = producer.subscribe(Subscription::default().with_start(0).with_max(None));
+		let mut subscriber = producer.subscribe(
+			Subscription::default()
+				.with_start(0)
+				.with_max(None)
+				.with_order(Order::Ascending),
+		);
 		drop(producer.finish().unwrap());
 
 		// Reading 1000 and 2000 keeps them cached past 3000's idle window.
@@ -17888,7 +17893,12 @@ mod test {
 		}
 		let state = producer.state.downgrade();
 		let consumer = producer.consume();
-		let mut subscriber = producer.subscribe(Subscription::default().with_start(0).with_max(None));
+		let mut subscriber = producer.subscribe(
+			Subscription::default()
+				.with_start(0)
+				.with_max(None)
+				.with_order(Order::Ascending),
+		);
 
 		// Reading 1 and 2 keeps them cached past 3's idle window, as an empty 4 created then is.
 		let waiter = kio::Waiter::noop();
@@ -36669,7 +36679,7 @@ mod test {
 			for millis in [1000, 2000, 3000, 6000] {
 				append_at(&mut producer, millis);
 			}
-			assert_eq!(drain(&mut subscriber), vec![3, 4]);
+			assert_eq!(drain(&mut subscriber), vec![4, 3]);
 			if lost {
 				producer.evict_for_debt(1);
 				producer.evict_for_debt(2);

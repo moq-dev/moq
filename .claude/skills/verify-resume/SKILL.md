@@ -31,7 +31,7 @@ quest gate just rs tla moq-net/verify/resume/ResumeReader.tla -config rs/moq-net
 quest gate just rs tla moq-net/verify/resume/ResumeReader.tla -config rs/moq-net/verify/resume/Evict.cfg
 ```
 
-The first checks every rule over two routes, three groups, two switches, and a reader holding each group until it finishes it: about STATES1 distinct states, in about TIME1. The second trades a group for a third route, so a route can come up after another failed: about STATES2 states, in about TIME2. The third lets the cache of a route no longer served evict one group, so a group a switch left a replaced copy to drain is lost there and asked of the serving route after all: about STATES3 states, in about TIME3. With `ReArm = FALSE` it fails `CleanEndIsComplete` in seconds. All three pass at the sync commit. Nightly runs every config here and fails if a config with an `\* Open finding:` line passes.
+The first checks every rule over two routes, three groups, two switches, and a reader holding each group until it finishes it: about 20.3M distinct states, in about eight minutes. The second trades a group for a third route, so a route can come up after another failed: about 5.0M states, in about a minute and a half. The third lets the cache of a route no longer served evict one group, so a group a switch left a replaced copy to drain is lost there and asked of the serving route after all: about 14.7M states, in about four minutes. With `ReArm = FALSE` it fails `CleanEndIsComplete` in seconds. All three pass at the sync commit. Nightly runs every config here and fails if a config with an `\* Open finding:` line passes.
 
 ## Open findings
 

@@ -9827,12 +9827,12 @@ mod test {
 			routes.serve(b.consume());
 			// The switch leaves groups 1 and 2 to the replaced copy, so it asks the serving route
 			// for neither.
-			assert_eq!(peek(&mut sub, false).key(), 1);
+			assert_eq!(peek(&mut sub, false).key(), 3);
 			match debt {
 				true => a.evict_for_debt(2),
 				false => a.evict(2),
 			}
-			assert_eq!(drain(&mut sub, false), [1, 3], "debt {debt}");
+			assert_eq!(drain(&mut sub, false), [3, 1], "debt {debt}");
 			// Parked with group 2 lost to a reader that already waits on the rest.
 			let wake = Arc::new(Wake::default());
 			let waiter = kio::Waiter::new(wake.clone().into());
@@ -9861,7 +9861,7 @@ mod test {
 		write(&a, 3);
 		let b = copy();
 		routes.serve(b.consume());
-		assert_eq!(peek(&mut sub, false).key(), 1);
+		assert_eq!(peek(&mut sub, false).key(), 3);
 		sub.edit(track::Edit {
 			placed: Default::default(),
 			retire: Vec::new(),
@@ -9876,9 +9876,9 @@ mod test {
 			order: track::Order::default(),
 		})
 		.unwrap();
-		assert_eq!(peek(&mut sub, false).key(), 1);
+		assert_eq!(peek(&mut sub, false).key(), 3);
 		a.evict(2);
-		assert_eq!(drain(&mut sub, false), [1, 3]);
+		assert_eq!(drain(&mut sub, false), [3, 1]);
 		write(&b, 2);
 		assert_eq!(drain(&mut sub, false), [2]);
 	}

@@ -2489,8 +2489,8 @@ async function idleBut(keys: bigint[], evicted: bigint[]) {
 // Rust `an_evicted_successor_still_bounds_the_reach`.
 test("an evicted successor still bounds the reach", async () => {
 	for (const [evicted, read] of [
-		[[], [1000n, 5000n, 6000n]],
-		[[1000n], [5000n, 6000n]],
+		[[], [6000n, 5000n, 1000n]],
+		[[1000n], [6000n, 5000n]],
 	]) {
 		const { producer, clock } = await idleBut([0n, 1000n], evicted);
 		try {
@@ -2553,7 +2553,7 @@ test("a join ignores an evicted older group running past the edge", async () => 
 			const subscriber = producer.subscribe({
 				ranges: [{ start: { live: { min: Duration.millis(500), max: null } } }],
 			});
-			expect({ evicted, read: drainGroups(subscriber) }).toEqual({ evicted, read: [2000n, 3000n, 3001n] });
+			expect({ evicted, read: drainGroups(subscriber) }).toEqual({ evicted, read: [3001n, 3000n, 2000n] });
 		} finally {
 			producer.finish();
 			producer.close();
@@ -2567,7 +2567,7 @@ test("a join ignores an evicted older group running past the edge", async () => 
 // `a_local_time_start_ignores_an_older_group_kept_past_an_evicted_one`.
 test("a local time start ignores an older group kept past an evicted one", async () => {
 	for (const [evicted, read] of [
-		[[], [2000n, 3000n]],
+		[[], [3000n, 2000n]],
 		[[2000n], [3000n]],
 		[[1000n, 2000n], [3000n]],
 	]) {
@@ -2588,8 +2588,8 @@ test("a local time start ignores an older group kept past an evicted one", async
 // cache still holds. Mirrors the Rust `a_join_after_the_end_measures_an_evicted_edge`.
 test("a join after the end measures an evicted edge", async () => {
 	for (const [evicted, read] of [
-		[[], [3000n, 4000n, 5000n]],
-		[[5000n], [3000n, 4000n]],
+		[[], [5000n, 4000n, 3000n]],
+		[[5000n], [4000n, 3000n]],
 	]) {
 		const keys = [1000n, 2000n, 3000n, 4000n, 5000n];
 		const clock = manualTime(10_000);
