@@ -1911,21 +1911,7 @@ async fn a_seek_mid_block_waits_for_the_block() {
 
 	let snapshot = catalog.snapshot();
 	let name = snapshot.audio.renditions.keys().next().unwrap();
-	let replay = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
-		moq_net::track::Start::Live {
-			min: Some(std::time::Duration::from_secs(3600)),
-			max: Some(std::time::Duration::from_secs(3600)),
-		},
-	)]);
-	let mut track = consumer.track(name).unwrap().subscribe(replay).await.unwrap();
-	let mut groups = Vec::new();
-	while let Some(mut group) = track.recv_group().await.unwrap() {
-		let mut frames = 0;
-		while group.read_frame().await.unwrap().is_some() {
-			frames += 1;
-		}
-		groups.push((group.start, frames));
-	}
+	let groups = groups(&consumer, name).await;
 	// The block's group ends whole past its second 20ms frame, so the seek's group starts there.
 	assert_eq!(groups, [(0, 2), (40_000, 1)]);
 }
@@ -2334,21 +2320,180 @@ async fn audio_block_duration_overrides_the_default() {
 		assert_eq!(published.values().next().unwrap(), &expected, "before {before}");
 
 		let name = snapshot.audio.renditions.keys().next().unwrap();
-		let replay = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
-			moq_net::track::Start::Live {
-				min: Some(std::time::Duration::from_secs(3600)),
-				max: Some(std::time::Duration::from_secs(3600)),
-			},
-		)]);
-		let mut track = consumer.track(name).unwrap().subscribe(replay).await.unwrap();
-		let mut groups = Vec::new();
-		while let Some(mut group) = track.recv_group().await.unwrap() {
-			let mut frames = 0;
-			while group.read_frame().await.unwrap().is_some() {
-				frames += 1;
-			}
-			groups.push((group.start, frames));
-		}
-		assert_eq!(groups, [(0, 20), (100_000, 20)], "before {before}");
+		assert_eq!(groups(&consumer, name).await, [(0, 20), (100_000, 20)], "before {before}");
 	}
+}
+
+/// Each group's start and frame count, replaying the track's whole history.
+async fn groups(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<(u64, usize)> {
+	let replay = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+		moq_net::track::Start::Live {
+			min: Some(std::time::Duration::from_secs(3600)),
+			max: Some(std::time::Duration::from_secs(3600)),
+		},
+	)]);
+	let mut track = consumer.track(name).unwrap().subscribe(replay).await.unwrap();
+	let mut groups = Vec::new();
+	while let Some(mut group) = track.recv_group().await.unwrap() {
+		let mut frames = 0;
+		while group.read_frame().await.unwrap().is_some() {
+			frames += 1;
+		}
+		groups.push((group.start, frames));
+	}
+	groups
+}
+
+/// An Opus track whose packets default to `default_duration` nanoseconds.
+fn opus_track(default_duration: u64) -> MatroskaSpec {
+	let mut entry = track_entry_audio_opus(1, 48_000.0, 2);
+	let MatroskaSpec::TrackEntry(Master::Full(children)) = &mut entry else {
+		unreachable!()
+	};
+	children.push(MatroskaSpec::DefaultDuration(default_duration));
+	entry
+}
+
+/// An import joining a catalog clock another source already placed shifts where its groups end
+/// along with its frames.
+#[tokio::test(start_paused = true)]
+async fn a_shifted_clock_cuts_where_its_frames_end() {
+	let data = MkvBuilder::new()
+		.header("webm")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![opus_track(20_000_000)])
+		.cluster(0, || {
+			(0..10i16)
+				.map(|index| simple_block(1, index * 20, true, b"\xf8\xff\xfe"))
+				.collect()
+		})
+		.segment_end()
+		.build();
+	let wall = kio::clock::wall();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	catalog
+		.timebase()
+		.place(moq_net::Timestamp::from_secs(10).unwrap(), wall)
+		.unwrap();
+	// This source's zero lands 10 s into the catalog clock.
+	let timebase = catalog.timebase();
+	timebase.place(moq_net::Timestamp::ZERO, wall).unwrap();
+	let mut importer = super::Import::new(broadcast, timebase.reserve());
+	importer.decode(&data).unwrap();
+	let _finished = importer.finish().unwrap();
+
+	let snapshot = catalog.snapshot();
+	let name = snapshot.audio.renditions.keys().next().unwrap();
+	assert_eq!(groups(&consumer, name).await, [(10_000_000, 5), (10_100_000, 5)]);
+}
+
+/// A laced block's BlockDuration spaces its packets when it precedes them. One that follows them
+/// comes too late to, so the block ends a default past its last packet rather than below it.
+#[tokio::test(start_paused = true)]
+async fn laced_audio_with_a_block_duration() {
+	use webm_iterable::matroska_spec::{BlockLacing, Frame};
+	for before in [true, false] {
+		// Twenty 5 ms packets a block, in a track that defaults to 20 ms.
+		let packets = vec![b"\xf8\xff\xfe".as_slice(); 20];
+		let (step, spacing) = match before {
+			true => (5_000, 100),
+			false => (20_000, 400),
+		};
+		let data = MkvBuilder::new()
+			.header("webm")
+			.segment_start()
+			.info(1_000_000)
+			.tracks(vec![opus_track(20_000_000)])
+			.cluster(0, || {
+				(0..2i16)
+					.map(|index| {
+						let mut block = SimpleBlock::new_uncheked(
+							&[],
+							1,
+							index * spacing,
+							false,
+							Some(BlockLacing::Xiph),
+							false,
+							true,
+						);
+						block.set_frame_data(&packets.iter().map(|data| Frame { data }).collect());
+						let MatroskaSpec::SimpleBlock(raw) = block.into() else {
+							unreachable!()
+						};
+						let mut children = vec![MatroskaSpec::Block(raw)];
+						let duration = MatroskaSpec::BlockDuration(100);
+						match before {
+							true => children.insert(0, duration),
+							false => children.push(duration),
+						}
+						MatroskaSpec::BlockGroup(Master::Full(children))
+					})
+					.collect()
+			})
+			.segment_end()
+			.build();
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut importer = super::Import::new(broadcast, catalog.reserve());
+		importer.decode(&data).unwrap();
+		let _finished = importer.finish().unwrap();
+
+		let snapshot = catalog.snapshot();
+		let published = crate::container::test_util::published(&consumer, &snapshot).await;
+		let start = spacing as u128 * 1_000;
+		let expected: Vec<u128> = (0..2)
+			.flat_map(|block| (0..20).map(move |index| block * start + index * step))
+			.collect();
+		assert_eq!(published.values().next().unwrap(), &expected, "before {before}");
+		let name = snapshot.audio.renditions.keys().next().unwrap();
+		assert_eq!(
+			groups(&consumer, name).await,
+			[(0, 20), (start as u64, 20)],
+			"before {before}"
+		);
+	}
+}
+
+/// A seek while a BlockGroup's trailing fields stream in waits behind the one its Block deferred,
+/// so the newer start wins.
+#[tokio::test(start_paused = true)]
+async fn a_seek_after_a_deferred_one_wins() {
+	use MatroskaSpec::{BlockDuration, ReferenceBlock};
+	let data = MkvBuilder::new()
+		.header("webm")
+		.segment_start()
+		.info(1_000_000)
+		.track_video(1, "V_VP9", 16, 16)
+		.cluster(0, || {
+			vec![
+				simple_block(1, 0, true, b"key"),
+				block_group(1, 33, b"delta", vec![ReferenceBlock(-33)], vec![BlockDuration(33)]),
+				simple_block(1, 66, true, b"next"),
+			]
+		})
+		.segment_end()
+		.build();
+	let delta = data.windows(5).position(|window| window == b"delta").unwrap();
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = super::Import::new(broadcast, catalog.reserve());
+	// Mid-Block, then between the Block and its BlockDuration.
+	importer.decode(&data[..delta + 2]).unwrap();
+	importer.seek(1_000_000).unwrap();
+	importer.decode(&data[delta + 2..delta + 5]).unwrap();
+	importer.seek(2_000_000).unwrap();
+	importer.decode(&data[delta + 5..]).unwrap();
+	let _finished = importer.finish().unwrap();
+
+	let snapshot = catalog.snapshot();
+	let name = snapshot.video.renditions.keys().next().unwrap();
+	let starts: Vec<u64> = groups(&consumer, name).await.into_iter().map(|(start, _)| start).collect();
+	assert_eq!(starts, [0, 2_000_000]);
 }

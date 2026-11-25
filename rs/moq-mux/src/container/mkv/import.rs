@@ -294,8 +294,8 @@ struct Ended {
 	track: u64,
 	/// The first frame's presentation time, in nanoseconds.
 	pts_ns: u64,
-	/// Nanoseconds from the first frame to the last.
-	laced: u64,
+	/// For a laced block, nanoseconds from its first frame to where its last ends.
+	laced: Option<u64>,
 }
 
 /// What a block header says.
@@ -842,18 +842,26 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			.checked_mul(self.timestamp_scale_ns)
 			.ok_or(Error::TimestampOverflow)?;
 
-		// An audio packet lasts its BlockDuration when one precedes it, else the track's default,
-		// which bounds its group's measured end; video's follows its cadence.
+		// A BlockDuration that precedes the Block spans all of its frames.
+		let block_duration = match (grouped, self.block_duration) {
+			(Some(_), Some(ticks)) => Some(
+				ticks
+					.checked_mul(self.timestamp_scale_ns)
+					.ok_or(Error::TimestampOverflow)?,
+			),
+			_ => None,
+		};
+		// Laced frames split it evenly, else each lasts the track's default. An audio packet lasts it,
+		// else the track's default, which bounds its group's measured end; video's follows its cadence.
 		let duration = match (laced, track.kind) {
-			(true, _) => Some(track.default_duration.ok_or(Error::LacingDuration)?),
-			(false, TrackKind::Audio) => match (grouped, self.block_duration) {
-				(Some(_), Some(ticks)) => Some(std::time::Duration::from_nanos(
-					ticks
-						.checked_mul(self.timestamp_scale_ns)
-						.ok_or(Error::TimestampOverflow)?,
-				)),
-				_ => track.default_duration,
-			},
+			(true, _) => Some(
+				block_duration
+					.map(|ns| std::time::Duration::from_nanos(ns / sizes.len() as u64))
+					.or(track.default_duration)
+					.filter(|step| !step.is_zero())
+					.ok_or(Error::LacingDuration)?,
+			),
+			(false, TrackKind::Audio) => block_duration.map(std::time::Duration::from_nanos).or(track.default_duration),
 			(false, TrackKind::Video) => None,
 		};
 		// Validate the last timestamp before publishing any part of this block.
@@ -969,7 +977,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					self.ended = Some(Ended {
 						track: frames.track,
 						pts_ns: frames.pts_ns,
-						laced: frames.step.saturating_mul(frames.sizes.len().saturating_sub(1) as u64),
+						laced: (frames.sizes.len() > 1).then(|| frames.step.saturating_mul(frames.sizes.len() as u64)),
 					});
 				}
 			}
@@ -988,23 +996,25 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		if let Some(ended) = self.ended.take()
 			&& let Some(track) = self.tracks.get_mut(&ended.track)
 		{
-			// A BlockDuration spans the whole block; the default lasts its last frame.
-			let duration = match self.block_duration {
-				Some(ticks) => Some(
+			// Laced frames were already stamped by their spacing, so a BlockDuration after them can't
+			// end the block below its last; an unlaced packet lasts its BlockDuration, else the default.
+			let duration = match (ended.laced, self.block_duration) {
+				(Some(laced), _) => Some(laced),
+				(None, Some(ticks)) => Some(
 					ticks
 						.checked_mul(self.timestamp_scale_ns)
 						.ok_or(Error::TimestampOverflow)?,
 				),
-				None => track
-					.default_duration
-					.map(|duration| ended.laced.saturating_add(duration.as_nanos() as u64)),
+				(None, None) => track.default_duration.map(|duration| duration.as_nanos() as u64),
 			};
 			// An audio group closes at the end of the block that brings it to a join, so a block's
 			// frames stay in one group and the relay sees it finish without waiting for the next.
 			let start = Timestamp::from_nanos(ended.pts_ns)?;
-			let end = Timestamp::from_nanos(ended.pts_ns.saturating_add(duration.unwrap_or(ended.laced)))?;
+			let end = Timestamp::from_nanos(ended.pts_ns.saturating_add(duration.unwrap_or_default()))?;
 			if track.join.fill(start, end) {
-				track.track.cut(duration.map(|_| end))?;
+				// The frames were shifted onto the catalog clock, so their end is too.
+				let end = duration.map(|_| self.timebase.shift(end)).transpose()?;
+				track.track.cut(end)?;
 			}
 		}
 		if let Some(start) = self.seek.take() {
@@ -1020,7 +1030,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// since its later frames continue its group.
 	pub fn seek(&mut self, start: u64) -> Result<()> {
 		self.input.check()?;
-		if self.block.is_some() || self.ended.is_some() {
+		// A seek already waiting runs at that boundary, so a later one waits with it and replaces it.
+		if self.block.is_some() || self.ended.is_some() || self.seek.is_some() {
 			self.seek = Some(start);
 			return Ok(());
 		}
