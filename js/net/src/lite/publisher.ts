@@ -36,6 +36,7 @@ import {
 	NO_MAX_DELAY,
 	presented,
 	type Run,
+	removeRun,
 	runGaps,
 	sameHole,
 } from "../internal.ts";
@@ -50,7 +51,7 @@ import type { Reported } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { nextChange } from "../util/change.ts";
 import { GivenUp } from "../util/given_up.ts";
-import { max, min } from "../util/key.ts";
+import { max, min, UNBOUNDED } from "../util/key.ts";
 import { Budget } from "../util/yield.ts";
 import { isEmpty, type Resolved, rangeKey } from "../window.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
@@ -80,7 +81,6 @@ import {
 	SubscribeEnd,
 	SubscribeOk,
 	type SubscribeResponse,
-	SubscribeSkip,
 	SubscribeStart,
 	SubscribeUpdate,
 	spanBetween,
@@ -98,12 +98,12 @@ import {
 	hasGroupEnd,
 	hasLargest,
 	hasLengthFirst,
+	hasPrevious,
 	hasProbeRtt,
 	hasRanges,
 	hasReliableReset,
 	hasRouteCost,
 	hasRoutes,
-	hasSkip,
 	hasTrackStream,
 	keepsSubscribeOpen,
 	resolvesStart,
@@ -285,6 +285,15 @@ interface RunGroup {
 	 * the group's span are accounted for.
 	 */
 	ended?: (end: bigint) => void;
+
+	/** Lite-07: the keys just below the group its header's Previous Delta proves hold none. */
+	gap: bigint;
+
+	/**
+	 * Lite-07: called when a reset after GROUP_END was buffered accounts for the group, with the
+	 * starts inside its span: the reset may cut the GROUP_END, so they are named again.
+	 */
+	cut?: (start: bigint, end: bigint) => void;
 }
 
 /**
@@ -1864,17 +1873,15 @@ export class Publisher {
 			return true;
 		};
 
-		// The message naming `[start, end)` given up as `hole` says: lite-07 skips what was never
-		// produced, and earlier versions drop it as not found.
-		const holeMessage = (start: bigint, end: bigint, hole: Hole): SubscribeResponse =>
-			hole.skip && hasSkip(this.version)
-				? { skip: new SubscribeSkip({ start, end }) }
-				: { drop: SubscribeDrop.given(start, end, hole.error, this.version) };
+		// The message naming `[start, end)` given up as `hole` says. Mirrors the Rust `TrackRun::hole`.
+		const holeMessage = (start: bigint, end: bigint, hole: Hole): SubscribeResponse => ({
+			drop: SubscribeDrop.given(start, end, hole.error, this.version),
+		});
 
-		// What the wire is told when `hole` goes out: on lite-07 a drop, which only a skip replaces.
-		// Mirrors the Rust `TrackRun::report`.
+		// What the wire is told when `hole` goes out: on lite-07 a drop, or a skip left for the group
+		// above to name. Mirrors the Rust `TrackRun::report`.
 		const reportOf = (hole: Hole): Omit<Reported, "start" | "end"> => {
-			if (!hasSkip(this.version)) return { kind: "settled" };
+			if (!hasPrevious(this.version)) return { kind: "settled" };
 			return { kind: hole.skip ? "skip" : "dropped" };
 		};
 
@@ -1888,6 +1895,46 @@ export class Publisher {
 		// The starts of the groups whose stream is still serving, which may yet send GROUP_END.
 		const streaming = new Set<bigint>();
 
+		// Lite-07: the skipped keys the wire was told nothing of yet, each waiting for the group just
+		// above it, whose header's Previous Delta proves it or whose drop names it. Mirrors the Rust
+		// `TrackRun::deferred`.
+		let deferred: Run[] = [];
+		// Lite-07: the run of skipped keys just below `key` nothing named yet, which a group at `key`
+		// proves empty with its header or names with its drop, taken out of `deferred`. Mirrors the
+		// Rust `TrackRun::gap_below`.
+		const gapBelow = (key: bigint): bigint => {
+			if (!record || !hasPrevious(this.version)) return 0n;
+			let low = key - hooks.skippedBelow(track, key);
+			const named = low < key ? record.lastNamed(low, key) : undefined;
+			if (named !== undefined) low = named + 1n;
+			if (low < key) deferred = removeRun(deferred, low, key);
+			return key - low;
+		};
+		const below = (key: bigint): bigint => key - gapBelow(key);
+		// Lite-07: drop as not found each deferred run the group above will never name: it was told
+		// already, or the track ends at or below it, or no range asks for it. Mirrors the Rust
+		// `TrackRun::settle_deferred`.
+		const settleDeferred = async (): Promise<boolean> => {
+			if (!record || deferred.length === 0) return true;
+			const end = hooks.subscriberEnd(track);
+			const fin = end ? finalKey(end) : undefined;
+			// SUBSCRIBE_END names every key at or past the end.
+			if (fin !== undefined) deferred = removeRun(deferred, fin, UNBOUNDED);
+			const notFound: Hole = { error: new StreamError(StreamCode.NotFound, { message: "group not found" }) };
+			for (const run of [...deferred]) {
+				const above = run.end;
+				const names =
+					!record.told(above) &&
+					(fin === undefined || above < fin) &&
+					hooks.servingRuns(track, above, above + 1n).length > 0;
+				if (names) continue;
+				deferred = removeRun(deferred, run.start, run.end);
+				record.tell(run.start, run.end, { kind: "dropped" });
+				if (!(await sendHole(holeMessage(run.start, run.end, notFound)))) return false;
+			}
+			return true;
+		};
+
 		// Give up, as `hole` says, whatever part of `[start, end)` this subscription has not been
 		// served or given up yet.
 		const drop = async (start: bigint, end: bigint, hole: Hole): Promise<boolean> => {
@@ -1898,20 +1945,33 @@ export class Publisher {
 				// account for, which may still be on its way, or its drop's, which names its span. A
 				// stream that already ended without one left them untold, so they are named here.
 				const around = hooks.wholeAround(track, gap.start);
-				const from = around && streaming.has(around.start) ? min(around.end, gap.end) : gap.start;
+				let from = around && streaming.has(around.start) ? min(around.end, gap.end) : gap.start;
 				if (from >= gap.end) continue;
+				// Lite-07: the drop names the skipped keys just below it, which no header will prove.
+				from = below(from);
 				record.tell(from, gap.end, report);
 				if (!(await sendHole(holeMessage(from, gap.end, hole)))) return false;
 			}
 			return true;
 		};
 
-		// Forward a verdict the reader reached on `[start, end)`, which its record already took in,
-		// replacing what it goes out over: on lite-07, a skip any drop already sent. A reader the
-		// earlier drop ended stays ended. A drop of a group held whole names its span.
+		// Forward a verdict the reader reached on `[start, end)`, which its record already took in. A
+		// drop of a group held whole names its span. On lite-07 a skip waits for the group above it,
+		// and a drop names the skipped keys just below it too.
 		const forward = async (start: bigint, end: bigint, hole: Hole): Promise<boolean> => {
 			if (!record || start >= end) return true;
-			if (!hole.skip) end = reach(end);
+			// A skip held before the start may lie in a gap a header since proved.
+			if (hole.skip && hasPrevious(this.version)) {
+				for (const part of record.unnamed(start, end)) {
+					record.tell(part.start, part.end, { kind: "skip" });
+					insertRun(deferred, part.start, part.end);
+				}
+				return settleDeferred();
+			}
+			if (!hole.skip) {
+				end = reach(end);
+				start = below(start);
+			}
 			record.tell(start, end, reportOf(hole));
 			return sendHole(holeMessage(start, end, hole));
 		};
@@ -1984,8 +2044,11 @@ export class Publisher {
 		const groupEnded = new Signal(0);
 		const drops = new Signal(0);
 		// Groups whose stream failed, with why, for the control stream to name, as runs: a group held
-		// whole names its span.
+		// whole names its span, and the gap below it its header proved.
 		const pendingDrops: { start: bigint; end: bigint; error: Error }[] = [];
+		// Lite-07: the starts inside whole groups' spans whose GROUP_END a reset may have cut, to name
+		// again. Mirrors the Rust `GroupOutcomes::cut`.
+		const pendingCuts: Run[] = [];
 
 		// Cancels groups still queued for a stream slot. Only the subscriber leaving counts:
 		// a track that ran out of groups still has to flush the ones already queued, and the
@@ -2028,6 +2091,11 @@ export class Publisher {
 					}
 					skipped = new Runs<DropRun>(sameHole);
 				}
+				for (const { start, end } of pendingCuts.splice(0)) {
+					record?.tell(start, end, { kind: "skip" });
+					insertRun(deferred, start, end);
+				}
+				if (deferred.length > 0 && !(await settleDeferred())) return false;
 				if (pendingDrops.length > 0) {
 					for (const { start, end, error } of pendingDrops.splice(0)) {
 						// The rest of the span is told with it; the served start keeps its record.
@@ -2198,7 +2266,7 @@ export class Publisher {
 						// Name every key from the start to the end this subscription never
 						// got. A cap below the end bounds what the subscriber is owed, as on its side.
 						if (startKey !== undefined) {
-							// A key the publisher declared skipped went out as a skip already; one
+							// A key the publisher declared skipped waits for the group above it; one
 							// it never declared might have existed, so it is not found.
 							const unserved: Hole = {
 								error: new StreamError(StreamCode.NotFound, { message: "group not served" }),
@@ -2215,7 +2283,7 @@ export class Publisher {
 						const drain = keepsSubscribeOpen(this.version) ? await drainedOrControl() : await drained();
 						if (drain === undefined) continue;
 						if (!drain) return false;
-						if (pendingDrops.length > 0) continue;
+						if (pendingDrops.length > 0 || pendingCuts.length > 0) continue;
 						// Lite-07 keeps the stream open past SUBSCRIBE_END: an update may still ask
 						// for the ended track's history, and the subscriber FINs once it wants nothing
 						// more.
@@ -2269,7 +2337,9 @@ export class Publisher {
 					if (bounds.startGroup === undefined && !resolvesStart(this.version)) raiseFloor(startKey);
 					if (!(await resolveStart(startKey, largest))) return false;
 				}
-				record?.tell(group.start, group.start + 1n, { kind: "settled" });
+				// Lite-07: the header proves the skipped keys just below the group.
+				const gap = gapBelow(group.start);
+				record?.tell(group.start - gap, group.start + 1n, { kind: "settled" });
 				streaming.add(group.start);
 
 				const options: RunGroup = {
@@ -2288,6 +2358,11 @@ export class Publisher {
 					ended: (end) => {
 						if (end > group.start + 1n) record?.tell(group.start + 1n, end, { kind: "settled" });
 					},
+					gap,
+					cut: (start, end) => {
+						pendingCuts.push({ start, end });
+						drops.update((revision) => revision + 1);
+					},
 				};
 				// The FIN waits for every stream to finish or reset, including one that has not opened yet.
 				// A stream reset to make room fails the group like any other reset, so it is dropped,
@@ -2303,7 +2378,7 @@ export class Publisher {
 					}
 					if (failed && emitRange) {
 						const end = max(group.end ?? group.start, group.start + 1n);
-						pendingDrops.push({ start: group.start, end, error: failed });
+						pendingDrops.push({ start: group.start - gap, end, error: failed });
 						drops.update((revision) => revision + 1);
 					}
 				})();
@@ -2811,7 +2886,7 @@ export class Publisher {
 	async #serveGroup(stream: Writer, options: RunGroup) {
 		const { sub, group, givenUp, stamp, compress, priority, start: startFrame, end: endFrame, stops } = options;
 		// The header names the requested position, so a copy missing it must be refused.
-		const msg = new GroupMessage({ subscribe: sub, key: group.start, frameStart: startFrame });
+		const msg = new GroupMessage({ subscribe: sub, key: group.start, frameStart: startFrame, gap: options.gap });
 		// The subscription's budget, or an eviction of what is left to read, may give up on the
 		// group mid-write, which abandons the stream. A group already given up never starts the write.
 		const write = async (op: () => Promise<unknown>) => {
@@ -2820,6 +2895,8 @@ export class Publisher {
 		};
 		// Lite-07: the transport took the whole GROUP header, which every later reset still delivers.
 		let held = false;
+		// Lite-07: the end of the span a buffered GROUP_END accounted for.
+		let spanEnd: bigint | undefined;
 		// Everything past this point runs inside the cleanup scope, so a failure never leaves
 		// a finished group's stream being ranked.
 		try {
@@ -2905,6 +2982,7 @@ export class Publisher {
 			const end = hasGroupEnd(this.version) && whole ? group.end : undefined;
 			if (end !== undefined) {
 				options.ended?.(end);
+				spanEnd = end;
 				await write(() => stream.write(groupEnd(stream.version, end, highest ?? group.start)));
 			}
 			stream.close();
@@ -2920,7 +2998,11 @@ export class Publisher {
 			const e = error(err);
 			stream.reset(e);
 			hooks.releaseGroupReader(group, e);
-			if (hasReliableReset(this.version) && (await accounts(stream, held))) return undefined;
+			if (hasReliableReset(this.version) && (await accounts(stream, held))) {
+				// The reset may cut the GROUP_END, so the starts it accounted for are named again.
+				if (spanEnd !== undefined && spanEnd > group.start + 1n) options.cut?.(group.start + 1n, spanEnd);
+				return undefined;
+			}
 			return e;
 		} finally {
 			priority.remove(stream);

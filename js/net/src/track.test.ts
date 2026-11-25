@@ -5828,7 +5828,7 @@ test("an appended first group skips everything below it", () => {
 
 // Creating a group says nothing about the gap it leaves: groups may be created out of order. An
 // append says the producer will not go back, so it skips every hole below it that was never
-// produced, replacing a drop already given and reported. A received copy's groups arrive in any
+// produced, around a drop already given and reported, which stays final. A received copy's groups arrive in any
 // order, so its gap is not skipped. Mirrors Rust.
 test("an append skips the holes created groups left below it", () => {
 	const producer = new TrackProducer("test");
@@ -5853,7 +5853,7 @@ test("an append skips the holes created groups left below it", () => {
 	expect(drain()).toEqual([[2n, 3n, false], 0n, 4n]);
 
 	hooks.appendNext(producer).finish();
-	expect(drain()).toEqual([[1n, 4n, true], 5n]);
+	expect(drain()).toEqual([[1n, 2n, true], [3n, 4n, true], 5n]);
 
 	// The next append only names what was left since this one.
 	producer.createGroup(7n).finish();
@@ -5967,43 +5967,6 @@ test("creating a skipped sequence throws Skipped", () => {
 		[0n, 1n, true],
 		[2n, 5n, true],
 	]);
-});
-
-// A skip after a drop already reported goes out again, replacing it, while a reader that moved past
-// the drop is handed nothing again; a skip already reported is not reported twice, and a later drop
-// leaves it skipped. Mirrors Rust.
-test("a skip is reported over a reported drop", () => {
-	const producer = new TrackProducer("test");
-	producer.accept({ maxAge: null });
-	const reader = producer.subscribe(withMax({ delay: { max: null } }));
-	const drain = () => {
-		const got: unknown[] = [];
-		for (
-			let next = hooks.tryRecvGroup(reader, true);
-			next.kind !== "idle";
-			next = hooks.tryRecvGroup(reader, true)
-		) {
-			if (next.kind === "group") got.push(next.group.start);
-			else if (next.kind === "drop") got.push([next.start, next.end, next.skip === true]);
-			else throw new Error(`unexpected ${next.kind}`);
-		}
-		return got;
-	};
-	producer.createGroup(0n).finish();
-	hooks.dropTrackGroups(producer, 1n, 3n, { error: DROPPED });
-	hooks.dropTrackGroups(producer, 4n, 5n, { error: DROPPED });
-	producer.createGroup(5n).finish();
-	expect(drain()).toEqual([[1n, 3n, false], [4n, 5n, false], 0n, 5n]);
-
-	// Group 0 arrived, so the skip leaves it; both drops and the gap between become one skip.
-	expect(hooks.skipTrackGroups(producer, 0n, 5n)).toEqual([{ start: 0n, end: 1n }]);
-	expect(drain()).toEqual([[1n, 5n, true]]);
-
-	expect(hooks.dropTrackGroups(producer, 2n, 3n, { error: DROPPED })).toEqual([]);
-	expect(drain()).toEqual([]);
-	expect(() => producer.createGroup(2n)).toThrow(Skipped);
-	reader.close();
-	producer.close();
 });
 
 // Skips are kept and reported as runs: a huge skipGroups or append gap costs one run and one

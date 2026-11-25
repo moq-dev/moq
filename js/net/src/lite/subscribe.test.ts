@@ -24,7 +24,6 @@ import {
 	SubscribeEnd,
 	SubscribeOk,
 	type SubscribeResponse,
-	SubscribeSkip,
 	SubscribeStart,
 	SubscribeUpdate,
 	spanOf,
@@ -565,18 +564,16 @@ test("SubscribeDrop is restored on draft-07", async () => {
 	expect(await encode(Version.DRAFT_06, drop)).toEqual(new Uint8Array([2, 3, 1, 3, 7]));
 });
 
-test("SubscribeSkip is type 3 on draft-07 alone", async () => {
-	const skip: SubscribeResponse = { skip: new SubscribeSkip({ start: 1n, end: 4n }) };
-	expect(await encode(Version.DRAFT_07, skip)).toEqual(new Uint8Array([3, 2, 1, 4]));
-	const got = await responseRoundtrip(Version.DRAFT_07, skip);
-	if (!("skip" in got)) throw new Error("expected skip");
-	expect([got.skip.start, got.skip.end]).toEqual([1n, 4n]);
-	await expect(encode(Version.DRAFT_06, skip)).rejects.toThrow();
+// Lite-07 proves skipped keys with a GROUP header's Previous Delta, so type 3 is unknown.
+test("subscribe response type 3 is unknown on draft-07", async () => {
+	const decode = (body: number[]) =>
+		decodeSubscribeResponse(new Reader(undefined, new Uint8Array(body), Version.DRAFT_07), Version.DRAFT_07);
+	await expect(decode([3, 2, 1, 4])).rejects.toThrow(ProtocolViolation);
 });
 
 // Lite-07 carries a non-empty `[Group Start, Group End)`, which reaches but never passes the
 // reserved group 2^64-1.
-test("lite-07 drop and skip spans are non-empty and stop at the reserved group", async () => {
+test("lite-07 drop spans are non-empty and stop at the reserved group", async () => {
 	const top = (1n << 64n) - 1n;
 	for (const [start, end] of [
 		[0n, 1n],
@@ -584,9 +581,6 @@ test("lite-07 drop and skip spans are non-empty and stop at the reserved group",
 		[0n, top],
 		[top - 1n, top],
 	]) {
-		const skip = await responseRoundtrip(Version.DRAFT_07, { skip: new SubscribeSkip({ start, end }) });
-		if (!("skip" in skip)) throw new Error("expected skip");
-		expect([skip.skip.start, skip.skip.end]).toEqual([start, end]);
 		const drop = await responseRoundtrip(Version.DRAFT_07, { drop: new SubscribeDrop({ start, end, error: 7 }) });
 		if (!("drop" in drop)) throw new Error("expected drop");
 		expect([drop.drop.start, drop.drop.end, drop.drop.error]).toEqual([start, end, 7]);
@@ -595,8 +589,6 @@ test("lite-07 drop and skip spans are non-empty and stop at the reserved group",
 	const decode = (body: number[]) =>
 		decodeSubscribeResponse(new Reader(undefined, new Uint8Array(body), Version.DRAFT_07), Version.DRAFT_07);
 	// A Group End not past its Group Start is a protocol violation, empty or reversed.
-	await expect(decode([3, 2, 4, 4])).rejects.toThrow(ProtocolViolation);
-	await expect(decode([3, 2, 4, 3])).rejects.toThrow(ProtocolViolation);
 	await expect(decode([2, 3, 4, 4, 7])).rejects.toThrow(ProtocolViolation);
 	await expect(decode([2, 3, 4, 3, 7])).rejects.toThrow(ProtocolViolation);
 
@@ -605,7 +597,6 @@ test("lite-07 drop and skip spans are non-empty and stop at the reserved group",
 		[3n, 3n],
 		[3n, 1n],
 	]) {
-		await expect(encode(Version.DRAFT_07, { skip: new SubscribeSkip({ start, end }) })).rejects.toThrow(RangeError);
 		await expect(encode(Version.DRAFT_07, { drop: new SubscribeDrop({ start, end, error: 0 }) })).rejects.toThrow(
 			RangeError,
 		);

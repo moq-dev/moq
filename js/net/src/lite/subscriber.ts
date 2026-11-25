@@ -129,12 +129,12 @@ import {
 	hasLengthFirst,
 	hasMediaTime,
 	hasOrder,
+	hasPrevious,
 	hasProbeRtt,
 	hasRanges,
 	hasRefresh,
 	hasRoutes,
 	hasSetupStream,
-	hasSkip,
 	hasSynced,
 	hasTrackStream,
 	hasTracks,
@@ -2487,11 +2487,6 @@ export class Subscriber {
 				// Final, so a stream it overtook is told from one whose gap the grace gave up on.
 				entry.tail.drop(start, end);
 				giveUp(start, end, dropped(cause));
-			} else if ("skip" in resp) {
-				// Never produced: final, as the subscription feeding the copy records it.
-				const { start, end } = resp.skip;
-				entry.tail.account(start, end);
-				hooks.skipTrackGroups(entry.track, start, end);
 			} else if ("end" in resp) {
 				if (finished) throw new ProtocolViolation("duplicate SUBSCRIBE_END");
 				finished = true;
@@ -2702,19 +2697,16 @@ export class Subscriber {
 				const { start, end } = resp.drop;
 				const error = resp.drop.cause(this.version);
 				// Lite-07 tells a stream a drop overtook from one whose gap the grace gave up on.
-				if (hasSkip(this.version)) entry.tail.drop(start, end);
+				if (hasPrevious(this.version)) entry.tail.drop(start, end);
 				else entry.tail.account(start, end);
 				this.#dropped(entry, start, end);
 				// On lite-07 an OLD drop is stale, recorded under the narrowest budget it may have been
 				// judged under: a reader wider than that does not settle on it, and asks for the group
 				// with a request of its own.
-				const stale = hasSkip(this.version) && toStreamCode(error) === StreamCode.Old;
+				const stale = hasPrevious(this.version) && toStreamCode(error) === StreamCode.Old;
 				const hole = stale ? staleHole(entry.staleBudget) : { error };
 				hooks.dropTrackGroups(entry.track, start, end, hole);
 				entry.fills?.refuse(start, end, error);
-			} else if ("skip" in resp) {
-				const { start, end } = resp.skip;
-				this.#skipped(entry, start, end);
 			}
 		}
 	}
@@ -2763,9 +2755,8 @@ export class Subscriber {
 			entry.tail.account(entry.requested, served);
 	}
 
-	// The publisher never produced `[start, end)`, as a SUBSCRIBE_SKIP says, so nothing is waited
-	// for and no reader ends. A skip replaces any drop of the same groups; a reader a drop already
-	// ended stays ended.
+	// The publisher never produced `[start, end)`, as a GROUP header's Previous Delta proves, so
+	// nothing is waited for and no reader ends. A reader a drop already ended stays ended.
 	#skipped(entry: SubscribeEntry, start: bigint, end: bigint): void {
 		entry.tail.account(start, end);
 		// A fill owing them is answered: the source never had them.
@@ -2775,7 +2766,7 @@ export class Subscriber {
 		const [cached] = hooks.skipTrackGroups(entry.track, start, end);
 		if (cached) {
 			console.warn(
-				`protocol error: SUBSCRIBE_SKIP skips [${start}, ${end}), which holds group ${cached.start}, which arrived; keeping it`,
+				`protocol error: Previous Delta proves [${start}, ${end}) empty, which holds group ${cached.start}, which arrived; keeping it`,
 			);
 		}
 	}
@@ -3206,8 +3197,10 @@ export class Subscriber {
 				track.abort(violation);
 				throw violation;
 			}
+			// Lite-07: the header's Previous Delta proves the keys just below the group hold none.
+			if (group.gap > 0n) this.#skipped(entry, group.key - group.gap, group.key);
 			// Registered before any duplicate wait below, so a drop that lands during it finds the read.
-			if (hasSkip(this.version)) {
+			if (hasPrevious(this.version)) {
 				entry.reading ??= new Map();
 				entry.reading.set(group.key, counted);
 				reading = true;

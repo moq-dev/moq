@@ -1036,7 +1036,7 @@ async function servedSubscription(
 				payloads.push(new TextDecoder().decode(await reader.read(size)));
 			}
 			const served = { key: header.key, frameStart: header.frameStart, payloads };
-			return lengthFirst ? { ...served, times, end, endDelta } : served;
+			return lengthFirst ? { ...served, times, end, endDelta, gap: header.gap } : served;
 		},
 		// Stop the next group stream the publisher opened with `code`, before reading any of it,
 		// as a subscriber that discards a stream unread does.
@@ -1357,9 +1357,9 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 		}
 	});
 
-	// A skip replaces a drop, so a relay forwards it over a drop it already forwarded; lite-06,
-	// which names a skip as a drop, sends nothing more. Mirrors Rust.
-	test(`lite ${version}: a skip goes out over a forwarded drop`, async () => {
+	// Every drop is final, so a skip a relay learns of later goes out over no drop it already
+	// forwarded. Mirrors the Rust `a_skip_goes_out_over_no_forwarded_drop`.
+	test(`lite ${version}: a skip goes out over no forwarded drop`, async () => {
 		const sub = await servedSubscription({ version, startGroup: 0n, routed: true });
 		try {
 			sub.serve(0n);
@@ -1372,10 +1372,6 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 			expect([resp.drop.start, resp.drop.end]).toEqual([1n, 3n]);
 
 			sub.track.skipGroups(1n, 3n);
-			if (version === Version.DRAFT_07) {
-				const skip = await decodeSubscribeResponse(sub.client.reader, version);
-				expect(skip).toMatchObject({ skip: { start: 1n, end: 3n } });
-			}
 			sub.track.finish();
 			sub.track.close();
 			const holes: unknown[] = [];
@@ -1383,7 +1379,6 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 				const next = await decodeSubscribeResponseMaybe(sub.client.reader, version);
 				if (!next) break;
 				if ("drop" in next) holes.push(["drop", next.drop.start, next.drop.end]);
-				if ("skip" in next) holes.push(["skip", next.skip.start, next.skip.end]);
 				if ("end" in next && keepsSubscribeOpen(version)) break;
 			}
 			expect(holes).toEqual([]);
@@ -1419,8 +1414,7 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 	});
 
 	for (const declared of [false, true]) {
-		const named = declared && version === Version.DRAFT_07 ? "in SUBSCRIBE_SKIP" : "in SUBSCRIBE_DROP";
-		test(`lite ${version}: the end sweep names a ${declared ? "declared skip" : "gap never declared"} ${named}`, async () => {
+		test(`lite ${version}: the end sweep names a ${declared ? "declared skip" : "gap never declared"}`, async () => {
 			const sub = await servedSubscription({ version, startGroup: 5n });
 			try {
 				sub.serve(5n);
@@ -1435,24 +1429,26 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 				if (declared) sub.track.skipGroups(2n, 6n);
 				sub.track.finish();
 				sub.track.close();
-				const codes: number[] = [];
-				const skips: bigint[][] = [];
+				const drops: unknown[] = [];
 				for (;;) {
 					const resp = await decodeSubscribeResponseMaybe(sub.client.reader, version);
 					if (!resp) break;
-					if ("drop" in resp) codes.push(resp.drop.error);
-					if ("skip" in resp) skips.push([resp.skip.start, resp.skip.end]);
+					if ("drop" in resp) drops.push([resp.drop.start, resp.drop.end, resp.drop.error]);
 					// Lite-07 keeps the stream open past SUBSCRIBE_END, after the sweep's drops.
 					if ("end" in resp && keepsSubscribeOpen(version)) break;
 				}
 				if (version !== Version.DRAFT_07) {
-					expect([codes, skips]).toEqual([[0], []]);
+					expect(drops).toEqual([[2n, 5n, 0]]);
 				} else if (declared) {
 					// Lite-07's time 2 lies before every held group, so the range reaches back to
-					// group 0: groups 0 and 1, never declared, go out as a drop.
-					expect([codes, skips]).toEqual([[StreamCode.NotFound], [[2n, 5n]]]);
+					// group 0. Group 5 went out before the skip, so its header proves none of it:
+					// the skip is not found, and groups 0 and 1, never declared, are not found either.
+					expect(drops).toEqual([
+						[2n, 5n, StreamCode.NotFound],
+						[0n, 2n, StreamCode.NotFound],
+					]);
 				} else {
-					expect([codes, skips]).toEqual([[StreamCode.NotFound], []]);
+					expect(drops).toEqual([[0n, 5n, StreamCode.NotFound]]);
 				}
 			} finally {
 				await sub.close();
@@ -1461,7 +1457,7 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 	}
 }
 
-// The SUBSCRIBE_SKIP and SUBSCRIBE_DROP ranges a lite-07 subscribe stream carried, in order, up to
+// The SUBSCRIBE_DROP ranges a lite-07 subscribe stream carried, in order, up to
 // SUBSCRIBE_END, or the first `count` of them.
 async function holesToFinish(reader: Reader, count = Number.POSITIVE_INFINITY): Promise<[string, bigint, bigint][]> {
 	const holes: [string, bigint, bigint][] = [];
@@ -1469,7 +1465,6 @@ async function holesToFinish(reader: Reader, count = Number.POSITIVE_INFINITY): 
 		if (holes.length >= count) return holes;
 		const resp = await decodeSubscribeResponseMaybe(reader, Version.DRAFT_07);
 		if (!resp || "end" in resp) return holes;
-		if ("skip" in resp) holes.push(["skip", resp.skip.start, resp.skip.end]);
 		if ("drop" in resp) holes.push(["drop", resp.drop.start, resp.drop.end]);
 	}
 }
@@ -1545,26 +1540,29 @@ test("lite-07 counts a resumed stream's first delta from the group's start", asy
 	}
 });
 
-// A declared skip goes out as SUBSCRIBE_SKIP as soon as the publisher learns of it, even below a
-// group it serves. Mirrors the Rust `lite07_skips_a_declared_skip`.
-test("lite-07 sends a declared skip below a served group as SUBSCRIBE_SKIP", async () => {
+// A declared skip goes out in the Previous Delta of the group above it. One whose group above went
+// out already is dropped as not found. Mirrors the Rust `lite07_proves_a_declared_skip_in_the_next_header`.
+test("lite-07 proves a declared skip in the next group's header", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 0n });
 	try {
 		sub.serve(0n);
 		expect(await sub.servedSequence()).toBe(0n);
 		sub.serve(3n);
 		sub.track.skipGroups(1n, 3n);
-		expect(await sub.servedSequence()).toBe(3n);
+		expect(await sub.servedGroup()).toMatchObject({ key: 3n, gap: 2n });
+		sub.serve(6n);
+		expect(await sub.servedSequence()).toBe(6n);
+		sub.track.skipGroups(4n, 6n);
 		sub.track.finish();
 		sub.track.close();
-		expect(await holesToFinish(sub.client.reader)).toEqual([["skip", 1n, 3n]]);
+		expect(await holesToFinish(sub.client.reader)).toEqual([["drop", 4n, 6n]]);
 	} finally {
 		await sub.close();
 	}
 });
 
-// Appending names the starts between one group's End and the next group's start with
-// SUBSCRIBE_SKIP: a pause, or a sparse data track's gaps. Contiguous groups, each starting at the
+// Appending names the starts between one group's End and the next group's start in the next
+// group's Previous Delta: a pause, or a sparse data track's gaps. Contiguous groups, each starting at the
 // previous End, skip nothing, and the starts inside each span are accounted for by its GROUP_END.
 test("lite-07 skips a pause and a sparse track's gaps, but nothing between contiguous groups", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 0n });
@@ -1581,19 +1579,15 @@ test("lite-07 skips a pause and a sparse track's gaps, but nothing between conti
 		expect(await sub.servedGroup()).toMatchObject({ key: 500n, end: 1000n });
 		// A pause: [1000, 1700) is named.
 		append(1700, 2000);
-		expect(await sub.servedGroup()).toMatchObject({ key: 1700n, end: 2000n });
-		// A sparse track whose groups end at their start: each skip starts just past it.
+		expect(await sub.servedGroup()).toMatchObject({ key: 1700n, end: 2000n, gap: 700n });
+		// A sparse track whose groups end at their start: each gap starts just past it.
 		append(2100, 2100);
-		expect(await sub.servedGroup()).toMatchObject({ key: 2100n, endDelta: 0n, end: 2100n });
+		expect(await sub.servedGroup()).toMatchObject({ key: 2100n, endDelta: 0n, end: 2100n, gap: 100n });
 		append(2200, 2200);
-		expect(await sub.servedGroup()).toMatchObject({ key: 2200n, end: 2200n });
+		expect(await sub.servedGroup()).toMatchObject({ key: 2200n, end: 2200n, gap: 99n });
 		sub.track.finish();
 		sub.track.close();
-		expect(await holesToFinish(sub.client.reader)).toEqual([
-			["skip", 1000n, 1700n],
-			["skip", 2000n, 2100n],
-			["skip", 2101n, 2200n],
-		]);
+		expect(await holesToFinish(sub.client.reader)).toEqual([]);
 	} finally {
 		await sub.close();
 	}
@@ -1635,9 +1629,8 @@ test("lite-07 names the span of a group that finished whole after its stream fai
 	}
 });
 
-// A skipped run goes out as SUBSCRIBE_SKIP ahead of a drop of the group above it. Mirrors the Rust
-// `lite07_sends_a_skip_ahead_of_a_drop`.
-test("lite-07 sends a skip ahead of a drop of the group above it", async () => {
+// A drop of the group above a skipped run names the run too, which its header no longer proves.
+test("lite-07 names a skipped run in the drop of the group above it", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 0n });
 	try {
 		sub.serve(0n);
@@ -1647,36 +1640,27 @@ test("lite-07 sends a skip ahead of a drop of the group above it", async () => {
 		above.writeFrame(textFrame("hello", Timestamp.fromMillis(3)));
 		sub.track.skipGroups(1n, 3n);
 		await sub.stopServed(StreamCode.Evicted);
-		expect(await holesToFinish(sub.client.reader, 2)).toEqual([
-			["skip", 1n, 3n],
-			["drop", 3n, 4n],
-		]);
+		expect(await holesToFinish(sub.client.reader, 1)).toEqual([["drop", 1n, 4n]]);
 	} finally {
 		await sub.close();
 	}
 });
 
-// A huge declared skip goes out as one SUBSCRIBE_SKIP, at a cost independent of its length.
+// A huge declared skip goes out in one Previous Delta, at a cost independent of its length.
 // Mirrors Rust.
 test("lite-07 skips a huge run at once", async () => {
-	const FAR = 1n << 61n;
+	// The largest start a millisecond timestamp holds exactly.
+	const FAR = 1n << 52n;
 	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 0n });
 	try {
 		sub.serve(0n);
 		expect(await sub.servedSequence()).toBe(0n);
 		sub.track.skipGroups(1n, FAR);
+		sub.serve(FAR);
+		expect(await sub.servedGroup()).toMatchObject({ key: FAR, gap: FAR - 1n });
 		sub.track.finish();
 		sub.track.close();
-		const codes: number[] = [];
-		const skips: bigint[][] = [];
-		for (;;) {
-			const resp = await decodeSubscribeResponseMaybe(sub.client.reader, Version.DRAFT_07);
-			if (!resp) break;
-			if ("drop" in resp) codes.push(resp.drop.error);
-			if ("skip" in resp) skips.push([resp.skip.start, resp.skip.end]);
-			if ("end" in resp) break;
-		}
-		expect([codes, skips]).toEqual([[], [[1n, FAR]]]);
+		expect(await holesToFinish(sub.client.reader)).toEqual([]);
 	} finally {
 		await sub.close();
 	}
@@ -1764,7 +1748,6 @@ async function holesToEnd(reader: Reader): Promise<unknown[]> {
 		const next = await decodeSubscribeResponseMaybe(reader, Version.DRAFT_07);
 		if (!next) return holes;
 		if ("drop" in next) holes.push(["drop", next.drop.start, next.drop.end]);
-		if ("skip" in next) holes.push(["skip", next.skip.start, next.skip.end]);
 		if ("end" in next) return holes;
 	}
 }
@@ -1856,6 +1839,51 @@ test("lite draft-07: a stale stream sent whole resets at its header and is not d
 		await clock.advance(Duration.millis(budget));
 		await flush();
 		expect(sub.reliable.resets).toEqual([{ offset: await headerSize(version, 1n), code: StreamCode.Old }]);
+
+		sub.track.finish();
+		sub.track.close();
+		expect(await holesToEnd(sub.client.reader)).toEqual([]);
+	} finally {
+		await sub.close();
+		installed.close();
+	}
+});
+
+// Lite-07: a stale stream reset after its GROUP_END went out may cut the GROUP_END on the wire, so
+// the starts it accounted for are named again, by the header of the group above. Mirrors the Rust
+// `lite07_a_cut_group_end_is_named_again`.
+test("lite draft-07: a reset that cut a GROUP_END names its span's starts again", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const budget = 1_000;
+	const version = Version.DRAFT_07;
+	const sub = await servedSubscription({ version, startGroup: 0n, reliable: true });
+	try {
+		sub.serve(0n);
+		expect(await sub.servedSequence()).toBe(0n);
+		expect("start" in (await decodeSubscribeResponse(sub.client.reader, version))).toBe(true);
+		await new SubscribeUpdate({ priority: 1, remove: [0n], ranges: [within(budget)] }).encode(
+			sub.client.writer,
+			version,
+		);
+		expect("start" in (await decodeSubscribeResponse(sub.client.reader, version))).toBe(true);
+
+		// Its FIN, after the GROUP_END naming its span [1, 3), is never acknowledged.
+		sub.reliable.fin = false;
+		const group = sub.track.appendGroup(Timestamp.fromMillis(1));
+		group.writeFrame(textFrame("x", Timestamp.fromMillis(1)));
+		group.finishAt(3n);
+		expect(await sub.servedHeader()).toBe(1n);
+		await flush();
+		sub.reliable.fin = true;
+		await clock.advance(Duration.millis(budget * 10));
+		await flush();
+		expect(sub.reliable.resets).toEqual([{ offset: await headerSize(version, 1n), code: StreamCode.Old }]);
+		const above = sub.track.appendGroup(Timestamp.fromMillis(5));
+		above.writeFrame(textFrame("y", Timestamp.fromMillis(5)));
+		above.finish();
+		// Start 2, which the cut GROUP_END told, along with 3 and 4, skipped by the append.
+		expect(await sub.servedGroup()).toMatchObject({ key: 5n, gap: 3n });
 
 		sub.track.finish();
 		sub.track.close();
@@ -2109,7 +2137,7 @@ test("lite draft-07: a time start a copy's oldest range covers waits for an answ
 });
 
 // A copy whose feed start resolved before its upstream said where the live edge is resolves delivery
-// with no range answered: a range following the edge waits for it. A skip given up meanwhile waits
+// with no range answered: a range following the edge waits for it. A drop given up meanwhile waits
 // for that START too, since a subscriber reads none before the first. Mirrors the Rust
 // `lite07_withholds_drops_until_a_range_is_answered`.
 test("lite draft-07: drops wait for the first SUBSCRIBE_START", async () => {
@@ -2118,7 +2146,7 @@ test("lite draft-07: drops wait for the first SUBSCRIBE_START", async () => {
 	try {
 		hooks.receiveTrack(sub.track);
 		hooks.startTrack(sub.track, { start: 0n });
-		sub.track.skipGroups(0n, 2n);
+		hooks.dropTrackGroups(sub.track, 0n, 2n, { error: new StreamError(StreamCode.NotFound) });
 		sub.serve(2n);
 		expect(await sub.servedSequence()).toBe(2n);
 		hooks.answerEdge(sub.track);
@@ -2126,8 +2154,31 @@ test("lite draft-07: drops wait for the first SUBSCRIBE_START", async () => {
 		if (!("start" in first)) throw new Error(`expected SUBSCRIBE_START, got ${Object.keys(first)}`);
 		expect(first.start.id).toBe(0n);
 		const second = await decodeSubscribeResponse(sub.client.reader, version);
-		if (!("skip" in second)) throw new Error(`expected SUBSCRIBE_SKIP, got ${Object.keys(second)}`);
-		expect([second.skip.start, second.skip.end]).toEqual([0n, 2n]);
+		if (!("drop" in second)) throw new Error(`expected SUBSCRIBE_DROP, got ${Object.keys(second)}`);
+		expect([second.drop.start, second.drop.end]).toEqual([0n, 2n]);
+	} finally {
+		await sub.close();
+	}
+});
+
+// A skip held until a range is answered, which the header of the group above it proved meanwhile,
+// is named by nothing else once delivery resolves. Mirrors the Rust
+// `lite07_a_held_skip_a_header_proved_goes_out_once`.
+test("lite draft-07: a held skip a header proved goes out once", async () => {
+	const version = Version.DRAFT_07;
+	const sub = await servedSubscription({ version, startGroup: 0n });
+	try {
+		hooks.receiveTrack(sub.track);
+		hooks.startTrack(sub.track, { start: 0n });
+		sub.track.skipGroups(0n, 2n);
+		sub.serve(2n);
+		expect(await sub.servedGroup()).toMatchObject({ key: 2n, gap: 2n });
+		hooks.answerEdge(sub.track);
+		const first = await decodeSubscribeResponse(sub.client.reader, version);
+		if (!("start" in first)) throw new Error(`expected SUBSCRIBE_START, got ${Object.keys(first)}`);
+		sub.track.finish();
+		sub.track.close();
+		expect(await holesToFinish(sub.client.reader)).toEqual([]);
 	} finally {
 		await sub.close();
 	}
@@ -3329,6 +3380,7 @@ type Served = {
 	times?: bigint[];
 	end?: bigint;
 	endDelta?: bigint;
+	gap?: bigint;
 };
 
 /**
@@ -3779,10 +3831,10 @@ for (const routed of [false, true, "nested"] as const) {
 	});
 }
 
-// A skip a reader reports over a run it already gave up, both before the start, replaces that run,
-// so the final runs reaching up to the start are still named. Mirrors the Rust `RangeMap` of runs
-// given up before the start.
-test("lite draft-06: a skip below the start replaces the drop it covers", async () => {
+// A skip a reader reports over a run it already gave up, both before the start, goes out over none
+// of it: every report is final. The final runs reaching up to the start are still named, each as
+// it was given up. Mirrors the Rust `RangeMap` of runs given up before the start.
+test("lite draft-06: a skip below the start leaves the drop it covers", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_06, maxDelay: 100 });
 	try {
 		hooks.dropTrackGroups(sub.track, 5n, 6n, { error: new StreamError(StreamCode.NotFound) });
@@ -3793,9 +3845,17 @@ test("lite draft-06: a skip below the start replaces the drop it covers", async 
 		const response = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
 		if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
 		expect(response.start.start).toBe(8n);
-		const drop = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
-		if (!("drop" in drop)) throw new Error("expected SUBSCRIBE_DROP");
-		expect([drop.drop.start, drop.drop.end]).toEqual([3n, 8n]);
+		const drops: bigint[][] = [];
+		for (let i = 0; i < 3; i++) {
+			const drop = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
+			if (!("drop" in drop)) throw new Error("expected SUBSCRIBE_DROP");
+			drops.push([drop.drop.start, drop.drop.end]);
+		}
+		expect(drops).toEqual([
+			[3n, 5n],
+			[5n, 6n],
+			[6n, 8n],
+		]);
 	} finally {
 		await sub.close();
 	}

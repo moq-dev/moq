@@ -18,7 +18,7 @@ import { withMax } from "../subscription.test-util.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import type { Subscription, Subscriber as TrackSubscriber } from "../track.ts";
 import { wireOf } from "../wire.ts";
-import { SubscribeDrop, SubscribeSkip, SubscribeStart, SubscribeUpdate } from "./subscribe.ts";
+import { SubscribeDrop, SubscribeStart, SubscribeUpdate } from "./subscribe.ts";
 import { ALPN_06, ALPN_07_WIP, Version } from "./version.ts";
 
 const url = new URL("https://localhost:4443/test");
@@ -71,17 +71,6 @@ function tap() {
 		};
 		heard.push(entry);
 		if (hold?.(entry)) await new Promise<void>((release) => held.push(release));
-		return msg;
-	});
-	const skip = SubscribeSkip.decode.bind(SubscribeSkip);
-	spyOn(SubscribeSkip, "decode").mockImplementation(async (r, version) => {
-		const msg = await skip(r, version);
-		heard.push({
-			...(hops.get(r) ?? { hop: "down", recovery: true }),
-			kind: "skip",
-			start: msg.start,
-			end: msg.end,
-		});
 		return msg;
 	});
 	const update = SubscribeUpdate.decodeMaybe.bind(SubscribeUpdate);
@@ -604,12 +593,9 @@ test("a run of billions of sequences is settled by each reader in one step, drop
 			["group", 1n + 2n * BILLIONS],
 		]);
 	}
-	// Each run goes out as it was learned, as one message.
+	// The drop goes out as one message, and the skip in the Previous Delta of the group above it.
 	for (const hop of ["up", "down"] as const)
-		expect(wire.on(hop)).toEqual([
-			["drop", 1n, 1n + BILLIONS, StreamCode.Cancel],
-			["skip", 1n + BILLIONS, 1n + 2n * BILLIONS, undefined],
-		]);
+		expect(wire.on(hop)).toEqual([["drop", 1n, 1n + BILLIONS, StreamCode.Cancel]]);
 	expect(chained.fetches()).toEqual(before);
 
 	for (const reader of [narrow, wide]) reader.close();

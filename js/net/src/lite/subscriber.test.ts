@@ -59,7 +59,6 @@ import {
 	SubscribeEnd,
 	SubscribeOk,
 	type SubscribeResponse,
-	SubscribeSkip,
 	SubscribeStart,
 	SubscribeUpdate,
 } from "./subscribe.ts";
@@ -3434,68 +3433,11 @@ test("a stale drop is recorded under the narrowest budget asked on lite-07", asy
 	}
 });
 
-// A SKIP, or any final drop, that follows an OLD drop of the same groups replaces it in the copy:
-// the groups stay accounted for through an update, and the skip stays final. Mirrors Rust.
-test("a skip or final drop replaces an earlier stale one on lite-07", async () => {
-	const version = Version.DRAFT_07;
-	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, toHop(1n));
-	type Entry = { track: Producer; tail: { covers(start: bigint, end: bigint): boolean } };
-	let entry: Entry | undefined;
-	const internal = subscriber as unknown as {
-		runResponses: (stream: unknown, entry: Entry) => Promise<void>;
-	};
-	const runResponses = internal.runResponses.bind(internal);
-	const responses = spyOn(internal, "runResponses").mockImplementation((stream, captured) => {
-		entry = captured;
-		return runResponses(stream, captured);
-	});
-	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.track("video").subscribe(withMax({ delay: { max: Duration.millis(500) } }));
-	try {
-		await opened(0);
-		await answerTrackInfo(streams[0], version);
-		const stream = await opened(1);
-		await stream.reading;
-		const chunks: Uint8Array[] = [];
-		const writer = new Writer(
-			new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
-			version,
-		);
-		const old = (start: bigint, end: bigint): SubscribeResponse => ({
-			drop: new SubscribeDrop({ start, end, error: StreamCode.Old }),
-		});
-		for (const resp of [
-			{ start: answer(version, 0n) },
-			old(1n, 3n),
-			old(4n, 5n),
-			{ skip: new SubscribeSkip({ start: 1n, end: 3n }) },
-			{ drop: new SubscribeDrop({ start: 4n, end: 5n, error: StreamCode.NotFound }) },
-		] satisfies SubscribeResponse[]) {
-			await encodeSubscribeResponse(writer, resp, version);
-		}
-		for (const chunk of chunks) stream.inbound.enqueue(chunk);
-		await drainReactions();
-		if (!entry) throw new Error("no subscription");
-
-		track.update(withMax({ priority: 1, delay: { max: Duration.millis(500) } }));
-		await drainReactions();
-		expect(entry.tail.covers(1n, 3n)).toBe(true);
-		expect(entry.tail.covers(4n, 5n)).toBe(true);
-		// Still skipped after the update.
-		expect(() => entry?.track.createGroup(1n)).toThrow(Skipped);
-	} finally {
-		responses.mockRestore();
-		track.close();
-		broadcast.close();
-		subscriber.close();
-	}
-});
-
-// A SKIP replaces an earlier final DROP of the same groups too: "never produced" is the most
-// authoritative verdict. A later DROP leaves the skip in place, and a SKIP naming a group that
-// arrived keeps the group, logging a protocol error without ending the session. Mirrors Rust.
-test("a skip replaces a final drop but not a cached group on lite-07", async () => {
+// Lite-07: a GROUP header's Previous Delta proves the keys just below its group hold none, which the
+// subscription's tail accounts for and the copy records skipped, final through an update. A gap
+// holding a group that arrived keeps the group, logging a protocol error. Mirrors the Rust
+// `previous_delta_skips_the_gap_below`.
+test("a lite-07 Previous Delta skips the gap below its group", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, toHop(1n));
@@ -3515,50 +3457,29 @@ test("a skip replaces a final drop but not a cached group on lite-07", async () 
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version);
-		const stream = await opened(1);
-		await stream.reading;
-		const send = async (resps: SubscribeResponse[]) => {
-			const chunks: Uint8Array[] = [];
-			const writer = new Writer(
-				new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
-				version,
-			);
-			for (const resp of resps) await encodeSubscribeResponse(writer, resp, version);
-			for (const chunk of chunks) stream.inbound.enqueue(chunk);
-			await drainReactions();
+		await (await opened(1)).reading;
+		const serve = async (key: bigint, gap: bigint) => {
+			const stream = handStream(version);
+			stream.write(await liteFrame(0, new Uint8Array([1])));
+			stream.finish();
+			await subscriber.runGroup(new Group({ subscribe: 0n, key, gap }), stream.reader);
 		};
-		await send([
-			{ start: answer(version, 0n) },
-			{ drop: new SubscribeDrop({ start: 1n, end: 3n, error: StreamCode.NotFound }) },
-		]);
+		await serve(0n, 0n);
+		await serve(3n, 2n);
 		if (!entry) throw new Error("no subscription");
-		entry.track.createGroup(5n).finish();
-
-		await send([
-			{ skip: new SubscribeSkip({ start: 1n, end: 3n }) },
-			// A later drop leaves the skip in place.
-			{ drop: new SubscribeDrop({ start: 2n, end: 3n, error: StreamCode.NotFound }) },
-			// Group 5 arrived, so the skip names only 4 and 6.
-			{ skip: new SubscribeSkip({ start: 4n, end: 7n }) },
-		]);
+		expect(entry.tail.covers(0n, 4n)).toBe(true);
 		expect(() => entry?.track.createGroup(1n)).toThrow(Skipped);
-		expect(() => entry?.track.createGroup(2n)).toThrow(Skipped);
-		expect(entry.tail.covers(4n, 7n)).toBe(true);
+
+		// Group 5 arrived, so the gap below 7 skips only 4 and 6.
+		await serve(5n, 0n);
+		await serve(7n, 3n);
+		expect(entry.tail.covers(4n, 8n)).toBe(true);
+		expect(() => entry?.track.createGroup(6n)).toThrow(Skipped);
 		expect(warn).toHaveBeenCalledTimes(1);
 
-		const reader = entry.track.subscribe(withMax({ delay: { max: null } }));
-		const got: unknown[] = [];
-		for (
-			let next = hooks.tryRecvGroup(reader, true);
-			next.kind !== "idle";
-			next = hooks.tryRecvGroup(reader, true)
-		) {
-			if (next.kind === "group") got.push(next.group.start);
-			else if (next.kind === "drop") got.push([next.start, next.end, next.skip === true]);
-			else break;
-		}
-		expect(got).toEqual([[1n, 3n, true], [4n, 5n, true], [6n, 7n, true], 5n]);
-		reader.close();
+		track.update(withMax({ priority: 1, delay: { max: Duration.millis(500) } }));
+		await drainReactions();
+		expect(() => entry?.track.createGroup(2n)).toThrow(Skipped);
 	} finally {
 		warn.mockRestore();
 		responses.mockRestore();

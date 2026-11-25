@@ -525,7 +525,7 @@ export function hasDropCode(version: Version): boolean {
 }
 
 /**
- * Whether SUBSCRIBE_DROP and SUBSCRIBE_SKIP carry a non-empty `[Group Start, Group End)` with an
+ * Whether SUBSCRIBE_DROP carries a non-empty `[Group Start, Group End)` with an
  * exclusive end. Added in lite-07; earlier versions carry an inclusive `Group Start` and `Group End`.
  */
 export function hasGroupSpan(version: Version): boolean {
@@ -544,12 +544,12 @@ export function hasGroupSpan(version: Version): boolean {
 }
 
 /**
- * Whether holes split into SUBSCRIBE_SKIP, for keys declared never produced, and
- * SUBSCRIBE_DROP, which names the `Update` in effect when it was given up; SUBSCRIBE and
- * SUBSCRIBE_UPDATE carry that `Update` number. Added in lite-07; earlier versions name every
- * hole in SUBSCRIBE_DROP.
+ * Whether GROUP carries `Previous Delta`, proving the keys just below its group hold none, and
+ * SUBSCRIBE_DROP's span of a group takes in that gap; SUBSCRIBE_DROP names the `Update` in effect
+ * when it was given up, and SUBSCRIBE and SUBSCRIBE_UPDATE carry that `Update` number. Added in
+ * lite-07; earlier versions name every gap in SUBSCRIBE_DROP.
  */
-export function hasSkip(version: Version): boolean {
+export function hasPrevious(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.
 	switch (version) {
 		case Version.DRAFT_01:
