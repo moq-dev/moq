@@ -5037,6 +5037,18 @@ impl OpenGroups {
 	}
 }
 
+/// What an ordered read does with a group it held behind a gap; see [`Subscriber::held`].
+pub(crate) enum Held {
+	/// The ranges cover it, or a range not yet placed may: hand it out.
+	Keep,
+	/// Nothing in range from it on: hold it for the ranges to widen again.
+	Wait,
+	/// The ranges moved past it: pass it.
+	Pass,
+	/// The ranges can't be served, so every read fails with this until they change.
+	Refused(Error),
+}
+
 /// A reader's local group bounds: the floor, and the exclusive cap (`None` for none).
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct Bounds {
@@ -12935,20 +12947,33 @@ impl Subscriber {
 			.collect()
 	}
 
-	/// Whether a range not yet placed may still come to hold group `key`, which ends at time
-	/// `end` if known, within the [`Self::with_range`] bounds. A resumed reader's window counts
-	/// such a range as pending, so [`Self::runs_in_range`] covers the group already.
-	pub(crate) fn may_hold(&mut self, key: u64, end: Option<u64>) -> bool {
+	/// What an ordered read does with group `key`, held behind a gap and ending at time `end`
+	/// if known, judged on one sync of the ranges so an answer landing midway can't pass a group
+	/// they cover, or hand one out past a refusal. A range not yet placed may come to hold it too; a resumed reader's window
+	/// counts such a range as pending, so its runs cover the group already.
+	pub(crate) fn held(&mut self, key: u64, end: Option<u64>) -> Held {
 		let bounds = self.bounds();
-		if key < bounds.start || bounds.end.is_some_and(|end| key >= end) {
-			return false;
-		}
-		match &mut self.inner {
+		let within = bounds.contains(key);
+		let from = key.max(bounds.start);
+		let (next, may_hold) = match &mut self.inner {
 			Inner::Plain(cursor) => {
 				cursor.sync();
-				cursor.filter.window.may_hold(key, end)
+				if let Some(err) = cursor.filter.refused.clone() {
+					return Held::Refused(err);
+				}
+				let window = &cursor.filter.window;
+				(
+					window.runs(from).next().map(|run| *run.start()),
+					within && window.may_hold(key, end),
+				)
 			}
-			Inner::Resume(..) => false,
+			Inner::Resume(resume, _) => (resume.runs(from).first().map(|run| *run.start()), false),
+		};
+		match next.filter(|start| bounds.end.is_none_or(|cap| *start < cap)) {
+			Some(start) if within && start == key => Held::Keep,
+			_ if may_hold => Held::Keep,
+			Some(_) => Held::Pass,
+			None => Held::Wait,
 		}
 	}
 
@@ -13817,17 +13842,14 @@ impl Ordered {
 	fn read(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
 		if let Some(group) = self.held.take() {
 			let key = group.start;
-			// A range still to be placed may come to hold it too: it was in range when read, so
-			// passing it could lose a group the ranges still name.
-			if !self.inner.runs_in_range(key, key.saturating_add(1)).is_empty() || self.inner.may_hold(key, group.end())
-			{
-				return Poll::Ready(Ok(Some(*group)));
-			}
-			// A range moved off it. With nothing in range above, it waits for the range to widen
-			// again, and the read waits or ends as it does for capped ranges; otherwise the read
-			// passes it.
-			if self.inner.runs_in_range(key, u64::MAX).is_empty() {
-				self.held = Some(group);
+			// It was in range when read, so passing it while a range may still hold it could lose
+			// a group the ranges name. A range moved off it with nothing in range above waits for
+			// the range to widen again, and the read waits or ends as it does for capped ranges.
+			match self.inner.held(key, group.end()) {
+				Held::Keep => return Poll::Ready(Ok(Some(*group))),
+				Held::Wait => self.held = Some(group),
+				Held::Pass => {}
+				Held::Refused(err) => return Poll::Ready(Err(err)),
 			}
 		}
 		let read = self.inner.poll_next_group(waiter);
@@ -18592,6 +18614,35 @@ mod test {
 		producer.skip_groups(3..10);
 		write_group(&producer, 10);
 		assert_eq!(held_next(&mut ordered), Some(Ok(10)));
+	}
+
+	/// A group held behind a gap fails with a refusal of an update's time start, as every
+	/// read does until the ranges change, rather than being handed out.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_held_group_fails_with_a_time_starts_refusal() {
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		let mut ordered = producer.subscribe(Subscription::default().with_max(None)).ordered();
+		write_group(&producer, 0);
+		producer.drop_groups(1..2, StreamError::NotFound);
+		write_group(&producer, 2);
+		assert_eq!(held_next(&mut ordered), Some(Ok(0)));
+		assert_eq!(held_next(&mut ordered), Some(Err(1..2)));
+		ordered
+			.update(
+				Subscription::default()
+					.with_ranges([Range {
+						start: crate::track::Start::Time(5),
+						end: None,
+					}])
+					.with_max(None),
+			)
+			.unwrap();
+		assert!(ordered.inner.refused().is_none(), "counted as an ask");
+		producer.refuse_time(5, Error::NotFound);
+		assert!(matches!(ordered.next_item().now_or_never(), Some(Err(Error::NotFound))));
 	}
 
 	/// A group held behind a gap is passed once an update's time start, still waiting, lies
