@@ -38,7 +38,11 @@ Recommendations:
 - Order: B2 buckets and keys, then `main`'s writers and the `release`
   backport, then the copy from R2, then the Worker deploy (`just infra nix
   deploy`). A tag pushed between the writer switch and the deploy reaches B2
-  and is served once the Worker moves.
+  and is served once the Worker moves. A tag job that started before the
+  backport merged still pushes to R2 from its tag's workflow, so run the
+  copy only once `gh run list --workflow release-nix.yml` shows no such run
+  in progress, and before deleting R2, list `nix-moq-dev` against the B2
+  bucket and copy any object B2 lacks.
 - Keep the Worker's release-then-CI order and its rule that an unavailable
   read is a miss sent with `no-store`, mapped from R2's error codes to B2's
   5xx answers. Prefer a small, maintained SigV4 signer such as aws4fetch to a
@@ -47,8 +51,11 @@ Recommendations:
   writes a new version, and the lifecycle counts from the newest upload.
   Deleting hidden versions a day later keeps superseded copies from piling up;
   check that a refreshed object's age actually restarts.
-- If [cachix-retire](/quest/m0/ci/cachix-retire.md) is still open, point its
-  bucket-size check at the B2 buckets.
+- The Worker's read path is what nix-nar-stream (added by
+  [moq-dev/moq#8048](https://github.com/moq-dev/moq/pull/8048)) fixes for
+  NAR downloads broken mid-stream. Replacing `bucket.get` with a signed
+  `fetch` drops its R2 error-text match (`/\((10001|10043)\)$/`); leave the
+  mid-stream fix to that quest, which then targets B2 rather than R2.
 - Update everything that names R2 for nix: `infra/nix/`, `infra/README.md`,
   `cache.yml`, `release-nix.yml`, and the
   [CI README](/quest/m0/ci/README.md)'s caches bullet.
@@ -63,4 +70,4 @@ Public API: none. Wire: none.
 ## Related
 
 - [The Rust cache moves to B2](/quest/m0/ci/mbx-b2.md) - same account, console session, and R2 teardown
-- [Retire Cachix](/quest/m0/ci/cachix-retire.md) - measures these buckets' sizes
+- [moq-dev/moq#8048](https://github.com/moq-dev/moq/pull/8048) - retires Cachix, records these buckets' sizes, and adds nix-nar-stream for the Worker's broken NAR streams
