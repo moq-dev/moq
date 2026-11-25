@@ -95,7 +95,7 @@ const MAX_MUX_RATE: u64 = 1_000_000_000;
 /// worth padding to when it is a real rate: zero pads nothing, and anything past
 /// [`MAX_MUX_RATE`] would allocate unbounded nulls per slot. Invalid rates are
 /// refused, leaving the output unpadded.
-fn sanitize_mux_rate(rate: u64) -> Option<u64> {
+pub(super) fn sanitize_mux_rate(rate: u64) -> Option<u64> {
 	(1..=MAX_MUX_RATE).contains(&rate).then_some(rate)
 }
 
@@ -123,7 +123,10 @@ pub(super) fn audio_floor(catalog: &Catalog<impl catalog::Catalog>) -> u64 {
 		.fold(0, u64::saturating_add);
 	match packets {
 		0 => 0,
-		packets => packets.saturating_add(3).saturating_mul(schedule::PACKET),
+		packets => packets
+			.saturating_add(3)
+			.saturating_mul(schedule::PACKET)
+			.min(MAX_MUX_RATE),
 	}
 }
 
@@ -1712,8 +1715,9 @@ where
 	}
 
 	/// Pad the output with null packets to `mux_rate` bits per second, whatever the
-	/// catalog records. Without this the catalog's `mpegts.muxRate` decides, and a
-	/// catalog without one leaves the output unpadded.
+	/// catalog records, which is used as given. Without this the catalog's `mpegts.muxRate`
+	/// decides, raised to what its AAC needs in a slot, and a catalog without one leaves the
+	/// output unpadded.
 	///
 	/// Zero and absurd rates are refused with a warning, leaving the output
 	/// unpadded rather than allocating unbounded nulls.

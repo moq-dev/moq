@@ -13173,3 +13173,17 @@ fn the_aac_floor_is_bounded_by_the_decoder_buffer() {
 	// 3,584 bytes doubled and the PES header: 40 packets, and 5 for the second entry, 3 more.
 	assert_eq!(floor, (40 + 5 + 3) * crate::container::ts::schedule::PACKET);
 }
+
+/// Many renditions cannot push the AAC floor past the rate limit, which would discard the
+/// rate the source recorded.
+#[test]
+fn the_aac_floor_stays_within_the_rate_limit() {
+	let mut catalog = crate::catalog::hang::Catalog::<tscat::Ext>::default();
+	for index in 0..40 {
+		let mut config = AudioConfig::new(AAC { profile: 2 }, 1, 16);
+		config.bitrate = Some((1 << 53) - 1);
+		config.description = Some(Bytes::from_static(&[0x12, 0x10]));
+		catalog.audio.renditions.insert(format!("a{index}"), config);
+	}
+	assert!(super::export::sanitize_mux_rate(super::export::audio_floor(&catalog)).is_some());
+}
