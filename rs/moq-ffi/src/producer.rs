@@ -436,7 +436,8 @@ impl MoqBroadcastProducer {
 	///
 	/// Errors with `Duplicate` while a live track holds the name, including one whose last
 	/// producer was released while read and whose request handler has not answered its
-	/// renewal, unless `info` is the one that track was published with.
+	/// renewal, unless that renewal is still queued and `info` is the one the track was
+	/// published with.
 	pub fn publish_track(&self, name: String, info: Option<MoqTrackInfo>) -> Result<Arc<MoqTrackProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		self.with_state(|state| {

@@ -328,8 +328,9 @@ impl Producer {
 	/// holds the name.
 	///
 	/// A track whose last producer dropped while read keeps holding its name until the
-	/// broadcast's [`Requests`] handler answers the renewal: this fulfils that renewal when
-	/// `info` is the one the track was first accepted with, and returns `None` otherwise.
+	/// broadcast's [`Requests`] handler answers the renewal: while the renewal is still
+	/// queued, this fulfils it when `info` is the one the track was first accepted with;
+	/// otherwise it returns `None`.
 	///
 	/// Pass a name and an optional [`track::Info`], so a bare name works:
 	/// `create_track("video", None)` creates an untimed track.
@@ -2898,6 +2899,34 @@ mod test {
 		drop((track, open));
 
 		dynamic.assert_request().reject(Error::Unroutable);
+		assert_eq!(
+			handle.resume_position(),
+			Some(crate::track::Position { group: 0, frame: 2 })
+		);
+	}
+
+	/// A replacement recreating the group its predecessor left open has produced, so dropping
+	/// it while read asks for the track again.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_renewal_recreating_the_open_group_is_renewed_again() {
+		let at = |millis| crate::Timestamp::from_millis(millis).unwrap();
+		let producer = Info::new().produce();
+		let mut dynamic = producer.requests();
+		let consumer = producer.consume();
+		let track = producer.create_track("video", crate::track::Info::timed()).unwrap();
+		let handle = track.consume();
+		let _reader = consumer.track("video").unwrap().subscribe(None).await.unwrap();
+		let mut open = track.append_next().unwrap();
+		open.write_frame(at(0), b"a".as_slice()).unwrap();
+		drop((track, open));
+
+		let next = dynamic.assert_request().accept(crate::track::Info::timed());
+		let mut again = next.create_group(crate::group::Info { start: 0 }).unwrap();
+		again.write_frame(at(0), b"a".as_slice()).unwrap();
+		again.write_frame(at(1), b"b".as_slice()).unwrap();
+		drop((next, again));
+		dynamic.assert_request();
 		assert_eq!(
 			handle.resume_position(),
 			Some(crate::track::Position { group: 0, frame: 2 })
