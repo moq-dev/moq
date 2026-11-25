@@ -1116,20 +1116,18 @@ impl Copy {
 			// owes what the reader's window hands out below its floor too.
 			let floor = self.floor;
 			let from = self.start(start);
-			// A group still to land is waited for, as a gap is.
+			// A group still to land is waited for, as a gap is, but not one a copy declared
+			// skipped: its publisher never produced it, so no route will.
 			if reader
 				.window
 				.runs(from)
 				.take_while(|run| *run.start() < end)
 				.any(|run| {
 					let end = run.end().saturating_add(1).min(end);
-					self.may_land(
-						*run.start()..end,
-						floor.is_some(),
-						grace,
-						Some(reader.delivered),
-						reader.waiter,
-					)
+					reader
+						.skipped
+						.gaps(&(*run.start()..end))
+						.any(|open| self.may_land(open, floor.is_some(), grace, Some(reader.delivered), reader.waiter))
 				}) {
 				return Retains::Wait;
 			}
@@ -1204,6 +1202,9 @@ struct Retain<'a> {
 	/// still deliver: no copy holds it, no other replaced copy still feeds it, and no copy
 	/// declared it skipped. Empty for an unbounded reader, which no gap ends early.
 	owed: &'a RangeSet<u64>,
+	/// What the reader recorded skipped or a copy declared skipped, under the replaced copies'
+	/// caps: no copy waits for it.
+	skipped: &'a RangeSet<u64>,
 	waiter: &'a kio::Waiter,
 }
 
@@ -2631,6 +2632,14 @@ impl Reader {
 			true => self.owed(delivered, waiter),
 			false => RangeSet::new(),
 		};
+		let capped = (self.copies.iter())
+			.filter(|copy| copy.replaced && copy.done.is_none())
+			.filter_map(|copy| copy.end())
+			.max();
+		let skipped = match capped {
+			Some(end) => self.skipped_in(self.groups.0..end, waiter),
+			None => RangeSet::new(),
+		};
 		let reader = Retain {
 			groups: self.groups,
 			window: &self.window,
@@ -2640,6 +2649,7 @@ impl Reader {
 			delivered,
 			out: &self.out,
 			owed: &owed,
+			skipped: &skipped,
 			waiter,
 		};
 		let mut waits = false;
@@ -11561,41 +11571,46 @@ mod test {
 
 	/// As [`an_unplaced_time_start_waits_on_a_replaced_copy`], with no group at the time: the
 	/// replaced copy declares it skipped, so the group holding the time starts below it, and
-	/// the reader waits for that group, as a plain cursor does.
+	/// the reader waits for that group, as a plain cursor does. Once read, the skipped group is
+	/// waited for on no copy, whether or not the serving copy's START lies past it.
 	#[test]
 	#[cfg(feature = "async")]
 	fn an_unplaced_time_start_waits_below_its_time_on_a_replaced_copy() {
-		let routes = Producer::new();
-		let front = logical(&routes);
-		let b = received_copy();
-		b.anchored();
-		routes.serve(b.consume());
-		let mut sub = front
-			.consume()
-			.subscribe(Subscription::default().with_ranges([track::Range {
-				start: crate::track::Start::Time(7),
-				end: Some(7),
-			}]))
-			.now_or_never()
-			.unwrap()
-			.unwrap();
-		write(&b, 8);
-		let mut c = received_copy();
-		c.anchored();
-		c.start_at(9).unwrap();
-		write(&c, 9);
-		routes.serve(c.consume());
-		b.skip_groups(7..8);
-		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		for started in [true, false] {
+			let routes = Producer::new();
+			let front = logical(&routes);
+			let b = received_copy();
+			b.anchored();
+			routes.serve(b.consume());
+			let mut sub = front
+				.consume()
+				.subscribe(Subscription::default().with_ranges([track::Range {
+					start: crate::track::Start::Time(7),
+					end: Some(7),
+				}]))
+				.now_or_never()
+				.unwrap()
+				.unwrap();
+			write(&b, 8);
+			let mut c = received_copy();
+			c.anchored();
+			if started {
+				c.start_at(9).unwrap();
+			}
+			write(&c, 9);
+			routes.serve(c.consume());
+			b.skip_groups(7..8);
+			assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
 
-		write(&b, 6);
-		assert_eq!(drain(&mut sub, false), [6]);
-		let resolved = sub.resolved_range(0).expect("placed");
-		assert_eq!((resolved.start, resolved.end), (6, Some(8)));
-		assert!(matches!(
-			sub.poll_recv_group(&kio::Waiter::noop()),
-			Poll::Ready(Ok(None))
-		));
+			write(&b, 6);
+			assert_eq!(drain(&mut sub, false), [6]);
+			let resolved = sub.resolved_range(0).expect("placed");
+			assert_eq!((resolved.start, resolved.end), (6, Some(8)));
+			assert!(
+				matches!(sub.poll_recv_group(&kio::Waiter::noop()), Poll::Ready(Ok(None))),
+				"started={started}"
+			);
+		}
 	}
 
 	/// A time start that reached back past every group a copy held stays unplaced once read,
