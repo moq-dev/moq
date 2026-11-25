@@ -187,7 +187,7 @@ function answer(
 	return new Answer({
 		version: Version.DRAFT_07,
 		advertised,
-		origin: { covers: () => true, allowed },
+		origin: { covers: () => true, allowed, root: Path.empty() },
 		grant,
 		ready: Promise.resolve(),
 		closing: new Once<true>(),

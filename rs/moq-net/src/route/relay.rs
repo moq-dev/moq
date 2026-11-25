@@ -68,8 +68,8 @@
 //! knows the claim available, the request waits: the node shows the claim available, so it
 //! never answers it unroutable. Among the claims
 //! of one Instance at one path, only the one shown closest to its own path, at the newest
-//! epoch among those, may serve, reachable or not, as `model::origin` ranks them; a
-//! route's rank chooses among those alone. A route whose cost a link would carry past the
+//! epoch among those, may serve, reachable or not; a route's rank chooses among those
+//! alone. `model::origin` and the draft instead rank every filing of one claim as one tier. A route whose cost a link would carry past the
 //! metric is never used, and a claim's cost saturates there.
 //!
 //! The rule is the bake-off's pick (moq-dev/moq#8880): `tests/multi.rs` with `floor`,
@@ -3594,6 +3594,18 @@ mod tests {
 		router.recv(2, claims(1)).unwrap();
 		assert_eq!(ways(&router), [(Next::Via(2), true), (Next::Via(3), false)]);
 		assert_eq!(router.step(node(5), &broadcast, None), Some(Next::Via(2)));
+	}
+
+	/// A request naming a forwarding node whose claims this node has yet to hear follows the
+	/// route to that node, but never back to the neighbour that asked.
+	#[test]
+	fn a_request_for_an_unheard_claim_follows_the_route_but_not_back() {
+		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
+		open(&mut router, 2, Role::Routing(node(2)));
+		router.recv(2, route(5, 2, 1)).unwrap();
+		let broadcast = (p("live"), 7);
+		assert_eq!(router.step(node(5), &broadcast, None), Some(Next::Via(2)));
+		assert_eq!(router.step(node(5), &broadcast, Some(2)), None);
 	}
 
 	/// A neighbour whose copy holds the claim only unavailable refuses a request for it too,

@@ -25,7 +25,7 @@ Recommended frame shape, settled in review:
 ```
 
 - `words`, `confidence`, and `lang` are optional, since a backend may lack
-  them (OpenAI's live model returns no word timing or confidence).
+  them.
 - Times sit on the source broadcast's clock, so a transcript lines up with
   the audio it came from. The frame timestamp carries `start`, as for every
   text format, so a relay never parses the payload.

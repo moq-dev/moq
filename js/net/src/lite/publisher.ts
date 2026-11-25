@@ -10,6 +10,7 @@ import { Withdrawal } from "../connection/withdrawal.ts";
 import { Counts } from "../cover.ts";
 import type * as datagram from "../datagram.ts";
 import * as DatagramStream from "../datagram_stream.ts";
+import { Runs } from "../drops.ts";
 import {
 	error,
 	NotFound,
@@ -36,6 +37,7 @@ import {
 	presented,
 	type Run,
 	runGaps,
+	sameHole,
 } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -98,6 +100,7 @@ import {
 	hasLengthFirst,
 	hasProbeRtt,
 	hasRanges,
+	hasReliableReset,
 	hasRouteCost,
 	hasRoutes,
 	hasSkip,
@@ -192,6 +195,19 @@ function wireTime(timestamp: Timestamp, stamp: Stamp): bigint {
  */
 function acknowledged(writer: Writer): Promise<void> {
 	return writer.closed.catch(() => {});
+}
+
+/**
+ * Lite-07: whether a Group Stream this side just reset still accounts for its group, `held` once
+ * a reset delivers its whole header. A reset of this side's delivers the held header, which does.
+ * A STOP_SENDING owes a drop only when it evicted the stream before the peer acknowledged the
+ * header, since the subscriber may never have read which group it carried; any other the
+ * subscriber sent knowing the group, or wanting none of it. Mirrors the Rust `accounts`.
+ */
+async function accounts(stream: Writer, held: boolean): Promise<boolean> {
+	const stop = stream.stopped;
+	if (stop === undefined) return held;
+	return stop !== StreamCode.Evicted || (await stream.heldAcknowledged());
 }
 
 // The TRACK_INFO a TRACK stream, or a listing's TRACKS_ADD, answers for a track.
@@ -1036,7 +1052,7 @@ export class Publisher {
 		// What the peer currently sees: the table under the prefix, less whatever our grant
 		// does not let us publish.
 		const visible = (table: Advertisements): Map<Path.Valid, Advertised> => {
-			const out = presented(msg.prefix, table, carries);
+			const out = presented(msg.prefix, table, carries, { root: this.#publish && wireOf(this.#publish).root });
 			const grant = this.#grant?.peek();
 			if (grant) {
 				for (const suffix of [...out.keys()]) {
@@ -1675,8 +1691,10 @@ export class Publisher {
 		// first group is known, SUBSCRIBE_END when the track finishes.
 		const emitRange = hasTrackStream(this.version);
 		let startSent = false;
-		// Dispositions before START refine its boundary; later ones must be named as drops.
-		const skipped: DropRun[] = [];
+		// Dispositions before START refine its boundary; later ones must be named as drops. Each
+		// replaces the runs it covers, as a skip may go out over a drop, so they stay sorted and
+		// disjoint. Mirrors the Rust `Start::Unresolved::skipped`.
+		let skipped = new Runs<DropRun>(sameHole);
 		// Where SUBSCRIBE_START resolved, lowered by an update that asks for groups below it.
 		let startKey: bigint | undefined;
 		// The first group and the edge seen before it was popped, held until the source
@@ -1988,19 +2006,27 @@ export class Publisher {
 		});
 		try {
 			for (;;) {
-				if (startKey !== undefined && skipped.length > 0) {
-					for (const range of skipped) {
-						// A stale run below the start is never named, so a wider budget may serve it. A
-						// final one is named all the same: no budget brings it back, and a subscriber
-						// filling below the start (a relay whose reader reaches lower) must still learn
-						// its fate. Mirrors the Rust `TrackRun::resolve`.
-						const below = min(range.end, startKey);
-						if (range.stale !== undefined) {
-							if (range.start < below) record?.untell(range.start, below);
-						} else if (!(await forward(range.start, below, range))) return false;
-						if (!(await forward(max(range.start, startKey), range.end, range))) return false;
+				if (startKey !== undefined && skipped.size > 0) {
+					// Nothing below the start is owed. The final runs reaching up to it unbroken are named all
+					// the same, so a reader filling below the start (a relay whose reader reaches lower) learns
+					// nothing there exists. The rest, past a stale run, a group still held, or a key nothing
+					// gave up, stay untold: naming them would send every gap in the track's history, as a
+					// lite-06 track keyed by timestamp holds one per group. An update that asks below the start
+					// names them then, and a wider budget may still serve a stale one. Mirrors the Rust
+					// `TrackRun::resolve`.
+					let reach = startKey;
+					for (let i = skipped.size - 1; i >= 0; i--) {
+						const range = skipped.all[i];
+						if (range.start >= reach) continue;
+						if (range.end < reach || range.stale !== undefined) break;
+						reach = range.start;
 					}
-					skipped.length = 0;
+					for (const range of skipped.all) {
+						const below = min(range.end, reach);
+						if (range.start < below) record?.untell(range.start, below);
+						if (!(await forward(max(range.start, reach), range.end, range))) return false;
+					}
+					skipped = new Runs<DropRun>(sameHole);
 				}
 				if (pendingDrops.length > 0) {
 					for (const { start, end, error } of pendingDrops.splice(0)) {
@@ -2101,7 +2127,7 @@ export class Publisher {
 					case "error":
 						throw recv.error;
 					case "drop":
-						if (!startSent) skipped.push(recv);
+						if (!startSent) skipped.set(recv.start, recv.end, recv);
 						else if (!(await forward(recv.start, recv.end, recv))) return false;
 						continue;
 					case "idle":
@@ -2126,7 +2152,7 @@ export class Publisher {
 							const end = hooks.servingEnd(track);
 							const runs = end === undefined ? [] : hooks.servingRuns(track, 0n, end);
 							const given: Run[] = [];
-							for (const range of skipped) insertRun(given, range.start, range.end);
+							for (const range of skipped.all) insertRun(given, range.start, range.end);
 							if (
 								runs.length > 0 &&
 								runs.every((run) => runGaps(given, run.start, run.end).length === 0)
@@ -2233,8 +2259,7 @@ export class Publisher {
 					startKey = min(group.start, source ?? group.start);
 					// A group given up cannot be where the feed starts. Adjacent runs given up with
 					// different errors stay separate, so walk them in order.
-					skipped.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
-					for (const range of skipped) {
+					for (const range of skipped.all) {
 						if (range.start <= startKey && range.end > startKey) startKey = min(range.end, group.start);
 					}
 					// A later group above an explicit floor is still delivered, so the cursor stays put.
@@ -2265,7 +2290,8 @@ export class Publisher {
 					},
 				};
 				// The FIN waits for every stream to finish or reset, including one that has not opened yet.
-				// A stream reset to make room fails the group like any other reset, so it is dropped.
+				// A stream reset to make room fails the group like any other reset, so it is dropped,
+				// unless a lite-07 reset delivered its header, which accounts for the group.
 				const task = (async () => {
 					const writer = await this.#openGroup(options);
 					let failed: Error | undefined;
@@ -2777,7 +2803,8 @@ export class Publisher {
 	}
 
 	/**
-	 * Serves one group on the stream {@link #openGroup} opened for it.
+	 * Serves one group on the stream {@link #openGroup} opened for it, resolving the error a
+	 * SUBSCRIBE_DROP names it with, or undefined when the stream accounts for the group.
 	 *
 	 * @internal
 	 */
@@ -2791,6 +2818,8 @@ export class Publisher {
 			const stop = await givenUp.write(op);
 			if (stop) throw stop;
 		};
+		// Lite-07: the transport took the whole GROUP header, which every later reset still delivers.
+		let held = false;
 		// Everything past this point runs inside the cleanup scope, so a failure never leaves
 		// a finished group's stream being ranked.
 		try {
@@ -2803,6 +2832,7 @@ export class Publisher {
 				await stream.u53(0); // stream type
 				await msg.encode(stream, this.version);
 			});
+			if (hasReliableReset(this.version)) held = stream.hold();
 
 			// Lite-07 counts the first delta from the group's start, whatever frame the stream starts
 			// at, and GROUP_END from the highest timestamp sent, since B-frames go backwards.
@@ -2879,16 +2909,18 @@ export class Publisher {
 			}
 			stream.close();
 			group.close();
-			// A stream that fails after its FIN may have lost its header, so report it for a DROP.
-			// Its bytes still hold the connection until acknowledged, so a group gone stale meanwhile
-			// is reset like one still serving, as the Rust `GroupServe` does: stale bytes must not fill
-			// the send window ahead of the streams behind them.
+			// A stream that fails after its FIN may have lost its header, so report it for a DROP,
+			// unless a lite-07 reset still delivers it. Its bytes still hold the connection until
+			// acknowledged, so a group gone stale meanwhile is reset like one still serving, as the
+			// Rust `GroupServe` does: stale bytes must not fill the send window ahead of the streams
+			// behind them.
 			await write(() => stream.closed);
 			return undefined;
 		} catch (err: unknown) {
 			const e = error(err);
 			stream.reset(e);
 			hooks.releaseGroupReader(group, e);
+			if (hasReliableReset(this.version) && (await accounts(stream, held))) return undefined;
 			return e;
 		} finally {
 			priority.remove(stream);

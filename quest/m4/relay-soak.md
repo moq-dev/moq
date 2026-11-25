@@ -37,4 +37,5 @@ Public API: none. Wire: none.
 
 ## Related
 
+- [One steady broadcast stops growing](/quest/m1/steady-broadcast-growth.md) - builds the steady-state slope judge this soak reuses
 - [Relay allocations](/quest/m9/perf/relay-allocs.md) - steady-state allocation cost, where this measures growth

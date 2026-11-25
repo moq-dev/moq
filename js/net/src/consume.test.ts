@@ -198,3 +198,26 @@ test("the newest stream wins a tie at its own prefix", () => {
 	cache.announce(path, older, z, true);
 	expect(cache.instance(path).route.instance).toBe(z.instance);
 });
+
+// A GOAWAY drains every claim of a session at once: a request on the claim selected before and
+// after stays valid, though draining the claims one by one would pass the path through another.
+test("a batch rechecks a path once, after its last change", () => {
+	const cache = new BroadcastCache();
+	const path = Path.from("room");
+	const [cheap, dear] = [{}, {}];
+	cache.announce(path, cheap, { ...WireRoute.default, cost: 1n });
+	cache.announce(path, dear, { ...WireRoute.default, cost: 5n });
+	const source = new Producer();
+	const selected = cache.instance(path);
+	const held = cache.insert(path, selected, source.consume());
+	const signal = selected.validity?.signal;
+	cache.batch(() => {
+		cache.announce(path, cheap, { ...WireRoute.default, cost: 1n, draining: true });
+		cache.announce(path, dear, { ...WireRoute.default, cost: 5n, draining: true });
+	});
+	expect(signal?.aborted).toBe(false);
+	cache.announce(path, cheap, { ...WireRoute.default, cost: 1n, draining: true, available: false });
+	expect(signal?.aborted).toBe(true);
+	held.close();
+	source.close();
+});

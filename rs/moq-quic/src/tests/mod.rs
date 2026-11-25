@@ -41,6 +41,7 @@ use util::*;
 mod acked;
 mod characterize;
 mod probe;
+mod quiesce;
 mod rate;
 mod realtime;
 mod receive_ts;
