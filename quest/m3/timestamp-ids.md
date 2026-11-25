@@ -1,14 +1,13 @@
-# [L] Decode-order timestamps: moq-timestamp-03 Object IDs and unsigned lite deltas
+# [L] moq-timestamp-03 Object IDs and unsigned lite timestamp deltas
 
 ## Goal
 
-Frame timestamps become decode-order time end to end, with presentation time
-carried by the hang `cts` container:
+The timestamp work split out of the 0.22 draft review lands:
 
 - On moq-transport draft-23 and later, a timed track declares `ID_TIMESCALE`
-  (`0x40B70`) and each object's Object ID encodes its decode timestamp
-  (`DTS = Group ID + Object ID - TIMESTAMP_TIE`, with `TIMESTAMP_TIE`
-  `0x40B72` omitted when zero), per draft-lcurley-moq-timestamp-03.
+  (`0x40B70`) and each object's Object ID encodes its timestamp
+  (`Group ID + Object ID - TIMESTAMP_TIE`, with `TIMESTAMP_TIE` `0x40B72`
+  omitted when zero), per draft-lcurley-moq-timestamp-03.
 - moq-lite carries unsigned, non-decreasing `FRAME` timestamp deltas instead
   of zigzag signed ones, with `GROUP_END`'s delta measured from the last frame.
 - First-party encoders emit the `cts` container, so B-frame streams keep their
@@ -24,25 +23,13 @@ Split out of [moq-dev/moq#9553](https://github.com/moq-dev/moq/pull/9553)
 decoders. The first implementation, with three review rounds of fixes, is on
 branch `t3/moqt-timestamp-ids` at `80f1cbb7105b5a2be9bb47fce5454092e1323a80`
 (it passed `just check` and `just test interop --all` there). Start from it
-rather than from scratch, but revisit its shape first: its open findings all
-come from per-copy timing state.
+rather than from scratch, but revisit its shape first. Its open review
+findings, listed in that PR's review threads and its `## Review` history, all
+come from timing derived per cached copy: a copy that starts mid-group or
+holds a tied frame first computes Object IDs and timestamps the origin never
+sent. A copy must serve the received wire values, or refuse to serve what it
+cannot prove matches them.
 
-- Each cached copy derives `timed_oid` and a clamped `mono_ts` as frames
-  enter it (`assign_timing` in `rs/moq-net/src/model/group.rs`), so a copy
-  that starts mid-group or holds a tied frame first computes values the
-  origin never sent. Carry the received wire Object ID and timestamp through
-  instead of recomputing them, or refuse to serve an offset copy in the other
-  ID mode.
-- Open review findings at that head: Codex round 3 (relay Object ID
-  translation by downstream mode, Largest Object translation, standalone
-  `END_OF_TRACK` caps in Rust and JS, partial-frame resume across dense and
-  sparse routes, gap property renumbering, bounded terminal lookup), Claude
-  round 3 (Largest Object reported in the upstream's ID scheme), and
-  CodeRabbit on `rs/moq-net/src/ietf/publisher.rs`,
-  `rs/moq-net/src/model/group.rs`, `rs/moq-net/src/ietf/properties.rs`,
-  `rs/moq-net/src/lite/publisher.rs`, `js/net/src/group.ts`,
-  `js/net/src/wire.ts`, and `drafts/draft-lcurley-moq-ietf.md` (backward
-  timestamps across the hop). The PR's review threads list each one.
 - The Draft-18..22 shim that keeps legacy `TIMESCALE` (`0x08`) and dense
   Object IDs for mixed-version rollouts stays, marked for deletion at the next
   bump.

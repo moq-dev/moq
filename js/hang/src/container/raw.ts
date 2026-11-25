@@ -31,7 +31,8 @@ export class Format implements ContainerFormat {
 	/** Decode one raw frame using its MoQ transport timestamp. Throws on an untimed track. */
 	decode(frame: Uint8Array, timestamp: Time.Timestamp): Frame[] {
 		if (timestamp.scale === undefined) throw new Moq.Error.TimestampMismatch();
-		// On data tracks, a zero-byte object is the discontinuity marker (decodes to no frames).
+		// On a data track a zero-byte object is only ever the discontinuity marker (decodes to no
+		// frames), so an empty payload has no encoding and one sharing its group is malformed.
 		if (this.kind === "data" && frame.byteLength === 0) return [];
 		const duration = frame.byteLength > 0 ? this.#duration?.(frame) : undefined;
 		return [

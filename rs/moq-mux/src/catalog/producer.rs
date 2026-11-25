@@ -1014,6 +1014,9 @@ impl<E: CatalogExt> Producer<E> {
 		R: super::RenditionConfig<E>,
 		crate::Error: From<C::Error>,
 	{
+		// Refused before the rendition publishes a config, so no consumer is told of a track whose
+		// first write would fail.
+		container.writable()?;
 		// Only video and audio promise the interval: a sparse role (text) groups only as often as it
 		// has something to say.
 		let role = std::any::TypeId::of::<R>();
@@ -1485,8 +1488,8 @@ fn packaging_of(container: &hang::catalog::Container) -> moq_msf::Packaging {
 		hang::catalog::Container::Cmaf { .. } => moq_msf::Packaging::Cmaf,
 		hang::catalog::Container::Loc => moq_msf::Packaging::Loc,
 		hang::catalog::Container::Legacy => moq_msf::Packaging::Legacy,
-		hang::catalog::Container::Raw => moq_msf::Packaging::Unknown("raw".to_string()),
-		hang::catalog::Container::Cts => moq_msf::Packaging::Unknown("cts".to_string()),
+		hang::catalog::Container::Raw => moq_msf::Packaging::Raw,
+		hang::catalog::Container::Cts => moq_msf::Packaging::Cts,
 		hang::catalog::Container::Unknown(unknown) => moq_msf::Packaging::Unknown(unknown.kind().to_string()),
 	}
 }
@@ -2235,6 +2238,32 @@ mod test {
 	/// The audio renditions the catalog holds, by name.
 	fn audio(catalog: &Producer) -> Vec<String> {
 		catalog.snapshot().audio.renditions.into_keys().collect()
+	}
+
+	/// A container this build only decodes is refused before its rendition is advertised, and the
+	/// name stays free for a container it can write.
+	#[test]
+	fn a_decode_only_container_publishes_no_rendition() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+		config.container = Container::Cts;
+		let info = catalog.track_info(hang::catalog::PRIORITY.audio);
+
+		let net = broadcast.create_track("audio0", info.clone()).unwrap();
+		let wire = crate::catalog::hang::Container::try_from(&config).unwrap();
+		let err = catalog.audio(net, wire, config.clone()).err();
+		assert!(
+			matches!(err, Some(crate::Error::Moq(moq_net::Error::Unsupported))),
+			"{err:?}"
+		);
+		assert!(audio(&catalog).is_empty());
+
+		config.container = Container::Raw;
+		let net = broadcast.create_track("audio1", info).unwrap();
+		let wire = crate::catalog::hang::Container::try_from(&config).unwrap();
+		let _audio = catalog.audio(net, wire, config).unwrap();
+		assert_eq!(audio(&catalog), ["audio1"]);
 	}
 
 	#[tokio::test(start_paused = true)]

@@ -43,7 +43,8 @@ type (
 	// VideoProperties holds catalog properties shared by every video rendition; nil fields clear those properties.
 	VideoProperties = ffi.MoqVideoProperties
 	// Container selects how subscribed media frames are demuxed. Build one with
-	// LegacyContainer, CmafContainer, or LocContainer. A catalog reports ContainerUnknown
+	// LegacyContainer, CmafContainer, LocContainer, RawContainer, or CtsContainer; raw and
+	// CTS need a timed track. A catalog reports ContainerUnknown
 	// for a container this version cannot name yet, which a subscription refuses.
 	Container = ffi.MoqContainer
 	// ContainerLegacy is the legacy hang container variant of Container; build one with LegacyContainer.

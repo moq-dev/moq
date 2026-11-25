@@ -1,7 +1,7 @@
 import { Duration } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
-import { Error as NetError, Time } from "@moq/net";
+import { Error as NetError } from "@moq/net";
 import { Derived, Effect, type Getter, getter, type Inputs, type Readonlys } from "@moq/signals";
 import type { VTTCue, VTTRegion } from "media-captions";
 import { subscribeMedia } from "../media";
@@ -353,19 +353,7 @@ export class Renderer {
 							for (;;) {
 								const frame = await group.readFrame();
 								if (!frame) break;
-								const decoded = format.decode(frame.payload, frame.timestamp);
-								if (
-									decoded.length === 0 &&
-									config.container.kind === "raw" &&
-									config.format === "utf8" &&
-									frame.timestamp.scale !== undefined
-								) {
-									// In raw mode, a zero-byte object decodes as a data discontinuity marker;
-									// on utf8 captions it also clears the active cue at its transport timestamp.
-									clearCue(store, Duration.micros(frame.timestamp.as(Time.Timescale.MICRO)).asSecs());
-									continue;
-								}
-								for (const sample of decoded) {
+								for (const sample of format.decode(frame.payload, frame.timestamp)) {
 									await this.#ingest(config.format, sample, store);
 								}
 							}

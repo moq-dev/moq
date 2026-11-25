@@ -24,7 +24,7 @@ medium bugs in `m1`; all medium bugs in `m3`).
    - `rs/hang/src/catalog/video/vp9.rs:94` parses `full_range` too loosely
      instead of accepting only `0` or `1` per the VP9 codec string grammar.
 3. **Reconcile PCM `description` validation with the draft.**
-   - Compare `drafts/draft-lcurley-moq-hang.md:474-476` with
+   - Compare the PCM section of `drafts/draft-lcurley-moq-hang.md` (`{#audio-pcm}`) with
      `rs/hang/src/catalog/audio/mod.rs:270-282` (and JS `js/hang` catalog
      validation) so Rust, JS, and the hang draft agree on whether `description`
      is forbidden, optional, or required for PCM renditions.

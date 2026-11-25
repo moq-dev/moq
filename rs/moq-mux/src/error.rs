@@ -291,6 +291,11 @@ pub enum Error {
 	/// An importer was given input after it finished.
 	#[error("input after finish")]
 	Finished,
+
+	/// A raw data track was handed an empty payload, which its zero-byte discontinuity marker
+	/// leaves no way to carry.
+	#[error("a raw data track can't carry an empty payload: a zero-byte object marks a discontinuity")]
+	EmptyRawPayload,
 }
 
 impl Error {

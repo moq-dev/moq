@@ -43,6 +43,11 @@ impl Container for Wire {
 	}
 
 	fn write(&self, group: &mut moq_net::group::Producer, frames: &[Frame]) -> Result<(), Self::Error> {
+		// A data track's zero-byte object is its discontinuity marker, so an empty frame has no
+		// encoding. Checked up front so a refused batch writes nothing.
+		if self.0 == Kind::Data && frames.iter().any(|frame| frame.payload.is_empty()) {
+			return Err(crate::Error::EmptyRawPayload);
+		}
 		for frame in frames {
 			group.write_frame(frame.timestamp, frame.payload.clone())?;
 		}
@@ -55,8 +60,8 @@ impl Container for Wire {
 			return Err(moq_net::Error::TimestampMismatch.into());
 		}
 
-		// On data tracks, a zero-byte object is the discontinuity marker (decodes to no frames),
-		// matching legacy and cts. On audio/video tracks, it is an endpoint/discontinuity frame.
+		// On a data track a zero-byte object is only ever the discontinuity marker (decodes to no
+		// frames), so one sharing its group is malformed. On audio/video it is an endpoint frame.
 		if self.0 == Kind::Data && frame.payload.is_empty() {
 			return Ok(Vec::new());
 		}
@@ -121,5 +126,31 @@ mod tests {
 			.decode(moq_net::frame::Frame::new(ts, Bytes::new()))
 			.unwrap();
 		assert!(data.is_empty());
+	}
+
+	#[test]
+	fn refuses_empty_data_payload() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast.create_track("data", hang::container::track_info(0)).unwrap();
+		let mut group = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
+		let frame = |payload: &'static [u8]| Frame {
+			timestamp: Timestamp::from_millis(0).unwrap(),
+			payload: Bytes::from_static(payload),
+			keyframe: true,
+			duration: None,
+		};
+
+		// The whole batch is refused, so the cue before the empty frame isn't written either.
+		let err = Wire(Kind::Data).write(&mut group, &[frame(b"cue"), frame(b"")]);
+		assert!(matches!(err, Err(crate::Error::EmptyRawPayload)));
+		Wire(Kind::Data).write(&mut group, &[frame(b"cue")]).unwrap();
+		let mut reader = group.consume();
+		group.finish().unwrap();
+
+		let read = futures::FutureExt::now_or_never(reader.read_frame())
+			.unwrap()
+			.unwrap()
+			.unwrap();
+		assert_eq!(read.payload, Bytes::from_static(b"cue"));
 	}
 }

@@ -627,6 +627,7 @@ Claim {
 }
 ~~~
 `Instance` + `Minted` uniquely identify the stream (a minted and non-minted Instance with identical text are distinct).
+`Cost` is the sender's cost to the claim: a routing node sends a routing neighbour the cost it learned the claim at (the neighbour adds its own route cost), and any other peer that cost plus its route cost to the node announcing the claim.
 `Above` exceeds the shown path's segment count, `Chain Count > 31`, `Relay = 0`, empty/non-UTF-8 `Instance`, or invalid `Minted`/flags -> `PROTOCOL_VIOLATION`.
 
 ### ANNOUNCE_END {#announce-end}
@@ -1026,6 +1027,7 @@ GROUP_END Message {
   End Delta (i),          ; non-negative delta from the highest stream frame timestamp (or Group Start if empty/scale-less)
 }
 ~~~
+End is never below any frame timestamp of the Group (including frames not carried on this stream, e.g., before a `FETCH` start), and no greater than the next Group's start.
 Publisher FINs immediately after `GROUP_END`; trailing bytes are a malformed Track.
 
 

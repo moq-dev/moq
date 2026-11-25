@@ -92,10 +92,12 @@ impl<E: CatalogExt> From<moq_net::track::Subscriber> for Consumer<E> {
 /// identifies text. Unsupported text packaging is an error so a gateway cannot silently lose it.
 /// Tracks with no role, sign language, audio description, other custom roles, and audio/video
 /// with packaging other than [`moq_msf::Packaging::Loc`], [`moq_msf::Packaging::Cmaf`],
-/// [`moq_msf::Packaging::Legacy`], `raw`, or `cts` are skipped with a warning.
+/// [`moq_msf::Packaging::Legacy`], [`moq_msf::Packaging::Raw`], or [`moq_msf::Packaging::Cts`]
+/// are skipped with a warning.
 ///
-/// [`moq_msf::Packaging::Loc`], [`moq_msf::Packaging::Legacy`], `raw`, and `cts` map to their own
-/// containers: they carry the same codec payload but frame it differently.
+/// [`moq_msf::Packaging::Loc`], [`moq_msf::Packaging::Legacy`], [`moq_msf::Packaging::Raw`], and
+/// [`moq_msf::Packaging::Cts`] map to their own containers: they carry the same codec payload but
+/// frame it differently.
 /// [`moq_msf::Packaging::Cmaf`] requires `init_data` to be present (base64-encoded ftyp+moov);
 /// a missing or malformed init segment is an error.
 ///
@@ -199,8 +201,8 @@ fn container_from_msf(track: &moq_msf::Track, init_cache: &mut InitDataCache) ->
 		// timestamp prefix. Reading one as the other misparses the head of every frame.
 		moq_msf::Packaging::Loc => Ok(Some(Container::Loc)),
 		moq_msf::Packaging::Legacy => Ok(Some(Container::Legacy)),
-		moq_msf::Packaging::Unknown(kind) if kind == "raw" => Ok(Some(Container::Raw)),
-		moq_msf::Packaging::Unknown(kind) if kind == "cts" => Ok(Some(Container::Cts)),
+		moq_msf::Packaging::Raw => Ok(Some(Container::Raw)),
+		moq_msf::Packaging::Cts => Ok(Some(Container::Cts)),
 		moq_msf::Packaging::Cmaf => {
 			let init =
 				decode_init_data(track, init_cache)?.ok_or_else(|| Error::MissingCmafInit(track.name.clone()))?;
@@ -244,9 +246,10 @@ fn decode_init_data(track: &moq_msf::Track, init_cache: &mut InitDataCache) -> R
 /// CMAF tracks carry their config inside `Container::Cmaf::init`, so this
 /// returns `Ok(None)` for them to avoid duplicating the bytes.
 fn legacy_description(track: &moq_msf::Track, init_cache: &mut InitDataCache) -> Result<Option<bytes::Bytes>> {
-	match &track.packaging {
-		moq_msf::Packaging::Loc | moq_msf::Packaging::Legacy => decode_init_data(track, init_cache),
-		moq_msf::Packaging::Unknown(kind) if kind == "raw" || kind == "cts" => decode_init_data(track, init_cache),
+	match track.packaging {
+		moq_msf::Packaging::Loc | moq_msf::Packaging::Legacy | moq_msf::Packaging::Raw | moq_msf::Packaging::Cts => {
+			decode_init_data(track, init_cache)
+		}
 		_ => Ok(None),
 	}
 }
@@ -373,9 +376,8 @@ fn derive_audio_params(
 ) -> Result<DerivedAudio> {
 	let init = decode_init_data(track, init_cache)?.ok_or_else(|| Error::MissingAudioParams(track.name.clone()))?;
 
-	match &track.packaging {
-		moq_msf::Packaging::Loc | moq_msf::Packaging::Legacy => derive_from_codec_config(track, codec, init),
-		moq_msf::Packaging::Unknown(kind) if kind == "raw" || kind == "cts" => {
+	match track.packaging {
+		moq_msf::Packaging::Loc | moq_msf::Packaging::Legacy | moq_msf::Packaging::Raw | moq_msf::Packaging::Cts => {
 			derive_from_codec_config(track, codec, init)
 		}
 		moq_msf::Packaging::Cmaf => derive_from_cmaf_moov(track, init),
@@ -946,8 +948,12 @@ mod test {
 	fn raw_and_cts_aac_params_derived_from_audio_specific_config() {
 		// AAC-LC, 44.1 kHz, stereo. raw and cts carry the bare codec config like LOC and Legacy.
 		let init_b64 = base64::engine::general_purpose::STANDARD.encode([0x12, 0x10]);
-		for (kind, container) in [("raw", Container::Raw), ("cts", Container::Cts)] {
-			let mut audio = audio_track("audio0", moq_msf::Packaging::Unknown(kind.into()));
+		for (packaging, container) in [
+			(moq_msf::Packaging::Raw, Container::Raw),
+			(moq_msf::Packaging::Cts, Container::Cts),
+		] {
+			let kind = packaging.to_string();
+			let mut audio = audio_track("audio0", packaging);
 			audio.codec = Some("mp4a.40.2".to_string());
 			audio.samplerate = None;
 			audio.channel_config = None;

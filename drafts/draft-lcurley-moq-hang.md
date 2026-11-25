@@ -455,7 +455,9 @@ Rules:
 - Durations and media timestamps are floored milliseconds; `arrival.wall` is milliseconds since `2020-01-01T00:00:00Z`; rates are bits per second.
 - Absent rendition counters mean `0` (empty rendition entries remain valid); unavailable gauges/transport values MUST be omitted (`null` read as absent), while known zeros MUST be explicit; `arrival` MUST include both `timestamp` and `wall`.
 - Renditions are keyed by the soliciting catalog's unique rendition IDs (even for referenced broadcasts).
-- `lostBytes`/`lostPackets` are cumulative counters; gauges MUST NOT be summed across reports.
+- `frames`/`bytes` count cumulative media payload frames and bytes sent (publisher) or received (viewer); publisher `keyframes` counts sent keyframes and `skipped` frames skipped before sending; viewer `decoded`, `late`, and `errors` count decoded frames, frames too late for playout, and decode errors.
+- `stalls` counts playout stalls, `stalled` is cumulative stalled duration, and `underruns` counts audio buffer underruns; `bitrate` is the latest target encoder bitrate; `arrival` pairs the newest received media timestamp with its arrival wall time.
+- `transport` describes the reporting connection: latest round-trip time `rtt`, estimated bitrate `rate`, cumulative loss counters `lostBytes`/`lostPackets`, and sample `age` at reporting time; gauges MUST NOT be summed across reports.
 - MSF conversion carries neither `stats` nor `echo`.
 
 
@@ -476,8 +478,8 @@ Consumers MUST ignore renditions with unrecognized `kind`; a missing string `kin
 - Empty groups (zero objects) are permitted and mean nothing.
 
 ## Discontinuities
-- On audio/video tracks, a group containing a single empty codec payload is a walk-now discontinuity marker (consumers MUST NOT pass it to a decoder); a zero-byte object is malformed (except in `raw`, where an empty codec payload is a zero-byte object), as is a marker sharing a group with another object.
-- On data tracks (container-framed tracks that are neither audio nor video, e.g., text and {{moqmpegts}} verbatim tracks), where empty payloads are valid data, the discontinuity marker is a group of one zero-byte object.
+- On audio/video tracks, a group containing a single empty codec payload is a walk-now discontinuity marker (consumers MUST NOT pass it to a decoder); a zero-byte object is malformed (except in `raw`, where an empty codec payload is a zero-byte object).
+- On data tracks (container-framed tracks that are neither audio nor video, e.g., text and {{moqmpegts}} verbatim tracks), where empty payloads are valid data, the discontinuity marker is a group of one zero-byte object; a zero-byte object sharing its group with another object is malformed.
 - `json` and `binary` tracks ({{data}}) carry no container, so a zero-byte frame there is a payload (e.g., an empty `binary` snapshot), never a marker.
 - Publishers pausing on a track that may resume SHOULD emit a discontinuity marker when stopping so the preceding group does not appear live across the pause.
 
@@ -488,7 +490,7 @@ Consumers MUST ignore renditions with unrecognized `kind`; a missing string `kin
 
 ## legacy {#legacy}
 Default when `container` is absent.
-Each frame is a QUIC/moq-lite varint timestamp in microseconds followed by the codec payload:
+Each frame is a timestamp in microseconds, encoded as a QUIC variable-length integer ({{!RFC9000, Section 16}}), followed by the codec payload:
 
 - **Video**: an empty codec payload marks the exclusive presentation end of the preceding frame (SHOULD end each group when known; MAY estimate from cadence, never from batching/reorder delay; omit for reordered video if the preceding decode-order frame's end is unknown). Consumers skip it and MUST NOT pass it to a decoder. H.264 without `description` is Annex B; with `description`, AVCC.
 - **Audio**: an empty codec payload marks the exclusive source-media endpoint for terminal trimming, placed *before* any codec drain packets in the same group; consumers decode drain packets and discard samples at or after the endpoint until a later group. AAC (`mp4a.40.*`) without `description` is one ADTS frame per payload; with AudioSpecificConfig in `description`, one raw AAC access unit.
@@ -511,13 +513,15 @@ Zero-overhead container for tracks without frame reordering (audio, text, data, 
 Requires a timed track (`Timescale > 0`); consumers MUST reject `raw` on an untimed track.
 
 Each frame carries the codec payload directly with no container header (using `legacy` codec framing), and its presentation timestamp equals the MoQ transport timestamp (`PTS = DTS`).
-Because there is no container header, an empty codec payload is a zero-byte MoQ object: on audio/video tracks it carries the same discontinuity (when alone in a group) or exclusive-end / terminal-trimming semantics as `legacy`; on data tracks a group of one zero-byte object is the discontinuity marker (and on `utf8` text tracks, clears the active cue at its transport timestamp).
+Because there is no container header, an empty codec payload is a zero-byte MoQ object: on audio/video tracks it carries the same discontinuity (when alone in a group) or exclusive-end / terminal-trimming semantics as `legacy`.
+On data tracks a zero-byte object is only the discontinuity marker, so publishers MUST NOT write an empty payload there (including a `utf8` clear).
 
 ## cts
 Low-overhead container for reordered tracks (B-frames).
 Requires a timed track (`Timescale > 0`); consumers MUST reject `cts` on an untimed track.
 
-Each frame is an unsigned QUIC variable-length integer {{!RFC9000}} composition time offset (`CTS`), measured in the track's `Timescale`, followed by the codec payload (using `legacy` codec framing and empty-payload rules):
+Each frame is an unsigned composition time offset (`CTS`), measured in the track's `Timescale` and encoded as a QUIC variable-length integer ({{RFC9000, Section 16}}), followed by the codec payload (using `legacy` codec framing and empty-payload rules).
+In this diagram, `(i)` denotes that QUIC encoding, not the moq-lite varint:
 
 ~~~
 CTS Frame {
@@ -602,7 +606,7 @@ This document has no IANA actions.
 - A data track marks a discontinuity with a group of one object with no bytes; an object with no bytes on an audio or video track (outside `raw`), or sharing its group, is malformed.
 - Timed CMAF samples from the frame timestamp; `tfdt` is relative within the fragment.
 - A `loc` frame's codec payload uses the `legacy` framing.
-- Added `raw` (zero-byte header, `PTS = transport_timestamp`) and `cts` (QUIC varint `CTS` in track `Timescale`, `PTS = transport_timestamp + CTS`) containers, both requiring a timed track.
+- Added `raw` (zero-byte header, `PTS = transport_timestamp`, no empty payload on a data track) and `cts` (QUIC varint `CTS` in track `Timescale`, `PTS = transport_timestamp + CTS`) containers, both requiring a timed track.
 
 ## moq-hang-03
 {:numbered="false"}

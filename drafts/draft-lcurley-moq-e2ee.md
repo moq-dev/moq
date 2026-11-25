@@ -173,7 +173,7 @@ key      = HKDF-Expand(prk, key_info, 16)
 # Object Identity {#identity}
 A protected object is identified by `(generation, physical_name, domain, group, frame)`.
 
-- **Grouped frames** (`domain = 0x00`): `group` is the group start (moq-lite-07 Group Start, earlier moq-lite Group Sequence, or MOQT Group ID); `frame` is the zero-based write-order frame index within the group. On {{moqt}}, `frame` is the explicit Object ID, never its arrival ordinal: publishers supporting both transports MUST assign contiguous Object IDs from `0` so each matches its {{moql}} write-order index, relays MUST NOT renumber protected objects, and an Object ID above `2^32-1` MUST be refused as `identity` before encryption or decryption. Relays MUST NOT drop or reorder frames inside a protected group.
+- **Grouped frames** (`domain = 0x00`): `group` is the group start (moq-lite-07 Group Start, earlier moq-lite Group Sequence, or MOQT Group ID); `frame` is the zero-based write-order frame index within the group. On {{moqt}}, `frame` is the explicit Object ID, never its arrival ordinal: publishers supporting both transports MUST assign contiguous Object IDs from `0` so each matches its {{moql}} write-order index, relays MUST NOT renumber protected objects, and an Object ID above `2^32-1` MUST be refused as `identity` before encryption or decryption.
 - **Datagrams** (`domain = 0x01`): `group` is the datagram sequence (moq-lite-07 Sequence, moq-lite-05/06 Group Sequence, or MOQT `OBJECT_DATAGRAM` Group ID at Object ID `0`); `frame = 0`.
 
 The 96-bit AES-128-GCM nonce is:

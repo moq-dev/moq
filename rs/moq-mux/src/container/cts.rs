@@ -23,6 +23,10 @@ impl Container for Wire {
 		self.0
 	}
 
+	fn writable(&self) -> Result<(), Self::Error> {
+		Err(moq_net::Error::Unsupported.into())
+	}
+
 	fn finish_group(
 		&self,
 		_group: &mut moq_net::group::Producer,

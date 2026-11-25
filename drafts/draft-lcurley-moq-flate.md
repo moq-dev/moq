@@ -130,7 +130,7 @@ All three values are even (bare varints) and sit outside the Mandatory Track Pro
 # Appendix A: Changelog
 {:numbered="false"}
 
-## moq-flate-01
+## Since draft-lcurley-moq-flate-00 (in progress)
 {:numbered="false"}
 
 - Negotiated FLATE signaling adds COMPRESSION and INFLATED_SIZE properties to MoQ Transport draft-18 and later; sealed declarations are forwarded unchanged or refused when incompatible.

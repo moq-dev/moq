@@ -3433,8 +3433,8 @@ pub unsafe extern "C" fn moq_publish_video_properties(broadcast: u32, properties
 /// - `coded_width` / `coded_height` may be zero to omit them.
 /// - `container` describes how the frames written to the track are wrapped. A
 ///   zeroed one declares the legacy container, which is what [moq_publish_video]
-///   writes; declare CMAF or LOC for a [moq_publish_track] whose frames you
-///   already encode that way.
+///   writes; declare CMAF, LOC, raw, or CTS for a [moq_publish_track] whose
+///   frames you already encode that way (raw and CTS need a timed track).
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///

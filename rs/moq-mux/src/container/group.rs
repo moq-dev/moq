@@ -133,30 +133,44 @@ mod tests {
 		assert!(group.read().await.unwrap().is_none());
 	}
 
+	/// Data frames round-trip through every container that can write them. Raw has no encoding for
+	/// an empty one, since its zero-byte object is the discontinuity marker, so it refuses that write.
 	#[tokio::test]
-	async fn empty_data_frames_survive_subscription_and_fetch() {
-		for config in [hang::catalog::Container::Legacy, hang::catalog::Container::Loc] {
+	async fn data_frames_survive_subscription_and_fetch() {
+		for config in [
+			hang::catalog::Container::Legacy,
+			hang::catalog::Container::Loc,
+			hang::catalog::Container::Raw,
+		] {
 			let broadcast = moq_net::broadcast::Info::new().produce();
 			let track = broadcast.create_track("data", hang::container::track_info(0)).unwrap();
 			let subscription = track.subscribe(moq_net::track::Subscription::default());
 			let consumer = broadcast.consume();
 			let mut producer =
 				crate::container::Producer::new(track, Hang::new(&config, crate::container::Kind::Data).unwrap());
-			producer.write(frame(0, b"", true)).unwrap();
+			let first: &'static [u8] = match config {
+				hang::catalog::Container::Raw => {
+					let err = producer.write(frame(0, b"", true));
+					assert!(matches!(err, Err(crate::Error::EmptyRawPayload)), "{err:?}");
+					b"cue"
+				}
+				_ => b"",
+			};
+			producer.write(frame(0, first, true)).unwrap();
 			producer.write(frame(10_000, b"data", false)).unwrap();
 			let _finished = producer.finish().unwrap();
 			let mut live = crate::container::Consumer::new(
 				subscription,
 				Hang::new(&config, crate::container::Kind::Data).unwrap(),
 			);
-			let first = live.read_frame().await.unwrap().unwrap();
-			assert!(first.payload.is_empty());
-			assert!(first.keyframe);
+			let read = live.read_frame().await.unwrap().unwrap();
+			assert_eq!(read.payload, first, "{config:?}");
+			assert!(read.keyframe);
 			assert_eq!(live.read_frame().await.unwrap().unwrap().payload, b"data".as_slice());
 			assert!(live.read_frame().await.unwrap().is_none());
 			let group = consumer.track("data").unwrap().fetch_group(0, None).await.unwrap();
 			let mut fetched = GroupConsumer::new(group, Hang::new(&config, crate::container::Kind::Data).unwrap());
-			assert!(fetched.read().await.unwrap().unwrap().payload.is_empty());
+			assert_eq!(fetched.read().await.unwrap().unwrap().payload, first);
 			assert_eq!(fetched.read().await.unwrap().unwrap().payload, b"data".as_slice());
 			assert!(fetched.read().await.unwrap().is_none());
 		}

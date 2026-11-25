@@ -114,7 +114,7 @@ A high, distinctive even value is requested to avoid the low ranges reserved by 
 # Appendix A: Changelog
 {:numbered="false"}
 
-## moq-solicit-01
+## Since draft-lcurley-moq-solicit-00 (in progress)
 {:numbered="false"}
 
 - A namespace heard both unsolicited and in answer to SUBSCRIBE_NAMESPACE is one advertisement until both are withdrawn, replacing the advice not to advertise it both ways.

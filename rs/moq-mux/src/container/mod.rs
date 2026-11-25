@@ -255,6 +255,14 @@ pub trait Container {
 		Kind::Data
 	}
 
+	/// Refuse a format this build can read but not write, before a producer is built for it.
+	///
+	/// A catalog checks this before advertising a rendition, so a consumer never sees one whose
+	/// first write would fail.
+	fn writable(&self) -> Result<(), Self::Error> {
+		Ok(())
+	}
+
 	/// Write any format-specific endpoint before the producer closes the group.
 	fn finish_group(
 		&self,
