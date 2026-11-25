@@ -11567,8 +11567,8 @@ impl Cursor {
 		}
 	}
 
-	/// Write off the stale groups at the old end of what a newest-first read owes, oldest
-	/// first, until one is fresh: the drift budget gives up the oldest first, and an
+	/// Write off the stale groups at the old end of what a newest-first read holds, owed,
+	/// filled, or a head, oldest first, until one is fresh: the drift budget gives up the oldest first, and an
 	/// arrival-order walk judged them before handing out anything newer. So what it gives up
 	/// is settled before the groups above go out, and a publisher resolving where delivery
 	/// starts from the lowest group still held finds a fresh one. Each group is judged once.
@@ -11576,12 +11576,33 @@ impl Cursor {
 		if order == Order::Ascending {
 			return Poll::Ready(Ok(()));
 		}
-		while let Some(group) = self.first_owed(true) {
-			let consumer = group.consume();
+		loop {
+			// The lowest of what the arrivals, fills, and heads hold, as a pick ascending would
+			// take it.
+			let (owed, filled, head) = (
+				self.first_owed(true),
+				self.next_filled(Order::Ascending),
+				self.next_head(Order::Ascending),
+			);
+			let keys = [
+				owed.as_ref().map(|group| (group.start, Taken::Owed)),
+				filled.as_ref().map(|group| (group.start, Taken::Filled)),
+				head.as_ref().map(|group| (group.start, Taken::Head)),
+			];
+			let lowest = keys
+				.into_iter()
+				.flatten()
+				.reduce(|first, next| if next.0 < first.0 { next } else { first });
+			let (consumer, taken) = match lowest.map(|(_, taken)| taken) {
+				Some(Taken::Owed) => (owed.expect("picked").consume(), Taken::Owed),
+				Some(Taken::Filled) => (filled.expect("picked").consume(), Taken::Filled),
+				Some(Taken::Head) => (head.expect("picked"), Taken::Head),
+				None => break,
+			};
 			if !ready!(self.poll_stale(&consumer, drift, waiter))? {
 				break;
 			}
-			self.advance_arrival(consumer.start, Taken::Owed);
+			self.advance_arrival(consumer.start, taken);
 			self.write_off_stale(consumer.start, consumer.content(), drift);
 		}
 		Poll::Ready(Ok(()))
@@ -31169,6 +31190,46 @@ mod test {
 		assert_eq!(subscriber.lowest_unread(1).map(|group| group.start), Some(1));
 		evict(&producer, 1);
 		assert_eq!(subscriber.lowest_unread(1).map(|group| group.start), Some(2));
+	}
+
+	/// Newest first, a stale group a fill answered is written off with the stale owed ones
+	/// below the first fresh group, so the lowest group held unread, where a lite publisher
+	/// starts, is one the read still hands out.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_stale_filled_group_is_written_off_before_the_newest_goes_out() {
+		let budget = Duration::from_millis(100);
+		let producer = track_producer("test", None);
+		let dynamic = producer.requests();
+		let mut subscriber = producer.subscribe(Subscription::default().with_max(budget));
+		let write = |key: u64| {
+			let mut group = producer.create_group(group::Info { start: key }).unwrap();
+			group.write_frame(Timestamp::unscaled(key), &b"x"[..]).unwrap();
+			group.finish().unwrap();
+		};
+		for key in 0..4 {
+			write(key);
+		}
+		evict(&producer, 1);
+		let waiter = kio::Waiter::noop();
+		let next = |subscriber: &mut Subscriber| match subscriber.poll_recv_group(&waiter) {
+			Poll::Ready(Ok(Some(group))) => group.start,
+			_ => panic!("a group is cached"),
+		};
+		assert_eq!(next(&mut subscriber), 3);
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("group 1 is a miss");
+		};
+		// Answered once its successor 2 arrived a full budget ago, so it lands stale.
+		producer.broadcast.pool.step(budget);
+		let mut filled = fill.accept(1, None).unwrap().expect("a fresh group");
+		filled.write_frame(Timestamp::unscaled(1), &b"x"[..]).unwrap();
+		filled.finish().unwrap();
+		drop(fill);
+		write(4);
+		write(5);
+		assert_eq!(next(&mut subscriber), 5);
+		assert_eq!(subscriber.lowest_unread(0).map(|group| group.start), Some(4));
 	}
 
 	/// A live arrival judged on its own keeps the history a resumed copy's live floor sits

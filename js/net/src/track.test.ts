@@ -1516,6 +1516,34 @@ test("a group written off at the bound keeps a fresh lower one buffered", () => 
 	}
 });
 
+// A peek offers a group a widened budget re-offers, as the take hands it out, so a front picking
+// across copies by peek sees it.
+test("a peek offers a group a widened budget re-offers", () => {
+	const clock = manualTime(0);
+	try {
+		const producer = new TrackProducer("test").accept({ maxAge: Duration.millis(1000) });
+		const reader = producer.subscribe(withMax({ delay: { max: Duration.millis(5) } }));
+		const write = (key: bigint) => {
+			const group = producer.createGroup(key);
+			group.writeFrame(textFrame("x", Timestamp.unscaled(key)));
+			group.finishAt(key + 1n);
+		};
+		write(7n);
+		write(8n);
+		expect(reader.tryRecvGroup()?.start).toBe(8n);
+		clock.set(10);
+		write(9n);
+		// 7's successor arrived 10 ms ago, past the 5 ms budget: skipped, not given up.
+		expect(readable(reader)).toEqual([9n]);
+		reader.update(withMax({ delay: { max: Duration.millis(1000) } }));
+		expect(hooks.peekGroup(reader, false)).toBe(7n);
+		expect(readable(reader)).toEqual([7n]);
+		producer.close();
+	} finally {
+		clock.installed.close();
+	}
+});
+
 // A time start resolves on keys alone: groups opened before their first frames, below a
 // reached end, are read from the one containing it. Mirrors the Rust `a_time_start_needs_no_frame`.
 test("a time start resolves on keys alone, before any group's first frame", () => {

@@ -6567,6 +6567,8 @@ export class Subscriber {
 		const cursor = this.#cursor.peek();
 		const start = ordered ? max(cursor.start, this.#nextKey) : cursor.start;
 		const drift = this.#drift();
+		// What a widened budget offers again, as the arrival take does first.
+		if (!ordered) this.#reoffer(drift.budget);
 		const groups = this.#state.groups.peek();
 		const offers = (group: GroupConsumer) =>
 			!this.#delivered.has(group.start) &&
