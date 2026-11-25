@@ -11850,6 +11850,8 @@ impl Cursor {
 			if let Some(heads) = &mut self.heads {
 				heads.fetching.remove(&key);
 			}
+			// Counted here, so an ordered walk's pending conviction of it is not counted again.
+			self.seek_pending.remove(&key);
 			self.write_off_stale(key, content, drift);
 		}
 	}
