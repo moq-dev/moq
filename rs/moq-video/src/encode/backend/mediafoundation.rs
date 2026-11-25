@@ -470,7 +470,8 @@ impl MediaFoundation {
 		Ok(())
 	}
 
-	/// Waits up to one frame interval for the output of the frames fed so far.
+	/// Waits up to one frame interval for the output of the frame fed at
+	/// `sample_time`.
 	///
 	/// A hardware MFT encodes asynchronously, so right after `ProcessInput` the
 	/// output of that frame is almost never queued yet. Collecting only what is
@@ -480,20 +481,24 @@ impl MediaFoundation {
 	/// waiting for the next, so this polls for it. The poll ends at once when the
 	/// output arrives, a few ms after the input.
 	///
+	/// It waits for this frame only, not for all of `pending`, so an earlier
+	/// frame the MFT never emitted does not make every later wait time out.
+	///
 	/// An MFT that holds a frame back anyway would make every frame wait out the
 	/// interval. So after [`HELD_BACK`] waits in a row time out, this stops
 	/// waiting. A single slow frame, such as the first one or one during a GPU
 	/// stall, does not stop it.
-	fn wait_for_output(&mut self) -> Result<(), Error> {
+	fn wait_for_output(&mut self, sample_time: i64) -> Result<(), Error> {
 		/// How often the poll looks for an event. The encode thread has nothing
-		/// else to do meanwhile.
+		/// else to do meanwhile. On Windows 10 1803 and later, std sleeps on a
+		/// high-resolution timer, so this is not rounded up to a 15.6 ms tick.
 		const POLL: std::time::Duration = std::time::Duration::from_micros(250);
 		if self.missed >= HELD_BACK {
 			return self.drain_ready();
 		}
 		let deadline = kio::clock::Instant::now()
 			.saturating_add(std::time::Duration::from_nanos(self.tick().unsigned_abs() * 100));
-		while !self.pending.is_empty() {
+		while self.pending.iter().any(|(fed, _)| *fed == sample_time) {
 			match unsafe { self.events.GetEvent(MF_EVENT_FLAG_NO_WAIT) } {
 				Ok(event) => {
 					self.handle_event(&event)?;
@@ -748,7 +753,7 @@ impl Backend for MediaFoundation {
 		self.pending.push_back((sample_time, frame.timestamp));
 		self.sample_index += 1;
 
-		self.wait_for_output()
+		self.wait_for_output(sample_time)
 	}
 
 	fn receive(&mut self) -> Result<Option<Encoded>, Error> {
