@@ -1411,8 +1411,9 @@ impl Subscriber {
 		};
 		// Judged as the pick judges a copy now, not by the verdict letting it go last made: a
 		// widened budget reads an expired copy again.
+		let widest = reader.mirrored.widest();
 		let kept = ready
-			.filter(|(copy, _)| copy.replaced && reader.reads(copy, delivered, &kio::Waiter::noop()).is_some())
+			.filter(|(copy, _)| copy.replaced && reader.reads(copy, widest, delivered, &kio::Waiter::noop()).is_some())
 			.filter_map(|(_, sub)| unread(sub))
 			.chain(keep)
 			.min();
@@ -2923,9 +2924,9 @@ impl Reader {
 		Ok(self.hand_out(index, group))
 	}
 
-	/// Whether [`Self::poll_first`] reads `copy` now: `Some(true)` when it ran out cleanly but a
-	/// late group reopened it.
-	fn reads(&self, copy: &Copy, delivered: &Delivered, waiter: &kio::Waiter) -> Option<bool> {
+	/// Whether [`Self::poll_first`] reads `copy` now, given the reader's [`Mirrored::widest`]
+	/// budget: `Some(true)` when it ran out cleanly but a late group reopened it.
+	fn reads(&self, copy: &Copy, widest: Duration, delivered: &Delivered, waiter: &kio::Waiter) -> Option<bool> {
 		// A fully handed-out bounded copy still backs groups being read, but cannot
 		// supply another one. Keep its recovery lease without polling its empty range.
 		let spent = copy.end().is_some_and(|end| delivered.covers(self.groups.0..end));
@@ -2939,7 +2940,7 @@ impl Reader {
 		// What a replaced copy holds is past the reader's budget once a newer group superseded
 		// it a full budget ago. A copy is let go as a whole, so it waits out the widest budget
 		// any group gets.
-		if spent || copy.expired(self.mirrored.widest(), waiter) {
+		if spent || copy.expired(widest, waiter) {
 			return None;
 		}
 		Some(ran_out)
@@ -2959,12 +2960,13 @@ impl Reader {
 		self.groups_read = true;
 		self.backfill_gaps(delivered, waiter);
 		let groups = self.groups;
+		let widest = self.mirrored.widest();
 		let floor = if ordered { delivered.floor() } else { 0 };
 		let ascending = ordered || self.mirrored.order == track::Order::Ascending;
 		let mut first: Option<Candidate> = None;
 		let mut held = false;
 		for index in 0..self.copies.len() {
-			let Some(ran_out) = self.reads(&self.copies[index], delivered, waiter) else {
+			let Some(ran_out) = self.reads(&self.copies[index], widest, delivered, waiter) else {
 				continue;
 			};
 			let copy = &mut self.copies[index];
