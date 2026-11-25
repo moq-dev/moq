@@ -15,7 +15,7 @@ import {
 } from "@moq/signals";
 import { hosted } from "../assets";
 import type { Broadcast } from "../broadcast";
-import { Estimator, type Order } from "../order";
+import { Estimator } from "../order";
 import { Slot } from "../publication";
 import type { AudioFrame, Capture, Format } from "./capture";
 import { Gain } from "./gain";
@@ -459,7 +459,7 @@ export class Encoder {
 
 			// Raw history needs a finite bound, so an unlimited max age keeps the media default's worth.
 			const maxAge = effect.get(broadcast.in.maxAge) ?? Container.MAX_AGE;
-			this.#encode(broadcast.order, format, maxAge, effect);
+			this.#encode(broadcast, format, maxAge, effect);
 		});
 
 		// A network track change ends the epoch; subscriber changes keep the same producer.
@@ -690,10 +690,12 @@ export class Encoder {
 
 	// Encode captured audio frames into whichever track producer is live. The broadcast owns the
 	// track's lifetime, so this never closes it; a fatal encoder error aborts only the live track.
-	#encode(order: Order, format: Format, retention: Duration, effect: Effect): void {
+	#encode(broadcast: Broadcast, format: Format, retention: Duration, effect: Effect): void {
+		const order = broadcast.order;
 		// The parent owns the config subscription before the async codec scope is opened.
 		const resolved = this.#config.peek();
 		if (!resolved) return;
+		const duration = frameDuration(resolved);
 		// A stopped rendition stops holding the others' delay back.
 		effect.cleanup(() => order.leave(this.#estimator));
 		effect.spawn(async () => {
@@ -763,11 +765,14 @@ export class Encoder {
 							// first one at or past the minimum after the open group's start. Frames forward
 							// as they are written rather than waiting for the group to fill. A dropped
 							// group leaves a gap for the codec's PLC.
+							const history = this.#history !== undefined && timestamp.lt(this.#history);
 							const keyframe =
-								live.start === undefined || timestamp.saturatingSub(live.start).ge(this.#join);
+								live.start === undefined ||
+								(history
+									? !fitsGroup(live.start, timestamp, duration, broadcast.join.peek() ?? this.#join)
+									: timestamp.saturatingSub(live.start).ge(this.#join));
 							if (keyframe) live.start = timestamp;
 							live.producer.encode(frame, timestamp, keyframe);
-							const history = this.#history !== undefined && timestamp.lt(this.#history);
 							if (!history && this.#estimator.write(timestamp.asMicros(), order, keyframe)) {
 								this.#estimate.set({ ...this.#estimator.estimate });
 							}
@@ -886,8 +891,9 @@ export class Encoder {
 							// A pause broke the timeline here.
 							if (backlog.takeCut()) cut();
 							backlog.shift();
+							// Marked before the codec can emit it, which a codec may do within the submit.
+							this.#history = Duration.micros(Math.round(entry.end.asMicros()));
 							submit(entry.frame, entry.end);
-							this.#history = this.#next;
 						}
 						deadline.set(backlog.deadline);
 						// The audio retained before a pause is all encoded, so the break follows it, even
@@ -1048,6 +1054,15 @@ function replayBudget(subscription: Moq.Track.Subscription | undefined): Duratio
 		reach = reach === undefined ? join : reach.max(join);
 	}
 	return reach;
+}
+
+// Whether a replayed frame at `timestamp` still fits the group opened at `start` without that group
+// outrunning `interval`, the catalog's promise of how often a group starts. Retained history replays
+// in one burst, and every group costs a stream at each hop, so it groups as coarsely as that promise
+// allows rather than at the live join: two seconds of 20 ms groups take more streams than a peer
+// grants by default, and the live edge then waits behind them for credit.
+function fitsGroup(start: Duration, timestamp: Duration, duration: Duration, interval: Duration): boolean {
+	return timestamp.add(duration).saturatingSub(start).le(interval);
 }
 
 /**

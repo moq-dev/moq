@@ -78,7 +78,9 @@ a late live join's `max`, a history range, or a fetch. The cache keeps an idle g
 may reach into it. Audio keeps raw PCM while nobody listens, then encodes the part of
 that history a subscriber wants ahead of live audio when one arrives: from a live join's
 lag (its playout delay plus the codec's warmup), bounded by its max delay. A join with no
-lag limit, as every join before moq-lite-07 is, gets the retained audio within its max delay. Raw audio keeps up to
+lag limit, as every join before moq-lite-07 is, gets the retained audio within its max delay.
+That history is grouped as coarsely as the catalog's `sync.interval` allows rather than at the
+audio's join, so a replay takes a few streams instead of one per join interval. Raw audio keeps up to
 `maxAge`, which for media defaults to 30 seconds (about 11.5 MB for 48 kHz
 stereo f32). With `maxAge: null`, which sets no publisher limit on the media, raw
 audio still keeps 30 seconds, since raw history needs a bound. The catalog and

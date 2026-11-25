@@ -1505,6 +1505,70 @@ test("default audio replays the last second after three seconds without a subscr
 	}
 });
 
+// A replay arrives as one burst, and each group costs a stream at every hop: at the live join, a
+// lite-06 viewer's two-second replay took more streams than a peer grants, so the live edge waited
+// for credit. History groups as coarsely as the catalog's interval promises; live audio keeps its join.
+test("replayed audio groups at the declared interval and live audio at its join", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	const clock = new Manual();
+	const installed = clock.install();
+	const broadcast = new Broadcast({
+		origin: new Moq.Origin.Producer(),
+		name: Moq.Path.from("interval.hang"),
+		maxAge: Duration.millis(1000),
+	});
+	// A video GOP sets the declared interval, listed before the audio so the catalog fixes it at 100 ms.
+	const video = broadcast.video("video");
+	video.join.set(Duration.millis(100));
+	video.config.set({ codec: "avc1.640028", container: { kind: "legacy" } });
+	const feed = new Feed();
+	const configuring = configured();
+	const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(feed) as never });
+	let late: Moq.Track.Subscriber | undefined;
+	try {
+		await configuring;
+		await settle();
+		expect(broadcast.join.peek()).toEqual(Duration.millis(100));
+		for (let index = 0; index < 150; index++) {
+			await feed.push({ timestamp: Duration.micros(index * 20_000), channels: [new Float32Array(960)] });
+			await feed.drain();
+			await clock.advance(Duration.millis(20));
+		}
+		const net = broadcast.net.peek();
+		if (!net) throw new Error("expected network broadcast");
+		late = net.track("audio").subscribe(within(1000));
+		await settle();
+		for (let index = 150; index < 153; index++) {
+			await feed.push({ timestamp: Duration.micros(index * 20_000), channels: [new Float32Array(960)] });
+		}
+		await feed.drain();
+		// The replay, frames 100 to 149, packs five 20 ms frames into each 100 ms group; the live
+		// frames after it, 150 onward, each open their own.
+		const starts: number[] = [];
+		const reader = late.ordered();
+		while (starts.length < 12) {
+			const group = await reader.nextGroup();
+			if (!group) throw new Error("expected buffered group");
+			const frames: number[] = [];
+			for (;;) {
+				const frame = await Promise.race([group.readFrame(), settle().then(() => null)]);
+				if (!frame) break;
+				frames.push(Moq.Varint.decode(frame.payload)[0] / 20_000);
+			}
+			starts.push(frames[0]);
+			if (frames[0] < 150) expect(frames).toEqual([0, 1, 2, 3, 4].map((offset) => frames[0] + offset));
+			else expect(frames).toEqual([frames[0]]);
+			group.close();
+		}
+		expect(starts).toEqual([100, 105, 110, 115, 120, 125, 130, 135, 140, 145, 150, 151]);
+	} finally {
+		late?.close();
+		encoder.close();
+		broadcast.close();
+		installed.close();
+	}
+});
+
 // Replayed groups reach the track as fresh arrivals, so only the encoder can tell they are old: a
 // live viewer rejoining after seconds idle would otherwise wade through all of them first. A live
 // join states how far back it plays as its lag, which bounds the replay however far its max reaches,
