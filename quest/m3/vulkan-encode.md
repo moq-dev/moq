@@ -14,6 +14,16 @@ Non-goal: running CARLA itself on AMD.
 
 ## Plan
 
+Moved from m5 to m3 on 2026-11-25 (maintainer, /quest-plan from the studio):
+the studio is its consumer. On the maintainer's Radeon (RDNA2 iGPU, Fedora),
+VA-API reads the studio's canvas back through the CPU at 14 ms a 1080p frame,
+over the 12.5 ms its 60 fps check allows, so a new show starts at 30 fps
+(rejected: speeding up that readback route, which stays a CPU round trip).
+That host's RADV, from Nix Mesa 26.3, exposes `VK_KHR_video_encode_h264` and
+`_h265`, so it can run the hardware test beside the RX 9070. The studio's
+[pin quest](https://github.com/moq-dev/studio/blob/main/quest/m0/pin-amd-encode.md)
+waits on this one.
+
 Decided 2026-10-05 in a `/quest-plan` interview (paper trail in the PR that
 added this quest):
 
