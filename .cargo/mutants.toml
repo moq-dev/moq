@@ -78,6 +78,13 @@ exclude_re = [
     # With no resume point `raised` names no start, and a settled window has no unsettled
     # range: each guard only skips the walk.
     'replace \|\| with && in Reader::raised$',
+    # `resolve` with nothing to place places only the unsettled ranges no copy's answer moves
+    # (an oldest start, time 0, or an empty range). `window()` just placed those unless no
+    # answered copy serves, and the first to answer places them the same, while nothing
+    # reads them before then.
+    ':\d+:17: replace < with <= in Reader::backfill_gaps$',
+    # `may_take` already confines a drained key to the copy's ranges, which end at its cap.
+    ':\d+:42: replace < with <= in Reader::backfill_gaps$',
     # Dead: every write of `until` also writes `since`, so the superseded check
     # never runs. `ResumeReader.tla` models it, so it goes with the model.
     'replace >= with < in Copy::retains$',

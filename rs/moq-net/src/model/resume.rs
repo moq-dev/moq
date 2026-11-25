@@ -3559,11 +3559,11 @@ impl Reader {
 		// does one still unanswered, whose ranges are not placed yet.
 		let start = self.groups.0;
 		let budget = self.mirrored.widest();
-		// Each replaced copy's staleness verdict, taken once for the whole walk.
+		// Each answered copy's staleness verdict, taken once for the whole walk.
 		let taking: Vec<Option<track::Taking<'_>>> = (self.copies.iter())
 			.map(|copy| match &copy.sub {
-				Sub::Ready(sub) if copy.replaced => Some(sub.taking()),
-				_ => None,
+				Sub::Ready(sub) => Some(sub.taking()),
+				Sub::Pending(_) => None,
 			})
 			.collect();
 		let drains = |key: u64| {
@@ -10854,6 +10854,52 @@ mod test {
 			rest.push(group.start);
 		}
 		assert_eq!(rest, vec![0, 1000, 2000, 3000, 4000, 6000]);
+	}
+
+	/// A reader that moves its start to exactly the replacement's resume point, while that
+	/// replacement is an empty received copy, takes no late group below it: group 8, which
+	/// holds time 8, already went out from the old route, and group 7 lies under the window
+	/// whichever copy it lands on, as for a plain reader of the route. So too once the old
+	/// route failed, leaving the empty replacement the only copy that can place the start.
+	#[test]
+	fn a_start_moved_to_the_resume_point_takes_no_late_group_below_it() {
+		for fail in [false, true] {
+			for ordered in [false, true] {
+				let routes = Producer::new();
+				let logical = logical(&routes);
+				let a = received_copy();
+				for key in [5, 6, 8] {
+					write(&a, key);
+				}
+				routes.serve(a.consume());
+				let mut sub = history(&logical);
+				let mut got = drain(&mut sub, ordered);
+				let b = received_copy();
+				routes.serve(b.consume());
+				got.extend(drain(&mut sub, ordered));
+				if fail {
+					a.clone()
+						.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+						.unwrap();
+					got.extend(drain(&mut sub, ordered));
+				}
+				let from = sub.subscription().with_ranges([track::Range {
+					start: track::Start::Time(8),
+					end: None,
+				}]);
+				sub.update(from).unwrap();
+				got.extend(drain(&mut sub, ordered));
+				if !fail {
+					write(&a, 7);
+					got.extend(drain(&mut sub, ordered));
+				}
+				write(&b, 7);
+				got.extend(drain(&mut sub, ordered));
+				write(&b, 9);
+				got.extend(drain(&mut sub, ordered));
+				assert_eq!(got, [5, 6, 8, 9], "fail={fail} ordered={ordered}");
+			}
+		}
 	}
 
 	/// Ranges widened while only an unanswered replacement can place them keep the switch's
