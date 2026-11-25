@@ -8951,6 +8951,95 @@ mod tests {
 		}
 	}
 
+	/// A SUBSCRIBE_UPDATE the publisher has no credit for holds back only the next demand
+	/// change, which goes out once it is on the wire: the serve loop still reads responses, so a
+	/// publisher blocked writing them while it reads none of ours is no deadlock, and still
+	/// cancels once the last reader leaves.
+	#[kio::test]
+	async fn an_update_waiting_on_credit_still_reads_and_cancels() {
+		use crate::transport::poll::{RecvStream as _, SendStream as _, Session as _};
+		for version in [Version::Lite06, Version::Lite07] {
+			for cancel in [false, true] {
+				// One queued message per stream, so a peer that stops reading stalls the writer.
+				let config = crate::transport::memory::Config {
+					stream_buffer: 0,
+					..Default::default()
+				};
+				let (session, peer) = crate::transport::memory::pair(config);
+				let subscriber = Subscriber::new(SubscriberConfig {
+					runtime: crate::time::sim(),
+					session: crate::driver::Transport::new(session.clone()),
+					origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
+					recv_bandwidth: None,
+					version,
+					peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+					peer_node: None,
+					cost: None,
+					going_away: Default::default(),
+					auth: crate::auth::Link::new(false),
+				});
+				let serve = TrackServe {
+					validity: Default::default(),
+					route: None,
+					source: None,
+					subscriber,
+					path: Path::from_static("room"),
+					instance: None,
+					node: None,
+					name: "video".into(),
+				};
+				let waiter = kio::Waiter::noop();
+				let broadcast = crate::broadcast::Info::new().produce();
+				let mut serving = ServeLoop::new(&serve, broadcast.reserve_track("video").unwrap(), Default::default());
+				let live = serving.serving.subscribe(None);
+				assert!(serving.poll(&serve, &waiter).is_pending());
+				let (mut send, mut recv) = kio::wait(|waiter| peer.poll_accept_bi(waiter)).await.unwrap();
+
+				// The SUBSCRIBE fills the stream, so the update a lowered floor sends waits on credit,
+				// and the change after it waits for that one.
+				let history = serving.serving.subscribe(Some(Subscription::default().with_start(0)));
+				assert!(serving.poll(&serve, &waiter).is_pending());
+				let urgent = serving
+					.serving
+					.subscribe(Some(Subscription::default().with_start(0).with_priority(5)));
+				assert!(serving.poll(&serve, &waiter).is_pending());
+
+				if cancel {
+					drop((live, history, urgent));
+					assert!(serving.poll(&serve, &waiter).is_pending());
+					assert!(
+						matches!(serving.sub, Sub::None),
+						"{version:?}: the subscription is cancelled with its update unsent"
+					);
+					continue;
+				}
+
+				// Each change goes out once its turn comes: the SUBSCRIBE, then one update each.
+				let mut chunks = 0;
+				while let Poll::Ready(Ok(Some(_))) = recv.poll_read_chunk(&waiter, usize::MAX) {
+					chunks += 1;
+					assert!(serving.poll(&serve, &waiter).is_pending());
+				}
+				assert_eq!(chunks, 3, "{version:?}");
+
+				// Stalled again: one update unread, the next waiting on it.
+				drop(urgent);
+				assert!(serving.poll(&serve, &waiter).is_pending());
+				drop(history);
+				assert!(serving.poll(&serve, &waiter).is_pending());
+
+				// The publisher gives up the subscription without reading the update.
+				send.reset(crate::StreamError::Cancel.to_code());
+				let end = serving.poll(&serve, &waiter);
+				assert!(
+					matches!(end, Poll::Ready(ServeEnd::GiveBack(_))),
+					"{version:?}: the reset is read behind the unsent update"
+				);
+				drop(live);
+			}
+		}
+	}
+
 	/// Malformed bytes on a Subscribe Stream close the session at once, on every version, even
 	/// with a group stream still being read: the close never waits on a drain that a reader
 	/// leaving meanwhile would cut short.
@@ -12430,7 +12519,11 @@ impl TrackServe {
 				// A returning subscriber re-establishes from the current demand.
 				if let Sub::Active(active) = sub {
 					self.subscriber.remove_subscribe(active.id);
-					let _ = active.stream.writer.finish();
+					// A FIN would cut short an update still waiting on credit: dropping the stream
+					// resets it instead.
+					if active.stream.writer.is_flushed() {
+						let _ = active.stream.writer.finish();
+					}
 					tracing::debug!(track = %self.name, "subscribe canceled (idle)");
 					// The copy is still held: what it cached goes stale from here, unless the
 					// subscription only filled it and never fed it live.
@@ -13341,7 +13434,13 @@ impl TrackServeRun {
 	/// Finish our side of the subscription, `true` once it waits for the publisher to read it.
 	fn finish_sub(&mut self, mut active: SubStream, finished: bool) -> bool {
 		let version = self.serve.subscriber.version;
-		if active.stream.writer.finish().is_err() || !finished || !version.waits_for_subscriber_fin() {
+		// A FIN would cut short an update still waiting on credit: dropping the stream resets it
+		// instead.
+		if !active.stream.writer.is_flushed()
+			|| active.stream.writer.finish().is_err()
+			|| !finished
+			|| !version.waits_for_subscriber_fin()
+		{
 			return false;
 		}
 		self.state = TrackRunState::Finish {
@@ -13856,6 +13955,9 @@ struct ServeLoop {
 	/// The TRACK stream that answered, until a SUBSCRIBE has a response or nobody holds
 	/// the copy.
 	held: Option<HeldTrack>,
+	/// A demand or fill change that arrived while an update was still flushing, applied once
+	/// that one is on the wire.
+	deferred: bool,
 }
 
 #[expect(
@@ -14177,6 +14279,7 @@ impl ServeLoop {
 			mode: ServeMode::Select,
 			linger: crate::time::Deadline::new(&serve.subscriber.runtime),
 			held: None,
+			deferred: false,
 		}
 	}
 
@@ -14749,19 +14852,29 @@ impl ServeLoop {
 						return Poll::Ready(ServeEnd::GiveBack(err));
 					}
 
-					// Deliver any buffered SUBSCRIBE_UPDATE before selecting, so the
-					// demand that produced it is on the wire.
-					if let Sub::Active(active) = &mut self.sub {
-						match active.stream.writer.poll_flush(waiter) {
-							Poll::Ready(Ok(())) => {}
+					// Deliver any buffered SUBSCRIBE_UPDATE. One the publisher has no credit for yet
+					// holds back the next demand change, so withholding credit costs one update's
+					// buffer, but nothing else waits on it: a publisher blocked writing responses
+					// while it reads none of ours needs them read.
+					let flushing = match &mut self.sub {
+						Sub::Active(active) => match active.stream.writer.poll_flush(waiter) {
+							Poll::Ready(Ok(())) => false,
 							// The publisher stopped reading, as it does once it finishes the
 							// track. The update is dropped, and the responses decide how the
 							// subscription ends: cleanly at the FIN, or with a reset's error.
 							Poll::Ready(Err(err)) => {
-								tracing::debug!(track = %serve.name, %err, "subscribe update dropped")
+								tracing::debug!(track = %serve.name, %err, "subscribe update dropped");
+								false
 							}
-							Poll::Pending => return Poll::Pending,
+							Poll::Pending => true,
+						},
+						Sub::None => false,
+					};
+					if !flushing && std::mem::take(&mut self.deferred) {
+						if let Err(err) = self.begin(serve, self.serving.subscription()) {
+							return Poll::Ready(ServeEnd::GiveBack(err));
 						}
+						continue;
 					}
 
 					// Biased: demand first, then completions, then closures.
@@ -14781,6 +14894,10 @@ impl ServeLoop {
 						Poll::Pending => {}
 					}
 					match self.serving.poll_subscription_changed(waiter) {
+						// Cancelling sends no update, so it never waits for one.
+						Poll::Ready(Ok(pref)) if flushing && (pref.is_some() || !self.range_fills.ask.is_empty()) => {
+							self.deferred = true;
+						}
 						Poll::Ready(Ok(pref)) => {
 							// Updating the upstream failed: hand the track back for another
 							// route to resume.
@@ -14801,7 +14918,7 @@ impl ServeLoop {
 							self.largest = Some(largest.group);
 						}
 						if let Sub::Active(active) = &mut self.sub
-							&& let Some(largest) = self.largest
+							&& !flushing && let Some(largest) = self.largest
 							&& let Some(wanted) = self.demand.poll_asked(waiter).filter(|wanted| *wanted > largest)
 							&& active.wanted != Some(wanted)
 						{
@@ -14831,6 +14948,7 @@ impl ServeLoop {
 						.poll(serve, &self.serving, accounted.as_ref(), read, waiter);
 					Self::walk_fills(serve, &mut self.range_fills, &mut self.fetches, &self.serving);
 					match polled {
+						Ok(true) if flushing => self.deferred = true,
 						Ok(true) => {
 							if let Err(err) = self.begin(serve, self.serving.subscription()) {
 								return Poll::Ready(ServeEnd::GiveBack(err));
