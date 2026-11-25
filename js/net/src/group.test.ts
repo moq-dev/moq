@@ -965,3 +965,29 @@ test("timed frames assign slice-independent monotonic timestamps", async () => {
 	expect(s2?.monoTs).toBe(1100n);
 	expect(s2?.timedOid).toBe(101n);
 });
+
+test("mirror preserves absolute frame indices in cached timing for offset groups", async () => {
+	const producer = new Producer(1000n);
+	hooks.startGroup(producer, 1);
+	hooks.bindGroupTimed(producer, {
+		timescale: Timescale.MILLI,
+		priority: 0,
+		maxAge: null,
+		compression: "none",
+		refresh: { ratio: null, interval: null },
+	});
+	producer.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(1033) });
+	producer.writeFrame({ payload: new Uint8Array([2]), timestamp: Timestamp.fromMillis(1066) });
+	producer.finish();
+
+	const mirrored = producer.mirror();
+	const f1 = await hooks.readGroupFrame(mirrored, false, 1);
+	const f2 = await hooks.readGroupFrame(mirrored, false, 2);
+	expect(f1?.timedOid).toBe(33n);
+	expect(f2?.timedOid).toBe(66n);
+	// Clamped upper bound past finished frame count resolves past last delivered OID (66 + 1 = 67).
+	expect(hooks.groupOidAfterFrame(mirrored, 5)).toBe(67);
+	// Standalone sparse END_OF_TRACK resolves back to total frame count (3).
+	expect(hooks.groupOrdinalForOid(producer, 67)).toBe(3);
+	mirrored.close();
+});

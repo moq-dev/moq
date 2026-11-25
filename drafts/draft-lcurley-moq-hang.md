@@ -510,7 +510,7 @@ Zero-overhead container for tracks without frame reordering (audio, text, data, 
 Requires a timed track (`Timescale > 0`); consumers MUST reject `raw` on an untimed track.
 
 Each frame carries the codec payload directly with no container header (using `legacy` codec framing), and its presentation timestamp equals the MoQ transport timestamp (`PTS = DTS`).
-Because there is no container header, an empty codec payload is a zero-byte MoQ object: on audio/video tracks it carries the same discontinuity (when alone in a group) or exclusive-end / terminal-trimming semantics as `legacy`; on data tracks a group of one zero-byte object is the discontinuity marker.
+Because there is no container header, an empty codec payload is a zero-byte MoQ object: on audio/video tracks it carries the same discontinuity (when alone in a group) or exclusive-end / terminal-trimming semantics as `legacy`; on data tracks a group of one zero-byte object is the discontinuity marker (and on `utf8` text tracks, clears the active cue at its transport timestamp).
 
 ## cts
 Low-overhead container for reordered tracks (B-frames).

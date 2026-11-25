@@ -1825,6 +1825,10 @@ export class Producer {
 		hooks.askProducer = (producer, ask) => producer.#ask(ask);
 		hooks.requestProducer = (producer, signal) => producer.#request(signal);
 		hooks.endTrack = (producer, end, error) => producer.#endPending(end, error);
+		hooks.producerGroupOrdinalForOid = (producer, key, wireObject) => {
+			const entry = producer.#cached.get(key);
+			return entry ? hooks.groupOrdinalForOid(entry.group, wireObject) : undefined;
+		};
 		hooks.tailGrace = (producer) => producer.#grace();
 		hooks.releaseTrack = (producer) => producer.#close(undefined);
 		hooks.trackReleased = (producer) => producer.#state.closed;

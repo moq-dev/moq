@@ -55,7 +55,12 @@ impl Container for Wire {
 			return Err(moq_net::Error::TimestampMismatch.into());
 		}
 
-		// With no header, an empty object is an empty payload (end marker on media, clear cue on text/data).
+		// On data tracks, a zero-byte object is the discontinuity marker (decodes to no frames),
+		// matching legacy and cts. On audio/video tracks, it is an endpoint/discontinuity frame.
+		if self.0 == Kind::Data && frame.payload.is_empty() {
+			return Ok(Vec::new());
+		}
+
 		Ok(vec![Frame {
 			timestamp: frame.timestamp,
 			payload: frame.payload,
@@ -111,13 +116,10 @@ mod tests {
 		assert_eq!(video.len(), 1);
 		assert_eq!(Wire(Kind::Video).end(&video[0]), Some(ts));
 
-		// Data: empty object is preserved as an empty payload (e.g. UTF-8 caption clear cue).
+		// Data: empty object is the discontinuity marker (decodes to no frames).
 		let data = Wire(Kind::Data)
 			.decode(moq_net::frame::Frame::new(ts, Bytes::new()))
 			.unwrap();
-		assert_eq!(data.len(), 1);
-		assert!(data[0].payload.is_empty());
-		assert_eq!(data[0].timestamp, ts);
-		assert_eq!(Wire(Kind::Data).end(&data[0]), None);
+		assert!(data.is_empty());
 	}
 }

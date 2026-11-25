@@ -402,6 +402,17 @@ export class Producer {
 		hooks.groupFrameCount = (group) => group.#state.total.peek();
 		hooks.groupLastObject = (group) =>
 			group.#state.lastTimedOid === undefined ? undefined : Number(group.#state.lastTimedOid);
+		hooks.groupOrdinalForOid = (group, wireObject) => {
+			const state = group.#state;
+			if (state.closed.peek() !== null) return undefined;
+			const target = BigInt(wireObject);
+			const total = state.total.peek();
+			for (let i = state.offset; i < total; i++) {
+				const entry = state.timings.get(i);
+				if (entry !== undefined && entry.oid >= target) return i;
+			}
+			return total;
+		};
 		hooks.groupProgress = (group, fn) => {
 			const state = group.#state;
 			fn(state.total.peek());
@@ -481,7 +492,10 @@ export class Producer {
 		// A track restamps its own mirror with when the group joined it.
 		dst.arrived = this.#state.arrived;
 		if (this.#state.index === this.#state.offset && !headShed(this.#state.frames.peek().first)) {
+			dst.total.set(this.#state.offset);
 			for (const frame of this.#state.frames.peek()) appendFrame(dst, frame);
+			dst.timings.clear();
+			for (const [k, v] of this.#state.timings) dst.timings.set(k, v);
 		} else {
 			dst.flate = undefined;
 			const closed = this.#state.closed.peek();
@@ -1331,10 +1345,14 @@ export class Consumer {
 		hooks.groupOidAfterFrame = (group, frameCount) => {
 			if (frameCount <= 0) return 0;
 			const state = group.#state;
-			if (frameCount === state.total.peek() && state.lastTimedOid !== undefined) {
+			const total = state.total.peek();
+			const closed = state.closed.peek() === null;
+			const effective = closed ? Math.min(frameCount, total) : frameCount;
+			if (effective <= 0) return 0;
+			if (effective === total && state.lastTimedOid !== undefined) {
 				return Number(state.lastTimedOid) + 1;
 			}
-			const entry = state.timings.get(frameCount - 1);
+			const entry = state.timings.get(effective - 1);
 			return entry === undefined ? undefined : Number(entry.oid) + 1;
 		};
 		hooks.evictGroup = (group, lost) => group.#evict(lost);

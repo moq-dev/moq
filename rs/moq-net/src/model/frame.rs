@@ -1708,13 +1708,14 @@ impl Consumer {
 					}
 				}
 			};
-			// A dense copy expects the same Object ID: for a relayed copy its own wire ID,
-			// otherwise the frame's ordinal (or moq-timestamp Object ID on a timed track).
+			// A dense copy expects the same Object ID: on timed tracks both dense ordinals
+			// (Draft18..22) and deterministic moq-timestamp Object IDs (Draft23+) identify the
+			// same frame, enabling mid-frame failover across mixed-version routes.
 			if let Some(fields) = frame.fields.as_ref() {
-				let matches = match (&self.fields, self.info.timestamp.scale()) {
-					(Some(own), _) => fields.id == own.id,
-					(None, Some(_)) => fields.id == index || fields.id == self.timed_oid,
-					(None, None) => fields.id == index,
+				let valid_id = |id: u64| id == index || (self.info.timestamp.scale().is_some() && id == self.timed_oid);
+				let matches = match &self.fields {
+					Some(own) => fields.id == own.id || (valid_id(own.id) && valid_id(fields.id)),
+					None => valid_id(fields.id),
 				};
 				if !matches {
 					return Poll::Ready(Err(Error::Unsupported));

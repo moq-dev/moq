@@ -39,9 +39,7 @@ test("raw rejects untimed tracks and handles empty markers", () => {
 	expect(video.end(marker)).toEqual(Duration.millis(500));
 
 	const data = new Raw.Format("data");
-	expect(data.decode(new Uint8Array(), ts)).toEqual([
-		{ payload: new Uint8Array(), timestamp: Duration.millis(500), keyframe: false, duration: undefined },
-	]);
+	expect(data.decode(new Uint8Array(), ts)).toEqual([]);
 });
 
 test("cts adds CTS varint in track timescale to transport timestamp", () => {

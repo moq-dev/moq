@@ -383,7 +383,7 @@ fn poll_settle(
 	match group.poll_closed(waiter) {
 		// FETCH objects carry no status, so a status object only bounds the frames before it.
 		Poll::Ready(Ok(())) => {
-			let end = match group.end_object() {
+			let end = match group.end_object().filter(|_| group_relayed_same_mode(group, timed)) {
 				Some(end) => end.id,
 				None => group_last_id(group, timed).map_or(0, |last| last.saturating_add(1)),
 			};
@@ -417,8 +417,8 @@ struct FetchObjectInfo<'a> {
 	/// The track's Publisher Priority on the wire, which the first object states for all.
 	priority: u8,
 	inflated: Option<u64>,
-	/// The Timestamp Tie (`0x40B72`) for a non-relayed timed object, if non-zero.
-	tie: Option<u64>,
+	/// `None` preserves relayed properties verbatim; `Some(tie)` rewrites/strips `TIMESTAMP_TIE`.
+	tie: Option<Option<u64>>,
 	version: Version,
 	fields: Option<&'a crate::model::object::Fields>,
 	/// The draft the track's publisher spoke, which serialized `fields`.
@@ -512,14 +512,20 @@ impl FindFetch {
 					if wire.as_ref().is_some_and(|wire| !wire.fetchable) {
 						return Poll::Ready(Err(Error::Unsupported));
 					}
-					// Relayed Object IDs need not match frame ordinals, so a relayed group is read
-					// from its first frame and filtered by ID. On a timed local group, translate
-					// the requested wire Object ID to its exact frame ordinal via binary search.
-					let frame_start = match (&wire, &cached, self.timed && info.timescale.is_some()) {
-						(Some(_), Some(group), _) => self.skip.min(group.first_frame()),
-						(None, Some(group), true) => group.ordinal_for_oid(self.skip),
-						(None, Some(_), false) => self.skip,
-						(_, None, _) => 0,
+					// Relayed Object IDs in the same scheme need not match ordinals; when relaying
+					// across dense and timed modes, translate via the frame ordinal or timed OID.
+					// An offset local/lite copy lacks the prior frames' clamp chain for timed IDs,
+					// so fetch it whole from frame 0 instead.
+					let timed_egress = self.timed && info.timescale.is_some();
+					let same_mode = cached
+						.as_ref()
+						.is_some_and(|group| group_relayed_same_mode(group, timed_egress));
+					let frame_start = match (&wire, &cached, same_mode, timed_egress) {
+						(_, Some(group), true, _) => self.skip.min(group.first_frame()),
+						(None, Some(group), false, true) if group.first_frame() > 0 => 0,
+						(_, Some(group), false, true) => group.ordinal_for_oid(self.skip),
+						(_, Some(_), false, false) => self.skip,
+						(_, None, _, _) => 0,
 					};
 					let fetching = match self.ahead.take_if(|_| frame_start == 0) {
 						Some(Ahead::Fetched(result)) => return Poll::Ready(result.map(|group| (info, group))),
@@ -3491,8 +3497,8 @@ impl Publisher {
 			source,
 		} = header;
 		let properties = match fields {
-			Some(fields) => super::object::write(&fields.properties, source, version)?,
-			None => super::object::own_properties(None, tie, version)?,
+			Some(fields) => super::object::write_with_tie(&fields.properties, source, version, tie)?,
+			None => super::object::own_properties(None, tie.flatten(), version)?,
 		};
 		let properties = super::object::compression(properties, version, inflated)?;
 		let properties = (!properties.is_empty()).then_some(properties);
@@ -7038,11 +7044,19 @@ impl TrackServe {
 		if self.terminal.sent.load(Ordering::Relaxed) {
 			return None;
 		}
-		let reached = self
-			.range
-			.end
-			.is_none_or(|last| last.group.saturating_add(1) >= end.group.saturating_add(u64::from(end.frame != 0)));
-		reached.then(|| self.wire_end(end))
+		let wire = self.wire_end(end);
+		let reached = self.range.end.is_none_or(|last| {
+			if wire.frame == 0 {
+				last.group.saturating_add(1) >= wire.group
+			} else if last.group > wire.group {
+				true
+			} else if last.group < wire.group {
+				false
+			} else {
+				last.object.is_none_or(|obj| obj.saturating_add(1) >= wire.frame)
+			}
+		});
+		reached.then_some(wire)
 	}
 
 	/// Await [`EndOfTrack`].
@@ -7493,6 +7507,8 @@ struct FetchGroupWrite {
 	written: bool,
 	/// Whether this fetch emits moq-timestamp Object IDs and TIMESTAMP_TIE properties.
 	timed: bool,
+	/// Whether a relayed group's wire Object IDs already match this fetch's mode.
+	same_mode: bool,
 }
 
 enum FetchGroupState {
@@ -7525,6 +7541,7 @@ impl FetchGroupWrite {
 		if group.wire().is_some_and(|wire| !wire.fetchable) {
 			return Err(Error::Unsupported);
 		}
+		let same_mode = group_relayed_same_mode(&group, false);
 		Ok(Self {
 			meter: Some(group.delegate()),
 			// A FETCH's group may be found from its first object in range.
@@ -7541,12 +7558,14 @@ impl FetchGroupWrite {
 			tail: None,
 			written: false,
 			timed: false,
+			same_mode,
 		})
 	}
 
 	fn timed(mut self, timed: bool) -> Self {
 		self.timed = timed && self.version.timestamp_object_ids() && self.group.timescale().is_some();
-		if self.timed && self.group.wire().is_none() && self.group.index() > 0 {
+		self.same_mode = group_relayed_same_mode(&self.group, self.timed);
+		if self.timed && !self.same_mode && self.group.index() > 0 {
 			self.index = self.group.oid_after_frame(self.group.index()).unwrap_or(self.index);
 		}
 		self
@@ -7568,10 +7587,14 @@ impl FetchGroupWrite {
 	/// The result once writing stops: a slice that ends before its cap lost objects. A cap
 	/// past the group's terminal object ends at it, since that status is no frame.
 	fn finish(&self) -> Result<(), Error> {
-		let cap = self
-			.slice
-			.until
-			.filter(|until| self.group.end_object().is_none_or(|end| *until <= end.id));
+		let end_id = match self.group.end_object().filter(|_| self.same_mode) {
+			Some(end) => Some(end.id),
+			None if self.group.end_object().is_some() => {
+				Some(group_last_id(&self.group, self.timed).map_or(0, |last| last.saturating_add(1)))
+			}
+			None => None,
+		};
+		let cap = self.slice.until.filter(|until| end_id.is_none_or(|end| *until <= end));
 		match cap.is_some_and(|until| self.index < until) {
 			true => Err(Error::NotFound),
 			false => Ok(()),
@@ -7583,20 +7606,21 @@ impl FetchGroupWrite {
 		fields: Option<&crate::model::object::Fields>,
 		timed_oid: u64,
 		timestamp: crate::Timestamp,
-	) -> (u64, Option<u64>) {
-		match fields {
-			Some(fields) => (fields.id, None),
-			None if self.timed => {
-				let scale = self.group.timescale().expect("timed requires timescale");
-				let dts = timestamp.convert(scale).map(|t| t.value()).unwrap_or(self.key);
-				let tie = self.key.saturating_add(timed_oid).saturating_sub(dts);
-				(timed_oid, (tie > 0).then_some(tie))
-			}
-			None => (self.index, None),
+	) -> (u64, Option<Option<u64>>) {
+		if self.same_mode {
+			// A plain relayed object elides `fields` when its wire Object ID equals its ordinal.
+			(fields.map_or(self.index, |fields| fields.id), None)
+		} else if self.timed {
+			let scale = self.group.timescale().expect("timed requires timescale");
+			let dts = timestamp.convert(scale).map(|t| t.value()).unwrap_or(self.key);
+			let tie = self.key.saturating_add(timed_oid).saturating_sub(dts);
+			(timed_oid, Some((tie > 0).then_some(tie)))
+		} else {
+			(self.index, Some(None))
 		}
 	}
 
-	fn object<'a>(&self, frame: &'a frame::Object, tie: Option<u64>) -> Result<FetchObjectInfo<'a>, Error> {
+	fn object<'a>(&self, frame: &'a frame::Object, tie: Option<Option<u64>>) -> Result<FetchObjectInfo<'a>, Error> {
 		Ok(FetchObjectInfo {
 			key: self.key,
 			object: self.index,
@@ -7670,7 +7694,9 @@ impl FetchGroupWrite {
 			match &mut self.state {
 				FetchGroupState::Yield => {
 					ready!(self.budget.poll_yield(waiter));
-					if self.group.wire().is_some_and(|wire| !wire.fetchable) {
+					if self.group.wire().is_some_and(|wire| !wire.fetchable)
+						|| (self.timed && self.group.wire().is_none() && self.group.first_frame() > 0)
+					{
 						return Poll::Ready(Err(Error::Unsupported));
 					}
 					if Self::capped(self.slice, self.index) {
@@ -8000,6 +8026,8 @@ struct GroupServe {
 	next_min_id: u64,
 	/// Whether this stream emits moq-timestamp Object IDs and TIMESTAMP_TIE properties.
 	timed: bool,
+	/// Whether a relayed group's wire Object IDs already match this stream's mode.
+	same_mode: bool,
 	slice: GroupSlice,
 	bounds: Option<kio::Consumer<ServeRange>>,
 	/// Set when a narrowing gives this stream up.
@@ -8092,6 +8120,7 @@ impl GroupServe {
 			prior_object: None,
 			next_min_id: 0,
 			timed: false,
+			same_mode: false,
 			slice,
 			bounds: None,
 			retired: Default::default(),
@@ -8170,11 +8199,12 @@ impl GroupServe {
 		terminal: Option<&Terminal>,
 		key: u64,
 		timed: bool,
+		same_mode: bool,
 	) -> Option<Arc<crate::model::object::Fields>> {
-		if let Some(end) = group.end_object() {
+		if same_mode && let Some(end) = group.end_object() {
 			return Some(status_fields(end));
 		}
-		if group.wire().is_some() || group.end().is_none() {
+		if same_mode || (group.end().is_none() && group.end_object().is_none()) {
 			return None;
 		}
 		let id = group_last_id(group, timed).map_or(0, |last| last.saturating_add(1));
@@ -8190,24 +8220,33 @@ impl GroupServe {
 	}
 
 	/// Fill in the header flags and the read slice from the group's relay state.
-	fn describe(&mut self, wire: Option<group::Wire>) {
+	fn describe(&mut self, wire: Option<group::Wire>) -> Result<(), Error> {
+		// An offset local/lite copy lacks the prior frames' clamp chain for moq-timestamp IDs.
+		if self.timed && wire.is_none() && self.group.first_frame() > 0 {
+			return Err(Error::Unsupported);
+		}
 		// A moq-transport publisher's objects carry its own Prior Group ID Gap, which passes
 		// through untouched, and only frame 0 names ours.
 		if wire.is_some() || self.slice.skip > 0 {
 			self.group_gap = 0;
 		}
-		let timed = wire.is_none() && self.timed;
+		let same_mode = wire.is_some()
+			&& (self.group.timescale().is_none()
+				|| self.group.ietf().is_none_or(|v| v.timestamp_object_ids() == self.timed));
+		self.same_mode = same_mode;
+		let timed_egress = !same_mode && self.timed;
 		let flags = &mut self.msg.flags;
-		flags.has_extensions |= wire.as_ref().is_some_and(|wire| wire.extensions) || self.group_gap > 0 || timed;
-		flags.first_object = wire.as_ref().map_or(self.slice.skip == 0, |wire| {
-			wire.first_object && self.slice.skip <= wire.first_id
-		});
+		flags.has_extensions |= wire.as_ref().is_some_and(|wire| wire.extensions) || self.group_gap > 0 || timed_egress;
+		flags.first_object = match wire.as_ref().filter(|_| same_mode) {
+			Some(wire) => wire.first_object && self.slice.skip <= wire.first_id,
+			None => self.slice.skip == 0,
+		};
 		// A stream capped by the range stops before the group may end, so its FIN cannot
 		// claim END_OF_GROUP. Our own group may close without saying it is whole, which only
 		// an explicit END_OF_GROUP once it finished does, so its FIN claims nothing either.
 		flags.has_end = self.slice.until.is_none() && wire.as_ref().is_some_and(|wire| wire.has_end);
-		if wire.is_none() {
-			if timed {
+		if !same_mode {
+			if self.timed {
 				self.group.skip_to_oid(self.slice.skip);
 			} else {
 				// Only the end: a start would clamp past a prefix the group never held, which
@@ -8217,6 +8256,7 @@ impl GroupServe {
 				self.group.end_at(self.slice.until);
 			}
 		}
+		Ok(())
 	}
 
 	/// Wait for stream credit, leaving the machine to describe the group on its stream.
@@ -8305,7 +8345,7 @@ impl GroupServe {
 					else {
 						unreachable!("matched above");
 					};
-					self.describe(wire);
+					self.describe(wire)?;
 					writer.buffer(&self.msg)?;
 					self.state = GroupState::Serve {
 						writer,
@@ -8384,21 +8424,21 @@ impl GroupServe {
 							} else if *batch_pos < batch.len() {
 								let ordinal = self.group.index() - batch.len() as u64 + *batch_pos as u64;
 								let batched = &mut batch[*batch_pos];
-								let (id, tie) =
-									match (&batched.fields, self.timed.then(|| self.group.timescale()).flatten()) {
-										(Some(fields), _) => (fields.id, None),
-										(None, Some(scale)) => {
-											let dts = batched
-												.timestamp
-												.convert(scale)
-												.map(|t| t.value())
-												.unwrap_or(self.msg.group_id);
-											let oid = batched.timed_oid;
-											let tie = self.msg.group_id.saturating_add(oid).saturating_sub(dts);
-											(oid, (tie > 0).then_some(tie))
-										}
-										(None, None) => (ordinal, None),
-									};
+								let (id, tie) = if self.same_mode {
+									// A plain relayed object elides `fields` when its wire Object ID equals its ordinal.
+									(batched.fields.as_ref().map_or(ordinal, |fields| fields.id), None)
+								} else if let Some(scale) = self.timed.then(|| self.group.timescale()).flatten() {
+									let dts = batched
+										.timestamp
+										.convert(scale)
+										.map(|t| t.value())
+										.unwrap_or(self.msg.group_id);
+									let oid = batched.timed_oid;
+									let tie = self.msg.group_id.saturating_add(oid).saturating_sub(dts);
+									(oid, Some((tie > 0).then_some(tie)))
+								} else {
+									(ordinal, Some(None))
+								};
 								*batch_pos += 1;
 								self.next_min_id = id.saturating_add(1);
 								if self.slice.until.is_some_and(|until| id >= until) {
@@ -8447,22 +8487,21 @@ impl GroupServe {
 								match self.group.poll_next_frame(waiter) {
 									Poll::Ready(Ok(Some(next))) => {
 										let ordinal = self.group.index() - 1;
-										let (id, tie) = match (
-											&next.fields,
-											self.timed.then(|| self.group.timescale()).flatten(),
-										) {
-											(Some(fields), _) => (fields.id, None),
-											(None, Some(scale)) => {
-												let dts = next
-													.timestamp
-													.convert(scale)
-													.map(|t| t.value())
-													.unwrap_or(self.msg.group_id);
-												let oid = next.timed_oid;
-												let tie = self.msg.group_id.saturating_add(oid).saturating_sub(dts);
-												(oid, (tie > 0).then_some(tie))
-											}
-											(None, None) => (ordinal, None),
+										let (id, tie) = if self.same_mode {
+											// A plain relayed object elides `fields` when its wire Object ID equals its ordinal.
+											(next.fields.as_ref().map_or(ordinal, |fields| fields.id), None)
+										} else if let Some(scale) = self.timed.then(|| self.group.timescale()).flatten()
+										{
+											let dts = next
+												.timestamp
+												.convert(scale)
+												.map(|t| t.value())
+												.unwrap_or(self.msg.group_id);
+											let oid = next.timed_oid;
+											let tie = self.msg.group_id.saturating_add(oid).saturating_sub(dts);
+											(oid, Some((tie > 0).then_some(tie)))
+										} else {
+											(ordinal, Some(None))
 										};
 										self.next_min_id = id.saturating_add(1);
 										if self.slice.until.is_some_and(|until| id >= until) {
@@ -8504,6 +8543,7 @@ impl GroupServe {
 												self.terminal.as_deref(),
 												self.msg.group_id,
 												self.timed,
+												self.same_mode,
 											) && end.id >= self.slice.skip && self
 											.slice
 											.until
@@ -8620,8 +8660,8 @@ struct Object<'a> {
 	delta: u64,
 	/// The Prior Group ID Gap our own object names, if any.
 	group_gap: Option<u64>,
-	/// The Timestamp Tie (`0x40B72`) our own timed object names, if non-zero.
-	tie: Option<u64>,
+	/// `None` preserves relayed properties verbatim; `Some(tie)` rewrites/strips `TIMESTAMP_TIE`.
+	tie: Option<Option<u64>>,
 	size: u64,
 	inflated: Option<u64>,
 	status: u64,
@@ -8672,8 +8712,10 @@ fn buffer_object<W: crate::transport::poll::SendStream>(
 	writer.buffer_varint(object.delta)?;
 	if encoding.extensions {
 		let ext = match object.fields {
-			Some(fields) => super::object::write(&fields.properties, encoding.source, encoding.version)?,
-			None => super::object::own_properties(object.group_gap, object.tie, encoding.version)?,
+			Some(fields) => {
+				super::object::write_with_tie(&fields.properties, encoding.source, encoding.version, object.tie)?
+			}
+			None => super::object::own_properties(object.group_gap, object.tie.flatten(), encoding.version)?,
 		};
 		let ext = super::object::compression(ext, encoding.version, object.inflated)?;
 		writer.buffer_varint(ext.len() as u64)?;
@@ -22065,9 +22107,21 @@ fn live_edge(track: &track::Consumer) -> LiveEdge {
 	live_edge_for(track, true)
 }
 
+/// Whether a relayed MOQT group's stored wire Object IDs already match the egress peer's mode.
+fn group_relayed_same_mode(group: &group::Consumer, timed: bool) -> bool {
+	group.wire().is_some()
+		&& (group.timescale().is_none() || group.ietf().is_none_or(|v| v.timestamp_object_ids() == timed))
+}
+
 fn group_last_id(group: &group::Consumer, timed: bool) -> Option<u64> {
-	if timed || group.wire().is_some() {
+	if group_relayed_same_mode(group, timed) {
 		group.last_object()
+	} else if group.timescale().is_some() {
+		if timed {
+			group.last_timed_oid()
+		} else {
+			group.last_frame()
+		}
 	} else {
 		group.last_frame()
 	}
@@ -23235,6 +23289,208 @@ mod compression_tests {
 					frame: expected_oid
 				}
 			);
+			// An upper bound declared above the finished group's actual frame count clamps past
+			// its last delivered Object ID rather than falling back to the raw ordinal.
+			if timed {
+				assert_eq!(
+					serve.wire_end(track::Position { group: 1000, frame: 5 }),
+					track::Position { group: 1000, frame: 34 }
+				);
+			}
 		}
+
+		// A bounded subscription stopping at Object 0 of the final group (which holds Objects 0
+		// and 33) must not emit a standalone END_OF_TRACK past its object cap.
+		let mut track = track::Producer::new(
+			Arc::new(crate::broadcast::Info::default()),
+			"video",
+			track::Info::timed().with_timescale(Timescale::MILLI),
+		);
+		let mut group = track.append_group(Timestamp::from_millis(1000).unwrap()).unwrap();
+		group
+			.write_frame(Timestamp::from_millis(1000).unwrap(), b"a".as_slice())
+			.unwrap();
+		group
+			.write_frame(Timestamp::from_millis(1033).unwrap(), b"b".as_slice())
+			.unwrap();
+		group.finish().unwrap();
+		track.finish_at(track::Position { group: 1000, frame: 2 }).unwrap();
+
+		for (cap, expect_end) in [
+			(Some(0), None),
+			(Some(33), Some(track::Position { group: 1000, frame: 34 })),
+		] {
+			let log = Log::default();
+			let mut serve = TrackServe::new(
+				crate::driver::Transport::new(SinkSession::new(log)),
+				track.subscribe(None),
+				RequestId(2),
+				Version::Draft23,
+				ServeRange {
+					start: None,
+					end: Some(ietf::EndLocation {
+						group: 1000,
+						object: cap,
+					}),
+				},
+			)
+			.timed(true);
+			serve.phase = ServePhase::Draining(Some(track::Position { group: 1000, frame: 2 }));
+			assert_eq!(serve.end(), expect_end, "cap={cap:?}");
+		}
+	}
+
+	/// A relay serving a MOQT-ingested timed group translates Object IDs and `TIMESTAMP_TIE`
+	/// whenever the downstream peer's Object ID mode differs from the upstream source.
+	#[kio::test]
+	async fn relayed_group_translates_between_sparse_and_dense_modes() {
+		use crate::lite::test_transport::{Log, SinkSession};
+
+		// 1. Draft23 sparse (0, 33) -> Draft22 dense (0, 1).
+		let info = track::Info {
+			timescale: Some(Timescale::MILLI),
+			properties: Some(Arc::new(crate::model::object::TrackProperties {
+				version: Version::Draft23,
+				values: Vec::new(),
+			})),
+			..track::Info::timed()
+		};
+		let track = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info);
+		let mut group = track.append_group(Timestamp::from_millis(1000).unwrap()).unwrap();
+		group
+			.set_wire(group::Wire {
+				sparse: false,
+				first_object: true,
+				first_id: 0,
+				extensions: true,
+				has_end: true,
+				fetchable: true,
+				last: None,
+			})
+			.unwrap();
+		for (oid, ms, payload) in [(0u64, 1000u64, b"a".as_slice()), (33u64, 1033u64, b"b".as_slice())] {
+			let mut f = group
+				.create_object(crate::frame::Header {
+					info: crate::frame::Info {
+						size: payload.len() as u64,
+						timestamp: Timestamp::from_millis(ms).unwrap(),
+					},
+					fields: Some(Arc::new(crate::model::object::Fields {
+						id: oid,
+						properties: Default::default(),
+					})),
+					inflated: None,
+				})
+				.unwrap();
+			f.write(bytes::Bytes::copy_from_slice(payload)).unwrap();
+			group = f.finish().unwrap();
+		}
+		let consumer = group.consume();
+		group.finish().unwrap();
+
+		let log = Log::default();
+		let mut serve = GroupServe::new(
+			crate::driver::Transport::new(SinkSession::new(log.clone())),
+			ietf::GroupHeader {
+				track_alias: 1,
+				group_id: 1000,
+				sub_group_id: 0,
+				publisher_priority: 128,
+				flags: Default::default(),
+			},
+			Rank::solo(kio::Producer::new(0i8).consume()),
+			consumer,
+			Version::Draft22,
+			GroupSlice::default(),
+		)
+		.timed(false);
+		kio::wait(|waiter| serve.poll_serve(waiter)).await.unwrap();
+		let written = log.writes.lock().unwrap().clone();
+		let mut r = crate::coding::Decoder::new(&written, Version::Draft22.into());
+		let header = ietf::GroupHeader::decode(&mut r, Version::Draft22).unwrap();
+		assert_eq!(header.group_id, 1000);
+		// Object 0 (delta 0, ext 0, len 1, "a") then Object 1 (delta 0, ext 0, len 1, "b").
+		assert_eq!(r.varint().unwrap(), 0);
+		assert_eq!(r.varint().unwrap(), 0);
+		assert_eq!(r.varint().unwrap(), 1);
+		assert_eq!(r.slice(1).unwrap(), b"a");
+		assert_eq!(r.varint().unwrap(), 0); // dense delta 0 -> Object ID 1 (not 33)
+		assert_eq!(r.varint().unwrap(), 0);
+		assert_eq!(r.varint().unwrap(), 1);
+		assert_eq!(r.slice(1).unwrap(), b"b");
+		assert!(r.is_empty());
+
+		// 2. Draft22 dense (0, 1) with timestamps (1000ms, 1033ms) -> Draft23 timed (0, 33).
+		let info22 = track::Info {
+			timescale: Some(Timescale::MILLI),
+			properties: Some(Arc::new(crate::model::object::TrackProperties {
+				version: Version::Draft22,
+				values: Vec::new(),
+			})),
+			..track::Info::timed()
+		};
+		let track22 = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info22);
+		let mut group22 = track22.append_group(Timestamp::from_millis(1000).unwrap()).unwrap();
+		group22
+			.set_wire(group::Wire {
+				sparse: false,
+				first_object: true,
+				first_id: 0,
+				extensions: false,
+				has_end: true,
+				fetchable: true,
+				last: None,
+			})
+			.unwrap();
+		for (oid, ms, payload) in [(0u64, 1000u64, b"a".as_slice()), (1u64, 1033u64, b"b".as_slice())] {
+			let mut f = group22
+				.create_object(crate::frame::Header {
+					info: crate::frame::Info {
+						size: payload.len() as u64,
+						timestamp: Timestamp::from_millis(ms).unwrap(),
+					},
+					fields: Some(Arc::new(crate::model::object::Fields {
+						id: oid,
+						properties: Default::default(),
+					})),
+					inflated: None,
+				})
+				.unwrap();
+			f.write(bytes::Bytes::copy_from_slice(payload)).unwrap();
+			group22 = f.finish().unwrap();
+		}
+		let consumer22 = group22.consume();
+		group22.finish().unwrap();
+
+		let log23 = Log::default();
+		let mut serve23 = GroupServe::new(
+			crate::driver::Transport::new(SinkSession::new(log23.clone())),
+			ietf::GroupHeader {
+				track_alias: 1,
+				group_id: 1000,
+				sub_group_id: 0,
+				publisher_priority: 128,
+				flags: Default::default(),
+			},
+			Rank::solo(kio::Producer::new(0i8).consume()),
+			consumer22,
+			Version::Draft23,
+			GroupSlice::default(),
+		)
+		.timed(true);
+		kio::wait(|waiter| serve23.poll_serve(waiter)).await.unwrap();
+		let written23 = log23.writes.lock().unwrap().clone();
+		let mut r23 = crate::coding::Decoder::new(&written23, Version::Draft23.into());
+		let header23 = ietf::GroupHeader::decode(&mut r23, Version::Draft23).unwrap();
+		assert_eq!(header23.group_id, 1000);
+		assert_eq!(r23.varint().unwrap(), 0); // Object ID 0
+		assert_eq!(r23.varint().unwrap(), 0);
+		assert_eq!(r23.varint().unwrap(), 1);
+		assert_eq!(r23.slice(1).unwrap(), b"a");
+		assert_eq!(r23.varint().unwrap(), 32); // delta 32 -> Object ID 33
+		assert_eq!(r23.varint().unwrap(), 0);
+		assert_eq!(r23.varint().unwrap(), 1);
+		assert_eq!(r23.slice(1).unwrap(), b"b");
+		assert!(r23.is_empty());
 	}
 }

@@ -334,6 +334,47 @@ pub(crate) fn write(properties: &Properties, source: Option<Version>, version: V
 	Ok(out)
 }
 
+/// Like [`write`], additionally rewriting or stripping `TIMESTAMP_TIE` (`0x40B72`) when relaying
+/// across dense and `moq-timestamp` Object ID schemes.
+///
+/// `tie = None` keeps the block as [`write`] does; `tie = Some(new_tie)` strips any existing
+/// mutable `TIMESTAMP_TIE` (refusing if sealed in `0x0b`) and inserts `new_tie` if `Some`.
+pub(crate) fn write_with_tie(
+	properties: &Properties,
+	source: Option<Version>,
+	version: Version,
+	tie: Option<Option<u64>>,
+) -> Result<Vec<u8>, Error> {
+	let Some(new_tie) = tie else {
+		return write(properties, source, version);
+	};
+	let Some(block) = &properties.block else {
+		return own_properties(None, new_tie, version);
+	};
+	let source = source.ok_or(Error::MalformedTrack)?;
+	let mut props = values(block, source)?;
+	let drop_delivery_timeout = has_delivery_timeout(source) != has_delivery_timeout(version);
+	if drop_delivery_timeout && sealed_key(&props, source, 0x06)? {
+		return Err(Error::Unsupported);
+	}
+	if sealed_key(&props, source, TIMESTAMP_TIE)? {
+		return Err(Error::Unsupported);
+	}
+	props.retain(|p| p.id != TIMESTAMP_TIE && (!drop_delivery_timeout || p.id != 0x06));
+	if let Some(tie_val) = new_tie.filter(|v| *v > 0) {
+		props.push(Property {
+			id: TIMESTAMP_TIE,
+			value: Value::Int(tie_val),
+		});
+		props.sort_by_key(|p| p.id);
+	}
+	let out = serialize(&props, version)?;
+	if out.len() > MAX_BLOCK {
+		return Err(Error::Unsupported);
+	}
+	Ok(out)
+}
+
 /// Whether the immutable block among `values` holds a property with `id`.
 fn sealed_key(values: &[Property], version: Version, id: u64) -> Result<bool, Error> {
 	let Some(sealed) = values.iter().find(|property| property.id == 0x0b) else {

@@ -2065,7 +2065,16 @@ export class Subscriber {
 						sparse && wireObject > 0
 							? producer
 								? { group: group.groupId, frame: hooks.groupFrameCount(producer) }
-								: { group: group.groupId + 1n, frame: 0 }
+								: (() => {
+										const ordinal = hooks.producerGroupOrdinalForOid(
+											track,
+											group.groupId,
+											wireObject,
+										);
+										return ordinal !== undefined
+											? { group: group.groupId, frame: ordinal }
+											: { group: group.groupId + 1n, frame: 0 };
+									})()
 							: { group: group.groupId, frame: wireObject };
 					producer?.finish();
 					try {

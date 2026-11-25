@@ -22,15 +22,7 @@ import {
 } from "../error.ts";
 import type * as group from "../group.ts";
 import type { Hop, WireRoute } from "../hop.ts";
-import {
-	datagramTrackInfo,
-	finalKey,
-	firstEligible,
-	hiddenBelow,
-	hooks,
-	presented,
-	type ReadGroupFrame,
-} from "../internal.ts";
+import { datagramTrackInfo, firstEligible, hiddenBelow, hooks, presented, type ReadGroupFrame } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { sendPayload } from "../payload.ts";
@@ -1082,13 +1074,29 @@ export class Publisher {
 			// subscriber where the track ended. A range that stopped short of the end never saw
 			// it, and claiming it would end the subscriber's track early.
 			const final = hooks.subscriberEnd(track);
-			const reached = final !== undefined && (range.end === undefined || range.end.group + 1n >= finalKey(final));
-			if (!datagramTrack && ended && !publishError && final !== undefined && reached && !streams.terminalSent) {
+			const wireObject = final !== undefined ? this.#wireEndObject(track, final, timed) : undefined;
+			const reached =
+				final !== undefined &&
+				wireObject !== undefined &&
+				(range.end === undefined ||
+					(wireObject === 0
+						? range.end.group + 1n >= final.group
+						: range.end.group > final.group ||
+							(range.end.group === final.group &&
+								(range.end.object === undefined || range.end.object + 1n >= BigInt(wireObject)))));
+			if (
+				!datagramTrack &&
+				ended &&
+				!publishError &&
+				final !== undefined &&
+				wireObject !== undefined &&
+				reached &&
+				!streams.terminalSent
+			) {
 				await this.#runEndOfTrack({
 					requestId: msg.requestId,
-					track,
-					final,
-					timed,
+					group: final.group,
+					wireObject,
 					publisherPriority,
 					unsubscribed,
 					streams,
@@ -1452,32 +1460,33 @@ export class Publisher {
 		}
 	}
 
+	#wireEndObject(track: TrackSubscriber, final: TrackPosition, timed: boolean): number {
+		if (!timed || final.frame <= 0) return final.frame;
+		const cached = hooks.cachedGroup(track, final.group);
+		if (cached) {
+			try {
+				const resolved = hooks.groupOidAfterFrame(cached, final.frame);
+				if (resolved !== undefined) return resolved;
+			} finally {
+				cached.close();
+			}
+		}
+		const largest = hooks.objectLargest(track, true);
+		if (largest?.group === final.group) return largest.frame + 1;
+		return final.frame;
+	}
+
 	/** Preserve the original terminal on a separate stream when its group already sent FIN. */
 	async #runEndOfTrack(options: {
 		requestId: bigint;
-		track: TrackSubscriber;
-		final: TrackPosition;
-		timed: boolean;
+		group: bigint;
+		wireObject: number;
 		publisherPriority: number;
 		unsubscribed: Promise<void>;
 		streams: StreamCount;
 	}) {
-		const { requestId, track, final, timed, publisherPriority, unsubscribed, streams } = options;
+		const { requestId, group, wireObject, publisherPriority, unsubscribed, streams } = options;
 		const version = this.#session.version;
-		let wireObject = final.frame;
-		if (timed && final.frame > 0) {
-			const cached = hooks.cachedGroup(track, final.group);
-			if (cached) {
-				try {
-					wireObject = hooks.groupOidAfterFrame(cached, final.frame) ?? final.frame;
-				} finally {
-					cached.close();
-				}
-			} else {
-				const largest = hooks.objectLargest(track, true);
-				if (largest?.group === final.group) wireObject = largest.frame + 1;
-			}
-		}
 		const stream = await Writer.tryOpen(this.#quic, { cancel: unsubscribed, version }).catch(() => undefined);
 		if (!stream) return;
 		streams.opened += 1;
@@ -1485,7 +1494,7 @@ export class Publisher {
 		try {
 			const header = new GroupMessage({
 				trackAlias: requestId,
-				groupId: final.group,
+				groupId: group,
 				subGroupId: 0n,
 				publisherPriority,
 				flags: {

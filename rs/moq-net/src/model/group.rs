@@ -1220,15 +1220,15 @@ impl GroupState {
 		} else {
 			timestamp.value()
 		};
-		let timed_oid = match fields {
-			Some(fields) => fields.id,
-			None if self.wire().is_none() && timestamp.scale().is_some() => {
-				let (oid, _) =
-					crate::ietf::object::timestamp_object_id(self.group_start, self.last_timed_oid, timestamp.value());
-				self.last_timed_oid = Some(oid);
-				oid
-			}
-			None => ordinal as u64,
+		let timed_oid = if timestamp.scale().is_some() {
+			let (oid, _) =
+				crate::ietf::object::timestamp_object_id(self.group_start, self.last_timed_oid, timestamp.value());
+			self.last_timed_oid = Some(oid);
+			oid
+		} else if let Some(fields) = fields {
+			fields.id
+		} else {
+			ordinal as u64
 		};
 		(timed_oid, mono_ts)
 	}
@@ -4288,6 +4288,15 @@ impl Consumer {
 		}
 	}
 
+	/// The last moq-timestamp Object ID assigned on a timed group.
+	#[cfg(feature = "async")]
+	pub(crate) fn last_timed_oid(&self) -> Option<u64> {
+		let state = self.cursor.state.read();
+		state
+			.last_timed_oid
+			.or_else(|| (state.next_index as u64).checked_sub(1))
+	}
+
 	/// The ordinal of the last frame written (for dense/untimed MOQT Largest Object).
 	#[cfg(feature = "async")]
 	pub(crate) fn last_frame(&self) -> Option<u64> {
@@ -4295,21 +4304,36 @@ impl Consumer {
 		(state.next_index as u64).checked_sub(1)
 	}
 
+	/// Whether the group finished cleanly (all frames written).
+	#[cfg(feature = "async")]
+	pub(crate) fn is_finished(&self) -> bool {
+		let state = self.cursor.state.read();
+		state.outcome.frames().is_some() && state.range_end.is_none()
+	}
+
 	/// The wire Object ID immediately following `frame` frames on a timed group (`0` when `frame == 0`).
+	/// When the group has already finished with fewer than `frame` frames, clamps to one past its
+	/// actual last frame so a declared upper bound (`finish_at`) resolves past every delivered object.
 	#[cfg(feature = "async")]
 	pub(crate) fn oid_after_frame(&self, frame: u64) -> Option<u64> {
 		if frame == 0 {
 			return Some(0);
 		}
 		let state = self.cursor.state.read();
-		let prev = usize::try_from(frame - 1).ok()?;
-		if prev + 1 == state.next_index {
-			if let Some(wire) = state.wire() {
-				return wire.last.map(|oid| oid.saturating_add(1));
-			}
-			if let Some(last) = state.last_timed_oid {
-				return Some(last.saturating_add(1));
-			}
+		let closed = state.outcome.frames().is_some();
+		let effective = if closed {
+			usize::try_from(frame).map_or(state.next_index, |f| f.min(state.next_index))
+		} else {
+			usize::try_from(frame).ok()?
+		};
+		if effective == 0 {
+			return Some(0);
+		}
+		let prev = effective - 1;
+		if prev + 1 == state.next_index
+			&& let Some(last) = state.last_timed_oid
+		{
+			return Some(last.saturating_add(1));
 		}
 		if prev == state.committed()
 			&& let Some(partial) = &state.partial

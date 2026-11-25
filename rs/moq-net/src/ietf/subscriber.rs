@@ -616,10 +616,7 @@ impl RangeWriter {
 			false => 0,
 		};
 		let frame_start = fill.frame_start(key);
-		self.skip_frames = match self.fetch.timing.timestamp_ids && wire_start == 0 {
-			true => frame_start,
-			false => 0,
-		};
+		self.skip_frames = frame_start.saturating_sub(wire_start);
 		let producer = match datagram {
 			true => {
 				tracing::debug!(key, "dropping a datagram group from a fetch");
@@ -6303,7 +6300,7 @@ impl RecvGroup {
 			Opened::EndOfTrack { object, properties } => {
 				let end = if timing.timestamp_ids && object > 0 {
 					match track.consume().peek_group(group.group_id) {
-						Some(existing) if existing.end().is_some() => track::Position {
+						Some(existing) if existing.is_finished() => track::Position {
 							group: group.group_id,
 							frame: existing.ordinal_for_oid(object),
 						},
