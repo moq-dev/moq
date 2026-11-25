@@ -11,6 +11,12 @@ use crate::{Error, Result, codec, session};
 pub struct IngestSink {
 	broadcast: moq_net::broadcast::Producer,
 	catalog: moq_mux::catalog::Producer,
+	/// Every track's timestamp base, so the session's audio and video shift onto the catalog's
+	/// clock by one offset, fixed at the first frame's arrival.
+	timebase: moq_mux::catalog::Timebase,
+	/// Withholds the catalog until the first frame places the timebase, so nothing fixes the clock
+	/// first and the session's timestamps stay verbatim on a fresh catalog.
+	gate: Option<moq_mux::catalog::Reserved>,
 	bridges: session::Bridges,
 	/// The route announcing the broadcast, when the sink owns it: held for the session's
 	/// life, linger included, and retracted when the session drops it.
@@ -22,6 +28,8 @@ impl IngestSink {
 	pub fn new(broadcast: moq_net::broadcast::Producer, catalog: moq_mux::catalog::Producer) -> Self {
 		Self {
 			broadcast,
+			timebase: catalog.timebase(),
+			gate: Some(catalog.reserve()),
 			catalog,
 			bridges: session::Bridges::new(),
 			_route: None,
@@ -90,16 +98,25 @@ impl session::MediaSink for IngestSink {
 		self.bridges.discontinuity(mid)
 	}
 
-	fn on_frame(&mut self, mid: str0m::media::Mid, frame: codec::Frame) -> Result<()> {
+	fn on_frame(&mut self, mid: str0m::media::Mid, mut frame: codec::Frame) -> Result<()> {
+		// The first frame places the session at its arrival: no sender report is waited for, which
+		// a publisher sends for audio only every RTCP interval (5 s).
+		let pts = moq_net::Timestamp::from_micros(frame.timestamp_us).map_err(moq_mux::Error::from)?;
+		let shifted = self.timebase.shift(pts)?.as_micros().map_err(moq_mux::Error::from)?;
+		frame.timestamp_us = u64::try_from(shifted).map_err(|_| moq_mux::Error::from(moq_net::TimeOverflow))?;
+		self.gate = None;
 		self.bridges.push(mid, frame)
 	}
 
 	fn abort(&mut self, err: moq_net::Error) {
+		self.gate = None;
 		self.catalog.clone().abort(err.clone());
 		self.bridges.abort(err);
 	}
 
 	fn finish(&mut self) -> Result<moq_net::broadcast::Producer> {
+		// A session without frames still closes its catalog.
+		self.gate = None;
 		self.bridges.finish()?;
 		self.catalog.finish()?;
 		Ok(self.broadcast.clone())

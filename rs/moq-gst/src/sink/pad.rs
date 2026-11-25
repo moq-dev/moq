@@ -902,7 +902,11 @@ impl Pad {
 		};
 		match timestamp {
 			Ok(micros) => {
-				let result: Result<()> = match &mut publishing.track {
+				// Onto the catalog's clock, which a pre-fixed or shared catalog keeps elsewhere.
+				let shifted = self.wall.as_ref().map_or(Ok(micros), |wall| wall.shift(micros));
+				let result: Result<()> = match shifted.map(|micros| (micros, &mut publishing.track)) {
+					Err(err) => Err(err),
+					Ok((micros, track)) => match track {
 					Sink::Media(media) => match media.write(&data, micros) {
 						Ok(false) => {
 							gst::debug!(
@@ -932,7 +936,7 @@ impl Pad {
 						};
 						producer.write_frame(ts, &data).map_err(Into::into)
 					}
-				};
+				}};
 				match result {
 					Ok(()) => Ok(PushOutcome::Published),
 					Err(err) => {

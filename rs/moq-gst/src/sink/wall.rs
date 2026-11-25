@@ -15,7 +15,8 @@ pub(super) struct Sample {
 	pub wall: kio::clock::Wall,
 }
 
-/// Places running-time zero on the wall clock once per run, holding the first catalog until then.
+/// Places running-time zero on the wall clock once per run, holding the first catalog until then,
+/// and shifts the run's timestamps onto the catalog's clock, which may have been fixed before it.
 pub(super) struct Wall {
 	timebase: moq_mux::catalog::Timebase,
 	// CAPS can resolve every rendition before the first buffer supplies its reference timestamp.
@@ -25,10 +26,9 @@ pub(super) struct Wall {
 
 impl Wall {
 	pub(super) fn new(catalog: &moq_mux::catalog::Producer) -> Arc<Self> {
-		let timebase = catalog.timebase();
 		Arc::new(Self {
-			pending: Mutex::new(Some(timebase.reserve())),
-			timebase,
+			pending: Mutex::new(Some(catalog.reserve())),
+			timebase: catalog.timebase(),
 			placed: AtomicBool::new(false),
 		})
 	}
@@ -46,6 +46,12 @@ impl Wall {
 		self.placed.store(true, Ordering::Release);
 		pending.take();
 		Ok(())
+	}
+
+	/// The catalog clock's timestamp for running time `micros`.
+	pub(super) fn shift(&self, micros: u64) -> Result<u64> {
+		let shifted = self.timebase.shift(hang::container::Timestamp::from_micros(micros)?)?;
+		Ok(shifted.as_micros()?.try_into()?)
 	}
 
 	/// A run without buffers still closes its catalog, without leaving a reservation outstanding.

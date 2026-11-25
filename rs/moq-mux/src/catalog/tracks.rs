@@ -428,20 +428,17 @@ fn check_identity<E: CatalogExt>(previous: &Catalog<E>, next: &Catalog<E>, name:
 /// snapshot is published atomically with the complete track list, so a one-shot muxer (fMP4,
 /// MPEG-TS) never sees a half-converged catalog.
 ///
-/// It belongs to one [`Timebase`](super::Timebase), whose offset the importer handed it shifts its
-/// timestamps by. Clones share that timebase.
+/// It only gates the catalog: the timestamps written through it land verbatim on the catalog's
+/// clock. A source on a timeline of its own shifts them through a [`Timebase`](super::Timebase).
 pub struct Reserved<E: CatalogExt = ()> {
-	timebase: super::Timebase<E>,
+	catalog: Producer<E>,
 	interval: Option<std::time::Duration>,
 }
 
 impl<E: CatalogExt> Reserved<E> {
-	pub(super) fn new(timebase: super::Timebase<E>) -> Self {
-		timebase.catalog.add_reserver();
-		Self {
-			timebase,
-			interval: None,
-		}
+	pub(super) fn new(catalog: Producer<E>) -> Self {
+		catalog.add_reserver();
+		Self { catalog, interval: None }
 	}
 
 	/// Declare the track's longest group (its GOP), which the catalog's `sync.interval`
@@ -455,7 +452,7 @@ impl<E: CatalogExt> Reserved<E> {
 	/// Track properties for a media track under this catalog, carrying any max age it declares.
 	/// See [`Producer::track_info`](super::Producer::track_info).
 	pub fn track_info(&self, priority: i8) -> moq_net::track::Info {
-		self.timebase.catalog.track_info(priority)
+		self.catalog.track_info(priority)
 	}
 
 	/// Reserve a rendition of config type `C` under `name`, returning its internal owner.
@@ -523,14 +520,12 @@ impl<E: CatalogExt> Reserved<E> {
 		crate::Error: From<C::Error>,
 	{
 		let rendition = self.init(track.name())?;
-		self.timebase
-			.catalog
-			.media(track, container, rendition, config.into(), self.interval)
+		self.catalog.media(track, container, rendition, config.into(), self.interval)
 	}
 
 	/// Resolve a timestamp on the broadcast's shared clock (see [`Producer::timestamp`]).
 	pub fn timestamp(&self, hint: Option<moq_net::Timestamp>) -> crate::Result<moq_net::Timestamp> {
-		self.timebase.catalog.timestamp(hint)
+		self.catalog.timestamp(hint)
 	}
 
 	/// The underlying catalog [`Producer`], for edits that outlive this reservation.
@@ -539,26 +534,19 @@ impl<E: CatalogExt> Reserved<E> {
 	/// track removals after its initial set is declared) while the reservation itself is dropped to
 	/// open the gate. The returned handle does not gate: only live `Reserved`s do.
 	pub(crate) fn producer(&self) -> Producer<E> {
-		self.timebase.catalog.clone()
-	}
-
-	/// The timebase this reservation belongs to, which outlives it without gating the catalog.
-	///
-	/// An importer anchors through it on its first frame and shifts every frame by its offset.
-	pub(crate) fn timebase(&self) -> super::Timebase<E> {
-		self.timebase.clone()
+		self.catalog.clone()
 	}
 }
 
 impl<E: CatalogExt> Clone for Reserved<E> {
 	fn clone(&self) -> Self {
-		Self::new(self.timebase.clone()).with_interval(self.interval)
+		Self::new(self.catalog.clone()).with_interval(self.interval)
 	}
 }
 
 impl<E: CatalogExt> Drop for Reserved<E> {
 	fn drop(&mut self) {
-		self.timebase.catalog.release_reserver();
+		self.catalog.release_reserver();
 	}
 }
 
