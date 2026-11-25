@@ -63,9 +63,8 @@ Recommendations:
 - Compare a hosted job's restore time against its R2 runs, since the bucket
   moves from R2's WNAM to `us-east-005`.
 - Update everything that names R2 for mbx: `.github/actions/rust-cache`,
-  `infra/mbx/`, `infra/README.md`, the
-  [CI README](/quest/m0/ci/README.md)'s caches bullet, and
-  [read-only-secrets](/quest/m0/ci/read-only-secrets.md)'s `MBX_R2_*` line.
+  `infra/mbx/`, `infra/README.md`, and the
+  [CI README](/quest/m0/ci/README.md)'s caches bullet.
 
 Public API: none. Wire: none.
 

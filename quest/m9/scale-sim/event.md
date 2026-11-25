@@ -10,7 +10,7 @@ all on virtual time over links that queue until they drop. It reports per relay
 tier the instructions, memory, and bytes per delivered frame, and the viewers'
 latency and stall percentiles, swept over viewer count and bufferbloat depth.
 Nightly runs it on `main` and charts the series beside the other benchmarks,
-within [the metrics budget](/quest/m0/ci/kixel-metrics-limit.md).
+within Kixel Quest's 8 MiB metrics budget.
 
 ## Plan
 
