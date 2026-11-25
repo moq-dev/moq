@@ -50,7 +50,7 @@ test("delivery restarts a group's idle window", async () => {
 	await withClock(async (clock) => {
 		const pool = new cache.Pool({ expiry: Duration.millis(10_000) });
 		const producer = pooled(pool);
-		const subscriber = producer.subscribe(withMax({ delay: { max: null } }));
+		const subscriber = producer.subscribe(withMax({ order: "ascending", delay: { max: null } }));
 		finished(producer, 1); // seq 0
 		finished(producer, 1); // seq 1 takes the live edge, so seq 0 can expire
 
@@ -171,7 +171,9 @@ test("a forgotten run is asked only by a reader that never judged it", async () 
 		hooks.receiveTrack(producer);
 		const requests = producer.requests();
 		const patient = () =>
-			producer.subscribe(withMax({ ranges: [{ start: 0n }], delay: { max: Duration.secs(3600) } }));
+			producer.subscribe(
+				withMax({ order: "ascending", ranges: [{ start: 0n }], delay: { max: Duration.secs(3600) } }),
+			);
 		const asked = async () => {
 			const runs: bigint[][] = [];
 			for (;;) {

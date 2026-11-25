@@ -16,3 +16,13 @@ ffmpeg -hide_banner -loglevel error -f lavfi -i testsrc2=size=32x32:rate=25 -fra
 
 The test adds AVC's MPEG-TS timing descriptor to its repacketized PMT: fixed
 frame rate plus temporal POC explicitly permits scaling POC by the VUI tick.
+
+# FFmpeg-packed AAC
+
+`ffmpeg_aac.ts` is five seconds of stereo 44.1 kHz AAC at 128 kb/s with FFmpeg's default MPEG-TS
+packing: a PES of about 186 ms in each of its audio packets, a clock in the first packet of each, and
+no null packets, so its recorded multiplex rate is the audio's own. Generated in the repository Nix shell with:
+
+```bash
+ffmpeg -hide_banner -loglevel error -f lavfi -i "anoisesrc=d=5:c=pink:r=44100:a=0.5:seed=7" -af tremolo=f=1.5:d=0.9 -ac 2 -c:a aac -b:a 128k -f mpegts ffmpeg_aac.ts
+```
