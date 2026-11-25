@@ -4289,8 +4289,9 @@ impl TrackState {
 			return self.handoff;
 		};
 		let live = match self.lookup.get(&max) {
-			// The renewal's teardown took the group its producer left open.
-			None if self.handoff.is_some() => return self.handoff,
+			// A renewal's teardown took the group its producer left open, and nothing since
+			// went past it.
+			None if self.handoff.is_some_and(|handoff| max <= handoff.group) => return self.handoff,
 			slot => slot.and_then(|slot| slot.group.resume_frame()),
 		};
 		let live = match live {
@@ -6726,17 +6727,19 @@ impl Drop for Alive {
 		// would, and the reader waits on the same state for the next producer. The groups this
 		// producer left open end as superseded: nobody can finish them, and the next producer's
 		// groups replace them, so a reader holding one moves on as past any group gone old.
-		let (resume, open) = state.tear_down(Error::Old);
+		let (resume, mut open) = state.tear_down(Error::Old);
 		state.publication = Publication::Pending;
 		state.handoff = resume;
 		drop(state);
-		open.abort();
 		let request = Request::renew(self.name.clone(), self.state.clone(), home.clone());
 		let Err(request) = home.request(request) else {
-			return;
+			return open.abort();
 		};
-		// Nothing will serve it again, so its readers end as at an abrupt teardown, resuming
-		// where this producer stopped, unless the broadcast's end already refused them.
+		// Nothing will serve it again, so its readers, and those holding only an open group, end
+		// as at an abrupt teardown, resuming where this producer stopped, unless the broadcast's
+		// end already refused them.
+		open.err = Error::Dropped;
+		open.abort();
 		if let Ok(state) = request.state.write()
 			&& state.publication == Publication::Pending
 			&& matches!(state.outcome, Outcome::Open)
@@ -14319,7 +14322,9 @@ impl Request {
 	/// (`None` for the defaults). A track asked for again because its last producer dropped
 	/// while read must be accepted with the info it was first accepted with, which its
 	/// readers already hold: a different `info` aborts the track with [`Error::Duplicate`],
-	/// so those readers end and a later lookup asks for the track afresh. If the track was
+	/// so those readers end and a later lookup asks for the track afresh. Such a track also
+	/// keeps the groups its last producer finished, so continue past them, as
+	/// [`Producer::append_next`] does, rather than numbering from zero again. If the track was
 	/// already aborted, or is aborted that way, the returned [`Producer`] is inert: writes
 	/// fail with the abort error, as if it had been aborted immediately after accepting.
 	pub fn accept(self, info: impl Into<Option<Info>>) -> Producer {
@@ -24451,6 +24456,32 @@ mod test {
 		put(&producer, 2, Some(2000));
 		assert!(woken.load(Ordering::SeqCst), "the lower successor went unjudged");
 		assert_eq!(drain_ordered(&mut consumer), [2], "group 3 is still owed");
+	}
+
+	/// Once a renewal's producer goes past where its predecessor stopped, the resume follows it,
+	/// even after the group it left at the live edge is reclaimed.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_renewal_past_the_handoff_resumes_past_it() {
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		let producer = broadcast::Info::new().produce();
+		let mut dynamic = producer.requests();
+		let consumer = producer.consume();
+		let track = producer.create_track("video", Info::timed()).unwrap();
+		let handle = track.consume();
+		let _reader = consumer.track("video").unwrap().subscribe(None).await.unwrap();
+		let mut open = track.append_next().unwrap();
+		open.write_frame(at(0), b"a".as_slice()).unwrap();
+		open.write_frame(at(1), b"b".as_slice()).unwrap();
+		drop((track, open));
+
+		let next = dynamic.assert_request().accept(Info::timed());
+		next.append_next().unwrap().finish().unwrap();
+		let mut open = next.append_next().unwrap();
+		open.write_frame(at(2), b"c".as_slice()).unwrap();
+		open.abort(Error::Cancel).unwrap();
+		next.modify().unwrap().reclaim_aborted(2);
+		assert_eq!(handle.resume_position(), Some(Position::group(3)));
 	}
 
 	/// The arrival ledger giving up on a gap wakes the reader, even when the owed group's

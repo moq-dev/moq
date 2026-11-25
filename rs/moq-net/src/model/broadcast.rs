@@ -2848,7 +2848,8 @@ mod test {
 		assert_eq!(reader.recv_group().await.unwrap().unwrap().start, 0);
 	}
 
-	/// With no handler to ask, a reader still holding a dropped track reads `Dropped`, as before.
+	/// With no handler to ask, a reader still holding a dropped track reads `Dropped`, as before,
+	/// and so does one holding only the group the producer left open.
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_drop_nothing_can_request_again_fails_its_reader() {
@@ -2856,7 +2857,13 @@ mod test {
 		let consumer = producer.consume();
 		let track = producer.create_track("video", crate::track::Info::timed()).unwrap();
 		let mut reader = consumer.track("video").unwrap().subscribe(None).await.unwrap();
-		drop(track);
+		let mut open = track.append_next().unwrap();
+		open.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"a".as_slice())
+			.unwrap();
+		let mut held = reader.recv_group().await.unwrap().unwrap();
+		assert!(held.read_frame().await.unwrap().is_some());
+		drop((track, open));
+		assert!(matches!(held.read_frame().await, Err(Error::Dropped)));
 		assert!(matches!(reader.recv_group().await, Err(Error::Dropped)));
 	}
 

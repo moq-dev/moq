@@ -3860,7 +3860,9 @@ pub extern "C" fn moq_publish_track_abort(track: u32, error_code: u16) -> i32 {
 /// reports `MOQ_DEMAND_UNWANTED`: a track nobody wants ends cleanly, and a subscriber that joined
 /// since is served by the broadcast's next track request ([moq_publish_requests]), or fails
 /// without a live handler, or when this handle served such a request and no subscriber joined
-/// since. Returns zero, or a negative code if the handle is unknown.
+/// since. A live [moq_publish_track_requests] handler on the track keeps it open like another
+/// handle, so cancel it with [moq_publish_requests_cancel] too. Returns zero, or a negative
+/// code if the handle is unknown.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_publish_track_free(track: u32) -> i32 {
 	ffi::enter(move || {
@@ -4015,7 +4017,8 @@ pub unsafe extern "C" fn moq_track_request_requests(
 ///
 /// A track asked for again, because its handle was freed while read, must be accepted with the
 /// `info` it was published with, which its readers hold: another ends the track, and writes
-/// through the returned handle fail.
+/// through the returned handle fail. It keeps the groups its last handle finished, so number
+/// new groups past them rather than from zero again.
 ///
 /// # Safety
 /// - `info` must be NULL or a valid pointer to a [moq_track_info] struct.
