@@ -741,6 +741,8 @@ export interface ResumeSource {
 	finished(): Promise<Position>;
 	/** The serving copy's newest buffered frame, which a wire answer names as its edge. */
 	bufferedLargest(): Position | undefined;
+	/** The group the next take hands out, without taking it; see `hooks.peekGroup`. */
+	peek(ordered: boolean, delivered: Delivered): bigint | undefined;
 	/** The lowest group any copy holds unread below `below`; see `hooks.lowestUnread`. */
 	lowestUnread(below: bigint): bigint | undefined;
 	/** Whether any copy holds group `key` unread; see `hooks.heldAt`. */

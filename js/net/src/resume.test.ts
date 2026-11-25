@@ -418,6 +418,37 @@ test("a resumed reader's replaced ranges reach its serving copy", async () => {
 	}
 });
 
+test("a serving copy behind an inner front offers its group in Group Order before a replaced copy's", async () => {
+	const clock = new Manual();
+	const installed = install(clock);
+	const front = new Front();
+	const inner = new Front();
+	const sources = [new BroadcastProducer(), new BroadcastProducer()];
+	const [ta, tb] = sources.map(copy);
+	ta.write(0n);
+	ta.write(2n);
+	front.serve(sources[0].consume());
+	const sub = front.consumer.track("seq").subscribe({ ranges: [{ start: 0n, end: 10n }] });
+	try {
+		await clock.advance(Duration.ZERO);
+		const first = sub.tryRecvGroup();
+		expect(first?.start).toBe(2n);
+		first?.close();
+		// The replaced copy still holds 0 unread; the serving one, behind an inner front, holds 3.
+		inner.serve(sources[1].consume());
+		front.serve(inner.consumer);
+		tb.write(3n);
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([3n, 0n]);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		inner.consumer.close();
+		for (const source of sources) source.close();
+		installed.close();
+	}
+});
+
 test("a closed copy still holding groups hands them out in the reader's new Group Order", async () => {
 	const clock = new Manual();
 	const installed = install(clock);

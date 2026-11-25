@@ -2448,6 +2448,19 @@ class Reader implements ResumeSource {
 		return serving && hooks.bufferedLargest(serving.sub);
 	}
 
+	/**
+	 * The group a {@link tryGroup} with nothing to drop would hand out next, without taking it: the
+	 * first any copy offers. A front reading this one as its copy picks across copies by it.
+	 */
+	peek(ordered: boolean, delivered: Delivered): bigint | undefined {
+		this.#delivered = delivered;
+		this.sync();
+		if (this.#closed) return undefined;
+		const { next } = this.#first(ordered, delivered);
+		if (!next) return undefined;
+		return hooks.peekGroup(next.sub, ordered, this.#newest === undefined ? undefined : this.#newest + 1n);
+	}
+
 	lowestUnread(below: bigint): bigint | undefined {
 		let lowest: bigint | undefined;
 		for (const copy of this.#copies) {

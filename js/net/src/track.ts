@@ -6546,6 +6546,7 @@ export class Subscriber {
 	// arrival take passes a group missing its head, so its peek does too: a resumed reader picks
 	// across copies by what each offers.
 	#peekGroup(ordered: boolean): bigint | undefined {
+		if (this.#resume) return this.#resume.peek(ordered, this.#delivered);
 		this.#settle();
 		const cursor = this.#cursor.peek();
 		const start = ordered ? max(cursor.start, this.#nextKey) : cursor.start;

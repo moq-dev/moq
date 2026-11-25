@@ -10720,11 +10720,9 @@ impl Cursor {
 		}
 	}
 
-	/// The next cached group still owed in the subscription's order, newest first unless
-	/// ascending; see [`Self::first_owed`].
-	fn next_owed(&mut self) -> Option<group::Handle> {
-		let ascending = self.subscription.read().order == Order::Ascending;
-		self.first_owed(ascending)
+	/// The next cached group still owed in `order`; see [`Self::first_owed`].
+	fn next_owed(&mut self, order: Order) -> Option<group::Handle> {
+		self.first_owed(order == Order::Ascending)
 	}
 
 	/// The lowest cached group still owed, or with `ascending` false the highest, consuming
@@ -11398,11 +11396,10 @@ impl Cursor {
 		}
 	}
 
-	/// The next group a fill answered for this cursor in its order, cached and not handed
-	/// out yet, asking again for any evicted before it got to them.
-	fn next_filled(&mut self) -> Option<group::Handle> {
+	/// The next group a fill answered for this cursor in `order`, cached and not handed out
+	/// yet, asking again for any evicted before it got to them.
+	fn next_filled(&mut self, order: Order) -> Option<group::Handle> {
 		let misses = self.misses.as_mut().filter(|misses| misses.has_filled())?;
-		let order = self.subscription.read().order;
 		let (mut lost, mut given_up) = (RangeSet::new(), Vec::new());
 		let group = misses.next_filled(&self.state.read(), order, &mut lost, &mut given_up);
 		if !lost.is_empty() {
@@ -11494,11 +11491,13 @@ impl Cursor {
 			{
 				drift = ready!(self.poll_drift(&self.servable, waiter))?;
 			}
-			ready!(self.write_off_oldest(&drift, waiter))?;
+			// Read once, so an update landing mid-pick applies to the next pick whole.
+			let order = self.subscription.read().order;
+			ready!(self.write_off_oldest(order, &drift, waiter))?;
 			// A fill answers what the arrivals never deliver, backfill and heads, which go in the
 			// same order. A tie goes to the arrival.
-			let (owed, filled, head) = (self.next_owed(), self.next_filled(), self.next_head());
-			let ascending = self.subscription.read().order == Order::Ascending;
+			let (owed, filled, head) = (self.next_owed(order), self.next_filled(order), self.next_head(order));
+			let ascending = order == Order::Ascending;
 			let keys = [
 				owed.as_ref().map(|group| (group.start, Taken::Owed)),
 				filled.as_ref().map(|group| (group.start, Taken::Filled)),
@@ -11572,8 +11571,8 @@ impl Cursor {
 	/// arrival-order walk judged them before handing out anything newer. So what it gives up
 	/// is settled before the groups above go out, and a publisher resolving where delivery
 	/// starts from the lowest group still held finds a fresh one. Each group is judged once.
-	fn write_off_oldest(&mut self, drift: &Drift, waiter: &kio::Waiter) -> Poll<Result<()>> {
-		if self.subscription.read().order == Order::Ascending {
+	fn write_off_oldest(&mut self, order: Order, drift: &Drift, waiter: &kio::Waiter) -> Poll<Result<()>> {
+		if order == Order::Ascending {
 			return Poll::Ready(Ok(()));
 		}
 		while let Some(group) = self.first_owed(true) {
@@ -11793,11 +11792,11 @@ impl Cursor {
 		}
 	}
 
-	/// The next head answered and not handed out yet, in the subscription's order.
-	fn next_head(&self) -> Option<group::Consumer> {
+	/// The next head answered and not handed out yet, in `order`.
+	fn next_head(&self, order: Order) -> Option<group::Consumer> {
 		let heads = self.heads.as_ref()?;
 		let mut filled = heads.filled.values();
-		match self.subscription.read().order {
+		match order {
 			Order::Ascending => filled.next(),
 			Order::Descending => filled.next_back(),
 		}
