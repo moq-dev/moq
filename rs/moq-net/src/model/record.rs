@@ -23,6 +23,10 @@ pub(crate) struct Record {
 	/// The groups handed out, so none is handed out twice: not when its key is re-created,
 	/// nor when another route delivers it too.
 	pub(super) delivered: Delivered,
+	/// The groups a key-order read handed out, which `delivered`, counting the keys it passed
+	/// too, cannot tell apart from a key a group may still land on late: only these fold as
+	/// final with their spans.
+	pub(super) handed: Delivered,
 	/// Cached groups skipped as stale, which a wider budget owes again.
 	pub(super) skipped: Skipped,
 	/// Groups skipped as stale, which account for a bounded window as handed out would, until a
@@ -194,8 +198,9 @@ pub(super) struct Standing<'a> {
 	/// while a live join waits or a start is still being looked up, when no gap can be known
 	/// to lie outside them.
 	pub ranges: Option<Cover>,
-	/// It reads in key order, counting the keys it passes as handed out: only a report then
-	/// shows it handed a group out, since a group may still land late on a key it passed.
+	/// It reads in key order, counting the keys it passes as handed out: only its own record of
+	/// the groups it handed out ([`Record::handed`]) or a report then shows it handed a group
+	/// out, since a group may still land late on a key it passed.
 	pub ordered: bool,
 	/// The groups its track holds whole.
 	pub spans: &'a dyn Spans,
@@ -321,6 +326,7 @@ impl Record {
 	/// prefix is one run that bills nothing.
 	fn runs(&self) -> u64 {
 		(self.delivered.runs().saturating_sub(1)
+			+ self.handed.runs().saturating_sub(1)
 			+ self.skipped.runs()
 			+ self.written_off.len()
 			+ self.pending.len()
@@ -378,7 +384,7 @@ impl Record {
 		match owed {
 			true => folded.extend(self.fold(&reader, &*beside, Fold::Debt)),
 			false if grown => {
-				self.hand_out_spans(reader.spans);
+				self.hand_out_spans(&reader);
 				folded.extend(inside_spans(&*beside, reader.spans));
 				folded.extend(self.fold(&reader, &*beside, Fold::Final));
 			}
@@ -484,7 +490,7 @@ impl Record {
 		}
 		let lowest = match mode {
 			// Only a key handed out or reported starts what it folds.
-			Fold::Final => self.next_told(self.floor.saturating_add(1)),
+			Fold::Final => self.next_final(self.floor.saturating_add(1), reader.ordered),
 			_ => self.lowest_settled(),
 		};
 		let mut from = Some(reader.from.max(lowest.unwrap_or(0))).filter(|from| *from > self.floor);
@@ -504,13 +510,14 @@ impl Record {
 				Fold::Final if stretch.end == start => {
 					let past = [
 						self.reported.get_key_value(&start).map(|(run, _)| run.end),
-						self.delivered.run_end(start),
+						self.handed_by(reader.ordered).run_end(start),
 					]
 					.into_iter()
 					.flatten()
 					.fold(start.saturating_add(1), u64::max);
-					self.next_told(past)
+					self.next_final(past, reader.ordered)
 				}
+				Fold::Final => self.next_final(stretch.end, reader.ordered),
 				_ => self.next_told(stretch.end.max(start + 1)),
 			};
 		}
@@ -521,21 +528,45 @@ impl Record {
 	/// at, when the track holds that group whole: no group starts there to hand out, so a
 	/// reader that never asks what it missed keeps one run for consecutive spans. Handing them
 	/// out stops no report, which a reader still makes of any of them.
-	fn hand_out_spans(&mut self, spans: &dyn Spans) {
-		let spans: Vec<Range<u64>> = self
-			.delivered
+	fn hand_out_spans(&mut self, reader: &Standing) {
+		let handed = match reader.ordered {
+			true => &mut self.handed,
+			false => &mut self.delivered,
+		};
+		let spans: Vec<Range<u64>> = handed
 			.ranges()
-			.filter_map(|run| spans.whole(run.end - 1).map(|span| run.end - 1..span.end))
+			.filter_map(|run| reader.spans.whole(run.end - 1).map(|span| run.end - 1..span.end))
 			.collect();
 		for span in spans {
-			self.delivered.insert_run(span);
+			handed.insert_run(span);
 		}
+	}
+
+	/// The groups a reader handed out, for the fold to prove final: a key-order read's own,
+	/// rather than every key it passed.
+	fn handed_by(&self, ordered: bool) -> &Delivered {
+		match ordered {
+			true => &self.handed,
+			false => &self.delivered,
+		}
+	}
+
+	/// The lowest key from `key` on that the reader handed out or reported, as
+	/// [`Self::handed_by`] counts it.
+	fn next_final(&self, key: u64, ordered: bool) -> Option<u64> {
+		[self.handed_by(ordered).next_from(key), self.next_reported(key)]
+			.into_iter()
+			.flatten()
+			.min()
 	}
 
 	/// Settle everything below `floor` for good.
 	fn raise(&mut self, floor: u64) {
 		self.floor = floor;
 		self.delivered.forget_below(floor);
+		if self.handed.runs() > 0 {
+			self.handed.forget_below(floor);
+		}
 		self.skipped.forget(0..floor);
 		self.written_off.remove(0..floor);
 		self.pending.remove(0..floor);
@@ -545,6 +576,9 @@ impl Record {
 	/// Settle `stretch` as one handed-out and reported run.
 	fn settle_stretch(&mut self, stretch: std::ops::Range<u64>) {
 		self.delivered.insert_run(stretch.clone());
+		if self.handed.runs() > 0 {
+			self.handed.insert_run(stretch.clone());
+		}
 		self.skipped.forget(stretch.clone());
 		self.written_off.remove(stretch.clone());
 		self.reported.insert(stretch, Report::Settled);
@@ -652,11 +686,11 @@ impl Record {
 							beside.given_up_end(end),
 						],
 						Fold::Retire { .. } => [self.delivered.run_end(end), None, None, None],
-						// A group handed out, once the track holds it whole. Not a key an ordered
-						// read passed, where a group may still land late and be reported dropped,
-						// nor the rest of a span, which may still owe a report of its own.
+						// A group handed out, once the track holds it whole. Not a key a key-order
+						// read only passed, where a group may still land late and be reported
+						// dropped, nor the rest of a span, which may still owe a report of its own.
 						Fold::Final => {
-							let handed = !reader.ordered && self.delivered.contains(end);
+							let handed = self.handed_by(reader.ordered).contains(end);
 							let group = reader.spans.whole(end).is_some_and(|span| span.start == end);
 							[(handed && group).then(|| end.saturating_add(1)), None, None, None]
 						}
@@ -871,15 +905,24 @@ mod test {
 	}
 
 	/// A key-order read counts the keys it passes as handed out, where a group may still land
-	/// late, so only a report proves one: a key it passed stays open for that report.
+	/// late, so only the groups it handed out itself, or reported, fold: a key it only passed
+	/// stays open for that report, while the rest folds to a few runs.
 	#[test]
-	fn a_growing_ordered_record_folds_only_reports() {
-		let (_pool, track) = roomy();
+	fn a_growing_ordered_record_folds_only_what_it_handed_out() {
+		let (pool, track) = roomy();
 		let mut record = Record::default();
 		for key in (FIRST..2_000).step_by(SPACING as usize) {
 			record.delivered.forget_below(key + SPACING);
-			if key != 500 {
-				record.reported.insert(key..key + 1, Report::Settled);
+			match key {
+				// Reported as the wire publisher does.
+				_ if key % 30 == 0 => {
+					record.reported.insert(key..key + 1, Report::Settled);
+				}
+				// Passed, not handed out: a group may land here late.
+				500 => {}
+				_ => {
+					record.handed.insert(key);
+				}
 			}
 			record.reported.insert(key + 1..key + SPACING, Report::Skip);
 		}
@@ -892,6 +935,11 @@ mod test {
 			record.report(500..501, &Hole::drop(StreamError::Old)),
 			Some(500..501),
 			"a group landing late on a key it passed is still reported"
+		);
+		assert!(
+			pool.used() <= 8 * RUN_OVERHEAD,
+			"{} runs left",
+			pool.used() / RUN_OVERHEAD
 		);
 	}
 

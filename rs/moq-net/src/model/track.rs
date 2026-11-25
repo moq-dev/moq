@@ -11143,6 +11143,7 @@ impl Cursor {
 	fn hand_out(&mut self, key: u64, ordered: bool) {
 		if ordered {
 			self.record.delivered.forget_below(key);
+			self.record.handed.insert(key);
 		}
 		self.prune_skipped();
 		self.record.delivered.insert(key);
@@ -12555,6 +12556,9 @@ impl Subscriber {
 			Inner::Plain(cursor) => cursor.hand_out(key, ordered),
 			Inner::Resume(resume, logical) => {
 				logical.ordered |= ordered;
+				if ordered {
+					logical.record.handed.insert(key);
+				}
 				let delivered = &mut logical.record.delivered;
 				if ordered {
 					delivered.forget_below(key);

@@ -8344,10 +8344,11 @@ mod test {
 	}
 
 	/// A front's key-order read of a live track whose groups start at sparse keys keeps a
-	/// bounded record, though each group's end skips the keys up to the next only after the
-	/// read handed the group out: the read passes those keys before any drop poll reports
-	/// them, and since nothing lands where the publisher skipped, they settle with the group
-	/// above them.
+	/// bounded record, its copy's included, as the export of a live broadcast reads one: each
+	/// group is read while still open, and its end, skipping the keys up to the next, arrives
+	/// while the read waits at the live edge, which reports them before the next group lands.
+	/// The read passes every key, so only the groups it handed out, each held whole, prove
+	/// the skipped runs between them final.
 	#[test]
 	fn a_front_ordered_read_of_a_sparse_track_keeps_a_bounded_record() {
 		const SPACING: u64 = 17;
@@ -8358,24 +8359,21 @@ mod test {
 				.with_capacity(1 << 40)
 				.with_expiry(crate::cache::DEFAULT_EXPIRY),
 		);
-		let routes = Producer::new();
-		let info = broadcast::Info {
+		let info = Arc::new(broadcast::Info {
 			pool: pool.clone(),
 			..Default::default()
-		};
-		let logical = track::Request::new(Arc::new(info), "video")
+		});
+		let routes = Producer::new();
+		let logical = track::Request::new(info.clone(), "video")
 			.routes(routes.consume())
 			.accept(crate::track::Info::timed());
-		let a = received_copy();
+		// Billed to the same pool, so the copy's record counts too.
+		let a = track::Producer::new(info, "video", crate::track::Info::timed());
+		a.received();
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, HOUR).ordered();
 		let waiter = kio::Waiter::noop();
-		let mut most = 0;
-		for n in 0..2000 {
-			let key = BASE + n * SPACING;
-			let mut group = a.create_group(group::Info { start: key }).unwrap();
-			group.write_frame(ts(key), b"x".as_ref()).unwrap();
-			group.finish_at(key + SPACING).unwrap();
+		let mut read = || {
 			let mut items = Vec::new();
 			while let Poll::Ready(Ok(Some(item))) = sub.poll_next_item(&waiter) {
 				items.push(match item {
@@ -8383,10 +8381,22 @@ mod test {
 					track::Item::Gap { range, .. } => panic!("gap {range:?}"),
 				});
 			}
-			assert_eq!(items, [key]);
-			// The starts its GROUP_END accounts for, read after the group, as its stream
-			// delivers it.
-			a.skip_groups(key + 1..key + SPACING);
+			items
+		};
+		let mut open: Option<group::Producer> = None;
+		let mut most = 0;
+		for n in 0..2000 {
+			let key = BASE + n * SPACING;
+			// The previous group's GROUP_END: its span, and the starts inside it skipped.
+			if let Some(group) = open.take() {
+				group.finish_at(key).unwrap();
+				a.skip_groups(key - SPACING + 1..key);
+				assert_eq!(read(), Vec::<u64>::new());
+			}
+			let mut group = a.create_group(group::Info { start: key }).unwrap();
+			group.write_frame(ts(key), b"x".as_ref()).unwrap();
+			assert_eq!(read(), [key]);
+			open = Some(group);
 			most = most.max(pool.recorded() / crate::model::record::RUN_OVERHEAD);
 		}
 		assert!(most <= 8, "the record grew to {most} runs");
