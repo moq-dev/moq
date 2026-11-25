@@ -44,7 +44,10 @@ Recommendations:
   `gh run list --workflow release-nix.yml --status queued` and
   `--status in_progress` (each with `--limit 1000`) list nothing, then
   revoke the `NIX_R2_*` write tokens so any later such run fails loudly
-  instead of writing to R2. Only then copy, and before deleting R2, list
+  instead of writing to R2. A `cache.yml` run started on `main` before its
+  writer switch may fail its push the same way; that is accepted, since the
+  CI bucket starts empty and the next run fills B2. Only then copy, and
+  before deleting R2, list
   `nix-moq-dev` against the B2 bucket and copy any object B2 lacks.
 - Keep the Worker's release-then-CI order and its rule that an unavailable
   read is a miss sent with `no-store`, mapped from R2's error codes to B2's
@@ -54,8 +57,8 @@ Recommendations:
   writes a new version, and the lifecycle counts from the newest upload.
   Deleting hidden versions a day later keeps superseded copies from piling up;
   check that a refreshed object's age actually restarts.
-- The Worker's read path is what nix-nar-stream (added by
-  [moq-dev/moq#8048](https://github.com/moq-dev/moq/pull/8048)) fixes for
+- The Worker's read path is what
+  [nix-nar-stream](/quest/m0/ci/nix-nar-stream.md) fixes for
   NAR downloads broken mid-stream. Replacing `bucket.get` with a signed
   `fetch` drops its R2 error-text match (`/\((10001|10043)\)$/`); leave the
   mid-stream fix to that quest, which then targets B2 rather than R2.
@@ -73,4 +76,4 @@ Public API: none. Wire: none.
 ## Related
 
 - [The Rust cache moves to B2](/quest/m0/ci/mbx-b2.md) - same account, console session, and R2 teardown
-- [moq-dev/moq#8048](https://github.com/moq-dev/moq/pull/8048) - retires Cachix, records these buckets' sizes, and adds nix-nar-stream for the Worker's broken NAR streams
+- [One broken NAR download](/quest/m0/ci/nix-nar-stream.md) - fixes the Worker's NAR streams broken mid-download, on B2 once this lands

@@ -30,14 +30,13 @@ Decided 2026-11-23 (maintainer, /quest-plan):
   expires within 7 days and would get a fresh 30-day clock on B2).
 - ✅ Delete the R2 bucket and revoke its tokens in this PR once a Nightly hits
   B2 (rejected: keeping them a week as a fallback).
-- ✅ This folds in [mbx-failed-puts](/quest/m0/ci/mbx-failed-puts.md): its
-  goal is fewer paid R2 puts, and on B2 puts are free and mbx sends no
-  conditional ones. This PR deletes it and closes its draft
-  [moq-dev/moq#8763](https://github.com/moq-dev/moq/pull/8763) with a comment
-  (rejected: finishing it on R2 first; closing it now). It also rewrites
-  [mbx-r2-verify](/quest/m0/ci/mbx-r2-verify.md) to measure B2, with
-  `quest mv` to a B2 name, and updates
-  [mbx-r2-release-cache](/quest/m3/mbx-r2-release-cache.md) to match.
+- ✅ Rewrite [mbx-r2-verify](/quest/m0/ci/mbx-r2-verify.md) to measure B2,
+  with `quest mv` to a B2 name, and update
+  [mbx-r2-release-cache](/quest/m3/mbx-r2-release-cache.md) to match. The
+  failed-puts work this was to fold in already ended: its draft
+  [moq-dev/moq#8763](https://github.com/moq-dev/moq/pull/8763) closed and
+  [moq-dev/moq#9558](https://github.com/moq-dev/moq/pull/9558) deleted its
+  quest when bumping mbx to 1.31.0.
 - ✅ An agent creates the bucket and keys in the B2 web console through the
   maintainer's signed-in agent Chrome (rejected: minting them through the B2
   API with the master key from Bitwarden's Break-glass project; a standing CI
