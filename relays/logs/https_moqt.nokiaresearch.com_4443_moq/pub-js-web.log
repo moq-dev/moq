@@ -1,19 +1,13 @@
-publishing smoke-js-web-4201-28700.hang (fake camera, vite) to https://moqt.nokiaresearch.com:4443/moq
+publishing smoke-js-web-4737-31903.hang (fake camera, vite) to https://moqt.nokiaresearch.com:4443/moq
 [page] negotiated protocol: moqt-22
 [page] subscribe_namespace written: requestId=2
-[page] announced: broadcast=demo active=true
+[page] announced: broadcast=moq-test-00 active=true
 [page] announced: broadcast=video active=true
 [page] announced: broadcast=simulcast active=true
-[page] announced: broadcast=moq-test-00 active=true
-[page] announced: broadcast=ping active=true
-[page] error processing bidi stream bs: unexpected end of stream
-    at #c (http://localhost:43355/assets/index-MaRiAUPh.js:1:98973)
-    at async ys.decode (http://localhost:43355/assets/index-MaRiAUPh.js:1:99546)
-    at async #p (http://localhost:43355/assets/index-MaRiAUPh.js:1:228378)
-[page] announced: broadcast=ping active=false
-[page] publish ok: broadcast=smoke-js-web-4201-28700.hang track=catalog.json
-[page] publish ok: broadcast=smoke-js-web-4201-28700.hang track=catalog.json
-[page] publish ok: broadcast=smoke-js-web-4201-28700.hang track=catalog.json
-[page] publish ok: broadcast=smoke-js-web-4201-28700.hang track=video
-[page] publish ok: broadcast=smoke-js-web-4201-28700.hang track=video
-[page] publish ok: broadcast=smoke-js-web-4201-28700.hang track=video
+[page] announced: broadcast=demo active=true
+[page] publish ok: broadcast=smoke-js-web-4737-31903.hang track=catalog.json
+[page] publish ok: broadcast=smoke-js-web-4737-31903.hang track=catalog.json
+[page] publish ok: broadcast=smoke-js-web-4737-31903.hang track=catalog.json
+[page] publish ok: broadcast=smoke-js-web-4737-31903.hang track=video
+[page] publish ok: broadcast=smoke-js-web-4737-31903.hang track=video
+[page] publish ok: broadcast=smoke-js-web-4737-31903.hang track=video

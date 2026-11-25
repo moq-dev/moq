@@ -3,55 +3,17 @@ https://us-west-2.relay.quicr.org:33437/relay negotiated ALPN: moqt-18
 connected version=moq-transport-18
 subscribe_namespace written: requestId=0
 announced: broadcast=metrics/us-west-2.relay.public active=true
-announced: broadcast=smoke-js-web-4201-8935.hang active=true
-subscribe start: id=2 broadcast=smoke-js-web-4201-8935.hang track=catalog.json
-subscribe written: id=2 broadcast=smoke-js-web-4201-8935.hang track=catalog.json
-subscribe ok: id=2 broadcast=smoke-js-web-4201-8935.hang track=catalog.json
-subscribe start: id=4 broadcast=smoke-js-web-4201-8935.hang track=video
-subscribe written: id=4 broadcast=smoke-js-web-4201-8935.hang track=video
-subscribe ok: id=4 broadcast=smoke-js-web-4201-8935.hang track=video
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 3
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 4
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 5
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 6
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 7
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 8
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 9
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 10
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 11
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 12
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 13
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 14
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 15
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 16
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 17
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 18
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 19
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 20
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 21
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 22
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 23
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 24
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 25
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 26
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 27
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 28
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 29
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 30
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 31
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 32
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 33
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 34
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 35
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 36
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 37
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 38
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 39
-group reset, waiting for the next: object IDs must start at 0 and increment by 1, got a delta of 40
-received 8702 bytes from smoke-js-web-4201-8935.hang
+announced: broadcast=smoke-js-web-4737-20051.hang active=true
+subscribe start: id=2 broadcast=smoke-js-web-4737-20051.hang track=catalog.json
+subscribe written: id=2 broadcast=smoke-js-web-4737-20051.hang track=catalog.json
+subscribe ok: id=2 broadcast=smoke-js-web-4737-20051.hang track=catalog.json
+subscribe start: id=4 broadcast=smoke-js-web-4737-20051.hang track=video
+subscribe written: id=4 broadcast=smoke-js-web-4737-20051.hang track=video
+subscribe ok: id=4 broadcast=smoke-js-web-4737-20051.hang track=video
+received 6916 bytes from smoke-js-web-4737-20051.hang
 subscribe_namespace error: connection error: closed (source=session)
 announced: broadcast=metrics/us-west-2.relay.public active=false
-announced: broadcast=smoke-js-web-4201-8935.hang active=false
+announced: broadcast=smoke-js-web-4737-20051.hang active=false
 broadcast discovery failed; broadcasts resolve on request only. WebTransportError {
   source: "session",
   streamErrorCode: null,
@@ -85,5 +47,5 @@ broadcast discovery failed; broadcasts resolve on request only. WebTransportErro
   DATA_CLONE_ERR: 25,
   toString: [Function: toString],
 }
-subscribe error: id=4 broadcast=smoke-js-web-4201-8935.hang track=video error=remote error: 0 (connection error: closed)
-subscribe error: id=2 broadcast=smoke-js-web-4201-8935.hang track=catalog.json error=remote error: 0 (connection error: closed)
+subscribe error: id=4 broadcast=smoke-js-web-4737-20051.hang track=video error=remote error: 0 (connection error: closed)
+subscribe error: id=2 broadcast=smoke-js-web-4737-20051.hang track=catalog.json error=remote error: 0 (connection error: closed)
