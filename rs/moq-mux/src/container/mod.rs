@@ -18,6 +18,7 @@ pub use declared::ReorderError;
 mod decode;
 mod group;
 mod input;
+mod join;
 mod producer;
 mod source;
 #[cfg(test)]
@@ -36,6 +37,7 @@ pub mod ts;
 pub use consumer::{Consumer, DELAY_MAX, Delay, Playout};
 pub use group::GroupConsumer;
 pub(crate) use input::Input;
+pub use join::Join;
 pub use producer::{Finished, Guard, Producer};
 pub(crate) use source::{ExportSource, Resume};
 

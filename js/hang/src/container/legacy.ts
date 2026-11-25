@@ -343,6 +343,16 @@ export class Producer {
 		this.#marked = true;
 	}
 
+	/**
+	 * Close the current group without breaking the timeline, so the next frame must be a keyframe.
+	 * `end` is where its content stops, which the group ends whole at, so a reader can tell the group
+	 * starting there continues it; without one it is estimated from the frame cadence. Mirrors the
+	 * Rust `container::Producer::cut`. Throws if `end` precedes a frame of the group.
+	 */
+	cut(end?: Duration) {
+		this.#close(end === undefined ? undefined : micros(end));
+	}
+
 	// Flush and close the current group at the supplied or estimated end timestamp, whole at the
 	// `whole` marker start when one follows it.
 	#close(end?: number, whole?: Time.Timestamp) {

@@ -170,6 +170,8 @@ impl VideoStream {
 struct AudioStream {
 	track: crate::container::Producer<crate::catalog::hang::Container, AudioConfig>,
 	config: AudioConfig,
+	/// Where the open group closes.
+	join: crate::container::Join,
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Import<E> {
@@ -578,7 +580,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		self.refuse(result)
 	}
 
-	/// Write one audio frame as its own group, so the relay can forward it immediately.
+	/// Write one audio frame, which forwards at once, closing its group once that carries a join.
+	///
+	/// A tag states no duration, so the group closes on the first frame starting a join past it.
 	fn write_audio(&mut self, track_id: u8, data: &[u8], timestamp: u64) -> crate::Result<()> {
 		if !self.audio.contains_key(&track_id) {
 			tracing::debug!("audio frame before config, dropping");
@@ -591,15 +595,22 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// the track set is declared; release the reservation to publish.
 		self.initial_reservation = None;
 		let stream = self.audio.get_mut(&track_id).expect("checked above");
+		let keyframe = stream.track.needs_keyframe();
+		if keyframe {
+			stream.join.reset();
+		}
 		let result = stream
 			.track
 			.write(Frame {
 				timestamp,
 				duration: None,
 				payload: Bytes::copy_from_slice(data),
-				keyframe: true,
+				keyframe,
 			})
-			.and_then(|()| stream.track.cut(None));
+			.and_then(|()| match stream.join.fill(timestamp, timestamp) {
+				true => stream.track.cut(None),
+				false => Ok(()),
+			});
 		self.refuse(result)
 	}
 
@@ -728,7 +739,14 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			Some(reserved) => reserved.audio(net_track, wire, config.clone())?,
 			None => self.catalog.audio(net_track, wire, config.clone())?,
 		};
-		self.audio.insert(track_id, AudioStream { track: media, config });
+		self.audio.insert(
+			track_id,
+			AudioStream {
+				track: media,
+				config,
+				join: crate::container::Join::default(),
+			},
+		);
 		Ok(())
 	}
 

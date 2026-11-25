@@ -193,7 +193,10 @@ impl Client {
 						};
 						let config = aac::config(params.extra_data())?;
 						let track = broadcast.unique_track(".aac", catalog.track_info(hang::catalog::PRIORITY.audio));
-						Track::Aac(Box::new(aac::Import::new(track, reserved.clone(), config)?))
+						Track::Aac {
+							import: Box::new(aac::Import::new(track, reserved.clone(), config)?),
+							join: moq_mux::container::Join::default(),
+						}
 					}
 				};
 				ingest.streams[*index] = Some(Stream {
@@ -282,7 +285,11 @@ enum Kind {
 
 enum Track {
 	Video(Box<Video>),
-	Aac(Box<aac::Import>),
+	Aac {
+		import: Box<aac::Import>,
+		/// Where the open group closes.
+		join: moq_mux::container::Join,
+	},
 }
 
 impl Track {
@@ -293,7 +300,7 @@ impl Track {
 				Video::H264 { import, .. } => import.finish().map(drop),
 				Video::H265 { import, .. } => import.finish().map(drop),
 			},
-			Self::Aac(import) => import.finish().map(drop),
+			Self::Aac { import, .. } => import.finish().map(drop),
 		}
 	}
 
@@ -303,7 +310,7 @@ impl Track {
 				Video::H264 { import, .. } => import.abort(err),
 				Video::H265 { import, .. } => import.abort(err),
 			},
-			Self::Aac(import) => import.abort(err),
+			Self::Aac { import, .. } => import.abort(err),
 		}
 	}
 }
@@ -408,7 +415,8 @@ struct Jump;
 impl Ingest {
 	/// Publish one depacketized item, or report that the timeline jumped.
 	fn push(&mut self, item: CodecItem, streams: &[retina::client::Stream]) -> Result<Option<Jump>> {
-		let (stream_id, timestamp, data, changed, received, loss) = match &item {
+		// An audio frame's length in clock units, so the frame that fills a group closes it.
+		let (stream_id, timestamp, data, changed, received, loss, length) = match &item {
 			CodecItem::VideoFrame(frame) => (
 				frame.stream_id(),
 				frame.timestamp(),
@@ -416,6 +424,7 @@ impl Ingest {
 				frame.has_new_parameters(),
 				kio::clock::Instant::from_std(frame.end_ctx().received()),
 				frame.loss(),
+				None,
 			),
 			CodecItem::AudioFrame(frame) => (
 				frame.stream_id(),
@@ -425,6 +434,7 @@ impl Ingest {
 				kio::clock::Instant::from_std(frame.ctx().received()),
 				// AAC packets decode alone, and the decoder conceals a lost one.
 				0,
+				Some(frame.frame_length().get()),
 			),
 			_ => return Ok(None),
 		};
@@ -490,7 +500,7 @@ impl Ingest {
 				stream.last = Some((elapsed, received));
 				video.decode(frames)?;
 			}
-			Track::Aac(import) => {
+			Track::Aac { import, join } => {
 				if !stream.started {
 					// Audio waits for the first keyframe too.
 					if self.video && !self.started {
@@ -500,8 +510,12 @@ impl Ingest {
 				}
 				stream.last = Some((elapsed, received));
 				import.decode(data, Some(pts))?;
-				// Each packet its own group (one QUIC stream), so relays forward it at once.
-				import.cut(None)?;
+				// Each packet forwards as it is written; its group closes once it carries a join.
+				let length = moq_net::Timestamp::from_scale(length.map_or(0, u64::from), u64::from(rate));
+				let end = length.and_then(|length| pts.checked_add(length)).map_err(moq_mux::Error::from)?;
+				if join.fill(pts, end) {
+					import.cut(Some(end))?;
+				}
 			}
 		}
 		Ok(None)

@@ -109,10 +109,10 @@ pub(super) struct Closed {
 /// An audio or video pad, published through a codec importer.
 struct Media {
 	track: import::Track,
-	/// Audio is independently decodable, so bound its groups by media time instead of keyframes.
+	/// Audio is independently decodable, so its groups roll by media time instead of keyframes.
 	audio: bool,
-	/// The media time of the first packet in the current audio group.
-	group_start: Option<Duration>,
+	/// Where the current audio group closes.
+	join: moq_mux::container::Join,
 	/// Apply a timeline break before the next valid frame, using the normal write error path.
 	discontinuity: bool,
 	/// Video can start or resume mid-GOP, so deltas drop until a keyframe opens a group. Stays set:
@@ -126,20 +126,14 @@ struct Media {
 impl Media {
 	/// Publish one frame at `micros` on the media clock. Returns false when a frame is dropped while
 	/// waiting for a keyframe at or beyond the live edge.
-	fn write(&mut self, data: &Bytes, micros: u64) -> Result<bool> {
+	///
+	/// An audio buffer's `duration`, when it states one, lets the buffer that fills its group close
+	/// it at once; without one, the group closes on the first buffer starting a join past it.
+	fn write(&mut self, data: &Bytes, micros: u64, duration: Option<gst::ClockTime>) -> Result<bool> {
 		if std::mem::take(&mut self.discontinuity) {
 			self.track.discontinuity()?;
 			self.keyframe = !self.audio;
-			self.group_start = None;
-		}
-		let timestamp = Duration::from_micros(micros);
-		if self.audio
-			&& self
-				.group_start
-				.is_some_and(|start| timestamp.saturating_sub(start) >= Duration::from_millis(20))
-		{
-			self.track.cut(None)?;
-			self.group_start = None;
+			self.join.reset();
 		}
 		let ts = hang::container::Timestamp::from_micros(micros).ok();
 		match self.track.decode(data, ts) {
@@ -148,13 +142,20 @@ impl Media {
 				// A rejected delta leaves its group open; later deltas cannot decode across that gap.
 				self.track.cut(None)?;
 				self.keyframe = !self.audio;
-				self.group_start = None;
+				self.join.reset();
 				return Ok(false);
 			}
 			result => result?,
 		}
-		if self.audio {
-			self.group_start.get_or_insert(timestamp);
+		if self.audio
+			&& let Some(start) = ts
+		{
+			let end = duration
+				.map(|duration| hang::container::Timestamp::from_micros(micros.saturating_add(duration.useconds())))
+				.transpose()?;
+			if self.join.fill(start, end.unwrap_or(start)) {
+				self.track.cut(end)?;
+			}
 		}
 		Ok(true)
 	}
@@ -664,7 +665,7 @@ impl Pad {
 		let media = Media {
 			track,
 			audio,
-			group_start: None,
+			join: moq_mux::container::Join::default(),
 			discontinuity: false,
 			keyframe: !audio,
 			pre_skip,
@@ -903,7 +904,7 @@ impl Pad {
 		match timestamp {
 			Ok(micros) => {
 				let result: Result<()> = match &mut publishing.track {
-					Sink::Media(media) => match media.write(&data, micros) {
+					Sink::Media(media) => match media.write(&data, micros, duration) {
 						Ok(false) => {
 							gst::debug!(
 								CAT,

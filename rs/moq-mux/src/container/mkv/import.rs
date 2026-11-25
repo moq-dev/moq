@@ -159,6 +159,8 @@ struct MkvTrack {
 	/// bytes say whether the parameter sets also ride in band. The rendition withholds the catalog
 	/// meanwhile.
 	record: Option<Record>,
+	/// Where an audio track's open group closes.
+	join: crate::container::Join,
 }
 
 struct Record {
@@ -183,6 +185,13 @@ impl Media {
 		match self {
 			Self::Video(track) => track.open(timestamp, keyframe, duration, size),
 			Self::Audio(track) => track.open(timestamp, keyframe, duration, size),
+		}
+	}
+
+	fn needs_keyframe(&self) -> bool {
+		match self {
+			Self::Video(track) => track.needs_keyframe(),
+			Self::Audio(track) => track.needs_keyframe(),
 		}
 	}
 
@@ -694,6 +703,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				kind,
 				track: media,
 				record,
+				join: crate::container::Join::default(),
 			},
 		);
 
@@ -854,7 +864,14 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					let timestamp = self.timebase.shift(Timestamp::from_nanos(pts_ns)?)?;
 					self.initial_reservation = None;
 					let keyframe = match frames.kind {
-						TrackKind::Audio => frames.index == 0,
+						// Any audio frame can open a group; the join decides where one closes.
+						TrackKind::Audio => {
+							let opens = track.track.needs_keyframe();
+							if opens {
+								track.join.reset();
+							}
+							opens
+						}
 						TrackKind::Video => frames.keyframe,
 					};
 					let size = usize::try_from(size).map_err(|_| moq_net::Error::FrameTooLarge)?;
@@ -912,10 +929,18 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			BlockState::Frames(frames) => {
 				// The frame sizes add up to the body, so every frame was written as its bytes arrived.
 				debug_assert!(frames.open.is_none() && frames.index == frames.sizes.len());
+				// An audio group closes at the end of the block that brings it to a join, so a block's
+				// frames stay in one group and the relay sees it finish without waiting for the next.
 				if frames.kind == TrackKind::Audio
 					&& let Some(track) = self.tracks.get_mut(&frames.track)
 				{
-					track.track.cut(None)?;
+					let laced = frames.step.saturating_mul(frames.sizes.len().saturating_sub(1) as u64);
+					let last = track.default_duration.map_or(0, |duration| duration.as_nanos() as u64);
+					let start = Timestamp::from_nanos(frames.pts_ns)?;
+					let end = Timestamp::from_nanos(frames.pts_ns.saturating_add(laced).saturating_add(last))?;
+					if track.join.fill(start, end) {
+						track.track.cut(None)?;
+					}
 				}
 			}
 			BlockState::Skip => {}

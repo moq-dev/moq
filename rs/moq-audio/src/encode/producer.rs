@@ -46,9 +46,9 @@ pub struct Options {
 	/// packet that reaches it closes the group, and the next packet opens a new one,
 	/// so a positive join shorter than a packet puts every packet in its own group.
 	///
-	/// Defaults to 20 ms; [`Producer::new`] refuses zero. Each group costs the relay a stream
-	/// and its bookkeeping, so raising this trades per-group overhead for coarser
-	/// loss: a viewer that falls behind skips a whole group, and a lost packet
+	/// Defaults to [`moq_mux::container::Join::DEFAULT`] (200 ms); [`Producer::new`] refuses zero.
+	/// Each group costs the relay a stream and its bookkeeping, so raising this trades per-group
+	/// overhead for coarser loss: a viewer that falls behind skips a whole group, and a lost packet
 	/// stalls the rest of its group until retransmitted. Packets still forward as
 	/// they are encoded rather than buffered until the group fills. A longer
 	/// [`Config::frame_duration`] (up to 60 ms for Opus) also packs more audio
@@ -64,7 +64,7 @@ impl Default for Options {
 			track: None,
 			config: Config::default(),
 			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
-			join: std::time::Duration::from_millis(20),
+			join: moq_mux::container::Join::DEFAULT,
 		}
 	}
 }

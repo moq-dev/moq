@@ -11,5 +11,5 @@ export { Consumer, type ConsumerProps, DELAY_MAX, type Delay, type Read, subscri
 export type { Format } from "./format.ts";
 /** The legacy varint container. */
 export * as Legacy from "./legacy.ts";
-export { MAX_AGE, type TrackInfoOptions, trackInfo } from "./track.ts";
+export { JOIN, MAX_AGE, type TrackInfoOptions, trackInfo } from "./track.ts";
 export * from "./types.ts";
