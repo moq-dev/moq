@@ -22,6 +22,8 @@ VERSION=moq-lite-07-wip
 PROFILE="${STEADY_PROFILE:-release}"
 RELAY="${RELAY_BIN:-}"
 MOQ="${MOQ_BIN:-}"
+# Both binaries refuse an environment variable under `MOQ_` they don't know.
+unset RELAY_BIN MOQ_BIN
 # Measured by seeding a known leak; see README.md before changing any of these.
 SECONDS_RUN=600
 WARMUP=120
@@ -40,12 +42,31 @@ value() {
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --seconds) value "$@"; SECONDS_RUN="$2"; shift 2 ;;
-        --warmup) value "$@"; WARMUP="$2"; shift 2 ;;
-        --fps) value "$@"; FPS="$2"; shift 2 ;;
-        --interval) value "$@"; INTERVAL="$2"; shift 2 ;;
+        --seconds)
+            value "$@"
+            SECONDS_RUN="$2"
+            shift 2
+            ;;
+        --warmup)
+            value "$@"
+            WARMUP="$2"
+            shift 2
+            ;;
+        --fps)
+            value "$@"
+            FPS="$2"
+            shift 2
+            ;;
+        --interval)
+            value "$@"
+            INTERVAL="$2"
+            shift 2
+            ;;
         --version)
-            [[ $# -ge 2 && -n "$2" ]] || { echo "error: --version requires a value" >&2; exit 2; }
+            [[ $# -ge 2 && -n "$2" ]] || {
+                echo "error: --version requires a value" >&2
+                exit 2
+            }
             VERSION="$2"
             shift 2
             ;;

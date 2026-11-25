@@ -111,8 +111,8 @@ pub async fn run() -> crate::Result<()> {
 /// Log the bytes the application holds and the bytes jemalloc keeps resident for it.
 fn report() {
 	// The counters are a snapshot taken at the last epoch advance.
-	let stats = tikv_jemalloc_ctl::epoch::advance()
-		.and_then(|_| Ok((stats::allocated::read()?, stats::resident::read()?)));
+	let stats =
+		tikv_jemalloc_ctl::epoch::advance().and_then(|_| Ok((stats::allocated::read()?, stats::resident::read()?)));
 	match stats {
 		Ok((allocated, resident)) => tracing::info!(allocated, resident, "jemalloc heap"),
 		Err(err) => tracing::error!(%err, "failed to read jemalloc stats"),

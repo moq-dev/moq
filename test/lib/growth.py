@@ -6,9 +6,10 @@ Two subcommands, so a harness samples while its workload runs and judges once it
     growth.py judge samples.jsonl --warmup 60 --max allocated=400 --max rss=4000
 
 `sample` waits for each process to log that its SIGUSR1 handler is up, then on each tick reads
-its resident set (VmRSS) and I/O counters from /proc and sends it SIGUSR1 and waits for the `jemalloc heap allocated=N resident=N` line that `moq_tokio::jemalloc`
-logs in answer, so every sample pairs with the exact live heap at that moment. A process that
-exits, or never answers, fails the run: a gap is not a flat line.
+its resident set (VmRSS) and I/O counters from /proc, sends it SIGUSR1, and waits for the
+`jemalloc heap allocated=N resident=N` line that `moq_tokio::jemalloc` logs in answer, so every
+sample pairs with the exact live heap at that moment. A process that exits, or never answers,
+fails the run: a gap is not a flat line.
 
 `judge` fits each process's slope after warm-up with the Theil-Sen estimator, the median of the
 slopes between every pair of samples, which in-flight data swinging between samples (cached
@@ -193,7 +194,9 @@ def judge(args):
             rate = moved / span if span else 0
             print(f"{label:>8} {counter:>9}: {rate / 1024:.1f} KiB/s after warm-up")
             if rate < args.min_flow:
-                failures.append(f"{label} moved {rate:.0f} B/s after warm-up, under {args.min_flow} B/s: the chain stalled")
+                failures.append(
+                    f"{label} moved {rate:.0f} B/s after warm-up, under {args.min_flow} B/s: the chain stalled"
+                )
         report["processes"][label] = entry
     for label in flows:
         if label not in series:
@@ -223,9 +226,7 @@ def main(argv=None):
     j.add_argument(
         "--max", action="append", default=[], required=True, help="measure=bytes-per-second (rss, allocated, resident)"
     )
-    j.add_argument(
-        "--flow", action="append", default=[], help="label=rchar|wchar, a counter that must keep moving"
-    )
+    j.add_argument("--flow", action="append", default=[], help="label=rchar|wchar, a counter that must keep moving")
     j.add_argument("--min-flow", type=float, default=1024, help="bytes per second each --flow must move")
     j.add_argument("--min-samples", type=int, default=10, help="samples each process needs after warm-up")
     j.add_argument("--report", help="JSON summary to write")

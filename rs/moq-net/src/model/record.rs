@@ -427,7 +427,10 @@ impl Record {
 			from = match mode {
 				// A stretch stopped where it started, at a drop, passes the whole report.
 				Fold::Final if stretch.end == start => {
-					let past = self.reported.get_key_value(&start).map_or(start + 1, |(run, _)| run.end);
+					let past = self
+						.reported
+						.get_key_value(&start)
+						.map_or(start + 1, |(run, _)| run.end);
 					self.next_reported(past)
 				}
 				Fold::Final => self.next_reported(stretch.end),
@@ -466,9 +469,9 @@ impl Record {
 	/// The lowest key from `key` on that was handed out or reported.
 	fn next_told(&self, key: u64) -> Option<u64> {
 		[self.delivered.next_from(key), self.next_reported(key)]
-		.into_iter()
-		.flatten()
-		.min()
+			.into_iter()
+			.flatten()
+			.min()
 	}
 
 	/// The lowest key from `key` on that anything in the record holds.
