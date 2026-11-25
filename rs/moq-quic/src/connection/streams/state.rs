@@ -557,7 +557,7 @@ impl StreamsState {
 	/// Process incoming `STOP_SENDING` frame
 	///
 	/// Returns the Reliable Size of 0 for a reset to send now, since the peer will not read the
-	/// data a reset still delivers.
+	/// data a reset still delivers: one already reset, or one a quiesce stopped and nobody reset.
 	pub(crate) fn received_stop_sending(
 		&mut self,
 		id: StreamId,
@@ -576,9 +576,18 @@ impl StreamsState {
 		let stream = stream_opt.get_or_insert_with(|| Send::new(max_send_data));
 
 		self.connection_blocked.swap_remove(&id);
+		// A stream a quiesce stopped is reset by the quiesce, which the peer's stop replaces: it
+		// reads nothing more, so it is reset now, keeping nothing.
+		let quiesced = match stream.stopped {
+			Some(Stop::Quiesce(code)) if !stream.is_reset() && !stream.released => Some(code),
+			_ => None,
+		};
 		let stopped = stream.try_stop(error_code);
 		let buffered = stream.pending.buffered();
-		let reset = stream.abandon_reliable();
+		let reset = match quiesced {
+			Some(code) => stream.reset(code, 0, self.peer_reset_stream_at),
+			None => stream.abandon_reliable(),
+		};
 		self.buffered_data -= buffered - stream.pending.buffered();
 		if reset.is_some() {
 			// The reset dropped what the peer had yet to acknowledge, which a quiesce waits for.

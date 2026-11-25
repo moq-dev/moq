@@ -333,7 +333,7 @@ fn stop_from_client(pair: &mut Pair, client_ch: ConnectionHandle, streams: &[Str
 
 /// A reset that drops the last bytes the peer has yet to acknowledge, as one does once the peer
 /// stopped the stream, wakes the wait instead of leaving it to the grace: a writer's reset after
-/// the peer's STOP_SENDING, and a peer's STOP_SENDING after the writer's reset.
+/// a STOP_SENDING that came before the quiesce, and a peer's STOP_SENDING after the writer's reset.
 #[test]
 fn a_reset_dropping_unacked_data_wakes_the_wait() {
 	let _guard = subscribe();
@@ -342,10 +342,10 @@ fn a_reset_dropping_unacked_data_wakes_the_wait() {
 	let stopped_first = open_ours(&mut pair, server_ch);
 	let reset_first = open_ours(&mut pair, server_ch);
 	lose_writes(&mut pair, server_ch, &[stopped_first, reset_first]);
+	stop_from_client(&mut pair, client_ch, &[stopped_first]);
 
 	let waiter = Counter::new();
 	assert!(quiesce(&mut pair, server_ch, &waiter, &[]).is_pending());
-	stop_from_client(&mut pair, client_ch, &[stopped_first]);
 	let wakes = waiter.wakes();
 	pair.server_send(server_ch, stopped_first).reset(VarInt(5)).unwrap();
 	assert!(waiter.wakes() > wakes, "the writer's reset left the wait asleep");
@@ -386,5 +386,35 @@ fn abandoning_sends_the_held_resets() {
 	assert_eq!(
 		pair.server_send(server_ch, open).reset(VarInt(5)),
 		Err(send::Error::Closed)
+	);
+}
+
+/// A stream the quiesce stopped and nobody reset is reset at once, keeping nothing, when the peer
+/// stops it too: the peer reads nothing more, and nothing is left for an abandon to end.
+#[test]
+fn a_peers_stop_resets_a_quiesced_stream() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	let (client_ch, server_ch) = pair.connect();
+	let ours = open_ours(&mut pair, server_ch);
+	lose_writes(&mut pair, server_ch, &[ours]);
+
+	let waiter = Counter::new();
+	assert!(quiesce(&mut pair, server_ch, &waiter, &[]).is_pending());
+	let wakes = waiter.wakes();
+	stop_from_client(&mut pair, client_ch, &[ours]);
+	assert!(waiter.wakes() > wakes, "the reset left the wait asleep");
+	assert_eq!(pair.server_conn_mut(server_ch).stats().frame_tx.reset_stream, 1);
+	// Its writer sees the peer's stop, and has nothing left to reset.
+	assert_eq!(pair.server_send(server_ch, ours).stopped(), Ok(Some(VarInt(1))));
+	assert_eq!(
+		pair.server_send(server_ch, ours).reset(VarInt(5)),
+		Err(send::Error::Closed)
+	);
+	pair.drive();
+	assert_eq!(quiesce(&mut pair, server_ch, &waiter, &[]), Poll::Ready(Ok(())));
+	assert!(
+		pair.client_conn_mut(client_ch).stats().frame_rx.reset_stream > 0,
+		"the reset never arrived"
 	);
 }
