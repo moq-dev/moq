@@ -228,6 +228,30 @@ fn h264_size_comes_from_the_sps() {
 	assert_eq!((config.coded_width, config.coded_height), (Some(320), Some(240)));
 }
 
+/// An avcC whose first SPS is malformed takes its size and field coding from the next SPS that
+/// parses, not from the sample entry.
+#[test]
+fn h264_size_comes_from_the_first_parseable_sps() {
+	let mut avcc = mp4_atom::Avcc::new(
+		crate::codec::h264::fixtures::SPS_FIELD,
+		crate::codec::h264::fixtures::PPS,
+	)
+	.unwrap();
+	// A header and profile bytes with no seq_parameter_set_id or anything after it.
+	avcc.sequence_parameter_sets.insert(0, vec![0x67, 0xf4, 0x00, 0x15]);
+	let config = video_config(mp4_atom::Codec::Avc1(mp4_atom::Avc1 {
+		avcc,
+		visual: mp4_atom::Visual {
+			width: 320,
+			height: 239,
+			..Default::default()
+		},
+		..Default::default()
+	}));
+	assert_eq!((config.coded_width, config.coded_height), (Some(320), Some(240)));
+	assert!(config.interlaced);
+}
+
 // Exercise every visual sample-entry path, including initializers with no in-band headers yet.
 fn aspect_entries(anamorphic: bool) -> Vec<mp4_atom::Codec> {
 	use crate::codec::{h264, h265};
