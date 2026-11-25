@@ -19,16 +19,16 @@ deploy:
     bun install --frozen-lockfile
     bun wrangler deploy
 
-# Replace each bucket's lifecycle rules with lifecycle.json's, with a B2 key allowed writeBuckets.
-lifecycle:
+# Replace a bucket's lifecycle rules with its entry in lifecycle.json, using that bucket's write key.
+lifecycle bucket:
     #!/usr/bin/env bash
     set -euo pipefail
-    : "${B2_APPLICATION_KEY_ID:?not set; use a key with writeBuckets on both buckets}"
-    : "${B2_APPLICATION_KEY:?not set}"
+    : "${AWS_ACCESS_KEY_ID:?not set}"
+    : "${AWS_SECRET_ACCESS_KEY:?not set}"
+    rules=$(jq -ce --arg bucket {{ quote(bucket) }} '.[$bucket]' lifecycle.json)
     b2=$(nix build --no-link --print-out-paths --inputs-from ../.. nixpkgs#backblaze-b2)/bin/backblaze-b2
-    for bucket in $(jq -r 'keys[]' lifecycle.json); do
-        "$b2" bucket update --lifecycle-rules "$(jq -c --arg bucket "$bucket" '.[$bucket]' lifecycle.json)" "$bucket" >/dev/null
-    done
+    B2_APPLICATION_KEY_ID=$AWS_ACCESS_KEY_ID B2_APPLICATION_KEY=$AWS_SECRET_ACCESS_KEY \
+        "$b2" bucket update --lifecycle-rules "$rules" {{ quote(bucket) }} >/dev/null
 
 # Sign store paths and upload them, with their closures, to a nix.moq.dev bucket.
 [no-cd]

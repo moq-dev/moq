@@ -3,16 +3,14 @@
 		{
 			"fileNamePrefix": "",
 			"daysFromUploadingToHiding": null,
-			"daysFromHidingToDeleting": 1,
-			"daysFromStartingToCancelingUnfinishedLargeFiles": 1
+			"daysFromHidingToDeleting": 1
 		}
 	],
 	"nix-ci-moq-dev": [
 		{
 			"fileNamePrefix": "",
 			"daysFromUploadingToHiding": 14,
-			"daysFromHidingToDeleting": 1,
-			"daysFromStartingToCancelingUnfinishedLargeFiles": 1
+			"daysFromHidingToDeleting": 1
 		}
 	]
 }

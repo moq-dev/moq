@@ -9,22 +9,37 @@
 //   /<hash>.narinfo             signed path metadata, pointing into nar/
 //   /nar/<filehash>.nar.zst     compressed archive, named by its own hash
 //
-// Each read is signed with a read-only key for the two buckets, so nobody can
-// list them or download from B2 directly, where egress is billed. Egress from
-// B2 to Cloudflare is free.
+// Each read is signed with the bucket's read-only key, so nobody can list the
+// buckets or download from B2 directly, where egress is billed. Egress from B2
+// to Cloudflare is free.
 
 import { AwsClient } from "aws4fetch";
 
+// B2's console scopes a key to one bucket or to all of them, so each bucket
+// has its own read-only key.
 interface Env {
-	B2_ACCESS_KEY_ID: string;
-	B2_SECRET_ACCESS_KEY: string;
+	B2_RELEASE_ACCESS_KEY_ID: string;
+	B2_RELEASE_SECRET_ACCESS_KEY: string;
+	B2_CI_ACCESS_KEY_ID: string;
+	B2_CI_SECRET_ACCESS_KEY: string;
 }
 
 const ENDPOINT = "https://s3.us-east-005.backblazeb2.com";
 
+// A missing secret throws here: a deploy error, not a read failure. No
+// retries: a failed read is a miss now, not seconds of backoff while Nix waits.
+function client(accessKeyId: string, secretAccessKey: string): AwsClient {
+	return new AwsClient({ accessKeyId, secretAccessKey, service: "s3", region: "us-east-005", retries: 0 });
+}
+
 // Releases first, since they never expire. A NAR is named by its hash, so
 // whichever bucket holds it serves the same bytes.
-const BUCKETS = ["nix-moq-dev", "nix-ci-moq-dev"];
+function buckets(env: Env): { name: string; client: AwsClient }[] {
+	return [
+		{ name: "nix-moq-dev", client: client(env.B2_RELEASE_ACCESS_KEY_ID, env.B2_RELEASE_SECRET_ACCESS_KEY) },
+		{ name: "nix-ci-moq-dev", client: client(env.B2_CI_ACCESS_KEY_ID, env.B2_CI_SECRET_ACCESS_KEY) },
+	];
+}
 
 // Priority 41 puts this right after cache.nixos.org (40), so Nix only asks here
 // for paths nixpkgs doesn't serve. Answered here rather than from a bucket so
@@ -140,19 +155,8 @@ export default {
 			});
 		}
 
-		// A missing secret throws here: a deploy error, not a read failure.
-		// No retries: a failed read is a miss now, not seconds of backoff while
-		// Nix waits.
-		const client = new AwsClient({
-			accessKeyId: env.B2_ACCESS_KEY_ID,
-			secretAccessKey: env.B2_SECRET_ACCESS_KEY,
-			service: "s3",
-			region: "us-east-005",
-			retries: 0,
-		});
-
 		let failed = false;
-		for (const bucket of BUCKETS) {
+		for (const { name: bucket, client } of buckets(env)) {
 			const url = `${ENDPOINT}/${bucket}/${key}`;
 			let response: Response;
 			try {

@@ -1,9 +1,9 @@
 {
 	// Cloudflare Wrangler configuration for the Nix binary cache worker.
 	// Serves nix.moq.dev from two private B2 buckets: released packages, kept
-	// forever, and CI dev shells, which a lifecycle rule expires. The read-only
-	// key for both is a pair of Worker secrets, B2_ACCESS_KEY_ID and
-	// B2_SECRET_ACCESS_KEY (`bun wrangler secret put`).
+	// forever, and CI dev shells, which a lifecycle rule expires. Each bucket's
+	// read-only key is a pair of Worker secrets, B2_{RELEASE,CI}_ACCESS_KEY_ID
+	// and B2_{RELEASE,CI}_SECRET_ACCESS_KEY (`bun wrangler secret put`).
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "nix-moq-dev",
 	"main": "src/worker.ts",

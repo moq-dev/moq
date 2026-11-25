@@ -295,12 +295,11 @@ merging; older commits' paths still expire. `flake.nix` sets `fallback = true` b
 that expiry can remove a path before one that depends on it.
 
 Both buckets live in Backblaze B2's `us-east-005` region. They are private:
-the Worker signs each read (SigV4) with a read-only key, so nobody can list
-them or download from B2 directly, where egress is billed; egress to
+the Worker signs each read (SigV4) with the bucket's read-only key, so nobody
+can list them or download from B2 directly, where egress is billed; egress to
 Cloudflare is free. B2 keeps a new version on every overwrite, including each
 refresh, and counts the CI bucket's 14 days from the newest; both buckets
-delete a superseded or expired version a day later and cancel a large upload
-left unfinished for a day.
+delete a superseded or expired version a day later.
 
 The Worker logs a read B2 answers with a 5xx or 429, or never answers, and
 treats it as a miss: the other bucket can still serve the path, and otherwise
@@ -312,12 +311,12 @@ cache for a minute.
 
 Nix only trusts paths signed by the key in `flake.nix`, so the signing key is
 the trust boundary, not the bucket keys. It lives in the `cache-write`
-Environment beside one B2 key for both buckets. Only `main` and the five
+Environment beside each bucket's B2 write key. Only `main` and the five
 release tag patterns can deploy there; anything that can reach
 the key can sign any path, so a second Environment for releases would only
 guard the bucket. Readers need no secret.
 
-All of this runs once, by a maintainer, in this order. Steps 1, 3, and 5 are
+All of this runs once, by a maintainer, in this order. All five steps are
 done.
 
 1. **Restrict the release tags.** Anyone with write access can push a tag
@@ -347,10 +346,12 @@ done.
 
 2. **Create the buckets** in the B2 console of the `us-east-005` account
    (Buckets -> Create a Bucket): `nix-moq-dev` and `nix-ci-moq-dev`, both
-   Private, with default encryption and Object Lock off. Set each one's
-   Lifecycle Settings to its custom rules in `infra/nix/lifecycle.json`. After
-   editing them, `just infra nix lifecycle` applies them with a key allowed
-   `writeBuckets`, such as a short-lived one made for the purpose.
+   Private, with Object Lock off. Set their Lifecycle Settings to match
+   `infra/nix/lifecycle.json`: "Keep only the last version" for
+   `nix-moq-dev`, and one custom rule (empty prefix, hide after 14 days,
+   delete a day later) for `nix-ci-moq-dev`. After editing the file,
+   `just infra nix lifecycle <bucket>` applies it with that bucket's write
+   key in `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`.
 
 3. **Admit the release tags to `cache-write`**, which the Rust build cache
    bootstrap created:
@@ -362,26 +363,33 @@ done.
    done
    ```
 
-4. **Create two application keys** (Application Keys -> Add a New
-   Application Key), each allowed both buckets only. Each shows its keyID and
-   applicationKey once; put them straight into their secrets, with no other
-   copy. To rotate one, create a new key, replace the secrets, then delete
-   the old key.
+4. **Create four application keys** (Application Keys -> Add a New
+   Application Key), each allowed one bucket, since the console offers one
+   bucket or all of them. Each shows its keyID and applicationKey once; put
+   them straight into their secrets, with no other copy. To rotate one,
+   create a new key, replace its secrets, then delete the old key. The
+   console's Read and Write keys also carry `writeBuckets`, so a writer could
+   change its bucket's settings; only `cache-write` jobs hold them.
 
-   - `nix-read`, **Read Only**, for the Worker:
+   - `nix-release-read` and `nix-ci-read`, **Read Only**, for the Worker:
 
      ```bash
      cd infra/nix
-     bun wrangler secret put B2_ACCESS_KEY_ID
-     bun wrangler secret put B2_SECRET_ACCESS_KEY
+     bun wrangler secret put B2_RELEASE_ACCESS_KEY_ID      # nix-release-read
+     bun wrangler secret put B2_RELEASE_SECRET_ACCESS_KEY
+     bun wrangler secret put B2_CI_ACCESS_KEY_ID           # nix-ci-read
+     bun wrangler secret put B2_CI_SECRET_ACCESS_KEY
      just infra nix deploy   # nix.moq.dev
      ```
 
-   - `nix-write`, **Read and Write**, for the writers:
+   - `nix-release-write` and `nix-ci-write`, **Read and Write**, for
+     `release-nix.yml` and `cache.yml`:
 
      ```bash
-     gh secret set NIX_B2_ACCESS_KEY_ID --env cache-write --repo moq-dev/moq
-     gh secret set NIX_B2_SECRET_ACCESS_KEY --env cache-write --repo moq-dev/moq
+     gh secret set NIX_B2_RELEASE_ACCESS_KEY_ID --env cache-write --repo moq-dev/moq
+     gh secret set NIX_B2_RELEASE_SECRET_ACCESS_KEY --env cache-write --repo moq-dev/moq
+     gh secret set NIX_B2_CI_ACCESS_KEY_ID --env cache-write --repo moq-dev/moq
+     gh secret set NIX_B2_CI_SECRET_ACCESS_KEY --env cache-write --repo moq-dev/moq
      ```
 
 5. **Generate the signing key.** This stores it as `NIX_SIGNING_KEY` in

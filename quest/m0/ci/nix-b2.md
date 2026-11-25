@@ -1,4 +1,4 @@
-# [M] nix.moq.dev serves from Backblaze B2
+# [S] nix.moq.dev serves from Backblaze B2
 
 ## Goal
 
@@ -14,64 +14,52 @@ Non-goals: moq's other R2 buckets, and changing the CI cache's 14-day expiry.
 ## Plan
 
 Decided 2026-11-23 (maintainer, /quest-plan), with the move itself and its
-reasons in [the Rust cache move](/quest/m0/ci/mbx-b2.md):
+reasons in [the Rust cache move](/quest/m0/ci/mbx-b2.md): private buckets
+read by the Worker with SigV4; the `release` backport merged by the
+maintainer before the Worker cuts over; only `nix-moq-dev`'s released
+packages copied; buckets and keys made in the B2 console; R2 deleted once
+the substitution checks pass.
 
-- ✅ Private buckets, with the Worker signing each GET (SigV4) with a
-  read-only key held as a Worker secret (rejected: public buckets, which let
-  anyone download straight from B2 on billed egress and list the bucket). B2
-  egress to Cloudflare is free under the Bandwidth Alliance.
-- ✅ Backport the push change to `release` in a PR the maintainer merges, as
-  [moq-dev/moq#8062](https://github.com/moq-dev/moq/pull/8062) did, and cut
-  the Worker over only after it lands (rejected: the Worker also reading R2
-  until the m3 cut merges `main` into `release`). Agents never merge into
-  `release`.
-- ✅ Copy `nix-moq-dev`'s 1.8 GB of released packages, which old tags'
-  flakes still substitute; the CI bucket starts empty (rejected: copying
-  `nix-ci-moq-dev`'s 73.5 GB too, which expires within 14 days).
-- ✅ Delete the R2 buckets and revoke their tokens in this PR once the
-  substitution checks pass (rejected: keeping them a week).
-- ✅ An agent creates the buckets and keys in the B2 console through the
-  maintainer's agent Chrome, as for mbx.
+Done in [moq-dev/moq#9625](https://github.com/moq-dev/moq/pull/9625): the
+Worker, writers, lifecycle, and docs; the B2 buckets with their lifecycle
+rules; one key per bucket and role (the console scopes a key to one bucket or
+all), stored as the Worker's `B2_{RELEASE,CI}_*` secrets and `cache-write`'s
+`NIX_B2_{RELEASE,CI}_*`; and R2 `nix-moq-dev`'s 1,628 cache objects copied
+to B2, checked by size and MD5. The `release` backport is
+[moq-dev/moq#9628](https://github.com/moq-dev/moq/pull/9628).
 
-Recommendations:
+What remains, in order:
 
-- Order: B2 buckets and keys, then `main`'s writers and the `release`
-  backport, then the copy from R2, then the Worker deploy (`just infra nix
-  deploy`). A tag pushed between the writer switch and the deploy reaches B2
-  and is served once the Worker moves. A tag run uses its tag commit's
-  workflow, so one started before the backport, or a tag on a pre-backport
-  commit, still pushes to R2. Once the backport lands, wait until
-  `gh run list --workflow release-nix.yml --status queued` and
-  `--status in_progress` (each with `--limit 1000`) list nothing, then
-  revoke the `NIX_R2_*` write tokens so any later such run fails loudly
-  instead of writing to R2. A `cache.yml` run started on `main` before its
-  writer switch may fail its push the same way; that is accepted, since the
-  CI bucket starts empty and the next run fills B2. Only then copy, and
-  before deleting R2, list
-  `nix-moq-dev` against the B2 bucket and copy any object B2 lacks.
-- Keep the Worker's release-then-CI order and its rule that an unavailable
-  read is a miss sent with `no-store`, mapped from R2's error codes to B2's
-  5xx answers. Prefer a small, maintained SigV4 signer such as aws4fetch to a
-  hand-rolled one.
-- `refresh` restarts an object's age by copying it onto itself. On B2 that
-  writes a new version, and the lifecycle counts from the newest upload.
-  Deleting hidden versions a day later keeps superseded copies from piling up;
-  check that a refreshed object's age actually restarts.
-- The Worker's read path is what
-  [nix-nar-stream](/quest/m0/ci/nix-nar-stream.md) fixes for
-  NAR downloads broken mid-stream. Replacing `bucket.get` with a signed
-  `fetch` drops its R2 error-text match (`/\((10001|10043)\)$/`); leave the
-  mid-stream fix to that quest, which then targets B2 rather than R2.
-- Update everything that names R2 for nix: `infra/nix/`, `infra/README.md`,
-  `cache.yml`, `release-nix.yml`, and the
-  [CI README](/quest/m0/ci/README.md)'s caches bullet.
+1. Once #9628 merges and `gh run list --workflow release-nix.yml --status
+   queued` and `--status in_progress` (each with `--limit 1000`) list
+   nothing, revoke the R2 token behind `NIX_R2_*` (Cloudflare dashboard, R2
+   -> Manage API tokens) so a pre-backport tag fails loudly.
+2. List R2 `nix-moq-dev` through the Cloudflare API (wrangler's OAuth token
+   can) and copy to B2 whatever it lacks; `rclone copy --files-from <keys>
+   --no-traverse --http-url https://nix.moq.dev :http: b2:nix-moq-dev`
+   reads them through the Worker while it still serves R2.
+3. Right after #9625 lands, `just infra nix deploy` (the Worker reads B2
+   from then on), so Smoke's pinned commit, which the first `cache.yml` run
+   pushes to B2, substitutes.
+4. In a fresh `docker.io/nixos/nix` container, `nix run
+   github:moq-dev/moq/<tag>#moq-relay --accept-flake-config -- --version`
+   builds nothing for a copied tag (`moq-relay-v0.17.18` already did, through
+   the B2 Worker in `wrangler dev`), and for the first tag pushed to B2 once
+   one exists; the same for a CI dev shell from `main`. Worker logs show no
+   read errors.
+5. Delete R2 `nix-moq-dev` and `nix-ci-moq-dev`, and the `NIX_R2_*` secrets
+   in `cache-write`.
 
-Validation: in a fresh `docker.io/nixos/nix` container, `nix run
-github:moq-dev/moq/<tag>#moq-relay --accept-flake-config -- --version` builds
-nothing, both for a tag copied from R2 and one pushed to B2. The same works
-for a CI dev shell from `main`, and Worker logs show the reads going to B2.
+Record which Nightly runs the B2 deploy covers in
+[nix-nar-stream](/quest/m0/ci/nix-nar-stream.md).
 
 Public API: none. Wire: none.
+
+## Waiting
+
+- Maintainer: merge [moq-dev/moq#9628](https://github.com/moq-dev/moq/pull/9628)
+  into `release` (agents never merge there); its `NIX_B2_RELEASE_*` secrets
+  already exist. Check with `gh pr view 9628 --json state`.
 
 ## Related
 

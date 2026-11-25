@@ -12,7 +12,12 @@ Object.assign(globalThis, {
 	},
 });
 
-const env = { B2_ACCESS_KEY_ID: "id", B2_SECRET_ACCESS_KEY: "secret" };
+const env = {
+	B2_RELEASE_ACCESS_KEY_ID: "release-id",
+	B2_RELEASE_SECRET_ACCESS_KEY: "release-secret",
+	B2_CI_ACCESS_KEY_ID: "ci-id",
+	B2_CI_SECRET_ACCESS_KEY: "ci-secret",
+};
 const key = "00000000000000000000000000000000.narinfo";
 const request = (path = key, method = "GET") => new Request(`https://nix.moq.dev/${path}`, { method });
 const bytes = (text: string) => new TextEncoder().encode(text);
@@ -38,18 +43,19 @@ const found = (body: BodyInit | null, size: number, etag = '"a"') =>
 afterEach(() => mock.restore());
 
 describe("bucket reads", () => {
-	test("each read is a signed path-style request to the bucket", async () => {
-		const ci = mock((_: Request) => found("signed metadata", 15));
-		const fetch = b2({ ci });
+	test("each read is a path-style request signed with its bucket's key", async () => {
+		const fetch = b2({ ci: () => found("signed metadata", 15) });
 		const response = await worker.fetch(request(), env);
 		expect(response.status).toBe(200);
-		expect(fetch.mock.calls.map(([input]) => (input as Request).url)).toEqual([
+		const requests = fetch.mock.calls.map(([input]) => input as Request);
+		expect(requests.map((r) => r.url)).toEqual([
 			`https://s3.us-east-005.backblazeb2.com/nix-moq-dev/${key}`,
 			`https://s3.us-east-005.backblazeb2.com/nix-ci-moq-dev/${key}`,
 		]);
-		const authorization = ci.mock.calls[0][0].headers.get("Authorization");
-		expect(authorization).toStartWith("AWS4-HMAC-SHA256 Credential=id/");
-		expect(authorization).toContain("/us-east-005/s3/aws4_request");
+		const [release, ci] = requests.map((r) => r.headers.get("Authorization"));
+		expect(release).toStartWith("AWS4-HMAC-SHA256 Credential=release-id/");
+		expect(ci).toStartWith("AWS4-HMAC-SHA256 Credential=ci-id/");
+		expect(ci).toContain("/us-east-005/s3/aws4_request");
 	});
 
 	for (const bucket of ["release", "ci"] as const) {
@@ -81,8 +87,9 @@ describe("bucket reads", () => {
 	});
 
 	test("a missing secret is a configuration error", async () => {
-		b2({});
-		await expect(worker.fetch(request(), { ...env, B2_ACCESS_KEY_ID: undefined } as never)).rejects.toThrow();
+		// Even when the release bucket would have served the path.
+		b2({ release: () => found("signed metadata", 15) });
+		await expect(worker.fetch(request(), { ...env, B2_CI_ACCESS_KEY_ID: undefined } as never)).rejects.toThrow();
 	});
 
 	test("a release miss checks CI and preserves the object's headers and body", async () => {

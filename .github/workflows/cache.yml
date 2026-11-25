@@ -30,8 +30,8 @@ jobs:
       - name: Cache the dev shell and @moq/libav
         env:
           NIX_SIGNING_KEY: ${{ secrets.NIX_SIGNING_KEY }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.NIX_B2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.NIX_B2_SECRET_ACCESS_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.NIX_B2_CI_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.NIX_B2_CI_SECRET_ACCESS_KEY }}
         run: just gh cache
 
   runtime:
@@ -57,6 +57,6 @@ jobs:
       - name: Cache pinned packages and dependencies
         env:
           NIX_SIGNING_KEY: ${{ secrets.NIX_SIGNING_KEY }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.NIX_B2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.NIX_B2_SECRET_ACCESS_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.NIX_B2_CI_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.NIX_B2_CI_SECRET_ACCESS_KEY }}
         run: just gh cache-runtime
