@@ -17,17 +17,19 @@ use crate::container::fmp4::{self, Error, config, edit::Edit, metadata, sample};
 /// the file, fetching one sample at a time with [`read`](Self::read).
 ///
 /// Every sample is checked to lie within the file, and the tracks may declare at most one sample
-/// per byte of it, so no size the file declares allocates more than the file could fill. The
-/// `moov` may hold up to 128 MiB, about a day of 30 fps video with 48 kHz AAC.
+/// per byte of it, so the index grows linearly with the file whatever sizes it declares. The `moov`
+/// may hold up to 128 MiB, about a day of 30 fps video with 48 kHz AAC.
 ///
-/// Audio and video tracks in a codec [`Import`](crate::container::fmp4::Import) reads are listed;
-/// other tracks (timecode, chapters, subtitles, codecs moq-mux doesn't carry) are skipped. A track
-/// with several sample descriptions, as a file joined from several encodes has, is refused.
+/// Audio and video tracks in a codec [`Import`](crate::container::fmp4::Import) reads are listed.
+/// Other tracks are left out and listed by [`skipped`](Self::skipped): timecode, chapters,
+/// subtitles, codecs moq-mux doesn't carry, and sample entries the catalog can't describe, such as
+/// a track with several sample descriptions, which a file joined from several encodes has.
 pub struct Reader<R> {
 	reader: R,
 	/// The file's length in bytes.
 	len: u64,
 	tracks: Vec<Track>,
+	skipped: Vec<Skipped>,
 }
 
 /// One audio or video track of an MP4 file.
@@ -128,9 +130,13 @@ impl<R: Read + Seek> Reader<R> {
 		let moov = moov.ok_or(Error::NoMoov)?;
 
 		let mut budget = Budget(len);
-		let mut declared = declare(&moov, &mut budget, Some(len))?;
-		for fragment in fragments {
-			let size = fragment.end - fragment.start;
+		let (mut declared, skipped) = declare(&moov, &mut budget, Some(len))?;
+		let trex = mp4_atom::Moov {
+			mvex: moov.mvex.clone(),
+			..Default::default()
+		};
+		for range in fragments {
+			let size = range.end - range.start;
 			if size > fmp4::MAX_METADATA_BYTES as u64 {
 				return Err(Error::MetadataTooLarge {
 					kind: mp4_atom::Moof::KIND.to_string(),
@@ -140,27 +146,20 @@ impl<R: Read + Seek> Reader<R> {
 			}
 			let atom = TopLevel {
 				kind: mp4_atom::Moof::KIND,
-				start: fragment.start,
-				end: fragment.end,
+				start: range.start,
+				end: range.end,
 			};
 			let moof = decode_moof(&atom.bytes(&mut reader)?)?;
-			// Without a base offset, a track fragment's data follows the previous one's.
-			let mut data_end = fragment.start;
-			for traf in &moof.traf {
-				let Some(track) = declared.iter_mut().find(|track| track.id == traf.tfhd.track_id) else {
-					continue;
-				};
-				let base = match traf.tfhd.base_data_offset {
-					Some(base) => base,
-					None if traf.tfhd.default_base_is_moof => fragment.start,
-					None => data_end,
-				};
-				data_end = track.fragment(traf, base, len, &mut budget)?;
-			}
+			fragment(&moof, range.start, &trex, Some(len), &mut budget, &mut declared)?;
 		}
 
 		let tracks = declared.into_iter().map(Declared::present).collect::<Result<_>>()?;
-		Ok(Self { reader, len, tracks })
+		Ok(Self {
+			reader,
+			len,
+			tracks,
+			skipped,
+		})
 	}
 
 	/// Read the payload of `sample`, one of this file's.
@@ -184,6 +183,12 @@ impl<R> Reader<R> {
 	/// The file's audio and video tracks, in the order its `moov` lists them.
 	pub fn tracks(&self) -> &[Track] {
 		&self.tracks
+	}
+
+	/// The tracks the file declares that [`tracks`](Self::tracks) leaves out: neither audio nor
+	/// video, in a codec moq-mux doesn't carry, or with a sample entry the catalog can't describe.
+	pub fn skipped(&self) -> &[Skipped] {
+		&self.skipped
 	}
 
 	/// Take back the reader.
@@ -222,7 +227,13 @@ impl TopLevel {
 		let kind = mp4_atom::FourCC::new(&[header[4], header[5], header[6], header[7]]);
 		let end = match u32::from_be_bytes(header[..4].try_into().expect("four bytes")) {
 			0 => len,
-			1 if available < 16 => return Err(Error::BoxPastEnd(kind.to_string()).into()),
+			1 if available < 16 && matches!(kind, mp4_atom::Moov::KIND | mp4_atom::Moof::KIND) => {
+				return Err(Error::BoxPastEnd(kind.to_string()).into());
+			}
+			1 if available < 16 => {
+				tracing::debug!(%kind, start, len, "a box header runs past the end of the file, ending the boxes");
+				return Ok(None);
+			}
 			1 => {
 				reader.read_exact(&mut header[8..])?;
 				match u64::from_be_bytes(header[8..].try_into().expect("eight bytes")) {
@@ -261,7 +272,7 @@ pub(super) fn decode_moov(data: &[u8]) -> Result<mp4_atom::Moov> {
 }
 
 /// Decode a `moof` box, header included.
-fn decode_moof(data: &[u8]) -> Result<mp4_atom::Moof> {
+pub(super) fn decode_moof(data: &[u8]) -> Result<mp4_atom::Moof> {
 	let data = without_metadata(data)?;
 	metadata::check(&data)?;
 	mp4_atom::Moof::decode(&mut data.as_slice()).map_err(|err| Error::mp4(err).into())
@@ -349,44 +360,163 @@ pub(super) struct Declared {
 	pub timescale: moq_net::Timescale,
 	pub edit: Edit,
 	defaults: sample::Defaults,
+	/// Whether the track is audio, whose samples all decode alone whatever their flags say.
+	audio: bool,
+	/// The samples listed and not yet taken, in decode order.
 	pub samples: Vec<Raw>,
+	/// Where the last sample listed ends on the decode timeline, which a fragment without a
+	/// `tfdt` continues from.
+	next_dts: i64,
 }
 
-/// The audio and video tracks `moov` declares, in a file of `len` bytes when it is known.
+/// A track a file declares that a [`Reader`] or [`Import`](super::Import) skips.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct Skipped {
+	/// The track's `track_id`.
+	pub id: u32,
+	/// The track's handler, such as `vide`, `soun`, `text`, or `tmcd`.
+	pub handler: [u8; 4],
+	/// The four-character code of the track's first sample entry, such as `mp4v` or `ac-3`, when it
+	/// has one.
+	pub codec: Option<[u8; 4]>,
+	/// Why the track is skipped.
+	pub error: crate::Error,
+}
+
+/// The four-character code `codec` encodes with.
+fn entry_kind(codec: &mp4_atom::Codec) -> Option<[u8; 4]> {
+	if let mp4_atom::Codec::Unknown(kind, _) = codec {
+		return Some((*kind).into());
+	}
+	let mut buf = Vec::new();
+	codec.encode(&mut buf).ok()?;
+	buf.get(4..8)?.try_into().ok()
+}
+
+/// The catalog entry of `trak`, a video or an audio track.
+fn describe(trak: &mp4_atom::Trak, video: bool) -> Result<Config> {
+	let entry = config::sample_entry(trak)?;
+	if !config::supported(entry) {
+		return Err(match entry {
+			mp4_atom::Codec::Unknown(kind, _) => Error::UnknownCodec(kind.to_string()),
+			entry => Error::unsupported_codec(entry),
+		}
+		.into());
+	}
+	Ok(match video {
+		true => Config::Video(config::video(entry, Container::Legacy)?),
+		false => Config::Audio(config::audio(entry, Container::Legacy)?),
+	})
+}
+
+/// The audio and video tracks `moov` declares, in a file of `len` bytes when it is known, and the
+/// tracks it skips.
 ///
-/// A track that is neither, or in a codec moq-mux doesn't carry, is skipped.
-pub(super) fn declare(moov: &mp4_atom::Moov, budget: &mut Budget, len: Option<u64>) -> Result<Vec<Declared>> {
+/// A track that is neither audio nor video, in a codec moq-mux doesn't carry, or whose sample
+/// entry the catalog can't describe is skipped, so one track can't refuse the file. A sample table
+/// that doesn't fit the file still fails it.
+pub(super) fn declare(
+	moov: &mp4_atom::Moov,
+	budget: &mut Budget,
+	len: Option<u64>,
+) -> Result<(Vec<Declared>, Vec<Skipped>)> {
 	let mut tracks = Vec::new();
+	let mut skipped = Vec::new();
 	for trak in &moov.trak {
 		let id = trak.tkhd.track_id;
 		let handler = trak.mdia.hdlr.handler;
 		let video = match handler.as_ref() {
-			b"vide" => true,
-			b"soun" => false,
-			_ => {
-				tracing::debug!(track = id, %handler, "skipping a track that is neither audio nor video");
+			b"vide" => Ok(true),
+			b"soun" => Ok(false),
+			_ => Err(crate::Error::from(Error::UnknownTrackHandler(handler.into()))),
+		};
+		let config = video.and_then(|video| describe(trak, video));
+		let config = match config {
+			Ok(config) => config,
+			Err(error) => {
+				tracing::warn!(track = id, %handler, %error, "skipping a track");
+				skipped.push(Skipped {
+					id,
+					handler: handler.into(),
+					codec: trak.mdia.minf.stbl.stsd.codecs.first().and_then(entry_kind),
+					error,
+				});
 				continue;
 			}
 		};
-		let entry = config::sample_entry(trak)?;
-		if !config::supported(entry) {
-			tracing::warn!(track = id, codec = %Error::unsupported_codec(entry), "skipping a track in an unsupported codec");
-			continue;
-		}
-		let config = match video {
-			true => Config::Video(config::video(entry, Container::Legacy)?),
-			false => Config::Audio(config::audio(entry, Container::Legacy)?),
-		};
+		let audio = matches!(config, Config::Audio(_));
+		let (samples, next_dts) = sample_table(&trak.mdia.minf.stbl, budget, len, audio)?;
 		tracks.push(Declared {
 			id,
 			config,
 			timescale: moq_net::Timescale::new(u64::from(trak.mdia.mdhd.timescale))?,
 			edit: Edit::lenient(trak, moov.mvhd.timescale)?,
 			defaults: sample::Defaults::from_moov(moov, id),
-			samples: sample_table(&trak.mdia.minf.stbl, budget, len)?,
+			audio,
+			samples,
+			next_dts,
 		});
 	}
-	Ok(tracks)
+	Ok((tracks, skipped))
+}
+
+/// Append the samples of `moof`, which starts at file offset `start`, to the `tracks` it lists,
+/// in a file of `len` bytes when it is known. `trex` holds the `moov`'s `mvex`, whose defaults a
+/// track fragment for a skipped track takes.
+pub(super) fn fragment<'a>(
+	moof: &mp4_atom::Moof,
+	start: u64,
+	trex: &mp4_atom::Moov,
+	len: Option<u64>,
+	budget: &mut Budget,
+	tracks: impl IntoIterator<Item = &'a mut Declared>,
+) -> Result<()> {
+	let mut tracks: Vec<&mut Declared> = tracks.into_iter().collect();
+	// Without a base offset, a track fragment's data follows the previous one's.
+	let mut data_end = start;
+	for traf in &moof.traf {
+		let base = match traf.tfhd.base_data_offset {
+			Some(base) => base,
+			None if traf.tfhd.default_base_is_moof => start,
+			None => data_end,
+		};
+		data_end = match tracks.iter_mut().find(|track| track.id == traf.tfhd.track_id) {
+			Some(track) => track.fragment(traf, base, len, budget)?,
+			// A skipped track's data still moves the next fragment's base.
+			None => {
+				let defaults = sample::Defaults::from_moov(trex, traf.tfhd.track_id);
+				runs(traf, base, defaults, |_, _, _| Ok(()))?
+			}
+		};
+	}
+	Ok(())
+}
+
+/// Walk the samples of `traf`, whose data offsets count from `base`, with each one's offset,
+/// resolved values, and composition offset, and return where its data ends.
+fn runs(
+	traf: &mp4_atom::Traf,
+	base: u64,
+	defaults: sample::Defaults,
+	mut each: impl FnMut(u64, sample::Sample, i64) -> Result<()>,
+) -> Result<u64> {
+	let mut offset = base;
+	for run in &traf.trun {
+		if let Some(data_offset) = run.data_offset {
+			offset = base
+				.checked_add_signed(i64::from(data_offset))
+				.ok_or(Error::InvalidDataOffset)?;
+		}
+		for entry in run.samples.iter() {
+			let sample = defaults.resolve(&traf.tfhd, &entry);
+			each(offset, sample, entry.cts.unwrap_or(0))?;
+			offset = offset
+				.checked_add(u64::from(sample.size))
+				.ok_or(Error::InvalidDataOffset)?;
+		}
+	}
+	Ok(offset)
 }
 
 /// Where a sample of `size` bytes at `offset` ends, checked against the file's `len` when known.
@@ -397,8 +527,9 @@ fn sample_end(offset: u64, size: u32, len: Option<u64>) -> Result<u64> {
 		.ok_or_else(|| Error::SampleOutsideMedia { offset, size }.into())
 }
 
-/// The samples a regular MP4 track's sample tables list.
-fn sample_table(stbl: &mp4_atom::Stbl, budget: &mut Budget, len: Option<u64>) -> Result<Vec<Raw>> {
+/// The samples a regular MP4 track's sample tables list, and where the last one ends on the decode
+/// timeline. Every sample of an `audio` track is a keyframe.
+fn sample_table(stbl: &mp4_atom::Stbl, budget: &mut Budget, len: Option<u64>, audio: bool) -> Result<(Vec<Raw>, i64)> {
 	let sizes = &stbl.stsz.samples;
 	let count = match sizes {
 		mp4_atom::StszSamples::Identical { count, .. } => u64::from(*count),
@@ -406,7 +537,7 @@ fn sample_table(stbl: &mp4_atom::Stbl, budget: &mut Budget, len: Option<u64>) ->
 	};
 	budget.take(count)?;
 	if count == 0 {
-		return Ok(Vec::new());
+		return Ok((Vec::new(), 0));
 	}
 	let size = |index: usize| match sizes {
 		mp4_atom::StszSamples::Identical { size, .. } => *size,
@@ -466,7 +597,7 @@ fn sample_table(stbl: &mp4_atom::Stbl, budget: &mut Budget, len: Option<u64>) ->
 				pts,
 				duration,
 				// Without an `stss`, every sample is a sync sample.
-				keyframe: sync.is_none_or(|sync| sync.binary_search(&(index as u32 + 1)).is_ok()),
+				keyframe: audio || sync.is_none_or(|sync| sync.binary_search(&(index as u32 + 1)).is_ok()),
 			});
 			offset = sample_end(offset, size, len)?;
 			dts = dts.checked_add(i64::from(duration)).ok_or(Error::PtsOverflow)?;
@@ -475,48 +606,34 @@ fn sample_table(stbl: &mp4_atom::Stbl, budget: &mut Budget, len: Option<u64>) ->
 	if samples.len() < count {
 		return Err(Error::InvalidSampleTable("the chunks hold fewer samples than the sizes list").into());
 	}
-	Ok(samples)
+	Ok((samples, dts))
 }
 
 impl Declared {
 	/// Append the samples of one track fragment whose data offsets count from `base`, and return
 	/// where its data ends. A fragment without a `tfdt` continues from the track's last sample.
-	fn fragment(&mut self, traf: &mp4_atom::Traf, base: u64, len: u64, budget: &mut Budget) -> Result<u64> {
+	fn fragment(&mut self, traf: &mp4_atom::Traf, base: u64, len: Option<u64>, budget: &mut Budget) -> Result<u64> {
 		budget.take(sample::count(traf))?;
 		let mut dts = match &traf.tfdt {
 			Some(tfdt) => i64::try_from(tfdt.base_media_decode_time).map_err(|_| Error::PtsOverflow)?,
-			None => match self.samples.last() {
-				Some(last) => last
-					.dts
-					.checked_add(i64::from(last.duration))
-					.ok_or(Error::PtsOverflow)?,
-				None => 0,
-			},
+			None => self.next_dts,
 		};
-		let mut offset = base;
-		for run in &traf.trun {
-			if let Some(data_offset) = run.data_offset {
-				offset = base
-					.checked_add_signed(i64::from(data_offset))
-					.ok_or(Error::InvalidDataOffset)?;
-			}
-			for entry in run.samples.iter() {
-				let sample = self.defaults.resolve(&traf.tfhd, &entry);
-				let duration = sample.duration.unwrap_or(0);
-				let pts = dts.checked_add(entry.cts.unwrap_or(0)).ok_or(Error::PtsOverflow)?;
-				self.samples.push(Raw {
-					offset,
-					size: sample.size,
-					dts,
-					pts,
-					duration,
-					keyframe: sample.is_sync(),
-				});
-				offset = sample_end(offset, sample.size, Some(len))?;
-				dts = dts.checked_add(i64::from(duration)).ok_or(Error::PtsOverflow)?;
-			}
-		}
-		Ok(offset)
+		let end = runs(traf, base, self.defaults, |offset, sample, cts| {
+			let duration = sample.duration.unwrap_or(0);
+			self.samples.push(Raw {
+				offset,
+				size: sample.size,
+				dts,
+				pts: dts.checked_add(cts).ok_or(Error::PtsOverflow)?,
+				duration,
+				keyframe: self.audio || sample.is_sync(),
+			});
+			sample_end(offset, sample.size, len)?;
+			dts = dts.checked_add(i64::from(duration)).ok_or(Error::PtsOverflow)?;
+			Ok(())
+		})?;
+		self.next_dts = dts;
+		Ok(end)
 	}
 
 	/// The track with its edit list applied to its samples.
@@ -544,6 +661,8 @@ pub(super) struct Presenter {
 	edit: Edit,
 	/// Whether a keyframe at or after the edit's start has opened the presentation.
 	started: bool,
+	/// Whether a sample at or after the edit's end has ended it.
+	ended: bool,
 }
 
 /// What [`Presenter::present`] made of a sample.
@@ -558,14 +677,20 @@ pub(super) enum Presented {
 
 impl Presenter {
 	pub fn new(edit: Edit) -> Self {
-		Self { edit, started: false }
+		Self {
+			edit,
+			started: false,
+			ended: false,
+		}
 	}
 
 	/// Place `raw`, the next sample in decode order, on the presentation timeline.
 	pub fn present(&mut self, raw: Raw) -> Result<Presented> {
-		if let Some(end) = self.edit.end()
-			&& i128::from(raw.pts) >= i128::from(end)
-		{
+		self.ended |= self
+			.edit
+			.end()
+			.is_some_and(|end| i128::from(raw.pts) >= i128::from(end));
+		if self.ended {
 			return Ok(Presented::Ended);
 		}
 		// A version 1 `ctts` can present a sample before zero, which precedes any edit.
@@ -714,6 +839,24 @@ pub(super) mod tests {
 		}
 	}
 
+	/// `moov` with its first track made an H.264 video track.
+	pub(crate) fn video(mut moov: mp4_atom::Moov) -> mp4_atom::Moov {
+		let trak = &mut moov.trak[0];
+		trak.mdia.hdlr.handler = b"vide".into();
+		let avcc =
+			mp4_atom::Avcc::new(crate::codec::h264::fixtures::SPS_IPB, crate::codec::h264::fixtures::PPS).unwrap();
+		trak.mdia.minf.stbl.stsd.codecs = vec![mp4_atom::Codec::Avc1(mp4_atom::Avc1 {
+			avcc,
+			visual: mp4_atom::Visual {
+				width: 64,
+				height: 64,
+				..Default::default()
+			},
+			..Default::default()
+		})];
+		moov
+	}
+
 	fn index(data: Vec<u8>) -> Result<Vec<Track>> {
 		Ok(Reader::new(Cursor::new(data))?.tracks().to_vec())
 	}
@@ -760,7 +903,7 @@ pub(super) mod tests {
 	fn the_presentation_starts_at_a_keyframe() {
 		let mut tables = stbl(10);
 		tables.stss = Some(mp4_atom::Stss { entries: vec![1, 6] });
-		let samples = index_plain(10, &moov(tables, vec![edit(0, Some(200))])).unwrap();
+		let samples = index_plain(10, &video(moov(tables, vec![edit(0, Some(200))]))).unwrap();
 		assert_eq!(pts(&samples), [300, 400, 500, 600, 700]);
 		assert!(samples[0].keyframe);
 		assert_eq!(samples[0].dts, 300);
@@ -813,13 +956,16 @@ pub(super) mod tests {
 	/// Without an `stss` every sample is a keyframe, and with one only those it lists.
 	#[test]
 	fn sync_samples() {
-		let all = index_plain(3, &moov(stbl(3), Vec::new())).unwrap();
+		let all = index_plain(3, &video(moov(stbl(3), Vec::new()))).unwrap();
 		assert!(all.iter().all(|sample| sample.keyframe));
 		let mut tables = stbl(3);
 		tables.stss = Some(mp4_atom::Stss { entries: vec![1, 3] });
-		let listed = index_plain(3, &moov(tables, Vec::new())).unwrap();
+		let listed = index_plain(3, &video(moov(tables.clone(), Vec::new()))).unwrap();
 		let keyframes: Vec<bool> = listed.iter().map(|sample| sample.keyframe).collect();
 		assert_eq!(keyframes, [true, false, true]);
+		// Every audio sample decodes alone, whatever its `stss` says.
+		let audio = index_plain(3, &moov(tables, Vec::new())).unwrap();
+		assert!(audio.iter().all(|sample| sample.keyframe));
 	}
 
 	/// Counts and offsets past what the file holds fail the index instead of allocating.
@@ -850,22 +996,42 @@ pub(super) mod tests {
 
 	/// A track with two sample descriptions is refused, since the catalog can't follow a switch.
 	#[test]
-	fn several_sample_descriptions_fail() {
+	fn several_sample_descriptions_are_skipped() {
 		let mut tables = stbl(1);
 		tables.stsd.codecs.push(tables.stsd.codecs[0].clone());
+		let mut data = mdat(1);
+		moov(tables, Vec::new()).encode(&mut data).unwrap();
+		let reader = Reader::new(Cursor::new(data)).unwrap();
+		assert!(reader.tracks().is_empty());
 		assert!(matches!(
-			index_plain(1, &moov(tables, Vec::new())),
-			Err(crate::Error::Cmaf(Error::MultipleCodecs))
+			reader.skipped(),
+			[Skipped {
+				id: 1,
+				error: crate::Error::Cmaf(Error::MultipleCodecs),
+				..
+			}]
 		));
 	}
 
-	/// A track that is not audio or video, or in a codec moq-mux doesn't carry, is skipped.
+	/// A track that is not audio or video, in a codec moq-mux doesn't carry, or one the catalog
+	/// can't describe is skipped and reported, and the others still index.
 	#[test]
 	fn other_tracks_are_skipped() {
 		let mut file = moov(stbl(1), Vec::new());
 		let mut text = file.trak[0].clone();
+		text.tkhd.track_id = 2;
 		text.mdia.hdlr.handler = b"text".into();
+		let mut several = file.trak[0].clone();
+		several.tkhd.track_id = 4;
+		several
+			.mdia
+			.minf
+			.stbl
+			.stsd
+			.codecs
+			.push(several.mdia.minf.stbl.stsd.codecs[0].clone());
 		let mut ac3 = file.trak[0].clone();
+		ac3.tkhd.track_id = 3;
 		ac3.mdia.minf.stbl.stsd.codecs = vec![
 			mp4_atom::Ac3 {
 				audio: file.trak[0].mdia.minf.stbl.stsd.codecs[0].audio().unwrap().clone(),
@@ -880,12 +1046,25 @@ pub(super) mod tests {
 			}
 			.into(),
 		];
-		file.trak.extend([text, ac3]);
+		file.trak.extend([text, ac3, several]);
 		let mut data = mdat(1);
 		file.encode(&mut data).unwrap();
-		let tracks = index(data).unwrap();
-		assert_eq!(tracks.len(), 1);
-		assert!(matches!(tracks[0].config, Config::Audio(_)));
+		let reader = Reader::new(Cursor::new(data)).unwrap();
+		assert_eq!(reader.tracks().len(), 1);
+		assert!(matches!(reader.tracks()[0].config, Config::Audio(_)));
+		let skipped: Vec<_> = reader
+			.skipped()
+			.iter()
+			.map(|track| (track.id, &track.handler, track.codec.as_ref()))
+			.collect();
+		assert_eq!(
+			skipped,
+			[
+				(2, b"text", Some(b"Opus")),
+				(3, b"soun", Some(b"ac-3")),
+				(4, b"soun", Some(b"Opus"))
+			]
+		);
 	}
 
 	/// A `moof` with its `trun` sizes and durations left to the `trex` defaults.
@@ -912,7 +1091,8 @@ pub(super) mod tests {
 	}
 
 	/// A fragment without a `tfdt` continues the track where the last one ended, and the samples
-	/// take the `trex` defaults.
+	/// take the `trex` defaults. Audio samples all decode alone, though the defaults flag them
+	/// non-sync.
 	#[test]
 	fn fragments_without_tfdt_continue() {
 		let mut init = moov(stbl(0), Vec::new());
@@ -922,7 +1102,7 @@ pub(super) mod tests {
 				default_sample_description_index: 1,
 				default_sample_duration: 100,
 				default_sample_size: SIZE,
-				default_sample_flags: 0,
+				default_sample_flags: 0x0001_0000,
 			}],
 			..Default::default()
 		});
@@ -945,6 +1125,65 @@ pub(super) mod tests {
 		}
 		let samples = index(data).unwrap().remove(0).samples;
 		assert_eq!(pts(&samples), [0, 100, 200, 300, 400]);
+		assert!(samples.iter().all(|sample| sample.keyframe));
+	}
+
+	/// Without base offsets, a track fragment's data follows the previous one's, a skipped
+	/// track's included.
+	#[test]
+	fn a_skipped_track_fragment_moves_the_next_base() {
+		let mut init = moov(stbl(0), Vec::new());
+		let mut text = init.trak[0].clone();
+		text.tkhd.track_id = 2;
+		text.mdia.hdlr.handler = b"text".into();
+		init.trak.push(text);
+		let trex = |track_id, size| mp4_atom::Trex {
+			track_id,
+			default_sample_description_index: 1,
+			default_sample_duration: 100,
+			default_sample_size: size,
+			default_sample_flags: 0,
+		};
+		init.mvex = Some(mp4_atom::Mvex {
+			trex: vec![trex(1, SIZE), trex(2, 7)],
+			..Default::default()
+		});
+		let mut data = Vec::new();
+		init.encode(&mut data).unwrap();
+		let start = data.len() as u64;
+
+		let traf = |track_id, count, data_offset| mp4_atom::Traf {
+			tfhd: mp4_atom::Tfhd {
+				track_id,
+				..Default::default()
+			},
+			tfdt: Some(mp4_atom::Tfdt {
+				base_media_decode_time: 0,
+			}),
+			trun: vec![mp4_atom::Trun {
+				data_offset,
+				samples: mp4_atom::TrunSamples::Inherited {
+					count,
+					first_flags: None,
+				},
+			}],
+			..Default::default()
+		};
+		let mut moof = mp4_atom::Moof {
+			traf: vec![traf(2, 2, Some(0)), traf(1, 3, None)],
+			..Default::default()
+		};
+		let mut encoded = Vec::new();
+		moof.encode(&mut encoded).unwrap();
+		let media = start + encoded.len() as u64 + 8;
+		moof.traf[0].trun[0].data_offset = Some((media - start) as i32);
+		moof.encode(&mut data).unwrap();
+		data.extend(mp4_box(b"mdat", &vec![0; 14 + 3 * SIZE as usize]));
+
+		let tracks = index(data).unwrap();
+		let offsets: Vec<u64> = tracks[0].samples.iter().map(|sample| sample.offset).collect();
+		let first = media + 14;
+		assert_eq!(offsets, [first, first + 10, first + 20]);
 	}
 
 	/// A `udta` whose `meta/ilst` repeats its copyright item, as some encoders write.
@@ -1034,7 +1273,7 @@ pub(super) mod tests {
 		data
 	}
 
-	fn video(tracks: &[Track]) -> &VideoConfig {
+	fn video_config(tracks: &[Track]) -> &VideoConfig {
 		tracks
 			.iter()
 			.find_map(|track| match &track.config {
@@ -1049,7 +1288,7 @@ pub(super) mod tests {
 	#[test]
 	fn the_sps_sets_the_picture_size() {
 		let tracks = index(declares_height_47()).unwrap();
-		let config = video(&tracks);
+		let config = video_config(&tracks);
 		assert_eq!((config.coded_width, config.coded_height), (Some(64), Some(48)));
 
 		let mut data = declares_height_47();
@@ -1059,7 +1298,7 @@ pub(super) mod tests {
 		let len = usize::from(u16::from_be_bytes([data[avcc + 10], data[avcc + 11]]));
 		data[avcc + 13..avcc + 12 + len].fill(0);
 		let tracks = index(data).unwrap();
-		let config = video(&tracks);
+		let config = video_config(&tracks);
 		assert_eq!((config.coded_width, config.coded_height), (Some(64), Some(47)));
 	}
 

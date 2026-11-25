@@ -70,8 +70,7 @@ impl Edit {
 		};
 		let mut unsupported = None;
 		// Several media edits splice the media, which one shift can't express.
-		let spliced = entries.next().is_some();
-		if spliced {
+		if entries.next().is_some() {
 			unsupported = Some("an edit follows the media edit");
 		}
 		// A rate of 0 dwells on one sample, and the standard defines no other.
@@ -96,10 +95,11 @@ impl Edit {
 			}
 		};
 		// A duration of zero is unknown, as a fragmented file's edit declares it, and one past the
-		// media timeline trims nothing.
+		// media timeline trims nothing. An edit list this shape can't express plays the media
+		// whole, so it trims nothing either.
 		let end = match (entry.segment_duration, movie_timescale) {
 			(0, _) | (_, 0) => None,
-			_ if spliced => None,
+			_ if unsupported.is_some() => None,
 			(duration, scale) => u64::try_from(u128::from(duration) * timescale / u128::from(scale))
 				.ok()
 				.and_then(|duration| media_time.checked_add(duration)),
@@ -283,11 +283,7 @@ mod tests {
 				[None, None, Some(0), Some(40)],
 				None,
 			),
-			(
-				vec![entry(1000, Some(960), 2)],
-				[None, None, Some(0), Some(40)],
-				Some(960 + 48_000),
-			),
+			(vec![entry(1000, Some(960), 2)], [None, None, Some(0), Some(40)], None),
 		];
 		for (entries, expected, end) in cases {
 			assert!(

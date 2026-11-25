@@ -440,6 +440,13 @@ impl MoqContainerFormat {
 		Arc::new(Self(moq_mux::import::ContainerFormat::Fmp4))
 	}
 
+	/// Regular MP4, with its `moov` before or after its media, or fragmented, split into one frame
+	/// per sample.
+	#[uniffi::constructor]
+	pub fn mp4() -> Arc<Self> {
+		Arc::new(Self(moq_mux::import::ContainerFormat::Mp4))
+	}
+
 	/// Matroska / WebM.
 	#[uniffi::constructor]
 	pub fn mkv() -> Arc<Self> {
@@ -811,6 +818,7 @@ mod test {
 
 		let container = [
 			MoqContainerFormat::fmp4,
+			MoqContainerFormat::mp4,
 			MoqContainerFormat::mkv,
 			MoqContainerFormat::ts,
 			MoqContainerFormat::flv,

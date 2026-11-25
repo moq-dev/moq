@@ -106,7 +106,7 @@ MP4 parser. `import fmp4 --cmaf` publishes each fragment whole as
 timing.
 
 `import mp4` reads a regular MP4 the same way, applying each track's edit list,
-and hands a fragmented one to the fMP4 import. A file with its `moov` first
+and reads a fragmented one too. A file with its `moov` first
 (`-movflags +faststart`) publishes as it streams in. One with its `moov` last,
 as most recorders write it, publishes nothing until the `moov` arrives, and
 holds up to 64 MiB of media until then. Like the other stdin imports it

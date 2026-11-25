@@ -293,6 +293,7 @@ pub fn seeds() -> Vec<Seed> {
 	for mp4 in [
 		&include_bytes!("container/mp4/test_data/faststart.mp4")[..],
 		include_bytes!("container/mp4/test_data/bframes.mp4"),
+		include_bytes!("container/mp4/test_data/hybrid.mp4"),
 		bbb,
 	] {
 		add("mp4", 0, mp4);

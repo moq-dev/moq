@@ -31,7 +31,7 @@ mod import;
 mod index;
 
 pub use import::{Finished, Import};
-pub use index::{Config, Reader, Sample, Track};
+pub use index::{Config, Reader, Sample, Skipped, Track};
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
