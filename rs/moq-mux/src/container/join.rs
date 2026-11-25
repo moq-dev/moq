@@ -27,7 +27,7 @@ impl Join {
 	/// Count media from `start` to `end` into the open group, opening one when none is, and return
 	/// whether the group is now full, so the caller cuts it.
 	///
-	/// Media running backwards past the group's start also fills it, since the timeline broke. An
+	/// Media starting before the group's start also fills it, since the timeline broke. An
 	/// unscaled timestamp can't be measured, so it fills its group alone.
 	pub fn fill(&mut self, start: moq_net::Timestamp, end: moq_net::Timestamp) -> bool {
 		let (Ok(start), Ok(end)) = (Duration::try_from(start), Duration::try_from(end)) else {
@@ -35,7 +35,7 @@ impl Join {
 			return true;
 		};
 		let opened = *self.start.get_or_insert(start);
-		let full = self.spans(opened, end);
+		let full = start < opened || self.spans(opened, end);
 		if full {
 			self.start = None;
 		}
@@ -137,8 +137,10 @@ mod tests {
 		// A jump ahead reaches the span at once.
 		assert!(join.fill(micros(5_000_000), micros(5_020_000)));
 		assert!(!join.fill(micros(5_020_000), micros(5_040_000)));
-		// A rewind closes the group it can't continue.
+		// A rewind closes the group it can't continue, even one overlapping the group's start.
 		assert!(join.fill(micros(0), micros(20_000)));
+		assert!(!join.fill(micros(1_000_000), micros(1_020_000)));
+		assert!(join.fill(micros(990_000), micros(1_010_000)));
 		assert!(join.fill(moq_net::Timestamp::unscaled(3), moq_net::Timestamp::unscaled(4)));
 	}
 }

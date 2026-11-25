@@ -71,14 +71,17 @@ Moq.connect("https://relay.example.com", ClientConfig(tls = ClientTls(roots = li
 
 ```kotlin
 // Publish encoded frames, or raw pixels with the codec inside the binding.
-// opusInit, packet, pts, and rgba come from your encoder or capture source.
+// opusInit, packets, pts, and rgba come from your encoder or capture source.
 Moq.connect("https://relay.example.com").use { moq ->
     // Hidden until the catalog is filled; hold the route while it should stay announced.
     val route = moq.route("my-stream.hang", RouteOptions(hidden = true))
     val broadcast = route.broadcast()
     val audio = dev.moq.media.TrackProducer.audio(broadcast, Named(null), AudioInit(format = AudioFormat.opus(), data = opusInit))
-    audio.writeFrame(Frame(payload = packet, timestamp = Timestamp(960u, 48_000u)))
-    audio.cut() // once a group holds 100 ms: audio has no keyframes, so cuts give it groups
+    packets.forEachIndexed { i, packet -> // 20 ms of Opus each
+        audio.writeFrame(Frame(payload = packet, timestamp = Timestamp(960uL * i.toULong(), 48_000u)))
+        // Five packets fill a 100 ms group: audio has no keyframes, so cuts give it groups.
+        if (i % 5 == 4) audio.cut()
+    }
 
     val video = dev.moq.video.Producer(
         CatalogProducer(broadcast),

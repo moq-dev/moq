@@ -93,14 +93,18 @@ import (
 )
 
 // Publish encoded frames, or raw pixels with the codec inside the binding.
-// opusInit, packet, pts (90 kHz ticks), and rgba come from your encoder or capture source.
+// opusInit, packets, pts (90 kHz ticks), and rgba come from your encoder or capture source.
 // Hidden until the catalog is filled; keep the route reachable while publishing.
 route, _ := client.Route("my-stream.hang", moq.RouteOptions{Hidden: true})
 broadcast := route.Broadcast()
 audio, _ := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Named{}, moqmedia.AudioInit{Format: moqmedia.OpusAudioFormat(), Data: opusInit})
-timestamp := moq.TimestampFromScale(960, 48_000) // 20 ms on the Opus sample clock
-_ = audio.WriteFrame(moq.Frame{Payload: packet, Timestamp: timestamp})
-_ = audio.Cut() // once a group holds 100 ms: audio has no keyframes, so cuts give it groups
+for i, packet := range packets { // 20 ms of Opus each
+    timestamp := moq.TimestampFromScale(uint64(i)*960, 48_000) // on the Opus sample clock
+    _ = audio.WriteFrame(moq.Frame{Payload: packet, Timestamp: timestamp})
+    if i%5 == 4 {
+        _ = audio.Cut() // five packets fill a 100 ms group: audio has no keyframes, so cuts give it groups
+    }
+}
 
 track := "camera"
 catalogProducer, _ := moqmedia.NewCatalogProducer(broadcast)
