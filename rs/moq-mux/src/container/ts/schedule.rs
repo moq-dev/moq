@@ -1439,8 +1439,8 @@ impl Schedule {
 	/// so the grid adds one only to a period without. The copy is due in its slot and goes out
 	/// as soon as TBsys and Bsys take it, past the copies the media leads when it matches them,
 	/// never past a different version; padded, a copy of the same tables still in Bsys covers
-	/// it ([`Self::covered`]), and unpadded, one laid before it in the same slot. Periods are absolute on the grid, so two exporters of a
-	/// broadcast repeat in the same slots.
+	/// it ([`Self::covered`]), and unpadded, one laid before it in the same slot. Periods are
+	/// absolute on the grid, so two exporters of a broadcast repeat in the same slots.
 	fn repeat(&mut self, index: u128) {
 		let period = index / REPEAT_SLOTS;
 		// Tables too large for Bsys to take each period repeat as fast as it takes them.
