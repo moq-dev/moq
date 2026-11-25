@@ -601,8 +601,8 @@ impl Consumer {
 		if std::mem::take(&mut self.warmup_pending) && !track_start {
 			let warmup = self.warmup.saturating_sub(self.primed);
 			if !warmup.is_zero() {
-				let warmup = moq_net::Timestamp::try_from(warmup)?
-					.convert(timestamp.scale().ok_or(moq_net::TimeOverflow)?)?;
+				let warmup =
+					moq_net::Timestamp::try_from(warmup)?.convert(timestamp.scale().ok_or(moq_net::TimeOverflow)?)?;
 				self.warmup_until = Some(timestamp.checked_add(warmup)?);
 			}
 		}
@@ -1956,8 +1956,10 @@ mod tests {
 				Read::Frame(frame) => {
 					let pcm: Vec<f32> = frame
 						.data
-						.chunks_exact(4)
-						.map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+						.as_chunks::<4>()
+						.0
+						.iter()
+						.map(|b| f32::from_le_bytes(*b))
 						.collect();
 					let rms = (pcm.iter().map(|s| s * s).sum::<f32>() / pcm.len() as f32).sqrt();
 					Event::Frame(frame.timestamp.as_micros().unwrap(), pcm.len(), rms)
