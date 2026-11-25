@@ -1473,6 +1473,50 @@ test("fill: a refused head gives its group up, and the bounded reader moves past
 	broadcast.close();
 });
 
+// A head a bounded read still asks goes stale once the budget passes it: only the clock gives it up,
+// so the read wakes for that rather than waiting on a fill that never answers. An arrival read hands
+// out group 3 first, then ends; an ordered one waits on group 2 before it. Mirrors the Rust
+// `an_ordered_read_gives_up_a_head_still_asked_past_its_budget`.
+test.each(["arrival", "sequence"])("fill: a %s read gives up a head still asked past its budget", async (mode) => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const { broadcast, track } = headless();
+		const requests = track.requests();
+		const reader = track.subscribe({
+			ranges: [{ start: { live: { min: null, max: Duration.millis(100) } }, end: 3n }],
+		});
+		const ordered = mode === "sequence" ? reader.ordered() : undefined;
+		const next = () => (ordered ? ordered.nextGroup() : reader.recvGroup());
+		if (!ordered) expect((await next())?.start).toBe(3n);
+		// Null until the read resolves: cast, since TypeScript would narrow it to null for good.
+		let took = null as bigint | undefined | null;
+		const read = next().then((group) => {
+			took = group?.start;
+		});
+		let fill = await requests.requestedFill();
+		// The join reaches back past the oldest group held, which an ordered read asks a fill for
+		// first: none exists.
+		if (ordered && fill?.start === 0n) {
+			fill.dropGroups(fill.start, fill.end);
+			fill.close();
+			fill = await requests.requestedFill();
+		}
+		expect([fill?.start, fill?.end]).toEqual([2n, 3n]);
+		await yieldNow();
+		expect(took).toBeNull();
+
+		await clock.advance(Duration.millis(200));
+		await read;
+		expect(took).toBe(ordered ? 3n : undefined);
+
+		requests.close();
+		broadcast.close();
+	} finally {
+		installed.close();
+	}
+});
+
 test.each([
 	["arrival", "drop"],
 	["arrival", "close"],
