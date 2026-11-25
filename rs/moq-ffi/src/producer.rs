@@ -433,6 +433,10 @@ impl MoqBroadcastProducer {
 	/// Same pattern as moq-boy's `status` and `command` tracks: raw UTF-8/JSON
 	/// bytes written directly to moq-lite groups with no media framing. `info` sets
 	/// track properties (priority, max age, timescale); omit for defaults.
+	///
+	/// Errors with `Duplicate` while a live track holds the name, including one whose last
+	/// producer was released while read and whose request handler has not answered its
+	/// renewal, unless `info` is the one that track was published with.
 	pub fn publish_track(&self, name: String, info: Option<MoqTrackInfo>) -> Result<Arc<MoqTrackProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		self.with_state(|state| {

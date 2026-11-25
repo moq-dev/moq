@@ -68,6 +68,9 @@ fn timed(timestamp: moq_net::Timestamp, duration: Option<moq_net::Timestamp>) ->
 ///
 /// This is useful for CMAF where multiple samples should be packed into one moof+mdat.
 pub struct Producer<C: Container, R = ()> {
+	/// The catalog rendition this media producer owns, when it was created through a catalog.
+	/// Dropped before the track, so a handler asked for the track again finds the name free.
+	rendition: Option<Box<dyn Rendition<R>>>,
 	inner: moq_net::track::Producer,
 	container: C,
 	group: Option<moq_net::group::Producer>,
@@ -141,8 +144,6 @@ pub struct Producer<C: Container, R = ()> {
 	/// Named `bandwidth` so it is not confused with the catalog-gate [`Reserved`].
 	bandwidth: Option<crate::catalog::Claim>,
 
-	/// The catalog rendition this media producer owns, when it was created through a catalog.
-	rendition: Option<Box<dyn Rendition<R>>>,
 
 	/// The counters the catalog reports for this track, when it was created through a catalog.
 	sent: Option<std::sync::Arc<crate::stats::Sent>>,

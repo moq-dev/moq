@@ -470,6 +470,16 @@ enum Publication {
 	Published,
 }
 
+/// Where a track stood when it was asked for again because its last producer dropped while
+/// read; it describes the track until the next producer appends a group.
+#[derive(Clone, Copy, Debug)]
+struct Renewal {
+	/// Where that producer stopped, found before the groups it left open went.
+	resume: Option<Position>,
+	/// The next group key then: a producer appending anything moves past it.
+	next_key: u64,
+}
+
 /// How far a track got toward its end; each step replaces the last, and only an abort
 /// follows a seal or a drop.
 #[derive(Debug, Default)]
@@ -691,6 +701,8 @@ pub(crate) struct TrackState {
 	// How far the track got toward a live Producer. A reverse fetch may install `info`
 	// before acceptance, so the two are deliberately separate.
 	publication: Publication,
+	// Set when the track is asked for again because its last producer dropped while read.
+	renewal: Option<Renewal>,
 
 	// The broadcast this track belongs to. Supplies the cache pool its groups charge
 	// into and the local `cache_duration` ceiling.
@@ -3454,6 +3466,11 @@ impl TrackState {
 		self.max_key.map_or(0, |max| max + 1)
 	}
 
+	/// The renewal the track is still on, when no producer appended a group since.
+	fn unproductive_renewal(&self) -> Option<Renewal> {
+		self.renewal.filter(|renewal| renewal.next_key == self.next_key())
+	}
+
 	/// The copy of the feed's `key` that still answers from `frame_start`, if any.
 	///
 	/// A dead (aborted or evicted) copy holds nothing, and neither does one that starts
@@ -4275,6 +4292,10 @@ impl TrackState {
 		} = self.outcome
 		{
 			return Some(resume);
+		}
+		// Likewise while nothing was appended since the track was asked for again.
+		if let Some(renewal) = self.unproductive_renewal() {
+			return renewal.resume;
 		}
 
 		let max = self.latest_group?;
@@ -6696,7 +6717,9 @@ impl Drop for Alive {
 				return;
 			}
 		}
-		let Some(home) = self.home.get().cloned() else {
+		// A producer that served a renewal and appended nothing is not asked for again: a
+		// handler that fails at once would otherwise loop for as long as the reader stays.
+		let Some(home) = self.home.get().cloned().filter(|_| state.unproductive_renewal().is_none()) else {
 			return Self::drop_wanted(state, &self.name);
 		};
 		// A reader still wants the track, so its broadcast asks for it again, as a later lookup
@@ -6705,6 +6728,11 @@ impl Drop for Alive {
 		// groups replace them, so a reader holding one moves on as past any group gone old.
 		let (resume, open) = state.tear_down(Error::Old);
 		state.publication = Publication::Pending;
+		// Kept in the state, so a refusal reached later still resumes where this producer stopped.
+		state.renewal = Some(Renewal {
+			resume,
+			next_key: state.next_key(),
+		});
 		drop(state);
 		open.abort();
 		let request = Request::renew(self.name.clone(), self.state.clone(), home.clone());

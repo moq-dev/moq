@@ -327,6 +327,10 @@ impl Producer {
 	/// Produce a new track and insert it into the broadcast, or `None` while a live track
 	/// holds the name.
 	///
+	/// A track whose last producer dropped while read keeps holding its name until the
+	/// broadcast's [`Requests`] handler answers the renewal: this fulfils that renewal when
+	/// `info` is the one the track was first accepted with, and returns `None` otherwise.
+	///
 	/// Pass a name and an optional [`track::Info`], so a bare name works:
 	/// `create_track("video", None)` creates an untimed track.
 	pub fn create_track(
@@ -2874,6 +2878,58 @@ mod test {
 			handle.resume_position(),
 			Some(crate::track::Position { group: 0, frame: 2 })
 		);
+	}
+
+	/// A renewal queued for a handler that then refuses it still resumes where the producer
+	/// stopped, though the group it stopped in is gone.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_queued_renewal_refused_later_resumes_where_the_producer_stopped() {
+		let at = |millis| crate::Timestamp::from_millis(millis).unwrap();
+		let producer = Info::new().produce();
+		let mut dynamic = producer.requests();
+		let consumer = producer.consume();
+		let track = producer.create_track("video", crate::track::Info::timed()).unwrap();
+		let handle = track.consume();
+		let _reader = consumer.track("video").unwrap().subscribe(None).await.unwrap();
+		let mut open = track.append_next().unwrap();
+		open.write_frame(at(0), b"a".as_slice()).unwrap();
+		open.write_frame(at(1), b"b".as_slice()).unwrap();
+		drop((track, open));
+
+		dynamic.assert_request().reject(Error::Unroutable);
+		assert_eq!(
+			handle.resume_position(),
+			Some(crate::track::Position { group: 0, frame: 2 })
+		);
+	}
+
+	/// A renewal whose producer appended nothing and dropped while still read ends its readers
+	/// with `Dropped` rather than asking again, so a handler failing at once cannot loop.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_renewal_that_produced_nothing_is_not_renewed_again() {
+		let producer = Info::new().produce();
+		let mut dynamic = producer.requests();
+		let consumer = producer.consume();
+		let track = producer.create_track("video", crate::track::Info::timed()).unwrap();
+		let mut reader = consumer.track("video").unwrap().subscribe(None).await.unwrap();
+		track.append_next().unwrap().finish().unwrap();
+		drop(track);
+
+		drop(dynamic.assert_request().accept(crate::track::Info::timed()));
+		dynamic.assert_no_request();
+		assert_eq!(reader.recv_group().await.unwrap().unwrap().start, 0);
+		assert!(matches!(reader.recv_group().await, Err(Error::Dropped)));
+
+		// One that produced is asked for again.
+		let subscribing = subscribe_pending!(consumer, "video");
+		let next = dynamic.assert_request().accept(crate::track::Info::timed());
+		let mut reader = subscribing.await.unwrap();
+		next.append_next().unwrap().finish().unwrap();
+		drop(next);
+		dynamic.assert_request();
+		assert_eq!(reader.recv_group().await.unwrap().unwrap().start, 0);
 	}
 
 	#[test]

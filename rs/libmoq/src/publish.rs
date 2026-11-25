@@ -1206,6 +1206,10 @@ impl Publish {
 	/// No codec, container, or catalog framing. This is the moq-net primitive
 	/// for non-media tracks. Pair it with [`Self::video_config`] / [`Self::audio_config`]
 	/// if you want to describe the track in the catalog as well.
+	///
+	/// Errors with `Duplicate` while a live track holds the name, including one whose last
+	/// producer was released while read and whose request handler has not answered its
+	/// renewal, unless `info` is the one that track was published with.
 	pub fn track(&mut self, broadcast: Id, name: &str, info: Option<moq_net::track::Info>) -> Result<Id, Error> {
 		let children = self.children(broadcast)?;
 		let broadcast = self.producer(broadcast)?;
