@@ -2187,6 +2187,27 @@ mod tests {
 		assert_eq!(collect_starts(consumer).await, vec![0, 42]);
 	}
 
+	/// A seek can stamp a group's keyframe past where its source says the content stops, so a cut
+	/// at that source end, as an audio importer makes, still closes the group.
+	#[tokio::test]
+	async fn cut_at_the_source_end_of_a_moved_group() {
+		for frames in [&[0][..], &[0, 20_000, 40_000, 60_000, 80_000]] {
+			let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
+			let consumer = track.subscribe(replay());
+			let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Audio));
+
+			producer.seek(1_000_000).unwrap();
+			for (i, &timestamp) in frames.iter().enumerate() {
+				producer.write(frame(timestamp, i == 0)).unwrap();
+			}
+			let end = frames.last().unwrap() + 20_000;
+			producer.cut(Some(Timestamp::from_micros(end).unwrap())).unwrap();
+			let _finished = producer.finish().unwrap();
+
+			assert_eq!(collect_groups(consumer).await, vec![frames.len()]);
+		}
+	}
+
 	/// A seek made before a decoder identity change keys the successor's first group.
 	#[tokio::test]
 	async fn a_seek_carries_across_a_new_identity() {
