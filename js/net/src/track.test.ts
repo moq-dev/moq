@@ -6398,6 +6398,49 @@ test("track: a bounded join answered empty delivers nothing past a declared end"
 	}
 });
 
+// A copy whose keys past a group are given up places a time start inside that group once a later
+// frame passes the time or the group ends, which changes only the group: an arrival read and an
+// ordered read parked on it wake then and take the group. Mirrors the Rust
+// `a_frame_or_end_placing_a_time_start_wakes_its_reads`.
+test("track: a frame or end placing a time start wakes its reads", async () => {
+	for (const place of ["frame", "finish", "finishAt"] as const) {
+		const producer = receivedTrack({ timescale: Timescale.MILLI });
+		try {
+			const group = producer.createGroup(1000n);
+			group.writeFrame(textFrame("x", Timestamp.fromMillis(1000)));
+			producer.skipGroups(1001n, 2000n);
+			const from = () => withMax({ delay: { max: null }, ranges: [{ start: 1500n }] });
+			const arrival = producer.subscribe(from());
+			const ordered = producer.subscribe(from()).ordered();
+			let orderedTook: bigint | undefined;
+			// The read left parked fails once the track closes unfinished.
+			const read = ordered.nextGroup().then((taken) => {
+				orderedTook = taken?.start;
+			});
+			await yieldNow();
+			expect(arrival.tryRecvGroup()).toBeUndefined();
+			let woke = false;
+			const dispose = hooks.groupChanged(arrival, () => {
+				woke = true;
+			});
+			// Ending before the time leaves it in the skipped keys past the group, which reads none.
+			if (place === "frame") group.writeFrame(textFrame("x", Timestamp.fromMillis(1600)));
+			else if (place === "finish") group.finish();
+			else group.finishAt(1001n);
+			await yieldNow();
+			dispose();
+			const taken = place === "finishAt" ? undefined : 1000n;
+			expect([place, woke]).toEqual([place, true]);
+			expect([place, arrival.tryRecvGroup()?.start]).toEqual([place, taken]);
+			expect([place, orderedTook]).toEqual([place, taken]);
+			producer.close();
+			await read.catch(() => undefined);
+		} finally {
+			producer.close();
+		}
+	}
+});
+
 // Mirrors moq-net's `unplaced_holds_only_what_containing_cant_place`: a run holds only times
 // `containing` can't place, but those a reported start places directly, and a time it leaves out
 // lies between two held groups, which the window tries each time.

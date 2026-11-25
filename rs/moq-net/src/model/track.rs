@@ -2546,6 +2546,22 @@ impl TrackState {
 		}
 	}
 
+	/// Wake `waiter` once the group held at or before each of `times` places it: a frame past
+	/// the time or the group ending changes only the group, yet lets
+	/// [`Self::containing_received`] place the time.
+	fn watch_places(&self, times: impl Iterator<Item = u64>, waiter: &kio::Waiter) {
+		if self.anchors != Anchors::Wire {
+			return;
+		}
+		for time in times {
+			if let Some((_, slot)) = self.lookup.range(..=time).next_back() {
+				for copy in slot.copies() {
+					let _ = copy.poll_past(waiter, time);
+				}
+			}
+		}
+	}
+
 	/// The live-feed groups in `range` still served: an aborted one cannot start a join, whose
 	/// floor would then pass the usable group before it.
 	fn walked(&self, range: impl ops::RangeBounds<u64>) -> impl DoubleEndedIterator<Item = (&u64, &Slot)> {
@@ -10814,6 +10830,7 @@ impl Cursor {
 				if self.filter.window.is_reaching() {
 					state.watch_starts(waiter);
 				}
+				state.watch_places(self.filter.window.asks(), waiter);
 			}
 			res
 		});
@@ -12690,12 +12707,14 @@ impl Subscriber {
 		};
 		if unplaced(&cursor.filter) {
 			// Registered before syncing again, so a change placing it after this wakes it, such
-			// as the upstream's answer to the range asked, or a live group starting. A closed
-			// track places it at once, since nothing more can arrive.
+			// as the upstream's answer to the range asked, a live group starting, or a group
+			// placing a time. A closed track places it at once, since nothing more can arrive.
+			let window = &cursor.filter.window;
 			let closed = cursor
 				.state
 				.poll(waiter, |state| {
 					state.watch_starts(waiter);
+					state.watch_places(window.asks(), waiter);
 					Poll::<()>::Pending
 				})
 				.is_ready();
@@ -18223,6 +18242,69 @@ mod test {
 		assert!(third.refused().is_none());
 		drop(third);
 		assert_eq!(asks(&producer), Vec::<u64>::new());
+	}
+
+	/// A copy whose keys past a group are given up places a time start inside that group once a
+	/// later frame passes the time or the group ends, which changes only the group: the start,
+	/// an arrival read, and an ordered read parked on it all wake then and take the group.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_frame_or_end_placing_a_time_start_wakes_its_reads() {
+		enum Place {
+			Frame,
+			Finish,
+			FinishAt,
+		}
+		for place in [Place::Frame, Place::Finish, Place::FinishAt] {
+			let producer = track_producer("test", Info::timed());
+			producer.received();
+			producer.anchored();
+			let mut group = producer.create_group(group::Info { start: 1000 }).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(1000).unwrap(), &b"x"[..])
+				.unwrap();
+			producer.skip_groups(1001..2000);
+			let from = || {
+				Subscription::default()
+					.with_ranges([Range {
+						start: crate::track::Start::Time(1500),
+						end: None,
+					}])
+					.with_max(None)
+			};
+			let mut start = producer.subscribe(from());
+			let mut arrival = producer.subscribe(from());
+			let mut ordered = producer.subscribe(from()).ordered();
+			let flags = [Flag::waiter(), Flag::waiter(), Flag::waiter()];
+			assert!(start.poll_start(&flags[0].1).is_pending());
+			assert!(arrival.poll_recv_group(&flags[1].1).is_pending());
+			assert!(ordered.poll_next_group(&flags[2].1).is_pending());
+			for (flag, _) in &flags {
+				flag.take();
+			}
+			// Ending before the time leaves it in the skipped keys past the group, which reads none.
+			let (_finished, taken) = match place {
+				Place::Frame => {
+					group
+						.write_frame(Timestamp::from_millis(1600).unwrap(), &b"x"[..])
+						.unwrap();
+					(None, Some(1000))
+				}
+				Place::Finish => (Some(group.finish().unwrap()), Some(1000)),
+				Place::FinishAt => (Some(group.finish_at(1001).unwrap()), None),
+			};
+			for (flag, _) in &flags {
+				assert!(flag.take(), "placing the start wakes each read");
+			}
+			let start_of = |polled: Poll<Result<Option<group::Consumer>>>| match polled {
+				Poll::Ready(Ok(Some(group))) => Some(group.start),
+				Poll::Pending => None,
+				Poll::Ready(other) => panic!("unexpected read: {:?}", other.map(|_| ())),
+			};
+			assert!(start.poll_start(&flags[0].1).is_ready());
+			assert_eq!(start_of(arrival.poll_recv_group(&flags[1].1)), taken);
+			assert_eq!(start_of(ordered.poll_next_group(&flags[2].1)), taken);
+		}
 	}
 
 	/// A refused time start places its reader's start, so a publisher waiting on that start

@@ -1044,6 +1044,9 @@ let unplacedFromAt: (producer: Producer, key: bigint) => bigint | undefined;
 // The group a lookup's floor is past: the held one just below it, or a whole one ending there.
 // Assigned in its static block.
 let belowFloor: (producer: Producer, floor: bigint) => { key: bigint; group: GroupProducer } | undefined;
+// The held group at or before `time` that doesn't place it yet: a frame past the time or the group
+// ending places it, changing only the group. Assigned in its static block.
+let unplacingAt: (producer: Producer, time: bigint) => GroupProducer | undefined;
 
 // Whether the held group at `key` places `time`: finished, or holding a frame past it.
 function placesAt(producer: Producer, key: bigint, time: bigint): boolean {
@@ -1744,6 +1747,12 @@ export class Producer {
 			if (key === undefined || entry === undefined) return undefined;
 			if (key + 1n !== floor && hooks.groupWholeEnd(entry.group) !== floor) return undefined;
 			return { key, group: entry.group };
+		};
+		unplacingAt = (producer, time) => {
+			const keys = producer.#keys;
+			const key = keys[keyIndex(keys, time + 1n) - 1];
+			const entry = key === undefined ? undefined : producer.#cached.get(key);
+			return entry && !placesAt(producer, entry.group.start, time) ? entry.group : undefined;
 		};
 		unplacedFromAt = (producer, key) => {
 			const entry = producer.#cached.get(key);
@@ -6002,6 +6011,14 @@ export class Subscriber {
 			),
 			// A handler opening takes a miss nobody could ask before.
 			...(producer ? [fillsOf(producer).opened.changed(fn)] : []),
+			// A frame past a time start a received copy waits on, or its group ending, places it with
+			// no change to the track. Mirrors the Rust `TrackState::watch_places`.
+			...(producer && receivedCopy(producer) && !this.#state.dropsAnchors.peek()
+				? this.#window.asks().flatMap((time) => {
+						const group = unplacingAt(producer, time);
+						return group ? [group.closed.changed(fn), hooks.groupWrites(group).changed(fn)] : [];
+					})
+				: []),
 			this.#state.startChanged.changed(fn),
 			// A group starting may settle a time end, or move the cap it holds reads back with.
 			...(this.#window.settled ? [] : [this.#state.timelineChanged.changed(fn)]),
