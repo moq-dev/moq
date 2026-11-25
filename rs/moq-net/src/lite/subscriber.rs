@@ -9265,7 +9265,11 @@ mod tests {
 	async fn an_update_waiting_on_credit_still_reads_and_cancels() {
 		use crate::transport::poll::{RecvStream as _, SendStream as _, Session as _};
 		for version in [Version::Lite06, Version::Lite07] {
-			for cancel in [false, true] {
+			// Draining: lite-07 fills still ask for a run whose stream arrives, which only a reader keeps.
+			for (cancel, draining) in [(false, false), (true, false), (true, true)] {
+				if draining && !version.has_ranges() {
+					continue;
+				}
 				// One queued message per stream, so a peer that stops reading stalls the writer.
 				let config = crate::transport::memory::Config {
 					stream_buffer: 0,
@@ -9296,7 +9300,9 @@ mod tests {
 				};
 				let waiter = kio::Waiter::noop();
 				let broadcast = crate::broadcast::Info::new().produce();
-				let mut serving = ServeLoop::new(&serve, broadcast.reserve_track("video").unwrap(), Default::default());
+				// Timed, for the group a draining run waits on.
+				let info = track::Info::timed();
+				let mut serving = ServeLoop::new(&serve, broadcast.reserve_track("video").unwrap(), info);
 				let live = serving.serving.subscribe(None);
 				assert!(serving.poll(&serve, &waiter).is_pending());
 				let (mut send, mut recv) = kio::wait(|waiter| peer.poll_accept_bi(waiter)).await.unwrap();
@@ -9311,11 +9317,22 @@ mod tests {
 				assert!(serving.poll(&serve, &waiter).is_pending());
 
 				if cancel {
+					let mut _arriving = None;
+					if draining {
+						let mut group = serving.serving.create_group(group::Info { start: 0 }).unwrap();
+						group.write_frame(group.key_time(), b"x".as_slice()).unwrap();
+						_arriving = Some(group);
+						serving.range_fills.ask.groups.insert(0..1);
+					}
 					drop((live, history, urgent));
 					assert!(serving.poll(&serve, &waiter).is_pending());
 					assert!(
 						matches!(serving.sub, Sub::None),
-						"{version:?}: the subscription is cancelled with its update unsent"
+						"{version:?} draining {draining}: the subscription is cancelled with its update unsent"
+					);
+					assert!(
+						!serving.deferred,
+						"{version:?} draining {draining}: nothing is left to apply"
 					);
 					continue;
 				}
@@ -14681,6 +14698,12 @@ impl ServeLoop {
 		self.serving.seen_subscription(None);
 	}
 
+	/// Whether applying `pref` cancels the subscription: neither the demand nor the fills ask
+	/// for anything. A cancel sends no update, so it never waits for one to flush.
+	fn cancels(&self, pref: &Option<Subscription>) -> bool {
+		pref.is_none() && self.range_fills.ask.is_empty()
+	}
+
 	/// Apply a demand change: open, update, or cancel the upstream subscription.
 	fn begin(&mut self, serve: &TrackServe, pref: Option<Subscription>) -> Result<(), Error> {
 		match serve.begin_subscription(
@@ -14697,6 +14720,11 @@ impl ServeLoop {
 				self.mode = ServeMode::Establish(est);
 			}
 			Begin::None => {}
+		}
+		// A change held back for an update applies to the subscription that update was on, so
+		// none outlives it: a fresh one asks for the demand as it is then.
+		if matches!(self.sub, Sub::None) {
+			self.deferred = false;
 		}
 		// A finished track's tail waits a fresh grace for what an update newly asked for,
 		// rather than a deadline that may have passed while an earlier stream was read.
@@ -15247,10 +15275,7 @@ impl ServeLoop {
 						Poll::Pending => {}
 					}
 					match self.serving.poll_subscription_changed(waiter) {
-						// Cancelling sends no update, so it never waits for one.
-						Poll::Ready(Ok(pref)) if flushing && (pref.is_some() || !self.range_fills.ask.is_empty()) => {
-							self.deferred = true;
-						}
+						Poll::Ready(Ok(pref)) if flushing && !self.cancels(&pref) => self.deferred = true,
 						Poll::Ready(Ok(pref)) => {
 							// Updating the upstream failed: hand the track back for another
 							// route to resume.
@@ -15301,12 +15326,16 @@ impl ServeLoop {
 						.poll(serve, &self.serving, accounted.as_ref(), read, waiter);
 					Self::walk_fills(serve, &mut self.range_fills, &mut self.fetches, &self.serving);
 					match polled {
-						Ok(true) if flushing => self.deferred = true,
 						Ok(true) => {
-							if let Err(err) = self.begin(serve, self.serving.subscription()) {
-								return Poll::Ready(ServeEnd::GiveBack(err));
+							let pref = self.serving.subscription();
+							if flushing && !self.cancels(&pref) {
+								self.deferred = true;
+							} else {
+								if let Err(err) = self.begin(serve, pref) {
+									return Poll::Ready(ServeEnd::GiveBack(err));
+								}
+								continue;
 							}
-							continue;
 						}
 						Ok(false) => {}
 						Err(err) => return Poll::Ready(ServeEnd::GiveBack(err)),
