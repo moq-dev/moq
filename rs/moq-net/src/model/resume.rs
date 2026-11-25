@@ -11265,7 +11265,9 @@ mod test {
 				got.extend(drain(&mut sub, ordered));
 				write(&b, 9);
 				got.extend(drain(&mut sub, ordered));
-				assert_eq!(got, [5, 6, 8, 9], "fail={fail} ordered={ordered}");
+				// An arrival read takes the groups it holds newest first.
+				let expected = if ordered { [5, 6, 8, 9] } else { [8, 6, 5, 9] };
+				assert_eq!(got, expected, "fail={fail} ordered={ordered}");
 			}
 		}
 	}
@@ -11657,7 +11659,7 @@ mod test {
 			.now_or_never()
 			.unwrap()
 			.unwrap();
-		assert_eq!(drain(&mut sub, false), [0, 2]);
+		assert_eq!(drain(&mut sub, false), [2, 0]);
 		let b = received_copy();
 		b.anchored();
 		routes.serve(b.consume());
@@ -12497,7 +12499,9 @@ mod test {
 			};
 			let placed = |ranges: Vec<track::Range>| Subscription {
 				placed: [(0, 3)].into(),
-				..Subscription::default().with_ranges(ranges)
+				..Subscription::default()
+					.with_ranges(ranges)
+					.with_order(track::Order::Ascending)
 			};
 			let preferences = track::Preferences::from(placed(vec![join]));
 			let mut sub = routes.consume().subscribe(preferences.clone());
@@ -12589,10 +12593,12 @@ mod test {
 			max: None,
 		};
 		let ranges = |back| {
-			Subscription::default().with_ranges([track::Range {
-				start: join(back),
-				end: Some(1_000_000 + back),
-			}])
+			Subscription::default()
+				.with_ranges([track::Range {
+					start: join(back),
+					end: Some(1_000_000 + back),
+				}])
+				.with_order(track::Order::Ascending)
 		};
 		let preferences = track::Preferences::from(ranges(5));
 		let mut sub = routes.consume().subscribe(preferences.clone());
@@ -12637,7 +12643,11 @@ mod test {
 				false => vec![first],
 				true => vec![first, past],
 			};
-			let preferences = track::Preferences::from(Subscription::default().with_ranges(ranges));
+			let preferences = track::Preferences::from(
+				Subscription::default()
+					.with_ranges(ranges)
+					.with_order(track::Order::Ascending),
+			);
 			let mut sub = routes.consume().subscribe(preferences.clone());
 			let mut delivered = Delivered::default();
 			let Poll::Ready(Ok(Some(candidate))) =
@@ -12659,7 +12669,11 @@ mod test {
 			match switched {
 				// Not yet mirrored into the copies: group 8 holds time 100.
 				false => preferences
-					.update(Subscription::default().with_ranges([first, past]))
+					.update(
+						Subscription::default()
+							.with_ranges([first, past])
+							.with_order(track::Order::Ascending),
+					)
 					.unwrap(),
 				// The new copy answered, holding nothing yet.
 				true => {
@@ -12760,7 +12774,7 @@ mod test {
 		for key in (0..=50).step_by(10) {
 			write(&a, key);
 		}
-		assert_eq!(drain(&mut sub, false), [0, 10, 20, 30, 40, 50]);
+		assert_eq!(drain(&mut sub, false), [50, 40, 30, 20, 10, 0]);
 		assert_eq!(sub.delivered_runs(), 6, "every gap is still owed");
 		sub.update(Subscription::default().with_range(50..=50)).unwrap();
 		assert_eq!(sub.delivered_runs(), 2, "0 through 40, then 50");
@@ -14761,7 +14775,11 @@ mod test {
 		write(&a, 1);
 		routes.serve(a.consume());
 		let budget = Duration::from_secs(1);
-		let mut sub = subscribe(&logical, budget);
+		// Oldest first, so group 1 is left unread.
+		let ascending = Subscription::default()
+			.with_max(budget)
+			.with_order(track::Order::Ascending);
+		let mut sub = logical.consume().subscribe(ascending).now_or_never().unwrap().unwrap();
 		assert_eq!(recv(&mut sub).start, 0);
 		sub.set_range(..1);
 		let b = copy();
@@ -14785,7 +14803,7 @@ mod test {
 		write(&a, 3);
 		routes.serve(a.consume());
 		let mut sub = subscribe_until(&logical, 5);
-		assert_eq!(drain(&mut sub, false), [0, 3]);
+		assert_eq!(drain(&mut sub, false), [3, 0]);
 		let mut sub = sub.with_range(2..6);
 		let b = copy();
 		write(&b, 4);
@@ -14810,7 +14828,7 @@ mod test {
 		write(&a, 3);
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, HOUR);
-		assert_eq!(drain(&mut sub, false), [0, 3]);
+		assert_eq!(drain(&mut sub, false), [3, 0]);
 		let b = copy();
 		write(&b, 4);
 		routes.serve(b.consume());
@@ -14835,7 +14853,7 @@ mod test {
 		}
 		routes.serve(a.consume());
 		let mut sub = subscribe_until(&logical, 9);
-		assert_eq!(drain(&mut sub, false), [0, 1, 2]);
+		assert_eq!(drain(&mut sub, false), [2, 1, 0]);
 		// Asked from 2, it never gets 3.
 		let b = received_copy();
 		let b_fills = b.requests();
