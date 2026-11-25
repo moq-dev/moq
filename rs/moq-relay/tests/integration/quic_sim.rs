@@ -315,9 +315,10 @@ fn many_groups_carry_bulk_transfers_losslessly() {
 }
 
 /// How many bulk transfers share one connection in
-/// [`concurrent_groups_carry_bulk_transfers_losslessly`]: well past the two that pause when
-/// each paused stream holds its whole stream window.
-const SESSIONS: usize = 12;
+/// [`concurrent_groups_carry_bulk_transfers_losslessly`]: past the two that pause when each
+/// paused stream holds its whole stream window, which evicts one. Each costs the same CPU to
+/// simulate, so more is left to [`MANY`].
+const SESSIONS: usize = 4;
 
 /// How many share one in [`many_groups_carry_bulk_transfers_losslessly`]. Past a couple of
 /// hundred, the frames in flight at once each hold credit until they seal, and that fills

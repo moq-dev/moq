@@ -34,4 +34,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Test coverage audit](/quest/m3/audit-test-coverage.md) - the line-coverage reports this complements
+- [Test coverage audit](/quest/m3/audit-tests.md) - the line-coverage reports this complements

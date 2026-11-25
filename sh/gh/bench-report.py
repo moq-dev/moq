@@ -295,8 +295,8 @@ def prepare(directory, output):
                 stream.write(f"{name}={str(bool(entries)).lower()}\n")
 
 
-# Kixel Quest reads at most this many bytes of a run attempt's metrics, across its artifacts.
-KIXEL_LIMIT = 1 << 20
+# Kixel Quest reads at most this many bytes of each inflated metrics file.
+KIXEL_LIMIT = 8 << 20
 # The measure an entry that is no benchmark CSV column records, by its unit; any other unit names its own.
 MEASURES = {"ns": "time", "bytes": "size"}
 

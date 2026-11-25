@@ -58,9 +58,9 @@ names the Environment, and a branch that is not on the list fails to start it.
 | Environment | Deployable from | Holds |
 | --- | --- | --- |
 | `bot` | `main`, `release`, `moq-ffi-v*` | The moq-bot key (`APP_CLIENT_ID`, `APP_PRIVATE_KEY`) alone |
-| `publish` | `release`, `moq-ffi-v*`, `moq-relay-v*`, `moq-cli-v*` | Registry, signing, and deploy credentials, and the moq-bot key for jobs that also need one of those |
+| `publish` | `release`, `libmoq-v*`, `moq-boy-v*`, `moq-cli-v*`, `moq-ffi-v*`, `moq-gst-v*`, `moq-relay-v*` | Registry, signing, and deploy credentials, and the moq-bot key for jobs that also need one of those |
 | `alert` | `main` | `DISCORD_WEBHOOK`, for `alert.yml`'s failure posts |
-| `cache-write` | `main`, its merge queue, binary release tags | The mbx and Nix cache write keys ([below](#bootstrapping-the-rust-build-cache)) |
+| `cache-write` | `main`, its merge queue (`gh-readonly-queue/main/*`), binary release tags | The mbx and Nix cache write keys ([below](#bootstrapping-the-rust-build-cache)) |
 | `corpus` | `main` | The private corpus's read key ([below](#bootstrapping-the-video-corpus)) |
 | `npm` | `release` | Nothing; npm's trusted publisher names it |
 | `pypi` | `main`, `release`, `moq-ffi-v*` | Nothing; PyPI's trusted publisher names it |

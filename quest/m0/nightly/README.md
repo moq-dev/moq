@@ -212,3 +212,16 @@ holds it makes the lagging stream's older batch a real change, which marks the c
 so the relay works its ways out again, a constant cost per step. The bench's comment now
 says so. Nightly compares against a base that already carries the cost, so it will not
 flag it again.
+
+Triaged 2026-11-25 (pre-0.22 recurring audits), from run
+[45242597151](https://github.com/moq-dev/moq/actions/runs/45242597151) (`b29b90be29`):
+`Tests (test resume-model)` at seed `1465722607` was fixed by
+[moq-dev/moq#9509](https://github.com/moq-dev/moq/pull/9509); `Nightly (JS coverage)`'s
+`widened_max_age.test.ts` failure is
+[widened-bounded-reader-js](/quest/m0/test-flakes-4/widened-bounded-reader-js.md); and
+`Shipping sizes`' +10% `moq_ffi.dll.lib` is the Windows import library growing with the
+exports [moq-dev/moq#9359](https://github.com/moq-dev/moq/pull/9359) added, while every
+shipped library stayed under the 5% bound. Already owned: `Tests (rs quic-sim)`'s
+`many_groups_carry_bulk_transfers_losslessly` by
+[moq-dev/moq#9439](https://github.com/moq-dev/moq/pull/9439), and the paired benchmark
+regressions by [perf-recheck](/quest/m3/release/perf-recheck.md).

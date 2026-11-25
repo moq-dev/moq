@@ -1024,7 +1024,7 @@ rust2-bench checks against Kixel Quest's limits as it writes it; Nightly reports
 every successful source's report, without its `bench-*` prefix, and each paired
 comparison's base as a second observation of that commit (`just gh
 benchmark-report nightly-metrics`). A benchmark CSV column becomes a measure of
-its row. Kixel Quest reads at most 1 MiB of a run's metrics, and a full Nightly
+its row. Kixel Quest reads at most 8 MiB of each metrics file, and a full Nightly
 writes about 0.87 MiB, so the step fails rather than upload more.
 
 ## Local check capacity
