@@ -61,20 +61,23 @@ Decided 2026-11-23 (maintainer, /quest-run): ✅ Kixel is the immediate user
 the 2026-11-16 deferral lacked. Its robot failover
 ([kixel-ai/kixel.ai#242](https://github.com/kixel-ai/kixel.ai/pull/242)) fixes
 a camera stuck on a silently dead LAN route through this epic's metadata
-standby and [failover](/quest/m3/route-health/failover.md). So the wire goes
-into lite-07 before the cut as
-[lite07-metadata](/quest/m2/lite07-metadata.md), and failover is not blocked
-on lite-08.
+standby and [failover](/quest/m3/route-health/failover.md).
 
-Decided 2026-11-25 (maintainer, /quest-run): ✅ the implementation of
-[meta.md](/quest/m3/route-health/meta.md) and
-[failover](/quest/m3/route-health/failover.md) stays in m3 (rejected: m2,
-m1, m0), and lite07-metadata also serves the mode from every lite-07
-publisher and relay of ours, leaving meta.md the subscriber side.
+Decided 2026-11-25 (maintainer, /quest-run): ✅ "actually move
+SUBSCRIBE_META entirely to m3 and out of lite-07". The metadata mode's wire
+and serving are [wire.md](/quest/m3/route-health/wire.md), on lite-08-wip
+after the lite-07 cut, and lite-07 freezes without the mode. So failover
+waits on the lite-08 wire, and Kixel's failover with it (rejected, both
+reversed: the wire in lite-07 before the cut so failover is not blocked on
+lite-08, decided 2026-11-23; the serving side in m2 so every lite-07
+publisher and relay serves the mode, decided earlier on 2026-11-25).
+[meta.md](/quest/m3/route-health/meta.md) keeps the subscriber side, and
+everything here stays in m3 (rejected: m2, m1, m0).
+
 Decided 2026-11-25 (maintainer, /quest-run): ✅ nothing refuses the mode: a
-relay over an older version subscribes for payload and drops it, and
-moq-transport gets [an extension](/quest/m3/route-health/ietf.md) for the
-mode (rejected: a NOT_SUPPORTED refusal).
+relay whose upstream is lite-07 or earlier subscribes for payload and drops
+it, and moq-transport gets [an extension](/quest/m3/route-health/ietf.md)
+for the mode (rejected: a NOT_SUPPORTED refusal).
 
 New on 2026-11-15, from the prior art this is closest to:
 

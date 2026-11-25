@@ -4,8 +4,8 @@
 
 Rust and JS subscribe to a track's group and frame progress without its
 payload, as a subscription of its own beside payload subscriptions, on the
-lite-07 wire [lite07-metadata](/quest/m2/lite07-metadata.md) defines and
-every lite-07 publisher and relay of ours already serves. A reader
+lite-08 wire [wire.md](/quest/m3/route-health/wire.md) defines and every
+lite-08 publisher and relay of ours already serves. A reader
 that wants the payload opens a payload subscription from its first missing
 frame, and nothing changes mode in place.
 
@@ -34,21 +34,17 @@ the shape below it and is closed with its branch kept):
   gains no field. This reverses 2026-10-13's marker, which existed for
   streams opened before a mode update.
 
-Decided 2026-11-23 (maintainer, /quest-run): ✅ the wire goes into lite-07
-before the cut as [lite07-metadata](/quest/m2/lite07-metadata.md), and this
-quest is the implementation that rides on it (rejected: the whole quest in
-lite-08), since the [epic](/quest/m3/route-health/README.md) now has a
-user. That quest settles the wire this
-Plan recommended: a `Meta` byte on SUBSCRIBE, set when it opens, the
-payload-less FRAME, and no refusal code. Its Plan records what this quest's
-code must keep conforming to.
-
-Decided 2026-11-25 (maintainer, /quest-run): ✅ the serving side moves to
-[lite07-metadata](/quest/m2/lite07-metadata.md) in m2: a publisher serving
-the mode, a relay forwarding metadata demand upstream, both codecs, and the
-TLA+ check of two modes on one track. This quest keeps the subscriber side:
-the API that asks for metadata, the bindings, and what
-[failover](/quest/m3/route-health/failover.md) reads. Resized from L to M.
+Decided 2026-11-25 (maintainer, /quest-run): ✅ "actually move
+SUBSCRIBE_META entirely to m3 and out of lite-07". The wire and the serving
+side are [wire.md](/quest/m3/route-health/wire.md), in m3 on lite-08-wip: a
+publisher serving the mode, a relay forwarding metadata demand upstream, both
+codecs, and the TLA+ check of two modes on one track. This quest keeps the
+subscriber side: the API that asks for metadata, the bindings, and what
+[failover](/quest/m3/route-health/failover.md) reads, so it stays M.
+Rejected, both reversed by it: the wire in lite-07 before the cut with this
+quest the implementation riding on it (decided 2026-11-23), and the serving
+side in m2 on lite-07 (decided earlier on 2026-11-25). wire.md's Plan
+records what this quest's code must keep conforming to.
 
 - Recommended, to confirm when this starts: in the API, an entry and a
   consumer type of their own, so a payload read of a header-only frame cannot
@@ -72,8 +68,8 @@ deleted in [moq-dev/moq#8423](https://github.com/moq-dev/moq/pull/8423)
   leaves and metadata demand remains, the relay opens the metadata
   subscription and closes the payload one.
 - Superseded 2026-11-25 (maintainer, /quest-run, on
-  [lite07-metadata](/quest/m2/lite07-metadata.md)): ✅ nothing refuses the
-  mode. A relay whose upstream is lite-06 or earlier subscribes for payload
+  [wire.md](/quest/m3/route-health/wire.md)): ✅ nothing refuses the
+  mode. A relay whose upstream is lite-07 or earlier subscribes for payload
   and drops it for its metadata readers, and moq-transport gets an
   [extension](/quest/m3/route-health/ietf.md) for the mode (rejected: this
   rule's own "an older version never emulates it by fetching and discarding
@@ -88,8 +84,8 @@ What the parked PR learned, on branch `quest/m3/route-health/meta` at
   waiting for or inflating a compressed frame (`read_info`, `readInfo`); the
   bindings' header read; and the interop lane's subscriber half. The codecs,
   the relay's per-mode upstream, and the TLA+ check go to
-  [lite07-metadata](/quest/m2/lite07-metadata.md), and its refusal on lite-06
-  and moq-transport is dropped.
+  [wire.md](/quest/m3/route-health/wire.md), and its refusal on older
+  versions and moq-transport is dropped.
 - Recommended, to confirm when this starts: an endpoint whose own session is
   an older version asks for metadata the way a relay does over one, with a
   payload subscription whose payload it drops, so the API never refuses.
@@ -111,8 +107,8 @@ for bytes, wakes, and memory. Add the subscriber to
 `just test interop --all`.
 
 Public API: a metadata subscription in Rust, JS, and the bindings. Wire: none
-beyond [lite07-metadata](/quest/m2/lite07-metadata.md).
+beyond [wire.md](/quest/m3/route-health/wire.md).
 
 ## Required
 
-- [Metadata mode on the lite-07 wire, served](/quest/m2/lite07-metadata.md) - the SUBSCRIBE mode, payload-less FRAME, and the publishers and relays that serve it
+- [Metadata mode on the lite-08 wire, served](/quest/m3/route-health/wire.md) - the SUBSCRIBE mode, payload-less FRAME, and the publishers and relays that serve it
