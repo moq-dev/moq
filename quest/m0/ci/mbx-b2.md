@@ -22,6 +22,11 @@ landed in [moq-dev/moq#9624](https://github.com/moq-dev/moq/pull/9624). Only
 `main` writes the cache, so no Nightly could hit B2 before that PR merged;
 the teardown it was to include is this quest.
 
+Decided 2026-11-25 (maintainer, /quest-run): ✅ the R2 teardown stays this
+separate [XS] quest (rejected: folding it into
+[the B2 verification](/quest/m0/ci/mbx-b2-verify.md)), and ✅ the B2 bucket
+keeps the name `mbx-moq-dev` (rejected: renaming it).
+
 Steps:
 
 1. Compare each Rust-cache job's hits and "not looked up" counts
