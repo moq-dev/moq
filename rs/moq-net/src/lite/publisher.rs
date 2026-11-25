@@ -10095,27 +10095,24 @@ mod serve_group_test {
 	/// hold: the subscriber reads an empty answer as no group at or before the time.
 	#[kio::test]
 	async fn lite07_a_finished_copy_answers_a_time_only_once_placed() {
-		for (anchored, handler) in [(true, true), (true, false), (false, true), (false, false)] {
-			let mut track = track::Producer::new(
-				Arc::new(broadcast::Info::default()),
-				"test",
-				crate::track::Info::timed(),
-			);
-			track.received();
-			if anchored {
-				track.anchored();
-			}
-			let _upstream = handler.then(|| track.requests());
-			let (mut run, mut writer, log) = lite07_run_ranges(&track, &[lite::Range::span(Some(1000), 0, None, None)]);
-			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-			write_group(&mut track, 5000, 5000);
-			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-			write_group(&mut track, 6000, 6000);
-			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-			track.finish_shared().unwrap();
-			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-			eprintln!("DEBUG anchored {anchored} handler {handler}: {:?}", responses(&mut writer, &log).await);
-		}
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		track.received();
+		track.anchored();
+		track.request_start(Some(0)).unwrap();
+		let (mut run, mut writer, log) = lite07_run_ranges(&track, &[lite::Range::span(Some(1000), 0, None, None)]);
+		write_group(&mut track, 5000, 5000);
+		write_group(&mut track, 6000, 6000);
+		track.finish_shared().unwrap();
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(starts(&responses(&mut writer, &log).await), []);
+
+		track.time_starts([(1000, Some(1000))]);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(starts(&responses(&mut writer, &log).await), [(0, Some(1000))]);
 	}
 
 	/// A relay's copy that placed one range from its upstream's answer, which also asked for

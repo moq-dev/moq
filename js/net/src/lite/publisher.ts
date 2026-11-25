@@ -1796,6 +1796,13 @@ export class Publisher {
 			return ids.some((id, index) => resolution[index]?.floored && (known || !unstarted.get(id)?.live));
 		};
 
+		// Lite-07: whether a range still unanswered waits on this copy's upstream to place it.
+		const awaitsUpstream = (): boolean => {
+			if (!perRange()) return false;
+			const held = [...unstarted.keys()].filter((id) => controls.holds(id));
+			return hooks.servingResolvedKeys(track, held).some((range) => range === undefined);
+		};
+
 		// Answer each range still waiting for its SUBSCRIBE_START once it resolves, or with no start
 		// once nothing can resolve it (`finished`). One following the live edge also waits until this
 		// hop knows where it is. The first answers go out with `resolveStart`. Mirrors the Rust
@@ -2191,6 +2198,12 @@ export class Publisher {
 						if (keepsSubscribeOpen(this.version) && !startSent && boundary() > 0n) {
 							const from = hooks.servingRuns(track, 0n, boundary())[0]?.start ?? boundary();
 							if (!(await resolveStart(from, largest))) return false;
+							continue;
+						}
+						// A relay's copy places a range only as its upstream would, so one its upstream has yet
+						// to answer may start below every group held: nothing it owes is final until then.
+						if (awaitsUpstream()) {
+							await park();
 							continue;
 						}
 						// Nothing arrives to resolve a range still waiting on the live feed.

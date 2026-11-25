@@ -2188,7 +2188,8 @@ test("lite draft-07: a placed range goes out before an older unplaced one", asyn
 	try {
 		hooks.receiveTrack(sub.track);
 		// The copy still waits on its upstream's answer for the demand from 1000.
-		hooks.startTrack(sub.track, { requested: 1000n });
+		// Its upstream subscription is still unanswered when the track finishes.
+		hooks.startTrack(sub.track, { requested: 0n });
 		hooks.timeStarts(sub.track, [[5000n, 5000n]]);
 		sub.serve(5000n);
 		const placed = await decodeSubscribeResponse(sub.client.reader, version);
@@ -2208,7 +2209,10 @@ test("lite draft-07: a placed range goes out before an older unplaced one", asyn
 	}
 });
 
-// DEBUG repro: a finished relay copy holding only groups past a range's time.
+// A relay's copy that finished holding only groups past a range's time answers that range only once
+// its upstream placed the time, never empty for want of history it doesn't hold: a subscriber reads
+// an empty answer as no group at or before the time. Mirrors the Rust
+// `lite07_a_finished_copy_answers_a_time_only_once_placed`.
 test("lite draft-07: a finished copy answers a time only once placed", async () => {
 	const version = Version.DRAFT_07;
 	const sub = await servedSubscription({
@@ -2218,19 +2222,24 @@ test("lite draft-07: a finished copy answers a time only once placed", async () 
 	});
 	try {
 		hooks.receiveTrack(sub.track);
+		hooks.startTrack(sub.track, { requested: 1000n });
 		sub.serve(5000n);
 		sub.serve(6000n);
 		sub.track.finish();
-		let answer: Awaited<ReturnType<typeof decodeSubscribeResponse>> | undefined;
-		const reading = decodeSubscribeResponse(sub.client.reader, version).then((msg) => {
-			answer = msg;
-		});
+		const messages: Awaited<ReturnType<typeof decodeSubscribeResponse>>[] = [];
+		const reading = (async () => {
+			for (;;) {
+				const msg = await decodeSubscribeResponse(sub.client.reader, version);
+				messages.push(msg);
+				if ("start" in msg) return msg.start;
+			}
+		})();
 		for (let i = 0; i < 20; i++) await flush();
-		console.log("DEBUG", answer);
-		expect(answer).toBeUndefined();
+		expect(messages.filter((msg) => "start" in msg)).toEqual([]);
+
 		hooks.timeStarts(sub.track, [[1000n, 1000n]]);
-		await reading;
-		console.log("DEBUG", answer);
+		const start = await reading;
+		expect([start.id, start.start]).toEqual([0n, 1000n]);
 	} finally {
 		await sub.close();
 	}
