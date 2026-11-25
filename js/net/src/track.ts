@@ -5878,8 +5878,8 @@ export class Subscriber {
 			const next = this.#window.next(key);
 			return next === undefined ? groups.length : timelineIndex(groups, next);
 		}
-		const below = this.#window.runs(0n, key).at(-1);
-		return below === undefined ? -1 : timelineIndex(groups, below.end) - 1;
+		const below = this.#window.prev(key);
+		return below === undefined ? -1 : timelineIndex(groups, below + 1n) - 1;
 	}
 
 	// Write off the stale groups at the oldest end of `groups` within `[start, end)`, up to the first
