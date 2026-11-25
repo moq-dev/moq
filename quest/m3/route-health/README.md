@@ -66,6 +66,12 @@ into lite-07 before the cut as
 [lite07-metadata](/quest/m2/lite07-metadata.md), and failover is not blocked
 on lite-08.
 
+Decided 2026-11-25 (maintainer, /quest-run): ✅ the implementation of
+[meta.md](/quest/m3/route-health/meta.md) and
+[failover](/quest/m3/route-health/failover.md) stays in m3 (rejected: m2,
+m1, m0), and lite07-metadata also serves the mode from every lite-07
+publisher and relay of ours, leaving meta.md the subscriber side.
+
 New on 2026-11-15, from the prior art this is closest to:
 
 - The standby is a route whose path does not name this node, and one that

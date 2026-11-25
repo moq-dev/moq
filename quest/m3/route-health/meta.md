@@ -1,12 +1,11 @@
-# [L] Metadata-only subscriptions
+# [M] Metadata-only subscriptions
 
 ## Goal
 
 Rust and JS subscribe to a track's group and frame progress without its
 payload, as a subscription of its own beside payload subscriptions, on the
-lite-07 wire [lite07-metadata](/quest/m2/lite07-metadata.md) defines; a
-lite-07 peer of ours stops refusing the mode. A chain of relays forwards
-and aggregates that demand without pulling the media behind it. A reader
+lite-07 wire [lite07-metadata](/quest/m2/lite07-metadata.md) defines and
+every lite-07 publisher and relay of ours already serves. A reader
 that wants the payload opens a payload subscription from its first missing
 frame, and nothing changes mode in place.
 
@@ -44,6 +43,13 @@ Plan recommended: a `Meta` byte on SUBSCRIBE, set when it opens, the
 payload-less FRAME, and a refusal code. Its Plan records what this quest's
 code must keep conforming to.
 
+Decided 2026-11-25 (maintainer, /quest-run): ✅ the serving side moves to
+[lite07-metadata](/quest/m2/lite07-metadata.md) in m2: a publisher serving
+the mode, a relay forwarding metadata demand upstream, both codecs, and the
+TLA+ check of two modes on one track. This quest keeps the subscriber side:
+the API that asks for metadata, the bindings, and what
+[failover](/quest/m3/route-health/failover.md) reads. Resized from L to M.
+
 - Recommended, to confirm when this starts: in the API, an entry and a
   consumer type of their own, so a payload read of a header-only frame cannot
   be written: the C binding in that PR needed an `Unsupported` error for it.
@@ -66,41 +72,38 @@ deleted in [moq-dev/moq#8423](https://github.com/moq-dev/moq/pull/8423)
   subscription and closes the payload one.
 - ✅ An older version never emulates it by fetching and discarding media: it
   reports the mode unsupported. No moq-transport counterpart is needed. A
-  lite-07 peer that refuses the mode is reported the same way, and a relay
-  whose upstream refuses refuses its own readers.
+  relay refusing with NOT_SUPPORTED because its route cannot carry the mode
+  is reported the same way, and a relay whose upstream refuses refuses its
+  own readers.
 
 What the parked PR learned, on branch `quest/m3/route-health/meta` at
 `c00addff48`:
 
-- Carries over: the payload-less FRAME in both codecs, whose bytes
-  [lite07-metadata](/quest/m2/lite07-metadata.md) fixes; a header read that
-  returns the declared size without waiting for or inflating a compressed
-  frame (`read_info`, `readInfo`); the bindings' header read; the refusal on
-  lite-06 and moq-transport; and the interop lane.
+- Carries over here: a header read that returns the declared size without
+  waiting for or inflating a compressed frame (`read_info`, `readInfo`); the
+  bindings' header read; the refusal on lite-06 and moq-transport; and the
+  interop lane's subscriber half. The codecs, the relay's per-mode upstream,
+  and the TLA+ check go to [lite07-metadata](/quest/m2/lite07-metadata.md).
 - A history fill is payload demand of its own. There it switched the relay's
   one shared upstream subscription to payload, so live groups arrived with
   payload until the fill was answered. A subscription per mode removes the
-  case; pin it.
-- The TLA+ subscription model was extended for promotion and found six bugs
-  there. With fixed modes it needs no promotion rule; check that two
-  subscriptions to one track in different modes keep the existing accounting.
+  case; pin it from the public API.
 - Adding a field to the C `moq_subscription` struct changes its ABI.
 
 Mirror the API across Rust, JS, and every binding that exposes
 `Subscription`.
 
-Tests: metadata-only traffic across several hops carries no payload; a relay
-whose last payload reader leaves keeps forwarding headers to its metadata
-readers; mixed demand; a payload subscription opened mid-group from a
-position seen as metadata; a fill while only metadata demand stands; empty
-frames; cancellation; refusal on an unsupported version and by a lite-07
-peer without the mode. Sweep tracks, readers, and relay depth for bytes,
-wakes, and memory. Add the mode to `just test interop --all`.
+Tests, from the public API: metadata-only traffic across several hops
+carries no payload; mixed demand; a payload subscription opened mid-group
+from a position seen as metadata; a fill while only metadata demand stands;
+empty frames; cancellation; refusal on an unsupported version and by a relay
+whose route cannot carry the mode. Sweep tracks, readers, and relay depth
+for bytes, wakes, and memory. Add the subscriber to
+`just test interop --all`.
 
 Public API: a metadata subscription in Rust, JS, and the bindings. Wire: none
-beyond [lite07-metadata](/quest/m2/lite07-metadata.md); a lite-07 publisher
-of ours serves the mode instead of refusing it.
+beyond [lite07-metadata](/quest/m2/lite07-metadata.md).
 
 ## Required
 
-- [Metadata mode on the lite-07 wire](/quest/m2/lite07-metadata.md) - the SUBSCRIBE mode, payload-less FRAME, and refusal this serves
+- [Metadata mode on the lite-07 wire, served](/quest/m2/lite07-metadata.md) - the SUBSCRIBE mode, payload-less FRAME, and the publishers and relays that serve it

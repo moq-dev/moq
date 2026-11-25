@@ -267,10 +267,13 @@ immediate user, is not blocked on lite-08 (rejected: keeping it for lite-08).
 This reverses the rule above that metadata-only subscriptions don't gate the
 cut. [Metadata mode on the lite-07 wire](/quest/m2/lite07-metadata.md) joins
 Required; the implementation stays in m3 and lands on lite-07's wire.
+Narrowed 2026-11-25 (maintainer, /quest-run): ✅ the serving side joins that
+quest too, so every lite-07 publisher and relay serves the mode; only the
+subscriber API and failover stay in m3.
 
 ## Required
 
-- [Metadata mode on the lite-07 wire](/quest/m2/lite07-metadata.md) - `Meta` on SUBSCRIBE, the payload-less FRAME, and the refusal a peer without metadata mode answers with
+- [Metadata mode on the lite-07 wire, served](/quest/m2/lite07-metadata.md) - `Meta` on SUBSCRIBE and the payload-less FRAME, served by every lite-07 publisher and relay of ours
 - [The router ranks one claim prefix's filings as one tier](/quest/m2/router-claim-tier.md) - the lite-07 router follows the draft's one-tier ranking instead of stopping at the deepest filing
 - [Redesign lite-07 subscribe and fetch](/quest/m2/lite07-subscribe/README.md) - data-layer Previous Delta, RESET_STREAM_AT, FETCH and SUBSCRIBE_SKIP removal, per-range Priority and Order, and judged OLD drops freeze into lite-07
 
