@@ -308,9 +308,12 @@ fn concurrent_groups_carry_bulk_transfers_losslessly() {
 /// fixed credit per paused stream fits in half the connection window. Every one still
 /// pauses, since a paused stream holds a share of that half set by its slot, not by how many
 /// pause.
+///
+/// Their read-ahead together passes the relay session's live-edge budget, which sheds the
+/// lowest priorities first: only the [`LOSSLESS`] highest must arrive whole.
 #[test]
 #[ignore = "a hundred bulk transfers, about a minute in debug: run in release by `just rs quic-sim`"]
-fn many_groups_carry_bulk_transfers_losslessly() {
+fn many_groups_carry_their_highest_priorities_losslessly() {
 	memory::run(|| bulk(MANY, 64 * 1024, 1024 * 1024));
 }
 
@@ -320,14 +323,22 @@ fn many_groups_carry_bulk_transfers_losslessly() {
 /// simulate, so more is left to [`MANY`].
 const SESSIONS: usize = 4;
 
-/// How many share one in [`many_groups_carry_bulk_transfers_losslessly`]. Past a couple of
-/// hundred, the frames in flight at once each hold credit until they seal, and that fills
-/// the connection window whatever the paused streams hold.
+/// How many share one in [`many_groups_carry_their_highest_priorities_losslessly`]. Past a
+/// couple of hundred, the frames in flight at once each hold credit until they seal, and that
+/// fills the connection window whatever the paused streams hold.
 const MANY: usize = 100;
 
+/// How many of the highest-priority tracks [`bulk`] reads whole. A session past its 256 MiB
+/// live-edge budget sheds every frame readers took first, and each group's ingest runs at most
+/// half the 32 MiB live tail ahead of its reader, so this many fit with room to spare however
+/// the rest are shed. Measured, a group holds about 8 MiB ahead, so about 30 survive.
+const LOSSLESS: usize = 12;
+
 /// Write `tracks` tracks of one group each, [`BULK`] bytes in `chunk`-byte frames, through
-/// one relay, and read the first `read` bytes of each slower than they are written,
-/// asserting every one arrives.
+/// one relay, and read the first `read` bytes of each slower than they are written. Track `i`
+/// has publisher priority `i - 128`, ordered for up to 256 tracks: the [`LOSSLESS`] highest
+/// must arrive whole, and a lower one may end early with an error but never delivers a wrong
+/// frame.
 async fn bulk(tracks: usize, chunk: usize, read: usize) {
 	let network = Network::new(0);
 	let auth = memory::public(&[""], &[], &[]);
@@ -342,7 +353,11 @@ async fn bulk(tracks: usize, chunk: usize, read: usize) {
 		.map(|index| {
 			broadcast
 				.broadcast()
-				.create_track(format!("data{index}"), moq_net::track::Info::default())
+				.create_track(
+					format!("data{index}"),
+					moq_net::track::Info::default()
+						.with_priority(i8::try_from(index as i64 - 128).expect("at most 256 tracks")),
+				)
 				.expect("track")
 		})
 		.collect();
@@ -375,8 +390,10 @@ async fn bulk(tracks: usize, chunk: usize, read: usize) {
 		// Held until the reads end: dropping a track unfinished aborts it.
 		futures::future::pending::<()>().await;
 	};
-	let read = |name: String| {
+	let read = |index: usize| {
 		let viewer = viewer.clone();
+		let name = format!("data{index}");
+		let lossless = index + LOSSLESS >= tracks;
 		async move {
 			let remote = loop {
 				match viewer.consume().request("bulk", None).await {
@@ -401,11 +418,12 @@ async fn bulk(tracks: usize, chunk: usize, read: usize) {
 			let mut ordered = consumer.ordered();
 			let mut group = ordered.next_group().await.unwrap().expect("a group");
 			for index in 0..read / chunk {
-				let frame = group
-					.read_frame()
-					.await
-					.unwrap_or_else(|err| panic!("{name} frame {index}: {err}"))
-					.unwrap_or_else(|| panic!("{name} ended at frame {index}"));
+				let frame = match group.read_frame().await {
+					Ok(frame) => frame.unwrap_or_else(|| panic!("{name} ended at frame {index}")),
+					// Shed by the budget, which a lower priority may be.
+					Err(_) if !lossless => return,
+					Err(err) => panic!("{name} frame {index}: {err}"),
+				};
 				assert_eq!(frame.payload.len(), chunk, "{name} frame {index} is cut short");
 				assert!(
 					frame.payload.iter().all(|&byte| byte == index as u8),
@@ -425,7 +443,7 @@ async fn bulk(tracks: usize, chunk: usize, read: usize) {
 		}
 	};
 	let writes = futures::future::join_all(sources.into_iter().map(write));
-	let reads = futures::future::join_all((0..tracks).map(|index| read(format!("data{index}"))));
+	let reads = futures::future::join_all((0..tracks).map(read));
 	kio::clock::timeout(Duration::from_secs(600), async {
 		futures::pin_mut!(writes, reads);
 		futures::future::select(writes, reads).await;
