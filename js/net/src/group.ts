@@ -407,9 +407,17 @@ export class Producer {
 			if (state.closed.peek() !== null) return undefined;
 			const target = BigInt(wireObject);
 			const total = state.total.peek();
-			for (let i = state.offset; i < total; i++) {
-				const entry = state.timings.get(i);
-				if (entry !== undefined && entry.oid >= target) return i;
+			if (target === 0n) return 0;
+			if (state.lastTimedOid !== undefined && target > state.lastTimedOid) return total;
+			let first = true;
+			for (const [ordinal, entry] of state.timings) {
+				if (entry.oid >= target) {
+					// If the prefix before `ordinal` was shed and `entry.oid > target`, we cannot
+					// prove which shed ordinal `target` fell at.
+					if (first && state.index > state.offset && entry.oid > target) return undefined;
+					return ordinal;
+				}
+				first = false;
 			}
 			return total;
 		};
@@ -826,6 +834,10 @@ export class Producer {
 				if (mirror.frames.peek().last === cut) {
 					mirror.frames.mutate((frames) => frames.pop());
 					mirror.total.update((total) => total - 1);
+					mirror.timings.delete(index);
+					const prev = mirror.timings.get(index - 1);
+					mirror.lastTimedOid = prev?.oid;
+					mirror.lastMonoTs = prev?.monoTs;
 				} else if (mirror.closed.peek() === undefined) mirror.closed.set(outcome);
 			}
 		}
@@ -1347,6 +1359,9 @@ export class Consumer {
 			const state = group.#state;
 			const total = state.total.peek();
 			const closed = state.closed.peek() === null;
+			// An already-finished empty group was delivered and moved the subscriber's live edge
+			// to G+1; do not clamp a non-zero upper bound back down to Object 0.
+			if (closed && total === 0) return undefined;
 			const effective = closed ? Math.min(frameCount, total) : frameCount;
 			if (effective <= 0) return 0;
 			if (effective === total && state.lastTimedOid !== undefined) {
@@ -1354,6 +1369,16 @@ export class Consumer {
 			}
 			const entry = state.timings.get(effective - 1);
 			return entry === undefined ? undefined : Number(entry.oid) + 1;
+		};
+		hooks.groupConsumerClosedEmpty = (group) => {
+			const state = group.#state;
+			return state.closed.peek() === null && state.total.peek() === 0;
+		};
+		hooks.groupConsumerLastId = (group, timed) => {
+			const state = group.#state;
+			if (timed) return state.lastTimedOid === undefined ? undefined : Number(state.lastTimedOid);
+			const total = state.total.peek();
+			return total > 0 ? total - 1 : undefined;
 		};
 		hooks.evictGroup = (group, lost) => group.#evict(lost);
 		hooks.refreshGroup = (group) => group.#state.charge?.touch();

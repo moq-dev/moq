@@ -540,7 +540,7 @@ An edge serves a broadcast as HLS/DASH using a fixed segment grid derived solely
 - **Segment length**: smallest whole multiple of `sync.interval` that is at least 1 second. Grid lines fall at every multiple of segment length in PTS time.
 - **Placement**: each group spans `[group_start, next_group_start)` (or first frame timestamp if untimed) and belongs to the segment of the first grid line it contains, or if it contains none, the line it starts after. Segments hold whole groups and share numbering across all renditions.
 - **Gaps & overruns**: a grid line where no group starts a segment is emitted as HLS `EXT-X-GAP` and omitted from DASH `SegmentTimeline`. Overrunning groups stay at their first line; surrounding duration policy is up to the edge.
-- **Durations & listing**: `EXT-X-TARGETDURATION` is `ceil(2 * segment_length)` seconds. A segment is listed once a later segment starts or the track ends (joining mid-segment waits for the next segment start). Backwards timestamps start a per-rendition discontinuity (`EXT-X-PROGRAM-DATE-TIME` resynchronizes across renditions).
+- **Durations & listing**: `EXT-X-TARGETDURATION` is `ceil(2 * segment_length / 1000)` seconds (where `segment_length` is in milliseconds). A segment is listed once a later segment starts or the track ends (joining mid-segment waits for the next segment start). Backwards timestamps start a per-rendition discontinuity (`EXT-X-PROGRAM-DATE-TIME` resynchronizes across renditions).
 
 
 # MPEG-TS {#mpegts}

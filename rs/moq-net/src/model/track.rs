@@ -380,6 +380,12 @@ impl Info {
 	pub(crate) fn ietf(&self) -> Option<crate::ietf::Version> {
 		self.properties.as_ref().map(|properties| properties.version)
 	}
+
+	/// Whether the upstream moq-transport publisher declared `ID_TIMESCALE`, or `None` for a
+	/// native moq-lite track.
+	pub(crate) fn timestamp_ids(&self) -> Option<bool> {
+		self.properties.as_ref().map(|properties| properties.timestamp_ids)
+	}
 }
 
 #[cfg(test)]
@@ -7485,6 +7491,22 @@ impl Consumer {
 			Ok(start) => Poll::Ready(start),
 			Err(state) => Poll::Ready(state.start.key()),
 		}
+	}
+
+	/// The track's [`Info`] when already resolved, without waiting.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn peek_info(&self) -> Option<Info> {
+		if let Some(serving) = self.serving() {
+			return serving.peek_info();
+		}
+		self.with_state(|state| {
+			let state = state?.read();
+			state
+				.info
+				.as_ref()
+				.filter(|_| state.publication != Publication::Staged)
+				.cloned()
+		})
 	}
 
 	/// The upstream publisher's Largest Object, independently of which groups are cached.

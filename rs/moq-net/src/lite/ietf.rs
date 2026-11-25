@@ -323,6 +323,7 @@ impl<'a> Message<'a> for TrackProperties {
 		};
 		let properties = crate::model::object::TrackProperties {
 			version,
+			timestamp_ids: version.timestamp_object_ids(),
 			values: decode_list(r, version)?,
 		};
 		// TRACK_INFO carries these, so a second copy could only contradict it.
@@ -510,6 +511,7 @@ mod tests {
 	fn track_properties_round_trip() {
 		let properties = crate::model::object::TrackProperties {
 			version: Draft::Draft18,
+			timestamp_ids: false,
 			values: vec![
 				Property {
 					id: IMMUTABLE,
@@ -527,6 +529,7 @@ mod tests {
 		// An empty list still names its draft.
 		let bare = crate::model::object::TrackProperties {
 			version: Draft::Draft22,
+			timestamp_ids: false,
 			values: Vec::new(),
 		};
 		let decoded = round_trip(&TrackProperties(Some(Arc::new(bare.clone())))).unwrap();
@@ -548,6 +551,7 @@ mod tests {
 			w.varint(code).unwrap();
 			let list = encode_list(&crate::model::object::TrackProperties {
 				version: Draft::Draft18,
+				timestamp_ids: false,
 				values: values.to_vec(),
 			})
 			.unwrap();
@@ -604,6 +608,7 @@ mod tests {
 		sealed.extend([0, 1].repeat(count - 1));
 		let msg = TrackProperties(Some(Arc::new(crate::model::object::TrackProperties {
 			version: Draft::Draft18,
+			timestamp_ids: false,
 			values: vec![Property {
 				id: IMMUTABLE,
 				value: Value::Bytes(sealed.into()),
@@ -651,6 +656,7 @@ mod tests {
 			assert_eq!(ingress.unknown.len(), repeats + 1, "{version}");
 			let forwarded = crate::model::object::TrackProperties {
 				version,
+				timestamp_ids: version.timestamp_object_ids(),
 				values: ingress.unknown.clone(),
 			};
 			assert!(forwarded.refused(&crate::track::Info::default()).is_none(), "{version}");
@@ -776,6 +782,7 @@ mod hop_tests {
 	fn draft22(values: Vec<Property>) -> Option<Arc<crate::model::object::TrackProperties>> {
 		Some(Arc::new(crate::model::object::TrackProperties {
 			version: crate::ietf::Version::Draft22,
+			timestamp_ids: false,
 			values,
 		}))
 	}

@@ -3547,6 +3547,8 @@ impl Handle {
 				timescale: self.track.timescale,
 				#[cfg(feature = "async")]
 				ietf: self.track.ietf(),
+				#[cfg(feature = "async")]
+				timestamp_ids: self.track.timestamp_ids(),
 				arrived: self.alive.arrived,
 				stale_counted: AtomicBool::new(false),
 			}),
@@ -4152,6 +4154,8 @@ pub(super) struct Delivery {
 	timescale: Option<Timescale>,
 	#[cfg(feature = "async")]
 	ietf: Option<crate::ietf::Version>,
+	#[cfg(feature = "async")]
+	timestamp_ids: Option<bool>,
 	arrived: crate::time::Instant,
 	// Whichever reader observes expiry first records its unread tail only once.
 	pub(super) stale_counted: AtomicBool,
@@ -4321,6 +4325,11 @@ impl Consumer {
 		}
 		let state = self.cursor.state.read();
 		let closed = state.outcome.frames().is_some();
+		// An already-finished empty group was delivered and moved the subscriber's live edge
+		// to G+1; do not clamp a non-zero upper bound back down to Object 0.
+		if closed && state.next_index == 0 {
+			return None;
+		}
 		let effective = if closed {
 			usize::try_from(frame).map_or(state.next_index, |f| f.min(state.next_index))
 		} else {
@@ -4810,6 +4819,13 @@ impl Consumer {
 	#[cfg(feature = "async")]
 	pub(crate) fn ietf(&self) -> Option<crate::ietf::Version> {
 		self.delivery.ietf
+	}
+
+	/// Whether the parent track's moq-transport publisher declared `ID_TIMESCALE`, or `None`
+	/// for a moq-lite track.
+	#[cfg(feature = "async")]
+	pub(crate) fn timestamp_ids(&self) -> Option<bool> {
+		self.delivery.timestamp_ids
 	}
 
 	/// The index of the next frame this consumer will return.

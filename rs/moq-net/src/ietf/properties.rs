@@ -740,6 +740,7 @@ mod tests {
 	fn forwarded(properties: &Properties, version: Version) -> TrackProperties {
 		TrackProperties {
 			version,
+			timestamp_ids: properties.timestamp_ids,
 			values: properties.unknown.clone(),
 		}
 	}
@@ -750,6 +751,7 @@ mod tests {
 	fn forwarded_properties_leave_room_for_the_restated() {
 		let unknown = |count: usize| TrackProperties {
 			version: Version::Draft22,
+			timestamp_ids: false,
 			values: (0..count as u64)
 				.map(|i| Property {
 					id: 0x40 + 2 * i,
@@ -795,6 +797,7 @@ mod tests {
 		w.varint(value).unwrap();
 		let unknown = TrackProperties {
 			version,
+			timestamp_ids: false,
 			values: vec![Property {
 				id: IMMUTABLE,
 				value: Value::Bytes(block.into()),

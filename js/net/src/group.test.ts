@@ -991,3 +991,22 @@ test("mirror preserves absolute frame indices in cached timing for offset groups
 	expect(hooks.groupOrdinalForOid(producer, 67)).toBe(3);
 	mirrored.close();
 });
+
+test("empty finished timed group does not clamp non-zero finishAt back to Object 0", () => {
+	const producer = new Producer(1000n);
+	hooks.bindGroupTimed(producer, {
+		timescale: Timescale.MILLI,
+		priority: 0,
+		maxAge: null,
+		compression: "none",
+		refresh: { ratio: null, interval: null },
+	});
+	producer.finish();
+
+	const consumer = producer.consume();
+	expect(hooks.groupOidAfterFrame(consumer, 0)).toBe(0);
+	expect(hooks.groupOidAfterFrame(consumer, 3)).toBeUndefined();
+	expect(hooks.groupConsumerClosedEmpty(consumer)).toBe(true);
+	expect(hooks.groupConsumerLastId(consumer, true)).toBeUndefined();
+	consumer.close();
+});

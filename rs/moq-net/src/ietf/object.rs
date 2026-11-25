@@ -357,10 +357,10 @@ pub(crate) fn write_with_tie(
 	if drop_delivery_timeout && sealed_key(&props, source, 0x06)? {
 		return Err(Error::Unsupported);
 	}
-	if sealed_key(&props, source, TIMESTAMP_TIE)? {
+	if sealed_key(&props, source, TIMESTAMP_TIE)? || sealed_key(&props, source, PRIOR_OBJECT_ID_GAP)? {
 		return Err(Error::Unsupported);
 	}
-	props.retain(|p| p.id != TIMESTAMP_TIE && (!drop_delivery_timeout || p.id != 0x06));
+	props.retain(|p| p.id != TIMESTAMP_TIE && p.id != PRIOR_OBJECT_ID_GAP && (!drop_delivery_timeout || p.id != 0x06));
 	if let Some(tie_val) = new_tie.filter(|v| *v > 0) {
 		props.push(Property {
 			id: TIMESTAMP_TIE,

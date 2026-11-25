@@ -3345,8 +3345,8 @@ export class Front {
 		}
 	}
 
-	largest(name: string): track.Position | undefined {
-		return this.#source?.wire.largest(name);
+	largest(name: string, timed?: boolean): track.Position | undefined {
+		return this.#source?.wire.largest(name, timed);
 	}
 
 	async fetchGroup(name: string, key: bigint, options?: track.FetchGroupOptions): Promise<GroupConsumer> {
@@ -3501,7 +3501,7 @@ class FrontConsumer extends broadcast.Consumer {
 			lister: view.lister,
 			subscribe: (name, options) => front.subscribe(name, options),
 			resolveTrackInfo: (name, hold) => front.resolveTrackInfo(name, hold),
-			largest: (name) => front.largest(name),
+			largest: (name, timed) => front.largest(name, timed),
 			fetchGroup: (name, key, options) => front.fetchGroup(name, key, options),
 		});
 	}

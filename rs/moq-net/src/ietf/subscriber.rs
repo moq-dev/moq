@@ -857,6 +857,7 @@ fn accepted_info(properties: &ietf::Properties, version: Version) -> track::Info
 		.with_refresh(track::Refresh::default().with_ratio(properties.dynamic_groups.then_some(0)));
 	info.properties = Some(std::sync::Arc::new(crate::model::object::TrackProperties {
 		version,
+		timestamp_ids: properties.timestamp_ids,
 		values: properties.unknown.clone(),
 	}));
 	info

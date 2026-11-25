@@ -4896,6 +4896,7 @@ mod tests {
 		info.properties = framing.ietf.map(|version| {
 			std::sync::Arc::new(crate::model::object::TrackProperties {
 				version,
+				timestamp_ids: version.timestamp_object_ids(),
 				values: Vec::new(),
 			})
 		});

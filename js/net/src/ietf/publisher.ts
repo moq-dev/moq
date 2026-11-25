@@ -1074,29 +1074,23 @@ export class Publisher {
 			// subscriber where the track ended. A range that stopped short of the end never saw
 			// it, and claiming it would end the subscriber's track early.
 			const final = hooks.subscriberEnd(track);
-			const wireObject = final !== undefined ? this.#wireEndObject(track, final, timed) : undefined;
+			const wireEnd = final !== undefined ? this.#wireEnd(track, final, timed) : undefined;
 			const reached =
-				final !== undefined &&
-				wireObject !== undefined &&
+				wireEnd !== undefined &&
 				(range.end === undefined ||
-					(wireObject === 0
-						? range.end.group + 1n >= final.group
-						: range.end.group > final.group ||
-							(range.end.group === final.group &&
-								(range.end.object === undefined || range.end.object + 1n >= BigInt(wireObject)))));
-			if (
-				!datagramTrack &&
-				ended &&
-				!publishError &&
-				final !== undefined &&
-				wireObject !== undefined &&
-				reached &&
-				!streams.terminalSent
-			) {
+					(wireEnd.object === 0
+						? range.end.group >= wireEnd.group ||
+							(range.end.group + 1n === wireEnd.group &&
+								(range.end.object === undefined ||
+									this.#objectCapReachesEnd(track, range.end.group, range.end.object, timed)))
+						: range.end.group > wireEnd.group ||
+							(range.end.group === wireEnd.group &&
+								(range.end.object === undefined || range.end.object + 1n >= BigInt(wireEnd.object)))));
+			if (!datagramTrack && ended && !publishError && wireEnd !== undefined && reached && !streams.terminalSent) {
 				await this.#runEndOfTrack({
 					requestId: msg.requestId,
-					group: final.group,
-					wireObject,
+					group: wireEnd.group,
+					wireObject: wireEnd.object,
 					publisherPriority,
 					unsubscribed,
 					streams,
@@ -1460,20 +1454,39 @@ export class Publisher {
 		}
 	}
 
-	#wireEndObject(track: TrackSubscriber, final: TrackPosition, timed: boolean): number {
-		if (!timed || final.frame <= 0) return final.frame;
+	#wireEnd(track: TrackSubscriber, final: TrackPosition, timed: boolean): { group: bigint; object: number } {
+		if (!timed || final.frame <= 0) return { group: final.group, object: final.frame };
 		const cached = hooks.cachedGroup(track, final.group);
 		if (cached) {
 			try {
 				const resolved = hooks.groupOidAfterFrame(cached, final.frame);
-				if (resolved !== undefined) return resolved;
+				if (resolved !== undefined) return { group: final.group, object: resolved };
+				if (hooks.groupConsumerClosedEmpty(cached)) {
+					return { group: final.group + 1n, object: 0 };
+				}
 			} finally {
 				cached.close();
 			}
 		}
 		const largest = hooks.objectLargest(track, true);
-		if (largest?.group === final.group) return largest.frame + 1;
-		return final.frame;
+		if (largest?.group === final.group) return { group: final.group, object: largest.frame + 1 };
+		return { group: final.group, object: final.frame };
+	}
+
+	#objectCapReachesEnd(track: TrackSubscriber, group: bigint, cap: bigint, timed: boolean): boolean {
+		const cached = hooks.cachedGroup(track, group);
+		if (cached) {
+			try {
+				const lastId = hooks.groupConsumerLastId(cached, timed);
+				return lastId === undefined || cap >= BigInt(lastId);
+			} finally {
+				cached.close();
+			}
+		}
+		const largest = hooks.objectLargest(track, timed);
+		if (largest === undefined || largest.group < group) return true;
+		if (largest.group === group) return cap >= BigInt(largest.frame);
+		return false;
 	}
 
 	/** Preserve the original terminal on a separate stream when its group already sent FIN. */

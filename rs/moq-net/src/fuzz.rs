@@ -128,6 +128,7 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 		properties: properties.then(|| {
 			std::sync::Arc::new(crate::model::object::TrackProperties {
 				version: ietf::Version::Draft22,
+				timestamp_ids: false,
 				values: Vec::new(),
 			})
 		}),

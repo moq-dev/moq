@@ -373,8 +373,11 @@ fn derive_audio_params(
 ) -> Result<DerivedAudio> {
 	let init = decode_init_data(track, init_cache)?.ok_or_else(|| Error::MissingAudioParams(track.name.clone()))?;
 
-	match track.packaging {
+	match &track.packaging {
 		moq_msf::Packaging::Loc | moq_msf::Packaging::Legacy => derive_from_codec_config(track, codec, init),
+		moq_msf::Packaging::Unknown(kind) if kind == "raw" || kind == "cts" => {
+			derive_from_codec_config(track, codec, init)
+		}
 		moq_msf::Packaging::Cmaf => derive_from_cmaf_moov(track, init),
 		_ => Err(Error::UnsupportedDerivationPackaging {
 			name: track.name.clone(),

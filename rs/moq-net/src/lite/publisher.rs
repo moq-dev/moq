@@ -14618,6 +14618,7 @@ mod tests {
 		let mut relayed = crate::track::Info::timed();
 		relayed.properties = Some(Arc::new(crate::model::object::TrackProperties {
 			version: crate::ietf::Version::Draft22,
+			timestamp_ids: false,
 			values: Vec::new(),
 		}));
 		let without = served_group(relayed.clone(), false).await;

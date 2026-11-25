@@ -1340,6 +1340,10 @@ export const hooks: {
 	groupLastObject: (group: GroupProducer) => number | undefined;
 	/** Wire Object ID immediately past `frameCount` frames in a timed group, or undefined if unknown. */
 	groupOidAfterFrame: (group: GroupConsumer, frameCount: number) => number | undefined;
+	/** Whether a group consumer's underlying group closed cleanly with zero frames. */
+	groupConsumerClosedEmpty: (group: GroupConsumer) => boolean;
+	/** Last wire Object ID (timed or frame ordinal) delivered in a group consumer's underlying group. */
+	groupConsumerLastId: (group: GroupConsumer, timed: boolean) => number | undefined;
 	/** Model frame ordinal corresponding to sparse wire `wireObject` on a finished group, or undefined if unfinished. */
 	groupOrdinalForOid: (group: GroupProducer, wireObject: number) => number | undefined;
 	/** Model frame ordinal for a cached finished group on a track producer, or undefined if absent/unfinished. */
@@ -1836,6 +1840,12 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	groupOidAfterFrame: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupConsumerClosedEmpty: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupConsumerLastId: () => {
 		throw new Error("group.ts not loaded");
 	},
 	groupOrdinalForOid: () => {

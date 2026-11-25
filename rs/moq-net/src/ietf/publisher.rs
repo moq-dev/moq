@@ -112,6 +112,11 @@ fn track_properties(
 		}
 		unknown.retain(|property| property.id != 0x06);
 	}
+	// Sealed ID_TIMESCALE (0x40B70) declares sparse moq-timestamp Object IDs, which would
+	// contradict dense pre-Draft23 egress Object IDs.
+	if !version.timestamp_object_ids() && track.sealed().any(|id| id == 0x40B70) {
+		return Err(Error::Unsupported);
+	}
 	Ok(ietf::Properties { unknown, ..restated })
 }
 
@@ -338,7 +343,8 @@ impl PrepareFetch {
 fn fetch_largest(track: &track::Consumer, joined: bool, timed: bool) -> Option<Location> {
 	let finished = track.final_key();
 	let known = track.is_live() || finished.is_some_and(|end| Some(end) == track.latest_key().map(|latest| latest + 1));
-	match !joined && (known || track.reported_object().is_some()) {
+	let has_reported = track_reported_same_mode(track, timed) && track.reported_object().is_some();
+	match !joined && (known || has_reported) {
 		true => live_edge_for(track, timed).largest,
 		false => None,
 	}
@@ -522,6 +528,7 @@ impl FindFetch {
 						.is_some_and(|group| group_relayed_same_mode(group, timed_egress));
 					let frame_start = match (&wire, &cached, same_mode, timed_egress) {
 						(_, Some(group), true, _) => self.skip.min(group.first_frame()),
+						(Some(w), Some(group), false, _) if !w.first_object || group.first_frame() > 0 => 0,
 						(None, Some(group), false, true) if group.first_frame() > 0 => 0,
 						(_, Some(group), false, true) => group.ordinal_for_oid(self.skip),
 						(_, Some(_), false, false) => self.skip,
@@ -7025,9 +7032,17 @@ impl TrackServe {
 		if self.timed
 			&& end.frame > 0
 			&& let Some(group) = self.track.peek_group(end.group)
-			&& let Some(oid) = group.oid_after_frame(end.frame)
 		{
-			end.frame = oid;
+			if let Some(oid) = group.oid_after_frame(end.frame) {
+				end.frame = oid;
+			} else if group.is_finished() && group.last_frame().is_none() {
+				// Empty finished group G was already delivered, advancing the subscriber's
+				// live edge to G+1; place END_OF_TRACK at (G+1, 0) rather than (G, 0).
+				end = track::Position {
+					group: end.group.saturating_add(1),
+					frame: 0,
+				};
+			}
 		}
 		end
 	}
@@ -7047,7 +7062,19 @@ impl TrackServe {
 		let wire = self.wire_end(end);
 		let reached = self.range.end.is_none_or(|last| {
 			if wire.frame == 0 {
-				last.group.saturating_add(1) >= wire.group
+				if last.group >= wire.group {
+					true
+				} else if last.group.saturating_add(1) == wire.group {
+					// Ordinary finish() places the end at (G+1, 0): if the subscription capped
+					// objects within group G, it reached the end only when its cap covers G's
+					// last delivered object.
+					last.object.is_none_or(|obj| match self.track.peek_group(last.group) {
+						Some(group) => group_last_id(&group, self.timed).is_none_or(|last_id| obj >= last_id),
+						None => self.track.latest_key().is_none_or(|latest| latest < last.group),
+					})
+				} else {
+					false
+				}
 			} else if last.group > wire.group {
 				true
 			} else if last.group < wire.group {
@@ -7695,7 +7722,12 @@ impl FetchGroupWrite {
 				FetchGroupState::Yield => {
 					ready!(self.budget.poll_yield(waiter));
 					if self.group.wire().is_some_and(|wire| !wire.fetchable)
-						|| (self.timed && self.group.wire().is_none() && self.group.first_frame() > 0)
+						|| (!self.same_mode
+							&& ((self.timed && self.group.first_frame() > 0)
+								|| self
+									.group
+									.wire()
+									.is_some_and(|wire| !wire.first_object || self.group.first_frame() > 0)))
 					{
 						return Poll::Ready(Err(Error::Unsupported));
 					}
@@ -8221,8 +8253,18 @@ impl GroupServe {
 
 	/// Fill in the header flags and the read slice from the group's relay state.
 	fn describe(&mut self, wire: Option<group::Wire>) -> Result<(), Error> {
-		// An offset local/lite copy lacks the prior frames' clamp chain for moq-timestamp IDs.
-		if self.timed && wire.is_none() && self.group.first_frame() > 0 {
+		let same_mode = wire.is_some()
+			&& (self.group.timescale().is_none() || self.group.timestamp_ids().is_none_or(|ts| ts == self.timed));
+		// Translating across Object ID schemes (or synthesizing moq-timestamp IDs from a
+		// local/lite copy) requires the group's prefix from frame 0: a relayed suffix
+		// (`!wire.first_object`) or an offset copy (`first_frame > 0`) would otherwise
+		// renumber a truncated suffix as Object 0 or diverge from the origin's clamp chain.
+		if !same_mode
+			&& ((self.timed && self.group.first_frame() > 0)
+				|| wire
+					.as_ref()
+					.is_some_and(|wire| !wire.first_object || self.group.first_frame() > 0))
+		{
 			return Err(Error::Unsupported);
 		}
 		// A moq-transport publisher's objects carry its own Prior Group ID Gap, which passes
@@ -8230,9 +8272,6 @@ impl GroupServe {
 		if wire.is_some() || self.slice.skip > 0 {
 			self.group_gap = 0;
 		}
-		let same_mode = wire.is_some()
-			&& (self.group.timescale().is_none()
-				|| self.group.ietf().is_none_or(|v| v.timestamp_object_ids() == self.timed));
 		self.same_mode = same_mode;
 		let timed_egress = !same_mode && self.timed;
 		let flags = &mut self.msg.flags;
@@ -15595,6 +15634,7 @@ mod serve_tests {
 			let info = track::Info {
 				properties: Some(Arc::new(crate::model::object::TrackProperties {
 					version,
+					timestamp_ids: version.timestamp_object_ids(),
 					values: upstream.unknown.clone(),
 				})),
 				..track::Info::timed()
@@ -15660,6 +15700,7 @@ mod serve_tests {
 			refresh: crate::track::Refresh::default().with_ratio(0),
 			properties: Some(Arc::new(crate::model::object::TrackProperties {
 				version: Version::Draft22,
+				timestamp_ids: false,
 				values: upstream.unknown.clone(),
 			})),
 			..track::Info::timed()
@@ -15701,6 +15742,7 @@ mod serve_tests {
 			track::Info {
 				properties: Some(Arc::new(crate::model::object::TrackProperties {
 					version: Version::Draft18,
+					timestamp_ids: false,
 					values: properties.unknown,
 				})),
 				..Default::default()
@@ -22077,11 +22119,20 @@ struct LiveEdge {
 	next: Option<Location>,
 }
 
+/// Whether the track's upstream MOQT `reported_object()` uses the same Object ID scheme as
+/// this egress request (`timed`).
+fn track_reported_same_mode(track: &track::Consumer, timed: bool) -> bool {
+	track
+		.peek_info()
+		.is_some_and(|info| info.timescale.is_none() || info.timestamp_ids().is_none_or(|ts| ts == timed))
+}
+
 /// Snapshot the live edge of a track, using wire Object IDs when `timed` (Draft23+ with
 /// `ID_TIMESCALE`) or frame ordinals otherwise (untimed, pre-Draft23, or `INCLUDE_PROPERTIES=0`).
 fn live_edge_for(track: &track::Consumer, timed: bool) -> LiveEdge {
-	let reported = track
-		.reported_object()
+	let reported = track_reported_same_mode(track, timed)
+		.then(|| track.reported_object())
+		.flatten()
 		.map(|(group, object)| Location { group, object });
 	let cached = cached_edge(track, timed);
 	match reported.filter(|reported| {
@@ -22109,8 +22160,7 @@ fn live_edge(track: &track::Consumer) -> LiveEdge {
 
 /// Whether a relayed MOQT group's stored wire Object IDs already match the egress peer's mode.
 fn group_relayed_same_mode(group: &group::Consumer, timed: bool) -> bool {
-	group.wire().is_some()
-		&& (group.timescale().is_none() || group.ietf().is_none_or(|v| v.timestamp_object_ids() == timed))
+	group.wire().is_some() && (group.timescale().is_none() || group.timestamp_ids().is_none_or(|ts| ts == timed))
 }
 
 fn group_last_id(group: &group::Consumer, timed: bool) -> Option<u64> {
@@ -23093,6 +23143,7 @@ mod compression_tests {
 				compression: crate::track::Compression::Deflate,
 				properties: Some(Arc::new(crate::model::object::TrackProperties {
 					version,
+					timestamp_ids: false,
 					values: vec![crate::model::object::Property {
 						id: 0x0b,
 						value: crate::model::object::Value::Bytes(sealed.into()),
@@ -23351,6 +23402,7 @@ mod compression_tests {
 			timescale: Some(Timescale::MILLI),
 			properties: Some(Arc::new(crate::model::object::TrackProperties {
 				version: Version::Draft23,
+				timestamp_ids: true,
 				values: Vec::new(),
 			})),
 			..track::Info::timed()
@@ -23425,6 +23477,7 @@ mod compression_tests {
 			timescale: Some(Timescale::MILLI),
 			properties: Some(Arc::new(crate::model::object::TrackProperties {
 				version: Version::Draft22,
+				timestamp_ids: false,
 				values: Vec::new(),
 			})),
 			..track::Info::timed()
@@ -23492,5 +23545,232 @@ mod compression_tests {
 		assert_eq!(r23.varint().unwrap(), 1);
 		assert_eq!(r23.slice(1).unwrap(), b"b");
 		assert!(r23.is_empty());
+	}
+
+	/// Round 3 regressions:
+	/// - Draft-22 upstream declaring ID_TIMESCALE (`timestamp_ids: true`) translates sparse Objects
+	///   (0, 33) + Prior Object ID Gap (32) to dense Objects (0, 1) without gap for a dense peer.
+	/// - `live_edge_for` ignores upstream `reported_object()` when Object ID schemes differ.
+	/// - Cross-mode translation refuses a prefix-less relayed suffix (`!wire.first_object`).
+	/// - Empty finished timed group G with `finish_at(G, 3)` places `END_OF_TRACK` at (G+1, 0).
+	/// - Ordinary `finish()` checks `range.end.object` on final group G before emitting `END_OF_TRACK`.
+	#[kio::test]
+	async fn round3_mixed_mode_relay_and_terminal_regressions() {
+		use crate::lite::test_transport::{Log, SinkSession};
+
+		// 1 & 4. Draft-22 upstream declaring ID_TIMESCALE (timestamp_ids = true) with Prior Object ID Gap 32.
+		let info = track::Info {
+			timescale: Some(Timescale::MILLI),
+			properties: Some(Arc::new(crate::model::object::TrackProperties {
+				version: Version::Draft22,
+				timestamp_ids: true,
+				values: Vec::new(),
+			})),
+			..track::Info::timed()
+		};
+		let track = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info.clone());
+		// Upstream reported sparse Largest Object (1000, 33).
+		track.report_object(1000, 33);
+
+		let mut group = track.append_group(Timestamp::from_millis(1000).unwrap()).unwrap();
+		group
+			.set_wire(group::Wire {
+				sparse: false,
+				first_object: true,
+				first_id: 0,
+				extensions: true,
+				has_end: true,
+				fetchable: true,
+				last: None,
+			})
+			.unwrap();
+		let gap_props = crate::model::object::Properties {
+			block: super::super::object::block(
+				&[crate::model::object::Property {
+					id: 0x3e, // PRIOR_OBJECT_ID_GAP
+					value: crate::model::object::Value::Int(32),
+				}],
+				Version::Draft22,
+			)
+			.unwrap(),
+		};
+		for (oid, ms, props, payload) in [
+			(0u64, 1000u64, Default::default(), b"a".as_slice()),
+			(33u64, 1033u64, gap_props, b"b".as_slice()),
+		] {
+			let mut f = group
+				.create_object(crate::frame::Header {
+					info: crate::frame::Info {
+						size: payload.len() as u64,
+						timestamp: Timestamp::from_millis(ms).unwrap(),
+					},
+					fields: Some(Arc::new(crate::model::object::Fields {
+						id: oid,
+						properties: props,
+					})),
+					inflated: None,
+				})
+				.unwrap();
+			f.write(bytes::Bytes::copy_from_slice(payload)).unwrap();
+			group = f.finish().unwrap();
+		}
+		let consumer = group.consume();
+		group.finish().unwrap();
+
+		// 2 & 9. Dense subscriber ignores sparse reported_object(1000, 33) and sees dense cached edge (1000, 1).
+		let dense_edge = live_edge_for(&track.consume(), false);
+		assert_eq!(dense_edge.largest, Some(Location { group: 1000, object: 1 }));
+		assert_eq!(dense_edge.next, Some(Location { group: 1000, object: 2 }));
+		let sparse_edge = live_edge_for(&track.consume(), true);
+		assert_eq!(
+			sparse_edge.largest,
+			Some(Location {
+				group: 1000,
+				object: 33
+			})
+		);
+
+		// Dense egress renumbers (0, 33) -> (0, 1) and strips PRIOR_OBJECT_ID_GAP (32).
+		let log = Log::default();
+		let mut serve = GroupServe::new(
+			crate::driver::Transport::new(SinkSession::new(log.clone())),
+			ietf::GroupHeader {
+				track_alias: 1,
+				group_id: 1000,
+				sub_group_id: 0,
+				publisher_priority: 128,
+				flags: Default::default(),
+			},
+			Rank::solo(kio::Producer::new(0i8).consume()),
+			consumer,
+			Version::Draft22,
+			GroupSlice::default(),
+		)
+		.timed(false);
+		kio::wait(|waiter| serve.poll_serve(waiter)).await.unwrap();
+		let written = log.writes.lock().unwrap().clone();
+		let mut r = crate::coding::Decoder::new(&written, Version::Draft22.into());
+		let _header = ietf::GroupHeader::decode(&mut r, Version::Draft22).unwrap();
+		assert_eq!(r.varint().unwrap(), 0); // Object 0
+		assert_eq!(r.varint().unwrap(), 0); // ext len 0
+		assert_eq!(r.varint().unwrap(), 1);
+		assert_eq!(r.slice(1).unwrap(), b"a");
+		assert_eq!(r.varint().unwrap(), 0); // delta 0 -> dense Object 1
+		assert_eq!(r.varint().unwrap(), 0); // PRIOR_OBJECT_ID_GAP stripped -> ext len 0
+		assert_eq!(r.varint().unwrap(), 1);
+		assert_eq!(r.slice(1).unwrap(), b"b");
+		assert!(r.is_empty());
+
+		// 3. Relayed suffix (`first_object: false`) refuses cross-mode translation.
+		let suffix_track = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info);
+		let mut suffix_group = suffix_track
+			.append_group(Timestamp::from_millis(2000).unwrap())
+			.unwrap();
+		suffix_group
+			.set_wire(group::Wire {
+				sparse: false,
+				first_object: false,
+				first_id: 33,
+				extensions: true,
+				has_end: true,
+				fetchable: true,
+				last: None,
+			})
+			.unwrap();
+		let mut sf = suffix_group
+			.create_object(crate::frame::Header {
+				info: crate::frame::Info {
+					size: 1,
+					timestamp: Timestamp::from_millis(2033).unwrap(),
+				},
+				fields: Some(Arc::new(crate::model::object::Fields {
+					id: 33,
+					properties: Default::default(),
+				})),
+				inflated: None,
+			})
+			.unwrap();
+		sf.write(bytes::Bytes::from_static(b"x")).unwrap();
+		suffix_group = sf.finish().unwrap();
+		let suffix_consumer = suffix_group.consume();
+		suffix_group.finish().unwrap();
+
+		let mut suffix_serve = GroupServe::new(
+			crate::driver::Transport::new(SinkSession::new(Log::default())),
+			ietf::GroupHeader {
+				track_alias: 1,
+				group_id: 2000,
+				sub_group_id: 0,
+				publisher_priority: 128,
+				flags: Default::default(),
+			},
+			Rank::solo(kio::Producer::new(0i8).consume()),
+			suffix_consumer,
+			Version::Draft22,
+			GroupSlice::default(),
+		)
+		.timed(false);
+		let res = kio::wait(|waiter| suffix_serve.poll_serve(waiter)).await;
+		assert!(
+			matches!(res, Err(Error::Unsupported)),
+			"expected Unsupported, got {res:?}"
+		);
+
+		// 5. Empty finished timed group G with finish_at(G, 3) resolves END_OF_TRACK to (G+1, 0).
+		let mut empty_track = track::Producer::new(
+			Arc::new(crate::broadcast::Info::default()),
+			"video",
+			track::Info::timed().with_timescale(Timescale::MILLI),
+		);
+		let empty_group = empty_track.append_group(Timestamp::from_millis(3000).unwrap()).unwrap();
+		empty_group.finish().unwrap();
+		empty_track
+			.finish_at(track::Position { group: 3000, frame: 3 })
+			.unwrap();
+		let mut empty_serve = TrackServe::new(
+			crate::driver::Transport::new(SinkSession::new(Log::default())),
+			empty_track.subscribe(None),
+			RequestId(3),
+			Version::Draft23,
+			ServeRange::default(),
+		)
+		.timed(true);
+		empty_serve.phase = ServePhase::Draining(Some(track::Position { group: 3000, frame: 3 }));
+		assert_eq!(empty_serve.end(), Some(track::Position { group: 3001, frame: 0 }));
+
+		// 6. Ordinary finish() checks range.end.object on final group G before emitting END_OF_TRACK.
+		let mut cap_track = track::Producer::new(
+			Arc::new(crate::broadcast::Info::default()),
+			"video",
+			track::Info::timed().with_timescale(Timescale::MILLI),
+		);
+		let mut cap_group = cap_track.append_group(Timestamp::from_millis(4000).unwrap()).unwrap();
+		cap_group
+			.write_frame(Timestamp::from_millis(4000).unwrap(), b"a".as_slice())
+			.unwrap();
+		cap_group
+			.write_frame(Timestamp::from_millis(4033).unwrap(), b"b".as_slice())
+			.unwrap();
+		cap_group.finish().unwrap();
+		let finish_pos = track::Position { group: 4001, frame: 0 };
+		cap_track.finish_at(finish_pos).unwrap();
+		for (cap, expect_end) in [(Some(0), None), (Some(33), Some(finish_pos)), (None, Some(finish_pos))] {
+			let mut cap_serve = TrackServe::new(
+				crate::driver::Transport::new(SinkSession::new(Log::default())),
+				cap_track.subscribe(None),
+				RequestId(4),
+				Version::Draft23,
+				ServeRange {
+					start: None,
+					end: Some(ietf::EndLocation {
+						group: 4000,
+						object: cap,
+					}),
+				},
+			)
+			.timed(true);
+			cap_serve.phase = ServePhase::Draining(Some(finish_pos));
+			assert_eq!(cap_serve.end(), expect_end, "ordinary finish cap={cap:?}");
+		}
 	}
 }

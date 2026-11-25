@@ -1748,12 +1748,21 @@ impl Consumer {
 			};
 			// A dense copy expects the same Object ID: on timed tracks both dense ordinals
 			// (Draft18..22) and deterministic moq-timestamp Object IDs (Draft23+) identify the
-			// same frame, enabling mid-frame failover across mixed-version routes.
+			// same frame, enabling mid-frame failover across mixed-version routes. Each copy's
+			// wire Object ID is validated against its own timing mode so a Draft-22 copy (whose
+			// decoded timestamp equals the group start) can still resume onto a Draft-23 copy.
 			if let Some(fields) = frame.fields.as_ref() {
-				let valid_id = |id: u64| id == index || (self.info.timestamp.scale().is_some() && id == self.timed_oid);
+				let own_sparse = self.state.read().sparse();
+				let new_sparse = frame.state.read().sparse();
+				let own_valid = |id: u64| {
+					id == index || (!own_sparse && self.info.timestamp.scale().is_some() && id == self.timed_oid)
+				};
+				let new_valid = |id: u64| {
+					id == index || (!new_sparse && frame.info.timestamp.scale().is_some() && id == frame.timed_oid)
+				};
 				let matches = match &self.fields {
-					Some(own) => fields.id == own.id || (valid_id(own.id) && valid_id(fields.id)),
-					None => valid_id(fields.id),
+					Some(own) => fields.id == own.id || (own_valid(own.id) && new_valid(fields.id)),
+					None => new_valid(fields.id),
 				};
 				if !matches {
 					return Poll::Ready(Err(Error::Unsupported));
