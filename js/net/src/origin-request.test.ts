@@ -2,10 +2,11 @@ import { expect, test } from "bun:test";
 import { Producer as BroadcastProducer } from "./broadcast";
 import { defined } from "./defined.test-util.ts";
 import { StreamCode, StreamError } from "./error";
-import { WireRoute } from "./hop";
+import { toHop, WireRoute } from "./hop";
 import * as Instance from "./instance.ts";
 import { type Following, Producer, type Requesting } from "./origin";
 import * as Path from "./path";
+import { readsFrom } from "./resume.test-util";
 import { Timestamp } from "./time.ts";
 import { wireOf } from "./wire";
 
@@ -1472,5 +1473,53 @@ test("a held request is unwanted once its requester gives up the switch", async 
 	source.close();
 	cheaper.close();
 	serving.close();
+	origin.close();
+});
+
+// A claim of `src`'s one instance at `epoch`, through a peer, shown `above` levels beneath its prefix.
+const epochClaim = (epoch: bigint, above = 0n): Partial<WireRoute> => ({
+	instance: Instance.parse("stable"),
+	epoch,
+	hops: [toHop(10n)],
+	claimed: true,
+	above,
+});
+
+// A front held through an older epoch keeps serving its readers while it waits on the newer one,
+// but a fresh request never resolves through it: with the newer epoch winning and turned
+// unavailable before it answers, the request waits on that epoch and fails with its refusal, as
+// `a_superseded_epoch_never_answers_a_fresh_request` in Rust.
+test("a superseded epoch never answers a fresh request", async () => {
+	const origin = new Producer();
+	const path = Path.from("src/a/b");
+	// A claim of `src` filed at `src/a`, shown a level beneath its prefix.
+	const filed = wireOf(origin).receive(Path.from("src/a"), epochClaim(1n, 1n));
+	const held = origin.request(path);
+	const source = new BroadcastProducer();
+	defined((await filed.requested().next()).value).serve(source.consume());
+	const reader = await held.broadcast();
+	expect(readsFrom(reader, source)).toBe(true);
+
+	const newer = wireOf(origin).receive(Path.from("src"), epochClaim(2n));
+	const asked = newer.requested();
+	const switching = defined((await asked.next()).value);
+	wireOf(newer).update({ ...epochClaim(2n), available: false });
+
+	const fresh = origin.request(path);
+	await settle();
+	expect(fresh.active.peek()).toBeUndefined();
+	expect(readsFrom(reader, source)).toBe(true);
+
+	// No route reaches the newer epoch, so its session refuses whatever it is asked.
+	const refused = new StreamError(StreamCode.Unroutable);
+	switching.reject(refused);
+	await settle();
+	expect(fresh.closed.peek()).toBe(refused);
+
+	fresh.close();
+	held.close();
+	source.close();
+	newer.close();
+	filed.close();
 	origin.close();
 });

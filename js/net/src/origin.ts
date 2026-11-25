@@ -313,6 +313,8 @@ interface RequestSlot {
 interface Resolution {
 	readonly front?: broadcast.Consumer;
 	readonly instance?: Instance.Valid;
+	/** The epoch of the instance the front came from: a request selecting another one never joins it. */
+	readonly epoch?: bigint;
 	/** The local broadcast or route entry's identity the front came from, when it did. */
 	readonly source?: object;
 	/** Whether the front is the local broadcast, whose word on a track no route news overtakes. */
@@ -648,7 +650,7 @@ class OriginState {
 	// providing route goes away or the last request releases it.
 	materialized = new Map<
 		Path.Valid,
-		{ entry: RouteEntry; front: broadcast.Consumer; instance?: Instance.Valid; source: object }
+		{ entry: RouteEntry; front: broadcast.Consumer; instance?: Instance.Valid; epoch?: bigint; source: object }
 	>();
 
 	// Paths consumers asked for without waiting for an announcement; attached sessions
@@ -892,6 +894,13 @@ class OriginState {
 				this.retire(path, slot);
 				return;
 			}
+			// Another epoch of the instance wins: the slot's handles move onto it once it answers, but
+			// nobody joins them meanwhile, since an older epoch never stands in for a newer one.
+			if (next && (next.route.epoch ?? 0n) !== (current.epoch ?? 0n)) {
+				this.retire(path, slot);
+				this.follow(path, slot, current.instance, current.source);
+				return;
+			}
 		}
 		slot.route.set(this.route(path, slot));
 	}
@@ -930,7 +939,8 @@ class OriginState {
 			slot.failover = undefined;
 			if (source === local) return;
 			this.retain(path, slot, undefined);
-			slot.route.set({ front: local, instance, source: local, local: true });
+			const epoch = this.advertisedLocal.peek().get(path)?.epoch;
+			slot.route.set({ front: local, instance, epoch, source: local, local: true });
 			return;
 		}
 		if (!entry?.server) {
@@ -954,7 +964,7 @@ class OriginState {
 		}
 		slot.failover = undefined;
 		this.retain(path, slot, served);
-		slot.route.set({ front: served, instance, source: entry.identity });
+		slot.route.set({ front: served, instance, epoch: entry.route.peek().epoch, source: entry.identity });
 	}
 
 	/**
@@ -1000,7 +1010,8 @@ class OriginState {
 		const entry = this.bestEntry(path);
 		const local = this.local.peek().get(path);
 		if (local && this.localWins(path, entry)) {
-			return { identity: local, route: { instance: this.advertisedLocal.peek().get(path)?.instance } };
+			const advertised = this.advertisedLocal.peek().get(path);
+			return { identity: local, route: { instance: advertised?.instance, epoch: advertised?.epoch } };
 		}
 		if (!entry?.server) return undefined;
 		return { identity: entry.identity, route: entry.route.peek() };
@@ -1207,9 +1218,11 @@ class OriginState {
 		if (local && this.localWins(path, entry)) {
 			// Nothing reads a remote front the local broadcast replaced, so close its session subscription.
 			this.releaseMaterialized(path);
+			const advertised = this.advertisedLocal.peek().get(path);
 			return {
 				front: local,
-				instance: this.advertisedLocal.peek().get(path)?.instance,
+				instance: advertised?.instance,
+				epoch: advertised?.epoch,
 				source: local,
 				local: true,
 			};
@@ -1221,7 +1234,8 @@ class OriginState {
 			cached = undefined;
 		}
 		const instance = entry?.route.peek().instance;
-		if (cached && cached.entry === entry && cached.instance === instance) return cached;
+		const epoch = entry?.route.peek().epoch;
+		if (cached && cached.entry === entry && cached.instance === instance && cached.epoch === epoch) return cached;
 		if (!entry?.server) {
 			this.releaseMaterialized(path);
 			return slot.answer ? { front: slot.answer } : undefined;
@@ -1229,16 +1243,17 @@ class OriginState {
 
 		const served = entry.server.served.get(path);
 		if (served && served.closed.peek() === undefined) {
-			const resolution = { entry, front: served, instance, source: entry.identity };
+			const resolution = { entry, front: served, instance, epoch, source: entry.identity };
 			this.materialized.set(path, resolution);
 			if (cached && cached.front !== served) this.closeUnheld(path, cached.front);
 			return resolution;
 		}
 
 		entry.server.enqueue(path);
-		// The same instance over another route: the old front serves until the new one answers.
-		const kept = cached?.instance === instance ? cached : undefined;
-		return { front: kept?.front, instance, source: kept?.source, pending: true };
+		// The same instance and epoch over another route: the old front serves until the new one
+		// answers. An older epoch never stands in for a newer one.
+		const kept = cached?.instance === instance && (cached?.epoch ?? 0n) === (epoch ?? 0n) ? cached : undefined;
+		return { front: kept?.front, instance, epoch: kept?.epoch, source: kept?.source, pending: true };
 	}
 }
 
