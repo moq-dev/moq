@@ -107,8 +107,9 @@ class TrackDemand:
     async def wanted_changed(self) -> bool:
         """Wait for ``wanted`` to change and return it. The first call returns at once.
 
-        End a track nobody wants by releasing its producer once this returns ``False``: a reader
-        that joined since is served by the next request for the track while a request handler is live.
+        End a track nobody wants by dropping every reference to its producer (``del producer``)
+        once this returns ``False``: a reader that joined since is served by the next request
+        for the track while a request handler is live.
         """
         return await self._inner.wanted_changed()
 

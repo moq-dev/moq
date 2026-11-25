@@ -14124,6 +14124,9 @@ pub struct Request {
 
 	// A track the producer reserved, listed by its broadcast once accepted.
 	list: Option<broadcast::ListOnAccept>,
+
+	// Asked for again after its last producer dropped while read; see [`Self::renew`].
+	renewed: bool,
 }
 
 /// Whether a [`Request`] asked for its accepted track's start to be pending.
@@ -14142,7 +14145,10 @@ impl Request {
 	/// Ask for a track again on the state its last producer left, so the readers still
 	/// waiting on it are served by the producer accepting this.
 	fn renew(name: Arc<str>, state: kio::Producer<TrackState>, home: broadcast::Home) -> Self {
-		Self::with_state(name, state).homed(home)
+		Self {
+			renewed: true,
+			..Self::with_state(name, state).homed(home)
+		}
 	}
 
 	fn with_state(name: Arc<str>, state: kio::Producer<TrackState>) -> Self {
@@ -14160,6 +14166,7 @@ impl Request {
 			requested_start: RequestedStart::Unset,
 			idle: false,
 			list: None,
+			renewed: false,
 		}
 	}
 
@@ -14276,7 +14283,9 @@ impl Request {
 	/// Serve the request with the given track, resolving every waiting subscriber.
 	///
 	/// The name is taken from [`Self::name`]; `info` supplies the remaining knobs
-	/// (`None` for the defaults). If the track was already aborted, the returned
+	/// (`None` for the defaults). A track asked for again because its last producer dropped
+	/// while read keeps the info it was first accepted with, which its readers already hold,
+	/// and ignores `info`. If the track was already aborted, the returned
 	/// [`Producer`] is inert: writes fail with the abort error, as if it had been
 	/// aborted immediately after accepting.
 	pub fn accept(self, info: impl Into<Option<Info>>) -> Producer {
@@ -14290,11 +14299,18 @@ impl Request {
 	/// [`Staged::commit`]. Dropping the [`Staged`] uncommitted rejects the request with
 	/// [`Error::Dropped`].
 	pub(crate) fn stage(self, info: impl Into<Option<Info>>) -> Staged {
-		let info = info.into().unwrap_or_default();
+		let mut info = info.into().unwrap_or_default();
 		// A closed state means the track was aborted under us. Mirror `reject` and
 		// tolerate it: the Producer we hand back simply can't write.
 		let open = match self.state.write() {
 			Ok(mut state) => {
+				// Its readers, and the peers they forward to, already hold the info the track
+				// was first accepted with, so a renewal keeps it rather than change it under them.
+				if self.renewed
+					&& let Some(held) = &state.info
+				{
+					info = held.clone();
+				}
 				state.stage(info.clone());
 				if let RequestedStart::Pending(floor) = self.requested_start {
 					state.set_start(FeedStart::Pending(floor));

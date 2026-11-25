@@ -353,11 +353,13 @@ impl Producer {
 			let track = request
 				.with_stats(self.stats.clone())
 				.homed(Home(self.state.clone()))
-				.accept(info.clone());
+				.accept(info);
 			// Cache it like a served request so concurrent lookups coalesce; a
 			// live same-name entry cannot exist (its presence would have kept
 			// the request from queuing).
 			let _ = state.cache_track(track.weak());
+			// The accepted info, which a renewed track keeps from its first producer.
+			let info = track.info().clone();
 			let unlist = Unlist::list(&self.state, &mut state.listing, name, Listed::Track(info));
 			return Some(track.listed(unlist));
 		}
@@ -2616,6 +2618,27 @@ mod test {
 		next.append_next().unwrap().finish().unwrap();
 		while later.recv_group().await.unwrap().unwrap().start != 2 {}
 		dynamic.assert_no_request();
+	}
+
+	/// A renewed track keeps the info it was first accepted with, which its reader already
+	/// holds, whatever the next producer asks for.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_renewed_track_keeps_its_first_info() {
+		let producer = Info::new().produce();
+		let mut dynamic = producer.requests();
+		let consumer = producer.consume();
+
+		let first = consumer.track("video").unwrap().subscribe(None);
+		let track = dynamic.assert_request().accept(crate::track::Info::timed());
+		drop(first);
+		let joined = consumer.track("video").unwrap().subscribe(None).await.unwrap();
+		drop(track);
+
+		let compressed = crate::track::Info::timed().with_compression(crate::track::Compression::Deflate);
+		let next = dynamic.assert_request().accept(compressed);
+		assert_eq!(next.info(), &crate::track::Info::timed());
+		drop(joined);
 	}
 
 	/// A reader that joined in the race and holds the group the producer left open reads that

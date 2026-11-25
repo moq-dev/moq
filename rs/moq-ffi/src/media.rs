@@ -1074,11 +1074,10 @@ struct MediaStreamProducer {
 
 /// Imports a container into a broadcast, from chunks split anywhere such as a raw byte stream.
 ///
-/// Released before its finish, it ends each track cleanly while nobody wants it; a reader that
-/// still does is served by the broadcast's next request for the track, or reads `Dropped` (seen
-/// elsewhere as `Internal`) with no request handler. Still open when its broadcast closes, it ends
-/// them with `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such
-/// code.
+/// Released before its finish, it ends each track with `Dropped` (seen elsewhere as `Internal`):
+/// its input stopped mid-stream, and it serves no on-demand track. Still open when its broadcast
+/// closes, it ends them with `Unroutable`, which a moq-transport reader sees as `Internal`: its
+/// wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqMediaContainerProducer {
 	driver: crate::ffi::Background,
