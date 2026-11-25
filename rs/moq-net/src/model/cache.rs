@@ -325,6 +325,12 @@ impl Pool {
 		self.spared().saturating_add(recorded).saturating_sub(self.target())
 	}
 
+	/// What readers' records and tails bill in all.
+	#[cfg(test)]
+	pub(super) fn recorded(&self) -> u64 {
+		self.inner.recorded.load(Ordering::Relaxed)
+	}
+
 	/// What usage converges toward: the capacity, or the pinned bytes when they are more,
 	/// since nothing can reclaim those. Holds never raise it: they fit within the capacity.
 	fn target(&self) -> u64 {

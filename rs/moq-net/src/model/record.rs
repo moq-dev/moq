@@ -41,6 +41,9 @@ pub(crate) struct Record {
 	bill: Option<cache::Reader>,
 	/// The ranges the last retirement judged the gaps against (see [`Self::retire`]).
 	retired: Option<Cover>,
+	/// The runs, its own and beside it, left by the last fold: the next folds what is final
+	/// once they double (see [`Self::settle`]).
+	folded_at: u64,
 	/// A fold forgot the runs copied from the track's drop set, which the next drop scan
 	/// folds in again in full.
 	pub(super) rescan: bool,
@@ -190,6 +193,10 @@ pub(super) trait Beside {
 	fn given_up_end(&self, key: u64) -> Option<u64>;
 	/// The lowest key from `key` on that it gave up, or still asks or awaits a fill for.
 	fn next_held(&self, key: u64) -> Option<u64>;
+	/// The lowest key from `key` on that it gave up as stale, which a wider budget asks again.
+	fn next_stale(&self, _key: u64) -> Option<u64> {
+		None
+	}
 	/// Forget every run within `folded`, which the record folded as settled.
 	fn forget(&mut self, folded: std::ops::Range<u64>);
 }
@@ -237,6 +244,11 @@ enum Fold {
 	/// ranges that start below `below`, so a stale skip stays for a wider budget to offer
 	/// again.
 	Retire { below: u64 },
+	/// As the record grows: only what nothing can change any more, which folds at no cost to
+	/// what the reader offers or reports later. Groups handed out and told, and skips and
+	/// settled reports; never a drop a skip may still replace, a stale skip a wider budget
+	/// owes again, or a run not reported yet.
+	Final,
 }
 
 /// What a record bills, and the debt its track left to its readers.
@@ -260,6 +272,9 @@ impl Record {
 	/// Bill this record to `account`, opened on its first run. Once the reader's ranges
 	/// moved, retire the gaps they left behind (see [`Self::retire`]); under a debt the track
 	/// left its readers, pay what it can by folding what it settled for good into its floor.
+	/// Without one, fold what is final whenever the record doubled since it last did, so a
+	/// live reader of a sparse-key track, which settles a skip between every two groups, keeps
+	/// a record no larger than what is still open, at a cost linear in the runs it adds.
 	///
 	/// A record is its reader's owed gaps, not cached media, so it never ends its reader:
 	/// what is left after both is owed for a moment, a drop not reported yet or a miss still
@@ -276,7 +291,8 @@ impl Record {
 		if moved {
 			self.retired = reader.ranges.clone();
 		}
-		let bytes = (self.runs() + beside.runs()) * RUN_OVERHEAD;
+		let runs = self.runs() + beside.runs();
+		let bytes = runs * RUN_OVERHEAD;
 		let bill = match &mut self.bill {
 			Some(bill) => bill,
 			None if bytes == 0 => return,
@@ -284,21 +300,27 @@ impl Record {
 		};
 		bill.set(bytes);
 		let owed = bill.debt() > 0;
-		if !owed && !moved {
+		let grown = runs > 2 * self.folded_at;
+		if !owed && !moved && !grown {
 			return;
 		}
 		let mut folded = Vec::new();
 		if moved {
 			folded.extend(self.retire(&reader, &*beside));
 		}
-		if owed {
-			folded.extend(self.fold(&reader, &*beside));
+		match owed {
+			true => folded.extend(self.fold(&reader, &*beside, Fold::Debt)),
+			false if grown => folded.extend(self.fold(&reader, &*beside, Fold::Final)),
+			false => {}
 		}
 		for folded in folded {
 			beside.forget(folded);
 		}
-		let bytes = (self.runs() + beside.runs()) * RUN_OVERHEAD;
-		self.bill.as_mut().expect("opened above").set(bytes);
+		let runs = self.runs() + beside.runs();
+		if owed || grown {
+			self.folded_at = runs;
+		}
+		self.bill.as_mut().expect("opened above").set(runs * RUN_OVERHEAD);
 	}
 
 	/// Retire the gaps the reader's ranges left behind, which nothing settles while they stay
@@ -366,14 +388,16 @@ impl Record {
 	/// should a group arrive there or its ranges widen. Folding past each key still owed, as a
 	/// miss its fills have yet to answer, bounds what is left by those keys, which the reader's
 	/// ask allowance bounds in turn. Returns the runs it folded, below the floor and above.
-	fn fold(&mut self, reader: &Standing, beside: &dyn Beside) -> Vec<std::ops::Range<u64>> {
+	///
+	/// [`Fold::Final`] folds the same way through only what nothing can change any more.
+	fn fold(&mut self, reader: &Standing, beside: &dyn Beside, mode: Fold) -> Vec<std::ops::Range<u64>> {
 		let mut folded = Vec::new();
 		// The runs copied from the track's drop set go first: the next scan folds in again
 		// whatever the track still holds.
 		let received: Vec<_> = self
 			.pending
 			.iter()
-			.filter(|(_, pending)| pending.received)
+			.filter(|(_, pending)| mode == Fold::Debt && pending.received)
 			.map(|(run, _)| run.clone())
 			.collect();
 		if !received.is_empty() {
@@ -382,7 +406,7 @@ impl Record {
 			}
 			self.rescan = true;
 		}
-		let floor = self.final_end(self.floor, reader, beside, Fold::Debt).end;
+		let floor = self.final_end(self.floor, reader, beside, mode).end;
 		if floor > self.floor {
 			self.raise(floor);
 			folded.push(0..floor);
@@ -390,7 +414,7 @@ impl Record {
 		let mut from = Some(reader.from.max(self.lowest_settled().unwrap_or(0))).filter(|from| *from > self.floor);
 		while let Some(start) = from {
 			// Folded, a stretch costs two runs: only one spanning more is worth it.
-			let stretch = self.final_end(start, reader, beside, Fold::Debt);
+			let stretch = self.final_end(start, reader, beside, mode);
 			if stretch.runs > 2 {
 				self.settle_stretch(start..stretch.end);
 				folded.push(start..stretch.end);
@@ -494,6 +518,8 @@ impl Record {
 		let mut gaps = Vec::new();
 		loop {
 			let next = match self.reported.get_key_value(&end) {
+				// A skip may still go out over a drop, which folding would stop.
+				Some((_, Report::Dropped)) if fold == Fold::Final => break,
 				Some((run, _)) => run.end,
 				None if self.pending.contains_key(&end) => break,
 				None => {
@@ -504,7 +530,7 @@ impl Record {
 							self.skipped.run_end(end),
 							beside.given_up_end(end),
 						],
-						Fold::Retire { .. } => [self.delivered.run_end(end), None, None, None],
+						Fold::Retire { .. } | Fold::Final => [self.delivered.run_end(end), None, None, None],
 					};
 					let Some(run_end) = local.into_iter().flatten().max() else {
 						let Fold::Retire { below } = fold else {
@@ -530,6 +556,18 @@ impl Record {
 					.flatten()
 					.fold(run_end, |run_end, start| run_end.min(start.max(end)))
 				}
+			};
+			// A stale skip stays for a wider budget to offer again.
+			let next = match fold {
+				Fold::Final => [
+					self.skipped.next_from(end),
+					self.written_off.overlapping(&(end..next)).next().map(|run| run.start),
+					beside.next_stale(end),
+				]
+				.into_iter()
+				.flatten()
+				.fold(next, |next, stale| next.min(stale.max(end))),
+				_ => next,
 			};
 			// The group this read hands out stays above: its publisher has yet to tell its wire
 			// of it, and would take one below the floor as told already.

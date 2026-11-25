@@ -36,30 +36,50 @@ Decided 2026-11-24 (maintainer, /quest-import):
   known leak, as the relay soak plans, and build the slope judge so the
   relay soak can reuse it for churn.
 
-Leads from reading the code at `f031ffec29`, unconfirmed until profiled.
-Passthrough cuts a group at each video random access point, or after 1 s
-(`rs/moq-mux/src/container/ts/passthrough.rs` `FALLBACK_TICKS`), so thousands
-of groups an hour, keyed by their start time in microseconds
-(`Track::append_group`). The relay's slope is then a few hundred bytes per
-group.
+Profiled 2026-11-25 on `b367c92954` (draft
+[moq-dev/moq#9579](https://github.com/moq-dev/moq/pull/9579)): the passthrough
+chain on loopback, a 320x240 60 fps source with every frame a keyframe (60
+groups/s), jemalloc `lg_prof_sample:17`, dumps every 5 min over 20 min. RSS
+stayed in noise at that length, but the heap diffs showed one growth in all
+three processes, one entry per group in each live reader:
 
-- A reader's `Record` (`rs/moq-net/src/model/record.rs`) keeps runs of keys
-  handed out, skipped, pending and reported, and folds them below `floor` only
-  under pool pressure. A stock relay's headroom governor seldom reaches that
-  pressure, and with sparse keys a run that `forget_past_budget` can't merge
-  stays its own entry. This is the likeliest lead.
-- Each `append_group` records the keys skipped since the previous group in
-  the track's drop set, which `expire_drops` forgets only below the live edge.
-- The track and session arrival ledgers (`ledger.rs`, `tail.rs`) open a gap
-  per sparse key, closed after the max delay.
-- `moq-quic` keeps each send stream's end state until `release()`. A path
-  that bypasses the handle that releases it on drop would keep one per
-  stream.
+- `Record::reported` (`rs/moq-net/src/model/record.rs`, via
+  `DropCursor::next` → `Record::report`): import +2.1 MB, export +1.7 MB,
+  relay +1.7 MB over 15 min.
+- `Misses::given_up` (`rs/moq-net/src/model/track/miss.rs`
+  `adopt_drops`): relay +1.3 MB, import +0.9 MB.
 
-A quick discriminator: if the pool's billed record bytes climb, it's one of
-the first three, and `--cache-capacity` should flatten the relay. The import
-and export have no byte capacity at all, so they would show the same shape.
-Ask the reporter to run the fix on their lane, but don't wait on it to land.
+Cause: every `append_group` (and on a received copy, every GROUP_END's
+`skip_groups`) skips the keys between consecutive group starts, each reader
+reports that skip, and the record folds only under pool debt or when its
+ranges move. A stock pool is far below its target, so nothing folds. A unit
+test (`a_sparse_live_track_keeps_a_bounded_record`) measured 3,999 billed runs
+after 2,000 groups.
+
+Fix (on the draft): `Fold::Final`, a lossless fold that `Record::settle`
+runs whenever the record has doubled since its last fold. It folds only
+delivered keys and `Skip`/`Settled` reports. It stops at `Dropped` reports
+(a skip may still replace them), stale skips, written-off runs, `Misses`'
+stale verdicts (`Beside::next_stale`), pending runs, and the group being
+handed out. `Misses`' given-up runs fold with it through `Beside::forget`.
+The test now peaks at 3 runs.
+
+Remaining:
+
+- Run the full `moq-net` suite (`just rs test -p moq-net --features async`)
+  and `/verify-subscribe` on the fix; neither ran yet.
+- Re-profile with the fix over a longer run (1 h or more) to confirm all
+  three level off. The QUIC recv leases (`Leased::fill`) and cached
+  groups/frames swung between dumps and looked like in-flight data, but
+  confirm they don't trend.
+- The Nightly steady run from the Goal: the repro at
+  `.tmp/steady/repro.sh` in the draft's worktree is the shape (a live
+  ffmpeg source at a high group rate | `import ts --passthrough` → relay →
+  `export ts --passthrough`, sampling `/proc/<pid>/status` VmRSS and
+  jemalloc heap dumps). Build it on `test/lib/harness.sh`, judge the slope
+  after warm-up, size the run by seeding a known leak (revert this fix), and
+  wire it into `.github/workflows/nightly.yml`.
+- Ask the reporter to run the fix on their lane once it lands.
 
 Public API: none expected. Wire: none.
 

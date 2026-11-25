@@ -32692,6 +32692,43 @@ mod test {
 		assert_eq!(subscriber.delivered_runs(), 1000);
 	}
 
+	/// A live reader of a track whose groups start at sparse keys keeps a bounded record however
+	/// long the track runs, under a pool with room to spare: the keys between groups are
+	/// skipped for good, by the publisher's append or the upstream's group end, so what the
+	/// reader settled folds as it goes rather than waiting for pool pressure.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_sparse_live_track_keeps_a_bounded_record() {
+		const GROUPS: u64 = 2000;
+		const SPACING: u64 = 17;
+		for received in [false, true] {
+			let (producer, pool) = pooled_producer(1 << 40);
+			if received {
+				producer.received();
+			}
+			let mut subscriber = producer.subscribe(Subscription::default());
+			let mut most = 0;
+			for n in 0..GROUPS {
+				let key = n * SPACING;
+				let mut group = match received {
+					false => producer.append_group(Timestamp::from_millis(key).unwrap()).unwrap(),
+					true => producer.create_group(group::Info { start: key }).unwrap(),
+				};
+				group
+					.write_frame(Timestamp::from_millis(key).unwrap(), &b"x"[..])
+					.unwrap();
+				group.finish().unwrap();
+				if received {
+					producer.skip_groups(key + 1..key + SPACING);
+				}
+				assert_eq!(drain_groups(&mut subscriber), [key], "received={received}");
+				drained_drops(&mut subscriber);
+				most = most.max(pool.recorded() / super::super::record::RUN_OVERHEAD);
+			}
+			assert!(most <= 8, "received={received}: the record grew to {most} runs");
+		}
+	}
+
 	/// A peer that keeps moving its ranges to a disjoint single group, up or down the track,
 	/// grows no record however long it hops, at any capacity: each gap its ranges leave
 	/// behind is retired once they no longer cover it.

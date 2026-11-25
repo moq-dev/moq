@@ -2152,6 +2152,13 @@ impl super::super::record::Beside for Misses {
 		.min()
 	}
 
+	fn next_stale(&self, key: u64) -> Option<u64> {
+		self.stale
+			.overlapping(&(key..u64::MAX))
+			.next()
+			.map(|(run, _)| run.start.max(key))
+	}
+
 	fn forget(&mut self, folded: ops::Range<u64>) {
 		if !folded.is_empty() {
 			self.given_up.remove(folded.clone());
