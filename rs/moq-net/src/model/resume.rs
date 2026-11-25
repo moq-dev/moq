@@ -1407,7 +1407,10 @@ impl Subscriber {
 	}
 
 	/// The lowest group at or above `from` any copy's arrival read holds unread; see
-	/// [`track::Subscriber::lowest_unread`].
+	/// [`track::Subscriber::lowest_unread`]. Of the copies holding it, the one serving the
+	/// most of it, so which copy holds a group never decides whether it can be served: one
+	/// that can fetch its head serves any frame, and below its first frame a copy that can't
+	/// fetches nothing, so the lowest first frame serves the rest.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn lowest_unread(&self, from: u64) -> Option<group::Consumer> {
 		let reader = self.reader();
@@ -1416,7 +1419,7 @@ impl Subscriber {
 				Sub::Ready(sub) => sub.lowest_unread(from),
 				Sub::Pending(_) => None,
 			})
-			.min_by_key(|group| group.start)
+			.min_by_key(|group| (group.start, !group.fetches_from(0), group.first_frame()))
 	}
 
 	/// Poll for where the serving copy's live feed starts; see
