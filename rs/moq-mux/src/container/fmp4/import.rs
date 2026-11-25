@@ -2691,30 +2691,30 @@ mod tests {
 	}
 
 	/// Audio-only fragments of one 23 ms sample, as ffmpeg's `-frag_duration` writes them, share a
-	/// group until it carries 200 ms, and the fragment that fills it closes it at once.
+	/// group until it carries 100 ms, and the fragment that fills it closes it at once.
 	#[test]
 	fn audio_only_fragments_share_a_group_until_it_fills() {
 		const SIZE: usize = 64;
 		for passthrough in [false, true] {
 			let (mut import, id, _) = initialized(passthrough);
 			let mut consumer = replay(&import.tracks[&id].output);
-			for fragment in 0..9 {
+			for fragment in 0..5 {
 				import
 					.decode(&media_header(id, fragment * 1024, &[0], SIZE as u32, Some(SIZE)))
 					.unwrap();
 				import.decode(&[0xA5; SIZE]).unwrap();
 			}
-			// Nine fragments carry 209 ms, so the group is already closed.
-			assert_eq!(groups(&mut consumer), [(0, Some(9))], "passthrough: {passthrough}");
-			for fragment in 9..12 {
+			// Five fragments carry 116 ms, so the group is already closed.
+			assert_eq!(groups(&mut consumer), [(0, Some(5))], "passthrough: {passthrough}");
+			for fragment in 5..7 {
 				import
 					.decode(&media_header(id, fragment * 1024, &[0], SIZE as u32, Some(SIZE)))
 					.unwrap();
 				import.decode(&[0xA5; SIZE]).unwrap();
 			}
 			let _finished = import.finish().unwrap();
-			let second = start(&consumer, 9 * 1024);
-			assert_eq!(groups(&mut consumer), [(second, Some(3))], "passthrough: {passthrough}");
+			let second = start(&consumer, 5 * 1024);
+			assert_eq!(groups(&mut consumer), [(second, Some(2))], "passthrough: {passthrough}");
 		}
 	}
 
@@ -2728,19 +2728,19 @@ mod tests {
 				.decode(&media_header(id, 0, &[0], SIZE as u32, Some(SIZE)))
 				.unwrap();
 			import.decode(&[0xA5; SIZE]).unwrap();
-			// This fragment brings the group to 200 ms, so the next opens a group of its own.
+			// This fragment brings the group to 100 ms, so the next opens a group of its own.
 			import
-				.decode(&media_header(id, 8_820, &[0], SIZE as u32, Some(SIZE)))
+				.decode(&media_header(id, 4_410, &[0], SIZE as u32, Some(SIZE)))
 				.unwrap();
 			import.decode(&[0xA5; SIZE]).unwrap();
 			import
-				.decode(&media_header(id, 11_025, &[0], SIZE as u32, Some(SIZE)))
+				.decode(&media_header(id, 5_512, &[0], SIZE as u32, Some(SIZE)))
 				.unwrap();
 			import.decode(&[0xA5; SIZE / 2]).unwrap();
 			// In place, so the tracks can be inspected after the failure.
 			let err = import.finish_in_place().unwrap_err();
 			assert!(matches!(err, crate::Error::Mp4(_)), "{err:?}");
-			let second = start(&consumer, 11_025);
+			let second = start(&consumer, 5_512);
 			assert_eq!(
 				groups(&mut consumer),
 				[(0, Some(2)), (second, None)],

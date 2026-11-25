@@ -3121,7 +3121,7 @@ pub extern "C" fn moq_publish_timebase_free(timebase: u32) -> i32 {
 /// For a codec track this ends the open group; the next frame written starts a new one. Audio has
 /// no boundary of its own (every packet is independently decodable), so this is the only thing
 /// that gives it groups (one QUIC stream each): call it after the frame that brings a group to
-/// about 200 ms, so the relay sees the group finish at once. Frames forward as they are written
+/// about 100 ms, so the relay sees the group finish at once. Frames forward as they are written
 /// either way; a cut per frame costs a stream per packet. Video
 /// groups at its own keyframes and needs this only to override that.
 ///

@@ -13,7 +13,7 @@ use crate::container::Frame;
 /// until the caller [`cut`](Self::cut)s or [`seek`](Self::seek)s. The
 /// [`import::Track`](crate::import::Track) facade passes that through, so boundaries are the
 /// caller's either way: [`Join`](crate::container::Join) says when a group (one QUIC stream)
-/// holds its 200 ms. Opus' packet loss concealment handles drops.
+/// holds its 100 ms. Opus' packet loss concealment handles drops.
 pub struct Import {
 	track: crate::container::Producer<crate::catalog::hang::Container, hang::catalog::AudioConfig>,
 }

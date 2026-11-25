@@ -29,7 +29,7 @@ Today the `Encoded::Gap` arm in `rs/moq-audio/src/decode/consumer.rs` calls
   (see the comment on that arm). Those keep the reset.
 - For lost media, conceal each missing frame with `decode(&[])` and let
   libopus fade it. Cap concealment near 100 ms and fill the rest with
-  silence, so a whole 200 ms lost group doesn't ring on. Confirm the cap by
+  silence, so a longer gap doesn't ring on. Confirm the cap by
   measuring distance from the original, not by ear.
 - Keep the warmup and decoder-boundary rules for the packet after the gap
   intact. Test with a mocked clock.
@@ -38,4 +38,4 @@ Public API: none (behavior change). Wire: none.
 
 ## Related
 
-- [Audio groups span 200 ms by default](/quest/m1/audio-group-200ms.md) - a lost group is now 200 ms
+- [Audio groups span 100 ms by default](/quest/m1/audio-group-200ms.md) - a lost group is now 100 ms

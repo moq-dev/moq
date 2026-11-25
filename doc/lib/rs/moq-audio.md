@@ -46,8 +46,8 @@ no lag limit, as every join before moq-lite-07 is, gets the retained audio withi
 to encode continuously instead. Dropping an encoder leaves the shared capture running. A device
 failure keeps the retained history on the track until it is subscribed or expires, then the
 encoder returns the error. Opus packs 20 ms per packet by default,
-or 10 ms with a shorter `frame_duration`. Groups carry at least 200 ms by default,
-so a relay keeps one stream per 200 ms rather than one per packet. `encode::Options::join`
+or 10 ms with a shorter `frame_duration`. Groups carry at least 100 ms by default,
+so a relay keeps one stream per 100 ms rather than one per packet. `encode::Options::join`
 changes that minimum; a join shorter than a packet puts every packet in its own
 group, and zero is refused. Longer groups
 mean fewer streams per relay but coarser loss. An encode of `Kind::Voice`, as

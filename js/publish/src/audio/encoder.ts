@@ -121,7 +121,7 @@ export type EncoderProps = Inputs<EncoderInput> & {
 	// Codec selection plus encoder settings. Defaults to "opus".
 	codec?: Codec | Signal<Codec>;
 
-	// The time between join points: the frame that brings a group to this much audio closes it. Defaults to 200 ms.
+	// The time between join points: the frame that brings a group to this much audio closes it. Defaults to 100 ms.
 	join?: Duration | Signal<Duration>;
 };
 
@@ -181,7 +181,7 @@ export class Encoder {
 	/**
 	 * The time between join points: the minimum audio each group carries. The frame that reaches it
 	 * closes the group, so the relay sees it finish without waiting for the next, and frames still
-	 * forward as they are encoded. Defaults to 200 ms ({@link Container.JOIN}). A longer join costs
+	 * forward as they are encoded. Defaults to 100 ms ({@link Container.JOIN}). A longer join costs
 	 * the relay fewer streams but makes loss coarser: a viewer that falls behind skips a whole group.
 	 * A join that is not a positive, finite duration refuses the rendition.
 	 */

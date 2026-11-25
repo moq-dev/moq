@@ -1656,14 +1656,14 @@ mod tests {
 		builder.build()
 	}
 
-	/// The buffer that brings a group to 200 ms closes it when buffers state their duration, and
-	/// otherwise the first buffer starting 200 ms past the group's start does.
+	/// The buffer that brings a group to 100 ms closes it when buffers state their duration, and
+	/// otherwise the first buffer starting 100 ms past the group's start does.
 	#[tokio::test(start_paused = true)]
-	async fn audio_groups_carry_two_hundred_milliseconds() {
+	async fn audio_groups_carry_one_hundred_milliseconds() {
 		gst::init().unwrap();
 		for (duration, expected) in [
-			(Some(gst::ClockTime::from_useconds(2_500)), [80, 80, 10]),
-			(None, [81, 81, 8]),
+			(Some(gst::ClockTime::from_useconds(2_500)), [40, 40, 10]),
+			(None, [41, 41, 8]),
 		] {
 			let (broadcast, catalog) = producers();
 			let consumer = broadcast.consume();
@@ -1687,7 +1687,7 @@ mod tests {
 				)
 				.await
 				.unwrap();
-			for index in 0..170 {
+			for index in 0..90 {
 				assert_eq!(
 					pad.push_buffer(
 						Bytes::from_static(&[0x80, 0xff, 0xfe]),

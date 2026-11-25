@@ -46,7 +46,7 @@ pub struct Options {
 	/// packet that reaches it closes the group, and the next packet opens a new one,
 	/// so a positive join shorter than a packet puts every packet in its own group.
 	///
-	/// Defaults to [`moq_mux::container::Join::DEFAULT`] (200 ms); [`Producer::new`] refuses zero.
+	/// Defaults to [`moq_mux::container::Join::DEFAULT`] (100 ms); [`Producer::new`] refuses zero.
 	/// Each group costs the relay a stream and its bookkeeping, so raising this trades per-group
 	/// overhead for coarser loss: a viewer that falls behind skips a whole group, and a lost packet
 	/// stalls the rest of its group until retransmitted. Packets still forward as
@@ -2231,8 +2231,8 @@ mod tests {
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn default_groups_carry_two_hundred_milliseconds() {
-		for (frame_us, packets) in [(2_500, 80), (10_000, 20), (20_000, 10), (40_000, 5)] {
+	async fn default_groups_carry_one_hundred_milliseconds() {
+		for (frame_us, packets) in [(2_500, 40), (10_000, 10), (20_000, 5), (40_000, 3)] {
 			let mut broadcast = moq_net::broadcast::Info::new().produce();
 			let consumer = broadcast.consume();
 			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();

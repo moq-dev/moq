@@ -703,8 +703,8 @@ void MoQOutput::Data(struct encoder_packet *packet)
 	}
 }
 
-// How much audio a group carries: a new group (one QUIC stream) every 200 ms.
-static constexpr int64_t AUDIO_JOIN_US = 200'000;
+// How much audio a group carries: a new group (one QUIC stream) every 100 ms.
+static constexpr int64_t AUDIO_JOIN_US = 100'000;
 
 // The packet's timestamp on the broadcast clock, or nothing when it falls before zero.
 static std::optional<moq::Timestamp> PacketTimestamp(const struct encoder_packet *packet)
@@ -753,7 +753,7 @@ void MoQOutput::AudioData(struct encoder_packet *packet)
 
 	// Audio has no keyframes, so it has no group boundary of its own: without a cut the whole
 	// stream is one group, and a cut per packet spends a QUIC stream per packet. The packet that
-	// brings a group to 200 ms closes it, as moq-mux's `container::Join::DEFAULT` does, so the
+	// brings a group to 100 ms closes it, as moq-mux's `container::Join::DEFAULT` does, so the
 	// relay sees it finish without waiting for the next; packets still forward as written.
 	const int64_t start_us = packet->pts * packet->timebase_num * 1'000'000 / packet->timebase_den;
 	const uint32_t sample_rate = obs_encoder_get_sample_rate(encoder);

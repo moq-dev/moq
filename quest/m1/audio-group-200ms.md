@@ -1,9 +1,9 @@
-# [M] Audio groups span 200 ms by default
+# [M] Audio groups span 100 ms by default
 
 ## Goal
 
 Every publisher that groups audio itself opens a new group (one QUIC stream)
-every 200 ms instead of every packet, so a live audio track costs 5 streams a
+every 100 ms instead of every packet, so a live audio track costs 10 streams a
 second instead of 50. Each frame is still written as soon as it is encoded, so
 latency does not change. Tiny audio streams stop racing each other and using up
 `MAX_STREAMS` credit, which matters most behind the ~100-stream browser
@@ -28,12 +28,18 @@ traces through `@moq/watch`'s audio path:
 - 1 s saves only 4 more streams a second. One lost group became a 960 ms
   gap, and a late join replays about 550 ms of backlog.
 
+Decided 2026-11-25 (maintainer, /quest-run): ✅ 100 ms, aligned with the
+native PLC's ~100 ms concealment cap
+([moq-dev/moq#9562](https://github.com/moq-dev/moq/pull/9562)), so a lost
+group is concealed rather than half silent (rejected: 200 ms, the 11-24 pick;
+1 s; keep 20 ms). It costs 10 streams a second instead of 5.
+
 Publishers to change (as of 47e3a57a7b):
 
 - `moq_audio::encode::Options::join` (`rs/moq-audio/src/encode/producer.rs`):
-  change the default to 200 ms. moq-ffi and the SDKs built on it inherit it.
+  change the default to 100 ms. moq-ffi and the SDKs built on it inherit it.
 - `@moq/publish`'s `Encoder.join` (`js/publish/src/audio/encoder.ts`): change
-  the default to 200 ms. Also close a group on the frame that fills it, as Rust
+  the default to 100 ms. Also close a group on the frame that fills it, as Rust
   does in `publish`. JS today holds the group open until the next frame
   arrives, so the relay sees the group finish one frame late.
 - moq-webrtc's Opus bridge (`rs/moq-webrtc/src/codec/opus.rs`) cuts after
@@ -46,7 +52,7 @@ Publishers to change (as of 47e3a57a7b):
   `demo/pub/bbb.py` pass to ffmpeg, makes that a group per Opus frame. Roll
   audio-only groups by duration instead.
 
-Recommendation: keep one 200 ms default in moq-mux that each Rust publisher
+Recommendation: keep one 100 ms default in moq-mux that each Rust publisher
 reads, and mirror it in JS, rather than repeating the constant. Audit other
 audio publishers (gstreamer, OBS, Python) for their own per-packet grouping.
 The catalog already declares the join interval (`groupSpacing`), so players
@@ -56,12 +62,12 @@ need no change. Check that `Start::Latest` joins still reach the live edge in
 Validation: run `just test audio-quality` and `just bench-audio` before and
 after, and record underruns, trimmed audio, recovery, stream counts, and
 relay CPU in the PR. bench-audio already sweeps 20, 100, and 200 ms groups.
-With these changes the harness's Opus row publishes 200 ms groups.
+With these changes the harness's Opus row publishes 100 ms groups.
 
 Public API: none (a default changes). Wire: none.
 
 ## Related
 
-- [Buffered playback subscribes in ascending order](/quest/m3/buffered-ascending.md) - live audio stays newest-first even with 200 ms groups
+- [Buffered playback subscribes in ascending order](/quest/m3/buffered-ascending.md) - live audio stays newest-first even with 100 ms groups
 - [An audio track's final flush joins its open group](/quest/m4/audio-flush-group.md) - the same race at every group boundary, now 10x rarer
-- [Native audio conceals short losses](/quest/m1/audio-plc.md) - covers part of a lost group, which is now 200 ms
+- [Native audio conceals short losses](/quest/m1/audio-plc.md) - covers part of a lost group, which is now 100 ms

@@ -204,7 +204,7 @@ obs_data_t *obs_encoder_get_settings(const obs_encoder_t *encoder)
 	return reinterpret_cast<obs_data_t *>(const_cast<obs_encoder_t *>(encoder));
 }
 
-// AudioData measures each packet's length to close a group once it carries 200 ms: 20 ms Opus.
+// AudioData measures each packet's length to close a group once it carries 100 ms: 20 ms Opus.
 uint32_t obs_encoder_get_sample_rate(const obs_encoder_t *)
 {
 	return 48000;

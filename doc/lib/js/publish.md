@@ -133,8 +133,8 @@ follow through the catalog. For
 simulcast, drop the element and register several encoders on a
 `Publish.Broadcast`, as below.
 
-Audio groups carry at least 200 ms by default, so a relay keeps one stream per
-200 ms rather than one per codec frame; the frame that fills a group closes it.
+Audio groups carry at least 100 ms by default, so a relay keeps one stream per
+100 ms rather than one per codec frame; the frame that fills a group closes it.
 `el.audio.join` changes that minimum; a join shorter than a frame puts every
 frame in its own group, and zero is refused. A longer join lets a
 relay keep fewer streams, at the cost of coarser loss: a viewer that falls

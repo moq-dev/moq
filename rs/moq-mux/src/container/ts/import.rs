@@ -10515,7 +10515,7 @@ pub(super) mod test {
 
 	/// A PES never splits across groups, so the transport, which sends a track's newest group
 	/// first, cannot deliver a PES's frames newest first: a group closes at the end of the PES that
-	/// brings it to 200 ms, here the fourth 64 ms PES, though the join falls inside it.
+	/// brings it to 100 ms, here every second 64 ms PES, though the join falls inside it.
 	#[tokio::test(start_paused = true)]
 	async fn aac_groups_close_at_a_pes_end() {
 		const AAC_PID: u16 = 0x0060;
@@ -10556,7 +10556,8 @@ pub(super) mod test {
 		assert_eq!(
 			groups,
 			[
-				vec![0x10, 0x11, 0x12, 0x20, 0x21, 0x22, 0x30, 0x31, 0x32, 0x40, 0x41, 0x42],
+				vec![0x10, 0x11, 0x12, 0x20, 0x21, 0x22],
+				vec![0x30, 0x31, 0x32, 0x40, 0x41, 0x42],
 				vec![0x50, 0x51, 0x52],
 			]
 		);

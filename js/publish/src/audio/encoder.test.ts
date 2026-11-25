@@ -905,12 +905,12 @@ test("a join packs frames until the minimum and restarts after a break", async (
 	expect(groups).toEqual([5, 2, 1, 2]);
 });
 
-test("default audio groups carry two hundred milliseconds", async () => {
+test("default audio groups carry one hundred milliseconds", async () => {
 	using _webcodecs = installFakeWebCodecs();
 	for (const [frameMs, packets, groupMs] of [
-		[2.5, 80, undefined],
-		[10, 20, undefined],
-		[20, 10, undefined],
+		[2.5, 40, undefined],
+		[10, 10, undefined],
+		[20, 5, undefined],
 		[2.5, 1, 1],
 	] as const) {
 		using env = await setup(
@@ -991,7 +991,7 @@ test("a rendition written behind another advertises delay", async () => {
 		]);
 		expect(encoder.out.catalog.peek()?.delay).toBeUndefined();
 
-		// The window closes at the first group to start a second in: 200 ms groups put that 1.2 s in.
+		// The window closes at the first group to start a second in.
 		for (let index = 4; index < 70; index++) await push(index);
 		await feed.drain();
 		expect(encoder.out.catalog.peek()).toMatchObject({ delay: 100 });
@@ -1492,7 +1492,7 @@ test("default audio replays the last second after three seconds without a subscr
 		}
 		await feed.drain();
 		// The subscription's one second reaches back from the newest frame, 152, to 102, which the
-		// 200 ms group starting at frame 100 holds.
+		// 100 ms group starting at frame 100 holds.
 		const reader = late.ordered();
 		const frames: number[] = [];
 		while (frames.length < 53) {

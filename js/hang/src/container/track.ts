@@ -22,11 +22,11 @@ import { Time, type Track } from "@moq/net";
 export const MAX_AGE = Duration.millis(30_000);
 
 /**
- * How much audio a group carries by default: a new group (one QUIC stream) every 200 ms, since every
+ * How much audio a group carries by default: a new group (one QUIC stream) every 100 ms, since every
  * audio packet decodes on its own and a group per packet spends a stream per packet. Mirrors the
  * Rust `moq_mux::container::Join::DEFAULT`.
  */
-export const JOIN = Duration.millis(200);
+export const JOIN = Duration.millis(100);
 
 /**
  * Track properties for a track carrying media frames, for `Track.Producer.accept`.

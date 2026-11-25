@@ -15,8 +15,9 @@ pub struct Join {
 }
 
 impl Join {
-	/// How much audio a group carries by default: a new group (one QUIC stream) every 200 ms.
-	pub const DEFAULT: Duration = Duration::from_millis(200);
+	/// How much audio a group carries by default: a new group (one QUIC stream) every 100 ms, about
+	/// as much as a player conceals, so a lost group is concealed rather than half silent.
+	pub const DEFAULT: Duration = Duration::from_millis(100);
 
 	/// Roll groups once they carry `span` of audio. A zero span fills every group with its first packet.
 	pub fn new(span: Duration) -> Self {
@@ -100,10 +101,10 @@ mod tests {
 
 	#[test]
 	fn the_packet_that_reaches_the_span_fills_the_group() {
-		// 20 ms Opus fills a 200 ms group exactly.
-		assert_eq!(groups(&mut Join::default(), 20_000, 30), [10, 10, 10]);
-		// 1024 samples at 48 kHz never land on 200 ms, so a group takes the packet past it.
-		assert_eq!(groups(&mut Join::default(), 21_333, 20), [10, 10]);
+		// 20 ms Opus fills a 100 ms group exactly.
+		assert_eq!(groups(&mut Join::default(), 20_000, 15), [5, 5, 5]);
+		// 1024 samples at 48 kHz never land on 100 ms, so a group takes the packet past it.
+		assert_eq!(groups(&mut Join::default(), 21_333, 10), [5, 5]);
 		// A unit longer than the span is a group of its own.
 		assert_eq!(groups(&mut Join::default(), 500_000, 3), [1, 1, 1]);
 		assert_eq!(groups(&mut Join::new(Duration::ZERO), 20_000, 3), [1, 1, 1]);
@@ -112,11 +113,11 @@ mod tests {
 	#[test]
 	fn a_reset_restarts_the_span() {
 		let mut join = Join::default();
-		assert!(!join.fill(micros(0), micros(180_000)));
+		assert!(!join.fill(micros(0), micros(80_000)));
 		join.reset();
 		// Measured from the media after the reset, not the group the caller closed.
-		assert!(!join.fill(micros(1_000_000), micros(1_100_000)));
-		assert!(join.fill(micros(1_100_000), micros(1_200_000)));
+		assert!(!join.fill(micros(1_000_000), micros(1_050_000)));
+		assert!(join.fill(micros(1_050_000), micros(1_100_000)));
 	}
 
 	#[test]
@@ -125,7 +126,7 @@ mod tests {
 		assert!(!join.opens(micros(1_000_000)), "no group is open");
 		assert!(!join.fill(micros(1_000_000), micros(1_020_000)));
 		assert!(!join.opens(micros(1_020_000)));
-		assert!(join.opens(micros(1_200_000)));
+		assert!(join.opens(micros(1_100_000)));
 		assert!(join.opens(micros(999_999)));
 	}
 
