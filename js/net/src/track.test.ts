@@ -6948,7 +6948,9 @@ test("delivery starts at the first group it can serve", () => {
 				const producer = new TrackProducer("test");
 				const subscriber = hooks.wholeGroups(producer.subscribe(withMax({ delay: { max: null } })), () => 0);
 				for (const { key, whole } of held) {
-					const group = whole ? producer.createGroup(key) : hooks.receiveGroup(producer, { start: key, offset: 1 });
+					const group = whole
+						? producer.createGroup(key)
+						: hooks.receiveGroup(producer, { start: key, offset: 1 });
 					group.writeFrame(textFrame("x", Timestamp.fromMillis(Number(key))));
 					group.finish();
 				}
