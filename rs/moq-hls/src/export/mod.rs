@@ -4181,6 +4181,25 @@ mod tests {
 		assert!(cursor.next().await.unwrap().is_none());
 	}
 
+	// A cursor opened mid-broadcast lists rows whose media the source already dropped: it starts at
+	// the oldest segment it can still record instead of refusing the first, having omitted nothing.
+	#[tokio::test(start_paused = true)]
+	async fn a_late_cursor_starts_after_media_the_source_dropped() {
+		let test = Groups::with(&["video0"], &[]);
+		let mut video0 = test.publish("video0");
+		let lost = video0.open(0);
+		for pts in [2_000, 4_000, 6_000] {
+			video0.at(pts);
+		}
+		test.listed("video0", 2).await;
+		lost.abort(moq_net::Error::Cancel).unwrap();
+
+		let mut cursor = test.rendition("video0").segments();
+		assert_eq!(cursor.peek().await.unwrap().unwrap().segment, 1);
+		assert_eq!(cursor.next().await.unwrap().unwrap().segment, 1);
+		assert_eq!(cursor.next().await.unwrap().unwrap().segment, 2);
+	}
+
 	// Every rendition numbers its segments on the one grid while cutting at its own groups: audio
 	// joining at 5.5s starts at segment 3, the line its first group reaches, as the video does.
 	#[tokio::test(start_paused = true)]
