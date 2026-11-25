@@ -106,11 +106,6 @@ fn expected(order: Order) -> Vec<u64> {
 	}
 }
 
-/// Whether `version` can carry an ascending order at all.
-fn carries_order(version: &str) -> bool {
-	version == "moq-lite-07-wip" || version.starts_with("moq-transport")
-}
-
 /// Serve one subscriber in `order`, optionally through a relay, and return the order its
 /// backlog arrived in.
 async fn round(version: &str, relay: bool, order: Order) -> Vec<u64> {
@@ -171,12 +166,9 @@ async fn a_backlog_is_served_in_the_subscription_order() {
 		for relay in [false, true] {
 			for order in [Order::Ascending, Order::Descending] {
 				let got = round(version, relay, order).await;
-				// An older lite wire cannot ask for ascending, so it is served newest first.
-				let served = match carries_order(version) {
-					true => order,
-					false => Order::Descending,
-				};
-				if got != expected(served) {
+				// An older lite wire cannot ask for ascending, so it is served newest first, but
+				// the reader holds the whole backlog by then and reads it in its own order.
+				if got != expected(order) {
 					failures.push(format!("{version} relay={relay} {order:?}: {got:?}"));
 				}
 			}

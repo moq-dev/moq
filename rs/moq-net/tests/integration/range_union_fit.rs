@@ -155,13 +155,18 @@ async fn a_union_too_large_for_one_message_asks_a_covering_superset() {
 	write_group(&track, BASE + 3);
 	write_group(&track, BASE + 2 * VIEWERS + 2);
 	write_group(&track, key);
-	for want in [BASE + 2, BASE + 2 * VIEWERS + 2] {
-		let got = kio::clock::timeout(TIMEOUT, readers[1].recv_group())
+	// Which of its two is read first depends on which lands first, so only the set is checked.
+	let mut got = Vec::new();
+	for _ in 0..2 {
+		let group = kio::clock::timeout(TIMEOUT, readers[1].recv_group())
 			.await
 			.unwrap()
-			.unwrap();
-		assert_eq!(got.map(|group| group.start), Some(want));
+			.unwrap()
+			.expect("a group");
+		got.push(group.start);
 	}
+	got.sort();
+	assert_eq!(got, [BASE + 2, BASE + 2 * VIEWERS + 2]);
 	let got = kio::clock::timeout(TIMEOUT, live.recv_group()).await.unwrap().unwrap();
 	assert_eq!(
 		got.map(|group| group.start),

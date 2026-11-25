@@ -341,9 +341,12 @@ fn consume(generation: &Producer) -> Consumer {
 	generation.credential().consume(generation.epoch().clone())
 }
 
-/// Every group the track holds, as history, so none goes stale and none waits on a live edge.
+/// Every group the track holds, as history, so none goes stale and none waits on a live edge,
+/// oldest first.
 fn subscribe_all() -> moq_net::track::Subscription {
-	moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL])
+	moq_net::track::Subscription::default()
+		.with_ranges([moq_net::track::Range::ALL])
+		.with_order(moq_net::track::Order::Ascending)
 }
 
 /// A track whose superseded groups stay fresh, so [`subscribe_all`] reads every group.

@@ -53,6 +53,11 @@ export class Consumer<T> {
 
 	constructor(config: Consumer.Config<T>) {
 		this.#track = config.track;
+		// The log is read oldest first whatever order the subscription asked, so a second group a
+		// broken publisher opens is caught as Rolled rather than read ahead of the first. Mirrors
+		// the Rust `Consumer::new`.
+		const subscription = this.#track.subscription.peek();
+		if (subscription?.order !== "ascending") this.#track.update({ ...subscription, order: "ascending" });
 		this.#decoder = new Decoder({ schema: config.schema });
 	}
 
