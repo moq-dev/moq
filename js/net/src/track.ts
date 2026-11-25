@@ -5477,10 +5477,8 @@ export class Subscriber {
 	#nextInRange(from: bigint): bigint | undefined {
 		from = max(from, this.#local.start);
 		if (this.#resume) {
-			// Without a serving copy nothing says yet.
-			const runs = this.#resume.runs(from, UNBOUNDED);
 			const resume = this.#resume;
-			return runs ? firstOpen(runs, (key) => resume.holeEnd(key, true)) : from;
+			return firstOpen(resume.runs(from, UNBOUNDED), (key) => resume.holeEnd(key, true));
 		}
 		this.#settle();
 		const drops = this.#state.drops;
@@ -6174,7 +6172,7 @@ export class Subscriber {
 		const from = max(start, cursor.start);
 		const to = cursor.end === undefined ? end : min(end, cursor.end);
 		if (from >= to) return [];
-		if (this.#resume) return this.#resume.runs(from, to) ?? [{ start: from, end: to }];
+		if (this.#resume) return this.#resume.runs(from, to);
 		return this.#window.runs(from, to);
 	}
 

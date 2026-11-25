@@ -2359,11 +2359,12 @@ class Reader implements ResumeSource {
 		return this.#window().resolved();
 	}
 
-	// The reader's ranges resolve on the copies, which hold the groups their anchors name.
-	runs(start: bigint, end: bigint): Run[] | undefined {
+	// The reader's own window, which spans every copy: the serving one starts at the switch's
+	// boundary, so it leaves out what a replaced copy still delivers below it. Mirrors the Rust
+	// `Resume::runs`.
+	runs(start: bigint, end: bigint): Run[] {
 		this.sync();
-		const serving = this.#serving();
-		return serving && hooks.servingRuns(serving.sub, start, end);
+		return this.#window().runs(start, end);
 	}
 
 	// The serving copy's runs leave out the keys below a time start it still waits to place, so its

@@ -4289,6 +4289,82 @@ test("a routed ordered read returns the gap its copy passed to take a group", as
 	}
 });
 
+// A gap the serving copy reported and the ordered read holds behind a lower group still owed
+// stands across a switch: the replaced copy still delivers that group, and the gap follows it.
+// Mirrors the Rust `a_replaced_copys_stale_gap_stands_once_the_read_widens`.
+for (const [switched, widened] of [
+	[true, true],
+	[true, false],
+	[false, false],
+] as const) {
+	test(`a front's ordered read returns a gap held behind an owed group (switched=${switched} widened=${widened})`, async () => {
+		install(new Manual());
+		const front = new Front();
+		const a = new BroadcastProducer();
+		const b = new BroadcastProducer();
+		// Timed copies presenting each group at its key in milliseconds.
+		const [ta, tb] = [a, b].map((source) =>
+			defined(source.createTrack("seq", { ...INFO, timescale: Timescale.MILLI })),
+		);
+		const write = (producer: typeof ta, key: bigint) => {
+			const group = producer.createGroup(key);
+			group.writeFrame({ payload: enc.encode(`${key}`), timestamp: Timestamp.fromMillis(Number(key)) });
+			group.finish();
+		};
+		hooks.receiveTrack(ta);
+		const requests = ta.requests();
+		front.serve(a.consume());
+		write(ta, 998n);
+		write(ta, 2000n);
+		hooks.dropTrackGroups(ta, 1000n, 1500n, staleHole(10_000));
+		const ordered = front.consumer
+			.track("seq")
+			.subscribe(withMax({ delay: { max: Duration.secs(1) } }))
+			.withRange({ start: { included: 998n }, end: { excluded: 1500n } })
+			.ordered();
+		const read = () => {
+			const out: string[] = [];
+			for (let item = ordered.tryNextItem(); item; item = ordered.tryNextItem()) {
+				if (item.kind === "group") out.push(`group ${item.group.start}`);
+				else out.push(`gap ${item.start}..${item.end}`);
+			}
+			return out;
+		};
+		try {
+			await settle();
+			expect(read()).toEqual(["group 998"]);
+			const fill = await requests.requestedFill();
+			expect([fill?.start, fill?.end]).toEqual([1000n, 1500n]);
+			fill?.refuseGroups(1000n, 1500n, new StreamError(StreamCode.Old));
+			await settle();
+			// The gap waits behind group 999.
+			expect(read()).toEqual([]);
+
+			if (switched) {
+				// A newer route gives the run up for good, held back while the old one may deliver 999.
+				front.serve(b.consume());
+				hooks.dropTrackGroups(tb, 1000n, 1500n, { error: new StreamError(StreamCode.NotFound) });
+				await settle();
+				expect(read()).toEqual([]);
+			}
+			if (widened) {
+				ordered.update(withMax({ delay: { max: null } }));
+				await settle();
+				expect(read()).toEqual([]);
+			}
+			write(ta, 999n);
+			await settle();
+			expect(read()).toEqual(["group 999", "gap 1000..1500"]);
+		} finally {
+			requests.close();
+			ordered.close();
+			front.consumer.close();
+			a.close();
+			b.close();
+		}
+	});
+}
+
 for (const resolution of ["arrival", "drop", "other copy", "budget"] as const) {
 	test(`an ordered resumed reader keeps an older copy's owed hole until ${resolution}`, async () => {
 		const clock = new Manual();

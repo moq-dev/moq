@@ -712,8 +712,8 @@ export interface ResumeSource {
 	resolved(): (Resolved | undefined)[];
 	/** Where a live join this reader placed at `placed` starts under `budget` milliseconds, on the serving copy. */
 	joinStart(placed: bigint, budget: number): bigint;
-	/** The runs of `[start, end)` the serving copy reads, undefined without one. */
-	runs(start: bigint, end: bigint): Run[] | undefined;
+	/** The runs of `[start, end)` the reader's ranges name, across every copy. */
+	runs(start: bigint, end: bigint): Run[];
 	/** Whether a time start the serving copy still waits to place holds back a gap; see `hooks.gapHeld`. */
 	gapHeld(at: bigint, end: bigint): boolean;
 	/** Whether a route's copy serves the reader now. */

@@ -8178,6 +8178,68 @@ mod test {
 		assert_eq!(read(), ["group 1000", "gap 1500..1600", "group 2000"]);
 	}
 
+	/// A gap the serving copy reported and the ordered read holds behind a lower group still
+	/// owed stands across a switch: the replaced copy still delivers that group, and the gap
+	/// follows it. The reader's window spans every copy, not just the serving one, which starts
+	/// at the switch's boundary.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_replaced_copys_stale_gap_stands_once_the_read_widens() {
+		for (switched, widened) in [(true, true), (true, false), (false, false)] {
+			let case = format!("switched={switched} widened={widened}");
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = received_copy();
+			a.anchored();
+			let dynamic = a.requests();
+			routes.serve(a.consume());
+			write(&a, 998);
+			write(&a, 2000);
+			a.give_up(1000..1500, track::Hole::stale(Duration::from_secs(10)));
+			let mut ordered = logical
+				.consume()
+				.subscribe(Subscription::default().with_max(Duration::from_secs(1)))
+				.now_or_never()
+				.unwrap()
+				.unwrap()
+				.with_range(998..1500)
+				.ordered();
+			let read = |ordered: &mut track::Ordered| -> Vec<String> {
+				let mut items = Vec::new();
+				while let Poll::Ready(Ok(Some(item))) = ordered.poll_next_item(&kio::Waiter::noop()) {
+					items.push(match item {
+						track::Item::Group(group) => format!("group {}", group.start),
+						track::Item::Gap { range, .. } => format!("gap {range:?}"),
+					});
+				}
+				items
+			};
+			assert_eq!(read(&mut ordered), ["group 998"], "{case}");
+			let fill = dynamic.requested_fill().now_or_never().expect("asked").unwrap();
+			assert_eq!(fill.start().group..fill.end(), 1000..1500, "{case}");
+			fill.refuse_groups(1000..1500, Error::Old);
+			assert_eq!(
+				read(&mut ordered),
+				Vec::<String>::new(),
+				"{case}: the gap waits behind 999"
+			);
+
+			if switched {
+				// A newer route gives the run up for good, held back while the old one may deliver 999.
+				let b = received_copy();
+				routes.serve(b.consume());
+				b.drop_groups(1000..1500, StreamError::NotFound);
+				assert_eq!(read(&mut ordered), Vec::<String>::new(), "{case}");
+			}
+			if widened {
+				ordered.update(ordered.subscription().with_max(None)).unwrap();
+				assert_eq!(read(&mut ordered), Vec::<String>::new(), "{case}");
+			}
+			write(&a, 999);
+			assert_eq!(read(&mut ordered), ["group 999", "gap 1000..1500"], "{case}");
+		}
+	}
+
 	/// A front's key-order reader reports a group that lands on its copy after the read passed
 	/// its key, as old, with when it landed, and never one it handed out.
 	#[test]
