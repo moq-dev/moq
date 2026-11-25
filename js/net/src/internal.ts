@@ -763,7 +763,7 @@ export interface ResumeSource {
 	/** The group the next take hands out, without taking it; see `hooks.peekGroup`. */
 	peek(ordered: boolean, delivered: Delivered): bigint | undefined;
 	/** The lowest group any copy holds unread in `[from, below)`; see `hooks.lowestHeld`. */
-	lowestHeld(from: bigint, below: bigint): Held | undefined;
+	lowestHeld(from: bigint, below: bigint, servable: boolean): Held | undefined;
 	/** The serving copy's newest actual object, including metadata retained past cache eviction. */
 	objectLargest(): Position | undefined;
 	/** The serving copy's largest location now, and whether it can still advance. */
@@ -1087,10 +1087,11 @@ export const hooks: {
 	 */
 	deliveryStart: (subscriber: Subscriber, opening: Opening) => bigint;
 	/**
-	 * The lowest group the subscriber holds unread in `[from, below)`, in its window, and whether
-	 * it is whole from the frame asked, for a front's `lowestHeld`. Assigned by `track.ts`.
+	 * The lowest group the subscriber holds unread in `[from, below)`, in its window, only one whole
+	 * from the frame asked when `servable`, and whether it is, for a front's `lowestHeld`. Assigned
+	 * by `track.ts`.
 	 */
-	lowestHeld: (subscriber: Subscriber, from: bigint, below: bigint) => Held | undefined;
+	lowestHeld: (subscriber: Subscriber, from: bigint, below: bigint, servable: boolean) => Held | undefined;
 	/** The newest actual object received or reported upstream, independent of cache retention. */
 	objectLargest: (subscriber: Subscriber) => Position | undefined;
 	/** Call `fn` with a group's frame count now and on every change; assigned by `group.ts`. */
