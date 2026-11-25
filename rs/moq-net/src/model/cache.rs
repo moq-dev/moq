@@ -814,7 +814,9 @@ impl Edges {
 	/// Whether a reclaim holds the session's reclaim lock now.
 	#[cfg(test)]
 	pub(super) fn reclaiming(&self) -> bool {
-		self.0.as_ref().is_some_and(|inner| inner.reclaiming.try_lock().is_err())
+		self.0
+			.as_ref()
+			.is_some_and(|inner| inner.reclaiming.try_lock().is_err())
 	}
 
 	/// Bytes the session's live edges bill now.

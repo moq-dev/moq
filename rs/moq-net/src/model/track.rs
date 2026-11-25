@@ -27879,7 +27879,10 @@ mod test {
 		finished_group(&mut writer, usize::try_from(LIMIT - before + 1).unwrap());
 		let after = broadcast.edges.used();
 		assert!(after <= LIMIT, "the shed left the session over: {before} -> {after}");
-		assert!(!producer.state.read().cache.listed(), "the reclaim visit left it listed");
+		assert!(
+			!producer.state.read().cache.listed(),
+			"the reclaim visit left it listed"
+		);
 		// Its bill leaves with it, so decoding the rest never passes the budget again.
 		drop(writer);
 		for _ in 1..4 {
