@@ -34,6 +34,53 @@ function cacheControl(key: string): string {
 	return "public, max-age=300";
 }
 
+// Resumes a body R2 fails to finish. The response already sent its status and
+// Content-Length, so the only other outcome is a reset connection, which Nix
+// answers by disabling the whole cache for a minute. Resumes are capped per
+// response so a persistently failing object can't loop; past the cap the
+// stream errors as it would have.
+const RESUMES = 5;
+
+function resume(bucket: R2Bucket, key: string, object: R2ObjectBody): ReadableStream<Uint8Array> {
+	let reader = object.body.getReader();
+	let sent = 0;
+	let resumes = 0;
+
+	return new ReadableStream({
+		async pull(controller) {
+			for (;;) {
+				let chunk: ReadableStreamReadResult<Uint8Array> | undefined;
+				try {
+					chunk = await reader.read();
+				} catch (error) {
+					if (resumes++ >= RESUMES) return controller.error(error);
+					console.error(`Nix cache body read failed at byte ${sent}, resuming: ${key}`, error);
+				}
+				if (chunk?.done) return controller.close();
+				if (chunk) {
+					sent += chunk.value.byteLength;
+					return controller.enqueue(chunk.value);
+				}
+
+				// Only the same object continues the stream: the etag guard turns
+				// an overwrite into a body-less result, which ends the stream.
+				try {
+					const next = await bucket.get(key, {
+						range: { offset: sent },
+						onlyIf: { etagMatches: object.etag },
+					});
+					if (!next || !("body" in next))
+						return controller.error(new Error(`object changed mid-read: ${key}`));
+					reader = next.body.getReader();
+				} catch (error) {
+					console.error(`Nix cache resume failed at byte ${sent}: ${key}`, error);
+				}
+			}
+		},
+		cancel: (reason) => reader.cancel(reason),
+	});
+}
+
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
 		if (request.method !== "GET" && request.method !== "HEAD") {
@@ -59,14 +106,15 @@ export default {
 		let unavailable = false;
 		for (const bucket of [env.RELEASE, env.CI]) {
 			let object: R2ObjectBody | null;
+			// A misconfigured binding is a deploy error, not a read failure.
+			const get = bucket.get.bind(bucket);
 			try {
-				object = await bucket.get(key);
+				object = await get(key);
 			} catch (error) {
-				// R2 exposes its error code in the message, not as a typed field:
-				// https://developers.cloudflare.com/r2/api/error-codes/
-				if (!(error instanceof Error && /^get: .* \((10001|10043)\)$/.test(error.message))) throw error;
-				// Treat the failed read as a miss, so the other bucket can still
-				// serve the path and Nix otherwise builds it from source.
+				// R2 exposes no typed error, and its message text is not an interface,
+				// so every failed read is one. Treat it as a miss, so the other bucket
+				// can still serve the path and Nix otherwise builds it from source
+				// without disabling the cache.
 				console.error(`Nix cache read unavailable: ${key}`, error);
 				unavailable = true;
 				continue;
@@ -78,7 +126,7 @@ export default {
 				"Cache-Control": cacheControl(key),
 				"Content-Length": object.size.toString(),
 			};
-			return new Response(request.method === "HEAD" ? null : object.body, { headers });
+			return new Response(request.method === "HEAD" ? null : resume(bucket, key, object), { headers });
 		}
 
 		// Keep intermediaries from caching a transient failure as missing.
