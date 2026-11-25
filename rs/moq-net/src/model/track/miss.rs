@@ -1745,7 +1745,10 @@ impl Misses {
 		self.skipped.remove(groups.clone());
 		match stale {
 			Some(stale) => {
-				self.narrowest = Some(self.narrowest.map_or(stale.budget, |narrowest| narrowest.min(stale.budget)));
+				self.narrowest = Some(
+					self.narrowest
+						.map_or(stale.budget, |narrowest| narrowest.min(stale.budget)),
+				);
 				self.stale.insert(groups, stale);
 			}
 			None => self.stale.remove(groups),
@@ -1787,7 +1790,11 @@ impl Misses {
 	/// such as the cap the upstream judged it within.
 	pub fn retake(&mut self, drift: &Drift) -> RangeSet<u64> {
 		let mut taken = self.widen(&drift.budget);
-		if self.adopted_under.as_ref().is_some_and(|under| *under != drift.coverage) {
+		if self
+			.adopted_under
+			.as_ref()
+			.is_some_and(|under| *under != drift.coverage)
+		{
 			let unsettled: Vec<ops::Range<u64>> = (self.stale.iter())
 				.filter(|(run, verdict)| !verdict.settles(run.start, drift))
 				.map(|(run, _)| run.clone())
@@ -2344,12 +2351,22 @@ mod tests {
 			&waiter,
 		);
 		assert!(misses.given_up.contains(&1) && misses.given_up.contains(&2), "adopted");
-		assert!(misses.retake(&drift(5)).is_empty(), "the cap it was judged within still holds");
+		assert!(
+			misses.retake(&drift(5)).is_empty(),
+			"the cap it was judged within still holds"
+		);
 		assert!(misses.unanswered(&state, 1..3, &drift(5)).is_empty());
 
 		// Lowered to 4, the reader never sees what lies at 4, which the upstream's verdict
 		// may rest on.
-		assert_eq!(misses.unanswered(&state, 1..3, &drift(4)).iter().cloned().collect::<Vec<_>>(), [1..3]);
+		assert_eq!(
+			misses
+				.unanswered(&state, 1..3, &drift(4))
+				.iter()
+				.cloned()
+				.collect::<Vec<_>>(),
+			[1..3]
+		);
 		let taken = misses.retake(&drift(4));
 		assert_eq!(taken.iter().cloned().collect::<Vec<_>>(), [1..3]);
 		assert!(misses.stale.is_empty() && misses.adopted_under.is_none());
