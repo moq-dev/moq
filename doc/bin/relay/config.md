@@ -214,7 +214,8 @@ publisher holding many quiet tracks would otherwise hold one group each past
 any budget. Past the bound, the session's own live edges are shed in delivery's
 priority order: the lowest-priority track first, and among equals the edge that
 moved longest ago. Frames viewers already read go before any frame a viewer is
-still owed. A viewer reaching a shed frame
+still owed, except a compressed track's decoded copies, which go with their
+whole edge. A viewer reaching a shed frame
 meets it as it would any frame the cache dropped; the group's place on the
 timeline stays, so live joins land where they did. Another session's edges
 are never touched. Here zero means no bound.

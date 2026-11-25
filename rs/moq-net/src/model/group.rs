@@ -1160,19 +1160,28 @@ impl GroupState {
 	/// Shed the front frames the fastest reader took, those ending at or below `read` on the
 	/// pace scale: a reader on the group loses nothing it has yet to take, though a slower one
 	/// falls off as after any shed. Frames adopted from a head are off that scale, so the shed
-	/// stops at them.
+	/// stops at them. So does a started plain copy's inflated prefix: inflating slices to shed
+	/// them would bill the session more than it frees.
 	fn shed_taken(&mut self, read: u64) {
 		if self.outcome.error().is_some() {
 			return;
 		}
+		let inflated = match &self.flate {
+			Some(flate) => match flate.plain.len.load(Ordering::Acquire) {
+				0 => usize::MAX,
+				len => len,
+			},
+			None => usize::MAX,
+		};
 		let mut end = self.held();
-		while let Some(entry) = self.entry(end)
+		while end < inflated
+			&& let Some(entry) = self.entry(end)
 			&& entry.end != 0
 			&& entry.end <= read
 		{
 			end += 1;
 		}
-		self.shed_to(end);
+		self.shed_frames(end, false);
 	}
 
 	/// Whether a frame still arriving bills the session: its payload or its header's fields.
@@ -1844,6 +1853,9 @@ impl Producer {
 				)));
 			}
 			state.charge = charge;
+			if cache.bounded() {
+				state.pace.report(cache.clone());
+			}
 			(state.log.reader(), state.pace.clone())
 		};
 		let alive = Arc::new(Alive {

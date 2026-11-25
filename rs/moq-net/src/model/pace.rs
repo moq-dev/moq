@@ -18,11 +18,12 @@
 //! waiting on the writer.
 
 use std::sync::{
-	Mutex, PoisonError,
+	Arc, Mutex, OnceLock, PoisonError,
 	atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::task::Waker;
 
+use super::cache;
 use super::group::MAX_CACHE_BYTES;
 #[cfg(any(test, feature = "async"))]
 use crate::transport::ReceiveWindow;
@@ -58,6 +59,9 @@ pub(super) struct Pace {
 	parked: AtomicBool,
 	// The writer's waker: a group has one writer, so one slot, far smaller than a list.
 	writer: Mutex<Option<Waker>>,
+	// The track told when the fastest reader takes a frame the copy still holds, set only
+	// while its session has a live-edge budget to shed those frames toward.
+	edge: OnceLock<Arc<cache::Track>>,
 }
 
 impl Pace {
@@ -70,6 +74,17 @@ impl Pace {
 		// SeqCst pairs with `park`: either this sees the writer parked, or it sees the read.
 		self.read.fetch_max(end, Ordering::SeqCst);
 		self.wake();
+		if let Some(track) = self.edge.get()
+			&& end > self.front.load(Ordering::SeqCst)
+		{
+			track.took();
+		}
+	}
+
+	/// Tell `track` whenever the fastest reader takes a frame this copy still holds, so its
+	/// session, past its live-edge budget, visits only the edges with taken frames to shed.
+	pub fn report(&self, track: Arc<cache::Track>) {
+		let _ = self.edge.set(track);
 	}
 
 	/// Wake the writer, if parked, since what it waits on changed.

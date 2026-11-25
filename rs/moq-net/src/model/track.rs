@@ -382,7 +382,7 @@ impl Info {
 	}
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzz"))]
 impl Info {
 	/// A millisecond track with no publisher max age, for tests that write timestamps: a test
 	/// of staleness sets its max age explicitly.
@@ -6813,6 +6813,90 @@ impl Routed {
 			copy,
 			_routes: routes,
 		}
+	}
+}
+
+/// A session at its live-edge budget, for benches: `quiet` edges that moved first, each
+/// holding one frame nobody read, and one edge written a frame at a time, which a reader
+/// takes as it lands. Each write past the budget reclaims.
+#[cfg(feature = "fuzz")]
+pub(crate) struct EdgesBench {
+	_quiet: Vec<(Producer, group::Producer)>,
+	written: Producer,
+	group: group::Producer,
+	reader: group::Consumer,
+	frame: bytes::Bytes,
+	frames: usize,
+}
+
+#[cfg(feature = "fuzz")]
+impl EdgesBench {
+	/// Frames the written edge takes before it moves to a new group.
+	const GROUP: usize = 1024;
+
+	/// `quiet` quiet edges of a `frame`-byte frame each, and a written edge of `frame`-byte
+	/// frames, with room past the quiet edges for a new group's first frame, two more, and
+	/// the two log segments of slots a shed may leave billed, so only the written edge sheds.
+	pub(crate) fn new(quiet: usize, frame: usize) -> Self {
+		let frame = bytes::Bytes::from(vec![0u8; frame]);
+		// What an edge of one frame bills, measured on a session that never sheds.
+		let probe = Self::session(Some(u64::MAX));
+		let (_edge, edge) = (Self::quiet(&probe, "probe", &frame), probe.edges.used());
+		let slots = 2 * kio::log::Writer::<group::Entry>::SEGMENT_HEAP as u64;
+		let room = edge + 2 * frame.len() as u64 + slots;
+		let broadcast = Self::session(Some(edge * quiet as u64 + room));
+		let quiet = (0..quiet)
+			.map(|i| Self::quiet(&broadcast, &format!("quiet{i}"), &frame))
+			.collect();
+		let written = Producer::new(broadcast, "written", Info::timed());
+		let (group, reader) = Self::open(&written);
+		Self {
+			_quiet: quiet,
+			written,
+			group,
+			reader,
+			frame,
+			frames: 0,
+		}
+	}
+
+	fn session(limit: Option<u64>) -> Arc<broadcast::Info> {
+		Arc::new(broadcast::Info {
+			edges: cache::Edges::new(limit),
+			..Default::default()
+		})
+	}
+
+	fn quiet(broadcast: &Arc<broadcast::Info>, name: &str, frame: &bytes::Bytes) -> (Producer, group::Producer) {
+		let producer = Producer::new(broadcast.clone(), name, Info::timed());
+		let mut group = producer.append_next().expect("open");
+		group.write_frame(Self::time(&group), frame.clone()).expect("open");
+		(producer, group)
+	}
+
+	/// Where `group` starts on a millisecond track, so groups start in key order.
+	fn time(group: &group::Producer) -> Timestamp {
+		Timestamp::from_millis(group.start).expect("a bench key fits a timestamp")
+	}
+
+	fn open(written: &Producer) -> (group::Producer, group::Consumer) {
+		let group = written.append_next().expect("open");
+		let reader = written.consume().peek_group(group.start).expect("cached");
+		(group, reader)
+	}
+
+	/// Write one frame to the written edge and read it, moving to a new group every
+	/// [`Self::GROUP`] frames.
+	pub(crate) fn write(&mut self) {
+		if self.frames == Self::GROUP {
+			(self.group, self.reader) = Self::open(&self.written);
+			self.frames = 0;
+		}
+		self.frames += 1;
+		let time = Self::time(&self.group);
+		self.group.write_frame(time, self.frame.clone()).expect("open");
+		let read = self.reader.poll_read_frame(&kio::Waiter::noop());
+		assert!(matches!(read, Poll::Ready(Ok(Some(_)))), "{read:?}");
 	}
 }
 
@@ -27750,6 +27834,52 @@ mod test {
 		let mut late = producer.consume().peek_group(0).expect("the edge stays cached");
 		let read = late.read_frame().now_or_never();
 		assert!(matches!(read, Some(Err(Error::Evicted))), "{read:?}");
+		drop(group);
+	}
+
+	/// The taken-frame shed of a received compressed edge inflates nothing: a raw reader past
+	/// a plain reader's decoded prefix sheds only the slices that prefix already used, so the
+	/// session's bill never grows and the plain reader keeps decoding.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_taken_shed_leaves_slices_the_plain_copy_needs() {
+		let info = Info::timed().with_compression(Compression::Deflate);
+		let stored = stored_slices(&info);
+		let pool = cache::Pool::unbounded();
+		let broadcast = session_broadcast(&pool, Some(1 << 30));
+		let producer = Producer::new(broadcast.clone(), "test", info);
+		let mut group = producer.create_group(group::Info { start: 0 }).unwrap();
+		// A plain reader decodes the first slices, then a raw one takes every slice.
+		for object in &stored[..2] {
+			group = ingest_slice(group, object);
+		}
+		let mut plain = producer.consume().peek_group(0).expect("cached");
+		assert!(plain.read_frame().await.unwrap().is_some());
+		for object in &stored[2..] {
+			group = ingest_slice(group, object);
+		}
+		let mut raw = arrayvec::ArrayVec::<frame::Object, 4>::new();
+		assert!(matches!(
+			producer
+				.consume()
+				.peek_group(0)
+				.expect("cached")
+				.compressed()
+				.poll_read_objects(&kio::Waiter::noop(), &mut raw),
+			Poll::Ready(Ok(4))
+		));
+
+		let before = broadcast.edges.used();
+		let moves = producer.state.read().cache.moves();
+		producer.state.write().ok().expect("open").shed_edge_taken(moves);
+		let after = broadcast.edges.used();
+		assert!(after <= before, "the shed billed more: {before} -> {after}");
+		for _ in 1..4 {
+			assert!(
+				plain.read_frame().await.unwrap().is_some(),
+				"a slice the plain copy needed went"
+			);
+		}
 		drop(group);
 	}
 

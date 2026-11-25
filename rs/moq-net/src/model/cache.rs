@@ -36,7 +36,7 @@
 //! The pool never evicts a live track's latest group, so a session's live-edge budget
 //! (`session::Limits::live_edges`) bounds what those hold in bytes: every track a session
 //! ingests bills its live edge there, and a session past its budget pays with its own
-//! oldest live edges, never another session's.
+//! live edges in delivery's priority order, never another session's.
 //!
 //! A bare pool is inert by default ([`Pool::unbounded`]): publishers and subscribers
 //! that never set a capacity or expiry pay only a couple of atomic counters, and
@@ -781,7 +781,16 @@ struct EdgesInner {
 	moves: AtomicU64,
 	// The tracks billing here, so the order knows how many of its entries can be current.
 	tracks: AtomicUsize,
+	// The tracks whose readers took a frame their groups still hold, in the order their edges
+	// pay, each listed once until a reclaim visits it: what a reclaim's first pass sheds,
+	// without looking at an edge that has nothing taken. A track's entry moves with its
+	// rank and age, under this lock.
+	taken: Mutex<BTreeMap<TakenKey, Weak<Track>>>,
 }
+
+/// A track's place among its session's edges with taken frames: its [`EdgeKey`], then its
+/// account's address, which keeps two tracks at one key apart.
+type TakenKey = (EdgeKey, usize);
 
 impl Edges {
 	/// A budget of `limit` bytes, or unbounded for `None`.
@@ -793,12 +802,13 @@ impl Edges {
 				order: Mutex::default(),
 				moves: AtomicU64::new(0),
 				tracks: AtomicUsize::new(0),
+				taken: Mutex::default(),
 			})
 		}))
 	}
 
 	/// Bytes the session's live edges bill now.
-	#[cfg(test)]
+	#[cfg(any(test, feature = "fuzz"))]
 	pub(super) fn used(&self) -> u64 {
 		self.0
 			.as_ref()
@@ -825,47 +835,82 @@ impl Edges {
 	}
 
 	/// Pay the session's excess with its live edges in order, lowest rank and oldest first,
-	/// in two passes. The first sheds the frames each edge's readers took, which no reader is
-	/// owed. Only once none is left does the second shed every frame of an edge (aborting a
-	/// copy still receiving one), which then leaves the order until it grows again. `writer`'s
-	/// edge, being written, instead sheds its older frames in its turn and stays queued.
+	/// in two passes. The first sheds the frames readers took, which no reader is owed,
+	/// visiting only the edges a reader took one of since a reclaim last visited them. Only
+	/// once none is left does the second shed every frame of an edge (aborting a copy still
+	/// receiving one), which then leaves the order until it grows again. `writer`'s edge,
+	/// being written, instead sheds its older frames in its turn and stays queued.
 	/// Takes track locks: call with none held.
 	fn reclaim(&self, writer: &Track) {
 		let Some(inner) = &self.0 else {
 			return;
 		};
-		for whole in [false, true] {
-			// The writer pays in its turn, or after every queued edge when it has no entry.
-			let mut paid = false;
-			// Each step resumes after the last key, so an entry is visited once per pass.
-			let mut after = None;
-			while self.excess().is_some()
-				&& let Some((key, track, moves)) = self.next(after)
-			{
-				after = Some(key);
-				if std::ptr::eq(Arc::as_ptr(&track), writer) {
-					paid = true;
-					writer.shed_own(self, whole);
-					continue;
-				}
-				let Some(state) = track.state.upgrade() else {
+		while self.excess().is_some() {
+			let track = {
+				let mut taken = inner.taken.lock().unwrap_or_else(PoisonError::into_inner);
+				let Some((_, track)) = taken.pop_first() else {
+					break;
+				};
+				let Some(track) = track.upgrade() else {
 					continue;
 				};
-				let Ok(mut state) = state.write() else {
-					continue;
-				};
-				if !whole {
-					state.shed_edge_taken(moves);
-					continue;
-				}
-				// Unqueued before the shed, so whatever the edge bills after it queues it again.
-				inner.order.lock().unwrap_or_else(PoisonError::into_inner).remove(&key);
-				track.queued.store(false, Ordering::Relaxed);
-				state.shed_edge_all(moves);
+				*track.listed.lock().unwrap_or_else(PoisonError::into_inner) = None;
+				track
+			};
+			track.shed_taken();
+		}
+		// The writer pays in its turn, or after every queued edge when it has no entry.
+		let mut paid = false;
+		// Each step resumes after the last key, so an entry is visited once.
+		let mut after = None;
+		while self.excess().is_some()
+			&& let Some((key, track, moves)) = self.next(after)
+		{
+			after = Some(key);
+			if std::ptr::eq(Arc::as_ptr(&track), writer) {
+				paid = true;
+				writer.shed_own(self);
+				continue;
 			}
-			if !paid {
-				writer.shed_own(self, whole);
+			let Some(state) = track.state.upgrade() else {
+				continue;
+			};
+			let Ok(mut state) = state.write() else {
+				continue;
+			};
+			// Unqueued before the shed, so whatever the edge bills after it queues it again.
+			inner.order.lock().unwrap_or_else(PoisonError::into_inner).remove(&key);
+			track.queued.store(false, Ordering::Relaxed);
+			state.shed_edge_all(moves);
+		}
+		if !paid {
+			writer.shed_own(self);
+		}
+	}
+
+	/// List `track` as having taken frames to shed, or with `again`, move its entry to its
+	/// current rank and age if it has one. Drops the entries of tracks gone since once they
+	/// clearly outnumber the live ones, as [`Self::queue`] does.
+	fn list(&self, track: &Arc<Track>, again: bool) {
+		let Some(inner) = &self.0 else {
+			return;
+		};
+		let mut taken = inner.taken.lock().unwrap_or_else(PoisonError::into_inner);
+		let mut listed = track.listed.lock().unwrap_or_else(PoisonError::into_inner);
+		let at = Arc::as_ptr(track) as usize;
+		match (*listed, again) {
+			(Some(key), true) => {
+				taken.remove(&(key, at));
 			}
+			(None, false) => {}
+			_ => return,
+		}
+		let key = (track.rank(), track.seq.load(Ordering::Relaxed));
+		taken.insert((key, at), Arc::downgrade(track));
+		*listed = Some(key);
+		drop(listed);
+		if taken.len() > 2 * inner.tracks.load(Ordering::Relaxed) + EDGE_SLACK {
+			taken.retain(|_, track| track.strong_count() > 0);
 		}
 	}
 
@@ -905,6 +950,11 @@ impl Edges {
 		// they clearly outnumber the current ones, which costs a constant per change.
 		if order.len() > 2 * inner.tracks.load(Ordering::Relaxed) + EDGE_SLACK {
 			order.retain(|key, (track, moves)| track.upgrade().is_some_and(|track| track.queued_at(*key, *moves)));
+		}
+		drop(order);
+		// A listed edge with taken frames moves with it, so they pay in its new turn.
+		if track.taken.load(Ordering::SeqCst) {
+			self.list(track, true);
 		}
 	}
 
@@ -1015,6 +1065,12 @@ pub(super) struct Track {
 	// Whether the live edge has an entry in its session's order, so one that a reclaim shed
 	// queues again once it grows.
 	queued: AtomicBool,
+	// Whether a reader took a frame this track's groups still hold since a reclaim last
+	// visited it, so a reader lists the track once.
+	taken: AtomicBool,
+	// Where the session lists this track among its edges with taken frames, if it does.
+	// Changed only under that list's lock.
+	listed: Mutex<Option<EdgeKey>>,
 
 	// One finished local group's encoder, kept until another group needs it or the
 	// account drops. Raw codec only: an Extra here would keep this account alive.
@@ -1159,6 +1215,8 @@ impl Track {
 			subscriber: AtomicI8::new(i8::MIN),
 			publisher: AtomicI8::new(0),
 			queued: AtomicBool::new(false),
+			taken: AtomicBool::new(false),
+			listed: Mutex::default(),
 			written: AtomicU64::new(0),
 			next_expiry: AtomicU64::new(0),
 			expiry_cursor: AtomicUsize::new(0),
@@ -1238,10 +1296,9 @@ impl Track {
 		self.edge_is(moves) && self.rank() == key.0
 	}
 
-	/// Pay the session's excess with this track's own live edge, being written: the frames
-	/// its readers took, or with `whole`, its older frames, keeping the newest of an open
-	/// group.
-	fn shed_own(&self, edges: &Edges, whole: bool) {
+	/// Pay the session's excess with this track's own live edge, being written: its older
+	/// frames, keeping the newest of an open group.
+	fn shed_own(&self, edges: &Edges) {
 		let Some(excess) = edges.excess() else {
 			return;
 		};
@@ -1251,10 +1308,38 @@ impl Track {
 		let Ok(mut state) = state.write() else {
 			return;
 		};
-		match whole {
-			false => state.shed_edge_taken(self.moves.load(Ordering::Relaxed)),
-			true => state.shed_edge(excess),
+		state.shed_edge(excess);
+	}
+
+	/// A reader took a frame one of this track's groups still holds: list the track with its
+	/// session, once until a reclaim visits it. Called by [`super::pace::Pace`] only while
+	/// the session has a live-edge budget.
+	pub(super) fn took(self: &Arc<Self>) {
+		// SeqCst pairs with the fence in `shed_taken`: either this sees the track unlisted,
+		// or that shed sees the reader's progress.
+		if !self.taken.load(Ordering::SeqCst) && !self.taken.swap(true, Ordering::SeqCst) {
+			self.edges.list(self, false);
 		}
+	}
+
+	/// Shed the frames readers took of this track's live edge, unlisting it first, so a frame
+	/// a reader takes during the shed lists it again.
+	fn shed_taken(&self) {
+		self.taken.store(false, Ordering::SeqCst);
+		std::sync::atomic::fence(Ordering::SeqCst);
+		let Some(state) = self.state.upgrade() else {
+			return;
+		};
+		let Ok(mut state) = state.write() else {
+			return;
+		};
+		state.shed_edge_taken(self.moves.load(Ordering::Relaxed));
+	}
+
+	/// Whether this track's session bounds its live edges, so its readers' progress matters
+	/// to a reclaim.
+	pub(super) fn bounded(&self) -> bool {
+		self.edges.0.is_some()
 	}
 
 	/// How many times the live edge moved.
