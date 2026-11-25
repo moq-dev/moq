@@ -49,8 +49,3 @@ The late-group lead from the 2026-11-22 run did not reproduce in eight setups;
 `a_start_moved_to_the_resume_point_takes_no_late_group_below_it` pins it.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [Resume model misses a group](/quest/m0/nightly/resume-model-missing-group.md) - a seed the
-  model fails on, found while probing these
