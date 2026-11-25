@@ -23,7 +23,11 @@ type Handler = (request: Request) => Response | Promise<Response>;
 function b2(buckets: { release?: Handler; ci?: Handler }) {
 	return spyOn(globalThis, "fetch").mockImplementation((async (input: Request) => {
 		const bucket = new URL(input.url).pathname.split("/")[1];
-		const handler = bucket === "nix-moq-dev" ? buckets.release : bucket === "nix-ci-moq-dev" ? buckets.ci : undefined;
+		const handlers: Record<string, Handler | undefined> = {
+			"nix-moq-dev": buckets.release,
+			"nix-ci-moq-dev": buckets.ci,
+		};
+		const handler = handlers[bucket];
 		return handler ? handler(input) : new Response("NoSuchKey", { status: 404 });
 	}) as typeof fetch);
 }
