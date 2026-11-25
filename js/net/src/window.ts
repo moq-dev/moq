@@ -1032,6 +1032,14 @@ export class Window {
 	}
 
 	/**
+	 * The runs the placed ranges name: unlike {@link runs}, a live join still waiting on a first
+	 * group names none of them. Mirrors the Rust `Window::placed`.
+	 */
+	placed(from = 0n, end = UNBOUNDED): Run[] {
+		return from >= end ? [] : this.#groups.runs(from, end);
+	}
+
+	/**
 	 * The part of {@link runs} a miss may ask a fill for: all of it but what starts before a time
 	 * start that fell before every group held. Mirrors the Rust `Window::missable`.
 	 */

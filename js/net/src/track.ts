@@ -6177,11 +6177,8 @@ export class Subscriber {
 					items.held = held;
 					return { kind: "error", error: refused };
 				}
-				// A live join still waiting on a first group names every key, so it places nothing yet.
-				const window = this.#resume ? this.#resume.window() : this.#window;
-				if (!window.pending && this.#covered(held.start, held.start + 1n).length > 0) {
-					return { kind: "group", group: held };
-				}
+				// Only placed ranges count: a live join still waiting on a first group names every key.
+				if (this.#placed(held.start)) return { kind: "group", group: held };
 				if (!this.#mayHold(held.start, held.end)) break;
 				if (ended) {
 					items.held = held;
@@ -6219,20 +6216,20 @@ export class Subscriber {
 		return (this.#resume ? this.#resume.window() : this.#window).mayHold(key, end);
 	}
 
-	// How a read waiting on a held group ends with nothing past it to read: the track failing or
-	// closing, or the read reaching its cap or the track's end. Undefined while it may go on, as the
-	// Rust held read finds through its cursor.
+	// Whether the placed ranges and the bounds name group `key`. Mirrors the Rust `Subscriber::held`.
+	#placed(key: bigint): boolean {
+		const cursor = this.#cursor.peek();
+		if (key < cursor.start || (cursor.end !== undefined && key >= cursor.end)) return false;
+		return (this.#resume ? this.#resume.window() : this.#window).placed(key, key + 1n).length > 0;
+	}
+
+	// How a read waiting on a held group ends: the track closing, which places what it can. Its cap
+	// or a declared end does not: an upstream still answers where a time start lies. Undefined while
+	// it may go on.
 	#heldEnded(): Recv | undefined {
 		const closed = this.#state.closed.peek();
 		if (closed instanceof Error) return { kind: "error", error: closed };
 		if (closed !== undefined) return { kind: "done" };
-		if (this.#resume) return undefined;
-		const cursor = this.#cursor.peek();
-		const start = max(cursor.start, this.#nextKey);
-		const end = this.#state.end.peek()?.at;
-		if ((cursor.end !== undefined && start >= cursor.end) || (end !== undefined && start >= finalKey(end))) {
-			return { kind: "done" };
-		}
 		return undefined;
 	}
 

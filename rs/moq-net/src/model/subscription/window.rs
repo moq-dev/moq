@@ -982,6 +982,12 @@ impl Window {
 		self.from(&self.groups, from)
 	}
 
+	/// The groups the placed ranges name from `from` on, lowest first: unlike [`Self::runs`],
+	/// a live join still waiting on a first group names none of them.
+	pub fn placed(&self, from: u64) -> impl Iterator<Item = ops::RangeInclusive<u64>> + '_ {
+		self.groups.runs(from)
+	}
+
 	/// The groups in range from `from` on that a miss may ask for, lowest first: all of
 	/// them but those starting before a time start that fell before every group held.
 	pub fn missable(&self, from: u64) -> impl Iterator<Item = ops::RangeInclusive<u64>> + '_ {

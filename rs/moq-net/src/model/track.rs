@@ -12957,10 +12957,10 @@ impl Subscriber {
 		let bounds = self.bounds();
 		let within = bounds.contains(key);
 		let from = key.max(bounds.start);
-		// A live join still waiting on a first group names every key, so it places nothing yet.
+		// Only placed ranges count: a live join still waiting on a first group names every key.
 		let judge = |window: &subscription::Window| {
-			let next = (!window.is_pending()).then(|| window.runs(from).next().map(|run| *run.start()));
-			(next.flatten(), within && window.may_hold(key, end))
+			let next = window.placed(from).next().map(|run| *run.start());
+			(next, within && window.may_hold(key, end))
 		};
 		let (next, may_hold) = match &mut self.inner {
 			Inner::Plain(cursor) => {
@@ -13848,20 +13848,17 @@ impl Ordered {
 			let key = group.start;
 			// A range moved off it with nothing in range above waits for the range to widen
 			// again, and the read waits or ends as it does for capped ranges.
-			// What parking on the cursor found: `Some(ended)` once it parked or ended.
-			let mut parked: Option<bool> = None;
+			let mut parked = false;
 			loop {
 				match self.inner.held(key, group.end()) {
 					Held::Keep => return Poll::Ready(Ok(Some(*group))),
 					// Neither handed out nor passed until the range places: it may or may not name
-					// it, and the read never goes back. A read that ended keeps it, as the buffer
-					// keeps a group past the cap, for the ranges or bounds to judge again.
-					Held::Placing if let Some(ended) = parked => {
+					// it, and the read never goes back. Its cap or the track's end does not end the
+					// read meanwhile: an upstream still answers where the start lies, and a closed
+					// track places it.
+					Held::Placing if parked => {
 						self.held = Some(group);
-						return match ended {
-							true => Poll::Ready(Ok(None)),
-							false => Poll::Pending,
-						};
+						return Poll::Pending;
 					}
 					Held::Placing => {
 						// Parked on whatever the cursor waits on, refusing every group past it, and
@@ -13870,8 +13867,7 @@ impl Ordered {
 						let _ = group.poll_closed(waiter);
 						let admit = (ops::Bound::Unbounded, ops::Bound::Excluded(key));
 						match self.inner.poll_group_in(true, admit, waiter) {
-							Poll::Pending => parked = Some(false),
-							Poll::Ready(Ok(None)) => parked = Some(true),
+							Poll::Pending | Poll::Ready(Ok(None)) => parked = true,
 							// One below it goes first, as the read never goes back.
 							Poll::Ready(Ok(Some(lower))) => {
 								self.held = Some(group);
@@ -18722,11 +18718,11 @@ mod test {
 		);
 	}
 
-	/// A held group waiting on a time start stays held, rather than handed out, when the read
-	/// reaches its cap: the start may still place past it.
+	/// A held group waiting on a time start keeps a read at its cap waiting for the start,
+	/// neither handed out nor ended past: the start may place at it or past it.
 	#[test]
 	#[cfg(feature = "async")]
-	fn a_held_group_waiting_on_a_time_start_stays_held_at_the_reads_cap() {
+	fn a_held_group_keeps_a_read_at_its_cap_waiting_for_a_time_start() {
 		let mut producer = track_producer("test", Info::timed());
 		producer.received();
 		producer.anchored();
@@ -18740,12 +18736,17 @@ mod test {
 		assert_eq!(held_next(&mut ordered), Some(Ok(0)));
 		assert_eq!(held_next(&mut ordered), Some(Err(1..2)));
 		ordered.update(from_time(5)).unwrap();
-		// Past the cap, so the read ends there.
+		// The track ends past the cap, but upstream still places the start.
 		producer.finish_at(Position { group: 10, frame: 0 }).unwrap();
+		let woken = Arc::new(AtomicBool::new(false));
+		let waiter = kio::Waiter::new(futures::task::waker(Arc::new(FlagWake(woken.clone()))));
 		assert!(
-			matches!(ordered.next_item().now_or_never(), Some(Ok(None))),
-			"group 2 is not handed out"
+			ordered.poll_next_item(&waiter).is_pending(),
+			"neither group 2 nor the end"
 		);
+		producer.time_starts([(5, Some(2))]);
+		assert!(woken.load(Ordering::SeqCst), "the answer wakes the read");
+		assert_eq!(held_next(&mut ordered), Some(Ok(2)));
 	}
 
 	/// A held group waiting on a time start wakes the read when it finishes at an end the

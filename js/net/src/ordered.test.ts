@@ -547,7 +547,7 @@ for (const placed of [2n, 4n]) {
 	});
 }
 
-test("a held group waiting on a time start stays held when the read reaches its cap", async () => {
+test("a held group waiting on a time start keeps a read at its cap waiting for the start", async () => {
 	const producer = receivedTrack();
 	const ordered = producer
 		.subscribe(withMax({ delay: { max: null } }))
@@ -560,9 +560,10 @@ test("a held group waiting on a time start stays held when the read reaches its 
 	expect(ordered.tryNextItem()).toMatchObject({ kind: "gap", start: 1n, end: 2n });
 	ordered.update(withMax({ delay: { max: null }, ranges: [{ start: 5n }] }));
 	const next = ordered.nextItem();
-	// Past the cap: group 2 stays held, since the start may still place past it.
+	// The track ends past the cap, but upstream still places the start.
 	producer.finishAt({ group: 10n, frame: 0 });
-	expect(await next).toBeUndefined();
+	hooks.timeStarts(producer, [[5n, 2n]]);
+	expect((await next)?.group?.start).toBe(2n);
 });
 
 // Mirrors the Rust `a_held_group_a_waiting_time_start_lies_past_is_passed`.
