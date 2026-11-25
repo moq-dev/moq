@@ -1,12 +1,12 @@
 set fallback
 
-endpoint := "s3.us-east-005.backblazeb2.com"
+endpoint := "https://s3.us-east-005.backblazeb2.com"
 region := "us-east-005"
 
 # The `b2:` remote for rclone, with the same credentials `nix copy` reads.
 export RCLONE_CONFIG_B2_TYPE := "s3"
 export RCLONE_CONFIG_B2_PROVIDER := "Other"
-export RCLONE_CONFIG_B2_ENDPOINT := "https://" + endpoint
+export RCLONE_CONFIG_B2_ENDPOINT := endpoint
 export RCLONE_CONFIG_B2_REGION := region
 export RCLONE_CONFIG_B2_ACCESS_KEY_ID := env("AWS_ACCESS_KEY_ID", "")
 export RCLONE_CONFIG_B2_SECRET_ACCESS_KEY := env("AWS_SECRET_ACCESS_KEY", "")
