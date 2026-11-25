@@ -35,17 +35,15 @@ producer declares an end at silence instead of publishing those packets, but any
 publisher that forwards DTX packets (such as WebRTC Opus with DTX on) would
 reach `moq play` this way; unverified end to end.
 
+Decided (maintainer, 2026-11-25): don't wait for an upstream release. Vendor
+whichever Opus implementation fixes this, such as unsafe-libopus 0.2.0 with
+DCNick3/unsafe-libopus#3 applied (in-tree or under a moq-dev crate name, since
+`[patch.crates-io]` doesn't reach crates.io users of moq-audio) or another
+decoder. The fix must cover both bugs: SILK and hybrid concealment, and the
+full-scale noise SILK DTX packets play in normal playback today. Add a
+regression test for the DTX case alongside the concealment ones.
+
 Once the decoder conceals SILK correctly, delete the `celt` gate in
 `rs/moq-audio/src/decode/backend/libopus.rs` and `opus::track_celt`. Then flip
 `opus_silk_loss_stays_a_gap` and `opus_refuses_to_conceal_after_silk` to
 expect concealment that decays rather than saturates.
-
-## Waiting
-
-- Maintainer: choose how moq-audio gets a SILK PLC fix. Patching through
-  `[patch.crates-io]` doesn't reach crates.io users of moq-audio. The options
-  are (a) a moq-dev fork of unsafe-libopus 0.2.0 with the six-site fix,
-  published under a new crate name, (b) asking upstream to merge PR #3 and cut
-  0.2.1, which needs approval to post outside our orgs, or (c) decoding Opus
-  through C libopus. Recommended: (a), plus a comment asking upstream for
-  0.2.1, so the fork goes away if they release.
