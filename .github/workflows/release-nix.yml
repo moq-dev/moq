@@ -59,14 +59,14 @@ jobs:
       - uses: ./.github/actions/nix
       - uses: ./.github/actions/just
 
-      # The release bucket has no lifecycle rule, unlike the CI one, so a flake
+      # The release bucket never expires a path, unlike the CI one, so a flake
       # pinned to an old tag still substitutes.
       - name: Build and push
         env:
           PACKAGE: ${{ steps.pkg.outputs.name }}
           NIX_SIGNING_KEY: ${{ secrets.NIX_SIGNING_KEY }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.NIX_R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.NIX_R2_SECRET_ACCESS_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.NIX_B2_RELEASE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.NIX_B2_RELEASE_SECRET_ACCESS_KEY }}
         run: |
           nix build ".#$PACKAGE" --print-build-logs
           just infra nix push nix-moq-dev ./result

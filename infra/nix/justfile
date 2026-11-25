@@ -29,7 +29,7 @@ push bucket +paths:
     key=$(mktemp)
     trap 'rm -f "$key"' EXIT
     printf '%s' "$NIX_SIGNING_KEY" >"$key"
-    nix copy --to "s3://{{ bucket }}?endpoint=dd618f5dbd5da77b8296f1613c301f5c.r2.cloudflarestorage.com&region=auto&compression=zstd&secret-key=$key" {{ paths }}
+    nix copy --to "s3://{{ bucket }}?endpoint=s3.us-east-005.backblazeb2.com&region=us-east-005&compression=zstd&secret-key=$key" {{ paths }}
 
 # Generate a signing key into the cache-write Environment and print its public half for flake.nix.
 keygen:
