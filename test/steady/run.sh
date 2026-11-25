@@ -19,7 +19,8 @@ RERUN="$(harness_env STEADY_PROFILE RELAY_BIN MOQ_BIN)just test steady$(harness_
 # lite-07, where every publisher reports each group's skips and serves to its record.
 VERSION=moq-lite-07-wip
 
-PROFILE="${STEADY_PROFILE:-release}"
+# Release code with line tables, so a failing run's heap dumps name their stacks.
+PROFILE="${STEADY_PROFILE:-profiling}"
 RELAY="${RELAY_BIN:-}"
 MOQ="${MOQ_BIN:-}"
 # Both binaries refuse an environment variable under `MOQ_` they don't know.
@@ -95,14 +96,14 @@ harness_begin steady "$RERUN"
 # The jemalloc feature answers SIGUSR1 with the exact live heap, which the sampler reads.
 if [[ -z "$RELAY" || -z "$MOQ" ]]; then
     echo "building moq-relay + moq-cli with jemalloc ($PROFILE)..."
-    flag=()
-    [[ "$PROFILE" == "release" ]] && flag=(--release)
-    (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-relay -p moq-cli \
+    (cd "$WORKSPACE" && cargo build --locked --profile "$PROFILE" -p moq-relay -p moq-cli \
         --features moq-relay/jemalloc,moq-cli/jemalloc)
     TARGET_BASE=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE/Cargo.toml" --no-deps |
         sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
-    [[ -n "$RELAY" ]] || RELAY="$TARGET_BASE/$PROFILE/moq-relay"
-    [[ -n "$MOQ" ]] || MOQ="$TARGET_BASE/$PROFILE/moq"
+    out="$PROFILE"
+    [[ "$PROFILE" == dev ]] && out=debug
+    [[ -n "$RELAY" ]] || RELAY="$TARGET_BASE/$out/moq-relay"
+    [[ -n "$MOQ" ]] || MOQ="$TARGET_BASE/$out/moq"
 fi
 harness_stage bin/moq-relay "$RELAY"
 harness_stage bin/moq "$MOQ"
