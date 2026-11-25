@@ -85,6 +85,8 @@ impl<'a> Streams<'a> {
 		if dir == Dir::Bi {
 			self.state.send_streams += 1;
 		}
+		// A quiesce waiting on the stream can end it now.
+		self.state.waits.wake_ended();
 
 		Some(StreamId::new(!self.state.side, dir, x))
 	}

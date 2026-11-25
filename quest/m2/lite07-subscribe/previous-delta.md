@@ -40,10 +40,8 @@ Wire and accounting design (fixes audit findings W1, W5, W6, S12, S13):
   - Handle bridged `Previous Delta = 0` cleanly (when upstream is lite-06 / `moq-transport`, the copy already runs on that legacy transport's rules; a lite-07 publisher forwarding a copy with unknown predecessor sends `Previous Delta = 0` and uses explicit `SUBSCRIBE_DROP` if needed rather than silent gaps).
 - **Formal verification (`/verify-subscribe`) and interop:**
   - Update `rs/moq-net/verify/subscribe/SubscribeAccounting.tla` (and its `.cfg` / README) to model `Previous Delta` + `RESET_STREAM_AT(header_end)` + no `SUBSCRIBE_SKIP`, and run TLC via `/verify-subscribe` to prove `ServedOnce`, `NamedOnce`, `NoContradictoryDrop`, `ZeroTimers_QuietIsSettled`, and deadlock freedom.
+  - The open finding `CutGroupEnd.cfg` (a reset after FIN delivers only the header, so the starts its cut GROUP_END told wait out the grace) must pass: delete its `Open finding` line, and fold `QuietIsSettledWhole` into `QuietIsSettled`, dropping `Cut`.
   - Update Rust (`rs/moq-net`), JS (`js/net`), and `drafts/draft-lcurley-moq-lite.md` in the same PR, and run `just test interop --all`.
 
 Public API: none (internal `Group` predecessor metadata stays crate-private unless a public getter is needed). Wire: breaking lite-07 change (adds `Previous Delta` to `GROUP` header, removes `SUBSCRIBE_SKIP`).
 
-## Required
-
-- [Require RESET_STREAM_AT for lite-07 group streams](/quest/m2/lite07-subscribe/reset-at.md) - opened Group Streams deliver their GROUP header with Previous Delta before reset without emitting SUBSCRIBE_DROP

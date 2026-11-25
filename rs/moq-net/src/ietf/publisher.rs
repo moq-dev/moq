@@ -7499,6 +7499,15 @@ impl<T: crate::transport::poll::SendStream> crate::transport::poll::SendStream f
 		inner.stream.reset(code);
 	}
 
+	fn reset_at(&mut self, offset: &Self::Offset, code: u32) {
+		let inner = self.get_mut();
+		let code = match inner.lapse.as_ref().is_some_and(Lapse::lapsed) {
+			true => super::error::EXPIRED_AUTH_TOKEN,
+			false => code,
+		};
+		inner.stream.reset_at(offset, code);
+	}
+
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>> {
 		let mut inner = self.inner.lock().unwrap();
 		inner.follow(waiter);

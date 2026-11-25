@@ -290,6 +290,17 @@ impl Version {
 		)
 	}
 
+	/// Whether a publisher resets an opened Group Stream reliably, still delivering its GROUP
+	/// header, which then accounts for the group, so no SUBSCRIBE_DROP names it. Added in
+	/// lite-07; earlier versions name every group whose stream failed in SUBSCRIBE_DROP.
+	#[cfg(feature = "async")]
+	pub(crate) fn has_reliable_reset(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
 	/// Whether SUBSCRIBE_DROP and SUBSCRIBE_SKIP carry `Group Start` and an exclusive
 	/// `Group End` past it. Added in lite-07; earlier versions carry an inclusive `Group End`.
 	pub(crate) fn has_group_span(self) -> bool {

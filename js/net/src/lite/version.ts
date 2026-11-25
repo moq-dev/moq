@@ -707,3 +707,22 @@ export function hasUnsignedTimestamps(version: Version): boolean {
 			return true;
 	}
 }
+
+/**
+ * Whether a publisher resets an opened Group Stream reliably, still delivering its GROUP header,
+ * which then accounts for the group, so no SUBSCRIBE_DROP names it. Added in lite-07; earlier
+ * versions name every group whose stream failed in SUBSCRIBE_DROP.
+ */
+export function hasReliableReset(version: Version): boolean {
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}

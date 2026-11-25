@@ -508,6 +508,27 @@ impl Connection {
 		open(&self.shared, Dir::Bi, options, waiter).map_ok(|(send, recv)| (send, recv.expect("bidirectional")))
 	}
 
+	/// Ask the peer to end every stream it may still send on, except `keep`, and wait until it
+	/// has, as [`moq_quic::connection::Connection::poll_quiesce`] does.
+	pub(crate) fn poll_quiesce(
+		&self,
+		waiter: &kio::Waiter,
+		code: VarInt,
+		keep: &[crate::quic::stream::Id],
+	) -> Poll<Result<(), Error>> {
+		let quiesced = self.shared.conn.borrow_mut().poll_quiesce(waiter, code, keep);
+		match ready!(quiesced) {
+			Ok(()) => Poll::Ready(Ok(())),
+			Err(_) => Poll::Ready(Err(self.shared.lost())),
+		}
+	}
+
+	/// Give up a quiesce that is not ready, as
+	/// [`moq_quic::connection::Connection::abandon_quiesce`] does.
+	pub(crate) fn abandon_quiesce(&self, code: VarInt, keep: &[crate::quic::stream::Id]) {
+		self.shared.conn.borrow_mut().abandon_quiesce(code, keep);
+	}
+
 	/// Receive the next datagram.
 	#[kio::wrapper]
 	pub fn poll_recv_datagram(&self, waiter: &kio::Waiter) -> Poll<Result<Bytes, Error>> {

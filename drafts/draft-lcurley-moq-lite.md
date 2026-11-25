@@ -31,6 +31,7 @@ normative:
   RFC6455:
   RFC9000:
   RFC9002:
+  reliable-reset: I-D.ietf-quic-reliable-stream-reset
 
 informative:
   I-D.lcurley-moq-cluster:
@@ -292,7 +293,12 @@ Each endpoint MAY open one unidirectional Announce Stream (`0x3`) carrying all d
 Opened by a publisher per Group served to a Subscribe Stream: `GROUP`, zero or more `FRAME`s, and `GROUP_END` + `FIN` if finished (or `FIN` alone if closed, or reset if aborted).
 A publisher MUST NOT send `GROUP_END` for an unfinished Group, MUST NOT send two Group Streams for the same Group Start on one subscription, and a subscriber treats bytes after `GROUP_END` as a malformed Track.
 
-A publisher out of peer stream credit MAY reset its lowest-priority Group Stream with `TOO_FAR_BEHIND` and name it in `SUBSCRIBE_DROP` (subscribers wanting the remainder `FETCH` from the missing frame index).
+A publisher that resets a Group Stream after sending its `GROUP` message MUST still deliver that message: it sends `RESET_STREAM_AT` {{reliable-reset}} with a Reliable Size at the end of the `GROUP` message, or, toward a peer that did not negotiate it, holds the `RESET_STREAM` until the peer acknowledges the `GROUP` message.
+The `GROUP` message then accounts for the Group and the reset ends its readers with its error, so the publisher names it in no `SUBSCRIBE_DROP`.
+Without `RESET_STREAM_AT`, a subscriber SHOULD read a Group Stream's `GROUP` message as soon as the stream arrives, since an acknowledged message can still be discarded unread by a reset; one that loses it waits out its grace period for the Group.
+A publisher whose transport can do neither, such as a browser's WebTransport, names each Group whose stream it resets in a `SUBSCRIBE_DROP` with the reset's error instead, as it does a Group whose stream it resets before sending the `GROUP` message.
+
+A publisher out of peer stream credit MAY reset its lowest-priority Group Stream with `TOO_FAR_BEHIND` (subscribers wanting the remainder `FETCH` from the missing frame index).
 Both peers MAY reset a Group Stream at any time without affecting the session.
 
 ## Datagrams {#datagrams}
@@ -316,7 +322,7 @@ Subscribers MUST silently drop datagrams with unknown `Subscribe ID` or arriving
 
 # Discovery and Routing {#announce}
 Each endpoint MAY open one unidirectional Announce Stream (`0x3`) for the session.
-Opening a second Announce Stream or resetting one MUST close the session with `PROTOCOL_VIOLATION`; FIN ends all routes and claims sent on it (while the peer keeps answering previously requested prefixes).
+Opening a second Announce Stream or resetting one MUST close the session with `PROTOCOL_VIOLATION`, except that an endpoint whose transport cannot tell a reset from its session closing (such as a browser's WebTransport, which reports `WT_SESSION_GONE` as application error code 0) treats a reset or stop with code 0 as the peer leaving and lets the session close say why; FIN ends all routes and claims sent on it (while the peer keeps answering previously requested prefixes).
 
 Two endpoints exchange routes when both send the `Node ID` Setup Parameter (allowed only when both grants cover the empty prefix; narrowing either grant below every path MUST close the session with `UNAUTHORIZED`).
 All other sessions exchange claims alone ({{claims}}).
@@ -421,8 +427,8 @@ A superseded Group expires when either age `>= Max Age`:
 - **Timestamp age**: `(newest_frame_timestamp_of_latest_nonempty_group) - group_reach`, where `group_reach` is the Group's `End` (if finished) or its successor's first frame timestamp (unbounded if the successor has no frames yet). Because reach is exclusive, equality already expires the Group (so `Max Age = 0` works without a special case). Scale-less Tracks (`Timescale = 0`) have no timestamp age.
 - **Arrival age**: wall time elapsed since the Group's successor arrived at this hop.
 
-When a Group expires, the publisher resets its Group Stream with `OLD` (even after sending an unacknowledged `GROUP_END` to free flow control) and names it in `SUBSCRIBE_DROP(OLD)`.
-A subscriber that already read the complete Group through `GROUP_END` + `FIN` keeps it unaffected.
+When a Group expires, the publisher resets its [Group Stream](#group-stream) with `OLD` (even after sending an unacknowledged `GROUP_END` to free flow control), or names a Group it sent no `GROUP` message for in `SUBSCRIBE_DROP(OLD)`.
+A subscriber that already read the complete Group through `GROUP_END` + `FIN` keeps it unaffected: the reset arrives too late to cut it.
 
 
 # Wire Format
@@ -859,8 +865,9 @@ SUBSCRIBE_DROP Message {
 }
 ~~~
 
-Names a half-open span `[Group Start, Group End)` the publisher will not deliver (aborted, evicted, expired `OLD`, `NOT_FOUND` for undeclared gaps, or subscriber `STOP_SENDING` carrying its code).
-For every start in range, a publisher MUST send a Group Stream, cover it inside a `GROUP_END` span, or name it in `SUBSCRIBE_SKIP` or `SUBSCRIBE_DROP` (a reliably delivered reset after the Group header also suffices unless answering `STOP_SENDING`).
+Names a half-open span `[Group Start, Group End)` the publisher will not deliver: Groups given up before their `GROUP` message was sent ([Group Stream](#group-stream)) as aborted, evicted, or expired `OLD`, and `NOT_FOUND` for undeclared gaps.
+For every start in range, a publisher MUST send a Group Stream, cover it inside a `GROUP_END` span, or name it in `SUBSCRIBE_SKIP` or `SUBSCRIBE_DROP`.
+A Group Stream the subscriber stopped (`STOP_SENDING`) with `EVICTED` before the publisher's transport acknowledged its `GROUP` message, which the subscriber may have discarded unread, is named in a drop with `EVICTED`; no other stop is, since the subscriber sent it knowing the Group or wanting none of it.
 Dropping a whole held Group names `[start, max(End, start + 1))`.
 
 Drops are final on their subscription and end active readers of affected Groups with `Error Code` (unless another Group Stream already completed the Group).
@@ -1089,6 +1096,8 @@ This document has no IANA actions.
 - Replaced group datagrams with separate datagram Tracks (`0x9` Datagrams Stream: `DATAGRAMS`/`UPDATE`/`INFO`) and typed Track Datagrams (`Type = 0x0`).
 - `FRAME` leads with `Payload Length` (`len + 1`, with `0` marking `GROUP_END`), an unsigned non-negative `Timestamp Delta` (omitted when scale-less, replacing zigzag deltas), and optional `Inflated Size`.
 - Expiration adds arrival age (sole metric for scale-less tracks) and resets expired Group Streams with `OLD` even after unacknowledged `GROUP_END`.
+- A publisher resets a Group Stream after its `GROUP` message with `RESET_STREAM_AT`, or a `RESET_STREAM` held until the `GROUP` message is acknowledged, and names no such Group in `SUBSCRIBE_DROP`; a publisher whose transport can do neither, such as a browser's WebTransport, still does. A stopped Group Stream is named in `SUBSCRIBE_DROP` only with `EVICTED`, before its `GROUP` message was acknowledged.
+- A reset of the Announce Stream closes the session unless the transport cannot tell the reset from the session closing.
 
 ## moq-lite-06
 {:numbered="false"}
