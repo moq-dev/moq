@@ -44,6 +44,7 @@ impl Hole {
 	}
 
 	/// This verdict, judged within the exclusive group end `cap`.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn capped(mut self, cap: Option<u64>) -> Self {
 		if let Self::Drop { cap: judged, .. } = &mut self {
 			*judged = cap;
