@@ -96,7 +96,7 @@ test("Legacy Producer ends an audio group whole at its discontinuity marker", as
 // has the group's End treats any start inside the span as skipped, so nothing later starts there.
 test("Legacy Producer starts nothing inside the span of a group a cut ended", async () => {
 	const media = track(Time.Timescale.MICRO);
-	const subscriber = media.subscribe({ ranges: [{}] });
+	const subscriber = media.subscribe({ order: "ascending", ranges: [{}] });
 	const producer = new Producer(media, new Format("audio"));
 	producer.encode(new Uint8Array([1]), Duration.micros(0), true);
 	producer.encode(new Uint8Array([1]), Duration.micros(20_000), false);
