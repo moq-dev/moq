@@ -2233,8 +2233,9 @@ mod tests {
 
 		let data = include_bytes!("test_data/opus.webm");
 		// The last packet is followed by 10 bytes of BlockGroup metadata: cut inside its payload,
-		// or inside the metadata after all six packets were accepted.
-		for (missing, expected) in [(11, 5), (1, 6)] {
+		// which fails the group the six 20 ms packets share, or inside the metadata after all six
+		// were accepted.
+		for (missing, expected) in [(11, 0), (1, 6)] {
 			let data = &data[..data.len() - missing];
 			for chunk in [1, 7, 64, data.len()] {
 				let (mut import, catalog, consumer) = import();

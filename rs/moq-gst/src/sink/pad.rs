@@ -1656,53 +1656,60 @@ mod tests {
 		builder.build()
 	}
 
+	/// The buffer that brings a group to 200 ms closes it when buffers state their duration, and
+	/// otherwise the first buffer starting 200 ms past the group's start does.
 	#[tokio::test(start_paused = true)]
-	async fn audio_groups_carry_twenty_milliseconds() {
+	async fn audio_groups_carry_two_hundred_milliseconds() {
 		gst::init().unwrap();
-		let (broadcast, catalog) = producers();
-		let consumer = broadcast.consume();
-		let mut pad = Pad::new();
-		pad.observe_caps(
-			&broadcast,
-			&catalog,
-			producer_options(&opus_caps(1, None, None), Some("audio")),
-		);
-		pad.observe_segment(time_segment());
-		let mut track = consumer
-			.track("audio")
-			.unwrap()
-			.subscribe(
-				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
-					moq_net::track::Start::Live {
-						min: Some(Duration::from_secs(1)),
-						max: Some(Duration::from_secs(1)),
-					},
-				)]),
-			)
-			.await
-			.unwrap();
-		for index in 0..17 {
-			assert_eq!(
-				pad.push_buffer(
-					Bytes::from_static(&[0x80, 0xff, 0xfe]),
-					Some(gst::ClockTime::from_useconds(100_000 + index * 2_500)),
-					None,
-					None
-				)
-				.unwrap(),
-				PushOutcome::Published
+		for (duration, expected) in [
+			(Some(gst::ClockTime::from_useconds(2_500)), [80, 80, 10]),
+			(None, [81, 81, 8]),
+		] {
+			let (broadcast, catalog) = producers();
+			let consumer = broadcast.consume();
+			let mut pad = Pad::new();
+			pad.observe_caps(
+				&broadcast,
+				&catalog,
+				producer_options(&opus_caps(1, None, None), Some("audio")),
 			);
-		}
-		pad.finalize().unwrap();
-		for expected in [8, 8, 1] {
-			let mut group = track.recv_group().await.unwrap().unwrap();
-			let mut count = 0;
-			while group.read_frame().await.unwrap().is_some() {
-				count += 1;
+			pad.observe_segment(time_segment());
+			let mut track = consumer
+				.track("audio")
+				.unwrap()
+				.subscribe(
+					moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+						moq_net::track::Start::Live {
+							min: Some(Duration::from_secs(1)),
+							max: Some(Duration::from_secs(1)),
+						},
+					)]),
+				)
+				.await
+				.unwrap();
+			for index in 0..170 {
+				assert_eq!(
+					pad.push_buffer(
+						Bytes::from_static(&[0x80, 0xff, 0xfe]),
+						Some(gst::ClockTime::from_useconds(100_000 + index * 2_500)),
+						duration,
+						None
+					)
+					.unwrap(),
+					PushOutcome::Published
+				);
 			}
-			assert_eq!(count, expected);
+			pad.finalize().unwrap();
+			for expected in expected {
+				let mut group = track.recv_group().await.unwrap().unwrap();
+				let mut count = 0;
+				while group.read_frame().await.unwrap().is_some() {
+					count += 1;
+				}
+				assert_eq!(count, expected, "{duration:?}");
+			}
+			assert!(track.recv_group().await.unwrap().is_none());
 		}
-		assert!(track.recv_group().await.unwrap().is_none());
 	}
 
 	fn published_opus(

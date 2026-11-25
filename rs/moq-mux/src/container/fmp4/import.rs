@@ -89,6 +89,12 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	// open group belongs to an older one rolls, so every track segments identically.
 	segment: u64,
 
+	// Where an audio-only import's open segment starts and its media reaches, on the catalog
+	// clock, while one is open: nothing in the container says where a segment ends, so it closes
+	// once it carries a join.
+	audio: Option<(Timestamp, Timestamp)>,
+	join: crate::container::Join,
+
 	dropped_metadata: u64,
 
 	// A seek or discontinuity waiting for the fragment still publishing.
@@ -313,6 +319,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			input: crate::container::Input::Open,
 			pending_cut: false,
 			segment: 0,
+			audio: None,
+			join: crate::container::Join::default(),
 			dropped_metadata: 0,
 			deferred: Deferred::default(),
 		}
@@ -1081,9 +1089,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		}
 
 		if !has_video {
-			// Audio-only and unsegmented: nothing in the container says where a segment ends, so
-			// fall back to a group per fragment. Bounded, unlike one group for the whole source.
-			return true;
+			// Audio-only: a segment rolls once it carries a join (see `settle`), never per fragment,
+			// which with ffmpeg's `-frag_duration` is a group per packet.
+			return false;
 		}
 
 		// A video keyframe starts a segment, but only once the current segment already has its
@@ -1134,6 +1142,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		if self.starts_segment(&moof, has_video, len.unwrap_or(usize::MAX)) {
 			self.segment += 1;
 			self.pending_cut = false;
+			self.audio = None;
 		}
 		let mut resolver = sample::Resolver::new(self.moof_span, len.unwrap_or(usize::MAX));
 		resolver.streaming();
@@ -1177,6 +1186,13 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			// The moov declared every track, so any track's anchored fragment releases the catalog.
 			let offset = self.timebase.anchor(run.earliest)?;
 			anchored = true;
+			if !has_video {
+				let start = offset.apply(run.earliest)?;
+				let end = offset.apply(run.end)?;
+				let start = self.audio.map_or(start, |(start, _)| start);
+				let end = self.audio.map_or(end, |(_, reached)| crate::container::later(reached, end));
+				self.audio = Some((start, end));
+			}
 			let placement = Placement {
 				offset,
 				new_segment: track.segment != Some(self.segment),
@@ -1996,6 +2012,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	}
 
 	fn apply_seek(&mut self, seek: Seek) -> Result<()> {
+		self.audio = None;
 		for track in self.text.values_mut() {
 			match seek {
 				Seek::Start(start) => {
@@ -2040,6 +2057,11 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	}
 
 	fn apply_discontinuity(&mut self) {
+		// An audio-only segment never continues across a new timeline, so a group never spans one.
+		if !self.tracks.values().any(|track| track.kind == Kind::Video) {
+			self.audio = None;
+			self.pending_cut = true;
+		}
 		for track in self.text.values_mut() {
 			track.end_decode_time = None;
 			track.discontinuity = true;
@@ -2055,7 +2077,19 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	}
 
 	/// Apply the controls deferred while a fragment was publishing, in the order HLS issues them.
+	///
+	/// An audio-only segment that now carries a join closes here, at the end of the fragment that
+	/// filled it, so the relay sees each group finish without waiting for the next fragment.
 	fn settle(&mut self) -> Result<()> {
+		if let Some((start, end)) = self.audio
+			&& self.join.full(start, end)
+		{
+			self.audio = None;
+			self.pending_cut = true;
+			for track in self.tracks.values_mut() {
+				media!(&mut track.output, producer => producer.cut(None)?, passthrough => passthrough.close()?);
+			}
+		}
 		let Deferred { seek, discontinuity } = std::mem::take(&mut self.deferred);
 		if discontinuity {
 			self.apply_discontinuity();
@@ -2664,17 +2698,22 @@ mod tests {
 				.decode(&media_header(id, 0, &[0], SIZE as u32, Some(SIZE)))
 				.unwrap();
 			import.decode(&[0xA5; SIZE]).unwrap();
+			// This fragment brings the group to 200 ms, so the next opens a group of its own.
 			import
-				.decode(&media_header(id, 1024, &[0], SIZE as u32, Some(SIZE)))
+				.decode(&media_header(id, 8_820, &[0], SIZE as u32, Some(SIZE)))
+				.unwrap();
+			import.decode(&[0xA5; SIZE]).unwrap();
+			import
+				.decode(&media_header(id, 11_025, &[0], SIZE as u32, Some(SIZE)))
 				.unwrap();
 			import.decode(&[0xA5; SIZE / 2]).unwrap();
 			// In place, so the tracks can be inspected after the failure.
 			let err = import.finish_in_place().unwrap_err();
 			assert!(matches!(err, crate::Error::Mp4(_)), "{err:?}");
-			let second = start(&consumer, 1024);
+			let second = start(&consumer, 11_025);
 			assert_eq!(
 				groups(&mut consumer),
-				[(0, Some(1)), (second, None)],
+				[(0, Some(2)), (second, None)],
 				"passthrough: {passthrough}"
 			);
 			let finished = match &import.tracks[&id].output {

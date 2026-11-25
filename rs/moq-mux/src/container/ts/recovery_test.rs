@@ -1565,7 +1565,7 @@ async fn disjoint_outages_across_both_tracks_keep_the_clock() {
 			let missing = if slot.video {
 				slot.group == 5 && slot.frame == 11
 			} else {
-				(SPLICE - 5 * FRAME..SPLICE - 4 * FRAME).contains(&slot.nominal)
+				outage(slot, SPLICE - 5 * FRAME..SPLICE - 4 * FRAME)
 			};
 			if missing { Delivery::Omitted } else { clean(slot) }
 		})
@@ -1620,11 +1620,19 @@ async fn a_stalled_track_leaves_the_others_running() {
 
 /// Omit the audio due in [2 s, 3.5 s).
 fn stall_audio(slot: Slot) -> Delivery {
-	let (from, until) = (Duration::from_millis(2000), Duration::from_millis(3500));
-	match !slot.video && (from..until).contains(&slot.nominal) {
+	match !slot.video && outage(slot, Duration::from_millis(2000)..Duration::from_millis(3500)) {
 		true => Delivery::Omitted,
 		false => clean(slot),
 	}
+}
+
+/// Whether an audio frame is lost to an outage over `window`: one due in it, or in a group that
+/// began in it, so each group still delivers a prefix of its frames.
+fn outage(slot: Slot, window: Range<Duration>) -> bool {
+	let start = slot.nominal.saturating_sub(Duration::from_nanos(
+		slot.frame as u64 * AUDIO_TICKS * 1_000_000_000 / 90_000,
+	));
+	slot.nominal >= window.start && start < window.end
 }
 
 /// Audio sent 200 ms behind the video, within the delay, survives a skipped video group whole.

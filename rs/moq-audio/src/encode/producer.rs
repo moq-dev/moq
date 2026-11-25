@@ -2231,8 +2231,8 @@ mod tests {
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn default_groups_carry_twenty_milliseconds() {
-		for (frame_us, packets) in [(2_500, 8), (10_000, 2), (20_000, 1), (40_000, 1)] {
+	async fn default_groups_carry_two_hundred_milliseconds() {
+		for (frame_us, packets) in [(2_500, 80), (10_000, 20), (20_000, 10), (40_000, 5)] {
 			let mut broadcast = moq_net::broadcast::Info::new().produce();
 			let consumer = broadcast.consume();
 			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
@@ -2416,6 +2416,8 @@ mod tests {
 			let options = Options {
 				track: Some("audio".to_string()),
 				config: Config::from_input(crate::encode::Codec::Aac, &input),
+				// A group per packet, so the break follows a group that ended whole.
+				join: Duration::from_millis(20),
 				..Options::default()
 			};
 			let stub = crate::encode::backend::stub::install();

@@ -10513,10 +10513,11 @@ pub(super) mod test {
 		import_refused(&mux.out);
 	}
 
-	/// Each PES is one group in presentation order, so the transport, which sends a track's
-	/// newest group first, cannot deliver a PES's frames newest first.
+	/// A PES never splits across groups, so the transport, which sends a track's newest group
+	/// first, cannot deliver a PES's frames newest first: a group closes at the end of the PES that
+	/// brings it to 200 ms, here the fourth 64 ms PES, though the join falls inside it.
 	#[tokio::test(start_paused = true)]
-	async fn aac_pes_is_one_group() {
+	async fn aac_groups_close_at_a_pes_end() {
 		const AAC_PID: u16 = 0x0060;
 		// 1024 samples at 48 kHz, in 90 kHz ticks.
 		const AAC_FRAME: u64 = 1024 * 90_000 / 48_000;
@@ -10524,10 +10525,10 @@ pub(super) mod test {
 			out: synth_pmt(&[(StreamType::AdtsAac, AAC_PID)], false),
 			..Default::default()
 		};
-		for pes in 0..2u8 {
+		for pes in 0..5u8 {
 			let mut payload = Vec::new();
 			for i in 0..3 {
-				payload.extend_from_slice(&adts_frame(17, 0xA0 | (pes << 4) | i));
+				payload.extend_from_slice(&adts_frame(17, (0x10 * (pes + 1)) | i));
 			}
 			let cc = mux.cc(AAC_PID);
 			let pts = 90_000 + u64::from(pes) * 3 * AAC_FRAME;
@@ -10552,7 +10553,13 @@ pub(super) mod test {
 			}
 			groups.push(fills);
 		}
-		assert_eq!(groups, [vec![0xA0, 0xA1, 0xA2], vec![0xB0, 0xB1, 0xB2]]);
+		assert_eq!(
+			groups,
+			[
+				vec![0x10, 0x11, 0x12, 0x20, 0x21, 0x22, 0x30, 0x31, 0x32, 0x40, 0x41, 0x42],
+				vec![0x50, 0x51, 0x52],
+			]
+		);
 	}
 
 	/// A frame without a PTS is stamped by the producer, which checks only where groups start, so
