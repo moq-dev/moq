@@ -4365,6 +4365,59 @@ for (const [switched, widened] of [
 	});
 }
 
+// Mirrors the Rust `a_fronts_held_group_waits_for_a_time_start_that_may_place_at_it`.
+for (const placed of [2n, 4n]) {
+	test(`a front's held group waits for a time start that may place at it (placed at ${placed})`, async () => {
+		install(new Manual());
+		const front = new Front();
+		const a = new BroadcastProducer();
+		const ta = defined(a.createTrack("seq", { ...INFO, timescale: Timescale.MILLI }));
+		const write = (key: bigint) => {
+			const group = ta.createGroup(key);
+			group.writeFrame({ payload: enc.encode(`${key}`), timestamp: Timestamp.fromMillis(Number(key)) });
+			group.finish();
+		};
+		hooks.receiveTrack(ta);
+		front.serve(a.consume());
+		const ordered = front.consumer
+			.track("seq")
+			.subscribe(withMax({ delay: { max: null } }))
+			.ordered();
+		const read = (most = Number.POSITIVE_INFINITY) => {
+			const out: string[] = [];
+			for (let item = out.length < most ? ordered.tryNextItem() : undefined; item; ) {
+				out.push(item.kind === "group" ? `group ${item.group.start}` : `gap ${item.start}..${item.end}`);
+				item = out.length < most ? ordered.tryNextItem() : undefined;
+			}
+			return out;
+		};
+		try {
+			write(0n);
+			hooks.dropTrackGroups(ta, 1n, 2n, { error: new StreamError(StreamCode.NotFound) });
+			write(2n);
+			await settle();
+			// Group 2 is held behind the gap.
+			expect(read(2)).toEqual(["group 0", "gap 1..2"]);
+			ordered.update(withMax({ delay: { max: null }, ranges: [{ start: 5n }] }));
+			await settle();
+			expect(read()).toEqual([]);
+			hooks.timeStarts(ta, [[5n, placed]]);
+			await settle();
+			if (placed === 2n) expect(read()).toEqual(["group 2"]);
+			else {
+				ta.skipGroups(3n, 4n);
+				write(4n);
+				await settle();
+				expect(read()).toEqual(["group 4"]);
+			}
+		} finally {
+			ordered.close();
+			front.consumer.close();
+			a.close();
+		}
+	});
+}
+
 for (const resolution of ["arrival", "drop", "other copy", "budget"] as const) {
 	test(`an ordered resumed reader keeps an older copy's owed hole until ${resolution}`, async () => {
 		const clock = new Manual();

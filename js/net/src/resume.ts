@@ -2367,6 +2367,12 @@ class Reader implements ResumeSource {
 		return this.#window().runs(start, end);
 	}
 
+	// The reader's own window, synced, as `runs` reads it. Mirrors the Rust `Resume::with_window`.
+	window(): Window {
+		this.sync();
+		return this.#window();
+	}
+
 	// The serving copy's runs leave out the keys below a time start it still waits to place, so its
 	// barrier holds a gap the group containing that start may lie below.
 	gapHeld(at: bigint, end: bigint): boolean {

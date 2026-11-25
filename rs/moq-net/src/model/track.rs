@@ -12952,25 +12952,26 @@ impl Subscriber {
 
 	/// What an ordered read does with group `key`, held behind a gap and ending at time `end`
 	/// if known, judged on one sync of the ranges so an answer landing midway can't pass a group
-	/// they cover, or hand one out past a refusal. A resumed reader's window counts a range not
-	/// yet placed as pending, so its runs cover the group already.
+	/// they cover, or hand one out past a refusal.
 	pub(crate) fn held(&mut self, key: u64, end: Option<u64>) -> Held {
 		let bounds = self.bounds();
 		let within = bounds.contains(key);
 		let from = key.max(bounds.start);
+		// A live join still waiting on a first group names every key, so it places nothing yet.
+		let judge = |window: &subscription::Window| {
+			let next = (!window.is_pending()).then(|| window.runs(from).next().map(|run| *run.start()));
+			(next.flatten(), within && window.may_hold(key, end))
+		};
 		let (next, may_hold) = match &mut self.inner {
 			Inner::Plain(cursor) => {
 				cursor.sync();
 				if let Some(err) = cursor.filter.refused.clone() {
 					return Held::Refused(err);
 				}
-				let window = &cursor.filter.window;
-				(
-					window.runs(from).next().map(|run| *run.start()),
-					within && window.may_hold(key, end),
-				)
+				judge(&cursor.filter.window)
 			}
-			Inner::Resume(resume, _) => (resume.runs(from).first().map(|run| *run.start()), false),
+			// Its own window, which spans every copy, places a range once a copy does.
+			Inner::Resume(resume, _) => resume.with_window(judge),
 		};
 		match next.filter(|start| bounds.end.is_none_or(|cap| *start < cap)) {
 			Some(start) if within && start == key => Held::Keep,
@@ -13830,13 +13831,13 @@ impl Ordered {
 				Some(item) => Poll::Ready(Ok(Some(item))),
 				None => Poll::Pending,
 			},
-			// Every gap is returned before the end.
+			// Every gap is returned before the end, but none past a group still held.
 			Poll::Ready(end) => match self.lowest_gap() {
-				Some((at, span)) => {
+				Some((at, span)) if !self.held_below(span.start) => {
 					let resume = span.end;
 					Poll::Ready(Ok(Some(self.take_gap(at, span, resume))))
 				}
-				None => Poll::Ready(end.map(|_| None)),
+				_ => Poll::Ready(end.map(|_| None)),
 			},
 		}
 	}
@@ -13847,24 +13848,30 @@ impl Ordered {
 			let key = group.start;
 			// A range moved off it with nothing in range above waits for the range to widen
 			// again, and the read waits or ends as it does for capped ranges.
-			let mut parked = false;
+			// What parking on the cursor found: `Some(ended)` once it parked or ended.
+			let mut parked: Option<bool> = None;
 			loop {
 				match self.inner.held(key, group.end()) {
 					Held::Keep => return Poll::Ready(Ok(Some(*group))),
 					// Neither handed out nor passed until the range places: it may or may not name
-					// it, and the read never goes back.
-					Held::Placing if parked => {
+					// it, and the read never goes back. A read that ended keeps it, as the buffer
+					// keeps a group past the cap, for the ranges or bounds to judge again.
+					Held::Placing if let Some(ended) = parked => {
 						self.held = Some(group);
-						return Poll::Pending;
+						return match ended {
+							true => Poll::Ready(Ok(None)),
+							false => Poll::Pending,
+						};
 					}
 					Held::Placing => {
-						// Parked on whatever the cursor waits on, refusing every group past it,
-						// then judged again, so a placing meanwhile is not missed.
+						// Parked on whatever the cursor waits on, refusing every group past it, and
+						// on the group finishing, whose end may rule the range out, then judged
+						// again, so a change meanwhile is not missed.
+						let _ = group.poll_closed(waiter);
 						let admit = (ops::Bound::Unbounded, ops::Bound::Excluded(key));
 						match self.inner.poll_group_in(true, admit, waiter) {
-							Poll::Pending => parked = true,
-							// Nothing more lands to place it: as it stood when read, it is handed out.
-							Poll::Ready(Ok(None)) => return Poll::Ready(Ok(Some(*group))),
+							Poll::Pending => parked = Some(false),
+							Poll::Ready(Ok(None)) => parked = Some(true),
 							// One below it goes first, as the read never goes back.
 							Poll::Ready(Ok(Some(lower))) => {
 								self.held = Some(group);
@@ -13986,8 +13993,7 @@ impl Ordered {
 	/// waiting below its end may resolve to a group below it.
 	fn next_gap(&mut self, waiter: &kio::Waiter) -> Option<Item> {
 		let (_, span) = self.lowest_gap()?;
-		// A group still held lies below it, as the read handing it out or passing it settles.
-		if self.held.as_ref().is_some_and(|held| held.start < span.start) {
+		if self.held_below(span.start) {
 			return None;
 		}
 		if self.inner.poll_gap_held(self.at, span.end, waiter).is_pending() {
@@ -13997,6 +14003,12 @@ impl Ordered {
 		let ready = span.start <= self.at || self.inner.next_in_range(self.at).is_none_or(|owed| owed >= span.start);
 		let resume = span.end;
 		ready.then(|| self.take_gap(at, span, resume))
+	}
+
+	/// Whether a group still held lies below `key`: what lies past it waits for the read to
+	/// hand it out or pass it, since the read never goes back.
+	fn held_below(&self, key: u64) -> bool {
+		self.held.as_ref().is_some_and(|held| held.start < key)
 	}
 
 	/// A gap as an item, which the read has now moved past.
@@ -18710,6 +18722,88 @@ mod test {
 		);
 	}
 
+	/// A held group waiting on a time start stays held, rather than handed out, when the read
+	/// reaches its cap: the start may still place past it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_held_group_waiting_on_a_time_start_stays_held_at_the_reads_cap() {
+		let mut producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		let mut ordered = producer
+			.subscribe(Subscription::default().with_max(None))
+			.ordered()
+			.with_range(0..3);
+		write_group(&producer, 0);
+		producer.drop_groups(1..2, StreamError::NotFound);
+		write_group(&producer, 2);
+		assert_eq!(held_next(&mut ordered), Some(Ok(0)));
+		assert_eq!(held_next(&mut ordered), Some(Err(1..2)));
+		ordered.update(from_time(5)).unwrap();
+		// Past the cap, so the read ends there.
+		producer.finish_at(Position { group: 10, frame: 0 }).unwrap();
+		assert!(
+			matches!(ordered.next_item().now_or_never(), Some(Ok(None))),
+			"group 2 is not handed out"
+		);
+	}
+
+	/// A held group waiting on a time start wakes the read when it finishes at an end the
+	/// start lies past.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_held_group_finishing_wakes_a_read_waiting_on_a_time_start() {
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		let mut ordered = producer.subscribe(Subscription::default().with_max(None)).ordered();
+		write_group(&producer, 0);
+		producer.drop_groups(1..2, StreamError::NotFound);
+		let mut group = producer.create_group(group::Info { start: 2 }).unwrap();
+		group
+			.write_frame(Timestamp::from_millis(2).unwrap(), &b"x"[..])
+			.unwrap();
+		assert_eq!(held_next(&mut ordered), Some(Ok(0)));
+		assert_eq!(held_next(&mut ordered), Some(Err(1..2)));
+		ordered.update(from_time(5)).unwrap();
+		let woken = Arc::new(AtomicBool::new(false));
+		let waiter = kio::Waiter::new(futures::task::waker(Arc::new(FlagWake(woken.clone()))));
+		assert!(ordered.poll_next_item(&waiter).is_pending());
+		group.finish_at(3).unwrap();
+		assert!(woken.load(Ordering::SeqCst), "its end rules the start out");
+	}
+
+	/// A refusal keeps a held group ahead of every gap past it, so the read stays in key order
+	/// once the ranges stop refusing.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_refusal_keeps_a_held_group_ahead_of_a_later_gap() {
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		let mut ordered = producer.subscribe(Subscription::default().with_max(None)).ordered();
+		write_group(&producer, 0);
+		producer.drop_groups(1..2, StreamError::NotFound);
+		write_group(&producer, 2);
+		assert_eq!(held_next(&mut ordered), Some(Ok(0)));
+		assert_eq!(held_next(&mut ordered), Some(Err(1..2)));
+		producer.drop_groups(6..7, StreamError::NotFound);
+		let both = Subscription::default()
+			.with_ranges([0, 5].map(|time| Range {
+				start: crate::track::Start::Time(time),
+				end: None,
+			}))
+			.with_max(None);
+		ordered.update(both).unwrap();
+		producer.refuse_time(5, Error::NotFound);
+		assert!(
+			matches!(ordered.next_item().now_or_never(), Some(Err(Error::NotFound))),
+			"not the gap past group 2"
+		);
+		ordered.update(from_time(0)).unwrap();
+		assert_eq!(held_next(&mut ordered), Some(Ok(2)));
+	}
+
 	/// A group held behind a gap is passed once an update's time start, still waiting, lies
 	/// at or past where the group is known to end: it falls in a later group.
 	#[test]
@@ -18773,6 +18867,17 @@ mod test {
 		producer.skip_groups(3..10);
 		write_group(&producer, 10);
 		assert_eq!(held_next(&mut ordered), Some(Ok(10)));
+	}
+
+	/// A subscription of one range starting at `time`, held without a max delay.
+	#[cfg(feature = "async")]
+	fn from_time(time: u64) -> Subscription {
+		Subscription::default()
+			.with_ranges([Range {
+				start: crate::track::Start::Time(time),
+				end: None,
+			}])
+			.with_max(None)
 	}
 
 	/// The ordered read's next item now: a group's start, a gap's range, or `None` while it waits.

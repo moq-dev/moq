@@ -4183,7 +4183,6 @@ impl Consumer {
 
 	/// Resolves once the group's outcome is final, wherever this cursor is: `Ok` once
 	/// finished, or the abort error.
-	#[cfg(feature = "async")]
 	pub(crate) fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
 		self.cursor.poll(waiter, |state| state.poll_outcome())
 	}

@@ -5991,8 +5991,16 @@ export class Subscriber {
 	// the caller disposes the losers after whichever source wakes it. A declared end wakes it
 	// too, so a publisher can forward the end before the live edge reaches it.
 	#groupChanged(fn: () => void): Dispose {
+		// A group an ordered read holds finishing may rule out the range it waits on.
+		const held = this.#items?.held;
+		const finished = held ? [hooks.groupFinished(held).changed(fn)] : [];
 		if (this.#resume) {
-			const resumed = [this.#resume.changed(fn), this.#cursor.changed(fn), this.#state.closed.changed(fn)];
+			const resumed = [
+				this.#resume.changed(fn),
+				this.#cursor.changed(fn),
+				this.#state.closed.changed(fn),
+				...finished,
+			];
 			return () => {
 				for (const close of resumed) close();
 			};
@@ -6025,6 +6033,7 @@ export class Subscriber {
 			this.#state.end.changed(fn),
 			this.#state.received.changed(fn),
 			this.#state.owed.changed(fn),
+			...finished,
 		];
 		if (this.#state.waitingOrdered)
 			dispose.push(this.#state.timelineChanged.changed(fn), this.#wall.revision.changed(fn));
@@ -6110,10 +6119,13 @@ export class Subscriber {
 				this.#fold(this.#delivered.runEnd(0n) ?? 0n);
 				return read;
 			}
+			// Every gap goes out before the end, but none past a group still held.
 			case "done":
 			case "error": {
 				const lowest = this.#lowestGap(items);
-				if (lowest) return this.#takeGap(items, lowest.index, lowest.span, lowest.span.end);
+				if (lowest && !(items.held && items.held.start < lowest.span.start)) {
+					return this.#takeGap(items, lowest.index, lowest.span, lowest.span.end);
+				}
 				return read;
 			}
 			case "drop":
@@ -6152,18 +6164,34 @@ export class Subscriber {
 			// Settled first, so a range the groups or an upstream answer placed since counts where it
 			// placed. A refused lookup fails every read until the ranges change, this one included,
 			// keeping the group for them to judge afresh.
-			const refused = this.#settle();
-			if (refused) {
-				items.held = held;
-				return { kind: "error", error: refused };
-			}
-			if (this.#covered(held.start, held.start + 1n).length > 0) return { kind: "group", group: held };
+			//
 			// A range still to be placed may come to hold it: neither handed out nor passed until it
 			// places, since it may or may not name it and the read never goes back. Whatever places it
-			// moves the window, which wakes the read.
-			if (this.#mayHold(held.start, held.end)) {
-				items.held = held;
-				return { kind: "idle" };
+			// moves the window, and the group finishing may rule it out, either waking the read. The
+			// read ending may place it too, so it is judged again then; still unplaced, it stays held,
+			// as the buffer keeps a group past the cap, for the ranges or bounds to judge again.
+			let ended: Recv | undefined;
+			for (;;) {
+				const refused = this.#settle();
+				if (refused) {
+					items.held = held;
+					return { kind: "error", error: refused };
+				}
+				// A live join still waiting on a first group names every key, so it places nothing yet.
+				const window = this.#resume ? this.#resume.window() : this.#window;
+				if (!window.pending && this.#covered(held.start, held.start + 1n).length > 0) {
+					return { kind: "group", group: held };
+				}
+				if (!this.#mayHold(held.start, held.end)) break;
+				if (ended) {
+					items.held = held;
+					return ended;
+				}
+				ended = this.#heldEnded();
+				if (!ended) {
+					items.held = held;
+					return { kind: "idle" };
+				}
 			}
 			// The bounds moved off it. With nothing they cover above, it waits for them to widen again,
 			// still polling the cursor so the read sees the track or itself end; otherwise the read
@@ -6183,12 +6211,29 @@ export class Subscriber {
 	}
 
 	// Whether a range not yet placed may still come to hold `key`, which ends at time `end` if known,
-	// within the bounds. A resumed reader's window counts such a range as pending, so #covered covers
-	// the key already. Mirrors the Rust `Subscriber::may_hold`.
+	// within the bounds. A resumed reader asks its own window, which places a range once a copy does.
+	// Mirrors the Rust `Subscriber::held`.
 	#mayHold(key: bigint, end: bigint | undefined): boolean {
 		const cursor = this.#cursor.peek();
 		if (key < cursor.start || (cursor.end !== undefined && key >= cursor.end)) return false;
-		return !this.#resume && this.#window.mayHold(key, end);
+		return (this.#resume ? this.#resume.window() : this.#window).mayHold(key, end);
+	}
+
+	// How a read waiting on a held group ends with nothing past it to read: the track failing or
+	// closing, or the read reaching its cap or the track's end. Undefined while it may go on, as the
+	// Rust held read finds through its cursor.
+	#heldEnded(): Recv | undefined {
+		const closed = this.#state.closed.peek();
+		if (closed instanceof Error) return { kind: "error", error: closed };
+		if (closed !== undefined) return { kind: "done" };
+		if (this.#resume) return undefined;
+		const cursor = this.#cursor.peek();
+		const start = max(cursor.start, this.#nextKey);
+		const end = this.#state.end.peek()?.at;
+		if ((cursor.end !== undefined && start >= cursor.end) || (end !== undefined && start >= finalKey(end))) {
+			return { kind: "done" };
+		}
+		return undefined;
 	}
 
 	// The parts of `[start, end)` this reader's ranges and bounds cover now.

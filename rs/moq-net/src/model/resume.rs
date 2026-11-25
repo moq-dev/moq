@@ -1540,6 +1540,11 @@ impl Subscriber {
 		self.reader().window().runs(from).collect()
 	}
 
+	/// Read the reader's own window, synced, as [`Self::runs`] does.
+	pub(super) fn with_window<R>(&self, read: impl FnOnce(&Window) -> R) -> R {
+		read(self.reader().window())
+	}
+
 	/// Whether `accounted` holds every group the reader's bounded ranges name from `from`
 	/// up to `cap`; see [`track::Subscriber::covered`].
 	pub(super) fn covered(&self, from: u64, cap: Option<u64>, accounted: &impl Accounted) -> bool {
@@ -8237,6 +8242,66 @@ mod test {
 			}
 			write(&a, 999);
 			assert_eq!(read(&mut ordered), ["group 999", "gap 1000..1500"], "{case}");
+		}
+	}
+
+	/// A front's ordered read holding a group behind a gap waits while an update's time start
+	/// may still place at it, then hands it out if the start lands at it, else passes it.
+	/// Mirrors the plain `a_held_group_waits_for_a_time_start_that_may_place_at_it`.
+	#[test]
+	fn a_fronts_held_group_waits_for_a_time_start_that_may_place_at_it() {
+		for placed in [2, 4] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = received_copy();
+			a.anchored();
+			routes.serve(a.consume());
+			let mut ordered = logical
+				.consume()
+				.subscribe(Subscription::default().with_max(None))
+				.now_or_never()
+				.unwrap()
+				.unwrap()
+				.ordered();
+			// Up to `most` items now.
+			let take = |ordered: &mut track::Ordered, most: usize| -> Vec<String> {
+				let mut items = Vec::new();
+				while items.len() < most
+					&& let Poll::Ready(Ok(Some(item))) = ordered.poll_next_item(&kio::Waiter::noop())
+				{
+					items.push(match item {
+						track::Item::Group(group) => format!("group {}", group.start),
+						track::Item::Gap { range, .. } => format!("gap {range:?}"),
+					});
+				}
+				items
+			};
+			let read = |ordered: &mut track::Ordered| take(ordered, usize::MAX);
+			write(&a, 0);
+			a.drop_groups(1..2, StreamError::NotFound);
+			write(&a, 2);
+			// Group 2 is held behind the gap.
+			assert_eq!(take(&mut ordered, 2), ["group 0", "gap 1..2"], "placed at {placed}");
+			let start = crate::track::Range {
+				start: crate::track::Start::Time(5),
+				end: None,
+			};
+			ordered
+				.update(Subscription::default().with_ranges([start]).with_max(None))
+				.unwrap();
+			assert_eq!(
+				read(&mut ordered),
+				Vec::<String>::new(),
+				"placed at {placed}: group 2 may contain time 5"
+			);
+			a.time_starts([(5, Some(placed))]);
+			if placed == 2 {
+				assert_eq!(read(&mut ordered), ["group 2"]);
+			} else {
+				a.skip_groups(3..4);
+				write(&a, 4);
+				assert_eq!(read(&mut ordered), ["group 4"]);
+			}
 		}
 	}
 

@@ -34,7 +34,7 @@ import type {
 } from "./track.ts";
 import { max, min } from "./util/key.ts";
 import * as Varint from "./varint.ts";
-import type { Budget, Holdings, Resolved } from "./window.ts";
+import type { Budget, Holdings, Resolved, Window } from "./window.ts";
 import type { Advertised, Advertisements } from "./wire.ts";
 
 /** A null {@link Live.max} in milliseconds, which the model holds as the largest value every peer can read. */
@@ -714,6 +714,8 @@ export interface ResumeSource {
 	joinStart(placed: bigint, budget: number): bigint;
 	/** The runs of `[start, end)` the reader's ranges name, across every copy. */
 	runs(start: bigint, end: bigint): Run[];
+	/** The reader's own window, which spans every copy, synced. */
+	window(): Window;
 	/** Whether a time start the serving copy still waits to place holds back a gap; see `hooks.gapHeld`. */
 	gapHeld(at: bigint, end: bigint): boolean;
 	/** Whether a route's copy serves the reader now. */
@@ -1363,6 +1365,8 @@ export const hooks: {
 	 * whether the read goes on past a short close, leaving that to the reader. Assigned by `group.ts`.
 	 */
 	groupClosed: (group: GroupConsumer) => GetPromise<Error | null>;
+	/** Settles once the group's producer closes it, read or not: when its {@link GroupConsumer.end} is known. Assigned by `group.ts`. */
+	groupFinished: (group: GroupConsumer) => GetPromise<Error | null>;
 	/** Settles once the reader releases the group (`close` or an abort), however far it read. */
 	groupReleased: (group: GroupConsumer) => Promise<void>;
 	/** Whether a group reader still reads the copy it was mirrored from, not one its recovery moved it to. */
@@ -1852,6 +1856,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	groupClosed: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupFinished: () => {
 		throw new Error("group.ts not loaded");
 	},
 	readsMirrored: () => {

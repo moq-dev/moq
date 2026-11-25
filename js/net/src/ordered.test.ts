@@ -547,6 +547,24 @@ for (const placed of [2n, 4n]) {
 	});
 }
 
+test("a held group waiting on a time start stays held when the read reaches its cap", async () => {
+	const producer = receivedTrack();
+	const ordered = producer
+		.subscribe(withMax({ delay: { max: null } }))
+		.withRange({ end: { excluded: 3n } })
+		.ordered();
+	put(producer, 0n, false);
+	drop(producer, 1n, 2n);
+	put(producer, 2n, false);
+	expect(ordered.tryNextItem()?.group?.start).toBe(0n);
+	expect(ordered.tryNextItem()).toMatchObject({ kind: "gap", start: 1n, end: 2n });
+	ordered.update(withMax({ delay: { max: null }, ranges: [{ start: 5n }] }));
+	const next = ordered.nextItem();
+	// Past the cap: group 2 stays held, since the start may still place past it.
+	producer.finishAt({ group: 10n, frame: 0 });
+	expect(await next).toBeUndefined();
+});
+
 // Mirrors the Rust `a_held_group_a_waiting_time_start_lies_past_is_passed`.
 test("a group held behind a gap is passed once an update's waiting time start lies past its end", () => {
 	const producer = receivedTrack();
