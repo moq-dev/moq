@@ -3688,8 +3688,14 @@ impl Reader {
 			})
 		});
 		drop(taking);
+		// Ranges an edit added are walked only from their own starts, which rechecks none of the
+		// groups below: a watch set there stands until a walk of the whole route renews it.
+		let partial = matches!(resumed_by, Resumed::Ranges(_));
 		for ((copy, left), evicted) in self.copies.iter_mut().zip(left).zip(evicted) {
-			copy.drains = evicted.filter(|_| left);
+			copy.drains = match copy.drains {
+				Some(at) if partial => Some(at),
+				_ => evicted.filter(|_| left),
+			};
 		}
 		// A raised start is asked from its time whatever the local floor, so the backfill
 		// places it, and the group holding it is read once the floor lets it.
@@ -9766,6 +9772,46 @@ mod test {
 			assert!(wake.0.load(std::sync::atomic::Ordering::Relaxed), "debt {debt}");
 			assert_eq!(drain(&mut sub, false), [2], "debt {debt}");
 		}
+	}
+
+	/// A range an edit adds above the resume point rechecks none of the groups below it, so a
+	/// group the switch left to a replaced copy to drain is still asked of the serving route
+	/// once that copy's cache loses it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_range_added_above_the_resume_point_keeps_the_drain_watched() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		write(&a, 0);
+		assert_eq!(drain(&mut sub, false), [0]);
+		write(&a, 1);
+		write(&a, 2);
+		write(&a, 3);
+		let b = copy();
+		routes.serve(b.consume());
+		assert_eq!(peek(&mut sub, false).key(), 1);
+		sub.edit(track::Edit {
+			placed: Default::default(),
+			retire: Vec::new(),
+			add: vec![(
+				1,
+				track::Range {
+					start: crate::track::Start::Time(10),
+					end: None,
+				},
+			)],
+			priority: 0,
+			order: track::Order::default(),
+		})
+		.unwrap();
+		assert_eq!(peek(&mut sub, false).key(), 1);
+		a.evict(2);
+		assert_eq!(drain(&mut sub, false), [1, 3]);
+		write(&b, 2);
+		assert_eq!(drain(&mut sub, false), [2]);
 	}
 
 	/// A replaced copy holding a group without its head gives it up under a bounded window, so
