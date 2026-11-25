@@ -253,7 +253,8 @@ struct Duplicate {
 	/// The copy still arriving, whose readers wait while this holds it.
 	arriving: track::Hold,
 	track: track::Producer,
-	/// Counted already, and kept open while held, since the stream may still carry the group.
+	/// Counted already, but parked while held: the copy it waits on arrives on another stream,
+	/// which holds the end of whatever carries it, so a stall there never holds this one's.
 	reading: Reading,
 }
 
@@ -1467,11 +1468,12 @@ impl GroupRecv {
 		}
 		// A duplicate of a copy still arriving waits, unread, for that copy to settle.
 		let opened: Opened = wait!(Hold => loop {
-			let duplicate = match open.take() {
+			let mut duplicate = match open.take() {
 				Some(Open::Group(opened)) => break Poll::Ready(Ok(opened)),
 				Some(Open::Duplicate(duplicate)) => duplicate,
 				None => break Poll::Ready(Err(Error::Cancel)),
 			};
+			duplicate.reading.park();
 			if let Poll::Ready(err) = self.reader.poll_reset(waiter) {
 				break Poll::Ready(Err(err));
 			}
@@ -1499,7 +1501,11 @@ impl GroupRecv {
 					let Some(entry) = subs.get(&hdr.subscribe) else {
 						break Poll::Ready(Err(Error::Cancel));
 					};
-					let Duplicate { arriving, reading, .. } = duplicate;
+					let Duplicate {
+						arriving, mut reading, ..
+					} = duplicate;
+					// Taking the group, this stream alone holds the end open for it.
+					reading.resume();
 					let reopened = entry.reopen(hdr, self.subscriber.version, reading, self.subscriber.runtime.now());
 					// Released once the group is opened again, so the failed copy's readers
 					// waiting on it find this copy.
@@ -5531,8 +5537,12 @@ mod tests {
 			let waiter = kio::Waiter::noop();
 			assert!(duplicate.poll_serve(&waiter).is_pending(), "first fails: {first_fails}");
 			assert_eq!(duplicate.state.name(), "Hold", "first fails: {first_fails}");
-			// Counted and holding the end open while it waits, since it may carry the group.
+			// Counted, but not holding the end open while it waits, so the end settles however
+			// long the stream of the copy it waits on stalls.
 			assert_eq!(tail.read().streams(), 1);
+			assert!(!tail.read().is_reading(), "first fails: {first_fails}");
+			let mut settle = Settle::new(&clock, tail.consume());
+			assert!(settle.poll(&waiter, |tail| tail.covers(3..4)).is_ready());
 
 			let mut original = reader.assert_group();
 			let frame = original.read_frame().await.unwrap().unwrap();

@@ -1787,6 +1787,54 @@ test("a drop during a duplicate wait lets the end give up on a stream that never
 	}
 });
 
+// Lite-07: a Group Stream waiting unread on a copy of its group that another stream delivers, such
+// as a recovery's, does not hold the end: that copy's stream holds the end of whatever carries it,
+// so a stall there never pins this subscription's. Once that copy fails, this stream takes the group
+// and holds the end while it reads.
+test("a duplicate wait does not hold the end", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, toHop(1n));
+	type Entry = { track: Producer; tail: { reading: boolean } };
+	let entry: Entry | undefined;
+	const internal = subscriber as unknown as {
+		runResponses: (stream: unknown, entry: Entry) => Promise<void>;
+	};
+	const runResponses = internal.runResponses.bind(internal);
+	const responses = spyOn(internal, "runResponses").mockImplementation((stream, captured) => {
+		entry = captured;
+		return runResponses(stream, captured);
+	});
+	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version, 1000);
+		const request = await opened(1);
+		await request.reading;
+		await respond(request, version, [{ start: answer(version, 0n) }]);
+		if (!entry) throw new Error("no subscription");
+
+		// A copy of group 0 this subscription's tail does not count, still arriving.
+		const other = hooks.receiveGroup(entry.track, { start: 0n, offset: 0 });
+		const duplicate = handStream(version);
+		duplicate.write(await liteFrame(0, new Uint8Array([1])));
+		const running = subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), duplicate.reader);
+		await drainReactions();
+		expect(entry.tail.reading).toBe(false);
+
+		other.abort(new StreamError(StreamCode.Cancel));
+		await drainReactions();
+		expect(entry.tail.reading).toBe(true);
+		duplicate.finish();
+		await running;
+		expect(entry.tail.reading).toBe(false);
+	} finally {
+		responses.mockRestore();
+		track.close();
+		subscriber.close();
+	}
+});
+
 // Lite-07: a header that arrives after the grace gave up on its gap is covered by the tail, but
 // no drop accounts for it, so its stream is still delivering and holds the end until it is read.
 test("a stream whose gap the grace gave up on still holds the end", async () => {
