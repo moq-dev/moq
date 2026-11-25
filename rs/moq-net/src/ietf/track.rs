@@ -204,19 +204,18 @@ mod tests {
 	/// Properties.
 	#[test]
 	fn test_track_status_ok_round_trip() {
+		let properties = Properties {
+			unknown: Default::default(),
+			dynamic_groups: false,
+			compress: false,
+			max_cache_duration: Some(std::time::Duration::from_secs(30)),
+			timescale: Some(crate::Timescale::MILLI),
+			priority: Some(7),
+			group_order: Some(GroupOrder::Descending),
+		};
 		let largest = Some(Location { group: 5, object: 2 });
 
 		for version in ALL {
-			let properties = Properties {
-				unknown: Default::default(),
-				dynamic_groups: false,
-				compress: false,
-				max_cache_duration: Some(std::time::Duration::from_secs(30)),
-				timescale: Some(crate::Timescale::MILLI),
-				timestamp_ids: version.timestamp_object_ids(),
-				priority: Some(7),
-				group_order: Some(GroupOrder::Descending),
-			};
 			let msg = TrackStatusOk {
 				largest,
 				properties: properties.clone(),

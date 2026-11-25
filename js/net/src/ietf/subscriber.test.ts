@@ -824,22 +824,19 @@ test("a track without TIMESCALE arrives untimed, even if an object carries a Tim
 	track.close();
 });
 
-test("a received frame's time is Group ID + Object ID - TIMESTAMP_TIE in ID_TIMESCALE", async () => {
-	const { subscriber, track } = await subscribeTrack({
-		version: Version.DRAFT_23,
-		properties: { timescale: Timescale.MICRO },
-	});
+test("a received frame's time is its group's key in the track's TIMESCALE", async () => {
+	const { subscriber, track } = await subscribeTrack({ properties: { timescale: Timescale.MICRO } });
 	expect((await track.info()).timescale).toBe(Timescale.MICRO);
 
-	// LOC's 0x08 (Timescale) = 1 and 0x10 (Timestamp) = 5 are ignored; object 0 gets 7 + 0 = 7,
-	// and object 1 (no properties) gets 7 + 1 = 8.
+	// Property 0x08 (Timescale) = 1 per second, then 0x10 (Timestamp) = 5 as a type delta of 8:
+	// neither is read. The second object carries no properties at all.
 	const objects = new Uint8Array([...encodeStamped([0x08, 1, 0x08, 5]), ...encodeStamped([])]);
-	await subscriber.handleGroup(stampedGroup(7n), new Reader(undefined, objects, Version.DRAFT_23));
+	await subscriber.handleGroup(stampedGroup(7n), new Reader(undefined, objects, VERSION));
 	const group = await track.ordered().nextGroup();
 	for (let i = 0; i < 2; i++) {
 		const frame = await group?.readFrame();
 		expect(frame?.payload).toEqual(new Uint8Array([42]));
-		expect(frame?.timestamp).toEqual(new Timestamp(7 + i, Timescale.MICRO));
+		expect(frame?.timestamp).toEqual(new Timestamp(7, Timescale.MICRO));
 	}
 	expect(track.closed.peek()).toBeUndefined();
 	track.close();

@@ -115,7 +115,7 @@ A Group ends in one of three states:
 
 ## Frame {#frame}
 Frames within a Group are indexed sequentially from `0` in write order, implied by position from `GROUP`'s `Frame Start` (or `FETCH`'s `Frame Start`).
-Each frame carries a monotonic transport timestamp `< 2^61` in the Track's `Timescale` (larger values are a malformed Track).
+Each frame carries a presentation timestamp `< 2^61` in the Track's `Timescale` (larger values are a malformed Track), used by moq-lite for [expiration](#expiration).
 When `Timescale = 0` (scale-less), frames carry no timestamp delta and inherit their Group's start.
 
 Unless a negotiated extension specifies otherwise, a publisher MUST NOT start a Group's frame 0 at or before that of any lower-start Group; a receiver MAY reset violating streams (`STOP_SENDING`) with `TIMESTAMP_MISMATCH`.
@@ -1008,13 +1008,13 @@ GROUP Message {
 ~~~
 FRAME Message {
   Payload Length opt(i),  ; wire payload bytes + 1 (0 = GROUP_END)
-  [Timestamp Delta (i)],  ; unsigned non-negative delta; omitted if Timescale == 0
+  [Timestamp Delta (i)],  ; zigzag-encoded signed delta; omitted if Timescale == 0
   [Inflated Size (i)],    ; present iff Track Compression != none
   Payload (..),
 }
 ~~~
-`Timestamp Delta` is an unsigned non-negative delta in `Timescale` ticks (monotonic decode/transport order): it counts from `Group Start` on the first `FRAME` of a stream (so frame 0's delta is `0`) and from the prior `FRAME`'s timestamp thereafter.
-A frame whose presentation time precedes decode order (B-frames) encodes the composition offset in the media container rather than sending negative transport deltas.
+`Timestamp Delta` is a signed delta in `Timescale` ticks from the prior `FRAME`'s timestamp on this stream; the first `FRAME` of a stream counts from the Group Start (the `GROUP`'s on a Group Stream, the `FETCH`'s on a Fetch Stream), so frame 0's delta is `0`.
+It is zigzag-mapped so small magnitudes of either sign fit in a 1-byte varint: encode `unsigned = (signed << 1) ^ (signed >> 63)` (arithmetic right shift), decode `signed = (unsigned >> 1) ^ -(unsigned & 1)`.
 When compressed, receivers MUST check `Inflated Size` against resource limits before inflating and treat any mismatching inflated length as malformed.
 
 ### GROUP_END {#group-end}
@@ -1023,7 +1023,7 @@ Shares `FRAME`'s leading varint using the reserved value `0`:
 ~~~
 GROUP_END Message {
   Payload Length (i) = 0,
-  End Delta (i),          ; non-negative delta from last stream frame timestamp (or Group Start if empty/scale-less)
+  End Delta (i),          ; non-negative delta from the highest stream frame timestamp (or Group Start if empty/scale-less)
 }
 ~~~
 Publisher FINs immediately after `GROUP_END`; trailing bytes are a malformed Track.
@@ -1094,7 +1094,7 @@ This document has no IANA actions.
 - Replaced Group sequence numbers with timestamp `Group Start` (`< 2^61`; `2^64-1` reserved) and added `GROUP_END` (`Payload Length = 0` followed by `End Delta`) with non-overlapping `[start, End)` group spans.
 - Replaced `SUBSCRIBE` bounds with multi-Range Anchors (`None`, `Time`, `Position`, `Live` with `Min Age`/`Max Age`, `Joined`), `Group Order`, per-Range `SUBSCRIBE_START` (with `Largest`), `SUBSCRIBE_UPDATE` range edits/retuning, half-open `SUBSCRIBE_DROP`/`SUBSCRIBE_SKIP` spans, and `SUBSCRIBE_END.Error Code`; Subscribe Streams remain open until subscriber FIN.
 - Replaced group datagrams with separate datagram Tracks (`0x9` Datagrams Stream: `DATAGRAMS`/`UPDATE`/`INFO`) and typed Track Datagrams (`Type = 0x0`).
-- `FRAME` leads with `Payload Length` (`len + 1`, with `0` marking `GROUP_END`), an unsigned non-negative `Timestamp Delta` (omitted when scale-less, replacing zigzag deltas), and optional `Inflated Size`.
+- `FRAME` leads with `Payload Length` (`len + 1`, with `0` marking `GROUP_END`), a zigzag `Timestamp Delta` (omitted when scale-less), and optional `Inflated Size`.
 - Expiration adds arrival age (sole metric for scale-less tracks) and resets expired Group Streams with `OLD` even after unacknowledged `GROUP_END`.
 - A publisher resets a Group Stream after its `GROUP` message with `RESET_STREAM_AT`, or a `RESET_STREAM` held until the `GROUP` message is acknowledged, and names no such Group in `SUBSCRIBE_DROP`; a publisher whose transport can do neither, such as a browser's WebTransport, still does. A stopped Group Stream is named in `SUBSCRIBE_DROP` only with `EVICTED`, before its `GROUP` message was acknowledged.
 - A reset of the Announce Stream closes the session unless the transport cannot tell the reset from the session closing.

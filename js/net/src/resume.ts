@@ -536,7 +536,7 @@ class Reader implements ResumeSource {
 	 * the route only for the groups still read; see {@link #rerouted}. Holds the serving copy's
 	 * largest then, kept once that copy goes.
 	 */
-	#ended?: { largest?: track.Position; object?: track.Position; timedObject?: track.Position; ended: true };
+	#ended?: { largest?: track.Position; object?: track.Position; ended: true };
 	/**
 	 * Copies of the routes served after the track ended, newest last, subscribed only while a group
 	 * handed out is still read: they continue it off a route that dies, and hand out nothing.
@@ -1905,7 +1905,6 @@ class Reader implements ResumeSource {
 		this.#ended = {
 			largest: serving && hooks.peekLargest(serving.sub).largest,
 			object: serving && hooks.objectLargest(serving.sub),
-			timedObject: serving && hooks.objectLargest(serving.sub, true),
 			ended: true,
 		};
 		this.#shell.close();
@@ -2441,14 +2440,10 @@ class Reader implements ResumeSource {
 		return serving && hooks.bufferedLargest(serving.sub);
 	}
 
-	objectLargest(timed = false): track.Position | undefined {
+	objectLargest(): track.Position | undefined {
 		this.sync();
 		const serving = this.#serving();
-		return serving
-			? hooks.objectLargest(serving.sub, timed)
-			: timed
-				? this.#ended?.timedObject
-				: this.#ended?.object;
+		return serving ? hooks.objectLargest(serving.sub) : this.#ended?.object;
 	}
 
 	largestFinished(position: track.Position): boolean {
@@ -3345,8 +3340,8 @@ export class Front {
 		}
 	}
 
-	largest(name: string, timed?: boolean): track.Position | undefined {
-		return this.#source?.wire.largest(name, timed);
+	largest(name: string): track.Position | undefined {
+		return this.#source?.wire.largest(name);
 	}
 
 	async fetchGroup(name: string, key: bigint, options?: track.FetchGroupOptions): Promise<GroupConsumer> {
@@ -3501,7 +3496,7 @@ class FrontConsumer extends broadcast.Consumer {
 			lister: view.lister,
 			subscribe: (name, options) => front.subscribe(name, options),
 			resolveTrackInfo: (name, hold) => front.resolveTrackInfo(name, hold),
-			largest: (name, timed) => front.largest(name, timed),
+			largest: (name) => front.largest(name),
 			fetchGroup: (name, key, options) => front.fetchGroup(name, key, options),
 		});
 	}

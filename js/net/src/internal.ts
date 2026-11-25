@@ -527,10 +527,6 @@ export interface ReadGroupFrame {
 	inflated?: number;
 	/** The payload to stream instead of `frame.payload`, for a frame written in pieces. */
 	chunks?: FrameConsumer;
-	/** The frame's moq-timestamp Object ID (DTS offset from group start), assigned at write time. */
-	timedOid?: bigint;
-	/** The frame's monotonic clamped timestamp in the track's timescale, assigned at write time. */
-	monoTs?: bigint;
 }
 
 /**
@@ -746,7 +742,7 @@ export interface ResumeSource {
 	/** The serving copy's newest buffered frame, which a wire answer names as its edge. */
 	bufferedLargest(): Position | undefined;
 	/** The serving copy's newest actual object, including metadata retained past cache eviction. */
-	objectLargest(timed?: boolean): Position | undefined;
+	objectLargest(): Position | undefined;
 	/** The serving copy's largest location now, and whether it can still advance. */
 	peekLargest(): { largest?: Position; ended: boolean };
 	/** Whether `position` is the serving copy's largest and its group ended there. */
@@ -1014,7 +1010,7 @@ export const hooks: {
 	 */
 	stageRequest: (request: Request, info: InfoInit) => StagedTrack;
 	/** The newest frame a producer's cache holds, read without subscribing; assigned by `track.ts`. */
-	cachedLargest: (producer: Producer, timed?: boolean) => Position | undefined;
+	cachedLargest: (producer: Producer) => Position | undefined;
 	/** A producer's committed {@link Info}, or undefined before it is accepted; assigned by `track.ts`. */
 	acceptedInfo: (producer: Producer) => Info | undefined;
 	/** Count an info lookup as the track's demand until the returned release, called once, runs; assigned by `track.ts`. */
@@ -1063,7 +1059,7 @@ export const hooks: {
 	/** The newest frame still buffered for a subscriber; assigned by `track.ts`. */
 	bufferedLargest: (subscriber: Subscriber) => Position | undefined;
 	/** The newest actual object received or reported upstream, independent of cache retention. */
-	objectLargest: (subscriber: Subscriber, timed?: boolean) => Position | undefined;
+	objectLargest: (subscriber: Subscriber) => Position | undefined;
 	/** Call `fn` with a group's frame count now and on every change; assigned by `group.ts`. */
 	groupProgress: (group: GroupProducer, fn: (total: number) => void) => Dispose;
 	/**
@@ -1337,17 +1333,6 @@ export const hooks: {
 	chargeGroup: (group: GroupProducer, charge: Charge | undefined) => void;
 	/** Frame count without creating a read handle. */
 	groupFrameCount: (group: GroupProducer) => number;
-	groupLastObject: (group: GroupProducer) => number | undefined;
-	/** Wire Object ID immediately past `frameCount` frames in a timed group, or undefined if unknown. */
-	groupOidAfterFrame: (group: GroupConsumer, frameCount: number) => number | undefined;
-	/** Whether a group consumer's underlying group closed cleanly with zero frames. */
-	groupConsumerClosedEmpty: (group: GroupConsumer) => boolean;
-	/** Last wire Object ID (timed or frame ordinal) delivered in a group consumer's underlying group. */
-	groupConsumerLastId: (group: GroupConsumer, timed: boolean) => number | undefined;
-	/** Model frame ordinal corresponding to sparse wire `wireObject` on a finished group, or undefined if unfinished. */
-	groupOrdinalForOid: (group: GroupProducer, wireObject: number) => number | undefined;
-	/** Model frame ordinal for a cached finished group on a track producer, or undefined if absent/unfinished. */
-	producerGroupOrdinalForOid: (producer: Producer, key: bigint, wireObject: number) => number | undefined;
 	/**
 	 * Cap a group at `frames` for a track end inside it, so later writes past it throw.
 	 * Throws `ProtocolViolation` if a frame at or past the cap already exists.
@@ -1835,24 +1820,6 @@ export const hooks: {
 	},
 	groupFrameCount: () => {
 		throw new Error("group.ts not loaded");
-	},
-	groupLastObject: () => {
-		throw new Error("group.ts not loaded");
-	},
-	groupOidAfterFrame: () => {
-		throw new Error("group.ts not loaded");
-	},
-	groupConsumerClosedEmpty: () => {
-		throw new Error("group.ts not loaded");
-	},
-	groupConsumerLastId: () => {
-		throw new Error("group.ts not loaded");
-	},
-	groupOrdinalForOid: () => {
-		throw new Error("group.ts not loaded");
-	},
-	producerGroupOrdinalForOid: () => {
-		throw new Error("track.ts not loaded");
 	},
 	bindGroupTimed: () => {
 		throw new Error("group.ts not loaded");

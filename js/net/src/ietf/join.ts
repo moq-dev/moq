@@ -103,9 +103,9 @@ export class Join {
 		return undefined;
 	}
 
-	/** The head wrote an object; `next` is one past its Object ID (default `state.next + 1`). */
-	wrote(next?: number): void {
-		if (this.#state.kind === "writing") this.#state.next = next ?? this.#state.next + 1;
+	/** The head wrote its next object. */
+	wrote(): void {
+		if (this.#state.kind === "writing") this.#state.next += 1;
 	}
 
 	/**
@@ -188,7 +188,7 @@ export class Join {
 	 * continue, and drops a head that ends somewhere other than where the tail starts, since
 	 * that hole is something the model cannot express.
 	 */
-	async claim(start: number | undefined, suspend?: () => () => void, sparse = false): Promise<Head | undefined> {
+	async claim(start: number | undefined, suspend?: () => () => void): Promise<Head | undefined> {
 		const { kind } = this.#state;
 		if (kind === "pending" || kind === "writing") {
 			const resume = suspend?.();
@@ -202,8 +202,7 @@ export class Join {
 
 		const state = this.#state;
 		if (state.kind !== "ready") return undefined;
-		const mismatch = start !== undefined && (sparse ? start < state.next : start !== state.next);
-		if (mismatch) {
+		if (start !== undefined && start !== state.next) {
 			console.warn(`the head does not meet the live tail: group=${this.key} head=${state.next} tail=${start}`);
 			state.producer.abort(new Error("the head and the live tail do not meet"));
 			this.#transition({ kind: "done" });

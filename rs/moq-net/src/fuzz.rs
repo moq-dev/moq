@@ -128,7 +128,6 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 		properties: properties.then(|| {
 			std::sync::Arc::new(crate::model::object::TrackProperties {
 				version: ietf::Version::Draft22,
-				timestamp_ids: false,
 				values: Vec::new(),
 			})
 		}),
@@ -1201,17 +1200,8 @@ impl LiteSample {
 		match self {
 			Self::Video | Self::Audio => {
 				for (delta, size) in self.frames() {
-					let wire = match version.has_unsigned_timestamps() {
-						true => delta as u64,
-						false => varint::zigzag(delta),
-					};
-					if version.has_length_first() {
-						w.varint(size + 1).unwrap();
-						w.varint(wire).unwrap();
-					} else {
-						w.varint(wire).unwrap();
-						w.varint(size).unwrap();
-					}
+					w.varint(varint::zigzag(delta)).unwrap();
+					w.varint(size).unwrap();
 				}
 			}
 			Self::Group => lite::Group {

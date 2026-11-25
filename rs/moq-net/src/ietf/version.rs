@@ -34,14 +34,6 @@ impl Version {
 		!matches!(self, Self::Draft18 | Self::Draft20 | Self::Draft22)
 	}
 
-	/// Whether timed tracks use `moq-timestamp-03` (`ID_TIMESCALE` 0x40B70, sparse timestamp
-	/// Object IDs, and `TIMESTAMP_TIE` 0x40B72). Earlier drafts keep dense ordinal Object IDs
-	/// and legacy `TIMESCALE` (0x08) as a temporary migration shim for `moq-net-v0.3.24`
-	/// rolling upgrades (delete next bump).
-	pub(crate) fn timestamp_object_ids(self) -> bool {
-		!matches!(self, Self::Draft18 | Self::Draft20 | Self::Draft22)
-	}
-
 	/// The Forward State a message carries: FORWARD as sent, or PAUSED inverted, whichever
 	/// `self` puts on the wire. `None` when the message carried neither.
 	pub(crate) fn forward_state(forward: Option<bool>, paused: Option<bool>) -> Option<bool> {

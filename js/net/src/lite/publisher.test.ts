@@ -1028,8 +1028,8 @@ async function servedSubscription(
 					end = (highest ?? header.key) + endDelta;
 					continue;
 				}
-				const raw = await reader.u62();
-				ts += lengthFirst ? raw : (raw >> 1n) ^ -(raw & 1n);
+				const zigzag = await reader.u62();
+				ts += (zigzag >> 1n) ^ -(zigzag & 1n);
 				times.push(ts);
 				if (highest === undefined || ts > highest) highest = ts;
 				const size = length ?? (await reader.u53());
@@ -1491,9 +1491,9 @@ test("lite-07 ends a finished group with GROUP_END and a closed one with a bare 
 	}
 });
 
-// Lite-07 deltas are unsigned (monotonic), so a bridged group with backwards timestamps clamps
-// non-increasing deltas to 0 and GROUP_END still counts from the highest (now also last) timestamp.
-test("lite-07 clamps backwards timestamps to monotonic deltas and ends from the highest frame", async () => {
+// A lite-07 GROUP_END's End is a delta from the highest frame timestamp the stream carried: B-frames
+// send timestamps backwards, so the highest is not the last.
+test("lite-07 GROUP_END counts from the highest frame of a group with B-frames", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 0n });
 	try {
 		const group = sub.track.createGroup(1000n);
@@ -1501,7 +1501,7 @@ test("lite-07 clamps backwards timestamps to monotonic deltas and ends from the 
 		group.finishAt(1133n);
 		expect(await sub.servedGroup()).toMatchObject({
 			key: 1000n,
-			times: [1000n, 1100n, 1100n, 1100n],
+			times: [1000n, 1100n, 1033n, 1066n],
 			endDelta: 33n,
 			end: 1133n,
 		});

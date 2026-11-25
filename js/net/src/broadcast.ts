@@ -297,9 +297,9 @@ async function resolveTrackInfo(state: BroadcastState, name: string, hold?: Abor
 }
 
 // The newest frame cached for `name`, without subscribing: undefined when nobody serves it yet.
-function largest(state: BroadcastState, name: string, timed = false): track.Position | undefined {
+function largest(state: BroadcastState, name: string): track.Position | undefined {
 	const producer = lookup(state, name);
-	return producer && hooks.cachedLargest(producer, timed);
+	return producer && hooks.cachedLargest(producer);
 }
 
 // Fetch one group as a one-range subscription: the cached group at once, or else one the track's
@@ -424,7 +424,7 @@ export class Producer {
 			localDatagrams: !this.#state.unheld,
 			subscribe: (name, options) => subscribe(this.#state, name, options),
 			resolveTrackInfo: (name, hold) => resolveTrackInfo(this.#state, name, hold),
-			largest: (name, timed) => largest(this.#state, name, timed),
+			largest: (name) => largest(this.#state, name),
 			fetchGroup: (name, key, options) => fetchGroup(this.#state, name, key, options),
 			requested: () => requested(this.#state),
 			datagrams: (name) => datagrams(this.#state, name),
@@ -591,7 +591,7 @@ export class Consumer {
 			localDatagrams: !this.#state.unheld,
 			subscribe: (name, options) => subscribe(this.#state, name, options),
 			resolveTrackInfo: (name, hold) => resolveTrackInfo(this.#state, name, hold),
-			largest: (name, timed) => largest(this.#state, name, timed),
+			largest: (name) => largest(this.#state, name),
 			fetchGroup: (name, key, options) => fetchGroup(this.#state, name, key, options),
 			requested: () => requested(this.#state),
 			datagrams: (name) => datagrams(this.#state, name),

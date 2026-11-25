@@ -67,7 +67,6 @@ fn track_info(timed: bool, compress: bool, draft: Option<ietf::Version>) -> trac
 	info.properties = draft.map(|version| {
 		std::sync::Arc::new(TrackProperties {
 			version,
-			timestamp_ids: timed && version.timestamp_object_ids(),
 			values: Vec::new(),
 		})
 	});

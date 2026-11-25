@@ -32,18 +32,13 @@ pub(crate) struct Clock {
 	prev: u64,
 	/// The highest timestamp a FRAME on this stream carried, which GROUP_END counts from.
 	highest: Option<u64>,
-	/// Whether deltas are unsigned non-negative values (lite-07+) rather than zigzag-encoded
-	/// signed values (lite-05/06).
-	unsigned: bool,
 }
 
 impl Clock {
-	/// A stream of the group starting at `start`. Lite-07 counts the first FRAME's unsigned
-	/// delta from that start, so frame 0's is 0; earlier versions zigzag-encode signed deltas
-	/// from 0.
+	/// A stream of the group starting at `start`. Lite-07 counts the first FRAME's delta from
+	/// that start, so frame 0's is 0; earlier versions count it from 0.
 	pub fn new(version: Version, start: u64) -> Self {
-		let unsigned = version.has_unsigned_timestamps();
-		let prev = match unsigned {
+		let prev = match version.has_group_end() {
 			true => start,
 			false => 0,
 		};
@@ -51,36 +46,21 @@ impl Clock {
 			start,
 			prev,
 			highest: None,
-			unsigned,
 		}
 	}
 
-	/// The wire `Timestamp Delta` of the next FRAME, at `timestamp`, advancing the clock.
-	///
-	/// On lite-07+, deltas are unsigned and non-decreasing; a backwards timestamp (for example,
-	/// bridged from lite-05/06) clamps to 0 so the wire timestamp stays monotonic. Earlier
-	/// versions zigzag-encode a signed delta and return `None` when it does not fit in `i64`.
-	pub fn encode_delta(&mut self, timestamp: u64) -> Option<u64> {
-		if self.unsigned {
-			let delta = timestamp.saturating_sub(self.prev);
-			self.advance(self.prev + delta);
-			Some(delta)
-		} else {
-			let delta: i64 = (timestamp as i128 - self.prev as i128).try_into().ok()?;
-			self.advance(timestamp);
-			Some(crate::coding::varint::zigzag(delta))
-		}
+	/// The `Timestamp Delta` of the next FRAME, at `timestamp`, which it advances to; `None`
+	/// when the delta doesn't fit.
+	pub fn delta(&mut self, timestamp: u64) -> Option<i64> {
+		let delta = (timestamp as i128 - self.prev as i128).try_into().ok()?;
+		self.advance(timestamp);
+		Some(delta)
 	}
 
-	/// The timestamp of the next FRAME, which carries wire `delta`, advancing the clock; `None`
-	/// when it falls outside 64 bits.
-	pub fn decode_delta(&mut self, raw: u64) -> Option<u64> {
-		let timestamp = if self.unsigned {
-			self.prev.checked_add(raw)?
-		} else {
-			let delta = crate::coding::varint::unzigzag(raw);
-			(self.prev as i128 + delta as i128).try_into().ok()?
-		};
+	/// The timestamp of the next FRAME, which carries `delta`, and advances to it; `None` when
+	/// it falls outside 64 bits.
+	pub fn timestamp(&mut self, delta: i64) -> Option<u64> {
+		let timestamp = (self.prev as i128 + delta as i128).try_into().ok()?;
 		self.advance(timestamp);
 		Some(timestamp)
 	}

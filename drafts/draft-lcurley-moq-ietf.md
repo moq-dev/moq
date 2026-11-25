@@ -87,14 +87,14 @@ Each track has one immutable Version.
 The {{moqt}} Track Properties forwarded without interpretation, delta-encoded in ascending ID order using the track Version's varints.
 At most one Immutable Properties block (`0x0b`) may appear, forwarded verbatim in the same encoding.
 
-A message MUST NOT carry more than 64 properties, nor any of the six properties a relay interprets into `TRACK_INFO`: `MAX_CACHE_DURATION` (`0x04`), `DEFAULT_PUBLISHER_PRIORITY` (`0x0e`), `DEFAULT_PUBLISHER_GROUP_ORDER` (`0x22`), `DYNAMIC_GROUPS` (`0x30`), `COMPRESSION` (`0x40B6C`), and `ID_TIMESCALE` (`0x40B70`).
+A message MUST NOT carry more than 64 properties, nor any of the six properties a relay interprets into `TRACK_INFO`: `MAX_CACHE_DURATION` (`0x04`), `TIMESCALE` (`0x08`), `DEFAULT_PUBLISHER_PRIORITY` (`0x0e`), `DEFAULT_PUBLISHER_GROUP_ORDER` (`0x22`), `DYNAMIC_GROUPS` (`0x30`), and `COMPRESSION` (`0x40B6C`).
 Violating either rule is malformed.
 
 Because a relay restates up to five of those from `TRACK_INFO` (never `MAX_CACHE_DURATION`), it forwards at most 58 opaque properties and refuses a track with more as unsupported.
 Dropping understood properties can widen the delta spanning them; a relay also refuses as unsupported any track whose remaining `Property List` does not fit a `TRACK_PROPERTIES` message beside its Version.
 
 Immutable Properties (`0x0b`) MAY still seal an understood property, in which case the relay forwards it in place of restating a mutable copy and MUST NOT restate any key present inside `0x0b`.
-Because the relay acts on `TRACK_INFO`, sealed `ID_TIMESCALE`, `DEFAULT_PUBLISHER_PRIORITY`, `DYNAMIC_GROUPS`, and `COMPRESSION` MUST match `TRACK_INFO` (`DYNAMIC_GROUPS` matching whether `Refresh` is non-zero); a relay refuses a mismatching track as unsupported.
+Because the relay acts on `TRACK_INFO`, sealed `TIMESCALE`, `DEFAULT_PUBLISHER_PRIORITY`, `DYNAMIC_GROUPS`, and `COMPRESSION` MUST match `TRACK_INFO` (`DYNAMIC_GROUPS` matching whether `Refresh` is non-zero); a relay refuses a mismatching track as unsupported.
 Sealed `DEFAULT_PUBLISHER_GROUP_ORDER` and `MAX_CACHE_DURATION` are advisory and forwarded unchanged.
 
 A relay neither processes nor forwards Mandatory Track Properties (`0x4000`–`0x7FFF`), mutable or sealed; a receiver refuses such a track with an unsupported extension error.
@@ -162,7 +162,8 @@ The track's Version also scopes version-dependent property IDs (such as `0x06`, 
 
 ## Timestamps {#timestamps}
 A relay MUST preserve a relayed track's `Timescale` and timestamps across a negotiated hop.
-The `FRAME` timestamp is the object's transport time.
+A nonzero Version identifies a track from {{moqt}}, whose objects take their time from their Group ID in the track's `Timescale`.
+The `FRAME` timestamp is the object's time.
 Any `TIMESTAMP` property (`0x10`) attached by a {{moqt}} publisher stays opaque inside the Property Block and is neither read nor restated.
 
 

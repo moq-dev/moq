@@ -4,18 +4,7 @@ import { Cursor, concat, encodeVarint, Reader, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import { MAX_FRAME_BYTES } from "../util/limits.ts";
 import { FetchHeader } from "./fetch.ts";
-import {
-	decodeFetchObject,
-	decodeGroupGap,
-	decodeObjectProperties,
-	EndOfRange,
-	encodeGroupGap,
-	encodeObjectProperties,
-	Frame,
-	Group,
-	objectTime,
-	timestampObjectId,
-} from "./object.ts";
+import { decodeFetchObject, decodeGroupGap, EndOfRange, encodeGroupGap, Frame, Group, objectTime } from "./object.ts";
 import { Version } from "./version.ts";
 
 const VERSION = Version.DRAFT_18;
@@ -167,97 +156,5 @@ test("an End of Range decodes a 62-bit Object ID and refuses unknown flags", () 
 	});
 	for (const flags of [0x80, 0x10d, 1n << 53n, max]) {
 		expect(() => decodeFetchObject(cursor(flags, 0, 0))).toThrow(ProtocolViolation);
-	}
-});
-
-test("timestampObjectId and objectTime roundtrip monotonic, tied, and backwards timestamps", () => {
-	const group = 1000n;
-	// Monotonic timestamps: no tie emitted.
-	const mono = [1000n, 1033n, 1066n];
-	let prior: bigint | undefined;
-	const monoWire = mono.map((dts) => {
-		const res = timestampObjectId(group, prior, dts);
-		prior = res.id;
-		return res;
-	});
-	expect(monoWire).toEqual([
-		{ id: 0n, tie: 0n },
-		{ id: 33n, tie: 0n },
-		{ id: 66n, tie: 0n },
-	]);
-	for (let i = 0; i < mono.length; i++) {
-		expect(objectTime(Timescale.MILLI, group, monoWire[i].id, monoWire[i].tie)).toEqual(
-			Timestamp.fromMillis(Number(mono[i])),
-		);
-	}
-
-	// Consecutive ties: Object ID advances by 1 and TIMESTAMP_TIE tracks the offset.
-	const tied = [1000n, 1000n, 1000n];
-	prior = undefined;
-	const tiedWire = tied.map((dts) => {
-		const res = timestampObjectId(group, prior, dts);
-		prior = res.id;
-		return res;
-	});
-	expect(tiedWire).toEqual([
-		{ id: 0n, tie: 0n },
-		{ id: 1n, tie: 1n },
-		{ id: 2n, tie: 2n },
-	]);
-	for (let i = 0; i < tied.length; i++) {
-		expect(objectTime(Timescale.MILLI, group, tiedWire[i].id, tiedWire[i].tie)).toEqual(
-			Timestamp.fromMillis(Number(tied[i])),
-		);
-	}
-
-	// Backwards DTS (e.g. bridging from a wire without monotonic DTS): Object ID increments, tie absorbs delta.
-	const backwards = [1000n, 1100n, 1033n];
-	prior = undefined;
-	const backwardsWire = backwards.map((dts) => {
-		const res = timestampObjectId(group, prior, dts);
-		prior = res.id;
-		return res;
-	});
-	expect(backwardsWire).toEqual([
-		{ id: 0n, tie: 0n },
-		{ id: 100n, tie: 0n },
-		{ id: 101n, tie: 68n },
-	]);
-	for (let i = 0; i < backwards.length; i++) {
-		expect(objectTime(Timescale.MILLI, group, backwardsWire[i].id, backwardsWire[i].tie)).toEqual(
-			Timestamp.fromMillis(Number(backwards[i])),
-		);
-	}
-
-	// Tie exceeding Group ID + Object ID is a malformed track.
-	expect(() => objectTime(Timescale.MILLI, 10n, 5n, 16n)).toThrow(StreamError);
-});
-
-test("TIMESTAMP_TIE roundtrips alone and with Prior Group ID Gap, rejecting duplicates", () => {
-	const readProps = (bytes: Uint8Array) => new Cursor(bytes, VERSION).exact(bytes.byteLength, decodeObjectProperties);
-
-	const tieOnly = encodeObjectProperties({ tie: 7n }, VERSION);
-	expect(tieOnly).toBeDefined();
-	if (!tieOnly) throw new Error("expected encoded properties");
-	expect(readProps(tieOnly)).toEqual({ groupGap: undefined, tie: 7n });
-
-	const both = encodeObjectProperties({ groupGap: 3n, tie: 12n }, VERSION);
-	expect(both).toBeDefined();
-	if (!both) throw new Error("expected encoded properties");
-	expect(readProps(both)).toEqual({ groupGap: 3n, tie: 12n });
-
-	// Zero tie is omitted.
-	expect(encodeObjectProperties({ tie: 0n }, VERSION)).toBeUndefined();
-
-	// Inside Immutable Properties (0x0b).
-	const sealed = block(0x40b72n, 9n);
-	expect(readProps(concat([block(0x0b, sealed.byteLength), sealed]))).toEqual({ groupGap: undefined, tie: 9n });
-
-	// Duplicate TIMESTAMP_TIE is malformed.
-	for (const bad of [
-		block(0x40b72n, 1n, 0n, 2n),
-		concat([block(0x0b, sealed.byteLength), sealed, block(0x40b72n - 0x0bn, 2n)]),
-	]) {
-		expect(() => readProps(bad)).toThrow(StreamError);
 	}
 });

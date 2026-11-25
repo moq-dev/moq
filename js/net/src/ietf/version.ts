@@ -69,19 +69,6 @@ export function isDraft23(version: IetfVersion): boolean {
 	}
 }
 
-/**
- * Whether `version` uses draft-lcurley-moq-timestamp's `ID_TIMESCALE (0x40B70)`, sparse
- * timestamp-offset Object IDs, and `TIMESTAMP_TIE (0x40B72)`.
- *
- * Gated to draft-23+ during the v0.3.24 migration window so draft-18..22 peers continue to
- * interoperate using legacy `0x08` + dense ordinal Object IDs.
- *
- * Temporary migration shim: remove once draft-22 peers are retired.
- */
-export function hasTimestampObjectIds(version: IetfVersion): boolean {
-	return isDraft23(version);
-}
-
 export function versionName(v: Version): string {
 	return VERSION_NAMES[v] ?? `unknown(0x${v.toString(16)})`;
 }

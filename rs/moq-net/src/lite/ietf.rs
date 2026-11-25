@@ -323,7 +323,6 @@ impl<'a> Message<'a> for TrackProperties {
 		};
 		let properties = crate::model::object::TrackProperties {
 			version,
-			timestamp_ids: version.timestamp_object_ids(),
 			values: decode_list(r, version)?,
 		};
 		// TRACK_INFO carries these, so a second copy could only contradict it.
@@ -511,7 +510,6 @@ mod tests {
 	fn track_properties_round_trip() {
 		let properties = crate::model::object::TrackProperties {
 			version: Draft::Draft18,
-			timestamp_ids: false,
 			values: vec![
 				Property {
 					id: IMMUTABLE,
@@ -529,7 +527,6 @@ mod tests {
 		// An empty list still names its draft.
 		let bare = crate::model::object::TrackProperties {
 			version: Draft::Draft22,
-			timestamp_ids: false,
 			values: Vec::new(),
 		};
 		let decoded = round_trip(&TrackProperties(Some(Arc::new(bare.clone())))).unwrap();
@@ -551,7 +548,6 @@ mod tests {
 			w.varint(code).unwrap();
 			let list = encode_list(&crate::model::object::TrackProperties {
 				version: Draft::Draft18,
-				timestamp_ids: false,
 				values: values.to_vec(),
 			})
 			.unwrap();
@@ -569,9 +565,9 @@ mod tests {
 		let list: Vec<_> = (0..=max).map(|i| opaque(0x40 + 2 * i)).collect();
 		assert!(decode(&wire(&list[..max as usize], draft18)).is_ok());
 		assert!(decode(&wire(&list, draft18)).is_err(), "more than ingress keeps");
-		// ID_TIMESCALE belongs to TRACK_INFO.
+		// TIMESCALE belongs to TRACK_INFO.
 		assert!(
-			decode(&wire(&[opaque(0x40B70)], draft18)).is_err(),
+			decode(&wire(&[opaque(0x08)], draft18)).is_err(),
 			"an understood property"
 		);
 		assert!(
@@ -608,7 +604,6 @@ mod tests {
 		sealed.extend([0, 1].repeat(count - 1));
 		let msg = TrackProperties(Some(Arc::new(crate::model::object::TrackProperties {
 			version: Draft::Draft18,
-			timestamp_ids: false,
 			values: vec![Property {
 				id: IMMUTABLE,
 				value: Value::Bytes(sealed.into()),
@@ -656,7 +651,6 @@ mod tests {
 			assert_eq!(ingress.unknown.len(), repeats + 1, "{version}");
 			let forwarded = crate::model::object::TrackProperties {
 				version,
-				timestamp_ids: version.timestamp_object_ids(),
 				values: ingress.unknown.clone(),
 			};
 			assert!(forwarded.refused(&crate::track::Info::default()).is_none(), "{version}");
@@ -782,7 +776,6 @@ mod hop_tests {
 	fn draft22(values: Vec<Property>) -> Option<Arc<crate::model::object::TrackProperties>> {
 		Some(Arc::new(crate::model::object::TrackProperties {
 			version: crate::ietf::Version::Draft22,
-			timestamp_ids: false,
 			values,
 		}))
 	}
@@ -1002,14 +995,14 @@ mod hop_tests {
 		}
 	}
 
-	/// A sealed ID_TIMESCALE that contradicts TRACK_INFO is refused across the hop: the relay
+	/// A sealed TIMESCALE that contradicts TRACK_INFO is refused across the hop: the relay
 	/// times frames by TRACK_INFO, while egress would forward the sealed one.
 	#[kio::test]
 	async fn a_sealed_property_must_match_track_info() {
 		for (timescale, ok) in [(1000, true), (900, false), (0, false)] {
 			let mut sealed = Vec::new();
 			let e = &mut Encoder::new(&mut sealed, crate::ietf::Version::Draft22.into());
-			e.varint(0x40B70).unwrap();
+			e.varint(0x08).unwrap();
 			e.varint(timescale).unwrap();
 			let res = subscribe_across(vec![Property {
 				id: IMMUTABLE,

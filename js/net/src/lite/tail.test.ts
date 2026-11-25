@@ -37,9 +37,9 @@ const GRACE = Duration.millis(100);
  */
 function frame(payload: string, version: Version, delta = 0): Uint8Array {
 	const bytes = new TextEncoder().encode(payload);
-	// Every field is under 64, so each is a one-byte varint; lite-05/06 zigzag-encode the delta.
+	// Every field is under 64, so each is a one-byte varint; the delta is zigzagged.
 	if (delta < 0 || delta >= 32) throw new RangeError("a one-byte delta only");
-	if (hasLengthFirst(version)) return new Uint8Array([bytes.byteLength + 1, delta, ...bytes]);
+	if (hasLengthFirst(version)) return new Uint8Array([bytes.byteLength + 1, delta * 2, ...bytes]);
 	return new Uint8Array([delta * 2, bytes.byteLength, ...bytes]);
 }
 

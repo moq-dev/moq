@@ -750,7 +750,6 @@ mod tests {
 				compress: false,
 				max_cache_duration: None,
 				timescale: None,
-				timestamp_ids: false,
 				priority: None,
 				group_order: Some(GroupOrder::Descending),
 			},

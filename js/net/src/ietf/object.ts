@@ -18,9 +18,8 @@ export function statusDefined(status: number): boolean {
 	return status === 0 || status === GROUP_END || status === END_OF_TRACK;
 }
 
-// MOQ Object Property ids. Both are even, so their values are bare varints.
+// MOQ Object Property ids. Prior Group ID Gap is even, so its value is a bare varint.
 const PRIOR_GROUP_ID_GAP = 0x3cn;
-const TIMESTAMP_TIE = 0x40b72n;
 const IMMUTABLE_PROPERTIES = 0x0bn;
 
 // draft-18 adds bit 0x40 (FIRST_OBJECT) to the subgroup header type per spec
@@ -32,72 +31,20 @@ const FIRST_OBJECT_BIT = 0x40;
 const MAX_SAFE_KEY = BigInt(Number.MAX_SAFE_INTEGER);
 
 /**
- * Compute the wire `(id, tie)` for a frame at `dts` in group `groupId` following `prior`
- * (the previous frame's Object ID, if any), per draft-lcurley-moq-timestamp.
+ * A received object's timestamp: its group's `key`, in the track's `timescale` when it declared
+ * one, else {@link Timestamp.unscaled}. Nothing reads time from an object's properties, so every
+ * object of a group shares its start. Throws a `RangeError` for a key no timestamp at that scale holds.
  */
-export function timestampObjectId(
-	groupId: bigint,
-	prior: bigint | undefined,
-	dts: bigint,
-): { id: bigint; tie: bigint } {
-	const minOid = prior === undefined ? 0n : prior + 1n;
-	const desired = dts > groupId ? dts - groupId : 0n;
-	let id = minOid;
-	if (desired > id) id = desired;
-	const tie = groupId + id > dts ? groupId + id - dts : 0n;
-	return { id, tie };
-}
-
-/**
- * A received object's timestamp: `Group ID + Object ID - tie` in the track's `ID_TIMESCALE`
- * when declared (per draft-lcurley-moq-timestamp), else {@link Timestamp.unscaled}.
- */
-export function objectTime(timescale: Timescale | undefined, key: bigint, objectId = 0n, tie = 0n): Timestamp {
+export function objectTime(timescale: Timescale | undefined, key: bigint): Timestamp {
 	if (timescale === undefined) return Timestamp.unscaled(key);
-	const dts = key + objectId - tie;
-	if (dts < 0n) {
-		throw new StreamError(StreamCode.MalformedTrack, {
-			message: `TIMESTAMP_TIE ${tie} exceeds ${key} + ${objectId}`,
-		});
-	}
-	if (dts > MAX_SAFE_KEY) throw new RangeError(`timestamp ${dts} is past the latest timestamp`);
-	return new Timestamp(Number(dts), timescale);
-}
-
-/** Decoded known object properties from a Properties block. */
-export interface DecodedObjectProperties {
-	groupGap?: bigint;
-	tie?: bigint;
-}
-
-/** Encode the Properties block of an object carrying an optional Prior Group ID Gap and/or Timestamp Tie. */
-export function encodeObjectProperties(
-	{ groupGap, tie }: { groupGap?: bigint; tie?: bigint },
-	version: IetfVersion,
-): Uint8Array | undefined {
-	const parts: Uint8Array[] = [];
-	let prev = 0n;
-	if (groupGap !== undefined && groupGap > 0n) {
-		parts.push(encodeVarint(PRIOR_GROUP_ID_GAP - prev, version), encodeVarint(groupGap, version));
-		prev = PRIOR_GROUP_ID_GAP;
-	}
-	if (tie !== undefined && tie > 0n) {
-		parts.push(encodeVarint(TIMESTAMP_TIE - prev, version), encodeVarint(tie, version));
-	}
-	return parts.length > 0 ? concat(parts) : undefined;
+	if (key > MAX_SAFE_KEY) throw new RangeError(`group ${key} is past the latest timestamp`);
+	return new Timestamp(Number(key), timescale);
 }
 
 /** Encode the Properties block of an object naming `gap` Group IDs just below its own as never produced. */
 export function encodeGroupGap(gap: bigint, version: IetfVersion): Uint8Array {
+	// The only property, so its type's delta from the previous one is from zero.
 	return concat([encodeVarint(PRIOR_GROUP_ID_GAP, version), encodeVarint(gap, version)]);
-}
-
-/**
- * Decode an object's Properties block, consuming all of it, for the Prior Group ID Gap and
- * Timestamp Tie, outside or inside Immutable Properties. Every other property is skipped.
- */
-export function decodeObjectProperties(c: Cursor): DecodedObjectProperties {
-	return decodeProperties(c, false);
 }
 
 /**
@@ -105,12 +52,11 @@ export function decodeObjectProperties(c: Cursor): DecodedObjectProperties {
  * or inside Immutable Properties. Every other property is skipped.
  */
 export function decodeGroupGap(c: Cursor): bigint | undefined {
-	return decodeProperties(c, false).groupGap;
+	return decodeProperties(c, false);
 }
 
-function decodeProperties(c: Cursor, immutable: boolean): DecodedObjectProperties {
-	let groupGap: bigint | undefined;
-	let tie: bigint | undefined;
+function decodeProperties(c: Cursor, immutable: boolean): bigint | undefined {
+	let gap: bigint | undefined;
 	let sealed = false;
 	let prevType = 0n;
 	const malformed = (message: string) => new StreamError(StreamCode.MalformedTrack, { message });
@@ -120,13 +66,9 @@ function decodeProperties(c: Cursor, immutable: boolean): DecodedObjectPropertie
 
 		if (id % 2n === 0n) {
 			const value = c.u62();
-			if (id === PRIOR_GROUP_ID_GAP) {
-				if (groupGap !== undefined) throw malformed("repeated Prior Group ID Gap");
-				groupGap = value;
-			} else if (id === TIMESTAMP_TIE) {
-				if (tie !== undefined) throw malformed("repeated Timestamp Tie");
-				tie = value;
-			}
+			if (id !== PRIOR_GROUP_ID_GAP) continue;
+			if (gap !== undefined) throw malformed("repeated Prior Group ID Gap");
+			gap = value;
 			continue;
 		}
 		const length = c.u53();
@@ -136,23 +78,18 @@ function decodeProperties(c: Cursor, immutable: boolean): DecodedObjectPropertie
 		}
 		if (immutable || sealed) throw malformed("nested or repeated Immutable Properties");
 		sealed = true;
-		let inner: DecodedObjectProperties;
+		let inner: bigint | undefined;
 		try {
 			inner = c.exact(length, (e) => decodeProperties(e, true));
 		} catch (err: unknown) {
 			if (err instanceof StreamError) throw err;
 			throw malformed("unreadable Immutable Properties");
 		}
-		if (inner.groupGap !== undefined) {
-			if (groupGap !== undefined) throw malformed("repeated Prior Group ID Gap");
-			groupGap = inner.groupGap;
-		}
-		if (inner.tie !== undefined) {
-			if (tie !== undefined) throw malformed("repeated Timestamp Tie");
-			tie = inner.tie;
-		}
+		if (inner === undefined) continue;
+		if (gap !== undefined) throw malformed("repeated Prior Group ID Gap");
+		gap = inner;
 	}
-	return { groupGap, tie };
+	return gap;
 }
 
 export interface GroupFlags {
@@ -318,14 +255,12 @@ export class Frame {
 	 * the publisher will never produce. Only the group's first object sends one.
 	 */
 	groupGap?: bigint;
-	/** The Timestamp Tie (`0x40B72`) subtracted from `Group ID + Object ID`. */
-	tie?: bigint;
 	/**
 	 * An END_OF_TRACK marker: no object at or past its location exists. At object 0 its group
 	 * does not exist either, so the track ends at that group; later in a group it ends after it.
 	 */
 	endOfTrack: boolean;
-	/** Absolute object ID for the first object or a standalone terminal; delta minus 1 thereafter. */
+	/** Absolute object ID for a standalone terminal; zero for sequential objects. */
 	idDelta = 0;
 	/** An END_OF_TRACK that carries properties, which a track end has nowhere to keep. */
 	hasProperties = false;
@@ -334,13 +269,11 @@ export class Frame {
 		payload,
 		streamed,
 		groupGap,
-		tie,
 		endOfTrack = false,
-	}: { payload?: Uint8Array; streamed?: number; groupGap?: bigint; tie?: bigint; endOfTrack?: boolean } = {}) {
+	}: { payload?: Uint8Array; streamed?: number; groupGap?: bigint; endOfTrack?: boolean } = {}) {
 		this.payload = payload;
 		this.streamed = streamed;
 		this.groupGap = groupGap;
-		this.tie = tie;
 		this.endOfTrack = endOfTrack;
 	}
 
@@ -352,16 +285,17 @@ export class Frame {
 	/**
 	 * Encode this frame using the group flags and negotiated IETF version.
 	 *
-	 * `idDelta` is the first object's absolute Object ID and the gap above `prior + 1` for
-	 * every later one. A {@link streamed} object writes only its header; the caller writes its payload.
+	 * `idDelta` is the first object's absolute Object ID and zero for every
+	 * later one, so a group whose head was trimmed by a filter still puts the true numbering
+	 * on the wire. A {@link streamed} object writes only its header; the caller writes its payload.
 	 */
-	async encode(w: Writer, flags: GroupFlags, version: IetfVersion, idDelta: number | bigint = 0): Promise<void> {
+	async encode(w: Writer, flags: GroupFlags, version: IetfVersion, idDelta = 0): Promise<void> {
 		// Everything before the payload is built in memory and goes out as one write: a stream
 		// write is far costlier than a varint, and a backlog pays it for every object.
 		const header = [encodeVarint(idDelta, version)];
 
 		if (flags.hasExtensions) {
-			const properties = encodeObjectProperties({ groupGap: this.groupGap, tie: this.tie }, version);
+			const properties = this.groupGap ? encodeGroupGap(this.groupGap, version) : undefined;
 			header.push(encodeVarint(properties?.byteLength ?? 0, version));
 			if (properties) header.push(properties);
 		}
@@ -386,10 +320,14 @@ export class Frame {
 	 * Decode a frame using the group flags, at the cursor's negotiated IETF version.
 	 *
 	 * `offset` lets a stream's first object start past zero, reporting its absolute Object ID
-	 * in `idDelta` rather than throwing {@link ObjectIdGap}. `sparse` allows arbitrary non-zero
-	 * Object ID deltas on a timed track (draft-lcurley-moq-timestamp).
+	 * in `idDelta` rather than throwing {@link ObjectIdGap}: that is the live tail of a group
+	 * whose head a joining FETCH or a fill brings.
 	 */
-	static decode(c: Cursor, flags: GroupFlags, offset = false, sparse = false): Frame {
+	static decode(c: Cursor, flags: GroupFlags, offset = false): Frame {
+		// The first object's delta is its absolute Object ID; every later one is the prior ID
+		// plus the delta plus one. moq-lite groups start at object 0 and never skip one, so
+		// a sequential group is a zero delta throughout, and any other value means the group
+		// either starts partway through or has a gap that would renumber the frames after it.
 		let delta = 0;
 		if (flags.hasSubgroupObject) {
 			// A compact stream's first Object ID is its subgroup and any later delta a gap.
@@ -402,7 +340,6 @@ export class Frame {
 		}
 
 		let groupGap: bigint | undefined;
-		let tie: bigint | undefined;
 		let hasProperties = false;
 		if (flags.hasExtensions) {
 			const extensionsLength = c.u53();
@@ -410,21 +347,19 @@ export class Frame {
 				throw new StreamError(StreamCode.MalformedTrack, { message: "object extensions exceed 64 KiB" });
 			}
 			hasProperties = extensionsLength !== 0;
-			const decoded = c.exact(extensionsLength, decodeObjectProperties);
-			groupGap = decoded.groupGap;
-			tie = decoded.tie;
+			// Nothing reads time from an object: a Timestamp is skipped like any other property.
+			groupGap = c.exact(extensionsLength, decodeGroupGap);
 		}
 
 		const payloadLength = c.u53();
 
 		if (payloadLength > 0) {
-			if (delta !== 0 && !offset && !sparse) throw new ObjectIdGap(delta);
+			if (delta !== 0 && !offset) throw new ObjectIdGap(delta);
 			const payload = decodePayload(c, payloadLength);
 			const frame = new Frame({
 				payload,
 				streamed: payload === undefined ? payloadLength : undefined,
 				groupGap,
-				tie,
 			});
 			frame.idDelta = delta;
 			return frame;
@@ -442,9 +377,7 @@ export class Frame {
 			frame.hasProperties = hasProperties;
 			return frame;
 		}
-		if (delta !== 0 && !((offset || sparse) && (status === 0 || status === GROUP_END))) {
-			throw new ObjectIdGap(delta);
-		}
+		if (delta !== 0 && !(offset && (status === 0 || status === GROUP_END))) throw new ObjectIdGap(delta);
 		// Allowed even when the header marks the group's end: that bit only lets a FIN imply it,
 		// and imquic sends both.
 		if (status === GROUP_END) {
@@ -454,7 +387,7 @@ export class Frame {
 		}
 
 		if (status === 0) {
-			const frame = new Frame({ payload: new Uint8Array(0), groupGap, tie });
+			const frame = new Frame({ payload: new Uint8Array(0), groupGap });
 			frame.idDelta = delta;
 			return frame;
 		}
@@ -483,8 +416,6 @@ export interface FetchPosition {
 	first: boolean;
 	/** The group of the prior object or End of Range when this object starts a different group. */
 	previousGroup?: bigint;
-	/** The Object ID of the prior object in the same group, when skipping IDs. */
-	previousObject?: number;
 }
 
 /**
@@ -504,35 +435,22 @@ export class FetchFrame {
 	 * every object after it, as a subgroup header does.
 	 */
 	priority: number;
-	/** Optional Timestamp Tie (`0x40B72`) property. */
-	tie?: bigint;
 
-	constructor({
-		payload,
-		streamed,
-		priority,
-		tie,
-	}: { payload?: Uint8Array; streamed?: number; priority: number; tie?: bigint }) {
+	constructor({ payload, streamed, priority }: { payload?: Uint8Array; streamed?: number; priority: number }) {
 		this.payload = payload ?? new Uint8Array(0);
 		this.streamed = streamed;
 		this.priority = priority;
-		this.tie = tie;
 	}
 
-	/** Encode this object at `position`, with optional properties. */
+	/** Encode this object at `position`, without properties. */
 	async encode(w: Writer, position: FetchPosition, version: IetfVersion): Promise<void> {
 		const previous = position.previousGroup;
-		const properties = encodeObjectProperties({ tie: this.tie }, version);
-		const propFlag = properties ? FETCH_PROPERTIES : 0;
 		// Everything before the payload goes out as one write, as in Frame.encode.
 		const header: Uint8Array[] = [];
 		if (position.first || previous !== undefined) {
 			// Include the priority too: "same as the prior object" has no prior to refer to.
 			header.push(
-				encodeVarint(
-					FETCH_GROUP_ID | FETCH_OBJECT_ID | (position.first ? FETCH_PRIORITY : 0) | propFlag,
-					version,
-				),
+				encodeVarint(FETCH_GROUP_ID | FETCH_OBJECT_ID | (position.first ? FETCH_PRIORITY : 0), version),
 				encodeVarint(
 					previous === undefined
 						? position.group
@@ -543,20 +461,8 @@ export class FetchFrame {
 			);
 			if (position.first) header.push(Uint8Array.of(this.priority));
 		} else {
-			const step = position.previousObject === undefined ? 1 : position.object - position.previousObject;
-			if (step > 1) {
-				header.push(
-					encodeVarint(FETCH_OBJECT_ID | propFlag, version),
-					encodeVarint(step - objectDeltaBias(version), version),
-				);
-			} else {
-				// Same group and priority; the Object ID is the prior one plus one.
-				header.push(encodeVarint(propFlag, version));
-			}
-		}
-
-		if (properties) {
-			header.push(encodeVarint(properties.byteLength, version), properties);
+			// Same group and priority; the Object ID is the prior one plus one.
+			header.push(encodeVarint(0, version));
 		}
 
 		header.push(encodeVarint(this.streamed ?? this.payload.byteLength, version));
@@ -661,8 +567,6 @@ export type FetchedObject =
 			object?: number;
 			/** The Publisher Priority, absent when it repeats the prior object's. */
 			priority?: number;
-			/** Optional Timestamp Tie (`0x40B72`) decoded from object properties. */
-			tie?: bigint;
 			/** The object payload; empty for an empty object, and `undefined` when it streams after the object. */
 			payload?: Uint8Array;
 			/** The payload length; past one segment, the payload follows on the stream. */
@@ -673,7 +577,7 @@ export type FetchedObject =
 	/** Draft-23's End of Group, or with `track` its End of Track. */
 	| { kind: "endOfGroup"; track: boolean };
 
-/** Decode the next object on a fetch stream, extracting Timestamp Tie when present. */
+/** Decode the next object on a fetch stream. Its properties are skipped. */
 export function decodeFetchObject(c: Cursor): FetchedObject {
 	// Any 62-bit value is a legal field, so an unknown one is a violation, not a decode failure.
 	const wide = c.varint();
@@ -715,17 +619,16 @@ export function decodeFetchObject(c: Cursor): FetchedObject {
 	const object = flags & FETCH_OBJECT_ID ? c.u53() : undefined;
 	const priority = flags & FETCH_PRIORITY ? c.u8() : undefined;
 
-	let tie: bigint | undefined;
 	if (flags & FETCH_PROPERTIES) {
 		const length = c.u53();
 		if (length > MAX_OBJECT_EXTENSIONS) {
 			throw new StreamError(StreamCode.MalformedTrack, { message: "object extensions exceed 64 KiB" });
 		}
-		tie = c.exact(length, decodeObjectProperties).tie;
+		c.read(length);
 	}
 
 	// A fetch stream carries no Object Status: a zero length is simply an empty object.
 	const length = c.u53();
 	const payload = decodePayload(c, length);
-	return { kind: "object", group, subgroup, subgroupId, object, priority, tie, payload, size: length };
+	return { kind: "object", group, subgroup, subgroupId, object, priority, payload, size: length };
 }

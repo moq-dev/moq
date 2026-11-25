@@ -3266,7 +3266,6 @@ impl Request for FetchServe {
 							writer,
 							shared.version,
 							batched.frame.timestamp,
-							batched.mono_ts,
 							batched.inflated,
 							batched.frame.payload.len() as u64,
 							*stamp,
@@ -3306,7 +3305,6 @@ impl Request for FetchServe {
 									writer,
 									shared.version,
 									next.timestamp,
-									next.mono_ts,
 									next.inflated,
 									next.size,
 									*stamp,
@@ -4649,7 +4647,6 @@ fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 	writer: &mut Writer<W, Version>,
 	version: Version,
 	timestamp: crate::Timestamp,
-	mono_ts: u64,
 	inflated: Option<u64>,
 	size: u64,
 	stamp: Option<Stamp>,
@@ -4664,16 +4661,10 @@ fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 		writer.buffer_varint(length)?;
 	}
 	if let Some(stamp) = stamp {
-		// On lite-07+, use the group's precomputed monotonic timestamp so a resumed or fetched
-		// slice emits the exact same wire timestamp as a full stream from frame 0.
-		let wire = match version.has_unsigned_timestamps() && timestamp.scale().is_some() {
-			true => mono_ts,
-			false => stamp.wire(timestamp)?,
-		};
 		let delta = clock
-			.encode_delta(wire)
+			.delta(stamp.wire(timestamp)?)
 			.ok_or(Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
-		writer.buffer_varint(delta)?;
+		writer.buffer_varint(crate::coding::varint::zigzag(delta))?;
 	}
 	// Only a compressed group read in its stored form has one, and only on lite-07.
 	if let Some(inflated) = inflated {
@@ -7480,7 +7471,6 @@ impl GroupServe {
 											writer,
 											self.ctx.version,
 											batched.frame.timestamp,
-											batched.mono_ts,
 											batched.inflated,
 											batched.frame.payload.len() as u64,
 											self.ctx.stamp,
@@ -7551,7 +7541,6 @@ impl GroupServe {
 													writer,
 													self.ctx.version,
 													next.timestamp,
-													next.mono_ts,
 													next.inflated,
 													next.size,
 													self.ctx.stamp,
@@ -8202,11 +8191,11 @@ mod serve_group_test {
 
 			let (bytes, fin) = first_stream(&log);
 			assert!(fin, "finished={finished}: no FIN");
-			// The frame: its length plus one, the unsigned timestamp delta from the group's start,
-			// and the payload; then GROUP_END, its End 3 past the frame at 2.
+			// The frame: its length plus one, the timestamp delta from the group's start, and the
+			// payload; then GROUP_END, its End 3 past the frame at 2.
 			let tail: &[u8] = match finished {
-				true => &[2, 2, b'x', 0, 3],
-				false => &[2, 2, b'x'],
+				true => &[2, 4, b'x', 0, 3],
+				false => &[2, 4, b'x'],
 			};
 			assert!(bytes.ends_with(tail), "finished={finished}: {bytes:?}");
 			assert!(log.resets().is_empty(), "finished={finished}");
@@ -14802,7 +14791,6 @@ mod tests {
 		let mut relayed = crate::track::Info::timed();
 		relayed.properties = Some(Arc::new(crate::model::object::TrackProperties {
 			version: crate::ietf::Version::Draft22,
-			timestamp_ids: false,
 			values: Vec::new(),
 		}));
 		let without = served_group(relayed.clone(), false).await;

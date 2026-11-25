@@ -270,10 +270,6 @@ pub(crate) struct Object {
 	/// The inflated size of a compressed frame read in its stored form (see
 	/// [`group::Consumer::compressed`]), whose `payload` is then the DEFLATE slice.
 	pub inflated: Option<u64>,
-	/// The moq-timestamp Object ID assigned when this frame entered the group.
-	pub timed_oid: u64,
-	/// The monotonic clamped timestamp in the track's timescale for lite-07 egress.
-	pub mono_ts: u64,
 }
 
 #[cfg(feature = "async")]
@@ -1530,12 +1526,6 @@ pub struct Consumer {
 	/// [`group::Consumer::compressed`]), whose payload is then the DEFLATE slice.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) inflated: Option<u64>,
-	/// The moq-timestamp Object ID assigned when this frame entered the group.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) timed_oid: u64,
-	/// The monotonic clamped timestamp in the track's timescale for lite-07 egress.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) mono_ts: u64,
 	source: Source,
 	// Byte offset consumed so far.
 	read_idx: usize,
@@ -1591,8 +1581,6 @@ impl Consumer {
 			info: header.info,
 			fields: header.fields,
 			inflated: header.inflated,
-			timed_oid: 0,
-			mono_ts: header.info.timestamp.value(),
 			source,
 			read_idx: 0,
 			stats: stats::Meter::default(),
@@ -1600,12 +1588,6 @@ impl Consumer {
 			expired: false,
 			resume: Resume::None,
 		}
-	}
-
-	pub(super) fn with_timing(mut self, timed_oid: u64, mono_ts: u64) -> Self {
-		self.timed_oid = timed_oid;
-		self.mono_ts = mono_ts;
-		self
 	}
 
 	/// Carry this frame across a front's route changes; see [`super::resume`].
@@ -1746,27 +1728,10 @@ impl Consumer {
 					}
 				}
 			};
-			// A dense copy expects the same Object ID: on timed tracks both dense ordinals
-			// (Draft18..22) and deterministic moq-timestamp Object IDs (Draft23+) identify the
-			// same frame, enabling mid-frame failover across mixed-version routes. Each copy's
-			// wire Object ID is validated against its own timing mode so a Draft-22 copy (whose
-			// decoded timestamp equals the group start) can still resume onto a Draft-23 copy.
-			if let Some(fields) = frame.fields.as_ref() {
-				let own_sparse = self.state.read().sparse();
-				let new_sparse = frame.state.read().sparse();
-				let own_valid = |id: u64| {
-					id == index || (!own_sparse && self.info.timestamp.scale().is_some() && id == self.timed_oid)
-				};
-				let new_valid = |id: u64| {
-					id == index || (!new_sparse && frame.info.timestamp.scale().is_some() && id == frame.timed_oid)
-				};
-				let matches = match &self.fields {
-					Some(own) => fields.id == own.id || (own_valid(own.id) && new_valid(fields.id)),
-					None => new_valid(fields.id),
-				};
-				if !matches {
-					return Poll::Ready(Err(Error::Unsupported));
-				}
+			// This copy was dense through its frame, so the replacement's must be the same
+			// Object ID: a copy that begins past a gap holds different content there.
+			if frame.fields.as_ref().is_some_and(|fields| fields.id != index) {
+				return Poll::Ready(Err(Error::Unsupported));
 			}
 			// Same name, same content: a different size is the routes disagreeing.
 			if frame.info.size != self.info.size || frame.inflated != self.inflated {

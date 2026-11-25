@@ -58,8 +58,6 @@ All provisional MOQT code points stay outside the Mandatory Track Property range
 | MOQT Setup Options | `0x40B6A` | `FLATE` | `draft-lcurley-moq-flate` |
 | MOQ Properties (Track) | `0x40B6C` | `COMPRESSION` | `draft-lcurley-moq-flate` |
 | MOQ Properties (Object) | `0x40B6E` | `INFLATED_SIZE` | `draft-lcurley-moq-flate` |
-| MOQ Properties (Track) | `0x40B70` | `ID_TIMESCALE` | `draft-lcurley-moq-timestamp` |
-| MOQ Properties (Object) | `0x40B72` | `TIMESTAMP_TIE` | `draft-lcurley-moq-timestamp` |
 | moq-lite Setup Parameters | `0x49455446` | `IETF` | `draft-lcurley-moq-ietf` |
 
 ## Contributing
