@@ -1246,6 +1246,7 @@ mod tests {
 		.unwrap();
 		let mut producer = Producer::new(&mut broadcast, catalog, input, &options).unwrap();
 		let at = |index: u64| Timestamp::from_micros(1_000_000 + index * 20_000).unwrap();
+		producer.set_active(false, at(0)).unwrap();
 		for index in 0..3 {
 			producer
 				.write(&pcm_frame(&vec![0.5; 1920], at(index).as_micros().unwrap() as u64))
