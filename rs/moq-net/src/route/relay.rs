@@ -2646,19 +2646,23 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 	}
 
 	/// The filing of `origin`'s claim of `instance` a request at `path` naming `origin`
-	/// follows when none of its tier may serve: of the ones this node knows covering the
-	/// path, the best lowered to it, as [`Self::tier`] ranks them, the deepest on a tie.
+	/// follows when none of its tier may serve, as for an asker that does not know the tier
+	/// whole: of the ones this node knows covering the path, the best lowered to it, as
+	/// [`Self::tier`] ranks them, then one of the best precedence where it is filed, which
+	/// [`Self::ways`] serves, then the deepest.
 	fn named(&self, origin: NodeId, path: &Path, instance: &I) -> Option<Broadcast<I>> {
 		let known = self.known.get(&origin)?;
 		let depth = path.parts().count();
-		let mut pick: Option<(Precedence, Broadcast<I>)> = None;
+		let mut pick: Option<((Precedence, bool), Broadcast<I>)> = None;
 		for from in ancestors(path).rev() {
 			let by = (depth - from.parts().count()) as u64;
 			let claim = (from, instance.clone());
 			let Some(held) = known.items.get(&claim) else {
 				continue;
 			};
-			let lowered = precedence_at(&held.item, by);
+			let outranked = (self.reader.get(instance.clone(), &claim.0))
+				.is_none_or(|shown| precedence(&shown.item) != precedence(&held.item));
+			let lowered = (precedence_at(&held.item, by), outranked);
 			if pick.as_ref().is_none_or(|(best, _)| lowered < *best) {
 				pick = Some((lowered, claim));
 			}
@@ -3928,6 +3932,43 @@ mod tests {
 		assert_eq!(router.pick(&under), Some(node(5)));
 		assert_eq!(router.filed(node(5), &under), Some(p("src")));
 		assert_eq!(router.step(node(5), &under, None), Some(Next::Via(4)));
+	}
+
+	/// A request naming a node whose claims a more specific claim shadows here, as an asker
+	/// that is not told that claim does, follows the filing of the node's claim that a way
+	/// serves, not a deeper one the exact claim outranks there.
+	#[test]
+	fn a_named_request_outside_its_tier_follows_a_filing_with_a_way() {
+		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
+		open(&mut router, 3, Role::Routing(node(3)));
+		open(&mut router, 4, Role::Routing(node(4)));
+		router.recv(3, route(6, 3, 1)).unwrap();
+		router.recv(4, route(5, 4, 1)).unwrap();
+		let exact = Msg::Claims {
+			origin: node(6),
+			changes: vec![((p("src/a"), 7), claim(run(1), 0))],
+			floor: 1,
+		};
+		router.recv(3, exact).unwrap();
+		let claims = Msg::Claims {
+			origin: node(5),
+			changes: vec![
+				((p("src"), 7), claim(run(1), 0)),
+				((p("src/a"), 7), claim(Run { epoch: 1, above: 1 }, 0)),
+			],
+			floor: 1,
+		};
+		router.recv(4, claims).unwrap();
+		let under = (p("src/a/b"), 7);
+		assert_eq!(router.pick(&under), Some(node(6)));
+		assert_eq!(router.filed(node(5), &under), Some(p("src")));
+		assert_eq!(router.step(node(5), &under, None), Some(Next::Via(4)));
+		let ways = |at: &str| {
+			(router.ways(&(p(at), 7)).into_iter())
+				.map(|way| way.origin)
+				.collect::<Vec<_>>()
+		};
+		assert_eq!((ways("src"), ways("src/a")), (vec![node(5)], vec![node(6)]));
 	}
 
 	/// A relay that owns a claim serves a request naming it under a copy of the same claim
