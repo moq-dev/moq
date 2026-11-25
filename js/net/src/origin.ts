@@ -881,8 +881,9 @@ class OriginState {
 	#reroute(path: Path.Valid, slot: RequestSlot): void {
 		if (this.retained.has(slot)) return;
 		const current = slot.route.peek();
-		// A pinned slot follows its instance from the start, and a detached one once it resolved.
-		if (slot.pin !== undefined && !(current?.front && current.source)) {
+		// A pinned slot follows its instance before it resolves; once resolved, the detached branch
+		// passes its source along, so losing its instance's last route ends it even while parked.
+		if (slot.pin !== undefined && !current?.source) {
 			this.follow(path, slot, slot.pin, undefined);
 			return;
 		}

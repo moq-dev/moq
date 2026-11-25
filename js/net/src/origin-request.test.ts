@@ -1596,6 +1596,34 @@ test("a superseded epoch never answers a fresh pinned request", async () => {
 	origin.close();
 });
 
+// A pinned request whose answer closes waits on its instance's route to answer again, but ends
+// once that instance's last route leaves first, as one that never parked does.
+test("a parked pinned request ends when its last route leaves", async () => {
+	const origin = new Producer();
+	const path = Path.from("room/audio");
+	const pinned = Instance.random();
+	const claim = origin.claim(path, { instance: { id: pinned, epoch: 0n }, cost: 9n });
+	const winning = origin.claim(path, { instance: { id: Instance.random(), epoch: 0n }, cost: 1n });
+	const held = origin.request(path, { instance: pinned });
+	const asked = claim.requested();
+	const source = new BroadcastProducer();
+	defined((await asked.next()).value).serve(source.consume());
+	await held.broadcast();
+
+	source.close();
+	await settle();
+	expect(held.closed.peek()).toBeUndefined();
+
+	claim.close();
+	await settle();
+	expect(held.closed.peek()).toBeInstanceOf(StreamError);
+	expect((held.closed.peek() as StreamError).code).toBe(StreamCode.Unroutable);
+
+	held.close();
+	winning.close();
+	origin.close();
+});
+
 // A newer epoch taking the path releases the cheaper route of the older one the request was
 // moving to: nothing waits on its answer any more.
 test("a held request is unwanted once a newer epoch wins", async () => {
