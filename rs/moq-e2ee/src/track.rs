@@ -235,7 +235,9 @@ impl Consumer {
 		&self.name
 	}
 
-	/// The next protected group in arrival order, or `None` once the track finished.
+	/// The next protected group in arrival order, or `None` once the track finished. Groups
+	/// already held come in the subscription's Group Order, newest first unless it asks
+	/// ascending.
 	///
 	/// # Errors
 	///

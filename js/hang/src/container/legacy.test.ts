@@ -34,7 +34,7 @@ async function groups(subscriber: Track.Subscriber) {
 
 test("Legacy Producer keys groups in a millisecond track's timescale", async () => {
 	const media = track(Time.Timescale.MILLI);
-	const subscriber = media.subscribe({ ranges: [{}] });
+	const subscriber = media.subscribe({ order: "ascending", ranges: [{}] });
 	const producer = new Producer(media, new Format("video"));
 	producer.encode(new Uint8Array([1]), Duration.micros(1_400), true);
 	// The same millisecond as the open group's start, so it continues that group.
@@ -55,7 +55,7 @@ test("Legacy Producer keys groups in a millisecond track's timescale", async () 
 
 test("Legacy Producer keys groups in a nanosecond track's timescale", async () => {
 	const media = track(Time.Timescale.NANO);
-	const subscriber = media.subscribe({ ranges: [{}] });
+	const subscriber = media.subscribe({ order: "ascending", ranges: [{}] });
 	const producer = new Producer(media, new Format("video"));
 	producer.encode(new Uint8Array([1]), Duration.micros(1_000), true);
 	producer.encode(new Uint8Array([1]), Duration.micros(2_000), true);
@@ -73,7 +73,7 @@ test("Legacy Producer keys groups in a nanosecond track's timescale", async () =
 
 test("Legacy Producer ends an audio group whole at its discontinuity marker", async () => {
 	const media = track(Time.Timescale.MICRO);
-	const subscriber = media.subscribe({ ranges: [{}] });
+	const subscriber = media.subscribe({ order: "ascending", ranges: [{}] });
 	const producer = new Producer(media, new Format("audio"));
 	producer.encode(new Uint8Array([1]), Duration.micros(0), true);
 	producer.encode(new Uint8Array([1]), Duration.micros(20_000), false);
@@ -96,7 +96,7 @@ test("Legacy Producer ends an audio group whole at its discontinuity marker", as
 // has the group's End treats any start inside the span as skipped, so nothing later starts there.
 test("Legacy Producer starts nothing inside the span of a group a cut ended", async () => {
 	const media = track(Time.Timescale.MICRO);
-	const subscriber = media.subscribe({ ranges: [{}] });
+	const subscriber = media.subscribe({ order: "ascending", ranges: [{}] });
 	const producer = new Producer(media, new Format("audio"));
 	producer.encode(new Uint8Array([1]), Duration.micros(0), true);
 	producer.encode(new Uint8Array([1]), Duration.micros(20_000), false);
@@ -184,7 +184,7 @@ test("Legacy Producer starts video resuming at a discontinuity's end past its ma
 		[Time.Timescale.MILLI, 34_000],
 	] as const) {
 		const media = track(scale);
-		const subscriber = media.subscribe({ ranges: [{}] });
+		const subscriber = media.subscribe({ order: "ascending", ranges: [{}] });
 		const producer = new Producer(media, new Format("video"));
 		producer.encode(new Uint8Array([1]), Duration.micros(0), true);
 		producer.discontinuity(Duration.micros(33_000));
@@ -204,7 +204,7 @@ test("Legacy Producer starts video resuming at a discontinuity's end past its ma
 
 test("Legacy Producer moves a picture with the parameter sets a marker moved", async () => {
 	const media = track(Time.Timescale.MICRO);
-	const subscriber = media.subscribe({ ranges: [{}] });
+	const subscriber = media.subscribe({ order: "ascending", ranges: [{}] });
 	const producer = new Producer(media, new Format("video"));
 	producer.encode(new Uint8Array([1]), Duration.micros(0), true);
 	producer.discontinuity(Duration.micros(33_000));
@@ -224,7 +224,7 @@ test("Legacy Producer moves a picture with the parameter sets a marker moved", a
 
 test("Legacy Producer reorders a group whose frame is written below its moved keyframe", async () => {
 	const media = track(Time.Timescale.MILLI);
-	const subscriber = media.subscribe({ ranges: [{}] });
+	const subscriber = media.subscribe({ order: "ascending", ranges: [{}] });
 	const producer = new Producer(media, new Format("video"));
 	producer.encode(new Uint8Array([1]), Duration.micros(0), true);
 	producer.discontinuity(Duration.micros(33_000));

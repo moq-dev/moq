@@ -68,7 +68,8 @@ async fn a_relay_keeps_keys_and_the_gaps_between_them() {
 				.subscribe(
 					Subscription::default()
 						.with_ranges([support::keys(2..=8)])
-						.with_max(None),
+						.with_max(None)
+						.with_order(moq_net::track::Order::Ascending),
 				)
 				.await
 				.unwrap();

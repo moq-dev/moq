@@ -1220,10 +1220,11 @@ mod tests {
 		let _finished = import.finish().unwrap();
 	}
 
-	/// Count the frames in each group of a finished track.
-	async fn collect_groups(mut subscriber: moq_net::track::Subscriber) -> Vec<usize> {
+	/// Count the frames in each group of a finished track, in key order.
+	async fn collect_groups(subscriber: moq_net::track::Subscriber) -> Vec<usize> {
+		let mut subscriber = subscriber.ordered();
 		let mut groups = Vec::new();
-		while let Some(mut group) = subscriber.recv_group().await.unwrap() {
+		while let Some(mut group) = subscriber.next_group().await.unwrap() {
 			let mut count = 0;
 			while group.next_frame().await.unwrap().is_some() {
 				count += 1;

@@ -1,4 +1,4 @@
-# [XS] Release pull requests read the R2 Rust cache
+# [XS] Release pull requests read the B2 Rust cache
 
 ## Goal
 
@@ -11,10 +11,10 @@ carries the platform Rust cache, which its `platform.yml` still lacks on
 ## Plan
 
 Decided 2026-11-05 (maintainer, /quest-audit): ✅ split from
-[Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) and moved to m2 (m3 since the milestone re-cut)
+[Verify the B2 Rust cache](/quest/m0/ci/mbx-b2-verify.md) and moved to m2 (m3 since the milestone re-cut)
 behind [the cut](/quest/m3/release/cut.md), which brings `main`'s platform
 Rust cache to `release` when it merges `main` into it. Not chosen: moving
-the whole R2 verification quest; merging `main` into `release` now, which
+the whole Rust cache verification quest; merging `main` into `release` now, which
 reverses the 2026-11-04 decision.
 
 Once the cut lands, inspect the first release pull request's `Check the

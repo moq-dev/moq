@@ -26,7 +26,7 @@ so none is excluded. Kill each with a unit test or a model regression, or exclud
   is covered another way (a replaced non-fill copy removes its fed range, the serving copy
   starts above, a fill waits through its unread group). Needs a second fill, from another
   route, holding a key the first covers while the local cap holds it back.
-- `Reader::poll_lowest` `!copy.replaced && Some(copy.generation) == self.generation`, `&&`
+- `Reader::poll_first` `!copy.replaced && Some(copy.generation) == self.generation`, `&&`
   to `||`: also counts a late backfill of the serving route, which only reruns
   `backfill_gaps` (a no-op, or a reset of that backfill's budget), and a last copy of an old
   generation left while the route has no copy. That one reading late with a floor may ask
