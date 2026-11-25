@@ -5207,6 +5207,8 @@ export class Subscriber {
 			if (subscriber.#resume) subscriber.#resume.forgetPast(delivered, budget);
 			else subscriber.#forgetPastBudget(delivered, budget);
 		};
+		hooks.lowestBuffered = (subscriber, delivered) =>
+			subscriber.#resume ? subscriber.#resume.lowestBuffered(delivered) : subscriber.#lowestBuffered(delivered);
 		hooks.fold = (subscriber, at) => subscriber.#fold(at);
 		hooks.untell = (subscriber, start, end) => {
 			if (start >= end) return;

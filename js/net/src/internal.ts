@@ -680,14 +680,16 @@ export interface ResumeSource {
 	accounts(delivered: Delivered, gaps: readonly Run[], ordered: boolean): boolean;
 	/** Wake once a read may go differently; fires at most once. */
 	changed(fn: () => void): Dispose;
-	/** Forget the gaps in `delivered` below each group past the budget, judged as {@link forgetPast} judges it. */
+	/** Forget the gaps in `delivered` below each group past the budget, as {@link forgetPast} does. */
 	forgetPastBudget(delivered: Delivered): void;
 	/**
 	 * Forget the gaps in `delivered` below each group past `budget`, an outer reader's whose
-	 * `delivered` this is, judged on the newest copy and every replaced copy still feeding the
-	 * reader. Mirrors the Rust `Subscriber::forget_past`.
+	 * `delivered` this is, judged on the newest copy, but never past a group a replaced copy still
+	 * feeding the reader holds unread. Mirrors the Rust `Subscriber::forget_past`.
 	 */
 	forgetPast(delivered: Delivered, budget: Budget): void;
+	/** The lowest group any copy holds unread that `delivered` lacks; see `hooks.lowestBuffered`. */
+	lowestBuffered(delivered: Delivered): bigint | undefined;
 	/**
 	 * Forget every copy's report of `[start, end)`, so the copy serving when the reader's ranges ask
 	 * for it again reports it again. Mirrors the Rust `Reader::untell`.
@@ -1227,6 +1229,12 @@ export const hooks: {
 	 * cannot judge by its own. Mirrors the Rust `Subscriber::forget_past_budget`.
 	 */
 	forgetPastBudget: (subscriber: Subscriber, delivered: Delivered, budget: Budget) => void;
+	/**
+	 * The lowest group the subscriber holds unread that another reader's `delivered` lacks, in its
+	 * range and window, on any copy it reads. Mirrors the Rust `track::Subscriber::lowest_unread`
+	 * as a front's compaction reads it.
+	 */
+	lowestBuffered: (subscriber: Subscriber, delivered: Delivered) => bigint | undefined;
 	/** Fold a route copy's record below `at`, where the reader it feeds is, which reports nothing there. */
 	fold: (subscriber: Subscriber, at: bigint) => void;
 	/** Forget what a route copy reported of `[start, end)`, which its reader's wire was never told. */
@@ -1681,6 +1689,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	forgetPastBudget: () => {
+		throw new Error("track.ts not loaded");
+	},
+	lowestBuffered: () => {
 		throw new Error("track.ts not loaded");
 	},
 	fold: () => {

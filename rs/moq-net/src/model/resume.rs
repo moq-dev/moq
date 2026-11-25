@@ -1378,18 +1378,17 @@ impl Subscriber {
 			.collect()
 	}
 
-	/// Forget the gaps in `delivered` below each group past the reader's budget, judged as
-	/// [`Self::forget_past`] judges them; see [`track::Subscriber::forget_past_budget`].
+	/// Forget the gaps in `delivered` below each group past the reader's budget, as
+	/// [`Self::forget_past`] does; see [`track::Subscriber::forget_past_budget`].
 	pub(super) fn forget_past_budget(&self, delivered: &mut Delivered) {
 		let budget = self.reader().budget();
 		self.forget_past(delivered, budget);
 	}
 
 	/// Forget the gaps in `delivered` below each group past `budget`, an outer reader's whose
-	/// `delivered` this is, judged on the newest copy that answered and on every replaced copy
-	/// still feeding the reader. Such a copy judges its own late groups: one it holds unread,
-	/// or whose successor landed there recently, is fresh though the newest copy would write a
-	/// group landing there off, so only what every one of them forgets is forgotten.
+	/// `delivered` this is, judged on the newest copy that answered, but never past a group a
+	/// replaced copy still feeding the reader holds unread: as one cursor keeps what it owes,
+	/// since a late group there may be fresh by its own successor on that copy.
 	pub(super) fn forget_past(&self, delivered: &mut Delivered, budget: Budget) {
 		let reader = self.reader();
 		let mut ready = reader.copies.iter().rev().filter_map(|copy| match &copy.sub {
@@ -1399,26 +1398,28 @@ impl Subscriber {
 		let Some((_, newest)) = ready.next() else {
 			return;
 		};
-		let mut feeding = ready
+		let unread = |sub: &track::Subscriber| {
+			let mut from = delivered.floor();
+			while let Some(group) = sub.lowest_unread(from) {
+				if !delivered.contains(group.start) {
+					return Some(group.start);
+				}
+				from = group.start.checked_add(1)?;
+			}
+			None
+		};
+		let kept = ready
 			.filter(|(copy, _)| copy.replaced && copy.feeds)
-			.map(|(_, sub)| sub)
-			.peekable();
+			.filter_map(|(_, sub)| unread(sub))
+			.min();
 		// A reader following one route judges on it alone, with no copy of `delivered`.
-		if feeding.peek().is_none() {
+		let Some(kept) = kept else {
 			newest.forget_past_budget(delivered, budget);
 			return;
-		}
-		let floor = std::iter::once(newest)
-			.chain(feeding)
-			.map(|sub| {
-				let mut judged = delivered.clone();
-				sub.forget_past_budget(&mut judged, budget.clone());
-				judged.floor()
-			})
-			.min();
-		if let Some(floor) = floor {
-			delivered.forget_below(floor);
-		}
+		};
+		let mut judged = delivered.clone();
+		newest.forget_past_budget(&mut judged, budget);
+		delivered.forget_below(judged.floor().min(kept));
 	}
 
 	/// Poll for the track's declared exclusive end.

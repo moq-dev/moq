@@ -2201,27 +2201,35 @@ class Reader implements ResumeSource {
 		for (const copy of this.#copies) hooks.untell(copy.sub, start, end);
 	}
 
-	// Judged on the newest copy and on every replaced copy still feeding the reader. Such a copy
-	// judges its own late groups: one it holds unread, or whose successor landed there recently, is
-	// fresh though the newest copy would write a group landing there off, so only what every one of
-	// them forgets is forgotten.
+	// Judged on the newest copy, but never past a group a replaced copy still feeding the reader
+	// holds unread: as one cursor keeps what it owes, since a late group there may be fresh by its
+	// own successor on that copy.
 	forgetPast(delivered: Delivered, budget: Budget): void {
 		const newest = this.#copies.at(-1);
 		if (!newest) return;
-		const feeding = this.#copies.filter((copy) => copy !== newest && copy.replaced && this.#feeds(copy));
+		let kept: bigint | undefined;
+		for (const copy of this.#copies) {
+			if (copy === newest || !copy.replaced || !this.#feeds(copy)) continue;
+			const key = hooks.lowestBuffered(copy.sub, delivered);
+			if (key !== undefined) kept = min(kept ?? key, key);
+		}
 		// A reader following one route judges on it alone, with no copy of `delivered`.
-		if (feeding.length === 0) {
+		if (kept === undefined) {
 			hooks.forgetPastBudget(newest.sub, delivered, budget);
 			return;
 		}
-		let floor: bigint | undefined;
-		for (const copy of [newest, ...feeding]) {
-			const judged = delivered.clone();
-			hooks.forgetPastBudget(copy.sub, judged, budget);
-			const at = judged.runEnd(0n) ?? 0n;
-			floor = floor === undefined ? at : min(floor, at);
+		const judged = delivered.clone();
+		hooks.forgetPastBudget(newest.sub, judged, budget);
+		delivered.forgetBelow(min(judged.runEnd(0n) ?? 0n, kept));
+	}
+
+	lowestBuffered(delivered: Delivered): bigint | undefined {
+		let lowest: bigint | undefined;
+		for (const copy of this.#copies) {
+			const key = hooks.lowestBuffered(copy.sub, delivered);
+			if (key !== undefined) lowest = min(lowest ?? key, key);
 		}
-		if (floor !== undefined) delivered.forgetBelow(floor);
+		return lowest;
 	}
 
 	latest(): bigint | undefined {
