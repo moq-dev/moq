@@ -354,7 +354,7 @@ impl Producer {
 		self.track.track().demand()
 	}
 
-	#[cfg(feature = "capture")]
+	#[cfg(any(feature = "capture", test))]
 	pub(crate) fn track(&self) -> &moq_net::track::Producer {
 		self.track.track()
 	}
@@ -1218,7 +1218,10 @@ mod tests {
 		assert!(end.unwrap().is_none());
 
 		producer.set_active(true, at(2)).unwrap();
-		assert_eq!(producer.track().largest().unwrap().group, at(1).as_micros().unwrap() as u64);
+		assert_eq!(
+			producer.track().largest().unwrap().group,
+			at(1).as_micros().unwrap() as u64
+		);
 		let _finished = producer.finish().unwrap();
 	}
 
