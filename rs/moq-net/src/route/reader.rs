@@ -161,16 +161,20 @@ mod tests {
 
 	/// A claim presented at a narrower region that goes while the claim it stood for is
 	/// still shown moved up to it, so it went offline there, never ended, even when its
-	/// origin withdrew it. One its origin announced there ends.
+	/// origin withdrew it. One its origin announced there ends, whatever is above it.
 	#[test]
 	fn a_presented_claim_that_moved_up_goes_offline() {
 		let mut reader = Reader::<u64, u64>::default();
-		let now = BTreeMap::from([(p("a"), shown(false)), (p("a/b"), shown(true)), (p("c"), shown(false))]);
+		let now = BTreeMap::from([
+			(p("a"), shown(false)),
+			(p("a/b"), shown(true)),
+			(p("a/c"), shown(false)),
+		]);
 		reader.apply(1, |_| true, now, |_| false);
 		reader.events();
 		reader.apply(1, |_| true, BTreeMap::from([(p("a/b"), None)]), |_| true);
 		assert_eq!(kinds(&mut reader), [("a/b".to_string(), Kind::Offline)]);
-		reader.apply(1, |_| true, BTreeMap::from([(p("c"), None)]), |_| true);
-		assert_eq!(kinds(&mut reader), [("c".to_string(), Kind::End)]);
+		reader.apply(1, |_| true, BTreeMap::from([(p("a/c"), None)]), |_| true);
+		assert_eq!(kinds(&mut reader), [("a/c".to_string(), Kind::End)]);
 	}
 }
