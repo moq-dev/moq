@@ -1839,8 +1839,6 @@ mod tests {
 					value: b"jwt".to_vec(),
 				},
 				None,
-				crate::auth::RequestKind::Subscribe,
-				&crate::Path::from_static("room/alice"),
 			);
 			let received = requests.next().await.expect("the pre-ok consumer receives the request");
 			assert_eq!(received.token().as_ref(), b"jwt", "{version:?}");

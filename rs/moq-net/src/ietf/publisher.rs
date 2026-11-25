@@ -17956,6 +17956,59 @@ mod serve_tests {
 		}
 	}
 
+	/// A REQUEST_UPDATE whose token the acceptor renews without SUBSCRIBE among its kinds is
+	/// refused, and the live subscription ends with it.
+	#[kio::test]
+	async fn a_renewal_without_the_subscribe_kind_ends_the_subscription() {
+		for version in [Version::Draft18, Version::Draft22] {
+			let (auth, mut requests, _cred) = auth_covering_other();
+			let h = serve_with_auth(version, auth, subscribe_update_with_token(version, true).await);
+			let rt = h.publisher.runtime.clone();
+			let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+			group.write_frame(group.key_time(), b"frame".as_slice()).unwrap();
+			group.finish().unwrap();
+			settle().await;
+
+			let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), version)
+				.await
+				.unwrap();
+			let acceptor = async move {
+				let mut held = Vec::new();
+				held.push(requests.next().await.unwrap().accept(grant_all_expiring(&rt, None)));
+				held.push(requests.next().await.unwrap().accept(crate::auth::Grant {
+					kinds: crate::auth::RequestKinds::all().without(crate::auth::RequestKind::Subscribe),
+					..grant_all_expiring(&rt, None)
+				}));
+				std::future::pending::<()>().await
+			};
+			let serving = h.publisher.clone().run_subscribe_stream(stream, token_subscribe());
+			let served = kio::clock::timeout(Duration::from_secs(5), async {
+				futures::pin_mut!(acceptor, serving);
+				match futures::future::select(acceptor, serving).await {
+					futures::future::Either::Right((served, _)) => served,
+					futures::future::Either::Left(_) => unreachable!("the acceptor never ends"),
+				}
+			})
+			.await
+			.unwrap_or_else(|_| panic!("{version}: the subscription outlived its refused renewal"));
+			assert!(matches!(served, Err(Error::Unauthorized)), "{version}: {served:?}");
+
+			let wire = Wire::read(&h.log, version);
+			let (code, _) = wire.request_error.expect("REQUEST_ERROR was sent");
+			assert_eq!(
+				code,
+				request::to_code(&Error::Unauthorized, request::Kind::Subscribe, version),
+				"{version}: request error code"
+			);
+			let (status, _) = wire.publish_done.expect("PUBLISH_DONE was sent");
+			assert_eq!(
+				status,
+				ietf::PublishDoneStatus::UpdateFailed.code(),
+				"{version}: UPDATE_FAILED"
+			);
+		}
+	}
+
 	/// Pausing with a token waits for verification, drops demand, and keeps the new grant.
 	#[kio::test]
 	async fn a_pause_carrying_a_token_changes_authority() {
@@ -18904,8 +18957,6 @@ mod serve_tests {
 				let mut subscription: Running =
 					Box::pin(h.publisher.clone().run_subscribe_stream(stream, token_subscribe()));
 				let request = taken_token(&mut subscription, &mut requests).await;
-				assert_eq!(request.kind(), Some(RequestKind::Subscribe), "{case}");
-				assert_eq!(request.path().map(|path| path.as_str()), Some("room"), "{case}");
 				let mut grant = crate::auth::Grant::all();
 				if narrowed {
 					grant.kinds = RequestKind::Subscribe.into();
