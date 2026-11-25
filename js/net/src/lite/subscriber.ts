@@ -2174,7 +2174,7 @@ export class Subscriber {
 				entry.fillsChanged.update((revision) => revision + 1);
 			};
 			for (const fill of fills.takeWalks()) void fetch(fill).then(walked, walked);
-			await fills.changed(entry.tail);
+			await fills.changed(entry.tail, demand);
 		}
 		entry.fillsChanged.update((revision) => revision + 1);
 	}
@@ -3219,7 +3219,8 @@ export class Subscriber {
 			// delivers, waits unread, which flow control bounds. Created once that copy ends, it is
 			// refused as a duplicate if the copy finished and takes the group if it failed,
 			// continuing the reads of that copy, which wait while it is held. Its own reset ends the
-			// wait; a clean end leaves it on the copy alone.
+			// wait; a clean end leaves it on the copy alone. Parked meanwhile: that copy's stream holds
+			// the end of whatever carries it, so a stall there never holds this subscription's.
 			for (;;) {
 				// Kept held past a failure until this copy takes the group, below.
 				const next = hooks.arrivingGroup(track, group.key);
@@ -3228,9 +3229,11 @@ export class Subscriber {
 				arriving = next;
 				// Served again once that copy fails, so owed again.
 				owed = true;
+				counted.park();
 				const settled = arriving.settled;
 				await race([settled, stream.closed.then(() => settled)]);
 			}
+			counted.resume();
 			producer ??= hooks.receiveGroup(track, {
 				start: group.key,
 				offset: group.frameStart,
