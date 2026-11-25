@@ -721,6 +721,12 @@
                 # fix`. IN_NIX_SHELL would also pass inside another project's shell.
                 IN_MOQ_DEV_SHELL = "1";
 
+                # Without it, stdenv links every binary with an RPATH to
+                # `<checkout>/outputs/out/lib`, which never exists, so the same
+                # code built in two checkouts differs by its path and counts
+                # different instructions (quest/m0/repeatable-instruction-counts.md).
+                NIX_NO_SELF_RPATH = "1";
+
                 # Local launchers need the exact build without evaluating the flake again.
                 # QUEST_* belongs to quest itself.
                 DEV_SHELL_QUEST = "${quest-cli}/bin/quest";
