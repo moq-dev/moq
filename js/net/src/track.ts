@@ -1236,14 +1236,6 @@ function reaches(received: bigint, drops: DropSet, end: End, refused: readonly R
 	return runGaps(given, received, final).length === 0;
 }
 
-/**
- * Whether `run` settles a reader judging under `budget` with `coverage`. Any run but a received
- * stale one does. A stale verdict holds for a reader no wider than the budget it was judged under
- * that reads every group above the run's start, past the live edge: its own successor and edge are
- * then no older than those the verdict was judged against, since a group's verdict looks only
- * above it. A reader whose budget varies by group is held to its widest. Mirrors the Rust
- * `settles`.
- */
 // The parts of `drops` within `[start, end)`, each clipped there.
 function intersectDrops(drops: readonly DropRun[], start: bigint, end: bigint): DropRun[] {
 	const out: DropRun[] = [];
@@ -1253,13 +1245,26 @@ function intersectDrops(drops: readonly DropRun[], start: bigint, end: bigint): 
 	return out;
 }
 
+/**
+ * Whether `run` settles a reader judging under `budget` with `coverage`. Any run but a received
+ * stale one does. A stale verdict holds for a reader no wider than the budget it was judged under
+ * that reads every group above the run's start: its own successor and edge are then no older than
+ * those the verdict was judged against, since a group's verdict looks only above it. An uncapped
+ * reader reads them past the live edge; a capped one only when the upstream judged within the very
+ * cap it has (`run.cap`), else the verdict may rest on groups above the cap it never sees. A reader
+ * whose budget varies by group is held to its widest. Mirrors the Rust `settles`.
+ */
 function settles(run: DropRun, budget: Budget, coverage: Coverage): boolean {
 	if (run.stale === undefined) return true;
 	if ((budget.isUniform() ? budget.at(run.start) : budget.widest()) > run.stale) return false;
-	if (coverage === undefined || coverage.cap !== undefined) return false;
+	if (coverage === undefined) return false;
+	const { cap } = coverage;
+	if (cap !== undefined && run.cap !== cap) return false;
 	const above = run.start + 1n;
+	const end = cap ?? UNBOUNDED;
+	if (above >= end) return true;
 	const held = coverage.runs.find((run) => run.start <= above && above < run.end);
-	return held !== undefined && held.end >= UNBOUNDED;
+	return held !== undefined && held.end >= end;
 }
 // Actual object metadata outlives cached payloads, unlike empty group heads in model largest.
 let objectLargest: (producer: Producer) => Position | undefined;

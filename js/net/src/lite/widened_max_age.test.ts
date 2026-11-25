@@ -28,18 +28,6 @@ async function received(reader: TrackSubscriber, count: number): Promise<bigint[
 	return got.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
-/**
- * Resolves once `reader`'s copy has seen group `key` arrive, without reading a group. A bounded
- * reader judges a group the publisher dropped as stale by the newest group it holds when it
- * reads, so it fetches that group if it reads before the edge arrives: group streams and drops
- * are unordered, so the read has to wait for the edge, not race it.
- */
-async function seen(reader: TrackSubscriber, key: bigint): Promise<void> {
-	for (let largest = await reader.largest(); largest && largest.group < key; ) {
-		largest = await reader.largest();
-	}
-}
-
 // What the subscriber reads after widening its own max age. Mirrors the Rust
 // `a_widened_reader_gets_what_was_skipped`.
 for (const [version, alpn] of [
@@ -174,7 +162,6 @@ test("a widening recovers the stale groups for a bounded lite-07 reader", async 
 	]) {
 		write(key, millis);
 	}
-	await seen(reader, 4n);
 	expect(await received(reader, 2)).toEqual([3n, 4n]);
 
 	// The widened reader asks for them with a request of its own.

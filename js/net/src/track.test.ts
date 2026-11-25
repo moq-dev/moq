@@ -4629,6 +4629,34 @@ test("a received stale drop settles only the readers it covers", () => {
 	producer.close();
 });
 
+// The group streams and a stale drop are unordered, so a drop may reach the copy before the groups
+// it rests on. A reader capped where the upstream judged reads the same groups above the run, so it
+// takes the verdict instead of fetching a group the groups above would still convict.
+test("a received stale drop settles a reader capped where the upstream judged it", () => {
+	const producer = new TrackProducer("video").accept({ timescale: Timescale.MILLI, maxAge: null });
+	putGroup(producer, 0n, 0);
+	const reader = (max: number, end: bigint) =>
+		producer.subscribe(withMax({ delay: { max: Duration.millis(max) }, ranges: [{ end: end - 1n }] }));
+	const same = reader(500, 4n);
+	const narrower = reader(100, 4n);
+	const wider = reader(5000, 4n);
+	const lower = reader(500, 3n);
+	const higher = reader(500, 5n);
+	hooks.dropTrackGroups(producer, 1n, 3n, staleHole(500, 4n));
+	const dropped = (subscriber: typeof same) => {
+		const runs: [bigint, bigint][] = [];
+		for (let run = hooks.tryDrop(subscriber); run; run = hooks.tryDrop(subscriber)) runs.push([run.start, run.end]);
+		return runs;
+	};
+	expect(dropped(same)).toEqual([[1n, 3n]]);
+	expect(dropped(narrower)).toEqual([[1n, 3n]]);
+	// A wider budget still asks, and a cap apart from the verdict's may see other groups above it.
+	for (const subscriber of [wider, lower, higher]) expect(dropped(subscriber)).toEqual([]);
+	for (const subscriber of [same, narrower, wider, lower, higher]) subscriber.close();
+	producer.finish();
+	producer.close();
+});
+
 test("a superseded stale run is unknown again, and its group is handed out", () => {
 	const producer = new TrackProducer("video").accept({});
 	const reader = producer.subscribe(withMax({ delay: { max: Duration.millis(500) }, ranges: [{ start: 0n }] }));
