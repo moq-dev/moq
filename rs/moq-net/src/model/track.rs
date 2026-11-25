@@ -2803,6 +2803,16 @@ impl TrackState {
 		key < self.cache_floor(budget) || (self.lookup.contains_key(&key) && self.drifted(key, edge, budget))
 	}
 
+	/// Whether `budget` gave up group `key`, whose head a fill still owes, parking `waiter` on
+	/// what may give it up later: a group landing above it, or the clock alone, which no fill
+	/// answering or track change marks. Judged whether or not the cache still holds the
+	/// headless copy: an evicted one goes stale all the same.
+	fn poll_head_stale(&self, key: u64, servable: &Servable, budget: Duration, waiter: &kio::Waiter) -> bool {
+		// Parked first, so a group landing above while this judges wakes it.
+		let _ = self.cache.wakes().watch_landing(key, waiter);
+		key < self.cache_floor(budget) || self.poll_drifted(key, servable, budget, None, waiter)
+	}
+
 	/// Where a live join placed at `placed` starts for a reader within `budget`, as its
 	/// publisher reports it: past the groups held there and after that the budget expired, as
 	/// delivery starts at the first group it serves.
@@ -11634,6 +11644,16 @@ impl Cursor {
 		self.give_up_heads(given_up);
 	}
 
+	/// Whether the budget gave up group `key`, whose head an ordered read waits on, parking
+	/// `waiter` on what may give it up later; see [`TrackState::poll_head_stale`].
+	fn poll_head_stale(&self, key: u64, drift: &Drift, waiter: &kio::Waiter) -> bool {
+		let budget = drift.budget.at(key);
+		let polled = self.poll(waiter, |state| {
+			Poll::Ready(Ok(state.poll_head_stale(key, &self.servable, budget, waiter)))
+		});
+		matches!(polled, Poll::Ready(Ok(true)))
+	}
+
 	/// Write off the heads still asked whose group went stale within this cursor's window,
 	/// so a bounded read never waits on a fill for a group it would not hand out. The cursor
 	/// judges what it hands out, so a head fill does not ([`Fetching::unjudged`]).
@@ -11648,13 +11668,8 @@ impl Cursor {
 			let stale: Vec<(u64, stats::Content)> = asked
 				.iter()
 				.filter_map(|&key| {
-					// Parked first, so a group landing above while this judges wakes it.
-					let _ = state.cache.wakes().watch_landing(key, waiter);
-					// Judged whether or not the cache still holds the headless copy: an evicted
-					// one goes stale all the same, and counts as a group of unknown size.
-					(key < state.cache_floor(drift.budget.at(key))
-						|| state.poll_drifted(key, &servable, drift.budget.at(key), None, waiter))
-					.then(|| {
+					// An evicted headless copy counts as a group of unknown size.
+					(state.poll_head_stale(key, &servable, drift.budget.at(key), waiter)).then(|| {
 						let content = match state.lookup.get(&key) {
 							Some(slot) => slot.group.consume().content(),
 							None => stats::Content {
@@ -11878,6 +11893,12 @@ impl Cursor {
 						Some(head) => head.clone(),
 						// Given up: past it, as past any group no fill can serve.
 						None if self.misses.as_ref().is_some_and(|misses| misses.gone(key).is_some()) => {
+							floor = key.saturating_add(1);
+							continue;
+						}
+						// The budget gives it up while the fill is out, as [`Self::poll_stale`] would.
+						None if self.poll_head_stale(key, &drift, waiter) => {
+							self.seek_pending.insert(key, (group.content(), drift.budget.at(key)));
 							floor = key.saturating_add(1);
 							continue;
 						}
@@ -26668,6 +26689,39 @@ mod test {
 		}
 		head.finish().unwrap();
 		assert_eq!(reading.await.unwrap(), (Some(0), true));
+	}
+
+	/// A head an ordered read still asks goes stale once the budget passes it, as on an arrival
+	/// read: only the clock gives it up, so the read wakes for that rather than waiting on a fill
+	/// that may never answer.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_ordered_read_gives_up_a_head_still_asked_past_its_budget() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+
+		let mut live = producer.create_group(group::Info { start: 0 }).unwrap();
+		live.start_at(1).unwrap();
+		live.write_frame(live.key_time(), bytes::Bytes::from_static(b"delta"))
+			.unwrap();
+		live.finish().unwrap();
+		let mut newer = producer.create_group(group::Info { start: 1 }).unwrap();
+		newer
+			.write_frame(Timestamp::from_millis(1).unwrap(), bytes::Bytes::from_static(b"x"))
+			.unwrap();
+		newer.finish().unwrap();
+
+		let mut ordered = producer.subscribe(within(Duration::from_millis(100), 1)).ordered();
+		let (flag, waiter) = Flag::waiter();
+		assert!(ordered.poll_next_group(&waiter).is_pending(), "the head is still asked");
+		let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
+		assert_eq!(request.key(), 0);
+		flag.take();
+
+		elapse(&producer, Duration::from_millis(200));
+		assert!(flag.take(), "the budget giving up the head wakes the read");
+		assert!(matches!(ordered.poll_next_group(&waiter), Poll::Ready(Ok(Some(group))) if group.start == 1));
+		drop(request);
 	}
 
 	/// A head still asked when a newer group in the reader's window supersedes it is
