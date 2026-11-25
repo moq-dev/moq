@@ -2289,3 +2289,66 @@ async fn keyframe_decides_where_parameter_sets_live() {
 		}
 	}
 }
+
+/// An audio Block's own BlockDuration, before or after it, overrides the track default, so its
+/// group closes where its packets end instead of the default's estimate.
+#[tokio::test(start_paused = true)]
+async fn audio_block_duration_overrides_the_default() {
+	use MatroskaSpec::BlockDuration;
+	for before in [true, false] {
+		let mut entry = track_entry_audio_opus(1, 48_000.0, 2);
+		let MatroskaSpec::TrackEntry(Master::Full(children)) = &mut entry else {
+			unreachable!()
+		};
+		children.push(MatroskaSpec::DefaultDuration(20_000_000));
+		// 5 ms packets in a track that defaults to 20 ms.
+		let data = MkvBuilder::new()
+			.header("webm")
+			.segment_start()
+			.info(1_000_000)
+			.tracks(vec![entry])
+			.cluster(0, || {
+				(0..40i16)
+					.map(|index| {
+						let (front, back) = match before {
+							true => (vec![BlockDuration(5)], vec![]),
+							false => (vec![], vec![BlockDuration(5)]),
+						};
+						block_group(1, index * 5, b"\xf8\xff\xfe", front, back)
+					})
+					.collect()
+			})
+			.segment_end()
+			.build();
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut importer = super::Import::new(broadcast, catalog.reserve());
+		importer.decode(&data).unwrap();
+		let _finished = importer.finish().unwrap();
+
+		let snapshot = catalog.snapshot();
+		let published = crate::container::test_util::published(&consumer, &snapshot).await;
+		let expected: Vec<u128> = (0..40).map(|index| index * 5_000).collect();
+		assert_eq!(published.values().next().unwrap(), &expected, "before {before}");
+
+		let name = snapshot.audio.renditions.keys().next().unwrap();
+		let replay = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+			moq_net::track::Start::Live {
+				min: Some(std::time::Duration::from_secs(3600)),
+				max: Some(std::time::Duration::from_secs(3600)),
+			},
+		)]);
+		let mut track = consumer.track(name).unwrap().subscribe(replay).await.unwrap();
+		let mut groups = Vec::new();
+		while let Some(mut group) = track.recv_group().await.unwrap() {
+			let mut frames = 0;
+			while group.read_frame().await.unwrap().is_some() {
+				frames += 1;
+			}
+			groups.push((group.start, frames));
+		}
+		assert_eq!(groups, [(0, 20), (100_000, 20)], "before {before}");
+	}
+}

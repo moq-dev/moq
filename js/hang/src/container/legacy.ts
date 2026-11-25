@@ -168,6 +168,8 @@ export class Producer {
 	// start moved it past a marker. A frame at that source timestamp, such as the picture its
 	// parameter sets precede, is written with it.
 	#moved?: [number, number];
+	// The newest source timestamp in the current group, which a source end must reach.
+	#sourceEnd?: number;
 	#floor?: number;
 	// The newest frame of every group before the current one: every frame of the current group
 	// presents after it.
@@ -272,6 +274,7 @@ export class Producer {
 			this.#skipping = false;
 			this.#start = source;
 			this.#moved = timestamp === source ? undefined : [source, timestamp];
+			this.#sourceEnd = undefined;
 		} else if (!this.#group) {
 			throw new Error("must start with a keyframe");
 		}
@@ -294,6 +297,7 @@ export class Producer {
 		this.#previous = source;
 		this.#previousWritten = timestamp;
 		if (this.#end === undefined || timestamp > this.#end) this.#end = timestamp;
+		if (this.#sourceEnd === undefined || source > this.#sourceEnd) this.#sourceEnd = source;
 		if (this.#newest === undefined || timestamp > this.#newest) this.#newest = timestamp;
 	}
 
@@ -372,7 +376,8 @@ export class Producer {
 		let at = end === undefined ? undefined : micros(end);
 		// Only the moved keyframe presents past a source end that covers the source frames.
 		const moved = this.#group ? this.#moved : undefined;
-		if (at !== undefined && moved && this.#end === moved[1] && at < moved[1] && at >= moved[0]) at = moved[1];
+		const covered = this.#sourceEnd !== undefined && at !== undefined && at >= this.#sourceEnd;
+		if (at !== undefined && moved && this.#end === moved[1] && at < moved[1] && covered) at = moved[1];
 		this.#close(at);
 	}
 

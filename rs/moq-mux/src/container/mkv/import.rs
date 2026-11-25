@@ -113,6 +113,11 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	numbers: HashSet<u64>,
 	/// Whether a ReferenceBlock preceded the current BlockGroup's Block.
 	referenced: bool,
+	/// The current BlockGroup's BlockDuration, in Matroska ticks, once read.
+	block_duration: Option<u64>,
+	/// An audio Block whose group may close once its BlockGroup ends, since a BlockDuration can
+	/// follow it.
+	ended: Option<Ended>,
 	/// The SimpleBlock or Block streaming in.
 	block: Option<Block>,
 	/// The hvcC CodecPrivate streaming in.
@@ -283,6 +288,16 @@ enum BlockState {
 	Skip,
 }
 
+/// Where an audio block's frames start, waiting to learn where they end.
+#[derive(Clone, Copy)]
+struct Ended {
+	track: u64,
+	/// The first frame's presentation time, in nanoseconds.
+	pts_ns: u64,
+	/// Nanoseconds from the first frame to the last.
+	laced: u64,
+}
+
 /// What a block header says.
 #[derive(Clone, Copy)]
 struct Fixed {
@@ -343,6 +358,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			fields: Vec::new(),
 			numbers: HashSet::new(),
 			referenced: false,
+			block_duration: None,
+			ended: None,
 			block: None,
 			hvcc: None,
 			seek: None,
@@ -445,6 +462,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			(Some(CLUSTER), SIMPLE_BLOCK) => Action::Stream,
 			(Some(CLUSTER), BLOCK_GROUP) => Action::Descend,
 			(Some(BLOCK_GROUP), BLOCK) => Action::Stream,
+			(Some(BLOCK_GROUP), BLOCK_DURATION) => Action::Read,
 			_ => Action::Skip,
 		};
 		// A number is at most 8 bytes, so a larger one is refused before its bytes are held.
@@ -539,7 +557,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		}
 		match header.id {
 			id::CLUSTER => self.cluster_timestamp = 0,
-			id::BLOCK_GROUP => self.referenced = false,
+			id::BLOCK_GROUP => {
+				self.referenced = false;
+				self.block_duration = None;
+			}
 			_ => {}
 		}
 		Ok(())
@@ -552,6 +573,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			MatroskaSpec::TimestampScale(scale) => self.timestamp_scale_ns = scale,
 			// Within a Cluster, this is the cluster timestamp (in Matroska ticks).
 			MatroskaSpec::Timestamp(timestamp) => self.cluster_timestamp = timestamp,
+			MatroskaSpec::BlockDuration(duration) => self.block_duration = Some(duration),
 			value => set(
 				self.fields.last_mut().expect("a read field has a collecting parent"),
 				value,
@@ -592,6 +614,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				}
 			}
 			id::SIMPLE_BLOCK | id::BLOCK => self.block_end()?,
+			id::BLOCK_GROUP => {
+				self.settle()?;
+				self.block_duration = None;
+			}
 			id::CODEC_PRIVATE => {
 				let hvcc = self.hvcc.take().expect("only a filtered CodecPrivate is streamed");
 				set(
@@ -816,11 +842,18 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			.checked_mul(self.timestamp_scale_ns)
 			.ok_or(Error::TimestampOverflow)?;
 
-		// An audio packet lasts the track's default, which bounds its group's measured end; video's
-		// follows its cadence.
+		// An audio packet lasts its BlockDuration when one precedes it, else the track's default,
+		// which bounds its group's measured end; video's follows its cadence.
 		let duration = match (laced, track.kind) {
 			(true, _) => Some(track.default_duration.ok_or(Error::LacingDuration)?),
-			(false, TrackKind::Audio) => track.default_duration,
+			(false, TrackKind::Audio) => match (grouped, self.block_duration) {
+				(Some(_), Some(ticks)) => Some(std::time::Duration::from_nanos(
+					ticks
+						.checked_mul(self.timestamp_scale_ns)
+						.ok_or(Error::TimestampOverflow)?,
+				)),
+				_ => track.default_duration,
+			},
 			(false, TrackKind::Video) => None,
 		};
 		// Validate the last timestamp before publishing any part of this block.
@@ -932,21 +965,47 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			BlockState::Frames(frames) => {
 				// The frame sizes add up to the body, so every frame was written as its bytes arrived.
 				debug_assert!(frames.open.is_none() && frames.index == frames.sizes.len());
-				// An audio group closes at the end of the block that brings it to a join, so a block's
-				// frames stay in one group and the relay sees it finish without waiting for the next.
-				if frames.kind == TrackKind::Audio
-					&& let Some(track) = self.tracks.get_mut(&frames.track)
-				{
-					let laced = frames.step.saturating_mul(frames.sizes.len().saturating_sub(1) as u64);
-					let last = track.default_duration.map_or(0, |duration| duration.as_nanos() as u64);
-					let start = Timestamp::from_nanos(frames.pts_ns)?;
-					let end = Timestamp::from_nanos(frames.pts_ns.saturating_add(laced).saturating_add(last))?;
-					if track.join.fill(start, end) {
-						track.track.cut(None)?;
-					}
+				if frames.kind == TrackKind::Audio {
+					self.ended = Some(Ended {
+						track: frames.track,
+						pts_ns: frames.pts_ns,
+						laced: frames.step.saturating_mul(frames.sizes.len().saturating_sub(1) as u64),
+					});
 				}
 			}
 			BlockState::Skip => {}
+		}
+		// A Block's BlockGroup may still hold its BlockDuration.
+		if block.grouped.is_none() {
+			self.settle()?;
+		}
+		Ok(())
+	}
+
+	/// The last block's duration is known: close its audio group if it fills a join, then run a
+	/// seek that waited for it.
+	fn settle(&mut self) -> Result<()> {
+		if let Some(ended) = self.ended.take()
+			&& let Some(track) = self.tracks.get_mut(&ended.track)
+		{
+			// A BlockDuration spans the whole block; the default lasts its last frame.
+			let duration = match self.block_duration {
+				Some(ticks) => Some(
+					ticks
+						.checked_mul(self.timestamp_scale_ns)
+						.ok_or(Error::TimestampOverflow)?,
+				),
+				None => track
+					.default_duration
+					.map(|duration| ended.laced.saturating_add(duration.as_nanos() as u64)),
+			};
+			// An audio group closes at the end of the block that brings it to a join, so a block's
+			// frames stay in one group and the relay sees it finish without waiting for the next.
+			let start = Timestamp::from_nanos(ended.pts_ns)?;
+			let end = Timestamp::from_nanos(ended.pts_ns.saturating_add(duration.unwrap_or(ended.laced)))?;
+			if track.join.fill(start, end) {
+				track.track.cut(duration.map(|_| end))?;
+			}
 		}
 		if let Some(start) = self.seek.take() {
 			self.seek(start)?;
@@ -961,7 +1020,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// since its later frames continue its group.
 	pub fn seek(&mut self, start: u64) -> Result<()> {
 		self.input.check()?;
-		if self.block.is_some() {
+		if self.block.is_some() || self.ended.is_some() {
 			self.seek = Some(start);
 			return Ok(());
 		}

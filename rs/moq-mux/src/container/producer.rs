@@ -100,6 +100,8 @@ pub struct Producer<C: Container, R = ()> {
 	/// start moved it past a span. A frame at that source timestamp, such as the picture parameter
 	/// sets precede, is published with it.
 	moved: Option<(moq_net::Timestamp, moq_net::Timestamp)>,
+	/// The newest source timestamp in the open group, which a source end must reach.
+	source_end: Option<moq_net::Timestamp>,
 
 	/// The source timestamp of the keyframe that opened the latest group. The next group may not
 	/// start below it.
@@ -352,6 +354,7 @@ impl<C: Container> Producer<C> {
 			newest: None,
 			ended: None,
 			moved: None,
+			source_end: None,
 			start: None,
 			floor: None,
 			ceiling: None,
@@ -397,6 +400,7 @@ where
 			newest: None,
 			ended: None,
 			moved: None,
+			source_end: None,
 			start: None,
 			floor: None,
 			ceiling: None,
@@ -868,6 +872,7 @@ where
 			// Measured from the source, so a moved start never adds up across groups.
 			self.start = Some(source);
 			self.moved = (timestamp != source).then_some((source, timestamp));
+			self.source_end = None;
 			self.group = Some(group);
 			self.keyframe = Some(timestamp);
 			self.tainted = false;
@@ -958,7 +963,9 @@ where
 			return Ok(Some(end));
 		}
 		match self.moved {
-			Some((source, at)) if key(at) == key(newest) && key(end) >= key(source) => Ok(Some(at)),
+			Some((source, at)) if key(at) == key(newest) && key(end) >= key(self.source_end.unwrap_or(source)) => {
+				Ok(Some(at))
+			}
 			_ => Err(super::InvalidEnd.into()),
 		}
 	}
@@ -1066,6 +1073,7 @@ where
 			self.cadence = Some(delta);
 		}
 		self.previous_timestamp = Some((timestamp, at));
+		self.source_end = Some(self.source_end.map_or(timestamp, |end| super::later(end, timestamp)));
 		// At full precision, so the group's floor is its highest frame as `finish_at` sees it.
 		self.newest = Some(self.newest.map_or(at, |newest| super::later(newest, at)));
 
@@ -2262,6 +2270,23 @@ mod tests {
 			collect_starts(consumer).await,
 			vec![0, 20_000, 40_000, 60_000, 80_000, 100_000, 120_000]
 		);
+	}
+
+	/// A later frame below a moved keyframe still bounds its group's source end.
+	#[tokio::test]
+	async fn cut_below_a_later_frame_of_a_moved_group() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Audio));
+
+		producer.write(frame(0, true)).unwrap();
+		producer.cut(Some(Timestamp::from_micros(40_000).unwrap())).unwrap();
+		// Moved to 40 ms; the frame after it presents at its own 37 ms.
+		producer.write(frame(30_000, true)).unwrap();
+		producer.write(frame(37_000, false)).unwrap();
+		let below = producer.cut(Some(Timestamp::from_micros(35_000).unwrap()));
+		assert!(matches!(below, Err(crate::Error::InvalidEnd(_))), "{below:?}");
+		producer.cut(Some(Timestamp::from_micros(42_000).unwrap())).unwrap();
+		let _finished = producer.finish().unwrap();
 	}
 
 	/// A seek made before a decoder identity change keys the successor's first group.

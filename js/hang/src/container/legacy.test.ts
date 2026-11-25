@@ -150,6 +150,19 @@ test("Legacy Producer cuts a moved keyframe's group at its source end", async ()
 	]);
 });
 
+test("Legacy Producer refuses a source end below a later frame of a moved keyframe's group", async () => {
+	const media = track(Time.Timescale.MICRO);
+	const producer = new Producer(media, new Format("audio"));
+	producer.encode(new Uint8Array([1]), Duration.micros(0), true);
+	producer.cut(Duration.micros(40_000));
+	// Moved to 40 ms; the frame after it presents at its own 37 ms.
+	producer.encode(new Uint8Array([1]), Duration.micros(30_000), true);
+	producer.encode(new Uint8Array([1]), Duration.micros(37_000), false);
+	expect(() => producer.cut(Duration.micros(35_000))).toThrow();
+	producer.cut(Duration.micros(42_000));
+	producer.finish();
+});
+
 test("Legacy Producer starts video resuming at a discontinuity's end past its marker", async () => {
 	for (const [scale, at] of [
 		[Time.Timescale.MICRO, 33_001],
