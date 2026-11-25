@@ -107,6 +107,9 @@ test("Legacy Producer starts nothing inside the span of a group a cut ended", as
 	// Estimated from the cadence: 100 ms.
 	producer.cut();
 	producer.encode(new Uint8Array([1]), Duration.micros(90_000), true);
+	producer.cut();
+	producer.discontinuity();
+	producer.encode(new Uint8Array([1]), Duration.micros(110_000), true);
 	producer.finish();
 
 	expect(await groups(subscriber)).toEqual([
@@ -116,6 +119,9 @@ test("Legacy Producer starts nothing inside the span of a group a cut ended", as
 		{ start: 60_000n, end: 100_000n, frames: [60_000, 80_000] },
 		// Resumed below the estimated end, so stamped at it.
 		{ start: 100_000n, end: 120_000n, frames: [100_000] },
+		// The marker starts at the estimated end, and the keyframe below it lands past both.
+		{ start: 120_000n, end: undefined, frames: [120_000] },
+		{ start: 120_001n, end: undefined, frames: [120_001] },
 	]);
 });
 

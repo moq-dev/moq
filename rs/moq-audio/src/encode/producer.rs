@@ -112,7 +112,8 @@ pub struct Producer {
 	/// group starts strictly increase.
 	stamped: u64,
 	/// Where the newest published packet ends: the open group's end when encoding stops, since
-	/// frames stamped since may still wait in the backlog or the codec.
+	/// frames stamped since may still wait in the backlog or the codec. `None` after priming,
+	/// which ends where it starts and which the muxer may write a unit past a marker.
 	published: Option<Timestamp>,
 	/// An encoder reset that still needs a marker group before its next packet.
 	pending_discontinuity: bool,
@@ -627,8 +628,13 @@ impl Producer {
 		// Nothing reads on, so the open group ends where its last packet does: a reader of it,
 		// such as a fetch, finishes while the audio is retained. The epoch continues, so the
 		// replay that follows opens the next group with no marker.
-		if self.active && !active && !self.track.needs_keyframe() {
-			self.track.cut(self.published)?;
+		// A group ending in priming stays open for the packet that moves on, as `publish` leaves it.
+		if self.active
+			&& !active
+			&& !self.track.needs_keyframe()
+			&& let Some(end) = self.published
+		{
+			self.track.cut(Some(end))?;
 		}
 		self.active = active;
 		// One codec frame per turn lets capture keep draining while catching up.
@@ -730,7 +736,7 @@ impl Producer {
 			duration: None,
 		};
 		self.track.write(mux_frame)?;
-		self.published = Some(stamp.end);
+		self.published = (stamp.end > stamp.start).then_some(stamp.end);
 		self.grouped += self.encoder.frame_size() as u64;
 		// Cut as soon as the group is long enough rather than when the next packet arrives, so
 		// the relay sees it finish without waiting. The group ends whole where its last packet
@@ -2559,6 +2565,37 @@ mod tests {
 		// with its first.
 		assert_eq!(pts(1_050_000).await, vec![1_041_334, 1_041_334, 1_048_666, 1_070_000]);
 		assert_eq!(pts(1_000_000).await, vec![1_041_334, 1_041_334, 1_041_334, 1_061_333]);
+	}
+
+	/// Priming stamped where the packets before a reanchor end lands on the break's marker, so the
+	/// muxer writes it a unit later. Stopping with only priming in the open group leaves that group
+	/// open for the packet that moves on, as `publish` does, rather than cutting below its packets.
+	#[tokio::test]
+	async fn stopping_after_priming_on_a_marker_keeps_the_track() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let input = Input::new(48_000, Layout::Mono);
+		let options = Options {
+			track: Some("audio".to_string()),
+			config: Config::from_input(crate::encode::Codec::Aac, &input),
+			..Options::default()
+		};
+		let stub = crate::encode::backend::stub::install();
+		let mut producer = Producer::new(&mut broadcast, catalog, input, &options).unwrap();
+		drop(stub);
+
+		producer.write(&pcm_frame(&[0.1; 4 * 1024], 1_000_000)).unwrap();
+		producer.reanchor();
+		// The codec returns two priming packets, stamped at 1_041_333 and written at 1_041_334.
+		producer.write(&pcm_frame(&[0.1; 2 * 1024], 1_000_000)).unwrap();
+		producer
+			.set_active(false, Timestamp::from_micros(1_100_000).unwrap())
+			.unwrap();
+		producer
+			.set_active(true, Timestamp::from_micros(1_100_000).unwrap())
+			.unwrap();
+		producer.write(&pcm_frame(&[0.1; 3 * 1024], 1_021_333)).unwrap();
+		let _finished = producer.finish().unwrap();
 	}
 
 	/// A codec that holds frames returns their packets late, and each still goes out at the stamp

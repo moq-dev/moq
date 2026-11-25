@@ -224,13 +224,14 @@ export class Producer {
 		// With no group open, one landing on the latest group's start, such as media resuming right
 		// at a discontinuity's marker, or inside the span of the group a cut ended whole, starts at
 		// the first start past both instead.
+		// The span first, since a marker may start at its end.
 		if (keyframe && !behind && !this.#group) {
+			if (this.#ended !== undefined && keyOf(this.#track, timestamp) < this.#ended) {
+				timestamp = startAt(this.#track, this.#ended);
+			}
 			const largest = this.#track.largest()?.group;
 			if (largest !== undefined && keyOf(this.#track, timestamp) === largest) {
 				timestamp = startAt(this.#track, largest + 1n);
-			}
-			if (this.#ended !== undefined && keyOf(this.#track, timestamp) < this.#ended) {
-				timestamp = startAt(this.#track, this.#ended);
 			}
 		}
 		const opens = keyframe && !behind && startsPast(this.#track, timestamp);
