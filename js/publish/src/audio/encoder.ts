@@ -497,15 +497,6 @@ export class Encoder {
 			// retained for the subscription that follows rather than replaying all of it.
 			const subscription = track && effect.get(track.subscription);
 			this.#budget = replayBudget(subscription);
-			// TEMPORARY: the ARM measurement's demand trace; deleted before review.
-			const ranges = subscription?.ranges?.map((range) =>
-				typeof range.start === "object" && "live" in range.start
-					? `live(min ${range.start.live.min ?? "none"}, max ${range.start.live.max ?? "none"})`
-					: `${String(range.start)}..${String(range.end)}`,
-			);
-			console.debug(
-				`tmp-audio track=${track?.name} sub=${subscription ? (ranges?.join(",") ?? "default") : "none"} budget=${this.#budget ?? "all"}`,
-			);
 			// Not gated on `enabled` or `muted`: a paused rendition takes no capture, but still encodes what it retained.
 			const was = encoding;
 			encoding = !!format && !!track && !fatal && (!onDemand || subscription !== undefined);
