@@ -7016,6 +7016,76 @@ mod tests {
 		assert!(matches!(closed, Poll::Ready(Err(Error::Unauthorized))), "{closed:?}");
 	}
 
+	/// A finished copy's reader waiting on a time its probes can't ask, the last key, is failed
+	/// rather than left waiting for good.
+	#[kio::test]
+	async fn a_finished_copy_refuses_a_time_start_at_the_last_key() {
+		let (session, _peer) = crate::transport::memory::pair(Default::default());
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session: crate::driver::Transport::new(session.clone()),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version: Version::Lite07,
+			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+			peer_node: None,
+			cost: None,
+			going_away: Default::default(),
+			auth: crate::auth::Link::new(false),
+		});
+		let serve = TrackServe {
+			validity: Default::default(),
+			route: None,
+			source: None,
+			subscriber,
+			path: Path::from_static("room"),
+			instance: None,
+			node: None,
+			name: "video".to_string(),
+		};
+		let broadcast = crate::broadcast::Info::new().produce();
+		let serve_loop = ServeLoop::new(
+			&serve,
+			broadcast.reserve_track("video").unwrap(),
+			crate::track::Info::timed(),
+		);
+		let mut track = serve_loop.serving.clone();
+		track.finish_at(Position::group(10)).unwrap();
+		let mut finished = FinishedServe {
+			serving: Some(serve_loop.serving),
+			demand: serve_loop.demand,
+			dynamic: serve_loop.dynamic,
+			fetches: serve_loop.fetches,
+			range_fills: RangeFills::per_run(),
+			asks: Vec::new(),
+			priority: 0,
+			probes: Default::default(),
+			placed: Default::default(),
+			closed: serve_loop.closed,
+		};
+		let reader = broadcast
+			.consume()
+			.track("video")
+			.unwrap()
+			.subscribe(
+				track::Subscription::default()
+					.with_ranges([track::Range {
+						start: crate::track::Start::Time(u64::MAX),
+						end: None,
+					}])
+					.with_max(None),
+			)
+			.await
+			.unwrap();
+		let mut ordered = reader.ordered();
+		assert!(ordered.next_item().now_or_never().is_none(), "waits on its upstream");
+
+		finished.probe(&serve, true, &kio::Waiter::noop()).unwrap();
+		assert_eq!(finished.asks, [u64::MAX], "the reader asks the last key");
+		let res = ordered.next_item().now_or_never();
+		assert!(matches!(res, Some(Err(_))), "{:?}", res.map(|res| res.map(|item| item.is_some())));
+	}
+
 	/// Drive the subscriber with a peer's response bytes followed by FIN.
 	async fn check_subscription_fin(version: Version, responses: Vec<u8>, clean: bool) {
 		let session = crate::lite::test_transport::ScriptedSession::eof(responses);
@@ -13158,8 +13228,10 @@ impl FinishedServe {
 			if self.placed.contains_key(&time) || self.probes.contains_key(&time) {
 				continue;
 			}
-			// No group starts at the last key, so no range from it holds one.
+			// No group starts at the last key, so no range from it holds one: its readers are
+			// failed rather than left waiting on a probe never asked.
 			let Some(end) = time.checked_add(1) else {
+				serving.refuse_time(time, Error::NotFound);
 				continue;
 			};
 			self.probes
