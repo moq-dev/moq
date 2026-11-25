@@ -1,4 +1,4 @@
-import { fromTransport, StreamCode, TooFarBehind, toStreamCode, toTransport } from "./error.ts";
+import { fromTransport, StreamCode, streamCode, TooFarBehind, toStreamCode, toTransport } from "./error.ts";
 import { sharedStreamCode } from "./ietf/error.ts";
 import type { IetfVersion } from "./ietf/version.ts";
 import { Version as Lite, type Version as LiteVersion } from "./lite/version.ts";
@@ -66,7 +66,7 @@ function isLite(version: StreamVersion): version is LiteVersion {
 }
 
 /** The moq-transport draft a stream follows, or undefined on moq-lite, whose stream codes are the same on every draft. */
-function asIetf(version: StreamVersion): IetfVersion | undefined {
+export function asIetf(version: StreamVersion): IetfVersion | undefined {
 	return isLite(version) ? undefined : version;
 }
 
@@ -160,6 +160,9 @@ export interface TryOpenOptions extends Omit<OpenOptions, "sendOrder"> {
 
 /** A send stream that reports what it sent, as W3C WebTransport's `WebTransportSendStream.getStats()` does. */
 type Stats = WritableStream<Uint8Array> & { getStats(): Promise<{ bytesAcknowledged: number }> };
+
+/** A send stream that can reset while still delivering a prefix, as `@moq/qmux`'s can. */
+type ResetsAt = WritableStream<Uint8Array> & { resetAt(offset: number, reason?: unknown): void };
 
 export class Stream {
 	reader: Reader;
@@ -364,6 +367,12 @@ export class Reader {
 		return result instanceof Short ? undefined : result;
 	}
 
+	/** Like {@link tryDecode}, but consumes nothing: a look at what is buffered. */
+	tryPeek<T extends NonNullable<unknown>>(decode: (c: Cursor) => T): T | undefined {
+		const result = this.#try(decode, false);
+		return result instanceof Short ? undefined : result;
+	}
+
 	/** Run a synchronous decode, filling from the stream until it has the bytes it needs. */
 	async decode<T>(decode: (c: Cursor) => T): Promise<T> {
 		for (;;) {
@@ -373,8 +382,8 @@ export class Reader {
 		}
 	}
 
-	// Like decode, but leaves the bytes buffered for the next read.
-	async #peek<T>(decode: (c: Cursor) => T): Promise<T> {
+	/** Like {@link decode}, but leaves the bytes buffered for the next read. */
+	async peek<T>(decode: (c: Cursor) => T): Promise<T> {
 		for (;;) {
 			const result = this.#try(decode, false);
 			if (!(result instanceof Short)) return result;
@@ -482,7 +491,7 @@ export class Reader {
 
 	/** Like {@link u62}, but leaves the varint buffered, so a stream's type can be read twice. */
 	async peekU62(): Promise<bigint> {
-		return this.#peek(U62);
+		return this.peek(U62);
 	}
 
 	async varint(): Promise<U64> {
@@ -710,6 +719,14 @@ export class Writer implements OpenStream {
 	#acknowledges = false;
 	/** Reset by this side, or failed or stopped by the peer, so never acknowledged. */
 	#aborted = false;
+	/** Whether the transport can reset while still delivering a prefix, known at open. */
+	#resetsAt: boolean;
+	/** The bytes every later reset still delivers, once {@link hold} marks them. */
+	#held?: number;
+	/** What this side first reset the stream with, which tells its end apart from a peer's stop. */
+	#reason?: unknown;
+	/** The code the peer stopped the stream with. */
+	#stop?: StreamCode;
 	/** The session's open group streams, while this one is among them. */
 	#listed?: OpenStreams;
 
@@ -722,12 +739,15 @@ export class Writer implements OpenStream {
 		this.#stream = stream;
 		this.#scratch = new ArrayBuffer(9);
 		this.#writer = this.#stream.getWriter();
+		this.#resetsAt = typeof (stream as Partial<ResetsAt>).resetAt === "function";
 		this.version = version;
 		// The stream ends once it is finished, or with a failure: a reset, a stop, or the session closing.
 		this.#writer.closed.then(
 			() => this.#unlist(),
-			() => {
+			(err: unknown) => {
 				this.#aborted = true;
+				// A reset of this side's ends the stream with its own reason, so any other code is the peer's stop.
+				if (err !== this.#reason) this.#stop = streamCode(err);
 				this.#unlist();
 			},
 		);
@@ -763,6 +783,38 @@ export class Writer implements OpenStream {
 		const written = this.#written;
 		const stats = await (this.#stream as Stats).getStats();
 		return !this.#aborted && stats.bytesAcknowledged >= written;
+	}
+
+	/**
+	 * From now on, every reset of the stream, a preemption included, still delivers the bytes
+	 * written so far. Call it once every write so far resolved. Returns whether the transport
+	 * can: a browser's WebTransport cannot, so its resets may still lose them, and a stream
+	 * already reset or stopped, perhaps preempted before this, has lost them already.
+	 */
+	hold(): boolean {
+		if (this.#aborted) return false;
+		this.#held = this.#written;
+		return this.#resetsAt;
+	}
+
+	/**
+	 * Whether the peer acknowledged every byte {@link hold} marked, even after the stream ended;
+	 * false when nothing is held or the transport cannot tell.
+	 */
+	async heldAcknowledged(): Promise<boolean> {
+		const held = this.#held;
+		if (held === undefined || !this.#acknowledges) return false;
+		const stats = await (this.#stream as Stats).getStats();
+		return stats.bytesAcknowledged >= held;
+	}
+
+	/**
+	 * The code the peer stopped the stream with, or undefined while it has not: still open,
+	 * finished, reset by this side first, or failed with its session. Known before a write or
+	 * {@link closed} that the stop failed settles.
+	 */
+	get stopped(): StreamCode | undefined {
+		return this.#stop;
 	}
 
 	async bool(v: boolean) {
@@ -849,10 +901,18 @@ export class Writer implements OpenStream {
 		this.reset(new TooFarBehind());
 	}
 
+	/** Reset the stream with `reason`, still delivering what {@link hold} marked where the transport can. */
 	reset(reason: unknown) {
 		this.#aborted = true;
 		this.#unlist();
-		this.#writer.abort(withCode(reason, this.version)).catch(() => void 0);
+		const coded = withCode(reason, this.version);
+		// Only the first reset reaches the transport, so its reason is the one the stream ends with.
+		this.#reason ??= coded;
+		if (this.#held !== undefined && this.#resetsAt) {
+			(this.#stream as ResetsAt).resetAt(this.#held, coded);
+		} else {
+			this.#writer.abort(coded).catch(() => void 0);
+		}
 	}
 
 	#unlist() {
@@ -955,9 +1015,5 @@ export class Readers {
 		const next = await this.#reader.read();
 		if (next.done) return;
 		return new Reader(next.value, undefined, this.#version);
-	}
-
-	close() {
-		this.#reader.cancel();
 	}
 }

@@ -820,8 +820,10 @@ impl<T: Clone> Dpb<T> {
 				pic.pic_order_cnt = 0;
 			}
 			Field::Frame => {
-				pic.top_field_order_cnt -= pic.pic_order_cnt;
-				pic.bottom_field_order_cnt -= pic.pic_order_cnt;
+				// Saturates rather than overflows for a stream whose fields are
+				// further apart than an `i32` holds, which no conforming one is.
+				pic.top_field_order_cnt = pic.top_field_order_cnt.saturating_sub(pic.pic_order_cnt);
+				pic.bottom_field_order_cnt = pic.bottom_field_order_cnt.saturating_sub(pic.pic_order_cnt);
 				pic.pic_order_cnt = std::cmp::min(pic.top_field_order_cnt, pic.bottom_field_order_cnt);
 			}
 		}

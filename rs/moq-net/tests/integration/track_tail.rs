@@ -11,6 +11,7 @@
 //!
 //! Time is paused, so the one-second grace for a group that never arrives is free.
 
+use crate::WithMax as _;
 use crate::support;
 use support::AppendNext;
 use support::AtStart;
@@ -34,7 +35,7 @@ const PAYLOAD: &[u8] = b"frame";
 /// How long a subscriber waits for a group it cannot account for, with no max delay set.
 const GRACE: Duration = Duration::from_secs(1);
 
-/// moq-lite drafts with and without SUBSCRIBE_FINISH, and IETF drafts with a joining
+/// moq-lite drafts with and without SUBSCRIBE_END, and IETF drafts with a joining
 /// FETCH (18) and with subscription fills (22).
 const VERSIONS: &[&str] = &[
 	"moq-lite-03",
@@ -126,9 +127,9 @@ async fn round(version: &str, late: Late, final_key: u64, max_delay: Option<Dura
 	} = connect(version).await;
 
 	let reader = kio::clock::sim::spawn(async move {
-		let subscription = moq_net::track::Subscription::default()
-			.with_ranges([support::keys(0..)])
-			.with_delay(moq_net::track::Delay::default().with_max(max_delay));
+		// Every group still within `max_delay`: a live join, so a group that never arrives goes
+		// stale, or with none, every group, as history.
+		let subscription = moq_net::track::Subscription::default().with_max(max_delay);
 		let mut sub = remote
 			.track("video")
 			.unwrap()
@@ -354,7 +355,7 @@ async fn draft18_a_join_reaching_a_finished_track_keeps_its_head() {
 }
 
 /// IETF drafts with a joining FETCH (18) and with subscription fills (22).
-const IETF: &[&str] = &["moq-transport-18", "moq-transport-22"];
+const IETF: &[&str] = &["moq-transport-18", "moq-transport-22", "moq-transport-23"];
 
 /// A subscriber that leaves while END_OF_TRACK waits for stream credit ends the publisher's
 /// request, instead of parking it until credit that may never come.
@@ -427,7 +428,7 @@ async fn a_group_whose_first_frame_trails_its_header_is_delivered() {
 		let reader = kio::clock::sim::spawn(async move {
 			let subscription = moq_net::track::Subscription::default()
 				.with_ranges([support::keys(0..)])
-				.with_delay(moq_net::track::Delay::default().with_max(TIMEOUT));
+				.with_max(TIMEOUT);
 			let mut sub = remote
 				.track("video")
 				.unwrap()

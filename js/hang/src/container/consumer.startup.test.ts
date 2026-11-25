@@ -2,6 +2,7 @@ import { expect, onTestFinished, spyOn, test } from "bun:test";
 import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { type Group, Error as NetError, StreamCode, Time, Track } from "@moq/net";
+import { within } from "../subscription.test-util.ts";
 import { Consumer, type Read } from "./consumer.ts";
 import { encodeFrame, Format } from "./legacy.ts";
 
@@ -11,8 +12,8 @@ function setup(maxDelay = 100) {
 	const installed = clock.install();
 	// Drain the in-memory readers and their continuations without moving time.
 	const flush = () => clock.advance(Duration.ZERO);
-	const track = new Track.Producer("video");
-	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(maxDelay) } }), {
+	const track = new Track.Producer("video").accept({ timescale: Time.Timescale.MICRO, maxAge: null });
+	const consumer = new Consumer(track.subscribe(within(Duration.millis(maxDelay))), {
 		format: new Format("video"),
 		delay: { min: null, max: Duration.millis(maxDelay) },
 	});

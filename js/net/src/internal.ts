@@ -20,11 +20,11 @@ import * as Instance from "./instance.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
 import type {
-	Delay,
 	Demand,
 	Groups,
 	Info,
 	InfoInit,
+	Live,
 	Position,
 	Producer,
 	Request,
@@ -34,10 +34,10 @@ import type {
 } from "./track.ts";
 import { max, min } from "./util/key.ts";
 import * as Varint from "./varint.ts";
-import type { Holdings, Resolved } from "./window.ts";
+import type { Budget, Holdings, Resolved } from "./window.ts";
 import type { Advertised, Advertisements } from "./wire.ts";
 
-/** A null {@link Delay.max} in milliseconds, which the model holds as the largest value every peer can read. */
+/** A null {@link Live.max} in milliseconds, which the model holds as the largest value every peer can read. */
 export const NO_MAX_DELAY = Varint.MAX_U53;
 
 /** A datagram track's properties as the stream track info a wire answers with: no groups, so no age, refresh, or compression. */
@@ -57,19 +57,6 @@ export function datagramTrackInfo(info: datagram.Info): Info {
  * the largest, or a reader of the newest group reaching a frame its copy shed.
  */
 export type Ask = "join" | "refresh" | "shed";
-
-/** A subscription's {@link Delay.max} in milliseconds as the wire carries it: null for no limit, omitted for zero. */
-export function maxDelayOf(subscription: Pick<Subscription, "delay">): number {
-	const max = subscription.delay?.max;
-	if (max === null) return NO_MAX_DELAY;
-	return max?.asMillis() ?? 0;
-}
-
-/** A subscription's {@link Delay.max} in milliseconds as SUBSCRIBE carries it: null for no limit. */
-export function wireMaxDelay(subscription: Pick<Subscription, "delay">): number | null {
-	const max = maxDelayOf(subscription);
-	return max < NO_MAX_DELAY ? max : null;
-}
 
 /**
  * `value` rounded up to a whole millisecond, as the wire carries it: callers derive one from
@@ -128,36 +115,150 @@ export function presented(
 	prefix: Path.Valid,
 	table: Advertisements,
 	carries: (covered: Path.Valid) => boolean,
-	// Lite-07: a route above the prefix keeps how many segments broader than the prefix it is.
-	keepAbove = false,
-	shows: (candidate: Advertised, at: Path.Valid) => boolean = () => true,
+	options: {
+		// The absolute path the table's paths hang from, so claims rank as a request resolves.
+		root?: Path.Valid;
+		// Lite-07: a route above the prefix keeps how many segments broader than the prefix it is.
+		keepAbove?: boolean;
+		shows?: (candidate: Advertised, at: Path.Valid) => boolean;
+	} = {},
 ): Map<Path.Valid, Advertised> {
+	const { root = Path.empty(), keepAbove = false, shows = () => true } = options;
 	const out = new Map<Path.Valid, Advertised>();
-	// The most specific claim covering the prefix wins, then the deeper filing, as a request resolves.
-	let rootRank: [number, number] | undefined;
+	// Every claim covering the prefix, as a request through the prefix resolves: the most specific
+	// tier, ranked across the prefixes its claims are filed at, each by its absolute filing.
+	const covering: Filed<Advertised>[] = [];
 	for (const [covered, candidates] of table) {
 		if (!carries(covered)) continue;
 		if (Path.hasPrefix(covered, prefix)) {
-			const snap = firstEligible(candidates, (candidate) => shows(candidate, prefix));
-			if (!snap) continue;
 			const depth = Path.parts(covered).length;
-			const rank: [number, number] = [depth - Number(snap.route.above ?? 0n), depth];
-			if (rootRank && (rank[0] < rootRank[0] || (rank[0] === rootRank[0] && rank[1] < rootRank[1]))) continue;
-			rootRank = rank;
-			const above = BigInt(Path.parts(prefix).length - depth);
-			out.set(
-				Path.empty(),
-				keepAbove && above > 0n
-					? { ...snap, route: { ...snap.route, above: (snap.route.above ?? 0n) + above } }
-					: snap,
-			);
+			candidates.forEach((candidate, order) => {
+				if (!shows(candidate, prefix)) return;
+				// Hold the empty suffix's place in the order the table lists its first claim.
+				if (covering.length === 0) out.set(Path.empty(), candidate);
+				covering.push({
+					prefix: candidate.filed ?? Path.join(root, covered),
+					depth,
+					order: candidate.order ?? order,
+					arrival: arrival(candidate.identity),
+					candidate,
+					route: candidate.route,
+				});
+			});
 			continue;
 		}
 		const suffix = Path.stripPrefix(prefix, covered);
 		const best = suffix !== null ? firstEligible(candidates, (candidate) => shows(candidate, covered)) : undefined;
 		if (suffix !== null && best) out.set(suffix, best);
 	}
+	// Hashed on the absolute path requested, as a request for it resolves. A broadcast published
+	// above that path serves only its own, so a tier-mate that serves the path ranks ahead of it.
+	const at = Path.join(root, prefix);
+	const best = bestOfTier(at, covering, { serves: (entry) => !entry.candidate.exact || entry.prefix === at });
+	if (best) {
+		const snap = best.candidate;
+		const above = BigInt(Path.parts(prefix).length - best.depth);
+		out.set(
+			Path.empty(),
+			keepAbove && above > 0n
+				? { ...snap, route: { ...snap.route, above: (snap.route.above ?? 0n) + above } }
+				: snap,
+		);
+	}
 	return out;
+}
+
+/**
+ * A candidate filed at `prefix`, `depth` segments deep, `order`th in its prefix's preference, and
+ * {@link arrival} `arrival`th.
+ */
+export interface Filed<T> {
+	readonly prefix: Path.Valid;
+	readonly depth: number;
+	readonly order: number;
+	readonly arrival: number;
+	readonly candidate: T;
+	readonly route: WireRoute;
+}
+
+// When each advertisement's identity was first received, across every filing.
+const receipts = new WeakMap<object, number>();
+let nextReceipt = 0;
+
+/** Records `identity` as received now, as each announce of a claim is: it ranks as the newest. */
+export function receive(identity: object): void {
+	receipts.set(identity, nextReceipt++);
+}
+
+/**
+ * The order `identity` was last {@link receive}d in, stamped now if it never was: a later one is
+ * larger, so a full tie across filings goes to the most recently received claim, as Rust's newest
+ * route entry. An update keeps its identity's place.
+ */
+export function arrival(identity: object): number {
+	let order = receipts.get(identity);
+	if (order === undefined) {
+		order = nextReceipt++;
+		receipts.set(identity, order);
+	}
+	return order;
+}
+
+/**
+ * The best of the most specific claims among `filed`, which all cover `path`: a claim shown above
+ * its own prefix counts for the shallower prefix it is really at, and claims of one prefix rank
+ * against each other wherever each is filed. Only an instance's highest epoch among them (and
+ * `others`, of the same claim when `exact`) is eligible; one that `serves` `path` ranks ahead, then
+ * {@link compareTier}, then {@link compareTie}. Mirrors `RouteTable::best_route` in rs/moq-net,
+ * and with `serves`, `TableCursor::best`.
+ */
+export function bestOfTier<T>(
+	path: Path.Valid,
+	filed: readonly Filed<T>[],
+	options: {
+		others?: (specificity: number) => readonly WireRoute[];
+		serves?: (entry: Filed<T>) => boolean;
+	} = {},
+): Filed<T> | undefined {
+	const { others = () => [], serves = () => true } = options;
+	const specificity = (entry: Filed<T>) => entry.depth - Number(entry.route.above ?? 0n);
+	// A loop, not a spread: a table may hold more candidates than a call takes arguments.
+	let most = Number.NEGATIVE_INFINITY;
+	for (const entry of filed) most = Math.max(most, specificity(entry));
+	const tier = filed.filter((entry) => specificity(entry) === most);
+	// One claim prefix: an instance's epochs compare across the whole tier.
+	const epochs = new Epochs([...tier.map((entry) => entry.route), ...others(most)], () => 0n);
+	let best: Filed<T> | undefined;
+	for (const entry of tier) {
+		if (epochs.supersedes(entry.route)) continue;
+		if (best === undefined) {
+			best = entry;
+			continue;
+		}
+		const serving = Number(serves(best)) - Number(serves(entry));
+		if ((serving || compareTier(path, entry, best) || compareTie(path, entry, best)) < 0) best = entry;
+	}
+	return best;
+}
+
+/**
+ * How a full tie between two claims of one tier resolving `path` breaks: to the newest, by each
+ * prefix's own order and across prefixes the most recently {@link arrival}, as Rust's final
+ * `Reverse(entry.id)`, so a publisher that restarts under a new instance takes over at once. Filed
+ * beneath `path` where neither is a lite-07 claim, it goes to the oldest instead, as Rust's
+ * `RouteEntry::since`: switching there would restart the route at every relay downstream that
+ * ranks it alike. Rust also renews `since` when a re-price changes the rank; this origin forwards
+ * no route it received, so a route that dips and recovers here restarts only its own readers.
+ * Then the deeper filing.
+ */
+export function compareTie(
+	path: Path.Valid,
+	a: Pick<Filed<unknown>, "prefix" | "depth" | "order" | "arrival" | "route">,
+	b: Pick<Filed<unknown>, "prefix" | "depth" | "order" | "arrival" | "route">,
+): number {
+	const newest = a.prefix === b.prefix ? a.order - b.order : b.arrival - a.arrival;
+	const holds = a.prefix !== path && b.prefix !== path && !a.route.claimed && !b.route.claimed;
+	return (holds ? -newest : newest) || b.depth - a.depth;
 }
 
 /**
@@ -165,19 +266,13 @@ export function presented(
  * candidate supersedes. Supersession is decided among what the reader may see, so a higher epoch
  * it cannot see never hides a route it can.
  */
-export function firstEligible<T extends { readonly route: WireRoute; readonly prefix?: Path.Valid }>(
+export function firstEligible<T extends { readonly route: WireRoute }>(
 	candidates: readonly T[],
 	admits: (candidate: T) => boolean = () => true,
 ): T | undefined {
 	const admitted = candidates.filter(admits);
-	const byPrefix = new Map<Path.Valid | undefined, WireRoute[]>();
-	for (const candidate of admitted) {
-		const routes = byPrefix.get(candidate.prefix);
-		if (routes) routes.push(candidate.route);
-		else byPrefix.set(candidate.prefix, [candidate.route]);
-	}
-	const epochs = new Map([...byPrefix].map(([prefix, routes]) => [prefix, new Epochs(routes)]));
-	return admitted.find((candidate) => !epochs.get(candidate.prefix)?.supersedes(candidate.route));
+	const epochs = new Epochs(admitted.map((candidate) => candidate.route));
+	return admitted.find((candidate) => !epochs.supersedes(candidate.route));
 }
 
 /**
@@ -398,6 +493,13 @@ export function runGaps(runs: readonly Run[], start: bigint, end: bigint): Run[]
 }
 
 /**
+ * What a group read reports as a `drop` before the group: nothing, everything its cursor gives up,
+ * or `"budget"`, only what its budget skips, still handing out a failed group so a front's read
+ * continues it through its recovery, as a front reads its serving copy.
+ */
+export type Dispositions = boolean | "budget";
+
+/**
  * What a non-blocking group read found, which is everything the caller needs to decide what
  * to do next: no second look at the track's closed state, and no ordering rule to get wrong.
  */
@@ -434,6 +536,8 @@ export interface ReadGroupFrame {
 export interface Within {
 	contains: (key: bigint) => boolean;
 	end: () => bigint | undefined;
+	/** How long each group stays worth delivering, as the logical reader's own ranges set it. */
+	budget: () => Budget;
 	/** What can change either. */
 	changed: readonly Getter<unknown>[];
 }
@@ -447,6 +551,12 @@ export interface ResumeShell {
 	 * live: each copy it asks takes an answer recorded since (see `hooks.stampSubscriber`).
 	 */
 	since(): readonly number[];
+	/**
+	 * Whether the reader's ranges last changed by a retune alone, each live join kept where it joined
+	 * under another max: each copy then retunes its own in place, and otherwise is asked whole,
+	 * restated. Mirrors the Rust `Change::Edit` against `Change::All`.
+	 */
+	retuned(): boolean;
 	/** The reader's group cursor: an inclusive start and an exclusive end. */
 	readonly cursor: Getter<{ start: bigint; end?: bigint }>;
 	/** Settles once the logical track ends. */
@@ -468,7 +578,7 @@ export interface Expiry {
 /**
  * Why a group read looks past the copy it reads, as the Rust `resume::Cause`: the copy failed,
  * stalled while a newer route serves, or closed the group short of a known end (a FIN without
- * GROUP_END) after a newer route took over, which may hold more.
+ * GROUP_END) after a newer route took over or while one is being spliced in, which may hold more.
  */
 export type RecoverCause = { kind: "failed"; error: Error } | { kind: "stalled" } | { kind: "closed" };
 
@@ -482,10 +592,10 @@ export interface GroupRecover {
 	/** Release the route held by this group when its consumer closes. */
 	close?(): void;
 	/**
-	 * Whether to look past the copy being read: it failed with `failed` and that is no verdict
-	 * on the group, or (with none) it stalled or closed short while a newer route serves.
+	 * Whether to look past the copy being read for `cause`: it failed and that is no verdict on
+	 * the group, or it stalled or closed short while a newer route serves.
 	 */
-	wants(failed: Error | undefined): boolean;
+	wants(cause: RecoverCause): boolean;
 	/** Wakes a stalled read once the route changes. */
 	readonly changed: Getter<unknown>;
 	/**
@@ -572,12 +682,26 @@ export interface ResumeSource {
 	changed(fn: () => void): Dispose;
 	/** Forget the gaps in `delivered` below each group past the budget, judged on the newest copy. */
 	forgetPastBudget(delivered: Delivered): void;
+	/**
+	 * Forget the gaps in `delivered` below each group past `budget`, an outer reader's whose
+	 * `delivered` this is, judged on the newest copy. Mirrors the Rust `Subscriber::forget_past`.
+	 */
+	forgetPast(delivered: Delivered, budget: Budget): void;
+	/**
+	 * Forget every copy's report of `[start, end)`, so the copy serving when the reader's ranges ask
+	 * for it again reports it again. Mirrors the Rust `Reader::untell`.
+	 */
+	untell(start: bigint, end: bigint): void;
 	/** Have every copy read whole groups for this reader; see `hooks.wholeGroups`. */
 	wholeGroups(frameOf: (key: bigint) => number | undefined): void;
 	/** The newest key any copy has seen. */
 	latest(): bigint | undefined;
 	/** The serving copy's declared start, raised to its cursor floor, or `"pending"` until resolved. */
 	start(): bigint | "pending" | undefined;
+	/** Whether the serving copy places ranges as its publisher would; see `hooks.placesAsUpstream`. */
+	placesAsUpstream(): boolean;
+	/** Whether the serving copy knows where the live feed is; see `hooks.knowsEdge`. */
+	knowsEdge(): boolean;
 	/** The logical track's declared exclusive end, as the first copy to know it declared it. */
 	end(): Position | undefined;
 	/** The longest run of keys just below `key` any copy knows were never produced. */
@@ -586,6 +710,8 @@ export interface ResumeSource {
 	starts(from: bigint): (bigint | undefined)[] | undefined;
 	/** Each range as the reader's window resolved it, whichever copy serves. */
 	resolved(): (Resolved | undefined)[];
+	/** Where a live join this reader placed at `placed` starts under `budget` milliseconds, on the serving copy. */
+	joinStart(placed: bigint, budget: number): bigint;
 	/** The runs of `[start, end)` the serving copy reads, undefined without one. */
 	runs(start: bigint, end: bigint): Run[] | undefined;
 	/** Whether a time start the serving copy still waits to place holds back a gap; see `hooks.gapHeld`. */
@@ -594,6 +720,8 @@ export interface ResumeSource {
 	serving(): boolean;
 	/** The parts of `[start, end)` any copy held or let go says its publisher skipped; see `hooks.skippedIn`. */
 	skippedIn(start: bigint, end: bigint): Run[];
+	/** Ask the serving copy's fills for kept-out keys an outer front owes; see `hooks.askUnproven`. */
+	askUnproven(unproven: Run[]): Run[];
 	/** Whether a group in `land` may still land on a copy this reader keeps; see `hooks.mayLand`. */
 	mayLand(land: Land): boolean;
 	/** Where the run of keys from `key` the serving copy says no group arrives at ends; see `hooks.holeEnd`. */
@@ -644,8 +772,8 @@ export interface TrackRequestOptions {
 	producer: Producer;
 	/** Requests not yet accepted or rejected by the publisher. */
 	pending: Set<Request>;
-	/** Metadata-only readers holding this request, if its broadcast supports them. */
-	lookups?: { pending: Getter<number>; opened: boolean };
+	/** Whether a metadata-only lookup opened this request, if its broadcast supports them. */
+	lookups?: { opened: boolean };
 }
 
 /**
@@ -730,6 +858,8 @@ export const hooks: {
 	 * Mirrors the Rust `Demand::asked`; assigned by `track.ts`.
 	 */
 	demandAsked: (demand: Demand) => Getter<bigint | undefined>;
+	/** Whether a subscriber, not just a held info lookup, wants the track; assigned by `track.ts`. */
+	demandSubscribed: (demand: Demand) => boolean;
 	/** Whether the producer declared the track's end, released or not. Assigned by `track.ts`. */
 	trackFinished: (producer: Producer) => boolean;
 	/**
@@ -810,9 +940,19 @@ export const hooks: {
 	 * `track.ts`. A null `start` resolves an empty range; without `start`, the SUBSCRIBE still
 	 * waits on its START, as the Rust `request_start`. Only after {@link receiveTrack}: the start
 	 * is that subscription's, and ends with it. `resolved` marks a start the publisher placed
-	 * itself, as the Rust `start_resolved`: every older group stays fillable.
+	 * itself, as the Rust `start_resolved`: every older group stays fillable. `restated` marks a
+	 * start its publisher has since placed afresh, as {@link restateTrack} does.
 	 */
-	startTrack: (producer: Producer, served: { start?: bigint | null; requested?: bigint; resolved?: boolean }) => void;
+	startTrack: (
+		producer: Producer,
+		served: { start?: bigint | null; requested?: bigint; resolved?: boolean; restated?: boolean },
+	) => void;
+	/**
+	 * Mark the start a pre-07 copy's wire subscription declared as placed afresh by an update since:
+	 * it still bounds fills, since the publisher's re-offer brings the groups below it, but no longer
+	 * a reader's live join, which may reach lower. Assigned by `track.ts`.
+	 */
+	restateTrack: (producer: Producer) => void;
 	/**
 	 * Mark a track as a copy received over a wire without ranges, whose publisher placed its live
 	 * join already, so its readers start one among the groups held by when each presented rather
@@ -833,27 +973,26 @@ export const hooks: {
 	 */
 	answersJoins: (producer: Producer) => void;
 	/**
-	 * Record where the upstream publisher started each of a lite-07 copy's live wire ranges, as
-	 * `[time, start, budget]` by the time each asked from (0 for the oldest group), `start`
-	 * undefined for one with no group to deliver at or before its time, answered under at most
-	 * `budget`, the max delay in milliseconds, replacing the last set. A reader's time start the
-	 * copy cannot place among its own groups resolves to the range asked from it: a start at or
-	 * before the time names the group containing it, and anything else says no group there is
-	 * left within the budget. Mirrors the Rust `track::Producer::time_starts`; assigned by
-	 * `track.ts`.
+	 * Record where the upstream publisher started each of a lite-07 copy's live history ranges, as
+	 * `[time, start]` by the time each asked from (0 for the oldest group), `start` undefined for one
+	 * with no group to deliver at or before its time, replacing the last set. A reader's time start
+	 * the copy cannot place among its own groups resolves to the range asked from it: a start at or
+	 * before the time names the group containing it, one past the time starts the range there, and
+	 * no start says no group at or before the time is left.
+	 * Mirrors the Rust `track::Producer::time_starts`; assigned by `track.ts`.
 	 */
-	timeStarts: (producer: Producer, starts: Iterable<readonly [bigint, bigint | undefined, number]>) => void;
+	timeStarts: (producer: Producer, starts: Iterable<readonly [bigint, bigint | undefined]>) => void;
 	/**
 	 * Record how the upstream publisher answered a range of a lite-07 copy asking the live join `min`
 	 * milliseconds behind the live edge through the time `end`: at group `start`, or undefined for
-	 * nothing to deliver, asked under at most `budget`, the max delay in milliseconds. It replaces the
-	 * join's earlier answer, and places every reader of that join that began waiting before now,
-	 * within the budget. Returns the tick it was recorded at. Mirrors the Rust
+	 * nothing to deliver, asked under at most `budget` milliseconds ({@link NO_MAX_DELAY} for no
+	 * limit). It replaces the join's earlier answer, and places every reader of that join that began
+	 * waiting before now, within the budget. Returns the tick it was recorded at. Mirrors the Rust
 	 * `track::Producer::answer_join`; assigned by `track.ts`.
 	 */
 	answerJoin: (
 		producer: Producer,
-		min: number,
+		min: number | null,
 		end: bigint | undefined,
 		start: bigint | undefined,
 		budget: number,
@@ -862,7 +1001,7 @@ export const hooks: {
 	 * Forget the answers of the live joins `keep` rejects: no live range asks them, so no reader waits
 	 * on them. Mirrors the Rust `track::Producer::retain_joins`; assigned by `track.ts`.
 	 */
-	retainJoins: (producer: Producer, keep: (min: number, end: bigint | undefined) => boolean) => void;
+	retainJoins: (producer: Producer, keep: (min: number | null, end: bigint | undefined) => boolean) => void;
 	/** Mint a track {@link Request}; assigned by `track.ts`. */
 	makeRequest: (options: TrackRequestOptions) => Request;
 	/**
@@ -872,6 +1011,10 @@ export const hooks: {
 	stageRequest: (request: Request, info: InfoInit) => StagedTrack;
 	/** The newest frame a producer's cache holds, read without subscribing; assigned by `track.ts`. */
 	cachedLargest: (producer: Producer) => Position | undefined;
+	/** A producer's committed {@link Info}, or undefined before it is accepted; assigned by `track.ts`. */
+	acceptedInfo: (producer: Producer) => Info | undefined;
+	/** Count an info lookup as the track's demand until the returned release, called once, runs; assigned by `track.ts`. */
+	holdTrack: (producer: Producer) => () => void;
 	/** The publisher priority from a demanded track's committed {@link Info}; assigned by `track.ts`. */
 	demandPriority: (demand: Demand) => number;
 	/**
@@ -879,6 +1022,8 @@ export const hooks: {
 	 * assigned by `track.ts`.
 	 */
 	reportedLargest: (producer: Producer, largest: Position | undefined, finished: boolean) => void;
+	/** A received copy's upstream said where the live feed is, its largest or that it has none. */
+	answerEdge: (producer: Producer) => void;
 	/**
 	 * Seed a received track from the publisher's reported group alone, whose frame is unknown,
 	 * so it names no object; assigned by `track.ts`.
@@ -898,6 +1043,19 @@ export const hooks: {
 	 * the upstream START that resolves it has yet to arrive; assigned by `track.ts`.
 	 */
 	sourceStart: (subscriber: Subscriber) => bigint | "pending" | undefined;
+	/**
+	 * Whether the copy the subscriber reads places a range only where its publisher would, from
+	 * that publisher's answer for it or groups proving it, so `servingResolvedKeys` needs no other
+	 * range answered first; false while a front's reader has no copy serving. Mirrors the Rust
+	 * `track::Subscriber::places_as_upstream`; assigned by `track.ts`.
+	 */
+	placesAsUpstream: (subscriber: Subscriber) => boolean;
+	/**
+	 * Whether this hop knows where the live feed is: always on a track's own publisher, and on a
+	 * received copy once its upstream said so or the track ended; assigned by `track.ts`. A relay
+	 * answers a range following the live edge only then. Mirrors the Rust `poll_live`.
+	 */
+	knowsEdge: (subscriber: Subscriber) => boolean;
 	/** The newest frame still buffered for a subscriber; assigned by `track.ts`. */
 	bufferedLargest: (subscriber: Subscriber) => Position | undefined;
 	/** The newest actual object received or reported upstream, independent of cache retention. */
@@ -909,15 +1067,21 @@ export const hooks: {
 	 *
 	 * Synchronous so a caller can pop a group and act on it in the same turn. Park on
 	 * {@link groupChanged} when it reports `idle` or `boundary`. With `dispositions`, what
-	 * the cursor gives up is reported once as a `drop`.
+	 * the cursor gives up is reported once as a `drop`; see {@link Dispositions}.
 	 */
-	tryRecvGroup: (subscriber: Subscriber, dispositions: boolean) => Recv;
+	tryRecvGroup: (subscriber: Subscriber, dispositions: Dispositions) => Recv;
 	/**
 	 * The next run the subscriber's cursor gave up and has not reported, without taking a group.
 	 * From the first call on, the budget skips of {@link tryRecvGroup} without dispositions are
 	 * kept for it, so a resumed reader takes groups the plain way and drops from here.
 	 */
 	tryDrop: (subscriber: Subscriber) => (Recv & { kind: "drop" }) | undefined;
+	/**
+	 * Ask a route copy's fills for the keys of `unproven` a front's resumed reader owes that its
+	 * track cannot prove skipped, once its feed no longer waits for them, returning those its fills
+	 * gave up. Assigned by `track.ts`.
+	 */
+	askUnproven: (subscriber: Subscriber, unproven: Run[]) => Run[];
 	/**
 	 * The runs of `[start, end)` a subscriber reads: inside its ranges and its local bounds.
 	 * Assigned by `track.ts`.
@@ -940,7 +1104,7 @@ export const hooks: {
 	servingStarts: (subscriber: Subscriber, from: bigint) => (bigint | undefined)[];
 	/**
 	 * Each of a subscriber's ranges as resolved where it is served, undefined for one whose start
-	 * still waits: what lite-07 SUBSCRIBE_STARTED answers. Assigned by `track.ts`.
+	 * still waits: what lite-07 SUBSCRIBE_START answers. Assigned by `track.ts`.
 	 */
 	servingResolved: (subscriber: Subscriber) => (Resolved | undefined)[];
 	/**
@@ -951,11 +1115,24 @@ export const hooks: {
 	 */
 	servingResolvedKeys: (subscriber: Subscriber, keys: readonly bigint[]) => (Resolved | undefined)[];
 	/**
+	 * Where a live join a subscriber placed at `placed` starts under `budget` milliseconds, as a
+	 * publisher reports it: past the groups the budget expired, unless an upstream's answer placed
+	 * it. Mirrors the Rust `Subscriber::join_start`; assigned by `track.ts`.
+	 */
+	joinStart: (subscriber: Subscriber, placed: bigint, budget: number) => bigint;
+	/**
 	 * Edit a subscriber's preferences by key, costing the ranges the edit names rather than every
 	 * range: lite-07's SUBSCRIBE_UPDATE, by Range ID. Mirrors the Rust `Subscriber::edit`. Assigned
 	 * by `track.ts`.
 	 */
 	editSubscriber: (subscriber: Subscriber, edit: Edit) => void;
+	/**
+	 * Replace a subscriber's preferences as a subscription restated whole, as a SUBSCRIBE_UPDATE
+	 * before lite-07 restates it: every range is placed afresh, a live join whose max alone changed
+	 * included, since that wire names no range to retune. What the reader already handed out stays
+	 * settled. Mirrors the Rust `Subscriber::restate`. Assigned by `track.ts`.
+	 */
+	restateSubscriber: (subscriber: Subscriber, subscription: Subscription) => void;
 	/**
 	 * Note each of a subscriber's live join ranges keyed in `since` as added at its tick instead: a
 	 * front's reader stamps each copy it asks with the tick it added the range at, so an answer the
@@ -1016,21 +1193,34 @@ export const hooks: {
 	reportedRuns: (subscriber: Subscriber) => number;
 	/** Whether the subscriber already handed out group `key`, or no longer expects it. */
 	handedOut: (subscriber: Subscriber, key: bigint) => boolean;
-	/** Forget the gaps in another reader's `delivered` below each group past this subscriber's budget. */
-	forgetPastBudget: (subscriber: Subscriber, delivered: Delivered) => void;
+	/**
+	 * Which groups the subscriber may still hand out, judged against one staleness verdict taken
+	 * now: a key qualifies when its ranges and floor cover it, nothing skipped or gave it up, it has
+	 * not handed it out or passed it, as an ordered read passes what lies below where it reads next,
+	 * and it is not stale under its budget. Mirrors the Rust crate-private `track::Subscriber::taking`.
+	 */
+	taking: (subscriber: Subscriber) => (key: bigint) => boolean;
+	/**
+	 * Forget the gaps in another reader's `delivered` below each group past `budget`, the budget of
+	 * the reader whose `delivered` this is, which a front's copy, its ranges raised to a resume point,
+	 * cannot judge by its own. Mirrors the Rust `Subscriber::forget_past_budget`.
+	 */
+	forgetPastBudget: (subscriber: Subscriber, delivered: Delivered, budget: Budget) => void;
 	/** Fold a route copy's record below `at`, where the reader it feeds is, which reports nothing there. */
 	fold: (subscriber: Subscriber, at: bigint) => void;
+	/** Forget what a route copy reported of `[start, end)`, which its reader's wire was never told. */
+	untell: (subscriber: Subscriber, start: bigint, end: bigint) => void;
 	/**
 	 * What a lite publisher told its wire about a subscriber's keys, kept in the
 	 * subscriber's own record. Mirrors the Rust crate-private `track::Subscriber::record_mut`.
 	 */
 	wire: (subscriber: Subscriber) => WireRecord;
 	/**
-	 * Whether this subscriber's budget, or `budget` in milliseconds when given, gives up on `key`,
-	 * judged by its successor; see {@link expireGroup}. Successors count within `within` when
-	 * given, else within this subscriber's window below its cursor's cap.
+	 * Whether this subscriber's budget gives up on `key`, or the publisher's max age alone for a
+	 * `fetched` group, judged by its successor; see {@link expireGroup}. Successors count within
+	 * `within` when given, else within this subscriber's window below its cursor's cap.
 	 */
-	staleAt: (subscriber: Subscriber, key: bigint, budget?: number, within?: Within) => Expiry;
+	staleAt: (subscriber: Subscriber, key: bigint, fetched?: boolean, within?: Within) => Expiry;
 	/** A group the subscriber's track still caches, as a fresh read handle. */
 	cachedGroup: (subscriber: Subscriber, key: bigint, from?: number) => GroupConsumer | undefined;
 	/**
@@ -1091,8 +1281,8 @@ export const hooks: {
 	) => Subscriber;
 	/** Wake once a subscriber's group cursor may read differently, including when the track declares its end; assigned by `track.ts`. */
 	groupChanged: (subscriber: Subscriber, fn: () => void) => Dispose;
-	/** Apply a FETCH reader budget without inheriting SUBSCRIBE's zero default, and the frame it asks from. */
-	fetchBudget: (subscriber: Subscriber, maxDelay: Duration | undefined, frameStart?: number) => void;
+	/** Read one group for a FETCH, bounded by the publisher's max age alone, from the frame it asks from. */
+	fetchFrom: (subscriber: Subscriber, frameStart?: number) => void;
 	/** Whether a reader beyond one-shot fetches subscribes to this copy. */
 	subscribing: (producer: Producer) => Getter<boolean>;
 	/** The aggregate across every reader, one-shot fetches included: what the wire asks for. */
@@ -1123,6 +1313,19 @@ export const hooks: {
 	groupHeadless: (group: GroupProducer) => boolean;
 	/** Where a source copy finished whole ends, undefined while it is open or ended without one. */
 	groupWholeEnd: (group: GroupProducer) => bigint | undefined;
+	/**
+	 * The first time a source copy can't place, undefined once it finished: it places a time it holds
+	 * a timed frame past, which puts its End past the time too. An aborted copy may have lost its End.
+	 * Mirrors the Rust `group::Handle::unplaced_from`.
+	 */
+	groupUnplacedFrom: (group: GroupProducer) => bigint | undefined;
+	/** A source copy's frame count, bumped on each write. */
+	groupWrites: (group: GroupProducer) => Getter<number>;
+	/**
+	 * Move a reader past every frame buffered now without building a payload, so a streamed frame
+	 * that aborted or shed its head never throws. Mirrors draining Rust's `poll_next_frame`.
+	 */
+	skipGroupFrames: (group: GroupConsumer) => void;
 	writeGroupFrame: (group: GroupProducer, frame: Frame, inflated?: number) => void;
 	/** Payload footprint including a shared inflated copy, for measurements. */
 	groupCacheBytes: (group: GroupProducer) => number;
@@ -1222,8 +1425,11 @@ export const hooks: {
 	onClosed: (producer: BroadcastProducer, fn: () => void) => Dispose;
 	/** Reserve an on-demand track without listing it or enabling a request handler. */
 	reserveUnlistedTrack: (producer: BroadcastProducer, name: string) => Request;
-	/** Whether a subscriber or a metadata lookup still holds a requested track. */
-	requestWanted: (request: Request) => Getter<boolean>;
+	/**
+	 * Answer an info lookup from the accepted copy of `name` a broadcast holds open, holding the copy
+	 * until `hold` aborts; undefined with no such copy. Assigned by `broadcast.ts`.
+	 */
+	resolveHeld: (broadcast: BroadcastConsumer, name: string, hold?: AbortSignal) => Promise<Info> | undefined;
 	/** Transfer a metadata-opened request to its session's producer lifetime. */
 	keepRequest: (request: Request) => void;
 	/** Observe the peer's reset without waiting for routed delivery recovery. */
@@ -1279,6 +1485,9 @@ export const hooks: {
 	demandAsked: () => {
 		throw new Error("track.ts not loaded");
 	},
+	demandSubscribed: () => {
+		throw new Error("track.ts not loaded");
+	},
 	trackFinished: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -1318,6 +1527,9 @@ export const hooks: {
 	startTrack: () => {
 		throw new Error("track.ts not loaded");
 	},
+	restateTrack: () => {
+		throw new Error("track.ts not loaded");
+	},
 	dropAnchors: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -1354,7 +1566,13 @@ export const hooks: {
 	servingResolvedKeys: () => {
 		throw new Error("track.ts not loaded");
 	},
+	joinStart: () => {
+		throw new Error("track.ts not loaded");
+	},
 	editSubscriber: () => {
+		throw new Error("track.ts not loaded");
+	},
+	restateSubscriber: () => {
 		throw new Error("track.ts not loaded");
 	},
 	stampSubscriber: () => {
@@ -1375,10 +1593,19 @@ export const hooks: {
 	cachedLargest: () => {
 		throw new Error("track.ts not loaded");
 	},
+	acceptedInfo: () => {
+		throw new Error("track.ts not loaded");
+	},
+	holdTrack: () => {
+		throw new Error("track.ts not loaded");
+	},
 	demandPriority: () => {
 		throw new Error("track.ts not loaded");
 	},
 	reportedLargest: () => {
+		throw new Error("track.ts not loaded");
+	},
+	answerEdge: () => {
 		throw new Error("track.ts not loaded");
 	},
 	reportedGroup: () => {
@@ -1396,6 +1623,12 @@ export const hooks: {
 	sourceStart: () => {
 		throw new Error("track.ts not loaded");
 	},
+	placesAsUpstream: () => {
+		throw new Error("track.ts not loaded");
+	},
+	knowsEdge: () => {
+		throw new Error("track.ts not loaded");
+	},
 	bufferedLargest: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -1411,6 +1644,9 @@ export const hooks: {
 	tryDrop: () => {
 		throw new Error("track.ts not loaded");
 	},
+	askUnproven: () => {
+		throw new Error("track.ts not loaded");
+	},
 	tryNextGroup: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -1421,6 +1657,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	fold: () => {
+		throw new Error("track.ts not loaded");
+	},
+	untell: () => {
 		throw new Error("track.ts not loaded");
 	},
 	wire: () => {
@@ -1436,6 +1675,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	handedOut: () => {
+		throw new Error("track.ts not loaded");
+	},
+	taking: () => {
 		throw new Error("track.ts not loaded");
 	},
 	hasUnreadGroup: () => {
@@ -1519,7 +1761,7 @@ export const hooks: {
 	requested: () => {
 		throw new Error("track.ts not loaded");
 	},
-	fetchBudget: () => {
+	fetchFrom: () => {
 		throw new Error("track.ts not loaded");
 	},
 	askFetch: () => {
@@ -1553,6 +1795,15 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	groupWholeEnd: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupUnplacedFrom: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupWrites: () => {
+		throw new Error("group.ts not loaded");
+	},
+	skipGroupFrames: () => {
 		throw new Error("group.ts not loaded");
 	},
 	startGroup: () => {
@@ -1663,8 +1914,8 @@ export const hooks: {
 	reserveUnlistedTrack: () => {
 		throw new Error("broadcast.ts not loaded");
 	},
-	requestWanted: () => {
-		throw new Error("track.ts not loaded");
+	resolveHeld: () => {
+		throw new Error("broadcast.ts not loaded");
 	},
 	keepRequest: () => {
 		throw new Error("track.ts not loaded");
@@ -1722,66 +1973,35 @@ function rendezvousHash(path: string, instance: string): bigint {
 }
 
 /**
- * Settles among one instance's routes: FNV-1a 64 of `path` then each hop, oldest first, as 8
- * little-endian bytes. Mirrors `chain_key` in `rs/moq-net`.
- */
-export function chainHash(path: string, hops: readonly bigint[]): bigint {
-	const bytes: number[] = [];
-	for (const hop of hops) {
-		for (let shift = 0n; shift < 64n; shift += 8n) bytes.push(Number((hop >> shift) & 0xffn));
-	}
-	return fnv(path, bytes);
-}
-
-/**
- * The best of `candidates`, oldest first, at `prefix` for resolving `path`: `best_route` in
- * rs/moq-net. Only an instance's highest epoch is eligible, ranked by
- * {@link compareRouteCandidates} (`route_order`), and a full tie goes to the newest, as Rust's
- * final `Reverse(entry.id)`: a claim is new when it starts or restarts (another instance or
- * epoch), and keeps its place through a re-price. Every selector ranks through this, so the
- * announcements and the consumes of one session never pick apart.
- */
-export function bestCandidate<T>(
-	path: Path.Valid,
-	prefix: Path.Valid,
-	candidates: Iterable<T>,
-	route: (candidate: T) => WireRoute,
-): T | undefined {
-	const list = [...candidates];
-	const epochs = new Epochs(list.map(route));
-	let best: T | undefined;
-	for (const candidate of list) {
-		const next = route(candidate);
-		if (epochs.supersedes(next)) continue;
-		if (best === undefined || compareRouteCandidates(path, prefix, next, route(best)) <= 0) best = candidate;
-	}
-	return best;
-}
-
-/**
- * What `pick` finds at the most specific claim covering `path`: it picks at each covering prefix,
- * deepest first, and a claim shown above its own prefix counts for the shallower prefix it is
- * really at. Of claims as specific as each other the deepest prefix wins. Mirrors
- * `RouteTable::best_route` in rs/moq-net.
+ * The best claim covering `path`, as `RouteTable::best_route` in rs/moq-net picks it: only the
+ * most specific claims compete, a claim shown above its own prefix counting for the shallower
+ * prefix it is really at, and they rank against each other wherever each is filed. Of those, only
+ * an instance's highest epoch is eligible, an exact claim's `others` (which never win) included,
+ * and the rest order by {@link compareTier}, then {@link compareTie}: a claim is new when it
+ * starts or restarts (another instance or epoch), and keeps its place through a re-price.
+ * `candidates` lists each
+ * covering prefix's, newest first, and `advertised` names each one's identity and route. Every
+ * selector ranks through this, so the announcements and the consumes of one session never pick
+ * apart.
  */
 export function mostSpecific<T>(
 	path: Path.Valid,
-	pick: (prefix: Path.Valid) => T | undefined,
-	route: (found: T) => WireRoute,
+	candidates: (prefix: Path.Valid) => Iterable<T>,
+	advertised: (candidate: T) => Advertised,
+	others: readonly WireRoute[] = [],
 ): T | undefined {
-	let best: T | undefined;
-	let bestSpecificity = -1;
+	const filed: Filed<T>[] = [];
 	let depth = Path.parts(path).length;
+	const exact = depth;
 	for (const prefix of coveringPrefixes(path)) {
-		const found = pick(prefix);
-		const specificity = found === undefined ? 0 : depth - Number(route(found).above ?? 0n);
-		if (found !== undefined && specificity > bestSpecificity) {
-			best = found;
-			bestSpecificity = specificity;
+		let order = 0;
+		for (const candidate of candidates(prefix)) {
+			const { identity, route } = advertised(candidate);
+			filed.push({ prefix, depth, order: order++, arrival: arrival(identity), candidate, route });
 		}
 		depth--;
 	}
-	return best;
+	return bestOfTier(path, filed, { others: (specificity) => (specificity === exact ? others : []) })?.candidate;
 }
 
 /** Covering prefixes, most specific first, including the empty root. */
@@ -1813,39 +2033,44 @@ export function superseded(route: WireRoute, others: Iterable<WireRoute>): boole
  * every instance announces epoch 0, stores nothing. Mirrors `Epochs` in rs/moq-net, whose routes
  * are all of one prefix here.
  */
-export class Epochs {
+class Epochs {
 	readonly #highest = new Map<Instance.Valid | undefined, Map<bigint, bigint>>();
+	readonly #claim: (route: WireRoute) => bigint;
 
-	constructor(routes: Iterable<WireRoute>) {
+	/** `claim` names each route's claim among `routes`: its Above, for routes all of one prefix. */
+	constructor(routes: Iterable<WireRoute>, claim: (route: WireRoute) => bigint = (route) => route.above ?? 0n) {
+		this.#claim = claim;
 		for (const route of routes) {
 			const epoch = route.epoch ?? 0n;
 			if (epoch === 0n) continue;
-			let above = this.#highest.get(route.instance);
-			if (!above) {
-				above = new Map();
-				this.#highest.set(route.instance, above);
+			let claims = this.#highest.get(route.instance);
+			if (!claims) {
+				claims = new Map();
+				this.#highest.set(route.instance, claims);
 			}
-			const highest = above.get(route.above ?? 0n);
-			if (highest === undefined || epoch > highest) above.set(route.above ?? 0n, epoch);
+			const highest = claims.get(claim(route));
+			if (highest === undefined || epoch > highest) claims.set(claim(route), epoch);
 		}
 	}
 
 	/** Whether a route carries `route`'s instance at a higher epoch on the same claim. */
 	supersedes(route: WireRoute): boolean {
-		const highest = this.#highest.get(route.instance)?.get(route.above ?? 0n);
+		const highest = this.#highest.get(route.instance)?.get(this.#claim(route));
 		return highest !== undefined && highest > (route.epoch ?? 0n);
 	}
 }
 
 /**
- * Prefer a route that is neither draining (a peer that sent GOAWAY) nor unavailable (held),
- * which rank below every other, then the highest priority on its path, then identified
+ * Prefer a route that is available (not held), then one that is not draining (a peer that sent
+ * GOAWAY), which still reaches its origin, then the highest priority on its path, then identified
  * publishers, then lower static cost.
  */
 export function compareRoutes(a: WireRoute, b: WireRoute): number {
-	const last = (route: WireRoute) => Number((route.draining ?? false) || route.available === false);
+	const held = (route: WireRoute) => Number(route.available === false);
+	const draining = (route: WireRoute) => Number(route.draining ?? false);
 	return (
-		last(a) - last(b) ||
+		held(a) - held(b) ||
+		draining(a) - draining(b) ||
 		(b.priority ?? 0) - (a.priority ?? 0) ||
 		Number(isAnonymous(a)) - Number(isAnonymous(b)) ||
 		(a.cost < b.cost ? -1 : a.cost > b.cost ? 1 : 0)
@@ -1853,23 +2078,25 @@ export function compareRoutes(a: WireRoute, b: WireRoute): number {
 }
 
 /**
- * Order eligible routes at `prefix` resolving `path` by preference, hop count, then the spread
- * hash of each instance, then, within one instance, the hash of its chain. A lite-07 claim counts
- * as one hop, to the peer that sent it, and ranks by the rendezvous hash of its instance. The
- * hashes only spread a prefix's paths: at the prefix itself a tie is left for the newest to win
- * (see {@link bestCandidate}), so a publisher that restarts under a new instance takes over from
- * its lingering session at once, matching `route_order` in rs/moq-net for routes a node did not
- * get from a cluster peer, which is every route here.
+ * Order two claims of one tier resolving `path`, each filed at its `prefix`: by preference, hop
+ * count, then one filed at `path` itself, then, keyed on `path` whatever each claim's filing, the
+ * rendezvous hash of a lite-07 claim's instance or the spread hash of a named one. The hashes only
+ * spread a pool over a prefix's paths, as `route_order` in rs/moq-net does. Any other tie breaks by
+ * {@link compareTie}.
  */
-export function compareRouteCandidates(path: Path.Valid, prefix: Path.Valid, a: WireRoute, b: WireRoute): number {
-	// The most specific claim wins outright: an exact claim shadows broader ones shown at its path.
-	const above = (a.above ?? 0n) - (b.above ?? 0n);
-	const order = (above < 0n ? -1 : above > 0n ? 1 : 0) || compareRoutes(a, b) || routeHops(a) - routeHops(b);
-	if (order !== 0 || path === prefix) return order;
-	const [a1, a2] = routeKey(path, a);
-	const [b1, b2] = routeKey(path, b);
-	if (a1 !== b1) return a1 < b1 ? -1 : 1;
-	return a2 < b2 ? -1 : a2 > b2 ? 1 : 0;
+export function compareTier(
+	path: Path.Valid,
+	a: { readonly prefix: Path.Valid; readonly route: WireRoute },
+	b: { readonly prefix: Path.Valid; readonly route: WireRoute },
+): number {
+	const order = compareRoutes(a.route, b.route) || routeHops(a.route) - routeHops(b.route);
+	if (order !== 0) return order;
+	// A claim filed at the path itself skips the hash and ranks first, as a route entered here at
+	// the path does in Rust; two of them tie, for the newest to win.
+	const exact = Number(b.prefix === path) - Number(a.prefix === path);
+	if (exact !== 0 || a.prefix === path) return exact;
+	const [ka, kb] = [routeKey(path, a.route), routeKey(path, b.route)];
+	return ka < kb ? -1 : ka > kb ? 1 : 0;
 }
 
 /** The hops a route ranks by: a lite-07 claim counts as the one hop to the peer that sent it. */
@@ -1877,10 +2104,12 @@ export function routeHops(route: WireRoute): number {
 	return route.claimed ? 1 : route.hops.length;
 }
 
-/** The hash pair a route ranks by beneath its prefix, each route keyed on its own: a lite-07 claim
- * by the rendezvous hash of its instance, any other by the spread hash of its instance and then
- * the hash of its chain. As `route_order` in rs/moq-net. */
-function routeKey(path: Path.Valid, route: WireRoute): [bigint, bigint] {
-	if (route.claimed) return [rendezvousHash(path, route.instance ? Instance.text(route.instance) : ""), 0n];
-	return [spreadHash(path, route.instance ? Instance.text(route.instance) : ""), chainHash(path, route.hops)];
+/** The hash a route ranks by beneath its prefix, each route keyed on its own: a lite-07 claim by
+ * the rendezvous hash of its instance, a named instance by its spread hash, and one a session
+ * minted by none, since no other node shares it. As `route_order` in rs/moq-net. */
+function routeKey(path: Path.Valid, route: WireRoute): bigint {
+	const instance = route.instance;
+	if (route.claimed) return rendezvousHash(path, instance ? Instance.text(instance) : "");
+	if (instance !== undefined && Instance.isMinted(instance)) return 0n;
+	return spreadHash(path, instance ? Instance.text(instance) : "");
 }

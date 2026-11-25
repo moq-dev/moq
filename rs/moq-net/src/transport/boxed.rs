@@ -361,33 +361,81 @@ pub(crate) struct Offset(Box<dyn Any + Send + Sync>);
 pub(crate) struct SendStream(Sender);
 
 enum Sender {
-	Own(Box<dyn ErasedSend>),
+	Own(Held),
 	/// A group stream its session lists, so the list can read it too.
 	Listed(Listing),
+}
+
+/// A transport's stream, and the offset its resets still deliver every byte before.
+struct Held {
+	stream: Box<dyn ErasedSend>,
+	floor: Option<Offset>,
+}
+
+impl Held {
+	fn new(stream: Box<dyn ErasedSend>) -> Self {
+		Self { stream, floor: None }
+	}
+
+	/// Reset with `code`, still delivering what precedes the floor.
+	fn reset(&mut self, code: u32) {
+		match &self.floor {
+			Some(floor) => self.stream.reset_at(floor, code),
+			None => self.stream.reset(code),
+		}
+	}
 }
 
 impl SendStream {
 	/// Box a stream, keeping its own send-group type behind the boundary.
 	#[cfg(test)]
 	pub(crate) fn new(stream: impl poll::SendStream<Group: Send + Sync, Offset: Send + Sync> + Send + Sync) -> Self {
-		Self(Sender::Own(Box::new(stream)))
+		Self(Sender::Own(Held::new(Box::new(stream))))
 	}
 
 	fn own(stream: impl poll::SendStream<Group: Send + Sync, Offset: Send + Sync> + Send + Sync + 'static) -> Self {
-		Self(Sender::Own(Box::new(stream)))
+		Self(Sender::Own(Held::new(Box::new(stream))))
 	}
 
 	/// Run `f` on the transport's stream, then leave the session's list if `unlist`.
-	fn with<T>(&mut self, unlist: bool, f: impl FnOnce(&mut dyn ErasedSend) -> T) -> T {
+	fn with<T>(&mut self, unlist: bool, f: impl FnOnce(&mut Held) -> T) -> T {
 		match &mut self.0 {
-			Sender::Own(stream) => f(stream.as_mut()),
+			Sender::Own(held) => f(held),
 			Sender::Listed(listing) => {
-				let res = f(listing.listed.lock().stream.as_mut());
+				let res = f(&mut listing.listed.lock().stream);
 				if unlist {
 					listing.unlist();
 				}
 				res
 			}
+		}
+	}
+
+	/// From now on, every reset of the stream, a preemption included, still delivers the bytes
+	/// written so far. Dropping it unreset leaves that to the transport's own drop.
+	pub(crate) fn hold(&mut self) {
+		self.with(false, |held| held.floor = Some(held.stream.offset()));
+	}
+
+	/// Whether [`Self::hold`] marked the bytes every later reset still delivers.
+	pub(crate) fn held(&self) -> bool {
+		self.get().held().floor.is_some()
+	}
+
+	/// Whether the peer acknowledged every byte [held](Self::hold), false when nothing is.
+	pub(crate) fn held_acked(&self) -> bool {
+		let read = self.get();
+		let held = read.held();
+		held.floor
+			.as_ref()
+			.is_some_and(|floor| matches!(held.stream.poll_acked(&kio::Waiter::noop(), floor), Poll::Ready(Ok(()))))
+	}
+
+	/// Whether the session reset the stream to make room for a higher-ranked one.
+	pub(crate) fn preempted(&self) -> bool {
+		match &self.0 {
+			Sender::Own(_) => false,
+			Sender::Listed(listing) => listing.listed.lock().preempted,
 		}
 	}
 
@@ -399,13 +447,13 @@ impl SendStream {
 		f: impl FnOnce(&mut dyn ErasedSend) -> Poll<Result<usize, Error>>,
 	) -> Poll<Result<usize, Error>> {
 		match &mut self.0 {
-			Sender::Own(stream) => f(stream.as_mut()),
+			Sender::Own(held) => f(held.stream.as_mut()),
 			Sender::Listed(listing) => {
 				let mut state = listing.listed.lock();
 				if let Some(err) = state.preempted() {
 					return Poll::Ready(Err(err));
 				}
-				let res = f(state.stream.as_mut());
+				let res = f(state.stream.stream.as_mut());
 				if res.is_pending() {
 					state.waiters.register(waiter);
 				}
@@ -416,7 +464,7 @@ impl SendStream {
 
 	fn get(&self) -> Read<'_> {
 		match &self.0 {
-			Sender::Own(stream) => Read::Own(stream.as_ref()),
+			Sender::Own(held) => Read::Own(held),
 			Sender::Listed(listing) => Read::Listed(listing.listed.lock()),
 		}
 	}
@@ -424,18 +472,24 @@ impl SendStream {
 
 /// A boxed stream borrowed for a read through `&self`.
 enum Read<'a> {
-	Own(&'a (dyn ErasedSend + 'static)),
+	Own(&'a Held),
 	Listed(std::sync::MutexGuard<'a, ListedState>),
+}
+
+impl Read<'_> {
+	fn held(&self) -> &Held {
+		match self {
+			Read::Own(held) => held,
+			Read::Listed(state) => &state.stream,
+		}
+	}
 }
 
 impl std::ops::Deref for Read<'_> {
 	type Target = dyn ErasedSend;
 
 	fn deref(&self) -> &Self::Target {
-		match self {
-			Read::Own(stream) => *stream,
-			Read::Listed(state) => state.stream.as_ref(),
-		}
+		self.held().stream.as_ref()
 	}
 }
 
@@ -445,7 +499,7 @@ pub(super) struct Listed {
 }
 
 struct ListedState {
-	stream: Box<dyn ErasedSend>,
+	stream: Held,
 	/// The rank of the send group the stream is in, shared with the group's handles.
 	group: Option<Arc<GroupRank>>,
 	priority: i64,
@@ -494,14 +548,15 @@ impl Listed {
 	/// cannot see acknowledgments.
 	pub(super) fn acknowledged(&self) -> bool {
 		let state = self.lock();
-		let offset = state.stream.offset();
+		let offset = state.stream.stream.offset();
 		matches!(
-			state.stream.poll_acked(&kio::Waiter::noop(), &offset),
+			state.stream.stream.poll_acked(&kio::Waiter::noop(), &offset),
 			Poll::Ready(Ok(()))
 		)
 	}
 
-	/// Reset the stream to make room, failing its writer with the reset's code.
+	/// Reset the stream to make room, failing its writer with the reset's code, still delivering
+	/// what it [held](SendStream::hold).
 	pub(super) fn preempt(&self) {
 		let mut state = self.lock();
 		if state.preempted {
@@ -783,6 +838,7 @@ trait ErasedSend: Send + Sync {
 	fn set_group(&mut self, group: &Group);
 	fn finish(&mut self) -> Result<(), Error>;
 	fn reset(&mut self, code: u32);
+	fn reset_at(&mut self, offset: &Offset, code: u32);
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Error>>;
 	fn offset(&self) -> Offset;
 	fn poll_acked(&self, waiter: &kio::Waiter, offset: &Offset) -> Poll<Result<(), Error>>;
@@ -960,6 +1016,10 @@ impl<T: poll::SendStream<Group: Send + Sync, Offset: Send + Sync> + Send + Sync>
 		poll::SendStream::reset(self, code)
 	}
 
+	fn reset_at(&mut self, offset: &Offset, code: u32) {
+		poll::SendStream::reset_at(self, own_offset::<T>(offset), code)
+	}
+
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		poll::SendStream::poll_closed(self, waiter).map_err(Error::new)
 	}
@@ -969,12 +1029,16 @@ impl<T: poll::SendStream<Group: Send + Sync, Offset: Send + Sync> + Send + Sync>
 	}
 
 	fn poll_acked(&self, waiter: &kio::Waiter, offset: &Offset) -> Poll<Result<(), Error>> {
-		let offset = offset
-			.0
-			.downcast_ref::<T::Offset>()
-			.expect("offset belongs to another transport");
-		poll::SendStream::poll_acked(self, waiter, offset).map_err(Error::new)
+		poll::SendStream::poll_acked(self, waiter, own_offset::<T>(offset)).map_err(Error::new)
 	}
+}
+
+/// The transport's own offset behind a boxed one.
+fn own_offset<T: poll::SendStream<Offset: Send + Sync>>(offset: &Offset) -> &T::Offset {
+	offset
+		.0
+		.downcast_ref::<T::Offset>()
+		.expect("offset belongs to another transport")
 }
 
 impl<T: poll::RecvStream + Send + Sync> ErasedRecv for Budgeted<T> {
@@ -1222,14 +1286,14 @@ impl poll::SendStream for SendStream {
 		if let Sender::Listed(listing) = &self.0 {
 			listing.listed.lock().priority = priority;
 		}
-		self.with(false, |stream| stream.set_priority(priority))
+		self.with(false, |held| held.stream.set_priority(priority))
 	}
 
 	fn set_group(&mut self, group: &Group) {
 		if let Sender::Listed(listing) = &self.0 {
 			listing.listed.lock().group = Some(group.rank.clone());
 		}
-		self.with(false, |stream| stream.set_group(group))
+		self.with(false, |held| held.stream.set_group(group))
 	}
 
 	fn finish(&mut self) -> Result<(), Error> {
@@ -1238,9 +1302,10 @@ impl poll::SendStream for SendStream {
 		{
 			return Err(err);
 		}
-		self.with(true, |stream| stream.finish())
+		self.with(true, |held| held.stream.finish())
 	}
 
+	/// Resets at the [held](Self::hold) offset once there is one.
 	fn reset(&mut self, code: u32) {
 		// A preempted stream keeps the code it was reset with.
 		if let Sender::Listed(listing) = &self.0
@@ -1248,19 +1313,28 @@ impl poll::SendStream for SendStream {
 		{
 			return;
 		}
-		self.with(true, |stream| stream.reset(code))
+		self.with(true, |held| held.reset(code))
+	}
+
+	fn reset_at(&mut self, offset: &Offset, code: u32) {
+		if let Sender::Listed(listing) = &self.0
+			&& listing.listed.lock().preempted
+		{
+			return;
+		}
+		self.with(true, |held| held.stream.reset_at(offset, code))
 	}
 
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		match &self.0 {
-			Sender::Own(stream) => stream.poll_closed(waiter),
+			Sender::Own(held) => held.stream.poll_closed(waiter),
 			Sender::Listed(listing) => {
 				let mut state = listing.listed.lock();
 				if let Some(err) = state.preempted() {
 					return Poll::Ready(Err(err));
 				}
 				state.waiters.register(waiter);
-				state.stream.poll_closed(waiter)
+				state.stream.stream.poll_closed(waiter)
 			}
 		}
 	}
@@ -1538,11 +1612,16 @@ mod test {
 	}
 
 	/// A stream that counts written bytes as its offset and reports them acknowledged up to
-	/// a mark, to check the boxed layer carries its offset through and back.
+	/// a mark, to check the boxed layer carries its offset through and back, and records the
+	/// offset of its reset.
 	struct Acking {
 		written: u64,
 		acked: u64,
+		reset: std::sync::Arc<std::sync::Mutex<Option<Reset>>>,
 	}
+
+	/// The offset a reset kept bytes below, if any, and its code.
+	type Reset = (Option<u64>, u32);
 
 	impl poll::SendStream for Acking {
 		type Error = super::super::memory::Error;
@@ -1575,7 +1654,13 @@ mod test {
 			Ok(())
 		}
 
-		fn reset(&mut self, _: u32) {}
+		fn reset(&mut self, code: u32) {
+			*self.reset.lock().unwrap() = Some((None, code));
+		}
+
+		fn reset_at(&mut self, offset: &u64, code: u32) {
+			*self.reset.lock().unwrap() = Some((Some(*offset), code));
+		}
 
 		fn poll_closed(&self, _: &kio::Waiter) -> Poll<Result<(), Self::Error>> {
 			Poll::Pending
@@ -1587,7 +1672,11 @@ mod test {
 	#[test]
 	fn a_boxed_stream_forwards_acknowledgment() {
 		let waiter = kio::Waiter::noop();
-		let mut stream = SendStream::new(Acking { written: 0, acked: 3 });
+		let mut stream = SendStream::new(Acking {
+			written: 0,
+			acked: 3,
+			reset: Default::default(),
+		});
 		assert!(matches!(
 			poll::SendStream::poll_write(&mut stream, &waiter, b"abc"),
 			Poll::Ready(Ok(3))
@@ -1611,6 +1700,51 @@ mod test {
 			poll::SendStream::poll_acked(&listed, &waiter, &offset),
 			Poll::Ready(Ok(()))
 		));
+	}
+
+	/// A held stream's reset still delivers what it held, whether its writer resets it or the
+	/// session preempts it, and the stream reads as acknowledged once the peer took that much.
+	#[test]
+	fn a_held_stream_resets_after_what_it_held() {
+		let waiter = kio::Waiter::noop();
+		for preempt in [false, true] {
+			let (a, b) = super::super::memory::pair(Default::default());
+			let session = Session::new(a);
+			let mut stream = open_group(&session, ungrouped(0));
+			assert!(!stream.held_acked(), "nothing is held yet");
+			assert!(matches!(
+				poll::SendStream::poll_write(&mut stream, &waiter, b"group"),
+				Poll::Ready(Ok(5))
+			));
+			stream.hold();
+			assert!(matches!(
+				poll::SendStream::poll_write(&mut stream, &waiter, b"frames"),
+				Poll::Ready(Ok(6))
+			));
+			match preempt {
+				true => session.open_streams()[0].1.preempt(),
+				false => poll::SendStream::reset(&mut stream, 2),
+			}
+			assert!(!stream.held_acked());
+			assert_eq!(stream.preempted(), preempt);
+
+			let Poll::Ready(Ok(mut recv)) = poll::Session::poll_accept_uni(&b, &waiter) else {
+				panic!("the peer accepts the stream");
+			};
+			let Poll::Ready(Ok(Some(held))) = poll::RecvStream::poll_read_chunk(&mut recv, &waiter, 16) else {
+				panic!("the held bytes arrive");
+			};
+			assert_eq!(held, "group", "preempt: {preempt}");
+			let Poll::Ready(Err(err)) = poll::RecvStream::poll_read_chunk(&mut recv, &waiter, 16) else {
+				panic!("the reset follows them");
+			};
+			let code = match preempt {
+				true => 1,
+				false => 2,
+			};
+			assert_eq!(super::super::Error::stream_error(&err), Some(code));
+			assert!(stream.held_acked(), "the peer took what was held");
+		}
 	}
 
 	/// A listed stream reads as acknowledged once the peer has everything written to it.

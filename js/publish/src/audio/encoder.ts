@@ -221,8 +221,8 @@ export class Encoder {
 	// discontinuity and re-anchors on.
 	#pipeline: Pipeline | undefined;
 	#encoding = false;
-	// How far back retained audio is replayed (see replayBudget): a live join's lag, else the max
-	// delay, and for fetches alone the retention. Replayed groups land as fresh arrivals, so only this
+	// How far back retained audio is replayed (see replayBudget): the live joins' reach, and for
+	// history or fetches alone the retention. Replayed groups land as fresh arrivals, so only this
 	// cut keeps a rejoining live viewer from receiving all the retained audio before the live edge.
 	#budget: Duration | undefined;
 
@@ -1031,22 +1031,23 @@ export function resolve(captured: Format, selected: Codec): Resolved {
 	};
 }
 
-// How far back a subscription wants retained audio replayed. A live join (an open range starting
-// live) starts its lag behind the live edge, which a player states as its playout delay plus the
-// codec's warmup, so the largest lag bounds it within the max delay. Any other range, such as one
-// from the oldest group (moq-transport, moq-lite before 07), wants all its max delay keeps.
-// Undefined with no subscription, leaving the retention.
+// How far back a subscription wants retained audio replayed. A live join starts its lag behind the
+// live edge, which a player states as its playout delay plus the codec's warmup, and never reaches
+// past its own max, so the largest of those bounds it. A join with no lag limit, as every join before
+// lite-07 is, starts from the oldest group but drops anything older than its max, so its max alone
+// bounds it. Any other range, one with an end included, is history, which wants the whole retention,
+// as does no subscription or a join bounded by neither.
 function replayBudget(subscription: Moq.Track.Subscription | undefined): Duration | undefined {
-	const delay = subscription?.delay;
-	if (!delay) return undefined;
-	const max = delay.max ?? undefined;
-	let lag: Duration | undefined;
+	if (!subscription) return undefined;
+	let reach: Duration | undefined;
 	for (const range of subscription.ranges ?? [{}]) {
-		if (typeof range.start !== "object" || range.end !== undefined) return max;
-		lag = lag === undefined ? range.start.live : lag.max(range.start.live);
+		if (typeof range.start !== "object" || range.end !== undefined) return undefined;
+		const { min, max = Duration.ZERO } = range.start.live;
+		const join = max === null ? min : min === null ? max : min.min(max);
+		if (join === null) return undefined;
+		reach = reach === undefined ? join : reach.max(join);
 	}
-	if (lag === undefined) return max;
-	return max === undefined ? lag : lag.min(max);
+	return reach;
 }
 
 /**

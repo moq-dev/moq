@@ -11,36 +11,39 @@ complete it before cutting main into release.
 
 Decided 2026-11-21 (maintainer, /quest-plan of the main → release routing
 audit): the cut also waits on the routing fixes that audit found. NodeId
-drops Start ([node-id-drop-start](/quest/m2/node-id-drop-start.md)),
-whether an origin forwards moves into its config, and moq-relay's
-cluster peers lose `egress` ([relay-peer-egress](/quest/m2/relay-peer-egress.md)).
-[lite07-finalize](/quest/m2/lite07-finalize.md) also requires three m1 fixes
-from [lite07-routing](/quest/m1/lite07-routing/README.md), whose Plan
-records each decision.
+drops Start, whether an origin forwards moves into its config, and moq-relay's
+cluster peers lose `egress`.
+That audit's three m1 fixes (the scoped peer, the route floors, and the
+origin's route rank) have landed; the lite-07 router's half of the rank is
+[router-claim-tier](/quest/m2/router-claim-tier.md).
 
 Decided 2026-11-21 (maintainer, /quest-plan of an exhaustive full-codebase
 audit before the `0.22.0` cut, covering both pre-release and new code): the cut
-also waits on the breaking fixes that audit surfaced across the wire, vendored
-native crates, and public APIs:
-
-- **Wire and drafts.** Delete the temporary `raw_parts` / `base.split("/")`
-  `Path Keep` migration before lite-07 finalizes
-  ([lite07-path-keep-parts](/quest/m2/lite07-path-keep-parts.md)), and bring
-  `draft-lcurley-qmux-websocket` up to `qmux-VV.<alpn>`
-  ([qmux-websocket-draft](/quest/m2/qmux-websocket-draft.md)).
-- **Vendored native crate soundness.** Fix the unsound public APIs in
-  [moq-v4l](/quest/m2/v4l-arena-soundness.md) and
-  [moq-vaapi](/quest/m2/vaapi-soundness-and-upload.md) before `0.22.0`
-  publishes them (moq-nvenc's are fixed).
-- **Public API freezes.** Fence `moq-net` event/item types with
-  `#[non_exhaustive]` ([net-non-exhaustive-events](/quest/m2/net-non-exhaustive-events.md)).
+also waited on the breaking fixes that audit surfaced across the wire, vendored
+native crates, and public APIs, and all of them have landed.
 
 Non-breaking findings from the same audit live in
 [m0](/quest/m0/README.md) (release-cut pipeline and packaging blockers),
-[m1/precut-audit](/quest/m1/precut-audit/README.md) (high- and medium-impact
-fixes, TLA+ sync drift, and CI hardening), [m3](/quest/m3/README.md) (softer
-edge cases and low-severity cleanups), and
+[m3](/quest/m3/README.md) (softer edge cases and low-severity cleanups), and
 [m4](/quest/m4/fuzz-binary-parsers.md) (binary-parser fuzz targets).
+
+Decided 2026-11-23 (maintainer): ✅ the cut waits for a
+[safe on-demand drop](/quest/m2/on-demand-drop.md) and
+[deleting `abort_unwanted`](/quest/m2/abort-unwanted-delete.md), so 0.22 never
+publishes an API the next release removes (rejected: leaving them in m3,
+cutting first and deleting in the next breaking release).
+
+Decided 2026-11-24 (maintainer, /quest-plan of the exhaustive `moq-net`
+subscribe/fetch audit): ✅ the cut waits on
+[Redesign lite-07 subscribe and fetch](/quest/m2/lite07-subscribe/README.md),
+which adds `Previous Delta` to `GROUP` headers, requires `RESET_STREAM_AT` for
+opened Group Streams, removes `FETCH` and `SUBSCRIBE_SKIP` on lite-07, moves
+`Priority` and `Group Order` onto per-range wire fields and public
+`track::Range` across Rust, JS, and all FFI bindings, and adds judged `Max Age`
+to `SUBSCRIBE_DROP(OLD)` (rejected: bugfixes only without wire changes; drop).
+This supersedes `quest/m2/time-addressing/per-range-start.md` (#9491) and
+#9538; non-wire progress and cache-invariant fixes live independently in
+[m1](/quest/m1/subscribe-progress-fixes.md).
 
 Decided 2026-11-16 (maintainer, /quest-plan of an audit of everything on
 `main` since `release`, and of the lite-07 draft): the cut also waits on what
@@ -103,7 +106,7 @@ with Min Age placing a live join;
 scale-less tracks aging by arrival ([moq-dev/moq#9266](https://github.com/moq-dev/moq/pull/9266));
 Group Streams carrying each time once ([moq-dev/moq#9263](https://github.com/moq-dev/moq/pull/9263)),
 with GROUP_END's end back as a delta;
-[time anchors landing by group spans](/quest/m2/time-addressing/span-time-anchors.md);
+time anchors landing by group spans ([moq-dev/moq#9406](https://github.com/moq-dev/moq/pull/9406));
 and first-party producers keeping those spans apart ([moq-dev/moq#9317](https://github.com/moq-dev/moq/pull/9317)).
 [moq-dev/moq#9198](https://github.com/moq-dev/moq/pull/9198) and
 [moq-dev/moq#9221](https://github.com/moq-dev/moq/pull/9221) closed, since
@@ -322,7 +325,7 @@ stream-credit epic (rejected: keep the gate). It was an ordering rule, not a
 code dependency, and with takeover moved to m3 the epic changes no wire.
 
 Decided 2026-11-13 (maintainer, /quest-plan from an audit of `main`'s audio):
-✅ the [audio playout](/quest/m2/audio-playout/README.md) epic moves here from
+✅ the audio playout epic moves here from
 m1, with its calibration in m3 (rejected: calibration here too; only the lag
 rule here). Its lag rule reshapes `main`-only API the cut would publish (the
 `stretch` setting, moq-audio's `Sink::due` and `bus::Positioned`), and the

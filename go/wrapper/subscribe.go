@@ -45,11 +45,6 @@ func (b *BroadcastConsumer) FetchGroup(
 	start uint64,
 	options *FetchGroupOptions,
 ) (*GroupConsumer, error) {
-	if options != nil {
-		if err := bridge.NonNegative(options.MaxDelay, "max delay"); err != nil {
-			return nil, err
-		}
-	}
 	inner, err := b.inner.FetchGroup(ctx, name, start, options)
 	if err != nil {
 		return nil, err
@@ -153,7 +148,7 @@ func (t *TrackConsumer) Info() TrackInfo {
 }
 
 // Update changes this subscriber's delivery preferences. It fails on a
-// negative MaxDelay, or a range time the track can't serve.
+// negative delay, or a range time the track can't serve.
 func (t *TrackConsumer) Update(subscription Subscription) error {
 	sub, err := subscription.ffi()
 	if err != nil {

@@ -2,7 +2,7 @@ import type * as broadcast from "./broadcast.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import type { WireRoute } from "./hop.ts";
 import * as Instance from "./instance.ts";
-import { bestCandidate, coveringPrefixes, mostSpecific } from "./internal.ts";
+import { arrival, coveringPrefixes, mostSpecific } from "./internal.ts";
 import type * as Path from "./path.ts";
 import { type Served, sameInstance } from "./wire.ts";
 
@@ -62,6 +62,29 @@ export class BroadcastCache {
 	#blind = new Map<Path.Valid, Blind>();
 	#blindPrefixes = new Map<Path.Valid, Set<Path.Valid>>();
 	#paths = new Map<Path.Valid, Set<Path.Valid>>();
+	// The prefixes a batch changed, rechecked once it ends.
+	#batched?: Set<Path.Valid>;
+
+	/**
+	 * Apply several changes as one: each path they touch is rechecked once, after the last, so
+	 * a selection that only passes through another route on the way never retires a request.
+	 */
+	batch(apply: () => void): void {
+		if (this.#batched) {
+			apply();
+			return;
+		}
+		const batched = new Set<Path.Valid>();
+		this.#batched = batched;
+		try {
+			apply();
+		} finally {
+			this.#batched = undefined;
+		}
+		const paths = new Set<Path.Valid>();
+		for (const prefix of batched) for (const path of this.#paths.get(prefix) ?? []) paths.add(path);
+		for (const path of paths) this.#check(path);
+	}
 
 	/** Record this interest's live advertisement, preserving identity across route updates. */
 	announce(path: Path.Valid, owner: object, route: WireRoute, restart = false): void {
@@ -74,7 +97,8 @@ export class BroadcastCache {
 		}
 		const previous = entries.get(owner);
 		const identity = (!restart && previous?.identity) || {};
-		// A new or restarted stream ranks as the newest, which wins a full tie; see bestCandidate.
+		arrival(identity);
+		// A new or restarted stream ranks as the newest, which wins a full tie at its own path; see mostSpecific.
 		if (!previous || restart) entries.delete(owner);
 		entries.set(owner, { identity, route });
 		this.#update(path);
@@ -92,8 +116,8 @@ export class BroadcastCache {
 	instance(path: Path.Valid): Selection {
 		const best = mostSpecific(
 			path,
-			(prefix) => bestCandidate(path, prefix, this.#eligible(prefix), (entry) => entry.route),
-			(entry) => entry.route,
+			(prefix) => this.#eligible(prefix).reverse(),
+			(entry) => entry,
 		);
 		if (best) {
 			const cached = this.#cache.get(path)?.get(best.route.instance ?? best.identity);
@@ -119,11 +143,11 @@ export class BroadcastCache {
 	pinned(path: Path.Valid, instance: Instance.Valid): Selection {
 		const best = mostSpecific(
 			path,
-			(prefix) => {
-				const entries = this.#eligible(prefix).filter((entry) => entry.route.instance === instance);
-				return bestCandidate(path, prefix, entries, (entry) => entry.route);
-			},
-			(entry) => entry.route,
+			(prefix) =>
+				this.#eligible(prefix)
+					.filter((entry) => entry.route.instance === instance)
+					.reverse(),
+			(entry) => entry,
 		);
 		return best ?? { identity: {}, route: { instance } };
 	}
@@ -203,6 +227,10 @@ export class BroadcastCache {
 	}
 
 	#update(prefix: Path.Valid): void {
+		if (this.#batched) {
+			this.#batched.add(prefix);
+			return;
+		}
 		for (const path of this.#paths.get(prefix) ?? []) this.#check(path);
 	}
 

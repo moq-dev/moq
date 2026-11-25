@@ -1366,12 +1366,12 @@ mod tests {
 	/// Subscribe to `video`, skipping no group however far behind the reader falls.
 	#[cfg(feature = "openh264")]
 	async fn subscribe(broadcast: &moq_net::broadcast::Producer) -> moq_net::track::Subscriber {
-		let history = moq_net::track::Delay::default().with_max(None);
+		let history = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL]);
 		broadcast
 			.consume()
 			.track("video")
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_delay(history))
+			.subscribe(history)
 			.await
 			.unwrap()
 	}

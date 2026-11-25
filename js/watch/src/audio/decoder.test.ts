@@ -774,6 +774,12 @@ describe("Decoder across a broadcast disable", () => {
 	});
 });
 
+// The max the subscription's live join asks, as the decoder sets it.
+function liveMax(subscription: Moq.Track.Subscription | undefined): Duration | null | undefined {
+	const start = subscription?.ranges?.[0]?.start;
+	return typeof start === "object" ? (start.live.max ?? Duration.ZERO) : undefined;
+}
+
 describe("Decoder across a delay change", () => {
 	it("reaches back and trims the join for a catalog warmup no further than the delay cap", async () => {
 		const trims = spyOn(Terminal.prototype, "clear");
@@ -785,14 +791,14 @@ describe("Decoder across a delay change", () => {
 			this: Moq.Track.Consumer,
 			...args: Parameters<typeof subscribe>
 		) {
-			asked.push(args[0]?.delay?.max);
+			asked.push(liveMax(args[0]));
 			return subscribe.apply(this, args);
 		});
 		const updates = spyOn(Moq.Track.Subscriber.prototype, "update").mockImplementation(function (
 			this: Moq.Track.Subscriber,
 			...args: Parameters<typeof update>
 		) {
-			asked.push(args[0]?.delay?.max);
+			asked.push(liveMax(args[0]));
 			return update.apply(this, args);
 		});
 		const playback = await play(Duration.millis(100));
@@ -1563,8 +1569,9 @@ function legacyFrame(media: Duration): Moq.Group.Frame {
 
 // A live "auto" playback reading real tracks through real container consumers on a manual clock.
 // One 20ms Opus frame per group, flushed in runs of `burst`, so each run's first frame lands that
-// much late. Each tick renders 20ms from the decoder's ring the way the worklet does.
-async function livePlayback(burst: number) {
+// much late. Each tick renders 20ms from the decoder's ring the way the worklet does. `priority` is
+// what the decoder subscribes with.
+async function livePlayback(burst: number, priority?: Signal<number>) {
 	const FRAME = 20;
 	const clock = manualAt(0);
 	const insert = spyOn(AudioRingBuffer.prototype, "write");
@@ -1592,7 +1599,7 @@ async function livePlayback(burst: number) {
 		producer.createTrack("audio", { timescale: Moq.Time.Timescale.MILLI, maxAge: Container.MAX_AGE }),
 	);
 	const enabled = new Signal(true);
-	const decoder = new Decoder({ source, sync, enabled });
+	const decoder = new Decoder({ source, sync, enabled, priority });
 
 	const samples = (48_000 * FRAME) / 1000;
 	const output = [new Float32Array(samples), new Float32Array(samples)];
@@ -1619,6 +1626,10 @@ async function livePlayback(burst: number) {
 		},
 		counts,
 		ring,
+		// The priority the publisher sees: the highest of the decoder's subscriptions to the track.
+		get priority() {
+			return track.subscription.peek()?.priority;
+		},
 		get burst() {
 			return burst;
 		},
@@ -1684,6 +1695,30 @@ async function livePlayback(burst: number) {
 		},
 	};
 }
+
+// The arrival estimate and the ordered read are two subscriptions to one track, and the publisher
+// sees the higher priority, so a drop reaches it only when both follow.
+it("subscribes at the hang audio priority unless given one, and follows a change", async () => {
+	const defaulted = await livePlayback(1);
+	try {
+		await defaulted.run(100);
+		expect(defaulted.priority).toBe(Catalog.PRIORITY.audio);
+	} finally {
+		await defaulted.close();
+	}
+
+	const priority = new Signal(127);
+	const playback = await livePlayback(1, priority);
+	try {
+		await playback.run(100);
+		expect(playback.priority).toBe(127);
+		priority.set(-128);
+		await playback.run(200);
+		expect(playback.priority).toBe(-128);
+	} finally {
+		await playback.close();
+	}
+});
 
 it("a missing live group re-primes without clearing decoded PCM or resetting Sync", async () => {
 	const playback = await livePlayback(1);
@@ -2110,14 +2145,14 @@ for (const buffered of [false, true]) {
 			...args: Parameters<typeof subscribe>
 		) {
 			const subscriber = subscribe.apply(this, args);
-			asked.set(subscriber, args[0]?.delay?.max);
+			asked.set(subscriber, liveMax(args[0]));
 			return subscriber;
 		});
 		const updates = spyOn(Moq.Track.Subscriber.prototype, "update").mockImplementation(function (
 			this: Moq.Track.Subscriber,
 			...args: Parameters<typeof update>
 		) {
-			asked.set(this, args[0]?.delay?.max);
+			asked.set(this, liveMax(args[0]));
 			return update.apply(this, args);
 		});
 		const playback = await play(Duration.millis(100), buffered);

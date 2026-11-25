@@ -10,6 +10,7 @@ import * as Lite from "./lite/index.ts";
 import { createMockTransportPair } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
+import { withMax } from "./subscription.test-util.ts";
 import { Timestamp } from "./time.ts";
 import { wireOf } from "./wire.ts";
 
@@ -47,7 +48,7 @@ const WIRES: Wire[] = [
  * ID, as a relay does. A JS origin refuses to serve a broadcast a session delivered.
  */
 async function forward(input: BroadcastConsumer, carriesDatagrams: boolean): Promise<BroadcastProducer> {
-	const subscription = input.track("video").subscribe({ delay: { max: null } });
+	const subscription = input.track("video").subscribe(withMax({ delay: { max: null } }));
 	const copy = new BroadcastProducer();
 	if (carriesDatagrams) {
 		const reader = input.datagrams("video");
@@ -104,7 +105,7 @@ for (const wire of WIRES) {
 		})();
 
 		const remote = wireOf(viewer).consume(path);
-		const reader = remote.track("video").subscribe({ delay: { max: null } });
+		const reader = remote.track("video").subscribe(withMax({ delay: { max: null } }));
 		// Publish once the viewer's subscription reached the publisher through the relay, so
 		// every group rides it live rather than racing it.
 		const demand = track.demand();

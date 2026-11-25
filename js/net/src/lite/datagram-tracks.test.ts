@@ -526,7 +526,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 }
 
 // A peer's protocol violation fails the session at once, without the drain a close gets. A lite-05/06
-// datagram track whose SUBSCRIBE_FINISH was accepted keeps that end, even while its FIN lags.
+// datagram track whose SUBSCRIBE_END was accepted keeps that end, even while its FIN lags.
 for (const [alpn, version] of [
 	[ALPN_05, Version.DRAFT_05],
 	[ALPN_06, Version.DRAFT_06],

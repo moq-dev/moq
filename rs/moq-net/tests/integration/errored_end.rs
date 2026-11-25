@@ -4,8 +4,8 @@
 //! group below the end, then the error, and so does one subscribing after the first ended.
 //! Before lite-07 the end has nowhere to carry its error, so the subscription resets with it.
 
+use crate::WithMax as _;
 use crate::support;
-use moq_net::track::Delay;
 use support::AppendNext;
 use support::AtStart;
 
@@ -32,7 +32,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 async fn read(broadcast: &moq_net::broadcast::Consumer) -> (Vec<(u64, Vec<Vec<u8>>)>, Option<Error>) {
 	let subscription = Subscription::default()
 		.with_ranges([support::keys(0..)])
-		.with_delay(Delay::default().with_max(Duration::from_secs(30)));
+		.with_max(Duration::from_secs(30));
 	let mut sub = kio::clock::timeout(TIMEOUT, broadcast.track("video").unwrap().subscribe(subscription))
 		.await
 		.expect("subscribe timeout")
@@ -140,7 +140,7 @@ async fn an_errored_end_keeps_its_history_across_a_hop() {
 				false => assert!(err.is_some(), "{label} {what}: ended cleanly"),
 			}
 		}
-		// Lite-07 ends the subscription after SUBSCRIBE_FINISH rather than resetting it.
+		// Lite-07 ends the subscription after SUBSCRIBE_END rather than resetting it.
 		let reset = session.server_transport.resets().contains(&(64 + 7));
 		assert_eq!(
 			reset,

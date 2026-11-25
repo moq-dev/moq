@@ -73,6 +73,7 @@ pub(super) async fn record(node: &origin::Producer, path: &'static str) -> Watch
 				origin::RouteKind::Restart => support::Kind::Restart,
 				origin::RouteKind::End => support::Kind::End,
 				origin::RouteKind::Offline => support::Kind::Offline,
+				kind => panic!("unexpected route kind {kind:?}"),
 			};
 			let route = &event.announce.route;
 			let seen = (kio::clock::now(), kind, route.available(), route.cost().value());

@@ -9774,9 +9774,9 @@ rec {
       };
       "form_urlencoded" = rec {
         crateName = "form_urlencoded";
-        version = "1.2.2";
+        version = "1.2.3";
         edition = "2018";
-        sha256 = "1kqzb2qn608rxl3dws04zahcklpplkd5r1vpabwga5l50d2v4k6b";
+        sha256 = "0vph40jb1qvkvl52aigslr0hvbg1dhiwdwaxg48i5yxgkqcqk95g";
         authors = [
           "The rust-url developers"
         ];
@@ -20136,6 +20136,11 @@ rec {
             rename = "criterion";
           }
           {
+            name = "block2";
+            packageId = "block2 0.6.2";
+            target = { target, features }: ("macos" == target."os" or null);
+          }
+          {
             name = "futures";
             packageId = "futures";
           }
@@ -20164,6 +20169,17 @@ rec {
             name = "moq-net";
             packageId = "moq-net";
             features = [ "fuzz" ];
+          }
+          {
+            name = "objc2-av-foundation";
+            packageId = "objc2-av-foundation";
+            target = { target, features }: ("macos" == target."os" or null);
+            features = [ "objc2-core-media" ];
+          }
+          {
+            name = "objc2-foundation";
+            packageId = "objc2-foundation 0.3.2";
+            target = { target, features }: ("macos" == target."os" or null);
           }
           {
             name = "proptest";
@@ -20373,6 +20389,7 @@ rec {
           {
             name = "moq-net";
             packageId = "moq-net";
+            usesDefaultFeatures = false;
             features = [
               "relay"
               "test-support"
@@ -27366,6 +27383,24 @@ rec {
             ];
           }
           {
+            name = "objc2-core-media";
+            packageId = "objc2-core-media";
+            optional = true;
+            usesDefaultFeatures = false;
+            features = [
+              "CMBase"
+              "CMFormatDescription"
+              "CMSampleBuffer"
+              "CMSync"
+              "CMTag"
+              "CMTagCollection"
+              "CMTaggedBufferGroup"
+              "CMTime"
+              "CMTimeRange"
+              "objc2"
+            ];
+          }
+          {
             name = "objc2-core-video";
             packageId = "objc2-core-video";
             optional = true;
@@ -28311,6 +28346,7 @@ rec {
           "objc2-core-foundation"
           "objc2-core-graphics"
           "objc2-core-image"
+          "objc2-core-media"
           "objc2-core-video"
           "objc2-image-io"
           "objc2-media-toolbox"
@@ -52063,9 +52099,9 @@ rec {
       };
       "url" = rec {
         crateName = "url";
-        version = "2.5.8";
+        version = "2.5.9";
         edition = "2018";
-        sha256 = "1v8f7nx3hpr1qh76if0a04sj08k86amsq4h8cvpw6wvk76jahrzz";
+        sha256 = "06ivkcv3ljdrp34vlr8n2byyzk7m43q4r3g8ggqhwb5lgd0d437h";
         authors = [
           "The rust-url developers"
         ];
@@ -60012,6 +60048,12 @@ rec {
             target = { target, features }: (target.name == "aarch64-apple-darwin");
           }
           {
+            name = "objc2-av-foundation";
+            packageId = "objc2-av-foundation";
+            target = { target, features }: (target.name == "aarch64-apple-darwin");
+            features = [ "objc2-core-media" ];
+          }
+          {
             name = "objc2-core-audio";
             packageId = "objc2-core-audio";
             usesDefaultFeatures = false;
@@ -60039,6 +60081,11 @@ rec {
           {
             name = "objc2-core-graphics";
             packageId = "objc2-core-graphics";
+            target = { target, features }: (target.name == "aarch64-apple-darwin");
+          }
+          {
+            name = "objc2-core-media";
+            packageId = "objc2-core-media";
             target = { target, features }: (target.name == "aarch64-apple-darwin");
           }
           {
@@ -61473,6 +61520,12 @@ rec {
             target = { target, features }: (target.name == "aarch64-apple-darwin");
           }
           {
+            name = "objc2-av-foundation";
+            packageId = "objc2-av-foundation";
+            target = { target, features }: (target.name == "aarch64-apple-darwin");
+            features = [ "objc2-core-media" ];
+          }
+          {
             name = "objc2-core-audio";
             packageId = "objc2-core-audio";
             usesDefaultFeatures = false;
@@ -61500,6 +61553,11 @@ rec {
           {
             name = "objc2-core-graphics";
             packageId = "objc2-core-graphics";
+            target = { target, features }: (target.name == "aarch64-apple-darwin");
+          }
+          {
+            name = "objc2-core-media";
+            packageId = "objc2-core-media";
             target = { target, features }: (target.name == "aarch64-apple-darwin");
           }
           {

@@ -60,7 +60,8 @@ jobs:
         if: steps.scope.outputs.needed == 'true'
         run: |
           rm -rf target/cargo-timings
-          nix develop --command just ci --all
+          # exec, so a cancel reaches the dispatcher (see queue.yml).
+          exec nix develop --command just ci --all
 
       # Cargo's per-crate timings for the Rust test builds, so a slow crate
       # shows without rebuilding. The job summary has the per-module times.

@@ -41,6 +41,7 @@ use util::*;
 mod acked;
 mod characterize;
 mod probe;
+mod quiesce;
 mod rate;
 mod realtime;
 mod receive_ts;
@@ -4173,6 +4174,168 @@ fn lost_handshake_ack_repeats_in_next_packet() {
 	assert_eq!(pair.server_conn_mut(server_ch).stats().frame_rx.acks, acks + 1);
 }
 
+/// A server whose flight was lost re-sends it when the client repeats its ClientHello, rather than
+/// at its own PTO (RFC 9002 §6.2.3)
+#[test]
+fn server_resends_flight_when_client_probes() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	// The client probes long before the server's 999ms PTO, as a peer with a lower initial RTT does
+	let mut client = client_config();
+	client.transport.initial_rtt = Duration::from_millis(10);
+	let client_ch = pair.begin_connect(client);
+	let start = pair.time;
+
+	// The server's flight is lost
+	pair.drive_client();
+	pair.drive_server();
+	pair.client.inbound.clear();
+	let sent = pair.client_conn_mut(client_ch).stats().frame_tx.crypto;
+	while pair.client_conn_mut(client_ch).stats().frame_tx.crypto == sent {
+		pair.time = pair.client.next_wakeup().unwrap();
+		pair.drive_client();
+	}
+
+	while !has_handshake_data(pair.client_conn_mut(client_ch)) {
+		assert!(pair.step());
+	}
+	// Before the server's own first PTO, three times its initial RTT
+	let pto = 3 * transport::Config::default().initial_rtt;
+	assert!(pair.time - start < pto, "{:?}", pair.time - start);
+}
+
+/// A client that gets the server's Handshake packets without the ServerHello before them asks
+/// for it again at once, rather than at its PTO (RFC 9002 §6.2.3)
+#[test]
+fn client_requests_lost_server_hello() {
+	let _guard = subscribe();
+	let (cert, key) = big_cert_and_key();
+	let mut pair = Pair::new(Default::default(), server_config_with_cert(cert.clone(), key));
+	pair.latency = Duration::from_millis(10);
+	let client_ch = pair.begin_connect(client_config_with_certs(vec![cert]));
+	pair.drive_client();
+	pair.time = pair.server.next_wakeup().unwrap();
+	pair.server.drive(pair.time, pair.client.addr);
+	let start = pair.time;
+
+	// The datagram carrying the ServerHello is lost, and the Handshake ones paced out behind it
+	// arrive
+	pair.server.outbound.pop_front();
+	pair.drive_server();
+
+	// The client asks by repeating its ClientHello, whose ACK was in the lost datagram: a server
+	// following RFC 9002 §6.2.3's text re-sends on duplicate CRYPTO but only ACKs a PING
+	let tx = pair.client_conn_mut(client_ch).stats().frame_tx;
+	while pair.client_conn_mut(client_ch).stats().frame_tx.crypto == tx.crypto {
+		assert!(pair.step());
+	}
+	let asked = pair.client_conn_mut(client_ch).stats().frame_tx;
+	assert_eq!((asked.crypto, asked.ping), (tx.crypto + 1, tx.ping));
+
+	while !has_handshake_data(pair.client_conn_mut(client_ch)) {
+		assert!(pair.step());
+	}
+	// Three round trips and the pacing between datagrams, against a 999ms PTO: one to hear the
+	// ServerHello is missing, then two for the flight sent again, which the anti-amplification
+	// limit splits around an ACK
+	let rtt = 2 * pair.latency;
+	assert!(pair.time - start < 4 * rtt, "{:?}", pair.time - start);
+	pair.drive();
+	assert!(is_confirmed(pair.client_conn_mut(client_ch)));
+}
+
+/// A server's handshake PTO carries its whole lost flight, Initial and Handshake coalesced, so the
+/// probe's first datagram alone completes the client's handshake
+#[test]
+fn handshake_pto_coalesces_lost_flight() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	let client_ch = pair.begin_connect(client_config());
+	pair.drive_client();
+	pair.drive_server();
+	// The server's whole flight is lost, up to its PTO's probe, a padded Initial
+	pair.client.inbound.clear();
+	loop {
+		pair.time = pair.server.next_wakeup().unwrap();
+		pair.server.drive(pair.time, pair.client.addr);
+		if pair
+			.server
+			.outbound
+			.front()
+			.is_some_and(|(t, _)| t.size >= MIN_INITIAL_SIZE as usize)
+		{
+			break;
+		}
+		pair.server.outbound.clear();
+	}
+	pair.server.outbound.truncate(1);
+	pair.drive_server();
+	pair.drive_client();
+	assert!(is_connected(pair.client_conn_mut(client_ch)));
+}
+
+/// CRYPTO recovered early goes ahead of a flight the anti-amplification limit still holds back,
+/// since a client buffers only so far past the offset it is missing
+#[test]
+fn recovered_crypto_precedes_unsent_flight() {
+	let _guard = subscribe();
+	let (cert, key) = big_cert_and_key();
+	let mut pair = Pair::new(Default::default(), server_config_with_cert(cert.clone(), key));
+	pair.latency = Duration::from_millis(10);
+	let mut client = client_config_with_certs(vec![cert]);
+	// Less than the flight, more than the anti-amplification limit lets out at once
+	client.transport.crypto_buffer_size = 4096;
+	let client_ch = pair.begin_connect(client);
+	pair.drive_client();
+	pair.time = pair.server.next_wakeup().unwrap();
+	pair.server.drive(pair.time, pair.client.addr);
+
+	// The ServerHello and the flight's first bytes are lost
+	pair.server.outbound.pop_front();
+	pair.drive();
+	assert!(is_confirmed(pair.client_conn_mut(client_ch)));
+}
+
+/// A requeued handshake flight goes out in offset order, behind none of its later bytes.
+///
+/// The client, with a 4 KiB crypto buffer, holds the flight up to the datagram lost at offset
+/// 4420. Its retransmission is lost too, and the flight's tail never arrived, so a probe re-sends
+/// both; a tail ahead of the retransmission lands past the client's buffer and closes it.
+#[test]
+fn requeued_crypto_keeps_offset_order() {
+	let _guard = subscribe();
+	let (cert, key) = big_cert_and_key();
+	let mut pair = Pair::new(Default::default(), server_config_with_cert(cert.clone(), key));
+	pair.latency = Duration::from_millis(10);
+	let mut client = client_config_with_certs(vec![cert]);
+	client.transport.crypto_buffer_size = 4096;
+	let client_ch = pair.begin_connect(client);
+
+	// The server's datagrams by index: 4 holds offset 4420, 6 to 8 the flight's tail, and 12 the
+	// retransmission of 4420
+	const LOST: [usize; 5] = [4, 6, 7, 8, 12];
+	let mut sent = 0;
+	while !is_confirmed(pair.client_conn_mut(client_ch)) {
+		pair.drive_client();
+		pair.server.drive(pair.time, pair.client.addr);
+		let outbound = mem::take(&mut pair.server.outbound);
+		let batch = outbound.len();
+		for (index, datagram) in (sent..).zip(outbound) {
+			if !LOST.contains(&index) {
+				pair.server.outbound.push_back(datagram);
+			}
+		}
+		sent += batch;
+		pair.drive_server();
+		// Nothing left to wake: a closed client fails the assertion below
+		match min_opt(pair.client.next_wakeup(), pair.server.next_wakeup()) {
+			Some(t) => pair.time = pair.time.max(t),
+			None => break,
+		}
+	}
+	assert!(is_confirmed(pair.client_conn_mut(client_ch)));
+}
+
 /// A short idle timeout does not cut the handshake to two Initial flights.
 ///
 /// Before an RTT sample the PTO is 999ms, so a 2s idle timeout is armed at 2997ms, while
@@ -7050,6 +7213,151 @@ fn pacing_blocked_backlog_is_not_app_limited() {
 		pacing_rate: Some(125_000),
 		..Default::default()
 	});
+}
+
+/// Drains a backlog that `factory`'s controllers hold back, and returns the client's
+/// `(cwnd_blocked, pacing_blocked)` with the span from its first send of the backlog to its last.
+///
+/// The backlog waits on the controller from its first send to its last, and the simulated
+/// clock sends in no time, so the limit that held it must account for that whole span.
+fn congestion_waits(factory: PacketRecorderFactory) -> (Duration, Duration, Duration) {
+	let _guard = subscribe();
+	let (mut pair, client_ch, log) = recorded_pair(factory);
+	pair.latency = Duration::from_millis(20);
+	// Refill a pacer the handshake drained, as `check_blocked_backlog_is_not_app_limited` does.
+	pair.time = pair.time.saturating_add(Duration::from_millis(100));
+	pair.drive();
+	let before = log.lock().unwrap().len();
+	// The handshake may have waited on the pacer already.
+	let start = pair.client_conn_mut(client_ch).stats().path;
+
+	let s = pair
+		.client_streams(client_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	pair.client_send(client_ch, s).write(&mut &[42; 64 * 1024][..]).unwrap();
+	pair.client_send(client_ch, s).finish().unwrap();
+	pair.drive();
+
+	let sent: Vec<Instant> = log.lock().unwrap()[before..]
+		.iter()
+		.filter_map(|e| match e {
+			PacketEvent::Sent { at } => Some(*at),
+			_ => None,
+		})
+		.collect();
+	let span = *sent.last().unwrap() - sent[0];
+	let end = pair.client_conn_mut(client_ch).stats().path;
+	(
+		end.cwnd_blocked - start.cwnd_blocked,
+		end.pacing_blocked - start.pacing_blocked,
+		span,
+	)
+}
+
+#[test]
+fn congestion_waits_time_a_full_window() {
+	let (window, pacing, span) = congestion_waits(PacketRecorderFactory {
+		window: Some(12_000),
+		..Default::default()
+	});
+	// 64 KiB through a 12 kB window takes several 40 ms round trips.
+	assert!(span >= Duration::from_millis(160), "{span:?}");
+	assert_eq!((window, pacing), (span, Duration::ZERO));
+}
+
+#[test]
+fn congestion_waits_time_the_pacer() {
+	let (window, pacing, span) = congestion_waits(PacketRecorderFactory {
+		pacing_rate: Some(125_000),
+		..Default::default()
+	});
+	// 64 KiB at 125 kB/s takes about half a second.
+	assert!(span >= Duration::from_millis(400), "{span:?}");
+	assert_eq!((window, pacing), (Duration::ZERO, span));
+}
+
+/// A wait ends when its limit clears, though the driver holds transmits back past it, as while
+/// its send buffers are full: an ACK that opens the window, the pacer's deadline passing, or the
+/// path that imposed it being replaced.
+#[test]
+fn congestion_waits_end_when_the_limit_clears() {
+	let backlog = |factory| {
+		let _guard = subscribe();
+		let (mut pair, ch, _log) = recorded_pair(factory);
+		pair.latency = Duration::from_millis(20);
+		pair.time = pair.time.saturating_add(Duration::from_millis(100));
+		pair.drive();
+		let start = pair.client_conn_mut(ch).stats().path;
+		let s = pair.client_streams(ch).open(Dir::Uni, Default::default()).unwrap();
+		pair.client_send(ch, s).write(&mut &[42; 64 * 1024][..]).unwrap();
+		pair.drive_client();
+		(pair, ch, start)
+	};
+	let held = Duration::from_millis(100);
+
+	// A full window clears when the server's ACK arrives, a round trip after the client blocked.
+	let (mut pair, ch, start) = backlog(PacketRecorderFactory {
+		window: Some(12_000),
+		..Default::default()
+	});
+	let blocked = pair.time;
+	pair.time = pair.time.saturating_add(Duration::from_millis(20));
+	pair.drive_server();
+	pair.time = pair.time.saturating_add(Duration::from_millis(20));
+	let acked = pair.time;
+	pair.client.receive_only(acked, pair.server.addr);
+	pair.time = pair.time.saturating_add(held);
+	let now = pair.time;
+	pair.client_conn_mut(ch).handle_timeout(now);
+	let stats = pair.client_conn_mut(ch).stats().path;
+	assert_eq!(stats.cwnd_blocked - start.cwnd_blocked, acked - blocked);
+
+	// The pacer clears at its deadline, the connection's next timer.
+	let (mut pair, ch, start) = backlog(PacketRecorderFactory {
+		pacing_rate: Some(125_000),
+		..Default::default()
+	});
+	let blocked = pair.time;
+	let until = pair.client_conn_mut(ch).poll_timeout().unwrap();
+	assert!(until > blocked);
+	pair.time = until.saturating_add(held);
+	let now = pair.time;
+	pair.client_conn_mut(ch).handle_timeout(now);
+	let stats = pair.client_conn_mut(ch).stats().path;
+	assert_eq!(stats.pacing_blocked - start.pacing_blocked, until - blocked);
+
+	// A path change ends the wait the old path imposed: the server, held by its pacer, hears the
+	// client from a new address before the pacer's deadline.
+	let _guard = subscribe();
+	let (mut pair, client_ch, _log) = recorded_pair(PacketRecorderFactory {
+		pacing_rate: Some(125_000),
+		..Default::default()
+	});
+	pair.time = pair.time.saturating_add(Duration::from_millis(100));
+	pair.drive();
+	let server_ch = *pair.server.connections.keys().next().unwrap();
+	let start = pair.server_conn_mut(server_ch).stats().path;
+	let s = pair
+		.server_streams(server_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	pair.server_send(server_ch, s).write(&mut &[42; 64 * 1024][..]).unwrap();
+	pair.drive_server();
+	let blocked = pair.time;
+	let until = pair.server_conn_mut(server_ch).poll_timeout().unwrap();
+	pair.time = blocked.saturating_add((until - blocked) / 2);
+	let moved = pair.time;
+	pair.client.addr = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), pair.next_port());
+	pair.client_conn_mut(client_ch).ping();
+	pair.drive_client();
+	pair.server.receive_only(moved, pair.client.addr);
+	assert_eq!(pair.server_conn_mut(server_ch).remote_address(), pair.client.addr);
+	pair.time = until.saturating_add(held);
+	let now = pair.time;
+	pair.server_conn_mut(server_ch).handle_timeout(now);
+	let stats = pair.server_conn_mut(server_ch).stats().path;
+	assert_eq!(stats.pacing_blocked - start.pacing_blocked, moved - blocked);
 }
 
 /// The last packet in a poll can drain the application while bytes remain in flight.

@@ -234,7 +234,6 @@ public enum Media {
         /// Fetch and decode exactly one group of a catalog rendition, following its broadcast and track.
         public static func fetch(broadcast: BroadcastConsumer, config: GroupConfig) async throws -> GroupConsumer {
             try checkRendition(config.rendition)
-            try checkFetch(config.options)
             return GroupConsumer(try await MoqMediaGroupConsumer.fetch(broadcast: broadcast.ffi, config: config))
         }
         init(_ ffi: MoqMediaGroupConsumer) {

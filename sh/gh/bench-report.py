@@ -250,8 +250,8 @@ def sizes(directory):
     )
 
 
-def prepare(directory, output):
-    costs, rates, comparisons = [], [], {}
+def completed(directory):
+    """Each nightly source that succeeded, as its name, its checked entries, and its paired comparison or None."""
     for source in sorted(directory.glob("bench-*")):
         # Other nightly artifacts share the prefix; only a recorded outcome marks a chart source.
         status = source / "outcome.json"
@@ -261,18 +261,25 @@ def prepare(directory, output):
         if outcome not in {"success", "failure", "cancelled", "skipped"}:
             raise ValueError(f"invalid benchmark outcome: {source}")
         if outcome != "success":
-            print(f"{source.name}: {outcome}; no history point")
+            print(f"{source.name}: {outcome}; no point")
             continue
         report = source / "report.json"
         if not report.exists():
             raise ValueError(f"successful benchmark has no report: {source}")
         entries = checked(json.loads(report.read_text()))
+        print(f"{source.name}: {len(entries)} measured entries")
+        paired = source / "paired.json"
+        yield source.name, entries, json.loads(paired.read_text()) if paired.exists() else None
+
+
+def prepare(directory, output):
+    costs, rates, comparisons = [], [], {}
+    for source, entries, comparison in completed(directory):
         for entry in entries:
             target = rates if entry["unit"] in BIGGER else costs
-            target.append({**entry, "name": f"{source.name}/{entry['name']}"})
-        print(f"{source.name}: {len(entries)} measured entries")
-        if (source / "paired.json").exists():
-            comparisons[source.name] = json.loads((source / "paired.json").read_text())
+            target.append({**entry, "name": f"{source}/{entry['name']}"})
+        if comparison is not None:
+            comparisons[source] = comparison
     if not costs and not rates:
         # The table still rebuilds from stored history and marks every source stale.
         print("no completed benchmark reports; no history point")
@@ -286,6 +293,70 @@ def prepare(directory, output):
         if target := os.environ.get("GITHUB_OUTPUT"):
             with open(target, "a") as stream:
                 stream.write(f"{name}={str(bool(entries)).lower()}\n")
+
+
+# Kixel Quest reads at most this many bytes of a run attempt's metrics, across its artifacts.
+KIXEL_LIMIT = 1 << 20
+# The measure an entry that is no benchmark CSV column records, by its unit; any other unit names its own.
+MEASURES = {"ns": "time", "bytes": "size"}
+
+
+def compact(number):
+    """A measurement to six significant digits, far finer than its noise, so a night's fits Kixel Quest's limit."""
+    rounded = float(f"{value(number):.6g}")
+    return int(rounded) if rounded.is_integer() else rounded
+
+
+def kixel(head, bases):
+    """Kixel Quest's `metrics.json` for entries measured at the run's commit and, by commit, at paired bases.
+
+    A benchmark CSV column becomes a measure of the row its other segments name, so a row's columns share one name.
+    """
+    units = {}
+
+    def metrics(entries):
+        result = {}
+        for entry in checked(entries):
+            benchmark, _, column = entry["name"].rpartition("/")
+            if not benchmark or measurement_unit(column) != entry["unit"]:
+                benchmark, measure = entry["name"], MEASURES.get(entry["unit"], entry["unit"])
+            else:
+                measure = column
+            if len(benchmark) > 1024 or len(measure) > 64:
+                raise ValueError(f"name too long for Kixel Quest: {entry['name']}")
+            # A column's name implies its unit, and MEASURES names no column, so a measure keeps one unit.
+            units[measure] = entry["unit"]
+            measures = result.setdefault(benchmark, {})
+            if measure in measures:
+                raise ValueError(f"duplicate measurement: {entry['name']}")
+            measures[measure] = {"value": compact(entry["value"])}
+        return result
+
+    samples = [{"metrics": metrics(head)}]
+    for commit, entries in sorted(bases.items()):
+        if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", commit):
+            raise ValueError(f"paired base is not a full commit ID: {commit!r}")
+        samples.append({"commit": commit, "metrics": metrics(entries)})
+    text = json.dumps({"units": units, "samples": samples}, separators=(",", ":"), ensure_ascii=False) + "\n"
+    size = len(text.encode())
+    if size > KIXEL_LIMIT:
+        raise ValueError(f"metrics.json is {size} bytes, over the {KIXEL_LIMIT} Kixel Quest reads")
+    print(f"metrics.json: {size} bytes of {KIXEL_LIMIT}")
+    return text
+
+
+def nightly_metrics(directory):
+    """Kixel Quest's metrics of each successful source, with each paired comparison's base; None when none succeeded."""
+    head, bases = [], {}
+    for _, entries, comparison in completed(directory):
+        head += entries
+        if comparison is not None:
+            measured = [case for case in comparison["cases"] if case["base_ns"] is not None]
+            bases.setdefault(comparison["base"], []).extend(
+                {"name": case["name"], "unit": "ns", "value": case["base_ns"]} for case in measured
+            )
+    # A comparison of only identical builds measured no base.
+    return kixel(head, {commit: entries for commit, entries in bases.items() if entries}) if head else None
 
 
 HISTORY_PREFIX = "window.BENCHMARK_DATA = "
@@ -569,7 +640,7 @@ def index(directory, commit=None, paired_path=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    for command in ("rust", "rust-test", "js", "size", "prepare"):
+    for command in ("rust", "rust-test", "js", "size", "prepare", "nightly-metrics"):
         sub = commands.add_parser(command)
         sub.add_argument("directory", type=Path)
         sub.add_argument("output", type=Path)
@@ -597,6 +668,11 @@ def main():
         write(args.output, sizes(args.directory))
     elif args.command == "prepare":
         prepare(args.directory, args.output)
+    elif args.command == "nightly-metrics":
+        text = nightly_metrics(args.directory)
+        if text is not None:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(text)
     elif args.command == "status":
         args.directory.mkdir(parents=True, exist_ok=True)
         (args.directory / "outcome.json").write_text(json.dumps({"status": args.status}) + "\n")

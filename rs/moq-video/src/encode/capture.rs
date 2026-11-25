@@ -1386,8 +1386,12 @@ mod tests {
 					.track(name)
 					.unwrap()
 					.subscribe(
-						moq_net::track::Subscription::default()
-							.with_delay(moq_net::track::Delay::default().with_max(RETAIN)),
+						moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+							moq_net::track::Start::Live {
+								min: Some(RETAIN),
+								max: Some(RETAIN),
+							},
+						)]),
 					)
 					.await
 					.unwrap();
@@ -2085,8 +2089,12 @@ mod tests {
 					.track(&name)
 					.unwrap()
 					.subscribe(
-						moq_net::track::Subscription::default()
-							.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(5))),
+						moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+							moq_net::track::Start::Live {
+								min: Some(Duration::from_secs(5)),
+								max: Some(Duration::from_secs(5)),
+							},
+						)]),
 					)
 					.await
 					.unwrap();
@@ -2278,8 +2286,12 @@ mod tests {
 				.track(name)
 				.unwrap()
 				.subscribe(
-					moq_net::track::Subscription::default()
-						.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60))),
+					moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+						moq_net::track::Start::Live {
+							min: Some(Duration::from_secs(60)),
+							max: Some(Duration::from_secs(60)),
+						},
+					)]),
 				)
 				.await
 				.unwrap()
@@ -2687,8 +2699,12 @@ mod tests {
 				.track("video")
 				.unwrap()
 				.subscribe(
-					moq_net::track::Subscription::default()
-						.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(600))),
+					moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+						moq_net::track::Start::Live {
+							min: Some(Duration::from_secs(600)),
+							max: Some(Duration::from_secs(600)),
+						},
+					)]),
 				)
 				.await
 				.unwrap();

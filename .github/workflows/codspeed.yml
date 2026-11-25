@@ -1,31 +1,40 @@
-name: CodSpeed
+name: Instructions
 
-# CPU-simulated instruction counts for the deterministic Criterion benches,
-# nightly on main. An extra signal beside Nightly's paired timing, which still
-# measures every bench and is the only gate; see bench/README.md.
+# Nightly instruction counts for the deterministic Criterion benches, under stock
+# Valgrind through rust2-bench (`just rs instructions`). Kixel Quest reads them
+# and bisects a regression to its landing; nothing gates on them, and Nightly's
+# paired timing still measures every bench. See bench/README.md.
 on:
   schedule:
     - cron: "0 7 * * *"
+  # Kixel Quest bisects a regression by dispatching this workflow on a
+  # `kixel-bisect/<run>/<commit>` branch of its own, naming the suspect
+  # benchmarks so each step builds and counts only those.
   workflow_dispatch:
+    inputs:
+      benchmarks:
+        description: "Benchmark names to count, one per line (the form takes one; pass several with `gh workflow run -f` or the API); empty counts every one."
+        required: false
+        default: ""
+
+# Keyed on the ref, so a bisect step never waits behind or cancels `main`, and
+# each bisect's steps run on branches of their own.
+concurrency:
+  group: instructions-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 jobs:
-  codspeed:
-    name: CodSpeed (${{ matrix.shard }})
-    if: github.ref == 'refs/heads/main'
-    # One upload of every bench is over CodSpeed's per-run limit, so each shard
-    # uploads separately and CodSpeed merges this workflow's shards.
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [net, mux, rest]
-    # CodSpeed's simulation runner supports x86 hosted runners.
+  instructions:
+    name: Instructions
+    # rust2-bench's fingerprint names the simulated CPU in each measure, so
+    # counts compare only within one runner image's hardware class.
     runs-on: ubuntu-24.04
-    environment: cache-write
-    timeout-minutes: 90
-    permissions:
-      contents: read
-      # CodSpeed authenticates the upload with GitHub OIDC; no token secret.
-      id-token: write
+    # Only `main` writes the Rust cache; see .github/actions/rust-cache.
+    environment: ${{ github.ref == 'refs/heads/main' && 'cache-write' || '' }}
+    timeout-minutes: 120
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -37,14 +46,33 @@ jobs:
           access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
 
-      # The runner measures its whole command, so the benches run on the dev
-      # shell's PATH rather than inside a `nix develop` it would also measure.
-      - name: Build
+      - name: Count
+        env:
+          BENCHMARKS: ${{ inputs.benchmarks }}
         run: |
-          nix develop --command just rs codspeed ${{ matrix.shard }}
-          echo "DEV_PATH=$(nix develop --command printenv PATH)" >> "$GITHUB_ENV"
+          # One benchmark at a time: some read the wall clock, so their counts
+          # follow the host's load, and a bisect step must count under the same
+          # load as the nightly it is compared against.
+          args=(run --jobs 1 --out kixel-metrics/metrics.json)
+          if [ -n "$BENCHMARKS" ]; then
+            printf '%s\n' "$BENCHMARKS" > "$RUNNER_TEMP/benchmarks"
+            args+=(--benchmarks "$RUNNER_TEMP/benchmarks")
+          fi
+          nix develop --command just rs instructions "${args[@]}"
 
-      - uses: CodSpeedHQ/action@af75f77f17a054769abefaa42fe8dc2975469b5f # v5.6.3
+      # rust2-bench keeps a failed job's output and Valgrind log here.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: failure()
         with:
-          mode: simulation
-          run: env PATH="$DEV_PATH" cargo codspeed run
+          name: rust2-bench-jobs
+          path: target/rust2-bench/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      # Kixel Quest reads it once the run attempt finishes; a rerun overwrites it.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: kixel-metrics
+          path: kixel-metrics/metrics.json
+          overwrite: true
+          retention-days: 30

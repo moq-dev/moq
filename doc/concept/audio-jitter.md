@@ -46,11 +46,11 @@ Natively that holds only as far as the caller lets it. The container consumer
 reads groups in sequence order and applies its age budget inside `read()`, so a
 group skipped for age is never observed, and a frame queued behind a stalled
 group is observed when the stall clears. A missing group, one that has delivered
-no frame, is given up by the subscription's `delay.max` alone, like any stale
-group; `delay.min` only sets where a join starts. Each frame is timed by when it
+no frame, is given up by the live join's `max` alone, like any stale
+group; its `min` only sets where the join starts. Each frame is timed by when it
 landed in the node's cache, not when the read reached it, so the frames a hole
 holds back read as on time rather than as jitter. The browser player leaves the hole to the transport: it reads its audio
-through an ordered track reader whose own `delay.max` is what the ring holds of
+through an ordered track reader whose own live join's `max` is what the ring holds of
 the delay plus the stretch threshold, past which the ring would skip the hole's
 audio anyway, and plays each gap that reader reports as the hole. The reader
 gives up on a missing group by the same two clocks as any stale group: once the
@@ -68,7 +68,7 @@ as packets come and lets the playback buffer hold the target, rather than
 pacing reads to the speaker.
 
 A frame dropped by the relay is never observed, which is correct only while the
-drop is not the receiver's own doing. The subscription's max delay drops groups
+drop is not the receiver's own doing. The live join's max drops groups
 before any container sees them, at the relay and in the receiver's own transport
 subscriber, so a subscription cut to the target hides every frame later than
 the target: the estimate creeps up one bucket at a time while the frames it
@@ -940,10 +940,12 @@ keeps three numbers: `owed`, the playhead movement the pace asked for that no
 splice took yet; its `direction`; and an `allowance`, which starts at `span`.
 
 At each hop boundary, before anything else, the allowance refills by
-`CAP * hop`, up to `span`. If the pace's sign differs from `direction`, it
-becomes the direction and `owed` resets to zero. A hold returns no splice.
-Otherwise `owed` adds `pace * hop`, clamped to ±`span`, and a splice is tried
-once `direction * owed >= hop`, or at once when urgent. The shift's range is
+`CAP * hop`, up to `span`. A hold returns no splice and keeps `owed`, so a lag
+flickering across half a hop, as clock readings jitter, still adds up to one.
+Otherwise, if the pace's sign differs from `direction`, it becomes the
+direction and `owed` resets to zero; then `owed` adds `pace * hop`, clamped
+to ±`span`, and a splice is tried once `direction * owed >= hop`, or at once
+when urgent. The shift's range is
 the decision's `[low, high]`, within ±`floor(allowance)`, at least `-head` (the
 history held) and at most what is held past the playhead less a hop; when not
 urgent, also within a hop of `owed`, `[ceil(owed) - hop, floor(owed) + hop]`.

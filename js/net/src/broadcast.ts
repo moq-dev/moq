@@ -21,9 +21,8 @@ export { type Listed, Tracks, type TracksEvent } from "./listing.ts";
 
 let stampProducer: (producer: Producer, path: Path.Valid) => void;
 
-// Info lookups pending or held on a track.
+// The info lookups on an on-demand track.
 class Lookups {
-	pending = new Signal(0);
 	// Whether a lookup opened the request, so the last lookup to end closes it unless subscribed.
 	opened = false;
 }
@@ -257,22 +256,21 @@ function subscribe(state: BroadcastState, name: string, options?: track.Subscrip
 	return logical(state, name).producer.subscribe(options);
 }
 
-// A lookup holds a request until `hold` aborts, even before the answer. An unanswered
-// request stays open for its handler; after acceptance nobody holding it releases it.
+// A lookup counts as the track's demand until `hold` aborts (without one, until the answer), before
+// and after acceptance, as a Rust `Resolving` does while held. An unanswered request stays open for its handler; after
+// acceptance, the last holder of a request a lookup opened releases it.
 async function resolveTrackInfo(state: BroadcastState, name: string, hold?: AbortSignal): Promise<track.Info> {
 	hold?.throwIfAborted();
 	const { producer, requested } = logical(state, name);
 	const lookups = state.lookups.get(producer);
-	if (!lookups) return producer.info();
-	if (requested) lookups.opened = true;
-	lookups.pending.update((pending) => pending + 1);
+	if (lookups && requested) lookups.opened = true;
+	const unhold = hooks.holdTrack(producer);
 
 	const info = producer.info();
 	let answered = false;
 	let ended = false;
 	const release = () => {
-		if (lookups.opened && lookups.pending.peek() === 0 && !producer.demand().wanted.peek())
-			hooks.releaseTrack(producer);
+		if (lookups?.opened && !producer.demand().wanted.peek()) hooks.releaseTrack(producer);
 	};
 	info.then(
 		() => {
@@ -283,7 +281,7 @@ async function resolveTrackInfo(state: BroadcastState, name: string, hold?: Abor
 	);
 	const end = () => {
 		ended = true;
-		lookups.pending.update((pending) => pending - 1);
+		unhold();
 		if (answered) release();
 	};
 
@@ -323,7 +321,7 @@ async function fetchGroup(
 		ranges: [{ start: key, end: key }],
 	});
 	// The lite publisher serving a FETCH from a later frame takes a copy holding that frame on.
-	hooks.fetchBudget(subscriber, options.maxDelay, (options as FetchFrom).frameStart);
+	hooks.fetchFrom(subscriber, (options as FetchFrom).frameStart);
 	try {
 		// Judged in this turn when the track is known, so a cached group is taken before anything
 		// else can change it. A track requested on demand opens its handler once accepted, so its
@@ -401,8 +399,6 @@ function takeQueued(state: BroadcastState, name: string): track.Request | undefi
 
 // Serve `producer` as the broadcast's track for its name, listed with `info`.
 function adopt(state: BroadcastState, producer: track.Producer, info: track.Info): void {
-	const lookups = state.lookups.get(producer) ?? new Lookups();
-	state.lookups.set(producer, lookups);
 	state.tracks.set(producer.name, producer);
 	state.listing.listTrack(producer, info);
 
@@ -620,6 +616,13 @@ export class Consumer {
 			target.#unlisted = true;
 		};
 		hooks.unlisted = (target) => target.#unlisted;
+		hooks.resolveHeld = (target, name, hold) => {
+			const state = target.#state;
+			if (state.closed.peek() !== undefined) return undefined;
+			const producer = lookup(state, name);
+			if (!producer || !hooks.acceptedInfo(producer)) return undefined;
+			return resolveTrackInfo(state, name, hold);
+		};
 	}
 
 	/**

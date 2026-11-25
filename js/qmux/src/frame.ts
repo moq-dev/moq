@@ -80,11 +80,10 @@ export interface ResetStream {
 	code: VarInt;
 	/** Final byte offset consumed by the send side. */
 	finalSize: bigint;
-	/** Set (to the frame's Reliable Size) when this was decoded from a
-	 * RESET_STREAM_AT frame (0x24, draft-02); absent for a plain RESET_STREAM.
-	 * The session delivers that many bytes before surfacing the reset, and uses
-	 * its presence to enforce that RESET_STREAM_AT is only accepted when we
-	 * advertised the `reset_stream_at` transport parameter. */
+	/** The Reliable Size of a RESET_STREAM_AT frame (0x24, draft-02); absent for a
+	 * plain RESET_STREAM. The receiver delivers that many bytes before surfacing the
+	 * reset, and accepts the frame only when it advertised the `reset_stream_at`
+	 * transport parameter. */
 	reliableSize?: bigint;
 }
 
@@ -327,15 +326,22 @@ function encodeQMux(frame: Any): Uint8Array {
 		}
 
 		case "reset_stream": {
-			const frameType = VarInt.from(0x04);
+			// A reliable size makes it a RESET_STREAM_AT; the session sends one only to a
+			// peer that advertised `reset_stream_at`.
+			const { reliableSize } = frame;
+			if (reliableSize !== undefined && reliableSize > frame.finalSize) {
+				throw new Error("RESET_STREAM_AT reliable_size exceeds final_size");
+			}
+			const frameType = VarInt.from(reliableSize === undefined ? 0x04n : RESET_STREAM_AT);
 			const finalSize = VarInt.from(frame.finalSize);
 
-			let buffer = new Uint8Array(new ArrayBuffer(8 + 8 + 8 + 8), 0, 0);
+			let buffer = new Uint8Array(new ArrayBuffer(8 + 8 + 8 + 8 + 8), 0, 0);
 
 			buffer = frameType.encode(buffer);
 			buffer = frame.id.value.encode(buffer);
 			buffer = frame.code.encode(buffer);
 			buffer = finalSize.encode(buffer);
+			if (reliableSize !== undefined) buffer = VarInt.from(reliableSize).encode(buffer);
 			return buffer;
 		}
 
@@ -710,8 +716,15 @@ export function decodeRecord(buffer: Uint8Array): Any[] {
 	return frames;
 }
 
+/** Decode a draft-00 message, which carries exactly one frame; a PADDING byte counts as one. */
 function decodeQMux(buffer: Uint8Array): Any | null {
-	return decodeQMuxOne(buffer)?.[0] ?? null;
+	const result = decodeQMuxOne(buffer);
+	if (result === null) return null;
+	const [frame, remaining] = result;
+	if (remaining.byteLength > 0) {
+		throw new TransportError(TransportCode.FRAME_ENCODING_ERROR, "draft-00 message carries more than one frame");
+	}
+	return frame;
 }
 
 /** Decode a single QMux frame, returning the frame and remaining buffer.

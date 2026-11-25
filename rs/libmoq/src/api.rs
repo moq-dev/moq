@@ -835,7 +835,9 @@ pub struct moq_delay {
 	pub min_us: u64,
 	/// How far a non-latest group may fall behind the live edge before it is skipped, in
 	/// microseconds. Zero skips immediately. Enforced by the publisher's cache and by any
-	/// local buffering, and it caps every range. It bounds lateness only, never the start.
+	/// local buffering. It bounds only ranges with no start: a range with a start is history,
+	/// delivered in full and bounded only by the publisher's max age. It bounds lateness, never
+	/// the start.
 	/// Ignored when `max_unlimited` is set.
 	pub max_us: u64,
 	/// No subscriber max: wait on a stalled group as long as the publisher's max age allows.
@@ -905,8 +907,9 @@ pub struct moq_subscription {
 /// `end`. A zeroed one has neither: a range with no start that follows the live edge.
 ///
 /// Every start is the first frame of its group, and every end includes its whole group. A time
-/// names the group containing it, the newest one starting at or before it, so a group's start
-/// names exactly it. Both are unscaled (`has_scale` false), with `value` in the track's
+/// names the group containing it, the newest one starting at or before it unless that group ended
+/// whole at or before the time, so a group's start names exactly it. A start in the pause past a
+/// whole group's end begins at the next group. Both are unscaled (`has_scale` false), with `value` in the track's
 /// timescale; a scaled one is refused with a timestamp mismatch.
 ///
 /// A range with no start is placed by the subscription's `delay`. A raw track consumer joins it
@@ -964,7 +967,8 @@ pub(crate) unsafe fn parse_subscription(
 	};
 	let mut out = moq_net::track::Subscription::default()
 		.with_priority(subscription.priority)
-		.with_order(order);
+		.with_order(order)
+		.with_ranges([moq_net::track::Range::ALL]);
 	if !subscription.ranges.is_null() {
 		let ranges = unsafe { std::slice::from_raw_parts(subscription.ranges, subscription.ranges_len) };
 		let ranges = ranges

@@ -131,8 +131,12 @@ async fn import_emits_frames() {
 		.track(&video_name)
 		.unwrap()
 		.subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+				moq_net::track::Start::Live {
+					min: Some(Duration::from_secs(1)),
+					max: Some(Duration::from_secs(1)),
+				},
+			)]),
 		)
 		.await
 		.unwrap();
@@ -598,8 +602,12 @@ async fn config_churn_keeps_flat_state() {
 		.track(&replaced)
 		.unwrap()
 		.subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+				moq_net::track::Start::Live {
+					min: Some(Duration::from_secs(1)),
+					max: Some(Duration::from_secs(1)),
+				},
+			)]),
 		)
 		.await
 		.unwrap();
@@ -615,8 +623,12 @@ async fn config_churn_keeps_flat_state() {
 		.track(snap.video.renditions.keys().next().unwrap())
 		.unwrap()
 		.subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+				moq_net::track::Start::Live {
+					min: Some(Duration::from_secs(1)),
+					max: Some(Duration::from_secs(1)),
+				},
+			)]),
 		)
 		.await
 		.unwrap();
@@ -664,8 +676,12 @@ async fn import_enhanced_av1() {
 		.track(name)
 		.unwrap()
 		.subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+				moq_net::track::Start::Live {
+					min: Some(Duration::from_secs(1)),
+					max: Some(Duration::from_secs(1)),
+				},
+			)]),
 		)
 		.await
 		.unwrap();
@@ -801,8 +817,12 @@ async fn import_reports_negative_pts_and_can_resume() {
 		.track(name)
 		.unwrap()
 		.subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+				moq_net::track::Start::Live {
+					min: Some(Duration::from_secs(1)),
+					max: Some(Duration::from_secs(1)),
+				},
+			)]),
 		)
 		.await
 		.unwrap();
@@ -844,8 +864,12 @@ async fn import_enhanced_hvc1_applies_composition_time() {
 		.track(name)
 		.unwrap()
 		.subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+			moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+				moq_net::track::Start::Live {
+					min: Some(Duration::from_secs(1)),
+					max: Some(Duration::from_secs(1)),
+				},
+			)]),
 		)
 		.await
 		.unwrap();
@@ -1175,8 +1199,12 @@ async fn a_seek_reaches_a_track_waiting_for_its_keyframe() {
 
 	let snapshot = catalog.snapshot();
 	let name = snapshot.video.renditions.keys().next().unwrap();
-	let replay = moq_net::track::Subscription::default()
-		.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(3600)));
+	let replay = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+		moq_net::track::Start::Live {
+			min: Some(Duration::from_secs(3600)),
+			max: Some(Duration::from_secs(3600)),
+		},
+	)]);
 	let mut track = consumer.track(name).unwrap().subscribe(replay).await.unwrap();
 	let mut starts = Vec::new();
 	while let Some(group) = track.recv_group().await.unwrap() {
@@ -1223,8 +1251,12 @@ async fn a_changed_sequence_header_waits_for_its_keyframe() {
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 	let mut importer = Import::new(broadcast, catalog.reserve());
 	let replay = || {
-		moq_net::track::Subscription::default()
-			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(3600)))
+		moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+			moq_net::track::Start::Live {
+				min: Some(Duration::from_secs(3600)),
+				max: Some(Duration::from_secs(3600)),
+			},
+		)])
 	};
 	importer.decode(&headers).unwrap();
 	importer.decode(&keyframe).unwrap();

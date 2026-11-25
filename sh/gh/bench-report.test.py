@@ -414,6 +414,76 @@ class ReportTest(unittest.TestCase):
         report.prepare(self.root, output)
         self.assertEqual(json.loads((output / "costs.json").read_text()), [])
 
+    def source(self, name, entries, outcome="success", comparison=None):
+        source = self.root / name
+        source.mkdir()
+        (source / "report.json").write_text(json.dumps(entries))
+        (source / "outcome.json").write_text(json.dumps({"status": outcome}))
+        if comparison is not None:
+            (source / "paired.json").write_text(json.dumps(comparison))
+
+    def test_nightly_metrics_name_each_row_once_and_add_the_paired_base(self):
+        base = "b" * 40
+        self.source(
+            "bench-rust",
+            [{"name": "rust/kio/lock/4", "unit": "ns", "value": 150.123456789}],
+            comparison={
+                "base": base,
+                "cases": [
+                    {"name": "rust/kio/lock/4", "base_ns": 100, "verdict": "unchanged"},
+                    {"name": "rust/kio/same", "base_ns": None, "verdict": "identical"},
+                ],
+            },
+        )
+        self.source(
+            "bench-rust-test",
+            [
+                {"name": "rust-test/moq-net/fanout/viewers=4/elapsed_ns", "unit": "ns", "value": 2e9},
+                {"name": "rust-test/moq-net/fanout/viewers=4/lost_packets", "unit": "packets", "value": 0},
+            ],
+        )
+        self.source("bench-size", [{"name": "size/moq-relay", "unit": "bytes", "value": 4}])
+        self.source("bench-js", [{"name": "js/x", "unit": "ns", "value": 1}], outcome="failure")
+        metrics = json.loads(report.nightly_metrics(self.root))
+        self.assertEqual(
+            metrics,
+            {
+                "units": {"time": "ns", "elapsed_ns": "ns", "lost_packets": "packets", "size": "bytes"},
+                "samples": [
+                    {
+                        "metrics": {
+                            "rust/kio/lock/4": {"time": {"value": 150.123}},
+                            "rust-test/moq-net/fanout/viewers=4": {
+                                "elapsed_ns": {"value": 2000000000},
+                                "lost_packets": {"value": 0},
+                            },
+                            "size/moq-relay": {"size": {"value": 4}},
+                        }
+                    },
+                    {"commit": base, "metrics": {"rust/kio/lock/4": {"time": {"value": 100}}}},
+                ],
+            },
+        )
+        # Sources are named apart only by their entries, so a name two sources share is refused.
+        self.source("bench-rust-extra", [{"name": "size/moq-relay", "unit": "bytes", "value": 5}])
+        with self.assertRaises(ValueError):
+            report.nightly_metrics(self.root)
+        for name in ("bench-rust-extra", "bench-rust", "bench-rust-test", "bench-size"):
+            (self.root / name / "outcome.json").write_text('{"status":"failure"}')
+        self.assertIsNone(report.nightly_metrics(self.root))
+
+    def test_kixel_metrics_refuse_what_kixel_quest_would_not_read(self):
+        entry = {"name": "rust/kio/lock", "unit": "ns", "value": 1}
+        for head, bases in (
+            ([entry], {"c1": [entry]}),
+            ([{**entry, "name": "x" * 1025}], {}),
+        ):
+            with self.assertRaises(ValueError):
+                report.kixel(head, bases)
+        many = [{"name": f"rust/{index:0500}", "unit": "ns", "value": 1} for index in range(2100)]
+        with self.assertRaises(ValueError):
+            report.kixel(many, {})
+
     def history(self, kind, runs):
         """Store runs of (commit, day, {name: value}) the way github-action-benchmark does."""
         unit = "MB/s" if kind == "rates" else "ns"

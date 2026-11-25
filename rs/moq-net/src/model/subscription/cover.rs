@@ -42,6 +42,8 @@ struct Node {
 	right: Link,
 }
 
+impl Eq for Cover {}
+
 impl PartialEq for Cover {
 	/// The same copy, unedited since: two covers holding the same keys by different edits
 	/// compare unequal, which costs a reader one spurious refresh at most.
@@ -119,7 +121,6 @@ impl Cover {
 	}
 
 	/// Whether no run is counted.
-	#[cfg(test)]
 	pub fn is_empty(&self) -> bool {
 		self.root.is_none()
 	}

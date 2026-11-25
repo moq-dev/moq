@@ -297,9 +297,9 @@ pub(super) enum Outcome {
 	/// Finished with this many frames and the end it finished at, then aborted to free its
 	/// cache: a reader that took every frame got every frame the group finished with, and one
 	/// short of it gets the error.
-	Released(usize, Option<u64>, Error),
+	Released(usize, Option<u64>, Abort),
 	/// Aborted before it finished.
-	Aborted(Error),
+	Aborted(Abort),
 }
 
 impl Outcome {
@@ -314,9 +314,43 @@ impl Outcome {
 	/// The error the group was aborted with, before or after it finished.
 	pub(super) fn error(&self) -> Option<&Error> {
 		match self {
-			Self::Released(.., err) | Self::Aborted(err) => Some(err),
+			Self::Released(.., abort) | Self::Aborted(abort) => Some(abort.error()),
 			Self::Open | Self::Finished(..) => None,
 		}
+	}
+
+	/// Whether the pool evicted this copy, so a reader short of its end is owed the frames
+	/// it freed, which a flight of the group brings.
+	pub(super) fn evicted(&self) -> bool {
+		matches!(self, Self::Released(.., Abort::Evicted) | Self::Aborted(Abort::Evicted))
+	}
+}
+
+/// Why a copy was aborted: recorded where the abort is decided, so a reader never tells the
+/// pool's eviction from a failure by the error it reads.
+#[derive(Clone, Debug)]
+pub(super) enum Abort {
+	/// The pool evicted it, read as [`Error::Evicted`].
+	Evicted,
+	/// Anything else: the copy failed, was given up, or aged out.
+	Failed(Error),
+}
+
+// What a reader of an evicted copy reads, borrowed like any other abort's error.
+static EVICTED: Error = Error::Evicted;
+
+impl Abort {
+	fn error(&self) -> &Error {
+		match self {
+			Self::Evicted => &EVICTED,
+			Self::Failed(err) => err,
+		}
+	}
+}
+
+impl From<Error> for Abort {
+	fn from(err: Error) -> Self {
+		Self::Failed(err)
 	}
 }
 
@@ -450,6 +484,9 @@ struct Relay {
 	wire: Option<Wire>,
 	// The terminal object, learned at the stream tail.
 	end_object: Option<Arc<super::object::Fields>>,
+	// The newest object ID before the terminal object, which a publisher's Largest names
+	// instead of the terminal object it sends past it.
+	last_before_end: Option<u64>,
 	// Heap charged for this box, its frames' fields, and the terminal object.
 	bytes: u64,
 }
@@ -1324,9 +1361,9 @@ impl GroupState {
 			return Poll::Ready(Err(Error::Evicted));
 		}
 		match &self.outcome {
-			Outcome::Released(total, _, err) if index < *total => Poll::Ready(Err(err.clone())),
+			Outcome::Released(total, _, abort) if index < *total => Poll::Ready(Err(abort.error().clone())),
 			Outcome::Finished(..) | Outcome::Released(..) => Poll::Ready(Ok(())),
-			Outcome::Aborted(err) => Poll::Ready(Err(err.clone())),
+			Outcome::Aborted(abort) => Poll::Ready(Err(abort.error().clone())),
 			Outcome::Open => {
 				// Waiting on frames the writer has yet to commit, wherever the reader skipped
 				// to, so it holds the writer back from none of them.
@@ -1363,12 +1400,28 @@ impl GroupState {
 		}
 	}
 
+	/// The first time the group can't yet place: none once finished, else its newest frame's
+	/// timestamp, or 0 with no timed frame. A frame past a time puts the group's End past it
+	/// too, and an aborted copy may have lost the End its group was sent with.
+	fn unplaced_from(&self) -> Option<u64> {
+		match (self.poll_outcome(), &self.timeline) {
+			(Poll::Ready(Ok(())), _) => None,
+			(_, Timeline::Timed { latest, .. }) => Some(latest.value()),
+			_ => Some(0),
+		}
+	}
+
+	/// Whether the group places `time`; see [`Self::unplaced_from`].
+	fn places(&self, time: u64) -> bool {
+		self.unplaced_from().is_none_or(|from| time < from)
+	}
+
 	/// The group's outcome once final: `Ok` once finished, which a later abort only frees
 	/// the cache of, or the abort error.
 	fn poll_outcome(&self) -> Poll<Result<()>> {
 		match &self.outcome {
 			Outcome::Finished(..) | Outcome::Released(..) => Poll::Ready(Ok(())),
-			Outcome::Aborted(err) => Poll::Ready(Err(err.clone())),
+			Outcome::Aborted(abort) => Poll::Ready(Err(abort.error().clone())),
 			Outcome::Open => Poll::Pending,
 		}
 	}
@@ -1462,6 +1515,11 @@ impl GroupState {
 		entry.frame.payload = row.freeze();
 		*entry.owner.lock().unwrap_or_else(PoisonError::into_inner) = Some(row);
 		Ok(())
+	}
+
+	/// The cache account of the track this copy belongs to, kept after its frames are freed.
+	pub(super) fn account(&self) -> Option<&Arc<cache::Track>> {
+		self.charge.account()
 	}
 
 	/// Whether Object IDs left the frame ordinals, so ordinal recovery cannot stitch.
@@ -2409,6 +2467,12 @@ impl Producer {
 		state.outcome = Outcome::Finished(fin, end);
 		// No frame follows to compress.
 		let original_fin = state.range_end.is_none().then_some(fin);
+		// Finished short of its transport bound, a bounded copy reached the group's own end too.
+		let whole = state.range_end.is_none_or(|bound| fin < bound);
+		state.charge.finish(whole);
+		if let Some(content) = &state.content {
+			content.siblings.update(&state.charge);
+		}
 		if let Some(flate) = &mut state.flate {
 			flate.finish(original_fin);
 		}
@@ -2650,6 +2714,7 @@ impl Handle {
 		let relay = state.relay();
 		relay.bytes += bytes;
 		if let Some(wire) = &mut relay.wire {
+			relay.last_before_end = wire.last;
 			wire.last = Some(fields.id);
 		}
 		relay.end_object = Some(Arc::new(fields));
@@ -2818,6 +2883,15 @@ impl Handle {
 		}
 	}
 
+	/// Shed like [`Self::shed`] while the group still grows: a finished live edge is pinned,
+	/// what a new reader starts from.
+	pub(super) fn shed_growing(&self, debt: u64, cap: u64) -> u64 {
+		match self.state.write() {
+			Ok(mut state) if state.outcome.frames().is_none() => state.shed(debt, cap),
+			_ => 0,
+		}
+	}
+
 	/// Shed every frame this copy holds, as [`GroupState::shed_all`] does. A frame still
 	/// arriving cannot be shed, so a copy holding one is aborted with [`Error::Evicted`]
 	/// instead: only a publisher leaving frames unfinished loses the group itself.
@@ -2827,7 +2901,7 @@ impl Handle {
 		};
 		state.shed_all();
 		if state.arriving() {
-			self.commit_abort(state, Error::Evicted);
+			self.commit_abort(state, Abort::Evicted);
 		}
 	}
 
@@ -2937,10 +3011,16 @@ impl Handle {
 			(timeline, _) => timeline,
 		};
 		state.adopted = Some(head.first_object);
-		if let Some(wire) = state.wire_mut() {
+		if let Some(relay) = state.relay.as_mut()
+			&& let Some(wire) = &mut relay.wire
+		{
 			wire.first_object = head.first_object;
 			wire.first_id = head.start as u64;
 			wire.last = wire.last.or(Some(offset as u64 - 1));
+			// A terminal object held before any frame leaves the head's last as the newest data.
+			if relay.end_object.is_some() {
+				relay.last_before_end = relay.last_before_end.or(Some(offset as u64 - 1));
+			}
 		}
 		let extra = metadata + growth + if state.content.is_none() { payload } else { 0 };
 		Some(Adopted {
@@ -2976,11 +3056,15 @@ impl Handle {
 	}
 
 	/// The newest object's ID, by its moq-transport object ID when the group carries one,
-	/// else its frame index; `None` before the first frame.
-	pub(crate) fn last_object(&self) -> Option<u64> {
+	/// else its frame index; `None` before the first frame. A terminal object does not
+	/// count: a publisher's Largest never names the END_OF_GROUP it sends past the last.
+	pub(crate) fn last_data_object(&self) -> Option<u64> {
 		let state = self.state.read();
 		match state.wire() {
-			Some(wire) => wire.last,
+			Some(wire) => match state.relay.as_ref().filter(|relay| relay.end_object.is_some()) {
+				Some(relay) => relay.last_before_end,
+				None => wire.last,
+			},
 			None => (state.next_index as u64).checked_sub(1),
 		}
 	}
@@ -3015,12 +3099,14 @@ impl Handle {
 		}
 	}
 
-	fn close_aborted(&self, err: Error) -> Result<()> {
-		self.commit_abort(modify(&self.state)?, err);
+	pub(super) fn close_aborted(&self, abort: impl Into<Abort>) -> Result<()> {
+		self.commit_abort(modify(&self.state)?, abort);
 		Ok(())
 	}
 
-	fn commit_abort(&self, mut guard: kio::Mut<'_, GroupState>, err: Error) {
+	fn commit_abort(&self, mut guard: kio::Mut<'_, GroupState>, abort: impl Into<Abort>) {
+		let abort = abort.into();
+		let err = abort.error();
 		let policy = matches!(err, Error::Old | Error::Timeout | Error::Evicted);
 		// Cache policy frees the frames, as does an oversized group whichever write found
 		// it; a copy that failed or was given up lends them on.
@@ -3055,8 +3141,8 @@ impl Handle {
 		}
 		let finished = guard.outcome.frames().is_some();
 		guard.outcome = match guard.outcome {
-			Outcome::Finished(frames, end) => Outcome::Released(frames, end, err),
-			_ => Outcome::Aborted(err),
+			Outcome::Finished(frames, end) => Outcome::Released(frames, end, abort),
+			_ => Outcome::Aborted(abort),
 		};
 		// After the outcome exists, so a scan reading the mirror never hides a live group.
 		// The group lock admits one abort, so this is the only store.
@@ -3344,6 +3430,17 @@ impl Handle {
 		}
 	}
 
+	/// Pin the group while a fill holds it for a reader, or stop: see [`cache::Charge::hold`].
+	/// Through a read guard, so holding wakes no consumer.
+	pub(super) fn cache_hold(&self, held: bool) {
+		let state = self.state.read();
+		state.charge.hold(held);
+		// Frames a sibling copy wrote first bill that copy, so it is held with this one.
+		if let Some(content) = &state.content {
+			content.siblings.update(&state.charge);
+		}
+	}
+
 	/// Record a cache access (delivery to a subscriber, a FETCH hit, or a fetched
 	/// backfill's birth), protecting the group from eviction and restarting its
 	/// expiry clock. Stamps through a read guard, whose release never notifies, so
@@ -3420,6 +3517,30 @@ impl Handle {
 	// Sessions observe a group while its sole writer belongs to a frame.
 	pub(crate) fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
 		settle(self.state.poll_ref(waiter, |state| state.poll_outcome()))
+	}
+
+	/// Poll until the group places `time` (see [`Self::unplaced_from`]): a frame past the time
+	/// puts its End past the time too, so it contains the time whatever it ends at. Fails with
+	/// the abort when the group aborts first, which proves nothing of where it ends.
+	pub(crate) fn poll_past(&self, waiter: &kio::Waiter, time: u64) -> Poll<Result<()>> {
+		let placed = |state: &GroupState| match state.places(time) {
+			true => Poll::Ready(Ok(())),
+			false => state.poll_outcome(),
+		};
+		Poll::Ready(match ready!(self.state.poll_ref(waiter, |state| placed(state))) {
+			Ok(outcome) => outcome,
+			Err(closed) => match placed(&closed) {
+				Poll::Ready(outcome) => outcome,
+				Poll::Pending => Err(Error::Dropped),
+			},
+		})
+	}
+
+	/// The first time the group can't place now, `None` once it finished: it places a time
+	/// it holds a timed frame past, which puts its End past the time too. An aborted copy
+	/// proves nothing of where its group ends.
+	pub(crate) fn unplaced_from(&self) -> Option<u64> {
+		self.state.read().unplaced_from()
 	}
 
 	/// Poll until the group is aborted, including by eviction and after it finished; ready
@@ -3878,6 +3999,12 @@ struct Carry {
 	// The copy an end check waits on past the frames this reader prefetched, with the frame
 	// it reads that copy from: held between polls so the copy keeps this reader's demand.
 	finishing: Option<(usize, Consumer)>,
+	// What ended the read once a copy closed the group below the frames already read: no
+	// route change after undoes it.
+	failed: Option<Error>,
+	// The frames up to the cursor this reader skipped rather than read: where it started, or
+	// where a skip moved it, until it reads on. A copy closing inside them took no frame back.
+	unread: std::ops::Range<usize>,
 }
 
 impl Clone for Carry {
@@ -3890,6 +4017,8 @@ impl Clone for Carry {
 				..*ride
 			}),
 			finishing: None,
+			failed: self.failed.clone(),
+			unread: self.unread.clone(),
 		}
 	}
 }
@@ -3947,6 +4076,18 @@ pub(super) trait Expiry: Send + Sync + std::panic::UnwindSafe + std::panic::RefU
 
 	/// What the reader asks a fill with, such as the flight it boards.
 	fn asking(&self) -> super::track::Asking;
+}
+
+/// What a reader under `expiry` asks a fill with: its subscription's or fetch's, else the
+/// defaults.
+pub(super) fn asking(expiry: Option<&Arc<dyn Expiry>>) -> track::Asking {
+	expiry.map_or(
+		track::Asking {
+			priority: 0,
+			order: super::subscription::Order::Ascending,
+		},
+		|expiry| expiry.asking(),
+	)
 }
 
 /// The read cursor over a [`Producer`]'s shared state.
@@ -4139,14 +4280,7 @@ impl Consumer {
 
 	/// What this reader asks a fill with: its subscription's or fetch's, else the defaults.
 	pub(super) fn asking(&self) -> super::track::Asking {
-		self.expiry.as_ref().map_or(
-			super::track::Asking {
-				priority: 0,
-				max_delay: None,
-				order: super::subscription::Order::Ascending,
-			},
-			|expiry| expiry.asking(),
-		)
+		asking(self.expiry.as_ref())
 	}
 
 	/// The hand-off of this copy's head, shared by every reader that could resume it
@@ -4168,8 +4302,36 @@ impl Consumer {
 	/// Carry this group across a front's route changes; see [`super::resume`].
 	pub(super) fn with_recover(mut self, recover: super::resume::Recover) -> Self {
 		Idle::disarm(&mut self.idle);
-		self.carry.get_or_insert_default().recover = Some(recover);
+		let index = self.position();
+		let carry = self.carry.get_or_insert_default();
+		carry.recover = Some(recover);
+		carry.unread = 0..index;
 		self
+	}
+
+	/// The frame this reader reads next: the cursor, plus the frames a compressed flight it
+	/// boarded still inflates and drops to get back there.
+	fn position(&self) -> usize {
+		let skip = self
+			.carry
+			.as_ref()
+			.and_then(|carry| carry.ride.as_ref())
+			.map_or(0, |ride| ride.skip);
+		self.cursor.index.saturating_add(skip)
+	}
+
+	/// Note that the read moved from position `from` to where it is without reading the frames
+	/// between.
+	fn skipped(&mut self, from: usize) {
+		let to = self.position();
+		if let Some(carry) = self.carry.as_mut().filter(|carry| carry.recover.is_some())
+			&& to > from
+		{
+			match carry.unread.end == from {
+				true => carry.unread.end = to,
+				false => carry.unread = from..to,
+			}
+		}
 	}
 
 	/// Run `read`, and once this copy fails with its route, stalls while a newer route serves,
@@ -4183,6 +4345,9 @@ impl Consumer {
 		mut read: impl FnMut(&mut Self, &kio::Waiter) -> Poll<Result<Option<T>>>,
 	) -> Poll<Result<Option<T>>> {
 		loop {
+			if let Some(err) = self.carry.as_ref().and_then(|carry| carry.failed.clone()) {
+				return Poll::Ready(Err(err));
+			}
 			let res = read(self, waiter);
 			// The reader's own budget gave up on it: that is no route's doing.
 			if self.expired {
@@ -4190,6 +4355,10 @@ impl Consumer {
 			}
 			let index = self.cursor.index;
 			let short = matches!(res, Poll::Ready(Ok(None))) && self.closed_short();
+			// A copy taken over mid-group may close it below the frames already read from the
+			// copy before it, so its close cannot be where this read ends. One below only frames
+			// the read skipped still ends it cleanly, as an empty range does.
+			let past = short && self.closed_past();
 			let Some(recover) = self.carry.as_mut().and_then(|carry| carry.recover.as_mut()) else {
 				return res;
 			};
@@ -4223,9 +4392,15 @@ impl Consumer {
 				Poll::Ready(Err(err)) => Cause::Failed(err.clone()),
 				Poll::Pending => Cause::Stalled,
 			};
-			if !recover.wants(cause.error(), waiter) {
+			if !recover.wants(&cause, waiter) {
 				match &cause {
 					Cause::Failed(err) => recover.failed(index, err),
+					// The copy being read still serves and holds no more than was read, so
+					// nothing continues the group.
+					Cause::Closed if past => {
+						recover.failed(index, &Error::NotFound);
+						return Poll::Ready(Err(self.fail(Error::NotFound)));
+					}
 					// The copy being read still serves, so its close is the group's end.
 					Cause::Closed => self.let_go(),
 					Cause::Stalled => {}
@@ -4233,7 +4408,8 @@ impl Consumer {
 				return res;
 			}
 			recover.recovering(index, &cause);
-			let closed = matches!(cause, Cause::Closed);
+			// A close stands only where the read is.
+			let closed = short && !past;
 			let replacement = match self.replacement(cause, waiter) {
 				Poll::Ready(Ok(replacement)) => replacement,
 				Poll::Ready(Err(err)) => {
@@ -4245,17 +4421,23 @@ impl Consumer {
 						self.let_go();
 						return res;
 					}
+					if past {
+						return Poll::Ready(Err(self.fail(err)));
+					}
 					return Poll::Ready(Err(err));
 				}
 				// The reader's budget bounds the wait for the rest, as it does a stall, and
-				// ends the group where it closed.
+				// ends the group where it closed, if that close stands.
 				Poll::Pending
-					if closed
+					if short
 						&& self
 							.expiry
 							.as_ref()
 							.is_some_and(|e| e.is_expired(self.recover(), waiter)) =>
 				{
+					if !closed {
+						return Poll::Ready(Err(self.fail(Error::Old)));
+					}
 					self.let_go();
 					return res;
 				}
@@ -4321,8 +4503,8 @@ impl Consumer {
 	/// once it does.
 	///
 	/// A publisher still writing the group polls this while it waits on its own transport,
-	/// which the group's reads cannot see: once the subscription's
-	/// [`Delay::max`](crate::track::Delay::max) expires the group, it abandons
+	/// which the group's reads cannot see: once the `max` of the live joins reaching it
+	/// ([`Start::Live`](crate::track::Start::Live)) expires the group, it abandons
 	/// the stream, even with every frame already read off. It abandons it too once
 	/// [`Self::poll_finished`] fails. Stays `true` once set.
 	#[cfg(any(feature = "async", test))]
@@ -4432,7 +4614,9 @@ impl Consumer {
 	pub fn with_range(mut self, frames: impl RangeBounds<u64>) -> Self {
 		Idle::disarm(&mut self.idle);
 		let (start, end) = super::subscription::key_bounds(frames);
+		let from = self.position();
 		self.cursor.start_at(start);
+		self.skipped(from);
 		self.cursor.end = end.map(|end| usize::try_from(end).unwrap_or(usize::MAX));
 		self
 	}
@@ -4458,7 +4642,9 @@ impl Consumer {
 	/// handlers, and surfaces as [`Error::Lagged`] when neither can serve them.
 	pub fn skip_to(&mut self, index: u64) {
 		Idle::disarm(&mut self.idle);
+		let from = self.position();
 		self.cursor.skip_to(index);
+		self.skipped(from);
 	}
 
 	/// The number of frames written so far (completed plus any in-flight), independent of
@@ -4491,11 +4677,16 @@ impl Consumer {
 	/// passed the [`Self::with_range`] cap.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Consumer>>> {
-		let res = match self.recover().is_none() {
-			true => {
-				let res = self.poll_next_frame_once(waiter);
-				self.ended_on(res)
-			}
+		let res = match !self.resumes() {
+			true => match self.poll_next_frame_once(waiter) {
+				// A frame still arriving loses its rest if the pool evicts the copy, which a
+				// flight of the group from that frame brings instead.
+				Poll::Ready(Ok(Some(frame))) if self.cursor.partial => {
+					let index = self.cursor.index as u64 - 1;
+					Poll::Ready(Ok(Some(frame.with_flight(self.start, index))))
+				}
+				res => self.ended_on(res),
+			},
 			false => match (self.poll_resumed(waiter, Self::poll_next_frame_once), self.recover()) {
 				// A frame read from a copy that may fail too carries on the same way.
 				(Poll::Ready(Ok(Some(frame))), Some(recover)) => Poll::Ready(Ok(Some(
@@ -4591,7 +4782,7 @@ impl Consumer {
 		let read = gate.as_mut().map_or(waiter, |gate| gate.waiter());
 		// Read once, carried across route changes when the group came from a front. One call
 		// site keeps the read inline: a second costs every frame drained a call frame.
-		let res = match self.recover().is_none() {
+		let res = match !self.resumes() {
 			true => self.poll_read_frame_once(read, take),
 			false => self.poll_resumed(read, |this, waiter| this.poll_read_frame_once(waiter, take)),
 		};
@@ -4640,37 +4831,16 @@ impl Consumer {
 	) -> Poll<Result<Option<T>>> {
 		let mut boarded = false;
 		loop {
-			if let Some(ride) = self.ride_mut() {
-				// Frames still to drop when the flight boarded, before the ones it starts below
-				// the reader.
-				let pending = ride.skip;
-				if let Some(boarding) = &mut ride.boarding {
-					let copy = match boarding.poll(waiter) {
-						Poll::Ready(Ok(copy)) => copy,
-						// Nothing serves the frame: the shed read stands.
-						Poll::Ready(Err(_)) => {
-							self.set_ride(None);
-							return Poll::Ready(Err(Error::Evicted));
-						}
-						// A read waiting on its flight is blocked like one at the edge, so the
-						// reader's budget still gives up on it.
-						Poll::Pending => return self.poll_expired_if_blocked(waiter, Poll::Pending),
-					};
-					let start = usize::try_from(boarding.frame()).unwrap_or(usize::MAX);
-					let start = start.min(self.cursor.index);
-					let skip = pending + (self.cursor.index - start);
-					self.adopt_copy(copy);
-					self.cursor.index = start;
-					self.set_ride(Some(Ride::aboard(true, skip)));
-				} else if ride.aboard
-					&& self.cursor.prefetch.is_drained()
-					&& let Some(track) = self.cursor.cache.track()
-					&& let Some((copy, flight)) = track::hand_over(&track, self)
-				{
-					let skip = self.ride_mut().map_or(0, |ride| ride.skip);
-					self.adopt_copy(copy);
-					self.set_ride((flight || skip > 0).then(|| Ride::aboard(flight, skip)));
-				}
+			ready!(self.poll_boarding(waiter))?;
+			if let Some(ride) = self.ride_mut()
+				&& ride.aboard
+				&& self.cursor.prefetch.is_drained()
+				&& let Some(track) = self.cursor.cache.track()
+				&& let Some((copy, flight)) = track::hand_over(&track, self)
+			{
+				let skip = self.ride_mut().map_or(0, |ride| ride.skip);
+				self.adopt_copy(copy);
+				self.set_ride((flight || skip > 0).then(|| Ride::aboard(flight, skip)));
 			}
 			let res = read(self, waiter);
 			if let Poll::Ready(Ok(Some(_))) = &res
@@ -4686,32 +4856,80 @@ impl Consumer {
 			if ready!(self.poll_successor(waiter))? {
 				continue;
 			}
-			if !self.shed_next() {
+			if !self.board(&mut boarded) {
 				return res;
-			}
-			// The copy just boarded shed the frame before the reader took it: pool debt
-			// outruns the reader, and boarding again now would fare no better.
-			if std::mem::replace(&mut boarded, true) {
-				return res;
-			}
-			let Some(track) = self.cursor.cache.track() else {
-				return res;
-			};
-			// A rider still skipping to its frame keeps what it has left to skip.
-			let skip = self.ride_mut().map_or(0, |ride| ride.skip);
-			match track::board(&track, self) {
-				None => return res,
-				Some(track::Board::Ride(copy, flight)) => {
-					self.adopt_copy(copy);
-					self.set_ride(Some(Ride::aboard(flight, skip)));
-				}
-				Some(track::Board::Wait(boarding)) => self.set_ride(Some(Ride {
-					boarding: Some(boarding),
-					aboard: true,
-					skip,
-				})),
 			}
 		}
+	}
+
+	/// Board a flight, or a copy riding one, for the frames the copy read next shed or lost.
+	/// Returns whether it did. `boarded` says it already did in this read: the copy just
+	/// boarded shed the frame before the reader took it, so pool debt outruns the reader, and
+	/// boarding again now would fare no better.
+	fn board(&mut self, boarded: &mut bool) -> bool {
+		if !self.shed_next() || std::mem::replace(boarded, true) {
+			return false;
+		}
+		let Some(track) = self.cursor.cache.track() else {
+			return false;
+		};
+		// A rider still skipping to its frame keeps what it has left to skip.
+		let skip = self.ride_mut().map_or(0, |ride| ride.skip);
+		match track::board(&track, self) {
+			None => return false,
+			Some(track::Board::Ride(copy, flight)) => {
+				self.adopt_copy(copy);
+				self.set_ride(Some(Ride::aboard(flight, skip)));
+			}
+			Some(track::Board::Wait(boarding)) => self.set_ride(Some(Ride {
+				boarding: Some(boarding),
+				aboard: true,
+				skip,
+			})),
+		}
+		true
+	}
+
+	/// Wait for the flight this reader is boarding, if any, and move onto it. Fails with
+	/// [`Error::Evicted`] when nothing serves the frame, so the shed read stands, or
+	/// [`Error::Old`] when its handler judged the group stale or the reader's budget gave up
+	/// on the wait. A reader capped where it stands needs nothing from the flight, so it
+	/// waits only once its cap is raised.
+	fn poll_boarding(&mut self, waiter: &kio::Waiter) -> Poll<Result<()>> {
+		if self.cursor.capped() {
+			return Poll::Ready(Ok(()));
+		}
+		let Some(ride) = self.ride_mut() else {
+			return Poll::Ready(Ok(()));
+		};
+		// Frames still to drop when the flight boarded, before the ones it starts below the
+		// reader.
+		let pending = ride.skip;
+		let Some(boarding) = &mut ride.boarding else {
+			return Poll::Ready(Ok(()));
+		};
+		let copy = match boarding.poll(waiter) {
+			Poll::Ready(Ok(copy)) => copy,
+			Poll::Ready(Err(err)) => {
+				self.set_ride(None);
+				return Poll::Ready(Err(track::flight_failed(err)));
+			}
+			// The copy read brings the reader nothing more, even one its pool evicted, which
+			// leaves no frame to expire: the budget judges the wait itself.
+			Poll::Pending => {
+				return match self.poll_expiry(waiter, true) {
+					true => Poll::Ready(Err(Error::Old)),
+					false => Poll::Pending,
+				};
+			}
+		};
+		let start = usize::try_from(boarding.frame()).unwrap_or(usize::MAX);
+		let start = start.min(self.cursor.index);
+		let skip = pending + (self.cursor.index - start);
+		self.adopt_copy(copy);
+		self.cursor.index = start;
+		self.set_ride(Some(Ride::aboard(true, skip)));
+		Poll::Ready(Ok(()))
 	}
 
 	/// Continue on another copy of this group in the same track once the copy read failed or
@@ -4796,6 +5014,36 @@ impl Consumer {
 			)
 	}
 
+	/// End every later read with `err`, which a route change no longer undoes, and return it.
+	/// The recovery goes, so no replaced copy stays subscribed for a read that ended.
+	fn fail(&mut self, err: Error) -> Error {
+		let carry = self.carry.get_or_insert_default();
+		carry.recover = None;
+		carry.failed = Some(err.clone());
+		err
+	}
+
+	/// Whether reads go through [`Self::poll_resumed`]: the group carries on across route
+	/// changes, or a failure that ended it stands.
+	fn resumes(&self) -> bool {
+		self.carry
+			.as_ref()
+			.is_some_and(|carry| carry.recover.is_some() || carry.failed.is_some())
+	}
+
+	/// Whether the copy read closed the group short below a frame this reader read, from the
+	/// copy before it: not only below frames it skipped.
+	fn closed_past(&self) -> bool {
+		let index = self.position();
+		let unread = self.carry.as_ref().map_or(0..0, |carry| carry.unread.clone());
+		self.cursor
+			.state
+			.read()
+			.outcome
+			.frames()
+			.is_some_and(|frames| index > frames && !(unread.start <= frames && unread.end >= index))
+	}
+
 	fn recover_mut(&mut self) -> Option<&mut super::resume::Recover> {
 		self.carry.as_mut()?.recover.as_mut()
 	}
@@ -4812,6 +5060,8 @@ impl Consumer {
 					recover: None,
 					ride: Some(ride),
 					finishing: None,
+					failed: None,
+					unread: 0..0,
 				}))
 			}
 			(None, None) => {}
@@ -4822,11 +5072,19 @@ impl Consumer {
 	/// rather than failing. Ordinals stand for frames only on a dense group, so only one
 	/// boards a flight. A plain read of a compressed copy also loses a frame its inflated copy
 	/// shed, which the decoder, already past it, cannot inflate again. A group handed out
-	/// from a front recovers a frame its copy started past from a route instead.
+	/// from a front recovers a frame its copy started past from a route instead. A copy the
+	/// pool evicted, such as with a frame still arriving, lacks every frame from the reader's
+	/// on, as if shed: the reader is owed the rest of the group, which a flight brings.
 	fn shed_next(&self) -> bool {
 		let state = self.cursor.state.read();
 		let index = self.cursor.index;
-		if state.outcome.error().is_some() || state.sparse() {
+		if state.sparse() {
+			return false;
+		}
+		if state.outcome.evicted() {
+			return true;
+		}
+		if state.outcome.error().is_some() {
 			return false;
 		}
 		if index < state.offset {
@@ -4977,7 +5235,7 @@ impl Consumer {
 	/// failed upstream) and no route will continue them.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
-		let res = match self.recover().is_none() {
+		let res = match !self.resumes() {
 			true => self.poll_finished_once(waiter),
 			// A reader at the end of a copy that closed the group short reads on from the route
 			// that replaced it, as a frame read does, so its end is that copy's.
@@ -4986,7 +5244,7 @@ impl Consumer {
 					this.poll_finished_once(waiter)
 						.map(|res| res.map(|index| (!this.closed_short()).then_some(index)))
 				})
-				.map(|res| res.map(|index| index.unwrap_or(self.cursor.index as u64))),
+				.map(|res| res.map(|index| index.unwrap_or(self.position() as u64))),
 		};
 		if let Poll::Ready(Ok(_)) = res {
 			self.release_if_finished();
@@ -4995,9 +5253,12 @@ impl Consumer {
 	}
 
 	/// Like a frame read, a failed copy's end waits out a re-offer held for the group and
-	/// reports the end of the copy that took it over (see [`Self::poll_successor`]).
+	/// reports the end of the copy that took it over (see [`Self::poll_successor`]), or of
+	/// the flight that brings the frames the copy shed or lost.
 	fn poll_finished_once(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
+		let mut boarded = false;
 		loop {
+			ready!(self.poll_boarding(waiter))?;
 			let res = self.poll_finished_copy(waiter);
 			if !matches!(res, Poll::Ready(Err(_))) {
 				return res;
@@ -5018,7 +5279,7 @@ impl Consumer {
 			if drained > self.cursor.index {
 				return self.poll_finished_past(waiter, drained, res);
 			}
-			if !ready!(self.poll_successor(waiter))? {
+			if !ready!(self.poll_successor(waiter))? && !self.board(&mut boarded) {
 				return res;
 			}
 		}
@@ -5034,7 +5295,7 @@ impl Consumer {
 		drained: usize,
 		failed: Poll<Result<u64>>,
 	) -> Poll<Result<u64>> {
-		let index = self.cursor.index as u64;
+		let index = self.position() as u64;
 		if self.cursor.end.is_some_and(|end| drained >= end) {
 			return Poll::Ready(Ok(index));
 		}
@@ -5048,12 +5309,19 @@ impl Consumer {
 				next
 			}
 			_ => {
-				let Some(copy) = ready!(self.poll_successor_at(waiter, drained))? else {
-					return failed;
-				};
+				let copy = ready!(self.poll_successor_at(waiter, drained))?;
 				let mut next = self.clone();
-				next.adopt_copy(copy);
 				next.cursor.index = drained;
+				match copy {
+					Some(copy) => {
+						next.adopt_copy(copy);
+						next.cursor.index = drained;
+					}
+					// Nothing replaced the copy, so the frames past the prefetch come on a
+					// flight, as they would for the reader once it drains that far.
+					None if next.board(&mut false) => {}
+					None => return failed,
+				}
 				next
 			}
 		};
@@ -5081,9 +5349,12 @@ impl Consumer {
 			return Poll::Ready(Err(Error::Old));
 		}
 		let index = self.cursor.index;
+		// Where the reader stands, past the frames a compressed flight it boarded still
+		// inflates from frame 0 and drops.
+		let position = self.position() as u64;
 		// Reads end cleanly at the range's end, whatever becomes of the frames past it.
 		if self.cursor.capped() {
-			return Poll::Ready(Ok(index as u64));
+			return Poll::Ready(Ok(position));
 		}
 		let (raw, end) = (self.cursor.raw, self.cursor.end);
 		// Frames already prefetched are this cursor's whatever the group sheds since, so
@@ -5098,7 +5369,7 @@ impl Consumer {
 		let res = self
 			.cursor
 			.poll(waiter, |state| state.poll_end(index, unread, raw, end))
-			.map(|res| res.map(|()| index as u64));
+			.map(|res| res.map(|()| position));
 		self.poll_expired_if_blocked(waiter, res)
 	}
 }
@@ -5354,12 +5625,6 @@ pub struct Fetch {
 	/// Delivery priority for the fetched group's stream, higher first. Defaults to 0.
 	pub priority: i8,
 
-	/// Maximum age behind the live edge this caller accepts.
-	///
-	/// `None` applies only the publisher's max age. An explicit value can
-	/// tighten, but never relax, that bound.
-	pub max_delay: Option<std::time::Duration>,
-
 	/// Index of the first frame to fetch within the group. Defaults to 0, the whole group.
 	///
 	/// Only a route change sets it, filling the hole after a head another route already
@@ -5375,12 +5640,6 @@ impl Fetch {
 	/// Set the delivery priority, returning `self` for chaining.
 	pub fn with_priority(mut self, priority: i8) -> Self {
 		self.priority = priority;
-		self
-	}
-
-	/// Limit how far behind the live edge the fetched group may fall.
-	pub fn with_max_delay(mut self, max_delay: std::time::Duration) -> Self {
-		self.max_delay = Some(max_delay);
 		self
 	}
 }
@@ -5870,10 +6129,8 @@ mod test {
 	fn draining_a_parked_group_does_not_lock_the_backlog() {
 		let broadcast = super::super::broadcast::Producer::new(Default::default());
 		let track = broadcast.create_track("parked", track::Info::timed()).unwrap();
-		let mut subscriber = track.subscribe(
-			track::Subscription::default()
-				.with_delay(track::Delay::default().with_max(std::time::Duration::from_secs(3600))),
-		);
+		let mut subscriber =
+			track.subscribe(track::Subscription::default().with_max(std::time::Duration::from_secs(3600)));
 		let groups: Vec<_> = (0..3)
 			.map(|key| {
 				let mut group = track.create_group(Info { start: key }).unwrap();
@@ -6220,6 +6477,46 @@ mod test {
 				"a reader keeps its place"
 			);
 		}
+	}
+
+	/// A head adopted into a copy that already holds its terminal object, and no frame,
+	/// leaves the head's last object as the newest data object, not the terminal one.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_adopted_head_below_a_terminal_object_is_the_last_data() {
+		let head = Head {
+			content: None,
+			start: 0,
+			first_object: true,
+			entries: vec![
+				Entry::plain(Frame::new(Timestamp::unscaled(0), Bytes::from_static(b"a")).into(), 0),
+				Entry::plain(Frame::new(Timestamp::unscaled(0), Bytes::from_static(b"b")).into(), 0),
+			],
+			compressed: false,
+		};
+		let pool = cache::Pool::unbounded();
+		let cache = cache::Track::new(pool, Default::default(), Default::default(), kio::Weak::new());
+		let mut tail = Producer::new(Info::from(0u64), track::Info::default(), cache);
+		tail.start_at(2).unwrap();
+		tail.set_wire(Wire {
+			sparse: false,
+			first_object: false,
+			first_id: 2,
+			extensions: false,
+			has_end: true,
+			fetchable: true,
+			last: None,
+		})
+		.unwrap();
+		tail.set_end_object(super::super::object::Fields {
+			id: 2,
+			properties: Default::default(),
+		})
+		.unwrap();
+		assert_eq!(tail.handle.last_data_object(), None, "no data object yet");
+		tail.handle.adopt_head(&head);
+		assert_eq!(tail.handle.state.read().offset, 0, "the head is adopted");
+		assert_eq!(tail.handle.last_data_object(), Some(1));
 	}
 
 	#[test]
@@ -6575,6 +6872,35 @@ mod test {
 			assert_eq!(frame.payload, Bytes::from(vec![i as u8; 4]));
 		}
 		assert!(consumer.read_frame().now_or_never().unwrap().unwrap().is_none());
+	}
+
+	/// A group places a time once it holds a frame past it or finishes, never by aborting: an
+	/// aborted copy may have lost the End its group was sent with.
+	#[test]
+	fn a_group_places_a_time_only_once_it_passes_it_or_finishes() {
+		let frame = |producer: &mut Producer, millis| {
+			producer
+				.write_frame(Timestamp::from_millis(millis).unwrap(), Bytes::from_static(b"x"))
+				.unwrap();
+		};
+		let mut open = Info { start: 1000 }.produce();
+		assert_eq!(open.handle().unplaced_from(), Some(0), "no frame");
+		frame(&mut open, 1000);
+		assert_eq!(open.handle().unplaced_from(), Some(1000));
+		frame(&mut open, 1800);
+		assert_eq!(open.handle().unplaced_from(), Some(1800), "places 1700, not 1800");
+
+		let mut aborted = Info { start: 1000 }.produce();
+		frame(&mut aborted, 1000);
+		let handle = aborted.handle();
+		aborted.abort(Error::Cancel).unwrap();
+		assert_eq!(handle.unplaced_from(), Some(1000), "aborted");
+
+		let mut finished = Info { start: 1000 }.produce();
+		frame(&mut finished, 1000);
+		let handle = finished.handle();
+		drop(finished.finish().unwrap());
+		assert_eq!(handle.unplaced_from(), None, "finished");
 	}
 
 	/// A finished group is still aborted once its frames are released to free memory (the
@@ -7953,7 +8279,6 @@ mod test {
 		fn asking(&self) -> crate::model::track::Asking {
 			crate::model::track::Asking {
 				priority: 0,
-				max_delay: None,
 				order: crate::model::subscription::Order::Ascending,
 			}
 		}
@@ -8116,6 +8441,24 @@ mod test {
 		assert!(matches!(res, Poll::Ready(Ok(None))), "{res:?}");
 		let res = reader.poll_finished(&waiter);
 		assert!(matches!(res, Poll::Ready(Ok(4))), "{res:?}");
+	}
+
+	/// A bounded copy finishing short of its bound reached the group's own end, which makes its
+	/// siblings whole too; one finishing at its bound finished only the range it was cut to.
+	#[test]
+	fn a_copy_finished_short_of_its_bound_is_whole() {
+		for (frames, whole) in [(2, true), (4, false)] {
+			let mut producer = Info { start: 0 }.produce();
+			producer.bound(Bounds { start: 0, end: Some(4) }).unwrap();
+			let handle = producer.handle();
+			for _ in 0..frames {
+				producer
+					.write_frame(crate::Timestamp::ZERO, Bytes::from_static(b"x"))
+					.unwrap();
+			}
+			producer.finish().unwrap();
+			assert_eq!(handle.state.read().charge.is_whole(), whole, "{frames} frames");
+		}
 	}
 
 	/// A publisher that read every frame of a finished group still learns when the budget

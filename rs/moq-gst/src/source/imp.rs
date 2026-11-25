@@ -1721,7 +1721,9 @@ impl Reader {
 			subscriber = async {
 				instance
 					.track(&shape.track)?
-					.subscribe(playout.subscription(moq_net::track::Subscription::default()))
+					.subscribe(playout.subscription(
+						moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL]),
+					))
 					.await
 			} => match subscriber {
 				Ok(subscriber) => subscriber,
@@ -3026,7 +3028,14 @@ mod session_tests {
 		});
 
 		let request = await_request(&mut dynamic);
-		assert_eq!(request.subscription().unwrap().delay.max, Some(max_delay));
+		// No min: the join reaches back as far as the max delay keeps.
+		assert_eq!(
+			request.subscription().unwrap().ranges,
+			[moq_net::track::Range::from(moq_net::track::Start::Live {
+				min: Some(max_delay),
+				max: Some(max_delay),
+			})]
+		);
 
 		let _ = shutdown.send(true);
 		super::RUNTIME.block_on(session).unwrap().unwrap();
@@ -3060,7 +3069,13 @@ mod session_tests {
 		});
 
 		let request = await_request(&mut dynamic);
-		assert_eq!(request.subscription().unwrap().delay.max, Some(max_delay + warmup));
+		assert_eq!(
+			request.subscription().unwrap().ranges,
+			[moq_net::track::Range::from(moq_net::track::Start::Live {
+				min: Some(max_delay + warmup),
+				max: Some(max_delay + warmup),
+			})]
+		);
 
 		let _ = shutdown.send(true);
 		super::RUNTIME.block_on(session).unwrap().unwrap();

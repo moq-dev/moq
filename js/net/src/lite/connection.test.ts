@@ -11,12 +11,11 @@ import { hooks } from "../internal.ts";
 import { createMockTransportPair, type MockTransport, manual, settlesWithin, textFrame } from "../mock.ts";
 import { Producer } from "../origin.ts";
 import * as Path from "../path.ts";
-import { acceptBudget, Readers, Stream, Writer } from "../stream.ts";
+import { acceptBudget, Stream, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import { wireOf } from "../wire.ts";
-import { type AnnounceBroadcast, decodeAnnounceBroadcast, encodeAnnounceBroadcast } from "./announce.ts";
+import { type AnnounceBroadcast, encodeAnnounceBroadcast } from "./announce.ts";
 import { AnnounceStream } from "./announce_stream.ts";
-import { AuthMessage, AuthOk } from "./auth.ts";
 import { Connection, probeLevel } from "./connection.ts";
 import { Fetch } from "./fetch.ts";
 import { Goaway } from "./goaway.ts";
@@ -27,7 +26,7 @@ import {
 	decodeSubscribeResponse,
 	encodeSubscribeResponse,
 	Subscribe,
-	SubscribeFinish,
+	SubscribeEnd,
 	SubscribeStart,
 } from "./subscribe.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
@@ -38,6 +37,7 @@ import {
 	ALPN_05,
 	ALPN_06,
 	ALPN_07_WIP,
+	hasRanges,
 	hasTrackStream,
 	keepsSubscribeOpen,
 	Version,
@@ -404,7 +404,7 @@ for (const [alpn, version] of [
 		}
 	});
 
-	// A lite-07 subscriber FINs once it read the tail, which can land while SUBSCRIBE_FINISH's
+	// A lite-07 subscriber FINs once it read the tail, which can land while SUBSCRIBE_END's
 	// write still waits; the final group's FIN still holds the close.
 	if (keepsSubscribeOpen(version)) {
 		test(`a subscriber FIN during the end's write still drains the final group over ${versionName(version)}`, async () => {
@@ -643,9 +643,9 @@ async function servedRawSubscription(alpn: string = ALPN_07_WIP, version: Versio
 	expect("start" in (await decodeSubscribeResponse(subscriber.reader, version))).toBe(true);
 	producer.finish();
 	producer.close();
-	// SUBSCRIBE_FINISH, then before lite-07 the publisher's FIN; lite-07 keeps the stream open.
+	// SUBSCRIBE_END, then before lite-07 the publisher's FIN; lite-07 keeps the stream open.
 	if (keepsSubscribeOpen(version)) {
-		while (!("finish" in (await decodeSubscribeResponse(subscriber.reader, version)))) {}
+		while (!("end" in (await decodeSubscribeResponse(subscriber.reader, version)))) {}
 	} else await subscriber.reader.readAll();
 
 	let closed = false;
@@ -665,7 +665,7 @@ async function servedRawSubscription(alpn: string = ALPN_07_WIP, version: Versio
 }
 
 // The publisher's FIN says nothing about whether the subscriber read the tail, and a receiver
-// may drop unread bytes on close. From lite-05, whose SUBSCRIBE_FINISH lets the subscriber settle
+// may drop unread bytes on close. From lite-05, whose SUBSCRIBE_END lets the subscriber settle
 // its tail at once, the subscriber's FIN says so, and close waits for it.
 for (const [alpn, version] of [
 	[ALPN_05, Version.DRAFT_05],
@@ -821,8 +821,8 @@ test("close waits for a request served while withdrawals are in flight", async (
 		expect("start" in (await decodeSubscribeResponse(subscriber.reader, version))).toBe(true);
 		producer.finish();
 		producer.close();
-		// SUBSCRIBE_FINISH; lite-07 keeps the stream open past it.
-		while (!("finish" in (await decodeSubscribeResponse(subscriber.reader, version)))) {}
+		// SUBSCRIBE_END; lite-07 keeps the stream open past it.
+		while (!("end" in (await decodeSubscribeResponse(subscriber.reader, version)))) {}
 
 		// The withdrawal completes, but the subscription still waits for the subscriber's FIN.
 		fin.release();
@@ -994,14 +994,24 @@ for (const violation of ["a partial group", "a group past the declared end"] as 
 						sub = stream;
 					}
 				}
-				await encodeSubscribeResponse(sub.writer, { start: new SubscribeStart([0n]) }, version);
+				await encodeSubscribeResponse(
+					sub.writer,
+					{
+						start: new SubscribeStart({
+							id: 0n,
+							start: 0n,
+							largest: hasRanges(version) ? "empty" : "unknown",
+						}),
+					},
+					version,
+				);
 
 				let group: GroupMessage;
 				if (violation === "a partial group") {
 					// A received tail uses its wire position even without a locally retained prefix.
 					group = new GroupMessage({ subscribe: 0n, key: 0n, frameStart: 5 });
 				} else {
-					await encodeSubscribeResponse(sub.writer, { finish: new SubscribeFinish(2n) }, version);
+					await encodeSubscribeResponse(sub.writer, { end: new SubscribeEnd(2n) }, version);
 					group = new GroupMessage({ subscribe: 0n, key: 2n });
 				}
 				const writer = await Writer.open(pair.server, { version });
@@ -1050,36 +1060,6 @@ for (const [name, violate] of [
 		async (pair) => {
 			await announceStream(pair);
 			await announceStream(pair);
-		},
-	],
-	[
-		"a reset Announce Stream",
-		async (pair) => {
-			// The client answers once its peer grants its credential.
-			const auth = await Stream.accept(pair.server, Version.DRAFT_07);
-			if (!auth || (await auth.reader.u53()) !== StreamId.Auth)
-				throw new Error("the peer never presented a credential");
-			await AuthMessage.decode(auth.reader, Version.DRAFT_07);
-			const all = Path.Prefixes.all();
-			await new AuthOk(all, all).encode(auth.writer, Version.DRAFT_07);
-			const { writer, send } = await announceStream(pair);
-			await send({ status: "request", more: false, remove: [], add: [{ prefix: ROOM, hidden: false }] });
-			// A reset discards what the peer has not read, and a stream whose type byte is lost
-			// is not known to be an Announce Stream, so it cannot break the session. Reset only
-			// once the ANNOUNCE_OK answering the request shows the stream was identified.
-			const readers = new Readers(pair.server, Version.DRAFT_07);
-			try {
-				for (;;) {
-					const stream = await readers.next();
-					if (!stream) throw new Error("the peer never answered");
-					if ((await stream.u53()) !== DataType.Announce) continue;
-					expect(await decodeAnnounceBroadcast(stream, Version.DRAFT_07)).toEqual({ status: "ok" });
-					break;
-				}
-			} finally {
-				readers.close();
-			}
-			writer.reset(new Error("gone"));
 		},
 	],
 	[
@@ -1173,6 +1153,160 @@ for (const [name, violate] of [
 		}
 	});
 }
+
+// Reach the Announce Stream `quic` opens: `reset` resets it with `code`, 0 as a browser reports a closing
+// session's, and `stop` fails its writes from then on with the error a peer's STOP_SENDING raises.
+function announceWriter(quic: MockTransport): { reset(code?: number): void; stop(): void } {
+	let announce: WritableStreamDefaultWriter<Uint8Array> | undefined;
+	let stopped = false;
+	const create = quic.createUnidirectionalStream.bind(quic);
+	quic.createUnidirectionalStream = async (options) => {
+		const stream = await create(options);
+		const getWriter = stream.getWriter.bind(stream);
+		stream.getWriter = () => {
+			const writer = getWriter();
+			const write = writer.write.bind(writer);
+			let first = true;
+			writer.write = (chunk) => {
+				if (first && chunk?.[0] === DataType.Announce) announce = writer;
+				first = false;
+				if (stopped && writer === announce) {
+					return Promise.reject(
+						Object.assign(new Error("stopped"), { source: "stream", streamErrorCode: 0 }),
+					);
+				}
+				return write(chunk);
+			};
+			return writer;
+		};
+		return stream;
+	};
+	return {
+		reset: (code = 0) =>
+			void defined(announce).abort(Object.assign(new Error("gone"), { source: "stream", streamErrorCode: code })),
+		stop: () => {
+			stopped = true;
+		},
+	};
+}
+
+// A server closing a session resets its Announce Stream and stops the client's before its close
+// arrives, with a code Chrome reports as an application's 0: the client takes the server for
+// leaving, its routes end, and the session's close says why.
+for (const name of ["resets", "stops"] as const) {
+	test(`an Announce Stream the peer ${name} ends its routes and leaves the session's close to say why`, async () => {
+		const pair = createMockTransportPair(ALPN_07_WIP);
+		const serverAnnounce = announceWriter(pair.server);
+		const clientAnnounce = announceWriter(pair.client);
+		const up = new Producer();
+		const down = new Producer();
+		const fromClient = new Producer();
+		const fromServer = new Producer();
+		const url = new URL("https://localhost/test");
+		const [client, server] = await Promise.all([
+			connect({ url, transport: pair.client, publish: up.consume(), consume: fromServer }),
+			accept({ url, transport: pair.server, publish: down.consume(), consume: fromClient }),
+		]);
+		const cam = up.route(Path.from("up/cam"));
+		const room = down.route(Path.from("down/room"));
+		const atServer = fromClient.routes();
+		const atClient = fromServer.routes();
+		let closed = false;
+		void pair.client.closed.then(() => {
+			closed = true;
+		});
+		const late: { broadcast: { close(): void } }[] = [];
+		try {
+			expect(await atServer.next()).toMatchObject({ prefix: Path.from("up/cam"), kind: "start" });
+			expect(await atClient.next()).toMatchObject({ prefix: Path.from("down/room"), kind: "start" });
+
+			if (name === "resets") {
+				serverAnnounce.reset();
+			} else {
+				clientAnnounce.stop();
+				// The client learns of the stop on its next send.
+				late.push(up.route(Path.from("up/late")));
+			}
+			expect(await atClient.next()).toMatchObject({ prefix: Path.from("down/room"), kind: "offline" });
+			// What the peer still sends on its own stream about the routes that ended, such as a
+			// claim it now withdraws, is ignored.
+			if (name === "stops") room.broadcast.close();
+			await settle();
+			expect(closed).toBe(false);
+
+			pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
+			expect(await pair.client.closed).toEqual({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
+		} finally {
+			atServer.close();
+			atClient.close();
+			client.abort();
+			server.abort();
+			cam.broadcast.close();
+			room.broadcast.close();
+			for (const route of late) route.broadcast.close();
+			for (const origin of [up, down, fromClient, fromServer]) origin.close();
+		}
+	});
+}
+
+// A reset carrying an application code of its own is no closing session's: it breaks the session.
+test("an Announce Stream the peer resets with a code closes moq-lite-07 with PROTOCOL_VIOLATION", async () => {
+	const pair = createMockTransportPair(ALPN_07_WIP);
+	const serverAnnounce = announceWriter(pair.server);
+	const down = new Producer();
+	const fromServer = new Producer();
+	const url = new URL("https://localhost/test");
+	const [client, server] = await Promise.all([
+		connect({ url, transport: pair.client, consume: fromServer }),
+		accept({ url, transport: pair.server, publish: down.consume() }),
+	]);
+	const room = down.route(Path.from("down/room"));
+	const atClient = fromServer.routes();
+	try {
+		expect(await atClient.next()).toMatchObject({ prefix: Path.from("down/room"), kind: "start" });
+		serverAnnounce.reset(7);
+		expect((await pair.client.closed).closeCode).toBe(SessionCode.ProtocolViolation);
+	} finally {
+		atClient.close();
+		client.abort();
+		server.abort();
+		room.broadcast.close();
+		for (const origin of [down, fromServer]) origin.close();
+	}
+});
+
+// A peer that stops this side's Announce Stream as it asks for a prefix is leaving too: the reader
+// waiting on that ANNOUNCE_REQUEST is not failed with the stop, and the session stays open.
+test("an ANNOUNCE_REQUEST the peer stops leaves its reader and the session open", async () => {
+	const pair = createMockTransportPair(ALPN_07_WIP);
+	const clientAnnounce = announceWriter(pair.client);
+	const down = new Producer();
+	const url = new URL("https://localhost/test");
+	const [client, server] = await Promise.all([
+		connect({ url, transport: pair.client }),
+		accept({ url, transport: pair.server, publish: down.consume() }),
+	]);
+	let closed = false;
+	void pair.client.closed.then(() => {
+		closed = true;
+	});
+	clientAnnounce.stop();
+	const listing = client.announced(Path.Pattern.literal(ROOM));
+	let ended: unknown;
+	void listing.closed.then((err) => {
+		ended = err ?? "closed";
+	});
+	try {
+		await settle();
+		expect(ended).toBeUndefined();
+		expect(closed).toBe(false);
+	} finally {
+		listing.close();
+		client.abort();
+		server.abort();
+		down.close();
+	}
+});
 
 // The peer finishing its Announce Stream is leaving: its routes end, the session stays, and the
 // prefixes it asked for are still answered.

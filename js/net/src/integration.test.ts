@@ -28,6 +28,7 @@ import type { Consumer as OriginConsumer } from "./origin.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Stream } from "./stream.ts";
+import { withMax } from "./subscription.test-util.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import type { Position, Producer as TrackProducer } from "./track.ts";
 import { unwanted } from "./util/demand.ts";
@@ -205,32 +206,40 @@ test("integration: lite subscription options and updates reach the publisher", a
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	// A floor of group 1, a concrete group on every draft.
-	const subscriber = remote.track("video").subscribe({
-		priority: 3,
-		delay: { max: Duration.millis(250) },
-		ranges: [{ start: 1n, end: 8n }],
-	});
+	const subscriber = remote.track("video").subscribe(
+		withMax({
+			priority: 3,
+			delay: { max: Duration.millis(250) },
+			ranges: [{ start: 1n, end: 8n }],
+		}),
+	);
 	const producer = await accepted;
-	expect(producer.subscription.peek()).toEqual({
-		priority: 3,
-		// The negotiated lite-06 cannot state a minimum.
-		delay: { max: Duration.millis(250) },
-		order: "descending",
-		ranges: [{ start: 1n, end: 8n }],
-	});
+	expect(producer.subscription.peek()).toEqual(
+		withMax({
+			priority: 3,
+			// The negotiated lite-06 cannot state a minimum.
+			delay: { max: Duration.millis(250) },
+			order: "descending",
+			ranges: [{ start: 1n, end: 8n }],
+		}),
+	);
 
 	const updated = producer.subscription.changed();
-	subscriber.update({
-		priority: 8,
-		delay: { max: Duration.millis(500) },
-		ranges: [{ start: 2n, end: 11n }],
-	});
-	expect(await updated).toEqual({
-		priority: 8,
-		delay: { max: Duration.millis(500) },
-		order: "descending",
-		ranges: [{ start: 2n, end: 11n }],
-	});
+	subscriber.update(
+		withMax({
+			priority: 8,
+			delay: { max: Duration.millis(500) },
+			ranges: [{ start: 2n, end: 11n }],
+		}),
+	);
+	expect(await updated).toEqual(
+		withMax({
+			priority: 8,
+			delay: { max: Duration.millis(500) },
+			order: "descending",
+			ranges: [{ start: 2n, end: 11n }],
+		}),
+	);
 
 	subscriber.close();
 	remote.close();
@@ -257,9 +266,12 @@ test.each([Ietf.ALPN.DRAFT_22])("integration: %s carries no subscriber max age",
 	})();
 
 	const remote = wireOf(client).consume(Path.from("test"));
-	const subscriber = remote.track("video").subscribe({ delay: { max: Duration.millis(250) } });
+	const subscriber = remote
+		.track("video")
+		.subscribe({ ranges: [{ start: { live: { min: Duration.ZERO, max: Duration.millis(250) } } }] });
 	const producer = await accepted;
-	expect(producer.subscription.peek()?.delay?.max).toEqual(Duration.millis(Number.MAX_SAFE_INTEGER));
+	// A live join whose groups only the publisher's max age expires.
+	expect(producer.subscription.peek()?.ranges).toEqual([{ start: { live: { min: Duration.ZERO, max: null } } }]);
 
 	subscriber.close();
 	remote.close();
@@ -269,7 +281,7 @@ test.each([Ietf.ALPN.DRAFT_22])("integration: %s carries no subscriber max age",
 	server.abort();
 });
 
-test("integration: lite carries a fractional delay as a whole millisecond", async () => {
+test("integration: lite carries a fractional live max as a whole millisecond", async () => {
 	const pair = createMockTransportPair(Lite.ALPN_05);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
@@ -290,7 +302,7 @@ test("integration: lite carries a fractional delay as a whole millisecond", asyn
 			const producer = request.accept({ timescale: Timescale.MILLI });
 			// The TRACK lookup opens the request and the SUBSCRIBE joins it, so its options land after.
 			const check = (subscription = producer.subscription.peek()) => {
-				if (subscription?.ranges?.[0]?.start === 1n) resolveProducer?.(producer);
+				if (typeof subscription?.ranges?.[0]?.start === "object") resolveProducer?.(producer);
 			};
 			check();
 			producer.subscription.subscribe(check);
@@ -299,10 +311,12 @@ test("integration: lite carries a fractional delay as a whole millisecond", asyn
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	// A varint cannot encode 38.75, so an unrounded value fails the SUBSCRIBE outright and
-	// nothing resubscribes. The publisher must see the budget rounded up instead.
-	const subscriber = remote
-		.track("video")
-		.subscribe({ delay: { max: Duration.millis(38.75) }, ranges: [{ start: 1n }] });
+	// nothing resubscribes. The publisher must see the budget rounded up instead: lite-05 carries
+	// the live join as no start under its one max age, which takes every group within it.
+	const live = (min: Duration | null, max: number) => ({
+		ranges: [{ start: { live: { min, max: Duration.millis(max) } } }],
+	});
+	const subscriber = remote.track("video").subscribe(live(Duration.ZERO, 38.75));
 
 	// A failed subscribe never reaches the publisher, so race its closure to report the
 	// encode error rather than block until the suite times out.
@@ -311,11 +325,11 @@ test("integration: lite carries a fractional delay as a whole millisecond", asyn
 	});
 
 	const producer = await Promise.race([accepted, failed]);
-	expect(producer.subscription.peek()?.delay?.max).toEqual(Duration.millis(39));
+	expect(producer.subscription.peek()?.ranges).toEqual(live(null, 39).ranges);
 
 	const updated = producer.subscription.changed();
-	subscriber.update({ delay: { max: Duration.millis(500.25) }, ranges: [{ start: 1n }] });
-	expect((await Promise.race([updated, failed]))?.delay?.max).toEqual(Duration.millis(501));
+	subscriber.update(live(Duration.ZERO, 500.25));
+	expect((await Promise.race([updated, failed]))?.ranges).toEqual(live(null, 501).ranges);
 
 	subscriber.close();
 	remote.close();
@@ -351,10 +365,12 @@ test("integration: lite applies initial and updated group bounds", async () => {
 	const remote = wireOf(client).consume(Path.from("test"));
 	const subscriber = remote
 		.track("video")
-		.subscribe({
-			delay: { max: Duration.millis(REPLAY_LATENCY_MS) },
-			ranges: [{ start: INITIAL_START_GROUP, end: INITIAL_END_GROUP - 1n }],
-		})
+		.subscribe(
+			withMax({
+				delay: { max: Duration.millis(REPLAY_LATENCY_MS) },
+				ranges: [{ start: INITIAL_START_GROUP, end: INITIAL_END_GROUP - 1n }],
+			}),
+		)
 		.ordered();
 	try {
 		expect((await subscriber.nextGroup())?.start).toBe(INITIAL_START_GROUP);
@@ -364,20 +380,24 @@ test("integration: lite applies initial and updated group bounds", async () => {
 		expect(await subscriber.nextGroup()).toBeUndefined();
 
 		// Replacing the ranges reads on from the same reader, the update going upstream.
-		subscriber.update({
-			delay: { max: Duration.millis(REPLAY_LATENCY_MS) },
-			ranges: [{ start: UPDATED_GROUP, end: UPDATED_END_GROUP - 1n }],
-		});
+		subscriber.update(
+			withMax({
+				delay: { max: Duration.millis(REPLAY_LATENCY_MS) },
+				ranges: [{ start: UPDATED_GROUP, end: UPDATED_END_GROUP - 1n }],
+			}),
+		);
 		const updated = (pending: Promise<unknown>) =>
 			withTimeout(pending, Duration.millis(UPDATE_TIMEOUT_MS), "updated group bound timed out");
 		expect(((await updated(subscriber.nextGroup())) as { start: bigint } | undefined)?.start).toBe(UPDATED_GROUP);
 		expect(await updated(subscriber.nextGroup())).toBeUndefined();
 
 		// An open range parks at the live edge instead.
-		subscriber.update({
-			delay: { max: Duration.millis(REPLAY_LATENCY_MS) },
-			ranges: [{ start: GROUP_COUNT }],
-		});
+		subscriber.update(
+			withMax({
+				delay: { max: Duration.millis(REPLAY_LATENCY_MS) },
+				ranges: [{ start: GROUP_COUNT }],
+			}),
+		);
 		expect(await settlesWithin(subscriber.nextGroup(), clock, Duration.millis(PENDING_ASSERT_MS))).toBe(false);
 	} finally {
 		subscriber.close();
@@ -409,10 +429,12 @@ test("integration: lite refuses an empty requested range on open and on update",
 	try {
 		// Bounds that meet cannot go on the wire: the nearest encoding inverts the range. The read
 		// of an empty window ends at once, and the copy is refused.
-		const empty = video.subscribe({
-			delay: { max: Duration.millis(REPLAY_LATENCY_MS) },
-			ranges: [{ start: 2n, end: 1n }],
-		});
+		const empty = video.subscribe(
+			withMax({
+				delay: { max: Duration.millis(REPLAY_LATENCY_MS) },
+				ranges: [{ start: 2n, end: 1n }],
+			}),
+		);
 		expect(await empty.recvGroup()).toBeUndefined();
 		expect(
 			await withTimeout(Promise.resolve(empty.closed), Duration.millis(TIMEOUT_MS), "empty open never settled"),
@@ -421,16 +443,20 @@ test("integration: lite refuses an empty requested range on open and on update",
 
 		// A live subscription whose demand later collapses to nothing fails the same way.
 		const live = video
-			.subscribe({
-				delay: { max: Duration.millis(REPLAY_LATENCY_MS) },
-				ranges: [{ start: 1n, end: 1n }],
-			})
+			.subscribe(
+				withMax({
+					delay: { max: Duration.millis(REPLAY_LATENCY_MS) },
+					ranges: [{ start: 1n, end: 1n }],
+				}),
+			)
 			.ordered();
 		expect((await live.nextGroup())?.start).toBe(1n);
-		live.update({
-			delay: { max: Duration.millis(REPLAY_LATENCY_MS) },
-			ranges: [{ start: 3n, end: 2n }],
-		});
+		live.update(
+			withMax({
+				delay: { max: Duration.millis(REPLAY_LATENCY_MS) },
+				ranges: [{ start: 3n, end: 2n }],
+			}),
+		);
 		expect(await live.nextGroup()).toBeUndefined();
 		expect(
 			await withTimeout(Promise.resolve(live.closed), Duration.millis(TIMEOUT_MS), "empty update never settled"),
@@ -462,15 +488,17 @@ test("integration: lite-07 serves sparse ranges and a live join", async () => {
 	try {
 		const reader = remote
 			.track("video")
-			.subscribe({
-				// The join starts 2 ms behind the newest group, which starts at 9 ms.
-				delay: { max: null },
-				order: "ascending",
-				ranges: [
-					{ start: 1n, end: 2n },
-					{ start: { live: Duration.millis(2) }, end: 8n },
-				],
-			})
+			.subscribe(
+				withMax({
+					// The join starts 2 ms behind the newest group, which starts at 9 ms.
+					delay: { max: null },
+					order: "ascending",
+					ranges: [
+						{ start: 1n, end: 2n },
+						{ start: { live: { min: Duration.millis(2), max: Duration.ZERO } }, end: 8n },
+					],
+				}),
+			)
 			.ordered();
 		// Covering the ranges ends the subscription upstream, and the read with its window.
 		const got: bigint[] = [];
@@ -511,7 +539,10 @@ test("integration: lite-07 starts an ordered read at a live join over a frameles
 	const newest = hooks.appendNext(producer);
 
 	const remote = wireOf(client).consume(Path.from("test"));
-	const subscription = { delay: { max: null }, ranges: [{ start: { live: Duration.ZERO } }] };
+	const subscription = withMax({
+		delay: { max: null },
+		ranges: [{ start: { live: { min: Duration.ZERO, max: Duration.ZERO } } }],
+	});
 	const reader = remote.track("video").subscribe(subscription).ordered();
 	const sibling = remote.track("video").subscribe(subscription);
 	try {
@@ -548,7 +579,10 @@ test("integration: lite-07 joins a late live join at the live edge", async () =>
 	hooks.appendNext(producer).finish();
 
 	const remote = wireOf(client).consume(Path.from("test"));
-	const subscription = { delay: { max: null }, ranges: [{ start: { live: Duration.ZERO } }] };
+	const subscription = withMax({
+		delay: { max: null },
+		ranges: [{ start: { live: { min: Duration.ZERO, max: Duration.ZERO } } }],
+	});
 	const first = remote.track("video").subscribe(subscription);
 	let late: ReturnType<typeof first.ordered> | undefined;
 	try {
@@ -596,11 +630,13 @@ test("integration: lite-07 keeps a covered bounded subscription open", async () 
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	const bounded = (end: bigint) =>
-		remote.track("video").subscribe({
-			delay: { max: Duration.millis(60_000) },
-			order: "ascending",
-			ranges: [{ start: 1n, end: end - 1n }],
-		});
+		remote.track("video").subscribe(
+			withMax({
+				delay: { max: Duration.millis(60_000) },
+				order: "ascending",
+				ranges: [{ start: 1n, end: end - 1n }],
+			}),
+		);
 	// Arrival reads, as the Rust test's: an ordered one would wait out the missing group 3.
 	const read = async (reader: ReturnType<typeof bounded>, count: number) => {
 		const got: bigint[] = [];
@@ -653,11 +689,13 @@ test("integration: lite-07 serves a time range", async () => {
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	try {
-		const reader = remote.track("video").subscribe({
-			delay: { max: null },
-			order: "ascending",
-			ranges: [{ start: 2000n, end: 5000n }],
-		});
+		const reader = remote.track("video").subscribe(
+			withMax({
+				delay: { max: null },
+				order: "ascending",
+				ranges: [{ start: 2000n, end: 5000n }],
+			}),
+		);
 		const got: bigint[] = [];
 		for (let i = 0; i < 4; i++) got.push((await reader.recvGroup())?.start ?? -1n);
 		expect(got.sort((a, b) => (a < b ? -1 : 1))).toEqual([2000n, 3000n, 4000n, 5000n]);
@@ -3087,15 +3125,15 @@ test.each([Lite.ALPN_06, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])(
 	10_000,
 );
 
-// A qmux session pair negotiating `protocol` over an in-memory socket, the client letting the server
-// open `maxStreams` streams of each kind. The client opens every bidirectional stream, so a small limit
-// bounds only the server's group streams.
-function qmuxPair(protocol: string, maxStreams: bigint): { client: Qmux; server: Qmux } {
+// A qmux session pair negotiating `protocol` over an in-memory socket at the `qmux` draft, the client
+// letting the server open `maxStreams` streams of each kind. The client opens every bidirectional
+// stream, so a small limit bounds only the server's group streams.
+function qmuxPair(protocol: string, maxStreams: bigint, qmux = "qmux-01"): { client: Qmux; server: Qmux } {
 	const socket = (readable: ReadableStream<Uint8Array>, writable: WritableStream<Uint8Array>) => {
 		const closed = Promise.withResolvers<{ closeCode: number; reason: string }>();
 		return {
 			url: "",
-			opened: Promise.resolve({ readable, writable, extensions: "", protocol: `qmux-01.${protocol}` }),
+			opened: Promise.resolve({ readable, writable, extensions: "", protocol: `${qmux}.${protocol}` }),
 			closed: closed.promise,
 			close: () => closed.resolve({ closeCode: 1000, reason: "" }),
 		};
@@ -3110,67 +3148,73 @@ function qmuxPair(protocol: string, maxStreams: bigint): { client: Qmux; server:
 	return { client, server };
 }
 
-// On lite-07 a group whose stream a newer one reset to make room is dropped: its reader ends with
-// TOO_FAR_BEHIND, and a reader that wants the rest FETCHes it whole. Mirrors the Rust
-// `a_reset_group_is_fetched_whole`.
-test("integration: lite-07 drops a group reset to make room, and a FETCH reads it whole", async () => {
-	using clock = manual();
-	// Advance the clock until `work` settles: a waiting open makes room once it has waited about a
-	// round trip.
-	const settled = async <T>(work: Promise<T>, what: string): Promise<T> => {
-		for (let i = 0; i < 100; i++) if (await settlesWithin(work, clock, Duration.millis(10))) return work;
-		throw new Error(`${what} never settled`);
-	};
-	// One unidirectional stream of credit, so a newer group's open must reset the older one.
-	const pair = qmuxPair(Lite.ALPN_07_WIP, 1n);
-	// The server learns the negotiated protocol once its socket opens.
-	await Promise.all([pair.client.ready, pair.server.ready]);
-	const origin = new OriginProducer();
-	const [client, server] = await Promise.all([
-		connect(url, { transport: pair.client }),
-		accept(pair.server, url, { publish: origin.consume() }),
-	]);
-	const broadcast = publish(origin, Path.from("live"));
-	// Kept, so the older group is never too old for the subscription.
-	const producer = defined(broadcast.createTrack("0", { timescale: Timescale.MILLI, maxAge: null }));
-	const remote = wireOf(client).consume(Path.from("live"));
-	const subscriber = remote.track("0").subscribe({ order: "descending", delay: { max: Duration.millis(30_000) } });
-	try {
-		// Unfinished, so its stream holds the only credit until the newer group resets it.
-		const older = hooks.appendNext(producer);
-		older.writeFrame(textFrame("a"));
-		const reset = await settled(subscriber.recvGroup(), "the older group");
-		if (!reset) throw new Error("no older group");
-		expect(reset.start).toBe(0n);
-		expect(await settled(reset.readString(), "its first frame")).toBe("a");
+// On lite-07 a group whose stream a newer one reset to make room ends: its reader ends with
+// TOO_FAR_BEHIND, and a reader that wants the rest FETCHes it whole. The reset still delivers the
+// group's header, as a RESET_STREAM_AT on qmux-02 and ahead of a plain reset on qmux-01. Mirrors the
+// Rust `a_reset_group_is_fetched_whole`.
+test.each(["qmux-01", "qmux-02"])(
+	"integration: lite-07 over %s ends a group reset to make room, and a FETCH reads it whole",
+	async (qmux) => {
+		using clock = manual();
+		// Advance the clock until `work` settles: a waiting open makes room once it has waited about a
+		// round trip.
+		const settled = async <T>(work: Promise<T>, what: string): Promise<T> => {
+			for (let i = 0; i < 100; i++) if (await settlesWithin(work, clock, Duration.millis(10))) return work;
+			throw new Error(`${what} never settled`);
+		};
+		// One unidirectional stream of credit, so a newer group's open must reset the older one.
+		const pair = qmuxPair(Lite.ALPN_07_WIP, 1n, qmux);
+		// The server learns the negotiated protocol once its socket opens.
+		await Promise.all([pair.client.ready, pair.server.ready]);
+		const origin = new OriginProducer();
+		const [client, server] = await Promise.all([
+			connect(url, { transport: pair.client }),
+			accept(pair.server, url, { publish: origin.consume() }),
+		]);
+		const broadcast = publish(origin, Path.from("live"));
+		// Kept, so the older group is never too old for the subscription.
+		const producer = defined(broadcast.createTrack("0", { timescale: Timescale.MILLI, maxAge: null }));
+		const remote = wireOf(client).consume(Path.from("live"));
+		const subscriber = remote
+			.track("0")
+			.subscribe(withMax({ order: "descending", delay: { max: Duration.millis(30_000) } }));
+		try {
+			// Unfinished, so its stream holds the only credit until the newer group resets it.
+			const older = hooks.appendNext(producer);
+			older.writeFrame(textFrame("a"));
+			const reset = await settled(subscriber.recvGroup(), "the older group");
+			if (!reset) throw new Error("no older group");
+			expect(reset.start).toBe(0n);
+			expect(await settled(reset.readString(), "its first frame")).toBe("a");
 
-		const newer = hooks.appendNext(producer);
-		newer.writeFrame(textFrame("new"));
-		newer.finish();
-		const group = await settled(subscriber.recvGroup(), "the newer group taking the older one's credit");
-		expect(group?.start).toBe(1n);
-		expect(await settled(Promise.resolve(reset.closed), "the older group's end")).toMatchObject({
-			code: StreamCode.TooFarBehind,
-		});
+			const newer = hooks.appendNext(producer);
+			newer.writeFrame(textFrame("new"));
+			newer.finish();
+			const group = await settled(subscriber.recvGroup(), "the newer group taking the older one's credit");
+			expect(group?.start).toBe(1n);
+			expect(await settled(Promise.resolve(reset.closed), "the older group's end")).toMatchObject({
+				code: StreamCode.TooFarBehind,
+			});
 
-		older.writeFrame(textFrame("b"));
-		older.finish();
-		const fetched = await settled(remote.track("0").fetchGroup(0n), "the FETCH of the dropped group");
-		const frames: string[] = [];
-		for (;;) {
-			const frame = await settled(fetched.readString(), "the fetched group");
-			if (frame === undefined) break;
-			frames.push(frame);
+			older.writeFrame(textFrame("b"));
+			older.finish();
+			const fetched = await settled(remote.track("0").fetchGroup(0n), "the FETCH of the dropped group");
+			const frames: string[] = [];
+			for (;;) {
+				const frame = await settled(fetched.readString(), "the fetched group");
+				if (frame === undefined) break;
+				frames.push(frame);
+			}
+			expect(frames).toEqual(["a", "b"]);
+		} finally {
+			subscriber.close();
+			remote.close();
+			broadcast.close();
+			client.abort();
+			server.abort();
 		}
-		expect(frames).toEqual(["a", "b"]);
-	} finally {
-		subscriber.close();
-		remote.close();
-		broadcast.close();
-		client.abort();
-		server.abort();
-	}
-});
+	},
+);
 
 // Out of credit, a late group that ranks below the stream holding it waits for credit without
 // holding back a newer group that outranks that stream. Mirrors the Rust
@@ -3194,7 +3238,7 @@ for (const alpn of [Lite.ALPN_06, Lite.ALPN_07_WIP]) {
 		const remote = wireOf(client).consume(Path.from("live"));
 		const subscriber = remote
 			.track("0")
-			.subscribe({ order: "descending", delay: { max: Duration.millis(30_000) } });
+			.subscribe(withMax({ order: "descending", delay: { max: Duration.millis(30_000) } }));
 		try {
 			// Unfinished, so its stream holds the only credit.
 			// Each group stamped in sequence order, since the track checks a late group's start.

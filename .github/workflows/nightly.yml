@@ -411,6 +411,22 @@ jobs:
         id: deploy
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
 
+      # Apart from the site, so either failing leaves the other published.
+      - name: Write Kixel Quest metrics
+        id: kixel
+        if: ${{ !cancelled() && steps.reports.outcome == 'success' }}
+        run: nix shell --inputs-from . nixpkgs#just --command just gh benchmark-report nightly-metrics benchmark-inputs kixel-metrics/metrics.json
+      # Kixel Quest reads it once the run attempt finishes; a rerun overwrites it.
+      # No file when every source failed: their series are missing, not zero.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: ${{ !cancelled() && steps.kixel.outcome == 'success' }}
+        with:
+          name: kixel-metrics
+          path: kixel-metrics/metrics.json
+          if-no-files-found: ignore
+          overwrite: true
+          retention-days: 30
+
   tests:
     name: Tests (${{ matrix.recipe }})
     runs-on: ubuntu-24.04-arm
@@ -439,7 +455,7 @@ jobs:
         # `rs multicast` runs the mDNS tests, which loop multicast back on the runner.
         # `rs render-sw` renders through wgpu on Mesa's software Vulkan driver.
         # `test qmux` runs js/qmux against the in-tree Rust qmux, per draft.
-        # `rs v4l2` streams moq-video's V4L2 capture from the kernel's vivid
+        # `rs v4l2` streams moq-v4l and moq-video V4L2 capture and output from the kernel's vivid
         # virtual camera, a module load no pull request job should make.
         # `js worklet-matrix` loads `?worklet` output through the bundlers pinned in test/worklet.
         recipe: ["gh test-integration", "rs doctest --workspace", "test drill-sensitivity", "rs uring", "test drain", "test json-properties", "test resume-model", "test route-sweep", "test route-race", "rs quic-sim", "rs rung-disable", "test drill impaired", "rs cli-export", "rs hls-conformance", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux", "rs v4l2", "js worklet-matrix"]
@@ -727,12 +743,8 @@ jobs:
   release-shared-ffi:
     name: Release FFI
     uses: ./.github/workflows/release-shared-ffi.yml
-    permissions:
-      contents: write
-
-  release-dart-ffi:
-    name: Release Dart FFI
-    uses: ./.github/workflows/release-dart-ffi.yml
+    # The coordinator's Dart job declares id-token for pub.dev; a caller grants every
+    # permission a nested job declares, used or not.
     permissions:
       contents: write
       id-token: write
@@ -746,7 +758,6 @@ jobs:
   release-cpp:
     name: Release Cpp
     needs: [release-shared-ffi]
-    if: ${{ always() && !cancelled() }}
     uses: ./.github/workflows/release-cpp.yml
     with:
       reuse-native: true
@@ -756,7 +767,6 @@ jobs:
   release-c:
     name: Release C
     needs: [release-shared-ffi]
-    if: ${{ always() && !cancelled() }}
     uses: ./.github/workflows/release-c.yml
     with:
       reuse-native: true
@@ -882,7 +892,8 @@ jobs:
         run: |
           export HOME="$RUNNER_TEMP/home"
           mkdir -p "$HOME"
-          nix develop --command just gate
+          # exec, so a cancel reaches the dispatcher (see queue.yml).
+          exec nix develop --command just gate
 
   fuzz:
     name: Fuzz (${{ matrix.target }})

@@ -293,6 +293,15 @@ impl poll::SendStream for MockSendStream {
 		}
 	}
 
+	fn reset_at(&mut self, offset: &u64, code: u32) {
+		if !self.done {
+			self.done = true;
+			self.resets.lock().unwrap().push(code);
+			*self.line.reset.lock().unwrap() = Some(self.conn.arrival());
+			self.inner.reset_at(offset, code);
+		}
+	}
+
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>> {
 		if self.conn.hold_fins.load(Ordering::Relaxed) {
 			return Poll::Ready(Err(ready!(poll::Session::poll_closed(&self.session, waiter))));
@@ -817,6 +826,24 @@ impl MockSession {
 			let _ = link.ready_uni.try_push(stream);
 		}
 		held.len()
+	}
+
+	/// How many uni streams this side opened are held back.
+	pub fn held_unis(&self) -> usize {
+		let link = &self.side.out;
+		link.settle();
+		link.held_uni.lock().unwrap().as_ref().map_or(0, Vec::len)
+	}
+
+	/// Deliver only the oldest held uni stream, and keep holding the rest.
+	pub fn release_oldest_uni(&self) {
+		let link = &self.side.out;
+		link.settle();
+		let mut held = link.held_uni.lock().unwrap();
+		let held = held.as_mut().expect("not holding");
+		if !held.is_empty() {
+			let _ = link.ready_uni.try_push(held.remove(0));
+		}
 	}
 
 	/// Deliver the held uni streams newest first, and stop holding.

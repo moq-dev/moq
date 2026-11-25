@@ -813,8 +813,12 @@ mod tests {
 			.track(name)
 			.unwrap()
 			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(30))),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(std::time::Duration::from_secs(30)),
+						max: Some(std::time::Duration::from_secs(30)),
+					},
+				)]),
 			)
 			.await
 			.unwrap();

@@ -4,7 +4,9 @@
 //! but QUIC does not order streams, so one opened before the end can still reach us after
 //! it. The subscriber keeps the subscription routable until each owed group is accounted
 //! for, or a grace expires for a group whose stream was reset before its header arrived.
-//! A reset that keeps the header (reliable reset) would make the grace unnecessary.
+//! A lite-07 publisher resets after the header (reliable reset) or names the group in a
+//! drop, so there the grace covers only a GROUP_END such a reset cut, and a peer whose
+//! transport lost the header anyway.
 //!
 //! A stream whose header arrived is read to its end whatever the grace says: a group ends
 //! on its own stream's FIN or reset, never because its track ended. A lost datagram is not
@@ -29,6 +31,8 @@ pub(crate) struct Tail {
 	// than grow with a grace that never passes.
 	bill: Option<cache::Reader>,
 	streams: u64,
+	// The lowest group a stream's header named, which proves the group exists.
+	first: Option<u64>,
 	// Streams whose header arrived and that are still being read.
 	active: u64,
 	// The publisher's FIN ended the track, its only end before lite-05, so a session that
@@ -49,6 +53,7 @@ impl Tail {
 			ledger: Ledger::new(grace),
 			bill: None,
 			streams: 0,
+			first: None,
 			active: 0,
 			ended: false,
 		}
@@ -139,6 +144,11 @@ impl Tail {
 	pub fn streams(&self) -> u64 {
 		self.streams
 	}
+
+	/// The lowest group whose stream's header arrived.
+	pub fn first_group(&self) -> Option<u64> {
+		self.first
+	}
 }
 
 /// A data stream whose header arrived, holding its subscription's end open until dropped.
@@ -159,6 +169,7 @@ impl Reading {
 		state.streams += 1;
 		state.active += 1;
 		if let Some(group) = group {
+			state.first = Some(state.first.map_or(group, |first| first.min(group)));
 			state.account(group..group.saturating_add(1), now);
 		}
 		Self {
@@ -211,6 +222,7 @@ impl Drop for Reading {
 
 /// Waits out a subscription's tail: until the owed streams are accounted for, or the grace.
 pub(crate) struct Settle {
+	runtime: crate::time::Deadlines,
 	tail: kio::Consumer<Tail>,
 	grace: Deadline,
 }
@@ -220,9 +232,21 @@ impl Settle {
 	pub fn new(runtime: &crate::time::Deadlines, tail: kio::Consumer<Tail>) -> Self {
 		let grace = tail.read().ledger.grace();
 		Self {
+			runtime: runtime.clone(),
 			tail,
 			grace: Deadline::after(runtime, grace),
 		}
+	}
+
+	/// Give up on missing streams after `grace` at the latest.
+	pub fn at_most(mut self, grace: Duration) -> Self {
+		let limit = self.runtime.now().checked_add(grace);
+		if let Some(limit) = limit
+			&& self.grace.deadline().is_none_or(|at| limit < at)
+		{
+			self.grace.set(Some(limit));
+		}
+		self
 	}
 
 	/// Ready once no stream is being read and either `complete` holds or the grace

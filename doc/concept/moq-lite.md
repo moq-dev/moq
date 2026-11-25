@@ -127,9 +127,10 @@ hidden names work exactly as before.
   [choosing a route](/concept/identity#choosing-a-route).
 - **Same instance resumes.** A subscription moves between routes with the same
   instance without a seam, continuing from the first frame it lacks. That is a
-  floor, not a promise: groups the outage held back still arrive only while
-  the subscriber's max age covers them, so a route that dies silently, noticed
-  only at the idle timeout, costs whatever aged out meanwhile.
+  floor, not a promise: groups the outage held back still arrive in full for a
+  history range, but for a live join only while its max covers them, so a
+  route that dies silently, noticed only at the idle timeout, costs a live
+  viewer whatever aged out meanwhile.
 - **Another instance restarts.** Another instance winning the path is
   announced as a restart. Subscriptions already answered stay on the old
   stream until dropped or none of its routes remain, which ends them with an
@@ -297,8 +298,8 @@ Each subscription carries the knobs that decide behavior under congestion:
 | --- | --- |
 | **Priority** (-128..127, default 0) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. The publisher's track priority breaks ties between subscriptions at one priority. From a native Rust publisher over QUIC or WebTransport, subscriptions at the same priority and publisher priority split bandwidth evenly by bytes, streams and datagrams alike, however many groups each has queued. A browser publisher and other transports without send groups are not covered. |
 | **Order** | Which group to send first when several are pending. Newest first for live (the default), oldest first for catch-up. Needs moq-lite 07 or moq-transport; older moq-lite always sends newest first. |
-| **Max delay** | How long a non-latest group stays worth delivering before it is skipped. Zero means "live edge only", and raising it is also what asks for history. Unset leaves the publisher's max age alone to bound it. |
-| **Ranges** | Which groups to ask for, through the group containing an end time or onward with the live edge. A range starts at the group containing a time, at the oldest group max delay allows (the default), or as a live join. Each group arrives whole, from its first frame. Max delay still caps every range. |
+| **Ranges** | Which groups to ask for, through the group containing an end time or onward with the live edge. A range starts at the oldest group or at the group containing a time, which asks for history, or as a live join (the default joins at the live edge). Each group arrives whole, from its first frame. |
+| **Max** (live joins) | How long a non-latest group a live join reaches stays worth delivering before it is skipped. Zero means "live edge only", the default. Unset leaves the publisher's max age alone to bound it. History has none: its groups arrive in full, bounded only by the publisher's max age. |
 
 A live join is a range starting a lag behind the live edge: the playout buffer
 the subscriber holds. It starts at the group containing the live edge minus the
@@ -310,8 +311,20 @@ reach that group like any time start. A moq-lite 07 relay copy asks its upstream
 for each join, with the same lag and end, and places a reader's join only from
 an answer that arrived after the reader asked, so a join reads the same groups
 through a relay as from the publisher. Readers joining alike share one answer.
+Each range is answered on its own, so a relay serves at once a range its copy
+placed where its upstream would, while a join in the same subscription waits on
+its upstream; a range reaching back to the oldest group waits for where the
+copy's feed starts.
 Over older moq-lite and moq-transport, a relay places the join from the groups
 it holds instead.
+
+A join never starts at a group its max expired, so a max below its lag starts
+past the oldest groups the lag reaches, and a relay copy reuses an answer only
+for readers no wider than the max it was asked under. A group several ranges cover takes the largest max, and none if
+a history range covers it. Over moq-lite 07 an update changes a join's max in
+place, keeping where it started. Older moq-lite and moq-transport carry one
+subscriber max age instead, so a subscription sends its widest, or none while it
+asks for history.
 
 On moq-lite 05 and later, a publisher explicitly reports groups that will not arrive.
 This lets a finished subscription settle without waiting for missing groups.
@@ -324,7 +337,7 @@ browser does at about 100, gets them for the highest-priority groups. To make ro
 the publisher resets the lowest-priority group's stream with `TOO_FAR_BEHIND`, on
 every moq-lite version, and from moq-lite 05 also reports that group as dropped.
 Its reader ends with that error after the frames that arrived, and no later
-stream carries the rest, even for a reader with no max delay. A reader that still
+stream carries the rest, even for a reader of history. A reader that still
 wants the group fetches it, which returns it whole on a stream the subscriber
 opens, outside the cap.
 
@@ -332,7 +345,7 @@ Ranges are both a request and a filter. A subscriber reads only the groups its
 own ranges cover, resolved again whenever it replaces them, even when another
 subscriber of the same track asked for more. Widening them, including lowering
 the start, also serves the cached groups they newly cover, never one already
-served or reported. A report is final: raising max delay afterwards does not
+served or reported. A report is final: raising a join's max afterwards does not
 bring back a group reported `OLD`, though a relay whose own reader allows more
 asks upstream for it again. A reader that has accounted for every group its bounded ranges cover
 ends, and repeated reads end immediately too. Widening the ranges resumes reading.
@@ -353,6 +366,8 @@ A group is addressed by its start: where it starts in the track's timescale,
 or a bare number that grows with each group on a track without one. A time
 start is the group containing that time, the newest starting at or before it,
 and a time end includes the group containing it, so neither waits on a frame.
+A group that ended whole at a declared end contains no time past it: a time
+start in the pause before the next group starts at that next group.
 Older moq-lite versions and moq-transport carry a group ID equal to the start,
 so a time goes upstream as that ID, where a start selects the first group at or
 after it rather than the one containing it. A live join goes to a moq-transport
@@ -373,12 +388,12 @@ reported as skipped, so a reader sees a gap at once. Older versions and
 moq-transport carry no end.
 
 Order only decides what goes first, never what is skipped, so catching up oldest
-first needs a max delay that covers the backlog. When a relay serves subscribers of
+first needs a history range, or a live join whose max covers the backlog. When a relay serves subscribers of
 both orders from one upstream subscription, it asks upstream for newest first, and
 still sends each subscriber its groups in that subscriber's own order. Over
 moq-transport the upstream order is fixed by whichever subscriber arrived first.
 
-Max delay starts counting when a group's successor arrives, on two clocks, and
+A live join's max starts counting when a group's successor arrives, on two clocks, and
 whichever reaches it first skips the group: the wall clock since the successor
 arrived at this hop, and how far the successor's first timestamp trails the
 live edge. Media time catches a backlog delivered as a burst; the wall clock
@@ -426,15 +441,15 @@ zero, the live edge only, unless its publisher asks for more or for no limit;
 media tracks declare 30 seconds, so a segmented egress can still find its
 segments. A relay bounds what it keeps with its own cache, not the publisher's
 default. Max age ages a group by the
-same two clocks as max delay, and makes the newest group stale only once it
+same two clocks as a live join's max, and makes the newest group stale only once it
 finished whole and its own end stands in for a successor. A fetch
-obeys the same bound, and may name a tighter max delay of its own.
+obeys the same bound and names none of its own.
 moq-transport drops it: its `MAX_CACHE_DURATION` would also expire the newest group,
 so a hop past one keeps superseded groups only as long as its own cache allows.
 
 Put together, a conference might use:
 
-| Track | Priority | Order | Max delay |
+| Track | Priority | Order | Live join max |
 | --- | --- | --- | --- |
 | audio | 100 | ascending | 500 ms |
 | video | 50 | descending | 2 s |
@@ -522,7 +537,7 @@ Rust, `broadcast.create_datagrams(name, info)` publishes one and
 `broadcast.createDatagrams(name, info)` and `broadcast.datagrams(name)`.
 
 A datagram subscription is live from when it starts: it has no ranges, order,
-or max delay, only a priority, which a subscriber can change. A datagram still
+or max, only a priority, which a subscriber can change. A datagram still
 waits behind higher-priority traffic instead of jumping the queue. Nothing
 caches a datagram, and `FETCH` never returns one, so use a stream track for
 anything a late joiner needs.

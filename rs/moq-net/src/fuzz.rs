@@ -410,7 +410,7 @@ pub fn lite_wire(data: &[u8]) -> bool {
 		6 => roundtrip::<lite::Subscribe<'_>, _>(rest, &mut Vec::new(), version),
 		7 => roundtrip::<lite::SubscribeOk, _>(rest, &mut Vec::new(), version),
 		8 => roundtrip::<lite::SubscribeStart, _>(rest, &mut Vec::new(), version),
-		9 => roundtrip::<lite::SubscribeFinish, _>(rest, &mut Vec::new(), version),
+		9 => roundtrip::<lite::SubscribeEnd, _>(rest, &mut Vec::new(), version),
 		10 => roundtrip::<lite::SubscribeUpdate, _>(rest, &mut Vec::new(), version),
 		11 => roundtrip::<lite::SubscribeDrop, _>(rest, &mut Vec::new(), version),
 		12 => roundtrip::<lite::SubscribeResponse, _>(rest, &mut Vec::new(), version),
@@ -572,6 +572,31 @@ pub fn route_info(
 	}
 }
 
+/// An [`Update`](crate::origin::RouteKind::Update) of the route at `prefix` with `cost`, as a
+/// consuming cursor yields it, for benches that replay route events.
+pub fn route_update(prefix: &str, cost: u64) -> crate::origin::RouteEvent {
+	crate::origin::RouteEvent {
+		kind: crate::origin::RouteKind::Update,
+		announce: announce(prefix, cost),
+	}
+}
+
+/// The announces a session replays for a burst of route events: each prefix's last active
+/// event, in event order. For benches of the replay.
+pub fn replay(events: Vec<crate::origin::RouteEvent>) -> Vec<crate::announce::Announce> {
+	crate::lite::replay::initial(events)
+}
+
+/// A route over `prefix` with `cost`, as an announcement listing reports it, for tests that
+/// hand one to code that consumes announcements.
+pub fn announce(prefix: &str, cost: u64) -> crate::announce::Announce {
+	crate::announce::Announce {
+		prefix: crate::Path::new(prefix).unwrap(),
+		captures: None,
+		route: route_info([], cost, None),
+	}
+}
+
 /// The hop ids a received route traversed, oldest first: crate-private chain state, for
 /// tests that check which path a route took.
 pub fn route_hops(route: &crate::origin::RouteInfo) -> Vec<u64> {
@@ -608,11 +633,7 @@ fn route_clock() -> kio::clock::Deadlines {
 
 /// The forwarding node of the relay `relay`.
 fn route_id(relay: u64) -> crate::route::NodeId {
-	crate::route::NodeId {
-		relay,
-		start: 1,
-		marked: false,
-	}
+	crate::route::NodeId { relay, marked: false }
 }
 
 /// A link to a neighbour in `role`.
@@ -1414,8 +1435,9 @@ impl Default for Messages {
 				}]),
 			},
 			lite_start: lite::SubscribeResponse::Start(lite::SubscribeStart {
-				largest: None,
-				starts: vec![Some(1_234)],
+				id: 0,
+				start: Some(1_234),
+				largest: lite::Edge::Unknown,
 			}),
 			lite_info: lite::TrackInfo {
 				refresh: crate::track::Refresh::default(),
@@ -1826,10 +1848,10 @@ const TYPED_LITE_SEEDS: &[(u8, &[u8])] = &[
 	(30, &[7, 0, 0, 0, 0, 0, 0, 0]),
 	(27, &[0, 3, 0, 0, 0]),
 	// ROUTE, ROUTE_END, DEAD, DRAIN, ANNOUNCE_FLOOR, ANNOUNCE_REQUEST, ANNOUNCE_OK.
-	(5, &[7, 8, 1, 7, 1, 0, 0, 0, 0x80, 1]),
+	(5, &[7, 7, 1, 7, 0, 0, 0, 0x80, 1]),
 	(5, &[8, 1, 0]),
-	(5, &[9, 7, 7, 1, 0, 2, 9, 1, 0]),
-	(5, &[10, 3, 7, 1, 0]),
+	(5, &[9, 5, 7, 0, 2, 9, 0]),
+	(5, &[10, 2, 7, 0]),
 	(5, &[3, 2, 0, 1]),
 	(5, &[5, 4, 0, 1, 0, 0]),
 	(5, &[6, 0]),

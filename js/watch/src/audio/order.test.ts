@@ -1,5 +1,6 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Duration } from "@moq/clock";
+import { Manual } from "@moq/clock/test";
 import { Order } from "./order";
 
 type Read = { group: bigint; frame: { timestamp: Duration } };
@@ -7,6 +8,14 @@ const read = (group: bigint, timestamp: number): Read => ({ group, frame: { time
 const timestamps = (reads: Read[]) => reads.map(({ frame }) => frame.timestamp.asMicros());
 
 describe("Order", () => {
+	let clock: Manual;
+	let installed: { close(): void };
+	beforeEach(() => {
+		clock = new Manual();
+		installed = clock.install();
+	});
+	afterEach(() => installed.close());
+
 	it("releases a held head sorted once a newer group arrives", () => {
 		const order = new Order<Read>(() => ({ floor: 100, maxDelay: 1000 }));
 		for (const t of [40, 20, 0]) expect(order.push(read(BigInt(t / 20), t))).toEqual([]);
@@ -78,6 +87,18 @@ describe("Order", () => {
 		expect(order.push(read(5n, 60))).toEqual([]);
 		expect(order.push(read(4n, 0))).toEqual([]);
 		expect(timestamps(order.push(read(5n, 140)))).toEqual([0, 20, 60, 140]);
+	});
+
+	// A publisher repeating one timestamp never advances the span or runs past the floor, so only the
+	// time the head has waited releases it, however many frames arrived meanwhile.
+	it("releases a head once it has waited the max delay", () => {
+		const order = new Order<Read>(() => ({ floor: 100, maxDelay: 1000 }));
+		for (let i = 0; i < 100; i++) expect(order.push(read(5n, 20))).toEqual([]);
+		clock.jump(Duration.micros(999));
+		expect(order.push(read(5n, 20))).toEqual([]);
+		clock.jump(Duration.micros(1));
+		expect(order.push(read(5n, 20))).toHaveLength(102);
+		expect(timestamps(order.push(read(5n, 20)))).toEqual([20]);
 	});
 
 	it("holds nothing live", () => {

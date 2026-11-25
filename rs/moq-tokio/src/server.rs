@@ -432,6 +432,7 @@ impl Server {
 			moq = moq.with_subscriber(subscriber);
 		}
 
+		let websocket = websocket.map(|websocket| websocket.with_quic(&resolved).with_versions(&versions));
 		Ok(Server {
 			admission,
 			accept: Default::default(),
@@ -440,7 +441,7 @@ impl Server {
 			streams,
 			tls_stream,
 			quic,
-			websocket: websocket.map(|websocket| websocket.with_quic(&resolved)),
+			websocket,
 		})
 	}
 
@@ -1842,6 +1843,7 @@ mod tests {
 		match announced.next().await? {
 			moq_net::announce::Event::Present(route) => Some((route, true)),
 			moq_net::announce::Event::Absent(route) => Some((route, false)),
+			event => panic!("unexpected announce event {event:?}"),
 		}
 	}
 
@@ -2268,6 +2270,7 @@ mod tests {
 			Ok(())
 		}
 		fn reset(&mut self, _: u32) {}
+		fn reset_at(&mut self, _: &(), _: u32) {}
 		fn poll_closed(&self, _: &kio::Waiter) -> std::task::Poll<Result<(), ScriptedError>> {
 			std::task::Poll::Pending
 		}

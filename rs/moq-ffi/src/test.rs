@@ -1288,7 +1288,10 @@ async fn raw_track_update_keeps_the_join_a_range_was_subscribed_with() {
 	};
 	let consumer = track.consume(Some(subscription(1, None))).unwrap();
 	let joined = |min: u64, end: Option<u64>| Range {
-		start: Start::Live(Duration::from_secs(min)),
+		start: Start::Live {
+			min: Some(Duration::from_secs(min)),
+			max: None,
+		},
 		end,
 	};
 	assert_eq!(consumer.control.subscription().ranges, [joined(1, None)]);
@@ -2848,14 +2851,7 @@ async fn fetches_cached_group_without_subscribing() {
 
 	let consumer = broadcast.consume().unwrap();
 	let fetched = consumer
-		.fetch_group(
-			"events".into(),
-			0,
-			Some(MoqFetchGroupOptions {
-				priority: 7,
-				max_delay: None,
-			}),
-		)
+		.fetch_group("events".into(), 0, Some(MoqFetchGroupOptions { priority: 7 }))
 		.await
 		.unwrap();
 
@@ -2903,10 +2899,7 @@ async fn fetches_cached_media_group_and_decodes_container() {
 			rendition: rendition("media", crate::media::MoqContainer::Legacy),
 			// The group starts at its first frame, a second in, in the track's milliseconds.
 			start: 1000,
-			options: Some(MoqFetchGroupOptions {
-				priority: 7,
-				max_delay: None,
-			}),
+			options: Some(MoqFetchGroupOptions { priority: 7 }),
 		},
 	)
 	.await
@@ -3176,14 +3169,7 @@ async fn dynamic_track_serves_fetch_miss_and_priority() {
 
 	let fetch = tokio::spawn(async move {
 		consumer
-			.fetch_group(
-				"events".into(),
-				5,
-				Some(MoqFetchGroupOptions {
-					priority: 11,
-					max_delay: None,
-				}),
-			)
+			.fetch_group("events".into(), 5, Some(MoqFetchGroupOptions { priority: 11 }))
 			.await
 	});
 
@@ -6879,13 +6865,15 @@ async fn follow_hands_out_the_instance_again_after_an_end() {
 		.unwrap()
 		.unwrap();
 
-	// A covering claim answering under the same instance.
-	let dynamic = serve(&origin, "");
+	// The path goes unserved, then a covering claim answers under the same instance.
 	first_route.withdraw().unwrap();
-	let again = tokio::spawn(async move {
-		assert!(followed.available().await?.is_none(), "the end comes first");
-		followed.available().await
-	});
+	let end = kio::clock::timeout(TIMEOUT, followed.available())
+		.await
+		.expect("timed out waiting for the end")
+		.unwrap();
+	assert!(end.is_none(), "the end comes first");
+	let dynamic = serve(&origin, "");
+	let again = tokio::spawn(async move { followed.available().await });
 	let request = kio::clock::timeout(TIMEOUT, requested(&dynamic))
 		.await
 		.expect("the instance never asked the route above the path")
@@ -7201,8 +7189,10 @@ fn subscription_defaults_are_moq_net_defaults() {
 	let defaults = moq_net::track::Subscription::try_from(moq_subscription_defaults()).unwrap();
 	assert_eq!(defaults, moq_net::track::Subscription::default());
 	assert_eq!(moq_subscription_defaults().delay.min, None);
-	assert_eq!(defaults.ranges, [moq_net::track::Range::default()]);
-	assert_eq!(defaults.delay.max, Some(Duration::ZERO));
+	assert_eq!(
+		defaults.ranges,
+		[moq_net::track::Range::from(moq_net::track::Start::LATEST)]
+	);
 }
 
 /// A settings UI shows these, so each must be what an unset knob actually dials with.
@@ -7925,25 +7915,39 @@ async fn wait_phase(
 /// rather than retrying: nothing has ever connected, so the cause is likely setup.
 #[tokio::test]
 async fn session_state_names_a_failing_first_dial() {
-	let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+	// Nextest runs each test in its own process, so this one starts the runtime on a clock
+	// only it moves: the dial times out when the test says, not when the host is slow.
+	assert!(
+		crate::ffi::start_test_clock(),
+		"the runtime already started: run under nextest"
+	);
+	let clock = crate::ffi::test_clock().unwrap();
+	let silent = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
 	let addr = silent.local_addr().unwrap();
-	let config = || MoqClientConfig {
+	const DIAL: Duration = Duration::from_millis(100);
+	let client = MoqClient::new(MoqClientConfig {
 		tls: insecure_tls(),
 		bind: Some("127.0.0.1:0".into()),
-		timeout: Some(Duration::from_millis(100)),
+		timeout: Some(DIAL),
 		websocket: MoqWebSocketConfig {
 			enabled: Some(false),
 			..Default::default()
 		},
-		backoff: fast_backoff(),
 		..Default::default()
-	};
-	let client = MoqClient::new(config()).unwrap();
+	})
+	.unwrap();
 	let session = client.connect(format!("https://{addr}")).await.unwrap();
 	let state = session.state();
 	assert!(matches!(state.phase, MoqConnectionPhase::Connecting { .. }));
 	assert_eq!(state.connects, 0);
 	drop(client);
+	// The dial fixes its deadline before it sends, so once its first packet lands, passing
+	// the timeout fails it.
+	kio::clock::timeout(TIMEOUT, silent.recv_from(&mut [0; 2048]))
+		.await
+		.unwrap()
+		.unwrap();
+	clock.advance(DIAL).unwrap();
 	let state = kio::clock::timeout(TIMEOUT, session.state_changed(state.revision))
 		.await
 		.unwrap()
@@ -7960,20 +7964,40 @@ async fn session_state_names_a_failing_first_dial() {
 	);
 	assert_eq!(state.connects, 0);
 	assert!(matches!(session.closed().await, Err(MoqError::Connect { .. })));
+}
 
-	// The accepting side of a session reports its own lifecycle.
-	drop(silent);
+/// The accepting side of a session reports its own lifecycle, and the client reads the
+/// peer's close of a connected session as an outage it redials.
+#[tokio::test]
+async fn session_state_reports_an_accepted_session() {
 	let server = MoqServer::new(MoqServerConfig {
-		bind: Some(addr.to_string()),
+		bind: Some("127.0.0.1:0".into()),
 		tls: localhost_tls(),
 		..Default::default()
 	})
 	.unwrap();
-	server.listen().await.unwrap();
-	let client = MoqClient::new(config()).unwrap();
+	let addr = kio::clock::timeout(TIMEOUT, server.listen()).await.unwrap().unwrap();
+	let client = MoqClient::new(MoqClientConfig {
+		tls: insecure_tls(),
+		bind: Some("127.0.0.1:0".into()),
+		websocket: MoqWebSocketConfig {
+			enabled: Some(false),
+			..Default::default()
+		},
+		backoff: fast_backoff(),
+		..Default::default()
+	})
+	.unwrap();
 	let session = client.connect(format!("https://{addr}")).await.unwrap();
-	let request = server.accept().await.unwrap().unwrap();
-	let accepted = request.accept(None, None).await.unwrap();
+	let request = kio::clock::timeout(TIMEOUT, server.accept())
+		.await
+		.unwrap()
+		.unwrap()
+		.unwrap();
+	let accepted = kio::clock::timeout(TIMEOUT, request.accept(None, None))
+		.await
+		.unwrap()
+		.unwrap();
 	let connected = kio::clock::timeout(
 		TIMEOUT,
 		wait_phase(&session, |phase| matches!(phase, MoqConnectionPhase::Connected { .. })),
@@ -9911,7 +9935,7 @@ async fn range_times_select_the_containing_groups() {
 	));
 	// No start is the range a subscription's delay places.
 	let joined = MoqRange { start: None, end: None };
-	assert_eq!(joined.resolve().unwrap(), moq_net::track::Range::default());
+	assert_eq!(joined.resolve().unwrap(), moq_net::track::Range::ALL);
 
 	// Every group a read hands out before it ends, by start. Start order ends at the first
 	// group past the range, where arrival order waits for a straggler until it ages out.

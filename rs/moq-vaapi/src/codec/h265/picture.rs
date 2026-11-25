@@ -43,14 +43,15 @@ impl PictureData {
 	/// to 0.
 	///
 	/// This will also call the picture order count process (clause 8.3.1) to
-	/// correctly initialize the POC values.
+	/// correctly initialize the POC values, returning `None` when they leave the
+	/// `i32` range the specification bounds them to, as a hostile stream's can.
 	pub fn new_from_slice(
 		slice: &Slice,
 		first_picture_in_bitstream: bool,
 		first_picture_after_eos: bool,
 		prev_tid0_pic: Option<&PictureData>,
 		max_pic_order_cnt_lsb: i32,
-	) -> Self {
+	) -> Option<Self> {
 		let hdr = &slice.header;
 		let nalu_type = slice.nalu.header.type_;
 
@@ -87,11 +88,11 @@ impl PictureData {
 				if (slice_pic_order_cnt_lsb < prev_pic_order_cnt_lsb)
 					&& (prev_pic_order_cnt_lsb - slice_pic_order_cnt_lsb) >= (max_pic_order_cnt_lsb / 2)
 				{
-					pic_order_cnt_msb = prev_pic_order_cnt_msb + max_pic_order_cnt_lsb;
+					pic_order_cnt_msb = prev_pic_order_cnt_msb.checked_add(max_pic_order_cnt_lsb)?;
 				} else if (slice_pic_order_cnt_lsb > prev_pic_order_cnt_lsb)
 					&& (slice_pic_order_cnt_lsb - prev_pic_order_cnt_lsb) > (max_pic_order_cnt_lsb / 2)
 				{
-					pic_order_cnt_msb = prev_pic_order_cnt_msb - max_pic_order_cnt_lsb;
+					pic_order_cnt_msb = prev_pic_order_cnt_msb.checked_sub(max_pic_order_cnt_lsb)?;
 				} else {
 					pic_order_cnt_msb = prev_pic_order_cnt_msb;
 				}
@@ -117,7 +118,7 @@ impl PictureData {
 			false
 		};
 
-		Self {
+		Some(Self {
 			nalu_type,
 			no_rasl_output_flag,
 			no_output_of_prior_pics_flag,
@@ -126,13 +127,13 @@ impl PictureData {
 			slice_pic_order_cnt_lsb,
 			pic_order_cnt_msb,
 			// Equation (8-2)
-			pic_order_cnt_val: pic_order_cnt_msb + slice_pic_order_cnt_lsb,
+			pic_order_cnt_val: pic_order_cnt_msb.checked_add(slice_pic_order_cnt_lsb)?,
 			first_picture_after_eos,
 			reference: Default::default(),
 			pic_latency_cnt: 0,
 			needed_for_output: false,
 			short_term_ref_pic_set_size_bits: hdr.st_rps_bits,
-		}
+		})
 	}
 
 	/// Whether the current picture is a reference, either ShortTerm or LongTerm.

@@ -9,6 +9,7 @@ import { hooks } from "../internal.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
+import { withMax } from "../subscription.test-util.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import type { Subscriber as TrackSubscriber } from "../track.ts";
 import { wireOf } from "../wire.ts";
@@ -27,42 +28,52 @@ async function received(reader: TrackSubscriber, count: number): Promise<bigint[
 	return got.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
-test("a widened maxDelay re-offers what the publisher skipped below the start", async () => {
-	const pair = createMockTransportPair(ALPN_07_WIP);
-	const origin = new OriginProducer();
-	const publication = origin.route(Path.from("room"));
-	const broadcast = publication.broadcast;
-	const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
-	// One group per second, so a budget picks how far back a reader reaches.
-	for (let key = 0; key < 10; key++) {
-		const group = hooks.appendNext(producer);
-		group.writeFrame({ payload: new Uint8Array([key]), timestamp: Timestamp.fromMillis(key * 1000) });
-		group.finish();
-	}
+// What the subscriber reads after widening its own max age. Mirrors the Rust
+// `a_widened_reader_gets_what_was_skipped`.
+for (const [version, alpn] of [
+	[Version.DRAFT_06, ALPN_06],
+	[Version.DRAFT_07, ALPN_07_WIP],
+] as const) {
+	test(`a widened reader gets what was skipped on ${alpn}`, async () => {
+		const pair = createMockTransportPair(alpn);
+		const origin = new OriginProducer();
+		const publication = origin.route(Path.from("room"));
+		const broadcast = publication.broadcast;
+		const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
+		// One group per second, so a budget picks how far back a reader reaches.
+		for (let key = 0; key < 10; key++) {
+			const group = hooks.appendNext(producer);
+			group.writeFrame({ payload: new Uint8Array([key]), timestamp: Timestamp.fromMillis(key * 1000) });
+			group.finish();
+		}
 
-	const [client, server] = await Promise.all([
-		connect({ url, transport: pair.client }),
-		accept({ transport: pair.server, url, version: Version.DRAFT_07, publish: origin.consume() }),
-	]);
-	const remote = wireOf(client).consume(Path.from("room"));
-	// Group 5 ends at 6s, a full 3s behind the 9s edge.
-	const reader = remote.track("video").subscribe({ delay: { max: Duration.millis(2500) } });
-	expect(await received(reader, 4)).toEqual([6n, 7n, 8n, 9n]);
+		const [client, server] = await Promise.all([
+			connect({ url, transport: pair.client }),
+			accept({ transport: pair.server, url, version, publish: origin.consume() }),
+		]);
+		const remote = wireOf(client).consume(Path.from("room"));
+		// Group 5 ends at 6s, a full 3s behind the 9s edge.
+		const reader = remote.track("video").subscribe(withMax({ delay: { max: Duration.millis(2500) } }));
+		expect(await received(reader, 4)).toEqual([6n, 7n, 8n, 9n]);
 
-	reader.update({ delay: { max: Duration.millis(6500) } });
-	expect(await received(reader, 4)).toEqual([2n, 3n, 4n, 5n]);
-	// Ending the track flushes anything else the publisher would send: nothing, not even a repeat.
-	producer.finish();
-	producer.close();
-	expect(await reader.recvGroup()).toBeUndefined();
+		reader.update(withMax({ delay: { max: Duration.millis(6500) } }));
+		// Lite-07 carries the live join, and widening only its max keeps where it started, past the
+		// groups the narrow max expired. A lite-06 hop carries only the max, so the join reaches back
+		// to the oldest group and takes the publisher's re-offer.
+		if (version === Version.DRAFT_06) expect(await received(reader, 4)).toEqual([2n, 3n, 4n, 5n]);
+		// Ending the track flushes anything else the publisher would send: nothing, not even a repeat.
+		producer.finish();
+		producer.close();
+		expect(await reader.recvGroup()).toBeUndefined();
 
-	reader.close();
-	remote.close();
-	broadcast.close();
-	origin.close();
-	client.abort();
-	server.abort();
-});
+		reader.close();
+		remote.close();
+		broadcast.close();
+		origin.close();
+		client.abort();
+		server.abort();
+	});
+}
 
 for (const [version, alpn] of [
 	[Version.DRAFT_06, ALPN_06],
@@ -87,7 +98,7 @@ for (const [version, alpn] of [
 			accept({ transport: pair.server, url, version, publish: origin.consume() }),
 		]);
 		const remote = wireOf(client).consume(Path.from("room"));
-		const reader = remote.track("video").subscribe({ delay: { max: Duration.millis(1500) } });
+		const reader = remote.track("video").subscribe(withMax({ delay: { max: Duration.millis(1500) } }));
 		expect(await received(reader, 1)).toEqual([0n]);
 		// Groups 1 and 2 reach 2s and 3s, at least 1.5s behind the 6s edge, so they are reported
 		// stale after SUBSCRIBE_START.
@@ -104,7 +115,7 @@ for (const [version, alpn] of [
 		// A lite-07 stale drop holds only for a budget no wider than the one it was judged under, so the
 		// widened reader asks for the groups with a request of its own; earlier versions' drops are
 		// final for every reader.
-		reader.update({ delay: { max: Duration.millis(10_000) } });
+		reader.update(withMax({ delay: { max: Duration.millis(10_000) } }));
 		if (recovers) expect(await received(reader, 2)).toEqual([1n, 2n]);
 		producer.finish();
 		producer.close();
@@ -137,8 +148,10 @@ test("a widening recovers the stale groups for a bounded lite-07 reader", async 
 		accept({ transport: pair.server, url, version: Version.DRAFT_07, publish: origin.consume() }),
 	]);
 	const remote = wireOf(client).consume(Path.from("room"));
-	const ranges = [{ start: 0n, end: 4n }];
-	const reader = remote.track("video").subscribe({ delay: { max: Duration.millis(1500) }, ranges });
+	// A live join reaching back to the oldest group, through group 4: a time start would be history,
+	// which never goes stale.
+	const ranges = [{ end: 4n }];
+	const reader = remote.track("video").subscribe(withMax({ delay: { max: Duration.millis(1500) }, ranges }));
 	expect(await received(reader, 1)).toEqual([0n]);
 	// Groups 1 and 2 are reported stale after SUBSCRIBE_START.
 	for (const [key, millis] of [
@@ -152,7 +165,7 @@ test("a widening recovers the stale groups for a bounded lite-07 reader", async 
 	expect(await received(reader, 2)).toEqual([3n, 4n]);
 
 	// The widened reader asks for them with a request of its own.
-	reader.update({ delay: { max: Duration.millis(10_000) }, ranges });
+	reader.update(withMax({ delay: { max: Duration.millis(10_000) }, ranges }));
 	expect(await received(reader, 2)).toEqual([1n, 2n]);
 	producer.finish();
 

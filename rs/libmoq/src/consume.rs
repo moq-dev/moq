@@ -699,8 +699,11 @@ impl Consume {
 				driver
 					.watch(async move {
 						// The publisher must retain the history the decoder needs too.
-						let subscription =
-							playout.subscription(moq_net::track::Subscription::default().with_priority(C::PRIORITY));
+						let subscription = playout.subscription(
+							moq_net::track::Subscription::default()
+								.with_priority(C::PRIORITY)
+								.with_ranges([moq_net::track::Range::ALL]),
+						);
 						// Resolving a sibling broadcast can wait too, so the close races both steps.
 						let setup = async {
 							let broadcast = resolve(broadcast, origin, reference, instance).await?;
@@ -886,7 +889,12 @@ impl Consume {
 
 	/// The caller's preferences, joining live at the latest group without a stated minimum.
 	fn raw_delay(subscription: RawSubscription) -> (moq_net::track::Subscription, moq_mux::container::Delay) {
-		let (subscription, delay) = subscription.unwrap_or_default();
+		let (subscription, delay) = subscription.unwrap_or_else(|| {
+			(
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL]),
+				Default::default(),
+			)
+		});
 		(subscription, delay.with_min(delay.min.unwrap_or_default()))
 	}
 
@@ -1524,8 +1532,12 @@ mod read_tests {
 		let format = || moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio);
 		let consumer = moq_mux::container::Consumer::new(
 			track.subscribe(
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::ZERO)),
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(std::time::Duration::ZERO),
+						max: Some(std::time::Duration::ZERO),
+					},
+				)]),
 			),
 			format(),
 		);
@@ -1719,15 +1731,13 @@ mod tests {
 				let warmup = warmup.unwrap_or_default();
 				assert_eq!(
 					consumer.initial.ranges,
-					[moq_net::track::Range::from(moq_net::track::Start::Live(
-						Duration::from_millis(200) + warmup
-					))]
-				);
-				assert_eq!(
-					consumer.initial.delay.max,
-					// The request aggregate represents Duration::MAX as unlimited.
-					max.map(|max| max.saturating_add(warmup))
-						.filter(|max| *max != Duration::MAX),
+					[moq_net::track::Range::from(moq_net::track::Start::Live {
+						min: Some(Duration::from_millis(200) + warmup),
+						// The request aggregate represents Duration::MAX as unlimited.
+						max: max
+							.map(|max| max.saturating_add(warmup))
+							.filter(|max| *max != Duration::MAX),
+					})]
 				);
 				consumer.cancel().await;
 			}
