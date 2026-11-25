@@ -31775,16 +31775,17 @@ mod test {
 		) {
 			let producer = track_producer("test", Info::timed());
 			let mut subscriber = producer.subscribe(replay());
+			// The first group out is served whole.
+			let first = *held.keys().last().unwrap();
 			for (&key, &whole) in &held {
 				let mut group = producer.create_group(group::Info { start: key }).unwrap();
-				if !whole {
+				if !whole && key != first {
 					group.start_at(1).unwrap();
 				}
 				group.write_frame(Timestamp::from_millis(key).unwrap(), &b"x"[..]).unwrap();
 				group.finish().unwrap();
 			}
 			// Newest first, the read hands out the last group written and holds the rest.
-			let first = *held.keys().last().unwrap();
 			let Poll::Ready(Ok(Some(out))) = subscriber.poll_recv_group(&kio::Waiter::noop()) else {
 				panic!("a group is cached");
 			};

@@ -5362,7 +5362,7 @@ export class Subscriber {
 		hooks.arrived = (subscriber) => (subscriber.#resume ? 0 : subscriber.#state.arrived);
 		hooks.bufferedLargest = (subscriber) => subscriber.#bufferedLargest();
 		hooks.deliveryStart = (subscriber, opening) => subscriber.#deliveryStart(opening);
-		hooks.held = (subscriber, from, below) => subscriber.#held(from, below);
+		hooks.lowestHeld = (subscriber, from, below) => subscriber.#lowestHeld(from, below);
 		hooks.objectLargest = (subscriber) => {
 			if (subscriber.#resume) return subscriber.#resume.objectLargest();
 			const producer = subscriber.#state.producer;
@@ -5574,7 +5574,7 @@ export class Subscriber {
 	// `track::Subscriber::delivery_start`.
 	#deliveryStart({ first, source, givenUp }: Opening): bigint {
 		let lowest = first;
-		for (let held = this.#held(0n, first); held; held = this.#held(held.key + 1n, first)) {
+		for (let held = this.#lowestHeld(0n, first); held; held = this.#lowestHeld(held.key + 1n, first)) {
 			if (held.servable) {
 				lowest = held.key;
 				break;
@@ -5584,7 +5584,7 @@ export class Subscriber {
 		// This stops at the lowest servable group at the latest. Adjacent runs given up with
 		// different errors stay separate, so walk them all.
 		while (start < first) {
-			const held = this.#held(start, start + 1n);
+			const held = this.#lowestHeld(start, start + 1n);
 			const end = givenUp.at(start)?.end ?? (held?.servable === false ? start + 1n : undefined);
 			if (end === undefined) break;
 			start = min(end, first);
@@ -5595,8 +5595,8 @@ export class Subscriber {
 	// The lowest group at or above `from` and below `below` this read holds unread in its window,
 	// and whether it is whole from the frame asked, on any copy it reads. Mirrors the Rust
 	// `track::Subscriber::lowest_unread` and the publisher's `servable`.
-	#held(from: bigint, below: bigint): Held | undefined {
-		if (this.#resume) return this.#resume.held(from, below);
+	#lowestHeld(from: bigint, below: bigint): Held | undefined {
+		if (this.#resume) return this.#resume.lowestHeld(from, below);
 		const groups = this.#state.groups.peek();
 		for (let index = timelineIndex(groups, max(from, this.#cursor.peek().start)); index < groups.length; index++) {
 			const group = groups[index];

@@ -2492,7 +2492,7 @@ test("lite draft-05: an update dropping the floor on an empty track serves the n
 // Lite-06 encodes a floor of group 0 as 0, including a subscribe that omitted Group Start.
 // That is a floor, so a later group 0 is still served.
 // A held group missing its head, which no fill can bring, cannot be where the feed starts either.
-// Mirrors the Rust `TrackRun::start`.
+// Mirrors the Rust `track::Subscriber::delivery_start`.
 test("lite draft-06: START advances past a held group it cannot serve", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 5n });
 	try {

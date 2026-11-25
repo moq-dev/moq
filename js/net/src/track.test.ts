@@ -2,13 +2,15 @@ import { expect, spyOn, test } from "bun:test";
 import { Duration, Instant, Wall, yieldNow } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { race } from "@moq/signals";
+import fc from "fast-check";
 import { DEFAULT_EXPIRY, Pool } from "./cache.ts";
 import { joinTick } from "./demand.ts";
+import { Runs } from "./drops.ts";
 import { ProtocolViolation, Skipped, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
 import type { FillGroups } from "./fill.ts";
 import type { Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
-import { hooks, NO_MAX_DELAY, skipHole, staleHole } from "./internal.ts";
+import { type DropRun, hooks, NO_MAX_DELAY, sameHole, skipHole, staleHole } from "./internal.ts";
 import { GRACE } from "./ledger.ts";
 import { textFrame } from "./mock.ts";
 import { rescale, rescaleIn } from "./rescale.ts";
@@ -6922,4 +6924,51 @@ test("a bounded read asks again for a kept-out skip its track forgot", async () 
 		producer.close();
 		installed.close();
 	}
+});
+
+// Where a publisher's delivery starts, over random held groups (whole or headless) and runs given
+// up: from the lower of the source's start and the lowest held group it serves, the first group
+// neither given up nor held unservable, and never past the first group out. Mirrors the Rust
+// `delivery_starts_at_the_first_group_it_can_serve`.
+test("delivery starts at the first group it can serve", () => {
+	const key = (max: bigint) => fc.bigInt({ min: 0n, max });
+	fc.assert(
+		fc.property(
+			fc.uniqueArray(fc.record({ key: key(15n), whole: fc.boolean() }), {
+				selector: (held) => held.key,
+				minLength: 1,
+				maxLength: 9,
+			}),
+			fc.array(fc.tuple(key(15n), fc.bigInt({ min: 1n, max: 3n })), { maxLength: 4 }),
+			fc.option(key(19n), { nil: undefined }),
+			(held, given, source) => {
+				held.sort((a, b) => (a.key < b.key ? -1 : 1));
+				// The first group out is served whole.
+				held[held.length - 1].whole = true;
+				const producer = new TrackProducer("test");
+				const subscriber = hooks.wholeGroups(producer.subscribe(withMax({ delay: { max: null } })), () => 0);
+				for (const { key, whole } of held) {
+					const group = whole ? producer.createGroup(key) : hooks.receiveGroup(producer, { start: key, offset: 1 });
+					group.writeFrame(textFrame("x", Timestamp.fromMillis(Number(key))));
+					group.finish();
+				}
+				// Newest first, the read hands out the last group written and holds the rest.
+				const first = held[held.length - 1].key;
+				expect(subscriber.tryRecvGroup()?.start).toBe(first);
+				// Alternating errors keep adjacent runs separate entries.
+				const givenUp = new Runs<DropRun>(sameHole);
+				given.forEach(([start, len], index) => {
+					const code = index % 2 === 0 ? StreamCode.Old : StreamCode.Cancel;
+					givenUp.set(start, start + len, { start, end: start + len, error: new StreamError(code) });
+				});
+				const whole = new Map(held.map((group) => [group.key, group.whole]));
+				const lowest = held.find((group) => group.key < first && group.whole)?.key ?? first;
+				let want = source !== undefined && source < lowest ? source : lowest;
+				while (want < first && (givenUp.at(want) || whole.get(want) === false)) want++;
+				expect(hooks.deliveryStart(subscriber, { first, source, givenUp })).toBe(want);
+				subscriber.close();
+				producer.close();
+			},
+		),
+	);
 });

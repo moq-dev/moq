@@ -2486,10 +2486,10 @@ class Reader implements ResumeSource {
 
 	// Of the copies holding the lowest group, servable if any can serve it, so which copy holds a
 	// group never decides whether it can be served.
-	held(from: bigint, below: bigint): Held | undefined {
+	lowestHeld(from: bigint, below: bigint): Held | undefined {
 		let lowest: Held | undefined;
 		for (const copy of this.#copies) {
-			const held = hooks.held(copy.sub, from, lowest ? lowest.key + 1n : below);
+			const held = hooks.lowestHeld(copy.sub, from, lowest ? lowest.key + 1n : below);
 			if (!held) continue;
 			if (held.key === lowest?.key) lowest.servable ||= held.servable;
 			else lowest = held;
