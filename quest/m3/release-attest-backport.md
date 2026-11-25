@@ -29,7 +29,7 @@ a post-cut verification step to the cut). It changes no shipped code or API.
 `main` already has the change, so the backport is one PR against `release`
 carrying only #7224's workflow changes, adapted to `release`'s
 `release-binary.yml`; this quest's deletion goes with it or in a PR on `main`.
-After the next release of each, check its archives with the command above plus
-`--source-ref refs/tags/<tag>`.
+After the next release of each, check its archives with the command above, adding
+the archive path (for example, `./<archive>`) and `--source-ref refs/tags/<tag>`.
 
 Public API: none. Wire: none.
