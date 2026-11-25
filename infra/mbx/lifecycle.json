@@ -1,11 +1,8 @@
-{
-	"rules": [
-		{
-			"id": "expire",
-			"enabled": true,
-			"conditions": { "prefix": "" },
-			"deleteObjectsTransition": { "condition": { "type": "Age", "maxAge": 604800 } },
-			"abortMultipartUploadsTransition": { "condition": { "type": "Age", "maxAge": 86400 } }
-		}
-	]
-}
+[
+	{
+		"fileNamePrefix": "",
+		"daysFromUploadingToHiding": 30,
+		"daysFromHidingToDeleting": 1,
+		"daysFromStartingToCancelingUnfinishedLargeFiles": 1
+	}
+]

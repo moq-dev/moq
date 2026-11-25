@@ -3,12 +3,12 @@
 Cloudflare Workers and supporting scripts that back project-owned
 infrastructure.
 
-| Worker      | Domain          | R2 bucket       | What it serves                          |
+| Worker      | Domain          | Bucket          | What it serves                          |
 | ----------- | --------------- | --------------- | --------------------------------------- |
 | `infra/apt` | `apt.moq.dev`   | `apt-moq-dev`   | Debian/Ubuntu package repository        |
 | `infra/rpm` | `rpm.moq.dev`   | `rpm-moq-dev`   | Fedora/RHEL package repository          |
 | `infra/moq-sh` | `moq.sh`     |                 | The `moq` installer script              |
-| `infra/mbx` |                 | `mbx-moq-dev`   | Private Rust build cache for CI         |
+| `infra/mbx` |                 | `mbx-moq-dev` (B2) | Private Rust build cache for CI      |
 | `infra/nix` | `nix.moq.dev`   | `nix-moq-dev`, `nix-ci-moq-dev` | Nix binary cache        |
 | `infra/corpus` | `corpus.moq.dev` | `corpus-moq-dev`, `corpus-private-moq-dev` | Video-quality corpus |
 | `infra/go`  | `go.moq.dev`    | `go-moq-dev`    | Go module proxy for `moq.dev/moq-ffi`   |
@@ -19,8 +19,8 @@ bucket with appropriate `Content-Type` and `Cache-Control` headers for the
 file kind, and the nix worker does the same across its two buckets. The
 moq.sh worker serves `install.sh` from its bundle at every path, with the
 newest `moq-cli` release filled in as the default version.
-`infra/mbx` has no Worker: CI reaches its bucket directly through mbx's S3
-client. `infra/corpus` has none either: R2 serves the open bucket on its custom
+`infra/mbx` has no Worker: CI reaches its Backblaze B2 bucket directly
+through mbx's S3 client. `infra/corpus` has none either: R2 serves the open bucket on its custom
 domain, and CI reads the private one over S3.
 
 ## Deploying a worker
@@ -166,10 +166,10 @@ See [`CONTRIBUTING.md`](../CONTRIBUTING.md#landing-gate) for requesting a landin
 
 ## Bootstrapping the Rust build cache
 
-`.github/actions/rust-cache` points mbx at the private `mbx-moq-dev` bucket,
-namespaced per runner OS and architecture. Hosted jobs on `main` write what
-they compile. The merge queue's self-hosted build uses its persistent local store and has no R2
-credentials.
+`.github/actions/rust-cache` points mbx at the private `mbx-moq-dev` bucket
+in Backblaze B2 (`us-east-005`), namespaced per runner OS and architecture.
+Hosted jobs on `main` write what they compile. The merge queue's self-hosted
+build uses its persistent local store and has no B2 credentials.
 Pull request jobs only read (main PRs run Check only while ready), and
 fork pull requests, which get no secrets, build cold.
 
@@ -179,28 +179,30 @@ when it runs on one of them. mbx on its own trusts only a push to a protected
 branch, which leaves out Nightly's schedule, so the action sets
 `MBX_REMOTE_TRUST_WRITES` for writers and the Environment is the only boundary.
 
-All of this runs once, by a maintainer. Steps 1, 2, and 4 are done, and step 3
-is done for `main`.
+All of this runs once and is done.
 
-1. **Create the bucket and its lifecycle rule** under your `wrangler login`:
+1. **Create the bucket and its lifecycle rule** in the B2 web console
+   (Buckets -> Create a Bucket): `mbx-moq-dev`, private, no encryption or
+   object lock. Then set its lifecycle from `lifecycle.json`, either as a
+   custom rule in the console (Lifecycle Settings) or with an account key:
 
    ```bash
-   just infra mbx create
+   nix run nixpkgs#backblaze-b2 -- account authorize
+   just infra mbx lifecycle
    ```
 
-   `lifecycle.json` deletes every object 7 days after upload and aborts
-   multipart uploads left incomplete for a day. mbx writes each compilation
-   once and never refreshes it, so a result still in use expires too; the
-   next writer that misses it compiles and uploads it again. After editing
-   the rules, `just infra mbx lifecycle` applies them.
+   `lifecycle.json` hides every object 30 days after upload, deletes hidden
+   versions a day later, and cancels large-file uploads left unfinished for a
+   day. mbx writes each compilation once and never refreshes it, so a result
+   still in use expires too; the next writer that misses it compiles and
+   uploads it again.
 
-2. **Create two R2 API tokens** in the dashboard (R2 -> Manage API tokens ->
-   Create Account API token), both scoped to `mbx-moq-dev` only. Wrangler
-   cannot create R2 tokens. Each shows an Access Key ID and a Secret Access
-   Key once.
+2. **Create two application keys** in the console (Application Keys -> Add a
+   New Application Key), both restricted to `mbx-moq-dev`. Each shows its
+   keyID and applicationKey once:
 
-   - `mbx-read`: **Object Read only**.
-   - `mbx-write`: **Object Read & Write**.
+   - `mbx-read`: **Read Only**.
+   - `mbx-write`: **Read and Write**.
 
 3. **Create the `cache-write` Environment**, deployable from `main` and the
    protected release tags configured below.
@@ -220,16 +222,19 @@ is done for `main`.
 
 4. **Store the keys under the same two names at both levels.** An Environment
    secret shadows a repository secret of the same name, so writers get the
-   write key and every other job the read key, all through one pair of names:
+   write key and every other job the read key, all through one pair of names.
+   Each key goes straight from the console into its secret, with no other
+   copy: to rotate one, create a new key, replace the secret, then delete the
+   old key.
 
    ```bash
    # mbx-write, readable only by jobs in the cache-write Environment
-   gh secret set MBX_R2_ACCESS_KEY_ID --env cache-write --repo moq-dev/moq
-   gh secret set MBX_R2_SECRET_ACCESS_KEY --env cache-write --repo moq-dev/moq
+   gh secret set MBX_B2_ACCESS_KEY_ID --env cache-write --repo moq-dev/moq
+   gh secret set MBX_B2_SECRET_ACCESS_KEY --env cache-write --repo moq-dev/moq
 
    # mbx-read, for every other job
-   gh secret set MBX_R2_ACCESS_KEY_ID --repo moq-dev/moq
-   gh secret set MBX_R2_SECRET_ACCESS_KEY --repo moq-dev/moq
+   gh secret set MBX_B2_ACCESS_KEY_ID --repo moq-dev/moq
+   gh secret set MBX_B2_SECRET_ACCESS_KEY --repo moq-dev/moq
    ```
 
 Without the repository secrets, readers warn and build cold. A writer without
