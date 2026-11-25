@@ -18,7 +18,7 @@ Baseline: 2026-11-23 at `890ea4e531` (before the 0.22.0 cut). Both `cargo deny c
 - The QUIC fork has no advisory feed: list `quinn-proto` and `quinn-udp` advisories on RustSec and GHSA, port any fix, and note it in `rs/moq-quic/README.md` (decided 2026-10-28). Only a [vendor sync](/quest/m3/vendor-sync/quinn.md) advances the recorded upstream commit.
 - Waiting on upstream: [askama](/quest/m5/askama-maintained.md); root Bun overrides (`chokidar@3`, `glob`, `minimatch`, `postcss-selector-parser@6`, `undici@7`, `vite@5`); `deny.toml` unmaintained ignores (`paste` via `tikv-jemalloc-ctl`, `proc-macro-error2` via `core-models`, `ttf-parser` via `winit`, `basic-toml` via `askama`, `zvariant*` via `ashpd`, `chrono`/`humantime` via `object_store` and `qlog`).
 - Most duplicate versions in `Cargo.lock` come from upstream ecosystem transitions; check the consumer before calling one removable. Fix a transitive Bun advisory with a targeted `bun update <pkg> --lockfile-only --ignore-scripts`, not a regenerated lockfile.
-- Kept on purpose: `tracing-android`, `humantime-serde`, `hex`, `send_wrapper`, `byteorder`, `assert_matches`, `cpu-time`, `stats_alloc`, `unsafe-libopus`, the QUIC/UDP, RTMP, V4L2, NVIDIA, VA-API, UniFFI, and LibAV forks ([vendor-sync](/quest/m3/vendor-sync/README.md) ports upstream), and JS's Zod, pako, and UUIDv7. `moq-gst` keeps its Rust 1.92 floor for GStreamer.
+- Kept on purpose: `tracing-android`, `humantime-serde`, `hex`, `send_wrapper`, `byteorder`, `assert_matches`, `cpu-time`, `stats_alloc`, the QUIC/UDP, RTMP, V4L2, NVIDIA, VA-API, libopus, UniFFI, and LibAV forks ([vendor-sync](/quest/m3/vendor-sync/README.md) ports upstream), and JS's Zod, pako, and UUIDv7. `moq-gst` keeps its Rust 1.92 floor for GStreamer.
 
 ## Audit
 
