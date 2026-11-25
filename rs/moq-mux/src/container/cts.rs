@@ -33,8 +33,8 @@ impl Container for Wire {
 	}
 
 	fn write(&self, _group: &mut moq_net::group::Producer, _frames: &[Frame]) -> Result<(), Self::Error> {
-		// Refuse to emit CTS = 0 with PTS as the transport timestamp: on reordered video,
-		// lite-07 monotonic clamping would corrupt B-frame presentation times.
+		// CTS needs each frame's DTS as the transport timestamp, which `container::Frame`
+		// does not carry yet; writing CTS = 0 with the PTS would mislabel reordered video.
 		Err(moq_net::Error::Unsupported.into())
 	}
 
