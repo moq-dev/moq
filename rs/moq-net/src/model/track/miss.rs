@@ -150,6 +150,21 @@ impl Stale {
 			Some(cap) => drift.settles(start, &Hole::stale(self.budget).capped(cap)),
 		}
 	}
+
+	/// The part of `run` this verdict no longer settles `drift` for. A later start needs
+	/// fewer groups above it read, so a run settles from some start on: only the part below
+	/// it is open again, the way the track's drop is clipped to what settles.
+	fn unsettled(&self, run: &ops::Range<u64>, drift: &Drift) -> ops::Range<u64> {
+		let (mut low, mut high) = (run.start, run.end);
+		while low < high {
+			let mid = low + (high - low) / 2;
+			match self.settles(mid, drift) {
+				true => high = mid,
+				false => low = mid + 1,
+			}
+		}
+		run.start..low
+	}
 }
 
 /// A run of misses the reader gives up, for the drop cursor to name, with the budget it was
@@ -1678,8 +1693,9 @@ impl Misses {
 					given.remove(part);
 				}
 			}
-			if !judged.settles(run.start, drift) {
-				given.remove(run.clone());
+			let open = judged.unsettled(run, drift);
+			if !open.is_empty() {
+				given.remove(open);
 			}
 		}
 		for run in given.iter() {
@@ -1796,8 +1812,8 @@ impl Misses {
 			.is_some_and(|under| *under != drift.coverage)
 		{
 			let unsettled: Vec<ops::Range<u64>> = (self.stale.iter())
-				.filter(|(run, verdict)| !verdict.settles(run.start, drift))
-				.map(|(run, _)| run.clone())
+				.map(|(run, verdict)| verdict.unsettled(run, drift))
+				.filter(|run| !run.is_empty())
 				.collect();
 			for run in unsettled {
 				self.stale.remove(run.clone());
@@ -2363,6 +2379,59 @@ mod tests {
 		assert_eq!(misses.unanswered(&state, 1..3, &drift(4)), run);
 		assert_eq!(misses.retake(&drift(4)), run);
 		assert!(misses.stale.is_empty() && misses.adopted_under.is_none());
+	}
+
+	/// A run settles a reader from some start on, so a coverage that stops reading only the
+	/// groups just above its start asks again that start's prefix, and keeps the rest.
+	#[kio::test]
+	async fn an_adopted_stale_verdict_is_asked_again_only_where_it_stops_settling() {
+		let broadcast = crate::broadcast::Info::default().produce();
+		let track = broadcast
+			.create_track("clipped", crate::track::Info::default())
+			.unwrap();
+		let budget = Duration::from_secs(5);
+		let _reader = track.subscribe(Subscription::default().with_max(budget));
+		for key in [4, 0] {
+			track
+				.create_group(crate::group::Info { start: key })
+				.unwrap()
+				.finish()
+				.unwrap();
+		}
+		track.give_up(1..4, Hole::stale(budget).capped(Some(5)));
+		let state = track.state.read();
+		let drift = |groups: ops::RangeInclusive<u64>| Drift {
+			budget: Budget::uniform(budget),
+			bound: None,
+			edge: state.drift_edge(&Servable::ALL),
+			coverage: Some((Cover::new(std::iter::once(groups)), Some(5))),
+		};
+		let mut misses = Misses::default();
+		let mut given_up = Vec::new();
+		let waiter = kio::Waiter::noop();
+		misses.judge(
+			&state,
+			(0, 0, Some(5)),
+			None,
+			None,
+			None,
+			|span| [span].into_iter().collect(),
+			&Delivered::default(),
+			&drift(0..=4),
+			&mut given_up,
+			&waiter,
+		);
+		assert!(misses.given_up.contains(&1) && misses.given_up.contains(&3), "adopted");
+
+		// Reading only 3..=4, it no longer reads what lies above 1, but still all that lies
+		// above 2: only group 1 is open again.
+		let open: RangeSet<u64> = std::iter::once(1..2).collect();
+		assert_eq!(misses.unanswered(&state, 1..4, &drift(3..=4)), open);
+		assert_eq!(misses.retake(&drift(3..=4)), open);
+		let kept: RangeSet<u64> = misses.stale.iter().map(|(run, _)| run.clone()).collect();
+		assert_eq!(kept, std::iter::once(2..4).collect(), "the rest stays adopted");
+		assert!(misses.adopted_under.is_some());
+		assert!(misses.retake(&drift(3..=4)).is_empty());
 	}
 
 	#[kio::test]
