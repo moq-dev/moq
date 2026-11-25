@@ -6,7 +6,7 @@ Fix every non-wire subscription stall, deadlock, missed wakeup, and cache-invari
 
 ## Plan
 
-Created 2026-11-24 (maintainer, /quest-plan of the exhaustive `moq-net` subscribe/fetch audit). Placed in `m1` because these fixes change neither the wire nor public APIs and can land independently of the `m2` [lite-07 subscribe redesign](/quest/m2/lite07-subscribe/README.md). Do not duplicate work already owned by open PRs `#9437`, `#9438`, `#9529`, `#9530`, `#9537`, and `#9546`.
+Created 2026-11-24 (maintainer, /quest-plan of the exhaustive `moq-net` subscribe/fetch audit). Placed in `m1` because these fixes change neither the wire nor public APIs and can land independently of the `m2` [lite-07 subscribe redesign](/quest/m2/lite07-subscribe/README.md). Do not duplicate work already owned by open PRs `#9438`, `#9529`, `#9530`, `#9537`, and `#9546` (`#9437` was closed and moved to [m3](/quest/m3/widened-front-reader-asks-stale-again.md)).
 
 Bugs to fix (each with a deterministic regression test using mocked time):
 
@@ -20,7 +20,7 @@ Bugs to fix (each with a deterministic regression test using mocked time):
   - **S7** (`rs/moq-net/src/model/track.rs:11741-11871`): `Cursor::poll_next_with` misses `expire_heads` and expiry wake registration on `lacks_head`, allowing a stalled head fill to block an ordered reader past its budget.
   - **S14** (`rs/moq-net/src/lite/subscriber.rs:256, 1468-1513`, `rs/moq-net/src/tail.rs:188-192`): `Open::Duplicate` never calls `Reading::park()`, leaving `tail.active >= 1` and pinning `Settle`/`Recovery` if the primary stream stalls.
   - **S15**: Fix `Cursor::poll_time_start` local-track `Duration::MAX` stall (`model/track.rs:10931-10983`), `Recover::poll` stalls on `Cause::Stalled` / `Cause::Closed` with lingering staged copy / `poll_fetch` `Duration::MAX` (`model/resume.rs:3756-4017`), `Front` stranding on transient `Unroutable` (`model/front.rs:881-925`), and `FinishedServe::probe` skipping `time == u64::MAX` without refusing (`lite/subscriber.rs:13025`).
-  - **D6** (`rs/moq-net/src/model/track.rs:12596-12647`): `Subscriber::ordered` over `Inner::Resume` must set `key_order = true` on copy cursors (coordinate `take_withdrawn` with `#9437`).
+  - **D6** (`rs/moq-net/src/model/track.rs:12596-12647`): `Subscriber::ordered` over `Inner::Resume` must set `key_order = true` on copy cursors (widened stale take-back over fronts lives in [quest/m3/widened-front-reader-asks-stale-again.md](/quest/m3/widened-front-reader-asks-stale-again.md)).
   - **D7** (`rs/moq-net/src/model/resume.rs:2970-2988, 3479-3596`): `Reader::backfill_gaps` must re-arm when a draining replaced copy loses groups to eviction or expiry.
   - **D8** (`rs/moq-net/src/lite/subscriber/fills.rs:529-554`, `rs/moq-net/src/lite/subscriber.rs:12255-12258`): `RangeFills` draining loop ignores `read`, keeping upstream `SUBSCRIBE` open and blocking `IDLE_LINGER` after all downstream readers leave.
   - **D9**: Stop reverting `TrackState::start` to `FeedStart::Pending` for 1 RTT on every new demand range (`lite/subscriber.rs:11383-11397`); prevent `fit_after` from overflowing `MAX_MESSAGE_SIZE` on initial `SUBSCRIBE` or starving live joins behind time-start probes (`lite/subscriber/fit.rs:46, 66`); fix lost-wakeup race in pre-lite-05 `FeedFetches::poll` (`lite/subscriber.rs:14016-14026`); merge overlapping `Oldest..=a` and `Oldest..=b` in `model/track/demand/ranges.rs`.

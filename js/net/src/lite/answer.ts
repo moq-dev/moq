@@ -28,7 +28,7 @@ export interface Publish {
 	/** The origin's claims, or undefined once it closed. */
 	advertised: Getter<Advertisements | undefined>;
 	/** The origin's scope, when the session publishes one. */
-	origin?: Pick<OriginConsumer, "covers" | "allowed">;
+	origin?: Pick<OriginConsumer, "covers" | "allowed" | "root">;
 	/** Our grant: only what it lets us publish is announced. */
 	grant?: Getter<Grant | undefined>;
 	/** Resolves once the tokens this session presented at setup are answered, so nothing is
@@ -262,7 +262,11 @@ export class Answer {
 			const carries = (covered: Path.Valid) => prefix.hidden || !hiddenBelow(prefix.path, covered);
 			for (const read of reads(prefix.path, granted)) {
 				// A claim covering what is read from above keeps how many segments broader than it it is.
-				for (const [suffix, snap] of presented(read, table, carries, true, shows)) {
+				for (const [suffix, snap] of presented(read, table, carries, {
+					root: origin?.root,
+					keepAbove: true,
+					shows,
+				})) {
 					latest.set(Path.join(read, suffix), snap);
 				}
 			}

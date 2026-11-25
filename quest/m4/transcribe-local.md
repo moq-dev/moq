@@ -18,11 +18,14 @@ Decided 2026-11-23 (maintainer, `/quest-run`): ✅ whisper.cpp through
 through ONNX Runtime, which has no Vulkan). Why: the only engine covering all
 four backends.
 
-Whisper decodes windows of audio rather than streaming, so the backend feeds
-it each segment the crate's pause detection commits and returns the result as
-that segment's final, with an interim from a decode of the segment so far
-where the hardware keeps up.
+Whisper decodes windows of audio rather than streaming and has no
+endpointing, so the backend detects speech and pauses itself (Deepgram
+endpoints server-side, so the crate has none to share): speech onset opens
+an utterance, each pause commits a segment that whisper decodes into its
+final, with an interim from a decode of the segment so far where the
+hardware keeps up, and the silence that ends the utterance finishes its
+group. It also identifies each segment's language, which whisper returns.
 
 ## Required
 
-- [moq-transcribe with an OpenAI backend](/quest/m3/transcribe/crate.md) - the crate and backend interface this adds to
+- [moq-transcribe with a Deepgram backend](/quest/m3/transcribe/crate.md) - the crate and backend interface this adds to

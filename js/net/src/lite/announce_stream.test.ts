@@ -123,3 +123,43 @@ test("finishing a stream that sent a claim waits for its acknowledgement", async
 		server.close();
 	}
 });
+
+// Each uni stream `quic` opens from now on fails its close as a peer's STOP_SENDING with `code` does.
+function stopOnClose(quic: WebTransport, code: number) {
+	const create = quic.createUnidirectionalStream.bind(quic);
+	quic.createUnidirectionalStream = (async (options?: WebTransportSendStreamOptions) => {
+		const inner = (await create(options)).getWriter();
+		return new WritableStream<Uint8Array>({
+			write: (chunk) => inner.write(chunk),
+			close: () =>
+				Promise.reject(Object.assign(new Error("stopped"), { source: "stream", streamErrorCode: code })),
+		});
+	}) as WebTransport["createUnidirectionalStream"];
+}
+
+// A peer stopping a claim's stream without a code of its own is leaving as this side does, which
+// owes it nothing more; a stop with a code still fails the finish.
+for (const [code, leaves] of [
+	[0, true],
+	[7, false],
+] as const) {
+	test(`finishing a claim's stream the peer stops with code ${code} ${leaves ? "resolves" : "rejects"}`, async () => {
+		const { client, server } = createMockTransportPair();
+		try {
+			stopOnClose(client, code);
+			const stream = AnnounceStream.of(client, version);
+			await stream.send({
+				status: "start",
+				suffix: Path.from("a"),
+				instance: Instance.parse("a"),
+				claim: ownClaim(0n),
+			});
+			const finished = stream.finish();
+			if (leaves) await finished;
+			else await expect(finished).rejects.toThrow();
+		} finally {
+			client.close();
+			server.close();
+		}
+	});
+}

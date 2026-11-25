@@ -28,6 +28,11 @@ Wire, API, and state-machine changes (fixes audit findings S3, S8, S9, S10, S11,
   - Add a TLA+ or exhaustive property model verifying N-to-1 heterogeneous deduplication across overlapping live/history ranges with distinct `(Priority, Order, MaxAge)` and judged `OLD` drops (extending `rs/moq-net/verify/subscribe/`).
   - Update Rust (`rs/moq-net`, `rs/moq-ffi`, `rs/libmoq`, all bindings), JS (`js/net`, `js/hang`), and `drafts/draft-lcurley-moq-lite.md` in the same PR.
   - Run `just test interop --all`.
+- **History given up before the first start (from closed [moq-dev/moq#9491](https://github.com/moq-dev/moq/pull/9491)):** the per-range state must not forget stale runs a relay gives up while a range still waits for its start. Branch [`quest-iterate/9491-narrow`](https://github.com/moq-dev/moq/tree/quest-iterate/9491-narrow) (81713d43) forgot them and fails `widened_max_age::a_tightened_start_leaves_history_fillable_by_an_intermediate_reader` with relay=true:
+  - A reader narrows its live join's max while the relay's join still waits for its start, and the relay gives up groups 2..5 as stale in that window.
+  - The join is then answered at group 2 and owes 2..5, which nothing ever names. A wider reader joining later adds a range to that subscription, never told the groups were dropped as too old, and never receives 4 and 5 (still missing after 1000 simulated seconds against a 1s grace), so the history is lost for good.
+  - Recommendation from that work (untested): keep the stale runs given up before a range's first `SUBSCRIBE_START`, and forget them only after it, which keeps memory bounded as `main` does. Rejected there: holding stale runs while any range waits.
+  - Keep that test passing with relay=true.
 
 Public API: breaking change (moves `priority` and `order` from `Subscription` onto `track::Range` across Rust, JS, and all FFI bindings; PR title uses `!` and `## Impact` includes the migration note). Wire: breaking lite-07 change (per-range `Priority`/`Group Order`, `Max Age` field on `SUBSCRIBE_DROP(OLD)`).
 

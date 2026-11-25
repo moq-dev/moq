@@ -239,6 +239,14 @@ Decided 2026-11-21 (maintainer, /quest-plan of the exhaustive pre-cut
 full-codebase audit): ✅ this quest fixes the changelog typo at
 `drafts/draft-lcurley-moq-lite.md:2380` during the cut.
 
+Decided 2026-11-24 (maintainer, on
+[moq-dev/moq#9371](https://github.com/moq-dev/moq/pull/9371#issuecomment-7146881312)):
+✅ land that PR's origin ranking now and have the cut wait for the router to
+rank one claim prefix's filings as one tier, since the draft now says copies
+of one claim rank together wherever each is filed (rejected: keep the
+origin's deepest-filing rule until the router lands; fix the router in that
+PR).
+
 Decided 2026-11-24 (maintainer, /quest-plan of the exhaustive `moq-net`
 subscribe/fetch audit): ✅ the cut waits on
 [Redesign lite-07 subscribe and fetch](/quest/m2/lite07-subscribe/README.md)
@@ -263,7 +271,7 @@ Required; the implementation stays in m3 and lands on lite-07's wire.
 ## Required
 
 - [Metadata mode on the lite-07 wire](/quest/m2/lite07-metadata.md) - `Meta` on SUBSCRIBE, the payload-less FRAME, and the refusal a peer without metadata mode answers with
-- [Origin route rank](/quest/m1/lite07-routing/origin-route-rank.md) - bridged routes keep drain and priority, and the draft's rank text matches the code
+- [The router ranks one claim prefix's filings as one tier](/quest/m2/router-claim-tier.md) - the lite-07 router follows the draft's one-tier ranking instead of stopping at the deepest filing
 - [Redesign lite-07 subscribe and fetch](/quest/m2/lite07-subscribe/README.md) - data-layer Previous Delta, RESET_STREAM_AT, FETCH and SUBSCRIBE_SKIP removal, per-range Priority and Order, and judged OLD drops freeze into lite-07
 
 ## Related

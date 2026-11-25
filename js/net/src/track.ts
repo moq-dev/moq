@@ -26,6 +26,7 @@ import type { IetfVersion } from "./ietf/version.ts";
 import {
 	type Ask,
 	cutRun,
+	type Dispositions,
 	type DropRun,
 	dropAt,
 	type FillStarts,
@@ -4025,8 +4026,11 @@ export class Subscriber {
 			tell: (start, end, report) => {
 				if (start < end) reported.set(start, end, { ...report, start, end });
 			},
+			// A front's copies forget it too, so ranges that later ask for it report it again.
 			untell: (start, end) => {
-				if (start < end) reported.set(start, end);
+				if (start >= end) return;
+				reported.set(start, end);
+				this.#resume?.untell(start, end);
 			},
 		};
 	}
@@ -5181,6 +5185,12 @@ export class Subscriber {
 			else subscriber.#forgetPastBudget(delivered, budget);
 		};
 		hooks.fold = (subscriber, at) => subscriber.#fold(at);
+		hooks.untell = (subscriber, start, end) => {
+			if (start >= end) return;
+			subscriber.#reported.set(start, end);
+			// A copy that is itself a front has copies of its own that reported it.
+			subscriber.#resume?.untell(start, end);
+		};
 		hooks.wire = (subscriber) => subscriber.#wireRecord();
 		hooks.deliveredRuns = (subscriber) => subscriber.#delivered.runs;
 		hooks.reportedRuns = (subscriber) => subscriber.#reported.size;
@@ -5702,8 +5712,10 @@ export class Subscriber {
 
 	// Package-internal synchronous half of recvGroup. The lite publisher uses this so applying
 	// control state, popping the group, and positioning its frames are one JavaScript turn.
-	#tryRecvGroup(dispositions = false): Recv {
-		if (this.#resume) return this.#tryResumed(false, dispositions);
+	#tryRecvGroup(dispositions: Dispositions = false): Recv {
+		// A front never reports a failed group as a drop, whatever the mode: it reads its own copies
+		// for budget skips only, and continues a failed group through its recovery.
+		if (this.#resume) return this.#tryResumed(false, dispositions !== false);
 		const refused = this.#settle();
 		if (refused) return { kind: "error", error: refused };
 		this.#fillWait = false;
@@ -5733,7 +5745,7 @@ export class Subscriber {
 			}
 			groups.splice(index, 1);
 			const failed = hooks.groupFailed(group);
-			if (dispositions && failed) {
+			if (dispositions === true && failed) {
 				// A group expired under this subscription's budget is a stale verdict.
 				const hole =
 					toStreamCode(failed) === StreamCode.Old

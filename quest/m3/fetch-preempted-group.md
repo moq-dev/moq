@@ -62,4 +62,4 @@ Public API: none. Wire: none.
 ## Related
 
 - [Takeover](/quest/m3/group-takeover.md) - measures this against a continuation before lite-08 brings one back
-- [Browser reset reports](/quest/m4/browser-reset-reports.md) - why a browser reader learns of the reset from the drop, not the stream
+- [Chromium reset fix](/quest/m4/browser-fixes/chromium-reset-before-accept.md) - why a browser reader learns of the reset from the drop, not the stream

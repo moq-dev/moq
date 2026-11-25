@@ -1049,3 +1049,18 @@ for (const kind of ["uni", "bidi"] as const) {
 		}
 	});
 }
+
+test("Writer hold refuses a stream already reset", async () => {
+	const resets: (number | undefined)[] = [];
+	const stream = Object.assign(new WritableStream<Uint8Array>({ abort: () => void resets.push(undefined) }), {
+		resetAt: (offset: number) => void resets.push(offset),
+	});
+	const writer = new Writer(stream, Lite.DRAFT_07);
+	await writer.u53(0);
+	// A preemption between the header's write and the hold resets the stream plainly.
+	writer.preempt();
+	expect(writer.hold()).toBe(false);
+	writer.reset(new Error("later"));
+	await yieldNow();
+	expect(resets).toEqual([undefined]);
+});

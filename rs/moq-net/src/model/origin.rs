@@ -591,12 +591,12 @@ pub struct RouteInfo {
 	pub(crate) lane: Lane,
 
 	/// The session it arrived on is going away (the peer sent a GOAWAY): it ranks below
-	/// every other eligible route, whatever its priority or cost, yet still serves when
-	/// nothing else does.
+	/// every other available route, whatever its priority or cost, yet above one held
+	/// unavailable, and still serves when nothing else does.
 	///
-	/// A ranking state, never a saturated metric. Local, like [`Self::via`]: never
-	/// forwarded, so a relay advertises a draining route at its real cost and its
-	/// readers never see the flag.
+	/// A ranking state, never a saturated metric. Never in an announcement, so a relay
+	/// advertises a draining route at its real cost and its readers never see the flag; only
+	/// the lite-07 route layer hears it, which drains the claim it makes for the route.
 	pub(crate) draining: bool,
 
 	/// Whether a usable path reaches the route's origin; see [`Self::available`].
@@ -697,8 +697,9 @@ impl RouteInfo {
 
 	/// Whether a usable path reaches the route's origin. An unavailable route is held:
 	/// the network lost every path to it but may recover one, so the announcement stays.
-	/// It ranks with a draining route, below every available one, and requests through
-	/// it may fail until it recovers: request again once it turns available.
+	/// It ranks below every available claim of its prefix, a draining one included, though a
+	/// more specific claim still shadows a broader one, and requests through it may fail until
+	/// it recovers: request again once it turns available.
 	pub fn available(&self) -> bool {
 		self.available
 	}
@@ -917,20 +918,18 @@ fn instance_key(path: &str, instance: &Instance) -> u64 {
 
 /// The highest epoch each instance reaches among a set of candidates, per claim: an older
 /// incarnation of an instance is never eligible, however cheap, since its publisher was
-/// replaced. A claim is its prefix and how far above it was shown ([`Lane::above`]), so a
+/// replaced. A claim is its own prefix ([`RouteEntry::claimed`]), wherever it is filed, so a
 /// broader claim shown at a prefix is another claim than the one made there, and its epoch
 /// supersedes nothing of it. Built in one pass, so ranking N candidates stays linear. Only
 /// epochs above 0 are kept, since nothing is below 0: the common case, where every instance
 /// announces epoch 0, allocates nothing.
-struct Epochs<'a>(HashMap<(&'a Path, &'a Instance, u8), u64>);
+struct Epochs<'a>(HashMap<(&'a str, &'a Instance), u64>);
 
 impl<'a> Epochs<'a> {
 	fn of(candidates: impl Iterator<Item = &'a RouteEntry>) -> Self {
 		let mut highest = HashMap::new();
 		for entry in candidates.filter(|entry| entry.epoch > 0) {
-			let epoch = highest
-				.entry((&entry.prefix, &entry.instance, entry.lane.above))
-				.or_insert(0);
+			let epoch = highest.entry((entry.claimed(), &entry.instance)).or_insert(0);
 			*epoch = (*epoch).max(entry.epoch);
 		}
 		Self(highest)
@@ -938,16 +937,22 @@ impl<'a> Epochs<'a> {
 
 	/// Whether a candidate carries `entry`'s instance at a higher epoch on the same claim.
 	fn superseded(&self, entry: &RouteEntry) -> bool {
-		self.0
-			.get(&(&entry.prefix, &entry.instance, entry.lane.above))
-			.is_some_and(|&highest| highest > entry.epoch)
+		// Checked first, so the common case never walks the entry's prefix for its claim.
+		!self.0.is_empty()
+			&& self
+				.0
+				.get(&(entry.claimed(), &entry.instance))
+				.is_some_and(|&highest| highest > entry.epoch)
 	}
 }
 
-/// Ordering key for an eligible route entry resolving `path` (see [`Epochs`]): its
-/// [`route_rank`], then how a tie between equally ranked routes breaks, then the newest
-/// announcement. Lower wins. `path` is what is being resolved: the requested path for a
-/// request, the prefix itself for an advertisement.
+/// Ordering key for an eligible route entry resolving `path` (see [`Epochs`]), among the
+/// candidates of one claim tier: its [`route_rank`], then how a tie between equally ranked
+/// routes breaks, then the newest announcement. Lower wins. A caller ranks claims by
+/// specificity first (see [`RouteEntry::specificity`]), since the most specific claim wins
+/// outright, however far its route's cost or state ranks below a broader one. `path` is what
+/// is being resolved: the requested path for a request, the prefix itself for an
+/// advertisement.
 ///
 /// A tie between two lite-07 claims goes by a rendezvous hash of the instance and `path`,
 /// then the node claiming it, as every node that knows the claim ranks it. Any other tie
@@ -981,17 +986,16 @@ fn route_order(path: &Path, entry: &RouteEntry) -> RouteOrder {
 /// The key [`route_order`] ranks an entry by: lower wins.
 type RouteOrder = (RouteRank, (u64, u64), Reverse<u64>);
 
-/// How good a route is, ties aside: lower wins. First the route layer's narrowest route
-/// covering the claim, so a wider lite-07 route ranks below every narrowest one, even a
-/// draining or unavailable one, and serves only while a closing session leaves no
-/// narrowest route. Then a route that is neither draining (see [`RouteInfo::draining`])
-/// nor unavailable (see [`RouteInfo::available`]), so a peer that sent a GOAWAY or a held
-/// route ranks below every other eligible route and serves only as a last resort. Then the
-/// route layer's closest way to a broadcast ahead of its others ([`Lane::primary`]). Then
-/// the higher link [`Priority`], so metrics from different operators are never compared.
-/// Then an identified chain (no 0) outranks an anonymous one regardless of cost, then the
-/// cheapest cost, then a broadcast published on this origin (it serves what is here, not a
-/// claim that has to ask), then the shortest hop chain.
+/// How good a route is, ties aside: lower wins. First a route that reaches its origin (see
+/// [`RouteInfo::available`]), then one that is not draining (see [`RouteInfo::draining`]), so
+/// a peer that sent a GOAWAY ranks below every live route yet above one held unavailable,
+/// which may serve nothing. Then the route layer's closest way to a broadcast ahead of its
+/// others ([`Lane::primary`]). Then the higher link [`Priority`], so metrics from different
+/// operators are never compared. Then an identified chain (no 0) outranks an anonymous one
+/// regardless of cost, then the cheapest cost, then a broadcast published on this origin (it
+/// serves what is here, not a claim that has to ask), then the shortest hop chain. The
+/// availability, drain, priority and cost tiers are the draft's (Resolution), as the route
+/// layer ranks the claims of one filing ([`crate::route::relay::claim_order`]).
 fn route_rank(entry: &RouteEntry) -> RouteRank {
 	// A lite-07 claim ranks as the one hop to its origin node: the rest of its hops are
 	// the moq-lite-06 chain it carries only for loop detection and translation.
@@ -1000,21 +1004,16 @@ fn route_rank(entry: &RouteEntry) -> RouteRank {
 		None => (entry.is_anonymous(), entry.hops.len()),
 	};
 	(
-		// The most specific claim wins outright, however far its route's cost or state
-		// ranks below a broader one: a stream presents a broader claim at the request,
-		// where it ties an exact claim for the path.
-		entry.lane.above,
-		entry.draining || !entry.available,
+		!entry.available,
+		entry.draining,
 		// The route layer's closest way ahead of its others to the same broadcast. Below
 		// availability, since the route layer marks every way to a broadcast available or
 		// none: a live instance's other way outranks a dead one held unavailable while a
-		// route change moves its closest way to another session.
+		// route change moves its closest way to another session. Below the drain, since the
+		// route layer ranks a draining claim below every other, so its closest way drains
+		// only once every way does.
 		!entry.lane.primary,
-		// A lite-07 route ranks by the lowest priority of any link on its path.
-		Reverse(match entry.lane.priority {
-			Some(priority) => entry.priority.min(Priority::new(priority)),
-			None => entry.priority,
-		}),
+		Reverse(entry.link_priority()),
 		anonymous,
 		entry.cost,
 		!entry.local,
@@ -1023,10 +1022,10 @@ fn route_rank(entry: &RouteEntry) -> RouteRank {
 }
 
 /// The key [`route_rank`] ranks an entry by: lower wins.
-type RouteRank = (u8, bool, bool, Reverse<Priority>, bool, Cost, bool, usize);
+type RouteRank = (bool, bool, bool, Reverse<Priority>, bool, Cost, bool, usize);
 
-/// The `(hops, cost, source, instance, epoch, auth, node, available)` metadata
-/// an announce cursor delivers alongside a prefix.
+/// The `(hops, cost, source, instance, epoch, auth, node, available, above, standing)`
+/// metadata an announce cursor delivers alongside a prefix.
 type RouteMeta = (
 	Hops,
 	Cost,
@@ -1037,7 +1036,13 @@ type RouteMeta = (
 	Option<crate::route::NodeId>,
 	bool,
 	u8,
+	Option<Standing>,
 );
+
+/// A route's drain and link priority, which a ranked cursor ([`NodeFilter::Own`]) delivers as
+/// well: they change how the route layer ranks the claim it is fed, but nothing a reader
+/// sees, so no other cursor carries them (see [`RouteInfo::draining`]).
+type Standing = (bool, Priority);
 
 /// The earlier of two optional deadlines.
 fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
@@ -1079,6 +1084,8 @@ struct Delivered {
 	/// path from a restart; see [`lite06_churn::falls_back`].
 	publisher: Option<Hop>,
 	rank: (Cost, usize),
+	/// Whether a ranked cursor delivered the route draining; see [`Delivered::drains`].
+	draining: bool,
 }
 
 impl Delivered {
@@ -1087,8 +1094,21 @@ impl Delivered {
 			instance: meta.3.clone(),
 			publisher: lite06_churn::publisher(&meta.0),
 			rank: (meta.1, meta.0.len()),
+			draining: draining(meta),
 		}
 	}
+
+	/// Whether `meta` is the route starting to drain, which the update hold never delays: it
+	/// damps path hunting, which a drain is not, and a peer closing within the hold would
+	/// end the route before a ranked cursor's reader learned it drains.
+	fn drains(&self, meta: &RouteMeta) -> bool {
+		!self.draining && draining(meta)
+	}
+}
+
+/// Whether a ranked cursor delivers `meta` draining.
+fn draining(meta: &RouteMeta) -> bool {
+	meta.9.is_some_and(|(draining, _)| draining)
 }
 
 /// A pending update's hold, kept with it in its [`Routes`]'s queue.
@@ -1400,7 +1420,11 @@ impl OriginConsumerState {
 			let pending = self.pending.get_mut(prefix).unwrap();
 			let wake = match pending.update.as_ref().unwrap() {
 				PendingUpdate::Announce((meta, _))
-					if self.delivered.contains_key(prefix) && lite06_churn::hunts(&meta.0, meta.6) =>
+					if self
+						.delivered
+						.get(prefix)
+						.is_some_and(|delivered| !delivered.drains(meta))
+						&& lite06_churn::hunts(&meta.0, meta.6) =>
 				{
 					pending.hold(now, hold)
 				}
@@ -1485,10 +1509,13 @@ impl OriginConsumerState {
 				epoch: meta.4,
 				auth: meta.5,
 				node: meta.6,
-				draining: false,
+				draining: meta.9.is_some_and(|(draining, _)| draining),
 				available: meta.7,
+				// A ranked cursor's link priority rides the lane's, which
+				// [`OwnClaims::apply`] reads: it ranks the route where the route layer's would.
 				lane: Lane {
 					above: meta.8,
+					priority: meta.9.map(|(_, priority)| priority.value()),
 					..Lane::default()
 				},
 				marked: false,
@@ -1542,8 +1569,8 @@ struct RouteEntry {
 	node: Option<crate::route::NodeId>,
 	/// The route layer's route it follows; see [`RouteInfo::lane`].
 	lane: Lane,
-	/// Whether the route ranks last; see [`RouteInfo::draining`]. Local selection state,
-	/// so never part of [`Self::meta`].
+	/// Whether the route ranks below every other available one; see [`RouteInfo::draining`].
+	/// Only a ranked cursor's [`Self::meta`] carries it, for the route layer.
 	draining: bool,
 	/// Whether a usable path reaches the route's origin; see [`RouteInfo::available`].
 	available: bool,
@@ -1589,6 +1616,22 @@ impl RouteEntry {
 		(self.prefix.parts().count()).saturating_sub(usize::from(self.lane.above))
 	}
 
+	/// The lowest priority of a link on the way to the publisher: the link the entry arrived
+	/// on, and for a lite-07 route, every link the route layer counted before it.
+	fn link_priority(&self) -> Priority {
+		match self.lane.priority {
+			Some(priority) => self.priority.min(Priority::new(priority)),
+			None => self.priority,
+		}
+	}
+
+	/// The claim's own prefix: the entry's, less how far above it the claim was shown. Claims
+	/// of one prefix form one tier, whichever prefix each is filed at.
+	fn claimed(&self) -> &str {
+		let len = (self.prefix.head_len(self.specificity())).expect("a claim is no deeper than its entry");
+		&self.prefix.as_str()[..len]
+	}
+
 	/// Whether the announcing producer may serve the absolute `path` beneath the entry: its
 	/// grant covers the entry's whole subtree, less what it excludes.
 	fn authorizes(&self, path: &Path) -> bool {
@@ -1612,8 +1655,9 @@ impl RouteEntry {
 		}
 	}
 
-	/// The metadata an announce cursor delivers for this entry.
-	fn meta(&self) -> RouteMeta {
+	/// The metadata an announce cursor delivers for this entry, its [`Standing`] too when the
+	/// cursor is `ranked`.
+	fn meta(&self, ranked: bool) -> RouteMeta {
 		(
 			self.hops.clone(),
 			self.cost,
@@ -1624,12 +1668,18 @@ impl RouteEntry {
 			self.node,
 			self.available,
 			self.lane.above,
+			self.standing(ranked),
 		)
 	}
 
+	/// What a `ranked` cursor delivers of the entry's drain and link priority.
+	fn standing(&self, ranked: bool) -> Option<Standing> {
+		ranked.then(|| (self.draining, self.link_priority()))
+	}
+
 	/// Whether [`Self::meta`] would equal `meta`, without building it.
-	fn delivers(&self, meta: &RouteMeta) -> bool {
-		let (hops, cost, source, instance, epoch, auth, node, available, above) = meta;
+	fn delivers(&self, meta: &RouteMeta, ranked: bool) -> bool {
+		let (hops, cost, source, instance, epoch, auth, node, available, above, standing) = meta;
 		*hops == self.hops
 			&& *cost == self.cost
 			&& *source == self.entered()
@@ -1639,6 +1689,7 @@ impl RouteEntry {
 			&& *node == self.node
 			&& *available == self.available
 			&& *above == self.lane.above
+			&& *standing == self.standing(ranked)
 	}
 
 	/// Whether a request for `path` can be served through this entry. A served
@@ -1682,13 +1733,15 @@ pub(crate) fn filed(scope: &Prefixes, requested: &Path, publishes: impl Fn(&Path
 	if scope.matches(requested.as_str()) {
 		return vec![(requested.clone(), 0)];
 	}
-	let depth = requested.depth();
+	// Count segments, not every `/` as the wire limit does: an escaped `/` must not push the
+	// claim's own prefix (`RouteEntry::claimed`) above the requested one.
+	let segments = requested.parts().count();
 	(scope.iter())
 		// A prefix too long for a path holds nothing a request could name.
 		.filter_map(|prefix| Path::new(prefix.as_str()).ok())
 		.filter(|prefix| prefix.has_prefix(requested) && prefix.depth() <= Path::MAX_PARTS && publishes(prefix))
 		.map(|prefix| {
-			let below = u8::try_from(prefix.depth() - depth).expect("a path has at most 32 segments");
+			let below = u8::try_from(prefix.parts().count() - segments).expect("a path has at most 32 segments");
 			(prefix, below)
 		})
 		.collect()
@@ -1768,7 +1821,8 @@ pub(crate) enum NodeFilter {
 	/// broadcast's closest way (see [`Lane`]).
 	#[default]
 	Any,
-	/// Only the routes this node serves itself.
+	/// Only the routes this node serves itself, which the route layer is fed as this node's
+	/// own claims: a cursor delivers each one's [`Standing`] too, since the claim carries it.
 	Own,
 	/// Only the route layer's route following the forwarding node `node`'s claim.
 	#[cfg_attr(
@@ -1867,6 +1921,8 @@ struct CursorRoute {
 	prefix: Path,
 	/// What the cursor's scope captured from `prefix`.
 	captures: Option<Vec<Pattern>>,
+	/// The route entry that won, which a lookup reports a change of.
+	id: u64,
 }
 
 impl WeakEntry for RemoteFront {
@@ -1914,6 +1970,14 @@ struct TableCursor {
 	/// The last delivered best route per presented (relative) prefix, for change
 	/// detection. Servability is part of the dedupe key but never leaves the model.
 	current: HashMap<Path, CursorRoute>,
+	/// Whether the cursor delivers each route's [`Standing`], and a change to it.
+	ranked: bool,
+	/// Whether the cursor serves a path lookup ([`Consumer::path_routes`]), which reads only
+	/// what serves its root: the entry [`RouteTable::best_route`] picks for it, as a request
+	/// does. It reports no captures, so a claim filed above the root takes over from one filed
+	/// there in place, and it reports any change of the entry serving the root, which a refused
+	/// request asks again.
+	lookup: bool,
 }
 
 impl TableCursor {
@@ -1936,6 +2000,9 @@ impl TableCursor {
 	/// What the cursor's most specific matching scope member captures from an
 	/// exact announced prefix. An overlap-only route does not pin every wildcard.
 	fn captures(&self, prefix: &Path) -> Option<Vec<Pattern>> {
+		if self.lookup {
+			return None;
+		}
 		let (literal, allowed) = match &self.named {
 			Some((mount, allowed)) => (Pattern::literal(mount.name(prefix)?.as_str()).ok()?, allowed),
 			None => (Pattern::literal(prefix.as_str()).ok()?, &self.allowed),
@@ -1998,13 +2065,14 @@ impl TableCursor {
 		if previous.is_some_and(|previous| {
 			previous.instance == entry.instance
 				&& previous.prefix == entry.prefix
+				&& (!self.lookup || previous.id == entry.id)
 				&& previous.served == served
-				&& entry.delivers(&previous.meta)
+				&& entry.delivers(&previous.meta, self.ranked)
 		}) {
 			return;
 		}
 
-		let meta = entry.meta();
+		let meta = entry.meta(self.ranked);
 		let captures = self.captures(&entry.prefix);
 		let previous = self.current.insert(
 			presented.clone(),
@@ -2014,6 +2082,7 @@ impl TableCursor {
 				served,
 				prefix: entry.prefix.clone(),
 				captures: captures.clone(),
+				id: entry.id,
 			},
 		);
 		match previous {
@@ -2036,8 +2105,10 @@ impl TableCursor {
 			// between routes of one instance and epoch is invisible, which is the point).
 			// A servability flip is delivered: a request that failed Unroutable
 			// under an advertise-only route retries on the update, and hiding
-			// it would park that waiter forever.
-			Some(previous) if previous.meta == meta && previous.served == served => {}
+			// it would park that waiter forever. So is another entry serving a
+			// lookup, which a refusal by the one before asks again.
+			Some(previous)
+				if previous.meta == meta && previous.served == served && !(self.lookup && previous.id != entry.id) => {}
 			_ => {
 				if let Ok(mut state) = self.state.write() {
 					state.apply_announce(self.under.rejoin(presented), meta, captures);
@@ -2046,21 +2117,19 @@ impl TableCursor {
 		}
 	}
 
-	/// The visible entry among `candidates` that presents here: the most specific claim,
-	/// the deepest where claims tie, then the first eligible one in [`route_order`].
-	fn best<'a>(&self, candidates: impl Iterator<Item = &'a RouteEntry> + Clone) -> Option<&'a RouteEntry> {
-		let visible = candidates.filter(|entry| self.visible(entry));
+	/// The visible entry among `candidates` that presents at the absolute `at`: the most
+	/// specific claim, then the first eligible one in [`route_order`] resolving `at`, wherever
+	/// each claim of that tier is filed, so the stream advertises what a request for `at`
+	/// resolves to. One whose producer may not serve `at` is no candidate, as in
+	/// [`RouteTable::best_route`]; one that cannot serve `at`, such as a broadcast published
+	/// above it, still shadows broader claims but ranks behind every tier-mate that can.
+	fn best<'a>(&self, at: &Path, candidates: impl Iterator<Item = &'a RouteEntry> + Clone) -> Option<&'a RouteEntry> {
+		let visible = candidates.filter(|entry| self.visible(entry) && entry.authorizes(at));
 		let epochs = Epochs::of(visible.clone());
 		visible
 			.clone()
 			.filter(|entry| !epochs.superseded(entry))
-			.min_by_key(|entry| {
-				(
-					Reverse(entry.specificity()),
-					Reverse(entry.prefix.len()),
-					route_order(&entry.prefix, entry),
-				)
-			})
+			.min_by_key(|entry| (Reverse(entry.specificity()), !entry.serves(at), route_order(at, entry)))
 	}
 
 	/// Whether the hidden rule lets this cursor discover a route at `prefix`.
@@ -3813,7 +3882,13 @@ impl AnnounceProducer {
 			let Some(entry) = shared.routes.entry_mut(prefix, *id) else {
 				return Err(Error::Closed);
 			};
-			let held = (entry.live(), route_rank(entry), entry.instance.clone(), entry.epoch);
+			let held = (
+				entry.live(),
+				entry.specificity(),
+				route_rank(entry),
+				entry.instance.clone(),
+				entry.epoch,
+			);
 			let next = match &lent {
 				Some(lent) => Some((lent.instance.clone(), lent.epoch)),
 				None => route.instance.clone().map(|instance| (instance, route.epoch)),
@@ -3853,7 +3928,14 @@ impl AnnounceProducer {
 			entry.available = route.available;
 			entry.marked = route.marked;
 			entry.advertised = true;
-			if held != (true, route_rank(entry), entry.instance.clone(), entry.epoch) {
+			if held
+				!= (
+					true,
+					entry.specificity(),
+					route_rank(entry),
+					entry.instance.clone(),
+					entry.epoch,
+				) {
 				entry.since = stamp;
 			}
 			let claim = entry.claim.clone();
@@ -4189,6 +4271,8 @@ impl OwnClaims {
 		};
 		let route = announce.route;
 		let instance = route.instance?;
+		// Only a route published here has crossed no node.
+		let learned = !route.hops.is_empty();
 		let claim = Claim {
 			item: Attr {
 				epoch: route.epoch,
@@ -4196,7 +4280,12 @@ impl OwnClaims {
 				above: route.lane.above.into(),
 			},
 			cost: route.cost.value(),
-			priority: route.lane.priority.unwrap_or(i8::MAX),
+			// A publisher's own claim carries the highest priority; a learned one the lowest
+			// of a link on its way here, which the ranked cursor delivers.
+			priority: match learned {
+				true => route.lane.priority.unwrap_or_default(),
+				false => i8::MAX,
+			},
 			draining: route.draining,
 			unavailable: false,
 			// Kept, so the claim that crossed into lite-07 here is still recognized
@@ -4204,8 +4293,6 @@ impl OwnClaims {
 			chain: route.hops.iter().map(|hop| hop.id()).filter(|id| *id != 0).collect(),
 			marked: false,
 		};
-		// Only a route published here has crossed no node.
-		let learned = !route.hops.is_empty();
 		let was = self
 			.best
 			.insert(announce.prefix.clone(), (instance.clone(), claim, learned));
@@ -6397,43 +6484,29 @@ impl RouteTable {
 		excluded: &HashSet<u64>,
 		only: impl Fn(&RouteEntry) -> bool,
 	) -> Option<&RouteEntry> {
-		// Covering prefixes of one path form a chain, so the deepest node with a
-		// candidate holds the unique longest prefix; walking down, the last such
-		// node decides. A claim shown above its own prefix is filed deeper than it
-		// is, so a node whose best claim is less specific than the one decided above
-		// it does not take over.
+		// The most specific claims covering the path are the whole answer, serving or not: one
+		// that refuses the path still shadows what is broader. A claim shown above its own
+		// prefix is filed deeper than it is, so the claims of one tier may sit at several
+		// nodes, and they rank against each other wherever each is filed.
 		let (above, at) = self.split(path);
-		let mut best: Option<(usize, Option<&RouteEntry>)> = None;
-		for (depth, node) in above.into_iter().chain(at).enumerate() {
-			// How specific a claim filed at this node is: the node's depth less how far above
-			// it the claim was shown.
-			let specific = |entry: &RouteEntry| depth.saturating_sub(usize::from(entry.lane.above));
-			let mut candidates = node
-				.entries
-				.iter()
-				.filter(|entry| entry.live())
-				.filter(|entry| entry.authorizes(path))
-				.filter(|entry| horizon.admits(entry))
-				.filter(|entry| !excluded.contains(&entry.id))
-				.filter(|entry| only(entry))
-				.peekable();
-			if candidates.peek().is_some() {
-				// The node's most specific candidates are the whole answer, serving or not:
-				// one that refuses the path still shadows what is broader.
-				let specificity = candidates.clone().map(specific).max().unwrap_or_default();
-				if best.is_some_and(|(decided, _)| specificity < decided) {
-					continue;
-				}
-				let tier = candidates.filter(|entry| specific(entry) == specificity);
-				let epochs = Epochs::of(tier.clone());
-				let found = tier
-					.filter(|entry| entry.serves(path))
-					.filter(|entry| !epochs.superseded(entry))
-					.min_by_key(|entry| route_order(path, entry));
-				best = Some((specificity, found));
-			}
-		}
-		best.and_then(|(_, found)| found)
+		// How specific each claim is: its node's depth less how far above it the claim was
+		// shown, as [`RouteEntry::specificity`] counts without walking the prefix.
+		// Borrowed, so the clones below copy no node list.
+		let candidates = (above.iter().copied().chain(at).enumerate())
+			.flat_map(|(depth, node)| {
+				(node.entries.iter()).map(move |entry| (depth.saturating_sub(usize::from(entry.lane.above)), entry))
+			})
+			.filter(|(_, entry)| entry.live())
+			.filter(|(_, entry)| entry.authorizes(path))
+			.filter(|(_, entry)| horizon.admits(entry))
+			.filter(|(_, entry)| !excluded.contains(&entry.id))
+			.filter(|(_, entry)| only(entry));
+		let specificity = candidates.clone().map(|(specific, _)| specific).max()?;
+		let tier = (candidates.filter(|(specific, _)| *specific == specificity)).map(|(_, entry)| entry);
+		let epochs = Epochs::of(tier.clone());
+		tier.filter(|entry| entry.serves(path))
+			.filter(|entry| !epochs.superseded(entry))
+			.min_by_key(|entry| route_order(path, entry))
 	}
 
 	/// The nodes above `path` and the node at it, as far as the table has them.
@@ -6793,9 +6866,16 @@ impl OriginState {
 					// Every non-root presentation refers to this exact prefix. Rank
 					// its routes once, then take each cursor's first eligible visible entry.
 					let candidates = candidates.get_or_insert_with(|| {
+						// All of one prefix, so the most specific claim is the least above it.
+						// Ranked as [`TableCursor::best`] ranks a replayed row.
 						let mut entries: Vec<_> = routes
 							.at(prefix)
-							.map(|entry| (route_order(prefix, entry), entry))
+							.map(|entry| {
+								(
+									(entry.lane.above, !entry.serves(prefix), route_order(prefix, entry)),
+									entry,
+								)
+							})
 							.collect();
 						entries.sort_unstable_by_key(|(order, _)| *order);
 						entries
@@ -6927,14 +7007,18 @@ impl OriginState {
 	fn sync_cursor(routes: &RouteTable, cursor: &mut TableCursor, presented: &Path, gone: Gone) {
 		// The entries presenting here are the ones announced at the absolute
 		// prefix, or, for the cursor's own root, at the root and every prefix
-		// above it (all of which present as the empty path). Among them, the
-		// longest prefix wins outright, so the metadata a cursor advertises
-		// matches what a request through it actually resolves.
+		// above it (all of which present as the empty path). Among them, the most
+		// specific claim wins outright, its tier ranked wherever each claim is filed,
+		// so the metadata a cursor advertises matches what a request through it resolves.
 		let best = match presented.is_empty() {
-			true => cursor.best(routes.covering(&cursor.root)),
+			true if cursor.lookup => {
+				let visible = |entry: &RouteEntry| cursor.visible(entry);
+				routes.best_route(&cursor.root, cursor.horizon, &HashSet::new(), visible)
+			}
+			true => cursor.best(&cursor.root, routes.covering(&cursor.root)),
 			false => {
 				let absolute = cursor.root.rejoin(presented);
-				cursor.best(routes.at(&absolute))
+				cursor.best(&absolute, routes.at(&absolute))
 			}
 		};
 
@@ -7054,10 +7138,11 @@ impl OriginState {
 	/// The best served route covering `path` (absolute) for a requester seeing
 	/// `horizon`, skipping the `excluded` entry ids.
 	///
-	/// The most specific covering prefix wins outright, so a narrow advertise-only
+	/// The most specific claim wins outright, so a narrow advertise-only
 	/// announcement shadows a broad served one: requests under it resolve
-	/// unroutable instead of being routed around it. Among routes at the winning
-	/// prefix, the cheapest served one is picked by [`route_order`].
+	/// unroutable instead of being routed around it. A claim's specificity is its own
+	/// prefix, wherever it is filed (see [`RouteEntry::specificity`]), and the claims of
+	/// the winning tier rank together: the best served one by [`route_order`].
 	///
 	/// Only announced routes are candidates: an unannounced broadcast serves
 	/// nobody, and does not shadow anything either. Routes `excluded` for the
@@ -7577,6 +7662,11 @@ impl Requesting {
 	pub fn poll_ok(&mut self, waiter: &kio::Waiter) -> Poll<Result<broadcast::Consumer, Error>> {
 		loop {
 			if let Some(discovery) = &mut self.discovery {
+				// Sync is an event, not a deadline: sessions hold it from the moment the
+				// interest is created until the initial announcement set is delivered. Read it
+				// before draining the routes, so a session delivering its set and syncing
+				// between the two reads never leaves that set unseen.
+				let synced = discovery.poll_synced(waiter).is_ready();
 				loop {
 					match discovery.poll_next(waiter) {
 						Poll::Ready(Some(RouteEvent {
@@ -7585,19 +7675,17 @@ impl Requesting {
 						})) => self.routed = false,
 						Poll::Ready(Some(RouteEvent {
 							kind: RouteKind::Start | RouteKind::Restart | RouteKind::Update,
-							announce,
-						})) => {
-							self.routed = self.instance.is_none() || announce.route.instance == self.instance;
-						}
+							..
+						})) => self.routed = true,
 						Poll::Ready(None) => return Poll::Ready(Err(Error::Closed)),
 						Poll::Pending => break,
 					}
 				}
-				// Sync is an event, not a deadline: sessions hold it from the moment the
-				// interest is created until the initial announcement set is delivered.
-				let synced = discovery.poll_synced(waiter).is_ready();
+				// The winner says nothing of a pinned instance, which follows its own routes: a pinned
+				// request concludes only from a lookup the routes have not moved since.
+				let absent = self.instance.is_none() && !self.routed;
 				if self.request.is_none()
-					&& synced && (!self.routed || self.watch.as_ref().is_some_and(|(watch, seen)| watch.seen() == *seen))
+					&& synced && (absent || self.watch.as_ref().is_some_and(|(watch, seen)| watch.seen() == *seen))
 				{
 					return Poll::Ready(Err(Error::Unroutable));
 				}
@@ -8204,6 +8292,11 @@ impl Consumer {
 	/// its peer about the scope while any stream watches it.
 	/// Drop the returned [`Routes`] to unregister.
 	pub fn routes(&self) -> Routes {
+		self.listing(false)
+	}
+
+	/// [`Self::routes`], for a path lookup when `lookup`; see [`TableCursor::lookup`].
+	fn listing(&self, lookup: bool) -> Routes {
 		let state = kio::Producer::<OriginConsumerState>::default();
 		let cursor =
 			|root: Path, allowed: Patterns, hidden: Hidden, mount: Option<&Mount>, under: Path, holes: Vec<Path>| {
@@ -8220,6 +8313,8 @@ impl Consumer {
 					named: mount.map(|mount| (mount.clone(), self.listed.clone())),
 					interested: self.interested,
 					current: HashMap::new(),
+					ranked: self.horizon.node == NodeFilter::Own,
+					lookup,
 				}
 			};
 
@@ -8329,7 +8424,7 @@ impl Consumer {
 			.routes
 			.at(&full)
 			.filter(|entry| entry.local)
-			.min_by_key(|entry| route_order(&entry.prefix, entry))
+			.min_by_key(|entry| (entry.lane.above, route_order(&entry.prefix, entry)))
 			.and_then(|entry| entry.source.clone())
 	}
 
@@ -8343,7 +8438,8 @@ impl Consumer {
 		let path = path::convert(path)?;
 
 		// On a consumer limited to `foo/specific`, no route can ever cover `foo`.
-		if !self.scope.permits(&self.root.join(&path)?) {
+		let root = self.root.join(&path)?;
+		if !self.scope.permits(&root) {
 			return Err(Error::Unauthorized);
 		}
 
@@ -8361,13 +8457,19 @@ impl Consumer {
 			.patterns()
 			.intersect(&rooted.into())
 			.map_err(|_| Error::Unauthorized)?;
-		let consumer = Consumer { listed, ..self.clone() };
+		// Rooted at the path, so every claim covering it presents at the root, ranked as one
+		// answer the way a request ranks them, wherever each claim is filed.
+		let consumer = Consumer {
+			root,
+			listed,
+			..self.clone()
+		};
 
 		// Untagged: this is a lookup, not egress announce forwarding, so it must not drive
 		// the announce guards. Hiding narrows discovery, not lookup, so a hidden path
 		// follows like any other.
-		let announced = consumer.untagged().with_hidden(true).covering().routes();
-		Ok(Follow::new(announced, path))
+		let announced = consumer.untagged().with_hidden(true).covering().listing(true);
+		Ok(Follow::new(announced))
 	}
 
 	/// A resolution that already failed with `err`.
@@ -10982,6 +11084,58 @@ mod tests {
 		}
 	}
 
+	/// Claims of one prefix filed at different depths tie as one tier: the one announced
+	/// first keeps a path beneath both, whichever filing it has, and one announced again
+	/// ranks as newly arrived, as `js/net`'s `compareTie` has it.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn an_equal_claim_filed_elsewhere_keeps_the_one_in_use() {
+		let named = instance();
+		let route = |hop: u64, above: u8| {
+			RouteInfo::new()
+				.with_instance(named.clone(), 0)
+				.with_hops(hops(&[hop]))
+				.with_lane(Lane {
+					above,
+					..Lane::default()
+				})
+		};
+		// Hop 10 is filed at `src/a` a level above its own prefix, hop 11 at `src`.
+		let filing = |hop: u64| match hop {
+			10 => ("src/a", route(10, 1)),
+			_ => ("src", route(11, 0)),
+		};
+		for (first, second) in [(10, 11), (11, 10)] {
+			let producer = Config {
+				update_hold: Duration::ZERO,
+				..Config::from(origin(1))
+			}
+			.produce();
+			let peer = producer.clone().with_link(Link::Peer);
+			let resolved = || {
+				let table = producer.shared.read();
+				let path = Path::new("src/a/b").unwrap();
+				let entry = table.best_route(&path, Horizon::default(), &HashSet::new(), |_| true);
+				entry.map(|entry| entry.hops.clone())
+			};
+			let forward = |hop| {
+				let (prefix, route) = filing(hop);
+				peer.forward(prefix, route).unwrap()
+			};
+			let held = forward(first);
+			let _later = forward(second);
+			assert_eq!(resolved(), Some(hops(&[first])), "the later claim took requests");
+			drop(held);
+			assert_eq!(resolved(), Some(hops(&[second])));
+			let _again = forward(first);
+			assert_eq!(
+				resolved(),
+				Some(hops(&[second])),
+				"the claim announced again took requests"
+			);
+		}
+	}
+
 	/// A publisher that restarts while its old session lingers announces its own path under
 	/// a new first hop. The restart takes over at once whichever chain hashes lower, so new
 	/// requests never wait on the old session.
@@ -11386,6 +11540,459 @@ mod tests {
 			announced.try_next().is_none(),
 			"the broader claim at a higher epoch must not replace the exact one in the announcement"
 		);
+	}
+
+	/// Claims of one prefix rank against each other wherever each is filed: a claim for `src`
+	/// filed at `src/a` (shown there, a level above) never takes `src/a/b` from a claim made
+	/// at `src` without being ranked against it. Its instance's higher epoch at `src`
+	/// supersedes it, and so does a live claim of another instance outrank it while it drains,
+	/// for a request and for an announce stream rooted beneath both.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_claim_filed_deeper_ranks_against_the_claim_of_its_prefix() {
+		let route = |instance: &crate::Instance, epoch, node, above, draining| {
+			RouteInfo::new()
+				.with_instance(instance.clone(), epoch)
+				.with_hops(hops(&[node]))
+				.with_node(Some(node_id(node)))
+				.with_lane(Lane {
+					above,
+					..Lane::default()
+				})
+				.with_draining(draining)
+		};
+		let (old, other) = (crate::Instance::random(), crate::Instance::random());
+		for (deep, direct) in [(old.clone(), old.clone()), (old.clone(), other.clone())] {
+			// Updates are delivered at once: the hold is not what this checks.
+			let producer = Config {
+				update_hold: Duration::ZERO,
+				..Config::from(origin(1))
+			}
+			.produce();
+			let consumer = producer.consume();
+			let mut announced = consumer.scope("src/a", &Prefixes::all()).unwrap().covering().routes();
+			let filed = producer.forward("src/a", route(&deep, 1, 10, 1, true)).unwrap();
+			let made = producer.forward("src", route(&direct, 2, 11, 0, false)).unwrap();
+
+			let _pending = consumer.request("src/a/b", None);
+			let request = queued(&made).await;
+			assert_eq!(request.path().as_str(), "src/a/b");
+			assert!(
+				filed.poll_requested(&kio::Waiter::noop()).is_pending(),
+				"the claim filed deeper must not serve while it ranks below"
+			);
+			let mut last = None;
+			while let Some(route) = announced.try_next() {
+				last = Some(route);
+			}
+			let last = last.expect("the stream presents a claim at its root");
+			assert_eq!(
+				(last.announce.route.instance(), last.announce.route.epoch),
+				(&direct, 2)
+			);
+		}
+	}
+
+	/// A follower of a path ranks a claim filed deeper against the claim of its prefix as a
+	/// request does, so a better claim of the tier filed shallower takes over.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_follower_takes_the_claim_a_request_resolves() {
+		let route = |instance: &crate::Instance, node, above, draining| {
+			RouteInfo::new()
+				.with_instance(instance.clone(), 0)
+				.with_hops(hops(&[node]))
+				.with_node(Some(node_id(node)))
+				.with_lane(Lane {
+					above,
+					..Lane::default()
+				})
+				.with_draining(draining)
+		};
+		let producer = Config {
+			update_hold: Duration::ZERO,
+			..Config::from(origin(1))
+		}
+		.produce();
+		let consumer = producer.consume();
+		let mut follow = consumer.path_routes("src/a/b").unwrap();
+		let (deep, direct) = (crate::Instance::random(), crate::Instance::random());
+
+		let _filed = producer.forward("src/a", route(&deep, 10, 1, true)).unwrap();
+		let event = follow.next().await.expect("the origin is open");
+		assert!(
+			matches!(&event, RouteEvent { kind: RouteKind::Start, announce } if announce.route.instance() == &deep),
+			"{event:?}"
+		);
+
+		let made = producer.forward("src", route(&direct, 11, 0, false)).unwrap();
+		let event = kio::clock::timeout(Duration::from_secs(1), follow.next())
+			.await
+			.expect("the follower hears the takeover")
+			.expect("the origin is open");
+		assert!(
+			matches!(&event, RouteEvent { kind: RouteKind::Restart, announce } if announce.route.instance() == &direct),
+			"{event:?}"
+		);
+		let _pending = consumer.request("src/a/b", None);
+		assert_eq!(queued(&made).await.path().as_str(), "src/a/b");
+	}
+
+	/// The instance a follower of `follow`'s path settles on, once it goes quiet.
+	#[cfg(feature = "async")]
+	async fn settled_on(follow: &mut Follow) -> Option<crate::Instance> {
+		let mut serving = None;
+		while let Ok(event) = kio::clock::timeout(Duration::from_secs(1), follow.next()).await {
+			let event = event.expect("the origin is open");
+			serving = match event.kind {
+				RouteKind::End | RouteKind::Offline => None,
+				_ => event.announce.route.instance.clone(),
+			};
+		}
+		serving
+	}
+
+	#[cfg(feature = "async")]
+	fn claim_route(instance: &crate::Instance, node: u64, above: u8, cost: u64) -> RouteInfo {
+		RouteInfo::new()
+			.with_instance(instance.clone(), 0)
+			.with_hops(hops(&[node]))
+			.with_node(Some(node_id(node)))
+			.with_lane(Lane {
+				above,
+				..Lane::default()
+			})
+			.with_cost(cost)
+	}
+
+	/// A claim whose producer may not serve the path never wins a follower of it, however cheap,
+	/// as it never wins a request.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_follower_skips_a_claim_excluded_from_the_path() {
+		let producer = Config {
+			update_hold: Duration::ZERO,
+			..Config::from(origin(1))
+		}
+		.produce();
+		let consumer = producer.consume();
+		let mut follow = consumer.path_routes("src/a/b").unwrap();
+		let (cheap, allowed) = (crate::Instance::random(), crate::Instance::random());
+		let excluded = producer.exclude("src/a/b").unwrap();
+		let _cheap = excluded.forward("src", claim_route(&cheap, 10, 0, 1)).unwrap();
+		let filed = producer.forward("src/a", claim_route(&allowed, 11, 1, 5)).unwrap();
+		assert_eq!(settled_on(&mut follow).await, Some(allowed));
+		let _pending = consumer.request("src/a/b", None);
+		assert_eq!(queued(&filed).await.path().as_str(), "src/a/b");
+	}
+
+	/// A broadcast published at a prefix serves only its own path, so a follower of a path beneath
+	/// it settles on the claim of the same tier that serves, as a request does.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_follower_skips_a_broadcast_that_cannot_serve_the_path() {
+		let producer = Config {
+			update_hold: Duration::ZERO,
+			..Config::from(origin(1))
+		}
+		.produce();
+		let consumer = producer.consume();
+		let mut follow = consumer.path_routes("src/a/b").unwrap();
+		let (published, claimed) = (crate::Instance::random(), crate::Instance::random());
+		let _broadcast = producer
+			.route("src", RouteOptions::default().with_instance(published, 0))
+			.unwrap();
+		let filed = producer.forward("src/a", claim_route(&claimed, 10, 1, 0)).unwrap();
+		assert_eq!(settled_on(&mut follow).await, Some(claimed));
+		let _pending = consumer.request("src/a/b", None);
+		assert_eq!(queued(&filed).await.path().as_str(), "src/a/b");
+	}
+
+	/// A request pinned to an instance follows that instance's own routes, so a better claim of
+	/// another instance arriving with it, while discovery syncs, never ends the request.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_pinned_request_resolves_its_instance_under_a_better_claim() {
+		let producer = Config {
+			update_hold: Duration::ZERO,
+			..Config::from(origin(1))
+		}
+		.produce();
+		let consumer = producer.consume();
+		let snapshot = producer.snapshot("src");
+		let (pinned, other) = (crate::Instance::random(), crate::Instance::random());
+		let pending = consumer.request("src/a/b", pinned.clone());
+		let filed = producer.forward("src/a", claim_route(&pinned, 10, 1, 5)).unwrap();
+		let _made = producer.forward("src", claim_route(&other, 11, 0, 1)).unwrap();
+		drop(snapshot);
+		let answer = async {
+			let request = kio::clock::timeout(Duration::from_secs(1), queued(&filed))
+				.await
+				.expect("the pinned instance was never asked");
+			assert_eq!(request.path().as_str(), "src/a/b");
+			let source = broadcast::Info::new().produce();
+			request.serve(&source);
+			source
+		};
+		let (result, _source) = futures::join!(kio::clock::timeout(Duration::from_secs(1), pending), answer);
+		let resolved = result.expect("the pinned request never resolved").expect("resolves");
+		assert_eq!(resolved.info().instance, Some(pinned));
+	}
+
+	/// An escaped `/` belongs to its segment, so a claim filed beneath a scope's escaped prefix
+	/// sits one segment below its own prefix, not two, and keeps that prefix's tier.
+	#[test]
+	fn a_filing_counts_an_escaped_slash_as_part_of_its_segment() {
+		let mut scope = Prefixes::new();
+		scope.insert(r"src/a\/b".parse().unwrap());
+		let requested = Path::new("src").unwrap();
+		assert_eq!(
+			filed(&scope, &requested, |_| true),
+			[(Path::new(r"src/a\/b").unwrap(), 1)]
+		);
+	}
+
+	/// Claims of one tier filed at different depths that tie through every rank hash on the path
+	/// a covering stream presents them at, as a request for that path does, so the stream
+	/// advertises what the request resolves to, for every pair of instances.
+	#[test]
+	fn a_covering_root_advertises_what_a_request_for_it_resolves() {
+		let route = |name: &str, node, above| {
+			RouteInfo::new()
+				.with_instance(name.parse().unwrap(), 0)
+				.with_hops(hops(&[node]))
+				.with_node(Some(node_id(node)))
+				.with_lane(Lane {
+					above,
+					..Lane::default()
+				})
+		};
+		// A route entered here at the path skips the hash, so the claim filed at the root wins
+		// whichever instance it carries; any other pair is settled by the hash on the root.
+		for (link, i) in [Link::Peer, Link::Local]
+			.into_iter()
+			.flat_map(|link| (0..32).map(move |i| (link, i)))
+		{
+			let producer = Config {
+				update_hold: Duration::ZERO,
+				..Config::from(origin(1))
+			}
+			.produce();
+			let mut announced = (producer.consume().scope("src/a", &Prefixes::all()).unwrap())
+				.covering()
+				.routes();
+			let handle = producer.clone().with_link(link);
+			let _made = handle.forward("src", route(&format!("made{i}"), 10, 0)).unwrap();
+			let _filed = handle.forward("src/a", route(&format!("filed{i}"), 11, 1)).unwrap();
+
+			let table = producer.shared.read();
+			let resolved = table
+				.best_route(
+					&Path::new("src/a").unwrap(),
+					Horizon::default(),
+					&HashSet::new(),
+					|_| true,
+				)
+				.map(|entry| entry.instance.clone());
+			drop(table);
+			let mut advertised = None;
+			while let Some(event) = announced.try_next() {
+				advertised = Some(event.announce.route.instance().clone());
+			}
+			assert_eq!(advertised, resolved, "{link:?} pair {i}");
+			if link == Link::Local {
+				assert_eq!(resolved, Some(format!("filed{i}").parse().unwrap()), "pair {i}");
+			}
+		}
+	}
+
+	/// A covering stream's root advertises the claim a request for the root takes, passing over a
+	/// cheaper one that cannot serve it. A broadcast published above the root serves only its own
+	/// path, so it ranks behind a tier-mate that serves. A claim whose producer excludes the root
+	/// is no candidate at all: it neither outranks a tier-mate, shadows a broader claim, nor
+	/// supersedes an older epoch of its instance.
+	#[test]
+	fn a_covering_root_passes_over_a_claim_that_cannot_serve_it() {
+		#[derive(Debug, Clone, Copy)]
+		enum Case {
+			Broadcast,
+			Excluded,
+			ExcludedShadow,
+			ExcludedEpoch,
+		}
+		let route = |instance: &crate::Instance, epoch, node, above, cost: u64| {
+			RouteInfo::new()
+				.with_instance(instance.clone(), epoch)
+				.with_hops(hops(&[node]))
+				.with_node(Some(node_id(node)))
+				.with_lane(Lane {
+					above,
+					..Lane::default()
+				})
+				.with_cost(cost)
+		};
+		for case in [
+			Case::Broadcast,
+			Case::Excluded,
+			Case::ExcludedShadow,
+			Case::ExcludedEpoch,
+		] {
+			let producer = Config {
+				update_hold: Duration::ZERO,
+				..Config::from(origin(1))
+			}
+			.produce();
+			let mut announced = (producer.consume().scope("src/a", &Prefixes::all()).unwrap())
+				.covering()
+				.routes();
+			let (cheap, serving) = (crate::Instance::random(), crate::Instance::random());
+			let excluded = producer.exclude("src/a").unwrap();
+			let mut held = Vec::new();
+			let mut broadcast = None;
+			match case {
+				Case::Broadcast => {
+					let options = RouteOptions::default().with_instance(cheap.clone(), 0);
+					broadcast = Some(producer.route("src", options).unwrap());
+					held.push(producer.forward("src/a", route(&serving, 0, 11, 1, 5)).unwrap());
+				}
+				Case::Excluded => {
+					held.push(excluded.forward("src", route(&cheap, 0, 10, 0, 0)).unwrap());
+					held.push(producer.forward("src/a", route(&serving, 0, 11, 1, 5)).unwrap());
+				}
+				Case::ExcludedShadow => {
+					held.push(excluded.forward("src", route(&cheap, 0, 10, 0, 0)).unwrap());
+					held.push(producer.forward("", route(&serving, 0, 11, 0, 5)).unwrap());
+				}
+				Case::ExcludedEpoch => {
+					held.push(excluded.forward("src", route(&serving, 2, 10, 0, 0)).unwrap());
+					held.push(producer.forward("src/a", route(&serving, 1, 11, 1, 5)).unwrap());
+				}
+			}
+
+			let table = producer.shared.read();
+			let resolved = table
+				.best_route(
+					&Path::new("src/a").unwrap(),
+					Horizon::default(),
+					&HashSet::new(),
+					|_| true,
+				)
+				.map(|entry| (entry.instance.clone(), entry.cost));
+			drop(table);
+			assert_eq!(resolved, Some((serving.clone(), Cost::from(5u64))), "{case:?}");
+			let mut advertised = None;
+			while let Some(event) = announced.try_next() {
+				advertised = Some((event.announce.route.instance().clone(), event.announce.route.cost()));
+			}
+			assert_eq!(advertised, resolved, "{case:?}");
+			drop((held, broadcast));
+		}
+	}
+
+	/// A stream's row beneath its root ranks a route that serves its prefix ahead of a cheaper
+	/// one that serves nothing, whether the row was synced as the routes arrived or replayed
+	/// for a stream that started after them.
+	#[test]
+	fn a_row_ranks_a_serving_route_alike_synced_or_replayed() {
+		let producer = Config {
+			update_hold: Duration::ZERO,
+			..Config::from(origin(1))
+		}
+		.produce();
+		let mut synced = producer.consume().routes();
+		let (advertised, serving) = (crate::Instance::random(), crate::Instance::random());
+		let route = |instance: &crate::Instance, node, cost: u64| {
+			RouteInfo::new()
+				.with_instance(instance.clone(), 0)
+				.with_hops(hops(&[node]))
+				.with_cost(cost)
+		};
+		let _advertised = producer.announce("src", route(&advertised, 10, 1)).unwrap();
+		let _serving = producer.forward("src", route(&serving, 11, 5)).unwrap();
+		let mut replayed = producer.consume().routes();
+		let last = |announced: &mut Routes| {
+			let mut last = None;
+			while let Some(event) = announced.try_next() {
+				last = Some(event.announce.route.instance().clone());
+			}
+			last
+		};
+		assert_eq!(last(&mut synced), Some(serving.clone()));
+		assert_eq!(last(&mut replayed), Some(serving));
+	}
+
+	/// A draining route still reaches its origin, so it outranks one held unavailable,
+	/// however cheap: the held route may serve nothing.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_draining_route_outranks_an_unavailable_one() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let held = RouteInfo::new()
+			.with_hops(hops(&[10]))
+			.with_node(Some(node_id(10)))
+			.with_lane(Lane {
+				priority: Some(0),
+				..Lane::default()
+			})
+			.with_available(false)
+			.with_cost(1);
+		let held = producer.forward("room", held).unwrap();
+		let draining = producer
+			.clone()
+			.with_link(Link::Peer)
+			.forward(
+				"room",
+				RouteInfo::new().with_hops(hops(&[11])).with_cost(5).with_draining(true),
+			)
+			.unwrap();
+
+		let _pending = consumer.request("room/alice", None);
+		let request = queued(&draining).await;
+		assert_eq!(request.path().as_str(), "room/alice");
+		assert!(
+			held.poll_requested(&kio::Waiter::noop()).is_pending(),
+			"the unavailable route must not serve while a draining one reaches the origin"
+		);
+	}
+
+	/// A route learned over an older version reaches the route node with its link priority
+	/// and its drain, so the claim this node announces for it ranks as the route does here.
+	/// A drain that changes nothing a reader sees still reaches the node, at once: the update
+	/// hold damps path hunting, which a drain is not, and a peer closing within the hold would
+	/// otherwise end the route before the node ever learned it drains.
+	#[test]
+	fn the_route_node_learns_a_bridged_routes_priority_and_drain() {
+		use crate::route::relay;
+		let config = Config::from(origin(1));
+		assert!(!config.update_hold().is_zero());
+		let producer = config.produce();
+		let route = RouteInfo::new().with_hops(hops(&[10])).with_cost(3);
+		let bridged = (producer.clone().with_link(Link::Peer))
+			.with_priority(Priority::new(-5))
+			.forward("room/alice", route)
+			.unwrap();
+		let stream = route_stream(&producer.route_node());
+		let told = |stream: &crate::route::node::Stream| {
+			std::iter::from_fn(|| stream.try_wire())
+				.filter_map(|msg| match msg {
+					relay::Msg::Announce { changes } => Some(changes),
+					_ => None,
+				})
+				.flatten()
+				.filter_map(|(_, change)| match change {
+					relay::Change::Live(claim) => Some((claim.priority, claim.draining)),
+					_ => None,
+				})
+				.last()
+		};
+		assert_eq!(told(&stream), Some((-5, false)));
+
+		bridged.update(bridged.route().unwrap().with_draining(true)).unwrap();
+		// Nothing polls this test's driver: `route_node` catches the feeder up.
+		producer.route_node();
+		stream.flush();
+		assert_eq!(told(&stream), Some((-5, true)));
 	}
 
 	/// A restarted publisher's dead instance, held unavailable, never wins back the path from
@@ -14981,7 +15588,7 @@ mod tests {
 		assert!((&mut fut).now_or_never().is_none());
 
 		// A covering prefix resolves the wait.
-		let _a = producer.announce("room", RouteInfo::new().with_cost(3)).unwrap();
+		let _a = producer.forward("room", RouteInfo::new().with_cost(3)).unwrap();
 		let route = started(fut.now_or_never().expect("covered"));
 		assert_eq!(route.cost, Cost::new(3));
 
@@ -14997,12 +15604,12 @@ mod tests {
 		let consumer = producer.consume();
 
 		// A deeper route does not cover the shorter path.
-		let _deep = producer.announce("room/alice/cam", RouteInfo::new()).unwrap();
+		let _deep = producer.forward("room/alice/cam", RouteInfo::new()).unwrap();
 		let mut routes = consumer.path_routes("room/alice").unwrap();
 		let mut fut = routes.next().boxed();
 		assert!((&mut fut).now_or_never().is_none());
 
-		let _exact = producer.announce("room/alice", RouteInfo::new()).unwrap();
+		let _exact = producer.forward("room/alice", RouteInfo::new()).unwrap();
 		started(fut.now_or_never().expect("covered"));
 	}
 
@@ -15024,7 +15631,7 @@ mod tests {
 		assert!((&mut fut).now_or_never().is_none());
 
 		// A covering root still resolves: the lookup must not require `path/**`.
-		let _a = producer.announce("", RouteInfo::new()).unwrap();
+		let _a = producer.forward("", RouteInfo::new()).unwrap();
 		started(fut.now_or_never().expect("covered"));
 	}
 
@@ -17993,7 +18600,7 @@ mod tests {
 		let registry = stats::Registry::new(stats::Config::new());
 		let producer = origin(1).produce();
 		let local = producer.route("project/cam.chat", RouteOptions::default()).unwrap();
-		let overlap = producer.announce("project/room", RouteInfo::new()).unwrap();
+		let overlap = producer.forward("project/room", RouteInfo::new()).unwrap();
 		let consumer = (producer.consume().scope("project", &Prefixes::all()).unwrap())
 			.filter(&"**/*.chat".parse().unwrap())
 			.unwrap()

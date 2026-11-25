@@ -92,6 +92,7 @@ Critical fixes continue to reach the existing release through backports.
 
 Test flakes join m0 without asking (decided 2026-11-05, maintainer): a test
 that fails intermittently in CI, Nightly, or the merge queue becomes a child
-of m0's [test flakes](/quest/m0/test-flakes-3/README.md) epic, planned anew once it completes. Skills that plan
+of m0's open `test-flakes-N` epic, or of a fresh one carrying the last epic's
+rules from git history when none is open. Skills that plan
 follow-ups plan a reported flake there without asking whether or where; the
 planning PR's review is the check.

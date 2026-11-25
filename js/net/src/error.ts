@@ -337,7 +337,12 @@ export { Session as SessionError, Stream as StreamError, TooFarBehind as Lagged 
 /** The WebTransport-shaped fields a stream reset code arrives in. */
 type StreamErrorLike = { source?: unknown; streamErrorCode?: unknown };
 
-function streamCode(err: unknown): StreamCode | undefined {
+/**
+ * The raw code a transport's stream error carries, or undefined for any other error.
+ *
+ * @internal
+ */
+export function streamCode(err: unknown): StreamCode | undefined {
 	if (typeof err !== "object" || err === null) return undefined;
 
 	const { source, streamErrorCode } = err as StreamErrorLike;
@@ -618,6 +623,20 @@ export function closeError(quic: WebTransport): Promise<Error> {
  */
 export function sessionClosed(err: unknown): boolean {
 	return typeof err === "object" && err !== null && (err as { source?: unknown }).source === "session";
+}
+
+/**
+ * Whether a stream failed because the peer reset or stopped it without an application code of its
+ * own, as a browser reports a closing session's WT_SESSION_GONE (as code 0), either raw or through
+ * {@link fromTransport}, rather than on a local error, a session close, or a reset with a code.
+ *
+ * @internal
+ */
+export function peerEnded(err: unknown): boolean {
+	const raw = err instanceof Stream ? err.cause : err;
+	if (typeof raw !== "object" || raw === null) return false;
+	const { source, streamErrorCode } = raw as StreamErrorLike;
+	return source === "stream" && (streamErrorCode === 0 || streamErrorCode === null);
 }
 
 /**
