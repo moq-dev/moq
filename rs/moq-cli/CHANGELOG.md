@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `moq import mp4` publishes a regular MP4 from stdin, with its `moov` before or after its media, as `import fmp4` does a fragmented one.
+
 ### Changed
 
 - `moq --listen` bounds auth admission by the listener's `--listen-timeout` handshake deadline instead of a fixed ten seconds.

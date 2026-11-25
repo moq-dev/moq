@@ -24,6 +24,7 @@ pub type Target = fn(&[u8]) -> bool;
 /// Every target, keyed by the name of its `fuzz_targets/<name>.rs` shim.
 pub const TARGETS: &[(&str, Target)] = &[
 	("fmp4", fmp4),
+	("mp4", mp4),
 	("mkv", mkv),
 	("ts", ts),
 	("flv", flv),
@@ -113,6 +114,26 @@ fn container(format: ContainerFormat, data: &[u8]) -> bool {
 /// fMP4 import, as fMP4 and HLS ingest feed it.
 pub fn fmp4(data: &[u8]) -> bool {
 	container(ContainerFormat::Fmp4, data)
+}
+
+/// MP4 import, plain or fragmented, and the sample index a seekable reader builds of the same
+/// bytes, with every sample it lists read back while the reads stay within the input's size.
+pub fn mp4(data: &[u8]) -> bool {
+	if let Some((_, file)) = data.split_first()
+		&& let Ok(mut reader) = crate::container::mp4::Reader::new(std::io::Cursor::new(file))
+	{
+		// Samples may share bytes, so reading each could cost far more than the file holds.
+		let mut budget = file.len();
+		let tracks = reader.tracks().to_vec();
+		for sample in tracks.iter().flat_map(|track| &track.samples) {
+			let Some(left) = budget.checked_sub(sample.size as usize) else {
+				break;
+			};
+			budget = left;
+			let _ = reader.read(sample);
+		}
+	}
+	container(ContainerFormat::Mp4, data)
 }
 
 /// Matroska / WebM import.
@@ -268,6 +289,15 @@ pub fn seeds() -> Vec<Seed> {
 	}
 	// Small writes too, so the corpus covers an atom split across reads.
 	add("fmp4", 100, bbb);
+
+	for mp4 in [
+		&include_bytes!("container/mp4/test_data/faststart.mp4")[..],
+		include_bytes!("container/mp4/test_data/bframes.mp4"),
+		bbb,
+	] {
+		add("mp4", 0, mp4);
+	}
+	add("mp4", 100, include_bytes!("container/mp4/test_data/faststart.mp4"));
 
 	add("mkv", 0, include_bytes!("container/mkv/test_data/opus.webm"));
 	add("mkv", 100, include_bytes!("container/mkv/test_data/opus.webm"));

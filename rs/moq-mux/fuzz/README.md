@@ -1,16 +1,16 @@
 # Fuzzing moq-mux
 
 Coverage-guided fuzzing of the media parsers an untrusted publisher reaches: the fMP4,
-Matroska, MPEG-TS, and FLV importers (fMP4, HLS, SRT, and RTMP ingest), the Annex-B and
-AV1 OBU splitters, the CMAF fragment decoder, and the hang and MSF catalog consumers
-(catalog subscription).
+regular MP4, Matroska, MPEG-TS, and FLV importers (fMP4, HLS, SRT, and RTMP ingest, and
+media files), the regular MP4 sample index, the Annex-B and AV1 OBU splitters, the CMAF
+fragment decoder, and the hang and MSF catalog consumers (catalog subscription).
 
 ```bash
 cargo install --locked cargo-fuzz
 just rs fuzz fmp4
 ```
 
-The targets are `fmp4`, `mkv`, `ts`, `flv`, `cmaf`, `annexb`, and `catalog`. Extra
+The targets are `fmp4`, `mp4`, `mkv`, `ts`, `flv`, `cmaf`, `annexb`, and `catalog`. Extra
 arguments pass through to libFuzzer, so `just rs fuzz fmp4 -- -max_total_time=300`
 bounds a run.
 
@@ -38,8 +38,9 @@ symbol stripping. Prefix direct calls with
 
 ## Input framing
 
-- `fmp4`, `mkv`, `ts`, `flv`: a write size byte (0 for the whole input), then the
-  container bytes, written in pieces of that size as ingest reads a socket.
+- `fmp4`, `mp4`, `mkv`, `ts`, `flv`: a write size byte (0 for the whole input), then the
+  container bytes, written in pieces of that size as ingest reads a socket. `mp4` also
+  indexes the same bytes through a seekable reader first.
 - `annexb`: a selector byte whose remainder modulo 3 picks H.264, H.265, or AV1 and whose
   quotient is the write size, then the stream.
 - `cmaf`: a big-endian `u16` init segment length, the init segment, then one moof+mdat

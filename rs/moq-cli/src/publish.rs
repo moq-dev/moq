@@ -1,5 +1,5 @@
 use anyhow::Context;
-use moq_mux::container::{flv, fmp4, ts};
+use moq_mux::container::{flv, fmp4, mp4, ts};
 
 /// Container format read from stdin on the import (source) side.
 #[derive(Clone, Copy)]
@@ -8,6 +8,8 @@ pub enum PublishFormat {
 	H264,
 	/// Fragmented MP4 (CMAF), republished whole as CMAF when `cmaf`.
 	Fmp4 { cmaf: bool },
+	/// Regular MP4, with its `moov` before or after its media.
+	Mp4,
 	/// MPEG-TS (transport stream), limited to one `program` of a multiplex when given.
 	Ts { program: Option<u16> },
 	/// MPEG-TS published whole, paced on `pcr_pid` when given rather than the PMT's clock.
@@ -183,6 +185,7 @@ enum PublishDecoder {
 		import: Box<moq_mux::codec::h264::Import>,
 	},
 	Fmp4(Box<fmp4::Import>),
+	Mp4(Box<mp4::Import>),
 	/// `import ts`: one program, owning its route and catalog, republished on each change of
 	/// source.
 	Ts(Box<ts::Republish>),
@@ -207,6 +210,7 @@ impl PublishDecoder {
 				import.decode(frames)?;
 			}
 			Self::Fmp4(d) => d.decode(chunk)?,
+			Self::Mp4(d) => d.decode(chunk)?,
 			Self::Ts(d) => return d.decode(chunk).map_err(suggest_program),
 			Self::TsPrograms(d) => d.decode(chunk)?,
 			Self::TsPassthrough(d) => d.decode(chunk)?,
@@ -221,7 +225,7 @@ impl PublishDecoder {
 		match self {
 			Self::Ts(d) => Some(d.stats()),
 			Self::TsPrograms(d) => Some(d.stats()),
-			Self::H264 { .. } | Self::Fmp4(_) | Self::TsPassthrough(_) | Self::Flv(_) => None,
+			Self::H264 { .. } | Self::Fmp4(_) | Self::Mp4(_) | Self::TsPassthrough(_) | Self::Flv(_) => None,
 		}
 	}
 
@@ -236,6 +240,7 @@ impl PublishDecoder {
 				FinishedDecoder::H264(Box::new(import.finish()?))
 			}
 			Self::Fmp4(d) => FinishedDecoder::Fmp4(Box::new(d.finish()?)),
+			Self::Mp4(d) => FinishedDecoder::Mp4(Box::new(d.finish()?)),
 			Self::Ts(d) => FinishedDecoder::Ts(Box::new(d.finish()?)),
 			Self::TsPrograms(d) => FinishedDecoder::TsPrograms(Box::new(d.finish()?)),
 			Self::TsPassthrough(d) => FinishedDecoder::TsPassthrough(Box::new(d.finish()?)),
@@ -249,6 +254,7 @@ impl PublishDecoder {
 		match self {
 			Self::H264 { import, .. } => import.abort(err),
 			Self::Fmp4(d) => d.abort(err),
+			Self::Mp4(d) => d.abort(err),
 			Self::Ts(d) => d.abort(err),
 			Self::TsPrograms(d) => d.abort(err),
 			Self::TsPassthrough(d) => d.abort(err),
@@ -261,6 +267,7 @@ impl PublishDecoder {
 enum FinishedDecoder {
 	H264(Box<moq_mux::container::Finished<moq_mux::catalog::hang::Container, hang::catalog::VideoConfig>>),
 	Fmp4(Box<fmp4::Finished>),
+	Mp4(Box<mp4::Finished>),
 	Ts(Box<ts::republish::Finished>),
 	TsPrograms(Box<ts::programs::Finished>),
 	TsPassthrough(Box<ts::passthrough::Finished>),
@@ -282,7 +289,7 @@ impl FinishedDecoder {
 		match self {
 			Self::Ts(d) => Some(d.stats()),
 			Self::TsPrograms(d) => Some(d.stats()),
-			Self::H264(_) | Self::Fmp4(_) | Self::TsPassthrough(_) | Self::Flv(_) => None,
+			Self::H264(_) | Self::Fmp4(_) | Self::Mp4(_) | Self::TsPassthrough(_) | Self::Flv(_) => None,
 		}
 	}
 
@@ -290,6 +297,7 @@ impl FinishedDecoder {
 		match self {
 			Self::H264(import) => import.abort(err),
 			Self::Fmp4(d) => d.abort(err),
+			Self::Mp4(d) => d.abort(err),
 			Self::Ts(d) => d.abort(err),
 			Self::TsPrograms(d) => d.abort(err),
 			Self::TsPassthrough(d) => d.abort(err),
@@ -463,6 +471,10 @@ impl Publish {
 				let timebase = catalog.timebase();
 				let fmp4 = fmp4::Import::new(broadcast.clone(), timebase.reserve()).with_cmaf(*cmaf);
 				PublishDecoder::Fmp4(Box::new(fmp4))
+			}
+			PublishFormat::Mp4 => {
+				let timebase = catalog.timebase();
+				PublishDecoder::Mp4(Box::new(mp4::Import::new(broadcast.clone(), timebase.reserve())))
 			}
 			PublishFormat::Ts { .. } | PublishFormat::TsPassthrough { .. } => unreachable!("handled above"),
 			// FLV's 32-bit milliseconds wrap after 49 days, which its importer does not follow,
@@ -2429,11 +2441,13 @@ pub(crate) mod tests {
 		// Longer than the two seconds a live TS catalog waits on to measure its mux rate.
 		const TS: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/scte35/bbb5s.ts");
 		const FMP4: &[u8] = include_bytes!("../../moq-mux/src/container/fmp4/test_data/av1.mp4");
+		const MP4: &[u8] = include_bytes!("../../moq-mux/src/container/mp4/test_data/bframes.mp4");
 		for (format, input) in [
 			(PublishFormat::Ts { program: None }, TS),
 			(PublishFormat::TsPassthrough { pcr_pid: None }, TS),
 			(PublishFormat::Fmp4 { cmaf: false }, FMP4),
 			(PublishFormat::Fmp4 { cmaf: true }, FMP4),
+			(PublishFormat::Mp4, MP4),
 		] {
 			let origin = moq_tokio::origin::spawn();
 			let consumer = origin.consume();

@@ -11,6 +11,7 @@ use crate::Result;
 enum ContainerImpl<E: crate::container::ts::Catalog = ()> {
 	// Boxed because it's a large struct and clippy complains about the size.
 	Fmp4(Box<crate::container::fmp4::Import<E>>),
+	Mp4(Box<crate::container::mp4::Import<E>>),
 	Mkv(Box<crate::container::mkv::Import<E>>),
 	Ts(Box<crate::container::ts::Import<E>>),
 	Flv(Box<crate::container::flv::Import<E>>),
@@ -24,6 +25,7 @@ impl<E: crate::container::ts::Catalog> ContainerImpl<E> {
 	) -> Self {
 		match format {
 			ContainerFormat::Fmp4 => Self::fmp4(broadcast, reserved),
+			ContainerFormat::Mp4 => Self::Mp4(Box::new(crate::container::mp4::Import::new(broadcast, reserved))),
 			ContainerFormat::Mkv => Self::mkv(broadcast, reserved),
 			ContainerFormat::Ts => Self::ts(broadcast, reserved),
 			ContainerFormat::Flv => Self::flv(broadcast, reserved),
@@ -49,6 +51,7 @@ impl<E: crate::container::ts::Catalog> ContainerImpl<E> {
 	fn decode(&mut self, data: &[u8]) -> Result<()> {
 		match self {
 			ContainerImpl::Fmp4(decoder) => decoder.decode(data),
+			ContainerImpl::Mp4(decoder) => decoder.decode(data),
 			ContainerImpl::Mkv(decoder) => decoder.decode(data),
 			ContainerImpl::Ts(decoder) => Ok(decoder.decode(data)?),
 			ContainerImpl::Flv(decoder) => decoder.decode(data),
@@ -58,6 +61,7 @@ impl<E: crate::container::ts::Catalog> ContainerImpl<E> {
 	fn finish(self) -> Result<FinishedImpl<E>> {
 		Ok(match self {
 			ContainerImpl::Fmp4(decoder) => FinishedImpl::Fmp4(Box::new(decoder.finish()?)),
+			ContainerImpl::Mp4(decoder) => FinishedImpl::Mp4(Box::new(decoder.finish()?)),
 			ContainerImpl::Mkv(decoder) => FinishedImpl::Mkv(Box::new(decoder.finish()?)),
 			ContainerImpl::Ts(decoder) => FinishedImpl::Ts(Box::new(decoder.finish()?)),
 			ContainerImpl::Flv(decoder) => FinishedImpl::Flv(Box::new(decoder.finish()?)),
@@ -67,6 +71,7 @@ impl<E: crate::container::ts::Catalog> ContainerImpl<E> {
 	fn abort(self, err: moq_net::Error) {
 		match self {
 			ContainerImpl::Fmp4(decoder) => decoder.abort(err),
+			ContainerImpl::Mp4(decoder) => decoder.abort(err),
 			ContainerImpl::Mkv(decoder) => decoder.abort(err),
 			ContainerImpl::Ts(decoder) => decoder.abort(err),
 			ContainerImpl::Flv(decoder) => decoder.abort(err),
@@ -85,6 +90,7 @@ impl<E: crate::container::ts::Catalog> ContainerImpl<E> {
 	fn seek(&mut self, start: u64) -> Result<()> {
 		match self {
 			ContainerImpl::Fmp4(decoder) => decoder.seek(start),
+			ContainerImpl::Mp4(decoder) => decoder.seek(start),
 			ContainerImpl::Mkv(decoder) => decoder.seek(start),
 			ContainerImpl::Ts(decoder) => decoder.seek(start).map_err(Into::into),
 			ContainerImpl::Flv(decoder) => decoder.seek(start),
@@ -138,7 +144,7 @@ impl<E: crate::container::ts::Catalog> Container<E> {
 	///
 	/// For a caller that knows the source's segmentation out of band (an HLS import following its
 	/// playlist). An fMP4 source that carries `styp` atoms declares its own, so this is only
-	/// needed when it doesn't. Ignored by container formats with no segment concept (MKV, TS, FLV).
+	/// needed when it doesn't. Ignored by container formats with no segment concept (MP4, MKV, TS, FLV).
 	pub fn cut(&mut self) -> Result<()> {
 		self.inner.cut()
 	}
@@ -153,6 +159,7 @@ impl<E: crate::container::ts::Catalog> Container<E> {
 enum FinishedImpl<E: crate::container::ts::Catalog = ()> {
 	// Boxed like the importers they finished.
 	Fmp4(Box<crate::container::fmp4::Finished<E>>),
+	Mp4(Box<crate::container::mp4::Finished<E>>),
 	Mkv(Box<crate::container::mkv::Finished<E>>),
 	Ts(Box<crate::container::ts::Finished<E>>),
 	Flv(Box<crate::container::flv::Finished<E>>),
@@ -180,6 +187,7 @@ impl<E: crate::container::ts::Catalog> Finished<E> {
 	pub fn abort(self, err: moq_net::Error) {
 		match self.inner {
 			FinishedImpl::Fmp4(finished) => finished.abort(err),
+			FinishedImpl::Mp4(finished) => finished.abort(err),
 			FinishedImpl::Mkv(finished) => finished.abort(err),
 			FinishedImpl::Ts(finished) => finished.abort(err),
 			FinishedImpl::Flv(finished) => finished.abort(err),

@@ -6,12 +6,13 @@
 //! container; [`Import`] parses external fMP4 streams and [`Export`]
 //! produces them.
 
-mod edit;
+pub(crate) mod config;
+pub(crate) mod edit;
 mod export;
 mod import;
 pub(crate) mod metadata;
 mod muxer;
-mod sample;
+pub(crate) mod sample;
 mod text;
 
 pub use export::*;
@@ -51,11 +52,24 @@ const MAX_FRAGMENT_SAMPLES: u64 = (MAX_METADATA_BYTES / 16) as u64;
 /// of samples.
 pub(crate) const FRAGMENT_SAMPLE_BASE: u64 = 4096;
 
+/// The largest `moov` a regular MP4 reader holds.
+///
+/// A regular MP4's `moov` indexes every sample, so it grows with the file, well past
+/// [`MAX_METADATA_BYTES`]: about 5 MB for two hours of 30 fps video with 48 kHz AAC. This allows
+/// about a day of it. The reader checks a size against the file's length before reading it.
+pub(crate) const MAX_MOOV_BYTES: u64 = 128 * 1024 * 1024;
+
+/// The most media a regular MP4 import holds before its `moov` arrives.
+///
+/// A file with its `moov` last says where its samples lie only after all of them, so a streamed
+/// import holds them until then. A seekable reader reads the `moov` first instead.
+pub(crate) const MAX_PENDING_BYTES: usize = 64 * 1024 * 1024;
+
 /// The most tracks [`Import`] accepts from one `moov`, refused before any is created.
 ///
 /// Each track costs about 16 KiB to parse and set up, and keeps its catalog entry and output
 /// state for as long as the import runs. Real files declare a handful.
-const MAX_TRACKS: usize = 256;
+pub(crate) const MAX_TRACKS: usize = 256;
 
 #[cfg(test)]
 mod export_test;
@@ -410,6 +424,38 @@ pub enum Error {
 	/// A file to repair is not a recording that an MP4 export left unfinished.
 	#[error("not an unfinished mp4 recording: {0}")]
 	Unrepairable(&'static str),
+
+	/// A regular MP4's `moov` is larger than a file reader holds.
+	#[error("moov declares {0} bytes, more than the {MAX_MOOV_BYTES} a file reader accepts")]
+	MoovTooLarge(u64),
+
+	/// A box the reader needs runs past the end of the file.
+	#[error("the {0} box runs past the end of the file")]
+	BoxPastEnd(String),
+
+	/// A track's sample tables don't describe where its samples lie.
+	#[error("invalid sample table: {0}")]
+	InvalidSampleTable(&'static str),
+
+	/// The tracks declare more samples than the file holds bytes, which no file does.
+	#[error("the tracks declare {0} samples, more than the file holds")]
+	TooManyFileSamples(u64),
+
+	/// A sample lies outside the media the file holds.
+	#[error("a sample of {size} bytes at byte {offset} lies outside the file's media")]
+	SampleOutsideMedia {
+		/// Where the sample starts in the file.
+		offset: u64,
+		/// The sample's size.
+		size: u32,
+	},
+
+	/// A regular MP4 streamed into an import holds more media ahead of its `moov` than the
+	/// import holds.
+	#[error(
+		"more than {MAX_PENDING_BYTES} bytes of media precede the moov; read the file through a seekable mp4::Reader"
+	)]
+	MediaBeforeMoov,
 }
 
 impl Error {
