@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- An H.264 MP4 or fMP4 sample entry's catalog size comes from its SPS, which says what the decoder outputs, as the Annex-B import's does, and from the entry's width and height only when no SPS parses. A file can declare 640x359 in its entry for pictures its SPS codes as 640x360.
 - A TS import's catalog goes out with the first media instead of waiting two seconds to measure `mpegts.muxRate`, which arrives as a catalog update once a PCR window measures it. An export with no `with_mux_rate` waits up to one window for it before it subscribes the tracks, so a padded export still starts padded; a variable-rate source costs it that one wait.
 - [**breaking**] Declare per-track archive durations from GOP hints or the first completed record.
 - [**breaking**] Update the re-exported `mp4_atom` to 0.17, whose `Trun.entries` is now `Trun.samples`: a run without per-sample fields decodes as a count, so a moof of field-less runs no longer materializes an entry per sample before import refuses it. Read entries with `trun.samples.iter()` and build them with `samples: entries.into()`. `TrunEntry::cts` widens to `i64` (a version 0 offset is unsigned), `EsDescriptor` gains its optional fields, and `Dref.urls` becomes typed `entries`. `Dops` gains `channel_mapping: Option<OpusChannelMapping>` (`None` for family 0).
