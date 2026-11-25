@@ -60,6 +60,7 @@ For each object in subgroup order:
 
 The stream is never terminated: a publisher MUST NOT emit a final DEFLATE block, and a consumer MUST treat a final block as malformed and abandon the subgroup.
 A consumer decompresses incrementally without treating absent end-of-stream as truncation, and MUST abandon the remainder of a subgroup if any object is missing.
+A publisher sends each object's compressed bytes unchanged, so a FETCH starting partway through a subgroup returns objects that decompress only after the subgroup's earlier ones; a consumer not holding those MUST fetch from the subgroup's first object.
 The compression level is a publisher choice.
 
 
@@ -137,6 +138,7 @@ All three values are even (bare varints) and sit outside the Mandatory Track Pro
 - A relay inflates for a peer whose transport does not declare compression.
 - Datagram tracks are not compressed and carry no Inflated Size.
 - A consumer rejects an object that inflates to other than its declared size, or that ends in a final block.
+- A FETCH from partway through a compressed subgroup returns its objects as compressed; a consumer lacking the earlier objects fetches from the first.
 
 # Acknowledgments
 {:numbered="false"}

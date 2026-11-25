@@ -477,7 +477,8 @@ Consumers MUST ignore renditions with unrecognized `kind`; a missing string `kin
 
 ## Discontinuities
 - On audio/video tracks, a group containing a single empty codec payload is a walk-now discontinuity marker (consumers MUST NOT pass it to a decoder); a zero-byte object is malformed (except in `raw`, where an empty codec payload is a zero-byte object), as is a marker sharing a group with another object.
-- On data tracks (where empty payloads are valid data), the discontinuity marker is a group of one zero-byte object.
+- On data tracks (container-framed tracks that are neither audio nor video, e.g., text and {{moqmpegts}} verbatim tracks), where empty payloads are valid data, the discontinuity marker is a group of one zero-byte object.
+- `json` and `binary` tracks ({{data}}) carry no container, so a zero-byte frame there is a payload (e.g., an empty `binary` snapshot), never a marker.
 - Publishers pausing on a track that may resume SHOULD emit a discontinuity marker when stopping so the preceding group does not appear live across the pause.
 
 ## Ordering and Splicing

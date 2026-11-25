@@ -64,7 +64,7 @@ Submit an [issue](https://github.com/moq-dev/moq/issues) or [PR](https://github.
 {::boilerplate bcp14-tagged}
 
 This document uses {{mpeg2}} terminology for PID, PSI, PAT, PMT, PES, descriptor, section, and `stream_type`, and {{hang}} terminology for broadcast, track, group, and frame.
-A **verbatim** track carries an undecoded elementary stream byte-for-byte.
+A **verbatim** track carries an undecoded elementary stream byte-for-byte except for its clocks ({{verbatim-timestamps}}).
 
 
 # Introduction {#introduction}
@@ -210,6 +210,7 @@ A frame's timestamp is the placement time of its first byte on the catalog clock
 PCRs unwrap to the `2^33` era nearest the media PTS and apply the media's clock shift; in programs with no media stream, the first PCR anchors the shift and retains its era across wraps for any media added later.
 Data before the first PCR or past a lone PCR is dropped.
 For `pesPacket`, PTS and DTS are shifted modulo `2^33` preserving prefix and marker bits (leaving the PES CRC valid because it covers the previous packet's data bytes).
+For `verbatim`, a SCTE-35 {{scte35}} `splice_info_section` (`table_id` `0xFC`) with a valid `CRC_32` adds the shift to `pts_adjustment` modulo `2^33` and recomputes `CRC_32`, so its splice times stay on the shifted media clock; other sections pass unchanged.
 
 A publisher MUST refuse:
 
@@ -246,7 +247,7 @@ A new group starts at:
 
 - a packet with `random_access_indicator` set on the clock program's first video PID (or clock PID if there is no video);
 - a clock-PID PCR discontinuity ({{passthrough-timestamps}});
-- the first PCR at least 1 second of PCR time after the group start; or
+- the first PCR at least 1 second of PCR time after the group start or, before the first group, after the first PCR following the clock program's PMT (restarting at a PCR discontinuity), so a source without `random_access_indicator` still starts; or
 - the frame that would exceed a publisher-chosen group size cap (without splitting frames).
 
 `randomAccess` is `true` only while the PAT lists one program, its PMT declares at most one video stream, the clock PID is that PMT's `PCR_PID`, and every group so far began at `random_access_indicator`.
@@ -278,7 +279,7 @@ An MSF catalog lists the raw hang-framed `passthrough` track only inside `mpegts
 | `mpeg2tsProgramNumber`, `mpeg2tsPcrPid`, `mpeg2tsScte35Pid` | extracted from PAT/PMT packets where {{msfts}} permits |
 | `mpeg2tsTimestampMode`, `mpeg2tsEsPid`, `mpeg2tsSiPids` | absent |
 
-When `randomAccess` is `true`, a converter extracts PAT and PMT from the packets for {{msfts}} `initDataList`.
+When `randomAccess` is `true`, a converter extracts PAT and PMT from the track's packets for {{msfts}} `initDataList`; the copies the publisher read before the first group are not carried, so a converter waits for the source to repeat them.
 
 
 # Carriage {#carriage}
@@ -303,7 +304,7 @@ A consumer rebuilding a transport stream:
 
 # Security Considerations
 All binary fields (`descriptors`, `si`, `verbatim`, `pesPacket`) and `passthrough` packets are forwarded unparsed and MUST be treated as untrusted input.
-Consumers MUST bound section counts and SI track sizes (rejecting unmanageable catalogs rather than silently truncating), range-check PIDs (13-bit), program numbers (16-bit), and stream types (8-bit), and MUST NOT emit colliding PIDs across elementary streams, SI tables, PAT, PMT, or null packets.
+Consumers MUST bound section counts and SI track sizes (rejecting unmanageable catalogs rather than silently truncating), range-check PIDs (13-bit), program numbers (16-bit), and stream types (8-bit), and MUST NOT emit two elementary streams on one PID or an SI table on the PID of PAT, PMT, null packets, or an elementary stream (SI tables MAY share a PID, as DVB SDT and BAT do on `0x0011`).
 
 Carrying `mpegts` exposes source service metadata (service/provider/network names in SI and original PID layout) to relays and readers; publishers wishing to hide provenance MUST omit the section.
 
@@ -361,6 +362,7 @@ A DVB broadcast with decoded video/audio, a verbatim SCTE-35 stream (`0x86`), an
 - Programs without media anchor on PCR, preserving its era across the wrap; rebuilding supports audio clocks and a dedicated PCR-only PID for data-only programs.
 - Added the `passthrough` member, naming a track that carries the transport stream whole, with its mapping onto MSFTS; the section's `muxRate` is that track's rate. The comparison uses MSFTS's `mpeg2ts` names.
 - Section-framed `verbatim` timestamps use PCR-derived placement at the first section byte, as whole PES do, rather than a video presentation time.
+- A `verbatim` SCTE-35 section absorbs the media's clock shift in `pts_adjustment`.
 - Added the `pesPacket` record: each frame one whole PES packet, timestamped with its placement. A consumer that predates it drops the track rather than refusing the catalog.
 - `verbatim` carries sections only, breaking -00: `framing` is required and `"section"` its only value, and `streamId` is gone. A consumer refuses a -00 catalog with `"pes"` framing or a `verbatim` record without `framing`. A publisher carries an undecoded PES stream as `pesPacket`, and refuses one it cannot carry unaltered.
 - MPEG-1/2 video and LATM AAC are named among `pesPacket` streams, and the DSM-CC types 0x0A to 0x0D among section-framed `verbatim` ones. A rebuilt PAT lists the network entry when the NIT is carried.

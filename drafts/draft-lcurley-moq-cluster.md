@@ -40,6 +40,8 @@ Submit an [issue](https://github.com/moq-dev/moq/issues) or [PR](https://github.
 **Upstream** and **downstream** are relative to the flow of an advertisement: the peer sending it is upstream and the peer receiving it is downstream.
 Two relays can be upstream of each other for different namespaces.
 
+Setup Option keys and parameter types in this document are absolute; on the wire they are delta-encoded within their block as {{moqt}} specifies.
+
 
 # Introduction
 {{moqt}} does not carry enough metadata to forward advertisements across a relay mesh: naive forwarding loops indefinitely, and a relay receiving the same namespace from multiple peers has no metric to choose between them.
@@ -104,7 +106,8 @@ An authenticated or dialed peer SHOULD receive one stable ID across reconnects a
 
 # Namespace Advertisements {#namespace}
 `HOP_PATH` and `ROUTE_COST` are Key-Value-Pair parameters ({{moqt}}).
-`PUBLISH_NAMESPACE` already carries parameters; `NAMESPACE` does not, so when any negotiated extension attaches parameters to `NAMESPACE`, one parameter block is appended in the same format as `PUBLISH_NAMESPACE` (with count `0` if none applies):
+`PUBLISH_NAMESPACE` already carries parameters, as does `NAMESPACE` from {{moqt}} draft-23, whose parameter block carries them unchanged.
+Before draft-23, `NAMESPACE` carries none, so when any negotiated extension attaches parameters to `NAMESPACE`, one parameter block is appended in the same format as `PUBLISH_NAMESPACE` (with count `0` if none applies, and no block if no such extension is negotiated):
 
 ~~~
 NAMESPACE Message (Cluster) {
@@ -268,7 +271,7 @@ Key-Value-Pair parity is load-bearing: `HOP_PATH` is odd (length-prefixed bytes)
 - A relay does not advertise a namespace because it resolved it; the publisher advertises the concrete namespace once producing.
 - Path selection ranks a session that sent GOAWAY last and breaks ties by a hash of the namespace and path before recency.
 - PUBLISH carries no cluster parameters and is not forwarded to cluster peers; tracks cross the mesh by subscription. Added an implementation status section.
-- Aligned NAMESPACE length and SUBSCRIBE_TRACKS pause guidance with moq-transport draft-23 (`Length (vi64)` and `PAUSED`).
+- Aligned NAMESPACE framing and SUBSCRIBE_TRACKS pause guidance with moq-transport draft-23 (`Length (vi64)`, NAMESPACE's own parameter block, and `PAUSED`).
 
 ## moq-cluster-01
 {:numbered="false"}
