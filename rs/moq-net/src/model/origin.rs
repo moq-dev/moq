@@ -16032,7 +16032,10 @@ mod tests {
 			pending.epoch = 1;
 		}
 		let waiter = kio::Waiter::noop();
-		assert!(first.into_inner().poll_ok(&waiter).is_ready(), "the older epoch's requester resolves");
+		assert!(
+			first.into_inner().poll_ok(&waiter).is_ready(),
+			"the older epoch's requester resolves"
+		);
 		assert!(
 			fresh.poll_ok(&waiter).is_pending(),
 			"a request selecting the newer epoch must not resolve through the older one"
