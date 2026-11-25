@@ -368,7 +368,9 @@ impl Producer {
 			return None;
 		}
 		if let Some(request) = state.requests.take(name.as_ref()) {
+			// Listed below, under the lock this holds, rather than by the accept.
 			let track = request
+				.unlisted()
 				.with_stats(self.stats.clone())
 				.homed(Home(self.state.clone()))
 				.accept(info.clone());
@@ -836,6 +838,20 @@ impl Drop for Handler {
 pub(super) struct Home(kio::Shared<BroadcastState>);
 
 impl Home {
+	/// Whether a request queued now would reach a handler: the broadcast is open and one is live.
+	pub(super) fn serves(&self) -> bool {
+		let state = self.0.read();
+		!state.closing && state.requests.has_handlers()
+	}
+
+	/// List `name` again once its request is accepted.
+	pub(super) fn list_on_accept(&self, name: Arc<str>) -> ListOnAccept {
+		ListOnAccept {
+			state: self.0.clone(),
+			name,
+		}
+	}
+
 	/// Queue `request` for a [`Requests`] to serve, as a lookup of its name would, handing it
 	/// back when none can: the broadcast ended, no handler is alive, or another track or
 	/// request holds the name.

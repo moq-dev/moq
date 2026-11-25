@@ -6655,12 +6655,14 @@ impl Alive {
 	}
 
 	/// Withdraw the track from its broadcast's listing, as one that `finished` or left
-	/// unfinished. Never under the broadcast's lock.
-	fn unlist(&self, finished: bool) {
+	/// unfinished, returning whether it was listed. Never under the broadcast's lock.
+	fn unlist(&self, finished: bool) -> bool {
 		let unlist = self.listed.lock().take();
+		let listed = unlist.is_some();
 		if let Some(unlist) = unlist {
 			unlist.unlist(finished);
 		}
+		listed
 	}
 
 	/// Note that a [`Producer`] was minted from this track, optionally under a tagged
@@ -6681,7 +6683,7 @@ impl Drop for Alive {
 		// Withdrawn before the state closes, so the track leaves the listing before a
 		// later one can take its name. It finished if its producer declared its end.
 		let finished = self.state.read().outcome.end().is_some();
-		self.unlist(finished);
+		let listed = self.unlist(finished);
 		if let Ok(mut state) = self.state.write() {
 			state.release_ingress();
 		}
@@ -6691,12 +6693,17 @@ impl Drop for Alive {
 		}
 		// Decided under the lock a lookup joins the track under: a reader either joins in
 		// time to be handed to the next producer, or finds the track closed and asks afresh.
-		let mut state = match self.state.write_unwanted() {
+		let (mut state, home) = match self.state.write_unwanted() {
 			kio::Unwanted::Idle(state) => return Self::close_unwanted(state),
-			kio::Unwanted::Wanted => match self.state.write() {
-				Ok(state) => state,
-				Err(_) => return,
-			},
+			// Asked before the track's lock, which the broadcast's precedes: a broadcast nobody
+			// serves leaves the track to end as dropped, its budget unspent.
+			kio::Unwanted::Wanted => {
+				let home = self.home.get().filter(|home| home.serves()).cloned();
+				match self.state.write() {
+					Ok(state) => (state, home),
+					Err(_) => return,
+				}
+			}
 			kio::Unwanted::Closed => return,
 		};
 		// The last producer going away ends what it declared: nothing protects its live edge
@@ -6717,7 +6724,7 @@ impl Drop for Alive {
 		}
 		// Each renewal spends the budget a reader joining refilled: a handler failing each time
 		// would otherwise loop for as long as the reader stays.
-		let Some(home) = self.home.get().cloned() else {
+		let Some(home) = home else {
 			return Self::drop_wanted(state, &self.name);
 		};
 		if std::mem::replace(state.renewal_spent.get_mut(), true) {
@@ -6731,13 +6738,17 @@ impl Drop for Alive {
 		state.publication = Publication::Pending;
 		state.handoff = resume;
 		drop(state);
-		let request = Request::renew(self.name.clone(), self.state.clone(), home.clone());
+		let mut request = Request::renew(self.name.clone(), self.state.clone(), home.clone());
+		// Listed again once served, as it was before this producer left.
+		if listed {
+			request = request.listed(home.list_on_accept(self.name.clone()));
+		}
 		let Err(request) = home.request(request) else {
 			return open.abort();
 		};
-		// Nothing will serve it again, so its readers, and those holding only an open group, end
-		// as at an abrupt teardown, resuming where this producer stopped, unless the broadcast's
-		// end already refused them.
+		// The broadcast stopped serving since it was asked, so nothing will serve it again: its
+		// readers, and those holding only an open group, end as at an abrupt teardown, resuming
+		// where this producer stopped, unless the broadcast's end already refused them.
 		open.err = Error::Dropped;
 		open.abort();
 		if let Ok(state) = request.state.write()
@@ -14209,6 +14220,13 @@ impl Request {
 	/// List the track in its broadcast once accepted: the producer reserved it.
 	pub(super) fn listed(mut self, list: broadcast::ListOnAccept) -> Self {
 		self.list = Some(list);
+		self
+	}
+
+	/// Leave the listing to the caller, which lists the track under the broadcast's lock that
+	/// an accept listing it would take again.
+	pub(super) fn unlisted(mut self) -> Self {
+		self.list = None;
 		self
 	}
 
@@ -24456,6 +24474,25 @@ mod test {
 		put(&producer, 2, Some(2000));
 		assert!(woken.load(Ordering::SeqCst), "the lower successor went unjudged");
 		assert_eq!(drain_ordered(&mut consumer), [2], "group 3 is still owed");
+	}
+
+	/// A track no handler can ask for again records the group its producer left open as
+	/// dropped, not superseded, for a subscriber still owed it.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_drop_nothing_serves_records_its_open_group_dropped() {
+		let producer = broadcast::Info::new().produce();
+		let consumer = producer.consume();
+		let track = producer.create_track("video", Info::timed()).unwrap();
+		let handle = track.consume();
+		let _reader = consumer.track("video").unwrap().subscribe(None).await.unwrap();
+		let mut open = track.append_next().unwrap();
+		open.write_frame(Timestamp::from_millis(0).unwrap(), b"a".as_slice())
+			.unwrap();
+		drop((track, open));
+		let given_up = handle.with_state(|state| state?.read().given_up(0));
+		let dropped = Some(Error::Stream(StreamError::from(&Error::Dropped)));
+		assert_eq!(format!("{given_up:?}"), format!("{dropped:?}"));
 	}
 
 	/// Once a renewal's producer goes past where its predecessor stopped, the resume follows it,

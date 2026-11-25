@@ -914,6 +914,24 @@ mod tests {
 		assert_eq!(drain(&mut tracks), ["~d:b", "-b"]);
 	}
 
+	/// A listed track asked for again because its producer dropped while read is listed again
+	/// once its handler serves it.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_renewed_track_is_listed_again() {
+		let broadcast = Info::new().produce();
+		let mut requests = broadcast.requests();
+		let consumer = broadcast.consume();
+		let mut tracks = consumer.tracks().unwrap();
+		let track = broadcast.create_track("a", track::Info::timed()).unwrap();
+		let _reader = consumer.track("a").unwrap().subscribe(None).await.unwrap();
+		assert_eq!(drain(&mut tracks), ["synced", "+a"]);
+		drop(track);
+		assert_eq!(drain(&mut tracks), ["-a"]);
+		let _next = requests.assert_request().accept(track::Info::timed());
+		assert_eq!(drain(&mut tracks), ["+a"]);
+	}
+
 	/// A datagram track a consumer asked for and a handler served is not in the inventory,
 	/// as a track served on request is not.
 	#[test]
