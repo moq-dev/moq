@@ -12631,7 +12631,10 @@ mod test {
 		// The old route gives 3 up and finishes, so it ran out under its cap without it.
 		a.drop_groups(3..4, StreamError::NotFound);
 		let _finished = a.finish().unwrap();
-		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		assert!(
+			sub.poll_recv_group(&fresh()).is_pending(),
+			"only the fill may deliver 3"
+		);
 		write(&b, 3);
 		assert_eq!(drain(&mut sub, false), [3]);
 	}
@@ -14012,6 +14015,113 @@ mod test {
 		assert!(sub.poll_recv_group(&fresh()).is_pending(), "2 is owed");
 		b.skip_groups(2..3);
 		assert!(matches!(sub.poll_recv_group(&fresh()), Poll::Ready(Ok(None))));
+	}
+
+	/// A serving copy that drains cleanly before any group past the cap supersedes what the copy
+	/// it replaced holds: an unread group there, kept out by the local cap, is waited for a
+	/// budget from the drain, and the track then ends.
+	#[kio::test]
+	async fn a_clean_drain_ends_the_wait_for_a_replaced_copys_unread_group_after_a_budget() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		write(&a, 0);
+		write(&a, 1);
+		routes.serve(a.consume());
+		let budget = Duration::from_secs(1);
+		let mut sub = subscribe(&logical, budget);
+		assert_eq!(recv(&mut sub).start, 0);
+		sub.set_range(..1);
+		let b = copy();
+		routes.serve(b.consume());
+		let _b = b.finish().unwrap();
+		assert!(sub.poll_recv_group(&fresh()).is_pending(), "group 1 is still unread");
+		kio::clock::sleep(2 * budget).await;
+		assert!(matches!(sub.poll_recv_group(&fresh()), Poll::Ready(Ok(None))));
+	}
+
+	/// A backfill of the serving route goes once it delivered what it was asked for, when the
+	/// only key the local floor keeps out under the resume point is skipped: nothing is left to
+	/// ask that route, so no copy is kept for the ask.
+	#[test]
+	fn a_backfill_goes_once_every_kept_out_key_is_skipped() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		write(&a, 0);
+		a.skip_groups(1..2);
+		write(&a, 3);
+		routes.serve(a.consume());
+		let mut sub = subscribe_until(&logical, 5);
+		assert_eq!(drain(&mut sub, false), [0, 3]);
+		let mut sub = sub.with_range(2..6);
+		let b = copy();
+		write(&b, 4);
+		routes.serve(b.consume());
+		assert_eq!(drain(&mut sub, false), [4]);
+		assert!(asked_for(&b, 2), "{:?}", b.subscription());
+		write(&b, 2);
+		assert_eq!(drain(&mut sub, false), [2]);
+		assert!(!asked_for(&b, 2), "{:?}", b.subscription());
+	}
+
+	/// An unbounded reader asks the serving route for no key its local floor keeps out, so a
+	/// backfill that delivered the rest of what it was asked for goes, though it was asked from
+	/// below that floor.
+	#[test]
+	fn an_unbounded_read_keeps_no_backfill_for_a_kept_out_key() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		write(&a, 0);
+		a.drop_groups(1..2, StreamError::NotFound);
+		write(&a, 3);
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		assert_eq!(drain(&mut sub, false), [0, 3]);
+		let b = copy();
+		write(&b, 4);
+		routes.serve(b.consume());
+		assert_eq!(drain(&mut sub, false), [4]);
+		assert!(asked_for(&b, 1), "{:?}", b.subscription());
+		let mut sub = sub.with_range(2..);
+		b.drop_groups(1..2, StreamError::NotFound);
+		write(&b, 2);
+		assert_eq!(drain(&mut sub, false), [2]);
+		assert!(!asked_for(&b, 2), "{:?}", b.subscription());
+	}
+
+	/// A kept-out key is asked of the serving route alone: a copy of another route, though it
+	/// was asked for that key and stays for a group still read from it, is not asked to fill it.
+	#[kio::test]
+	async fn a_kept_out_key_is_asked_of_no_replaced_route() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		for key in [0, 1, 2] {
+			write(&a, key);
+		}
+		routes.serve(a.consume());
+		let mut sub = subscribe_until(&logical, 9);
+		assert_eq!(drain(&mut sub, false), [0, 1, 2]);
+		// Asked from 2, it never gets 3.
+		let b = received_copy();
+		let b_fills = b.requests();
+		routes.serve(b.consume());
+		write(&b, 4);
+		let held = recv(&mut sub);
+		assert_eq!(held.start, 4);
+		let c = received_copy();
+		routes.serve(c.consume());
+		write(&c, 5);
+		let mut sub = sub.with_range(4..10);
+		assert_eq!(drain(&mut sub, false), [5]);
+		assert!(asked_for(&c, 3), "{:?}", c.subscription());
+		// Past the grace, the asked copy asks its own fills, and nothing asks b's.
+		kio::clock::sleep(HOUR).await;
+		assert!(sub.poll_recv_group(&fresh()).is_pending(), "3 is owed");
+		assert!(b_fills.poll_requested_fill(&fresh()).is_pending());
+		drop(held);
 	}
 
 	/// A kept-out key the asked copy's track forgot it was told is skipped, once the pool's expiry
