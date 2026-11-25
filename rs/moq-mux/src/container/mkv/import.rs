@@ -816,9 +816,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			.checked_mul(self.timestamp_scale_ns)
 			.ok_or(Error::TimestampOverflow)?;
 
-		let duration = match laced {
-			true => Some(track.default_duration.ok_or(Error::LacingDuration)?),
-			false => None,
+		// An audio packet lasts the track's default, which bounds its group's measured end; video's
+		// follows its cadence.
+		let duration = match (laced, track.kind) {
+			(true, _) => Some(track.default_duration.ok_or(Error::LacingDuration)?),
+			(false, TrackKind::Audio) => track.default_duration,
+			(false, TrackKind::Video) => None,
 		};
 		// Validate the last timestamp before publishing any part of this block.
 		let step = duration.map(|duration| duration.as_nanos()).unwrap_or_default();

@@ -1253,6 +1253,39 @@ async fn malformed_lacing_is_refused() {
 	}
 }
 
+/// An unlaced audio block lasts the track's DefaultDuration, so a group cut at an irregular gap
+/// measures its bitrate to where its last packet ends rather than one guessed gap later.
+#[tokio::test(start_paused = true)]
+async fn unlaced_audio_bitrate_counts_the_default_duration() {
+	let mut entry = track_entry_audio_opus(1, 48_000.0, 2);
+	let MatroskaSpec::TrackEntry(Master::Full(children)) = &mut entry else {
+		unreachable!()
+	};
+	children.push(MatroskaSpec::DefaultDuration(20_000_000));
+	let payload = [0xf8; 250];
+	let data = MkvBuilder::new()
+		.header("webm")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![entry])
+		.cluster(0, || {
+			// Three 20 ms packets in each 100 ms, the last after a 60 ms gap: 60 kb/s.
+			(0..15i16)
+				.flat_map(|cycle| [0, 20, 80].map(|at| simple_block(1, cycle * 100 + at, true, &payload)))
+				.collect()
+		})
+		.segment_end()
+		.build();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = super::Import::new(broadcast, catalog.reserve());
+	importer.decode(&data).unwrap();
+	let snapshot = catalog.snapshot();
+	let rendition = snapshot.audio.renditions.values().next().unwrap();
+	assert_eq!(rendition.bitrate, Some(60_000));
+	let _finished = importer.finish().unwrap();
+}
+
 /// An unlaced block's duration follows its cadence, not an unparsed track default.
 #[tokio::test(start_paused = true)]
 async fn unlaced_block_duration_does_not_use_track_default() {

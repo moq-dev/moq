@@ -364,10 +364,16 @@ export class Producer {
 	 * Close the current group without breaking the timeline, so the next frame must be a keyframe.
 	 * `end` is where its content stops, which the group ends whole at, so a reader can tell the group
 	 * starting there continues it; without one it is estimated from the frame cadence. Mirrors the
-	 * Rust `container::Producer::cut`. Throws if `end` precedes a frame of the group.
+	 * Rust `container::Producer::cut`. Throws if `end` precedes a frame of the group. An `end` at or
+	 * past the source timestamp of a keyframe moved past an earlier group's end is the source's: the
+	 * group ends at the moved keyframe instead.
 	 */
 	cut(end?: Duration) {
-		this.#close(end === undefined ? undefined : micros(end));
+		let at = end === undefined ? undefined : micros(end);
+		// Only the moved keyframe presents past a source end that covers the source frames.
+		const moved = this.#group ? this.#moved : undefined;
+		if (at !== undefined && moved && this.#end === moved[1] && at < moved[1] && at >= moved[0]) at = moved[1];
+		this.#close(at);
 	}
 
 	// Flush and close the current group at the supplied or estimated end timestamp, whole at the

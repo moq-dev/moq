@@ -128,6 +128,28 @@ test("Legacy Producer starts a keyframe inside a cut group's span at its end", a
 	]);
 });
 
+test("Legacy Producer cuts a moved keyframe's group at its source end", async () => {
+	const media = track(Time.Timescale.MICRO);
+	const subscriber = media.subscribe({ ranges: [{}] });
+	const producer = new Producer(media, new Format("audio"));
+	producer.encode(new Uint8Array([1]), Duration.micros(0), true);
+	producer.encode(new Uint8Array([1]), Duration.micros(20_000), false);
+	producer.cut(Duration.micros(40_000));
+	// Moved to 40 ms, past where this 5 ms packet ends on the source timeline.
+	producer.encode(new Uint8Array([1]), Duration.micros(30_000), true);
+	// Below the keyframe's source timestamp is still below a frame of the group.
+	expect(() => producer.cut(Duration.micros(25_000))).toThrow();
+	producer.cut(Duration.micros(35_000));
+	producer.encode(new Uint8Array([1]), Duration.micros(60_000), true);
+	producer.finish();
+
+	expect(await groups(subscriber)).toEqual([
+		{ start: 0n, end: 40_000n, frames: [0, 20_000] },
+		{ start: 40_000n, end: undefined, frames: [40_000] },
+		{ start: 60_000n, end: 80_000n, frames: [60_000] },
+	]);
+});
+
 test("Legacy Producer starts video resuming at a discontinuity's end past its marker", async () => {
 	for (const [scale, at] of [
 		[Time.Timescale.MICRO, 33_001],
