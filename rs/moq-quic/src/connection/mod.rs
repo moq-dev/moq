@@ -538,7 +538,7 @@ impl Connection {
 			self.streams.waits.register_ended(waiter);
 			return Poll::Pending;
 		}
-		self.reset_quiesced();
+		self.reset_quiesced(sending.iter().map(|&id| (id, code)).collect());
 		let pending = &mut self.spaces[SpaceId::Data].pending;
 		if !self.streams.quiesce(pending, code, &keep) && sending.is_empty() {
 			return Poll::Ready(Ok(()));
@@ -554,14 +554,18 @@ impl Connection {
 	/// send the writers' resets it held, without waiting for the peer to acknowledge what was
 	/// written. Until this or a ready poll, those resets stay held.
 	pub fn abandon_quiesce(&mut self) {
-		self.reset_quiesced();
+		let quiesced = self.streams.quiesced();
+		self.reset_quiesced(quiesced);
 	}
 
-	/// Reset every stream a quiesce stopped with its code, keeping what was written, which a peer
-	/// with RESET_STREAM_AT still hands its reader, and send those resets together with the ones
-	/// its writers asked for meanwhile.
-	fn reset_quiesced(&mut self) {
-		for (id, code) in self.streams.quiesced_open() {
+	/// Reset each of `streams` still open with its code, keeping what was written, which a peer
+	/// with RESET_STREAM_AT still hands its reader unless it stopped the stream, and send those
+	/// resets together with the ones writers of quiesced streams asked for meanwhile.
+	fn reset_quiesced(&mut self, streams: Vec<(StreamId, VarInt)>) {
+		for (id, code) in streams {
+			if !self.streams.resettable(id) {
+				continue;
+			}
 			let mut send = self.send_stream(id);
 			let written = send.offset();
 			send.reset_at(written, code).expect("a stream still sending resets");

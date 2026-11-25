@@ -13,7 +13,7 @@ use tracing::{debug, trace};
 use super::{
 	Next, Reader, Recv, Retransmits, Schedule, Send, SendState, StreamHalf, ThinRetransmits,
 	lease::Rank,
-	send::{End, Error},
+	send::{End, Error, Stop},
 };
 use crate::{
 	Dir, Duration, Instant, MAX_STREAM_COUNT, Rate, Side, StreamId, TransportError, VarInt,
@@ -472,15 +472,20 @@ impl StreamsState {
 			.collect()
 	}
 
-	/// The streams a quiesce stopped that are still to be reset, each with the quiesce's code: not
-	/// reset yet, nor released by their application, which left them to finish
-	pub(crate) fn quiesced_open(&self) -> Vec<(StreamId, VarInt)> {
+	/// Whether a quiesce still has `id` to reset: not reset yet, nor released by its
+	/// application, which left it to finish
+	pub(crate) fn resettable(&self, id: StreamId) -> bool {
+		let send = self.send.get(&id).and_then(|slot| slot.as_ref());
+		send.is_some_and(|send| !send.is_reset() && !send.released)
+	}
+
+	/// The streams a quiesce stopped, which the peer has not stopped since, each with its code
+	pub(crate) fn quiesced(&self) -> Vec<(StreamId, VarInt)> {
 		self.send
 			.iter()
-			.filter_map(|(&id, slot)| {
-				let send = slot.as_ref()?;
-				let code = send.quiesced?;
-				(!send.is_reset() && !send.released).then_some((id, code))
+			.filter_map(|(&id, slot)| match slot.as_ref()?.stopped {
+				Some(Stop::Quiesce(code)) => Some((id, code)),
+				_ => None,
 			})
 			.collect()
 	}
@@ -497,8 +502,8 @@ impl StreamsState {
 			return false;
 		};
 		let send = slot.get_or_insert_with(|| Send::new(max_data));
-		if !send.is_reset() && !send.released && send.quiesced.is_none() {
-			send.quiesced = Some(code);
+		if !send.is_reset() && !send.released && send.stopped.is_none() {
+			send.stopped = Some(Stop::Quiesce(code));
 			self.waits.wake(id, Wait::Write);
 			self.waits.wake(id, Wait::End);
 		}
@@ -711,7 +716,7 @@ impl StreamsState {
 		let stream = self.send.get(&id)?.as_ref()?;
 		stream
 			.data_blocked_limit
-			.filter(|&limit| stream.is_writable() && stream.stop_reason.is_none() && limit == stream.max_data)
+			.filter(|&limit| stream.is_writable() && !stream.peer_stopped() && limit == stream.max_data)
 	}
 
 	pub(in crate::connection) fn write_control_frames(
@@ -1011,7 +1016,7 @@ impl StreamsState {
 		self.send
 			.get(&id)?
 			.as_deref()
-			.filter(|stream| !stream.is_reset() && stream.stop_reason.is_none())
+			.filter(|stream| !stream.is_reset() && !stream.peer_stopped())
 	}
 
 	/// Process the acknowledgement of stream data
@@ -1133,7 +1138,7 @@ impl StreamsState {
 	/// Wake the writer of a stream whose flow control limit just rose past what it has written
 	fn send_unblocked(&mut self, id: StreamId) {
 		let stream = self.send.get(&id).and_then(|s| s.as_ref()).unwrap();
-		if !stream.is_writable() || stream.stop_reason.is_some() {
+		if !stream.is_writable() || stream.peer_stopped() {
 			return;
 		}
 		if self.write_limit() > 0 {
@@ -1171,7 +1176,7 @@ impl StreamsState {
 
 			// If it's no longer sensible to write to a stream (even to detect an error) then don't
 			// report it.
-			if stream.is_writable() && stream.stop_reason.is_none() && stream.max_data > stream.offset() {
+			if stream.is_writable() && !stream.peer_stopped() && stream.max_data > stream.offset() {
 				self.waits.wake(id, Wait::Write);
 			}
 		}
