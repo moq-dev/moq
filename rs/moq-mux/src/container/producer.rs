@@ -144,7 +144,6 @@ pub struct Producer<C: Container, R = ()> {
 	/// Named `bandwidth` so it is not confused with the catalog-gate [`Reserved`].
 	bandwidth: Option<crate::catalog::Claim>,
 
-
 	/// The counters the catalog reports for this track, when it was created through a catalog.
 	sent: Option<std::sync::Arc<crate::stats::Sent>>,
 }

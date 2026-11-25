@@ -754,7 +754,11 @@ mod test {
 		assert!(requests.poll_requested_track(&waiter).is_pending());
 
 		drop(status);
-		assert_eq!(*listed.at_wake.lock().unwrap(), Some(false), "the entry outlived the renewal");
+		assert_eq!(
+			*listed.at_wake.lock().unwrap(),
+			Some(false),
+			"the entry outlived the renewal"
+		);
 		assert!(requests.poll_requested_track(&kio::Waiter::noop()).is_ready());
 	}
 

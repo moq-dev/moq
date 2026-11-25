@@ -6719,7 +6719,12 @@ impl Drop for Alive {
 		}
 		// A producer that served a renewal and appended nothing is not asked for again: a
 		// handler that fails at once would otherwise loop for as long as the reader stays.
-		let Some(home) = self.home.get().cloned().filter(|_| state.unproductive_renewal().is_none()) else {
+		let Some(home) = self
+			.home
+			.get()
+			.cloned()
+			.filter(|_| state.unproductive_renewal().is_none())
+		else {
 			return Self::drop_wanted(state, &self.name);
 		};
 		// A reader still wants the track, so its broadcast asks for it again, as a later lookup
