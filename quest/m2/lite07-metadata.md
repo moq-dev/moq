@@ -58,9 +58,10 @@ amended 2026-11-25 below):
   declared size without being inflated.
 - A relay serves a requested range from a payload copy only where the copy
   proves upstream would answer it the same way (the root cache rule); any
-  range the copy doesn't prove, it forwards upstream as a metadata
-  subscription and waits, holding at most one upstream subscription per mode
-  for a track. When the last payload
+  range the copy doesn't prove, it forwards upstream and waits: as a
+  metadata subscription where the upstream session carries the mode, or as
+  the payload SUBSCRIBE the next rule describes where it doesn't. It holds at
+  most one upstream subscription per mode for a track. When the last payload
   reader leaves and metadata demand remains, it opens the metadata
   subscription and closes the payload one. A metadata copy never answers a
   payload reader. This needs the payload-less FRAME's decoder and a
