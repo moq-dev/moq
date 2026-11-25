@@ -17,7 +17,7 @@ itself kept failing, which the B2 move
 ([moq-dev/moq#9625](https://github.com/moq-dev/moq/pull/9625)) changed, and no hop in between remains to fix. That
 move replaced `bucket.get` with a signed `fetch`, carrying the resume over as
 a `Range` request guarded by `If-Match` on the first response's etag; on B2,
-a cap hit means B2 kept failing instead.
+a cap hit means reads kept failing on the Worker-to-B2 path, from transport errors as well as B2 responses; the logged error shows which.
 
 Decided 2026-11-25 (maintainer, /quest-run): ✅ an agent deploys `main`'s
 Worker now with this desktop's wrangler login (rejected: waiting for the B2
