@@ -19,7 +19,7 @@ use std::sync::Mutex;
 
 use super::delivered::Delivered;
 use super::idle;
-use super::record::{Pending, Record, Report, Standing};
+use super::record::{self, Pending, Record, Report, Standing};
 use crate::ledger::{self, Ledger};
 
 use super::subscription;
@@ -1947,6 +1947,14 @@ impl TrackState {
 			Some((_, slot)) => slot.end().map_or(end, |whole| whole.max(end)),
 			None => end,
 		}
+	}
+
+	/// The span of the group held whole that `key` lies in; see [`record::Spans::whole`].
+	fn whole(&self, key: u64) -> Option<ops::Range<u64>> {
+		let (start, slot) = self.lookup.range(..=key).next_back()?;
+		// A group that presents no further still spans its own key.
+		let end = slot.end()?.max(start.saturating_add(1));
+		(end > key).then_some(*start..end)
 	}
 
 	/// When the latest group cached at `keys` landed here, `None` when none is.
@@ -8045,6 +8053,14 @@ impl Consumer {
 			.unwrap_or(end)
 	}
 
+	/// The span of the group held whole that `key` lies in; see [`record::Spans::whole`].
+	pub(super) fn whole(&self, key: u64) -> Option<ops::Range<u64>> {
+		if let Some(serving) = self.serving() {
+			return serving.whole(key);
+		}
+		self.with_state(|state| state?.read().whole(key))
+	}
+
 	/// When the latest group cached at `keys` landed; see [`Subscriber::landed`].
 	pub(super) fn landed(&self, keys: ops::Range<u64>) -> Option<crate::time::Instant> {
 		if let Some(serving) = self.serving() {
@@ -8297,6 +8313,7 @@ impl Subscribing {
 				Logical {
 					state: self.state.clone(),
 					record: Record::default(),
+					ordered: false,
 				},
 			),
 			None => Inner::Plain(Cursor::new(self.state.clone(), self.subscription.clone())),
@@ -8712,6 +8729,14 @@ enum Inner {
 struct Logical {
 	state: kio::Consumer<TrackState>,
 	record: Record,
+	/// Read in key order, counting the keys it passes as handed out.
+	ordered: bool,
+}
+
+impl record::Spans for kio::Consumer<TrackState> {
+	fn whole(&self, key: u64) -> Option<ops::Range<u64>> {
+		self.read().whole(key)
+	}
 }
 
 /// A group a [`Subscriber`] reserved without handing it out; see
@@ -11416,7 +11441,7 @@ impl Cursor {
 			let mut open = record.untold(run.clone());
 			if self.withdrawn.is_some() {
 				for (dropped, report) in record.reported.overlapping(run) {
-					if *report == Report::Dropped {
+					if matches!(report, Report::Dropped | Report::Stale) {
 						open.insert(dropped.start.max(run.start)..dropped.end.min(run.end));
 					}
 				}
@@ -12529,6 +12554,7 @@ impl Subscriber {
 		match &mut self.inner {
 			Inner::Plain(cursor) => cursor.hand_out(key, ordered),
 			Inner::Resume(resume, logical) => {
+				logical.ordered |= ordered;
 				let delivered = &mut logical.record.delivered;
 				if ordered {
 					delivered.forget_below(key);
@@ -12562,12 +12588,14 @@ impl Subscriber {
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
 				let window = &cursor.filter.window;
+				let state = &cursor.state;
 				let reader = Standing {
 					from,
 					handed,
 					ranges: window.is_settled().then(|| window.groups().cloned()).flatten(),
+					ordered: cursor.key_order,
+					spans: state,
 				};
-				let state = &cursor.state;
 				match cursor.misses.as_deref_mut() {
 					Some(misses) => cursor.record.settle(|| state.read().cache.clone(), misses, reader),
 					None => cursor.record.settle(|| state.read().cache.clone(), &mut (), reader),
@@ -12578,6 +12606,8 @@ impl Subscriber {
 					from,
 					handed,
 					ranges: resume.ranges(),
+					ordered: logical.ordered,
+					spans: &**resume,
 				};
 				let state = &logical.state;
 				logical.record.settle(|| state.read().cache.clone(), &mut (), reader)
@@ -12612,6 +12642,20 @@ impl Subscriber {
 			Inner::Resume(resume, logical) => {
 				logical.record.untell(range.clone());
 				resume.untell(range);
+			}
+		}
+	}
+
+	/// Fold nothing this reader settled as final while `held`, as its publisher's start is
+	/// unresolved: until then, it may still take a report back (see [`Self::untell`]). On a
+	/// front, every copy's record holds too, as each takes the report back.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn hold(&mut self, held: bool) {
+		match &mut self.inner {
+			Inner::Plain(cursor) => cursor.record.hold(held),
+			Inner::Resume(resume, logical) => {
+				logical.record.hold(held);
+				resume.hold(held);
 			}
 		}
 	}
@@ -33097,26 +33141,36 @@ mod test {
 		assert_eq!(subscriber.delivered_runs(), 1000);
 	}
 
-	/// A live reader of a track whose groups start at sparse keys keeps a bounded record however
-	/// long the track runs, under a pool with room to spare, whether the keys between groups
-	/// are skipped by the publisher's append or by the upstream's group end: what it settled
-	/// folds as it goes rather than waiting for pool pressure. Each kind of reader: a wire
-	/// publisher that tells each group it serves, a front's copy that tells none, and a
-	/// key-order read.
+	/// A live reader of a track whose groups start at sparse keys, each ending whole where the
+	/// next starts, keeps a bounded record however long the track runs, under a pool with room
+	/// to spare, whether the keys between groups are skipped by the publisher's append or by
+	/// the upstream's group end: what the spans prove folds as it goes rather than waiting for
+	/// pool pressure. Each kind of reader: a wire publisher that tells each group's span as it
+	/// serves it, or tells it dropped over the skip already reported there, as a publisher
+	/// whose stream failed does; a front's copy that tells none; one that never asks what it
+	/// missed; and a key-order read.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_sparse_live_track_keeps_a_bounded_record() {
 		#[derive(Clone, Copy, Debug)]
 		enum Reader {
 			Told,
+			Dropped,
 			Untold,
+			Receive,
 			Ordered,
 		}
 		const GROUPS: u64 = 2000;
 		const SPACING: u64 = 17;
 		// Live groups start well above key 0, as a timestamp does.
 		const BASE: u64 = 1_000_003;
-		for reader in [Reader::Told, Reader::Untold, Reader::Ordered] {
+		for reader in [
+			Reader::Told,
+			Reader::Dropped,
+			Reader::Untold,
+			Reader::Receive,
+			Reader::Ordered,
+		] {
 			for received in [false, true] {
 				let (producer, pool) = pooled_producer(1 << 40);
 				if received {
@@ -33130,6 +33184,7 @@ mod test {
 				let mut most = 0;
 				for n in 0..GROUPS {
 					let key = BASE + n * SPACING;
+					let span = key..key + SPACING;
 					let mut group = match received {
 						false => producer.append_group(Timestamp::from_millis(key).unwrap()).unwrap(),
 						true => producer.create_group(group::Info { start: key }).unwrap(),
@@ -33137,17 +33192,25 @@ mod test {
 					group
 						.write_frame(Timestamp::from_millis(key).unwrap(), &b"x"[..])
 						.unwrap();
-					group.finish().unwrap();
+					group.finish_at(span.end).unwrap();
+					// A GROUP_END accounts for the starts inside its span.
 					if received {
-						producer.skip_groups(key + 1..key + SPACING);
+						producer.skip_groups(key + 1..span.end);
 					}
 					match (&mut subscriber, &mut ordered) {
 						(Some(subscriber), _) => {
 							assert_eq!(drain_groups(subscriber), [key], "{reader:?} received={received}");
-							if let Reader::Told = reader {
-								subscriber.record_mut().tell(key..key + 1, Report::Settled);
+							match reader {
+								Reader::Told => subscriber.record_mut().tell(span, Report::Settled),
+								Reader::Dropped => {
+									drained_drops(subscriber);
+									subscriber.record_mut().tell(span, Report::Dropped);
+								}
+								Reader::Untold => {
+									drained_drops(subscriber);
+								}
+								_ => {}
 							}
-							drained_drops(subscriber);
 						}
 						(None, Some(ordered)) => {
 							let mut items = Vec::new();
@@ -33169,6 +33232,44 @@ mod test {
 				);
 			}
 		}
+	}
+
+	/// On a received copy, a group's SUBSCRIBE_SKIP arrives independently of the group before
+	/// it, so a skip reported past a dropped key proves nothing about it: the upstream may still
+	/// learn that key was never produced, and its skip still reaches a reader whose record has
+	/// grown meanwhile.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_skip_past_a_received_drop_still_replaces_it() {
+		const SPACING: u64 = 17;
+		const BASE: u64 = 1_000_003;
+		let (producer, _pool) = pooled_producer(1 << 40);
+		producer.received();
+		let mut subscriber = producer.subscribe(Subscription::default());
+		let mut group = producer.create_group(group::Info { start: BASE }).unwrap();
+		group
+			.write_frame(Timestamp::from_millis(BASE).unwrap(), &b"x"[..])
+			.unwrap();
+		group.finish_at(BASE + SPACING).unwrap();
+		producer.skip_groups(BASE + 1..BASE + SPACING);
+		assert_eq!(drain_groups(&mut subscriber), [BASE]);
+		drained_drops(&mut subscriber);
+		// Each later key dropped upstream before its stream, with the skip past it.
+		for n in 1..2000 {
+			let key = BASE + n * SPACING;
+			producer.give_up(key..key + 1, Hole::drop(StreamError::NotFound));
+			producer.skip_groups(key + 1..key + SPACING);
+			drain_groups(&mut subscriber);
+			drained_drops(&mut subscriber);
+		}
+		let upgraded = BASE + 10 * SPACING;
+		producer.skip_groups(upgraded..upgraded + 1);
+		assert_eq!(drain_groups(&mut subscriber), Vec::<u64>::new());
+		assert_eq!(
+			drained_drops(&mut subscriber),
+			[(upgraded, upgraded + 1)],
+			"the skip replaces the drop"
+		);
 	}
 
 	/// A peer that keeps moving its ranges to a disjoint single group, up or down the track,

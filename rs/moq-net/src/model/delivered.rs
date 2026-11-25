@@ -154,6 +154,11 @@ impl Delivered {
 		}
 	}
 
+	/// Each run, in order.
+	pub fn ranges(&self) -> impl Iterator<Item = std::ops::Range<u64>> + '_ {
+		self.runs.iter().map(|(first, last)| *first..last + 1)
+	}
+
 	/// One past the highest key handed out.
 	pub fn end(&self) -> Option<u64> {
 		self.runs.last_key_value().map(|(_, last)| last + 1)

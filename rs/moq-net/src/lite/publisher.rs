@@ -5525,7 +5525,7 @@ impl TrackRun {
 		let groups = bounds.groups();
 		let cap = groups.end().map_or(Bound::Unbounded, Bound::Excluded);
 		// The FIN of a covered subscription is the wire's to send, below.
-		let track = track.with_range((Bound::Included(floor), cap)).parked();
+		let mut track = track.with_range((Bound::Included(floor), cap)).parked();
 
 		// Lite03 and Lite04 declare no end, so neither side could settle on a drop.
 		let start = match ctx.version.has_track_stream() {
@@ -5535,6 +5535,8 @@ impl TrackRun {
 			},
 			false => Start::Legacy,
 		};
+		// What the cursor reports before the start resolves may yet be taken back below it.
+		track.hold(start.is_unresolved());
 		let bounded = bounds.ends(ctx.version);
 		let initial = bounds.ranges.len() as u64;
 		ctx.outcomes.set_stops(&bounds.frames.stops);
@@ -6298,10 +6300,7 @@ impl TrackRun {
 		match self.ctx.version.has_skip() {
 			// Every drop is final before lite-07.
 			false => Report::Settled,
-			true => match hole {
-				Hole::Skip => Report::Skip,
-				Hole::Drop { .. } => Report::Dropped,
-			},
+			true => Report::of(hole),
 		}
 	}
 
@@ -6590,6 +6589,7 @@ impl TrackRun {
 		let Start::Unresolved { first, skipped } = std::mem::replace(&mut self.start, Start::Resolved(start)) else {
 			unreachable!("resolved once");
 		};
+		self.track.hold(false);
 		debug_assert!(first.is_none(), "a held group is taken before it resolves");
 		// Only groups: the subscriber derives the start frame from its own request
 		// (see `lite::SubscribeStart`).

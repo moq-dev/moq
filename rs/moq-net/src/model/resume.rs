@@ -59,6 +59,7 @@ use crate::{Error, Result, StreamError, group, stats, track};
 
 use super::delivered::Delivered;
 use super::idle::{Idle, Walk};
+use super::record;
 use super::subscription::{
 	Accounted, Budget, Containing, Cover, Holdings, Joining, Position, Resolved, Subscription, Unheld, Window,
 };
@@ -593,6 +594,7 @@ impl Consumer {
 				generation: None,
 				copies: Vec::new(),
 				newest: None,
+				held: false,
 				skipped: RangeSet::new(),
 				resumed: None,
 				refused: None,
@@ -771,6 +773,8 @@ struct Copy {
 	resolved: BTreeMap<u64, Resolved>,
 	/// Replaced by a newer route.
 	replaced: bool,
+	/// Its record folds nothing as final; see [`track::Subscriber::hold`].
+	held: bool,
 	/// Capped when replaced, at the boundary the copy replacing it starts at, or for a
 	/// backfill at the groups it fills: nothing past this group is taken from it or asked of
 	/// it. Unset while it serves.
@@ -1048,6 +1052,14 @@ impl Copy {
 		};
 	}
 
+	/// Hold its record unfolded while `held`, once subscribed and from then on.
+	fn hold(&mut self, held: bool) {
+		self.held = held;
+		if let Sub::Ready(sub) = &mut self.sub {
+			sub.hold(held);
+		}
+	}
+
 	/// The subscription, once the copy answered. `Err` once it refused.
 	fn poll_ready(&mut self, groups: (u64, Option<u64>), waiter: &kio::Waiter) -> Poll<Result<&mut track::Subscriber>> {
 		if let Sub::Pending(pending) = &self.sub {
@@ -1061,6 +1073,7 @@ impl Copy {
 				))
 				.parked();
 			self.sub = Sub::Ready(Box::new(sub));
+			self.hold(self.held);
 		}
 		let Sub::Ready(sub) = &mut self.sub else { unreachable!() };
 		Poll::Ready(Ok(sub))
@@ -1247,6 +1260,14 @@ impl Subscriber {
 /// it has stopped reading would otherwise keep its old priority upstream.
 #[derive(Clone)]
 pub(super) struct Mirror(Weak<Mutex<Reader>>);
+
+/// The groups the serving copy holds whole, which is what the reader reads.
+impl record::Spans for Subscriber {
+	fn whole(&self, key: u64) -> Option<std::ops::Range<u64>> {
+		let serving = self.reader().copies.last().map(|copy| copy.track.clone());
+		serving?.whole(key)
+	}
+}
 
 impl Mirror {
 	pub(super) fn sync(&self) {
@@ -1561,6 +1582,16 @@ impl Subscriber {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn untell(&mut self, range: std::ops::Range<u64>) {
 		self.reader().untell(range)
+	}
+
+	/// Hold every copy's record unfolded while `held`; see [`track::Subscriber::hold`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(super) fn hold(&mut self, held: bool) {
+		let mut reader = self.reader();
+		reader.held = held;
+		for copy in &mut reader.copies {
+			copy.hold(held);
+		}
 	}
 
 	/// Assign the local read floor and exclusive cap; see [`track::Subscriber::with_range`].
@@ -2057,6 +2088,8 @@ struct Reader {
 	copies: Vec<Copy>,
 	/// The newest group handed out: a switch's boundary is never below it.
 	newest: Option<u64>,
+	/// Every copy's record folds nothing as final; see [`track::Subscriber::hold`].
+	held: bool,
 	/// The skipped run from the start of each key run the local floor or cap keeps out of a gap
 	/// under the serving copy's resume point, recorded as the copies declare it, so it outlives
 	/// the copy and the cache that held it. Only that run, at most two a gap however many routes
@@ -2526,6 +2559,7 @@ impl Reader {
 			resume,
 			resolved,
 			replaced: false,
+			held: self.held,
 			until: None,
 			cap: None,
 			done: None,
@@ -3532,6 +3566,7 @@ impl Reader {
 			// Bounded from the start: everything it may deliver is older than what the reader
 			// already read, so it is waited for no longer than the reader's budget.
 			replaced: true,
+			held: self.held,
 			until: Some(lowered.end.checked_sub(1)),
 			cap: None,
 			since: Some(track.now()),
@@ -8338,7 +8373,9 @@ mod test {
 		let mut most = 0;
 		for n in 0..2000 {
 			let key = BASE + n * SPACING;
-			write(&a, key);
+			let mut group = a.create_group(group::Info { start: key }).unwrap();
+			group.write_frame(ts(key), b"x".as_ref()).unwrap();
+			group.finish_at(key + SPACING).unwrap();
 			let mut items = Vec::new();
 			while let Poll::Ready(Ok(Some(item))) = sub.poll_next_item(&waiter) {
 				items.push(match item {
@@ -8347,7 +8384,8 @@ mod test {
 				});
 			}
 			assert_eq!(items, [key]);
-			// The group's end, read after the group, as its stream delivers it.
+			// The starts its GROUP_END accounts for, read after the group, as its stream
+			// delivers it.
 			a.skip_groups(key + 1..key + SPACING);
 			most = most.max(pool.recorded() / crate::model::record::RUN_OVERHEAD);
 		}
