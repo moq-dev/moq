@@ -38,11 +38,14 @@ Recommendations:
 - Order: B2 buckets and keys, then `main`'s writers and the `release`
   backport, then the copy from R2, then the Worker deploy (`just infra nix
   deploy`). A tag pushed between the writer switch and the deploy reaches B2
-  and is served once the Worker moves. A tag job that started before the
-  backport merged still pushes to R2 from its tag's workflow, so run the
-  copy only once `gh run list --workflow release-nix.yml` shows no such run
-  in progress, and before deleting R2, list `nix-moq-dev` against the B2
-  bucket and copy any object B2 lacks.
+  and is served once the Worker moves. A tag run uses its tag commit's
+  workflow, so one started before the backport, or a tag on a pre-backport
+  commit, still pushes to R2. Once the backport lands, wait until
+  `gh run list --workflow release-nix.yml --status queued` and
+  `--status in_progress` (each with `--limit 1000`) list nothing, then
+  revoke the `NIX_R2_*` write tokens so any later such run fails loudly
+  instead of writing to R2. Only then copy, and before deleting R2, list
+  `nix-moq-dev` against the B2 bucket and copy any object B2 lacks.
 - Keep the Worker's release-then-CI order and its rule that an unavailable
   read is a miss sent with `no-store`, mapped from R2's error codes to B2's
   5xx answers. Prefer a small, maintained SigV4 signer such as aws4fetch to a
