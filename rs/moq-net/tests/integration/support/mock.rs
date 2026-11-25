@@ -293,6 +293,15 @@ impl poll::SendStream for MockSendStream {
 		}
 	}
 
+	fn reset_at(&mut self, offset: &u64, code: u32) {
+		if !self.done {
+			self.done = true;
+			self.resets.lock().unwrap().push(code);
+			*self.line.reset.lock().unwrap() = Some(self.conn.arrival());
+			self.inner.reset_at(offset, code);
+		}
+	}
+
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>> {
 		if self.conn.hold_fins.load(Ordering::Relaxed) {
 			return Poll::Ready(Err(ready!(poll::Session::poll_closed(&self.session, waiter))));

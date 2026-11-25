@@ -11,8 +11,9 @@
   key ran out.
 - An application can encrypt a single track it already holds under a name
   both ends agree on, without the broadcast wrapper choosing the name.
-- A publisher run is identified by moq-net's `Instance`; there is no
-  separate `Epoch` type.
+- A publisher is identified by the moq-net `Instance` it announces, minted
+  or the application's own stable one; there is no separate `Epoch` type,
+  and a restart under a stable Instance never reuses a key.
 - The wrapper's names and signatures match moq-net's, in Rust and JS.
 - The payload is ciphertext plus tag with no compression metadata, and a
   credential names its profile.
@@ -36,6 +37,17 @@ Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit):
   dropping the broadcast wrappers and name hiding).
 - ✅ `e2ee::Epoch` becomes `moq_net::Instance` (rejected: renaming it
   `e2ee::Instance` and keeping UUIDv7; documenting the difference).
+- ✅ The producer takes the caller's Instance, or mints one when the caller
+  gives none, and the key scope binds no epoch (2026-11-24, maintainer,
+  kixel.ai's [git over MoQ](https://github.com/kixel-ai/kixel.ai/blob/main/quest/m2/git/README.md)
+  planning; rejected: minting an Instance per generation, which leaves an
+  application that names its publisher by a stable Instance unable to
+  encrypt, as kixel's git broadcasts do with each device's endpoint ID;
+  binding lite-07's epoch too, since readers stitch every route of one
+  Instance without seeing its epoch). Per-group keys need nothing more:
+  `with_instance` (`rs/moq-net/src/model/origin.rs`) requires that group
+  starts never restart within an Instance, so a restarted publisher derives
+  only keys it never used.
 - ✅ Wrapper fixes: `abort` takes an error, `create_group` is deleted, the
   subscribe shape and names match moq-net, `name()` means one thing, and
   `Config`, `Frame`, `Datagram`, and `Event` are `#[non_exhaustive]`.
@@ -132,8 +144,12 @@ types, and the vectors regenerate once):
   moq-net track and the semantic name. Raw seal and open with caller-chosen
   identities stay private, as the epic decided: the claim is what makes
   nonce reuse unrepresentable.
-- Instance: `credential.produce(..)` mints a `moq_net::Instance`,
-  `generation.instance()` returns it, and `consume` takes one. Delete
+- Instance: `credential.produce(..)` takes an optional `moq_net::Instance`
+  and mints one when given none, `generation.instance()` returns it, and
+  `consume` takes one. Confirm that a datagram track's key index cannot
+  repeat within an Instance across restarts, as group starts cannot; if it
+  can, stop and report, since no epoch reaches the subscriber to separate
+  runs. Delete
   `Epoch`, `epoch.json`, and `uuid`. The wrapper cannot see whether the
   route was announced with that Instance (a producer's
   `broadcast::Info.instance` is `None`), so say in the docs what a

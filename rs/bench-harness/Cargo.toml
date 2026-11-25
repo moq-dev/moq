@@ -1,6 +1,6 @@
 [package]
 name = "bench-harness"
-description = "Media over QUIC - Criterion, instrumented by CodSpeed under `cargo codspeed`"
+description = "Media over QUIC - Criterion, instrumented by CodSpeed's crates under `cfg(codspeed)`"
 authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"

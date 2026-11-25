@@ -23,6 +23,18 @@ nightly.yml --branch main --event schedule`), never a dispatch on a branch.
 
 ## Plan
 
+Decided 2026-11-24 (maintainer, /quest-run on
+[moq-dev/moq#9558](https://github.com/moq-dev/moq/pull/9558)): ✅ after the
+first warm scheduled Nightly on mbx 1.31.0, which ships
+[jdx/mr-boxington#951](https://github.com/jdx/mr-boxington/pull/951), post
+its per-OS cache summaries to
+[jdx/mr-boxington#950](https://github.com/jdx/mr-boxington/discussions/950)
+as the after-numbers for #951 (rejected: posting nothing upstream). Reread
+that repository's AI policy before posting; the disclosure rules in the
+draft below still apply. A dispatched pair of runs on `main` already showed
+1.31.0 reading R2 (488, 26 and 158 hits across its three cached jobs, run
+45525263480), but only scheduled runs count here.
+
 Decided 2026-11-13 (maintainer, /quest-complete): ✅ after the first
 scheduled Nightly past [#8631](https://github.com/moq-dev/moq/pull/8631),
 add the Windows numbers to
@@ -325,8 +337,8 @@ over the 10 GiB default that #951's half-budget prefetch cap splits). The
 drafted issue below was not filed and is obsolete.
 
 What the after-#8631 nights must show here, read from the same summaries
-the [failed-puts quest](/quest/m0/ci/mbx-failed-puts.md) already collects for
-its own after-measurement:
+the failed-puts measurement collected (closed with
+[#8763](https://github.com/moq-dev/moq/pull/8763)):
 
 - Windows: settled on 11-14 (above). Later nights only need to confirm
   that the hits hold once the expiry wave passes.
@@ -378,7 +390,3 @@ placeholder with the first night after #8631.
   and count the Nightly jobs that rebuilt a crate the expiry deleted, listing as unknown any it cannot attribute. This count waits until the 7-day rule has run for at least 7 days,
   so the shorter window has data. Bring the lifecycle back to the
   maintainer only if that count argues for lengthening it.
-
-## Related
-
-- [The Rust cache stops paying for uploads R2 refuses](/quest/m0/ci/mbx-failed-puts.md) - measures the same bucket's requests and also reports to mbx upstream

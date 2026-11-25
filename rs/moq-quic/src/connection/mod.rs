@@ -507,6 +507,77 @@ impl Connection {
 		}
 	}
 
+	/// End every stream either side may still send on, except `keep`, and wait until both ends are
+	/// through
+	///
+	/// Each stream the application opened or accepted first stops taking writes, and once the peer
+	/// acknowledged everything written to them, each is reset with `code` and gets one
+	/// STOP_SENDING with it, so the peer reads what was written ahead of any end. A stream is done
+	/// once the peer acknowledged the reset, or every byte of a finish, and its final size arrived
+	/// with a reset or FIN. A stream waiting to be accepted is left alone but keeps this waiting:
+	/// accept it, and keep it by passing it in `keep` or let the next poll end it. The readers and
+	/// writers keep their streams, and learn of the ends by using them: a writer sees its stream
+	/// stopped with `code`, as if the peer had stopped it, and its own reset is held with the
+	/// others. Ready once none is left open, or with the reason the connection was lost first. A
+	/// peer that keeps opening streams keeps this waiting, so bound the wait, and call
+	/// [`Self::abandon_quiesce`] when it runs out.
+	pub fn poll_quiesce(&mut self, waiter: &kio::Waiter, code: VarInt, keep: &[StreamId]) -> Poll<Result<(), Error>> {
+		if let Some(err) = self.streams.waits.lost() {
+			return Poll::Ready(Err(err.clone()));
+		}
+		// The peer's stalled streams can fill `keep`, so look it up in constant time.
+		let keep: rustc_hash::FxHashSet<StreamId> = keep.iter().copied().collect();
+		let sending = self.streams.sending(&keep);
+		// The writers stop, and what they wrote reaches the peer before any stream ends, so it
+		// reads that, such as a refusal, ahead of the resets and stops, whatever the packets do.
+		let mut unacked = false;
+		for &id in &sending {
+			unacked |= self.streams.stop_for_writer(id, code);
+		}
+		if unacked {
+			self.streams.waits.register_ended(waiter);
+			return Poll::Pending;
+		}
+		self.reset_quiesced(sending.iter().map(|&id| (id, code)).collect());
+		let pending = &mut self.spaces[SpaceId::Data].pending;
+		if !self.streams.quiesce(pending, code, &keep) && sending.is_empty() {
+			return Poll::Ready(Ok(()));
+		}
+		// A stream the peer opens, or either half of one ending, may change the answer.
+		self.streams.waits.register_ended(waiter);
+		self.streams.waits.register_accept(Dir::Uni, waiter);
+		self.streams.waits.register_accept(Dir::Bi, waiter);
+		Poll::Pending
+	}
+
+	/// Give up a [`Self::poll_quiesce`] that is not ready, with the same `code` and `keep`: reset
+	/// now the streams it stopped, send the writers' resets it held, and ask the peer to end the
+	/// streams it sends on, without waiting for the peer to acknowledge what was written. Until
+	/// this or a ready poll, those resets and stops stay held.
+	pub fn abandon_quiesce(&mut self, code: VarInt, keep: &[StreamId]) {
+		let quiesced = self.streams.quiesced();
+		self.reset_quiesced(quiesced);
+		let keep: rustc_hash::FxHashSet<StreamId> = keep.iter().copied().collect();
+		self.streams
+			.quiesce(&mut self.spaces[SpaceId::Data].pending, code, &keep);
+	}
+
+	/// Reset each of `streams` still open with its code, keeping what was written, which a peer
+	/// with RESET_STREAM_AT still hands its reader unless it stopped the stream, and send those
+	/// resets together with the ones writers of quiesced streams asked for meanwhile.
+	fn reset_quiesced(&mut self, streams: Vec<(StreamId, VarInt)>) {
+		for (id, code) in streams {
+			if !self.streams.resettable(id) {
+				continue;
+			}
+			let mut send = self.send_stream(id);
+			let written = send.offset();
+			send.reset_at(written, code).expect("a stream still sending resets");
+		}
+		self.streams
+			.release_quiesced_resets(&mut self.spaces[SpaceId::Data].pending);
+	}
+
 	/// Provide control over streams
 	#[must_use]
 	pub fn recv_stream(&mut self, id: StreamId) -> recv::Stream<'_> {

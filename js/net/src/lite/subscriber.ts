@@ -481,7 +481,7 @@ export class Subscriber {
 		return this.#goaway?.peek() !== undefined;
 	}
 
-	// A route ranks last once the peer has asked us to leave. A later announce on a
+	// A route ranks below every available one once the peer has asked us to leave. A later announce on a
 	// draining session must not win selection, however cheap the path it advertises.
 	#drained(route: WireRoute): WireRoute {
 		return this.#goingAway() ? { ...route, draining: true } : route;

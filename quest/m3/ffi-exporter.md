@@ -3,7 +3,7 @@
 ## Goal
 
 moq's bindings (Kotlin, Swift, Python, Go, Dart, C++, and C) come from
-[rust2's exporter](https://github.com/moq-dev/rust2/blob/main/quest/m1/ffi-export/README.md)
+[rust2's exporter](https://github.com/kixel-ai/rust2/blob/main/ffi/README.md)
 (`rust2-ffi`), which exports moq's crates' `pub` API as a C ABI with no
 attributes. moq-ffi shrinks to the remainder that is genuinely new API.
 `rs/uniffi-bindgen`, `nix/uniffi-dart-*`, the per-generator pins, and the
@@ -17,7 +17,7 @@ re-export may change.
 
 Decided 2026-11-02 (maintainer, /quest-unblock): moq skips rust2's UniFFI fork and switches straight to the
 exporter. rust2 decided on 2026-10-25, from
-[moq-dev/rust2#41](https://github.com/moq-dev/rust2/pull/41), that the exporter
+[kixel-ai/rust2#41](https://github.com/kixel-ai/rust2/pull/41), that the exporter
 replaces the fork, which stays in maintenance; publishing `rust2-uniffi` to
 crates.io would commit permanent names to code already slated for
 retirement, and switching moq to it would be churn on the way to the
@@ -31,8 +31,16 @@ exporter's generators and needs re-checking against its design. The fork-era
 choices (UniFFI as the base, a hard fork in rust2 published as the
 `rust2-uniffi*` crates) no longer apply: the fork is not published, and
 moq-ffi builds on the exporter's pinned revision with no `[patch]` and no git
-dependency, so crates.io moq-ffi still builds (see the
-[condition quest](/quest/m3/rust2-exporter.md)).
+dependency, so crates.io moq-ffi still builds: rust2-ffi is a build tool from
+rust2's flake, and the crate it generates depends only on crates.io packages
+and the facade.
+
+The exporter is ready (checked 2026-11-22): rust2's exporter epic finished with
+[kixel-ai/rust2#955](https://github.com/kixel-ai/rust2/pull/955), which added
+the flake package moq pins, `github:kixel-ai/rust2/<rev>#ffi`, and
+[kixel-ai/rust2#956](https://github.com/kixel-ai/rust2/pull/956), its last
+child. rust2's README lists every generator moq ships. The package wraps
+rust2-ffi with rust2's std sysroot, so moq's stable cargo runs it.
 
 - **Generated code stays identical**: Kotlin package names, library symbol
   prefixes, and every wrapper's API do not change, except Dart's
@@ -42,7 +50,7 @@ dependency, so crates.io moq-ffi still builds (see the
   only expected differences.
 - **C names** (maintainer, 2026-10-24 and 2026-10-25): rust2's C generator
   names in GLib style
-  ([moq-dev/rust2#66](https://github.com/moq-dev/rust2/pull/66)).
+  ([kixel-ai/rust2#66](https://github.com/kixel-ai/rust2/pull/66)).
   Types are CamelCase with the namespace prefix (`MoqError`, `MoqStringList`,
   enum tags `<Enum>Tag`, async callbacks `<Function>Callback`), functions and
   enum constants keep their names, and any remaining clash fails generation
@@ -66,7 +74,7 @@ dependency, so crates.io moq-ffi still builds (see the
 - rust2's C backend still refuses `Duration`, which moq-ffi's audio configs
   use (moq's current generator accepts it), so the fork must accept it before
   the switch can generate C.
-- **One pin**: rust2 becomes a flake input, and `flake.nix`, the release
+- **One pin**: rust2 becomes a flake input, its `ffi` package the exporter, and `flake.nix`, the release
   workflows, `rs/moq-ffi/build.sh`, and `sh/` read the generators from it.
   Delete `rs/uniffi-bindgen`, the "five places" comments in `flake.nix`, and the
   `nix/uniffi-dart-*` lockfile and patch. The `sh/{kt,swift,dart,cpp}`
@@ -102,6 +110,43 @@ dependency, so crates.io moq-ffi still builds (see the
     exactly what `package.py init` writes and a rust2 pin bump is a re-init
     (rejected: hand-editing moq's copy to the existing `bot` environment;
     renaming the template's environment in rust2 to moq's name).
+- **Dart FFI release** (from
+  [kixel-ai/rust2#915](https://github.com/kixel-ai/rust2/pull/915), kept by the
+  maintainer 2026-11-22 for planning here): `moq_ffi` becomes the pub package
+  the export writes in `dart/`, with rust2's shared build hook, released by the
+  `pub` job that the same `package.py init` writes. That job publishes through
+  pub.dev's automated publishing on the `moq-ffi-v*` tags, after the GitHub
+  release hosts the libraries the package's `hook/release.json` names by size
+  and SHA-256; without that file, as in a checkout, the hook builds the crate
+  with Cargo. The package name is the library's prefix, so it stays `moq_ffi`.
+  It lands in the switch, not after it, since the re-init brings the `pub`
+  job, which would publish beside `release-dart-ffi.yml`, and deleting UniFFI
+  removes what generates today's package.
+  - Point `moq_ffi`'s automated publishing on pub.dev at a new `pub`
+    environment (tag pattern `moq-ffi-v{{version}}`), deployable only from
+    `moq-ffi-v*` tags, as `swift-mirror` above; `release-dart-ffi.yml` uses
+    `pub.dev` today. An
+    agent can make the change by driving the maintainer's signed-in Chrome.
+  - Delete `dart/moq_ffi` (its hook, `pubspec.yaml`, packaging, and tests that
+    the export replaces), `dart/uniffi.toml`, `release-dart-ffi.yml`, its
+    packaging in `sh/dart/package.sh`, and its leg of the shared native build
+    (`release-shared-ffi.yml`, `sh/gh/ffi.test.ts`). The `moq` wrapper
+    (`dart/moq`, `release-dart.yml`) stays, depending on the published
+    `moq_ffi` and, in a checkout, on the export's `dart/` by path.
+  - Consumers lose what rust2 rejected in #915: the hook's `user_defines`
+    override of the library (a checkout builds from source instead), the
+    `x86_64-apple-ios` simulator library (Intel Macs; the source build still
+    maps it), and the `.sha256` release assets (`release.json` pins them).
+    Floors are Flutter's defaults, Android 24, iOS 13.0, and macOS 10.15, and
+    the Dart SDK stays at 3.10. List the changes in `moq_ffi`'s `MIGRATE.md`.
+  - Decided 2026-11-25 (maintainer, /quest-run): ✅ `moq_ffi` accepts rust2's
+    pub package as it is, losing these three, as for Python and Swift, so a
+    pin bump stays a re-init and every binding ships one way (rejected:
+    adding `x86_64-apple-ios` to rust2's builder; keeping moq's own hook
+    beside the export's).
+  - [Dart on iOS](/quest/m4/dart-ios.md)'s verdict then applies to rust2's
+    package: dropping the iOS targets, if it comes to that, is a change in
+    rust2's builder rather than in `release-dart-ffi.yml`.
 - Zero-default durations (Decided 2026-11-03 (maintainer, follow-up planning after the 2026-11-03 /quest-afk and /quest-complete runs), from
   [moq-dev/moq#7697](https://github.com/moq-dev/moq/pull/7697)): the
   exporter gives generated duration fields a zero default, so a bare C++
@@ -122,7 +167,7 @@ dependency, so crates.io moq-ffi still builds (see the
   [kixelated/uniffi-dart#7](https://github.com/kixelated/uniffi-dart/pull/7)
   carries Dart's nested input-scratch cleanup (`71dc9f8b`) and disposal status
   reservation (`a2751c4c`).
-  [moq-dev/rust2#364](https://github.com/moq-dev/rust2/pull/364) mirrors them
+  [kixel-ai/rust2#364](https://github.com/kixel-ai/rust2/pull/364) mirrors them
   into the maintenance fork. The exporter's generators must retain these
   behaviors too, rechecking each against their design before the switch.
 - Update the quests that name a `kixelated/uniffi-*` fork
@@ -182,16 +227,7 @@ generated C type names become CamelCase, the generated record
 `MoqAudioEncoderFinished` becomes `MoqAudioEncoderFinish` in every language,
 Dart's `MoqRoute.instanceId()` takes the exporter's name, the FFI Swift module
 becomes `MoqFfi`, moq-ffi's floors rise to Python 3.11, macOS 13, and Swift
-6.2 with no sdist, and any other generated name the wrappers re-export may
-change, each listed in the PR.
+6.2 with no sdist, `moq_ffi` loses its `user_defines` override and its
+x86_64 iOS simulator library, and any other generated name the wrappers
+re-export may change, each listed in the PR.
 Wire: none.
-
-## Required
-
-- [rust2's exporter is ready for moq](/quest/m3/rust2-exporter.md) - the exporter generates every language moq ships and moq can pin it
-
-## Related
-
-- [Payload bytes](https://github.com/moq-dev/rust2/blob/main/quest/m1/ffi-bytes.md) - the first patch the fork carries
-- [Kotlin calls](https://github.com/moq-dev/rust2/blob/main/quest/m1/kt-ffi-calls.md) - a Kotlin generator patch the fork carries
-- [Foreign poll for hot reads](https://github.com/moq-dev/rust2/blob/main/quest/m1/ffi-poll-protocol.md) - a generated poll protocol the fork carries; dropping a future at cancel is optional here, since no moq quest waits on it
