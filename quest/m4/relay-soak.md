@@ -28,6 +28,10 @@ Agent's choices, for the implementer to revisit:
   an absolute ceiling, which would track the host.
 - Cover both backends the relay ships, tokio and io_uring.
 - It never gates a merge, as benchmarks do not (2026-10-20, maintainer).
+- Reuse the steady run's sampler and slope judge,
+  [`test/lib/growth.py`](/test/lib/growth.py) (VmRSS, `/proc` I/O, and the
+  exact jemalloc heap a `jemalloc` build logs on SIGUSR1, judged by its
+  Theil-Sen slope after warm-up), adding descriptors and tasks as measures.
 
 Public API: none. Wire: none.
 
@@ -37,5 +41,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [One steady broadcast stops growing](/quest/m1/steady-broadcast-growth.md) - builds the steady-state slope judge this soak reuses
 - [Relay allocations](/quest/m9/perf/relay-allocs.md) - steady-state allocation cost, where this measures growth
