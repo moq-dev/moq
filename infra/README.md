@@ -283,8 +283,8 @@ rebuilds only the crates whose source, features, or dependencies changed. The ot
 platforms have no Smoke nix lane. Runtime warms serialize: the active run
 finishes and new pushes replace only the pending run, avoiding duplicate
 builds without starving publication or delaying the dev-shell matrix.
-Its lifecycle rule (`infra/nix/lifecycle.json`) deletes each object 14 days
-after upload. `nix copy` never re-uploads a path the bucket already has, so a
+Its lifecycle rule (`infra/nix/lifecycle.json`) hides each object 14 days
+after its newest upload and deletes it a day later. `nix copy` never re-uploads a path the bucket already has, so a
 path many commits reuse keeps its first upload's age. Each job therefore
 records the store paths it pushed under `roots/<commit>/`, the runtime job its
 dependency crates too, since no runtime closure references them, then copies every
@@ -303,8 +303,10 @@ delete a superseded or expired version a day later.
 
 The Worker logs a read B2 answers with a 5xx or 429, or never answers, and
 treats it as a miss: the other bucket can still serve the path, and otherwise
-the 404 is non-cacheable so Nix builds from source. Any other answer, such as a
-rejected key, fails the request. A body that fails after it starts streaming
+the 404 is non-cacheable so Nix builds from source. A 401 or 403, a rejected
+key, fails the request; the account sets no storage or download cap (Caps &
+Alerts), which would otherwise also answer 403. Any other refusal, such as a
+key too long, is a plain miss. A body that fails after it starts streaming
 resumes with a ranged read guarded by the first response's etag (a few times,
 then the stream errors), since a reset connection makes Nix disable the whole
 cache for a minute.
@@ -350,8 +352,9 @@ done.
    `infra/nix/lifecycle.json`: "Keep only the last version" for
    `nix-moq-dev`, and one custom rule (empty prefix, hide after 14 days,
    delete a day later) for `nix-ci-moq-dev`. After editing the file,
-   `just infra nix lifecycle <bucket>` applies it with that bucket's write
-   key in `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`.
+   apply it with `just infra nix lifecycle <bucket>`, given a short-lived
+   Read and Write key for that bucket in `AWS_ACCESS_KEY_ID` and
+   `AWS_SECRET_ACCESS_KEY`; delete the key afterward.
 
 3. **Admit the release tags to `cache-write`**, which the Rust build cache
    bootstrap created:
@@ -367,19 +370,20 @@ done.
    Application Key), each allowed one bucket, since the console offers one
    bucket or all of them. Each shows its keyID and applicationKey once; put
    them straight into their secrets, with no other copy. To rotate one,
-   create a new key, replace its secrets, then delete the old key. The
+   create a new key, replace its secrets, check reads or pushes, then delete
+   the old key. The
    console's Read and Write keys also carry `writeBuckets`, so a writer could
    change its bucket's settings; only `cache-write` jobs hold them.
 
-   - `nix-release-read` and `nix-ci-read`, **Read Only**, for the Worker:
+   - `nix-release-read` and `nix-ci-read`, **Read Only**, for the Worker.
+     Set each pair in one request, since each secret change deploys, and a
+     Worker signing with one key's ID and another's secret fails every read:
 
      ```bash
      cd infra/nix
-     bun wrangler secret put B2_RELEASE_ACCESS_KEY_ID      # nix-release-read
-     bun wrangler secret put B2_RELEASE_SECRET_ACCESS_KEY
-     bun wrangler secret put B2_CI_ACCESS_KEY_ID           # nix-ci-read
-     bun wrangler secret put B2_CI_SECRET_ACCESS_KEY
-     just infra nix deploy   # nix.moq.dev
+     # {"B2_RELEASE_ACCESS_KEY_ID": "<keyID>", "B2_RELEASE_SECRET_ACCESS_KEY": "<applicationKey>"}
+     bun wrangler secret bulk   # reads the JSON from stdin; again for B2_CI_*
+     just infra nix deploy      # nix.moq.dev
      ```
 
    - `nix-release-write` and `nix-ci-write`, **Read and Write**, for

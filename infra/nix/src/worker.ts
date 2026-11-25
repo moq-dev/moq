@@ -68,6 +68,12 @@ function unavailable(status: number): boolean {
 	return status === 429 || status >= 500;
 }
 
+// Drops a body the Worker won't forward. One that already failed has nothing
+// left to drop, and its failure must not end the bucket fallback.
+async function discard(response: Response): Promise<void> {
+	await response.body?.cancel().catch(() => {});
+}
+
 // Resumes a body B2 fails to finish. The response already sent its status and
 // Content-Length, so the only other outcome is a reset connection, which Nix
 // answers by disabling the whole cache for a minute. Resumes are capped per
@@ -114,11 +120,11 @@ function resume(
 						headers: { Range: `bytes=${sent}-`, "If-Match": first.etag },
 					});
 					if (next.status === 412) {
-						await next.body?.cancel();
+						await discard(next);
 						return controller.error(new Error(`object changed mid-read: ${key}`));
 					}
 					if (next.status !== 206 || !next.body) {
-						await next.body?.cancel();
+						await discard(next);
 						throw new Error(`ranged read answered ${next.status}`);
 					}
 					if (cancelled) return next.body.cancel();
@@ -157,7 +163,9 @@ export default {
 
 		let failed = false;
 		for (const { name: bucket, client } of buckets(env)) {
-			const url = `${ENDPOINT}/${bucket}/${key}`;
+			// aws4fetch signs a `+` in the path as a space, which S3 doesn't, so
+			// encode it.
+			const url = `${ENDPOINT}/${bucket}/${key.replaceAll("+", "%2B")}`;
 			let response: Response;
 			try {
 				response = await client.fetch(url, { method: request.method });
@@ -166,24 +174,31 @@ export default {
 				failed = true;
 				continue;
 			}
-			if (response.status === 404 || unavailable(response.status)) {
-				await response.body?.cancel();
+			// A rejected signature or key is a deploy error. The account sets no
+			// download cap, so B2 has no other reason to answer this way.
+			if (response.status === 401 || response.status === 403) {
+				await discard(response);
+				throw new Error(`${bucket} rejected the read of ${key}: ${response.status}`);
+			}
+			if (response.status !== 200) {
+				await discard(response);
 				// Treat an unavailable read as a miss, so the other bucket can still
 				// serve the path and Nix otherwise builds it from source without
-				// disabling the cache.
-				if (response.status !== 404) {
+				// disabling the cache. Any other answer refuses the request's key,
+				// such as one too long, and is a plain miss.
+				if (unavailable(response.status)) {
 					console.error(`Nix cache read unavailable: ${bucket}/${key} answered ${response.status}`);
 					failed = true;
 				}
 				continue;
 			}
 
-			// Anything else, such as a rejected key, is a deploy error.
-			const size = Number(response.headers.get("Content-Length"));
+			const length = response.headers.get("Content-Length");
+			const size = length ? Number(length) : Number.NaN;
 			const etag = response.headers.get("ETag");
-			if (response.status !== 200 || !Number.isSafeInteger(size) || !etag) {
-				await response.body?.cancel();
-				throw new Error(`${bucket}/${key} answered ${response.status} without a usable length and etag`);
+			if (!Number.isSafeInteger(size) || !etag) {
+				await discard(response);
+				throw new Error(`${bucket}/${key} answered without a usable length and etag`);
 			}
 
 			const headers = {

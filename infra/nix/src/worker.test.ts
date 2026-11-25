@@ -86,6 +86,35 @@ describe("bucket reads", () => {
 		await expect(worker.fetch(request(), env)).rejects.toThrow("403");
 	});
 
+	test("a key B2 refuses is a plain miss", async () => {
+		const ci = mock((_: Request) => found("signed metadata", 15));
+		b2({ release: () => new Response("KeyTooLong", { status: 400 }), ci });
+		const response = await worker.fetch(request(), env);
+		expect(response.status).toBe(200);
+		expect(ci).toHaveBeenCalledTimes(1);
+	});
+
+	test("a plus in the key is sent encoded, as it is signed", async () => {
+		const fetch = b2({});
+		await worker.fetch(request("log/abc-libsigc++-2.drv"), env);
+		const url = (fetch.mock.calls[0][0] as Request).url;
+		expect(url).toBe("https://s3.us-east-005.backblazeb2.com/nix-moq-dev/log/abc-libsigc%2B%2B-2.drv");
+	});
+
+	test("a failed error body still falls back to the other bucket", async () => {
+		const broken = new ReadableStream({ start: (c) => c.error(new Error("reset")) });
+		const ci = mock((_: Request) => found("signed metadata", 15));
+		b2({ release: () => new Response(broken, { status: 503 }), ci });
+		spyOn(console, "error").mockImplementation(() => {});
+		const response = await worker.fetch(request(), env);
+		expect(response.status).toBe(200);
+	});
+
+	test("a hit without a length is a configuration error", async () => {
+		b2({ release: () => new Response(new Blob(["abc"]).stream(), { status: 200, headers: { ETag: '"a"' } }) });
+		await expect(worker.fetch(request(), env)).rejects.toThrow("length");
+	});
+
 	test("a missing secret is a configuration error", async () => {
 		// Even when the release bucket would have served the path.
 		b2({ release: () => found("signed metadata", 15) });

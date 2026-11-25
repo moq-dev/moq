@@ -38,9 +38,11 @@ What remains, in order:
    can) and copy to B2 whatever it lacks; `rclone copy --files-from <keys>
    --no-traverse --http-url https://nix.moq.dev :http: b2:nix-moq-dev`
    reads them through the Worker while it still serves R2.
-3. Right after #9625 lands, `just infra nix deploy` (the Worker reads B2
-   from then on), so Smoke's pinned commit, which the first `cache.yml` run
-   pushes to B2, substitutes.
+3. Once #9625 lands, wait for its first successful `cache.yml` run, which
+   pushes to B2, then `just infra nix deploy` (the Worker reads B2 from then
+   on). Smoke pins the newest commit with a successful Cache run
+   (`just gh cache-rev`), and only B2 holds that commit's closure once the
+   run finishes, while R2 holds the one before.
 4. In a fresh `docker.io/nixos/nix` container, `nix run
    github:moq-dev/moq/<tag>#moq-relay --accept-flake-config -- --version`
    builds nothing for a copied tag (`moq-relay-v0.17.18` already did, through
