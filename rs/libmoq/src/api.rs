@@ -934,7 +934,8 @@ pub struct moq_range {
 }
 
 /// Which of a subscription's groups comes first, as the publisher sends them and a read in
-/// arrival order returns those held. Zero is the default.
+/// arrival order returns those held. Zero is the default. Before moq-lite-07 the publisher
+/// sends newest first whatever this asks.
 #[repr(C)]
 #[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug)]

@@ -232,7 +232,8 @@ typealias Range = uniffi.moq.MoqRange
 
 /**
  * Which group comes first, as the publisher sends them and `recvGroup` returns those held:
- * `ASCENDING` or `DESCENDING`.
+ * `ASCENDING` or `DESCENDING`. Before moq-lite-07 the publisher sends newest first whatever this
+ * asks.
  */
 typealias Order = uniffi.moq.MoqOrder
 

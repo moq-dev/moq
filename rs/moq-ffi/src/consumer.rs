@@ -85,7 +85,8 @@ pub struct MoqSubscription {
 	#[uniffi(default = None)]
 	pub ranges: Option<Vec<MoqRange>>,
 	/// Which group comes first, as the publisher sends them and `recv_group` returns those held,
-	/// or null for newest first.
+	/// or null for newest first. Before moq-lite-07 the publisher sends newest first whatever this
+	/// asks, and `recv_group` still returns those held in this order.
 	#[uniffi(default = None)]
 	pub order: Option<MoqOrder>,
 }
@@ -130,8 +131,8 @@ pub struct MoqRange {
 }
 
 /// Which of a subscription's groups comes first, as the publisher sends them and `recv_group`
-/// returns those held, mirroring
-/// [`moq_net::track::Order`].
+/// returns those held, mirroring [`moq_net::track::Order`]. Before moq-lite-07 the publisher
+/// sends newest first whatever this asks.
 #[derive(Clone, Copy, uniffi::Enum)]
 pub enum MoqOrder {
 	/// Oldest first, draining a backlog in start order.

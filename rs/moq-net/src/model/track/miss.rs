@@ -363,9 +363,10 @@ impl Misses {
 		!self.filled.is_empty()
 	}
 
-	/// The lowest group at or above `from` a fill answered, not handed out yet.
-	pub fn lowest_filled(&self, from: u64) -> Option<u64> {
-		self.filled.range(from..).next().copied()
+	/// The groups at or above `from` a fill answered and not handed out yet, lowest first,
+	/// including any evicted since that [`Self::next_filled`] has yet to prune.
+	pub fn filled_from(&self, from: u64) -> impl Iterator<Item = u64> + '_ {
+		self.filled.range(from..).copied()
 	}
 
 	/// The lowest key asked and not answered yet.

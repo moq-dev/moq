@@ -76,12 +76,10 @@ async fn round(version: &str) -> (Vec<(u64, Option<u64>)>, Option<u64>) {
 		.unwrap();
 	let mut subscriber = kio::clock::timeout(
 		TIMEOUT,
-		remote.track("video").unwrap().subscribe(
-			Subscription::default()
-				.with_ranges([Range::ALL])
-				.with_max(None)
-				.with_order(moq_net::track::Order::Ascending),
-		),
+		remote
+			.track("video")
+			.unwrap()
+			.subscribe(Subscription::default().with_ranges([Range::ALL]).with_max(None)),
 	)
 	.await
 	.expect("subscribe timeout")
@@ -96,6 +94,8 @@ async fn round(version: &str) -> (Vec<(u64, Option<u64>)>, Option<u64>) {
 		let start = group.start;
 		subscribed.push((start, read_to_end(group).await));
 	}
+	// Which of the two is read first depends on which lands first, so only the set is checked.
+	subscribed.sort();
 
 	// A second reader fetching group 0 from a hop that never held it.
 	let fetcher = produce_origin(3);

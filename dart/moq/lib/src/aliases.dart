@@ -203,6 +203,7 @@ Subscription defaultSubscription() => Subscription._(moqSubscriptionDefaults());
 typedef Range = MoqRange;
 
 /// Which group comes first, as the publisher sends them and `recvGroup` returns those held.
+/// Before moq-lite-07 the publisher sends newest first whatever this asks.
 typedef Order = MoqOrder;
 
 /// A location within a track: a group start and a frame index in it.

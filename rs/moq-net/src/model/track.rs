@@ -6119,6 +6119,16 @@ impl Producer {
 		self.state.read().start.key()
 	}
 
+	/// The cached groups' keys in the order they arrived, which no reader's Group Order changes.
+	#[cfg(all(test, feature = "async"))]
+	pub(crate) fn arrival_order(&self) -> Vec<u64> {
+		let state = self.state.read();
+		(state.arrivals_from(0))
+			.filter(|entry| state.is_current(entry.key, entry.stamp))
+			.map(|entry| entry.key)
+			.collect()
+	}
+
 	/// Evict group `key` from the cache, as expiry does.
 	#[cfg(all(test, feature = "async"))]
 	pub(crate) fn evict(&self, key: u64) {
@@ -10757,9 +10767,15 @@ impl Cursor {
 			let mut slots = state.lookup.range((*run.start()).max(from)..=*run.end());
 			slots.find(|(_, slot)| slot.is_read()).map(|(_, slot)| slot.serving())
 		});
+		// An answered group evicted or aborted since is passed over, as `next_filled` prunes it.
 		let filled = (self.misses.as_ref()).and_then(|misses| {
-			let key = misses.lowest_filled(from)?;
-			state.lookup.get(&key).map(Slot::serving)
+			misses.filled_from(from).find_map(|key| {
+				state
+					.lookup
+					.get(&key)
+					.filter(|slot| slot.serves_end())
+					.map(Slot::serving)
+			})
 		});
 		let lowest = [owed, filled]
 			.into_iter()
@@ -31039,6 +31055,40 @@ mod test {
 		assert_eq!(drain_groups(&mut subscriber), [1]);
 		assert!(dynamic.poll_requested_fill(&waiter).is_pending());
 		assert!(drained_drops(&mut subscriber).is_empty(), "nothing was given up");
+	}
+
+	/// A filled group evicted before its reader took it is passed over when finding the lowest
+	/// it holds unread, as a lite publisher's start does, so the filled group above it counts.
+	#[test]
+	#[cfg(feature = "async")]
+	fn the_lowest_unread_group_passes_over_an_evicted_fill() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let mut subscriber = producer.subscribe(replay());
+		for key in 0..4 {
+			write_group(&producer, key);
+		}
+		evict(&producer, 1);
+		evict(&producer, 2);
+		let waiter = kio::Waiter::noop();
+		let next = |subscriber: &mut Subscriber| match subscriber.poll_recv_group(&waiter) {
+			Poll::Ready(Ok(Some(group))) => group.start,
+			_ => panic!("a group is cached"),
+		};
+		assert_eq!(next(&mut subscriber), 3);
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("groups 1 and 2 are misses");
+		};
+		assert_eq!((fill.start().group, fill.end()), (1, 3));
+		write_filled(fill.accept(1, None), 1);
+		write_filled(fill.accept(2, None), 2);
+		drop(fill);
+		write_group(&producer, 4);
+		// Newest first, this read takes in the fill's answers and leaves them unread.
+		assert_eq!(next(&mut subscriber), 4);
+		assert_eq!(subscriber.lowest_unread(1).map(|group| group.start), Some(1));
+		evict(&producer, 1);
+		assert_eq!(subscriber.lowest_unread(1).map(|group| group.start), Some(2));
 	}
 
 	/// A live arrival judged on its own keeps the history a resumed copy's live floor sits

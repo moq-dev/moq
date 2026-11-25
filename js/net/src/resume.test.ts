@@ -415,6 +415,39 @@ test("a resumed reader's replaced ranges reach its serving copy", async () => {
 	}
 });
 
+test("a closed copy still holding groups hands them out in the reader's new Group Order", async () => {
+	const clock = new Manual();
+	const installed = install(clock);
+	const front = new Front();
+	const sources = [new BroadcastProducer(), new BroadcastProducer()];
+	const handles = sources.map((source) => source.consume());
+	const [ta, tb] = sources.map(copy);
+	ta.write(0n);
+	ta.write(1n);
+	front.serve(handles[0]);
+	const preferences = { delay: { max: Duration.millis(3_600_000) }, ranges: [{ start: 0n }] };
+	const sub = front.consumer.track("seq").subscribe(withMax(preferences));
+	try {
+		await clock.advance(Duration.ZERO);
+		front.serve(handles[1]);
+		await clock.advance(Duration.ZERO);
+		// The replaced copy's subscription closes with groups 0 and 1 still unread.
+		ta.producer.close();
+		await clock.advance(Duration.ZERO);
+		sub.update(withMax({ ...preferences, order: "ascending" }));
+		await clock.advance(Duration.ZERO);
+		tb.write(2n);
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([0n, 1n, 2n]);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		for (const handle of handles) handle.close();
+		for (const source of sources) source.close();
+		installed.close();
+	}
+});
+
 test("a group the window dropped above the serving copy's resume point is backfilled once ranges widen to it", async () => {
 	const clock = new Manual();
 	const installed = install(clock);

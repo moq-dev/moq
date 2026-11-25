@@ -2852,7 +2852,7 @@ impl Reader {
 		// A copy is let go as a whole, so it waits out the widest budget any group gets.
 		let budget = self.mirrored.widest();
 		let floor = if ordered { delivered.floor() } else { 0 };
-		let ascending = ordered || self.subscription.read().order == track::Order::Ascending;
+		let ascending = ordered || self.mirrored.order == track::Order::Ascending;
 		let mut first: Option<Candidate> = None;
 		let mut held = false;
 		for index in 0..self.copies.len() {

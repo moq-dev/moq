@@ -57,7 +57,8 @@ type (
 	// reaches back as far as Max allows. A nil End keeps following the live edge.
 	Range = ffi.MoqRange
 	// Order is which of a subscription's groups comes first, as the publisher sends them and
-	// RecvGroup returns those held.
+	// RecvGroup returns those held. Before moq-lite-07 the publisher sends newest first whatever
+	// this asks.
 	Order = ffi.MoqOrder
 	// Compression is how a track's frames are compressed on the wire. Build one with
 	// DeflateCompression, and compare a received one by Name; a new compression joins as a

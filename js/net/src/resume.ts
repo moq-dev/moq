@@ -1008,6 +1008,11 @@ class Reader implements ResumeSource {
 			if (this.#shell.retuned()) copy.sub.update(wire);
 			else hooks.restateSubscriber(copy.sub, wire);
 			this.#stamp(copy);
+		} else {
+			// Its ranges stay as resolved when it closed, but the groups it still holds are picked in
+			// the reader's Group Order. Mirrors the Rust `Copy::send`, which edits every copy.
+			const { priority = 0, order = "descending" } = wire;
+			hooks.editSubscriber(copy.sub, { retire: [], add: [], priority, order });
 		}
 	}
 

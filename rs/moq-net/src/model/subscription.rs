@@ -114,7 +114,8 @@ pub(crate) fn max_of(budget: Duration) -> Option<Duration> {
 }
 
 /// Which of a subscription's groups comes first: the publisher sends its pending groups in
-/// this order, and `recv_group` hands out the groups it holds in it.
+/// this order, and `recv_group` hands out the groups it holds in it. Before moq-lite-07 the
+/// publisher sends newest first whatever this asks.
 ///
 /// An order only: it never decides *whether* a group is delivered. A history
 /// range ([`Start::Time`] or [`Start::Oldest`]) delivers every group it covers, and a

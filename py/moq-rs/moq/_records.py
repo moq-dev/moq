@@ -209,6 +209,7 @@ class Subscription:
     behind before it is skipped. ``ranges`` are the spans of the track to deliver, ``None`` for
     one :class:`Range` with no start. ``order`` is which group comes first, as the
     publisher sends them and :meth:`recv_group` returns those held, ``None`` for newest first.
+    Before moq-lite-07 the publisher sends newest first whatever ``order`` asks.
 
     A bare ``Subscription()`` has moq-net's defaults, as :meth:`default` does.
     """
