@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { yieldNow } from "@moq/clock";
 import { getter, Once, race, Signal } from "@moq/signals";
+import fc from "fast-check";
 import { announcedView } from "./announced.test-util";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { askedFirst } from "./claim.test-util.ts";
@@ -204,7 +205,9 @@ test("an announced local path competes with a received route on cost", async () 
 	expect(live.peek().size).toBe(0);
 });
 
-test("a scoped route remains visible when an exact local path is outside the scope", async () => {
+// A covering reader sees a broadcast at a path its scope only overlaps, as Rust's cursor does: it
+// ranks with the routes there, so the cheaper broadcast is listed over a costlier route.
+test("a covering listing shows a broadcast at a path its scope only overlaps", async () => {
 	const origin = new Producer();
 	const path = Path.from("room");
 	const remote = wireOf(origin).receive(path, { cost: 5n });
@@ -216,10 +219,30 @@ test("a scoped route remains visible when an exact local path is outside the sco
 
 	expect((await announcedView(origin)).peek().get(path)).toMatchObject(WireRoute.default);
 	await new Promise<void>((resolve) => setImmediate(resolve));
+	expect(live.peek().get(path)).toMatchObject(WireRoute.default);
+
+	// Withdrawn, the route serving the subtree is listed again.
+	local.close();
+	await settle();
 	expect(live.peek().get(path)).toMatchObject({ cost: 5n });
 
-	local.close();
 	remote.close();
+	origin.close();
+});
+
+// A broadcast beneath a broader claim shadows it for the paths beneath the broadcast, so a covering
+// reader of those paths is shown both.
+test("a covering listing shows a broadcast that shadows a broader claim", async () => {
+	const origin = new Producer();
+	const broad = origin.claim(Path.empty());
+	const broadcast = origin.route(Path.from("room"));
+	const live = await announcedView(origin, Path.Pattern.parse("room/*"), { covering: true });
+	await settle();
+	expect([...live.peek().keys()].sort()).toEqual([Path.empty(), Path.from("room")]);
+	expect(live.peek().get(Path.from("room"))?.instance).toBe(broadcast.instance);
+	await live.close();
+	broadcast.close();
+	broad.close();
 	origin.close();
 });
 
@@ -3071,6 +3094,170 @@ test("a scope's root row leads with a claim that serves it over a broadcast abov
 	broadcast.close();
 	filed.close();
 	origin.close();
+});
+
+/** Whether `claim` was asked to serve anything, checked after the table settles. */
+function watchAsked(claim: { requested(): AsyncIterable<unknown> }): () => boolean {
+	let asked = false;
+	void (async () => {
+		for await (const _ of claim.requested()) asked = true;
+	})();
+	return () => asked;
+}
+
+// A broadcast published above a scope's root is the most specific claim on it, so the root row
+// leads with it, and a request for the root, which it does not serve, goes no further than it.
+test("a broadcast above a request shadows a broader claim, as the root row announces", async () => {
+	const origin = new Producer();
+	const broadcast = origin.route(Path.from("src"));
+	const broad = origin.claim(Path.empty());
+	const asked = watchAsked(broad);
+	const reader = origin.scope(Path.from("src/a"), Path.Prefixes.all()).consume();
+	const covering = await announcedView(reader, undefined, { covering: true });
+	await settle();
+	expect(wireOf(reader).advertised.peek()?.get(Path.empty())?.[0]?.route.instance).toBe(broadcast.instance);
+	expect(covering.peek().get(Path.empty())?.instance).toBe(broadcast.instance);
+	await covering.close();
+	const demanded = wireOf(reader).demand(Path.empty());
+	await settle();
+	expect(asked()).toBe(false);
+	await expect(demanded).resolves.toBeUndefined();
+	// The broadcast still serves its own path.
+	expect(await wireOf(origin.consume()).demand(Path.from("src"))).toBeDefined();
+	broadcast.close();
+	broad.close();
+	origin.close();
+});
+
+// A broadcast's announce and retract change what every path beneath it resolves to.
+test("a request beneath a broadcast resolves the broader claim once the broadcast goes", async () => {
+	const origin = new Producer();
+	const broad = origin.claim(Path.empty());
+	const asked = watchAsked(broad);
+	const broadcast = origin.route(Path.from("src"));
+	const request = origin.consume().request(Path.from("src/a"));
+	await settle();
+	expect(asked()).toBe(false);
+	broadcast.close();
+	await settle();
+	expect(asked()).toBe(true);
+	request.close();
+	broad.close();
+	origin.close();
+});
+
+// Rust's a_broadcast_here_shadows_a_broader_claim_shown_at_its_prefix, with a claim of the
+// broadcast's own prefix filed deeper: of one tier, a claim that serves the request outranks the
+// broadcast, unless the broadcast carries its instance at a higher epoch.
+for (const superseding of [false, true]) {
+	test(`a broadcast above a request ${superseding ? "supersedes an older epoch of its instance filed deeper" : "ranks behind a tier-mate that serves the request"}`, async () => {
+		const origin = new Producer();
+		const instance = Instance.random();
+		const filed = origin
+			.scope(Path.empty(), Path.Prefixes.parse(["src/a"]))
+			.claim(Path.from("src"), { instance: { id: instance, epoch: 1n } });
+		const broadcast = origin.route(Path.from("src"), superseding ? { instance: { id: instance, epoch: 2n } } : {});
+		const asked = watchAsked(filed);
+		const demanded = wireOf(origin.consume()).demand(Path.from("src/a/b"));
+		await settle();
+		expect(asked()).toBe(!superseding);
+		if (superseding) await expect(demanded).resolves.toBeUndefined();
+		broadcast.close();
+		filed.close();
+		origin.close();
+		await demanded.catch(() => {});
+	});
+}
+
+// Differential: a request beneath broadcasts and claims, some filed deeper than their prefix,
+// resolves to the instance a covering announcement presents for its path, or is refused when that
+// is a broadcast above it.
+test("a request resolves to the instance its covering announcement presents", async () => {
+	const root = Path.from("a/b/c");
+	const prefixes = [Path.empty(), Path.from("a"), Path.from("a/b"), root];
+	const instances = [Instance.random(), Instance.random()];
+	type Advertised = { route: { instance: Instance.Valid; epoch: bigint; cost: bigint } };
+	const route = fc.record({
+		instance: fc.constantFrom(...instances),
+		epoch: fc.bigInt({ min: 0n, max: 2n }),
+		cost: fc.bigInt({ min: 0n, max: 3n }),
+	});
+	// A broadcast's depth (1 to 3), and a claim's depth with how much deeper it is filed.
+	const broadcasts = fc.uniqueArray(fc.record({ depth: fc.integer({ min: 1, max: 3 }), route }), {
+		selector: (item) => item.depth,
+		maxLength: 3,
+	});
+	const claims = fc.array(
+		fc
+			.record({ depth: fc.integer({ min: 0, max: 3 }), deeper: fc.integer({ min: 0, max: 3 }), route })
+			.map((item) => ({ ...item, deeper: Math.min(item.deeper, 3 - item.depth) })),
+		{ maxLength: 4 },
+	);
+	const run = async (
+		published: readonly (Advertised & { depth: number })[],
+		claimed: readonly (Advertised & { depth: number; deeper: number })[],
+	) => {
+		const origin = new Producer();
+		const options = (item: Advertised) => ({
+			cost: item.route.cost,
+			instance: { id: item.route.instance, epoch: item.route.epoch },
+		});
+		const routes = published.map((item) => ({
+			...item,
+			handle: origin.route(prefixes[item.depth], options(item)),
+		}));
+		const asked: Instance.Valid[] = [];
+		const handles = claimed.map((item) => {
+			const scope = origin.scope(Path.empty(), Path.Prefixes.parse([prefixes[item.depth + item.deeper]]));
+			const handle = scope.claim(prefixes[item.depth], options(item));
+			void (async () => {
+				for await (const _ of handle.requested()) asked.push(item.route.instance);
+			})();
+			return handle;
+		});
+		const reader = origin.scope(root, Path.Prefixes.all()).consume();
+		const covering = await announcedView(reader, undefined, { covering: true });
+		const presented = covering.peek().get(Path.empty());
+		const demanded = wireOf(reader).demand(Path.empty());
+		await settle();
+		const exact = routes.find((item) => item.depth === 3);
+		const local = await Promise.race([demanded, settle().then(() => "pending" as const)]);
+		const resolved =
+			local === "pending"
+				? asked[0]
+				: local !== undefined && exact && readsFrom(local, exact.handle.broadcast)
+					? exact.handle.instance
+					: undefined;
+		// Which advertisement is presented, by its instance and epoch: a broadcast above the root
+		// serves nothing there. A broadcast above and a serving claim alike would be ambiguous.
+		const named = (item: Advertised) =>
+			presented !== undefined &&
+			item.route.instance === presented.instance &&
+			item.route.epoch === (presented.epoch ?? 0n);
+		const shadowing = routes.some((item) => item.depth < 3 && named(item));
+		await covering.close();
+		for (const item of routes) item.handle.close();
+		for (const handle of handles) handle.close();
+		origin.close();
+		await demanded.catch(() => {});
+		fc.pre(!(shadowing && (claimed.some(named) || (exact !== undefined && named(exact)))));
+		expect(resolved).toBe(shadowing ? undefined : presented?.instance);
+	};
+	await fc.assert(fc.asyncProperty(broadcasts, claims, run), { seed: 0x6d6f71, numRuns: 300 });
+});
+
+// A request pinned to an instance ranks only that instance's claims, so a broadcast of another
+// instance above it shadows nothing.
+test("a broadcast above a pinned request of another instance shadows nothing", async () => {
+	const origin = new Producer();
+	const broadcast = origin.route(Path.from("src"));
+	const broad = origin.claim(Path.empty());
+	const demanded = wireOf(origin.consume()).demand(Path.from("src/a"), broad.instance);
+	await askedFirst(Path.from("src/a"), [broad]);
+	broadcast.close();
+	broad.close();
+	origin.close();
+	await demanded.catch(() => {});
 });
 
 test("a scope's merged covering prefixes never supersede across prefixes", async () => {

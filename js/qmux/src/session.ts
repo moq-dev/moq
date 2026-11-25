@@ -375,6 +375,13 @@ export interface SendStream extends WritableStream<Uint8Array> {
 	sendOrder: number;
 	/** What the stream has written, sent, and had acknowledged so far. */
 	getStats(): Promise<SendStreamStats>;
+	/**
+	 * Non-standard: reset the stream like `abort(reason)`, but still deliver its first `offset`
+	 * bytes, which writes that already resolved must cover. The peer reads them before the reset:
+	 * a RESET_STREAM_AT when it advertised `reset_stream_at`, otherwise a RESET_STREAM sent after
+	 * them. A stream the peer already stopped, or that already ended, is left as it is.
+	 */
+	resetAt(offset: number, reason?: unknown): void;
 }
 
 /** A bidirectional stream whose send half is a {@link SendStream}. */
@@ -1519,8 +1526,12 @@ export class Session implements WebTransport {
 	}
 
 	/** Reset a stream's send half, unless it already ended: fail its writable and its
-	 *  queued frame, and send RESET_STREAM with every byte that took credit. */
-	#resetSend(id: Stream.Id, stream: StreamState, reason: Error, code: VarInt) {
+	 *  queued frame, and send RESET_STREAM with every byte that took credit.
+	 *
+	 *  The first `reliable` bytes, already on the socket, still reach the peer's reader: a
+	 *  RESET_STREAM_AT says so to a peer that accepts one, and any other gets a plain
+	 *  RESET_STREAM behind them. */
+	#resetSend(id: Stream.Id, stream: StreamState, reason: Error, code: VarInt, reliable = 0n) {
 		const finalSize = stream.send?.reset(reason);
 		if (finalSize === undefined) return;
 		const streamId = id.value.value;
@@ -1528,7 +1539,9 @@ export class Session implements WebTransport {
 			stream.writable?.error(reason);
 		} catch {}
 		this.#scheduler?.dropStream(streamId, reason);
-		this.#sendPriorityFrame({ type: "reset_stream", id, code, finalSize });
+		// Only qmux-02 advertises the parameter, so this gates the frame on the version too.
+		const at = reliable > 0n && this.#ourParams.resetStreamAt && this.#peerParams.resetStreamAt;
+		this.#sendPriorityFrame({ type: "reset_stream", id, code, finalSize, reliableSize: at ? reliable : undefined });
 		this.#reap(streamId);
 	}
 
@@ -1788,7 +1801,19 @@ export class Session implements WebTransport {
 			configurable: true,
 			value: async (): Promise<SendStreamStats> => ({ ...stats }),
 		});
-		// Both properties are defined above.
+		Object.defineProperty(writable, "resetAt", {
+			configurable: true,
+			value: (offset: number, e?: unknown) => {
+				if (send.terminal) return;
+				// Bytes not yet on the socket could still be queued behind the reset.
+				if (!Number.isSafeInteger(offset) || offset < 0 || offset > stats.bytesSent) {
+					throw new RangeError(`resetAt offset ${offset} is past the ${stats.bytesSent} bytes sent`);
+				}
+				const reason = e instanceof Error ? e : new Error("stream aborted");
+				this.#resetSend(id, stream, reason, VarInt.from(resetCode(e)), BigInt(offset));
+			},
+		});
+		// The properties are defined above.
 		return writable as SendStream;
 	}
 

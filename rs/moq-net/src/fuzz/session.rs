@@ -1018,6 +1018,15 @@ impl poll::SendStream for Recorded<memory::SendStream> {
 		self.inner.reset(code);
 	}
 
+	/// Recorded as a plain reset, which is all a replay can ask of its stream.
+	fn reset_at(&mut self, offset: &u64, code: u32) {
+		log(&self.log).push(Action::Reset {
+			stream: self.stream,
+			code: code as u8,
+		});
+		self.inner.reset_at(offset, code);
+	}
+
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>> {
 		self.inner.poll_closed(waiter)
 	}

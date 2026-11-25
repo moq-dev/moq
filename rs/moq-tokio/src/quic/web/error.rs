@@ -83,7 +83,7 @@ impl From<web_transport_proto::ConnectError> for Error {
 }
 
 /// The HTTP/3 code a closed session's streams are reset and stopped with.
-const WT_SESSION_GONE: u64 = 0x170d7b68;
+pub(crate) const WT_SESSION_GONE: u64 = 0x170d7b68;
 
 /// Why a session closed, shared by the session and its streams. The first close wins.
 ///
@@ -111,7 +111,7 @@ impl CloseReason {
 		}
 	}
 
-	fn get(&self) -> Option<Error> {
+	pub(crate) fn get(&self) -> Option<Error> {
 		self.reason.lock().unwrap().err.clone()
 	}
 

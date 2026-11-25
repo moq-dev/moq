@@ -1640,6 +1640,49 @@ test.each([
 	}
 });
 
+// Lite-07: a publisher resets a Group Stream after its header with no drop, since the header it still
+// delivers accounts for the group. The subscription's end then waits on nothing, not even the grace.
+// Mirrors the Rust `lite07_a_reset_after_the_header_delivers_it_and_names_nothing`.
+test("lite-07: a group reset after its header settles the end without a drop", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, toHop(1n));
+	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version, 1000);
+		const request = await opened(1);
+		await request.reading;
+		await respond(request, version, [{ start: answer(version, 0n) }]);
+
+		const reset = handStream(version);
+		reset.write(await liteFrame(0, new Uint8Array([1])));
+		const running = subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), reset.reader);
+		const group = await track.recvGroup();
+		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
+		reset.reset(StreamCode.Old);
+		await running;
+		expect(await group?.closed).toMatchObject({ code: StreamCode.Old });
+
+		let fin = false;
+		void request.finished.then(() => {
+			fin = true;
+		});
+		await respond(request, version, [{ end: new SubscribeEnd(1n) }]);
+		await drainReactions();
+		expect(fin).toBe(true);
+		request.inbound.close();
+		expect(await track.recvGroup()).toBeUndefined();
+		expect(await track.closed).toBeNull();
+	} finally {
+		track.close();
+		subscriber.close();
+		installed.close();
+	}
+});
+
 // Lite-07: Firefox reports a reset that lands before the page read the stream's data as a bare
 // TypeError, dropping its code. The group ends with it, as with any other reset; the drop that
 // follows names the reason.

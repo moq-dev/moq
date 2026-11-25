@@ -2,6 +2,7 @@
 // says about discovery and routing in order: as a subscriber the edits of the prefixes it asks
 // for, and as a publisher the routes and claims answering what its peer asks for.
 
+import { peerEnded } from "../error.ts";
 import { Writer } from "../stream.ts";
 import { type AnnounceBroadcast, encodeAnnounceBroadcast } from "./announce.ts";
 import { DataType } from "./stream.ts";
@@ -71,8 +72,8 @@ export class AnnounceStream {
 
 	/**
 	 * This side is leaving the session: finish the stream once everything sent is written, and
-	 * wait for the peer to take it when it carried a claim the FIN ends. A stream that never
-	 * opened stays unopened.
+	 * wait for the peer to take it when it carried a claim the FIN ends, or to stop it as it
+	 * leaves. A stream that never opened stays unopened.
 	 */
 	finish(): Promise<void> {
 		this.#finished = true;
@@ -82,7 +83,11 @@ export class AnnounceStream {
 			if (!opened) return;
 			const writer = await opened;
 			writer.close();
-			if (this.#announced) await writer.closed;
+			if (!this.#announced) return;
+			// A peer that stopped the stream as its session closed is leaving too: nothing is owed.
+			await writer.closed.catch((err: unknown) => {
+				if (!peerEnded(err)) throw err;
+			});
 		});
 		this.#tail = done.catch(() => {});
 		return done;
