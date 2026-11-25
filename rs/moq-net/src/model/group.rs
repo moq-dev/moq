@@ -782,10 +782,6 @@ struct Inflate {
 	// The first frame the read needs, pinned in `plain` until this job drops, so no shed of
 	// the inflated copy passes it.
 	keep: usize,
-	// Whether the slices' `end`s are on the pace scale every copy starting at frame 0 shares,
-	// which an inflated frame keeps for the copy that sheds it. A copy that adopted a head
-	// counts from where its log began, so its frames are off that scale.
-	scaled: bool,
 	// Each stored slice, with its declared inflated size.
 	slices: Vec<Entry>,
 }
@@ -849,7 +845,7 @@ impl Inflate {
 						},
 						fields: slice.fields.clone(),
 						inflated: 0,
-						end: if self.scaled { slice.end } else { 0 },
+						end: slice.end,
 					};
 					let cost = Plain::cost(&entry);
 					self.plain.bill.add(cost);
@@ -887,9 +883,21 @@ impl Inflate {
 
 impl Drop for Inflate {
 	fn drop(&mut self) {
-		let mut state = self.plain.lock();
-		if let Some(at) = state.pins.iter().position(|pin| *pin == self.keep) {
-			state.pins.swap_remove(at);
+		let held_back = {
+			let mut state = self.plain.lock();
+			if let Some(at) = state.pins.iter().position(|pin| *pin == self.keep) {
+				state.pins.swap_remove(at);
+			}
+			// A reclaim that visited the copy meanwhile left the frames this job pinned, and with
+			// the slices shed there is nothing else to list it for.
+			state.base < state.pinned()
+				&& state
+					.frames
+					.front()
+					.is_some_and(|entry| entry.end != 0 && entry.end <= self.pace.read())
+		};
+		if held_back {
+			self.pace.retake_inflated();
 		}
 	}
 }
@@ -1220,8 +1228,8 @@ impl GroupState {
 	///
 	/// The plain copy's own front goes with them: each inflated frame whose slice that reader
 	/// took, by the `end` it kept. A long group's tail shed leaves inflated frames past `read`
-	/// to the plain reader owed them, so the slice front does not bound this. A copy off the
-	/// scale its frames kept, one that adopted a head, leaves them.
+	/// to the plain reader owed them, so the slice front does not bound this. A copy whose
+	/// content other copies share leaves them: those readers' progress is not on its scale.
 	fn shed_taken(&mut self, read: u64) {
 		if self.outcome.error().is_some() {
 			return;
@@ -1243,8 +1251,7 @@ impl GroupState {
 		}
 		self.shed_frames(end, false);
 		if let Some(flate) = &self.flate
-			&& self.adopted.is_none()
-			&& self.offset == 0
+			&& self.content.is_none()
 		{
 			flate.plain.shed_taken(read, self.held());
 		}
@@ -1366,7 +1373,6 @@ impl GroupState {
 			pace: self.pace.clone(),
 			from,
 			keep: first,
-			scaled: self.adopted.is_none(),
 			slices: self.entries(from, last + 1).cloned().collect(),
 		})
 	}
@@ -7821,6 +7827,58 @@ mod test {
 		drop(state);
 		assert!(matches!(plain.get(0), Err(Error::Evicted)));
 		assert_eq!(group.handle.state.read().held(), 4, "the slices went too");
+	}
+
+	/// A copy whose content other copies share leaves the inflated frames alone: a sibling's
+	/// reader, on its own pace scale, may still be owed them, and cannot inflate them again.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_taken_shed_leaves_inflated_frames_shared_content_holds() {
+		let pool = cache::Pool::unbounded();
+		let (group, plain, ends) = inflated_group(&pool);
+		group.handle.activate_content().unwrap().unwrap();
+		group.handle.state.read().pace.took(ends[3]);
+
+		group.handle.shed_taken();
+		assert_eq!(plain.lock().base, 0, "a shared inflated copy was shed");
+		assert_eq!(group.handle.state.read().held(), 4, "the slices still went");
+	}
+
+	/// Once a job that pinned frames from a reclaim is done, the edge lists again for them, even
+	/// when every slice they came from is shed and its reader's progress shows nothing new.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_finished_job_relists_the_frames_it_pinned() {
+		let pool = cache::Pool::unbounded();
+		let cache = cache::Track::new(
+			pool.clone(),
+			Default::default(),
+			cache::Edges::new(Some(1 << 30)),
+			kio::Weak::new(),
+		);
+		let mut group = Producer::new(
+			Info::from(0u64),
+			track::Info::default().with_compression(crate::track::Compression::Deflate),
+			cache.clone(),
+		);
+		for index in 0..4 {
+			group
+				.write_frame(crate::Timestamp::unscaled(group.start), verbose(index))
+				.unwrap();
+		}
+		// Inflated without telling the session, so only the job's drop can list the edge.
+		take_slices(&group.handle, 3).inflate(&stats::Meter::default());
+		let end = group.handle.state.read().entry(3).unwrap().end;
+		// Taken before the copy is the live edge, so it lists nothing; a reclaim that visited
+		// it meanwhile would have left it unlisted the same way.
+		group.handle.state.read().pace.took(end);
+		group.handle.state.write().ok().unwrap().charge.promote();
+		assert!(!cache.listed());
+
+		let job = take_slices(&group.handle, 2);
+		assert!(!cache.listed(), "a job in flight listed the edge");
+		drop(job);
+		assert!(cache.listed(), "the pinned frames went unreported");
 	}
 
 	/// A taken-frame shed never passes the frames an inflate job in flight has yet to take: the
