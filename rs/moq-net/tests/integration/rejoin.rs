@@ -132,6 +132,81 @@ async fn rejoin_recovers_the_group_reset_on_leave() {
 	}
 }
 
+/// A live join rejoining through the relay's idle copy asks the publisher exactly what it
+/// asked the first time, rather than a join placed at the group the copy cached.
+///
+/// A publisher can size work by a join's reach: a retaining audio encoder replays as much of
+/// its retention as the join reaches back for. Placed at the cached head, the join would reach
+/// back nowhere, so the encoder would drop the audio the rejoining player is about to miss.
+/// Before lite-06 an absent start is the latest group alone, so the head is the only reach
+/// back that wire has, and it stays.
+#[kio::test]
+async fn rejoin_asks_the_publisher_for_the_first_join() {
+	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"] {
+		kio::clock::timeout(TEST_TIMEOUT, async {
+			let publisher = produce_origin(1);
+			let relay = produce_origin(2);
+
+			let broadcast = publisher
+				.route("bench", moq_net::origin::RouteOptions::hidden())
+				.unwrap();
+			let mut track = broadcast.broadcast().create_track("audio", timed()).unwrap();
+			broadcast.announce().unwrap();
+
+			let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
+			options.server_publish = Some(publisher.consume());
+			options.client_subscribe = Some(relay.clone());
+			let _pair = connect_mock(options).await;
+
+			let consumer = relay.consume();
+			let remote = consumer
+				.follow("bench", None)
+				.unwrap()
+				.available()
+				.await
+				.unwrap()
+				.unwrap();
+			let ts = |ms| Timestamp::from_millis(ms).unwrap();
+			// A player's join: its playout delay behind the live edge, dropping what's stale.
+			let join = || {
+				track::Subscription::default().with_ranges([track::Range::from(track::Start::Live {
+					min: Some(Duration::from_millis(500)),
+					max: Some(Duration::from_secs(2)),
+				})])
+			};
+
+			let mut group = track.append_next().unwrap();
+			group.write_frame(ts(0), b"0".as_ref()).unwrap();
+			group.finish().unwrap();
+
+			let mut sub = remote.track("audio").unwrap().subscribe(join()).await.unwrap();
+			let first = asked(&mut track).await;
+			let mut group = track.append_next().unwrap();
+			group.write_frame(ts(100), b"1".as_ref()).unwrap();
+			group.finish().unwrap();
+			while sub.recv_group().await.unwrap().unwrap().start < 1 {}
+			drop(sub);
+			crate::support::unwanted(track.demand()).await.unwrap();
+
+			// The copy lingers with group 1 cached, and the publisher wrote nothing since.
+			let _sub = remote.track("audio").unwrap().subscribe(join()).await.unwrap();
+			assert_eq!(asked(&mut track).await, first, "{version}: the rejoin's ask");
+		})
+		.await
+		.unwrap_or_else(|_| panic!("{version}: timed out"));
+	}
+}
+
+/// The ranges the publisher's track is next asked for.
+async fn asked(track: &mut track::Producer) -> Vec<track::Range> {
+	loop {
+		if let Some(subscription) = track.subscription() {
+			return subscription.ranges;
+		}
+		track.subscription_changed().await.unwrap();
+	}
+}
+
 /// A reader rejoining a track another handle kept open is not handed what the relay cached
 /// before it went idle.
 ///
