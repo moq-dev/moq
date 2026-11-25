@@ -538,6 +538,43 @@ test("a group held behind a gap stays in range while an update's time start may 
 	expect(items(ordered)).toEqual(["group 10"]);
 });
 
+// Mirrors the Rust `a_held_group_a_waiting_time_start_lies_past_is_passed`.
+test("a group held behind a gap is passed once an update's waiting time start lies past its end", () => {
+	const producer = receivedTrack();
+	const ordered = producer.subscribe(withMax({ delay: { max: null } })).ordered();
+	put(producer, 0n, false);
+	drop(producer, 1n, 2n);
+	const group = producer.createGroup(2n);
+	group.writeFrame(textFrame("x", Timestamp.unscaled(2n)));
+	group.finishAt(3n);
+	expect(ordered.tryNextItem()?.group?.start).toBe(0n);
+	expect(ordered.tryNextItem()).toMatchObject({ kind: "gap", start: 1n, end: 2n });
+	// Group 2 ends at time 3, so time 5 lies in a later group.
+	ordered.update(withMax({ delay: { max: null }, ranges: [{ start: 5n }] }));
+	expect(items(ordered)).toEqual([]);
+	producer.skipGroups(3n, 10n);
+	put(producer, 10n, false);
+	expect(items(ordered)).toEqual(["group 10"]);
+});
+
+// Mirrors the Rust `a_held_group_an_answered_time_start_placed_past_is_passed`.
+test("a group held behind a gap is passed once upstream answers an update's time start past it", () => {
+	const producer = receivedTrack();
+	const ordered = producer.subscribe(withMax({ delay: { max: null } })).ordered();
+	put(producer, 0n, false);
+	drop(producer, 1n, 2n);
+	put(producer, 2n, false);
+	expect(ordered.tryNextItem()?.group?.start).toBe(0n);
+	expect(ordered.tryNextItem()).toMatchObject({ kind: "gap", start: 1n, end: 2n });
+	ordered.update(withMax({ delay: { max: null }, ranges: [{ start: 5n }] }));
+	// The publisher started the range at 10, so group 2 holds no time it asks for.
+	hooks.timeStarts(producer, [[5n, 10n]]);
+	expect(items(ordered)).toEqual([]);
+	producer.skipGroups(3n, 10n);
+	put(producer, 10n, false);
+	expect(items(ordered)).toEqual(["group 10"]);
+});
+
 test("a waiting time start holds back a gap above its group", () => {
 	const producer = receivedTrack();
 	put(producer, 2000n, false);

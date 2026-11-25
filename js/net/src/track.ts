@@ -6149,8 +6149,10 @@ export class Subscriber {
 		if (held) {
 			items.held = undefined;
 			// A range still to be placed may come to hold it too: it was in range when read, so passing
-			// it could lose a group the ranges still name.
-			if (this.#covered(held.start, held.start + 1n).length > 0 || this.#mayHold(held.start)) {
+			// it could lose a group the ranges still name. Settled first, so a range the groups or an
+			// upstream answer placed since counts where it placed.
+			this.#settle();
+			if (this.#covered(held.start, held.start + 1n).length > 0 || this.#mayHold(held.start, held.end)) {
 				return { kind: "group", group: held };
 			}
 			// The bounds moved off it. With nothing they cover above, it waits for them to widen again,
@@ -6170,13 +6172,13 @@ export class Subscriber {
 		return read;
 	}
 
-	// Whether a range not yet placed may still come to hold `key`, within the bounds. A resumed
-	// reader's window counts such a range as pending, so #covered covers the key already. Mirrors the
-	// Rust `Subscriber::may_hold`.
-	#mayHold(key: bigint): boolean {
+	// Whether a range not yet placed may still come to hold `key`, which ends at time `end` if known,
+	// within the bounds. A resumed reader's window counts such a range as pending, so #covered covers
+	// the key already. Mirrors the Rust `Subscriber::may_hold`.
+	#mayHold(key: bigint, end: bigint | undefined): boolean {
 		const cursor = this.#cursor.peek();
 		if (key < cursor.start || (cursor.end !== undefined && key >= cursor.end)) return false;
-		return !this.#resume && this.#window.mayHold(key);
+		return !this.#resume && this.#window.mayHold(key, end);
 	}
 
 	// The parts of `[start, end)` this reader's ranges and bounds cover now.

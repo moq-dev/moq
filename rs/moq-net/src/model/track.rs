@@ -12935,10 +12935,10 @@ impl Subscriber {
 			.collect()
 	}
 
-	/// Whether a range not yet placed may still come to hold group `key`, within the
-	/// [`Self::with_range`] bounds. A resumed reader's window counts such a range as pending,
-	/// so [`Self::runs_in_range`] covers the group already.
-	pub(crate) fn may_hold(&mut self, key: u64) -> bool {
+	/// Whether a range not yet placed may still come to hold group `key`, which ends at time
+	/// `end` if known, within the [`Self::with_range`] bounds. A resumed reader's window counts
+	/// such a range as pending, so [`Self::runs_in_range`] covers the group already.
+	pub(crate) fn may_hold(&mut self, key: u64, end: Option<u64>) -> bool {
 		let bounds = self.bounds();
 		if key < bounds.start || bounds.end.is_some_and(|end| key >= end) {
 			return false;
@@ -12946,7 +12946,7 @@ impl Subscriber {
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
 				cursor.sync();
-				cursor.filter.window.may_hold(key)
+				cursor.filter.window.may_hold(key, end)
 			}
 			Inner::Resume(..) => false,
 		}
@@ -13819,7 +13819,8 @@ impl Ordered {
 			let key = group.start;
 			// A range still to be placed may come to hold it too: it was in range when read, so
 			// passing it could lose a group the ranges still name.
-			if !self.inner.runs_in_range(key, key.saturating_add(1)).is_empty() || self.inner.may_hold(key) {
+			if !self.inner.runs_in_range(key, key.saturating_add(1)).is_empty() || self.inner.may_hold(key, group.end())
+			{
 				return Poll::Ready(Ok(Some(*group)));
 			}
 			// A range moved off it. With nothing in range above, it waits for the range to widen
@@ -18570,14 +18571,8 @@ mod test {
 		write_group(&producer, 0);
 		producer.drop_groups(1..2, StreamError::NotFound);
 		write_group(&producer, 2);
-		let mut next = || match ordered.next_item().now_or_never() {
-			None => None,
-			Some(Ok(Some(Item::Group(group)))) => Some(Ok(group.start)),
-			Some(Ok(Some(Item::Gap { range, .. }))) => Some(Err(range)),
-			Some(res) => panic!("ended: {:?}", res.map(|_| ())),
-		};
-		assert_eq!(next(), Some(Ok(0)));
-		assert_eq!(next(), Some(Err(1..2)));
+		assert_eq!(held_next(&mut ordered), Some(Ok(0)));
+		assert_eq!(held_next(&mut ordered), Some(Err(1..2)));
 		// Group 2 may contain time 5 until a later group arrives.
 		ordered
 			.update(
@@ -18589,16 +18584,90 @@ mod test {
 					.with_max(None),
 			)
 			.unwrap();
-		let mut next = || match ordered.next_item().now_or_never() {
+		assert_eq!(
+			held_next(&mut ordered),
+			Some(Ok(2)),
+			"the held group may still be in range"
+		);
+		producer.skip_groups(3..10);
+		write_group(&producer, 10);
+		assert_eq!(held_next(&mut ordered), Some(Ok(10)));
+	}
+
+	/// A group held behind a gap is passed once an update's time start, still waiting, lies
+	/// at or past where the group is known to end: it falls in a later group.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_held_group_a_waiting_time_start_lies_past_is_passed() {
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		let mut ordered = producer.subscribe(Subscription::default().with_max(None)).ordered();
+		write_group(&producer, 0);
+		producer.drop_groups(1..2, StreamError::NotFound);
+		let mut group = producer.create_group(group::Info { start: 2 }).unwrap();
+		group
+			.write_frame(Timestamp::from_millis(2).unwrap(), &b"x"[..])
+			.unwrap();
+		group.finish_at(3).unwrap();
+		assert_eq!(held_next(&mut ordered), Some(Ok(0)));
+		assert_eq!(held_next(&mut ordered), Some(Err(1..2)));
+		ordered
+			.update(
+				Subscription::default()
+					.with_ranges([Range {
+						start: crate::track::Start::Time(5),
+						end: None,
+					}])
+					.with_max(None),
+			)
+			.unwrap();
+		assert_eq!(held_next(&mut ordered), None, "group 2 ends at 3, below time 5");
+		producer.skip_groups(3..10);
+		write_group(&producer, 10);
+		assert_eq!(held_next(&mut ordered), Some(Ok(10)));
+	}
+
+	/// A group held behind a gap is passed once its upstream answers an update's time start
+	/// past it, before the read settles the window on its own.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_held_group_an_answered_time_start_placed_past_is_passed() {
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		let mut ordered = producer.subscribe(Subscription::default().with_max(None)).ordered();
+		write_group(&producer, 0);
+		producer.drop_groups(1..2, StreamError::NotFound);
+		write_group(&producer, 2);
+		assert_eq!(held_next(&mut ordered), Some(Ok(0)));
+		assert_eq!(held_next(&mut ordered), Some(Err(1..2)));
+		ordered
+			.update(
+				Subscription::default()
+					.with_ranges([Range {
+						start: crate::track::Start::Time(5),
+						end: None,
+					}])
+					.with_max(None),
+			)
+			.unwrap();
+		producer.time_starts([(5, Some(10))]);
+		assert_eq!(held_next(&mut ordered), None, "the start placed at 10");
+		producer.skip_groups(3..10);
+		write_group(&producer, 10);
+		assert_eq!(held_next(&mut ordered), Some(Ok(10)));
+	}
+
+	/// The ordered read's next item now: a group's start, a gap's range, or `None` while it waits.
+	#[cfg(feature = "async")]
+	fn held_next(ordered: &mut Ordered) -> Option<std::result::Result<u64, ops::Range<u64>>> {
+		match ordered.next_item().now_or_never() {
 			None => None,
 			Some(Ok(Some(Item::Group(group)))) => Some(Ok(group.start)),
 			Some(Ok(Some(Item::Gap { range, .. }))) => Some(Err(range)),
 			Some(res) => panic!("ended: {:?}", res.map(|_| ())),
-		};
-		assert_eq!(next(), Some(Ok(2)), "the held group may still be in range");
-		producer.skip_groups(3..10);
-		write_group(&producer, 10);
-		assert_eq!(next(), Some(Ok(10)));
+		}
 	}
 
 	/// A gap at a time start still waiting goes after the group the start resolves to, as a

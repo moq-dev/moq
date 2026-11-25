@@ -850,13 +850,20 @@ export class Window {
 
 	/**
 	 * Whether a range not yet placed may still come to hold group `key`: placed, it starts at or below
-	 * the group its time or live edge falls in, which may be `key` or one below. Mirrors the Rust
+	 * the group its time or live edge falls in, which may be `key` or one below. A time at or past
+	 * `end`, where group `key` is known to end, falls in a later group. Mirrors the Rust
 	 * `Window::may_hold`.
 	 */
-	mayHold(key: bigint): boolean {
-		for (const unsettled of this.unsettled()) {
+	mayHold(key: bigint, end: bigint | undefined): boolean {
+		const reaches = (unsettled: bigint) => {
 			const range = this.#ranges.get(unsettled);
-			if (range && (range.end === undefined || range.end >= key)) return true;
+			return range !== undefined && (range.end === undefined || range.end >= key);
+		};
+		for (const unsettled of this.#pending) if (reaches(unsettled)) return true;
+		for (const unsettled of this.#reaching) if (reaches(unsettled)) return true;
+		for (const timed of [this.#waiting, this.#looking]) {
+			const entries = end === undefined ? timed.all() : timed.in(0n, end);
+			for (const entry of entries) for (const unsettled of entry.keys) if (reaches(unsettled)) return true;
 		}
 		return false;
 	}

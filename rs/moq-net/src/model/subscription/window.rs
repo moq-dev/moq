@@ -902,13 +902,17 @@ impl Window {
 	}
 
 	/// Whether a range not yet placed may still come to hold group `key`: placed, it starts at
-	/// or below the group its time or live edge falls in, which may be `key` or one below.
-	pub fn may_hold(&self, key: u64) -> bool {
-		self.unsettled().iter().any(|k| {
+	/// or below the group its time or live edge falls in, which may be `key` or one below. A
+	/// time at or past `end`, where group `key` is known to end, falls in a later group.
+	pub fn may_hold(&self, key: u64, end: Option<u64>) -> bool {
+		let reaches = |k: &u64| {
 			self.ranges
 				.get(k)
 				.is_some_and(|range| range.end.is_none_or(|end| end >= key))
-		})
+		};
+		self.pending.iter().chain(&self.reaching).any(reaches)
+			|| (self.waiting.iter().chain(&self.looking))
+				.any(|(time, k)| end.is_none_or(|end| *time < end) && reaches(k))
 	}
 
 	/// Each time start that names no group yet, with its range's end: waiting on a first
