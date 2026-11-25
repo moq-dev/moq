@@ -37,7 +37,9 @@ What remains, in order:
 2. List R2 `nix-moq-dev` through the Cloudflare API (wrangler's OAuth token
    can) and copy to B2 whatever it lacks; `rclone copy --files-from <keys>
    --no-traverse --http-url https://nix.moq.dev :http: b2:nix-moq-dev`
-   reads them through the Worker while it still serves R2.
+   reads them through the Worker while it still serves R2. The write needs a
+   short-lived Read and Write key for `nix-moq-dev` from the console, deleted
+   afterward.
 3. Once #9625 lands, wait until `just gh cache-rev`, the commit Smoke pins
    (the newest with a successful push-triggered Cache run), is #9625's merge
    or later, so B2 holds its closure; then `just infra nix deploy` (the
