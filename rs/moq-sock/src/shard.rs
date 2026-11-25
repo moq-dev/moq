@@ -1478,18 +1478,19 @@ mod tests {
 		});
 	}
 
-	/// An ephemeral group never lands on a port another holds, even when so many are
-	/// held that a reuseport bind of port `0` would pick one of them often.
+	/// An ephemeral group never lands on a port another holds, even when enough are
+	/// held that a reuseport bind of port `0` would pick one of them within a thousand tries,
+	/// few enough to stay under a 1024 descriptor limit.
 	#[test]
 	#[cfg(target_os = "linux")]
 	fn an_ephemeral_group_never_shares_a_held_port() {
-		let held: Vec<_> = (0..2000)
+		let held: Vec<_> = (0..200)
 			.map(|_| bind("127.0.0.1:0".parse().unwrap(), 1).unwrap())
 			.collect();
 		let ports: std::collections::HashSet<_> = held.iter().map(|group| group.addr().port()).collect();
 		assert_eq!(ports.len(), held.len(), "two groups drew the same port");
 
-		for _ in 0..500 {
+		for _ in 0..1000 {
 			let group = bind("127.0.0.1:0".parse().unwrap(), 1).unwrap();
 			assert!(!ports.contains(&group.addr().port()), "joined a held group");
 		}
