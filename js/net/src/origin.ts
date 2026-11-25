@@ -19,15 +19,18 @@ import { StreamCode, StreamError } from "./error.ts";
 import { type Cost, routesEqual, WireRoute } from "./hop.ts";
 import * as Instance from "./instance.ts";
 import {
-	compareRouteCandidates,
+	arrival,
+	bestOfTier,
 	compareRoutes,
+	compareTie,
+	compareTier,
 	coveringPrefixes,
-	Epochs,
+	type Filed,
 	firstEligible,
 	hiddenBelow,
-	holdsOnTie,
 	hooks,
 	mostSpecific,
+	receive,
 	routeHops,
 	scopeCaptures,
 	scopeHead,
@@ -186,25 +189,52 @@ class Scope {
 			}
 			// Hold the empty path's place in the order until every covering prefix is known.
 			if (covering.length === 0) out.set(Path.empty(), []);
-			// Each keeps its own prefix, so supersession never compares across the merged prefixes,
-			// and its claim's own prefix: raised to the root, it is that much further above it.
+			// Raised to the root, a claim is that much further above it, so its Above names its own
+			// prefix: claims of one prefix supersede each other wherever each is filed. It keeps
+			// where it is filed, so a read beneath the root ranks it as a request there resolves, and
+			// its place among its filing's claims, which the merged row below no longer shows.
 			const raised = BigInt(rootDepth - Path.parts(path).length);
 			covering.push([
 				path,
-				visible.map((value) => ({
-					...value,
-					prefix: path,
-					route: raised === 0n ? value.route : { ...value.route, above: (value.route.above ?? 0n) + raised },
-				})),
+				visible.map((value, order) =>
+					raised === 0n
+						? { ...value, order }
+						: {
+								...value,
+								filed: path,
+								order,
+								route: { ...value.route, above: (value.route.above ?? 0n) + raised },
+							},
+				),
 			]);
 		}
 		if (covering.length > 0) {
-			// The most specific claim first, as a request beneath the root resolves, then the deeper filing.
-			const rank = ([, visible]: [Path.Valid, Advertised[]]) => claimDepth(Path.empty(), visible[0].route);
-			covering.sort((a, b) => rank(b) - rank(a) || b[0].length - a[0].length);
+			// The most specific claim first, as a request beneath the root resolves; claims of one
+			// prefix rank against each other wherever each is filed, hashed on the root, as a
+			// request for it resolves.
+			const ranked = covering.flatMap(([prefix, visible]) =>
+				visible.map((value) => ({
+					value,
+					prefix,
+					depth: Path.parts(prefix).length,
+					order: value.order ?? 0,
+					arrival: arrival(value.identity),
+					route: value.route,
+				})),
+			);
+			// A broadcast published above the root serves only its own path, so a tier-mate that
+			// serves the root ranks ahead of it, as `presented` ranks them.
+			const serves = (entry: (typeof ranked)[number]) => !entry.value.exact || entry.prefix === this.root;
+			ranked.sort(
+				(a, b) =>
+					Number((a.route.above ?? 0n) - (b.route.above ?? 0n)) ||
+					Number(serves(b)) - Number(serves(a)) ||
+					compareTier(this.root, a, b) ||
+					compareTie(this.root, a, b),
+			);
 			out.set(
 				Path.empty(),
-				covering.flatMap(([, visible]) => visible),
+				ranked.map(({ value }) => value),
 			);
 		}
 		return out;
@@ -233,35 +263,6 @@ function frontier(node: WatchNode, out: Path.Valid[] = []): Path.Valid[] {
 		else frontier(child, out);
 	}
 	return out;
-}
-
-/**
- * Presents advertised prefixes relative to a root. Every prefix at or above the root
- * collapses to the empty path, where the most specific claim wins, then the deeper filing,
- * since that is the route a request beneath the root resolves through.
- */
-class CoveringRoot {
-	readonly #root: Path.Valid;
-	#covering?: [number, number];
-
-	constructor(root: Path.Valid) {
-		this.#root = root;
-	}
-
-	/**
-	 * The presented path for `route` at `path`, or undefined when it is outside the root or a
-	 * more specific cover.
-	 */
-	relative(path: Path.Valid, route: WireRoute): Path.Valid | undefined {
-		const relative = Path.stripPrefix(this.#root, path);
-		if (relative !== null && relative !== Path.empty()) return relative;
-		if (relative === null && !Path.hasPrefix(path, this.#root)) return undefined;
-		const rank: [number, number] = [claimDepth(path, route), Path.parts(path).length];
-		const covering = this.#covering;
-		if (covering && (rank[0] < covering[0] || (rank[0] === covering[0] && rank[1] < covering[1]))) return undefined;
-		this.#covering = rank;
-		return Path.empty();
-	}
 }
 
 /**
@@ -356,7 +357,7 @@ interface Candidate extends Advertised {
 /**
  * Orders advertisements at a prefix: the most specific claim, then the better route, then a
  * local broadcast on a tie, then fewer hops. A remaining tie is left to the table's newest-first
- * order; see {@link compareRouteCandidates}.
+ * order; see {@link compareTier}.
  */
 function compareCandidates(a: Candidate, b: Candidate): number {
 	const above = (a.route.above ?? 0n) - (b.route.above ?? 0n);
@@ -366,51 +367,6 @@ function compareCandidates(a: Candidate, b: Candidate): number {
 		Number(b.exact) - Number(a.exact) ||
 		routeHops(a.route) - routeHops(b.route)
 	);
-}
-
-/**
- * How many segments the claim a route at `path` shows has: the path's, less how far above it
- * the claim is. The most specific claim covering a path wins, however deep it is filed.
- */
-function claimDepth(path: Path.Valid, route: WireRoute): number {
-	return Path.parts(path).length - Number(route.above ?? 0n);
-}
-
-/**
- * The preferred of `entries` (newest first, at `prefix`) for resolving `path`, not skipped
- * nor superseded: see {@link compareRouteCandidates}, then {@link holdsOnTie}.
- */
-function preferredEntry(
-	path: Path.Valid,
-	prefix: Path.Valid,
-	entries: readonly RouteEntry[],
-	skip?: (entry: RouteEntry) => boolean,
-	others: readonly WireRoute[] = [],
-): RouteEntry | undefined {
-	const admitted = entries.filter((entry) => !skip?.(entry));
-	// The most specific claims are the whole answer: a broader one shown here neither competes
-	// with them nor supersedes them, whatever its epoch.
-	const above = (entry: RouteEntry) => entry.route.peek().above ?? 0n;
-	// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min throws on bigint.
-	const narrowest = admitted.reduce((least, entry) => (above(entry) < least ? above(entry) : least), 2n ** 64n);
-	const eligible = admitted.filter((entry) => above(entry) === narrowest);
-	// `others` compete at the prefix too, such as a broadcast announced here at the path.
-	const epochs = new Epochs([...eligible.map((entry) => entry.route.peek()), ...others]);
-	let best: RouteEntry | undefined;
-	for (const entry of eligible) {
-		// Only the highest epoch of an instance is eligible, however cheap an older one is.
-		if (epochs.supersedes(entry.route.peek())) continue;
-		if (!best) {
-			best = entry;
-			continue;
-		}
-		// Newest first, so an older entry replaces on a tie only where the tie holds the oldest.
-		const a = entry.route.peek();
-		const b = best.route.peek();
-		const order = compareRouteCandidates(path, prefix, a, b);
-		if (order < 0 || (order === 0 && holdsOnTie(path, prefix, a, b))) best = entry;
-	}
-	return best;
 }
 
 /** Whether a session received `entry`, so it is never forwarded to a peer. */
@@ -1200,18 +1156,9 @@ class OriginState {
 		const local = this.local.peek().has(path) ? this.advertisedLocal.peek().get(path) : undefined;
 		return mostSpecific(
 			path,
-			(prefix) => {
-				const entries = routes.get(prefix);
-				if (!entries) return undefined;
-				return preferredEntry(
-					path,
-					prefix,
-					entries,
-					(candidate) => !admits(candidate, path) || (skip?.(candidate) ?? false),
-					prefix === path && local ? [local] : [],
-				);
-			},
-			(entry) => entry.route.peek(),
+			(prefix) => (routes.get(prefix) ?? []).filter((entry) => admits(entry, path) && !skip?.(entry)),
+			(entry) => ({ identity: entry.identity, route: entry.route.peek() }),
+			local ? [local] : [],
 		);
 	}
 
@@ -1754,6 +1701,8 @@ export class Producer implements Table {
 					else routes.set(at, [entry]);
 				}
 			});
+			// Newest at each filing, so newest across them too, as Rust files a new entry each time.
+			receive(identity);
 			inserted = true;
 			refresh();
 		};
@@ -1814,7 +1763,8 @@ export class Producer implements Table {
 			}
 			if (!inserted) return;
 			// A claim is new when it restarts, so it moves to the newest place and yields a tie
-			// it held to one that kept its instance (see bestCandidate).
+			// it held to one that kept its instance (see compareTie), at each filing and across them.
+			if (renewed) receive(identity);
 			this.#state.routes.mutate((routes) => {
 				if (!renewed) return;
 				for (const { at, entry } of filed) {
@@ -2265,6 +2215,7 @@ export class Consumer implements Reader {
 			demand: (path, instance, signal) => this.#demand(scope.path(path), instance, signal),
 			covers: (prefix: Path.Valid) => scope.covers(prefix),
 			allowed: scope.allowed?.rebase(scope.root),
+			root: scope.root,
 		});
 	}
 
@@ -2680,10 +2631,21 @@ export class Consumer implements Reader {
 	/** The routes visible to one announcement watcher. */
 	#listed(patterns: Path.Patterns, hidden: boolean, covering: boolean): Map<Path.Valid, Presented> {
 		const next = new Map<Path.Valid, Presented>();
-		const rooted = new CoveringRoot(this.#scope.root);
+		const root = this.#scope.root;
 		const scopes = [...patterns]
 			.sort((a, b) => Path.compareSpecificity(b.specificity(), a.specificity()))
 			.map((pattern) => ({ pattern, head: scopeHead(pattern) }));
+		// Every prefix at or above the root presents as the empty path, where the claims covering the
+		// root compete as one tier, as a request beneath the root resolves.
+		const atRoot: Filed<{ candidate: Candidate; path: Path.Valid; pattern: Path.Pattern }>[] = [];
+		const present = (path: Path.Valid, entry: Candidate, pattern: Path.Pattern): Presented => ({
+			identity: entry.identity,
+			// Draining is this node's selection state: readers, and the peers a relay forwards to, see
+			// the route as it is.
+			route: entry.route.draining === undefined ? entry.route : { ...entry.route, draining: undefined },
+			captures: scopeCaptures(pattern, path),
+			lost: entry.lost,
+		});
 		for (const [path, candidates] of this.#state.snapshot()) {
 			// The first candidate this reader can see wins, since the preferred one overall may not be,
 			// unless a higher epoch of its instance that the reader also sees supersedes it.
@@ -2694,20 +2656,36 @@ export class Consumer implements Reader {
 						(candidate.exact ? pattern.matches(path) : scopeOverlaps(pattern, path)) &&
 						(hidden || !hiddenBelow(head, path)),
 				);
+			const relative = Path.stripPrefix(root, path);
+			if (relative === null || relative === Path.empty()) {
+				if (relative === null && !Path.hasPrefix(path, root)) continue;
+				const depth = Path.parts(path).length;
+				candidates.forEach((candidate, order) => {
+					const scope = scopeOf(candidate);
+					if (scope === undefined) return;
+					// Hold the empty path's place in the order the snapshot lists its first claim.
+					if (atRoot.length === 0) next.set(Path.empty(), present(path, candidate, scope.pattern));
+					const filed = { candidate, path, pattern: scope.pattern };
+					atRoot.push({
+						prefix: path,
+						depth,
+						order,
+						arrival: arrival(candidate.identity),
+						candidate: filed,
+						route: candidate.route,
+					});
+				});
+				continue;
+			}
 			const entry = firstEligible(candidates, (candidate) => scopeOf(candidate) !== undefined);
 			const scope = entry && scopeOf(entry);
 			if (!entry || !scope) continue;
-			const relative = rooted.relative(path, entry.route);
-			if (relative === undefined) continue;
-			next.set(relative, {
-				identity: entry.identity,
-				// Draining is this node's selection state: readers, and the peers a relay
-				// forwards to, see the route as it is.
-				route: entry.route.draining === undefined ? entry.route : { ...entry.route, draining: undefined },
-				captures: scopeCaptures(scope.pattern, path),
-				lost: entry.lost,
-			});
+			next.set(relative, present(path, entry, scope.pattern));
 		}
+		// Hashed on the root, as a request for it resolves.
+		const best = bestOfTier(root, atRoot);
+		if (best)
+			next.set(Path.empty(), present(best.candidate.path, best.candidate.candidate, best.candidate.pattern));
 		return next;
 	}
 

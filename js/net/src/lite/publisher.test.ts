@@ -4,6 +4,7 @@ import { Manual } from "@moq/clock/test";
 import { type Getter, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
+import { askedFirst } from "../claim.test-util.ts";
 import { accept as acceptSession, connect as connectSession } from "../connection/index.ts";
 import { defined } from "../defined.test-util.ts";
 import { fromTransport, ProtocolViolation, SessionCode, StreamCode, StreamError, toStreamCode } from "../error.ts";
@@ -5006,17 +5007,7 @@ test("a lite-07 answer shows the most specific of the claims filed at a grant", 
 
 			// A request there resolves through the same claim.
 			const request = origin.consume().request(Path.join(asked, Path.from("x")));
-			const which = await Promise.race([
-				narrow
-					.requested()
-					.next()
-					.then(() => "narrow"),
-				broad
-					.requested()
-					.next()
-					.then(() => "broad"),
-			]);
-			expect(which).toBe("narrow");
+			expect(await askedFirst(Path.join(asked, Path.from("x")), [narrow, broad])).toBe(narrow);
 			request.close();
 		} finally {
 			narrow.close();
@@ -5024,6 +5015,115 @@ test("a lite-07 answer shows the most specific of the claims filed at a grant", 
 			close();
 			origin.close();
 		}
+	}
+});
+
+// Claims of one prefix filed above and below a handle's root that tie on rank hash on the root,
+// as a request for it resolves, though the handle shows both at its root: the answer carries
+// what the request takes, whichever claim is newer.
+test("a lite-07 rooted answer shows the claim a request for its root takes", async () => {
+	const root = Path.from("src/a/b");
+	for (const [i, swap] of [...Array(16).keys()].flatMap((i) => [[i, false] as const, [i, true] as const])) {
+		const origin = new OriginProducer();
+		// Names whose hash order differs between paths.
+		const pair = [`cam${i * 7}`, `pub${i * 13}`];
+		const names = swap ? pair.toReversed() : pair;
+		const instance = (name: string) => ({ id: Instance.parse(name), epoch: 0n });
+		const shallow = origin.claim(Path.from("src"), { instance: instance(names[0]) });
+		const deep = origin
+			.scope(Path.empty(), Path.Prefixes.parse(["src/a"]))
+			.claim(Path.from("src"), { instance: instance(names[1]) });
+		const { next, ok, close } = routedAnswer(origin.scope(root, Path.Prefixes.parse([""])));
+		try {
+			await ok();
+			const msgs: AnnounceBroadcast[] = [];
+			for (;;) {
+				const msg = await next();
+				msgs.push(msg);
+				if (msg.status === "synced") break;
+			}
+			const starts = msgs.flatMap((msg) => (msg.status === "start" ? [msg.instance] : []));
+			const request = origin.consume().request(root);
+			const which = (await askedFirst(root, [shallow, deep])).instance;
+			expect(starts).toEqual([which]);
+			request.close();
+		} finally {
+			shallow.close();
+			deep.close();
+			close();
+			origin.close();
+		}
+	}
+});
+
+// Read beneath a handle's root, claims of one prefix filed above and at the root that tie on rank
+// hash on the absolute path read, as a request for it resolves, not on the path from the root:
+// the answer carries the claim the request takes.
+test("a lite-07 rooted answer beneath its root shows the claim a request for that path takes", async () => {
+	const root = Path.from("src/a");
+	for (const [i, swap] of [...Array(16).keys()].flatMap((i) => [[i, false] as const, [i, true] as const])) {
+		const origin = new OriginProducer();
+		// Names whose hash order differs between the absolute path and the path from the root.
+		const pair = [`cam${i * 7}`, `pub${i * 13}`];
+		const names = swap ? pair.toReversed() : pair;
+		const instance = (name: string) => ({ id: Instance.parse(name), epoch: 0n });
+		const shallow = origin.claim(Path.from("src"), { instance: instance(names[0]) });
+		const deep = origin
+			.scope(Path.empty(), Path.Prefixes.parse(["src/a"]))
+			.claim(Path.from("src"), { instance: instance(names[1]) });
+		const { next, ok, close } = routedAnswer(
+			origin.scope(root, Path.Prefixes.parse([""])),
+			undefined,
+			Path.from("x"),
+		);
+		try {
+			await ok();
+			const msgs: AnnounceBroadcast[] = [];
+			for (;;) {
+				const msg = await next();
+				msgs.push(msg);
+				if (msg.status === "synced") break;
+			}
+			const starts = msgs.flatMap((msg) => (msg.status === "start" ? [msg.instance] : []));
+			const request = origin.consume().request(Path.from("src/a/x"));
+			const which = (await askedFirst(Path.from("src/a/x"), [shallow, deep])).instance;
+			expect(starts).toEqual([which]);
+			request.close();
+		} finally {
+			shallow.close();
+			deep.close();
+			close();
+			origin.close();
+		}
+	}
+});
+
+// A broadcast published above a handle's root serves only its own path, so a costlier claim of the
+// same prefix filed at the root, which serves it, is the one the answer carries, as a request for
+// the root takes it.
+test("a lite-07 rooted answer passes over a broadcast published above its root", async () => {
+	const origin = new OriginProducer();
+	const broadcast = publish(origin, Path.from("src"));
+	const filed = origin.scope(Path.empty(), Path.Prefixes.parse(["src/a"])).claim(Path.from("src"), { cost: 5n });
+	const { next, ok, close } = routedAnswer(origin.scope(Path.from("src/a"), Path.Prefixes.parse([""])));
+	try {
+		await ok();
+		const msgs: AnnounceBroadcast[] = [];
+		for (;;) {
+			const msg = await next();
+			msgs.push(msg);
+			if (msg.status === "synced") break;
+		}
+		const starts = msgs.flatMap((msg) => (msg.status === "start" ? [msg.instance] : []));
+		expect(starts).toEqual([filed.instance]);
+		const request = origin.consume().request(Path.from("src/a"));
+		await askedFirst(Path.from("src/a"), [filed]);
+		request.close();
+	} finally {
+		broadcast.close();
+		filed.close();
+		close();
+		origin.close();
 	}
 });
 
@@ -5049,17 +5149,7 @@ test("a lite-07 rooted answer shows the most specific claim filed on either side
 		expect(starts.map((msg) => msg.instance)).toEqual([narrow.instance]);
 
 		const request = origin.consume().request(Path.from("a/b/c/d/x"));
-		const which = await Promise.race([
-			narrow
-				.requested()
-				.next()
-				.then(() => "narrow"),
-			broad
-				.requested()
-				.next()
-				.then(() => "broad"),
-		]);
-		expect(which).toBe("narrow");
+		expect(await askedFirst(Path.from("a/b/c/d/x"), [narrow, broad])).toBe(narrow);
 		request.close();
 	} finally {
 		narrow.close();

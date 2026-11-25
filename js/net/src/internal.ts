@@ -115,36 +115,150 @@ export function presented(
 	prefix: Path.Valid,
 	table: Advertisements,
 	carries: (covered: Path.Valid) => boolean,
-	// Lite-07: a route above the prefix keeps how many segments broader than the prefix it is.
-	keepAbove = false,
-	shows: (candidate: Advertised, at: Path.Valid) => boolean = () => true,
+	options: {
+		// The absolute path the table's paths hang from, so claims rank as a request resolves.
+		root?: Path.Valid;
+		// Lite-07: a route above the prefix keeps how many segments broader than the prefix it is.
+		keepAbove?: boolean;
+		shows?: (candidate: Advertised, at: Path.Valid) => boolean;
+	} = {},
 ): Map<Path.Valid, Advertised> {
+	const { root = Path.empty(), keepAbove = false, shows = () => true } = options;
 	const out = new Map<Path.Valid, Advertised>();
-	// The most specific claim covering the prefix wins, then the deeper filing, as a request resolves.
-	let rootRank: [number, number] | undefined;
+	// Every claim covering the prefix, as a request through the prefix resolves: the most specific
+	// tier, ranked across the prefixes its claims are filed at, each by its absolute filing.
+	const covering: Filed<Advertised>[] = [];
 	for (const [covered, candidates] of table) {
 		if (!carries(covered)) continue;
 		if (Path.hasPrefix(covered, prefix)) {
-			const snap = firstEligible(candidates, (candidate) => shows(candidate, prefix));
-			if (!snap) continue;
 			const depth = Path.parts(covered).length;
-			const rank: [number, number] = [depth - Number(snap.route.above ?? 0n), depth];
-			if (rootRank && (rank[0] < rootRank[0] || (rank[0] === rootRank[0] && rank[1] < rootRank[1]))) continue;
-			rootRank = rank;
-			const above = BigInt(Path.parts(prefix).length - depth);
-			out.set(
-				Path.empty(),
-				keepAbove && above > 0n
-					? { ...snap, route: { ...snap.route, above: (snap.route.above ?? 0n) + above } }
-					: snap,
-			);
+			candidates.forEach((candidate, order) => {
+				if (!shows(candidate, prefix)) return;
+				// Hold the empty suffix's place in the order the table lists its first claim.
+				if (covering.length === 0) out.set(Path.empty(), candidate);
+				covering.push({
+					prefix: candidate.filed ?? Path.join(root, covered),
+					depth,
+					order: candidate.order ?? order,
+					arrival: arrival(candidate.identity),
+					candidate,
+					route: candidate.route,
+				});
+			});
 			continue;
 		}
 		const suffix = Path.stripPrefix(prefix, covered);
 		const best = suffix !== null ? firstEligible(candidates, (candidate) => shows(candidate, covered)) : undefined;
 		if (suffix !== null && best) out.set(suffix, best);
 	}
+	// Hashed on the absolute path requested, as a request for it resolves. A broadcast published
+	// above that path serves only its own, so a tier-mate that serves the path ranks ahead of it.
+	const at = Path.join(root, prefix);
+	const best = bestOfTier(at, covering, { serves: (entry) => !entry.candidate.exact || entry.prefix === at });
+	if (best) {
+		const snap = best.candidate;
+		const above = BigInt(Path.parts(prefix).length - best.depth);
+		out.set(
+			Path.empty(),
+			keepAbove && above > 0n
+				? { ...snap, route: { ...snap.route, above: (snap.route.above ?? 0n) + above } }
+				: snap,
+		);
+	}
 	return out;
+}
+
+/**
+ * A candidate filed at `prefix`, `depth` segments deep, `order`th in its prefix's preference, and
+ * {@link arrival} `arrival`th.
+ */
+export interface Filed<T> {
+	readonly prefix: Path.Valid;
+	readonly depth: number;
+	readonly order: number;
+	readonly arrival: number;
+	readonly candidate: T;
+	readonly route: WireRoute;
+}
+
+// When each advertisement's identity was first received, across every filing.
+const receipts = new WeakMap<object, number>();
+let nextReceipt = 0;
+
+/** Records `identity` as received now, as each announce of a claim is: it ranks as the newest. */
+export function receive(identity: object): void {
+	receipts.set(identity, nextReceipt++);
+}
+
+/**
+ * The order `identity` was last {@link receive}d in, stamped now if it never was: a later one is
+ * larger, so a full tie across filings goes to the most recently received claim, as Rust's newest
+ * route entry. An update keeps its identity's place.
+ */
+export function arrival(identity: object): number {
+	let order = receipts.get(identity);
+	if (order === undefined) {
+		order = nextReceipt++;
+		receipts.set(identity, order);
+	}
+	return order;
+}
+
+/**
+ * The best of the most specific claims among `filed`, which all cover `path`: a claim shown above
+ * its own prefix counts for the shallower prefix it is really at, and claims of one prefix rank
+ * against each other wherever each is filed. Only an instance's highest epoch among them (and
+ * `others`, of the same claim when `exact`) is eligible; one that `serves` `path` ranks ahead, then
+ * {@link compareTier}, then {@link compareTie}. Mirrors `RouteTable::best_route` in rs/moq-net,
+ * and with `serves`, `TableCursor::best`.
+ */
+export function bestOfTier<T>(
+	path: Path.Valid,
+	filed: readonly Filed<T>[],
+	options: {
+		others?: (specificity: number) => readonly WireRoute[];
+		serves?: (entry: Filed<T>) => boolean;
+	} = {},
+): Filed<T> | undefined {
+	const { others = () => [], serves = () => true } = options;
+	const specificity = (entry: Filed<T>) => entry.depth - Number(entry.route.above ?? 0n);
+	// A loop, not a spread: a table may hold more candidates than a call takes arguments.
+	let most = Number.NEGATIVE_INFINITY;
+	for (const entry of filed) most = Math.max(most, specificity(entry));
+	const tier = filed.filter((entry) => specificity(entry) === most);
+	// One claim prefix: an instance's epochs compare across the whole tier.
+	const epochs = new Epochs([...tier.map((entry) => entry.route), ...others(most)], () => 0n);
+	let best: Filed<T> | undefined;
+	for (const entry of tier) {
+		if (epochs.supersedes(entry.route)) continue;
+		if (best === undefined) {
+			best = entry;
+			continue;
+		}
+		const serving = Number(serves(best)) - Number(serves(entry));
+		if ((serving || compareTier(path, entry, best) || compareTie(path, entry, best)) < 0) best = entry;
+	}
+	return best;
+}
+
+/**
+ * How a full tie between two claims of one tier resolving `path` breaks: to the newest, by each
+ * prefix's own order and across prefixes the most recently {@link arrival}, as Rust's final
+ * `Reverse(entry.id)`, so a publisher that restarts under a new instance takes over at once. Filed
+ * beneath `path` where neither is a lite-07 claim, it goes to the oldest instead, as Rust's
+ * `RouteEntry::since`: switching there would restart the route at every relay downstream that
+ * ranks it alike. Rust also renews `since` when a re-price changes the rank; this origin forwards
+ * no route it received, so a route that dips and recovers here restarts only its own readers.
+ * Then the deeper filing.
+ */
+export function compareTie(
+	path: Path.Valid,
+	a: Pick<Filed<unknown>, "prefix" | "depth" | "order" | "arrival" | "route">,
+	b: Pick<Filed<unknown>, "prefix" | "depth" | "order" | "arrival" | "route">,
+): number {
+	const newest = a.prefix === b.prefix ? a.order - b.order : b.arrival - a.arrival;
+	const holds = a.prefix !== path && b.prefix !== path && !a.route.claimed && !b.route.claimed;
+	return (holds ? -newest : newest) || b.depth - a.depth;
 }
 
 /**
@@ -152,19 +266,13 @@ export function presented(
  * candidate supersedes. Supersession is decided among what the reader may see, so a higher epoch
  * it cannot see never hides a route it can.
  */
-export function firstEligible<T extends { readonly route: WireRoute; readonly prefix?: Path.Valid }>(
+export function firstEligible<T extends { readonly route: WireRoute }>(
 	candidates: readonly T[],
 	admits: (candidate: T) => boolean = () => true,
 ): T | undefined {
 	const admitted = candidates.filter(admits);
-	const byPrefix = new Map<Path.Valid | undefined, WireRoute[]>();
-	for (const candidate of admitted) {
-		const routes = byPrefix.get(candidate.prefix);
-		if (routes) routes.push(candidate.route);
-		else byPrefix.set(candidate.prefix, [candidate.route]);
-	}
-	const epochs = new Map([...byPrefix].map(([prefix, routes]) => [prefix, new Epochs(routes)]));
-	return admitted.find((candidate) => !epochs.get(candidate.prefix)?.supersedes(candidate.route));
+	const epochs = new Epochs(admitted.map((candidate) => candidate.route));
+	return admitted.find((candidate) => !epochs.supersedes(candidate.route));
 }
 
 /**
@@ -1865,73 +1973,35 @@ function rendezvousHash(path: string, instance: string): bigint {
 }
 
 /**
- * The best of `candidates`, oldest first, at `prefix` for resolving `path`: `best_route` in
- * rs/moq-net. Only an instance's highest epoch is eligible, ranked by
- * {@link compareRouteCandidates} (`route_order`). A full tie goes to the oldest where
- * {@link holdsOnTie}, as Rust's `RouteEntry::since`, and otherwise to the newest, as Rust's final
- * `Reverse(entry.id)`: a claim is new when it starts or restarts (another instance or epoch), and
- * keeps its place through a re-price. Rust also renews `since` when a re-price changes the rank;
- * this origin forwards no route it received, so a route that dips and recovers here restarts only
- * its own readers. Every selector ranks through this, so the announcements and the consumes of
- * one session never pick apart.
- */
-export function bestCandidate<T>(
-	path: Path.Valid,
-	prefix: Path.Valid,
-	candidates: Iterable<T>,
-	route: (candidate: T) => WireRoute,
-): T | undefined {
-	const list = [...candidates];
-	const epochs = new Epochs(list.map(route));
-	let best: T | undefined;
-	for (const candidate of list) {
-		const next = route(candidate);
-		if (epochs.supersedes(next)) continue;
-		if (best === undefined) {
-			best = candidate;
-			continue;
-		}
-		const order = compareRouteCandidates(path, prefix, next, route(best));
-		if (order < 0 || (order === 0 && !holdsOnTie(path, prefix, next, route(best)))) best = candidate;
-	}
-	return best;
-}
-
-/**
- * Whether a full tie between `a` and `b` resolving `path` at `prefix` keeps the route held
- * longest, rather than the newest: beneath the prefix, where neither is a lite-07 claim. Switching
- * there would restart the route at every relay downstream that ranks it alike; at the prefix
- * itself the newest wins, so a publisher that restarts under a new instance takes over at once.
- * As `route_order` in rs/moq-net.
- */
-export function holdsOnTie(path: Path.Valid, prefix: Path.Valid, a: WireRoute, b: WireRoute): boolean {
-	return path !== prefix && !a.claimed && !b.claimed;
-}
-
-/**
- * What `pick` finds at the most specific claim covering `path`: it picks at each covering prefix,
- * deepest first, and a claim shown above its own prefix counts for the shallower prefix it is
- * really at. Of claims as specific as each other the deepest prefix wins. Mirrors
- * `RouteTable::best_route` in rs/moq-net.
+ * The best claim covering `path`, as `RouteTable::best_route` in rs/moq-net picks it: only the
+ * most specific claims compete, a claim shown above its own prefix counting for the shallower
+ * prefix it is really at, and they rank against each other wherever each is filed. Of those, only
+ * an instance's highest epoch is eligible, an exact claim's `others` (which never win) included,
+ * and the rest order by {@link compareTier}, then {@link compareTie}: a claim is new when it
+ * starts or restarts (another instance or epoch), and keeps its place through a re-price.
+ * `candidates` lists each
+ * covering prefix's, newest first, and `advertised` names each one's identity and route. Every
+ * selector ranks through this, so the announcements and the consumes of one session never pick
+ * apart.
  */
 export function mostSpecific<T>(
 	path: Path.Valid,
-	pick: (prefix: Path.Valid) => T | undefined,
-	route: (found: T) => WireRoute,
+	candidates: (prefix: Path.Valid) => Iterable<T>,
+	advertised: (candidate: T) => Advertised,
+	others: readonly WireRoute[] = [],
 ): T | undefined {
-	let best: T | undefined;
-	let bestSpecificity = -1;
+	const filed: Filed<T>[] = [];
 	let depth = Path.parts(path).length;
+	const exact = depth;
 	for (const prefix of coveringPrefixes(path)) {
-		const found = pick(prefix);
-		const specificity = found === undefined ? 0 : depth - Number(route(found).above ?? 0n);
-		if (found !== undefined && specificity > bestSpecificity) {
-			best = found;
-			bestSpecificity = specificity;
+		let order = 0;
+		for (const candidate of candidates(prefix)) {
+			const { identity, route } = advertised(candidate);
+			filed.push({ prefix, depth, order: order++, arrival: arrival(identity), candidate, route });
 		}
 		depth--;
 	}
-	return best;
+	return bestOfTier(path, filed, { others: (specificity) => (specificity === exact ? others : []) })?.candidate;
 }
 
 /** Covering prefixes, most specific first, including the empty root. */
@@ -1963,39 +2033,44 @@ export function superseded(route: WireRoute, others: Iterable<WireRoute>): boole
  * every instance announces epoch 0, stores nothing. Mirrors `Epochs` in rs/moq-net, whose routes
  * are all of one prefix here.
  */
-export class Epochs {
+class Epochs {
 	readonly #highest = new Map<Instance.Valid | undefined, Map<bigint, bigint>>();
+	readonly #claim: (route: WireRoute) => bigint;
 
-	constructor(routes: Iterable<WireRoute>) {
+	/** `claim` names each route's claim among `routes`: its Above, for routes all of one prefix. */
+	constructor(routes: Iterable<WireRoute>, claim: (route: WireRoute) => bigint = (route) => route.above ?? 0n) {
+		this.#claim = claim;
 		for (const route of routes) {
 			const epoch = route.epoch ?? 0n;
 			if (epoch === 0n) continue;
-			let above = this.#highest.get(route.instance);
-			if (!above) {
-				above = new Map();
-				this.#highest.set(route.instance, above);
+			let claims = this.#highest.get(route.instance);
+			if (!claims) {
+				claims = new Map();
+				this.#highest.set(route.instance, claims);
 			}
-			const highest = above.get(route.above ?? 0n);
-			if (highest === undefined || epoch > highest) above.set(route.above ?? 0n, epoch);
+			const highest = claims.get(claim(route));
+			if (highest === undefined || epoch > highest) claims.set(claim(route), epoch);
 		}
 	}
 
 	/** Whether a route carries `route`'s instance at a higher epoch on the same claim. */
 	supersedes(route: WireRoute): boolean {
-		const highest = this.#highest.get(route.instance)?.get(route.above ?? 0n);
+		const highest = this.#highest.get(route.instance)?.get(this.#claim(route));
 		return highest !== undefined && highest > (route.epoch ?? 0n);
 	}
 }
 
 /**
- * Prefer a route that is neither draining (a peer that sent GOAWAY) nor unavailable (held),
- * which rank below every other, then the highest priority on its path, then identified
+ * Prefer a route that is available (not held), then one that is not draining (a peer that sent
+ * GOAWAY), which still reaches its origin, then the highest priority on its path, then identified
  * publishers, then lower static cost.
  */
 export function compareRoutes(a: WireRoute, b: WireRoute): number {
-	const last = (route: WireRoute) => Number((route.draining ?? false) || route.available === false);
+	const held = (route: WireRoute) => Number(route.available === false);
+	const draining = (route: WireRoute) => Number(route.draining ?? false);
 	return (
-		last(a) - last(b) ||
+		held(a) - held(b) ||
+		draining(a) - draining(b) ||
 		(b.priority ?? 0) - (a.priority ?? 0) ||
 		Number(isAnonymous(a)) - Number(isAnonymous(b)) ||
 		(a.cost < b.cost ? -1 : a.cost > b.cost ? 1 : 0)
@@ -2003,21 +2078,24 @@ export function compareRoutes(a: WireRoute, b: WireRoute): number {
 }
 
 /**
- * Order eligible routes at `prefix` resolving `path` by preference, hop count, then, beneath the
- * prefix, the spread hash of each named instance. A lite-07 claim counts as one hop, to the peer
- * that sent it, and ranks by the rendezvous hash of its instance. The hashes only spread a pool
- * over a prefix's paths, as `route_order` in rs/moq-net does. Any other tie is left for the newest
- * to win (see {@link bestCandidate}), so a publisher that restarts under a new instance takes over
- * from its lingering session at once. A relay instead keeps the route in use on such a tie, since
- * switching would restart it at every relay downstream; this origin forwards no route it received,
- * so its switch restarts nothing past its own readers.
+ * Order two claims of one tier resolving `path`, each filed at its `prefix`: by preference, hop
+ * count, then one filed at `path` itself, then, keyed on `path` whatever each claim's filing, the
+ * rendezvous hash of a lite-07 claim's instance or the spread hash of a named one. The hashes only
+ * spread a pool over a prefix's paths, as `route_order` in rs/moq-net does. Any other tie breaks by
+ * {@link compareTie}.
  */
-export function compareRouteCandidates(path: Path.Valid, prefix: Path.Valid, a: WireRoute, b: WireRoute): number {
-	// The most specific claim wins outright: an exact claim shadows broader ones shown at its path.
-	const above = (a.above ?? 0n) - (b.above ?? 0n);
-	const order = (above < 0n ? -1 : above > 0n ? 1 : 0) || compareRoutes(a, b) || routeHops(a) - routeHops(b);
-	if (order !== 0 || path === prefix) return order;
-	const [ka, kb] = [routeKey(path, a), routeKey(path, b)];
+export function compareTier(
+	path: Path.Valid,
+	a: { readonly prefix: Path.Valid; readonly route: WireRoute },
+	b: { readonly prefix: Path.Valid; readonly route: WireRoute },
+): number {
+	const order = compareRoutes(a.route, b.route) || routeHops(a.route) - routeHops(b.route);
+	if (order !== 0) return order;
+	// A claim filed at the path itself skips the hash and ranks first, as a route entered here at
+	// the path does in Rust; two of them tie, for the newest to win.
+	const exact = Number(b.prefix === path) - Number(a.prefix === path);
+	if (exact !== 0 || a.prefix === path) return exact;
+	const [ka, kb] = [routeKey(path, a.route), routeKey(path, b.route)];
 	return ka < kb ? -1 : ka > kb ? 1 : 0;
 }
 
