@@ -98,6 +98,33 @@ public enum Video {
                     lower: lower?.ffi))
         }
 
+        private init(_ ffi: MoqVideoProducer) {
+            self.ffi = ffi
+        }
+
+        /// Open a video track on the track a subscriber's `request` asks for, which names it.
+        ///
+        /// This is how an on-demand publisher serves a track asked for again after its producer
+        /// was released while read: pass the settings it was first published with, since its
+        /// readers hold the track info they set; others end the track with `Duplicate`. The
+        /// request must belong to the catalog's broadcast.
+        public static func requested(
+            catalog: Media.CatalogProducer,
+            request: TrackRequest,
+            input: EncoderInput,
+            output: EncoderOutput,
+            bandwidth: Allocator? = nil,
+            lower: Producer? = nil
+        ) throws -> Producer {
+            try checkDuration(output.join, "join")
+            return Producer(
+                try MoqVideoProducer.requested(
+                    catalog: catalog.ffi, request: request.ffi,
+                    options: MoqVideoProducerOptions(
+                        input: input, output: output, track: nil, bandwidth: bandwidth?.ffi,
+                        lower: lower?.ffi)))
+        }
+
         /// A watch-only handle to whether the video track has subscribers.
         public func demand() throws -> TrackDemand {
             TrackDemand(try ffi.demand())

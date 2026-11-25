@@ -718,6 +718,72 @@ class SmokeTest {
         }
     }
 
+    /**
+     * A native encoder serves a track asked for again after its producer was released while read.
+     */
+    @Test
+    fun `native encoders serve a renewal`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            broadcast.requests().use { requests ->
+                val catalog = CatalogProducer(broadcast)
+                val mic =
+                    AudioProducerOptions(
+                        input =
+                            AudioEncoderInput(
+                                format = AudioSampleFormat.F32,
+                                sampleRate = 48_000u,
+                                channels = 1u,
+                            ),
+                        output = AudioEncoderOutput(codec = AudioCodec.opus()),
+                    )
+                val audio = AudioProducer(catalog, mic.copy(track = "mic"))
+                var late = broadcast.consume().subscribeTrack("mic", null)
+                audio.close()
+                var request = requests.requestedTrack()
+                assertEquals("mic", request.name())
+                val served = AudioProducer.requested(catalog, request, mic)
+                repeat(3) { index ->
+                    served.write(
+                        AudioFrame(
+                            timestamp = Timestamp(index.toULong() * 960uL, 48_000uL),
+                            data = ByteArray(960 * 4),
+                        )
+                    )
+                }
+                assertNotNull(late.readFrame())
+                late.cancel()
+
+                val camera =
+                    VideoProducerOptions(
+                        input =
+                            VideoEncoderInput(
+                                format = VideoPixelFormat.rgba(),
+                                width = 320u,
+                                height = 240u,
+                                framerate = VideoFrameRate(30u, 1u),
+                            ),
+                        output =
+                            VideoEncoderOutput(codec = VideoCodec.h264(), kind = softwareEncoder),
+                    )
+                val video = VideoProducer(catalog, camera.copy(track = "camera"))
+                late = broadcast.consume().subscribeTrack("camera", null)
+                video.close()
+                request = requests.requestedTrack()
+                assertEquals("camera", request.name())
+                val next = VideoProducer.requested(catalog, request, camera)
+                next.write(
+                    VideoFrame(
+                        timestamp = Timestamp(0uL, 1_000_000uL),
+                        data = ByteArray(320 * 240 * 4) { 0x80.toByte() },
+                    )
+                )
+                next.finish()
+                assertNotNull(late.readFrame())
+                late.cancel()
+            }
+        }
+    }
+
     @Test
     fun `json release serves a reader that joined late`() = runTest {
         BroadcastProducer().use { broadcast ->

@@ -157,6 +157,8 @@ int32_t moq_track_request_name(uint32_t request, moq_string *dst);
 int32_t moq_track_request_accept(uint32_t request, const moq_track_info *info);
 int32_t moq_track_request_video(uint32_t request, const moq_video_init *config);
 int32_t moq_track_request_audio(uint32_t request, const moq_audio_init *config);
+int32_t moq_track_request_encode_video(uint32_t request, const moq_video_encoder_input *input, const moq_video_encoder_output *output, const moq_video_encode_options *options);
+int32_t moq_track_request_encode_audio(uint32_t request, const moq_audio_encoder_input *input, const moq_audio_encoder_output *output, uint32_t allocator);
 int32_t moq_track_request_abort(uint32_t request, uint16_t error_code);
 int32_t moq_track_request_free(uint32_t request);
 int32_t moq_group_request_start(uint32_t request, uint64_t *dst);

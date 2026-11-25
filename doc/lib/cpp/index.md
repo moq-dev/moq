@@ -274,7 +274,10 @@ close ends with `Unroutable` (`Internal` over moq-transport, which has no such
 code), and one released without a finish ends cleanly while nobody reads it; a
 reader still reading is served by the next request for the track while a request
 handler is live. That handler must accept it with the info the track was
-published with: another info ends the track with `Duplicate`. With no handler,
+published with: another info ends the track with `Duplicate`. Serve an
+encoder's track with `moq::VideoProducer::requested()` or
+`moq::AudioProducer::requested()`, given the request and the options the track
+was published with. With no handler,
 the reader reads `Dropped`, seen as `Internal`. A media container
 producer, and a JSON stream or window that published a record, are the
 exceptions: finish them, since releasing one unfinished ends its tracks with

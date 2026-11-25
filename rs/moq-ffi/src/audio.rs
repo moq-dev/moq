@@ -513,6 +513,34 @@ impl MoqAudioProducer {
 		catalog: &crate::media::MoqMediaCatalogProducer,
 		options: MoqAudioProducerOptions,
 	) -> Result<Arc<MoqAudioProducer>, MoqError> {
+		Self::open(catalog, None, options)
+	}
+
+	/// Open an audio track on the track a subscriber's `request` asks for, as [`new`](Self::new)
+	/// does on a track of its own.
+	///
+	/// This is how an on-demand publisher serves a track asked for again after its producer was
+	/// released while read: serve it with the options it was first published with, since its
+	/// readers hold the track info they set; other options end the track with `Duplicate`. The
+	/// request names the track, so [`MoqAudioProducerOptions::track`] must be `None`, and it
+	/// must belong to the catalog's broadcast. A config the codec refuses rejects the request
+	/// with the cause.
+	#[uniffi::constructor]
+	pub fn requested(
+		catalog: &crate::media::MoqMediaCatalogProducer,
+		request: Arc<crate::producer::MoqTrackRequest>,
+		options: MoqAudioProducerOptions,
+	) -> Result<Arc<MoqAudioProducer>, MoqError> {
+		Self::open(catalog, Some(request), options)
+	}
+}
+
+impl MoqAudioProducer {
+	fn open(
+		catalog: &crate::media::MoqMediaCatalogProducer,
+		request: Option<Arc<crate::producer::MoqTrackRequest>>,
+		options: MoqAudioProducerOptions,
+	) -> Result<Arc<MoqAudioProducer>, MoqError> {
 		let _guard = crate::ffi::runtime().enter();
 		let broadcast = catalog.broadcast()?;
 
@@ -551,11 +579,23 @@ impl MoqAudioProducer {
 			options.bandwidth = bandwidth.inner().clone();
 		}
 
-		let (producer, children) = broadcast.with_state(|state| {
-			let producer =
-				moq_audio::encode::Producer::new(&mut state.broadcast, state.catalog.clone(), input, &options)?;
-			Ok((producer, state.children.clone()))
-		})?;
+		let (producer, children) = match request {
+			None => broadcast.with_state(|state| {
+				let producer =
+					moq_audio::encode::Producer::new(&mut state.broadcast, state.catalog.clone(), input, &options)?;
+				Ok((producer, state.children.clone()))
+			})?,
+			Some(request) => {
+				let (catalog, children) =
+					broadcast.with_state(|state| Ok((state.catalog.clone(), state.children.clone())))?;
+				let producer = request.answer_in(&children, |request| {
+					Ok(moq_audio::encode::Producer::requested(
+						request, catalog, input, &options,
+					)?)
+				})?;
+				(producer, children)
+			}
+		};
 
 		// Producer::new does not reserve today (only capture does), so the
 		// binding holds the claim itself. Passing the allocator into Options

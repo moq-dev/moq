@@ -1062,6 +1062,87 @@ void main() {
     broadcast.close();
   });
 
+  test('native encoders serve a renewal', () async {
+    final broadcast = BroadcastProducer();
+    final requests = broadcast.requests();
+    final catalog = moq_media.CatalogProducer(broadcast: broadcast);
+
+    moq_audio.ProducerOptions mic(String? track) => moq_audio.ProducerOptions(
+      input: moq_audio.EncoderInput(
+        format: moq_audio.SampleFormat.f32,
+        sampleRate: 48000,
+        channels: 1,
+      ),
+      output: moq_audio.EncoderOutput(codec: moq_audio.Codec.opus()),
+      track: track,
+    );
+    final audio = moq_audio.Producer(catalog: catalog, options: mic('mic'));
+    var late = await broadcast
+        .consume()
+        .subscribeTrack(name: 'mic', subscription: null)
+        .timeout(timeout);
+    audio.dispose();
+    var request = await requests.requestedTrack().timeout(timeout);
+    expect(request.name(), 'mic');
+    final served = moq_audio.Producer.requested(
+      catalog: catalog,
+      request: request,
+      options: mic(null),
+    );
+    for (var i = 0; i < 3; i++) {
+      served.write(
+        frame: moq_audio.Frame(
+          timestamp: Timestamp(value: i * 20000, scale: 1000000),
+          data: Uint8List(960 * 4),
+        ),
+      );
+    }
+    expect(await late.readFrame().timeout(timeout), isNotNull);
+    late.cancel();
+
+    moq_video.ProducerOptions camera(String? track) =>
+        moq_video.ProducerOptions(
+          input: moq_video.EncoderInput(
+            format: moq_video.PixelFormat.rgba(),
+            width: 320,
+            height: 240,
+            framerate: moq_video.FrameRate(numerator: 30, denominator: 1),
+          ),
+          output: moq_video.EncoderOutput(
+            codec: moq_video.Codec.h264(),
+            kind: moq_video.SoftwareEncoder(),
+          ),
+          track: track,
+        );
+    final video = moq_video.Producer(
+      catalog: catalog,
+      options: camera('camera'),
+    );
+    late = await broadcast
+        .consume()
+        .subscribeTrack(name: 'camera', subscription: null)
+        .timeout(timeout);
+    video.dispose();
+    request = await requests.requestedTrack().timeout(timeout);
+    expect(request.name(), 'camera');
+    final next = moq_video.Producer.requested(
+      catalog: catalog,
+      request: request,
+      options: camera(null),
+    );
+    next.write(
+      frame: moq_video.Frame(
+        timestamp: Timestamp(value: 0, scale: 1000000),
+        data: Uint8List(320 * 240 * 4)..fillRange(0, 320 * 240 * 4, 0x80),
+      ),
+    );
+    next.finish();
+    expect(await late.readFrame().timeout(timeout), isNotNull);
+    late.cancel();
+    requests.cancel();
+    broadcast.close();
+  });
+
   test('JSON release serves a reader that joined late', () async {
     final broadcast = MoqBroadcastProducer();
     final requests = broadcast.requests();

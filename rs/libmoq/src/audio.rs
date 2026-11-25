@@ -210,15 +210,40 @@ impl Audio {
 		reserve: bool,
 	) -> Result<Id, Error> {
 		let producer = moq_audio::encode::Producer::new(target.producer, target.catalog.clone(), input, &options)?;
+		self.insert(target.children, producer, &options, reserve)
+	}
+
+	/// Encode PCM frames onto the track a subscriber's `request` asks for and return its handle.
+	pub(crate) fn publish_requested(
+		&mut self,
+		requested: crate::publish::Requested,
+		input: moq_audio::encode::Input,
+		options: moq_audio::encode::Options,
+		reserve: bool,
+	) -> Result<Id, Error> {
+		let crate::publish::Requested {
+			request,
+			catalog,
+			children,
+		} = requested;
+		let producer = moq_audio::encode::Producer::requested(request, catalog, input, &options)?;
+		self.insert(&children, producer, &options, reserve)
+	}
+
+	fn insert(
+		&mut self,
+		children: &crate::publish::Children,
+		producer: moq_audio::encode::Producer,
+		options: &moq_audio::encode::Options,
+		reserve: bool,
+	) -> Result<Id, Error> {
 		let reservation = reserve.then(|| Arc::new(options.bandwidth.reserve(&producer.demand(), producer.bitrate())));
 		let encoder = Shared::new(AudioEncoder {
 			producer,
 			reservation,
-			children: target.children.clone(),
+			children: children.clone(),
 		});
-		target
-			.children
-			.insert(&mut self.producers, encoder, crate::publish::Child::Audio)
+		children.insert(&mut self.producers, encoder, crate::publish::Child::Audio)
 	}
 
 	pub(crate) fn reservation(&self, id: Id) -> Result<Option<Arc<moq_net::bandwidth::Reservation>>, Error> {
@@ -394,32 +419,9 @@ pub unsafe extern "C" fn moq_encode_audio(
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
 		let name = unsafe { ffi::parse_str(name, name_len)? }.to_string();
-		let raw_input = unsafe { input.as_ref() }.ok_or(Error::InvalidPointer)?;
-		let raw_output = unsafe { output.as_ref() }.ok_or(Error::InvalidPointer)?;
-		let codec_str = unsafe { ffi::parse_str(raw_output.codec, raw_output.codec_len)? };
-
-		let layout = moq_audio::Layout::from_channels(raw_input.channels)?;
-		let mut encoder_input = moq_audio::encode::Input::new(raw_input.sample_rate, layout);
-		encoder_input.format = audio_format_from_u32(raw_input.format)?;
-
-		// The C ABI takes an explicit track name and spells "unset" as 0, so map
-		// both onto the Rust options here rather than leaking either convention.
-		let mut options = moq_audio::encode::Options::default();
+		let (input, mut options) = unsafe { encode_options(input, output)? };
+		// The C ABI takes an explicit track name.
 		options.track = Some(name);
-		let codec = codec_str
-			.parse()
-			.map_err(|_| Error::UnknownFormat(codec_str.to_string()))?;
-		options.config = moq_audio::encode::Config::from_input(codec, &encoder_input);
-		if let Some(sample_rate) = zeroable(raw_output.sample_rate) {
-			options.config.sample_rate = sample_rate;
-		}
-		if let Some(channels) = zeroable(raw_output.channels) {
-			options.config.layout = moq_audio::Layout::from_channels(channels)?;
-		}
-		options.config.bitrate = zeroable(raw_output.bitrate).map(|bps| moq_net::bandwidth::Rate::from_bps(bps.into()));
-		if let Some(micros) = zeroable(raw_output.frame_duration_us) {
-			options.config.frame_duration = Duration::from_micros(micros.into());
-		}
 
 		let allocator = ffi::parse_id_optional(allocator)?;
 		let mut state = State::lock();
@@ -427,8 +429,80 @@ pub unsafe extern "C" fn moq_encode_audio(
 			options.bandwidth = state.bandwidth.allocator(id)?;
 		}
 		let State { publish, audio, .. } = &mut *state;
-		audio.publish(publish.target(broadcast)?, encoder_input, options, allocator.is_some())
+		audio.publish(publish.target(broadcast)?, input, options, allocator.is_some())
 	})
+}
+
+/// Accept a track request as an audio track, encoding the PCM frames you publish to it.
+///
+/// Consumes the request handle and returns the same kind of handle as [moq_encode_audio], or a
+/// negative code on failure. The request names the track. This is how an on-demand publisher
+/// serves a track asked for again after its handle was freed while read: accept it with the
+/// configuration it was first published with, since its readers hold the track info it set;
+/// another ends the track. A configuration the codec refuses rejects the request with the cause.
+///
+/// # Safety
+/// - As [moq_encode_audio], for `input`, `output`, and `allocator`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_track_request_encode_audio(
+	request: u32,
+	input: *const moq_audio_encoder_input,
+	output: *const moq_audio_encoder_output,
+	allocator: u32,
+) -> i32 {
+	ffi::enter(move || {
+		let request = ffi::parse_id(request)?;
+		let (input, mut options) = unsafe { encode_options(input, output)? };
+
+		let allocator = ffi::parse_id_optional(allocator)?;
+		let mut state = State::lock();
+		if let Some(id) = allocator {
+			options.bandwidth = state.bandwidth.allocator(id)?;
+		}
+		let State { publish, audio, .. } = &mut *state;
+		audio.publish_requested(
+			publish.track_request_take(request)?,
+			input,
+			options,
+			allocator.is_some(),
+		)
+	})
+}
+
+/// The encoder input and options `input` and `output` describe, with no track name.
+///
+/// # Safety
+/// - As [moq_encode_audio], for `input` and `output`.
+unsafe fn encode_options(
+	input: *const moq_audio_encoder_input,
+	output: *const moq_audio_encoder_output,
+) -> Result<(moq_audio::encode::Input, moq_audio::encode::Options), Error> {
+	let raw_input = unsafe { input.as_ref() }.ok_or(Error::InvalidPointer)?;
+	let raw_output = unsafe { output.as_ref() }.ok_or(Error::InvalidPointer)?;
+	let codec_str = unsafe { ffi::parse_str(raw_output.codec, raw_output.codec_len)? };
+
+	let layout = moq_audio::Layout::from_channels(raw_input.channels)?;
+	let mut encoder_input = moq_audio::encode::Input::new(raw_input.sample_rate, layout);
+	encoder_input.format = audio_format_from_u32(raw_input.format)?;
+
+	// The C ABI spells "unset" as 0, so map it onto the Rust options here rather than leaking
+	// the convention.
+	let mut options = moq_audio::encode::Options::default();
+	let codec = codec_str
+		.parse()
+		.map_err(|_| Error::UnknownFormat(codec_str.to_string()))?;
+	options.config = moq_audio::encode::Config::from_input(codec, &encoder_input);
+	if let Some(sample_rate) = zeroable(raw_output.sample_rate) {
+		options.config.sample_rate = sample_rate;
+	}
+	if let Some(channels) = zeroable(raw_output.channels) {
+		options.config.layout = moq_audio::Layout::from_channels(channels)?;
+	}
+	options.config.bitrate = zeroable(raw_output.bitrate).map(|bps| moq_net::bandwidth::Rate::from_bps(bps.into()));
+	if let Some(micros) = zeroable(raw_output.frame_duration_us) {
+		options.config.frame_duration = Duration::from_micros(micros.into());
+	}
+	Ok((encoder_input, options))
 }
 
 /// This encoder's bandwidth reservation, or 0 if it was published without one.

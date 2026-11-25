@@ -541,6 +541,48 @@ async def test_release_ends_an_on_demand_track():
     broadcast.close()
 
 
+async def test_native_encoders_serve_a_renewal():
+    """A native encoder serves a track asked for again after its producer was released while read."""
+    broadcast = moq.BroadcastProducer()
+    dynamic = broadcast.requests()
+    catalog = moq.media.CatalogProducer(broadcast)
+
+    mic = moq.AudioEncoderInput(format=moq.AudioSampleFormat.F32, sample_rate=48_000, channels=1)
+    opus = moq.audio.EncoderOutput(codec=moq.AudioCodec.opus())
+    audio = moq.audio.Producer(catalog, mic, opus, track="mic")
+    late = await broadcast.consume().subscribe_track("mic")
+    del audio
+    request = await asyncio.wait_for(dynamic.requested_track(), timeout=5.0)
+    assert request.name == "mic"
+    audio = moq.audio.Producer.requested(catalog, request, mic, opus)
+    for i in range(3):
+        audio.write(moq.audio.Frame(timestamp=moq.Timestamp(20 * i, 1_000), data=bytes(960 * 4)))
+    assert await asyncio.wait_for(late.read_frame(), timeout=5.0) is not None
+    late.cancel()
+
+    camera = moq.VideoEncoderInput(
+        format=moq.VideoPixelFormat.rgba(),
+        width=320,
+        height=240,
+        framerate=moq.video.FrameRate(numerator=30, denominator=1),
+    )
+    h264 = moq.VideoEncoderOutput(
+        codec=moq.VideoCodec.h264(),
+        kind=cast(moq.VideoEncoderKind, moq.VideoEncoderKind.SOFTWARE()),
+    )
+    video = moq.video.Producer(catalog, camera, h264, track="camera")
+    late = await broadcast.consume().subscribe_track("camera")
+    del video
+    request = await asyncio.wait_for(dynamic.requested_track(), timeout=5.0)
+    assert request.name == "camera"
+    video = moq.video.Producer.requested(catalog, request, camera, h264)
+    video.write(moq.video.Frame(timestamp=moq.Timestamp(0, 1_000_000), data=bytes([0x80]) * (320 * 240 * 4)))
+    video.finish()
+    assert await asyncio.wait_for(late.read_frame(), timeout=5.0) is not None
+    late.cancel()
+    broadcast.close()
+
+
 def test_publish_lifecycle():
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("status")

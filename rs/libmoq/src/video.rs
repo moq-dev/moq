@@ -682,6 +682,97 @@ pub unsafe extern "C" fn moq_encode_video(
 ) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
+		let encode = unsafe { Encode::parse(input, output, options)? };
+
+		// Everything the producer needs from the global state, taken out of it: bringing up a
+		// hardware encoder is slow enough that every other call would wait behind it.
+		let (encode, producer, catalog, children) = {
+			let mut state = State::lock();
+			let encode = encode.resolve(&mut state)?;
+			let target = state.publish.target(broadcast)?;
+			(
+				encode,
+				target.producer.clone(),
+				target.catalog.clone(),
+				target.children.clone(),
+			)
+		};
+		let Encode {
+			format,
+			size,
+			options,
+			reserved,
+			..
+		} = encode;
+		let encoder = block_on(moq_video::encode::Producer::new(&producer, catalog, options))?;
+		State::lock().video.insert(&children, encoder, format, size, reserved)
+	})
+}
+
+/// Accept a track request as a video track, encoding the raw frames you publish to it.
+///
+/// Consumes the request handle and returns the same kind of handle as [moq_encode_video], or a
+/// negative code on failure. The request names the track. This is how an on-demand publisher
+/// serves a track asked for again after its handle was freed while read: accept it with the
+/// configuration it was first published with, since its readers hold the track info it set;
+/// another ends the track. A configuration this machine can't encode rejects the request with
+/// the cause.
+///
+/// # Safety
+/// - As [moq_encode_video], for `input`, `output`, and `options`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_track_request_encode_video(
+	request: u32,
+	input: *const moq_video_encoder_input,
+	output: *const moq_video_encoder_output,
+	options: *const moq_video_encode_options,
+) -> i32 {
+	ffi::enter(move || {
+		let request = ffi::parse_id(request)?;
+		let encode = unsafe { Encode::parse(input, output, options)? };
+
+		// Out of the global state, as moq_encode_video opens its encoder.
+		let (encode, requested) = {
+			let mut state = State::lock();
+			let encode = encode.resolve(&mut state)?;
+			(encode, state.publish.track_request_take(request)?)
+		};
+		let Encode {
+			format,
+			size,
+			options,
+			reserved,
+			..
+		} = encode;
+		let crate::publish::Requested {
+			request,
+			catalog,
+			children,
+		} = requested;
+		let encoder = block_on(moq_video::encode::Producer::requested(request, catalog, options))?;
+		State::lock().video.insert(&children, encoder, format, size, reserved)
+	})
+}
+
+/// A video encode's configuration, parsed from its C structs.
+struct Encode {
+	format: moq_video_pixel_format,
+	size: moq_video::Size,
+	options: moq_video::encode::Options,
+	/// Whether it reserves against a bandwidth allocator.
+	reserved: bool,
+	bandwidth: Option<Id>,
+	lower: Option<Id>,
+}
+
+impl Encode {
+	/// # Safety
+	/// - As [moq_encode_video], for `input`, `output`, and `options`.
+	unsafe fn parse(
+		input: *const moq_video_encoder_input,
+		output: *const moq_video_encoder_output,
+		options: *const moq_video_encode_options,
+	) -> Result<Self, Error> {
 		let raw_input = unsafe { input.as_ref() }.ok_or(Error::InvalidPointer)?;
 		let raw_output = unsafe { output.as_ref() }.ok_or(Error::InvalidPointer)?;
 		let options = unsafe { options.as_ref() }.copied().unwrap_or_default();
@@ -694,27 +785,26 @@ pub unsafe extern "C" fn moq_encode_video(
 		}
 
 		let (format, config) = unsafe { encoder_config(raw_input, raw_output)? };
-		let size = config.size();
-		let mut options = moq_video::encode::Options::new(config);
+		Ok(Self {
+			format,
+			size: config.size(),
+			options: moq_video::encode::Options::new(config),
+			reserved: bandwidth.is_some(),
+			bandwidth,
+			lower,
+		})
+	}
 
-		// Everything the producer needs from the global state, taken out of it: bringing up a
-		// hardware encoder is slow enough that every other call would wait behind it.
-		let (producer, catalog, children) = {
-			let mut state = State::lock();
-			if let Some(bandwidth) = bandwidth {
-				options.bandwidth = state.bandwidth.allocator(bandwidth)?;
-			}
-			if let Some(lower) = lower {
-				options.lower = Some(state.video.rung(lower)?);
-			}
-			let target = state.publish.target(broadcast)?;
-			(target.producer.clone(), target.catalog.clone(), target.children.clone())
-		};
-		let encoder = block_on(moq_video::encode::Producer::new(&producer, catalog, options))?;
-		State::lock()
-			.video
-			.insert(&children, encoder, format, size, bandwidth.is_some())
-	})
+	/// Look up the allocator and lower rendition it names.
+	fn resolve(mut self, state: &mut State) -> Result<Self, Error> {
+		if let Some(bandwidth) = self.bandwidth {
+			self.options.bandwidth = state.bandwidth.allocator(bandwidth)?;
+		}
+		if let Some(lower) = self.lower {
+			self.options.lower = Some(state.video.rung(lower)?);
+		}
+		Ok(self)
+	}
 }
 
 /// This encoder's bandwidth reservation, or 0 if it was published without one.

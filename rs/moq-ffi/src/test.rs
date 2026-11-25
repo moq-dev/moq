@@ -2261,6 +2261,130 @@ async fn release_ends_on_demand(
 		.unwrap();
 }
 
+/// The microphone a test publishes: mono 48 kHz PCM encoded to Opus in 20 ms frames.
+fn microphone(track: Option<String>) -> crate::audio::MoqAudioProducerOptions {
+	crate::audio::MoqAudioProducerOptions {
+		input: crate::audio::MoqAudioEncoderInput {
+			format: crate::audio::MoqAudioSampleFormat::F32,
+			sample_rate: 48_000,
+			channels: 1,
+		},
+		output: crate::audio::MoqAudioEncoderOutput {
+			codec: crate::audio::MoqAudioCodec::opus(),
+			sample_rate: None,
+			channels: None,
+			bitrate: None,
+			frame_duration: Some(Duration::from_millis(20)),
+		},
+		track,
+		bandwidth: None,
+	}
+}
+
+/// The camera a test publishes: 320x240 RGBA at 30 fps, encoded by openh264.
+fn camera(track: Option<String>) -> crate::video::MoqVideoProducerOptions {
+	crate::video::MoqVideoProducerOptions {
+		input: crate::video::MoqVideoEncoderInput {
+			format: crate::video::MoqVideoPixelFormat::rgba(),
+			width: 320,
+			height: 240,
+			framerate: crate::video::MoqVideoFrameRate {
+				numerator: 30,
+				denominator: 1,
+			},
+		},
+		output: crate::video::MoqVideoEncoderOutput {
+			codec: crate::video::MoqVideoCodec::h264(),
+			bitrate: None,
+			join: None,
+			kind: crate::video::MoqVideoEncoderKind::Software,
+		},
+		track,
+		bandwidth: None,
+		lower: None,
+	}
+}
+
+/// Wait for `name`'s reader to be handed to the broadcast's next request for it.
+async fn renewal(dynamic: &MoqBroadcastRequests, name: &str) -> Arc<crate::producer::MoqTrackRequest> {
+	let request = kio::clock::timeout(TIMEOUT, dynamic.requested_track())
+		.await
+		.unwrap_or_else(|_| panic!("timed out waiting for {name} to be requested again"))
+		.unwrap();
+	assert_eq!(request.name().unwrap(), name);
+	request
+}
+
+/// Wait for the next group `reader` reads, which must come.
+async fn next_group(reader: &MoqTrackConsumer, name: &str) {
+	let group = kio::clock::timeout(TIMEOUT, reader.recv_group())
+		.await
+		.unwrap_or_else(|_| panic!("timed out waiting for {name}'s group"))
+		.unwrap();
+	assert!(group.is_some(), "{name} ended under a reader");
+}
+
+/// A native encoder serves a track asked for again after its producer was released while read,
+/// published with the options it was first published with, and the reader reads what it encodes.
+#[tokio::test]
+async fn native_encoders_serve_a_renewal() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let dynamic = broadcast.requests().unwrap();
+	let catalog = MoqMediaCatalogProducer::new(broadcast.clone()).unwrap();
+
+	let audio = crate::audio::MoqAudioProducer::new(&catalog, microphone(Some("microphone".into()))).unwrap();
+	let late = subscribe(&broadcast, "microphone").await;
+	drop(audio);
+	let request = renewal(&dynamic, "microphone").await;
+	let audio = crate::audio::MoqAudioProducer::requested(&catalog, request, microphone(None)).unwrap();
+	for index in 0..3 {
+		let frame = crate::audio::MoqAudioFrame {
+			timestamp: us(index * 20_000),
+			data: vec![0; 960 * 4],
+		};
+		audio.write(frame).unwrap();
+	}
+	next_group(&late, "microphone").await;
+
+	let video = crate::video::MoqVideoProducer::new(&catalog, camera(Some("camera".into()))).unwrap();
+	let late = subscribe(&broadcast, "camera").await;
+	drop(video);
+	let request = renewal(&dynamic, "camera").await;
+	let video = crate::video::MoqVideoProducer::requested(&catalog, request, camera(None)).unwrap();
+	let frame = crate::video::MoqVideoFrame {
+		timestamp: us(0),
+		data: vec![0x80; 320 * 240 * 4],
+	};
+	video.write(frame).unwrap();
+	video.finish().unwrap();
+	next_group(&late, "camera").await;
+}
+
+/// A requested encoder refuses a request it would publish wrong, rejecting it with the cause:
+/// one naming another track, or one from another broadcast, whose readers would never find the
+/// catalog's rendition.
+#[tokio::test]
+async fn native_encoders_refuse_a_request_they_cannot_serve() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let dynamic = broadcast.requests().unwrap();
+	let catalog = MoqMediaCatalogProducer::new(broadcast.clone()).unwrap();
+	let other = MoqBroadcastProducer::new().unwrap();
+	let elsewhere = MoqMediaCatalogProducer::new(other.clone()).unwrap();
+
+	let pending = {
+		let consumer = broadcast.consume().unwrap();
+		tokio::spawn(async move { consumer.subscribe_track("camera".into(), None).await })
+	};
+	let request = renewal(&dynamic, "camera").await;
+	assert!(crate::video::MoqVideoProducer::requested(&elsewhere, request.clone(), camera(None)).is_err());
+	assert!(crate::audio::MoqAudioProducer::requested(&elsewhere, request.clone(), microphone(None)).is_err());
+	assert!(crate::video::MoqVideoProducer::requested(&catalog, request, camera(Some("other".into()))).is_err());
+	let pending = kio::clock::timeout(TIMEOUT, pending)
+		.await
+		.expect("timed out waiting for the rejection");
+	assert!(pending.unwrap().is_err());
+}
+
 #[tokio::test]
 async fn release_ends_every_on_demand_producer() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
@@ -2315,22 +2439,7 @@ async fn release_ends_every_on_demand_producer() {
 		|name| {
 			let audio = crate::audio::MoqAudioProducer::new(
 				&MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
-				crate::audio::MoqAudioProducerOptions {
-					input: crate::audio::MoqAudioEncoderInput {
-						format: crate::audio::MoqAudioSampleFormat::F32,
-						sample_rate: 48_000,
-						channels: 1,
-					},
-					output: crate::audio::MoqAudioEncoderOutput {
-						codec: crate::audio::MoqAudioCodec::opus(),
-						sample_rate: None,
-						channels: None,
-						bitrate: None,
-						frame_duration: Some(Duration::from_millis(20)),
-					},
-					track: Some(name.into()),
-					bandwidth: None,
-				},
+				microphone(Some(name.into())),
 			)
 			.unwrap();
 			(audio.demand().unwrap(), Box::new(audio))
@@ -2345,26 +2454,7 @@ async fn release_ends_every_on_demand_producer() {
 		|name| {
 			let video = crate::video::MoqVideoProducer::new(
 				&MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
-				crate::video::MoqVideoProducerOptions {
-					input: crate::video::MoqVideoEncoderInput {
-						format: crate::video::MoqVideoPixelFormat::rgba(),
-						width: 320,
-						height: 240,
-						framerate: crate::video::MoqVideoFrameRate {
-							numerator: 30,
-							denominator: 1,
-						},
-					},
-					output: crate::video::MoqVideoEncoderOutput {
-						codec: crate::video::MoqVideoCodec::h264(),
-						bitrate: None,
-						join: None,
-						kind: crate::video::MoqVideoEncoderKind::Software,
-					},
-					track: Some(name.into()),
-					bandwidth: None,
-					lower: None,
-				},
+				camera(Some(name.into())),
 			)
 			.unwrap();
 			(video.demand().unwrap(), Box::new(video))

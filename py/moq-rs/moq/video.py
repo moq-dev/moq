@@ -20,7 +20,7 @@ from ._read import End, Gap, _end, _gap
 from ._records import Delay, Timestamp, VideoDecodedFrame
 from ._stream import _Stream
 from .media import CatalogProducer, DecodeStart, Dimensions, Video
-from .publish import TrackDemand
+from .publish import TrackDemand, TrackRequest
 from .session import Allocator, Reservation
 from .subscribe import BroadcastConsumer
 from .types import VideoCodec as Codec
@@ -116,6 +116,38 @@ class Producer:
                 lower=None if lower is None else lower._inner,
             ),
         )
+
+    @classmethod
+    def requested(
+        cls,
+        catalog: CatalogProducer,
+        request: TrackRequest,
+        input: EncoderInput,
+        output: EncoderOutput,
+        *,
+        bandwidth: Allocator | None = None,
+        lower: Producer | None = None,
+    ) -> Producer:
+        """Open a video track on the track a subscriber's ``request`` asks for, which names it.
+
+        This is how an on-demand publisher serves a track asked for again after its producer was
+        released while read: pass the settings it was first published with, since its readers
+        hold the track info they set; others end the track with ``Duplicate``. The request must
+        belong to the catalog's broadcast.
+        """
+        producer = cls.__new__(cls)
+        producer._inner = MoqVideoProducer.requested(
+            catalog._inner,
+            request._inner,
+            MoqVideoProducerOptions(
+                input=input,
+                output=output,
+                track=None,
+                bandwidth=None if bandwidth is None else bandwidth._inner,
+                lower=None if lower is None else lower._inner,
+            ),
+        )
+        return producer
 
     def demand(self) -> TrackDemand:
         """A watch-only handle to whether this video track has subscribers."""

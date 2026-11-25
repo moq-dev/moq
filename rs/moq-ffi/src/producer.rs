@@ -241,6 +241,11 @@ impl Children {
 		}
 	}
 
+	/// Whether both are the children of one broadcast.
+	fn same(&self, other: &Self) -> bool {
+		Arc::ptr_eq(&self.family, &other.family)
+	}
+
 	/// The broadcast, while a handle keeping it open still holds it.
 	fn broadcast(&self) -> Option<Arc<moq_net::broadcast::Producer>> {
 		self.broadcast.upgrade()
@@ -687,6 +692,22 @@ impl MoqTrackRequest {
 		f: impl FnOnce(moq_net::track::Request) -> Result<R, MoqError>,
 	) -> Result<R, MoqError> {
 		self.inner.answer(f)
+	}
+
+	/// [`answer`](Self::answer) for a producer publishing in the broadcast `children` belong to,
+	/// refusing a request from another broadcast, whose readers would never find that catalog's
+	/// rendition.
+	pub(crate) fn answer_in<R>(
+		&self,
+		children: &Children,
+		f: impl FnOnce(moq_net::track::Request) -> Result<R, MoqError>,
+	) -> Result<R, MoqError> {
+		if !self.children.same(children) {
+			return Err(MoqError::Codec {
+				reason: "the request belongs to another broadcast".into(),
+			});
+		}
+		self.answer(f)
 	}
 }
 

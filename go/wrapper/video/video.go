@@ -81,23 +81,48 @@ type ProducerOptions struct {
 
 // NewProducer opens a video track on the catalog's broadcast and registers its rendition.
 func NewProducer(catalog *media.CatalogProducer, options ProducerOptions) (*Producer, error) {
-	if err := bridge.NonNegative(options.Output.Join, "join"); err != nil {
+	raw, err := options.ffi()
+	if err != nil {
 		return nil, err
 	}
-	var bw **ffi.MoqAllocator
-	if options.Bandwidth != nil {
-		raw := bridge.Allocator(options.Bandwidth)
-		bw = &raw
-	}
-	var lower **ffi.MoqVideoProducer
-	if options.Lower != nil {
-		lower = &options.Lower.inner
-	}
-	inner, err := ffi.NewMoqVideoProducer(bridge.CatalogProducer(catalog), ffi.MoqVideoProducerOptions{Input: options.Input, Output: options.Output, Track: options.Track, Bandwidth: bw, Lower: lower})
+	inner, err := ffi.NewMoqVideoProducer(bridge.CatalogProducer(catalog), raw)
 	if err != nil {
 		return nil, err
 	}
 	return &Producer{inner}, nil
+}
+
+// NewRequestedProducer opens a video track on the track a subscriber's request asks for, which
+// names it, so options.Track must be nil. This is how an on-demand publisher serves a track asked
+// for again after its producer was closed while read: pass the options it was first published
+// with, since its readers hold the track info they set; others end the track with Duplicate. The
+// request must belong to the catalog's broadcast.
+func NewRequestedProducer(catalog *media.CatalogProducer, request *moq.TrackRequest, options ProducerOptions) (*Producer, error) {
+	raw, err := options.ffi()
+	if err != nil {
+		return nil, err
+	}
+	inner, err := ffi.MoqVideoProducerRequested(bridge.CatalogProducer(catalog), bridge.TrackRequest(request), raw)
+	if err != nil {
+		return nil, err
+	}
+	return &Producer{inner}, nil
+}
+
+func (o ProducerOptions) ffi() (ffi.MoqVideoProducerOptions, error) {
+	if err := bridge.NonNegative(o.Output.Join, "join"); err != nil {
+		return ffi.MoqVideoProducerOptions{}, err
+	}
+	var bw **ffi.MoqAllocator
+	if o.Bandwidth != nil {
+		raw := bridge.Allocator(o.Bandwidth)
+		bw = &raw
+	}
+	var lower **ffi.MoqVideoProducer
+	if o.Lower != nil {
+		lower = &o.Lower.inner
+	}
+	return ffi.MoqVideoProducerOptions{Input: o.Input, Output: o.Output, Track: o.Track, Bandwidth: bw, Lower: lower}, nil
 }
 
 // Demand returns a watch-only handle to whether the track has subscribers.

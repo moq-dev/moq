@@ -543,6 +543,34 @@ impl MoqVideoProducer {
 		catalog: &crate::media::MoqMediaCatalogProducer,
 		options: MoqVideoProducerOptions,
 	) -> Result<Arc<MoqVideoProducer>, MoqError> {
+		Self::open(catalog, None, options)
+	}
+
+	/// Open a video track on the track a subscriber's `request` asks for, as [`new`](Self::new)
+	/// does on a track of its own.
+	///
+	/// This is how an on-demand publisher serves a track asked for again after its producer was
+	/// released while read: serve it with the options it was first published with, since its
+	/// readers hold the track info they set; other options end the track with `Duplicate`. The
+	/// request names the track, so [`MoqVideoProducerOptions::track`] must be `None`, and it
+	/// must belong to the catalog's broadcast. A config this machine can't encode rejects the
+	/// request with the cause.
+	#[uniffi::constructor]
+	pub fn requested(
+		catalog: &crate::media::MoqMediaCatalogProducer,
+		request: Arc<crate::producer::MoqTrackRequest>,
+		options: MoqVideoProducerOptions,
+	) -> Result<Arc<MoqVideoProducer>, MoqError> {
+		Self::open(catalog, Some(request), options)
+	}
+}
+
+impl MoqVideoProducer {
+	fn open(
+		catalog: &crate::media::MoqMediaCatalogProducer,
+		request: Option<Arc<crate::producer::MoqTrackRequest>>,
+		options: MoqVideoProducerOptions,
+	) -> Result<Arc<MoqVideoProducer>, MoqError> {
 		let _guard = crate::ffi::runtime().enter();
 		let broadcast = catalog.broadcast()?;
 
@@ -573,7 +601,14 @@ impl MoqVideoProducer {
 		// long as the codec takes to start.
 		let (target, catalog, children) = broadcast
 			.with_state(|state| Ok((state.broadcast.clone(), state.catalog.clone(), state.children.clone())))?;
-		let producer = block_on(moq_video::encode::Producer::new(&target, catalog, options))?;
+		let producer = match request {
+			None => block_on(moq_video::encode::Producer::new(&target, catalog, options))?,
+			Some(request) => request.answer_in(&children, |request| {
+				Ok(block_on(moq_video::encode::Producer::requested(
+					request, catalog, options,
+				))?)
+			})?,
+		};
 		children.adopt(Arc::new(MoqVideoProducer {
 			inner: std::sync::Mutex::new(Some(producer)),
 			format: input.format.0,

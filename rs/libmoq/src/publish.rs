@@ -26,6 +26,14 @@ struct TrackRequest {
 	request: moq_net::track::Request,
 }
 
+/// A track request taken to publish an encoder on, under its broadcast's catalog.
+pub(crate) struct Requested {
+	pub request: moq_net::track::Request,
+	pub catalog: moq_mux::catalog::Producer<Extra>,
+	/// The broadcast's children, which the encoder joins.
+	pub children: Children,
+}
+
 /// A request a handler pulled, before it has a handle. A track request is boxed: it is
 /// several times the size of a fill.
 enum Request {
@@ -1102,6 +1110,22 @@ impl Publish {
 			children: children.clone(),
 		};
 		children.insert(&mut self.tracks, raw, Child::Track)
+	}
+
+	/// Take a track request to publish an encoder on, with the catalog of the broadcast it was
+	/// made on and that broadcast's children.
+	pub(crate) fn track_request_take(&mut self, request: Id) -> Result<Requested, Error> {
+		let TrackRequest {
+			broadcast,
+			children,
+			request,
+		} = self.track_request.remove(request).ok_or(Error::NotFound)?;
+		let catalog = self.catalog(broadcast)?.clone();
+		Ok(Requested {
+			request,
+			catalog,
+			children,
+		})
 	}
 
 	/// Accept a track request as an audio track, returning a media handle like [`Self::audio`].

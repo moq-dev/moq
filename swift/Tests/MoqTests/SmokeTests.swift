@@ -847,6 +847,52 @@ final class SmokeTests: XCTestCase {
         try broadcast.close()
     }
 
+    /// A native encoder serves a track asked for again after its producer was released while
+    /// read, published with the same settings.
+    func testNativeEncodersServeARenewal() async throws {
+        let broadcast = try BroadcastProducer()
+        let requests = try broadcast.requests()
+        let catalog = try Media.CatalogProducer(broadcast: broadcast)
+
+        let mic = AudioEncoderInput(format: .f32, sampleRate: 48_000, channels: 1)
+        let opus = AudioEncoderOutput(codec: AudioCodec.opus())
+        var audio: Audio.Producer? = try Audio.Producer(
+            catalog: catalog, input: mic, output: opus, track: "mic")
+        var late = try await broadcast.consume().subscribeTrack(name: "mic")
+        audio = nil
+        var request = try await requests.requestedTrack()
+        XCTAssertEqual(try request.name, "mic")
+        audio = try Audio.Producer.requested(
+            catalog: catalog, request: request, input: mic, output: opus)
+        for index in 0..<3 {
+            try audio!.write(
+                AudioFrame(timestamp: micros(UInt64(index) * 20_000), data: Data(count: 960 * 4)))
+        }
+        var frame = try await late.readFrame()
+        XCTAssertNotNil(frame)
+        late.cancel()
+
+        let camera = VideoEncoderInput(
+            format: .rgba(), width: 320, height: 240,
+            framerate: Video.FrameRate(numerator: 30, denominator: 1))
+        let h264 = VideoEncoderOutput(codec: VideoCodec.h264(), kind: .software)
+        var video: Video.Producer? = try Video.Producer(
+            catalog: catalog, input: camera, output: h264, track: "camera")
+        late = try await broadcast.consume().subscribeTrack(name: "camera")
+        video = nil
+        request = try await requests.requestedTrack()
+        XCTAssertEqual(try request.name, "camera")
+        video = try Video.Producer.requested(
+            catalog: catalog, request: request, input: camera, output: h264)
+        try video!.write(
+            VideoFrame(timestamp: micros(0), data: Data(repeating: 0x80, count: 320 * 240 * 4)))
+        try video!.finish()
+        frame = try await late.readFrame()
+        XCTAssertNotNil(frame)
+        late.cancel()
+        try broadcast.close()
+    }
+
     /// A released typed producer hands a reader that joined since to the next request, like a
     /// raw one.
     func testJsonReleaseServesALateReader() async throws {

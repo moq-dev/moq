@@ -137,20 +137,45 @@ type ProducerOptions struct {
 
 // NewProducer opens an audio track on the catalog's broadcast and registers its rendition.
 func NewProducer(catalog *media.CatalogProducer, options ProducerOptions) (*Producer, error) {
-	out, err := options.Output.ffi()
+	raw, err := options.ffi()
 	if err != nil {
 		return nil, err
 	}
-	var bw **ffi.MoqAllocator
-	if options.Bandwidth != nil {
-		raw := bridge.Allocator(options.Bandwidth)
-		bw = &raw
-	}
-	inner, err := ffi.NewMoqAudioProducer(bridge.CatalogProducer(catalog), ffi.MoqAudioProducerOptions{Input: options.Input, Output: out, Track: options.Track, Bandwidth: bw})
+	inner, err := ffi.NewMoqAudioProducer(bridge.CatalogProducer(catalog), raw)
 	if err != nil {
 		return nil, err
 	}
 	return &Producer{inner}, nil
+}
+
+// NewRequestedProducer opens an audio track on the track a subscriber's request asks for, which
+// names it, so options.Track must be nil. This is how an on-demand publisher serves a track asked
+// for again after its producer was closed while read: pass the options it was first published
+// with, since its readers hold the track info they set; others end the track with Duplicate. The
+// request must belong to the catalog's broadcast.
+func NewRequestedProducer(catalog *media.CatalogProducer, request *moq.TrackRequest, options ProducerOptions) (*Producer, error) {
+	raw, err := options.ffi()
+	if err != nil {
+		return nil, err
+	}
+	inner, err := ffi.MoqAudioProducerRequested(bridge.CatalogProducer(catalog), bridge.TrackRequest(request), raw)
+	if err != nil {
+		return nil, err
+	}
+	return &Producer{inner}, nil
+}
+
+func (o ProducerOptions) ffi() (ffi.MoqAudioProducerOptions, error) {
+	out, err := o.Output.ffi()
+	if err != nil {
+		return ffi.MoqAudioProducerOptions{}, err
+	}
+	var bw **ffi.MoqAllocator
+	if o.Bandwidth != nil {
+		raw := bridge.Allocator(o.Bandwidth)
+		bw = &raw
+	}
+	return ffi.MoqAudioProducerOptions{Input: o.Input, Output: out, Track: o.Track, Bandwidth: bw}, nil
 }
 
 // Demand returns a watch-only handle to whether the track has subscribers.

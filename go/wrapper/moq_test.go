@@ -1755,6 +1755,102 @@ func TestCloseEndsAnOnDemandTrack(t *testing.T) {
 	}
 }
 
+// TestNativeEncodersServeARenewal serves a track asked for again after its encoder was closed
+// while read with an encoder on the request, published with the same options.
+func TestNativeEncodersServeARenewal(t *testing.T) {
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer broadcast.Close()
+	dynamic, err := broadcast.Requests()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dynamic.Cancel()
+	consumer, err := broadcast.Consume()
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := moqmedia.NewCatalogProducer(broadcast)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	// Close the producer published as name once a reader joined, returning the request for it.
+	renewal := func(name string, close func()) (*moq.TrackConsumer, *moq.TrackRequest) {
+		t.Helper()
+		late, err := consumer.SubscribeTrack(ctx, name, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		close()
+		request, err := dynamic.RequestedTrack(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, err := request.Name(); err != nil || got != name {
+			t.Fatalf("request name = %q, %v; want %s", got, err, name)
+		}
+		return late, request
+	}
+	read := func(late *moq.TrackConsumer) {
+		t.Helper()
+		frame, err := late.ReadFrame(ctx)
+		if err != nil || frame == nil {
+			t.Fatalf("frame = %+v, %v; want one", frame, err)
+		}
+		late.Cancel()
+	}
+
+	mic := "mic"
+	audioOptions := moqaudio.ProducerOptions{
+		Input:  moqaudio.EncoderInput{Format: moq.AudioSampleFormatF32, SampleRate: 48000, Channels: 1},
+		Output: moqaudio.EncoderOutput{Codec: moq.OpusAudioCodec(), FrameDuration: 20 * time.Millisecond},
+	}
+	named := audioOptions
+	named.Track = &mic
+	audio, err := moqaudio.NewProducer(catalog, named)
+	if err != nil {
+		t.Fatal(err)
+	}
+	late, request := renewal(mic, audio.Close)
+	if audio, err = moqaudio.NewRequestedProducer(catalog, request, audioOptions); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 3 {
+		if err := audio.Write(moqaudio.Frame{Timestamp: moq.TimestampFromScale(uint64(i)*960, 48_000), Data: make([]byte, 960*4)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read(late)
+
+	camera := "camera"
+	videoOptions := moqvideo.ProducerOptions{
+		Input:  moqvideo.EncoderInput{Format: moq.RgbaVideoPixelFormat(), Width: 320, Height: 240, Framerate: moqvideo.FrameRate{Numerator: 30, Denominator: 1}},
+		Output: moqvideo.EncoderOutput{Codec: moq.H264VideoCodec(), Kind: moq.SoftwareEncoder()},
+	}
+	namedVideo := videoOptions
+	namedVideo.Track = &camera
+	video, err := moqvideo.NewProducer(catalog, namedVideo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	late, request = renewal(camera, video.Close)
+	if video, err = moqvideo.NewRequestedProducer(catalog, request, videoOptions); err != nil {
+		t.Fatal(err)
+	}
+	if err := video.Write(moqvideo.Frame{Timestamp: moq.TimestampFromScale(0, 30), Data: make([]byte, 320*240*4)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := video.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	read(late)
+}
+
 // TestCancelDoesNotLeakGoroutines parks many subscribes on a dynamic producer
 // that never answers, cancels them all, and waits for the goroutine count to come
 // back. Each parked call holds a goroutine inside cgo, so a cancel that returned
