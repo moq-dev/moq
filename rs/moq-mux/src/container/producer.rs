@@ -941,7 +941,8 @@ where
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> crate::Result<()> {
 		let bound = self.bound(end)?;
 		let marker_at = bound.or_else(|| self.estimated_end());
-		self.close(end, bound, marker_at, None)
+		// Without a bound, the group's media still lasts past its last frame's timestamp.
+		self.close(end.or(marker_at), bound, marker_at, None)
 	}
 
 	/// Where a group cut at `end` ends: there, or at its moved keyframe when only that frame
@@ -966,18 +967,18 @@ where
 	///
 	/// The group ends whole at `whole`, else at a bound the caller knows, such as the next
 	/// keyframe, else where a media track's duration marker goes, so a reader can tell the group
-	/// starting there continues it. The catalog's estimate measures to the source's `end`, which a
-	/// moved keyframe can put below `bound`.
+	/// starting there continues it. The catalog's estimate measures to `measured`, the source's
+	/// end, which a moved keyframe can put below `bound`.
 	fn close(
 		&mut self,
-		end: Option<moq_net::Timestamp>,
+		measured: Option<moq_net::Timestamp>,
 		bound: Option<moq_net::Timestamp>,
 		marker_at: Option<moq_net::Timestamp>,
 		whole: Option<moq_net::Timestamp>,
 	) -> crate::Result<()> {
 		// Before the flush, which can fail: an unbounded cut leaves the measurement open to fold
 		// into the next group anyway, so cutting often costs the catalog nothing.
-		self.estimator.cut(end);
+		self.estimator.cut(measured);
 		let end = bound;
 		self.claim();
 
@@ -1802,6 +1803,22 @@ mod tests {
 		}
 
 		assert_eq!(producer.estimate().bitrate, Some(1_000_000));
+	}
+
+	/// An unbounded cut measures a group to where its last frame ends, not to that frame's
+	/// timestamp, or five-packet audio groups would advertise a quarter more than they carry.
+	#[tokio::test]
+	async fn grouped_unbounded_cuts_measure_the_last_frame() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Audio));
+		for i in 0..200u64 {
+			// 20 ms packets of 250 bytes: 100 kbps.
+			producer.write(sized_frame(i * 20_000, i % 5 == 0, 250)).unwrap();
+			if i % 5 == 4 {
+				producer.cut(None).unwrap();
+			}
+		}
+		assert_eq!(producer.estimate().bitrate, Some(100_000));
 	}
 
 	/// A break in the timeline is not a frame duration, so the estimate never spans one. Without the

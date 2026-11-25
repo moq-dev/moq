@@ -209,8 +209,9 @@ macro_rules! import {
 ///
 /// Video groups by its own keyframes. Audio is independently decodable per frame, so it has no
 /// boundary of its own and accumulates into the current group until the caller draws one with
-/// [`cut`](Self::cut) or [`seek`](Self::seek). Cut per frame for the lowest latency (one group,
-/// one QUIC stream, forwarded without waiting), or less often to batch frames into fewer groups. An
+/// [`cut`](Self::cut) or [`seek`](Self::seek). Cut once a group holds about
+/// [`Join::DEFAULT`](crate::container::Join::DEFAULT) of audio: frames forward as they are written
+/// either way, and each group costs a QUIC stream, so cutting per frame spends one per packet. An
 /// audio track that is never cut is one unbounded group, which strands late subscribers and the
 /// timeline alike, so this warns once when it sees that.
 pub struct Track {
@@ -515,8 +516,9 @@ impl Track {
 
 	/// Cut the current group at `end` without finishing the track.
 	///
-	/// This is how an audio track gets group boundaries at all: call it per frame for one group
-	/// per packet (the lowest latency), or less often to batch frames into fewer groups.
+	/// This is how an audio track gets group boundaries at all: call it once a group holds about
+	/// [`Join::DEFAULT`](crate::container::Join::DEFAULT) of audio. Frames forward as they are
+	/// written, so cutting per frame only spends a QUIC stream per packet.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> Result<()> {
 		self.group_start = None;
 		import!(&mut self.kind, import => import.cut(end))
@@ -1297,8 +1299,7 @@ mod tests {
 		assert_eq!(collect_groups(subscriber).await, vec![2, 1, 2]);
 	}
 
-	/// Cutting after every frame is still available, and is what a caller wanting the lowest
-	/// latency does: one group (one QUIC stream) per packet, forwarded without waiting.
+	/// Cutting after every frame is still available: one group (one QUIC stream) per packet.
 	#[tokio::test(start_paused = true)]
 	async fn a_caller_can_still_cut_per_frame() {
 		let (mut broadcast, catalog) = new_broadcast();

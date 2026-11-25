@@ -110,6 +110,24 @@ test("Legacy Producer starts a discontinuity marker after a cut audio group's en
 	]);
 });
 
+test("Legacy Producer starts a keyframe inside a cut group's span at its end", async () => {
+	const media = track(Time.Timescale.MICRO);
+	const subscriber = media.subscribe({ ranges: [{}] });
+	const producer = new Producer(media, new Format("audio"));
+	producer.encode(new Uint8Array([1]), Duration.micros(0), true);
+	producer.encode(new Uint8Array([1]), Duration.micros(20_000), false);
+	producer.cut(Duration.micros(40_000));
+	// Past the newest frame but inside the span the cut ended whole, as Rust's producer moves it.
+	producer.encode(new Uint8Array([1]), Duration.micros(30_000), true);
+	producer.encode(new Uint8Array([1]), Duration.micros(50_000), false);
+	producer.finish();
+
+	expect(await groups(subscriber)).toEqual([
+		{ start: 0n, end: 40_000n, frames: [0, 20_000] },
+		{ start: 40_000n, end: 70_000n, frames: [40_000, 50_000] },
+	]);
+});
+
 test("Legacy Producer starts video resuming at a discontinuity's end past its marker", async () => {
 	for (const [scale, at] of [
 		[Time.Timescale.MICRO, 33_001],

@@ -42,8 +42,12 @@ impl codec::Bridge for Bridge {
 			.map_err(moq_mux::Error::from)?;
 		// The importer writes each packet at once and only accumulates the group, so the packet that
 		// fills a join closes it, and the relay sees the group finish without waiting for the next.
+		// An encoder entering DTX sends one header-only packet and then nothing until speech
+		// resumes, so that packet closes the group too.
+		let dtx = frame.payload.len() <= 2;
 		self.import.decode(&frame.payload, Some(pts))?;
-		if self.join.fill(pts, end.unwrap_or(pts)) {
+		if self.join.fill(pts, end.unwrap_or(pts)) || dtx {
+			self.join.reset();
 			self.import.cut(end)?;
 		}
 		Ok(())

@@ -187,7 +187,7 @@ export class Producer {
 	// The newest frame timestamp written in any group, which a marker never starts below.
 	#newest?: number;
 	// Where the latest group that ended whole ends, in the track's timescale. Its span runs to there,
-	// so a marker never starts below it.
+	// so neither a marker nor the next group starts below it.
 	#ended?: bigint;
 
 	/** Wrap a track to publish legacy-container frames into it. */
@@ -203,8 +203,9 @@ export class Producer {
 	 * its own (a leading picture after a splice) is dropped, as is a keyframe at or before the newest
 	 * frame with no group open, with the frames after it until a keyframe opens a group. With no group
 	 * open, a keyframe landing on the latest group's start (media resuming right at a discontinuity's
-	 * marker) is stamped one unit of the track's timescale later, and so is a frame at its timestamp
-	 * after it, such as the picture its parameter sets precede. Throws if the first frame is not a
+	 * marker) is stamped one unit of the track's timescale later, and one inside the span of the
+	 * group a cut ended whole is stamped at its end, and so is a frame at its timestamp after it, such
+	 * as the picture its parameter sets precede. Throws if the first frame is not a
 	 * keyframe, a group start goes backwards, or a frame is below the previous group start.
 	 */
 	encode(data: Uint8Array | Source, pts: Duration, keyframe: boolean) {
@@ -220,6 +221,17 @@ export class Producer {
 		// the old content's last frames, continues the open group instead. With none open it is
 		// refused, before anything changes.
 		const behind = this.#newest !== undefined && timestamp <= this.#newest;
+		// With no group open, one inside the span of the group a cut ended whole, such as after an end
+		// rounded up from the frame duration, starts at that end.
+		if (
+			keyframe &&
+			!behind &&
+			!this.#group &&
+			this.#ended !== undefined &&
+			keyOf(this.#track, timestamp) < this.#ended
+		) {
+			timestamp = startAfter(this.#track, this.#ended - 1n);
+		}
 		// With no group open, one landing on the latest group's start, such as media resuming right
 		// at a discontinuity's marker, starts at the first start past it instead.
 		const largest = this.#track.largest()?.group;

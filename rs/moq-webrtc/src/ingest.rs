@@ -203,6 +203,39 @@ mod tests {
 		assert_eq!(groups, 3, "the two frames' group, the marker, and the frame after it");
 	}
 
+	/// An Opus encoder entering DTX sends one header-only packet and then goes quiet, so that
+	/// packet closes the group rather than leaving the speech before it open until audio resumes.
+	#[tokio::test(start_paused = true)]
+	async fn a_dtx_packet_closes_its_group() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut sink = IngestSink::new(broadcast, catalog);
+		let audio = str0m::media::MediaKind::Audio;
+		sink.on_track("0".into(), audio, str0m::format::Codec::Opus, Some((48_000, 2)))
+			.unwrap();
+		let mut track = consumer.track("0.opus").unwrap().subscribe(None).await.unwrap();
+		let frame = |timestamp_us, payload: &'static [u8]| codec::Frame {
+			timestamp_us,
+			payload: bytes::Bytes::from_static(payload),
+		};
+		sink.on_frame("0".into(), frame(20_000, &[0xfc, 0xff, 0xfe])).unwrap();
+		// Config 31, one frame, and no payload: what the encoder emits on entering DTX.
+		sink.on_frame("0".into(), frame(40_000, &[0xf8])).unwrap();
+
+		let mut group = track.recv_group().await.unwrap().unwrap();
+		let mut frames = 0;
+		while kio::clock::timeout(Duration::from_millis(100), group.next_frame())
+			.await
+			.expect("the group closes")
+			.unwrap()
+			.is_some()
+		{
+			frames += 1;
+		}
+		assert_eq!(frames, 2);
+	}
+
 	/// Dropping a sink before its session ends, as when shutdown cancels a pull, aborts its
 	/// tracks and the catalog rather than leaving them to warn as dropped unfinished.
 	#[tokio::test]

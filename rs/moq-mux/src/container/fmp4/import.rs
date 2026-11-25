@@ -89,10 +89,8 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	// open group belongs to an older one rolls, so every track segments identically.
 	segment: u64,
 
-	// Where an audio-only import's open segment starts, on the catalog clock, while one is open:
-	// nothing in the container says where a segment ends, so it closes once it carries a join.
-	// Each track's `reached` says how far its media in the segment runs.
-	audio: Option<Timestamp>,
+	// An audio-only import's open segment closes once any track's `span` carries a join, since
+	// nothing in the container says where a segment ends.
 	join: crate::container::Join,
 
 	dropped_metadata: u64,
@@ -145,9 +143,10 @@ struct Fmp4Track<E: crate::catalog::hang::CatalogExt> {
 	// group, which is what keeps audio on the same boundaries as video.
 	segment: Option<u64>,
 
-	// Where this track's media in an audio-only import's open segment ends, on the catalog clock,
-	// which bounds its group when the segment closes.
-	reached: Option<Timestamp>,
+	// Where this track's media in an audio-only import's open segment starts and ends, on the
+	// catalog clock. Measured per track, so one lagging another never holds the segment open, and
+	// the end bounds its group when the segment closes.
+	span: Option<(Timestamp, Timestamp)>,
 
 	output: Output<E>,
 }
@@ -327,7 +326,6 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			input: crate::container::Input::Open,
 			pending_cut: false,
 			segment: 0,
-			audio: None,
 			join: crate::container::Join::default(),
 			dropped_metadata: 0,
 			deferred: Deferred::default(),
@@ -618,7 +616,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					last_decode_time: None,
 					sample_duration: None,
 					segment: None,
-					reached: None,
+					span: None,
 					output,
 				},
 			);
@@ -1198,12 +1196,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			if !has_video {
 				let start = offset.apply(run.earliest)?;
 				let end = offset.apply(run.end)?;
-				self.audio.get_or_insert(start);
-				track.reached = Some(
-					track
-						.reached
-						.map_or(end, |reached| crate::container::later(reached, end)),
-				);
+				track.span = Some(match track.span {
+					Some((start, reached)) => (start, crate::container::later(reached, end)),
+					None => (start, end),
+				});
 			}
 			let placement = Placement {
 				offset,
@@ -2070,9 +2066,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	/// Forget the open audio-only segment, whose groups close some other way.
 	fn reset_audio(&mut self) {
-		self.audio = None;
 		for track in self.tracks.values_mut() {
-			track.reached = None;
+			track.span = None;
 		}
 	}
 
@@ -2101,19 +2096,16 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// An audio-only segment that now carries a join closes here, at the end of the fragment that
 	/// filled it, so the relay sees each group finish without waiting for the next fragment.
 	fn settle(&mut self) -> Result<()> {
-		let reached = self
+		let full = self
 			.tracks
 			.values()
-			.filter_map(|track| track.reached)
-			.reduce(crate::container::later);
-		if let Some((start, end)) = self.audio.zip(reached)
-			&& self.join.full(start, end)
-		{
-			self.audio = None;
+			.filter_map(|track| track.span)
+			.any(|(start, end)| self.join.full(start, end));
+		if full {
 			self.pending_cut = true;
 			// Each group ends where its own media does, which the catalog's bitrate divides by.
 			for track in self.tracks.values_mut() {
-				let end = track.reached.take();
+				let end = track.span.take().map(|(_, end)| end);
 				media!(&mut track.output, producer => producer.cut(end)?, passthrough => passthrough.close(end)?);
 			}
 		}
@@ -2802,6 +2794,29 @@ mod tests {
 		let _finished = import.finish().unwrap();
 
 		assert_eq!(groups(&mut consumer), [(0, Some(1)), (start(&consumer, 4410), Some(1))]);
+	}
+
+	/// Each audio track's group fills from its own first fragment, so one track lagging another's
+	/// clock never holds the shared segment open past a join.
+	#[test]
+	fn a_lagging_track_fills_its_own_join() {
+		const SIZE: usize = 64;
+		let (mut import, ids, _) = initialized_tracks(false, 2);
+		let (a, b) = (ids[0], ids[1]);
+		let mut consumer = replay(&import.tracks[&b].output);
+		let mut fragment = |id: u32, decode_time: u64| {
+			import
+				.decode(&media_header(id, decode_time, &[0], SIZE as u32, Some(SIZE)))
+				.unwrap();
+			import.decode(&[0xA5; SIZE]).unwrap();
+		};
+		// Ten seconds ahead of the other track.
+		fragment(a, 441_000);
+		for i in 0..5 {
+			fragment(b, i * 1024);
+		}
+		// Five fragments carry 116 ms of the lagging track, so its group is already closed.
+		assert_eq!(groups(&mut consumer), [(0, Some(5))]);
 	}
 
 	/// Audio-only fragments of one 23 ms sample, as ffmpeg's `-frag_duration` writes them, share a
