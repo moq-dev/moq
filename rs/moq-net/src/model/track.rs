@@ -2207,7 +2207,7 @@ impl TrackState {
 		let expired: Vec<_> = self
 			.drops_born
 			.iter()
-			.filter(|(run, expires)| now >= **expires && run.start < kept)
+			.filter(|(run, expires)| now >= **expires && run.start < kept && !self.pins_drops(run.start))
 			.map(|(run, _)| run.start..run.end.min(kept))
 			.collect();
 		for run in expired {
@@ -2216,9 +2216,23 @@ impl TrackState {
 		self.drops_oldest = self
 			.drops_born
 			.iter()
-			.filter(|(run, _)| run.start < kept)
+			.filter(|(run, _)| run.start < kept && !self.pins_drops(run.start))
 			.map(|(_, expires)| *expires)
 			.min();
+	}
+
+	/// Whether the dropped run holding `key` lies directly above a group a local track still
+	/// caches, which keeps it: forgetting it would read like evicted groups between two held
+	/// ones, a gap its publisher never left. Each cached group keeps at most one run, until it
+	/// leaves (see [`Self::remove_slot`]). A received copy keeps none, since upstream answers
+	/// for what it forgets.
+	fn pins_drops(&self, key: u64) -> bool {
+		!self.anchors.received()
+			&& self
+				.dropped
+				.get(&key)
+				.and_then(|run| run.start.checked_sub(1))
+				.is_some_and(|below| self.lookup.contains_key(&below))
 	}
 
 	/// Where the runs a reclaim may forget end: every run on a received copy, whose tail
@@ -2232,14 +2246,14 @@ impl TrackState {
 		}
 	}
 
-	/// The runs from `from` up to [`Self::kept_drops`] were kept and are now reclaimable: date
+	/// The runs in `runs` below [`Self::kept_drops`] were kept and are now reclaimable: date
 	/// the oldest of them, which the expiry scan skipped, so the next scan finds it.
-	fn rearm_drops(&mut self, from: u64) {
-		let due = self
-			.drops_born
-			.overlapping(&(from..self.kept_drops()))
-			.map(|(_, expires)| *expires)
-			.min();
+	fn rearm_drops(&mut self, runs: ops::Range<u64>) {
+		let runs = runs.start..runs.end.min(self.kept_drops());
+		if runs.is_empty() {
+			return;
+		}
+		let due = self.drops_born.overlapping(&runs).map(|(_, expires)| *expires).min();
 		if let Some(due) = due {
 			self.drops_oldest = Some(self.drops_oldest.map_or(due, |oldest| oldest.min(due)));
 		}
@@ -2252,15 +2266,19 @@ impl TrackState {
 	fn shed_drops(&mut self, cap: u64) -> u64 {
 		let mut paid = 0u64;
 		let kept = self.kept_drops();
-		while self.debt > 0 && paid < cap {
+		// Past the runs found kept, so each is skipped once.
+		let mut from = 0;
+		while self.debt > 0 && paid < cap && from < kept {
 			let Some(run) = self
-				.drops
-				.first_range_value()
+				.dropped
+				.overlapping(&(from..kept))
+				.find(|run| !self.pins_drops(run.start))
+				.and_then(|run| self.drops.overlapping(run).next())
 				.map(|(run, _)| run.start..run.end.min(kept))
-				.filter(|run| !run.is_empty())
 			else {
 				break;
 			};
+			from = run.start;
 			let billed = self.drops_bill.size();
 			self.forget_drops(run);
 			let freed = billed.saturating_sub(self.drops_bill.size());
@@ -3412,6 +3430,12 @@ impl TrackState {
 		}) {
 			self.forget_departed_above(key);
 		}
+		// The run it kept above it may expire now.
+		if let Some(above) = key.checked_add(1)
+			&& let Some(run) = self.dropped.get(&above).filter(|run| run.start == above).cloned()
+		{
+			self.rearm_drops(run);
+		}
 		self.bounds
 			.get_mut()
 			.unwrap_or_else(PoisonError::into_inner)
@@ -3574,9 +3598,7 @@ impl TrackState {
 	fn advance(&mut self, key: u64, answers: bool) {
 		let kept = self.kept_drops();
 		self.max_key = Some(self.max_key.map_or(key, |max| max.max(key)));
-		if self.kept_drops() > kept {
-			self.rearm_drops(kept);
-		}
+		self.rearm_drops(kept..u64::MAX);
 		self.cache.advance_largest(Position::group(key));
 		let wakes = self.subscriptions.lock().wrote(key, answers);
 		self.deferred
@@ -34188,6 +34210,68 @@ mod test {
 		assert!(producer.state.read().drops.is_empty());
 		assert_eq!(pool.used(), used);
 		assert!(local.state.read().skipped(5), "a local skip above the edge stays");
+	}
+
+	/// A local track keeps the skip directly above each cached group while that group stays,
+	/// so a read across two held groups never finds a gap its publisher did not leave; once
+	/// the group below leaves, its run expires like any other.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_local_skip_between_held_groups_outlives_its_expiry() {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(10)));
+		let producer = track_producer_pooled("test", pool.clone());
+		let read = || {
+			let mut ordered = producer
+				.subscribe(Subscription::default().with_range(0..).with_max(None))
+				.ordered();
+			let mut items = Vec::new();
+			while let Some(Ok(Some(item))) = ordered.next_item().now_or_never() {
+				items.push(match item {
+					Item::Group(group) => format!("g{}", group.start),
+					Item::Gap { range, .. } => format!("gap{range:?}"),
+				});
+			}
+			items
+		};
+		for millis in [1000, 3000, 4000] {
+			producer
+				.clone()
+				.write_frame(Timestamp::from_millis(millis).unwrap(), &b"x"[..])
+				.unwrap();
+		}
+		let held = read();
+		// Reading them again keeps the groups past their runs' expiry.
+		elapse(&producer, Duration::from_secs(6));
+		assert_eq!(read(), held);
+		elapse(&producer, Duration::from_secs(7));
+		pool.sweep();
+		// Only the history below the oldest held group reads as forgotten.
+		assert_eq!(held, ["g1000", "g3000", "g4000"]);
+		assert_eq!(read(), ["gap0..1000", "g1000", "g3000", "g4000"]);
+
+		elapse(&producer, Duration::from_secs(11));
+		pool.sweep();
+		assert!(
+			producer.state.read().drops.is_empty(),
+			"the runs expire once their groups go"
+		);
+	}
+
+	/// Paying eviction debt also keeps the skip directly above each group a local track holds.
+	#[test]
+	fn paying_debt_keeps_a_local_skip_between_held_groups() {
+		let producer = track_producer("test", Info::timed());
+		for millis in [1000, 3000, 4000] {
+			producer
+				.clone()
+				.write_frame(Timestamp::from_millis(millis).unwrap(), &b"x"[..])
+				.unwrap();
+		}
+		let mut state = producer.state.write().ok().unwrap();
+		state.debt = u64::MAX;
+		state.shed_drops(u64::MAX);
+		let held: Vec<_> = state.dropped.iter().cloned().collect();
+		assert_eq!(held, [1001..3000, 3001..4000]);
 	}
 
 	/// A forgotten run reaching a local track's first arrival extends it down, so a group
