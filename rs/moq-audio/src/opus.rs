@@ -340,10 +340,7 @@ mod tests {
 
 	#[test]
 	fn only_argument_failures_are_unsupported() {
-		assert!(matches!(
-			error(moq_libopus::OPUS_BAD_ARG, "ctx"),
-			Error::Unsupported(_)
-		));
+		assert!(matches!(error(moq_libopus::OPUS_BAD_ARG, "ctx"), Error::Unsupported(_)));
 		assert!(matches!(
 			error(moq_libopus::OPUS_UNIMPLEMENTED, "ctx"),
 			Error::Unsupported(_)

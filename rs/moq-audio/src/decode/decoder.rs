@@ -529,7 +529,11 @@ pub(crate) mod tests {
 			let mut decoder = Decoder::new(&encoder.catalog(), &Config::default()).unwrap();
 			let mut last = Vec::new();
 			for packet in &packets {
-				assert!(modes.contains(&(packet.payload[0] >> 3)), "{bitrate}: mode {}", packet.payload[0] >> 3);
+				assert!(
+					modes.contains(&(packet.payload[0] >> 3)),
+					"{bitrate}: mode {}",
+					packet.payload[0] >> 3
+				);
 				last = crate::single(decoder.decode_all(&packet.payload).unwrap()).samples;
 			}
 			let level = rms(&last);
@@ -539,8 +543,14 @@ pub(crate) mod tests {
 				.map(|_| rms(&crate::single(decoder.decode_all(&[]).unwrap()).samples))
 				.collect();
 			// Saturated concealment reads about 1.0 RMS.
-			assert!(concealed.iter().all(|&rms| rms < 1.5 * level), "{bitrate}: {level} then {concealed:?}");
-			assert!(concealed[0] > 0.2 * level, "{bitrate}: concealed silence, {concealed:?}");
+			assert!(
+				concealed.iter().all(|&rms| rms < 1.5 * level),
+				"{bitrate}: {level} then {concealed:?}"
+			);
+			assert!(
+				concealed[0] > 0.2 * level,
+				"{bitrate}: concealed silence, {concealed:?}"
+			);
 			assert!(concealed[4] < 0.5 * concealed[0], "{bitrate}: no fade, {concealed:?}");
 
 			decoder.reset().unwrap();
@@ -563,7 +573,11 @@ pub(crate) mod tests {
 					dtx += 1;
 					assert!(decoded.activity.is_dtx());
 					let peak = decoded.samples.iter().fold(0f32, |peak, s| peak.max(s.abs()));
-					assert!(peak < 0.05, "{bitrate}: DTX packet {:?} peaks at {peak}", packet.payload);
+					assert!(
+						peak < 0.05,
+						"{bitrate}: DTX packet {:?} peaks at {peak}",
+						packet.payload
+					);
 				}
 			}
 			assert!(dtx > 10, "{bitrate}: only {dtx} DTX packets");

@@ -84,7 +84,6 @@ mod silk {
 	pub mod control_SNR;
 	pub mod control_audio_bandwidth;
 	pub mod control_codec;
-	pub mod debug;
 	pub mod dec_API;
 	pub mod decode_core;
 	pub mod decode_frame;
