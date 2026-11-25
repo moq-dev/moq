@@ -3658,6 +3658,48 @@ mod tests {
 		(track, callers, requests)
 	}
 
+	/// A held group readied while the poll drains the ready queue, as its fill's waker fires on
+	/// another thread, is taken by that poll or wakes its owner: never left queued unseen.
+	#[kio::test]
+	async fn a_feed_fetch_readied_during_a_drain_is_not_lost() {
+		#[derive(Default)]
+		struct Wakes(std::sync::atomic::AtomicUsize);
+		impl std::task::Wake for Wakes {
+			fn wake(self: Arc<Self>) {
+				self.0.fetch_add(1, atomic::Ordering::Relaxed);
+			}
+		}
+		let start = crate::time::Instant::now();
+		let clock = crate::time::Deadlines::new(start);
+		let tail = kio::Producer::new(Tail::default());
+		let sub = feed_sub(&tail).await;
+		let (track, _callers, requests) = feed_batch([100, 101]);
+		let mut fetches = FeedFetches::new(&clock);
+		for req in requests {
+			fetches.push(req, &track.consume());
+		}
+		let wakes = Arc::new(Wakes::default());
+		let waiter = kio::Waiter::new(std::task::Waker::from(wakes.clone()));
+		fetches.poll(&sub, start, &waiter);
+		assert_eq!(fetches.held.len(), 2, "both held while their callers wait");
+
+		// Group 100 is readied, and group 101's waker fires just as the drain takes it: parked on
+		// the queue, it runs once the drain releases the lock.
+		fetches.ready.lock().insert(100);
+		let racing = kio::Waiter::new(std::task::Waker::from(Arc::new(FetchWake {
+			key: 101,
+			ready: fetches.ready.clone(),
+		})));
+		let _ = fetches.ready.poll(&racing, |_| Poll::<()>::Pending);
+		wakes.0.store(0, atomic::Ordering::Relaxed);
+		fetches.poll(&sub, start, &waiter);
+		let queued = !fetches.ready.read().is_empty();
+		assert!(
+			!queued || wakes.0.load(atomic::Ordering::Relaxed) > 0,
+			"group 101 sits readied with nothing to poll it"
+		);
+	}
+
 	#[kio::test]
 	async fn an_abandoned_feed_fetch_wakes_its_owner_without_an_arrival() {
 		#[derive(Default)]
@@ -14108,17 +14150,15 @@ impl FeedFetches {
 				}
 			}
 		}
-		let ready = match self.ready.poll(waiter, |ready| {
-			if ready.is_empty() {
-				Poll::Pending
-			} else {
-				Poll::Ready(())
-			}
+		// Drained until seen empty, which alone registers `waiter`: a key readied after a take, as a
+		// fill's waker fires on another thread, is taken here or wakes it.
+		let mut ready = BTreeSet::new();
+		while let Poll::Ready(mut more) = self.ready.poll(waiter, |ready| match ready.is_empty() {
+			true => Poll::Pending,
+			false => Poll::Ready(()),
 		}) {
-			Poll::Ready(mut ready) => std::mem::take(&mut *ready),
-			Poll::Pending => BTreeSet::new(),
-		};
-		let _ = self.ready.poll(waiter, |_| Poll::<()>::Pending);
+			ready.append(&mut more);
+		}
 		let mut unused = Vec::new();
 		let mut settled = Vec::new();
 		for key in ready {
