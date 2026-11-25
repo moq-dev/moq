@@ -2021,6 +2021,34 @@ test("lite draft-07: a placed range goes out before an older unplaced one", asyn
 	}
 });
 
+// DEBUG repro: a finished relay copy holding only groups past a range's time.
+test("lite draft-07: a finished copy answers a time only once placed", async () => {
+	const version = Version.DRAFT_07;
+	const sub = await servedSubscription({
+		version,
+		maxAge: Duration.millis(3_600_000),
+		ranges: [{ start: { absolute: 1000n } }],
+	});
+	try {
+		hooks.receiveTrack(sub.track);
+		sub.serve(5000n);
+		sub.serve(6000n);
+		sub.track.finish();
+		let answer: Awaited<ReturnType<typeof decodeSubscribeResponse>> | undefined;
+		const reading = decodeSubscribeResponse(sub.client.reader, version).then((msg) => {
+			answer = msg;
+		});
+		for (let i = 0; i < 20; i++) await flush();
+		console.log("DEBUG", answer);
+		expect(answer).toBeUndefined();
+		hooks.timeStarts(sub.track, [[1000n, 1000n]]);
+		await reading;
+		console.log("DEBUG", answer);
+	} finally {
+		await sub.close();
+	}
+});
+
 // A relay's copy that placed one range from its upstream's answer, which also asked for the oldest
 // group held: that range starts where the copy's feed does, so it is answered only once the copy
 // knows, never at the floor delivery started from. Mirrors the Rust
