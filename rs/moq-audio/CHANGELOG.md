@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `decode::Consumer` conceals lost SILK and hybrid Opus packets (speech, the
+  `Voice` encoder kind, low bitrates) as it already did CELT ones, instead of
+  reading the loss as a `Read::Gap`. Opus now encodes and decodes through
+  `moq-libopus`, our fork of `unsafe-libopus` 0.2.0, whose SILK concealment
+  saturated to full scale. The same fix stops every SILK or hybrid DTX packet,
+  such as one forwarded from WebRTC with DTX on, from decoding to full-scale
+  noise.
 - `encode::publish_capture` keeps captured audio on the host clock its video is
   stamped on: it resamples by up to 2000 ppm to follow each buffer's capture
   time, where the PTS used to advance by the device's sample count and drift by

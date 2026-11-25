@@ -128,8 +128,8 @@ tests [moq-dev/moq#7600](https://github.com/moq-dev/moq/pull/7600), build time
   --ignore-scripts`, not a regenerated lockfile.
 - Kept on purpose, each with live consumers a replacement would reimplement:
   `tracing-android`, `humantime-serde`, `hex`, `send_wrapper`, `byteorder`,
-  `assert_matches`, `cpu-time`, `stats_alloc`, `unsafe-libopus`, the
-  QUIC/UDP, RTMP, V4L2, NVIDIA, VA-API, UniFFI, and LibAV forks
+  `assert_matches`, `cpu-time`, `stats_alloc`, the
+  QUIC/UDP, RTMP, V4L2, NVIDIA, VA-API, libopus, UniFFI, and LibAV forks
   ([vendor-sync](/quest/m3/vendor-sync/README.md) ports upstream), and JS's
   Zod, pako, and UUIDv7. Replaced: `sorted-btree`, by the ledger's in-tree
   chunked `Sorted` list (about 5 KB Brotli per bundle). `moq-gst` keeps its Rust 1.92 floor

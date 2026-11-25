@@ -240,6 +240,16 @@ rec {
       # File a bug if you depend on any for non-debug work!
       debug = internal.debugCrate { inherit packageId; };
     };
+    "moq-libopus" = rec {
+      packageId = "moq-libopus";
+      build = internal.buildRustCrateWithFeatures {
+        packageId = "moq-libopus";
+      };
+
+      # Debug support which might change between releases.
+      # File a bug if you depend on any for non-debug work!
+      debug = internal.debugCrate { inherit packageId; };
+    };
     "moq-loc" = rec {
       packageId = "moq-loc";
       build = internal.buildRustCrateWithFeatures {
@@ -18015,6 +18025,10 @@ rec {
             ];
           }
           {
+            name = "moq-libopus";
+            packageId = "moq-libopus";
+          }
+          {
             name = "moq-mux";
             packageId = "moq-mux";
             features = [ "async" ];
@@ -18114,10 +18128,6 @@ rec {
             name = "tracing";
             packageId = "tracing";
             optional = true;
-          }
-          {
-            name = "unsafe-libopus";
-            packageId = "unsafe-libopus";
           }
         ];
         devDependencies = [
@@ -19920,6 +19930,45 @@ rec {
           "bench"
           "default"
         ];
+      };
+      "moq-libopus" = rec {
+        crateName = "moq-libopus";
+        version = "0.1.0";
+        edition = "2021";
+        src = lib.cleanSourceWith {
+          filter = sourceFilter;
+          src = ../rs/moq-libopus;
+        };
+        libName = "moq_libopus";
+        dependencies = [
+          {
+            name = "arrayref";
+            packageId = "arrayref";
+          }
+          {
+            name = "hex";
+            packageId = "hex";
+            optional = true;
+          }
+          {
+            name = "num-complex";
+            packageId = "num-complex";
+          }
+          {
+            name = "num-traits";
+            packageId = "num-traits";
+          }
+        ];
+        devDependencies = [
+          {
+            name = "workspace-hack";
+            packageId = "workspace-hack";
+          }
+        ];
+        features = {
+          "ent-dump" = [ "dep:hex" ];
+        };
+        resolvedDefaultFeatures = [ "ent-dump" ];
       };
       "moq-loc" = rec {
         crateName = "moq-loc";
@@ -52058,34 +52107,6 @@ rec {
           "cli" = [ "dep:uniffi" ];
         };
         resolvedDefaultFeatures = [ "cli" ];
-      };
-      "unsafe-libopus" = rec {
-        crateName = "unsafe-libopus";
-        version = "0.2.0";
-        edition = "2021";
-        sha256 = "0wzbfqirg86cmfx79izc1rili2c7if65q8bv7hs11janfa740my7";
-        libName = "unsafe_libopus";
-        authors = [
-          "DCNick3"
-        ];
-        dependencies = [
-          {
-            name = "arrayref";
-            packageId = "arrayref";
-          }
-          {
-            name = "num-complex";
-            packageId = "num-complex";
-          }
-          {
-            name = "num-traits";
-            packageId = "num-traits";
-          }
-        ];
-        features = {
-          "ent-dump" = [ "hex" ];
-          "hex" = [ "dep:hex" ];
-        };
       };
       "untrusted" = rec {
         crateName = "untrusted";

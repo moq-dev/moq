@@ -3,7 +3,7 @@
 //! Every stream goes through the multistream decoder, which is also how a
 //! family 0 (mono/stereo) stream decodes: one stream, coupled when stereo.
 
-use unsafe_libopus::{
+use moq_libopus::{
 	OPUS_OK, OPUS_RESET_STATE, OPUS_SET_GAIN_REQUEST, OpusMSDecoder, opus_multistream_decode_float,
 	opus_multistream_decoder_create, opus_multistream_decoder_ctl_impl, opus_multistream_decoder_destroy, varargs,
 };
@@ -33,12 +33,8 @@ pub(super) struct Libopus {
 	pre_skip: usize,
 	max_frame_size: usize,
 	/// Frames per channel in the last packet that decoded, which is what a lost
-	/// packet most likely carried. `None` until one has.
+	/// packet most likely carried. `None` until one has since the last reset.
 	last_frame_size: Option<usize>,
-	/// Whether each stream decodes in CELT-only mode, the only one unsafe-libopus 0.2 conceals
-	/// correctly: its SILK concealment saturates to full scale (DCNick3/unsafe-libopus#3).
-	/// Delete once a fixed decoder lands.
-	celt: Vec<bool>,
 	in_dtx: bool,
 	/// Outputs submitted but not yet received, which reuse their slots across calls.
 	ready: VecDeque<Decoded>,
@@ -108,7 +104,6 @@ impl Libopus {
 			pre_skip: head.pre_skip as usize,
 			max_frame_size: (opus::DECODE_RATE as usize * MAX_FRAME_MS) / 1000,
 			last_frame_size: None,
-			celt: vec![false; streams as usize],
 			in_dtx: false,
 			ready: VecDeque::new(),
 		};
@@ -158,24 +153,18 @@ fn vorbis(channels: u32) -> Result<(Layout, Option<&'static [usize]>), Error> {
 
 impl Backend for Libopus {
 	/// An empty packet conceals as much audio as the last packet that decoded
-	/// held, and is refused before any has, or after a SILK or hybrid one. Loss
-	/// during DTX remains classified as DTX, while loss during active audio
-	/// remains active.
+	/// held, in whichever mode (SILK, hybrid, or CELT) that packet used, and is
+	/// refused before any has. Loss during DTX remains classified as DTX, while
+	/// loss during active audio remains active.
 	fn decode(&mut self, packet: &[u8]) -> Result<(), Error> {
 		let channels = self.layout.channels() as usize;
 		// libopus conceals exactly `frame_size` samples for a lost packet, and
 		// the decoder can't know how long it was, so assume the last one's length.
 		// A real packet decodes into the most it can hold.
 		let frame_size = if packet.is_empty() {
-			let frame_size = self.last_frame_size.ok_or_else(|| {
+			self.last_frame_size.ok_or_else(|| {
 				Error::Decode("opus packet lost before any packet decoded, so no length to conceal".into())
-			})?;
-			if !self.celt.iter().all(|celt| *celt) {
-				return Err(Error::Decode(
-					"opus packet lost after a SILK or hybrid packet, which this decoder cannot conceal".into(),
-				));
-			}
-			frame_size
+			})?
 		} else {
 			self.max_frame_size
 		};
@@ -197,7 +186,6 @@ impl Backend for Libopus {
 		}
 		if !packet.is_empty() {
 			self.last_frame_size = Some(samples as usize);
-			opus::track_celt(packet, &mut self.celt);
 		}
 		out.truncate(samples as usize * channels);
 
@@ -233,14 +221,14 @@ impl Backend for Libopus {
 			return Err(opus::error(rc, "OPUS_RESET_STATE"));
 		}
 		self.in_dtx = false;
-		// A reset decoder has no mode to conceal in.
-		self.celt.fill(false);
+		// A reset decoder has no history to conceal from.
+		self.last_frame_size = None;
 		self.ready.clear();
 		Ok(())
 	}
 
 	fn conceals(&self) -> bool {
-		self.last_frame_size.is_some() && self.celt.iter().all(|celt| *celt)
+		self.last_frame_size.is_some()
 	}
 
 	fn sample_rate(&self) -> u32 {
@@ -269,7 +257,7 @@ impl Drop for Libopus {
 
 #[cfg(test)]
 mod tests {
-	use unsafe_libopus::{
+	use moq_libopus::{
 		OPUS_APPLICATION_AUDIO, opus_multistream_encode_float, opus_multistream_encoder_destroy,
 		opus_multistream_surround_encoder_create,
 	};

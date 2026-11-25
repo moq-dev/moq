@@ -23,3 +23,13 @@ release since 2024-11.
   three in `PLC.rs` on master).
 - Upstream's tests, which link C libopus, are not carried; `moq-audio` tests
   the decoder it uses.
+- Formatted with the workspace's rustfmt, and built with every lint allowed.
+
+## Upstream
+
+Vendored from the crates.io release of v0.2.0
+([`3187faf`](https://github.com/DCNick3/unsafe-libopus/commit/3187faf19e11ad32916d1d850e93f2cb5134ec46)).
+Last checked: master at
+[`a84a3ba`](https://github.com/DCNick3/unsafe-libopus/commit/a84a3bab86cec409b2e08792a8bbee371e21b8a1)
+(2024-07-08), 62 commits of refactoring past v0.2.0 that remove the
+multistream API; nothing there to port beyond the concealment fix above.
