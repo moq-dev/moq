@@ -2623,8 +2623,9 @@ impl Reader {
 			true => self.owed(delivered, waiter),
 			false => RangeSet::new(),
 		};
+		// Only a replaced copy has an end.
 		let capped = (self.copies.iter())
-			.filter(|copy| copy.replaced && copy.done.is_none())
+			.filter(|copy| copy.done.is_none())
 			.filter_map(|copy| copy.end())
 			.max();
 		let skipped = match capped {
@@ -4681,12 +4682,12 @@ mod test {
 		let requests = source.requests();
 		routes.serve(source.consume());
 		let mut sub = subscribe(&logical, HOUR);
-		let live = source.create_group(group::Info { start: 0 }).unwrap();
+		let live = source.create_group(group::Info { start: 5 }).unwrap();
 		let handle = live.handle();
 		let payload = bytes::Bytes::from(vec![7; 16]);
 		let info = crate::frame::Info {
 			size: payload.len() as u64,
-			timestamp: ts(0),
+			timestamp: ts(5),
 		};
 		let mut arriving = live.create_frame(info).unwrap();
 		arriving.write(payload.slice(..2)).unwrap();
@@ -4707,8 +4708,8 @@ mod test {
 			Poll::Ready(fill) => fill.unwrap(),
 			Poll::Pending => panic!("a flight is asked"),
 		};
-		assert_eq!(fill.start(), Position { group: 0, frame: 0 });
-		let flight = fill.accept(0, None).unwrap().expect("a fresh group");
+		assert_eq!(fill.start(), Position { group: 5, frame: 0 });
+		let flight = fill.accept(5, None).unwrap().expect("a fresh group");
 		let mut flying = flight.create_frame(info).unwrap();
 		flying.write(payload.clone()).unwrap();
 		let mut rest = Vec::new();
@@ -6825,6 +6826,23 @@ mod test {
 		});
 		assert_eq!(events("group read recovering", &logs).len(), 2);
 		assert!(events("group read recovered", &logs).is_empty());
+
+		// A short close on the serving route, with nothing staged to replace its copy, is the
+		// group's end: nothing recovers it.
+		let logs = crate::test_tracing::capture(tracing::Level::DEBUG, || {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&logical, Duration::from_secs(10));
+			let mut short = a.create_group(group::Info { start: 0 }).unwrap();
+			short.write_frame(ts(0), b"a".as_ref()).unwrap();
+			let mut reading = recv(&mut sub);
+			assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+			short.finish().unwrap();
+			assert_eq!(read(&mut reading), None);
+		});
+		assert!(events("group read recovering", &logs).is_empty());
 	}
 
 	/// A fetch the serving route already answered continues the group, even when that route
