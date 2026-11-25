@@ -458,8 +458,8 @@ jobs:
         # `rs v4l2` streams moq-v4l and moq-video V4L2 capture and output from the kernel's vivid
         # virtual camera, a module load no pull request job should make.
         # `js worklet-matrix` loads `?worklet` output through the bundlers pinned in test/worklet.
-        # `test steady` runs one passthrough broadcast at 60 groups/s for minutes and fails on a
-        # heap or resident slope after warm-up, too long for a pull request (see test/steady).
+        # `test steady` runs one passthrough broadcast at 60 groups/s for 15 minutes and fails on
+        # a heap slope after warm-up, too long for a pull request (see test/steady).
         recipe: ["gh test-integration", "rs doctest --workspace", "test drill-sensitivity", "rs uring", "test drain", "test json-properties", "test resume-model", "test route-sweep", "test route-race", "rs quic-sim", "rs rung-disable", "test drill impaired", "rs cli-export", "rs hls-conformance", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux", "rs v4l2", "js worklet-matrix", "test steady"]
         include:
           # Miri interprets kio's and moq-net's in-memory unsafe and moq-sock's and moq-uring's

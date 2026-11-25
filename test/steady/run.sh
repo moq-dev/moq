@@ -16,7 +16,7 @@ source "$STEADY_DIR/../lib/harness.sh"
 
 RERUN="$(harness_env STEADY_PROFILE RELAY_BIN MOQ_BIN)just test steady$(harness_argv "$@")"
 
-# lite-07, where every publisher reports each group's skips and serves to its record.
+# lite-07, which carries each group's skips. lite-06 still grows: /quest/m1/lite06-sparse-skips.md.
 VERSION=moq-lite-07-wip
 
 # Release code with line tables, so a failing run's heap dumps name their stacks.
@@ -26,13 +26,12 @@ MOQ="${MOQ_BIN:-}"
 # Both binaries refuse an environment variable under `MOQ_` they don't know.
 unset RELAY_BIN MOQ_BIN
 # Measured by seeding a known leak; see README.md before changing any of these.
-SECONDS_RUN=600
-WARMUP=120
+SECONDS_RUN=900
+WARMUP=300
 FPS=60
 INTERVAL=5
-# Bytes each group may leave behind in a process, on average, before the run fails.
-PER_GROUP_ALLOCATED=8
-PER_GROUP_RSS=64
+# Live heap bytes each group may leave behind in a process, on average, before the run fails.
+PER_GROUP_ALLOCATED=32
 
 value() {
     if [[ $# -lt 2 || ! "$2" =~ ^[1-9][0-9]*$ ]]; then
@@ -184,7 +183,7 @@ fi
 
 if ((status == 0)); then
     python3 "$STEADY_DIR/../lib/growth.py" judge "$HARNESS_RUN/samples.jsonl" --warmup "$WARMUP" \
-        --max "allocated=$((PER_GROUP_ALLOCATED * FPS))" --max "rss=$((PER_GROUP_RSS * FPS))" \
+        --max "allocated=$((PER_GROUP_ALLOCATED * FPS))" \
         --flow import=rchar --flow export=wchar --report "$HARNESS_RUN/report.json" || status=$?
 fi
 

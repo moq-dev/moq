@@ -19,8 +19,9 @@ just test steady
 just test steady --seconds 1200 --fps 120
 ```
 
-`cargo build --release -p moq-relay -p moq-cli` builds both with the `jemalloc`
-feature. `STEADY_PROFILE` picks the cargo profile, and `RELAY_BIN` and
+It builds `moq-relay` and `moq-cli` with the `jemalloc` feature under the
+`profiling` cargo profile, release code with line tables so heap dumps name
+their stacks. `STEADY_PROFILE` picks another profile, and `RELAY_BIN` and
 `MOQ_BIN` point at prebuilt binaries instead, which must have that feature. A
 failing run keeps its run directory; a passing run deletes it unless
 `HARNESS_KEEP=1`.
@@ -33,9 +34,9 @@ logging its exact allocated and resident bytes (`moq_tokio::jemalloc`) and
 dumping a heap profile. After `--warmup`, it fits each process's slope with the
 Theil-Sen estimator, the median slope between every pair of samples, which
 in-flight media swinging between samples barely moves. A process fails when its
-allocated bytes grow faster than 8 bytes a group, or its resident set faster
-than 64 a group; the import must keep reading and the export keep writing, so a
-stalled chain is no pass.
+allocated bytes grow faster than 32 bytes a group; the import must keep reading
+and the export keep writing, so a stalled chain is no pass. Resident bytes and
+VmRSS are recorded but not judged (see Sizing).
 
 A failing run's directory holds `samples.jsonl`, `report.json`, each process's
 log, and `heap/<process>.<pid>.<seq>.i<n>.heap`. Diff the first dump after
@@ -47,4 +48,26 @@ jeprof --text --base heap/relay.<pid>.<a>.heap bin/moq-relay heap/relay.<pid>.<b
 
 ## Sizing
 
-<!-- Filled in from the seeded-leak measurement. -->
+Measured on 2026-11-25 with the `profiling` build, over moq-lite-07 at 60
+groups a second. A seeded leak (the record fold from before
+[moq-dev/moq#9579](https://github.com/moq-dev/moq/pull/9579)) was compared
+with the fixed build. Each figure is the Theil-Sen slope of allocated bytes,
+divided by the group rate:
+
+| Window (s) | Fixed, worst process | Seeded leak, mildest process |
+| ---------- | -------------------- | ---------------------------- |
+| 180-600    | +22.7 B/group        | +75.1 B/group                |
+| 300-900    | +9.3 B/group         | +73.0 B/group                |
+| 600-1200   | +10.8 B/group        | +75.7 B/group                |
+| 2400-3300  | +0.5 B/group         | (not run)                    |
+
+The import's heap still climbs for its first ten minutes, so the shortest run
+that keeps at least a twofold margin on both sides is 900 s judged after
+300 s, failing at 32 B/group. Over an hour the fixed build levels off in
+every process. Resident bytes and VmRSS can't separate the two at this length:
+the leak's VmRSS slope ran +9 to +59 B/group over 300-900 s, while the fixed
+relay's swung to +140 B/group over 180-600 s.
+
+The run uses lite-07 because lite-06, which clients negotiate by default,
+still grows in the relay and the export
+([quest](/quest/m1/lite06-sparse-skips.md)).
