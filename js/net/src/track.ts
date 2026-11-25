@@ -6120,9 +6120,10 @@ export class Subscriber {
 				// Only a read with dispositions reports a drop, which this one finds through the record.
 				throw new Error("an ordered read took a drop");
 			default: {
-				// What the read still owes lies above the gap, so the gap goes first.
+				// What the read still owes lies above the gap, so the gap goes first. A group still held
+				// lies below it, as handing it out or passing it settles.
 				const lowest = this.#lowestGap(items);
-				if (!lowest) return { kind: "idle" };
+				if (!lowest || (items.held && items.held.start < lowest.span.start)) return { kind: "idle" };
 				const owed = this.#nextInRange(items.at);
 				const ready = lowest.span.start <= items.at || owed === undefined || owed >= lowest.span.start;
 				if (!ready || this.#gapHeld(items.at, lowest.span.end)) return { kind: "idle" };
@@ -6148,17 +6149,21 @@ export class Subscriber {
 		const held = items.held;
 		if (held) {
 			items.held = undefined;
-			// A range still to be placed may come to hold it too: it was in range when read, so passing
-			// it could lose a group the ranges still name. Settled first, so a range the groups or an
-			// upstream answer placed since counts where it placed. A refused lookup fails every read
-			// until the ranges change, this one included, keeping the group for them to judge afresh.
+			// Settled first, so a range the groups or an upstream answer placed since counts where it
+			// placed. A refused lookup fails every read until the ranges change, this one included,
+			// keeping the group for them to judge afresh.
 			const refused = this.#settle();
 			if (refused) {
 				items.held = held;
 				return { kind: "error", error: refused };
 			}
-			if (this.#covered(held.start, held.start + 1n).length > 0 || this.#mayHold(held.start, held.end)) {
-				return { kind: "group", group: held };
+			if (this.#covered(held.start, held.start + 1n).length > 0) return { kind: "group", group: held };
+			// A range still to be placed may come to hold it: neither handed out nor passed until it
+			// places, since it may or may not name it and the read never goes back. Whatever places it
+			// moves the window, which wakes the read.
+			if (this.#mayHold(held.start, held.end)) {
+				items.held = held;
+				return { kind: "idle" };
 			}
 			// The bounds moved off it. With nothing they cover above, it waits for them to widen again,
 			// still polling the cursor so the read sees the track or itself end; otherwise the read

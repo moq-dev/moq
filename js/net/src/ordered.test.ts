@@ -521,22 +521,31 @@ test("a time start no answer for its own time places asks upstream for it", () =
 	subscriber.close();
 });
 
-// Mirrors the Rust `a_held_group_a_waiting_time_start_may_place_at_is_handed_out`.
-test("a group held behind a gap stays in range while an update's time start may place there", () => {
-	const producer = receivedTrack();
-	const ordered = producer.subscribe(withMax({ delay: { max: null } })).ordered();
-	put(producer, 0n, false);
-	drop(producer, 1n, 2n);
-	put(producer, 2n, false);
-	expect(ordered.tryNextItem()?.group?.start).toBe(0n);
-	expect(ordered.tryNextItem()).toMatchObject({ kind: "gap", start: 1n, end: 2n });
-	// Group 2 may contain time 5 until a later group arrives.
-	ordered.update(withMax({ delay: { max: null }, ranges: [{ start: 5n }] }));
-	expect(items(ordered)).toEqual(["group 2"]);
-	producer.skipGroups(3n, 10n);
-	put(producer, 10n, false);
-	expect(items(ordered)).toEqual(["group 10"]);
-});
+// Mirrors the Rust `a_held_group_waits_for_a_time_start_that_may_place_at_it`.
+for (const placed of [2n, 4n]) {
+	test(`a group held behind a gap waits for an update's time start that may place at it (placed at ${placed})`, async () => {
+		const producer = receivedTrack();
+		const ordered = producer.subscribe(withMax({ delay: { max: null } })).ordered();
+		put(producer, 0n, false);
+		drop(producer, 1n, 2n);
+		put(producer, 2n, false);
+		expect(ordered.tryNextItem()?.group?.start).toBe(0n);
+		expect(ordered.tryNextItem()).toMatchObject({ kind: "gap", start: 1n, end: 2n });
+		if (placed === 4n) drop(producer, 3n, 4n);
+		// Group 2 may contain time 5 until the start places.
+		ordered.update(withMax({ delay: { max: null }, ranges: [{ start: 5n }] }));
+		expect(items(ordered)).toEqual([]);
+		const next = ordered.nextItem();
+		hooks.timeStarts(producer, [[5n, placed]]);
+		if (placed === 2n) {
+			expect((await next)?.group?.start).toBe(2n);
+			return;
+		}
+		producer.skipGroups(3n, 4n);
+		put(producer, 4n, false);
+		expect((await next)?.group?.start).toBe(4n);
+	});
+}
 
 // Mirrors the Rust `a_held_group_a_waiting_time_start_lies_past_is_passed`.
 test("a group held behind a gap is passed once an update's waiting time start lies past its end", () => {
