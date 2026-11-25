@@ -56,9 +56,11 @@ amended 2026-11-25 below):
   the same ranges, priority, drops, and skips as a payload one, writing each
   frame's header without its payload. A compressed frame reports its
   declared size without being inflated.
-- A relay serves metadata from a payload copy while it holds one; otherwise
-  it forwards the demand upstream as a metadata subscription, holding at most
-  one upstream subscription per mode for a track. When the last payload
+- A relay serves a requested range from a payload copy only where the copy
+  proves upstream would answer it the same way (the root cache rule); any
+  range the copy doesn't prove, it forwards upstream as a metadata
+  subscription and waits, holding at most one upstream subscription per mode
+  for a track. When the last payload
   reader leaves and metadata demand remains, it opens the metadata
   subscription and closes the payload one. A metadata copy never answers a
   payload reader. This needs the payload-less FRAME's decoder and a
@@ -102,7 +104,8 @@ in this quest, since relays decode it. Pin the SUBSCRIBE byte in
 Tests, through `moq-net`'s and `js/net`'s internal entry points: a metadata
 SUBSCRIBE served by a publisher carries headers and no payload bytes; an
 empty frame stays distinguishable; a relay with a payload copy serves both
-modes from it; a relay without one forwards metadata upstream and carries no
+modes from it; a relay holding only group 10 of a payload copy, asked for
+metadata on groups 5-10, forwards the groups its copy doesn't prove upstream; a relay without one forwards metadata upstream and carries no
 payload across that hop; the last payload reader leaving switches the
 relay's upstream to metadata; a relay below a lite-06 hop serves metadata
 from a payload subscription across that hop and carries no payload below it.
