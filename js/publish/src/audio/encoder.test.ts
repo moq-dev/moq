@@ -1595,9 +1595,10 @@ for (const [name, subscription] of [
 	});
 }
 
-// A fetch's own budget judges only the group it asks for, so it must not narrow what the encoder
-// replays for the live subscribers that come later.
-test("a fetch alone replays the whole retention", async () => {
+// Demand without a live subscription, such as a fetch or a relay's TRACK sent ahead of its
+// SUBSCRIBE, states no reach, so it replays nothing: the subscription that follows replays only what
+// it reaches, instead of the whole retention arriving as fresh groups ahead of the live edge.
+test("demand without a subscription keeps the retention for the subscription that follows", async () => {
 	using _webcodecs = installFakeWebCodecs();
 	const clock = new Manual();
 	const installed = clock.install();
@@ -1606,6 +1607,7 @@ test("a fetch alone replays the whole retention", async () => {
 	const configuring = configured();
 	const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(feed) as never });
 	let fetched: Moq.Group.Consumer | undefined;
+	let late: Moq.Track.Subscriber | undefined;
 	try {
 		await configuring;
 		await settle();
@@ -1624,12 +1626,18 @@ test("a fetch alone replays the whole retention", async () => {
 			await feed.push({ timestamp: Duration.micros(index * 20_000), channels: [new Float32Array(960)] });
 			await feed.drain();
 		}
-		expect(encoder.out.stats.peek().frames).toBe(encoded);
-		// Held open, the fetched group keeps the fetch's demand alive while the encoder reacts.
+		// Held open, the fetched group keeps the track wanted with no subscription.
 		fetched = await net.track("audio").fetchGroup(0n);
 		await settle();
-		expect(encoder.out.stats.peek().frames).toBe(encoded + 150);
+		expect(encoder.out.active.peek()).toBe(false);
+		expect(encoder.out.stats.peek().frames).toBe(encoded);
+
+		// At 3000 ms, a 130 ms budget still wants the frames ending after 2870 ms: 143 to 150.
+		late = net.track("audio").subscribe(within(130));
+		await settle();
+		expect(encoder.out.stats.peek().frames).toBe(encoded + 8 - FakeAudioEncoder.LAG);
 	} finally {
+		late?.close();
 		fetched?.close();
 		encoder.close();
 		broadcast.close();
