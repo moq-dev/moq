@@ -812,7 +812,7 @@ impl Edges {
 	}
 
 	/// Whether a reclaim holds the session's reclaim lock now.
-	#[cfg(test)]
+	#[cfg(all(test, feature = "async"))]
 	pub(super) fn reclaiming(&self) -> bool {
 		self.0
 			.as_ref()
