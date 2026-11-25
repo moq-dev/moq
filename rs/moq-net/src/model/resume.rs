@@ -1387,7 +1387,7 @@ impl Subscriber {
 
 	/// Forget the gaps in `delivered` below each group past `budget`, an outer reader's whose
 	/// `delivered` this is, judged on the newest copy that answered, but never past a group a
-	/// replaced copy still feeding the reader holds unread: as one cursor keeps what it owes,
+	/// replaced copy the reader still reads holds unread: as one cursor keeps what it owes,
 	/// since a late group there may be fresh by its own successor on that copy.
 	pub(super) fn forget_past(&self, delivered: &mut Delivered, budget: Budget) {
 		let reader = self.reader();
@@ -1408,8 +1408,10 @@ impl Subscriber {
 			}
 			None
 		};
+		// Judged as the pick judges a copy now, not by the verdict letting it go last made: a
+		// widened budget reads an expired copy again.
 		let kept = ready
-			.filter(|(copy, _)| copy.replaced && copy.feeds)
+			.filter(|(copy, _)| copy.replaced && reader.reads(copy, delivered, &kio::Waiter::noop()).is_some())
 			.filter_map(|(_, sub)| unread(sub))
 			.min();
 		// A reader following one route judges on it alone, with no copy of `delivered`.
@@ -2926,6 +2928,28 @@ impl Reader {
 		Ok(self.hand_out(index, group))
 	}
 
+	/// Whether [`Self::poll_first`] reads `copy` now: `Some(true)` when it ran out cleanly but a
+	/// late group reopened it.
+	fn reads(&self, copy: &Copy, delivered: &Delivered, waiter: &kio::Waiter) -> Option<bool> {
+		// A fully handed-out bounded copy still backs groups being read, but cannot
+		// supply another one. Keep its recovery lease without polling its empty range.
+		let spent = copy.end().is_some_and(|end| delivered.covers(self.groups.0..end));
+		// A copy that ran out cleanly still takes a group in flight below its end while the
+		// read stays open, as a cursor still reading it would.
+		let ran_out = match &copy.done {
+			None => false,
+			Some(Ok(drained)) if !spent && copy.track.poll_arrived(*drained, waiter).is_ready() => true,
+			Some(_) => return None,
+		};
+		// What a replaced copy holds is past the reader's budget once a newer group superseded
+		// it a full budget ago. A copy is let go as a whole, so it waits out the widest budget
+		// any group gets.
+		if spent || copy.expired(self.mirrored.widest(), waiter) {
+			return None;
+		}
+		Some(ran_out)
+	}
+
 	/// Choose without consuming a candidate, so a newer copy cannot overtake a group still
 	/// buffered on an older one that goes first: the lowest for an `ordered` read, else the
 	/// first in the subscription's Group Order. A tie favors the newer copy.
@@ -2940,29 +2964,15 @@ impl Reader {
 		self.groups_read = true;
 		self.backfill_gaps(delivered, waiter);
 		let groups = self.groups;
-		// A copy is let go as a whole, so it waits out the widest budget any group gets.
-		let budget = self.mirrored.widest();
 		let floor = if ordered { delivered.floor() } else { 0 };
 		let ascending = ordered || self.mirrored.order == track::Order::Ascending;
 		let mut first: Option<Candidate> = None;
 		let mut held = false;
 		for index in 0..self.copies.len() {
-			let copy = &mut self.copies[index];
-			// What a replaced copy holds is past the reader's budget once a newer group
-			// superseded it a full budget ago.
-			// A fully handed-out bounded copy still backs groups being read, but cannot
-			// supply another one. Keep its recovery lease without polling its empty range.
-			let spent = copy.end().is_some_and(|end| delivered.covers(groups.0..end));
-			// A copy that ran out cleanly still takes a group in flight below its end while the
-			// read stays open, as a cursor still reading it would.
-			let ran_out = match &copy.done {
-				None => false,
-				Some(Ok(drained)) if !spent && copy.track.poll_arrived(*drained, waiter).is_ready() => true,
-				Some(_) => continue,
-			};
-			if spent || copy.expired(budget, waiter) {
+			let Some(ran_out) = self.reads(&self.copies[index], delivered, waiter) else {
 				continue;
-			}
+			};
+			let copy = &mut self.copies[index];
 			if ran_out {
 				copy.done = None;
 			}
@@ -14845,6 +14855,43 @@ mod test {
 				write(&a, key);
 			}
 			assert_eq!(drain(&mut sub, false), [6, 2, 1], "routed {routed}");
+		}
+	}
+
+	/// A replaced copy past the reader's budget is read again once the budget widens, so its
+	/// late groups outlive the serving copy's stale verdict as they do on one track: compaction
+	/// judges a copy as the pick does now, not by the verdict letting copies go last made.
+	#[kio::test]
+	async fn a_widened_budget_keeps_an_expired_copys_late_groups() {
+		let ms = Duration::from_millis;
+		for routed in [false, true] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(if routed { &logical } else { &a }, ms(1000));
+			write(&a, 0);
+			write(&a, 5);
+			// Held, so the replaced copy stays subscribed once it expires.
+			let _held = recv(&mut sub);
+			assert_eq!(drain(&mut sub, false), [0]);
+			let b = copy();
+			if routed {
+				routes.serve(b.consume());
+			}
+			write(if routed { &b } else { &a }, 6);
+			// Read within the budget, so no gap below 6 is stale yet.
+			kio::clock::sleep(ms(900)).await;
+			assert_eq!(drain(&mut sub, false), [6]);
+			// A budget past 6 superseding it, the replaced copy expires and goes unread.
+			kio::clock::sleep(ms(1500)).await;
+			assert!(sub.poll_recv_group(&fresh()).is_pending());
+			for key in [4, 2, 1] {
+				write(&a, key);
+			}
+			// Wide enough to read the copy again, not to keep 4: 5 arrived past it.
+			sub.update(Subscription::default().with_max(ms(2000))).unwrap();
+			assert_eq!(drain(&mut sub, false), [2, 1], "routed {routed}");
 		}
 	}
 
