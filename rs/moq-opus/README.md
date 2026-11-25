@@ -1,4 +1,4 @@
-# moq-libopus
+# moq-opus
 
 [libopus](https://github.com/xiph/opus) 1.3.1, transpiled from C to unsafe Rust
 with c2rust, vendored for the MoQ workspace. `moq-audio` uses it to encode and

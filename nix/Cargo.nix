@@ -240,16 +240,6 @@ rec {
       # File a bug if you depend on any for non-debug work!
       debug = internal.debugCrate { inherit packageId; };
     };
-    "moq-libopus" = rec {
-      packageId = "moq-libopus";
-      build = internal.buildRustCrateWithFeatures {
-        packageId = "moq-libopus";
-      };
-
-      # Debug support which might change between releases.
-      # File a bug if you depend on any for non-debug work!
-      debug = internal.debugCrate { inherit packageId; };
-    };
     "moq-loc" = rec {
       packageId = "moq-loc";
       build = internal.buildRustCrateWithFeatures {
@@ -324,6 +314,16 @@ rec {
       packageId = "moq-nvenc";
       build = internal.buildRustCrateWithFeatures {
         packageId = "moq-nvenc";
+      };
+
+      # Debug support which might change between releases.
+      # File a bug if you depend on any for non-debug work!
+      debug = internal.debugCrate { inherit packageId; };
+    };
+    "moq-opus" = rec {
+      packageId = "moq-opus";
+      build = internal.buildRustCrateWithFeatures {
+        packageId = "moq-opus";
       };
 
       # Debug support which might change between releases.
@@ -18025,10 +18025,6 @@ rec {
             ];
           }
           {
-            name = "moq-libopus";
-            packageId = "moq-libopus";
-          }
-          {
             name = "moq-mux";
             packageId = "moq-mux";
             features = [ "async" ];
@@ -18036,6 +18032,10 @@ rec {
           {
             name = "moq-net";
             packageId = "moq-net";
+          }
+          {
+            name = "moq-opus";
+            packageId = "moq-opus";
           }
           {
             name = "objc2";
@@ -19931,45 +19931,6 @@ rec {
           "default"
         ];
       };
-      "moq-libopus" = rec {
-        crateName = "moq-libopus";
-        version = "0.1.0";
-        edition = "2021";
-        src = lib.cleanSourceWith {
-          filter = sourceFilter;
-          src = ../rs/moq-libopus;
-        };
-        libName = "moq_libopus";
-        dependencies = [
-          {
-            name = "arrayref";
-            packageId = "arrayref";
-          }
-          {
-            name = "hex";
-            packageId = "hex";
-            optional = true;
-          }
-          {
-            name = "num-complex";
-            packageId = "num-complex";
-          }
-          {
-            name = "num-traits";
-            packageId = "num-traits";
-          }
-        ];
-        devDependencies = [
-          {
-            name = "workspace-hack";
-            packageId = "workspace-hack";
-          }
-        ];
-        features = {
-          "ent-dump" = [ "dep:hex" ];
-        };
-        resolvedDefaultFeatures = [ "ent-dump" ];
-      };
       "moq-loc" = rec {
         crateName = "moq-loc";
         version = "0.2.19";
@@ -20649,6 +20610,45 @@ rec {
           }
         ];
 
+      };
+      "moq-opus" = rec {
+        crateName = "moq-opus";
+        version = "0.1.0";
+        edition = "2021";
+        src = lib.cleanSourceWith {
+          filter = sourceFilter;
+          src = ../rs/moq-opus;
+        };
+        libName = "moq_opus";
+        dependencies = [
+          {
+            name = "arrayref";
+            packageId = "arrayref";
+          }
+          {
+            name = "hex";
+            packageId = "hex";
+            optional = true;
+          }
+          {
+            name = "num-complex";
+            packageId = "num-complex";
+          }
+          {
+            name = "num-traits";
+            packageId = "num-traits";
+          }
+        ];
+        devDependencies = [
+          {
+            name = "workspace-hack";
+            packageId = "workspace-hack";
+          }
+        ];
+        features = {
+          "ent-dump" = [ "dep:hex" ];
+        };
+        resolvedDefaultFeatures = [ "ent-dump" ];
       };
       "moq-pattern" = rec {
         crateName = "moq-pattern";

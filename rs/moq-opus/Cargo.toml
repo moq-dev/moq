@@ -1,5 +1,5 @@
 [package]
-name = "moq-libopus"
+name = "moq-opus"
 version = "0.1.0"
 # Upstream's edition: the transpiled code relies on 2021 rules for its extern blocks and static muts.
 edition = "2021"

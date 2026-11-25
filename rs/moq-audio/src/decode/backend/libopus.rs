@@ -3,7 +3,7 @@
 //! Every stream goes through the multistream decoder, which is also how a
 //! family 0 (mono/stereo) stream decodes: one stream, coupled when stereo.
 
-use moq_libopus::{
+use moq_opus::{
 	OPUS_OK, OPUS_RESET_STATE, OPUS_SET_GAIN_REQUEST, OpusMSDecoder, opus_multistream_decode_float,
 	opus_multistream_decoder_create, opus_multistream_decoder_ctl_impl, opus_multistream_decoder_destroy, varargs,
 };
@@ -257,7 +257,7 @@ impl Drop for Libopus {
 
 #[cfg(test)]
 mod tests {
-	use moq_libopus::{
+	use moq_opus::{
 		OPUS_APPLICATION_AUDIO, opus_multistream_encode_float, opus_multistream_encoder_destroy,
 		opus_multistream_surround_encoder_create,
 	};
