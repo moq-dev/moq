@@ -2383,6 +2383,106 @@ test("a parked read wakes at its wall deadline", async () => {
 	}
 });
 
+// Write groups at `keys`, each presenting at its key in milliseconds, then idle the cache past its
+// window but for the ones not in `evicted`, read meanwhile: the next write lets those go.
+async function idleBut(keys: bigint[], evicted: bigint[]) {
+	const clock = manualTime(10_000);
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: null });
+	for (const key of keys) putGroup(producer, key, Number(key));
+	await clock.advance(10_000 + CACHE_WINDOW_MS / 2);
+	const reader = producer.subscribe(withMax({ delay: { max: null } }));
+	for (const key of keys) {
+		if (evicted.includes(key)) continue;
+		const group = hooks.cachedGroup(reader, key);
+		if (!group) throw new Error(`group ${key} is cached`);
+		hooks.refreshGroup(group);
+		group.close();
+	}
+	reader.close();
+	clock.set(10_000 + CACHE_WINDOW_MS + 200);
+	return { producer, clock };
+}
+
+// A group stays stale once the cache lets its successor go: the one gone still bounds its reach
+// and starts its wall clock, rather than the next group the cache happens to keep. Mirrors the
+// Rust `an_evicted_successor_still_bounds_the_reach`.
+test("an evicted successor still bounds the reach", async () => {
+	for (const [evicted, read] of [
+		[[], [1000n, 5000n, 6000n]],
+		[[1000n], [5000n, 6000n]],
+	]) {
+		const { producer, clock } = await idleBut([0n, 1000n], evicted);
+		try {
+			for (const key of [5000n, 6000n]) putGroup(producer, key, Number(key));
+			const subscriber = producer.subscribe(withMax({ delay: { max: Duration.millis(2000) } }));
+			expect(drainGroups(subscriber)).toEqual(read);
+		} finally {
+			producer.finish();
+			producer.close();
+			clock.installed.close();
+		}
+	}
+});
+
+// A local track places a time start at the group containing it even once the cache let that
+// group go: an older group the cache happens to keep never stands in for it. Mirrors the Rust
+// `a_local_time_start_ignores_an_older_group_kept_past_an_evicted_one`.
+test("a local time start ignores an older group kept past an evicted one", async () => {
+	for (const [evicted, read] of [
+		[[], [2000n, 3000n]],
+		[[2000n], [3000n]],
+		[[1000n, 2000n], [3000n]],
+	]) {
+		const { producer, clock } = await idleBut([1000n, 2000n], evicted);
+		try {
+			putGroup(producer, 3000n, 3000);
+			const subscriber = producer.subscribe({ ranges: [{ start: 2500n }] });
+			expect(drainGroups(subscriber)).toEqual(read);
+		} finally {
+			producer.finish();
+			producer.close();
+			clock.installed.close();
+		}
+	}
+});
+
+// A finished track's live join measures the edge its publisher produced, not the newest group its
+// cache still holds. Mirrors the Rust `a_join_after_the_end_measures_an_evicted_edge`.
+test("a join after the end measures an evicted edge", async () => {
+	for (const [evicted, read] of [
+		[[], [3000n, 4000n, 5000n]],
+		[[5000n], [3000n, 4000n]],
+	]) {
+		const keys = [1000n, 2000n, 3000n, 4000n, 5000n];
+		const clock = manualTime(10_000);
+		const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: null });
+		try {
+			for (const key of keys) putGroup(producer, key, Number(key));
+			producer.finish();
+			// Closed, so the cache lets the newest group go once idle too.
+			producer.close();
+			await clock.advance(10_000 + CACHE_WINDOW_MS / 2);
+			const reader = producer.subscribe(withMax({ delay: { max: null } }));
+			for (const key of keys) {
+				if (evicted.includes(key)) continue;
+				const group = hooks.cachedGroup(reader, key);
+				if (!group) throw new Error(`group ${key} is cached`);
+				hooks.refreshGroup(group);
+				group.close();
+			}
+			reader.close();
+			await clock.advance(10_000 + CACHE_WINDOW_MS + 200);
+			const subscriber = producer.subscribe({
+				ranges: [{ start: { live: { min: Duration.millis(1500), max: null } } }],
+			});
+			expect(drainGroups(subscriber)).toEqual(read);
+		} finally {
+			producer.close();
+			clock.installed.close();
+		}
+	}
+});
+
 // Evicting a recorded successor nobody read leaves its mirror a reader-side gap, which is not
 // a failure: the held group is still judged by that successor's arrival, not the next one's.
 test("an evicted successor with unread frames still starts the wall clock", async () => {

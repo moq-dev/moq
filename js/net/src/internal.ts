@@ -1192,6 +1192,12 @@ export const hooks: {
 	/** Where a source copy finished whole ends, undefined while it is open or ended without one. */
 	groupWholeEnd: (group: GroupProducer) => bigint | undefined;
 	/**
+	 * Whether a source copy counts as content (its first frame landed, or it ended), whether it
+	 * failed, and its first and newest timestamps: what the groups below it are judged by once it
+	 * leaves the cache. Assigned by `group.ts`.
+	 */
+	groupSpan: (group: GroupProducer) => { started: boolean; failed: boolean; first?: Timestamp; latest?: Timestamp };
+	/**
 	 * The first time a source copy can't place, undefined once it finished: it places a time it holds
 	 * a timed frame past, which puts its End past the time too. An aborted copy may have lost its End.
 	 * Mirrors the Rust `group::Handle::unplaced_from`.
@@ -1670,6 +1676,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	groupWholeEnd: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupSpan: () => {
 		throw new Error("group.ts not loaded");
 	},
 	groupUnplacedFrom: () => {

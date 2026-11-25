@@ -781,6 +781,14 @@ pub(crate) struct TrackState {
 	// group above it is checked against it as well as its cached neighbors; one at or below
 	// it may have lost its lower bound. One entry, so nothing grows with the cache.
 	evicted: Option<(u64, Timestamp)>,
+	// The live groups the cache let go of, by key: only the lowest between two cached groups,
+	// so one at most per cached group and one below them all. It is still the immediate
+	// successor of the group below it, which a read judges by and a time start past it is
+	// not placed in (see [`Self::departed_above`]).
+	departed: BTreeMap<u64, Departed>,
+	// The newest frame of any live group the cache let go of: the live edge a join measures
+	// stays where its publisher reached once the cache lets the newest group go.
+	departed_edge: Option<Timestamp>,
 
 	// The key of the newest cached group: the live edge, protected from
 	// eviction by never entering the eviction order until no producer remains.
@@ -934,6 +942,15 @@ pub(crate) struct TrackState {
 	// A front's logical track: read straight from its routes' copies rather than this
 	// cache, which stays empty; see [`super::resume`].
 	routes: Option<super::resume::Consumer>,
+}
+
+/// A live group the cache let go of; see [`TrackState::departed`].
+#[derive(Clone, Copy, Debug)]
+struct Departed {
+	/// When it arrived, which started the wall clock of the group before it.
+	arrived: crate::time::Instant,
+	/// Where it started presenting, which bounds the reach of the group before it.
+	start: Option<Timestamp>,
 }
 
 /// A publisher-produced group in [`TrackState::arrival`].
@@ -1193,7 +1210,8 @@ impl Slot {
 /// ([`group::CACHE_OVERHEAD`]).
 ///
 /// One [`Slot`] under its key in `lookup`, its key in `visible`, its start in
-/// `starts` once frame 0 arrives, plus a hint in each of `arrival` and `evict`. Doubled
+/// `starts` once frame 0 arrives, a hint in each of `arrival` and `evict`, plus at most one
+/// group let go of above it in `departed`. Doubled
 /// because the containers run half empty in the worst case: a
 /// `BTreeMap` node sits between half and fully packed, and a `VecDeque` holds up to
 /// twice the entries in it. Half of [`cache::ENTRY_OVERHEAD`]; see it for why this is
@@ -1203,7 +1221,8 @@ pub(super) const CACHE_OVERHEAD: u64 = 2
 		+ size_of::<Slot>()
 		+ size_of::<(u64, Timestamp)>()
 		+ size_of::<Arrived>()
-		+ size_of::<(u64, u32)>()) as u64;
+		+ size_of::<(u64, u32)>()
+		+ size_of::<(u64, Departed)>()) as u64;
 
 /// Heap the track keeps per run of its drop set: the run and its reason in `drops`, at most
 /// one coalesced run in each of `dropped` and `gone`, and its two entries in `drops_changes`. Doubled for half-full `BTreeMap` nodes, as
@@ -1246,6 +1265,17 @@ impl Holdings for TrackState {
 			return self.containing_received(time, budget);
 		}
 		match self.lookup.range(..=time).next_back() {
+			// A live group the cache let go of between them starts after it, so this one does
+			// not contain the time: a range from it starts there, though nothing is held. A
+			// handler that looks it up finds it from the group held instead, as for any group
+			// the cache let go of.
+			Some((&key, _))
+				if !self.looks_up()
+					&& let Some((gone, _)) = self.departed_above(key, &Servable::ALL, None)
+					&& gone <= time =>
+			{
+				Containing::At(gone)
+			}
 			Some((&key, slot)) => Containing::At(slot.reached(key, time)),
 			// Every key at or before it is gone, so whichever group held it will never arrive.
 			None if self.dropped_cover(0..time.saturating_add(1)) => Containing::Before,
@@ -1363,9 +1393,14 @@ impl Holdings for TrackState {
 				None => Join::Time(0),
 			};
 		};
+		// The newest frame held, or one the cache let go of: its publisher reached it.
 		let newest = self
 			.live_edge(&Servable::ALL)
-			.and_then(|edge| edge.timestamp.convert(scale).ok())
+			.map(|edge| edge.timestamp)
+			.into_iter()
+			.chain(self.departed_edge)
+			.reduce(Timestamp::later)
+			.and_then(|edge| edge.convert(scale).ok())
 			.map(Timestamp::value);
 		// Rounded up to whole ticks, so the start is never newer than the lag allows; one past
 		// every timestamp, or with no lag limit, reaches back to the oldest group.
@@ -1830,6 +1865,7 @@ impl TrackState {
 	/// it for the readers that judged it cached to judge again.
 	fn evict_group(&mut self, key: u64, abort: impl Into<group::Abort>) {
 		let slot = self.uncache(key).expect("a cached group");
+		self.depart(key, &slot);
 		slot.abort(abort);
 		let landed = self
 			.inboxes
@@ -1839,6 +1875,53 @@ impl TrackState {
 		if landed {
 			self.evictions += 1;
 		}
+	}
+
+	/// Record live group `key`, which the cache let go of, for the groups below it: the
+	/// lowest one gone between two cached groups shadows any above it.
+	fn depart(&mut self, key: u64, slot: &Slot) {
+		if !slot.is_shown() {
+			return;
+		}
+		if let Some(latest) = slot.group.latest() {
+			self.departed_edge = Some(self.departed_edge.map_or(latest, |edge| edge.later(latest)));
+		}
+		let below = self.lookup.range(..key).next_back().map_or(0, |(&below, _)| below + 1);
+		if self.departed.range(below..key).next().is_some() {
+			return;
+		}
+		self.forget_departed_above(key);
+		let start = self.started_at(slot);
+		self.departed.insert(
+			key,
+			Departed {
+				arrived: slot.arrived,
+				start,
+			},
+		);
+	}
+
+	/// Forget the group gone between `key` and the next cached group: one at or below `key`
+	/// shadows it now.
+	fn forget_departed_above(&mut self, key: u64) {
+		let Some(from) = key.checked_add(1) else {
+			return;
+		};
+		let above = self.lookup.range(from..).next().map(|(&above, _)| above);
+		let shadowed = match above {
+			Some(above) => self.departed.range(from..above).next(),
+			None => self.departed.range(from..).next(),
+		};
+		if let Some((&shadowed, _)) = shadowed {
+			self.departed.remove(&shadowed);
+		}
+	}
+
+	/// The live group gone just above `key` in `servable`, when the cache let it go below
+	/// `held`, the next one it holds there: still `key`'s immediate successor.
+	fn departed_above(&self, key: u64, servable: &Servable, held: Option<u64>) -> Option<(u64, &Departed)> {
+		let (&gone, record) = self.departed.range(key.checked_add(1)?..).next()?;
+		(servable.contains(gone) && held.is_none_or(|held| gone < held)).then_some((gone, record))
 	}
 
 	/// [`Self::uncache`] a group that another copy displaces rather than one that ends, so a
@@ -2621,12 +2704,16 @@ impl TrackState {
 	/// successor's start proves it cannot run past it. The bound is the *immediate*
 	/// servable successor's start, so an unstamped successor leaves the reach unbounded
 	/// until it presents its first frame, and so does having no successor in `servable`
-	/// at all.
+	/// at all. A successor the cache let go of still bounds it (see [`Self::departed_above`]).
 	fn reach(&self, key: u64, servable: &Servable) -> Option<Timestamp> {
 		if let Some(end) = self.own_end(key) {
 			return Some(end);
 		}
-		self.started_at(self.successor(key, servable)?)
+		let successor = self.successor(key, servable);
+		if let Some((_, gone)) = self.departed_above(key, servable, successor.map(|slot| slot.group.start)) {
+			return gone.start;
+		}
+		self.started_at(successor?)
 	}
 
 	/// The track's timescale, or `None` on a scale-less track, or before its info is known.
@@ -2704,7 +2791,11 @@ impl TrackState {
 	/// hands it to the next one. The clock is read only once there is a successor,
 	/// so judging the newest group, the common case, costs no clock read.
 	fn superseded(&self, key: u64, servable: &Servable, budget: Duration) -> bool {
-		match self.arrival(key, servable) {
+		let arrival = self.arrival(key, servable);
+		if let Some((_, gone)) = self.departed_above(key, servable, arrival.map(|slot| slot.group.start)) {
+			return self.aged(gone.arrived, budget);
+		}
+		match arrival {
 			Some(successor) => self.aged(successor.arrived, budget),
 			None => self.ended_at(key).is_some_and(|ended| self.aged(ended, budget)),
 		}
@@ -2863,9 +2954,11 @@ impl TrackState {
 		// is observed or wakes us, and armed for whichever successor this pass selected, so
 		// re-selecting re-arms it.
 		let arrival = self.watch_abort(waiter, |state| state.arrival(key, servable));
+		let gone = self.departed_above(key, servable, arrival.map(|slot| slot.group.start));
 		// A group finished whole ages from its own end without one; see [`Self::ended_at`].
-		let Some(arrived) = self
-			.superseded_at(arrival, servable, superseded)
+		let Some(arrived) = gone
+			.map(|(_, gone)| gone.arrived)
+			.or_else(|| self.superseded_at(arrival, servable, superseded))
 			.or_else(|| self.ended_at(key))
 		else {
 			return false;
@@ -2886,7 +2979,14 @@ impl TrackState {
 			}
 			// An abort can change reach even after the successor is stamped. Unbounded
 			// until a group shows above, or the successor presents its first frame.
-			let Some(successor) = self.watch_abort(waiter, |state| state.successor(key, servable)) else {
+			let successor = self.watch_abort(waiter, |state| state.successor(key, servable));
+			if let Some((_, gone)) = self.departed_above(key, servable, successor.map(|slot| slot.group.start)) {
+				match gone.start {
+					Some(start) => break start,
+					None => return false,
+				}
+			}
+			let Some(successor) = successor else {
 				return false;
 			};
 			if let Some(reach) = self.started_at(successor) {
@@ -3273,6 +3373,15 @@ impl TrackState {
 	fn remove_slot(&mut self, key: u64) -> Option<Slot> {
 		let slot = self.lookup.remove(&key)?;
 		self.visible.remove(&key);
+		// The groups gone on either side of it now lie between the same two cached groups.
+		if self.departed.range(..key).next_back().is_some_and(|(&departed, _)| {
+			self.lookup
+				.range(..key)
+				.next_back()
+				.is_none_or(|(&below, _)| departed > below)
+		}) {
+			self.forget_departed_above(key);
+		}
 		self.bounds
 			.get_mut()
 			.unwrap_or_else(PoisonError::into_inner)
@@ -3543,7 +3652,11 @@ impl TrackState {
 			},
 		);
 		match visible {
-			true => self.visible.insert(key),
+			true => {
+				// Held again, so it is no longer gone.
+				self.departed.remove(&key);
+				self.visible.insert(key)
+			}
 			false => self.visible.remove(&key),
 		};
 		// A fill holds the group from the moment it lands: the pool's next write may evict
@@ -18597,6 +18710,110 @@ mod test {
 		};
 		assert_eq!(read(1000), Some(2000));
 		assert_eq!(read(1500), None, "folded into it");
+	}
+
+	/// A local track places a time start at the group containing it even once the cache
+	/// evicted that group: an older group the cache happens to keep never stands in for it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_local_time_start_ignores_an_older_group_kept_past_an_evicted_one() {
+		let read = |evicted: &[u64]| -> Vec<u64> {
+			let mut producer = track_producer("test", Info::timed());
+			for millis in [1000, 2000, 3000] {
+				producer
+					.write_frame(Timestamp::from_millis(millis).unwrap(), &b"x"[..])
+					.unwrap();
+			}
+			for &key in evicted {
+				evict(&producer, key);
+			}
+			let mut ordered = producer
+				.subscribe(
+					Subscription::default()
+						.with_ranges([Range {
+							start: crate::track::Start::Time(2500),
+							end: None,
+						}])
+						.with_max(None),
+				)
+				.ordered();
+			let mut groups = Vec::new();
+			while let Some(Ok(Some(item))) = ordered.next_item().now_or_never() {
+				if let Item::Group(group) = item {
+					groups.push(group.start);
+				}
+			}
+			groups
+		};
+		assert_eq!(read(&[]), [2000, 3000]);
+		assert_eq!(read(&[2000]), [3000], "1000 holds no time past 2000");
+		assert_eq!(read(&[1000, 2000]), [3000]);
+	}
+
+	/// A group stays stale once the cache evicts its successor: the evicted one still bounds
+	/// its reach, rather than the next group the cache happens to keep.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_evicted_successor_still_bounds_the_reach() {
+		let read = |evicted: bool| {
+			let producer = track_producer("test", Info::timed());
+			for key in [0, 1000, 5000, 6000] {
+				write_group(&producer, key);
+			}
+			if evicted {
+				evict(&producer, 1000);
+			}
+			let mut subscriber = producer.subscribe(
+				Subscription::default()
+					.with_ranges([Range {
+						start: crate::track::Start::Oldest,
+						end: None,
+					}])
+					.with_max(Duration::from_secs(2)),
+			);
+			drain_groups(&mut subscriber)
+		};
+		assert!(!read(false).contains(&0), "1000 bounds it: {:?}", read(false));
+		assert!(!read(true).contains(&0), "the evicted 1000 bounds it: {:?}", read(true));
+	}
+
+	/// A finished track's live join measures the edge its publisher produced, not the newest
+	/// group its cache still holds.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_join_after_the_end_measures_an_evicted_edge() {
+		let read = |evicted: bool| {
+			let mut producer = track_producer("test", Info::timed());
+			for millis in [1000, 2000, 3000, 4000, 5000] {
+				producer
+					.write_frame(Timestamp::from_millis(millis).unwrap(), &b"x"[..])
+					.unwrap();
+			}
+			let finished = producer.finish().unwrap();
+			if evicted {
+				evict(&finished.producer, 5000);
+			}
+			let mut ordered = finished
+				.producer
+				.subscribe(Subscription::default().with_ranges([Range {
+					start: crate::track::Start::Live {
+						min: Some(Duration::from_millis(1500)),
+						max: None,
+					},
+					end: None,
+				}]))
+				.ordered();
+			let mut groups = Vec::new();
+			while let Some(Ok(Some(item))) = ordered.next_item().now_or_never() {
+				if let Item::Group(group) = item {
+					groups.push(group.start);
+				}
+			}
+			groups
+		};
+		let held = read(false);
+		assert_eq!(held, [3000, 4000, 5000]);
+		assert_eq!(read(true), [3000, 4000], "the same start");
 	}
 
 	/// A range answered empty releases a reader within its budget whatever that reader's own
