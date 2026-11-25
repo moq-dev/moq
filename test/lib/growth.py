@@ -5,8 +5,8 @@ Two subcommands, so a harness samples while its workload runs and judges once it
     growth.py sample --out samples.jsonl --interval 5 --seconds 600 relay=<pid>=<log> ...
     growth.py judge samples.jsonl --warmup 60 --max allocated=400 --max rss=4000
 
-`sample` reads each process's resident set (VmRSS) and I/O counters from /proc, then sends it
-SIGUSR1 and waits for the `jemalloc heap allocated=N resident=N` line that `moq_tokio::jemalloc`
+`sample` waits for each process to log that its SIGUSR1 handler is up, then on each tick reads
+its resident set (VmRSS) and I/O counters from /proc and sends it SIGUSR1 and waits for the `jemalloc heap allocated=N resident=N` line that `moq_tokio::jemalloc`
 logs in answer, so every sample pairs with the exact live heap at that moment. A process that
 exits, or never answers, fails the run: a gap is not a flat line.
 
@@ -27,6 +27,10 @@ import time
 from pathlib import Path
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
+# Logged once the SIGUSR1 handler is registered: a signal before it would kill the process.
+READY = "jemalloc heap profiling"
+# How long a process may take to start answering SIGUSR1.
+READY_SECONDS = 30
 HEAP = re.compile(r"jemalloc heap allocated=(\d+) resident=(\d+)")
 # How long a process may take to log its heap after SIGUSR1; it answers on its runtime, so a
 # busy process takes milliseconds.
@@ -56,6 +60,15 @@ class Process:
             raise SystemExit(f"error: expected label=pid=log, got {spec!r}")
         self.log = Path(log)
         self.answered = 0
+
+    def wait_ready(self):
+        deadline = time.monotonic() + READY_SECONDS
+        while READY not in ANSI.sub("", self.log.read_text(errors="replace")):
+            if not Path(f"/proc/{self.pid}").exists():
+                raise SystemExit(f"error: {self.label} (pid {self.pid}) exited before it answered SIGUSR1")
+            if time.monotonic() > deadline:
+                raise SystemExit(f"error: {self.label} never logged {READY!r}; is it built with the jemalloc feature?")
+            time.sleep(0.05)
 
     def sample(self):
         try:
@@ -93,6 +106,8 @@ class Process:
 
 def sample(args):
     processes = [Process(spec) for spec in args.process]
+    for process in processes:
+        process.wait_ready()
     start = time.monotonic()
     with open(args.out, "w") as out:
         tick = 0

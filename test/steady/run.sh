@@ -16,6 +16,9 @@ source "$STEADY_DIR/../lib/harness.sh"
 
 RERUN="$(harness_env STEADY_PROFILE RELAY_BIN MOQ_BIN)just test steady$(harness_argv "$@")"
 
+# lite-07, where every publisher reports each group's skips and serves to its record.
+VERSION=moq-lite-07-wip
+
 PROFILE="${STEADY_PROFILE:-release}"
 RELAY="${RELAY_BIN:-}"
 MOQ="${MOQ_BIN:-}"
@@ -41,6 +44,11 @@ while [[ $# -gt 0 ]]; do
         --warmup) value "$@"; WARMUP="$2"; shift 2 ;;
         --fps) value "$@"; FPS="$2"; shift 2 ;;
         --interval) value "$@"; INTERVAL="$2"; shift 2 ;;
+        --version)
+            [[ $# -ge 2 && -n "$2" ]] || { echo "error: --version requires a value" >&2; exit 2; }
+            VERSION="$2"
+            shift 2
+            ;;
         *)
             echo "unknown arg: $1" >&2
             exit 2
@@ -96,7 +104,7 @@ if harness_probe "$URL/certificate.sha256"; then
     exit 1
 fi
 harness_spawn relay "$HARNESS_RUN/relay.log" env "MALLOC_CONF=$(malloc_conf relay)" \
-    "$RELAY" "$STEADY_DIR/relay.toml" --listen "127.0.0.1:$PORT" --web-http-listen "127.0.0.1:$PORT"
+    "$RELAY" "$STEADY_DIR/relay.toml" --listen-version "$VERSION" --listen "127.0.0.1:$PORT" --web-http-listen "127.0.0.1:$PORT"
 RELAY_PID="$HARNESS_PID"
 if ! harness_ready "$URL/certificate.sha256" 30 "$RELAY_PID"; then
     echo "error: relay never became ready" >&2
@@ -113,13 +121,14 @@ mkfifo "$SOURCE"
 # Each `exec`s so the spawned PID is moq's own, which the sampler reads and signals.
 # shellcheck disable=SC2329  # invoked indirectly via 'harness_spawn'
 export_run() {
-    exec env "MALLOC_CONF=$(malloc_conf export)" "$MOQ" --connect "$URL" --broadcast "$BROADCAST" \
-        export ts --passthrough >/dev/null
+    exec env "MALLOC_CONF=$(malloc_conf export)" "$MOQ" --connect "$URL" --connect-version "$VERSION" \
+        --broadcast "$BROADCAST" export ts --passthrough >/dev/null
 }
+# Opened read-write, which never blocks on a FIFO, so moq is running before the source opens it.
 # shellcheck disable=SC2329  # invoked indirectly via 'harness_spawn'
 import_run() {
-    exec env "MALLOC_CONF=$(malloc_conf import)" "$MOQ" --connect "$URL" --broadcast "$BROADCAST" \
-        import ts --passthrough <"$SOURCE"
+    exec env "MALLOC_CONF=$(malloc_conf import)" "$MOQ" --connect "$URL" --connect-version "$VERSION" \
+        --broadcast "$BROADCAST" import ts --passthrough <>"$SOURCE"
 }
 
 # The export waits on the announce, so it starts first and never misses the start.
@@ -160,7 +169,7 @@ fi
 if ((status != 0)); then
     for name in relay import export; do
         echo "── $name log (tail) ──" >&2
-        tail -n 40 "$HARNESS_RUN/$name.log" | sed 's/^/  /' >&2 || true
+        grep -v "jemalloc heap\|heap profile dumped" "$HARNESS_RUN/$name.log" | tail -n 40 | sed 's/^/  /' >&2 || true
     done
     echo "heap dumps: $HARNESS_RUN/heap (jeprof --base <first> <binary> <last>)" >&2
 fi
