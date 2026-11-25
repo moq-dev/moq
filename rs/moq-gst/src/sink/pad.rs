@@ -1439,6 +1439,57 @@ mod tests {
 		assert!(!pad.finalize().unwrap(), "second finalize is a no-op");
 	}
 
+	/// A run on a catalog whose clock was fixed before it, as by `Config::with_clock`, shifts its
+	/// running times onto that clock: a buffer lands where its reference timestamp says.
+	#[test]
+	fn a_fixed_clock_is_shifted_onto() {
+		gst::init().unwrap();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let config = moq_mux::catalog::Config::default().with_clock(moq_mux::Clock::new());
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
+		let mut pad = Pad::new();
+		pad.reserve(&catalog, super::super::wall::Wall::new(&catalog), &Names::default());
+		pad.observe_caps(&broadcast, &catalog, producer_options(&h264_caps(), Some("camera")));
+		pad.observe_segment(time_segment());
+
+		// Captured a second ago, at running time 3 s.
+		let captured = kio::clock::wall() - Duration::from_secs(1);
+		let mut buffer = gst::Buffer::from_slice(h264_keyframe_au());
+		let b = buffer.get_mut().unwrap();
+		b.set_pts(gst::ClockTime::from_seconds(3));
+		gst::ReferenceTimestampMeta::add(
+			b,
+			&gst::Caps::builder("timestamp/x-unix").build(),
+			gst::ClockTime::from_nseconds(
+				captured
+					.saturating_duration_since(kio::clock::Wall::UNIX_EPOCH)
+					.as_nanos() as u64,
+			),
+			None,
+		);
+		let sample = super::super::wall::Sample {
+			running: None,
+			wall: kio::clock::wall(),
+		};
+		pad.place_wall(&buffer, sample).unwrap();
+		let mut consumer = moq_mux::container::Consumer::new(
+			futures::executor::block_on(broadcast.consume().track("camera").unwrap().subscribe(None)).unwrap(),
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
+		);
+		let pushed = pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::from_seconds(3)), None, None);
+		assert_eq!(pushed, Ok(PushOutcome::Published));
+
+		let std::task::Poll::Ready(Ok(Some(moq_mux::container::Read::Frame { frame, .. }))) =
+			consumer.poll_read(&kio::Waiter::noop())
+		else {
+			panic!("published media frame")
+		};
+		let wall = catalog.clock().wall_clock(frame.timestamp).unwrap();
+		// Within the microsecond the catalog clock counts in.
+		let error = wall.saturating_duration_since(captured) + captured.saturating_duration_since(wall);
+		assert!(error < Duration::from_micros(1), "landed {error:?} from its capture");
+	}
+
 	// A named pad reserves that track instead of the generated one, and the catalog advertises the same
 	// name (the rendition resolves off the SPS, so it needs one AU).
 	#[test]
