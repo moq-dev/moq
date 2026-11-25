@@ -472,8 +472,8 @@ impl Producer {
 		}
 	}
 
-	/// A cursor over segments, starting from the oldest still in the window whose media is
-	/// still served.
+	/// A cursor over segments, starting from the oldest in the window whose media is still
+	/// served.
 	pub fn subscribe(&self, rendition: Arc<Rendition>) -> Consumer {
 		let consumer = self.state.consume();
 		let state = self.state.read();
@@ -481,7 +481,7 @@ impl Producer {
 			state: consumer,
 			rendition,
 			position: (state.resets, state.produced - state.rows.len() as u64),
-			joined: false,
+			listed: Some(state.produced),
 			feed: None,
 			fetch: None,
 		}
@@ -538,10 +538,11 @@ pub struct Consumer {
 	rendition: Arc<Rendition>,
 	/// The reset epoch and next append position; errors leave it unchanged.
 	position: (u64, u64),
-	/// Whether it yielded a segment with media. Until then a listed row whose media the source
-	/// no longer serves is skipped rather than refused: a cursor opened mid-broadcast lists rows
-	/// older than the source keeps, and has omitted nothing by starting after them.
-	joined: bool,
+	/// The append position the window had reached when the cursor opened, until it first peeks or
+	/// yields media. A row listed before it whose media the source no longer serves is skipped
+	/// rather than refused: a cursor opened mid-broadcast lists rows older than the source keeps,
+	/// and has omitted nothing by starting after them. Rows listed later are never skipped.
+	listed: Option<u64>,
 	feed: Option<Feed>,
 	/// The next row's media being fetched or sized, kept across polls.
 	fetch: Option<Fetch>,
@@ -597,11 +598,13 @@ impl Consumer {
 			let bytes = ready!(fetch.poll_size(&self.rendition, waiter));
 			let row = self.fetch.take().expect("fetching above").row().clone();
 			match bytes? {
-				Some(bytes) => break (row, bytes),
-				None if self.joined => {
-					return Poll::Ready(Err(crate::Error::SegmentUnavailable { segment: row.segment }));
+				// `next` yields this row, never skipping past it.
+				Some(bytes) => {
+					self.listed = None;
+					break (row, bytes);
 				}
-				None => self.position.1 += 1,
+				None if self.skips() => self.position.1 += 1,
+				None => return Poll::Ready(Err(crate::Error::SegmentUnavailable { segment: row.segment })),
 			}
 		};
 		Poll::Ready(Ok(Some(Info {
@@ -627,9 +630,9 @@ impl Consumer {
 	/// pause longer than the playlist window: only its newest
 	/// `MAX_SEGMENTS` gaps are listed, since older ones would slide out of every window before
 	/// the next segment, so the numbers before them are skipped. Until the first segment with media,
-	/// rows whose media the source no longer serves are skipped too, so a cursor opened
-	/// mid-broadcast starts at the oldest segment it can record. After it, missing window rows or
-	/// unavailable media fail the recording with
+	/// rows already listed when the cursor opened whose media the source no longer serves are
+	/// skipped too, so a cursor opened mid-broadcast starts at the oldest segment it can record.
+	/// Otherwise missing window rows or unavailable media fail the recording with
 	/// [`SegmentUnavailable`](crate::Error::SegmentUnavailable) instead of silently omitting
 	/// segments. Fetch/transmux errors leave the cursor in place so the caller can retry. A bound instance's retained media drains after End or Restart; a replacement's
 	/// media is never read under the old rows.
@@ -653,14 +656,14 @@ impl Consumer {
 			// A failure leaves the position for a retry to fetch the row afresh.
 			let row = self.fetch.take().expect("fetching above").row().clone();
 			match media? {
-				Some(media) => break (row, Some(media)),
-				None if self.joined => {
-					return Poll::Ready(Err(crate::Error::SegmentUnavailable { segment: row.segment }));
+				Some(media) => {
+					self.listed = None;
+					break (row, Some(media));
 				}
-				None => self.position.1 += 1,
+				None if self.skips() => self.position.1 += 1,
+				None => return Poll::Ready(Err(crate::Error::SegmentUnavailable { segment: row.segment })),
 			}
 		};
-		self.joined |= media.is_some();
 		self.position.1 += 1;
 		Poll::Ready(Ok(Some(Segment {
 			segment: row.segment,
@@ -669,6 +672,11 @@ impl Consumer {
 			program_date_time: self.rendition.wall_clock(row.pts),
 			discontinuity: row.discontinuity,
 		})))
+	}
+
+	/// Whether the next row, its media gone, is skipped rather than refused; see `listed`.
+	fn skips(&self) -> bool {
+		self.listed.is_some_and(|listed| self.position.1 < listed)
 	}
 
 	fn poll_row(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Row>>> {

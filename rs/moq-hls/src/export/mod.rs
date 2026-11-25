@@ -4200,6 +4200,55 @@ mod tests {
 		assert_eq!(cursor.next().await.unwrap().unwrap().segment, 2);
 	}
 
+	// A cursor skips only rows listed before it opened: media lost from a row listed later is a loss
+	// it would omit, so it fails the recording.
+	#[tokio::test(start_paused = true)]
+	async fn a_late_cursor_refuses_media_lost_after_it_opened() {
+		let test = Groups::with(&["video0"], &[]);
+		let mut video0 = test.publish("video0");
+		let dropped = video0.open(0);
+		let lost = video0.open(2_000);
+		test.listed("video0", 0).await;
+		let mut cursor = test.rendition("video0").segments();
+		video0.at(4_000);
+		video0.finish();
+		test.finished("video0").await;
+		dropped.abort(moq_net::Error::Cancel).unwrap();
+		lost.abort(moq_net::Error::Cancel).unwrap();
+
+		assert!(matches!(
+			cursor.next().await,
+			Err(crate::Error::SegmentUnavailable { segment: 1 })
+		));
+	}
+
+	// A peek picks the segment `next` yields: if its media expires in between, `next` fails rather
+	// than yield a later segment than the caller reserved for.
+	#[tokio::test(start_paused = true)]
+	async fn a_peeked_segment_is_never_skipped() {
+		let test = Groups::with(&["video0"], &[]);
+		let mut video0 = Gops {
+			track: test
+				.broadcast
+				.create_track("video0", timed().with_max_age(Duration::from_secs(1)))
+				.unwrap(),
+		};
+		video0.at(0);
+		video0.at(2_000);
+		test.listed("video0", 0).await;
+
+		let mut cursor = test.rendition("video0").segments();
+		assert_eq!(cursor.peek().await.unwrap().unwrap().segment, 0);
+		// Newer groups age segment 0's out of the source.
+		video0.at(4_000);
+		video0.at(6_000);
+		test.listed("video0", 2).await;
+		assert!(matches!(
+			cursor.next().await,
+			Err(crate::Error::SegmentUnavailable { segment: 0 })
+		));
+	}
+
 	// Every rendition numbers its segments on the one grid while cutting at its own groups: audio
 	// joining at 5.5s starts at segment 3, the line its first group reaches, as the video does.
 	#[tokio::test(start_paused = true)]
