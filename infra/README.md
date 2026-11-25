@@ -195,17 +195,23 @@ All of this runs once and is done.
 
    Then apply `lifecycle.json` with `mbx-write` (or any key that may update
    the bucket). The console's lifecycle form cannot cancel unfinished large
-   files, so use the recipe:
+   files, so use the recipe. Read the key silently, so it stays out of shell
+   history:
 
    ```bash
-   B2_APPLICATION_KEY_ID=... B2_APPLICATION_KEY=... just infra mbx lifecycle
+   read -rp 'keyID: ' B2_APPLICATION_KEY_ID
+   read -rsp 'applicationKey: ' B2_APPLICATION_KEY; echo
+   B2_APPLICATION_KEY_ID=$B2_APPLICATION_KEY_ID B2_APPLICATION_KEY=$B2_APPLICATION_KEY \
+     just infra mbx lifecycle
+   unset B2_APPLICATION_KEY_ID B2_APPLICATION_KEY
    ```
 
    `lifecycle.json` hides every object 30 days after upload, deletes hidden
    versions a day later, and cancels large-file uploads left unfinished for a
-   day. mbx writes each compilation once and never refreshes it, so a result
-   still in use expires too; the next writer that misses it compiles and
-   uploads it again.
+   day. A restore never refreshes an object, so a result still in use
+   expires too; the next writer that misses it compiles and uploads it again.
+   Without conditional writes, a writer that re-uploads an object B2 still
+   holds writes a new version, which restarts its 30 days.
 
 3. **Create the `cache-write` Environment**, deployable from `main` and the
    protected release tags configured below.
@@ -509,4 +515,4 @@ All of this runs once, by a maintainer. All four steps are done.
    ```
 
    The endpoint is `https://dd618f5dbd5da77b8296f1613c301f5c.r2.cloudflarestorage.com`,
-   as for mbx, so no account id secret is needed.
+   so no account id secret is needed.

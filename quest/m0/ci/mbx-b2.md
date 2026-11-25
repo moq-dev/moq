@@ -24,9 +24,13 @@ the teardown it was to include is this quest.
 
 Steps:
 
-1. Compare per-OS workspace-build hits (`mbx[cache]: object cache` lines) of
-   the last scheduled Nightly on R2 and the second on B2. If B2 hits clearly
-   less, stop and bring it to the maintainer before deleting anything.
+1. Compare each Rust-cache job's hits and "not looked up" counts
+   (`mbx[cache]: object cache` lines) between the last scheduled Nightly on
+   R2 and the second on B2. Without conditional writes, concurrent writers in
+   one namespace can overwrite each other's task manifests, which shows as
+   one job's "not looked up" rising while totals hold. If B2 hits clearly
+   less, or a job's "not looked up" rises, stop and bring it to the
+   maintainer before deleting anything.
 2. Delete the `MBX_R2_*` secrets: `gh secret delete MBX_R2_ACCESS_KEY_ID`
    and `MBX_R2_SECRET_ACCESS_KEY`, each with and without `--env
    cache-write`, on `moq-dev/moq`. A branch that has not merged `main` since

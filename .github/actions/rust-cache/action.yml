@@ -73,7 +73,7 @@ runs:
           # mbx stops prefetching at half of it, so a job's own results still
           # restore, but 20 GiB covers the most any job downloaded before that,
           # and a refused restore compiles again and re-uploads objects the
-          # bucket already holds, each a refused but billed put.
+          # bucket already holds, each another version B2 keeps for a day.
           echo "MBX_GC_MAX_SIZE=20GiB"
           if [ "$WRITE" = "true" ]; then
             echo "MBX_REMOTE_MODE=read-write"

@@ -80,9 +80,10 @@ What R2 settled, for reading the B2 numbers:
   depth-1 range. If not, plan a quest that returns those jobs to
   `fetch-depth: 1`, since full history then costs checkout time for nothing.
 - A refused conditional put never refreshed an object on R2. B2 runs with
-  `MBX_REMOTE_S3_CONDITIONAL_WRITES=off`, so a re-upload of an existing key
-  writes a new version and restarts its 30 days. Note whether expiry waves
-  like 2026-11-13's still appear.
+  `MBX_REMOTE_S3_CONDITIONAL_WRITES=off`, so a writer that re-uploads an
+  object B2 still holds writes a new version and restarts its 30 days, while
+  a restore refreshes nothing. Note whether expiry waves like 2026-11-13's
+  still appear.
 
 Size and download bytes come from the B2 console's Reports page, read
 through the maintainer's agent Chrome.
