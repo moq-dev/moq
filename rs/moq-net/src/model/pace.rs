@@ -100,6 +100,27 @@ impl Pace {
 		}
 	}
 
+	/// Report the taken frames the copy holds again, even when every slice they came from is shed:
+	/// a shed that had to leave inflated ones now may take them.
+	pub fn retake_inflated(&self) {
+		// SeqCst pairs with the fence a reclaim's shed takes, as [`Self::retake`] does.
+		std::sync::atomic::fence(Ordering::SeqCst);
+		if let Some(report) = self.report.get() {
+			report.took();
+		}
+	}
+
+	/// The inflated copy this group shares with its other copies decoded further, which may let
+	/// the live edge shed more of its slices, even when this copy is not the edge: the edge's
+	/// own reads cannot tell.
+	pub fn decoded(&self) {
+		// SeqCst pairs with the fence a reclaim's shed takes, as [`Self::retake`] does.
+		std::sync::atomic::fence(Ordering::SeqCst);
+		if let Some(report) = self.report.get() {
+			report.decoded();
+		}
+	}
+
 	/// Wake the writer, if parked, since what it waits on changed.
 	fn wake(&self) {
 		// A load first, so a writer not parked costs a read rather than a locked swap; still

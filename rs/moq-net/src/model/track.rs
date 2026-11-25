@@ -28170,6 +28170,115 @@ mod test {
 		drop(group);
 	}
 
+	/// A higher-priority compressed edge whose plain reader took every slice pays its inflated
+	/// frames in the taken-frame shed too, so a lower-priority edge's owed frame survives
+	/// instead of being evicted by the whole-edge pass.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_taken_shed_pays_the_inflated_frames_before_owed_ones() {
+		const LIMIT: u64 = 60_000;
+		const FRAME: usize = 15_000;
+		let info = Info::timed().with_compression(Compression::Deflate).with_priority(5);
+		let stored = stored_slices(&info);
+		let pool = cache::Pool::unbounded();
+		let broadcast = session_broadcast(&pool, Some(LIMIT));
+		let high = Producer::new(broadcast.clone(), "high", info);
+		let low = Producer::new(broadcast.clone(), "low", Info::timed().with_priority(-5));
+		let mut writer = Producer::new(broadcast.clone(), "writer", Info::timed());
+
+		let mut group = high.create_group(group::Info { start: 0 }).unwrap();
+		for object in &stored {
+			group = ingest_slice(group, object);
+		}
+		let mut plain = high.consume().peek_group(0).expect("cached");
+		assert!(plain.read_frame().await.unwrap().is_some());
+
+		let mut open = low.append_next().unwrap();
+		let mut owed = low.consume().peek_group(open.start).expect("cached");
+		open.write_frame(open.key_time(), bytes::Bytes::from(vec![0u8; FRAME]))
+			.unwrap();
+		let before = broadcast.edges.used();
+		assert!(
+			before > 30_000 + FRAME as u64,
+			"the inflated frames bill the session: {before}"
+		);
+		assert!(before <= LIMIT, "{before}");
+
+		// The writer's frame passes the budget, which the taken frames alone cover.
+		finished_group(&mut writer, 2 * FRAME);
+		assert!(broadcast.edges.used() <= LIMIT, "{:?}", broadcast.edges);
+		assert!(
+			matches!(owed.read_frame().now_or_never(), Some(Ok(Some(_)))),
+			"an owed frame paid while taken inflated frames were left"
+		);
+		drop((group, open));
+	}
+
+	/// A displaced copy decoding the inflated copy it shares with the live edge lists the edge:
+	/// the slices that decoding made sheddable belong to the edge's raw reader, whose own reads
+	/// have nothing more to report.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_displaced_copys_decoding_lists_the_live_edge() {
+		const LIMIT: u64 = 1 << 20;
+		let info = Info::timed().with_compression(Compression::Deflate).with_priority(5);
+		let stored = stored_slices(&info);
+		let pool = cache::Pool::unbounded();
+		let broadcast = session_broadcast(&pool, Some(LIMIT));
+		let producer = Producer::new(broadcast.clone(), "test", info);
+		let mut writer = Producer::new(broadcast.clone(), "writer", Info::timed());
+		producer.received();
+		elapse(&producer, Duration::ZERO);
+		let listed = || producer.state.read().cache.listed();
+		let fetched = |end| {
+			producer
+				.state
+				.write()
+				.ok()
+				.unwrap()
+				.insert_group_request(0, group::Bounds { start: 0, end }, None)
+				.unwrap()
+				.expect("a fresh group")
+		};
+
+		// The live edge, received from its second frame, whose raw reader takes every slice.
+		let Ok(Received::Group(mut live)) = producer.create_group_at(group::Info { start: 0 }, 1, 0..0) else {
+			panic!("the live copy opens");
+		};
+		for object in &stored[1..] {
+			live = ingest_slice(live, object);
+		}
+		let mut raw = arrayvec::ArrayVec::<frame::Object, 4>::new();
+		assert!(matches!(
+			producer
+				.consume()
+				.peek_group(0)
+				.expect("cached")
+				.with_range(1..)
+				.compressed()
+				.poll_read_objects(&kio::Waiter::noop(), &mut raw),
+			Poll::Ready(Ok(3))
+		));
+		// A reclaim visits the edge, which sheds no slice that nothing has decoded.
+		let before = broadcast.edges.used();
+		finished_group(&mut writer, usize::try_from(LIMIT - before + 1).unwrap());
+		assert!(!listed(), "the reclaim visit left it listed");
+
+		// A fetch of the head shares the live edge's inflated copy, then a whole fetch displaces
+		// it while its reader decodes the frames the edge holds slices of.
+		let mut cut = fetched(Some(2));
+		let mut reader = cut.consume();
+		let whole = fetched(None);
+		for object in &stored[..2] {
+			cut = ingest_slice(cut, object);
+		}
+		for _ in 0..2 {
+			assert!(reader.read_frame().await.unwrap().is_some());
+		}
+		assert!(listed(), "the live edge's decoded slices went unreported");
+		drop((live, whole, cut));
+	}
+
 	/// Only reads of the live edge list its track for a reclaim, and the listing goes when the
 	/// edge moves: a reclaim never visits a track for frames taken from an older group.
 	#[test]
