@@ -16,10 +16,10 @@ use crate::container::fmp4::{self, Error};
 ///
 /// Each sample becomes one [`Legacy`](Container::Legacy) frame, as the fMP4 import unwraps a
 /// fragment's, published once its last byte arrives, with its track's edit list applied as
-/// [`Sample`] describes. The tracks and codecs are those a [`Reader`](super::Reader) lists, and a
-/// track it skips is skipped here too. A fragmented file whose `moov` lists no samples is handed
-/// whole to [`fmp4::Import`]; one whose `moov` lists the first samples, as ffmpeg's
-/// `frag_keyframe` without `empty_moov` writes, publishes those and then each fragment's.
+/// [`Sample`] describes. The tracks, samples, and times are those a [`Reader`](super::Reader)
+/// indexes, and a track it skips is skipped here too. A fragmented file publishes the samples its
+/// `moov` lists, as ffmpeg's `frag_keyframe` without `empty_moov` writes them, then each
+/// fragment's.
 ///
 /// A regular MP4 says where its samples lie only in its `moov`. With the `moov` first, as a file
 /// written for streaming has it, each sample publishes as it arrives and the import holds no more
@@ -30,7 +30,10 @@ use crate::container::fmp4::{self, Error};
 ///
 /// Samples publish in file order, so one that starts before the previous one ends, such as a track
 /// stored out of decode order or two samples sharing bytes, is refused with
-/// [`BackwardsDataOffset`](fmp4::Error::BackwardsDataOffset). An empty sample is skipped.
+/// [`BackwardsDataOffset`](fmp4::Error::BackwardsDataOffset). Each sample must also arrive before
+/// the next `moof`, which a fragment's media follows, or it is refused with
+/// [`SampleOutsideMedia`](fmp4::Error::SampleOutsideMedia). An empty sample is skipped, and one
+/// larger than a frame holds, 32 MiB, is refused before its bytes are held.
 ///
 /// An audio group opens at the first audio sample at or after each of the first video track's
 /// keyframes, wherever the file stores the two, so audio and video group alike. A file without video
@@ -50,19 +53,12 @@ pub struct Import<E: CatalogExt = ()> {
 	/// Whether input is still accepted.
 	input: crate::container::Input,
 
-	state: State<E>,
-}
-
-enum State<E: CatalogExt> {
-	/// Reading the top-level boxes of a regular or hybrid MP4.
-	Plain(Box<Plain>),
-	/// A fragmented MP4, read by the fMP4 import.
-	Fragmented(Box<fmp4::Import<E>>),
+	file: File,
 }
 
 /// The top-level boxes of an MP4, read as they arrive.
 #[derive(Default)]
-struct Plain {
+struct File {
 	/// The file offset of the next input byte.
 	position: u64,
 	/// The box being read.
@@ -77,8 +73,9 @@ struct Plain {
 	trex: mp4_atom::Moov,
 	/// Where the last published sample ends in the file.
 	published: u64,
-	/// The first video track's keyframes listed so far, as each presents, which audio groups follow.
-	keyframes: Vec<moq_net::Timestamp>,
+	/// The first video track's keyframes, as each presents, from the latest at or before the
+	/// earliest audio still to publish. Audio groups follow them.
+	keyframes: VecDeque<moq_net::Timestamp>,
 	/// Whether the file has a video track for audio groups to follow.
 	video: bool,
 }
@@ -127,6 +124,8 @@ struct Output {
 	presenter: Presenter,
 	/// The samples to publish, in decode order.
 	samples: VecDeque<Sample>,
+	/// When the last published sample presents, before the shift onto the catalog clock.
+	last: Option<moq_net::Timestamp>,
 	/// The video keyframe an audio track's open group follows.
 	follows: Option<moq_net::Timestamp>,
 	/// Where an audio track's open group starts, and the frames it holds, in a file without video.
@@ -136,7 +135,7 @@ struct Output {
 impl Output {
 	/// Move the samples listed since the last call through the edit list into those to publish,
 	/// noting the keyframes in `keyframes` when this is the track audio follows.
-	fn take(&mut self, mut keyframes: Option<&mut Vec<moq_net::Timestamp>>) -> Result<()> {
+	fn take(&mut self, mut keyframes: Option<&mut VecDeque<moq_net::Timestamp>>) -> Result<()> {
 		for raw in self.declared.samples.drain(..) {
 			let Presented::Sample(sample) = self.presenter.present(raw)? else {
 				continue;
@@ -144,11 +143,20 @@ impl Output {
 			if sample.keyframe
 				&& let Some(keyframes) = keyframes.as_deref_mut()
 			{
-				keyframes.push(sample.timestamp(self.declared.timescale)?);
+				keyframes.push_back(sample.timestamp(self.declared.timescale)?);
 			}
 			self.samples.push_back(sample);
 		}
 		Ok(())
+	}
+
+	/// When the earliest sample still to publish presents, or the last one published did when
+	/// none is listed.
+	fn earliest(&self) -> Option<moq_net::Timestamp> {
+		match self.samples.front() {
+			Some(sample) => sample.timestamp(self.declared.timescale).ok(),
+			None => self.last,
+		}
 	}
 }
 
@@ -220,7 +228,7 @@ impl<E: CatalogExt> Import<E> {
 			timebase: reserved.timebase(),
 			initial_reservation: Some(reserved),
 			input: crate::container::Input::Open,
-			state: State::Plain(Box::default()),
+			file: File::default(),
 		}
 	}
 
@@ -239,20 +247,17 @@ impl<E: CatalogExt> Import<E> {
 
 	fn drain(&mut self, mut data: &[u8]) -> Result<()> {
 		while !data.is_empty() {
-			let plain = match &mut self.state {
-				State::Plain(plain) => plain,
-				State::Fragmented(import) => return import.decode(data),
-			};
-			match &mut plain.body {
+			let file = &mut self.file;
+			match &mut file.body {
 				Body::Header(header) => {
 					let count = (header_len(header) - header.len()).min(data.len());
 					header.extend_from_slice(&data[..count]);
 					data = &data[count..];
-					plain.position += count as u64;
+					file.position += count as u64;
 					// The first 8 bytes may say that 8 more hold the size.
 					if header.len() == header_len(header) {
 						let header = std::mem::take(header);
-						plain.begin(&header)?;
+						file.begin(&header)?;
 					}
 				}
 				Body::Metadata {
@@ -264,10 +269,10 @@ impl<E: CatalogExt> Import<E> {
 					let count = (*size - held.len()).min(data.len());
 					held.extend_from_slice(&data[..count]);
 					data = &data[count..];
-					plain.position += count as u64;
+					file.position += count as u64;
 					if held.len() == *size {
 						let (kind, start, held) = (*kind, *start, std::mem::take(held));
-						plain.body = Body::default();
+						file.body = Body::default();
 						match kind {
 							mp4_atom::Moov::KIND => self.init(&held)?,
 							_ => self.fragment(start, &held)?,
@@ -276,20 +281,20 @@ impl<E: CatalogExt> Import<E> {
 				}
 				Body::Media(end) | Body::Skip(end) => {
 					let end = *end;
-					let media = matches!(plain.body, Body::Media(_));
-					let start = plain.position;
+					let media = matches!(file.body, Body::Media(_));
+					let start = file.position;
 					let count = match end {
 						Some(end) => usize::try_from(end - start).unwrap_or(usize::MAX).min(data.len()),
 						None => data.len(),
 					};
 					let (bytes, rest) = data.split_at(count);
 					data = rest;
-					plain.position += count as u64;
-					if plain.body.ended(plain.position) {
-						plain.body = Body::default();
+					file.position += count as u64;
+					if file.body.ended(file.position) {
+						file.body = Body::default();
 					}
 					if media {
-						plain.hold(start, bytes)?;
+						file.hold(start, bytes)?;
 						self.publish()?;
 					}
 				}
@@ -298,21 +303,9 @@ impl<E: CatalogExt> Import<E> {
 		Ok(())
 	}
 
-	/// Read the `moov`, header included: declare its tracks and publish the media already held,
-	/// or hand a fragmented file to the fMP4 import.
+	/// Read the `moov`, header included: declare its tracks and publish the media already held.
 	fn init(&mut self, data: &[u8]) -> Result<()> {
 		let moov = index::decode_moov(data)?;
-		let listed = |trak: &mp4_atom::Trak| match &trak.mdia.minf.stbl.stsz.samples {
-			mp4_atom::StszSamples::Identical { count, .. } => *count > 0,
-			mp4_atom::StszSamples::Different { sizes } => !sizes.is_empty(),
-		};
-		if moov.mvex.is_some() && !moov.trak.iter().any(listed) {
-			let reserved = self.initial_reservation.take().ok_or(crate::Error::Finished)?;
-			let mut import = fmp4::Import::new(self.broadcast.clone(), reserved);
-			import.decode(data)?;
-			self.state = State::Fragmented(Box::new(import));
-			return Ok(());
-		}
 		if moov.trak.len() > fmp4::MAX_TRACKS {
 			return Err(Error::TooManyTracks(moov.trak.len()).into());
 		}
@@ -331,7 +324,7 @@ impl<E: CatalogExt> Import<E> {
 		let video = declared
 			.iter()
 			.position(|track| matches!(track.config, Config::Video(_)));
-		let mut keyframes = Vec::new();
+		let mut keyframes = VecDeque::new();
 		let mut tracks = Vec::new();
 		for (index, declared) in declared.into_iter().enumerate() {
 			let (suffix, kind, priority) = match &declared.config {
@@ -349,6 +342,7 @@ impl<E: CatalogExt> Import<E> {
 				presenter: Presenter::new(declared.edit),
 				declared,
 				samples: VecDeque::new(),
+				last: None,
 				follows: None,
 				group: None,
 			};
@@ -373,75 +367,84 @@ impl<E: CatalogExt> Import<E> {
 			// The fragments' first sample anchors it.
 			None => {}
 		}
-		let State::Plain(plain) = &mut self.state else {
-			unreachable!("a regular MP4 reads its own moov");
-		};
-		plain.video = video.is_some();
-		plain.keyframes = keyframes;
-		plain.trex = mp4_atom::Moov {
+		let file = &mut self.file;
+		file.video = video.is_some();
+		file.keyframes = keyframes;
+		file.trex = mp4_atom::Moov {
 			mvex: moov.mvex,
 			..Default::default()
 		};
-		plain.tracks = Some(tracks);
-		plain.trim();
+		file.tracks = Some(tracks);
+		file.trim();
 		self.publish()
 	}
 
 	/// Read a `moof` that starts at file offset `start`, header included, and queue its samples.
 	fn fragment(&mut self, start: u64, data: &[u8]) -> Result<()> {
 		let moof = index::decode_moof(data)?;
-		let State::Plain(plain) = &mut self.state else {
-			unreachable!("only a regular MP4 reads its own fragments");
-		};
-		let Some(tracks) = &mut plain.tracks else {
+		let file = &mut self.file;
+		let Some(tracks) = &mut file.tracks else {
 			return Err(Error::NoMoov.into());
 		};
+		// A fragment's media follows it, so a sample listed earlier that has not arrived lies
+		// elsewhere. Holding it would let fragments pointing past their media queue samples
+		// without end.
+		if let Some(index) = next(tracks) {
+			let sample = tracks[index].samples[0];
+			return Err(Error::SampleOutsideMedia {
+				offset: sample.offset,
+				size: sample.size,
+			}
+			.into());
+		}
 		let mut budget = Budget(data.len() as u64 + fmp4::FRAGMENT_SAMPLE_BASE);
 		index::fragment(
 			&moof,
 			start,
-			&plain.trex,
+			&file.trex,
 			None,
 			&mut budget,
 			tracks.iter_mut().map(|track| &mut track.declared),
 		)?;
 		let video = tracks.iter().position(|track| matches!(track.media, Media::Video(_)));
 		for (index, track) in tracks.iter_mut().enumerate() {
-			track.take((video == Some(index)).then_some(&mut plain.keyframes))?;
+			track.take((video == Some(index)).then_some(&mut file.keyframes))?;
 		}
-		plain.trim();
+		file.trim();
 		Ok(())
 	}
 
 	/// Publish every sample whose bytes arrived, in file order.
 	fn publish(&mut self) -> Result<()> {
-		let State::Plain(plain) = &mut self.state else {
-			return Ok(());
-		};
-		let Some(tracks) = &mut plain.tracks else {
+		let file = &mut self.file;
+		let Some(tracks) = &mut file.tracks else {
 			return Ok(());
 		};
 		while let Some(index) = next(tracks) {
 			let track = &mut tracks[index];
 			let sample = *track.samples.front().expect("the next track has a sample");
-			if sample.offset < plain.published {
+			if sample.offset < file.published {
 				return Err(Error::BackwardsDataOffset.into());
+			}
+			// A frame can't hold more, so refuse the sample before holding its bytes.
+			if sample.size as usize > fmp4::MAX_HELD_BYTES {
+				return Err(moq_net::Error::FrameTooLarge.into());
 			}
 			let end = sample
 				.offset
 				.checked_add(u64::from(sample.size))
 				.ok_or(Error::InvalidDataOffset)?;
-			if end > plain.position {
+			if end > file.position {
 				break;
 			}
 			track.samples.pop_front();
-			plain.published = end;
+			file.published = end;
 			if sample.size == 0 {
 				continue;
 			}
 			// The held media is in file order, without overlaps.
-			let index = plain.held.partition_point(|held| held.end() <= sample.offset);
-			let held = plain
+			let index = file.held.partition_point(|held| held.end() <= sample.offset);
+			let held = file
 				.held
 				.get(index)
 				.filter(|held| held.start <= sample.offset && end <= held.end())
@@ -456,6 +459,7 @@ impl<E: CatalogExt> Import<E> {
 			let source = sample.timestamp(timescale)?;
 			let timestamp = self.timebase.shift(source)?;
 			self.initial_reservation = None;
+			track.last = Some(source);
 			let duration = match sample.duration {
 				0 => None,
 				duration => Some(moq_net::Timestamp::new(u64::from(duration), timescale)?),
@@ -464,9 +468,9 @@ impl<E: CatalogExt> Import<E> {
 				Media::Video(_) => sample.keyframe,
 				// An audio sample opens a group at the first video keyframe at or before it that the
 				// open group doesn't follow yet.
-				Media::Audio(_) if plain.video => {
-					let passed = plain.keyframes.partition_point(|keyframe| *keyframe <= source);
-					let latest = passed.checked_sub(1).map(|index| plain.keyframes[index]);
+				Media::Audio(_) if file.video => {
+					let passed = file.keyframes.partition_point(|keyframe| *keyframe <= source);
+					let latest = passed.checked_sub(1).map(|index| file.keyframes[index]);
 					let opens = track.media.needs_keyframe() || (latest.is_some() && latest != track.follows);
 					if opens {
 						track.follows = latest;
@@ -497,53 +501,31 @@ impl<E: CatalogExt> Import<E> {
 				keyframe,
 			})?;
 		}
-		plain.trim();
+		file.trim();
 		Ok(())
-	}
-
-	/// Declare that the next fragment starts a new segment, for a fragmented file handed to the
-	/// fMP4 import; see [`fmp4::Import::cut`]. A regular MP4 has no segments to declare.
-	pub fn cut(&mut self) -> Result<()> {
-		self.input.check()?;
-		match &mut self.state {
-			State::Fragmented(import) => import.cut(),
-			State::Plain(_) => Ok(()),
-		}
 	}
 
 	/// Close every track's group and open the next one at `start`.
 	pub fn seek(&mut self, start: u64) -> Result<()> {
 		self.input.check()?;
-		match &mut self.state {
-			State::Fragmented(import) => import.seek(start),
-			State::Plain(plain) => {
-				for track in plain.tracks.iter_mut().flatten() {
-					track.media.seek(start)?;
-				}
-				Ok(())
-			}
+		for track in self.file.tracks.iter_mut().flatten() {
+			track.media.seek(start)?;
 		}
+		Ok(())
 	}
 
 	/// Finish every track and return the [`Finished`] import.
 	///
-	/// Input that ends before the `moov`, inside it, or before a sample it lists is refused, but
-	/// the tracks still end with what was published, as they do after a refused
+	/// Input that ends before the `moov`, inside it or a `moof`, or before a sample they list is
+	/// refused, but the tracks still end with what was published, as they do after a refused
 	/// [`decode`](Self::decode). Either way every track has ended, so a failed finish can't be
 	/// retried.
 	pub fn finish(mut self) -> Result<Finished<E>> {
-		let inner = match std::mem::replace(&mut self.state, State::Plain(Box::default())) {
-			State::Fragmented(import) => Inner::Fragmented(Box::new(import.finish()?)),
-			plain => {
-				self.state = plain;
-				self.finish_plain()?;
-				Inner::Plain(Box::new(self))
-			}
-		};
-		Ok(Finished { inner })
+		self.finish_in_place()?;
+		Ok(Finished { import: Box::new(self) })
 	}
 
-	fn finish_plain(&mut self) -> Result<()> {
+	fn finish_in_place(&mut self) -> Result<()> {
 		let mut result = match &self.input {
 			crate::container::Input::Finished => return Ok(()),
 			crate::container::Input::Failed(err) => return Err(err.clone()),
@@ -551,11 +533,9 @@ impl<E: CatalogExt> Import<E> {
 			crate::container::Input::Open => self.complete(),
 		};
 		self.initial_reservation = None;
-		if let State::Plain(plain) = &mut self.state {
-			for track in plain.tracks.iter_mut().flatten() {
-				// End every track even on refusal, keeping the first error.
-				result = result.and(track.media.end());
-			}
+		for track in self.file.tracks.iter_mut().flatten() {
+			// End every track even on refusal, keeping the first error.
+			result = result.and(track.media.end());
 		}
 		match &result {
 			// A refusal keeps refusing input with its own cause.
@@ -566,29 +546,26 @@ impl<E: CatalogExt> Import<E> {
 		result
 	}
 
-	/// Check that the input held the whole file: its `moov`, and every sample it lists.
+	/// Check that the input held the whole file: its `moov`, and every sample listed.
 	fn complete(&self) -> Result<()> {
-		let State::Plain(plain) = &self.state else {
-			return Ok(());
-		};
-		match &plain.body {
+		let file = &self.file;
+		match &file.body {
 			Body::Metadata { kind, .. } => return Err(Error::BoxPastEnd(kind.to_string()).into()),
 			Body::Header(header) if !header.is_empty() => {
 				tracing::debug!(bytes = header.len(), "skipping the bytes after the last box");
 			}
 			_ => {}
 		}
-		let tracks = plain.tracks.as_ref().ok_or(Error::NoMoov)?;
-		match tracks
-			.iter()
-			.filter_map(|track| track.samples.front())
-			.min_by_key(|sample| sample.offset)
-		{
-			Some(sample) => Err(Error::SampleOutsideMedia {
-				offset: sample.offset,
-				size: sample.size,
+		let tracks = file.tracks.as_ref().ok_or(Error::NoMoov)?;
+		match next(tracks) {
+			Some(index) => {
+				let sample = tracks[index].samples[0];
+				Err(Error::SampleOutsideMedia {
+					offset: sample.offset,
+					size: sample.size,
+				}
+				.into())
 			}
-			.into()),
 			None => Ok(()),
 		}
 	}
@@ -596,18 +573,13 @@ impl<E: CatalogExt> Import<E> {
 	/// Abort every track with `err` instead of finishing, so subscribers see the real cause rather
 	/// than [`moq_net::Error::Dropped`]. Consumes the importer.
 	pub fn abort(mut self, err: moq_net::Error) {
-		match std::mem::replace(&mut self.state, State::Plain(Box::default())) {
-			State::Fragmented(import) => import.abort(err),
-			State::Plain(mut plain) => {
-				for track in plain.tracks.take().into_iter().flatten() {
-					track.media.abort(err.clone());
-				}
-			}
+		for track in self.file.tracks.take().into_iter().flatten() {
+			track.media.abort(err.clone());
 		}
 	}
 }
 
-impl Plain {
+impl File {
 	/// Start the box whose whole `header` arrived.
 	fn begin(&mut self, header: &[u8]) -> Result<()> {
 		let kind = mp4_atom::FourCC::new(&[header[4], header[5], header[6], header[7]]);
@@ -701,7 +673,8 @@ impl Plain {
 		Ok(())
 	}
 
-	/// Drop the held media before the next sample to publish, which no later one takes.
+	/// Drop the held media before the next sample to publish, which no later one takes, and the
+	/// keyframes no audio sample still to publish follows.
 	fn trim(&mut self) {
 		let Some(tracks) = &self.tracks else {
 			return;
@@ -718,6 +691,20 @@ impl Plain {
 			}
 			break;
 		}
+
+		// An audio sample follows the latest keyframe at or before it, so only the latest one at or
+		// before the earliest audio still to publish, and those after it, are still read. Audio
+		// that has neither listed nor published a sample yet arrives later, so it holds none back.
+		let audio = tracks
+			.iter()
+			.filter(|track| matches!(track.media, Media::Audio(_)))
+			.filter_map(Output::earliest)
+			.reduce(crate::container::earlier);
+		let passed = match audio {
+			Some(audio) => self.keyframes.partition_point(|keyframe| *keyframe <= audio),
+			None => self.keyframes.len(),
+		};
+		self.keyframes.drain(..passed.saturating_sub(1));
 	}
 }
 
@@ -738,12 +725,6 @@ fn next(tracks: &[Output]) -> Option<usize> {
 		.map(|(index, _)| index)
 }
 
-/// What [`Finished`] holds.
-enum Inner<E: CatalogExt> {
-	Plain(Box<Import<E>>),
-	Fragmented(Box<fmp4::Finished<E>>),
-}
-
 /// An MP4 import that [finished](Import::finish): every track has ended, and they can still be
 /// read or aborted, but it takes no more input.
 ///
@@ -756,17 +737,14 @@ enum Inner<E: CatalogExt> {
 /// ```
 #[must_use = "dropping it retires the tracks and their catalog renditions"]
 pub struct Finished<E: CatalogExt = ()> {
-	inner: Inner<E>,
+	import: Box<Import<E>>,
 }
 
 impl<E: CatalogExt> Finished<E> {
 	/// Abort every track with `err`; see [`Import::abort`]. Readers still draining a track get its
 	/// clean end instead once every group below its end finished.
 	pub fn abort(self, err: moq_net::Error) {
-		match self.inner {
-			Inner::Plain(import) => import.abort(err),
-			Inner::Fragmented(finished) => finished.abort(err),
-		}
+		self.import.abort(err);
 	}
 }
 
@@ -774,10 +752,7 @@ impl<E: CatalogExt> Drop for Import<E> {
 	/// End each track, then retire its HLS records: every track takes a fresh name, so nothing
 	/// publishes it again.
 	fn drop(&mut self) {
-		let State::Plain(plain) = &mut self.state else {
-			return;
-		};
-		for mut track in plain.tracks.take().into_iter().flatten() {
+		for mut track in self.file.tracks.take().into_iter().flatten() {
 			let ended = track.media.end();
 			drop(track);
 			if let Err(err) = ended {
@@ -932,17 +907,14 @@ mod tests {
 		let (mut import, catalog, _consumer) = import();
 		import.decode(&data[..moov]).unwrap();
 		assert!(catalog.snapshot().video.renditions.is_empty());
-		let State::Plain(plain) = &import.state else {
-			panic!("a regular MP4");
-		};
-		assert_eq!(plain.held.iter().map(|held| held.data.len()).sum::<usize>(), 1309 - 8);
+		assert_eq!(
+			import.file.held.iter().map(|held| held.data.len()).sum::<usize>(),
+			1309 - 8
+		);
 
 		import.decode(&data[moov..]).unwrap();
 		assert_eq!(catalog.snapshot().video.renditions.len(), 1);
-		let State::Plain(plain) = &import.state else {
-			panic!("a regular MP4");
-		};
-		assert!(plain.held.is_empty(), "every sample published");
+		assert!(import.file.held.is_empty(), "every sample published");
 		let _finished = import.finish().unwrap();
 	}
 
@@ -961,10 +933,7 @@ mod tests {
 		let (mut import, _catalog, _consumer) = import();
 		for chunk in data.chunks(64) {
 			import.decode(chunk).unwrap();
-			let State::Plain(plain) = &import.state else {
-				panic!("a regular MP4");
-			};
-			let held: usize = plain.held.iter().map(|held| held.data.len()).sum();
+			let held: usize = import.file.held.iter().map(|held| held.data.len()).sum();
 			assert!(held < largest + 64, "{held} bytes held");
 		}
 		let _finished = import.finish().unwrap();
@@ -988,7 +957,7 @@ mod tests {
 
 	/// A fragmented file publishes what the fMP4 import does.
 	#[tokio::test]
-	async fn a_fragmented_file_is_imported_as_fmp4() {
+	async fn a_fragmented_file_publishes_what_the_fmp4_import_does() {
 		// The fixture ends on a moof without its mdat, so keep its first four whole fragments.
 		let data = &include_bytes!("../fmp4/test_data/bbb.mp4")[..2035];
 		let mp4 = streamed(data, 100).await;
@@ -1136,6 +1105,180 @@ mod tests {
 		assert!(matches!(
 			import.decode(&data),
 			Err(crate::Error::Cmaf(Error::BackwardsDataOffset))
+		));
+	}
+
+	/// A `moov` listing no samples, of `traks`, whose `trex` defaults are sync samples of
+	/// [`SIZE`] bytes lasting 100 ticks.
+	fn empty_moov(traks: Vec<mp4_atom::Trak>) -> Vec<u8> {
+		let mut init = moov(stbl(0), Vec::new());
+		init.mvex = Some(mp4_atom::Mvex {
+			trex: traks
+				.iter()
+				.map(|trak| mp4_atom::Trex {
+					track_id: trak.tkhd.track_id,
+					default_sample_description_index: 1,
+					default_sample_duration: 100,
+					default_sample_size: SIZE,
+					default_sample_flags: 0,
+				})
+				.collect(),
+			..Default::default()
+		});
+		init.trak = traks;
+		let mut data = Vec::new();
+		init.encode(&mut data).unwrap();
+		data
+	}
+
+	/// A `moof` at file offset `start` with one sample of each of `tracks` decoding at `time`,
+	/// then the `mdat` holding them. The data offsets count from a `base_data_offset` holding the
+	/// `moof`'s file offset, as ffmpeg writes without `default_base_moof`.
+	fn fragment(start: u64, tracks: &[u32], time: u64) -> Vec<u8> {
+		let build = |len: i32| mp4_atom::Moof {
+			traf: tracks
+				.iter()
+				.zip(0..)
+				.map(|(&track_id, index)| mp4_atom::Traf {
+					tfhd: mp4_atom::Tfhd {
+						track_id,
+						base_data_offset: Some(start),
+						..Default::default()
+					},
+					tfdt: Some(mp4_atom::Tfdt {
+						base_media_decode_time: time,
+					}),
+					trun: vec![mp4_atom::Trun {
+						data_offset: Some(len + 8 + index * SIZE as i32),
+						samples: mp4_atom::TrunSamples::Inherited {
+							count: 1,
+							first_flags: None,
+						},
+					}],
+					..Default::default()
+				})
+				.collect(),
+			..Default::default()
+		};
+		let mut data = Vec::new();
+		build(0).encode(&mut data).unwrap();
+		let len = data.len() as i32;
+		data.clear();
+		build(len).encode(&mut data).unwrap();
+		data.extend(mdat(tracks.len() as u32));
+		data
+	}
+
+	/// A fragmented file of `traks` with `count` fragments, each one sample of every track.
+	fn fragmented(traks: Vec<mp4_atom::Trak>, count: u64) -> Vec<u8> {
+		let ids: Vec<u32> = traks.iter().map(|trak| trak.tkhd.track_id).collect();
+		let mut data = empty_moov(traks);
+		for index in 0..count {
+			data.extend(fragment(data.len() as u64, &ids, index * 100));
+		}
+		data
+	}
+
+	/// An Opus track numbered `id`.
+	fn opus(id: u32) -> mp4_atom::Trak {
+		let mut trak = moov(stbl(0), Vec::new()).trak.remove(0);
+		trak.tkhd.track_id = id;
+		trak
+	}
+
+	/// A fragmented file whose `moov` lists no samples skips a track in a codec moq-mux doesn't
+	/// carry, as the reader does, rather than refusing the file. Its fragments take their data
+	/// offsets from the file's start.
+	#[tokio::test]
+	async fn a_fragmented_file_skips_an_unsupported_track() {
+		let mut ac3 = opus(2);
+		ac3.mdia.minf.stbl.stsd.codecs = vec![
+			mp4_atom::Ac3 {
+				audio: ac3.mdia.minf.stbl.stsd.codecs[0].audio().unwrap().clone(),
+				dac3: mp4_atom::Ac3SpecificBox {
+					fscod: 0,
+					bsid: 8,
+					bsmod: 0,
+					acmod: 2,
+					lfeon: false,
+					bit_rate_code: 0,
+				},
+			}
+			.into(),
+		];
+		let data = fragmented(vec![opus(1), ac3], 3);
+		let mut expected = from_zero(indexed(&data));
+		assert_eq!(expected.len(), 1);
+		groups(&mut expected[0]);
+		for chunk in [1, 7, 100, data.len()] {
+			let mut tracks = streamed(&data, chunk).await;
+			groups(&mut tracks[0]);
+			assert_eq!(tracks, expected, "writes of {chunk} bytes");
+		}
+		assert_eq!(
+			expected[0].iter().map(|frame| frame.0).collect::<Vec<_>>(),
+			[0, 100_000, 200_000]
+		);
+	}
+
+	/// On a long fragmented stream, the import keeps only the keyframes audio still follows,
+	/// and the audio groups still open at each of them.
+	#[tokio::test]
+	async fn a_long_stream_keeps_only_the_keyframes_audio_follows() {
+		use super::super::index::tests::video;
+
+		let video = video(moov(stbl(0), Vec::new())).trak.remove(0);
+		let data = fragmented(vec![video, opus(2)], 50);
+		let (mut import, catalog, consumer) = import();
+		import.decode(&data).unwrap();
+		assert!(
+			import.file.keyframes.len() <= 1,
+			"{} keyframes",
+			import.file.keyframes.len()
+		);
+		let _finished = import.finish().unwrap();
+		let mut tracks = from_zero(published(&consumer, &catalog).await);
+		let keyframes = groups(&mut tracks[0]);
+		assert_eq!(keyframes.len(), 50);
+		assert_eq!(groups(&mut tracks[1]), keyframes);
+	}
+
+	/// A `moof` arriving before the media of the one before it is refused, so fragments pointing
+	/// past their media can't queue samples without end.
+	#[test]
+	fn a_fragment_before_the_last_ones_media_is_refused() {
+		let mut data = empty_moov(vec![opus(1)]);
+		let first = fragment(data.len() as u64, &[1], 0);
+		// The first `moof` without its `mdat`.
+		data.extend_from_slice(&first[..first.len() - mdat(1).len()]);
+		data.extend(fragment(data.len() as u64, &[1], 100));
+		let (mut import, _catalog, _consumer) = import();
+		assert!(matches!(
+			import.decode(&data),
+			Err(crate::Error::Cmaf(Error::SampleOutsideMedia { .. }))
+		));
+	}
+
+	/// A sample larger than a frame holds is refused before its bytes are held.
+	#[test]
+	fn a_sample_larger_than_a_frame_is_refused() {
+		let mut tables = stbl(1);
+		tables.stsz.samples = mp4_atom::StszSamples::Identical {
+			count: 1,
+			size: fmp4::MAX_HELD_BYTES as u32 + 1,
+		};
+		let mut data = Vec::new();
+		moov(tables.clone(), Vec::new()).encode(&mut data).unwrap();
+		tables.stco = Some(mp4_atom::Stco {
+			entries: vec![data.len() as u32 + 8],
+		});
+		data.clear();
+		moov(tables, Vec::new()).encode(&mut data).unwrap();
+		data.extend_from_slice(&[0, 0, 0, 0, b'm', b'd', b'a', b't', 0]);
+		let (mut import, _catalog, _consumer) = import();
+		assert!(matches!(
+			import.decode(&data),
+			Err(crate::Error::Moq(moq_net::Error::FrameTooLarge))
 		));
 	}
 }

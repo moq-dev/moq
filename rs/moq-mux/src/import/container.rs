@@ -79,12 +79,10 @@ impl<E: crate::container::ts::Catalog> ContainerImpl<E> {
 	}
 
 	fn cut(&mut self) -> Result<()> {
-		// Only fMP4, and a fragmented MP4 handed to it, has a segment concept to declare. The others
-		// recover their own framing and
+		// Only fMP4 has a segment concept to declare. The others recover their own framing and
 		// group on what they find in it, so there is nothing for a caller to draw.
 		match self {
 			ContainerImpl::Fmp4(decoder) => decoder.cut(),
-			ContainerImpl::Mp4(decoder) => decoder.cut(),
 			_ => Ok(()),
 		}
 	}
@@ -146,7 +144,7 @@ impl<E: crate::container::ts::Catalog> Container<E> {
 	///
 	/// For a caller that knows the source's segmentation out of band (an HLS import following its
 	/// playlist). An fMP4 source that carries `styp` atoms declares its own, so this is only
-	/// needed when it doesn't. Ignored by container formats with no segment concept (a regular MP4, MKV, TS, FLV).
+	/// needed when it doesn't. Ignored by container formats with no segment concept (MP4, MKV, TS, FLV).
 	pub fn cut(&mut self) -> Result<()> {
 		self.inner.cut()
 	}

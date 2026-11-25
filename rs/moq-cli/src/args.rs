@@ -847,8 +847,8 @@ pub enum ImportSource {
 	H264,
 	/// Fragmented MP4 / CMAF from stdin.
 	Fmp4(Fmp4Import),
-	/// Regular MP4 from stdin, with its `moov` before or after its media. One with its `moov`
-	/// last holds up to 64 MiB of media until the `moov` arrives.
+	/// Regular or fragmented MP4 from stdin, with its `moov` before or after its media. One with
+	/// its `moov` last is refused past 64 MiB of media; `ffmpeg -movflags +faststart` moves it.
 	Mp4,
 	/// MPEG-TS from stdin.
 	Ts(TsImport),

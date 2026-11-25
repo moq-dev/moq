@@ -108,10 +108,16 @@ timing.
 `import mp4` reads a regular MP4 the same way, applying each track's edit list,
 and reads a fragmented one too. A file with its `moov` first
 (`-movflags +faststart`) publishes as it streams in. One with its `moov` last,
-as most recorders write it, publishes nothing until the `moov` arrives, and
-holds up to 64 MiB of media until then. Like the other stdin imports it
-publishes as fast as stdin delivers, so a file published at real speed goes
-through `ffmpeg -re` and `import ts` as above.
+as most recorders write it, publishes nothing until the `moov` arrives. The
+import holds up to 64 MiB of media until then, and refuses a file with more.
+Move the `moov` to the front first, without re-encoding:
+
+```bash
+ffmpeg -i recording.mp4 -c copy -movflags +faststart faststart.mp4
+```
+
+Like the other stdin imports it publishes as fast as stdin delivers, so a file
+published at real speed goes through `ffmpeg -re` and `import ts` as above.
 
 `import rtsp` pulls an IP camera's H.264 or H.265 video and AAC audio without
 re-encoding. RTP rides the RTSP connection, so run it on the camera's network
