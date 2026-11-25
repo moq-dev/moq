@@ -10,7 +10,8 @@ it. The draft defines a mode on SUBSCRIBE, set when it opens and never
 updated, and the payload-less FRAME a metadata subscription carries. Rust and
 JS (`moq-net` and `js/net`) serve a metadata SUBSCRIBE from a track they
 publish or hold, and a relay forwards metadata demand it cannot serve
-upstream. The public API for asking for metadata, the bindings, and failover
+upstream, or serves it from a payload subscription where the upstream is an
+older version. The public API for asking for metadata, the bindings, and failover
 stay in [meta.md](/quest/m3/route-health/meta.md).
 
 ## Plan
@@ -42,12 +43,14 @@ The wire, as [meta.md](/quest/m3/route-health/meta.md) recommended:
 - The draft's Metadata section states the semantics meta.md records as
   decided: a metadata frame never satisfies a payload reader, fills a cache as
   a complete frame, or advances a resume cursor; a relay serves metadata from
-  a payload copy or a metadata subscription upstream, and never emulates it by
-  fetching and discarding payload. A reader moving to payload opens a new
+  a payload copy, a metadata subscription upstream, or, where the upstream
+  cannot carry the mode, a payload subscription whose payload it drops. No
+  stream error code is added. A reader moving to payload opens a new
   subscription from its first missing frame with the Position or Joined
   Anchor lite-07 already has; confirm that needs no new bytes.
 
-Serving, under meta.md's standing relay rules (✅ 2026-10-13 and 2026-11-02):
+Serving, under meta.md's standing relay rules (✅ 2026-10-13 and 2026-11-02,
+amended 2026-11-25 below):
 
 - A publisher serves a metadata SUBSCRIBE from the track it publishes with
   the same ranges, priority, drops, and skips as a payload one, writing each
@@ -61,22 +64,32 @@ Serving, under meta.md's standing relay rules (✅ 2026-10-13 and 2026-11-02):
   payload reader. This needs the payload-less FRAME's decoder and a
   header-only copy inside `moq-net` and `js/net`'s forwarding, with no public
   consumer type yet; that type is meta.md's.
+- A relay whose upstream session cannot carry the mode (lite-06 or earlier,
+  or moq-transport) opens an ordinary payload SUBSCRIBE upstream and serves
+  its metadata readers the headers, dropping the payload for them. That
+  route has one mode, so the track holds one upstream subscription on it, and
+  the payload costs only that hop. `moq-net` decides this from the
+  negotiated version when it routes the subscription, never by trying the
+  mode and falling back.
 - Check with the TLA+ subscription model (`/verify-subscribe`) that two
   subscriptions to one track in different modes keep the existing
   accounting; with fixed modes no promotion rule is needed.
 
-The refusal, re-examined now that every lite-07 publisher serves the mode.
-Recommended: keep one stream error code, NOT_SUPPORTED at 0x30 (free in the
-stream table and matching the session code), but narrow it to a relay whose
-route to the track cannot carry the mode, such as an upstream on lite-06,
-moq-transport, or a bridge. A lite-07 publisher MUST NOT refuse a metadata
-SUBSCRIBE for a track it serves. The refusal stays because the newest and
-previous relay releases interoperate during a rollout, so a lite-07 relay can
-sit below a lite-06 hop, and the standing rule forbids emulating the mode by
-fetching payload. A relay whose upstream refuses refuses downstream with the
-same code. Recommended against: dropping the code (a mixed-version chain then
-has no answer but a payload fetch or a generic error) and a SETUP capability
-(a relay learns its route's support only per subscription).
+Decided 2026-11-25 (maintainer, /quest-run,
+[comment](https://github.com/moq-dev/moq/pull/9516#issuecomment-7168011073)):
+
+- ✅ No NOT_SUPPORTED refusal: a relay whose upstream is an older version
+  does an actual SUBSCRIBE upstream and drops the payload, serving the
+  metadata subscription itself, and moq-transport gets an extension for
+  metadata-only subscriptions (rejected: the refusal narrowed to a relay
+  whose route cannot carry the mode; no refusal code, answering with a
+  generic error). This supersedes meta.md's standing ✅ rule that an older
+  version never emulates the mode by fetching and discarding payload; the
+  newer decision wins, and 0x30 leaves the plan. The extension is
+  [its own quest](/quest/m3/route-health/ietf.md), so until it lands a
+  moq-transport upstream is served like lite-06.
+- ✅ Relay forwarding of metadata requests lands here in m2, so this quest
+  stays L and meta.md M (rejected: forwarding stays in m3).
 
 Start from the draft text and codecs on `quest/m3/route-health/meta` at
 `c00addff48` ([moq-dev/moq#8882](https://github.com/moq-dev/moq/pull/8882),
@@ -91,16 +104,17 @@ SUBSCRIBE served by a publisher carries headers and no payload bytes; an
 empty frame stays distinguishable; a relay with a payload copy serves both
 modes from it; a relay without one forwards metadata upstream and carries no
 payload across that hop; the last payload reader leaving switches the
-relay's upstream to metadata; a relay below a lite-06 hop refuses with
-NOT_SUPPORTED. Cover Rust and JS serving each other in
+relay's upstream to metadata; a relay below a lite-06 hop serves metadata
+from a payload subscription across that hop and carries no payload below it.
+Cover Rust and JS serving each other in
 `just test interop --all`.
 
 Public API: none; asking for metadata is meta.md's. Wire: breaking on
-`moq-lite-07-wip`: `Meta` on SUBSCRIBE, the payload-less FRAME, and the
-NOT_SUPPORTED stream code.
+`moq-lite-07-wip`: `Meta` on SUBSCRIBE and the payload-less FRAME.
 
 ## Related
 
 - [Finalize moq-lite-07](/quest/m2/lite07-finalize.md) - the cut waits on this
 - [Redesign lite-07 subscribe and fetch](/quest/m2/lite07-subscribe/README.md) - moves Priority and Group Order onto per-range fields, adds Previous Delta to GROUP, and removes FETCH and SUBSCRIBE_SKIP; `Meta` stays one byte on SUBSCRIBE independently
 - [Metadata-only subscriptions](/quest/m3/route-health/meta.md) - the subscriber API and bindings that ask for what this serves
+- [Metadata-only subscriptions over moq-transport](/quest/m3/route-health/ietf.md) - the extension that lets a moq-transport hop carry the mode instead of payload

@@ -269,7 +269,8 @@ cut. [Metadata mode on the lite-07 wire](/quest/m2/lite07-metadata.md) joins
 Required; the implementation stays in m3 and lands on lite-07's wire.
 Narrowed 2026-11-25 (maintainer, /quest-run): ✅ the serving side joins that
 quest too, so every lite-07 publisher and relay serves the mode; only the
-subscriber API and failover stay in m3.
+subscriber API and failover stay in m3. A relay over an older upstream
+serves the mode from a payload subscription, so lite-07 adds no refusal code.
 
 ## Required
 

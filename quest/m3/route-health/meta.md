@@ -40,7 +40,7 @@ quest is the implementation that rides on it (rejected: the whole quest in
 lite-08), since the [epic](/quest/m3/route-health/README.md) now has a
 user. That quest settles the wire this
 Plan recommended: a `Meta` byte on SUBSCRIBE, set when it opens, the
-payload-less FRAME, and a refusal code. Its Plan records what this quest's
+payload-less FRAME, and no refusal code. Its Plan records what this quest's
 code must keep conforming to.
 
 Decided 2026-11-25 (maintainer, /quest-run): ✅ the serving side moves to
@@ -64,26 +64,35 @@ deleted in [moq-dev/moq#8423](https://github.com/moq-dev/moq/pull/8423)
   bytes, so a real empty frame stays distinguishable. Metadata never
   satisfies a media reader, fills a cache as a complete frame, or advances a
   resume cursor.
-- ✅ A relay pulls payload upstream only for payload demand, and holds at
-  most one upstream subscription per mode for a track. Metadata demand is
+- ✅ A relay pulls payload upstream only for payload demand (except over an
+  older version, below), and holds at most one upstream subscription per
+  mode for a track. Metadata demand is
   served from a payload copy while the relay holds one, and otherwise
   travels upstream as a metadata subscription. When the last payload reader
   leaves and metadata demand remains, the relay opens the metadata
   subscription and closes the payload one.
-- ✅ An older version never emulates it by fetching and discarding media: it
-  reports the mode unsupported. No moq-transport counterpart is needed. A
-  relay refusing with NOT_SUPPORTED because its route cannot carry the mode
-  is reported the same way, and a relay whose upstream refuses refuses its
-  own readers.
+- Superseded 2026-11-25 (maintainer, /quest-run, on
+  [lite07-metadata](/quest/m2/lite07-metadata.md)): ✅ nothing refuses the
+  mode. A relay whose upstream is lite-06 or earlier subscribes for payload
+  and drops it for its metadata readers, and moq-transport gets an
+  [extension](/quest/m3/route-health/ietf.md) for the mode (rejected: this
+  rule's own "an older version never emulates it by fetching and discarding
+  media: it reports the mode unsupported", which the newer decision
+  replaces, with its NOT_SUPPORTED refusal and "no moq-transport counterpart
+  is needed").
 
 What the parked PR learned, on branch `quest/m3/route-health/meta` at
 `c00addff48`:
 
 - Carries over here: a header read that returns the declared size without
   waiting for or inflating a compressed frame (`read_info`, `readInfo`); the
-  bindings' header read; the refusal on lite-06 and moq-transport; and the
-  interop lane's subscriber half. The codecs, the relay's per-mode upstream,
-  and the TLA+ check go to [lite07-metadata](/quest/m2/lite07-metadata.md).
+  bindings' header read; and the interop lane's subscriber half. The codecs,
+  the relay's per-mode upstream, and the TLA+ check go to
+  [lite07-metadata](/quest/m2/lite07-metadata.md), and its refusal on lite-06
+  and moq-transport is dropped.
+- Recommended, to confirm when this starts: an endpoint whose own session is
+  an older version asks for metadata the way a relay does over one, with a
+  payload subscription whose payload it drops, so the API never refuses.
 - A history fill is payload demand of its own. There it switched the relay's
   one shared upstream subscription to payload, so live groups arrived with
   payload until the fill was answered. A subscription per mode removes the
@@ -96,8 +105,8 @@ Mirror the API across Rust, JS, and every binding that exposes
 Tests, from the public API: metadata-only traffic across several hops
 carries no payload; mixed demand; a payload subscription opened mid-group
 from a position seen as metadata; a fill while only metadata demand stands;
-empty frames; cancellation; refusal on an unsupported version and by a relay
-whose route cannot carry the mode. Sweep tracks, readers, and relay depth
+empty frames; cancellation; an older-version session or hop, which carries
+payload only where it must. Sweep tracks, readers, and relay depth
 for bytes, wakes, and memory. Add the subscriber to
 `just test interop --all`.
 

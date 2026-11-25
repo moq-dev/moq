@@ -71,6 +71,10 @@ Decided 2026-11-25 (maintainer, /quest-run): ✅ the implementation of
 [failover](/quest/m3/route-health/failover.md) stays in m3 (rejected: m2,
 m1, m0), and lite07-metadata also serves the mode from every lite-07
 publisher and relay of ours, leaving meta.md the subscriber side.
+Decided 2026-11-25 (maintainer, /quest-run): ✅ nothing refuses the mode: a
+relay over an older version subscribes for payload and drops it, and
+moq-transport gets [an extension](/quest/m3/route-health/ietf.md) for the
+mode (rejected: a NOT_SUPPORTED refusal).
 
 New on 2026-11-15, from the prior art this is closest to:
 
