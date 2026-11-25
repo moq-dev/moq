@@ -438,8 +438,9 @@ pub unsafe extern "C" fn moq_encode_audio(
 /// Consumes the request handle and returns the same kind of handle as [moq_encode_audio], or a
 /// negative code on failure. The request names the track. This is how an on-demand publisher
 /// serves a track asked for again after its handle was freed while read: accept it with the
-/// configuration it was first published with, since its readers hold the track info it set;
-/// another ends the track. A configuration the codec refuses rejects the request with the cause.
+/// configuration it was first published with. One that changes the track info its readers hold
+/// ends the track and fails here; nothing checks the codec settings, which its readers decode
+/// with, so keep those too. A configuration the codec refuses rejects the request.
 ///
 /// # Safety
 /// - As [moq_encode_audio], for `input`, `output`, and `allocator`.

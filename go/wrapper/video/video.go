@@ -95,8 +95,10 @@ func NewProducer(catalog *media.CatalogProducer, options ProducerOptions) (*Prod
 // NewRequestedProducer opens a video track on the track a subscriber's request asks for, which
 // names it, so options.Track must be nil. This is how an on-demand publisher serves a track asked
 // for again after its producer was closed while read: pass the options it was first published
-// with, since its readers hold the track info they set; others end the track with Duplicate. The
-// request must belong to the catalog's broadcast.
+// with. Options that change the track info its readers hold end the track with Duplicate and fail
+// here; nothing checks the codec settings, which its readers decode with, so keep those too. The
+// request must belong to the catalog's broadcast, and a config that can't be encoded rejects it
+// with Unsupported.
 func NewRequestedProducer(catalog *media.CatalogProducer, request *moq.TrackRequest, options ProducerOptions) (*Producer, error) {
 	raw, err := options.ffi()
 	if err != nil {

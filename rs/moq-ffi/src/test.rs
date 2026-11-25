@@ -2360,7 +2360,32 @@ async fn native_encoders_serve_a_renewal() {
 	next_group(&late, "camera").await;
 }
 
-/// A requested encoder refuses a request it would publish wrong, rejecting it with the cause:
+/// A native encoder serving a renewal with another track info than its readers hold fails,
+/// rather than advertise a rendition the track will never carry, and its reader ends.
+#[tokio::test]
+async fn native_encoders_refuse_a_renewal_they_would_change() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let dynamic = broadcast.requests().unwrap();
+	let catalog = MoqMediaCatalogProducer::new(broadcast.clone()).unwrap();
+
+	for name in ["microphone", "camera"] {
+		let track = broadcast.publish_track(name.into(), Some(timed_info())).unwrap();
+		let reader = subscribe(&broadcast, name).await;
+		drop(track);
+		let request = renewal(&dynamic, name).await;
+		let served = match name {
+			"microphone" => crate::audio::MoqAudioProducer::requested(&catalog, request, microphone(None)).map(drop),
+			_ => crate::video::MoqVideoProducer::requested(&catalog, request, camera(None)).map(drop),
+		};
+		assert!(served.is_err(), "{name} served a renewal it changed");
+		let ended = kio::clock::timeout(TIMEOUT, reader.recv_group())
+			.await
+			.unwrap_or_else(|_| panic!("timed out waiting for {name} to end"));
+		assert!(ended.is_err(), "{name}'s reader did not end");
+	}
+}
+
+/// A requested encoder refuses a request it would publish wrong, rejecting it:
 /// one naming another track, or one from another broadcast, whose readers would never find the
 /// catalog's rendition.
 #[tokio::test]

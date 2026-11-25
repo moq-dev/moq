@@ -277,8 +277,10 @@ handler is live. That handler must accept it with the info the track was
 published with: another info ends the track with `Duplicate`. Serve an
 encoder's track with `moq::VideoProducer::requested()` or
 `moq::AudioProducer::requested()`, given the request and the options the track
-was published with. With no handler,
-the reader reads `Dropped`, seen as `Internal`. A media container
+was published with: `Duplicate` catches only a changed track info, not changed
+codec settings, which its readers decode with. With no handler, or once the
+producer serving that request is released too before another reader joins, the
+reader reads `Dropped`, seen as `Internal`. A media container
 producer, and a JSON stream or window that published a record, are the
 exceptions: finish them, since releasing one unfinished ends its tracks with
 `Dropped`. Readers follow a publisher's runs by announcement, not by that error: see

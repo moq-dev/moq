@@ -50,9 +50,11 @@ public enum Audio {
         /// Open an audio track on the track a subscriber's `request` asks for, which names it.
         ///
         /// This is how an on-demand publisher serves a track asked for again after its producer
-        /// was released while read: pass the settings it was first published with, since its
-        /// readers hold the track info they set; others end the track with `Duplicate`. The
-        /// request must belong to the catalog's broadcast.
+        /// was released while read: pass the settings it was first published with. Settings that
+        /// change the track info its readers hold end the track with `Duplicate` and throw here;
+        /// nothing checks the codec settings, which its readers decode with, so keep those too.
+        /// The request must belong to the catalog's broadcast, and a config that can't be encoded
+        /// rejects it with `Unsupported`.
         public static func requested(
             catalog: Media.CatalogProducer,
             request: TrackRequest,

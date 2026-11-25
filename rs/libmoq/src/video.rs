@@ -714,9 +714,9 @@ pub unsafe extern "C" fn moq_encode_video(
 /// Consumes the request handle and returns the same kind of handle as [moq_encode_video], or a
 /// negative code on failure. The request names the track. This is how an on-demand publisher
 /// serves a track asked for again after its handle was freed while read: accept it with the
-/// configuration it was first published with, since its readers hold the track info it set;
-/// another ends the track. A configuration this machine can't encode rejects the request with
-/// the cause.
+/// configuration it was first published with. One that changes the track info its readers hold
+/// ends the track and fails here; nothing checks the codec settings, which its readers decode
+/// with, so keep those too. A configuration this machine can't encode rejects the request.
 ///
 /// # Safety
 /// - As [moq_encode_video], for `input`, `output`, and `options`.
