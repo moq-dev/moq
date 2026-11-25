@@ -334,7 +334,8 @@ pub enum Error {
 	#[error(transparent)]
 	Path(crate::path::Error),
 
-	/// A duplicate ID was used
+	/// A duplicate ID was used, or a track asked for again was accepted with info other than
+	/// what its readers already hold.
 	// The broadcast/track is a duplicate
 	#[error("duplicate")]
 	Duplicate,

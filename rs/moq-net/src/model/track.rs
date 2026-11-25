@@ -6703,7 +6703,7 @@ impl Drop for Alive {
 		// would, and the reader waits on the same state for the next producer. The groups this
 		// producer left open end as superseded: nobody can finish them, and the next producer's
 		// groups replace them, so a reader holding one moves on as past any group gone old.
-		let (_, open) = state.tear_down(Error::Old);
+		let (resume, open) = state.tear_down(Error::Old);
 		state.publication = Publication::Pending;
 		drop(state);
 		open.abort();
@@ -6711,13 +6711,13 @@ impl Drop for Alive {
 		let Err(request) = home.request(request) else {
 			return;
 		};
-		// Nothing will serve it again, so its readers end as at an abrupt teardown, unless the
-		// broadcast's end already refused them.
+		// Nothing will serve it again, so its readers end as at an abrupt teardown, resuming
+		// where this producer stopped, unless the broadcast's end already refused them.
 		if let Ok(state) = request.state.write()
 			&& state.publication == Publication::Pending
 			&& matches!(state.outcome, Outcome::Open)
 		{
-			Self::drop_wanted(state, &self.name);
+			Self::end_dropped(state, &self.name, resume);
 		}
 	}
 }
@@ -6762,12 +6762,17 @@ impl Alive {
 	/// abort with [`Error::Dropped`] does: the open groups go and the finished ones stay for
 	/// readers still draining.
 	fn drop_wanted(mut state: kio::Mut<'_, TrackState>, name: &str) {
-		tracing::warn!(track = %name, "track::Producer dropped without finish() or abort()");
 		let (resume, open) = state.tear_down(Error::Dropped);
+		Self::end_dropped(state, name, resume);
+		open.abort();
+	}
+
+	/// End a torn-down track with [`Error::Dropped`], at the `resume` position its teardown
+	/// found: a second teardown would find the open groups already gone.
+	fn end_dropped(mut state: kio::Mut<'_, TrackState>, name: &str, resume: Option<Position>) {
+		tracing::warn!(track = %name, "track::Producer dropped without finish() or abort()");
 		state.outcome = Outcome::Dropped { resume };
 		state.close_cache();
-		drop(state);
-		open.abort();
 	}
 }
 
@@ -14284,10 +14289,11 @@ impl Request {
 	///
 	/// The name is taken from [`Self::name`]; `info` supplies the remaining knobs
 	/// (`None` for the defaults). A track asked for again because its last producer dropped
-	/// while read keeps the info it was first accepted with, which its readers already hold,
-	/// and ignores `info`. If the track was already aborted, the returned
-	/// [`Producer`] is inert: writes fail with the abort error, as if it had been
-	/// aborted immediately after accepting.
+	/// while read must be accepted with the info it was first accepted with, which its
+	/// readers already hold: a different `info` aborts the track with [`Error::Duplicate`],
+	/// so those readers end and a later lookup asks for the track afresh. If the track was
+	/// already aborted, or is aborted that way, the returned [`Producer`] is inert: writes
+	/// fail with the abort error, as if it had been aborted immediately after accepting.
 	pub fn accept(self, info: impl Into<Option<Info>>) -> Producer {
 		self.stage(info).commit()
 	}
@@ -14299,18 +14305,19 @@ impl Request {
 	/// [`Staged::commit`]. Dropping the [`Staged`] uncommitted rejects the request with
 	/// [`Error::Dropped`].
 	pub(crate) fn stage(self, info: impl Into<Option<Info>>) -> Staged {
-		let mut info = info.into().unwrap_or_default();
+		let info = info.into().unwrap_or_default();
+		let conflicts = self.conflicts(&info);
 		// A closed state means the track was aborted under us. Mirror `reject` and
 		// tolerate it: the Producer we hand back simply can't write.
 		let open = match self.state.write() {
+			// Its readers, and the peers they forward to, already hold the info the track was
+			// first accepted with, which nothing may change under them.
+			Ok(mut state) if conflicts => {
+				state.reject(Error::Duplicate, None);
+				state.close();
+				false
+			}
 			Ok(mut state) => {
-				// Its readers, and the peers they forward to, already hold the info the track
-				// was first accepted with, so a renewal keeps it rather than change it under them.
-				if self.renewed
-					&& let Some(held) = &state.info
-				{
-					info = held.clone();
-				}
 				state.stage(info.clone());
 				if let RequestedStart::Pending(floor) = self.requested_start {
 					state.set_start(FeedStart::Pending(floor));
@@ -14340,6 +14347,11 @@ impl Request {
 			}),
 			_dynamic: self._dynamic,
 		}
+	}
+
+	/// Whether accepting with `info` would change the info a renewed track's readers hold.
+	pub(super) fn conflicts(&self, info: &Info) -> bool {
+		self.renewed && self.state.read().info.as_ref().is_some_and(|held| held != info)
 	}
 
 	/// Reject the request, waking all waiting subscribers with `err`.

@@ -18,6 +18,9 @@ pub use super::Config;
 ///
 /// Cheaply clonable: clones share one underlying track and publishing state, so multiple owners
 /// (e.g. several producers feeding one log) append into a single ordered stream.
+///
+/// [`finish`](Self::finish) or [`abort`](Self::abort) the log: dropping the last clone unfinished
+/// is not supported, and once it published, its readers read [`moq_net::Error::Dropped`].
 pub struct Producer<T> {
 	inner: Arc<Mutex<Inner<T>>>,
 	_marker: PhantomData<fn(T)>,

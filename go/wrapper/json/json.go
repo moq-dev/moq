@@ -138,9 +138,9 @@ func (p *StreamProducer) Demand() (*moq.TrackDemand, error) {
 
 // Close releases the producer on the calling goroutine without finishing its track: a
 // track nobody wants ends cleanly, and a reader that joined since is served by the next
-// request for it while a request handler is live. Once it appended a record, its track
-// ends with Dropped instead, since another producer could not continue its log. The
-// producer is unusable afterwards.
+// request for it while a request handler is live. Once it appended a record, Finish it:
+// closing it unfinished is not supported, and aborts its track with Dropped, since another
+// producer could not continue its log. The producer is unusable afterwards.
 func (p *StreamProducer) Close() { p.inner.Destroy() }
 
 // Finish closes the stream track.
@@ -306,9 +306,9 @@ func (p *WindowProducer) Demand() (*moq.TrackDemand, error) {
 
 // Close releases the producer on the calling goroutine without finishing its track: a
 // track nobody wants ends cleanly, and a reader that joined since is served by the next
-// request for it while a request handler is live. Once it pushed a record, its track
-// ends with Dropped instead, since another producer would number its records afresh. The
-// producer is unusable afterwards.
+// request for it while a request handler is live. Once it pushed a record, Finish it:
+// closing it unfinished is not supported, and aborts its track with Dropped, since another
+// producer would number its records afresh. The producer is unusable afterwards.
 func (p *WindowProducer) Close() { p.inner.Destroy() }
 
 // Finish closes the window track.

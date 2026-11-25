@@ -5012,12 +5012,31 @@ fn media_demand_refuses_a_container() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// The C form of `info`, for accepting a request with the info a track was first published with.
+fn c_track_info(info: &moq_net::track::Info) -> moq_track_info {
+	let refresh = info.refresh;
+	moq_track_info {
+		priority: info.priority,
+		max_age_us: info.max_age.map_or(0, |age| age.as_micros() as u64),
+		max_age_unlimited: info.max_age.is_none(),
+		timescale: info.timescale.map_or(0, |scale| scale.as_u64()),
+		timescale_present: info.timescale.is_some(),
+		refresh: refresh.ratio.unwrap_or(0),
+		refresh_present: refresh.ratio.is_some(),
+		refresh_interval_us: refresh.interval.map_or(0, |interval| interval.as_micros() as u64),
+		refresh_interval_present: refresh.interval.is_some(),
+		compression: moq_compression::MOQ_COMPRESSION_NONE as u32,
+	}
+}
+
 /// Freeing a handle ends its on-demand track, for one kind of handle `publish` makes on a
 /// broadcast with a request handler. Nobody wanting the track, it closes cleanly. A reader that
 /// joined after the watcher reported nobody wants it is handed to the broadcast's next track
-/// request instead of failing, and reads what that request's producer writes.
+/// request instead of failing, and reads what that request's producer writes, which accepts it
+/// with `info`, the info the track was first published with.
 fn free_ends_on_demand(
 	path: &[u8],
+	info: moq_net::track::Info,
 	publish: impl Fn(u32, &[u8]) -> (u32, moq_net::track::Demand),
 	watch: unsafe extern "C" fn(u32, ffi::moq_status_callback, *mut c_void) -> i32,
 	free: extern "C" fn(u32) -> i32,
@@ -5057,7 +5076,7 @@ fn free_ends_on_demand(
 	};
 	assert_eq!(unsafe { moq_track_request_name(request, &mut got) }, 0);
 	assert_eq!(borrowed_string(got.data, got.len).as_deref(), Some(name.as_str()));
-	let track = id(unsafe { moq_track_request_accept(request, std::ptr::null()) });
+	let track = id(unsafe { moq_track_request_accept(request, &c_track_info(&info)) });
 	let payload = b"served again";
 	assert_eq!(
 		unsafe { moq_publish_track_frame(track, payload.as_ptr(), payload.len(), &micros(0)) },
@@ -5081,6 +5100,7 @@ fn free_ends_on_demand(
 fn track_free_ends_on_demand() {
 	free_ends_on_demand(
 		b"track-free",
+		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MICRO),
 		|broadcast, name| {
 			let track = id(unsafe {
 				moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null())
@@ -5100,6 +5120,7 @@ fn track_free_ends_on_demand() {
 fn media_free_ends_on_demand() {
 	free_ends_on_demand(
 		b"media-free",
+		hang::container::track_info(hang::catalog::PRIORITY.audio),
 		|broadcast, _| {
 			let media = id(publish_audio(
 				broadcast,
@@ -5138,6 +5159,7 @@ fn media_free_refuses_a_container() {
 fn audio_free_ends_on_demand() {
 	free_ends_on_demand(
 		b"audio-free",
+		hang::container::track_info(hang::catalog::PRIORITY.audio),
 		|broadcast, name| {
 			let input = moq_audio_encoder_input {
 				format: moq_audio_sample_format::MOQ_AUDIO_SAMPLE_FORMAT_F32 as u32,
@@ -5174,6 +5196,7 @@ fn audio_free_ends_on_demand() {
 fn video_free_ends_on_demand() {
 	free_ends_on_demand(
 		b"video-free",
+		hang::container::track_info(hang::catalog::PRIORITY.video),
 		|broadcast, _| {
 			let input = moq_video_encoder_input {
 				format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,

@@ -2222,7 +2222,10 @@ async fn release_ends_on_demand(
 		.unwrap();
 	assert_eq!(request.name().unwrap(), idle);
 	request.reject(404).unwrap();
-	assert!(again.await.unwrap().is_err());
+	let again = kio::clock::timeout(TIMEOUT, again)
+		.await
+		.unwrap_or_else(|_| panic!("timed out waiting for {idle}'s rejection"));
+	assert!(again.unwrap().is_err());
 
 	// A reader joins after the publisher saw nobody wanted the track, then the publisher releases.
 	let (demand, producer) = publish(name);
@@ -2230,14 +2233,17 @@ async fn release_ends_on_demand(
 		.await
 		.expect("timed out waiting for the track to start unwanted")
 		.unwrap();
-	let late = subscribe(broadcast, name).await;
+	let late = kio::clock::timeout(TIMEOUT, subscribe(broadcast, name))
+		.await
+		.unwrap_or_else(|_| panic!("timed out subscribing to {name}"));
 	drop(producer);
 	let request = kio::clock::timeout(TIMEOUT, dynamic.requested_track())
 		.await
 		.unwrap_or_else(|_| panic!("timed out waiting for {name} to be requested again"))
 		.unwrap();
 	assert_eq!(request.name().unwrap(), name);
-	let next = request.accept(Some(timed_info())).unwrap();
+	// The info the reader holds: a renewal accepted with another aborts the track.
+	let next = request.accept(Some(late.info())).unwrap();
 	next.append_group(us(0)).unwrap().finish().unwrap();
 	let group = kio::clock::timeout(TIMEOUT, late.recv_group())
 		.await

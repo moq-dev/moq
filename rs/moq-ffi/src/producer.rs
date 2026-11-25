@@ -712,6 +712,10 @@ impl MoqTrackRequest {
 	///
 	/// Once the broadcast closed, the track ends with `Unroutable` and this fails with `Closed`.
 	///
+	/// A track asked for again, because its producer was released while read, must be accepted
+	/// with the info it was published with, which its readers hold: another ends the track with
+	/// `Duplicate`, and the returned producer's writes fail with it.
+	///
 	/// For media use [`crate::media::MoqMediaTrackProducer::audio`] instead, which lets
 	/// the importer pick the timescale.
 	pub fn accept(&self, info: Option<MoqTrackInfo>) -> Result<Arc<MoqTrackProducer>, MoqError> {

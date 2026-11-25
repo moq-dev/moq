@@ -247,7 +247,7 @@ Obtain a dynamic track request’s `demand()` before accepting it to watch subsc
 
 A producer publishes everything you write, subscribed or not, so a late subscriber can fetch the recent past. Capturing only while `demand()->wanted()` is set is an opt-in that saves the encode but leaves nothing from before the first subscriber.
 
-To end a track nobody wants, release its producer once `wanted_changed()` returns false; a subscriber that joined since is served by the next request for the track while a request handler is live.
+To end a track nobody wants, release its producer once `wanted_changed()` returns false; a subscriber that joined since is served by the next request for the track while a request handler is live, and reads `Dropped` without one.
 
 ## Authorization
 
@@ -273,8 +273,10 @@ offline. How long to keep it up is yours to decide. A track still open at the
 close ends with `Unroutable` (`Internal` over moq-transport, which has no such
 code), and one released without a finish ends cleanly while nobody reads it; a
 reader still reading is served by the next request for the track while a request
-handler is live, and reads `Dropped`, seen as `Internal`, otherwise. Readers
-follow a publisher's runs by announcement, not by that error: see
+handler is live, which must accept it with the info the track was published
+with, and reads `Dropped`, seen as `Internal`, otherwise. A JSON stream or window
+that published a record is the exception: finish it, since releasing it
+unfinished ends its track with `Dropped`. Readers follow a publisher's runs by announcement, not by that error: see
 [identity and recovery](/concept/identity).
 
 `moq::shutdown()` stops the `moq-ffi` runtime workers, then the executor.

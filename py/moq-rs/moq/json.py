@@ -115,7 +115,8 @@ class StreamProducer:
     """Publish an ordered log of JSON records (lossless).
 
     Every :meth:`append` is preserved and delivered in order. A name the catalog already carries is
-    refused.
+    refused. Once it appended a record, :meth:`finish` it: releasing it unfinished is not supported,
+    and aborts its track with ``Dropped``.
     """
 
     def __init__(self, broadcast: BroadcastProducer, track: publish.TrackProducer) -> None:
@@ -201,6 +202,8 @@ class WindowProducer:
     Give the track a :class:`moq.TrackRefresh` ``ratio`` so a join past it gets the window restated in a fresh group.
 
     Not advertised in the broadcast's catalog, which has no window mode; a reader names the track.
+    Once it pushed a record, :meth:`finish` it: releasing it unfinished is not supported, and aborts
+    its track with ``Dropped``.
     """
 
     def __init__(

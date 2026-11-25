@@ -4012,6 +4012,10 @@ pub unsafe extern "C" fn moq_track_request_requests(
 /// broadcast closed, the track ends with `UNROUTABLE` and the call fails with
 /// `MOQ_ERROR_BROADCAST_NOT_FOUND`.
 ///
+/// A track asked for again, because its handle was freed while read, must be accepted with the
+/// `info` it was published with, which its readers hold: another ends the track, and writes
+/// through the returned handle fail.
+///
 /// # Safety
 /// - `info` must be NULL or a valid pointer to a [moq_track_info] struct.
 #[unsafe(no_mangle)]

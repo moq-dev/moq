@@ -72,7 +72,15 @@ static void wait_wanted(Queue *demand) {
 typedef struct {
     int32_t (*free)(uint32_t handle);
     int32_t (*demand)(uint32_t handle, moq_status_callback on_demand, void *user_data);
+    // The info the handle published its track with, which a renewal must be accepted with: its
+    // reader already holds it. NULL for the raw default.
+    const moq_track_info *info;
 } Handle;
+
+// hang's media track info: a microsecond timescale and a 30-second max age, at the kind's priority.
+#define MEDIA_INFO(prio) {prio, 30000000, false, 1000000, true, 0, false, 0, false, MOQ_COMPRESSION_NONE}
+static const moq_track_info AUDIO_INFO = MEDIA_INFO(80);
+static const moq_track_info VIDEO_INFO = MEDIA_INFO(60);
 
 // An idle handle ends: freeing it releases the handle and ends its watcher cleanly.
 static void check_idle(const Handle *ops, uint32_t handle) {
@@ -91,8 +99,9 @@ static Queue *requests;
 static int64_t raw_at = 10000000;
 
 // A handle whose reader joined is freed: the broadcast asks for the track again, and the reader
-// reads what the raw track accepted from that request writes, past any group it already read.
-static void check_wanted(const Handle *ops, uint32_t handle, const char *name, Queue *frames) {
+// reads what the raw track accepted from that request, with the same info, writes, past any group
+// it already read.
+static void check_wanted(const Handle *ops, uint32_t handle, const char *name, int32_t reader, Queue *frames) {
     Queue *demand = queue_new();
     int32_t watcher = ops->demand(handle, on_code, demand);
     CHECK(watcher > 0);
@@ -105,7 +114,7 @@ static void check_wanted(const Handle *ops, uint32_t handle, const char *name, Q
     moq_string requested = {NULL, 0};
     CHECK(moq_track_request_name((uint32_t)request, &requested) == 0);
     CHECK(requested.len == strlen(name) && memcmp(requested.data, name, requested.len) == 0);
-    int32_t track = moq_track_request_accept((uint32_t)request, NULL);
+    int32_t track = moq_track_request_accept((uint32_t)request, ops->info);
     CHECK(track > 0);
     moq_timestamp timestamp = {(uint64_t)raw_at, 1000000, true};
     raw_at += 1000000;
@@ -126,6 +135,12 @@ static void check_wanted(const Handle *ops, uint32_t handle, const char *name, Q
     // The watcher follows the track, not the freed handle, so it is stopped here.
     CHECK(moq_publish_demand_cancel((uint32_t)watcher) == 0);
     while (next(demand) > 0) {}
+    // Cancelled before the finish, which would otherwise end the reader first and leave nothing
+    // to cancel.
+    CHECK(moq_consume_track_cancel((uint32_t)reader) == 0);
+    for (int32_t frame; (frame = next(frames)) > 0;) {
+        CHECK(moq_consume_track_frame_free((uint32_t)frame) == 0);
+    }
     // The origin keeps a joined track wanted past the reader's leaving, so it is finished instead.
     CHECK(moq_publish_track_finish((uint32_t)track) == 0);
 }
@@ -136,7 +151,7 @@ static int32_t track_demand(uint32_t track, moq_status_callback on_demand, void 
     return moq_publish_track_demand(track, on_demand, user_data);
 }
 
-static const Handle TRACK = {moq_publish_track_free, track_demand};
+static const Handle TRACK = {moq_publish_track_free, track_demand, NULL};
 
 // ---- media tracks ----
 
@@ -146,7 +161,7 @@ static int32_t media_demand(uint32_t media, moq_status_callback on_demand, void 
     return moq_publish_media_demand(media, on_demand, user_data);
 }
 
-static const Handle MEDIA = {moq_publish_media_free, media_demand};
+static const Handle MEDIA = {moq_publish_media_free, media_demand, &AUDIO_INFO};
 
 // ---- encoded audio ----
 
@@ -160,7 +175,7 @@ static int32_t encode_audio(uint32_t broadcast, const char *name) {
     return moq_encode_audio(broadcast, name, strlen(name), &input, &output, 0);
 }
 
-static const Handle AUDIO = {moq_encode_audio_free, audio_demand};
+static const Handle AUDIO = {moq_encode_audio_free, audio_demand, &AUDIO_INFO};
 
 // ---- encoded video ----
 
@@ -186,7 +201,7 @@ static int32_t encode_video(uint32_t broadcast) {
     return moq_encode_video(broadcast, &input, &output, NULL);
 }
 
-static const Handle VIDEO = {moq_encode_video_free, video_demand};
+static const Handle VIDEO = {moq_encode_video_free, video_demand, &VIDEO_INFO};
 
 // ---- the fixture ----
 
@@ -247,8 +262,7 @@ int main(void) {
     track = moq_publish_track(broadcast, "wanted", 6, NULL);
     CHECK(track > 0);
     int32_t reader = join(consume, "wanted", track_frames);
-    check_wanted(&TRACK, (uint32_t)track, "wanted", track_frames);
-    CHECK(moq_consume_track_cancel((uint32_t)reader) == 0);
+    check_wanted(&TRACK, (uint32_t)track, "wanted", reader, track_frames);
 
     // Media tracks, which a track request creates once the reader has asked for the name.
     moq_audio_init init = {MOQ_AUDIO_FORMAT_OPUS, OPUS_HEAD, sizeof(OPUS_HEAD), NULL, 0, {0}};
@@ -262,8 +276,7 @@ int main(void) {
     CHECK(request > 0);
     media = moq_track_request_audio((uint32_t)request, &init);
     CHECK(media > 0);
-    check_wanted(&MEDIA, (uint32_t)media, "requested", media_frames);
-    CHECK(moq_consume_track_cancel((uint32_t)reader) == 0);
+    check_wanted(&MEDIA, (uint32_t)media, "requested", reader, media_frames);
 
     // Encoded audio.
     int32_t audio = encode_audio(broadcast, "idle-audio");
@@ -274,8 +287,7 @@ int main(void) {
     audio = encode_audio(broadcast, "wanted-audio");
     CHECK(audio > 0);
     reader = join(consume, "wanted-audio", audio_frames);
-    check_wanted(&AUDIO, (uint32_t)audio, "wanted-audio", audio_frames);
-    CHECK(moq_consume_track_cancel((uint32_t)reader) == 0);
+    check_wanted(&AUDIO, (uint32_t)audio, "wanted-audio", reader, audio_frames);
 
     // Encoded video. A rendition is named by the catalog once the encoder has produced a keyframe,
     // so the idle one is checked first and the other is primed before its reader asks.
@@ -290,8 +302,7 @@ int main(void) {
     char name[64];
     video_name(consume, name, sizeof(name));
     reader = join(consume, name, video_frames);
-    check_wanted(&VIDEO, (uint32_t)video, name, video_frames);
-    CHECK(moq_consume_track_cancel((uint32_t)reader) == 0);
+    check_wanted(&VIDEO, (uint32_t)video, name, reader, video_frames);
 
     CHECK(moq_publish_requests_cancel(handler) == 0);
     CHECK(moq_consume_close(consume) == 0);

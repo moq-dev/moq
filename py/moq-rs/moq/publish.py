@@ -217,7 +217,9 @@ class TrackRequest:
     def accept(self, info: TrackInfo | None = None) -> TrackProducer:
         """Accept the request as a raw track.
 
-        ``info`` fixes the track's timescale, priority, and cache; omit for defaults.
+        ``info`` fixes the track's timescale, priority, and cache; omit for defaults. A track asked
+        for again, because its producer was released while read, must be accepted with the info it
+        was published with: another ends the track, and the producer's writes raise.
         """
         return TrackProducer(self._inner.accept(_track_info(info)))
 

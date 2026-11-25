@@ -121,6 +121,8 @@ func (r *TrackRequest) Requests() (*TrackRequests, error) {
 }
 
 // Accept accepts the request as a raw track. For media, pass the request as media.Requested to an importer constructor.
+// A track asked for again, because its producer was closed while read, must be accepted with
+// the info it was published with: another ends the track, and the producer's writes fail.
 func (r *TrackRequest) Accept(info *TrackInfo) (*TrackProducer, error) {
 	ffiInfo, err := trackInfoFFI(info)
 	if err != nil {
