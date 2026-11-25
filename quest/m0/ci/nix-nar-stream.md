@@ -22,5 +22,5 @@ signed `fetch`, so it carries the resume over as a `Range` request guarded by
 ## Waiting
 
 - Maintainer: run `just infra nix deploy` (the Worker deploys by hand with
-  Cloudflare credentials); check with `wrangler tail` or a Nightly run showing
-  no cache-disabled line.
+  Cloudflare credentials); check a Nightly run for no cache-disabled line.
+  `wrangler tail` shows only Worker logs and cannot confirm this.
