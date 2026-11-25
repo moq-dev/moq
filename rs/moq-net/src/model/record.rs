@@ -245,9 +245,9 @@ enum Fold {
 	/// again.
 	Retire { below: u64 },
 	/// As the record grows: only what nothing can change any more, which folds at no cost to
-	/// what the reader offers or reports later. Groups handed out and told, and skips and
-	/// settled reports; never a drop a skip may still replace, a stale skip a wider budget
-	/// owes again, or a run not reported yet.
+	/// what the reader offers or reports later. Skips and settled reports, as a group handed
+	/// out and told; never a drop a skip may still replace, a stale skip a wider budget owes
+	/// again, or a key not reported yet, even one handed out.
 	Final,
 }
 
@@ -530,7 +530,11 @@ impl Record {
 							self.skipped.run_end(end),
 							beside.given_up_end(end),
 						],
-						Fold::Retire { .. } | Fold::Final => [self.delivered.run_end(end), None, None, None],
+						Fold::Retire { .. } => [self.delivered.run_end(end), None, None, None],
+						// Only what the record reported is final: a key handed out, or passed in
+						// key order, and never reported may still be reported dropped, as a group
+						// cut after it went out or one landing late below an ordered read.
+						Fold::Final => [None; 4],
 					};
 					let Some(run_end) = local.into_iter().flatten().max() else {
 						let Fold::Retire { below } = fold else {

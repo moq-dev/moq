@@ -20,6 +20,7 @@ questions to a harness. For builds and CI selection, see the
 | [native-play](native-play/README.md) | `just test native-play` | the shipped headless player follows overlapping publishers and fallback through decoded PCM on a private Linux null audio device |
 | [audio-quality](audio-quality/README.md) | `just test audio-quality` | browser and native audio playout stay within budget over an impaired path |
 | [drain](drain/README.md) | `just test drain` | a JS viewer migrates off a draining relay without a dropped group |
+| [steady](steady/README.md) | `just test steady` | the TS passthrough chain's import, relay, and export stop growing in heap and resident memory after warm-up on one steady broadcast |
 | [stream-credit](stream-credit/README.md) | `just test stream-credit` | a browser tab reads 300 live tracks past its ~100-stream WebTransport cap, the highest priority first, and nothing hangs |
 | qmux | `just test qmux` | `@moq/qmux`, as client and as server, interoperates with the Rust qmux 0.6.3 release on every QMux draft |
 | vr | `just test vr` | a VR180 left-right MP4 with ambisonic Opus keeps its catalog projection, stereo, and layout through import and a relay, and `demo/vr` lays out each eye and turns the sound field with the head |

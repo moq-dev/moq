@@ -32694,8 +32694,9 @@ mod test {
 
 	/// A live reader of a track whose groups start at sparse keys keeps a bounded record however
 	/// long the track runs, under a pool with room to spare: the keys between groups are
-	/// skipped for good, by the publisher's append or the upstream's group end, so what the
-	/// reader settled folds as it goes rather than waiting for pool pressure.
+	/// skipped for good, by the publisher's append or the upstream's group end, and each group
+	/// served is told, as a lite-07 publisher does, so what the reader settled folds as it goes
+	/// rather than waiting for pool pressure.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_sparse_live_track_keeps_a_bounded_record() {
@@ -32722,6 +32723,7 @@ mod test {
 					producer.skip_groups(key + 1..key + SPACING);
 				}
 				assert_eq!(drain_groups(&mut subscriber), [key], "received={received}");
+				subscriber.record_mut().tell(key..key + 1, Report::Settled);
 				drained_drops(&mut subscriber);
 				most = most.max(pool.recorded() / super::super::record::RUN_OVERHEAD);
 			}

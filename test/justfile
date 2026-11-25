@@ -47,6 +47,7 @@ default:
 harness:
     ./lib/harness.test.sh
     python3 lib/pulse.test.py
+    python3 lib/growth.test.py
     ./interop/relay-log.test.sh
     python3 interop/staging.test.py
     python3 ../rs/moq-gst/smoke.test.py
@@ -266,6 +267,14 @@ ts-controls:
 # Relay drain migration, end to end.
 drain *args:
     ./drain/run.sh {{ args }}
+
+# One steady passthrough broadcast (ffmpeg | import ts --passthrough -> relay -> export ts
+# --passthrough) at 60 groups/s, failing when any process's heap or resident memory keeps
+# growing after warm-up. See steady/README.md.
+
+# Memory growth on one steady broadcast.
+steady *args:
+    ./steady/run.sh {{ args }}
 
 # A browser tab reads 300 live tracks of mixed priority through a Rust relay over WebTransport,
 # past its ~100-stream cap: the top priority gets every group and nothing hangs. Runs lite-07 and

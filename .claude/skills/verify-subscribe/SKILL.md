@@ -41,7 +41,7 @@ Sync commit: `d791d549a6690b31dd6e6f5173d776fd8ed45573`. Run `git log d791d549a6
 | `rs/moq-net/src/lite/publisher.rs` `poll_forward_drop`, `forward_range`, `drop_range`, `report`, `hole`; `rs/moq-net/src/model/record.rs` `Record::report`, `tell`, `untold`, `Report::blocks` | `CursorGiveUp`, `dropped`, `Span` |
 | `rs/moq-net/src/lite/publisher.rs` `TrackRun::poll_step` (outcomes, `GroupOutcomes::whole`) | `PubOutcomes` |
 | `rs/moq-net/src/lite/publisher.rs` `GroupServe::poll_serve` (`Serve`, `Closed`), `buffer_group_end`, `settle_failed`, `poll_given_up`; `rs/moq-net/src/transport/boxed.rs` `ListedState::preempted` | `StreamFin`, `StreamFail`, `StreamAck` |
-| `rs/moq-net/src/model/record.rs` `Record::fold` | `PubFold`, `folded` |
+| `rs/moq-net/src/model/record.rs` `Record::fold` (`Fold::Debt`, and `Fold::Final`, which folds a subset) | `PubFold`, `folded` |
 | `rs/moq-net/src/lite/subscriber.rs` `TrackEntry::open`, `reopen`, `place`; `GroupRecv::poll_serve` (a GROUP_END's span) | `SubHeader`, `SubFin`, `SubReset` |
 | `rs/moq-net/src/lite/subscriber.rs` `ServeLoop::apply_response` (`Drop`, `Skip`) | `OnDrop`, `OnSkip`, `SubRecv` |
 | `rs/moq-net/src/tail.rs` `Reading::open`, `Reading::account`, `Tail::account` | `acct` |
