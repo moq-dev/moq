@@ -12,14 +12,17 @@ once.
 
 ## Plan
 
-Recommended: start each search after the port this run last reserved, so a run
-never re-checks its own ports, and let a run that needs many ports ask for them
-in one call (`harness_port` taking a count, or a sibling that fills an array), so
-the lock and `reserve.sh` run once per port taken instead of once per port
-probed. Size the window by what concurrent runs need rather than the fixed 500,
-or wrap the search once past its end. Keep the reservation semantics
-`harness.sh` documents: held for the run, claimed atomically under the advisory
-lock, and a stale owner detected by its process identity.
+Recommended: start each search after the port this run last reserved, wrapping
+to `HARNESS_PORT_BASE` once past the window's end, so a run never re-checks its
+own ports yet still finds a free one below its last (as after an explicit
+`wanted` near the top). Let a run that needs many ports ask for them in one call
+(`harness_port` taking a count, or a sibling that fills an array), so the lock
+and `reserve.sh` run once per port probed rather than once per port held. Widen
+the window too, since wrapping alone leaves the fixed 501 ports as the limit on
+concurrent runs: a few thousand ports fit many 162-port replays. Keep the
+reservation semantics `harness.sh` documents: held for the run, claimed
+atomically under the advisory lock, and a stale owner detected by its process
+identity.
 
 Callers include `test/mesh-replay/run.sh`, `test/drain/run.sh`, and
 `test/interop/interop.sh`; `grep -rn harness_port test bench` lists the rest. An

@@ -16,9 +16,11 @@ Scope: one per-event column in `report.md` and the same value in `report.json`
 `test/mesh-replay/README.md`.
 
 Recommended: read the `some` line's `total` counter (microseconds some task
-waited for CPU) when the event starts and when it settles, and report the
-difference as a percentage of the elapsed time. That covers exactly the event's
-window, where `avg10` would blur across events. Decide at setup whether
+waited for CPU) when the event starts and when it ends, settled or at its
+`settle` deadline, and report the difference as a percentage of the elapsed
+time. That covers exactly the event's window, where `avg10` would blur across
+events, and an event that never settles still shows its pressure, since a
+starved host is a likely reason it didn't. Decide at setup whether
 `/proc/pressure/cpu` is readable; where it isn't (macOS, or a kernel without
 PSI), the column reads n/a for the whole run.
 
