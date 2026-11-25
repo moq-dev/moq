@@ -750,12 +750,6 @@ function gateWrites(target: WritableStream<Uint8Array>, hold: boolean) {
 	return { writable, parked, release };
 }
 
-// Opens a served subscription and returns the machinery to write groups and observe
-// which of them the publisher put on the wire (each group gets its own uni stream).
-//
-// `gated` holds the publisher's subscribe-stream writes until `release()`, parking the
-// serving loop mid-iteration so a test can drive the concurrent SUBSCRIBE_UPDATE loop
-// against a group the loop is already holding.
 /** How {@link reliableStreams} acknowledges and finishes, and the resets it logged. */
 interface Reliable {
 	/** Whether the peer acknowledges what a stream wrote. */
@@ -815,6 +809,12 @@ async function headerSize(version: Version, key: bigint): Promise<number> {
 	return header.byteLength;
 }
 
+// Opens a served subscription and returns the machinery to write groups and observe
+// which of them the publisher put on the wire (each group gets its own uni stream).
+//
+// `gated` holds the publisher's subscribe-stream writes until `release()`, parking the
+// serving loop mid-iteration so a test can drive the concurrent SUBSCRIBE_UPDATE loop
+// against a group the loop is already holding.
 async function servedSubscription(
 	options: {
 		ranges?: Subscribe["ranges"];

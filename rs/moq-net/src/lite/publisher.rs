@@ -7119,11 +7119,6 @@ struct GroupServe {
 	/// The times the stream carried, which each FRAME's delta and GROUP_END count from.
 	clock: lite::Clock,
 	state: GroupState,
-	/// Lite-07: the transport took the whole GROUP header, which every later reset of the
-	/// stream still delivers.
-	held: bool,
-	/// The stream failed in a way that still accounts for its group, so no drop names it.
-	accounted: bool,
 	// A long cached group drains a slice per poll, so its siblings still run.
 	budget: kio::coop::Budget,
 	/// Bills the group's payload as each stream delivers it.
@@ -7157,7 +7152,11 @@ enum GroupState {
 	Closed {
 		writer: Writer<crate::transport::boxed::SendStream, Version>,
 	},
+	/// Finished, or failed in a way the control stream names in a drop.
 	Done,
+	/// Lite-07: failed, but the stream still accounts for its group (see `accounts`), so no
+	/// drop names it.
+	Accounted,
 }
 
 /// How a serving Group Stream ends.
@@ -7207,8 +7206,6 @@ impl GroupServe {
 			end,
 			stops,
 			state: GroupState::Open,
-			held: false,
-			accounted: false,
 			budget: kio::coop::Budget::new(32),
 			meter,
 		}
@@ -7374,9 +7371,8 @@ impl GroupServe {
 							ready!(self.budget.poll_yield(waiter));
 							match writer.poll_flush(waiter) {
 								// The first flush is the header alone: nothing else is buffered before it.
-								Poll::Ready(Ok(())) if !self.held && self.ctx.version.has_reliable_reset() => {
-									writer.hold();
-									self.held = true;
+								Poll::Ready(Ok(())) if !writer.held() && self.ctx.version.has_reliable_reset() => {
+									writer.hold()
 								}
 								Poll::Ready(Ok(())) => {}
 								Poll::Ready(Err(err)) => break 'serve Err(err),
@@ -7591,13 +7587,13 @@ impl GroupServe {
 								// The writer drops here: the Drop reset stands in for the
 								// abort, exactly like the old `finish()?`.
 								Err(err) => {
-									self.accounted = accounts(self.ctx.version, self.held, &mut writer);
+									self.settle_reset(&mut writer);
 									return Poll::Ready(Err(err));
 								}
 							}
 						}
 						Err(err) => {
-							self.accounted = accounts(self.ctx.version, self.held, &mut writer);
+							self.settle_reset(&mut writer);
 							writer.abort(&err);
 							return Poll::Ready(Err(err));
 						}
@@ -7616,24 +7612,26 @@ impl GroupServe {
 							else {
 								unreachable!()
 							};
-							self.accounted = accounts(self.ctx.version, self.held, &mut writer);
+							self.settle_reset(&mut writer);
 							writer.abort(&Error::Old);
 							return Poll::Ready(Err(Error::Old));
 						}
 						Poll::Pending => return Poll::Pending,
 					};
-					if res.is_err() {
-						self.accounted = accounts(self.ctx.version, self.held, writer);
-					}
 					// The peer acknowledged everything or ended the stream, so the Drop fallback must not
 					// reset it and discard bytes still retransmitting.
+					let GroupState::Closed { mut writer } = std::mem::replace(&mut self.state, GroupState::Done) else {
+						unreachable!()
+					};
+					if res.is_err() {
+						self.settle_reset(&mut writer);
+					}
 					writer.release();
-					self.state = GroupState::Done;
 					return Poll::Ready(res.map(|()| {
 						tracing::debug!(key = self.key, "finished group");
 					}));
 				}
-				GroupState::Done => return Poll::Ready(Ok(())),
+				GroupState::Done | GroupState::Accounted => return Poll::Ready(Ok(())),
 			}
 		}
 	}
@@ -7650,12 +7648,12 @@ impl kio::Task for GroupServe {
 	}
 }
 
-/// Lite-07: whether a Group Stream on `writer`, failing now, still accounts for its group,
-/// `held` once the transport took its whole header. A reset of this side's delivers the held
-/// header, which does. A STOP_SENDING owes a drop only when it evicted the stream before the
-/// peer acknowledged the header, since the subscriber may never have read which group it
-/// carried; any other the subscriber sent knowing the group, or wanting none of it.
-fn accounts(version: Version, held: bool, writer: &mut Writer<crate::transport::boxed::SendStream, Version>) -> bool {
+/// Lite-07: whether a Group Stream on `writer`, failing now, still accounts for its group.
+/// A reset of this side's delivers the header once the transport took it ([held](Writer::held)),
+/// which does. A STOP_SENDING owes a drop only when it evicted the stream before the peer
+/// acknowledged the header, since the subscriber may never have read which group it carried;
+/// any other the subscriber sent knowing the group, or wanting none of it.
+fn accounts(version: Version, writer: &mut Writer<crate::transport::boxed::SendStream, Version>) -> bool {
 	if !version.has_reliable_reset() {
 		return false;
 	}
@@ -7663,15 +7661,24 @@ fn accounts(version: Version, held: bool, writer: &mut Writer<crate::transport::
 		Poll::Ready(Err(err)) if !writer.preempted() => {
 			StreamError::from(&err) != StreamError::Evicted || writer.held_acked()
 		}
-		_ => held,
+		_ => writer.held(),
 	}
 }
 
 impl GroupServe {
+	/// Leave the machine failed, `Accounted` when the stream on `writer`, failing now, still
+	/// accounts for its group.
+	fn settle_reset(&mut self, writer: &mut Writer<crate::transport::boxed::SendStream, Version>) {
+		self.state = match accounts(self.ctx.version, writer) {
+			true => GroupState::Accounted,
+			false => GroupState::Done,
+		};
+	}
+
 	/// Account for a group that failed with `err`: one that never got a stream, or whose
 	/// header a reset may lose, is named on the control stream with that error.
 	fn settle_failed(&mut self, err: &Error) {
-		if !self.ctx.version.has_track_stream() || self.accounted {
+		if !self.ctx.version.has_track_stream() || matches!(self.state, GroupState::Accounted) {
 			return;
 		}
 		let span = span(self.key, self.group.end());
@@ -11433,8 +11440,6 @@ mod serve_group_test {
 		assert!(bytes.ends_with(&[end as u8, 0]), "{bytes:?}");
 	}
 
-	/// Group `key`'s Group Stream on `log`'s session, as its Frame Start and the bytes after
-	/// its GROUP.
 	/// Each reset group stream's key, whether the reset still delivers exactly its GROUP
 	/// header, and its error, for the streams that wrote one.
 	fn group_resets(log: &Log, version: Version) -> Vec<(u64, bool, StreamError)> {
@@ -11464,6 +11469,8 @@ mod serve_group_test {
 			.collect()
 	}
 
+	/// Group `key`'s Group Stream on `log`'s session, as its Frame Start and the bytes after
+	/// its GROUP.
 	fn group_stream(log: &Log, version: Version, key: u64) -> Option<(u64, Vec<u8>)> {
 		let mut streams = std::collections::BTreeMap::<_, Vec<u8>>::new();
 		for (id, sent) in log.trail() {

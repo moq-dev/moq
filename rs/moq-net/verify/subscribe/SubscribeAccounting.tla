@@ -59,12 +59,12 @@ Inner(g, e) == {x \in Groups : g < x /\ x < e}
 
 \* A Group Stream: the publisher's side (`GroupState`), and the subscriber's.
 \*   pub: "open" (serving), "fin" (FIN sent, awaiting its acknowledgement),
-\*        "acked", or "reset" with `err` ("old" or "evicted")
+\*        "acked", or "reset" with `err` ("old", "evicted", or a stop's "cancel")
 \*   held: the transport took the GROUP header, so a reset still delivers it
 \*   fin: the FIN went out before any reset, so every byte may arrive first
 \*   ended: the FIN followed a GROUP_END, accounting for the starts in `inner`
 \*   sub: "none" (no header yet, or lost with a reset, or never sent), "header"
-\*        (filling the copy), "fin", or "reset"
+\*        (filling the copy), "fin", or "reset" (read to a reset, or stopped)
 NewStream(g) ==
     [g |-> g, pub |-> "open", held |-> FALSE, fin |-> FALSE, ended |-> FALSE, inner |-> {},
      err |-> "", sub |-> "none"]
@@ -292,6 +292,22 @@ SubResetAt(i) ==
     /\ cached' = [cached EXCEPT ![streams[i].g] = "aborted"]
     /\ UNCHANGED <<pubVars, resp, acct, rec>>
 
+\* The subscriber stops a stream whose header it read (`UniServe::abort` on a failed
+\* `GroupRecv`), with EVICTED or any other code (Cancel, Duplicate), and its copy drops the group.
+\* The publisher answers with a reset (`accounts`): the stop owes a drop only when it is
+\* EVICTED and arrived before the header's acknowledgement, which `acked` chooses freely, so
+\* the subscriber may have stopped the stream unsure which group it was. Any other stop the
+\* subscriber sent knowing the group. Either way it cuts a GROUP_END it had not read.
+SubStopAt(i, err, acked) ==
+    /\ streams[i].sub = "header"
+    /\ streams[i].pub \in {"open", "fin"}
+    /\ streams' = [streams EXCEPT ![i].pub = "reset", ![i].err = err, ![i].sub = "reset"]
+    /\ cached' = [cached EXCEPT ![streams[i].g] = "aborted"]
+    /\ outq' = IF err = "evicted" /\ ~(streams[i].held /\ acked)
+              THEN Append(outq, <<streams[i].g, err>>)
+              ELSE outq
+    /\ UNCHANGED <<cur, late, ends, served, dropped, folded, names, resp, acct, rec>>
+
 \* The copy's cache evicts a whole group.
 Evict(g) ==
     /\ cached[g] = "whole"
@@ -360,6 +376,7 @@ StreamAck == \E i \in 1..Len(streams) : StreamAckAt(i)
 SubHeader == \E i \in 1..Len(streams) : SubHeaderAt(i)
 SubFin == \E i \in 1..Len(streams) : SubFinAt(i)
 SubReset == \E i \in 1..Len(streams) : SubResetAt(i)
+SubStop == \E i \in 1..Len(streams), err \in {"evicted", "cancel"}, acked \in BOOLEAN : SubStopAt(i, err, acked)
 
 Next ==
     \/ \E g \in Groups, e \in 1..MaxEnd : g < e /\ Finish(g, e)
@@ -375,6 +392,7 @@ Next ==
     \/ SubHeader
     \/ SubFin
     \/ SubReset
+    \/ SubStop
     \/ \E g \in Groups : Evict(g)
     \/ SubRecv
     \/ Done

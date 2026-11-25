@@ -349,6 +349,11 @@ impl<V> Writer<crate::transport::boxed::SendStream, V> {
 		self.stream.as_mut().unwrap().hold();
 	}
 
+	/// Whether [`Self::hold`] marked the bytes every later reset still delivers.
+	pub(crate) fn held(&self) -> bool {
+		self.stream.as_ref().is_some_and(|stream| stream.held())
+	}
+
 	/// Whether the peer acknowledged every byte [held](Self::hold), false when nothing is.
 	pub(crate) fn held_acked(&self) -> bool {
 		self.stream.as_ref().is_some_and(|stream| stream.held_acked())

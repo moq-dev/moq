@@ -788,9 +788,11 @@ export class Writer implements OpenStream {
 	/**
 	 * From now on, every reset of the stream, a preemption included, still delivers the bytes
 	 * written so far. Call it once every write so far resolved. Returns whether the transport
-	 * can: a browser's WebTransport cannot, so its resets may still lose them.
+	 * can: a browser's WebTransport cannot, so its resets may still lose them, and a stream
+	 * already reset or stopped, perhaps preempted before this, has lost them already.
 	 */
 	hold(): boolean {
+		if (this.#aborted) return false;
 		this.#held = this.#written;
 		return this.#resetsAt;
 	}

@@ -906,6 +906,7 @@ The subscriber MAY cache the error and potentially retry later.
 
 A publisher that resets a Group Stream after sending its GROUP message MUST still deliver that message: it sends RESET_STREAM_AT [reliable-reset] with a Reliable Size at the end of the GROUP message, or, toward a peer that did not negotiate it, holds the RESET_STREAM until the peer acknowledged the GROUP message.
 The GROUP message then accounts for the Group and the reset ends its readers with its error, so the publisher names the Group in no [SUBSCRIBE_DROP](#subscribe-drop).
+An acknowledgment only means the peer's transport holds the GROUP message, which a RESET_STREAM lets it discard unread, so without RESET_STREAM_AT a subscriber SHOULD read a Group Stream's GROUP message as soon as the stream arrives; one that loses it waits out its grace period for the Group.
 A publisher whose transport can do neither, such as a browser's WebTransport, names each Group whose stream it resets in a SUBSCRIBE_DROP with the reset's error instead, as it does a Group whose stream it resets before sending the GROUP message.
 
 A publisher out of the peer's stream credit MAY reset the lowest-priority Group Stream with TOO_FAR_BEHIND to make room for a higher-priority one.

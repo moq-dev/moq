@@ -417,6 +417,11 @@ impl SendStream {
 		self.with(false, |held| held.floor = Some(held.stream.offset()));
 	}
 
+	/// Whether [`Self::hold`] marked the bytes every later reset still delivers.
+	pub(crate) fn held(&self) -> bool {
+		self.get().held().floor.is_some()
+	}
+
 	/// Whether the peer acknowledged every byte [held](Self::hold), false when nothing is.
 	pub(crate) fn held_acked(&self) -> bool {
 		let read = self.get();
