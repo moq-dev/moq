@@ -68,12 +68,15 @@ such as `relay_auth_refresh`, is not attributable this way.
 - `track_stamp_groups/append`'s per-group cost (a start-index insert and a
   second track lock per group), then the resume reader, which dominates a
   short Annex B export.
-- `catalog::tracks::Rendition::stage` clones and serializes the whole catalog
-  on every estimate; validating only the edited entry weakens custom configs,
-  so it needs a decision.
 - The TS export's `Schedule::index` and `Schedule::admit` scan and sort every
   queued unit per PCR slot, so cost grows with track count.
-- e2ee expands the AES-GCM key on every frame in `protect`.
+- Verified already fixed (2026-11-23 at `890ea4e531`): `moq-e2ee/src/protect.rs`
+  now takes `&aead::Key` (no per-frame key expansion), and `Rendition::stage` is
+  gone. Still open at `890ea4e531`: `Lines::make_room`, `Catalog::from_slice`,
+  `moq-archive` `Object::encode`, `moq-loc::encode`, `h264/h265/av1` keyframe
+  copies, `js/hang/src/cmaf/decode.ts`, `js/qmux` `TransformStream` and
+  `Array.shift()`, and `js/signals` `useValue` mount re-render. Pre-0.22 release
+  re-measurement is tracked in [perf-recheck](/quest/m3/release/perf-recheck.md).
 - Unbenchmarked paths, by impact: HLS request fan-out; LOC and CMAF in
   moq-mux's benches, which only use `Container::Legacy`; browser media
   copies; moq-quic loss recovery and real congestion controllers; HTTP

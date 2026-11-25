@@ -375,6 +375,8 @@ impl WaiterList {
 struct Held {
 	depth: usize,
 	wakers: Vec<Weak<Waker>>,
+	// Wakes made by [`wake`], which owns its waker rather than a list's registration.
+	owned: Vec<Waker>,
 }
 
 thread_local! {
@@ -382,8 +384,24 @@ thread_local! {
 		std::cell::RefCell::new(Held {
 			depth: 0,
 			wakers: Vec::new(),
+			owned: Vec::new(),
 		})
 	};
+}
+
+/// Wake `waker` now, or under a [`Hold`] once the outermost one drops, as a
+/// [`WaiterList`] does: for a single waker kept outside a list.
+pub fn wake(waker: Waker) {
+	let mut waker = Some(waker);
+	let _ = HELD.try_with(|held| {
+		let mut held = held.borrow_mut();
+		if held.depth > 0 {
+			held.owned.extend(waker.take());
+		}
+	});
+	if let Some(waker) = waker {
+		waker.wake();
+	}
 }
 
 /// Holds back every wake this thread makes through a [`WaiterList`] until it drops.
@@ -408,19 +426,22 @@ pub fn hold() -> Hold {
 
 impl Drop for Hold {
 	fn drop(&mut self) {
-		let wakers = HELD
+		let (wakers, owned) = HELD
 			.try_with(|held| {
 				let mut held = held.borrow_mut();
 				held.depth = held.depth.saturating_sub(1);
 				match held.depth {
-					0 => std::mem::take(&mut held.wakers),
-					_ => Vec::new(),
+					0 => (std::mem::take(&mut held.wakers), std::mem::take(&mut held.owned)),
+					_ => Default::default(),
 				}
 			})
 			.unwrap_or_default();
 		// Outside the borrow: a waker may poll inline and open a hold of its own.
 		for waker in wakers.into_iter().filter_map(|w| w.upgrade()) {
 			waker.wake_by_ref();
+		}
+		for waker in owned {
+			waker.wake();
 		}
 	}
 }
@@ -613,6 +634,15 @@ mod tests {
 		waiter.register(&mut list);
 		list.wake();
 		assert_eq!(woken(), 2, "a wake with no hold open waited");
+
+		// A lone waker's wake waits the same way.
+		let outer = hold();
+		wake(Waker::from(count.clone()));
+		assert_eq!(woken(), 2, "a held lone wake went out");
+		drop(outer);
+		assert_eq!(woken(), 3, "the hold lost the lone wake");
+		wake(Waker::from(count.clone()));
+		assert_eq!(woken(), 4, "a lone wake with no hold open waited");
 	}
 
 	#[test]

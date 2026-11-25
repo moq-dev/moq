@@ -15,12 +15,14 @@ hand-written C API ships as `libmoq`, which has a trusted publisher, and
 2026-11-21 (/quest-plan of the pre-cut full-codebase audit): `moq-vaapi`
 (vendored in [moq-dev/moq#8235](https://github.com/moq-dev/moq/pull/8235),
 publishable and depended on by `moq-video`) joins the list; seven crates
-remain.
+remain. Corrected 2026-11-25 ([moq-dev/moq#9578](https://github.com/moq-dev/moq/pull/9578)):
+`moq-opus`, the vendored Opus that `moq-audio` depends on, joins the list;
+eight crates remain.
 
 ## Waiting
 
 - Maintainer: after [the cut](/quest/m3/release/cut.md) publishes kio-macros,
-  moq-congestion, moq-crypto, moq-quic, moq-rtsp, moq-vaapi, and moq-webrtc by
+  moq-congestion, moq-crypto, moq-opus, moq-quic, moq-rtsp, moq-vaapi, and moq-webrtc by
   token, add their trusted publishers the same way. Settings pages need a
   crates.io login, so check with a `release-rs.yml` run that publishes through
   OIDC.

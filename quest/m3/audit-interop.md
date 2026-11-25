@@ -55,20 +55,29 @@ Previous runs: [moq-dev/moq#6538](https://github.com/moq-dev/moq/pull/6538),
 - Most red cells were fixed on `main` and wait for the cut; confirm each
   turned green once the [runner client bump](/quest/m3/release/runner-client-bump.md)
   lands.
+- Live `https://git.moq.dev/relays/results.json` baseline (2026-11-23T20:05Z,
+  published 0.17/0.4 clients): green on `moq-dev-rs` (`cdn.moq.dev`),
+  `stitcher-moq`, `aiomoqt-relay`, `libquicr`, `moq-rs-draft-18`, and `moxygen`.
+  Red on draft-22 relays to recheck after 0.22 publishes: `oracle-relay` (newly
+  registered 2026-11-17, `/interop` path fixed 2026-11-23, all 7 cells failing
+  with `RequestError`/`subscribe error` on `catalog.json`), `moq-ng` (`rust -> rust`
+  fails while all 5 JS pairs pass), `moqtail` (`js-web -> *` fails while
+  `rust -> *` passes), `imquic` WebTransport (`rust -> *` fails while QUIC and
+  `js-web -> *` pass), `red5-moq-relay` WebTransport (all JS cells fail while
+  `rust -> rust` passes), and `quiche-moq` WebTransport (`js-web -> rust` invalid
+  GOAWAY). `test/smoke/relays.sh` pulls `implementations.json` dynamically so
+  `oracle-relay` and `red5-moq-relay` are already included.
 - Ours, still red from `main`: moq-go's webtransport-go speaks WebTransport
   draft 15 (SETTINGS_WT_ENABLED and `:protocol webtransport-h3`), which
-  `web-transport-proto` doesn't; moq-dev-js `data-subgroup-basic` against
-  libquicr never sees the track end; moq-dev-js `announce-subscribe` times out
-  against imquic; moq-dev-js `setup-only` fails across many relays.
-- Reported upstream, search before filing again:
-  [cloudflare/moq-rs#281](https://github.com/cloudflare/moq-rs/issues/281),
-  [cloudflare/moq-rs#282](https://github.com/cloudflare/moq-rs/issues/282),
-  [moqtail/moqtail#450](https://github.com/moqtail/moqtail/issues/450),
-  [openmoq/moqx#852](https://github.com/openmoq/moqx/issues/852),
-  [gmarzot/aiomoqt#123](https://github.com/gmarzot/aiomoqt/issues/123),
-  [yatagai-mm/Moqtopus#2](https://github.com/yatagai-mm/Moqtopus/issues/2),
-  [facebookexperimental/moxygen#252](https://github.com/facebookexperimental/moxygen/issues/252),
-  and [facebookexperimental/moxygen#225](https://github.com/facebookexperimental/moxygen/issues/225).
+  `web-transport-proto` doesn't (check `web-transport-proto` 0.7.0); moq-dev-js
+  `data-subgroup-basic` against libquicr never sees the track end; moq-dev-js
+  `announce-subscribe` times out against imquic; moq-dev-js `setup-only` fails
+  across many relays.
+- Reported upstream, still open as of 2026-11-23 (6 earlier issues closed:
+  `moqtail#450`, `moqx#852`, `aiomoqt#123`, `Moqtopus#2`, `moxygen#252`,
+  `moxygen#225`):
+  [cloudflare/moq-rs#281](https://github.com/cloudflare/moq-rs/issues/281) and
+  [cloudflare/moq-rs#282](https://github.com/cloudflare/moq-rs/issues/282).
   Not yet filed: cloudflare/moq-rs `SubscribeRecv::error` reports a
   REQUEST_ERROR as `done` when the track has no reader.
 - Unsupported or down, not worth rechecking unless something changes:

@@ -3596,6 +3596,18 @@ mod tests {
 		assert_eq!(router.step(node(5), &broadcast, None), Some(Next::Via(2)));
 	}
 
+	/// A request naming a forwarding node whose claims this node has yet to hear follows the
+	/// route to that node, but never back to the neighbour that asked.
+	#[test]
+	fn a_request_for_an_unheard_claim_follows_the_route_but_not_back() {
+		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
+		open(&mut router, 2, Role::Routing(node(2)));
+		router.recv(2, route(5, 2, 1)).unwrap();
+		let broadcast = (p("live"), 7);
+		assert_eq!(router.step(node(5), &broadcast, None), Some(Next::Via(2)));
+		assert_eq!(router.step(node(5), &broadcast, Some(2)), None);
+	}
+
 	/// A neighbour whose copy holds the claim only unavailable refuses a request for it too,
 	/// though this node knows it available from another. Its copy catching up makes it a way.
 	#[test]

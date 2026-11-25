@@ -156,6 +156,10 @@ impl<T: poll::SendStream> poll::SendStream for Local<T> {
 		self.0.reset(code)
 	}
 
+	fn reset_at(&mut self, offset: &Self::Offset, code: u32) {
+		self.0.reset_at(offset, code)
+	}
+
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>> {
 		self.0.poll_closed(waiter)
 	}

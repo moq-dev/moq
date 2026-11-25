@@ -1,28 +1,28 @@
-use std::pin::Pin;
-
 use futures::{StreamExt, stream::FuturesUnordered, try_join};
 use tokio::io::AsyncReadExt;
 
-use super::session::{PendingUni, log_header_error, read_uni_header};
+use super::session::{Classifying, PendingUni, log_header_error, read_uni_header};
 use web_transport_proto::StreamUni;
 
 pub struct Settings {
-	#[allow(
-		dead_code,
-		reason = "a reference to the send/recv stream, so we don't close it until dropped"
-	)]
+	/// Our control stream, held so it stays open until dropped.
 	send: crate::quic::driver::send::Stream,
 
-	#[allow(dead_code, reason = "held so the stream stays open until dropped")]
+	/// The peer's control stream, held so it stays open until dropped.
 	recv: crate::quic::driver::recv::Stream,
 
 	/// The peer's other unidirectional streams that arrived before its control stream, their
 	/// headers read or still reading, for the session to take over. Behind a lock only so the
 	/// session can share its settings; it is taken before then.
-	pub(crate) early: std::sync::Mutex<Vec<Pin<Box<PendingUni>>>>,
+	pub(crate) early: std::sync::Mutex<Vec<Classifying<PendingUni>>>,
 }
 
 impl Settings {
+	/// Both control streams, the peer's and ours, which a close must leave open.
+	pub(crate) fn control_ids(&self) -> [crate::quic::driver::stream::Id; 2] {
+		[self.recv.id(), self.send.id()]
+	}
+
 	// Establish the H3 connection.
 	pub async fn connect(conn: &crate::quic::driver::connection::Connection) -> Result<Self, super::Error> {
 		let recv = Self::accept(conn);
@@ -46,16 +46,19 @@ impl Settings {
 	/// one kept holds the peer's stream credit, which bounds how many it can open first.
 	async fn accept(
 		conn: &crate::quic::driver::connection::Connection,
-	) -> Result<(crate::quic::driver::recv::Stream, Vec<Pin<Box<PendingUni>>>), super::Error> {
-		let mut pending = FuturesUnordered::<Pin<Box<PendingUni>>>::new();
-		let mut early = Vec::<Pin<Box<PendingUni>>>::new();
+	) -> Result<(crate::quic::driver::recv::Stream, Vec<Classifying<PendingUni>>), super::Error> {
+		let mut pending = FuturesUnordered::<Classifying<PendingUni>>::new();
+		let mut early = Vec::<Classifying<PendingUni>>::new();
 
 		let mut recv = loop {
 			tokio::select! {
-				recv = kio::wait(|waiter| conn.poll_accept_uni(waiter)) => pending.push(Box::pin(read_uni_header(recv?))),
+				recv = kio::wait(|waiter| conn.poll_accept_uni(waiter)) => {
+					let recv = recv?;
+					pending.push(Classifying::new(recv.id(), Box::pin(read_uni_header(recv))));
+				}
 				Some(header) = pending.next() => match header {
 					Ok((StreamUni::CONTROL, _, recv)) => break recv,
-					Ok(header) => early.push(Box::pin(std::future::ready(Ok(header)))),
+					Ok(header) => early.push(Classifying::new(header.2.id(), Box::pin(std::future::ready(Ok(header))))),
 					Err(err) => log_header_error(err, "unidirectional"),
 				},
 			}

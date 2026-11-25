@@ -4,7 +4,9 @@
 //! but QUIC does not order streams, so one opened before the end can still reach us after
 //! it. The subscriber keeps the subscription routable until each owed group is accounted
 //! for, or a grace expires for a group whose stream was reset before its header arrived.
-//! A reset that keeps the header (reliable reset) would make the grace unnecessary.
+//! A lite-07 publisher resets after the header (reliable reset) or names the group in a
+//! drop, so there the grace covers only a GROUP_END such a reset cut, and a peer whose
+//! transport lost the header anyway.
 //!
 //! A stream whose header arrived is read to its end whatever the grace says: a group ends
 //! on its own stream's FIN or reset, never because its track ended. A lost datagram is not
