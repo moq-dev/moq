@@ -28,7 +28,8 @@ per segment.
 
 Reproduce with `quic_sim::many_groups_carry_their_highest_priorities_losslessly`
 (`rs/moq-relay/tests/integration/quic_sim.rs`) at `MANY = 200` and
-`LOSSLESS = 200`, with the relay's client `live_edges` budget raised to fit
+`LOSSLESS = 200`, reading `BULK` bytes per group instead of 1 MiB so it checks whole
+transfers, with the relay's client `live_edges` budget raised to fit
 every group (each holds at most `pace::AHEAD`, 16 MiB, ahead of its reader, so
 200 need 3.2 GiB; `0` leaves it unbounded). Every track must then arrive whole:
 the budget sheds nothing, so an eviction is the credit limit, not priority
