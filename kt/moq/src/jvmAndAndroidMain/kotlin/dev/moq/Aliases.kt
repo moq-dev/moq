@@ -230,7 +230,11 @@ fun uniffi.moq.MoqSubscription.Companion.default(): Subscription =
  */
 typealias Range = uniffi.moq.MoqRange
 
-/** Which pending group the publisher sends first: `ASCENDING` or `DESCENDING`. */
+/**
+ * Which group comes first, as the publisher sends them and `recvGroup` returns those held:
+ * `ASCENDING` or `DESCENDING`. Before moq-lite-07 the publisher sends newest first whatever this
+ * asks.
+ */
 typealias Order = uniffi.moq.MoqOrder
 
 /** A location within a track: a group start and a frame index in it. */

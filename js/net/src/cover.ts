@@ -208,6 +208,17 @@ function firstFrom(node: Link<bigint>, offset: number, from: bigint, want: Want)
 	return firstIn(node.right, at, want);
 }
 
+// {@link lastIn} over the keys at or before `to`.
+function lastThrough(node: Link<bigint>, offset: number, to: bigint, want: Want): bigint | undefined {
+	if (!node) return undefined;
+	const at = offset + sum(node.left) + node.delta;
+	if (node.key > to) return lastThrough(node.left, offset, to, want);
+	const right = lastThrough(node.right, at, to, want);
+	if (right !== undefined) return right;
+	if (want(at)) return node.key;
+	return lastIn(node.left, offset, want);
+}
+
 /** A multiset of runs of keys, read as the set of keys any run covers. */
 export class Cover {
 	#root: Link<bigint>;
@@ -232,6 +243,20 @@ export class Cover {
 	/** The lowest key covered at or after `from`. */
 	next(from: bigint): bigint | undefined {
 		return this.contains(from) ? from : firstFrom(this.#root, 0, from, COVERED);
+	}
+
+	/** The highest key covered below `before`. */
+	prev(before: bigint): bigint | undefined {
+		if (before <= 0n) return undefined;
+		const key = before - 1n;
+		if (this.contains(key)) return key;
+		// The last run starting at or below `key` ends at the first gap past its start, which `key`,
+		// uncovered, is at or past.
+		const start = lastThrough(this.#root, 0, key, COVERED);
+		if (start === undefined) return undefined;
+		const end = firstFrom(this.#root, 0, start + 1n, GAP);
+		if (end === undefined) throw new Error("an uncovered key lies past a gap");
+		return end - 1n;
 	}
 
 	/** The lowest key covered: where the first run starts. */

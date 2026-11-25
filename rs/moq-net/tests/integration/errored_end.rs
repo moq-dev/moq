@@ -30,9 +30,11 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 /// Read every group from the first, frame by frame, returning each group's key and
 /// payloads, and how the read ended.
 async fn read(broadcast: &moq_net::broadcast::Consumer) -> (Vec<(u64, Vec<Vec<u8>>)>, Option<Error>) {
+	// The history oldest first.
 	let subscription = Subscription::default()
 		.with_ranges([support::keys(0..)])
-		.with_max(Duration::from_secs(30));
+		.with_max(Duration::from_secs(30))
+		.with_order(moq_net::track::Order::Ascending);
 	let mut sub = kio::clock::timeout(TIMEOUT, broadcast.track("video").unwrap().subscribe(subscription))
 		.await
 		.expect("subscribe timeout")
