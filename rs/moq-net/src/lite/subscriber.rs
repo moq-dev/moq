@@ -1563,13 +1563,13 @@ impl GroupRecv {
 			// span holds no other start, so its stream accounts for those starts too, and the
 			// track records them skipped, as its own publisher's append did.
 			Ok(end) => {
-				if let Some(end) = end {
-					reading.account(hdr.key..end, self.subscriber.runtime.now());
-				}
+				// Only a GROUP_END the group accepts accounts for its span: one below a frame it
+				// holds is malformed, and names nothing.
 				let ended = group.end(end);
 				if ended.is_ok()
 					&& let Some(end) = end
 				{
+					reading.account(hdr.key..end, self.subscriber.runtime.now());
 					track.skip_groups(hdr.key.saturating_add(1)..end);
 				}
 				ended

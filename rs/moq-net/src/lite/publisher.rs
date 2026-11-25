@@ -5256,6 +5256,9 @@ struct GroupOutcomes {
 	dropped: Mutex<Vec<(Range<u64>, StreamError)>>,
 	/// The spans of the groups whose GROUP_END went out, which their stream accounts for.
 	whole: Mutex<Vec<Range<u64>>>,
+	/// Lite-07: the starts strictly inside a whole group's span whose GROUP_END a reset may
+	/// have cut after its header arrived, which the control stream names again.
+	cut: Mutex<Vec<Range<u64>>>,
 	/// Lite-07: the frame each group a range ends partway through stops before, by group
 	/// ([`Frames::stops`]), which a group already streaming follows as an update moves it.
 	stops: kio::Producer<Vec<(u64, u64)>>,
@@ -6037,6 +6040,18 @@ impl TrackRun {
 		let whole = std::mem::take(&mut *self.ctx.outcomes.whole.lock().unwrap());
 		for span in whole {
 			self.mark_served(span);
+		}
+		// A reset may have cut a GROUP_END after its header arrived, so the starts it told wait
+		// for the group above to name them, as skips do, or a drop once none will.
+		let cut = std::mem::take(&mut *self.ctx.outcomes.cut.lock().unwrap());
+		if !cut.is_empty() && self.start.emits_range() {
+			for inner in cut {
+				self.track.record_mut().tell(inner.clone(), Report::Skip);
+				self.deferred.insert(inner);
+			}
+			if self.settle_deferred(writer)? {
+				return Poll::Ready(Ok(ControlFlow::Continue(())));
+			}
 		}
 		let dropped = std::mem::take(&mut *self.ctx.outcomes.dropped.lock().unwrap());
 		if !dropped.is_empty() {
@@ -7185,6 +7200,8 @@ struct GroupServe {
 	/// Lite-07: how many keys just below `key` the header's Previous Delta proves empty, which a
 	/// drop of the group names with it if the header never arrives.
 	gap: u64,
+	/// The End its GROUP_END told, once buffered.
+	ended: Option<u64>,
 	/// The frame a range ending partway through the group stops it before, if any. Lite-06
 	/// keeps the one it opened with and FINs there, so its FIN cannot end the group. Lite-07
 	/// follows [`GroupOutcomes::stops`] and parks there with the stream open, for an update
@@ -7280,6 +7297,7 @@ impl GroupServe {
 			key,
 			frame_start,
 			gap: 0,
+			ended: None,
 			end,
 			stops,
 			state: GroupState::Open,
@@ -7584,6 +7602,7 @@ impl GroupServe {
 											) {
 												Ok(Some(end)) => {
 													self.ctx.outcomes.whole(self.key, end);
+													self.ended = Some(end);
 													*ending = Ending::Whole;
 													continue;
 												}
@@ -7643,6 +7662,7 @@ impl GroupServe {
 											) {
 												Ok(Some(end)) => {
 													self.ctx.outcomes.whole(self.key, end);
+													self.ended = Some(end);
 													*ending = Ending::Whole;
 													continue;
 												}
@@ -7757,6 +7777,14 @@ impl GroupServe {
 			true => GroupState::Accounted,
 			false => GroupState::Done,
 		};
+		// The header arrives, but the reset may cut the GROUP_END after it, so the starts it
+		// told are named again. A drop of a group whose header never arrived names its span.
+		if matches!(self.state, GroupState::Accounted)
+			&& let Some(end) = self.ended
+			&& self.key + 1 < end
+		{
+			self.ctx.outcomes.cut.lock().unwrap().push(self.key + 1..end);
+		}
 	}
 
 	/// Account for a group that failed with `err`: one that never got a stream, or whose
@@ -10390,6 +10418,47 @@ mod serve_group_test {
 			}
 		}
 		assert_eq!(holes, vec![4..6]);
+	}
+
+	/// A reset that may have cut a GROUP_END after the header arrived leaves the starts it told
+	/// for the group above to prove, or a drop once that group went out without them.
+	#[kio::test]
+	async fn lite07_a_cut_group_end_is_named_again() {
+		let track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let subscriber = track.subscribe(None);
+		let session = Log::default();
+		let (mut run, mut writer, log) = lite07_run(SinkSession::new(session.clone()), subscriber);
+		let append = |start: u64| {
+			let mut group = track.append_group(Timestamp::from_millis(start).unwrap()).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(start).unwrap(), b"x".as_slice())
+				.unwrap();
+			group
+		};
+		let group = append(0);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		group.finish_at(3).unwrap();
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		// Group 0's stream reset after its GROUP_END, unacknowledged.
+		run.ctx.outcomes.cut.lock().unwrap().push(1..3);
+		let _group = append(5);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(group_gaps(&session, Version::Lite07), [(0, 0), (5, 4)]);
+		assert_eq!(holes(&mut writer, &log).await, []);
+
+		// Group 7 went out already, so a cut below it is dropped instead.
+		let group = append(7);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		drop(group);
+		let _group = append(9);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		run.ctx.outcomes.cut.lock().unwrap().push(6..7);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(holes(&mut writer, &log).await, [("drop", 6..7)]);
 	}
 
 	/// A whole group whose stream fails before its GROUP_END names its span in its drop, which
