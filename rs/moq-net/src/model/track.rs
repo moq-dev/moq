@@ -786,9 +786,9 @@ pub(crate) struct TrackState {
 	// successor of the group below it, which a read judges by and a time start past it is
 	// not placed in (see [`Self::departed_above`]).
 	departed: BTreeMap<u64, Departed>,
-	// The newest frame of any live group the cache let go of: the live edge a join measures
-	// stays where its publisher reached once the cache lets the newest group go.
-	departed_edge: Option<Timestamp>,
+	// The newest live group the cache let go of, by key, and its newest frame: the live edge a
+	// join measures stays where its publisher reached once the cache lets the newest group go.
+	departed_edge: Option<(u64, Timestamp)>,
 
 	// The key of the newest cached group: the live edge, protected from
 	// eviction by never entering the eviction order until no producer remains.
@@ -1403,14 +1403,15 @@ impl Holdings for TrackState {
 				None => Join::Time(0),
 			};
 		};
-		// The newest frame held, or one the cache let go of: its publisher reached it.
+		// The newest group's newest frame, held or let go of by the cache: its publisher reached
+		// it. An older group's later frames don't move it, held or not.
 		let newest = self
 			.live_edge(&Servable::ALL)
-			.map(|edge| edge.timestamp)
+			.map(|edge| (edge.key, edge.timestamp))
 			.into_iter()
 			.chain(self.departed_edge)
-			.reduce(Timestamp::later)
-			.and_then(|edge| edge.convert(scale).ok())
+			.reduce(|held, gone| if gone > held { gone } else { held })
+			.and_then(|(_, edge)| edge.convert(scale).ok())
 			.map(Timestamp::value);
 		// Rounded up to whole ticks, so the start is never newer than the lag allows; one past
 		// every timestamp, or with no lag limit, reaches back to the oldest group.
@@ -1894,8 +1895,10 @@ impl TrackState {
 		if !slot.is_shown() {
 			return;
 		}
-		if let Some(latest) = slot.group.latest() {
-			self.departed_edge = Some(self.departed_edge.map_or(latest, |edge| edge.later(latest)));
+		if let Some(latest) = slot.group.latest()
+			&& self.departed_edge.is_none_or(|edge| (key, latest) > edge)
+		{
+			self.departed_edge = Some((key, latest));
 		}
 		let below = self.lookup.range(..key).next_back().map_or(0, |(&below, _)| below + 1);
 		if self.departed.range(below..key).next().is_some() {
@@ -1931,8 +1934,12 @@ impl TrackState {
 	/// The live group gone just above `key` in `servable`, when the cache let it go below
 	/// `held`, the next one it holds there: still `key`'s immediate successor.
 	fn departed_above(&self, key: u64, servable: &Servable, held: Option<u64>) -> Option<(u64, &Departed)> {
-		let (&gone, record) = self.departed.range(key.checked_add(1)?..).next()?;
-		(servable.contains(gone) && held.is_none_or(|held| gone < held)).then_some((gone, record))
+		let from = key.checked_add(1)?;
+		let mut gone = match held {
+			Some(held) => self.departed.range(from..held),
+			None => self.departed.range(from..),
+		};
+		gone.find(|(gone, _)| servable.contains(**gone)).map(|(&gone, record)| (gone, record))
 	}
 
 	/// [`Self::uncache`] a group that another copy displaces rather than one that ends, so a
@@ -3432,7 +3439,8 @@ impl TrackState {
 		let slot = self.lookup.remove(&key)?;
 		self.visible.remove(&key);
 		// The groups gone on either side of it now lie between the same two cached groups.
-		if self.departed.range(..key).next_back().is_some_and(|(&departed, _)| {
+		// At `key` too: a fetched copy keeps the departure of the live group it stands in for.
+		if self.departed.range(..=key).next_back().is_some_and(|(&departed, _)| {
 			self.lookup
 				.range(..key)
 				.next_back()
@@ -18986,6 +18994,40 @@ mod test {
 		assert!(!read(true).contains(&0), "the evicted 1000 bounds it: {:?}", read(true));
 	}
 
+	/// A reader whose runs skip a cached group is bounded by its own successor once the cache
+	/// evicts it, past an evicted group it does not serve.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_evicted_successor_past_an_unserved_one_still_bounds_the_reach() {
+		let read = |evicted: bool| {
+			let producer = track_producer("test", Info::timed());
+			for key in [0, 1000, 2000, 3000, 4000] {
+				write_group(&producer, key);
+			}
+			if evicted {
+				evict(&producer, 1000);
+				evict(&producer, 3000);
+			}
+			let mut subscriber = producer.subscribe(
+				Subscription::default()
+					.with_ranges([
+						Range {
+							start: crate::track::Start::Oldest,
+							end: Some(0),
+						},
+						Range {
+							start: crate::track::Start::Time(3000),
+							end: None,
+						},
+					])
+					.with_max(Duration::from_millis(500)),
+			);
+			drain_groups(&mut subscriber)
+		};
+		assert!(!read(false).contains(&0), "3000 bounds it: {:?}", read(false));
+		assert!(!read(true).contains(&0), "the evicted 3000 bounds it: {:?}", read(true));
+	}
+
 	/// A finished track's live join measures the edge its publisher produced, not the newest
 	/// group its cache still holds.
 	#[test]
@@ -19023,6 +19065,77 @@ mod test {
 		let held = read(false);
 		assert_eq!(held, [3000, 4000, 5000]);
 		assert_eq!(read(true), [3000, 4000], "the same start");
+	}
+
+	/// A live join measures the edge by the newest group, so evicting an older group whose
+	/// later frames run past it moves the start nowhere.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_join_ignores_an_evicted_older_group_running_past_the_edge() {
+		let read = |evicted: bool| {
+			let producer = track_producer("test", Info::timed());
+			let mut old = producer.create_group(group::Info { start: 1000 }).unwrap();
+			old.write_frame(Timestamp::from_millis(1000).unwrap(), &b"x"[..])
+				.unwrap();
+			for millis in [2000, 3000] {
+				let mut group = producer.create_group(group::Info { start: millis }).unwrap();
+				group
+					.write_frame(Timestamp::from_millis(millis).unwrap(), &b"x"[..])
+					.unwrap();
+				group.finish().unwrap();
+			}
+			old.write_frame(Timestamp::from_millis(10_000).unwrap(), &b"x"[..])
+				.unwrap();
+			old.finish().unwrap();
+			if evicted {
+				evict(&producer, 1000);
+			}
+			let mut ordered = producer
+				.subscribe(Subscription::default().with_ranges([Range {
+					start: crate::track::Start::Live {
+						min: Some(Duration::from_millis(500)),
+						max: None,
+					},
+					end: None,
+				}]))
+				.ordered();
+			let mut groups = Vec::new();
+			while let Some(Ok(Some(item))) = ordered.next_item().now_or_never() {
+				if let Item::Group(group) = item {
+					groups.push(group.start);
+				}
+			}
+			groups
+		};
+		assert_eq!(read(false), [2000, 3000]);
+		assert_eq!(read(true), [2000, 3000], "the same start");
+	}
+
+	/// A fetched copy of a departed group keeps its departure, so letting that copy go leaves
+	/// only the lowest departure in the merged gap.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn evicting_a_refetched_departure_compacts_its_gap() {
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		let dynamic = producer.requests();
+		let consumer = producer.consume();
+		for key in [0, 1000, 2000, 3000] {
+			write_group(&producer, key);
+		}
+		evict(&producer, 1000);
+		let pending = consumer.fetch_group(1000, None);
+		let req = dynamic
+			.requested_fill_group()
+			.now_or_never()
+			.expect("fetch request is ready")
+			.unwrap();
+		write_filled(req.accept(Info::timed()), 1000);
+		pending.await.unwrap();
+		evict(&producer, 2000);
+		evict(&producer, 1000);
+		let departed: Vec<u64> = producer.state.read().departed.keys().copied().collect();
+		assert_eq!(departed, [1000]);
 	}
 
 	/// A range answered empty releases a reader within its budget whatever that reader's own

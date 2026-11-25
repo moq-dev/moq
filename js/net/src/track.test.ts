@@ -2424,6 +2424,63 @@ test("an evicted successor still bounds the reach", async () => {
 	}
 });
 
+// A reader whose runs skip a cached group is bounded by its own successor once the cache lets it
+// go, past a group gone it does not serve. Mirrors the Rust
+// `an_evicted_successor_past_an_unserved_one_still_bounds_the_reach`.
+test("an evicted successor past an unserved one still bounds the reach", async () => {
+	for (const evicted of [[], [1000n, 3000n]]) {
+		const { producer, clock } = await idleBut([0n, 1000n, 2000n, 3000n], evicted);
+		try {
+			putGroup(producer, 4000n, 4000);
+			const subscriber = producer.subscribe(
+				withMax({ ranges: [{ end: 0n }, { start: 3000n }], delay: { max: Duration.millis(500) } }),
+			);
+			expect({ evicted, stale: drainGroups(subscriber).includes(0n) }).toEqual({ evicted, stale: false });
+		} finally {
+			producer.finish();
+			producer.close();
+			clock.installed.close();
+		}
+	}
+});
+
+// A live join measures the edge by the newest group, so letting an older group go whose later
+// frames run past it moves the start nowhere. Mirrors the Rust
+// `a_join_ignores_an_evicted_older_group_running_past_the_edge`.
+test("a join ignores an evicted older group running past the edge", async () => {
+	for (const evicted of [false, true]) {
+		const clock = manualTime(10_000);
+		const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: null });
+		try {
+			const old = producer.createGroup(1000n);
+			old.writeFrame(textFrame("x", Timestamp.fromMillis(1000)));
+			putGroup(producer, 2000n, 2000);
+			putGroup(producer, 3000n, 3000);
+			old.writeFrame(textFrame("x", Timestamp.fromMillis(10_000)));
+			old.finish();
+			await clock.advance(10_000 + CACHE_WINDOW_MS / 2);
+			const reader = producer.subscribe(withMax({ delay: { max: null } }));
+			for (const key of evicted ? [2000n, 3000n] : [1000n, 2000n, 3000n]) {
+				const group = hooks.cachedGroup(reader, key);
+				if (!group) throw new Error(`group ${key} is cached`);
+				hooks.refreshGroup(group);
+				group.close();
+			}
+			reader.close();
+			clock.set(10_000 + CACHE_WINDOW_MS + 200);
+			putGroup(producer, 3001n, 3001);
+			const subscriber = producer.subscribe({
+				ranges: [{ start: { live: { min: Duration.millis(500), max: null } } }],
+			});
+			expect({ evicted, read: drainGroups(subscriber) }).toEqual({ evicted, read: [2000n, 3000n, 3001n] });
+		} finally {
+			producer.finish();
+			producer.close();
+			clock.installed.close();
+		}
+	}
+});
+
 // A local track places a time start at the group containing it even once the cache let that
 // group go: an older group the cache happens to keep never stands in for it. Mirrors the Rust
 // `a_local_time_start_ignores_an_older_group_kept_past_an_evicted_one`.

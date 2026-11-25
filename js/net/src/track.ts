@@ -1043,10 +1043,10 @@ let fillFloor: (producer: Producer, named: bigint | undefined) => bigint | undef
 // The keys of the groups the producer caches, sorted: what time starts and live joins resolve
 // against, as the Rust `TrackState::lookup` keys; assigned in its static block.
 let keysOf: (producer: Producer) => readonly bigint[];
-// The live group the producer's cache let go of just above `key`, and the newest frame of any it
-// let go of; assigned in its static block.
-let departedAbove: (producer: Producer, key: bigint) => Departed | undefined;
-let departedEdge: (producer: Producer) => Timestamp | undefined;
+// The live groups the producer's cache let go of, sorted by key, and the newest one with its newest
+// frame; assigned in its static block.
+let departedOf: (producer: Producer) => readonly Departed[];
+let departedEdge: (producer: Producer) => { key: bigint; latest: Timestamp } | undefined;
 // The span of the held group finished whole that holds `key` strictly past its start, undefined
 // when none does; assigned in its static block.
 let wholeAround: (producer: Producer, key: bigint) => Run | undefined;
@@ -1507,9 +1507,9 @@ export class Producer {
 	// still the immediate successor of the group below it, which a read judges by and a time start
 	// past it is not placed in. Mirrors the Rust `TrackState::departed`.
 	#departed: Departed[] = [];
-	// The newest frame of any live group the cache let go of: the live edge a join measures stays
-	// where its publisher reached. Mirrors the Rust `TrackState::departed_edge`.
-	#departedEdge?: Timestamp;
+	// The newest live group the cache let go of, and its newest frame: the live edge a join measures
+	// stays where its publisher reached. Mirrors the Rust `TrackState::departed_edge`.
+	#departedEdge?: { key: bigint; latest: Timestamp };
 	// How many cached groups the pool evicted, so a reader that left a group to this copy to read
 	// learns it may be gone. Mirrors the Rust `TrackState::evicted_groups`.
 	#evictions = 0;
@@ -1777,7 +1777,7 @@ export class Producer {
 		sourceStart = (producer) => producer.#wire?.served && producer.#feedStart();
 		fillFloor = (producer, named) => producer.#fillFloor(named);
 		keysOf = (producer) => producer.#keys;
-		departedAbove = (producer, key) => producer.#departed[timelineIndex(producer.#departed, key + 1n)];
+		departedOf = (producer) => producer.#departed;
 		departedEdge = (producer) => producer.#departedEdge;
 		wholeAt = (producer, key) => {
 			const entry = producer.#cached.get(key);
@@ -2563,7 +2563,8 @@ export class Producer {
 			this.#cached.delete(key);
 			removeKey(this.#keys, key);
 			// The groups gone on either side of it now lie between the same two cached groups.
-			const below = this.#departed[timelineIndex(this.#departed, key) - 1];
+			// At `key` too: a fetched copy keeps the departure of the live group it stands in for.
+			const below = this.#departed[timelineIndex(this.#departed, key + 1n) - 1];
 			const held = this.#keys[keyIndex(this.#keys, key) - 1];
 			if (below && (held === undefined || below.start > held)) this.#forgetDepartedAbove(key);
 			// The run it kept above it may expire now.
@@ -2578,9 +2579,10 @@ export class Producer {
 	// Record live group `entry`, which the cache let go of, for the groups below it: the lowest one
 	// gone between two cached groups shadows any above it. Mirrors the Rust `TrackState::depart`.
 	#depart(entry: CachedGroup, span: { first?: Timestamp; latest?: Timestamp }): void {
-		const edge = this.#departedEdge;
-		if (span.latest && (!edge || span.latest.asMillis() > edge.asMillis())) this.#departedEdge = span.latest;
 		const key = entry.group.start;
+		const edge = this.#departedEdge;
+		if (span.latest && (!edge || key > edge.key || (key === edge.key && edge.latest.isBefore(span.latest))))
+			this.#departedEdge = { key, latest: span.latest };
 		const held = this.#keys[keyIndex(this.#keys, key) - 1];
 		const departed = this.#departed;
 		const at = timelineIndex(departed, key);
@@ -3721,10 +3723,14 @@ export class Subscriber {
 		scope?: Scope,
 	): Departed | undefined {
 		const producer = this.#state.producer;
-		const gone = producer && departedAbove(producer, key);
-		if (!gone || (held !== undefined && gone.start >= held) || (end !== undefined && gone.start >= end))
-			return undefined;
-		return this.#judges(gone.start, scope) ? gone : undefined;
+		if (!producer) return undefined;
+		const departed = departedOf(producer);
+		for (let i = timelineIndex(departed, key + 1n); i < departed.length; i++) {
+			const gone = departed[i];
+			if ((held !== undefined && gone.start >= held) || (end !== undefined && gone.start >= end)) return undefined;
+			if (this.#judges(gone.start, scope)) return gone;
+		}
+		return undefined;
 	}
 
 	// Whether group `key` counts toward the drift edge: inside the window, or the `scope` judged
@@ -4263,7 +4269,9 @@ export class Subscriber {
 				// A live group the cache let go of between them starts after it, so this one does not
 				// contain the time: a range from it starts there, though nothing is held. A handler that
 				// looks it up finds it from the group held instead, as for any group the cache let go of.
-				const gone = below === undefined || holdings.looksUp?.() ? undefined : departedAbove(producer, below);
+				const departed = departedOf(producer);
+				const gone =
+					below === undefined || holdings.looksUp?.() ? undefined : departed[timelineIndex(departed, below + 1n)];
 				if (gone && gone.start <= time) return { at: gone.start };
 				if (below !== undefined) return at(below);
 				// Every key at or before it is gone, so whichever group held it will never arrive.
@@ -4381,12 +4389,18 @@ export class Subscriber {
 			const latest = group && (hooks.groupLatest(group) ?? hooks.groupTimestamp(group));
 			return latest && BigInt(floorAt(latest, scale));
 		};
-		// The newest frame held, or one the cache let go of: its publisher reached it.
+		// The newest group's newest frame, held or let go of by the cache: its publisher reached it.
+		// An older group's later frames don't move it, held or not.
 		const producer = this.#state.producer;
 		const gone = producer && departedEdge(producer);
-		const departed = gone && BigInt(floorAt(gone, scale));
+		const departed = gone && BigInt(floorAt(gone.latest, scale));
 		const held = reach(stamped);
-		const edge = held === undefined || (departed !== undefined && departed > held) ? departed : held;
+		const newer =
+			gone &&
+			(!stamped ||
+				gone.key > stamped.start ||
+				(gone.key === stamped.start && (held === undefined || (departed !== undefined && departed > held))));
+		const edge = held === undefined || newer ? departed : held;
 		// The lag rounds up to whole ticks, so the start is never newer than it allows; with no lag
 		// limit it reaches back past every timestamp.
 		const back =

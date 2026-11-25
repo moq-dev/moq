@@ -62,6 +62,8 @@ Arrived(t) == {trk[t].arr[i] : i \in 1 .. Len(trk[t].arr)}
 Landed(t) == Arrived(t) \ trk[t].gone
 \* `track::Consumer::evicted`: how many groups its cache evicted so far.
 Evicted(t) == Cardinality(trk[t].gone)
+\* How many groups the caches of every route evicted, counting each route's own.
+Evictions == Cardinality(UNION {{<<u, g>> : g \in trk[u].gone} : u \in Tracks})
 Live(t) == trk[t].made /\ ~trk[t].failed
 \* `track::Consumer::latest_key` (`TrackState::max_key`): the newest group the
 \* track got, which an eviction keeps.
@@ -457,7 +459,7 @@ Settle(t) ==
 Evict(t, g) ==
     /\ Live(t) /\ t # front.cur
     /\ g \in Landed(t)
-    /\ Cardinality(UNION {trk[u].gone : u \in Tracks}) < MaxEvicts
+    /\ Evictions < MaxEvicts
     /\ trk' = [trk EXCEPT ![t].gone = @ \cup {g}]
     /\ UNCHANGED <<front, rd, reading>>
 
@@ -572,7 +574,7 @@ CopiesBounded ==
     \A t \in Tracks :
         Cardinality({i \in 1 .. Len(rd.copies) :
                         rd.copies[i].t = t /\ rd.copies[i].done = "no"})
-            <= 2 + Cardinality({u \in Tracks : trk[u].failed}) + Cardinality(UNION {trk[u].gone : u \in Tracks})
+            <= 2 + Cardinality({u \in Tracks : trk[u].failed}) + Evictions
 
 TypeOK ==
     /\ rd.ended \in {"no", "ok", "err"}
