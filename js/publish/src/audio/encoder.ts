@@ -496,10 +496,6 @@ export class Encoder {
 			// Not gated on `enabled` or `muted`: a paused rendition takes no capture, but still encodes what it retained.
 			this.#encoding = !!format && !!track && !fatal && (!onDemand || subscription !== undefined);
 			effect.set(this.#out.active, enabled && this.#encoding, false);
-			// TMP(firefox-arm-returns): demand trace, deleted before review.
-			console.debug(
-				`[tmp-audio] ${this.name} wanted=${!!track && effect.get(track.demand().wanted)} sub=${subscription ? (subscription.ranges ?? [{}]).map((r) => (typeof r.start === "object" ? `live(${r.start.live.min?.asMillis() ?? "-"},${r.start.live.max?.asMillis() ?? "-"})` : `key(${r.start})`) + (r.end === undefined ? "" : `..${r.end}`)).join("|") : "none"} budget=${this.#budget?.asMillis()} encoding=${this.#encoding}`,
-			);
 			try {
 				if (this.#encoding) this.#pipeline?.drain();
 			} catch (error) {
@@ -886,18 +882,9 @@ export class Encoder {
 						// Expired history is a real gap, unlike a loss of demand: end the epoch where the
 						// encoded audio stops, so its last frame isn't stretched across the gap.
 						if (backlog.takeEvicted()) cut();
-						// TMP(firefox-arm-returns): replay size, deleted before review.
-						let replayed = 0;
-						let firstAt: number | undefined;
 						for (;;) {
 							const entry = backlog.peek();
-							if (!entry) {
-								if (replayed > 0)
-									console.debug(`[tmp-audio] ${this.name} replayed=${replayed} from=${firstAt}us`);
-								break;
-							}
-							replayed++;
-							firstAt ??= entry.frame.timestamp.asMicros();
+							if (!entry) break;
 							// A pause broke the timeline here.
 							if (backlog.takeCut()) cut();
 							backlog.shift();
