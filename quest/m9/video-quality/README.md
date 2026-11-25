@@ -6,7 +6,7 @@ A nightly harness runs a golden corpus through moq-video and moq-transcode
 on every encoder backend we have hardware for. It scores each output frame
 with VMAF against the source and turns the nightly red when a row's quality
 drops or a GoP boundary visibly pops. Its rows include on-demand starts and
-fetch-encoded groups, and moq-boy's encoding is fixed under it.
+fetch-encoded groups, and moq-cade's encoding is fixed under it.
 
 Today nothing measures encoded quality: the only check is a manual PSNR/SSIM
 recipe in `rs/moq-video/examples/encode-presets.rs`. moq-boy's encoding looks
