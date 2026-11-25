@@ -100,6 +100,8 @@ describe("parseConfig", () => {
 	it("reports explicit SBR and PS output", () => {
 		expect(parseConfig(new Uint8Array([0x2b, 0x11, 0x88]))).toEqual({ sampleRate: 48000, numberOfChannels: 2 });
 		expect(parseConfig(new Uint8Array([0xeb, 0x09, 0x88]))).toEqual({ sampleRate: 48000, numberOfChannels: 2 });
+		// PS decodes to stereo even when a program config element names the core's channels.
+		expect(parseConfig(new Uint8Array([0xeb, 0x01, 0x88]))).toEqual({ sampleRate: 48000, numberOfChannels: 2 });
 	});
 
 	// An AAC-LC core followed by a backward-compatible sync extension plays at the signaled output.
