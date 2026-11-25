@@ -2,6 +2,16 @@ import { describe, expect, mock, spyOn, test } from "bun:test";
 
 import worker from "./worker";
 
+// Only the Workers runtime has FixedLengthStream; its length check is the
+// runtime's, so a pass-through stands in for it here.
+Object.assign(globalThis, {
+	FixedLengthStream: class extends TransformStream {
+		constructor(readonly length: number) {
+			super();
+		}
+	},
+});
+
 const key = "00000000000000000000000000000000.narinfo";
 const request = (path = key, method = "GET") => new Request(`https://nix.moq.dev/${path}`, { method });
 const bucket = (get = mock(async (_key: string): Promise<R2ObjectBody | null> => null)) =>

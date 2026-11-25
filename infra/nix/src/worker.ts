@@ -45,6 +45,7 @@ function resume(bucket: R2Bucket, key: string, object: R2ObjectBody): ReadableSt
 	let reader = object.body.getReader();
 	let sent = 0;
 	let resumes = 0;
+	let cancelled = false;
 
 	return new ReadableStream({
 		async pull(controller) {
@@ -53,7 +54,10 @@ function resume(bucket: R2Bucket, key: string, object: R2ObjectBody): ReadableSt
 				try {
 					chunk = await reader.read();
 				} catch (error) {
-					if (resumes++ >= RESUMES) return controller.error(error);
+					if (resumes++ >= RESUMES) {
+						console.error(`Nix cache body failed at byte ${sent}, out of resumes: ${key}`, error);
+						return controller.error(error);
+					}
 					console.error(`Nix cache body read failed at byte ${sent}, resuming: ${key}`, error);
 				}
 				if (chunk?.done) return controller.close();
@@ -71,13 +75,17 @@ function resume(bucket: R2Bucket, key: string, object: R2ObjectBody): ReadableSt
 					});
 					if (!next || !("body" in next))
 						return controller.error(new Error(`object changed mid-read: ${key}`));
+					if (cancelled) return next.body.cancel();
 					reader = next.body.getReader();
 				} catch (error) {
 					console.error(`Nix cache resume failed at byte ${sent}: ${key}`, error);
 				}
 			}
 		},
-		cancel: (reason) => reader.cancel(reason),
+		cancel(reason) {
+			cancelled = true;
+			return reader.cancel(reason);
+		},
 	});
 }
 
@@ -126,7 +134,17 @@ export default {
 				"Cache-Control": cacheControl(key),
 				"Content-Length": object.size.toString(),
 			};
-			return new Response(request.method === "HEAD" ? null : resume(bucket, key, object), { headers });
+			if (request.method === "HEAD") return new Response(null, { headers });
+
+			// A plain stream drops Content-Length from the response, and with it
+			// Nix's check for a short body. The fixed-length stream keeps it, and
+			// errors, rather than ends, if the resumed bytes don't add up.
+			const { readable, writable } = new FixedLengthStream(object.size);
+			// A failed pipe already errored `readable`, which resets the client.
+			resume(bucket, key, object)
+				.pipeTo(writable)
+				.catch(() => {});
+			return new Response(readable, { headers });
 		}
 
 		// Keep intermediaries from caching a transient failure as missing.
