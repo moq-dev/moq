@@ -1984,9 +1984,12 @@ class Reader implements ResumeSource {
 			// the reader's window hands out below its floor too.
 			const start = copy.backfill ? cursor.start : max(cursor.start, copy.floor ?? 0n);
 			const floor = copy.floor !== undefined;
-			// A group still to land in the reader's window is waited for, as a gap is.
+			// A group still to land in the reader's window is waited for, as a gap is, but not one a
+			// copy declared skipped: its publisher never produced it, so no route will.
 			const lands = (run: { start: bigint; end: bigint }) =>
-				hooks.mayLand(copy.sub, { ...run, floor, grace: wait, delivered });
+				runGaps(this.skippedIn(run.start, run.end), run.start, run.end).some((open) =>
+					hooks.mayLand(copy.sub, { ...open, floor, grace: wait, delivered }),
+				);
 			if (this.#window().runs(start, end).some(lands)) return "wait";
 			if (hooks.hasUnreadGroup(copy.sub, cursor.start, end, delivered)) return "keep";
 		}
