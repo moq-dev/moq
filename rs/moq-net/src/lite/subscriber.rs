@@ -9314,6 +9314,26 @@ mod tests {
 				let urgent = serving
 					.serving
 					.subscribe(Some(Subscription::default().with_start(0).with_priority(5)));
+				#[derive(Default)]
+				struct Wakes(std::sync::atomic::AtomicUsize);
+				impl std::task::Wake for Wakes {
+					fn wake(self: Arc<Self>) {
+						self.0.fetch_add(1, atomic::Ordering::Relaxed);
+					}
+				}
+				let wakes = Arc::new(Wakes::default());
+				let counted = kio::Waiter::new(std::task::Waker::from(wakes.clone()));
+				assert!(serving.poll(&serve, &counted).is_pending());
+				assert!(serving.deferred, "{version:?}: the change waits on the update");
+				// The change after the deferred one still wakes the loop, as a cancel must.
+				let later = serving
+					.serving
+					.subscribe(Some(Subscription::default().with_start(0).with_priority(9)));
+				assert!(
+					wakes.0.load(atomic::Ordering::Relaxed) > 0,
+					"{version:?}: a change after a deferred one wakes the loop"
+				);
+				drop(later);
 				assert!(serving.poll(&serve, &waiter).is_pending());
 
 				if cancel {
@@ -15288,7 +15308,11 @@ impl ServeLoop {
 						Poll::Pending => {}
 					}
 					match self.serving.poll_subscription_changed(waiter) {
-						Poll::Ready(Ok(pref)) if flushing && !self.cancels(&pref) => self.deferred = true,
+						// Polled again until it parks, so a later change such as a cancel still wakes us.
+						Poll::Ready(Ok(pref)) if flushing && !self.cancels(&pref) => {
+							self.deferred = true;
+							continue;
+						}
 						Poll::Ready(Ok(pref)) => {
 							// Updating the upstream failed: hand the track back for another
 							// route to resume.

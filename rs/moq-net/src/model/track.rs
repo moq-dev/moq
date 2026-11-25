@@ -1403,12 +1403,21 @@ impl Holdings for TrackState {
 				None => Join::Time(0),
 			};
 		};
-		// The newest group's newest frame, held or let go of by the cache: its publisher reached
-		// it. An older group's later frames don't move it, held or not.
+		// The newest group's newest frame, held, expired in place by an ended track's sweep, or
+		// let go of by the cache: its publisher reached it. An older group's later frames don't
+		// move it, held or not.
+		let expired = self
+			.lookup
+			.iter()
+			.rev()
+			.find(|(_, slot)| slot.succeeds())
+			.filter(|(_, slot)| !slot.is_live() && slot.group.is_started())
+			.and_then(|(&key, slot)| Some((key, slot.group.latest().or_else(|| self.started_at(slot))?)));
 		let newest = self
 			.live_edge(&Servable::ALL)
 			.map(|edge| (edge.key, edge.timestamp))
 			.into_iter()
+			.chain(expired)
 			.chain(self.departed_edge)
 			.reduce(|held, gone| if gone > held { gone } else { held })
 			.and_then(|(_, edge)| edge.convert(scale).ok())
@@ -17520,6 +17529,63 @@ mod test {
 
 		pool.step(budget - cache::DEFAULT_EXPIRY);
 		assert!(held.poll_expired(&waiter), "the successor arrived a budget ago");
+	}
+
+	/// A live join on an ended track measures the edge by the newest group even once its sweep
+	/// expired that group in place while an older one stays cached.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_join_measures_an_edge_expired_in_place() {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY));
+		let mut producer = track_producer_pooled("test", pool.clone());
+		for millis in [1000, 2000, 3000] {
+			producer
+				.write_frame(Timestamp::from_millis(millis).unwrap(), &b"x"[..])
+				.unwrap();
+		}
+		let state = producer.state.downgrade();
+		let consumer = producer.consume();
+		let mut subscriber = producer.subscribe(Subscription::default().with_start(0).with_max(None));
+		drop(producer.finish().unwrap());
+
+		// Reading 1000 and 2000 keeps them cached past 3000's idle window.
+		let waiter = kio::Waiter::noop();
+		pool.sweep();
+		pool.step(cache::DEFAULT_EXPIRY / 2);
+		let mut held = Vec::new();
+		for key in [1000, 2000] {
+			let mut group = subscriber.assert_group();
+			assert_eq!(group.start, key);
+			assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
+			held.push(group);
+		}
+		pool.sweep();
+		pool.step(cache::DEFAULT_EXPIRY / 2 + Duration::from_secs(2));
+		pool.sweep();
+		assert_eq!(
+			state.read(|state| [1000, 2000, 3000].map(|key| state.lookup.get(&key).is_some_and(Slot::is_aborted))),
+			Some([false, false, true]),
+			"only 3000 expired in place"
+		);
+
+		let mut ordered = consumer
+			.subscribe(Subscription::default().with_ranges([Range {
+				start: crate::track::Start::Live {
+					min: Some(Duration::from_millis(1000)),
+					max: None,
+				},
+				end: None,
+			}]))
+			.await
+			.unwrap()
+			.ordered();
+		let mut groups = Vec::new();
+		while let Some(Ok(Some(item))) = ordered.next_item().now_or_never() {
+			if let Item::Group(group) = item {
+				groups.push(group.start);
+			}
+		}
+		assert!(!groups.contains(&1000), "3000 measures the edge: {groups:?}");
 	}
 
 	/// Empty groups are handed out like any other and retired by the wall clock like an
