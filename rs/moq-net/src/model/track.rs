@@ -6819,7 +6819,7 @@ impl Routed {
 /// A session at its live-edge budget, for benches: `quiet` edges that moved first, each
 /// holding one frame nobody read, and one edge written a frame at a time, which a reader
 /// takes as it lands. Each write past the budget reclaims.
-#[cfg(feature = "fuzz")]
+#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
 pub(crate) struct EdgesBench {
 	_quiet: Vec<(Producer, group::Producer)>,
 	written: Producer,
@@ -6829,7 +6829,7 @@ pub(crate) struct EdgesBench {
 	frames: usize,
 }
 
-#[cfg(feature = "fuzz")]
+#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
 impl EdgesBench {
 	/// Frames the written edge takes before it moves to a new group.
 	const GROUP: usize = 1024;
@@ -27838,16 +27838,19 @@ mod test {
 	}
 
 	/// The taken-frame shed of a received compressed edge inflates nothing: a raw reader past
-	/// a plain reader's decoded prefix sheds only the slices that prefix already used, so the
-	/// session's bill never grows and the plain reader keeps decoding.
+	/// a plain reader's decoded prefix sheds only the slices that prefix already used, so a
+	/// reclaim's first pass brings the session back under budget without shedding a whole
+	/// edge, and the plain reader keeps decoding.
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_taken_shed_leaves_slices_the_plain_copy_needs() {
-		let info = Info::timed().with_compression(Compression::Deflate);
+		const LIMIT: u64 = 1 << 20;
+		let info = Info::timed().with_compression(Compression::Deflate).with_priority(5);
 		let stored = stored_slices(&info);
 		let pool = cache::Pool::unbounded();
-		let broadcast = session_broadcast(&pool, Some(1 << 30));
+		let broadcast = session_broadcast(&pool, Some(LIMIT));
 		let producer = Producer::new(broadcast.clone(), "test", info);
+		let mut writer = Producer::new(broadcast.clone(), "writer", Info::timed());
 		let mut group = producer.create_group(group::Info { start: 0 }).unwrap();
 		// A plain reader decodes the first slices, then a raw one takes every slice.
 		for object in &stored[..2] {
@@ -27869,12 +27872,16 @@ mod test {
 			Poll::Ready(Ok(4))
 		));
 
+		assert!(producer.state.read().cache.listed(), "the raw read went unreported");
+
+		// A lower-priority write passes the budget by a byte, so a reclaim visits the edge.
 		let before = broadcast.edges.used();
-		let cache = producer.state.read().cache.clone();
-		cache.shed_taken();
+		finished_group(&mut writer, usize::try_from(LIMIT - before + 1).unwrap());
 		let after = broadcast.edges.used();
-		assert!(after <= before, "the shed billed more: {before} -> {after}");
-		assert!(!producer.state.read().cache.listed(), "the reclaim visit unlisted it");
+		assert!(after <= LIMIT, "the shed left the session over: {before} -> {after}");
+		assert!(!producer.state.read().cache.listed(), "the reclaim visit left it listed");
+		// Its bill leaves with it, so decoding the rest never passes the budget again.
+		drop(writer);
 		for _ in 1..4 {
 			assert!(
 				plain.read_frame().await.unwrap().is_some(),
@@ -27897,20 +27904,107 @@ mod test {
 		let listed = || producer.state.read().cache.listed();
 		let mut group = producer.append_next().unwrap();
 		let mut reader = producer.consume().peek_group(group.start).expect("cached");
-		for _ in 0..2 {
-			group
-				.write_frame(group.key_time(), bytes::Bytes::from(vec![0u8; 100]))
-				.unwrap();
-		}
+		let frame = || bytes::Bytes::from(vec![0u8; 100]);
+		group.write_frame(group.key_time(), frame()).unwrap();
 		assert!(!listed(), "listed before any read");
 		assert!(matches!(reader.read_frame().now_or_never(), Some(Ok(Some(_)))));
 		assert!(listed(), "a live-edge read went unreported");
 
+		// Written after the first read, so the read after the move takes it from the group,
+		// moving the reader's progress past a group that is no longer the edge.
+		group.write_frame(group.key_time(), frame()).unwrap();
 		let next = producer.append_next().unwrap();
 		assert!(!listed(), "the listing outlived the edge");
 		assert!(matches!(reader.read_frame().now_or_never(), Some(Ok(Some(_)))));
 		assert!(!listed(), "a read behind the edge listed the track");
 		drop((group, next));
+	}
+
+	/// A fetched copy of the live edge that another copy displaced from its slot lists nothing
+	/// when read: a reclaim visits only the slot's copies, so it would find nothing to shed.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_displaced_copys_reads_list_nothing() {
+		let pool = cache::Pool::unbounded();
+		let broadcast = session_broadcast(&pool, Some(1 << 30));
+		let producer = Producer::new(broadcast, "test", Info::timed());
+		producer.received();
+		elapse(&producer, Duration::ZERO);
+		let listed = || producer.state.read().cache.listed();
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		let payload = || bytes::Bytes::from(vec![0u8; 100]);
+		let fetched = |end| {
+			producer
+				.state
+				.write()
+				.ok()
+				.unwrap()
+				.insert_group_request(3, group::Bounds { start: 0, end }, None)
+				.unwrap()
+				.expect("a fresh group")
+		};
+
+		// The live copy, received from frame 1, beside a fetch of the head cut short at frame 1.
+		let Ok(Received::Group(mut live)) = producer.create_group_at(group::Info { start: 3 }, 1, 0..0) else {
+			panic!("the live copy opens");
+		};
+		live.write_frame(at(301), payload()).unwrap();
+		let mut cut = fetched(Some(1));
+		let mut reader = cut.consume();
+		// A whole fetch of the group displaces the cut one from the slot.
+		let whole = fetched(None);
+		cut.write_frame(at(300), payload()).unwrap();
+		assert!(matches!(reader.read_frame().now_or_never(), Some(Ok(Some(_)))));
+		assert!(!listed(), "a displaced copy's read listed the track");
+		drop((live, whole));
+	}
+
+	/// A reclaim wakes nothing while it holds its session's reclaim lock: a waker may poll its
+	/// task inline, and a task that settles a write on the same session would reclaim again
+	/// and wait on that lock forever. Here a reclaim's taken-frame shed wakes a parked writer.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_reclaim_wakes_nothing_under_its_lock() {
+		struct Probe {
+			edges: cache::Edges,
+			woken: AtomicBool,
+			locked: AtomicBool,
+		}
+		impl std::task::Wake for Probe {
+			fn wake(self: Arc<Self>) {
+				self.locked.fetch_or(self.edges.reclaiming(), Ordering::SeqCst);
+				self.woken.store(true, Ordering::SeqCst);
+			}
+		}
+		const FRAME: usize = 10_000;
+		let pool = cache::Pool::unbounded();
+		let broadcast = session_broadcast(&pool, Some(25_000));
+		let a = Producer::new(broadcast.clone(), "a", Info::timed());
+		let mut b = Producer::new(broadcast.clone(), "b", Info::timed());
+		let frame = || bytes::Bytes::from(vec![0u8; FRAME]);
+
+		// a's reader takes its first frame, and its writer parks a frame ahead of that reader.
+		let mut group = a.append_next().unwrap();
+		let mut reader = a.consume().peek_group(group.start).expect("cached");
+		group.write_frame(group.key_time(), frame()).unwrap();
+		assert!(matches!(reader.read_frame().now_or_never(), Some(Ok(Some(_)))));
+		group.write_frame(group.key_time(), frame()).unwrap();
+		let probe = Arc::new(Probe {
+			edges: broadcast.edges.clone(),
+			woken: AtomicBool::new(false),
+			locked: AtomicBool::new(false),
+		});
+		let waiter = kio::Waiter::new(std::task::Waker::from(probe.clone()));
+		assert!(group.poll_paced(&waiter, 0, 1).is_pending());
+
+		// b's write passes the budget, and the reclaim sheds a's taken frame.
+		finished_group(&mut b, FRAME);
+		assert!(probe.woken.load(Ordering::SeqCst), "the shed left the writer parked");
+		assert!(
+			!probe.locked.load(Ordering::SeqCst),
+			"a waker ran under the reclaim lock"
+		);
+		drop(group);
 	}
 
 	/// The stored slices a publisher of a compressed group would send.

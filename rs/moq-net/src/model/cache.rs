@@ -811,6 +811,12 @@ impl Edges {
 		}))
 	}
 
+	/// Whether a reclaim holds the session's reclaim lock now.
+	#[cfg(test)]
+	pub(super) fn reclaiming(&self) -> bool {
+		self.0.as_ref().is_some_and(|inner| inner.reclaiming.try_lock().is_err())
+	}
+
 	/// Bytes the session's live edges bill now.
 	#[cfg(any(test, feature = "fuzz"))]
 	pub(super) fn used(&self) -> u64 {
@@ -849,6 +855,9 @@ impl Edges {
 		let Some(inner) = &self.0 else {
 			return;
 		};
+		// Opened first, so it drops last: a shed's wakes go out once the lock is released,
+		// since a woken task polled inline may settle a write here and reclaim again.
+		let _hold = kio::hold();
 		let _reclaiming = inner.reclaiming.lock().unwrap_or_else(PoisonError::into_inner);
 		while self.excess().is_some() {
 			let track = {
@@ -859,7 +868,10 @@ impl Edges {
 				let Some(track) = track.upgrade() else {
 					continue;
 				};
+				// Unlisted before the shed, so a frame a reader takes during it lists the
+				// track again.
 				*track.listed.lock().unwrap_or_else(PoisonError::into_inner) = None;
+				track.taken.store(false, Ordering::SeqCst);
 				track
 			};
 			track.shed_taken();
@@ -894,8 +906,9 @@ impl Edges {
 	}
 
 	/// List `track` as having taken frames to shed, or with `again`, move its entry to its
-	/// current rank and age if it has one. Drops the entries of tracks gone since once they
-	/// clearly outnumber the live ones, as [`Self::queue`] does.
+	/// current rank and age if it has one. Its `taken` flag changes only here, with the entry,
+	/// so the two always agree. Drops the entries of tracks gone since once they clearly
+	/// outnumber the live ones, as [`Self::queue`] does.
 	fn list(&self, track: &Arc<Track>, again: bool) {
 		let Some(inner) = &self.0 else {
 			return;
@@ -913,6 +926,7 @@ impl Edges {
 		let key = (track.rank(), track.seq.load(Ordering::Relaxed));
 		taken.insert((key, at), Arc::downgrade(track));
 		*listed = Some(key);
+		track.taken.store(true, Ordering::SeqCst);
 		drop(listed);
 		if taken.len() > 2 * inner.tracks.load(Ordering::Relaxed) + EDGE_SLACK {
 			taken.retain(|_, track| track.strong_count() > 0);
@@ -1010,8 +1024,9 @@ impl std::fmt::Debug for Edges {
 	}
 }
 
-/// Tells a group's session when its readers take frames it still holds, while it is the live
-/// edge, so a reclaim past the session's budget visits only edges with taken frames.
+/// Tells a group's session when its readers take frames it still holds, while the copy is
+/// itself the live edge, so a reclaim past the session's budget visits only edges with taken
+/// frames: a sibling that bills the edge from outside its slot is never visited.
 pub(super) struct Report {
 	track: Arc<Track>,
 	footprint: Arc<Footprint>,
@@ -1020,7 +1035,7 @@ pub(super) struct Report {
 impl Report {
 	/// A reader took a frame the group still holds.
 	pub(super) fn took(&self) {
-		if self.footprint.edge() {
+		if self.footprint.slot() {
 			self.track.took();
 		}
 	}
@@ -1102,8 +1117,8 @@ pub(super) struct Track {
 	// Whether the live edge has an entry in its session's order, so one that a reclaim shed
 	// queues again once it grows.
 	queued: AtomicBool,
-	// Whether a reader took a frame this track's groups still hold since a reclaim last
-	// visited it, so a reader lists the track once.
+	// Whether the session lists this track among its edges with taken frames, so a reader
+	// lists it once. Changed only under that list's lock, with `listed`.
 	taken: AtomicBool,
 	// Where the session lists this track among its edges with taken frames, if it does.
 	// Changed only under that list's lock.
@@ -1353,15 +1368,13 @@ impl Track {
 	fn took(self: &Arc<Self>) {
 		// SeqCst pairs with the fence in `shed_taken`: either this sees the track unlisted,
 		// or that shed sees the reader's progress.
-		if !self.taken.load(Ordering::SeqCst) && !self.taken.swap(true, Ordering::SeqCst) {
+		if !self.taken.load(Ordering::SeqCst) {
 			self.edges.list(self, false);
 		}
 	}
 
-	/// Shed the frames readers took of this track's live edge, unlisting it first, so a frame
-	/// a reader takes during the shed lists it again.
-	pub(super) fn shed_taken(&self) {
-		self.taken.store(false, Ordering::SeqCst);
+	/// Shed the frames readers took of this track's live edge, which a reclaim unlisted first.
+	fn shed_taken(&self) {
 		std::sync::atomic::fence(Ordering::SeqCst);
 		let Some(state) = self.state.upgrade() else {
 			return;
@@ -1450,9 +1463,9 @@ impl Track {
 			footprint: Arc::new(Footprint {
 				content: AtomicU64::new(0),
 				fixed: AtomicU64::new(ENTRY_OVERHEAD),
+				slot: AtomicBool::new(false),
 			}),
 			content: 0,
-			edge: false,
 			whole: false,
 			held: AtomicBool::new(false),
 		}
@@ -1733,12 +1746,15 @@ fn fixed_class(flags: u64) -> Class {
 pub(super) struct Footprint {
 	content: AtomicU64,
 	fixed: AtomicU64,
+	// Whether this copy is itself its track's cached live edge, not billed for a sibling that
+	// is. Atomic so a reader's progress can check it outside the group's lock.
+	slot: AtomicBool,
 }
 
 impl Footprint {
-	/// Whether the group bills its session as its track's live edge.
-	fn edge(&self) -> bool {
-		self.content.load(Ordering::Relaxed) & EDGE != 0
+	/// Whether this copy is itself its track's cached live edge.
+	fn slot(&self) -> bool {
+		self.slot.load(Ordering::Relaxed)
 	}
 
 	/// Count `n` more content bytes, returning whether they bill the session.
@@ -1882,14 +1898,14 @@ impl Siblings {
 			.find(|sibling| Arc::ptr_eq(&sibling.footprint, &charge.footprint))
 		{
 			Some(sibling) => {
-				sibling.edge = charge.edge;
+				sibling.edge = charge.footprint.slot();
 				sibling.whole = charge.whole;
 				sibling.held = charge.is_held();
 			}
 			None => siblings.push(Sibling {
 				track: track.clone(),
 				footprint: charge.footprint.clone(),
-				edge: charge.edge,
+				edge: charge.footprint.slot(),
 				whole: charge.whole,
 				held: charge.is_held(),
 			}),
@@ -1955,9 +1971,6 @@ pub(super) struct Charge {
 	footprint: Arc<Footprint>,
 	// The part of `bytes` in `footprint`: content, its fixed overhead left out.
 	content: u64,
-	// Whether this group is itself its track's cached live edge, as opposed to billing the
-	// session only for a sibling that is: see [`Siblings`].
-	edge: bool,
 	// Whether this copy finished the whole group, which makes its siblings whole too.
 	whole: bool,
 	// Whether a fill holds this copy for a reader, which holds its siblings too. Atomic, since a
@@ -2125,7 +2138,7 @@ impl Charge {
 		if let Some(track) = &self.track {
 			self.footprint.demote(track);
 		}
-		self.edge = false;
+		self.footprint.slot.store(false, Ordering::Relaxed);
 	}
 
 	/// Bill the group, its extras included, to its session's [`Edges`] as its track's cached
@@ -2136,7 +2149,7 @@ impl Charge {
 			&& !self.counted
 		{
 			self.footprint.promote(track);
-			self.edge = true;
+			self.footprint.slot.store(true, Ordering::Relaxed);
 		}
 	}
 

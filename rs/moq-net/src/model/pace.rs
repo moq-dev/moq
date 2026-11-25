@@ -106,8 +106,9 @@ impl Pace {
 		// SeqCst, to stay in the order `park` pairs with.
 		if self.parked.load(Ordering::SeqCst) && self.parked.swap(false, Ordering::SeqCst) {
 			let writer = self.writer.lock().unwrap_or_else(PoisonError::into_inner).take();
+			// Through kio, so a wake made under a hold (a reclaim's) waits for it.
 			if let Some(writer) = writer {
-				writer.wake();
+				kio::wake(writer);
 			}
 		}
 	}
