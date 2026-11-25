@@ -519,9 +519,10 @@ pub struct Config {
 	/// A credential every subscription carries, kept apart from the connection credential.
 	///
 	/// On moq-transport it rides each SUBSCRIBE, standalone FETCH, and TRACK_STATUS as its
-	/// `AUTHORIZATION TOKEN`; on moq-lite it rides AUTH like any other connect token. Renew a
-	/// connection's through `Connection::auth`: add the new token, then name it with
-	/// `set_subscribe_auth`, and each live subscription that carried the old one renews.
+	/// `AUTHORIZATION TOKEN`. On `moq-lite-07-wip` it rides AUTH like any other connect token,
+	/// and earlier moq-lite versions send nothing. Renew a connection's through
+	/// `Connection::auth`: add the new token, then name it with `set_subscribe_auth`, and each
+	/// live subscription that carried the old one renews.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	#[usage(
 		name = "connect-subscribe-token",
