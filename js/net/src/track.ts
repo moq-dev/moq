@@ -6492,7 +6492,7 @@ export class Subscriber {
 		return runs;
 	}
 
-	// In order, the group a waiting time start resolves to comes first: it starts at or before that
+	// In order, the group an unresolved time start resolves to comes first: it starts at or before that
 	// time, below `key`, and may still land at or past the read's floor `start`, until the budget
 	// gives up on it as on an owed group. Its landing, the answer placing the start, or that verdict
 	// wakes the read; a closed track places the start.
@@ -6501,7 +6501,7 @@ export class Subscriber {
 		const producer = this.#state.producer;
 		let waits = false;
 		const coverage = this.#coverage();
-		for (const time of this.#window.waitingIn(start, key)) {
+		for (const time of this.#window.unresolvedIn(start, key)) {
 			if (producer && wireFed(producer)) {
 				// With every key from the floor through the time accounted for, a group still to come
 				// containing it lies below the floor, which the read never hands out.

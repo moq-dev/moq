@@ -799,3 +799,22 @@ test("an ordered read whose window ends past a group it passed as stale reports 
 		expect(ordered.tryNextItem()).toBeUndefined();
 		expect(ordered.tryNextGroup()).toBeUndefined();
 	}));
+
+// A time start before every group held waits on its history lookup, and the group the lookup finds
+// comes before the later one held. Ports the Rust
+// `waiting_time_start::a_looked_up_time_start_reads_before_a_held_later_group`.
+test("a looked-up time start reads before a held later group", async () => {
+	const producer = new TrackProducer("test").accept({ maxAge: null });
+	const requests = producer.requests();
+	put(producer, 66n, false);
+	const ordered = producer
+		.subscribe(withMax({ delay: { max: null }, ranges: [{ start: 10n, end: 20n }, { start: 66n }] }))
+		.ordered();
+	expect(items(ordered)).toEqual([]);
+	const fill = await requests.requestedFill();
+	const group = fill?.accept(10n);
+	group?.writeFrame(textFrame("x", Timestamp.unscaled(10n)));
+	group?.finish();
+	expect(items(ordered)).toEqual(["group 10"]);
+	requests.close();
+});

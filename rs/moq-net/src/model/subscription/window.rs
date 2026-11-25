@@ -710,19 +710,25 @@ impl Window {
 		self.waiting.last().is_some_and(|&(time, _)| time > floor)
 	}
 
-	/// The times in `times` of the time starts still waiting on the groups held. The group
-	/// containing each starts at or before its time, so one at or past a read's floor and
-	/// below a group may still land between them.
-	pub fn waiting_in<R: ops::RangeBounds<u64> + 'static>(&self, times: R) -> impl Iterator<Item = u64> + '_ {
+	/// The times in `times` of the time starts not yet resolved: waiting on the groups held,
+	/// or on a lookup of the track's history. The group containing each starts at or before
+	/// its time, so one at or past a read's floor and below a group may still land between
+	/// them. Unsorted, and a time two spans share comes twice.
+	pub fn unresolved_in<R: ops::RangeBounds<u64> + Clone + 'static>(
+		&self,
+		times: R,
+	) -> impl Iterator<Item = u64> + '_ {
 		let from = match times.start_bound() {
 			ops::Bound::Included(&start) => start,
 			ops::Bound::Excluded(&start) => start.saturating_add(1),
 			ops::Bound::Unbounded => 0,
 		};
-		self.waiting
-			.range((from, 0)..)
-			.map(|&(time, _)| time)
-			.take_while(move |time| times.contains(time))
+		let looked = times.clone();
+		let waiting =
+			(self.waiting.range((from, 0)..).map(|&(time, _)| time)).take_while(move |time| times.contains(time));
+		let looking =
+			(self.looking.range((from, 0)..).map(|&(time, _)| time)).take_while(move |time| looked.contains(time));
+		waiting.chain(looking)
 	}
 
 	/// Resolve what the groups now held settle: live joins once `latest` exists or an
@@ -815,10 +821,11 @@ impl Window {
 		self.groups.contains(key)
 	}
 
-	/// The lowest group in range, `None` while an anchor waits. Nothing in range floors
-	/// nowhere: group 0.
+	/// The lowest group in range, `None` while an anchor waits, a time start's lookup included:
+	/// it may resolve to a group below every one in range. Nothing in range floors nowhere:
+	/// group 0.
 	pub fn floor(&self) -> Option<u64> {
-		match self.is_pending() || self.unplaced() {
+		match self.is_pending() || self.unplaced() || !self.looking.is_empty() {
 			true => None,
 			false => Some(self.groups.lowest().unwrap_or(0)),
 		}

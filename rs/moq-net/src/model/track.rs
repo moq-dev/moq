@@ -11082,14 +11082,15 @@ impl Cursor {
 		})
 	}
 
-	/// Pending while a time start in `times` waits to be placed and the group containing it,
-	/// at or before its time and so below `times.end`, may still land at or past the read's
-	/// floor `times.start` within the drift budget. Its landing, the answer placing the start,
+	/// Pending while a time start in `times` waits to be placed, on the groups held or a lookup
+	/// of the track's history, and the group containing it, at or before its time and so below
+	/// `times.end`, may still land at or past the read's floor `times.start` within the drift
+	/// budget. Its landing, the answer placing the start,
 	/// the grace for a gap below it folding, or the budget giving up on it wakes us; a closed
 	/// track places it. `Ready(true)` when a change placed one meanwhile, so the caller looks
 	/// again.
 	fn poll_time_start(&mut self, times: ops::Range<u64>, drift: &Drift, waiter: &kio::Waiter) -> Poll<bool> {
-		if self.filter.window.is_settled() || self.filter.window.waiting_in(times.clone()).next().is_none() {
+		if self.filter.window.is_settled() || self.filter.window.unresolved_in(times.clone()).next().is_none() {
 			return Poll::Ready(false);
 		}
 		let window = &self.filter.window;
@@ -11100,7 +11101,7 @@ impl Cursor {
 				// An unjudgeable old gap cannot hold a finite read, as for an owed group.
 				let floor = times.start.max(drift.budget.floor(state.live_floor));
 				let grace = state.arrival_grace();
-				for time in window.waiting_in(floor..times.end) {
+				for time in window.unresolved_in(floor..times.end) {
 					// With every key from the floor through the time accounted for, a group still
 					// to come containing it lies below the floor, which the read never hands out.
 					let unaccounted = match state.anchors.received() {
@@ -11135,7 +11136,7 @@ impl Cursor {
 		let window = &self.filter.window;
 		if waited
 			.iter()
-			.any(|&time| window.waiting_in(time..=time).next().is_none())
+			.any(|&time| window.unresolved_in(time..=time).next().is_none())
 		{
 			return Poll::Ready(true);
 		}
