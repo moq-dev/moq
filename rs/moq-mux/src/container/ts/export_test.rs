@@ -10618,28 +10618,40 @@ async fn a_follower_keeps_a_return_awaiting_its_catalog_when_a_stitch_goes() {
 	assert_eq!(start.elapsed(), follow);
 }
 
-/// Each track subscription joins live the whole delay back and states it as its max, so a relay
-/// holds a group as long as the export could still play it.
+/// Each track subscription states the whole delay as its max, so a relay holds a group as long as
+/// the export could still play it. A live export joins at the edge, where it starts reading, so no
+/// backlog it would skip crowds out the newest group; a replay reaches back the whole delay.
 #[tokio::test(start_paused = true)]
 async fn a_subscription_states_the_whole_delay() {
-	let origin = crate::source::produce_origin();
-	let (live, mut catalog) = publish_bare(&origin, None);
-	let mut audio = aac_rendition(&mut live.broadcast().clone(), &mut catalog, "a.aac");
-	write_aac(&mut audio, 0);
-	let delay = Duration::from_secs(2);
-	let mut export = open_export(crate::source::resolved(&origin, "live").await, delay)
-		.await
-		.unwrap();
-	let _ = kio::clock::timeout(Duration::from_secs(1), export.next()).await;
-	let subscription = audio.track().subscription().unwrap();
-	assert_eq!(
-		subscription.ranges,
-		[moq_net::track::Range::from(moq_net::track::Start::Live {
-			min: Some(delay),
-			max: Some(delay),
-		})]
-	);
-	drop((live, catalog));
+	for replay in [false, true] {
+		let origin = crate::source::produce_origin();
+		let (live, mut catalog) = publish_bare(&origin, None);
+		let mut audio = aac_rendition(&mut live.broadcast().clone(), &mut catalog, "a.aac");
+		write_aac(&mut audio, 0);
+		let delay = Duration::from_secs(2);
+		let export = open_export(crate::source::resolved(&origin, "live").await, delay)
+			.await
+			.unwrap();
+		let mut export = match replay {
+			true => export.with_replay(),
+			false => export,
+		};
+		let _ = kio::clock::timeout(Duration::from_secs(1), export.next()).await;
+		let subscription = audio.track().subscription().unwrap();
+		let min = match replay {
+			true => delay,
+			false => Duration::ZERO,
+		};
+		assert_eq!(
+			subscription.ranges,
+			[moq_net::track::Range::from(moq_net::track::Start::Live {
+				min: Some(min),
+				max: Some(delay),
+			})],
+			"replay: {replay}"
+		);
+		drop((live, catalog));
+	}
 }
 
 /// A program that ends while stitching, then returns after the unresolved replacement goes,

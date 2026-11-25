@@ -4595,7 +4595,8 @@ fn video_kind(config: &VideoConfig, name: &str) -> Result<Kind> {
 }
 
 /// The delay a track subscription states for an export running `delay` behind: all of it, as both
-/// bounds, so a relay resets a group only once it is that old.
+/// bounds, so a relay resets a group only once it is that old and a replay reaches back that far.
+/// A live start joins at the edge whatever the min ([`ExportSource::live`]).
 pub(super) fn subscribed(delay: Duration) -> crate::container::Delay {
 	crate::container::Delay::default().with_min(delay).with_max(delay)
 }
