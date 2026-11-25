@@ -897,6 +897,9 @@ pub(crate) struct TrackState {
 	// Bumped whenever an eviction lands in an inbox, so a reader with nothing new skips
 	// its own lock.
 	evictions: u64,
+	// Bumped as each cached group is evicted, landed in an inbox or not; see
+	// [`Consumer::evicted`].
+	evicted_groups: u64,
 	// Bumped as each group is cached, stamped on its slot: a reader judged a slot cached
 	// only if it was cached by the count the reader last judged at.
 	cached: u64,
@@ -1831,6 +1834,7 @@ impl TrackState {
 	fn evict_group(&mut self, key: u64, abort: impl Into<group::Abort>) {
 		let slot = self.uncache(key).expect("a cached group");
 		slot.abort(abort);
+		self.evicted_groups += 1;
 		let landed = self
 			.inboxes
 			.get_mut()
@@ -7660,6 +7664,15 @@ impl Consumer {
 				false => Poll::Pending,
 			}
 		})
+	}
+
+	/// How many cached groups were evicted here so far, so a reader that left a group to this
+	/// copy to read learns it may be gone.
+	pub(super) fn evicted(&self) -> u64 {
+		if let Some(serving) = self.serving() {
+			return serving.evicted();
+		}
+		self.with_state(|state| state.map_or(0, |state| state.read().evicted_groups))
 	}
 
 	/// How many groups arrived here so far; see [`Self::poll_arrived`].
