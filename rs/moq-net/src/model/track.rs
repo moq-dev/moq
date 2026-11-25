@@ -14324,7 +14324,7 @@ impl Request {
 	/// readers already hold: a different `info` aborts the track with [`Error::Duplicate`],
 	/// so those readers end and a later lookup asks for the track afresh. Such a track also
 	/// keeps the groups its last producer finished, so continue past them, as
-	/// [`Producer::append_next`] does, rather than numbering from zero again. If the track was
+	/// [`Producer::append_group`] does, rather than numbering from zero again. If the track was
 	/// already aborted, or is aborted that way, the returned [`Producer`] is inert: writes
 	/// fail with the abort error, as if it had been aborted immediately after accepting.
 	pub fn accept(self, info: impl Into<Option<Info>>) -> Producer {
