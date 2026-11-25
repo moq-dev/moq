@@ -1406,13 +1406,14 @@ impl Holdings for TrackState {
 		// The newest group's newest frame, held, expired in place by an ended track's sweep, or
 		// let go of by the cache: its publisher reached it. An older group's later frames don't
 		// move it, held or not.
+		// Down to the held edge at most, past groups that present nothing.
 		let expired = self
 			.lookup
 			.iter()
 			.rev()
-			.find(|(_, slot)| slot.succeeds())
-			.filter(|(_, slot)| !slot.is_live() && slot.group.is_started())
-			.and_then(|(&key, slot)| Some((key, slot.group.latest().or_else(|| self.started_at(slot))?)));
+			.take_while(|(_, slot)| !slot.is_shown())
+			.filter(|(_, slot)| slot.succeeds() && slot.group.is_started())
+			.find_map(|(&key, slot)| Some((key, slot.group.latest().or_else(|| self.started_at(slot))?)));
 		let newest = self
 			.live_edge(&Servable::ALL)
 			.map(|edge| (edge.key, edge.timestamp))
@@ -17531,8 +17532,9 @@ mod test {
 		assert!(held.poll_expired(&waiter), "the successor arrived a budget ago");
 	}
 
-	/// A live join on an ended track measures the edge by the newest group even once its sweep
-	/// expired that group in place while an older one stays cached.
+	/// A live join on an ended track measures the edge by the newest group with a frame even
+	/// once its sweep expired that group, and an empty one after it, in place while an older
+	/// one stays cached.
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_join_measures_an_edge_expired_in_place() {
@@ -17543,6 +17545,11 @@ mod test {
 				.write_frame(Timestamp::from_millis(millis).unwrap(), &b"x"[..])
 				.unwrap();
 		}
+		producer
+			.create_group(group::Info { start: 4000 })
+			.unwrap()
+			.finish()
+			.unwrap();
 		let state = producer.state.downgrade();
 		let consumer = producer.consume();
 		let mut subscriber = producer.subscribe(Subscription::default().with_start(0).with_max(None));
@@ -17563,9 +17570,10 @@ mod test {
 		pool.step(cache::DEFAULT_EXPIRY / 2 + Duration::from_secs(2));
 		pool.sweep();
 		assert_eq!(
-			state.read(|state| [1000, 2000, 3000].map(|key| state.lookup.get(&key).is_some_and(Slot::is_aborted))),
-			Some([false, false, true]),
-			"only 3000 expired in place"
+			state
+				.read(|state| [1000, 2000, 3000, 4000].map(|key| state.lookup.get(&key).is_some_and(Slot::is_aborted))),
+			Some([false, false, true, true]),
+			"only 3000 and 4000 expired in place"
 		);
 
 		let mut ordered = consumer
