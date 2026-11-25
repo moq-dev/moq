@@ -128,6 +128,24 @@ pub(crate) fn multistream_activity(packet: &[u8], streams: u8, in_dtx: bool) -> 
 	}
 }
 
+/// Whether every stream in a multistream packet is coded in CELT-only mode (RFC 6716
+/// §3.1: TOC configurations 16 to 31), rather than SILK or hybrid.
+pub(crate) fn celt_only(mut packet: &[u8], streams: u8) -> bool {
+	for index in 0..streams {
+		if packet.first().is_none_or(|toc| toc >> 3 < 16) {
+			return false;
+		}
+		if index + 1 == streams {
+			return true;
+		}
+		let Some((_, offset)) = self_delimited(packet) else {
+			return false;
+		};
+		packet = &packet[offset..];
+	}
+	false
+}
+
 /// Whether every stream in a multistream packet coded no audio.
 fn streams_carry_nothing(mut packet: &[u8], streams: u8) -> bool {
 	for index in 0..streams {
@@ -403,6 +421,14 @@ mod tests {
 		assert_eq!(multistream_activity(&code3, 2, false), Activity::Dtx);
 		let code3_payload = [0xfb, 0x03, 0x01, 0xaa, 0xbb, 0xcc, 0xf8];
 		assert_eq!(multistream_activity(&code3_payload, 2, false), Activity::Active);
+		// Every stream above is CELT-only; a SILK stream anywhere is not.
+		assert!(celt_only(&dtx, 4));
+		assert!(celt_only(&code3_payload, 2));
+		assert!(!celt_only(&[0xfc, 0x00, 0x48, 0x00, 0xf8], 3));
+		assert!(!celt_only(&[0xfc, 0x00, 0xfc, 0x00, 0xf8, 0x00, 0x78], 4));
+		assert!(celt_only(&[0xf8], 1));
+		assert!(!celt_only(&[0x48], 1));
+		assert!(!celt_only(&[], 1));
 		// Loss still carries the previous classification, whatever the layout.
 		assert_eq!(multistream_activity(&[], 4, true), Activity::Dtx);
 		assert_eq!(multistream_activity(&[], 4, false), Activity::Active);
