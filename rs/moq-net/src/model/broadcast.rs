@@ -2933,6 +2933,47 @@ mod test {
 		);
 	}
 
+	/// A replacement that only recreates the open group, or opens a frame it never commits, has
+	/// produced nothing: dropping it while read ends its readers with `Dropped` instead of asking
+	/// again, and keeps where its predecessor stopped.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_renewal_recreating_a_group_without_a_frame_is_not_renewed_again() {
+		let at = |millis| crate::Timestamp::from_millis(millis).unwrap();
+		let producer = Info::new().produce();
+		let mut dynamic = producer.requests();
+		let consumer = producer.consume();
+		let track = producer.create_track("video", crate::track::Info::timed()).unwrap();
+		let handle = track.consume();
+		let mut reader = consumer.track("video").unwrap().subscribe(None).await.unwrap();
+		let mut open = track.append_next().unwrap();
+		open.write_frame(at(0), b"a".as_slice()).unwrap();
+		drop((track, open));
+
+		let next = dynamic.assert_request().accept(crate::track::Info::timed());
+		let again = next.create_group(crate::group::Info { start: 0 }).unwrap();
+		let partial = next
+			.append_next()
+			.unwrap()
+			.create_frame(crate::frame::Info {
+				size: 2,
+				timestamp: at(2),
+			})
+			.unwrap();
+		drop((next, again, partial));
+		dynamic.assert_no_request();
+		assert_eq!(
+			handle.resume_position(),
+			Some(crate::track::Position { group: 0, frame: 1 })
+		);
+		loop {
+			match reader.recv_group().await {
+				Ok(Some(_)) => continue,
+				result => break assert!(matches!(result, Err(Error::Dropped)), "{:?}", result.err()),
+			}
+		}
+	}
+
 	/// A renewal whose producer appended nothing and dropped while still read ends its readers
 	/// with `Dropped` rather than asking again, so a handler failing at once cannot loop.
 	#[kio::test]

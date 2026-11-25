@@ -700,7 +700,8 @@ pub(crate) struct TrackState {
 	// before acceptance, so the two are deliberately separate.
 	publication: Publication,
 	// Set when the track is asked for again because its last producer dropped while read,
-	// and cleared once the live feed takes a group.
+	// and cleared once a live group commits a frame or finishes: creating one is not enough,
+	// so a producer that recreates its predecessor's open group and fails is not asked again.
 	renewal: Option<Renewal>,
 
 	// The broadcast this track belongs to. Supplies the cache pool its groups charge
@@ -3508,8 +3509,6 @@ impl TrackState {
 			self.latest_group = Some(key);
 		}
 		if visible {
-			// The live feed produced, even into a group it recreated at a key it had.
-			self.renewal = None;
 			if let Feed::Live { first, .. } = &mut self.feed {
 				first.get_or_insert(key);
 			}
@@ -3609,6 +3608,24 @@ impl TrackState {
 		}
 		self.wake_landed(key);
 		matches!(self.feed, Feed::Answered { from } if key >= from)
+	}
+
+	/// Whether the track awaits production since it was asked for again, and `group` is the
+	/// live feed's group at its key, so its first commit counts.
+	pub(super) fn renews(&self, group: &group::Handle) -> bool {
+		self.renewal.is_some()
+			&& self
+				.lookup
+				.get(&group.start)
+				.is_some_and(|slot| slot.visible && slot.group.is_clone(group))
+	}
+
+	/// The live feed's `group` committed a frame or finished: the track produced since it was
+	/// last asked for again.
+	pub(super) fn produced(&mut self, group: &group::Handle) {
+		if self.renews(group) {
+			self.renewal = None;
+		}
 	}
 
 	/// Wake the reads a group landing at `key` succeeds.
@@ -4289,7 +4306,7 @@ impl TrackState {
 		{
 			return Some(resume);
 		}
-		// Likewise while nothing was appended since the track was asked for again.
+		// Likewise while nothing was produced since the track was asked for again.
 		if let Some(renewal) = self.renewal {
 			return renewal.resume;
 		}
