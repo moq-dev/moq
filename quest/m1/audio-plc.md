@@ -1,41 +1,49 @@
-# [S] Native audio conceals short losses
+# [S] Native audio conceals SILK and hybrid Opus losses
 
 ## Goal
 
-When groups are lost, `moq_audio::decode::Consumer` fills the gap with Opus
-packet loss concealment (PLC) instead of resetting the decoder to silence.
-Gaps the publisher declared, such as a pause or DTX silence, still play as
-silence. Other codecs keep today's behavior.
+When groups are lost on a SILK or hybrid Opus track (speech, the `Voice`
+encoder kind, low bitrates), `moq_audio::decode::Consumer` fills the gap with
+packet loss concealment (PLC) instead of a silent `Read::Gap`, as it already
+does for CELT-only Opus.
 
 Not here: `@moq/watch`, since WebCodecs' `AudioDecoder` has no PLC or FEC
 input; Opus in-band FEC (LBRR) and DRED.
 
 ## Plan
 
-Decided 2026-11-24 (maintainer, /quest-plan after a group-duration sweep).
-On real speech (`rs/moq-audio/src/decode/test_data/opus-speech.f32`), a lost
-frame played as silence measured 47 dB log-spectral distance from the
-original. PLC brought 20 to 60 ms gaps down to 22 to 28 dB, and libopus fades
-its concealment out past about 100 ms. Opus in-band FEC was rejected: within a
-QUIC stream, frame N never arrives without N-1, so FEC could only cover the
-frame just before a group boundary. It also takes bits from clean speech.
+CELT-only Opus already conceals: the consumer decodes each lost packet with
+`decode(&[])`, up to `CONCEAL_MAX` (100 ms), and reads only the rest as a gap.
+A declared end is never concealed. See `conceal` in
+`rs/moq-audio/src/decode/consumer.rs`.
 
-Today the `Encoded::Gap` arm in `rs/moq-audio/src/decode/consumer.rs` calls
-`restart()` and emits `Read::Gap`. `decoder.rs` already supports
-`decode(&[])` for PLC.
+SILK and hybrid were left out because the bundled decoder, unsafe-libopus
+0.2.0, conceals them at full scale: c2rust turned `silk_SAT16`'s lower bound
+`(opus_int16)0x8000` into `+0x8000`, so every concealed sample clamps to
++32767. The bug sits in three sites in `silk/PLC.rs` and three in `silk/CNG.rs`.
+C libopus 1.6.1 conceals the same packets normally, fading to -40 dB within
+about 80 ms. The fix for master is
+[DCNick3/unsafe-libopus#3](https://github.com/DCNick3/unsafe-libopus/pull/3), open
+since 2026-07 with no release since 2024-11. Until a fixed decoder lands,
+`Libopus` refuses `decode(&[])` after a SILK or hybrid packet, and
+`Backend::conceals` reports it.
 
-- Tell lost media apart from declared silence. A gap past a declared end is
-  the fresh encoder's silence, and so is a pre-lite-07 skip across a pause
-  (see the comment on that arm). Those keep the reset.
-- For lost media, conceal each missing frame with `decode(&[])` and let
-  libopus fade it. Cap concealment near 100 ms and fill the rest with
-  silence, so a whole 200 ms lost group doesn't ring on. Confirm the cap by
-  measuring distance from the original, not by ear.
-- Keep the warmup and decoder-boundary rules for the packet after the gap
-  intact. Test with a mocked clock.
+The same bug plays every SILK or hybrid DTX packet at full scale, since libopus
+decodes an empty frame as a loss: measured with the `Voice` encoder kind, which
+enables DTX, every 1-byte silence packet decoded to a 1.0 peak. moq-audio's own
+producer declares an end at silence instead of publishing those packets, but any
+publisher that forwards DTX packets (such as WebRTC Opus with DTX on) would
+reach `moq play` this way; unverified end to end.
 
-Public API: none (behavior change). Wire: none.
+Decided (maintainer, 2026-11-25): don't wait for an upstream release. Vendor
+whichever Opus implementation fixes this, such as unsafe-libopus 0.2.0 with
+DCNick3/unsafe-libopus#3 applied (in-tree or under a moq-dev crate name, since
+`[patch.crates-io]` doesn't reach crates.io users of moq-audio) or another
+decoder. The fix must cover both bugs: SILK and hybrid concealment, and the
+full-scale noise SILK DTX packets play in normal playback today. Add a
+regression test for the DTX case alongside the concealment ones.
 
-## Related
-
-- [Audio groups span 200 ms by default](/quest/m1/audio-group-200ms.md) - a lost group is now 200 ms
+Once the decoder conceals SILK correctly, delete the `celt` gate in
+`rs/moq-audio/src/decode/backend/libopus.rs` and `opus::track_celt`. Then flip
+`opus_silk_loss_stays_a_gap` and `opus_refuses_to_conceal_after_silk` to
+expect concealment that decays rather than saturates.
