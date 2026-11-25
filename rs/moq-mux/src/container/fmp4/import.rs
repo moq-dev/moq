@@ -2224,6 +2224,12 @@ mod tests {
 	}
 
 	fn initialized(passthrough: bool) -> (Import, u32, moq_net::cache::Pool) {
+		let (import, ids, pool) = initialized_tracks(passthrough, 1);
+		(import, ids[0], pool)
+	}
+
+	/// An import of `count` copies of the test file's audio track, returning their ids.
+	fn initialized_tracks(passthrough: bool, count: u32) -> (Import, Vec<u32>, moq_net::cache::Pool) {
 		use mp4_atom::Decode;
 		let mut info = moq_net::broadcast::Info::new();
 		info.pool = moq_net::cache::Pool::new(moq_net::cache::Config::default().with_capacity(1024 * 1024));
@@ -2236,19 +2242,42 @@ mod tests {
 		let mut moov = Moov::decode(&mut data).unwrap();
 		moov.trak.retain(|trak| trak.mdia.hdlr.handler.as_ref() == b"soun");
 		let id = moov.trak[0].tkhd.track_id;
+		let ids: Vec<u32> = (0..count).map(|i| id + 100 * i).collect();
+		for &copy in &ids[1..] {
+			let mut trak = moov.trak[0].clone();
+			trak.tkhd.track_id = copy;
+			moov.trak.push(trak);
+			if let Some(mvex) = moov.mvex.as_mut()
+				&& let Some(trex) = mvex.trex.iter().find(|trex| trex.track_id == id).cloned()
+			{
+				mvex.trex.push(mp4_atom::Trex { track_id: copy, ..trex });
+			}
+		}
 		import.init(moov).unwrap();
-		(import, id, pool)
+		(import, ids, pool)
 	}
 
 	// Only the headers are supplied. The declared mdat may never finish.
 	fn media_header(id: u32, decode_time: u64, offsets: &[usize], size: u32, len: Option<usize>) -> Vec<u8> {
+		media_header_lasting(id, decode_time, 1024, offsets, size, len)
+	}
+
+	/// A [`media_header`] whose samples each last `duration` ticks.
+	fn media_header_lasting(
+		id: u32,
+		decode_time: u64,
+		duration: u32,
+		offsets: &[usize],
+		size: u32,
+		len: Option<usize>,
+	) -> Vec<u8> {
 		let mut moof = Moof {
 			mfhd: Default::default(),
 			traf: vec![mp4_atom::Traf {
 				tfhd: mp4_atom::Tfhd {
 					track_id: id,
 					default_sample_size: Some(size),
-					default_sample_duration: Some(1024),
+					default_sample_duration: Some(duration),
 					..Default::default()
 				},
 				tfdt: Some(mp4_atom::Tfdt {
@@ -2740,6 +2769,39 @@ mod tests {
 			let expected = (bytes * 8) as u64 * 44_100 / (50 * 1024);
 			assert_eq!(bitrate, Some(expected), "passthrough: {passthrough}");
 		}
+	}
+
+	/// A fragment overlapping the group the join closed publishes its sample at that group's end,
+	/// past where the fragment itself ends. When another audio track then fills the join, the
+	/// first track's group closes past that sample rather than failing the import.
+	#[test]
+	fn an_overlapping_splice_closes_with_another_track() {
+		const SIZE: usize = 64;
+		let (mut import, ids, _) = initialized_tracks(false, 2);
+		let (a, b) = (ids[0], ids[1]);
+		let mut consumer = replay(&import.tracks[&a].output);
+		let mut fragment = |id: u32, decode_time: u64, duration: u32| {
+			import
+				.decode(&media_header_lasting(
+					id,
+					decode_time,
+					duration,
+					&[0],
+					SIZE as u32,
+					Some(SIZE),
+				))
+				.unwrap();
+			import.decode(&[0xA5; SIZE]).unwrap();
+		};
+		// 100 ms at 44.1 kHz fills the join and closes the group at its end.
+		fragment(a, 0, 4410);
+		// Overlaps that group, so its sample publishes at 4410, past this fragment's end.
+		fragment(a, 2000, 1000);
+		// The other track fills the join that started at 2000.
+		fragment(b, 2000, 4410);
+		let _finished = import.finish().unwrap();
+
+		assert_eq!(groups(&mut consumer), [(0, Some(1)), (start(&consumer, 4410), Some(1))]);
 	}
 
 	/// Audio-only fragments of one 23 ms sample, as ffmpeg's `-frag_duration` writes them, share a
