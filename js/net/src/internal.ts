@@ -659,7 +659,7 @@ export interface ResumeSource {
 	 * The next group not in `delivered`, in arrival or sequence order, without waiting. With
 	 * `dispositions`, a run no copy may still deliver is reported once as a `drop`.
 	 */
-	tryGroup(ordered: boolean, delivered: Delivered, dispositions: boolean): Recv;
+	tryGroup(ordered: boolean, delivered: Delivered, dispositions: boolean, admit?: bigint): Recv;
 	/**
 	 * The next run no copy may still deliver, reported once as a `drop`, without taking a group.
 	 * Below `passing`, which a key-order read is about to pass, no copy can deliver one later.
@@ -1153,8 +1153,11 @@ export const hooks: {
 	resolveRanges: (subscriber: Subscriber, subscription: Subscription) => (Resolved | undefined)[];
 	/** The lowest buffered candidate, which an ordered take may wait below; `floor` passes keys taken on other copies. */
 	peekGroup: (subscriber: Subscriber, ordered: boolean, floor?: bigint) => bigint | undefined;
-	/** Take the next group in sequence order without waiting, as {@link tryRecvGroup} does in arrival order. */
-	tryNextGroup: (subscriber: Subscriber, floor?: bigint) => Recv;
+	/**
+	 * Take the next group in sequence order without waiting, as {@link tryRecvGroup} does in arrival
+	 * order. One at or past `admit` stays next, and the read reports idle.
+	 */
+	tryNextGroup: (subscriber: Subscriber, floor?: bigint, admit?: bigint) => Recv;
 	/** Whether a buffered group in `[start, end)` that `delivered` lacks still waits to be read. */
 	hasUnreadGroup: (subscriber: Subscriber, start: bigint, end: bigint | undefined, delivered: Delivered) => boolean;
 	/**

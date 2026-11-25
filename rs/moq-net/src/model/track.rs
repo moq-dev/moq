@@ -12981,6 +12981,15 @@ impl Subscriber {
 		}
 	}
 
+	/// Whether the track closed: aborted, or every producer gone, so nothing lands or places
+	/// any more.
+	fn is_closed(&self) -> bool {
+		match &self.inner {
+			Inner::Plain(cursor) => cursor.state.read().is_closed(),
+			Inner::Resume(_, logical) => logical.state.read().is_closed(),
+		}
+	}
+
 	/// Whether `accounted` holds every group from `from` on that this subscriber's ranges
 	/// and [`Self::with_range`] bounds name, once every range has a resolved end: `false`
 	/// while one stays open, counts back from a group not seen yet, or ends at a time not
@@ -13848,17 +13857,23 @@ impl Ordered {
 			let key = group.start;
 			// A range moved off it with nothing in range above waits for the range to widen
 			// again, and the read waits or ends as it does for capped ranges.
-			let mut parked = false;
+			// What parking on the cursor found: `Some(closed)` once it parked, or ended with the
+			// track closed.
+			let mut parked: Option<bool> = None;
 			loop {
 				match self.inner.held(key, group.end()) {
 					Held::Keep => return Poll::Ready(Ok(Some(*group))),
 					// Neither handed out nor passed until the range places: it may or may not name
-					// it, and the read never goes back. Its cap or the track's end does not end the
-					// read meanwhile: an upstream still answers where the start lies, and a closed
-					// track places it.
-					Held::Placing if parked => {
+					// it, and the read never goes back. Its cap or the track's declared end does not
+					// end the read meanwhile, since an upstream still answers where the start lies;
+					// the track closing does, as nothing can place it any more. The group stays
+					// held for the ranges to judge again.
+					Held::Placing if let Some(closed) = parked => {
 						self.held = Some(group);
-						return Poll::Pending;
+						return match closed {
+							true => Poll::Ready(Ok(None)),
+							false => Poll::Pending,
+						};
 					}
 					Held::Placing => {
 						// Parked on whatever the cursor waits on, refusing every group past it, and
@@ -13867,7 +13882,8 @@ impl Ordered {
 						let _ = group.poll_closed(waiter);
 						let admit = (ops::Bound::Unbounded, ops::Bound::Excluded(key));
 						match self.inner.poll_group_in(true, admit, waiter) {
-							Poll::Pending | Poll::Ready(Ok(None)) => parked = true,
+							Poll::Pending => parked = Some(false),
+							Poll::Ready(Ok(None)) => parked = Some(self.inner.is_closed()),
 							// One below it goes first, as the read never goes back.
 							Poll::Ready(Ok(Some(lower))) => {
 								self.held = Some(group);
@@ -18747,6 +18763,33 @@ mod test {
 		producer.time_starts([(5, Some(2))]);
 		assert!(woken.load(Ordering::SeqCst), "the answer wakes the read");
 		assert_eq!(held_next(&mut ordered), Some(Ok(2)));
+	}
+
+	/// A held group whose live join never places ends the read once the track closes: no
+	/// answer can place it any more, so the read neither hands it out nor waits forever.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_held_group_ends_the_read_once_the_track_closes_unplaced() {
+		let producer = untimed_producer();
+		producer.received();
+		producer.anchored();
+		let mut ordered = producer.subscribe(Subscription::default().with_max(None)).ordered();
+		framed(&producer, 0, 1).finish().unwrap();
+		producer.drop_groups(1..2, StreamError::NotFound);
+		framed(&producer, 2, 1).finish().unwrap();
+		assert_eq!(held_next(&mut ordered), Some(Ok(0)));
+		assert_eq!(held_next(&mut ordered), Some(Err(1..2)));
+		// Lagging further than any group here has aged, so only upstream may place it.
+		let join = Range::from(Start::Live {
+			min: Some(Duration::from_secs(60)),
+			max: None,
+		});
+		ordered
+			.update(Subscription::default().with_ranges([join]).with_max(None))
+			.unwrap();
+		assert_eq!(held_next(&mut ordered), None, "the join may start at group 2");
+		drop(producer.finish().unwrap());
+		assert!(matches!(ordered.next_item().now_or_never(), Some(Ok(None))));
 	}
 
 	/// A held group waiting on a time start wakes the read when it finishes at an end the

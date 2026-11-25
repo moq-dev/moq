@@ -465,8 +465,8 @@ function subscribe(wire: BroadcastWire, name: string, subscription: track.Subscr
  * Take a copy's next group, in sequence or arrival order. With `dispositions`, a run the copy gives
  * up on the way comes back first; see {@link Dispositions}.
  */
-function take(copy: Copy, ordered: boolean, floor?: bigint, dispositions: Dispositions = false): Recv {
-	return ordered ? hooks.tryNextGroup(copy.sub, floor) : hooks.tryRecvGroup(copy.sub, dispositions);
+function take(copy: Copy, ordered: boolean, floor?: bigint, dispositions: Dispositions = false, admit?: bigint): Recv {
+	return ordered ? hooks.tryNextGroup(copy.sub, floor, admit) : hooks.tryRecvGroup(copy.sub, dispositions);
 }
 
 /** Where `copy` stopped offering the groups below, which only a backfill of its route reads. */
@@ -1391,7 +1391,7 @@ class Reader implements ResumeSource {
 		return (!this.route.concluded && copyFailed(copy)) || copy.backfill === true;
 	}
 
-	tryGroup(ordered: boolean, delivered: Delivered, dispositions: boolean): Recv {
+	tryGroup(ordered: boolean, delivered: Delivered, dispositions: boolean, admit?: bigint): Recv {
 		this.#delivered = delivered;
 		this.sync();
 		this.#learnEnd();
@@ -1408,11 +1408,11 @@ class Reader implements ResumeSource {
 		// lower group that truly arrives later.
 		let owing: Copy[];
 		for (;;) {
-			const lowest = this.#lowest(ordered, delivered);
+			const lowest = this.#lowest(ordered, delivered, admit);
 			owing = lowest.owing;
 			const next = lowest.next;
 			if (!next) break;
-			const recv = this.#take(next, ordered, dispositions);
+			const recv = this.#take(next, ordered, dispositions, admit);
 			if (recv.kind === "drop") {
 				const dropped = this.#tryDrop(delivered);
 				if (dropped) return dropped;
@@ -1454,7 +1454,7 @@ class Reader implements ResumeSource {
 					held.add(copy);
 					break;
 				}
-				const recv = this.#take(copy, ordered, dispositions);
+				const recv = this.#take(copy, ordered, dispositions, admit);
 				if (recv.kind === "drop") {
 					const dropped = this.#tryDrop(delivered);
 					if (dropped) return dropped;
@@ -1511,7 +1511,7 @@ class Reader implements ResumeSource {
 		// ends. Mirrors the Rust `Reader::poll_lowest`.
 		const backfill = owed && this.#resumed && this.#window().floor() !== undefined;
 		if (end.kind === "idle" && (this.route.generation !== generation || backfill)) {
-			return this.tryGroup(ordered, delivered, dispositions);
+			return this.tryGroup(ordered, delivered, dispositions, admit);
 		}
 		return end;
 	}
@@ -1710,10 +1710,10 @@ class Reader implements ResumeSource {
 	// returns first what its budget skips on the way, which is queued, so a publisher hears of it
 	// before the group, as from a direct reader; only the serving copy's verdicts count. A failed
 	// group still comes out, to continue through its recovery.
-	#take(copy: Copy, ordered: boolean, dispositions: boolean): Recv {
+	#take(copy: Copy, ordered: boolean, dispositions: boolean, admit?: bigint): Recv {
 		const newest = this.#newest === undefined ? undefined : this.#newest + 1n;
 		const serving = dispositions ? this.#serving() : undefined;
-		const recv = take(copy, ordered, newest, copy === serving && "budget");
+		const recv = take(copy, ordered, newest, copy === serving && "budget", admit);
 		if (recv.kind === "drop" && serving) this.#queueDrop(serving, recv);
 		return recv;
 	}
@@ -1758,7 +1758,7 @@ class Reader implements ResumeSource {
 	// The copy whose next group is the lowest deliverable one in the reader's window, dropping any
 	// it holds next that are not, and the copies whose ordered cursor is left on such a group
 	// because the window still owes a lower one that may yet land there.
-	#lowest(ordered: boolean, delivered: Delivered): { next?: Copy; owing: Copy[] } {
+	#lowest(ordered: boolean, delivered: Delivered, admit?: bigint): { next?: Copy; owing: Copy[] } {
 		let lowest: { copy: Copy; key: bigint } | undefined;
 		const owing: Copy[] = [];
 		const floor = ordered ? (delivered.runEnd(0n) ?? 0n) : 0n;
@@ -1770,7 +1770,8 @@ class Reader implements ResumeSource {
 					ordered,
 					this.#newest === undefined ? undefined : this.#newest + 1n,
 				);
-				if (key === undefined || this.#waits(copy, key)) break;
+				// At or past `admit`, it stays next, unjudged.
+				if (key === undefined || this.#waits(copy, key) || (admit !== undefined && key >= admit)) break;
 				const deliverable = this.#deliverable(copy, key, delivered);
 				if (deliverable && this.#inWindow(key)) {
 					// A tie goes to the newer copy, so the serving one hands out its first group and

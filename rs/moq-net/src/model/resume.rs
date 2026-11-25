@@ -8305,6 +8305,58 @@ mod test {
 		}
 	}
 
+	/// A front's ordered read holding a group for an unplaced time start still reaches the
+	/// serving copy's fatal abort: its close places the start, and the read then fails.
+	#[test]
+	fn a_fronts_held_group_sees_its_copys_fatal_abort() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		a.anchored();
+		routes.serve(a.consume());
+		let since = |time| {
+			Subscription::default()
+				.with_ranges([crate::track::Range {
+					start: crate::track::Start::Time(time),
+					end: None,
+				}])
+				.with_max(None)
+		};
+		let mut ordered = logical
+			.consume()
+			.subscribe(since(0))
+			.now_or_never()
+			.unwrap()
+			.unwrap()
+			.ordered();
+		let noop = kio::Waiter::noop();
+		let mut next = || match ordered.poll_next_item(&noop) {
+			Poll::Ready(Ok(Some(track::Item::Group(group)))) => Some(Ok(group.start)),
+			Poll::Ready(Ok(Some(track::Item::Gap { range, .. }))) => Some(Err(range)),
+			Poll::Ready(res) => panic!("ended: {:?}", res.map(|_| ())),
+			Poll::Pending => None,
+		};
+		write(&a, 0);
+		a.drop_groups(1..2, StreamError::NotFound);
+		let mut open = a.create_group(group::Info { start: 2 }).unwrap();
+		open.write_frame(ts(2), b"x".as_ref()).unwrap();
+		assert_eq!(next(), Some(Ok(0)));
+		// Group 2 is held behind the gap.
+		assert_eq!(next(), Some(Err(1..2)));
+		ordered.update(since(5)).unwrap();
+		assert!(ordered.poll_next_item(&noop).is_pending(), "group 2 may hold time 5");
+		a.abort(Error::FrameTooLarge).unwrap();
+		// Its close places time 5 at group 2, the last group it held, then the read fails with it.
+		assert!(matches!(
+			ordered.poll_next_item(&noop),
+			Poll::Ready(Ok(Some(track::Item::Group(group)))) if group.start == 2
+		));
+		assert!(matches!(
+			ordered.poll_next_item(&noop),
+			Poll::Ready(Err(Error::FrameTooLarge))
+		));
+	}
+
 	/// A front's key-order reader reports a group that lands on its copy after the read passed
 	/// its key, as old, with when it landed, and never one it handed out.
 	#[test]

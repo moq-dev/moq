@@ -495,6 +495,48 @@ test("a backfill places a time start its serving copy raised, at the group holdi
 	}
 });
 
+// An ordered read holding a group for an unplaced time start still runs its cursor, so the serving
+// copy's fatal abort reaches it. The Rust `a_fronts_held_group_sees_its_copys_fatal_abort` reaches
+// it too, after the copy's close places the start at group 2.
+test("a front's held group sees its serving copy's fatal abort", async () => {
+	const clock = new Manual();
+	const installed = install(clock);
+	const front = new Front();
+	const source = new BroadcastProducer();
+	const handle = source.consume();
+	const ta = copy(source);
+	// Received, so only its upstream places a time start past its groups.
+	hooks.receiveTrack(ta.producer);
+	ta.write(0n);
+	hooks.dropTrackGroups(ta.producer, 1n, 2n, { error: new StreamError(StreamCode.NotFound) });
+	ta.write(2n, 1, false);
+	front.serve(handle);
+	const ordered = front.consumer
+		.track("seq")
+		.subscribe({ ranges: [{ start: 0n }] })
+		.ordered();
+	try {
+		await clock.advance(Duration.ZERO);
+		expect(ordered.tryNextItem()?.group?.start).toBe(0n);
+		// Group 2 is held behind the gap.
+		expect(ordered.tryNextItem()).toMatchObject({ kind: "gap", start: 1n, end: 2n });
+		// Group 2 may still hold time 5, until a later group starts.
+		ordered.update({ ranges: [{ start: 5n }] });
+		await clock.advance(Duration.ZERO);
+		expect(ordered.tryNextItem()).toBeUndefined();
+		const error = new StreamError(StreamCode.FrameTooLarge);
+		const next = ordered.nextItem();
+		ta.producer.abort(error);
+		await expect(next).rejects.toBe(error);
+	} finally {
+		ordered.close();
+		front.consumer.close();
+		handle.close();
+		source.close();
+		installed.close();
+	}
+});
+
 /**
  * As above, beside a range still waiting on a group past the live edge: the raised start's backfill
  * is asked without waiting for that range to place. Mirrors the Rust

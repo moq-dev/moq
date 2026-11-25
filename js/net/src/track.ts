@@ -5172,9 +5172,9 @@ export class Subscriber {
 			};
 			return Window.keyed(ranges, subscriber.#latestGroup(), subscriber.#holdings(), joining).resolved();
 		};
-		hooks.tryNextGroup = (subscriber, floor) => {
+		hooks.tryNextGroup = (subscriber, floor, admit) => {
 			subscriber.#raiseNext(floor);
-			return subscriber.#tryNextGroup();
+			return subscriber.#tryNextGroup(admit);
 		};
 		hooks.peekGroup = (subscriber, ordered, floor) => {
 			if (ordered) subscriber.#raiseNext(floor);
@@ -5918,7 +5918,7 @@ export class Subscriber {
 	}
 
 	// A group from the routes' copies; see #resume.
-	#tryResumed(ordered: boolean, dispositions = false): Recv {
+	#tryResumed(ordered: boolean, dispositions = false, admit?: bigint): Recv {
 		const resume = this.#resume as ResumeSource;
 		// A clean end leaves what the copies hold readable, as a direct reader's buffer is.
 		const closed = this.#state.closed.peek();
@@ -5928,7 +5928,7 @@ export class Subscriber {
 				const queued = this.#nextResumedDrop();
 				if (queued) return queued;
 			}
-			const recv = resume.tryGroup(ordered, this.#delivered, dispositions);
+			const recv = resume.tryGroup(ordered, this.#delivered, dispositions, admit);
 			if (recv.kind === "drop") {
 				this.#queueResumedDrop(recv);
 				continue;
@@ -6166,11 +6166,14 @@ export class Subscriber {
 			// keeping the group for them to judge afresh.
 			//
 			// A range still to be placed may come to hold it: neither handed out nor passed until it
-			// places, since it may or may not name it and the read never goes back. Whatever places it
-			// moves the window, and the group finishing may rule it out, either waking the read. The
-			// read ending may place it too, so it is judged again then; still unplaced, it stays held,
-			// as the buffer keeps a group past the cap, for the ranges or bounds to judge again.
-			let ended: Recv | undefined;
+			// places, since it may or may not name it and the read never goes back. Meanwhile the cursor
+			// still runs, refusing every group past it, so backfills are asked and a copy's failure or the
+			// track closing reaches the read; then it is judged again, since that may have placed it. The
+			// cap or a declared end does not end the read, as an upstream still answers where the start
+			// lies; the track closing does, keeping the group for the ranges to judge again. Whatever
+			// places it moves the window, and the group finishing may rule it out, either waking the read.
+			// Mirrors the Rust `Ordered::read`.
+			let parked: Recv | undefined;
 			for (;;) {
 				const refused = this.#settle();
 				if (refused) {
@@ -6180,15 +6183,18 @@ export class Subscriber {
 				// Only placed ranges count: a live join still waiting on a first group names every key.
 				if (this.#placed(held.start)) return { kind: "group", group: held };
 				if (!this.#mayHold(held.start, held.end)) break;
-				if (ended) {
+				if (parked) {
 					items.held = held;
-					return ended;
+					return parked;
 				}
-				ended = this.#heldEnded();
-				if (!ended) {
+				const read = this.#tryNextGroup(held.start);
+				if (read.kind === "group" || read.kind === "error") {
+					// One below it goes first, as the read never goes back.
 					items.held = held;
-					return { kind: "idle" };
+					if (read.kind === "group") this.#settled(read.group.start, read.group.start + 1n);
+					return read;
 				}
+				parked = read.kind === "done" && this.#state.closed.peek() !== undefined ? read : { kind: "idle" };
 			}
 			// The bounds moved off it. With nothing they cover above, it waits for them to widen again,
 			// still polling the cursor so the read sees the track or itself end; otherwise the read
@@ -6221,16 +6227,6 @@ export class Subscriber {
 		const cursor = this.#cursor.peek();
 		if (key < cursor.start || (cursor.end !== undefined && key >= cursor.end)) return false;
 		return (this.#resume ? this.#resume.window() : this.#window).placed(key, key + 1n).length > 0;
-	}
-
-	// How a read waiting on a held group ends: the track closing, which places what it can. Its cap
-	// or a declared end does not: an upstream still answers where a time start lies. Undefined while
-	// it may go on.
-	#heldEnded(): Recv | undefined {
-		const closed = this.#state.closed.peek();
-		if (closed instanceof Error) return { kind: "error", error: closed };
-		if (closed !== undefined) return { kind: "done" };
-		return undefined;
 	}
 
 	// The parts of `[start, end)` this reader's ranges and bounds cover now.
@@ -6531,9 +6527,10 @@ export class Subscriber {
 		return undefined;
 	}
 
-	// The synchronous half of #nextGroup.
-	#tryNextGroup(): Recv {
-		const recv = this.#resume ? this.#tryResumed(true) : this.#tryNextBuffered();
+	// The synchronous half of #nextGroup. A group at or past `admit` stays next, and the read reports
+	// idle, as the Rust `Subscriber::poll_group_in` refuses one outside its bounds.
+	#tryNextGroup(admit?: bigint): Recv {
+		const recv = this.#resume ? this.#tryResumed(true, false, admit) : this.#tryNextBuffered(admit);
 		// One cursor: the frame helpers must not keep draining a group this read just
 		// moved past, or interleaved reads would run backwards.
 		if (recv.kind === "group" && this.#frameGroup && this.#frameGroup.start < recv.group.start) {
@@ -6543,7 +6540,7 @@ export class Subscriber {
 		return recv;
 	}
 
-	#tryNextBuffered(): Recv {
+	#tryNextBuffered(admit?: bigint): Recv {
 		const refused = this.#settle();
 		if (refused) return { kind: "error", error: refused };
 		this.#state.waitingOrdered = false;
@@ -6609,6 +6606,8 @@ export class Subscriber {
 				group.close();
 				continue;
 			}
+			// Refused: it stays next, so nothing behind it is either.
+			if (admit !== undefined && group.start >= admit) return { kind: "idle" };
 			this.#passOwed(start, group.start, drift);
 			this.#pass(groups, index);
 			this.#handOut(group.start, true);
