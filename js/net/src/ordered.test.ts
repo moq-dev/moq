@@ -521,6 +521,23 @@ test("a time start no answer for its own time places asks upstream for it", () =
 	subscriber.close();
 });
 
+// Mirrors the Rust `a_held_group_a_waiting_time_start_may_place_at_is_handed_out`.
+test("a group held behind a gap stays in range while an update's time start may place there", () => {
+	const producer = receivedTrack();
+	const ordered = producer.subscribe(withMax({ delay: { max: null } })).ordered();
+	put(producer, 0n, false);
+	drop(producer, 1n, 2n);
+	put(producer, 2n, false);
+	expect(ordered.tryNextItem()?.group?.start).toBe(0n);
+	expect(ordered.tryNextItem()).toMatchObject({ kind: "gap", start: 1n, end: 2n });
+	// Group 2 may contain time 5 until a later group arrives.
+	ordered.update(withMax({ delay: { max: null }, ranges: [{ start: 5n }] }));
+	expect(items(ordered)).toEqual(["group 2"]);
+	producer.skipGroups(3n, 10n);
+	put(producer, 10n, false);
+	expect(items(ordered)).toEqual(["group 10"]);
+});
+
 test("a waiting time start holds back a gap above its group", () => {
 	const producer = receivedTrack();
 	put(producer, 2000n, false);

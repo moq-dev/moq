@@ -848,6 +848,19 @@ export class Window {
 		return keys;
 	}
 
+	/**
+	 * Whether a range not yet placed may still come to hold group `key`: placed, it starts at or below
+	 * the group its time or live edge falls in, which may be `key` or one below. Mirrors the Rust
+	 * `Window::may_hold`.
+	 */
+	mayHold(key: bigint): boolean {
+		for (const unsettled of this.unsettled()) {
+			const range = this.#ranges.get(unsettled);
+			if (range && (range.end === undefined || range.end >= key)) return true;
+		}
+		return false;
+	}
+
 	/** Whether nothing is left to resolve as groups arrive. */
 	get settled(): boolean {
 		return this.#pending.size === 0 && !this.#unplaced() && this.#looking.size === 0;

@@ -901,6 +901,16 @@ impl Window {
 		keys
 	}
 
+	/// Whether a range not yet placed may still come to hold group `key`: placed, it starts at
+	/// or below the group its time or live edge falls in, which may be `key` or one below.
+	pub fn may_hold(&self, key: u64) -> bool {
+		self.unsettled().iter().any(|k| {
+			self.ranges
+				.get(k)
+				.is_some_and(|range| range.end.is_none_or(|end| end >= key))
+		})
+	}
+
 	/// Each time start that names no group yet, with its range's end: waiting on a first
 	/// group, reaching back past every group held, waiting on one, or looking one up. Costs
 	/// those, nothing once every time start names a group.

@@ -6148,7 +6148,11 @@ export class Subscriber {
 		const held = items.held;
 		if (held) {
 			items.held = undefined;
-			if (this.#covered(held.start, held.start + 1n).length > 0) return { kind: "group", group: held };
+			// A range still to be placed may come to hold it too: it was in range when read, so passing
+			// it could lose a group the ranges still name.
+			if (this.#covered(held.start, held.start + 1n).length > 0 || this.#mayHold(held.start)) {
+				return { kind: "group", group: held };
+			}
 			// The bounds moved off it. With nothing they cover above, it waits for them to widen again,
 			// still polling the cursor so the read sees the track or itself end; otherwise the read
 			// passes it.
@@ -6164,6 +6168,15 @@ export class Subscriber {
 		const read = this.#tryNextGroup();
 		if (read.kind === "group") this.#settled(read.group.start, read.group.start + 1n);
 		return read;
+	}
+
+	// Whether a range not yet placed may still come to hold `key`, within the bounds. A resumed
+	// reader's window counts such a range as pending, so #covered covers the key already. Mirrors the
+	// Rust `Subscriber::may_hold`.
+	#mayHold(key: bigint): boolean {
+		const cursor = this.#cursor.peek();
+		if (key < cursor.start || (cursor.end !== undefined && key >= cursor.end)) return false;
+		return !this.#resume && this.#window.mayHold(key);
 	}
 
 	// The parts of `[start, end)` this reader's ranges and bounds cover now.
