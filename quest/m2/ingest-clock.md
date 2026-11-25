@@ -64,16 +64,44 @@ Decided 2026-11-25 (maintainer, `/quest-plan`, superseding the 2026-11-23
     (unset/out-of-range NTP) or once one report interval expires (polled
     alongside media reception so an idle stream still releases). Waiting ~2 s at
     ingest connect is fine; egress latency is what matters.
+  - Correlate each stream on its own. retina's `Permissive` policy uses
+    `rtptime` only when every stream carries it; otherwise each stream's
+    elapsed time starts at its own first packet, so two streams starting 1 s
+    apart both read 0. The first placed stream places the shared `Timebase`;
+    every other stream maps its frames to wall time through its own sender
+    report (falling back to its own first frame's arrival) and carries the
+    difference from the shared placement as a fixed per-stream offset applied
+    before `shift`. When RTP-Info aligned every stream, streams without a
+    usable report of their own take the shared placement with no offset.
+  - Fold in [#9611](https://github.com/moq-dev/moq/issues/9611) on the same
+    start-up path: instead of failing on frames before the announced
+    `rtptime` (`MAX_BACKWARD`), start each stream at its first keyframe at or
+    after `rtptime`. The report wait already holds about one GOP, so this
+    costs almost nothing.
+  - Reference, not cherry-pick (they go through the rejected `Placement`):
+    j4y-v's [`f578df9ef`](https://github.com/j4y-v/moq/commit/f578df9effec9ba5ddea6a9f027ea156b4a59ee2)
+    and [`26e8d4818`](https://github.com/j4y-v/moq/commit/26e8d481850734d4779794a7ae2f0ef636ff27b4)
+    for the wait deadline polled alongside media (keep
+    `a_wait_expires_at_its_deadline` and
+    `a_silent_camera_is_placed_when_the_report_wait_ends`), and
+    [`03603914c`](https://github.com/j4y-v/moq/commit/03603914c9b6f1a4a7af1a2a66bba837e11c6325)
+    for `moq-webrtc`'s one timebase per ingest, placed at its first frame's
+    arrival (`place(first_pts, arrival)` then `shift`).
 - ✅ Take over [moq-dev/moq#9506](https://github.com/moq-dev/moq/pull/9506)'s
   branch (`fix/moq-rtsp-sync-clock`, allows maintainer edits) (rejected: asking
   j4y-v to rework #9506; opening a fresh PR and closing #9506). Keep its
   `fake::Server` tests and j4y-v's credit, drop `Client::with_report_wait` and
   the pre-fixed-clock warning, replace its RTSP-only workaround with
   `Timebase::shift`, and ask j4y-v to re-measure `now - wall_clock(pts)` on
-  their camera once landed.
+  their camera once landed. j4y-v measured the equivalent prototype on
+  [#9507](https://github.com/moq-dev/moq/issues/9507#issuecomment-7167621758)
+  at 224-293 ms `now - wall_clock(pts)` (against 10.4-11.6 s on main), with
+  the catalog publishing 0.9-2.7 s after PLAY instead of 0.05-0.18 s; expect
+  the same numbers, and a camera whose reports run ~15 min ahead rejected.
 
-Test fresh catalogs, delayed pulls, pre-fixed `Config::with_clock`, and two
-sessions sharing one catalog across `moq-rtsp`, `moq-webrtc`, and `moq-gst`,
+Test fresh catalogs, delayed pulls, pre-fixed `Config::with_clock`, two
+sessions sharing one catalog, and (RTSP) streams without RTP-Info starting
+apart, across `moq-rtsp`, `moq-webrtc`, and `moq-gst`,
 plus `moq-mux` `Timebase` tests. Run `just test interop --all`, since `moq-ffi`
 updates its internal container timebase wiring.
 
@@ -86,3 +114,4 @@ migration note under `## Impact` and mark the PR title `!`. No `moq-ffi`,
 ## Closes
 
 - [#9507](https://github.com/moq-dev/moq/issues/9507) - moq-rtsp's `sync.clock` puts every frame 10 s or more before capture
+- [#9611](https://github.com/moq-dev/moq/issues/9611) - moq-rtsp fails a session whose server replays frames from before its announced `rtptime`
