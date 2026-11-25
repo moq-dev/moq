@@ -1099,9 +1099,13 @@ impl Copy {
 		{
 			self.since = Some(self.track.now());
 		}
-		// The copy is let go as a whole, so it waits out the widest budget any group gets.
+		// The copy is let go as a whole, so it waits out the widest budget any group gets. One
+		// whose wire names every start waits for it to, however long that takes.
 		let budget = reader.widest;
-		let grace = ledger::grace(budget);
+		let grace = match self.track.is_proven() {
+			true => Duration::MAX,
+			false => ledger::grace(budget),
+		};
 		// What is under the bound is past the reader's budget a full budget after a newer
 		// group superseded it, landed or not.
 		if self.done.is_none()

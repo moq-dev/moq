@@ -832,6 +832,10 @@ pub(crate) struct TrackState {
 	// a lite-07 copy, whose ranges carry each join and whose publisher reports where each
 	// starts. Another copy measures the live edge from what it holds and its upstream's Largest.
 	answers_joins: bool,
+	// Whether the copy's wire names every start: a lite-07 group's header proves the gap below
+	// it, and a drop or the track's end names the rest, so no gap is given up for its age.
+	// Another copy gives up a gap once its grace passes, as nothing else may ever name it.
+	proven: bool,
 	// How readers learn where the live feed is; see [`Subscriber::knows_edge`].
 	edge: EdgeSource,
 	// Where the upstream publisher started each of a lite-07 copy's live wire ranges, by the
@@ -3368,8 +3372,11 @@ impl TrackState {
 	}
 
 	/// How long a missing live group is waited for, from the max delay the track's
-	/// subscribers ask for.
+	/// subscribers ask for: for as long as it takes on a copy whose wire names every start.
 	fn arrival_grace(&self) -> Duration {
+		if self.proven {
+			return Duration::MAX;
+		}
 		let max_delay = clamp_max_delay(self.subscriptions.lock().max_delay(), self.max_age_bound());
 		ledger::grace(max_delay)
 	}
@@ -3918,7 +3925,8 @@ impl TrackState {
 	/// [`Self::poll_arrival`] applies: not accounted for, not dropped, within the feed, and
 	/// in a gap a later arrival opened less than `grace` ago, or that nothing later opened.
 	/// Below the first arrival only when the feed was asked to start lower, as `floor` says.
-	/// With `delivered`, only a group it lacks counts. Parks `waiter` until the gap folds.
+	/// With `delivered`, only a group it lacks counts. Parks `waiter` until the gap folds. A
+	/// copy whose wire names every start waits however long `grace` would have given up.
 	fn may_land(
 		&self,
 		groups: ops::Range<u64>,
@@ -3927,6 +3935,10 @@ impl TrackState {
 		delivered: Option<&Delivered>,
 		waiter: &kio::Waiter,
 	) -> bool {
+		let grace = match self.proven {
+			true => Duration::MAX,
+			false => grace,
+		};
 		self.find_landable(groups, floor, grace, |open, folds| {
 			if delivered.is_some_and(|delivered| delivered.covers(open)) {
 				return None;
@@ -5679,6 +5691,16 @@ impl Producer {
 		}
 	}
 
+	/// Have this received copy wait on its wire for every start rather than give a gap up once
+	/// its grace passes: a lite-07 publisher names each one, in a group's header, a drop, or the
+	/// track's end.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn proven(&self) {
+		if let Ok(mut state) = self.modify() {
+			state.proven = true;
+		}
+	}
+
 	/// Have this lite-07 copy say nothing of the live edge until [`Self::answer_edge`]: it is
 	/// accepted live, so its readers read what lands before its upstream says where the feed
 	/// is. See [`Subscriber::knows_edge`].
@@ -7318,11 +7340,8 @@ impl Arrivals {
 	pub(crate) fn poll(&self, waiter: &kio::Waiter) -> ArrivalRead<'_> {
 		let _ = self.state.poll(waiter, |_| Poll::<()>::Pending);
 		let state = self.state.read();
-		let max_delay = clamp_max_delay(state.subscriptions.lock().max_delay(), state.max_age_bound());
-		ArrivalRead {
-			state,
-			grace: ledger::grace(max_delay),
-		}
+		let grace = state.arrival_grace();
+		ArrivalRead { state, grace }
 	}
 }
 
@@ -7657,8 +7676,7 @@ impl Consumer {
 				return Poll::Ready(Ok(None));
 			};
 			let res = state.poll(waiter, |state| {
-				let max_delay = clamp_max_delay(state.subscriptions.lock().max_delay(), state.max_age_bound());
-				let grace = ledger::grace(max_delay);
+				let grace = state.arrival_grace();
 				let now = state.cache.pool().now_wall();
 				let res = state.poll_arrival(key, now, grace, waiter);
 				if res.is_pending() {
@@ -7797,6 +7815,14 @@ impl Consumer {
 				!state.is_closed() && state.read().may_land(groups, floor, grace, delivered, waiter)
 			})
 		})
+	}
+
+	/// Whether this copy's wire names every start; see [`Producer::proven`].
+	pub(super) fn is_proven(&self) -> bool {
+		if let Some(serving) = self.serving() {
+			return serving.is_proven();
+		}
+		self.with_state(|state| state.is_some_and(|state| state.read().proven))
 	}
 
 	/// The wall clock this track's cache judges ages by.

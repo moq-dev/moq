@@ -12560,8 +12560,13 @@ impl TrackServe {
 
 		tracing::debug!(id, broadcast = %self.subscriber.log_path(&self.path), track = %self.name, "subscribe started");
 
-		// A pipelined SUBSCRIBE has no copy, so no max age, until it is adopted.
-		let tail = kio::Producer::new(Tail::new(tail::grace(track::budget(max_age))));
+		// A pipelined SUBSCRIBE has no copy, so no max age, until it is adopted. Lite-07 names
+		// every start, so its tail waits out no grace.
+		let tail = match self.subscriber.version.has_previous() {
+			true => Tail::proven(),
+			false => Tail::new(tail::grace(track::budget(max_age))),
+		};
+		let tail = kio::Producer::new(tail);
 		if let Some(copy) = &copy
 			&& let Ok(mut tail) = tail.write()
 		{
@@ -14087,6 +14092,10 @@ impl ServeLoop {
 		}
 		if serve.subscriber.version.resolves_anchors() {
 			serving.anchored();
+		}
+		// Lite-07 names every start, so the copy waits for its wire rather than a grace.
+		if serve.subscriber.version.has_previous() {
+			serving.proven();
 		}
 		// A wire whose ranges carry each live join answers where each starts, which alone
 		// places a reader's.

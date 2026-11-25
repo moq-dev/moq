@@ -1873,9 +1873,10 @@ impl TrackState {
 	/// the arrival grace, or [`ledger::GRACE`] when nothing bounds that, so every hole is
 	/// asked or given up in finite time. A reader with no budget on a track with no max age
 	/// would otherwise wait out an unbounded grace, and a read of the hole would never end.
+	/// A copy whose wire names every start waits for it to: the wire ends the read.
 	pub(super) fn miss_grace(&self) -> Duration {
 		match self.arrival_grace() {
-			Duration::MAX => ledger::GRACE,
+			Duration::MAX if !self.proven => ledger::GRACE,
 			grace => grace,
 		}
 	}
