@@ -268,7 +268,7 @@ export class Routed {
 		// the stream is leaving, which the session's own handling of the stop ends these routes for.
 		for (const part of requestParts(remove, add, this.#session.version)) {
 			this.#session.send(part).catch((err: unknown) => {
-				if (!peerEnded(err)) this.close(error(err));
+				if (!peerEnded(this.#session.quic, err)) this.close(error(err));
 			});
 		}
 	}

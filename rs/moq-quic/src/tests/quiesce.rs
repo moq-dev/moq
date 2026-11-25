@@ -294,6 +294,30 @@ fn ended_streams_are_done() {
 	assert_eq!(stops_sent(&mut pair, server_ch), before);
 }
 
+/// A bidirectional stream the peer finished before it was accepted keeps the wait open: its send
+/// half is still open, and only once accepted is it reset.
+#[test]
+fn an_unaccepted_finished_stream_keeps_the_wait() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	let (client_ch, server_ch) = pair.connect();
+	let s = pair
+		.client_streams(client_ch)
+		.open(Dir::Bi, Default::default())
+		.unwrap();
+	pair.client_send(client_ch, s).write(&mut &b"in flight"[..]).unwrap();
+	pair.client_send(client_ch, s).finish().unwrap();
+	pair.drive();
+
+	let waiter = Counter::new();
+	assert!(quiesce(&mut pair, server_ch, &waiter, &[]).is_pending());
+	assert_eq!(pair.server_streams(server_ch).accept(Dir::Bi), Some(s));
+	assert!(quiesce(&mut pair, server_ch, &waiter, &[]).is_pending());
+	pair.drive();
+	assert_eq!(quiesce(&mut pair, server_ch, &waiter, &[]), Poll::Ready(Ok(())));
+	assert_eq!(pair.client_recv(client_ch, s).received_reset(), Ok(Some(CODE)));
+}
+
 /// The wait fails once the connection is lost, waking the waiter.
 #[test]
 fn fails_on_loss() {

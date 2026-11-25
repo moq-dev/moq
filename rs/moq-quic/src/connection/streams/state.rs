@@ -536,13 +536,18 @@ impl StreamsState {
 			if keep.contains(&id) {
 				continue;
 			}
+			// Before its final size: a bidirectional stream's send half stays open after the peer
+			// ended its own, and only once accepted does the quiesce see it.
+			if id.initiator() != self.side && id.index() >= self.next_reported_remote[id.dir() as usize] {
+				open = true;
+				continue;
+			}
 			let rs = get_or_insert_recv(slot, self.initial_stream_receive_window);
 			if !rs.final_offset_unknown() {
 				continue;
 			}
 			open = true;
-			let unaccepted = id.initiator() != self.side && id.index() >= self.next_reported_remote[id.dir() as usize];
-			if unaccepted || rs.reader == Reader::Stopped || mem::replace(&mut rs.quiesced, true) {
+			if rs.reader == Reader::Stopped || mem::replace(&mut rs.quiesced, true) {
 				continue;
 			}
 			pending.stop_sending.push(frame::StopSending { id, error_code: code });

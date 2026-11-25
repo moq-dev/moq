@@ -231,7 +231,7 @@ export class Connection implements Session {
 		if (hasRoutes(version)) {
 			void AnnounceStream.of(quic, version).broken.then((err) => {
 				if (this.#transportClosed || this.#phase.kind === "closed") return;
-				if (peerEnded(err)) return this.#subscriber.announceFinished();
+				if (peerEnded(quic, err)) return this.#subscriber.announceFinished();
 				this.#fail(error(err));
 			});
 		}
@@ -605,7 +605,7 @@ export class Connection implements Session {
 				// other reset, a message cut short, or one that does not decode lost what the peer
 				// said.
 				if (this.#transportClosed || this.#phase.kind === "closed") throw err;
-				if (peerEnded(err)) break;
+				if (peerEnded(this.#quic, err)) break;
 				throw new ProtocolViolation("Announce Stream broke", { cause: err });
 			}
 			if (!msg) break;

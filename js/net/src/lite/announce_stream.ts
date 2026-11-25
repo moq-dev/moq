@@ -86,7 +86,7 @@ export class AnnounceStream {
 			if (!this.#announced) return;
 			// A peer that stopped the stream as its session closed is leaving too: nothing is owed.
 			await writer.closed.catch((err: unknown) => {
-				if (!peerEnded(err)) throw err;
+				if (!peerEnded(this.#quic, err)) throw err;
 			});
 		});
 		this.#tail = done.catch(() => {});
