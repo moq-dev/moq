@@ -3679,7 +3679,8 @@ function probes(asks: readonly bigint[], ranges: readonly WireRange[]): WireRang
 // which its answer comes after. A probe answering it stays until its readers stop waiting, so its
 // answer outlives their placing, and asks the widest max they wait with, retuned in place as that
 // moves. Mirrors the Rust `join_probes`.
-function joinProbes(
+/** @internal */
+export function joinProbes(
 	entry: SubscribeEntry,
 	joins: readonly JoinAsk[],
 	ranges: readonly WireRange[],
@@ -3692,9 +3693,11 @@ function joinProbes(
 			const asked = entry.joinBudgets.get(id) ?? NO_MAX_DELAY;
 			const live = entry.live.get(id)?.start?.live;
 			const now = live === undefined ? 0 : wireBudget(live.max);
+			// The publisher may answer under the max asked before a retune since.
+			const wide = Math.min(asked, now) >= join.budget;
 			const tick = entry.joinTicks.get(id);
-			if (tick === undefined) return !entry.starts.has(id) && now >= join.budget;
-			return tick > join.since && Math.min(asked, now) >= join.budget;
+			if (tick === undefined) return !entry.starts.has(id) && wide;
+			return tick > join.since && wide;
 		};
 		// Each live range asking the join, with whether it is a probe.
 		const live: [bigint, boolean][] = [];
@@ -3823,9 +3826,9 @@ function sameAsks(a: readonly bigint[], b: readonly bigint[]): boolean {
 
 // Whether a lite-07 range with no group to deliver says its publisher held none at or before its
 // reach: only one whose end takes in the group containing its time, which a range that ends before
-// its time may not. Mirrors the Rust `SubStream::report_starts`.
+// its time may not, and an open one always does. Mirrors the Rust `SubStream::report_starts`.
 function reaches(end: WireAnchor | undefined, asked: bigint): boolean {
-	if (end === undefined) return false;
+	if (end === undefined) return true;
 	if (end.time !== undefined) return end.time >= asked;
 	if (end.absolute !== undefined) return end.absolute > asked;
 	return false;

@@ -63,7 +63,7 @@ import {
 	SubscribeStart,
 	SubscribeUpdate,
 } from "./subscribe.ts";
-import { fittedReasks, Minted, Subscriber } from "./subscriber.ts";
+import { fittedReasks, joinProbes, Minted, Subscriber } from "./subscriber.ts";
 import { Track, TrackInfo } from "./track.ts";
 import { hasLengthFirst, hasRanges, hasTrackStream, Version, versionName } from "./version.ts";
 
@@ -85,6 +85,24 @@ test("a reasked probe is renewed whatever max its fresh probe asks", () => {
 	expect(fittedReasks([1n], live, [join(300)])).toEqual(new Set([1n]));
 	// A fresh probe for another join renews nothing.
 	expect(fittedReasks([1n], live, [{ start: { live: { min: 2000, max: 300 } } }])).toEqual(new Set());
+});
+
+// A live demand range retuned wider before its answer may still be answered under the max it was
+// asked with until then, which places no reader waiting with the wider one, so the join goes out on
+// a probe of its own. Mirrors the Rust `a_join_range_retuned_wider_before_its_answer_is_probed`.
+test("a join range retuned wider before its answer is probed", () => {
+	const join = { min: 1000, end: undefined, budget: 300, since: 0 };
+	const demand = { start: { live: { min: 1000, max: 300 } } };
+	const entry = {
+		live: new LiveRanges(Version.DRAFT_07, [demand]),
+		// Asked at 120 ms, then retuned to the reader's 300 ms, still unanswered.
+		joinBudgets: new Map([[0n, 120]]),
+		joinTicks: new Map(),
+		starts: new Map(),
+		fillIds: new Set(),
+		probeIds: new Set(),
+	} as unknown as Parameters<typeof joinProbes>[0];
+	expect(joinProbes(entry, [join], [demand])).toEqual({ probes: [demand], reasked: [] });
 });
 
 test("closing the subscriber suppresses probe stream warnings", async () => {
@@ -3182,7 +3200,9 @@ test("a lite-07 copy asks upstream for a time start it cannot place", async () =
 
 // A range the publisher answers with no group to deliver lands none of its groups, so the copy is
 // told, and an ordered read holds no later group back for its time. Only one whose end takes in its
-// time says so: one following the live edge may still get the group containing it.
+// time says so, as one following the live edge does: its publisher answers it empty only once the
+// track ended, so no group containing its time is left. Mirrors the Rust
+// `an_open_range_answered_empty_places_its_time`.
 test("a lite-07 range answered empty is reported only for a range reaching its time", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
@@ -3205,7 +3225,10 @@ test("a lite-07 range answered empty is reported only for a range reaching its t
 			{ start: answer(version, undefined, 1n) },
 		]);
 		await drainReactions();
-		expect(reported.at(-1)).toEqual([[10n, undefined]]);
+		expect(reported.at(-1)).toEqual([
+			[10n, undefined],
+			[30n, undefined],
+		]);
 	} finally {
 		hooks.timeStarts = timeStarts;
 		track.close();

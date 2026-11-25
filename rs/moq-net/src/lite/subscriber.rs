@@ -3405,6 +3405,47 @@ mod tests {
 		assert_eq!(read(30), None, "its range ended before it");
 	}
 
+	/// An open range answered with no group to deliver takes in every group past its time, so
+	/// its answer places a reader there as a bounded range's does. Unrecorded, the reader would
+	/// wait for good on a group held past it, and no probe asks for its time while a demand
+	/// range starts there.
+	#[kio::test]
+	async fn an_open_range_answered_empty_places_its_time() {
+		let tail = kio::Producer::new(Tail::default());
+		let Sub::Active(mut active) = feed_sub(&tail).await else {
+			unreachable!("feed_sub is active")
+		};
+		active.live = lite::LiveRanges::new(Version::Lite07, &[lite::Range::span(Some(40), 0, None, None)]);
+		active.starts = [(0, None)].into();
+		let info = track::Info::default().with_timescale(None).with_max_age(None);
+		let serving = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info);
+		serving.received();
+		serving.anchored();
+		serving
+			.create_group(group::Info { start: 66 })
+			.unwrap()
+			.finish()
+			.unwrap();
+		active.report_starts(&serving);
+
+		let mut ordered = serving
+			.subscribe(
+				track::Subscription::default()
+					.with_ranges([track::Range {
+						start: crate::track::Start::Time(40),
+						end: None,
+					}])
+					.with_max(None),
+			)
+			.ordered();
+		let read = match ordered.next_item().now_or_never() {
+			Some(Ok(Some(track::Item::Group(group)))) => Some(group.start),
+			None => None,
+			Some(res) => panic!("not a group: {:?}", res.map(|item| item.is_some())),
+		};
+		assert_eq!(read, Some(66), "no group at or before time 40 is left");
+	}
+
 	/// A placed join under a max age may be answered past groups the publisher still holds,
 	/// stale for it alone, so its answer places no history reader at its group; one with no
 	/// max age skips nothing, so it does, unless it was asked under one before a retune.
@@ -4121,6 +4162,58 @@ mod tests {
 			[(0, Some(Duration::from_millis(300)))],
 			"the demand range is retuned"
 		);
+	}
+
+	/// A live demand range retuned wider before its answer may still be answered under the max
+	/// it was asked with until then, which places no reader waiting with the wider one. So it
+	/// answers that reader's join only once nothing narrower was asked of it, and the join goes
+	/// out on a probe of its own meanwhile.
+	#[kio::test]
+	async fn a_join_range_retuned_wider_before_its_answer_is_probed() {
+		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), Version::Lite07)
+			.await
+			.unwrap();
+		let join = track::JoinAsk {
+			min: Some(Duration::from_secs(1)),
+			end: None,
+			budget: Duration::from_millis(300),
+			since: 0,
+		};
+		// Asked at 120 ms, then retuned to the reader's 300 ms, still unanswered.
+		let demand = join_probe(&join);
+		let sub = SubStream {
+			order: crate::track::Order::Ascending,
+			stream,
+			id: 0,
+			max_delay: None,
+			stale_budget: Duration::ZERO,
+			start: None,
+			priority: 0,
+			requested: None,
+			live: lite::LiveRanges::new(Version::Lite07, &[demand]),
+			demand: Some(Subscription::default()),
+			fill_ids: Default::default(),
+			probe_ids: Default::default(),
+			fill_groups: Default::default(),
+			tail: Default::default(),
+			started: None,
+			went_live: false,
+			finishing: None,
+			parked: false,
+			starts: Default::default(),
+			join_ticks: Default::default(),
+			join_budgets: [(0, Duration::from_millis(120))].into(),
+			declared: None,
+			end: None,
+			wanted: None,
+			unanswered: None,
+			_working: crate::session::Work::default().start(),
+		};
+
+		let (probes, reasked) = join_probes(Some(&sub), &[join], &[demand]);
+		assert_eq!(probes, [join_probe(&join)], "an answer under 120 ms places no reader at 300 ms");
+		assert!(reasked.is_empty());
 	}
 
 	/// The owed groups start at the floor the demand last asked for, which an update can raise
@@ -11437,12 +11530,13 @@ impl SubStream {
 			};
 			// Whether a range with no group to deliver says its publisher held none at or before
 			// its reach: only one whose end takes in the group containing its time, which a
-			// range that ends before its time may not.
+			// range that ends before its time may not, and an open one always does.
 			let reaches = match range.end {
 				Some(lite::Anchor::Absolute(end)) if end.frame == 0 => end.group > asked,
 				Some(lite::Anchor::Absolute(end)) => end.group >= asked,
 				Some(lite::Anchor::Time(end)) => end >= asked,
-				Some(lite::Anchor::Live { .. } | lite::Anchor::Joined { .. }) | None => false,
+				Some(lite::Anchor::Live { .. } | lite::Anchor::Joined { .. }) => false,
+				None => true,
 			};
 			// One with no group to deliver says nothing of its time unless it reaches it.
 			if start.is_some() || reaches {
@@ -11685,10 +11779,10 @@ fn probes(asks: &[u64], ranges: &[lite::Range]) -> Vec<lite::Range> {
 /// reader began waiting.
 ///
 /// A live range asking the join answers it when it is still unanswered, or was answered after
-/// every waiting reader began, whatever max age it asks. So does a demand range asking it that
-/// this edit adds, which its answer comes after. A probe answering it stays until its readers
-/// stop waiting, so its answer outlives their placing, and asks the widest max age they wait
-/// with, retuned in place as that moves.
+/// every waiting reader began, under a max age as wide as theirs. So does a demand range asking
+/// it that this edit adds, which its answer comes after. A probe answering it stays until its
+/// readers stop waiting, so its answer outlives their placing, and asks the widest max age they
+/// wait with, retuned in place as that moves.
 fn join_probes(
 	active: Option<&SubStream>,
 	joins: &[track::JoinAsk],
@@ -11699,8 +11793,9 @@ fn join_probes(
 	for join in joins {
 		let key = Some((join.min, join.end));
 		// Each live range asking the join, with whether it is a probe and whether it answers:
-		// answered after every waiting reader began, under a max age as wide as theirs, or still
-		// to answer under one.
+		// answered after every waiting reader began, or still to answer, under a max age as wide
+		// as theirs, now and before any retune since: the publisher may answer under the max asked
+		// until then.
 		let answers = |id: u64| {
 			let Some(active) = active else {
 				return false;
@@ -11713,7 +11808,7 @@ fn join_probes(
 			let wide = asked.min(now) >= join.budget;
 			match active.join_ticks.get(&id) {
 				Some(tick) => *tick > join.since && wide,
-				None => !active.starts.contains_key(&id) && now >= join.budget,
+				None => !active.starts.contains_key(&id) && wide,
 			}
 		};
 		let live: Vec<(u64, bool)> = active
