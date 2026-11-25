@@ -359,6 +359,12 @@ export interface Hole {
 	 * does not depend on it. Only a widening past it reverses the verdict.
 	 */
 	stale?: number;
+	/**
+	 * The exclusive group end the upstream subscription judged a stale verdict within, undefined
+	 * when it followed the live edge or its end is not known to be the one it judged under. A
+	 * reader capped at the same end reads the groups the verdict rests on, so it settles on it.
+	 */
+	cap?: bigint;
 }
 
 /** A key never produced; see {@link Hole.skip}. */
@@ -366,9 +372,9 @@ export function skipHole(): Hole {
 	return { error: new StreamError(StreamCode.NotFound, { message: "group never produced" }), skip: true };
 }
 
-/** A group judged stale under `budget` milliseconds. */
-export function staleHole(budget: number): Hole {
-	return { error: new StreamError(StreamCode.Old, { message: "group is past the budget" }), stale: budget };
+/** A group judged stale under `budget` milliseconds, within the exclusive group end `cap` when it has one. */
+export function staleHole(budget: number, cap?: bigint): Hole {
+	return { error: new StreamError(StreamCode.Old, { message: "group is past the budget" }), stale: budget, cap };
 }
 
 /** A run of keys given up, with why. */
@@ -385,6 +391,7 @@ export function sameHole(a: DropRun, b: DropRun): boolean {
 		toStreamCode(a.error) === toStreamCode(b.error) &&
 		!a.skip === !b.skip &&
 		a.stale === b.stale &&
+		a.cap === b.cap &&
 		!a.received === !b.received &&
 		!a.own === !b.own
 	);
@@ -411,6 +418,7 @@ export function insertDrop(
 		error: hole.error,
 		skip: hole.skip,
 		stale: hole.stale,
+		cap: hole.cap,
 		received: hole.received,
 		own: hole.own,
 	});

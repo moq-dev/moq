@@ -9023,9 +9023,11 @@ type Coverage = Option<(Cover, Option<u64>)>;
 /// from `start`. Any hole but a received stale one settles every reader. A stale verdict
 /// holds for a reader no wider than the budget it was judged under that reads every group
 /// above the run's start: its own successor and edge are then no older than those the
-/// verdict was judged against, whatever ranges the upstream judged it under, since a group's
-/// verdict looks only above it. Any other reader treats the run as unknown, and fills it on
-/// a request of its own: the upstream subscription never delivers a group it dropped.
+/// verdict was judged against, since a group's verdict looks only above it. An uncapped
+/// reader reads them past the live edge; a capped one only when the upstream judged within
+/// that very cap, else the verdict may rest on groups above the cap it never sees. Any other
+/// reader treats the run as unknown, and fills it on a request of its own: the upstream
+/// subscription never delivers a group it dropped.
 fn settles(budget: &Budget, coverage: &Coverage, start: u64, hole: &Hole) -> bool {
 	let Some(stale) = hole.stale_budget() else {
 		return true;
@@ -9038,6 +9040,10 @@ fn settles(budget: &Budget, coverage: &Coverage, start: u64, hole: &Hole) -> boo
 	let Some((groups, cap)) = coverage else {
 		return false;
 	};
+	let cap = bound(groups, *cap);
+	if cap.is_some() && hole.stale_cap() != cap {
+		return false;
+	}
 	let Some(above) = start.checked_add(1) else {
 		return budget <= stale;
 	};
@@ -9053,25 +9059,39 @@ fn settles(budget: &Budget, coverage: &Coverage, start: u64, hole: &Hole) -> boo
 			false => *held.end() >= run.end - 1,
 		})
 	};
-	budget <= stale && reads(above..u64::MAX)
+	// Nothing above the run within the cap: the upstream judged it from no more.
+	let end = cap.unwrap_or(u64::MAX);
+	budget <= stale && (above >= end || reads(above..end))
+}
+
+/// The exclusive end a reader of `groups` stops at: its own `cap`, or where its ranges end,
+/// whichever is lower, `None` when it reads on past the live edge.
+fn bound(groups: &Cover, cap: Option<u64>) -> Option<u64> {
+	let ends = groups.highest().and_then(|top| top.checked_add(1));
+	match (cap, ends) {
+		(Some(cap), Some(ends)) => Some(cap.min(ends)),
+		(cap, ends) => cap.or(ends),
+	}
 }
 
 /// The starts at which a received stale run settles a reader whose coverage grew from `old`
 /// to `new` under the same budget and did not before, or `None` inside for none: `None` when
-/// the coverage changed other than by growing. See [`settles`]: only an uncapped reader is
-/// settled, by a run whose next key the open run of its groups holds, and that run's start
-/// only falls as the groups grow.
+/// the coverage changed other than by growing. See [`settles`]: an uncapped reader is
+/// settled by a run whose next key the open run of its groups holds, and that run's start
+/// only falls as the groups grow; a capped reader's groups growing may settle runs anywhere
+/// below its cap, so that is a rescan.
 fn settling(old: &Coverage, new: &Coverage) -> Option<Option<ops::Range<u64>>> {
 	let ((old, old_cap), (new, cap)) = match (old, new) {
 		(None, None) => return Some(None),
 		(Some(old), Some(new)) => (old, new),
 		_ => return None,
 	};
+	let (old_cap, cap) = (bound(old, *old_cap), bound(new, *cap));
 	if old_cap != cap || !old.gained(new, 0, u64::MAX).is_empty() {
 		return None;
 	}
 	if cap.is_some() {
-		return Some(None);
+		return new.gained(old, 0, u64::MAX).is_empty().then_some(None);
 	}
 	// The lowest start settled: the one just below the open run, or only the last key.
 	let settled = |groups: &Cover| groups.open_from().map_or(u64::MAX, |start| start.saturating_sub(1));
@@ -10873,7 +10893,7 @@ impl Cursor {
 		};
 		let misses = &mut kept.misses;
 		// A wider budget asks again what a narrower one gave up as stale.
-		for run in misses.widen(&drift.budget).iter() {
+		for run in misses.retake(&drift).iter() {
 			misses.reopen(run.clone());
 		}
 		misses.retain(id, None, || target(0..=u64::MAX - 1));
@@ -11617,7 +11637,7 @@ impl Cursor {
 	fn probe(&mut self, from: u64, drift: &Drift, waiter: &kio::Waiter) {
 		self.let_go_kept_out();
 		self.look_up(waiter);
-		self.rejudge(&drift.budget);
+		self.rejudge(drift);
 		let taken = &self.record.delivered;
 		let (window, cap, revision) = (&self.filter.window, self.end_key, self.filter.revision);
 		let misses = self.misses.get_or_insert_with(Box::default);
@@ -11672,16 +11692,17 @@ impl Cursor {
 		}
 	}
 
-	/// Judge again what this cursor's misses gave up as stale under a budget narrower than
-	/// `budget`, as [`Self::reoffer`] does for the cached groups it skipped: a drop judged
-	/// under a narrower budget never settles a wider reader. What it already told stands: a
+	/// Judge again what this cursor's misses gave up as stale that `drift` no longer settles,
+	/// as [`Self::reoffer`] does for the cached groups it skipped: a drop judged under a
+	/// narrower budget never settles a wider reader, nor one judged within a cap another
+	/// reader's does not share. What it already told stands: a
 	/// gap an [`Ordered`] returned, or any drop a wire publisher reported. A gap an
 	/// [`Ordered`] has yet to return is taken back from it.
-	fn rejudge(&mut self, budget: &Budget) {
+	fn rejudge(&mut self, drift: &Drift) {
 		let Some(misses) = &mut self.misses else {
 			return;
 		};
-		let widened = misses.widen(budget);
+		let widened = misses.retake(drift);
 		let record = &mut self.record;
 		let mut untold = false;
 		for run in widened.iter() {
@@ -28932,6 +28953,115 @@ mod test {
 		drop(group);
 	}
 
+	/// A higher-priority compressed edge whose plain reader took every slice pays its inflated
+	/// frames in the taken-frame shed too, so a lower-priority edge's owed frame survives
+	/// instead of being evicted by the whole-edge pass.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_taken_shed_pays_the_inflated_frames_before_owed_ones() {
+		const LIMIT: u64 = 60_000;
+		const FRAME: usize = 15_000;
+		let info = Info::timed().with_compression(Compression::Deflate).with_priority(5);
+		let stored = stored_slices(&info);
+		let pool = cache::Pool::unbounded();
+		let broadcast = session_broadcast(&pool, Some(LIMIT));
+		let high = Producer::new(broadcast.clone(), "high", info);
+		let low = Producer::new(broadcast.clone(), "low", Info::timed().with_priority(-5));
+		let mut writer = Producer::new(broadcast.clone(), "writer", Info::timed());
+
+		let mut group = high.create_group(group::Info { start: 0 }).unwrap();
+		for object in &stored {
+			group = ingest_slice(group, object);
+		}
+		let mut plain = high.consume().peek_group(0).expect("cached");
+		assert!(plain.read_frame().await.unwrap().is_some());
+
+		let mut open = low.append_next().unwrap();
+		let mut owed = low.consume().peek_group(open.start).expect("cached");
+		open.write_frame(open.key_time(), bytes::Bytes::from(vec![0u8; FRAME]))
+			.unwrap();
+		let before = broadcast.edges.used();
+		assert!(
+			before > 30_000 + FRAME as u64,
+			"the inflated frames bill the session: {before}"
+		);
+		assert!(before <= LIMIT, "{before}");
+
+		// The writer's frame passes the budget, which the taken frames alone cover.
+		finished_group(&mut writer, 2 * FRAME);
+		assert!(broadcast.edges.used() <= LIMIT, "{:?}", broadcast.edges);
+		assert!(
+			matches!(owed.read_frame().now_or_never(), Some(Ok(Some(_)))),
+			"an owed frame paid while taken inflated frames were left"
+		);
+		drop((group, open));
+	}
+
+	/// A displaced copy decoding the inflated copy it shares with the live edge lists the edge:
+	/// the slices that decoding made sheddable belong to the edge's raw reader, whose own reads
+	/// have nothing more to report.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_displaced_copys_decoding_lists_the_live_edge() {
+		const LIMIT: u64 = 1 << 20;
+		let info = Info::timed().with_compression(Compression::Deflate).with_priority(5);
+		let stored = stored_slices(&info);
+		let pool = cache::Pool::unbounded();
+		let broadcast = session_broadcast(&pool, Some(LIMIT));
+		let producer = Producer::new(broadcast.clone(), "test", info);
+		let mut writer = Producer::new(broadcast.clone(), "writer", Info::timed());
+		producer.received();
+		elapse(&producer, Duration::ZERO);
+		let listed = || producer.state.read().cache.listed();
+		let fetched = |end| {
+			producer
+				.state
+				.write()
+				.ok()
+				.unwrap()
+				.insert_group_request(0, group::Bounds { start: 0, end }, None)
+				.unwrap()
+				.expect("a fresh group")
+		};
+
+		// The live edge, received from its second frame, whose raw reader takes every slice.
+		let Ok(Received::Group(mut live)) = producer.create_group_at(group::Info { start: 0 }, 1, 0..0) else {
+			panic!("the live copy opens");
+		};
+		for object in &stored[1..] {
+			live = ingest_slice(live, object);
+		}
+		let mut raw = arrayvec::ArrayVec::<frame::Object, 4>::new();
+		assert!(matches!(
+			producer
+				.consume()
+				.peek_group(0)
+				.expect("cached")
+				.with_range(1..)
+				.compressed()
+				.poll_read_objects(&kio::Waiter::noop(), &mut raw),
+			Poll::Ready(Ok(3))
+		));
+		// A reclaim visits the edge, which sheds no slice that nothing has decoded.
+		let before = broadcast.edges.used();
+		finished_group(&mut writer, usize::try_from(LIMIT - before + 1).unwrap());
+		assert!(!listed(), "the reclaim visit left it listed");
+
+		// A fetch of the head shares the live edge's inflated copy, then a whole fetch displaces
+		// it while its reader decodes the frames the edge holds slices of.
+		let mut cut = fetched(Some(2));
+		let mut reader = cut.consume();
+		let whole = fetched(None);
+		for object in &stored[..2] {
+			cut = ingest_slice(cut, object);
+		}
+		for _ in 0..2 {
+			assert!(reader.read_frame().await.unwrap().is_some());
+		}
+		assert!(listed(), "the live edge's decoded slices went unreported");
+		drop((live, whole, cut));
+	}
+
 	/// Only reads of the live edge list its track for a reclaim, and the listing goes when the
 	/// edge moves: a reclaim never visits a track for frames taken from an older group.
 	#[test]
@@ -34990,6 +35120,41 @@ mod test {
 			[(4..5, Hole::Skip)],
 			"the stale run is outside its range"
 		);
+	}
+
+	/// The group streams and a stale drop are unordered, so a drop may reach the copy before the
+	/// groups it rests on. A reader capped where the upstream judged reads the same groups above
+	/// the run, so it takes the verdict instead of fetching a group the groups above would
+	/// still convict. A reader capped elsewhere may see other groups above the run. Mirrors JS.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_received_stale_drop_settles_a_reader_capped_where_the_upstream_judged_it() {
+		let producer = track_producer("test", Info::timed());
+		let _dynamic = producer.requests();
+		let budget = Duration::from_millis(500);
+		// Only group 0 is held: the groups above the run have not arrived.
+		write_group(&producer, 0);
+		let reader = |max: Duration, last: Option<u64>| producer.subscribe(within(max, last));
+		let mut same = reader(budget, Some(3));
+		let mut narrower = reader(Duration::from_millis(100), Some(3));
+		let mut wider = reader(Duration::from_secs(5), Some(3));
+		let mut lower = reader(budget, Some(2));
+		let mut higher = reader(budget, Some(4));
+		// Reading past the live edge, it needs no cap to match.
+		let mut open = reader(budget, None);
+		let verdict = Hole::stale(budget).capped(Some(4));
+		producer.give_up(1..3, verdict.clone());
+		let waiter = kio::Waiter::noop();
+		assert_eq!(same.poll_drop(&waiter), Poll::Ready((1..3, verdict.clone())));
+		assert_eq!(narrower.poll_drop(&waiter), Poll::Ready((1..3, verdict.clone())));
+		assert_eq!(open.poll_drop(&waiter), Poll::Ready((1..3, verdict)));
+		for (name, subscriber) in [
+			("a wider budget", &mut wider),
+			("a lower cap", &mut lower),
+			("a higher cap", &mut higher),
+		] {
+			assert!(subscriber.poll_drop(&waiter).is_pending(), "{name} still asks");
+		}
 	}
 
 	/// A received stale run in a reader's live range settles it once a group arriving places its

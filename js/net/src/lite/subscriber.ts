@@ -258,6 +258,11 @@ interface SubscribeEntry {
 	// the publisher's max age, which binds every reader alike. Too narrow costs a wider reader a
 	// request of its own; too wide would settle it on a group it could still get.
 	staleBudget: number;
+	// The exclusive group end every live range the SUBSCRIBE and each SUBSCRIBE_UPDATE asked ended at,
+	// undefined once one followed the live edge or two ended apart: the cap a lite-07 stale drop is
+	// recorded within, so a reader capped alike settles on it. Like the budget, the wire does not say
+	// which update a drop crossed, so a cap that ever varied settles no capped reader.
+	staleCap: bigint | undefined;
 	// The subscribe stream, from the setup that registered this entry to its end.
 	stream: SubscribeStream;
 	// How many SUBSCRIBE_UPDATEs went out, so a tail settling past SUBSCRIBE_END waits a fresh
@@ -1754,6 +1759,7 @@ export class Subscriber {
 		const entry: SubscribeEntry = {
 			track: producer,
 			staleBudget: narrowest(live),
+			staleCap: capOf(live),
 			...framing,
 			// The effective max delay is the stopgap grace: the wrong clock (it bounds
 			// presentation-time drift), but it is how long the subscriber was willing to wait
@@ -2230,6 +2236,7 @@ export class Subscriber {
 		const entry: SubscribeEntry = {
 			track: producer,
 			staleBudget: narrowest(live),
+			staleCap: capOf(live),
 			compress: copy.compress,
 			timescale: copy.timescale,
 			tail: new Tail({ grace: () => hooks.tailGrace(producer) }),
@@ -2709,7 +2716,7 @@ export class Subscriber {
 				// judged under: a reader wider than that does not settle on it, and asks for the group
 				// with a request of its own.
 				const stale = hasSkip(this.version) && toStreamCode(error) === StreamCode.Old;
-				const hole = stale ? staleHole(entry.staleBudget) : { error };
+				const hole = stale ? staleHole(entry.staleBudget, entry.staleCap) : { error };
 				hooks.dropTrackGroups(entry.track, start, end, hole);
 				entry.fills?.refuse(start, end, error);
 			} else if ("skip" in resp) {
@@ -3011,6 +3018,7 @@ export class Subscriber {
 				for (const id of entry.joinTicks.keys()) if (!entry.live.get(id)) entry.joinTicks.delete(id);
 				for (const id of entry.joinBudgets.keys()) if (!entry.live.get(id)) entry.joinBudgets.delete(id);
 				entry.staleBudget = Math.min(entry.staleBudget, narrowest(entry.live));
+				if (capOf(entry.live) !== entry.staleCap) entry.staleCap = undefined;
 				for (const id of entry.fillIds) if (!entry.live.get(id)) entry.fillIds.delete(id);
 				for (const id of edited.fillIds) entry.fillIds.add(id);
 				for (const id of entry.probeIds) if (!entry.live.get(id)) entry.probeIds.delete(id);
@@ -3800,6 +3808,19 @@ function narrowest(live: LiveRanges): number {
 		if (max !== undefined) narrowest = Math.min(narrowest, wireBudget(max));
 	}
 	return narrowest;
+}
+
+// The exclusive group end past every range among `live`, undefined when one follows the live edge
+// or `live` holds none: the cap a stale drop is judged within. Mirrors the Rust `cap_of`.
+function capOf(live: LiveRanges): bigint | undefined {
+	let cap: bigint | undefined;
+	for (const range of live.ranges()) {
+		if (range.end === undefined) return undefined;
+		const last = through(range.end);
+		// A range ending before the first group reaches none.
+		cap = max(cap ?? 0n, last === undefined ? 0n : last + 1n);
+	}
+	return cap;
 }
 
 // The one `Subscriber Max Age` a wire before lite-07 carries for `ranges`, in milliseconds: `null`

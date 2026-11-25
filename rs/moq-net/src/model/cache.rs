@@ -1070,6 +1070,15 @@ impl Report {
 			self.track.took();
 		}
 	}
+
+	/// The group's inflated copy grew, which a sibling that is the live edge shares. A copy that
+	/// is itself the edge reports it through [`Self::took`] instead, as its readers' progress
+	/// decides whether it has anything to shed.
+	pub(super) fn decoded(&self) {
+		if !self.footprint.slot() {
+			self.track.took();
+		}
+	}
 }
 
 /// Gross bytes a track writes before a frame write settles its eviction debt itself,
