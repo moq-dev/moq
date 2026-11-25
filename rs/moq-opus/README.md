@@ -18,8 +18,8 @@ release since 2024-11.
   (-32768), into the literal `0x8000` (+32768), so every concealed or comfort
   noise sample clamped to +32767. That broke concealment of SILK and hybrid
   packets and every SILK DTX packet, which libopus decodes as a loss. The six
-  expansions in `silk/PLC.rs` and `silk/CNG.rs` now call `silk_SAT16`
-  (upstream's [#3](https://github.com/DCNick3/unsafe-libopus/pull/3) fixes the
+  inline clamps in `silk/PLC.rs` and `silk/CNG.rs` now use the lower bound
+  `-0x8000` (upstream's [#3](https://github.com/DCNick3/unsafe-libopus/pull/3) fixes the
   three in `PLC.rs` on master).
 - Upstream's tests, which link C libopus, are not carried; `moq-audio` tests
   the decoder it uses.
