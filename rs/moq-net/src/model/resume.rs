@@ -1382,14 +1382,15 @@ impl Subscriber {
 	/// [`Self::forget_past`] does; see [`track::Subscriber::forget_past_budget`].
 	pub(super) fn forget_past_budget(&self, delivered: &mut Delivered) {
 		let budget = self.reader().budget();
-		self.forget_past(delivered, budget);
+		self.forget_past(delivered, budget, None);
 	}
 
 	/// Forget the gaps in `delivered` below each group past `budget`, an outer reader's whose
 	/// `delivered` this is, judged on the newest copy that answered, but never past a group a
 	/// replaced copy the reader still reads holds unread: as one cursor keeps what it owes,
-	/// since a late group there may be fresh by its own successor on that copy.
-	pub(super) fn forget_past(&self, delivered: &mut Delivered, budget: Budget) {
+	/// since a late group there may be fresh by its own successor on that copy. Nor past `keep`,
+	/// an outer reader's own such group.
+	pub(super) fn forget_past(&self, delivered: &mut Delivered, budget: Budget, keep: Option<u64>) {
 		let reader = self.reader();
 		let mut ready = reader.copies.iter().rev().filter_map(|copy| match &copy.sub {
 			Sub::Ready(sub) => Some((copy, sub)),
@@ -1413,15 +1414,9 @@ impl Subscriber {
 		let kept = ready
 			.filter(|(copy, _)| copy.replaced && reader.reads(copy, delivered, &kio::Waiter::noop()).is_some())
 			.filter_map(|(_, sub)| unread(sub))
+			.chain(keep)
 			.min();
-		// A reader following one route judges on it alone, with no copy of `delivered`.
-		let Some(kept) = kept else {
-			newest.forget_past_budget(delivered, budget);
-			return;
-		};
-		let mut judged = delivered.clone();
-		newest.forget_past_budget(&mut judged, budget);
-		delivered.forget_below(judged.floor().min(kept));
+		newest.forget_past_budget(delivered, budget, kept);
 	}
 
 	/// Poll for the track's declared exclusive end.

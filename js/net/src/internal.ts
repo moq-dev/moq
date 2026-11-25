@@ -685,9 +685,9 @@ export interface ResumeSource {
 	/**
 	 * Forget the gaps in `delivered` below each group past `budget`, an outer reader's whose
 	 * `delivered` this is, judged on the newest copy, but never past a group a replaced copy still
-	 * feeding the reader holds unread. Mirrors the Rust `Subscriber::forget_past`.
+	 * feeding the reader holds unread, nor past `keep`. Mirrors the Rust `Subscriber::forget_past`.
 	 */
-	forgetPast(delivered: Delivered, budget: Budget): void;
+	forgetPast(delivered: Delivered, budget: Budget, keep?: bigint): void;
 	/** The lowest group any copy holds unread that `delivered` lacks; see `hooks.lowestBuffered`. */
 	lowestBuffered(delivered: Delivered): bigint | undefined;
 	/**
@@ -1226,9 +1226,10 @@ export const hooks: {
 	/**
 	 * Forget the gaps in another reader's `delivered` below each group past `budget`, the budget of
 	 * the reader whose `delivered` this is, which a front's copy, its ranges raised to a resume point,
-	 * cannot judge by its own. Mirrors the Rust `Subscriber::forget_past_budget`.
+	 * cannot judge by its own, forgetting no gap at or above `keep`. Mirrors the Rust
+	 * `Subscriber::forget_past_budget`.
 	 */
-	forgetPastBudget: (subscriber: Subscriber, delivered: Delivered, budget: Budget) => void;
+	forgetPastBudget: (subscriber: Subscriber, delivered: Delivered, budget: Budget, keep?: bigint) => void;
 	/**
 	 * The lowest group the subscriber holds unread that another reader's `delivered` lacks, in its
 	 * range and window, on any copy it reads. Mirrors the Rust `track::Subscriber::lowest_unread`

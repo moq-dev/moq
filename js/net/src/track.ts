@@ -3939,8 +3939,9 @@ export class Subscriber {
 	// this track holds it or not: one landing there would be written off. A group skipped as
 	// stale is not forgotten, since a wider budget offers it again, and neither is one still
 	// buffered unread: it may have arrived after a newer one, so its own successor may be fresh.
-	// Mirrors the Rust `Cursor::forget_past_budget` keeping what the arrivals still owe.
-	#forgetPastBudget(delivered: Delivered, budget = this.#window.budget()): void {
+	// Mirrors the Rust `Cursor::forget_past_budget` keeping what the arrivals still owe. No gap at
+	// or above `keep` is forgotten either.
+	#forgetPastBudget(delivered: Delivered, budget = this.#window.budget(), keep?: bigint): void {
 		if (delivered.aboveGap() === undefined) return;
 		// One edge for every group judged, so forgetting N gaps never resolves it N times.
 		const own = this.#drift();
@@ -3967,6 +3968,7 @@ export class Subscriber {
 				}
 				const owed = this.#lowestBuffered(delivered);
 				if (owed !== undefined) skipped = min(skipped ?? owed, owed);
+				if (keep !== undefined) skipped = min(skipped ?? keep, keep);
 			}
 			if (skipped !== undefined && skipped < oldest) {
 				delivered.forgetBelow(skipped);
@@ -5203,9 +5205,9 @@ export class Subscriber {
 			if (ordered) subscriber.#raiseNext(floor);
 			return subscriber.#peekGroup(ordered);
 		};
-		hooks.forgetPastBudget = (subscriber, delivered, budget) => {
-			if (subscriber.#resume) subscriber.#resume.forgetPast(delivered, budget);
-			else subscriber.#forgetPastBudget(delivered, budget);
+		hooks.forgetPastBudget = (subscriber, delivered, budget, keep) => {
+			if (subscriber.#resume) subscriber.#resume.forgetPast(delivered, budget, keep);
+			else subscriber.#forgetPastBudget(delivered, budget, keep);
 		};
 		hooks.lowestBuffered = (subscriber, delivered) =>
 			subscriber.#resume ? subscriber.#resume.lowestBuffered(delivered) : subscriber.#lowestBuffered(delivered);

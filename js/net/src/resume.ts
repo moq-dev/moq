@@ -2203,24 +2203,17 @@ class Reader implements ResumeSource {
 
 	// Judged on the newest copy, but never past a group a replaced copy still feeding the reader
 	// holds unread: as one cursor keeps what it owes, since a late group there may be fresh by its
-	// own successor on that copy.
-	forgetPast(delivered: Delivered, budget: Budget): void {
+	// own successor on that copy. Nor past `keep`, an outer reader's own such group.
+	forgetPast(delivered: Delivered, budget: Budget, keep?: bigint): void {
 		const newest = this.#copies.at(-1);
 		if (!newest) return;
-		let kept: bigint | undefined;
+		let kept = keep;
 		for (const copy of this.#copies) {
 			if (copy === newest || !copy.replaced || !this.#feeds(copy)) continue;
 			const key = hooks.lowestBuffered(copy.sub, delivered);
 			if (key !== undefined) kept = min(kept ?? key, key);
 		}
-		// A reader following one route judges on it alone, with no copy of `delivered`.
-		if (kept === undefined) {
-			hooks.forgetPastBudget(newest.sub, delivered, budget);
-			return;
-		}
-		const judged = delivered.clone();
-		hooks.forgetPastBudget(newest.sub, judged, budget);
-		delivered.forgetBelow(min(judged.runEnd(0n) ?? 0n, kept));
+		hooks.forgetPastBudget(newest.sub, delivered, budget, kept);
 	}
 
 	lowestBuffered(delivered: Delivered): bigint | undefined {
