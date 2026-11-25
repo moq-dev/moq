@@ -95,8 +95,39 @@ const MAX_MUX_RATE: u64 = 1_000_000_000;
 /// worth padding to when it is a real rate: zero pads nothing, and anything past
 /// [`MAX_MUX_RATE`] would allocate unbounded nulls per slot. Invalid rates are
 /// refused, leaving the output unpadded.
-fn sanitize_mux_rate(rate: u64) -> Option<u64> {
+pub(super) fn sanitize_mux_rate(rate: u64) -> Option<u64> {
 	(1..=MAX_MUX_RATE).contains(&rate).then_some(rate)
+}
+
+/// The slowest multiplex the AAC of `catalog` can be padded to: every slot carries a frame at the
+/// entry's bitrate, doubled for a variable-rate encoder's peaks, with the PAT, the PMT and a clock
+/// packet. A catalog entry without a bitrate sets none.
+///
+/// An audio frame goes out no further ahead of its decode time than its decoder buffer takes to
+/// fill at Rx, which is under a slot, so it needs the whole slot it decodes in. A multiplex a
+/// source recorded packs its audio tighter: FFmpeg's default has no nulls and puts 186 ms of audio
+/// in each PES, so the recorded rate alone can fall short of the export's own framing.
+pub(super) fn audio_floor(catalog: &Catalog<impl catalog::Catalog>) -> u64 {
+	let packets: u64 = catalog
+		.audio
+		.renditions
+		.iter()
+		.filter(|(_, config)| matches!(config.codec, AudioCodec::AAC(_)))
+		.filter_map(|(name, config)| {
+			// The catalog is untrusted: no frame outgrows the decoder buffer that holds it.
+			let size = audio_buffer(config, &audio_kind(config, name).ok()?).size?;
+			let frame = (config.bitrate? / 8 * 1024 / u64::from(config.sample_rate.max(1))).min(size as u64);
+			let pes = 2 * frame + (adts::MIN_HEADER_LEN + PES_PREFIX_LEN + PES_OPTIONAL_LEN) as u64;
+			Some(pes.div_ceil(schedule::PAYLOAD as u64))
+		})
+		.fold(0, u64::saturating_add);
+	match packets {
+		0 => 0,
+		packets => packets
+			.saturating_add(3)
+			.saturating_mul(schedule::PACKET)
+			.min(MAX_MUX_RATE),
+	}
 }
 
 /// Subscribe to a broadcast and produce an MPEG-TS byte stream.
@@ -1684,8 +1715,9 @@ where
 	}
 
 	/// Pad the output with null packets to `mux_rate` bits per second, whatever the
-	/// catalog records. Without this the catalog's `mpegts.muxRate` decides, and a
-	/// catalog without one leaves the output unpadded.
+	/// catalog records, which is used as given. Without this the catalog's `mpegts.muxRate`
+	/// decides, raised to what its AAC needs in a slot, and a catalog without one leaves the
+	/// output unpadded.
 	///
 	/// Zero and absurd rates are refused with a warning, leaving the output
 	/// unpadded rather than allocating unbounded nulls.
@@ -2418,12 +2450,16 @@ where
 		// unpadded), so a bad flag cannot silently fall back to the catalog rate.
 		let mux_rate = match self.program.mux_rate_override {
 			Some(override_rate) => sanitize_mux_rate(override_rate),
-			None => mpegts.mux_rate.and_then(|rate| {
-				sanitize_mux_rate(rate).or_else(|| {
-					tracing::warn!(mux_rate = rate, "ignoring invalid MPEG-TS multiplex rate in catalog");
-					None
+			None => mpegts
+				.mux_rate
+				.and_then(|rate| {
+					sanitize_mux_rate(rate).or_else(|| {
+						tracing::warn!(mux_rate = rate, "ignoring invalid MPEG-TS multiplex rate in catalog");
+						None
+					})
 				})
-			}),
+				.map(|rate| rate.max(audio_floor(&catalog)))
+				.and_then(sanitize_mux_rate),
 		};
 		// A revision is one boundary: the rate rides the next tables out.
 		if mux_rate != self.program.mux_rate {
