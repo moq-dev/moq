@@ -487,6 +487,9 @@ impl Producer {
 	///
 	/// Uses [`Self::unique_name`]; minted names are never reused, even after closure.
 	pub fn unique_track(&self, suffix: &str, info: impl Into<Option<track::Info>>) -> track::Producer {
+		// A consumer may already have requested the minted name: hold the wakes as
+		// `create_track` does.
+		let _hold = kio::hold();
 		let mut state = self.state.lock();
 		let name = state.unique_name(suffix);
 		// Minted under the same lock, so no live track can hold the name.
@@ -2737,6 +2740,38 @@ mod test {
 		let waiter = kio::Waiter::new(std::task::Waker::from(reenter.clone()));
 		assert!(reader.poll_recv_group(&waiter).is_pending());
 		let _next = producer.create_track("video", crate::track::Info::timed()).unwrap();
+		assert!(reenter.woken.load(std::sync::atomic::Ordering::SeqCst));
+	}
+
+	/// `unique_track` minting a name a consumer already requested fulfils that request, and
+	/// wakes its subscriber only once the broadcast unlocks.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn unique_track_wakes_a_queued_subscriber_after_unlocking() {
+		struct Reenter {
+			consumer: Consumer,
+			woken: std::sync::atomic::AtomicBool,
+		}
+		impl std::task::Wake for Reenter {
+			fn wake(self: Arc<Self>) {
+				let _ = self.consumer.track("other");
+				self.woken.store(true, std::sync::atomic::Ordering::SeqCst);
+			}
+		}
+
+		let producer = Info::new().produce();
+		let _dynamic = producer.requests();
+		let consumer = producer.consume();
+		let pending = consumer.track("0.opus").unwrap().subscribe(None);
+
+		let reenter = Arc::new(Reenter {
+			consumer: consumer.clone(),
+			woken: false.into(),
+		});
+		let waiter = kio::Waiter::new(std::task::Waker::from(reenter.clone()));
+		assert!(pending.poll_ok(&waiter).is_pending());
+		let track = producer.unique_track(".opus", crate::track::Info::timed());
+		assert_eq!(&*track.name(), "0.opus");
 		assert!(reenter.woken.load(std::sync::atomic::Ordering::SeqCst));
 	}
 

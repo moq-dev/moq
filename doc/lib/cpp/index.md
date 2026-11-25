@@ -273,8 +273,9 @@ offline. How long to keep it up is yours to decide. A track still open at the
 close ends with `Unroutable` (`Internal` over moq-transport, which has no such
 code), and one released without a finish ends cleanly while nobody reads it; a
 reader still reading is served by the next request for the track while a request
-handler is live, which must accept it with the info the track was published
-with, and reads `Dropped`, seen as `Internal`, otherwise. A media container
+handler is live. That handler must accept it with the info the track was
+published with: another info ends the track with `Duplicate`. With no handler,
+the reader reads `Dropped`, seen as `Internal`. A media container
 producer, and a JSON stream or window that published a record, are the
 exceptions: finish them, since releasing one unfinished ends its tracks with
 `Dropped`. Readers follow a publisher's runs by announcement, not by that error: see
