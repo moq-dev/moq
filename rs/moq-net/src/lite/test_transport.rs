@@ -94,7 +94,10 @@ pub enum Sent {
 	Finish,
 	Reset(u32),
 	/// A reset that still delivers the stream's bytes before `offset`.
-	ResetAt { offset: u64, code: u32 },
+	ResetAt {
+		offset: u64,
+		code: u32,
+	},
 }
 
 /// What the streams sent ahead of the first session close. See [`Log::before_close`].

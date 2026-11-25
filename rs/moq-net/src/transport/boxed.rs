@@ -421,12 +421,9 @@ impl SendStream {
 	pub(crate) fn held_acked(&self) -> bool {
 		let read = self.get();
 		let held = read.held();
-		held.floor.as_ref().is_some_and(|floor| {
-			matches!(
-				held.stream.poll_acked(&kio::Waiter::noop(), floor),
-				Poll::Ready(Ok(()))
-			)
-		})
+		held.floor
+			.as_ref()
+			.is_some_and(|floor| matches!(held.stream.poll_acked(&kio::Waiter::noop(), floor), Poll::Ready(Ok(()))))
 	}
 
 	/// Whether the session reset the stream to make room for a higher-ranked one.
@@ -1615,8 +1612,11 @@ mod test {
 	struct Acking {
 		written: u64,
 		acked: u64,
-		reset: std::sync::Arc<std::sync::Mutex<Option<(Option<u64>, u32)>>>,
+		reset: std::sync::Arc<std::sync::Mutex<Option<Reset>>>,
 	}
+
+	/// The offset a reset kept bytes below, if any, and its code.
+	type Reset = (Option<u64>, u32);
 
 	impl poll::SendStream for Acking {
 		type Error = super::super::memory::Error;
@@ -1667,7 +1667,11 @@ mod test {
 	#[test]
 	fn a_boxed_stream_forwards_acknowledgment() {
 		let waiter = kio::Waiter::noop();
-		let mut stream = SendStream::new(Acking { written: 0, acked: 3, reset: Default::default() });
+		let mut stream = SendStream::new(Acking {
+			written: 0,
+			acked: 3,
+			reset: Default::default(),
+		});
 		assert!(matches!(
 			poll::SendStream::poll_write(&mut stream, &waiter, b"abc"),
 			Poll::Ready(Ok(3))

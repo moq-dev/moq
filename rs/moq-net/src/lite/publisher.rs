@@ -7611,7 +7611,8 @@ impl GroupServe {
 						// lite-07 GROUP_END: stale bytes would fill the send window and stall the
 						// streams behind them.
 						Poll::Pending if self.group.poll_expired(waiter) => {
-							let GroupState::Closed { mut writer } = std::mem::replace(&mut self.state, GroupState::Done)
+							let GroupState::Closed { mut writer } =
+								std::mem::replace(&mut self.state, GroupState::Done)
 							else {
 								unreachable!()
 							};
@@ -10802,8 +10803,16 @@ mod serve_group_test {
 				true => &[(0, 0)],
 				false => &[],
 			};
-			assert_eq!(drops(&mut writer, &log, version).await, dropped, "{stop:?} acked: {acked}");
-			assert_eq!(group_resets(&streams, version).len(), 1, "{stop:?}: the stop is answered");
+			assert_eq!(
+				drops(&mut writer, &log, version).await,
+				dropped,
+				"{stop:?} acked: {acked}"
+			);
+			assert_eq!(
+				group_resets(&streams, version).len(),
+				1,
+				"{stop:?}: the stop is answered"
+			);
 		}
 	}
 
@@ -11147,7 +11156,10 @@ mod serve_group_test {
 				true => {
 					assert_eq!(drops(&mut writer, &log, version).await, []);
 					let resets = group_resets(&streams, version);
-					assert_eq!(resets.iter().map(|(key, held, _)| (*key, *held)).collect::<Vec<_>>(), [(1, true)]);
+					assert_eq!(
+						resets.iter().map(|(key, held, _)| (*key, *held)).collect::<Vec<_>>(),
+						[(1, true)]
+					);
 				}
 			}
 		}
