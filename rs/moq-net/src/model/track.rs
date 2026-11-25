@@ -471,7 +471,7 @@ enum Publication {
 }
 
 /// Where a track stood when it was asked for again because its last producer dropped while
-/// read; it describes the track until the live feed takes a group, at any key.
+/// read; it describes the track until the live feed goes past it.
 #[derive(Clone, Copy, Debug)]
 struct Renewal {
 	/// Where that producer stopped, found before the groups it left open went.
@@ -699,9 +699,9 @@ pub(crate) struct TrackState {
 	// How far the track got toward a live Producer. A reverse fetch may install `info`
 	// before acceptance, so the two are deliberately separate.
 	publication: Publication,
-	// Set when the track is asked for again because its last producer dropped while read,
-	// and cleared once a live group commits a frame or finishes: creating one is not enough,
-	// so a producer that recreates its predecessor's open group and fails is not asked again.
+	// Set when the track is asked for again because its last producer dropped while read. It
+	// stands until the live feed goes past its resume, judged when read and when a group is
+	// created rather than on every write (see `pending_renewal`).
 	renewal: Option<Renewal>,
 
 	// The broadcast this track belongs to. Supplies the cache pool its groups charge
@@ -3610,22 +3610,19 @@ impl TrackState {
 		matches!(self.feed, Feed::Answered { from } if key >= from)
 	}
 
-	/// Whether the track awaits production since it was asked for again, and `group` is the
-	/// live feed's group at its key, so its first commit counts.
-	pub(super) fn renews(&self, group: &group::Handle) -> bool {
-		self.renewal.is_some()
-			&& self
-				.lookup
-				.get(&group.start)
-				.is_some_and(|slot| slot.visible && slot.group.is_clone(group))
-	}
-
-	/// The live feed's `group` committed a frame or finished: the track produced since it was
-	/// last asked for again.
-	pub(super) fn produced(&mut self, group: &group::Handle) {
-		if self.renews(group) {
-			self.renewal = None;
-		}
+	/// The renewal the live feed has not gone past yet: no live group at or past where the track
+	/// was asked for again finished, or committed a frame there. Replaying frames the last
+	/// producer already wrote does not count, so a handler failing at the same frame each time is
+	/// not asked again. Read from the groups under the track lock (track then group), so a commit
+	/// racing the producer's drop is either seen or lands after it.
+	fn pending_renewal(&self) -> Option<Renewal> {
+		let renewal = self.renewal?;
+		let resume = renewal.resume.unwrap_or_default();
+		let advanced = self.lookup.range(resume.group..).any(|(&key, slot)| {
+			let written = if key == resume.group { resume.frame } else { 0 };
+			slot.visible && (slot.group.is_finished() || slot.group.committed() as u64 > written)
+		});
+		(!advanced).then_some(renewal)
 	}
 
 	/// Wake the reads a group landing at `key` succeeds.
@@ -3652,6 +3649,11 @@ impl TrackState {
 	/// can never be a victim of the very write that created it), insert it, then
 	/// expire idle groups.
 	fn commit_group(&mut self, group: &group::Handle) {
+		// Settled while the live edge it went past is still cached and protected, so evicting
+		// it later cannot bring a stale renewal back.
+		if self.renewal.is_some() && self.pending_renewal().is_none() {
+			self.renewal = None;
+		}
 		self.charge_debt();
 		self.insert_group(group, true);
 		self.evict_expired();
@@ -4306,8 +4308,8 @@ impl TrackState {
 		{
 			return Some(resume);
 		}
-		// Likewise while nothing was produced since the track was asked for again.
-		if let Some(renewal) = self.renewal {
+		// Likewise until the live feed goes past where the track was asked for again.
+		if let Some(renewal) = self.pending_renewal() {
 			return renewal.resume;
 		}
 
@@ -6730,9 +6732,10 @@ impl Drop for Alive {
 				return;
 			}
 		}
-		// A producer that served a renewal and produced nothing is not asked for again: a
-		// handler that fails at once would otherwise loop for as long as the reader stays.
-		let Some(home) = self.home.get().cloned().filter(|_| state.renewal.is_none()) else {
+		// A producer that served a renewal and never went past where it was asked for again is
+		// not asked again: a handler failing at the same point each time would otherwise loop for
+		// as long as the reader stays.
+		let Some(home) = self.home.get().cloned().filter(|_| state.pending_renewal().is_none()) else {
 			return Self::drop_wanted(state, &self.name);
 		};
 		// A reader still wants the track, so its broadcast asks for it again, as a later lookup

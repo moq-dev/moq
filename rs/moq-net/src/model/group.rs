@@ -1731,9 +1731,6 @@ struct Alive {
 	// the group lock is released and before the track is told: a track scan reading a stale
 	// false judges the group frameless until that wake re-judges it.
 	started: AtomicBool,
-	// Set once the group committed a frame or finished, after the group lock is released and
-	// before the track is told, so the track hears it once.
-	produced: AtomicBool,
 	// Set once a final drop of this group waits on this copy, a fetched head still filling:
 	// an abort before it finishes makes the drop the group's cut, so cut watchers hear it.
 	carries_drop: AtomicBool,
@@ -1829,7 +1826,6 @@ impl Producer {
 			cut: OnceLock::new(),
 			checked: AtomicBool::new(false),
 			started: AtomicBool::new(false),
-			produced: AtomicBool::new(false),
 			carries_drop: AtomicBool::new(false),
 			access,
 			log,
@@ -1994,7 +1990,6 @@ impl Producer {
 		}
 		drop(track);
 		self.handle.start(producer);
-		self.handle.produced();
 
 		// With the group lock released (lock order is track then group), settle
 		// eviction debt if enough has been written since the track last paid.
@@ -2133,7 +2128,6 @@ impl Producer {
 		drop(track);
 		if count > 0 {
 			self.handle.start(producer);
-			self.handle.produced();
 		}
 
 		self.handle.cache.settle(now);
@@ -2377,7 +2371,6 @@ impl Producer {
 		);
 		self.advance_largest(&state);
 		drop(state);
-		self.handle.produced();
 
 		// With the group lock released (lock order is track then group), settle
 		// eviction debt and age idle content out, reusing the tick above.
@@ -2461,7 +2454,6 @@ impl Producer {
 		drop(state);
 		// An empty group counts as content once it ends.
 		self.handle.start(None);
-		self.handle.produced();
 		// A finished group can no longer raise the track's largest, which may end its stream.
 		// A copy a transport bound cut short finished only its own range.
 		if original_fin.is_some() {
@@ -3286,22 +3278,6 @@ impl Handle {
 		let answers = track.read().reveal(self);
 		if answers && let Ok(mut state) = track.write() {
 			state.shown(self.start);
-		}
-	}
-
-	/// The group committed a frame or finished: tell the track once, so a producer serving a
-	/// renewal counts as producing. Called with the group lock released.
-	fn produced(&self) {
-		if self.alive.produced.swap(true, Ordering::Relaxed) {
-			return;
-		}
-		let Some(track) = self.cache.track() else {
-			return;
-		};
-		if track.read().renews(self)
-			&& let Ok(mut state) = track.write()
-		{
-			state.produced(self);
 		}
 	}
 

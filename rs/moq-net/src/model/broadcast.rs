@@ -2974,6 +2974,78 @@ mod test {
 		}
 	}
 
+	/// A replacement that replays only frames its predecessor already wrote has not gone past
+	/// where the track was asked for again, so a handler failing at the same frame each time
+	/// ends its readers with `Dropped` instead of being asked again.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_renewal_replaying_written_frames_is_not_renewed_again() {
+		let at = |millis| crate::Timestamp::from_millis(millis).unwrap();
+		let producer = Info::new().produce();
+		let mut dynamic = producer.requests();
+		let consumer = producer.consume();
+		let track = producer.create_track("video", crate::track::Info::timed()).unwrap();
+		let handle = track.consume();
+		let mut reader = consumer.track("video").unwrap().subscribe(None).await.unwrap();
+		let mut open = track.append_next().unwrap();
+		open.write_frame(at(0), b"a".as_slice()).unwrap();
+		drop((track, open));
+
+		let next = dynamic.assert_request().accept(crate::track::Info::timed());
+		let mut again = next.create_group(crate::group::Info { start: 0 }).unwrap();
+		again.write_frame(at(0), b"a".as_slice()).unwrap();
+		assert_eq!(
+			handle.resume_position(),
+			Some(crate::track::Position { group: 0, frame: 1 })
+		);
+		drop((next, again));
+		dynamic.assert_no_request();
+		assert_eq!(
+			handle.resume_position(),
+			Some(crate::track::Position { group: 0, frame: 1 })
+		);
+		loop {
+			match reader.recv_group().await {
+				Ok(Some(_)) => continue,
+				result => break assert!(matches!(result, Err(Error::Dropped)), "{:?}", result.err()),
+			}
+		}
+	}
+
+	/// A replacement dropped on another thread right after its first frame commits, before
+	/// anything else hears of the frame, has still produced, so its track is asked for again.
+	/// Untimed, so the commit wakes its reader with no track lock held.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_renewal_dropped_as_its_frame_commits_is_renewed_again() {
+		struct DropOnWake(std::sync::Mutex<Option<crate::track::Producer>>);
+		impl std::task::Wake for DropOnWake {
+			fn wake(self: Arc<Self>) {
+				drop(self.0.lock().unwrap().take());
+			}
+		}
+
+		let producer = Info::new().produce();
+		let mut dynamic = producer.requests();
+		let consumer = producer.consume();
+		let track = producer.create_track("video", crate::track::Info::default()).unwrap();
+		let mut reader = consumer.track("video").unwrap().subscribe(None).await.unwrap();
+		drop(track);
+
+		let next = dynamic.assert_request().accept(crate::track::Info::default());
+		let mut group = next.append_next().unwrap();
+		let dropper = Arc::new(DropOnWake(std::sync::Mutex::new(Some(next))));
+		let waiter = kio::Waiter::new(std::task::Waker::from(dropper.clone()));
+		let mut read = reader.recv_group().await.unwrap().unwrap();
+		assert!(read.poll_read_frame(&waiter).is_pending());
+		group
+			.write_frame(crate::Timestamp::unscaled(0), b"a".as_slice())
+			.unwrap();
+		assert!(dropper.0.lock().unwrap().is_none(), "the commit woke the reader");
+		drop(group);
+		dynamic.assert_request();
+	}
+
 	/// A renewal whose producer appended nothing and dropped while still read ends its readers
 	/// with `Dropped` rather than asking again, so a handler failing at once cannot loop.
 	#[kio::test]
