@@ -470,14 +470,6 @@ enum Publication {
 	Published,
 }
 
-/// Where a track stood when it was asked for again because its last producer dropped while
-/// read; it describes the track until the live feed goes past it.
-#[derive(Clone, Copy, Debug)]
-struct Renewal {
-	/// Where that producer stopped, found before the groups it left open went.
-	resume: Option<Position>,
-}
-
 /// How far a track got toward its end; each step replaces the last, and only an abort
 /// follows a seal or a drop.
 #[derive(Debug, Default)]
@@ -699,10 +691,14 @@ pub(crate) struct TrackState {
 	// How far the track got toward a live Producer. A reverse fetch may install `info`
 	// before acceptance, so the two are deliberately separate.
 	publication: Publication,
-	// Set when the track is asked for again because its last producer dropped while read. It
-	// stands until the live feed goes past its resume, judged when read and when a group is
-	// created rather than on every write (see `pending_renewal`).
-	renewal: Option<Renewal>,
+	// Where the last producer stopped when the track was asked for again because it dropped
+	// while read, found before the groups it left open went: `resume_position` never reports
+	// less, so a renewal refused or abandoned later still resumes there.
+	handoff: Option<Position>,
+	// The renewal budget: a reader joining refills it to one renewal, and a renewal spends it.
+	// So a handler failing every time is asked again at most once per reader join, whatever
+	// the cache holds. Atomic so a join refills it under the read lock it already takes.
+	renewal_spent: AtomicBool,
 
 	// The broadcast this track belongs to. Supplies the cache pool its groups charge
 	// into and the local `cache_duration` ceiling.
@@ -3610,21 +3606,6 @@ impl TrackState {
 		matches!(self.feed, Feed::Answered { from } if key >= from)
 	}
 
-	/// The renewal the live feed has not gone past yet: no live group at or past where the track
-	/// was asked for again finished, or committed a frame there. Replaying frames the last
-	/// producer already wrote does not count, so a handler failing at the same frame each time is
-	/// not asked again. Read from the groups under the track lock (track then group), so a commit
-	/// racing the producer's drop is either seen or lands after it.
-	fn pending_renewal(&self) -> Option<Renewal> {
-		let renewal = self.renewal?;
-		let resume = renewal.resume.unwrap_or_default();
-		let advanced = self.lookup.range(resume.group..).any(|(&key, slot)| {
-			let written = if key == resume.group { resume.frame } else { 0 };
-			slot.visible && (slot.group.is_finished() || slot.group.committed() as u64 > written)
-		});
-		(!advanced).then_some(renewal)
-	}
-
 	/// Wake the reads a group landing at `key` succeeds.
 	fn wake_landed(&self, key: u64) {
 		let below = self
@@ -3649,11 +3630,6 @@ impl TrackState {
 	/// can never be a victim of the very write that created it), insert it, then
 	/// expire idle groups.
 	fn commit_group(&mut self, group: &group::Handle) {
-		// Settled while the live edge it went past is still cached and protected, so evicting
-		// it later cannot bring a stale renewal back.
-		if self.renewal.is_some() && self.pending_renewal().is_none() {
-			self.renewal = None;
-		}
 		self.charge_debt();
 		self.insert_group(group, true);
 		self.evict_expired();
@@ -4308,25 +4284,31 @@ impl TrackState {
 		{
 			return Some(resume);
 		}
-		// Likewise until the live feed goes past where the track was asked for again.
-		if let Some(renewal) = self.pending_renewal() {
-			return renewal.resume;
-		}
 
-		let max = self.latest_group?;
-		match self.lookup.get(&max).and_then(|slot| slot.group.resume_frame()) {
+		let Some(max) = self.latest_group else {
+			return self.handoff;
+		};
+		let live = match self.lookup.get(&max) {
+			// The renewal's teardown took the group its producer left open.
+			None if self.handoff.is_some() => return self.handoff,
+			slot => slot.and_then(|slot| slot.group.resume_frame()),
+		};
+		let live = match live {
 			// Still open *and* carrying frames, so the replacement continues it
 			// frame-by-frame.
-			Some(frame) => Some(Position {
+			Some(frame) => Position {
 				group: max,
 				frame: frame as u64,
-			}),
+			},
 			// A copy that wrote nothing has no frames to continue, and the reader
 			// already holds its (empty) handle. Pointing a replacement at frame 0 would
 			// hand the same key out twice, so roll to the next group exactly as a
 			// finished one does.
-			None => Some(Position::group(max.saturating_add(1))),
-		}
+			None => Position::group(max.saturating_add(1)),
+		};
+		// A renewal's producer replaying fewer frames than the last one wrote does not move
+		// the resume back.
+		Some(live).max(self.handoff)
 	}
 
 	/// The upstream subscription ended with the copy still held: what it cached may go
@@ -6732,20 +6714,21 @@ impl Drop for Alive {
 				return;
 			}
 		}
-		// A producer that served a renewal and never went past where it was asked for again is
-		// not asked again: a handler failing at the same point each time would otherwise loop for
-		// as long as the reader stays.
-		let Some(home) = self.home.get().cloned().filter(|_| state.pending_renewal().is_none()) else {
+		// Each renewal spends the budget a reader joining refilled: a handler failing each time
+		// would otherwise loop for as long as the reader stays.
+		let Some(home) = self.home.get().cloned() else {
 			return Self::drop_wanted(state, &self.name);
 		};
+		if std::mem::replace(state.renewal_spent.get_mut(), true) {
+			return Self::drop_wanted(state, &self.name);
+		}
 		// A reader still wants the track, so its broadcast asks for it again, as a later lookup
 		// would, and the reader waits on the same state for the next producer. The groups this
 		// producer left open end as superseded: nobody can finish them, and the next producer's
 		// groups replace them, so a reader holding one moves on as past any group gone old.
 		let (resume, open) = state.tear_down(Error::Old);
 		state.publication = Publication::Pending;
-		// Kept in the state, so a refusal reached later still resumes where this producer stopped.
-		state.renewal = Some(Renewal { resume });
+		state.handoff = resume;
 		drop(state);
 		open.abort();
 		let request = Request::renew(self.name.clone(), self.state.clone(), home.clone());
@@ -6953,9 +6936,13 @@ impl TrackWeak {
 		&self,
 		subscription: Option<&Subscription>,
 	) -> Option<(kio::Consumer<TrackState>, Option<Preferences>)> {
+		let state = self.state.read();
+		// Refilled before the join counts as demand, so a last producer dropping once it does
+		// sees the refill and asks for the track again.
+		state.renewal_spent.store(false, Ordering::Relaxed);
 		// Register before the first consumer can wake the serving session, while
 		// still refusing a copy whose idle teardown already committed.
-		let preferences = subscription.map(|value| Preferences::register(self.state.read(), value.clone()));
+		let preferences = subscription.map(|value| Preferences::register(state, value.clone()));
 		Some((self.state.try_consume()?, preferences))
 	}
 

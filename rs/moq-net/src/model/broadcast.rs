@@ -2905,11 +2905,52 @@ mod test {
 		);
 	}
 
-	/// A replacement recreating the group its predecessor left open has produced, so dropping
-	/// it while read asks for the track again.
+	/// A renewal spends the budget its readers' joins refilled, however much its producer then
+	/// writes: dropping that producer while the same reader still reads ends it with `Dropped`
+	/// instead of asking again, so a handler failing each time cannot loop. Another reader joining
+	/// refills the budget for one more renewal.
 	#[kio::test]
 	#[cfg(feature = "async")]
-	async fn a_renewal_recreating_the_open_group_is_renewed_again() {
+	async fn a_renewal_is_asked_for_again_only_after_a_reader_joins() {
+		let producer = Info::new().produce();
+		let mut dynamic = producer.requests();
+		let consumer = producer.consume();
+		let track = producer.create_track("video", crate::track::Info::timed()).unwrap();
+		let mut reader = consumer.track("video").unwrap().subscribe(None).await.unwrap();
+		track.append_next().unwrap().finish().unwrap();
+		drop(track);
+
+		let next = dynamic.assert_request().accept(crate::track::Info::timed());
+		next.append_next().unwrap().finish().unwrap();
+		let mut joined = consumer.track("video").unwrap().subscribe(None).await.unwrap();
+		drop(next);
+
+		let last = dynamic.assert_request().accept(crate::track::Info::timed());
+		last.append_next().unwrap().finish().unwrap();
+		drop(last);
+		dynamic.assert_no_request();
+		for reader in [&mut reader, &mut joined] {
+			loop {
+				match reader.recv_group().await {
+					Ok(Some(_)) => continue,
+					result => break assert!(matches!(result, Err(Error::Dropped)), "{:?}", result.err()),
+				}
+			}
+		}
+
+		// A lookup after that asks for the track afresh.
+		let subscribing = subscribe_pending!(consumer, "video");
+		let fresh = dynamic.assert_request().accept(crate::track::Info::timed());
+		let mut reader = subscribing.await.unwrap();
+		fresh.append_next().unwrap().finish().unwrap();
+		assert_eq!(reader.recv_group().await.unwrap().unwrap().start, 0);
+	}
+
+	/// A renewal's producer replaying fewer frames of the group its predecessor left open does
+	/// not move the resume back, before or after it drops.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_renewal_replaying_fewer_frames_keeps_the_resume() {
 		let at = |millis| crate::Timestamp::from_millis(millis).unwrap();
 		let producer = Info::new().produce();
 		let mut dynamic = producer.requests();
@@ -2919,159 +2960,16 @@ mod test {
 		let _reader = consumer.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut open = track.append_next().unwrap();
 		open.write_frame(at(0), b"a".as_slice()).unwrap();
+		open.write_frame(at(1), b"b".as_slice()).unwrap();
 		drop((track, open));
 
 		let next = dynamic.assert_request().accept(crate::track::Info::timed());
 		let mut again = next.create_group(crate::group::Info { start: 0 }).unwrap();
 		again.write_frame(at(0), b"a".as_slice()).unwrap();
-		again.write_frame(at(1), b"b".as_slice()).unwrap();
+		let stopped = Some(crate::track::Position { group: 0, frame: 2 });
+		assert_eq!(handle.resume_position(), stopped);
 		drop((next, again));
-		dynamic.assert_request();
-		assert_eq!(
-			handle.resume_position(),
-			Some(crate::track::Position { group: 0, frame: 2 })
-		);
-	}
-
-	/// A replacement that only recreates the open group, or opens a frame it never commits, has
-	/// produced nothing: dropping it while read ends its readers with `Dropped` instead of asking
-	/// again, and keeps where its predecessor stopped.
-	#[kio::test]
-	#[cfg(feature = "async")]
-	async fn a_renewal_recreating_a_group_without_a_frame_is_not_renewed_again() {
-		let at = |millis| crate::Timestamp::from_millis(millis).unwrap();
-		let producer = Info::new().produce();
-		let mut dynamic = producer.requests();
-		let consumer = producer.consume();
-		let track = producer.create_track("video", crate::track::Info::timed()).unwrap();
-		let handle = track.consume();
-		let mut reader = consumer.track("video").unwrap().subscribe(None).await.unwrap();
-		let mut open = track.append_next().unwrap();
-		open.write_frame(at(0), b"a".as_slice()).unwrap();
-		drop((track, open));
-
-		let next = dynamic.assert_request().accept(crate::track::Info::timed());
-		let again = next.create_group(crate::group::Info { start: 0 }).unwrap();
-		let partial = next
-			.append_next()
-			.unwrap()
-			.create_frame(crate::frame::Info {
-				size: 2,
-				timestamp: at(2),
-			})
-			.unwrap();
-		drop((next, again, partial));
-		dynamic.assert_no_request();
-		assert_eq!(
-			handle.resume_position(),
-			Some(crate::track::Position { group: 0, frame: 1 })
-		);
-		loop {
-			match reader.recv_group().await {
-				Ok(Some(_)) => continue,
-				result => break assert!(matches!(result, Err(Error::Dropped)), "{:?}", result.err()),
-			}
-		}
-	}
-
-	/// A replacement that replays only frames its predecessor already wrote has not gone past
-	/// where the track was asked for again, so a handler failing at the same frame each time
-	/// ends its readers with `Dropped` instead of being asked again.
-	#[kio::test]
-	#[cfg(feature = "async")]
-	async fn a_renewal_replaying_written_frames_is_not_renewed_again() {
-		let at = |millis| crate::Timestamp::from_millis(millis).unwrap();
-		let producer = Info::new().produce();
-		let mut dynamic = producer.requests();
-		let consumer = producer.consume();
-		let track = producer.create_track("video", crate::track::Info::timed()).unwrap();
-		let handle = track.consume();
-		let mut reader = consumer.track("video").unwrap().subscribe(None).await.unwrap();
-		let mut open = track.append_next().unwrap();
-		open.write_frame(at(0), b"a".as_slice()).unwrap();
-		drop((track, open));
-
-		let next = dynamic.assert_request().accept(crate::track::Info::timed());
-		let mut again = next.create_group(crate::group::Info { start: 0 }).unwrap();
-		again.write_frame(at(0), b"a".as_slice()).unwrap();
-		assert_eq!(
-			handle.resume_position(),
-			Some(crate::track::Position { group: 0, frame: 1 })
-		);
-		drop((next, again));
-		dynamic.assert_no_request();
-		assert_eq!(
-			handle.resume_position(),
-			Some(crate::track::Position { group: 0, frame: 1 })
-		);
-		loop {
-			match reader.recv_group().await {
-				Ok(Some(_)) => continue,
-				result => break assert!(matches!(result, Err(Error::Dropped)), "{:?}", result.err()),
-			}
-		}
-	}
-
-	/// A replacement dropped on another thread right after its first frame commits, before
-	/// anything else hears of the frame, has still produced, so its track is asked for again.
-	/// Untimed, so the commit wakes its reader with no track lock held.
-	#[kio::test]
-	#[cfg(feature = "async")]
-	async fn a_renewal_dropped_as_its_frame_commits_is_renewed_again() {
-		struct DropOnWake(std::sync::Mutex<Option<crate::track::Producer>>);
-		impl std::task::Wake for DropOnWake {
-			fn wake(self: Arc<Self>) {
-				drop(self.0.lock().unwrap().take());
-			}
-		}
-
-		let producer = Info::new().produce();
-		let mut dynamic = producer.requests();
-		let consumer = producer.consume();
-		let track = producer.create_track("video", crate::track::Info::default()).unwrap();
-		let mut reader = consumer.track("video").unwrap().subscribe(None).await.unwrap();
-		drop(track);
-
-		let next = dynamic.assert_request().accept(crate::track::Info::default());
-		let mut group = next.append_next().unwrap();
-		let dropper = Arc::new(DropOnWake(std::sync::Mutex::new(Some(next))));
-		let waiter = kio::Waiter::new(std::task::Waker::from(dropper.clone()));
-		let mut read = reader.recv_group().await.unwrap().unwrap();
-		assert!(read.poll_read_frame(&waiter).is_pending());
-		group
-			.write_frame(crate::Timestamp::unscaled(0), b"a".as_slice())
-			.unwrap();
-		assert!(dropper.0.lock().unwrap().is_none(), "the commit woke the reader");
-		drop(group);
-		dynamic.assert_request();
-	}
-
-	/// A renewal whose producer appended nothing and dropped while still read ends its readers
-	/// with `Dropped` rather than asking again, so a handler failing at once cannot loop.
-	#[kio::test]
-	#[cfg(feature = "async")]
-	async fn a_renewal_that_produced_nothing_is_not_renewed_again() {
-		let producer = Info::new().produce();
-		let mut dynamic = producer.requests();
-		let consumer = producer.consume();
-		let track = producer.create_track("video", crate::track::Info::timed()).unwrap();
-		let mut reader = consumer.track("video").unwrap().subscribe(None).await.unwrap();
-		track.append_next().unwrap().finish().unwrap();
-		drop(track);
-
-		drop(dynamic.assert_request().accept(crate::track::Info::timed()));
-		dynamic.assert_no_request();
-		assert_eq!(reader.recv_group().await.unwrap().unwrap().start, 0);
-		assert!(matches!(reader.recv_group().await, Err(Error::Dropped)));
-
-		// One that produced is asked for again.
-		let subscribing = subscribe_pending!(consumer, "video");
-		let next = dynamic.assert_request().accept(crate::track::Info::timed());
-		let mut reader = subscribing.await.unwrap();
-		next.append_next().unwrap().finish().unwrap();
-		drop(next);
-		dynamic.assert_request();
-		assert_eq!(reader.recv_group().await.unwrap().unwrap().start, 0);
+		assert_eq!(handle.resume_position(), stopped);
 	}
 
 	#[test]

@@ -426,7 +426,8 @@ pub enum Error {
 
 	/// The producer was dropped without finishing or aborting, so the content is incomplete,
 	/// with no cause to report. A track's reader sees it only when no request handler can serve
-	/// the track again, or when the next producer could not continue it (a JSON log or window): a
+	/// the track again, when the producer that served such a request drops too before another
+	/// reader joins, or when the next producer could not continue it (a JSON log or window): a
 	/// track nobody wants ends cleanly when its last producer drops.
 	#[error("dropped without a finish or abort")]
 	Dropped,

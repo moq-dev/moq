@@ -403,8 +403,9 @@ impl TryFrom<MoqAudioFrame> for moq_audio::Frame {
 ///
 /// Released before its finish, it ends its track cleanly while nobody wants it; a reader that still
 /// does is served by the broadcast's next request for the track, or reads `Dropped` (seen elsewhere
-/// as `Internal`) with no request handler. Still open when its broadcast closes, it ends it with
-/// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
+/// as `Internal`) with no request handler, or when this producer served such a request and no
+/// reader joined since. Still open when its broadcast closes, it ends it with `Unroutable`, which a
+/// moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqAudioProducer {
 	inner: std::sync::Mutex<Option<moq_audio::encode::Producer>>,

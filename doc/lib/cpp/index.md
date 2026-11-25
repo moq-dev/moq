@@ -247,7 +247,7 @@ Obtain a dynamic track request’s `demand()` before accepting it to watch subsc
 
 A producer publishes everything you write, subscribed or not, so a late subscriber can fetch the recent past. Capturing only while `demand()->wanted()` is set is an opt-in that saves the encode but leaves nothing from before the first subscriber.
 
-To end a track nobody wants, release its producer once `wanted_changed()` returns false; a subscriber that joined since is served by the next request for the track while a request handler is live, and reads `Dropped` without one.
+To end a track nobody wants, release its producer once `wanted_changed()` returns false; a subscriber that joined since is served by the next request for the track while a request handler is live, and reads `Dropped` without one, or once that request's producer is released too before another subscriber joins.
 
 ## Authorization
 

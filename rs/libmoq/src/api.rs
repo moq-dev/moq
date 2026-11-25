@@ -3859,7 +3859,8 @@ pub extern "C" fn moq_publish_track_abort(track: u32, error_code: u16) -> i32 {
 /// This is how an on-demand publisher ends a track once its [moq_publish_track_demand] watcher
 /// reports `MOQ_DEMAND_UNWANTED`: a track nobody wants ends cleanly, and a subscriber that joined
 /// since is served by the broadcast's next track request ([moq_publish_requests]), or fails
-/// without a live handler. Returns zero, or a negative code if the handle is unknown.
+/// without a live handler, or when this handle served such a request and no subscriber joined
+/// since. Returns zero, or a negative code if the handle is unknown.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_publish_track_free(track: u32) -> i32 {
 	ffi::enter(move || {

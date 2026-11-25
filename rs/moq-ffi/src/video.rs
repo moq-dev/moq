@@ -358,8 +358,9 @@ fn panic_error() -> MoqError {
 ///
 /// Released before its finish, it ends its track cleanly while nobody wants it; a reader that still
 /// does is served by the broadcast's next request for the track, or reads `Dropped` (seen elsewhere
-/// as `Internal`) with no request handler. Still open when its broadcast closes, it ends it with
-/// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
+/// as `Internal`) with no request handler, or when this producer served such a request and no
+/// reader joined since. Still open when its broadcast closes, it ends it with `Unroutable`, which a
+/// moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqVideoProducer {
 	/// `None` once finished or aborted.
