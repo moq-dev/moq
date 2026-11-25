@@ -60,6 +60,7 @@ import {
 	type Expiry,
 	finalKey,
 	type GroupRecover,
+	type Held,
 	hooks,
 	insertDrop,
 	insertRun,
@@ -2483,24 +2484,17 @@ class Reader implements ResumeSource {
 		return hooks.peekGroup(next.sub, ordered, this.#newest === undefined ? undefined : this.#newest + 1n);
 	}
 
-	lowestUnread(below: bigint): bigint | undefined {
-		let lowest: bigint | undefined;
+	// Of the copies holding the lowest group, servable if any can serve it, so which copy holds a
+	// group never decides whether it can be served.
+	held(from: bigint, below: bigint): Held | undefined {
+		let lowest: Held | undefined;
 		for (const copy of this.#copies) {
-			const key = hooks.lowestUnread(copy.sub, lowest ?? below);
-			if (key !== undefined) lowest = key;
+			const held = hooks.held(copy.sub, from, lowest ? lowest.key + 1n : below);
+			if (!held) continue;
+			if (held.key === lowest?.key) lowest.servable ||= held.servable;
+			else lowest = held;
 		}
 		return lowest;
-	}
-
-	// Servable if any copy can serve it.
-	heldAt(key: bigint): "servable" | "unservable" | undefined {
-		let held: "unservable" | undefined;
-		for (const copy of this.#copies) {
-			const state = hooks.heldAt(copy.sub, key);
-			if (state === "servable") return state;
-			held ??= state;
-		}
-		return held;
 	}
 
 	objectLargest(): track.Position | undefined {
