@@ -14909,7 +14909,10 @@ impl ServeLoop {
 						Sub::None => false,
 					};
 					if !flushing && std::mem::take(&mut self.deferred) {
-						if let Err(err) = self.begin(serve, self.serving.subscription()) {
+						// Acted on whole, so the change it folded in is not reported again.
+						let pref = self.serving.subscription();
+						self.serving.seen_subscription(pref.clone());
+						if let Err(err) = self.begin(serve, pref) {
 							return Poll::Ready(ServeEnd::GiveBack(err));
 						}
 						continue;
