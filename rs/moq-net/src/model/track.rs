@@ -12491,7 +12491,7 @@ impl Subscriber {
 	}
 
 	/// What this reader settled.
-	pub(super) fn record(&self) -> &Record {
+	fn record(&self) -> &Record {
 		match &self.inner {
 			Inner::Plain(cursor) => &cursor.record,
 			Inner::Resume(_, logical) => &logical.record,

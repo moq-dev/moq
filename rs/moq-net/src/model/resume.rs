@@ -883,16 +883,6 @@ impl Copy {
 			.and_then(|last| last.map_or(Some(0), |last| last.checked_add(1)))
 	}
 
-	/// Whether its cap may lift. Not once its own record counts a group past the cap as handed
-	/// out: it hands out nothing there, so that is a gap its record retired when the cap
-	/// narrowed its ranges, which it would never offer again.
-	fn liftable(&self) -> bool {
-		let (Some(end), Sub::Ready(sub)) = (self.end(), &self.sub) else {
-			return true;
-		};
-		sub.record().delivered.end().is_none_or(|settled| settled <= end)
-	}
-
 	/// Mirror `change` to the reader's preferences, which now read as `reader`.
 	fn update(&mut self, reader: &Mirrored, change: &Change) {
 		self.reopen();
@@ -2461,10 +2451,8 @@ impl Reader {
 		let boundary = self.boundary();
 		// Returning to a route reuses its subscription and leases, including an older
 		// group's in-flight tail. A fresh copy would replay it and retain one per flap. The
-		// newest is the route's own copy, not a backfill of it. One whose cap may not lift
-		// stays replaced, and a fresh copy serves.
-		let returning = (self.copies.iter().rposition(|copy| copy.track.same_channel(&track)))
-			.filter(|index| self.copies[*index].liftable());
+		// newest is the route's own copy, not a backfill of it.
+		let returning = self.copies.iter().rposition(|copy| copy.track.same_channel(&track));
 		// The copy's own resolution ends at its old cap; the reader's does not.
 		let returning = returning.map(|index| (self.window().resolved_by_key(), self.copies.remove(index)));
 		match boundary {
@@ -3511,7 +3499,7 @@ impl Reader {
 		let last = self.copies.len() - 1;
 		if let Some(copy) = self.copies[..last]
 			.iter_mut()
-			.find(|copy| !matches!(copy.done, Some(Err(_))) && copy.end().is_some() && asks(copy) && copy.liftable())
+			.find(|copy| !matches!(copy.done, Some(Err(_))) && copy.end().is_some() && asks(copy))
 		{
 			copy.until = Some(lowered.end.checked_sub(1));
 			copy.since = Some(copy.track.now());
@@ -7548,9 +7536,8 @@ mod test {
 	}
 
 	/// A switch caps the copy it replaces, which narrows that copy's ranges, so its record
-	/// retires the gaps left between the group it handed out and the drops it reported: past
-	/// one per run, a gap counts as handed out. Returning to the route reads a group landing
-	/// in one all the same.
+	/// retires the gaps left between the group it handed out and the drops it reported, past
+	/// one per run. Returning to the route hands out a group landing in one all the same.
 	#[test]
 	fn a_returning_route_hands_out_a_group_its_capped_copy_retired() {
 		let routes = Producer::new();
@@ -7580,44 +7567,6 @@ mod test {
 		write(&a, 1);
 		assert_eq!(drain(&mut sub, false), [1]);
 		drop(held);
-	}
-
-	/// The same copy, left replaced once its route serves again, is no backfill to widen over
-	/// the gap it retired: a group landing there comes through a backfill of its own.
-	#[test]
-	fn a_backfill_never_widens_a_copy_that_retired_a_gap() {
-		let routes = Producer::new();
-		let logical = logical(&routes);
-		let a = copy();
-		routes.serve(a.consume());
-		let mut sub = history(&logical);
-		write(&a, 0);
-		let first = recv(&mut sub);
-		assert_eq!(first.start, 0);
-
-		let b = copy();
-		routes.serve(b.consume());
-		write(&b, 1);
-		let second = recv(&mut sub);
-		assert_eq!(second.start, 1);
-		b.drop_groups(3..4, StreamError::DeliveryTimeout);
-		b.drop_groups(7..8, StreamError::DeliveryTimeout);
-		assert_eq!(
-			dropped(&mut sub),
-			[
-				(3..4, StreamError::DeliveryTimeout),
-				(7..8, StreamError::DeliveryTimeout)
-			]
-		);
-
-		let c = copy();
-		write(&c, 5);
-		routes.serve(c.consume());
-		assert_eq!(drain(&mut sub, false), [5]);
-		routes.serve(b.consume());
-		write(&b, 2);
-		assert_eq!(drain(&mut sub, false), [2]);
-		drop((first, second));
 	}
 
 	/// A skip of a run the serving copy already dropped replaces the drop, so the resumed

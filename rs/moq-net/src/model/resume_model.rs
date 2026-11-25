@@ -2189,9 +2189,9 @@ fn regressions() {
 			finish: false,
 		},
 		// A copy capped at a switch, whose reader reported the drops past the group it handed out,
-		// retires the gap between them: returning to its route reads the group landing there
-		// from a fresh copy. `a_returning_route_hands_out_a_group_its_capped_copy_retired` in
-		// `resume.rs` pins it.
+		// retires the gap between them: returning to its route still reads the group landing
+		// there. `a_returning_route_hands_out_a_group_its_capped_copy_retired` in `resume.rs`
+		// pins it.
 		Case {
 			ops: vec![
 				Op::GiveUp {
