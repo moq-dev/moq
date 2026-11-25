@@ -13152,3 +13152,24 @@ async fn an_ffmpeg_aac_source_exports_with_default_settings() {
 	// It joined after the multiplex rate was measured, so it carries less than the source.
 	assert!(ts.len() > data.len() / 4, "{} of {} bytes", ts.len(), data.len());
 }
+
+/// A catalog's bitrate and sample rate are hints from the network: the AAC floor they set stays
+/// within what a frame the decoder buffer holds needs, so a hostile pair neither overflows nor
+/// swallows the rate the source recorded.
+#[test]
+fn the_aac_floor_is_bounded_by_the_decoder_buffer() {
+	let mut catalog = crate::catalog::hang::Catalog::<tscat::Ext>::default();
+	for (name, bitrate, sample_rate) in [
+		("a", Some((1 << 53) - 1), 1),
+		("b", Some(128_000), 44_100),
+		("c", None, 48_000),
+	] {
+		let mut config = AudioConfig::new(AAC { profile: 2 }, sample_rate, 2);
+		config.bitrate = bitrate;
+		config.description = Some(Bytes::from_static(&[0x12, 0x10]));
+		catalog.audio.renditions.insert(name.into(), config);
+	}
+	let floor = super::export::audio_floor(&catalog);
+	// 3,584 bytes doubled and the PES header: 40 packets, and 5 for the second entry, 3 more.
+	assert_eq!(floor, (40 + 5 + 3) * crate::container::ts::schedule::PACKET);
+}

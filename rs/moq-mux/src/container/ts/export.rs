@@ -107,21 +107,23 @@ fn sanitize_mux_rate(rate: u64) -> Option<u64> {
 /// fill at Rx, which is under a slot, so it needs the whole slot it decodes in. A multiplex a
 /// source recorded packs its audio tighter: FFmpeg's default has no nulls and puts 186 ms of audio
 /// in each PES, so the recorded rate alone can fall short of the export's own framing.
-fn audio_floor(catalog: &Catalog<impl catalog::Catalog>) -> u64 {
+pub(super) fn audio_floor(catalog: &Catalog<impl catalog::Catalog>) -> u64 {
 	let packets: u64 = catalog
 		.audio
 		.renditions
-		.values()
-		.filter(|config| matches!(config.codec, AudioCodec::AAC(_)))
-		.filter_map(|config| {
-			let frame = config.bitrate? * 1024 / u64::from(config.sample_rate.max(1)) / 8;
+		.iter()
+		.filter(|(_, config)| matches!(config.codec, AudioCodec::AAC(_)))
+		.filter_map(|(name, config)| {
+			// The catalog is untrusted: no frame outgrows the decoder buffer that holds it.
+			let size = audio_buffer(config, &audio_kind(config, name).ok()?).size?;
+			let frame = (config.bitrate? / 8 * 1024 / u64::from(config.sample_rate.max(1))).min(size as u64);
 			let pes = 2 * frame + (adts::MIN_HEADER_LEN + PES_PREFIX_LEN + PES_OPTIONAL_LEN) as u64;
 			Some(pes.div_ceil(schedule::PAYLOAD as u64))
 		})
-		.sum();
+		.fold(0, u64::saturating_add);
 	match packets {
 		0 => 0,
-		packets => (packets + 3) * schedule::PACKET,
+		packets => packets.saturating_add(3).saturating_mul(schedule::PACKET),
 	}
 }
 

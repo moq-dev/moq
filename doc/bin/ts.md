@@ -119,8 +119,9 @@ the same tables are still in the receiver's 1,536-byte system buffer, so frequen
 keyframes cost nothing extra, and PAT and PMT of more than two packets together
 repeat only on the 500 ms and keyframe cadence, since a revision must wait for a
 repeat still in that buffer. It pads to the source's constant mux rate when the
-catalog recorded one, or to `--mux-rate`, on a schedule an IRD or groomer can
-lock to, with each PCR within 500 ns of its byte position. A variable-rate
+catalog recorded one (raised to what its AAC needs in a slot when the source
+packed it tighter, as FFmpeg's default does), or to `--mux-rate`, which is used
+as given, on a schedule an IRD or groomer can lock to, with each PCR within 500 ns of its byte position. A variable-rate
 source exports unpadded, with no mux-rate or system-buffer claim.
 
 Each frame goes out as early as the receiver's buffers admit, up to `--delay`

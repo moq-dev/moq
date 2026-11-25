@@ -1584,7 +1584,7 @@ impl Schedule {
 			.enumerate()
 			.filter_map(|(lane, units)| {
 				let unit = &self.units[*units.front()?];
-				(self.release(unit) <= index).then_some(Reverse((unit.timing.by, lane)))
+				(self.release(unit) <= index).then_some(Reverse((unit.by_at(unit.sent), lane)))
 			})
 			.collect();
 		let mut waiting: BinaryHeap<Reverse<(i128, usize)>> = BinaryHeap::new();
@@ -1602,7 +1602,8 @@ impl Schedule {
 			}
 			while waiting.peek().is_some_and(|Reverse((at, _))| *at <= now) {
 				let Reverse((_, lane)) = waiting.pop().unwrap();
-				ready.push(Reverse((self.units[*lanes[lane].front().unwrap()].timing.by, lane)));
+				let unit = &self.units[*lanes[lane].front().unwrap()];
+				ready.push(Reverse((unit.by_at(unit.sent), lane)));
 			}
 			let mut emitted = false;
 			// The slot's PCR opens it. Its PID's next packet carries it there when it can go
@@ -1632,7 +1633,7 @@ impl Schedule {
 					if let Some(&i) = lanes[lane].front()
 						&& self.release(&self.units[i]) <= index
 					{
-						ready.push(Reverse((self.units[i].timing.by, lane)));
+						ready.push(Reverse((self.units[i].by_at(self.units[i].sent), lane)));
 					}
 					// What it held back may go at this position.
 					ready.extend(passed.drain(..));
@@ -1833,7 +1834,7 @@ impl Schedule {
 				if let Some(&i) = lanes[lane].front() {
 					let unit = &self.units[i];
 					if self.release(unit) <= index {
-						ready.push(Reverse((unit.timing.by, lane)));
+						ready.push(Reverse((unit.by_at(unit.sent), lane)));
 					}
 				}
 				emitted = true;
