@@ -6335,6 +6335,7 @@ export class Subscriber {
 		const hole: Hole = { error: drop.error };
 		if (drop.skip) hole.skip = true;
 		if (drop.stale !== undefined) hole.stale = drop.stale;
+		if (drop.cap !== undefined) hole.cap = drop.cap;
 		this.#adopted = insertDrop(this.#adopted, start, end, hole);
 	}
 
