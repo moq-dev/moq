@@ -6901,6 +6901,76 @@ test("a forgotten kept-out run is judged by each range's budget", async () => {
 	}
 });
 
+// A local track keeps the skip directly above each cached group while that group stays, so a read
+// across two held groups never asks a fill for keys its publisher skipped; once the group below
+// leaves, its run expires like any other. Mirrors the Rust
+// `a_local_skip_between_held_groups_outlives_its_expiry`.
+test("a local skip between held groups outlives its expiry", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const pool = new Pool({ expiry: Duration.millis(10_000) });
+	const unpooled = new TrackProducer("test");
+	hooks.poolTrack(unpooled, pool);
+	const producer = unpooled.accept({ timescale: Timescale.MILLI, maxAge: null });
+	const requests = producer.requests();
+	const fills: FillGroups[] = [];
+	void (async () => {
+		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) fills.push(fill);
+	})();
+	// An ordered read from group 1000, which reads (and so keeps) every group it reaches.
+	const read = async () => {
+		const reader = producer.subscribe({ ranges: [{ start: 1000n }] }).ordered();
+		const items: string[] = [];
+		for (let item = reader.tryNextItem(); item; item = reader.tryNextItem()) {
+			if (item.kind === "gap") items.push(`gap${item.start}..${item.end}`);
+			else {
+				items.push(`g${item.group.start}`);
+				hooks.refreshGroup(item.group);
+				item.group.close();
+			}
+		}
+		await clock.advance(Duration.ZERO);
+		reader.close();
+		return items;
+	};
+	const asked = () => fills.map((fill) => [fill.start, fill.end]);
+	try {
+		for (const millis of [1000, 3000, 4000]) {
+			const group = producer.appendGroup(Timestamp.fromMillis(millis));
+			group.writeFrame(textFrame("x", Timestamp.fromMillis(millis)));
+			group.finish();
+		}
+		const held = ["g1000", "g3000", "g4000"];
+		expect(await read()).toEqual(held);
+		// Reading them again keeps the groups past their runs' expiry.
+		await clock.advance(Duration.millis(6_000));
+		expect(await read()).toEqual(held);
+		await clock.advance(Duration.millis(7_000));
+		pool.sweep();
+		expect(await read()).toEqual(held);
+		expect(asked()).toEqual([]);
+
+		// Only 3000 is read again, so 1000 idles out and the run it kept goes with it.
+		await clock.advance(Duration.millis(6_000));
+		const reader = producer.subscribe({ ranges: [{ start: 0n }] });
+		const group = hooks.cachedGroup(reader, 3000n);
+		if (!group) throw new Error("group 3000 is cached");
+		hooks.refreshGroup(group);
+		group.close();
+		await clock.advance(Duration.millis(6_000));
+		// The sweep forgets the run once the next one finds it due.
+		pool.sweep();
+		pool.sweep();
+		expect(hooks.givenUp(reader, 2000n).error).toBeUndefined();
+		expect(hooks.givenUp(reader, 3500n).error).toBeDefined();
+		reader.close();
+	} finally {
+		requests.close();
+		producer.close();
+		installed.close();
+	}
+});
+
 // A bounded read owes the keys its local floor keeps out until a skip accounts for them. One its
 // track forgot once the pool's idle window passed is unknown again, so the read asks a fill for it
 // rather than wait for good, and ends on the upstream's answer. Mirrors the Rust
