@@ -2201,9 +2201,27 @@ class Reader implements ResumeSource {
 		for (const copy of this.#copies) hooks.untell(copy.sub, start, end);
 	}
 
+	// Judged on the newest copy and on every replaced copy still feeding the reader. Such a copy
+	// judges its own late groups: one it holds unread, or whose successor landed there recently, is
+	// fresh though the newest copy would write a group landing there off, so only what every one of
+	// them forgets is forgotten.
 	forgetPast(delivered: Delivered, budget: Budget): void {
 		const newest = this.#copies.at(-1);
-		if (newest) hooks.forgetPastBudget(newest.sub, delivered, budget);
+		if (!newest) return;
+		const feeding = this.#copies.filter((copy) => copy !== newest && copy.replaced && this.#feeds(copy));
+		// A reader following one route judges on it alone, with no copy of `delivered`.
+		if (feeding.length === 0) {
+			hooks.forgetPastBudget(newest.sub, delivered, budget);
+			return;
+		}
+		let floor: bigint | undefined;
+		for (const copy of [newest, ...feeding]) {
+			const judged = delivered.clone();
+			hooks.forgetPastBudget(copy.sub, judged, budget);
+			const at = judged.runEnd(0n) ?? 0n;
+			floor = floor === undefined ? at : min(floor, at);
+		}
+		if (floor !== undefined) delivered.forgetBelow(floor);
 	}
 
 	latest(): bigint | undefined {

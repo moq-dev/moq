@@ -1378,23 +1378,46 @@ impl Subscriber {
 			.collect()
 	}
 
-	/// Forget the gaps in `delivered` below each group past the reader's budget, judged on
-	/// the newest copy that answered; see [`track::Subscriber::forget_past_budget`].
+	/// Forget the gaps in `delivered` below each group past the reader's budget, judged as
+	/// [`Self::forget_past`] judges them; see [`track::Subscriber::forget_past_budget`].
 	pub(super) fn forget_past_budget(&self, delivered: &mut Delivered) {
 		let budget = self.reader().budget();
 		self.forget_past(delivered, budget);
 	}
 
 	/// Forget the gaps in `delivered` below each group past `budget`, an outer reader's whose
-	/// `delivered` this is, judged on the newest copy that answered.
+	/// `delivered` this is, judged on the newest copy that answered and on every replaced copy
+	/// still feeding the reader. Such a copy judges its own late groups: one it holds unread,
+	/// or whose successor landed there recently, is fresh though the newest copy would write a
+	/// group landing there off, so only what every one of them forgets is forgotten.
 	pub(super) fn forget_past(&self, delivered: &mut Delivered, budget: Budget) {
 		let reader = self.reader();
 		let mut ready = reader.copies.iter().rev().filter_map(|copy| match &copy.sub {
-			Sub::Ready(sub) => Some(sub),
+			Sub::Ready(sub) => Some((copy, sub)),
 			Sub::Pending(_) => None,
 		});
-		if let Some(sub) = ready.next() {
-			sub.forget_past_budget(delivered, budget);
+		let Some((_, newest)) = ready.next() else {
+			return;
+		};
+		let mut feeding = ready
+			.filter(|(copy, _)| copy.replaced && copy.feeds)
+			.map(|(_, sub)| sub)
+			.peekable();
+		// A reader following one route judges on it alone, with no copy of `delivered`.
+		if feeding.peek().is_none() {
+			newest.forget_past_budget(delivered, budget);
+			return;
+		}
+		let floor = std::iter::once(newest)
+			.chain(feeding)
+			.map(|sub| {
+				let mut judged = delivered.clone();
+				sub.forget_past_budget(&mut judged, budget.clone());
+				judged.floor()
+			})
+			.min();
+		if let Some(floor) = floor {
+			delivered.forget_below(floor);
 		}
 	}
 
@@ -14788,6 +14811,40 @@ mod test {
 		assert!(sub.poll_recv_group(&fresh()).is_pending(), "group 1 is still unread");
 		kio::clock::sleep(2 * budget).await;
 		assert!(matches!(sub.poll_recv_group(&fresh()), Poll::Ready(Ok(None))));
+	}
+
+	/// Late groups a replaced copy holds unread, fresh by their own successors there, outlive
+	/// the serving copy's old arrival above them making the gap below it stale, as they do on
+	/// one track: a cursor never forgets what it still holds to hand out.
+	#[kio::test]
+	async fn a_replaced_copys_unread_late_groups_outlive_the_serving_copys_stale_verdict() {
+		for routed in [false, true] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let budget = Duration::from_secs(1);
+			let mut sub = subscribe(if routed { &logical } else { &a }, budget);
+			write(&a, 0);
+			write(&a, 5);
+			// Held, so the replaced copy stays subscribed.
+			let _held = recv(&mut sub);
+			assert_eq!(drain(&mut sub, false), [0]);
+			let b = copy();
+			if routed {
+				routes.serve(b.consume());
+			}
+			let serving = if routed { &b } else { &a };
+			assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+			// 6 arrives long before the late groups, and the reader looks only once they land:
+			// 4 is stale by 5, while 2 and 1 are fresh by 4 and 2.
+			write(serving, 6);
+			kio::clock::sleep(2 * budget).await;
+			for key in [4, 2, 1] {
+				write(&a, key);
+			}
+			assert_eq!(drain(&mut sub, false), [6, 2, 1], "routed {routed}");
+		}
 	}
 
 	/// A backfill of the serving route goes once it delivered what it was asked for, when the

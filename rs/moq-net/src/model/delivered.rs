@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 /// below it as handed out (see [`Self::forget_below`]). The run starting at 0 is that
 /// floor, so only the gaps above it cost memory. It never holds the reserved group
 /// key `u64::MAX`, so one past any run fits.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(super) struct Delivered {
 	/// First to last key, inclusive, never adjacent to each other.
 	runs: BTreeMap<u64, u64>,

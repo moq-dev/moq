@@ -65,6 +65,13 @@ export class Delivered {
 		this.#runs.splice(first, last - first + 1, merged);
 	}
 
+	/** A copy of this record, to change apart from it. */
+	clone(): Delivered {
+		const clone = new Delivered();
+		clone.#runs = this.#runs.map(([first, last]) => [first, last]);
+		return clone;
+	}
+
 	/** A record of what either this or `other` handed out. */
 	union(other: Delivered): Delivered {
 		const union = new Delivered();

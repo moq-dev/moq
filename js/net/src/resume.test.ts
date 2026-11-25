@@ -5628,6 +5628,52 @@ test("a fetch waits for the copy being read to say what the track is", async () 
 	b.close();
 });
 
+// Late groups a replaced copy holds unread, fresh by their own successors there, outlive the
+// serving copy's old arrival above them making the gap below it stale, as they do on one track: a
+// cursor never forgets what it still holds to hand out. Mirrors the Rust
+// `a_replaced_copys_unread_late_groups_outlive_the_serving_copys_stale_verdict`.
+test("a replaced copy's unread late groups outlive the serving copy's stale verdict", async () => {
+	for (const routed of [false, true]) {
+		const clock = new Manual();
+		const installed = install(clock);
+		try {
+			const front = new Front();
+			const a = new BroadcastProducer();
+			const b = new BroadcastProducer();
+			const ta = copy(a);
+			const tb = copy(b);
+			front.serve(a.consume());
+			const budget = withMax({ delay: { max: Duration.millis(1_000) } });
+			const sub = routed ? front.consumer.track("seq").subscribe(budget) : ta.producer.subscribe(budget);
+			ta.write(0n);
+			ta.write(5n);
+			// Held, so the replaced copy stays subscribed.
+			const held = defined(sub.tryRecvGroup());
+			expect(held.start).toBe(5n);
+			expect(drain(sub)).toEqual([0n]);
+			if (routed) {
+				front.serve(b.consume());
+				await settle();
+			}
+			expect(drain(sub)).toEqual([]);
+			// 6 arrives long before the late groups, and the reader looks only once they land: 4 is
+			// stale by 5, while 2 and 1 are fresh by 4 and 2.
+			(routed ? tb : ta).write(6n);
+			await clock.advance(Duration.millis(2_000));
+			for (const key of [4n, 2n, 1n]) ta.write(key);
+			expect(drain(sub), `routed ${routed}`).toEqual([6n, 2n, 1n]);
+
+			held.close();
+			sub.close();
+			front.consumer.close();
+			a.close();
+			b.close();
+		} finally {
+			installed.close();
+		}
+	}
+});
+
 test("an arrival read takes a replaced copy's buffered group before the new copy's later one", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();

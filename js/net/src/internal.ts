@@ -680,11 +680,12 @@ export interface ResumeSource {
 	accounts(delivered: Delivered, gaps: readonly Run[], ordered: boolean): boolean;
 	/** Wake once a read may go differently; fires at most once. */
 	changed(fn: () => void): Dispose;
-	/** Forget the gaps in `delivered` below each group past the budget, judged on the newest copy. */
+	/** Forget the gaps in `delivered` below each group past the budget, judged as {@link forgetPast} judges it. */
 	forgetPastBudget(delivered: Delivered): void;
 	/**
 	 * Forget the gaps in `delivered` below each group past `budget`, an outer reader's whose
-	 * `delivered` this is, judged on the newest copy. Mirrors the Rust `Subscriber::forget_past`.
+	 * `delivered` this is, judged on the newest copy and every replaced copy still feeding the
+	 * reader. Mirrors the Rust `Subscriber::forget_past`.
 	 */
 	forgetPast(delivered: Delivered, budget: Budget): void;
 	/**
