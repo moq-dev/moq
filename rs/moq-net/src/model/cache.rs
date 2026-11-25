@@ -880,11 +880,16 @@ impl Edges {
 		}
 		// The writer pays in its turn, or after every queued edge when it has no entry.
 		let mut paid = false;
-		// Each step resumes after the last key, so an entry is visited once.
+		// Each step resumes after the last key, so an entry is visited once. Visits are bounded
+		// by the entries present now, since a publisher inserting groups requeues its edge after
+		// `after` and could otherwise keep this pass, and the lock, going.
+		let mut offers = inner.order.lock().unwrap_or_else(PoisonError::into_inner).len();
 		let mut after = None;
-		while self.excess().is_some()
+		while offers > 0
+			&& self.excess().is_some()
 			&& let Some((key, track, moves)) = self.next(after)
 		{
+			offers -= 1;
 			after = Some(key);
 			if std::ptr::eq(Arc::as_ptr(&track), writer) {
 				paid = true;
