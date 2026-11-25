@@ -262,7 +262,6 @@ and exclusive `End` plus one-shot `SUBSCRIBE` + immediate `FIN`, moves
 
 ## Required
 
-- [The router ranks one claim prefix's filings as one tier](/quest/m2/router-claim-tier.md) - the lite-07 router follows the draft's one-tier ranking instead of stopping at the deepest filing
 - [Redesign lite-07 subscribe and fetch](/quest/m2/lite07-subscribe/README.md) - data-layer Previous Delta, RESET_STREAM_AT, FETCH and SUBSCRIBE_SKIP removal, per-range Priority and Order, and judged OLD drops freeze into lite-07
 
 ## Related

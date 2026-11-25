@@ -561,7 +561,7 @@ process CPU (user + system, every thread) per MB into
 budget (default 1); every received frame is checked byte for byte.
 
 The binding benchmark itself lives in
-[rust2](https://github.com/moq-dev/rust2/blob/main/bench/ffi/README.md), with
+[rust2](https://github.com/kixel-ai/rust2/blob/main/bench/ffi/README.md), with
 the UniFFI fork whose changes it measures: its `just bench-ffi` runs these
 runners nightly at a pinned moq revision, against the fork, and reports each
 wrapper's ratio to Rust. So that they keep working here, moq's Nightly runs every
@@ -1024,7 +1024,7 @@ rust2-bench checks against Kixel Quest's limits as it writes it; Nightly reports
 every successful source's report, without its `bench-*` prefix, and each paired
 comparison's base as a second observation of that commit (`just gh
 benchmark-report nightly-metrics`). A benchmark CSV column becomes a measure of
-its row. Kixel Quest reads at most 1 MiB of a run's metrics, and a full Nightly
+its row. Kixel Quest reads at most 8 MiB of each metrics file, and a full Nightly
 writes about 0.87 MiB, so the step fails rather than upload more.
 
 ## Local check capacity

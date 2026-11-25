@@ -18,7 +18,7 @@ instead, with the binding features moq-ffi gained in m1 and m2
 never had, such as single-group fetch and group-level consumption, wait for this
 line. The C generator's GLib-style names, which fix
 the C name clash, come from rust2
-([moq-dev/rust2#66](https://github.com/moq-dev/rust2/pull/66)), not from a
+([kixel-ai/rust2#66](https://github.com/kixel-ai/rust2/pull/66)), not from a
 `kixelated/uniffi-bindgen-cpp` release, and reach moq with the switch.
 
 Decided earlier, still standing:

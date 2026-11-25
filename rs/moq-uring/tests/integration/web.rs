@@ -1210,6 +1210,155 @@ fn dropped_session_delivers_close(explicit: bool) {
 		.expect("worker");
 }
 
+/// A close resets every stream the server sends on, stops every stream the peer
+/// sends on, and writes its capsule only once the peer reset them, since Chrome crashes on a capsule arriving under a
+/// write in flight (https://issues.chromium.org/issues/589817008). It
+/// classifies the streams nobody accepted itself, so the HTTP/3 control,
+/// QPACK, and CONNECT streams stay open, and so does one still mid-header.
+#[test]
+fn a_close_waits_for_the_peer_to_reset_its_streams() {
+	const WT_SESSION_GONE: u64 = 0x170d7b68;
+
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+	let server = h3_endpoint(&handle, &certs);
+	let sock = handle
+		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+		.expect("client socket");
+	let client = quic::Endpoint::new(quic::endpoint::Config::default(), sock).expect("client endpoint");
+	let dial = quic::client::Config::new(support::client_tls(&["h3"]));
+
+	worker
+		.block_on(async {
+			let peer = client
+				.connect(&dial, server.local_addr(), "localhost")
+				.await
+				.expect("dial");
+			let conn = server.accept().await.expect("accept");
+			let watch = conn.clone();
+
+			let mut control = peer.open_uni(Default::default()).await.expect("control stream");
+			let mut settings = web_transport_proto::Settings::default();
+			settings.enable_webtransport(1);
+			let mut bytes = Vec::new();
+			settings.encode(&mut bytes);
+			write_raw(&mut control, &bytes).await;
+
+			let (mut connect_send, mut connect_recv) = peer.open_bi(Default::default()).await.expect("CONNECT stream");
+			let url = url::Url::parse(&format!("https://localhost:{}/", server.local_addr().port())).expect("url");
+			let mut bytes = Vec::new();
+			web_transport_proto::ConnectRequest::new(url)
+				.encode(&mut bytes)
+				.expect("encode CONNECT");
+			write_raw(&mut connect_send, &bytes).await;
+
+			let request = within(&handle, "the CONNECT", quic::web::Request::accept(conn))
+				.await
+				.expect("handshake");
+			let session = request.ok().await.expect("respond");
+
+			// A QPACK stream, and a bidi and a uni stream the page is still writing.
+			let session_id = u64::from(connect_send.id());
+			let mut qpack = peer.open_uni(Default::default()).await.expect("qpack");
+			let mut header = Vec::new();
+			web_transport_proto::StreamUni::QPACK_ENCODER.encode(&mut header);
+			write_raw(&mut qpack, &header).await;
+			let (mut bi, mut bi_recv) = peer.open_bi(Default::default()).await.expect("bi");
+			let mut header = Vec::new();
+			web_transport_proto::Frame::WEBTRANSPORT.encode(&mut header);
+			web_transport_proto::VarInt::try_from(session_id)
+				.unwrap()
+				.encode(&mut header);
+			write_raw(&mut bi, &header).await;
+			let mut uni = peer.open_uni(Default::default()).await.expect("uni");
+			let mut header = Vec::new();
+			web_transport_proto::StreamUni::WEBTRANSPORT.encode(&mut header);
+			web_transport_proto::VarInt::try_from(session_id)
+				.unwrap()
+				.encode(&mut header);
+			write_raw(&mut uni, &header).await;
+			// And one stalled mid-header, which may yet turn out to be QPACK:
+			// it is spared, and holds neither the other streams' stops nor the
+			// capsule.
+			let mut stalled = peer.open_uni(Default::default()).await.expect("stalled");
+			write_raw(&mut stalled, &[0x40]).await;
+			// The session holds the uni stream but never accepts the bidi one,
+			// which the close classifies itself. The client resets neither
+			// until both are stopped, so the capsule cannot go before the bidi
+			// stream arrives, and the QPACK stream is spared whoever classifies it.
+			let _held = within(
+				&handle,
+				"the uni stream",
+				kio::wait(|waiter| session.poll_accept_uni(waiter)),
+			)
+			.await
+			.expect("accept uni");
+
+			session.close(CLOSE_CODE, CLOSE_REASON);
+			let gone = quic::VarInt::from_u64(WT_SESSION_GONE).unwrap();
+			for stream in [&uni, &bi] {
+				let stop = within(&handle, "the stop", stream.closed()).await.expect("stopped");
+				assert_eq!(stop, Some(gone));
+			}
+			// The server's half of the bidi stream is reset as well, ending the read.
+			let mut buf = [0u8; 64];
+			let read = within(&handle, "the reset", bi_recv.read(&mut &mut buf[..])).await;
+			assert!(
+				matches!(read, Err(quic::recv::Error::Reset(code)) if code == gone),
+				"{read:?}"
+			);
+			let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+			match std::pin::pin!(control.closed()).poll(&mut cx) {
+				std::task::Poll::Pending => {}
+				other => panic!("the control stream was stopped: {other:?}"),
+			}
+			let mut response = Vec::new();
+			let consumed = loop {
+				read_more(&mut connect_recv, &mut response).await;
+				let mut peek = response.as_slice();
+				match web_transport_proto::ConnectResponse::decode(&mut peek) {
+					Ok(_) => break response.len() - peek.len(),
+					Err(web_transport_proto::ConnectError::UnexpectedEnd) => {}
+					Err(err) => panic!("bad CONNECT response: {err}"),
+				}
+			};
+			assert_eq!(consumed, response.len(), "the capsule arrived before the resets");
+			match std::pin::pin!(connect_recv.read(&mut &mut buf[..])).poll(&mut cx) {
+				std::task::Poll::Pending => {}
+				other => panic!("the capsule arrived before the resets: {other:?}"),
+			}
+
+			uni.reset(gone);
+			bi.reset(gone);
+			let mut capsules = Vec::new();
+			let capsule = within(&handle, "the close capsule", async {
+				loop {
+					let mut peek = capsules.as_slice();
+					if let Ok((_, mut payload)) = web_transport_proto::Frame::read(&mut peek) {
+						break web_transport_proto::Capsule::decode(&mut payload).expect("a whole capsule");
+					}
+					read_more(&mut connect_recv, &mut capsules).await;
+				}
+			})
+			.await;
+			assert_eq!(
+				capsule,
+				web_transport_proto::Capsule::CloseWebTransportSession {
+					code: CLOSE_CODE,
+					reason: CLOSE_REASON.to_string(),
+				}
+			);
+			assert_eq!(
+				watch.stats().frame_tx.stop_sending,
+				2,
+				"a QPACK or unclassified stream was stopped"
+			);
+			drop((qpack, stalled));
+		})
+		.expect("worker");
+}
+
 /// A close capsule written in the same burst as the CONNECT headers, before
 /// any answer, still closes the session with its code: the handshake must
 /// hand the bytes it read past the headers to the capsule reader.

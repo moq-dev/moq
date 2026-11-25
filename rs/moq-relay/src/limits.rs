@@ -33,8 +33,9 @@ pub struct Client {
 	/// bound.
 	///
 	/// The cache keeps each live track's newest group past its capacity, so this is what
-	/// bounds a client holding many quiet tracks. Past it, the frames of the client's own
-	/// live edges are shed, the one that moved longest ago first, never another session's.
+	/// bounds a client holding many quiet tracks. Past it, the client's own live edges are
+	/// shed in delivery's priority order, the frames viewers read before any a viewer is
+	/// owed, never another session's.
 	#[usage(
 		long = "limits-client-live-edges",
 		env = "MOQ_LIMITS_CLIENT_LIVE_EDGES",
