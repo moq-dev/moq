@@ -205,7 +205,9 @@ test("an announced local path competes with a received route on cost", async () 
 	expect(live.peek().size).toBe(0);
 });
 
-test("a scoped route remains visible when an exact local path is outside the scope", async () => {
+// A covering reader sees a broadcast at a path its scope only overlaps, as Rust's cursor does: it
+// ranks with the routes there, so the cheaper broadcast is listed over a costlier route.
+test("a covering listing shows a broadcast at a path its scope only overlaps", async () => {
 	const origin = new Producer();
 	const path = Path.from("room");
 	const remote = wireOf(origin).receive(path, { cost: 5n });
@@ -217,10 +219,30 @@ test("a scoped route remains visible when an exact local path is outside the sco
 
 	expect((await announcedView(origin)).peek().get(path)).toMatchObject(WireRoute.default);
 	await new Promise<void>((resolve) => setImmediate(resolve));
+	expect(live.peek().get(path)).toMatchObject(WireRoute.default);
+
+	// Withdrawn, the route serving the subtree is listed again.
+	local.close();
+	await settle();
 	expect(live.peek().get(path)).toMatchObject({ cost: 5n });
 
-	local.close();
 	remote.close();
+	origin.close();
+});
+
+// A broadcast beneath a broader claim shadows it for the paths beneath the broadcast, so a covering
+// reader of those paths is shown both.
+test("a covering listing shows a broadcast that shadows a broader claim", async () => {
+	const origin = new Producer();
+	const broad = origin.claim(Path.empty());
+	const broadcast = origin.route(Path.from("room"));
+	const live = await announcedView(origin, Path.Pattern.parse("room/*"), { covering: true });
+	await settle();
+	expect([...live.peek().keys()].sort()).toEqual([Path.empty(), Path.from("room")]);
+	expect(live.peek().get(Path.from("room"))?.instance).toBe(broadcast.instance);
+	await live.close();
+	broadcast.close();
+	broad.close();
 	origin.close();
 });
 

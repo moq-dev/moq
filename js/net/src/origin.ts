@@ -2662,9 +2662,8 @@ export class Consumer implements Reader {
 	 * broadcast change. The filter is any pattern, relative to the root, and only picks what is
 	 * listed: what the wildcards stood for is each announcement's `captures`. A local broadcast
 	 * appears once it announces, exactly as a peer sees it. Only routes whose literal name
-	 * matches the filter are listed, unless `options.covering` also asks for every dynamic or
-	 * received route whose subtree overlaps it, and for a broadcast above the root, which shadows
-	 * them there. The stream ends when the origin closes or the
+	 * matches the filter are listed, unless `options.covering` also asks for every route whose
+	 * subtree overlaps it, a broadcast included. The stream ends when the origin closes or the
 	 * consumer is closed. Hidden routes are left out unless `options.hidden` opts in (see
 	 * {@link Announce.Options}). While open, it watches the filter's literal head: a `consume`
 	 * session asks its peer for announcements there.
@@ -2710,23 +2709,20 @@ export class Consumer implements Reader {
 			lost: entry.lost,
 		});
 		for (const [path, candidates] of this.#state.snapshot()) {
+			// Every candidate is a claim on the subtree it is filed at, a broadcast included, so a
+			// covering reader sees each one whose subtree overlaps its scope, as Rust's cursor does.
+			const scope = scopes.find(
+				({ pattern, head }) =>
+					(covering || pattern.matches(path)) &&
+					scopeOverlaps(pattern, path) &&
+					(hidden || !hiddenBelow(head, path)),
+			);
+			if (scope === undefined) continue;
 			const relative = Path.stripPrefix(root, path);
-			// The first candidate this reader can see wins, since the preferred one overall may not be,
-			// unless a higher epoch of its instance that the reader also sees supersedes it. A broadcast
-			// above the root is a claim on it, which a covering reader sees as it sees any other.
-			const scopeOf = (candidate: Candidate) =>
-				scopes.find(
-					({ pattern, head }) =>
-						(covering || pattern.matches(path)) &&
-						(candidate.exact && relative !== null ? pattern.matches(path) : scopeOverlaps(pattern, path)) &&
-						(hidden || !hiddenBelow(head, path)),
-				);
 			if (relative === null || relative === Path.empty()) {
 				if (relative === null && !Path.hasPrefix(path, root)) continue;
 				const depth = Path.parts(path).length;
 				candidates.forEach((candidate, order) => {
-					const scope = scopeOf(candidate);
-					if (scope === undefined) return;
 					// Hold the empty path's place in the order the snapshot lists its first claim.
 					if (atRoot.length === 0) next.set(Path.empty(), present(path, candidate, scope.pattern));
 					const filed = { candidate, path, pattern: scope.pattern };
@@ -2741,10 +2737,9 @@ export class Consumer implements Reader {
 				});
 				continue;
 			}
-			const entry = firstEligible(candidates, (candidate) => scopeOf(candidate) !== undefined);
-			const scope = entry && scopeOf(entry);
-			if (!entry || !scope) continue;
-			next.set(relative, present(path, entry, scope.pattern));
+			// The preferred candidate wins, unless a higher epoch of its instance supersedes it.
+			const entry = firstEligible(candidates, () => true);
+			if (entry) next.set(relative, present(path, entry, scope.pattern));
 		}
 		// Hashed on the root, as a request for it resolves. A broadcast above the root serves only
 		// its own path, so a tier-mate that serves the root ranks ahead of it, as `presented` ranks them.
