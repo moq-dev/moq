@@ -10,8 +10,9 @@ const PAYLOAD = 8;
 // Arrivals timed per append row, so a sample spans enough work to read.
 const APPENDS = 64;
 const REPS = 5;
-// Every retained group, however old: replay is the work being measured.
-const SUBSCRIPTION = { ranges: [{ start: 0n }] };
+// Every retained group, however old: replay is the work being measured. Ascending, so a reader
+// drains its backlog oldest first whatever order it arrived in.
+const SUBSCRIPTION: Track.Subscription = { order: "ascending", ranges: [{ start: 0n }] };
 
 // The arrival order of sequences 0..count-1: ascending, descending, or a seeded shuffle.
 function arrivals(count: number, order: Order): number[] {

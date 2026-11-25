@@ -702,7 +702,7 @@ mod tests {
 
 			let packet = crate::single(enc.encode_all(&vec![0.0f32; samples]).unwrap());
 			// SAFETY: a non-empty packet from the encoder above; the TOC is its first byte.
-			let coded = unsafe { unsafe_libopus::opus_packet_get_samples_per_frame(packet.payload.as_ptr(), 48_000) };
+			let coded = unsafe { moq_opus::opus_packet_get_samples_per_frame(packet.payload.as_ptr(), 48_000) };
 			assert_eq!(coded as usize, samples, "{millis} ms packet");
 		}
 	}

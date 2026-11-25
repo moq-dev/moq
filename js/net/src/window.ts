@@ -986,6 +986,12 @@ export class Window {
 		return this.pending ? from : this.#groups.next(from);
 	}
 
+	/** The highest group in range below `before`, undefined when none is. The one just below while a live join waits on a first group. */
+	prev(before: bigint): bigint | undefined {
+		if (this.pending) return before > 0n ? before - 1n : undefined;
+		return this.#groups.prev(before);
+	}
+
 	/** The lowest group in range, undefined while a start waits. Nothing in range floors at group 0. */
 	floor(): bigint | undefined {
 		if (this.pending || this.#unplaced()) return undefined;

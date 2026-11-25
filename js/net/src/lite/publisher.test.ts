@@ -2502,9 +2502,10 @@ test.each([Version.DRAFT_01, Version.DRAFT_02])(
 		const sub = await servedSubscription({ version, pending: true });
 		try {
 			await sub.accept([0n, 3n, 7n]);
-			expect(await sub.servedHeader()).toBe(0n);
-			expect(await sub.servedHeader()).toBe(3n);
+			// Newest first, the default Group Order these versions cannot change.
 			expect(await sub.servedHeader()).toBe(7n);
+			expect(await sub.servedHeader()).toBe(3n);
+			expect(await sub.servedHeader()).toBe(0n);
 		} finally {
 			await sub.close();
 		}
@@ -2527,6 +2528,26 @@ test("lite draft-05: an update dropping the floor on an empty track serves the n
 
 // Lite-06 encodes a floor of group 0 as 0, including a subscribe that omitted Group Start.
 // That is a floor, so a later group 0 is still served.
+// A held group missing its head, which no fill can bring, cannot be where the feed starts either.
+// Mirrors the Rust `TrackRun::start`.
+test("lite draft-06: START advances past a held group it cannot serve", async () => {
+	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 5n });
+	try {
+		hooks.receiveTrack(sub.track);
+		hooks.startTrack(sub.track, { start: 5n, requested: 5n });
+		const tail = hooks.receiveGroup(sub.track, { start: 5n, offset: 1 });
+		tail.writeFrame(textFrame("tail", Timestamp.fromMillis(5)));
+		tail.finish();
+		sub.serve(6n);
+		const response = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
+		if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
+		expect(response.start.start).toBe(6n);
+		expect(await sub.servedSequence()).toBe(6n);
+	} finally {
+		await sub.close();
+	}
+});
+
 test("lite draft-06: an omitted group start still serves a group below the first one", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_06 });
 	try {

@@ -7,21 +7,21 @@
 (* The front (`resume::Producer`) serves one copy at a time, switches to   *)
 (* another live one at will, and ends the track. The reader (`Reader`)     *)
 (* keeps one `Copy` per route it read, each with its own cursor over that  *)
-(* track: a walk in arrival order, the groups a widening owes it, and what *)
-(* it took. One poll for a group (`Reader::poll_lowest`) is one atomic     *)
-(* step, as the reader's lock makes it; so is a switch, which syncs the    *)
-(* reader as `serve_from` does.                                            *)
+(* track, which holds what landed in its window and picks in the           *)
+(* subscription's Group Order, and what it took. One poll for a group      *)
+(* (`Reader::poll_first`) is one atomic step, as the reader's lock makes   *)
+(* it; so is a switch, which syncs the reader as `serve_from` does.        *)
 (*                                                                         *)
 (* Scope: whole groups (no frames, so no `Recover`), an unbounded          *)
 (* subscription from the oldest group with an hour's budget (nothing goes  *)
-(* stale or expires), arrival order, no local range, copies that answer at *)
-(* once, and a reader that joins before any group lands. A route declares  *)
-(* its end once it holds the last group, a gap below it may still land,    *)
-(* even once its session settled that end, and a route that declared its   *)
-(* end never fails. Only a route no longer served evicts, up to MaxEvicts   *)
-(* groups in all, and a group a route evicted is owed only by the routes   *)
-(* still holding it: a cursor of its own would ask a fill for it, which is *)
-(* not modelled.                                                           *)
+(* stale or expires), an arrival read in the default Group Order (newest   *)
+(* first), no local range, copies that answer at once, and a reader that   *)
+(* joins before any group lands. A route declares its end once it holds    *)
+(* the last group, a gap below it may still land, even once its session    *)
+(* settled that end, and a route that declared its end never fails. Only a *)
+(* route no longer served evicts, up to MaxEvicts groups in all, and a     *)
+(* group a route evicted is owed only by the routes still holding it: a    *)
+(* cursor of its own would ask a fill for it, which is not modelled.       *)
 (***************************************************************************)
 EXTENDS Integers, Sequences, FiniteSets
 
@@ -98,22 +98,15 @@ Admits(floor, until, g) ==
 \* last left the copy a group to drain, else None.
 NewCopy(id, t, gen, floor, rep, until) ==
     [id |-> id, t |-> t, gen |-> gen, floor |-> floor, rep |-> rep,
-     until |-> until, done |-> "no", drained |-> 0, idx |-> 1,
-     took |-> {}, owed |-> {}, drains |-> None]
+     until |-> until, done |-> "no", drained |-> 0, took |-> {}, drains |-> None]
 
 \* The wire asks for [floor, until] instead (`Copy::cap`, or `Copy::send` on a
 \* reuse or a widening; neither reopens a drained copy): the cursor
-\* passes what its window leaves out, holding nothing, and a widening owes it
-\* the cached groups the window newly covers.
-Window(c, floor, until) ==
-    [c EXCEPT
-        !.floor = floor,
-        !.until = until,
-        !.owed = {g \in @ : Admits(floor, until, g)}
-                 \cup {g \in Landed(c.t) :
-                         /\ Admits(floor, until, g)
-                         /\ ~Admits(c.floor, c.until, g)
-                         /\ g \notin c.took}]
+\* passes what its window leaves out, holding nothing, and a widening offers it
+\* the cached groups the window newly covers. A landed group stays cached for
+\* the hour's budget unless its route evicts it (`Evict`), so the window and
+\* the cache decide what the cursor holds.
+Window(c, floor, until) == [c EXCEPT !.floor = floor, !.until = until]
 
 \* `Reader::deliverable`.
 Deliverable(c, g, dlv) ==
@@ -121,39 +114,24 @@ Deliverable(c, g, dlv) ==
     /\ g \notin dlv
 
 \* One `poll_peek_group` on a copy's cursor, skipping what the logical reader
-\* already has (`take`, so the cursor moves past it). Returns the cursor moved,
-\* and the group it reserves (None when pending or done), and where it came from.
-RECURSIVE Peek(_, _, _)
-Peek(c, dlv, fuel) ==
-    LET ow == {g \in c.owed : Admits(c.floor, c.until, g) /\ g \notin c.took /\ g \notin trk[c.t].gone}
-        arr == trk[c.t].arr
+\* already has (`take`, so the cursor moves past it). It holds what landed in
+\* its window and it has not taken, and picks in the subscription's Group Order,
+\* the default `Order::Descending`: the newest first. An aborted track still
+\* hands out what it holds before its error; once it holds nothing, a complete
+\* track ends the cursor and an aborted one fails it. A clean end records the
+\* arrivals it saw (`Copy::drained`). Returns the cursor moved and the group it
+\* reserves (None when pending or done).
+Peek(c, dlv) ==
+    LET unread == {g \in Landed(c.t) : Admits(c.floor, c.until, g) /\ g \notin c.took}
+        rest == {g \in unread : Deliverable(c, g, dlv)}
+        c1 == [c EXCEPT !.took = @ \cup (unread \ rest)]
     IN
-    IF fuel = 0 THEN [c |-> c, g |-> None, src |-> "none"]
-    \* What a widening owes comes first, newest first (`Order::Descending`). An
-    \* aborted track still hands out what it holds before its error.
-    ELSE IF ow # {} THEN
-        LET g == Max(ow) IN
-        IF Deliverable(c, g, dlv)
-            THEN [c |-> c, g |-> g, src |-> "owed"]
-            ELSE Peek([c EXCEPT !.took = @ \cup {g}, !.owed = @ \ {g}], dlv, fuel - 1)
-    \* `TrackState::poll_recv_group`: past the last arrival, a complete track
-    \* ends the walk, and an aborted one fails it. A clean end records the
-    \* arrivals it saw (`Copy::drained`).
-    ELSE IF c.idx > Len(arr) THEN
-        IF trk[c.t].whole
-            THEN [c |-> [c EXCEPT !.done = "ok", !.drained = Len(arr)], g |-> None, src |-> "none"]
-        ELSE IF trk[c.t].failed
-            THEN [c |-> [c EXCEPT !.done = "err"], g |-> None, src |-> "none"]
-            ELSE [c |-> c, g |-> None, src |-> "none"]
-    ELSE
-        LET g == arr[c.idx] IN
-        IF ~Admits(c.floor, c.until, g) \/ g \in c.took \/ g \in trk[c.t].gone
-            THEN Peek([c EXCEPT !.idx = @ + 1], dlv, fuel - 1)
-        ELSE IF Deliverable(c, g, dlv)
-            THEN [c |-> c, g |-> g, src |-> "walk"]
-        ELSE Peek([c EXCEPT !.took = @ \cup {g}, !.idx = @ + 1], dlv, fuel - 1)
-
-Fuel == 2 * G + 2
+    IF rest # {} THEN [c |-> c1, g |-> Max(rest)]
+    ELSE IF trk[c.t].whole
+        THEN [c |-> [c1 EXCEPT !.done = "ok", !.drained = Len(trk[c.t].arr)], g |-> None]
+    ELSE IF trk[c.t].failed
+        THEN [c |-> [c1 EXCEPT !.done = "err"], g |-> None]
+        ELSE [c |-> c1, g |-> None]
 
 Covers(dlv, lo, hi) == \A g \in lo .. hi - 1 : g \in dlv
 
@@ -167,13 +145,12 @@ MayLand(t, lo, hi, floored, dlv) ==
         /\ g \notin Arrived(t)
         /\ floored \/ (Arrived(t) # {} /\ g >= Min(Arrived(t)))
 
-\* `track::Subscriber::has_unread_group`: a group the walk has yet to take, or
-\* a widening owes, in [Start, end), that the reader lacks.
+\* `track::Subscriber::has_unread_group`: a group the cursor has yet to take
+\* in [Start, end), that the reader lacks.
 HasUnread(c, end, dlv) ==
-    LET arr == trk[c.t].arr
-        ahead == ({arr[i] : i \in c.idx .. Len(arr)} \cup c.owed) \ trk[c.t].gone
-    IN /\ ~trk[c.t].failed
-       /\ \E g \in ahead : g >= Start(c) /\ g < end /\ g < End(c) /\ g \notin dlv
+    /\ ~trk[c.t].failed
+    /\ \E g \in Landed(c.t) \ c.took :
+        g >= Start(c) /\ g < end /\ g < End(c) /\ g \notin dlv
 
 (***************************************************************************)
 (* The reader.                                                             *)
@@ -281,8 +258,8 @@ BackfillGaps(r) ==
                         [r.copies[i] EXCEPT !.drains = IF i \in left THEN Evicted(r.copies[i].t) ELSE None]]]
             IN IF gaps = {} THEN r2 ELSE Backfill(r2, Min(gaps), at)
 
-\* The copy loop of `poll_lowest`: peek each copy, keeping the lowest group;
-\* a tie goes to the newer copy. A copy that ran out cleanly is read again
+\* The copy loop of `poll_first`: peek each copy, keeping the first group in
+\* Group Order, here the highest; a tie goes to the newer copy. A copy that ran out cleanly is read again
 \* once a group arrived on it since (`Copy::drained`); one arriving on the
 \* serving copy, which resumed at a floor, may be under it (`late`), as may
 \* what a replaced copy that just failed still had to drain, or one whose
@@ -300,27 +277,23 @@ Scan(cs, dlv, gen, i, best, late) ==
         IF c.done # "no" \/ spent
             THEN Scan(cs, dlv, gen, i + 1, best, late)
         ELSE
-            LET p == Peek(c, dlv, Fuel)
+            LET p == Peek(c, dlv)
                 lost == ReArm /\ c.rep /\ c.drains # None /\ c.drains # Evicted(c.t)
                 cs2 == [cs EXCEPT ![i] = IF lost THEN [p.c EXCEPT !.drains = None] ELSE p.c]
-                better == p.g # None /\ (best.g = None \/ p.g <= best.g)
+                better == p.g # None /\ (best.g = None \/ p.g >= best.g)
             IN Scan(cs2, dlv, gen, i + 1,
-                    IF better THEN [i |-> i, g |-> p.g, src |-> p.src] ELSE best,
+                    IF better THEN [i |-> i, g |-> p.g] ELSE best,
                     late \/ (reopens /\ serves) \/ (c.rep /\ p.c.done = "err") \/ lost)
 
-NoBest == [i |-> 0, g |-> None, src |-> "none"]
+NoBest == [i |-> 0, g |-> None]
 
 \* `Reader::take`: hand out the group. The switch capped every copy it
 \* replaced already, so the group bounds nothing.
 Take(r, b) ==
-    LET c == r.copies[b.i]
-        moved == IF b.src = "walk"
-                    THEN [c EXCEPT !.took = @ \cup {b.g}, !.idx = @ + 1]
-                    ELSE [c EXCEPT !.took = @ \cup {b.g}, !.owed = @ \ {b.g}]
-    IN [r EXCEPT !.copies[b.i] = moved,
-                 !.newest = Max2(@, b.g),
-                 !.dup = @ \/ b.g \in r.dlv,
-                 !.dlv = @ \cup {b.g}]
+    [r EXCEPT !.copies[b.i].took = @ \cup {b.g},
+              !.newest = Max2(@, b.g),
+              !.dup = @ \/ b.g \in r.dlv,
+              !.dlv = @ \cup {b.g}]
 
 \* `Copy::retains` for a replaced copy: "wait" while it may still deliver a
 \* group the reader lacks under its cap, "keep" while it backs a group being
@@ -349,7 +322,7 @@ LetGo(r) ==
     IN [copies |-> [k \in 1 .. Cardinality(kept) |-> r.copies[order[k]]],
         waits |-> \E i \in 1 .. n : ret[i] = "wait"]
 
-\* `Reader::poll_end`, with `poll_lowest`'s guard: a drained serving copy ends
+\* `Reader::poll_end`, with `poll_first`'s guard: a drained serving copy ends
 \* the track only once no copy it replaced may still deliver below the end.
 PollEnd(r, drained, waits) ==
     LET s == Serving(r)
@@ -360,7 +333,7 @@ PollEnd(r, drained, waits) ==
     ELSE IF front.end = "ok" /\ (s = {} \/ \E c \in s : c.done # "no") THEN ok
     ELSE "no"
 
-\* One `poll_recv_group` on the logical track (`Reader::poll_lowest`, looked
+\* One `poll_recv_group` on the logical track (`Reader::poll_first`, looked
 \* at again while it returns `None`: a late group on the serving copy sets
 \* `resumed`, so the next pass asks its route for what lies under its floor).
 RECURSIVE Pass(_)
@@ -401,7 +374,7 @@ Late(r) ==
             /\ c.rep /\ c.done = "no"
             /\ Admits(c.floor, c.until, g)
             /\ \/ /\ ~trk[c.t].failed
-                  /\ g \in ({trk[c.t].arr[k] : k \in c.idx .. Len(trk[c.t].arr)} \cup c.owed) \ trk[c.t].gone
+                  /\ g \in Landed(c.t) \ c.took
                \/ MayLand(c.t, g, g + 1, c.floor # None, r.dlv)}
 
 (***************************************************************************)

@@ -38,9 +38,8 @@ class Validity {
 	}
 }
 
-// The route a consume selected: its instance, which its requests pin.
+// The route a consume selected: its instance, which its requests pin, and epoch.
 type Selection = Served & {
-	readonly route: Pick<WireRoute, "instance">;
 	readonly validity?: Validity;
 };
 
@@ -52,12 +51,11 @@ class Blind implements Selection {
 
 type Advertised = { identity: object; route: WireRoute };
 
+type CacheEntry = { consumer: broadcast.Consumer; selection: Selection };
+
 /** Consumed broadcasts shared only within the selected serving instance. @internal */
 export class BroadcastCache {
-	#cache = new Map<
-		Path.Valid,
-		Map<Instance.Valid | object, { consumer: broadcast.Consumer; selection: Selection }>
-	>();
+	#cache = new Map<Path.Valid, Map<Instance.Valid | object, CacheEntry>>();
 	#announced = new Map<Path.Valid, Map<object, Advertised>>();
 	#blind = new Map<Path.Valid, Blind>();
 	#blindPrefixes = new Map<Path.Valid, Set<Path.Valid>>();
@@ -120,16 +118,13 @@ export class BroadcastCache {
 			(entry) => entry,
 		);
 		if (best) {
-			const cached = this.#cache.get(path)?.get(best.route.instance ?? best.identity);
+			const cached = this.#live(path, best);
 			// A minted instance names the announcement, not the publisher's stream, so a
 			// request for it can only name the path: it holds while this route is selected.
 			const named = best.route.instance !== undefined && !Instance.isMinted(best.route.instance);
 			return {
 				...best,
-				validity: !named
-					? ((cached?.consumer.closed.peek() === undefined ? cached?.selection.validity : undefined) ??
-						new Validity())
-					: undefined,
+				validity: !named ? (cached?.selection.validity ?? new Validity()) : undefined,
 			};
 		}
 		return this.#blind.get(path) ?? new Blind();
@@ -152,10 +147,17 @@ export class BroadcastCache {
 		return best ?? { identity: {}, route: { instance } };
 	}
 
-	/** Clone the live cached consumer only when it serves the selected instance. */
+	/** Clone the live cached consumer only when it serves the selected instance and epoch. */
 	get(path: Path.Valid, instance: Served): broadcast.Consumer | undefined {
-		const cached = this.#cache.get(path)?.get(instance.route.instance ?? instance.identity);
-		return cached?.consumer.closed.peek() === undefined ? cached?.consumer.clone() : undefined;
+		return this.#live(path, instance)?.consumer.clone();
+	}
+
+	// The live cached entry consumed through `served`'s instance and epoch: an older epoch never
+	// answers a fresh request, since the newer one may refuse it.
+	#live(path: Path.Valid, served: Served): CacheEntry | undefined {
+		const cached = this.#cache.get(path)?.get(served.route.instance ?? served.identity);
+		if (cached?.consumer.closed.peek() !== undefined) return undefined;
+		return cached?.selection.route.epoch === served.route.epoch ? cached : undefined;
 	}
 
 	/** Cache each live instance so a temporary route winner never displaces a held fallback. */

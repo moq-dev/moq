@@ -363,6 +363,12 @@ impl Misses {
 		!self.filled.is_empty()
 	}
 
+	/// The groups at or above `from` a fill answered and not handed out yet, lowest first,
+	/// including any evicted since that [`Self::next_filled`] has yet to prune.
+	pub fn filled_from(&self, from: u64) -> impl Iterator<Item = u64> + '_ {
+		self.filled.range(from..).copied()
+	}
+
 	/// The lowest key asked and not answered yet.
 	pub fn lowest_wanted(&self) -> Option<u64> {
 		self.wanted.iter().next().map(|run| run.start)
@@ -428,6 +434,11 @@ impl Misses {
 			.collect();
 		self.release(&filled);
 		self.pick_up();
+	}
+
+	/// Offer `key`, a fill's answer still cached, again: a widened budget owes it once more.
+	pub fn refill(&mut self, key: u64) {
+		self.filled.insert(key);
 	}
 
 	/// Take `key` as handed out, if a fill answered it.

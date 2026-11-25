@@ -37,6 +37,23 @@ first. The ledger's `BBR3 references` entry holds the Google Linux BBRv3,
 draft-ietf-ccwg-bbr, and QUICHE BBR3 heads; recheck them with quinn#2481 each
 run, and record any divergence a change to them adds there.
 
+Checked 2026-11-23 (pre-0.22 dependency audit at `890ea4e531`): no new
+quinn security advisories since 2026-09-30. The correctness fixes on `main`
+to check this run, besides `aa61ce99`:
+[`765abecf`](https://github.com/quinn-rs/quinn/commit/765abecf7b) (no
+poisoned-lock panics during cleanup),
+[`8fe66c31`](https://github.com/quinn-rs/quinn/commit/8fe66c31d7) and
+[`dadde9a6`](https://github.com/quinn-rs/quinn/commit/dadde9a681) (release
+cancelled stopped registrations, and the sender when the connection driver
+drops),
+[`26711b2e`](https://github.com/quinn-rs/quinn/commit/26711b2e1b) (a server
+waits for the protocol before handshake data after a retry),
+[`ca3566ce`](https://github.com/quinn-rs/quinn/commit/ca3566ce19) (a client
+discards incoming 0-RTT packets), and
+[`0f9432f7`](https://github.com/quinn-rs/quinn/commit/0f9432f7c1) (a run of
+PADDING bytes decodes as one frame). None changes the API or wire, so the run
+stays after the cut and a fix ships in a patch release.
+
 Learned: a fix missing from the ledger is often already held, since the fork
 reworked the same code (`stop` under `RESET_STREAM_AT`, the stale-accept
 check under `handshake_timeout`, socket setup in `moq_sock::bind`), so check
@@ -60,4 +77,4 @@ behavior follows upstream's fixes.
 
 ## Related
 
-- [Cost audit](/quest/m3/audit-cost.md) - covers crates cargo-deny can see
+- [Dependency audit](/quest/m3/audit-deps.md) - covers crates cargo-deny can see

@@ -21,8 +21,7 @@
 (* paused budget, half the connection window, and is not read until the   *)
 (* reader catches up, the reader leaves, or the stream is evicted. Refused *)
 (* a reservation, it reads on. Ingest shapes each stream's window to the   *)
-(* room its group has left plus the allowance of the stream's slot, as     *)
-(* moq-dev/moq#9210 designs it.                                            *)
+(* room its group has left plus the allowance of the stream's slot.        *)
 (*                                                                         *)
 (* When the peer has no connection credit left, moq-quic evicts the lowest *)
 (* ranked stream holding credit, unless an evicted reader has yet to stop  *)
@@ -43,8 +42,7 @@ CONSTANTS
     SW,         \* the stream receive window
     Ahead,      \* `pace::AHEAD`, the most a writer runs ahead of its fastest reader
     Late,       \* a group's first reader may arrive after its writer started
-    Leave,      \* a group's last reader may leave it
-    Shaped      \* moq-dev/moq#9210's design; FALSE for main's
+    Leave       \* a group's last reader may leave it
 
 ASSUME FrameLen % Seg = 0 /\ N >= 1 /\ Frames >= 1 /\ Seg >= 1 /\ SW >= 1 /\ W >= 1
 
@@ -58,11 +56,9 @@ SumTo(f(_), n) == IF n = 0 THEN 0 ELSE f(n) + SumTo(f, n - 1)
 
 Len == Frames * FrameLen
 
-\* `Budgeted::window`: `pace::window`, the stream window capped at AHEAD and the connection
-\* window; on a transport that shapes credit, plus a stream window, capped at AHEAD.
-PaceWindow ==
-    LET window == Min(Min(SW, Ahead), W) IN
-    IF Shaped THEN Min(window + SW, Ahead) ELSE window
+\* `Budgeted::window` on a transport that shapes credit: `pace::window`, the stream window
+\* capped at AHEAD and the connection window, plus a stream window, capped at AHEAD.
+PaceWindow == Min(Min(Min(SW, Ahead), W) + SW, Ahead)
 
 \* `Pacing::cap`: what the session's paused streams may hold together.
 Cap == W \div 2
@@ -143,7 +139,7 @@ Limit(r) == Max(r.taken + Max(Min(r.win, SW), IF r.want THEN 1 ELSE 0), r.msd)
 \* carries it computes the limit again (`Transmit`).
 Queue(r) == IF CanGrant(r) /\ Limit(r) > r.msd THEN [r EXCEPT !.due = TRUE] ELSE r
 
-\* `Recv::credit` (moq-dev/moq#9210): what arrived and was not released, and what the peer
+\* `Recv::credit`: what arrived and was not released, and what the peer
 \* may still send; capped at the final size once the FIN arrived.
 Credit(r) == IF r.rdr = "reading"
              THEN (IF r.arr = Len THEN Min(Limit(r), Len) ELSE Limit(r)) - r.rel
@@ -216,11 +212,11 @@ Room(s, w) ==
     IN IF room = None THEN None ELSE Max(room - FrameLen, 0)
 
 \* `Budgeted::shape`: let the peer send what the group has `room` for, at least the `unsealed`
-\* rest of the segment, plus the slot's allowance. Main shapes nothing.
+\* rest of the segment, plus the slot's allowance.
 Shape(r, sl, room, unsealed) ==
     LET a == Allowance(sl)
         target == IF room = None THEN SW ELSE Min(Max(room, unsealed) + a, SW)
-    IN IF Shaped /\ (target < r.win \/ target - r.win >= a \div 2)
+    IN IF target < r.win \/ target - r.win >= a \div 2
        THEN Queue([r EXCEPT !.win = target])
        ELSE r
 
@@ -238,9 +234,8 @@ Unsealed(w) ==
     LET inside == w % FrameLen IN
     IF inside = 0 /\ w > 0 THEN 0 ELSE Seg - (inside % Seg)
 
-\* `Budgeted::pause`'s charge: on #9210, the credit the stream holds once shaped to its
-\* allowance; on main, a stream window and the units taken but not released.
-Charge(r) == IF Shaped THEN Min(Credit(r), W) ELSE Min(SW + r.taken - r.rel, W)
+\* `Budgeted::pause`'s charge: the credit the stream holds once shaped to its allowance.
+Charge(r) == Min(Credit(r), W)
 
 Accept(s) ==
     /\ pc[s] = "new"
@@ -291,9 +286,8 @@ Park(s) ==
     /\ pc' = [pc EXCEPT ![s] = "paused"]
     /\ woken' = [woken EXCEPT ![s] = FALSE]
 
-\* One turn of `Reader::poll_read_frame`'s loop, or of the frame admission before it. #9210
-\* checks the gate only at a seal, so a paused stream holds no segment's credit; main checks it
-\* every turn.
+\* One turn of `Reader::poll_read_frame`'s loop, or of the frame admission before it. The gate
+\* is checked only at a seal, so a paused stream holds no segment's credit.
 Step(s) ==
     LET r == q[s]
         sealed == r.rel = r.taken
@@ -303,28 +297,28 @@ Step(s) ==
     /\ woken[s]
     /\ IF r.rdr = "evicted" \/ r.taken = Len
        THEN Stop(s)
-       ELSE IF (sealed \/ ~Shaped) /\ Paced(s, wr[s])
+       ELSE IF sealed /\ Paced(s, wr[s])
        THEN \* `Budgeted::pause`: reserve the credit the stream holds, or read on.
             IF charge[s] # None
             THEN Park(s) /\ UNCHANGED <<q, credited, stuckWaiting, charge, slot, wr, rd, held,
                                         refused>>
-            ELSE LET shrunk == IF Shaped THEN Queue([r EXCEPT !.win = Allowance(sl)]) ELSE r
+            ELSE LET shrunk == Queue([r EXCEPT !.win = Allowance(sl)])
                      ch == Charge(shrunk)
                  IN IF PausedTotal(charge) + ch <= Cap
                     THEN /\ Park(s)
                          /\ q' = [q EXCEPT ![s] = shrunk]
                          /\ charge' = [charge EXCEPT ![s] = ch]
-                         /\ slot' = [slot EXCEPT ![s] = IF Shaped THEN sl ELSE None]
+                         /\ slot' = [slot EXCEPT ![s] = sl]
                          /\ UNCHANGED <<credited, stuckWaiting, wr, rd, held, refused>>
-                    ELSE /\ Lease(s, shrunk, IF Shaped THEN sl ELSE None, None)
+                    ELSE /\ Lease(s, shrunk, sl, None)
                          /\ refused' = TRUE
                          /\ UNCHANGED <<wr, rd, held>>
-       ELSE IF sealed \/ ~Shaped
+       ELSE IF sealed
        THEN \* The gate is open: resume, and shape the window, at a frame's start for the
             \* admission and then for the frame, whose first segment is whole.
             LET room == Room(s, wr[s])
                 admitted == IF wr[s] % FrameLen = 0 THEN Shape(r, sl, room, 0) ELSE r
-            IN /\ Lease(s, Shape(admitted, sl, room, Seg), IF Shaped THEN sl ELSE None, None)
+            IN /\ Lease(s, Shape(admitted, sl, room, Seg), sl, None)
                /\ UNCHANGED <<wr, rd, held, refused>>
        ELSE Lease(s, r, slot[s], charge[s]) /\ UNCHANGED <<wr, rd, held, refused>>
 
@@ -344,7 +338,7 @@ HandBack(s) ==
     IN /\ pc[s] = "out"
        /\ \E p \in passes : Settle(p, woken)
        /\ pc' = [pc EXCEPT ![s] = "write"]
-       /\ slot' = [slot EXCEPT ![s] = IF Shaped THEN sl ELSE None]
+       /\ slot' = [slot EXCEPT ![s] = sl]
        /\ UNCHANGED <<charge, wr, rd, held, refused>>
 
 \* Write the chunk into the frame, committing it once whole. The window was shaped to the room
@@ -449,7 +443,7 @@ PausedWithinCap ==
     /\ PausedTotal(charge) <= Cap
     /\ \A s \in Streams : charge[s] # None => Credit(q[s]) <= charge[s]
 
-\* moq-dev/moq#9210's claims: every stream pauses, charged its slot's allowance.
+\* Every stream pauses, charged its slot's allowance.
 EveryPauseFits == ~refused
 ChargedAllowance == \A s \in Streams : charge[s] # None => charge[s] <= Allowance(slot[s])
 

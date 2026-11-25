@@ -94,6 +94,8 @@ async fn round(version: &str) -> (Vec<(u64, Option<u64>)>, Option<u64>) {
 		let start = group.start;
 		subscribed.push((start, read_to_end(group).await));
 	}
+	// Which of the two is read first depends on which lands first, so only the set is checked.
+	subscribed.sort();
 
 	// A second reader fetching group 0 from a hop that never held it.
 	let fetcher = produce_origin(3);
