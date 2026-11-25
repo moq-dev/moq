@@ -567,7 +567,9 @@ impl Consumer {
 			return Ok(None);
 		}
 		// A millisecond-stamped resume may land up to a millisecond before the packet ending there.
-		let lost = Duration::try_from(resume)?.saturating_sub(Duration::try_from(start)?) + Duration::from_millis(1);
+		let lost = Duration::try_from(resume)?
+			.saturating_sub(Duration::try_from(start)?)
+			.saturating_add(Duration::from_millis(1));
 		let packets = lost.min(CONCEAL_MAX).as_nanos() / self.frame.as_nanos();
 		for _ in 0..packets {
 			let at = self.next_start.unwrap_or(start);
