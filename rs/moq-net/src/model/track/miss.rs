@@ -2328,7 +2328,7 @@ mod tests {
 		}
 		track.give_up(1..3, Hole::stale(budget).capped(Some(5)));
 		let state = track.state.read();
-		let coverage = |cap: u64| Some((Cover::new([0..=cap - 1]), Some(cap)));
+		let coverage = |cap: u64| Some((Cover::new(std::iter::once(0..=cap - 1)), Some(cap)));
 		let drift = |cap: u64| Drift {
 			budget: Budget::uniform(budget),
 			bound: None,
@@ -2359,16 +2359,9 @@ mod tests {
 
 		// Lowered to 4, the reader never sees what lies at 4, which the upstream's verdict
 		// may rest on.
-		assert_eq!(
-			misses
-				.unanswered(&state, 1..3, &drift(4))
-				.iter()
-				.cloned()
-				.collect::<Vec<_>>(),
-			[1..3]
-		);
-		let taken = misses.retake(&drift(4));
-		assert_eq!(taken.iter().cloned().collect::<Vec<_>>(), [1..3]);
+		let run: RangeSet<u64> = std::iter::once(1..3).collect();
+		assert_eq!(misses.unanswered(&state, 1..3, &drift(4)), run);
+		assert_eq!(misses.retake(&drift(4)), run);
 		assert!(misses.stale.is_empty() && misses.adopted_under.is_none());
 	}
 
