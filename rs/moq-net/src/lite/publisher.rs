@@ -6309,9 +6309,12 @@ impl TrackRun {
 			return Ok(false);
 		}
 		let range = match hole {
+			// A skip held before the start may lie in a gap a header since proved.
 			Hole::Skip if self.ctx.version.has_previous() => {
-				self.track.record_mut().tell(range.clone(), Report::Skip);
-				self.deferred.insert(range);
+				for part in self.track.record_mut().unnamed(range) {
+					self.track.record_mut().tell(part.clone(), Report::Skip);
+					self.deferred.insert(part);
+				}
 				return self.settle_deferred(writer);
 			}
 			Hole::Skip => range,
@@ -10109,6 +10112,36 @@ mod serve_group_test {
 					lite::SubscribeResponse::Drop(lite::SubscribeDrop { groups, .. }),
 				] if *groups == (0..2)
 			),
+			"{answered:?}"
+		);
+	}
+
+	/// A skip held until a range is answered, which the header of the group above it proved
+	/// meanwhile, is named by nothing else once delivery resolves.
+	#[kio::test]
+	async fn lite07_a_held_skip_a_header_proved_goes_out_once() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		track.received();
+		track.await_edge();
+		track.set_live(None, None, Some(0)).unwrap();
+		let bounds = Bounds::new(&[lite::Range::span(None, 0, None, None)], None);
+		let subscriber = track.subscribe(track::Subscription::default().with_ranges(bounds.ranges.iter().copied()));
+		let session = Log::default();
+		let (mut run, mut writer, log) = lite07_run(SinkSession::new(session.clone()), subscriber);
+		asked(&mut run, &bounds.ranges);
+		track.skip_groups(0..2);
+		write_group(&mut track, 2, 2);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		track.answer_edge();
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(group_gaps(&session, Version::Lite07), [(2, 2)]);
+		let answered = responses(&mut writer, &log).await;
+		assert!(
+			matches!(answered.as_slice(), [lite::SubscribeResponse::Start(_)]),
 			"{answered:?}"
 		);
 	}

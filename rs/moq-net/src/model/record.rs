@@ -144,6 +144,22 @@ impl Record {
 		}
 	}
 
+	/// The parts of `range` the wire was told nothing of, served or dropped: untold, or a
+	/// skip a lite-07 publisher leaves for the group above to name.
+	pub fn unnamed(&self, range: Range<u64>) -> Vec<Range<u64>> {
+		let range = range.start.max(self.floor)..range.end;
+		if range.is_empty() {
+			return Vec::new();
+		}
+		let named: RangeSet<u64> = self
+			.reported
+			.overlapping(&range)
+			.filter(|(_, report)| **report != Report::Skip)
+			.map(|(run, _)| run.clone())
+			.collect();
+		named.gaps(&range).collect()
+	}
+
 	/// The highest key of `range` the wire was told of, served or dropped, past the skips a
 	/// lite-07 publisher leaves for the group above to name.
 	pub fn last_named(&self, range: Range<u64>) -> Option<u64> {
