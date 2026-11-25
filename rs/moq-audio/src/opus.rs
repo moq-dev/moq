@@ -128,22 +128,27 @@ pub(crate) fn multistream_activity(packet: &[u8], streams: u8, in_dtx: bool) -> 
 	}
 }
 
-/// Whether every stream in a multistream packet is coded in CELT-only mode (RFC 6716
-/// §3.1: TOC configurations 16 to 31), rather than SILK or hybrid.
-pub(crate) fn celt_only(mut packet: &[u8], streams: u8) -> bool {
+/// Update whether each stream of a decoded multistream packet now decodes in CELT-only mode
+/// (RFC 6716 §3.1: TOC configurations 16 to 31), rather than SILK or hybrid. A stream whose
+/// frames are all empty keeps its mode, since libopus decodes it as a loss in the mode before.
+/// A packet whose framing does not parse marks every stream as not CELT.
+pub(crate) fn track_celt(mut packet: &[u8], celt: &mut [bool]) {
+	let streams = celt.len();
 	for index in 0..streams {
-		if packet.first().is_none_or(|toc| toc >> 3 < 16) {
-			return false;
-		}
-		if index + 1 == streams {
-			return true;
-		}
-		let Some((_, offset)) = self_delimited(packet) else {
-			return false;
+		let (silent, offset) = match index + 1 == streams {
+			true => (carries_nothing(packet), packet.len()),
+			false => match self_delimited(packet) {
+				Some(parsed) => parsed,
+				None => return celt.fill(false),
+			},
 		};
+		match packet.first() {
+			Some(toc) if !silent => celt[index] = toc >> 3 >= 16,
+			Some(_) => {}
+			None => return celt.fill(false),
+		}
 		packet = &packet[offset..];
 	}
-	false
 }
 
 /// Whether every stream in a multistream packet coded no audio.
@@ -396,6 +401,28 @@ mod tests {
 		assert_eq!(activity(&[], false), Activity::Active);
 	}
 
+	/// Each stream's mode follows its last coded frame, as libopus decodes it.
+	#[test]
+	fn track_celt_follows_each_coded_stream() {
+		// A coded stream takes its TOC's mode: CELT, SILK, CELT.
+		let mut celt = [false; 3];
+		track_celt(&[0xfc, 0x01, 0xaa, 0x48, 0x01, 0xaa, 0xf8, 0xaa], &mut celt);
+		assert_eq!(celt, [true, false, true]);
+		// An empty stream keeps its mode, whatever its TOC says.
+		track_celt(&[0xfc, 0x00, 0xfc, 0x01, 0xaa, 0x48], &mut celt);
+		assert_eq!(celt, [true, true, true]);
+
+		let mut celt = [false];
+		track_celt(&[0xf8], &mut celt);
+		assert_eq!(celt, [false], "a CELT DTX packet decodes in the SILK mode before it");
+		track_celt(&[0xf8, 0xaa], &mut celt);
+		assert_eq!(celt, [true]);
+		track_celt(&[0x48], &mut celt);
+		assert_eq!(celt, [true], "a SILK DTX packet decodes in the CELT mode before it");
+		track_celt(&[], &mut celt);
+		assert_eq!(celt, [false], "unparsed framing conceals nothing");
+	}
+
 	/// A surround packet is one self-delimited Opus packet per stream, then a
 	/// normal packet for the last. DTX is all of them empty; one coded frame is
 	/// audio. Parsing the buffer as a single stream would read the later
@@ -421,14 +448,6 @@ mod tests {
 		assert_eq!(multistream_activity(&code3, 2, false), Activity::Dtx);
 		let code3_payload = [0xfb, 0x03, 0x01, 0xaa, 0xbb, 0xcc, 0xf8];
 		assert_eq!(multistream_activity(&code3_payload, 2, false), Activity::Active);
-		// Every stream above is CELT-only; a SILK stream anywhere is not.
-		assert!(celt_only(&dtx, 4));
-		assert!(celt_only(&code3_payload, 2));
-		assert!(!celt_only(&[0xfc, 0x00, 0x48, 0x00, 0xf8], 3));
-		assert!(!celt_only(&[0xfc, 0x00, 0xfc, 0x00, 0xf8, 0x00, 0x78], 4));
-		assert!(celt_only(&[0xf8], 1));
-		assert!(!celt_only(&[0x48], 1));
-		assert!(!celt_only(&[], 1));
 		// Loss still carries the previous classification, whatever the layout.
 		assert_eq!(multistream_activity(&[], 4, true), Activity::Dtx);
 		assert_eq!(multistream_activity(&[], 4, false), Activity::Active);

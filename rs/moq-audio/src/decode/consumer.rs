@@ -570,12 +570,20 @@ impl Consumer {
 		let lost = Duration::try_from(resume)?
 			.saturating_sub(Duration::try_from(start)?)
 			.saturating_add(Duration::from_millis(1));
-		let packets = lost.min(CONCEAL_MAX).as_nanos() / self.frame.as_nanos();
-		for _ in 0..packets {
-			let at = self.next_start.unwrap_or(start);
-			self.decode(&[], at, false)?;
+		let packets = (lost.min(CONCEAL_MAX).as_nanos() / self.frame.as_nanos()) as usize;
+		if packets == 0 {
+			return Ok(None);
 		}
-		Ok(self.next_start.filter(|_| packets > 0))
+		// Each concealed packet is placed by the samples before it, not by the previous one's
+		// stamp, which a coarse timescale would round down packet by packet.
+		let rate = self.decoder.sample_rate();
+		let samples = ((self.frame.as_nanos() * u128::from(rate) + 500_000_000) / 1_000_000_000) as usize;
+		for packet in 0..packets {
+			self.decode(&[], advance(start, packet * samples, rate)?, false)?;
+		}
+		let end = advance(start, packets * samples, rate)?;
+		self.next_start = Some(end);
+		Ok(Some(end))
 	}
 
 	/// Decode one packet, an empty one concealing a lost packet, and queue its output.
@@ -1928,7 +1936,7 @@ mod tests {
 				continue;
 			}
 			if !matches!(loss, Loss::Stamps) {
-				producer.seek(packet * 20_000).unwrap();
+				producer.seek(packet * frames * 1_000_000 / 48_000).unwrap();
 			}
 			producer
 				.write(moq_mux::container::Frame {
@@ -2027,6 +2035,20 @@ mod tests {
 			// The sine runs at 0.35 RMS; silence would be zero.
 			assert!(quietest > 0.1, "{loss:?}: concealed at {quietest}");
 		}
+	}
+
+	/// Short packets conceal on a sample-exact timeline: four lost 2.5 ms packets play as four.
+	#[tokio::test(start_paused = true)]
+	async fn opus_conceals_short_packets_back_to_back() {
+		let config = EncodeConfig {
+			frame_duration: Duration::from_micros(2_500),
+			..EncodeConfig::new(48_000, Layout::Mono)
+		};
+		let events = opus_loss(config, 5..9, Loss::Groups).await;
+		assert_eq!(gaps(&events), []);
+		assert!(contiguous(&events), "{events:?}");
+		let (total, _) = heard(&events, 0..0);
+		assert_eq!(total, 20 * 120 - 312);
 	}
 
 	/// A loss past [`CONCEAL_MAX`] conceals its first 100 ms and reads the rest as a gap.

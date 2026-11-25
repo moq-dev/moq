@@ -28,8 +28,15 @@ since 2026-07 with no release since 2024-11. Until a fixed decoder lands,
 `Libopus` refuses `decode(&[])` after a SILK or hybrid packet, and
 `Backend::conceals` reports it.
 
+The same bug plays every SILK or hybrid DTX packet at full scale, since libopus
+decodes an empty frame as a loss: measured with the `Voice` encoder kind, which
+enables DTX, every 1-byte silence packet decoded to a 1.0 peak. moq-audio's own
+producer declares an end at silence instead of publishing those packets, but any
+publisher that forwards DTX packets (such as WebRTC Opus with DTX on) would
+reach `moq play` this way; unverified end to end.
+
 Once the decoder conceals SILK correctly, delete the `celt` gate in
-`rs/moq-audio/src/decode/backend/libopus.rs` and `opus::celt_only`. Then flip
+`rs/moq-audio/src/decode/backend/libopus.rs` and `opus::track_celt`. Then flip
 `opus_silk_loss_stays_a_gap` and `opus_refuses_to_conceal_after_silk` to
 expect concealment that decays rather than saturates.
 

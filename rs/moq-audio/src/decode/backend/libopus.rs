@@ -35,10 +35,10 @@ pub(super) struct Libopus {
 	/// Frames per channel in the last packet that decoded, which is what a lost
 	/// packet most likely carried. `None` until one has.
 	last_frame_size: Option<usize>,
-	/// Whether the last packet that decoded was CELT-only in every stream, the only mode
-	/// unsafe-libopus 0.2 conceals correctly: its SILK concealment saturates to full scale
-	/// (DCNick3/unsafe-libopus#3). Delete once a fixed decoder lands.
-	celt: bool,
+	/// Whether each stream decodes in CELT-only mode, the only one unsafe-libopus 0.2 conceals
+	/// correctly: its SILK concealment saturates to full scale (DCNick3/unsafe-libopus#3).
+	/// Delete once a fixed decoder lands.
+	celt: Vec<bool>,
 	in_dtx: bool,
 	/// Outputs submitted but not yet received, which reuse their slots across calls.
 	ready: VecDeque<Decoded>,
@@ -108,7 +108,7 @@ impl Libopus {
 			pre_skip: head.pre_skip as usize,
 			max_frame_size: (opus::DECODE_RATE as usize * MAX_FRAME_MS) / 1000,
 			last_frame_size: None,
-			celt: false,
+			celt: vec![false; streams as usize],
 			in_dtx: false,
 			ready: VecDeque::new(),
 		};
@@ -170,7 +170,7 @@ impl Backend for Libopus {
 			let frame_size = self.last_frame_size.ok_or_else(|| {
 				Error::Decode("opus packet lost before any packet decoded, so no length to conceal".into())
 			})?;
-			if !self.celt {
+			if !self.celt.iter().all(|celt| *celt) {
 				return Err(Error::Decode(
 					"opus packet lost after a SILK or hybrid packet, which this decoder cannot conceal".into(),
 				));
@@ -197,7 +197,7 @@ impl Backend for Libopus {
 		}
 		if !packet.is_empty() {
 			self.last_frame_size = Some(samples as usize);
-			self.celt = opus::celt_only(packet, self.streams);
+			opus::track_celt(packet, &mut self.celt);
 		}
 		out.truncate(samples as usize * channels);
 
@@ -233,12 +233,14 @@ impl Backend for Libopus {
 			return Err(opus::error(rc, "OPUS_RESET_STATE"));
 		}
 		self.in_dtx = false;
+		// A reset decoder has no mode to conceal in.
+		self.celt.fill(false);
 		self.ready.clear();
 		Ok(())
 	}
 
 	fn conceals(&self) -> bool {
-		self.last_frame_size.is_some() && self.celt
+		self.last_frame_size.is_some() && self.celt.iter().all(|celt| *celt)
 	}
 
 	fn sample_rate(&self) -> u32 {
