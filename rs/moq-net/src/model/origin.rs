@@ -237,9 +237,9 @@ impl Default for Config {
 impl Config {
 	/// Config for the given origin node with no byte target and the default idle expiry.
 	///
-	/// Behind the `test-support` or `fuzz` feature: a test's door, not an API. A Node ID kept across
+	/// Behind the `test-support` feature: a test's door, not an API. A Node ID kept across
 	/// runs would merge them on lite-07.
-	#[cfg(any(test, feature = "test-support", feature = "fuzz"))]
+	#[cfg(any(test, feature = "test-support"))]
 	pub fn new(node: NonZeroU64) -> Self {
 		Self {
 			node: Some(node),

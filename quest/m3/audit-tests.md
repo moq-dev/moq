@@ -8,7 +8,7 @@ Run the `tests` audit: `quest audit tests` prints what it checks, what each find
 
 Baseline: 2026-11-23 at `890ea4e531` (Nightly `45242597151` `rust-coverage` at `b29b90be29`, measured via `just rs coverage`):
 `moq-auth` 98.1%, `moq-mux` 97.7%, `moq-hls` 97.6%, `hang` 97.5%, `moq-net` 96.1%, `moq-quic` 96.0%, `libmoq` 96.0%, `moq-audio` 95.9%, `moq-gst` 95.7%, `moq-relay` 95.3%, `moq-congestion` 95.0%, `moq-json` 94.4%, `kio` 93.9%, `qmux` 93.6%, `moq-ffi` 93.2%, `moq-rtmp` 93.1%, `moq-webrtc` 93.0%, `moq-tokio` 92.4%, `moq-uring` 89.6%, `moq-cli` 87.2%, `moq-e2ee` 86.2%, `moq-video` 65.3%, `moq-nvenc` 44.9%, `moq-v4l` 17.4%, `moq-vaapi` 12.2%.
-In Nightly `45242597151`, `js-coverage` stopped at `js/net` (`lite` 96.7%, `ietf` 94.3%, `origin` 97.8%, `track` 97.9%, `resume` 94.9%) due to a failure in `widened_max_age.test.ts`; re-baseline the remaining JS packages once [js-widened-max-age](/quest/m0/nightly/js-widened-max-age.md) lands.
+In Nightly `45242597151`, `js-coverage` stopped at `js/net` (`lite` 96.7%, `ietf` 94.3%, `origin` 97.8%, `track` 97.9%, `resume` 94.9%) due to a failure in `widened_max_age.test.ts`; the next night's passed, so start from a Nightly whose `js-coverage` covered every package. The flake is [widened-bounded-reader-js](/quest/m0/test-flakes-4/widened-bounded-reader-js.md).
 
 Previous run: [moq-dev/moq#6175](https://github.com/moq-dev/moq/pull/6175). Test cost belongs to [audit-cost](/quest/m3/audit-cost.md).
 

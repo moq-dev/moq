@@ -312,5 +312,4 @@ candidate:
 - [Interop and Video pass on main](/quest/m0/interop-green/README.md) - the cut PR's release gate runs `interop.yml`, which failed on `main` every day through 2026-11-12
 - [Nightly passes on main](/quest/m0/nightly/README.md) - the release gate runs `features.yml`, red in the 2026-11-12 Nightly
 - [Resync drifted TLA+ models](/quest/m1/resync-tla-models.md) - formal models match the finalized lite-07 code before it ships
-- [Port recent quinn fixes](/quest/m1/quinn-upstream-sync.md) - upstream quinn-proto correctness fixes since 2026-11-03 land in moq-quic before 0.22
 - [Re-run release performance baseline](/quest/m3/release/perf-recheck.md) - fresh `main` vs `origin/release` baseline and Nightly paired regression triage once m2 finishes

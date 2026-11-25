@@ -213,11 +213,15 @@ so the relay works its ways out again, a constant cost per step. The bench's com
 says so. Nightly compares against a base that already carries the cost, so it will not
 flag it again.
 
-Decided 2026-11-23 (maintainer, pre-0.22 recurring audits), from run
+Triaged 2026-11-25 (pre-0.22 recurring audits), from run
 [45242597151](https://github.com/moq-dev/moq/actions/runs/45242597151) (`b29b90be29`):
-three more children: [resume-model-panic](/quest/m0/nightly/resume-model-panic.md),
-[js-widened-max-age](/quest/m0/nightly/js-widened-max-age.md), and
-[ffi-windows-size-jump](/quest/m0/nightly/ffi-windows-size-jump.md). Already owned:
-`Tests (rs quic-sim)`'s `many_groups_carry_bulk_transfers_losslessly` by
-[moq-dev/moq#9439](https://github.com/moq-dev/moq/pull/9439), and the 18 paired
-benchmark regressions by [perf-recheck](/quest/m3/release/perf-recheck.md).
+`Tests (test resume-model)` at seed `1465722607` was fixed by
+[moq-dev/moq#9509](https://github.com/moq-dev/moq/pull/9509); `Nightly (JS coverage)`'s
+`widened_max_age.test.ts` failure is
+[widened-bounded-reader-js](/quest/m0/test-flakes-4/widened-bounded-reader-js.md); and
+`Shipping sizes`' +10% `moq_ffi.dll.lib` is the Windows import library growing with the
+exports [moq-dev/moq#9359](https://github.com/moq-dev/moq/pull/9359) added, while every
+shipped library stayed under the 5% bound. Already owned: `Tests (rs quic-sim)`'s
+`many_groups_carry_bulk_transfers_losslessly` by
+[moq-dev/moq#9439](https://github.com/moq-dev/moq/pull/9439), and the paired benchmark
+regressions by [perf-recheck](/quest/m3/release/perf-recheck.md).

@@ -13,6 +13,7 @@ Found by the 2026-11-23 pre-0.22 performance audit (`890ea4e531`):
   - Relay session benchmarks (6 regressions, +12.0% to +23.3%): `relay_session_churn_sessions`, `relay_session_dash_projects`, `relay_session_delivery_watch` (lite-06 and lite-07), `relay_session_join_broadcasts`, `relay_session_join_relays`.
   - Rust shared bench targets (11 regressions, +12.3% to +28.5%): `annexb-export-frames`, `container-export-idle/{flv,mkv,ts}`, `container-export/flv`.
   - Rust supplemental benchmarks (1 regression).
+- Nightly [45459585582](https://github.com/moq-dev/moq/actions/runs/45459585582) (`5d86f05321` vs `b29b90be29`) confirmed 5 more: 4 in the relay session benchmarks and 1 in the Rust shared bench targets.
 
 Once `m2` finishes, follow the Release baseline method in [Performance audit](/quest/m3/audit-perf.md):
 
@@ -21,7 +22,7 @@ BENCH_ARTIFACTS=<scratch> just bench origin/release
 bun bench/browser/micro.ts --bench frames --out <scratch>/frames.json base=<release> current=. aa=.
 ```
 
-Record `/proc/loadavg`, re-run every slower or larger case in alternating rounds with instruction counts (or heap profiles for RSS), fix accidental regressions, record accepted costs with the feature and PR each pays for in `.github/release-perf.md`, and confirm the 18 Nightly paired regressions above are resolved or explained.
+Record `/proc/loadavg`, re-run every slower or larger case in alternating rounds with instruction counts (or heap profiles for RSS), fix accidental regressions, record accepted costs with the feature and PR each pays for in `.github/release-perf.md`, and confirm the Nightly paired regressions above are resolved or explained.
 
 Public API: none. Wire: none.
 
