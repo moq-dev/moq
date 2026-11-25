@@ -92,6 +92,33 @@ test("Legacy Producer ends an audio group whole at its discontinuity marker", as
 	]);
 });
 
+// A cut ends its group whole without a marker, and its span runs to that end: a lite-07 relay that
+// has the group's End treats any start inside the span as skipped, so nothing later starts there.
+test("Legacy Producer starts nothing inside the span of a group a cut ended", async () => {
+	const media = track(Time.Timescale.MICRO);
+	const subscriber = media.subscribe({ ranges: [{}] });
+	const producer = new Producer(media, new Format("audio"));
+	producer.encode(new Uint8Array([1]), Duration.micros(0), true);
+	producer.encode(new Uint8Array([1]), Duration.micros(20_000), false);
+	producer.cut(Duration.micros(40_000));
+	producer.discontinuity(Duration.micros(40_000));
+	producer.encode(new Uint8Array([1]), Duration.micros(60_000), true);
+	producer.encode(new Uint8Array([1]), Duration.micros(80_000), false);
+	// Estimated from the cadence: 100 ms.
+	producer.cut();
+	producer.encode(new Uint8Array([1]), Duration.micros(90_000), true);
+	producer.finish();
+
+	expect(await groups(subscriber)).toEqual([
+		{ start: 0n, end: 40_000n, frames: [0, 20_000] },
+		// Not a unit before the break, which the group the cut ended still spans.
+		{ start: 40_000n, end: undefined, frames: [40_000] },
+		{ start: 60_000n, end: 100_000n, frames: [60_000, 80_000] },
+		// Resumed below the estimated end, so stamped at it.
+		{ start: 100_000n, end: 120_000n, frames: [100_000] },
+	]);
+});
+
 test("Legacy Producer starts video resuming at a discontinuity's end past its marker", async () => {
 	for (const [scale, at] of [
 		[Time.Timescale.MICRO, 33_001],

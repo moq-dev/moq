@@ -122,12 +122,12 @@ function startsPast(track: Moq.Track.Producer, timestamp: number): boolean {
 	return largest === undefined || keyOf(track, timestamp) > largest.group;
 }
 
-// The first whole microsecond whose start on `track` passes the group starting at `key`.
-function startAfter(track: Moq.Track.Producer, key: bigint): number {
+// The first whole microsecond whose start on `track` is at least `key`.
+function startAt(track: Moq.Track.Producer, key: bigint): number {
 	// keyOf vouched for the timescale.
 	const scale = track.timescale as Time.Timescale;
-	const at = Time.floorAt(new Time.Timestamp(Number(key + 1n), scale), Time.Timescale.MICRO);
-	return keyOf(track, at) > key ? at : at + 1;
+	const at = Time.floorAt(new Time.Timestamp(Number(key), scale), Time.Timescale.MICRO);
+	return keyOf(track, at) >= key ? at : at + 1;
 }
 
 // The wire carries whole microseconds, rounded down as moq-net's timestamps are.
@@ -186,6 +186,9 @@ export class Producer {
 	#marked = false;
 	// The newest frame timestamp written in any group, which a marker never starts below.
 	#newest?: number;
+	// The End of the latest group that ended whole, in the track's timescale. Its span runs there,
+	// so no later group starts below it.
+	#ended?: bigint;
 
 	/** Wrap a track to publish legacy-container frames into it. */
 	constructor(track: Moq.Track.Producer, format: Format) {
@@ -200,8 +203,9 @@ export class Producer {
 	 * its own (a leading picture after a splice) is dropped, as is a keyframe at or before the newest
 	 * frame with no group open, with the frames after it until a keyframe opens a group. With no group
 	 * open, a keyframe landing on the latest group's start (media resuming right at a discontinuity's
-	 * marker) is stamped one unit of the track's timescale later, and so is a frame at its timestamp
-	 * after it, such as the picture its parameter sets precede. Throws if the first frame is not a
+	 * marker) is stamped one unit of the track's timescale later, one inside the span of a group
+	 * {@link cut} ended whole is stamped at that group's end, and so is a frame at its timestamp after
+	 * it, such as the picture its parameter sets precede. Throws if the first frame is not a
 	 * keyframe, a group start goes backwards, or a frame is below the previous group start.
 	 */
 	encode(data: Uint8Array | Source, pts: Duration, keyframe: boolean) {
@@ -218,10 +222,16 @@ export class Producer {
 		// refused, before anything changes.
 		const behind = this.#newest !== undefined && timestamp <= this.#newest;
 		// With no group open, one landing on the latest group's start, such as media resuming right
-		// at a discontinuity's marker, starts at the first start past it instead.
-		const largest = this.#track.largest()?.group;
-		if (keyframe && !behind && !this.#group && largest !== undefined && keyOf(this.#track, timestamp) === largest) {
-			timestamp = startAfter(this.#track, largest);
+		// at a discontinuity's marker, or inside the span of the group a cut ended whole, starts at
+		// the first start past both instead.
+		if (keyframe && !behind && !this.#group) {
+			const largest = this.#track.largest()?.group;
+			if (largest !== undefined && keyOf(this.#track, timestamp) === largest) {
+				timestamp = startAt(this.#track, largest + 1n);
+			}
+			if (this.#ended !== undefined && keyOf(this.#track, timestamp) < this.#ended) {
+				timestamp = startAt(this.#track, this.#ended);
+			}
 		}
 		const opens = keyframe && !behind && startsPast(this.#track, timestamp);
 		// Dropped: a keyframe with no group to continue, and a frame presenting with the groups
@@ -318,6 +328,8 @@ export class Producer {
 			const endpoint = this.#group && this.#format.kind === "video" && !this.#reordered ? end : undefined;
 			const newest = keyOf(this.#track, Math.max(this.#newest ?? 0, endpoint ?? 0));
 			if (start < newest) start = newest;
+			// Nor inside the span of a group a cut ended whole, which runs to its End.
+			if (this.#ended !== undefined && start < this.#ended) start = this.#ended;
 			const largest = this.#track.largest()?.group;
 			if (largest !== undefined && start <= largest) start = largest + 1n;
 			// keyOf vouched for the timescale.
@@ -370,8 +382,12 @@ export class Producer {
 		// A group ends whole where its content stops, which bounds its reach without a successor.
 		const at =
 			whole !== undefined ? BigInt(whole.value) : bound === undefined ? undefined : keyOf(this.#track, bound);
-		if (at !== undefined && at > this.#group.start) this.#group.finishAt(at);
-		else this.#group.finish();
+		if (at !== undefined && at > this.#group.start) {
+			this.#group.finishAt(at);
+			this.#ended = at;
+		} else {
+			this.#group.finish();
+		}
 		this.#group = undefined;
 		if (this.#end !== undefined) {
 			this.#liveEdge = this.#liveEdge === undefined ? this.#end : Math.max(this.#liveEdge, this.#end);
