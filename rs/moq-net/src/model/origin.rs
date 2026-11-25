@@ -9334,11 +9334,6 @@ impl Routes {
 		self.assert_next_gone(RouteKind::End, expected);
 	}
 
-	/// The next update must be `expected` let go of here, not retracted by its origin.
-	pub fn assert_next_offline(&mut self, expected: impl TryInto<Path, Error: std::fmt::Debug>) {
-		self.assert_next_gone(RouteKind::Offline, expected);
-	}
-
 	fn assert_next_gone(&mut self, kind: RouteKind, expected: impl TryInto<Path, Error: std::fmt::Debug>) {
 		match kio::wait(|waiter| self.poll_next(waiter))
 			.now_or_never()

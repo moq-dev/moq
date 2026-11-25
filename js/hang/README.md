@@ -7,7 +7,7 @@
 [![npm version](https://img.shields.io/npm/v/@moq/hang)](https://www.npmjs.com/package/@moq/hang)
 [![TypeScript](https://img.shields.io/badge/TypeScript-ready-blue.svg)](https://www.typescriptlang.org/)
 
-Core media library for [Media over QUIC](https://moq.dev/) (MoQ). Provides shared primitives used by [`@moq/watch`](../watch) and [`@moq/publish`](../publish), built on top of [`@moq/net`](../lite).
+Core media library for [Media over QUIC](https://moq.dev/) (MoQ). Provides shared primitives used by [`@moq/watch`](../watch) and [`@moq/publish`](../publish), built on top of [`@moq/net`](../net).
 
 ## Features
 
@@ -55,7 +55,7 @@ import * as Publish from "@moq/publish";
 
 - **[@moq/watch](../watch)** - Subscribe to and render MoQ broadcasts
 - **[@moq/publish](../publish)** - Publish media to MoQ broadcasts
-- **[@moq/net](../lite)** - Core pub/sub transport protocol
+- **[@moq/net](../net)** - Core pub/sub transport protocol
 - **[@moq/signals](../signals)** - Reactive signals library
 
 ## License
