@@ -2694,8 +2694,10 @@ impl Reader {
 				if copy.done.is_some() || copy.expired(budget, waiter) {
 					continue;
 				}
-				for key in copy.track.cached_groups(gap.clone()) {
-					if copy.start(start) <= key && Self::deliverable(copy, key, delivered) {
+				// Nothing under where the copy starts goes out from it: the serving copy holds none.
+				let from = gap.start.max(copy.start(start)).min(gap.end);
+				for key in copy.track.cached_groups(from..gap.end) {
+					if Self::deliverable(copy, key, delivered) {
 						owed.remove(key..key + 1);
 					}
 				}
@@ -3602,17 +3604,12 @@ impl Reader {
 		// start is asked from its time, and the group holding it below is read as `raised` says.
 		let from = match &resumed_by {
 			Resumed::Route => floor,
-			Resumed::Ranges(keys) => {
-				let starts = (keys.iter())
-					.filter_map(|key| self.mirrored.ranges.get(key))
-					.map(|range| range.time().unwrap_or(floor));
-				match starts.min() {
-					Some(start) => start,
-					// Retired since, so nothing new is covered.
-					None if owed.is_empty() => return,
-					None => resumed,
-				}
-			}
+			// Retired since, so nothing new is covered: only an owed raised start is asked.
+			Resumed::Ranges(keys) => (keys.iter())
+				.filter_map(|key| self.mirrored.ranges.get(key))
+				.map(|range| range.time().unwrap_or(floor))
+				.min()
+				.unwrap_or(resumed),
 		};
 		let from = from.max(self.groups.0);
 		// A group a replaced copy holds under its cap and inside its own ranges is that copy's to
