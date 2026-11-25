@@ -907,6 +907,14 @@ pub mod poll {
 		/// for exactly that reason.
 		fn reset(&mut self, code: u32);
 
+		/// Like [`reset`](Self::reset), but still deliver every byte before `offset`.
+		///
+		/// The peer reads those bytes before the reset's error: RESET_STREAM_AT, or toward a peer
+		/// that does not support it, a RESET_STREAM held until it acknowledged them. A peer that
+		/// stopped the stream gets the reset without them. Takes `&mut self` for the same
+		/// reasons as [`reset`](Self::reset).
+		fn reset_at(&mut self, offset: &Self::Offset, code: u32);
+
 		/// Poll until the stream is closed by either side.
 		///
 		/// This includes:

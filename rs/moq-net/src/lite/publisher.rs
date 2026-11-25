@@ -7119,6 +7119,11 @@ struct GroupServe {
 	/// The times the stream carried, which each FRAME's delta and GROUP_END count from.
 	clock: lite::Clock,
 	state: GroupState,
+	/// Lite-07: the transport took the whole GROUP header, which every later reset of the
+	/// stream still delivers.
+	held: bool,
+	/// The stream failed in a way that still accounts for its group, so no drop names it.
+	accounted: bool,
 	// A long cached group drains a slice per poll, so its siblings still run.
 	budget: kio::coop::Budget,
 	/// Bills the group's payload as each stream delivers it.
@@ -7202,6 +7207,8 @@ impl GroupServe {
 			end,
 			stops,
 			state: GroupState::Open,
+			held: false,
+			accounted: false,
 			budget: kio::coop::Budget::new(32),
 			meter,
 		}
@@ -7365,6 +7372,11 @@ impl GroupServe {
 						loop {
 							ready!(self.budget.poll_yield(waiter));
 							match writer.poll_flush(waiter) {
+								// The first flush is the header alone: nothing else is buffered before it.
+								Poll::Ready(Ok(())) if !self.held && self.ctx.version.has_reliable_reset() => {
+									writer.hold();
+									self.held = true;
+								}
 								Poll::Ready(Ok(())) => {}
 								Poll::Ready(Err(err)) => break 'serve Err(err),
 								// Parking on the transport is the one stall the group cursor cannot
@@ -7577,35 +7589,43 @@ impl GroupServe {
 								Ok(()) => self.state = GroupState::Closed { writer },
 								// The writer drops here: the Drop reset stands in for the
 								// abort, exactly like the old `finish()?`.
-								Err(err) => return Poll::Ready(Err(err)),
+								Err(err) => {
+									self.accounted = accounts(self.ctx.version, self.held, &mut writer);
+									return Poll::Ready(Err(err));
+								}
 							}
 						}
 						Err(err) => {
+							self.accounted = accounts(self.ctx.version, self.held, &mut writer);
 							writer.abort(&err);
 							return Poll::Ready(Err(err));
 						}
 					}
 				}
 				GroupState::Closed { writer } => {
-					// poll_close releases the stream on completion: the peer acknowledged
-					// everything, so the Drop fallback must not reset the stream and
-					// discard bytes still retransmitting.
-					let res = match writer.poll_close(waiter) {
+					let res = match writer.poll_closed(waiter) {
 						Poll::Ready(res) => res,
 						// Those bytes still hold the connection until acknowledged, so a group
 						// gone stale meanwhile releases them like one still serving, even after a
 						// lite-07 GROUP_END: stale bytes would fill the send window and stall the
 						// streams behind them.
 						Poll::Pending if self.group.poll_expired(waiter) => {
-							let GroupState::Closed { writer } = std::mem::replace(&mut self.state, GroupState::Done)
+							let GroupState::Closed { mut writer } = std::mem::replace(&mut self.state, GroupState::Done)
 							else {
 								unreachable!()
 							};
+							self.accounted = accounts(self.ctx.version, self.held, &mut writer);
 							writer.abort(&Error::Old);
 							return Poll::Ready(Err(Error::Old));
 						}
 						Poll::Pending => return Poll::Pending,
 					};
+					if res.is_err() {
+						self.accounted = accounts(self.ctx.version, self.held, writer);
+					}
+					// The peer acknowledged everything or ended the stream, so the Drop fallback must not
+					// reset it and discard bytes still retransmitting.
+					writer.release();
 					self.state = GroupState::Done;
 					return Poll::Ready(res.map(|()| {
 						tracing::debug!(key = self.key, "finished group");
@@ -7628,11 +7648,28 @@ impl kio::Task for GroupServe {
 	}
 }
 
+/// Lite-07: whether a Group Stream on `writer`, failing now, still accounts for its group,
+/// `held` once the transport took its whole header. A reset of this side's delivers the held
+/// header, which does. A STOP_SENDING owes a drop only when it evicted the stream before the
+/// peer acknowledged the header, since the subscriber may never have read which group it
+/// carried; any other the subscriber sent knowing the group, or wanting none of it.
+fn accounts(version: Version, held: bool, writer: &mut Writer<crate::transport::boxed::SendStream, Version>) -> bool {
+	if !version.has_reliable_reset() {
+		return false;
+	}
+	match writer.poll_closed(&kio::Waiter::noop()) {
+		Poll::Ready(Err(err)) if !writer.preempted() => {
+			StreamError::from(&err) != StreamError::Evicted || writer.held_acked()
+		}
+		_ => held,
+	}
+}
+
 impl GroupServe {
-	/// Account for a group that failed with `err`: a reset can lose its header, and a group
-	/// that never got a stream has none, so the control stream names it with that error.
+	/// Account for a group that failed with `err`: one that never got a stream, or whose
+	/// header a reset may lose, is named on the control stream with that error.
 	fn settle_failed(&mut self, err: &Error) {
-		if !self.ctx.version.has_track_stream() {
+		if !self.ctx.version.has_track_stream() || self.accounted {
 			return;
 		}
 		let span = span(self.key, self.group.end());
@@ -10537,9 +10574,10 @@ mod serve_group_test {
 	}
 
 	/// A group whose stream wrote its FIN, and on lite-07 its GROUP_END, but goes stale before
-	/// the acknowledgement resets with OLD, so its bytes stop holding the send window, and a
-	/// stale drop names it. It is never served again, though the subscriber may have read the
-	/// first stream whole: the drop is final even when a later update widens the budget.
+	/// the acknowledgement resets with OLD, so its bytes stop holding the send window. Before
+	/// lite-07 a stale drop names it; lite-07's reset delivers the header instead, so a
+	/// subscriber that read the stream whole first is never told otherwise. It is never served
+	/// again: the reset is final even when a later update widens the budget.
 	#[kio::test]
 	async fn a_stale_unacknowledged_fin_is_never_served_again() {
 		for version in [Version::Lite06, Version::Lite07] {
@@ -10575,9 +10613,17 @@ mod serve_group_test {
 			write_group(&mut track, 1, 1000);
 			write_group(&mut track, 2, 6000);
 			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-			let dropped: &[(u64, u64)] = &[(0, 0)];
+			let reliable = version.has_reliable_reset();
+			let dropped: &[(u64, u64)] = match reliable {
+				true => &[],
+				false => &[(0, 0)],
+			};
 			assert_eq!(drops(&mut writer, &log, version).await, dropped, "{version}");
-			assert_eq!(session.resets(), [StreamError::Old.to_code()], "{version}");
+			assert_eq!(
+				group_resets(&session, version),
+				[(0, reliable, StreamError::Old)],
+				"{version}"
+			);
 
 			let opened = run.ctx.outcomes.opened.load(Ordering::Relaxed);
 			run.update(update(Duration::from_secs(10)));
@@ -10711,6 +10757,91 @@ mod serve_group_test {
 				false => crate::StreamError::Old,
 			};
 			assert_eq!(dropped, [(0..1, error)], "{version:?}");
+		}
+	}
+
+	/// Lite-07 names a stopped group stream in SUBSCRIBE_DROP only when the stop evicted it
+	/// before the peer acknowledged its GROUP header: otherwise the subscriber read which group
+	/// the stream carried, and stopped it knowing, as a duplicate or wanting none of it.
+	#[kio::test]
+	async fn lite07_names_only_an_eviction_before_the_header_is_acknowledged() {
+		let version = Version::Lite07;
+		for (stop, acked, named) in [
+			(crate::StreamError::Evicted, false, true),
+			(crate::StreamError::Evicted, true, false),
+			// What a subscriber stops a duplicate with.
+			(crate::StreamError::from(&Error::Duplicate), false, false),
+			(crate::StreamError::Cancel, false, false),
+		] {
+			let track = track::Producer::new(
+				Arc::new(broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed(),
+			);
+			let session = SinkSession::new(Log::default());
+			let streams = session.log.clone();
+			if !acked {
+				streams.ack(0);
+			}
+			let (mut run, mut writer, log) = lite07_run(session, track.subscribe(None));
+			let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(0).unwrap(), b"x".as_slice())
+				.unwrap();
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			assert_eq!(group_headers(&streams, version), [0], "the header went out");
+
+			streams.stop_sends(version.encode_stream_code(&stop));
+			// The next frame wakes the stream to the stop.
+			group
+				.write_frame(Timestamp::from_millis(1).unwrap(), b"y".as_slice())
+				.unwrap();
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			let dropped: &[(u64, u64)] = match named {
+				true => &[(0, 0)],
+				false => &[],
+			};
+			assert_eq!(drops(&mut writer, &log, version).await, dropped, "{stop:?} acked: {acked}");
+			assert_eq!(group_resets(&streams, version).len(), 1, "{stop:?}: the stop is answered");
+		}
+	}
+
+	/// A lite-07 group stream that fails after its header, whatever this side gives it up for,
+	/// resets still delivering that header, which accounts for the group: no drop names it. One
+	/// that fails before the transport took the header resets plainly, and a drop names it.
+	#[kio::test]
+	async fn lite07_a_reset_after_the_header_delivers_it_and_names_nothing() {
+		let version = Version::Lite07;
+		for written in [true, false] {
+			let track = track::Producer::new(
+				Arc::new(broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed(),
+			);
+			// A stream whose writes park keeps its header buffered.
+			let gate = kio::Producer::new(written);
+			let session = SinkSession::gated_uni(gate.consume());
+			let streams = session.log.clone();
+			let (mut run, mut writer, log) = lite07_run(session, track.subscribe(None));
+			let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(0).unwrap(), b"x".as_slice())
+				.unwrap();
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+
+			group.abort(Error::Evicted).unwrap();
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			match written {
+				true => {
+					assert_eq!(group_resets(&streams, version), [(0, true, StreamError::Evicted)]);
+					assert_eq!(drops(&mut writer, &log, version).await, []);
+				}
+				false => {
+					assert!(group_resets(&streams, version).is_empty(), "no header went out");
+					assert_eq!(streams.resets(), [StreamError::Evicted.to_code()]);
+					assert_eq!(drops(&mut writer, &log, version).await, [(0, 0)]);
+				}
+			}
 		}
 	}
 
@@ -10956,7 +11087,7 @@ mod serve_group_test {
 
 	/// A group missing its head on a track whose handler serves history is fetched from
 	/// that handler and served whole, as the source would: a cache only makes things
-	/// faster. Refused, it is named in SUBSCRIBE_DROP.
+	/// faster. Refused, its stream, already open, resets after its header, which names it.
 	#[kio::test]
 	async fn a_missing_head_is_fetched() {
 		for refuse in [false, true] {
@@ -11012,7 +11143,11 @@ mod serve_group_test {
 					assert!(head < tail);
 					assert_eq!(drops(&mut writer, &log, version).await, []);
 				}
-				true => assert_eq!(drops(&mut writer, &log, version).await, [(1, 1)]),
+				true => {
+					assert_eq!(drops(&mut writer, &log, version).await, []);
+					let resets = group_resets(&streams, version);
+					assert_eq!(resets.iter().map(|(key, held, _)| (*key, *held)).collect::<Vec<_>>(), [(1, true)]);
+				}
 			}
 		}
 	}
@@ -11109,7 +11244,7 @@ mod serve_group_test {
 				match sent {
 					Sent::Write(write) => bytes.extend(write),
 					Sent::Finish => fin = true,
-					Sent::Reset(_) => reset = true,
+					Sent::Reset(_) | Sent::ResetAt { .. } => reset = true,
 				}
 			}
 			(bytes, fin, reset)
@@ -11287,6 +11422,35 @@ mod serve_group_test {
 
 	/// Group `key`'s Group Stream on `log`'s session, as its Frame Start and the bytes after
 	/// its GROUP.
+	/// Each reset group stream's key, whether the reset still delivers exactly its GROUP
+	/// header, and its error, for the streams that wrote one.
+	fn group_resets(log: &Log, version: Version) -> Vec<(u64, bool, StreamError)> {
+		let mut streams = std::collections::BTreeMap::<_, (Vec<u8>, Option<(Option<u64>, u32)>)>::new();
+		for (id, sent) in log.trail() {
+			let stream = streams.entry(id).or_default();
+			match sent {
+				Sent::Write(bytes) => stream.0.extend(bytes),
+				Sent::Reset(code) => stream.1 = Some((None, code)),
+				Sent::ResetAt { offset, code } => stream.1 = Some((Some(offset), code)),
+				Sent::Finish => {}
+			}
+		}
+		streams
+			.into_values()
+			.filter_map(|(bytes, reset)| {
+				let (at, code) = reset?;
+				let mut buf = bytes.as_slice();
+				let group = crate::coding::decode_buf(&mut buf, version, |r, v| {
+					lite::DataType::decode(r, v)?;
+					lite::Group::decode(r, v)
+				})
+				.ok()?;
+				let header = (bytes.len() - buf.len()) as u64;
+				Some((group.key, at == Some(header), StreamError::from_code(code)))
+			})
+			.collect()
+	}
+
 	fn group_stream(log: &Log, version: Version, key: u64) -> Option<(u64, Vec<u8>)> {
 		let mut streams = std::collections::BTreeMap::<_, Vec<u8>>::new();
 		for (id, sent) in log.trail() {

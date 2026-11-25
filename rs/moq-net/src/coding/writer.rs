@@ -304,8 +304,14 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 	/// reset an acknowledged stream with a spurious Cancel.
 	pub fn poll_close(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let res = ready!(self.poll_closed(waiter));
-		self.stream = None;
+		self.release();
 		Poll::Ready(res)
+	}
+
+	/// Let go of a stream [`Self::poll_closed`] found closed, so the [`Drop`] fallback cannot
+	/// reset it.
+	pub(crate) fn release(&mut self) {
+		self.stream = None;
 	}
 
 	/// Set the priority within the stream's send group, or session-wide when ungrouped.
@@ -331,6 +337,26 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 			written: self.written,
 			billing: self.billing.take(),
 		}
+	}
+}
+
+#[cfg(feature = "async")]
+impl<V> Writer<crate::transport::boxed::SendStream, V> {
+	/// From now on, every reset of the stream, a preemption or a drop included, still delivers
+	/// the bytes it took so far. Call it once they are flushed.
+	pub(crate) fn hold(&mut self) {
+		debug_assert!(self.buffer.is_empty(), "held with unflushed bytes");
+		self.stream.as_mut().unwrap().hold();
+	}
+
+	/// Whether the peer acknowledged every byte [held](Self::hold), false when nothing is.
+	pub(crate) fn held_acked(&self) -> bool {
+		self.stream.as_ref().is_some_and(|stream| stream.held_acked())
+	}
+
+	/// Whether the session reset the stream to make room for a higher-ranked one.
+	pub(crate) fn preempted(&self) -> bool {
+		self.stream.as_ref().is_some_and(|stream| stream.preempted())
 	}
 }
 
@@ -541,6 +567,8 @@ mod tests {
 
 		fn reset(&mut self, _: u32) {}
 
+		fn reset_at(&mut self, _: &(), _: u32) {}
+
 		fn poll_closed(&self, _: &kio::Waiter) -> Poll<Result<(), Self::Error>> {
 			Poll::Ready(Err(self.clone()))
 		}
@@ -679,6 +707,10 @@ mod tests {
 		}
 
 		fn reset(&mut self, _: u32) {
+			self.0.lock().unwrap().reset = true;
+		}
+
+		fn reset_at(&mut self, _: &u64, _: u32) {
 			self.0.lock().unwrap().reset = true;
 		}
 
