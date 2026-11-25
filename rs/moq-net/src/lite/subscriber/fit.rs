@@ -48,7 +48,9 @@ impl Budget {
 		let form = version.into();
 		let half = (MAX_MESSAGE_SIZE - UPDATE_FIELDS) / 2;
 		let id = varint::size(next.saturating_add(count as u64), form).unwrap_or(9);
-		let room = MAX_MESSAGE_SIZE.saturating_sub(fields).saturating_sub(RANGE_FIELDS + id);
+		let room = MAX_MESSAGE_SIZE
+			.saturating_sub(fields)
+			.saturating_sub(RANGE_FIELDS + id);
 		Self {
 			bytes: half.min(room),
 			form,

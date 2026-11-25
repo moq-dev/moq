@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 import { insertRun, type Run, removeRun, runGaps } from "../internal.ts";
-import { MAX_MESSAGE_SIZE } from "./message.ts";
 import { Writer } from "../stream.ts";
 import { type Budget, budget as budgetOf, fit, fitAfter, UPDATE_FIELDS } from "./fit.ts";
+import { MAX_MESSAGE_SIZE } from "./message.ts";
 import { LiveRanges, rangeSize, SubscribeUpdate, type WireAnchor, type WireRange } from "./subscribe.ts";
 import { Version } from "./version.ts";
 

@@ -46,8 +46,8 @@ import {
 	ownClaim,
 } from "./announce.ts";
 import { closeViolation } from "./error.ts";
-import { Group } from "./group.ts";
 import * as Fit from "./fit.ts";
+import { Group } from "./group.ts";
 import { Probe } from "./probe.ts";
 import { ProbeLevel, Setup } from "./setup.ts";
 import { DataType, StreamId } from "./stream.ts";

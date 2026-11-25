@@ -3382,7 +3382,11 @@ mod tests {
 
 		active.live = lite::LiveRanges::new(Version::Lite07, &[first, lite::Range::span(Some(5), 0, None, None)]);
 		active.start = Some(5);
-		assert_eq!(active.feed_start(), Some((Some(5), true)), "a range from 5 may start below 10");
+		assert_eq!(
+			active.feed_start(),
+			Some((Some(5), true)),
+			"a range from 5 may start below 10"
+		);
 	}
 
 	/// A lite-07 range answered with no group to deliver lands none of its groups, so the copy's
@@ -4287,7 +4291,11 @@ mod tests {
 		};
 
 		let (probes, reasked) = join_probes(Some(&sub), &[join], &[demand]);
-		assert_eq!(probes, [join_probe(&join)], "an answer under 120 ms places no reader at 300 ms");
+		assert_eq!(
+			probes,
+			[join_probe(&join)],
+			"an answer under 120 ms places no reader at 300 ms"
+		);
 		assert!(reasked.is_empty());
 	}
 
@@ -7134,7 +7142,11 @@ mod tests {
 		finished.probe(&serve, true, &kio::Waiter::noop()).unwrap();
 		assert_eq!(finished.asks, [u64::MAX], "the reader asks the last key");
 		let res = ordered.next_item().now_or_never();
-		assert!(matches!(res, Some(Err(_))), "{:?}", res.map(|res| res.map(|item| item.is_some())));
+		assert!(
+			matches!(res, Some(Err(_))),
+			"{:?}",
+			res.map(|res| res.map(|item| item.is_some()))
+		);
 	}
 
 	/// Drive the subscriber with a peer's response bytes followed by FIN.
