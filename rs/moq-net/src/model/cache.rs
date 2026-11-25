@@ -786,6 +786,9 @@ struct EdgesInner {
 	// without looking at an edge that has nothing taken. A track's entry moves with its
 	// rank and age, under this lock.
 	taken: Mutex<BTreeMap<TakenKey, Weak<Track>>>,
+	// Held through a reclaim, so one that finds no taken frame listed never sheds a whole
+	// edge while another is still shedding the taken frames it popped.
+	reclaiming: Mutex<()>,
 }
 
 /// A track's place among its session's edges with taken frames: its [`EdgeKey`], then its
@@ -803,6 +806,7 @@ impl Edges {
 				moves: AtomicU64::new(0),
 				tracks: AtomicUsize::new(0),
 				taken: Mutex::default(),
+				reclaiming: Mutex::default(),
 			})
 		}))
 	}
@@ -845,6 +849,7 @@ impl Edges {
 		let Some(inner) = &self.0 else {
 			return;
 		};
+		let _reclaiming = inner.reclaiming.lock().unwrap_or_else(PoisonError::into_inner);
 		while self.excess().is_some() {
 			let track = {
 				let mut taken = inner.taken.lock().unwrap_or_else(PoisonError::into_inner);
@@ -972,7 +977,23 @@ impl Edges {
 			.store(inner.moves.fetch_add(1, Ordering::Relaxed), Ordering::Relaxed);
 		track.moves.fetch_add(1, Ordering::Relaxed);
 		drop(order);
+		self.unlist(track);
 		self.queue(track);
+	}
+
+	/// Drop `track`'s listing, if it has one: the edge whose readers took frames left it.
+	fn unlist(&self, track: &Arc<Track>) {
+		let Some(inner) = &self.0 else {
+			return;
+		};
+		if !track.taken.load(Ordering::SeqCst) {
+			return;
+		}
+		let mut taken = inner.taken.lock().unwrap_or_else(PoisonError::into_inner);
+		if let Some(key) = track.listed.lock().unwrap_or_else(PoisonError::into_inner).take() {
+			taken.remove(&(key, Arc::as_ptr(track) as usize));
+		}
+		track.taken.store(false, Ordering::SeqCst);
 	}
 }
 
@@ -985,6 +1006,22 @@ impl std::fmt::Debug for Edges {
 				.field("limit", &inner.limit)
 				.finish(),
 			None => f.debug_struct("Edges").finish_non_exhaustive(),
+		}
+	}
+}
+
+/// Tells a group's session when its readers take frames it still holds, while it is the live
+/// edge, so a reclaim past the session's budget visits only edges with taken frames.
+pub(super) struct Report {
+	track: Arc<Track>,
+	footprint: Arc<Footprint>,
+}
+
+impl Report {
+	/// A reader took a frame the group still holds.
+	pub(super) fn took(&self) {
+		if self.footprint.edge() {
+			self.track.took();
 		}
 	}
 }
@@ -1311,10 +1348,9 @@ impl Track {
 		state.shed_edge(excess);
 	}
 
-	/// A reader took a frame one of this track's groups still holds: list the track with its
-	/// session, once until a reclaim visits it. Called by [`super::pace::Pace`] only while
-	/// the session has a live-edge budget.
-	pub(super) fn took(self: &Arc<Self>) {
+	/// A reader took a frame the live edge still holds: list the track with its session, once
+	/// until a reclaim visits it or the edge moves.
+	fn took(self: &Arc<Self>) {
 		// SeqCst pairs with the fence in `shed_taken`: either this sees the track unlisted,
 		// or that shed sees the reader's progress.
 		if !self.taken.load(Ordering::SeqCst) && !self.taken.swap(true, Ordering::SeqCst) {
@@ -1324,7 +1360,7 @@ impl Track {
 
 	/// Shed the frames readers took of this track's live edge, unlisting it first, so a frame
 	/// a reader takes during the shed lists it again.
-	fn shed_taken(&self) {
+	pub(super) fn shed_taken(&self) {
 		self.taken.store(false, Ordering::SeqCst);
 		std::sync::atomic::fence(Ordering::SeqCst);
 		let Some(state) = self.state.upgrade() else {
@@ -1336,10 +1372,10 @@ impl Track {
 		state.shed_edge_taken(self.moves.load(Ordering::Relaxed));
 	}
 
-	/// Whether this track's session bounds its live edges, so its readers' progress matters
-	/// to a reclaim.
-	pub(super) fn bounded(&self) -> bool {
-		self.edges.0.is_some()
+	/// Whether the session lists this track as having taken frames to shed.
+	#[cfg(all(test, feature = "async"))]
+	pub(super) fn listed(&self) -> bool {
+		self.taken.load(Ordering::SeqCst)
 	}
 
 	/// How many times the live edge moved.
@@ -1392,6 +1428,16 @@ impl Track {
 	}
 
 	/// Charge a new group's fixed overhead, returning its [`Charge`].
+	/// How a group's reader progress reaches this track's session, `None` while it has no
+	/// live-edge budget to shed taken frames toward.
+	pub(super) fn report(self: &Arc<Self>, charge: &Charge) -> Option<Report> {
+		self.edges.0.as_ref()?;
+		Some(Report {
+			track: self.clone(),
+			footprint: charge.footprint.clone(),
+		})
+	}
+
 	pub(super) fn charge(self: &Arc<Self>) -> Charge {
 		self.pool.add(ENTRY_OVERHEAD);
 		self.written.fetch_add(ENTRY_OVERHEAD, Ordering::Relaxed);
@@ -1690,6 +1736,11 @@ pub(super) struct Footprint {
 }
 
 impl Footprint {
+	/// Whether the group bills its session as its track's live edge.
+	fn edge(&self) -> bool {
+		self.content.load(Ordering::Relaxed) & EDGE != 0
+	}
+
 	/// Count `n` more content bytes, returning whether they bill the session.
 	fn add(&self, track: &Track, n: u64) -> bool {
 		let prior = self.content.fetch_add(n, Ordering::Relaxed);

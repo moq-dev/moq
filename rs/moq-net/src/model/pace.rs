@@ -18,7 +18,7 @@
 //! waiting on the writer.
 
 use std::sync::{
-	Arc, Mutex, OnceLock, PoisonError,
+	Mutex, OnceLock, PoisonError,
 	atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::task::Waker;
@@ -59,9 +59,9 @@ pub(super) struct Pace {
 	parked: AtomicBool,
 	// The writer's waker: a group has one writer, so one slot, far smaller than a list.
 	writer: Mutex<Option<Waker>>,
-	// The track told when the fastest reader takes a frame the copy still holds, set only
-	// while its session has a live-edge budget to shed those frames toward.
-	edge: OnceLock<Arc<cache::Track>>,
+	// Told when the fastest reader takes a frame the copy still holds, set only while its
+	// session has a live-edge budget to shed those frames toward.
+	report: OnceLock<cache::Report>,
 }
 
 impl Pace {
@@ -74,17 +74,30 @@ impl Pace {
 		// SeqCst pairs with `park`: either this sees the writer parked, or it sees the read.
 		self.read.fetch_max(end, Ordering::SeqCst);
 		self.wake();
-		if let Some(track) = self.edge.get()
+		if let Some(report) = self.report.get()
 			&& end > self.front.load(Ordering::SeqCst)
 		{
-			track.took();
+			report.took();
 		}
 	}
 
-	/// Tell `track` whenever the fastest reader takes a frame this copy still holds, so its
-	/// session, past its live-edge budget, visits only the edges with taken frames to shed.
-	pub fn report(&self, track: Arc<cache::Track>) {
-		let _ = self.edge.set(track);
+	/// Report reader progress through `report`, so the copy's session, past its live-edge
+	/// budget, visits only the edges with taken frames to shed.
+	pub fn report(&self, report: cache::Report) {
+		let _ = self.report.set(report);
+	}
+
+	/// Report the taken frames the copy still holds again, as a frame read does: a shed that
+	/// had to leave some now may take them.
+	pub fn retake(&self) {
+		// SeqCst pairs with the fence a reclaim's shed takes: either that shed sees what made
+		// the frames sheddable, or this sees the track unlisted.
+		std::sync::atomic::fence(Ordering::SeqCst);
+		if let Some(report) = self.report.get()
+			&& self.read() > self.front.load(Ordering::SeqCst)
+		{
+			report.took();
+		}
 	}
 
 	/// Wake the writer, if parked, since what it waits on changed.

@@ -746,6 +746,8 @@ impl Plain {
 struct Inflate {
 	release: Arc<Release>,
 	plain: Arc<Plain>,
+	// The group copy's reader progress, told when inflating lets a reclaim shed more slices.
+	pace: Arc<Pace>,
 	// Local index of the first slice: the copy's inflated length when the read took them.
 	from: usize,
 	// The first frame the read needs, which shedding the inflated copy stops short of.
@@ -762,6 +764,8 @@ impl Inflate {
 	/// lock held, since settling the debt takes the track's.
 	fn run(&self, meter: &stats::Meter) {
 		self.inflate(meter);
+		// Slices a raw reader took that a taken-frame shed kept for this copy may go now.
+		self.pace.retake();
 		// The inflated bytes are written like a producer's, so they pay the pool's debt the
 		// same way: a finished track has no writer left to settle it.
 		self.plain.bill.settle();
@@ -1294,6 +1298,7 @@ impl GroupState {
 				.clone()
 				.ok_or_else(|| self.outcome.error().cloned().unwrap_or(Error::Dropped))?,
 			plain: flate.plain.clone(),
+			pace: self.pace.clone(),
 			from,
 			keep: first,
 			slices: self.entries(from, last + 1).cloned().collect(),
@@ -1852,10 +1857,10 @@ impl Producer {
 					charge.extra(),
 				)));
 			}
-			state.charge = charge;
-			if cache.bounded() {
-				state.pace.report(cache.clone());
+			if let Some(report) = cache.report(&charge) {
+				state.pace.report(report);
 			}
+			state.charge = charge;
 			(state.log.reader(), state.pace.clone())
 		};
 		let alive = Arc::new(Alive {

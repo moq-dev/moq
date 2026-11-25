@@ -27870,17 +27870,47 @@ mod test {
 		));
 
 		let before = broadcast.edges.used();
-		let moves = producer.state.read().cache.moves();
-		producer.state.write().ok().expect("open").shed_edge_taken(moves);
+		let cache = producer.state.read().cache.clone();
+		cache.shed_taken();
 		let after = broadcast.edges.used();
 		assert!(after <= before, "the shed billed more: {before} -> {after}");
+		assert!(!producer.state.read().cache.listed(), "the reclaim visit unlisted it");
 		for _ in 1..4 {
 			assert!(
 				plain.read_frame().await.unwrap().is_some(),
 				"a slice the plain copy needed went"
 			);
 		}
+		// Decoding the rest made the slices it kept sheddable, so the edge is listed again.
+		assert!(producer.state.read().cache.listed(), "the kept slices went unreported");
 		drop(group);
+	}
+
+	/// Only reads of the live edge list its track for a reclaim, and the listing goes when the
+	/// edge moves: a reclaim never visits a track for frames taken from an older group.
+	#[test]
+	#[cfg(feature = "async")]
+	fn only_live_edge_reads_list_a_track() {
+		let pool = cache::Pool::unbounded();
+		let broadcast = session_broadcast(&pool, Some(1 << 30));
+		let producer = Producer::new(broadcast, "test", Info::timed());
+		let listed = || producer.state.read().cache.listed();
+		let mut group = producer.append_next().unwrap();
+		let mut reader = producer.consume().peek_group(group.start).expect("cached");
+		for _ in 0..2 {
+			group
+				.write_frame(group.key_time(), bytes::Bytes::from(vec![0u8; 100]))
+				.unwrap();
+		}
+		assert!(!listed(), "listed before any read");
+		assert!(matches!(reader.read_frame().now_or_never(), Some(Ok(Some(_)))));
+		assert!(listed(), "a live-edge read went unreported");
+
+		let next = producer.append_next().unwrap();
+		assert!(!listed(), "the listing outlived the edge");
+		assert!(matches!(reader.read_frame().now_or_never(), Some(Ok(Some(_)))));
+		assert!(!listed(), "a read behind the edge listed the track");
+		drop((group, next));
 	}
 
 	/// The stored slices a publisher of a compressed group would send.
