@@ -30,6 +30,10 @@ holds a tied frame first computes Object IDs and timestamps the origin never
 sent. A copy must serve the received wire values, or refuse to serve what it
 cannot prove matches them.
 
+- A `cts` track's Group Starts are decode-order times while HLS/DASH grid
+  lines are presentation times (`rs/moq-hls/src/export/grid.rs`). When `cts`
+  encoders land, decide which time segment placement uses on a `cts` track and
+  state it in `drafts/draft-lcurley-moq-hang.md`.
 - The Draft-18..22 shim that keeps legacy `TIMESCALE` (`0x08`) and dense
   Object IDs for mixed-version rollouts stays, marked for deletion at the next
   bump.

@@ -583,6 +583,9 @@ ROUTE_END Message {
   Route ID (i),
 }
 ~~~
+A claim is under the route named by the `ANNOUNCE_FLOOR` closing the batch that started it, and stays under it (naming it in another route's batch is a `PROTOCOL_VIOLATION`).
+`ROUTE_END` retires the Route ID and the Announce ID of every claim under the route: the publisher sends no `ANNOUNCE_END` for them, and the receiver drops them at once.
+It says nothing about whether those claims are served elsewhere.
 
 ### DEAD {#dead}
 ~~~
@@ -1064,6 +1067,7 @@ This document has no IANA actions.
 - Capped `Message Length` at 65,535 bytes for all messages except `FRAME`; `SETUP` exceeding the cap MUST close with `PROTOCOL_VIOLATION` (removing the separate parameter count cap).
 - Decode errors on Setup, Announce, and bidirectional streams close the session with `PROTOCOL_VIOLATION`.
 - Added draft-14 `CLIENT_SETUP`/`SERVER_SETUP` fallback negotiation when subprotocol negotiation is unavailable.
+- QMux bindings negotiate `qmux-VV.moq-lite-xx` (or bare `qmux-VV`) instead of `moq-lite-xx`.
 - Added SETUP `Implementation` (`0x6`) and client-only `Token` (`0x7`) parameters.
 - `Report`-level publishers ignore `PROBE` targets instead of resetting the stream.
 - `GOAWAY` recipients MAY keep opening requests until migrated; senders MAY reset with `GOING_AWAY`.

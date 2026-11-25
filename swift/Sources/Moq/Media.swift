@@ -240,14 +240,16 @@ public enum Media {
             self.ffi = ffi
         }
 
-        /// Decode `group` with the track's container, as each frame lands.
+        /// Decode `group` with the catalog rendition's container and media role, as each frame lands.
         ///
-        /// Pair it with ``Moq/TrackConsumer/recvGroup()`` to read media in arrival order: frame
+        /// Only the rendition's role and container are used, since `group` is already the track's;
+        /// the role tells an endpoint marker from a frame. Pair it with ``Moq/TrackConsumer/recvGroup()`` to read media in arrival order: frame
         /// timestamps are container media time, not the transport's. Which groups arrive, and how
         /// long a stalled one stays readable, is the subscription's `delay.max`. Takes over
         /// `group`, whose handle is closed afterward; throws if it has already read a frame.
-        public convenience init(group: Moq.GroupConsumer, container: Container) throws {
-            self.init(try MoqMediaGroupConsumer(group: group.ffi, container: container))
+        public convenience init(group: Moq.GroupConsumer, rendition: Rendition) throws {
+            try checkRendition(rendition)
+            self.init(try MoqMediaGroupConsumer(group: group.ffi, rendition: rendition))
         }
 
         /// The start of this group within the track.

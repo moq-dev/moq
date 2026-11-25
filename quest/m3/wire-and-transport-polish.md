@@ -1,9 +1,8 @@
-# [S] Polish wire, transport, qmux config, draft, and HLS escaping edge cases
+# [S] Polish wire, transport, qmux config, and HLS escaping edge cases
 
 ## Goal
 
-`FetchServeRun` closes streams cleanly with FIN, `draft-lcurley-moq-ietf.md`
-matches the implemented compression and property limits, `moq-tokio` exposes
+`FetchServeRun` closes streams cleanly with FIN, `moq-tokio` exposes
 stream TLS certificates and rejects WebTransport requests gracefully, `qmux`
 validates rate caps consistently, and `moq-hls` escapes DASH `$` templates and
 sanitizes playlist query strings.
@@ -31,6 +30,5 @@ severity bugs).
    MPD query strings (per ISO/IEC 23009-1 template substitution) and sanitize
    newlines/control characters in `query` in `render_media`.
 
-Public API: none. Wire: none (clean FIN instead of reset on fetch completion;
-draft text synced to implementation). Add unit tests for each fix and run
-`just drafts check`.
+Public API: none. Wire: none (clean FIN instead of reset on fetch completion).
+Add unit tests for each fix.

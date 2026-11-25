@@ -127,6 +127,13 @@ impl ContainerTrait for Container {
 		}
 	}
 
+	fn check(&self, frame: &Frame) -> Result<(), Self::Error> {
+		match self {
+			Self::Raw(kind) => raw::Wire(*kind).check(frame),
+			_ => Ok(()),
+		}
+	}
+
 	fn finish_group(
 		&self,
 		group: &mut moq_net::group::Producer,

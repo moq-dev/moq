@@ -263,6 +263,14 @@ pub trait Container {
 		Ok(())
 	}
 
+	/// Refuse a frame this format has no encoding for.
+	///
+	/// A [`Producer`] checks each frame on entry, before it cuts a group or buffers anything, so a
+	/// refused frame leaves the open group and the buffered frames as they were.
+	fn check(&self, _frame: &Frame) -> Result<(), Self::Error> {
+		Ok(())
+	}
+
 	/// Write any format-specific endpoint before the producer closes the group.
 	fn finish_group(
 		&self,

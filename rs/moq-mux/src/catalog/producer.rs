@@ -2260,10 +2260,10 @@ mod test {
 		assert!(audio(&catalog).is_empty());
 
 		config.container = Container::Raw;
-		let net = broadcast.create_track("audio1", info).unwrap();
+		let net = broadcast.create_track("audio0", info).unwrap();
 		let wire = crate::catalog::hang::Container::try_from(&config).unwrap();
 		let _audio = catalog.audio(net, wire, config).unwrap();
-		assert_eq!(audio(&catalog), ["audio1"]);
+		assert_eq!(audio(&catalog), ["audio0"]);
 	}
 
 	#[tokio::test(start_paused = true)]

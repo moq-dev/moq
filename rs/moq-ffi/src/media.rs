@@ -1638,6 +1638,14 @@ impl MoqRendition {
 		.unwrap_or_default()
 	}
 
+	/// The media role its container decodes for, which tells an endpoint marker from a frame.
+	fn kind(&self) -> moq_mux::container::Kind {
+		match self {
+			Self::Video { .. } => moq_mux::container::Kind::Video,
+			Self::Audio { .. } => moq_mux::container::Kind::Audio,
+		}
+	}
+
 	/// Split into the broadcast reference and its instance, the track name, and the container.
 	pub(crate) fn into_parts(self) -> (Option<String>, Option<String>, String, MoqContainer) {
 		let (id, broadcast, instance, track, container) = match self {
@@ -2084,10 +2092,7 @@ impl MoqMediaTrackConsumer {
 			rendition,
 			subscription,
 		} = config;
-		let kind = match &rendition {
-			MoqRendition::Audio { .. } => moq_mux::container::Kind::Audio,
-			MoqRendition::Video { .. } => moq_mux::container::Kind::Video,
-		};
+		let kind = rendition.kind();
 		let warmup = rendition.warmup();
 		let (reference, instance, name, container) = rendition.into_parts();
 		// Parse the container before resolving or subscribing so we don't leave a dangling
@@ -2118,17 +2123,20 @@ impl MoqMediaTrackConsumer {
 
 #[uniffi::export]
 impl MoqMediaGroupConsumer {
-	/// Decode `group` with the track's container, as each frame lands.
+	/// Decode `group` with the catalog rendition's container and media role, as each frame lands.
 	///
-	/// Pair it with [`MoqTrackConsumer::recv_group`](crate::consumer::MoqTrackConsumer::recv_group)
-	/// to read media in arrival order: frame timestamps are container media time, not the
-	/// transport's. Which groups arrive, and how long a stalled one stays readable, is the
+	/// Only the rendition's role and container are used, since `group` is already the track's; the
+	/// role tells a video or audio endpoint marker from a frame. Pair it with
+	/// [`MoqTrackConsumer::recv_group`](crate::consumer::MoqTrackConsumer::recv_group) to read media
+	/// in arrival order: frame timestamps are container media time, not the transport's. Which groups arrive, and how long a stalled one stays readable, is the
 	/// subscription's `delay.max`. Takes over `group`, whose handle is closed afterward; errors
 	/// if it has already read a frame.
 	#[uniffi::constructor]
-	pub fn new(group: &MoqGroupConsumer, container: MoqContainer) -> Result<Arc<Self>, MoqError> {
+	pub fn new(group: &MoqGroupConsumer, rendition: MoqRendition) -> Result<Arc<Self>, MoqError> {
+		let kind = rendition.kind();
+		let (_, _, _, container) = rendition.into_parts();
 		// Parse the container first, so a bad init leaves the raw group readable.
-		let media = media_container(container, moq_mux::container::Kind::Data)?;
+		let media = media_container(container, kind)?;
 		let (group, driver) = group.take()?;
 		Ok(Arc::new(Self::from_inner(group, media, driver)))
 	}
@@ -2147,10 +2155,11 @@ impl MoqMediaGroupConsumer {
 			start,
 			options,
 		} = config;
+		let kind = rendition.kind();
 		let (reference, instance, name, container) = rendition.into_parts();
 		// Parse the container before fetching so invalid CMAF init data does not leave a
 		// dynamic group request waiting for a consumer that can never read it.
-		let media = media_container(container, moq_mux::container::Kind::Data)?;
+		let media = media_container(container, kind)?;
 		let resolved = broadcast
 			.resolve_inner(reference.as_deref(), instance.as_deref())
 			.await?;

@@ -1454,6 +1454,12 @@ def _legacy(timestamp_us: int, payload: bytes) -> bytes:
 _LEGACY = cast(moq.media.Container, moq.media.Container.LEGACY())
 
 
+def _audio(container: moq.media.Container = _LEGACY) -> moq.media.Audio:
+    return moq.media.Audio(
+        codec="opus", description=None, sample_rate=48_000, channel_count=2, bitrate=None, container=container
+    )
+
+
 async def _recv_raw(track: moq.TrackConsumer) -> moq.GroupConsumer:
     group = await asyncio.wait_for(track.recv_group(), timeout=5.0)
     assert group is not None
@@ -1461,7 +1467,7 @@ async def _recv_raw(track: moq.TrackConsumer) -> moq.GroupConsumer:
 
 
 async def _recv_media(track: moq.TrackConsumer) -> moq.media.GroupConsumer:
-    return moq.media.GroupConsumer(await _recv_raw(track), _LEGACY)
+    return moq.media.GroupConsumer(await _recv_raw(track), "audio", _audio())
 
 
 async def test_container_group_decodes_arrival_order():
@@ -1508,12 +1514,12 @@ async def test_container_group_takes_over_an_unread_group():
     raw = await _recv_raw(consumer)
     assert await raw.read_frame() is not None
     with pytest.raises(moq.Error.AlreadyCommitted):
-        moq.media.GroupConsumer(raw, _LEGACY)
+        moq.media.GroupConsumer(raw, "audio", _audio())
 
     group = track.append_group(moq.Timestamp(2, 1_000))
     group.write_frame(_legacy(1_020_000, b"b"), moq.Timestamp(2, 1_000))
     raw = await _recv_raw(consumer)
-    media = moq.media.GroupConsumer(raw, _LEGACY)
+    media = moq.media.GroupConsumer(raw, "audio", _audio())
     with pytest.raises(moq.Error.Cancelled):
         await raw.read_frame()
     frame = await asyncio.wait_for(anext(media), timeout=5.0)
@@ -1531,8 +1537,8 @@ async def test_container_group_fails_loudly():
     group.write_frame(b"\x40", moq.Timestamp(1, 1_000))
     raw = await _recv_raw(consumer)
     with pytest.raises(moq.Error.Codec):
-        moq.media.GroupConsumer(raw, cast(moq.media.Container, moq.media.Container.CMAF(init=b"")))
-    media = moq.media.GroupConsumer(raw, _LEGACY)
+        moq.media.GroupConsumer(raw, "audio", _audio(cast(moq.media.Container, moq.media.Container.CMAF(init=b""))))
+    media = moq.media.GroupConsumer(raw, "audio", _audio())
     # UniFFI rebinds the error class, hiding its Exception base from pyright.
     with pytest.raises(moq.Error):  # type: ignore[attr-defined]
         await asyncio.wait_for(anext(media), timeout=5.0)

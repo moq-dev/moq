@@ -989,7 +989,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 		t.Fatalf("frame = %+v, want payload=%q ts=1000000", frame, payload)
 	}
 
-	// The same group, received raw in arrival order and decoded with the container.
+	// The same group, received raw in arrival order and decoded with the rendition.
 	track, err := bc.SubscribeTrack(ctx, trackName, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1002,7 +1002,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 	if group == nil {
 		t.Fatal("expected a group")
 	}
-	decoded, err := moqmedia.NewGroupConsumer(group, audio.Container)
+	decoded, err := moqmedia.NewGroupConsumer(group, moqmedia.AudioRendition(trackName, audio))
 	if err != nil {
 		t.Fatal(err)
 	}

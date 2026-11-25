@@ -73,6 +73,76 @@ function channelConfig(channelCount: number): number {
 	throw new Error(`no AAC channel configuration for ${channelCount} channels`);
 }
 
+// The sampling frequency table by index, from the MPEG-4 AudioSpecificConfig spec.
+const SAMPLE_RATE_TABLE: readonly number[] = Object.keys(SAMPLE_RATE_INDEX)
+	.map(Number)
+	.sort((a, b) => SAMPLE_RATE_INDEX[a] - SAMPLE_RATE_INDEX[b]);
+
+// The channel count each channelConfiguration names (ISO 14496-3 Table 1.19); 0 defers to a
+// program config element, and 8, 9, 10, and 15 are reserved.
+const CHANNEL_COUNTS: Readonly<Record<number, number>> = {
+	1: 1,
+	2: 2,
+	3: 3,
+	4: 4,
+	5: 5,
+	6: 6,
+	7: 8,
+	11: 7,
+	12: 8,
+	13: 24,
+	14: 8,
+};
+
+/** The output an AudioSpecificConfig decodes to. */
+export interface Config {
+	/** The decoded rate: under SBR, the extension rate rather than the core's. */
+	sampleRate: number;
+	/** The decoded channels: two under PS, which a mono core carries. */
+	numberOfChannels: number;
+}
+
+/**
+ * Read the decoded sample rate and channel count from an AudioSpecificConfig (ISO 14496-3 §1.6.2.1).
+ *
+ * Mirrors `aac::Config::parse` in rs/moq-mux for explicitly signaled SBR and PS. A backward-compatible
+ * sync extension isn't followed, so it reports the core. Undefined when the config is truncated,
+ * names a reserved rate or channelConfiguration, or takes its channels from a program config element.
+ */
+export function parseConfig(asc: Uint8Array): Config | undefined {
+	let bit = 0;
+	const read = (n: number): number | undefined => {
+		if (bit + n > asc.byteLength * 8) return undefined;
+		let value = 0;
+		for (const end = bit + n; bit < end; bit++) value = value * 2 + ((asc[bit >> 3] >> (7 - (bit & 7))) & 1);
+		return value;
+	};
+	// audioObjectType, escaped to 32 and above by 31 and a 6-bit extension.
+	const objectType = (): number | undefined => {
+		const type = read(5);
+		if (type !== 31) return type;
+		const extension = read(6);
+		return extension === undefined ? undefined : 32 + extension;
+	};
+	// samplingFrequencyIndex, escaped to an explicit 24-bit rate by 15.
+	const sampleRate = (): number | undefined => {
+		const index = read(4);
+		if (index !== 15) return index === undefined ? undefined : SAMPLE_RATE_TABLE[index];
+		const rate = read(24);
+		return rate === 0 ? undefined : rate;
+	};
+
+	const type = objectType();
+	let rate = sampleRate();
+	const channelConfig = read(4);
+	if (type === undefined || channelConfig === undefined) return undefined;
+	// Explicit SBR (5) or PS (29) plays at the extension rate that follows.
+	if (type === 5 || type === 29) rate = sampleRate();
+	const numberOfChannels = type === 29 ? 2 : CHANNEL_COUNTS[channelConfig];
+	if (rate === undefined || numberOfChannels === undefined) return undefined;
+	return { sampleRate: rate, numberOfChannels };
+}
+
 /**
  * Build the AAC-LC AudioSpecificConfig that decoders need when frames are raw (no ADTS header).
  *

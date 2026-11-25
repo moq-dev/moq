@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { audioSpecificConfig, objectType, pickRate, SAMPLE_RATES, supportsRate } from "./aac";
+import { audioSpecificConfig, objectType, parseConfig, pickRate, SAMPLE_RATES, supportsRate } from "./aac";
 
 describe("pickRate", () => {
 	// 44.1kHz is in the AAC table, unlike Opus, so it must survive untouched.
@@ -84,5 +84,28 @@ describe("objectType", () => {
 		for (const codec of codecs) {
 			expect(objectType(codec)).toBeUndefined();
 		}
+	});
+});
+
+describe("parseConfig", () => {
+	it("reads AAC-LC", () => {
+		expect(parseConfig(new Uint8Array([0x12, 0x10]))).toEqual({ sampleRate: 44100, numberOfChannels: 2 });
+	});
+
+	it("reads the escape form audioSpecificConfig writes", () => {
+		expect(parseConfig(audioSpecificConfig(44101, 8))).toEqual({ sampleRate: 44101, numberOfChannels: 8 });
+	});
+
+	// A 24 kHz core under explicit SBR or PS plays at the 48 kHz extension rate, PS in stereo.
+	it("reports explicit SBR and PS output", () => {
+		expect(parseConfig(new Uint8Array([0x2b, 0x11, 0x88]))).toEqual({ sampleRate: 48000, numberOfChannels: 2 });
+		expect(parseConfig(new Uint8Array([0xeb, 0x09, 0x88]))).toEqual({ sampleRate: 48000, numberOfChannels: 2 });
+	});
+
+	it("refuses what it can't read", () => {
+		expect(parseConfig(new Uint8Array([0x12]))).toBeUndefined();
+		// A program config element's channels, and a reserved channelConfiguration.
+		expect(parseConfig(new Uint8Array([0x12, 0x00]))).toBeUndefined();
+		expect(parseConfig(new Uint8Array([0x12, 0x40]))).toBeUndefined();
 	});
 });
