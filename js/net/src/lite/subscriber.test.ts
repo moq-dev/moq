@@ -3258,6 +3258,46 @@ test("a lite-07 range answered empty is reported only for a range reaching its t
 	}
 });
 
+// A demand range added once the live feed started leaves its declared start standing while
+// unanswered when it can't start below it, rather than make it pending for a round trip. Mirrors the
+// Rust `a_range_added_past_the_feed_start_keeps_it_declared`.
+test("a range added past the feed start keeps it declared", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, toHop(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	const declared: (bigint | null | undefined)[] = [];
+	const startTrack = hooks.startTrack;
+	hooks.startTrack = (producer, served) => {
+		declared.push(served.start);
+		startTrack(producer, served);
+	};
+	const track = broadcast.track("video").subscribe({ ranges: [{ start: 10n, end: 12n }] });
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version);
+		const request = await opened(1);
+		const sent = new Reader(request.outbound, undefined, version);
+		expect(await sent.u53()).toBe(StreamId.Subscribe);
+		await Subscribe.decode(sent, version);
+		await request.reading;
+		await respond(request, version, [
+			{ start: answer(version, 10n, 0n, { position: { group: 12n, frame: 0 }, ended: false }) },
+		]);
+		await drainReactions();
+		expect(declared.at(-1)).toBe(10n);
+		track.update({ ranges: [{ start: 10n, end: 12n }, { start: 20n }] });
+		const added = await SubscribeUpdate.decode(sent, version);
+		expect(added.ranges).toEqual([{ start: { time: 20n } }]);
+		expect(declared.at(-1)).toBe(10n);
+	} finally {
+		hooks.startTrack = startTrack;
+		track.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
 // A placed join under a max age may be answered past groups the publisher still holds, stale for
 // it alone, so its answer places no history reader at its group; one with no max age skips nothing.
 // Mirrors the Rust `only_an_unbounded_placed_join_answers_for_history`.

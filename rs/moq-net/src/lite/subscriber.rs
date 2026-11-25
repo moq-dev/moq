@@ -3352,6 +3352,39 @@ mod tests {
 		assert_eq!(active.never_serves(None), None, "nothing to go live at");
 	}
 
+	/// A demand range added once the live feed started leaves its declared start standing while
+	/// unanswered when it can't start below it: from a time at or past it, or at the latest
+	/// group. Only one that may start lower makes the start pending again.
+	#[kio::test]
+	async fn a_range_added_past_the_feed_start_keeps_it_declared() {
+		let tail = kio::Producer::new(Tail::default());
+		let Sub::Active(mut active) = feed_sub(&tail).await else {
+			unreachable!("feed_sub is active")
+		};
+		let first = lite::Range::span(Some(10), 0, None, None);
+		active.live = lite::LiveRanges::new(Version::Lite07, &[first]);
+		active.starts = [(0, Some(10))].into();
+		active.started = Some(Some(10));
+		active.start = Some(10);
+		assert_eq!(active.feed_start(), Some((Some(10), false)));
+
+		let latest = lite::Range {
+			start: Some(lite::Anchor::Live {
+				min: Some(Duration::ZERO),
+				max: Some(Duration::ZERO),
+			}),
+			end: None,
+		};
+		for added in [lite::Range::span(Some(20), 0, None, None), latest] {
+			active.live = lite::LiveRanges::new(Version::Lite07, &[first, added]);
+			assert_eq!(active.feed_start(), Some((Some(10), false)), "{added:?}");
+		}
+
+		active.live = lite::LiveRanges::new(Version::Lite07, &[first, lite::Range::span(Some(5), 0, None, None)]);
+		active.start = Some(5);
+		assert_eq!(active.feed_start(), Some((Some(5), true)), "a range from 5 may start below 10");
+	}
+
 	/// A lite-07 range answered with no group to deliver lands none of its groups, so the copy's
 	/// ordered reads hold no later group back for its time, within the budget it was asked
 	/// under. Only one whose end takes in its time says so: one ending before it may still have
@@ -11601,20 +11634,31 @@ impl SubStream {
 
 	/// Lite-07's declaration of where the live feed starts: the lowest start the demand's live
 	/// ranges report, or the requested floor, pending, while SUBSCRIBE_START or a range's
-	/// SUBSCRIBE_START has yet to say where one starts. `None` before lite-07, whose one start
-	/// describes only the SUBSCRIBE's demand, and while the ranges ask only for fills.
+	/// SUBSCRIBE_START has yet to say where one starts. A range added once the feed started
+	/// leaves it standing while it can't start below it (see [`starts_past`]). `None` before
+	/// lite-07, whose one start describes only the SUBSCRIBE's demand, and while the ranges ask
+	/// only for fills.
 	fn feed_start(&self) -> Option<(Option<u64>, bool)> {
 		if !self.live.reports_starts() || self.demand.is_none() {
 			return None;
 		}
+		let feeding = || self.live.iter().filter(|(id, _)| self.feeds(*id));
 		let mut start: Option<u64> = None;
-		for (id, _) in self.live.iter().filter(|(id, _)| self.feeds(*id)) {
+		let mut unanswered = false;
+		for (id, _) in feeding() {
 			match self.starts.get(&id) {
 				// A range with no group there serves nothing to start from.
 				Some(Some(at)) => start = Some(start.map_or(*at, |start| start.min(*at))),
 				Some(None) => {}
-				None => return Some((self.start, true)),
+				None => unanswered = true,
 			}
+		}
+		let lower = |range: &lite::Range| match (self.started, start) {
+			(Some(_), Some(start)) => !starts_past(range, start),
+			_ => true,
+		};
+		if unanswered && feeding().any(|(id, range)| !self.starts.contains_key(&id) && lower(range)) {
+			return Some((self.start, true));
 		}
 		Some((start, self.started.is_none()))
 	}
@@ -11883,6 +11927,17 @@ impl SubStream {
 			.filter(|id| !self.probe_ids.contains(id))
 			.eq(before);
 		Ok((edit, changed))
+	}
+}
+
+/// Whether the live range `range`, once answered, starts at or past group `start`, which the
+/// live feed already serves: from a time at or past it, as the group containing that time is,
+/// from a join placed there, or at the latest group, which no group the feed serves is past.
+fn starts_past(range: &lite::Range, start: u64) -> bool {
+	match range.start {
+		Some(lite::Anchor::Absolute(at) | lite::Anchor::Joined { at, .. }) => at.group >= start,
+		Some(lite::Anchor::Live { min, .. }) => min == Some(Duration::ZERO),
+		Some(lite::Anchor::Time(_)) | None => false,
 	}
 }
 
@@ -12652,7 +12707,7 @@ impl TrackServe {
 							// start returns to the demand that produced it (see
 							// `SubStream::requested`).
 							// Lite-07 declares from each live range's reported start instead, pending
-							// while a range the update adds awaits SUBSCRIBE_START.
+							// while a range the update adds that may start lower awaits SUBSCRIBE_START.
 							if active.live.reports_starts() {
 								active.declare(producer);
 							} else if start_moved {

@@ -3021,7 +3021,7 @@ export class Subscriber {
 						entry.tail.demand(gap.start, gap.end);
 				entry.fillGroups = fitted.fills;
 				entry.floor = span.start;
-				// Pending while a range the update adds awaits SUBSCRIBE_START.
+				// Pending while a range the update adds awaits SUBSCRIBE_START, if it may start lower.
 				this.#declare(entry);
 			} else {
 				const before = wireSpan(placedAsTimes(last.ranges, last.placed));
@@ -3119,18 +3119,22 @@ export class Subscriber {
 
 		let start: bigint | null = null;
 		let pending = entry.start === undefined;
-
-		for (const id of entry.live.ids()) {
-			// Only the demand's ranges say where the live feed starts, not a fill's or a probe.
-			if (entry.fillIds.has(id) || entry.probeIds.has(id)) continue;
-			if (!entry.starts.has(id)) {
-				pending = true;
-				break;
-			}
+		// Only the demand's ranges say where the live feed starts, not a fill's or a probe.
+		const feeding = [...entry.live.ids()].filter((id) => !entry.fillIds.has(id) && !entry.probeIds.has(id));
+		for (const id of feeding) {
+			if (!entry.starts.has(id)) continue;
 			const at = entry.starts.get(id);
 			// A range with no group there serves nothing to start from.
 			if (at !== undefined && (start === null || at < start)) start = at;
 		}
+		// One still unanswered leaves the start standing once the feed started only while it can't
+		// start below it.
+		const lowest = start;
+		const lower = (id: bigint) => {
+			const range = entry.live.get(id);
+			return lowest === null || range === undefined || !startsPast(range, lowest);
+		};
+		if (feeding.some((id) => !entry.starts.has(id) && lower(id))) pending = true;
 		const next = { start: pending ? undefined : start, requested: entry.floor };
 		const last = entry.declared;
 		if (last && last.start === next.start && last.requested === next.requested) return;
@@ -3845,6 +3849,17 @@ function probe(time: bigint): WireRange {
 // Whether two lists of asks, each a time, are the same.
 function sameAsks(a: readonly bigint[], b: readonly bigint[]): boolean {
 	return a.length === b.length && a.every((time, i) => time === b[i]);
+}
+
+// Whether the live range `range`, once answered, starts at or past group `start`, which the live feed
+// already serves: from a time at or past it, as the group containing that time is, from a join placed
+// there, or at the latest group, which no group the feed serves is past. Mirrors the Rust `starts_past`.
+function startsPast(range: WireRange, start: bigint): boolean {
+	const from = range.start;
+	if (from?.time !== undefined) return from.time >= start;
+	if (from?.absolute !== undefined) return from.absolute >= start;
+	if (from?.joined !== undefined) return from.joined.absolute >= start;
+	return from?.live?.min === 0;
 }
 
 // Whether a lite-07 range with no group to deliver says its publisher held none at or before its
