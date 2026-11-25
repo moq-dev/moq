@@ -3727,7 +3727,8 @@ export class Subscriber {
 		const departed = departedOf(producer);
 		for (let i = timelineIndex(departed, key + 1n); i < departed.length; i++) {
 			const gone = departed[i];
-			if ((held !== undefined && gone.start >= held) || (end !== undefined && gone.start >= end)) return undefined;
+			if ((held !== undefined && gone.start >= held) || (end !== undefined && gone.start >= end))
+				return undefined;
 			if (this.#judges(gone.start, scope)) return gone;
 		}
 		return undefined;
@@ -4271,7 +4272,9 @@ export class Subscriber {
 				// looks it up finds it from the group held instead, as for any group the cache let go of.
 				const departed = departedOf(producer);
 				const gone =
-					below === undefined || holdings.looksUp?.() ? undefined : departed[timelineIndex(departed, below + 1n)];
+					below === undefined || holdings.looksUp?.()
+						? undefined
+						: departed[timelineIndex(departed, below + 1n)];
 				if (gone && gone.start <= time) return { at: gone.start };
 				if (below !== undefined) return at(below);
 				// Every key at or before it is gone, so whichever group held it will never arrive.

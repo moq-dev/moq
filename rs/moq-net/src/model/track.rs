@@ -1939,7 +1939,8 @@ impl TrackState {
 			Some(held) => self.departed.range(from..held),
 			None => self.departed.range(from..),
 		};
-		gone.find(|(gone, _)| servable.contains(**gone)).map(|(&gone, record)| (gone, record))
+		gone.find(|(gone, _)| servable.contains(**gone))
+			.map(|(&gone, record)| (gone, record))
 	}
 
 	/// [`Self::uncache`] a group that another copy displaces rather than one that ends, so a
