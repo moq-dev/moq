@@ -33,7 +33,14 @@ struct Settings {
 	broadcast: Option<String>,
 	connection: crate::connection::Settings,
 	linger: Duration,
+	cache_expiry: Duration,
 }
+
+/// Bounds of the `cache-expiry` property, in milliseconds. The cache rounds every window up to its
+/// 100 ms tick, so a shorter value (zero included) would read back as a window that never applies.
+/// The ceiling stays below the value the cache reads as "never reclaim".
+const CACHE_EXPIRY_MIN_MS: u64 = 100;
+const CACHE_EXPIRY_MAX_MS: u64 = 600_000;
 
 impl Default for Settings {
 	fn default() -> Self {
@@ -42,6 +49,7 @@ impl Default for Settings {
 			broadcast: None,
 			connection: Default::default(),
 			linger: moq_mux::Linger::DEFAULT,
+			cache_expiry: moq_net::cache::DEFAULT_EXPIRY,
 		}
 	}
 }
@@ -60,6 +68,7 @@ impl TryFrom<Settings> for ResolvedSettings {
 				.clone(),
 			connect,
 			quic,
+			cache_expiry: value.cache_expiry,
 		})
 	}
 }
@@ -211,6 +220,14 @@ impl ObjectImpl for MoqSink {
 					.default_value(crate::connection::duration_millis(moq_mux::Linger::DEFAULT))
 					.mutable_ready()
 					.build(),
+				glib::ParamSpecUInt64::builder("cache-expiry")
+					.nick("Cache expiry")
+					.blurb("Free a published group once nobody has read it for this many milliseconds; each track's newest group is always kept")
+					.minimum(CACHE_EXPIRY_MIN_MS)
+					.maximum(CACHE_EXPIRY_MAX_MS)
+					.default_value(crate::connection::duration_millis(moq_net::cache::DEFAULT_EXPIRY))
+					.mutable_ready()
+					.build(),
 				// Read-only, served from the live session's status. Each notifies on change.
 				glib::ParamSpecEnum::builder::<ConnectionStatus>("status")
 					.nick("Connection status")
@@ -279,6 +296,7 @@ impl ObjectImpl for MoqSink {
 			"url" => settings.url = value.get().unwrap(),
 			"broadcast" => settings.broadcast = value.get().unwrap(),
 			"linger" => settings.linger = Duration::from_millis(value.get().unwrap()),
+			"cache-expiry" => settings.cache_expiry = Duration::from_millis(value.get().unwrap()),
 			name => settings.connection.set(name, value),
 		}
 	}
@@ -311,6 +329,7 @@ impl ObjectImpl for MoqSink {
 					"url" => settings.url.to_value(),
 					"broadcast" => settings.broadcast.to_value(),
 					"linger" => crate::connection::duration_millis(settings.linger).to_value(),
+					"cache-expiry" => crate::connection::duration_millis(settings.cache_expiry).to_value(),
 					name => settings.connection.get(name),
 				}
 			}
@@ -2589,6 +2608,7 @@ mod tests {
 			"url",
 			"broadcast",
 			"linger",
+			"cache-expiry",
 			"connect-tls-insecure",
 			"quic-idle-timeout",
 			"quic-keep-alive",
@@ -2604,6 +2624,10 @@ mod tests {
 			assert_eq!(sink.property::<u64>(name), value);
 		}
 		assert_eq!(spec(&sink, "linger").default_value().get::<u64>(), Ok(30_000));
+		assert_eq!(
+			sink.property::<u64>("cache-expiry"),
+			crate::connection::duration_millis(moq_net::cache::DEFAULT_EXPIRY)
+		);
 		for name in [
 			"status",
 			"connected",
@@ -2655,6 +2679,48 @@ mod tests {
 		assert!(quic.keylog.is_some());
 	}
 
+	#[test]
+	fn cache_expiry_reaches_the_origin_pool() {
+		gst::init().unwrap();
+		let sink = sink();
+		sink.set_property("url", "https://relay.example.com/anon");
+		sink.set_property("broadcast", "test");
+
+		// Unset, the origin keeps the cache's own default window.
+		let resolved = ResolvedSettings::try_from(sink.imp().settings.lock().unwrap().clone()).unwrap();
+		let config = super::super::session::origin_config(&resolved);
+		assert_eq!(config.pool.expiry(), Some(moq_net::cache::DEFAULT_EXPIRY));
+		assert_eq!(
+			config.pool.expiry(),
+			moq_net::origin::Config::default().pool.expiry(),
+			"an unset sink caches like any other origin"
+		);
+
+		sink.set_property("cache-expiry", 3_000u64);
+		assert_eq!(sink.property::<u64>("cache-expiry"), 3_000);
+		let resolved = ResolvedSettings::try_from(sink.imp().settings.lock().unwrap().clone()).unwrap();
+		let config = super::super::session::origin_config(&resolved);
+		assert_eq!(config.pool.expiry(), Some(Duration::from_secs(3)));
+	}
+
+	#[test]
+	fn cache_expiry_refuses_zero() {
+		gst::init().unwrap();
+		let sink = sink();
+		let pspec = spec(&sink, "cache-expiry");
+		let bounds = pspec.downcast_ref::<glib::ParamSpecUInt64>().unwrap();
+		assert!(bounds.minimum() > 0, "zero is refused");
+		assert_eq!(bounds.minimum(), CACHE_EXPIRY_MIN_MS);
+		assert_eq!(bounds.maximum(), CACHE_EXPIRY_MAX_MS);
+		// Every accepted window is one the cache applies as written: neither rounded up to its
+		// tick nor read as "never reclaim".
+		for ms in [bounds.minimum(), bounds.maximum()] {
+			let pool =
+				moq_net::cache::Pool::new(moq_net::cache::Config::default().with_expiry(Duration::from_millis(ms)));
+			assert_eq!(pool.expiry(), Some(Duration::from_millis(ms)));
+		}
+	}
+
 	/// The sink retries without a budget, so an outage of any length is ridden out
 	/// (the session tests' relay loss covers the redial itself).
 	#[test]
@@ -2676,12 +2742,14 @@ mod tests {
 		sink.set_property("broadcast", "before");
 		sink.set_property("quic-idle-timeout", 15_000u64);
 		sink.set_property("quic-keep-alive", 3_000u64);
+		sink.set_property("cache-expiry", 3_000u64);
 		assert_eq!(sink.property::<String>("broadcast"), "before");
 
 		sink.set_state(gst::State::Paused).unwrap();
 		sink.set_property("broadcast", "after");
 		sink.set_property("quic-idle-timeout", 20_000u64);
 		sink.set_property("quic-keep-alive", 4_000u64);
+		sink.set_property("cache-expiry", 4_000u64);
 		assert_eq!(
 			sink.property::<String>("broadcast"),
 			"before",
@@ -2689,15 +2757,18 @@ mod tests {
 		);
 		assert_eq!(sink.property::<u64>("quic-idle-timeout"), 15_000);
 		assert_eq!(sink.property::<u64>("quic-keep-alive"), 3_000);
+		assert_eq!(sink.property::<u64>("cache-expiry"), 3_000);
 
 		// MUTABLE_READY means configurable on every run, not just before the first.
 		sink.set_state(gst::State::Ready).unwrap();
 		sink.set_property("broadcast", "after");
 		sink.set_property("quic-idle-timeout", 20_000u64);
 		sink.set_property("quic-keep-alive", 4_000u64);
+		sink.set_property("cache-expiry", 4_000u64);
 		assert_eq!(sink.property::<String>("broadcast"), "after");
 		assert_eq!(sink.property::<u64>("quic-idle-timeout"), 20_000);
 		assert_eq!(sink.property::<u64>("quic-keep-alive"), 4_000);
+		assert_eq!(sink.property::<u64>("cache-expiry"), 4_000);
 		sink.set_state(gst::State::Null).unwrap();
 	}
 

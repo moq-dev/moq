@@ -141,6 +141,15 @@ pub struct ResolvedSettings {
 	pub connect: moq_tokio::connect::Config,
 	/// The shared QUIC properties resolved before startup.
 	pub quic: moq_tokio::quic::Config,
+	/// How long a published group stays cached with nobody reading it.
+	pub cache_expiry: std::time::Duration,
+}
+
+/// The origin the sink publishes on: a cache pool with the sink's idle window.
+pub(super) fn origin_config(settings: &ResolvedSettings) -> moq_net::origin::Config {
+	let mut config = moq_net::origin::Config::default();
+	config.pool = moq_net::cache::Pool::new(moq_net::cache::Config::default().with_expiry(settings.cache_expiry));
+	config
 }
 
 /// Builds the connect configuration with the sink's TLS and backoff overrides.
@@ -276,7 +285,7 @@ impl Session {
 		// Producer setup may touch tokio time (group eviction), so run it inside the runtime context.
 		let _rt = RUNTIME.enter();
 
-		let origin = moq_tokio::origin::spawn();
+		let origin = moq_tokio::origin::spawn_config(origin_config(&settings));
 		// Each run is a new stream under a fresh instance, which the route mints: a restarted
 		// pipeline never resumes viewers into the old run's group sequence. Reconnects keep it.
 		let route = origin.route(&settings.broadcast, moq_net::origin::RouteOptions::default())?;
@@ -576,6 +585,7 @@ mod tests {
 			broadcast: "test".into(),
 			connect: crate::connection::Settings::default().resolve().unwrap().0,
 			quic: Default::default(),
+			cache_expiry: moq_net::cache::DEFAULT_EXPIRY,
 		};
 		let (session, registration, route, _) = Session::start(settings, glib::WeakRef::new()).unwrap();
 		registration.mark_registered();

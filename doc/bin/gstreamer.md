@@ -88,7 +88,7 @@ Caps that only change what the bitstream already carries (a video resolution)
 keep the track live. A run never publishes a track name it ended again: new
 codec config, a pad requested again, or a stream resumed after EOS publishes as
 `<track>/<n>`, which `track` reads back. Element properties:
-`url`, `broadcast`, `linger`, `connect-version`, `connect-websocket-enabled`, `connect-tls-insecure`, `quic-idle-timeout`, `quic-keylog`,
+`url`, `broadcast`, `linger`, `cache-expiry`, `connect-version`, `connect-websocket-enabled`, `connect-tls-insecure`, `quic-idle-timeout`, `quic-keylog`,
 `quic-keep-alive`, and read-only `status`, `connected`, `moq-version`, and
 `estimated-send-rate`, `estimated-recv-rate`, `connection-stats`, and
 `sessions`. Once the relay has accepted a session (on moq-lite 03/04, which never answer, once
@@ -115,6 +115,13 @@ Once every pad reaches EOS, the sink keeps the finished broadcast announced
 for `linger` milliseconds (default 30000), so a subscriber that arrives late
 still gets the tail, then closes it and posts EOS. `linger=0` closes it at once,
 and stopping the pipeline (`READY` or `NULL`) during the wait closes it early.
+
+Every group the sink publishes stays in its cache until nobody has read it for
+`cache-expiry` milliseconds (default 30000, the idle window of any origin and
+the relay's `--cache-duration` default), whether or not anyone subscribes. Each
+track's newest group is always kept, so a new subscriber still starts at once.
+A publisher with many always-on pads can lower it to bound the memory each
+holds. It takes 100 to 600000; the cache rounds a window up to its 100 ms tick.
 
 All pads share one media timeline on one wall clock. The first timed buffer places
 it using UNIX or NTP reference timestamp metadata; other clock domains use the
