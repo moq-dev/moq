@@ -698,6 +698,9 @@ test("microphone audio takes the media clock's suspend jumps", async () => {
 		capture.close();
 		await settle();
 		installed.close();
+		// The suspend left the media timeline an hour ahead, and the next Manual clock has the same
+		// origin, so it would continue it: a read on the host clock's own origin starts a new one.
+		MediaClock.now();
 	}
 });
 
@@ -805,5 +808,8 @@ test("a page stalled past a suspend takes the jump where the audio thread woke",
 		capture.close();
 		await settle();
 		installed.close();
+		// The suspend left the media timeline an hour ahead, and the next Manual clock has the same
+		// origin, so it would continue it: a read on the host clock's own origin starts a new one.
+		MediaClock.now();
 	}
 });
