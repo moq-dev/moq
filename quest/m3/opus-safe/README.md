@@ -50,7 +50,3 @@ additive with no API change.
 
 Posting to a repository outside `kixelated`, `kixel-ai`, and `moq-dev`
 (such as opus-pure's) needs the maintainer's OK first.
-
-## Required
-
-- [Native audio conceals SILK and hybrid Opus losses](/quest/m1/audio-plc.md) - #9578 vendors moq-libopus, the baseline every candidate is measured against
