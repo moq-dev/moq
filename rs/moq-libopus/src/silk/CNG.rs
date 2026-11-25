@@ -335,9 +335,9 @@ pub unsafe fn silk_CNG(
 					} else {
 						((*CNG_sig_Q14.as_mut_ptr().offset((16 + i) as isize) as i64 * gain_Q10 as i64 >> 16) as i32
 							>> 8 - 1) + 1 >> 1
-					}) < 0x8000
+					}) < -0x8000
 					{
-						0x8000
+						-0x8000
 					} else {
 						if 8 == 1 {
 							((*CNG_sig_Q14.as_mut_ptr().offset((16 + i) as isize) as i64 * gain_Q10 as i64 >> 16)
@@ -371,9 +371,9 @@ pub unsafe fn silk_CNG(
 					} else {
 						((*CNG_sig_Q14.as_mut_ptr().offset((16 + i) as isize) as i64 * gain_Q10 as i64 >> 16) as i32
 							>> 8 - 1) + 1 >> 1
-					}) < 0x8000
+					}) < -0x8000
 					{
-						0x8000
+						-0x8000
 					} else {
 						if 8 == 1 {
 							((*CNG_sig_Q14.as_mut_ptr().offset((16 + i) as isize) as i64 * gain_Q10 as i64 >> 16)
@@ -409,9 +409,9 @@ pub unsafe fn silk_CNG(
 						} else {
 							((*CNG_sig_Q14.as_mut_ptr().offset((16 + i) as isize) as i64 * gain_Q10 as i64 >> 16)
 								as i32 >> 8 - 1) + 1 >> 1
-						}) < 0x8000
+						}) < -0x8000
 						{
-							0x8000
+							-0x8000
 						} else {
 							if 8 == 1 {
 								((*CNG_sig_Q14.as_mut_ptr().offset((16 + i) as isize) as i64 * gain_Q10 as i64 >> 16)

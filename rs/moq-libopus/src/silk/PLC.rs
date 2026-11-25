@@ -570,9 +570,9 @@ unsafe fn silk_PLC_conceal(
 			} else {
 				((*sLPC_Q14_ptr.offset((16 + i) as isize) as i64 * prevGain_Q10[1 as usize] as i64 >> 16) as i32
 					>> 8 - 1) + 1 >> 1
-			}) < 0x8000
+			}) < -0x8000
 			{
-				0x8000
+				-0x8000
 			} else {
 				if 8 == 1 {
 					((*sLPC_Q14_ptr.offset((16 + i) as isize) as i64 * prevGain_Q10[1 as usize] as i64 >> 16) as i32
@@ -603,9 +603,9 @@ unsafe fn silk_PLC_conceal(
 			} else {
 				((*sLPC_Q14_ptr.offset((16 + i) as isize) as i64 * prevGain_Q10[1 as usize] as i64 >> 16) as i32
 					>> 8 - 1) + 1 >> 1
-			}) < 0x8000
+			}) < -0x8000
 			{
-				0x8000
+				-0x8000
 			} else {
 				if 8 == 1 {
 					((*sLPC_Q14_ptr.offset((16 + i) as isize) as i64 * prevGain_Q10[1 as usize] as i64 >> 16) as i32
@@ -634,9 +634,9 @@ unsafe fn silk_PLC_conceal(
 		} else {
 			((*sLPC_Q14_ptr.offset((16 + i) as isize) as i64 * prevGain_Q10[1 as usize] as i64 >> 16) as i32 >> 8 - 1)
 				+ 1 >> 1
-		}) < 0x8000
+		}) < -0x8000
 		{
-			0x8000
+			-0x8000
 		} else if 8 == 1 {
 			((*sLPC_Q14_ptr.offset((16 + i) as isize) as i64 * prevGain_Q10[1 as usize] as i64 >> 16) as i32 >> 1)
 				+ ((*sLPC_Q14_ptr.offset((16 + i) as isize) as i64 * prevGain_Q10[1 as usize] as i64 >> 16) as i32 & 1)
