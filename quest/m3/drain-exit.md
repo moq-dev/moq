@@ -35,4 +35,3 @@ Decided 2026-11-25 (maintainer, `/quest-plan`): ✅ keep (rejected: drop).
 ## Related
 
 - [moq-dev/moq#8596](https://github.com/moq-dev/moq/pull/8596) - the restart beside a draining relay, whose old process this keeps alive
-- [A new relay takes over from a draining one](/quest/m0/test-flakes-4/relay-handoff-drain.md) - a drain test flake on the same path

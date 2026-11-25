@@ -224,9 +224,12 @@ impl Config {
 	/// Never a reuseport bind of port `0`: Linux counts a port held only by
 	/// same-UID reuseport sockets as free for one, so the kernel could hand
 	/// back a port another group holds and this one would silently join it. A
-	/// plain bind conflicts with every holder. Another socket taking the port
-	/// before the first member binds fails that bind with
-	/// [`io::ErrorKind::AddrInUse`].
+	/// plain bind conflicts with every holder. Another socket, or another group
+	/// resolving the same port, can take it before the first member binds; an
+	/// ephemeral request then draws another port, up to `EPHEMERAL_ATTEMPTS`
+	/// times, since it asked for any free one. A named port fails that bind with
+	/// [`io::ErrorKind::AddrInUse`], or [`Error::Overlap`] when another group
+	/// holds its lock.
 	pub fn bind(self) -> Result<Bound, Error> {
 		let count = self.count.max(1);
 		let generations = match self.handoff {
@@ -241,18 +244,32 @@ impl Config {
 			});
 		}
 
-		let addr = match self.addr.port() {
-			0 => crate::bind::udp(crate::bind::Udp::new(self.addr))
-				.and_then(|socket| socket.local_addr())
-				.map_err(Error::Resolve)?,
-			_ => self.addr,
+		let mut attempts = match self.addr.port() {
+			0 => EPHEMERAL_ATTEMPTS,
+			_ => 1,
+		};
+		let (addr, lock, first) = loop {
+			let addr = match self.addr.port() {
+				0 => crate::bind::udp(crate::bind::Udp::new(self.addr))
+					.and_then(|socket| socket.local_addr())
+					.map_err(Error::Resolve)?,
+				_ => self.addr,
+			};
+			match claim(addr) {
+				Err(err) if attempts > 1 => {
+					attempts -= 1;
+					tracing::debug!(%err, port = addr.port(), "another socket took the ephemeral port first; drawing another");
+				}
+				claimed => {
+					let (lock, first) = claimed?;
+					break (addr, lock, first);
+				}
+			}
 		};
 
-		let port = addr.port();
-		let lock = Lock::acquire(port).map_err(|_| Error::Overlap { port })?;
-
 		let mut slots = Vec::with_capacity(usize::from(total));
-		for index in 0..total {
+		slots.push(first);
+		for index in 1..total {
 			slots.push(member(addr, index).map_err(|source| Error::Bind { index, source })?);
 		}
 
@@ -517,6 +534,19 @@ impl Socket {
 	pub fn into_inner(self) -> UdpSocket {
 		self.socket
 	}
+}
+
+/// How many ports an ephemeral group draws before giving up on one a
+/// concurrent bind keeps taking first; each loss needs a bind of that very port
+/// within the instants between drawing it and holding it.
+const EPHEMERAL_ATTEMPTS: u8 = 8;
+
+/// Lock the port of `addr` and bind the group's first member there.
+fn claim(addr: SocketAddr) -> Result<(Option<Lock>, UdpSocket), Error> {
+	let port = addr.port();
+	let lock = Lock::acquire(port).map_err(|_| Error::Overlap { port })?;
+	let first = member(addr, 0).map_err(|source| Error::Bind { index: 0, source })?;
+	Ok((lock, first))
 }
 
 /// Bind member `index` of the group at `addr`.
@@ -1413,6 +1443,31 @@ mod tests {
 			drop(first);
 			bind(addr, 1).expect("the released port must be takeable again");
 		}
+	}
+
+	/// Groups binding an ephemeral port at once each get one: two drawing the same
+	/// port, or a plain bind taking it between the draw and the first member, make
+	/// one draw again instead of failing a bind that asked for any port.
+	#[test]
+	#[cfg(target_os = "linux")]
+	fn concurrent_ephemeral_groups_all_bind() {
+		const THREADS: usize = 64;
+		const GROUPS: usize = 300;
+
+		std::thread::scope(|scope| {
+			let threads: Vec<_> = (0..THREADS)
+				.map(|_| {
+					scope.spawn(|| {
+						for _ in 0..GROUPS {
+							bind("127.0.0.1:0".parse().unwrap(), 1).expect("an ephemeral group failed to bind");
+						}
+					})
+				})
+				.collect();
+			for thread in threads {
+				thread.join().unwrap();
+			}
+		});
 	}
 
 	/// A same-UID reuseport socket already on the address, one the lock cannot
