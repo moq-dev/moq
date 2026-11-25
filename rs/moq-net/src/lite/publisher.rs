@@ -4913,7 +4913,7 @@ impl Bounds {
 			let start = match range.start {
 				None => legacy.unwrap_or(Start::Oldest),
 				Some(lite::Anchor::Absolute(_)) if legacy_max.is_some() => Start::Live {
-					min: Duration::ZERO,
+					min: Some(Duration::ZERO),
 					max: legacy_max,
 				},
 				Some(lite::Anchor::Absolute(position)) => Start::Time(position.group),
@@ -4922,7 +4922,7 @@ impl Bounds {
 				// Placed already, so its lag places nothing: it starts where it was placed and
 				// expires as a live join under its max age.
 				Some(lite::Anchor::Joined { max, .. }) => Start::Live {
-					min: Duration::ZERO,
+					min: Some(Duration::ZERO),
 					max,
 				},
 			};
@@ -6251,11 +6251,6 @@ impl TrackRun {
 			false => self.track.poll_queued_drop(waiter),
 		};
 		let Poll::Ready((range, hole)) = polled else {
-			// A reader the pool ended reports no drop: end the subscription now, rather than once
-			// a group waiting on stream credit reads the failure.
-			if self.track.lagged() {
-				return Err(Error::Lagged);
-			}
 			return Ok(false);
 		};
 		match &mut self.start {
@@ -6630,19 +6625,27 @@ impl TrackRun {
 			unreachable!("resolved above");
 		};
 		// The subscriber now owes itself everything from the start, so a range given up
-		// above it is named as it would have been after the start. A stale run below it is
-		// never named, so a wider budget may still serve it. A final one is named all the same:
-		// no budget brings it back, and a subscriber filling below the start (a relay whose
-		// reader reaches lower) must still learn its fate.
-		for (range, hole) in skipped.iter() {
-			let below = range.start..range.end.min(start);
-			match hole.stale_budget() {
-				Some(_) => self.track.record_mut().untell(below),
-				None => {
-					self.forward_range(below, hole, writer)?;
-				}
+		// above it is named as it would have been after the start. Below it, nothing is owed. The
+		// final runs reaching up to it unbroken are named all the same, so a reader filling below
+		// the start (a relay whose reader reaches lower) learns nothing there exists. The rest,
+		// past a stale run, a group still held, or a key nothing gave up, stay untold: naming them
+		// would send every gap in the track's history, as a lite-06 track keyed by timestamp holds
+		// one per group. An update that asks below the start names them then, and a wider budget
+		// may still serve a stale one.
+		let mut reach = start;
+		for (range, hole) in skipped.iter().rev() {
+			if range.start >= reach {
+				continue;
 			}
-			self.forward_range(range.start.max(start)..range.end, hole, writer)?;
+			if range.end < reach || hole.stale_budget().is_some() {
+				break;
+			}
+			reach = range.start;
+		}
+		for (range, hole) in skipped.iter() {
+			let below = range.start..range.end.min(reach);
+			self.track.untell(below);
+			self.forward_range(range.start.max(reach)..range.end, hole, writer)?;
 		}
 		// An end declared while this start was held follows it.
 		if let Some(end) = self.held_end.take() {
@@ -7729,7 +7732,7 @@ mod serve_group_test {
 		assert_eq!(
 			groups.ranges,
 			[crate::track::Range::from(crate::track::Start::Live {
-				min: Duration::ZERO,
+				min: Some(Duration::ZERO),
 				max
 			})]
 		);
@@ -9294,7 +9297,7 @@ mod serve_group_test {
 			.with_ranges([
 				// A live join a second behind the newest frame, at 4 s.
 				Range::from(crate::track::Start::Live {
-					min: Duration::from_secs(1),
+					min: Some(Duration::from_secs(1)),
 					max: Some(std::time::Duration::ZERO),
 				}),
 				Range {
@@ -9306,7 +9309,7 @@ mod serve_group_test {
 				// Empty only once its join resolves to group 3000.
 				Range {
 					start: crate::track::Start::Live {
-						min: Duration::from_secs(1),
+						min: Some(Duration::from_secs(1)),
 						max: Some(std::time::Duration::ZERO),
 					},
 					end: Some(1999),
@@ -9448,7 +9451,7 @@ mod serve_group_test {
 		// A live join two seconds behind the newest frame, at 4 s: group 2000, before delivery.
 		let back = lite::Range {
 			start: Some(lite::Anchor::Live {
-				min: Duration::from_secs(2),
+				min: Some(Duration::from_secs(2)),
 				max: None,
 			}),
 			end: None,
@@ -9464,7 +9467,7 @@ mod serve_group_test {
 		assert_eq!(
 			run.track.subscription().ranges[1].start,
 			crate::track::Start::Live {
-				min: Duration::from_secs(2),
+				min: Some(Duration::from_secs(2)),
 				max: None
 			},
 			"still a live join"
@@ -9506,7 +9509,7 @@ mod serve_group_test {
 		// nothing within 1.5 s of it.
 		let back = lite::Range {
 			start: Some(lite::Anchor::Live {
-				min: Duration::from_secs(4),
+				min: Some(Duration::from_secs(4)),
 				max: Some(Duration::from_millis(1500)),
 			}),
 			end: None,
@@ -9547,7 +9550,7 @@ mod serve_group_test {
 		// A live join two seconds behind the newest frame, at 4 s: group 2000.
 		let back = lite::Range {
 			start: Some(lite::Anchor::Live {
-				min: Duration::from_secs(2),
+				min: Some(Duration::from_secs(2)),
 				max: None,
 			}),
 			end: None,
@@ -9578,7 +9581,7 @@ mod serve_group_test {
 			run.track.subscription().ranges[1],
 			track::Range {
 				start: crate::track::Start::Live {
-					min: Duration::from_secs(2),
+					min: Some(Duration::from_secs(2)),
 					max: None
 				},
 				end: None,
@@ -9955,7 +9958,9 @@ mod serve_group_test {
 
 	/// A copy fed over a wire before lite-07, whose answers say nothing of the live edge, learns
 	/// it from its first live group: until one lands, a range from the oldest group is not
-	/// answered Empty.
+	/// answered Empty. Its answer says where the feed starts, and a group's header can land
+	/// after that and before the group's first frame, which alone shows the edge: that frame
+	/// wakes the run to answer.
 	#[kio::test]
 	async fn lite07_a_copy_from_an_older_wire_learns_its_edge_from_its_first_group() {
 		let mut track = track::Producer::new(
@@ -9965,12 +9970,24 @@ mod serve_group_test {
 		);
 		track.received();
 		track.edge_from_groups();
+		track.request_start(None).unwrap();
 		let (mut run, mut writer, log) = lite07_run_ranges(&track, &[lite::Range::span(None, 0, None, None)]);
-		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		let waiter = kio::Waiter::noop();
+		while run.poll_step(&mut writer, &waiter).is_ready() {}
 		assert!(responses(&mut writer, &log).await.is_empty());
 
-		write_group(&mut track, 5, 5);
-		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		track.start_resolved(5).unwrap();
+		let mut group = track.create_group(group::Info { start: 5 }).unwrap();
+		while run.poll_step(&mut writer, &waiter).is_ready() {}
+		assert!(
+			responses(&mut writer, &log).await.is_empty(),
+			"a frameless header shows no edge"
+		);
+
+		group
+			.write_frame(Timestamp::from_millis(5).unwrap(), b"x".as_slice())
+			.unwrap();
+		while run.poll_step(&mut writer, &waiter).is_ready() {}
 		let answered = responses(&mut writer, &log).await;
 		assert!(
 			matches!(
@@ -10733,6 +10750,88 @@ mod serve_group_test {
 			drops(&mut writer, &log, version).await,
 			[(2, WIDE - 1), (1, 1), (WIDE, WIDE + 1)]
 		);
+	}
+
+	/// A join over a long history of gaps, as a lite-06 track keyed by timestamp carries one per
+	/// group, names only the gaps from the group below its start up, and an update keeping its
+	/// start names none of the rest: they lie past a group its budget skipped, which the
+	/// subscriber is not owed. One lowering its start asks for them, so they are named then, on a
+	/// relay's front too, whose copies reported them once already.
+	#[kio::test]
+	async fn a_join_names_no_gap_past_a_skipped_group() {
+		for (version, routed) in [Version::Lite05, Version::Lite06]
+			.into_iter()
+			.flat_map(|v| [(v, false), (v, true)])
+		{
+			let mut plain = None;
+			let mut front = None;
+			let track = match routed {
+				false => plain.insert(track::Producer::new(
+					Arc::new(broadcast::Info::default()),
+					"test",
+					crate::track::Info::timed(),
+				)),
+				true => {
+					&mut front
+						.insert(track::Routed::new("test", crate::track::Info::timed()))
+						.copy
+				}
+			};
+			for key in (0..1000).step_by(20) {
+				write_group(track, key, key);
+				track.drop_groups(key + 1..key + 20, crate::StreamError::NotFound);
+			}
+			let subscription = track::Subscription::default().with_max(Duration::from_millis(100));
+			let subscriber = match &front {
+				None => plain.as_ref().unwrap().subscribe(subscription),
+				Some(front) => front
+					.logical
+					.consume()
+					.subscribe(subscription)
+					.now_or_never()
+					.expect("an accepted logical track answers at once")
+					.unwrap(),
+			};
+			let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			let start = run.start.resolved().expect("resolved");
+			let below: Vec<_> = (drops(&mut writer, &log, version).await.into_iter())
+				.filter(|(first, _)| *first < start)
+				.collect();
+			assert_eq!(
+				below,
+				[(start - 19, start - 1)],
+				"{version:?} routed {routed}: start {start}"
+			);
+
+			let update = |start| lite::SubscribeUpdate {
+				wanted_group: None,
+				order: crate::track::Order::Descending,
+				priority: 1,
+				max_delay: Some(Duration::from_millis(100)),
+				ranges: vec![lite::Range::span(start, 0, None, None)],
+			};
+			let named = drops(&mut writer, &log, version).await.len();
+			run.replace(update(None));
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			let after = drops(&mut writer, &log, version).await;
+			assert_eq!(
+				after.len(),
+				named,
+				"{version:?} routed {routed}: an update keeping the start"
+			);
+
+			// One lowering the start asks for those keys, so each gap there is named then.
+			run.replace(update(Some(1)));
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			let lowered: Vec<_> = drops(&mut writer, &log, version).await.split_off(named);
+			for key in (0..start - 20).step_by(20) {
+				assert!(
+					lowered.contains(&(key + 1, key + 19)),
+					"{version:?} routed {routed}: gap {key} after a lowered start"
+				);
+			}
+		}
 	}
 
 	/// An upstream drop below the floor is forwarded once an update lowers the floor to it,

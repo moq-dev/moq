@@ -4,8 +4,11 @@
 
 `sh/gh/bench-report.py` checks each `kixel-metrics` `metrics.json` against
 Kixel Quest's new 8 MiB inflated-file budget instead of 1 MiB, and
-`bench/README.md` states the same figure. That leaves Nightly and CodSpeed
-room to grow before their upload steps fail.
+`bench/README.md` states the same figure. That leaves Nightly room to grow
+before its upload step fails. The Instructions workflow's 190 KB file is
+checked by rust2-bench's own `LIMIT` (`bench/runner/src/metrics.rs` in
+kixel-ai/rust2), which a rust2 change and a bump of moq's `rust2` input raise
+if that file ever needs it.
 
 ## Plan
 
@@ -13,7 +16,7 @@ Decided 2026-11-23 (maintainer, /quest-run): ✅ plan it (rejected: drop).
 Kixel Quest's single 1 MiB `LIMIT` is being split. Artifact zips stay at
 1 MiB compressed, and each inflated file gets 8 MiB
 ([kixel-ai/kixel.quest#118](https://github.com/kixel-ai/kixel.quest/pull/118)).
-A full Nightly `metrics.json` is 865 KB today, and CodSpeed's is 161 KB.
+A full Nightly `metrics.json` is 865 KB today, and the Instructions workflow's is 190 KB.
 
 - Raise `KIXEL_LIMIT` in `sh/gh/bench-report.py` to `8 << 20`, and the
   "at most 1 MiB" sentence in `bench/README.md`.

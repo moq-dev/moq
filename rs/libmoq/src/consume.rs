@@ -1534,7 +1534,7 @@ mod read_tests {
 			track.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: std::time::Duration::ZERO,
+						min: Some(std::time::Duration::ZERO),
 						max: Some(std::time::Duration::ZERO),
 					},
 				)]),
@@ -1732,7 +1732,7 @@ mod tests {
 				assert_eq!(
 					consumer.initial.ranges,
 					[moq_net::track::Range::from(moq_net::track::Start::Live {
-						min: Duration::from_millis(200) + warmup,
+						min: Some(Duration::from_millis(200) + warmup),
 						// The request aggregate represents Duration::MAX as unlimited.
 						max: max
 							.map(|max| max.saturating_add(warmup))

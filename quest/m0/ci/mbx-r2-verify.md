@@ -325,8 +325,8 @@ over the 10 GiB default that #951's half-budget prefetch cap splits). The
 drafted issue below was not filed and is obsolete.
 
 What the after-#8631 nights must show here, read from the same summaries
-the [failed-puts quest](/quest/m0/ci/mbx-failed-puts.md) already collects for
-its own after-measurement:
+the failed-puts measurement collected (closed with
+[#8763](https://github.com/moq-dev/moq/pull/8763)):
 
 - Windows: settled on 11-14 (above). Later nights only need to confirm
   that the hits hold once the expiry wave passes.
@@ -378,7 +378,3 @@ placeholder with the first night after #8631.
   and count the Nightly jobs that rebuilt a crate the expiry deleted, listing as unknown any it cannot attribute. This count waits until the 7-day rule has run for at least 7 days,
   so the shorter window has data. Bring the lifecycle back to the
   maintainer only if that count argues for lengthening it.
-
-## Related
-
-- [The Rust cache stops paying for uploads R2 refuses](/quest/m0/ci/mbx-failed-puts.md) - measures the same bucket's requests and also reports to mbx upstream

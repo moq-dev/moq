@@ -1400,7 +1400,7 @@ impl SiTrack {
 					Ok(track) => SiState::Subscribing(track.subscribe(self.source.subscription(
 						moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 							moq_net::track::Start::Live {
-								min: self.max_age,
+								min: Some(self.max_age),
 								max: Some(self.max_age),
 							},
 						)]),

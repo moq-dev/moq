@@ -5473,7 +5473,7 @@ pub(super) mod test {
 			.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: RECORDING_MAX_AGE,
+						min: Some(RECORDING_MAX_AGE),
 						max: Some(RECORDING_MAX_AGE),
 					},
 				)]),
@@ -6162,7 +6162,7 @@ pub(super) mod test {
 			.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: RECORDING_MAX_AGE,
+						min: Some(RECORDING_MAX_AGE),
 						max: Some(RECORDING_MAX_AGE),
 					},
 				)]),
@@ -7390,7 +7390,7 @@ pub(super) mod test {
 			.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: RECORDING_MAX_AGE,
+						min: Some(RECORDING_MAX_AGE),
 						max: Some(RECORDING_MAX_AGE),
 					},
 				)]),
@@ -7789,7 +7789,7 @@ pub(super) mod test {
 			.subscribe(
 				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 					moq_net::track::Start::Live {
-						min: RECORDING_MAX_AGE,
+						min: Some(RECORDING_MAX_AGE),
 						max: Some(RECORDING_MAX_AGE),
 					},
 				)]),
@@ -8091,7 +8091,7 @@ pub(super) mod test {
 		// it has to reach back past a 30 s leap to the first frame.
 		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 			moq_net::track::Start::Live {
-				min: std::time::Duration::from_secs(3600),
+				min: Some(std::time::Duration::from_secs(3600)),
 				max: Some(std::time::Duration::from_secs(3600)),
 			},
 		)]);
@@ -9412,7 +9412,7 @@ pub(super) mod test {
 	) -> Vec<crate::container::Frame> {
 		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 			moq_net::track::Start::Live {
-				min: Duration::from_secs(3600),
+				min: Some(Duration::from_secs(3600)),
 				max: Some(Duration::from_secs(3600)),
 			},
 		)]);
@@ -10235,7 +10235,7 @@ pub(super) mod test {
 		let name = catalog.snapshot().video.renditions.keys().next().unwrap().clone();
 		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 			moq_net::track::Start::Live {
-				min: Duration::from_secs(3600),
+				min: Some(Duration::from_secs(3600)),
 				max: Some(Duration::from_secs(3600)),
 			},
 		)]);
@@ -10481,7 +10481,7 @@ pub(super) mod test {
 		let name = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
 		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 			moq_net::track::Start::Live {
-				min: Duration::from_secs(3600),
+				min: Some(Duration::from_secs(3600)),
 				max: Some(Duration::from_secs(3600)),
 			},
 		)]);
@@ -10529,7 +10529,7 @@ pub(super) mod test {
 		let name = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
 		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 			moq_net::track::Start::Live {
-				min: Duration::from_secs(3600),
+				min: Some(Duration::from_secs(3600)),
 				max: Some(Duration::from_secs(3600)),
 			},
 		)]);
@@ -11408,7 +11408,7 @@ pub(super) mod test {
 				.subscribe(
 					moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
 						moq_net::track::Start::Live {
-							min: RECORDING_MAX_AGE,
+							min: Some(RECORDING_MAX_AGE),
 							max: Some(RECORDING_MAX_AGE),
 						},
 					)]),

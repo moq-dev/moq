@@ -255,9 +255,10 @@ test("a lite-07 list decodes its time anchors and starts with none", async () =>
 
 	// An update may add no range, retiring some or none.
 	expect((await update([0])).ranges).toEqual([]);
-	// Type 3 is a live join's lag then its max plus one, 0 for none, which only a start may carry.
-	expect((await update([1, 3, 7, 0, 0])).ranges).toEqual([{ start: { live: { min: 7, max: null } } }]);
-	expect((await update([1, 3, 7, 5, 0])).ranges).toEqual([{ start: { live: { min: 7, max: 4 } } }]);
+	// Type 3 is a live join's lag then its max, each plus one, 0 for none, which only a start may carry.
+	expect((await update([1, 3, 8, 0, 0])).ranges).toEqual([{ start: { live: { min: 7, max: null } } }]);
+	expect((await update([1, 3, 8, 5, 0])).ranges).toEqual([{ start: { live: { min: 7, max: 4 } } }]);
+	expect((await update([1, 3, 0, 5, 0])).ranges).toEqual([{ start: { live: { min: null, max: 4 } } }]);
 	await expect(update([1, 0, 3, 7, 0])).rejects.toThrow(ProtocolViolation);
 	// Type 4 is a placed join's group, a frame that may be 0, then its max as type 3 carries it,
 	// which only a start may carry either.

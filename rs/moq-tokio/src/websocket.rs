@@ -78,6 +78,11 @@ pub enum Error {
 	/// The qmux handshake failed while accepting an incoming connection.
 	#[error("WebSocket accept failed: {0}")]
 	Accept(String),
+
+	/// [`Config::idle_timeout`] is under a millisecond, QMux's unit, or past what its
+	/// millisecond varint can carry.
+	#[error("WebSocket idle timeout must be from 1ms to under 2^62 milliseconds")]
+	IdleTimeoutRange,
 }
 
 impl crate::failover::Aggregate for Error {
@@ -298,6 +303,19 @@ pub struct Config {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub delay: Option<crate::cli::Duration>,
 
+	/// How long a dialed session may go without a frame before it closes, like
+	/// `quic.idle_timeout`. Defaults to 30s, and a quiet session pings every sixth of it.
+	/// `None` uses the default; zero turns it off, for a server whose own is off too, so a
+	/// quiet session sends nothing and a dead link surfaces only as the WebSocket closing.
+	#[usage(
+		name = "connect-websocket-idle-timeout",
+		long = "connect-websocket-idle-timeout",
+		env = "MOQ_CONNECT_WEBSOCKET_IDLE_TIMEOUT",
+		setting = "connect.websocket.idle_timeout"
+	)]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub idle_timeout: Option<crate::cli::Duration>,
+
 	/// The released `MOQ_CLIENT_WEBSOCKET_*` env vars, named by [`Config::deprecated`].
 	#[usage(flatten)]
 	#[serde(skip)]
@@ -335,6 +353,10 @@ pub(crate) struct Legacy {
 /// The QUIC head start when `--connect-websocket-delay` is unset.
 const DEFAULT_DELAY: time::Duration = time::Duration::from_millis(200);
 
+/// The session idle timeout when `--connect-websocket-idle-timeout` is unset, matching
+/// `@moq/net`'s and qmux's.
+const DEFAULT_IDLE_TIMEOUT: time::Duration = time::Duration::from_secs(30);
+
 impl Config {
 	/// The released spellings in use, each paired with what replaced it. Reached
 	/// through [`crate::connect::Config::deprecated`].
@@ -357,11 +379,25 @@ impl Config {
 		found
 	}
 
+	/// Reject an idle timeout QMux can't carry. Called when the client is built.
+	pub(crate) fn validate(&self) -> Result<()> {
+		const MAX_MILLIS: u128 = (1 << 62) - 1;
+		match self.resolve().idle_timeout {
+			Some(timeout) if timeout < time::Duration::from_millis(1) || timeout.as_millis() > MAX_MILLIS => {
+				Err(Error::IdleTimeoutRange)
+			}
+			_ => Ok(()),
+		}
+	}
+
 	/// The fallback knobs with defaults applied, ready to run the race with.
 	pub fn resolve(&self) -> Resolved {
 		Resolved {
 			enabled: self.enabled.unwrap_or(true),
 			delay: self.delay.map(Into::into).unwrap_or(DEFAULT_DELAY),
+			// A configured zero turns the idle timeout off.
+			idle_timeout: Some(self.idle_timeout.map(Into::into).unwrap_or(DEFAULT_IDLE_TIMEOUT))
+				.filter(|timeout: &time::Duration| !timeout.is_zero()),
 		}
 	}
 }
@@ -377,6 +413,33 @@ pub struct Resolved {
 	pub enabled: bool,
 	/// The head start a QUIC dial gets before the fallback joins the race.
 	pub delay: time::Duration,
+	/// How long a dialed session may go without a frame, or `None` to never time out.
+	pub idle_timeout: Option<time::Duration>,
+}
+
+impl Resolved {
+	/// `session` with this idle timeout applied to both layers that enforce one: QMux's,
+	/// which only drafts 01 and later negotiate, and the WebSocket Ping keep-alive, which
+	/// covers `qmux-00` too. Off turns off both, and QMux's RTT probe, so a quiet session
+	/// sends nothing; it then reports no RTT.
+	fn session(&self, session: &qmux::Config) -> Session {
+		let mut config = session.clone();
+		config.idle_timeout = self.idle_timeout;
+		if self.idle_timeout.is_none() {
+			config.rtt_interval = None;
+		}
+		// A sixth keeps the 5s ping against the 30s default.
+		let keep_alive = self
+			.idle_timeout
+			.map(|timeout| qmux::ws::KeepAlive::new(timeout / 6, timeout));
+		Session { config, keep_alive }
+	}
+}
+
+/// What a dialed session runs with, from [`Resolved::session`].
+struct Session {
+	config: qmux::Config,
+	keep_alive: Option<qmux::ws::KeepAlive>,
 }
 
 /// The fallback arm of the QUIC-vs-WebSocket race.
@@ -420,6 +483,7 @@ pub(crate) async fn connect(
 	if !resolved.enabled {
 		return Err(Error::Disabled);
 	}
+	let session = &resolved.session(session);
 
 	// Convert URL scheme: http:// -> ws://, https:// -> wss://
 	// Custom protocols (moqt://, moql://) use raw QUIC and don't support WebSocket.
@@ -490,11 +554,14 @@ pub(crate) async fn connect(
 			// `qmux-00`) by default so we still interop with relays that only know a
 			// wire-format version.
 			// The existing TLS config (which respects tls-disable-verify) for secure connections.
-			qmux::ws::Client::new()
+			let mut client = qmux::ws::Client::new()
 				.with_protocols(alpns.iter().map(|&a| (a, qmux_versions_for(a))))
 				.with_tls(Arc::new(tls.clone()))
-				.with_keep_alive(qmux::ws::KeepAlive::default()) // 5s ping / 30s deadline; TCP backs off retransmits too far for QUIC's 10s
-				.with_session_config(session.clone())
+				.with_session_config(session.config.clone());
+			if let Some(keep_alive) = session.keep_alive {
+				client = client.with_keep_alive(keep_alive);
+			}
+			client
 				.connect(url.as_str())
 				.await
 				.map(crate::spawn_qmux)
@@ -516,7 +583,7 @@ async fn connect_tls_override(
 	stream: tokio::net::TcpStream,
 	stats: Option<qmux::SharedSocketStats>,
 	alpns: &[&str],
-	session: &qmux::Config,
+	session: &Session,
 ) -> Result<qmux::Session> {
 	let mut request = url
 		.as_str()
@@ -538,9 +605,10 @@ async fn connect_tls_override(
 		.map_err(|err| Error::WebSocketConnect(crate::error::message(err)))?;
 	let negotiated = upgrade(&mut stream, &request).await?;
 
-	let mut upgraded = qmux::ws::Upgraded::new(stream, &negotiated)
-		.with_keep_alive(qmux::ws::KeepAlive::default())
-		.with_session_config(session.clone());
+	let mut upgraded = qmux::ws::Upgraded::new(stream, &negotiated).with_session_config(session.config.clone());
+	if let Some(keep_alive) = session.keep_alive {
+		upgraded = upgraded.with_keep_alive(keep_alive);
+	}
 	if let Some(stats) = stats {
 		upgraded = upgraded.with_socket_stats(stats);
 	}
@@ -1410,9 +1478,13 @@ mod legacy_tests {
 		assert!(!resolved.enabled);
 		assert_eq!(resolved.delay, time::Duration::from_secs(2));
 
+		let config = parse(&["--connect-websocket-idle-timeout", "0s"]);
+		assert_eq!(config.resolve().idle_timeout, None);
+
 		// Neither given: the parser resolves to the typed defaults.
 		let config = parse(&[]);
 		assert_eq!(config.resolve().delay, DEFAULT_DELAY);
+		assert_eq!(config.resolve().idle_timeout, Some(DEFAULT_IDLE_TIMEOUT));
 	}
 }
 
@@ -1503,5 +1575,238 @@ mod timeout_tests {
 				assert!(result.is_none(), "no timeout must keep waiting for SETUP");
 			}
 		}
+	}
+}
+
+#[cfg(test)]
+mod idle_timeout_tests {
+	use super::*;
+	use futures::StreamExt;
+
+	/// Read a QUIC varint off the front of `buf`.
+	fn varint(buf: &mut &[u8]) -> u64 {
+		let len = 1 << (buf[0] >> 6);
+		let mut value = u64::from(buf[0] & 0x3f);
+		for &byte in &buf[1..len] {
+			value = (value << 8) | u64::from(byte);
+		}
+		*buf = &buf[len..];
+		value
+	}
+
+	/// The `max_idle_timeout` a dial with `config` advertises, read off the wire: its first
+	/// QMux record leads with `QX_TRANSPORT_PARAMETERS`, absent meaning zero (off).
+	async fn advertised(config: Config) -> u64 {
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let port = listener.local_addr().unwrap().port();
+		let server = tokio::spawn(async move {
+			let (stream, _) = listener.accept().await.unwrap();
+			#[expect(
+				clippy::result_large_err,
+				reason = "the error type is tungstenite's handshake response, not ours"
+			)]
+			let callback = |request: &tungstenite::handshake::server::Request,
+			       mut response: tungstenite::handshake::server::Response| {
+				// A record-framed draft, the ones that negotiate an idle timeout.
+				let protocol = request
+					.headers()
+					.get(http::header::SEC_WEBSOCKET_PROTOCOL)
+					.and_then(|value| value.to_str().ok())
+					.and_then(|value| value.split(',').map(str::trim).find(|p| !p.starts_with("qmux-00")))
+					.unwrap()
+					.to_string();
+				response.headers_mut().insert(
+					http::header::SEC_WEBSOCKET_PROTOCOL,
+					http::HeaderValue::from_str(&protocol).unwrap(),
+				);
+				Ok(response)
+			};
+			let mut ws = tokio_tungstenite::accept_hdr_async(stream, callback).await.unwrap();
+			let record = loop {
+				match ws.next().await.unwrap().unwrap() {
+					tungstenite::Message::Binary(record) => break record,
+					_ => continue,
+				}
+			};
+			let mut buf = &record[..];
+			assert_eq!(
+				varint(&mut buf),
+				0x3f5153300d0a0d0a,
+				"first frame is QX_TRANSPORT_PARAMETERS"
+			);
+			let len = varint(&mut buf) as usize;
+			let mut params = &buf[..len];
+			while !params.is_empty() {
+				let id = varint(&mut params);
+				let len = varint(&mut params) as usize;
+				let mut value = &params[..len];
+				params = &params[len..];
+				if id == 0x01 {
+					return varint(&mut value);
+				}
+			}
+			0
+		});
+
+		let url = Url::parse(&format!("ws://127.0.0.1:{port}/")).unwrap();
+		let tls = crate::tls::Connect::default().build().unwrap();
+		let client = tokio::spawn(async move {
+			let _ = connect(&config, &tls, None, url.into(), moq_net::ALPNS, &crate::qmux_default()).await;
+		});
+		let advertised = server.await.unwrap();
+		client.abort();
+		advertised
+	}
+
+	/// The dial carries `idle_timeout` into QMux: unset is the 30s default, and zero is off.
+	#[tokio::test]
+	async fn the_idle_timeout_reaches_the_wire() {
+		kio::clock::host_time(); // real sockets over loopback
+		let delay = Some(time::Duration::ZERO.into());
+		assert_eq!(
+			advertised(Config {
+				delay,
+				..Default::default()
+			})
+			.await,
+			30_000
+		);
+		let idle_timeout = Some(time::Duration::from_secs(12).into());
+		assert_eq!(
+			advertised(Config {
+				delay,
+				idle_timeout,
+				..Default::default()
+			})
+			.await,
+			12_000
+		);
+		let idle_timeout = Some(time::Duration::ZERO.into());
+		assert_eq!(
+			advertised(Config {
+				delay,
+				idle_timeout,
+				..Default::default()
+			})
+			.await,
+			0
+		);
+	}
+
+	/// The WebSocket Ping keep-alive follows the idle timeout, so turning it off leaves a
+	/// quiet session silent.
+	#[test]
+	fn the_keep_alive_follows_the_idle_timeout() {
+		let session = crate::qmux_default();
+		let keep_alive = Config::default().resolve().session(&session).keep_alive.unwrap();
+		assert_eq!(
+			(keep_alive.interval, keep_alive.timeout),
+			(time::Duration::from_secs(5), time::Duration::from_secs(30))
+		);
+
+		let off = Config {
+			idle_timeout: Some(time::Duration::ZERO.into()),
+			..Default::default()
+		};
+		let session = off.resolve().session(&session);
+		assert_eq!(session.config.idle_timeout, None);
+		assert!(session.keep_alive.is_none());
+	}
+
+	/// IO that counts the bytes written through it.
+	struct Counted(tokio::io::DuplexStream, Arc<std::sync::atomic::AtomicUsize>);
+
+	impl AsyncRead for Counted {
+		fn poll_read(
+			mut self: std::pin::Pin<&mut Self>,
+			cx: &mut std::task::Context<'_>,
+			buf: &mut tokio::io::ReadBuf<'_>,
+		) -> std::task::Poll<std::io::Result<()>> {
+			std::pin::Pin::new(&mut self.0).poll_read(cx, buf)
+		}
+	}
+
+	impl AsyncWrite for Counted {
+		fn poll_write(
+			mut self: std::pin::Pin<&mut Self>,
+			cx: &mut std::task::Context<'_>,
+			buf: &[u8],
+		) -> std::task::Poll<std::io::Result<usize>> {
+			let written = std::task::ready!(std::pin::Pin::new(&mut self.0).poll_write(cx, buf))?;
+			self.1.fetch_add(written, std::sync::atomic::Ordering::Relaxed);
+			std::task::Poll::Ready(Ok(written))
+		}
+		fn poll_flush(
+			mut self: std::pin::Pin<&mut Self>,
+			cx: &mut std::task::Context<'_>,
+		) -> std::task::Poll<std::io::Result<()>> {
+			std::pin::Pin::new(&mut self.0).poll_flush(cx)
+		}
+		fn poll_shutdown(
+			mut self: std::pin::Pin<&mut Self>,
+			cx: &mut std::task::Context<'_>,
+		) -> std::task::Poll<std::io::Result<()>> {
+			std::pin::Pin::new(&mut self.0).poll_shutdown(cx)
+		}
+	}
+
+	/// Bytes a dialed session with `config` sends over two quiet minutes, against a server
+	/// whose own idle timeout and probes are off.
+	async fn quiet_bytes(config: Config) -> usize {
+		const ALPN: &str = "qmux-02.moq-lite-06";
+		let session = config.resolve().session(&crate::qmux_default());
+		let (client_io, server_io) = tokio::io::duplex(1 << 16);
+		let sent = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+		let mut client =
+			qmux::ws::Upgraded::new(Counted(client_io, sent.clone()), ALPN).with_session_config(session.config);
+		if let Some(keep_alive) = session.keep_alive {
+			client = client.with_keep_alive(keep_alive);
+		}
+		let mut quiet = crate::qmux_default();
+		quiet.idle_timeout = None;
+		quiet.rtt_interval = None;
+		let server = qmux::ws::Upgraded::new(server_io, ALPN).with_session_config(quiet);
+		let (client, server) = tokio::join!(client.connect(), server.accept());
+		let (_client, client_driver) = client.unwrap();
+		let (_server, server_driver) = server.unwrap();
+		tokio::spawn(client_driver);
+		tokio::spawn(server_driver);
+		// Let the handshake's last frames settle before counting.
+		tokio::time::advance(time::Duration::from_millis(1)).await;
+		tokio::task::yield_now().await;
+		let before = sent.load(std::sync::atomic::Ordering::Relaxed);
+		for _ in 0..120 {
+			tokio::time::advance(time::Duration::from_secs(1)).await;
+			tokio::task::yield_now().await;
+		}
+		sent.load(std::sync::atomic::Ordering::Relaxed) - before
+	}
+
+	/// With the idle timeout off, a quiet session sends nothing at all: no QMux keep-alive,
+	/// RTT probe, or WebSocket Ping. The default keeps pinging.
+	#[tokio::test(start_paused = true)]
+	async fn an_idle_timeout_off_leaves_a_quiet_session_silent() {
+		assert!(quiet_bytes(Config::default()).await > 0);
+		let off = Config {
+			idle_timeout: Some(time::Duration::ZERO.into()),
+			..Default::default()
+		};
+		assert_eq!(quiet_bytes(off).await, 0);
+	}
+
+	#[test]
+	fn an_idle_timeout_qmux_cannot_carry_is_refused() {
+		for timeout in [time::Duration::from_micros(999), time::Duration::from_millis(1 << 62)] {
+			let config = Config {
+				idle_timeout: Some(timeout.into()),
+				..Default::default()
+			};
+			assert!(matches!(config.validate(), Err(Error::IdleTimeoutRange)));
+		}
+		let config = Config {
+			idle_timeout: Some(time::Duration::from_millis(1).into()),
+			..Default::default()
+		};
+		assert!(config.validate().is_ok());
 	}
 }

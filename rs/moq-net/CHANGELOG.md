@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- *(net)* a track's first appended group skips every key below it, so a reader asking from the oldest group of a time-keyed track no longer waits forever on keys below its first group
 - *(net)* widen only frame-bounded starts to the head; pin the peer's own read
 - *(net)* a relay resuming mid-group asks upstream for the group's head
 

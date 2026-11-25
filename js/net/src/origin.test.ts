@@ -3,19 +3,12 @@ import { yieldNow } from "@moq/clock";
 import { getter, Once, race, Signal } from "@moq/signals";
 import { announcedView } from "./announced.test-util";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
+import { askedFirst } from "./claim.test-util.ts";
 import { defined } from "./defined.test-util.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import { type Cost, toHop, WireRoute } from "./hop.ts";
 import * as Instance from "./instance.ts";
-import {
-	bestCandidate,
-	compareRouteCandidates,
-	hooks,
-	mostSpecific,
-	presented,
-	spreadHash,
-	superseded,
-} from "./internal.ts";
+import { arrival, compareRoutes, hooks, mostSpecific, presented, spreadHash, superseded } from "./internal.ts";
 import * as Mint from "./mint.ts";
 import { SessionBroadcast, textFrame } from "./mock.ts";
 import type { Consumer, Table } from "./origin.ts";
@@ -2219,9 +2212,16 @@ test("a claim nearer its path outranks a broader one", () => {
 	const path = Path.from("src/derived");
 	const exact = { ...WireRoute.default, instance: Instance.parse("a"), claimed: true, cost: 9n, priority: -5 };
 	const broad = { ...WireRoute.default, instance: Instance.parse("b"), claimed: true, cost: 1n, above: 1n };
-	expect(compareRouteCandidates(path, path, exact, broad)).toBeLessThan(0);
-	expect(compareRouteCandidates(path, path, broad, exact)).toBeGreaterThan(0);
-	expect(compareRouteCandidates(path, path, exact, { ...broad, above: 0n })).toBeGreaterThan(0);
+	const pick = (...routes: WireRoute[]) =>
+		mostSpecific(
+			path,
+			(prefix) => (prefix === path ? routes : []),
+			(route) => ({ identity: route, route }),
+		);
+	expect(pick(exact, broad)).toBe(exact);
+	expect(pick(broad, exact)).toBe(exact);
+	const level = { ...broad, above: 0n };
+	expect(pick(exact, level)).toBe(level);
 });
 
 // A claim shown above its own prefix is filed deeper than it is: it counts for where it really is,
@@ -2234,34 +2234,229 @@ test("the most specific claim wins whichever prefix shows it", () => {
 		[Path.from("src/a/b"), broad],
 		[Path.from("src/a"), exact],
 	]);
-	const pick = (prefix: Path.Valid) => at.get(prefix);
-	expect(mostSpecific(path, pick, (route) => route)).toBe(exact);
-	// Claims as specific as each other go to the deepest prefix.
-	const same = new Map([
-		[Path.from("src/a/b"), { ...WireRoute.default, claimed: true, above: 1n }],
-		[Path.from("src/a"), exact],
-	]);
-	expect(
-		mostSpecific(
-			path,
-			(prefix) => same.get(prefix),
-			(route) => route,
-		)?.above,
-	).toBe(1n);
+	const pick = (prefix: Path.Valid) => [at.get(prefix)].filter((route) => route !== undefined);
+	expect(mostSpecific(path, pick, (route) => ({ identity: route, route }))).toBe(exact);
+	// Claims as specific as each other tie to the most recently received, wherever each is filed.
+	for (const newer of ["deep", "exact"]) {
+		const deep = { ...WireRoute.default, claimed: true, above: 1n };
+		const shallow = { ...WireRoute.default, claimed: true };
+		for (const route of newer === "deep" ? [shallow, deep] : [deep, shallow]) arrival(route);
+		const same = new Map([
+			[Path.from("src/a/b"), deep],
+			[Path.from("src/a"), shallow],
+		]);
+		const pickSame = (prefix: Path.Valid) => [same.get(prefix)].filter((route) => route !== undefined);
+		expect(mostSpecific(path, pickSame, (route) => ({ identity: route, route }))).toBe(
+			newer === "deep" ? deep : shallow,
+		);
+	}
 });
 
-// An instance's epoch supersedes only within one claim, as Rust's `Epochs` keys by prefix and Above:
+// Claims of one prefix rank against each other wherever each is filed, as `best_route` in Rust: a
+// draining claim filed deeper loses to a live one made at its prefix, and an instance's higher epoch
+// at the prefix supersedes its older one filed deeper.
+test("a claim filed deeper ranks against the claim of its prefix", () => {
+	const path = Path.from("src/a/b");
+	const instance = Instance.parse("i");
+	const made = { ...WireRoute.default, instance, claimed: true, epoch: 2n, cost: 5n };
+	for (const deep of [
+		{ ...WireRoute.default, instance: Instance.parse("j"), claimed: true, above: 1n, draining: true, cost: 1n },
+		{ ...WireRoute.default, instance, claimed: true, epoch: 1n, above: 1n, cost: 1n },
+	]) {
+		const at = new Map<Path.Valid, WireRoute>([
+			[Path.from("src/a"), deep],
+			[Path.from("src"), made],
+		]);
+		const pick = (prefix: Path.Valid) => [at.get(prefix)].filter((route) => route !== undefined);
+		expect(mostSpecific(path, pick, (route) => ({ identity: route, route }))).toBe(made);
+	}
+});
+
+// An announce stream rooted beneath claims of one prefix filed at several depths walks the whole
+// tier, as a request does: an instance's older epoch filed deeper never wins back the root once
+// its newer epoch is superseded by rank, as `TableCursor::best` in Rust.
+test("a rooted announce stream ranks the whole tier of claims covering its root", async () => {
+	const origin = new Producer();
+	const a = Instance.parse("a");
+	const b = Instance.parse("b");
+	const newer = wireOf(origin).receive(Path.from("src"), { instance: a, epoch: 2n, hops: [PEER], cost: 10n });
+	const other = wireOf(origin).receive(Path.from("src/a/b"), { instance: b, hops: [PEER], cost: 5n, above: 2n });
+	const older = wireOf(origin).receive(Path.from("src/a"), {
+		instance: a,
+		epoch: 1n,
+		hops: [PEER],
+		cost: 1n,
+		above: 1n,
+	});
+	const reader = origin.scope(Path.from("src/a/b"), Path.Prefixes.all()).consume();
+	const covering = await announcedView(reader, undefined, { covering: true });
+	expect(covering.peek().get(Path.empty())?.instance).toBe(b);
+	await covering.close();
+	for (const handle of [newer, other, older]) handle.close();
+	origin.close();
+});
+
+// Claims of one tier filed at different depths that tie through every rank hash on the path a
+// covering stream presents them at, as a request for it does, so the stream advertises what the
+// request resolves to, as `a_covering_root_advertises_what_a_request_for_it_resolves` in Rust.
+test("a covering root advertises what a request for it resolves", async () => {
+	const root = Path.from("src/a");
+	// Each pair in both orders, so a tie the hash settles goes to either filing.
+	for (const [i, swap] of [...Array(16).keys()].flatMap((i) => [[i, false] as const, [i, true] as const])) {
+		const origin = new Producer();
+		const names = swap ? [`b${i}`, `a${i}`] : [`a${i}`, `b${i}`];
+		const made = { ...WireRoute.default, instance: Instance.parse(names[0]), hops: [PEER], claimed: true };
+		const filed = { ...made, instance: Instance.parse(names[1]), above: 1n };
+		const handles = [wireOf(origin).receive(Path.from("src"), made), wireOf(origin).receive(root, filed)];
+		const at = new Map<Path.Valid, WireRoute>([
+			[Path.from("src"), made],
+			[root, filed],
+		]);
+		const pick = (prefix: Path.Valid) => [at.get(prefix)].filter((route) => route !== undefined);
+		// The claim filed at the path itself wins the tie, as a route entered here at the path skips
+		// Rust's hash, whichever instance it carries.
+		expect(mostSpecific(root, pick, (route) => ({ identity: route, route }))?.instance).toBe(filed.instance);
+		const reader = origin.scope(root, Path.Prefixes.all()).consume();
+		const covering = await announcedView(reader, undefined, { covering: true });
+		expect(covering.peek().get(Path.empty())?.instance).toBe(filed.instance);
+		await covering.close();
+		for (const handle of handles) handle.close();
+		origin.close();
+	}
+});
+
+// Two claims of different instances at exactly the requested path skip the hash, as routes entered
+// here at the path do in Rust and as the draft's Resolution says, so the newest wins whichever
+// instance hashes lower: a publisher restarting under a new instance takes over at once.
+test("the newest claim at the path wins a tie whatever its hash", () => {
+	const path = Path.from("src/a");
+	for (const i of Array(16).keys()) {
+		const [a, b] = [`a${i}`, `b${i}`].map((name) => ({
+			...WireRoute.default,
+			instance: Instance.parse(name),
+			hops: [PEER],
+			claimed: true,
+		}));
+		// The candidates at the path, newest first, each received anew and in that order.
+		const best = (...routes: WireRoute[]) => {
+			const fresh = routes.map((route) => ({ route }));
+			for (const entry of fresh.toReversed()) arrival(entry);
+			return mostSpecific(
+				path,
+				(at) => (at === path ? fresh : []),
+				(entry) => ({ identity: entry, route: entry.route }),
+			)?.route;
+		};
+		expect(best(a, b)).toBe(a);
+		expect(best(b, a)).toBe(b);
+	}
+});
+
+// One claim reached at two filings ties through every rank and hash, since both carry its instance,
+// so the most recently received wins wherever each is filed, as Rust's newest entry and the draft's
+// Resolution have it.
+test("a tie across filings goes to the most recently received claim", async () => {
+	const root = Path.from("src/a/b");
+	const instance = Instance.parse("cam");
+	const deep = { ...WireRoute.default, instance, hops: [PEER], claimed: true, above: 1n };
+	const shallow = { ...WireRoute.default, instance, hops: [toHop(11n)], claimed: true };
+	const arrivals: [Path.Valid, WireRoute][][] = [
+		[
+			[Path.from("src/a"), deep],
+			[Path.from("src"), shallow],
+		],
+		[
+			[Path.from("src"), shallow],
+			[Path.from("src/a"), deep],
+		],
+	];
+	for (const order of arrivals) {
+		const origin = new Producer();
+		const handles = order.map(([prefix, route]) => wireOf(origin).receive(prefix, route));
+		const reader = origin.scope(root, Path.Prefixes.all()).consume();
+		const covering = await announcedView(reader, undefined, { covering: true });
+		expect(covering.peek().get(Path.empty())?.hops).toEqual(order[1][1].hops);
+		await covering.close();
+		for (const handle of handles) handle.close();
+		origin.close();
+	}
+});
+
+// A local broadcast and a claim at the root tie on rank, and a request takes the local broadcast,
+// so a covering stream rooted there shows it too, though the claim came later.
+test("a covering root shows the local broadcast a request takes over an equal claim", async () => {
+	const origin = new Producer();
+	const path = Path.from("live");
+	const local = origin.route(path, { instance: { id: INSTANCE, epoch: 0n }, cost: 5n });
+	const reader = origin.scope(path, Path.Prefixes.all()).consume();
+	const covering = await announcedView(reader, undefined, { covering: true });
+	const claim = origin.claim(path, { cost: 5n });
+	const request = origin.consume().request(path);
+	await settle();
+	expect(request.active.peek()?.instance).toBe(INSTANCE);
+	expect(covering.peek().get(Path.empty())?.instance).toBe(INSTANCE);
+	await covering.close();
+	request.close();
+	claim.close();
+	local.close();
+	origin.close();
+});
+
+// A claim announced after starting hidden, or announced again after a withdrawal, is received then,
+// as Rust files a new entry for each announce, so beneath the path it yields a full tie across
+// filings to the claim held longer.
+test("a claim announced again ranks as newly received", async () => {
+	const origin = new Producer();
+	const root = Path.from("src/a/b");
+	const instance = { id: Instance.parse("cam"), epoch: 0n };
+	// Filed at `src` with Above 0, and through a scope at `src/a` with Above 1: one claim prefix.
+	const shallow = origin.claim(Path.from("src"), { hidden: true, instance });
+	const deep = origin.scope(Path.empty(), Path.Prefixes.parse(["src/a"])).claim(Path.from("src"), { instance });
+	const reader = origin.scope(root, Path.Prefixes.all()).consume();
+	const covering = await announcedView(reader, undefined, { covering: true });
+	const shown = async () => {
+		await settle();
+		return covering.peek().get(Path.empty())?.above ?? 0n;
+	};
+	expect(await shown()).toBe(1n);
+	shallow.announce();
+	expect(await shown()).toBe(1n);
+	deep.withdraw();
+	deep.announce();
+	expect(await shown()).toBe(0n);
+	await covering.close();
+	shallow.close();
+	deep.close();
+	origin.close();
+});
+
+// A draining route still reaches its origin, so it outranks one held unavailable, however cheap.
+test("a draining route outranks an unavailable one", () => {
+	const draining = { ...WireRoute.default, draining: true, cost: 5n };
+	const held = { ...WireRoute.default, available: false, cost: 1n };
+	expect(compareRoutes(draining, held)).toBeLessThan(0);
+	expect(compareRoutes(held, draining)).toBeGreaterThan(0);
+});
+
+// An instance's epoch supersedes only within one claim, as Rust's `Epochs` keys by the claim's prefix:
 // a broader claim shown at the path, at a higher epoch, is another claim than the exact one there.
 test("a broader claim at a higher epoch does not supersede the exact one", () => {
 	const path = Path.from("src/a");
 	const instance = Instance.parse("i");
 	const exact = { ...WireRoute.default, instance, claimed: true, epoch: 0n };
 	const broad = { ...WireRoute.default, instance, claimed: true, epoch: 1n, above: 1n };
-	expect(bestCandidate(path, path, [exact, broad], (route) => route)).toBe(exact);
-	expect(bestCandidate(path, path, [broad, exact], (route) => route)).toBe(exact);
+	// The best of `routes`, newest first, all filed at the path.
+	const best = (...routes: WireRoute[]) =>
+		mostSpecific(
+			path,
+			(at) => (at === path ? routes : []),
+			(route) => ({ identity: route, route }),
+		);
+	expect(best(exact, broad)).toBe(exact);
+	expect(best(broad, exact)).toBe(exact);
 	// The same claim at a higher epoch still supersedes its older one.
 	const newer = { ...exact, epoch: 2n };
-	expect(bestCandidate(path, path, [exact, newer], (route) => route)).toBe(newer);
+	expect(best(newer, exact)).toBe(newer);
 	expect(superseded(exact, [exact, newer])).toBe(true);
 	expect(superseded(exact, [exact, broad])).toBe(false);
 });
@@ -2833,6 +3028,48 @@ test("a publisher weighs a local broadcast against the routes it may forward onl
 	received.close();
 	originated.close();
 	localRoute.broadcast.close();
+	origin.close();
+});
+
+// A full tie beneath the path holds the claim received first, as a request does; the scope's
+// merged root row lists that claim first, which `presented` must not read as the newest.
+test("a scope's root row presents the tied claim a request holds", async () => {
+	const origin = new Producer();
+	const instance = { id: Instance.parse("cam"), epoch: 0n };
+	const older = origin.claim(Path.from("src"), { instance });
+	const newer = origin.claim(Path.from("src"), { instance });
+	const reader = origin.scope(Path.from("src/a"), Path.Prefixes.all()).consume();
+	await settle();
+	const all = wireOf(origin.consume()).advertised.peek()?.get(Path.from("src"));
+	const table = wireOf(reader).advertised.peek();
+	if (!all || !table) throw new Error("expected a table");
+	// Newest first at its own filing.
+	const held = all[1];
+	expect(presented(Path.empty(), table, () => true, { root: Path.from("src/a") }).get(Path.empty())?.identity).toBe(
+		held.identity,
+	);
+	const request = origin.consume().request(Path.from("src/a"));
+	expect(await askedFirst(Path.from("src/a"), [older, newer])).toBe(older);
+	request.close();
+	older.close();
+	newer.close();
+	origin.close();
+});
+
+// A broadcast published above a scope's root serves only its own path, so the merged root row,
+// whose first eligible entry an unsolicited PUBLISH_NAMESPACE offers, leads with the costlier claim
+// of the same prefix that serves the root.
+test("a scope's root row leads with a claim that serves it over a broadcast above it", async () => {
+	const origin = new Producer();
+	const broadcast = origin.route(Path.from("src"));
+	const filed = origin.scope(Path.empty(), Path.Prefixes.parse(["src/a"])).claim(Path.from("src"), { cost: 5n });
+	const reader = origin.scope(Path.from("src/a"), Path.Prefixes.all()).consume();
+	await settle();
+	const row = wireOf(reader).advertised.peek()?.get(Path.empty());
+	if (!row) throw new Error("expected a root row");
+	expect(row.map((entry) => entry.route.instance)).toEqual([filed.instance, broadcast.instance]);
+	broadcast.close();
+	filed.close();
 	origin.close();
 });
 

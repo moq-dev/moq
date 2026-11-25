@@ -282,10 +282,11 @@ function collapse(ranges: readonly WireRange[]): WireRange[] {
 			kinds.push({ ...range });
 			continue;
 		}
-		// The join reaching furthest back, under the widest max, delivers what each of the others does.
+		// The join reaching furthest back, none past one with no lag limit, under the widest max,
+		// delivers what each of the others does.
 		const held = cover.start?.live;
 		if (held !== undefined && live !== undefined)
-			cover.start = { live: { min: Math.max(held.min, live.min), max: widest(held.max, live.max) } };
+			cover.start = { live: { min: widest(held.min, live.min), max: widest(held.max, live.max) } };
 		// The join placed earliest, under the widest max.
 		const placed = cover.start?.joined;
 		if (placed !== undefined && joined !== undefined) {

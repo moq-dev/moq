@@ -736,6 +736,7 @@ interface ReceiveWindows {
 	initialMaxStreamDataBidiLocal: bigint;
 	initialMaxStreamDataBidiRemote: bigint;
 	initialMaxStreamDataUni: bigint;
+	maxIdleTimeout: bigint;
 }
 
 // How many streams the WebSocket fallback lets a server open in each direction: a qmux
@@ -836,6 +837,7 @@ test("the WebSocket fallback grants stream limits and receive windows", async ()
 			initialMaxStreamDataBidiLocal: 4_194_304n,
 			initialMaxStreamDataBidiRemote: 4_194_304n,
 			initialMaxStreamDataUni: 4_194_304n,
+			maxIdleTimeout: 30_000n,
 		},
 	});
 	expect(
@@ -844,6 +846,7 @@ test("the WebSocket fallback grants stream limits and receive windows", async ()
 				maxStreams: 3,
 				receiveWindow: 65_537,
 				streamReceiveWindow: 16_385,
+				idleTimeout: null,
 			},
 		}),
 	).toMatchObject({
@@ -854,6 +857,7 @@ test("the WebSocket fallback grants stream limits and receive windows", async ()
 			initialMaxStreamDataBidiLocal: 16_385n,
 			initialMaxStreamDataBidiRemote: 16_385n,
 			initialMaxStreamDataUni: 16_385n,
+			maxIdleTimeout: 0n,
 		},
 	});
 });
@@ -864,6 +868,7 @@ test("WebSocket limits must be positive safe integers", async () => {
 			await expect(connect(url, { websocket: { [key]: value } })).rejects.toThrow(RangeError);
 		}
 	}
+	await expect(connect(url, { websocket: { idleTimeout: Duration.ZERO } })).rejects.toThrow(RangeError);
 });
 
 // A WebTransport whose handshake nothing ever answers, as a dial to a dead target is.

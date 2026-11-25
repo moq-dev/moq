@@ -1,6 +1,6 @@
 ---
 name: verify-credit
-description: Model-check receive and send credit (`rs/moq-quic/src/connection/streams/lease.rs` leases and `evict_if_stuck`, `rs/moq-net/src/coding/reader.rs` pacing, `transport/boxed.rs` pausing, `lite/publisher.rs` `TrackRun::opening`, `transport/open.rs`) with TLA+. Use when a change touches how a lease returns credit, `MAX_STREAM_DATA`, stuck-window eviction (`evicted_held`, `trim_unlooked`, `unlooked`), the pace gate or where ingest pauses a stream, the paused budget (`Budgeted::pause`, `reserve`, the half-window cap, slot allowances, `set_window`, `shape`), or how a group waits for stream credit (`Lines::make_room`, `give_way`, `shed`, `stuck`), or when a credit hang needs every ordering of arrivals, reads, pauses, and evictions checked rather than a random sweep.
+description: Model-check receive and send stream credit, pacing, paused budgets, and stuck-window eviction (`rs/moq-net/verify/credit/`) with TLA+. Use when changing flow-control, pacing, or credit-accounting code in `rs/moq-quic` or `rs/moq-net`.
 ---
 
 # Verify credit
