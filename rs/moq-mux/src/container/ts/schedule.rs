@@ -1371,10 +1371,31 @@ impl Schedule {
 				order.append(&mut copies);
 			}
 		}
+		// The clock and rate the copies laid so far in the slot put in force, and the last one's
+		// unflagged version.
+		let (mut in_force, mut version) = ((self.clock, self.rate), None);
 		for i in order {
 			let (unit, take) = (&mut self.units[i], take[i]);
 			if take == 0 {
 				continue;
+			}
+			if unit.is_tables() {
+				let sets = unit.tables.as_ref().map(|program| (Some(program.clock), program.rate));
+				// The slot lays its copies back to back, faster than TBsys passes them on: one of
+				// the version laid just before it, putting nothing new in force, adds only a burst.
+				// It is done where it stands, as padded once Bsys holds the copy.
+				if unit.sent == 0
+					&& version.is_some()
+					&& unit.version() == version
+					&& sets.is_none_or(|sets| sets == in_force)
+				{
+					unit.packets.clear();
+					unit.runs.clear();
+					begun += usize::from(unit.tables.is_some());
+					continue;
+				}
+				in_force = sets.unwrap_or(in_force);
+				version = unit.version();
 			}
 			if unit.sent == 0 {
 				keyframe |= unit.keyframe;
@@ -1418,8 +1439,8 @@ impl Schedule {
 	/// so the grid adds one only to a period without. The copy is due in its slot and goes out
 	/// as soon as TBsys and Bsys take it, past the copies the media leads when it matches them,
 	/// never past a different version; padded, a copy of the same tables still in Bsys covers
-	/// it ([`Self::covered`]). Periods are absolute on the grid, so two exporters of a
-	/// broadcast repeat in the same slots.
+	/// it ([`Self::covered`]), and unpadded, one laid before it in the same slot. Periods are
+	/// absolute on the grid, so two exporters of a broadcast repeat in the same slots.
 	fn repeat(&mut self, index: u128) {
 		let period = index / REPEAT_SLOTS;
 		// Tables too large for Bsys to take each period repeat as fast as it takes them.
@@ -2724,6 +2745,73 @@ mod tests {
 				.enumerate()
 				.position(|(n, &place)| usize::from(place) != n % count);
 			assert_eq!(interrupted, None, "{window} {count} {leads:?}: {places:?}");
+		}
+	}
+
+	/// Unpadded, a slot lays each version of the tables once, however many copies the media and
+	/// the grid queue for it, since it lays them back to back; a revision still goes out, and
+	/// the tables keep repeating.
+	#[test]
+	fn a_slot_lays_each_version_once_unpadded() {
+		for window in [0, 100, 1_000] {
+			let mut schedule = Schedule::new(Duration::from_millis(window));
+			schedule.set_tables(100);
+			schedule.set_clock(1);
+			schedule.set_buffer(1, VIDEO);
+			let psi = |mark: u8| Psi {
+				packets: marked_tables(mark, 1),
+				flagged: None,
+				clock: 1,
+			};
+			schedule.set_psi(psi(1));
+			let (mut versions, mut periods, mut media) = (Vec::new(), Vec::new(), 0);
+			let mut lay = |schedule: &mut Schedule, horizon: u128| {
+				while let Some(slot) = schedule.next(Some(slot(ms(horizon)))).unwrap() {
+					let mut marks = table_marks(&slot);
+					let laid = marks.len();
+					marks.dedup();
+					assert_eq!(
+						laid,
+						2 * marks.len(),
+						"{window} ms, slot {}: {:?}",
+						slot.index,
+						table_marks(&slot)
+					);
+					if !marks.is_empty() {
+						periods.push(slot.index / REPEAT_SLOTS);
+					}
+					if slot
+						.packets
+						.as_chunks::<{ TsPacket::SIZE }>()
+						.0
+						.iter()
+						.any(|packet| pid(packet) == 1)
+					{
+						media = slot.index / REPEAT_SLOTS;
+					}
+					versions.extend(marks);
+				}
+			};
+			// A frame every 10 ms, each leading a copy, and a revision at 1 s.
+			for ms in (0..2_000).step_by(10) {
+				if ms == 1_000 {
+					schedule.set_psi(psi(2));
+				}
+				schedule.lead(Tables {
+					rate: None,
+					added: Vec::new(),
+				});
+				schedule.push(1, timing(ms), unit(1, 1), ms % 1_000 == 0).unwrap();
+				lay(&mut schedule, ms);
+			}
+			lay(&mut schedule, 4_000);
+			// While the media flows, every repeat period still carries a copy.
+			periods.dedup();
+			assert_eq!(periods, (0..=media).collect::<Vec<_>>(), "{window} ms");
+			assert!(
+				versions.contains(&1) && versions.contains(&2),
+				"{window} ms: {versions:?}"
+			);
 		}
 	}
 
