@@ -40,6 +40,10 @@ Decided 2026-11-24 (maintainer, /quest-plan):
 - ✅ The maintainer picks the winning path from the spike's numbers (rejected:
   the implementer picks), since it likely commits moq to owning an Opus
   codec for years.
+- ✅ The safe implementation is the crate `rs/moq-opus` (maintainer, after
+  planning). Under path (a), code moves into it from moq-libopus as it is
+  converted; under (b), it holds a fork if one is needed. An external crate
+  used unchanged needs no crate of ours.
 
 Milestone m3: the maintainer asked for this to follow #9578, and it is
 additive with no API change.
