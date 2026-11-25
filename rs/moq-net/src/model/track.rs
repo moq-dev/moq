@@ -4525,6 +4525,9 @@ impl TrackState {
 		for key in keys {
 			self.evict_group(key, err.clone());
 		}
+		// Nor does anything it let go of bound this track's groups or edge.
+		self.departed.clear();
+		self.departed_edge = None;
 		Err(err)
 	}
 
