@@ -78,7 +78,7 @@ async def main():
         # Already-encoded frames: the catalog is filled from the bitstream
         audio = moq.media.TrackProducer.audio(broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.opus(), data=opus_init_bytes))
         audio.write_frame(payload, moq.media.CatalogProducer(broadcast).now())
-        audio.cut()   # audio has no keyframes, so this is what gives it groups
+        audio.cut()   # once a group holds 200 ms: audio has no keyframes, so cuts give it groups
 
         # Or raw pixels, encoded inside the binding (VideoToolbox, Media Foundation, NVENC, openh264)
         catalog_producer = moq.media.CatalogProducer(broadcast)
@@ -119,7 +119,7 @@ one to one; the API reference has the names, and [Layers](/lib/layers)
 shows which module holds each.
 
 - **Context managers.** `async with` on a client or session awaits a graceful shutdown when the body exits cleanly, and cancels at once when it raises, so your exception survives.
-- **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `cut()`: after every frame, or less often to batch frames into fewer groups.
+- **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `cut()`: after the frame that brings a group to about 200 ms, so a relay keeps one stream (group) per 200 ms rather than one per packet. Frames forward as they are written either way.
 - **Timeline breaks.** On a seek or pause, call `discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
 - **Media reads.** `media.TrackConsumer`, `moq.audio.Consumer`, and `moq.video.Consumer` yield, in order, frames, a `Gap` where media was lost, and an `End` where the publisher stopped its encoder. A gap breaks continuity. An encoder end is not stream EOF: following frames before its endpoint are the old encoder's drain; the first at or past it starts fresh. A decoder reads everything the track still holds unless a live player sets `start=moq.media.DecodeStart.LATEST` in its decoder output, which joins at the newest group and skips the cached backlog.
 - **Decoded frames hold decoder buffers.** Drop each frame from a `moq.video.Consumer` promptly, or the decoder stalls. `resize` is best effort, so read each frame's `width()` and `height()`.

@@ -32,7 +32,11 @@ impl codec::Bridge for Bridge {
 		let pts = moq_net::Timestamp::from_micros(frame.timestamp_us).map_err(moq_mux::Error::from)?;
 		// The packet states its own length; one that does not counts as none.
 		let end = moq_mux::codec::opus::packet_samples(&frame.payload)
-			.map(|samples| frame.timestamp_us.saturating_add(u64::from(samples) * 1_000_000 / 48_000))
+			.map(|samples| {
+				frame
+					.timestamp_us
+					.saturating_add(u64::from(samples) * 1_000_000 / 48_000)
+			})
 			.map(moq_net::Timestamp::from_micros)
 			.transpose()
 			.map_err(moq_mux::Error::from)?;

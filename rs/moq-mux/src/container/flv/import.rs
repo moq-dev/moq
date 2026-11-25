@@ -172,6 +172,8 @@ struct AudioStream {
 	config: AudioConfig,
 	/// Where the open group closes.
 	join: crate::container::Join,
+	/// The latest frame's timestamp, whose spacing estimates how long the next frame plays.
+	previous: Option<Timestamp>,
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Import<E> {
@@ -582,7 +584,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	/// Write one audio frame, which forwards at once, closing its group once that carries a join.
 	///
-	/// A tag states no duration, so the group closes on the first frame starting a join past it.
+	/// A tag states no duration, so each frame is taken to play as long as the spacing before it. A
+	/// frame a gap or rewind puts outside the open group opens a new one, so the producer checks it
+	/// as a group start.
 	fn write_audio(&mut self, track_id: u8, data: &[u8], timestamp: u64) -> crate::Result<()> {
 		if !self.audio.contains_key(&track_id) {
 			tracing::debug!("audio frame before config, dropping");
@@ -595,22 +599,30 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// the track set is declared; release the reservation to publish.
 		self.initial_reservation = None;
 		let stream = self.audio.get_mut(&track_id).expect("checked above");
-		let keyframe = stream.track.needs_keyframe();
-		if keyframe {
-			stream.join.reset();
-		}
-		let result = stream
-			.track
-			.write(Frame {
+		let spacing = stream
+			.previous
+			.and_then(|previous| timestamp.checked_sub(previous).ok());
+		stream.previous = Some(timestamp);
+		let end = spacing.and_then(|spacing| timestamp.checked_add(spacing).ok());
+		let result = (|| {
+			if !stream.track.needs_keyframe() && stream.join.opens(timestamp) {
+				stream.track.cut(None)?;
+			}
+			let keyframe = stream.track.needs_keyframe();
+			if keyframe {
+				stream.join.reset();
+			}
+			stream.track.write(Frame {
 				timestamp,
 				duration: None,
 				payload: Bytes::copy_from_slice(data),
 				keyframe,
-			})
-			.and_then(|()| match stream.join.fill(timestamp, timestamp) {
-				true => stream.track.cut(None),
-				false => Ok(()),
-			});
+			})?;
+			if stream.join.fill(timestamp, end.unwrap_or(timestamp)) {
+				stream.track.cut(None)?;
+			}
+			Ok(())
+		})();
 		self.refuse(result)
 	}
 
@@ -745,6 +757,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				track: media,
 				config,
 				join: crate::container::Join::default(),
+				previous: None,
 			},
 		);
 		Ok(())

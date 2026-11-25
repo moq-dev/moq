@@ -28,7 +28,7 @@ export interface LocalProps {
 	microphone?: {
 		/** Capture the microphone. Pass a Signal to share it with the app. Defaults to false. */
 		enabled?: GetterInit<boolean>;
-		/** The time between the microphone's audio join points; see {@link Publish.Audio.Encoder.join}. Defaults to 20 ms. */
+		/** The time between the microphone's audio join points; see {@link Publish.Audio.Encoder.join}. Defaults to 200 ms. */
 		join?: Duration | Signal<Duration>;
 	};
 	/** The screen share's switch. */
@@ -37,7 +37,7 @@ export interface LocalProps {
 		enabled?: GetterInit<boolean>;
 		/** The share's audio. */
 		audio?: {
-			/** The time between the share audio's join points; see {@link Publish.Audio.Encoder.join}. Defaults to 20 ms. */
+			/** The time between the share audio's join points; see {@link Publish.Audio.Encoder.join}. Defaults to 200 ms. */
 			join?: Duration | Signal<Duration>;
 		};
 	};

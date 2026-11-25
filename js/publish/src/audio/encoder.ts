@@ -767,7 +767,8 @@ export class Encoder {
 							// the next. Frames forward as they are written rather than waiting for the group
 							// to fill. A dropped group leaves a gap for the codec's PLC.
 							const open = live.start;
-							const start = open !== undefined && timestamp.saturatingSub(open).lt(this.#join) ? open : timestamp;
+							const start =
+								open !== undefined && timestamp.saturatingSub(open).lt(this.#join) ? open : timestamp;
 							const keyframe = start !== open;
 							live.producer.encode(frame, timestamp, keyframe);
 							const end = timestamp.add(duration);

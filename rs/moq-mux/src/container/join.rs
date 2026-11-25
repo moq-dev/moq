@@ -41,6 +41,16 @@ impl Join {
 		full
 	}
 
+	/// Whether media from `start` can't continue the open group, since it starts a whole span past
+	/// the group's start (a gap) or before it (a rewind), so the caller cuts before writing it.
+	pub fn opens(&self, start: moq_net::Timestamp) -> bool {
+		match (self.start, Duration::try_from(start)) {
+			(Some(opened), Ok(start)) => self.spans(opened, start),
+			(Some(_), Err(_)) => true,
+			(None, _) => false,
+		}
+	}
+
 	/// Whether a group from `start` to `end` is full, for a caller that tracks its own group.
 	///
 	/// Ending before it starts is full, since the timeline broke, and so is an unscaled timestamp.
@@ -107,6 +117,16 @@ mod tests {
 		// Measured from the media after the reset, not the group the caller closed.
 		assert!(!join.fill(micros(1_000_000), micros(1_100_000)));
 		assert!(join.fill(micros(1_100_000), micros(1_200_000)));
+	}
+
+	#[test]
+	fn a_gap_or_rewind_opens_a_group() {
+		let mut join = Join::default();
+		assert!(!join.opens(micros(1_000_000)), "no group is open");
+		assert!(!join.fill(micros(1_000_000), micros(1_020_000)));
+		assert!(!join.opens(micros(1_020_000)));
+		assert!(join.opens(micros(1_200_000)));
+		assert!(join.opens(micros(999_999)));
 	}
 
 	#[test]

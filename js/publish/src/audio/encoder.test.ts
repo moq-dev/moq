@@ -865,8 +865,9 @@ test("AAC frames with fractional durations stay one stream", async () => {
 	}
 });
 
-// The first frame at the minimum opens the next group. A timeline break closes the group early,
-// so the first frame after it opens a fresh one.
+// The frame that reaches the minimum closes its group at once, so the relay sees it finish without
+// waiting for the next frame. A timeline break closes the group early, so the first frame after it
+// opens a fresh one.
 test("a join packs frames until the minimum and restarts after a break", async () => {
 	using _webcodecs = installFakeWebCodecs();
 	using env = await setup(new Order(), undefined, Duration.millis(100));
@@ -880,12 +881,14 @@ test("a join packs frames until the minimum and restarts after a break", async (
 		await feed.drain();
 	};
 
-	await push(5);
-	expect(groups).toEqual([5]);
+	await push(4);
+	expect(groups).toEqual([4]);
 	expect(appended[0].closed.peek()).toBeUndefined();
-	await push(2); // the next frame opens a new group and closes the first
-	expect(groups).toEqual([5, 2]);
+	await push(1); // the fifth frame brings the group to 100ms
 	expect(appended[0].closed.peek()).toBeNull();
+	await push(2);
+	expect(groups).toEqual([5, 2]);
+	expect(appended[1].closed.peek()).toBeUndefined();
 
 	enabled.set(false);
 	await settle();
@@ -897,17 +900,17 @@ test("a join packs frames until the minimum and restarts after a break", async (
 	expect(written.map(([timestamp]) => timestamp)).toEqual([
 		20_000, 40_000, 60_000, 80_000, 100_000, 120_000, 140_000, 159_999, 200_000, 220_000,
 	]);
-	// 120ms opens the next group, closing the five frames at 20-100ms. The break ends that group
-	// early, so resumed frames start a fresh group after the marker.
+	// The frame at 100ms closes the five frames at 20-100ms. The break ends the next group early,
+	// so resumed frames start a fresh group after the marker.
 	expect(groups).toEqual([5, 2, 1, 2]);
 });
 
-test("default audio groups carry twenty milliseconds", async () => {
+test("default audio groups carry two hundred milliseconds", async () => {
 	using _webcodecs = installFakeWebCodecs();
 	for (const [frameMs, packets, groupMs] of [
-		[2.5, 8, undefined],
-		[10, 2, undefined],
-		[20, 1, undefined],
+		[2.5, 80, undefined],
+		[10, 20, undefined],
+		[20, 10, undefined],
 		[2.5, 1, 1],
 	] as const) {
 		using env = await setup(
@@ -988,7 +991,8 @@ test("a rendition written behind another advertises delay", async () => {
 		]);
 		expect(encoder.out.catalog.peek()?.delay).toBeUndefined();
 
-		for (let index = 4; index < 60; index++) await push(index);
+		// The window closes at the first group to start a second in: 200 ms groups put that 1.2 s in.
+		for (let index = 4; index < 70; index++) await push(index);
 		await feed.drain();
 		expect(encoder.out.catalog.peek()).toMatchObject({ delay: 100 });
 	} finally {
@@ -1185,8 +1189,8 @@ test("audio failure stays local through demand changes and capture format re-arm
 		const siblingTrack = sibling.track.peek();
 		if (!siblingTrack) throw new Error("expected demanded sibling track");
 		expect(siblingTrack.appendGroup(Moq.Time.Timestamp.fromMicros(0)).start).toBe(0n);
-		await push(0, 1); // a group per frame
-		expect((await subscriber.largest())?.group).toBe(40_000n);
+		await push(0, 1); // 60 ms, so one open group
+		expect((await subscriber.largest())?.group).toBe(0n);
 		catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track: net.track(Broadcast.CATALOG_TRACK) });
 		expect((await catalog.latest())?.value.audio?.renditions.audio?.enabled).not.toBe(false);
 		const live = FakeAudioEncoder.instances.at(-1);
@@ -1228,7 +1232,7 @@ test("audio failure stays local through demand changes and capture format re-arm
 		recovered = net.track(config.track).subscribe();
 		await settle();
 		await push(3, 2);
-		expect((await recovered.largest())?.group).toBe(100_000n);
+		expect((await recovered.largest())?.group).toBe(60_000n);
 		expect(encoder.out.active.peek()).toBe(true);
 		expect(recovered.closed.peek()).toBeUndefined();
 		expect(broadcast.net.peek()).toBe(net);
@@ -1487,16 +1491,21 @@ test("default audio replays the last second after three seconds without a subscr
 			await feed.push({ timestamp: Duration.micros(index * 20_000), channels: [new Float32Array(960)] });
 		}
 		await feed.drain();
-		// The subscription's one second reaches back from the newest frame, 152, to 102.
+		// The subscription's one second reaches back from the newest frame, 152, to 102, which the
+		// 200 ms group starting at frame 100 holds.
 		const reader = late.ordered();
-		for (let index = 102; index < 153; index++) {
+		const frames: number[] = [];
+		while (frames.length < 53) {
 			const group = await reader.nextGroup();
 			if (!group) throw new Error("expected buffered group");
-			const frame = await group.readFrame();
-			if (!frame) throw new Error("expected buffered frame");
-			expect(Moq.Varint.decode(frame.payload)[0]).toBe(index * 20_000);
+			for (;;) {
+				const frame = await Promise.race([group.readFrame(), settle().then(() => undefined)]);
+				if (!frame) break;
+				frames.push(Moq.Varint.decode(frame.payload)[0] / 20_000);
+			}
 			group.close();
 		}
+		expect(frames).toEqual(Array.from({ length: 53 }, (_, index) => 100 + index));
 	} finally {
 		late?.close();
 		encoder.close();
@@ -1799,14 +1808,15 @@ test.each([false, true])("audio retained before a disable is encoded on demand (
 		}
 		// The history is encoded and its marker follows at once, since nothing else is owed while disabled.
 		expect(encoder.out.stats.peek().frames).toBe(4);
-		const reader = late.ordered();
+		// The 80 ms retained share one group, which the marker closes.
+		const group = await late.ordered().nextGroup();
 		for (let index = 0; index < 4; index++) {
-			const group = await reader.nextGroup();
 			const frame = await group?.readFrame();
 			if (!frame) throw new Error("expected retained frame");
 			expect(Moq.Varint.decode(frame.payload)[0]).toBe(index * 20_000);
-			group?.close();
 		}
+		expect(await group?.readFrame()).toBeUndefined();
+		group?.close();
 	} finally {
 		late?.close();
 		encoder.close();
@@ -1861,23 +1871,35 @@ test("audio retained across a disable and re-enable is served before the break",
 		// The four retained frames, then the marker, then the three resumed.
 		expect(encoder.out.stats.peek().frames).toBe(7);
 		expect(discontinuity.mock.calls.map(([end]) => end)).toEqual([Duration.micros(80_000)]);
+		// Each group's frames as [timestamp, payload bytes]; the resumed group is still open.
 		const reader = late.ordered();
-		const read: [number, number][] = [];
-		while (read.length < 6) {
+		const read: [number, number][][] = [];
+		while (read.length < 3) {
 			const group = await reader.nextGroup();
-			const frame = await group?.readFrame();
-			if (!frame) throw new Error("expected a frame");
-			const [timestamp, payload] = Moq.Varint.decode(frame.payload);
-			read.push([timestamp, payload.byteLength]);
-			group?.close();
+			if (!group) throw new Error("expected a group");
+			const frames: [number, number][] = [];
+			for (;;) {
+				const frame = await Promise.race([group.readFrame(), settle().then(() => undefined)]);
+				if (!frame) break;
+				const [timestamp, payload] = Moq.Varint.decode(frame.payload);
+				frames.push([timestamp, payload.byteLength]);
+			}
+			read.push(frames);
+			group.close();
 		}
 		expect(read).toEqual([
-			[0, 1],
-			[20_000, 1],
-			[40_000, 1],
-			[60_000, 1],
-			[79_999, 0],
-			[200_000, 1],
+			[
+				[0, 1],
+				[20_000, 1],
+				[40_000, 1],
+				[60_000, 1],
+			],
+			[[79_999, 0]],
+			[
+				[200_000, 1],
+				[220_000, 1],
+				[240_000, 1],
+			],
 		]);
 	} finally {
 		discontinuity.mockRestore();
@@ -1928,24 +1950,36 @@ test("a capture gap inside replayed audio keeps every frame on both sides of it"
 		// Every frame on both sides of the gap.
 		expect(encoder.out.stats.peek().frames).toBe(8);
 		expect(discontinuity.mock.calls.map(([end]) => end)).toEqual([Duration.micros(80_000)]);
+		// Each group's frames as [timestamp, payload bytes]; the resumed group is still open.
 		const reader = late.ordered();
-		const read: [number, number][] = [];
-		while (read.length < 7) {
+		const read: [number, number][][] = [];
+		while (read.length < 3) {
 			const group = await reader.nextGroup();
-			const frame = await group?.readFrame();
-			if (!frame) throw new Error("expected a frame");
-			const [timestamp, payload] = Moq.Varint.decode(frame.payload);
-			read.push([timestamp, payload.byteLength]);
-			group?.close();
+			if (!group) throw new Error("expected a group");
+			const frames: [number, number][] = [];
+			for (;;) {
+				const frame = await Promise.race([group.readFrame(), settle().then(() => undefined)]);
+				if (!frame) break;
+				const [timestamp, payload] = Moq.Varint.decode(frame.payload);
+				frames.push([timestamp, payload.byteLength]);
+			}
+			read.push(frames);
+			group.close();
 		}
 		expect(read).toEqual([
-			[0, 1],
-			[20_000, 1],
-			[40_000, 1],
-			[60_000, 1],
-			[79_999, 0],
-			[200_000, 1],
-			[220_000, 1],
+			[
+				[0, 1],
+				[20_000, 1],
+				[40_000, 1],
+				[60_000, 1],
+			],
+			[[79_999, 0]],
+			[
+				[200_000, 1],
+				[220_000, 1],
+				[240_000, 1],
+				[260_000, 1],
+			],
 		]);
 	} finally {
 		discontinuity.mockRestore();

@@ -757,8 +757,8 @@ void MoQOutput::AudioData(struct encoder_packet *packet)
 	// relay sees it finish without waiting for the next; packets still forward as written.
 	const int64_t start_us = packet->pts * packet->timebase_num * 1'000'000 / packet->timebase_den;
 	const uint32_t sample_rate = obs_encoder_get_sample_rate(encoder);
-	const int64_t frame_us =
-		sample_rate ? int64_t(obs_encoder_get_frame_size(encoder)) * 1'000'000 / sample_rate : 0;
+	const int64_t frame_us = sample_rate ? int64_t(obs_encoder_get_frame_size(encoder)) * 1'000'000 / sample_rate
+					     : 0;
 	const int64_t group_start_us = track.group_start_us.value_or(start_us);
 	const int64_t end_us = start_us + frame_us;
 	if (end_us < group_start_us || end_us - group_start_us >= AUDIO_JOIN_US) {

@@ -1353,8 +1353,9 @@ impl MoqMediaTrackProducer {
 	/// Draw a group boundary here.
 	///
 	/// Audio has no boundary of its own (every packet is independently decodable), so this is the
-	/// only thing that gives it groups: call it after every frame for one group (one QUIC stream)
-	/// the relay forwards without waiting, or less often to batch frames into fewer groups. Video
+	/// only thing that gives it groups (one QUIC stream each): call it after the frame that brings
+	/// a group to about 200 ms, so the relay sees the group finish at once. Frames forward as they
+	/// are written either way; a cut per frame costs a stream per packet. Video
 	/// groups at its own keyframes and needs this only to override that.
 	pub fn cut(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();

@@ -512,7 +512,9 @@ impl Ingest {
 				import.decode(data, Some(pts))?;
 				// Each packet forwards as it is written; its group closes once it carries a join.
 				let length = moq_net::Timestamp::from_scale(length.map_or(0, u64::from), u64::from(rate));
-				let end = length.and_then(|length| pts.checked_add(length)).map_err(moq_mux::Error::from)?;
+				let end = length
+					.and_then(|length| pts.checked_add(length))
+					.map_err(moq_mux::Error::from)?;
 				if join.fill(pts, end) {
 					import.cut(Some(end))?;
 				}

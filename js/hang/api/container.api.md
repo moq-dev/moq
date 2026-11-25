@@ -51,6 +51,8 @@ export interface Frame {
 	timestamp: Net.Clock.Duration;
 }
 
+export const JOIN: Net.Clock.Duration;
+
 export namespace Legacy {
 	export { BufferedRange };
 	export { BufferedRanges };
@@ -68,6 +70,7 @@ export namespace Legacy {
 	export class Producer {
 		constructor(track: Net.Track.Producer, format: Legacy.Format);
 		abort(err: Error): void;
+		cut(end?: Net.Clock.Duration): void;
 		discontinuity(endpoint?: Net.Clock.Duration): void;
 		encode(data: Uint8Array | Legacy.Source, pts: Net.Clock.Duration, keyframe: boolean): void;
 		finish(): Legacy.Finished;

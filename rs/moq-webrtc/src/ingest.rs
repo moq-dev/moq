@@ -200,7 +200,7 @@ mod tests {
 		read(&mut track).await;
 		sink.on_frame("0".into(), frame(400_000)).unwrap();
 		read(&mut track).await;
-		assert_eq!(groups, 4, "two frames, the marker, and the frame after it");
+		assert_eq!(groups, 3, "the two frames' group, the marker, and the frame after it");
 	}
 
 	/// Dropping a sink before its session ends, as when shutdown cancels a pull, aborts its
