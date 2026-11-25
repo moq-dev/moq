@@ -2040,6 +2040,11 @@ impl Lost {
 		}
 	}
 
+	/// Whether it holds an eviction of any key in `groups`, expired or not.
+	pub fn holds(&self, groups: ops::RangeInclusive<u64>) -> bool {
+		self.keys.range(groups).next().is_some()
+	}
+
 	/// Whether it holds no eviction, expired or not.
 	pub fn is_empty(&self) -> bool {
 		self.order.is_empty()
