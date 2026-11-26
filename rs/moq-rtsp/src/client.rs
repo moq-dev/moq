@@ -2191,7 +2191,7 @@ mod tests {
 	/// arrived: with a report too far off to time it, the stream waits out the report interval and
 	/// is timed on its live frames, or every frame would land after it arrived.
 	#[tokio::test]
-	async fn a_replay_with_a_wrong_camera_clock_is_timed_on_its_live_frames() {
+	async fn a_replay_with_a_wrong_camera_clock_publishes_nothing_in_the_future() {
 		kio::clock::host_time(); // real RTSP sockets, and the report wait is real time
 		let server = Server::bind(vec![Media::H265]).await;
 		let (broadcast, catalog, pull) = pull(client(server.url()).waiting(Duration::from_millis(500)));
@@ -2221,12 +2221,41 @@ mod tests {
 				wall - listed
 			);
 		}
-		let captured = wall_of(&snapshot, &video[0]);
-		assert!(
-			captured <= sent - 250_000,
-			"the replayed keyframe timed {} µs before it was sent",
-			sent - captured
-		);
+	}
+
+	/// The same replay, on exact arrivals: a report too far off to time the stream settles nothing,
+	/// so the replay alone can't place it, and the live frame's arrival puts the replayed keyframe
+	/// exactly as far before it as their timestamps are apart.
+	#[test]
+	fn a_replay_with_a_wrong_camera_clock_is_placed_on_its_live_frames() {
+		let (broadcast, catalog) = broadcast();
+		let track = broadcast.unique_track(".aac", catalog.track_info(hang::catalog::PRIORITY.audio));
+		let config = aac::config(fake::AAC_CONFIG).unwrap();
+		let mut stream = Stream {
+			track: Track::Aac(Box::new(aac::Import::new(track, catalog.reserve(), config).unwrap())),
+			last: None,
+			started: false,
+			held: None,
+			opened: None,
+			fresh: true,
+			clock: StreamClock::Unplaced {
+				report: None,
+				bound: None,
+			},
+		};
+		let rate = 90_000;
+		let start: i128 = 1_800_000_000_000_000;
+		// The replayed keyframe and the next frame, 40 ms later, arrive together.
+		stream.arrived(0, rate, start);
+		stream.arrived(3_600, rate, start + 1_000);
+		// A camera clock 15 min ahead.
+		stream.report(start + 900_000_000);
+		assert!(!stream.reported(), "a report far from the replay settles nothing");
+
+		// The first live frame, captured 300 ms after the replayed keyframe, arrives 5 ms later.
+		stream.arrived(27_000, rate, start + 5_000);
+		assert!(!stream.reported(), "nor from the live frames");
+		assert_eq!(stream.place(0), Some(start + 5_000 - 300_000));
 	}
 
 	/// Two streams whose first packets came a second apart each count from their own: each lands
