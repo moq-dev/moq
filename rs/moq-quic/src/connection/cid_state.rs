@@ -121,7 +121,8 @@ impl CidState {
 		//
 		// If yes (return true), a new CID must be pushed with updated `retire_prior_to` field to remote peer.
 		// If no (return false), it means CIDs that reach the end of lifetime have been retired already. Do not push a new CID in order to avoid violating above RFC.
-		(current_retire_prior_to..self.retire_seq).any(|seq| self.active_seq.contains(&seq))
+		let range = current_retire_prior_to..self.retire_seq;
+		self.active_seq.iter().any(|seq| range.contains(seq))
 	}
 
 	/// Drop the expiry batch covering `sequence` once the peer retired all of its CIDs
@@ -141,14 +142,16 @@ impl CidState {
 			_ => self.retire_timestamp[idx - 1].sequence + 1,
 		};
 		let end = self.retire_timestamp[idx].sequence;
-		if !(start..=end).any(|seq| self.active_seq.contains(&seq)) {
+		// Pruned batches leave gaps of retired CIDs, so scan the bounded active set instead
+		if !self.active_seq.iter().any(|seq| (start..=end).contains(seq)) {
 			self.retire_timestamp.remove(idx);
 		}
 	}
 
 	/// Whether the peer hasn't retired all the CIDs we asked it to yet
 	fn unretired(&self) -> bool {
-		(self.prev_retire_seq..self.retire_seq).any(|seq| self.active_seq.contains(&seq))
+		let range = self.prev_retire_seq..self.retire_seq;
+		self.active_seq.iter().any(|seq| range.contains(seq))
 	}
 
 	/// Update cid state when `NewIdentifiers` event is received
