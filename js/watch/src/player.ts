@@ -34,9 +34,10 @@ export type PlayerInput = {
 	stretch: Getter<Duration>;
 	/**
 	 * A shared {@link Sync} to play in step with other players on, aligned through each broadcast's
-	 * catalog `sync.clock`, or none to play alone. See {@link SyncInput.group}.
+	 * catalog `sync.clock`, or none to play alone. `player.sync` stays this player's own clock, which
+	 * links to it. See {@link SyncInput.sync}.
 	 */
-	group: Getter<Sync | undefined>;
+	sync: Getter<Sync | undefined>;
 	/** Video rendition and canvas output. */
 	video: {
 		/** Desired video rendition or quality limits. */
@@ -106,7 +107,7 @@ export class Player {
 	};
 	/** Broadcast subscription and effective catalog. */
 	readonly broadcast: Broadcast;
-	/** This player's audio, video, and caption clock, which joins `group` when one is set. */
+	/** This player's own audio, video, and caption clock, which links to the shared `sync` input when set. */
 	readonly sync: Sync;
 	/** Selected caption rendition. */
 	readonly text: Text.Source;
@@ -144,7 +145,7 @@ export class Player {
 			delay: getter(props.delay ?? "auto"),
 			lookahead: getter(props.lookahead ?? Duration.ZERO),
 			stretch: getter(props.stretch ?? STRETCH),
-			group: getter(props.group),
+			sync: getter(props.sync),
 			video: {
 				target: getter<Video.Target | undefined>(props.video?.target),
 				canvas: getter(props.video?.canvas),
@@ -192,7 +193,7 @@ export class Player {
 			delay: this.in.delay,
 			lookahead: this.in.lookahead,
 			stretch: this.in.stretch,
-			group: this.in.group,
+			sync: this.in.sync,
 			// Every rendition shares the root catalog's timeline, includes too.
 			clock: this.#signals.computed((effect) => effect.get(this.broadcast.out.catalog)?.sync?.clock),
 		});
@@ -277,6 +278,15 @@ export class Player {
 				effect.get(audioSource.out.config) !== undefined &&
 				!effect.get(this.audio.out.ended);
 			this.#tail.set(video || audio);
+		});
+
+		// Only a member showing video places a group's playhead; audio or captions alone follow it.
+		this.#signals.run((effect) => {
+			const video =
+				effect.get(this.#videoEnabled) &&
+				effect.get(videoSource.out.config) !== undefined &&
+				!effect.get(this.video.out.ended);
+			this.sync.video.set(video);
 		});
 
 		this.#signals.run((effect) => {

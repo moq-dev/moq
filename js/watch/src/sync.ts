@@ -63,16 +63,17 @@ export type SyncInput = {
 	stretch: Getter<Duration>;
 
 	/**
-	 * The shared {@link Sync} to play in step with, or none to play alone (the default).
+	 * A shared {@link Sync} to play in step with, or none to play alone (the default).
 	 *
-	 * Members of one group present the same capture instant together, placed on one timeline through
-	 * each one's {@link SyncInput.clock}. The group's `delay` and {@link SyncInput.cap} apply instead
-	 * of this one's: an `"auto"` group holds each member's own measured target, a fixed group delay
-	 * replaces it. A member with no clock, or whose target would exceed the cap, plays alone and reads
+	 * Every sync linked to one shared sync is a member of its group: they present the same capture
+	 * instant together, placed on one timeline through each one's {@link SyncInput.clock}. The shared
+	 * sync's `delay` and {@link SyncInput.cap} apply instead of the member's: an `"auto"` group holds
+	 * each member's own measured target, a fixed group delay replaces it. A member with no clock, or
+	 * that can't stay in step within the cap, plays alone on this sync and reads
 	 * {@link SyncOutput.outOfSync}. A member set to `"instant"` or a nonzero lookahead is refused with
 	 * {@link SyncOutput.error}, since a shared timeline can honor neither.
 	 */
-	group: Getter<Sync | undefined>;
+	sync: Getter<Sync | undefined>;
 
 	/** The broadcast's catalog `sync.clock`, which places this member on its group's timeline. */
 	clock: Getter<Catalog.Clock | undefined>;
@@ -118,7 +119,7 @@ export type SyncOutput = {
 	maxDelay: Signal<Duration>;
 
 	/**
-	 * Whether this belongs to a {@link SyncInput.group} yet plays alone: it has no `clock`, the group
+	 * Whether this is linked to a shared {@link SyncInput.sync} yet plays alone: it has no `clock`, the group
 	 * refused it, or the group's timeline sits outside the delay it can hold within the cap. It
 	 * rejoins on its own once it fits again. False when not grouped.
 	 */
@@ -210,7 +211,7 @@ export class Clock {
 			delay: getter(props?.delay ?? ("auto" as Delay)),
 			lookahead: getter(props?.lookahead ?? Duration.ZERO),
 			stretch: getter(props?.stretch ?? STRETCH),
-			group: getter(props?.group),
+			sync: getter(props?.sync),
 			clock: getter(props?.clock),
 			cap: getter(props?.cap ?? DELAY_MAX),
 		};
@@ -502,7 +503,7 @@ export class Track {
  * What a group member offers its group: its earliest arrival on the group's timeline (its
  * reference less its clock's PTS zero), and the delay it needs held behind that.
  */
-type Member = { reference: Getter<number | undefined>; target: Getter<Duration> };
+type Member = { reference: Getter<number | undefined>; target: Getter<Duration>; video: Getter<boolean> };
 
 /**
  * The group's playhead offset: the latest each member wants to trail is `reference + cap`, the
@@ -537,6 +538,15 @@ export class Sync {
 	// As a group: who plays in step, and the playhead offset on the group's timeline.
 	#members = new Signal<Member[]>([]);
 	#playhead = new Signal<number | undefined>(undefined);
+	// As a member: whether it played in step at its last check, which widens the margin to rejoin.
+	#inStep = false;
+
+	/**
+	 * Whether this member's video is playing. Only such members place the group's playhead; one with
+	 * only audio or captions follows it, or plays alone when it can't. Set by the player.
+	 * @internal
+	 */
+	readonly video = new Signal<boolean>(true);
 
 	// Created after the clock, which refuses a renamed input before anything needs closing.
 	#signals: Effect;
@@ -657,8 +667,11 @@ export class Sync {
 	// delay puts its frames at the group's playhead, or play alone when that is outside its reach.
 	#runMember(effect: Effect): void {
 		const out = this.#clock.out;
-		const group = effect.get(this.in.group);
+		const group = effect.get(this.in.sync);
 		if (!group) return;
+		effect.cleanup(() => {
+			this.#inStep = false;
+		});
 
 		const error = this.#refusal(group, effect.get(this.in.delay), effect.get(this.in.lookahead));
 		effect.set(out.error, error, undefined);
@@ -673,7 +686,7 @@ export class Sync {
 		const reference = new Derived([out.reference], (reference) =>
 			reference === undefined ? undefined : reference - zero,
 		);
-		const member: Member = { reference, target: this.#target };
+		const member: Member = { reference, target: this.#target, video: this.video };
 		group.#members.update((members) => [...members, member]);
 		effect.cleanup(() => group.#members.update((members) => members.filter((other) => other !== member)));
 
@@ -682,12 +695,18 @@ export class Sync {
 			const ours = nested.get(reference);
 			// Nothing received yet: nothing to align, and nothing out of step either.
 			if (at === undefined || ours === undefined) {
+				this.#inStep = false;
 				nested.set(out.outOfSync, false, true);
 				return;
 			}
 			const delay = at - ours;
 			const target = group.#memberTarget(nested, member);
-			if (delay < target || delay > nested.get(group.in.cap).asMillis()) return;
+			// A member out of step rejoins only with a tenth of the cap to spare, so one hovering at
+			// the cap doesn't flip in and out with every small change in its target or the playhead.
+			const cap = nested.get(group.in.cap).asMillis();
+			const reach = this.#inStep ? cap : cap - cap / 10;
+			this.#inStep = delay >= target && delay <= reach;
+			if (!this.#inStep) return;
 			nested.set(this.#joined, Duration.millis(delay), undefined);
 			nested.set(out.outOfSync, false, true);
 		});
@@ -716,7 +735,10 @@ export class Sync {
 			return;
 		}
 		const cap = effect.get(this.in.cap).asMillis();
-		const spans = effect.get(this.#members).flatMap((member) => {
+		const members = effect.get(this.#members);
+		// Members playing video place the playhead; the rest only follow it. With none, all of them do.
+		const video = members.filter((member) => effect.get(member.video));
+		const spans = (video.length ? video : members).flatMap((member) => {
 			const reference = effect.get(member.reference);
 			if (reference === undefined) return [];
 			return [{ lo: reference + this.#memberTarget(effect, member), hi: reference + cap }];

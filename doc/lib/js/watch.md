@@ -129,14 +129,22 @@ attribute you can style, until it fits again. So does a broadcast without a
 `sync.clock`, and one whose clock is far off, since the group follows whichever
 playhead the most members agree on. A member that receives nothing yet, or is
 hidden by `visible`, neither holds the group back nor leaves it: it joins at the
-shared playhead once frames arrive. `delay="instant"` is refused on
-`<moq-sync>`, and a member with `delay="instant"` or a `lookahead` is refused
-with an `error` event and plays alone, since a shared timeline can honor
-neither. Audio follows each member's clock as usual, so unmute the one you want
+shared playhead once frames arrive. Only members showing video place the
+playhead; one playing only audio or captions follows it when it can and plays
+alone otherwise. A member that dropped out comes back only once it fits with a
+tenth of the cap to spare, so one hovering at the cap doesn't flicker in and
+out. The group compares the members' `sync.clock`s with each other only, never
+with the viewer's clock, so a viewer whose clock is off or steps changes
+nothing. `delay="instant"` is refused on
+`<moq-sync>`, and so is `delay="instant"` or a `lookahead` on a `<moq-watch>`
+inside one: its setter throws, and one that already had it when it joined is
+reported with an `error` event and plays alone, since a shared timeline can
+honor neither. Audio follows each member's clock as usual, so unmute the one you want
 to hear.
 
-Without the element, pass one `Watch.Sync` as `group` to each
-[`Player`](#without-the-element); `player.sync.out.outOfSync` and
+Without the element, pass one shared `Watch.Sync` as `sync` to each
+[`Player`](#without-the-element). `player.sync` stays the player's own clock,
+which links to the shared one; `player.sync.out.outOfSync` and
 `player.sync.out.error` report the same as the attribute and the event.
 
 ## Binding from a framework

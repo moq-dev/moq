@@ -152,12 +152,12 @@ export type PlayerInput = {
 	delay: Signals.Getter<Delay>;
 	enabled: Signals.Getter<boolean>;
 	follow: Signals.Getter<boolean>;
-	group: Signals.Getter<Sync | undefined>;
 	lookahead: Signals.Getter<Clock.Duration>;
 	name: Signals.Getter<Net.Path.Valid>;
 	origin: Signals.Getter<Net.Origin.Reader | undefined>;
 	paused: Signals.Getter<boolean>;
 	stretch: Signals.Getter<Clock.Duration>;
+	sync: Signals.Getter<Sync | undefined>;
 	text: {
 		container: Signals.Getter<HTMLElement | undefined>;
 		target: Signals.Getter<string | undefined>;
@@ -192,9 +192,9 @@ export type SyncInput = {
 	cap: Signals.Getter<Clock.Duration>;
 	clock: Signals.Getter<Hang.Catalog.Clock | undefined>;
 	delay: Signals.Getter<Delay>;
-	group: Signals.Getter<Sync | undefined>;
 	lookahead: Signals.Getter<Clock.Duration>;
 	stretch: Signals.Getter<Clock.Duration>;
+	sync: Signals.Getter<Sync | undefined>;
 };
 
 export type SyncOutput = {

@@ -103,8 +103,8 @@ Wrap several `<moq-watch>` in a `<moq-sync>` to show the same capture instant in
 through every broadcast's catalog `sync.clock`. It takes `delay` (`auto` or a duration, default
 `auto`) and `cap` (a duration, default `10s`); a member that can't stay in step within the cap,
 or has no `sync.clock`, plays alone and carries an `out-of-sync` attribute. A member with
-`delay="instant"` or a `lookahead` is refused. In JavaScript, pass one `Sync` as each
-`Player`'s `group`.
+`delay="instant"` or a `lookahead` is refused. In JavaScript, pass one shared `Sync` as each
+`Player`'s `sync`.
 
 ## JavaScript API
 

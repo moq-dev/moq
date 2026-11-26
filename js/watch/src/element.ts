@@ -276,7 +276,7 @@ export default class MoqWatch extends HTMLElement {
 	#captionsOverlayEl?: HTMLDivElement;
 
 	// The enclosing `<moq-sync>`'s clock, while connected inside one.
-	#group = new Signal<Sync | undefined>(undefined);
+	#shared = new Signal<Sync | undefined>(undefined);
 
 	// Whether the element is connected to a document.
 	#connected = false;
@@ -309,7 +309,7 @@ export default class MoqWatch extends HTMLElement {
 			follow: this.#follow,
 			catalogFormat: this.#catalogFormat,
 			catalog: this.#catalog,
-			group: this.#group,
+			sync: this.#shared,
 			...this.controls,
 			video: {
 				...this.controls.video,
@@ -454,7 +454,7 @@ export default class MoqWatch extends HTMLElement {
 	connectedCallback() {
 		this.#connected = true;
 		const group = this.parentElement?.closest("moq-sync");
-		this.#group.set(group instanceof MoqSync ? group.sync : undefined);
+		this.#shared.set(group instanceof MoqSync ? group.sync : undefined);
 		this.#update();
 		this.style.display = "block";
 		this.style.position = "relative";
@@ -477,7 +477,7 @@ export default class MoqWatch extends HTMLElement {
 	disconnectedCallback() {
 		// Stop everything but don't actually cleanup just in case we get added back to the DOM.
 		this.#connected = false;
-		this.#group.set(undefined);
+		this.#shared.set(undefined);
 		this.#update();
 	}
 
@@ -681,6 +681,9 @@ export default class MoqWatch extends HTMLElement {
 	set delay(value: Delay) {
 		if (!(value instanceof Duration) && value !== "auto" && value !== "instant")
 			throw invalidAttribute("delay", value, '"auto", "instant", or a Duration');
+		// Inside a `<moq-sync>`, a shared timeline can't honor "instant".
+		if (value === "instant" && this.#shared.peek())
+			throw invalidAttribute("delay", value, '"auto" or a duration inside <moq-sync>');
 		this.controls.delay.set(parseDelay(value instanceof Duration ? formatDuration(value) : value));
 		this.#accept("delay");
 	}
@@ -701,6 +704,9 @@ export default class MoqWatch extends HTMLElement {
 
 	set lookahead(value: Duration) {
 		if (!(value instanceof Duration)) throw invalidAttribute("lookahead", value, "a Duration");
+		// Inside a `<moq-sync>`, a shared timeline can't hold a lookahead.
+		if (!value.isZero() && this.#shared.peek())
+			throw invalidAttribute("lookahead", formatDuration(value), "zero inside <moq-sync>");
 		this.controls.lookahead.set(parseLookahead(formatDuration(value)));
 		this.#accept("lookahead");
 	}
