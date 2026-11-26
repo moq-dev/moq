@@ -18,8 +18,8 @@ import { withMax } from "../subscription.test-util.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import type { Subscription, Subscriber as TrackSubscriber } from "../track.ts";
 import { wireOf } from "../wire.ts";
-import { SubscribeDrop, SubscribeSkip, SubscribeStart, SubscribeUpdate } from "./subscribe.ts";
-import { ALPN_06, ALPN_07_WIP, Version } from "./version.ts";
+import { SubscribeDrop, SubscribeStart, SubscribeUpdate } from "./subscribe.ts";
+import { ALPN_06, ALPN_07_WIP, hasSkip, Version } from "./version.ts";
 
 const url = new URL("https://localhost:4443/test");
 const path = Path.from("room");
@@ -62,26 +62,16 @@ function tap() {
 	const drop = SubscribeDrop.decode.bind(SubscribeDrop);
 	spyOn(SubscribeDrop, "decode").mockImplementation(async (r, version) => {
 		const msg = await drop(r, version);
+		const isSkip = hasSkip(version) && msg.error === StreamCode.Skip;
 		const entry: Heard = {
 			...(hops.get(r) ?? { hop: "down", recovery: true }),
-			kind: "drop",
+			kind: isSkip ? "skip" : "drop",
 			start: msg.start,
 			end: msg.end,
-			error: msg.error,
+			...(isSkip ? {} : { error: msg.error }),
 		};
 		heard.push(entry);
-		if (hold?.(entry)) await new Promise<void>((release) => held.push(release));
-		return msg;
-	});
-	const skip = SubscribeSkip.decode.bind(SubscribeSkip);
-	spyOn(SubscribeSkip, "decode").mockImplementation(async (r, version) => {
-		const msg = await skip(r, version);
-		heard.push({
-			...(hops.get(r) ?? { hop: "down", recovery: true }),
-			kind: "skip",
-			start: msg.start,
-			end: msg.end,
-		});
+		if (!isSkip && hold?.(entry)) await new Promise<void>((release) => held.push(release));
 		return msg;
 	});
 	const update = SubscribeUpdate.decodeMaybe.bind(SubscribeUpdate);

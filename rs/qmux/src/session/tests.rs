@@ -132,6 +132,18 @@ async fn every_version_establishes_and_negotiates_in_band() {
 	}
 }
 
+/// Only qmux-02 negotiates RESET_STREAM_AT, so only its resets keep their prefix for the
+/// peer's reader; an earlier draft's plain RESET_STREAM may discard it.
+#[tokio::test(start_paused = true)]
+async fn only_qmux_02_resets_reliably() {
+	for &version in Version::ALL {
+		let (client, server) = pair(config(version), config(version)).await;
+		let reliable = version == Version::QMux02;
+		assert_eq!(client.reliable_reset(), reliable, "{version:?}");
+		assert_eq!(server.reliable_reset(), reliable, "{version:?}");
+	}
+}
+
 /// A transfer many times the receive windows completes only if reading returns credit:
 /// MAX_STREAM_DATA for the stream and MAX_DATA for the connection.
 #[tokio::test(start_paused = true)]

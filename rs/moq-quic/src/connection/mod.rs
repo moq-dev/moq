@@ -1886,6 +1886,13 @@ impl Connection {
 		}
 	}
 
+	/// Whether [`send::Stream::reset_at`] still delivers its prefix to the peer's reader: the peer
+	/// accepts RESET_STREAM_AT. Otherwise it sends a RESET_STREAM once the prefix is acknowledged,
+	/// which lets the peer discard any of it not yet read. False until the peer's parameters arrive.
+	pub fn reset_stream_at(&self) -> bool {
+		self.streams.peer_reset_stream_at()
+	}
+
 	/// The connection-wide receive window now in force; see [`Limits::receive_window`]
 	pub fn receive_window(&self) -> std::num::NonZeroU64 {
 		std::num::NonZeroU64::new(self.streams.receive_window()).expect("receive windows are non-zero limits")

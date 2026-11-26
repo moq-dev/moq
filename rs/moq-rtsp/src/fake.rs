@@ -288,13 +288,20 @@ impl Session {
 		self.seq[track] = self.seq[track].wrapping_add(packets);
 	}
 
-	/// Send an RTCP sender report for `track`, which carries no media.
+	/// Send an RTCP sender report for `track`, which carries no media. Its NTP time is zero, a
+	/// camera clock never set, which no session is timed on.
 	pub async fn rtcp(&mut self, track: usize, rtptime: u32) {
+		self.report(track, rtptime, 0).await;
+	}
+
+	/// Send an RTCP sender report for `track` saying its RTP time `rtptime` is the NTP time `ntp`
+	/// (Q32.32 seconds since 1900).
+	pub async fn report(&mut self, track: usize, rtptime: u32, ntp: u64) {
 		let channel = self.channels[track].expect("track was set up") + 1;
 		// V=2, PT=200 (SR), length 6 (32-bit words minus one), then SSRC, NTP, RTP time, counts.
 		let mut packet = vec![0x80, 200, 0, 6];
 		packet.extend_from_slice(&(0x1000 + track as u32).to_be_bytes());
-		packet.extend_from_slice(&[0; 8]);
+		packet.extend_from_slice(&ntp.to_be_bytes());
 		packet.extend_from_slice(&rtptime.to_be_bytes());
 		packet.extend_from_slice(&[0; 8]);
 

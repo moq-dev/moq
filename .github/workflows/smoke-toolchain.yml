@@ -33,7 +33,7 @@ jobs:
       # Use the existing app identity to publish the validated draft proposal.
       # Mint it after evaluating nixpkgs so the update itself holds no write token.
       - name: Generate moq-bot token
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3
         id: token
         with:
           client-id: ${{ secrets.APP_CLIENT_ID }}

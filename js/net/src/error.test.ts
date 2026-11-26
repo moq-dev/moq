@@ -270,6 +270,7 @@ test("stream codes match the draft's Stream Error Codes table", () => {
 		Unroutable: 0x36,
 		FrameTooLarge: 0x38,
 		TimestampMismatch: 0x39,
+		Skip: 0x3a,
 		Unauthorized: 0x3b,
 	});
 });
@@ -296,6 +297,7 @@ test("the code tables keep their registry ranges", () => {
 		StreamCode.Unroutable,
 		StreamCode.FrameTooLarge,
 		StreamCode.TimestampMismatch,
+		StreamCode.Skip,
 		StreamCode.Unauthorized,
 	];
 	for (const code of Object.values(StreamCode)) {

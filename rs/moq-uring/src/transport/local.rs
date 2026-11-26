@@ -114,6 +114,10 @@ impl<S: poll::Session> poll::Session for Local<S> {
 		self.0.receive_window()
 	}
 
+	fn reliable_reset(&self) -> bool {
+		self.0.reliable_reset()
+	}
+
 	fn set_limits(&self, limits: moq::Limits) -> Result<(), moq::LimitsError> {
 		self.0.set_limits(limits)
 	}

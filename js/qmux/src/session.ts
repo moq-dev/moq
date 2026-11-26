@@ -377,11 +377,17 @@ export interface SendStream extends WritableStream<Uint8Array> {
 	getStats(): Promise<SendStreamStats>;
 	/**
 	 * Non-standard: reset the stream like `abort(reason)`, but still deliver its first `offset`
-	 * bytes, which writes that already resolved must cover. The peer reads them before the reset:
-	 * a RESET_STREAM_AT when it advertised `reset_stream_at`, otherwise a RESET_STREAM sent after
-	 * them. A stream the peer already stopped, or that already ended, is left as it is.
+	 * bytes, which writes that already resolved must cover. Where {@link reliableReset}, the peer
+	 * reads them before the reset; otherwise a RESET_STREAM goes after them, which lets the peer
+	 * discard any it has not read. A stream the peer already stopped, or that already ended, is
+	 * left as it is.
 	 */
 	resetAt(offset: number, reason?: unknown): void;
+	/**
+	 * Non-standard: whether {@link resetAt} still delivers its prefix to the peer's reader, which
+	 * takes a RESET_STREAM_AT: both sides advertised `reset_stream_at`, as only qmux-02 does.
+	 */
+	readonly reliableReset: boolean;
 }
 
 /** A bidirectional stream whose send half is a {@link SendStream}. */
@@ -1539,10 +1545,15 @@ export class Session implements WebTransport {
 			stream.writable?.error(reason);
 		} catch {}
 		this.#scheduler?.dropStream(streamId, reason);
-		// Only qmux-02 advertises the parameter, so this gates the frame on the version too.
-		const at = reliable > 0n && this.#ourParams.resetStreamAt && this.#peerParams.resetStreamAt;
+		const at = reliable > 0n && this.#reliableReset();
 		this.#sendPriorityFrame({ type: "reset_stream", id, code, finalSize, reliableSize: at ? reliable : undefined });
 		this.#reap(streamId);
+	}
+
+	/** Whether a reset may carry a RESET_STREAM_AT. Only qmux-02 advertises the parameter, so this
+	 *  gates the frame on the version too. */
+	#reliableReset(): boolean {
+		return this.#ourParams.resetStreamAt && this.#peerParams.resetStreamAt;
 	}
 
 	/** The largest STREAM frame the peer accepts, in bytes.
@@ -1800,6 +1811,10 @@ export class Session implements WebTransport {
 		Object.defineProperty(writable, "getStats", {
 			configurable: true,
 			value: async (): Promise<SendStreamStats> => ({ ...stats }),
+		});
+		Object.defineProperty(writable, "reliableReset", {
+			configurable: true,
+			get: () => this.#reliableReset(),
 		});
 		Object.defineProperty(writable, "resetAt", {
 			configurable: true,

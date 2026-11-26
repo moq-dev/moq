@@ -403,6 +403,11 @@ impl poll::Session for Session {
 		))
 	}
 
+	/// Only a qmux-02 peer that advertised RESET_STREAM_AT keeps a reset's prefix for its reader.
+	fn reliable_reset(&self) -> bool {
+		self.inner.lock().conn.reset_stream_at()
+	}
+
 	fn set_limits(&self, limits: net::Limits) -> Result<(), net::LimitsError> {
 		let mut quic = moq_quic::Limits::default();
 		quic.receive_window = limits.receive_window;
@@ -600,7 +605,7 @@ impl poll::SendStream for SendStream {
 	}
 
 	/// RESET_STREAM_AT toward a peer that accepts it, otherwise a RESET_STREAM once the link
-	/// took the bytes before `offset`.
+	/// took the bytes before `offset`, which lets the peer discard any it has not read.
 	fn reset_at(&mut self, offset: &send::Offset, code: u32) {
 		self.reset_with(Some(*offset), code);
 	}

@@ -9,7 +9,7 @@ use rangemap::{RangeMap, RangeSet};
 use super::cache;
 use super::delivered::Delivered;
 use super::skipped::Skipped;
-use super::subscription::Cover;
+use super::subscription::{Cover, minus};
 use super::track::Hole;
 
 /// Heap a record keeps per run: its widest entry, doubled for half-full `BTreeMap` nodes as
@@ -63,16 +63,15 @@ impl Pending {
 }
 
 /// How a reader reported a run, and what its wire was told. Every report is final: a drop,
-/// stale (OLD) or not, settles its keys for good on the wire.
+/// stale (OLD) or not, settles its keys for good on the wire, and a skip goes out over none.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Report {
-	/// Served on a Group Stream, or given up on a version that has no skip: nothing goes out
-	/// over it.
+	/// Served on a Group Stream, or given up on a version that has no skip.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	Settled,
-	/// Dropped, though a skip still goes out over it.
+	/// Dropped.
 	Dropped,
-	/// Skipped, which replaces a drop.
+	/// Skipped, as SUBSCRIBE_SKIP names it.
 	Skip,
 }
 
@@ -84,37 +83,23 @@ impl Report {
 			Hole::Drop { .. } => Self::Dropped,
 		}
 	}
-
-	/// Whether this report stops `hole` going out over it: only a skip goes out over a drop.
-	pub fn blocks(self, hole: &Hole) -> bool {
-		match self {
-			Self::Settled | Self::Skip => true,
-			Self::Dropped => !matches!(hole, Hole::Skip),
-		}
-	}
 }
 
 impl Record {
-	/// Report the first part of `range` nothing already reported blocks, as `hole` says,
-	/// replacing what it goes out over. `None` when every part is blocked.
+	/// Report the first part of `range` nothing reported already, as `hole` says. `None`
+	/// when every part was.
 	pub fn report(&mut self, range: Range<u64>, hole: &Hole) -> Option<Range<u64>> {
 		let range = range.start.max(self.floor)..range.end;
 		if range.is_empty() {
 			return None;
 		}
-		let blocked: RangeSet<u64> = self
-			.reported
-			.overlapping(&range)
-			.filter(|(_, report)| report.blocks(hole))
-			.map(|(run, _)| run.clone())
-			.collect();
-		let gap = blocked.gaps(&range).next()?;
+		let gap = self.reported.gaps(&range).next()?;
 		self.reported.insert(gap.clone(), Report::of(hole));
 		Some(gap)
 	}
 
-	/// The lowest pending run's first part nothing already reported blocks, now reported, with
-	/// why; the rest of that run waits its turn.
+	/// The lowest pending run's first part nothing reported already, now reported, with why;
+	/// the rest of that run waits its turn.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn next_pending(&mut self) -> Option<(Range<u64>, Hole)> {
 		while let Some((range, pending)) = self
@@ -190,7 +175,7 @@ pub(super) trait Beside {
 	fn given_up_end(&self, key: u64) -> Option<u64>;
 	/// The lowest key from `key` on that it gave up, or still asks or awaits a fill for.
 	fn next_held(&self, key: u64) -> Option<u64>;
-	/// Forget every run within `folded`, which the record folded as settled.
+	/// Forget every run within `folded`, which the record folded as settled or forgot.
 	fn forget(&mut self, folded: std::ops::Range<u64>);
 }
 
@@ -210,7 +195,7 @@ impl Beside for () {
 	fn forget(&mut self, _folded: std::ops::Range<u64>) {}
 }
 
-/// A final stretch of keys a fold may settle.
+/// A final stretch of keys a fold may settle, or a retirement forget.
 struct Stretch {
 	/// One past its last key.
 	end: u64,
@@ -220,11 +205,11 @@ struct Stretch {
 	gaps: Vec<u64>,
 }
 
-/// What a walk through the gaps the reader's ranges left behind found, and folded.
+/// What a walk through the gaps the reader's ranges left behind found, and forgot.
 #[derive(Default)]
 struct Walk {
 	gaps: Vec<u64>,
-	folded: Vec<std::ops::Range<u64>>,
+	forgot: Vec<std::ops::Range<u64>>,
 }
 
 /// Which keys a fold may settle.
@@ -235,7 +220,7 @@ enum Fold {
 	Debt,
 	/// After the ranges moved: only groups handed out, reports, and the gaps left outside the
 	/// ranges that start below `below`, so a stale skip stays for a wider budget to offer
-	/// again.
+	/// again. What it passes is forgotten, not settled.
 	Retire { below: u64 },
 }
 
@@ -306,14 +291,19 @@ impl Record {
 	/// no longer hold, and that nothing owes for a moment (a run given up and not reported
 	/// yet, or a miss `beside` still asks). A record keeps as many such gaps as its ranges
 	/// hold runs, so a narrowing its reader undoes still offers what it narrowed past, as the
-	/// ranges themselves bound; past that, the lowest retire. Each final stretch through them
-	/// folds into one handed-out and reported run, as [`Self::fold`]'s does, so a reader whose
+	/// ranges themselves bound; past that, the lowest retire. The record forgets each final
+	/// stretch through them outside the ranges, above its handed-out prefix, so a reader whose
 	/// ranges keep moving to disjoint groups keeps a record no larger than its ranges' share.
-	/// Should the ranges widen over a retired key again, a group there counts as handed out.
 	///
-	/// Only a stretch through a retired gap folds, and stale skips stop one: without a debt,
-	/// the record otherwise stays as it was, and a wider budget still offers a stale skip
-	/// again. Returns the runs it folded.
+	/// A retired gap was never served nor reported, so settling it would leave ranges that
+	/// widen over it again owed a key no group or report ever comes for. Forgetting it, and the
+	/// keys around it, asks for the whole stretch afresh instead, as a new reader would: its
+	/// gaps are served, and a group handed out there before may be handed out again, which
+	/// the same identity makes harmless.
+	///
+	/// Only a stretch through a retired gap is forgotten, and stale skips stop one: without a
+	/// debt, the record otherwise stays as it was, and a wider budget still offers a stale skip
+	/// again. Returns the runs it forgot.
 	fn retire(&mut self, reader: &Standing, beside: &dyn Beside) -> Vec<std::ops::Range<u64>> {
 		let Some(ranges) = &reader.ranges else {
 			return Vec::new();
@@ -324,33 +314,49 @@ impl Record {
 			0 => Vec::new(),
 			excess => {
 				let below = gaps.get(excess).copied().unwrap_or(u64::MAX);
-				self.walk(reader, beside, below, true).folded
+				self.walk(reader, beside, below, true).forgot
 			}
 		}
 	}
 
 	/// Walk each final stretch through the gaps the ranges left behind below `below`, from the
-	/// floor up, folding those worth it when `fold` says so.
+	/// floor up, forgetting each when `fold` says so.
 	fn walk(&mut self, reader: &Standing, beside: &dyn Beside, below: u64, fold: bool) -> Walk {
 		let mut walk = Walk::default();
 		let retire = Fold::Retire { below };
 		let floor = self.final_end(self.floor, reader, beside, retire);
 		walk.gaps.extend(&floor.gaps);
 		if fold && !floor.gaps.is_empty() {
-			self.raise(floor.end);
-			walk.folded.push(0..floor.end);
+			walk.forgot.extend(self.forget_outside(self.floor..floor.end, reader));
 		}
 		let mut from = floor.end.max(self.floor);
 		while let Some(start) = self.next_told(from) {
 			let stretch = self.final_end(start, reader, beside, retire);
 			walk.gaps.extend(&stretch.gaps);
-			if fold && !stretch.gaps.is_empty() && stretch.runs > 2 {
-				self.settle_stretch(start..stretch.end);
-				walk.folded.push(start..stretch.end);
+			if fold && !stretch.gaps.is_empty() {
+				walk.forgot.extend(self.forget_outside(start..stretch.end, reader));
 			}
 			from = stretch.end.max(start + 1);
 		}
 		walk
+	}
+
+	/// Forget what the record holds of `stretch` outside the reader's ranges, above the
+	/// handed-out prefix: keys the ranges no longer hold, which they ask for afresh should they
+	/// cover them again. The prefix stays, as it bills nothing. Returns the runs it forgot.
+	fn forget_outside(&mut self, stretch: Range<u64>, reader: &Standing) -> Vec<Range<u64>> {
+		let start = stretch.start.max(self.delivered.floor());
+		let Some(ranges) = reader.ranges.as_ref().filter(|_| start < stretch.end) else {
+			return Vec::new();
+		};
+		let forgot: Vec<Range<u64>> = (minus(start..=stretch.end - 1, ranges).into_iter())
+			.map(|run| *run.start()..*run.end() + 1)
+			.collect();
+		for run in &forgot {
+			self.delivered.remove(run.clone());
+			self.reported.remove(run.clone());
+		}
+		forgot
 	}
 
 	/// Raise the floor over the final prefix: each run from it up to the lowest one that is
@@ -869,38 +875,40 @@ mod test {
 	}
 
 	/// Once the ranges move, the gaps they left between settled keys retire without a debt,
-	/// past one per run the ranges hold, lowest first: the runs around them fold into one.
-	/// The gap kept, and the keys below the lowest settled, stay owed should the ranges widen
-	/// over them again.
+	/// past one per run the ranges hold, lowest first: the record forgets each stretch through
+	/// them, so none of it counts as handed out or told, and ranges widening over it again ask
+	/// for it afresh. A retired gap is never settled, which would leave such ranges owed a key
+	/// nothing comes for.
 	#[test]
 	fn moved_ranges_retire_the_gaps_they_left() {
 		let (_pool, track) = roomy();
 		let mut record = Record::default();
 		for key in (10..=50).step_by(10) {
 			record.delivered.insert(key);
+			record.tell(key..key + 1, Report::Settled);
 		}
 		record.settle(|| track.clone(), &mut (), ranged(&[(50, 50)]));
-		assert_eq!(record.delivered.runs(), 2, "10 through 40, then 50");
-		assert_eq!(record.reported.len(), 1, "and one report");
-		assert!(
-			record.delivered.contains(25) && record.told(25),
-			"a retired gap is settled"
-		);
-		assert!(!record.delivered.contains(45), "the highest gap is kept");
-		assert!(!record.delivered.contains(5), "below the lowest settled stays owed");
+		assert_eq!(record.delivered.runs(), 1, "50 alone");
+		assert_eq!(record.reported.len(), 1, "and its report");
+		for key in [10, 25, 40] {
+			assert!(!record.delivered.contains(key) && !record.told(key), "{key} forgotten");
+		}
 
-		// Its ranges move above it: the gap kept retires for the one the move left.
-		record.delivered.insert(70);
+		// Its ranges move above it: the gap the move left retires.
+		for key in [60, 70] {
+			record.delivered.insert(key);
+			record.tell(key..key + 1, Report::Settled);
+		}
 		record.settle(|| track.clone(), &mut (), ranged(&[(70, 70)]));
-		assert_eq!(record.delivered.runs(), 2, "10 through 50, then 70");
-		assert_eq!(record.reported.len(), 1);
-		assert!(record.delivered.contains(45));
-		assert!(!record.delivered.contains(60));
+		assert_eq!(record.delivered.runs(), 1, "70 alone");
+		assert!(!record.told(55) && !record.told(60));
+		assert!(record.told(70));
 	}
 
-	/// A gap the ranges still hold stays owed, as does one owed for a moment: a run given up
-	/// and not reported yet, or a miss still asked. So does a stale skip, which a wider budget
-	/// offers again while no debt folds it. Each stops the stretch that would retire past it.
+	/// A key the ranges still hold stays as it was, as does a run owed for a moment: one given
+	/// up and not reported yet, or a miss still asked. So does a stale skip, which a wider
+	/// budget offers again while no debt folds it. Each stops the stretch that would retire
+	/// past it, and the highest gap stays.
 	#[test]
 	fn moved_ranges_keep_what_is_still_owed() {
 		struct Asked(Range<u64>);
@@ -926,12 +934,15 @@ mod test {
 			.insert(25..26, Pending::own(Hole::drop(StreamError::NotFound)));
 		record.skipped.insert(65, Duration::from_secs(1));
 		let mut asked = Asked(15..16);
-		record.settle(|| track.clone(), &mut asked, ranged(&[(35, 38)]));
-		for owed in [15, 25, 36, 65, 75] {
-			assert!(!record.delivered.contains(owed), "{owed} stays owed");
+		record.settle(|| track.clone(), &mut asked, ranged(&[(36, 40)]));
+		for owed in [25, 65] {
+			assert_eq!(record.next_held(owed), Some(owed), "{owed} stays owed");
 		}
-		for retired in [45, 55, 62] {
-			assert!(record.delivered.contains(retired), "{retired} retired");
+		for kept in [40, 70, 80] {
+			assert!(record.delivered.contains(kept), "{kept} kept");
+		}
+		for retired in [10, 20, 30, 50, 60] {
+			assert!(!record.delivered.contains(retired), "{retired} forgotten");
 		}
 	}
 

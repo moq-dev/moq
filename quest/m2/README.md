@@ -42,8 +42,9 @@ opened Group Streams, removes `FETCH` and `SUBSCRIBE_SKIP` on lite-07, moves
 `track::Range` across Rust, JS, and all FFI bindings, and adds judged `Max Age`
 to `SUBSCRIBE_DROP(OLD)` (rejected: bugfixes only without wire changes; drop).
 This supersedes `quest/m2/time-addressing/per-range-start.md` (#9491) and
-#9538; non-wire progress and cache-invariant fixes live independently in
-[m1](/quest/m1/subscribe-progress-fixes.md).
+#9538; the non-wire progress and cache-invariant fixes landed separately in
+moq-dev/moq#9564.
+Superseded 2026-11-26: no `Previous Delta`; the previous group's `GROUP_END` proves the gap, `SUBSCRIBE_DROP(SKIP)` (`0x3A`) covers the rest (removing `SUBSCRIBE_SKIP` `0x3`), and a drop names a group a plain reset may have lost.
 
 Decided 2026-11-16 (maintainer, /quest-plan of an audit of everything on
 `main` since `release`, and of the lite-07 draft): the cut also waits on what

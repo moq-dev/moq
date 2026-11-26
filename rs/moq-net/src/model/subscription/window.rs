@@ -673,7 +673,6 @@ impl Window {
 
 	/// The time starts still waiting on the groups held: what a received copy asks its
 	/// upstream to place.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn asks(&self) -> impl Iterator<Item = u64> + '_ {
 		let mut last = None;
 		self.waiting
@@ -710,19 +709,25 @@ impl Window {
 		self.waiting.last().is_some_and(|&(time, _)| time > floor)
 	}
 
-	/// The times in `times` of the time starts still waiting on the groups held. The group
-	/// containing each starts at or before its time, so one at or past a read's floor and
-	/// below a group may still land between them.
-	pub fn waiting_in<R: ops::RangeBounds<u64> + 'static>(&self, times: R) -> impl Iterator<Item = u64> + '_ {
+	/// The times in `times` of the time starts not yet resolved: waiting on the groups held,
+	/// or on a lookup of the track's history. The group containing each starts at or before
+	/// its time, so one at or past a read's floor and below a group may still land between
+	/// them. Unsorted, and a time two spans share comes twice.
+	pub fn unresolved_in<R: ops::RangeBounds<u64> + Clone + 'static>(
+		&self,
+		times: R,
+	) -> impl Iterator<Item = u64> + '_ {
 		let from = match times.start_bound() {
 			ops::Bound::Included(&start) => start,
 			ops::Bound::Excluded(&start) => start.saturating_add(1),
 			ops::Bound::Unbounded => 0,
 		};
-		self.waiting
-			.range((from, 0)..)
-			.map(|&(time, _)| time)
-			.take_while(move |time| times.contains(time))
+		let looked = times.clone();
+		let waiting =
+			(self.waiting.range((from, 0)..).map(|&(time, _)| time)).take_while(move |time| times.contains(time));
+		let looking =
+			(self.looking.range((from, 0)..).map(|&(time, _)| time)).take_while(move |time| looked.contains(time));
+		waiting.chain(looking)
 	}
 
 	/// Resolve what the groups now held settle: live joins once `latest` exists or an
@@ -815,10 +820,11 @@ impl Window {
 		self.groups.contains(key)
 	}
 
-	/// The lowest group in range, `None` while an anchor waits. Nothing in range floors
-	/// nowhere: group 0.
+	/// The lowest group in range, `None` while an anchor waits, a time start's lookup included:
+	/// it may resolve to a group below every one in range. Nothing in range floors nowhere:
+	/// group 0.
 	pub fn floor(&self) -> Option<u64> {
-		match self.is_pending() || self.unplaced() {
+		match self.is_pending() || self.unplaced() || !self.looking.is_empty() {
 			true => None,
 			false => Some(self.groups.lowest().unwrap_or(0)),
 		}
@@ -901,6 +907,21 @@ impl Window {
 		keys
 	}
 
+	/// Whether a range not yet placed may still come to hold group `key`: placed, it starts at
+	/// or below the group its time or live edge falls in, which may be `key` or one below. A
+	/// time at or past `end`, where group `key` is known to end, falls in a later group, however
+	/// far the range got placing it.
+	pub fn may_hold(&self, key: u64, end: Option<u64>) -> bool {
+		let before = |time: u64| end.is_none_or(|end| time < end);
+		let reaches = |k: &u64| {
+			self.ranges
+				.get(k)
+				.is_some_and(|range| range.end.is_none_or(|end| end >= key) && range.time().is_none_or(before))
+		};
+		self.pending.iter().chain(&self.reaching).any(reaches)
+			|| (self.waiting.iter().chain(&self.looking)).any(|(time, k)| before(*time) && reaches(k))
+	}
+
 	/// Each time start that names no group yet, with its range's end: waiting on a first
 	/// group, reaching back past every group held, waiting on one, or looking one up. Costs
 	/// those, nothing once every time start names a group.
@@ -966,6 +987,12 @@ impl Window {
 	/// The groups in range from `from` on, lowest first.
 	pub fn runs(&self, from: u64) -> impl Iterator<Item = ops::RangeInclusive<u64>> + '_ {
 		self.from(&self.groups, from)
+	}
+
+	/// The groups the placed ranges name from `from` on, lowest first: unlike [`Self::runs`],
+	/// a live join still waiting on a first group names none of them.
+	pub fn placed(&self, from: u64) -> impl Iterator<Item = ops::RangeInclusive<u64>> + '_ {
+		self.groups.runs(from)
 	}
 
 	/// The groups in range from `from` on that a miss may ask for, lowest first: all of

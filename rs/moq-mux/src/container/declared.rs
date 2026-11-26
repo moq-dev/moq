@@ -53,6 +53,9 @@ pub(crate) struct DeclaredClock<T> {
 	highest: Vec<(u64, u128)>,
 	/// The last DTS released.
 	last: Option<i128>,
+	/// A flush fixed the group's earliest slot before enough frames were read to know it, so a
+	/// later frame of the group may present below it.
+	forced: bool,
 }
 
 impl<T> DeclaredClock<T> {
@@ -66,12 +69,19 @@ impl<T> DeclaredClock<T> {
 			slots: Vec::new(),
 			highest: Vec::new(),
 			last: None,
+			forced: false,
 		}
 	}
 
 	/// Restart the clock at the same declared depth.
 	pub(crate) fn restart(self) -> Self {
 		Self::new(self.depth)
+	}
+
+	/// Whether a flush fixed the group's earliest slot before enough frames were read to know it,
+	/// so the rest of the group may no longer fit the clock.
+	pub(crate) fn forced(&self) -> bool {
+		self.forced
 	}
 
 	/// How many frames are held.
@@ -122,6 +132,9 @@ impl<T> DeclaredClock<T> {
 	pub(crate) fn pop(&mut self, flush: bool) -> crate::Result<Option<(T, i128, u64)>> {
 		if self.held.is_empty() || (self.earliest.is_none() && !flush && self.held.len() <= self.depth) {
 			return Ok(None);
+		}
+		if self.earliest.is_none() && self.held.len() <= self.depth {
+			self.forced = true;
 		}
 		let earliest = *self.earliest.get_or_insert(self.slots[0]);
 		let dts = match self.leading {
@@ -188,6 +201,23 @@ mod tests {
 	/// A source timestamp exactly on 90 kHz tick `pts`.
 	fn at(pts: u64) -> moq_net::Timestamp {
 		moq_net::Timestamp::from_scale(pts, 90_000).unwrap()
+	}
+
+	/// A flush before the group's first depth + 1 frames fixes its earliest slot by force; one
+	/// after them, or a release as it reads, does not.
+	#[test]
+	fn a_flush_before_the_lookahead_forces_the_earliest_slot() {
+		let mut early = DeclaredClock::new(2);
+		early.push((), PYRAMID[0], at(PYRAMID[0])).unwrap();
+		while early.pop(true).unwrap().is_some() {}
+		assert!(early.forced());
+
+		let mut late = DeclaredClock::new(2);
+		for &pts in &PYRAMID[..3] {
+			late.push((), pts, at(pts)).unwrap();
+		}
+		while late.pop(true).unwrap().is_some() {}
+		assert!(!late.forced());
 	}
 
 	/// The DTS of one group read through a declared clock of `depth`, released as each frame is

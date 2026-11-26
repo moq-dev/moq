@@ -822,6 +822,7 @@ pub(super) trait ErasedSession: Send + Sync {
 	fn wire(&self) -> Option<Wire>;
 	fn probe(&self) -> Option<Probe>;
 	fn receive_window(&self) -> Option<ReceiveWindow>;
+	fn reliable_reset(&self) -> bool;
 	fn set_limits(&self, limits: Limits) -> Result<(), LimitsError>;
 }
 
@@ -964,6 +965,10 @@ impl<S: poll::Boxable> ErasedSession for S {
 
 	fn receive_window(&self) -> Option<ReceiveWindow> {
 		poll::Session::receive_window(self)
+	}
+
+	fn reliable_reset(&self) -> bool {
+		poll::Session::reliable_reset(self)
 	}
 
 	fn set_limits(&self, limits: Limits) -> Result<(), LimitsError> {
@@ -1254,6 +1259,10 @@ impl poll::Session for Session {
 
 	fn receive_window(&self) -> Option<ReceiveWindow> {
 		self.inner.session.receive_window()
+	}
+
+	fn reliable_reset(&self) -> bool {
+		self.inner.session.reliable_reset()
 	}
 
 	fn set_limits(&self, limits: Limits) -> Result<(), LimitsError> {

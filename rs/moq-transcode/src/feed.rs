@@ -42,8 +42,8 @@ pub(crate) enum Item {
 	/// A decoded frame of the current group. Cloning is cheap (`Arc`), and a GPU
 	/// frame stays on the GPU for every receiving rung.
 	Frame(Arc<moq_video::Frame>),
-	/// The current group ended cleanly.
-	End,
+	/// The current group ended cleanly, with its exclusive end if known.
+	End(Option<u64>),
 	/// The source track ended cleanly; no more items follow.
 	Finished,
 	/// The current group will never end: its source read failed, or this
@@ -245,7 +245,7 @@ async fn decode(inner: &Inner, sender: &broadcast::Sender<Item>) -> Result<(), E
 			while let Some(decoded) = decoder.receive()? {
 				let _ = sender.send(Item::Frame(Arc::new(decoded)));
 			}
-			let _ = sender.send(Item::End);
+			let _ = sender.send(Item::End(group.end()));
 		} else {
 			while decoder.receive()?.is_some() {}
 			let _ = sender.send(Item::Lost);
