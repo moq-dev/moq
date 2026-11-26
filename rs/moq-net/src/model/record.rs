@@ -507,10 +507,12 @@ impl Record {
 				folded.push(start..stretch.end);
 			} else if mode == Fold::Final && stretch.end > start {
 				// Final as it stands, so what was handed out in it merges into one run, though
-				// folding it would cost more than it saves.
-				self.delivered.insert_run(start..stretch.end);
-				if self.handed.runs() > 0 {
-					self.handed.insert_run(start..stretch.end);
+				// folding it would cost more than it saves. Only where it holds a key already,
+				// so an isolated report adds no run.
+				for handed in [&mut self.delivered, &mut self.handed] {
+					if handed.next_from(start).is_some_and(|key| key < stretch.end) {
+						handed.insert_run(start..stretch.end);
+					}
 				}
 				folded.push(start..stretch.end);
 			}
@@ -680,11 +682,13 @@ impl Record {
 				Some((run, report)) if fold == Fold::Final => match report {
 					Report::Settled | Report::Skip => run.end,
 					// A skip may still go out over a drop, which folding would stop, unless the
-					// drop lies in a whole group's span: that group was produced, and no other
-					// starts in the span for a skip to reveal.
+					// drop named a group the track holds whole: that group was produced, and no
+					// other starts in its span for a skip to reveal. A drop starting inside the
+					// span named only starts there, perhaps before the span was known, which
+					// the skip its end implies still replaces.
 					Report::Dropped => match reader.spans.whole(end) {
-						Some(span) => run.end.min(span.end),
-						None => break,
+						Some(span) if run.start <= span.start => run.end.min(span.end),
+						_ => break,
 					},
 					Report::Stale => break,
 				},
@@ -888,6 +892,38 @@ mod test {
 			record.report(10..12, &Hole::Skip),
 			Some(10..12),
 			"a drop outside a whole span still does"
+		);
+	}
+
+	/// A drop that starts inside a whole group's span named only starts there, as a relay
+	/// forwards an upstream drop while the group is still open: a growing record keeps it
+	/// for the skip the group's end implies, while the groups around it fold.
+	#[test]
+	fn a_growing_record_keeps_a_drop_inside_a_span_for_its_skip() {
+		let (_pool, track) = roomy();
+		let mut record = Record::default();
+		for key in (FIRST..2_000).step_by(SPACING as usize) {
+			record.delivered.insert(key);
+			match key {
+				500 => {
+					record.reported.insert(501..503, Report::Dropped);
+					record.reported.insert(503..510, Report::Skip);
+				}
+				_ => {
+					record.reported.insert(key + 1..key + SPACING, Report::Skip);
+				}
+			}
+		}
+		let reader = Standing {
+			reports: true,
+			..live()
+		};
+		record.settle(|| track.clone(), &mut (), reader);
+		assert!(record.told(400), "the groups around it folded");
+		assert_eq!(
+			record.report(501..503, &Hole::Skip),
+			Some(501..503),
+			"the skip still replaces the drop"
 		);
 	}
 
