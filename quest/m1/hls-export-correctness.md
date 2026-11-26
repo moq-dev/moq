@@ -1,12 +1,13 @@
-# [M] Fix moq-hls Hold metering leak, grid timing, NTSC gaps, GROUP_END closure, bounded fetches, and playlist/import conformance
+# [M] Fix moq-hls Hold metering leak, grid timing, NTSC gaps, GROUP_END extents, bounded fetches, and playlist/import conformance
 
 ## Goal
 
 `moq-hls` stops metering unrequested bytes in `Hold`, emits accurate DASH
-`S@t`/`S@d` and HLS `EXT-X-PROGRAM-DATE-TIME` after pauses and overruns, stops
-emitting spurious millisecond `EXT-X-GAP` segments on 29.97fps NTSC GOP jitter,
-closes segments immediately on lite-07 `GROUP_END`, fetches multi-group
-segments in one bounded `SUBSCRIBE`, emits valid master playlist versions and
+`S@t`/`S@d` (with matching `$Time$` segment lookup) and HLS
+`EXT-X-PROGRAM-DATE-TIME` after pauses and overruns, stops emitting spurious
+millisecond `EXT-X-GAP` segments on 29.97fps NTSC GOP jitter, settles group
+extents on lite-07 `GROUP_END`, fetches multi-group segments in one bounded
+`SUBSCRIBE`, emits valid master playlist versions and
 `EXT-X-INDEPENDENT-SEGMENTS`, and imports non-H.264 (HEVC, AV1, VP9) HLS master
 playlists.
 
@@ -26,14 +27,17 @@ Fixes in `rs/moq-hls`:
    before subscribing in `Hold` (matching `WatchMedia`), so metered origins
    never count media bytes that no HTTP client requested before `sync.interval`
    is declared.
-2. **`Row` first-sample PTS (`src/export/segments.rs`, `src/export/rendition.rs`):**
+2. **`Row` first-sample PTS and DASH `$Time$` lookup (`src/export/segments.rs`, `src/export/rendition.rs`):**
    `Row` lives in `src/export/segments.rs:143` (with wall-clock callers at
    `segments.rs:614, 672` and `rendition.rs:1302`). When a timed group starts
    before its first frame, the grid stores the group start while CMAF `tfdt`
    uses the first muxed sample's PTS. Carry the first muxed sample's PTS
    separately on `Row` for DASH `S@t`/`S@d` and HLS
    `EXT-X-PROGRAM-DATE-TIME` / `segments::Segment.program_date_time`, keeping
-   grid placement for segment numbering and `EXTINF`.
+   grid placement for segment numbering and `EXTINF`. Update DASH `$Time$`
+   lookup (`segment_number_at` at `src/export/segments.rs:390-400`) to match
+   the exact same converted first-sample PTS that `S@t` renders, so
+   `seg/{tag}.t{time}.m4s` URLs advertised by the MPD never 404.
 3. **NTSC / slight-overrun gap spam (`src/export/grid.rs`):** absorb sub-frame
    or NTSC GOP jitter (e.g. 29.97fps 60-frame GOP = 2,002 ms on a 2,000 ms
    grid) without inserting spurious millisecond `#EXT-X-GAP` segments or
@@ -60,5 +64,6 @@ Fixes in `rs/moq-hls`:
    import support.
 
 Public API: none. Wire: none. Add unit/integration tests for each fix,
-including a 29.97fps NTSC stream, a pause/overrun DASH `S@t` vs `tfdt` check,
-a metered `Hold` check, and a non-H.264 master playlist import.
+including a 29.97fps NTSC stream, a pause/overrun DASH `S@t` vs `tfdt` check
+that fetches the exact `$Time$` segment URL advertised by the MPD, a metered
+`Hold` check, and a non-H.264 master playlist import.

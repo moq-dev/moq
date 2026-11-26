@@ -2,13 +2,16 @@
 
 ## Goal
 
-`moq-hls` indexes live renditions over metadata-only subscriptions so zero
-media payload bytes cross the relay mesh until an HTTP client requests a
-segment; `moq_hls::Server` supports idle eviction and per-request embedder
-scoping/hooks so downstream gateways delegate to `Server` instead of
-duplicating broadcaster pools; cold edges wait or fetch on demand instead of
-returning spurious 404s before `WatchMedia` finishes indexing; and concurrent
-requests for the same segment share one fetch and transmux pass.
+`moq-hls` indexes unwatched timed, catalog-described live renditions over
+metadata-only subscriptions so zero media payload bytes cross the relay mesh
+for them until an HTTP client requests a segment (retaining payload probing
+only for scale-less/legacy tracks or inline-parameter-set video renditions
+that can resize without a catalog update); `moq_hls::Server` supports idle
+eviction and per-request embedder scoping/hooks so downstream gateways delegate
+to `Server` instead of duplicating broadcaster pools; cold edges wait or fetch
+on demand instead of returning spurious 404s before `WatchMedia` finishes
+indexing; and concurrent requests for the same segment share one fetch and
+transmux pass.
 
 ## Plan
 
@@ -25,10 +28,9 @@ Scope in `rs/moq-hls`:
 
 1. **Metadata-only live indexing (`src/export/rendition.rs`):**
    - Switch `WatchMedia` to a metadata-only subscription on timed lite-07
-     tracks where wire headers and catalog updates supply everything the
-     watcher needs, so opening `master.m3u8` or watching one rung avoids
-     pulling full media payloads for unwatched renditions across the relay
-     mesh.
+     tracks whose catalog describes codec configuration, so opening
+     `master.m3u8` or watching one rung pulls zero media payload bytes for
+     other timed, catalog-described renditions across the relay mesh.
    - Account explicitly for every payload-derived fact `WatchMedia` currently
      decodes so nothing regresses:
      - **Sample PTS & `Reach` (`rendition.rs:2552-2558, 2638-2640`):** on timed
@@ -36,17 +38,16 @@ Scope in `rs/moq-hls`:
        group start/end and reach; keep a payload subscription on scale-less or
        legacy (`lite-06` / `moq-transport`) tracks that carry no wire
        timestamps.
-     - **Discontinuity markers (`rendition.rs:2472, 2646`):** a container
-       discontinuity frame can be non-zero bytes on the wire and empty only
-       after container decoding; handle via a targeted frame-0 payload probe
-       (or container-level empty-group signal) so pauses never become media
-       segments.
-     - **Resized video hand-over:** when a resized video group arrives before
-       its catalog update, `WatchMedia` currently inspects keyframe picture
-       dimensions to assign the group to the new init segment. Retain a
-       targeted frame-0 payload probe (or payload probing on inline-parameter-set
-       / resizable video renditions where headers and catalog data do not
-       suffice) so a resized group is never listed under the old init segment.
+     - **Pauses and trailing stop markers (`rendition.rs:2472, 2552-2554, 2596-2597, 2646`):**
+       do not probe payloads for container discontinuity or trailing stop
+       markers (which a frame-0 probe would miss anyway); on timed lite-07
+       tracks, pauses and group boundaries come from wire `GROUP_END` and
+       `SUBSCRIBE_DROP(SKIP)` instead of decoding container stop markers.
+     - **Resized video hand-over:** limit keyframe payload probing strictly to
+       video renditions with inline parameter sets (no catalog `description`)
+       that can resize without a catalog update, so catalog-described video
+       renditions never pull keyframes across the mesh while unwatched and
+       inline-parameter-set resizes still bind to the right init segment.
 2. **Idle eviction and embedder hooks on `moq_hls::Server` (`src/server/`):**
    - Add configurable idle eviction to `Server`'s broadcaster pool so
      long-lived streams tear down subscriptions when no HTTP requests arrive.
