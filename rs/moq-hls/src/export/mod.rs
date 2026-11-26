@@ -3798,7 +3798,12 @@ mod tests {
 
 		/// Write the group at `pts_ms` with a single keyframe declaring a `width`x`height`
 		/// picture in band.
-		fn sized(&mut self, pts_ms: u64, (width, height): (u16, u16)) {
+		fn sized(&mut self, pts_ms: u64, size: (u16, u16)) {
+			self.sized_until(pts_ms, size, None);
+		}
+
+		/// [`sized`](Self::sized), declaring a GROUP_END at `end_ms` when given.
+		fn sized_until(&mut self, pts_ms: u64, (width, height): (u16, u16), end_ms: Option<u64>) {
 			let mut group = self.track.create_group(moq_net::group::Info { start: pts_ms }).unwrap();
 			let mut payload = KEYFRAME.to_vec();
 			payload[6..8].copy_from_slice(&width.to_le_bytes());
@@ -3809,7 +3814,10 @@ mod tests {
 			}
 			.write_to(&mut group)
 			.unwrap();
-			group.finish().unwrap();
+			match end_ms {
+				Some(end) => group.finish_at(end).unwrap(),
+				None => group.finish().unwrap(),
+			};
 		}
 
 		/// Write the `index`th GOP at `2 * index` seconds: one GOP per grid line.
@@ -4812,8 +4820,16 @@ mod tests {
 	// The catalog and the media are separate tracks, so a resize's first group can reach the
 	// retiring instance before the catalog update declaring it. Its keyframe's size says it is the
 	// replacement's, so it is listed under the new init rather than muxed under the old.
+	//
+	// Its GROUP_END reaching the next line doesn't list it under the old init first either.
 	#[tokio::test(start_paused = true)]
 	async fn a_resizes_first_group_ahead_of_the_catalog_is_the_replacements() {
+		for end in [None, Some(8_000)] {
+			resize_ahead_of_the_catalog(end).await;
+		}
+	}
+
+	async fn resize_ahead_of_the_catalog(end: Option<u64>) {
 		let mut test = Groups::with(&["video0"], &[]);
 		let mut media = test.publish("video0");
 		for sequence in 0..3 {
@@ -4822,7 +4838,7 @@ mod tests {
 		test.listed("video0", 1).await;
 		let old = test.rendition("video0");
 		// Group 3 opens segment 3 at 640x480 before the catalog says so.
-		media.sized(6_000, (640, 480));
+		media.sized_until(6_000, (640, 480), end);
 		kio::clock::sleep(Duration::from_millis(100)).await;
 		let config = test.catalog.video.renditions.get_mut("video0").unwrap();
 		config.coded_width = Some(640);
@@ -4835,7 +4851,11 @@ mod tests {
 		let snapshot = test.listed("video0", 4).await;
 		assert_eq!(numbers(&snapshot), [0, 1, 2, 3, 4]);
 		let tags: Vec<_> = snapshot.segments.iter().map(|s| s.tag.as_str()).collect();
-		assert_eq!(tags, [old.tag(), old.tag(), old.tag(), new.tag(), new.tag()]);
+		assert_eq!(
+			tags,
+			[old.tag(), old.tag(), old.tag(), new.tag(), new.tag()],
+			"GROUP_END {end:?}"
+		);
 		let breaks: Vec<_> = snapshot.segments.iter().map(|s| s.discontinuity).collect();
 		assert_eq!(breaks, [false, false, false, true, false]);
 	}

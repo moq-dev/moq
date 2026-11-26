@@ -2162,6 +2162,10 @@ struct Follow {
 	ending: Option<(moq_net::group::Consumer, moq_net::Timescale)>,
 	/// Where the newest group ends, once it ended declaring it.
 	end: Option<moq_net::Timestamp>,
+	/// The picture size the newest group declared in band, and the newest group declaring a size
+	/// other than the one before it, as the claim tracks them.
+	size: Option<(u32, u32)>,
+	resized: Option<u64>,
 	spacing: Option<Duration>,
 	/// Nothing is listed before the first segment this watcher saw start.
 	whole: bool,
@@ -2183,6 +2187,8 @@ impl Follow {
 			latest: None,
 			ending: None,
 			end: None,
+			size: None,
+			resized: None,
 			spacing: None,
 			whole: false,
 			reading: false,
@@ -2223,6 +2229,12 @@ impl Follow {
 				if let Some(newest) = reach.newest() {
 					slots.extend(self.grid.reach(newest));
 				}
+				if let Some(size) = declared
+					&& self.size != Some(size)
+				{
+					self.size = Some(size);
+					self.resized = Some(sequence);
+				}
 				self.ending = scale.map(|scale| (group.clone(), scale));
 				self.end = None;
 				self.latest = Some((group, media, reach));
@@ -2233,9 +2245,13 @@ impl Follow {
 		self.list(rendition, slots, Some(read), size, false)
 	}
 
-	/// Wait for the newest group to end, so its GROUP_END rather than its successor's start places
-	/// it, as on every edge that reads the same group; the segments that completes. A group that
-	/// failed or declared no end leaves its place to its successor.
+	/// Wait for the newest group to end, so its GROUP_END may complete its segment before its
+	/// successor starts; the segments that completes. A group that failed or declared no end leaves
+	/// its segment to its successor.
+	///
+	/// So does a segment holding an in-band resize: the catalog update declaring it may still
+	/// follow, and a retire hands over only groups no listed segment holds (see
+	/// [`Rendition::handover`]).
 	fn poll_end(&mut self, waiter: &kio::Waiter) -> Poll<Vec<grid::Slot>> {
 		let Some((group, scale)) = &mut self.ending else {
 			return Poll::Ready(Vec::new());
@@ -2244,7 +2260,16 @@ impl Follow {
 		let end = group.end().and_then(|end| moq_net::Timestamp::new(end, *scale).ok());
 		self.ending = None;
 		self.end = end;
-		Poll::Ready(end.map(|end| self.grid.end(end)).unwrap_or_default())
+		let unplaced = self.grid.unplaced();
+		let resizing = self
+			.resized
+			.zip(unplaced)
+			.is_some_and(|(resized, first)| resized >= first);
+		let slots = match (end, resizing) {
+			(Some(end), false) => self.grid.end(end),
+			_ => Vec::new(),
+		};
+		Poll::Ready(slots)
 	}
 
 	/// List what `slots` place, after reading the group `read` whose keyframe declares `size`;
@@ -2550,8 +2575,12 @@ impl WatchMedia {
 					{
 						return Poll::Ready(done);
 					}
-					// A declared end says where its content ends without decoding its frames.
-					if let Some(end) = follow.end {
+					// A declared end says where its content ends without decoding its frames, once
+					// the group is placed: one off the grid is placed by its last frame, as on an edge
+					// without GROUP_END.
+					if let Some(end) = follow.end
+						&& !follow.grid.pending()
+					{
 						let slots = follow.grid.finish(None, Some(end));
 						let done = follow.list(&self.rendition, slots, None, None, true);
 						return Poll::Ready(done.expect("an ended track ends the watch"));

@@ -52,8 +52,9 @@ pub(crate) struct Segment {
 	/// Content time jumped before this segment (`EXT-X-DISCONTINUITY`).
 	pub discontinuity: bool,
 	/// Wall-clock start (`EXT-X-PROGRAM-DATE-TIME`), when the catalog advertises its root
-	/// broadcast clock. Rendered on the first segment and after each discontinuity, where the
-	/// running sum of `EXTINF`s no longer gives it.
+	/// broadcast clock. Rendered on the first segment and wherever the running sum of `EXTINF`s
+	/// from the one before no longer gives it, as after a discontinuity or where a segment's media
+	/// starts off its grid line by another amount than the segment before's.
 	pub program_date_time: Option<Wall>,
 }
 
@@ -95,7 +96,9 @@ pub(crate) fn render_media(snapshot: &Snapshot, init: &str, query: Option<&str>)
 	let mut current = snapshot.segments.first().map_or(init, |segment| map(segment, init));
 	let _ = writeln!(out, "#EXT-X-MAP:URI=\"init.{current}.mp4{suffix}\"");
 
-	for (index, segment) in snapshot.segments.iter().enumerate() {
+	// The wall clock a player derives for the next segment from the last one stated.
+	let mut derived: Option<Wall> = None;
+	for segment in &snapshot.segments {
 		if segment.discontinuity {
 			let _ = writeln!(out, "#EXT-X-DISCONTINUITY");
 		}
@@ -104,14 +107,17 @@ pub(crate) fn render_media(snapshot: &Snapshot, init: &str, query: Option<&str>)
 			current = map(segment, init);
 			let _ = writeln!(out, "#EXT-X-MAP:URI=\"init.{current}.mp4{suffix}\"");
 		}
-		if (index == 0 || segment.discontinuity)
-			&& let Some(pdt) = segment.program_date_time
-		{
-			let _ = writeln!(
-				out,
-				"#EXT-X-PROGRAM-DATE-TIME:{}",
-				humantime::format_rfc3339_millis(pdt.into())
-			);
+		// Restated wherever it moves, so a segment keeps its wall clock whichever segment the
+		// window starts at.
+		if let Some(pdt) = segment.program_date_time {
+			if segment.discontinuity || derived != Some(pdt) {
+				let _ = writeln!(
+					out,
+					"#EXT-X-PROGRAM-DATE-TIME:{}",
+					humantime::format_rfc3339_millis(pdt.into())
+				);
+			}
+			derived = Some(pdt + segment.duration);
 		}
 		if segment.gap {
 			let _ = writeln!(out, "#EXT-X-GAP");
@@ -217,6 +223,45 @@ mod tests {
 			"{out}"
 		);
 		assert_eq!(out.matches("PROGRAM-DATE-TIME").count(), 2, "{out}");
+	}
+
+	// A segment whose media starts off its grid line by another amount than the one before it
+	// restates its wall clock, so a reload whose window starts there gives it the same one.
+	#[test]
+	fn a_moved_media_offset_restates_the_program_date_time() {
+		let at = |millis| Some(Wall::UNIX_EPOCH + Duration::from_millis(millis));
+		let segment = |segment, program_date_time| Segment {
+			segment,
+			tag: "ab12cd34".into(),
+			map: None,
+			duration: Duration::from_secs(2),
+			gap: false,
+			discontinuity: false,
+			program_date_time,
+		};
+		let snapshot = Snapshot {
+			target_duration: 4,
+			media_sequence: 0,
+			discontinuity_sequence: 0,
+			segments: vec![segment(0, at(0)), segment(1, at(2_050)), segment(2, at(4_000))],
+			finished: false,
+			generation: None,
+		};
+
+		let out = render_media(&snapshot, "0123abcd", None);
+		let stated: Vec<_> = out
+			.lines()
+			.filter_map(|line| line.strip_prefix("#EXT-X-PROGRAM-DATE-TIME:"))
+			.collect();
+		assert_eq!(
+			stated,
+			[
+				"1970-01-01T00:00:00.000Z",
+				"1970-01-01T00:00:02.050Z",
+				"1970-01-01T00:00:04.000Z"
+			],
+			"{out}"
+		);
 	}
 
 	#[test]

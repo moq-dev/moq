@@ -8,8 +8,7 @@
 //! boundaries at its own groups.
 //!
 //! A group starts at its key on a timed track, or its first frame's pts where the session carries
-//! no timeline, and ends where its GROUP_END says, else where the next group starts. It belongs to
-//! one segment. A group starting on a line, or at most a sixteenth of a segment after one (the
+//! no timeline, and ends where the next group starts. It belongs to one segment. A group starting on a line, or at most a sixteenth of a segment after one (the
 //! slack), belongs to that line's segment, so a keyframe landing a little late, as timestamp jitter
 //! or an NTSC GOP of 2,002 ms on a 2 s grid puts it, still starts that segment rather than leaving
 //! it a gap of a few milliseconds. Any other group belongs to the next line if it contains it, so
@@ -17,8 +16,9 @@
 //! after, `floor(start / length)`. A group off the grid is placed once its end is known, or sooner
 //! once one of its own frames passes the next line, since it then contains that line: every frame
 //! of its successor presents after all of its own. The segment before it completes then, not a
-//! group later. A segment also completes once its newest group ends at or past the next line,
-//! since every later group then starts a later segment. Groups are never split, since a segment
+//! group later. A segment also completes once its newest group's GROUP_END reaches the next line,
+//! since every later group then starts a later segment. A GROUP_END places no group: one arriving
+//! before or after the successor would then place it differently on different edges. Groups are never split, since a segment
 //! starting mid-GOP is not independent. A grid slot no group starts a segment in, because an
 //! overrun or a pause skipped it, is listed as a gap, so the numbering never skips: on a 2s grid, a
 //! group A = [0.5s, 7s) is segment 0, slots 1 and 2 are gaps, and a contiguous B = [7s, 7.2s)
@@ -333,13 +333,14 @@ impl Grid {
 	}
 
 	/// The newest group ends at `at`, as its GROUP_END says, so no later group starts before it.
-	/// Places it if it waits for its end, and completes its segment once `at` reaches the next
-	/// line, since every later group then starts a later segment. Returns the segments it completes.
+	/// Completes its segment once `at` reaches the next line, since every later group then starts a
+	/// later segment: the segment its successor would complete. A group waiting to be placed is left
+	/// to its successor or its frames, as on an edge whose GROUP_END arrives after the successor.
+	/// Returns the segments it completes.
 	pub fn end(&mut self, at: Timestamp) -> Vec<Slot> {
 		let mut out = Vec::new();
-		if let Some(pending) = self.pending.take() {
-			let segment = self.segment(pending.pts, Some(at)).expect("bounded");
-			self.place(pending, segment, &mut out);
+		if self.pending.is_some() {
+			return out;
 		}
 		let reached =
 			(self.open.as_ref()).is_some_and(|open| super::nanos(at) >= super::nanos(self.line(open.segment + 1)));
@@ -723,15 +724,17 @@ mod test {
 					}
 					early_slots.extend(early.finish(Some(ms(end - 1)), Some(ms(end))));
 					let early = listed(early_slots);
-					// Each group's GROUP_END, where its successor starts, lists the same segments too.
+					// Each group's GROUP_END, anywhere up to where its successor starts, lists the
+					// same segments too, so an edge's segments never depend on whether it arrives
+					// before the successor.
 					let mut ended = Grid::new(Duration::from_millis(length), 256);
 					let mut ended_slots = Vec::new();
 					for (sequence, start) in starts.iter().enumerate().skip(join) {
 						ended_slots.extend(ended.group(sequence as u64, ms(*start), ms(*start)));
 						let until = starts.get(sequence + 1).copied().unwrap_or(end);
-						ended_slots.extend(ended.end(ms(until)));
+						ended_slots.extend(ended.end(ms(start + next(until - start + 1))));
 					}
-					ended_slots.extend(ended.finish(None, Some(ms(end))));
+					ended_slots.extend(ended.finish(Some(ms(end - 1)), Some(ms(end))));
 					let ended = listed(ended_slots);
 					let listed = listed(slots);
 					assert_eq!(early, listed, "{interval} ms: {starts:?}");
@@ -847,7 +850,8 @@ mod test {
 			grid.end(ms(1500)).is_empty(),
 			"a later group may still start before 2 s"
 		);
-		assert!(grid.group(1, ms(1500), ms(1500)).is_empty());
+		// Within the slack, so placed in segment 0 at once.
+		assert!(grid.group(1, ms(100), ms(100)).is_empty());
 		assert_eq!(listed(grid.end(ms(2000))), [(0, 0..2, 0, 2000)]);
 		assert!(!grid.waiting(), "nothing is left open");
 		// A pause: the next group lists the gaps after the segment its end completed.
@@ -857,13 +861,14 @@ mod test {
 		);
 		assert_eq!(listed(grid.end(ms(8000))), [(3, 2..3, 6000, 8000)]);
 
-		// An end places a group off the grid that waits for it.
+		// A group off the grid waits for its successor whatever its end: one ending at 1.5 s and
+		// followed at 2.5 s contains the line at 2 s, as an edge seeing the successor first places it.
 		let mut grid = Grid::new(Duration::from_secs(2), 256);
-		assert!(grid.group(0, ms(500), ms(500)).is_empty());
+		assert!(grid.group(0, ms(1000), ms(1000)).is_empty());
+		assert!(grid.end(ms(1500)).is_empty());
 		assert!(grid.pending());
-		assert!(grid.end(ms(1900)).is_empty(), "placed in segment 0, which stays open");
-		assert!(!grid.pending());
-		assert_eq!(grid.open(), Some(0));
+		assert!(grid.group(1, ms(2500), ms(2500)).is_empty());
+		assert_eq!(grid.open(), Some(1));
 
 		// A later group starting inside a completed segment resets rather than rewriting it.
 		let mut grid = Grid::new(Duration::from_secs(2), 256);
