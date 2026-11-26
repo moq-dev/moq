@@ -587,9 +587,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	/// Write one audio frame, which forwards at once, closing its group once that carries a join.
 	///
-	/// A tag states no duration, so each frame is taken to play as long as the shortest spacing
-	/// seen, which a gap can't stretch past the next frame's start. A frame a gap or rewind puts
-	/// outside the open group opens a new one, so the producer checks it as a group start.
+	/// A tag states no duration, so each frame plays as long as its codec says, else as long as the
+	/// shortest spacing seen, which a gap can't stretch past the next frame's start. A frame a gap or
+	/// rewind puts outside the open group opens a new one, so the producer checks it as a group start.
 	fn write_audio(&mut self, track_id: u8, data: &[u8], timestamp: u64) -> crate::Result<()> {
 		if !self.audio.contains_key(&track_id) {
 			tracing::debug!("audio frame before config, dropping");
@@ -619,7 +619,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			);
 		}
 		stream.previous = Some(timestamp);
-		let end = stream.spacing.and_then(|spacing| timestamp.checked_add(spacing).ok());
+		let stated = crate::container::legacy::Audio::new(&stream.config).and_then(|audio| audio.duration(data));
+		let end = stated
+			.or(stream.spacing)
+			.and_then(|duration| timestamp.checked_add(duration).ok());
 		let result = (|| {
 			if !stream.track.needs_keyframe() && stream.join.opens(timestamp) {
 				stream.track.cut(None)?;
@@ -630,7 +633,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			}
 			stream.track.write(Frame {
 				timestamp,
-				duration: None,
+				duration: stated,
 				payload: Bytes::copy_from_slice(data),
 				keyframe,
 			})?;

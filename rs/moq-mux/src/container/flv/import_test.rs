@@ -1323,12 +1323,32 @@ async fn audio_published(data: &[u8]) -> Vec<u128> {
 	published.remove(&name).unwrap()
 }
 
+/// An audio-only FLV of 20 ms Opus packets at `timestamps` (ms).
+fn opus_tags(timestamps: &[u32]) -> Vec<u8> {
+	let mut out = flv_header(0x04);
+	let mut seq = vec![(super::AUDIO_FORMAT_EX << 4) | super::AUDIO_PACKET_SEQUENCE_START];
+	seq.extend_from_slice(b"Opus");
+	seq.extend_from_slice(&crate::codec::opus::Config::new(48_000, 2).encode().unwrap());
+	write_tag(&mut out, super::TAG_AUDIO, 0, &seq);
+	for &timestamp in timestamps {
+		let mut frame = vec![(super::AUDIO_FORMAT_EX << 4) | super::AUDIO_PACKET_CODED_FRAMES];
+		frame.extend_from_slice(b"Opus");
+		// CELT fullband, one 20 ms frame.
+		frame.extend_from_slice(&[0xf8, 0xff, 0xfe]);
+		write_tag(&mut out, super::TAG_AUDIO, timestamp, &frame);
+	}
+	out
+}
+
 /// Dropped packets leave a gap the group's end doesn't extrapolate, so the packet after it keeps
 /// its own timestamp rather than moving past an end estimated from the gap.
 #[tokio::test]
 async fn an_audio_gap_keeps_the_next_timestamp() {
-	let published = audio_published(&aac_tags(&[0, 20, 80, 100, 120, 140])).await;
-	assert_eq!(published, [0, 20_000, 80_000, 100_000, 120_000, 140_000]);
+	for timestamps in [[0, 20, 80, 100, 120, 140], [0, 80, 100, 120, 140, 160]] {
+		let published = audio_published(&opus_tags(&timestamps)).await;
+		let expected: Vec<u128> = timestamps.iter().map(|&ms| u128::from(ms) * 1000).collect();
+		assert_eq!(published, expected);
+	}
 }
 
 /// A tag repeating the previous timestamp adds no time, so it is dropped rather than holding a

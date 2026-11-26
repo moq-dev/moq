@@ -4111,7 +4111,8 @@ impl<E: CatalogExt> AacStream<E> {
 	}
 
 	fn seek(&mut self, start: u64) -> Result<()> {
-		// A seek is a discontinuity like any other.
+		// A seek is a discontinuity like any other, and the producer's seek closes the open group.
+		self.group.take();
 		self.desync();
 		if let Some(import) = &mut self.import {
 			import.seek(start)?;
@@ -4128,10 +4129,9 @@ impl<E: CatalogExt> AacStream<E> {
 	}
 
 	/// The partial frame will never see its end, and whatever vouched for the next frame
-	/// boundary no longer applies.
+	/// boundary no longer applies. The open group keeps its end for the caller to close it at.
 	fn desync(&mut self) {
 		self.burst = std::time::Duration::ZERO;
-		self.group.take();
 		self.tail.clear();
 		self.tail_pts = None;
 		self.tail_pes = PesStarts::default();
@@ -4753,7 +4753,8 @@ impl<E: CatalogExt> LegacyStream<E> {
 	}
 
 	fn seek(&mut self, start: u64) -> Result<()> {
-		// A seek is a discontinuity like any other.
+		// A seek is a discontinuity like any other, and the producer's seek closes the open group.
+		self.group.take();
 		self.desync();
 		if let Some(import) = &mut self.import {
 			import.seek(start)?;
@@ -4770,9 +4771,8 @@ impl<E: CatalogExt> LegacyStream<E> {
 	}
 
 	/// The partial frame will never see its end, and whatever vouched for the next frame
-	/// boundary no longer applies.
+	/// boundary no longer applies. The open group keeps its end for the caller to close it at.
 	fn desync(&mut self) {
-		self.group.take();
 		self.tail.clear();
 		self.tail_pts = None;
 		self.tail_pes = PesStarts::default();
