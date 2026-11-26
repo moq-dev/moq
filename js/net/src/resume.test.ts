@@ -603,6 +603,47 @@ test("a front's held group sees its serving copy's fatal abort", async () => {
 });
 
 /**
+ * A front's serving copy refusing a range's time start fails the read only until the ranges change:
+ * the track does not end on it, as a direct reader's refusal does not. Mirrors the Rust
+ * `Reader::poll_group`, which returns a serving copy's refusal without marking the copy done.
+ */
+test("a front's read recovers from its serving copy's range refusal", async () => {
+	const clock = new Manual();
+	const installed = install(clock);
+	const front = new Front();
+	const source = new BroadcastProducer();
+	const handle = source.consume();
+	const ta = copy(source);
+	const requests = ta.producer.requests();
+	ta.write(10n);
+	front.serve(handle);
+	// Time 5 lies before every group held, so the copy looks it up.
+	const ordered = front.consumer
+		.track("seq")
+		.subscribe({ ranges: [{ start: 5n, end: 6n }, { start: 10n }] })
+		.ordered();
+	try {
+		await clock.advance(Duration.ZERO);
+		expect(ordered.tryNextItem()).toBeUndefined();
+		const fill = await requests.requestedFill();
+		const error = new StreamError(StreamCode.Old);
+		fill?.refuseGroups(fill.start, fill.end ?? 10n, error);
+		await clock.advance(Duration.ZERO);
+		expect(() => ordered.tryNextItem()).toThrow(error);
+		ordered.update({ ranges: [{ start: 10n }] });
+		await clock.advance(Duration.ZERO);
+		expect(ordered.tryNextItem()?.group?.start).toBe(10n);
+	} finally {
+		requests.close();
+		ordered.close();
+		front.consumer.close();
+		handle.close();
+		source.close();
+		installed.close();
+	}
+});
+
+/**
  * A front's held group the ranges cover goes out before its serving copy's fatal abort, which the
  * next read reports. Mirrors the Rust `a_fronts_held_group_goes_out_before_its_copys_fatal_abort`.
  */

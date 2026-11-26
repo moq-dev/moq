@@ -8691,6 +8691,59 @@ mod test {
 		));
 	}
 
+	/// A front served by another front reports the inner front's copy refusing a range before
+	/// a held group another range covers, keeping the group, as a direct read does.
+	#[test]
+	fn a_nested_fronts_held_group_waits_behind_its_copys_refusal() {
+		let inner_routes = Producer::new();
+		let inner = logical(&inner_routes);
+		let a = received_copy();
+		a.anchored();
+		inner_routes.serve(a.consume());
+		let routes = Producer::new();
+		let outer = logical(&routes);
+		routes.serve(inner.consume());
+		let since = |times: &[u64]| {
+			Subscription::default()
+				.with_ranges(times.iter().map(|&time| crate::track::Range {
+					start: crate::track::Start::Time(time),
+					end: None,
+				}))
+				.with_max(None)
+		};
+		let mut ordered = outer
+			.consume()
+			.subscribe(since(&[0]))
+			.now_or_never()
+			.unwrap()
+			.unwrap()
+			.ordered();
+		let noop = kio::Waiter::noop();
+		write(&a, 0);
+		a.drop_groups(1..2, StreamError::NotFound);
+		write(&a, 2);
+		assert!(matches!(
+			ordered.poll_next_item(&noop),
+			Poll::Ready(Ok(Some(track::Item::Group(group)))) if group.start == 0
+		));
+		// Group 2 is held behind the gap.
+		assert!(matches!(
+			ordered.poll_next_item(&noop),
+			Poll::Ready(Ok(Some(track::Item::Gap { .. })))
+		));
+		ordered.update(since(&[0, 5])).unwrap();
+		a.refuse_time(5, Error::NotFound);
+		assert!(matches!(
+			ordered.poll_next_item(&noop),
+			Poll::Ready(Err(Error::NotFound))
+		));
+		ordered.update(since(&[0])).unwrap();
+		assert!(matches!(
+			ordered.poll_next_item(&noop),
+			Poll::Ready(Ok(Some(track::Item::Group(group)))) if group.start == 2
+		));
+	}
+
 	/// A front's key-order reader reports a group that lands on its copy after the read passed
 	/// its key, as old, with when it landed, and never one it handed out.
 	#[test]

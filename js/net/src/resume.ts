@@ -1478,6 +1478,13 @@ class Reader implements ResumeSource {
 					held.add(copy);
 					break;
 				}
+				// A copy still serving that refuses the reader's ranges fails the read until they change,
+				// so it is not done: a copy it replaced refusing leaves the rest to the one now serving.
+				// Mirrors the Rust `Reader::poll_group`.
+				if (!copy.replaced) {
+					const refused = hooks.refused(copy.sub);
+					if (refused) return { kind: "error", error: refused };
+				}
 				const recv = this.#take(copy, ordered, dispositions, admit);
 				if (recv.kind === "drop") {
 					const dropped = this.#tryDrop(delivered);

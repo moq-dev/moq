@@ -13613,14 +13613,14 @@ impl Subscriber {
 	}
 
 	/// Why this subscriber's ranges can't be served from its track, the error its reads
-	/// fail with; `None` for a front's reader, whose copies answer for it.
+	/// fail with: for a front's reader, a copy still serving it refusing them.
 	pub(super) fn refused(&mut self) -> Option<Error> {
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
 				cursor.sync();
 				cursor.filter.refused.clone()
 			}
-			Inner::Resume(..) => None,
+			Inner::Resume(resume, _) => resume.refused(),
 		}
 	}
 
