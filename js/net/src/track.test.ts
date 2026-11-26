@@ -2,13 +2,15 @@ import { expect, spyOn, test } from "bun:test";
 import { Duration, Instant, Wall, yieldNow } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { race } from "@moq/signals";
+import fc from "fast-check";
 import { DEFAULT_EXPIRY, Pool } from "./cache.ts";
 import { joinTick } from "./demand.ts";
+import { Runs } from "./drops.ts";
 import { ProtocolViolation, Skipped, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
 import type { FillGroups } from "./fill.ts";
 import type { Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
-import { hooks, NO_MAX_DELAY, skipHole, staleHole } from "./internal.ts";
+import { type DropRun, hooks, NO_MAX_DELAY, sameHole, skipHole, staleHole } from "./internal.ts";
 import { GRACE } from "./ledger.ts";
 import { textFrame } from "./mock.ts";
 import { rescale, rescaleIn } from "./rescale.ts";
@@ -2464,6 +2466,163 @@ test("a parked read wakes at its wall deadline", async () => {
 	}
 });
 
+// Write groups at `keys`, each presenting at its key in milliseconds, then idle the cache past its
+// window but for the ones not in `evicted`, read meanwhile: the next write lets those go.
+async function idleBut(keys: bigint[], evicted: bigint[]) {
+	const clock = manualTime(10_000);
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: null });
+	for (const key of keys) putGroup(producer, key, Number(key));
+	await clock.advance(10_000 + CACHE_WINDOW_MS / 2);
+	const reader = producer.subscribe(withMax({ delay: { max: null } }));
+	for (const key of keys) {
+		if (evicted.includes(key)) continue;
+		const group = hooks.cachedGroup(reader, key);
+		if (!group) throw new Error(`group ${key} is cached`);
+		hooks.refreshGroup(group);
+		group.close();
+	}
+	reader.close();
+	clock.set(10_000 + CACHE_WINDOW_MS + 200);
+	return { producer, clock };
+}
+
+// A group stays stale once the cache lets its successor go: the one gone still bounds its reach
+// and starts its wall clock, rather than the next group the cache happens to keep. Mirrors the
+// Rust `an_evicted_successor_still_bounds_the_reach`.
+test("an evicted successor still bounds the reach", async () => {
+	for (const [evicted, read] of [
+		[[], [6000n, 5000n, 1000n]],
+		[[1000n], [6000n, 5000n]],
+	]) {
+		const { producer, clock } = await idleBut([0n, 1000n], evicted);
+		try {
+			for (const key of [5000n, 6000n]) putGroup(producer, key, Number(key));
+			const subscriber = producer.subscribe(withMax({ delay: { max: Duration.millis(2000) } }));
+			expect(drainGroups(subscriber)).toEqual(read);
+		} finally {
+			producer.finish();
+			producer.close();
+			clock.installed.close();
+		}
+	}
+});
+
+// A reader whose runs skip a cached group is bounded by its own successor once the cache lets it
+// go, past a group gone it does not serve. Mirrors the Rust
+// `an_evicted_successor_past_an_unserved_one_still_bounds_the_reach`.
+test("an evicted successor past an unserved one still bounds the reach", async () => {
+	for (const evicted of [[], [1000n, 3000n]]) {
+		const { producer, clock } = await idleBut([0n, 1000n, 2000n, 3000n], evicted);
+		try {
+			putGroup(producer, 4000n, 4000);
+			const subscriber = producer.subscribe(
+				withMax({ ranges: [{ end: 0n }, { start: 3000n }], delay: { max: Duration.millis(500) } }),
+			);
+			expect({ evicted, stale: drainGroups(subscriber).includes(0n) }).toEqual({ evicted, stale: false });
+		} finally {
+			producer.finish();
+			producer.close();
+			clock.installed.close();
+		}
+	}
+});
+
+// A live join measures the edge by the newest group, so letting an older group go whose later
+// frames run past it moves the start nowhere. Mirrors the Rust
+// `a_join_ignores_an_evicted_older_group_running_past_the_edge`.
+test("a join ignores an evicted older group running past the edge", async () => {
+	for (const evicted of [false, true]) {
+		const clock = manualTime(10_000);
+		const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: null });
+		try {
+			const old = producer.createGroup(1000n);
+			old.writeFrame(textFrame("x", Timestamp.fromMillis(1000)));
+			putGroup(producer, 2000n, 2000);
+			putGroup(producer, 3000n, 3000);
+			old.writeFrame(textFrame("x", Timestamp.fromMillis(10_000)));
+			old.finish();
+			await clock.advance(10_000 + CACHE_WINDOW_MS / 2);
+			const reader = producer.subscribe(withMax({ delay: { max: null } }));
+			for (const key of evicted ? [2000n, 3000n] : [1000n, 2000n, 3000n]) {
+				const group = hooks.cachedGroup(reader, key);
+				if (!group) throw new Error(`group ${key} is cached`);
+				hooks.refreshGroup(group);
+				group.close();
+			}
+			reader.close();
+			clock.set(10_000 + CACHE_WINDOW_MS + 200);
+			putGroup(producer, 3001n, 3001);
+			const subscriber = producer.subscribe({
+				ranges: [{ start: { live: { min: Duration.millis(500), max: null } } }],
+			});
+			expect({ evicted, read: drainGroups(subscriber) }).toEqual({ evicted, read: [3001n, 3000n, 2000n] });
+		} finally {
+			producer.finish();
+			producer.close();
+			clock.installed.close();
+		}
+	}
+});
+
+// A local track places a time start at the group containing it even once the cache let that
+// group go: an older group the cache happens to keep never stands in for it. Mirrors the Rust
+// `a_local_time_start_ignores_an_older_group_kept_past_an_evicted_one`.
+test("a local time start ignores an older group kept past an evicted one", async () => {
+	for (const [evicted, read] of [
+		[[], [3000n, 2000n]],
+		[[2000n], [3000n]],
+		[[1000n, 2000n], [3000n]],
+	]) {
+		const { producer, clock } = await idleBut([1000n, 2000n], evicted);
+		try {
+			putGroup(producer, 3000n, 3000);
+			const subscriber = producer.subscribe({ ranges: [{ start: 2500n }] });
+			expect(drainGroups(subscriber)).toEqual(read);
+		} finally {
+			producer.finish();
+			producer.close();
+			clock.installed.close();
+		}
+	}
+});
+
+// A finished track's live join measures the edge its publisher produced, not the newest group its
+// cache still holds. Mirrors the Rust `a_join_after_the_end_measures_an_evicted_edge`.
+test("a join after the end measures an evicted edge", async () => {
+	for (const [evicted, read] of [
+		[[], [5000n, 4000n, 3000n]],
+		[[5000n], [4000n, 3000n]],
+	]) {
+		const keys = [1000n, 2000n, 3000n, 4000n, 5000n];
+		const clock = manualTime(10_000);
+		const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: null });
+		try {
+			for (const key of keys) putGroup(producer, key, Number(key));
+			producer.finish();
+			// Closed, so the cache lets the newest group go once idle too.
+			producer.close();
+			await clock.advance(10_000 + CACHE_WINDOW_MS / 2);
+			const reader = producer.subscribe(withMax({ delay: { max: null } }));
+			for (const key of keys) {
+				if (evicted.includes(key)) continue;
+				const group = hooks.cachedGroup(reader, key);
+				if (!group) throw new Error(`group ${key} is cached`);
+				hooks.refreshGroup(group);
+				group.close();
+			}
+			reader.close();
+			await clock.advance(10_000 + CACHE_WINDOW_MS + 200);
+			const subscriber = producer.subscribe({
+				ranges: [{ start: { live: { min: Duration.millis(1500), max: null } } }],
+			});
+			expect(drainGroups(subscriber)).toEqual(read);
+		} finally {
+			producer.close();
+			clock.installed.close();
+		}
+	}
+});
+
 // Evicting a recorded successor nobody read leaves its mirror a reader-side gap, which is not
 // a failure: the held group is still judged by that successor's arrival, not the next one's.
 test("an evicted successor with unread frames still starts the wall clock", async () => {
@@ -4736,6 +4895,34 @@ test("a received stale drop settles only the readers it covers", () => {
 	producer.close();
 });
 
+// The group streams and a stale drop are unordered, so a drop may reach the copy before the groups
+// it rests on. A reader capped where the upstream judged reads the same groups above the run, so it
+// takes the verdict instead of fetching a group the groups above would still convict.
+test("a received stale drop settles a reader capped where the upstream judged it", () => {
+	const producer = new TrackProducer("video").accept({ timescale: Timescale.MILLI, maxAge: null });
+	putGroup(producer, 0n, 0);
+	const reader = (max: number, end: bigint) =>
+		producer.subscribe(withMax({ delay: { max: Duration.millis(max) }, ranges: [{ end: end - 1n }] }));
+	const same = reader(500, 4n);
+	const narrower = reader(100, 4n);
+	const wider = reader(5000, 4n);
+	const lower = reader(500, 3n);
+	const higher = reader(500, 5n);
+	hooks.dropTrackGroups(producer, 1n, 3n, staleHole(500, 4n));
+	const dropped = (subscriber: typeof same) => {
+		const runs: [bigint, bigint][] = [];
+		for (let run = hooks.tryDrop(subscriber); run; run = hooks.tryDrop(subscriber)) runs.push([run.start, run.end]);
+		return runs;
+	};
+	expect(dropped(same)).toEqual([[1n, 3n]]);
+	expect(dropped(narrower)).toEqual([[1n, 3n]]);
+	// A wider budget still asks, and a cap apart from the verdict's may see other groups above it.
+	for (const subscriber of [wider, lower, higher]) expect(dropped(subscriber)).toEqual([]);
+	for (const subscriber of [same, narrower, wider, lower, higher]) subscriber.close();
+	producer.finish();
+	producer.close();
+});
+
 test("a superseded stale run is unknown again, and its group is handed out", () => {
 	const producer = new TrackProducer("video").accept({});
 	const reader = producer.subscribe(withMax({ delay: { max: Duration.millis(500) }, ranges: [{ start: 0n }] }));
@@ -6514,6 +6701,49 @@ test("track: a bounded join answered empty delivers nothing past a declared end"
 	}
 });
 
+// A copy whose keys past a group are given up places a time start inside that group once a later
+// frame passes the time or the group ends, which changes only the group: an arrival read and an
+// ordered read parked on it wake then and take the group. Mirrors the Rust
+// `a_frame_or_end_placing_a_time_start_wakes_its_reads`.
+test("track: a frame or end placing a time start wakes its reads", async () => {
+	for (const place of ["frame", "finish", "finishAt"] as const) {
+		const producer = receivedTrack({ timescale: Timescale.MILLI });
+		try {
+			const group = producer.createGroup(1000n);
+			group.writeFrame(textFrame("x", Timestamp.fromMillis(1000)));
+			producer.skipGroups(1001n, 2000n);
+			const from = () => withMax({ delay: { max: null }, ranges: [{ start: 1500n }] });
+			const arrival = producer.subscribe(from());
+			const ordered = producer.subscribe(from()).ordered();
+			let orderedTook: bigint | undefined;
+			// The read left parked fails once the track closes unfinished.
+			const read = ordered.nextGroup().then((taken) => {
+				orderedTook = taken?.start;
+			});
+			await yieldNow();
+			expect(arrival.tryRecvGroup()).toBeUndefined();
+			let woke = false;
+			const dispose = hooks.groupChanged(arrival, () => {
+				woke = true;
+			});
+			// Ending before the time leaves it in the skipped keys past the group, which reads none.
+			if (place === "frame") group.writeFrame(textFrame("x", Timestamp.fromMillis(1600)));
+			else if (place === "finish") group.finish();
+			else group.finishAt(1001n);
+			await yieldNow();
+			dispose();
+			const taken = place === "finishAt" ? undefined : 1000n;
+			expect([place, woke]).toEqual([place, true]);
+			expect([place, arrival.tryRecvGroup()?.start]).toEqual([place, taken]);
+			expect([place, orderedTook]).toEqual([place, taken]);
+			producer.close();
+			await read.catch(() => undefined);
+		} finally {
+			producer.close();
+		}
+	}
+});
+
 // Mirrors moq-net's `unplaced_holds_only_what_containing_cant_place`: a run holds only times
 // `containing` can't place, but those a reported start places directly, and a time it leaves out
 // lies between two held groups, which the window tries each time.
@@ -6874,6 +7104,76 @@ test("a forgotten kept-out run is judged by each range's budget", async () => {
 	}
 });
 
+// A local track keeps the skip directly above each cached group while that group stays, so a read
+// across two held groups never asks a fill for keys its publisher skipped; once the group below
+// leaves, its run expires like any other. Mirrors the Rust
+// `a_local_skip_between_held_groups_outlives_its_expiry`.
+test("a local skip between held groups outlives its expiry", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const pool = new Pool({ expiry: Duration.millis(10_000) });
+	const unpooled = new TrackProducer("test");
+	hooks.poolTrack(unpooled, pool);
+	const producer = unpooled.accept({ timescale: Timescale.MILLI, maxAge: null });
+	const requests = producer.requests();
+	const fills: FillGroups[] = [];
+	void (async () => {
+		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) fills.push(fill);
+	})();
+	// An ordered read from group 1000, which reads (and so keeps) every group it reaches.
+	const read = async () => {
+		const reader = producer.subscribe({ ranges: [{ start: 1000n }] }).ordered();
+		const items: string[] = [];
+		for (let item = reader.tryNextItem(); item; item = reader.tryNextItem()) {
+			if (item.kind === "gap") items.push(`gap${item.start}..${item.end}`);
+			else {
+				items.push(`g${item.group.start}`);
+				hooks.refreshGroup(item.group);
+				item.group.close();
+			}
+		}
+		await clock.advance(Duration.ZERO);
+		reader.close();
+		return items;
+	};
+	const asked = () => fills.map((fill) => [fill.start, fill.end]);
+	try {
+		for (const millis of [1000, 3000, 4000]) {
+			const group = producer.appendGroup(Timestamp.fromMillis(millis));
+			group.writeFrame(textFrame("x", Timestamp.fromMillis(millis)));
+			group.finish();
+		}
+		const held = ["g1000", "g3000", "g4000"];
+		expect(await read()).toEqual(held);
+		// Reading them again keeps the groups past their runs' expiry.
+		await clock.advance(Duration.millis(6_000));
+		expect(await read()).toEqual(held);
+		await clock.advance(Duration.millis(7_000));
+		pool.sweep();
+		expect(await read()).toEqual(held);
+		expect(asked()).toEqual([]);
+
+		// Only 3000 is read again, so 1000 idles out and the run it kept goes with it.
+		await clock.advance(Duration.millis(6_000));
+		const reader = producer.subscribe({ ranges: [{ start: 0n }] });
+		const group = hooks.cachedGroup(reader, 3000n);
+		if (!group) throw new Error("group 3000 is cached");
+		hooks.refreshGroup(group);
+		group.close();
+		await clock.advance(Duration.millis(6_000));
+		// The sweep forgets the run once the next one finds it due.
+		pool.sweep();
+		pool.sweep();
+		expect(hooks.givenUp(reader, 2000n).error).toBeUndefined();
+		expect(hooks.givenUp(reader, 3500n).error).toBeDefined();
+		reader.close();
+	} finally {
+		requests.close();
+		producer.close();
+		installed.close();
+	}
+});
+
 // A bounded read owes the keys its local floor keeps out until a skip accounts for them. One its
 // track forgot once the pool's idle window passed is unknown again, so the read asks a fill for it
 // rather than wait for good, and ends on the upstream's answer. Mirrors the Rust
@@ -6922,4 +7222,82 @@ test("a bounded read asks again for a kept-out skip its track forgot", async () 
 		producer.close();
 		installed.close();
 	}
+});
+
+// A live join added behind a reader caught up at the live edge hands out the cached groups it
+// reaches back to, though the reader's own budget already gave up everything below the groups
+// it read: no range covered those, so none was judged.
+test("a join added behind a caught-up read hands out what it reaches", () => {
+	const clock = manualTime(0);
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Duration.secs(30) });
+	try {
+		const read = (subscriber: ReturnType<typeof producer.subscribe>) => {
+			const got: bigint[] = [];
+			for (let group = subscriber.tryRecvGroup(); group; group = subscriber.tryRecvGroup()) got.push(group.start);
+			return got;
+		};
+		putGroup(producer, 0n, 0);
+		putGroup(producer, 1000n, 1000);
+		const edge: Range = { start: { live: { min: Duration.ZERO, max: Duration.ZERO } } };
+		const subscriber = producer.subscribe({ ranges: [edge] });
+		expect(read(subscriber)).toEqual([1000n]);
+		putGroup(producer, 2000n, 2000);
+		expect(read(subscriber)).toEqual([2000n]);
+		const behind: Range = { start: { live: { min: Duration.secs(30), max: Duration.secs(30) } } };
+		subscriber.update({ ranges: [edge, behind] });
+		expect(read(subscriber)).toEqual([0n]);
+		subscriber.close();
+	} finally {
+		producer.close();
+		clock.installed.close();
+	}
+});
+
+// Where a publisher's delivery starts, over random held groups (whole or headless) and runs given
+// up: from the lower of the source's start and the lowest held group it serves, the first group
+// neither given up nor held unservable, and never past the first group out. Mirrors the Rust
+// `delivery_starts_at_the_first_group_it_can_serve`.
+test("delivery starts at the first group it can serve", () => {
+	const key = (max: bigint) => fc.bigInt({ min: 0n, max });
+	fc.assert(
+		fc.property(
+			fc.uniqueArray(fc.record({ key: key(15n), whole: fc.boolean() }), {
+				selector: (held) => held.key,
+				minLength: 1,
+				maxLength: 9,
+			}),
+			fc.array(fc.tuple(key(15n), fc.bigInt({ min: 1n, max: 3n })), { maxLength: 4 }),
+			fc.option(key(19n), { nil: undefined }),
+			(held, given, source) => {
+				held.sort((a, b) => (a.key < b.key ? -1 : 1));
+				// The first group out is served whole.
+				held[held.length - 1].whole = true;
+				const producer = new TrackProducer("test");
+				const subscriber = hooks.wholeGroups(producer.subscribe(withMax({ delay: { max: null } })), () => 0);
+				for (const { key, whole } of held) {
+					const group = whole
+						? producer.createGroup(key)
+						: hooks.receiveGroup(producer, { start: key, offset: 1 });
+					group.writeFrame(textFrame("x", Timestamp.fromMillis(Number(key))));
+					group.finish();
+				}
+				// Newest first, the read hands out the last group written and holds the rest.
+				const first = held[held.length - 1].key;
+				expect(subscriber.tryRecvGroup()?.start).toBe(first);
+				// Alternating errors keep adjacent runs separate entries.
+				const givenUp = new Runs<DropRun>(sameHole);
+				given.forEach(([start, len], index) => {
+					const code = index % 2 === 0 ? StreamCode.Old : StreamCode.Cancel;
+					givenUp.set(start, start + len, { start, end: start + len, error: new StreamError(code) });
+				});
+				const whole = new Map(held.map((group) => [group.key, group.whole]));
+				const lowest = held.find((group) => group.key < first && group.whole)?.key ?? first;
+				let want = source !== undefined && source < lowest ? source : lowest;
+				while (want < first && (givenUp.at(want) || whole.get(want) === false)) want++;
+				expect(hooks.deliveryStart(subscriber, { first, source, givenUp })).toBe(want);
+				subscriber.close();
+				producer.close();
+			},
+		),
+	);
 });

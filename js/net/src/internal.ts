@@ -34,7 +34,7 @@ import type {
 } from "./track.ts";
 import { max, min } from "./util/key.ts";
 import * as Varint from "./varint.ts";
-import type { Budget, Holdings, Resolved } from "./window.ts";
+import type { Budget, Holdings, Resolved, Window } from "./window.ts";
 import type { Advertised, Advertisements } from "./wire.ts";
 
 /** A null {@link Live.max} in milliseconds, which the model holds as the largest value every peer can read. */
@@ -359,6 +359,12 @@ export interface Hole {
 	 * does not depend on it. Only a widening past it reverses the verdict.
 	 */
 	stale?: number;
+	/**
+	 * The exclusive group end the upstream subscription judged a stale verdict within, undefined
+	 * when it followed the live edge or its end is not known to be the one it judged under. A
+	 * reader capped at the same end reads the groups the verdict rests on, so it settles on it.
+	 */
+	cap?: bigint;
 }
 
 /** A key never produced; see {@link Hole.skip}. */
@@ -366,9 +372,9 @@ export function skipHole(): Hole {
 	return { error: new StreamError(StreamCode.NotFound, { message: "group never produced" }), skip: true };
 }
 
-/** A group judged stale under `budget` milliseconds. */
-export function staleHole(budget: number): Hole {
-	return { error: new StreamError(StreamCode.Old, { message: "group is past the budget" }), stale: budget };
+/** A group judged stale under `budget` milliseconds, within the exclusive group end `cap` when it has one. */
+export function staleHole(budget: number, cap?: bigint): Hole {
+	return { error: new StreamError(StreamCode.Old, { message: "group is past the budget" }), stale: budget, cap };
 }
 
 /** A run of keys given up, with why. */
@@ -379,12 +385,29 @@ export interface DropRun extends Run, Hole {
 	own?: boolean;
 }
 
+/** A group a subscriber holds unread, and whether it is whole from the frame asked. */
+export interface Held {
+	key: bigint;
+	servable: boolean;
+}
+
+/** What a publisher knows of where its delivery can start; see `hooks.deliveryStart`. */
+export interface Opening {
+	/** The first group going out. */
+	first: bigint;
+	/** Where the source's feed starts, if it names one. */
+	source: bigint | undefined;
+	/** The runs given up before delivery started, which it can't start in. */
+	givenUp: { at(key: bigint): Run | undefined };
+}
+
 /** Whether two runs say the same thing, so they may merge. */
 export function sameHole(a: DropRun, b: DropRun): boolean {
 	return (
 		toStreamCode(a.error) === toStreamCode(b.error) &&
 		!a.skip === !b.skip &&
 		a.stale === b.stale &&
+		a.cap === b.cap &&
 		!a.received === !b.received &&
 		!a.own === !b.own
 	);
@@ -411,6 +434,7 @@ export function insertDrop(
 		error: hole.error,
 		skip: hole.skip,
 		stale: hole.stale,
+		cap: hole.cap,
 		received: hole.received,
 		own: hole.own,
 	});
@@ -514,8 +538,12 @@ export type Recv =
 	| { kind: "boundary" }
 	/** The producer finished and the buffer is drained. Nothing can follow. */
 	| { kind: "done" }
-	/** The track aborted. */
-	| { kind: "error"; error: Error };
+	/**
+	 * The read failed: the track aborted, or, `refused`, the reader's ranges can't be served until
+	 * they change, which a front's copy reports so the front does not take it for the track's end.
+	 * Mirrors the Rust `track::Failure`.
+	 */
+	| { kind: "error"; error: Error; refused?: true };
 
 /** A package-internal frame read as the group stores it. */
 export interface ReadGroupFrame {
@@ -659,7 +687,7 @@ export interface ResumeSource {
 	 * The next group not in `delivered`, in arrival or sequence order, without waiting. With
 	 * `dispositions`, a run no copy may still deliver is reported once as a `drop`.
 	 */
-	tryGroup(ordered: boolean, delivered: Delivered, dispositions: boolean): Recv;
+	tryGroup(ordered: boolean, delivered: Delivered, dispositions: boolean, admit?: bigint): Recv;
 	/**
 	 * The next run no copy may still deliver, reported once as a `drop`, without taking a group.
 	 * Below `passing`, which a key-order read is about to pass, no copy can deliver one later.
@@ -690,6 +718,10 @@ export interface ResumeSource {
 	forgetPast(delivered: Delivered, budget: Budget, keep?: bigint): void;
 	/** The lowest group any copy holds unread that `delivered` lacks; see `hooks.lowestBuffered`. */
 	lowestBuffered(delivered: Delivered): bigint | undefined;
+	/** The first key any copy holds past `key`; see `hooks.keyAfter`. */
+	keyAfter(key: bigint): bigint | undefined;
+	/** Why a copy still serving refuses the reader's ranges; see `hooks.refused`. */
+	refused(): Error | undefined;
 	/**
 	 * Forget every copy's report of `[start, end)`, so the copy serving when the reader's ranges ask
 	 * for it again reports it again. Mirrors the Rust `Reader::untell`.
@@ -715,8 +747,10 @@ export interface ResumeSource {
 	resolved(): (Resolved | undefined)[];
 	/** Where a live join this reader placed at `placed` starts under `budget` milliseconds, on the serving copy. */
 	joinStart(placed: bigint, budget: number): bigint;
-	/** The runs of `[start, end)` the serving copy reads, undefined without one. */
-	runs(start: bigint, end: bigint): Run[] | undefined;
+	/** The runs of `[start, end)` the reader's ranges name, across every copy. */
+	runs(start: bigint, end: bigint): Run[];
+	/** The reader's own window, which spans every copy, synced. */
+	window(): Window;
 	/** Whether a time start the serving copy still waits to place holds back a gap; see `hooks.gapHeld`. */
 	gapHeld(at: bigint, end: bigint): boolean;
 	/** Whether a route's copy serves the reader now. */
@@ -746,10 +780,8 @@ export interface ResumeSource {
 	bufferedLargest(): Position | undefined;
 	/** The group the next take hands out, without taking it; see `hooks.peekGroup`. */
 	peek(ordered: boolean, delivered: Delivered): bigint | undefined;
-	/** The lowest group any copy holds unread below `below`; see `hooks.lowestUnread`. */
-	lowestUnread(below: bigint): bigint | undefined;
-	/** Whether any copy holds group `key` unread; see `hooks.heldAt`. */
-	heldAt(key: bigint): "servable" | "unservable" | undefined;
+	/** The lowest group any copy holds unread in `[from, below)`; see `hooks.lowestHeld`. */
+	lowestHeld(from: bigint, below: bigint, servable: boolean): Held | undefined;
 	/** The serving copy's newest actual object, including metadata retained past cache eviction. */
 	objectLargest(): Position | undefined;
 	/** The serving copy's largest location now, and whether it can still advance. */
@@ -1068,16 +1100,16 @@ export const hooks: {
 	/** The newest frame still buffered for a subscriber; assigned by `track.ts`. */
 	bufferedLargest: (subscriber: Subscriber) => Position | undefined;
 	/**
-	 * The lowest group the subscriber holds unread below `below`, in its window and whole from the
-	 * frame asked: where a newest-first read's delivery starts. Mirrors the Rust
-	 * `track::Subscriber::lowest_unread`; assigned by `track.ts`.
+	 * Where a publisher's delivery starts once `opening.first` goes out first. Mirrors the Rust
+	 * `track::Subscriber::delivery_start`; assigned by `track.ts`.
 	 */
-	lowestUnread: (subscriber: Subscriber, below: bigint) => bigint | undefined;
+	deliveryStart: (subscriber: Subscriber, opening: Opening) => bigint;
 	/**
-	 * Whether the subscriber holds group `key` unread in its window, and whether it is whole from the
-	 * frame asked: a publisher's start passes a held group it cannot serve. Assigned by `track.ts`.
+	 * The lowest group the subscriber holds unread in `[from, below)`, in its window, only one whole
+	 * from the frame asked when `servable`, and whether it is, for a front's `lowestHeld`. Assigned
+	 * by `track.ts`.
 	 */
-	heldAt: (subscriber: Subscriber, key: bigint) => "servable" | "unservable" | undefined;
+	lowestHeld: (subscriber: Subscriber, from: bigint, below: bigint, servable: boolean) => Held | undefined;
 	/** The newest actual object received or reported upstream, independent of cache retention. */
 	objectLargest: (subscriber: Subscriber) => Position | undefined;
 	/** Call `fn` with a group's frame count now and on every change; assigned by `group.ts`. */
@@ -1174,8 +1206,11 @@ export const hooks: {
 	 * below it, else the first in the subscription's Group Order. `floor` passes keys taken on other copies.
 	 */
 	peekGroup: (subscriber: Subscriber, ordered: boolean, floor?: bigint) => bigint | undefined;
-	/** Take the next group in sequence order without waiting, as {@link tryRecvGroup} does in arrival order. */
-	tryNextGroup: (subscriber: Subscriber, floor?: bigint) => Recv;
+	/**
+	 * Take the next group in sequence order without waiting, as {@link tryRecvGroup} does in arrival
+	 * order. One at or past `admit` stays next, and the read reports idle.
+	 */
+	tryNextGroup: (subscriber: Subscriber, floor?: bigint, admit?: bigint) => Recv;
 	/** Whether a buffered group in `[start, end)` that `delivered` lacks still waits to be read. */
 	hasUnreadGroup: (subscriber: Subscriber, start: bigint, end: bigint | undefined, delivered: Delivered) => boolean;
 	/**
@@ -1236,6 +1271,10 @@ export const hooks: {
 	 * as a front's compaction reads it.
 	 */
 	lowestBuffered: (subscriber: Subscriber, delivered: Delivered) => bigint | undefined;
+	/** The first key the subscriber holds unread past `key`, on any copy it reads. Mirrors the Rust `TrackState::key_after`. */
+	keyAfter: (subscriber: Subscriber, key: bigint) => bigint | undefined;
+	/** Why the subscriber's ranges can't be served, which its reads fail with. Mirrors the Rust `Subscriber::refused`. */
+	refused: (subscriber: Subscriber) => Error | undefined;
 	/** Fold a route copy's record below `at`, where the reader it feeds is, which reports nothing there. */
 	fold: (subscriber: Subscriber, at: bigint) => void;
 	/** Forget what a route copy reported of `[start, end)`, which its reader's wire was never told. */
@@ -1263,6 +1302,11 @@ export const hooks: {
 	 * only one held from its first frame.
 	 */
 	holdsGroup: (subscriber: Subscriber, key: bigint, whole?: boolean) => boolean;
+	/**
+	 * How many cached groups the subscriber's track evicted so far. Mirrors the Rust
+	 * `Consumer::evicted`.
+	 */
+	evictions: (subscriber: Subscriber) => number;
 	/**
 	 * When the latest group the subscriber's track caches in `[start, end)` landed, undefined when
 	 * it caches none; a routed reader asks every copy. Mirrors the Rust `Subscriber::landed`.
@@ -1344,6 +1388,12 @@ export const hooks: {
 	/** Where a source copy finished whole ends, undefined while it is open or ended without one. */
 	groupWholeEnd: (group: GroupProducer) => bigint | undefined;
 	/**
+	 * Whether a source copy counts as content (its first frame landed, or it ended), whether it
+	 * failed, and its first and newest timestamps: what the groups below it are judged by once it
+	 * leaves the cache. Assigned by `group.ts`.
+	 */
+	groupSpan: (group: GroupProducer) => { started: boolean; failed: boolean; first?: Timestamp; latest?: Timestamp };
+	/**
 	 * The first time a source copy can't place, undefined once it finished: it places a time it holds
 	 * a timed frame past, which puts its End past the time too. An aborted copy may have lost its End.
 	 * Mirrors the Rust `group::Handle::unplaced_from`.
@@ -1393,6 +1443,8 @@ export const hooks: {
 	 * whether the read goes on past a short close, leaving that to the reader. Assigned by `group.ts`.
 	 */
 	groupClosed: (group: GroupConsumer) => GetPromise<Error | null>;
+	/** Settles once the group's producer closes it, read or not: when its {@link GroupConsumer.end} is known. Assigned by `group.ts`. */
+	groupFinished: (group: GroupConsumer) => GetPromise<Error | null>;
 	/** Settles once the reader releases the group (`close` or an abort), however far it read. */
 	groupReleased: (group: GroupConsumer) => Promise<void>;
 	/** Whether a group reader still reads the copy it was mirrored from, not one its recovery moved it to. */
@@ -1662,10 +1714,10 @@ export const hooks: {
 	bufferedLargest: () => {
 		throw new Error("track.ts not loaded");
 	},
-	lowestUnread: () => {
+	deliveryStart: () => {
 		throw new Error("track.ts not loaded");
 	},
-	heldAt: () => {
+	lowestHeld: () => {
 		throw new Error("track.ts not loaded");
 	},
 	objectLargest: () => {
@@ -1693,6 +1745,12 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	lowestBuffered: () => {
+		throw new Error("track.ts not loaded");
+	},
+	keyAfter: () => {
+		throw new Error("track.ts not loaded");
+	},
+	refused: () => {
 		throw new Error("track.ts not loaded");
 	},
 	fold: () => {
@@ -1750,6 +1808,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	holdsGroup: () => {
+		throw new Error("track.ts not loaded");
+	},
+	evictions: () => {
 		throw new Error("track.ts not loaded");
 	},
 	landed: () => {
@@ -1836,6 +1897,9 @@ export const hooks: {
 	groupWholeEnd: () => {
 		throw new Error("group.ts not loaded");
 	},
+	groupSpan: () => {
+		throw new Error("group.ts not loaded");
+	},
 	groupUnplacedFrom: () => {
 		throw new Error("group.ts not loaded");
 	},
@@ -1891,6 +1955,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	groupClosed: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupFinished: () => {
 		throw new Error("group.ts not loaded");
 	},
 	readsMirrored: () => {

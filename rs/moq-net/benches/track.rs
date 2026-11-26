@@ -1772,7 +1772,7 @@ impl EmptyRun {
 			Run::Retired => (Duration::ZERO, 1),
 		};
 		let budget = track::Subscription::default().with_ranges([track::Range::from(track::Start::Live {
-			min: Some(budget),
+			min: None,
 			max: Some(budget),
 		})]);
 		Self {

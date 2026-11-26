@@ -46,6 +46,7 @@ import {
 	ownClaim,
 } from "./announce.ts";
 import { closeViolation } from "./error.ts";
+import * as Fit from "./fit.ts";
 import { Group } from "./group.ts";
 import { Probe } from "./probe.ts";
 import { ProbeLevel, Setup } from "./setup.ts";
@@ -63,7 +64,7 @@ import {
 	SubscribeStart,
 	SubscribeUpdate,
 } from "./subscribe.ts";
-import { fittedReasks, Minted, Subscriber } from "./subscriber.ts";
+import { fittedReasks, joinProbes, Minted, Subscriber, wantedProbes } from "./subscriber.ts";
 import { Track, TrackInfo } from "./track.ts";
 import { hasLengthFirst, hasRanges, hasTrackStream, Version, versionName } from "./version.ts";
 
@@ -85,6 +86,44 @@ test("a reasked probe is renewed whatever max its fresh probe asks", () => {
 	expect(fittedReasks([1n], live, [join(300)])).toEqual(new Set([1n]));
 	// A fresh probe for another join renews nothing.
 	expect(fittedReasks([1n], live, [{ start: { live: { min: 2000, max: 300 } } }])).toEqual(new Set());
+});
+
+// A live demand range retuned wider before its answer may still be answered under the max it was
+// asked with until then, which places no reader waiting with the wider one, so the join goes out on
+// a probe of its own. Mirrors the Rust `a_join_range_retuned_wider_before_its_answer_is_probed`.
+test("a join range retuned wider before its answer is probed", () => {
+	const join = { min: 1000, end: undefined, budget: 300, since: 0 };
+	const demand = { start: { live: { min: 1000, max: 300 } } };
+	const entry = {
+		live: new LiveRanges(Version.DRAFT_07, [demand]),
+		// Asked at 120 ms, then retuned to the reader's 300 ms, still unanswered.
+		joinBudgets: new Map([[0n, 120]]),
+		joinTicks: new Map(),
+		starts: new Map(),
+		fillIds: new Set(),
+		probeIds: new Set(),
+	} as unknown as Parameters<typeof joinProbes>[0];
+	expect(joinProbes(entry, [join], [demand])).toEqual({ probes: [demand], reasked: [] });
+});
+
+// A flood of time starts the copy's readers wait on leaves room for a live join's probe, so a reader
+// joining live is not held behind history readers, nor they behind joins. Mirrors the Rust
+// `time_probes_leave_room_for_a_join`.
+test("time probes leave room for a join", () => {
+	const asks = Array.from({ length: 10_000 }, (_, n) => BigInt(n));
+	const join = { min: 1000, end: undefined, budget: 300, since: 0 };
+	const entry = {
+		live: new LiveRanges(Version.DRAFT_07, []),
+		joinBudgets: new Map(),
+		joinTicks: new Map(),
+		starts: new Map(),
+		fillIds: new Set(),
+		probeIds: new Set(),
+	} as unknown as Parameters<typeof wantedProbes>[0];
+	const { probes } = wantedProbes(entry, asks, [join], []);
+	const fitted = Fit.fitAfter(Fit.budget(0, 0n, probes.length), [], probes);
+	expect(fitted.length).toBeLessThan(asks.length);
+	expect(fitted).toContainEqual({ start: { live: { min: 1000, max: 300 } } });
 });
 
 test("closing the subscriber suppresses probe stream warnings", async () => {
@@ -1830,6 +1869,54 @@ test("a drop during a duplicate wait lets the end give up on a stream that never
 	}
 });
 
+// Lite-07: a Group Stream waiting unread on a copy of its group that another stream delivers, such
+// as a recovery's, does not hold the end: that copy's stream holds the end of whatever carries it,
+// so a stall there never pins this subscription's. Once that copy fails, this stream takes the group
+// and holds the end while it reads.
+test("a duplicate wait does not hold the end", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, toHop(1n));
+	type Entry = { track: Producer; tail: { reading: boolean } };
+	let entry: Entry | undefined;
+	const internal = subscriber as unknown as {
+		runResponses: (stream: unknown, entry: Entry) => Promise<void>;
+	};
+	const runResponses = internal.runResponses.bind(internal);
+	const responses = spyOn(internal, "runResponses").mockImplementation((stream, captured) => {
+		entry = captured;
+		return runResponses(stream, captured);
+	});
+	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version, 1000);
+		const request = await opened(1);
+		await request.reading;
+		await respond(request, version, [{ start: answer(version, 0n) }]);
+		if (!entry) throw new Error("no subscription");
+
+		// A copy of group 0 this subscription's tail does not count, still arriving.
+		const other = hooks.receiveGroup(entry.track, { start: 0n, offset: 0 });
+		const duplicate = handStream(version);
+		duplicate.write(await liteFrame(0, new Uint8Array([1])));
+		const running = subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), duplicate.reader);
+		await drainReactions();
+		expect(entry.tail.reading).toBe(false);
+
+		other.abort(new StreamError(StreamCode.Cancel));
+		await drainReactions();
+		expect(entry.tail.reading).toBe(true);
+		duplicate.finish();
+		await running;
+		expect(entry.tail.reading).toBe(false);
+	} finally {
+		responses.mockRestore();
+		track.close();
+		subscriber.close();
+	}
+});
+
 // Lite-07: a header that arrives after the grace gave up on its gap is covered by the tail, but
 // no drop accounts for it, so its stream is still delivering and holds the end until it is read.
 test("a stream whose gap the grace gave up on still holds the end", async () => {
@@ -2895,10 +2982,13 @@ test.each(
 		await answerTrackInfo(streams[0], version, 1000);
 		await (await opened(1)).reading;
 		await drainReactions();
+		// The first group starts what watches the copy for good, such as its fills.
+		await subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), await groupStream(0, version));
+		await drainReactions();
 		const before = counters.map((counter) => counter.count());
 		expect(before).toHaveLength(3);
 		expect(before.every((count) => count > 0)).toBe(true);
-		for (let key = 0n; key < 50n; key++) {
+		for (let key = 1n; key < 50n; key++) {
 			await subscriber.runGroup(new Group({ subscribe: 0n, key: key }), await groupStream(Number(key), version));
 			await drainReactions();
 		}
@@ -3225,7 +3315,9 @@ test("a lite-07 copy asks upstream for a time start it cannot place", async () =
 
 // A range the publisher answers with no group to deliver lands none of its groups, so the copy is
 // told, and an ordered read holds no later group back for its time. Only one whose end takes in its
-// time says so: one following the live edge may still get the group containing it.
+// time says so, as one following the live edge does: its publisher answers it empty only once the
+// track ended, so no group containing its time is left. Mirrors the Rust
+// `an_open_range_answered_empty_places_its_time`.
 test("a lite-07 range answered empty is reported only for a range reaching its time", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
@@ -3248,9 +3340,52 @@ test("a lite-07 range answered empty is reported only for a range reaching its t
 			{ start: answer(version, undefined, 1n) },
 		]);
 		await drainReactions();
-		expect(reported.at(-1)).toEqual([[10n, undefined]]);
+		expect(reported.at(-1)).toEqual([
+			[10n, undefined],
+			[30n, undefined],
+		]);
 	} finally {
 		hooks.timeStarts = timeStarts;
+		track.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
+// A demand range added once the live feed started leaves its declared start standing while
+// unanswered when it can't start below it, rather than make it pending for a round trip. Mirrors the
+// Rust `a_range_added_past_the_feed_start_keeps_it_declared`.
+test("a range added past the feed start keeps it declared", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, toHop(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	const declared: (bigint | null | undefined)[] = [];
+	const startTrack = hooks.startTrack;
+	hooks.startTrack = (producer, served) => {
+		declared.push(served.start);
+		startTrack(producer, served);
+	};
+	const track = broadcast.track("video").subscribe({ ranges: [{ start: 10n, end: 12n }] });
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version);
+		const request = await opened(1);
+		const sent = new Reader(request.outbound, undefined, version);
+		expect(await sent.u53()).toBe(StreamId.Subscribe);
+		await Subscribe.decode(sent, version);
+		await request.reading;
+		await respond(request, version, [
+			{ start: answer(version, 10n, 0n, { position: { group: 12n, frame: 0 }, ended: false }) },
+		]);
+		await drainReactions();
+		expect(declared.at(-1)).toBe(10n);
+		track.update({ ranges: [{ start: 10n, end: 12n }, { start: 20n }] });
+		const added = await SubscribeUpdate.decode(sent, version);
+		expect(added.ranges).toEqual([{ start: { time: 20n } }]);
+		expect(declared.at(-1)).toBe(10n);
+	} finally {
+		hooks.startTrack = startTrack;
 		track.close();
 		broadcast.close();
 		subscriber.close();

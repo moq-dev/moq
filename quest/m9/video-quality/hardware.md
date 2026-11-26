@@ -24,7 +24,7 @@ their table to `.tmp/` and upload nothing.
 - Select the backend explicitly per row. moq-transcode's default prefers
   hardware, so a missing driver must fail the row, not fall back to
   OpenH264.
-- When [Vulkan Video encode on AMD](/quest/m5/vulkan-encode.md) lands, its
+- When [Vulkan Video encode on AMD](/quest/m3/vulkan-encode.md) lands, its
   backend joins the desktop's rows.
 
 Public API: none. Wire: none.

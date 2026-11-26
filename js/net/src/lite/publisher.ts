@@ -1796,6 +1796,13 @@ export class Publisher {
 			return ids.some((id, index) => resolution[index]?.floored && (known || !unstarted.get(id)?.live));
 		};
 
+		// Lite-07: whether a range still unanswered waits on this copy's upstream to place it.
+		const awaitsUpstream = (): boolean => {
+			if (!perRange()) return false;
+			const held = [...unstarted.keys()].filter((id) => controls.holds(id));
+			return hooks.servingResolvedKeys(track, held).some((range) => range === undefined);
+		};
+
 		// Answer each range still waiting for its SUBSCRIBE_START once it resolves, or with no start
 		// once nothing can resolve it (`finished`). One following the live edge also waits until this
 		// hop knows where it is. The first answers go out with `resolveStart`. Mirrors the Rust
@@ -2193,6 +2200,12 @@ export class Publisher {
 							if (!(await resolveStart(from, largest))) return false;
 							continue;
 						}
+						// A relay's copy places a range only as its upstream would, so one its upstream has yet
+						// to answer may start below every group held: nothing it owes is final until then.
+						if (awaitsUpstream()) {
+							await park();
+							continue;
+						}
 						// Nothing arrives to resolve a range still waiting on the live feed.
 						if (!(await reportStarted(true))) return false;
 						// Name every key from the start to the end this subscription never
@@ -2254,22 +2267,8 @@ export class Publisher {
 						}
 						source = floor;
 					}
-					// Newest first, this reader still holds groups below the first to go out: delivery
-					// starts at the lowest it can serve. A newer group's stream can also beat where the
-					// source's feed starts: preserve that start so a resumed subscriber still waits for
-					// the backlog.
-					const lowest = hooks.lowestUnread(track, group.start) ?? group.start;
-					startKey = min(lowest, source ?? lowest);
-					// A group given up, or held and not servable, cannot be where the feed starts. This
-					// stops at the first group out at the latest. Adjacent runs given up with different
-					// errors stay separate, so walk them all. Mirrors the Rust `TrackRun::start`.
-					while (startKey < group.start) {
-						const key = startKey;
-						const end =
-							skipped.at(key)?.end ?? (hooks.heldAt(track, key) === "unservable" ? key + 1n : undefined);
-						if (end === undefined) break;
-						startKey = min(end, group.start);
-					}
+					// A group given up, or held and not servable, cannot be where the feed starts.
+					startKey = hooks.deliveryStart(track, { first: group.start, source, givenUp: skipped });
 					// A later group above an explicit floor is still delivered, so the cursor stays put.
 					// A pre-06 subscribe that named no group is the exception: an absent
 					// Group Start is the latest group, and this key becomes the floor.
