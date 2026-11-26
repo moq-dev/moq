@@ -1922,12 +1922,13 @@ async fn a_rate_change_applies_behind_the_revision_it_comes_with() {
 		})
 		.expect("a revised PMT");
 	let counts: Vec<u64> = frames.iter().map(|frame| frame.payload.len() as u64 / 188).collect();
+	// Each recorded rate gains a packet a slot for the export's own clock and framing.
 	assert!(
-		counts[revised - 20..=revised].iter().all(|&n| n == OLD),
+		counts[revised - 20..=revised].iter().all(|&n| n == OLD + 1),
 		"{revised}: {counts:?}"
 	);
 	assert!(
-		counts[revised + 1..revised + 20].iter().all(|&n| n == NEW),
+		counts[revised + 1..revised + 20].iter().all(|&n| n == NEW + 1),
 		"{revised}: {counts:?}"
 	);
 }

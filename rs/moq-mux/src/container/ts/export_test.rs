@@ -8021,7 +8021,8 @@ async fn export_fixture(data: &[u8], mux_rate: Option<u64>) -> BytesMut {
 }
 
 /// `bbb_cbr.ts` is a 400 kb/s multiplex carrying 167 kb/s of media, which import
-/// records as such, so export pads the media back to the recorded rate.
+/// records as such, so export pads the media back to the recorded rate, and a packet a slot
+/// more for its own clock and framing.
 #[tokio::test(start_paused = true)]
 async fn export_pads_to_the_recorded_mux_rate() {
 	let ts = export_fixture(include_bytes!("test_data/bbb_cbr.ts"), None).await;
@@ -8029,8 +8030,8 @@ async fn export_pads_to_the_recorded_mux_rate() {
 	assert!(clocked.nulls > 0, "no null stuffing was emitted");
 	let rate = clocked.rate();
 	assert!(
-		rate.abs_diff(400_000) * 100 <= 400_000,
-		"output runs at {rate} b/s, not the recorded 400 kb/s"
+		rate.abs_diff(460_160) * 100 <= 460_160,
+		"output runs at {rate} b/s, not the recorded 400 kb/s and 60,160 b/s"
 	);
 	assert!(
 		clocked.max_gap <= 40 * 27_000,
@@ -13094,12 +13095,54 @@ fn pcr_chunks(data: &[u8], pid: u16) -> Vec<(usize, u64)> {
 		.collect()
 }
 
-/// An FFmpeg TS of AAC, packed as it does by default, exports with the CLI's default delay and
-/// no multiplex rate given: the rate it picks carries what the audio sends, its tables and its
-/// clock, though the source recorded one with no room beyond its own packing.
+/// An FFmpeg TS of audio alone, packed as it does by default, exports with the CLI's 1 s delay and
+/// the rate the source recorded, whatever the codec and however its frames peak: the rate it pads to
+/// carries what the audio sends, its tables and its clock, though the source recorded one with no
+/// room beyond its own packing. So it does whether the export waits for the rate, takes it up once
+/// it is measured, or is given it.
 #[tokio::test(start_paused = true)]
-async fn an_ffmpeg_aac_source_exports_with_default_settings() {
-	let data = include_bytes!("test_data/ffmpeg_aac.ts");
+async fn an_ffmpeg_audio_source_exports_at_its_recorded_rate() {
+	for (name, data) in [
+		("aac", &include_bytes!("test_data/ffmpeg_aac.ts")[..]),
+		("aac_pulse", include_bytes!("test_data/ffmpeg_aac_pulse.ts")),
+		("ac3", include_bytes!("test_data/ffmpeg_ac3.ts")),
+		("eac3", include_bytes!("test_data/ffmpeg_eac3.ts")),
+		("mp2", include_bytes!("test_data/ffmpeg_mp2.ts")),
+		("opus", include_bytes!("test_data/ffmpeg_opus.ts")),
+	] {
+		let recorded = Clocked::of(data).rate();
+		let padded = recorded + crate::container::ts::schedule::PACKET;
+		for rate in [Rate::Wait, Rate::Measured, Rate::Given(padded)] {
+			let (ts, dropped) = paced_export(data, rate).await;
+			assert_packet_aligned(&ts);
+			assert_eq!(dropped, 0, "{name}, {rate:?}: every frame made its deadline");
+			let out = Clocked::of(&ts).rate();
+			match rate {
+				Rate::Given(_) => assert!(out.abs_diff(padded) <= 1, "{name}: padded to {out} b/s, not {padded}"),
+				_ => assert!(
+					out > recorded,
+					"{name}, {rate:?}: padded to {out} b/s, no more than the recorded {recorded}"
+				),
+			}
+		}
+	}
+}
+
+/// Where [`paced_export`] takes its multiplex rate from.
+#[derive(Clone, Copy, Debug)]
+enum Rate {
+	/// The catalog, waiting for the import to measure it.
+	Wait,
+	/// The catalog, starting unpadded and taking it up once measured.
+	Measured,
+	/// The builder, from the start.
+	Given(u64),
+}
+
+/// Import `data` live, each stretch to a PCR on PID 0x100 arriving when its clock says, and export
+/// it at `rate` from the first stretch on until 4 s of media. Returns the output and the frames it
+/// dropped.
+async fn paced_export(data: &[u8], rate: Rate) -> (BytesMut, u64) {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(
@@ -13109,9 +13152,8 @@ async fn an_ffmpeg_aac_source_exports_with_default_settings() {
 	.unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 
-	// A live source: each stretch to a PCR arrives when its clock says.
 	let chunks = pcr_chunks(data, 0x100);
-	assert!(chunks.len() > 20, "{} PCRs", chunks.len());
+	assert!(chunks.len() > 10, "{} PCRs", chunks.len());
 	let (mut at, mut clock) = (0, chunks[0].1);
 	let mut export = None;
 	for (end, pcr) in chunks {
@@ -13126,7 +13168,12 @@ async fn an_ffmpeg_aac_source_exports_with_default_settings() {
 				.await
 				.unwrap();
 			export = Some(tokio::spawn(async move {
-				let mut export = Export::new(source, catalog, Duration::from_millis(500));
+				let export = Export::new(source, catalog, Duration::from_secs(1));
+				let mut export = match rate {
+					Rate::Wait => export,
+					Rate::Measured => export.without_rate_wait(),
+					Rate::Given(rate) => export.with_mux_rate(rate),
+				};
 				let mut ts = BytesMut::new();
 				// The catalog stays open, so the export pads on: stop with the media.
 				while let Some(frame) = export.next().await.expect("exporter error") {
@@ -13135,56 +13182,11 @@ async fn an_ffmpeg_aac_source_exports_with_default_settings() {
 						break;
 					}
 				}
-				ts
+				(ts, export.dropped())
 			}));
 		}
 	}
 	import.decode(&data[at * 188..]).unwrap();
 	let _finished = import.finish().unwrap();
-
-	let ts = export.unwrap().await.unwrap();
-	assert_packet_aligned(&ts);
-	let recorded = Clocked::of(data).rate();
-	let rate = Clocked::of(&ts).rate();
-	assert!(
-		rate > recorded,
-		"padded to {rate} b/s, no more than the recorded {recorded}"
-	);
-	// It joined after the multiplex rate was measured, so it carries less than the source.
-	assert!(ts.len() > data.len() / 4, "{} of {} bytes", ts.len(), data.len());
-}
-
-/// A catalog's bitrate and sample rate are hints from the network: the AAC floor they set stays
-/// within what a frame the decoder buffer holds needs, so a hostile pair neither overflows nor
-/// swallows the rate the source recorded.
-#[test]
-fn the_aac_floor_is_bounded_by_the_decoder_buffer() {
-	let mut catalog = crate::catalog::hang::Catalog::<tscat::Ext>::default();
-	for (name, bitrate, sample_rate) in [
-		("a", Some((1 << 53) - 1), 1),
-		("b", Some(128_000), 44_100),
-		("c", None, 48_000),
-	] {
-		let mut config = AudioConfig::new(AAC { profile: 2 }, sample_rate, 2);
-		config.bitrate = bitrate;
-		config.description = Some(Bytes::from_static(&[0x12, 0x10]));
-		catalog.audio.renditions.insert(name.into(), config);
-	}
-	let floor = super::export::audio_floor(&catalog);
-	// 3,584 bytes doubled and the PES header: 40 packets, and 5 for the second entry, 3 more.
-	assert_eq!(floor, (40 + 5 + 3) * crate::container::ts::schedule::PACKET);
-}
-
-/// Many renditions cannot push the AAC floor past the rate limit, which would discard the
-/// rate the source recorded.
-#[test]
-fn the_aac_floor_stays_within_the_rate_limit() {
-	let mut catalog = crate::catalog::hang::Catalog::<tscat::Ext>::default();
-	for index in 0..40 {
-		let mut config = AudioConfig::new(AAC { profile: 2 }, 1, 16);
-		config.bitrate = Some((1 << 53) - 1);
-		config.description = Some(Bytes::from_static(&[0x12, 0x10]));
-		catalog.audio.renditions.insert(format!("a{index}"), config);
-	}
-	assert!(super::export::sanitize_mux_rate(super::export::audio_floor(&catalog)).is_some());
+	export.unwrap().await.unwrap()
 }

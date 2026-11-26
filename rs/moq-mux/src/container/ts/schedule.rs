@@ -68,7 +68,7 @@ const _: () = assert!(TABLE_REPEAT.as_nanos().is_multiple_of(PCR_INTERVAL.as_nan
 /// its own.
 pub(super) const PACKET: u64 = TsPacket::SIZE as u64 * 8 * SLOTS_PER_SECOND;
 /// The most of a packet a decoder buffer can receive: everything after its 4-byte header.
-pub(super) const PAYLOAD: usize = TsPacket::SIZE - 4;
+const PAYLOAD: usize = TsPacket::SIZE - 4;
 /// How many empty slots to lay at most before the next packets: one second's worth. Past
 /// this the media had an outage rather than a coarse cadence, and a dense clock history for
 /// a span that carried no bytes only stalls anything pacing on the asserted values.
