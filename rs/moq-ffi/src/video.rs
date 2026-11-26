@@ -555,7 +555,7 @@ impl MoqVideoProducer {
 	/// nothing checks the codec settings, which its readers decode with, so keep those too. The
 	/// request names the track, so [`MoqVideoProducerOptions::track`] must be `None`, and it
 	/// must belong to the catalog's broadcast. A config this machine can't encode rejects the
-	/// request with `Unsupported`.
+	/// request with `NotFound`.
 	#[uniffi::constructor]
 	pub fn requested(
 		catalog: &crate::media::MoqMediaCatalogProducer,

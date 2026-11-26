@@ -98,7 +98,7 @@ func NewProducer(catalog *media.CatalogProducer, options ProducerOptions) (*Prod
 // with. Options that change the track info its readers hold end the track with Duplicate and fail
 // here; nothing checks the codec settings, which its readers decode with, so keep those too. The
 // request must belong to the catalog's broadcast, and a config that can't be encoded rejects it
-// with Unsupported.
+// with NotFound.
 func NewRequestedProducer(catalog *media.CatalogProducer, request *moq.TrackRequest, options ProducerOptions) (*Producer, error) {
 	raw, err := options.ffi()
 	if err != nil {

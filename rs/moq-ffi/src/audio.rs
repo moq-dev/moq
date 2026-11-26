@@ -525,7 +525,7 @@ impl MoqAudioProducer {
 	/// nothing checks the codec settings, which its readers decode with, so keep those too. The
 	/// request names the track, so [`MoqAudioProducerOptions::track`] must be `None`, and it
 	/// must belong to the catalog's broadcast. A config the codec refuses rejects the request
-	/// with `Unsupported`.
+	/// with `NotFound`.
 	#[uniffi::constructor]
 	pub fn requested(
 		catalog: &crate::media::MoqMediaCatalogProducer,

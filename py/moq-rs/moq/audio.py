@@ -155,7 +155,7 @@ class Producer:
         the track info its readers hold end the track with ``Duplicate`` and raise here; nothing
         checks the codec settings, which its readers decode with, so keep those too. The request
         must belong to the catalog's broadcast, and a config that can't be encoded rejects it
-        with ``Unsupported``.
+        with ``NotFound``.
         """
         producer = cls.__new__(cls)
         producer._inner = MoqAudioProducer.requested(

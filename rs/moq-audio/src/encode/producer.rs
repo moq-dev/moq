@@ -180,7 +180,7 @@ impl Reserved {
 		) {
 			Ok(track) => track,
 			Err(err) => {
-				let _ = held.abort(moq_net::Error::Unsupported);
+				let _ = held.abort(moq_net::Error::NotFound);
 				return Err(err.into());
 			}
 		};
@@ -341,7 +341,7 @@ impl Producer {
 	/// [`Duplicate`](moq_net::Error::Duplicate) and fail here. Nothing checks the rest: its
 	/// readers also decode with the codec settings they were first given, so keep those too. The
 	/// request names the track, so [`Options::track`] must be `None`. A config the codec refuses
-	/// rejects the request with [`Unsupported`](moq_net::Error::Unsupported), or ends the
+	/// rejects the request with [`NotFound`](moq_net::Error::NotFound), or ends the
 	/// accepted track with it.
 	pub fn requested<E: CatalogExt>(
 		request: moq_net::track::Request,
@@ -356,9 +356,10 @@ impl Producer {
 				Ok(accepted(request.take().expect("accepted once"), info)?)
 			}),
 		};
-		// Not accepted: the subscribers waiting on it learn it won't be served.
+		// Not accepted: the subscribers waiting on it learn it won't be served. `NotFound`, not
+		// `Unsupported`, which moq-lite sends as a retryable `Internal`, so a relay would ask again.
 		if let (Err(_), Some(request)) = (&built, request) {
-			request.reject(moq_net::Error::Unsupported);
+			request.reject(moq_net::Error::NotFound);
 		}
 		built
 	}
@@ -388,7 +389,7 @@ impl Producer {
 			Ok(registered) => Ok(reserved.encode(registered)),
 			Err(err) => {
 				// A subscriber may already be waiting on the track; tell it the track won't be served.
-				reserved.track.abort(moq_net::Error::Unsupported);
+				reserved.track.abort(moq_net::Error::NotFound);
 				Err(err)
 			}
 		}
@@ -1143,7 +1144,7 @@ mod tests {
 	}
 
 	/// A rendition the catalog refuses after the request was accepted, here a name another
-	/// producer claims, ends the track with `Unsupported` rather than leaving it to drop.
+	/// producer claims, ends the track with `NotFound` rather than leaving it to drop.
 	#[tokio::test]
 	async fn a_requested_producer_ends_a_track_the_catalog_refuses() {
 		let input = Input::default();
@@ -1175,7 +1176,7 @@ mod tests {
 
 		let request = requests.requested_track().await.unwrap();
 		assert!(Producer::requested(request, catalog, input, &options).is_err());
-		assert!(matches!(reader.recv_group().await, Err(moq_net::Error::Unsupported)));
+		assert!(matches!(reader.recv_group().await, Err(moq_net::Error::NotFound)));
 	}
 
 	/// A request names its track, so a requested producer given a name of its own fails and
@@ -1192,7 +1193,7 @@ mod tests {
 			..Options::default()
 		};
 		assert!(Producer::requested(request, catalog, Input::default(), &options).is_err());
-		assert!(matches!(pending.await, Err(moq_net::Error::Unsupported)));
+		assert!(matches!(pending.await, Err(moq_net::Error::NotFound)));
 	}
 
 	/// The catalog's stats follow the encoder's target from the first rendition on.

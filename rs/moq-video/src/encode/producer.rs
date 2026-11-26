@@ -182,7 +182,7 @@ impl Producer {
 	/// [`Duplicate`](moq_net::Error::Duplicate) and fail here. Nothing checks the rest: its
 	/// readers also decode with the codec settings they were first given, so keep those too. The
 	/// request names the track, so [`Options::track`] must be `None`. A config this machine can't
-	/// encode rejects the request with [`Unsupported`](moq_net::Error::Unsupported), and a
+	/// encode rejects the request with [`NotFound`](moq_net::Error::NotFound), and a
 	/// rendition the catalog refuses ends the accepted track with it.
 	pub async fn requested<E: CatalogExt>(
 		request: moq_net::track::Request,
@@ -199,9 +199,10 @@ impl Producer {
 				.await
 			}
 		};
-		// Not accepted: the subscribers waiting on it learn it won't be served.
+		// Not accepted: the subscribers waiting on it learn it won't be served. `NotFound`, not
+		// `Unsupported`, which moq-lite sends as a retryable `Internal`, so a relay would ask again.
 		if let (Err(_), Some(request)) = (&opened, request) {
-			request.reject(moq_net::Error::Unsupported);
+			request.reject(moq_net::Error::NotFound);
 		}
 		opened
 	}
@@ -264,7 +265,7 @@ impl Producer {
 		) {
 			Ok(publisher) => publisher,
 			Err(err) => {
-				let _ = held.abort(moq_net::Error::Unsupported);
+				let _ = held.abort(moq_net::Error::NotFound);
 				return Err(err);
 			}
 		};
@@ -1475,7 +1476,7 @@ mod tests {
 	}
 
 	/// A rendition the catalog refuses, here a name another producer claims, ends its track
-	/// with `Unsupported`, so a subscriber already waiting on it isn't left reading a drop.
+	/// with `NotFound`, so a subscriber already waiting on it isn't left reading a drop.
 	#[tokio::test]
 	async fn a_refused_rendition_ends_its_track() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -1497,7 +1498,7 @@ mod tests {
 		let mut reader = other.consume().track("video").unwrap().subscribe(None).await.unwrap();
 		let config = config(encoder::Kind::Named(probe::NAME.into()), Rate::from_mbps(1));
 		assert!(Producer::with_track(track, &catalog, config, rendition(), unlimited, None).is_err());
-		assert!(matches!(reader.recv_group().await, Err(moq_net::Error::Unsupported)));
+		assert!(matches!(reader.recv_group().await, Err(moq_net::Error::NotFound)));
 	}
 
 	/// A request names its track, so a requested producer given a name of its own fails and
@@ -1512,7 +1513,7 @@ mod tests {
 		let mut options = Options::new(config(encoder::Kind::Named(probe::NAME.into()), Rate::from_mbps(1)));
 		options.track = Some("other".into());
 		assert!(Producer::requested(request, catalog, options).await.is_err());
-		assert!(matches!(pending.await, Err(moq_net::Error::Unsupported)));
+		assert!(matches!(pending.await, Err(moq_net::Error::NotFound)));
 	}
 
 	/// Subscribe to `video`, skipping no group however far behind the reader falls.

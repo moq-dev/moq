@@ -109,7 +109,7 @@ public enum Video {
         /// change the track info its readers hold end the track with `Duplicate` and throw here;
         /// nothing checks the codec settings, which its readers decode with, so keep those too.
         /// The request must belong to the catalog's broadcast, and a config that can't be encoded
-        /// rejects it with `Unsupported`.
+        /// rejects it with `NotFound`.
         public static func requested(
             catalog: Media.CatalogProducer,
             request: TrackRequest,
