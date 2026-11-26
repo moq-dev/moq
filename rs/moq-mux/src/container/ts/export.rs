@@ -2768,7 +2768,10 @@ where
 			if track.read != Read::Stale {
 				continue;
 			}
-			let resume = track.source.resume();
+			let mut resume = track.source.resume();
+			// A flush settled the group's decode clock before its reordering was known, so the
+			// rest of the group may not fit it: read on from the next group instead.
+			let cut = track.declared.as_ref().is_some_and(DeclaredClock::forced) && resume.past_group();
 			let resumed = |source: ExportSource| match resume.read() {
 				true => source.resuming(&resume),
 				false => at_edge(source, replay),
@@ -2797,8 +2800,8 @@ where
 				continue;
 			};
 			// A new subscription at the edge counts as cutting whatever group the old one was
-			// reading; one that reads on counts its own.
-			let jumped = u64::from(!resume.read());
+			// reading, as does reading on past the rest of it; one that reads on counts its own.
+			let jumped = u64::from(!resume.read() || cut);
 			track.base.0 += track.source.markers();
 			track.base.1 += track.source.skips() + jumped;
 			track.base.2 += track.source.cuts() + jumped;

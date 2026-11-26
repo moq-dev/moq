@@ -145,6 +145,40 @@ pub(crate) struct Resume {
 	reached: Reached,
 }
 
+/// What a source starting at `floor` asks for under `delay`.
+///
+/// From the group at the floor: a time start names the group containing it, so the request
+/// reaches that group too, and the reader leaves it out if excluded. A reader with a staleness
+/// budget asks for no more history than the group it was reading, whole, and joins the rest
+/// live, reaching back as far as the budget allows, so what follows goes stale under the delay as
+/// any live read's does.
+fn floor_ranges(floor: Bound<u64>, delay: crate::container::Delay) -> Vec<moq_net::track::Range> {
+	use moq_net::track::{Range, Start};
+	let (Bound::Included(group) | Bound::Excluded(group)) = floor else {
+		return vec![Range::ALL];
+	};
+	let Some(max) = delay.max else {
+		return vec![Range::from(Start::Time(group))];
+	};
+	let live = Range {
+		start: Start::Live {
+			min: None,
+			max: Some(max),
+		},
+		end: None,
+	};
+	match floor {
+		Bound::Included(group) => vec![
+			Range {
+				start: Start::Time(group),
+				end: Some(group),
+			},
+			live,
+		],
+		_ => vec![live],
+	}
+}
+
 /// Where a source stopped in its track.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Cursor {
@@ -158,6 +192,16 @@ impl Resume {
 	/// Whether the source read anything to resume after.
 	pub(crate) fn read(&self) -> bool {
 		self.cursor.is_some()
+	}
+
+	/// Resume past the group being read rather than within it, returning whether the source
+	/// stopped partway through one.
+	pub(crate) fn past_group(&mut self) -> bool {
+		let Some(Cursor::Within { group, .. }) = self.cursor else {
+			return false;
+		};
+		self.cursor = Some(Cursor::After(group));
+		true
 	}
 }
 
@@ -220,7 +264,7 @@ pub(crate) struct ExportSource {
 	latest: Option<Duration>,
 	/// The group of the last frame or end delivered.
 	delivered: Option<u64>,
-	/// The group being read, until it ends.
+	/// The group being read, until it ends or a later one is read.
 	reading: Option<Reading>,
 	/// Where the groups read through ended, here or by the source this one resumes.
 	reached: Reached,
@@ -664,13 +708,8 @@ impl ExportSource {
 		if let SourceState::Requesting { binding, start } = &self.state {
 			let broadcast = ready!(binding.poll_broadcast(waiter))?;
 			let instance = binding.sibling().then(|| broadcast.clone());
-			// From the group starting at the floor: a time start names the group containing it, so
-			// the request reaches that group too, and the reader below leaves it out if excluded.
-			let subscription = match start.floor {
-				Bound::Included(group) | Bound::Excluded(group) => moq_net::track::Subscription::default()
-					.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Time(group))]),
-				Bound::Unbounded => moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::ALL]),
-			};
+			let subscription =
+				moq_net::track::Subscription::default().with_ranges(floor_ranges(start.floor, self.delay));
 			let subscription = self.delay.subscription(subscription);
 			let track = match broadcast.track(&self.target.track) {
 				Ok(track) => track,
@@ -823,10 +862,10 @@ impl ExportSource {
 						self.reached = reached;
 						return Poll::Ready(Ok(Some(Event::GroupEnd)));
 					}
-					// The skip is counted with the gap the next group reads.
+					// The skip is counted with the gap the next group reads. The cursor stays within
+					// the group: a resumption may still find the rest of it.
 					Some(Item::Cut { observed }) => {
 						self.finish_ends();
-						self.reading = None;
 						self.cuts += u64::from(std::mem::take(&mut self.open));
 						return Poll::Ready(Ok(Some(Event::Cut { observed })));
 					}
@@ -1686,6 +1725,31 @@ mod tests {
 		assert_eq!(read(&mut export), (60_000, 1, 0));
 		cut.abort(moq_net::Error::Old).unwrap();
 		assert_eq!(read(&mut export), (80_000, 2, 1), "group 3 was cut short");
+	}
+
+	/// A group cut short keeps the cursor within it, so a resumption reads on with the rest of it
+	/// where the publisher still serves it rather than past it.
+	#[tokio::test(start_paused = true)]
+	async fn a_cut_keeps_the_cursor_within_the_group() {
+		use crate::container::Container as _;
+		use crate::container::test_util::raw_frame;
+
+		let (track, mut export) = audio_export().await;
+		let wire = HangContainer::Legacy(crate::container::Kind::Audio);
+		let mut group = track.create_group(moq_net::group::Info { start: 0 }).unwrap();
+		let frames = [0, 20_000].map(|at| raw_frame(at, b"audio", at == 0));
+		wire.write(&mut group, &frames).unwrap();
+		let waiter = kio::Waiter::noop();
+		for _ in 0..2 {
+			assert!(matches!(
+				export.poll_event(&waiter),
+				Poll::Ready(Ok(Some(Event::Frame { .. })))
+			));
+		}
+		group.abort(moq_net::Error::Old).unwrap();
+		while !matches!(export.poll_event(&waiter), Poll::Ready(Ok(Some(Event::Cut { .. })))) {}
+		assert_eq!(export.resume().cursor, Some(Cursor::Within { group: 0, taken: 2 }));
+		drop(track);
 	}
 
 	#[tokio::test(start_paused = true)]
