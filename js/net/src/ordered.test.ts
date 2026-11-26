@@ -818,3 +818,31 @@ test("a looked-up time start reads before a held later group", async () => {
 	expect(items(ordered)).toEqual(["group 10"]);
 	requests.close();
 });
+
+// A stale live group waits behind a time start still looked up, which keeps its own budget: the read
+// never passes the group the lookup finds.
+test("a stale group waits behind a looked-up time start", async () => {
+	using clock = manual();
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: null });
+	const requests = producer.requests();
+	put(producer, 66n);
+	clock.jump(Duration.secs(5));
+	put(producer, 5000n);
+	clock.jump(Duration.secs(2));
+	const ordered = producer
+		.subscribe({
+			ranges: [
+				{ start: 10n, end: 20n },
+				{ start: { live: { min: Duration.millis(4934), max: Duration.secs(1) } } },
+			],
+		})
+		.ordered();
+	expect(items(ordered)).toEqual([]);
+	const fill = await requests.requestedFill();
+	expect(fill?.start).toBe(10n);
+	const group = fill?.accept(10n);
+	group?.writeFrame(textFrame("x", Timestamp.fromMillis(10)));
+	group?.finish();
+	expect(items(ordered)[0]).toBe("group 10");
+	requests.close();
+});

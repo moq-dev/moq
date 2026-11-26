@@ -6667,7 +6667,9 @@ export class Subscriber {
 			// scanning: one pass walks a whole backlog off rather than replaying it.
 			if (this.#staleAt(group.start, drift)) {
 				// Passing it passes the owed keys below it too, which the budget gives up with it, but
-				// for one a wider budget still holds.
+				// for one a wider budget still holds, and for the group a time start below it resolves
+				// to, judged by its own budget.
+				if (this.#waitTimeStart(start, group.start, drift)) return { kind: "idle" };
 				if (this.#waitWider(start, group.start, drift, drift.budget.at(group.start))) return { kind: "idle" };
 				this.#passOwed(start, group.start, drift);
 				this.#giveUp({ start: group.start, end: group.start + 1n }, staleHole(drift.budget.at(group.start)));
