@@ -617,6 +617,25 @@ test("a held group's successor rules out a time start past it", () => {
 	expect(items(ordered)).toEqual(["group 4"]);
 });
 
+// Mirrors the Rust `a_held_groups_successor_bounds_it_by_key`.
+test("a held group's successor bounds it by key, not by its first frame's time", () => {
+	const producer = anchoredTrack();
+	const ordered = producer.subscribe(withMax({ delay: { max: null } })).ordered();
+	put(producer, 0n);
+	drop(producer, 1n, 2n);
+	put(producer, 2n);
+	const ten = producer.createGroup(10n);
+	ten.writeFrame(textFrame("x", Timestamp.fromMillis(4)));
+	ten.finish();
+	expect(ordered.tryNextItem()?.group?.start).toBe(0n);
+	expect(ordered.tryNextItem()).toMatchObject({ kind: "gap", start: 1n, end: 2n });
+	// Group 10 presents from time 4, but time starts resolve by key, so time 5 may lie in group 2.
+	ordered.update(withMax({ delay: { max: null }, ranges: [{ start: 5n }] }));
+	expect(items(ordered)).toEqual([]);
+	hooks.timeStarts(producer, [[5n, 2n]]);
+	expect(items(ordered)).toEqual(["group 2"]);
+});
+
 // Mirrors the Rust `a_held_group_a_waiting_time_start_lies_past_is_passed`.
 test("a group held behind a gap is passed once an update's waiting time start lies past its end", () => {
 	const producer = receivedTrack();

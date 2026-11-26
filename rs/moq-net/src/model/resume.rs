@@ -1572,6 +1572,27 @@ impl Subscriber {
 		copies.iter().filter_map(|track| track.landed(keys.clone())).max()
 	}
 
+	/// The first key any copy caches past `key`: the same key is the same group on every copy,
+	/// so it bounds group `key` whichever copy holds it.
+	pub(super) fn key_after(&self, key: u64) -> Option<u64> {
+		let copies: Vec<_> = self.reader().copies.iter().map(|copy| copy.track.clone()).collect();
+		copies.iter().filter_map(|track| track.key_after(key)).min()
+	}
+
+	/// Why a copy still serving the reader refuses its ranges, which every read fails with until
+	/// they change; see [`track::Subscriber::refused`].
+	pub(super) fn refused(&self) -> Option<Error> {
+		let mut reader = self.reader();
+		reader
+			.copies
+			.iter_mut()
+			.filter(|copy| !copy.replaced)
+			.find_map(|copy| match &mut copy.sub {
+				Sub::Ready(sub) => sub.refused(),
+				Sub::Pending(_) => None,
+			})
+	}
+
 	/// The groups the reader's ranges name from `from` on; see
 	/// [`track::Subscriber::runs_in_range`].
 	pub(super) fn runs(&self, from: u64) -> Vec<std::ops::RangeInclusive<u64>> {
@@ -8526,51 +8547,103 @@ mod test {
 		}
 	}
 
-	/// A front's ordered read holding a group for an unplaced time start still runs its
-	/// cursor, so the serving copy's fatal abort reaches it before the group goes out.
+	/// A front's held group with no end of its own is bounded by the next key its copies hold,
+	/// so a time start past that key holds back none of the groups another range covers.
+	/// Mirrors the plain `a_held_groups_successor_rules_out_a_time_start_past_it`.
 	#[test]
-	fn a_fronts_held_group_sees_its_copys_fatal_abort() {
+	fn a_fronts_held_groups_successor_rules_out_a_time_start_past_it() {
 		let routes = Producer::new();
 		let logical = logical(&routes);
 		let a = received_copy();
 		a.anchored();
 		routes.serve(a.consume());
-		let since = |time| {
-			Subscription::default()
-				.with_ranges([crate::track::Range {
-					start: crate::track::Start::Time(time),
-					end: None,
-				}])
-				.with_max(None)
-		};
 		let mut ordered = logical
 			.consume()
-			.subscribe(since(0))
+			.subscribe(Subscription::default().with_max(None))
 			.now_or_never()
 			.unwrap()
 			.unwrap()
 			.ordered();
-		let noop = kio::Waiter::noop();
-		let mut next = || match ordered.poll_next_item(&noop) {
-			Poll::Ready(Ok(Some(track::Item::Group(group)))) => Some(Ok(group.start)),
-			Poll::Ready(Ok(Some(track::Item::Gap { range, .. }))) => Some(Err(range)),
-			Poll::Ready(res) => panic!("ended: {:?}", res.map(|_| ())),
-			Poll::Pending => None,
+		let read = |ordered: &mut track::Ordered, most: usize| -> Vec<String> {
+			let mut items = Vec::new();
+			while items.len() < most
+				&& let Poll::Ready(Ok(Some(item))) = ordered.poll_next_item(&kio::Waiter::noop())
+			{
+				items.push(match item {
+					track::Item::Group(group) => format!("group {}", group.start),
+					track::Item::Gap { range, .. } => format!("gap {range:?}"),
+				});
+			}
+			items
 		};
 		write(&a, 0);
 		a.drop_groups(1..2, StreamError::NotFound);
-		let mut open = a.create_group(group::Info { start: 2 }).unwrap();
-		open.write_frame(ts(2), b"x".as_ref()).unwrap();
-		assert_eq!(next(), Some(Ok(0)));
+		write(&a, 2);
+		a.skip_groups(3..4);
+		write(&a, 4);
 		// Group 2 is held behind the gap.
-		assert_eq!(next(), Some(Err(1..2)));
-		ordered.update(since(5)).unwrap();
-		assert!(ordered.poll_next_item(&noop).is_pending(), "group 2 may hold time 5");
-		a.abort(Error::FrameTooLarge).unwrap();
-		assert!(matches!(
-			ordered.poll_next_item(&noop),
-			Poll::Ready(Err(Error::FrameTooLarge))
-		));
+		assert_eq!(read(&mut ordered, 2), ["group 0", "gap 1..2"]);
+		let both = Subscription::default()
+			.with_ranges([4, 5].map(|time| crate::track::Range {
+				start: crate::track::Start::Time(time),
+				end: None,
+			}))
+			.with_max(None);
+		ordered.update(both).unwrap();
+		// Time 5 lies in group 4 or later, never in group 2.
+		assert_eq!(read(&mut ordered, usize::MAX), ["group 4"]);
+	}
+
+	/// A front's ordered read holding a group runs its cursor and meets the serving copy's fatal
+	/// abort, but hands out the group first when the ranges cover it, then fails: whether it
+	/// held the group for a gap alone, or for a time start the abort then places at it.
+	#[test]
+	fn a_fronts_held_group_goes_out_before_its_copys_fatal_abort() {
+		for update in [false, true] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = received_copy();
+			a.anchored();
+			routes.serve(a.consume());
+			let since = |time| {
+				Subscription::default()
+					.with_ranges([crate::track::Range {
+						start: crate::track::Start::Time(time),
+						end: None,
+					}])
+					.with_max(None)
+			};
+			let mut ordered = logical
+				.consume()
+				.subscribe(since(0))
+				.now_or_never()
+				.unwrap()
+				.unwrap()
+				.ordered();
+			let noop = kio::Waiter::noop();
+			let next = |ordered: &mut track::Ordered| match ordered.poll_next_item(&noop) {
+				Poll::Ready(Ok(Some(track::Item::Group(group)))) => format!("group {}", group.start),
+				Poll::Ready(Ok(Some(track::Item::Gap { range, .. }))) => format!("gap {range:?}"),
+				Poll::Ready(Err(err)) => format!("error {err:?}"),
+				Poll::Ready(Ok(None)) => "end".into(),
+				Poll::Pending => "pending".into(),
+			};
+			write(&a, 0);
+			a.drop_groups(1..2, StreamError::NotFound);
+			let mut open = a.create_group(group::Info { start: 2 }).unwrap();
+			open.write_frame(ts(2), b"x".as_ref()).unwrap();
+			open.finish().unwrap();
+			assert_eq!(next(&mut ordered), "group 0");
+			// Group 2 is held behind the gap.
+			assert_eq!(next(&mut ordered), "gap 1..2");
+			if update {
+				ordered.update(since(5)).unwrap();
+				assert_eq!(next(&mut ordered), "pending", "group 2 may hold time 5");
+			}
+			a.abort(Error::FrameTooLarge).unwrap();
+			assert_eq!(next(&mut ordered), "group 2", "update={update}");
+			assert_eq!(next(&mut ordered), "error FrameTooLarge", "update={update}");
+		}
 	}
 
 	/// A front's ordered read reports its serving copy's refusal of a range before a group it

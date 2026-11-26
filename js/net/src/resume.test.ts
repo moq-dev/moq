@@ -603,6 +603,44 @@ test("a front's held group sees its serving copy's fatal abort", async () => {
 });
 
 /**
+ * A front's held group the ranges cover goes out before its serving copy's fatal abort, which the
+ * next read reports. Mirrors the Rust `a_fronts_held_group_goes_out_before_its_copys_fatal_abort`.
+ */
+test("a front's held group goes out before its serving copy's fatal abort", async () => {
+	const clock = new Manual();
+	const installed = install(clock);
+	const front = new Front();
+	const source = new BroadcastProducer();
+	const handle = source.consume();
+	const ta = copy(source);
+	hooks.receiveTrack(ta.producer);
+	ta.write(0n);
+	hooks.dropTrackGroups(ta.producer, 1n, 2n, { error: new StreamError(StreamCode.NotFound) });
+	ta.write(2n);
+	front.serve(handle);
+	const ordered = front.consumer
+		.track("seq")
+		.subscribe({ ranges: [{ start: 0n }] })
+		.ordered();
+	try {
+		await clock.advance(Duration.ZERO);
+		expect(ordered.tryNextItem()?.group?.start).toBe(0n);
+		// Group 2 is held behind the gap.
+		expect(ordered.tryNextItem()).toMatchObject({ kind: "gap", start: 1n, end: 2n });
+		const error = new StreamError(StreamCode.FrameTooLarge);
+		ta.producer.abort(error);
+		expect(ordered.tryNextItem()?.group?.start).toBe(2n);
+		await expect(ordered.nextItem()).rejects.toBe(error);
+	} finally {
+		ordered.close();
+		front.consumer.close();
+		handle.close();
+		source.close();
+		installed.close();
+	}
+});
+
+/**
  * As above, beside a range still waiting on a group past the live edge: the raised start's backfill
  * is asked without waiting for that range to place. Mirrors the Rust
  * `a_backfill_places_a_raised_start_beside_a_waiting_range`.

@@ -714,6 +714,10 @@ export interface ResumeSource {
 	forgetPast(delivered: Delivered, budget: Budget, keep?: bigint): void;
 	/** The lowest group any copy holds unread that `delivered` lacks; see `hooks.lowestBuffered`. */
 	lowestBuffered(delivered: Delivered): bigint | undefined;
+	/** The first key any copy holds past `key`; see `hooks.keyAfter`. */
+	keyAfter(key: bigint): bigint | undefined;
+	/** Why a copy still serving refuses the reader's ranges; see `hooks.refused`. */
+	refused(): Error | undefined;
 	/**
 	 * Forget every copy's report of `[start, end)`, so the copy serving when the reader's ranges ask
 	 * for it again reports it again. Mirrors the Rust `Reader::untell`.
@@ -1263,6 +1267,10 @@ export const hooks: {
 	 * as a front's compaction reads it.
 	 */
 	lowestBuffered: (subscriber: Subscriber, delivered: Delivered) => bigint | undefined;
+	/** The first key the subscriber holds unread past `key`, on any copy it reads. Mirrors the Rust `TrackState::key_after`. */
+	keyAfter: (subscriber: Subscriber, key: bigint) => bigint | undefined;
+	/** Why the subscriber's ranges can't be served, which its reads fail with. Mirrors the Rust `Subscriber::refused`. */
+	refused: (subscriber: Subscriber) => Error | undefined;
 	/** Fold a route copy's record below `at`, where the reader it feeds is, which reports nothing there. */
 	fold: (subscriber: Subscriber, at: bigint) => void;
 	/** Forget what a route copy reported of `[start, end)`, which its reader's wire was never told. */
@@ -1733,6 +1741,12 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	lowestBuffered: () => {
+		throw new Error("track.ts not loaded");
+	},
+	keyAfter: () => {
+		throw new Error("track.ts not loaded");
+	},
+	refused: () => {
 		throw new Error("track.ts not loaded");
 	},
 	fold: () => {

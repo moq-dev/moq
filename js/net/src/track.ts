@@ -5347,6 +5347,8 @@ export class Subscriber {
 			if (subscriber.#resume) subscriber.#resume.forgetPast(delivered, budget, keep);
 			else subscriber.#forgetPastBudget(delivered, budget, keep);
 		};
+		hooks.keyAfter = (subscriber, key) => subscriber.#keyAfter(key);
+		hooks.refused = (subscriber) => subscriber.#settle() ?? subscriber.#resume?.refused();
 		hooks.lowestBuffered = (subscriber, delivered) =>
 			subscriber.#resume ? subscriber.#resume.lowestBuffered(delivered) : subscriber.#lowestBuffered(delivered);
 		hooks.fold = (subscriber, at) => subscriber.#fold(at);
@@ -6449,57 +6451,53 @@ export class Subscriber {
 		const held = items.held;
 		if (held) {
 			items.held = undefined;
-			// Settled first, so a range the groups or an upstream answer placed since counts where it
-			// placed. A refused lookup fails every read until the ranges change, this one included,
-			// keeping the group for them to judge afresh.
-			//
+			// One step: the cursor runs first, refusing every group past this one, then the group is
+			// judged. A group below goes first, as the read never goes back, and a front's backfill is
+			// asked. A closed track skips the run, draining what it holds before its abort. A failure
+			// the run meets waits for the judgment: a group the ranges cover goes out first, and the
+			// next read runs into it again. Mirrors the Rust `Ordered::read`.
+			let failed: Recv | undefined;
+			if (this.#state.closed.peek() === undefined) {
+				const read = this.#tryNextGroup(held.start);
+				if (read.kind === "group") {
+					items.held = held;
+					this.#settled(read.group.start, read.group.start + 1n);
+					return read;
+				}
+				if (read.kind === "error") failed = read;
+			}
+			// Settled, so a range the groups or an upstream answer placed since counts where it placed.
+			// A refusal fails every read until the ranges change, this one included, keeping the group
+			// for them to judge afresh.
+			const refused = this.#settle() ?? this.#resume?.refused();
+			if (refused) {
+				items.held = held;
+				return { kind: "error", error: refused };
+			}
+			// Only placed ranges count: a live join still waiting on a first group names every key.
+			if (this.#placed(held.start)) return { kind: "group", group: held };
 			// A range still to be placed may come to hold it: neither handed out nor passed until it
 			// places, since it may or may not name it and the read never goes back. The cap or a declared
 			// end does not end the wait, as an upstream still answers where the start lies; the track
 			// closing does, as nothing places it any more. Whatever places it moves the window, and the
-			// group finishing may rule it out, either waking the read.
-			//
-			// Before handing it out or waiting on it, the cursor runs once, refusing every group past it:
-			// one below goes first, a failure its copies report, such as a front's serving copy refusing
-			// a range, comes before it, and a front's backfill is asked. Then it is judged again, since
-			// that may have placed it. Mirrors the Rust `Ordered::read`.
-			let driven = false;
-			for (;;) {
-				const refused = this.#settle();
-				if (refused) {
-					items.held = held;
-					return { kind: "error", error: refused };
-				}
-				// Only placed ranges count: a live join still waiting on a first group names every key.
-				const keep = this.#placed(held.start);
-				// Without an end of its own, a later group's start bounds it.
-				if (!keep && !this.#mayHold(held.start, held.end ?? this.#successorStart(held.start))) break;
-				// A closed track drains what it holds before its abort, so this group goes out first.
-				if (!driven && this.#state.closed.peek() === undefined) {
-					driven = true;
-					const read = this.#tryNextGroup(held.start);
-					if (read.kind === "group" || read.kind === "error") {
-						items.held = held;
-						if (read.kind === "group") this.#settled(read.group.start, read.group.start + 1n);
-						return read;
-					}
-					continue;
-				}
-				if (keep) return { kind: "group", group: held };
+			// group finishing may rule it out, either waking the read. Without an end of its own, the
+			// next key held past it bounds it.
+			if (this.#mayHold(held.start, held.end ?? this.#keyAfter(held.start))) {
 				items.held = held;
-				return { kind: "idle" };
+				return failed ?? { kind: "idle" };
 			}
 			// The bounds moved off it. With nothing they cover above, it waits for them to widen again,
 			// still polling the cursor so the read sees the track or itself end; otherwise the read
 			// passes it.
 			if (this.#covered(held.start, UNBOUNDED).length === 0) {
-				const read = this.#tryNextGroup();
+				const read = failed ?? this.#tryNextGroup();
 				// A clean end keeps it, as the buffer keeps a group past the cap, for a raise to read.
 				if (read.kind === "error") held.close();
 				else items.held = held;
 				return read.kind === "done" || read.kind === "error" ? read : { kind: "idle" };
 			}
 			held.close();
+			if (failed) return failed;
 		}
 		const read = this.#tryNextGroup();
 		if (read.kind === "group") this.#settled(read.group.start, read.group.start + 1n);
@@ -6517,17 +6515,13 @@ export class Subscriber {
 		return (this.#resume ? this.#resume.window() : this.#window).mayHold(key, end);
 	}
 
-	// Where the first group buffered past `key` starts presenting, in the track's timescale: no group
-	// spans another's start, so group `key` ends there at the latest. Mirrors the Rust
-	// `TrackState::successor_start`.
-	#successorStart(key: bigint): bigint | undefined {
-		const scale = this.#state.info.peek()?.timescale;
-		if (scale == null || this.#resume) return undefined;
-		for (const group of this.#state.groups.peek()) {
-			if (group.start <= key) continue;
-			const start = hooks.groupTimestamp(group);
-			if (start !== undefined) return BigInt(floorAt(start, scale));
-		}
+	// The first key buffered past `key`, on any copy for a resumed reader. Time starts resolve against
+	// group keys, and no group spans another's start, so group `key` holds no time at or past it.
+	// Mirrors the Rust `TrackState::key_after`.
+	#keyAfter(key: bigint): bigint | undefined {
+		if (this.#resume) return this.#resume.keyAfter(key);
+		// Buffered in key order, and every one past the held group, so this stops at the first.
+		for (const group of this.#state.groups.peek()) if (group.start > key) return group.start;
 		return undefined;
 	}
 
@@ -6901,6 +6895,9 @@ export class Subscriber {
 		for (let index = 0; ; ) {
 			const group = groups[index];
 			if (!group || (cursor.end !== undefined && group.start >= cursor.end)) break;
+			// Refused: it stays next, unjudged, so nothing behind it is passed either, not even as
+			// stale or headless.
+			if (admit !== undefined && group.start >= admit) return { kind: "idle" };
 			// Out of range for now, but kept until the cursor passes it: an anchor still
 			// resolving, or an update widening the ranges, may take it in.
 			if (!this.#window.contains(group.start)) {
@@ -6946,8 +6943,6 @@ export class Subscriber {
 				group.close();
 				continue;
 			}
-			// Refused: it stays next, so nothing behind it is either.
-			if (admit !== undefined && group.start >= admit) return { kind: "idle" };
 			this.#passOwed(start, group.start, drift);
 			this.#pass(groups, index);
 			this.#handOut(group.start, true);

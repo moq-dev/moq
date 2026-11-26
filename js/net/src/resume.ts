@@ -2243,6 +2243,27 @@ class Reader implements ResumeSource {
 		hooks.forgetPastBudget(newest.sub, delivered, budget, kept);
 	}
 
+	// The same key is the same group on every copy, so it bounds group `key` whichever copy holds it.
+	keyAfter(key: bigint): bigint | undefined {
+		let after: bigint | undefined;
+		for (const copy of this.#copies) {
+			const next = hooks.keyAfter(copy.sub, key);
+			if (next !== undefined) after = min(after ?? next, next);
+		}
+		return after;
+	}
+
+	// A copy it replaced refusing leaves the rest to the copy now serving. Mirrors the Rust
+	// `resume::Subscriber::refused`.
+	refused(): Error | undefined {
+		for (const copy of this.#copies) {
+			if (copy.replaced) continue;
+			const refused = hooks.refused(copy.sub);
+			if (refused) return refused;
+		}
+		return undefined;
+	}
+
 	lowestBuffered(delivered: Delivered): bigint | undefined {
 		let lowest: bigint | undefined;
 		for (const copy of this.#copies) {
