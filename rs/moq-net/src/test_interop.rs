@@ -281,7 +281,6 @@ fn lite_group(version: lite::Version, frames: impl IntoIterator<Item = (Option<i
 		subscribe: 5,
 		key: 1 << 20,
 		frame_start: if version.has_frame_bounds() { 200 } else { 0 },
-		gap: 0,
 	};
 	header.encode(w, version).unwrap();
 	for (delta, size) in frames {

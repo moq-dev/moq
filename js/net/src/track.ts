@@ -795,7 +795,7 @@ class TrackState {
 	// How many groups were mirrored in, whatever this sink reads: one arriving after its reader
 	// ran out is still in flight below the end.
 	arrived = 0;
-	// Keys the upstream publisher gave up, with why: an incoming Previous Delta or
+	// Keys the upstream publisher gave up, with why: an incoming SUBSCRIBE_SKIP or
 	// SUBSCRIBE_DROP, or a producer cut. Kept apart from the cache so reclaim cannot
 	// erase a disposition a downstream publisher still has to forward, and as runs so a wide
 	// DROP costs one entry. A sink shares its producer's, which the pool's idle window forgets.
@@ -2935,7 +2935,7 @@ export class Producer {
 	/**
 	 * Declare that this producer will never produce `[start, end)`: none will arrive, so a reader
 	 * waiting on one moves past it, the declared end does not wait for them, and a relay serving
-	 * this track forwards the skip (a lite-07 GROUP's Previous Delta). Unlike a drop, it ends no reader.
+	 * this track forwards the skip (lite-07 SUBSCRIBE_SKIP). Unlike a drop, it ends no reader.
 	 *
 	 * This and {@link appendGroup} are the only sources of a skip: a gap between created groups
 	 * says nothing, since groups may be created out of order, so only the producer knows a
@@ -3467,8 +3467,8 @@ type Successor = { key: bigint; arrived: Instant; fate: () => Error | undefined 
 
 /**
  * How a reader reported a run, and what its wire was told. Mirrors the Rust `record::Report`:
- * `settled` is a group served, or a drop on a version with no Previous Delta, and a lite-07
- * publisher leaves a skip for the group above to name. Every report is final.
+ * `settled` is a group served, or a drop on a version with no skip. Every report is final: nothing
+ * goes out over a drop.
  *
  * @internal
  */
@@ -3494,10 +3494,6 @@ export interface WireRecord {
 	tell(start: bigint, end: bigint, report: Omit<Reported, "start" | "end">): void;
 	/** Forget what was recorded of `[start, end)` without going out on the wire. */
 	untell(start: bigint, end: bigint): void;
-	/** The parts of `[start, end)` the wire was told nothing of, served or dropped: untold, or a skip. */
-	unnamed(start: bigint, end: bigint): Run[];
-	/** The highest key of `[start, end)` the wire was told of, served or dropped, past the skips. */
-	lastNamed(start: bigint, end: bigint): bigint | undefined;
 }
 
 /**
@@ -4182,19 +4178,6 @@ export class Subscriber {
 				if (start >= end) return;
 				reported.set(start, end);
 				this.#resume?.untell(start, end);
-			},
-			unnamed: (start, end) => {
-				const from = max(start, this.#floor);
-				if (from >= end) return [];
-				const named = reported.overlapping(from, end).filter((run) => run.kind !== "skip");
-				return runGaps(named, from, end);
-			},
-			lastNamed: (start, end) => {
-				const named = reported.overlapping(start, end).filter((run) => run.kind !== "skip");
-				const last = named.at(-1);
-				const told = last === undefined ? undefined : min(last.end, end) - 1n;
-				const folded = start < this.#floor ? min(this.#floor, end) - 1n : undefined;
-				return told === undefined ? folded : folded === undefined ? told : max(told, folded);
 			},
 		};
 	}

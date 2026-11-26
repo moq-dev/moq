@@ -15,41 +15,11 @@ pub struct Group {
 	// missing, because the subscription started partway in. Lite06+ only; older versions
 	// always start at 0.
 	pub frame_start: u64,
-
-	// How many keys just below `key` the publisher proves hold no group, as lite-07's
-	// `Previous Delta` says: every key below it on the track's first group. Earlier versions
-	// carry none.
-	pub gap: u64,
 }
 
 impl Group {
-	/// The varints the newest layout carries: Subscribe ID, Group Start, Frame Start and
-	/// Previous Delta.
-	const FIELDS: usize = 4;
-
-	/// The keys just below this group that hold no group.
-	pub fn empty_below(&self) -> std::ops::Range<u64> {
-		self.key - self.gap..self.key
-	}
-
-	/// `Previous Delta` for `gap`: 0 for none, 1 for every key below, and otherwise the gap plus
-	/// two, which names the start just below it.
-	fn previous_delta(&self) -> u64 {
-		match self.gap {
-			0 => 0,
-			gap if gap == self.key => 1,
-			gap => gap + 2,
-		}
-	}
-
-	/// The gap `delta` names below `key`; `None` for one reaching below 0.
-	fn gap(key: u64, delta: u64) -> Option<u64> {
-		match delta {
-			0 => Some(0),
-			1 => Some(key),
-			delta => Some(delta - 2).filter(|gap| *gap < key),
-		}
-	}
+	/// The varints the newest layout carries: Subscribe ID, Group Start and Frame Start.
+	const FIELDS: usize = 3;
 }
 
 /// The times one Group or Fetch Stream carries: what each FRAME's `Timestamp Delta` counts
@@ -131,16 +101,11 @@ impl<'a> Message<'a> for Group {
 			true => r.varint()?,
 			false => 0,
 		};
-		let gap = match version.has_previous() {
-			true => Self::gap(key, r.varint()?).ok_or(DecodeError::InvalidValue)?,
-			false => 0,
-		};
 
 		Ok(Self {
 			subscribe,
 			key,
 			frame_start,
-			gap,
 		})
 	}
 
@@ -152,11 +117,6 @@ impl<'a> Message<'a> for Group {
 		} else if self.frame_start != 0 {
 			// The peer would number the frames from 0 and silently misalign the group.
 			return Err(EncodeError::Version);
-		}
-		// An older peer learns of a gap another way, such as a drop, so the header drops it.
-		if version.has_previous() {
-			debug_assert!(self.gap <= self.key, "a gap below key 0");
-			w.varint(self.previous_delta())?;
 		}
 
 		Ok(())
@@ -174,7 +134,6 @@ mod test {
 			subscribe: 1,
 			key: 7,
 			frame_start: 4,
-			gap: 0,
 		};
 		for version in [Version::Lite06, Version::Lite07] {
 			let mut buf = Vec::new();
@@ -192,7 +151,6 @@ mod test {
 			subscribe: 1,
 			key: 7,
 			frame_start: 4,
-			gap: 0,
 		};
 		let mut buf = Vec::new();
 		assert!(
@@ -229,13 +187,11 @@ mod test {
 				Form::Quic => (crate::coding::varint::MAX_QUIC, 8),
 				Form::LeadingOnes => (u64::MAX, crate::coding::varint::MAX_LEN),
 			};
-			let fields = 2 + usize::from(version.has_frame_bounds()) + usize::from(version.has_previous());
-			// The longest Previous Delta names a gap of all but the lowest key.
+			let fields = 2 + usize::from(version.has_frame_bounds());
 			let msg = Group {
 				subscribe: max,
 				key: max,
 				frame_start: if version.has_frame_bounds() { max } else { 0 },
-				gap: if version.has_previous() { max - 2 } else { 0 },
 			};
 
 			let mut body = Vec::new();
@@ -250,64 +206,19 @@ mod test {
 			let (got, used) = Group::decode_slice(&wire, version).unwrap();
 			assert_eq!(used, wire.len(), "{version:?}");
 			assert_eq!(
-				(got.subscribe, got.key, got.frame_start, got.gap),
-				(msg.subscribe, msg.key, msg.frame_start, msg.gap),
+				(got.subscribe, got.key, got.frame_start),
+				(msg.subscribe, msg.key, msg.frame_start),
 				"{version:?}"
 			);
 		}
 
-		assert_eq!(<Group as Message>::MAX_SIZE, 36);
+		assert_eq!(<Group as Message>::MAX_SIZE, 27);
 		let over = <Group as Message>::MAX_SIZE + 1;
 		let mut wire = vec![over as u8];
 		wire.resize(1 + over, 0);
 		assert!(matches!(
 			Group::decode_slice(&wire, Version::Lite07),
-			Err(DecodeError::MessageTooLarge { size: 37, max: 36 })
+			Err(DecodeError::MessageTooLarge { size: 28, max: 27 })
 		));
-	}
-
-	/// `Previous Delta` names no gap with 0, every key below with 1, and otherwise the start
-	/// just below the gap, which never reaches below 0.
-	#[test]
-	fn previous_delta_names_the_gap_below() {
-		let header = |key, gap| Group {
-			subscribe: 1,
-			key,
-			frame_start: 0,
-			gap,
-		};
-		let delta = |key, gap| {
-			let mut buf = Vec::new();
-			header(key, gap)
-				.encode_msg(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07)
-				.unwrap();
-			let got = crate::coding::decode_buf(&mut buf.as_slice(), Version::Lite07, |r, v| Group::decode_msg(r, v))
-				.unwrap();
-			assert_eq!(got.empty_below(), key - gap..key);
-			*buf.last().unwrap()
-		};
-		assert_eq!(delta(10, 0), 0);
-		assert_eq!(delta(10, 10), 1, "the first group");
-		assert_eq!(delta(0, 0), 0);
-		// Group 3 just below: 3 + (6 + 1) = 10.
-		assert_eq!(delta(10, 6), 8);
-		assert_eq!(delta(10, 9), 11, "group 0 just below");
-
-		// A delta of 2 names the key just below, which holds no gap.
-		let decode = |delta: u8| {
-			crate::coding::decode_buf(&mut [1, 10, 0, delta].as_slice(), Version::Lite07, |r, v| {
-				Group::decode_msg(r, v)
-			})
-		};
-		assert_eq!(decode(2).unwrap().gap, 0);
-		assert_eq!(decode(11).unwrap().gap, 9);
-		assert!(matches!(decode(12), Err(DecodeError::InvalidValue)), "below group 0");
-
-		// Lite-06 carries no Previous Delta.
-		let mut buf = Vec::new();
-		header(10, 4)
-			.encode_msg(&mut Encoder::new(&mut buf, Version::Lite06.into()), Version::Lite06)
-			.unwrap();
-		assert_eq!(buf, [1, 10, 0]);
 	}
 }

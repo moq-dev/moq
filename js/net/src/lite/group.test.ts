@@ -302,30 +302,21 @@ test("a scale-less lite-07 FRAME carries no timestamp", async () => {
 	expect(Array.from(header)).toEqual([2]);
 });
 
-// Lite-07 GROUP carries Subscribe ID, Group Start, Frame Start, and Previous Delta: 0 for no gap,
-// 1 for every key below, and otherwise the gap plus two. Lite-06 carries the Frame Start alone.
-test("a lite-07 GROUP carries its start, frame start, and Previous Delta", async () => {
-	const encode = (version: Version, frameStart = 0, gap = 0n) =>
-		Writer.collect(version, (w) => new Group({ subscribe: 1n, key: 7n, frameStart, gap }).encode(w, version));
-	expect(Array.from(await encode(Version.DRAFT_07))).toEqual([4, 1, 7, 0, 0]);
+// Lite-07 GROUP drops the Previous Start it once carried: Subscribe ID, Group Start, Frame Start.
+// Lite-06 on carries the Frame Start.
+test("a lite-07 GROUP carries its start and frame start", async () => {
+	const encode = (version: Version, frameStart = 0) =>
+		Writer.collect(version, (w) => new Group({ subscribe: 1n, key: 7n, frameStart }).encode(w, version));
+	expect(Array.from(await encode(Version.DRAFT_07))).toEqual([3, 1, 7, 0]);
 	expect(Array.from(await encode(Version.DRAFT_06))).toEqual([3, 1, 7, 0]);
 	expect(Array.from(await encode(Version.DRAFT_06, 4))).toEqual([3, 1, 7, 4]);
-	expect(Array.from(await encode(Version.DRAFT_07, 4))).toEqual([4, 1, 7, 4, 0]);
-	expect(Array.from(await encode(Version.DRAFT_07, 0, 3n))).toEqual([4, 1, 7, 0, 5]);
-	expect(Array.from(await encode(Version.DRAFT_07, 0, 7n))).toEqual([4, 1, 7, 0, 1]);
-	// An older peer learns of the gap from a drop instead.
-	expect(Array.from(await encode(Version.DRAFT_06, 0, 3n))).toEqual([3, 1, 7, 0]);
-	await expect(encode(Version.DRAFT_07, 0, 8n)).rejects.toThrow(RangeError);
+	expect(Array.from(await encode(Version.DRAFT_07, 4))).toEqual([3, 1, 7, 4]);
 	await expect(encode(Version.DRAFT_05, 4)).rejects.toThrow();
 
 	const decode = (bytes: number[], version: Version) =>
 		Group.decode(streamOf([new Uint8Array(bytes)], version), version);
-	const group = await decode([4, 1, 7, 2, 0], Version.DRAFT_07);
-	expect([group.subscribe, group.key, group.frameStart, group.gap]).toEqual([1n, 7n, 2, 0n]);
-	expect((await decode([4, 1, 7, 0, 5], Version.DRAFT_07)).gap).toBe(3n);
-	expect((await decode([4, 1, 7, 0, 1], Version.DRAFT_07)).gap).toBe(7n);
-	// A gap reaching below 0 is refused.
-	await expect(decode([4, 1, 7, 0, 9], Version.DRAFT_07)).rejects.toThrow(ProtocolViolation);
+	const group = await decode([3, 1, 7, 2], Version.DRAFT_07);
+	expect([group.subscribe, group.key, group.frameStart]).toEqual([1n, 7n, 2]);
 	expect((await decode([3, 1, 7, 0], Version.DRAFT_06)).frameStart).toBe(0);
 });
 

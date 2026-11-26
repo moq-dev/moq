@@ -66,12 +66,12 @@ impl Pending {
 /// stale (OLD) or not, settles its keys for good on the wire, and a skip goes out over none.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Report {
-	/// Served on a Group Stream, or given up on a version that has no Previous Delta.
+	/// Served on a Group Stream, or given up on a version that has no skip.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	Settled,
 	/// Dropped.
 	Dropped,
-	/// Skipped: a lite-07 publisher leaves it for the group above to name.
+	/// Skipped, as SUBSCRIBE_SKIP names it.
 	Skip,
 }
 
@@ -142,34 +142,6 @@ impl Record {
 		if !range.is_empty() {
 			self.reported.insert(range, report);
 		}
-	}
-
-	/// The parts of `range` the wire was told nothing of, served or dropped: untold, or a
-	/// skip a lite-07 publisher leaves for the group above to name.
-	pub fn unnamed(&self, range: Range<u64>) -> Vec<Range<u64>> {
-		let range = range.start.max(self.floor)..range.end;
-		if range.is_empty() {
-			return Vec::new();
-		}
-		let named: RangeSet<u64> = self
-			.reported
-			.overlapping(&range)
-			.filter(|(_, report)| **report != Report::Skip)
-			.map(|(run, _)| run.clone())
-			.collect();
-		named.gaps(&range).collect()
-	}
-
-	/// The highest key of `range` the wire was told of, served or dropped, past the skips a
-	/// lite-07 publisher leaves for the group above to name.
-	pub fn last_named(&self, range: Range<u64>) -> Option<u64> {
-		let reported = self
-			.reported
-			.overlapping(&range)
-			.rfind(|(_, report)| **report != Report::Skip)
-			.map(|(run, _)| run.end.min(range.end) - 1);
-		let folded = (range.start < self.floor).then(|| self.floor.min(range.end) - 1);
-		reported.max(folded)
 	}
 
 	/// Forget every report of `range`, which the wire was never told: a run given up below

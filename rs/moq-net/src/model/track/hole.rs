@@ -4,8 +4,8 @@ use crate::StreamError;
 
 /// Why a group key will not be delivered.
 ///
-/// lite-07 proves a skip below a group with that group's GROUP header (`Previous Delta`), and
-/// names every other hole in SUBSCRIBE_DROP, as earlier versions name both.
+/// lite-07 carries the two kinds in their own messages, SUBSCRIBE_SKIP and SUBSCRIBE_DROP;
+/// earlier versions name both in SUBSCRIBE_DROP.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Hole {
 	/// Never produced, as the publisher declared (see `track::Producer::skip_groups`): final,

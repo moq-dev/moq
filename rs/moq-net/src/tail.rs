@@ -4,9 +4,9 @@
 //! but QUIC does not order streams, so one opened before the end can still reach us after
 //! it. The subscriber keeps the subscription routable until each owed group is accounted
 //! for, or a grace expires for a group whose stream was reset before its header arrived.
-//! A lite-07 publisher names every start: a group's header proves the gap below it (its
-//! Previous Delta), resets after the header (reliable reset) or names the group in a drop,
-//! and SUBSCRIBE_END names every start past the last group. So a lite-07 tail waits for no
+//! A lite-07 publisher names every start: a group's GROUP_END proves its span, SUBSCRIBE_SKIP
+//! names any other start it declared empty, a reset delivers the header (reliable reset) or
+//! names the group in a drop, and SUBSCRIBE_END names every start past the last group. So a lite-07 tail waits for no
 //! grace: it settles once everything owed is accounted for.
 //!
 //! A stream whose header arrived is read to its end whatever the grace says: a group ends

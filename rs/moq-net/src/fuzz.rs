@@ -1223,7 +1223,6 @@ impl LiteSample {
 				subscribe: 3,
 				key: 1_234,
 				frame_start: 0,
-				gap: 0,
 			}
 			.encode(w, version)
 			.unwrap(),
@@ -1466,7 +1465,6 @@ impl Default for Messages {
 				subscribe: 7,
 				key: 123_456,
 				frame_start: 0,
-				gap: 0,
 			},
 			ietf_subscribe: ietf::Subscribe {
 				new_group: None,

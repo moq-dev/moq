@@ -846,8 +846,8 @@ pub(crate) struct TrackState {
 	// a lite-07 copy, whose ranges carry each join and whose publisher reports where each
 	// starts. Another copy measures the live edge from what it holds and its upstream's Largest.
 	answers_joins: bool,
-	// Whether the copy's wire names every start: a lite-07 group's header proves the gap below
-	// it, and a drop or the track's end names the rest, so no gap is given up for its age.
+	// Whether the copy's wire names every start: a lite-07 publisher tells each with a group,
+	// its GROUP_END, a skip, a drop, or the track's end, so no gap is given up for its age.
 	// Another copy gives up a gap once its grace passes, as nothing else may ever name it.
 	proven: bool,
 	// How readers learn where the live feed is; see [`Subscriber::knows_edge`].
@@ -866,7 +866,7 @@ pub(crate) struct TrackState {
 	// Counts changes to how a time start is placed other than by groups arriving or drops:
 	// `time_starts`, `anchors`, and `starts_at_keys`. See [`Unplaced::mark`].
 	placing: u64,
-	// Keys the upstream publisher gave up, with why: an incoming Previous Delta or
+	// Keys the upstream publisher gave up, with why: an incoming SUBSCRIBE_SKIP or
 	// SUBSCRIBE_DROP, or a producer cut. Kept apart from the cache so reclaiming a slot
 	// cannot erase a disposition a relay must forward, and as ranges so a wide one costs
 	// one entry.
@@ -5896,8 +5896,8 @@ impl Producer {
 	}
 
 	/// Have this received copy wait on its wire for every start rather than give a gap up once
-	/// its grace passes: a lite-07 publisher names each one, in a group's header, a drop, or the
-	/// track's end.
+	/// its grace passes: a lite-07 publisher names each one, with a group, its GROUP_END, a skip,
+	/// a drop, or the track's end.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn proven(&self) {
 		if let Ok(mut state) = self.modify() {
@@ -6043,7 +6043,7 @@ impl Producer {
 
 	/// Declare that this producer will never produce `groups`: none will arrive, so a reader
 	/// waiting on one moves past it, the declared end does not wait for them, and a relay
-	/// serving this track forwards the skip (a lite-07 GROUP's Previous Delta). Unlike a drop,
+	/// serving this track forwards the skip (a lite-07 SUBSCRIBE_SKIP). Unlike a drop,
 	/// it ends no reader.
 	///
 	/// This and [`Self::append_group`] are the only sources of a skip: a gap between created
@@ -19237,7 +19237,7 @@ mod test {
 		assert_eq!(start(&mut paused), None, "a group may still start in 1400..=1700");
 		assert_eq!(drain(&mut paused), Vec::<u64>::new(), "reads from the time meanwhile");
 
-		// The next group's Previous Delta proves the pause empty.
+		// The publisher's skip proves the pause empty.
 		producer.skip_groups(1400..2000);
 		assert_eq!(start(&mut paused), Some(1400));
 		write_group(&producer, 2000);

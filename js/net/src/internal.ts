@@ -346,8 +346,8 @@ export function cutRun<R extends Run>(runs: R[], start: bigint, end: bigint): vo
 /**
  * Why a group key will not be delivered. Mirrors the Rust `track::Hole`.
  *
- * lite-07 proves a skip with a GROUP's Previous Delta, or names it in SUBSCRIBE_DROP where no
- * GROUP can; earlier versions name both in SUBSCRIBE_DROP.
+ * lite-07 carries the two kinds in their own messages, SUBSCRIBE_SKIP and SUBSCRIBE_DROP;
+ * earlier versions name both in SUBSCRIBE_DROP.
  */
 export interface Hole {
 	/** The error a reader waiting on the key ends with: NOT_FOUND for a skip. */

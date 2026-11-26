@@ -1,5 +1,5 @@
 import { race } from "@moq/signals";
-import { FrameTooLarge, ProtocolViolation, StreamCode, StreamError } from "../error.ts";
+import { FrameTooLarge, StreamCode, StreamError } from "../error.ts";
 import type * as netGroup from "../group.ts";
 import { hooks } from "../internal.ts";
 import { decodePayload, receiveFrame, type WirePayload } from "../payload.ts";
@@ -9,7 +9,7 @@ import { toNumber } from "../util/bigint.ts";
 import { RESERVED } from "../util/key.ts";
 import { MAX_FRAME_BYTES } from "../util/limits.ts";
 import * as Message from "./message.ts";
-import { hasFrameBounds, hasPrevious, type Version } from "./version.ts";
+import { hasFrameBounds, type Version } from "./version.ts";
 
 export class Group {
 	subscribe: bigint;
@@ -24,34 +24,18 @@ export class Group {
 	 */
 	frameStart: number;
 
-	/**
-	 * How many keys just below `key` the publisher proves hold no group, as lite-07's `Previous
-	 * Delta` says: every key below it on the track's first group. Earlier versions carry none.
-	 */
-	gap: bigint;
-
 	constructor({
 		subscribe,
 		key: sequence,
 		frameStart = 0,
-		gap = 0n,
 	}: {
 		subscribe: bigint;
 		key: bigint;
 		frameStart?: number;
-		gap?: bigint;
 	}) {
 		this.subscribe = subscribe;
 		this.key = sequence;
 		this.frameStart = frameStart;
-		this.gap = gap;
-	}
-
-	/** `Previous Delta` for the gap: 0 for none, 1 for every key below, and otherwise the gap plus two. */
-	#previousDelta(): bigint {
-		if (this.gap === 0n) return 0n;
-		if (this.gap === this.key) return 1n;
-		return this.gap + 2n;
 	}
 
 	async #encode(w: Writer, version: Version) {
@@ -63,25 +47,13 @@ export class Group {
 			// The peer would number the frames from 0 and silently misalign the group.
 			throw new Error("frame offsets not supported for this version");
 		}
-		// An older peer learns of a gap another way, such as a drop, so the header drops it.
-		if (hasPrevious(version)) {
-			if (this.gap > this.key) throw new RangeError(`a gap of ${this.gap} below key ${this.key}`);
-			await w.u62(this.#previousDelta());
-		}
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<Group> {
 		const subscribe = await r.u62();
 		const key = await r.u62();
 		const frameStart = hasFrameBounds(version) ? await r.u53() : 0;
-		let gap = 0n;
-		if (hasPrevious(version)) {
-			const delta = await r.u62();
-			gap = delta === 1n ? key : delta === 0n ? 0n : delta - 2n;
-			if (gap >= key && delta !== 1n && delta !== 0n)
-				throw new ProtocolViolation(`Previous Delta ${delta} names a start below 0 under group ${key}`);
-		}
-		return new Group({ subscribe, key: key, frameStart, gap });
+		return new Group({ subscribe, key: key, frameStart });
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {

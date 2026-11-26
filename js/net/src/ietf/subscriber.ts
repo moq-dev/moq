@@ -163,7 +163,7 @@ function wireStart(ranges: readonly track.Range[]): bigint | undefined {
 
 /**
  * Skip the `gap` keys just below the group at `key`, as an object's Prior Group ID Gap says
- * none of them will ever exist, through the path a lite GROUP's Previous Delta takes. Best effort: a
+ * none of them will ever exist, through the path a lite SUBSCRIBE_SKIP takes. Best effort: a
  * publisher that sends none leaves those keys to arrive or be given up.
  */
 function skipPrior(track: track.Producer, key: bigint, gap: bigint): void {

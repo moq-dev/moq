@@ -4,7 +4,7 @@ use crate::transport::poll::Session as _;
 use crate::model::record::Report;
 use crate::model::track::Hole;
 use crate::{SessionError, datagram, frame, group, origin, track};
-use rangemap::{RangeMap, RangeSet};
+use rangemap::RangeMap;
 use std::{
 	borrow::Cow,
 	collections::HashMap,
@@ -5424,11 +5424,6 @@ struct TrackRun {
 	// SUBSCRIBE_START has gone out yet, as a range following an edge this hop does not know
 	// yet leaves it. A subscriber reads none before the subscription's first START.
 	withheld: Option<RangeMap<u64, Hole>>,
-	// Lite-07: skipped keys the cursor gave up that nothing named yet, which the group just
-	// above each run names with its header's Previous Delta or its drop. One the group above
-	// will never name, past the track's end or the ranges, or served already, is dropped
-	// as not found instead.
-	deferred: RangeSet<u64>,
 	// Lite-07 with every range bounded: once every group in its ranges is given up, it is
 	// answered without a group to resolve its start, rather than left unanswered.
 	bounded: bool,
@@ -5584,7 +5579,6 @@ impl TrackRun {
 			end_sent: false,
 			held_end: None,
 			withheld: None,
-			deferred: RangeSet::new(),
 			opening: None,
 			children: kio::Tasks::new(),
 			idle: None,
@@ -6051,17 +6045,16 @@ impl TrackRun {
 		for span in whole {
 			self.mark_served(span);
 		}
-		// A reset may have cut a GROUP_END after its header arrived, so the starts it told wait
-		// for the group above to name them, as skips do, or a drop once none will.
+		// A reset may have cut a GROUP_END after its header arrived, so the starts it told go
+		// out again as a skip, even one dropped before the group finished: its readers ended
+		// already, and the producer did declare it empty.
 		let cut = std::mem::take(&mut *self.ctx.outcomes.cut.lock().unwrap());
 		if !cut.is_empty() && self.start.emits_range() {
 			for inner in cut {
 				self.track.record_mut().tell(inner.clone(), Report::Skip);
-				self.deferred.insert(inner);
+				self.buffer_hole(inner, Hole::Skip, writer)?;
 			}
-			if self.settle_deferred(writer)? {
-				return Poll::Ready(Ok(ControlFlow::Continue(())));
-			}
+			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
 		let dropped = std::mem::take(&mut *self.ctx.outcomes.dropped.lock().unwrap());
 		if !dropped.is_empty() {
@@ -6101,10 +6094,7 @@ impl TrackRun {
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<ControlFlow<()>, Error>> {
-		if self.poll_forward_drop(true, writer, waiter)?
-			|| self.report_started(false, writer, waiter)?
-			|| self.settle_deferred(writer)?
-		{
+		if self.poll_forward_drop(true, writer, waiter)? || self.report_started(false, writer, waiter)? {
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
 
@@ -6178,9 +6168,8 @@ impl TrackRun {
 						&& crate::priority::in_group(key, 0, order) < crate::priority::in_group(waiting.key, 0, order)
 					{
 						tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, key, "shedding a group ranked below one waiting for credit");
-						let gap = self.gap_below(key);
-						self.mark_served(key - gap..key + 1);
-						self.shed(&group, gap);
+						self.mark_served(key..key + 1);
+						self.shed(&group);
 						return Poll::Ready(Ok(ControlFlow::Continue(())));
 					}
 					match &mut self.start {
@@ -6305,10 +6294,9 @@ impl TrackRun {
 		}
 	}
 
-	/// Forward a verdict the cursor reached on `range`, which its record already took in. A
-	/// drop takes in the rest of a whole group's span it reaches into, and on lite-07 the gap
-	/// below it nothing named yet. A lite-07 skip waits for the group above it to name it.
-	/// Returns whether any was buffered.
+	/// Forward a verdict the cursor reached on `range`, which its record already took in, so
+	/// nothing went out over it. A drop takes in the rest of a whole group's span it reaches
+	/// into. Returns whether any was buffered.
 	fn forward_range(
 		&mut self,
 		range: Range<u64>,
@@ -6319,16 +6307,8 @@ impl TrackRun {
 			return Ok(false);
 		}
 		let range = match hole {
-			// A skip held before the start may lie in a gap a header since proved.
-			Hole::Skip if self.ctx.version.has_previous() => {
-				for part in self.track.record_mut().unnamed(range) {
-					self.track.record_mut().tell(part.clone(), Report::Skip);
-					self.deferred.insert(part);
-				}
-				return self.settle_deferred(writer);
-			}
 			Hole::Skip => range,
-			Hole::Drop { .. } => self.below(range.start)..self.track.span_end(range.end),
+			Hole::Drop { .. } => range.start..self.track.span_end(range.end),
 		};
 		let report = self.report(hole);
 		self.track.record_mut().tell(range.clone(), report);
@@ -6338,7 +6318,7 @@ impl TrackRun {
 
 	/// What the wire is told when `hole` goes out.
 	fn report(&self, hole: &Hole) -> Report {
-		match self.ctx.version.has_previous() {
+		match self.ctx.version.has_skip() {
 			// Every drop is final before lite-07.
 			false => Report::Settled,
 			true => match hole {
@@ -6362,72 +6342,20 @@ impl TrackRun {
 		let gaps = self.track.record_mut().untold(range);
 		let report = self.report(hole);
 		for gap in gaps.iter() {
-			let gap = self.below(gap.start)..gap.end;
 			self.track.record_mut().tell(gap.clone(), report);
-			self.buffer_hole(gap, hole.clone(), writer)?;
+			self.buffer_hole(gap.clone(), hole.clone(), writer)?;
 		}
 		Ok(!gaps.is_empty())
 	}
 
-	/// How many keys just below `key` are skipped with nothing naming them yet, which the
-	/// group at `key` names on lite-07, so they are no longer deferred: its header's Previous
-	/// Delta proves them, or its drop takes them in. None before lite-07, whose drops name
-	/// every skip.
-	fn gap_below(&mut self, key: u64) -> u64 {
-		if !self.ctx.version.has_previous() || !self.start.emits_range() {
-			return 0;
-		}
-		let low = key - self.track.skipped_below(key);
-		let low = (self.track.record_mut().last_named(low..key)).map_or(low, |named| named + 1);
-		if low < key {
-			self.deferred.remove(low..key);
-		}
-		key - low
-	}
-
-	/// Where a drop starting at `key` starts once it takes in [`Self::gap_below`].
-	fn below(&mut self, key: u64) -> u64 {
-		key - self.gap_below(key)
-	}
-
-	/// Name the deferred skips that no group will name: drop them as not found, as a gap the
-	/// publisher never declared is. Returns whether any was buffered.
-	fn settle_deferred(
-		&mut self,
-		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
-	) -> Result<bool, Error> {
-		if self.deferred.is_empty() {
-			return Ok(false);
-		}
-		let fin = match self.track.poll_finished(&kio::Waiter::noop()) {
-			Poll::Ready(Ok(fin)) => Some(final_key(fin)),
-			_ => None,
-		};
-		let hole = Hole::drop(StreamError::NotFound);
-		let mut buffered = false;
-		// SUBSCRIBE_END names every key from the track's end on.
-		if let Some(fin) = fin.filter(|fin| *fin < u64::MAX) {
-			self.deferred.remove(fin..u64::MAX);
-		}
-		for run in self.deferred.iter().cloned().collect::<Vec<_>>() {
-			let above = run.end;
-			let names = !self.track.record_mut().told(above)
-				&& fin.is_none_or(|fin| above < fin)
-				&& !self.track.runs_in_range(above, above.saturating_add(1)).is_empty();
-			if names {
-				continue;
-			}
-			self.deferred.remove(run.clone());
-			self.track.record_mut().tell(run.clone(), Report::Dropped);
-			self.buffer_hole(run, hole.clone(), writer)?;
-			buffered = true;
-		}
-		Ok(buffered)
-	}
-
-	/// The message naming `groups` given up as `hole`: a skip no header proves is not found.
+	/// The message naming `groups` given up as `hole`: lite-07 skips what was never
+	/// produced, and earlier versions drop it as not found.
 	fn hole(&self, groups: std::ops::Range<u64>, hole: &Hole) -> lite::SubscribeResponse {
-		lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(groups, &hole.error(), self.ctx.version))
+		let version = self.ctx.version;
+		match hole {
+			Hole::Skip if version.has_skip() => lite::SubscribeResponse::Skip(lite::SubscribeSkip { groups }),
+			hole => lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(groups, &hole.error(), version)),
+		}
 	}
 
 	/// Send `groups` given up as `hole`, or withhold it until the first SUBSCRIBE_START.
@@ -6488,7 +6416,7 @@ impl TrackRun {
 		for run in self.track.runs_in_range(start, end) {
 			dropped |= self.drop_range(run, &hole, writer)?;
 		}
-		Ok(self.settle_deferred(writer)? || dropped)
+		Ok(dropped)
 	}
 }
 
@@ -6752,12 +6680,10 @@ impl TrackRun {
 	fn serve(&mut self, group: group::Consumer) {
 		let key = group.start;
 		let frame_start = group.index();
-		// The header's Previous Delta proves the gap below, so nothing else names it.
-		let gap = self.gap_below(key);
-		self.mark_served(key - gap..key + 1);
-		tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, key, gap, "serving group");
+		self.mark_served(key..key + 1);
+		tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, key, "serving group");
 		self.give_way();
-		self.open(group, frame_start, gap);
+		self.open(group, frame_start);
 	}
 
 	/// The rank of the group waiting for stream credit, if it cannot make room: it ranks below
@@ -6790,18 +6716,17 @@ impl TrackRun {
 	}
 
 	/// Give up a group the cursor handed out without a stream, as one expired under the
-	/// subscription's budget is, with the `gap` below it no header proves now.
-	fn shed(&mut self, group: &group::Consumer, gap: u64) {
+	/// subscription's budget is.
+	fn shed(&mut self, group: &group::Consumer) {
 		if self.ctx.version.has_track_stream() {
 			let span = span(group.start, group.end());
-			let span = span.start - gap..span.end;
 			self.ctx.outcomes.dropped.lock().unwrap().push((span, StreamError::Old));
 		}
 	}
 
 	/// Open a group machine streaming `group` from `frame_start`, which waits for stream
 	/// credit before the cursor hands out another.
-	fn open(&mut self, group: group::Consumer, frame_start: u64, gap: u64) {
+	fn open(&mut self, group: group::Consumer, frame_start: u64) {
 		let key = group.start;
 		let end = self.frames.end(key);
 
@@ -6821,7 +6746,14 @@ impl TrackRun {
 			),
 		};
 		debug_assert!(self.opening.is_none(), "one group waits for stream credit at a time");
-		self.opening = Some(GroupServe::new(self.ctx.group_context(), key, frame_start, end, rank, group).gapped(gap));
+		self.opening = Some(GroupServe::new(
+			self.ctx.group_context(),
+			key,
+			frame_start,
+			end,
+			rank,
+			group,
+		));
 	}
 }
 
@@ -7206,9 +7138,6 @@ struct GroupServe {
 	group: group::Consumer,
 	key: u64,
 	frame_start: u64,
-	/// Lite-07: how many keys just below `key` the header's Previous Delta proves empty, which a
-	/// drop of the group names with it if the header never arrives.
-	gap: u64,
 	/// The End its GROUP_END told, once buffered.
 	ended: Option<u64>,
 	/// The frame a range ending partway through the group stops it before, if any. Lite-06
@@ -7305,7 +7234,6 @@ impl GroupServe {
 			clock,
 			key,
 			frame_start,
-			gap: 0,
 			ended: None,
 			end,
 			stops,
@@ -7313,12 +7241,6 @@ impl GroupServe {
 			budget: kio::coop::Budget::new(32),
 			meter,
 		}
-	}
-
-	/// Prove the `gap` keys just below the group empty in its header.
-	fn gapped(mut self, gap: u64) -> Self {
-		self.gap = gap;
-		self
 	}
 
 	/// Count opened streams for the scheduling tests.
@@ -7376,7 +7298,6 @@ impl GroupServe {
 			subscribe: self.ctx.id,
 			key: self.key,
 			frame_start: self.frame_start,
-			gap: self.gap,
 		};
 		let header = writer.buffer(&lite::DataType::Group).and_then(|()| writer.buffer(&msg));
 		let records = match header {
@@ -7801,9 +7722,7 @@ impl GroupServe {
 		if !self.ctx.version.has_track_stream() || matches!(self.state, GroupState::Accounted) {
 			return;
 		}
-		// The header never arrived, so neither did the gap it proved.
 		let span = span(self.key, self.group.end());
-		let span = span.start - self.gap..span.end;
 		self.ctx
 			.outcomes
 			.dropped
@@ -9088,11 +9007,6 @@ mod serve_group_test {
 
 	/// Each Group Stream's Group Start on `log`'s session, in order.
 	fn group_headers(log: &Log, version: Version) -> Vec<u64> {
-		group_gaps(log, version).into_iter().map(|(key, _)| key).collect()
-	}
-
-	/// Each Group Stream's key and the gap below it its header proves, by key.
-	fn group_gaps(log: &Log, version: Version) -> Vec<(u64, u64)> {
 		let mut streams = std::collections::BTreeMap::<_, Vec<u8>>::new();
 		for (id, sent) in log.trail() {
 			if let Sent::Write(bytes) = sent {
@@ -9105,7 +9019,7 @@ mod serve_group_test {
 				crate::coding::decode_buf(&mut bytes.as_slice(), version, |r, v| {
 					assert_eq!(lite::DataType::decode(r, v)?, lite::DataType::Group);
 					let group = lite::Group::decode(r, v)?;
-					Ok((group.key, group.gap))
+					Ok(group.key)
 				})
 				.unwrap()
 			})
@@ -10139,7 +10053,7 @@ mod serve_group_test {
 		track.await_edge();
 		track.set_live(None, None, Some(0)).unwrap();
 		let (mut run, mut writer, log) = lite07_run_ranges(&track, &[lite::Range::span(None, 0, None, None)]);
-		track.give_up(0..2, Hole::drop(StreamError::NotFound));
+		track.skip_groups(0..2);
 		write_group(&mut track, 2, 2);
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		assert_eq!(run.start.resolved(), Some(2), "delivery resolved");
@@ -10157,39 +10071,9 @@ mod serve_group_test {
 						start: Some(_),
 						largest: lite::Edge::Largest(_),
 					}),
-					lite::SubscribeResponse::Drop(lite::SubscribeDrop { groups, .. }),
+					lite::SubscribeResponse::Skip(lite::SubscribeSkip { groups }),
 				] if *groups == (0..2)
 			),
-			"{answered:?}"
-		);
-	}
-
-	/// A skip held until a range is answered, which the header of the group above it proved
-	/// meanwhile, is named by nothing else once delivery resolves.
-	#[kio::test]
-	async fn lite07_a_held_skip_a_header_proved_goes_out_once() {
-		let mut track = track::Producer::new(
-			Arc::new(broadcast::Info::default()),
-			"test",
-			crate::track::Info::timed(),
-		);
-		track.received();
-		track.await_edge();
-		track.set_live(None, None, Some(0)).unwrap();
-		let bounds = Bounds::new(&[lite::Range::span(None, 0, None, None)], None);
-		let subscriber = track.subscribe(track::Subscription::default().with_ranges(bounds.ranges.iter().copied()));
-		let session = Log::default();
-		let (mut run, mut writer, log) = lite07_run(SinkSession::new(session.clone()), subscriber);
-		asked(&mut run, &bounds.ranges);
-		track.skip_groups(0..2);
-		write_group(&mut track, 2, 2);
-		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-		track.answer_edge();
-		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-		assert_eq!(group_gaps(&session, Version::Lite07), [(2, 2)]);
-		let answered = responses(&mut writer, &log).await;
-		assert!(
-			matches!(answered.as_slice(), [lite::SubscribeResponse::Start(_)]),
 			"{answered:?}"
 		);
 	}
@@ -10391,11 +10275,10 @@ mod serve_group_test {
 		);
 	}
 
-	/// A key the publisher declared it will never produce is proven by the next group's header,
-	/// with no control message. One the group above can no longer prove, served already, is
-	/// dropped as not found, and so is one below the track's end with no group above.
+	/// A key the publisher declared it will never produce goes out as SUBSCRIBE_SKIP, with no
+	/// stream, even below a group whose stream opens.
 	#[kio::test]
-	async fn lite07_proves_a_declared_skip_in_the_next_header() {
+	async fn lite07_sends_a_declared_skip() {
 		let mut track = track::Producer::new(
 			Arc::new(broadcast::Info::default()),
 			"test",
@@ -10409,28 +10292,8 @@ mod serve_group_test {
 		track.skip_groups(1..3);
 		write_group(&mut track, 3, 3);
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-		assert_eq!(group_gaps(&session, Version::Lite07), [(0, 0), (3, 2)]);
-		assert_eq!(holes(&mut writer, &log).await, []);
-
-		// Group 6 went out before the gap below it was declared.
-		write_group(&mut track, 6, 6);
-		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-		track.skip_groups(4..6);
-		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-		assert_eq!(holes(&mut writer, &log).await, [("drop", 4..6)]);
-
-		// Nothing above 7 and 8 before the end at 9.
-		track.skip_groups(7..9);
-		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-		assert_eq!(
-			holes(&mut writer, &log).await,
-			[("drop", 4..6)],
-			"group 9 may still come"
-		);
-		track.finish_at(track::Position::group(9)).unwrap();
-		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-		assert_eq!(holes(&mut writer, &log).await, [("drop", 4..6), ("drop", 7..9)]);
-		assert_eq!(group_headers(&session, Version::Lite07), [0, 3, 6]);
+		assert_eq!(group_headers(&session, Version::Lite07), [0, 3]);
+		assert_eq!(holes(&mut writer, &log).await, [("skip", 1..3)]);
 	}
 
 	/// Appending skips the starts between groups, but a whole group's GROUP_END names those in
@@ -10464,8 +10327,8 @@ mod serve_group_test {
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		group.finish_at(12).unwrap();
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-		assert_eq!(group_gaps(&session, Version::Lite07), [(0, 0), (4, 0), (10, 4)]);
-		assert_eq!(holes(&mut writer, &log).await, []);
+		assert_eq!(group_headers(&session, Version::Lite07), [0, 4, 10]);
+		assert_eq!(holes(&mut writer, &log).await, [("skip", 6..10)]);
 	}
 
 	/// A drop of a group held whole names its span, which no other group starts inside, so the
@@ -10489,9 +10352,9 @@ mod serve_group_test {
 		group.finish_at(6).unwrap();
 		forward(&mut run, 3..4, &Hole::drop(StreamError::Cancel), &mut writer);
 		assert_eq!(holes(&mut writer, &log).await, [("drop", 3..6)]);
-		// A skip below a group already named names only the starts it covers.
+		// A skip names only the starts it covers.
 		forward(&mut run, 1..3, &Hole::Skip, &mut writer);
-		assert_eq!(holes(&mut writer, &log).await, [("drop", 3..6), ("drop", 1..3)]);
+		assert_eq!(holes(&mut writer, &log).await, [("drop", 3..6), ("skip", 1..3)]);
 	}
 
 	/// A whole group's span holds no other start, so the end of the track names none of them,
@@ -10530,8 +10393,8 @@ mod serve_group_test {
 		assert_eq!(holes, vec![4..6]);
 	}
 
-	/// A reset that may have cut a GROUP_END after the header arrived leaves the starts it told
-	/// for the group above to prove, or a drop once that group went out without them.
+	/// A reset that may have cut a GROUP_END after the header arrived names the starts it told
+	/// again, as a skip.
 	#[kio::test]
 	async fn lite07_a_cut_group_end_is_named_again() {
 		let track = track::Producer::new(
@@ -10540,35 +10403,21 @@ mod serve_group_test {
 			crate::track::Info::timed(),
 		);
 		let subscriber = track.subscribe(None);
-		let session = Log::default();
-		let (mut run, mut writer, log) = lite07_run(SinkSession::new(session.clone()), subscriber);
-		let append = |start: u64| {
-			let mut group = track.append_group(Timestamp::from_millis(start).unwrap()).unwrap();
-			group
-				.write_frame(Timestamp::from_millis(start).unwrap(), b"x".as_slice())
-				.unwrap();
-			group
-		};
-		let group = append(0);
+		let (mut run, mut writer, log) = lite07_run(SinkSession::new(Log::default()), subscriber);
+		let mut group = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
+		group
+			.write_frame(Timestamp::from_millis(0).unwrap(), b"x".as_slice())
+			.unwrap();
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		group.finish_at(3).unwrap();
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-		// Group 0's stream reset after its GROUP_END, unacknowledged.
-		run.ctx.outcomes.cut.lock().unwrap().push(1..3);
-		let _group = append(5);
-		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-		assert_eq!(group_gaps(&session, Version::Lite07), [(0, 0), (5, 4)]);
+		// The GROUP_END told 1 and 2, so nothing else names them.
 		assert_eq!(holes(&mut writer, &log).await, []);
 
-		// Group 7 went out already, so a cut below it is dropped instead.
-		let group = append(7);
+		// Group 0's stream reset after its GROUP_END, unacknowledged.
+		run.ctx.outcomes.cut.lock().unwrap().push(1..3);
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-		drop(group);
-		let _group = append(9);
-		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-		run.ctx.outcomes.cut.lock().unwrap().push(6..7);
-		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-		assert_eq!(holes(&mut writer, &log).await, [("drop", 6..7)]);
+		assert_eq!(holes(&mut writer, &log).await, [("skip", 1..3)]);
 	}
 
 	/// A whole group whose stream fails before its GROUP_END names its span in its drop, which
@@ -10599,9 +10448,10 @@ mod serve_group_test {
 		assert_eq!(drops, [0..4, 4..6]);
 	}
 
-	/// A skip goes out over no drop already forwarded for the same groups: every drop is final.
+	/// A relay forwards no SKIP over a DROP it already forwarded for the same groups: every
+	/// drop is final on the wire, though the track itself records the skip.
 	#[kio::test]
-	async fn a_skip_goes_out_over_no_forwarded_drop() {
+	async fn no_skip_goes_out_over_a_forwarded_drop() {
 		for version in [Version::Lite07, Version::Lite06] {
 			let mut track = track::Producer::new(
 				Arc::new(broadcast::Info::default()),
@@ -10623,23 +10473,22 @@ mod serve_group_test {
 
 			let writes = log.writes.lock().unwrap().clone();
 			let mut buf = writes.as_slice();
-			let mut drops = Vec::new();
+			let mut holes = Vec::new();
 			while !buf.is_empty() {
 				let (msg, size) = lite::SubscribeResponse::decode_slice(buf, version).unwrap();
 				buf = &buf[size..];
-				if let lite::SubscribeResponse::Drop(drop) = msg {
-					drops.push(drop.groups);
+				match msg {
+					lite::SubscribeResponse::Skip(skip) => holes.push(("skip", skip.groups)),
+					lite::SubscribeResponse::Drop(drop) => holes.push(("drop", drop.groups)),
+					_ => {}
 				}
 			}
-			assert!(
-				matches!(drops.as_slice(), [only] if *only == (1..3)),
-				"{version}: {drops:?}"
-			);
+			assert_eq!(holes, [("drop", 1..3)], "{version}");
 		}
 	}
 
-	/// A huge declared skip goes out at a cost independent of its length, in the header of the
-	/// group above it, and the end settles over one past the track's end.
+	/// A huge declared skip goes out at a cost independent of its length, as one SUBSCRIBE_SKIP,
+	/// and the end settles over it.
 	#[kio::test]
 	async fn lite07_skips_a_huge_run_at_once() {
 		const FAR: u64 = 1 << 61;
@@ -10662,16 +10511,18 @@ mod serve_group_test {
 
 		let writes = log.writes.lock().unwrap().clone();
 		let mut buf = writes.as_slice();
-		let mut drops = 0;
+		let (mut skips, mut drops) = (Vec::new(), 0);
 		while !buf.is_empty() {
 			let (msg, size) = lite::SubscribeResponse::decode_slice(buf, Version::Lite07).unwrap();
 			buf = &buf[size..];
-			if let lite::SubscribeResponse::Drop(_) = msg {
-				drops += 1;
+			match msg {
+				lite::SubscribeResponse::Skip(skip) => skips.push((skip.groups.start, skip.groups.end)),
+				lite::SubscribeResponse::Drop(_) => drops += 1,
+				_ => {}
 			}
 		}
-		assert_eq!(drops, 0);
-		assert_eq!(group_gaps(&session, Version::Lite07), [(0, 0), (FAR, FAR - 1)]);
+		assert_eq!((skips, drops), (vec![(1, FAR), (FAR + 1, FAR + 5)], 0));
+		assert_eq!(group_headers(&session, Version::Lite07), [0, FAR]);
 	}
 
 	/// A relay that holds only the first group of a backlog answers with the largest its
@@ -10772,7 +10623,8 @@ mod serve_group_test {
 		drops
 	}
 
-	/// The lite-07 SUBSCRIBE_DROP a run loop's subscribe stream carried, in order, once flushed.
+	/// The lite-07 SUBSCRIBE_SKIP and SUBSCRIBE_DROP a run loop's subscribe stream carried, in
+	/// order, once flushed.
 	async fn holes(
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
 		log: &Log,
@@ -10781,6 +10633,7 @@ mod serve_group_test {
 			.await
 			.into_iter()
 			.filter_map(|msg| match msg {
+				lite::SubscribeResponse::Skip(skip) => Some(("skip", skip.groups)),
 				lite::SubscribeResponse::Drop(drop) => Some(("drop", drop.groups)),
 				_ => None,
 			})

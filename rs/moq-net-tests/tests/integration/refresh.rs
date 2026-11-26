@@ -116,14 +116,16 @@ async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
 			.subscribe(track::Subscription::default().with_ranges([track::Range::from(reach)]))
 			.await
 			.unwrap();
-		// Refresh is a request, not a hold: the cached group arrives, whole, before the owner
-		// answers. Only then is the refresh driven, since the fresh group's header proves the
-		// cached one superseded, which a zero max age then skips if it lands first.
+		// Poll the new reader while the owner drives refresh: a front does not join its
+		// serving copy until read. Refresh is a request, not a hold, so the cached group
+		// arrives first, whole, and the fresh one follows.
 		let (mut cached, mut fresh) = kio::clock::timeout(Duration::from_secs(1), async {
-			let cached = late.recv_group().await.unwrap().unwrap();
-			let (refreshed, fresh) = futures::join!(producer.refresh(), late.recv_group());
+			let (refreshed, groups) = futures::join!(producer.refresh(), async {
+				let cached = late.recv_group().await.unwrap().unwrap();
+				(cached, late.recv_group().await.unwrap().unwrap())
+			});
 			refreshed.unwrap();
-			(cached, fresh.unwrap().unwrap())
+			groups
 		})
 		.await
 		.unwrap();

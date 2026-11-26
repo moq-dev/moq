@@ -386,7 +386,7 @@ async fn a_sparse_request_places_its_live_join_as_the_publisher_did() {
 /// A time end between two groups ends an ordered read once the publisher created a group past
 /// it: handing that group out would have passed the starts between. Through the publisher's own
 /// origin that is its own state. A lite-07 copy ends there only on what its wire proves, the
-/// starts between skipped, which an appending publisher's Previous Delta and GROUP_END say. A
+/// starts between skipped, which an appending publisher's SUBSCRIBE_SKIP and GROUP_END say. A
 /// publisher creating groups out of order says nothing, so the copy, and any arrival read of a
 /// track created that way, waits for a group that may still come. A group created below the
 /// end after an ordered read ended is late, as for any key the read passed.
