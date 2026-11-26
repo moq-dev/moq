@@ -9,6 +9,10 @@ name: Queue build
 # main's copy runs against every group's tree, and its local action comes from
 # that tree, so a PR that moves or deletes .github/actions/rust-cache fails its
 # own group: keep the old path until a later PR stops using it here.
+#
+# The caller grants `checks: write` beside `contents: read`: a called workflow
+# can only lower its caller's token, and GitHub refuses to start a run whose
+# report job asks for more.
 on:
   workflow_call:
 
