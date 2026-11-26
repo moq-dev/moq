@@ -847,7 +847,10 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 			for (let frame = await group.readFrame(); frame; frame = await group.readFrame())
 				got.push(dec.decode(frame.payload));
 			expect(got).toEqual(["c0", "c1", "c2", "c3", "c4"]);
-			expect(fetched.slice(before).filter((group) => group === 2n)).toEqual([2n]);
+			// On lite-07, fills go over SUBSCRIBE (no FETCH); on lite-06, single-group fills use FETCH.
+			expect(fetched.slice(before).filter((group) => group === 2n)).toEqual(
+				alpn === Lite.ALPN_07_WIP ? [] : [2n],
+			);
 			bounded.close();
 			open.close();
 		} finally {

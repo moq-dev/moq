@@ -1317,6 +1317,8 @@ export const hooks: {
 	 * only one held from its first frame.
 	 */
 	holdsGroup: (subscriber: Subscriber, key: bigint, whole?: boolean) => boolean;
+	/** Whether `producer`'s cache currently holds a non-aborted group `key` (optionally whole). */
+	producerHoldsGroup: (producer: Producer, key: bigint, whole?: boolean) => boolean;
 	/**
 	 * How many cached groups the subscriber's track evicted so far. Mirrors the Rust
 	 * `Consumer::evicted`.
@@ -2064,6 +2066,9 @@ export const hooks: {
 	},
 	unlisted: () => {
 		throw new Error("broadcast.ts not loaded");
+	},
+	producerHoldsGroup: () => {
+		throw new Error("track.ts not loaded");
 	},
 };
 

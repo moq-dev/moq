@@ -1182,7 +1182,7 @@ test("lite-07 SUBSCRIBE_START reports an added range's start, which later update
 		// Newer groups arrive, and another update leaves the range live: it still starts at 2. The
 		// added range starts at time 9, which the live group 7 contains.
 		for (const key of [5n, 6n, 7n]) sub.serve(key);
-		await replayUpdate({ priority: 0, ranges: [{ start: { absolute: 9n } }] }).encode(sub.client.writer, version);
+		await replayUpdate({ priority: 0, ranges: [{ start: { time: 9n } }] }).encode(sub.client.writer, version);
 		const pinned = await next();
 		expect([pinned.id, pinned.start]).toEqual([2n, 7n]);
 		// The join stays a live join, placed by its Range ID: pinned to a time start, its groups would
@@ -2237,8 +2237,8 @@ test("lite draft-07: a placed range goes out before an older unplaced one", asyn
 		version,
 		maxAge: Duration.millis(3_600_000),
 		ranges: [
-			{ start: { absolute: 1000n }, end: { absolute: 2001n } },
-			{ start: { absolute: 5000n }, end: { absolute: 6001n } },
+			{ start: { time: 1000n }, end: { time: 2000n } },
+			{ start: { time: 5000n }, end: { time: 6000n } },
 		],
 	});
 	try {
@@ -2274,7 +2274,7 @@ test("lite draft-07: a finished copy answers a time only once placed", async () 
 	const sub = await servedSubscription({
 		version,
 		maxAge: Duration.millis(3_600_000),
-		ranges: [{ start: { absolute: 1000n } }],
+		ranges: [{ start: { time: 1000n } }],
 	});
 	try {
 		hooks.receiveTrack(sub.track);
@@ -2348,15 +2348,15 @@ test("lite draft-07: a range added before the start is answered once placed", as
 	const sub = await servedSubscription({
 		version,
 		maxAge: Duration.millis(3_600_000),
-		ranges: [{ start: { absolute: 3000n }, end: { absolute: 4001n } }],
+		ranges: [{ start: { time: 3000n }, end: { time: 4000n } }],
 	});
 	try {
 		hooks.receiveTrack(sub.track);
 		await replayUpdate({
 			priority: 0,
 			ranges: [
-				{ start: { absolute: 1000n }, end: { absolute: 2001n } },
-				{ start: { absolute: 5000n }, end: { absolute: 6001n } },
+				{ start: { time: 1000n }, end: { time: 2000n } },
+				{ start: { time: 5000n }, end: { time: 6000n } },
 			],
 			remove: [0n],
 		}).encode(sub.client.writer, version);
@@ -2413,7 +2413,8 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 			await flush();
 			expect(closed).not.toContain(6n);
 
-			sub.client.close();
+			if (version === Version.DRAFT_07) sub.client.abort(new StreamError(StreamCode.Cancel));
+			else sub.client.close();
 			await sub.serving;
 			expect(closed).toContain(6n);
 		} finally {
@@ -2770,7 +2771,7 @@ test("lite-07 an update moves frame starts with the live ranges", async () => {
 	}
 });
 
-test("lite-07 a Position end parks the group, the stream open, until an update moves it", async () => {
+test("lite-07 a Position end closes the group stream cleanly without GROUP_END", async () => {
 	const version = Version.DRAFT_07;
 	const sub = await servedSubscription({
 		version,
@@ -2780,20 +2781,8 @@ test("lite-07 a Position end parks the group, the stream open, until an update m
 	});
 	try {
 		sub.serve(0n);
-		let served: Served | undefined;
-		const serving = sub.servedGroup().then((group) => {
-			served = group;
-		});
-		await flush();
-		expect(served).toBeUndefined();
-
-		// Moved past the group, the rest goes out on the same stream, which then ends.
-		await replayUpdate({ priority: 0, remove: [0n], ranges: [{ start: { absolute: 0n } }] }).encode(
-			sub.client.writer,
-			version,
-		);
-		await serving;
-		expect(served).toMatchObject({ key: 0n, frameStart: 0, payloads: ["a", "b", "c"] });
+		// Reaches Position(0, 2) and closes cleanly with FIN (not parked open, no GROUP_END).
+		expect(await sub.servedGroup()).toMatchObject({ key: 0n, frameStart: 0, payloads: ["a", "b"], end: undefined });
 	} finally {
 		await sub.close();
 	}
@@ -2812,47 +2801,23 @@ test("lite-07 a Position end parks the group, the stream open, until an update m
 		await ending.close();
 	}
 
-	// A track that ends while a group is parked still applies the update that moves its stop.
-	const ended = await servedSubscription({
+	// A Position slice [Position(0, 1), Position(0, 3)) delivers exact frames [1, 3) and closes cleanly.
+	const slice = await servedSubscription({
 		version,
-		frames: ["a", "b", "c"],
+		frames: ["a", "b", "c", "d"],
 		maxAge: Duration.millis(3_600_000),
-		ranges: [{ start: { absolute: 0n }, end: { absolute: 0n, frame: 2 } }],
+		ranges: [{ start: { absolute: 0n, frame: 1 }, end: { absolute: 0n, frame: 3 } }],
 	});
 	try {
-		ended.serve(0n);
-		let served: Served | undefined;
-		const serving = ended.servedGroup().then((group) => {
-			served = group;
+		slice.serve(0n);
+		expect(await slice.servedGroup()).toMatchObject({
+			key: 0n,
+			frameStart: 1,
+			payloads: ["b", "c"],
+			end: undefined,
 		});
-		ended.track.finish();
-		await flush();
-		expect(served).toBeUndefined();
-		await replayUpdate({ priority: 0, remove: [0n], ranges: [{ start: { absolute: 0n } }] }).encode(
-			ended.client.writer,
-			version,
-		);
-		await serving;
-		expect(served).toMatchObject({ key: 0n, payloads: ["a", "b", "c"] });
 	} finally {
-		await ended.close();
-	}
-
-	// The subscriber leaving resets a parked stream: no update will move its stop.
-	const leaving = await servedSubscription({
-		version,
-		frames: ["a", "b", "c"],
-		maxAge: Duration.millis(3_600_000),
-		ranges: [{ start: { absolute: 0n }, end: { absolute: 0n, frame: 2 } }],
-	});
-	try {
-		const reset = leaving.stall();
-		leaving.serve(0n);
-		expect(await leaving.servedHeader()).toBe(0n);
-		leaving.client.close();
-		expect(await reset).toBeDefined();
-	} finally {
-		await leaving.close();
+		await slice.close();
 	}
 });
 
@@ -5726,4 +5691,182 @@ test("a lite-07 request naming a node is served here", async () => {
 	});
 	const msg = await TrackMessage.decode(new Reader(undefined, sized, version), version);
 	expect(msg).toMatchObject({ broadcast: "cam", track: "video", instance: undefined });
+});
+
+// Lite-07: Position matches exact group (including 0), never falling back to an earlier group's
+// span; a Position End frame slice closes the Group Stream with bare FIN (no GROUP_END) and the
+// Subscribe Stream cleanly on one-shot SUBSCRIBE + immediate FIN.
+test("lite-07 one-shot SUBSCRIBE Position matches exact group and closes frame slice without GROUP_END", async () => {
+	const version = Version.DRAFT_07;
+	const pair = createMockTransportPair(ALPN_07_WIP);
+	const origin = new OriginProducer();
+	const route = origin.route(Path.from("room"));
+	const track = defined(route.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
+	const g0 = track.createGroup(0n);
+	for (let i = 0; i < 4; i++) {
+		g0.writeFrame({ payload: new TextEncoder().encode(`f${i}`), timestamp: Timestamp.fromMillis(i * 100) });
+	}
+	g0.finishAt(1000n);
+
+	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
+	const serveBidi = (async () => {
+		const reader = pair.server.incomingBidirectionalStreams.getReader();
+		try {
+			for (;;) {
+				const next = await reader.read();
+				if (next.done) break;
+				const s = new Stream({ readable: next.value.readable, writable: next.value.writable, version });
+				const typ = await s.reader.u53();
+				if (typ === 2) {
+					const sub = await Subscribe.decode(s.reader, version);
+					void publisher.runSubscribe(sub, s);
+				}
+			}
+		} catch {}
+	})();
+
+	const uniReader = pair.client.incomingUnidirectionalStreams.getReader();
+	const readGroup = async () => {
+		const next = await uniReader.read();
+		if (next.done) throw new Error("expected group stream");
+		const r = new Reader(next.value, undefined, version);
+		expect(await r.u53()).toBe(0);
+		const header = await GroupMessage.decode(r, version);
+		const frames: string[] = [];
+		let sawGroupEnd = false;
+		while (!(await r.done())) {
+			const encodedLen = await r.u53();
+			if (encodedLen === 0) {
+				// GROUP_END: 0 followed by end-delta varint.
+				sawGroupEnd = true;
+				await r.u62();
+				break;
+			}
+			const payloadLen = encodedLen - 1;
+			await r.varint(); // zigzag timestamp delta
+			const payload = await r.read(payloadLen);
+			frames.push(new TextDecoder().decode(payload));
+		}
+		return { header, frames, sawGroupEnd };
+	};
+
+	const oneShot = async (
+		id: bigint,
+		start: { absolute: bigint; frame: number },
+		end: { absolute: bigint; frame: number },
+	) => {
+		const s = await Stream.open(pair.client, { version });
+		const msg = new Subscribe({
+			id,
+			broadcast: Path.from("room"),
+			track: "video",
+			priority: 0,
+			order: "ascending",
+			maxDelay: null,
+			ranges: [{ start, end }],
+		});
+		const bytes = await Writer.collect(version, async (w) => {
+			await w.u53(2);
+			await msg.encode(w, version);
+		});
+		const writing = s.writer.write(bytes);
+		s.writer.close();
+		await writing;
+		const responses = [];
+		for (;;) {
+			const resp = await decodeSubscribeResponseMaybe(s.reader, version);
+			if (!resp) break;
+			responses.push(resp);
+		}
+		return responses;
+	};
+
+	try {
+		// 1) Whole group 0: [Position(0, 0), Position(1, 0)) delivers all 4 frames + GROUP_END + clean FIN.
+		const wholeGroup = readGroup();
+		const wholeResponses = await oneShot(0n, { absolute: 0n, frame: 0 }, { absolute: 1n, frame: 0 });
+		const whole = await wholeGroup;
+		expect(whole.header.key).toBe(0n);
+		expect(whole.frames).toEqual(["f0", "f1", "f2", "f3"]);
+		expect(whole.sawGroupEnd).toBe(true);
+		expect(wholeResponses.some((r) => "start" in r && r.start.start === 0n)).toBe(true);
+		expect(wholeResponses.some((r) => "drop" in r)).toBe(false);
+
+		// 2) Exact Position(500, 0) inside group 0's span [0, 1000) must NOT fall back to group 0.
+		const missResponses = await oneShot(1n, { absolute: 500n, frame: 0 }, { absolute: 501n, frame: 0 });
+		expect(missResponses.some((r) => "drop" in r)).toBe(true);
+
+		// 3) Frame slice [Position(0, 1), Position(0, 3)) delivers f1, f2 and closes with bare FIN (NO GROUP_END).
+		const sliceGroup = readGroup();
+		const sliceResponses = await oneShot(2n, { absolute: 0n, frame: 1 }, { absolute: 0n, frame: 3 });
+		const slice = await sliceGroup;
+		expect(slice.header.key).toBe(0n);
+		expect(slice.header.frameStart).toBe(1);
+		expect(slice.frames).toEqual(["f1", "f2"]);
+		expect(slice.sawGroupEnd).toBe(false);
+		expect(sliceResponses.some((r) => "start" in r && r.start.start === 0n)).toBe(true);
+		expect(sliceResponses.some((r) => "drop" in r)).toBe(false);
+
+		// 4) Delayed subscriber FIN (arriving after SUBSCRIBE, as on WebTransport/QUIC when
+		// write and close land in separate STREAM frames) still hands off to one-shot fetch
+		// and triggers the track's fill handler.
+		const requests = track.requests();
+		const servingFill = (async () => {
+			const fill = await requests.requestedFill();
+			if (!fill) throw new Error("expected fill for group 2000");
+			expect(fill.start).toBe(2000n);
+			expect(fill.end).toBe(2001n);
+			const group = fill.accept(2000n);
+			if (group) {
+				group.writeFrame({
+					payload: new TextEncoder().encode("late-fin"),
+					timestamp: Timestamp.fromMillis(2000),
+				});
+				group.finishAt(3000n);
+			}
+			fill.close();
+		})();
+		try {
+			const delayedGroup = readGroup();
+			const s = await Stream.open(pair.client, { version });
+			const msg = new Subscribe({
+				id: 3n,
+				broadcast: Path.from("room"),
+				track: "video",
+				priority: 0,
+				order: "ascending",
+				maxDelay: null,
+				ranges: [{ start: { absolute: 2000n, frame: 0 }, end: { absolute: 2001n, frame: 0 } }],
+			});
+			const bytes = await Writer.collect(version, async (w) => {
+				await w.u53(2);
+				await msg.encode(w, version);
+			});
+			await s.writer.write(bytes);
+			// Yield so the publisher enters #runTrack before the FIN frame lands.
+			for (let i = 0; i < 5; i++) await yieldNow();
+			s.writer.close();
+			const delayedResponses = [];
+			for (;;) {
+				const resp = await decodeSubscribeResponseMaybe(s.reader, version);
+				if (!resp) break;
+				delayedResponses.push(resp);
+			}
+			const delayed = await delayedGroup;
+			expect(delayed.header.key).toBe(2000n);
+			expect(delayed.frames).toEqual(["late-fin"]);
+			expect(delayed.sawGroupEnd).toBe(true);
+			expect(delayedResponses.some((r) => "start" in r && r.start.start === 2000n)).toBe(true);
+			await servingFill;
+		} finally {
+			requests.close();
+		}
+	} finally {
+		pair.client.close();
+		pair.server.close();
+		await serveBidi;
+		publisher.close();
+		route.broadcast.close();
+		origin.close();
+	}
 });

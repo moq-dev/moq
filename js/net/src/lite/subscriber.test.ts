@@ -1161,6 +1161,8 @@ interface FakeStream {
 	// Resolves once the subscriber waits on a read the test has not answered.
 	reading: Promise<void>;
 	aborted: Promise<unknown>;
+	// Resolves once the subscriber cancels its read half (STOP_SENDING).
+	cancelled: Promise<unknown>;
 	// Resolves once the subscriber FINs its side.
 	finished: Promise<void>;
 	// Resolves on the first write, even if it stalls.
@@ -1192,12 +1194,14 @@ function fakeSession(park: number[] = [], stall: number[] = []) {
 			const outbound = new ReadableStream<Uint8Array>({ start: (controller) => (sent = controller) });
 			let onRead!: () => void;
 			let onAbort!: (reason: unknown) => void;
+			let onCancel!: (reason: unknown) => void;
 			let onFinish!: () => void;
 			let onWrite!: () => void;
 			let release!: () => void;
 			let stopped: { reason: unknown; refused: () => void } | undefined;
 			const reading = new Promise<void>((resolve) => (onRead = resolve));
 			const aborted = new Promise<unknown>((resolve) => (onAbort = resolve));
+			const cancelled = new Promise<unknown>((resolve) => (onCancel = resolve));
 			const finished = new Promise<void>((resolve) => (onFinish = resolve));
 			const writing = new Promise<void>((resolve) => (onWrite = resolve));
 			const stalled = stall.includes(streams.length);
@@ -1208,6 +1212,7 @@ function fakeSession(park: number[] = [], stall: number[] = []) {
 						inbound = controller;
 					},
 					pull: () => onRead(),
+					cancel: (reason) => onCancel(reason),
 				},
 				{ highWaterMark: 0 },
 			);
@@ -1249,7 +1254,7 @@ function fakeSession(park: number[] = [], stall: number[] = []) {
 				new Promise<void>((refused) => {
 					stopped = { reason, refused };
 				});
-			streams.push({ inbound, outbound, reading, aborted, finished, writing, written, release, stop });
+			streams.push({ inbound, outbound, reading, aborted, cancelled, finished, writing, written, release, stop });
 			count.set(streams.length);
 			return opened;
 		},
@@ -1558,7 +1563,8 @@ test.each(
 		const update = await SubscribeUpdate.decode(subscribe, version);
 		expect([update.priority, update.maxDelay]).toEqual([4, maxAge]);
 		track.close();
-		expect(await subscribe.done()).toBe(true);
+		if (version === Version.DRAFT_07) await request.aborted;
+		else expect(await subscribe.done()).toBe(true);
 	} finally {
 		track.close();
 		subscriber.close();
@@ -2913,7 +2919,7 @@ test("a local unsubscribe owes no SUBSCRIBE_END", async () => {
 		(await next)?.close();
 		ordered.close();
 		track.close();
-		await streams[1].finished;
+		await streams[1].aborted;
 		await drainReactions();
 		expect(await outcome).toBeUndefined();
 	} finally {
@@ -4100,7 +4106,9 @@ test.each(["answer", "credit"] as const)("FETCH waiting for %s ends with its cal
 			await drainReactions();
 			expect(streams[1].written).toEqual([]);
 		} else {
-			await streams[1].aborted;
+			// On lite-07, one-shot SUBSCRIBE + immediate FIN already closed the write half,
+			// so cancellation sends STOP_SENDING on the read half.
+			await streams[1].cancelled;
 		}
 	} finally {
 		subscriber.close();

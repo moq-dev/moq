@@ -13813,6 +13813,21 @@ impl Subscriber {
 		}
 	}
 
+	/// Whether what the wire was told in this subscriber's record holds every group from
+	/// `from` on that its bounded ranges name; see [`Self::covered`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn told_covered(&mut self, from: u64) -> bool {
+		let bounds = self.bounds();
+		let from = from.max(bounds.start);
+		match &mut self.inner {
+			Inner::Plain(cursor) => {
+				cursor.sync();
+				cursor.filter.window.covered_by(from, bounds.end, &cursor.record)
+			}
+			Inner::Resume(resume, logical) => resume.covered(from, bounds.end, &logical.record),
+		}
+	}
+
 	/// Why this subscriber's ranges can't be served from its track, the error its reads
 	/// fail with: for a front's reader, a copy still serving it refusing them.
 	pub(super) fn refused(&mut self) -> Option<Error> {

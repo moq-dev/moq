@@ -569,8 +569,9 @@ impl Window {
 			self.retire(key);
 			self.ranges.insert(key, range);
 			self.count_budget(&range);
-			if range.join().is_some() {
-				self.joining.insert(key, joining(key));
+			let join = joining(key);
+			if range.join().is_some() || matches!(join, Joining::At(_)) {
+				self.joining.insert(key, join);
 			}
 			if !range.is_empty() {
 				self.place_range(key, latest, holdings);
@@ -1121,6 +1122,8 @@ impl Window {
 		// Every end includes its group.
 		let end = range.end.and_then(|end| end.checked_add(1));
 		let (anchor, asks) = match range.start {
+			// Exact group placement (lite-07 Position): never falls back to an earlier group.
+			Start::Time(_) if let Some(Joining::At(group)) = self.joining.get(&key) => (Some(*group), false),
 			Start::Time(time) => (Some(time), true),
 			// The oldest group held.
 			Start::Oldest => (None, false),

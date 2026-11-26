@@ -1940,9 +1940,9 @@ struct Mirrored {
 impl Mirrored {
 	fn insert(&mut self, key: u64, range: track::Range, joining: Joining) {
 		self.ranges.insert(key, range);
-		match range.join() {
-			Some(_) => _ = self.joining.insert(key, joining),
-			None => _ = self.joining.remove(&key),
+		match (range.join(), joining) {
+			(Some(_), _) | (_, Joining::At(_)) => _ = self.joining.insert(key, joining),
+			(None, Joining::Since(_)) => _ = self.joining.remove(&key),
 		}
 	}
 
@@ -2040,7 +2040,12 @@ fn asked(
 		end: None,
 		floored: true,
 	});
-	range.asked(floor.max(Some(group)), end, Some(resolved))
+	let (asked, keep) = range.asked(floor.max(Some(group)), end, Some(resolved));
+	let keep = keep.or_else(|| match asked.start {
+		track::Start::Time(at) if !asked.is_empty() => Some(at),
+		_ => None,
+	});
+	(asked, keep)
 }
 
 /// `asked` as a subscription's ranges, and where each live join among them was placed, by

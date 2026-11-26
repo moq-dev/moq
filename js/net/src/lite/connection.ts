@@ -37,6 +37,7 @@ import {
 	hasAuth,
 	hasDatagrams,
 	hasDatagramTracks,
+	hasFetch,
 	hasGoaway,
 	hasProbeRtt,
 	hasRoutes,
@@ -497,7 +498,7 @@ export class Connection implements Session {
 				})(),
 			);
 		} else if (typ === StreamId.Fetch) {
-			if (!hasTrackStream(this.#version)) throw new Error("FETCH is not supported on this version");
+			if (!hasFetch(this.#version)) throw new Error("FETCH is not supported on this version");
 			await this.#publisher.owe(
 				(async () => {
 					const msg = await Fetch.decode(stream.reader, this.#version);
