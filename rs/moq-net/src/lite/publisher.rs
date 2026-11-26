@@ -5236,6 +5236,10 @@ struct GroupContext {
 	/// Whether the session negotiated the `ietf` extension and a moq-transport publisher made
 	/// the track, so its group streams carry object records.
 	object_records: bool,
+	/// Lite-07 over a transport whose resets still deliver a GROUP header
+	/// ([reliable_reset](crate::transport::poll::Session::reliable_reset)), so a reset group
+	/// stream accounts for its group and no SUBSCRIBE_DROP names it.
+	reliable_reset: bool,
 }
 
 impl GroupContext {
@@ -5302,6 +5306,7 @@ impl Subscription {
 			stamp: self.stamp,
 			outcomes: self.outcomes.clone(),
 			object_records: self.object_records,
+			reliable_reset: self.version.has_reliable_reset() && self.session.reliable_reset(),
 		}
 	}
 
@@ -7477,9 +7482,7 @@ impl GroupServe {
 							ready!(self.budget.poll_yield(waiter));
 							match writer.poll_flush(waiter) {
 								// The first flush is the header alone: nothing else is buffered before it.
-								Poll::Ready(Ok(())) if !writer.held() && self.ctx.version.has_reliable_reset() => {
-									writer.hold()
-								}
+								Poll::Ready(Ok(())) if !writer.held() && self.ctx.reliable_reset => writer.hold(),
 								Poll::Ready(Ok(())) => {}
 								Poll::Ready(Err(err)) => break 'serve Err(err),
 								// Parking on the transport is the one stall the group cursor cannot
@@ -7758,9 +7761,10 @@ impl kio::Task for GroupServe {
 
 /// Lite-07: whether a Group Stream on `writer`, failing now, still accounts for its group.
 /// A reset of this side's delivers the header once the transport took it ([held](Writer::held)),
-/// which does. A STOP_SENDING owes a drop only when it evicted the stream before the peer
-/// acknowledged the header, since the subscriber may never have read which group it carried;
-/// any other the subscriber sent knowing the group, or wanting none of it.
+/// which does. Only a [reliable reset](GroupContext::reliable_reset) holds it: a plain one lets
+/// the peer discard a header it has not read. A STOP_SENDING owes a drop only when it evicted
+/// the stream before the peer acknowledged the header, since the subscriber may never have read
+/// which group it carried; any other the subscriber sent knowing the group, or wanting none of it.
 fn accounts(version: Version, writer: &mut Writer<crate::transport::boxed::SendStream, Version>) -> bool {
 	if !version.has_reliable_reset() {
 		return false;
@@ -10860,11 +10864,16 @@ mod serve_group_test {
 	/// A group whose stream wrote its FIN, and on lite-07 its GROUP_END, but goes stale before
 	/// the acknowledgement resets with OLD, so its bytes stop holding the send window. Before
 	/// lite-07 a stale drop names it; lite-07's reset delivers the header instead, so a
-	/// subscriber that read the stream whole first is never told otherwise. It is never served
-	/// again: the reset is final even when a later update widens the budget.
+	/// subscriber that read the stream whole first is never told otherwise, unless the
+	/// transport resets plainly, which may lose the header, so a drop names the group again.
+	/// It is never served again: the reset is final even when a later update widens the budget.
 	#[kio::test]
 	async fn a_stale_unacknowledged_fin_is_never_served_again() {
-		for version in [Version::Lite06, Version::Lite07] {
+		for (version, plain) in [
+			(Version::Lite06, false),
+			(Version::Lite07, false),
+			(Version::Lite07, true),
+		] {
 			let budget = Duration::from_millis(1500);
 			let mut track = track::Producer::new(
 				Arc::new(broadcast::Info::default()),
@@ -10873,11 +10882,9 @@ mod serve_group_test {
 			);
 			let subscriber = track.subscribe(track::Subscription::default().with_max(budget));
 			let session = Log::default();
-			let (mut run, mut writer, log) = lite_run(
-				version,
-				SinkSession::new(session.clone()).with_unacked_fin(),
-				subscriber,
-			);
+			let sink = SinkSession::new(session.clone()).with_unacked_fin();
+			let sink = if plain { sink.with_plain_reset() } else { sink };
+			let (mut run, mut writer, log) = lite_run(version, sink, subscriber);
 			let update = |max_delay| lite::SubscribeUpdate {
 				wanted_group: None,
 				priority: 0,
@@ -10897,7 +10904,7 @@ mod serve_group_test {
 			write_group(&mut track, 1, 1000);
 			write_group(&mut track, 2, 6000);
 			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-			let reliable = version.has_reliable_reset();
+			let reliable = version.has_reliable_reset() && !plain;
 			let dropped: &[(u64, u64)] = match reliable {
 				true => &[],
 				false => &[(0, 0)],
@@ -11100,11 +11107,12 @@ mod serve_group_test {
 
 	/// A lite-07 group stream that fails after its header, whatever this side gives it up for,
 	/// resets still delivering that header, which accounts for the group: no drop names it. One
-	/// that fails before the transport took the header resets plainly, and a drop names it.
+	/// that fails before the transport took the header resets plainly, and a drop names it, as
+	/// does one whose transport resets plainly, since its peer may discard the unread header.
 	#[kio::test]
 	async fn lite07_a_reset_after_the_header_delivers_it_and_names_nothing() {
 		let version = Version::Lite07;
-		for written in [true, false] {
+		for (written, plain) in [(true, false), (false, false), (true, true)] {
 			let track = track::Producer::new(
 				Arc::new(broadcast::Info::default()),
 				"test",
@@ -11113,6 +11121,7 @@ mod serve_group_test {
 			// A stream whose writes park keeps its header buffered.
 			let gate = kio::Producer::new(written);
 			let session = SinkSession::gated_uni(gate.consume());
+			let session = if plain { session.with_plain_reset() } else { session };
 			let streams = session.log.clone();
 			let (mut run, mut writer, log) = lite07_run(session, track.subscribe(None));
 			let mut group = track.create_group(group::Info { start: 0 }).unwrap();
@@ -11123,12 +11132,17 @@ mod serve_group_test {
 
 			group.abort(Error::Evicted).unwrap();
 			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-			match written {
-				true => {
+			match (written, plain) {
+				(true, false) => {
 					assert_eq!(group_resets(&streams, version), [(0, true, StreamError::Evicted)]);
 					assert_eq!(drops(&mut writer, &log, version).await, []);
 				}
-				false => {
+				// A plain reset may lose the header the peer has not read, so a drop names it.
+				(true, true) => {
+					assert_eq!(group_resets(&streams, version), [(0, false, StreamError::Evicted)]);
+					assert_eq!(drops(&mut writer, &log, version).await, [(0, 0)]);
+				}
+				(false, _) => {
 					assert!(group_resets(&streams, version).is_empty(), "no header went out");
 					assert_eq!(streams.resets(), [StreamError::Evicted.to_code()]);
 					assert_eq!(drops(&mut writer, &log, version).await, [(0, 0)]);

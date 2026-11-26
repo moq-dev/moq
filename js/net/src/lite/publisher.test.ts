@@ -759,6 +759,8 @@ interface Reliable {
 	fin: boolean;
 	/** Every reset of a stream: the prefix it still delivers, if any, and its code. */
 	resets: { offset?: number; code?: number }[];
+	/** Whether the peer negotiated RESET_STREAM_AT, so a reset keeps its prefix for the reader. */
+	reliableReset: boolean;
 }
 
 /**
@@ -793,6 +795,7 @@ function reliableStreams(quic: MockTransport, state: Reliable) {
 		inner.closed.catch((err: unknown) => controller.error(err));
 		return Object.assign(stream, {
 			getStats: async () => ({ bytesAcknowledged: state.acked ? written : 0 }),
+			reliableReset: state.reliableReset,
 			resetAt(offset: number, reason: unknown) {
 				reset(offset, reason);
 				controller.error(reason);
@@ -844,14 +847,15 @@ async function servedSubscription(
 		// The `Subscriber Max Age` as decoded, in place of the scheduling tests' wide one.
 		maxDelay?: number | null;
 		// Give each group stream acknowledgements and a reset that still delivers a prefix, as a
-		// qmux one has, which `reliable` on the result controls and logs.
-		reliable?: boolean;
+		// qmux one has, which `reliable` on the result controls and logs. `"plain"` is a qmux peer
+		// without RESET_STREAM_AT, whose resets may lose the prefix.
+		reliable?: boolean | "plain";
 	} = {},
 ) {
 	const version = options.version ?? Version.DRAFT_05;
 	const frames = options.frames ?? ["hello"];
 	const pair = createMockTransportPair(version === Version.DRAFT_06 ? ALPN_06 : ALPN_05);
-	const reliable: Reliable = { acked: true, fin: true, resets: [] };
+	const reliable: Reliable = { acked: true, fin: true, resets: [], reliableReset: options.reliable !== "plain" };
 	if (options.reliable) reliableStreams(pair.server, reliable);
 	if (options.maxDatagramSize !== undefined)
 		Object.defineProperty(pair.server.datagrams, "maxDatagramSize", { value: options.maxDatagramSize });
@@ -1896,12 +1900,13 @@ test("lite draft-07: a reset that cut a GROUP_END names its span's starts again"
 
 // Lite-07: a group stream this side resets after its header, whatever for, still delivers that header
 // where the transport can, which accounts for the group, so no drop names it. A browser's WebTransport
-// cannot, so there a drop still does. Mirrors the Rust
+// cannot, nor can a qmux peer without RESET_STREAM_AT, so there a drop still does. Mirrors the Rust
 // `lite07_a_reset_after_the_header_delivers_it_and_names_nothing`.
 test.each([
 	["a transport that resets reliably", true],
+	["a qmux peer without RESET_STREAM_AT", "plain"],
 	["a browser's WebTransport", false],
-])("lite-07 over %s: a group aborted after its header", async (_, reliable) => {
+] as const)("lite-07 over %s: a group aborted after its header", async (_, reliable) => {
 	const version = Version.DRAFT_07;
 	const sub = await servedSubscription({ version, startGroup: 0n, reliable });
 	try {
@@ -1913,8 +1918,12 @@ test.each([
 		await flush();
 		sub.track.finish();
 		sub.track.close();
-		expect(await holesToEnd(sub.client.reader)).toEqual(reliable ? [] : [["drop", 0n, 1n]]);
-		const resets = reliable ? [{ offset: await headerSize(version, 0n), code: StreamCode.Evicted }] : [];
+		expect(await holesToEnd(sub.client.reader)).toEqual(reliable === true ? [] : [["drop", 0n, 1n]]);
+		const resets = {
+			true: [{ offset: await headerSize(version, 0n), code: StreamCode.Evicted }],
+			plain: [{ code: StreamCode.Evicted }],
+			false: [],
+		}[`${reliable}`];
 		expect(sub.reliable.resets).toEqual(resets);
 	} finally {
 		await sub.close();

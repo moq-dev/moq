@@ -907,11 +907,12 @@ Both the publisher and subscriber MAY reset the stream at any time.
 This is not a fatal error and the session remains active.
 The subscriber MAY cache the error and potentially retry later.
 
-A publisher that resets a Group Stream after sending its GROUP message MUST still deliver that message: it sends RESET_STREAM_AT [reliable-reset] with a Reliable Size at the end of the GROUP message, or, toward a peer that did not negotiate it, holds the RESET_STREAM until the peer acknowledged the GROUP message.
+A publisher that resets a Group Stream after sending its GROUP message, toward a peer that negotiated RESET_STREAM_AT [reliable-reset], SHOULD send it with a Reliable Size at the end of the GROUP message.
 The GROUP message then accounts for the Group and the reset ends its readers with its error, so the publisher names the Group in no [SUBSCRIBE_DROP](#subscribe-drop).
-An acknowledgment only means the peer's transport holds the GROUP message, which a RESET_STREAM lets it discard unread, so without RESET_STREAM_AT a subscriber MUST read a Group Stream's GROUP message as soon as the stream arrives: nothing else accounts for the Group.
 A reset after a GROUP_END may cut the GROUP_END, so the publisher accounts again for the starts it accounted for, as it does for starts it declared it will never produce (see [SUBSCRIBE_DROP](#subscribe-drop)).
-A publisher whose transport can do neither, such as a browser's WebTransport, names each Group whose stream it resets in a SUBSCRIBE_DROP with the reset's error instead, as it does a Group whose stream it resets before sending the GROUP message.
+Any other reset may lose the GROUP message, since a RESET_STREAM lets the peer's transport discard data it has not delivered, even data it acknowledged.
+So a publisher MUST name each Group whose stream it resets without a Reliable Size covering the GROUP message, such as toward a peer without RESET_STREAM_AT or over a browser's WebTransport, in a SUBSCRIBE_DROP with the reset's error, as it does a Group whose stream it resets before sending the GROUP message.
+A subscriber that read the GROUP message first already accounted for the Group, and the drop ends its readers with the reset's error.
 
 A publisher out of the peer's stream credit MAY reset the lowest-priority Group Stream with TOO_FAR_BEHIND to make room for a higher-priority one.
 That gives the Group up on the subscription, and a subscriber that wants the rest of it FETCHes the Group from the first frame it lacks (see [Positions](#positions)).
@@ -2349,11 +2350,11 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 - Added `Error Code` to SUBSCRIBE_END: a track can end with an error while keeping the groups below its end.
 - Restored SUBSCRIBE_DROP (type 0x2), replacing Stream Count on SUBSCRIBE_END. Every start is accounted for by a Group Stream, a GROUP_END, a GROUP's Previous Delta, or a drop; a publisher SHOULD send a drop as soon as it gives a start up.
 - SUBSCRIBE_DROP's Error Code is a stream error code, which ends the dropped groups' readers, including one still arriving.
-- A publisher resets a Group Stream after its GROUP message with RESET_STREAM_AT, or a RESET_STREAM held until the GROUP message is acknowledged, and names no such Group in SUBSCRIBE_DROP; a publisher whose transport can do neither, such as a browser's WebTransport, still does.
+- A publisher that resets a Group Stream after its GROUP message with RESET_STREAM_AT, its Reliable Size covering the GROUP message, names no such Group in SUBSCRIBE_DROP. Any other reset may lose the GROUP message, so the publisher names the Group in SUBSCRIBE_DROP with the reset's error, toward a peer without RESET_STREAM_AT or over a browser's WebTransport.
 - A Group Stream the subscriber stopped (STOP_SENDING) is named in SUBSCRIBE_DROP only with EVICTED, before its GROUP message was acknowledged.
 - SUBSCRIBE_DROP names a span of starts, from `Group Start` up to an exclusive `Group End`, in place of an inclusive `Group End`. An empty or inverted span is a PROTOCOL_VIOLATION.
 - Added `Previous Delta` to GROUP, proving the starts just below its Group hold no Group: 0 proves nothing, 1 every start below it, and a higher value every start strictly between its `Previous Start` and the Group's. It names the starts the publisher declared it will never produce, which ends no reader and is final: a Group is never created there, and one that arrived is kept. A gap between starts is not proven empty, since Groups may be created out of order; a start never had and never declared skipped is named in SUBSCRIBE_DROP. A drop of a Group names the starts its GROUP message proves empty too, and a declared skip no GROUP message can prove, or whose GROUP_END a reset may have cut, is named in SUBSCRIBE_DROP with NOT_FOUND.
-- A subscriber waits out no grace period: every start is accounted for, so one nothing accounts for is still owed. Without RESET_STREAM_AT a subscriber MUST read a Group Stream's GROUP message as soon as the stream arrives.
+- A subscriber waits out no grace period: every start is accounted for, so one nothing accounts for is still owed.
 - Every SUBSCRIBE_DROP is final on its subscription, OLD included: no SUBSCRIBE_UPDATE reopens a drop, and a subscriber that still wants the Group asks for it with a SUBSCRIBE of its own.
 - SUBSCRIBE_END declares the final boundary while lower groups can still be in flight, and no longer closes the Subscribe Stream: the publisher keeps reading SUBSCRIBE_UPDATE, so an update can reach an ended Track's history.
 - A covered subscription, whose every Range has an End and whose every Group was sent or dropped, also stays open for an update; the publisher never FINs first.
