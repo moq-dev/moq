@@ -11,7 +11,7 @@ Decided 2026-11-25 (maintainer, `/quest-plan` on provable state-machine designs 
 - ✅ Move `rs/kio` to a dedicated `kio` repo, then run the state-machine spikes there (rejected: new project in `kixel-ai/rust2`, fresh blank-slate experiment repo leaving `rs/kio` in `moq`, keeping the spikes in `moq`'s `m9` lab first).
 - ✅ GitHub repo `kixel-ai/kio`, moved now in `m1` (rejected: `moq-dev/kio` moved in `m1`, `kixel-ai/kio` moved after the release cut in `m4`). `kio` is a general-purpose async crate with no MoQ concepts (matching `kixel-ai/swole`, `crabx`, `rind`, and `rust2`), switching `moq` to depend on external `kio` is additive for `moq` callers, and moving in `m1` unblocks the spikes without waiting behind the release cut.
 
-Implementation guidance (following `kixel-ai/rust2`'s [swole repo move](https://github.com/kixel-ai/rust2/blob/main/quest/m1/swole-repo.md)):
+Implementation guidance (following `kixel-ai/rust2`'s [swole repo move](https://github.com/kixel-ai/rust2/blob/e0484e81/quest/m1/swole-repo.md)):
 
 - Filter history with `git filter-repo` over `rs/kio/` and the carried quest files, moving `rs/kio/` to the new repository root (`Cargo.toml` workspace with `kio` and `macros/`). Rewrite bare `#N` references in commit messages to `moq-dev/moq#N`, and update package `repository` metadata to `https://github.com/kixel-ai/kio`.
 - Copy `moq`'s reusable setup trimmed to what `kio` needs: Nix flake, direnv, `just ci`, `AGENTS.md`, `CONTRIBUTING.md`, `quest init`, org rulesets via dotfiles' `repo-settings`, and crates.io release automation for `kio-macros` then `kio`.
