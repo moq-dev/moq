@@ -457,3 +457,42 @@ fn backends_agree() {
 		}
 	}
 }
+
+/// A picture carries the exact timestamp its access unit went in with, on a
+/// timescale whose ticks are not whole microseconds. A backend whose codec holds
+/// microseconds has to give back the instant it was handed, not a truncation of
+/// it, or a frame on a 90 kHz or nanosecond track lands below its group's start.
+#[test]
+#[cfg(feature = "openh264")]
+fn timestamps_keep_their_scale() {
+	let ninety_khz = moq_net::Timescale::new(90_000).unwrap();
+	let nanos = moq_net::Timescale::new(1_000_000_000).unwrap();
+	// Each tick is off the microsecond grid at its scale, as a real one is.
+	let scales = [(ninety_khz, 3003, 1), (nanos, 33_333_333, 1)];
+
+	for name in decoders() {
+		for (scale, step, offset) in scales {
+			let mut decoder = open(name).expect("backend opened during probing");
+			let mut sent = Vec::new();
+			let mut got = Vec::new();
+			for (i, unit) in access_units(&SEQ_PATTERN).into_iter().enumerate() {
+				let timestamp = Timestamp::new(i as u64 * step + offset, scale).unwrap();
+				assert_ne!(
+					Timestamp::from_micros(timestamp.as_micros().unwrap() as u64).unwrap(),
+					timestamp,
+					"the fixture timestamp must not be a whole microsecond"
+				);
+				sent.push(timestamp);
+				let frames = decoder
+					.decode_all(unit.payload, timestamp, unit.keyframe)
+					.unwrap_or_else(|e| panic!("{name} failed to decode: {e}"));
+				got.extend(frames.into_iter().map(|frame| frame.timestamp));
+			}
+
+			// IPPP with no reordering, so pictures come back in the order they were
+			// fed; a decoder still holding the last one is not a timestamp fault.
+			assert!(!got.is_empty(), "{name} decoded nothing");
+			assert_eq!(got, sent[..got.len()], "{name} changed a timestamp at {scale:?}");
+		}
+	}
+}

@@ -62,6 +62,7 @@ use moq_net::Timestamp;
 use moq_vaapi::decode::{Config as VaapiConfig, Decoder, ExportedFrame};
 use moq_vaapi::{Display, DrmDeviceIterator, VAEntrypoint, VAProfile};
 
+use super::submitted::Submitted;
 use super::{Backend, Codec, Config, Stream};
 use crate::frame::{I420, Surface, vaapi};
 use crate::{Error, Frame, Output};
@@ -71,6 +72,10 @@ pub(crate) const NAME: &str = "vaapi";
 pub(crate) struct Vaapi {
 	decoder: Decoder,
 	export: Export,
+	/// Access units the decoder has taken, for the timestamp to give their
+	/// pictures: the decoder carries whole microseconds, which would change a
+	/// [`Timestamp`] at its own scale.
+	submitted: Submitted,
 	ready: VecDeque<Frame>,
 }
 
@@ -151,18 +156,19 @@ impl Vaapi {
 		Ok(Box::new(Self {
 			decoder,
 			export,
+			submitted: Submitted::default(),
 			ready: VecDeque::new(),
 		}))
 	}
 
 	/// Decodes one access unit into GPU-resident frames, or `None` once the
 	/// driver has shown it will not export.
-	fn decode_shared(&mut self, access_unit: &Bytes, timestamp: u64) -> Option<Result<(), Error>> {
+	fn decode_shared(&mut self, access_unit: &Bytes, key: u64) -> Option<Result<(), Error>> {
 		if self.export == Export::Downloading {
 			return None;
 		}
 
-		let exported = self.decoder.decode_exported(access_unit, timestamp).and_then(share);
+		let exported = self.decoder.decode_exported(access_unit, key).and_then(share);
 		Some(self.exported(exported))
 	}
 
@@ -191,15 +197,18 @@ impl Vaapi {
 	/// is a decode error rather than a verdict on the driver. Reporting it as
 	/// one keeps a corrupt access unit from silently costing the rest of the
 	/// session its fast path.
-	fn exported(&mut self, exported: anyhow::Result<Vec<Frame>>) -> Result<(), Error> {
+	fn exported(&mut self, exported: anyhow::Result<Vec<(u64, Surface)>>) -> Result<(), Error> {
 		match exported {
-			Ok(frames) => {
+			Ok(pictures) => {
 				// An access unit whose pictures are all still in the DPB proves
 				// nothing about exporting, so only a non-empty answer counts.
-				if !frames.is_empty() {
+				if !pictures.is_empty() {
 					self.export = Export::Exporting;
 				}
-				self.ready.extend(frames);
+				for (key, surface) in pictures {
+					let timestamp = self.submitted.restore(key)?;
+					self.ready.push_back(Frame::new(surface, timestamp));
+				}
 				Ok(())
 			}
 			Err(err) if self.export == Export::Exporting => {
@@ -216,16 +225,18 @@ impl Vaapi {
 
 impl Backend for Vaapi {
 	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<(), Error> {
-		// The timestamp rides through the decoder with the picture, so it
-		// survives the DPB reordering a stream with B-frames goes through.
-		let timestamp = timestamp.as_micros()? as u64;
-		if let Some(frames) = self.decode_shared(&access_unit, timestamp) {
+		// The microseconds ride through the decoder with the picture, so they
+		// survive the DPB reordering a stream with B-frames goes through, and name
+		// the exact timestamp to give it back.
+		let key = Submitted::key(timestamp)?;
+		self.submitted.remember(key, timestamp);
+		if let Some(frames) = self.decode_shared(&access_unit, key) {
 			return frames;
 		}
 
 		let decoded = self
 			.decoder
-			.decode(&access_unit, timestamp)
+			.decode(&access_unit, key)
 			.map_err(|e| Error::codec(anyhow::anyhow!("VAAPI decode: {e:?}")))?;
 
 		self.convert(decoded)
@@ -237,16 +248,17 @@ impl Backend for Vaapi {
 
 	/// Queue the tail held by the DPB at the end of the stream.
 	fn flush(&mut self) -> Result<(), Error> {
-		if let Some(frames) = self.flush_shared() {
-			return frames;
-		}
-
-		let decoded = self
-			.decoder
-			.flush()
-			.map_err(|e| Error::codec(anyhow::anyhow!("VAAPI flush: {e:?}")))?;
-
-		self.convert(decoded)
+		let flushed = match self.flush_shared() {
+			Some(frames) => frames,
+			None => self
+				.decoder
+				.flush()
+				.map_err(|e| Error::codec(anyhow::anyhow!("VAAPI flush: {e:?}")))
+				.and_then(|decoded| self.convert(decoded)),
+		};
+		// The drain released every picture, so none is still owed a timestamp.
+		self.submitted.clear();
+		flushed
 	}
 
 	fn name(&self) -> &str {
@@ -300,23 +312,23 @@ impl Vaapi {
 	fn convert(&mut self, decoded: Vec<moq_vaapi::decode::Frame>) -> Result<(), Error> {
 		for frame in decoded {
 			let i420 = I420::from_nv12(&frame.data, crate::Size::new(frame.width, frame.height))?;
-			let timestamp = Timestamp::from_micros(frame.timestamp).unwrap_or(Timestamp::ZERO);
+			let timestamp = self.submitted.restore(frame.timestamp)?;
 			self.ready.push_back(Frame::new(Surface::I420(i420), timestamp));
 		}
 		Ok(())
 	}
 }
 
-/// Wrap each exported picture as the DMA-BUF surface a renderer imports, keeping
-/// the timestamp the picture was coded with.
-fn share(exported: Vec<ExportedFrame>) -> anyhow::Result<Vec<Frame>> {
+/// Wrap each exported picture as the DMA-BUF surface a renderer imports, with the
+/// microseconds the picture was coded with.
+fn share(exported: Vec<ExportedFrame>) -> anyhow::Result<Vec<(u64, Surface)>> {
 	exported
 		.into_iter()
 		.map(|frame| {
-			let timestamp = Timestamp::from_micros(frame.timestamp).unwrap_or(Timestamp::ZERO);
+			let key = frame.timestamp;
 			// A decode target names no color space, so the renderer infers one
 			// from the frame size exactly as it does for a downloaded picture.
-			Ok(Frame::new(Surface::DmaBuf(vaapi::adopt(frame, None)?), timestamp))
+			Ok((key, Surface::DmaBuf(vaapi::adopt(frame, None)?)))
 		})
 		.collect()
 }
