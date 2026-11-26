@@ -619,6 +619,14 @@ fn a_pipeline_description_configures_quic_timeouts() {
 }
 
 #[test]
+fn a_pipeline_description_configures_the_cache_expiry() {
+	init();
+	let sink = gst::parse::launch("moqsink url=https://127.0.0.1:1 broadcast=test cache-expiry=3000")
+		.expect("parse the description");
+	assert_eq!(sink.property::<u64>("cache-expiry"), 3_000);
+}
+
+#[test]
 fn a_pipeline_description_selects_loc() {
 	init();
 	let sink =
