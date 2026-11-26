@@ -422,14 +422,9 @@ impl Avcc {
 		let pps = record.picture_parameter_sets.into_iter().map(Bytes::from).collect();
 
 		// Resolution from the first parseable SPS.
-		let (mut coded_width, mut coded_height) = (None, None);
-		if let Some(first) = sps.first()
-			&& first.len() > 1
-			&& let Ok(parsed) = Sps::parse(first)
-		{
-			coded_width = Some(parsed.coded_width);
-			coded_height = Some(parsed.coded_height);
-		}
+		let parsed = sps.iter().find_map(|nal| Sps::parse(nal).ok());
+		let coded_width = parsed.as_ref().map(|sps| sps.coded_width);
+		let coded_height = parsed.as_ref().map(|sps| sps.coded_height);
 
 		Ok(Self {
 			profile: record.avc_profile_indication,

@@ -355,8 +355,10 @@ pub(crate) fn config_from_avcc(avcc_bytes: &[u8]) -> Result<hang::catalog::Video
 	});
 	config.coded_width = avcc.coded_width;
 	config.coded_height = avcc.coded_height;
-	config.interlaced = avcc.sps.first().and_then(|sps| super::sps_interlaced(sps)) == Some(true);
-	if let Some(vui) = avcc.sps.first().and_then(|sps| super::sps_vui(sps)) {
+	// The same SPS the coded size came from: the first that parses.
+	let sps = avcc.sps.iter().find(|nal| Sps::parse(nal).is_ok());
+	config.interlaced = sps.and_then(|sps| super::sps_interlaced(sps)) == Some(true);
+	if let Some(vui) = sps.and_then(|sps| super::sps_vui(sps)) {
 		vui.apply(&mut config);
 	}
 	config.description = Some(Bytes::copy_from_slice(avcc_bytes));

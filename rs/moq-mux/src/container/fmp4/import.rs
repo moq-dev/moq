@@ -931,8 +931,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			inline,
 		}
 		.into();
-		config.coded_width = Some(visual.width as _);
-		config.coded_height = Some(visual.height as _);
+		// The SPS says what the decoder outputs, where a sample entry can disagree, as one declaring
+		// 640x359 for 640x360 pictures does. The entry stands in when no SPS parses.
+		config.coded_width = config.coded_width.or(Some(visual.width.into()));
+		config.coded_height = config.coded_height.or(Some(visual.height.into()));
 		config.description = Some(description);
 		config.container = container;
 		Ok(config)
