@@ -36,37 +36,48 @@ publisher's history handler (`track::Requests`):
 a direct ordered reader handed out group 66 before its time start's lookup answered, then never
 returned the group the lookup found.
 
-Decided by the maintainer on 2026-11-25 ([answer](https://github.com/moq-dev/moq/pull/9639#issuecomment-7177793296)):
-a local Rust reader whose time range resolves through the history handler asks it for the keys
-with no group held, as copies and JS already do (rejected: ask nothing, unanswered means empty).
+Decided 2026-11-25 (maintainer, /quest-run): a local Rust reader whose time range resolves through
+the history handler asks it for the keys with no group held, as copies and JS already do, narrowed
+to ranges whose start a history lookup placed (`Window::found` with `Found::Group` or
+`Found::Dropped`) (rejected: ask nothing, unanswered means empty)
+([answer](https://github.com/moq-dev/moq/pull/9639#issuecomment-7177793296)).
 
-What implementing it found, on top of [moq-dev/moq#9639](https://github.com/moq-dev/moq/pull/9639)'s head:
+Decided 2026-11-25 (maintainer, /quest-run): once a history lookup comes back empty from key 0, no
+group starts at or before the time, so the range starts one past the time, in Rust
+(`Window::found`) and JS (`Window.found`): the time's own key is out of range everywhere, and the
+lookup's own NotFound drop of it is no gap (rejected: include the key everywhere). This changes the
+deliberate `a_time_start_the_groups_cant_place_is_looked_up` and
+`a_time_start_before_the_cache_asks_nothing_below_it`.
 
-- Asking now, rather than after the miss grace, has to be scoped to the spans a lookup resolved
-  (`Window::found` with `Found::Group` or `Found::Dropped`). Asking every local hole below the
-  first group the producer created (`TrackState::unfed` treating them as `never`) makes the
-  history test agree across direct, relayed, and JS (`[10, Err(11..15), 15, Err(16..21), 66]`), but
-  breaks 23 tests of the deliberate grace for local holes, such as
-  `a_hole_below_an_undeclared_start_is_asked_after_a_bounded_grace` and
-  `creating_a_group_past_a_gap_skips_nothing`. The scoped rule threads the lookup-resolved runs
-  from `Window` through `Misses::judge` into `TrackState::unfed`.
-- With asking scoped or not, `a_range_before_every_group_reads_past_it` still disagrees, for the two
-  reasons the decisions below settle: the publisher keeps the time's own key in range after a
-  dropped lookup, while a relay re-asks its upstream from the next time once that key is dropped;
-  and a copy reads an upstream answer of "no group to deliver" as proof the range holds nothing,
-  handing out the later group before the drops for the range land.
+Decided 2026-11-25 (maintainer, /quest-run): a publisher answers a range with a start, never "no
+group to deliver", whenever it dropped keys in it, so a copy waits for those drops rather than
+handing out a later group first (rejected: the copy waits on every key of a range answered empty).
+Built on the lite-07 Previous Delta wire, which changes how a copy learns a range is empty.
 
-Before the front-drop fix lands, `a_range_before_every_group_reads_past_it` must assert what
-these settle, for both readers and through the later group.
+What a broad first attempt found, on top of [moq-dev/moq#9639](https://github.com/moq-dev/moq/pull/9639):
+
+- Making `TrackState::unfed` treat every hole on a local track below the first group the producer
+  created (`arrivals.first()`) as `never`, so `Misses::judge` asks it now rather than after the miss
+  grace, makes a history handler holding groups 10 and 15 read the same through direct, relayed,
+  and JS readers: `[10, Err(11..15), 15, Err(16..21), 66]`. It breaks 23 tests of the deliberate
+  grace for local holes, such as `a_hole_below_an_undeclared_start_is_asked_after_a_bounded_grace`
+  and `creating_a_group_past_a_gap_skips_nothing`, which is why the ask is narrowed: thread the runs
+  of lookup-placed spans from `Window` through `Cursor::probe` and `Misses::judge` into `unfed`.
+- With that ask, a relay subscribing after the publisher already recorded the drops hung: the
+  publisher answered the range "no group to deliver", and the copy placed the time before every
+  group (`TimeStart::containing` gives `Containing::Before`), reading back to key 0 and waiting on
+  keys no upstream accounts for. The publisher-side answer above removes that case.
+- Gaps split by when their drops land, so the publisher reports `Err(10..11)` then `Err(11..21)`
+  where a relay gets one drop over `10..21`. Compare readers with adjacent gaps joined, and take
+  the excluded time key above into account.
+
+Then `a_range_before_every_group_reads_past_it` asserts the same items for both readers through
+the later group, before the front-drop fix lands.
 
 ## Waiting
 
-- Maintainer: After a time start's lookup from key 0 is dropped (no group starts at or before time T), does the range include key T itself? The publisher keeps T in range, by design (`a_time_start_before_the_cache_asks_nothing_below_it`), so the lookup's own NotFound drop of T is a gap there; a relay copy that learned T was dropped re-asks its upstream from time T+1 and leaves T out, so the two readers report different gaps.
-  - Exclude T everywhere (Recommended) - the dropped lookup already proved no group starts at T; the window starts the span at T+1 in Rust and JS, changing 2 deliberate tests.
-  - Include T everywhere - a copy never moves a time start past a key it learned was dropped; keeps the publisher's tests, and its readers report the lookup's drop of T as a gap.
-- Maintainer: A copy reads an upstream's "no group to deliver" answer for a time range as proof the range holds nothing (`an_empty_bounded_range_holds_back_no_later_range`), so it hands out a later group before the drops for that range land, while a reader at the publisher, whose handler left those keys unanswered, reports them as a NotFound gap. Which should change?
-  - Publisher answers with a start (Recommended) - a range whose keys the publisher dropped is answered with its start rather than "no group to deliver", so the copy waits for those drops, as for any range with keys in it.
-  - Copy waits for drops - the copy keeps reading "no group to deliver" as empty but holds a later group until each key of the range is accounted for; costs a wait on every truly empty range.
+- moq-dev/moq: [moq-dev/moq#9626](https://github.com/moq-dev/moq/pull/9626) (lite-07 Previous Delta) lands, since the publisher's answer for a range with dropped keys is built on its wire; check that the PR is merged.
+
 ## Related
 
-- [Previous Delta](/quest/m2/lite07-subscribe/previous-delta.md) - in [moq-dev/moq#9626](https://github.com/moq-dev/moq/pull/9626), changes how a copy learns a range is empty; this gap is the publisher's own NotFound, so it does not settle it.
+- [Previous Delta](/quest/m2/lite07-subscribe/previous-delta.md) - the wire this work builds on, in [moq-dev/moq#9626](https://github.com/moq-dev/moq/pull/9626).
