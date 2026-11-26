@@ -23,7 +23,7 @@ install. It needs an ARMv7 CPU, so not a Pi 1, Zero, or Zero W.
 
 | Verb | Endpoint | |
 | --- | --- | --- |
-| `import` | `ts`, `fmp4`, `flv`, `h264` | Read a container from stdin (usually FFmpeg). |
+| `import` | `ts`, `fmp4`, `mp4`, `flv`, `h264` | Read a container from stdin (usually FFmpeg). |
 | `import` | `capture` | Capture a camera, display, window, or app plus a microphone, and encode natively. |
 | `import` | `hls <url>` | Follow a remote live HLS playlist. |
 | `import` | `rtmp`, `srt`, `webrtc` | Accept pushes (`--listen`) or pull from a remote (`--connect`). |
@@ -92,7 +92,7 @@ moq --connect https://relay.example.com/rooms/1 --connect-token "$TOKEN" --broad
 
 ## Import
 
-The `ts`, `fmp4`, and `flv` imports publish the input's own timestamps, mapped
+The `ts`, `fmp4`, `mp4`, and `flv` imports publish the input's own timestamps, mapped
 to the wall time the first frame arrived. A timeline that rewinds, such as a
 restarted encoder or a looping file wrapping to the top, ends the import with
 an error; run it again to publish anew. `import ts` instead republishes when an
@@ -104,6 +104,20 @@ fMP4 import splits each fragment into one frame per sample, so players need no
 MP4 parser. `import fmp4 --cmaf` publishes each fragment whole as
 [`cmaf`](/concept/hang#container) instead, keeping the source's exact sample
 timing.
+
+`import mp4` reads a regular MP4 the same way, applying each track's edit list,
+and reads a fragmented one too. A file with its `moov` first
+(`-movflags +faststart`) publishes as it streams in. One with its `moov` last,
+as most recorders write it, publishes nothing until the `moov` arrives. The
+import holds up to 64 MiB of media until then, and refuses a file with more.
+Move the `moov` to the front first, without re-encoding:
+
+```bash
+ffmpeg -i recording.mp4 -c copy -movflags +faststart faststart.mp4
+```
+
+Like the other stdin imports it publishes as fast as stdin delivers, so a file
+published at real speed goes through `ffmpeg -re` and `import ts` as above.
 
 `import rtsp` pulls an IP camera's H.264 or H.265 video and AAC audio without
 re-encoding. RTP rides the RTSP connection, so run it on the camera's network

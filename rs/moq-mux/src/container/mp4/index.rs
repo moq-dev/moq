@@ -1,0 +1,1604 @@
+//! The sample index of an MP4 file: where each sample lies, and when it decodes and presents.
+
+use std::io::{Read, Seek, SeekFrom};
+use std::ops::Range;
+
+use bytes::Bytes;
+use hang::catalog::{AudioConfig, Container, VideoConfig};
+use mp4_atom::{Atom, Decode, DecodeMaybe, Encode};
+
+use crate::Result;
+use crate::container::fmp4::{self, Error, config, edit::Edit, metadata, sample};
+
+/// The sample index of an MP4 file, plain or fragmented, read through a seekable reader.
+///
+/// [`new`](Self::new) reads the boxes that describe the media and skips the media itself, so a
+/// `moov` after the `mdat` costs a seek, not a read of the file. Each [`Track`] lists its samples
+/// with where they lie and when they decode and present, so a caller can seek, loop, and pace
+/// the file, fetching one sample at a time with [`read`](Self::read).
+///
+/// Every sample is checked to lie within one `mdat`, and the tracks may declare at most one sample
+/// per byte of the file, so the index grows linearly with the file whatever sizes it declares. The
+/// `moov` may hold up to 128 MiB, about a day of 30 fps video with 48 kHz AAC.
+///
+/// Audio and video tracks in a codec [`Import`](crate::container::fmp4::Import) reads are listed.
+/// Other tracks are left out and listed by [`skipped`](Self::skipped): timecode, chapters,
+/// subtitles, codecs moq-mux doesn't carry, and sample entries the catalog can't describe, such as
+/// the several sample descriptions of a file joined from several encodes. A track whose media lies
+/// in another file, or without a timescale, is left out too.
+pub struct Reader<R> {
+	reader: R,
+	/// The file's length in bytes.
+	len: u64,
+	tracks: Vec<Track>,
+	skipped: Vec<Skipped>,
+}
+
+/// One audio or video track of an MP4 file.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct Track {
+	/// The track's `track_id`.
+	pub id: u32,
+	/// The track's catalog entry, as the fMP4 import publishes it, with a
+	/// [`Legacy`](Container::Legacy) container.
+	pub config: Config,
+	/// The ticks a second the samples' times count.
+	pub timescale: moq_net::Timescale,
+	/// The samples the track's edit list presents, in decode order.
+	pub samples: Vec<Sample>,
+}
+
+/// A track's catalog entry.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+#[expect(
+	clippy::large_enum_variant,
+	reason = "one per track of an index that holds a sample list per track, which dwarfs it"
+)]
+pub enum Config {
+	/// A video track.
+	Video(VideoConfig),
+	/// An audio track.
+	Audio(AudioConfig),
+}
+
+/// One sample: where it lies in the file, and when it decodes and presents.
+///
+/// Times count the track's [`timescale`](Track::timescale), after its edit list: the edit's
+/// start presents at zero, or later by the edit's leading empty time. The first sample is a
+/// keyframe at or after the edit's start, and the samples stop before the first one, in decode
+/// order, presenting at or after the edit's end. A sample of a leading picture that presents
+/// before the edit's start is left out. An Opus track keeps the samples its OpusHead pre-skip
+/// covers, which a decoder given the catalog entry's description trims, as the fMP4 import
+/// publishes them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Sample {
+	/// Where the sample starts in the file.
+	pub offset: u64,
+	/// The sample's size in bytes.
+	pub size: u32,
+	/// When the sample presents.
+	pub pts: u64,
+	/// When the sample decodes, which for a stream with B-frames is earlier than any
+	/// presentation, so it can be negative.
+	pub dts: i64,
+	/// How long the sample lasts, or zero when the file doesn't say.
+	pub duration: u32,
+	/// Whether a decoder can start at this sample: a sync sample, which every audio sample is.
+	pub keyframe: bool,
+}
+
+impl Sample {
+	/// The presentation time as a timestamp counting `timescale`, the track's.
+	pub fn timestamp(
+		&self,
+		timescale: moq_net::Timescale,
+	) -> std::result::Result<moq_net::Timestamp, moq_net::TimeOverflow> {
+		moq_net::Timestamp::new(self.pts, timescale)
+	}
+}
+
+impl<R: Read + Seek> Reader<R> {
+	/// Read the sample index of the MP4 file `reader` holds.
+	///
+	/// Fails for a file without a `moov`, one whose metadata doesn't parse, or one with a sample
+	/// outside its `mdat` boxes or a `moov` or `moof` running past its end. A few bytes after the
+	/// last box, too few for a box header, are skipped. Another box that runs past the end, such as
+	/// an `mdat` cut short, ends at the end of the file, so its samples before the end index and
+	/// one past the end fails the index.
+	pub fn new(mut reader: R) -> Result<Self> {
+		let len = reader.seek(SeekFrom::End(0))?;
+		let mut moov = None;
+		let mut fragments = Vec::new();
+		let mut layout = Layout { len, mdat: Vec::new() };
+		let mut position = 0;
+		while let Some(atom) = TopLevel::read(&mut reader, position, len)? {
+			match atom.kind {
+				mp4_atom::Moov::KIND => {
+					if moov.is_some() {
+						return Err(Error::DuplicateMoov.into());
+					}
+					let size = atom.end - atom.start;
+					if size > fmp4::MAX_MOOV_BYTES {
+						return Err(Error::MoovTooLarge(size).into());
+					}
+					moov = Some(decode_moov(&read_range(&mut reader, atom.start..atom.end)?)?);
+				}
+				// Decoded once the moov says which tracks they belong to, so only one is held.
+				mp4_atom::Moof::KIND => fragments.push(atom.start..atom.end),
+				// An empty `mdat` holds no sample, so only one with a payload is kept.
+				mp4_atom::Mdat::KIND if atom.payload < atom.end => layout.mdat.push(atom.payload..atom.end),
+				_ => {}
+			}
+			position = atom.end;
+		}
+		let moov = moov.ok_or(Error::NoMoov)?;
+
+		let mut budget = Budget(len);
+		let (mut declared, skipped) = declare(&moov, &mut budget, Some(&layout))?;
+		let trex = mp4_atom::Moov {
+			mvex: moov.mvex.clone(),
+			..Default::default()
+		};
+		for range in fragments {
+			let size = range.end - range.start;
+			if size > fmp4::MAX_METADATA_BYTES as u64 {
+				return Err(Error::MetadataTooLarge {
+					kind: mp4_atom::Moof::KIND.to_string(),
+					size: usize::try_from(size).unwrap_or(usize::MAX),
+				}
+				.into());
+			}
+			let moof = decode_moof(&read_range(&mut reader, range.clone())?)?;
+			fragment(&moof, range.start, &trex, Some(&layout), &mut budget, &mut declared)?;
+		}
+
+		let tracks = declared.into_iter().map(Declared::present).collect::<Result<_>>()?;
+		Ok(Self {
+			reader,
+			len,
+			tracks,
+			skipped,
+		})
+	}
+
+	/// Read the payload of `sample`, one of this file's.
+	pub fn read(&mut self, sample: &Sample) -> Result<Bytes> {
+		let end = sample.offset.checked_add(u64::from(sample.size));
+		if end.is_none_or(|end| end > self.len) {
+			return Err(Error::SampleOutsideMedia {
+				offset: sample.offset,
+				size: sample.size,
+			}
+			.into());
+		}
+		let mut data = vec![0; sample.size as usize];
+		self.reader.seek(SeekFrom::Start(sample.offset))?;
+		self.reader.read_exact(&mut data)?;
+		Ok(data.into())
+	}
+}
+
+impl<R> Reader<R> {
+	/// The file's audio and video tracks, in the order its `moov` lists them.
+	pub fn tracks(&self) -> &[Track] {
+		&self.tracks
+	}
+
+	/// The tracks the file declares that [`tracks`](Self::tracks) leaves out, each with why.
+	pub fn skipped(&self) -> &[Skipped] {
+		&self.skipped
+	}
+
+	/// Take back the reader.
+	pub fn into_inner(self) -> R {
+		self.reader
+	}
+}
+
+/// One top-level box in a file.
+#[derive(Debug)]
+struct TopLevel {
+	kind: mp4_atom::FourCC,
+	/// Where the box starts.
+	start: u64,
+	/// Where the box's payload starts, after its header.
+	payload: u64,
+	/// Where the box ends, or the end of the file for one cut short.
+	end: u64,
+}
+
+impl TopLevel {
+	/// The box at `start` of a file of `len` bytes, or `None` after the last box.
+	///
+	/// The boxes end at the end of the file, or at fewer bytes than a header after the last box,
+	/// which some files carry as a stray line break. A box other than a `moov` or `moof` that runs
+	/// past the end, such as an `mdat` cut short, ends at the end of the file, and its samples
+	/// past the end fail on their own.
+	fn read<R: Read + Seek>(reader: &mut R, start: u64, len: u64) -> Result<Option<Self>> {
+		let available = len.saturating_sub(start);
+		if available < 8 {
+			if available > 0 {
+				tracing::debug!(bytes = available, "skipping the bytes after the last box");
+			}
+			return Ok(None);
+		}
+		let mut header = [0u8; 16];
+		reader.seek(SeekFrom::Start(start))?;
+		reader.read_exact(&mut header[..8])?;
+		let kind = mp4_atom::FourCC::new(&[header[4], header[5], header[6], header[7]]);
+		let metadata = matches!(kind, mp4_atom::Moov::KIND | mp4_atom::Moof::KIND);
+		let (size, payload) = match u32::from_be_bytes(header[..4].try_into().expect("four bytes")) {
+			0 => (None, start + 8),
+			1 if available < 16 && metadata => return Err(Error::BoxPastEnd(kind.to_string()).into()),
+			1 if available < 16 => {
+				tracing::debug!(%kind, start, len, "a box header runs past the end of the file, ending the boxes");
+				return Ok(None);
+			}
+			1 => {
+				reader.read_exact(&mut header[8..])?;
+				match u64::from_be_bytes(header[8..].try_into().expect("eight bytes")) {
+					size if size < 16 => return Err(Error::mp4(mp4_atom::Error::InvalidSize).into()),
+					size => (Some(size), start + 16),
+				}
+			}
+			size if size < 8 => return Err(Error::mp4(mp4_atom::Error::InvalidSize).into()),
+			size => (Some(u64::from(size)), start + 8),
+		};
+		let end = match size {
+			None => len,
+			Some(size) => match start.checked_add(size).filter(|&end| end <= len) {
+				Some(end) => end,
+				None if metadata => return Err(Error::BoxPastEnd(kind.to_string()).into()),
+				None => {
+					tracing::debug!(%kind, start, size, len, "a box runs past the end of the file, ending the boxes");
+					len
+				}
+			},
+		};
+		Ok(Some(Self {
+			kind,
+			start,
+			payload,
+			end,
+		}))
+	}
+}
+
+/// The bytes of `range` in the file, whose size the caller bounded.
+fn read_range<R: Read + Seek>(reader: &mut R, range: Range<u64>) -> Result<Vec<u8>> {
+	let mut data = vec![0; (range.end - range.start) as usize];
+	reader.seek(SeekFrom::Start(range.start))?;
+	reader.read_exact(&mut data)?;
+	Ok(data)
+}
+
+/// Where a file holds its media: its length, and the payload of each `mdat` with one.
+pub(super) struct Layout {
+	len: u64,
+	/// The `mdat` payloads in file order, a final one cut short ending at `len`.
+	mdat: Vec<Range<u64>>,
+}
+
+impl Layout {
+	/// Where a sample of `size` bytes at `offset` ends, checked to lie within one `mdat` payload.
+	/// An empty sample may lie anywhere in the file.
+	fn check(&self, offset: u64, size: u32) -> Result<u64> {
+		let end = offset.checked_add(u64::from(size));
+		let inside = end.is_some_and(|end| match size {
+			0 => end <= self.len,
+			_ => {
+				let index = self.mdat.partition_point(|mdat| mdat.end <= offset);
+				self.mdat
+					.get(index)
+					.is_some_and(|mdat| mdat.start <= offset && end <= mdat.end)
+			}
+		});
+		match end {
+			Some(end) if inside => Ok(end),
+			_ => Err(Error::SampleOutsideMedia { offset, size }.into()),
+		}
+	}
+}
+
+/// Decode a `moov` box, header included, whose sample tables may be larger than the metadata a
+/// stream sends.
+pub(super) fn decode_moov(data: &[u8]) -> Result<mp4_atom::Moov> {
+	let data = without_metadata(data)?;
+	metadata::check_unbounded(&data)?;
+	mp4_atom::Moov::decode(&mut data.as_slice()).map_err(|err| Error::mp4(err).into())
+}
+
+/// Decode a `moof` box, header included.
+pub(super) fn decode_moof(data: &[u8]) -> Result<mp4_atom::Moof> {
+	let data = without_metadata(data)?;
+	metadata::check(&data)?;
+	mp4_atom::Moof::decode(&mut data.as_slice()).map_err(|err| Error::mp4(err).into())
+}
+
+/// The box in `data`, header included, without the `udta` and `meta` boxes among its children
+/// and those of each `trak` and `traf` in it.
+///
+/// No sample's place or time depends on them, and mp4-atom 0.17.1 refuses a repeated `ilst`
+/// item, a second `chpl` or `meta` in a `udta`, and a second `udta` or `meta` in a `moov`,
+/// `trak`, or `traf`, which players accept and some files carry.
+fn without_metadata(data: &[u8]) -> Result<Vec<u8>> {
+	let mut input = data;
+	let header = mp4_atom::Header::decode(&mut input).map_err(Error::mp4)?;
+	let body = children(input, true)?;
+	let mut out = Vec::with_capacity(body.len() + 16);
+	mp4_atom::Header {
+		kind: header.kind,
+		size: Some(body.len()),
+	}
+	.encode(&mut out)
+	.map_err(Error::mp4)?;
+	out.extend_from_slice(&body);
+	Ok(out)
+}
+
+/// The child boxes in `body` without their `udta` and `meta` boxes, descending into each `trak`
+/// and `traf` when `descend` is set.
+///
+/// A `trak` or `traf` sits directly in a `moov` or `moof`, so only that level descends, and the
+/// recursion is one level deep however the boxes nest.
+fn children(mut body: &[u8], descend: bool) -> Result<Vec<u8>> {
+	let mut kept = Vec::with_capacity(body.len());
+	while let Some(header) = mp4_atom::Header::decode_maybe(&mut body).map_err(Error::mp4)? {
+		let size = header.size.unwrap_or(body.len());
+		let (child, rest) = body
+			.split_at_checked(size)
+			.ok_or(Error::mp4(mp4_atom::Error::OutOfBounds))?;
+		body = rest;
+		let filtered;
+		let child = match header.kind {
+			mp4_atom::Udta::KIND | mp4_atom::Meta::KIND => continue,
+			mp4_atom::Trak::KIND | mp4_atom::Traf::KIND if descend => {
+				filtered = children(child, false)?;
+				filtered.as_slice()
+			}
+			_ => child,
+		};
+		mp4_atom::Header {
+			kind: header.kind,
+			size: Some(child.len()),
+		}
+		.encode(&mut kept)
+		.map_err(Error::mp4)?;
+		kept.extend_from_slice(child);
+	}
+	// Keep what is too short for a box, such as the padding mp4-atom tolerates.
+	kept.extend_from_slice(body);
+	Ok(kept)
+}
+
+/// The samples a file may still declare, one per byte of the file, so a table of billions of
+/// empty samples is refused before it is walked.
+pub(super) struct Budget(pub u64);
+
+impl Budget {
+	fn take(&mut self, count: u64) -> Result<()> {
+		self.0 = self.0.checked_sub(count).ok_or(Error::TooManyFileSamples(count))?;
+		Ok(())
+	}
+}
+
+/// A sample as its tables list it, before the edit list.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Raw {
+	pub offset: u64,
+	pub size: u32,
+	pub dts: i64,
+	pub pts: i64,
+	pub duration: u32,
+	pub keyframe: bool,
+}
+
+/// One audio or video track a `moov` declares, with the samples its tables list.
+pub(super) struct Declared {
+	pub id: u32,
+	pub config: Config,
+	pub timescale: moq_net::Timescale,
+	pub edit: Edit,
+	defaults: sample::Defaults,
+	/// The sample description its `trex` names for fragments whose `tfhd` names none.
+	description: u32,
+	/// Whether the track is audio, whose samples all decode alone whatever their flags say.
+	audio: bool,
+	/// The samples listed and not yet taken, in decode order.
+	pub samples: Vec<Raw>,
+	/// Where the last sample listed ends on the decode timeline, which a fragment without a
+	/// `tfdt` continues from.
+	next_dts: i64,
+}
+
+/// A track a file declares that a [`Reader`] or [`Import`](super::Import) skips.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct Skipped {
+	/// The track's `track_id`.
+	pub id: u32,
+	/// The track's handler, such as `vide`, `soun`, `text`, or `tmcd`.
+	pub handler: [u8; 4],
+	/// The four-character code of the track's first sample entry, such as `mp4v` or `ac-3`, when it
+	/// has one.
+	pub codec: Option<[u8; 4]>,
+	/// Why the track is skipped.
+	pub error: crate::Error,
+}
+
+/// The four-character code `codec` encodes with.
+fn entry_kind(codec: &mp4_atom::Codec) -> Option<[u8; 4]> {
+	if let mp4_atom::Codec::Unknown(kind, _) = codec {
+		return Some((*kind).into());
+	}
+	let mut buf = Vec::new();
+	codec.encode(&mut buf).ok()?;
+	buf.get(4..8)?.try_into().ok()
+}
+
+/// The catalog entry of `trak`, a video or an audio track whose media lies in this file.
+fn describe(trak: &mp4_atom::Trak, video: bool) -> Result<Config> {
+	let entry = config::sample_entry(trak)?;
+	// A data reference other than an empty `url ` points into another file, whose offsets would
+	// read this one's bytes. A reference past the list is taken as this file.
+	let reference = match video {
+		true => entry.visual().map(|visual| visual.data_reference_index),
+		false => entry.audio().map(|audio| audio.data_reference_index),
+	};
+	let external = reference
+		.and_then(|index| usize::from(index).checked_sub(1))
+		.and_then(|index| trak.mdia.minf.dinf.dref.entries.get(index))
+		.is_some_and(|entry| !matches!(entry, mp4_atom::DrefEntry::Url(url) if url.location.is_empty()));
+	if external {
+		return Err(Error::ExternalData.into());
+	}
+	if !config::supported(entry) {
+		return Err(match entry {
+			mp4_atom::Codec::Unknown(kind, _) => Error::UnknownCodec(kind.to_string()),
+			entry => Error::unsupported_codec(entry),
+		}
+		.into());
+	}
+	Ok(match video {
+		true => Config::Video(config::video(entry, Container::Legacy)?),
+		false => Config::Audio(config::audio(entry, Container::Legacy)?),
+	})
+}
+
+/// The audio and video tracks `moov` declares, with their samples checked against the file's
+/// `layout` when it is known, and the tracks it skips.
+///
+/// A track that is neither audio nor video, in a codec moq-mux doesn't carry, whose sample entry
+/// the catalog can't describe, whose media lies in another file, or without a timescale is
+/// skipped, so one track can't refuse the file. A sample table that doesn't fit the file still
+/// fails it.
+pub(super) fn declare(
+	moov: &mp4_atom::Moov,
+	budget: &mut Budget,
+	layout: Option<&Layout>,
+) -> Result<(Vec<Declared>, Vec<Skipped>)> {
+	let mut tracks = Vec::new();
+	let mut skipped = Vec::new();
+	for trak in &moov.trak {
+		let id = trak.tkhd.track_id;
+		let handler = trak.mdia.hdlr.handler;
+		let video = match handler.as_ref() {
+			b"vide" => Ok(true),
+			b"soun" => Ok(false),
+			_ => Err(crate::Error::from(Error::UnknownTrackHandler(handler.into()))),
+		};
+		// A track without a timescale or with an edit list past any time is skipped as well.
+		let described = video.and_then(|video| {
+			let timescale = moq_net::Timescale::new(u64::from(trak.mdia.mdhd.timescale))?;
+			let edit = Edit::lenient(trak, moov.mvhd.timescale)?;
+			Ok((describe(trak, video)?, timescale, edit))
+		});
+		let (config, timescale, edit) = match described {
+			Ok(described) => described,
+			Err(error) => {
+				tracing::warn!(track = id, %handler, %error, "skipping a track");
+				skipped.push(Skipped {
+					id,
+					handler: handler.into(),
+					codec: trak.mdia.minf.stbl.stsd.codecs.first().and_then(entry_kind),
+					error,
+				});
+				continue;
+			}
+		};
+		let audio = matches!(config, Config::Audio(_));
+		let (samples, next_dts) = sample_table(&trak.mdia.minf.stbl, budget, layout, audio)?;
+		tracks.push(Declared {
+			id,
+			config,
+			timescale,
+			edit,
+			defaults: sample::Defaults::from_moov(moov, id),
+			description: moov
+				.mvex
+				.iter()
+				.flat_map(|mvex| &mvex.trex)
+				.find(|trex| trex.track_id == id)
+				.map_or(1, |trex| trex.default_sample_description_index),
+			audio,
+			samples,
+			next_dts,
+		});
+	}
+	Ok((tracks, skipped))
+}
+
+/// Append the samples of `moof`, which starts at file offset `start`, to the `tracks` it lists,
+/// checked against the file's `layout` when it is known. `trex` holds the `moov`'s `mvex`, whose
+/// defaults a track fragment for a skipped track takes.
+pub(super) fn fragment<'a>(
+	moof: &mp4_atom::Moof,
+	start: u64,
+	trex: &mp4_atom::Moov,
+	layout: Option<&Layout>,
+	budget: &mut Budget,
+	tracks: impl IntoIterator<Item = &'a mut Declared>,
+) -> Result<()> {
+	let mut tracks: Vec<&mut Declared> = tracks.into_iter().collect();
+	// Without a base offset, a track fragment's data follows the previous one's.
+	let mut data_end = start;
+	for traf in &moof.traf {
+		let base = match traf.tfhd.base_data_offset {
+			Some(base) => base,
+			None if traf.tfhd.default_base_is_moof => start,
+			None => data_end,
+		};
+		data_end = match tracks.iter_mut().find(|track| track.id == traf.tfhd.track_id) {
+			Some(track) => track.fragment(traf, base, layout, budget)?,
+			// A skipped track's data still moves the next fragment's base.
+			None => {
+				let defaults = sample::Defaults::from_moov(trex, traf.tfhd.track_id);
+				runs(traf, base, defaults, |_, _, _| Ok(()))?
+			}
+		};
+	}
+	Ok(())
+}
+
+/// Walk the samples of `traf`, whose data offsets count from `base`, with each one's offset,
+/// resolved values, and composition offset, and return where its data ends.
+fn runs(
+	traf: &mp4_atom::Traf,
+	base: u64,
+	defaults: sample::Defaults,
+	mut each: impl FnMut(u64, sample::Sample, i64) -> Result<()>,
+) -> Result<u64> {
+	let mut offset = base;
+	for run in &traf.trun {
+		if let Some(data_offset) = run.data_offset {
+			offset = base
+				.checked_add_signed(i64::from(data_offset))
+				.ok_or(Error::InvalidDataOffset)?;
+		}
+		for entry in run.samples.iter() {
+			let sample = defaults.resolve(&traf.tfhd, &entry);
+			each(offset, sample, entry.cts.unwrap_or(0))?;
+			offset = offset
+				.checked_add(u64::from(sample.size))
+				.ok_or(Error::InvalidDataOffset)?;
+		}
+	}
+	Ok(offset)
+}
+
+/// Where a sample of `size` bytes at `offset` ends, checked against the file's `layout` when it
+/// is known.
+fn sample_end(offset: u64, size: u32, layout: Option<&Layout>) -> Result<u64> {
+	match layout {
+		Some(layout) => layout.check(offset, size),
+		None => offset
+			.checked_add(u64::from(size))
+			.ok_or_else(|| Error::SampleOutsideMedia { offset, size }.into()),
+	}
+}
+
+/// How many samples each of `chunks` chunks holds, by the sample-to-chunk `entries`.
+fn per_chunk(entries: &[mp4_atom::StscEntry], chunks: usize) -> impl Iterator<Item = u32> + '_ {
+	let mut entry = 0;
+	(0..chunks).map(move |chunk| {
+		// Each entry runs until the next one's first chunk, counting from one.
+		let number = chunk as u64 + 1;
+		while entries
+			.get(entry + 1)
+			.is_some_and(|next| u64::from(next.first_chunk) <= number)
+		{
+			entry += 1;
+		}
+		entries.get(entry).map_or(0, |entry| entry.samples_per_chunk)
+	})
+}
+
+/// The samples a regular MP4 track's sample tables list, and where the last one ends on the decode
+/// timeline. Every sample of an `audio` track is a keyframe.
+///
+/// The chunks must hold exactly the samples the sizes list, and every chunk the track's one sample
+/// description, so the index is reserved only for samples the tables agree on.
+fn sample_table(
+	stbl: &mp4_atom::Stbl,
+	budget: &mut Budget,
+	layout: Option<&Layout>,
+	audio: bool,
+) -> Result<(Vec<Raw>, i64)> {
+	let sizes = &stbl.stsz.samples;
+	let count = match sizes {
+		mp4_atom::StszSamples::Identical { count, .. } => u64::from(*count),
+		mp4_atom::StszSamples::Different { sizes } => sizes.len() as u64,
+	};
+	budget.take(count)?;
+	if count == 0 {
+		return Ok((Vec::new(), 0));
+	}
+	let size = |index: usize| match sizes {
+		mp4_atom::StszSamples::Identical { size, .. } => *size,
+		mp4_atom::StszSamples::Different { sizes } => sizes[index],
+	};
+	let (chunks, chunk): (usize, Box<dyn Fn(usize) -> u64>) = match (&stbl.stco, &stbl.co64) {
+		(Some(stco), _) => (stco.entries.len(), Box::new(|index| u64::from(stco.entries[index]))),
+		(None, Some(co64)) => (co64.entries.len(), Box::new(|index| co64.entries[index])),
+		(None, None) => return Err(Error::InvalidSampleTable("samples without chunk offsets").into()),
+	};
+	let entries = &stbl.stsc.entries;
+	if entries.iter().any(|entry| entry.sample_description_index != 1) {
+		return Err(Error::InvalidSampleTable("a chunk names a sample description other than the first").into());
+	}
+	let mapped: u64 = per_chunk(entries, chunks).map(u64::from).sum();
+	if mapped != count {
+		return Err(Error::InvalidSampleTable(match mapped < count {
+			true => "the chunks hold fewer samples than the sizes list",
+			false => "the chunks hold more samples than the sizes list",
+		})
+		.into());
+	}
+
+	let mut durations = stbl
+		.stts
+		.entries
+		.iter()
+		.flat_map(|entry| std::iter::repeat_n(entry.sample_delta, entry.sample_count as usize));
+	// A version 0 `ctts` holds unsigned offsets and a version 1 one signed, which mp4-atom reads
+	// alike.
+	let mut offsets = stbl
+		.ctts
+		.iter()
+		.flat_map(|ctts| &ctts.entries)
+		.flat_map(|entry| std::iter::repeat_n(entry.sample_offset, entry.sample_count as usize));
+	let sync = stbl.stss.as_ref().map(|stss| &stss.entries);
+	let mut samples = Vec::new();
+	let count = usize::try_from(count).map_err(|_| Error::TooManyFileSamples(count))?;
+	samples
+		.try_reserve_exact(count)
+		.map_err(|_| Error::TooManyFileSamples(count as u64))?;
+	let mut dts = 0i64;
+	for (index, per_chunk) in per_chunk(entries, chunks).enumerate() {
+		let mut offset = chunk(index);
+		for _ in 0..per_chunk {
+			let index = samples.len();
+			let size = size(index);
+			let duration = durations.next().unwrap_or(0);
+			let pts = dts.checked_add(offsets.next().unwrap_or(0)).ok_or(Error::PtsOverflow)?;
+			samples.push(Raw {
+				offset,
+				size,
+				dts,
+				pts,
+				duration,
+				// Without an `stss`, every sample is a sync sample.
+				keyframe: audio || sync.is_none_or(|sync| sync.binary_search(&(index as u32 + 1)).is_ok()),
+			});
+			offset = sample_end(offset, size, layout)?;
+			dts = dts.checked_add(i64::from(duration)).ok_or(Error::PtsOverflow)?;
+		}
+	}
+	Ok((samples, dts))
+}
+
+impl Declared {
+	/// Append the samples of one track fragment whose data offsets count from `base`, and return
+	/// where its data ends. A fragment without a `tfdt` continues from the track's last sample.
+	///
+	/// The fragment must name the track's one sample description, in its `tfhd` or its `trex`.
+	fn fragment(
+		&mut self,
+		traf: &mp4_atom::Traf,
+		base: u64,
+		layout: Option<&Layout>,
+		budget: &mut Budget,
+	) -> Result<u64> {
+		if traf.tfhd.sample_description_index.unwrap_or(self.description) != 1 {
+			return Err(Error::InvalidSampleTable("a fragment names a sample description other than the first").into());
+		}
+		budget.take(sample::count(traf))?;
+		let mut dts = match &traf.tfdt {
+			Some(tfdt) => i64::try_from(tfdt.base_media_decode_time).map_err(|_| Error::PtsOverflow)?,
+			None => self.next_dts,
+		};
+		let end = runs(traf, base, self.defaults, |offset, sample, cts| {
+			let duration = sample.duration.unwrap_or(0);
+			self.samples.push(Raw {
+				offset,
+				size: sample.size,
+				dts,
+				pts: dts.checked_add(cts).ok_or(Error::PtsOverflow)?,
+				duration,
+				keyframe: self.audio || sample.is_sync(),
+			});
+			sample_end(offset, sample.size, layout)?;
+			dts = dts.checked_add(i64::from(duration)).ok_or(Error::PtsOverflow)?;
+			Ok(())
+		})?;
+		self.next_dts = dts;
+		Ok(end)
+	}
+
+	/// The track with its edit list applied to its samples.
+	fn present(self) -> Result<Track> {
+		let mut presenter = Presenter::new(self.edit);
+		let mut samples = Vec::with_capacity(self.samples.len());
+		for raw in self.samples {
+			match presenter.present(raw)? {
+				Presented::Sample(sample) => samples.push(sample),
+				Presented::Skipped => {}
+				Presented::Ended => break,
+			}
+		}
+		Ok(Track {
+			id: self.id,
+			config: self.config,
+			timescale: self.timescale,
+			samples,
+		})
+	}
+}
+
+/// Applies a track's edit list to its samples in decode order.
+pub(super) struct Presenter {
+	edit: Edit,
+	/// Whether a keyframe at or after the edit's start has opened the presentation.
+	started: bool,
+	/// Whether a sample at or after the edit's end has ended it.
+	ended: bool,
+}
+
+/// What [`Presenter::present`] made of a sample.
+pub(super) enum Presented {
+	/// The sample presents.
+	Sample(Sample),
+	/// The sample precedes the edit's start, or the first keyframe at or after it.
+	Skipped,
+	/// The sample presents at or after the edit's end, which ends the track.
+	Ended,
+}
+
+impl Presenter {
+	pub fn new(edit: Edit) -> Self {
+		Self {
+			edit,
+			started: false,
+			ended: false,
+		}
+	}
+
+	/// Place `raw`, the next sample in decode order, on the presentation timeline.
+	pub fn present(&mut self, raw: Raw) -> Result<Presented> {
+		self.ended |= self
+			.edit
+			.end()
+			.is_some_and(|end| i128::from(raw.pts) >= i128::from(end));
+		if self.ended {
+			return Ok(Presented::Ended);
+		}
+		// A version 1 `ctts` can present a sample before zero, which precedes any edit.
+		let presented = match u64::try_from(raw.pts) {
+			Ok(pts) => self.edit.present(pts)?,
+			Err(_) => None,
+		};
+		let Some(pts) = presented else {
+			return Ok(Presented::Skipped);
+		};
+		// A decoder starts at a keyframe, so a sample before the first one has nothing to decode
+		// against.
+		self.started |= raw.keyframe;
+		if !self.started {
+			return Ok(Presented::Skipped);
+		}
+		Ok(Presented::Sample(Sample {
+			offset: raw.offset,
+			size: raw.size,
+			pts,
+			dts: self.edit.decode(raw.dts)?,
+			duration: raw.duration,
+			keyframe: raw.keyframe,
+		}))
+	}
+}
+
+#[cfg(test)]
+pub(super) mod tests {
+	//! Index tests on files built in memory, each a `moov` and an `mdat` or `moof` boxes, and on
+	//! the encodes in `test_data`.
+	//!
+	//! - `faststart.mp4`: 64x48 H.264 Baseline at 10 fps with a keyframe every 5 frames, and 16 kHz
+	//!   mono AAC, one second each, `moov` first: `ffmpeg -f lavfi -i
+	//!   testsrc2=size=64x48:rate=10:duration=1 -f lavfi -i sine=frequency=440:sample_rate=16000:duration=1
+	//!   -c:v libx264 -profile:v baseline -crf 40 -g 5 -pix_fmt yuv420p -c:a aac -b:a 16k -ac 1
+	//!   -fflags +bitexact -flags:v +bitexact -flags:a +bitexact -movflags +faststart faststart.mp4`.
+	//!   The audio's edit list trims the encoder's priming packet.
+	//! - `bframes.mp4`: the same video in High profile with two B-frames (`-profile:v high -bf 2
+	//!   -g 10`), no audio, and the `moov` last. Its edit list starts the presentation two frames
+	//!   into the decode timeline.
+
+	use std::io::Cursor;
+
+	use mp4_atom::{Decode, Encode};
+
+	use super::*;
+
+	/// The size of every test sample.
+	pub(crate) const SIZE: u32 = 10;
+
+	/// A box of `kind` around `body`.
+	pub(crate) fn mp4_box(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+		let mut data = (8 + body.len() as u32).to_be_bytes().to_vec();
+		data.extend_from_slice(kind);
+		data.extend_from_slice(body);
+		data
+	}
+
+	/// An `mdat` of `samples` test samples.
+	pub(crate) fn mdat(samples: u32) -> Vec<u8> {
+		mp4_box(b"mdat", &vec![0; (samples * SIZE) as usize])
+	}
+
+	/// Sample tables of `count` samples of 100 ticks in one chunk, which an `mdat` at the start of
+	/// the file holds.
+	pub(crate) fn stbl(count: u32) -> mp4_atom::Stbl {
+		mp4_atom::Stbl {
+			stsd: mp4_atom::Stsd {
+				codecs: vec![
+					mp4_atom::Opus {
+						audio: mp4_atom::Audio {
+							data_reference_index: 1,
+							channel_count: 2,
+							sample_size: 16,
+							sample_rate: mp4_atom::FixedPoint::from(48_000),
+						},
+						dops: mp4_atom::Dops {
+							output_channel_count: 2,
+							pre_skip: 0,
+							input_sample_rate: 48_000,
+							output_gain: 0,
+							channel_mapping: None,
+						},
+						btrt: None,
+					}
+					.into(),
+				],
+			},
+			stts: mp4_atom::Stts {
+				entries: vec![mp4_atom::SttsEntry {
+					sample_count: count,
+					sample_delta: 100,
+				}],
+			},
+			stsc: mp4_atom::Stsc {
+				entries: vec![mp4_atom::StscEntry {
+					first_chunk: 1,
+					samples_per_chunk: count,
+					sample_description_index: 1,
+				}],
+			},
+			stsz: mp4_atom::Stsz {
+				samples: mp4_atom::StszSamples::Identical { count, size: SIZE },
+			},
+			stco: Some(mp4_atom::Stco { entries: vec![8] }),
+			..Default::default()
+		}
+	}
+
+	/// A `moov` with one Opus track counting 1000 ticks a second, its tables `stbl`, and the edit
+	/// list `edits`.
+	pub(crate) fn moov(stbl: mp4_atom::Stbl, edits: Vec<mp4_atom::ElstEntry>) -> mp4_atom::Moov {
+		let trak = mp4_atom::Trak {
+			tkhd: mp4_atom::Tkhd {
+				track_id: 1,
+				..Default::default()
+			},
+			edts: (!edits.is_empty()).then_some(mp4_atom::Edts {
+				elst: Some(mp4_atom::Elst { entries: edits }),
+			}),
+			mdia: mp4_atom::Mdia {
+				mdhd: mp4_atom::Mdhd {
+					timescale: 1000,
+					language: "und".into(),
+					..Default::default()
+				},
+				hdlr: mp4_atom::Hdlr {
+					handler: b"soun".into(),
+					name: String::new(),
+				},
+				minf: mp4_atom::Minf {
+					stbl,
+					..Default::default()
+				},
+			},
+			..Default::default()
+		};
+		mp4_atom::Moov {
+			mvhd: mp4_atom::Mvhd {
+				timescale: 1000,
+				..Default::default()
+			},
+			trak: vec![trak],
+			..Default::default()
+		}
+	}
+
+	/// `moov` with its first track made an H.264 video track.
+	pub(crate) fn video(mut moov: mp4_atom::Moov) -> mp4_atom::Moov {
+		let trak = &mut moov.trak[0];
+		trak.mdia.hdlr.handler = b"vide".into();
+		let avcc =
+			mp4_atom::Avcc::new(crate::codec::h264::fixtures::SPS_IPB, crate::codec::h264::fixtures::PPS).unwrap();
+		trak.mdia.minf.stbl.stsd.codecs = vec![mp4_atom::Codec::Avc1(mp4_atom::Avc1 {
+			avcc,
+			visual: mp4_atom::Visual {
+				width: 64,
+				height: 64,
+				..Default::default()
+			},
+			..Default::default()
+		})];
+		moov
+	}
+
+	fn index(data: Vec<u8>) -> Result<Vec<Track>> {
+		Ok(Reader::new(Cursor::new(data))?.tracks().to_vec())
+	}
+
+	/// Index an `mdat` of `samples` test samples followed by `moov`.
+	fn index_plain(samples: u32, moov: &mp4_atom::Moov) -> Result<Vec<Sample>> {
+		let mut data = mdat(samples);
+		moov.encode(&mut data).unwrap();
+		Ok(index(data)?.remove(0).samples)
+	}
+
+	/// An edit list entry in the movie timescale of 1000.
+	pub(crate) fn edit(segment_duration: u64, media_time: Option<u64>) -> mp4_atom::ElstEntry {
+		mp4_atom::ElstEntry {
+			segment_duration,
+			media_time,
+			media_rate: mp4_atom::FixedPoint::from(1),
+		}
+	}
+
+	fn pts(samples: &[Sample]) -> Vec<u64> {
+		samples.iter().map(|sample| sample.pts).collect()
+	}
+
+	/// An empty edit delays the track, and the media edit trims its start and its end.
+	#[test]
+	fn edits_delay_and_trim() {
+		let delayed = moov(stbl(10), vec![edit(500, None), edit(0, Some(200))]);
+		let samples = index_plain(10, &delayed).unwrap();
+		assert_eq!(pts(&samples), [500, 600, 700, 800, 900, 1000, 1100, 1200]);
+		assert_eq!(samples[0].offset, 8 + 2 * u64::from(SIZE));
+
+		let trimmed = moov(stbl(10), vec![edit(300, Some(200))]);
+		assert_eq!(pts(&index_plain(10, &trimmed).unwrap()), [0, 100, 200]);
+
+		// A splice plays the media whole from the first edit's start.
+		let spliced = moov(stbl(10), vec![edit(300, Some(200)), edit(300, Some(700))]);
+		assert_eq!(index_plain(10, &spliced).unwrap().len(), 8);
+	}
+
+	/// The presentation starts at the first keyframe at or after the edit's start, so a decoder
+	/// needs no sample before it.
+	#[test]
+	fn the_presentation_starts_at_a_keyframe() {
+		let mut tables = stbl(10);
+		tables.stss = Some(mp4_atom::Stss { entries: vec![1, 6] });
+		let samples = index_plain(10, &video(moov(tables, vec![edit(0, Some(200))]))).unwrap();
+		assert_eq!(pts(&samples), [300, 400, 500, 600, 700]);
+		assert!(samples[0].keyframe);
+		assert_eq!(samples[0].dts, 300);
+	}
+
+	/// A version 1 `ctts` presents samples before they decode, and one before zero precedes the
+	/// presentation.
+	#[test]
+	fn negative_composition_offsets() {
+		let mut tables = stbl(4);
+		tables.ctts = Some(mp4_atom::Ctts {
+			entries: [200, 200, -100, -100]
+				.map(|sample_offset| mp4_atom::CttsEntry {
+					sample_count: 1,
+					sample_offset,
+				})
+				.into(),
+		});
+		let samples = index_plain(4, &moov(tables.clone(), Vec::new())).unwrap();
+		assert_eq!(pts(&samples), [200, 300, 100, 200]);
+
+		// An edit starting at the first presentation shifts every decode time below it.
+		let samples = index_plain(4, &moov(tables, vec![edit(0, Some(100))])).unwrap();
+		assert_eq!(pts(&samples), [100, 200, 0, 100]);
+		let dts: Vec<i64> = samples.iter().map(|sample| sample.dts).collect();
+		assert_eq!(dts, [-100, 0, 100, 200]);
+
+		let mut before = stbl(2);
+		before.ctts = Some(mp4_atom::Ctts {
+			entries: vec![mp4_atom::CttsEntry {
+				sample_count: 2,
+				sample_offset: -100,
+			}],
+		});
+		assert_eq!(pts(&index_plain(2, &moov(before, Vec::new())).unwrap()), [0]);
+	}
+
+	/// Chunk offsets in 64 bits place the samples as 32-bit ones do, and each chunk's samples
+	/// follow one another.
+	#[test]
+	fn co64_places_the_samples() {
+		let mut tables = stbl(3);
+		tables.stco = None;
+		tables.co64 = Some(mp4_atom::Co64 { entries: vec![8] });
+		let samples = index_plain(3, &moov(tables, Vec::new())).unwrap();
+		let offsets: Vec<u64> = samples.iter().map(|sample| sample.offset).collect();
+		assert_eq!(offsets, [8, 18, 28]);
+	}
+
+	/// Without an `stss` every sample is a keyframe, and with one only those it lists.
+	#[test]
+	fn sync_samples() {
+		let all = index_plain(3, &video(moov(stbl(3), Vec::new()))).unwrap();
+		assert!(all.iter().all(|sample| sample.keyframe));
+		let mut tables = stbl(3);
+		tables.stss = Some(mp4_atom::Stss { entries: vec![1, 3] });
+		let listed = index_plain(3, &video(moov(tables.clone(), Vec::new()))).unwrap();
+		let keyframes: Vec<bool> = listed.iter().map(|sample| sample.keyframe).collect();
+		assert_eq!(keyframes, [true, false, true]);
+		// Every audio sample decodes alone, whatever its `stss` says.
+		let audio = index_plain(3, &moov(tables, Vec::new())).unwrap();
+		assert!(audio.iter().all(|sample| sample.keyframe));
+	}
+
+	/// Counts and offsets past what the file holds fail the index instead of allocating.
+	#[test]
+	fn sizes_past_the_file_fail() {
+		let mut huge = stbl(3);
+		huge.stsz.samples = mp4_atom::StszSamples::Identical {
+			count: u32::MAX,
+			size: SIZE,
+		};
+		assert!(matches!(
+			index_plain(3, &moov(huge, Vec::new())),
+			Err(crate::Error::Cmaf(Error::TooManyFileSamples(_)))
+		));
+		let mut past = stbl(3);
+		past.stco = Some(mp4_atom::Stco { entries: vec![1 << 30] });
+		assert!(matches!(
+			index_plain(3, &moov(past, Vec::new())),
+			Err(crate::Error::Cmaf(Error::SampleOutsideMedia { .. }))
+		));
+		let mut short = stbl(3);
+		short.stsc.entries[0].samples_per_chunk = 2;
+		assert!(matches!(
+			index_plain(3, &moov(short, Vec::new())),
+			Err(crate::Error::Cmaf(Error::InvalidSampleTable(_)))
+		));
+	}
+
+	/// A track with two sample descriptions is refused, since the catalog can't follow a switch.
+	#[test]
+	fn several_sample_descriptions_are_skipped() {
+		let mut tables = stbl(1);
+		tables.stsd.codecs.push(tables.stsd.codecs[0].clone());
+		let mut data = mdat(1);
+		moov(tables, Vec::new()).encode(&mut data).unwrap();
+		let reader = Reader::new(Cursor::new(data)).unwrap();
+		assert!(reader.tracks().is_empty());
+		assert!(matches!(
+			reader.skipped(),
+			[Skipped {
+				id: 1,
+				error: crate::Error::Cmaf(Error::MultipleCodecs),
+				..
+			}]
+		));
+	}
+
+	/// A track that is not audio or video, in a codec moq-mux doesn't carry, or one the catalog
+	/// can't describe is skipped and reported, and the others still index.
+	#[test]
+	fn other_tracks_are_skipped() {
+		let mut file = moov(stbl(1), Vec::new());
+		let mut text = file.trak[0].clone();
+		text.tkhd.track_id = 2;
+		text.mdia.hdlr.handler = b"text".into();
+		let mut several = file.trak[0].clone();
+		several.tkhd.track_id = 4;
+		several
+			.mdia
+			.minf
+			.stbl
+			.stsd
+			.codecs
+			.push(several.mdia.minf.stbl.stsd.codecs[0].clone());
+		let mut ac3 = file.trak[0].clone();
+		ac3.tkhd.track_id = 3;
+		ac3.mdia.minf.stbl.stsd.codecs = vec![
+			mp4_atom::Ac3 {
+				audio: file.trak[0].mdia.minf.stbl.stsd.codecs[0].audio().unwrap().clone(),
+				dac3: mp4_atom::Ac3SpecificBox {
+					fscod: 0,
+					bsid: 8,
+					bsmod: 0,
+					acmod: 2,
+					lfeon: false,
+					bit_rate_code: 0,
+				},
+			}
+			.into(),
+		];
+		let mut timeless = file.trak[0].clone();
+		timeless.tkhd.track_id = 5;
+		timeless.mdia.mdhd.timescale = 0;
+		file.trak.extend([text, ac3, several, timeless]);
+		let mut data = mdat(1);
+		file.encode(&mut data).unwrap();
+		let reader = Reader::new(Cursor::new(data)).unwrap();
+		assert_eq!(reader.tracks().len(), 1);
+		assert!(matches!(reader.tracks()[0].config, Config::Audio(_)));
+		let skipped: Vec<_> = reader
+			.skipped()
+			.iter()
+			.map(|track| (track.id, &track.handler, track.codec.as_ref()))
+			.collect();
+		assert_eq!(
+			skipped,
+			[
+				(2, b"text", Some(b"Opus")),
+				(3, b"soun", Some(b"ac-3")),
+				(4, b"soun", Some(b"Opus")),
+				(5, b"soun", Some(b"Opus"))
+			]
+		);
+	}
+
+	/// A `moof` with its `trun` sizes and durations left to the `trex` defaults.
+	fn moof(count: u32, tfdt: Option<u64>) -> mp4_atom::Moof {
+		mp4_atom::Moof {
+			traf: vec![mp4_atom::Traf {
+				tfhd: mp4_atom::Tfhd {
+					track_id: 1,
+					default_base_is_moof: true,
+					..Default::default()
+				},
+				tfdt: tfdt.map(|base_media_decode_time| mp4_atom::Tfdt { base_media_decode_time }),
+				trun: vec![mp4_atom::Trun {
+					data_offset: Some(0),
+					samples: mp4_atom::TrunSamples::Inherited {
+						count,
+						first_flags: None,
+					},
+				}],
+				..Default::default()
+			}],
+			..Default::default()
+		}
+	}
+
+	/// A fragment without a `tfdt` continues the track where the last one ended, and the samples
+	/// take the `trex` defaults. Audio samples all decode alone, though the defaults flag them
+	/// non-sync.
+	#[test]
+	fn fragments_without_tfdt_continue() {
+		let mut init = moov(stbl(0), Vec::new());
+		init.mvex = Some(mp4_atom::Mvex {
+			trex: vec![mp4_atom::Trex {
+				track_id: 1,
+				default_sample_description_index: 1,
+				default_sample_duration: 100,
+				default_sample_size: SIZE,
+				default_sample_flags: 0x0001_0000,
+			}],
+			..Default::default()
+		});
+		let mut data = Vec::new();
+		init.encode(&mut data).unwrap();
+		for (count, tfdt) in [(3, Some(0)), (2, None)] {
+			let mut moof = moof(count, tfdt);
+			let mut encoded = Vec::new();
+			moof.encode(&mut encoded).unwrap();
+			// The samples follow the `moof` and the `mdat` header.
+			let start = data.len() as u64;
+			moof.traf[0].trun[0].data_offset = Some(encoded.len() as i32 + 8);
+			moof.encode(&mut data).unwrap();
+			data.extend(mdat(count));
+			let samples = index(data.clone()).unwrap().remove(0).samples;
+			assert_eq!(
+				samples.last().unwrap().offset,
+				start + encoded.len() as u64 + 8 + u64::from(SIZE * (count - 1))
+			);
+		}
+		let samples = index(data).unwrap().remove(0).samples;
+		assert_eq!(pts(&samples), [0, 100, 200, 300, 400]);
+		assert!(samples.iter().all(|sample| sample.keyframe));
+	}
+
+	/// Without base offsets, a track fragment's data follows the previous one's, a skipped
+	/// track's included.
+	#[test]
+	fn a_skipped_track_fragment_moves_the_next_base() {
+		let mut init = moov(stbl(0), Vec::new());
+		let mut text = init.trak[0].clone();
+		text.tkhd.track_id = 2;
+		text.mdia.hdlr.handler = b"text".into();
+		init.trak.push(text);
+		let trex = |track_id, size| mp4_atom::Trex {
+			track_id,
+			default_sample_description_index: 1,
+			default_sample_duration: 100,
+			default_sample_size: size,
+			default_sample_flags: 0,
+		};
+		init.mvex = Some(mp4_atom::Mvex {
+			trex: vec![trex(1, SIZE), trex(2, 7)],
+			..Default::default()
+		});
+		let mut data = Vec::new();
+		init.encode(&mut data).unwrap();
+		let start = data.len() as u64;
+
+		let traf = |track_id, count, data_offset| mp4_atom::Traf {
+			tfhd: mp4_atom::Tfhd {
+				track_id,
+				..Default::default()
+			},
+			tfdt: Some(mp4_atom::Tfdt {
+				base_media_decode_time: 0,
+			}),
+			trun: vec![mp4_atom::Trun {
+				data_offset,
+				samples: mp4_atom::TrunSamples::Inherited {
+					count,
+					first_flags: None,
+				},
+			}],
+			..Default::default()
+		};
+		let mut moof = mp4_atom::Moof {
+			traf: vec![traf(2, 2, Some(0)), traf(1, 3, None)],
+			..Default::default()
+		};
+		let mut encoded = Vec::new();
+		moof.encode(&mut encoded).unwrap();
+		let media = start + encoded.len() as u64 + 8;
+		moof.traf[0].trun[0].data_offset = Some((media - start) as i32);
+		moof.encode(&mut data).unwrap();
+		data.extend(mp4_box(b"mdat", &vec![0; 14 + 3 * SIZE as usize]));
+
+		let tracks = index(data).unwrap();
+		let offsets: Vec<u64> = tracks[0].samples.iter().map(|sample| sample.offset).collect();
+		let first = media + 14;
+		assert_eq!(offsets, [first, first + 10, first + 20]);
+	}
+
+	/// A `udta` whose `meta/ilst` repeats its copyright item, as some encoders write.
+	fn repeated_metadata() -> Vec<u8> {
+		// A `data` box of text: type 1 for UTF-8, then the locale.
+		let data = mp4_box(b"data", &[0, 0, 0, 1, 0, 0, 0, 0, b'x']);
+		let item = mp4_box(b"cprt", &data);
+		let ilst = mp4_box(b"ilst", &[item.clone(), item].concat());
+		let hdlr = mp4_box(b"hdlr", &[&[0; 8][..], b"mdir", &[0; 13]].concat());
+		// `meta` is a full box: version and flags precede its children.
+		let meta = mp4_box(b"meta", &[&[0; 4][..], &hdlr, &ilst].concat());
+		mp4_box(b"udta", &meta)
+	}
+
+	/// Repeated metadata in the `moov` and a `trak`, which mp4-atom refuses, is skipped.
+	#[test]
+	fn repeated_metadata_is_skipped() {
+		let mp4_atom::Moov { mvhd, trak, .. } = moov(stbl(3), Vec::new());
+		let mut mvhd_box = Vec::new();
+		mvhd.encode(&mut mvhd_box).unwrap();
+		let mut trak_box = Vec::new();
+		trak[0].encode(&mut trak_box).unwrap();
+		let trak = mp4_box(b"trak", &[&trak_box[8..], &repeated_metadata()].concat());
+		let moov = mp4_box(b"moov", &[mvhd_box, trak, repeated_metadata()].concat());
+		// When this starts failing, mp4-atom accepts repeated metadata, and the reader can decode
+		// the `moov` as it is.
+		assert!(matches!(
+			mp4_atom::Moov::decode(&mut moov.as_slice()),
+			Err(mp4_atom::Error::DuplicateBox(_))
+		));
+		let tracks = index([mdat(3), moov].concat()).unwrap();
+		assert_eq!(pts(&tracks[0].samples), [0, 100, 200]);
+
+		// The same in a `traf`.
+		let mut mfhd = Vec::new();
+		mp4_atom::Mfhd::default().encode(&mut mfhd).unwrap();
+		let mut traf = Vec::new();
+		mp4_atom::Traf::default().encode(&mut traf).unwrap();
+		let traf = mp4_box(b"traf", &[&traf[8..], &repeated_metadata()].concat());
+		let moof = mp4_box(b"moof", &[mfhd, traf].concat());
+		assert!(matches!(
+			mp4_atom::Moof::decode(&mut moof.as_slice()),
+			Err(mp4_atom::Error::DuplicateBox(_))
+		));
+		assert_eq!(decode_moof(&moof).unwrap().traf.len(), 1);
+	}
+
+	/// Bytes after the last box, too few for a box header, are skipped; a longer tail is a box,
+	/// and one claiming a `moov` past the end fails.
+	#[test]
+	fn trailing_bytes() {
+		let mut data = mdat(3);
+		moov(stbl(3), Vec::new()).encode(&mut data).unwrap();
+		let tracks = index([&data[..], b"\r\n"].concat()).unwrap();
+		assert_eq!(pts(&tracks[0].samples), [0, 100, 200]);
+
+		data.extend_from_slice(&[0, 0, 1, 0, b'm', b'o', b'o', b'v', 0, 0]);
+		assert!(matches!(index(data), Err(crate::Error::Cmaf(Error::BoxPastEnd(_)))));
+	}
+
+	/// A `moov` declaring more than the file holds is refused before any of it is read.
+	#[test]
+	fn a_huge_moov_is_refused() {
+		let mut data = mp4_box(b"moov", &[]);
+		data[..4].copy_from_slice(&[0, 0, 0, 1]);
+		data.extend_from_slice(&(fmp4::MAX_MOOV_BYTES + 17).to_be_bytes());
+		assert!(matches!(index(data), Err(crate::Error::Cmaf(Error::BoxPastEnd(_)))));
+	}
+
+	/// Where the box `kind` starts in `data`, at or after `from`.
+	fn find(data: &[u8], from: usize, kind: &[u8; 4]) -> usize {
+		from + data[from..]
+			.windows(4)
+			.position(|window| window == kind)
+			.expect("the file has the box")
+	}
+
+	/// `faststart.mp4` with its `avc1` sample entry declaring a height of 47.
+	fn declares_height_47() -> Vec<u8> {
+		let mut data = include_bytes!("test_data/faststart.mp4").to_vec();
+		// The width and height follow the `avc1` kind after 24 bytes of reserved fields, data
+		// reference index, and pre-defined fields. The `ftyp` names `avc1` as a brand too, so
+		// the search starts at the `stsd`.
+		let height = find(&data, find(&data, 0, b"stsd"), b"avc1") + 4 + 26;
+		assert_eq!(data[height..height + 2], 48u16.to_be_bytes());
+		data[height..height + 2].copy_from_slice(&47u16.to_be_bytes());
+		data
+	}
+
+	fn video_config(tracks: &[Track]) -> &VideoConfig {
+		tracks
+			.iter()
+			.find_map(|track| match &track.config {
+				Config::Video(config) => Some(config),
+				Config::Audio(_) => None,
+			})
+			.expect("a video track")
+	}
+
+	/// An H.264 track takes its picture size from the SPS rather than a sample entry that
+	/// disagrees, and from the entry when no SPS parses.
+	#[test]
+	fn the_sps_sets_the_picture_size() {
+		let tracks = index(declares_height_47()).unwrap();
+		let config = video_config(&tracks);
+		assert_eq!((config.coded_width, config.coded_height), (Some(64), Some(48)));
+
+		let mut data = declares_height_47();
+		// After the `avcC` kind come 6 bytes of fields, the 2-byte length of the first SPS, and
+		// its NAL header. Zeros then fail its first Exp-Golomb code.
+		let avcc = find(&data, 0, b"avcC");
+		let len = usize::from(u16::from_be_bytes([data[avcc + 10], data[avcc + 11]]));
+		data[avcc + 13..avcc + 12 + len].fill(0);
+		let tracks = index(data).unwrap();
+		let config = video_config(&tracks);
+		assert_eq!((config.coded_width, config.coded_height), (Some(64), Some(47)));
+	}
+
+	/// A `moov`-first file lists both tracks, with the audio's priming trimmed, and reads each
+	/// sample back from where it lies.
+	#[test]
+	fn a_faststart_file_reads_back() {
+		let data = include_bytes!("test_data/faststart.mp4");
+		let mut reader = Reader::new(Cursor::new(&data[..])).unwrap();
+		let tracks = reader.tracks().to_vec();
+		assert_eq!(tracks.len(), 2);
+
+		let video = &tracks[0];
+		assert!(matches!(&video.config, Config::Video(config) if config.codec.to_string().starts_with("avc1")));
+		let step = video.timescale.as_u64() / 10;
+		assert_eq!(
+			pts(&video.samples),
+			(0..10).map(|frame| frame * step).collect::<Vec<_>>()
+		);
+		let keyframes: Vec<bool> = video.samples.iter().map(|sample| sample.keyframe).collect();
+		assert_eq!(keyframes, (0..10).map(|frame| frame % 5 == 0).collect::<Vec<_>>());
+
+		let audio = &tracks[1];
+		let Config::Audio(config) = &audio.config else {
+			panic!("the second track is audio");
+		};
+		assert_eq!((config.sample_rate, config.channel_count), (16_000, 1));
+		// 17 AAC frames, the first of which the edit list trims as the encoder's priming.
+		assert_eq!(audio.samples.len(), 16);
+		assert_eq!(audio.samples[0].pts, 0);
+		assert!(audio.samples.iter().all(|sample| sample.duration == 1024));
+
+		for sample in video.samples.iter().chain(&audio.samples) {
+			let payload = reader.read(sample).unwrap();
+			let at = sample.offset as usize;
+			assert_eq!(payload, data[at..at + sample.size as usize]);
+		}
+	}
+
+	/// A `moov`-last file with B-frames decodes two frames ahead of its presentation.
+	#[test]
+	fn a_moov_last_file_with_b_frames() {
+		let tracks = index(include_bytes!("test_data/bframes.mp4").to_vec()).unwrap();
+		let samples = &tracks[0].samples;
+		assert_eq!(samples.len(), 10);
+		let step = tracks[0].timescale.as_u64() as i64 / 10;
+		let dts: Vec<i64> = samples.iter().map(|sample| sample.dts).collect();
+		assert_eq!(dts, (-2..8).map(|frame| frame * step).collect::<Vec<_>>());
+		let mut presented = pts(samples);
+		presented.sort();
+		assert_eq!(presented, (0..10).map(|frame| frame * step as u64).collect::<Vec<_>>());
+	}
+
+	/// Chunks mapping more samples than the sizes list are refused, whether the extra samples
+	/// fall in the last chunk or a later one, before the index is reserved for them.
+	#[test]
+	fn chunks_must_hold_exactly_the_listed_samples() {
+		let mut one_chunk = stbl(1);
+		one_chunk.stsc.entries[0].samples_per_chunk = 2;
+		let mut later_chunk = stbl(1);
+		later_chunk.stco = Some(mp4_atom::Stco { entries: vec![8, 18] });
+		later_chunk.stsc.entries[0].samples_per_chunk = 1;
+		// A count the file allows, which the chunks map only three of.
+		let mut huge = stbl(3);
+		huge.stsz.samples = mp4_atom::StszSamples::Identical {
+			count: 100_000,
+			size: 1,
+		};
+		for (tables, samples) in [(one_chunk, 2), (later_chunk, 2), (huge, 10_000)] {
+			let result = index_plain(samples, &moov(tables, Vec::new()));
+			assert!(
+				matches!(result, Err(crate::Error::Cmaf(Error::InvalidSampleTable(_)))),
+				"{result:?}"
+			);
+		}
+	}
+
+	/// A chunk or fragment naming a sample description the track doesn't have is refused. A
+	/// fragment's `tfhd` overrides its `trex`.
+	#[test]
+	fn samples_must_name_the_first_description() {
+		let mut tables = stbl(3);
+		tables.stsc.entries[0].sample_description_index = 2;
+		assert!(matches!(
+			index_plain(3, &moov(tables, Vec::new())),
+			Err(crate::Error::Cmaf(Error::InvalidSampleTable(_)))
+		));
+
+		for (trex, tfhd, ok) in [
+			(1, None, true),
+			(2, None, false),
+			(1, Some(2), false),
+			(2, Some(1), true),
+		] {
+			let mut init = moov(stbl(0), Vec::new());
+			init.mvex = Some(mp4_atom::Mvex {
+				trex: vec![mp4_atom::Trex {
+					track_id: 1,
+					default_sample_description_index: trex,
+					default_sample_duration: 100,
+					default_sample_size: SIZE,
+					default_sample_flags: 0,
+				}],
+				..Default::default()
+			});
+			let mut data = Vec::new();
+			init.encode(&mut data).unwrap();
+			let mut moof = moof(1, Some(0));
+			moof.traf[0].tfhd.sample_description_index = tfhd;
+			let mut encoded = Vec::new();
+			moof.encode(&mut encoded).unwrap();
+			moof.traf[0].trun[0].data_offset = Some(encoded.len() as i32 + 8);
+			moof.encode(&mut data).unwrap();
+			data.extend(mdat(1));
+			assert_eq!(index(data).is_ok(), ok, "trex {trex}, tfhd {tfhd:?}");
+		}
+	}
+
+	/// A sample must lie within one `mdat` payload: not across two, nor in another box. A sample
+	/// complete within an `mdat` cut short still indexes.
+	#[test]
+	fn samples_lie_within_one_mdat() {
+		// Two `mdat` boxes of two samples each, with the second chunk starting in the first box and
+		// running into the second.
+		let mut data = [mdat(2), mdat(2)].concat();
+		let second = 8 + 2 * u64::from(SIZE) + 8;
+		let mut tables = stbl(4);
+		tables.stsc.entries[0].samples_per_chunk = 2;
+		tables.stco = Some(mp4_atom::Stco {
+			entries: vec![8, second as u32 - 8 - SIZE / 2],
+		});
+		moov(tables.clone(), Vec::new()).encode(&mut data).unwrap();
+		assert!(matches!(
+			index(data),
+			Err(crate::Error::Cmaf(Error::SampleOutsideMedia { .. }))
+		));
+
+		// The same samples in a `free` box.
+		let mut data = mp4_box(b"free", &[0; 4 * SIZE as usize]);
+		moov(stbl(4), Vec::new()).encode(&mut data).unwrap();
+		assert!(matches!(
+			index(data),
+			Err(crate::Error::Cmaf(Error::SampleOutsideMedia { .. }))
+		));
+
+		// The `moov` first and an `mdat` declaring four samples of which three arrived.
+		let mut tables = stbl(3);
+		let mut data = Vec::new();
+		moov(tables.clone(), Vec::new()).encode(&mut data).unwrap();
+		tables.stco = Some(mp4_atom::Stco {
+			entries: vec![data.len() as u32 + 8],
+		});
+		data.clear();
+		moov(tables, Vec::new()).encode(&mut data).unwrap();
+		let mut cut = mdat(4);
+		cut.truncate(8 + 3 * SIZE as usize);
+		data.extend(cut);
+		assert_eq!(pts(&index(data).unwrap()[0].samples), [0, 100, 200]);
+	}
+
+	/// A track nested in a track, however deep, is refused rather than recursed into.
+	#[test]
+	fn nested_tracks_are_refused() {
+		let depth = 100_000u32;
+		let mut data = Vec::with_capacity(8 * depth as usize + 8);
+		data.extend_from_slice(&(8 * (depth + 1)).to_be_bytes());
+		data.extend_from_slice(b"moov");
+		for level in (1..=depth).rev() {
+			data.extend_from_slice(&(8 * level).to_be_bytes());
+			data.extend_from_slice(b"trak");
+		}
+		assert!(decode_moov(&data).is_err());
+	}
+
+	/// A track whose data reference points into another file is skipped.
+	#[test]
+	fn external_media_is_skipped() {
+		let mut file = moov(stbl(1), Vec::new());
+		file.trak[0].mdia.minf.dinf.dref.entries = vec![
+			mp4_atom::Url {
+				location: "elsewhere.mov".into(),
+			}
+			.into(),
+		];
+		let mut data = mdat(1);
+		file.encode(&mut data).unwrap();
+		let reader = Reader::new(Cursor::new(data)).unwrap();
+		assert!(reader.tracks().is_empty());
+		assert!(matches!(
+			reader.skipped(),
+			[Skipped {
+				error: crate::Error::Cmaf(Error::ExternalData),
+				..
+			}]
+		));
+	}
+}

@@ -1,4 +1,9 @@
-//! Regular MP4 files, recorded crash-safe.
+//! Regular MP4 files, read, imported, and recorded crash-safe.
+//!
+//! [`Reader`] indexes an MP4 file through a seekable reader, listing each track's catalog entry
+//! and where each sample lies and when it decodes and presents, for a caller that seeks, loops,
+//! or paces the file itself. [`Import`] publishes an MP4 fed in chunks into a broadcast, as
+//! [`fmp4::Import`] does a fragmented one.
 //!
 //! [`Export`] writes a file that is a valid fragmented MP4 while it grows, so a crash still
 //! leaves a playable file, and [`Export::finish`] turns it into a regular MP4 with its `moov`
@@ -21,6 +26,12 @@
 //! reader of the unfinished file skips. Before a track's first fragment, and again whenever
 //! its description changes, a `free` box holds a `moov` declaring it, so the final `moov`
 //! can be rebuilt from the file alone.
+
+mod import;
+mod index;
+
+pub use import::{Finished, Import};
+pub use index::{Config, Reader, Sample, Skipped, Track};
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
@@ -624,7 +635,7 @@ struct Index {
 	/// The latest description of each track, by track id.
 	descriptions: HashMap<u32, Description>,
 	/// What each track wrote, by track id.
-	tracks: BTreeMap<u32, Track>,
+	tracks: BTreeMap<u32, Written>,
 }
 
 /// How a track is declared.
@@ -672,10 +683,10 @@ impl Description {
 
 /// What one track wrote, in decode order.
 #[derive(Clone, Default)]
-struct Track {
+struct Written {
 	/// One chunk per `trun`, its samples contiguous in the file.
 	chunks: Vec<Run>,
-	samples: Vec<Sample>,
+	samples: Vec<WrittenSample>,
 }
 
 #[derive(Clone)]
@@ -689,7 +700,7 @@ struct Run {
 }
 
 #[derive(Clone)]
-struct Sample {
+struct WrittenSample {
 	size: u32,
 	duration: u32,
 	cts: i64,
@@ -770,7 +781,7 @@ impl Index {
 				count: trun.samples.len() as u32,
 			});
 			for entry in trun.samples.iter() {
-				let sample = Sample {
+				let sample = WrittenSample {
 					size: entry.size.unwrap_or(size),
 					duration: entry.duration.unwrap_or(duration),
 					cts: entry.cts.unwrap_or(0),
@@ -1115,7 +1126,7 @@ struct Timeline {
 }
 
 impl Timeline {
-	fn new(id: u32, trak: &mp4_atom::Trak, track: &Track) -> Result<Self> {
+	fn new(id: u32, trak: &mp4_atom::Trak, track: &Written) -> Result<Self> {
 		// Each fragment's decode time is its first sample's presentation time, so fragments
 		// shorter than a GOP of reordered video step back and forth. Decode on one clock that
 		// a sync sample moves ahead to its fragment's time, which keeps a real gap, and keep
@@ -1209,7 +1220,7 @@ fn edits(delay: u64, media_time: u64, presented: u64) -> Option<mp4_atom::Edts> 
 }
 
 /// The sample tables indexing `track` where its samples lie, each `trun` one chunk.
-fn sample_table(stsd: &mp4_atom::Stsd, track: &Track, timeline: &Timeline) -> mp4_atom::Stbl {
+fn sample_table(stsd: &mp4_atom::Stsd, track: &Written, timeline: &Timeline) -> mp4_atom::Stbl {
 	let mut stts: Vec<mp4_atom::SttsEntry> = Vec::new();
 	for &delta in &timeline.deltas {
 		match stts.last_mut() {
@@ -1657,6 +1668,68 @@ mod tests {
 			audio_trak.mdia.minf.stbl.stss.is_none(),
 			"every audio sample is a sync sample"
 		);
+	}
+
+	/// A recording reads back through a [`Reader`](super::Reader) sample for sample, fragmented
+	/// while it grows and regular once finished, with the audio starting 100 ms after the video in
+	/// both.
+	#[tokio::test(start_paused = true)]
+	async fn a_recording_reads_back() {
+		let mut live = Live::avc3();
+		let mut audio = add_opus(&mut live, 312);
+		let video: Vec<_> = (0..9u64).map(|i| video_frame(i * 33_000, i % 3 == 0)).collect();
+		for frame in &video {
+			live.track.write(frame.clone()).unwrap();
+		}
+		for i in 0..12u64 {
+			audio.write(raw_frame(100_000 + i * 20_000, OPUS, i % 5 == 0)).unwrap();
+		}
+		live.track.end_with(None).unwrap();
+		let _finished = audio.finish().unwrap();
+
+		let mut export = export(&live).await;
+		let mut file = Vec::new();
+		record(&mut export, &mut file).await;
+		let fragmented = file.clone();
+		finish(export, &mut file);
+
+		let written: Vec<Vec<u8>> = video.iter().map(length_prefixed).collect();
+		for data in [fragmented, file] {
+			let mut reader = super::Reader::new(std::io::Cursor::new(data)).unwrap();
+			let tracks = reader.tracks().to_vec();
+			assert_eq!(tracks.len(), 2);
+			let micros = |track: &super::Track, sample: &super::Sample| {
+				sample.timestamp(track.timescale).unwrap().as_micros().unwrap()
+			};
+			// Both tracks count from the earliest sample of either.
+			let origin = tracks
+				.iter()
+				.map(|track| micros(track, &track.samples[0]))
+				.min()
+				.unwrap();
+			let mut read = |track: &super::Track| -> Vec<(u128, bool, Vec<u8>)> {
+				track
+					.samples
+					.iter()
+					.map(|sample| {
+						let at = micros(track, sample) - origin;
+						(at, sample.keyframe, reader.read(sample).unwrap().to_vec())
+					})
+					.collect()
+			};
+			let (video_track, audio_track) = match tracks[0].config {
+				super::Config::Video(_) => (&tracks[0], &tracks[1]),
+				_ => (&tracks[1], &tracks[0]),
+			};
+			let expected: Vec<_> = (0..9u128)
+				.map(|i| (i * 33_000, i % 3 == 0, written[i as usize].clone()))
+				.collect();
+			assert_eq!(read(video_track), expected);
+			let expected: Vec<_> = (0..12u128)
+				.map(|i| (100_000 + i * 20_000, true, OPUS.to_vec()))
+				.collect();
+			assert_eq!(read(audio_track), expected);
+		}
 	}
 
 	/// A rendition that joins after the fragmented moov hides in free boxes until the final

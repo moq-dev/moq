@@ -60,6 +60,8 @@ pub enum VideoFormat {
 pub enum ContainerFormat {
 	/// Fragmented MP4 / CMAF.
 	Fmp4,
+	/// Regular MP4, with its `moov` before or after its media, or fragmented.
+	Mp4,
 	/// Matroska / WebM.
 	Mkv,
 	/// MPEG-2 transport stream.
@@ -137,6 +139,7 @@ impl FromStr for Format {
 			"vp9" | "vp09" => Format::Video(VideoFormat::Vp9),
 
 			"fmp4" | "cmaf" => Format::Container(ContainerFormat::Fmp4),
+			"mp4" => Format::Container(ContainerFormat::Mp4),
 			"mkv" | "webm" | "matroska" => Format::Container(ContainerFormat::Mkv),
 			// Not `m2ts`, which names BDAV's 192-byte packets rather than 188-byte TS.
 			"ts" | "mpegts" | "mpeg2ts" => Format::Container(ContainerFormat::Ts),
@@ -207,7 +210,7 @@ kind_format!(VideoFormat, Video,
 	Av01 => "av01", Vp8 => "vp8", Vp9 => "vp9");
 
 kind_format!(ContainerFormat, Container,
-	Fmp4 => "fmp4", Mkv => "mkv", Ts => "ts", Flv => "flv");
+	Fmp4 => "fmp4", Mp4 => "mp4", Mkv => "mkv", Ts => "ts", Flv => "flv");
 
 impl AudioFormat {
 	/// The suffix of a track named after this format, such as `.opus` in `0.opus`.
@@ -256,6 +259,7 @@ mod tests {
 			(vec!["vp8", "vp08"], "vp8"),
 			(vec!["vp9", "vp09"], "vp9"),
 			(vec!["fmp4", "cmaf"], "fmp4"),
+			(vec!["mp4"], "mp4"),
 			(vec!["mkv", "webm", "matroska"], "mkv"),
 			(vec!["ts", "mpegts", "mpeg2ts"], "ts"),
 			(vec!["opus"], "opus"),

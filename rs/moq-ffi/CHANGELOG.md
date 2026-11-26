@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `MoqTrackProducer::insert_datagram` sends a datagram at the caller's sequence,
   and `MoqTrackProducer::largest` reports the newest `MoqPosition` written.
 - `MoqBroadcastConsumer::closed` resolves once the broadcast ends.
+- `MoqContainerFormat::mp4` imports a regular MP4, with its `moov` before or
+  after its media, or a fragmented one.
 
 ### Changed
 

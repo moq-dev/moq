@@ -9,51 +9,101 @@ use super::Error;
 /// track, then one edit starting the media at `media_time` at normal rate. A sample before that
 /// start is dropped, since a frame timestamp can't be negative; that includes one straddling the
 /// start, such as Apple's 2112 AAC priming samples, which are not a whole number of frames. The
-/// edit's duration is ignored: it trims the end, and a live source has none.
+/// fMP4 import ignores the edit's duration, since a live source has no end; a file reader trims
+/// the end with [`end`](Self::end).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) struct Edit {
+pub(crate) struct Edit {
 	/// The media time presented at the edit's start.
 	start: u64,
 	/// The empty edits' duration, presented before `start`.
 	delay: u64,
+	/// The media time where the presentation ends, when the media edit declares a duration.
+	end: Option<u64>,
 }
 
 impl Edit {
-	/// The edit `trak` declares, in a movie counting `movie_timescale` ticks a second.
+	/// The edit `trak` declares, in a movie counting `movie_timescale` ticks a second, refusing an
+	/// edit list this shape can't express.
 	pub fn new(trak: &mp4_atom::Trak, movie_timescale: u32) -> Result<Self, Error> {
-		let Some(elst) = trak.edts.as_ref().and_then(|edts| edts.elst.as_ref()) else {
-			return Ok(Self::default());
-		};
-		if elst.entries.is_empty() {
-			return Ok(Self::default());
+		match Self::parse(trak, movie_timescale)? {
+			(edit, None) => Ok(edit),
+			(_, Some(reason)) => Err(Error::UnsupportedEditList(reason)),
 		}
+	}
+
+	/// The edit `trak` declares, as [`new`](Self::new), but an edit list this shape can't express
+	/// plays the media whole from the first media edit's start, with a warning.
+	///
+	/// For a file, where refusing an edited QuickTime export would refuse the whole file over
+	/// what is usually a splice of a few frames.
+	pub fn lenient(trak: &mp4_atom::Trak, movie_timescale: u32) -> Result<Self, Error> {
+		let (edit, unsupported) = Self::parse(trak, movie_timescale)?;
+		if let Some(reason) = unsupported {
+			tracing::warn!(
+				track = trak.tkhd.track_id,
+				reason,
+				"unsupported edit list, playing the media from the first edit's start"
+			);
+		}
+		Ok(edit)
+	}
+
+	/// The edit `trak` declares, and why it is not the whole edit list when it isn't.
+	fn parse(trak: &mp4_atom::Trak, movie_timescale: u32) -> Result<(Self, Option<&'static str>), Error> {
+		let Some(elst) = trak.edts.as_ref().and_then(|edts| edts.elst.as_ref()) else {
+			return Ok((Self::default(), None));
+		};
 
 		let mut entries = elst.entries.iter();
 		let mut empty = 0u64;
 		let (media_time, entry) = loop {
-			let entry = entries
-				.next()
-				.ok_or(Error::UnsupportedEditList("no edit presents media"))?;
+			let Some(entry) = entries.next() else {
+				return Ok(match elst.entries.is_empty() {
+					true => (Self::default(), None),
+					false => (Self::default(), Some("no edit presents media")),
+				});
+			};
 			match entry.media_time {
 				Some(media_time) => break (media_time, entry),
 				None => empty = empty.checked_add(entry.segment_duration).ok_or(Error::PtsOverflow)?,
 			}
 		};
+		let mut unsupported = None;
 		// Several media edits splice the media, which one shift can't express.
 		if entries.next().is_some() {
-			return Err(Error::UnsupportedEditList("an edit follows the media edit"));
+			unsupported = Some("an edit follows the media edit");
 		}
 		// A rate of 0 dwells on one sample, and the standard defines no other.
 		if entry.media_rate.integer() != 1 || entry.media_rate.decimal() != 0 {
-			return Err(Error::UnsupportedEditList("media rate is not 1"));
+			unsupported = Some("media rate is not 1");
 		}
 
 		let timescale = u128::from(trak.mdia.mdhd.timescale);
-		let delay = match empty {
-			0 => 0,
-			_ if movie_timescale == 0 => return Err(Error::UnsupportedEditList("movie timescale is zero")),
-			empty => u64::try_from(u128::from(empty) * timescale / u128::from(movie_timescale))
-				.map_err(|_| Error::PtsOverflow)?,
+		// Movie ticks in media ticks, or `None` without a movie timescale to convert from.
+		let media = |movie: u64| match movie_timescale {
+			0 => Ok(None),
+			scale => u64::try_from(u128::from(movie) * timescale / u128::from(scale))
+				.map(Some)
+				.map_err(|_| Error::PtsOverflow),
+		};
+		let delay = match media(empty)? {
+			_ if empty == 0 => 0,
+			Some(delay) => delay,
+			None => {
+				unsupported = Some("movie timescale is zero");
+				0
+			}
+		};
+		// A duration of zero is unknown, as a fragmented file's edit declares it, and one past the
+		// media timeline trims nothing. An edit list this shape can't express plays the media
+		// whole, so it trims nothing either. The end rounds up, so a sample presenting before a
+		// fractional end is kept.
+		let end = match (entry.segment_duration, movie_timescale) {
+			(0, _) | (_, 0) => None,
+			_ if unsupported.is_some() => None,
+			(duration, scale) => u64::try_from((u128::from(duration) * timescale).div_ceil(u128::from(scale)))
+				.ok()
+				.and_then(|duration| media_time.checked_add(duration)),
 		};
 
 		// A consumer trims the OpusHead pre-skip from the first decoded frame and plays the first
@@ -67,13 +117,15 @@ impl Edit {
 			_ => 0,
 		};
 
-		Ok(match media_time.checked_sub(skip) {
-			Some(start) => Self { start, delay },
+		let edit = match media_time.checked_sub(skip) {
+			Some(start) => Self { start, delay, end },
 			None => Self {
 				start: 0,
 				delay: delay.checked_add(skip - media_time).ok_or(Error::PtsOverflow)?,
+				end,
 			},
-		})
+		};
+		Ok((edit, unsupported))
 	}
 
 	/// Where the sample at media time `pts` presents, or `None` if it precedes the edit.
@@ -82,6 +134,18 @@ impl Edit {
 			return Ok(None);
 		};
 		since.checked_add(self.delay).map(Some).ok_or(Error::PtsOverflow)
+	}
+
+	/// Where the sample decoding at media time `dts` decodes, on the timeline
+	/// [`present`](Self::present) maps onto: before zero for one decoding ahead of the edit's start.
+	pub fn decode(&self, dts: i64) -> Result<i64, Error> {
+		let shifted = i128::from(dts) - i128::from(self.start) + i128::from(self.delay);
+		i64::try_from(shifted).map_err(|_| Error::PtsOverflow)
+	}
+
+	/// The media time where the presentation ends: a sample presenting at or after it is cut.
+	pub fn end(&self) -> Option<u64> {
+		self.end
 	}
 }
 
@@ -186,5 +250,56 @@ mod tests {
 				"{entries:?}"
 			);
 		}
+	}
+
+	/// A media edit's duration ends the presentation in media ticks, and an unknown one ends
+	/// nothing.
+	#[test]
+	fn a_duration_ends_the_presentation() {
+		// One movie second (1000 ticks) is 48000 media ticks.
+		let edit = Edit::new(&trak(Some(vec![entry(1000, Some(960), 1)]), false), 1000).unwrap();
+		assert_eq!(edit.end(), Some(960 + 48_000));
+		let edit = Edit::new(&trak(Some(vec![entry(0, Some(960), 1)]), false), 1000).unwrap();
+		assert_eq!(edit.end(), None);
+		// A fractional end rounds up: one movie tick in a 7000 tick movie is 6.86 media ticks, so
+		// the sample at tick 6 presents before the end and is kept.
+		let edit = Edit::new(&trak(Some(vec![entry(1, Some(0), 1)]), false), 7000).unwrap();
+		assert_eq!(edit.end(), Some(7));
+		// An Opus edit ends where its media does, wherever the pre-skip moves its start.
+		let edit = Edit::new(&trak(Some(vec![entry(1000, Some(312), 1)]), true), 1000).unwrap();
+		assert_eq!(
+			(presents(edit), edit.end()),
+			([Some(0), Some(959), Some(960), Some(1000)], Some(48_312))
+		);
+	}
+
+	/// What the strict edit refuses, the lenient one plays from the first media edit's start, with
+	/// no end when edits follow it.
+	#[test]
+	fn lenient_edits_play_from_the_first_media_edit() {
+		let cases = [
+			(
+				vec![entry(1000, None, 1)],
+				[Some(0), Some(959), Some(960), Some(1000)],
+				None,
+			),
+			(
+				vec![entry(1000, Some(960), 1), entry(1000, Some(0), 1)],
+				[None, None, Some(0), Some(40)],
+				None,
+			),
+			(vec![entry(1000, Some(960), 2)], [None, None, Some(0), Some(40)], None),
+		];
+		for (entries, expected, end) in cases {
+			assert!(
+				Edit::new(&trak(Some(entries.clone()), false), 1000).is_err(),
+				"{entries:?}"
+			);
+			let edit = Edit::lenient(&trak(Some(entries.clone()), false), 1000).unwrap();
+			assert_eq!((presents(edit), edit.end()), (expected, end), "{entries:?}");
+		}
+		// A sample decoding before the edit's start decodes before zero.
+		let edit = Edit::lenient(&trak(Some(vec![entry(0, Some(960), 1)]), false), 1000).unwrap();
+		assert_eq!(edit.decode(0).unwrap(), -960);
 	}
 }

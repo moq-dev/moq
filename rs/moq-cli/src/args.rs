@@ -847,6 +847,9 @@ pub enum ImportSource {
 	H264,
 	/// Fragmented MP4 / CMAF from stdin.
 	Fmp4(Fmp4Import),
+	/// Regular or fragmented MP4 from stdin, with its `moov` before or after its media. One with
+	/// its `moov` last is refused past 64 MiB of media; `ffmpeg -movflags +faststart` moves it.
+	Mp4,
 	/// MPEG-TS from stdin.
 	Ts(TsImport),
 	/// FLV / RTMP container from stdin.
@@ -878,6 +881,7 @@ impl ImportSource {
 		Some(match self {
 			Self::H264 => PublishFormat::H264,
 			Self::Fmp4(args) => PublishFormat::Fmp4 { cmaf: args.cmaf },
+			Self::Mp4 => PublishFormat::Mp4,
 			Self::Ts(args) if args.passthrough => PublishFormat::TsPassthrough {
 				pcr_pid: args.pcr_pid.map(|pid| pid.0),
 			},
@@ -906,7 +910,7 @@ impl ImportSource {
 			| Self::Archive(_) => Some("the gateway and archive imports build their own catalogs"),
 			#[cfg(feature = "capture")]
 			Self::Capture(_) => None,
-			Self::H264 | Self::Fmp4(_) | Self::Ts(_) | Self::Flv => None,
+			Self::H264 | Self::Fmp4(_) | Self::Mp4 | Self::Ts(_) | Self::Flv => None,
 		}
 	}
 
@@ -925,6 +929,7 @@ impl ImportSource {
 			Self::Capture(_) => Some("`import capture` has no clean end"),
 			Self::H264
 			| Self::Fmp4(_)
+			| Self::Mp4
 			| Self::Ts(_)
 			| Self::Flv
 			| Self::Hls(_)
