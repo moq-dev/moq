@@ -53,8 +53,8 @@ jobs:
       # with the repository's key and publishes nothing.
       - uses: ./.github/actions/rust-cache
         with:
-          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
-          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
+          access-key-id: ${{ secrets.MBX_B2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_B2_SECRET_ACCESS_KEY }}
           write: false
       # The checkout is thrown away, so mutating it in place keeps the build
       # incremental and cached instead of copying the tree per mutant. The step

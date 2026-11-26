@@ -390,8 +390,13 @@ pub(super) fn union(ranges: impl IntoIterator<Item = Range>) -> Vec<Range> {
 			end: end.map(|end| end - 1),
 		})
 		.collect();
-	// A range with no time start can't be placed against the time spans.
-	union.extend(ranges.iter().filter(|range| range.start == Start::Oldest));
+	// A range with no time start can't be placed against the time spans. One from the oldest
+	// group takes in every one from there ending before it.
+	union.extend(
+		(ranges.iter())
+			.filter(|range| range.start == Start::Oldest)
+			.max_by_key(|range| range.end),
+	);
 	union.extend(joins.into_iter().map(|((min, end), budget)| Range {
 		start: Start::Live {
 			min,
@@ -910,6 +915,16 @@ mod tests {
 		assert_eq!(
 			ranges(&[sub(&[ended]), joining(two)]),
 			vec![join(two, Some(Duration::ZERO)), ended]
+		);
+
+		// A range from the oldest group with an end takes in every one ending before it.
+		let oldest = |end| Range {
+			start: Start::Oldest,
+			end: Some(end),
+		};
+		assert_eq!(
+			ranges(&[sub(&[oldest(5)]), sub(&[oldest(3)]), sub(&[oldest(5)])]),
+			vec![oldest(5)]
 		);
 
 		// Empty ranges ask for nothing.

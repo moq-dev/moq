@@ -1,0 +1,102 @@
+name: Queue build
+
+# The merge queue's build of a group, on the host's self-hosted runner. Only
+# queue.yml calls it, at main: the moq-queue runner group admits only this
+# workflow and Nightly at refs/heads/main, so no other workflow can reach the
+# runner, an approved fork run's included, and a PR's edit to this file runs
+# only after it lands.
+#
+# main's copy runs against every group's tree, and its local action comes from
+# that tree, so a PR that moves or deletes .github/actions/rust-cache fails its
+# own group: keep the old path until a later PR stops using it here.
+#
+# The caller grants `checks: write` beside `contents: read`: a called workflow
+# can only lower its caller's token, and GitHub refuses to start a run whose
+# report job asks for more.
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build
+    # A caller's own event decides this, so a caller run for any other event
+    # still gets no runner.
+    if: github.event_name == 'merge_group'
+    runs-on: [self-hosted, moq-queue]
+    # A merge group is one PR at build concurrency 1; `just ci` takes about 5-15
+    # minutes. Backstop a hang below the queue's 90-minute response window, so
+    # on a free runner the report below still drops the group before it
+    # expires; time waiting for a runner counts against that window too.
+    timeout-minutes: 80
+    env:
+      # The diff the dispatcher selects from: the group's base, as the host gate
+      # passed its own BASE.
+      BASE: ${{ github.event.merge_group.base_sha }}
+      # A failure goes to the fixer whatever else fails, so stop at the first
+      # failed module (moq-dev/moq#7466).
+      CHECK_FAIL_FAST: "1"
+      NEXTEST_TEST_THREADS: 24
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # Full history for the dispatcher's base comparison.
+          fetch-depth: 0
+
+      # Local storage only: a self-hosted runner gets no remote cache key.
+      # The runner keeps each workspace's target between groups, so Cargo finds
+      # most units fresh without asking mbx. A group's mbx misses are then the
+      # crates its change dirtied, which no cache holds; 0 hits is normal.
+      # Only a group whose target is gone asks mbx for every unit: mbx evicted
+      # it past target.max_size, or rust-cache cleaned it for a new mbx
+      # version. Its misses include dependencies aged out of the local store.
+      - name: Rust cache
+        uses: ./.github/actions/rust-cache
+
+      - name: Check
+        # A cancel or timeout signals only the step's own process, so exec
+        # makes that just (nix develop execs it too), which passes the TERM to
+        # the dispatcher; it then prints what each unfinished lane waits on.
+        run: |
+          rm -rf target/cargo-timings
+          exec nix develop --command just ci "$BASE"
+
+      - name: Upload build timings
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cargo-timings
+          path: target/cargo-timings/cargo-timing-*.html
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # The required `Queue` context, reported on the same runners. A reusable
+  # workflow's jobs report as `Queue build / <job>`, so this job posts `Queue`
+  # as a check run, which GitHub attributes to GitHub Actions as main's ruleset
+  # requires. It runs even when the build fails or is cancelled, so the group
+  # drops at once instead of at the queue's timeout. It checks nothing out and
+  # runs no code from the group.
+  report:
+    name: Report Queue
+    needs: build
+    if: always() && github.event_name == 'merge_group'
+    runs-on: [self-hosted, moq-queue]
+    timeout-minutes: 5
+    permissions:
+      checks: write
+    steps:
+      - name: Report the build's result as Queue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          RESULT: ${{ needs.build.result }}
+        run: |
+          conclusion=failure
+          [[ "$RESULT" == success ]] && conclusion=success
+          gh api "repos/$REPO/check-runs" -f name=Queue -f head_sha="$SHA" -f status=completed -f conclusion="$conclusion" \
+            -f 'output[title]=Queue' -f "output[summary]=The queue build ended $RESULT." --silent
+          [[ "$RESULT" == success ]] || { echo "::error::the queue build ended $RESULT" >&2; exit 1; }
