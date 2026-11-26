@@ -4,8 +4,8 @@
 
 A session opened with `keep_alive: { soft, hard }`, such as 2 s and 10 s,
 learns when its peer goes quiet without closing on it. Both Rust and JS
-take it as an option on connect and accept. Browser WebTransport
-refuses it until [the moq-lite PING](/quest/m3/keep-alive-ping.md) lands.
+take it as an option on connect and accept, over native QUIC and qmux.
+Browser WebTransport refuses it at connect.
 
 - The library sends a QUIC PING only when nothing is in flight, so a busy
   session pays nothing for it.
@@ -31,18 +31,14 @@ Decided 2026-11-25 (maintainer, /quest-plan via kixel-ai/kixel.ai):
   QUIC library would automatically PING if needed".
 - ✅ m1, since it is additive.
 
-Decided 2026-11-25 (maintainer, on
-[moq-dev/moq#9666](https://github.com/moq-dev/moq/pull/9666)): ✅ JS over
-browser WebTransport gets keep-alive from a moq-lite PING message on
-lite-08-wip, so keep-alive works on every transport (rejected: qmux only,
-refusing it on WebTransport for good; polling `getStats()`, which is a timer
-loop). lite-08-wip opens only after [the lite-07
-cut](/quest/m2/lite07-finalize.md), and an m1 quest can't wait on m2. So the
-PING is [its own quest](/quest/m3/keep-alive-ping.md) in m3, and this one
-ships keep-alive now for every transport that can already probe: native QUIC
-in Rust, and qmux in both languages. Until the PING lands, a browser
-WebTransport session refuses the option at connect, so it never passes
-silently.
+Decided 2026-11-25 (maintainer): ✅ no moq-lite PING for now, since
+browsers won't use keep-alive: "just drop PING for now, browsers won't
+support it" (rejected: a moq-lite PING on lite-08-wip; polling `getStats()`).
+This supersedes the same day's decision on
+[moq-dev/moq#9666](https://github.com/moq-dev/moq/pull/9666) to add the PING.
+Keep-alive runs where the transport can already probe: native QUIC in Rust,
+and qmux in both languages. Browser WebTransport has no PING API, so a
+session there refuses the option at connect rather than passing silently.
 
 This reverses one rejection in [moq-dev/moq#7347](https://github.com/moq-dev/moq/pull/7347)'s
 quest (`git show 2a743c82b7^:quest/m2/quic-keep-alive.md`). That quest
@@ -84,5 +80,4 @@ sends about one per `soft / 2`.
 ## Related
 
 - [Route health](/quest/m3/route-health/README.md) - per-track failover, which never relies on QUIC keep-alives
-- [Keep-alive over moq-lite PING](/quest/m3/keep-alive-ping.md) - the wire message that brings it to browser WebTransport
 - [JS session cost](/quest/m1/js-session-cost.md) - Kixel's other link-quality primitive
