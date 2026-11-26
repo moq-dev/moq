@@ -1705,8 +1705,8 @@ where
 	/// video track that dropped one resumes at its next keyframe. A source whose clock runs
 	/// further off ours than 13818-1 lets the PCR follow fails the export once it has used half
 	/// the delay, where a brief network stall only drops what it made late. Every track is
-	/// subscribed with the whole delay as its min and max, so a relay resets a group only once it
-	/// is that old. The export skips a stalled group once it falls the whole delay behind the
+	/// subscribed with the whole delay as its max, so a relay resets a group only once it is that
+	/// old; a live export joins at the edge, and a replay reaches back the whole delay. The export skips a stalled group once it falls the whole delay behind the
 	/// newest content (see [`Consumer`](crate::container::Consumer)), so a stall shorter than the
 	/// delay loses nothing, while a group whose tail never arrives makes the start of the next one
 	/// late.
@@ -4772,7 +4772,8 @@ fn video_kind(config: &VideoConfig, name: &str) -> Result<Kind> {
 }
 
 /// The delay a track subscription states for an export running `delay` behind: all of it, as both
-/// bounds, so a relay resets a group only once it is that old.
+/// bounds, so a relay resets a group only once it is that old and a replay reaches back that far.
+/// A live start joins at the edge whatever the min ([`ExportSource::live`]).
 pub(super) fn subscribed(delay: Duration) -> crate::container::Delay {
 	crate::container::Delay::default().with_min(delay).with_max(delay)
 }

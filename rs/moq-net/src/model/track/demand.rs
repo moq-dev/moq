@@ -102,6 +102,10 @@ pub(super) struct Subscriptions {
 	/// [`Self::ranges`]: a placed join starts where it was placed, whatever its lag, so it
 	/// merges with no other range.
 	placed: BTreeMap<(u64, Option<u64>), BTreeMap<Duration, usize>>,
+	/// History ranges placed at an exact group (lite-07 Position), by group and end. Kept out
+	/// of [`Self::ranges`] so they never trigger time-containment lookup, and out of
+	/// [`Self::placed`] so publisher max-age clamping never expires them.
+	exact: BTreeMap<(u64, Option<u64>), usize>,
 	descending: usize,
 	/// Subscribers that need the live feed; see [`Subscription::feed`].
 	feed: usize,
@@ -196,6 +200,14 @@ impl Subscriptions {
 					min: Some(Duration::ZERO),
 					max: max_of(*budget),
 				},
+				end,
+			});
+		}
+		// Each exact-group history range once, placed at its exact group.
+		for &(group, end) in self.exact.keys() {
+			placed.insert(ranges.len() as u64, group);
+			ranges.push(Range {
+				start: Start::Time(group),
 				end,
 			});
 		}
@@ -585,6 +597,15 @@ impl Subscriptions {
 		let Some(group) = placed else {
 			return self.ranges.add(*range);
 		};
+		if matches!(range.start, Start::Time(_)) {
+			if range.is_empty() {
+				return false;
+			}
+			let key = (*group, range.end);
+			let count = self.exact.entry(key).or_default();
+			*count += 1;
+			return *count == 1;
+		}
 		let budgets = self.placed.entry((*group, range.end)).or_default();
 		let widest = budgets.last_key_value().map(|(budget, _)| *budget);
 		add(budgets, range.budget());
@@ -596,6 +617,19 @@ impl Subscriptions {
 		let Some(group) = placed else {
 			return self.ranges.remove(*range);
 		};
+		if matches!(range.start, Start::Time(_)) {
+			if range.is_empty() {
+				return false;
+			}
+			let key = (*group, range.end);
+			let count = self.exact.get_mut(&key).expect("a counted exact range");
+			*count -= 1;
+			if *count == 0 {
+				self.exact.remove(&key);
+				return true;
+			}
+			return false;
+		}
 		let key = (*group, range.end);
 		let budgets = self.placed.get_mut(&key).expect("a counted placed join");
 		let widest = budgets.last_key_value().map(|(budget, _)| *budget);
@@ -823,7 +857,8 @@ impl Prefs {
 		let retired = ranges.keys().filter(|key| !self.ranges.contains_key(key)).copied();
 		let moved = self.ranges.iter().filter_map(|(key, range)| {
 			let held = (ranges.get(key), joining.get(key).copied());
-			(held != (Some(range), range.join().map(|_| self.joining(*key)))).then_some(*key)
+			let expected = (range.join().is_some() || self.placed.contains_key(key)).then(|| self.joining(*key));
+			(held != (Some(range), expected)).then_some(*key)
 		});
 		retired.chain(moved).collect()
 	}

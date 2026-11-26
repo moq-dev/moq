@@ -1940,9 +1940,9 @@ struct Mirrored {
 impl Mirrored {
 	fn insert(&mut self, key: u64, range: track::Range, joining: Joining) {
 		self.ranges.insert(key, range);
-		match range.join() {
-			Some(_) => _ = self.joining.insert(key, joining),
-			None => _ = self.joining.remove(&key),
+		match (range.join(), joining) {
+			(Some(_), _) | (_, Joining::At(_)) => _ = self.joining.insert(key, joining),
+			(None, Joining::Since(_)) => _ = self.joining.remove(&key),
 		}
 	}
 
@@ -2040,7 +2040,12 @@ fn asked(
 		end: None,
 		floored: true,
 	});
-	range.asked(floor.max(Some(group)), end, Some(resolved))
+	let (asked, keep) = range.asked(floor.max(Some(group)), end, Some(resolved));
+	let keep = keep.or_else(|| match asked.start {
+		track::Start::Time(at) if !asked.is_empty() => Some(at),
+		_ => None,
+	});
+	(asked, keep)
 }
 
 /// `asked` as a subscription's ranges, and where each live join among them was placed, by
@@ -3888,6 +3893,10 @@ impl Recover {
 	pub(super) fn wants(&mut self, cause: &Cause, waiter: &kio::Waiter) -> bool {
 		match cause {
 			Cause::Failed(err) if self.undelivered(err) => return true,
+			// An explicit Position End back-cut always wants recovery once: even if a
+			// Stalled poll after switch-back advanced `self.generation` before the old
+			// bare FIN arrived, the copy will not deliver frames past `range_end`.
+			Cause::Cut => return true,
 			Cause::Stalled | Cause::Closed if copy_failed(&self.copy) => return true,
 			Cause::Closed if self.route.consumer().read().staged.is_some() => return true,
 			_ => {}
@@ -3897,10 +3906,14 @@ impl Recover {
 			.poll(waiter, |route| route.moved_past(self.generation))
 			.is_ready()
 		{
-			// A route that returned serves the copy being read again, which the reader reuses.
-			// Closed routes stay ready forever, so they end the wait like a conclusion.
+			// A route that returned serves the copy being read again, which the reader reuses
+			// for a stalled group. A group that closed short while another route served will
+			// not resume on the same subscription, so recover from the serving route.
 			let route = self.route.consumer().read();
-			if route.phase.terminal() || !route.copy.as_ref().is_some_and(|copy| copy.same_channel(&self.copy)) {
+			if matches!(cause, Cause::Closed)
+				|| route.phase.terminal()
+				|| !route.copy.as_ref().is_some_and(|copy| copy.same_channel(&self.copy))
+			{
 				return true;
 			}
 			self.generation = route.generation;
@@ -4023,10 +4036,10 @@ impl Recover {
 			if let Some(Err(err)) = &end {
 				return Poll::Ready(Err(err.clone()));
 			}
-			// A failed group continues from any copy still holding it, newest first: its name
-			// fixes its content. A stall only moves to the serving copy, so two stalled copies
-			// never trade the group back and forth.
-			if failed.is_some()
+			// A failed or Position-cut group continues from any copy still holding frames past
+			// `index`, newest first: its name fixes its content. A stall only moves to the
+			// serving copy, so two stalled copies never trade the group back and forth.
+			if (failed.is_some() || matches!(cause, Cause::Cut))
 				&& let Some(replacement) = self.held(index)
 			{
 				return Poll::Ready(Ok(replacement));
@@ -4051,6 +4064,8 @@ impl Recover {
 				// Nothing replaced a copy that closed the group, as when its track parks, so its
 				// close stands.
 				(None, Cause::Closed) => return Poll::Ready(Err(Error::NotFound)),
+				(None, Cause::Cut) if staged.is_none() || done => return Poll::Ready(Err(Error::Evicted)),
+				(None, Cause::Cut) => return Poll::Pending,
 				// Nothing serves: a failed copy waits for a route, unless none will come.
 				(None, _) => {
 					return match (failed, done) {
@@ -4061,21 +4076,35 @@ impl Recover {
 			};
 			if generation == self.generation {
 				match cause {
-					// The copy being read still serves: only a failure asks it again.
+					// The copy being read still serves: only a failure or an explicit
+					// Position End cut asks it again for the missing suffix.
 					Cause::Stalled => return Poll::Pending,
 					// Its route failed, or the front stages the copy to replace it, so that one
 					// may hold more, unless none will come.
-					Cause::Closed if (copy_failed(&self.copy) || staged.is_some()) && !done => return Poll::Pending,
+					Cause::Closed if (copy_failed(&self.copy) || staged.is_some()) && !done => {
+						return Poll::Pending;
+					}
 					// It serves on with no front to replace it, so its close stands.
 					Cause::Closed => return Poll::Ready(Err(Error::NotFound)),
-					Cause::Failed(_) => {}
+					Cause::Cut | Cause::Failed(_) => {}
 				}
 			}
-			let res = self.poll_serving(generation, &serving, index, settled, withdrawn.is_none(), waiter);
+			let mut res = self.poll_serving(generation, &serving, index, settled, withdrawn.is_none(), waiter);
+			// A delayed Position-cut FIN arriving while the front stages a replacement route
+			// still polls the serving route so an already-available suffix does not stall,
+			// deferring only a terminal refusal until the staged route splices or withdraws
+			// while still applying the reader's expiry budget below.
+			if matches!(cause, Cause::Cut) && staged.is_some() && !done && matches!(res, Poll::Ready(Err(_))) {
+				res = Poll::Pending;
+			}
 			// The serving route failed too, or will not fetch the rest while its subscription
 			// will not deliver it either, and no front is left to replace it.
 			if res.is_pending() && settled && done && (copy_failed(&serving) || self.refused(generation, &serving)) {
-				return Poll::Ready(Err(failed.cloned().unwrap_or(Error::NotFound)));
+				let fallback = match cause {
+					Cause::Cut => Error::Evicted,
+					_ => Error::NotFound,
+				};
+				return Poll::Ready(Err(failed.cloned().unwrap_or(fallback)));
 			}
 			// Judged within the reader's window, as a moved group is: the serving copy's
 			// subscription starts at the boundary, and newer groups it holds for others outside
@@ -4112,7 +4141,7 @@ impl Recover {
 			let group = copy.track.peek_group(self.key)?;
 			lend_head(&self.handoff, self.key, &copy.track, &group);
 			let group = group.with_range(index..);
-			(group.index() == index).then(|| Replacement {
+			(group.index() == index && !group.past_cut(index as usize)).then(|| Replacement {
 				group,
 				generation: copy.generation,
 				copy: copy.track.clone(),
@@ -4135,10 +4164,10 @@ impl Recover {
 		// failed delivered it already, so its subscription will not again.
 		let same = generation == self.generation;
 		match serving.poll_group(self.key, waiter) {
-			Poll::Ready(Ok(Some(group))) if !same => {
+			Poll::Ready(Ok(Some(group))) if !same && !serving.same_channel(&self.copy) => {
 				lend_head(&self.handoff, self.key, serving, &group);
 				let group = group.with_range(index..);
-				if group.index() == index {
+				if group.index() == index && !group.past_cut(index as usize) {
 					return Poll::Ready(Ok(Replacement {
 						group,
 						generation,
@@ -4310,6 +4339,9 @@ pub(super) enum Cause {
 	/// front replaced it or while it stages a replacement: the route replacing it may hold
 	/// more.
 	Closed,
+	/// The copy was cut short at a Position End cap (lite-07 bare FIN under a mid-group cap):
+	/// another retained copy or a fetch from the serving route can supply the remaining suffix.
+	Cut,
 	/// The copy failed with this error.
 	Failed(Error),
 }
@@ -4319,7 +4351,7 @@ impl Cause {
 	pub(super) fn error(&self) -> Option<&Error> {
 		match self {
 			Self::Failed(err) => Some(err),
-			Self::Stalled | Self::Closed => None,
+			Self::Stalled | Self::Closed | Self::Cut => None,
 		}
 	}
 }
@@ -4329,6 +4361,7 @@ impl std::fmt::Display for Cause {
 		match self {
 			Self::Stalled => f.write_str("stalled behind a newer route"),
 			Self::Closed => f.write_str("closed short after the route moved"),
+			Self::Cut => f.write_str("cut short at a Position End cap"),
 			Self::Failed(err) => err.fmt(f),
 		}
 	}

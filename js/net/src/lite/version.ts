@@ -70,6 +70,22 @@ export function hasTrackStream(version: Version): boolean {
 	}
 }
 
+/**
+ * Whether the session supports the FETCH control stream (0x3).
+ *
+ * Present in lite-05 and lite-06; lite-07 removes FETCH in favor of bounded one-shot SUBSCRIBE
+ * streams.
+ */
+export function hasFetch(version: Version): boolean {
+	switch (version) {
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return true;
+		default:
+			return false;
+	}
+}
+
 /** Whether the session carries unreliable datagrams, from lite-05 onward. */
 export function hasDatagrams(version: Version): boolean {
 	// Explicitly list older versions so future versions default to having datagrams.
