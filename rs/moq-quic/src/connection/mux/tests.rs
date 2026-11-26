@@ -644,6 +644,84 @@ fn backpressure_defers_the_idle_timeout_once() {
 	assert!(matches!(lost(&mut pair.server), Some(ConnectionError::TimedOut)));
 }
 
+/// Under a keep-alive, a silent peer turns stale after `soft` and live again on its next record,
+/// and the session closes once `hard` passes unheard
+#[test]
+fn keep_alive_turns_stale_then_live_then_closes() {
+	let ms = Duration::from_millis;
+	// Without RTT probes, every QX_PING is the keep-alive's.
+	let mut pair = Pair::new(Config {
+		rtt_interval: None,
+		..config(Version::QMux02)
+	});
+	pair.server.set_keep_alive(KeepAlive::new(ms(2_000), ms(10_000))).unwrap();
+	let start = pair.now;
+
+	// An idle, answering peer stays live, drawing one QX_PING per half of `soft`.
+	let before = pair.server.next_ping;
+	for _ in 0..40 {
+		pair.advance(ms(250));
+		pair.drive();
+		assert!(!pair.server.is_stale());
+	}
+	let pings = pair.server.next_ping - before;
+	assert!((9..=11).contains(&pings), "{pings} pings in 10 s");
+
+	// The client stops answering: the server's records go nowhere.
+	let woken = Counter::new();
+	assert!(pair.server.poll_stale(&woken, false).is_pending());
+	let silent = pair.now;
+	let mut stale_at = None;
+	while pair.now < silent.saturating_add(ms(4_000)) {
+		pair.advance(ms(50));
+		while pair.server.transmit(pair.now).is_some() {}
+		if stale_at.is_none() && pair.server.is_stale() {
+			stale_at = Some(pair.now);
+		}
+	}
+	let stale_after = stale_at.expect("turned stale") - silent;
+	assert!(stale_after <= ms(2_000), "stale after {stale_after:?}");
+	assert_eq!(woken.wakes(), 1);
+	assert!(pair.server.poll_stale(&kio::Waiter::noop(), true).is_pending());
+
+	// It heals before `hard`: the server's next QX_PING draws a response, turning it live again.
+	let healed = pair.now;
+	while pair.server.is_stale() {
+		pair.advance(ms(50));
+		pair.drive();
+		assert!(pair.now - healed <= ms(1_000), "still stale after healing");
+	}
+	assert!(matches!(pair.server.poll_stale(&kio::Waiter::noop(), true), Poll::Ready(false)));
+
+	// Then it goes silent for good: the server closes once `hard` passes unheard.
+	let silent = pair.now;
+	while !pair.server.is_closed() {
+		pair.advance(ms(50));
+		while pair.server.transmit(pair.now).is_some() {}
+		assert!(pair.now - silent <= ms(10_050), "still open past hard");
+	}
+	assert!(pair.now - silent >= ms(10_000));
+	assert!(matches!(lost(&mut pair.server), Some(ConnectionError::TimedOut)));
+	assert!(pair.now - start > ms(10_000));
+}
+
+/// Draft-00 has no QX_PING, and a `hard` past the idle timeout would never be reached
+#[test]
+fn keep_alive_refusals() {
+	let secs = Duration::from_secs;
+	let mut pair = Pair::new(config(Version::QMux00));
+	assert_eq!(
+		pair.client.set_keep_alive(KeepAlive::new(secs(2), secs(10))),
+		Err(KeepAliveError::Unsupported)
+	);
+	let mut pair = Pair::new(config(Version::QMux02));
+	assert!(matches!(
+		pair.client.set_keep_alive(KeepAlive::new(secs(2), secs(31))),
+		Err(KeepAliveError::IdleTimeout { .. })
+	));
+	pair.client.set_keep_alive(KeepAlive::new(secs(2), secs(30))).unwrap();
+}
+
 #[test]
 fn handshake_timeout() {
 	let now = Instant::now();

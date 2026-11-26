@@ -56,6 +56,10 @@ mod datagrams;
 use datagrams::DatagramState;
 pub use datagrams::Datagrams;
 
+mod keep_alive;
+pub use keep_alive::{KeepAlive, KeepAliveError};
+use keep_alive::Liveness;
+
 mod mtud;
 pub mod mux;
 
@@ -213,6 +217,10 @@ pub struct Connection {
 	idle_timeout: Option<Duration>,
 	/// Keep-alive interval, derived from [`Self::idle_timeout`] unless configured
 	keep_alive: Option<Duration>,
+	/// The keep-alive [`Self::set_keep_alive`] started, which replaces [`Self::keep_alive`]
+	liveness: Option<Liveness>,
+	/// When the peer was last heard: the latest authenticated packet
+	heard: Instant,
 	/// The time we send next bundled ACK
 	///
 	/// The goal is to wait long enough for the peer to acknowledge our previous
@@ -368,6 +376,8 @@ impl Connection {
 			},
 			// Armed only once established, after the peer's parameters set it.
 			keep_alive: None,
+			liveness: None,
+			heard: now,
 			timers: TimerTable::default(),
 			authentication_failures: 0,
 			early_1rtt: Vec::new(),
@@ -1444,7 +1454,7 @@ impl Connection {
 				// A datagram read after the idle deadline, as one buffered while this process was
 				// stopped, finds the connection already timed out: handling it first would restart
 				// the idle timer, and its ACKs would fold the stop into the RTT and so into 3 * PTO.
-				if self.timers.is_expired(Timer::Idle, now) {
+				if self.timers.is_expired(Timer::Idle, now) || self.timers.is_expired(Timer::Silent, now) {
 					self.handle_timeout(now);
 					return;
 				}
@@ -1537,9 +1547,20 @@ impl Connection {
 						false => Error::TimedOut,
 					});
 				}
+				Timer::KeepAlive if self.liveness.is_some() => self.probe(now),
 				Timer::KeepAlive => {
 					trace!("sending keep-alive");
 					self.ping();
+				}
+				Timer::Stale => {
+					if self.liveness.as_mut().is_some_and(|liveness| liveness.expire(now)) {
+						debug!("peer is stale");
+						self.streams.waits.wake_stale();
+					}
+				}
+				Timer::Silent => {
+					debug!("keep-alive closing on a silent peer");
+					self.kill(Error::TimedOut);
 				}
 				Timer::LossDetection => {
 					self.on_loss_detection_timeout(now);
@@ -1902,6 +1923,39 @@ impl Connection {
 	/// since credit already granted outlives a shrink; see [`Limits::stream_receive_window`]
 	pub fn stream_receive_window(&self) -> u64 {
 		self.streams.peak_stream_receive_window()
+	}
+
+	/// Start `keep_alive`, replacing any running, measured from when the peer was last heard
+	///
+	/// It replaces the keep-alive [`transport::Config::keep_alive`] derives: a PING goes out each
+	/// half of `soft` the peer stays unheard and nothing else ack-eliciting went out, the peer turns stale
+	/// once all of `soft` passes (see [`Self::poll_stale`]), and the connection closes as
+	/// [`Error::TimedOut`] once `hard` does. Errors, changing nothing, on a `hard` longer than the
+	/// negotiated idle timeout, which stays in force as a backstop.
+	pub fn set_keep_alive(&mut self, keep_alive: KeepAlive) -> Result<(), KeepAliveError> {
+		let liveness = Liveness::new(keep_alive, self.idle_timeout, self.heard)?;
+		if self.liveness.replace(liveness).is_some_and(|old| old.is_stale()) {
+			self.streams.waits.wake_stale();
+		}
+		self.arm_liveness();
+		// The driver reads the new deadlines when it next polls.
+		self.streams.waits.wake_transmit();
+		Ok(())
+	}
+
+	/// Whether a [`KeepAlive`] found the peer unheard for its `soft` limit
+	pub fn is_stale(&self) -> bool {
+		self.liveness.as_ref().is_some_and(Liveness::is_stale)
+	}
+
+	/// Wait until [`Self::is_stale`] differs from `stale`, returning the new value
+	pub fn poll_stale(&mut self, waiter: &kio::Waiter, stale: bool) -> Poll<bool> {
+		let now = self.is_stale();
+		if now != stale {
+			return Poll::Ready(now);
+		}
+		self.streams.waits.register_stale(waiter);
+		Poll::Pending
 	}
 
 	/// Change every limit `limits` sets, leaving the others as they are
@@ -2570,6 +2624,14 @@ impl Connection {
 		packet: Option<u64>,
 		spin: bool,
 	) {
+		self.heard = self.heard.max(now);
+		if let Some(liveness) = &mut self.liveness
+			&& liveness.heard(now)
+		{
+			debug!("peer is live again");
+			self.streams.waits.wake_stale();
+		}
+		self.arm_liveness();
 		self.reset_keep_alive(now);
 		self.reset_idle_timeout(now, space_id);
 		self.permit_idle_reset = true;
@@ -2621,6 +2683,10 @@ impl Connection {
 	}
 
 	fn reset_keep_alive(&mut self, now: Instant) {
+		// A keep-alive counts only what the peer sends; see [`Self::arm_liveness`].
+		if self.liveness.is_some() {
+			return;
+		}
 		let interval = match self.keep_alive {
 			Some(x) if self.state.is_established() => x,
 			_ => return,
@@ -2631,6 +2697,43 @@ impl Connection {
 			Some(deadline) => self.timers.set(Timer::KeepAlive, deadline),
 			None => self.timers.stop(Timer::KeepAlive),
 		}
+	}
+
+	/// Probe an unheard peer under a keep-alive, unless something ack-eliciting went out within half
+	/// of its `soft`, then check again half a `soft` after the latest
+	///
+	/// Ack-eliciting packets on a dead path stay in flight, and PTO probes back off exponentially,
+	/// so this bounds the gap between probes: a path that heals is heard within half a `soft`.
+	fn probe(&mut self, now: Instant) {
+		let Some(liveness) = &self.liveness else {
+			return;
+		};
+		let after = liveness.probe_after();
+		let sent = self.spaces[SpaceId::Data].time_of_last_ack_eliciting_packet;
+		match sent.map(|sent| sent.saturating_add(after)).filter(|&at| at > now) {
+			Some(at) => self.timers.set(Timer::KeepAlive, at),
+			None => {
+				trace!("sending keep-alive probe");
+				self.ping();
+				self.timers.set(Timer::KeepAlive, now.saturating_add(after));
+			}
+		}
+	}
+
+	/// Arm the keep-alive's probe, stale, and silent timers from when the peer was last heard
+	fn arm_liveness(&mut self) {
+		let Some(liveness) = &self.liveness else {
+			return;
+		};
+		if self.state.is_closed() {
+			return;
+		}
+		self.timers.set(Timer::KeepAlive, liveness.probe_at());
+		match liveness.stale_at() {
+			Some(at) => self.timers.set(Timer::Stale, at),
+			None => self.timers.stop(Timer::Stale),
+		}
+		self.timers.set(Timer::Silent, liveness.silent_at());
 	}
 
 	fn reset_cid_retirement(&mut self) {
@@ -4352,7 +4455,7 @@ impl Connection {
 		self.streams.receive_rate_deadline()
 	}
 
-	/// Whether no timers but keepalive, idle, rtt, pushnewcid, and key discard are running
+	/// Whether no timers but keepalive, idle, rtt, pushnewcid, key discard, stale, and silent are running
 	#[cfg(test)]
 	pub(crate) fn is_idle(&self) -> bool {
 		if self.streams.receive_rate_deadline().is_some() {
@@ -4360,7 +4463,12 @@ impl Connection {
 		}
 		Timer::VALUES
 			.iter()
-			.filter(|&&t| !matches!(t, Timer::KeepAlive | Timer::PushNewCid | Timer::KeyDiscard))
+			.filter(|&&t| {
+				!matches!(
+					t,
+					Timer::KeepAlive | Timer::PushNewCid | Timer::KeyDiscard | Timer::Stale | Timer::Silent
+				)
+			})
 			.filter_map(|&t| Some((t, self.timers.get(t)?)))
 			.min_by_key(|&(_, time)| time)
 			.is_none_or(|(timer, _)| timer == Timer::Idle)

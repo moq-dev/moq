@@ -11,9 +11,13 @@
 //! when latency matters and the keep-alive never fires. While the transport refuses writes,
 //! the peer is evidently there but slow, so the idle close is deferred by at most one more
 //! window.
+//!
+//! A [`KeepAlive`] also pings every half of its `soft` limit while the peer stays unheard, marks
+//! the peer stale once all of `soft` passes, and closes once `hard` does.
 
 use std::collections::VecDeque;
 
+use crate::connection::keep_alive::{KeepAlive, KeepAliveError, Liveness};
 use crate::{Duration, Instant};
 
 /// The most unanswered probes tracked. A peer that answers retires them at once, so this
@@ -42,6 +46,8 @@ pub(super) struct Timer {
 	/// Probes sent and not yet answered, oldest first, with the time each was written
 	outstanding: VecDeque<(u64, Instant)>,
 	rtt: Option<Duration>,
+
+	liveness: Option<Liveness>,
 }
 
 /// What [`Timer::poll`] found due
@@ -50,6 +56,8 @@ pub(super) struct Due {
 	pub(super) handshake: bool,
 	pub(super) idle: bool,
 	pub(super) ping: bool,
+	/// The peer just turned stale
+	pub(super) stale: bool,
 }
 
 impl Timer {
@@ -67,7 +75,19 @@ impl Timer {
 			backpressured: false,
 			outstanding: VecDeque::new(),
 			rtt: None,
+			liveness: None,
 		}
+	}
+
+	/// Start `keep_alive`, measured from the last record received; see [`Due::stale`]
+	pub(super) fn set_keep_alive(&mut self, keep_alive: KeepAlive) -> Result<Option<Liveness>, KeepAliveError> {
+		let liveness = Liveness::new(keep_alive, self.idle, self.last_recv)?;
+		Ok(self.liveness.replace(liveness))
+	}
+
+	/// Whether a keep-alive found the peer unheard for its `soft` limit
+	pub(super) fn is_stale(&self) -> bool {
+		self.liveness.as_ref().is_some_and(Liveness::is_stale)
 	}
 
 	/// Arm the idle timeout and RTT probing once the peer's parameters arrive
@@ -81,10 +101,12 @@ impl Timer {
 		self.last_ping = self.last_send.max(now);
 	}
 
-	pub(super) fn on_recv(&mut self, now: Instant) {
+	/// A record arrived at `now`; returns whether that ended a stale stretch
+	pub(super) fn on_recv(&mut self, now: Instant) -> bool {
 		self.last_recv = now;
 		self.send_credit = true;
 		self.deferred = None;
+		self.liveness.as_mut().is_some_and(|liveness| liveness.heard(now))
 	}
 
 	pub(super) fn on_send(&mut self, now: Instant) {
@@ -117,7 +139,18 @@ impl Timer {
 			.keepalive()
 			.map(|every| self.last_send.max(self.last_ping).saturating_add(every));
 		let rtt = self.rtt_interval.map(|every| self.last_ping.saturating_add(every));
-		[self.handshake, idle, keepalive, rtt].into_iter().flatten().min()
+		let liveness = self.liveness.as_ref().map(|liveness| {
+			let probe = liveness.probe_at().max(self.last_ping.saturating_add(liveness.probe_after()));
+			[Some(probe), liveness.stale_at(), Some(liveness.silent_at())]
+				.into_iter()
+				.flatten()
+				.min()
+				.expect("probe and silent are always set")
+		});
+		[self.handshake, idle, keepalive, rtt, liveness]
+			.into_iter()
+			.flatten()
+			.min()
 	}
 
 	pub(super) fn poll(&mut self, now: Instant) -> Due {
@@ -132,7 +165,13 @@ impl Timer {
 		let rtt = self
 			.rtt_interval
 			.is_some_and(|every| now >= self.last_ping.saturating_add(every));
-		if keepalive || rtt {
+		// Probe every half of `soft` while the peer stays unheard.
+		let probe = self.liveness.as_ref().is_some_and(|liveness| {
+			now >= liveness
+				.probe_at()
+				.max(self.last_ping.saturating_add(liveness.probe_after()))
+		});
+		if keepalive || rtt || probe {
 			// A ping cannot get past a stalled transport, and must not pile up behind it
 			due.ping = !self.backpressured;
 			self.last_ping = now;
@@ -147,6 +186,11 @@ impl Timer {
 				None if self.backpressured => self.deferred = Some(now),
 				None => due.idle = true,
 			}
+		}
+		// The hard limit closes whatever the transport's backpressure, unlike the idle timeout.
+		if let Some(liveness) = &mut self.liveness {
+			due.stale = liveness.expire(now);
+			due.idle |= now >= liveness.silent_at();
 		}
 		due
 	}
