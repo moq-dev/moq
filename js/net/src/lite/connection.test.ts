@@ -1368,11 +1368,61 @@ test("a bidirectional stream of the Announce type is unknown to moq-lite-07", as
 	try {
 		const stream = await Stream.open(pair.server, { version });
 		await stream.writer.u53(StreamId.Announce);
-		await stream.writer.write(new Uint8Array([1, 0]));
+		// Server rejects the unknown stream type with both RESET_STREAM and STOP_SENDING.
+		await stream.writer.write(new Uint8Array([1, 0])).catch(() => {});
 		await expect(stream.reader.readAll()).rejects.toThrow();
 		await settle();
 		expect(closed).toBe(false);
 	} finally {
 		connection.abort();
+	}
+});
+
+// Lite-07 removes FETCH (bidi 0x3): it resets only that stream while keeping the session alive
+// so subsequent SUBSCRIBE requests still succeed.
+test("a bidirectional stream of the Fetch type is unknown to moq-lite-07", async () => {
+	const version = Version.DRAFT_07;
+	const pair = createMockTransportPair(ALPN_07_WIP);
+	const origin = new Producer();
+	const route = origin.route(Path.from("room"));
+	const producer = defined(route.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
+	const g0 = hooks.appendNext(producer);
+	g0.writeFrame(textFrame("ok", Timestamp.fromMillis(0)));
+	g0.finish();
+
+	const server = new Connection({
+		url: new URL("https://relay.example/"),
+		quic: pair.server,
+		version,
+		publish: origin.consume(),
+	});
+	const client = new Connection({
+		url: new URL("https://relay.example/"),
+		quic: pair.client,
+		version,
+	});
+	let closed = false;
+	void pair.server.closed.then(() => {
+		closed = true;
+	});
+	try {
+		const stream = await Stream.open(pair.client, { version });
+		await stream.writer.u53(StreamId.Fetch);
+		// Server rejects FETCH on lite-07 with both RESET_STREAM and STOP_SENDING.
+		await stream.writer.write(new Uint8Array([1, 0])).catch(() => {});
+		await expect(stream.reader.readAll()).rejects.toThrow();
+		await settle();
+		expect(closed).toBe(false);
+
+		// Session is still healthy and serves fetches via one-shot SUBSCRIBE.
+		const fetched = await wireOf(client).consume(Path.from("room")).track("video").fetchGroup(0n);
+		const frame = await fetched.readFrame();
+		expect(new TextDecoder().decode(frame?.payload)).toBe("ok");
+		fetched.close();
+	} finally {
+		client.abort();
+		server.abort();
+		route.broadcast.close();
+		origin.close();
 	}
 });

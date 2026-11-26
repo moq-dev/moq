@@ -5521,6 +5521,7 @@ export class Subscriber {
 			const producer = subscriber.#state.producer;
 			return producer !== undefined && cachedHolds(producer, key, whole);
 		};
+		hooks.producerHoldsGroup = (producer, key, whole) => cachedHolds(producer, key, whole);
 		hooks.holeEnd = (subscriber, key, dropped) => holeEnd(subscriber.#state.drops, key, dropped);
 		hooks.wholeEnd = (subscriber, key) => {
 			// A reader following route copies knows what the serving copy holds, as the Rust

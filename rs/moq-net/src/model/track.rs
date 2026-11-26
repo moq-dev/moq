@@ -8514,6 +8514,35 @@ impl Consumer {
 		})
 	}
 
+	/// Non-blocking snapshot of this hop's live edge (`Some((position, ended))` when known,
+	/// `None` when unknown, e.g. a relay copy whose upstream has not answered yet).
+	#[cfg(feature = "async")]
+	pub(crate) fn live_edge(&self) -> Option<(Option<Position>, bool)> {
+		self.with_state(|state| {
+			let state = state?;
+			let state = state.read();
+			if let Some(routes) = state.routes.clone() {
+				drop(state);
+				return routes.serving()?.live_edge();
+			}
+			if !state.readable() {
+				return None;
+			}
+			let ended = state.outcome.is_final() || state.declared().is_some();
+			let pos = state.cache.largest();
+			let known = match state.edge {
+				EdgeSource::Cache => true,
+				EdgeSource::Answer { answered } => answered || ended,
+				EdgeSource::FirstGroup { .. } => pos.is_some() || ended,
+			};
+			if !known {
+				return None;
+			}
+			let largest_ended = pos.is_some_and(|p| state.cache.largest_finished(p));
+			Some((pos, largest_ended))
+		})
+	}
+
 	/// Poll for a largest frame within `bounds` newer than `seen`, recording it there. A
 	/// front's logical track follows the route serving it. Reads the instance served now
 	/// without asking for it, so a broadcast serving nothing under the name ends the stream.
@@ -13874,6 +13903,21 @@ impl Subscriber {
 				cursor.filter.window.covered_by(from, bounds.end, accounted)
 			}
 			Inner::Resume(resume, _) => resume.covered(from, bounds.end, accounted),
+		}
+	}
+
+	/// Whether what the wire was told in this subscriber's record holds every group from
+	/// `from` on that its bounded ranges name; see [`Self::covered`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn told_covered(&mut self, from: u64) -> bool {
+		let bounds = self.bounds();
+		let from = from.max(bounds.start);
+		match &mut self.inner {
+			Inner::Plain(cursor) => {
+				cursor.sync();
+				cursor.filter.window.covered_by(from, bounds.end, &cursor.record)
+			}
+			Inner::Resume(resume, logical) => resume.covered(from, bounds.end, &logical.record),
 		}
 	}
 

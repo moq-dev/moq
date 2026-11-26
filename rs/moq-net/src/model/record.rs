@@ -9,7 +9,7 @@ use rangemap::{RangeMap, RangeSet};
 use super::cache;
 use super::delivered::Delivered;
 use super::skipped::Skipped;
-use super::subscription::{Cover, minus};
+use super::subscription::{Accounted, Cover, minus};
 use super::track::Hole;
 
 /// Heap a record keeps per run: its widest entry, doubled for half-full `BTreeMap` nodes as
@@ -169,6 +169,16 @@ impl Record {
 	/// take a report back.
 	pub fn hold(&mut self, held: bool) {
 		self.held = held;
+	}
+}
+
+impl Accounted for Record {
+	fn first_gap(&self, range: &Range<u64>) -> Option<u64> {
+		let range = range.start.max(self.floor)..range.end;
+		if range.is_empty() {
+			return None;
+		}
+		self.reported.gaps(&range).next().map(|gap| gap.start)
 	}
 }
 
