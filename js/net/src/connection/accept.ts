@@ -1,5 +1,5 @@
 import type { Duration } from "@moq/clock";
-import { race } from "@moq/signals";
+import { type Getter, race } from "@moq/signals";
 import { ConnectTimeout, closeReason, error, fromClose, ProtocolViolation } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
 import { IMPLEMENTATION } from "../implementation.ts";
@@ -10,6 +10,7 @@ import { untilAborted } from "../util/abort.ts";
 import { after } from "../util/timer.ts";
 import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
 import { DEFAULT_TIMEOUT, exchangeSetup, handsOff } from "./handshake.ts";
+import * as KeepAlive from "./keep_alive.ts";
 import type { Session } from "./session.ts";
 
 /** Options for {@link Connection.accept}. */
@@ -41,6 +42,9 @@ export interface AcceptProps {
 
 	/** The implementation this side advertises in SETUP; see the `implementation` connect option. */
 	implementation?: string;
+
+	/** Probe a quiet client and report it through the session's `liveness`; see the `keepAlive` connect option. */
+	keepAlive?: KeepAlive.KeepAlive;
 }
 
 /** The per-session wiring shared by every negotiated protocol path. */
@@ -50,6 +54,8 @@ type SessionProps = {
 	client: boolean;
 	/** The implementation this side advertises in SETUP; empty sends nothing. */
 	implementation: string;
+	/** The peer's liveness, under a keep-alive. */
+	liveness?: Getter<KeepAlive.Liveness>;
 };
 
 /**
@@ -108,6 +114,7 @@ async function acceptInner(
 		publish: props.publish,
 		client: false,
 		implementation: props.implementation ?? IMPLEMENTATION,
+		liveness: props.keepAlive && KeepAlive.start(transport, props.keepAlive),
 	};
 
 	if (protocol === Ietf.ALPN.DRAFT_23) {

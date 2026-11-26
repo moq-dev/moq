@@ -25,6 +25,7 @@ import { parse } from "./endpoint.ts";
 import { DISCOVERY_REMOVED } from "./forward.ts";
 import { DEFAULT_HANDOVER, dialed, type Goaway, type Handover, handover, pinnedTransport, target } from "./goaway.ts";
 import { DEFAULT_TIMEOUT } from "./handshake.ts";
+import type { KeepAlive } from "./keep_alive.ts";
 import type { Session } from "./session.ts";
 import { estimates, type Probe } from "./stats.ts";
 import { tick } from "./ticker.ts";
@@ -317,6 +318,9 @@ export class Reload {
 	/** WebTransport options applied to each connection attempt (not reactive). */
 	webtransport?: WebTransportProps;
 
+	/** The keep-alive each connection runs (not reactive); see {@link ConnectProps.keepAlive}. */
+	readonly keepAlive?: KeepAlive;
+
 	/** WebSocket fallback options applied to each connection attempt (not reactive). */
 	websocket: WebSocketProps | undefined;
 
@@ -443,6 +447,7 @@ export class Reload {
 		this.urlAuth = props?.urlAuth;
 		this.webtransport = props?.webtransport;
 		this.websocket = props?.websocket;
+		this.keepAlive = props?.keepAlive;
 		// Validated here, like the versions, rather than by every attempt.
 		this.timeout = props?.timeout;
 		this.publish = props?.publish;
@@ -669,6 +674,7 @@ export class Reload {
 									: this.websocket,
 								versions: this.versions,
 								webtransport: this.webtransport,
+								keepAlive: this.keepAlive,
 								timeout,
 								publish: this.publish,
 								consume: this.consume,
@@ -891,7 +897,8 @@ export class Reload {
 	 */
 	async #probe(connection: Session, dialing: URL, signal: AbortSignal): Promise<Reached> {
 		const never = new Promise<never>(() => {});
-		if (connection.transport !== "websocket" || !isWebTransportSupported()) return never;
+		// WebTransport cannot run a keep-alive, so a session under one stays on the WebSocket.
+		if (connection.transport !== "websocket" || !isWebTransportSupported() || connection.liveness) return never;
 		try {
 			for (let delay = PROBE_INITIAL; ; delay = delay.mul(2).min(PROBE_MAX)) {
 				await sleep(delay.mul(0.5 + Math.random() / 2), { signal });

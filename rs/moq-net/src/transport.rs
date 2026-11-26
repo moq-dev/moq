@@ -321,6 +321,19 @@ pub enum LimitsError {
 	Refused(String),
 }
 
+/// Why a transport refused a [`KeepAlive`](crate::session::KeepAlive).
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum KeepAliveError {
+	/// The transport cannot probe its peer, such as browser WebTransport or qmux draft-00.
+	#[error("the transport cannot probe its peer")]
+	Unsupported,
+	/// The transport refused the values, with its reason, such as a hard limit past its idle
+	/// timeout.
+	#[error("keep-alive refused: {0}")]
+	Refused(String),
+}
+
 /// The smallest connection receive window a transport that leases may offer: one 1 MiB
 /// storage segment.
 ///
@@ -541,6 +554,30 @@ pub mod poll {
 			Err(super::LimitsError::Unsupported)
 		}
 
+		/// Start `keep_alive`: probe the peer once half of its `soft` passes unheard, report it
+		/// [`Stale`](crate::session::Liveness::Stale) through [`poll_liveness`](Self::poll_liveness)
+		/// once all of `soft` does, and close as an idle timeout once `hard` does. Any packet the
+		/// peer sends counts as hearing it, so a busy session sends no probe.
+		///
+		/// Errors with [`KeepAliveError::Unsupported`](super::KeepAliveError::Unsupported) when
+		/// the transport cannot probe its peer, which is the default, so the option never passes
+		/// silently.
+		fn set_keep_alive(&self, keep_alive: crate::session::KeepAlive) -> Result<(), super::KeepAliveError> {
+			let _ = keep_alive;
+			Err(super::KeepAliveError::Unsupported)
+		}
+
+		/// Poll until the peer's liveness differs from `last`, returning it. Pending forever
+		/// without a keep-alive.
+		fn poll_liveness(
+			&self,
+			waiter: &kio::Waiter,
+			last: crate::session::Liveness,
+		) -> Poll<crate::session::Liveness> {
+			let _ = (waiter, last);
+			Poll::Pending
+		}
+
 		/// Accept the next unidirectional stream opened by the peer.
 		fn accept_uni(&self) -> AcceptUni<'_, Self> {
 			AcceptUni::new(self)
@@ -752,6 +789,18 @@ pub mod poll {
 
 		fn set_limits(&self, limits: super::Limits) -> Result<(), super::LimitsError> {
 			(**self).set_limits(limits)
+		}
+
+		fn set_keep_alive(&self, keep_alive: crate::session::KeepAlive) -> Result<(), super::KeepAliveError> {
+			(**self).set_keep_alive(keep_alive)
+		}
+
+		fn poll_liveness(
+			&self,
+			waiter: &kio::Waiter,
+			last: crate::session::Liveness,
+		) -> Poll<crate::session::Liveness> {
+			(**self).poll_liveness(waiter, last)
 		}
 	}
 

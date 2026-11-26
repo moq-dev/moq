@@ -4,6 +4,7 @@ import * as announce from "../announced.ts";
 import type * as Auth from "../auth.ts";
 import { AuthSession } from "../auth_session.ts";
 import type { Goaway as Received } from "../connection/goaway.ts";
+import type { Liveness } from "../connection/keep_alive.ts";
 import type { Session } from "../connection/session.ts";
 import { detect, type Probe, type Stats, statsOf, type TransportStats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
@@ -77,6 +78,8 @@ export interface ConnectionProps {
 	implementation?: string;
 	/** The PROBE target to send a peer that advertised `Increase`, in bits per second; zero sends none. */
 	probeTarget?: Getter<number>;
+	/** The peer's liveness under a keep-alive; see {@link Session.liveness}. */
+	liveness?: Getter<Liveness>;
 }
 
 /** Where a session is: open, delivering what it owes before it closes, or closed. */
@@ -119,6 +122,9 @@ export class Connection implements Session {
 
 	/** The peer's PROBE estimates; see {@link Session.probe}. */
 	readonly probe: Getter<Probe>;
+
+	/** The peer's liveness under a keep-alive; see {@link Session.liveness}. */
+	readonly liveness: Getter<Liveness> | undefined;
 
 	// Our tokens and grants, and the answers to the peer's; see {@link Session.auth}.
 	#auth: AuthSession;
@@ -175,7 +181,9 @@ export class Connection implements Session {
 		token,
 		implementation = IMPLEMENTATION,
 		probeTarget,
+		liveness,
 	}: ConnectionProps) {
+		this.liveness = liveness;
 		this.url = url;
 		// Older versions carry the credential in the URL instead.
 		this.#token = client && hasAuth(version) ? token : undefined;

@@ -101,6 +101,7 @@ pub struct Server {
 	timeout: Option<Duration>,
 	receive_window: Option<NonZeroU64>,
 	allocator: Option<crate::bandwidth::Allocator>,
+	keep_alive: Option<crate::session::KeepAlive>,
 }
 
 impl Default for Server {
@@ -116,6 +117,7 @@ impl Default for Server {
 			timeout: Some(DEFAULT_TIMEOUT),
 			receive_window: None,
 			allocator: None,
+			keep_alive: None,
 		}
 	}
 }
@@ -234,6 +236,17 @@ impl Server {
 	/// transport set it.
 	pub fn with_receive_window(mut self, window: NonZeroU64) -> Self {
 		self.receive_window = Some(window);
+		self
+	}
+
+	/// Probe a quiet client and report it [`Stale`](crate::session::Liveness::Stale) through
+	/// [`Session::liveness`] before closing on it; see [`KeepAlive`](crate::session::KeepAlive).
+	///
+	/// Started once the caller admits the session ([`Handshake::ok`]), which refuses the session
+	/// with [`Error::KeepAlive`] on a transport that cannot run it. A [`Handshake`] can set its
+	/// own with [`Handshake::with_keep_alive`].
+	pub fn with_keep_alive(mut self, keep_alive: crate::session::KeepAlive) -> Self {
+		self.keep_alive = Some(keep_alive);
 		self
 	}
 
@@ -1223,6 +1236,12 @@ impl Handshake {
 		self.configure(|server| server.limits = limits)
 	}
 
+	/// Run `keep_alive` on this session. Overrides any value from the [`Server`] builder; see
+	/// [`Server::with_keep_alive`].
+	pub fn with_keep_alive(self, keep_alive: crate::session::KeepAlive) -> Self {
+		self.configure(|server| server.keep_alive = Some(keep_alive))
+	}
+
 	/// Open the receive window to `window` on [`ok`](Self::ok). Overrides any value from the
 	/// [`Server`] builder; see [`Server::with_receive_window`].
 	pub fn with_receive_window(self, window: NonZeroU64) -> Self {
@@ -1351,7 +1370,7 @@ impl Answer {
 			if self.timer.poll(waiter).is_ready() {
 				return Poll::Ready(None);
 			}
-			if let Err(err) = open_window(&server, &paused) {
+			if let Err(err) = open_window(&server, &paused).and_then(|()| start_keep_alive(&server, &paused)) {
 				return Poll::Ready(Some(Err(err)));
 			}
 			let peer_node = Some(self.handshake.assigned_hop);
@@ -1405,6 +1424,15 @@ fn open_window(server: &Server, paused: &PausedHandshake) -> Result<(), Error> {
 		Ok(()) | Err(crate::transport::LimitsError::Unsupported) => Ok(()),
 		Err(err) => Err(Error::Transport(err.to_string())),
 	}
+}
+
+/// Start the keep-alive before anything answers SETUP, refusing the session on a transport that
+/// cannot run it.
+fn start_keep_alive(server: &Server, paused: &PausedHandshake) -> Result<(), Error> {
+	let Some(keep_alive) = server.keep_alive else {
+		return Ok(());
+	};
+	paused.transport().0.set_keep_alive(keep_alive).map_err(Error::KeepAlive)
 }
 
 /// A SETUP reply the peer has not taken yet. Dropped unanswered, it refuses the session with

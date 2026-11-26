@@ -30,6 +30,7 @@ import {
 import { Dials as DialsClass, type Dial as DialType } from "./dials.ts";
 import { DISCOVERY_REMOVED } from "./forward.ts";
 import type { Goaway as GoawayType, Handover as HandoverType, Redirect as RedirectType } from "./goaway.ts";
+import type { KeepAlive as KeepAliveType, Liveness as LivenessType } from "./keep_alive.ts";
 import { type Backoff as BackoffType, pumpAnnounced, Reload, type ReloadStatus } from "./reload.ts";
 import type { Session as SessionType } from "./session.ts";
 import type { Probe as ProbeType, Stats as StatsType } from "./stats.ts";
@@ -64,6 +65,13 @@ export interface ConnectionProps {
 
 	/** WebSocket fallback options applied to each connection attempt (not reactive). */
 	websocket?: WebSocketPropsType;
+
+	/**
+	 * The keep-alive each connection runs (not reactive), reported through the established
+	 * session's `liveness`. Implies a private loop that stays on the WebSocket fallback; see
+	 * {@link Connection.KeepAlive}.
+	 */
+	keepAlive?: KeepAliveType;
 
 	/** The origin whose broadcasts are served, spanning reconnects. Implies a private loop. */
 	publish?: Origin.Consumer;
@@ -361,6 +369,7 @@ export class Connection {
 				versions,
 				webtransport: props.webtransport,
 				websocket: props.websocket,
+				keepAlive: props.keepAlive,
 				backoff: props.backoff,
 				timeout: props.timeout,
 				goaway: props.goaway,
@@ -509,6 +518,10 @@ export namespace Connection {
 	export type Transport = TransportType;
 	/** Tuning for the WebSocket fallback. @reexport */
 	export type WebSocketProps = WebSocketPropsType;
+	/** How long a session may go without hearing from its peer: `stale` after `soft`, closed after `hard`. @reexport */
+	export type KeepAlive = KeepAliveType;
+	/** Whether a session heard from its peer within its keep-alive's `soft` limit. @reexport */
+	export type Liveness = LivenessType;
 	/** WebTransport options, including friendlier certificate pinning. @reexport */
 	export type WebTransportProps = WebTransportPropsType;
 	/** A server certificate hash used to pin a self-signed server. @reexport */
@@ -580,6 +593,7 @@ function requiresPrivate(props: ConnectionProps): boolean {
 	return (
 		props.webtransport !== undefined ||
 		props.websocket !== undefined ||
+		props.keepAlive !== undefined ||
 		props.backoff !== undefined ||
 		props.tokens !== undefined ||
 		props.urlAuth === true ||

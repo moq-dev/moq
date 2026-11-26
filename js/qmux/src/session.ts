@@ -1,4 +1,14 @@
-import { Duration, Elapsed, Instant, type Interval, interval, MissedTickBehavior, now, timeout } from "@moq/clock";
+import {
+	Duration,
+	Elapsed,
+	Instant,
+	type Interval,
+	interval,
+	MissedTickBehavior,
+	now,
+	sleepUntil,
+	timeout,
+} from "@moq/clock";
 import { Credit, StreamLimit, Window } from "./credit.ts";
 import {
 	resetCode,
@@ -57,6 +67,24 @@ export interface Config {
 	 *  Datagrams are a record-framed-draft feature (qmux-01+); this is ignored on
 	 *  qmux-00. Defaults to a full record. */
 	maxDatagramFrameSize?: bigint | null;
+}
+
+/** How long a peer may go unheard: stale after `soft`, closed after `hard`. See {@link Session.keepAlive}. */
+export interface KeepAlive {
+	/** How long the peer may go unheard before it counts as stale. A QX_PING goes out every half of it while it stays unheard. */
+	soft: Duration;
+	/** How long the peer may go unheard before the session closes. */
+	hard: Duration;
+}
+
+/** A keep-alive in force. */
+interface Liveness {
+	config: KeepAlive;
+	stale: boolean;
+	/** When this keep-alive last sent a QX_PING. */
+	pinged: Instant;
+	/** Ends the keep-alive's timer, when the session ends or another keep-alive replaces it. */
+	stop: AbortController;
 }
 
 const DEFAULT_CONFIG: Required<Config> = {
@@ -759,6 +787,9 @@ export class Session implements WebTransport {
 	// to strictly increase). Undefined until the first request arrives.
 	#lastPingRecv?: bigint;
 	#idleTimer?: Interval;
+	#liveness?: Liveness;
+	// Settles on the next change to `stale`, or the session's end; see {@link staleChanged}.
+	#staleChanged = Promise.withResolvers<void>();
 
 	/** Open a QMux session as the **client**, dialing `url`.
 	 *
@@ -1012,6 +1043,10 @@ export class Session implements WebTransport {
 
 	#onData(data: Uint8Array) {
 		this.#lastRecvAt = now();
+		if (this.#liveness?.stale) {
+			this.#liveness.stale = false;
+			this.#notifyStale();
+		}
 		// The WebSocket binding makes an empty message a no-op on every version, unlike an
 		// empty record, as Rust's transport does.
 		if (data.byteLength === 0) return;
@@ -1199,6 +1234,101 @@ export class Session implements WebTransport {
 		this.#readyResolve();
 	}
 
+	/**
+	 * Probe a quiet peer and report it {@link stale} before closing on it.
+	 *
+	 * A QX_PING goes out each half of `soft` the peer stays unheard, {@link stale} turns true once
+	 * all of `soft` passes, and the session closes once `hard` does. Any frame the peer sends counts
+	 * as hearing it, so a busy session sends no probe. Replaces any keep-alive already running.
+	 *
+	 * Throws before {@link ready} resolves, on qmux-00, which has no QX_PING, on a `soft` that is
+	 * zero or longer than `hard`, and on a `hard` longer than the negotiated idle timeout, which
+	 * stays in force as a backstop.
+	 */
+	keepAlive(config: KeepAlive): void {
+		if (this.#closed) throw this.#closed;
+		if (!this.#paramsReceived) throw new Error("keep-alive needs the peer's transport parameters; await ready");
+		if (!usesRecords(this.#version)) throw new Error("qmux-00 has no QX_PING to probe the peer with");
+		if (config.soft.isZero() || config.soft.gt(config.hard)) {
+			throw new RangeError("keep-alive needs a soft limit above zero and no longer than its hard limit");
+		}
+		const idle = this.#effectiveIdleTimeoutMs();
+		if (idle !== 0n && config.hard.gt(Duration.millis(Number(idle)))) {
+			throw new RangeError(`keep-alive hard limit ${config.hard} is longer than the idle timeout ${idle}ms`);
+		}
+		const previous = this.#liveness;
+		previous?.stop.abort();
+		const liveness: Liveness = { config, stale: false, pinged: Instant.ZERO, stop: new AbortController() };
+		this.#liveness = liveness;
+		if (previous?.stale) this.#notifyStale();
+		void this.#keepAliveLoop(liveness);
+	}
+
+	/** Whether the peer went unheard for the {@link keepAlive}'s `soft` limit. */
+	get stale(): boolean {
+		return this.#liveness?.stale ?? false;
+	}
+
+	/** Settles once {@link stale} changes, or the session ends. */
+	staleChanged(): Promise<void> {
+		return this.#staleChanged.promise;
+	}
+
+	#notifyStale() {
+		const changed = this.#staleChanged;
+		this.#staleChanged = Promise.withResolvers();
+		changed.resolve();
+	}
+
+	// Sleeps until the keep-alive's next deadline, reading when the peer was last heard on each
+	// wake: hearing only moves the deadlines later, so a sleep never needs cutting short.
+	async #keepAliveLoop(liveness: Liveness) {
+		const { soft, hard } = liveness.config;
+		const half = soft.div(2);
+		for (;;) {
+			if (this.#closed || this.#liveness !== liveness) return;
+			const at = now();
+			const heard = this.#lastRecvAt;
+			if (at.since(heard).ge(hard)) {
+				this.#end({ clean: false, cause: new Error("keep-alive timeout") });
+				return;
+			}
+			if (!liveness.stale && at.since(heard).ge(soft)) {
+				liveness.stale = true;
+				this.#notifyStale();
+			}
+			let probe = heard.max(liveness.pinged).saturatingAdd(half);
+			if (at.ge(probe)) {
+				this.#ping();
+				liveness.pinged = at;
+				probe = at.saturatingAdd(half);
+			}
+			let next = probe.min(heard.saturatingAdd(hard));
+			if (!liveness.stale) next = next.min(heard.saturatingAdd(soft));
+			try {
+				await sleepUntil(next, { signal: liveness.stop.signal, ref: false });
+			} catch {
+				return; // Replaced, or the session ended.
+			}
+		}
+	}
+
+	/** Send a QX_PING request. */
+	#ping() {
+		const seq = this.#nextPingSeq;
+		// Monotonic (never wraps within a session's life): the draft-02
+		// strictly-increasing rule requires it, and it must not wrap earlier
+		// than the Rust peer's u64 counter or a valid ping would be rejected.
+		this.#nextPingSeq += 1;
+		try {
+			this.#sendPriorityFrame({ type: "ping_request", sequence: BigInt(seq) });
+		} catch (e) {
+			// Best effort - if the send fails, the close path will fire shortly.
+			// Log a breadcrumb so a never-fire encoder bug doesn't vanish silently.
+			console.warn("qmux: keep-alive ping failed", e);
+		}
+	}
+
 	/** Effective idle timeout in ms, or 0 if disabled.
 	 *
 	 * Per RFC 9000 §10.1, the effective value is `min(our, peer)` of the non-zero advertised values
@@ -1285,20 +1415,7 @@ export class Session implements WebTransport {
 		// Keep-alive: nudge the peer when our outbound side has been silent for a third
 		// of the timeout. Any frame counts as activity, so this only fires when truly idle.
 		// Nothing to keep alive before the peer has spoken at all.
-		if (this.#paramsReceived && at.since(this.#lastSendAt).gt(timeout.div(3))) {
-			const seq = this.#nextPingSeq;
-			// Monotonic (never wraps within a session's life): the draft-02
-			// strictly-increasing rule requires it, and it must not wrap earlier
-			// than the Rust peer's u64 counter or a valid ping would be rejected.
-			this.#nextPingSeq += 1;
-			try {
-				this.#sendPriorityFrame({ type: "ping_request", sequence: BigInt(seq) });
-			} catch (e) {
-				// Best effort - if the send fails, the close path will fire shortly.
-				// Log a breadcrumb so a never-fire encoder bug doesn't vanish silently.
-				console.warn("qmux: keep-alive ping failed", e);
-			}
-		}
+		if (this.#paramsReceived && at.since(this.#lastSendAt).gt(timeout.div(3))) this.#ping();
 	}
 
 	/** Encode the next window update owed to the peer, or undefined once none is.
@@ -1863,6 +1980,8 @@ export class Session implements WebTransport {
 
 		this.#idleTimer?.close();
 		this.#idleTimer = undefined;
+		this.#liveness?.stop.abort();
+		this.#notifyStale();
 
 		// A clean end ends the incoming readables; an abort errors them with its cause.
 		const cause = end.clean ? undefined : error;

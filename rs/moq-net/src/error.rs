@@ -512,9 +512,15 @@ pub enum Error {
 	/// Session and stream unknowns are [`Self::Session`] / [`Self::Stream`], not this.
 	#[error("remote error: code={0}")]
 	Remote(u32),
-	/// The underlying connection reached its transport idle deadline.
+	/// The underlying connection reached its transport idle deadline, or a
+	/// [`KeepAlive`](crate::session::KeepAlive)'s hard limit.
 	#[error("transport idle timeout")]
 	IdleTimeout,
+
+	/// The transport refused the session's [`KeepAlive`](crate::session::KeepAlive), so the
+	/// session never opened.
+	#[error("keep-alive: {0}")]
+	KeepAlive(crate::transport::KeepAliveError),
 }
 
 impl Error {
@@ -661,7 +667,7 @@ impl From<&Error> for SessionError {
 			Error::Cancel | Error::Closed | Error::GoingAway => Self::Cancel,
 			Error::Unauthorized => Self::Unauthorized,
 			Error::Expired => Self::Expired,
-			Error::Unsupported => Self::Unsupported,
+			Error::Unsupported | Error::KeepAlive(_) => Self::Unsupported,
 			Error::Version | Error::UnknownAlpn(_) => Self::Version,
 			Error::TooManyRequests => Self::TooManyRequests,
 			Error::GoawayTimeout => Self::GoawayTimeout,
@@ -761,6 +767,7 @@ impl From<&Error> for StreamError {
 			// No stream code says so: an unknown stream type, a request only moq-transport
 			// can make, or a fault on our own side.
 			Error::Unsupported
+			| Error::KeepAlive(_)
 			| Error::UnsupportedExtension
 			| Error::InvalidRange
 			| Error::InvalidJoiningRequestId

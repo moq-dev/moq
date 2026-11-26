@@ -329,6 +329,18 @@ impl Connection {
 		self.shared.conn.borrow_mut().set_limits(limits)
 	}
 
+	/// Start `keep_alive`, replacing any running; see
+	/// [`moq_quic::connection::Connection::set_keep_alive`].
+	pub fn set_keep_alive(&self, keep_alive: crate::quic::KeepAlive) -> Result<(), crate::quic::KeepAliveError> {
+		self.shared.conn.borrow_mut().set_keep_alive(keep_alive)
+	}
+
+	/// Wait until the keep-alive's stale signal differs from `stale`; see
+	/// [`moq_quic::connection::Connection::poll_stale`].
+	pub fn poll_stale(&self, waiter: &kio::Waiter, stale: bool) -> std::task::Poll<bool> {
+		self.shared.conn.borrow_mut().poll_stale(waiter, stale)
+	}
+
 	/// The wire counters this connection updates as it sends and receives.
 	pub(crate) fn wire(&self) -> moq_net::transport::Wire {
 		self.shared.wire.clone()

@@ -121,6 +121,14 @@ impl<S: poll::Session> poll::Session for Local<S> {
 	fn set_limits(&self, limits: moq::Limits) -> Result<(), moq::LimitsError> {
 		self.0.set_limits(limits)
 	}
+
+	fn set_keep_alive(&self, keep_alive: moq_net::session::KeepAlive) -> Result<(), moq::KeepAliveError> {
+		self.0.set_keep_alive(keep_alive)
+	}
+
+	fn poll_liveness(&self, waiter: &kio::Waiter, last: moq_net::session::Liveness) -> Poll<moq_net::session::Liveness> {
+		self.0.poll_liveness(waiter, last)
+	}
 }
 
 impl<T: poll::SendStream> poll::SendStream for Local<T> {

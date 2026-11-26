@@ -16,6 +16,7 @@ import { isWebTransportSupported } from "./browser.ts";
 import { parse, show } from "./endpoint.ts";
 import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
 import { DEFAULT_TIMEOUT, exchangeSetup, handsOff } from "./handshake.ts";
+import * as KeepAlive from "./keep_alive.ts";
 import type { Session } from "./session.ts";
 import { inspect } from "./stats.ts";
 import { credential, fallback, hold, type Presentation } from "./tokens.ts";
@@ -316,6 +317,13 @@ export interface ConnectProps {
 	viewers?: Viewers;
 
 	/**
+	 * Probe a quiet peer and report it through the session's `liveness` before closing on it.
+	 * Only the WebSocket fallback can probe, so a connect with one dials the WebSocket alone, and
+	 * a supplied WebTransport `transport` refuses it. See {@link KeepAlive.KeepAlive}.
+	 */
+	keepAlive?: KeepAlive.KeepAlive;
+
+	/**
 	 * Maximum time for one connect, covering the dial and the MoQ handshake, which has no
 	 * deadline of its own (default: 30000ms). `0` waits forever. Past it, the connect rejects
 	 * with {@link ConnectTimeout} and closes whatever it had opened.
@@ -343,6 +351,8 @@ type SessionProps = {
 	implementation: string;
 	/** The PROBE target to send a peer that advertised `Increase`. */
 	probeTarget?: Getter<number>;
+	/** The peer's liveness, under a keep-alive. */
+	liveness?: Getter<KeepAlive.Liveness>;
 };
 
 /**
@@ -509,7 +519,8 @@ async function connectInner(
 	if (props.transport) {
 		const transport = props.transport;
 		void abort.then(() => transport.close());
-		return [await connectTransport(url, transport, wiring(dial), offered.setup), dial];
+		const liveness = props.keepAlive && KeepAlive.start(transport, props.keepAlive);
+		return [await connectTransport(url, transport, { ...wiring(dial), liveness }, offered.setup), dial];
 	}
 
 	const websocketUrl = fallbackDial?.url ?? url;
@@ -542,7 +553,14 @@ async function connectInner(
 		throw new Error("server negotiated no protocol, and no offered version negotiates in SETUP");
 	}
 	const won = websocket && fallbackDial ? fallbackDial : dial;
-	const connection = await connectTransport(url, session as WebTransport, wiring(won), offered.setup);
+	let liveness: Getter<KeepAlive.Liveness> | undefined;
+	try {
+		liveness = props.keepAlive && KeepAlive.start(session as WebTransport, props.keepAlive);
+	} catch (err) {
+		session.close();
+		throw err;
+	}
+	const connection = await connectTransport(url, session as WebTransport, { ...wiring(won), liveness }, offered.setup);
 	if (websocket) {
 		const forget = () => websocketWon.delete(server);
 		void connection.closed.then(forget, forget);
@@ -563,9 +581,11 @@ async function dialRace(
 	const { promise: raced, resolve: done } = Promise.withResolvers<void>();
 	const cancel = Promise.race([raced, abort]);
 
-	const webtransport = isWebTransportSupported()
-		? hedgeWebTransport(url, cancel, offered.alpns, props.webtransport)
-		: undefined;
+	// WebTransport cannot probe its peer, so a keep-alive dials the WebSocket alone.
+	const webtransport =
+		isWebTransportSupported() && !props.keepAlive
+			? hedgeWebTransport(url, cancel, offered.alpns, props.webtransport)
+			: undefined;
 
 	// Give QUIC a head start to connect before trying WebSocket, unless WebSocket won the last race
 	// to this server. NOTE that QUIC should be faster because it involves 1/2 fewer RTTs.
