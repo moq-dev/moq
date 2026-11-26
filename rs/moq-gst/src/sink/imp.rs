@@ -742,8 +742,9 @@ impl MoqSink {
 			if lifecycle.media.is_failed() {
 				return Ok(gst::FlowSuccess::Ok);
 			}
-			let outcome = lifecycle.media.place_wall(&buffer, sample).and_then(|()| {
-				let pts = lifecycle.media.timeline_pts(&buffer)?;
+			// Once per buffer: an Opus packet's advances the pre-skip it clips.
+			let outcome = lifecycle.media.timeline_pts(&buffer).and_then(|pts| {
+				lifecycle.media.place_wall(&buffer, pts, sample)?;
 				lifecycle
 					.media
 					.push_buffer(data, pts, duration, current_running_time)

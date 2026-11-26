@@ -144,9 +144,11 @@ impl Client {
 	///
 	/// Each frame lands on the catalog's clock at its capture: where the camera's RTCP sender report
 	/// for its stream says it was taken, or, for a stream without a usable report, no later than
-	/// any of its frames arrived. The session waits up to one report interval (5 s) after its first
-	/// frame for every stream's report, holding the catalog and each stream's frames since its
-	/// latest keyframe meanwhile. Streams are placed apart, since a camera's `rtptime` need not
+	/// any of its frames arrived. The session waits up to 5 s after its first frame (RFC 3550's
+	/// minimum report interval: a camera reporting less often is placed on its arrivals) for every
+	/// stream's report to agree with its arrivals, holding the catalog and each stream's frames
+	/// since its latest keyframe meanwhile. It stops waiting sooner once it holds 1024 frames or
+	/// 32 MiB, or when the session ends or its timeline jumps. Streams are placed apart, since a camera's `rtptime` need not
 	/// align them, so a stream without a report trails its capture by the camera's encoding and
 	/// the network. A clock fixed before the session (a shared catalog, or
 	/// [`Config::with_clock`](moq_mux::catalog::Config::with_clock)) is shifted onto, so several
@@ -154,7 +156,8 @@ impl Client {
 	///
 	/// Never reconnects: returns once the session ends or its timeline jumps, finishing its
 	/// tracks, or fails, aborting them, including when a request or the media stalls. The
-	/// caller owns the broadcast and decides whether to retry. Dropping the future stops the
+	/// caller owns the broadcast and decides whether to retry; after [`End::Jumped`], on a fresh
+	/// broadcast and catalog, since the new timeline is new content. Dropping the future stops the
 	/// session and finishes its tracks.
 	pub async fn pull(
 		&self,
@@ -280,18 +283,16 @@ impl Client {
 				let due = ingest.timing.due().filter(|due| *due < deadline);
 				let item = match kio::clock::timeout_at(due.unwrap_or(deadline), session.next()).await {
 					Ok(item) => item,
-					Err(_) if due.is_some() => match ingest.expire(false)? {
-						Some(Jump) => break End::Jumped,
-						None => continue,
-					},
+					Err(_) if due.is_some() => {
+						ingest.expire(false)?;
+						continue;
+					}
 					Err(_) => return Err(Error::Stalled(self.timeout)),
 				};
 				let Some(item) = item else {
 					// A session ending during a report wait still publishes what it held.
-					match ingest.expire(true)? {
-						Some(Jump) => break End::Jumped,
-						None => break End::Closed,
-					}
+					ingest.expire(true)?;
+					break End::Closed;
 				};
 				let item = item?;
 				if matches!(item, CodecItem::VideoFrame(_) | CodecItem::AudioFrame(_)) {
@@ -433,8 +434,8 @@ impl Video {
 
 struct Stream {
 	track: Track,
-	/// The previous frame's timestamp, in the stream's clock units since the session start, and
-	/// when it arrived.
+	/// The previous frame received's timestamp, in the stream's clock units since the session
+	/// start, and when it arrived.
 	last: Option<(i64, kio::clock::Instant)>,
 	/// Whether a keyframe has been published (video) or the session started (audio).
 	started: bool,
@@ -467,6 +468,18 @@ enum StreamClock {
 }
 
 impl Stream {
+	/// Whether a frame `elapsed` units of `rate` Hz in, which arrived at `received`, landed too far
+	/// from the stream's previous frame: a camera resetting its RTP clock.
+	fn jumped(&self, elapsed: i64, rate: u32, received: kio::clock::Instant, max_forward: std::time::Duration) -> bool {
+		let Some((last, arrived)) = self.last else {
+			return false;
+		};
+		let delta = i128::from(elapsed) - i128::from(last);
+		let slack = max_forward + received.saturating_duration_since(arrived);
+		let forward = slack.as_micros() as i128 * i128::from(rate) / 1_000_000;
+		delta < -backward(rate) || delta > forward
+	}
+
 	/// Keep a sender report putting the stream's zero at `zero`, while it is not placed.
 	fn report(&mut self, zero: i128) {
 		if let StreamClock::Unplaced { report, .. } = &mut self.clock {
@@ -608,7 +621,8 @@ impl Waiting {
 	fn hold(&mut self, item: CodecItem, params: Option<VideoParameters>, video: bool) {
 		if let Some((stream_id, ..)) = media(&item) {
 			self.since.get_or_insert_with(kio::clock::now);
-			if matches!(&item, CodecItem::VideoFrame(frame) if frame.is_random_access_point()) {
+			// A damaged keyframe publishes nothing, so it never evicts a clean group held before it.
+			if matches!(&item, CodecItem::VideoFrame(frame) if frame.is_random_access_point() && frame.loss() == 0) {
 				self.held
 					.retain(|(held, _)| media(held).is_none_or(|(id, ..)| id != stream_id));
 			}
@@ -738,19 +752,32 @@ impl Ingest {
 			item => {
 				if let Some((stream_id, timestamp, received)) = media(item)
 					&& let Some(stream) = self.streams.get_mut(stream_id).and_then(Option::as_mut)
-					&& matches!(stream.clock, StreamClock::Unplaced { .. })
 				{
-					let now = kio::clock::now();
-					let arrival =
-						unix_micros(kio::clock::wall()) - now.saturating_duration_since(received).as_micros() as i128;
-					stream.arrived(timestamp.elapsed(), timestamp.clock_rate().get(), arrival);
+					let (elapsed, rate) = (timestamp.elapsed(), timestamp.clock_rate().get());
+					// Checked as each frame arrives, held or not, so a reset during a report wait
+					// neither evicts what was held nor moves the stream's placement.
+					if stream.jumped(elapsed, rate, received, self.max_forward) {
+						// What came before the jump still publishes.
+						if self.ready(true) {
+							self.release()?;
+						}
+						return Ok(Some(Jump));
+					}
+					stream.last = Some((elapsed, received));
+					if matches!(stream.clock, StreamClock::Unplaced { .. }) {
+						let now = kio::clock::now();
+						let arrival = unix_micros(kio::clock::wall())
+							- now.saturating_duration_since(received).as_micros() as i128;
+						stream.arrived(elapsed, rate, arrival);
+					}
 				}
 			}
 		}
 
 		let Timing::Waiting(waiting) = &mut self.timing else {
 			let params = parameters(streams, &item);
-			return self.publish(item, params);
+			self.publish(item, params)?;
+			return Ok(None);
 		};
 		if media(&item).is_some_and(|(stream_id, ..)| self.streams.get(stream_id).is_some_and(Option::is_some)) {
 			let params = parameters(streams, &item).cloned();
@@ -758,10 +785,10 @@ impl Ingest {
 		}
 		// Checked here too, not only when the pull loop wakes for it: a timeout polls the session
 		// first, so frames that keep arriving ready would hold that wake off.
-		if !self.ready(false) {
-			return Ok(None);
+		if self.ready(false) {
+			self.release()?;
 		}
-		self.release()
+		Ok(None)
 	}
 
 	/// Whether a session still waiting can be placed: once it holds a frame, and every stream
@@ -782,17 +809,17 @@ impl Ingest {
 
 	/// Place a session still waiting once its report wait is over, or once it ends, and publish
 	/// what it held. The pull loop wakes for the first.
-	fn expire(&mut self, ending: bool) -> Result<Option<Jump>> {
-		if !self.ready(ending) {
-			return Ok(None);
+	fn expire(&mut self, ending: bool) -> Result<()> {
+		if self.ready(ending) {
+			self.release()?;
 		}
-		self.release()
+		Ok(())
 	}
 
 	/// Place the session, and publish the frames it held.
 	///
 	/// Every stream holding a frame is placed; the earliest of their zeros is the timebase's.
-	fn release(&mut self) -> Result<Option<Jump>> {
+	fn release(&mut self) -> Result<()> {
 		let reference = self
 			.streams
 			.iter_mut()
@@ -818,25 +845,20 @@ impl Ingest {
 		};
 		let Waiting { gate, held, .. } = *waiting;
 		drop(gate);
-		let mut jumped = None;
 		for (item, params) in held {
-			if jumped.is_none() {
-				jumped = self.publish(item, params.as_ref())?;
-			}
+			self.publish(item, params.as_ref())?;
 		}
-		Ok(jumped)
+		Ok(())
 	}
 
-	/// Publish one depacketized item under its stream's video `params`, or report that the timeline
-	/// jumped.
-	fn publish(&mut self, item: CodecItem, params: Option<&VideoParameters>) -> Result<Option<Jump>> {
-		let (stream_id, timestamp, data, changed, received, loss) = match &item {
+	/// Publish one depacketized item under its stream's video `params`.
+	fn publish(&mut self, item: CodecItem, params: Option<&VideoParameters>) -> Result<()> {
+		let (stream_id, timestamp, data, changed, loss) = match &item {
 			CodecItem::VideoFrame(frame) => (
 				frame.stream_id(),
 				frame.timestamp(),
 				frame.data(),
 				frame.has_new_parameters(),
-				kio::clock::Instant::from_std(frame.end_ctx().received()),
 				frame.loss(),
 			),
 			CodecItem::AudioFrame(frame) => (
@@ -844,36 +866,27 @@ impl Ingest {
 				frame.timestamp(),
 				frame.data(),
 				false,
-				kio::clock::Instant::from_std(frame.ctx().received()),
 				// AAC packets decode alone, and the decoder conceals a lost one.
 				0,
 			),
-			_ => return Ok(None),
+			_ => return Ok(()),
 		};
 		let Timing::Placed { reference } = self.timing else {
 			unreachable!("frames publish once the session is placed");
 		};
 		let Some(stream) = self.streams.get_mut(stream_id).and_then(Option::as_mut) else {
-			return Ok(None);
+			return Ok(());
 		};
 
 		let elapsed = timestamp.elapsed();
 		let rate = timestamp.clock_rate().get();
-		if let Some((last, arrived)) = stream.last {
-			let delta = i128::from(elapsed) - i128::from(last);
-			let slack = self.max_forward + received.saturating_duration_since(arrived);
-			let forward = slack.as_micros() as i128 * i128::from(rate) / 1_000_000;
-			if delta < -backward(rate) || delta > forward {
-				return Ok(Some(Jump));
-			}
-		}
 		// A stream whose first frame came after the session was placed is placed on that frame.
 		let zero = stream.place(stream_id).expect("an arrived frame bounds its stream");
 		let offset = ((zero - reference) * i128::from(rate)).div_euclid(1_000_000);
 		let Ok(units) = u64::try_from(i128::from(elapsed) + offset) else {
 			// Captured more than [`LEAD`] before the session's start, such as a replay from long
 			// before PLAY: the timebase has no time for it, so drop it.
-			return Ok(None);
+			return Ok(());
 		};
 		let pts = moq_net::Timestamp::from_scale(units, u64::from(rate)).map_err(moq_mux::Error::from)?;
 		let pts = self.timebase.shift(pts)?;
@@ -883,7 +896,7 @@ impl Ingest {
 				// Before any drop, so the next clean keyframe still gets retina's new parameters.
 				stream.fresh |= changed;
 				if stream.opened.is_some_and(|opened| elapsed < opened) {
-					return Ok(None);
+					return Ok(());
 				}
 				if loss > 0 {
 					// The pictures after a lost packet reference what it carried, so hold the
@@ -894,7 +907,7 @@ impl Ingest {
 						stream.held = Some(kio::clock::now());
 					}
 					video.reset();
-					return Ok(None);
+					return Ok(());
 				}
 				let params = params.filter(|_| stream.fresh);
 				let frames = video.split(data, params, pts)?;
@@ -904,31 +917,29 @@ impl Ingest {
 					// Publish nothing before a keyframe, by the splitter's reckoning (an IDR, an
 					// H.264 recovery point, or any H.265 IRAP picture).
 					if !frames.first().is_some_and(|frame| frame.keyframe) {
-						return Ok(None);
+						return Ok(());
 					}
 					stream.started = true;
 					stream.held = None;
 					stream.opened = Some(elapsed);
 					self.started = true;
 				}
-				stream.last = Some((elapsed, received));
 				video.decode(frames)?;
 			}
 			Track::Aac(import) => {
 				if !stream.started {
 					// Audio waits for the first keyframe too.
 					if self.video && !self.started {
-						return Ok(None);
+						return Ok(());
 					}
 					stream.started = true;
 				}
-				stream.last = Some((elapsed, received));
 				import.decode(data, Some(pts))?;
 				// Each packet its own group (one QUIC stream), so relays forward it at once.
 				import.cut(None)?;
 			}
 		}
-		Ok(None)
+		Ok(())
 	}
 
 	/// Whether a video stream has waited longer than `timeout` for a keyframe: its first since
@@ -1576,6 +1587,51 @@ mod tests {
 			LEAD.as_micros() + 100_000,
 			"the track opens on the clean keyframe"
 		);
+	}
+
+	/// A keyframe that lost a packet during a report wait publishes nothing, so it leaves the clean
+	/// group held before it to publish.
+	#[tokio::test]
+	async fn a_lossy_keyframe_keeps_the_held_group() {
+		kio::clock::host_time(); // real RTSP sockets, and the report wait is real time
+		let server = Server::bind(vec![Media::H264 { sprop: true }]).await;
+		let (broadcast, catalog, pull) = pull(client(server.url()).waiting(10 * WAIT));
+
+		let mut session = within("PLAY", server.accept(0)).await;
+		let captured = wall_now();
+		session.video(0, 0, &[fake::H264_IDR]).await;
+		session.video(0, FRAME, &[fake::H264_SLICE]).await;
+		session.lose(0, 1);
+		session.video(0, 3 * FRAME, &[fake::H264_IDR]).await;
+		session.report(0, 0, ntp(captured)).await;
+		let snapshot = catalog_with(&catalog, 1, 0).await;
+		let reader = subscribe(&broadcast, video_track(&snapshot)).await;
+		session.close().await;
+		assert_eq!(within("the pull", pull).await.unwrap().unwrap(), End::Closed);
+
+		let frames = frames(reader).await;
+		assert_eq!(
+			frames.len(),
+			2,
+			"the clean group publishes, the lossy keyframe does not"
+		);
+		assert!(frames[0].keyframe && !frames[1].keyframe);
+	}
+
+	/// A camera resetting its RTP clock during a report wait ends the pull with `Jumped`, rather
+	/// than its new keyframe replacing the group held before it and the wait going on.
+	#[tokio::test]
+	async fn a_timestamp_jump_during_the_wait_ends_the_session() {
+		kio::clock::host_time(); // real RTSP sockets, and the report wait is real time
+		let server = Server::bind(vec![Media::H264 { sprop: true }]).await;
+		let (broadcast, catalog, pull) = pull(client(server.url()).waiting(10 * WAIT));
+
+		let mut session = within("PLAY", server.accept(0)).await;
+		session.video(0, 0, &[fake::H264_IDR]).await;
+		session.video(0, FRAME, &[fake::H264_SLICE]).await;
+		session.video(0, 0x8000_0000, &[fake::H264_IDR]).await;
+		assert_eq!(within("the pull", pull).await.unwrap().unwrap(), End::Jumped);
+		drop((broadcast, catalog));
 	}
 
 	/// The wall time `frame` advertises under the catalog's `sync.clock`, in Unix microseconds.

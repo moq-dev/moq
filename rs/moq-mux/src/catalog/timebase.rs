@@ -98,10 +98,10 @@ impl Offset {
 	/// Shift `pts`, keeping its scale. Refuses a result below zero rather than clamping it, and an
 	/// [unscaled](moq_net::Timestamp::unscaled) `pts`, which has no time to shift.
 	pub(crate) fn apply(self, pts: moq_net::Timestamp) -> crate::Result<moq_net::Timestamp> {
+		let scale = pts.scale().ok_or(moq_net::TimeOverflow)?;
 		if self.0 == 0 {
 			return Ok(pts);
 		}
-		let scale = pts.scale().ok_or(moq_net::TimeOverflow)?;
 		let value = pts.value() as i128 + self.ticks(scale.as_u64());
 		let value = u64::try_from(value).map_err(|_| {
 			crate::Error::UnmappableTimestamp(format!(
@@ -135,6 +135,7 @@ mod test {
 			Err(crate::Error::UnmappableTimestamp(_))
 		));
 		assert_eq!(Offset::default().apply(us(7)).unwrap(), us(7));
+		assert!(Offset::default().apply(moq_net::Timestamp::unscaled(7)).is_err());
 	}
 
 	/// A fractional unit rounds down at every scale, so tracks at one scale shift alike.

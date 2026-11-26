@@ -843,19 +843,26 @@ impl Pad {
 	}
 
 	/// Place the run on the wall clock before its first valid timestamp can reach an importer.
-	pub(super) fn place_wall(&self, buffer: &gst::BufferRef, sample: super::wall::Sample) -> Result<()> {
+	///
+	/// `pts` is the one `buffer` publishes at ([`timeline_pts`](Self::timeline_pts)), so the
+	/// placement lands where the published timestamps do and is decided on the same timestamp.
+	pub(super) fn place_wall(
+		&self,
+		buffer: &gst::BufferRef,
+		pts: Option<gst::ClockTime>,
+		sample: super::wall::Sample,
+	) -> Result<()> {
 		let Some(wall) = &self.wall else { return Ok(()) };
 		let Some(track) = self.track() else {
 			return Ok(());
 		};
-		let timestamp = if matches!(track, Sink::Opaque(_)) && buffer.pts().is_none() && self.state == PadState::Active
-		{
+		let timestamp = if matches!(track, Sink::Opaque(_)) && pts.is_none() && self.state == PadState::Active {
 			sample
 				.running
 				.map(|time| time.useconds())
 				.ok_or("no current running time")
 		} else {
-			self.frame_timestamp(buffer.pts())
+			self.frame_timestamp(pts)
 		};
 		if let Ok(micros) = timestamp {
 			wall.place(buffer, Duration::from_micros(micros), sample)?;
@@ -1440,6 +1447,39 @@ mod tests {
 		assert!(!pad.finalize().unwrap(), "second finalize is a no-op");
 	}
 
+	/// An Opus packet stamped just before the segment starts publishes inside it once its pre-skip
+	/// moves it onto hang's timeline, so the run is placed on that published timestamp: the first
+	/// packet places it rather than anchoring it on arrival, and the next one's placement holds.
+	#[test]
+	fn an_opus_run_is_placed_on_its_published_timestamp() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		let mut pad = Pad::new();
+		pad.reserve(&catalog, super::super::wall::Wall::new(&catalog), &Names::default());
+		// A mono OpusHead with a 312-sample (6.5 ms) pre-skip.
+		let mut head = b"OpusHead".to_vec();
+		head.extend([1, 1]);
+		head.extend(312u16.to_le_bytes());
+		head.extend(48_000u32.to_le_bytes());
+		head.extend([0, 0, 0]);
+		let caps = opus_caps(1, None, Some(gst::Buffer::from_slice(head)));
+		pad.observe_caps(&broadcast, &catalog, producer_options(&caps, Some("audio")));
+		pad.observe_segment(time_segment_at(1_000, 0));
+
+		let sample = super::super::wall::Sample {
+			running: Some(gst::ClockTime::ZERO),
+			wall: kio::clock::wall(),
+		};
+		for micros in [997_000, 1_017_000] {
+			let mut buffer = gst::Buffer::from_slice([0xf8]);
+			buffer.get_mut().unwrap().set_pts(gst::ClockTime::from_useconds(micros));
+			let pts = pad.timeline_pts(&buffer).unwrap();
+			pad.place_wall(&buffer, pts, sample).unwrap();
+			let pushed = pad.push_buffer(Bytes::from_static(&[0xf8]), pts, None, None);
+			assert_eq!(pushed, Ok(PushOutcome::Published), "the packet at {micros} µs");
+		}
+	}
+
 	/// A run on a catalog whose clock was fixed before it, as by `Config::with_clock`, shifts its
 	/// running times onto that clock: a buffer lands where its reference timestamp says.
 	#[test]
@@ -1472,7 +1512,7 @@ mod tests {
 			running: None,
 			wall: kio::clock::wall(),
 		};
-		pad.place_wall(&buffer, sample).unwrap();
+		pad.place_wall(&buffer, buffer.pts(), sample).unwrap();
 		let mut consumer = moq_mux::container::Consumer::new(
 			futures::executor::block_on(broadcast.consume().track("camera").unwrap().subscribe(None)).unwrap(),
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
