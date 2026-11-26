@@ -3531,6 +3531,10 @@ impl Connection {
 						sequence,
 						allow_more_cids,
 					));
+					// The peer catching up on a Retire Prior To lets the next expiry proceed
+					if self.timers.get(Timer::PushNewCid).is_none() {
+						self.reset_cid_retirement();
+					}
 				}
 				Frame::NewConnectionId(frame) => {
 					trace!(

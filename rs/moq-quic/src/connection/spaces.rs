@@ -331,7 +331,7 @@ impl Retransmits {
 			&& !(self.data_blocked && streams.can_send_data_blocked())
 			&& !self.max_stream_id.into_iter().any(|x| x)
 			&& !self.streams_blocked.into_iter().any(|x| x)
-			&& self.reset_stream.is_empty()
+			&& self.reset_stream.iter().all(|&(id, _)| !streams.can_send_reset(id))
 			&& self.stop_sending.is_empty()
 			&& self
 				.max_stream_data

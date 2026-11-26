@@ -53,7 +53,8 @@ impl PartialDecode {
 			let dgram_len = buf.get_ref().len();
 			let packet_len = plain_header
 				.payload_len()
-				.map(|len| (buf.position() + len) as usize)
+				// Past `usize` is past the datagram, rather than truncated into it on 32-bit targets
+				.map(|len| usize::try_from(buf.position().saturating_add(len)).unwrap_or(usize::MAX))
 				.unwrap_or(dgram_len);
 			return match dgram_len.cmp(&packet_len) {
 				Ordering::Equal => Ok((Self { plain_header, buf }, None)),
@@ -605,7 +606,7 @@ impl ProtectedHeader {
 
 			Ok(Some(match LongHeaderType::from_byte(first)? {
 				LongHeaderType::Initial => {
-					let token_len = buf.get_var()? as usize;
+					let token_len = usize::try_from(buf.get_var()?).unwrap_or(usize::MAX);
 					let token_start = buf.position() as usize;
 					if token_len > buf.remaining() {
 						return Err(PacketDecodeError::InvalidHeader("token out of bounds"));
@@ -965,6 +966,21 @@ mod tests {
 		let (handshake, rest) = decode(&[HANDSHAKE, ZERO_RTT].concat()).unwrap();
 		assert_eq!(handshake.data(), HANDSHAKE);
 		assert_eq!(decode(&rest.unwrap()).unwrap_err(), PacketDecodeError::ZeroRtt);
+	}
+
+	/// Lengths of 2^32 run past the datagram, rather than truncating to 0 on 32-bit targets
+	#[test]
+	fn oversized_lengths_are_rejected() {
+		let initial = hex!("c0 00000001 00 00 c000000100000000 01 aa");
+		assert_eq!(
+			decode(&initial).unwrap_err(),
+			PacketDecodeError::InvalidHeader("token out of bounds")
+		);
+		let handshake = hex!("e0 00000001 00 00 c000000100000000 ccdd");
+		assert_eq!(
+			decode(&handshake).unwrap_err(),
+			PacketDecodeError::InvalidHeader("packet too short to contain payload length")
+		);
 	}
 
 	#[test]

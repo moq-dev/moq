@@ -48,7 +48,13 @@ impl CidState {
 	}
 
 	/// Find the next timestamp when previously issued CID should be retired
+	///
+	/// `None` while the peer has yet to retire every CID the last Retire Prior To asked for, since
+	/// no update may follow until it has; its retirements re-arm the timer.
 	pub(crate) fn next_timeout(&mut self) -> Option<Instant> {
+		if self.unretired() {
+			return None;
+		}
 		self.retire_timestamp.front().map(|nc| {
 			trace!("CID {} will expire at {:?}", nc.sequence, nc.timestamp);
 			nc.timestamp
@@ -87,11 +93,8 @@ impl CidState {
 	///
 	/// Return whether a new CID needs to be pushed that notifies remote peer to respond `RETIRE_CONNECTION_ID`
 	pub(crate) fn on_cid_timeout(&mut self) -> bool {
-		// Whether the peer hasn't retired all the CIDs we asked it to yet
-		let unretired_ids_found = (self.prev_retire_seq..self.retire_seq).any(|seq| self.active_seq.contains(&seq));
-
+		let unretired_ids_found = self.unretired();
 		let current_retire_prior_to = self.retire_seq;
-		let next_retire_sequence = self.retire_timestamp.pop_front().map(|seq| seq.sequence + 1);
 
 		// According to RFC:
 		// Endpoints SHOULD NOT issue updates of the Retire Prior To field
@@ -101,9 +104,10 @@ impl CidState {
 		if !unretired_ids_found {
 			// All Cids are retired, `prev_retire_cid_seq` can be assigned to `retire_cid_seq`
 			self.prev_retire_seq = self.retire_seq;
-			// Advance `retire_seq` if next cid that needs to be retired exists
-			if let Some(next_retire_prior_to) = next_retire_sequence {
-				self.retire_seq = next_retire_prior_to;
+			// Advance `retire_seq` if next cid that needs to be retired exists. Otherwise the batch
+			// stays queued for when the peer catches up.
+			if let Some(next) = self.retire_timestamp.pop_front() {
+				self.retire_seq = next.sequence + 1;
 			}
 		}
 
@@ -118,6 +122,11 @@ impl CidState {
 		// If yes (return true), a new CID must be pushed with updated `retire_prior_to` field to remote peer.
 		// If no (return false), it means CIDs that reach the end of lifetime have been retired already. Do not push a new CID in order to avoid violating above RFC.
 		(current_retire_prior_to..self.retire_seq).any(|seq| self.active_seq.contains(&seq))
+	}
+
+	/// Whether the peer hasn't retired all the CIDs we asked it to yet
+	fn unretired(&self) -> bool {
+		(self.prev_retire_seq..self.retire_seq).any(|seq| self.active_seq.contains(&seq))
 	}
 
 	/// Update cid state when `NewIdentifiers` event is received
@@ -214,6 +223,38 @@ mod tests {
 
 	fn state(issued: u64) -> CidState {
 		CidState::new(8, None, Instant::now(), issued)
+	}
+
+	/// A batch expiring while the peer still owes retirements waits for them instead of being lost
+	#[test]
+	fn expiry_waits_for_pending_retirement() {
+		let lifetime = Duration::from_secs(10);
+		let start = Instant::now();
+		let mut state = CidState::new(8, Some(lifetime), start, 2);
+		let cid = |sequence| IssuedCid {
+			sequence,
+			id: ConnectionId::new(&[sequence as u8]),
+			reset_token: [0xab; crate::RESET_TOKEN_SIZE].into(),
+		};
+		state.new_cids(&[cid(2)], start.saturating_add(Duration::from_secs(5)));
+
+		assert_eq!(state.next_timeout(), Some(start.saturating_add(lifetime)));
+		assert!(state.on_cid_timeout());
+		assert_eq!(state.retire_prior_to(), 2);
+		// No update until the peer retires 0 and 1, even when asked
+		assert_eq!(state.next_timeout(), None);
+		assert!(!state.on_cid_timeout());
+		assert_eq!(state.retire_prior_to(), 2);
+
+		state.on_cid_retirement(0, LIMIT).unwrap();
+		assert_eq!(state.next_timeout(), None);
+		state.on_cid_retirement(1, LIMIT).unwrap();
+		assert_eq!(
+			state.next_timeout(),
+			Some(start.saturating_add(Duration::from_secs(15)))
+		);
+		assert!(state.on_cid_timeout());
+		assert_eq!(state.retire_prior_to(), 3);
 	}
 
 	#[test]

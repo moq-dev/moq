@@ -728,6 +728,17 @@ impl StreamsState {
 			.filter(|&limit| stream.is_writable() && !stream.peer_stopped() && limit == stream.max_data)
 	}
 
+	/// Whether a queued RESET_STREAM for stream `id` would still be written
+	///
+	/// `false` once the stream is freed, such as when a lost reset is requeued after its
+	/// replacement was acknowledged.
+	pub(crate) fn can_send_reset(&self, id: StreamId) -> bool {
+		self.send
+			.get(&id)
+			.and_then(|s| s.as_ref())
+			.is_some_and(|s| s.reliable_size().is_some())
+	}
+
 	pub(in crate::connection) fn write_control_frames(
 		&mut self,
 		buf: &mut impl FrameBuf,
@@ -1226,7 +1237,8 @@ impl StreamsState {
 				Dir::Bi => {}
 			};
 		} else {
-			let limit = self.max_remote[id.dir() as usize];
+			// A raised `max_remote` may not be in a `MAX_STREAMS` frame yet
+			let limit = self.sent_max_remote[id.dir() as usize];
 			if id.index() >= limit {
 				return Err(TransportError::STREAM_LIMIT_ERROR(""));
 			}
@@ -1675,6 +1687,7 @@ mod tests {
 					let mut server = make(Side::Server);
 					let mut pending = Retransmits::default();
 					for round in 0..3 {
+						announce_max_streams(&mut server);
 						let readers: Vec<_> = (0..streams).map(|_| Counter::new()).collect();
 						let ids: Vec<_> = (0..streams)
 							.map(|i| StreamId::new(Side::Client, dir, round * streams + i))
@@ -3187,6 +3200,7 @@ mod tests {
 			pending: &mut pending,
 		};
 		stream.stop(0u32.into()).unwrap();
+		announce_max_streams(&mut client);
 
 		// Open stream 128
 		assert_eq!(
@@ -3238,6 +3252,7 @@ mod tests {
 
 		// Relax limit by one
 		client.set_max_concurrent(Dir::Uni, 129u32.into());
+		announce_max_streams(&mut client);
 
 		// Open stream 128
 		assert_eq!(
@@ -3317,6 +3332,7 @@ mod tests {
 			pending: &mut pending,
 		};
 		stream.stop(0u32.into()).unwrap();
+		announce_max_streams(&mut client);
 
 		// Open stream 128
 		assert_eq!(
@@ -3460,6 +3476,7 @@ mod tests {
 		for i in 0..N {
 			// Give ourselves room as we churn through ids
 			client.set_max_concurrent(Dir::Uni, (i + 200).try_into().unwrap());
+			announce_max_streams(&mut client);
 			let id = StreamId::new(Side::Server, Dir::Uni, i);
 			assert_eq!(
 				client.received(
@@ -3986,6 +4003,10 @@ mod tests {
 		assert_eq!(server.send_streams, 1);
 		server.reset_acked(id, 0);
 		assert_eq!(server.send_streams, 0);
+
+		// The shrunk RESET_STREAM_AT is declared lost after its replacement freed the stream
+		pending.reset_stream = vec![(id, 4)];
+		assert!(pending.is_empty(&server), "a stale reset must not demand a packet");
 	}
 
 	/// A RESET_STREAM_AT acknowledged before STOP_SENDING shrinks it no longer counts, so a late
@@ -4108,6 +4129,71 @@ mod tests {
 		assert_eq!(open.wakes(), 0);
 	}
 
+	/// Data acknowledged before a reset truncated it stays acknowledged while the reset lingers
+	#[test]
+	fn acked_survives_reset_at_truncation() {
+		let mut server = reset_at_server();
+		let mut pending = Retransmits::default();
+		let id = Streams {
+			state: &mut server,
+			closed: false,
+		}
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+		let mut stream = send::Stream {
+			id,
+			state: &mut server,
+			pending: &mut pending,
+			closed: false,
+		};
+		stream.write(&mut &b"hello world"[..]).unwrap();
+		let end = stream.offset();
+		let mut buf = Vec::new();
+		let sent = stream.state.write_frames(&mut buf, 0..100, true).streams;
+		stream.state.received_ack_of(sent[0].clone());
+		assert_eq!(stream.acked(end), Ok(true));
+
+		stream.reset_at(end.rewind(4), 7u32.into()).unwrap();
+		assert_eq!(stream.state.send_streams, 1, "the reset is not acknowledged yet");
+		assert_eq!(stream.acked(end), Ok(true));
+	}
+
+	/// An empty write queues no STREAM frame and never blocks on flow control
+	#[test]
+	fn empty_write_queues_nothing() {
+		let mut server = make(Side::Server);
+		server.set_params(&TransportParameters {
+			initial_max_streams_uni: 2u32.into(),
+			initial_max_data: 4u32.into(),
+			initial_max_stream_data_uni: 42u32.into(),
+			..TransportParameters::default()
+		});
+		let mut pending = Retransmits::default();
+		let mut open = || {
+			Streams {
+				state: &mut server,
+				closed: false,
+			}
+			.open(Dir::Uni, Default::default())
+			.unwrap()
+		};
+		let (first, second) = (open(), open());
+
+		let mut stream = send::Stream::new(first, &mut server, &mut pending, false);
+		assert_eq!(stream.write(&mut &b""[..]), Ok(0));
+		assert!(!server.can_send_stream_data());
+		let mut buf = Vec::new();
+		assert!(server.write_frames(&mut buf, 0..100, true).streams.is_empty());
+
+		// Spend the connection credit, then write nothing on another stream
+		let mut stream = send::Stream::new(first, &mut server, &mut pending, false);
+		assert_eq!(stream.write(&mut &b"full"[..]), Ok(4));
+		let mut stream = send::Stream::new(second, &mut server, &mut pending, false);
+		assert_eq!(stream.write(&mut &b""[..]), Ok(0));
+		assert!(!pending.data_blocked);
+		assert!(server.connection_blocked.is_empty());
+	}
+
 	#[test]
 	fn reset_at_after_stop_sending_drops_prefix() {
 		let mut server = reset_at_server();
@@ -4134,6 +4220,11 @@ mod tests {
 		assert_eq!(frame.final_offset, VarInt(11));
 		assert!(send.pending.is_fully_acked());
 		assert_eq!(server.buffered_data, 0);
+	}
+
+	/// Count every raised stream limit as announced in a `MAX_STREAMS` frame
+	fn announce_max_streams(state: &mut StreamsState) {
+		state.sent_max_remote = state.max_remote;
 	}
 
 	fn data(client: &mut StreamsState, id: StreamId, offset: u64, len: usize, fin: bool) {
@@ -5453,6 +5544,16 @@ mod tests {
 		let id = StreamId::new(Side::Server, Dir::Bi, 200);
 
 		// Raised locally, but no MAX_STREAMS has told the peer yet
+		let frame = || frame::Stream {
+			id,
+			offset: 0,
+			fin: false,
+			data: Bytes::from_static(b"x"),
+		};
+		assert_eq!(
+			client.received(frame(), 1).map_err(|e| e.code),
+			Err(TransportErrorCode::STREAM_LIMIT_ERROR),
+		);
 		assert_eq!(
 			client.received_stop_sending(id, 0u32.into()).map_err(|e| e.code),
 			Err(TransportErrorCode::STREAM_LIMIT_ERROR),
@@ -5476,6 +5577,7 @@ mod tests {
 
 		assert_eq!(client.received_max_stream_data(id, 1), Ok(()));
 		assert!(client.received_stop_sending(id, 0u32.into()).is_ok());
+		assert!(client.received(frame(), 1).is_ok());
 	}
 
 	/// A stream window as large as a varint, added to what the reader took, still encodes.

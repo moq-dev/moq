@@ -589,9 +589,14 @@ impl Connection {
 		}
 
 		if let End::Closing { error, frame } = &mut self.end {
+			let room = budget.saturating_sub(buf.len());
+			if frame.is_some() && !buf.is_empty() && room < Close::SIZE_BOUND {
+				// The transport parameters left no room, so the close goes in the next record
+				self.timer.on_send(now);
+				return Some(Default::default());
+			}
 			// Write the close frame, if any, and go quiet
 			if let Some(close) = frame.take() {
-				let room = budget - buf.len();
 				close.encode(buf, room);
 			}
 			self.end = End::Closed(error.clone());
