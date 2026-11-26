@@ -76,4 +76,4 @@ the later group, before the front-drop fix lands.
 
 ## Waiting
 
-- moq-dev/moq: [moq-dev/moq#9626](https://github.com/moq-dev/moq/pull/9626) (lite-07 zero-timer accounting) lands, since the publisher's answer for a range with dropped keys is built on its wire; check that the PR is merged.
+- moq-dev/moq: [moq-dev/moq#9686](https://github.com/moq-dev/moq/pull/9686) (lite-07 zero-timer accounting) lands, since the publisher's answer for a range with dropped keys is built on its wire; check that the PR is merged.
