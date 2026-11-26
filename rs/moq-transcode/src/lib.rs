@@ -194,7 +194,8 @@ impl Transcoder {
 		// asked for it. A newer snapshot drops it.
 		let mut moving: Option<Moving> = None;
 		// Set once the source catalog finished cleanly: the source is ending, so the ladder stops
-		// following it, while the rungs still serving finish what their source tracks send.
+		// following it and starts no rung, idle rungs end, and the rungs still serving finish what
+		// their source tracks send.
 		let mut ended = false;
 		loop {
 			if ended && tasks.is_empty() {
@@ -204,7 +205,11 @@ impl Transcoder {
 				request = dynamic.requested_track() => {
 					// Err means the broadcast closed; nothing left to serve.
 					let Ok(request) = request else { break };
-					match ladder.rung(request.name()) {
+					let rung = match ended {
+						true => None,
+						false => ladder.rung(request.name()),
+					};
+					match rung {
 						Some(rung) => { tasks.spawn(rung::serve(rung, request)); }
 						None => request.reject(moq_net::Error::NotFound),
 					}
@@ -225,6 +230,7 @@ impl Transcoder {
 					Ok(None) => {
 						ended = true;
 						moving = None;
+						ladder.end();
 						derived.finish()?;
 					}
 					// The catalog track died, which says nothing of the source media: wind down.
@@ -257,7 +263,7 @@ impl Transcoder {
 		}
 
 		// Abort whatever is still serving. After a clean catalog end that is only what the
-		// closed source left, since the loop waits on the rest. A catalog-track error breaks while
+		// closed source cut off, since the loop waits on the rest. A catalog-track error breaks while
 		// the source media and viewers may still be live, and a rung task only self-ends on
 		// source-media-end or broadcast-close, so awaiting it could hang here forever.
 		tasks.shutdown().await;
@@ -1109,12 +1115,17 @@ mod tests {
 
 	/// A source whose catalog finishes cleanly is ending, not gone: a rung mid-group finishes
 	/// that group and then its track with its source track, rather than being cut off with the
-	/// catalog. The derivative catalog finishes, and so does the transcoder once its rungs have.
+	/// catalog. An idle rung ends at once, and the derivative catalog finishes, so the transcoder
+	/// ends with its last serving rung even while the source broadcast stays open.
 	#[tokio::test]
 	async fn a_finished_catalog_lets_the_rungs_drain() {
 		let mut source = source_catalog(320, 240);
 		let config = Config {
-			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
+			ladder: Ladder::new([
+				Rung::new(60, moq_net::bandwidth::Rate::from_bps(50_000)),
+				Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000)),
+			])
+			.unwrap(),
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
 			source: None,
@@ -1124,6 +1135,8 @@ mod tests {
 		let consumer = output.consume();
 		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
 
+		// A viewer who came and went leaves its rung idle.
+		drop(subscribe(&consumer, "video/60p").await);
 		let mut rung = subscribe(&consumer, "video/120p").await;
 		let mut catalogs =
 			moq_mux::catalog::hang::Consumer::<()>::new(consumer.track(hang::Catalog::DEFAULT_NAME).unwrap());

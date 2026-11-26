@@ -66,6 +66,11 @@ impl Retire {
 		// happens on its way out: retire rather than park here forever.
 		let _ = self.0.wait_for(|retired| *retired).await;
 	}
+
+	/// Whether it has fired.
+	fn is_fired(&self) -> bool {
+		*self.0.borrow()
+	}
 }
 
 /// Everything a rung needs to build transcoding pipelines on demand.
@@ -93,6 +98,10 @@ pub(crate) struct Rung {
 	pub rendition: crate::active::Rendition,
 	/// Fires when the ladder resizes past this rung.
 	pub retire: Retire,
+	/// Fires once the source catalog has finished, shared by every rung of the ladder. An idle
+	/// rung then ends rather than waiting on demand, and its fetches drain as on retirement,
+	/// while a serving one carries on until its source track ends.
+	pub ending: Retire,
 }
 
 impl Rung {
@@ -309,15 +318,16 @@ impl Want {
 /// open or ends at or past it. As moq-net judges a copy's feed,
 /// ranges wholly below it read only history, which fills serve.
 ///
-/// Before any group, only an open range does. A paused source's feed may never deliver a group
-/// to place the edge by, so a bounded range counted as live would hold the serving session its
-/// own fills then wait behind.
+/// Before any group, only an open range or a live join does. A paused source's feed may never
+/// deliver a group to place the edge by, so a bounded history range counted as live would hold
+/// the serving session its own fills then wait behind.
 fn reaches_live(subscription: &moq_net::track::Subscription, edge: Option<u64>) -> bool {
 	subscription.ranges.iter().any(|range| match (range.end, edge) {
 		(None, _) => true,
 		// A time end is the last key it reads.
 		(Some(last), Some(edge)) => last >= edge,
-		(Some(_), None) => false,
+		// A live join starts at the edge, wherever it turns out to be.
+		(Some(_), None) => matches!(range.start, moq_net::track::Start::Live { .. }),
 	})
 }
 
@@ -334,6 +344,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 	// The newest source group this rung has seen start, which a subscription has to reach.
 	let mut edge = None;
 	let mut retire = rung.retire.clone();
+	let mut ending = rung.ending.clone();
 	// Set once the ladder retires this rung. The track ends at the next group
 	// boundary rather than mid-group, so the last thing a subscriber gets is a
 	// complete group.
@@ -360,6 +371,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 				retiring = true;
 				continue;
 			}
+			() = ending.fired() => return Ok(Ended::Unfinished),
 		}
 
 		// The session's encoder holds its place in the budget for as long as it serves,
@@ -611,7 +623,8 @@ async fn fetches(
 		spawn_fill(&mut tasks, rung.clone(), fill, limit.clone());
 	}
 
-	if retired {
+	// A rung ending with its source catalog was idle, so what it still owes are fills.
+	if retired || rung.ending.is_fired() {
 		// A consumer that asked for a group before retirement is already waiting on
 		// it, whether or not this loop had reached it yet: the fill queues on the
 		// dynamic handler the moment the fetch is made. Take what is queued now, so
@@ -1160,6 +1173,9 @@ mod tests {
 			level: 30,
 		});
 		let (trigger, retire) = Retire::channel();
+		// A catalog that never finishes: a dropped sender fires, so this one lives for the test.
+		let (catalog, ending) = Retire::channel();
+		std::mem::forget(catalog);
 		let info = Resolved {
 			name: "video/120p".into(),
 			short_side: 120,
@@ -1188,6 +1204,7 @@ mod tests {
 			},
 			active,
 			retire,
+			ending,
 		};
 		(rung, source, trigger)
 	}
@@ -1601,6 +1618,21 @@ mod tests {
 		// The rendition reports the opened encoder's preset, the one the caller requested by default.
 		let applied = rung.rendition.applied().expect("the encoder opened");
 		assert_eq!(applied.preset, Some(moq_video::encode::Preset::LowLatency));
+	}
+
+	/// Before the feed has placed the edge, a range reaches it only if it is open or joins live:
+	/// a bounded history range would hold a session through a paused source.
+	#[test]
+	fn before_any_group_only_open_ranges_and_live_joins_reach_live() {
+		use moq_net::track::{Range, Start, Subscription};
+		let reaches =
+			|start, end, edge| reaches_live(&Subscription::default().with_ranges([Range { start, end }]), edge);
+		let live = Start::Live { min: None, max: None };
+		assert!(reaches(Start::Time(3), None, None));
+		assert!(!reaches(Start::Time(3), Some(4), None));
+		assert!(reaches(live, Some(4), None));
+		assert!(reaches(Start::Time(3), Some(4), Some(4)));
+		assert!(!reaches(Start::Time(3), Some(4), Some(5)));
 	}
 
 	/// A fetched NVDEC group reaches the encoder at native size when

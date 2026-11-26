@@ -72,6 +72,11 @@ pub(crate) struct Pipeline {
 	/// always the newest task for it and a signal sent to one that already ended
 	/// goes nowhere.
 	serving: HashMap<String, tokio::sync::watch::Sender<bool>>,
+	/// Whether the ladder left out a rung whose probe failed, so a later snapshot of the
+	/// same picture tries it again: an encoder out of sessions refuses a size it takes later.
+	incomplete: bool,
+	/// Fires once the source catalog has finished, for every rung served off this ladder.
+	ending: (tokio::sync::watch::Sender<bool>, rung::Retire),
 }
 
 impl Pipeline {
@@ -108,12 +113,15 @@ impl Pipeline {
 			names: Names::default(),
 			probed: VecDeque::new(),
 			serving: HashMap::new(),
+			incomplete: false,
+			ending: rung::Retire::channel(),
 		};
 
 		// `resolve` takes the source it resolves against, since `follow` calls it
 		// with one the ladder has not adopted yet. Here it is the ladder's own.
 		let (name, rendition) = (ladder.name.clone(), ladder.rendition.clone());
-		let rungs = ladder.resolve(&name, &rendition, &[]).await?;
+		let (rungs, complete) = ladder.resolve(&name, &rendition, &[]).await?;
+		ladder.incomplete = !complete;
 		tracing::info!(source = %ladder.name, rungs = rungs.len(), "transcoding");
 		// Publish the ladder before any rung can be asked for, so a cursor holds
 		// every handle and can bill a pipeline too short to show up as an edge.
@@ -138,13 +146,13 @@ impl Pipeline {
 	///
 	/// Nothing is committed here: an error leaves the ladder exactly as it was. The
 	/// probes that succeeded are remembered regardless, since they describe the
-	/// encoder rather than the ladder.
+	/// encoder rather than the ladder. Returns the rungs, and whether none was left out.
 	async fn resolve(
 		&mut self,
 		source_name: &str,
 		source: &VideoConfig,
 		carry: &[Published],
-	) -> Result<Vec<Published>, Error> {
+	) -> Result<(Vec<Published>, bool), Error> {
 		let resolved = catalog::resolve_rungs(&self.config.ladder, source_name, source)?;
 
 		let mut published = Vec::new();
@@ -175,13 +183,12 @@ impl Pipeline {
 			};
 			published.push(Published { rung, entry });
 		}
-		if published.is_empty()
-			&& let Some(err) = refused
-		{
-			return Err(err);
-		}
+		let complete = match refused {
+			Some(err) if published.is_empty() => return Err(err),
+			refused => refused.is_none(),
+		};
 		catalog::inherit(&mut published, source);
-		Ok(published)
+		Ok((published, complete))
 	}
 
 	/// The catalog entry for a fresh rung, probing an encoder only for a shape
@@ -230,7 +237,13 @@ impl Pipeline {
 			rendition: self.active.rendition(&published.rung),
 			info: published.rung.clone(),
 			retire,
+			ending: self.ending.1.clone(),
 		})
+	}
+
+	/// Tell every rung served off this ladder that the source catalog has finished.
+	pub(crate) fn end(&self) {
+		self.ending.0.send_replace(true);
 	}
 
 	/// Resolve the ladder again against a new source catalog snapshot.
@@ -249,6 +262,11 @@ impl Pipeline {
 			}
 		};
 		if name == self.name && same_picture(&rendition, &self.rendition) {
+			// The picture the ladder already serves, so only a rung left out before is new.
+			if self.incomplete {
+				self.apply(name, rendition, false, self.scale).await;
+				return None;
+			}
 			catalog::inherit(&mut self.rungs, &rendition);
 			self.rendition = rendition;
 			return None;
@@ -284,8 +302,8 @@ impl Pipeline {
 		// Probing opens a real encoder, and a picture this machine cannot encode at
 		// is a reason to keep serving the ladder that works, not to end the
 		// broadcast.
-		let rungs = match self.resolve(&name, &rendition, &carry).await {
-			Ok(rungs) => rungs,
+		let (rungs, complete) = match self.resolve(&name, &rendition, &carry).await {
+			Ok(resolved) => resolved,
 			Err(err) => {
 				tracing::warn!(%err, source = %name, "could not resolve a ladder for the new source");
 				return;
@@ -307,6 +325,7 @@ impl Pipeline {
 		self.name = name;
 		self.rendition = rendition;
 		self.scale = scale;
+		self.incomplete = !complete;
 
 		// Retire whatever the new ladder does not carry forward: a height it has no
 		// room for, and a height it kept at a picture it is no longer serving,
