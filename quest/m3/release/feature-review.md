@@ -55,9 +55,9 @@ first pass would ship as is, some left (YIELDED continuations, socket
 endpoints, video `warmup`, the vendored WebRTC stack, the unused exports)
 and more were renamed or reshaped.
 
-The delta pass now starts from `6ac78b68ee`, and its second bullet below is
-done: the gateway lifecycles, CLI flags, JSON snapshots, the codec split,
-and moqsink were read in full by that audit.
+The delta pass now starts from `6ac78b68ee`: the 2026-11-16 audit already read
+the gateway lifecycles, CLI flags, JSON snapshots, the codec split, and moqsink
+in full.
 
 What the 2026-11-16 audit learned, beyond the first pass's list below:
 

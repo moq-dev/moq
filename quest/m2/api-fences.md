@@ -14,7 +14,7 @@ Decided 2026-11-26 (maintainer, pre-cut quest and consumer audit): ✅ fence the
 
 Steps:
 
-1. Add `#[non_exhaustive]` to `pub struct Device` in `rs/moq-audio/src/playback/device.rs` and `pub enum Read` in `rs/moq-audio/src/decode/consumer.rs`. Check every in-tree caller (including tests and `moq-cli` / `moq-ffi`) and update struct literals or exhaustive matches to handle `..` / `_`.
+1. Add `#[non_exhaustive]` to `pub struct Device` in `rs/moq-audio/src/playback/device.rs` and `pub enum Read` in `rs/moq-audio/src/decode/consumer.rs`. Check every in-tree caller (including tests and `moq-cli` / `moq-ffi`) and update exhaustive struct destructuring patterns with `..` and exhaustive `Read` matches with `_`. Outside `moq-audio`, `#[non_exhaustive]` rejects struct literal construction of `Device`; check whether any external crate constructs `Device` and add a constructor or migration note if so.
 2. Add `"moq-opus"` to `exemptions.rust` in `version.json` (and update `RELEASE.md`'s Versions section to document why `moq-opus` keeps its `0.1.x` line while `opus-safe` replaces the c2rust API), or hide its raw c2rust `pub mod externs` / `varargs` exports if `just version`'s promotion rule requires keeping it on the shared minor. Confirm `just version` passes cleanly.
 3. Run `just check` and verify the API diff reports the two `#[non_exhaustive]` additions cleanly.
 
