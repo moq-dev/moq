@@ -35,11 +35,11 @@
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
-    # rust2-bench, which counts each bench's instructions under the Valgrind rust2's own
-    # nixpkgs pins (`just rs instructions`). A bump that moves that Valgrind starts new
-    # Kixel Quest series, since another Valgrind can count differently.
-    rust2 = {
-      url = "github:kixel-ai/rust2";
+    # swole, which counts each bench's instructions under the Valgrind its own nixpkgs
+    # pins (`just rs instructions`). A bump that moves that Valgrind starts new Kixel
+    # Quest series, since another Valgrind can count differently.
+    swole = {
+      url = "github:kixel-ai/swole";
       inputs.flake-utils.follows = "flake-utils";
       inputs.quest.follows = "quest";
     };

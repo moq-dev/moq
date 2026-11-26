@@ -1,8 +1,8 @@
-# [XL] Benches move from Criterion to rust2-bench-harness
+# [XL] Benches move from Criterion to swole
 
 ## Goal
 
-Every Rust bench target in moq is written as rust2-bench-harness `#[bench]` functions, which rust2-bench counts and Nightly times through the harness's paired timing. Criterion, `codspeed-criterion-compat`, `rs/bench-harness`, and `cfg(codspeed)` leave the workspace, and `.github/workflows/codspeed.yml` is renamed after what it runs, such as `instructions.yml`, so nothing in moq names CodSpeed.
+Every Rust bench target in moq is written as [swole](https://github.com/kixel-ai/swole) `#[bench]` functions, which swole counts and Nightly times through its paired timing. Criterion, `codspeed-criterion-compat`, `rs/bench-harness`, and `cfg(codspeed)` leave the workspace, and `.github/workflows/codspeed.yml` is renamed after what it runs, such as `instructions.yml`, so nothing in moq names CodSpeed.
 
 Non-goals: what each bench measures, and how often Nightly and the instruction counts run.
 
@@ -12,7 +12,9 @@ Decided 2026-11-25 (maintainer, `/quest-plan` in kixel-ai/rust2, [kixel-ai/rust2
 
 - ✅ No CodSpeed service, app, or code in moq-dev or kixel-ai (rejected: the service and app only; drop the work). moq stopped using the service in [moq-dev/moq#9555](https://github.com/moq-dev/moq/pull/9555). What's left is the crate and the name.
 - ✅ Rewrite the benches to `#[bench]` (rejected: a Criterion-API count layer in the harness, deleted later by this rewrite; wait for rust2's m2 harness epic).
-- ✅ The harness's wall-clock timing ships first, so each bench is written once and Criterion leaves with CodSpeed's crate (rejected: rewrite now and stop Nightly's wall-clock until timing ships; keep a Criterion copy of each bench for timing). rust2's [paired timing](https://github.com/kixel-ai/rust2/blob/main/quest/m1/codspeed/paired.md) is required to cover what Nightly times today, including the async benches and the `iter_custom` ones that keep an input and time part of each iteration.
+- ✅ The harness's wall-clock timing ships first, so each bench is written once and Criterion leaves with CodSpeed's crate (rejected: rewrite now and stop Nightly's wall-clock until timing ships; keep a Criterion copy of each bench for timing). Paired timing, which shipped in [kixel-ai/rust2#1033](https://github.com/kixel-ai/rust2/pull/1033), is required to cover what Nightly times today, including the async benches and the `iter_custom` ones that keep an input and time part of each iteration.
+
+Decided 2026-11-25 (maintainer, `/quest-plan` in kixel-ai/rust2, [kixel-ai/rust2#1041](https://github.com/kixel-ai/rust2/pull/1041)): ✅ rust2-bench and its harness move to [kixel-ai/swole](https://github.com/kixel-ai/swole) as `swole` before this rewrite, so the benches are written against `swole` once instead of renamed afterward. The move landed in [kixel-ai/rust2#1046](https://github.com/kixel-ai/rust2/pull/1046); the harness is `swole = { git = "https://github.com/kixel-ai/swole" }` in `[dev-dependencies]` until its first crates.io release.
 
 m9: it touches only benches, CI, and docs, so it changes no published API, wire format, or CLI surface, and it needn't wait for the release cut.
 
@@ -26,10 +28,6 @@ Recommendations for the implementer:
 - Update `bench/README.md`'s Instruction counts section and every comment that names CodSpeed or `cfg(codspeed)`.
 
 Public API: none. Wire: none.
-
-## Waiting
-
-- kixel-ai/rust2: paired timing, `quest/m1/codspeed/paired.md` in its quest tree; check that the file is gone from rust2's `main` and moq's rust2 flake pin includes it.
 
 ## Related
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Count the deterministic Criterion benches' instructions under stock Valgrind with rust2-bench,
+# Count the deterministic Criterion benches' instructions under stock Valgrind with swole,
 # as the nightly Instructions workflow does (x86-64 Linux).
 #
-# Usage: sh/rs/instructions.sh run|compare <base>|fingerprint [rust2-bench options]
+# Usage: sh/rs/instructions.sh run|compare <base>|fingerprint [swole options]
 #
 # With `--benchmarks <file>`, Cargo builds only the bench targets its names live in, since each
 # name starts with its target's file (`rs/<package>/benches/<target>.rs::`), so a bisect step
@@ -10,13 +10,13 @@
 # resolves the same features, and the targets link the same code, as a full count's.
 set -euo pipefail
 
-usage="usage: sh/rs/instructions.sh run|compare <base>|fingerprint [rust2-bench options]"
+usage="usage: sh/rs/instructions.sh run|compare <base>|fingerprint [swole options]"
 command=${1:?$usage}
 
 # Valgrind runs ADX but hides it from CPUID (https://bugs.kde.org/show_bug.cgi?id=494162), so
 # rind is built to skip that one startup check, or it refuses the simulated CPU.
 export VALGRIND_BUG_494162=1
-bench=(nix run --inputs-from . rust2#bench --)
+bench=(nix run --inputs-from . swole --)
 
 case "$command" in
     fingerprint | help | -h | --help) exec "${bench[@]}" "$@" ;;

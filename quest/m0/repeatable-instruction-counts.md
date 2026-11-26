@@ -20,7 +20,7 @@ Measured 2026-11-24 on rust2-bench at kixel-ai/rust2@6ead6d56 (fingerprint `x86_
 Recommendations for the implementer:
 
 - Count one noisy benchmark a few times with `--benchmarks`, at `--jobs 1` and at full load, and diff Callgrind's per-function costs to find what differs: timer and clock reads, thread interleaving, `RandomState` hash seeds, or a path or environment size that shifts alignment for glibc's string functions.
-- Fix it in the bench where the bench controls the source, such as a runtime on kio's simulated clock, tokio's paused time, or a fixed hasher. A location dependence that only `compare`'s separate base worktree causes belongs to rust2-bench instead.
+- Fix it in the bench where the bench controls the source, such as a runtime on kio's simulated clock, tokio's paused time, or a fixed hasher. A location dependence that only `compare`'s separate base worktree causes belongs to swole instead.
 - Prove it by counting every benchmark twice at full load, in two checkouts at different paths, and finding every count equal.
 
 Public API: none. Wire: none.

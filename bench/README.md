@@ -974,7 +974,7 @@ sharing one can leave a bench linked against the other tree's library.
 
 The Instructions workflow counts each deterministic bench's instructions every
 night on `main`, under stock Valgrind on a hosted runner, through
-[rust2-bench](https://github.com/kixel-ai/rust2/tree/main/bench/runner). Each
+[swole](https://github.com/kixel-ai/swole). Each
 benchmark runs alone in its own Valgrind process, so a change of a few percent
 shows without the paired comparison's rounds. Some counts still move
 between runs of the same code: some benches read the wall clock and follow the
@@ -986,11 +986,11 @@ them, skips `iter_custom` benches, so `sh/rs/instructions.sh` selects only
 single-threaded targets without I/O, and Nightly keeps measuring every bench.
 Workspace benches import `criterion`, which `rs/bench-harness` resolves to
 Criterion, or to CodSpeed's instrumented Criterion under `cfg(codspeed)`, which
-rust2-bench sets. Nothing gates on it.
+swole sets. Nothing gates on it.
 
 Each count's measure names the environment it ran in, such as `instructions
 (x86_64-3059cd1d9e65)`: Valgrind's simulated CPU, glibc's tunables, and the
-Valgrind version, which rust2's flake input pins. Counts compare only within one
+Valgrind version, which swole's flake input pins. Counts compare only within one
 fingerprint, and a Valgrind bump starts new series. A matching fingerprint does
 not yet reproduce CI's counts: two hosts sharing one agreed exactly on fewer
 than a quarter of the benchmarks. On x86-64 Linux:
@@ -1008,7 +1008,7 @@ commits, so its base needs every package `sh/rs/instructions.sh` lists. It
 counts the base in another worktree, whose path alone can move a count, so
 recount a change it reports in one checkout, with `--jobs 1` as CI counts,
 before trusting it. It keeps each
-checkout's base worktree and build under `~/.cache/rust2-bench` for the next
+checkout's base worktree and build under `~/.cache/swole` for the next
 compare; delete the directory, then `git worktree prune`, to reclaim them.
 
 ### Kixel Quest
@@ -1019,8 +1019,8 @@ the run finishes and turns a regression into an investigation quest in
 `quest/m0/`. It bisects one to the landing that caused it by dispatching the
 Instructions workflow on a `kixel-bisect/<run>/<commit>` branch, with its
 `benchmarks` input naming the suspects, so each step builds and counts only
-those. The Instructions workflow uploads rust2-bench's `metrics.json`, which
-rust2-bench checks against Kixel Quest's limits as it writes it; Nightly reports
+those. The Instructions workflow uploads swole's `metrics.json`, which
+swole checks against Kixel Quest's limits as it writes it; Nightly reports
 every successful source's report, without its `bench-*` prefix, and each paired
 comparison's base as a second observation of that commit (`just gh
 benchmark-report nightly-metrics`). A benchmark CSV column becomes a measure of
