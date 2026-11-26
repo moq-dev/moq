@@ -180,14 +180,14 @@ whose source, features, or dependencies moved, where crane rebuilt every
 workspace crate on any edit and every dependency on any lock change. Crates
 only the final fat-LTO link reads compile to bitcode alone, as cargo does:
 the spike measured that ~11% cheaper than crane cold and modeled it 49% cheaper
-over a week of `main`. Those builds run on free GitHub-hosted runners today,
-but many of these jobs are planned to move to self-hosted runners, where the
-saving lands on our own hosts. The generated file, and the release profile
-restated in `nix/crates.nix`, are accepted for that caching. Measured
-2026-11-14 by the [feature review](/quest/m3/release/feature-review.md): the
-Cache job's Runtime step took a median 13.1 min over 32 crane builds and
-11.9 min over 21 crate2nix builds, so the wall-time saving waits on that move,
-which no quest plans yet; per-PR cost is small (`just rs cargo-nix --check`
+over a week of `main`. Those builds run on free GitHub-hosted runners and,
+as `cache.yml` is no merge gate, may stay there (runner rule, 2026-11-26); a
+move to self-hosted runners happens only if measured to pay off. The generated
+file, and the release profile restated in `nix/crates.nix`, are accepted for
+that caching. Measured 2026-11-14 by the
+[feature review](/quest/m3/release/feature-review.md): the Cache job's Runtime
+step took a median 13.1 min over 32 crane builds and 11.9 min over 21 crate2nix
+builds, a 9% hosted wall-time saving that carries the item; per-PR cost is small (`just rs cargo-nix --check`
 takes about 3 s, and `nix/Cargo.nix` changed in 2 of the next 57 commits).
 
 Decided 2026-10-25 (maintainer), from a profile of moq-net: monomorphized
