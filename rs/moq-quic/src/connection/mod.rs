@@ -2169,6 +2169,10 @@ impl Connection {
 				self.spaces[space].ecn_feedback = frame::EcnCounts::ZERO;
 			}
 			Ok(false) => {}
+			// While the path validates, its controller hears no congestion signal, as it hears no
+			// ACK (see `on_packet_acked`): BBR3 would leave Startup with no bandwidth sample and
+			// pace at zero.
+			Ok(true) if self.path.challenge.is_some() => {}
 			Ok(true) => {
 				self.stats.path.congestion_events += 1;
 				self.path.congestion.on_ce(congestion::Ce {
@@ -2435,10 +2439,12 @@ impl Connection {
 
 			for &packet in &lost_packets {
 				let info = self.spaces[pn_space].sent_packets.remove(packet).unwrap(); // safe: lost_packets is populated just above
-				// A packet from another path carries another controller's state.
+				// A packet from another path carries another controller's state. While the path
+				// validates, its controller hears no loss, as it hears no ACK (see
+				// `on_packet_acked`): losses alone read as a path that delivers nothing.
 				if let Some(state) = info
 					.congestion
-					.filter(|_| info.path_generation == self.path.generation())
+					.filter(|_| self.path.challenge.is_none() && info.path_generation == self.path.generation())
 				{
 					lost.push(congestion::Lost {
 						sent: info.time_sent,
@@ -4381,6 +4387,19 @@ impl Connection {
 		buf.extend_from_slice(payload);
 		builder.finish(self, now, &mut buf);
 		buf
+	}
+
+	/// Whether the path the peer moved away from is still kept to fall back to
+	#[cfg(test)]
+	pub(crate) fn has_prev_path(&self) -> bool {
+		self.prev_path.is_some()
+	}
+
+	/// When the pacer lets a full-size datagram go, or `None` if it does now
+	#[cfg(test)]
+	pub(crate) fn pacing_release(&mut self, now: Instant) -> Option<Instant> {
+		let mtu = u64::from(self.path.current_mtu());
+		self.path.congestion.pace(now, mtu)
 	}
 
 	/// The number of bytes of packets containing retransmittable frames that have not been

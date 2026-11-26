@@ -335,18 +335,83 @@ fn rtt_after_rebinding(ip: IpAddr) -> (Duration, Duration) {
 	(before, pair.server_conn_mut(server_ch).rtt())
 }
 
-/// A port change on the same IPv4 address looks like NAT rebinding and keeps the path's RTT and
-/// congestion state
+/// A port change on the same address looks like NAT rebinding and keeps the path's RTT and
+/// congestion state: over IPv4, over IPv6, and over IPv4 that a dual-stack socket reports as
+/// IPv4-mapped IPv6
 #[test]
-fn ipv4_rebinding_keeps_path_state() {
-	let (before, after) = rtt_after_rebinding(Ipv4Addr::LOCALHOST.into());
-	assert_eq!(before, after);
+fn rebinding_keeps_path_state() {
+	for ip in [
+		IpAddr::from(Ipv4Addr::LOCALHOST),
+		Ipv6Addr::LOCALHOST.into(),
+		Ipv4Addr::LOCALHOST.to_ipv6_mapped().into(),
+	] {
+		let (before, after) = rtt_after_rebinding(ip);
+		assert_eq!(before, after, "{ip}");
+	}
 }
 
-/// The same port change over IPv6 starts the path over from the initial RTT
+/// A move to another IP address starts the path over from the initial RTT
 #[test]
-fn ipv6_rebinding_resets_path_state() {
-	let (before, after) = rtt_after_rebinding(Ipv6Addr::LOCALHOST.into());
-	assert_ne!(before, after);
-	assert_eq!(after, transport::Config::default().initial_rtt);
+fn address_change_resets_path_state() {
+	let _guard = subscribe();
+	let (mut pair, client_ch, server_ch) = connected();
+	pair.drive();
+	assert_ne!(pair.server_conn_mut(server_ch).rtt(), transport::Config::default().initial_rtt);
+
+	pair.client.addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), pair.next_port());
+	pair.client_conn_mut(client_ch).ping();
+	pair.drive_client();
+	let now = pair.time;
+	pair.server.drive(now, pair.client.addr);
+	assert_eq!(pair.server_conn_mut(server_ch).remote_address(), pair.client.addr);
+	assert_eq!(pair.server_conn_mut(server_ch).rtt(), transport::Config::default().initial_rtt);
+}
+
+/// A copy of the client's packet an attacker forwards from another address moves the server
+/// there, and the client's next packet from the address it never left moves the server back to
+/// the path it validated, with that path's RTT and congestion state (RFC 9000 §9.3.3)
+#[test]
+fn spurious_migration_returns_to_the_validated_path() {
+	let _guard = subscribe();
+	let (mut pair, client_ch, server_ch) = connected();
+	pair.drive();
+	let client = pair.client.addr;
+	let rtt = pair.server_conn_mut(server_ch).rtt();
+	assert_ne!(rtt, transport::Config::default().initial_rtt);
+
+	// The forwarded copy arrives first, so the client's own is a duplicate
+	pair.client_conn_mut(client_ch).ping();
+	pair.drive_client();
+	let forwarded = SocketAddr::new(Ipv4Addr::new(192, 0, 2, 1).into(), 4433);
+	let now = pair.time;
+	pair.server.drive(now, forwarded);
+	assert_eq!(pair.server_conn_mut(server_ch).remote_address(), forwarded);
+	assert_eq!(pair.server_conn_mut(server_ch).rtt(), transport::Config::default().initial_rtt);
+
+	// The server challenges the address it left, and the client answers from it
+	pair.drive();
+	let server = pair.server_conn_mut(server_ch);
+	assert_eq!(server.remote_address(), client);
+	assert_eq!(server.rtt(), rtt);
+	assert!(!server.has_prev_path());
+}
+
+/// Once the path a client moved to validates, the server lets go of the one it left
+#[test]
+fn validated_migration_releases_the_previous_path() {
+	let _guard = subscribe();
+	let (mut pair, client_ch, server_ch) = connected();
+	pair.drive();
+	pair.client.addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), pair.next_port());
+	pair.client_conn_mut(client_ch).ping();
+	pair.drive_client();
+	let now = pair.time;
+	pair.server.drive(now, pair.client.addr);
+	assert!(pair.server_conn_mut(server_ch).has_prev_path());
+
+	pair.drive();
+	let client = pair.client.addr;
+	let server = pair.server_conn_mut(server_ch);
+	assert_eq!(server.remote_address(), client);
+	assert!(!server.has_prev_path());
 }

@@ -243,7 +243,37 @@ impl Pair {
 		self.drive();
 		let server_ch = self.server.assert_accept();
 		self.finish_connect(client_ch, server_ch);
+		self.settle_pacing();
 		(client_ch, server_ch)
+	}
+
+	/// Advance time until each connection's pacer lets a full-size datagram go, as after the
+	/// pause any connection gets before the application writes. The MTU probes that end a
+	/// handshake are paced, so they leave the pacer spent at the instant the pair goes idle.
+	pub(super) fn settle_pacing(&mut self) {
+		loop {
+			let now = self.time;
+			let release = self
+				.client
+				.connections
+				.values_mut()
+				.chain(self.server.connections.values_mut())
+				.filter_map(|conn| conn.pacing_release(now))
+				.max();
+			match release {
+				Some(release) => self.time = release,
+				None => return,
+			}
+		}
+	}
+
+	/// Advance time until each connection's pacer holds a whole burst, for a test that sends
+	/// one without letting time pass
+	pub(super) fn refill_pacing(&mut self) {
+		// The longest a burst takes to refill, unless it is a single datagram
+		const REFILL: Duration = Duration::from_millis(10);
+		self.time = self.time.saturating_add(REFILL);
+		self.settle_pacing();
 	}
 
 	/// Just start connecting the client

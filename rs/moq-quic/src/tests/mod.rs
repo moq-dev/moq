@@ -1105,6 +1105,7 @@ fn congestion() {
 	let _guard = subscribe();
 	let mut pair = Pair::default();
 	let (client_ch, _) = pair.connect();
+	pair.refill_pacing();
 
 	const TARGET: u64 = 2048;
 	assert!(pair.client_conn_mut(client_ch).congestion_window() > TARGET);
@@ -3048,6 +3049,7 @@ fn congested_tail_loss() {
 	let _guard = subscribe();
 	let mut pair = Pair::default();
 	let (client_ch, _) = pair.connect();
+	pair.refill_pacing();
 
 	const TARGET: u64 = 2048;
 	assert!(pair.client_conn_mut(client_ch).congestion_window() > TARGET);
@@ -4575,6 +4577,72 @@ fn connect_lost_mtu_probes_do_not_trigger_congestion_control() {
 	assert_eq!(server_stats.path.congestion_events, 0);
 }
 
+/// An MTU probe is ack-eliciting data like any other, so a congestion window too small for it
+/// holds it back
+#[test]
+fn mtu_probes_respect_the_congestion_window() {
+	let _guard = subscribe();
+	// Room for a datagram at the initial MTU of 1200 bytes, short of the smallest probe
+	let factory = Arc::new(PacketRecorderFactory {
+		window: Some(1300),
+		..Default::default()
+	});
+	let transport = transport::Config {
+		congestion: factory,
+		..transport::Config::default()
+	};
+	let mut server_cfg = server_config();
+	server_cfg.transport = transport.clone();
+	let mut pair = Pair::new(Default::default(), server_cfg);
+	let mut client_cfg = client_config();
+	client_cfg.transport = transport;
+	pair.mtu = 1500;
+	let (client_ch, server_ch) = pair.connect_with(client_cfg);
+	pair.drive();
+
+	assert_eq!(pair.client_conn_mut(client_ch).stats().path.sent_plpmtud_probes, 0);
+	assert_eq!(pair.server_conn_mut(server_ch).stats().path.sent_plpmtud_probes, 0);
+}
+
+/// A lost ACK-only packet reached no congestion response, so a late ACK of it proves none
+/// spurious, and a real response stays in place
+#[test]
+fn late_ack_only_packet_is_no_spurious_loss() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	let (client_ch, server_ch) = pair.connect();
+	pair.drive();
+	let s = pair
+		.client_streams(client_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	// The server answers each burst with an ACK-only packet
+	let burst = |pair: &mut Pair| {
+		pair.client_send(client_ch, s).write(&mut &[42; 4000][..]).unwrap();
+		while pair.client.inbound.is_empty() {
+			assert!(pair.step(), "the server sent no ACK");
+		}
+	};
+
+	burst(&mut pair);
+	let late = mem::take(&mut pair.client.inbound);
+	// Later ACKs, and the client's ACK of a PING, show it lost
+	for _ in 0..3 {
+		burst(&mut pair);
+	}
+	pair.server_conn_mut(server_ch).ping();
+	pair.drive();
+	let stats = pair.server_conn_mut(server_ch).stats().path;
+	assert!(stats.lost_packets > 0, "the held ACK was never declared lost");
+	assert_eq!(stats.congestion_events, 0, "a lost packet was ack-eliciting");
+
+	// It arrives after all, and the client's ACK of the next PING covers it
+	pair.client.inbound.extend(late);
+	pair.server_conn_mut(server_ch).ping();
+	pair.drive();
+	assert_eq!(pair.server_conn_mut(server_ch).stats().path.spurious_congestion_events, 0);
+}
+
 #[test]
 fn connect_detects_mtu() {
 	let _guard = subscribe();
@@ -5569,6 +5637,7 @@ fn gso_truncation() {
 	let _guard = subscribe();
 	let mut pair = Pair::default();
 	let (client_ch, server_ch) = pair.connect();
+	pair.refill_pacing();
 
 	let initial_ios = pair.client_conn_mut(client_ch).stats().udp_tx.ios;
 
@@ -6061,8 +6130,8 @@ fn path_changes_unblock_oversized_datagrams() {
 
 		pair.mtu = 1200;
 		if migrate {
-			let port = pair.next_port();
-			pair.client.addr.set_port(port);
+			// Another address, since a port change alone keeps the path's MTU
+			pair.client.addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), pair.next_port());
 			pair.client_conn_mut(client_ch).ping();
 			pair.drive_client();
 			// Process migration without transmitting, so sends cannot free the buffer first.
