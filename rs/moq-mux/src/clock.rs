@@ -94,7 +94,8 @@ pub struct Clock {
 	/// The ambient clock captured where this one was created, read wherever it is read.
 	source: kio::clock::Clock,
 	timeline: Arc<Mutex<Timeline>>,
-	/// `None` when the host's wall clock was unset at construction.
+	/// `None` when the broadcast has no wall mapping: the host's wall clock was unset at construction, or
+	/// the source advertised none.
 	wall: Option<hang::catalog::Clock>,
 }
 
@@ -310,10 +311,10 @@ impl Clock {
 		Ok(moq_micros(wall) - self.mapping()?.wall.as_micros()? as i128)
 	}
 
-	/// The wall mapping, refused when the host's wall clock was unset.
+	/// The wall mapping, refused when the broadcast has none.
 	fn mapping(&self) -> crate::Result<hang::catalog::Clock> {
 		self.wall
-			.ok_or_else(|| crate::Error::UnmappableTimestamp("the host wall clock was unset".to_string()))
+			.ok_or_else(|| crate::Error::UnmappableTimestamp("the broadcast has no wall mapping".to_string()))
 	}
 
 	/// The current timestamp on this clock.
@@ -356,7 +357,8 @@ impl Clock {
 		Self::TIMESCALE
 	}
 
-	/// The catalog root section advertising this clock, or `None` if the host's wall clock was unset.
+	/// The catalog root section advertising this clock, or `None` if the broadcast has no wall mapping:
+	/// the host's wall clock was unset, or the source advertised none.
 	pub fn wall(&self) -> Option<hang::catalog::Clock> {
 		self.wall
 	}

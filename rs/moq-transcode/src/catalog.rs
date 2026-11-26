@@ -367,7 +367,9 @@ impl Anchor {
 	/// Pin `snapshot` to the clock the first one carried, which the first call records.
 	pub(crate) fn pin(&mut self, snapshot: &mut moq_mux::catalog::hang::Catalog) {
 		let anchored = *self.clock.get_or_insert(snapshot.sync.clock);
-		if snapshot.sync.clock != anchored {
+		// The same mapping in other units is no change, which the catalog producer accepts too.
+		let micros = |clock: Option<hang::catalog::Clock>| clock.map(|clock| clock.wall.as_micros().ok());
+		if snapshot.sync.clock != anchored && micros(snapshot.sync.clock) != micros(anchored) {
 			if self.warned != Some(snapshot.sync.clock) {
 				tracing::warn!(
 					?anchored,
@@ -1068,6 +1070,13 @@ mod tests {
 		assert_eq!(pinned(&mut anchor, clock(1)), clock(1));
 		assert_eq!(pinned(&mut anchor, clock(2)), clock(1));
 		assert_eq!(pinned(&mut anchor, None), clock(1));
+
+		// The same mapping in other units is left as the source wrote it.
+		let mut anchor = Anchor::default();
+		let millis = Some(hang::catalog::Clock::new(moq_net::Timestamp::from_millis(5).unwrap()).unwrap());
+		assert_eq!(pinned(&mut anchor, clock(5_000)), clock(5_000));
+		assert_eq!(pinned(&mut anchor, millis), millis);
+		assert_eq!(pinned(&mut anchor, clock(5_001)), clock(5_000));
 
 		let mut anchor = Anchor::default();
 		assert_eq!(pinned(&mut anchor, None), None);
