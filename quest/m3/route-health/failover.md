@@ -42,9 +42,9 @@ named, and opt in.
   stall, against today's: about 0, the 10 s idle timeout, and never.
 
 Public API: the opt-in, in the relay's configuration and on the client,
-beside the [metadata subscription](/quest/m3/route-health/meta.md). Wire:
+beside the [metadata subscription](/quest/m2/subscribe-meta.md). Wire:
 none beyond it.
 
 ## Required
 
-- [Metadata-only subscriptions](/quest/m3/route-health/meta.md) - what the standby observes
+- [Metadata-only subscriptions](/quest/m2/subscribe-meta.md) - what the standby observes

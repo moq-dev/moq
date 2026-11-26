@@ -4,12 +4,20 @@
 
 Rust and JS subscribe to a track's group and frame progress without its
 payload, as a subscription of its own beside payload subscriptions, on the
-lite-08 wire [wire.md](/quest/m3/route-health/wire.md) defines and every
-lite-08 publisher and relay of ours already serves. A reader
+lite-07 wire [subscribe-meta-wire.md](/quest/m2/subscribe-meta-wire.md)
+defines and every lite-07 publisher and relay of ours already serves. A reader
 that wants the payload opens a payload subscription from its first missing
 frame, and nothing changes mode in place.
 
 ## Plan
+
+Decided 2026-11-26 (maintainer, `/quest-plan` of the HLS and lite-07 audit):
+✅ move both [subscribe-meta-wire.md](/quest/m2/subscribe-meta-wire.md) and
+this subscriber quest into `m2` for `moq-lite-07` (rejected: moving only the
+wire into `m2` and keeping this quest in `m3`; leaving both in `m3` on
+lite-08-wip). This reverses the 2026-11-25 deferral to `m3`: `moq-hls` live
+and archive/VOD indexing needs the subscriber API right away, and landing it
+in `m2` avoids breaking the C `moq_subscription` ABI right after 0.22.
 
 Decided 2026-11-16 (maintainer, on
 [moq-dev/moq#8882](https://github.com/moq-dev/moq/pull/8882), which built
@@ -26,26 +34,10 @@ the shape below it and is closed with its branch kept):
   that PR, where most of 19 review findings came from it: the reader's walk,
   the cache, and the publisher's accounting each needed rules for a group
   held in both modes).
-- ✅ Deferred: "punt the new API/message to m3 for now; the goal was just to
-  make sure the routing layer supports it; we don't have an immediate
-  user." It waits on the route layer it rides on.
 - With a fixed mode every group stream of a subscription has that mode, so
   the mode marker in each group stream header goes, and SUBSCRIBE_UPDATE
   gains no field. This reverses 2026-10-13's marker, which existed for
   streams opened before a mode update.
-
-Decided 2026-11-25 (maintainer, /quest-run): ✅ "actually move
-SUBSCRIBE_META entirely to m3 and out of lite-07". The wire and the serving
-side are [wire.md](/quest/m3/route-health/wire.md), in m3 on lite-08-wip: a
-publisher serving the mode, a relay forwarding metadata demand upstream, both
-codecs, and the TLA+ check of two modes on one track. This quest keeps the
-subscriber side: the API that asks for metadata, the bindings, and what
-[failover](/quest/m3/route-health/failover.md) reads, so it stays M.
-Rejected, both reversed by it: the wire in lite-07 before the cut with this
-quest the implementation riding on it (decided 2026-11-23), and the serving
-side in m2 on lite-07 (decided earlier on 2026-11-25). wire.md's Plan
-records what this quest's code must keep conforming to.
-
 - Recommended, to confirm when this starts: in the API, an entry and a
   consumer type of their own, so a payload read of a header-only frame cannot
   be written: the C binding in that PR needed an `Unsupported` error for it.
@@ -62,20 +54,18 @@ deleted in [moq-dev/moq#8423](https://github.com/moq-dev/moq/pull/8423)
   resume cursor.
 - ✅ A relay pulls payload upstream only for payload demand (except over an
   older version, below), and holds at most one upstream subscription per
-  mode for a track. Metadata demand is
-  served from a payload copy while the relay holds one, and otherwise
-  travels upstream as a metadata subscription. When the last payload reader
-  leaves and metadata demand remains, the relay opens the metadata
-  subscription and closes the payload one.
-- Superseded 2026-11-25 (maintainer, /quest-run, on
-  [wire.md](/quest/m3/route-health/wire.md)): ✅ nothing refuses the
-  mode. A relay whose upstream is lite-07 or earlier subscribes for payload
-  and drops it for its metadata readers, and moq-transport gets an
+  mode for a track. Metadata demand is served from a payload copy while the
+  relay holds one, and otherwise travels upstream as a metadata subscription.
+  When the last payload reader leaves and metadata demand remains, the relay
+  opens the metadata subscription and closes the payload one.
+- Superseded 2026-11-25 (maintainer, `/quest-run`, on
+  [subscribe-meta-wire.md](/quest/m2/subscribe-meta-wire.md)): ✅ nothing
+  refuses the mode. A relay whose upstream is lite-06 or earlier subscribes
+  for payload and drops it for its metadata readers, and moq-transport gets an
   [extension](/quest/m3/route-health/ietf.md) for the mode (rejected: this
   rule's own "an older version never emulates it by fetching and discarding
-  media: it reports the mode unsupported", which the newer decision
-  replaces, with its NOT_SUPPORTED refusal and "no moq-transport counterpart
-  is needed").
+  media: it reports the mode unsupported", which the newer decision replaces,
+  with its NOT_SUPPORTED refusal and "no moq-transport counterpart is needed").
 
 What the parked PR learned, on branch `quest/m3/route-health/meta` at
 `c00addff48`:
@@ -83,9 +73,9 @@ What the parked PR learned, on branch `quest/m3/route-health/meta` at
 - Carries over here: a header read that returns the declared size without
   waiting for or inflating a compressed frame (`read_info`, `readInfo`); the
   bindings' header read; and the interop lane's subscriber half. The codecs,
-  the relay's per-mode upstream, and the TLA+ check go to
-  [wire.md](/quest/m3/route-health/wire.md), and its refusal on older
-  versions and moq-transport is dropped.
+  the relay's per-mode upstream, and the TLA+ check live in
+  [subscribe-meta-wire.md](/quest/m2/subscribe-meta-wire.md), and its refusal
+  on older versions and moq-transport is dropped.
 - Recommended, to confirm when this starts: an endpoint whose own session is
   an older version asks for metadata the way a relay does over one, with a
   payload subscription whose payload it drops, so the API never refuses.
@@ -107,8 +97,8 @@ for bytes, wakes, and memory. Add the subscriber to
 `just test interop --all`.
 
 Public API: a metadata subscription in Rust, JS, and the bindings. Wire: none
-beyond [wire.md](/quest/m3/route-health/wire.md).
+beyond [subscribe-meta-wire.md](/quest/m2/subscribe-meta-wire.md).
 
 ## Required
 
-- [Metadata mode on the lite-08 wire, served](/quest/m3/route-health/wire.md) - the SUBSCRIBE mode, payload-less FRAME, and the publishers and relays that serve it
+- [Metadata mode on the lite-07 wire, served](/quest/m2/subscribe-meta-wire.md) - the SUBSCRIBE mode, payload-less FRAME, and the publishers and relays that serve it
