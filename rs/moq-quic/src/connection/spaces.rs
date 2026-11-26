@@ -267,6 +267,8 @@ pub(super) struct SentPacket {
 	/// Whether `stream_frames` only resend data in flight in other packets, to probe for
 	/// bandwidth, so they are not retransmitted when lost
 	pub(super) bandwidth_probe: bool,
+	/// Whether it was sent marked ECT(0), so its acknowledgement must raise the peer's ECN counts
+	pub(super) ecn: bool,
 }
 
 /// Represents one or more packets that are deemed lost.

@@ -5374,6 +5374,73 @@ fn ack_frequency_update_max_delay() {
 	assert!(pair.server_conn_mut(server_ch).stats().frame_rx.ack_frequency >= 2);
 }
 
+/// A lost ACK_FREQUENCY frame is sent again, though the delay it asked for has not changed
+#[test]
+fn lost_ack_frequency_is_resent() {
+	let _guard = subscribe();
+	let mut config = client_config();
+	config.transport.ack_frequency = Some(transport::ack_frequency::Config {
+		max_ack_delay: Some(Duration::from_millis(200)),
+		..transport::ack_frequency::Config::default()
+	});
+	let mut pair = Pair::default();
+	// An RTT past the configured delay holds the request at it, so only a loss sends another
+	pair.latency = Duration::from_millis(150);
+	let client_ch = pair.begin_connect(config);
+	let sent = |pair: &mut Pair| pair.client_conn_mut(client_ch).stats().frame_tx.ack_frequency;
+	while sent(&mut pair) == 0 {
+		assert!(pair.step(), "the client never asked");
+	}
+	// Lose the request on its way
+	pair.server.inbound.clear();
+	pair.drive();
+	let server_ch = *pair.server.connections.keys().next().unwrap();
+	assert!(pair.server_conn_mut(server_ch).stats().frame_rx.ack_frequency > 0);
+	assert!(sent(&mut pair) > 1);
+}
+
+/// A Handshake ACK leaves the timer that sends a pending 1-RTT ACK running
+#[test]
+fn handshake_ack_leaves_the_max_ack_delay() {
+	let _guard = subscribe();
+	// Packet numbers without gaps, so no PING below arrives out of order
+	let mut pair = Pair::default_with_deterministic_pns();
+	// A PTO well past the max ACK delay, so no probe stands in for the timer
+	pair.latency = Duration::from_millis(50);
+	let client_ch = pair.begin_connect(client_config_with_deterministic_pns());
+	while !is_connected(pair.client_conn_mut(client_ch)) {
+		assert!(pair.step(), "the handshake stalled");
+	}
+	// Losing everything the client sends keeps the server from confirming the handshake, so the
+	// client keeps its Handshake keys. The client takes what the server already sent, and
+	// acknowledges it once its max ACK delay runs out.
+	for wait in [pair.latency, Duration::from_millis(25)] {
+		pair.server.inbound.clear();
+		pair.time = pair.time.saturating_add(wait);
+		pair.drive_client();
+	}
+	pair.server.inbound.clear();
+	let server_ch = *pair.server.connections.keys().next().unwrap();
+	let ping = |pair: &mut Pair, space| {
+		let now = pair.time;
+		let packet = pair.server_conn_mut(server_ch).forge_packet(now, space, &[0x01]);
+		pair.client.inbound.push_back((now, None, packet.as_slice().into()));
+		pair.drive_client();
+	};
+	let acks = |pair: &mut Pair| pair.client_conn_mut(client_ch).stats().frame_tx.acks;
+
+	// A lone 1-RTT PING waits for the max ACK delay
+	let before = acks(&mut pair);
+	ping(&mut pair, SpaceId::Data);
+	assert_eq!(acks(&mut pair), before);
+	// A Handshake PING is acknowledged at once
+	ping(&mut pair, SpaceId::Handshake);
+	assert_eq!(acks(&mut pair), before + 1);
+	pair.time = pair.time.saturating_add(Duration::from_millis(25));
+	pair.drive_client();
+	assert_eq!(acks(&mut pair), before + 2, "the 1-RTT ACK never went out");
+}
+
 fn stream_chunks(mut recv: recv::Stream<'_>) -> Vec<u8> {
 	let mut buf = Vec::new();
 
@@ -7034,9 +7101,8 @@ fn old_ce_marks_report_no_new_congestion() {
 }
 
 /// A path that starts bleaching the ECN field or re-marking it ECT(1) reports no CE, though the
-/// bottleneck marks every packet, and re-marking fails validation, so the sender stops using
-/// ECN. Bleaching is only caught once an ACK's count increase falls short of its ACK ranges,
-/// which may not happen within this transfer.
+/// bottleneck marks every packet, and either fails validation, so the sender stops using ECN:
+/// bleaching once an ACK's count increase falls short of the marked packets it acknowledges.
 #[test]
 fn invalid_ecn_feedback_reports_no_congestion() {
 	let _guard = subscribe();
@@ -7052,10 +7118,52 @@ fn invalid_ecn_feedback_reports_no_congestion() {
 		pair.client_send(client_ch, s).write(&mut &[42; 16 * 1024][..]).unwrap();
 		pair.drive();
 		assert_eq!(ce_events(&log), 0, "{rewrite:?}");
-		if rewrite.is_some() {
-			assert!(!pair.client_conn_mut(client_ch).using_ecn());
-		}
+		assert!(!pair.client_conn_mut(client_ch).using_ecn(), "{rewrite:?}");
 	}
+}
+
+/// A PATH_RESPONSE sent off the path goes unmarked, so an ACK of it that raises no ECN count is
+/// not taken for bleaching
+#[test]
+fn off_path_response_keeps_ecn() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	let (client_ch, server_ch) = pair.connect();
+	pair.drive();
+	assert!(pair.server_conn_mut(server_ch).using_ecn());
+	let responses = pair.server_conn_mut(server_ch).stats().frame_tx.path_response;
+
+	// A PATH_CHALLENGE from another address of the client, which the server answers there
+	// without migrating
+	let probe = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), pair.next_port());
+	let mut payload = vec![0x1a, 1, 2, 3, 4, 5, 6, 7, 8];
+	payload.resize(1100, 0);
+	let now = pair.time;
+	let packet = pair
+		.client_conn_mut(client_ch)
+		.forge_packet(now, SpaceId::Data, &payload);
+	pair.server
+		.inbound
+		.push_back((now, Some(EcnCodepoint::Ect0), packet.as_slice().into()));
+	pair.server.drive(now, probe);
+	assert_eq!(
+		pair.server_conn_mut(server_ch).stats().frame_tx.path_response,
+		responses + 1
+	);
+
+	// The response reaches the client as sent
+	let (off_path, on_path): (std::collections::VecDeque<_>, _) = mem::take(&mut pair.server.outbound)
+		.into_iter()
+		.partition(|(transmit, _)| transmit.remote == probe);
+	pair.server.outbound = on_path;
+	assert_eq!(off_path.len(), 1);
+	for (transmit, datagram) in off_path {
+		assert_eq!(transmit.ecn, None);
+		pair.client.inbound.push_back((now, transmit.ecn, datagram[..].into()));
+	}
+	pair.drive();
+	assert_eq!(pair.server_conn_mut(server_ch).remote_address(), pair.client.addr);
+	assert!(pair.server_conn_mut(server_ch).using_ecn());
 }
 
 /// A receiver that pads its ACK-only packets counts them in flight. ACKs and losses of them,
@@ -7210,6 +7318,56 @@ fn window_blocked_backlog_is_not_app_limited() {
 fn pacing_blocked_backlog_is_not_app_limited() {
 	// 1 Mbit/s holds the backlog back long before the unlimited window fills.
 	check_blocked_backlog_is_not_app_limited(PacketRecorderFactory {
+		pacing_rate: Some(125_000),
+		..Default::default()
+	});
+}
+
+/// ACKs due now go out alone while the client's `factory` controller holds back the data they
+/// would ride with, since an ACK-only packet is not congestion controlled (RFC 9002 §7) and
+/// holding it stalls the peer
+fn check_acks_go_alone(factory: PacketRecorderFactory) {
+	let _guard = subscribe();
+	let mut config = client_config();
+	config.transport.congestion = Arc::new(factory);
+	let mut pair = Pair::default();
+	let (client_ch, server_ch) = pair.connect_with(config);
+	// Refill a pacer the handshake drained, as `check_blocked_backlog_is_not_app_limited` does.
+	pair.time = pair.time.saturating_add(Duration::from_millis(100));
+	pair.drive();
+
+	// A backlog the limit holds back, none of it acknowledged
+	let s = pair
+		.client_streams(client_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	pair.client_send(client_ch, s).write(&mut &[42; 64 * 1024][..]).unwrap();
+	pair.drive_client();
+	pair.server.inbound.clear();
+
+	// Two PINGs are due an ACK at once
+	let before = pair.client_conn_mut(client_ch).stats().frame_tx;
+	for _ in 0..2 {
+		pair.server_conn_mut(server_ch).ping();
+		pair.drive_server();
+	}
+	pair.drive_client();
+	let after = pair.client_conn_mut(client_ch).stats().frame_tx;
+	assert!(after.acks > before.acks, "the held data held its ACKs back");
+	assert_eq!(after.stream, before.stream, "data went past the limit");
+}
+
+#[test]
+fn acks_go_alone_when_the_window_is_full() {
+	check_acks_go_alone(PacketRecorderFactory {
+		window: Some(12_000),
+		..Default::default()
+	});
+}
+
+#[test]
+fn acks_go_alone_while_the_pacer_holds_data() {
+	check_acks_go_alone(PacketRecorderFactory {
 		pacing_rate: Some(125_000),
 		..Default::default()
 	});

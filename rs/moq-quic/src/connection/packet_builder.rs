@@ -219,6 +219,7 @@ impl PacketBuilder {
 			retransmits: sent.retransmits,
 			stream_frames: sent.stream_frames,
 			bandwidth_probe: sent.bandwidth_probe,
+			ecn: conn.path.sending_ecn && !sent.off_path,
 		};
 
 		conn.path.sent(exact_number, packet, &mut conn.spaces[space_id]);
