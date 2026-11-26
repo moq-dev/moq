@@ -9,10 +9,10 @@ import { NotFound, SessionCode, SessionError, StreamCode, StreamError, toStreamC
 import type { FillGroups } from "./fill.ts";
 import { type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { WireRoute } from "./hop.ts";
+import * as Identity from "./identity.ts";
 import type { Session as IetfSession } from "./ietf/session.ts";
 import { Subscriber as IetfSubscriber } from "./ietf/subscriber.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
-import * as Identity from "./identity.ts";
 import { hooks, NO_MAX_DELAY, staleHole } from "./internal.ts";
 import type { Lister } from "./listing.ts";
 import { Producer } from "./origin.ts";

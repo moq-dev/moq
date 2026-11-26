@@ -29,7 +29,7 @@ Enable the `async` Cargo feature to keep awaiting moq-mux:
 The feature is off by default, and every `poll_*` method stays available without it.
 It covers the `next`, `read`, `latest`, `refresh`, `ready`, `wait`, and `broadcast` methods beside each poll:
 the catalog consumers and `catalog::Stream::next`, the container `Consumer` and `GroupConsumer`,
-every exporter (`next`, and fMP4's `next_chunk`), `ts::Follower`, `ts::Release`, `follow::Identities`,
+every exporter (`next`, and fMP4's `next_chunk`), `ts::Follower`, `ts::Release`, `follow::Instances`,
 `json::Consumer`, `json::Snapshot`, `rate::Follower`, `timeline::Resume`, `Binding`, and `Linger`.
 It also covers the async functions with no poll of their own: `catalog::Consumer::new`,
 `Source::{catalog, resolve, subscribe_track}`, `ts::Release::new`, and the JSON catalog entry's `subscribe`.
@@ -40,10 +40,10 @@ empty `Vec` to every poll of one group.
 `next` no longer requires `Catalog<E>: Unpin`.
 moq-mux no longer enables `moq-json/async`: enable it yourself to await moq-json's readers directly.
 
-### `follow::Identities` folds into `Following` ([#7678](https://github.com/moq-dev/moq/pull/7678))
+### `follow::Instances` folds into `Following` ([#7678](https://github.com/moq-dev/moq/pull/7678))
 
-`follow::Identities::new` is removed: call `origin.follow(path, identity)` and read `Following::available()`, which returns `Some(broadcast)` where `Event::Start` did and `None` where `Event::End` did.
-`Source::follow` still returns `follow::Identities`, for its one-shot hand-out of the catalog's own broadcast; its `next()` and `poll_next()` now return `Option<broadcast::Consumer>`, and `follow::Event` is gone.
+`follow::Instances::new` is removed: call `origin.follow(path, instance)` and read `Following::available()`, which returns `Some(broadcast)` where `Event::Start` did and `None` where `Event::End` did.
+`Source::follow` still returns `follow::Instances`, for its one-shot hand-out of the catalog's own broadcast; its `next()` and `poll_next()` now return `Option<broadcast::Consumer>`, and `follow::Event` is gone.
 
 ### `container::Playout` replaces `with_warmup` ([#7864](https://github.com/moq-dev/moq/pull/7864))
 
@@ -130,7 +130,7 @@ An av1C without a sequence header in its `configOBUs` no longer publishes a rend
 
 ### `moq_net::Path` has no lifetime
 
-`Source::resolve_reference` takes `Option<&Relative>` and returns `Option<Path>`, `ts::Programs::new` takes `impl Into<moq_net::Path>`, so pass a `Path`, and `follow::Identities::new` takes `impl TryInto<moq_net::Path, Error: Into<moq_net::Error>>`. Replace `PathOwned` with `Path` and drop `to_owned()` and `into_owned()` on paths. See moq-net's migration for the rest.
+`Source::resolve_reference` takes `Option<&Relative>` and returns `Option<Path>`, `ts::Programs::new` takes `impl Into<moq_net::Path>`, so pass a `Path`, and `follow::Instances::new` takes `impl TryInto<moq_net::Path, Error: Into<moq_net::Error>>`. Replace `PathOwned` with `Path` and drop `to_owned()` and `into_owned()` on paths. See moq-net's migration for the rest.
 
 ### MKV and FLV import refuse malformed tracks and unsupported codecs (#6908)
 
@@ -188,8 +188,8 @@ Match `TimestampRewind` where you matched `TimestampMismatch`.
 
 ### `Source` waits for a sibling's first announcement (#6254)
 
-`Source::bind`, `resolve`, and `subscribe_track` now wait for a sibling nothing announces yet instead of failing with `Unroutable`, and keep the first identity they resolve: once it goes, they answer that ended broadcast rather than waiting for the next.
-Where you skipped a rendition on that error, bound the call yourself (`tokio::time::timeout`, or drop it), or follow the sibling's identities with `Source::follow`.
+`Source::bind`, `resolve`, and `subscribe_track` now wait for a sibling nothing announces yet instead of failing with `Unroutable`, and keep the first instance they resolve: once it goes, they answer that ended broadcast rather than waiting for the next.
+Where you skipped a rendition on that error, bound the call yourself (`tokio::time::timeout`, or drop it), or follow the sibling's instances with `Source::follow`.
 
 ### JSON `delta_ratio` is `deltas`
 
@@ -213,11 +213,11 @@ Call `.with_passthrough(true)` to keep publishing CMAF.
 Read the frame yourself and hand it over: `while let Some(frame) = group.read_frame().await? { for media in container.decode(frame)? { .. } }`.
 An implementation drops its `group.poll_read_frame` call and its `None` end-of-group case, and decodes the frame it is given.
 
-### `Source` resolution takes the reference's identity (#5699)
+### `Source` resolution takes the reference's instance (#5699)
 
-`Source::bind(rel)`, `resolve(rel)`, and `subscribe_track(rel, name)` take the catalog entry's optional identity after `rel`.
-Pass `config.identity.as_ref()` (or `Reference::identity`), or `None` to accept the first identity resolved as before.
-A broadcast proven to serve another identity fails with the new `Error::IdentityMismatch`; against an identity a session minted the check is best effort.
+`Source::bind(rel)`, `resolve(rel)`, and `subscribe_track(rel, name)` take the catalog entry's optional instance after `rel`.
+Pass `config.instance.as_ref()` (or `Reference::instance`), or `None` to accept the first instance resolved as before.
+A broadcast proven to serve another instance fails with the new `Error::InstanceMismatch`; against an instance a session minted the check is best effort.
 
 ### `ts::stats::Export`'s release counters move into `release` (#5849)
 
@@ -273,7 +273,7 @@ Its `Hang`, `Msf`, and `Closed` variants and `catalog::msf::Consumer::track` are
 `Clock::wall()` returns `Option<hang::catalog::Clock>` instead of panicking, so handle `None`.
 `Clock::wall_clock` and `Timebase::place` refuse a clock without one.
 
-### TS export lingers within one publisher identity (#5147)
+### TS export lingers within one publisher instance (#5147)
 
 `ts::Export::resume` is `ts::Export::follow`, `Source::returned` is gone, and `ts::Follower` follows a path's announcements the way `moq export ts` does.
 `ts::Export::new(source, catalog)` takes a catalog stream like the other exporters: subscribe with `source.catalog::<ts::Ext>(format).await?` to keep MPEG-TS metadata, or `()` for media only, and select renditions on the stream before passing it in.
@@ -283,7 +283,7 @@ Its `Hang`, `Msf`, and `Closed` variants and `catalog::msf::Consumer::track` are
 
 `Source::new(origin, path)` is `Source::new(origin, broadcast)`: resolve the broadcast first, and catalog references resolve from its path.
 `Source::broadcast()` returns it without awaiting.
-Every later request for a path, siblings included, stays on the broadcast first held there and fails once it ends, so build a new `Source` to follow a new identity.
+Every later request for a path, siblings included, stays on the broadcast first held there and fails once it ends, so build a new `Source` to follow a new instance.
 
 ```rust
 let broadcast = origin.request(path, None).await?;

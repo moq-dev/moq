@@ -4322,10 +4322,7 @@ async fn announce_and_withdraw_toggle_discovery() {
 			}
 		}
 	}
-	assert_eq!(
-		Some(wait_live(&announced, true).await.route.identity),
-		route.identity()
-	);
+	assert_eq!(Some(wait_live(&announced, true).await.route.identity), route.identity());
 
 	route.withdraw().unwrap();
 	wait_live(&announced, false).await;
@@ -4338,10 +4335,7 @@ async fn announce_and_withdraw_toggle_discovery() {
 
 	// Announcing again brings the same stream back.
 	route.announce().unwrap();
-	assert_eq!(
-		Some(wait_live(&announced, true).await.route.identity),
-		route.identity()
-	);
+	assert_eq!(Some(wait_live(&announced, true).await.route.identity), route.identity());
 	kio::clock::timeout(TIMEOUT, consumer.request("live".into(), None))
 		.await
 		.expect("timed out requesting the reannounced broadcast")

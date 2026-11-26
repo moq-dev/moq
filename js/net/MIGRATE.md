@@ -76,16 +76,16 @@ Lite-01..04 and transports without datagrams refuse datagram requests. moq-trans
 
 ### Announcements are a listing ([#7678](https://github.com/moq-dev/moq/pull/7678))
 
-`Announce.Event` is `{ kind: "present" | "absent" } & Announce`. Another identity taking a path over keeps it present, and a route's cost or hops changing is not reported, so `start`, `update`, `restart` and `end` are gone.
-Map `"start"` to `"present"` and `"end"` to `"absent"`, and drop `"update"` branches. Where you requested the path again on `"restart"`, hold `origin.follow(path)`: its `active` moves to each new identity's broadcast.
+`Announce.Event` is `{ kind: "present" | "absent" } & Announce`. Another instance taking a path over keeps it present, and a route's cost or hops changing is not reported, so `start`, `update`, `restart` and `end` are gone.
+Map `"start"` to `"present"` and `"end"` to `"absent"`, and drop `"update"` branches. Where you requested the path again on `"restart"`, hold `origin.follow(path)`: its `active` moves to each new instance's broadcast.
 
 ### One `Origin.Route` handle replaces publications, claims, and prepared answers
 
 `Origin.Producer.createBroadcast`, `requests`, and `requestsRoute`, and the `Origin.Publication`, `Origin.Prepared`, and `Origin.Requests` classes are gone.
 An `Origin.Route` owns what you publish: `origin.route(path, options?)` creates an exact route that owns a new broadcast, and `origin.routePrefix(prefix, options?)` creates a prefix route that yields requests.
 A route is visible at once unless created with `{ hidden: true }`; `announce()` and `withdraw()` toggle it, `announced` says which, and `close()` retracts it and closes its broadcast, as closing the broadcast does.
-Its `identity` is minted when the route is created and kept across `withdraw()` and `announce()`, so a reader continues rather than restarts. A new route is a new stream.
-`RouteOptions` sets what `announce(route)` took: `cost`, `auth`, and a stable `identity` with its `epoch`. Re-price with `setCost(cost)` and swap the credential with `setAuth(auth)`.
+Its `instance` is minted when the route is created and kept across `withdraw()` and `announce()`, so a reader continues rather than restarts. A new route is a new stream.
+`RouteOptions` sets what `announce(route)` took: `cost`, `auth`, and a stable `instance` with its `epoch`. Re-price with `setCost(cost)` and swap the credential with `setAuth(auth)`.
 
 ```ts
 // Before
@@ -98,7 +98,7 @@ publication.unannounce();
 const route = origin.route(path, { hidden: true, cost: 5n });
 route.broadcast.createTrack("catalog.json");
 route.announce();
-route.withdraw(); // announce() again continues the same identity
+route.withdraw(); // announce() again continues the same instance
 ```
 
 Drop the separate `announce()` call when nothing needs filling first: `origin.route(path)` is already visible.
@@ -297,8 +297,8 @@ Treat a rejected group read as the loss of that group and keep reading the track
 
 ### A claim answers by publishing (#5678)
 
-`Origin.Producer.dynamic(prefix)` takes no route: an application claim has no identity, cost, or hops.
-Answer each `Origin.Request` with `using prepared = request.prepare()`, fill `prepared.broadcast`, then `prepared.publish()`, which announces the broadcast at the exact path under a fresh identity of its own and returns its publication handle.
+`Origin.Producer.dynamic(prefix)` takes no route: an application claim has no instance, cost, or hops.
+Answer each `Origin.Request` with `using prepared = request.prepare()`, fill `prepared.broadcast`, then `prepared.publish()`, which announces the broadcast at the exact path under a fresh instance of its own and returns its publication handle.
 Only `publish` announces it: `prepared.broadcast` has no announcement methods.
 `Prepared.reject(err)` is replaced by idempotent `close()` and `[Symbol.dispose]()`; either refuses the unpublished answer as `Unroutable` and closes its broadcast. Closing that broadcast also refuses the request. `using` handles normal scope exit and exceptions; after `publish()`, disposal leaves the returned publication and its fill producer live.
 Use `request.reject(err)` to refuse before preparing. A retained, unclosed `Prepared` keeps its request pending; garbage collection provides no prompt cleanup guarantee.
@@ -376,8 +376,8 @@ Import them from `@moq/clock`, which throws on negative or non-finite values.
 ### `follow(path)` replaces `request(path, { announced: true })`, and `broadcasts()` is gone ([#7173](https://github.com/moq-dev/moq/pull/7173), [#7476](https://github.com/moq-dev/moq/pull/7476))
 
 `RequestOptions.announced` is removed: replace `request(path, { announced: true })` with `follow(path)`, which returns an `Origin.Following`.
-An unpinned `follow(path)` stays open across publisher identities: its `active` moves to each new identity's broadcast and clears between them, instead of ending with `Unroutable`.
-Read `active` reactively and close the follower when done, or use `request(path)` to stay on one identity.
+An unpinned `follow(path)` stays open across publisher instances: its `active` moves to each new instance's broadcast and clears between them, instead of ending with `Unroutable`.
+Read `active` reactively and close the follower when done, or use `request(path)` to stay on one instance.
 A follower needs discovery: a session without it never serves one.
 `Origin.Producer` and `Origin.Consumer` drop `broadcasts(scope)`; iterate `announced(scope)` instead.
 
@@ -400,13 +400,13 @@ Drop the option.
 `Announce.Consumer` yields an `Announce.Event`: an `Announce.Announce` (`prefix`, `captures`, `route`) plus a `kind`.
 `Announce.Update`, `Announce.Kind`, and `Announce.isActive` are gone.
 Replace `Announce.isActive` with a check on `event.kind`: skip `"end"`, and treat `"start"` and `"restart"` as active.
-A `"restart"` means another publisher identity now serves the prefix: request the path again.
+A `"restart"` means another publisher instance now serves the prefix: request the path again.
 
-### Routes carry an identity and a per-identity epoch (#4942, [#7489](https://github.com/moq-dev/moq/pull/7489))
+### Routes carry an instance and a per-instance epoch (#4942, [#7489](https://github.com/moq-dev/moq/pull/7489))
 
-Every route carries an `Identity`: non-empty text naming one continuous run of group numbers at its path. Every broadcast mints a random one and keeps it across re-announcing, so most publishers set nothing.
-A publisher that continues its group sequences across restarts may name a stable one with `announce({ identity, epoch })`, raising `epoch` on each run.
-Read `Route.identity` and `Broadcast.Consumer.identity`; pin a request or follower to one with `request(path, { identity })` or `follow(path, { identity })`.
+Every route carries an `Instance`: non-empty text naming one continuous run of group numbers at its path. Every broadcast mints a random one and keeps it across re-announcing, so most publishers set nothing.
+A publisher that continues its group sequences across restarts may name a stable one with `announce({ instance, epoch })`, raising `epoch` on each run.
+Read `Route.instance` and `Broadcast.Consumer.instance`; pin a request or follower to one with `request(path, { instance })` or `follow(path, { instance })`.
 
 ### Publishing never invents a timestamp (#5070)
 

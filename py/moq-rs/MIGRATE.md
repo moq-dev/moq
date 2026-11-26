@@ -18,23 +18,23 @@ moq.socket now exposes TCP group halves and reliably subscribed track halves bes
 
 `AnnounceConsumer` yields `AnnounceEventPresent` when a route starts covering a path and `AnnounceEventAbsent` when none covers it any more, each carrying an `Announce` as `announce`.
 `AnnounceEventStart`, `AnnounceEventUpdate`, `AnnounceEventEnd`, `AnnounceEventRestart`, and `AnnounceEventTakeover` are removed: read `AnnounceEventStart` as `AnnounceEventPresent` and `AnnounceEventEnd` as `AnnounceEventAbsent`, and drop the `Update` branch, since a re-priced route is no longer reported.
-Another publisher identity taking a path over keeps it present and is not listed. Where you requested the path again on `AnnounceEventRestart`, hold `follow(path)` instead and read each `BroadcastConsumer` that `await following.available()` returns, dropping what you read from the previous one.
+Another publisher instance taking a path over keeps it present and is not listed. Where you requested the path again on `AnnounceEventRestart`, hold `follow(path)` instead and read each `BroadcastConsumer` that `await following.available()` returns, dropping what you read from the previous one.
 
 ### `Following.available()` returns `None` once the path goes offline
 
 `await following.available()` (or `await following`) returns `BroadcastConsumer | None`.
-Later calls return `None` when the path goes offline, or, when following an `identity`, when another identity takes it over, then the next broadcast once something serves the path again; the first call never returns `None`.
+Later calls return `None` when the path goes offline, or, when following an `instance`, when another instance takes it over, then the next broadcast once something serves the path again; the first call never returns `None`.
 Stop reading the previous broadcast on `None` and call `available()` again. A caller that only awaits the first broadcast can assert it is not `None`.
 
 ### Publishing goes through one `Route` handle
 
-`OriginProducer.create_broadcast(path)` (and `Client.create_broadcast` / `Server.create_broadcast`) is `route(path, *, hidden=False, cost=0, identity=None, epoch=0)`, and `OriginProducer.requests(prefix)` is `route_prefix(prefix, ...)`. Both return a `moq.Route`, which replaces `Publication`, `OriginRequests`, and `BroadcastPrepared`:
+`OriginProducer.create_broadcast(path)` (and `Client.create_broadcast` / `Server.create_broadcast`) is `route(path, *, hidden=False, cost=0, instance=None, epoch=0)`, and `OriginProducer.requests(prefix)` is `route_prefix(prefix, ...)`. Both return a `moq.Route`, which replaces `Publication`, `OriginRequests`, and `BroadcastPrepared`:
 
 - `Publication.broadcast` is `Route.broadcast`, which raises `Error.Internal` on a prefix route.
-- `Publication.announce(AnnounceRoute(...))` is `Route.announce()`; pass the cost and identity to `route()` instead, and re-price with `set_cost(cost)`. `unannounce()` is `withdraw()`.
+- `Publication.announce(AnnounceRoute(...))` is `Route.announce()`; pass the cost and instance to `route()` instead, and re-price with `set_cost(cost)`. `unannounce()` is `withdraw()`.
 - `OriginRequests.requested_broadcast()` is `Route.requested()`, which returns `None` once the origin closes; `async for` still iterates the requests.
 - `BroadcastRequest.prepare()` then `.publish()` is `BroadcastRequest.route(hidden=True)`, then fill `.broadcast` and call `announce()`.
-- `Route.identity` is the stream's identity, minted at creation and kept across `withdraw()` and `announce()`.
+- `Route.instance` is the stream's instance, minted at creation and kept across `withdraw()` and `announce()`.
 
 A route is visible at once unless `hidden=True`, so pass it and call `announce()` after filling the catalog to keep the old create-then-announce order. Hold the `Route` while the broadcast should stay announced: dropping or cancelling it retracts it, while `broadcast.close()` still ends both.
 
@@ -132,8 +132,8 @@ the matching generated bindings and native library.
 
 ### `announce` takes an `AnnounceRoute`
 
-`BroadcastProducer.announce` takes `moq.AnnounceRoute(cost=..., identity=..., epoch=...)` instead of a `Route`: the origin builds the hop chain, so `hops` is no longer an input.
-`Route` is only what announcements report. To re-announce an observed route, copy its `cost`, and its `identity` only when forwarding that same stream; leave `identity` unset to keep the one the broadcast minted.
+`BroadcastProducer.announce` takes `moq.AnnounceRoute(cost=..., instance=..., epoch=...)` instead of a `Route`: the origin builds the hop chain, so `hops` is no longer an input.
+`Route` is only what announcements report. To re-announce an observed route, copy its `cost`, and its `instance` only when forwarding that same stream; leave `instance` unset to keep the one the broadcast minted.
 
 ### A broadcast reference waits for its sibling's announcement (#6254)
 
@@ -172,8 +172,8 @@ To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 beco
 ### `request` and `follow` name the two resolutions ([#7193](https://github.com/moq-dev/moq/pull/7193), [#7489](https://github.com/moq-dev/moq/pull/7489))
 
 On `OriginConsumer` and `Client`, rename `request_broadcast(path)` to `request(path)` and `announced_broadcast(path)` to `follow(path)`; `moq.AnnouncedBroadcast` is `moq.Following`.
-Both take a keyword-only `identity=` to refuse every other publisher identity.
-`request` resolves one publisher identity: it retries as the routes covering the path change, and fails with an unroutable error only once discovery has synced with no covering route. `follow` hands out each identity that serves the path in turn.
+Both take a keyword-only `instance=` to refuse every other publisher instance.
+`request` resolves one publisher instance: it retries as the routes covering the path change, and fails with an unroutable error only once discovery has synced with no covering route. `follow` hands out each instance that serves the path in turn.
 
 ### A client asks only about what it watches (#6165)
 
@@ -186,11 +186,11 @@ moq-transport and moq-lite-03/04 sessions are unchanged.
 A container import with `ContainerFormat.FMP4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
 Pass the new `ContainerFormat.CMAF` to keep publishing CMAF.
 
-### Catalog references carry their identity
+### Catalog references carry their instance
 
-`Video` and `Audio` renditions gain `identity`, the publisher identity their `broadcast` reference names.
-`BroadcastConsumer.resolve(reference)` becomes `resolve(id, rendition)`, taking the catalog rendition the reference belongs to and reading its `broadcast` and `identity` from it.
-Resolving, and the rendition-based consumers, raise for a rendition whose broadcast is proven to serve another identity.
+`Video` and `Audio` renditions gain `instance`, the publisher instance their `broadcast` reference names.
+`BroadcastConsumer.resolve(reference)` becomes `resolve(id, rendition)`, taking the catalog rendition the reference belongs to and reading its `broadcast` and `instance` from it.
+Resolving, and the rendition-based consumers, raise for a rendition whose broadcast is proven to serve another instance.
 
 ### Timestamps stop at 2^61 - 1 microseconds (#6168)
 
@@ -206,7 +206,7 @@ Publish a replacement under a new name, and expect a finished track's demand wat
 ### A claim answers by publishing (#5678)
 
 `OriginProducer.dynamic(prefix)` takes no route, and `OriginDynamic.update` is gone.
-Replace `request.accept(broadcast)` with `prepared = request.prepare()`, fill `prepared.broadcast`, then `prepared.publish()`, which announces it at the exact path under a fresh identity of its own and returns its producer.
+Replace `request.accept(broadcast)` with `prepared = request.prepare()`, fill `prepared.broadcast`, then `prepared.publish()`, which announces it at the exact path under a fresh instance of its own and returns its producer.
 To answer with a broadcast you already hold, `request.serve(producer.consume())` serves it under the prefix route without announcing an exact route.
 
 ### Anchors can name a time (#6074)
@@ -262,10 +262,10 @@ bandwidth = session.recv_bandwidth()
 rate = bandwidth.rate() if bandwidth else None
 ```
 
-### `Following.available()` waits for the next publisher identity (#5700)
+### `Following.available()` waits for the next publisher instance (#5700)
 
 The first call returns the broadcast serving the path, as before.
-Each later call waits for the next identity to take over the path, instead of returning whatever serves it now.
+Each later call waits for the next instance to take over the path, instead of returning whatever serves it now.
 
 ### A timed track refuses a group that rewinds (#5803)
 
@@ -307,7 +307,7 @@ A panic in a background task raises `moq.Error.Task` with the panic message as `
 
 `AnnounceConsumer` yields an `AnnounceEvent`: `AnnounceEventStart`, `AnnounceEventUpdate`, `AnnounceEventEnd`, or `AnnounceEventRestart`, each carrying an `Announce` as `announce`.
 `AnnounceUpdate` is gone.
-A restart means another publisher identity now serves the prefix: request the path again.
+A restart means another publisher instance now serves the prefix: request the path again.
 Where you checked `update.active`, act on `AnnounceEventStart` and `AnnounceEventRestart` and read `event.announce.prefix`.
 
 ### "Epoch" means only the publisher epoch (#5146)

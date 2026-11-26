@@ -14,11 +14,11 @@ import {
 } from "./connection/index.ts";
 import { defined } from "./defined.test-util.ts";
 import { FrameTooLarge, SessionCode, SessionError, StreamCode, StreamError, TooFarBehind } from "./error.ts";
+import * as Identity from "./identity.ts";
 import * as Ietf from "./ietf/index.ts";
 import { Publisher as IetfPublisher } from "./ietf/publisher.ts";
 import { RequestError } from "./ietf/request.ts";
 import { refuse as refuseRequest } from "./ietf/request_stream.ts";
-import * as Identity from "./identity.ts";
 import { hooks } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
 import { Publisher as LitePublisher } from "./lite/publisher.ts";

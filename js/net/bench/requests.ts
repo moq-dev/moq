@@ -1,5 +1,6 @@
 /** Sweep request restart, cancellation, and discovery settlement over independent origin and waiter dimensions. */
 import { Producer as Broadcast } from "../src/broadcast";
+import * as Identity from "../src/identity.ts";
 import { Publisher as IetfPublisher } from "../src/ietf/publisher";
 import { RequestOk } from "../src/ietf/request";
 import { NativeSession } from "../src/ietf/session";
@@ -9,7 +10,6 @@ import {
 	SubscribeNamespaceEntryDone,
 } from "../src/ietf/subscribe_namespace";
 import { ALPN, Version } from "../src/ietf/version";
-import * as Identity from "../src/identity.ts";
 import { createMockTransportPair } from "../src/mock";
 import { Producer } from "../src/origin";
 import * as Path from "../src/path";

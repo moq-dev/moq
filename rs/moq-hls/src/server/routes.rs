@@ -293,8 +293,10 @@ mod tests {
 
 	const TIMEOUT: Duration = Duration::from_secs(10);
 
-	/// The identity each test's catalog broadcast announces, and so the identity its URLs name.
+	/// The identity each test's catalog broadcast announces.
 	const RUN: &str = "01920000-0000-7000-8000-000000000000";
+	/// The URL token of the named [`RUN`]: the first 64 bits of SHA-256 over `0x00 || RUN`.
+	const AT: &str = "82dbe9b7c7e4dd2d";
 
 	fn run() -> moq_net::origin::RouteOptions {
 		moq_net::origin::RouteOptions::default().with_identity(RUN.parse().unwrap(), 0)
@@ -505,9 +507,9 @@ mod tests {
 		let app = Server::new(origin.consume(), crate::export::Config::default())
 			.unwrap()
 			.router();
-		let old_playlist = format!("/live/@{RUN}/video/video0/media.m3u8");
-		let old_segment = format!("/live/@{RUN}/video/video0/seg/8343e7cd.0.m4s");
-		wait_listed(&app, "/live/master.m3u8", &format!("@{RUN}/video/video0/media.m3u8")).await;
+		let old_playlist = format!("/live/@{AT}/video/video0/media.m3u8");
+		let old_segment = format!("/live/@{AT}/video/video0/seg/8343e7cd.0.m4s");
+		wait_listed(&app, "/live/master.m3u8", &format!("@{AT}/video/video0/media.m3u8")).await;
 		wait_listed(&app, &old_playlist, "seg/8343e7cd.0.m4s").await;
 
 		let next = moq_net::Identity::random();
@@ -520,11 +522,11 @@ mod tests {
 		let (_new_catalog, _, _new_track, mut new_media) =
 			publish_video(&mut new.broadcast().clone(), video_config(), timed());
 		write_three_gops(&mut new_media);
-		let new_playlist = format!("/live/@{}/video/video0/media.m3u8", next.as_str());
+		let new_playlist = format!("/live/@{}/video/video0/media.m3u8", crate::export::token(&next));
 		wait_listed(
 			&app,
 			"/live/master.m3u8",
-			&format!("@{}/video/video0/media.m3u8", next.as_str()),
+			&format!("@{}/video/video0/media.m3u8", crate::export::token(&next)),
 		)
 		.await;
 		wait_listed(&app, &new_playlist, "seg/8343e7cd.0.m4s").await;
@@ -555,7 +557,7 @@ mod tests {
 
 		let server = Server::new(origin.consume(), crate::export::Config::default()).unwrap();
 		let app = server.router();
-		let old_playlist = format!("/live/@{RUN}/video/video0/media.m3u8");
+		let old_playlist = format!("/live/@{AT}/video/video0/media.m3u8");
 		wait_listed(&app, &old_playlist, "seg/8343e7cd.1.m4s").await;
 		let replaced = server.broadcaster("live").await.expect("announced");
 		let mut old_renditions = replaced.renditions();
@@ -645,14 +647,14 @@ mod tests {
 		let app = Server::new(origin.consume(), crate::export::Config::default())
 			.unwrap()
 			.router();
-		wait_listed(&app, &format!("/live/@{RUN}/video/video0/media.m3u8"), ".2.m4s").await;
+		wait_listed(&app, &format!("/live/@{AT}/video/video0/media.m3u8"), ".2.m4s").await;
 		assert_eq!(status(&app, "/live/manifest.mpd").await, StatusCode::OK);
 
 		// The track fails while its rendition stays in the catalog.
 		track
 			.abort(moq_net::Error::Transport("connection lost".into()))
 			.unwrap();
-		for uri in [&format!("/live/@{RUN}/video/video0/media.m3u8"), "/live/manifest.mpd"] {
+		for uri in [&format!("/live/@{AT}/video/video0/media.m3u8"), "/live/manifest.mpd"] {
 			let deadline = kio::clock::now().saturating_add(TIMEOUT);
 			let response = loop {
 				let response = oneshot(app.clone(), uri).await;
@@ -682,14 +684,14 @@ mod tests {
 		let app = server.router();
 		wait_listed(
 			&app,
-			&format!("/live/@{RUN}/video/video0/media.m3u8"),
+			&format!("/live/@{AT}/video/video0/media.m3u8"),
 			"seg/8343e7cd.0.m4s",
 		)
 		.await;
 		let broadcaster = server.broadcaster("live").await.expect("broadcaster");
 		broadcaster.set_generation(Some("run-1")).unwrap();
 
-		let response = oneshot(app.clone(), &format!("/live/@{RUN}/video/video0/media.m3u8")).await;
+		let response = oneshot(app.clone(), &format!("/live/@{AT}/video/video0/media.m3u8")).await;
 		let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
 		let playlist = String::from_utf8(body.to_vec()).unwrap();
 		assert!(playlist.contains("\nseg/run-1.8343e7cd.0.m4s\n"), "{playlist}");
@@ -701,39 +703,39 @@ mod tests {
 			.unwrap();
 
 		assert_eq!(
-			status(&app, &format!("/live/@{RUN}/video/video0/{init}")).await,
+			status(&app, &format!("/live/@{AT}/video/video0/{init}")).await,
 			StatusCode::OK
 		);
 		assert_eq!(
-			status(&app, &format!("/live/@{RUN}/video/video0/init.mp4")).await,
+			status(&app, &format!("/live/@{AT}/video/video0/init.mp4")).await,
 			StatusCode::NOT_FOUND
 		);
 		assert_eq!(
-			status(&app, &format!("/live/@{RUN}/video/video0/init.0000000000000000.mp4")).await,
+			status(&app, &format!("/live/@{AT}/video/video0/init.0000000000000000.mp4")).await,
 			StatusCode::NOT_FOUND
 		);
 
 		assert_eq!(
-			status(&app, &format!("/live/@{RUN}/video/video0/seg/run-1.8343e7cd.0.m4s")).await,
+			status(&app, &format!("/live/@{AT}/video/video0/seg/run-1.8343e7cd.0.m4s")).await,
 			StatusCode::OK
 		);
 		assert_eq!(
-			status(&app, &format!("/live/@{RUN}/video/video0/seg/run-1.8343e7cd.t0.m4s")).await,
+			status(&app, &format!("/live/@{AT}/video/video0/seg/run-1.8343e7cd.t0.m4s")).await,
 			StatusCode::OK
 		);
 		assert_eq!(
-			status(&app, &format!("/live/@{RUN}/video/video0/seg/8343e7cd.0.m4s")).await,
+			status(&app, &format!("/live/@{AT}/video/video0/seg/8343e7cd.0.m4s")).await,
 			StatusCode::NOT_FOUND
 		);
 		assert_eq!(
-			status(&app, &format!("/live/@{RUN}/video/video0/seg/run-0.8343e7cd.0.m4s")).await,
+			status(&app, &format!("/live/@{AT}/video/video0/seg/run-0.8343e7cd.0.m4s")).await,
 			StatusCode::NOT_FOUND
 		);
 
 		// A new run: the previous generation's URLs are refused even for numbers it reuses.
 		broadcaster.set_generation(Some("run-2")).unwrap();
 		assert_eq!(
-			status(&app, &format!("/live/@{RUN}/video/video0/seg/run-1.8343e7cd.0.m4s")).await,
+			status(&app, &format!("/live/@{AT}/video/video0/seg/run-1.8343e7cd.0.m4s")).await,
 			StatusCode::NOT_FOUND
 		);
 	}
@@ -781,14 +783,14 @@ mod tests {
 		let broadcaster = server.broadcaster("room/live").await.unwrap();
 		broadcaster.ready().await;
 		let tag = |name| broadcaster.rendition(Kind::Video, name).unwrap().tag().to_string();
-		let allowed_uri = &format!("/room/live/@{RUN}/video/video0/seg/{}.0.m4s", tag("video0"));
-		let denied_uri = &format!("/room/live/@{RUN}/video/video1/seg/{}.0.m4s", tag("video1"));
+		let allowed_uri = &format!("/room/live/@{AT}/video/video0/seg/{}.0.m4s", tag("video0"));
+		let denied_uri = &format!("/room/live/@{AT}/video/video1/seg/{}.0.m4s", tag("video1"));
 		let app = server.router();
 		assert_eq!(oneshot(app.clone(), allowed_uri).await.status(), StatusCode::OK);
 		for uri in [
 			denied_uri,
-			&format!("/room/live/@{RUN}/video/video1/media.m3u8"),
-			&format!("/room/live/@{RUN}/video/video1/init.unknown.mp4"),
+			&format!("/room/live/@{AT}/video/video1/media.m3u8"),
+			&format!("/room/live/@{AT}/video/video1/init.unknown.mp4"),
 		] {
 			let response = oneshot(app.clone(), uri).await;
 			assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri}");
@@ -830,7 +832,7 @@ mod tests {
 		assert_eq!(
 			oneshot(
 				app,
-				&format!("/room/live/@{RUN}/video/video0/seg/{}.9999.m4s", tag("video0"))
+				&format!("/room/live/@{AT}/video/video0/seg/{}.9999.m4s", tag("video0"))
 			)
 			.await
 			.status(),

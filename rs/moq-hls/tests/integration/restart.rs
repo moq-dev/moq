@@ -200,7 +200,10 @@ async fn a_named_identity_never_shares_urls_with_a_minted_one_of_its_text() {
 		if media != old_media {
 			break media;
 		}
-		assert!(kio::clock::now() < deadline, "the named identity shared the minted one's URLs");
+		assert!(
+			kio::clock::now() < deadline,
+			"the named identity shared the minted one's URLs"
+		);
 		kio::clock::sleep(Duration::from_millis(50)).await;
 	};
 	let playlist = listed(&app, &new_media, ".2.m4s").await;

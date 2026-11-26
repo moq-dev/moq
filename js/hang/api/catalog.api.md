@@ -224,14 +224,14 @@ export type Format = typeof FORMATS[number];
 
 export type Hex = infer<typeof hexSchema>;
 
+export const IdentitySchema: ZodMiniType<ReferenceIdentity, string>;
+
 export type Include = infer<typeof IncludeSchema>;
 
 export const IncludeSchema: ZodMiniObject<{
 	broadcast: ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>;
 	identity: ZodMiniOptional<ZodMiniType<ReferenceIdentity, string, $ZodTypeInternals<ReferenceIdentity, string>>>;
 }, $strip>;
-
-export const IdentitySchema: ZodMiniType<ReferenceIdentity, string>;
 
 export type Json = infer<typeof JsonSchema>;
 

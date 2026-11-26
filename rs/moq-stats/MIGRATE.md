@@ -18,11 +18,11 @@ The stats tracks and their JSON are unchanged.
 
 ### Group counters have their own epoch type
 
-`GroupFrame::epoch` is `moq_stats::Epoch` instead of `moq_net::Identity`.
+`GroupFrame::epoch` is `moq_stats::Epoch` instead of `moq_net::Instance`.
 Use `Epoch` for stored group epochs; parse their text with `str::parse` or
 `Epoch::try_from(String)`, and read it with `as_str` or `Display`.
 Epochs are opaque identities with equality and hashing, without a temporal order.
-Broadcast routes still use `moq_net::Identity`. Group JSON is unchanged:
+Broadcast routes still use `moq_net::Instance`. Group JSON is unchanged:
 producers mint UUIDv7 strings, and readers accept any nonempty epoch string.
 
 ### `moq_net::Path` has no lifetime
@@ -42,7 +42,7 @@ A frame whose uncompressed JSON passes the 32 MB group budget ends the track wit
 
 The single-broadcast readers are named like the aggregate ones: `consume::Traffic` is now `consume::TrafficConsumer` and `consume::Sessions` is `consume::SessionsConsumer`.
 
-### A returning group restarts under a new identity (#4904)
+### A returning group restarts under a new instance (#4904)
 
-A stats group that returns announces a new identity and starts its group numbers at zero, instead of continuing the old sequence.
+A stats group that returns announces a new instance and starts its group numbers at zero, instead of continuing the old sequence.
 A reader that keyed history on the path alone should end that history when the announcement ends and start fresh on the next one.

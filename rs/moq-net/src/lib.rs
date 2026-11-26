@@ -121,8 +121,8 @@ pub mod goaway;
 #[cfg(not(feature = "async"))]
 #[allow(dead_code, unused_imports, reason = "async-only")]
 mod goaway;
-mod ietf;
 mod identity;
+mod ietf;
 mod ledger;
 mod lite;
 mod model;

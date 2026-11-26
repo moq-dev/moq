@@ -1,11 +1,11 @@
 import { expect, spyOn, test } from "bun:test";
 import { Producer as Broadcast } from "./broadcast.ts";
 import { randomHop } from "./hop.ts";
+import * as Identity from "./identity.ts";
 import { Publisher as IetfPublisher } from "./ietf/publisher.ts";
 import { NativeSession } from "./ietf/session.ts";
 import { Subscribe as IetfSubscribe } from "./ietf/subscribe.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
-import * as Identity from "./identity.ts";
 import { Fetch } from "./lite/fetch.ts";
 import { Publisher as LitePublisher } from "./lite/publisher.ts";
 import { Subscribe as LiteSubscribe } from "./lite/subscribe.ts";

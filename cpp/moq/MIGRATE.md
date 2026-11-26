@@ -10,7 +10,7 @@ The generated SocketEndpoint, SocketIncomingTcp, SocketIncomingTrack, SocketTcpS
 
 ### `Following::available()` reports the path going offline ([#7678](https://github.com/moq-dev/moq/pull/7678))
 
-`moq::Following::available()` resolves to a null `std::shared_ptr<moq::BroadcastConsumer>` once the path goes offline (or, for a follow pinned to an identity, once another identity takes it over), then the next broadcast when something serves the path again. The first call is never null. Check for null before using a later result, and treat it like the previous identity ending.
+`moq::Following::available()` resolves to a null `std::shared_ptr<moq::BroadcastConsumer>` once the path goes offline (or, for a follow pinned to an instance, once another instance takes it over), then the next broadcast when something serves the path again. The first call is never null. Check for null before using a later result, and treat it like the previous instance ending.
 
 ### Publishing goes through one `moq::Route` handle
 
@@ -20,9 +20,9 @@ The generated SocketEndpoint, SocketIncomingTcp, SocketIncomingTrack, SocketTcpS
 - `Publication::announce(route)` is `announce()`, and re-pricing is `set_cost(cost)`; `unannounce()` is `withdraw()`.
 - `OriginRequests::requested_broadcast()` is `requested()`, which resolves to `nullptr` once the origin closes.
 - `BroadcastRequest::prepare()` then `BroadcastPrepared::publish()` is `BroadcastRequest::route(options)`: create it hidden to fill it first, then `announce()`.
-- `identity()` is the stream's identity, kept across `withdraw()` and `announce()`.
+- `instance_id()` is the stream's instance, kept across `withdraw()` and `announce()`.
 
-`moq::AnnounceRoute` is `moq::RouteOptions{hidden, cost, identity, epoch}`, given at creation. A route is visible at once unless `hidden`; set it and call `announce()` after filling the catalog to keep the old order. Hold the route while the broadcast should stay announced: `cancel()` or releasing its last handle retracts it, and closing its broadcast ends both. `moq::Route`, the record on `moq::Announce::route`, is `moq::RouteInfo`.
+`moq::AnnounceRoute` is `moq::RouteOptions{hidden, cost, instance, epoch}`, given at creation. A route is visible at once unless `hidden`; set it and call `announce()` after filling the catalog to keep the old order. Hold the route while the broadcast should stay announced: `cancel()` or releasing its last handle retracts it, and closing its broadcast ends both. `moq::Route`, the record on `moq::Announce::route`, is `moq::RouteInfo`.
 
 ### Separate datagram tracks
 

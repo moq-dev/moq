@@ -80,11 +80,11 @@ This is native listener bookkeeping; the protocol wire is unchanged.
 ### Announcements are a listing; `follow` reports the path going offline ([#7678](https://github.com/moq-dev/moq/pull/7678))
 
 `origin::Consumer::announced()` lists paths: `announce::Event` is `Present(Announce)` or `Absent(Announce)`.
-Another identity taking a path over keeps it present, and a route's cost or hops changing is not reported, so `Start`, `Update`, `End`, `Restart` and `Takeover` are gone.
+Another instance taking a path over keeps it present, and a route's cost or hops changing is not reported, so `Start`, `Update`, `End`, `Restart` and `Takeover` are gone.
 Map `Start` to `Present` and `End` to `Absent`, and drop `Update` arms.
-Where you requested the path again on `Restart`, hold `consumer.follow(path, None)` instead: each `available()` returns the next identity's broadcast.
+Where you requested the path again on `Restart`, hold `consumer.follow(path, None)` instead: each `available()` returns the next instance's broadcast.
 
-`Following::available()` returns `Result<Option<broadcast::Consumer>, Error>`: `None` reports the path going offline (or, when pinned, another identity taking it over), and the next `Some` is whatever serves it again.
+`Following::available()` returns `Result<Option<broadcast::Consumer>, Error>`: `None` reports the path going offline (or, when pinned, another instance taking it over), and the next `Some` is whatever serves it again.
 The first call never returns `None`. After a resolution failure, such as a handler refusing the path, the next `available()` waits for the serving route to change instead of asking the same handler again, so keep the follower rather than dropping it.
 
 ```rust
@@ -101,7 +101,7 @@ if let Some(announce::Event::Present(a)) = announced.next().await {
         play(broadcast);
     }
 }
-let broadcast = consumer.follow(path, None)?.available().await?.expect("the first change is an identity");
+let broadcast = consumer.follow(path, None)?.available().await?.expect("the first change is an instance");
 ```
 
 Relays and stats that forward every route change call `consumer.routes()`, a hidden `origin::Routes` stream of `origin::RouteEvent`, which keeps the old five variants.
@@ -119,18 +119,18 @@ An `origin::Route` is created with `RouteOptions` and owns its broadcast. Droppi
 | `publication.unannounce()` | `route.withdraw()` |
 | `publication.announce(Route::default().with_cost(c))` | `route.set_cost(c)` |
 | `Route::default().with_auth(cred)` | `RouteOptions::default().with_auth(cred)`, or `route.set_auth(Some(cred))` |
-| `Route::default().with_identity(identity, epoch)` | `RouteOptions::default().with_identity(identity, epoch)`, at creation only |
-| `publication.route().and_then(\|r\| r.identity)` | `route.identity()` |
+| `Route::default().with_instance(instance, epoch)` | `RouteOptions::default().with_instance(instance, epoch)`, at creation only |
+| `publication.route().and_then(\|r\| r.instance)` | `route.instance()` |
 | `origin.requests(prefix)` | `origin.route_prefix(prefix, RouteOptions::default())` |
 | `requests.requested_broadcast().await` (`Result`) | `route.requested().await` (`Option`, `None` once retracted or the origin closes) |
 | `request.prepare()?` … `prepared.publish()?` | `request.route(RouteOptions::hidden())?` … `job.announce()?` |
 
-A route mints its identity when it is created and keeps it for its lifetime, across `withdraw()` and `announce()`: re-announcing continues the same stream, and a new run is a new route.
-A job's route from `request.route(options)` serves a fresh identity unless `options` names one; created visible, it announces and answers the waiting requesters at once.
+A route mints its instance when it is created and keeps it for its lifetime, across `withdraw()` and `announce()`: re-announcing continues the same stream, and a new run is a new route.
+A job's route from `request.route(options)` serves a fresh instance unless `options` names one; created visible, it announces and answers the waiting requesters at once.
 `requested()` on an exact route returns `None` at once, and `broadcast()` on a prefix route panics.
 A prefix route takes a cost, a credential and hidden visibility like an exact one.
 
-The route metadata a reader receives is `origin::RouteInfo` (was `origin::Route`), with read-only getters: `announce.route.identity()` (an `&Identity`, no longer an `Option`), `cost()`, `hops()`, `is_anonymous()` and `source()`.
+The route metadata a reader receives is `origin::RouteInfo` (was `origin::Route`), with read-only getters: `announce.route.instance()` (an `&Instance`, no longer an `Option`), `cost()`, `hops()`, `is_anonymous()` and `source()`.
 Applications cannot build or edit one.
 
 ```rust
@@ -153,7 +153,7 @@ A transport that knows the peer's stream credit reports it from the new `poll::S
 ### `Following` waits out a refusal ([#7836](https://github.com/moq-dev/moq/pull/7836))
 
 After `Following::available` returns a handler's refusal, the next call no longer asks the refusing route again at once.
-It waits for the serving route to change: another identity, the path going and coming back, or the same identity over another route.
+It waits for the serving route to change: another instance, the path going and coming back, or the same instance over another route.
 A caller that retried in a loop now waits instead of spinning; one that gave up on the first error is unaffected.
 
 ### Authored tracks default to a zero max age ([#7729](https://github.com/moq-dev/moq/pull/7729))
@@ -472,7 +472,7 @@ On the wire, moq-lite carries `priority + 128` and moq-transport `127 - priority
 
 On moq-lite, a client session no longer asks its peer for announcements under its whole subscribe scope at connect.
 It asks only under the prefixes its subscribe origin's readers watch, with `announced()`, `request`, or `follow`, and stops asking 2s after nothing at or beneath a prefix is watched.
-`request(path, identity)` watches its own path while it resolves, so it finds a broadcast the peer serves with nothing else watching first; no `announced()` stream is needed beside it.
+`request(path, instance)` watches its own path while it resolves, so it finds a broadcast the peer serves with nothing else watching first; no `announced()` stream is needed beside it.
 A broadcast resolved through a discovered route keeps its path watched until dropped.
 A server session, and a client fed into a `Producer::peer` or `Producer::upstream` handle, still asks for everything it may, so a relay discovers as before.
 Serving another session's request is not a watch, so a client that relays what it discovers to its own sessions should feed its client session `origin.upstream()` (or `peer()`) instead of a plain handle.
@@ -499,8 +499,8 @@ Treat a failed group read as the loss of that group and keep reading the track, 
 
 ### A claim answers by publishing (#5678)
 
-`origin::Producer::dynamic(prefix)` takes no route: an application claim has no identity, cost, or hops.
-Answer each `origin::Request` with `request.prepare()?`, fill `prepared.broadcast()`, then `prepared.publish()?`, which announces the broadcast at the exact path under a fresh identity of its own and returns its producer.
+`origin::Producer::dynamic(prefix)` takes no route: an application claim has no instance, cost, or hops.
+Answer each `origin::Request` with `request.prepare()?`, fill `prepared.broadcast()`, then `prepared.publish()?`, which announces the broadcast at the exact path under a fresh instance of its own and returns its producer.
 Only `publish` announces it: `prepared.broadcast().announce(..)` fails with `Error::Closed`.
 `Dynamic::update` is gone: drop the claim and claim again to change it, and close an answer's producer to end that output.
 `Producer::requests_route` and `Requests::update_route` remain crate-private (#6496).
@@ -690,14 +690,14 @@ Pick the start sequence yourself with `create_group(group::Info { sequence })`, 
 
 `announce::Consumer` yields `announce::Event`, carrying an `announce::Announce { prefix, captures, route }`.
 `announce::Update` and `announce::Kind` are gone.
-`Restart` means another publisher identity now serves the prefix: request the path again.
-Another identity winning the path no longer ends open subscriptions with `Unroutable`; they stay on the old identity until dropped or its last route goes.
+`Restart` means another publisher instance now serves the prefix: request the path again.
+Another instance winning the path no longer ends open subscriptions with `Unroutable`; they stay on the old instance until dropped or its last route goes.
 
 ```rust
 while let Some(event) = announced.next().await {
 	match event {
 		announce::Event::Start(a) | announce::Event::Restart(a) => {
-			let broadcast = origin.request(&a.prefix, a.route.identity.clone()).await?;
+			let broadcast = origin.request(&a.prefix, a.route.instance.clone()).await?;
 		}
 		announce::Event::Update(_) => {}
 		announce::Event::End(_) => {}
@@ -705,31 +705,31 @@ while let Some(event) = announced.next().await {
 }
 ```
 
-### Routes carry an identity and a per-identity epoch (#4942, [#7489](https://github.com/moq-dev/moq/pull/7489))
+### Routes carry an instance and a per-instance epoch (#4942, [#7489](https://github.com/moq-dev/moq/pull/7489))
 
-Every route carries an `Identity`: non-empty text naming one continuous run of group numbers at its path, like a cloud instance ID that survives a reboot.
+Every route carries an `Instance`: non-empty text naming one continuous run of group numbers at its path, like a cloud instance ID that survives a reboot.
 Every broadcast mints a random one when it is created and keeps it across withdraw, re-announce, and reconnect, so most publishers set nothing.
-A publisher that continues its group sequences across restarts may name a stable one with `Route::with_identity(identity, epoch)`, raising `epoch` on each run; within one identity only the highest epoch is eligible.
-Read `Route::identity` and `broadcast::Info::identity`; the epoch is never readable.
-A session of moq-lite 06 or older, or moq-transport, mints an identity starting with `~` for each announcement (`Identity::is_minted`).
+A publisher that continues its group sequences across restarts may name a stable one with `Route::with_instance(instance, epoch)`, raising `epoch` on each run; within one instance only the highest epoch is eligible.
+Read `Route::instance` and `broadcast::Info::instance`; the epoch is never readable.
+A session of moq-lite 06 or older, or moq-transport, mints an instance starting with `~` for each announcement (`Instance::is_minted`).
 
 ### A path resolves with `request` or `follow` ([#6445](https://github.com/moq-dev/moq/pull/6445), [#7172](https://github.com/moq-dev/moq/pull/7172))
 
 | Before | After |
 |---|---|
 | `origin::Consumer::request_broadcast(path)` | `request(path, None)` |
-| `origin::Consumer::routed_broadcast(path)` | `request(path, None)` to resolve one identity, or `follow(path, None)?` to follow the path across identities |
+| `origin::Consumer::routed_broadcast(path)` | `request(path, None)` to resolve one instance, or `follow(path, None)?` to follow the path across instances |
 | `origin::Consumer::routed(path)`, then `request_broadcast(path)` | `follow(path, None)?.available().await` |
 | `origin::Consumer::routed(path)` to read the `Route` | `announced()` on a consumer `scope`d to the path with `Pattern::literal` |
 
-`request(path, identity)` resolves one publisher identity. It owns the discovery of its path and retries as the routes covering the path change, so it no longer fails at once when no route covers the path yet: it fails with `Error::Unroutable` only once discovery has synced with no covering route.
+`request(path, instance)` resolves one publisher instance. It owns the discovery of its path and retries as the routes covering the path change, so it no longer fails at once when no route covers the path yet: it fails with `Error::Unroutable` only once discovery has synced with no covering route.
 Drop a `routed` wait or an `announced()` stream held only so a request could resolve.
 A selected handler's explicit refusal, including a dropped `Prepared`, is final; a request no longer waits for the routes to move after one.
-`follow(path, identity)` returns an `origin::Following`, whose `available()` yields the broadcast each identity serving the path in turn.
+`follow(path, instance)` returns an `origin::Following`, whose `available()` yields the broadcast each instance serving the path in turn.
 `Requesting` is the owned task `request` returns; `Requesting::is_queued` is gone.
 
-Pass `None` to either to accept whichever identity wins the path, or an `Identity` to refuse every other one.
-A route updated to another identity refuses the requests its handler still holds with `Unroutable`.
+Pass `None` to either to accept whichever instance wins the path, or an `Instance` to refuse every other one.
+A route updated to another instance refuses the requests its handler still holds with `Unroutable`.
 
 ### Demand is read through `demand()`
 

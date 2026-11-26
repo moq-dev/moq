@@ -16,16 +16,16 @@ moq.dev/moq/socket now exposes TCP group halves and reliably subscribed track ha
 
 ### `Following.Available` reports the path going offline
 
-After the first call, `Available` returns `(nil, nil)` once the followed path goes offline, or, for a `Follow` pinned to an identity, once another identity takes it over.
+After the first call, `Available` returns `(nil, nil)` once the followed path goes offline, or, for a `Follow` pinned to an instance, once another instance takes it over.
 The next call returns whatever serves the path next. The first call is never nil.
-Check for nil before using the broadcast, and drop what was read from the previous identity either way.
+Check for nil before using the broadcast, and drop what was read from the previous instance either way.
 
 ### Announcements are a listing
 
 `AnnounceConsumer` yields only `AnnounceEventPresent`, when a route now covers a path that was absent, and `AnnounceEventAbsent`, when none does any more.
 Rename `AnnounceEventStart` to `AnnounceEventPresent` and `AnnounceEventEnd` to `AnnounceEventAbsent`.
 `AnnounceEventUpdate`, `AnnounceEventRestart`, and `AnnounceEventTakeover` with its `Predecessor` are gone: a route changing cost or hops, a restarted publisher, and a takeover all keep the path present and report nothing.
-Instead of requesting the path again on a restart, hold `Follow` and read each new publisher identity from `Available`, dropping what was read from the previous one.
+Instead of requesting the path again on a restart, hold `Follow` and read each new publisher instance from `Available`, dropping what was read from the previous one.
 
 ```go
 following, err := client.Follow(path, nil)
@@ -39,7 +39,7 @@ for {
 		return err
 	}
 	if broadcast == nil {
-		continue // offline until the next identity
+		continue // offline until the next instance
 	}
 	play(broadcast)
 }
@@ -53,9 +53,9 @@ for {
 - `Publication.Announce(moq.AnnounceRoute{...})` is `Announce()`, and re-pricing is `SetCost(cost)`. `Unannounce()` is `Withdraw()`.
 - `OriginRequests.RequestedBroadcast(ctx)` is `Route.Requested(ctx)`, which returns `(nil, nil)` once the origin closes; `All(ctx)` and `Cancel()` keep their names. Cancelling ctx no longer retracts the route, only the wait.
 - `BroadcastRequest.Prepare()` then `BroadcastPrepared.Publish()` is `BroadcastRequest.Route(options)`: create it hidden to fill it first, then `Announce()`. `BroadcastPrepared.Close()` is `Route.Cancel()`.
-- `Route.Identity()` is the stream's identity, minted at creation and kept across `Withdraw` and `Announce`.
+- `Route.Instance()` is the stream's instance, minted at creation and kept across `Withdraw` and `Announce`.
 
-`moq.AnnounceRoute` is `moq.RouteOptions{Hidden, Cost, Identity, Epoch}`, given once at creation. A route is visible at once unless `Hidden`; set it and call `Announce()` after filling the catalog to keep the old create-then-announce order. A stable `Identity` is fixed for the route's lifetime: announcing another one is a new route.
+`moq.AnnounceRoute` is `moq.RouteOptions{Hidden, Cost, Instance, Epoch}`, given once at creation. A route is visible at once unless `Hidden`; set it and call `Announce()` after filling the catalog to keep the old create-then-announce order. A stable `Instance` is fixed for the route's lifetime: announcing another one is a new route.
 
 Keep the `*Route` reachable for as long as the broadcast should stay announced: the collector reclaiming it, or `Cancel()`, retracts it, while `BroadcastProducer.Close()` still ends both. A `*BroadcastProducer` alone no longer keeps it announced.
 
@@ -160,8 +160,8 @@ the matching generated bindings and native library.
 
 ### `Announce` takes an `AnnounceRoute`
 
-`BroadcastProducer.Announce` takes `moq.AnnounceRoute{Cost, Identity, Epoch}` instead of a `moq.Route`: the origin builds the hop chain, so `Hops` is no longer an input, and `ErrInvalidRoute` is gone.
-`Route` is only what announcements report. To re-announce an observed route, copy its `Cost`, and its `Identity` only when forwarding that same stream; leave `Identity` unset to keep the one the broadcast minted.
+`BroadcastProducer.Announce` takes `moq.AnnounceRoute{Cost, Instance, Epoch}` instead of a `moq.Route`: the origin builds the hop chain, so `Hops` is no longer an input, and `ErrInvalidRoute` is gone.
+`Route` is only what announcements report. To re-announce an observed route, copy its `Cost`, and its `Instance` only when forwarding that same stream; leave `Instance` unset to keep the one the broadcast minted.
 
 ### A broadcast reference waits for its sibling's announcement (#6254)
 
@@ -199,8 +199,8 @@ To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 beco
 ### `Request` and `Follow` name the two resolutions ([#7193](https://github.com/moq-dev/moq/pull/7193), [#7489](https://github.com/moq-dev/moq/pull/7489))
 
 On `OriginConsumer` and `Client`, `RequestBroadcast(ctx, path)` is `Request(ctx, path, nil)`, `AnnouncedBroadcast(path)` is `Follow(path, nil)`, and `*moq.AnnouncedBroadcast` is `*moq.Following`.
-Pass `&identity` instead of `nil` to refuse every other publisher identity.
-`Request` resolves one publisher identity: it retries as the routes covering the path change, and fails with an unroutable error only once discovery has synced with no covering route. `Follow` hands out each identity that serves the path in turn.
+Pass `&instance` instead of `nil` to refuse every other publisher instance.
+`Request` resolves one publisher instance: it retries as the routes covering the path change, and fails with an unroutable error only once discovery has synced with no covering route. `Follow` hands out each instance that serves the path in turn.
 
 ### A client asks only about what it watches (#6165)
 
@@ -213,11 +213,11 @@ moq-transport and moq-lite-03/04 sessions are unchanged.
 A container import with `media.ContainerFormatFmp4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
 Pass the new `media.ContainerFormatCmaf` to keep publishing CMAF.
 
-### Catalog references carry their identity
+### Catalog references carry their instance
 
-`ffi.MoqVideo` and `ffi.MoqAudio` gain `Identity`, the publisher identity their `Broadcast` reference names.
-`BroadcastConsumer.Resolve(ctx, reference)` becomes `Resolve(ctx, rendition)`, taking the catalog rendition (`media.VideoRendition` or `media.AudioRendition`) and reading its `Broadcast` and `Identity` from it.
-Resolving, and the rendition-based consumers, error for a rendition whose broadcast is proven to serve another identity.
+`ffi.MoqVideo` and `ffi.MoqAudio` gain `Instance`, the publisher instance their `Broadcast` reference names.
+`BroadcastConsumer.Resolve(ctx, reference)` becomes `Resolve(ctx, rendition)`, taking the catalog rendition (`media.VideoRendition` or `media.AudioRendition`) and reading its `Broadcast` and `Instance` from it.
+Resolving, and the rendition-based consumers, error for a rendition whose broadcast is proven to serve another instance.
 
 ### Timestamps stop at 2^61 - 1 microseconds (#6168)
 
@@ -233,7 +233,7 @@ Publish a replacement under a new name, and expect a finished track's demand wat
 ### A claim answers by publishing (#5678)
 
 `OriginProducer.Dynamic(prefix)` takes no route, and `OriginDynamic.Update` is gone.
-Replace `request.Accept(broadcast)` with `request.Prepare()`, which returns a `*BroadcastPrepared`: fill its `Broadcast()`, then `Publish()` announces it at the exact path under a fresh identity of its own and returns its producer.
+Replace `request.Accept(broadcast)` with `request.Prepare()`, which returns a `*BroadcastPrepared`: fill its `Broadcast()`, then `Publish()` announces it at the exact path under a fresh instance of its own and returns its producer.
 To answer with a broadcast you already hold, `request.Serve(consumer)` serves it under the prefix route without announcing an exact route; the consumer stays yours to close.
 Where you rejected a request after a failed setup, `Close()` the prepared answer instead.
 
@@ -291,10 +291,10 @@ The connection stats no longer carry a receive estimate.
 Hold the consumer `Session.RecvBandwidth` returns to request PROBE, read it with `Rate()` or wait with `RateChanged(ctx)`, and `Close()` it to stop.
 It returns `nil` when the version has no PROBE.
 
-### `Following.Available` waits for the next publisher identity (#5700)
+### `Following.Available` waits for the next publisher instance (#5700)
 
 The first call returns the broadcast serving the path, as before.
-Each later call waits for the next identity to take over the path, instead of returning whatever serves it now.
+Each later call waits for the next instance to take over the path, instead of returning whatever serves it now.
 
 ### A timed track refuses a group that rewinds (#5803)
 
@@ -336,7 +336,7 @@ A panic in a background task returns an `ErrTask` error carrying the panic messa
 
 `AnnounceConsumer.Next` and `All` yield an `AnnounceEvent`: `AnnounceEventStart`, `AnnounceEventUpdate`, `AnnounceEventEnd`, or `AnnounceEventRestart`, each carrying an `Announce`.
 `AnnounceUpdate` and its `Active()` are gone.
-A restart means another publisher identity now serves the prefix: request the path again.
+A restart means another publisher instance now serves the prefix: request the path again.
 
 ```go
 for event, err := range announced.All(ctx) {

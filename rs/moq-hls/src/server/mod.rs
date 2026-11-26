@@ -156,7 +156,10 @@ impl Followed {
 		let mut identities = self.identities.lock().unwrap();
 		for (id, broadcaster) in &replaced.by_id {
 			if !broadcaster.is_closed() {
-				identities.by_id.entry(id.clone()).or_insert_with(|| broadcaster.clone());
+				identities
+					.by_id
+					.entry(id.clone())
+					.or_insert_with(|| broadcaster.clone());
 			}
 		}
 	}
@@ -561,7 +564,7 @@ mod tests {
 		let old = origin
 			.route("live", moq_net::origin::RouteOptions::default())
 			.expect("publish allowed");
-		let old_token = crate::export::token(old.identity());
+		let old_token = crate::export::token(&old.identity());
 		settle().await;
 		let first = server.broadcaster("live").await.expect("broadcast announced");
 		assert_eq!(first.token(), &old_token);
@@ -569,7 +572,7 @@ mod tests {
 		let new = origin
 			.route("live", moq_net::origin::RouteOptions::default())
 			.expect("publish allowed");
-		let new_token = crate::export::token(new.identity());
+		let new_token = crate::export::token(&new.identity());
 		eventually(async || {
 			let current = server.broadcaster("live").await.expect("broadcast announced");
 			*current.token() == new_token
