@@ -281,6 +281,15 @@ impl<T: Followed> Follower<T> {
 								self.state = self.withdrawn(missing)?;
 								continue;
 							}
+							// The publisher left during this poll, so a return already on hand is
+							// carried on into now: nothing else wakes the follower for it.
+							if switching.is_none()
+								&& matches!(self.serving, Serving::Return(_))
+								&& self.export.departed().is_some()
+							{
+								self.state = State::Running { awaiting, switching };
+								continue;
+							}
 							self.state = State::Running { awaiting, switching };
 							return Poll::Pending;
 						}
@@ -406,8 +415,10 @@ impl<T: Followed> Follower<T> {
 		{
 			let target = target.clone();
 			match missing {
+				// A replacement being acquired may have lowered the priority; the return reads on.
 				Some(_) => {
-					tracing::info!(path = %self.path, "broadcast returned, carrying on while the old output plays out")
+					tracing::info!(path = %self.path, "broadcast returned, carrying on while the old output plays out");
+					self.export.source().priority(0)?;
 				}
 				None => {
 					tracing::info!(path = %self.path, "broadcast replaced, switching the program to the new instance");
