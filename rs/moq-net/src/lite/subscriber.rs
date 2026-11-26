@@ -1555,13 +1555,13 @@ impl GroupRecv {
 			// span holds no other start, so its stream accounts for those starts too, and the
 			// track records them skipped, as its own publisher's append did.
 			Ok(end) => {
-				if let Some(end) = end {
-					reading.account(hdr.key..end, self.subscriber.runtime.now());
-				}
+				// Only a GROUP_END the group accepts accounts for its span: one below a frame it
+				// holds is malformed, and names nothing.
 				let ended = group.end(end);
 				if ended.is_ok()
 					&& let Some(end) = end
 				{
+					reading.account(hdr.key..end, self.subscriber.runtime.now());
 					track.skip_groups(hdr.key.saturating_add(1)..end);
 				}
 				ended
@@ -13213,8 +13213,13 @@ impl TrackServe {
 
 		tracing::debug!(id, broadcast = %self.subscriber.log_path(&self.path), track = %self.name, "subscribe started");
 
-		// A pipelined SUBSCRIBE has no copy, so no max age, until it is adopted.
-		let tail = kio::Producer::new(Tail::new(tail::grace(track::budget(max_age))));
+		// A pipelined SUBSCRIBE has no copy, so no max age, until it is adopted. Lite-07 names
+		// every start, so its tail waits out no grace.
+		let tail = match self.subscriber.version.has_skip() {
+			true => Tail::proven(),
+			false => Tail::new(tail::grace(track::budget(max_age))),
+		};
+		let tail = kio::Producer::new(tail);
 		if let Some(copy) = &copy
 			&& let Ok(mut tail) = tail.write()
 		{
@@ -14750,6 +14755,10 @@ impl ServeLoop {
 		}
 		if serve.subscriber.version.resolves_anchors() {
 			serving.anchored();
+		}
+		// Lite-07 names every start, so the copy waits for its wire rather than a grace.
+		if serve.subscriber.version.has_skip() {
+			serving.proven();
 		}
 		// A wire whose ranges carry each live join answers where each starts, which alone
 		// places a reader's.

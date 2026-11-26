@@ -1,47 +1,40 @@
-# [L] Replace lite-07 SUBSCRIBE_SKIP and stall timers with Previous Delta
+# [L] Remove lite-07 stall timers: GROUP_END and SUBSCRIBE_SKIP name every empty start
 
 ## Goal
 
-On lite-07, every `GROUP` header carries `Previous Delta (i)` to prove gaps in the data layer, `SUBSCRIBE_SKIP` is removed completely, `GROUP_END` stays at stream end for whole-vs-closed and presentation `End`, and all five stall-guessing timers are removed from lite-07 (remaining isolated to pre-lite-07 and `moq-transport`). `/verify-subscribe` (`SubscribeAccounting.tla`) proves zero-timer settlement on the new wire.
+lite-07 settles every start without a timer: a Group Stream, its `GROUP_END` (whose `End` accounts for the starts inside the span), a `SUBSCRIBE_SKIP` for any empty start no `GROUP_END` covers, a `SUBSCRIBE_DROP`, or `SUBSCRIBE_END`. All five stall-guessing timers are removed from lite-07 (remaining isolated to pre-lite-07 and `moq-transport`). `/verify-subscribe` (`SubscribeAccounting.tla`) proves zero-timer settlement on this wire.
 
 ## Plan
 
-Decided 2026-11-24 (maintainer, /quest-plan):
-- ✅ Add `Previous Delta (i)` to the lite-07 `GROUP` header (`0` = unknown/bridged/out-of-order, `1` = first group proving `0..Group Start` empty, `d + 2` = `Previous Start = Group Start - (d + 1)` proving `(Previous Start, Group Start)` empty), keeping `GROUP_END` at stream end for whole-vs-closed and presentation `End` (rejected: keeping `GROUP_END` only).
-- ✅ Remove `SUBSCRIBE_SKIP` from lite-07 completely; `Previous Delta` + `SUBSCRIBE_START(None)` + `SUBSCRIBE_END` handle all silent skips, and `SUBSCRIBE_DROP` handles genuine unopened drops. Handle the first group of a subscription cleanly (rejected: keeping `SUBSCRIBE_SKIP`).
+Decided 2026-11-26 (maintainer, on [moq-dev/moq#9626](https://github.com/moq-dev/moq/pull/9626)), overriding the 2026-11-24 `Previous Delta` plan below: "Remove prev group timestamp. Include the final group timestamp in the previous group instead. It's literally needed to learn segment durations anyway", and a control message covers discontinuities.
 
-Wire and accounting design (fixes audit findings W1, W5, W6, S12, S13):
+- No `Previous Delta` on the lite-07 `GROUP` header. The previous group's `GROUP_END` `End` proves the starts up to it empty.
+- Starts no `GROUP_END` covers (a discontinuity, a first group, a group closed without finishing, a `GROUP_END` a reset may have cut) go out as `SUBSCRIBE_SKIP`, main's lite-07 message, kept as its own message rather than a `SUBSCRIBE_DROP` code: a drop's code is a stream error that ends readers, a skip is final cacheable emptiness that ends none, and AGENTS.md asks for a separate message over a special value.
+- Every drop is final on the wire: no skip goes out over a drop (the audit's W1/W5 override machinery stays deleted), except the re-tell of a cut `GROUP_END`, which may name a start dropped before its group finished and changes nothing for it.
+- For local tracks, a producer declaring a group's end was to replace the 1 s local miss grace. See Waiting: it also governs local fill handlers and logical tracks.
 
-- **`GROUP` header `Previous Delta (i)`:**
-  - `0`: unknown predecessor (for example, bridged from lite-06 or `moq-transport`, or an out-of-order producer whose predecessor is not known).
-  - `1`: first group of the track; proves `[0, Group Start)` contains no group.
-  - `d + 2` (`d >= 0`): `Previous Start = Group Start - (d + 1)` (reject if `d + 1 > Group Start`); proves `(Previous Start, Group Start)` contains no group.
-- **Disjoint partition of `[0, ∞)` and first-group handling:**
-  - Each group `G_i` owns `(prev, G_i]` (`[0, G_0]` when `Previous Delta == 1`), and `SUBSCRIBE_END(last + 1)` owns `(last, ∞)`.
-  - First group of a subscription:
-    - `SUBSCRIBE_START(start)` sets the subscription floor so nothing below `start` is owed.
-    - For `Start::Oldest` (`SUBSCRIBE_START(0)`), the first group `G0` carries `Previous Delta = 1`, which closes `[0, G0]` with zero control messages.
-    - For a mid-pause `Start::Time(t)` where `G0.End <= t < G1.Start`, `SUBSCRIBE_START(t)` sets the floor at `t`, and `G1` carries `Previous Delta` naming `G0`, which proves `(G0, G1)` empty and closes `[t, G1]` cleanly.
-    - For an empty finished track, `SUBSCRIBE_START(None)` + `SUBSCRIBE_END` closes the subscription immediately with zero groups.
-  - When a publisher drops an unopened group `G_i` (`SUBSCRIBE_DROP`), the drop span covers `(prev, G_i]` (or `[start, end)` for contiguous dropped runs), so every start in `[floor, end)` is accounted for exactly once even across pauses and drops.
-  - Cache-local time lookup (`AGENTS.md`): when a relay holds `G0` and `G1` linked by `Previous Delta` (`G1.prev == G0.start`), any query time in `(G0.start, G1.start)` is provably answerable from cache without an upstream round-trip.
-- **Remove `SUBSCRIBE_SKIP` from lite-07 (`W1`, `W5`):**
-  - Remove `SUBSCRIBE_SKIP` encoding/decoding on lite-07 in Rust (`rs/moq-net`) and JS (`js/net`), and remove it from `drafts/draft-lcurley-moq-lite.md` (keep `SUBSCRIBE_SKIP` only if needed by pre-lite-07, or verify none of pre-lite-07 uses it).
-  - Delete `skipped` / `Hole::Skip` overwrite machinery on lite-07 (`W5a`, `W5b`) and fix `W1` (`SUBSCRIBE_SKIP` misclassified as `NotFound` for held fills).
-  - Fix `W6b`: validate `GROUP_END` in `group.end(end)` before accounting it in `Tail`.
-  - Fix `S12`: `Producer::finish_shared` clears `End::tail` properly on timed tracks and errored `SUBSCRIBE_END`.
-- **Remove all five stall-guessing timers from lite-07 (`S13`):**
-  - Keep wall-clock timers strictly for pre-lite-07 and `moq-transport` (plus spec'd finite `Max Age` media/arrival expiry). On lite-07, remove:
-    1. `Settle` grace timer (`rs/moq-net/src/tail.rs:222-264`, `rs/moq-net/src/lite/subscriber.rs:14541-14576`)
-    2. `TrackState::tail_deadline` / `End::tail` (`rs/moq-net/src/model/track.rs:4182-4238`)
-    3. `Misses::deferred` / `miss_grace` (`rs/moq-net/src/model/track/miss.rs:1876-1881, 1911-1958`)
-    4. `Lost` eviction TTL (`rs/moq-net/src/model/track/miss.rs:1984-2070`)
-    5. `Copy::retains` / `Copy::expired` wall-clock cap (`rs/moq-net/src/model/resume.rs:1061-1155`)
-  - Handle bridged `Previous Delta = 0` cleanly (when upstream is lite-06 / `moq-transport`, the copy already runs on that legacy transport's rules; a lite-07 publisher forwarding a copy with unknown predecessor sends `Previous Delta = 0` and uses explicit `SUBSCRIBE_DROP` if needed rather than silent gaps).
-- **Formal verification (`/verify-subscribe`) and interop:**
-  - Update `rs/moq-net/verify/subscribe/SubscribeAccounting.tla` (and its `.cfg` / README) to model `Previous Delta` + `RESET_STREAM_AT(header_end)` + no `SUBSCRIBE_SKIP`, and run TLC via `/verify-subscribe` to prove `ServedOnce`, `NamedOnce`, `NoContradictoryDrop`, `ZeroTimers_QuietIsSettled`, and deadlock freedom.
-  - The open finding `CutGroupEnd.cfg` (a reset after FIN delivers only the header, so the starts its cut GROUP_END told wait out the grace) must pass: delete its `Open finding` line, and fold `QuietIsSettledWhole` into `QuietIsSettled`, dropping `Cut`.
-  - Update Rust (`rs/moq-net`), JS (`js/net`), and `drafts/draft-lcurley-moq-lite.md` in the same PR, and run `just test interop --all`.
+Superseded 2026-11-24 (maintainer, /quest-plan): `Previous Delta (i)` on the lite-07 `GROUP` header, `SUBSCRIBE_SKIP` removed from lite-07, `GROUP_END` kept.
 
-Public API: none (internal `Group` predecessor metadata stays crate-private unless a public getter is needed). Wire: breaking lite-07 change (adds `Previous Delta` to `GROUP` header, removes `SUBSCRIBE_SKIP`).
+Decided 2026-11-25 (maintainer, on [moq-dev/moq#9626](https://github.com/moq-dev/moq/pull/9626)), still in force:
 
+- JS lite-07 drops the tail and track graces, as Rust did. The tail's excused-stream bound stays until browser WebTransport exposes `RESET_STREAM_AT`.
+- The FETCH `Stall` timer stays until FETCH is removed.
+- A reset that may lose its GROUP header (no `RESET_STREAM_AT`) names the group in `SUBSCRIBE_DROP` with the reset's error: `poll::Session::reliable_reset` says which, the publisher holds a header only when it is true, and `PlainReset.cfg` checks it.
+- Local and remote tracks must not behave differently. Consistent with [A relayed reader reports a refused fill as a gap a direct reader never sees](/quest/m1/relayed-refused-fill-gap.md).
+
+`S12` moved to [A moq-transport finish settles a declared end's tail](/quest/m3/ietf-finish-shared-tail.md).
+
+## Waiting
+
+- Maintainer: how to remove the local miss grace. `TrackState::miss_grace` (1 s) does more than settle a hole below an out-of-order `create_group`. It also decides when a local track with fill handlers (`Producer::requests`) asks for a hole, and how long a refused fill waits for the live feed before the hole is named dropped. Front and resume logical tracks are local producers too, so they would lose their gap give-up. Treating every local start as named broke 15 fill and resume tests.
+  - A: a local track names every start. A local fill handler is asked at once, and its refusal is final at once. A hole with no handler stays owed until the producer creates, skips, or ends it. Logical and resume tracks follow their serving copy. Needs a group-level `finish_at` in `moq-ffi` (only `finish()` today) and JS parity, and about 15 tests change.
+  - B: keep the grace only for fill-handler asks and refusals. Still a timer, so local and remote still differ.
+  - **C (recommended):** keep the local miss grace in [moq-dev/moq#9626](https://github.com/moq-dev/moq/pull/9626), which settles the wire, and do A in its own quest. The wire change stands alone, and A is a public API change (`moq-ffi`, JS) with its own tests.
+- Maintainer: how to close three cases that only a grace settled, which the zero-timer lite-07 now leaves open (Codex review round 1 on [moq-dev/moq#9626](https://github.com/moq-dev/moq/pull/9626)).
+  - A start no wire message names: the gap between two disjoint ranges of one subscription. A proven received copy waits on it forever, so a reader past it never reaches the track's end or error. Reproduced on the copy model: clearing the declared tail in `finish_shared` does not help, since a proven copy's hole wait never ends.
+  - The subscriber's ledger (Rust `Tail::proven`, JS `Ledger.expire` with no grace) never folds a gap, so a subscription that keeps moving one range through disjoint parts of a track keeps a run per visited interval.
+  - A Group Stream the subscriber's transport evicts after QUIC acknowledged its FIN, before moq-net read its GROUP_END, sends no STOP_SENDING, so the publisher never re-tells the cut span and the subscriber waits forever for those starts.
+  - Options:
+    - Fix all three in [moq-dev/moq#9626](https://github.com/moq-dev/moq/pull/9626) (Recommended) - starts outside every live range stop being owed when the range retires (fixes the first two in Rust and JS), and the subscriber reads a fully received stream's GROUP_END before evicting it, or names it to the publisher. Grows an already L PR.
+    - Keep a bounded lite-07 backstop grace for these cases only - smallest change, but brings a timer back against the 2026-11-25 decision.
+    - Land the wire with the lite-07 graces restored, and remove them in a follow-up once all three are fixed - unblocks the lite-07 cut sooner, at the cost of moving the zero-timer goal out of this quest.

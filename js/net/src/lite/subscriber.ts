@@ -1755,14 +1755,16 @@ export class Subscriber {
 		// Lite-06+ resolves where the feed starts only with SUBSCRIBE_START, so a relay serving
 		// this copy holds its first group until the answer arrives.
 		if (resolvesStart(this.version)) hooks.startTrack(producer, { requested: msg.startGroup });
+		// Lite-07 names every start, so the copy and its tail wait for the wire rather than a grace.
+		if (hasSkip(this.version)) hooks.proveTrack(producer);
 		const live = new LiveRanges(this.version, msg.ranges ?? []);
 		const entry: SubscribeEntry = {
 			track: producer,
 			staleBudget: narrowest(live),
 			staleCap: capOf(live),
 			...framing,
-			// The effective max delay is the stopgap grace: the wrong clock (it bounds
-			// presentation-time drift), but it is how long the subscriber was willing to wait
+			// Before lite-07, the effective max delay is the stopgap grace: the wrong clock (it
+			// bounds presentation-time drift), but it is how long the subscriber was willing to wait
 			// for a late group anyway, and no longer than the publisher keeps one fresh.
 			tail: new Tail({ grace: () => hooks.tailGrace(producer) }),
 			requested: msg.startGroup,

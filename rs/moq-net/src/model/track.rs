@@ -846,6 +846,10 @@ pub(crate) struct TrackState {
 	// a lite-07 copy, whose ranges carry each join and whose publisher reports where each
 	// starts. Another copy measures the live edge from what it holds and its upstream's Largest.
 	answers_joins: bool,
+	// Whether the copy's wire names every start: a lite-07 publisher tells each with a group,
+	// its GROUP_END, a skip, a drop, or the track's end, so no gap is given up for its age.
+	// Another copy gives up a gap once its grace passes, as nothing else may ever name it.
+	proven: bool,
 	// How readers learn where the live feed is; see [`Subscriber::knows_edge`].
 	edge: EdgeSource,
 	// Where the upstream publisher started each of a lite-07 copy's live wire ranges, by the
@@ -3573,8 +3577,11 @@ impl TrackState {
 	}
 
 	/// How long a missing live group is waited for, from the max delay the track's
-	/// subscribers ask for.
+	/// subscribers ask for: for as long as it takes on a copy whose wire names every start.
 	fn arrival_grace(&self) -> Duration {
+		if self.proven {
+			return Duration::MAX;
+		}
 		let max_delay = clamp_max_delay(self.subscriptions.lock().max_delay(), self.max_age_bound());
 		ledger::grace(max_delay)
 	}
@@ -4125,7 +4132,8 @@ impl TrackState {
 	/// [`Self::poll_arrival`] applies: not accounted for, not dropped, within the feed, and
 	/// in a gap a later arrival opened less than `grace` ago, or that nothing later opened.
 	/// Below the first arrival only when the feed was asked to start lower, as `floor` says.
-	/// With `delivered`, only a group it lacks counts. Parks `waiter` until the gap folds.
+	/// With `delivered`, only a group it lacks counts. Parks `waiter` until the gap folds. A
+	/// copy whose wire names every start waits however long `grace` would have given up.
 	fn may_land(
 		&self,
 		groups: ops::Range<u64>,
@@ -4134,6 +4142,10 @@ impl TrackState {
 		delivered: Option<&Delivered>,
 		waiter: &kio::Waiter,
 	) -> bool {
+		let grace = match self.proven {
+			true => Duration::MAX,
+			false => grace,
+		};
 		self.find_landable(groups, floor, grace, |open, folds| {
 			if delivered.is_some_and(|delivered| delivered.covers(open)) {
 				return None;
@@ -5922,6 +5934,16 @@ impl Producer {
 		}
 	}
 
+	/// Have this received copy wait on its wire for every start rather than give a gap up once
+	/// its grace passes: a lite-07 publisher names each one, with a group, its GROUP_END, a skip,
+	/// a drop, or the track's end.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn proven(&self) {
+		if let Ok(mut state) = self.modify() {
+			state.proven = true;
+		}
+	}
+
 	/// Have this lite-07 copy say nothing of the live edge until [`Self::answer_edge`]: it is
 	/// accepted live, so its readers read what lands before its upstream says where the feed
 	/// is. See [`Subscriber::knows_edge`].
@@ -6060,8 +6082,8 @@ impl Producer {
 
 	/// Declare that this producer will never produce `groups`: none will arrive, so a reader
 	/// waiting on one moves past it, the declared end does not wait for them, and a relay
-	/// serving this track forwards the skip (lite-07 SUBSCRIBE_SKIP). Unlike a drop, it ends
-	/// no reader.
+	/// serving this track forwards the skip (a lite-07 SUBSCRIBE_SKIP). Unlike a drop,
+	/// it ends no reader.
 	///
 	/// This and [`Self::append_group`] are the only sources of a skip: a gap between created
 	/// groups says nothing, since groups may be created out of order, so only the producer
@@ -7571,11 +7593,8 @@ impl Arrivals {
 	pub(crate) fn poll(&self, waiter: &kio::Waiter) -> ArrivalRead<'_> {
 		let _ = self.state.poll(waiter, |_| Poll::<()>::Pending);
 		let state = self.state.read();
-		let max_delay = clamp_max_delay(state.subscriptions.lock().max_delay(), state.max_age_bound());
-		ArrivalRead {
-			state,
-			grace: ledger::grace(max_delay),
-		}
+		let grace = state.arrival_grace();
+		ArrivalRead { state, grace }
 	}
 }
 
@@ -7910,8 +7929,7 @@ impl Consumer {
 				return Poll::Ready(Ok(None));
 			};
 			let res = state.poll(waiter, |state| {
-				let max_delay = clamp_max_delay(state.subscriptions.lock().max_delay(), state.max_age_bound());
-				let grace = ledger::grace(max_delay);
+				let grace = state.arrival_grace();
 				let now = state.cache.pool().now_wall();
 				let res = state.poll_arrival(key, now, grace, waiter);
 				if res.is_pending() {
@@ -8059,6 +8077,14 @@ impl Consumer {
 				!state.is_closed() && state.read().may_land(groups, floor, grace, delivered, waiter)
 			})
 		})
+	}
+
+	/// Whether this copy's wire names every start; see [`Producer::proven`].
+	pub(super) fn is_proven(&self) -> bool {
+		if let Some(serving) = self.serving() {
+			return serving.is_proven();
+		}
+		self.with_state(|state| state.is_some_and(|state| state.read().proven))
 	}
 
 	/// The wall clock this track's cache judges ages by.
@@ -16073,8 +16099,8 @@ mod test {
 	}
 
 	/// A received copy places and ends an ordered read between two groups only on what its feed
-	/// proves: a hole it may still land waits, and the starts between skipped, as a GROUP's
-	/// Previous Start says, place its start at the lower group and end it.
+	/// proves: a hole it may still land waits, and the starts between skipped, as a
+	/// SUBSCRIBE_SKIP says, place its start at the lower group and end it.
 	#[cfg(feature = "async")]
 	#[test]
 	fn a_time_end_between_received_groups_ends_only_once_proven() {
@@ -19408,7 +19434,7 @@ mod test {
 		assert_eq!(start(&mut paused), None, "a group may still start in 1400..=1700");
 		assert_eq!(drain(&mut paused), Vec::<u64>::new(), "reads from the time meanwhile");
 
-		// The publisher names the pause with SUBSCRIBE_SKIP.
+		// The publisher's skip proves the pause empty.
 		producer.skip_groups(1400..2000);
 		assert_eq!(start(&mut paused), Some(1400));
 		write_group(&producer, 2000);
@@ -26225,11 +26251,11 @@ mod test {
 		assert_eq!(items(&mut ordered), ["group 3", "pending"]);
 	}
 
-	/// A skip replaces a drop still waiting for the groups below it, so the keys it names are
-	/// no gap, and the part of a drop it leaves still is.
+	/// A skip leaves a drop still waiting for the groups below it: every drop is final, and the
+	/// wire carries no skip over one.
 	#[test]
 	#[cfg(feature = "async")]
-	fn a_skip_replaces_a_buffered_gap() {
+	fn a_skip_leaves_a_buffered_gap() {
 		let producer = received_producer(None);
 		let mut ordered = producer.subscribe(Subscription::default().with_max(None)).ordered();
 		put(&producer, 0, None);
@@ -26245,12 +26271,7 @@ mod test {
 		put(&producer, 3, None);
 		assert_eq!(
 			items(&mut ordered),
-			[
-				"group 3",
-				"gap 4..5 (delivery timeout)",
-				"gap 7..8 (delivery timeout)",
-				"pending"
-			]
+			["group 3", "gap 4..8 (delivery timeout)", "pending"]
 		);
 	}
 
@@ -37036,41 +37057,6 @@ mod test {
 			.map(|(run, hole)| (run.clone(), hole.clone()))
 			.collect();
 		assert_eq!(drops, [(0..1, Hole::Skip), (2..5, Hole::Skip)]);
-	}
-
-	/// A skip after a drop already reported goes out again, replacing it, while a reader that
-	/// moved past the drop is not handed anything again; one already reported as a skip is
-	/// not reported twice, and a later drop leaves it skipped.
-	#[test]
-	#[cfg(feature = "async")]
-	fn a_skip_is_reported_over_a_reported_drop() {
-		let producer = track_producer("test", Info::timed());
-		let mut subscriber = producer.subscribe(replay().with_range(0..));
-		let waiter = kio::Waiter::noop();
-		write_group(&producer, 0);
-		producer.give_up(1..3, Hole::drop(StreamError::Cancel));
-		producer.give_up(4..5, Hole::drop(StreamError::NotFound));
-		write_group(&producer, 5);
-		assert_eq!(
-			subscriber.poll_drop(&waiter),
-			Poll::Ready((1..3, Hole::drop(StreamError::Cancel)))
-		);
-		assert_eq!(
-			subscriber.poll_drop(&waiter),
-			Poll::Ready((4..5, Hole::drop(StreamError::NotFound)))
-		);
-		assert!(subscriber.poll_drop(&waiter).is_pending());
-		assert_eq!(drain_groups(&mut subscriber), [5, 0]);
-
-		// Group 0 arrived, so the skip leaves it; both drops and the gap between become one skip.
-		producer.skip_groups(0..5);
-		assert_eq!(subscriber.poll_drop(&waiter), Poll::Ready((1..5, Hole::Skip)));
-		assert!(subscriber.poll_drop(&waiter).is_pending());
-		assert!(drain_groups(&mut subscriber).is_empty(), "nothing is delivered again");
-
-		producer.give_up(2..3, Hole::drop(StreamError::Cancel));
-		assert!(subscriber.poll_drop(&waiter).is_pending(), "the skip stands");
-		assert!(producer.state.read().skipped(2));
 	}
 
 	/// An appended first group skips every key below it, down to 0: a time-keyed track's first

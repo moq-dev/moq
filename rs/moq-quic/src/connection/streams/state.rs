@@ -1473,6 +1473,11 @@ impl StreamsState {
 		diff > 0 && (diff >= threshold || sent.saturating_sub(self.data_recvd) < threshold)
 	}
 
+	/// Whether the peer accepts RESET_STREAM_AT, so a reset still delivers its reliable prefix
+	pub(crate) fn peer_reset_stream_at(&self) -> bool {
+		self.peer_reset_stream_at
+	}
+
 	pub(crate) fn credit_stats(&self) -> CreditStats {
 		CreditStats {
 			leased: self.held,

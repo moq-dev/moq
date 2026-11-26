@@ -1103,9 +1103,13 @@ impl Copy {
 		{
 			self.since = Some(self.track.now());
 		}
-		// The copy is let go as a whole, so it waits out the widest budget any group gets.
+		// The copy is let go as a whole, so it waits out the widest budget any group gets. One
+		// whose wire names every start waits for it to, however long that takes.
 		let budget = reader.widest;
-		let grace = ledger::grace(budget);
+		let grace = match self.track.is_proven() {
+			true => Duration::MAX,
+			false => ledger::grace(budget),
+		};
 		// What is under the bound is past the reader's budget a full budget after a newer
 		// group superseded it, landed or not.
 		if self.done.is_none()
@@ -7683,34 +7687,6 @@ mod test {
 		write(&a, 1);
 		assert_eq!(drain(&mut sub, false), [1]);
 		drop(held);
-	}
-
-	/// A skip of a run the serving copy already dropped replaces the drop, so the resumed
-	/// reader reports it again, as a skip, and only once.
-	#[kio::test]
-	async fn a_resumed_reader_reports_a_skip_over_a_reported_drop() {
-		let routes = Producer::new();
-		let logical = logical(&routes);
-		let a = copy();
-		routes.serve(a.consume());
-		let mut sub = subscribe(&logical, HOUR);
-		write(&a, 0);
-		assert_eq!(drain(&mut sub, false), [0]);
-		let holes = |sub: &mut track::Subscriber| {
-			let mut runs = Vec::new();
-			while let Poll::Ready(run) = sub.poll_drop(&kio::Waiter::noop()) {
-				runs.push(run);
-			}
-			runs
-		};
-
-		a.drop_groups(1..3, StreamError::NotFound);
-		assert_eq!(holes(&mut sub), [(1..3, track::Hole::drop(StreamError::NotFound))]);
-		a.skip_groups(1..3);
-		assert_eq!(holes(&mut sub), [(1..3, track::Hole::Skip)]);
-		assert_eq!(holes(&mut sub), []);
-		write(&a, 3);
-		assert_eq!(drain(&mut sub, false), [3]);
 	}
 
 	/// The boundary group the serving copy gave up waits while a copy it replaced may still

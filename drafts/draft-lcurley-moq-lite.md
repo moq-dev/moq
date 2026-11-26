@@ -640,7 +640,7 @@ A publisher never sends a Group twice on one subscription, so a Group the subscr
 That includes a Group dropped with OLD that the subscriber still wants, such as a relay reader whose live join's `Max Age` is wider than the one the drop was judged under: no SUBSCRIBE_UPDATE reopens a drop.
 
 The subscriber closes its side (FIN) once it wants nothing more from the subscription, and the publisher then closes its side (FIN), cancelling any Group Stream still open.
-After SUBSCRIBE_END, the subscriber SHOULD close its side once its tail accounting has settled: every received Group Stream has been read to its FIN, reset, or dropped, and every start in range has arrived, been accounted for by a [GROUP_END](#group-end), been named by SUBSCRIBE_SKIP or SUBSCRIBE_DROP, or exhausted the subscriber's grace period.
+After SUBSCRIBE_END, the subscriber SHOULD close its side once its tail accounting has settled: every received Group Stream has been read to its FIN, reset, or dropped, and every start in range has arrived, been accounted for by a [GROUP_END](#group-end), or been named by SUBSCRIBE_SKIP or SUBSCRIBE_DROP.
 A publisher closing its session gracefully MUST wait for the subscriber's FIN or reset on every Subscribe Stream before closing the connection; a transport acknowledgement alone does not confirm the subscriber read the tail.
 Either endpoint MAY reset the stream at any time.
 
@@ -906,10 +906,12 @@ Both the publisher and subscriber MAY reset the stream at any time.
 This is not a fatal error and the session remains active.
 The subscriber MAY cache the error and potentially retry later.
 
-A publisher that resets a Group Stream after sending its GROUP message MUST still deliver that message: it sends RESET_STREAM_AT [reliable-reset] with a Reliable Size at the end of the GROUP message, or, toward a peer that did not negotiate it, holds the RESET_STREAM until the peer acknowledged the GROUP message.
+A publisher that resets a Group Stream after sending its GROUP message, toward a peer that negotiated RESET_STREAM_AT [reliable-reset], SHOULD send it with a Reliable Size at the end of the GROUP message.
 The GROUP message then accounts for the Group and the reset ends its readers with its error, so the publisher names the Group in no [SUBSCRIBE_DROP](#subscribe-drop).
-An acknowledgment only means the peer's transport holds the GROUP message, which a RESET_STREAM lets it discard unread, so without RESET_STREAM_AT a subscriber SHOULD read a Group Stream's GROUP message as soon as the stream arrives; one that loses it waits out its grace period for the Group.
-A publisher whose transport can do neither, such as a browser's WebTransport, names each Group whose stream it resets in a SUBSCRIBE_DROP with the reset's error instead, as it does a Group whose stream it resets before sending the GROUP message.
+A reset after a GROUP_END may cut the GROUP_END, so the publisher names the starts it accounted for again in a [SUBSCRIBE_SKIP](#subscribe-skip).
+Any other reset may lose the GROUP message, since a RESET_STREAM lets the peer's transport discard data it has not delivered, even data it acknowledged.
+So a publisher MUST name each Group whose stream it resets without a Reliable Size covering the GROUP message, such as toward a peer without RESET_STREAM_AT or over a browser's WebTransport, in a SUBSCRIBE_DROP with the reset's error, as it does a Group whose stream it resets before sending the GROUP message.
+A subscriber that read the GROUP message first already accounted for the Group, and the drop ends its readers with the reset's error.
 
 A publisher out of the peer's stream credit MAY reset the lowest-priority Group Stream with TOO_FAR_BEHIND to make room for a higher-priority one.
 That gives the Group up on the subscription, and a subscriber that wants the rest of it FETCHes the Group from the first frame it lacks (see [Positions](#positions)).
@@ -1955,9 +1957,7 @@ Every drop is final on its subscription: no SUBSCRIBE_UPDATE reopens it, and a s
 An OLD drop was judged against the `Max Age` of the live joins covering the group when the publisher gave it up, which the drop does not carry.
 A relay that received one settles with it only a reader whose own budget is no wider than the narrowest `Max Age` its subscription's live joins asked and whose Ranges include every group the relay's own Ranges name above the dropped start, since the verdict on a group was judged against the groups above it; it asks again for a reader the drop does not settle.
 
-A later [SUBSCRIBE_SKIP](#subscribe-skip) of the same starts overrides a drop, whatever its Error Code: the subscriber records them as skipped from then on, and a relay forwards the skip even over a drop it already forwarded.
-A subscriber that already ended readers on the drop does not deliver anything again: those readers stay ended.
-A drop that follows a skip of the same starts changes nothing.
+A publisher names each start once, besides the starts of a GROUP_END a reset may have cut (see [Group Stream](#group-stream)): it never skips a start it dropped, and a skip or drop of a start already named ends no further reader and delivers nothing again.
 
 For every start in the subscription's range, the publisher MUST send a Group Stream, account for it with a [GROUP_END](#group-end), or name it in SUBSCRIBE_SKIP or SUBSCRIBE_DROP.
 A GROUP_END accounts for the starts strictly between its Group Start and End.
@@ -1983,12 +1983,12 @@ SUBSCRIBE_SKIP Message {
 A skip names only starts the original publisher declared it will never produce, and it is final: no Group will ever exist at those starts, whatever the terms.
 A publisher MUST NOT later create a Group at a start it skipped, and a subscriber MUST NOT deliver a Group Stream for one.
 It carries no error and ends no reader, since there is nothing to read; a subscriber stops waiting for those starts.
-A skip overrides an earlier SUBSCRIBE_DROP of the same starts, whatever its Error Code, since never produced is the most authoritative account of a start, and a relay forwards the skip downstream even over a drop it already forwarded.
-A subscriber that already ended readers on that drop does not deliver anything again: those readers stay ended.
+A relay caches a skip as the answer for those starts and serves it to any later subscription covering them, unlike a NOT_FOUND drop, which says only that the starts are not here.
 A skip never overrides a Group that arrived, since that Group was produced; a subscriber ignores a skip for such a start, which is a protocol error the publisher made, and MAY log it.
 
 A gap between starts says nothing on its own: a publisher may create Groups out of order, or create again a start whose Group it aborted, so it never skips a start merely because a higher Group exists or the Track ended without it.
 Only the application producing the Track knows a start will never hold a Group, for example when it moves on to the next Group and so declares that it will not go back to fill the starts below.
+A GROUP_END already accounts for the starts inside a finished Group's span, so a publisher skips only the starts no GROUP_END covers: a discontinuity between a Group's End and the next Group's start, the starts below the first Group or after a Group closed without a GROUP_END, and those of a GROUP_END a reset may have cut (see [Group Stream](#group-stream)).
 A publisher SHOULD send the skip as soon as it declares it.
 A relay forwards a skip it received and never skips a start on its own: one it never received is named in SUBSCRIBE_DROP (see [SUBSCRIBE_DROP](#subscribe-drop)).
 
@@ -2355,10 +2355,11 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 - Added `Error Code` to SUBSCRIBE_END: a track can end with an error while keeping the groups below its end.
 - Restored SUBSCRIBE_DROP (type 0x2), replacing Stream Count on SUBSCRIBE_END. Every start is accounted for by a Group Stream, a GROUP_END, a SUBSCRIBE_SKIP, or a drop; a publisher SHOULD send a drop as soon as it gives a start up.
 - SUBSCRIBE_DROP's Error Code is a stream error code, which ends the dropped groups' readers, including one still arriving.
-- A publisher resets a Group Stream after its GROUP message with RESET_STREAM_AT, or a RESET_STREAM held until the GROUP message is acknowledged, and names no such Group in SUBSCRIBE_DROP; a publisher whose transport can do neither, such as a browser's WebTransport, still does.
+- A publisher that resets a Group Stream after its GROUP message with RESET_STREAM_AT, its Reliable Size covering the GROUP message, names no such Group in SUBSCRIBE_DROP. Any other reset may lose the GROUP message, so the publisher names the Group in SUBSCRIBE_DROP with the reset's error, toward a peer without RESET_STREAM_AT or over a browser's WebTransport.
 - A Group Stream the subscriber stopped (STOP_SENDING) is named in SUBSCRIBE_DROP only with EVICTED, before its GROUP message was acknowledged.
 - SUBSCRIBE_DROP and SUBSCRIBE_SKIP name a span of starts, from `Group Start` up to an exclusive `Group End`, in place of an inclusive `Group End`. An empty or inverted span is a PROTOCOL_VIOLATION.
-- Added SUBSCRIBE_SKIP (type 0x3) for starts the publisher declared it will never produce, which ends no reader and is final: a Group is never created at a skipped start. A skip overrides an earlier drop of the same starts, whatever its Error Code, without re-delivering to readers the drop already ended, and never overrides a Group that arrived. A gap between starts is not a skip, since Groups may be created out of order; a start never had and never declared skipped is named in SUBSCRIBE_DROP. SUBSCRIBE_DROP no longer names declared skips.
+- Added SUBSCRIBE_SKIP (type 0x3) for starts the publisher declared it will never produce, which ends no reader and is final: a Group is never created at a skipped start. A publisher never skips a start it dropped, but for the starts of a GROUP_END a reset may have cut, and a skip never overrides a Group that arrived. A relay caches a skip as the final answer for its starts. A reset that may cut a GROUP_END names its inner starts again with SUBSCRIBE_SKIP. A gap between starts is not a skip, since Groups may be created out of order; a start never had and never declared skipped is named in SUBSCRIBE_DROP. SUBSCRIBE_DROP no longer names declared skips.
+- A subscriber waits out no grace period: every start is accounted for, so one nothing accounts for is still owed.
 - Every SUBSCRIBE_DROP is final on its subscription, OLD included: no SUBSCRIBE_UPDATE reopens a drop, and a subscriber that still wants the Group asks for it with a SUBSCRIBE of its own.
 - SUBSCRIBE_END declares the final boundary while lower groups can still be in flight, and no longer closes the Subscribe Stream: the publisher keeps reading SUBSCRIBE_UPDATE, so an update can reach an ended Track's history.
 - A covered subscription, whose every Range has an End and whose every Group was sent or dropped, also stays open for an update; the publisher never FINs first.

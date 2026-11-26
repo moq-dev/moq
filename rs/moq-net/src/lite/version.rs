@@ -284,9 +284,10 @@ impl Version {
 		)
 	}
 
-	/// Whether a publisher resets an opened Group Stream reliably, still delivering its GROUP
-	/// header, which then accounts for the group, so no SUBSCRIBE_DROP names it. Added in
-	/// lite-07; earlier versions name every group whose stream failed in SUBSCRIBE_DROP.
+	/// Whether a publisher over a transport with RESET_STREAM_AT resets an opened Group Stream
+	/// reliably, still delivering its GROUP header, which then accounts for the group, so no
+	/// SUBSCRIBE_DROP names it. Added in lite-07; earlier versions, and any transport without
+	/// it, name every group whose stream failed in SUBSCRIBE_DROP.
 	#[cfg(feature = "async")]
 	pub(crate) fn has_reliable_reset(self) -> bool {
 		!matches!(

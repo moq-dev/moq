@@ -465,6 +465,14 @@ impl Connection {
 		self.streams.peak_stream_receive_window()
 	}
 
+	/// Whether [`send::Stream::reset_at`] still delivers its prefix to the peer's reader: the peer
+	/// accepts RESET_STREAM_AT, which only qmux-02 negotiates. Otherwise it sends a RESET_STREAM
+	/// behind the prefix, which lets the peer discard any of it not yet read. False until the
+	/// peer's parameters arrive.
+	pub fn reset_stream_at(&self) -> bool {
+		self.streams.peer_reset_stream_at()
+	}
+
 	/// Receive flow control as the receiver sees it, evictions included
 	pub fn credit_stats(&self) -> super::CreditStats {
 		self.streams.credit_stats()

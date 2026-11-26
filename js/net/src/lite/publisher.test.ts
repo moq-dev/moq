@@ -759,6 +759,8 @@ interface Reliable {
 	fin: boolean;
 	/** Every reset of a stream: the prefix it still delivers, if any, and its code. */
 	resets: { offset?: number; code?: number }[];
+	/** Whether the peer negotiated RESET_STREAM_AT, so a reset keeps its prefix for the reader. */
+	reliableReset: boolean;
 }
 
 /**
@@ -793,6 +795,7 @@ function reliableStreams(quic: MockTransport, state: Reliable) {
 		inner.closed.catch((err: unknown) => controller.error(err));
 		return Object.assign(stream, {
 			getStats: async () => ({ bytesAcknowledged: state.acked ? written : 0 }),
+			reliableReset: state.reliableReset,
 			resetAt(offset: number, reason: unknown) {
 				reset(offset, reason);
 				controller.error(reason);
@@ -844,14 +847,15 @@ async function servedSubscription(
 		// The `Subscriber Max Age` as decoded, in place of the scheduling tests' wide one.
 		maxDelay?: number | null;
 		// Give each group stream acknowledgements and a reset that still delivers a prefix, as a
-		// qmux one has, which `reliable` on the result controls and logs.
-		reliable?: boolean;
+		// qmux one has, which `reliable` on the result controls and logs. `"plain"` is a qmux peer
+		// without RESET_STREAM_AT, whose resets may lose the prefix.
+		reliable?: boolean | "plain";
 	} = {},
 ) {
 	const version = options.version ?? Version.DRAFT_05;
 	const frames = options.frames ?? ["hello"];
 	const pair = createMockTransportPair(version === Version.DRAFT_06 ? ALPN_06 : ALPN_05);
-	const reliable: Reliable = { acked: true, fin: true, resets: [] };
+	const reliable: Reliable = { acked: true, fin: true, resets: [], reliableReset: options.reliable !== "plain" };
 	if (options.reliable) reliableStreams(pair.server, reliable);
 	if (options.maxDatagramSize !== undefined)
 		Object.defineProperty(pair.server.datagrams, "maxDatagramSize", { value: options.maxDatagramSize });
@@ -1357,9 +1361,9 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 		}
 	});
 
-	// A skip replaces a drop, so a relay forwards it over a drop it already forwarded; lite-06,
-	// which names a skip as a drop, sends nothing more. Mirrors Rust.
-	test(`lite ${version}: a skip goes out over a forwarded drop`, async () => {
+	// Every drop is final, so a skip a relay learns of later goes out over no drop it already
+	// forwarded. Mirrors the Rust `a_skip_goes_out_over_no_forwarded_drop`.
+	test(`lite ${version}: a skip goes out over no forwarded drop`, async () => {
 		const sub = await servedSubscription({ version, startGroup: 0n, routed: true });
 		try {
 			sub.serve(0n);
@@ -1372,10 +1376,6 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 			expect([resp.drop.start, resp.drop.end]).toEqual([1n, 3n]);
 
 			sub.track.skipGroups(1n, 3n);
-			if (version === Version.DRAFT_07) {
-				const skip = await decodeSubscribeResponse(sub.client.reader, version);
-				expect(skip).toMatchObject({ skip: { start: 1n, end: 3n } });
-			}
 			sub.track.finish();
 			sub.track.close();
 			const holes: unknown[] = [];
@@ -1866,14 +1866,54 @@ test("lite draft-07: a stale stream sent whole resets at its header and is not d
 	}
 });
 
+// Lite-07: a stale stream reset after its GROUP_END went out may cut the GROUP_END on the wire, so
+// the starts it accounted for are named again, with a skip. Mirrors the Rust
+// `lite07_a_cut_group_end_is_named_again`.
+test("lite draft-07: a reset that cut a GROUP_END names its span's starts again", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const budget = 1_000;
+	const version = Version.DRAFT_07;
+	const sub = await servedSubscription({ version, startGroup: 0n, reliable: true });
+	try {
+		sub.serve(0n);
+		expect(await sub.servedSequence()).toBe(0n);
+		expect("start" in (await decodeSubscribeResponse(sub.client.reader, version))).toBe(true);
+		await new SubscribeUpdate({ priority: 1, remove: [0n], ranges: [within(budget)] }).encode(
+			sub.client.writer,
+			version,
+		);
+		expect("start" in (await decodeSubscribeResponse(sub.client.reader, version))).toBe(true);
+
+		// Its FIN, after the GROUP_END naming its span [1, 3), is never acknowledged.
+		sub.reliable.fin = false;
+		const group = sub.track.createGroup(1n);
+		group.writeFrame(textFrame("x", Timestamp.fromMillis(1)));
+		group.finishAt(3n);
+		expect(await sub.servedHeader()).toBe(1n);
+		await flush();
+		sub.reliable.fin = true;
+		await clock.advance(Duration.millis(budget * 10));
+		await flush();
+		expect(sub.reliable.resets).toEqual([{ offset: await headerSize(version, 1n), code: StreamCode.Old }]);
+		expect(await decodeSubscribeResponse(sub.client.reader, version)).toMatchObject({
+			skip: { start: 2n, end: 3n },
+		});
+	} finally {
+		await sub.close();
+		installed.close();
+	}
+});
+
 // Lite-07: a group stream this side resets after its header, whatever for, still delivers that header
 // where the transport can, which accounts for the group, so no drop names it. A browser's WebTransport
-// cannot, so there a drop still does. Mirrors the Rust
+// cannot, nor can a qmux peer without RESET_STREAM_AT, so there a drop still does. Mirrors the Rust
 // `lite07_a_reset_after_the_header_delivers_it_and_names_nothing`.
 test.each([
 	["a transport that resets reliably", true],
+	["a qmux peer without RESET_STREAM_AT", "plain"],
 	["a browser's WebTransport", false],
-])("lite-07 over %s: a group aborted after its header", async (_, reliable) => {
+] as const)("lite-07 over %s: a group aborted after its header", async (_, reliable) => {
 	const version = Version.DRAFT_07;
 	const sub = await servedSubscription({ version, startGroup: 0n, reliable });
 	try {
@@ -1885,8 +1925,12 @@ test.each([
 		await flush();
 		sub.track.finish();
 		sub.track.close();
-		expect(await holesToEnd(sub.client.reader)).toEqual(reliable ? [] : [["drop", 0n, 1n]]);
-		const resets = reliable ? [{ offset: await headerSize(version, 0n), code: StreamCode.Evicted }] : [];
+		expect(await holesToEnd(sub.client.reader)).toEqual(reliable === true ? [] : [["drop", 0n, 1n]]);
+		const resets = {
+			true: [{ offset: await headerSize(version, 0n), code: StreamCode.Evicted }],
+			plain: [{ code: StreamCode.Evicted }],
+			false: [],
+		}[`${reliable}`];
 		expect(sub.reliable.resets).toEqual(resets);
 	} finally {
 		await sub.close();
@@ -3837,10 +3881,10 @@ for (const routed of [false, true, "nested"] as const) {
 	});
 }
 
-// A skip a reader reports over a run it already gave up, both before the start, replaces that run,
-// so the final runs reaching up to the start are still named. Mirrors the Rust `RangeMap` of runs
-// given up before the start.
-test("lite draft-06: a skip below the start replaces the drop it covers", async () => {
+// A skip a reader reports over a run it already gave up, both before the start, goes out over none
+// of it: every report is final. The final runs reaching up to the start are still named, each as
+// it was given up. Mirrors the Rust `RangeMap` of runs given up before the start.
+test("lite draft-06: a skip below the start leaves the drop it covers", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_06, maxDelay: 100 });
 	try {
 		hooks.dropTrackGroups(sub.track, 5n, 6n, { error: new StreamError(StreamCode.NotFound) });
@@ -3851,9 +3895,17 @@ test("lite draft-06: a skip below the start replaces the drop it covers", async 
 		const response = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
 		if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
 		expect(response.start.start).toBe(8n);
-		const drop = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
-		if (!("drop" in drop)) throw new Error("expected SUBSCRIBE_DROP");
-		expect([drop.drop.start, drop.drop.end]).toEqual([3n, 8n]);
+		const drops: bigint[][] = [];
+		for (let i = 0; i < 3; i++) {
+			const drop = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
+			if (!("drop" in drop)) throw new Error("expected SUBSCRIBE_DROP");
+			drops.push([drop.drop.start, drop.drop.end]);
+		}
+		expect(drops).toEqual([
+			[3n, 5n],
+			[5n, 6n],
+			[6n, 8n],
+		]);
 	} finally {
 		await sub.close();
 	}
