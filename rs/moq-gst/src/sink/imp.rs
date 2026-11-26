@@ -1368,7 +1368,7 @@ mod tests {
 				.wall
 				.place(
 					&gst::Buffer::new(),
-					Duration::ZERO,
+					gst::Signed::Positive(gst::ClockTime::ZERO),
 					super::super::wall::Sample {
 						running: Some(gst::ClockTime::ZERO),
 						wall: kio::clock::Wall::UNIX_EPOCH + Duration::from_secs(1_735_689_600),

@@ -845,7 +845,8 @@ impl Pad {
 	/// Place the run on the wall clock before its first valid timestamp can reach an importer.
 	///
 	/// `pts` is the one `buffer` publishes at ([`timeline_pts`](Self::timeline_pts)), so the
-	/// placement lands where the published timestamps do and is decided on the same timestamp.
+	/// placement is decided on the timestamp that publishes. It places on the buffer's own PTS,
+	/// which its reference timestamp describes and every pad's running time shares.
 	pub(super) fn place_wall(
 		&self,
 		buffer: &gst::BufferRef,
@@ -864,9 +865,17 @@ impl Pad {
 		} else {
 			self.frame_timestamp(pts)
 		};
-		if let Ok(micros) = timestamp {
-			wall.place(buffer, Duration::from_micros(micros), sample)?;
-		}
+		let Ok(micros) = timestamp else {
+			return Ok(());
+		};
+		let running = match (self.segment.as_ref(), buffer.pts()) {
+			(Some(segment), Some(own)) if pts.is_some() => segment
+				.to_running_time_full(own)
+				.context("the buffer's PTS has no running time")?,
+			// Unstamped opaque data runs at the pipeline's current running time.
+			_ => gst::Signed::Positive(gst::ClockTime::from_useconds(micros)),
+		};
+		wall.place(buffer, running, sample)?;
 		Ok(())
 	}
 
@@ -1448,8 +1457,9 @@ mod tests {
 	}
 
 	/// An Opus packet stamped just before the segment starts publishes inside it once its pre-skip
-	/// moves it onto hang's timeline, so the run is placed on that published timestamp: the first
-	/// packet places it rather than anchoring it on arrival, and the next one's placement holds.
+	/// moves it onto hang's timeline, so it places the run rather than anchoring it on arrival, and
+	/// the next one's placement holds. Its reference timestamp describes its own PTS, which every
+	/// pad's running time shares, so the run's zero lands by that, not by the pre-skip.
 	#[test]
 	fn an_opus_run_is_placed_on_its_published_timestamp() {
 		gst::init().unwrap();
@@ -1470,14 +1480,34 @@ mod tests {
 			running: Some(gst::ClockTime::ZERO),
 			wall: kio::clock::wall(),
 		};
+		// The first packet's own PTS, 3 ms before the segment, was captured a second ago.
+		let captured = kio::clock::wall() - Duration::from_secs(1);
 		for micros in [997_000, 1_017_000] {
 			let mut buffer = gst::Buffer::from_slice([0xf8]);
-			buffer.get_mut().unwrap().set_pts(gst::ClockTime::from_useconds(micros));
+			let b = buffer.get_mut().unwrap();
+			b.set_pts(gst::ClockTime::from_useconds(micros));
+			gst::ReferenceTimestampMeta::add(
+				b,
+				&gst::Caps::builder("timestamp/x-unix").build(),
+				gst::ClockTime::from_nseconds(
+					(captured + Duration::from_micros(micros - 997_000))
+						.saturating_duration_since(kio::clock::Wall::UNIX_EPOCH)
+						.as_nanos() as u64,
+				),
+				None,
+			);
 			let pts = pad.timeline_pts(&buffer).unwrap();
 			pad.place_wall(&buffer, pts, sample).unwrap();
 			let pushed = pad.push_buffer(Bytes::from_static(&[0xf8]), pts, None, None);
 			assert_eq!(pushed, Ok(PushOutcome::Published), "the packet at {micros} µs");
 		}
+		let zero = catalog.clock().wall_clock(moq_net::Timestamp::ZERO).unwrap();
+		let expected = captured + Duration::from_millis(3);
+		let error = zero.saturating_duration_since(expected) + expected.saturating_duration_since(zero);
+		assert!(
+			error < Duration::from_micros(1),
+			"running-time zero landed {error:?} off"
+		);
 	}
 
 	/// A run on a catalog whose clock was fixed before it, as by `Config::with_clock`, shifts its
