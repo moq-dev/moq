@@ -67,7 +67,7 @@ moq-stats = { workspace = true, features = ["async"] }
 # `relay` offers the lite-07 `ietf` extension on the relay's own links.
 moq-tokio = { workspace = true, features = ["relay"] }
 # The /metrics text encoder; the protobuf features stay off.
-prometheus-client = "0.25.2"
+prometheus-client = "0.26.0"
 qmux = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true, features = ["rustls-no-provider"] }
