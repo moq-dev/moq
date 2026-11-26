@@ -1751,6 +1751,7 @@ impl GroupRecv {
 				// mid-group by a Position End marks the copy back-cut so switch-back fetches the
 				// remaining frames rather than reusing the truncated slice.
 				let capped = end.is_none()
+					&& !ingest.saw_end_object()
 					&& self.subscriber.version.has_group_end()
 					&& self
 						.subscriber
@@ -1891,6 +1892,11 @@ impl FrameIngest {
 
 	/// The header of the frame whose fields were just read, checking the object record that
 	/// preceded it under the `ietf` extension.
+	/// Whether an explicit IETF `END_OF_GROUP` record completed this stream.
+	fn saw_end_object(&self) -> bool {
+		matches!(self.phase, IngestPhase::Ended)
+	}
+
 	fn header(
 		&mut self,
 		group: &mut crate::recv::Group,

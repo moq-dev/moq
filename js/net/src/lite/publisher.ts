@@ -3187,28 +3187,30 @@ export class Publisher {
 			let whole = false;
 
 			// Kept across loop iterations so waking on a Position End change never starts a
-			// second concurrent readGroupFrame().
+			// second concurrent readGroupFrame(), and stream.closed is derived once per stream.
 			let pendingRead: ReturnType<typeof hooks.readGroupFrame> | undefined;
+			const closed = stream.closed.then(() => undefined);
 			const stopWake = Symbol("stop-wake");
+			// Track the next unsent frame index separately from `hooks.groupIndex(group)`,
+			// which an in-flight `pendingRead` may advance before its frame is consumed.
+			let nextUnsent = Math.max(hooks.groupIndex(group), startFrame);
 
 			for (;;) {
 				// Lite-07: reaching a Position end closes the stream cleanly without GROUP_END
 				// (a slice, not the whole group) instead of parking open. If the group itself
-				// already finished at or before `nextIndex`, let the read below observe EOF so
+				// already finished at or before `nextUnsent`, let the read below observe EOF so
 				// GROUP_END is still sent.
-				const nextIndex = hooks.groupIndex(group);
 				const stopBefore = stops?.at.peek().get(group.start);
 				const settled = hooks.groupSettledFrames(group);
 				if (
-					((stopBefore !== undefined && nextIndex >= stopBefore) ||
-						(endFrame !== undefined && nextIndex > endFrame)) &&
-					(settled === undefined || settled > nextIndex)
+					((stopBefore !== undefined && nextUnsent >= stopBefore) ||
+						(endFrame !== undefined && nextUnsent > endFrame)) &&
+					(settled === undefined || settled > nextUnsent)
 				) {
 					pendingRead?.catch(() => {});
 					break;
 				}
 				pendingRead ??= hooks.readGroupFrame(group, compress);
-				const closed = stream.closed.then(() => undefined);
 				let disposeStop: Dispose | undefined;
 				let outcome: Awaited<ReturnType<typeof hooks.readGroupFrame>> | undefined | typeof stopWake;
 				try {
@@ -3240,11 +3242,15 @@ export class Publisher {
 				if (read.index + 1 >= startFrame) reached = true;
 				// Frames below the requested start were excluded, and the receiver
 				// numbers what it gets from `startFrame`.
-				if (read.index < startFrame) continue;
+				if (read.index < startFrame) {
+					nextUnsent = Math.max(nextUnsent, read.index + 1);
+					continue;
+				}
 				const stop = stops?.at.peek().get(group.start);
 				if ((endFrame !== undefined && read.index > endFrame) || (stop !== undefined && read.index >= stop)) {
 					break;
 				}
+				nextUnsent = read.index + 1;
 
 				let delta: bigint | undefined;
 				if (stamp !== undefined) {

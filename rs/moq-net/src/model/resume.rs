@@ -3893,8 +3893,12 @@ impl Recover {
 	pub(super) fn wants(&mut self, cause: &Cause, waiter: &kio::Waiter) -> bool {
 		match cause {
 			Cause::Failed(err) if self.undelivered(err) => return true,
-			Cause::Stalled | Cause::Closed | Cause::Cut if copy_failed(&self.copy) => return true,
-			Cause::Closed | Cause::Cut if self.route.consumer().read().staged.is_some() => return true,
+			// An explicit Position End back-cut always wants recovery once: even if a
+			// Stalled poll after switch-back advanced `self.generation` before the old
+			// bare FIN arrived, the copy will not deliver frames past `range_end`.
+			Cause::Cut => return true,
+			Cause::Stalled | Cause::Closed if copy_failed(&self.copy) => return true,
+			Cause::Closed if self.route.consumer().read().staged.is_some() => return true,
 			_ => {}
 		}
 		while self
@@ -3903,11 +3907,10 @@ impl Recover {
 			.is_ready()
 		{
 			// A route that returned serves the copy being read again, which the reader reuses
-			// for a stalled group. A group that closed short or was cut by a Position End cap
-			// while another route served will not resume on the same subscription, so recover
-			// from another retained copy or fetch the remaining frames from the serving route.
+			// for a stalled group. A group that closed short while another route served will
+			// not resume on the same subscription, so recover from the serving route.
 			let route = self.route.consumer().read();
-			if matches!(cause, Cause::Closed | Cause::Cut)
+			if matches!(cause, Cause::Closed)
 				|| route.phase.terminal()
 				|| !route.copy.as_ref().is_some_and(|copy| copy.same_channel(&self.copy))
 			{
@@ -4072,17 +4075,17 @@ impl Recover {
 			};
 			if generation == self.generation {
 				match cause {
-					// The copy being read still serves: only a failure asks it again.
+					// The copy being read still serves: only a failure or an explicit
+					// Position End cut asks it again for the missing suffix.
 					Cause::Stalled => return Poll::Pending,
 					// Its route failed, or the front stages the copy to replace it, so that one
 					// may hold more, unless none will come.
-					Cause::Closed | Cause::Cut if (copy_failed(&self.copy) || staged.is_some()) && !done => {
+					Cause::Closed if (copy_failed(&self.copy) || staged.is_some()) && !done => {
 						return Poll::Pending;
 					}
-					// It serves on with no front to replace it, so its close/cut stands.
+					// It serves on with no front to replace it, so its close stands.
 					Cause::Closed => return Poll::Ready(Err(Error::NotFound)),
-					Cause::Cut => return Poll::Ready(Err(Error::Evicted)),
-					Cause::Failed(_) => {}
+					Cause::Cut | Cause::Failed(_) => {}
 				}
 			}
 			let res = self.poll_serving(generation, &serving, index, settled, withdrawn.is_none(), waiter);

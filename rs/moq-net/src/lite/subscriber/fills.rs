@@ -145,8 +145,12 @@ pub(super) struct RangeFills {
 	skipped: RangeMap<u64, Range<u64>>,
 	/// Groups dropped as stale, which a [`Recovery`] has yet to ask for.
 	recover: RangeSet<u64>,
-	/// Groups a [`Recovery`] asks for now, which the subscription leaves out meanwhile.
+	/// Groups a [`Recovery`] asks for now from frame 0, which the subscription leaves out
+	/// meanwhile.
 	recovering: RangeSet<u64>,
+	/// First groups of active mid-group suffix recoveries (`frame_start > 0`) that are not
+	/// covered from frame 0, mapped to the lowest active recovery starting frame.
+	recovering_starts: BTreeMap<u64, u64>,
 	/// Groups already recovered once, which a second stale drop refuses.
 	recovered: RangeSet<u64>,
 	/// The subscriptions recovering them.
@@ -238,15 +242,43 @@ impl RangeFills {
 	}
 
 	/// What the recoveries still out cover: each its groups less what it refused and handed
-	/// over.
+	/// over. A suffix recovery (`frame_start > 0`) covers its first group only for fills
+	/// starting at or past `frame_start`, never suppressing a whole-group fill from frame 0.
 	fn cover(&mut self) {
 		let mut still = RangeSet::new();
+		let mut starts = BTreeMap::<u64, u64>::new();
 		for recovery in &self.recoveries {
 			for gap in recovery.released.gaps(&recovery.groups) {
-				still.insert(gap);
+				if recovery.frame_start > 0 && gap.start == recovery.groups.start {
+					starts
+						.entry(gap.start)
+						.and_modify(|current| *current = (*current).min(recovery.frame_start))
+						.or_insert(recovery.frame_start);
+					let tail = gap.start.saturating_add(1)..gap.end;
+					if !tail.is_empty() {
+						still.insert(tail);
+					}
+				} else {
+					still.insert(gap);
+				}
 			}
 		}
+		starts.retain(|group, _| !still.contains(group));
 		self.recovering = still;
+		self.recovering_starts = starts;
+	}
+
+	/// Trim any leading group already covered by an active suffix recovery at or before `frame`.
+	fn trim_suffix_covered(&self, gap: Range<u64>, frame: u64) -> Option<Range<u64>> {
+		let covered = self
+			.recovering_starts
+			.get(&gap.start)
+			.is_some_and(|&rec_frame| rec_frame <= frame);
+		if !covered {
+			return Some(gap);
+		}
+		let tail = gap.start.saturating_add(1)..gap.end;
+		(!tail.is_empty()).then_some(tail)
 	}
 
 	/// Take the refusals a recovery made since the last poll, once: each answers the fills
@@ -369,8 +401,14 @@ impl RangeFills {
 			// to hold again: as `unholdable` says of the groups whose eviction the track still
 			// records, kept with the fill so neither a grace nor a debt forgets it.
 			let mut unfit = RangeSet::new();
+			let mut asked_starts = BTreeMap::<u64, u64>::new();
 			for fill in self.held.iter().filter(|fill| !fill.is_paced()) {
 				if let Some(run) = fill.next_run() {
+					let frame = fill.frame_start(run.start);
+					asked_starts
+						.entry(run.start)
+						.and_modify(|current| *current = (*current).min(frame))
+						.or_insert(frame);
 					asked.insert(run);
 				}
 				unfit.extend(fill.unfit());
@@ -393,7 +431,10 @@ impl RangeFills {
 								}
 							}
 							for fresh in self.refused.gaps(&owed).collect::<Vec<_>>() {
-								self.recover.insert(fresh);
+								let frame = asked_starts.get(&fresh.start).copied().unwrap_or(0);
+								if let Some(fresh) = self.trim_suffix_covered(fresh, frame) {
+									self.recover.insert(fresh);
+								}
 							}
 						}
 					}
@@ -529,6 +570,14 @@ impl RangeFills {
 				};
 				for run in asked {
 					for gap in waiting.gaps(&run) {
+						let frame = if plain && serve.subscriber.version.has_ranges() {
+							fill.frame_start(gap.start)
+						} else {
+							0
+						};
+						let Some(gap) = this.trim_suffix_covered(gap, frame) else {
+							continue;
+						};
 						let frame = if plain && serve.subscriber.version.has_ranges() {
 							fill.frame_start(gap.start)
 						} else {
@@ -725,6 +774,8 @@ pub(super) struct Recovery {
 	serving: track::Producer,
 	id: u64,
 	groups: Range<u64>,
+	/// Starting frame requested for `groups.start` (`0` for whole-group recoveries).
+	frame_start: u64,
 	/// Whether its range is final. Before lite-07 the subscription proves only the keys below
 	/// its start, so it asks open, then caps once at the first group that arrives.
 	capped: bool,
@@ -794,7 +845,15 @@ impl Recovery {
 			start: Some(lite::Anchor::Absolute(start_pos)),
 			end: end.map(|end| lite::Anchor::Absolute(Position::group(end))),
 		}];
-		Self::open(serve, serving, groups, subscription, ranges, !one_start)
+		Self::open(
+			serve,
+			serving,
+			groups,
+			start_pos.frame,
+			subscription,
+			ranges,
+			!one_start,
+		)
 	}
 
 	/// Lite-07: a one-shot time-containment probe `[Time(time), Time(time)]` on a finished copy.
@@ -811,13 +870,14 @@ impl Recovery {
 			start: Some(lite::Anchor::Time(time)),
 			end: Some(lite::Anchor::Time(time)),
 		}];
-		Self::open(serve, serving, groups, subscription, ranges, true)
+		Self::open(serve, serving, groups, 0, subscription, ranges, true)
 	}
 
 	fn open(
 		serve: &TrackServe,
 		serving: &track::Producer,
 		groups: Range<u64>,
+		frame_start: u64,
 		subscription: Subscription,
 		ranges: Vec<lite::Range>,
 		capped: bool,
@@ -827,7 +887,7 @@ impl Recovery {
 			producer: serving.clone(),
 			framing: lite::Framing::new(serving.info(), serve.subscriber.version),
 		};
-		tracing::debug!(track = %serve.name, ?groups, one_shot, "recovering groups");
+		tracing::debug!(track = %serve.name, ?groups, frame_start, one_shot, "recovering groups");
 		// No max age: the groups it recovers are the ones a max age dropped.
 		let request = super::Request {
 			subscription,
@@ -841,6 +901,7 @@ impl Recovery {
 			serving: serving.clone(),
 			id: establish.id,
 			groups,
+			frame_start,
 			capped,
 			one_shot,
 			stall: None,
