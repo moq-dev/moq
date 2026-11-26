@@ -152,8 +152,11 @@ pub(crate) struct Row {
 	pub groups: super::grid::Groups,
 	/// Presentation duration.
 	pub duration: Duration,
-	/// The segment's starting presentation timestamp.
+	/// Where its `EXTINF` starts on the grid, which numbers and times the playlist.
 	pub pts: moq_net::Timestamp,
+	/// Where its media starts: its first group's first sample, which its CMAF `tfdt` carries, and
+	/// so what its DASH `S@t` and wall-clock time name. Its line for a gap.
+	pub media: moq_net::Timestamp,
 	/// The segment's ending presentation timestamp (`pts + duration`), for window eviction.
 	pub end: Duration,
 	/// The rendition's discontinuity sequence for this segment.
@@ -387,16 +390,16 @@ impl Producer {
 			.cloned()
 	}
 
-	/// The number of the segment whose `pts` is exactly `time` milliseconds (DASH `$Time$`
+	/// The number of the segment whose media starts exactly at `time` milliseconds (DASH `$Time$`
 	/// addressing), or `None` when no listed row starts there. Exact match is safe because the
-	/// rendered `S@t` and this lookup convert the same [`Row::pts`] the same way. A stop is never
+	/// rendered `S@t` and this lookup convert the same [`Row::media`] the same way. A stop is never
 	/// rendered, so it never answers, even where content resumes at its pts.
 	pub fn segment_number_at(&self, tag: &str, time: u64) -> Option<u64> {
 		let state = self.state.read();
 		state
 			.rows
 			.iter()
-			.find(|row| !row.stop && row.pts.as_millis() == Ok(time as u128) && &*row.tag == tag)
+			.find(|row| !row.stop && row.media.as_millis() == Ok(time as u128) && &*row.tag == tag)
 			.map(|row| row.segment)
 	}
 
@@ -513,7 +516,7 @@ pub struct Segment {
 	pub media: Option<Bytes>,
 	/// Presentation duration.
 	pub duration: Duration,
-	/// Wall-clock start time, when the catalog advertises its broadcast clock.
+	/// Wall-clock time of its first sample, when the catalog advertises its broadcast clock.
 	pub program_date_time: Option<Wall>,
 	/// The absolute discontinuity sequence within this broadcaster.
 	///
@@ -611,7 +614,7 @@ impl Consumer {
 			segment: row.segment,
 			bytes,
 			duration: row.duration,
-			program_date_time: self.rendition.wall_clock(row.pts),
+			program_date_time: self.rendition.wall_clock(row.media),
 			discontinuity: row.discontinuity,
 		})))
 	}
@@ -669,7 +672,7 @@ impl Consumer {
 			segment: row.segment,
 			media,
 			duration: row.duration,
-			program_date_time: self.rendition.wall_clock(row.pts),
+			program_date_time: self.rendition.wall_clock(row.media),
 			discontinuity: row.discontinuity,
 		})))
 	}
@@ -750,6 +753,7 @@ mod tests {
 			groups: super::super::grid::Groups::one(group),
 			duration: Duration::from_millis(duration_ms),
 			pts,
+			media: pts,
 			end: Duration::try_from(pts).unwrap() + Duration::from_millis(duration_ms),
 			discontinuity: 0,
 			stop: false,
