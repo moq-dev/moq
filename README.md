@@ -9,151 +9,164 @@
 
 # Media over QUIC
 
-[Media over QUIC](https://moq.dev) (MoQ) is a next-generation live media protocol that provides **real-time latency** at **massive scale**.
-Built using modern web technologies, MoQ delivers WebRTC-like latency without the constraints of WebRTC.
-The core networking is delegated to a QUIC library but the rest is in application-space, giving you full control over your media pipeline.
+[Media over QUIC](https://moq.dev) (MoQ) is an open-source live media and real-time data stack built on QUIC and WebTransport. One protocol replaces WebRTC, HLS/DASH, RTMP/SRT, and custom WebSocket fan-out, with **sub-second latency** at **CDN scale**.
 
-**Key Features:**
+- **Sub-second, no buffering spinners**: every group of frames rides its own QUIC stream. Under congestion, old video gets skipped while audio and fresh frames sail through.
+- **CDN scale, not SFU pain**: relays cache and fan out to millions of viewers without parsing media. No SDP, no ICE, no TURN; just dial a URL.
+- **Pull, not push**: nothing leaves a publisher until someone subscribes. Have 1,000 cameras? Only encode and upload the ones anyone is actually watching.
+- **Per-viewer latency budgets**: 100 ms for a live call or remote operator, 10 s for bad Wi-Fi, or a pristine archive recording, all from the same broadcast and relay.
+- **Media plus any live data**: video, audio, chat, AI transcripts, game inputs, and telemetry share one connection with explicit priorities.
+- **Every platform, migrate one piece at a time**: Rust core, from-scratch TypeScript for browsers (WebTransport + WebCodecs with automatic WebSocket fallback), 7 native language bindings, and drop-in gateways for WebRTC, HLS/DASH, RTMP, SRT, and RTSP.
 
-- 🚀 **Real-time latency** using QUIC for prioritization and partial reliability.
-- 📈 **Massive scale** designed for fan-out and supports cross-region clustering.
-- 🌐 **Modern Web** using [WebTransport](https://developer.mozilla.org/en-US/docs/Web/API/WebTransport_API), [WebCodecs](https://developer.mozilla.org/en-US/docs/Web/API/WebCodecs_API), and [WebAudio](https://developer.mozilla.org/en-US/docs/Web/API/Web_Audio_API).
-- 🎯 **Multi-language** with both Rust (native) and TypeScript (web) libraries.
-- 🔧 **Generic** for any live data, not just media. Includes text chat as both an example and a core feature.
+> **Standards & CDNs:** This repo implements [moq-lite](https://doc.moq.dev/concept/moq-lite) and [hang](https://doc.moq.dev/concept/hang) with compatibility for the IETF [moq-transport](https://doc.moq.dev/concept/standard) drafts. Self-host [`moq-relay`](rs/moq-relay) anywhere, use a managed CDN like [moq.pro](https://moq.pro) or [Cloudflare](https://moq.dev/blog/first-cdn), or mix both on the same broadcast.
 
-> **Note:** This project implements [moq-lite](https://doc.moq.dev/concept/moq-lite), a forwards-compatible subset of the IETF [moq-transport](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/) draft. moq-lite works with any moq-transport CDN (ex. [Cloudflare](https://moq.dev/blog/first-cdn/)). The focus is narrower, prioritizing simplicity and deployability.
+## Try It Live
 
-## Getting Started
+All of the hosted demos at **[moq.dev/demo](https://moq.dev/demo)** run on the open-source code in this repository:
+
+- **[Voice AI](https://moq.dev/voice)**: talk to a Pipecat voice agent over MoQ with faster-than-real-time TTS bursts, instant barge-in, and live transcripts (no WebRTC).
+- **[CARLA Teleoperation](https://moq.dev/carla)**: steer simulated trucks in real time with on-demand cameras, vehicle controls, and telemetry on one connection.
+- **[MoQ Boy](https://moq.dev/boy)**: crowd-controlled Game Boy (video down, button inputs up, sleeps when nobody is watching).
+- **[hang.live](https://hang.live)**: multi-party video conferencing with spatial audio and chat, built without WebRTC.
+- **[Watch](https://moq.dev/watch?project=demo\&name=bbb.hang)** & **[Publish](https://moq.dev/publish)**: browser playback (`<moq-watch>`) and webcam publishing (`<moq-publish>`).
+
+Want a real-world story? See how [autonomous boats run MoQ over cellular and Starlink](https://moq.dev/robotics), or read the [blog](https://moq.dev/blog) ([Replacing WebRTC](https://moq.dev/blog/replacing-webrtc), [Replacing HLS/DASH](https://moq.dev/blog/replacing-hls-dash), [On a Boat](https://moq.dev/blog/on-a-boat)).
+
+### Quick Start
 
 Full documentation lives at **[doc.moq.dev](https://doc.moq.dev)**.
 
-| I want to | Start here |
-| --- | --- |
-| Try MoQ | [Local demo](https://doc.moq.dev/setup/) or [live web demo](https://moq.dev/) |
-| Add streaming to an app | [Choose a library](https://doc.moq.dev/lib/) and [find an example](https://doc.moq.dev/setup/examples) |
-| Connect existing media tools | [CLI, OBS, GStreamer, and gateways](https://doc.moq.dev/bin/) |
-| Run a relay | [Install](https://doc.moq.dev/setup/install), then [production setup](https://doc.moq.dev/setup/prod) |
-| Understand the design | [Concepts](https://doc.moq.dev/concept/) and [protocol drafts](https://doc.moq.dev/draft/) |
-| Diagnose a problem | [Troubleshooting](https://doc.moq.dev/setup/troubleshooting) and [inspect a relay](https://doc.moq.dev/bin/inspect) |
-| Change this repository | [Repository map](doc/setup/repository.md), [development guide](doc/setup/dev.md), and [contributing](CONTRIBUTING.md) |
-| Work with a coding agent | [Agent setup](doc/setup/agent.md); repository instructions start in [AGENTS.md](AGENTS.md) |
-
-The quickest way to see it in action (requires [Nix](https://nixos.org/download.html) with [flakes](https://wiki.nixos.org/wiki/Flakes)):
+Install the `moq` CLI (macOS & Linux):
 
 ```sh
-# Runs a relay, demo media, and the web server
+curl -fsSL https://moq.sh | sh
+```
+
+Also available via Homebrew, apt, dnf, winget, Docker, Cargo, and Nix; see the [install guide](https://doc.moq.dev/setup/install).
+
+Or run the full local demo stack (relay, test stream, and web UI) from this checkout using [Nix](https://nixos.org/download.html) with [flakes](https://wiki.nixos.org/wiki/Flakes):
+
+```sh
 nix develop -c just
 ```
 
-It opens the watch, publish, and stats pages in your browser, or visit <http://localhost:5173/watch.html>. Don't have Nix? See the [demo guide](https://doc.moq.dev/setup/) for manual setup.
+It opens the watch, publish, and stats pages in your browser (or visit <http://localhost:5173/watch.html>). No Nix? See the [quick start guide](https://doc.moq.dev/setup/).
+
+## What You Can Build
+
+Pick your use case to jump straight to the docs, tools, and source folders:
+
+| Use case | Replaces | Tools & libraries in this repo | Docs |
+| --- | --- | --- | --- |
+| **Conferencing & rooms** | WebRTC, SFUs | [`@moq/room`](js/room), [`@moq/publish`](js/publish), [`@moq/watch`](js/watch), [`moq-webrtc`](rs/moq-webrtc), [`moq-relay`](rs/moq-relay) | [vs WebRTC](https://doc.moq.dev/concept/use-case/conferencing) |
+| **Voice & video AI** | WebRTC, WebSockets | [Python `moq-rs`](py/moq-rs), [`@moq/watch`](js/watch), [`@moq/publish`](js/publish), [`@moq/json`](js/json) | [MoQ for AI](https://doc.moq.dev/concept/use-case/ai) |
+| **Live streaming & distribution** | HLS, DASH | [`moq-relay`](rs/moq-relay), [`@moq/watch`](js/watch), [`moq-hls`](rs/moq-hls), [`moq-transcode`](rs/moq-transcode), [`moq-archive`](rs/moq-archive) | [vs HLS/DASH](https://doc.moq.dev/concept/use-case/distribution) |
+| **Contribution & ingest** | RTMP, SRT, RTSP, WHIP | [OBS plugin](cpp/obs), [GStreamer](rs/moq-gst), [`moq-cli`](rs/moq-cli), [`moq-rtmp`](rs/moq-rtmp), [`moq-srt`](rs/moq-srt), [`moq-rtsp`](rs/moq-rtsp) | [vs RTMP/SRT](https://doc.moq.dev/concept/use-case/contribution) |
+| **Robotics & teleoperation** | WebRTC, raw RTP | [`moq-net`](rs/moq-net), [`moq-video`](rs/moq-video), [`moq-audio`](rs/moq-audio), [`moq-json`](rs/moq-json), [C++](cpp/moq), [Python](py/moq-rs) | [Concepts](https://doc.moq.dev/concept/) |
+| **Interactive & real-time data** | WebSockets, DataChannels | [`moq-net`](rs/moq-net), [`@moq/net`](js/net), [`moq-json`](rs/moq-json), [`@moq/json`](js/json) | [moq-lite](https://doc.moq.dev/concept/moq-lite) |
+
+## What's in This Repository
+
+### Applications, Plugins & Gateways
+
+Ready-to-run binaries and plugins ([docs](https://doc.moq.dev/bin/)):
+
+- **[`moq-relay`](rs/moq-relay)** ([docs](https://doc.moq.dev/bin/relay/)): scalable relay server with RAM caching, JWT auth, multi-region clustering, HTTP/metrics, and zero-downtime upgrades.
+- **[`moq-cli`](rs/moq-cli)** (`moq`, [docs](https://doc.moq.dev/bin/cli)): all-in-one CLI media router to pipe FFmpeg, capture cameras and screens natively, play in a window, transcode ABR ladders on demand, record to S3/MP4, and [inspect relays](https://doc.moq.dev/bin/inspect).
+- **Plugins & studio**: [OBS Studio plugin](cpp/obs) ([docs](https://doc.moq.dev/bin/obs)), [GStreamer plugin](rs/moq-gst) ([docs](https://doc.moq.dev/bin/gstreamer)), and [moq-studio](https://github.com/moq-dev/studio) (native GPU streaming studio).
+- **Drop-in gateways**: bridge legacy stacks via `moq import` / `moq export` or embed the Rust crates directly: [WebRTC (WHIP/WHEP)](rs/moq-webrtc) ([docs](https://doc.moq.dev/bin/webrtc)), [HLS/DASH](rs/moq-hls) ([docs](https://doc.moq.dev/bin/hls)), [RTMP/E-RTMP](rs/moq-rtmp) ([docs](https://doc.moq.dev/bin/rtmp)), [SRT](rs/moq-srt) ([docs](https://doc.moq.dev/bin/srt)), [RTSP](rs/moq-rtsp), and [MPEG-TS](rs/moq-mux) ([docs](https://doc.moq.dev/bin/ts)).
+
+### Libraries & Bindings
+
+Two primary implementations (Rust and TypeScript) plus 7 native bindings, all speaking the same wire protocol ([library guide](https://doc.moq.dev/lib/)):
+
+| Layer | Rust ([`rs/`](rs), [docs](https://doc.moq.dev/lib/rs/)) | TypeScript ([`js/`](js), [docs](https://doc.moq.dev/lib/js/)) |
+| --- | --- | --- |
+| Live pub/sub | [`moq-net`](rs/moq-net), [`moq-tokio`](rs/moq-tokio) | [`@moq/net`](js/net) |
+| Media catalog & containers | [`hang`](rs/hang), [`moq-mux`](rs/moq-mux) | [`@moq/hang`](js/hang) |
+| Capture, codecs & playback | [`moq-video`](rs/moq-video), [`moq-audio`](rs/moq-audio), [`moq-transcode`](rs/moq-transcode) | [`@moq/publish`](js/publish), [`@moq/watch`](js/watch) |
+| Rooms, JSON state & archives | [`moq-json`](rs/moq-json), [`moq-archive`](rs/moq-archive) | [`@moq/room`](js/room), [`@moq/json`](js/json) |
+| Authorization | [`moq-auth`](rs/moq-auth) | [`@moq/auth`](js/auth) |
+
+**Native language bindings** (wrapping [`rs/moq-ffi`](rs/moq-ffi) via UniFFI, plus a plain C ABI; see [Layers](https://doc.moq.dev/lib/layers)):
+[Swift](swift) ([docs](https://doc.moq.dev/lib/swift/)) ·
+[Kotlin](kt) ([docs](https://doc.moq.dev/lib/kt/)) ·
+[Python](py/moq-rs) ([docs](https://doc.moq.dev/lib/py/)) ·
+[Go](go) ([docs](https://doc.moq.dev/lib/go/)) ·
+[Dart](dart) ([docs](https://doc.moq.dev/lib/dart/)) ·
+[C++](cpp/moq) ([docs](https://doc.moq.dev/lib/cpp/)) ·
+[C (`libmoq`)](rs/libmoq) ([docs](https://doc.moq.dev/lib/c/))
 
 ## Architecture
 
-MoQ is designed as a layered protocol stack.
+MoQ is a small stack of independent layers.
 
-**Rule 1**: The CDN MUST NOT know anything about your application, media codecs, or even the available tracks.
-Everything could be fully E2EE and the CDN wouldn't care. **No business logic allowed**.
+**Rule 1**: the relay MUST NOT know anything about your application, media codecs, or even the available tracks. Everything can be end-to-end encrypted and the CDN will not care. **No business logic in the relay.**
 
-Instead, [`moq-relay`](rs/moq-relay) operates on rules encoded in the [`moq-net`](https://docs.rs/moq-net) header.
-These rules are based on video encoding but are generic enough to be used for any live data.
-The goal is to keep the server as dumb as possible while supporting a wide range of use-cases.
+Instead, [`moq-relay`](rs/moq-relay) routes generic live pub/sub ([`moq-lite`](https://doc.moq.dev/concept/moq-lite)) made of broadcasts, tracks, groups, and frames. Media logic lives above it in [`hang`](https://doc.moq.dev/concept/hang), which only clients and media servers understand. Extend it or replace it entirely with your own tracks.
 
-The media logic is split into another protocol called [`hang`](https://docs.rs/hang).
-It's pretty simple and only intended to be used by clients or media servers.
-If you want to do something more custom, then you can always extend it or replace it entirely.
+Think of `hang` like HLS/DASH, and `moq-lite` like HTTP.
 
-Think of `hang` as like HLS/DASH, while `moq-lite` is like HTTP.
-
-```
+```text
 ┌─────────────────┐
-│   Application   │   🏢 Your business logic
-│                 │    - authentication, non-media tracks, etc.
+│   Application   │   Your business logic
+│                 │    - rooms, auth, AI, telemetry, game inputs
 ├─────────────────┤
-│      hang       │   🎬 Media-specific encoding/streaming
-│                 │     - codecs, containers, catalog
-├─────────────────├
-│    moq-lite     │  🚌 Generic pub/sub transport
-│                 │     - broadcasts, tracks, groups, frames
+│      hang       │   Media catalog & frame containers
+│                 │    - codecs, timestamps, captions, JSON tracks
 ├─────────────────┤
-│  WebTransport   │  🌐 Browser-compatible QUIC
-│      QUIC       │     - HTTP/3 handshake, multiplexing, etc.
+│    moq-lite     │   Generic live pub/sub transport
+│                 │    - broadcasts, tracks, groups, frames, datagrams
+├─────────────────┤
+│  WebTransport   │   Browser-compatible QUIC (with WebSocket fallback)
+│      QUIC       │    - streams, prioritization, partial reliability
 └─────────────────┘
 ```
 
-## Libraries
+Read [Concepts](https://doc.moq.dev/concept/) for the full walkthrough, or browse the [Internet-Drafts](https://doc.moq.dev/draft/) ([`drafts/`](drafts)) for wire specifications.
 
-Choose by the job you need done. The [library guide](https://doc.moq.dev/lib/)
-compares languages; the [repository map](doc/setup/repository.md) locates the
-implementation behind each feature.
+## For LLMs & Coding Agents
 
-| Layer | Rust | TypeScript |
-| --- | --- | --- |
-| Live pub/sub | [moq-net](rs/moq-net) | [@moq/net](js/net) |
-| Media catalog and containers | [hang](rs/hang), [moq-mux](rs/moq-mux) | [@moq/hang](js/hang) |
-| Capture and playback | [moq-audio](rs/moq-audio), [moq-video](rs/moq-video) | [@moq/publish](js/publish), [@moq/watch](js/watch) |
-| Rooms and chat | | [@moq/room](js/room) |
-| Authorization | [moq-auth](rs/moq-auth) | [@moq/auth](js/auth) |
+Building an app with MoQ using Claude Code, Cursor, Codex, or another coding agent? Paste this prompt to install the [MoQ skill](skills/moq/SKILL.md):
 
-The Rust core also has [Python](https://doc.moq.dev/lib/py/),
-[Swift](https://doc.moq.dev/lib/swift/), [Kotlin](https://doc.moq.dev/lib/kt/),
-[Go](https://doc.moq.dev/lib/go/), [Dart](https://doc.moq.dev/lib/dart/),
-[C++](https://doc.moq.dev/lib/cpp/), and [C](https://doc.moq.dev/lib/c/) bindings.
-[Layers](https://doc.moq.dev/lib/layers) maps their namespaces.
-
-## Protocol
-
-Start with the [layering overview](https://doc.moq.dev/concept/), then use the
-[Internet-Drafts index](https://doc.moq.dev/draft/) for the wire and format
-specifications. Their editable sources live in [drafts/](drafts/).
-
-## Stability
-
-The `release` branch is stable and is what gets published; `main` is the trunk where breaking API changes land between releases.
-Every package follows [semver](https://semver.org): a breaking API change bumps the first nonzero version number (`1.2.0` to `2.0.0`, `0.3.1` to `0.4.0`, `0.0.5` to `0.0.6`).
-Breaking wire changes are extremely rare.
-
-## Development
-
-Contributions are welcome, and AI-assisted issues, pull requests, reviews, and comments are encouraged. See [CONTRIBUTING.md](CONTRIBUTING.md#ai) for guidance on when to open an issue before writing code.
-
-```sh
-# See all available commands
-just --list
-
-# Build everything
-just build
-
-# Lint, compile, and test what your branch changed
-just check
-
-# Automatically fix some linting errors, same scope
-just fix
-
-# Same as the above, over every package
-just check --all
-just fix --all
+```text
+Follow the instructions at https://doc.moq.dev/setup/agent/prompt.md
 ```
 
-Expensive checks and test launchers automatically enter `quest gate` locally,
-including direct language recipes and fixture scripts. Admission waits for host
-CPU load and available memory before builds or test timeout clocks start;
-nested checks reuse that admission. Hosted GitHub Actions keeps its runner
-scheduling. Rust builds still use the dev shell's mbx Cargo shim.
+Or install it from your terminal:
 
-`just check` and `just ci` run three module lanes at once, each admitted per
-command; set `CHECK_JOBS` to change that, or to 1 to run them in order.
-`CHECK_MODULES` runs only the modules it names, or skips each one named with a
-leading `-`; `just gate rs` runs only the Rust module over every package.
-Local nextest runs default to at most four test workers; set
-`NEXTEST_TEST_THREADS` to override it. Bun workspace scripts run sequentially
-locally, preserving dependency order, while CI keeps its workspace parallelism.
-Selection and an empty JS selection do not wait for admission. For a build
-outside these entrypoints, use `bash sh/quest.sh gate COMMAND [ARGS...]`; gate thresholds
-come from the host and have no configuration.
+```sh
+npx -y skills add moq-dev/moq --yes
+```
 
-Run `just ci` before pushing. Check runs on PRs into `release`; for `main`, only GitHub's merge queue gates landing. `just ci` runs what the merge queue runs, the same ground as `just check`, plus two settings: `CI_STRICT=1`, which turns a missing tool into an error instead of a skipped check, and `NEXTEST_PROFILE=ci`, which allows a longer hang timeout.
+**Direct links for agents & automated retrieval:**
 
-See the [development guide](https://doc.moq.dev/setup/dev) and the [justfile](justfile) for more.
+| Resource | Link | What it is |
+| --- | --- | --- |
+| Docs index (Markdown) | [doc.moq.dev/llms.txt](https://doc.moq.dev/llms.txt) | Concise index of every documentation page |
+| Full docs bundle | [doc.moq.dev/llms-full.txt](https://doc.moq.dev/llms-full.txt) | All guides, concepts, app, and library pages in one file |
+| Single doc page as Markdown | `https://doc.moq.dev/<path>.md` | Append `.md` to any doc URL (e.g. `https://doc.moq.dev/lib/js/watch.md`) |
+| Agent setup guide | [doc.moq.dev/setup/agent](https://doc.moq.dev/setup/agent) | App-building skill and repo workflow details |
+| Repository instructions | [AGENTS.md](AGENTS.md) | Root rules and cross-package sync requirements (check nested `AGENTS.md` files too) |
+| Repository map | [doc/setup/repository.md](doc/setup/repository.md) | Maps every feature to its crates, packages, tests, and docs |
+| Runnable examples | [doc/setup/examples.md](doc/setup/examples.md), [`demo/`](demo) | Working code to inspect instead of guessing APIs |
+| Wire specifications | [`drafts/`](drafts) | Editable Internet-Draft sources for `moq-lite`, `hang`, and extensions |
+
+## Stability & Development
+
+**Stability**: `release` is the stable branch that gets published; `main` is the development trunk where breaking API changes land between releases. Every package follows [semver](https://semver.org) (a breaking API change bumps the first nonzero version number, e.g. `1.2.0` to `2.0.0` or `0.3.1` to `0.4.0`), and breaking wire changes are rare. See [Upgrade](https://doc.moq.dev/setup/upgrade) for migration guides.
+
+**Contributing**: Contributions are welcome, and AI-assisted issues, pull requests, reviews, and comments are encouraged; see [CONTRIBUTING.md](CONTRIBUTING.md#ai). Run commands inside `nix develop` so tool versions match CI:
+
+```sh
+just --list      # see all available commands
+just             # start the local relay, demo media, and web server
+just check       # lint, compile, and test what your branch changed
+just fix         # auto-fix formatting and lints (same scope)
+just ci          # run the merge queue's gate locally before pushing
+```
+
+See the [development guide](doc/setup/dev.md), [troubleshooting](https://doc.moq.dev/setup/troubleshooting), and [justfile](justfile) for full-repo checks (`--all`, `just gate`), cross-language interop tests, and Windows setup.
 
 ## License
 
