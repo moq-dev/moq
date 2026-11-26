@@ -62,11 +62,16 @@ fn long(ty: u8, version: u32, dst_cid: &[u8], len: usize) -> Vec<u8> {
 
 /// What `endpoint` answers `packet` with, at `now`
 fn answer(endpoint: &mut Endpoint, now: Instant, packet: &[u8]) -> Answer {
+	answer_from(endpoint, REMOTE.parse().unwrap(), now, packet)
+}
+
+/// [`answer`] for a datagram from `remote`
+fn answer_from(endpoint: &mut Endpoint, remote: SocketAddr, now: Instant, packet: &[u8]) -> Answer {
 	let mut buf = Vec::new();
 	match endpoint.handle(
 		now,
 		Received {
-			remote: REMOTE.parse().unwrap(),
+			remote,
 			local_ip: None,
 			ecn: None,
 			data: packet.into(),
@@ -119,6 +124,78 @@ fn unknown_cid_gets_stateless_reset() {
 	assert_eq!(answer(&mut server, now, &packet), Answer::Nothing);
 	let later = now.saturating_add(server.min_reset_interval());
 	assert!(matches!(answer(&mut server, later, &packet), Answer::Response(_)));
+}
+
+/// Spoofed sources cannot silence resets for everyone: each source address limits only the
+/// addresses sharing its slot, and the table is a fixed size however many addresses send.
+#[test]
+fn stateless_resets_are_limited_per_source() {
+	let _guard = subscribe();
+	let mut server = Endpoint::new(
+		crate::endpoint::Config {
+			server: Some(server_config()),
+			rng_seed: Some([7; 32]),
+			..endpoint_config()
+		},
+		true,
+	)
+	.unwrap();
+	let now = Instant::ZERO;
+	let cid = valid_cid();
+	let packet = short(&cid, 100);
+	let from = |n: u32| SocketAddr::new(Ipv6Addr::from(u128::from(n)).into(), 9000);
+
+	let mut answered = 0;
+	for source in 0..1024 {
+		if matches!(answer_from(&mut server, from(source), now, &packet), Answer::Response(_)) {
+			answered += 1;
+		}
+	}
+	// Each slot answers once, and a source never leaves its slot, so sources it shares the slot
+	// with, and only those, go unanswered.
+	assert!((128..=256).contains(&answered), "answered {answered} sources");
+	for source in 0..1024 {
+		assert_eq!(answer_from(&mut server, from(source), now, &packet), Answer::Nothing);
+	}
+	let later = now.saturating_add(server.min_reset_interval());
+	assert!(matches!(
+		answer_from(&mut server, from(0), later, &packet),
+		Answer::Response(_)
+	));
+}
+
+/// A response is written from the start of the buffer whatever it held, so `Transmit::size` is its length
+#[test]
+fn responses_ignore_stale_buffer_contents() {
+	let _guard = subscribe();
+	let mut server = endpoint(true);
+	let cid = valid_cid();
+	let mut buf = vec![0xee; 40];
+	let received = |data: Vec<u8>| Received {
+		remote: REMOTE.parse().unwrap(),
+		local_ip: None,
+		ecn: None,
+		data: data.as_slice().into(),
+		arrival: None,
+	};
+
+	let Some(DatagramEvent::Response(reset)) = server.handle(Instant::ZERO, received(short(&cid, 100)), &mut buf)
+	else {
+		panic!("expected a stateless reset");
+	};
+	assert_eq!(reset.size, buf.len());
+
+	let mut unsupported = vec![0xc0, 0xba, 0xba, 0xba, 0xba, 8];
+	unsupported.extend_from_slice(&[1; 8]);
+	unsupported.push(0);
+	unsupported.resize(1200, 0);
+	let mut buf = vec![0xee; 40];
+	let Some(DatagramEvent::Response(negotiation)) = server.handle(Instant::ZERO, received(unsupported), &mut buf)
+	else {
+		panic!("expected version negotiation");
+	};
+	assert_eq!(negotiation.size, buf.len());
+	assert_eq!(buf[0] & 0x80, 0x80);
 }
 
 /// A reset must be smaller than its inciting datagram yet look like a short header, so datagrams

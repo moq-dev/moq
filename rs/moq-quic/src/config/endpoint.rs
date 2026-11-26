@@ -53,7 +53,11 @@ pub struct Config {
 	/// desired.
 	pub grease_quic_bit: bool,
 
-	/// Minimum interval between outgoing stateless reset packets, or `None` for the default
+	/// Minimum interval between outgoing stateless reset packets to one source address, or `None`
+	/// for the default
+	///
+	/// Sources share a fixed table of slots, so a flood from enough spoofed addresses still
+	/// silences everyone, though one address silences only the few that share its slot.
 	///
 	/// Defaults to 20ms, or 1ms with a [`reset_secret`](Self::reset_secret), since a restart
 	/// leaves every peer waiting on a reset at once: 1000 a second resets 2,000 connections in 2s,

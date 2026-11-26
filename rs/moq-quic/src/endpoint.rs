@@ -41,6 +41,48 @@ use crate::{
 	transport_parameters::{PreferredAddress, TransportParameters},
 };
 
+/// Remembers when each source last got a stateless reset, in a table of fixed size
+///
+/// A single timestamp for the whole endpoint would let one spoofed source packet per interval
+/// suppress the resets every real peer needs after a restart. A source only shares its slot with
+/// the others that hash to it, under a key an attacker cannot see, so silencing everyone takes
+/// spoofing from about as many addresses as there are slots, every interval.
+struct ResetLimiter {
+	key: u64,
+	last: Box<[Option<Instant>; Self::SLOTS]>,
+}
+
+impl ResetLimiter {
+	const SLOTS: usize = 256;
+
+	fn new(rng: &mut StdRng) -> Self {
+		Self {
+			key: rng.random(),
+			last: Box::new([None; Self::SLOTS]),
+		}
+	}
+
+	fn slot(&self, source: IpAddr) -> usize {
+		use std::hash::{DefaultHasher, Hash, Hasher};
+
+		// SipHash, since a hash whose low bits ignore an address's last octet would crowd a subnet into one slot.
+		let mut hasher = DefaultHasher::new();
+		hasher.write_u64(self.key);
+		source.hash(&mut hasher);
+		hasher.finish() as usize % Self::SLOTS
+	}
+
+	/// Whether `source` shares a slot with a reset sent less than `interval` ago
+	fn limited(&self, source: IpAddr, now: Instant, interval: crate::Duration) -> bool {
+		self.last[self.slot(source)].is_some_and(|last| last.saturating_add(interval) > now)
+	}
+
+	fn record(&mut self, source: IpAddr, now: Instant) {
+		let slot = self.slot(source);
+		self.last[slot] = Some(now);
+	}
+}
+
 /// The main entry point to the library
 ///
 /// This object performs no I/O whatsoever. Instead, it consumes incoming packets and
@@ -54,8 +96,8 @@ pub struct Endpoint {
 	server_config: Option<Arc<server::Config>>,
 	/// Whether the underlying UDP socket promises not to fragment packets
 	allow_mtud: bool,
-	/// Time at which a stateless reset was most recently sent
-	last_stateless_reset: Option<Instant>,
+	/// When each source last got a stateless reset
+	resets: ResetLimiter,
 	/// Buffered Initial messages for pending incoming connections
 	incoming_buffers: Slab<IncomingBuffer>,
 	all_incoming_buffers_total_bytes: u64,
@@ -74,20 +116,21 @@ impl Endpoint {
 		use rand::SeedableRng;
 
 		let (resolved, cid_generator) = config.resolve()?;
+		let mut rng = match config.rng_seed {
+			Some(seed) => StdRng::from_seed(seed),
+			None => crate::entropy::std_rng(),
+		};
 		Ok(Self {
-			rng: match config.rng_seed {
-				Some(seed) => StdRng::from_seed(seed),
-				None => crate::entropy::std_rng(),
-			},
 			index: ConnectionIndex::default(),
 			connections: Slab::new(),
 			local_cid_generator: cid_generator,
 			config: resolved,
 			server_config: config.server.map(Arc::new),
 			allow_mtud,
-			last_stateless_reset: None,
+			resets: ResetLimiter::new(&mut rng),
 			incoming_buffers: Slab::new(),
 			all_incoming_buffers_total_bytes: 0,
+			rng,
 		})
 	}
 
@@ -184,6 +227,7 @@ impl Endpoint {
 					return None;
 				}
 				trace!("sending version negotiation");
+				buf.clear();
 				// Negotiate versions
 				Header::VersionNegotiate {
 					random: self.rng.random::<u8>() | 0x40,
@@ -274,10 +318,7 @@ impl Endpoint {
 		dst_cid: ConnectionId,
 		buf: &mut Vec<u8>,
 	) -> Option<Transmit> {
-		if self
-			.last_stateless_reset
-			.is_some_and(|last| last.saturating_add(self.config.min_reset_interval) > now)
-		{
+		if self.resets.limited(addresses.remote.ip(), now, self.config.min_reset_interval) {
 			debug!("ignoring unexpected packet within minimum stateless reset interval");
 			return None;
 		}
@@ -299,7 +340,7 @@ impl Endpoint {
 		};
 
 		debug!("sending stateless reset for {} to {}", dst_cid, addresses.remote);
-		self.last_stateless_reset = Some(now);
+		self.resets.record(addresses.remote.ip(), now);
 		// Resets with at least this much padding can't possibly be distinguished from real packets
 		const IDEAL_MIN_PADDING_LEN: usize = MIN_PADDING_LEN + MAX_CID_SIZE;
 		let padding_len = if max_padding_len <= IDEAL_MIN_PADDING_LEN {
@@ -307,6 +348,7 @@ impl Endpoint {
 		} else {
 			self.rng.random_range(IDEAL_MIN_PADDING_LEN..max_padding_len)
 		};
+		buf.clear();
 		buf.reserve(padding_len + RESET_TOKEN_SIZE);
 		buf.resize(padding_len, 0);
 		self.rng.fill_bytes(&mut buf[0..padding_len]);
@@ -820,6 +862,7 @@ impl Endpoint {
 		};
 
 		// A Retry has no Length field
+		buf.clear();
 		let encode = header.encode(buf, 0);
 		buf.put_slice(&token);
 		buf.extend_from_slice(
@@ -981,6 +1024,7 @@ impl Endpoint {
 			version: version.wire(),
 		});
 
+		buf.clear();
 		let partial_encode = header.encode(buf, INITIAL_MTU.into());
 		let max_len = INITIAL_MTU as usize - partial_encode.header_len - crypto.packet.local.tag_len();
 		frame::Close::from(reason).encode(buf, max_len);
