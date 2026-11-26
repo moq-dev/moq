@@ -1272,8 +1272,8 @@ run_fanout() {
             dir=$RUN/fanout/${labels[$index]}/$scenario
             mkdir -p "$dir"
             cp -R "$ROOT/bench/fanout/$scenario/." "$dir/"
-            # This revision's crates, resolved by its own lock.
-            sed -i "s|path = \"../../../rs/|path = \"${checkouts[$index]}/rs/|" "$dir/Cargo.toml"
+            # This revision's crates and kio source, resolved by its own lock.
+            python3 "$ROOT/bench/fanout.py" rewrite "$dir/Cargo.toml" "${checkouts[$index]}"
             cp "${checkouts[$index]}/Cargo.lock" "$dir/Cargo.lock"
             target=$harnesses/${keys[$index]}/$scenario
             # shellcheck disable=SC2016 # expanded by the build's own shell

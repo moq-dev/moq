@@ -218,7 +218,7 @@ Triaged 2026-11-25 (pre-0.22 recurring audits), from run
 `Tests (test resume-model)` at seed `1465722607` was fixed by
 [moq-dev/moq#9509](https://github.com/moq-dev/moq/pull/9509); `Nightly (JS coverage)`'s
 `widened_max_age.test.ts` failure is
-[widened-bounded-reader-js](/quest/m0/test-flakes-4/widened-bounded-reader-js.md); and
+[moq-dev/moq#9607](https://github.com/moq-dev/moq/pull/9607); and
 `Shipping sizes`' +10% `moq_ffi.dll.lib` is the Windows import library growing with the
 exports [moq-dev/moq#9359](https://github.com/moq-dev/moq/pull/9359) added, while every
 shipped library stayed under the 5% bound. Already owned: `Tests (rs quic-sim)`'s

@@ -22,8 +22,9 @@ The cause: lite-06 has no SUBSCRIBE_SKIP, so `lite::Publisher::hole` sends
 each skipped run as a SUBSCRIBE_DROP. Before lite-07, a drop carries no code,
 and the subscriber reads every one as `StreamError::Old`, a final drop. The
 relay's copy then holds a drop between every pair of groups. The reader
-serving the export gives each one up as a miss and reports it `Dropped`,
-which `Fold::Final` never folds, since a skip may still replace a drop. The
+serving the export gives each one up as a miss and reports it dropped, which
+`Fold::Final` folds only inside a span the track holds whole, where no group
+can still land late, and lite-06 declares no spans. The
 export's `Ordered` reader returns each one as a gap, which `moq-mux` logs.
 
 Options, to settle before building:

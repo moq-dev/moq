@@ -73,7 +73,6 @@ jobs:
               - "rs/moq-json/**"
               - "rs/moq-pattern/**"
               - "rs/hang/**"
-              - "rs/kio/**"
               - "rs/justfile"
               - "justfile"
               - ".cargo/config.toml"
@@ -235,8 +234,6 @@ jobs:
               - "test/justfile"
               # Exactly the workspace crates run.sh builds; sh/gh/ts-paths.py fails Check on drift.
               - "rs/hang/**"
-              - "rs/kio/**"
-              - "rs/kio/macros/**"
               - "rs/moq-archive/**"
               - "rs/moq-auth/**"
               - "rs/moq-cli/**"

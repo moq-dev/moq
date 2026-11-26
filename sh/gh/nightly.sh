@@ -133,8 +133,6 @@ case "$1" in
         criterion net --no-fail-fast -p moq-net --features fuzz --bench '*'
         # Measure the optional thread-CPU clock as well as the normal elapsed time, reusing that build.
         SESSION_CPU=1 criterion net-cpu -p moq-net --features fuzz --bench session -- session_delivery_group_cost_cpu
-        # Measure each kio routine, including the contended bench's worker threads.
-        criterion kio --no-fail-fast -p kio --bench '*'
         ;;
     rust-shared)
         # One invocation unifies this release build instead of rebuilding shared crates

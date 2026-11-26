@@ -2188,6 +2188,47 @@ fn regressions() {
 			],
 			finish: false,
 		},
+		// A copy capped at a switch, whose reader reported the drops past the group it handed out,
+		// retires the gap between them: returning to its route still reads the group landing
+		// there. `a_returning_route_hands_out_a_group_its_capped_copy_retired` in `resume.rs`
+		// pins it.
+		Case {
+			ops: vec![
+				Op::GiveUp {
+					instance: 0,
+					slot: 0,
+					group: 6,
+				},
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: None,
+					frames: 1,
+				},
+				Op::GiveUp {
+					instance: 0,
+					slot: 0,
+					group: 2,
+				},
+				Op::Join {
+					reader: 0,
+					spec: spec(false, Budget::Hour, None, false),
+				},
+				Op::Up { instance: 0, slot: 1 },
+				Op::Join {
+					reader: 1,
+					spec: spec(false, Budget::Hour, None, true),
+				},
+				Op::Write {
+					instance: 0,
+					slot: 1,
+					group: None,
+					frames: 1,
+				},
+				Op::Down { instance: 0, slot: 1 },
+			],
+			finish: false,
+		},
 	];
 	for case in cases {
 		if let Err(err) = run(&case) {

@@ -974,9 +974,10 @@ fi
 # info stays the base, ahead of the inherited RUST_LOG so its own level still wins: a filter naming
 # only targets, such as quinn=debug, would otherwise silence every other warning, such as why the
 # relay refused a request. Connection spans and clean closes must survive an
-# inherited warn-only filter. The idle-out check reads its upstream subscribe and fetch starts.
+# inherited warn-only filter. The idle-out check reads its upstream subscribe and fetch starts; the
+# downstream ones record what each reader asked, so a reader starved after its resume shows its request.
 harness_spawn relay "$HARNESS_RUN/relay.log" env \
-    "RUST_LOG=info,${RUST_LOG:+$RUST_LOG,}moq_relay::connection=info,moq_relay::relay=info,moq_net::lite::subscriber=debug" \
+    "RUST_LOG=info,${RUST_LOG:+$RUST_LOG,}moq_relay::connection=info,moq_relay::relay=info,moq_net::lite::subscriber=debug,moq_net::lite::publisher=debug" \
     "$RELAY" "$HARNESS_RUN/relay.toml"
 if ! harness_ready "$URL/certificate.sha256" 30 "$HARNESS_PID"; then
     echo "relay never became ready" >&2

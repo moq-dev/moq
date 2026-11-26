@@ -26,7 +26,7 @@ so none is excluded. Kill each with a unit test or a model regression, or exclud
   is covered another way (a replaced non-fill copy removes its fed range, the serving copy
   starts above, a fill waits through its unread group). Needs a second fill, from another
   route, holding a key the first covers while the local cap holds it back.
-- `Reader::poll_lowest` `!copy.replaced && Some(copy.generation) == self.generation`, `&&`
+- `Reader::poll_first` `!copy.replaced && Some(copy.generation) == self.generation`, `&&`
   to `||`: also counts a late backfill of the serving route, which only reruns
   `backfill_gaps` (a no-op, or a reset of that backfill's budget), and a last copy of an old
   generation left while the route has no copy. That one reading late with a floor may ask
@@ -49,8 +49,3 @@ The late-group lead from the 2026-11-22 run did not reproduce in eight setups;
 `a_start_moved_to_the_resume_point_takes_no_late_group_below_it` pins it.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [Resume model misses a group](/quest/m0/nightly/resume-model-missing-group.md) - a seed the
-  model fails on, found while probing these

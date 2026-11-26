@@ -2,7 +2,7 @@
 	"minor": null,
 	"phase": null,
 	"exemptions": {
-		"rust": ["kio", "kio-macros", "qmux"],
+		"rust": ["qmux"],
 		"npm": ["@moq/qmux"],
 		"dart": ["moq"]
 	}

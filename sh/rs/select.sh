@@ -132,7 +132,7 @@ select_packages() {
     [[ -n "$selected" ]] || return 0
 
     # Cargo's own package ids, not bare names: a workspace crate that is also
-    # pulled from crates.io (kio) makes `--package kio` ambiguous, and cargo
+    # pulled from crates.io makes `--package <name>` ambiguous, and cargo
     # refuses before compiling anything.
     local pkg_flags
     pkg_flags=$(jq -r --arg selected "$selected" '
@@ -250,6 +250,8 @@ case "$action" in
         fi
         # moq-net without `async`, which every other build unifies back in.
         if [[ "$fail" -eq 0 ]] && wants moq-net; then just rs no-async || fail=1; fi
+        # moq-net's `fuzz` module without the `test-support` other builds unify in.
+        if [[ "$fail" -eq 0 ]] && wants moq-net; then just rs net-fuzz || fail=1; fi
         # Every C caller still matches libmoq's generated header. rs/libmoq/build.rs
         # generates moq.h from rs/libmoq/src alone, so transitive upstream edits
         # cannot alter the header (and `test rs` still compiles libmoq against them).

@@ -84,7 +84,9 @@ pub struct MoqSubscription {
 	/// subscription's read filter: it reads only the groups its own ranges cover.
 	#[uniffi(default = None)]
 	pub ranges: Option<Vec<MoqRange>>,
-	/// Which pending group the publisher sends first, or null for newest first.
+	/// Which group comes first, as the publisher sends them and `recv_group` returns those held,
+	/// or null for newest first. Before moq-lite-07 the publisher sends newest first whatever this
+	/// asks, and `recv_group` still returns those held in this order.
 	#[uniffi(default = None)]
 	pub order: Option<MoqOrder>,
 }
@@ -128,8 +130,9 @@ pub struct MoqRange {
 	pub end: Option<MoqTimestamp>,
 }
 
-/// Which of a subscription's pending groups the publisher sends first, mirroring
-/// [`moq_net::track::Order`].
+/// Which of a subscription's groups comes first, as the publisher sends them and `recv_group`
+/// returns those held, mirroring [`moq_net::track::Order`]. Before moq-lite-07 the publisher
+/// sends newest first whatever this asks.
 #[derive(Clone, Copy, uniffi::Enum)]
 pub enum MoqOrder {
 	/// Oldest first, draining a backlog in start order.
@@ -586,7 +589,8 @@ impl MoqTrackConsumer {
 	///
 	/// Groups are returned as they arrive on the wire, which may be out of start
 	/// order (e.g. if a later group lands before an earlier one on a separate stream).
-	/// One that drifts further behind the live edge than the subscription's `delay.max`
+	/// Of the groups already held, it returns them in the subscription's group order:
+	/// newest first unless the subscription asks ascending. One that drifts further behind the live edge than the subscription's `delay.max`
 	/// is skipped, or ends its pending read if already returned; raise it to keep stalled groups.
 	///
 	/// The first call commits this track to arrival order: start-order reads

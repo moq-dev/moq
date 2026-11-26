@@ -258,13 +258,14 @@ impl<E: catalog::Catalog> Import<E> {
 			catalog.count_ext_tracks(|ext: &mut E| ext.mpegts_mut().is_some_and(|mpegts| mpegts.has_track()));
 		}
 		let si = super::si::Capture::new(broadcast.clone(), catalog.clone());
+		let timebase = catalog.timebase();
 		Self {
 			broadcast,
 			catalog,
 			container,
 			media_clock: false,
 			has_video: false,
-			timebase: reserved.timebase(),
+			timebase,
 			initial_reservation: Some(reserved),
 			demux: Demux::new(supports_mpegts),
 			steps: Default::default(),
@@ -308,6 +309,15 @@ impl<E: catalog::Catalog> Import<E> {
 			scrambled: HashSet::new(),
 			input: crate::container::Input::Open,
 		}
+	}
+
+	/// Shift this program's timestamps through `timebase`, a timestamp base of the catalog `reserved`
+	/// belongs to, instead of a fresh one: importers of one source share its offset.
+	///
+	/// Set it before the first [`decode`](Self::decode), which may anchor the timebase.
+	pub fn with_timebase(mut self, timebase: crate::catalog::Timebase<E>) -> Self {
+		self.timebase = timebase;
+		self
 	}
 
 	/// Import only the program numbered `program` in the PAT, ignoring the rest of the multiplex.
@@ -385,9 +395,9 @@ impl<E: catalog::Catalog> Import<E> {
 		health.hand_over(pid, &mut self.health, cadenced);
 	}
 
-	/// A reservation on this program's timebase, so every stream shifts by its offset.
+	/// A reservation for one of this program's streams, which the program's timebase shifts.
 	fn reserve(&self) -> crate::catalog::Reserved<E> {
-		self.timebase.reserve()
+		self.catalog.reserve()
 	}
 
 	/// The video hint for a decoded rendition: this importer's container, nothing else.
@@ -1037,7 +1047,7 @@ impl<E: catalog::Catalog> Import<E> {
 				format: (0, 0, 0),
 				broadcast: self.broadcast.clone(),
 				reserved: Some(self.reserve()),
-				timebase: self.timebase.clone(),
+				catalog: self.catalog.clone(),
 				container: self.container.clone(),
 				tail: Vec::new(),
 				tail_pts: None,
@@ -1132,7 +1142,7 @@ impl<E: catalog::Catalog> Import<E> {
 			import: None,
 			broadcast: self.broadcast.clone(),
 			reserved: Some(self.reserve()),
-			timebase: self.timebase.clone(),
+			catalog: self.catalog.clone(),
 			format: (0, 0),
 			container: self.container.clone(),
 			tail: Vec::new(),
@@ -3763,9 +3773,9 @@ struct AacStream<E: CatalogExt = ()> {
 	/// withheld until this deferred rendition resolves (config comes from the first ADTS header).
 	/// Consumed when `import` is built, or released by a frame that cannot build it.
 	reserved: Option<crate::catalog::Reserved<E>>,
-	/// Reserves the rendition anew on the program's timebase when `import` is built after `reserved`
-	/// was released, or for the next track after a config change.
-	timebase: crate::catalog::Timebase<E>,
+	/// Reserves the rendition anew when `import` is built after `reserved` was released, or for the
+	/// next track after a config change.
+	catalog: crate::catalog::Producer<E>,
 	/// The container this importer publishes decoded renditions with.
 	container: hang::catalog::Container,
 	/// Partial frame left at the end of the previous PES. ISO 13818-1 doesn't require
@@ -3992,7 +4002,7 @@ impl<E: CatalogExt> AacStream<E> {
 					config.container = self.container.clone();
 					// Consume the reservation held since the PMT: this resolves the gated rendition,
 					// and carries the catalog's declared media max age onto the track.
-					let reserved = self.reserved.take().unwrap_or_else(|| self.timebase.reserve());
+					let reserved = self.reserved.take().unwrap_or_else(|| self.catalog.reserve());
 					let track = self
 						.broadcast
 						.unique_track(".aac", reserved.track_info(hang::catalog::PRIORITY.audio));
@@ -4400,8 +4410,8 @@ struct LegacyStream<E: CatalogExt = ()> {
 	/// withheld until this deferred rendition resolves (config comes from the first frame header).
 	/// Consumed when `import` is built.
 	reserved: Option<crate::catalog::Reserved<E>>,
-	/// Reserves the next track on the program's timebase after a config change.
-	timebase: crate::catalog::Timebase<E>,
+	/// Reserves the next track after a config change.
+	catalog: crate::catalog::Producer<E>,
 	/// The sample rate and channel count `import` was built with, from the first frame header.
 	format: (u32, u32),
 	/// The container this importer publishes decoded renditions with.
@@ -4610,7 +4620,7 @@ impl<E: CatalogExt> LegacyStream<E> {
 					// Consume the reservation held since the PMT: this resolves the gated rendition,
 					// and carries the catalog's declared media max age onto the track. A track
 					// after a format change reserves anew on the same timebase.
-					let reserved = self.reserved.take().unwrap_or_else(|| self.timebase.reserve());
+					let reserved = self.reserved.take().unwrap_or_else(|| self.catalog.reserve());
 					let track = self.broadcast.unique_track(
 						self.descriptor.track_suffix,
 						reserved.track_info(hang::catalog::PRIORITY.audio),
@@ -5739,7 +5749,7 @@ pub(super) mod test {
 			let first = Timestamp::from_scale(picture(0), 90_000).unwrap();
 			timebase.place(first, kio::clock::wall()).unwrap();
 		}
-		let mut import = super::Import::new(broadcast, timebase.reserve());
+		let mut import = super::Import::new(broadcast, catalog.reserve()).with_timebase(timebase);
 
 		let mut bytes = synth_pmt(
 			&[
@@ -10233,12 +10243,12 @@ pub(super) mod test {
 
 		// Each group as published, its empty end marker included.
 		let name = catalog.snapshot().video.renditions.keys().next().unwrap().clone();
-		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
-			moq_net::track::Start::Live {
+		let subscription = moq_net::track::Subscription::default()
+			.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
 				min: Some(Duration::from_secs(3600)),
 				max: Some(Duration::from_secs(3600)),
-			},
-		)]);
+			})])
+			.with_order(moq_net::track::Order::Ascending);
 		let mut track = consumer.track(&name).unwrap().subscribe(subscription).await.unwrap();
 		let mut groups = Vec::new();
 		while let Some(mut group) = track.recv_group().await.unwrap() {
@@ -10479,12 +10489,12 @@ pub(super) mod test {
 		let (consumer, catalog, _import) = import_all(&mux.out).unwrap();
 
 		let name = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
-		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
-			moq_net::track::Start::Live {
+		let subscription = moq_net::track::Subscription::default()
+			.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
 				min: Some(Duration::from_secs(3600)),
 				max: Some(Duration::from_secs(3600)),
-			},
-		)]);
+			})])
+			.with_order(moq_net::track::Order::Ascending);
 		let mut track = consumer.track(&name).unwrap().subscribe(subscription).await.unwrap();
 		let mut groups = Vec::new();
 		while let Ok(Ok(Some(mut group))) = kio::clock::timeout(Duration::from_millis(50), track.recv_group()).await {
@@ -10527,12 +10537,12 @@ pub(super) mod test {
 		let (consumer, catalog, _import) = import_all(&mux.out).unwrap();
 
 		let name = catalog.snapshot().audio.renditions.keys().next().unwrap().clone();
-		let subscription = moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
-			moq_net::track::Start::Live {
+		let subscription = moq_net::track::Subscription::default()
+			.with_ranges([moq_net::track::Range::from(moq_net::track::Start::Live {
 				min: Some(Duration::from_secs(3600)),
 				max: Some(Duration::from_secs(3600)),
-			},
-		)]);
+			})])
+			.with_order(moq_net::track::Order::Ascending);
 		let mut track = consumer.track(&name).unwrap().subscribe(subscription).await.unwrap();
 		let mut groups = Vec::new();
 		while let Ok(Ok(Some(mut group))) = kio::clock::timeout(Duration::from_millis(50), track.recv_group()).await {

@@ -11,6 +11,10 @@ use crate::{Error, Result, codec, session};
 pub struct IngestSink {
 	broadcast: moq_net::broadcast::Producer,
 	catalog: moq_mux::catalog::Producer,
+	/// Every track's timestamp base, so the session's audio and video shift onto the catalog's
+	/// clock by one offset, fixed at the first frame's arrival. The catalog is not withheld for it:
+	/// a viewer negotiates against the catalog before the publisher's first frame.
+	timebase: moq_mux::catalog::Timebase,
 	bridges: session::Bridges,
 	/// The route announcing the broadcast, when the sink owns it: held for the session's
 	/// life, linger included, and retracted when the session drops it.
@@ -22,6 +26,7 @@ impl IngestSink {
 	pub fn new(broadcast: moq_net::broadcast::Producer, catalog: moq_mux::catalog::Producer) -> Self {
 		Self {
 			broadcast,
+			timebase: catalog.timebase(),
 			catalog,
 			bridges: session::Bridges::new(),
 			_route: None,
@@ -90,7 +95,12 @@ impl session::MediaSink for IngestSink {
 		self.bridges.discontinuity(mid)
 	}
 
-	fn on_frame(&mut self, mid: str0m::media::Mid, frame: codec::Frame) -> Result<()> {
+	fn on_frame(&mut self, mid: str0m::media::Mid, mut frame: codec::Frame) -> Result<()> {
+		// The first frame places the session at its arrival: no sender report is waited for, which
+		// a publisher sends for audio only every RTCP interval (5 s).
+		let pts = moq_net::Timestamp::from_micros(frame.timestamp_us).map_err(moq_mux::Error::from)?;
+		let shifted = self.timebase.shift(pts)?.as_micros().map_err(moq_mux::Error::from)?;
+		frame.timestamp_us = u64::try_from(shifted).map_err(|_| moq_mux::Error::from(moq_net::TimeOverflow))?;
 		self.bridges.push(mid, frame)
 	}
 
@@ -201,6 +211,45 @@ mod tests {
 		sink.on_frame("0".into(), frame(400_000)).unwrap();
 		read(&mut track).await;
 		assert_eq!(groups, 4, "two frames, the marker, and the frame after it");
+	}
+
+	/// A frame lands at its arrival on the catalog's clock, though the clock was fixed before the
+	/// session and the frame carries the session's own timeline.
+	#[tokio::test(start_paused = true)]
+	async fn a_frame_lands_at_its_arrival_on_a_fixed_clock() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let clock = catalog.clock();
+		tokio::time::advance(Duration::from_secs(5)).await;
+		let mut sink = IngestSink::new(broadcast, catalog.clone());
+		let audio = str0m::media::MediaKind::Audio;
+		sink.on_track("0".into(), audio, str0m::format::Codec::Opus, Some((48_000, 2)))
+			.unwrap();
+		let frame = |timestamp_us| codec::Frame {
+			timestamp_us,
+			payload: bytes::Bytes::from_static(&[0xfc, 0xff, 0xfe]),
+		};
+
+		let arrived = clock.now();
+		sink.on_frame("0".into(), frame(20_000)).unwrap();
+		let snapshot = catalog.snapshot();
+		let config = snapshot.audio.renditions.get("0.opus").unwrap();
+		let track = consumer.track("0.opus").unwrap().subscribe(None).await.unwrap();
+		let mut track = codec::Track::opus(track, config).unwrap();
+		let first = track.next().await.unwrap().unwrap();
+		assert_eq!(
+			first.timestamp_us as u128,
+			arrived.as_micros().unwrap(),
+			"the first frame lands at its arrival"
+		);
+		sink.on_frame("0".into(), frame(40_000)).unwrap();
+		let next = track.next().await.unwrap().unwrap();
+		assert_eq!(
+			next.timestamp_us - first.timestamp_us,
+			20_000,
+			"the next keeps its distance"
+		);
 	}
 
 	/// Dropping a sink before its session ends, as when shutdown cancels a pull, aborts its

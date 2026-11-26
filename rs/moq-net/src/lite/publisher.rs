@@ -3370,7 +3370,7 @@ mod test {
 		let mut unpinned = served();
 		assert_eq!(
 			drain(&mut unpinned),
-			vec![0, 1, 2],
+			vec![2, 1, 0],
 			"the unbounded budget alone resolves to the whole cache"
 		);
 
@@ -3387,7 +3387,7 @@ mod test {
 		// On lite-06 the declared budget is what resolves the start, so it stands.
 		let declared = producer.subscribe(track::Subscription::default().with_max(std::time::Duration::from_secs(5)));
 		let mut declared = declared.with_range(cursor_floor(Version::Lite06, None, producer.latest_key())..);
-		assert_eq!(drain(&mut declared), vec![0, 1, 2]);
+		assert_eq!(drain(&mut declared), vec![2, 1, 0]);
 	}
 
 	/// An unfloored join adopts the first served group: the cursor rises to it, so a
@@ -4736,12 +4736,14 @@ fn final_key(end: track::Position) -> u64 {
 /// Every group key, for [`poll_recv_next`] to hand out any.
 const ALL: (Bound<u64>, Bound<u64>) = (Bound::Unbounded, Bound::Unbounded);
 
-/// Poll a single [`track::Subscriber`] for the next group (cap-aware, in arrival order).
+/// Poll a single [`track::Subscriber`] for the next group (cap-aware, as an arrival read).
 ///
-/// Groups are served in arrival order (`poll_recv_group`), not key order: on a relay, a
-/// burst can be ingested micro-reordered by the upstream leg, and a key cursor would then
-/// permanently skip the older group even though it is cached and in demand. Staleness is
-/// governed by max age and the subscriber's max delay, not arrival raciness.
+/// Groups are served as an arrival read (`poll_recv_group`) serves them, not by a key cursor:
+/// of the groups held unread, the first in the subscription's Group Order, and never past a
+/// lower one that lands late. On a relay, a burst can be ingested micro-reordered by the
+/// upstream leg, and a key cursor would then permanently skip the older group even though it
+/// is cached and in demand. Staleness is governed by max age and the subscriber's max delay,
+/// not arrival raciness.
 ///
 /// The cursor hands out the next group only if its key lies in `groups`, leaving it in
 /// the cache otherwise, and without `groups` none at all. Either way it then never reports
@@ -4818,14 +4820,17 @@ async fn recv_next(track: &mut track::Subscriber, emit_boundary: bool) -> Result
 /// asked for a partial group, so it must be skipped: a group is the unit of decodability,
 /// and only the subscriber knows whether a partial one is any use to it.
 fn position_group(group: group::Consumer, frames: &Frames, capped: bool) -> Option<group::Consumer> {
-	if group.start < frames.floor {
+	if !servable(&group, frames) {
 		return None;
 	}
 	let expected = frames.start(group.start);
 	let end = frames.end(group.start).filter(|_| capped);
-	group
-		.fetches_from(expected)
-		.then(|| group.with_end(end).fetching_from(expected))
+	Some(group.with_end(end).fetching_from(expected))
+}
+
+/// Whether [`position_group`] can serve `group` at all.
+fn servable(group: &group::Consumer, frames: &Frames) -> bool {
+	group.start >= frames.floor && group.fetches_from(frames.start(group.start))
 }
 
 /// The frame bounds of a subscription, which the model leaves to the publisher: it reads
@@ -5231,6 +5236,10 @@ struct GroupContext {
 	/// Whether the session negotiated the `ietf` extension and a moq-transport publisher made
 	/// the track, so its group streams carry object records.
 	object_records: bool,
+	/// Lite-07 over a transport whose resets still deliver a GROUP header
+	/// ([reliable_reset](crate::transport::poll::Session::reliable_reset)), so a reset group
+	/// stream accounts for its group and no SUBSCRIBE_DROP names it.
+	reliable_reset: bool,
 }
 
 impl GroupContext {
@@ -5256,6 +5265,9 @@ struct GroupOutcomes {
 	dropped: Mutex<Vec<(Range<u64>, StreamError)>>,
 	/// The spans of the groups whose GROUP_END went out, which their stream accounts for.
 	whole: Mutex<Vec<Range<u64>>>,
+	/// Lite-07: the starts strictly inside a whole group's span whose GROUP_END a reset may
+	/// have cut after its header arrived, which the control stream names again.
+	cut: Mutex<Vec<Range<u64>>>,
 	/// Lite-07: the frame each group a range ends partway through stops before, by group
 	/// ([`Frames::stops`]), which a group already streaming follows as an update moves it.
 	stops: kio::Producer<Vec<(u64, u64)>>,
@@ -5294,6 +5306,7 @@ impl Subscription {
 			stamp: self.stamp,
 			outcomes: self.outcomes.clone(),
 			object_records: self.object_records,
+			reliable_reset: self.version.has_reliable_reset() && self.session.reliable_reset(),
 		}
 	}
 
@@ -5945,6 +5958,9 @@ impl TrackRun {
 		}
 		self.unstarted = waiting;
 		self.start = Start::Resolved(lowest);
+		if lowest < from {
+			self.track.rescan_drops();
+		}
 		Ok(reported)
 	}
 
@@ -6034,6 +6050,17 @@ impl TrackRun {
 		for span in whole {
 			self.mark_served(span);
 		}
+		// A reset may have cut a GROUP_END after its header arrived, so the starts it told go
+		// out again as a skip, even one dropped before the group finished: its readers ended
+		// already, and the producer did declare it empty.
+		let cut = std::mem::take(&mut *self.ctx.outcomes.cut.lock().unwrap());
+		if !cut.is_empty() && self.start.emits_range() {
+			for inner in cut {
+				self.track.record_mut().tell(inner.clone(), Report::Skip);
+				self.buffer_hole(inner, Hole::Skip, writer)?;
+			}
+			return Poll::Ready(Ok(ControlFlow::Continue(())));
+		}
 		let dropped = std::mem::take(&mut *self.ctx.outcomes.dropped.lock().unwrap());
 		if !dropped.is_empty() {
 			// Each was served, so its record says so already, and the drop is final: nothing
@@ -6097,7 +6124,7 @@ impl TrackRun {
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
 
-		// One cursor drives the whole subscription: poll the cap-aware arrival-order group.
+		// One cursor drives the whole subscription: poll the cap-aware arrival read.
 		let order = self.ctx.steer_current().order;
 		let stuck = self.stuck();
 		let emit_boundary = self.start.emits_range() && !self.end_sent;
@@ -6272,10 +6299,9 @@ impl TrackRun {
 		}
 	}
 
-	/// Forward a verdict the cursor reached on `range`, which its record already took in,
-	/// replacing what it goes out over: on lite-07, a skip any drop already sent. A reader the
-	/// earlier drop ended stays ended. A drop takes in the rest of a whole group's span it
-	/// reaches into. Returns whether any was buffered.
+	/// Forward a verdict the cursor reached on `range`, which its record already took in, so
+	/// nothing went out over it. A drop takes in the rest of a whole group's span it reaches
+	/// into. Returns whether any was buffered.
 	fn forward_range(
 		&mut self,
 		range: Range<u64>,
@@ -6325,13 +6351,14 @@ impl TrackRun {
 	}
 
 	/// The message naming `groups` given up as `hole`: lite-07 skips what was never
-	/// produced, and earlier versions drop it as not found.
+	/// produced with `SKIP`, and earlier versions drop it as not found.
 	fn hole(&self, groups: std::ops::Range<u64>, hole: &Hole) -> lite::SubscribeResponse {
 		let version = self.ctx.version;
-		match hole {
-			Hole::Skip if version.has_skip() => lite::SubscribeResponse::Skip(lite::SubscribeSkip { groups }),
-			hole => lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(groups, &hole.error(), version)),
-		}
+		let drop = match hole {
+			Hole::Skip if version.has_skip() => lite::SubscribeDrop::new(groups, &StreamError::Skip, version),
+			hole => lite::SubscribeDrop::new(groups, &hole.error(), version),
+		};
+		lite::SubscribeResponse::Drop(drop)
 	}
 
 	/// Send `groups` given up as `hole`, or withhold it until the first SUBSCRIBE_START.
@@ -6487,26 +6514,24 @@ impl TrackRun {
 	///
 	/// A relay caches groups in upstream arrival order, and a newer group's stream can
 	/// beat an older one, so the first group here need not be the oldest the source
-	/// serves. `source` is where the source's feed starts, raised to this cursor's floor,
-	/// so the resolved start is the lower of the two: resolving from the later group would
-	/// drop the older one for good.
+	/// serves. `source` is where the source's feed starts, raised to this cursor's floor;
+	/// see [`track::Subscriber::delivery_start`].
 	fn start(
 		&mut self,
 		group: group::Consumer,
 		source: Option<u64>,
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
 	) -> Result<(), Error> {
-		let mut start = source.map_or(group.start, |source| source.min(group.start));
-		// A group given up cannot be where the feed starts. This stops at the held group
-		// at the latest, since it was not skipped.
-		// Adjacent runs given up with different errors stay separate, so walk them all.
-		if let Start::Unresolved { skipped, .. } = &self.start {
-			while start < group.start
-				&& let Some((given_up, _)) = skipped.get_key_value(&start)
-			{
-				start = given_up.end.min(group.start);
-			}
-		}
+		let Start::Unresolved { skipped, .. } = &self.start else {
+			unreachable!("a start resolves once");
+		};
+		// A group given up, or held and not servable, cannot be where the feed starts.
+		let start = self.track.delivery_start(track::Opening {
+			first: group.start,
+			source,
+			given_up: skipped,
+			serves: &|held| servable(held, &self.frames),
+		});
 		self.resolve(start, writer)?;
 		// SUBSCRIBE_START names where delivery starts. Groups already skipped between
 		// the requested floor and this group are not served. A later group at or above an
@@ -6641,10 +6666,30 @@ impl TrackRun {
 			}
 			reach = range.start;
 		}
+		// On lite-07, a subscription can also name disjoint history ranges below `reach` whose
+		// groups were already given up before the first group resolved: forward their drops too
+		// so the subscriber settles those ranges with the same verdict as a direct reader.
+		let mut send = rangemap::RangeSet::new();
+		send.insert(reach..u64::MAX);
+		if self.ctx.version.has_ranges() {
+			for range in self.requested.ranges.values() {
+				let track::Start::Time(from) = range.start else {
+					continue;
+				};
+				let to = range.end.map_or(u64::MAX, |end| end.saturating_add(1));
+				if from < to {
+					send.insert(from..to);
+				}
+			}
+		}
 		for (range, hole) in skipped.iter() {
-			let below = range.start..range.end.min(reach);
-			self.track.untell(below);
-			self.forward_range(range.start.max(reach)..range.end, hole, writer)?;
+			for below in send.gaps(range) {
+				self.track.untell(below);
+			}
+			for part in send.overlapping(range) {
+				let part = part.start.max(range.start)..part.end.min(range.end);
+				self.forward_range(part, hole, writer)?;
+			}
 		}
 		// Only now, past every report taken back: polling the track above may fold.
 		self.track.hold(false);
@@ -7160,6 +7205,8 @@ enum GroupState {
 	/// cancel or expiry can still reset the stream.
 	Closed {
 		writer: Writer<crate::transport::boxed::SendStream, Version>,
+		/// The End its GROUP_END told, if any.
+		ended: Option<u64>,
 	},
 	/// Finished, or failed in a way the control stream names in a drop.
 	Done,
@@ -7174,8 +7221,8 @@ enum Ending {
 	/// With the group: a FIN once its frames run out, after a GROUP_END on lite-07 if it
 	/// finished whole.
 	Group,
-	/// Lite-07: the GROUP_END is buffered, so the FIN follows once it flushes.
-	Whole,
+	/// Lite-07: the GROUP_END is buffered for this End, so the FIN follows once it flushes.
+	Whole(u64),
 }
 
 impl GroupServe {
@@ -7326,7 +7373,7 @@ impl GroupServe {
 			// the stream is blocked on, including a FIN awaiting its acknowledgement
 			// (the transport still schedules its retransmissions). The rank is re-read
 			// as a send order when handled, since the two conventions are inverted.
-			if let GroupState::Serve { writer, .. } | GroupState::Closed { writer } = &mut self.state {
+			if let GroupState::Serve { writer, .. } | GroupState::Closed { writer, .. } = &mut self.state {
 				if let Rank::Queue(handle) = &mut self.rank {
 					while let Poll::Ready(rank) = handle.poll_next(waiter) {
 						writer.set_priority(PriorityHandle::send_order_of(rank).into());
@@ -7380,9 +7427,7 @@ impl GroupServe {
 							ready!(self.budget.poll_yield(waiter));
 							match writer.poll_flush(waiter) {
 								// The first flush is the header alone: nothing else is buffered before it.
-								Poll::Ready(Ok(())) if !writer.held() && self.ctx.version.has_reliable_reset() => {
-									writer.hold()
-								}
+								Poll::Ready(Ok(())) if !writer.held() && self.ctx.reliable_reset => writer.hold(),
 								Poll::Ready(Ok(())) => {}
 								Poll::Ready(Err(err)) => break 'serve Err(err),
 								// Parking on the transport is the one stall the group cursor cannot
@@ -7429,7 +7474,7 @@ impl GroupServe {
 									Poll::Ready(Err(err)) => break 'serve Err(err),
 									Poll::Pending => return Poll::Pending,
 								}
-							} else if *ending == Ending::Whole {
+							} else if matches!(*ending, Ending::Whole(_)) {
 								// Everything flushed after the GROUP_END.
 								break 'serve Ok(());
 							} else if stopped(
@@ -7509,7 +7554,7 @@ impl GroupServe {
 											) {
 												Ok(Some(end)) => {
 													self.ctx.outcomes.whole(self.key, end);
-													*ending = Ending::Whole;
+													*ending = Ending::Whole(end);
 													continue;
 												}
 												Ok(None) => break 'serve Ok(()),
@@ -7568,7 +7613,7 @@ impl GroupServe {
 											) {
 												Ok(Some(end)) => {
 													self.ctx.outcomes.whole(self.key, end);
-													*ending = Ending::Whole;
+													*ending = Ending::Whole(end);
 													continue;
 												}
 												Ok(None) => break 'serve Ok(()),
@@ -7583,32 +7628,37 @@ impl GroupServe {
 						}
 					};
 
-					let GroupState::Serve { mut writer, .. } = std::mem::replace(&mut self.state, GroupState::Done)
+					let GroupState::Serve { mut writer, ending, .. } =
+						std::mem::replace(&mut self.state, GroupState::Done)
 					else {
 						unreachable!()
+					};
+					let ended = match ending {
+						Ending::Whole(end) => Some(end),
+						Ending::Group => None,
 					};
 					match outcome {
 						Ok(()) => {
 							// The buffer drained before the final frame resolved, so the
 							// FIN follows the last byte.
 							match writer.finish() {
-								Ok(()) => self.state = GroupState::Closed { writer },
+								Ok(()) => self.state = GroupState::Closed { writer, ended },
 								// The writer drops here: the Drop reset stands in for the
 								// abort, exactly like the old `finish()?`.
 								Err(err) => {
-									self.settle_reset(&mut writer);
+									self.settle_reset(&mut writer, ended);
 									return Poll::Ready(Err(err));
 								}
 							}
 						}
 						Err(err) => {
-							self.settle_reset(&mut writer);
+							self.settle_reset(&mut writer, ended);
 							writer.abort(&err);
 							return Poll::Ready(Err(err));
 						}
 					}
 				}
-				GroupState::Closed { writer } => {
+				GroupState::Closed { writer, .. } => {
 					let res = match writer.poll_closed(waiter) {
 						Poll::Ready(res) => res,
 						// Those bytes still hold the connection until acknowledged, so a group
@@ -7616,12 +7666,12 @@ impl GroupServe {
 						// lite-07 GROUP_END: stale bytes would fill the send window and stall the
 						// streams behind them.
 						Poll::Pending if self.group.poll_expired(waiter) => {
-							let GroupState::Closed { mut writer } =
+							let GroupState::Closed { mut writer, ended } =
 								std::mem::replace(&mut self.state, GroupState::Done)
 							else {
 								unreachable!()
 							};
-							self.settle_reset(&mut writer);
+							self.settle_reset(&mut writer, ended);
 							writer.abort(&Error::Old);
 							return Poll::Ready(Err(Error::Old));
 						}
@@ -7629,11 +7679,12 @@ impl GroupServe {
 					};
 					// The peer acknowledged everything or ended the stream, so the Drop fallback must not
 					// reset it and discard bytes still retransmitting.
-					let GroupState::Closed { mut writer } = std::mem::replace(&mut self.state, GroupState::Done) else {
+					let GroupState::Closed { mut writer, ended } = std::mem::replace(&mut self.state, GroupState::Done)
+					else {
 						unreachable!()
 					};
 					if res.is_err() {
-						self.settle_reset(&mut writer);
+						self.settle_reset(&mut writer, ended);
 					}
 					writer.release();
 					return Poll::Ready(res.map(|()| {
@@ -7659,9 +7710,10 @@ impl kio::Task for GroupServe {
 
 /// Lite-07: whether a Group Stream on `writer`, failing now, still accounts for its group.
 /// A reset of this side's delivers the header once the transport took it ([held](Writer::held)),
-/// which does. A STOP_SENDING owes a drop only when it evicted the stream before the peer
-/// acknowledged the header, since the subscriber may never have read which group it carried;
-/// any other the subscriber sent knowing the group, or wanting none of it.
+/// which does. Only a [reliable reset](GroupContext::reliable_reset) holds it: a plain one lets
+/// the peer discard a header it has not read. A STOP_SENDING owes a drop only when it evicted
+/// the stream before the peer acknowledged the header, since the subscriber may never have read
+/// which group it carried; any other the subscriber sent knowing the group, or wanting none of it.
 fn accounts(version: Version, writer: &mut Writer<crate::transport::boxed::SendStream, Version>) -> bool {
 	if !version.has_reliable_reset() {
 		return false;
@@ -7677,11 +7729,19 @@ fn accounts(version: Version, writer: &mut Writer<crate::transport::boxed::SendS
 impl GroupServe {
 	/// Leave the machine failed, `Accounted` when the stream on `writer`, failing now, still
 	/// accounts for its group.
-	fn settle_reset(&mut self, writer: &mut Writer<crate::transport::boxed::SendStream, Version>) {
+	fn settle_reset(&mut self, writer: &mut Writer<crate::transport::boxed::SendStream, Version>, ended: Option<u64>) {
 		self.state = match accounts(self.ctx.version, writer) {
 			true => GroupState::Accounted,
 			false => GroupState::Done,
 		};
+		// The header arrives, but the reset may cut the GROUP_END after it, so the starts it
+		// told are named again. A drop of a group whose header never arrived names its span.
+		if matches!(self.state, GroupState::Accounted)
+			&& let Some(end) = ended
+			&& self.key + 1 < end
+		{
+			self.ctx.outcomes.cut.lock().unwrap().push(self.key + 1..end);
+		}
 	}
 
 	/// Account for a group that failed with `err`: one that never got a stream, or whose
@@ -9242,7 +9302,7 @@ mod serve_group_test {
 			[(0, 0), (1, 0)],
 			"each stream joins the subscription's group"
 		);
-		assert_eq!(log.orders(), [(0, 1), (1, 3)], "newer groups first");
+		assert_eq!(log.orders(), [(0, 3), (1, 1)], "newer groups first");
 		assert!(log.priorities().is_empty(), "the session queue ranks no stream");
 
 		run.replace(lite::SubscribeUpdate {
@@ -9263,7 +9323,8 @@ mod serve_group_test {
 		);
 		let mut flipped = log.orders()[2..].to_vec();
 		flipped.sort();
-		assert_eq!(flipped, [(0, 1), (1, -1)], "older groups first");
+		// Stream 0 carries group 1, which went first.
+		assert_eq!(flipped, [(0, -1), (1, 1)], "older groups first");
 	}
 
 	/// A group with more frames ready than one poll's budget drains over several polls,
@@ -9827,6 +9888,48 @@ mod serve_group_test {
 		assert!(served.contains(&4000), "served {served:?}");
 	}
 
+	/// The gaps a lite-07 subscription's hopping ranges left behind were never served, so a
+	/// range added back over them gets their groups rather than waiting on keys the wire
+	/// never hears of.
+	#[kio::test]
+	async fn lite07_a_range_added_back_gets_the_gaps_left_behind() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		for key in 0..8 {
+			write_group(&mut track, key, key);
+		}
+		let single = |key| lite::Range::span(Some(key), 0, Some(key), None);
+		let bounds = Bounds::new(&[single(0)], None);
+		let subscriber = track.subscribe(track::Subscription::default().with_ranges(bounds.ranges.iter().copied()));
+		let session = Log::default();
+		let (mut run, mut writer, log) = lite07_run(SinkSession::new(session.clone()), subscriber);
+		asked(&mut run, &bounds.ranges);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		for (id, key) in [(1, 2), (2, 4), (3, 6)] {
+			run.update(lite07_add(&run, &[], id, &[single(key)]));
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		}
+		assert_eq!(group_headers(&session, Version::Lite07), [0, 2, 4, 6]);
+
+		run.update(lite07_add(
+			&run,
+			&[],
+			4,
+			&[lite::Range::span(Some(0), 0, Some(7), None)],
+		));
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		let mut served = group_headers(&session, Version::Lite07);
+		served.dedup();
+		assert_eq!(served, (0..8).collect::<Vec<_>>(), "every key of the range is served");
+		let holes: Vec<_> = (responses(&mut writer, &log).await.into_iter())
+			.filter(|msg| matches!(msg, lite::SubscribeResponse::Drop(_)))
+			.collect();
+		assert!(holes.is_empty(), "nothing was given up: {holes:?}");
+	}
+
 	/// A range retired before SUBSCRIBE_START reported it gets none, and one still waiting
 	/// once the track ends is reported with no start.
 	#[kio::test]
@@ -9996,8 +10099,8 @@ mod serve_group_test {
 						start: Some(_),
 						largest: lite::Edge::Largest(_),
 					}),
-					lite::SubscribeResponse::Skip(lite::SubscribeSkip { groups }),
-				] if *groups == (0..2)
+					lite::SubscribeResponse::Drop(drop),
+				] if drop.groups == (0..2) && drop.error(Version::Lite07) == StreamError::Skip
 			),
 			"{answered:?}"
 		);
@@ -10047,6 +10150,31 @@ mod serve_group_test {
 			),
 			"{answered:?}"
 		);
+	}
+
+	/// A relay's copy that finished holding only groups past a range's time answers that range
+	/// only once its upstream placed the time, never empty for want of the history it doesn't
+	/// hold: the subscriber reads an empty answer as no group at or before the time.
+	#[kio::test]
+	async fn lite07_a_finished_copy_answers_a_time_only_once_placed() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		track.received();
+		track.anchored();
+		track.request_start(Some(0)).unwrap();
+		let (mut run, mut writer, log) = lite07_run_ranges(&track, &[lite::Range::span(Some(1000), 0, None, None)]);
+		write_group(&mut track, 5000, 5000);
+		write_group(&mut track, 6000, 6000);
+		track.finish_shared().unwrap();
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(starts(&responses(&mut writer, &log).await), []);
+
+		track.time_starts([(1000, Some(1000))]);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(starts(&responses(&mut writer, &log).await), [(0, Some(1000))]);
 	}
 
 	/// A relay's copy that placed one range from its upstream's answer, which also asked for
@@ -10293,6 +10421,33 @@ mod serve_group_test {
 		assert_eq!(holes, vec![4..6]);
 	}
 
+	/// A reset that may have cut a GROUP_END after the header arrived names the starts it told
+	/// again, as a skip.
+	#[kio::test]
+	async fn lite07_a_cut_group_end_is_named_again() {
+		let track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let subscriber = track.subscribe(None);
+		let (mut run, mut writer, log) = lite07_run(SinkSession::new(Log::default()), subscriber);
+		let mut group = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
+		group
+			.write_frame(Timestamp::from_millis(0).unwrap(), b"x".as_slice())
+			.unwrap();
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		group.finish_at(3).unwrap();
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		// The GROUP_END told 1 and 2, so nothing else names them.
+		assert_eq!(holes(&mut writer, &log).await, []);
+
+		// Group 0's stream reset after its GROUP_END, unacknowledged.
+		run.ctx.outcomes.cut.lock().unwrap().push(1..3);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(holes(&mut writer, &log).await, [("skip", 1..3)]);
+	}
+
 	/// A whole group whose stream fails before its GROUP_END names its span in its drop, which
 	/// tells the rest of the span too, so the end of the track names none of it again.
 	#[kio::test]
@@ -10321,10 +10476,10 @@ mod serve_group_test {
 		assert_eq!(drops, [0..4, 4..6]);
 	}
 
-	/// A relay forwards a SKIP over a DROP it already forwarded for the same groups, since the
-	/// skip replaces it; lite-06, which names a skip as a drop, sends nothing more.
+	/// A relay forwards no SKIP over a DROP it already forwarded for the same groups: every
+	/// drop is final on the wire, though the track itself records the skip.
 	#[kio::test]
-	async fn a_skip_goes_out_over_a_forwarded_drop() {
+	async fn no_skip_goes_out_over_a_forwarded_drop() {
 		for version in [Version::Lite07, Version::Lite06] {
 			let mut track = track::Producer::new(
 				Arc::new(broadcast::Info::default()),
@@ -10350,17 +10505,15 @@ mod serve_group_test {
 			while !buf.is_empty() {
 				let (msg, size) = lite::SubscribeResponse::decode_slice(buf, version).unwrap();
 				buf = &buf[size..];
-				match msg {
-					lite::SubscribeResponse::Skip(skip) => holes.push(("skip", skip.groups)),
-					lite::SubscribeResponse::Drop(drop) => holes.push(("drop", drop.groups)),
-					_ => {}
+				if let lite::SubscribeResponse::Drop(drop) = msg {
+					let kind = match version.has_skip() && drop.error(version) == StreamError::Skip {
+						true => "skip",
+						false => "drop",
+					};
+					holes.push((kind, drop.groups));
 				}
 			}
-			let expected = match version.has_skip() {
-				true => vec![("drop", 1..3), ("skip", 1..3)],
-				false => vec![("drop", 1..3)],
-			};
-			assert_eq!(holes, expected, "{version}");
+			assert_eq!(holes, [("drop", 1..3)], "{version}");
 		}
 	}
 
@@ -10392,10 +10545,12 @@ mod serve_group_test {
 		while !buf.is_empty() {
 			let (msg, size) = lite::SubscribeResponse::decode_slice(buf, Version::Lite07).unwrap();
 			buf = &buf[size..];
-			match msg {
-				lite::SubscribeResponse::Skip(skip) => skips.push((skip.groups.start, skip.groups.end)),
-				lite::SubscribeResponse::Drop(_) => drops += 1,
-				_ => {}
+			if let lite::SubscribeResponse::Drop(drop) = msg {
+				if drop.error(Version::Lite07) == StreamError::Skip {
+					skips.push((drop.groups.start, drop.groups.end));
+				} else {
+					drops += 1;
+				}
 			}
 		}
 		assert_eq!((skips, drops), (vec![(1, FAR), (FAR + 1, FAR + 5)], 0));
@@ -10493,15 +10648,17 @@ mod serve_group_test {
 		while !buf.is_empty() {
 			let (msg, size) = lite::SubscribeResponse::decode_slice(buf, version).unwrap();
 			buf = &buf[size..];
-			if let lite::SubscribeResponse::Drop(drop) = msg {
+			if let lite::SubscribeResponse::Drop(drop) = msg
+				&& !(version.has_skip() && drop.error(version) == StreamError::Skip)
+			{
 				drops.push((drop.groups.start, drop.groups.end - 1));
 			}
 		}
 		drops
 	}
 
-	/// The lite-07 SUBSCRIBE_SKIP and SUBSCRIBE_DROP a run loop's subscribe stream carried, in
-	/// order, once flushed.
+	/// The lite-07 SUBSCRIBE_DROP messages a run loop's subscribe stream carried, split into
+	/// skips (`SKIP`) and drops, in order, once flushed.
 	async fn holes(
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
 		log: &Log,
@@ -10510,8 +10667,13 @@ mod serve_group_test {
 			.await
 			.into_iter()
 			.filter_map(|msg| match msg {
-				lite::SubscribeResponse::Skip(skip) => Some(("skip", skip.groups)),
-				lite::SubscribeResponse::Drop(drop) => Some(("drop", drop.groups)),
+				lite::SubscribeResponse::Drop(drop) => {
+					let kind = match drop.error(Version::Lite07) == StreamError::Skip {
+						true => "skip",
+						false => "drop",
+					};
+					Some((kind, drop.groups))
+				}
 				_ => None,
 			})
 			.collect()
@@ -10594,11 +10756,16 @@ mod serve_group_test {
 	/// A group whose stream wrote its FIN, and on lite-07 its GROUP_END, but goes stale before
 	/// the acknowledgement resets with OLD, so its bytes stop holding the send window. Before
 	/// lite-07 a stale drop names it; lite-07's reset delivers the header instead, so a
-	/// subscriber that read the stream whole first is never told otherwise. It is never served
-	/// again: the reset is final even when a later update widens the budget.
+	/// subscriber that read the stream whole first is never told otherwise, unless the
+	/// transport resets plainly, which may lose the header, so a drop names the group again.
+	/// It is never served again: the reset is final even when a later update widens the budget.
 	#[kio::test]
 	async fn a_stale_unacknowledged_fin_is_never_served_again() {
-		for version in [Version::Lite06, Version::Lite07] {
+		for (version, plain) in [
+			(Version::Lite06, false),
+			(Version::Lite07, false),
+			(Version::Lite07, true),
+		] {
 			let budget = Duration::from_millis(1500);
 			let mut track = track::Producer::new(
 				Arc::new(broadcast::Info::default()),
@@ -10607,11 +10774,9 @@ mod serve_group_test {
 			);
 			let subscriber = track.subscribe(track::Subscription::default().with_max(budget));
 			let session = Log::default();
-			let (mut run, mut writer, log) = lite_run(
-				version,
-				SinkSession::new(session.clone()).with_unacked_fin(),
-				subscriber,
-			);
+			let sink = SinkSession::new(session.clone()).with_unacked_fin();
+			let sink = if plain { sink.with_plain_reset() } else { sink };
+			let (mut run, mut writer, log) = lite_run(version, sink, subscriber);
 			let update = |max_delay| lite::SubscribeUpdate {
 				wanted_group: None,
 				priority: 0,
@@ -10631,7 +10796,7 @@ mod serve_group_test {
 			write_group(&mut track, 1, 1000);
 			write_group(&mut track, 2, 6000);
 			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-			let reliable = version.has_reliable_reset();
+			let reliable = version.has_reliable_reset() && !plain;
 			let dropped: &[(u64, u64)] = match reliable {
 				true => &[],
 				false => &[(0, 0)],
@@ -10834,11 +10999,12 @@ mod serve_group_test {
 
 	/// A lite-07 group stream that fails after its header, whatever this side gives it up for,
 	/// resets still delivering that header, which accounts for the group: no drop names it. One
-	/// that fails before the transport took the header resets plainly, and a drop names it.
+	/// that fails before the transport took the header resets plainly, and a drop names it, as
+	/// does one whose transport resets plainly, since its peer may discard the unread header.
 	#[kio::test]
 	async fn lite07_a_reset_after_the_header_delivers_it_and_names_nothing() {
 		let version = Version::Lite07;
-		for written in [true, false] {
+		for (written, plain) in [(true, false), (false, false), (true, true)] {
 			let track = track::Producer::new(
 				Arc::new(broadcast::Info::default()),
 				"test",
@@ -10847,6 +11013,7 @@ mod serve_group_test {
 			// A stream whose writes park keeps its header buffered.
 			let gate = kio::Producer::new(written);
 			let session = SinkSession::gated_uni(gate.consume());
+			let session = if plain { session.with_plain_reset() } else { session };
 			let streams = session.log.clone();
 			let (mut run, mut writer, log) = lite07_run(session, track.subscribe(None));
 			let mut group = track.create_group(group::Info { start: 0 }).unwrap();
@@ -10857,12 +11024,17 @@ mod serve_group_test {
 
 			group.abort(Error::Evicted).unwrap();
 			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-			match written {
-				true => {
+			match (written, plain) {
+				(true, false) => {
 					assert_eq!(group_resets(&streams, version), [(0, true, StreamError::Evicted)]);
 					assert_eq!(drops(&mut writer, &log, version).await, []);
 				}
-				false => {
+				// A plain reset may lose the header the peer has not read, so a drop names it.
+				(true, true) => {
+					assert_eq!(group_resets(&streams, version), [(0, false, StreamError::Evicted)]);
+					assert_eq!(drops(&mut writer, &log, version).await, [(0, 0)]);
+				}
+				(false, _) => {
 					assert!(group_resets(&streams, version).is_empty(), "no header went out");
 					assert_eq!(streams.resets(), [StreamError::Evicted.to_code()]);
 					assert_eq!(drops(&mut writer, &log, version).await, [(0, 0)]);

@@ -259,11 +259,25 @@ and peer resets), removes `FETCH` (`0x3`) and `SUBSCRIBE_SKIP` (superseding the
 and exclusive `End` plus one-shot `SUBSCRIBE` + immediate `FIN`, moves
 `Priority` and `Group Order` onto each `Range` and `Retune`, and adds judged
 `Max Age` to `SUBSCRIBE_DROP(OLD)`.
+Superseded 2026-11-26: no `Previous Delta`; the previous group's `GROUP_END` proves the gap, `SUBSCRIBE_DROP(SKIP)` (`0x3A`) covers the rest (removing `SUBSCRIBE_SKIP` `0x3`), and a drop names a group a plain reset may have lost.
+
+Decided 2026-11-26 (maintainer, `/quest-plan` of the HLS and lite-07 audit):
+✅ the cut also waits on
+[Identity rename and 256-byte cap](/quest/m2/identity-rename-and-cap.md)
+(renaming `Instance` to `Identity`, capping it at 256 UTF-8 bytes for public
+keys, and hashing it in `moq-hls` URLs; rejected: keeping `Instance`, 1024-byte
+cap, raw URLs, no wire cap) and on
+[metadata-only subscriptions](/quest/m2/subscribe-meta-wire.md) plus its
+[subscriber API](/quest/m2/subscribe-meta.md) (reversing the 2026-11-25
+deferral to `m3` / lite-08 because `moq-hls` live and archive/VOD indexing is
+an immediate consumer and `moq_subscription` changes the C ABI; rejected:
+moving only the wire into `m2`, leaving both in `m3`).
 
 ## Required
 
-- [The router ranks one claim prefix's filings as one tier](/quest/m2/router-claim-tier.md) - the lite-07 router follows the draft's one-tier ranking instead of stopping at the deepest filing
-- [Redesign lite-07 subscribe and fetch](/quest/m2/lite07-subscribe/README.md) - data-layer Previous Delta, RESET_STREAM_AT, FETCH and SUBSCRIBE_SKIP removal, per-range Priority and Order, and judged OLD drops freeze into lite-07
+- [Redesign lite-07 subscribe and fetch](/quest/m2/lite07-subscribe/README.md) - GROUP_END and SUBSCRIBE_DROP(SKIP) gap accounting, RESET_STREAM_AT, FETCH removal, per-range Priority and Order, and judged OLD drops freeze into lite-07
+- [Rename Instance to Identity and cap it at 256 UTF-8 bytes on lite-07](/quest/m2/identity-rename-and-cap.md) - wire rename and 256-byte UTF-8 ceiling on Identity freeze into lite-07
+- [Metadata mode on the lite-07 wire, served](/quest/m2/subscribe-meta-wire.md) - Meta byte on SUBSCRIBE and payload-less FRAME freeze into lite-07
 
 ## Related
 

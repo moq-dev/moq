@@ -502,6 +502,12 @@ async fn an_ordered_reader_is_told_of_every_group_the_origin_evicted() {
 					.write_frame(Timestamp::from_millis(key * 1000).unwrap(), vec![0u8; PAYLOAD])
 					.unwrap();
 				group.finish().unwrap();
+				// Newest first, the origin would serve the last written: let group 0 take the
+				// credit before the rest queue behind it. Time is simulated, so this only lets
+				// every task settle.
+				if key == 0 {
+					kio::clock::sleep(Duration::from_millis(1)).await;
+				}
 			}
 			// Nobody reads the queued groups, so the origin reclaims all but the newest.
 			kio::clock::sleep(EXPIRY * 3).await;

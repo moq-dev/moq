@@ -351,13 +351,15 @@ impl Reader {
 				};
 				run += 1;
 				let instance = broadcast.info().instance.clone();
-				// From the live edge, and never skipping a group however late.
+				// From the live edge, and never skipping a group however late. Oldest first, so a
+				// backlog held across a failure reads in key order, as the report counts it.
 				let prefs = track::Subscription::default()
 					.with_ranges([track::Range::from(track::Start::Live {
 						min: Some(Duration::ZERO),
 						max: None,
 					})])
-					.with_max(Duration::from_secs(60));
+					.with_max(Duration::from_secs(60))
+					.with_order(track::Order::Ascending);
 				let Ok(mut sub) = broadcast.track(TRACK).unwrap().subscribe(prefs).await else {
 					continue;
 				};
