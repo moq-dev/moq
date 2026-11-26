@@ -42,9 +42,9 @@ its wall time: where the camera's RTCP sender report for its stream says it was
 taken, or, for a stream without a usable report, no later than any of its
 frames arrived, which trails the capture by the camera's encoding and the
 network. A session waits up to one report interval (5 s) after its first frame
-for every stream's report, holding the catalog and each stream's frames since
-its latest keyframe meanwhile. Each stream is placed on its own, since a
-camera's `rtptime` need not align them.
+for every stream's report to agree with its arrivals, holding the catalog and
+each stream's frames since its latest keyframe meanwhile. Each stream is placed
+on its own, since a camera's `rtptime` need not align them.
 
 A clock fixed before the session, by a shared catalog or
 `Config::with_clock`, is shifted onto. Two sessions, such as a camera's SD and
