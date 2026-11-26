@@ -102,6 +102,43 @@ also counts `skips`, each jump that dropped buffered audio rather than playing
 it faster, which the stats panel shows and the feedback track leaves out. The token must allow
 publishing under the echo path.
 
+## Playing in step
+
+Wrap several `<moq-watch>` in a `<moq-sync>` to show the same capture instant in
+every one of them, such as a camera wall or the angles of one event. Each
+broadcast is placed on one timeline through its catalog's
+[`sync.clock`](/concept/hang), so the cameras' clocks must agree (NTP is enough)
+and each publisher must advertise one.
+
+```html
+<moq-sync cap="1s" style="display: grid; grid-template-columns: 1fr 1fr">
+    <moq-watch url="https://relay.example.com/anon" name="site/gate.hang" muted><canvas></canvas></moq-watch>
+    <moq-watch url="https://relay.example.com/anon" name="site/yard.hang" muted><canvas></canvas></moq-watch>
+</moq-sync>
+```
+
+`<moq-sync>` lays out as its children alone (`display: contents`), so it can
+wrap the cells of a grid. Its `delay` replaces each member's: `"auto"` (the
+default) holds each member's own measured playout target behind its fastest
+arrival, and a duration holds that much instead. The group then plays as late
+as its slowest member needs, so the faster ones wait for it.
+
+A member that would have to wait longer than `cap` (10 s by default) to stay in
+step plays alone instead, at its own delay, and carries an `out-of-sync`
+attribute you can style, until it fits again. So does a broadcast without a
+`sync.clock`, and one whose clock is far off, since the group follows whichever
+playhead the most members agree on. A member that receives nothing yet, or is
+hidden by `visible`, neither holds the group back nor leaves it: it joins at the
+shared playhead once frames arrive. `delay="instant"` is refused on
+`<moq-sync>`, and a member with `delay="instant"` or a `lookahead` is refused
+with an `error` event and plays alone, since a shared timeline can honor
+neither. Audio follows each member's clock as usual, so unmute the one you want
+to hear.
+
+Without the element, pass one `Watch.Sync` as `group` to each
+[`Player`](#without-the-element); `player.sync.out.outOfSync` and
+`player.sync.out.error` report the same as the attribute and the event.
+
 ## Binding from a framework
 
 `import "@moq/watch/element"` registers `<moq-watch>` when the module
