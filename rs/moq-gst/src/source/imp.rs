@@ -1922,8 +1922,9 @@ impl Play {
 	}
 }
 
-/// Whether `track` holds nothing but its end, polled until one parks without waking itself. Any
-/// item still unread, or a failure, is not the end, so a publisher's input never keeps this going.
+/// Whether `track` holds nothing but its end, polled until one parks without waking itself. Past
+/// one stop marker, any item still unread, or a failure, is not the end, so a publisher's input
+/// never keeps this going.
 fn drained(track: &mut moq_mux::container::Consumer<moq_mux::catalog::hang::Container>) -> bool {
 	/// Records a wake of the poll that called it.
 	struct Woken(AtomicBool);
@@ -1936,9 +1937,13 @@ fn drained(track: &mut moq_mux::container::Consumer<moq_mux::catalog::hang::Cont
 
 	let woken = Arc::new(Woken(AtomicBool::new(false)));
 	let waiter = kio::Waiter::new(woken.clone().into());
+	let mut marked = false;
 	loop {
 		match track.poll_read(&waiter) {
 			std::task::Poll::Ready(Ok(None)) => return true,
+			// The final stop marker, which a track's end follows.
+			std::task::Poll::Ready(Ok(Some(moq_mux::container::Read::End { .. })))
+				if !std::mem::replace(&mut marked, true) => {}
 			std::task::Poll::Ready(_) => return false,
 			std::task::Poll::Pending if woken.0.swap(false, Ordering::AcqRel) => {}
 			std::task::Poll::Pending => return false,
