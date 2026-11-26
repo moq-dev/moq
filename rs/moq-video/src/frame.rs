@@ -3024,6 +3024,50 @@ mod tests {
 		);
 	}
 
+	/// A real frame from a Sony ZV-E10 (MJPEG-only UVC, 4:2:2, sent without an
+	/// end-of-image marker), as the V4L2 and PipeWire paths receive it. The
+	/// subject's face is wiped to a gray block, losslessly. Each 80x80 block of
+	/// the luma must average what ffmpeg's decode of the same file does, so a
+	/// squashed, shifted, or torn picture fails.
+	#[cfg(all(target_os = "linux", feature = "capture"))]
+	#[test]
+	fn mjpeg_capture_decodes_a_real_camera_frame() {
+		const FRAME: &[u8] = include_bytes!("frame/test_data/zv_e10_1280x720.jpg");
+		#[rustfmt::skip]
+		const FFMPEG_LUMA: [u8; 144] = [
+			18, 17, 18, 23, 33, 35, 36, 21, 16, 17, 17, 17, 21, 22, 24, 19,
+			18, 17, 19, 88, 107, 107, 107, 53, 18, 18, 18, 17, 20, 19, 23, 20,
+			18, 18, 20, 104, 126, 126, 126, 60, 16, 16, 18, 16, 21, 20, 23, 17,
+			18, 18, 20, 104, 126, 126, 126, 60, 17, 17, 19, 18, 20, 18, 19, 17,
+			17, 18, 20, 104, 126, 126, 126, 60, 16, 17, 18, 17, 18, 18, 17, 17,
+			18, 18, 23, 104, 126, 126, 126, 60, 16, 16, 19, 17, 17, 17, 16, 17,
+			19, 21, 19, 68, 82, 82, 82, 42, 16, 18, 21, 18, 16, 17, 17, 16,
+			20, 19, 16, 16, 16, 16, 16, 16, 16, 17, 18, 16, 17, 16, 16, 17,
+			20, 16, 16, 17, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+		];
+		let size = Size::new(1280, 720);
+		let frame = super::I420::from_mjpeg(FRAME, size).expect("camera frame to i420");
+		assert_eq!(frame.size(), size);
+		let luma = size.pixels() as usize;
+		let (width, block) = (1280, 80);
+		for (index, want) in FFMPEG_LUMA.iter().enumerate() {
+			let (column, row) = (index % 16, index / 16);
+			let sum: usize = (0..block)
+				.flat_map(|y| (0..block).map(move |x| (row * block + y) * width + column * block + x))
+				.map(|offset| usize::from(frame.data()[offset]))
+				.sum();
+			let got = sum / (block * block);
+			assert!(
+				got.abs_diff(usize::from(*want)) <= 2,
+				"block {column},{row}: {got}, ffmpeg {want}"
+			);
+		}
+		assert!(
+			frame.data()[luma..].iter().all(|&c| (96..=160).contains(&c)),
+			"the dark scene is nearly neutral"
+		);
+	}
+
 	/// A short buffer is rejected at construction rather than panicking later: the
 	/// plane splits in `y`/`u`/`v` and the CoreVideo upload both index blindly, so
 	/// a public `I420` has to be impossible to build malformed.
