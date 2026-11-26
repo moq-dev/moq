@@ -1448,6 +1448,7 @@ impl Default for Messages {
 					start: Some(lite::Anchor::Absolute(crate::track::Position::group(1_000))),
 					end: Some(lite::Anchor::Absolute(crate::track::Position::group(2_001))),
 				}]),
+				lost: Vec::new(),
 			},
 			lite_start: lite::SubscribeResponse::Start(lite::SubscribeStart {
 				id: 0,

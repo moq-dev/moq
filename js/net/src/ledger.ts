@@ -107,6 +107,27 @@ export class Ledger {
 		}
 	}
 
+	/**
+	 * Account every gap between two runs that no run of `owed` (sorted, disjoint) reaches: nothing
+	 * asks for those keys anymore, so nothing names them and nothing waits for them. Mirrors the
+	 * Rust `Ledger::retire`.
+	 */
+	retire(owed: readonly { start: bigint; end: bigint }[], at: Instant): void {
+		const first = this.#runs.first();
+		const last = this.#runs.last();
+		if (!first || !last) return;
+		for (const gap of this.gaps(first.start, last.end)) {
+			let below = gap.start;
+			for (const run of owed) {
+				if (run.end <= below) continue;
+				if (run.start >= gap.end) break;
+				this.account(below, min(run.start, gap.end), at);
+				below = max(below, run.end);
+			}
+			this.account(below, gap.end, at);
+		}
+	}
+
 	/** Whether a gap separates two runs, so {@link expire} has anything to fold. */
 	hasGaps(): boolean {
 		return this.#runs.size > 1;

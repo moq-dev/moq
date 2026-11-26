@@ -1731,9 +1731,12 @@ impl Resolve<lite::Subscribe<'static>> for lite::SubscribeUpdate {
 /// A SUBSCRIBE_UPDATE resolved by Range ID.
 type LiveUpdate = lite::SubscribeUpdate<lite::Applied>;
 
-/// `earlier` followed by `later`: the later's preferences, and both edits as one.
+/// `earlier` followed by `later`: the later's preferences, and both edits and lost lists as one.
 fn then(earlier: LiveUpdate, mut later: LiveUpdate) -> LiveUpdate {
 	let ranges = std::mem::replace(&mut later.ranges, lite::Applied::Replace(Vec::new()));
+	let mut lost = earlier.lost;
+	lost.append(&mut later.lost);
+	later.lost = lost;
 	later.with_ranges(earlier.ranges.then(ranges))
 }
 
@@ -5266,7 +5269,8 @@ struct GroupOutcomes {
 	/// The spans of the groups whose GROUP_END went out, which their stream accounts for.
 	whole: Mutex<Vec<Range<u64>>>,
 	/// Lite-07: the starts strictly inside a whole group's span whose GROUP_END a reset may
-	/// have cut after its header arrived, which the control stream names again.
+	/// have cut after its header arrived, or whose stream the subscriber reported lost, which
+	/// the control stream names again.
 	cut: Mutex<Vec<Range<u64>>>,
 	/// Lite-07: the frame each group a range ends partway through stops before, by group
 	/// ([`Frames::stops`]), which a group already streaming follows as an update moves it.
@@ -5602,6 +5606,16 @@ impl TrackRun {
 	fn update(&mut self, upd: LiveUpdate) {
 		if let Some(datagrams) = &mut self.datagrams {
 			datagrams.steer(upd.priority);
+		}
+		// Lite-07: the subscriber discarded these groups' streams before reading their end, so
+		// the starts inside each one's span go out again as a skip, as for a cut GROUP_END. Only
+		// a group the cache still holds whole says where its span ends.
+		for group in &upd.lost {
+			let next = group.saturating_add(1);
+			let end = self.track.span_end(next);
+			if next < end {
+				self.ctx.outcomes.cut.lock().unwrap().push(next..end);
+			}
 		}
 		// The update moves the cursor and the bounds the track side judges against, which
 		// notifies nothing it parked on.
@@ -7034,6 +7048,7 @@ impl UpdateBench {
 			max_delay: Some(Duration::from_secs(3600)),
 			ranges,
 			order: Order::Ascending,
+			lost: Vec::new(),
 		};
 		let update = <lite::SubscribeUpdate as Resolve<lite::Subscribe<'static>>>::resolve(update, &mut self.live)
 			.expect("a valid edit");
@@ -9122,6 +9137,7 @@ mod serve_group_test {
 			max_delay: Some(Duration::ZERO),
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 			order: Order::Descending,
+			lost: Vec::new(),
 		};
 		run.replace(update(Some(0)));
 		assert_eq!(track.demand().wanted_start(), Some(0), "stale request is not a join");
@@ -9283,6 +9299,7 @@ mod serve_group_test {
 			priority: 7,
 			max_delay: Some(Duration::ZERO),
 			ranges: vec![lite::Range::span(None, 0, None, None)],
+			lost: Vec::new(),
 		});
 		{
 			let mut poll = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
@@ -9461,6 +9478,7 @@ mod serve_group_test {
 				retuned: Vec::new(),
 			},
 			order: Order::Descending,
+			lost: Vec::new(),
 		}
 	}
 
@@ -9492,6 +9510,7 @@ mod serve_group_test {
 				retuned: Vec::new(),
 			},
 			order: Order::Descending,
+			lost: Vec::new(),
 		};
 		let resume = lite::Range::span(Some(5), 2, None, None);
 		run.update(edit(&[0], &[(1, resume)]));
@@ -10402,20 +10421,64 @@ mod serve_group_test {
 			"test",
 			crate::track::Info::timed(),
 		);
+		let subscriber = track.subscribe(track::Subscription::default().with_max(Duration::from_millis(500)));
+		let session = SinkSession::new(Log::default()).with_unacked_fin();
+		let streams = session.log.clone();
+		let (mut run, mut writer, log) = lite07_run(session, subscriber);
+		let mut group = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
+		group
+			.write_frame(Timestamp::from_millis(0).unwrap(), b"x".as_slice())
+			.unwrap();
+		group.finish_at(3).unwrap();
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		// The GROUP_END told 1 and 2, so nothing else names them.
+		assert_eq!(holes(&mut writer, &log).await, []);
+
+		// Group 0 goes stale with its FIN unacknowledged, so its stream resets after the
+		// GROUP_END, which the reset may cut.
+		kio::clock::sim::advance(Duration::from_secs(1)).await;
+		let mut edge = track.create_group(group::Info { start: 3 }).unwrap();
+		edge.write_frame(Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
+			.unwrap();
+		edge.finish().unwrap();
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert!(streams.resets().contains(&StreamError::Old.to_code()), "group 0 reset");
+		assert_eq!(holes(&mut writer, &log).await, [("skip", 1..3)]);
+	}
+
+	/// A group whose stream the subscriber reports lost, such as one its transport evicted after
+	/// the FIN, before reading its GROUP_END: the starts inside its span go out again as a skip,
+	/// as for a cut GROUP_END. A group whose span holds no other start names nothing.
+	#[kio::test]
+	async fn lite07_a_lost_group_end_is_named_again() {
+		let track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
 		let subscriber = track.subscribe(None);
 		let (mut run, mut writer, log) = lite07_run(SinkSession::new(Log::default()), subscriber);
 		let mut group = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
 		group
 			.write_frame(Timestamp::from_millis(0).unwrap(), b"x".as_slice())
 			.unwrap();
-		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		group.finish_at(3).unwrap();
+		let mut next = track.create_group(group::Info { start: 3 }).unwrap();
+		next.write_frame(Timestamp::from_millis(3).unwrap(), b"y".as_slice())
+			.unwrap();
+		next.finish().unwrap();
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-		// The GROUP_END told 1 and 2, so nothing else names them.
 		assert_eq!(holes(&mut writer, &log).await, []);
 
-		// Group 0's stream reset after its GROUP_END, unacknowledged.
-		run.ctx.outcomes.cut.lock().unwrap().push(1..3);
+		let lost = |lost: Vec<u64>| lite::SubscribeUpdate {
+			wanted_group: None,
+			priority: 0,
+			max_delay: None,
+			ranges: kept_range(Version::Lite07, lite::Range::OPEN),
+			order: Order::Descending,
+			lost,
+		};
+		run.update(lost(vec![0, 3]));
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		assert_eq!(holes(&mut writer, &log).await, [("skip", 1..3)]);
 	}
@@ -10702,6 +10765,7 @@ mod serve_group_test {
 					max_delay: Some(if widen { Duration::from_secs(10) } else { budget }),
 					ranges: kept_range(version, lite::Range::span(None, 0, None, None)),
 					order: Order::Descending,
+					lost: Vec::new(),
 				});
 				while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 				assert_eq!(run.ctx.outcomes.opened.load(Ordering::Relaxed), 3, "{case}: no stream");
@@ -10744,6 +10808,7 @@ mod serve_group_test {
 				max_delay: Some(max_delay),
 				ranges: kept_range(version, lite::Range::span(None, 0, None, None)),
 				order: Order::Descending,
+				lost: Vec::new(),
 			};
 
 			// Group 0 goes out whole: every frame and the FIN, which the peer has yet to
@@ -11092,6 +11157,7 @@ mod serve_group_test {
 				priority: 1,
 				max_delay: Some(Duration::from_millis(100)),
 				ranges: vec![lite::Range::span(start, 0, None, None)],
+				lost: Vec::new(),
 			};
 			let named = drops(&mut writer, &log, version).await.len();
 			run.replace(update(None));
@@ -11145,6 +11211,7 @@ mod serve_group_test {
 			priority: 0,
 			max_delay: Some(Duration::from_secs(60)),
 			ranges: vec![lite::Range::span(Some(0), 0, None, None)],
+			lost: Vec::new(),
 		});
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		assert_eq!(drops(&mut writer, &log, version).await, [(2, 2)]);
@@ -11951,6 +12018,7 @@ mod serve_group_test {
 					priority: 0,
 					max_delay: None,
 					ranges: vec![lite::Range::span(Some(10), 0, None, None)],
+					lost: Vec::new(),
 				});
 			}
 			assert!(
@@ -12022,6 +12090,7 @@ mod serve_group_test {
 			priority: 0,
 			max_delay: Some(Duration::from_secs(60)),
 			ranges: vec![lite::Range::span(Some(0), 0, None, None)],
+			lost: Vec::new(),
 		});
 		{
 			let mut run = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
@@ -12063,6 +12132,7 @@ mod serve_group_test {
 			priority: 0,
 			max_delay: None,
 			ranges: vec![lite::Range::span(Some(0), 0, None, None)],
+			lost: Vec::new(),
 		});
 		{
 			let mut run = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
@@ -12106,6 +12176,7 @@ mod serve_group_test {
 			priority: 0,
 			max_delay: Some(Duration::from_secs(1)),
 			ranges: vec![lite::Range::span(Some(start_group), 0, None, None)],
+			lost: Vec::new(),
 		};
 		run.replace(update(5));
 		{
@@ -12151,6 +12222,7 @@ mod serve_group_test {
 			priority: 0,
 			max_delay: Some(Duration::from_secs(10)),
 			ranges: vec![lite::Range::span(Some(start_group), 0, None, None)],
+			lost: Vec::new(),
 		};
 		run.replace(update(5));
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
@@ -12196,6 +12268,7 @@ mod serve_group_test {
 			priority: 0,
 			max_delay: Some(Duration::from_secs(60)),
 			ranges: vec![lite::Range::span(None, 0, None, None)],
+			lost: Vec::new(),
 		});
 		write_group(&mut track, 5, 5);
 		assert_eq!(settle(&mut run), 1, "served a group below the latest");
@@ -12287,6 +12360,7 @@ mod serve_group_test {
 			priority: 0,
 			max_delay: Some(Duration::from_secs(60)),
 			ranges: vec![lite::Range::span(None, 0, None, None)],
+			lost: Vec::new(),
 		});
 
 		write_group(&mut track, 0, 0);
@@ -12423,6 +12497,7 @@ mod serve_group_test {
 			priority: 0,
 			max_delay: Some(Duration::from_secs(30)),
 			ranges: vec![lite::Range::span(None, 0, None, None)],
+			lost: Vec::new(),
 		});
 		relay.settle();
 		assert_eq!(relay.opened(), 3, "group 0 is cached and now in range");
@@ -12449,6 +12524,7 @@ mod serve_group_test {
 			priority: 0,
 			max_delay: Some(Duration::ZERO),
 			ranges: vec![lite::Range::span(Some(7), 0, None, None)],
+			lost: Vec::new(),
 		};
 		relay.run.replace(update);
 		relay.settle();
@@ -14045,6 +14121,7 @@ mod tests {
 				add: Vec::new(),
 				retune: Vec::new(),
 			},
+			lost: Vec::new(),
 		};
 		session.push(&update(Some(2), 3).encode_bytes(version).unwrap());
 		session.push(&update(Some(2), 7).encode_bytes(version).unwrap());
@@ -14108,6 +14185,7 @@ mod tests {
 				add: Vec::new(),
 				retune: Vec::new(),
 			},
+			lost: Vec::new(),
 		}
 	}
 

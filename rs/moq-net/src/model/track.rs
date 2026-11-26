@@ -2078,7 +2078,8 @@ impl TrackState {
 
 	/// Skip what of `groups` holds no cached group, replacing any drop of it, final or stale:
 	/// "never produced" is the most authoritative verdict on a key. A reader a drop
-	/// already ended stays ended, and a relay forwards the skip over the drop it reported.
+	/// already ended stays ended, and a relay that reported the drop forwards no skip over it:
+	/// every drop is final on the wire.
 	/// A group that arrived is never overwritten, since it was produced after all. Returns
 	/// the cached keys left alone. See [`Producer::skip_groups`].
 	fn skip_groups(&mut self, groups: ops::Range<u64>) -> RangeSet<u64> {
@@ -5783,14 +5784,16 @@ impl Producer {
 	pub(crate) fn finish_shared(&self) -> Result<()> {
 		let mut state = self.modify()?;
 		let end = Position::group(state.next_key());
+		// The wire settled the tail, so nothing is in flight below the declared end: readers stop
+		// waiting at it. A proven copy holds no gap the wire left owed, so its end, errored or
+		// past its last group, stands; a graced one's stands only where it is.
 		if let Outcome::Ending(declared) = &state.outcome
-			&& declared.at == end
-			&& declared.error.is_none()
 			&& declared.tail.is_some()
+			&& (state.proven || (declared.at == end && declared.error.is_none()))
 		{
-			let settled = declared.settled();
+			let (at, error, settled) = (declared.at, declared.error.clone(), declared.settled());
 			state.outcome = Outcome::Open;
-			return state.declare(end, None, None, settled);
+			return state.declare(at, error, None, settled);
 		}
 		state.set_end(end, None)
 	}
@@ -6091,7 +6094,8 @@ impl Producer {
 	/// key is refused with [`Error::Skipped`], and a later drop of it is ignored.
 	///
 	/// A skip replaces any drop of the same keys, whatever its error: a reader the drop
-	/// already ended stays ended, and every later reader and relay sees the skip. A group
+	/// already ended stays ended, and every later reader sees the skip. A relay that reported
+	/// the drop forwards no skip over it, since every drop is final on the wire. A group
 	/// already cached keeps what it is, since it was produced after all.
 	pub fn skip_groups(&self, groups: ops::Range<u64>) {
 		self.skip_received(groups);
@@ -24291,6 +24295,36 @@ mod test {
 			.expect("should not block")
 			.expect("would have errored");
 		assert!(done.is_none(), "track completes once the boundary is reached");
+	}
+
+	/// A proven copy holding a gap no message names, such as one between two of its
+	/// subscription's ranges, reaches its errored end once the wire settles its tail: nothing is
+	/// in flight below the end then, so a reader gets the error rather than a clean end.
+	#[cfg(feature = "async")]
+	#[test]
+	fn a_settled_wire_tail_ends_a_proven_copy_with_its_error() {
+		let mut producer = received_producer(None);
+		producer.proven();
+		for key in [0, 2] {
+			framed(&producer, key, 1).finish().unwrap();
+		}
+		producer.end_at(Position::group(3), Some(Error::App(7))).unwrap();
+		assert!(!producer.state.read().is_complete(), "the copy still owes 1");
+
+		producer.finish_shared().unwrap();
+		assert!(producer.state.read().is_complete());
+		let mut ordered = producer
+			.subscribe(replay().with_ranges([Range {
+				start: crate::track::Start::Time(2),
+				end: None,
+			}]))
+			.ordered();
+		let noop = kio::Waiter::noop();
+		assert!(matches!(ordered.poll_next_group(&noop), Poll::Ready(Ok(Some(group))) if group.start == 2));
+		assert!(matches!(
+			ordered.poll_next_group(&noop),
+			Poll::Ready(Err(Error::App(7)))
+		));
 	}
 
 	/// An end declared with an error keeps the history below it: every reader gets the groups

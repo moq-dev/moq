@@ -229,6 +229,10 @@ struct Parked {
 	waiting: Vec<(u64, lite::Group)>,
 	/// What the accept opened for each, until its stream takes it.
 	opened: HashMap<u64, Result<Open, Error>>,
+	/// Waiting headers whose stream failed before the accept, such as one its transport
+	/// evicted, by ticket: the accept still opens each group and ends it, so the copy and the
+	/// tail learn of a group the publisher served.
+	failed: std::collections::HashSet<u64>,
 	next: u64,
 }
 
@@ -335,10 +339,24 @@ impl TrackEntry {
 			Ok(mut state) => std::mem::take(&mut state.waiting),
 			Err(_) => return,
 		};
-		let opened: Vec<_> = waiting
-			.into_iter()
-			.map(|(ticket, hdr)| (ticket, self.open(&hdr, version, now)))
-			.collect();
+		let failed = match parked.write() {
+			Ok(mut state) => std::mem::take(&mut state.failed),
+			Err(_) => return,
+		};
+		let mut opened = Vec::new();
+		for (ticket, hdr) in waiting {
+			let open = self.open(&hdr, version, now);
+			match (failed.contains(&ticket), open) {
+				// Its stream is gone, so the group, which no stream takes, ends as cancelled, as one
+				// the subscription drops does, and its reader, dropped unread, asks the publisher to
+				// name the rest of its span again.
+				(true, Ok(Open::Group(group))) => {
+					let _ = group.group.abort(Error::Cancel);
+				}
+				(true, _) => {}
+				(false, open) => opened.push((ticket, open)),
+			}
+		}
 		if let Ok(mut state) = parked.write() {
 			state.opened.extend(opened);
 		}
@@ -363,14 +381,17 @@ impl TrackEntry {
 	}
 
 	/// Withdraw the parked stream `ticket`, which failed before taking its group: a group the
-	/// accept already opened for it ends with `err` rather than waiting for a writer.
+	/// accept already opened ends with `err`, and one it opens later ends as cancelled, rather
+	/// than waiting for a writer.
 	fn withdraw(&mut self, ticket: u64, err: &Error) {
 		let Some(parked) = &self.parked else {
 			return;
 		};
 		let (opened, done) = match parked.write() {
 			Ok(mut state) => {
-				state.waiting.retain(|(waiting, _)| *waiting != ticket);
+				if state.waiting.iter().any(|(waiting, _)| *waiting == ticket) {
+					state.failed.insert(ticket);
+				}
 				let opened = state.opened.remove(&ticket);
 				(opened, state.opened.is_empty() && state.waiting.is_empty())
 			}
@@ -1493,6 +1514,7 @@ impl GroupRecv {
 						duplicate
 							.reading
 							.account(hdr.key..end, self.subscriber.runtime.now());
+						duplicate.reading.finish();
 					}
 					break Poll::Ready(Err(Error::Duplicate));
 				}
@@ -1536,7 +1558,7 @@ impl GroupRecv {
 		let track: track::Producer = track;
 		let clock = lite::Clock::new(self.subscriber.version, hdr.key);
 		let mut ingest: FrameIngest = FrameIngest::new(framing, records, hdr.frame_start, clock);
-		let reading: Reading = reading;
+		let mut reading: Reading = reading;
 
 		// Filling the group, bailing if the track or group dies first. The track or group
 		// dying cancels the stream; the peer's own close arrives through the ingest's reads.
@@ -1555,6 +1577,8 @@ impl GroupRecv {
 			// span holds no other start, so its stream accounts for those starts too, and the
 			// track records them skipped, as its own publisher's append did.
 			Ok(end) => {
+				// The stream's end was read, so whatever it left unnamed is its publisher's to name.
+				reading.finish();
 				// Only a GROUP_END the group accepts accounts for its span: one below a frame it
 				// holds is malformed, and names nothing.
 				let ended = group.end(end);
@@ -6219,6 +6243,50 @@ mod tests {
 		(serve, serving, tail, broadcast)
 	}
 
+	/// A lite-07 tail folds the gaps a retired range left once every live range says where it
+	/// starts, so a range moved through a track leaves no run behind for each place it visited.
+	#[kio::test]
+	async fn a_moved_range_leaves_no_gap_in_a_proven_tail() {
+		let (serve, mut serving, _tail, _broadcast) = lite07_serving(Duration::from_millis(500)).await;
+		let tail = kio::Producer::new(Tail::proven());
+		let span = |start: u64, end: u64| lite::Range {
+			start: Some(lite::Anchor::Absolute(Position::group(start))),
+			end: Some(lite::Anchor::Absolute(Position::group(end))),
+		};
+		let now = serve.subscriber.runtime.now();
+		let moved = {
+			let Sub::Active(active) = &mut serving.sub else {
+				unreachable!("an active subscription");
+			};
+			active.tail = tail.clone();
+			active.live = lite::LiveRanges::new(Version::Lite07, &[span(0, 10), span(20, 22)]);
+			active.starts.insert(0, Some(0));
+			active.starts.insert(1, Some(20));
+			if let Ok(mut tail) = tail.write() {
+				for groups in [0..5, 6..10, 20..22] {
+					tail.account(groups, now);
+				}
+			}
+			// The second range moves on to 30..32.
+			active.live.edit(&[span(0, 10), span(30, 32)]).unwrap();
+			active.live.iter().map(|(id, _)| id).max().unwrap()
+		};
+		serving
+			.apply_response(
+				&serve,
+				lite::SubscribeResponse::Start(lite::SubscribeStart {
+					id: moved,
+					start: Some(30),
+					largest: lite::Edge::Unknown,
+				}),
+			)
+			.unwrap();
+		assert!(
+			tail.read().accounted(0..40).eq([0..5, 6..22]),
+			"5 is still owed, and nothing between the ranges is"
+		);
+	}
+
 	/// A run no fill owes stays asked while a stream of it still arrives, judged by the copy
 	/// alone: one the pool evicts mid-stream lets the run go without asking a flight of the
 	/// group, which nobody here would read.
@@ -8204,8 +8272,10 @@ mod tests {
 		assert_eq!(read, [3, 2, 1]);
 	}
 
-	/// A parked stream that fails before taking its group withdraws it: the accept opens none
-	/// for it, or the group it opened ends with the stream's error, and the rest still open.
+	/// A parked stream that fails before taking its group withdraws it: its group, opened by
+	/// the accept already or once it comes, ends with the stream's error, and the rest still
+	/// open. A group the publisher served is accounted for, and one whose stream failed before
+	/// its end is named upstream, as an evicted stream sends no STOP_SENDING after its FIN.
 	#[kio::test]
 	async fn a_failed_parked_stream_withdraws_its_group() {
 		let version = Version::Lite07;
@@ -8214,7 +8284,8 @@ mod tests {
 			key,
 			frame_start: 0,
 		};
-		let mut entry = TrackEntry::new(None, Default::default());
+		let tail = kio::Producer::new(Tail::proven());
+		let mut entry = TrackEntry::new(None, tail.clone());
 		let (_early_wait, early) = entry.park(&header(1));
 		let (_late_wait, late) = entry.park(&header(2));
 		let (_kept_wait, kept) = entry.park(&header(3));
@@ -8244,7 +8315,15 @@ mod tests {
 			Err(_) => panic!("the entry holds the parked streams"),
 		};
 		opened.sort_unstable();
-		assert_eq!(opened, [late, kept], "nothing opened for the withdrawn header");
+		assert_eq!(
+			opened,
+			[late, kept],
+			"the withdrawn header's group is not the stream's to take"
+		);
+		assert!(
+			tail.read().covers(1..2),
+			"the withdrawn header's group is accounted for"
+		);
 
 		entry.withdraw(late, &Error::Evicted);
 		let opened = match entry.parked.as_ref().unwrap().write() {
@@ -8265,6 +8344,8 @@ mod tests {
 		}
 		assert_eq!(keys, [3]);
 		assert!(entry.parked.is_none(), "released once the last stream took its group");
+		// Both failed before their end, but group 3 arrived, which ends group 2's span.
+		assert_eq!(tail.write().ok().unwrap().take_lost(), [1]);
 	}
 
 	/// TRACK opens its stream before the fetches sent alongside it: TRACK fails fast without
@@ -9776,6 +9857,7 @@ mod tests {
 				max_delay: None,
 				ranges: lite::RangeEdit::Replace(ranges),
 				order: track::Order::default(),
+				lost: Vec::new(),
 			};
 			let mut buf = Vec::new();
 			msg.encode_msg(&mut Encoder::new(&mut buf, Version::Lite06.into()), Version::Lite06)
@@ -9946,6 +10028,52 @@ mod tests {
 		let _urgent = track.subscribe(Subscription::default().with_priority(9)).await.unwrap();
 		assert!(serving.poll(&h.serve, &kio::Waiter::noop()).is_pending());
 		assert_eq!(wanted(&h), [1, 2, 2], "every update restates the wanted group");
+	}
+
+	/// A lite-07 group stream dropped before its end, as one the transport evicts after its
+	/// FIN, sends no STOP_SENDING, so the subscription names the group in a SUBSCRIBE_UPDATE
+	/// for the publisher to name the rest of its span again. One read to its end names nothing.
+	#[kio::test]
+	async fn a_group_stream_lost_before_its_end_is_named_upstream() {
+		let h = Harness::new(Version::Lite07);
+		let request = h._broadcast.reserve_track("lost").unwrap();
+		let mut serving = ServeLoop::new(&h.serve, request, track::Info::default());
+		let track = h._broadcast.consume().track("lost").unwrap();
+		let _reader = track.subscribe(None).await.unwrap();
+		assert!(serving.poll(&h.serve, &kio::Waiter::noop()).is_pending());
+		let established = h.wire().len();
+		let lost = |h: &Harness| {
+			let wire = h.wire();
+			let mut wire = &wire[established..];
+			let mut lost = Vec::new();
+			while !wire.is_empty() {
+				let msg =
+					crate::coding::decode_buf(&mut wire, Version::Lite07, |r, v| lite::SubscribeUpdate::decode(r, v))
+						.unwrap();
+				lost.extend(msg.lost);
+			}
+			lost
+		};
+		let tail = match &serving.sub {
+			Sub::Active(active) => active.tail.clone(),
+			Sub::None => unreachable!("the reader opens the upstream"),
+		};
+		let now = h.serve.subscriber.runtime.now();
+
+		let mut read = Reading::open(&tail, Some(0), now);
+		read.finish();
+		drop(read);
+		drop(Reading::open(&tail, Some(4), now));
+		assert!(serving.poll(&h.serve, &kio::Waiter::noop()).is_pending());
+		assert_eq!(lost(&h), [4], "only the stream dropped unread");
+
+		// The next start accounted for already ends the span there, so nothing is left to name.
+		if let Ok(mut tail) = tail.write() {
+			tail.account(9..10, now);
+		}
+		drop(Reading::open(&tail, Some(8), now));
+		assert!(serving.poll(&h.serve, &kio::Waiter::noop()).is_pending());
+		assert_eq!(lost(&h), [4]);
 	}
 
 	/// A buffered SUBSCRIBE_START describes the demand its SUBSCRIBE carried, so
@@ -12107,6 +12235,38 @@ impl SubStream {
 		Some(owed)
 	}
 
+	/// The groups the live ranges still ask for, each from where it starts to its end, or open
+	/// past the live edge; `None` while one's start is still unknown.
+	fn live_spans(&self) -> Option<rangemap::RangeSet<u64>> {
+		let mut spans = rangemap::RangeSet::new();
+		for (id, range) in self.live.iter() {
+			let Some(start) = self.range_start(id, range)? else {
+				continue;
+			};
+			// A time end includes the group holding it, and an absolute end before a frame of its
+			// group still asks for that group's head.
+			let stop = match range.end {
+				Some(lite::Anchor::Time(time)) => time.saturating_add(1),
+				Some(lite::Anchor::Absolute(stop)) if stop.frame == 0 => stop.group,
+				Some(lite::Anchor::Absolute(stop)) => stop.group.saturating_add(1),
+				_ => u64::MAX,
+			};
+			if start < stop {
+				spans.insert(start..stop);
+			}
+		}
+		Some(spans)
+	}
+
+	/// Fold the tail's gaps no live range reaches anymore (see [`Tail::retire`]).
+	fn retire_unowed(&self, now: crate::time::Instant) {
+		if let Some(spans) = self.live_spans()
+			&& let Ok(mut tail) = self.tail.write()
+		{
+			tail.retire(&spans, now);
+		}
+	}
+
 	/// The groups the live range `id` asks for a fill, `None` for one of the demand's.
 	fn fill_range(&self, id: u64) -> Option<std::ops::Range<u64>> {
 		if !self.fill_ids.contains(&id) {
@@ -12987,6 +13147,7 @@ impl TrackServe {
 						active.fill_groups = groups;
 						active.demand = demand;
 						active.start = subscription.start();
+						active.retire_unowed(self.subscriber.runtime.now());
 						if supports_update {
 							// The floor follows the requested start, in both directions:
 							// moving below a declared SUBSCRIBE_START reopens those groups
@@ -13339,15 +13500,23 @@ enum Begin {
 }
 
 /// Buffer the current SUBSCRIBE parameters as the next update, with `ranges` the change to
-/// the live ranges. The caller flushes. It reopens nothing: every drop the publisher sent,
-/// a stale one included, stays final on the subscription.
+/// the live ranges, and every group the tail lost since the last one. The caller flushes. It
+/// reopens nothing: every drop the publisher sent, a stale one included, stays final on the
+/// subscription.
 fn buffer_update(active: &mut SubStream, ranges: lite::RangeEdit) -> Result<(), Error> {
+	// Taken only when there is one, since a write wakes whoever waits on the tail.
+	let has_lost = active.tail.read().has_lost();
+	let lost = match has_lost {
+		true => active.tail.write().map(|mut tail| tail.take_lost()).unwrap_or_default(),
+		false => Vec::new(),
+	};
 	active.stream.writer.buffer(&lite::SubscribeUpdate {
 		wanted_group: active.wanted,
 		priority: active.priority,
 		max_delay: active.max_delay,
 		ranges,
 		order: active.order,
+		lost,
 	})
 }
 
@@ -14903,6 +15072,7 @@ impl ServeLoop {
 		}
 		active.starts.insert(id, start.start);
 		let now = serve.subscriber.runtime.now();
+		active.retire_unowed(now);
 		// A fill's range starting past where it asked skips groups it will not deliver.
 		if let Some(groups) = active.fill_range(id) {
 			let skipped = groups.start..start.start.unwrap_or(groups.end).clamp(groups.start, groups.end);
@@ -15129,8 +15299,9 @@ impl ServeLoop {
 				}
 				self.range_fills.refuse(groups, error);
 			}
-			// Never produced, so nothing is waited for and no reader ends. A skip replaces any
-			// drop of the same groups, stale or final; a reader a drop already ended stays ended.
+			// Never produced, so nothing is waited for and no reader ends. A publisher sends no skip
+			// over its own drop, except a cut or lost GROUP_END's re-tell; the copy keeps the skip
+			// over a drop either way, and a reader a drop already ended stays ended.
 			lite::SubscribeResponse::Skip(skipped) => {
 				let groups = skipped.groups.clone();
 				if groups.is_empty() {
@@ -15457,6 +15628,24 @@ impl ServeLoop {
 							}
 							continue;
 						}
+					}
+
+					// Lite-07: a group stream discarded before its end, such as one the transport
+					// evicted after its FIN, leaves the rest of its span unnamed. Only a proven tail
+					// records one, and only the publisher can name it.
+					if let Sub::Active(active) = &mut self.sub
+						&& !flushing && matches!(
+						active.tail.poll_ref(waiter, |tail| match tail.has_lost() {
+							true => Poll::Ready(()),
+							false => Poll::Pending,
+						}),
+						Poll::Ready(Ok(()))
+					) {
+						let ranges = active.live.unchanged();
+						if let Err(err) = buffer_update(active, ranges) {
+							return Poll::Ready(ServeEnd::GiveBack(err));
+						}
+						continue;
 					}
 
 					// (2) In-flight fetches; completions just retire. The demand is settled,

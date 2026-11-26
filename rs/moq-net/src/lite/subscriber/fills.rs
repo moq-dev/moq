@@ -975,8 +975,8 @@ impl Recovery {
 						Recv::Ended if *finished => self.end(StreamError::NotFound),
 						// Or once it finished the track, before every stream it opened landed.
 						Recv::Ended if active.end.is_some() => {
-							// At most the grace: no max delay bounds the tail's own, and before lite-07
-							// nothing names a key after the FIN.
+							// At most GRACE: no max delay bounds the tail's own, and nothing names a key
+							// after the FIN. Only a publisher before lite-07 FINs unprompted.
 							*draining = Some(Box::new(
 								Settle::new(&self.serve.subscriber.runtime, active.tail.consume())
 									.at_most(crate::tail::GRACE),

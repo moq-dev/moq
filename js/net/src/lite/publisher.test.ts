@@ -1905,6 +1905,37 @@ test("lite draft-07: a reset that cut a GROUP_END names its span's starts again"
 	}
 });
 
+// Lite-07: a group whose stream the subscriber reports lost before reading its GROUP_END, as one its
+// transport evicted after the FIN, has the starts inside its span named again as a skip, as for a cut
+// GROUP_END. One whose span holds no other start names nothing. Mirrors the Rust
+// `lite07_a_lost_group_end_is_named_again`.
+test("lite draft-07: a lost GROUP_END names its span's starts again", async () => {
+	const version = Version.DRAFT_07;
+	const sub = await servedSubscription({ version, startGroup: 0n, reliable: true });
+	try {
+		const group = sub.track.createGroup(0n);
+		group.writeFrame(textFrame("x", Timestamp.fromMillis(0)));
+		group.finishAt(3n);
+		expect(await sub.servedHeader()).toBe(0n);
+		const next = sub.track.createGroup(3n);
+		next.writeFrame(textFrame("y", Timestamp.fromMillis(3)));
+		next.finish();
+		expect(await sub.servedHeader()).toBe(3n);
+		expect("start" in (await decodeSubscribeResponse(sub.client.reader, version))).toBe(true);
+		await flush();
+
+		await new SubscribeUpdate({ priority: 0, remove: [], ranges: [], lost: [0n, 3n] }).encode(
+			sub.client.writer,
+			version,
+		);
+		expect(await decodeSubscribeResponse(sub.client.reader, version)).toMatchObject({
+			skip: { start: 1n, end: 3n },
+		});
+	} finally {
+		await sub.close();
+	}
+});
+
 // Lite-07: a group stream this side resets after its header, whatever for, still delivers that header
 // where the transport can, which accounts for the group, so no drop names it. A browser's WebTransport
 // cannot, nor can a qmux peer without RESET_STREAM_AT, so there a drop still does. Mirrors the Rust

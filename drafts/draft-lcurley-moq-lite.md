@@ -909,6 +909,7 @@ The subscriber MAY cache the error and potentially retry later.
 A publisher that resets a Group Stream after sending its GROUP message, toward a peer that negotiated RESET_STREAM_AT [reliable-reset], SHOULD send it with a Reliable Size at the end of the GROUP message.
 The GROUP message then accounts for the Group and the reset ends its readers with its error, so the publisher names the Group in no [SUBSCRIBE_DROP](#subscribe-drop).
 A reset after a GROUP_END may cut the GROUP_END, so the publisher names the starts it accounted for again in a [SUBSCRIBE_SKIP](#subscribe-skip).
+A subscriber that discards a Group Stream before reading its end names the Group in a [SUBSCRIBE_UPDATE](#subscribe-update)'s `Lost`, which has the publisher do the same.
 Any other reset may lose the GROUP message, since a RESET_STREAM lets the peer's transport discard data it has not delivered, even data it acknowledged.
 So a publisher MUST name each Group whose stream it resets without a Reliable Size covering the GROUP message, such as toward a peer without RESET_STREAM_AT or over a browser's WebTransport, in a SUBSCRIBE_DROP with the reset's error, as it does a Group whose stream it resets before sending the GROUP message.
 A subscriber that read the GROUP message first already accounted for the Group, and the drop ends its readers with the reset's error.
@@ -1600,6 +1601,8 @@ SUBSCRIBE_UPDATE Message {
   Range (..) ...
   Retune Count (i)
   Retune (..) ...
+  Lost Count (i)
+  Group Start (i) ...
   Wanted Start (i)
 }
 
@@ -1625,6 +1628,13 @@ The live joins whose `Max Age` changes, each a Range ID and its new `Max Age`, e
 A retuned Range keeps where it started and is not resolved again: only which of its Groups are stale changes, from then on.
 A wider `Max Age` reopens no Group already named in a SUBSCRIBE_DROP.
 A Range ID that is not live after the removals, names a Range whose `Start` is neither Live nor Joined, or appears twice in the list is a PROTOCOL_VIOLATION.
+
+**Lost Count** and **Group Start**:
+The Groups whose Group Stream the subscriber discarded after reading its GROUP message but before reading to its end, such as one its transport discarded after the FIN to free flow control credit.
+That loses any GROUP_END it carried, and no STOP_SENDING tells the publisher once the FIN arrived, so the subscriber names each such Group here once, in its next SUBSCRIBE_UPDATE.
+A subscriber MAY leave out a Group whose next start is already accounted for, since no other Group starts inside a Group's span.
+A publisher that holds a named Group finished, with a GROUP_END whose `End` is past the next start, names the starts inside its span again in a [SUBSCRIBE_SKIP](#subscribe-skip), as for a GROUP_END a reset may have cut, and ignores any other.
+A start this re-tell names was skipped already, so it ends no reader and delivers nothing.
 
 **Wanted Start**:
 The group start the subscriber's readers want, plus one; `0` means none.
@@ -1957,7 +1967,7 @@ Every drop is final on its subscription: no SUBSCRIBE_UPDATE reopens it, and a s
 An OLD drop was judged against the `Max Age` of the live joins covering the group when the publisher gave it up, which the drop does not carry.
 A relay that received one settles with it only a reader whose own budget is no wider than the narrowest `Max Age` its subscription's live joins asked and whose Ranges include every group the relay's own Ranges name above the dropped start, since the verdict on a group was judged against the groups above it; it asks again for a reader the drop does not settle.
 
-A publisher names each start once, besides the starts of a GROUP_END a reset may have cut (see [Group Stream](#group-stream)): it never skips a start it dropped, and a skip or drop of a start already named ends no further reader and delivers nothing again.
+A publisher names each start once, besides the starts of a GROUP_END a reset may have cut or the subscriber reported lost (see [Group Stream](#group-stream)): it never skips a start it dropped, and a skip or drop of a start already named ends no further reader and delivers nothing again.
 
 For every start in the subscription's range, the publisher MUST send a Group Stream, account for it with a [GROUP_END](#group-end), or name it in SUBSCRIBE_SKIP or SUBSCRIBE_DROP.
 A GROUP_END accounts for the starts strictly between its Group Start and End.
@@ -1988,7 +1998,7 @@ A skip never overrides a Group that arrived, since that Group was produced; a su
 
 A gap between starts says nothing on its own: a publisher may create Groups out of order, or create again a start whose Group it aborted, so it never skips a start merely because a higher Group exists or the Track ended without it.
 Only the application producing the Track knows a start will never hold a Group, for example when it moves on to the next Group and so declares that it will not go back to fill the starts below.
-A GROUP_END already accounts for the starts inside a finished Group's span, so a publisher skips only the starts no GROUP_END covers: a discontinuity between a Group's End and the next Group's start, the starts below the first Group or after a Group closed without a GROUP_END, and those of a GROUP_END a reset may have cut (see [Group Stream](#group-stream)).
+A GROUP_END already accounts for the starts inside a finished Group's span, so a publisher skips only the starts no GROUP_END covers: a discontinuity between a Group's End and the next Group's start, the starts below the first Group or after a Group closed without a GROUP_END, and those of a GROUP_END a reset may have cut or the subscriber reported lost (see [Group Stream](#group-stream)).
 A publisher SHOULD send the skip as soon as it declares it.
 A relay forwards a skip it received and never skips a start on its own: one it never received is named in SUBSCRIBE_DROP (see [SUBSCRIBE_DROP](#subscribe-drop)).
 
@@ -2344,6 +2354,7 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 - Removed `Subscriber Max Age` from SUBSCRIBE and SUBSCRIBE_UPDATE. Only a Group reached through a live join expires for staleness, under that join's own `Max Age`, measured from the live edge; a Group several joins cover takes the largest, and one any other Range covers has no subscriber limit. A Group being sent when an update stops covering it takes the largest limit any Range asks. A Range whose `Start` is None, a Time, or a Position asks for history: every Group it covers is delivered, bounded only by `Publisher Max Age`.
 - Added a Live Anchor (0x3), a `Start` only, carrying a `Min Age`, the subscriber's target latency, in milliseconds plus one with zero meaning no lag limit: the Range joins at the Group containing the live edge minus it. It also carries a `Max Age`, milliseconds plus one with zero meaning no limit, past which the Groups it reaches are stale; the join never starts at a Group it expired. Each Range joins on its own, so one subscription can join at several lags. A relay places the join only at the Range Start its upstream answered a Range of its own with, the same `Min Age` and `End`, under a `Max Age` at least as large, answered after the subscriber's Range was added, and otherwise adds such a Range and waits for its answer. A `Start` of None is the oldest Group the publisher holds.
 - Added a retune list to SUBSCRIBE_UPDATE, after the Ranges to add: Range IDs of live joins, each with a new `Max Age`, changed in place without resolving the Range again.
+- Added `Lost` to SUBSCRIBE_UPDATE, after the retune list: the Groups whose Group Stream the subscriber discarded before reading its end, such as one its transport evicted after the FIN, which sends no STOP_SENDING. The publisher names the starts inside each one's span again in SUBSCRIBE_SKIP, as for a GROUP_END a reset may have cut.
 - Added a Joined Anchor (0x4), a `Start` only: a live join already placed, carrying a Group's start, a frame within it (`0` for the whole Group), and the join's `Max Age`, so a subscriber resuming a live join on a new subscription keeps its `Max Age` without being placed at the live edge again.
 - A relay places a Time `Start` only where it can show its origin would, and otherwise adds a Range from that time to its own subscription and waits for its answer.
 - FETCH reads one Group or a slice of one, and SUBSCRIBE reads whole Groups but for a Position `Start`: any other read of part of a Group FETCHes it. A publisher holding only part of a Group a subscription covers drops it.

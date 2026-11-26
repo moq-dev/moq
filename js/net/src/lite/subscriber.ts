@@ -32,6 +32,7 @@ import {
 	type Arriving,
 	hiddenBelow,
 	hooks,
+	insertRun,
 	NO_MAX_DELAY,
 	type Run,
 	removeRun,
@@ -2408,9 +2409,9 @@ export class Subscriber {
 				} else {
 					await responses;
 					// The publisher FINs unprompted once it finished the track, before every group stream
-					// it opened may have landed: those are waited for, at most the grace, before the rest
-					// is refused. No max delay bounds the tail's own, and before lite-07 nothing names a
-					// key after the FIN.
+					// it opened may have landed: those are waited for, at most GRACE, before the rest is
+					// refused. No max delay bounds the tail's own, and nothing names a key after the FIN.
+					// Only a publisher before lite-07 FINs unprompted.
 					if (!fin) {
 						const drained = new Once<null>();
 						try {
@@ -2743,6 +2744,7 @@ export class Subscriber {
 		// One retired since is owed nothing.
 		if (range) {
 			entry.starts.set(id, start);
+			this.#retireUnowed(entry);
 			// A fill's range starting past where it asked skips groups it will not deliver.
 			const asked = entry.fillIds.has(id) ? fillRun(range) : undefined;
 			if (asked) {
@@ -2751,6 +2753,29 @@ export class Subscriber {
 				entry.fills?.skip(asked, asked.start, skipped);
 			}
 		}
+	}
+
+	// Fold the tail's gaps no live range reaches anymore, once each says where it starts: from that
+	// start to its end, or open past the live edge. Mirrors the Rust
+	// `SubStream::retire_unowed`.
+	#retireUnowed(entry: SubscribeEntry): void {
+		const owed: Run[] = [];
+		for (const [id, range] of entry.live.entries()) {
+			if (!entry.starts.has(id)) return;
+			const start = entry.starts.get(id);
+			if (start === undefined) continue;
+			// A time end includes the group holding it, and an absolute end before a frame of its group
+			// still asks for that group's head.
+			const at = range.end;
+			const end =
+				at?.time !== undefined
+					? at.time + 1n
+					: at?.absolute !== undefined
+						? at.absolute + (at.frame ? 1n : 0n)
+						: UNBOUNDED;
+			if (start < end) insertRun(owed, start, end);
+		}
+		entry.tail.retire(owed);
 	}
 
 	// Apply the lite-07 SUBSCRIBE_STARTs `#started` recorded to what every range shares: where the
@@ -2773,8 +2798,9 @@ export class Subscriber {
 	}
 
 	// The publisher never produced `[start, end)`, as a SUBSCRIBE_SKIP says, so nothing is waited
-	// for and no reader ends. A skip replaces any drop of the same groups; a reader a drop already
-	// ended stays ended.
+	// for and no reader ends. A publisher sends no skip over its own drop, except a cut or lost
+	// GROUP_END's re-tell; the copy keeps the skip over a drop either way, and a reader a drop
+	// already ended stays ended.
 	#skipped(entry: SubscribeEntry, start: bigint, end: bigint): void {
 		entry.tail.account(start, end);
 		// A fill owing them is answered: the source never had them.
@@ -2932,9 +2958,12 @@ export class Subscriber {
 			const fills = entry.fills?.ask;
 			const fillGroups = fills?.groups ?? [];
 			const priority = Math.max(current?.priority ?? 0, fills?.priority ?? -128);
+			// Lite-07: a group stream let go before its end, such as one the transport evicted after its
+			// FIN, leaves the rest of its span unnamed, which only the publisher can name.
 			if (
 				current === undefined ||
 				(refresh === undefined &&
+					!entry.tail.hasLost &&
 					priority === sentPriority &&
 					sameRuns(fillGroups, sentFills) &&
 					sameAsks(asks, sentAsks) &&
@@ -2943,7 +2972,7 @@ export class Subscriber {
 			) {
 				// Each wake releases the quiet signals too, including when termination wins.
 				const next = await race([
-					Signal.race(hooks.requested(track), asked, edge, entry.fillsChanged),
+					Signal.race(hooks.requested(track), asked, edge, entry.fillsChanged, entry.tail.lostChanged),
 					stopped,
 				]);
 				if (next === null) return;
@@ -3017,6 +3046,7 @@ export class Subscriber {
 				);
 				edit = edited;
 				for (const id of entry.starts.keys()) if (!entry.live.get(id)) entry.starts.delete(id);
+				this.#retireUnowed(entry);
 				for (const id of entry.joinTicks.keys()) if (!entry.live.get(id)) entry.joinTicks.delete(id);
 				for (const id of entry.joinBudgets.keys()) if (!entry.live.get(id)) entry.joinBudgets.delete(id);
 				entry.staleBudget = Math.min(entry.staleBudget, narrowest(entry.live));
@@ -3061,6 +3091,7 @@ export class Subscriber {
 				ranges: edit?.add,
 				remove: edit?.remove,
 				retune: edit?.retune,
+				lost: hasRanges(this.version) ? entry.tail.takeLost() : [],
 			});
 			// Encoded apart from the write, so a bound the wire can't carry still fails the track.
 			const encoded = await Writer.collect(this.version, (w) => update.encode(w, this.version));
@@ -3261,6 +3292,8 @@ export class Subscriber {
 			const format = { scale: timescale, compress: entry.compress, lengthFirst: hasLengthFirst(this.version) };
 			const frames = readFrames(stream, producer, format);
 			const end = await (entry.filling ? untilAbandoned(producer, frames) : frames);
+			// The stream's end was read, so whatever it left unnamed is its publisher's to name.
+			counted.finish();
 
 			// Whole at a GROUP_END's end, else without one: every frame sent arrived.
 			if (end === undefined) producer.finish();
@@ -3842,7 +3875,10 @@ function restates(version: Version, update: SubscribeUpdate, live: SubscribeUpda
 		update.order === live.order &&
 		update.maxDelay === live.maxDelay;
 	if (!terms) return false;
-	if (hasRanges(version)) return update.ranges?.length === 0 && !update.remove?.length && !update.retune?.length;
+	if (hasRanges(version))
+		return (
+			update.ranges?.length === 0 && !update.remove?.length && !update.retune?.length && update.lost.length === 0
+		);
 	return (
 		update.startGroup === live.startGroup &&
 		update.endGroup === live.endGroup &&

@@ -2943,7 +2943,8 @@ export class Producer {
 	 * {@link Skipped}, and a later drop of it is ignored.
 	 *
 	 * A skip replaces any drop of the same keys, whatever its error: a reader the drop
-	 * already ended stays ended, and every later reader and relay sees the skip. A group already
+	 * already ended stays ended, and every later reader sees the skip. A relay that reported the
+	 * drop forwards no skip over it, since every drop is final on the wire. A group already
 	 * cached keeps what it is, since it was produced after all. Mirrors the Rust `skip_groups`.
 	 */
 	skipGroups(start: bigint, end: bigint): void {

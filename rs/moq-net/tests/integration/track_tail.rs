@@ -275,7 +275,7 @@ async fn a_session_death_before_the_tail_aborts_the_track() {
 }
 
 /// Skipped keys have no stream, so lite-05 and lite-06 publishers name them with SUBSCRIBE_DROP,
-/// and lite-07 proves them in the next group's header.
+/// and lite-07 names them in a SUBSCRIBE_SKIP.
 #[kio::test]
 async fn skipped_groups_end_without_the_grace() {
 	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {

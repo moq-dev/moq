@@ -400,7 +400,13 @@ type Control =
 	 * The peer re-stated the subscription: priority, ordering, latency, and its ranges, with the
 	 * Range IDs it retired and added on lite-07.
 	 */
-	| { kind: "update"; update: SubscribeUpdate; applied: Applied }
+	| {
+			kind: "update";
+			update: SubscribeUpdate;
+			applied: Applied;
+			/** Lite-07: every group the coalesced updates reported lost, in order. */
+			lost: bigint[];
+	  }
 	/** The peer FIN'd, or our own half went away. Either way there is nobody left to serve. */
 	| { kind: "done" }
 	/** The stream failed; the subscription goes down with it. */
@@ -440,6 +446,7 @@ class SubscriptionControls {
 		retired: bigint[];
 		added: Map<bigint, WireRange>;
 		retuned: Map<bigint, WireRange>;
+		lost: bigint[];
 	};
 	// Sticky, first one wins: null once the stream is over, an Error once it failed.
 	#end?: Error | null;
@@ -476,6 +483,7 @@ class SubscriptionControls {
 				kind: "update",
 				update: update.update,
 				applied: { retired: update.retired, added: [...update.added], retuned: [...update.retuned] },
+				lost: update.lost,
 			};
 		if (this.#end === undefined) return undefined;
 		return this.#end === null ? { kind: "done" } : { kind: "error", error: this.#end };
@@ -566,8 +574,11 @@ class SubscriptionControls {
 					retired: [] as bigint[],
 					added: new Map<bigint, WireRange>(),
 					retuned: new Map<bigint, WireRange>(),
+					lost: [] as bigint[],
 				};
 				pending.update = update;
+				// Every one reported lost is named again, not just the latest update's.
+				pending.lost.push(...update.lost);
 				for (const id of edit.retired) {
 					pending.retuned.delete(id);
 					if (!pending.added.delete(id)) pending.retired.push(id);
@@ -2080,6 +2091,17 @@ export class Publisher {
 							// An update may reach the finished track's history, so it is served again.
 							finished = false;
 							const update = control.update;
+							// Lite-07: the subscriber let these groups' streams go before reading their end, so
+							// the starts inside each one's span go out again as a skip, as for a cut GROUP_END.
+							// Only a group the cache still holds whole says where its span ends. Mirrors the
+							// Rust `TrackRun::update`.
+							for (const group of control.lost) {
+								const end = hooks.wholeEnd(track, group);
+								if (end !== undefined && end > group + 1n) {
+									pendingCuts.push({ start: group + 1n, end });
+									drops.update((revision) => revision + 1);
+								}
+							}
 							if (hasRanges(this.version)) {
 								// A range retired before its start resolved is owed no SUBSCRIBE_START.
 								for (const id of control.applied.retired) unstarted.delete(id);

@@ -9,9 +9,10 @@
 (* Group Stream, accounts for it with a GROUP_END, or names it in          *)
 (* SUBSCRIBE_SKIP or SUBSCRIBE_DROP. Every drop is final on its            *)
 (* subscription, a stale (OLD) one included: a SUBSCRIBE_UPDATE reopens    *)
-(* nothing, so updates are left out, and only a cut GROUP_END's skip goes  *)
-(* out over a drop. Drops and skips travel in order on the Subscribe       *)
-(* Stream; each Group Stream travels on its own, unordered against them.   *)
+(* nothing, so updates are left out but for their Lost list, and only a   *)
+(* cut or lost GROUP_END's skip goes out over a drop. Drops and skips      *)
+(* travel in order on the Subscribe Stream; each Group Stream travels on   *)
+(* its own, unordered against them.                                        *)
 (* No timer settles anything: once quiet, the subscriber has accounted for *)
 (* every start.                                                            *)
 (*                                                                         *)
@@ -26,7 +27,11 @@
 (* the reset may cut a GROUP_END after it, so the publisher skips the      *)
 (* starts it told again. Any other reset is named in a drop: before then   *)
 (* the header never left, and a plain RESET_STREAM lets the peer discard   *)
-(* it unread, or deliver it.                                               *)
+(* it unread, or deliver it. The subscriber's transport may discard a      *)
+(* stream after its FIN arrived, before moq-net read its GROUP_END, which  *)
+(* sends no STOP_SENDING: the subscriber names the group in a              *)
+(* SUBSCRIBE_UPDATE's Lost list, and the publisher skips the starts its    *)
+(* GROUP_END told again.                                                   *)
 (*                                                                         *)
 (* A whole group's span runs from its start to its End, and no group      *)
 (* starts strictly inside it. Its GROUP_END accounts for the starts        *)
@@ -71,7 +76,8 @@ Inner(g, e) == {x \in Groups : g < x /\ x < e}
 \*   ended: the FIN followed a GROUP_END, accounting for the starts in `inner`, which
 \*          a reset that cuts it skips again (`GroupOutcomes::cut`)
 \*   sub: "none" (no header yet, or lost with a reset, or never sent), "header"
-\*        (filling the copy), "fin", or "reset" (read to a reset, or stopped)
+\*        (filling the copy), "fin", "reset" (read to a reset, or stopped), or "lost"
+\*        (discarded after its FIN, before its end was read)
 NewStream(g) ==
     [g |-> g, pub |-> "open", held |-> FALSE, fin |-> FALSE, ended |-> FALSE, inner |-> {},
      err |-> "", sub |-> "none"]
@@ -91,18 +97,20 @@ VARIABLES
     outq,       \* `GroupOutcomes::dropped`: failed streams not yet named
     folded,     \* the record folded the group into its floor
     ndrop,      \* history: drops naming the group, not counting the span above it
-    nskip,      \* history: skips naming the start, not counting one a cut GROUP_END sends
+    nskip,      \* history: skips naming the start, not counting a cut or lost GROUP_END's
     \* The wire.
     streams,    \* every Group Stream opened, in order
     resp,       \* the Subscribe Stream, publisher to subscriber
     \* The subscriber's `Tail` and copy.
     acct,       \* the tail's ledger: starts accounted for
     rec,        \* the copy's record: "none", "stale", "final", or "skip"
-    cached      \* the copy's group: "none", "open", "whole", "aborted", "evicted"
+    cached,     \* the copy's group: "none", "open", "whole", "aborted", "evicted"
+    lostq       \* SUBSCRIBE_UPDATE's Lost list, subscriber to publisher: groups whose
+                \* stream was discarded before its end was read
 
 names == <<ndrop, nskip>>
 pubVars == <<cur, late, ends, served, outq, folded, names>>
-subVars == <<acct, rec, cached>>
+subVars == <<acct, rec, cached, lostq>>
 vars == <<pubVars, streams, resp, subVars>>
 
 Init ==
@@ -116,6 +124,7 @@ Init ==
     /\ acct = {}
     /\ rec = [g \in Groups |-> "none"]
     /\ cached = [g \in Groups |-> "none"]
+    /\ lostq = <<>>
 
 -----------------------------------------------------------------------------
 (* Publisher                                                               *)
@@ -245,7 +254,7 @@ StreamFailAt(i, err) ==
 \* The peer acknowledged everything up to the FIN.
 StreamAckAt(i) ==
     /\ streams[i].pub = "fin"
-    /\ streams[i].sub = "fin"
+    /\ streams[i].sub \in {"fin", "lost"}
     /\ streams' = [streams EXCEPT ![i].pub = "acked"]
     /\ UNCHANGED <<pubVars, resp, subVars>>
 
@@ -261,6 +270,17 @@ PubOutcomes ==
           /\ served' = served \cup gs
           /\ ndrop' = Named(ndrop, {g})
     /\ UNCHANGED <<cur, late, ends, folded, nskip, streams, subVars>>
+
+\* `TrackRun::update` takes a group the subscriber reported lost, and skips the starts
+\* strictly inside its span again, as for a cut GROUP_END, when it holds the group whole.
+PubLost ==
+    /\ lostq # <<>>
+    /\ lostq' = Tail(lostq)
+    /\ LET g == Head(lostq)
+       IN IF ends[g] # 0 /\ Inner(g, ends[g]) # {}
+          THEN resp' = Append(resp, SkipMsg(Inner(g, ends[g])))
+          ELSE UNCHANGED resp
+    /\ UNCHANGED <<pubVars, streams, acct, rec, cached>>
 
 \* The pool hands the reader debt and its record folds the start into its floor: one the
 \* cursor reached a verdict on, once no failed stream of it is still to name. Every
@@ -288,7 +308,7 @@ SubHeaderAt(i) ==
           /\ streams' = [streams EXCEPT ![i].sub = "header"]
           /\ cached' = [cached EXCEPT ![g] = "open"]
           /\ rec' = [rec EXCEPT ![g] = IF @ = "stale" THEN "none" ELSE @]
-    /\ UNCHANGED <<pubVars, resp>>
+    /\ UNCHANGED <<pubVars, resp, lostq>>
 
 \* The stream filling the copy is read to its FIN, the group whole after a GROUP_END or
 \* closed without one, which the copy keeps alike ("whole"). A GROUP_END accounts for the
@@ -300,7 +320,7 @@ SubFinAt(i) ==
     /\ streams' = [streams EXCEPT ![i].sub = "fin"]
     /\ acct' = acct \cup streams[i].inner
     /\ cached' = [cached EXCEPT ![streams[i].g] = "whole"]
-    /\ UNCHANGED <<pubVars, resp, rec>>
+    /\ UNCHANGED <<pubVars, resp, rec, lostq>>
 
 \* The reset of the stream filling the copy arrives and ends the group's readers with its
 \* error. The header already accounted for the group. A reset after the header cuts what
@@ -310,7 +330,7 @@ SubResetAt(i) ==
     /\ streams[i].pub = "reset"
     /\ streams' = [streams EXCEPT ![i].sub = "reset"]
     /\ cached' = [cached EXCEPT ![streams[i].g] = "aborted"]
-    /\ UNCHANGED <<pubVars, resp, acct, rec>>
+    /\ UNCHANGED <<pubVars, resp, acct, rec, lostq>>
 
 \* The subscriber stops a stream whose header it read (`UniServe::abort` on a failed
 \* `GroupRecv`), with EVICTED or any other code (Cancel, Duplicate), and its copy drops the group.
@@ -327,13 +347,25 @@ SubStopAt(i, err, acked) ==
     /\ IF err = "evicted" /\ ~(Kept(streams[i]) /\ acked)
        THEN outq' = Append(outq, <<streams[i].g, err>>) /\ UNCHANGED resp
        ELSE CutSkip(streams[i]) /\ UNCHANGED outq
-    /\ UNCHANGED <<cur, late, ends, served, folded, names, acct, rec>>
+    /\ UNCHANGED <<cur, late, ends, served, folded, names, acct, rec, lostq>>
+
+\* The subscriber's transport discards a stream whose FIN arrived, to free a stuck flow control
+\* window, before moq-net read its end (`Reading`'s drop): the group fails in the copy, and no
+\* STOP_SENDING goes out, so the next SUBSCRIBE_UPDATE names the group as lost. A GROUP_END it
+\* carried is lost with it.
+SubLoseAt(i) ==
+    /\ streams[i].sub = "header"
+    /\ streams[i].pub = "fin"
+    /\ streams' = [streams EXCEPT ![i].sub = "lost"]
+    /\ cached' = [cached EXCEPT ![streams[i].g] = "aborted"]
+    /\ lostq' = Append(lostq, streams[i].g)
+    /\ UNCHANGED <<pubVars, resp, acct, rec>>
 
 \* The copy's cache evicts a whole group.
 Evict(g) ==
     /\ cached[g] = "whole"
     /\ cached' = [cached EXCEPT ![g] = "evicted"]
-    /\ UNCHANGED <<pubVars, streams, resp, acct, rec>>
+    /\ UNCHANGED <<pubVars, streams, resp, acct, rec, lostq>>
 
 \* `apply_response` for SUBSCRIBE_DROP: the tail accounts for each start it names. A
 \* stale drop records it in the copy unless the copy holds it (`give_up` keeps an open
@@ -367,7 +399,7 @@ SubRecv ==
     /\ resp' = Tail(resp)
     /\ LET m == Head(resp)
        IN IF m.type = "drop" THEN OnDrop(m) ELSE OnSkip(m)
-    /\ UNCHANGED <<pubVars, streams>>
+    /\ UNCHANGED <<pubVars, streams, lostq>>
 
 -----------------------------------------------------------------------------
 
@@ -375,12 +407,12 @@ SubRecv ==
 \* read to the reset or to the FIN before it, or, never held, lost or never sent.
 StreamDone(s) ==
     \/ s.pub = "acked"
-    \/ s.pub = "reset" /\ (s.sub \in {"reset", "fin"} \/ (s.sub = "none" /\ ~Kept(s)))
+    \/ s.pub = "reset" /\ (s.sub \in {"reset", "fin", "lost"} \/ (s.sub = "none" /\ ~Kept(s)))
 
 \* Nothing in flight and nothing left for the publisher to do: every start has a verdict,
 \* and every start inside a whole group's span is told.
 Quiet ==
-    /\ resp = <<>> /\ outq = <<>>
+    /\ resp = <<>> /\ outq = <<>> /\ lostq = <<>>
     /\ \A g \in Groups : cur[g] # "pending" /\ (cur[g] = "inner" => g \in served)
     /\ \A i \in 1..Len(streams) : StreamDone(streams[i])
 
@@ -398,6 +430,7 @@ SubHeader == \E i \in 1..Len(streams) : SubHeaderAt(i)
 SubFin == \E i \in 1..Len(streams) : SubFinAt(i)
 SubReset == \E i \in 1..Len(streams) : SubResetAt(i)
 SubStop == \E i \in 1..Len(streams), err \in {"evicted", "cancel"}, acked \in BOOLEAN : SubStopAt(i, err, acked)
+SubLose == \E i \in 1..Len(streams) : SubLoseAt(i)
 
 Next ==
     \/ \E g \in Groups, e \in 1..MaxEnd : g < e /\ Finish(g, e)
@@ -409,11 +442,13 @@ Next ==
     \/ StreamFail
     \/ StreamAck
     \/ PubOutcomes
+    \/ PubLost
     \/ \E g \in Groups : PubFold(g)
     \/ SubHeader
     \/ SubFin
     \/ SubReset
     \/ SubStop
+    \/ SubLose
     \/ \E g \in Groups : Evict(g)
     \/ SubRecv
     \/ Done
@@ -424,8 +459,8 @@ Spec == Init /\ [][Next]_vars
 (* Rules                                                                   *)
 -----------------------------------------------------------------------------
 
-\* Once quiet, the tail accounts for every start, those a reset cut out of a GROUP_END
-\* included: none is left to a timer.
+\* Once quiet, the tail accounts for every start, those a reset cut out of a GROUP_END or
+\* the subscriber lost with its stream included: none is left to a timer.
 QuietIsSettled == Quiet => acct = Groups
 
 \* The publisher opens at most one Group Stream for a group, so the subscriber never reads
@@ -435,7 +470,7 @@ ServedOnce ==
 
 \* Every name is final: the publisher names a group in at most one drop and a start in at
 \* most one skip, and skips no start it served or dropped, besides the starts a reset cut
-\* out of a GROUP_END. A drop of a whole group names its span too, which may name again a
+\* out of a GROUP_END or the subscriber lost with its stream. A drop of a whole group names its span too, which may name again a
 \* start inside it that was skipped before the group finished. The subscriber changes
 \* nothing for a start named again.
 NamedOnce == \A g \in Groups : ndrop[g] <= 1 /\ nskip[g] <= 1

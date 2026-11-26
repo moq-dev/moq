@@ -429,6 +429,7 @@ mod tests {
 			max_delay: Some(std::time::Duration::from_millis(u64::MAX - 1)),
 			ranges,
 			order: crate::track::Order::Descending,
+			lost: Vec::new(),
 		};
 		let empty = lite::RangeEdit::Edit {
 			remove: Vec::new(),

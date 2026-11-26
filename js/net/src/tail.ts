@@ -14,7 +14,12 @@ export interface TailOptions {
 
 /** A group stream a {@link Tail} counts, from its header until it is read to its end. */
 export interface Counted {
-	/** Mark it read to its end. Idempotent. */
+	/** Mark its end read, or its span accounted for another way. Idempotent. */
+	finish(): void;
+	/**
+	 * Let go of it, read or not. One whose end went unread leaves the rest of its span for the
+	 * publisher to name again; see {@link Tail.takeLost}. Idempotent.
+	 */
 	done(): void;
 	/**
 	 * The publisher accounted for its group another way, such as a drop, so {@link Tail.settle}
@@ -56,6 +61,11 @@ export class Tail {
 	// Keys a drop named, so a stream whose header the drop overtook can be told from one
 	// whose gap the grace gave up on.
 	#dropped: Run[] = [];
+	// With no grace (lite-07): groups whose stream was let go before its end, which leaves the
+	// rest of the span its GROUP_END told unnamed, for a SUBSCRIBE_UPDATE to ask the publisher
+	// to name again.
+	#lost: bigint[] = [];
+	#lostChanged = new Signal(0);
 
 	constructor(options: TailOptions = {}) {
 		this.#grace = options.grace ?? (() => GRACE);
@@ -85,13 +95,18 @@ export class Tail {
 
 		// Parked holds nothing, excused or not: an excuse made while parked applies once it resumes.
 		let state: "held" | "excused" | "parked" | "parked-excused" | "done" = "held";
+		let unread = true;
 		const token = {};
 		return {
+			finish: () => {
+				unread = false;
+			},
 			done: () => {
 				if (state === "held") this.#active -= 1;
 				else if (state === "excused") this.#excused.delete(token);
 				else if (state === "done") return;
 				state = "done";
+				if (unread) this.#lose(key);
 				this.#bump();
 			},
 			excuse: () => {
@@ -167,10 +182,48 @@ export class Tail {
 		this.#account(start, end);
 	}
 
+	/** Whether a let-go stream left a group for the publisher to name the rest of again. */
+	get hasLost(): boolean {
+		return this.#lost.length > 0;
+	}
+
+	/** Bumped whenever a stream is lost; see {@link takeLost}. */
+	get lostChanged(): Getter<number> {
+		return this.#lostChanged;
+	}
+
+	/** Take the groups a SUBSCRIBE_UPDATE asks the publisher to name the rest of again. */
+	takeLost(): bigint[] {
+		const lost = this.#lost;
+		this.#lost = [];
+		return lost;
+	}
+
+	// The stream of `key` was let go before its end. With no grace, the publisher is asked to name
+	// the rest of its span again, unless the next start is accounted for already, which ends the
+	// span there: no other group starts inside a whole group's span. Mirrors the Rust `Tail::lose`.
+	#lose(key: bigint): void {
+		if (this.#grace() !== undefined || this.#ledger.covers(key + 1n, key + 2n)) return;
+		this.#lost.push(key);
+		this.#lostChanged.update((n) => n + 1);
+	}
+
 	/** Whether a drop named `key`. */
 	dropped(key: bigint): boolean {
 		const run = this.#dropped[runsFrom(this.#dropped, key)];
 		return run !== undefined && run.start <= key;
+	}
+
+	/**
+	 * Account every gap of a tail with no grace that no run of `owed` (sorted, disjoint) reaches, as
+	 * when a range retires: its publisher names nothing outside its live ranges, so with no grace to
+	 * fold them, those gaps would otherwise outlive the ranges that left them. Mirrors the Rust
+	 * `Tail::retire`.
+	 */
+	retire(owed: readonly Run[]): void {
+		if (this.#grace() !== undefined) return;
+		this.#ledger.retire(owed, now());
+		this.#bump();
 	}
 
 	/** Restart the age of every gap reaching into `[start, end)`, which the demand newly asks for. */
@@ -205,9 +258,10 @@ export class Tail {
 	 * A stream still being read is waited for: a group ends on its own stream's FIN or reset,
 	 * never because its track ended. The grace gives up on streams that never arrived, and on
 	 * excused ones: a browser can lose a stream's reset, leaving it open forever, and the
-	 * publisher's drop already accounted for its group. `limit` caps the grace. With no grace,
-	 * only excused streams are given up, after `limit` or {@link GRACE}: every other start
-	 * waits for the wire to account for it.
+	 * publisher's drop already accounted for its group. `limit` caps the grace, and gives up on
+	 * every missing start even with no grace, as the Rust `Settle::at_most` does. With neither,
+	 * only excused streams are given up, after {@link GRACE}: every other start waits for the
+	 * wire to account for it.
 	 */
 	async settle(complete: () => boolean, closed: GetPromise<unknown>, limit?: Duration): Promise<void> {
 		// A gap that aged past the grace since the last insert is no longer waited for either.
@@ -230,7 +284,7 @@ export class Tail {
 					// Given up on, so a later settle, such as the one the publisher's FIN starts, does
 					// not wait another grace for them.
 					this.#excused.clear();
-					if (grace !== undefined) return;
+					if (grace !== undefined || limit !== undefined) return;
 				}
 				if (this.#active === 0 && this.#excused.size === 0 && complete()) return;
 				await Signal.race(this.#changed, closed);

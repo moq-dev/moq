@@ -29,6 +29,7 @@ import { GRACE } from "../ledger.ts";
 import * as Path from "../path.ts";
 import { concat, Reader, Writer } from "../stream.ts";
 import { withMax } from "../subscription.test-util.ts";
+import type { Counted } from "../tail.ts";
 import { Timescale } from "../time.ts";
 import type { Producer } from "../track.ts";
 import { SEGMENT_BYTES } from "../util/limits.ts";
@@ -3443,6 +3444,57 @@ for (const [max, retuned] of [
 	});
 }
 
+// A lite-07 group stream let go before its end, as one the transport evicts after its FIN, sends no
+// STOP_SENDING, so the subscription names the group in a SUBSCRIBE_UPDATE for the publisher to name the
+// rest of its span again. One read to its end names nothing. Mirrors the Rust
+// `a_group_stream_lost_before_its_end_is_named_upstream`.
+test("a lite-07 group stream lost before its end is named upstream", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, toHop(1n));
+	type Entry = { tail: { account(start: bigint, end: bigint): void; open(key: bigint): Counted } };
+	let entry: Entry | undefined;
+	const internal = subscriber as unknown as {
+		runResponses: (stream: unknown, entry: Entry) => Promise<void>;
+	};
+	const runResponses = internal.runResponses.bind(internal);
+	const responses = spyOn(internal, "runResponses").mockImplementation((stream, captured) => {
+		entry = captured;
+		return runResponses(stream, captured);
+	});
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.track("video").subscribe({});
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version);
+		const request = await opened(1);
+		const sent = new Reader(request.outbound, undefined, version);
+		expect(await sent.u53()).toBe(StreamId.Subscribe);
+		await Subscribe.decode(sent, version);
+		await request.reading;
+		if (!entry) throw new Error("no subscription");
+
+		const read = entry.tail.open(0n);
+		read.finish();
+		read.done();
+		entry.tail.open(4n).done();
+		const update = await SubscribeUpdate.decode(sent, version);
+		expect(update.lost).toEqual([4n]);
+		expect(update.ranges).toEqual([]);
+
+		// The next start accounted for already ends the span there, so nothing is left to name.
+		entry.tail.account(9n, 10n);
+		entry.tail.open(8n).done();
+		entry.tail.open(12n).done();
+		expect((await SubscribeUpdate.decode(sent, version)).lost).toEqual([12n]);
+	} finally {
+		responses.mockRestore();
+		track.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
 // A lite-07 stale (OLD) drop accounts for its groups for good, whichever of it and a group's stream
 // lands first: an update owes none of them again, and a group still arriving, such as one another
 // subscription sharing the copy delivers, is never aborted by the drop.
@@ -3566,6 +3618,74 @@ test("a stale drop is recorded under the narrowest budget asked on lite-07", asy
 		track.close();
 		broadcast.close();
 		subscriber.close();
+	}
+});
+
+// A lite-07 tail folds the gaps a retired range left once every live range says where it starts, so
+// a range moved through a track leaves no run behind for each place it visited. Mirrors the Rust
+// `a_moved_range_leaves_no_gap_in_a_proven_tail`.
+test("a moved range leaves no gap in a lite-07 tail", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, toHop(1n));
+	type Entry = {
+		tail: { accounted(start: bigint, end: bigint): { start: bigint; end: bigint }[] };
+		live: { entries(): Iterable<[bigint, unknown]> };
+	};
+	let entry: Entry | undefined;
+	const internal = subscriber as unknown as {
+		runResponses: (stream: unknown, entry: Entry) => Promise<void>;
+	};
+	const runResponses = internal.runResponses.bind(internal);
+	const responses = spyOn(internal, "runResponses").mockImplementation((stream, captured) => {
+		entry = captured;
+		return runResponses(stream, captured);
+	});
+	const span = (start: bigint, end: bigint) => ({ start, end: end - 1n });
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.track("video").subscribe({ ranges: [span(0n, 10n), span(20n, 22n)] });
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version);
+		const stream = await opened(1);
+		await stream.reading;
+		const send = async (resps: SubscribeResponse[]) => {
+			const chunks: Uint8Array[] = [];
+			const writer = new Writer(
+				new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
+				version,
+			);
+			for (const resp of resps) await encodeSubscribeResponse(writer, resp, version);
+			for (const chunk of chunks) stream.inbound.enqueue(chunk);
+			await drainReactions();
+		};
+		const notFound = (start: bigint, end: bigint): SubscribeResponse => ({
+			drop: new SubscribeDrop({ start, end, error: StreamCode.NotFound }),
+		});
+		await send([
+			{ start: answer(version, 0n, 0n) },
+			{ start: answer(version, 20n, 1n) },
+			notFound(0n, 5n),
+			notFound(6n, 10n),
+			notFound(20n, 22n),
+		]);
+		if (!entry) throw new Error("no subscription");
+
+		// The second range moves on to 30..32.
+		track.update({ ranges: [span(0n, 10n), span(30n, 32n)] });
+		await drainReactions();
+		let moved = 0n;
+		for (const [id] of entry.live.entries()) if (id > moved) moved = id;
+		await send([{ start: answer(version, 30n, moved) }]);
+		// 5 is still owed, and nothing between the ranges is.
+		expect(entry.tail.accounted(0n, 40n)).toEqual([
+			{ start: 0n, end: 5n },
+			{ start: 6n, end: 22n },
+		]);
+	} finally {
+		responses.mockRestore();
+		track.close();
+		broadcast.close();
 	}
 });
 

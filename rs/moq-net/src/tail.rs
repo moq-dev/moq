@@ -41,6 +41,9 @@ pub(crate) struct Tail {
 	ended: bool,
 	// Lite-07: the publisher names every start, so no gap ages out.
 	proven: bool,
+	// Lite-07: groups whose stream was discarded before its end, which leaves the rest of the
+	// span its GROUP_END told unnamed, for a SUBSCRIBE_UPDATE to ask the publisher to name again.
+	lost: Vec<u64>,
 }
 
 impl Default for Tail {
@@ -60,6 +63,7 @@ impl Tail {
 			active: 0,
 			ended: false,
 			proven: false,
+			lost: Vec::new(),
 		}
 	}
 
@@ -123,6 +127,16 @@ impl Tail {
 		self.expire(now);
 	}
 
+	/// Account every gap of a proven tail that no range of `owed` reaches, as when a range
+	/// retires: its publisher names nothing outside its live ranges, so with no grace to fold
+	/// them, those gaps would otherwise outlive the ranges that left them.
+	pub fn retire(&mut self, owed: &rangemap::RangeSet<u64>, now: Instant) {
+		if self.proven {
+			self.ledger.retire(owed, now);
+			self.rebill();
+		}
+	}
+
 	/// Restart the age of every gap reaching into `groups`, which the demand newly asks for.
 	pub fn demand(&mut self, groups: Range<u64>, now: Instant) {
 		self.ledger.demand(groups, now);
@@ -150,6 +164,26 @@ impl Tail {
 		self.ledger.folds_at(group, self.ledger.grace())
 	}
 
+	/// Whether a discarded stream left a group for the publisher to name the rest of again.
+	pub fn has_lost(&self) -> bool {
+		!self.lost.is_empty()
+	}
+
+	/// Take the groups a SUBSCRIBE_UPDATE asks the publisher to name the rest of again.
+	pub fn take_lost(&mut self) -> Vec<u64> {
+		std::mem::take(&mut self.lost)
+	}
+
+	/// Record that the stream of `group` was discarded before its end. A proven tail asks the
+	/// publisher to name the rest of its span again, unless the next start is accounted for
+	/// already, which ends the span there: no other group starts inside a whole group's span.
+	fn lose(&mut self, group: u64) {
+		let next = group.saturating_add(1);
+		if self.proven && !self.ledger.covers(next..next.saturating_add(1)) {
+			self.lost.push(group);
+		}
+	}
+
 	/// Whether a data stream whose header arrived is still being read.
 	pub fn is_reading(&self) -> bool {
 		self.active > 0
@@ -170,6 +204,8 @@ impl Tail {
 pub(crate) struct Reading {
 	tail: Option<kio::Producer<Tail>>,
 	active: bool,
+	/// The group the stream's header named, until its end is read.
+	unread: Option<u64>,
 }
 
 impl Reading {
@@ -179,6 +215,7 @@ impl Reading {
 			return Self {
 				tail: None,
 				active: false,
+				unread: None,
 			};
 		};
 		state.streams += 1;
@@ -190,7 +227,14 @@ impl Reading {
 		Self {
 			tail: Some(tail.clone()),
 			active: true,
+			unread: group,
 		}
+	}
+
+	/// Record that the stream's end was read, or its span accounted for another way: dropped
+	/// before then, the stream asks its publisher to name the rest of its span again.
+	pub fn finish(&mut self) {
+		self.unread = None;
 	}
 
 	/// Record `groups` as accounted for by this stream, such as the span its GROUP_END closed.
@@ -232,6 +276,12 @@ impl Reading {
 impl Drop for Reading {
 	fn drop(&mut self) {
 		self.set_active(false);
+		if let Some(group) = self.unread
+			&& let Some(tail) = &self.tail
+			&& let Ok(mut state) = tail.write()
+		{
+			state.lose(group);
+		}
 	}
 }
 
@@ -326,6 +376,32 @@ mod tests {
 			tail.account(1..3, runtime.now());
 		}
 		settled.await;
+	}
+
+	/// A proven tail keeps a run only per gap a live range still owes: the gaps a retired range
+	/// left fold into their neighbors, so moving a range keeps the ledger bounded.
+	#[kio::test]
+	async fn a_proven_tail_folds_the_gaps_no_live_range_owes() {
+		let runtime = crate::time::sim();
+		let mut tail = Tail::proven();
+		let now = runtime.now();
+		// A fixed range over 0..10 owes 5, and a second range moved through 20..22 and 30..32.
+		for groups in [0..5, 6..10, 20..22, 30..32] {
+			tail.account(groups, now);
+		}
+		let mut owed = rangemap::RangeSet::new();
+		owed.insert(0..10);
+		owed.insert(30..u64::MAX);
+		tail.retire(&owed, now);
+		assert!(tail.accounted(0..40).eq([0..5, 6..32]), "5 is still owed");
+		assert!(!tail.covers(5..6));
+
+		// A tail with a grace folds its gaps when the grace passes instead.
+		let mut graced = Tail::new(GRACE);
+		graced.account(0..1, now);
+		graced.account(2..3, now);
+		graced.retire(&rangemap::RangeSet::new(), now);
+		assert!(!graced.covers(1..2));
 	}
 
 	/// A stream that outlives the grace still reaches `complete` once it finishes.

@@ -206,6 +206,21 @@ impl Ledger {
 		Some(gap)
 	}
 
+	/// Account every gap between two runs that no range of `owed` reaches: nothing asks for
+	/// those keys anymore, so nothing names them and nothing waits for them.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub fn retire(&mut self, owed: &rangemap::RangeSet<u64>, now: Instant) {
+		let (Some(first), Some(end)) = (self.first(), self.runs.last_key_value().map(|(_, run)| run.end)) else {
+			return;
+		};
+		let gaps: Vec<_> = self.gaps(first..end).map(|(gap, _)| gap).collect();
+		for gap in gaps {
+			for unowed in owed.gaps(&gap).collect::<Vec<_>>() {
+				self.account(unowed, now);
+			}
+		}
+	}
+
 	/// Whether a gap separates two runs, so [`Self::expire`] has anything to fold.
 	pub fn has_gaps(&self) -> bool {
 		self.runs.len() > 1

@@ -2389,15 +2389,15 @@ class Reader implements ResumeSource {
 		return runsIn(skipped, start, end);
 	}
 
-	// A copy this front replaced may still land a group its serving copy never will, so an outer
-	// front reading this one as a copy waits on every copy still kept, each past where it starts
-	// and under its bound. Mirrors the Rust `Subscriber::may_land`.
 	/** Whether the serving route's copy names every start on its wire. */
 	proven(): boolean {
 		const serving = this.#serving();
 		return serving !== undefined && hooks.provenTrack(serving.sub);
 	}
 
+	// A copy this front replaced may still land a group its serving copy never will, so an outer
+	// front reading this one as a copy waits on every copy still kept, each past where it starts
+	// and under its bound. Mirrors the Rust `Subscriber::may_land`.
 	mayLand(land: Land): boolean {
 		for (const copy of this.#copies) {
 			const start = copy.backfill || copy.floor === undefined ? land.start : max(land.start, copy.floor);

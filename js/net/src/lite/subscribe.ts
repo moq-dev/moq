@@ -987,6 +987,11 @@ export class SubscribeUpdate {
 	 * keeping where it was placed, by Range ID.
 	 */
 	retune?: [bigint, number | null][];
+	/**
+	 * Lite-07: the groups whose stream this subscriber discarded before reading its end, such as
+	 * one its transport evicted after the FIN, which the publisher names the rest of again.
+	 */
+	lost: bigint[];
 
 	constructor(props: {
 		priority: number;
@@ -1000,6 +1005,7 @@ export class SubscribeUpdate {
 		ranges?: WireRange[];
 		remove?: bigint[];
 		retune?: [bigint, number | null][];
+		lost?: bigint[];
 	}) {
 		if (props.wantedGroup !== undefined && props.wantedGroup < 0n)
 			throw new RangeError("wanted group must be non-negative");
@@ -1014,6 +1020,7 @@ export class SubscribeUpdate {
 		this.ranges = props.ranges;
 		this.remove = props.remove;
 		this.retune = props.retune;
+		this.lost = props.lost ?? [];
 	}
 
 	async #encode(w: Writer, version: Version) {
@@ -1046,7 +1053,10 @@ export class SubscribeUpdate {
 						await w.u62(id);
 						await Duration.encodeOptional(w, max ?? undefined);
 					}
+					await w.u53(this.lost.length);
+					for (const group of this.lost) await w.u62(group);
 				} else {
+					if (this.lost.length > 0) throw new Error("only lite-07 names lost groups");
 					await encodeSpan(w, version, this, this.ranges);
 				}
 				if (hasRefresh(version)) await w.u62(this.wantedGroup === undefined ? 0n : this.wantedGroup + 1n);
@@ -1063,7 +1073,12 @@ export class SubscribeUpdate {
 				const priority = fromWire(await r.u8());
 				const order = await decodeOrder(r, version);
 				const maxDelay = await decodeMaxDelay(r, version);
-				let span: Span & { ranges?: WireRange[]; remove?: bigint[]; retune?: [bigint, number | null][] };
+				let span: Span & {
+					ranges?: WireRange[];
+					remove?: bigint[];
+					retune?: [bigint, number | null][];
+					lost?: bigint[];
+				};
 				if (hasRanges(version)) {
 					// Not preallocated, like the ranges: each id costs a byte of the bounded message.
 					const remove: bigint[] = [];
@@ -1072,7 +1087,10 @@ export class SubscribeUpdate {
 					const retune: [bigint, number | null][] = [];
 					for (let count = await r.u53(); count > 0; count--)
 						retune.push([await r.u62(), (await Duration.decodeOptional(r)) ?? null]);
-					span = { startFrame: 0, remove, ranges, retune };
+					// Not preallocated either: each group costs a byte of the bounded message.
+					const lost: bigint[] = [];
+					for (let count = await r.u53(); count > 0; count--) lost.push(await r.u62());
+					span = { startFrame: 0, remove, ranges, retune, lost };
 				} else {
 					span = await decodeSpan(r, version);
 				}

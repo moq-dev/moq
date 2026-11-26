@@ -768,6 +768,10 @@ pub struct SubscribeUpdate<R = RangeEdit> {
 	pub ranges: R,
 	/// See [`Subscribe::order`].
 	pub order: Order,
+	/// Lite-07: the groups whose stream this subscriber discarded before reading its end,
+	/// such as one its transport evicted after the FIN, which the publisher names the rest
+	/// of again.
+	pub lost: Vec<u64>,
 }
 
 impl<R> SubscribeUpdate<R> {
@@ -779,6 +783,7 @@ impl<R> SubscribeUpdate<R> {
 			max_delay: self.max_delay,
 			ranges,
 			order: self.order,
+			lost: self.lost,
 		}
 	}
 }
@@ -812,6 +817,13 @@ impl<'a> Message<'a> for SubscribeUpdate {
 			}
 			false => RangeEdit::Replace(decode_ranges(r, version)?),
 		};
+		// Not preallocated either: each group costs a byte of the bounded message.
+		let mut lost = Vec::new();
+		if version.has_ranges() {
+			for _ in 0..r.varint()? {
+				lost.push(r.varint()?);
+			}
+		}
 
 		let wanted_group = match version.has_refresh() {
 			true => r.varint()?.checked_sub(1),
@@ -824,6 +836,7 @@ impl<'a> Message<'a> for SubscribeUpdate {
 			max_delay,
 			ranges,
 			order,
+			lost,
 		})
 	}
 
@@ -853,6 +866,16 @@ impl<'a> Message<'a> for SubscribeUpdate {
 			}
 			(RangeEdit::Replace(ranges), false) => encode_ranges(w, version, ranges)?,
 			_ => return Err(EncodeError::Version),
+		}
+		match version.has_ranges() {
+			true => {
+				w.varint(self.lost.len() as u64)?;
+				for group in &self.lost {
+					w.varint(*group)?;
+				}
+			}
+			false if !self.lost.is_empty() => return Err(EncodeError::Version),
+			false => {}
 		}
 
 		if version.has_refresh() {
@@ -1863,6 +1886,7 @@ mod test {
 			max_delay: Some(std::time::Duration::from_millis(250)),
 			ranges: sent.edit(&msg.ranges).unwrap(),
 			order: crate::track::Order::Ascending,
+			lost: Vec::new(),
 		};
 		let buf = update.encode_bytes(Version::Lite07).unwrap();
 		let got = crate::coding::decode_buf(&mut buf.as_ref(), Version::Lite07, |r, v| SubscribeUpdate::decode(r, v))
@@ -1871,6 +1895,26 @@ mod test {
 		live.apply(got.ranges).unwrap();
 		let resolved: Vec<_> = live.iter().map(|(_, range)| *range).collect();
 		assert_eq!(resolved, msg.ranges);
+	}
+
+	/// Lite-07 carries the groups an update reports lost; an earlier version has nowhere to put them.
+	#[test]
+	fn only_lite07_carries_lost_groups() {
+		let update = |version, lost| SubscribeUpdate {
+			wanted_group: None,
+			priority: 0,
+			max_delay: None,
+			ranges: LiveRanges::new(version, &[Range::OPEN]).unchanged(),
+			order: crate::track::Order::Descending,
+			lost,
+		};
+		let buf = update(Version::Lite07, vec![3, 9])
+			.encode_bytes(Version::Lite07)
+			.unwrap();
+		let got = crate::coding::decode_buf(&mut buf.as_ref(), Version::Lite07, |r, v| SubscribeUpdate::decode(r, v))
+			.unwrap();
+		assert_eq!(got.lost, [3, 9]);
+		assert!(update(Version::Lite06, vec![3]).encode_bytes(Version::Lite06).is_err());
 	}
 
 	/// Lite-07 has no absolute anchor: a group's position goes out as its start's time, an
@@ -1964,6 +2008,7 @@ mod test {
 				max_delay: Some(std::time::Duration::ZERO),
 				ranges: edit,
 				order: crate::track::Order::Descending,
+				lost: Vec::new(),
 			};
 			let buf = update.encode_bytes(version).unwrap();
 			let got =
@@ -2180,6 +2225,7 @@ mod test {
 					max_delay: Some(std::time::Duration::ZERO),
 					ranges: LiveRanges::new(version, &[Range::OPEN]).unchanged(),
 					order: crate::track::Order::Descending,
+					lost: Vec::new(),
 				};
 				let buf = update.encode_bytes(version).unwrap();
 				let got = crate::coding::decode_buf(&mut buf.as_ref(), version, |r, v| SubscribeUpdate::decode(r, v))
@@ -2368,6 +2414,7 @@ mod test {
 			max_delay: None,
 			ranges: edit,
 			order: crate::track::Order::Descending,
+			lost: Vec::new(),
 		};
 		let buf = update.encode_bytes(version).unwrap();
 		let got = crate::coding::decode_buf(&mut buf.as_ref(), version, |r, v| SubscribeUpdate::decode(r, v)).unwrap();
@@ -2436,6 +2483,7 @@ mod test {
 				max_delay: Some(std::time::Duration::ZERO),
 				ranges: LiveRanges::new(Version::Lite07, &[]).edit(&[live(min)]).unwrap(),
 				order: crate::track::Order::Descending,
+				lost: Vec::new(),
 			};
 			let buf = update.encode_bytes(Version::Lite07).unwrap();
 			let got =
@@ -2499,6 +2547,7 @@ mod test {
 				max_delay: Some(std::time::Duration::from_millis(250)),
 				ranges: LiveRanges::new(version, &[Range::OPEN]).unchanged(),
 				order,
+				lost: Vec::new(),
 			};
 			let mut buf = Vec::new();
 			update

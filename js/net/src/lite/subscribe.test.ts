@@ -181,6 +181,20 @@ test("SubscribeUpdate round-trips every option including startGroup 0", async ()
 	expect(absent.startGroup).toBeUndefined();
 });
 
+// Lite-07 carries the groups an update reports lost; an earlier version has nowhere to put them.
+// Mirrors the Rust `only_lite07_carries_lost_groups`.
+test("only lite-07 carries lost groups", async () => {
+	const update = new SubscribeUpdate({ priority: 0, remove: [], ranges: [], lost: [3n, 9n] });
+	const got = await SubscribeUpdate.decode(
+		new Reader(undefined, await encodeMessage(Version.DRAFT_07, update), Version.DRAFT_07),
+		Version.DRAFT_07,
+	);
+	expect(got.lost).toEqual([3n, 9n]);
+	await expect(
+		encodeMessage(Version.DRAFT_06, new SubscribeUpdate({ priority: 0, startGroup: 0n, lost: [3n] })),
+	).rejects.toThrow("only lite-07 names lost groups");
+});
+
 test("lite-07 carries the span as its only range, exclusive at the end", async () => {
 	const message = new Subscribe({
 		id: 1n,
@@ -219,10 +233,10 @@ test("lite-07 carries the span as its only range, exclusive at the end", async (
 
 test("a lite-07 list decodes its time anchors and starts with none", async () => {
 	// Priority and order as SubscribeUpdate writes them, then no Range ID to retire, the ranges it
-	// adds, no live join to retune, and an absent wanted group.
+	// adds, no live join to retune, no lost group, and an absent wanted group.
 	const head = (await encodeMessage(Version.DRAFT_07, new SubscribeUpdate({ priority: 0, ranges: [] }))).slice(1, 3);
 	const update = async (ranges: number[]) => {
-		const body = [...head, 0, ...ranges, 0, 0];
+		const body = [...head, 0, ...ranges, 0, 0, 0];
 		const got = await SubscribeUpdate.decode(
 			new Reader(undefined, new Uint8Array([body.length, ...body]), Version.DRAFT_07),
 			Version.DRAFT_07,
@@ -340,9 +354,9 @@ test("a lite-07 range may start partway through a group, which the span keeps", 
 	const position = { start: { absolute: 7n, frame: 4 } };
 	const update = new SubscribeUpdate({ priority: 0, ranges: [position] });
 	const bytes = await encodeMessage(Version.DRAFT_07, update);
-	// One range: type 2, start 7, frame 4, then no end, no live join to retune, and an absent
-	// wanted group.
-	expect(Array.from(bytes.slice(-7))).toEqual([1, 2, 7, 4, 0, 0, 0]);
+	// One range: type 2, start 7, frame 4, then no end, no live join to retune, no lost group, and
+	// an absent wanted group.
+	expect(Array.from(bytes.slice(-8))).toEqual([1, 2, 7, 4, 0, 0, 0, 0]);
 	expect(rangeSize(position)).toBe(4);
 	const got = await SubscribeUpdate.decode(new Reader(undefined, bytes, Version.DRAFT_07), Version.DRAFT_07);
 	expect(got.ranges).toEqual([position]);
@@ -413,8 +427,8 @@ test("a lite-07 range may end partway through a group, stopping it there", async
 	const update = new SubscribeUpdate({ priority: 0, ranges: [position] });
 	const bytes = await encodeMessage(Version.DRAFT_07, update);
 	// Type 1, time 3, then type 2, start 9, frame 2, which it stops before, no live join to retune,
-	// and an absent wanted group.
-	expect(Array.from(bytes.slice(-7))).toEqual([1, 3, 2, 9, 2, 0, 0]);
+	// no lost group, and an absent wanted group.
+	expect(Array.from(bytes.slice(-8))).toEqual([1, 3, 2, 9, 2, 0, 0, 0]);
 	const got = await SubscribeUpdate.decode(new Reader(undefined, bytes, Version.DRAFT_07), Version.DRAFT_07);
 	expect(got.ranges).toEqual([position]);
 	// The model range includes group 9, and only the frames before frame 2 of it go out.
