@@ -2,7 +2,7 @@
 	"name": "moq",
 	"version": "0.0.0",
 	"devDependencies": {
-		"@biomejs/biome": "^2.6.7",
+		"@biomejs/biome": "^2.6.8",
 		"@moq/auth": "workspace:*",
 		"@moq/clock": "workspace:*",
 		"@moq/hang": "workspace:*",

@@ -19,7 +19,7 @@
 		"vitepress": "^1.6.4",
 		"vitepress-plugin-llms": "^1.15.0",
 		"vue": "^3.5.45",
-		"wrangler": "^4.162.0",
+		"wrangler": "^4.165.0",
 		"yaml": "^2.9.1"
 	}
 }
