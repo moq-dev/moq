@@ -3630,11 +3630,13 @@ impl Handle {
 	pub(super) fn poll_started(&self, waiter: &kio::Waiter) -> Poll<()> {
 		match self.state.poll(waiter, |state| {
 			let started = self.is_started() || self.is_aborted();
+			#[cfg(debug_assertions)]
 			debug_assert_eq!(
 				started,
 				state.started(),
 				"Alive::started/fall mirror diverged from GroupState::started()"
 			);
+			let _ = state;
 			if started { Poll::Ready(()) } else { Poll::Pending }
 		}) {
 			Poll::Ready(_) => Poll::Ready(()),
