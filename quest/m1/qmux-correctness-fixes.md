@@ -21,7 +21,7 @@ Caused by: [moq-dev/moq#6231](https://github.com/moq-dev/moq/pull/6231) (`mux::T
 1. **One-way-sender idle timeout (`mux/timer.rs:116-139`)**: Gate keep-alive `QX_PING` on `last_recv.max(last_ping) + idle / 3` instead of `last_send`, so a healthy low-bitrate one-way publisher below the peer's 50% `MAX_DATA` replenishment threshold still probes and survives `idle_timeout` even with `rtt_interval: None`.
 2. **Ordered `RESET_STREAM_AT` (`mux/mod.rs:615-626`, `streams/send.rs:136`)**: On QMux's ordered byte stream, hold `RESET_STREAM_AT` until `0..reliable_size` has been serialized so it is never emitted ahead of its reliable prefix (which `js/qmux` rejects as a `PROTOCOL_VIOLATION`).
 3. **Flush-confirmed `transmitted()` and `reset_acked()` (`driver.rs:332-336`, `mux/mod.rs:618-622`)**: Confirm records (`transmitted()` and pending `reset_acked()`) only once `poll_flush()` drains them to the kernel/transport, not right after `send()` appends to user-space buffers.
-4. **Offered `Sec-WebSocket-Protocol` verification (`ws.rs:308-320`)**: Verify the server echoed a subprotocol `ws::Client::connect` actually offered (RFC 6455 §4.1 and `draft-lcurley-qmux-websocket.md`), matching `moq-tokio/src/websocket.rs:694-705`.
+4. **Offered `Sec-WebSocket-Protocol` rejection test (`ws.rs:308-320`)**: Pinned `tungstenite` 0.30 already validates that the server's `Sec-WebSocket-Protocol` was offered by the client; add a regression test at the `qmux::ws::Client::connect` boundary confirming an unoffered server subprotocol is rejected.
 5. **32-bit overflow / truncation (`transport/stream.rs:72-112`, `mux/mod.rs:684`)**: Use checked arithmetic for `prefix + size` and `usize::try_from` instead of `as usize` truncation on peer record sizes.
 6. **`WsTransport::poll_ping` waker clobbering (`transport/websocket.rs:104`, `driver.rs:271-359`)**: Stop registering `recv.waiter` on `self.ws.poll_ready` where `driver.rs` overwrites it with the main waiter, so write-backpressured keep-alive pings resume promptly.
 7. **Other `mux` / `qmux` protocol gaps**:
@@ -42,7 +42,7 @@ Caused by: [moq-dev/moq#6231](https://github.com/moq-dev/moq/pull/6231) (`mux::T
 12. **Protocol divergences**:
     - Reject `QX_PING` on `qmux-00` (`session.ts:1119-1134`).
     - Reject duplicate `QX_TRANSPORT_PARAMETERS` on `qmux-00/01` (`session.ts:1147`).
-    - Stop iterating trailing frames in a record after `APPLICATION_CLOSE`/`CONNECTION_CLOSE` (`session.ts:1027-1030`).
+    - Stop decoding a record in `Frame.decodeRecord()` as soon as `APPLICATION_CLOSE` or `CONNECTION_CLOSE` is decoded (matching Rust), so trailing frames or malformed trailing bytes after a valid close never hide the peer's close code and reason (`frame.ts:705`, `session.ts:1027-1030`).
     - Prevent an out-of-order `ping_request` on `qmux-01` from overwriting a higher queued `ping_response` sequence (`session.ts:1128`).
     - Return `FINAL_SIZE_ERROR` on `STREAM` data or mismatched `RESET_STREAM` after `FIN` in `sizeKnown` instead of silently dropping (`recv.ts:142-179`).
     - Clamp `StreamLimit.#raise` to `2^60` (`credit.ts:259`), and clamp huge peer `maxIdleTimeout` values so they cannot overflow JS's 32-bit `setTimeout` (`session.ts:1225`).
