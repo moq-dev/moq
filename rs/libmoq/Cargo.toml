@@ -49,7 +49,7 @@ url = { workspace = true }
 cbindgen = "0.29"
 
 [dev-dependencies]
-kio = { path = "../kio", features = ["runtime"] }
+kio = { workspace = true, features = ["runtime"] }
 moq-loc = { path = "../moq-loc" }
 # A peer without MoQ Solicit.
 moq-tokio = { path = "../moq-tokio", default-features = false, features = ["test-support"] }

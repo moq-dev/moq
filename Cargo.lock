@@ -3751,33 +3751,27 @@ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 [[package]]
 name = "kio"
 version = "0.6.2"
+source = "git+https://github.com/kixel-ai/kio?rev=866ef062d86cf4bd81e1f6766baaf95e3f687671#866ef062d86cf4bd81e1f6766baaf95e3f687671"
 dependencies = [
- "bench-harness",
  "crossbeam-epoch",
  "futures",
- "kio",
  "kio-macros",
  "libc",
  "rand 0.10.3",
  "serde",
- "serde_json",
  "serde_with",
  "smallvec",
- "test-env",
  "tokio",
- "workspace-hack",
 ]
 
 [[package]]
 name = "kio-macros"
 version = "0.1.0"
+source = "git+https://github.com/kixel-ai/kio?rev=866ef062d86cf4bd81e1f6766baaf95e3f687671#866ef062d86cf4bd81e1f6766baaf95e3f687671"
 dependencies = [
- "kio",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
- "test-env",
- "trybuild",
 ]
 
 [[package]]
@@ -8724,12 +8718,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
 
 [[package]]
-name = "target-tuple"
-version = "1.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "876fef147edbcbddc8ac5cbbba92c7b86519e314e86638596c09673b2ed01e7f"
-
-[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9320,21 +9308,6 @@ name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
-
-[[package]]
-name = "trybuild"
-version = "1.0.122"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62db9c92d704393fbf2132041720cc80b689f2d3f28521015c2ac866223c11b8"
-dependencies = [
- "glob",
- "serde",
- "serde_derive",
- "serde_json",
- "target-tuple",
- "termcolor",
- "toml 1.2.1+spec-1.1.0",
-]
 
 [[package]]
 name = "ttf-parser"
@@ -10668,6 +10641,7 @@ dependencies = [
  "hyper-util",
  "indexmap 2.14.2",
  "itertools 0.13.0",
+ "kio",
  "libc",
  "linux-raw-sys 0.12.1",
  "log",

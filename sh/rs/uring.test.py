@@ -30,8 +30,8 @@ class UringTest(unittest.TestCase):
                     }
                     for name, deps in (
                         ("moq-relay", ["moq-uring"]),
-                        ("moq-uring", ["kio"]),
-                        ("kio", []),
+                        ("moq-uring", ["moq-sock"]),
+                        ("moq-sock", []),
                         ("moq-unrelated", []),
                     )
                 ],
@@ -53,7 +53,7 @@ class UringTest(unittest.TestCase):
             for path, passes in (
                 ("rs/moq-uring/src/worker.rs", True),
                 ("rs/moq-relay/src/uring.rs", True),
-                ("rs/kio/src/lib.rs", True),
+                ("rs/moq-sock/src/lib.rs", True),
                 ("rs/moq-unrelated/src/lib.rs", False),
                 ("flake.lock", True),
                 (".github/workflows/uring.yml", True),
