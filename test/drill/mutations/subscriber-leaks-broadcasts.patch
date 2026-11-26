@@ -13,7 +13,7 @@
 diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.rs
 --- a/rs/moq-net/src/lite/subscriber.rs
 +++ b/rs/moq-net/src/lite/subscriber.rs
-@@ -1023,9 +1023,7 @@ impl SubscriberDriver {
+@@ -1050,9 +1050,7 @@ impl SubscriberDriver {
  		self.subscriber.note_end(err);
  		// Before the copies they serve, so each front reads what its copy fails with as its
  		// source going, not as the track's verdict.
@@ -24,20 +24,20 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  		self.cleanup.abort(err);
  	}
  
-@@ -2204,7 +2202,8 @@ struct PrefixRun {
- 	/// it comes from the connect config or the peer's SETUP, neither of which
- 	/// changes for the life of the session.
+@@ -2364,7 +2362,8 @@ struct PrefixRun {
  	link_cost: u64,
+ 	/// The price's epoch last applied.
+ 	price_epoch: u64,
 -	announced: Announced,
 +	// MUTATION: never dropped, so a session that ends keeps every route alive.
 +	announced: std::mem::ManuallyDrop<Announced>,
  	// Lite06+: announce ids. Each received `active` implicitly assigns the next
  	// per-stream ordinal; `ended`/`restart` reference it instead of repeating the
  	// path, and lite-07 bases name it too. Tracked even for announces we drop
-@@ -2290,7 +2289,10 @@ impl AnnouncePrefix {
- 		let mut run: PrefixRun = PrefixRun {
+@@ -2451,7 +2450,10 @@ impl AnnouncePrefix {
  			responder_origin,
  			link_cost,
+ 			price_epoch: 0,
 -			announced: Announced::new(self.subscriber.announces.clone(), self.subscriber.minted.clone()),
 +			announced: std::mem::ManuallyDrop::new(Announced::new(
 +				self.subscriber.announces.clone(),
@@ -46,7 +46,7 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  			decoder: lite::AnnounceDecoder::default(),
  			auth_epoch: 0,
  			initial,
-@@ -2419,7 +2421,8 @@ struct SourceServe {
+@@ -2588,7 +2590,8 @@ struct SourceServe {
  	path: Path,
  	instance: Option<crate::Instance>,
  	node: Option<crate::route::NodeId>,
@@ -56,7 +56,7 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  	dynamic: crate::broadcast::Requests,
  	route: kio::Consumer<()>,
  	// A dedicated close-watch handle, since each pending operation needs its own.
-@@ -2587,7 +2590,7 @@ impl SourceServe {
+@@ -2756,7 +2759,7 @@ impl SourceServe {
  			path: minted.path,
  			instance: minted.instance,
  			node: minted.node,
@@ -65,7 +65,7 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  			datagram_requests: minted.dynamic.datagrams(),
  			dynamic: minted.dynamic,
  			route: minted.route,
-@@ -2695,7 +2698,7 @@ impl kio::Task for SourceServe {
+@@ -2864,7 +2867,7 @@ impl kio::Task for SourceServe {
  					let serve = TrackServe {
  						validity: self.dynamic.validity().clone(),
  						route: Some(self.route.clone()),
@@ -74,7 +74,7 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  						subscriber: self.subscriber.clone(),
  						path: self.path.clone(),
  						instance: self.instance.clone(),
-@@ -10836,11 +10839,7 @@ impl TrackServe {
+@@ -12978,11 +12981,7 @@ impl TrackServe {
  	/// still open as the track's verdict: a session that failed its copies before closing their
  	/// sources would end tracks its relay could resume on the next route.
  	fn close_if_ending(&self) {
