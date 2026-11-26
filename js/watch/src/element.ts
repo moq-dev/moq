@@ -455,6 +455,15 @@ export default class MoqWatch extends HTMLElement {
 		this.#connected = true;
 		const group = this.parentElement?.closest("moq-sync");
 		this.#shared.set(group instanceof MoqSync ? group.sync : undefined);
+		// A delay or lookahead refused inside a `<moq-sync>` may be valid outside it, and the reverse.
+		for (const name of ["delay", "lookahead"] as const) {
+			if (!this.#invalid.peek().has(name)) continue;
+			try {
+				this.attributeChangedCallback(name, null, this.getAttribute(name));
+			} catch {
+				// Still refused, and already reported when it was set.
+			}
+		}
 		this.#update();
 		this.style.display = "block";
 		this.style.position = "relative";
