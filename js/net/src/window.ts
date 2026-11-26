@@ -958,13 +958,15 @@ export class Window {
 	}
 
 	/**
-	 * The times in `[start, end)` of the time starts still waiting on the groups held. The group
-	 * containing each starts at or before its time, so one at or past a read's floor and below a
-	 * group may still land between them. Mirrors the Rust `Window::waiting_in`.
+	 * The times in `[start, end)` of the time starts not yet resolved: waiting on the groups held, or
+	 * on a lookup of the track's history. The group containing each starts at or before its time, so
+	 * one at or past a read's floor and below a group may still land between them. Mirrors the Rust
+	 * `Window::unresolved_in`.
 	 */
-	waitingIn(start: bigint, end: bigint): bigint[] {
+	unresolvedIn(start: bigint, end: bigint): bigint[] {
 		const times: bigint[] = [];
 		for (const entry of this.#waiting.in(start, end)) times.push(entry.time);
+		for (const entry of this.#looking.in(start, end)) times.push(entry.time);
 		return times;
 	}
 
@@ -992,9 +994,12 @@ export class Window {
 		return this.#groups.prev(before);
 	}
 
-	/** The lowest group in range, undefined while a start waits. Nothing in range floors at group 0. */
+	/**
+	 * The lowest group in range, undefined while a start waits, a time start's lookup included: it may
+	 * resolve to a group below every one in range. Nothing in range floors at group 0.
+	 */
 	floor(): bigint | undefined {
-		if (this.pending || this.#unplaced()) return undefined;
+		if (this.pending || this.#unplaced() || this.#looking.size > 0) return undefined;
 		return this.#groups.lowest() ?? 0n;
 	}
 
