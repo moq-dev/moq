@@ -144,11 +144,13 @@ members report an `error` too. Audio follows each member's clock as usual, so un
 to hear.
 
 The cap also bounds how far a wrong camera clock can move the wall. A member
-whose `sync.clock` runs ahead by less than the cap stays in step by holding its
-frames that much longer, so it shows images that much older while looking in
-sync: on real cameras, a clock 2 s ahead showed frames about 2.6 s old with the
-default cap. One whose clock runs behind by less than the cap holds the whole
-group back by as much.
+whose `sync.clock` runs ahead stays in step as long as the delay it then needs,
+its usual one plus the lead, fits within the cap: it holds its frames that much
+longer, so it shows images that much older while looking in sync. On real
+cameras, a clock 2 s ahead showed frames about 2.6 s old with the default cap.
+One whose clock runs behind holds the whole group back by as much, as long as
+every other member's delay still fits within the cap; otherwise the playhead
+follows the most members and the one left over plays alone.
 
 Without the element, pass one shared `Watch.Sync` as `sync` to each
 [`Player`](#without-the-element). `player.sync` stays the player's own clock,
