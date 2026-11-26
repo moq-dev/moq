@@ -13113,7 +13113,7 @@ async fn an_ffmpeg_audio_source_exports_at_its_recorded_rate() {
 		let recorded = Clocked::of(data).rate();
 		let padded = recorded + crate::container::ts::schedule::PACKET;
 		for rate in [Rate::Wait, Rate::Measured, Rate::Given(padded)] {
-			let (ts, dropped) = paced_export(data, rate).await;
+			let (ts, dropped) = paced_export(data, rate, Duration::from_secs(1)).await;
 			assert_packet_aligned(&ts);
 			assert_eq!(dropped, 0, "{name}, {rate:?}: every frame made its deadline");
 			let out = Clocked::of(&ts).rate();
@@ -13126,6 +13126,11 @@ async fn an_ffmpeg_audio_source_exports_at_its_recorded_rate() {
 			}
 		}
 	}
+	// With no delay to send it ahead, AAC still finds room in each slot it decodes in. Frames
+	// that arrive after their decode time drop, but none misses a deadline once scheduled.
+	let data = include_bytes!("test_data/ffmpeg_aac.ts");
+	let (ts, _dropped) = paced_export(data, Rate::Wait, Duration::ZERO).await;
+	assert!(Clocked::of(&ts).rate() > Clocked::of(data).rate() + crate::container::ts::schedule::PACKET);
 }
 
 /// Where [`paced_export`] takes its multiplex rate from.
@@ -13140,9 +13145,9 @@ enum Rate {
 }
 
 /// Import `data` live, each stretch to a PCR on PID 0x100 arriving when its clock says, and export
-/// it at `rate` from the first stretch on until 4 s of media. Returns the output and the frames it
+/// it at `rate` and `delay` from the first stretch on until 4 s of media. Returns the output and the frames it
 /// dropped.
-async fn paced_export(data: &[u8], rate: Rate) -> (BytesMut, u64) {
+async fn paced_export(data: &[u8], rate: Rate, delay: Duration) -> (BytesMut, u64) {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(
@@ -13168,7 +13173,7 @@ async fn paced_export(data: &[u8], rate: Rate) -> (BytesMut, u64) {
 				.await
 				.unwrap();
 			export = Some(tokio::spawn(async move {
-				let export = Export::new(source, catalog, Duration::from_secs(1));
+				let export = Export::new(source, catalog, delay);
 				let mut export = match rate {
 					Rate::Wait => export,
 					Rate::Measured => export.without_rate_wait(),

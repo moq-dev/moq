@@ -107,6 +107,32 @@ fn padded(rate: u64) -> u64 {
 	rate.saturating_add(schedule::PACKET)
 }
 
+/// The rate a multiplex needs when its delay is too short to send audio a slot ahead: each slot
+/// then carries the AAC its own decode times hold, as much as two frames, beside a clock and
+/// tables. Sent further ahead, the audio spreads over slots and needs no floor.
+fn audio_floor(catalog: &Catalog<impl catalog::Catalog>) -> u64 {
+	let packets: u64 = catalog
+		.audio
+		.renditions
+		.iter()
+		.filter(|(_, config)| matches!(config.codec, AudioCodec::AAC(_)))
+		.filter_map(|(name, config)| {
+			// The catalog is untrusted: no frame outgrows the decoder buffer that holds it.
+			let size = audio_buffer(config, &audio_kind(config, name).ok()?).size?;
+			let frame = (config.bitrate? / 8 * 1024 / u64::from(config.sample_rate.max(1))).min(size as u64);
+			let pes = 2 * frame + (adts::MIN_HEADER_LEN + PES_PREFIX_LEN + PES_OPTIONAL_LEN) as u64;
+			Some(pes.div_ceil(schedule::PAYLOAD as u64))
+		})
+		.fold(0, u64::saturating_add);
+	match packets {
+		0 => 0,
+		packets => packets
+			.saturating_add(3)
+			.saturating_mul(schedule::PACKET)
+			.min(MAX_MUX_RATE),
+	}
+}
+
 /// Subscribe to a broadcast and produce an MPEG-TS byte stream.
 ///
 /// Use [`poll_next`](Self::poll_next) to pull one [`Frame`] per PCR grid slot: its `payload`
@@ -2445,6 +2471,11 @@ where
 					})
 				})
 				.map(padded)
+				// Audio goes out at most half the delay ahead (`audio_reach`).
+				.map(|rate| match self.program.delay < 2 * PCR_INTERVAL {
+					true => rate.max(audio_floor(&catalog)),
+					false => rate,
+				})
 				.and_then(sanitize_mux_rate),
 		};
 		// A revision is one boundary: the rate rides the next tables out.
@@ -3655,7 +3686,8 @@ where
 				.program
 				.tracks
 				.values()
-				.filter(|track| track.kind.class() == super::stats::Class::Audio)
+				// A track waiting for its PID takes its buffer there when it lists ([`Self::push_unit`]).
+				.filter(|track| track.listed && track.kind.class() == super::stats::Class::Audio)
 				.filter_map(|track| Some((track.pid, self.scheduled(track)?)))
 				.collect();
 			for (pid, buffer) in buffers {
