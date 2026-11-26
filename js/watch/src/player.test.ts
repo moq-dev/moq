@@ -19,6 +19,26 @@ test("Player refuses the renamed reload, announced, and buffer inputs", () => {
 	expect(() => new Player({ buffer: 1000 } as never)).toThrow("`buffer` was renamed to `lookahead`");
 });
 
+test("Player joins a group through its catalog clock, and plays alone without one", async () => {
+	const { Sync } = await import("./sync");
+	const group = new Sync();
+	const clock = { wall: Catalog.u53(1_000_000), timescale: 1_000_000 };
+	const timed = new Player({ catalogFormat: "manual", catalog: { sync: { clock } }, group });
+	const untimed = new Player({ catalogFormat: "manual", catalog: {}, group });
+	const alone = new Player({ catalogFormat: "manual", catalog: { sync: { clock } } });
+	try {
+		await flush();
+		expect(timed.sync.in.clock.peek()).toEqual(clock);
+		expect(timed.sync.out.outOfSync.peek()).toBe(false);
+		expect(untimed.sync.out.outOfSync.peek()).toBe(true);
+		expect(alone.sync.in.group.peek()).toBeUndefined();
+		expect(alone.sync.out.outOfSync.peek()).toBe(false);
+	} finally {
+		for (const player of [timed, untimed, alone]) player.close();
+		group.close();
+	}
+});
+
 test.each(["table", "consumer", "structural"] as const)("Player borrows a %s origin", async (role) => {
 	const producer = new Origin.Producer();
 	const consumer = producer.consume();

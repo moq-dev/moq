@@ -8,6 +8,7 @@ import { Manual } from "@moq/clock/test";
 // A monotonic instant `ms` after the clock origin.
 const at = (ms: number) => Instant.ZERO.saturatingAdd(Duration.millis(ms));
 
+import * as Catalog from "@moq/hang/catalog";
 import { Signal } from "@moq/signals";
 import { target } from "./audio/latency";
 import { type Delay, type Span, Sync } from "./sync";
@@ -707,7 +708,7 @@ describe("group", () => {
 	afterEach(() => installed.close());
 
 	// A catalog clock whose PTS zero was captured `ms` after the moq epoch.
-	const zero = (ms: number) => ({ wall: ms * 1000, timescale: 1_000_000 });
+	const zero = (ms: number) => ({ wall: Catalog.u53(ms * 1000), timescale: 1_000_000 });
 
 	// A member with one video track measuring `target` ms, on `group` under the catalog clock `wall`.
 	const member = (group: Sync | undefined, wall: number | undefined, target = 20) => {

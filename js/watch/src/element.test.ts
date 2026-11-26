@@ -32,3 +32,21 @@ test("catalog formats refuse unknown values rather than selecting detection", ()
 	expect(parseCatalogFormat(null)).toBeUndefined();
 	for (const invalid of ["", "guess"]) expect(() => parseCatalogFormat(invalid)).toThrow("catalog-format");
 });
+
+test("importing the entrypoint registers <moq-sync>, which refuses an instant delay", () => {
+	require("./element");
+	const MoqSync = registry.get("moq-sync") as unknown as new () => {
+		attributeChangedCallback(name: string, oldValue: string | null, newValue: string | null): void;
+		delay: unknown;
+		cap: { asMillis(): number };
+		sync: { close(): void };
+	};
+	expect(MoqSync).toBeDefined();
+	const group = new MoqSync();
+	expect(group.delay).toBe("auto");
+	expect(() => group.attributeChangedCallback("delay", null, "instant")).toThrow('delay="instant"');
+	group.attributeChangedCallback("cap", null, "1s");
+	expect(group.cap.asMillis()).toBe(1000);
+	expect(() => group.attributeChangedCallback("cap", null, "soon")).toThrow('cap="soon"');
+	group.sync.close();
+});
