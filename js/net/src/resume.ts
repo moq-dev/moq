@@ -2814,6 +2814,8 @@ class Recover implements GroupRecover {
 	readonly key: bigint;
 	/** The copy being read, whose subscription this group keeps alive while it is read. */
 	#copy?: Copy;
+	/** The route generation when `#copy` was acquired; kept separate because `Reader.sync` updates `copy.generation` in place on switch-back. */
+	#generation: number;
 
 	/**
 	 * Puts the group on the reader's list of those still read, so the other copies that hold it,
@@ -2823,6 +2825,7 @@ class Recover implements GroupRecover {
 		this.#reader = reader;
 		this.key = group.start;
 		this.#copy = copy;
+		this.#generation = copy.generation;
 		copy.lease++;
 		reader.out.add(this);
 	}
@@ -2860,7 +2863,17 @@ class Recover implements GroupRecover {
 		// replace it, looks to the route replacing it. Mirrors the Rust `Recover::wants`.
 		if (cause.kind !== "failed" && copyFailed(copy)) return true;
 		if (cause.kind === "closed" && route.staged) return true;
-		return route.generation !== copy.generation || route.concluded;
+		if (route.concluded) return true;
+		if (route.generation !== this.#generation) {
+			// A route that returned serves the copy being read again, which a stalled group reuses.
+			// A group that closed short (e.g. bare FIN at a Position End cap) will not resume on
+			// the same subscription, so recover by fetching the remaining frames.
+			if (cause.kind === "closed" || this.#reader.copy(route.generation) !== copy) {
+				return true;
+			}
+			this.#generation = route.generation;
+		}
+		return false;
 	}
 
 	/**
@@ -2923,21 +2936,21 @@ class Recover implements GroupRecover {
 				const cached = held && hooks.cachedGroup(held.sub, this.key, index);
 				if (cached) return this.#replacement(cached, held);
 				// A verdict would repeat from the route that gave it.
-				if (generation === current.generation && !this.#undelivered(failed, current)) throw failed;
+				if (generation === this.#generation && !this.#undelivered(failed, current)) throw failed;
 			}
 			// An unroutable copy waits for another route rather than asking its own again.
-			const withdrawn = failed !== undefined && generation === current.generation && unroutable(failed);
+			const withdrawn = failed !== undefined && generation === this.#generation && unroutable(failed);
 			if (!serving) {
 				// Nothing replaced a copy that closed the group, as when its track parks, so its
 				// close stands.
 				if (closed) throw standing();
 				// Nothing serves: a failed copy waits for a route, unless none will come.
 				if (failed && route.concluded) throw failed;
-			} else if (closed && generation === current.generation) {
+			} else if (closed && generation === this.#generation) {
 				// It serves on with no front to replace it, so its close stands, unless its route
 				// failed or the front stages the copy to replace it: then that one may hold more.
 				if ((!copyFailed(current) && !route.staged) || route.concluded) throw standing();
-			} else if (generation !== current.generation || failed) {
+			} else if (generation !== this.#generation || failed) {
 				// The serving route gave the group up, which ends it with that route's error however
 				// a fetch of the rest would answer. A copy that failed dropped its open groups with
 				// it, and a group the route failed is no verdict either.
@@ -2949,7 +2962,7 @@ class Recover implements GroupRecover {
 				// A newer copy's track caches it: continue from there. On switch-back to the same
 				// copy (whose group closed short under a Position End cap), skip its cached copy
 				// and fetch the remaining frames from `index`.
-				if (!failed && generation !== current.generation && serving !== current) {
+				if (!failed && generation !== this.#generation && serving !== current) {
 					const cached = hooks.cachedGroup(serving.sub, this.key, index);
 					if (cached) return this.#replacement(cached, serving);
 				}
@@ -2986,7 +2999,7 @@ class Recover implements GroupRecover {
 					const subscription = serving.sub.subscription.peek();
 					const maxDelay = Duration.millis(widest(subscription?.ranges ?? []));
 					const land = { start: this.key, end: this.key + 1n, floor: true, grace: grace(maxDelay) };
-					if (generation === current.generation || !hooks.mayLand(serving.sub, land)) throw outcome.error;
+					if (generation === this.#generation || !hooks.mayLand(serving.sub, land)) throw outcome.error;
 					landing = new Promise<void>((resolve) => {
 						unwatch = hooks.groupChanged(serving.sub, resolve);
 					});
@@ -3012,6 +3025,7 @@ class Recover implements GroupRecover {
 				copy.lease++;
 				this.#release();
 				this.#copy = copy;
+				this.#generation = copy.generation;
 			},
 			discard: () => group.close(),
 		};

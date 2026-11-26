@@ -459,6 +459,7 @@ export class Connection implements Session {
 			this.#runBidi(stream)
 				.catch((err: unknown) => {
 					stream.writer.reset(err);
+					stream.reader.stop(err);
 					// A protocol violation on one stream is the peer breaking the session.
 					// Resetting that stream would leave it free to repeat malformed input.
 					const violation = closeViolation(this.#quic, err);

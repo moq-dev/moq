@@ -8512,9 +8512,18 @@ impl Consumer {
 			if !state.readable() {
 				return None;
 			}
-			let pos = state.largest();
-			let ended = pos.is_some_and(|p| state.cache.largest_finished(p));
-			Some((pos, ended))
+			let ended = state.outcome.is_final() || state.declared().is_some();
+			let pos = state.cache.largest();
+			let known = match state.edge {
+				EdgeSource::Cache => true,
+				EdgeSource::Answer { answered } => answered || ended,
+				EdgeSource::FirstGroup { .. } => pos.is_some() || ended,
+			};
+			if !known {
+				return None;
+			}
+			let largest_ended = pos.is_some_and(|p| state.cache.largest_finished(p));
+			Some((pos, largest_ended))
 		})
 	}
 

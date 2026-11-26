@@ -1368,7 +1368,8 @@ test("a bidirectional stream of the Announce type is unknown to moq-lite-07", as
 	try {
 		const stream = await Stream.open(pair.server, { version });
 		await stream.writer.u53(StreamId.Announce);
-		await stream.writer.write(new Uint8Array([1, 0]));
+		// Server rejects the unknown stream type with both RESET_STREAM and STOP_SENDING.
+		await stream.writer.write(new Uint8Array([1, 0])).catch(() => {});
 		await expect(stream.reader.readAll()).rejects.toThrow();
 		await settle();
 		expect(closed).toBe(false);
@@ -1407,7 +1408,8 @@ test("a bidirectional stream of the Fetch type is unknown to moq-lite-07", async
 	try {
 		const stream = await Stream.open(pair.client, { version });
 		await stream.writer.u53(StreamId.Fetch);
-		await stream.writer.write(new Uint8Array([1, 0]));
+		// Server rejects FETCH on lite-07 with both RESET_STREAM and STOP_SENDING.
+		await stream.writer.write(new Uint8Array([1, 0])).catch(() => {});
 		await expect(stream.reader.readAll()).rejects.toThrow();
 		await settle();
 		expect(closed).toBe(false);

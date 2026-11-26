@@ -3457,10 +3457,7 @@ impl OneShotFetch {
 							};
 						}
 						Err(err) => {
-							if matches!(
-								err,
-								Error::Unauthorized | Error::Cancel | Error::Session(_) | Error::Transport(_)
-							) {
+							if is_cancel(&err) || matches!(err, Error::Unauthorized | Error::Session(_)) {
 								return Poll::Ready(Err(err));
 							}
 							let stream_err = match &err {

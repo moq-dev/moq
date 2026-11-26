@@ -2212,7 +2212,10 @@ export class Subscriber {
 				} else if ("drop" in resp) {
 					entry.tail.account(resp.drop.start, resp.drop.end);
 					if (key >= resp.drop.start && key < resp.drop.end) {
-						refused ??= resp.drop.cause(this.version);
+						refused ??=
+							hasSkip(this.version) && resp.drop.error === StreamCode.Skip
+								? new NotFound(`group ${key}`)
+								: resp.drop.cause(this.version);
 					}
 				} else if ("end" in resp) {
 					if (ended) throw new ProtocolViolation("duplicate SUBSCRIBE_END");
@@ -2226,23 +2229,24 @@ export class Subscriber {
 				}
 			}
 			// Publisher FIN'd cleanly; wait for the uni Group Stream if not yet arrived or still reading.
-			// Lite-07 names every start with no grace timer.
-			if (!target.taken && refused === undefined) {
-				const drained = new Once<null>();
-				const covered = () => target.taken || entry.tail.covers(key, key + 1n);
-				try {
-					await entry.tail.settle(covered, drained);
-				} finally {
-					drained.set(null);
+			// Lite-07 names every start with no grace timer, but abandoning the fetch or closing the
+			// session ends the wait so the subscription entry always cleans up.
+			const stop = new Once<null>();
+			const cancel = () => {
+				if (stop.peek() === undefined) stop.set(null);
+			};
+			void target.producer.closed.then(cancel, cancel);
+			void this.#quic.closed.then(cancel, cancel);
+			try {
+				if (!target.taken && refused === undefined) {
+					const covered = () => target.taken || entry.tail.covers(key, key + 1n);
+					await entry.tail.settle(covered, stop);
 				}
-			}
-			if (entry.tail.reading) {
-				const drained = new Once<null>();
-				try {
-					await entry.tail.settle(() => true, drained);
-				} finally {
-					drained.set(null);
+				if (entry.tail.reading) {
+					await entry.tail.settle(() => true, stop);
 				}
+			} finally {
+				cancel();
 			}
 			if (!target.taken) {
 				throw refused ?? new NotFound(`group ${key}`);
@@ -2251,6 +2255,7 @@ export class Subscriber {
 			closeViolation(this.#quic, err);
 			const e = await sessionCause(this.#quic, err);
 			stream.abort(e);
+			if (target.taken) target.producer.abort(e);
 			throw e;
 		}
 	}
