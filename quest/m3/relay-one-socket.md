@@ -31,7 +31,7 @@ Decided 2026-11-15 (maintainer, `/quest-plan` from kixel.ai's
   from the socket peers dial.
 - ✅ An io_uring relay keeps its tokio cluster dials on their own sockets
   (rejected: porting dials to the ring now, which would end the measurement
-  gate on [cluster dials on the ring](/quest/m9/uring-cluster-dial.md)).
+  gate on [cluster dials on the ring](/quest/m5/uring-cluster-dial.md)).
   Document that it does not share its socket.
 - ✅ m3 (rejected: m4).
 

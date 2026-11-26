@@ -9,7 +9,7 @@ release. Each child writes one fix, proves it against moq's reproduction in a
 local build of that browser, and hands it to the maintainer to submit.
 
 Not included: new web APIs (the receive-credit contract
-[Browsers expose WebTransport receive credit](/quest/m4/browser-receive-credit.md)
+[Browsers expose WebTransport receive credit](/quest/m5/browser-receive-credit.md)
 waits on is W3C spec work), and carrying browser forks: a patch upstream
 rejects is reported back to the maintainer, not maintained.
 

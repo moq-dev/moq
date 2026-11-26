@@ -42,12 +42,12 @@ the flake package moq pins, `github:kixel-ai/rust2/<rev>#ffi`, and
 child. rust2's README lists every generator moq ships. The package wraps
 rust2-ffi with rust2's std sysroot, so moq's stable cargo runs it.
 
-- **Generated code stays identical**: Kotlin package names, library symbol
-  prefixes, and every wrapper's API do not change, except Dart's
-  `MoqRoute.instanceId()` below. Diff the regenerated bindings for every
+- **API diff across every language**: Kotlin package names, library symbol
+  prefixes, and the hand-written wrapper surfaces keep their API except where
+  the decisions below say so; generated names the wrappers re-export may change
+  (see the 2026-11-16 decision below). Diff the regenerated bindings for every
   language against `main`'s, and run each wrapper's check plus
-  `just test interop --all`. The C names and that Dart rename below are the
-  only expected differences.
+  `just test interop --all`.
 - **C names** (maintainer, 2026-10-24 and 2026-10-25): rust2's C generator
   names in GLib style
   ([kixel-ai/rust2#66](https://github.com/kixel-ai/rust2/pull/66)).
@@ -59,21 +59,19 @@ rust2-ffi with rust2's std sysroot, so moq's stable cargo runs it.
   `MoqAudioEncoderFinish`, its name before
   [moq-dev/moq#6052](https://github.com/moq-dev/moq/pull/6052) worked around
   the old clash with `moq_audio_encoder_finish`; every wrapper's
-  `EncoderFinish` alias follows, so wrapper APIs do not change.
-- **Dart `MoqRoute.instanceId()`** (maintainer, 2026-11-07, from
-  [moq-dev/moq#8088](https://github.com/moq-dev/moq/pull/8088)'s API audit):
-  the switch renames it to the exporter's name for moq-net's
-  `Route::instance()`, a Dart API change the PR's Impact section records for
-  the release cut's `MIGRATE.md`. Open: rust2's C++ generator declares a
-  private `uint64_t instance` field in every object class
-  (`uniffi/cpp/bindgen/src/bindings/cpp/templates/obj.hpp`), which is why
-  moq-ffi names the method `instance_id` (`rs/moq-ffi/src/origin.rs`). Before
-  the rename, either rename rust2's private field (recommended, since rust2
-  is ours and the clash would hit any `instance` method), or keep the
-  generated `instance_id` and add the Dart name as a wrapper alias.
-- rust2's C backend still refuses `Duration`, which moq-ffi's audio configs
-  use (moq's current generator accepts it), so the fork must accept it before
-  the switch can generate C.
+  `EncoderFinish` alias follows.
+- **Generated C async failure contract** (folded from the retired C async
+  failure contract quest, decided 2026-10-28 and 2026-11-02;
+  reference [kixel-ai/rust2#169](https://github.com/kixel-ai/rust2/pull/169)):
+  every generated async call returns a task (never NULL), and its callback runs
+  exactly once on the dispatcher (`moq_set_dispatcher`), carrying `bool cancelled`
+  right after `user_data` (when set, `error` is NULL and `value` is empty; a
+  Rust panic aborts). `c/moq/test/probe.c`'s callbacks take `cancelled` and
+  release `user_data`.
+- **Route identity name**: [Rename Instance to Identity](/quest/m2/identity-rename-and-cap.md)
+  renames `Route::instance()` to `Route::identity()` in `m2`, which also avoids
+  the old C++ private `uint64_t instance` clash that forced `MoqRoute.instanceId()`.
+- Verify rust2's C backend accepts `Duration` (used by moq-ffi's audio configs).
 - **One pin**: rust2 becomes a flake input, its `ffi` package the exporter, and `flake.nix`, the release
   workflows, `rs/moq-ffi/build.sh`, and `sh/` read the generators from it.
   Delete `rs/uniffi-bindgen`, the "five places" comments in `flake.nix`, and the
@@ -223,11 +221,16 @@ facade Kotlin and Dart start from stays, and `MoqError`'s variants stay as
 they are.
 
 Public API: breaking in every binding. moq-ffi's dependency names change,
-generated C type names become CamelCase, the generated record
+generated C type names become CamelCase, every generated C async callback gains
+`bool cancelled`, the generated record
 `MoqAudioEncoderFinished` becomes `MoqAudioEncoderFinish` in every language,
-Dart's `MoqRoute.instanceId()` takes the exporter's name, the FFI Swift module
+the FFI Swift module
 becomes `MoqFfi`, moq-ffi's floors rise to Python 3.11, macOS 13, and Swift
 6.2 with no sdist, `moq_ffi` loses its `user_defines` override and its
 x86_64 iOS simulator library, and any other generated name the wrappers
 re-export may change, each listed in the PR.
 Wire: none.
+
+## Required
+
+- [Release cut](/quest/m3/release/cut.md) - 0.22.0 ships bindings on UniFFI; the exporter switch is the second breaking binding release after the cut (decided 2026-11-16)

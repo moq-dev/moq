@@ -68,9 +68,9 @@ The cut:
   final peer refuse each other by ALPN rather than misparse; no
   compatibility shim.
 - The draft's lite-07 changelog matches the wire and `just drafts check`
-  passes. Fix `drafts/draft-lcurley-moq-lite.md:2380` (the lite-07 changelog
-  says `0 is malformed` instead of `0 is GROUP_END`, contradicting lines 2218,
-  2245, and 2376; found in the 2026-11-21 full-codebase audit).
+  passes. Fix `drafts/draft-lcurley-moq-lite.md:2366` (the lite-07 changelog
+  says `0 is malformed` instead of `0 is GROUP_END`, contradicting lines 2202,
+  2229, and 2362; found in the 2026-11-21 full-codebase audit).
 - SETUP keeps its stronger rule: #4820 put it under the general Message
   Length cap, which only permits rejection (MAY), while "a receiver MUST
   treat a longer SETUP as a protocol violation" stays. The lite-07 changelog
@@ -162,7 +162,7 @@ would need a breaking release had it landed right after the cut:
   PR's interop lane runs with `CI_STRICT` (`.github/workflows/interop.yml`),
   which fails the route key lane on a Chromium below 158, so only the pinned
   toolchain clears it. As an early signal, before the rename, run the route
-  key lane (`test/interop/clients/js/route-key.ts`) once with Playwright
+  key lane once with Playwright
   1.65.0 or later from npm, which bundles Chromium 158, and put the result in
   the PR. If the tab fails, stop and report it, since only the wire can fix
   the signed transcript. Rejected: keeping the pin in m2, where the freeze
@@ -239,7 +239,7 @@ and switching rules in `rs/moq-net/AGENTS.md` before the cut):
 
 Decided 2026-11-21 (maintainer, /quest-plan of the exhaustive pre-cut
 full-codebase audit): ✅ this quest fixes the changelog typo at
-`drafts/draft-lcurley-moq-lite.md:2380` during the cut.
+`drafts/draft-lcurley-moq-lite.md:2366` during the cut.
 
 Decided 2026-11-24 (maintainer, on
 [moq-dev/moq#9371](https://github.com/moq-dev/moq/pull/9371#issuecomment-7146881312)):
@@ -283,5 +283,5 @@ moving only the wire into `m2`, leaving both in `m3`).
 
 ## Related
 
-- [Takeover](/quest/m3/group-takeover.md) - a later lite version may let a group stream take over for another group; lite-07 freezes without it (maintainer, 2026-11-13)
+- [Takeover](/quest/m4/group-takeover.md) - a later lite version may let a group stream take over for another group; lite-07 freezes without it (maintainer, 2026-11-13)
 - [The moq.pro mesh runs lite-07](/quest/m5/lite07-mesh.md) - the deployment condition that follows this

@@ -171,7 +171,7 @@ shift anyway).
 Cut gate template (moved here 2026-11-09 from the gate's own Plan; see the
 decision below). The gate is an epic in m3, `/quest/m3/cut-gate/`, for the checks the cut needs that
 break nothing: `main` is no slower than `release`, vendored code has the
-upstream fixes it needs, and the hand-written `moq-c` is at parity with
+upstream fixes it needs, and the hand-written `libmoq` (retired after `0.22`) is at parity with
 moq-ffi. It has no work of its own and completes when every child merges. It
 recurs once per release cycle, always in m3, and never re-creates itself: m3
 holds it and the cycle's wire cut requires m3, so a copy made before that cut
@@ -305,6 +305,7 @@ candidate:
 
 - [Breaking release readiness](/quest/m2/README.md) - code, protocol and package proofs
 - [rind 0.4 adapters](/quest/m0/rind-adapters.md) - `UnsupportedCpu`, which exists only for rind 0.3, never publishes
+- [kio published on crates.io](/quest/m0/kio-crates-io.md) - crates.io publish refuses git dependencies (`kio` / `kio-macros`)
 - [Migration audit](/quest/m3/release/migrate-audit.md) - every break on the cut PR has its MIGRATE.md entry
 - [API shape review](/quest/m3/release/api-review.md) - every new or changed public API was reviewed for a better shape, and approved changes landed
 - [Feature review](/quest/m3/release/feature-review.md) - every major work line since the last release was judged end to end, and its follow-ups landed

@@ -174,7 +174,7 @@ types, and the vectors regenerate once):
   Rust form, and the datagram allowance is 28 bytes, not the epic's 24.
 - Publish: remove `publish = false` and the READMEs' unpublished notes,
   give `rs/moq-e2ee` a `MIGRATE.md` for users of crates.io's 0.0.25 (the
-  entries `rs/moq-crypto/MIGRATE.md` held before the crate move, in
+  entries `moq-crypto`'s old MIGRATE.md held before the crate move, in
   `git show 6488ce6b87:rs/moq-crypto/MIGRATE.md`, with their paths back to
   `moq_e2ee::`, plus this format's breaks), and restore the doc rows
   [the crate move](https://github.com/moq-dev/moq/pull/8947) dropped, still marked
@@ -189,6 +189,10 @@ and moq-lite: none.
 ## Waiting
 
 - Maintainer: submit `draft-lcurley-moq-e2ee-01` to the datatracker once the PR merges, and add a crates.io trusted publisher for `moq-e2ee` (repository `moq-dev/moq`, workflow `release-rs.yml`, environment `publish`); both need a login an agent does not hold. Done when the datatracker shows -01 and a `release-rs.yml` run publishes `moq-e2ee` through OIDC.
+
+## Required
+
+- [Rename Instance to Identity and cap it at 256 UTF-8 bytes on lite-07](/quest/m2/identity-rename-and-cap.md) - `moq_net::Instance` renames to `Identity` before this format freezes its public API and test vectors
 
 ## Related
 
