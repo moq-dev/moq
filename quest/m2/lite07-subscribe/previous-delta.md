@@ -26,6 +26,8 @@ The local miss grace (`TrackState::miss_grace`, `ledger::GRACE`) settles a hole 
 
 Of the 23 tests that wait out a grace, 5 in `model/track.rs` encode the local miss grace and change with it (`a_hole_below_an_undeclared_start_is_asked_after_a_bounded_grace`, `a_refusal_below_the_start_is_held_for_a_bounded_grace`, `an_abort_past_the_grace_ends_a_pending_tail_cleanly`, `a_reported_end_survives_a_longer_grace`, `a_resumed_history_read_accounts_for_cached_and_refused_groups`). The other 18 (`ledger.rs`, `tail.rs`, `tests/integration/track_tail.rs`) cover the pre-lite-07 and `moq-transport` graces, which stay.
 
+Asked 2026-11-26 (maintainer, /quest-run): whether to remove `Previous Delta`, since out-of-order creation undercuts it, and what it gains over `RESET_STREAM_AT` and `SUBSCRIBE_DROP`. Answered on the PR: it is the only proof of emptiness that travels with the data and caches as final, timed tracks need one at every group boundary, and the out-of-order problem is the producer's to declare whatever message carries it. Recommended: keep it, and take B in its own quest.
+
 ## Waiting
 
-- Maintainer: pick A, B, or C for the local miss grace. Settled once the choice is in this quest's Plan.
+- Maintainer: keep `Previous Delta` or replace it, and pick A, B, or C for the local miss grace. Settled once both choices are in this quest's Plan.
