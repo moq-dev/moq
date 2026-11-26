@@ -10,37 +10,39 @@ well as lite-07.
 
 ## Plan
 
-Measured 2026-11-25 on the fix for the lite-07 growth
-([moq-dev/moq#9579](https://github.com/moq-dev/moq/pull/9579)): over lite-06,
-with 60 groups a second, the relay and the export each grow about 75 bytes a
-group, while the import stays flat. `main` grows the same, so the growth
-predates that PR. It came with sparse keys
+Measured 2026-11-25 on `main` and earlier rounds of
+[moq-dev/moq#9579](https://github.com/moq-dev/moq/pull/9579): over lite-06,
+with 60 groups a second, the relay and the export each grew about 75 bytes a
+group, while the import stayed flat. That growth came with sparse keys
 ([moq-dev/moq#8638](https://github.com/moq-dev/moq/pull/8638)), which skip
 the keys between each group's start time.
 
-The cause: lite-06 has no SUBSCRIBE_SKIP, so `lite::Publisher::hole` sends
-each skipped run as a SUBSCRIBE_DROP. Before lite-07, a drop carries no code,
-and the subscriber reads every one as `StreamError::Old`, a final drop. The
-relay's copy then holds a drop between every pair of groups. The reader
-serving the export gives each one up as a miss and reports it dropped, which
-`Fold::Final` folds only inside a span the track holds whole, where no group
-can still land late, and lite-06 declares no spans. The
-export's `Ordered` reader returns each one as a gap, which `moq-mux` logs.
+With structural coalescing in #9579 (`Report::Final`), final `SUBSCRIBE_DROP`
+runs and served groups now coalesce in `Record::reported`, which cuts the
+relay and export growth in a 30-120 s lite-06 run to about +22 B/group (relay)
+and +10 B/group (export). What still remains on lite-06:
+
+- lite-06 has no `SUBSCRIBE_SKIP`, so `lite::Publisher::hole` sends each
+  skipped run as `SUBSCRIBE_DROP`, which the subscriber reads as
+  `StreamError::Old` (a drop, not `Hole::Skip`).
+- Arrival-order readers with an unbounded budget still keep gaps between drops
+  in `Record::delivered`, because only `Hole::Skip` is absorbed into
+  `delivered` (a real drop must never hide a late-arriving group).
+- The export's `Ordered` reader still returns each drop between groups as a
+  gap, which `moq-mux` logs as "media skipped upstream" on every group.
+- Full 900 s steady verification and a lite-06 lane in Nightly.
 
 Options, to settle before building:
 
-- The lite-06 publisher sends nothing for a skip, and the lite-06 subscriber
-  stops waiting on keys between groups some other way. It needs a way to know
-  a key will never come, which lite-06 doesn't carry without a drop.
-- A copy fed only by a subscription with no skip tells its readers that its
-  drops are final, so they report them `Settled`, as the lite-06 publisher
-  already does (`Report::Settled`: "given up on a version that has no skip").
-  The `Ordered` reader passes a run it already returned as a gap the same
-  way. This keeps the wire as it is. The export still warns on each gap.
-- Leave lite-06 to grow until lite-07 is published and becomes the default.
+- Distinguish sparse-key inter-group gaps on lite-06 (or suppress the export's
+  per-group warning on gaps that no group started in) and verify a full 900 s
+  lite-06 steady run before adding it to Nightly.
+- Leave lite-06 as-is until lite-07 is published and becomes the default.
 
-Recommendation: the second, plus not warning on a drop of keys that no group
-started in. It keeps the version difference inside `moq-net`.
+Recommendation: verify the full 900 s lite-06 steady run (fixing any remaining
+`delivered` growth if present), suppress the noisy per-group warning on gaps
+that no group started in, and add lite-06 to the Nightly steady run. Keep any
+version difference inside `moq-net`.
 
 ## Related
 

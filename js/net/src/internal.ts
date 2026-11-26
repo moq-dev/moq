@@ -727,6 +727,8 @@ export interface ResumeSource {
 	 * for it again reports it again. Mirrors the Rust `Reader::untell`.
 	 */
 	untell(start: bigint, end: bigint): void;
+	/** Absorb declared skips on the serving copy into the logical reader's `delivered` set. */
+	absorbSkips(delivered: Delivered, key: bigint): void;
 	/** Have every copy read whole groups for this reader; see `hooks.wholeGroups`. */
 	wholeGroups(frameOf: (key: bigint) => number | undefined): void;
 	/** The newest key any copy has seen. */
@@ -1264,6 +1266,17 @@ export const hooks: {
 	deliveredRuns: (subscriber: Subscriber) => number;
 	/** How many runs a subscriber's record of what it reported holds. Tests only. */
 	reportedRuns: (subscriber: Subscriber) => number;
+	/**
+	 * Record `key` as final in `reported` when `subscriber` is already tracking drops, so a front's
+	 * copy coalesces each handed-out group with the skipped runs between them. Mirrors the Rust
+	 * `Subscriber::settle_if_dropping`.
+	 */
+	settleIfDropping: (subscriber: Subscriber, key: bigint) => void;
+	/**
+	 * Absorb declared skips on `subscriber`'s track touching `key` (or changed since `seen`) into
+	 * `delivered`, returning the new drops revision.
+	 */
+	absorbSkips: (subscriber: Subscriber, delivered: Delivered, key: bigint, seen: number) => number;
 	/** Whether the subscriber already handed out group `key`, or no longer expects it. */
 	handedOut: (subscriber: Subscriber, key: bigint) => boolean;
 	/**
@@ -1796,6 +1809,12 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	reportedRuns: () => {
+		throw new Error("track.ts not loaded");
+	},
+	settleIfDropping: () => {
+		throw new Error("track.ts not loaded");
+	},
+	absorbSkips: () => {
 		throw new Error("track.ts not loaded");
 	},
 	handedOut: () => {

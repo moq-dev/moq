@@ -49,10 +49,10 @@ Sync commit: `23d79895b079e949f335ea1cacb048a29db5de72`. Run `git log 23d79895b0
 | `rs/moq-net/src/lite/publisher.rs` `TrackRun::poll_track` (`Recv::Group`), `serve`, `mark_served`; `rs/moq-net/src/model/record.rs` `Record::told` | `CursorHand` |
 | `rs/moq-net/src/model/group.rs` `Producer::finish_at`; `rs/moq-net/src/model/track.rs` `TrackState::appended`, `TrackState::span_end` | `Finish`, `ends`, `CursorHole` |
 | `rs/moq-net/src/lite/publisher.rs` `TrackRun::give_way`, `shed` | a new group, or one shed, as `Serve`, then `StreamFail` with `old` whose header never arrives |
-| `rs/moq-net/src/lite/publisher.rs` `poll_forward_drop`, `forward_range`, `drop_range`, `report`, `hole`; `rs/moq-net/src/model/record.rs` `Record::report`, `tell`, `untold` | `CursorGiveUp`, `Span` |
+| `rs/moq-net/src/lite/publisher.rs` `poll_forward_drop`, `forward_range`, `drop_range`, `hole`; `rs/moq-net/src/model/record.rs` `Record::report`, `tell`, `untold` | `CursorGiveUp`, `Span` |
 | `rs/moq-net/src/lite/publisher.rs` `TrackRun::poll_step` (outcomes, `GroupOutcomes::whole`, `GroupOutcomes::cut`) | `PubOutcomes`, `CutSkip` |
 | `rs/moq-net/src/lite/publisher.rs` `GroupServe::poll_serve` (`Serve`, `Closed`), `buffer_group_end`, `settle_failed`, `settle_reset`, `accounts`, `poll_given_up`, `GroupContext::reliable_reset`; `rs/moq-net/src/transport/boxed.rs` `Held::reset`, `ListedState::preempted` | `StreamHold`, `StreamFin`, `StreamFail`, `StreamAck`, `SubStop`, `Kept` |
-| `rs/moq-net/src/model/record.rs` `Record::fold` (`Fold::Debt`, and `Fold::Final`, which folds a subset) | `PubFold`, `folded` |
+| `rs/moq-net/src/model/record.rs` `Record::fold` | `PubFold`, `folded` |
 | `rs/moq-net/src/lite/subscriber.rs` `TrackEntry::open`, `reopen`, `place`; `GroupRecv::poll_serve` (a GROUP_END's span), `UniServe::abort` | `SubHeader`, `SubFin`, `SubReset`, `SubStop` |
 | `rs/moq-net/src/lite/subscriber.rs` `ServeLoop::apply_response` (`Drop`, with `StreamError::Skip` as skip) | `OnDrop`, `OnSkip`, `SubRecv` |
 | `rs/moq-net/src/tail.rs` `Reading::open`, `Reading::account`, `Tail::account`, `Tail::proven` | `acct` |

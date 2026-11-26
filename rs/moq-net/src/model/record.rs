@@ -23,10 +23,6 @@ pub(crate) struct Record {
 	/// The groups handed out, so none is handed out twice: not when its key is re-created,
 	/// nor when another route delivers it too.
 	pub(super) delivered: Delivered,
-	/// The groups a key-order read handed out, which `delivered`, counting the keys it passed
-	/// too, cannot tell apart from a key a group may still land on late: only these fold as
-	/// final with their spans.
-	pub(super) handed: Delivered,
 	/// Cached groups skipped as stale, which a wider budget owes again.
 	pub(super) skipped: Skipped,
 	/// Groups skipped as stale, which account for a bounded window as handed out would, until a
@@ -38,19 +34,13 @@ pub(crate) struct Record {
 	pub(super) pending: RangeMap<u64, Pending>,
 	/// Every key already reported, with how.
 	pub(super) reported: RangeMap<u64, Report>,
-	/// Everything below was settled for good and folded away (see [`Fold`]): handed out, or
-	/// reported final, so none is handed out or reported again.
+	/// Everything below was settled for good and folded away under pool pressure: handed
+	/// out, or reported final, so none is handed out or reported again.
 	floor: u64,
 	/// What the runs above the floor bill to the track's account, opened on the first run.
 	bill: Option<cache::Reader>,
 	/// The ranges the last retirement judged the gaps against (see [`Self::retire`]).
 	retired: Option<Cover>,
-	/// The runs, its own and beside it, left by the last fold or since: the next folds what
-	/// is final once they double (see [`Self::settle`]).
-	folded_at: u64,
-	/// Its publisher's start is unresolved, so a report may still be taken back (see
-	/// [`Self::untell`]): nothing folds as final until it resolves.
-	held: bool,
 	/// A fold forgot the runs copied from the track's drop set, which the next drop scan
 	/// folds in again in full.
 	pub(super) rescan: bool,
@@ -72,42 +62,40 @@ impl Pending {
 	}
 }
 
-/// How a reader reported a run, and what its wire was told. Every report is final: a drop,
-/// stale (OLD) or not, settles its keys for good on the wire, and a skip goes out over none.
+/// How a reader reported a run, and what its wire was told. Every wire report is final:
+/// served, skipped, or dropped (stale `OLD` included), so adjacent final runs coalesce in
+/// `reported`. Only an ordered reader's unreturned stale gap stays [`Self::Withdrawable`], so
+/// a wider budget can take it back before it is returned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Report {
-	/// Served on a Group Stream, or given up on a version that has no skip.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	Settled,
-	/// Dropped.
-	Dropped,
-	/// Dropped as stale, which a wider budget may still serve.
-	Stale,
-	/// Skipped, as SUBSCRIBE_DROP(SKIP) names it.
-	Skip,
-}
-
-impl Report {
-	/// How `hole` reports.
-	pub fn of(hole: &Hole) -> Self {
-		match hole {
-			Hole::Skip => Self::Skip,
-			Hole::Drop { .. } if hole.stale_budget().is_some() => Self::Stale,
-			Hole::Drop { .. } => Self::Dropped,
-		}
-	}
+	/// Served, skipped, dropped on the wire, or returned as a gap.
+	Final,
+	/// Unreturned stale gap buffered for a key-order reader, which a wider budget may
+	/// withdraw before it is returned.
+	Withdrawable,
 }
 
 impl Record {
 	/// Report the first part of `range` nothing reported already, as `hole` says. `None`
-	/// when every part was.
-	pub fn report(&mut self, range: Range<u64>, hole: &Hole) -> Option<Range<u64>> {
+	/// when every part was. `withdrawable` is true only for a key-order reader that may take
+	/// back an unreturned stale gap on a budget widening.
+	///
+	/// A declared skip (`Hole::Skip`) was never produced and is already reported here, so it
+	/// is also absorbed into `delivered` to keep consecutive sparse groups one run.
+	pub fn report(&mut self, range: Range<u64>, hole: &Hole, withdrawable: bool) -> Option<Range<u64>> {
 		let range = range.start.max(self.floor)..range.end;
 		if range.is_empty() {
 			return None;
 		}
 		let gap = self.reported.gaps(&range).next()?;
-		self.reported.insert(gap.clone(), Report::of(hole));
+		let report = match withdrawable && hole.stale_budget().is_some() {
+			true => Report::Withdrawable,
+			false => Report::Final,
+		};
+		self.reported.insert(gap.clone(), report);
+		if *hole == Hole::Skip {
+			self.delivered.absorb_skip(gap.clone());
+		}
 		Some(gap)
 	}
 
@@ -122,7 +110,7 @@ impl Record {
 			.map(|(range, pending)| (range.clone(), pending.clone()))
 		{
 			self.pending.remove(range.clone());
-			if let Some(gap) = self.report(range.clone(), &pending.hole) {
+			if let Some(gap) = self.report(range.clone(), &pending.hole, false) {
 				if gap.end < range.end {
 					self.pending.insert(gap.end..range.end, pending.clone());
 				}
@@ -165,10 +153,11 @@ impl Record {
 		}
 	}
 
-	/// Fold nothing as final while `held`: its publisher's start is unresolved, and may still
-	/// take a report back.
-	pub fn hold(&mut self, held: bool) {
-		self.held = held;
+	/// Absorb `range` of declared skips (keys never produced) into `delivered` where it extends
+	/// an existing run rightward (or starts at 0), returning the subrange absorbed so the caller
+	/// can drop covered verdicts from `Misses`.
+	pub fn absorb_skip(&mut self, range: Range<u64>) -> Option<Range<u64>> {
+		self.delivered.absorb_skip(range)
 	}
 }
 
@@ -183,8 +172,8 @@ impl Accounted for Record {
 }
 
 /// Where a reader stands, which shapes what its record's fold settles.
-#[derive(Clone)]
-pub(super) struct Standing<'a> {
+#[derive(Clone, Default)]
+pub(super) struct Standing {
 	/// The lowest key the reader's ranges name now.
 	pub from: u64,
 	/// The group this read hands out, which its publisher has yet to tell its wire of.
@@ -193,41 +182,6 @@ pub(super) struct Standing<'a> {
 	/// while a live join waits or a start is still being looked up, when no gap can be known
 	/// to lie outside them.
 	pub ranges: Option<Cover>,
-	/// It reads in key order, counting the keys it passes as handed out: only its own record of
-	/// the groups it handed out ([`Record::handed`]) or a report then shows it handed a group
-	/// out, since a group may still land late on a key it passed.
-	pub ordered: bool,
-	/// It polls what it missed, so a skip inside a whole span may still be its to report: the
-	/// span stays out of what it handed out until it reports it.
-	pub reports: bool,
-	/// The groups its track holds whole.
-	pub spans: &'a dyn Spans,
-}
-
-impl Default for Standing<'_> {
-	fn default() -> Self {
-		Self {
-			from: 0,
-			handed: None,
-			ranges: None,
-			ordered: false,
-			reports: false,
-			spans: &(),
-		}
-	}
-}
-
-/// The groups a reader's track holds whole, each with the span its publisher declared: no
-/// other group starts inside one (see [`crate::group::Producer::finish_at`]).
-pub(super) trait Spans {
-	/// The span of the group held whole that `key` lies in, from its start, at least its own key.
-	fn whole(&self, key: u64) -> Option<Range<u64>>;
-}
-
-impl Spans for () {
-	fn whole(&self, _key: u64) -> Option<Range<u64>> {
-		None
-	}
 }
 
 /// Runs a reader keeps beside its record, billed with it and settled by its fold: the
@@ -239,17 +193,8 @@ pub(super) trait Beside {
 	fn given_up_end(&self, key: u64) -> Option<u64>;
 	/// The lowest key from `key` on that it gave up, or still asks or awaits a fill for.
 	fn next_held(&self, key: u64) -> Option<u64>;
-	/// The lowest key from `key` on that it gave up as stale, which a wider budget asks again.
-	fn next_stale(&self, _key: u64) -> Option<u64> {
-		None
-	}
-	/// Forget every run within `folded`, which the record folded as settled or forgot, or
-	/// which lies in a whole group's span, where no group lands to fill it.
+	/// Forget every run within `folded`, which the record folded as settled or forgot.
 	fn forget(&mut self, folded: std::ops::Range<u64>);
-	/// Every run [`Self::forget`] forgets.
-	fn held(&self) -> Vec<Range<u64>> {
-		Vec::new()
-	}
 }
 
 impl Beside for () {
@@ -266,20 +211,6 @@ impl Beside for () {
 	}
 
 	fn forget(&mut self, _folded: std::ops::Range<u64>) {}
-}
-
-/// The parts of what `beside` holds that lie inside a whole group's span, past its start:
-/// no group starts there, so nothing is left to fill.
-fn inside_spans(beside: &dyn Beside, spans: &dyn Spans) -> Vec<Range<u64>> {
-	beside
-		.held()
-		.into_iter()
-		.filter_map(|run| {
-			let span = spans.whole(run.start)?;
-			let inside = run.start.max(span.start + 1)..run.end.min(span.end);
-			(!inside.is_empty()).then_some(inside)
-		})
-		.collect()
 }
 
 /// A final stretch of keys a fold may settle, or a retirement forget.
@@ -309,14 +240,6 @@ enum Fold {
 	/// ranges that start below `below`, so a stale skip stays for a wider budget to offer
 	/// again. What it passes is forgotten, not settled.
 	Retire { below: u64 },
-	/// As the record grows: only what nothing can change any more, which folds at no cost to
-	/// what the reader offers or reports later. Skips and settled reports, and a group the
-	/// track holds whole, with the span its publisher declared, that the reader handed out or
-	/// reported dropped, with the drops it reported inside that span, where no other group
-	/// starts. Never a drop outside a whole span, where a group may still
-	/// land late, anything stale, which a wider budget owes again, or any other key not
-	/// reported yet, which may still owe a report.
-	Final,
 }
 
 /// What a record bills, and the debt its track left to its readers.
@@ -325,7 +248,6 @@ impl Record {
 	/// prefix is one run that bills nothing.
 	fn runs(&self) -> u64 {
 		(self.delivered.runs().saturating_sub(1)
-			+ self.handed.runs().saturating_sub(1)
 			+ self.skipped.runs()
 			+ self.written_off.len()
 			+ self.pending.len()
@@ -341,9 +263,6 @@ impl Record {
 	/// Bill this record to `account`, opened on its first run. Once the reader's ranges
 	/// moved, retire the gaps they left behind (see [`Self::retire`]); under a debt the track
 	/// left its readers, pay what it can by folding what it settled for good into its floor.
-	/// Without one, fold what is final whenever the record doubled since it last did, so a
-	/// live reader of a sparse-key track, which settles a skip between every two groups, keeps
-	/// a record no larger than what is still open, at a cost linear in the runs it adds.
 	///
 	/// A record is its reader's owed gaps, not cached media, so it never ends its reader:
 	/// what is left after both is owed for a moment, a drop not reported yet or a miss still
@@ -360,10 +279,7 @@ impl Record {
 		if moved {
 			self.retired = reader.ranges.clone();
 		}
-		// What a fold left and has since shrunk re-arms it, as a run that drained does.
-		let runs = self.runs() + beside.runs();
-		self.folded_at = self.folded_at.min(runs);
-		let bytes = runs * RUN_OVERHEAD;
+		let bytes = (self.runs() + beside.runs()) * RUN_OVERHEAD;
 		let bill = match &mut self.bill {
 			Some(bill) => bill,
 			None if bytes == 0 => return,
@@ -371,32 +287,21 @@ impl Record {
 		};
 		bill.set(bytes);
 		let owed = bill.debt() > 0;
-		// Not while a report may be taken back, nor before the ranges are placed.
-		let grown = runs > 2 * self.folded_at && !self.held && reader.ranges.is_some();
-		if !owed && !moved && !grown {
+		if !owed && !moved {
 			return;
 		}
 		let mut folded = Vec::new();
 		if moved {
 			folded.extend(self.retire(&reader, &*beside));
 		}
-		match owed {
-			true => folded.extend(self.fold(&reader, &*beside, Fold::Debt)),
-			false if grown => {
-				self.hand_out_spans(&reader);
-				folded.extend(inside_spans(&*beside, reader.spans));
-				folded.extend(self.fold(&reader, &*beside, Fold::Final));
-			}
-			false => {}
+		if owed {
+			folded.extend(self.fold(&reader, &*beside));
 		}
 		for folded in folded {
 			beside.forget(folded);
 		}
-		let runs = self.runs() + beside.runs();
-		if owed || grown {
-			self.folded_at = runs;
-		}
-		self.bill.as_mut().expect("opened above").set(runs * RUN_OVERHEAD);
+		let bytes = (self.runs() + beside.runs()) * RUN_OVERHEAD;
+		self.bill.as_mut().expect("opened above").set(bytes);
 	}
 
 	/// Retire the gaps the reader's ranges left behind, which nothing settles while they stay
@@ -485,16 +390,14 @@ impl Record {
 	/// should a group arrive there or its ranges widen. Folding past each key still owed, as a
 	/// miss its fills have yet to answer, bounds what is left by those keys, which the reader's
 	/// ask allowance bounds in turn. Returns the runs it folded, below the floor and above.
-	///
-	/// [`Fold::Final`] folds the same way through only what nothing can change any more.
-	fn fold(&mut self, reader: &Standing, beside: &dyn Beside, mode: Fold) -> Vec<std::ops::Range<u64>> {
+	fn fold(&mut self, reader: &Standing, beside: &dyn Beside) -> Vec<std::ops::Range<u64>> {
 		let mut folded = Vec::new();
 		// The runs copied from the track's drop set go first: the next scan folds in again
 		// whatever the track still holds.
 		let received: Vec<_> = self
 			.pending
 			.iter()
-			.filter(|(_, pending)| mode == Fold::Debt && pending.received)
+			.filter(|(_, pending)| pending.received)
 			.map(|(run, _)| run.clone())
 			.collect();
 		if !received.is_empty() {
@@ -503,105 +406,28 @@ impl Record {
 			}
 			self.rescan = true;
 		}
-		let floor = self.final_end(self.floor, reader, beside, mode).end;
+		let floor = self.final_end(self.floor, reader, beside, Fold::Debt).end;
 		if floor > self.floor {
 			self.raise(floor);
 			folded.push(0..floor);
 		}
-		let lowest = match mode {
-			// Only a key handed out or reported starts what it folds.
-			Fold::Final => self.next_final(self.floor.saturating_add(1), reader.ordered),
-			_ => self.lowest_settled(),
-		};
-		let mut from = Some(reader.from.max(lowest.unwrap_or(0))).filter(|from| *from > self.floor);
+		let mut from = Some(reader.from.max(self.lowest_settled().unwrap_or(0))).filter(|from| *from > self.floor);
 		while let Some(start) = from {
-			// Folded, a stretch costs two runs: only one spanning more is worth it. What
-			// `beside` holds in it is settled all the same.
-			let stretch = self.final_end(start, reader, beside, mode);
+			// Folded, a stretch costs two runs: only one spanning more is worth it.
+			let stretch = self.final_end(start, reader, beside, Fold::Debt);
 			if stretch.runs > 2 {
 				self.settle_stretch(start..stretch.end);
 				folded.push(start..stretch.end);
-			} else if mode == Fold::Final && stretch.end > start {
-				// Final as it stands, so what was handed out in it merges into one run, though
-				// folding it would cost more than it saves. Only where it holds a key already,
-				// so an isolated report adds no run.
-				let holds = |handed: &Delivered| handed.next_from(start).is_some_and(|key| key < stretch.end);
-				if holds(&self.handed) {
-					self.handed.insert_run(start..stretch.end);
-				}
-				// `beside` forgets its misses only where `delivered` now covers them, which is
-				// what a read checks its fills against.
-				if holds(&self.delivered) {
-					self.delivered.insert_run(start..stretch.end);
-					folded.push(start..stretch.end);
-				}
 			}
-			from = match mode {
-				// A stretch stopped where it started passes the whole run there, so a walk
-				// steps from run to run rather than key by key.
-				Fold::Final if stretch.end == start => {
-					let past = [
-						self.reported.get_key_value(&start).map(|(run, _)| run.end),
-						self.handed_by(reader.ordered).run_end(start),
-					]
-					.into_iter()
-					.flatten()
-					.fold(start.saturating_add(1), u64::max);
-					self.next_final(past, reader.ordered)
-				}
-				Fold::Final => self.next_final(stretch.end, reader.ordered),
-				_ => self.next_told(stretch.end.max(start + 1)),
-			};
+			from = self.next_told(stretch.end.max(start + 1));
 		}
 		folded
-	}
-
-	/// Take in, with each run of groups handed out, the rest of the span of the group it ends
-	/// at, when the track holds that group whole: no group starts there to hand out, so
-	/// consecutive spans keep one run. A key-order read takes them into its `handed`, which
-	/// gates nothing; any other reader into `delivered` only while it never asks what it
-	/// missed, since `delivered` keeps a skip from going out.
-	fn hand_out_spans(&mut self, reader: &Standing) {
-		let handed = match (reader.ordered, reader.reports) {
-			(true, _) => &mut self.handed,
-			// Its `delivered` keeps a skip it has yet to report from going out.
-			(false, true) => return,
-			(false, false) => &mut self.delivered,
-		};
-		let spans: Vec<Range<u64>> = handed
-			.ranges()
-			.filter_map(|run| reader.spans.whole(run.end - 1).map(|span| run.end - 1..span.end))
-			.collect();
-		for span in spans {
-			handed.insert_run(span);
-		}
-	}
-
-	/// The groups a reader handed out, for the fold to prove final: a key-order read's own,
-	/// rather than every key it passed.
-	fn handed_by(&self, ordered: bool) -> &Delivered {
-		match ordered {
-			true => &self.handed,
-			false => &self.delivered,
-		}
-	}
-
-	/// The lowest key from `key` on that the reader handed out or reported, as
-	/// [`Self::handed_by`] counts it.
-	fn next_final(&self, key: u64, ordered: bool) -> Option<u64> {
-		[self.handed_by(ordered).next_from(key), self.next_reported(key)]
-			.into_iter()
-			.flatten()
-			.min()
 	}
 
 	/// Settle everything below `floor` for good.
 	fn raise(&mut self, floor: u64) {
 		self.floor = floor;
 		self.delivered.forget_below(floor);
-		if self.handed.runs() > 0 {
-			self.handed.forget_below(floor);
-		}
 		self.skipped.forget(0..floor);
 		self.written_off.remove(0..floor);
 		self.pending.remove(0..floor);
@@ -611,28 +437,21 @@ impl Record {
 	/// Settle `stretch` as one handed-out and reported run.
 	fn settle_stretch(&mut self, stretch: std::ops::Range<u64>) {
 		self.delivered.insert_run(stretch.clone());
-		if self.handed.runs() > 0 {
-			self.handed.insert_run(stretch.clone());
-		}
 		self.skipped.forget(stretch.clone());
 		self.written_off.remove(stretch.clone());
-		self.reported.insert(stretch, Report::Settled);
-	}
-
-	/// The lowest key from `key` on that was reported.
-	fn next_reported(&self, key: u64) -> Option<u64> {
-		self.reported
-			.overlapping(&(key..u64::MAX))
-			.next()
-			.map(|(run, _)| run.start.max(key))
+		self.reported.insert(stretch, Report::Final);
 	}
 
 	/// The lowest key from `key` on that was handed out or reported.
 	fn next_told(&self, key: u64) -> Option<u64> {
-		[self.delivered.next_from(key), self.next_reported(key)]
-			.into_iter()
-			.flatten()
-			.min()
+		let reported = self.reported.overlapping(&(key..u64::MAX)).next();
+		[
+			self.delivered.next_from(key),
+			reported.map(|(run, _)| run.start.max(key)),
+		]
+		.into_iter()
+		.flatten()
+		.min()
 	}
 
 	/// The lowest key from `key` on that anything in the record holds.
@@ -698,19 +517,12 @@ impl Record {
 		let mut runs = 0;
 		let mut gaps = Vec::new();
 		loop {
-			let next = match self.reported.get_key_value(&end) {
-				Some((run, report)) if fold == Fold::Final => match report {
-					Report::Settled | Report::Skip => run.end,
-					// A group may still land on a dropped key, which this reader would hand out
-					// late, and folding would stop: only inside a span the track holds whole,
-					// where that group already landed and no other starts, does a drop fold.
-					Report::Dropped => match reader.spans.whole(end) {
-						Some(span) => run.end.min(span.end),
-						None => break,
-					},
-					Report::Stale => break,
-				},
-				Some((run, _)) => run.end,
+			let (next, step) = match self.reported.get_key_value(&end) {
+				Some((run, _)) => {
+					// A reported run overlapping a delivered run costs both runs.
+					let both = self.delivered.next_from(end).is_some_and(|first| first < run.end);
+					(run.end, 1 + usize::from(both))
+				}
 				None if self.pending.contains_key(&end) => break,
 				None => {
 					let local = match fold {
@@ -721,14 +533,6 @@ impl Record {
 							beside.given_up_end(end),
 						],
 						Fold::Retire { .. } => [self.delivered.run_end(end), None, None, None],
-						// A group handed out, once the track holds it whole. Not a key a key-order
-						// read only passed, where a group may still land late and be reported
-						// dropped, nor the rest of a span, which may still owe a report of its own.
-						Fold::Final => {
-							let handed = self.handed_by(reader.ordered).contains(end);
-							let group = reader.spans.whole(end).is_some_and(|span| span.start == end);
-							[(handed && group).then(|| end.saturating_add(1)), None, None, None]
-						}
 					};
 					let Some(run_end) = local.into_iter().flatten().max() else {
 						let Fold::Retire { below } = fold else {
@@ -746,26 +550,15 @@ impl Record {
 					};
 					// A report or a run given up inside it is judged on its own.
 					let span = end..run_end;
-					[
+					let next = [
 						self.reported.overlapping(&span).next().map(|(run, _)| run.start),
 						self.pending.overlapping(&span).next().map(|(run, _)| run.start),
 					]
 					.into_iter()
 					.flatten()
-					.fold(run_end, |run_end, start| run_end.min(start.max(end)))
+					.fold(run_end, |run_end, start| run_end.min(start.max(end)));
+					(next, 1)
 				}
-			};
-			// A stale skip stays for a wider budget to offer again.
-			let next = match fold {
-				Fold::Final => [
-					self.skipped.next_from(end),
-					self.written_off.overlapping(&(end..next)).next().map(|run| run.start),
-					beside.next_stale(end),
-				]
-				.into_iter()
-				.flatten()
-				.fold(next, |next, stale| next.min(stale.max(end))),
-				_ => next,
 			};
 			// The group this read hands out stays above: its publisher has yet to tell its wire
 			// of it, and would take one below the floor as told already.
@@ -777,7 +570,7 @@ impl Record {
 				break;
 			}
 			end = next;
-			runs += 1;
+			runs += step;
 		}
 		Stretch { end, runs, gaps }
 	}
@@ -813,7 +606,7 @@ mod test {
 		record.settle(|| track.clone(), &mut (), Standing::default());
 		assert_eq!(pool.used(), 0, "a lone prefix bills nothing");
 		for key in (10..1_000).step_by(2) {
-			record.reported.insert(key..key + 1, Report::Dropped);
+			record.reported.insert(key..key + 1, Report::Final);
 		}
 		record.settle(|| track.clone(), &mut (), Standing::default());
 		assert_eq!(pool.used(), 495 * RUN_OVERHEAD);
@@ -829,9 +622,11 @@ mod test {
 		let (pool, track) = account();
 		let mut record = Record::default();
 		record.delivered.insert(0);
-		record.reported.insert(1..u64::MAX / 2, Report::Dropped);
+		record.reported.insert(1..u64::MAX / 2, Report::Final);
 		record.delivered.insert(u64::MAX / 2);
-		record.reported.insert(u64::MAX / 2 + 1..u64::MAX / 2 + 2, Report::Skip);
+		record
+			.reported
+			.insert(u64::MAX / 2 + 1..u64::MAX / 2 + 2, Report::Final);
 		record.settle(|| track.clone(), &mut (), Standing::default());
 		assert_eq!(pool.used(), 3 * RUN_OVERHEAD);
 		owe(&track, pool.used());
@@ -841,245 +636,10 @@ mod test {
 			record.told(7) && record.delivered.contains(7),
 			"a folded drop stays dropped"
 		);
-		assert_eq!(record.report(0..u64::MAX / 2 + 2, &Hole::Skip), None);
+		assert_eq!(record.report(0..u64::MAX / 2 + 2, &Hole::Skip, false), None);
 		let mut untold = RangeSet::new();
 		untold.insert(u64::MAX / 2 + 2..u64::MAX / 2 + 3);
 		assert_eq!(record.untold(0..u64::MAX / 2 + 3), untold);
-	}
-
-	/// Groups every `SPACING` keys from `FIRST`, each held whole over the keys up to the next.
-	struct Spaced;
-
-	const FIRST: u64 = 20;
-	const SPACING: u64 = 10;
-
-	impl Spans for Spaced {
-		fn whole(&self, key: u64) -> Option<Range<u64>> {
-			let start = FIRST + key.checked_sub(FIRST)? / SPACING * SPACING;
-			Some(start..start + SPACING)
-		}
-	}
-
-	/// A live reader past the groups below, whose ranges are placed.
-	fn live() -> Standing<'static> {
-		Standing {
-			spans: &Spaced,
-			..ranged(&[(FIRST, u64::MAX - 1)])
-		}
-	}
-
-	/// Without a debt, a growing record folds what a whole group's span proves: a group handed
-	/// out or reported dropped, the drops reported inside its span, and every skip. A drop
-	/// outside a whole span stays, since a group may still land there late.
-	#[test]
-	fn a_growing_record_folds_what_whole_spans_prove() {
-		let (pool, track) = roomy();
-		let mut record = Record::default();
-		record.reported.insert(10..12, Report::Dropped);
-		record.reported.insert(12..FIRST, Report::Skip);
-		for key in (FIRST..2_000).step_by(SPACING as usize) {
-			match key % 30 {
-				// Handed out, its span skipped.
-				0 => {
-					record.delivered.insert(key);
-					record.reported.insert(key + 1..key + SPACING, Report::Skip);
-				}
-				// Dropped, its span skipped.
-				10 => {
-					record.reported.insert(key..key + 1, Report::Dropped);
-					record.reported.insert(key + 1..key + SPACING, Report::Skip);
-				}
-				// Dropped over its span, as a publisher tells a whole group's drop.
-				_ => {
-					record.reported.insert(key..key + SPACING, Report::Dropped);
-				}
-			}
-		}
-		record.settle(|| track.clone(), &mut (), live());
-		assert!(
-			pool.used() <= 4 * RUN_OVERHEAD,
-			"{} runs left",
-			pool.used() / RUN_OVERHEAD
-		);
-		assert!(record.delivered.contains(500), "a folded drop counts as handed out");
-		assert!(
-			!record.delivered.contains(10),
-			"a drop outside a whole span stays, so a group landing there late still goes out"
-		);
-	}
-
-	/// A drop that starts inside a whole group's span, as a relay forwards an upstream drop
-	/// while the group is still open, folds with the span: no other group starts there.
-	#[test]
-	fn a_growing_record_folds_a_drop_inside_a_span() {
-		let (_pool, track) = roomy();
-		let mut record = Record::default();
-		for key in (FIRST..2_000).step_by(SPACING as usize) {
-			record.delivered.insert(key);
-			match key {
-				500 => {
-					record.reported.insert(501..503, Report::Dropped);
-					record.reported.insert(503..510, Report::Skip);
-				}
-				_ => {
-					record.reported.insert(key + 1..key + SPACING, Report::Skip);
-				}
-			}
-		}
-		let reader = Standing {
-			reports: true,
-			..live()
-		};
-		record.settle(|| track.clone(), &mut (), reader);
-		assert!(record.told(400), "the groups around it folded");
-		assert!(record.delivered.contains(502), "so did the drop inside the span");
-	}
-
-	/// A key the track holds no whole group for stays as it was: a group handed out there may
-	/// still be cut, and a dropped one may still land late.
-	#[test]
-	fn a_growing_record_keeps_what_no_whole_span_proves() {
-		let (pool, track) = roomy();
-		let mut record = Record::default();
-		for key in (FIRST..2_000).step_by(SPACING as usize) {
-			match key % 20 {
-				0 => record.reported.insert(key..key + 1, Report::Dropped),
-				_ => {
-					record.delivered.insert(key);
-				}
-			}
-			record.reported.insert(key + 1..key + SPACING, Report::Skip);
-		}
-		let reader = Standing { spans: &(), ..live() };
-		record.settle(|| track.clone(), &mut (), reader);
-		assert!(
-			!record.delivered.contains(40),
-			"a dropped key no whole span proves stays unfolded"
-		);
-		assert!(pool.used() > 100 * RUN_OVERHEAD, "nothing folded");
-	}
-
-	/// A key-order read counts the keys it passes as handed out, where a group may still land
-	/// late, so only the groups it handed out itself, or reported, fold: a key it only passed
-	/// stays open for that report, while the rest folds to a few runs.
-	#[test]
-	fn a_growing_ordered_record_folds_only_what_it_handed_out() {
-		let (pool, track) = roomy();
-		let mut record = Record::default();
-		for key in (FIRST..2_000).step_by(SPACING as usize) {
-			record.delivered.forget_below(key + SPACING);
-			match key {
-				// Reported as the wire publisher does.
-				_ if key % 30 == 0 => {
-					record.reported.insert(key..key + 1, Report::Settled);
-				}
-				// Passed, not handed out: a group may land here late.
-				500 => {}
-				_ => {
-					record.handed.insert(key);
-				}
-			}
-			record.reported.insert(key + 1..key + SPACING, Report::Skip);
-		}
-		let reader = Standing {
-			ordered: true,
-			..live()
-		};
-		record.settle(|| track.clone(), &mut (), reader);
-		assert_eq!(
-			record.report(500..501, &Hole::drop(StreamError::Old)),
-			Some(500..501),
-			"a group landing late on a key it passed is still reported"
-		);
-		assert!(
-			pool.used() <= 8 * RUN_OVERHEAD,
-			"{} runs left",
-			pool.used() / RUN_OVERHEAD
-		);
-	}
-
-	/// A key-order read of a track whose groups declare no span settles them as one reported
-	/// run: the groups it handed out merge under it rather than keep a run each.
-	#[test]
-	fn a_growing_ordered_record_merges_what_it_handed_out_under_a_report() {
-		let (pool, track) = roomy();
-		let mut record = Record::default();
-		for key in (FIRST..2_000).step_by(SPACING as usize) {
-			record.delivered.forget_below(key);
-			record.delivered.insert(key);
-			record.handed.insert(key);
-		}
-		record.reported.insert(FIRST..2_000, Report::Settled);
-		let reader = Standing {
-			ordered: true,
-			spans: &(),
-			..live()
-		};
-		record.settle(|| track.clone(), &mut (), reader);
-		assert!(
-			pool.used() <= 4 * RUN_OVERHEAD,
-			"{} runs left",
-			pool.used() / RUN_OVERHEAD
-		);
-	}
-
-	/// A reader that polls what it missed keeps a whole span's skips its own to report: a
-	/// growing record takes none of them in as handed out, which would keep the skip from
-	/// going out, as a relay forwards a group before its end arrives.
-	#[test]
-	fn a_growing_record_leaves_a_reporting_reader_its_skips() {
-		let (_pool, track) = roomy();
-		let mut record = Record::default();
-		for key in (FIRST..2_000).step_by(SPACING as usize) {
-			record.delivered.insert(key);
-		}
-		let reader = Standing {
-			reports: true,
-			..live()
-		};
-		record.settle(|| track.clone(), &mut (), reader);
-		assert!(
-			!record.delivered.contains(FIRST + 1),
-			"the skip inside the span is still its to report"
-		);
-	}
-
-	/// While its publisher's start is unresolved, a record folds nothing as final, so taking a
-	/// report back still works; once it resolves, the next growth folds.
-	#[test]
-	fn a_held_record_folds_nothing_final() {
-		let (pool, track) = roomy();
-		let mut record = Record::default();
-		record.hold(true);
-		for key in (FIRST..2_000).step_by(SPACING as usize) {
-			record.reported.insert(key..key + SPACING, Report::Skip);
-			record.delivered.insert(key);
-		}
-		record.settle(|| track.clone(), &mut (), live());
-		record.untell(30..40);
-		assert_eq!(record.report(30..40, &Hole::Skip), Some(30..40), "taken back");
-		record.hold(false);
-		record.delivered.insert(2_000);
-		record.settle(|| track.clone(), &mut (), live());
-		assert!(
-			pool.used() <= 2 * RUN_OVERHEAD,
-			"{} runs left",
-			pool.used() / RUN_OVERHEAD
-		);
-	}
-
-	/// A reader that never asks what it missed hands out the rest of each whole group's span
-	/// with the group, so consecutive spans keep one run; nothing it reports later is blocked.
-	#[test]
-	fn a_growing_record_hands_out_whole_spans() {
-		let (pool, track) = roomy();
-		let mut record = Record::default();
-		for key in (FIRST..2_000).step_by(SPACING as usize) {
-			record.delivered.insert(key);
-		}
-		record.settle(|| track.clone(), &mut (), live());
-		assert_eq!(pool.used(), 0, "one run, which bills nothing");
-		assert_eq!(record.report(21..30, &Hole::Skip), Some(21..30), "still reported");
 	}
 
 	/// A reader that joined above key 0, as at a sparse-key track's live edge or its oldest
@@ -1091,7 +651,7 @@ mod test {
 		let mut record = Record::default();
 		for key in [1_000, 2_000, 3_000] {
 			record.delivered.insert(key);
-			record.reported.insert(key + 1..key + 1_000, Report::Dropped);
+			record.reported.insert(key + 1..key + 1_000, Report::Final);
 		}
 		record
 			.pending
@@ -1121,7 +681,7 @@ mod test {
 		for key in [1_000, 1_100, 2_000, 3_000] {
 			record.delivered.insert(key);
 			let end = if key < 2_000 { key + 100 } else { key + 1_000 };
-			record.reported.insert(key + 1..end, Report::Dropped);
+			record.reported.insert(key + 1..end, Report::Final);
 		}
 		record.settle(|| track.clone(), &mut (), Standing::default());
 		assert_eq!(pool.used(), 7 * RUN_OVERHEAD);
@@ -1153,7 +713,7 @@ mod test {
 		record.delivered.insert(1_000);
 		for key in [2_000, 3_000, 5_000, 6_000] {
 			record.delivered.insert(key);
-			record.reported.insert(key + 1..key + 1_000, Report::Dropped);
+			record.reported.insert(key + 1..key + 1_000, Report::Final);
 		}
 		record.settle(|| track.clone(), &mut (), Standing::default());
 		assert_eq!(pool.used(), 8 * RUN_OVERHEAD);
@@ -1192,9 +752,9 @@ mod test {
 		let (pool, track) = account();
 		let mut record = Record::default();
 		record.delivered.insert(0);
-		record.reported.insert(1..3, Report::Dropped);
+		record.reported.insert(1..3, Report::Final);
 		record.delivered.insert(3);
-		record.reported.insert(5..6, Report::Skip);
+		record.reported.insert(5..6, Report::Final);
 		record.settle(|| track.clone(), &mut (), Standing::default());
 		owe(&track, pool.used());
 		record.settle(
@@ -1209,81 +769,38 @@ mod test {
 		assert!(!record.told(3), "the handed group stays to be told");
 	}
 
-	/// One run a reader gave up beside its record.
-	struct GivenUp(Option<Range<u64>>);
-	impl Beside for GivenUp {
-		fn runs(&self) -> u64 {
-			u64::from(self.0.is_some())
-		}
-		fn given_up_end(&self, key: u64) -> Option<u64> {
-			self.0.as_ref().filter(|run| run.contains(&key)).map(|run| run.end)
-		}
-		fn next_held(&self, key: u64) -> Option<u64> {
-			self.0
-				.as_ref()
-				.filter(|run| run.end > key)
-				.map(|run| run.start.max(key))
-		}
-		fn forget(&mut self, folded: Range<u64>) {
-			self.0 = self
-				.0
-				.take()
-				.filter(|run| run.start >= folded.end || run.end <= folded.start);
-		}
-	}
-
-	/// A debt folds a stretch only where it settles it: one too short to be worth folding
-	/// keeps what the reader gave up beside it, which its fills would otherwise ask again.
-	#[test]
-	fn a_debt_keeps_what_it_gave_up_beside_a_stretch_it_does_not_fold() {
-		let (pool, track) = account();
-		let mut record = Record::default();
-		let mut beside = GivenUp(Some(11..12));
-		record.delivered.insert(10);
-		record.reported.insert(20..21, Report::Dropped);
-		record.settle(|| track.clone(), &mut beside, Standing::default());
-		owe(&track, pool.used());
-		record.settle(|| track.clone(), &mut beside, Standing::default());
-		assert_eq!(beside.0, Some(11..12), "kept, as the record settled nothing there");
-	}
-
-	/// A growing record forgets what the reader gave up beside a final stretch too short to
-	/// fold only where `delivered` then covers it, as a read checks its fills against
-	/// `delivered`: forgotten without that, the verdict would leave the read waiting on fills
-	/// that already answered.
-	#[test]
-	fn a_growing_record_keeps_what_it_gave_up_beside_a_stretch_nothing_covers() {
-		for handed in [false, true] {
-			let (_pool, track) = roomy();
-			let mut record = Record::default();
-			let mut beside = GivenUp(Some(31..32));
-			if handed {
-				record.delivered.insert(30);
-			}
-			record.reported.insert(30..35, Report::Skip);
-			let reader = Standing { spans: &(), ..live() };
-			record.settle(|| track.clone(), &mut beside, reader);
-			match handed {
-				true => {
-					assert!(record.delivered.contains(31), "merged under the group handed out");
-					assert_eq!(beside.0, None, "so forgotten");
-				}
-				false => assert_eq!(beside.0, Some(31..32), "kept, as nothing covers it"),
-			}
-		}
-	}
-
 	/// A run the reader gave up beside its record, such as a drop it took from the track's drop
 	/// set, is its own final verdict: a debt folds the floor over it rather than stopping at
 	/// the gap, and forgets it below the floor.
 	#[test]
 	fn a_debt_folds_over_what_the_reader_gave_up_beside_it() {
+		struct GivenUp(Option<Range<u64>>);
+		impl Beside for GivenUp {
+			fn runs(&self) -> u64 {
+				u64::from(self.0.is_some())
+			}
+			fn given_up_end(&self, key: u64) -> Option<u64> {
+				self.0.as_ref().filter(|run| run.contains(&key)).map(|run| run.end)
+			}
+			fn next_held(&self, key: u64) -> Option<u64> {
+				self.0
+					.as_ref()
+					.filter(|run| run.end > key)
+					.map(|run| run.start.max(key))
+			}
+			fn forget(&mut self, folded: Range<u64>) {
+				self.0 = self
+					.0
+					.take()
+					.filter(|run| run.start >= folded.end || run.end <= folded.start);
+			}
+		}
 		let (pool, track) = account();
 		let mut record = Record::default();
 		let mut beside = GivenUp(Some(1..2));
 		record.delivered.insert(0);
 		record.delivered.insert(2);
-		record.reported.insert(4..5, Report::Dropped);
+		record.reported.insert(4..5, Report::Final);
 		record.settle(|| track.clone(), &mut beside, Standing::default());
 		owe(&track, pool.used());
 		record.settle(|| track.clone(), &mut beside, Standing::default());
@@ -1321,7 +838,7 @@ mod test {
 		let (pool, track) = account();
 		let mut record = Record::default();
 		record.delivered.insert(0);
-		record.reported.insert(1..2, Report::Dropped);
+		record.reported.insert(1..2, Report::Final);
 		record
 			.pending
 			.insert(2..3, Pending::own(Hole::drop(StreamError::NotFound)));
@@ -1357,12 +874,12 @@ mod test {
 	fn record_with_promise() -> Record {
 		let mut record = Record::default();
 		record.delivered.insert(0);
-		record.reported.insert(1..2, Report::Dropped);
+		record.reported.insert(1..2, Report::Final);
 		record
 			.pending
 			.insert(2..3, Pending::own(Hole::drop(StreamError::NotFound)));
 		for key in (5..1_000).step_by(2) {
-			record.reported.insert(key..key + 1, Report::Dropped);
+			record.reported.insert(key..key + 1, Report::Final);
 		}
 		record
 	}
@@ -1375,7 +892,7 @@ mod test {
 	}
 
 	/// Standing for a reader whose ranges hold each first to last key in `runs`.
-	fn ranged(runs: &[(u64, u64)]) -> Standing<'static> {
+	fn ranged(runs: &[(u64, u64)]) -> Standing {
 		Standing {
 			ranges: Some(Cover::new(runs.iter().map(|(first, last)| *first..=*last))),
 			..Standing::default()
@@ -1393,7 +910,7 @@ mod test {
 		let mut record = Record::default();
 		for key in (10..=50).step_by(10) {
 			record.delivered.insert(key);
-			record.tell(key..key + 1, Report::Settled);
+			record.tell(key..key + 1, Report::Final);
 		}
 		record.settle(|| track.clone(), &mut (), ranged(&[(50, 50)]));
 		assert_eq!(record.delivered.runs(), 1, "50 alone");
@@ -1405,7 +922,7 @@ mod test {
 		// Its ranges move above it: the gap the move left retires.
 		for key in [60, 70] {
 			record.delivered.insert(key);
-			record.tell(key..key + 1, Report::Settled);
+			record.tell(key..key + 1, Report::Final);
 		}
 		record.settle(|| track.clone(), &mut (), ranged(&[(70, 70)]));
 		assert_eq!(record.delivered.runs(), 1, "70 alone");
@@ -1485,5 +1002,222 @@ mod test {
 		assert_eq!(bill.debt(), 0, "within its capacity, the pool forgives the rest");
 		bill.set(5 * RUN_OVERHEAD);
 		assert_eq!(bill.debt(), 0, "a later pressure owes nothing of it");
+	}
+
+	/// Served groups, declared skips, and wire-final stale drops all coalesce into one final run
+	/// in `reported`, while `delivered` absorbs skips only rightward from delivered groups so a
+	/// lagging viewer skipping groups as stale never piles up disjoint runs in `delivered`.
+	#[test]
+	fn final_reports_coalesce_and_skips_never_fragment_delivered() {
+		let mut record = Record::default();
+		// Lagging viewer: stale OLD drops alternating with skips, nothing handed out.
+		for i in 0..500u64 {
+			let key = 1_000 + i * 17;
+			assert_eq!(
+				record.report(key..key + 1, &Hole::stale(Duration::from_secs(1)), false),
+				Some(key..key + 1)
+			);
+			assert_eq!(
+				record.report(key + 1..key + 17, &Hole::Skip, false),
+				Some(key + 1..key + 17)
+			);
+		}
+		assert_eq!(record.reported.len(), 1, "stale wire drops and skips coalesce");
+		assert_eq!(record.delivered.runs(), 0, "skips alone never create runs in delivered");
+
+		// Healthy sparse live reader: handed-out keys coalesce with following skips.
+		let mut healthy = Record::default();
+		for i in 0..500u64 {
+			let key = 1_000 + i * 17;
+			healthy.delivered.insert(key);
+			healthy.tell(key..key + 1, Report::Final);
+			assert_eq!(
+				healthy.report(key + 1..key + 17, &Hole::Skip, false),
+				Some(key + 1..key + 17)
+			);
+		}
+		assert_eq!(healthy.reported.len(), 1);
+		assert_eq!(healthy.delivered.runs(), 1);
+	}
+
+	/// A key-order reader's unreturned stale gap stays withdrawable until finalized or untold,
+	/// and `untell` never punches a hole in `delivered`.
+	#[test]
+	fn withdrawable_report_stays_distinct_and_untell_preserves_delivered() {
+		let mut record = Record::default();
+		record.delivered.insert(10);
+		record.tell(10..11, Report::Final);
+		assert_eq!(
+			record.report(11..12, &Hole::stale(Duration::from_secs(1)), true),
+			Some(11..12)
+		);
+		assert_eq!(record.reported.get(&11), Some(&Report::Withdrawable));
+		assert!(!record.delivered.contains(11), "a stale drop is never delivered");
+
+		// Passing 11 in `delivered` and then withdrawing its report keeps `delivered` intact.
+		record.delivered.forget_below(12);
+		record.untell(11..12);
+		assert!(!record.told(11));
+		assert!(
+			record.delivered.contains(11),
+			"untell never punches a hole in delivered"
+		);
+
+		// Finalizing a withdrawable report coalesces it with neighbouring final runs.
+		assert_eq!(
+			record.report(11..12, &Hole::stale(Duration::from_secs(1)), true),
+			Some(11..12)
+		);
+		record.tell(12..13, Report::Final);
+		assert_eq!(record.reported.len(), 3);
+		record.tell(11..12, Report::Final);
+		assert_eq!(record.reported.len(), 1);
+	}
+
+	/// Differential property test: across random sparse deliveries, out-of-order skips, final and
+	/// stale drops, `tell`, and `untell`, `Record` matches a ground-truth key-by-key model:
+	/// dropped-only keys never appear in `delivered`, `told` and `Accounted::first_gap` stay
+	/// exact, and steady sparse patterns stay O(1) runs.
+	#[test]
+	fn structural_coalescing_matches_reference_model() {
+		use std::collections::{BTreeMap, BTreeSet};
+
+		struct Rng(u64);
+		impl Rng {
+			fn next(&mut self) -> u64 {
+				self.0 ^= self.0 << 13;
+				self.0 ^= self.0 >> 7;
+				self.0 ^= self.0 << 17;
+				self.0
+			}
+			fn below(&mut self, n: u64) -> u64 {
+				self.next() % n
+			}
+		}
+
+		for seed in 1..=64u64 {
+			let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+			let mut record = Record::default();
+			let mut handed = BTreeSet::<u64>::new();
+			let mut skipped = BTreeSet::<u64>::new();
+			let mut reported = BTreeMap::<u64, Report>::new();
+
+			const MAX_KEY: u64 = 128;
+			for _ in 0..250 {
+				match rng.below(6) {
+					// Hand out a non-skipped key.
+					0 => {
+						let key = rng.below(MAX_KEY);
+						if !skipped.contains(&key) {
+							record.delivered.insert(key);
+							handed.insert(key);
+						}
+					}
+					// Report a skip on a range containing no handed-out key.
+					1 => {
+						let start = rng.below(MAX_KEY);
+						let end = (start + 1 + rng.below(12)).min(MAX_KEY);
+						if (start..end).all(|k| !handed.contains(&k)) {
+							let withdrawable = rng.below(2) == 0;
+							while let Some(gap) = record.report(start..end, &Hole::Skip, withdrawable) {
+								for k in gap {
+									reported.insert(k, Report::Final);
+								}
+							}
+							for k in start..end {
+								skipped.insert(k);
+							}
+						}
+					}
+					// Report a final or stale drop.
+					2 => {
+						let start = rng.below(MAX_KEY);
+						let end = (start + 1 + rng.below(8)).min(MAX_KEY);
+						let stale = rng.below(2) == 0;
+						let withdrawable = rng.below(2) == 0;
+						let hole = match stale {
+							true => Hole::stale(Duration::from_secs(1)),
+							false => Hole::drop(StreamError::NotFound),
+						};
+						let expected_report = match stale && withdrawable {
+							true => Report::Withdrawable,
+							false => Report::Final,
+						};
+						while let Some(gap) = record.report(start..end, &hole, withdrawable) {
+							for k in gap {
+								assert!(!reported.contains_key(&k), "seed {seed}: duplicate report at {k}");
+								reported.insert(k, expected_report);
+							}
+						}
+					}
+					// Tell a range final.
+					3 => {
+						let start = rng.below(MAX_KEY);
+						let end = (start + 1 + rng.below(6)).min(MAX_KEY);
+						record.tell(start..end, Report::Final);
+						for k in start..end {
+							reported.insert(k, Report::Final);
+						}
+					}
+					// Untell a range.
+					4 => {
+						let start = rng.below(MAX_KEY);
+						let end = (start + 1 + rng.below(6)).min(MAX_KEY);
+						record.untell(start..end);
+						for k in start..end {
+							reported.remove(&k);
+						}
+					}
+					// Absorb a skip directly (e.g. GROUP_END or non-reporting reader).
+					_ => {
+						let start = rng.below(MAX_KEY);
+						let end = (start + 1 + rng.below(12)).min(MAX_KEY);
+						if (start..end).all(|k| !handed.contains(&k)) {
+							let before_runs = record.delivered.runs();
+							record.absorb_skip(start..end);
+							if start > 0 {
+								assert!(
+									record.delivered.runs() <= before_runs,
+									"seed {seed}: absorb_skip grew delivered from {before_runs} to {}",
+									record.delivered.runs()
+								);
+							}
+							for k in start..end {
+								skipped.insert(k);
+							}
+						}
+					}
+				}
+
+				// Every handed-out key is in `delivered`; no key that is neither handed-out nor
+				// skipped (i.e. dropped-only or untouched) ever appears in `delivered`.
+				for k in 0..MAX_KEY {
+					if handed.contains(&k) {
+						assert!(record.delivered.contains(k), "seed {seed}: missing handed key {k}");
+					} else if !skipped.contains(&k) {
+						assert!(
+							!record.delivered.contains(k),
+							"seed {seed}: non-skipped dropped/unhanded key {k} leaked into delivered"
+						);
+					}
+					assert_eq!(record.told(k), reported.contains_key(&k), "seed {seed}: told({k})");
+					assert_eq!(
+						record.reported.get(&k).copied(),
+						reported.get(&k).copied(),
+						"seed {seed}: report variant at {k}"
+					);
+				}
+
+				// Accounted::first_gap matches the reference map.
+				let q_start = rng.below(MAX_KEY);
+				let q_end = (q_start + rng.below(MAX_KEY - q_start + 1)).min(MAX_KEY);
+				let expected_gap = (q_start..q_end).find(|k| !reported.contains_key(k));
+				assert_eq!(
+					record.first_gap(&(q_start..q_end)),
+					expected_gap,
+					"seed {seed}: first_gap({q_start}..{q_end})"
+				);
+			}
+		}
 	}
 }

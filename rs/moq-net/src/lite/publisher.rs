@@ -6012,7 +6012,7 @@ impl TrackRun {
 		let groups = bounds.groups();
 		let cap = groups.end().map_or(Bound::Unbounded, Bound::Excluded);
 		// The FIN of a covered subscription is the wire's to send, below.
-		let mut track = track.with_range((Bound::Included(floor), cap)).parked();
+		let track = track.with_range((Bound::Included(floor), cap)).parked();
 
 		// Lite03 and Lite04 declare no end, so neither side could settle on a drop.
 		let start = match ctx.version.has_track_stream() {
@@ -6022,8 +6022,6 @@ impl TrackRun {
 			},
 			false => Start::Legacy,
 		};
-		// What the cursor reports before the start resolves may yet be taken back below it.
-		track.hold(start.is_unresolved());
 		let bounded = bounds.ends(ctx.version);
 		let initial = bounds.ranges.len() as u64;
 		ctx.outcomes.set_stops(&bounds.frames.stops);
@@ -6549,10 +6547,16 @@ impl TrackRun {
 		}
 
 		// The starts inside a whole group's span went out with its GROUP_END, so the end of the
-		// track names none of them.
+		// track names none of them. Its interior (`key+1..end`) was declared skipped and is
+		// already told, so absorbing it keeps consecutive sparse groups one run in `delivered`.
 		let whole = std::mem::take(&mut *self.ctx.outcomes.whole.lock().unwrap());
 		for span in whole {
-			self.mark_served(span);
+			self.mark_served(span.clone());
+			if let Some(inner_start) = span.start.checked_add(1)
+				&& inner_start < span.end
+			{
+				self.track.skip_settled(inner_start..span.end);
+			}
 		}
 		// A reset may have cut a GROUP_END after its header arrived, so the starts it told go
 		// out again as a skip, even one dropped before the group finished: its readers ended
@@ -6560,7 +6564,8 @@ impl TrackRun {
 		let cut = std::mem::take(&mut *self.ctx.outcomes.cut.lock().unwrap());
 		if !cut.is_empty() && self.start.emits_range() {
 			for inner in cut {
-				self.track.record_mut().tell(inner.clone(), Report::Skip);
+				self.track.record_mut().tell(inner.clone(), Report::Final);
+				self.track.skip_settled(inner.clone());
 				self.buffer_hole(inner, Hole::Skip, writer)?;
 			}
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
@@ -6573,10 +6578,14 @@ impl TrackRun {
 			for (span, err) in dropped {
 				let hole = Hole::drop(err);
 				if self.start.emits_range() {
-					let report = self.report(&hole);
 					let record = self.track.record_mut();
 					for gap in record.untold(span.clone()).iter() {
-						record.tell(gap.clone(), report);
+						record.tell(gap.clone(), Report::Final);
+					}
+					if let Some(inner_start) = span.start.checked_add(1)
+						&& inner_start < span.end
+					{
+						self.track.skip_settled(inner_start..span.end);
 					}
 				}
 				self.buffer_hole(span, hole, writer)?;
@@ -6815,7 +6824,7 @@ impl TrackRun {
 	/// span a whole group's GROUP_END accounted for.
 	fn mark_served(&mut self, groups: Range<u64>) {
 		if self.start.emits_range() {
-			self.track.record_mut().tell(groups, Report::Settled);
+			self.track.record_mut().tell(groups, Report::Final);
 		}
 	}
 
@@ -6831,23 +6840,18 @@ impl TrackRun {
 		if !self.start.emits_range() || range.is_empty() {
 			return Ok(false);
 		}
-		let range = match hole {
-			Hole::Skip => range,
-			Hole::Drop { .. } => range.start..self.track.span_end(range.end),
+		let end = match hole {
+			Hole::Skip => range.end,
+			Hole::Drop { .. } => self.track.span_end(range.end),
 		};
-		let report = self.report(hole);
-		self.track.record_mut().tell(range.clone(), report);
+		let span_tail = range.end..end;
+		let range = range.start..end;
+		self.track.record_mut().tell(range.clone(), Report::Final);
+		if !span_tail.is_empty() {
+			self.track.skip_settled(span_tail);
+		}
 		self.buffer_hole(range, hole.clone(), writer)?;
 		Ok(true)
-	}
-
-	/// What the wire is told when `hole` goes out.
-	fn report(&self, hole: &Hole) -> Report {
-		match self.ctx.version.has_skip() {
-			// Every drop is final before lite-07.
-			false => Report::Settled,
-			true => Report::of(hole),
-		}
 	}
 
 	/// Give up, as `hole` says, whatever part of `range` this subscription has not been
@@ -6862,9 +6866,11 @@ impl TrackRun {
 			return Ok(false);
 		}
 		let gaps = self.track.record_mut().untold(range);
-		let report = self.report(hole);
 		for gap in gaps.iter() {
-			self.track.record_mut().tell(gap.clone(), report);
+			self.track.record_mut().tell(gap.clone(), Report::Final);
+			if *hole == Hole::Skip {
+				self.track.skip_settled(gap.clone());
+			}
 			self.buffer_hole(gap.clone(), hole.clone(), writer)?;
 		}
 		Ok(!gaps.is_empty())
@@ -7211,8 +7217,6 @@ impl TrackRun {
 				self.forward_range(part, hole, writer)?;
 			}
 		}
-		// Only now, past every report taken back: polling the track above may fold.
-		self.track.hold(false);
 		// An end declared while this start was held follows it.
 		if let Some(end) = self.held_end.take() {
 			writer.buffer(&lite::SubscribeResponse::End(end))?;
@@ -9535,7 +9539,7 @@ mod serve_group_test {
 		hole: &Hole,
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
 	) {
-		while let Some(gap) = run.track.record_mut().report(range.clone(), hole) {
+		while let Some(gap) = run.track.record_mut().report(range.clone(), hole, false) {
 			run.forward_range(gap, hole, writer).unwrap();
 		}
 	}

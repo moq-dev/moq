@@ -76,6 +76,28 @@ impl Delivered {
 		self.runs.insert(first, last);
 	}
 
+	/// Absorb a declared skip `groups` into `delivered` only where it extends an existing run
+	/// rightward (or starts at 0), returning the subrange absorbed. That keeps consecutive sparse
+	/// groups one run without introducing a new non-zero run start (for example, when a lagging
+	/// viewer skips groups as stale instead of delivering them).
+	pub fn absorb_skip(&mut self, groups: std::ops::Range<u64>) -> Option<std::ops::Range<u64>> {
+		if groups.is_empty() {
+			return None;
+		}
+		if groups.start == 0 || self.contains(groups.start - 1) || self.contains(groups.start) {
+			self.insert_run(groups.clone());
+			return Some(groups);
+		}
+		if let Some(start) = self.next_from(groups.start)
+			&& start < groups.end
+		{
+			let absorbed = start..groups.end;
+			self.insert_run(absorbed.clone());
+			return Some(absorbed);
+		}
+		None
+	}
+
 	/// Forget that any key in `groups` was handed out, splitting the runs it cuts.
 	pub fn remove(&mut self, groups: std::ops::Range<u64>) {
 		let Some(last) = groups.end.checked_sub(1).filter(|_| !groups.is_empty()) else {
@@ -176,11 +198,6 @@ impl Delivered {
 			true => Some(key),
 			false => self.runs.range(key..).next().map(|(first, _)| *first),
 		}
-	}
-
-	/// Each run, in order.
-	pub fn ranges(&self) -> impl Iterator<Item = std::ops::Range<u64>> + '_ {
-		self.runs.iter().map(|(first, last)| *first..last + 1)
 	}
 
 	/// One past the highest key handed out.

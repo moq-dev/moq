@@ -7621,3 +7621,51 @@ test("a routed reader reports its serving copy's whole group spans", async () =>
 		installed.close();
 	}
 });
+
+// A front reader (ordered or arrival-order) of a sparse-key track keeps both the logical and copy
+// records bounded as groups open and their GROUP_END skips arrive afterward. Mirrors the Rust
+// `a_front_ordered_read_of_a_sparse_track_keeps_a_bounded_record`.
+test("a front read of a sparse live track keeps a bounded record", () => {
+	const GROUPS = 500n;
+	const SPACING = 17n;
+	const BASE = 1_000_003n;
+	for (const orderedMode of [true, false]) {
+		const front = new Front();
+		const source = new BroadcastProducer();
+		const handle = source.consume();
+		const producer = defined(source.createTrack("video", { ...INFO, timescale: Timescale.MILLI }));
+		front.serve(handle);
+		const sub = front.consumer.track("video").subscribe(withMax({ delay: { max: null } }));
+		const ordered = orderedMode ? sub.ordered() : undefined;
+		let open: { key: bigint; group: ReturnType<track.Producer["createGroup"]> } | undefined;
+		try {
+			for (let n = 0n; n < GROUPS; n++) {
+				const key = BASE + n * SPACING;
+				if (open) {
+					open.group.finishAt(key);
+					producer.skipGroups(open.key + 1n, key);
+					if (ordered) expect(ordered.tryNextItem()).toBeUndefined();
+				}
+				const group = producer.createGroup(key);
+				group.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(Number(key)) });
+				if (ordered) {
+					const item = ordered.tryNextItem();
+					expect(item).toMatchObject({ kind: "group" });
+					if (item && item.kind === "group") item.group.close();
+				} else {
+					expect(drain(sub)).toEqual([key]);
+				}
+				open = { key, group };
+				expect(hooks.deliveredRuns(sub)).toBeLessThanOrEqual(3);
+				expect(hooks.reportedRuns(sub)).toBeLessThanOrEqual(2);
+			}
+			open?.group.finish();
+		} finally {
+			ordered?.close();
+			sub.close();
+			front.consumer.close();
+			handle.close();
+			source.close();
+		}
+	}
+});

@@ -407,6 +407,8 @@ interface Copy {
 	resolved?: (Resolved | undefined)[];
 	/** Replaced by a newer route. */
 	replaced: boolean;
+	/** The copy's drops revision absorbed into the logical reader's `delivered` set. */
+	skipsSeen?: number;
 	/**
 	 * Bounded once the newer copy delivered its first group: nothing past this group is taken
 	 * from it. `null` when that leaves nothing. Unset while it is the only copy still feeding
@@ -1707,7 +1709,7 @@ class Reader implements ResumeSource {
 				this.#queueDrop(serving, dropped);
 			}
 		}
-		this.#drops = this.#drops.filter((run) => !delivered.covers(run.start, run.end));
+		this.#drops = this.#drops.filter((run) => run.skip || !delivered.covers(run.start, run.end));
 		const cursor = this.#shell.cursor.peek();
 		const feeding: Run[] = [];
 		for (const copy of this.#copies) {
@@ -1716,8 +1718,11 @@ class Reader implements ResumeSource {
 			insertRun(feeding, start, copyEnd(copy) ?? UNBOUNDED);
 		}
 		for (const run of this.#drops) {
+			const from = max(run.start, cursor.start);
 			const end = min(run.end, cursor.end ?? run.end);
-			for (const gap of delivered.gaps(max(run.start, cursor.start), end)) {
+			if (from >= end) continue;
+			const gaps = run.skip ? [{ start: from, end }] : delivered.gaps(from, end);
+			for (const gap of gaps) {
 				const [open] =
 					gap.start < passing
 						? [{ start: gap.start, end: min(gap.end, passing) }]
@@ -2184,6 +2189,7 @@ class Reader implements ResumeSource {
 	}
 
 	#handOut(copy: Copy, group: GroupConsumer): GroupConsumer {
+		hooks.settleIfDropping(copy.sub, group.start);
 		this.#newest = max(this.#newest ?? 0n, group.start);
 		// Another copy holding the group, now or once it lands there, is where a failure continues
 		// it, so it stays while the group is read; see #backs. Recorded even with one copy, since a
@@ -2240,6 +2246,12 @@ class Reader implements ResumeSource {
 
 	untell(start: bigint, end: bigint): void {
 		for (const copy of this.#copies) hooks.untell(copy.sub, start, end);
+	}
+
+	absorbSkips(delivered: Delivered, key: bigint): void {
+		const serving = this.#copies.at(-1);
+		if (!serving) return;
+		serving.skipsSeen = hooks.absorbSkips(serving.sub, delivered, key, serving.skipsSeen ?? 0);
 	}
 
 	// Judged on the newest copy, but never past a group a replaced copy still feeding the reader

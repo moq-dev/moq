@@ -3528,18 +3528,7 @@ type Superseded = { successor?: Successor };
 // the oldest held.
 type Successor = { key: bigint; arrived: Instant; fate: () => Error | undefined };
 
-/**
- * How a reader reported a run, and what its wire was told. Mirrors the Rust `record::Report`:
- * `settled` is a group served, or a drop on a version with no skip. Every report is final: nothing
- * goes out over a drop.
- *
- * @internal
- */
-export interface Reported extends Run {
-	kind: "settled" | "dropped" | "skip";
-}
-
-const sameReport = (a: Reported, b: Reported) => a.kind === b.kind;
+const sameReport = () => true;
 
 /**
  * What a lite publisher told its wire about a reader's keys, kept in the reader's own
@@ -3553,10 +3542,12 @@ export interface WireRecord {
 	told(key: bigint): boolean;
 	/** The parts of `[start, end)` the wire was told nothing of. */
 	untold(start: bigint, end: bigint): Run[];
-	/** Record that the wire was told `report` of `[start, end)`. */
-	tell(start: bigint, end: bigint, report: Omit<Reported, "start" | "end">): void;
+	/** Record that the wire was told of `[start, end)`. */
+	tell(start: bigint, end: bigint): void;
 	/** Forget what was recorded of `[start, end)` without going out on the wire. */
 	untell(start: bigint, end: bigint): void;
+	/** Absorb declared skips in `[start, end)` into `delivered` once settled on the wire. */
+	skipSettled(start: bigint, end: bigint): void;
 }
 
 /**
@@ -3660,7 +3651,9 @@ export class Subscriber {
 		budget: Budget;
 		coverage?: Coverage;
 	};
-	#reported = new Runs<Reported>(sameReport);
+	#reported = new Runs<Run>(sameReport);
+	// The track's drops revision absorbed into `#delivered` when this reader does not poll drops.
+	#skipsSeen = 0;
 	// Everything below was settled for good and folded out of #reported: handed out, told, or
 	// passed, so nothing there is reported again. Mirrors the Rust `Record::floor`, which folds
 	// under pool pressure; a key-order read folds at where it is instead (see #fold).
@@ -4050,6 +4043,10 @@ export class Subscriber {
 		if (ordered) this.#delivered.forgetBelow(key);
 		this.#delivered.add(key);
 		this.#skipped.delete(key);
+		if (!ordered) {
+			if (this.#resume) this.#resume.absorbSkips(this.#delivered, key);
+			else this.#absorbSkips(key);
+		}
 		// Another copy of it buffered here is never handed out.
 		this.#judge(key, key + 1n);
 		if (this.#resume) this.#resume.forgetPastBudget(this.#delivered);
@@ -4062,9 +4059,47 @@ export class Subscriber {
 		if (ordered) this.#fold(forgot);
 	}
 
+	// Absorb declared skips within local bounds into `#delivered` so consecutive sparse groups
+	// coalesce into one run without absorbing kept-out keys outside `[cursor.start, cursor.end)`.
+	#absorbSkips(handed?: bigint): void {
+		const { start: floor, end } = this.#cursor.peek();
+		const limit = end ?? UNBOUNDED;
+		if (floor >= limit) return;
+		const drops = this.#state.drops;
+		if (handed !== undefined) {
+			const next = drops.at(handed + 1n);
+			if (next?.skip) {
+				const from = max(handed + 1n, floor);
+				const to = min(next.end, limit);
+				if (from < to) {
+					const absorbed = this.#delivered.absorbSkip(from, to);
+					if (absorbed) this.#stoppedReading(absorbed.start, absorbed.end);
+				}
+			}
+		}
+		if (!this.#dropsSeen && this.#delivered.runs > 1) {
+			for (const changed of drops.since(this.#skipsSeen)) {
+				const cFrom = max(changed.start, floor);
+				const cTo = min(changed.end, limit);
+				if (cFrom >= cTo) continue;
+				for (const run of drops.overlapping(cFrom, cTo)) {
+					if (!run.skip) continue;
+					const from = max(run.start, floor);
+					const to = min(run.end, limit);
+					if (from < to) {
+						const absorbed = this.#delivered.absorbSkip(from, to);
+						if (absorbed) this.#stoppedReading(absorbed.start, absorbed.end);
+					}
+				}
+			}
+			this.#skipsSeen = drops.revision;
+		}
+	}
+
 	// This reader stopped reading `[start, end)` for good: clip what it asked there, and judge
 	// again only the fills owing it there, so a hand-out costs what it touches, not every fill.
 	#stoppedReading(start: bigint, end: bigint): void {
+		if (this.#adopted.length > 0) this.#adopted = removeRun(this.#adopted, start, end);
 		const asker = this.#state.asker;
 		const producer = this.#state.producer;
 		if (!asker || !producer) return;
@@ -4253,14 +4288,18 @@ export class Subscriber {
 		return {
 			told: (key) => reported.at(key) !== undefined,
 			untold: (start, end) => (start < end ? runGaps(reported.overlapping(start, end), start, end) : []),
-			tell: (start, end, report) => {
-				if (start < end) reported.set(start, end, { ...report, start, end });
+			tell: (start, end) => {
+				if (start < end) reported.set(start, end, { start, end });
 			},
 			// A front's copies forget it too, so ranges that later ask for it report it again.
 			untell: (start, end) => {
 				if (start >= end) return;
 				reported.set(start, end);
 				this.#resume?.untell(start, end);
+			},
+			skipSettled: (start, end) => {
+				const absorbed = this.#delivered.absorbSkip(start, end);
+				if (absorbed) this.#stoppedReading(absorbed.start, absorbed.end);
 			},
 		};
 	}
@@ -5449,6 +5488,38 @@ export class Subscriber {
 		hooks.wire = (subscriber) => subscriber.#wireRecord();
 		hooks.deliveredRuns = (subscriber) => subscriber.#delivered.runs;
 		hooks.reportedRuns = (subscriber) => subscriber.#reported.size;
+		hooks.settleIfDropping = (subscriber, key) => {
+			if (subscriber.#dropsSeen !== undefined || (subscriber.#resume && subscriber.#reported.size > 0)) {
+				subscriber.#settled(key, key + 1n);
+			}
+		};
+		hooks.absorbSkips = (subscriber, delivered, key, seen) => {
+			const { start: floor, end } = subscriber.#cursor.peek();
+			const limit = end ?? UNBOUNDED;
+			if (floor >= limit) return seen;
+			const drops = subscriber.#state.drops;
+			const next = drops.at(key + 1n);
+			if (next?.skip) {
+				const from = max(key + 1n, floor);
+				const to = min(next.end, limit);
+				if (from < to) delivered.absorbSkip(from, to);
+			}
+			if (delivered.runs > 1) {
+				for (const changed of drops.since(seen)) {
+					const cFrom = max(changed.start, floor);
+					const cTo = min(changed.end, limit);
+					if (cFrom >= cTo) continue;
+					for (const run of drops.overlapping(cFrom, cTo)) {
+						if (!run.skip) continue;
+						const from = max(run.start, floor);
+						const to = min(run.end, limit);
+						if (from < to) delivered.absorbSkip(from, to);
+					}
+				}
+				return drops.revision;
+			}
+			return seen;
+		};
 		hooks.handedOut = (subscriber, key) => subscriber.#delivered.has(key);
 		hooks.taking = (subscriber) => {
 			// One staleness verdict for the whole walk, as the Rust `Subscriber::taking` takes.
@@ -6198,7 +6269,11 @@ export class Subscriber {
 		if (start >= to) return undefined;
 		const [gap] = runGaps(this.#reported.overlapping(start, to), start, to);
 		if (!gap) return undefined;
-		this.#reported.set(gap.start, gap.end, { ...gap, kind: hole.skip ? "skip" : "dropped" });
+		this.#reported.set(gap.start, gap.end, { start: gap.start, end: gap.end });
+		if (hole.skip) {
+			const absorbed = this.#delivered.absorbSkip(gap.start, gap.end);
+			if (absorbed) this.#stoppedReading(absorbed.start, absorbed.end);
+		}
 		return { kind: "drop", ...gap, error: hole.error, skip: hole.skip, stale: hole.stale };
 	}
 
@@ -6729,7 +6804,7 @@ export class Subscriber {
 	// Record `[start, end)` as settled: handed out, or told as a gap.
 	#settled(start: bigint, end: bigint): void {
 		start = max(start, this.#floor);
-		if (start < end) this.#reported.set(start, end, { start, end, kind: "settled" });
+		if (start < end) this.#reported.set(start, end, { start, end });
 	}
 
 	// Fold the record below `at`, where a key-order read is, into the floor, held below every run

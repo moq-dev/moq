@@ -46,7 +46,6 @@ import { Priority, sendOrder } from "../priority.ts";
 import { concat, encodeVarint, type Reader, type Stream, type StreamVersion, Writer } from "../stream.ts";
 import { floorAt, type Timescale, type Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
-import type { Reported } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { nextChange } from "../util/change.ts";
 import { GivenUp } from "../util/given_up.ts";
@@ -2133,13 +2132,6 @@ export class Publisher {
 			),
 		});
 
-		// What the wire is told when `hole` goes out. Every report is final. Mirrors the Rust
-		// `TrackRun::report`.
-		const reportOf = (hole: Hole): Omit<Reported, "start" | "end"> => {
-			if (!hasSkip(this.version)) return { kind: "settled" };
-			return { kind: hole.skip ? "skip" : "dropped" };
-		};
-
 		// A drop of a group held whole names its span, `[start, max(End, start + 1))`, so the
 		// subscriber accounts for the starts inside it too: no other group starts there. The
 		// group is the highest one below `end`, starting at `end - 1n` or holding it in its span,
@@ -2154,7 +2146,6 @@ export class Publisher {
 		// served or given up yet.
 		const drop = async (start: bigint, end: bigint, hole: Hole): Promise<boolean> => {
 			if (!record) return true;
-			const report = reportOf(hole);
 			for (const gap of record.untold(start, end)) {
 				// The starts inside a whole group whose stream is still serving are its GROUP_END's to
 				// account for, which may still be on its way, or its drop's, which names its span. A
@@ -2162,7 +2153,8 @@ export class Publisher {
 				const around = hooks.wholeAround(track, gap.start);
 				const from = around && streaming.has(around.start) ? min(around.end, gap.end) : gap.start;
 				if (from >= gap.end) continue;
-				record.tell(from, gap.end, report);
+				record.tell(from, gap.end);
+				if (hole.skip) record.skipSettled(from, gap.end);
 				if (!(await sendHole(holeMessage(from, gap.end, hole)))) return false;
 			}
 			return true;
@@ -2172,9 +2164,10 @@ export class Publisher {
 		// nothing went out over it. A drop of a group held whole names its span.
 		const forward = async (start: bigint, end: bigint, hole: Hole): Promise<boolean> => {
 			if (!record || start >= end) return true;
-			if (!hole.skip) end = reach(end);
-			record.tell(start, end, reportOf(hole));
-			return sendHole(holeMessage(start, end, hole));
+			const reached = hole.skip ? end : reach(end);
+			record.tell(start, reached);
+			if (reached > end) record.skipSettled(end, reached);
+			return sendHole(holeMessage(start, reached, hole));
 		};
 
 		// The track's exclusive final boundary. A Rust subscriber feeds SUBSCRIBE_END
@@ -2313,7 +2306,8 @@ export class Publisher {
 					skipped = new Runs<DropRun>(sameHole);
 				}
 				for (const { start, end } of pendingCuts.splice(0)) {
-					record?.tell(start, end, { kind: "skip" });
+					record?.tell(start, end);
+					record?.skipSettled(start, end);
 					if (
 						!(await sendHole({
 							drop: SubscribeDrop.given(start, end, new StreamError(StreamCode.Skip), this.version),
@@ -2324,8 +2318,8 @@ export class Publisher {
 				if (pendingDrops.length > 0) {
 					for (const { start, end, error } of pendingDrops.splice(0)) {
 						// The rest of the span is told with it; the served start keeps its record.
-						for (const gap of record?.untold(start, end) ?? [])
-							record?.tell(gap.start, gap.end, reportOf({ error }));
+						for (const gap of record?.untold(start, end) ?? []) record?.tell(gap.start, gap.end);
+						if (end > start + 1n) record?.skipSettled(start + 1n, end);
 						if (!(await sendHole({ drop: SubscribeDrop.given(start, end, error, this.version) })))
 							return false;
 					}
@@ -2626,7 +2620,7 @@ export class Publisher {
 					if (bounds.startGroup === undefined && !resolvesStart(this.version)) raiseFloor(startKey);
 					if (!(await resolveStart(startKey, largest))) return false;
 				}
-				record?.tell(group.start, group.start + 1n, { kind: "settled" });
+				record?.tell(group.start, group.start + 1n);
 				streaming.add(group.start);
 
 				const options: RunGroup = {
@@ -2643,7 +2637,10 @@ export class Publisher {
 					// The starts inside a group sent whole are accounted for by its GROUP_END, so the
 					// end-of-track scan never drops them.
 					ended: (end) => {
-						if (end > group.start + 1n) record?.tell(group.start + 1n, end, { kind: "settled" });
+						if (end > group.start + 1n) {
+							record?.tell(group.start + 1n, end);
+							record?.skipSettled(group.start + 1n, end);
+						}
 					},
 					cut: (start, end) => {
 						pendingCuts.push({ start, end });

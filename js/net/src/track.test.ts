@@ -7357,3 +7357,75 @@ test("local group finishAt skips its span while cached and preserves it on evict
 		installed.close();
 	}
 });
+
+// A live reader of a sparse-key track coalesces final reports and declared skips as it goes,
+// keeping both `delivered` and `reported` bounded without waiting for eviction: wire publishers
+// serving or reporting stale drops, arrival-order readers that never poll drops (including when
+// GROUP_END skips land after the next group), and ordered readers. Mirrors the Rust
+// `a_sparse_live_track_keeps_a_bounded_record`.
+test("a sparse live track keeps a bounded record", () => {
+	const GROUPS = 500n;
+	const SPACING = 17n;
+	const BASE = 1_000_003n;
+	for (const mode of ["told", "stale", "receive", "ordered"] as const) {
+		const producer = new TrackProducer("sparse").accept({
+			timescale: Timescale.MILLI,
+			maxAge: mode === "stale" ? Duration.millis(1000) : null,
+		});
+		const sub = producer.subscribe(
+			mode === "stale" ? { ranges: [{ start: 0n }] } : withMax({ delay: { max: null } }),
+		);
+		const ordered = mode === "ordered" ? sub.ordered() : undefined;
+		const wire = mode === "told" || mode === "stale" ? hooks.wire(sub) : undefined;
+		let open: { key: bigint; group: ReturnType<TrackProducer["createGroup"]> } | undefined;
+		try {
+			for (let n = 0n; n < GROUPS; n++) {
+				const key = BASE + n * SPACING;
+				const end = key + SPACING;
+				if (mode === "stale") {
+					// Lagging viewer: stale OLD drop on each group key, skip on the span interior.
+					hooks.dropTrackGroups(producer, key, key + 1n, {
+						error: new StreamError(StreamCode.Old),
+						stale: 1000,
+					});
+					producer.skipGroups(key + 1n, end);
+					while (hooks.tryDrop(sub));
+					expect(hooks.deliveredRuns(sub)).toBeLessThanOrEqual(2);
+					expect(hooks.reportedRuns(sub)).toBeLessThanOrEqual(2);
+					continue;
+				}
+				const group = producer.createGroup(key);
+				group.writeFrame(textFrame("x", Timestamp.fromMillis(Number(key))));
+				if (mode === "receive") {
+					// Deliver the new group before finishing the previous one (out-of-order GROUP_END).
+					expect(drainGroups(sub)).toEqual([key]);
+					if (open) {
+						open.group.finishAt(key);
+						producer.skipGroups(open.key + 1n, key);
+					}
+					open = { key, group };
+				} else {
+					group.finishAt(end);
+					producer.skipGroups(key + 1n, end);
+					if (ordered) {
+						const item = ordered.tryNextItem();
+						expect(item).toMatchObject({ kind: "group" });
+						if (item && item.kind === "group") item.group.close();
+					} else {
+						expect(drainGroups(sub)).toEqual([key]);
+						wire?.tell(key, end);
+						wire?.skipSettled(key + 1n, end);
+						while (hooks.tryDrop(sub));
+					}
+				}
+				expect(hooks.deliveredRuns(sub)).toBeLessThanOrEqual(3);
+				expect(hooks.reportedRuns(sub)).toBeLessThanOrEqual(2);
+			}
+			open?.group.finish();
+		} finally {
+			ordered?.close();
+			sub.close();
+			producer.close();
+		}
+	}
+});

@@ -594,7 +594,6 @@ impl Consumer {
 				generation: None,
 				copies: Vec::new(),
 				newest: None,
-				held: false,
 				skipped: RangeSet::new(),
 				resumed: None,
 				refused: None,
@@ -773,8 +772,9 @@ struct Copy {
 	resolved: BTreeMap<u64, Resolved>,
 	/// Replaced by a newer route.
 	replaced: bool,
-	/// Its record folds nothing as final; see [`track::Subscriber::hold`].
-	held: bool,
+	/// The [`track::TrackState::drops_changes`] revision absorbed into the logical reader's
+	/// `delivered` set on this copy when the reader does not poll drops.
+	skips_seen: u64,
 	/// Capped when replaced, at the boundary the copy replacing it starts at, or for a
 	/// backfill at the groups it fills: nothing past this group is taken from it or asked of
 	/// it. Unset while it serves.
@@ -1055,14 +1055,6 @@ impl Copy {
 		};
 	}
 
-	/// Hold its record unfolded while `held`, once subscribed and from then on.
-	fn hold(&mut self, held: bool) {
-		self.held = held;
-		if let Sub::Ready(sub) = &mut self.sub {
-			sub.hold(held);
-		}
-	}
-
 	/// The subscription, once the copy answered. `Err` once it refused.
 	fn poll_ready(&mut self, groups: (u64, Option<u64>), waiter: &kio::Waiter) -> Poll<Result<&mut track::Subscriber>> {
 		if let Sub::Pending(pending) = &self.sub {
@@ -1076,7 +1068,6 @@ impl Copy {
 				))
 				.parked();
 			self.sub = Sub::Ready(Box::new(sub));
-			self.hold(self.held);
 		}
 		let Sub::Ready(sub) = &mut self.sub else { unreachable!() };
 		Poll::Ready(Ok(sub))
@@ -1647,18 +1638,13 @@ impl Subscriber {
 		self.reader().untell(range)
 	}
 
-	/// The serving copy's track, whose whole groups are what the reader reads.
-	pub(super) fn serving_track(&self) -> Option<track::Consumer> {
-		self.reader().copies.last().map(|copy| copy.track.clone())
-	}
-
-	/// Hold every copy's record unfolded while `held`; see [`track::Subscriber::hold`].
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(super) fn hold(&mut self, held: bool) {
+	/// Absorb declared skips on the serving copy within local bounds into the logical reader's
+	/// `delivered` set.
+	pub(super) fn absorb_skips(&mut self, delivered: &mut Delivered, key: u64) {
 		let mut reader = self.reader();
-		reader.held = held;
-		for copy in &mut reader.copies {
-			copy.hold(held);
+		let bounds = reader.groups.0..reader.groups.1.unwrap_or(u64::MAX);
+		if let Some(copy) = reader.copies.last_mut() {
+			copy.track.absorb_skips(delivered, key, bounds, &mut copy.skips_seen);
 		}
 	}
 
@@ -2167,8 +2153,6 @@ struct Reader {
 	copies: Vec<Copy>,
 	/// The newest group handed out: a switch's boundary is never below it.
 	newest: Option<u64>,
-	/// Every copy's record folds nothing as final; see [`track::Subscriber::hold`].
-	held: bool,
 	/// The skipped run from the start of each key run the local floor or cap keeps out of a gap
 	/// under the serving copy's resume point, recorded as the copies declare it, so it outlives
 	/// the copy and the cache that held it. Only that run, at most two a gap however many routes
@@ -2639,7 +2623,7 @@ impl Reader {
 			resume,
 			resolved,
 			replaced: false,
-			held: self.held,
+			skips_seen: 0,
 			until: None,
 			cap: None,
 			done: None,
@@ -2994,6 +2978,7 @@ impl Reader {
 			unreachable!("a candidate comes from a copy that answered")
 		};
 		let mut group = sub.take(candidate.reserved)?;
+		sub.settle_if_dropping(group.start);
 		// A mid-group end caps the group it falls in, as it caps a direct track's.
 		if let Some(end) = self.declared.filter(|end| end.frame != 0 && end.group == group.start) {
 			group = group.with_end(end.frame);
@@ -3483,7 +3468,13 @@ impl Reader {
 		// A delivered run goes once a scan reaches it, never in a pass over the whole queue:
 		// each poll reports one run, so such a pass would cost the queue squared to drain it,
 		// and a new reader can be handed one run per cached group and per gap between them.
-		while let Some(run) = self.drops.first_range_value().map(|(run, _)| run.clone())
+		// Declared skips stay: a reader may absorb a skip into `delivered` before polling drops,
+		// and `logical.record.reported` still needs it to coalesce and deduplicate.
+		while let Some((run, hole)) = self
+			.drops
+			.first_range_value()
+			.map(|(run, hole)| (run.clone(), hole.clone()))
+			&& hole != track::Hole::Skip
 			&& delivered.covers(run.clone())
 		{
 			self.remove_drop(run);
@@ -3512,15 +3503,21 @@ impl Reader {
 		}
 		let mut passed = Vec::new();
 		let next = self.drops.iter().find_map(|(run, err)| {
-			if delivered.covers(run.clone()) {
+			if *err != track::Hole::Skip && delivered.covers(run.clone()) {
 				passed.push(run.clone());
 				return None;
 			}
 			let run = run.start.max(start)..run.end.min(end.unwrap_or(u64::MAX));
-			let open = delivered
-				.gaps(run)
-				.into_iter()
-				.find_map(|gap| feeding.gaps(&gap).next())?;
+			if run.is_empty() {
+				return None;
+			}
+			let open = match err {
+				track::Hole::Skip => feeding.gaps(&run).next()?,
+				track::Hole::Drop { .. } => delivered
+					.gaps(run)
+					.into_iter()
+					.find_map(|gap| feeding.gaps(&gap).next())?,
+			};
 			Some((open, err.clone()))
 		});
 		for run in passed {
@@ -3677,7 +3674,7 @@ impl Reader {
 			// Bounded from the start: everything it may deliver is older than what the reader
 			// already read, so it is waited for no longer than the reader's budget.
 			replaced: true,
-			held: self.held,
+			skips_seen: 0,
 			until: Some(lowered.end.checked_sub(1)),
 			cap: None,
 			since: Some(track.now()),
@@ -8570,6 +8567,68 @@ mod test {
 			most = most.max(pool.recorded() / crate::model::record::RUN_OVERHEAD);
 		}
 		assert!(most <= 8, "the record grew to {most} runs");
+	}
+
+	/// A front's arrival-order read of a sparse live track keeps both its logical and copy records
+	/// bounded as groups open and their `GROUP_END` skips arrive afterward, both for a bare
+	/// receive-only reader and for a wire publisher polling drops.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_front_arrival_read_of_a_sparse_track_keeps_a_bounded_record() {
+		const SPACING: u64 = 17;
+		const BASE: u64 = 1_000_003;
+		for wire in [false, true] {
+			let pool = crate::cache::Pool::new(
+				crate::cache::Config::default()
+					.with_capacity(1 << 40)
+					.with_expiry(crate::cache::DEFAULT_EXPIRY),
+			);
+			let info = Arc::new(broadcast::Info {
+				pool: pool.clone(),
+				..Default::default()
+			});
+			let routes = Producer::new();
+			let logical = track::Request::new(info.clone(), "video")
+				.routes(routes.consume())
+				.accept(crate::track::Info::timed());
+			let a = track::Producer::new(info, "video", crate::track::Info::timed());
+			a.received();
+			routes.serve(a.consume());
+			let mut sub = logical
+				.consume()
+				.subscribe(track::Subscription::default().with_ranges([track::Range {
+					start: track::Start::Oldest,
+					end: None,
+				}]))
+				.now_or_never()
+				.unwrap()
+				.unwrap();
+			let waiter = kio::Waiter::noop();
+			let mut open: Option<(u64, group::Producer)> = None;
+			let mut most = 0;
+			for n in 0..2000u64 {
+				let key = BASE + n * SPACING;
+				let mut group = a.create_group(group::Info { start: key }).unwrap();
+				group.write_frame(ts(key), b"x".as_ref()).unwrap();
+				assert_eq!(drain(&mut sub, false), [key], "wire={wire}");
+				if wire {
+					sub.record_mut().tell(key..key + 1, crate::model::record::Report::Final);
+				}
+				if let Some((prev, prev_group)) = open.take() {
+					prev_group.finish_at(key).unwrap();
+					a.skip_groups(prev + 1..key);
+					if wire {
+						while sub.poll_drop(&waiter).is_ready() {}
+					}
+				}
+				open = Some((key, group));
+				most = most.max(pool.recorded() / crate::model::record::RUN_OVERHEAD);
+			}
+			if let Some((_, prev_group)) = open.take() {
+				prev_group.finish().unwrap();
+			}
+			assert!(most <= 8, "wire={wire}: the record grew to {most} runs");
+		}
 	}
 
 	/// A gap the serving copy reported and the ordered read holds behind a lower group still
@@ -16079,7 +16138,7 @@ mod test {
 			}
 			// What a wire publisher tells its peer of the keys between groups.
 			sub.record_mut()
-				.tell(key + 1..key + GAP, crate::model::record::Report::Dropped);
+				.tell(key + 1..key + GAP, crate::model::record::Report::Final);
 		};
 		for i in 0..1000 {
 			read(i, 1);

@@ -65,6 +65,26 @@ export class Delivered {
 		this.#runs.splice(first, last - first + 1, merged);
 	}
 
+	/**
+	 * Absorb a declared skip `[start, end)` only where it extends an existing run rightward (or
+	 * starts at 0), returning the subrange absorbed. Keeps consecutive sparse groups one run
+	 * without adding a new non-zero run start. Mirrors the Rust `Delivered::absorb_skip`.
+	 */
+	absorbSkip(start: bigint, end: bigint): { start: bigint; end: bigint } | undefined {
+		if (start >= end) return undefined;
+		if (start === 0n || this.has(start - 1n) || this.has(start)) {
+			this.addRun(start, end);
+			return { start, end };
+		}
+		const next = this.#below(start) + 1;
+		if (next < this.#runs.length && this.#runs[next][0] < end) {
+			const from = this.#runs[next][0];
+			this.addRun(from, end);
+			return { start: from, end };
+		}
+		return undefined;
+	}
+
 	/** A record of what either this or `other` handed out. */
 	union(other: Delivered): Delivered {
 		const union = new Delivered();
