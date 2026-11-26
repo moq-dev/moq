@@ -3223,6 +3223,38 @@ fn tail_loss_probe_ended_short_ends_the_gso_batch() {
 	assert!(server_stats.frame_rx.stream > 0);
 }
 
+/// A tail loss probe re-sends the stream data in flight, so a probe that gets through delivers it
+/// while every ACK is lost
+#[test]
+fn tail_loss_probe_resends_stream_data() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	let (client_ch, server_ch) = pair.connect();
+	let s = pair
+		.client_streams(client_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	pair.client_send(client_ch, s).write(&mut &b"hello"[..]).unwrap();
+	pair.client_send(client_ch, s).finish().unwrap();
+	pair.drive_client();
+	// The data is lost, and so is every ACK the server sends from here on
+	assert!(!pair.server.inbound.is_empty());
+	pair.server.inbound.clear();
+	pair.to_client.loss = 1.0;
+
+	let start = pair.time;
+	let pings = pair.client_conn_mut(client_ch).stats().frame_tx.ping;
+	while pair.server_conn_mut(server_ch).stats().frame_rx.stream == 0 {
+		assert!(pair.step(), "the connection went idle");
+		assert!(
+			pair.time - start < Duration::from_secs(10),
+			"the probes never carried the data"
+		);
+	}
+	// The first probe carried the data, so it needed no PING
+	assert_eq!(pair.client_conn_mut(client_ch).stats().frame_tx.ping, pings);
+}
+
 // Respect max_datagrams when TLP happens
 #[test]
 fn tail_loss_respect_max_datagrams() {
@@ -3756,6 +3788,48 @@ fn handshake_anti_deadlock_probe() {
 	pair.drive();
 	assert!(has_handshake_data(pair.client_conn_mut(client_ch)));
 	assert!(is_connected(pair.client_conn_mut(client_ch)));
+}
+
+/// A client that has heard only an ACK-only Initial, its ClientHello acknowledged and the server's
+/// flight lost, acknowledges it in its probe, so the server can declare that flight lost
+#[test]
+fn client_probe_acknowledges_ack_only_initial() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	let client_ch = pair.begin_connect(client_config());
+	pair.drive_client();
+	pair.drive_server();
+	// The server's flight is lost, and so is everything the client sends from here on
+	pair.client.inbound.clear();
+	pair.to_server.loss = 1.0;
+	let server_ch = *pair.server.connections.keys().next().unwrap();
+
+	let mut ranges = crate::range_set::ArrayRangeSet::new();
+	ranges.insert(0..1);
+	let mut ack = Vec::new();
+	frame::Ack::encode(0, &ranges, None, false, &mut ack);
+	let now = pair.time;
+	let packet = pair
+		.server_conn_mut(server_ch)
+		.forge_packet(now, SpaceId::Initial, &ack);
+	pair.client.inbound.push_back((now, None, packet.as_slice().into()));
+	pair.client.drive(now, pair.server.addr);
+	pair.client.outbound.clear();
+
+	let before = pair.client_conn_mut(client_ch).stats().frame_tx;
+	let sent = |pair: &mut Pair| {
+		let stats = pair.client_conn_mut(client_ch).stats().frame_tx;
+		stats.ping + stats.crypto
+	};
+	let probes = sent(&mut pair);
+	while sent(&mut pair) == probes {
+		assert!(pair.step(), "the client never probed");
+	}
+	let after = pair.client_conn_mut(client_ch).stats().frame_tx;
+	assert!(
+		after.acks > before.acks,
+		"the probe left the ACK-only Initial unacknowledged"
+	);
 }
 
 /// The ack-eliciting frames the client has sent, which its probes carry
@@ -4885,9 +4959,10 @@ fn blackhole_after_mtu_change_repairs_itself() {
 	// Back to the base MTU
 	pair.mtu = 1200;
 
-	// The payload will be sent in a single packet, because the detected MTU was 1444, but it will
-	// be dropped because the link no longer supports that packet size!
-	let payload = vec![42; 1300];
+	// The payload is sent in packets of the detected MTU, which the link now drops. A loss probe,
+	// capped to the minimum MTU, gets one packet's data through, so it takes a payload of many
+	// packets for their losses to reveal the black hole.
+	let payload = vec![42; 13000];
 	let s = pair
 		.client_streams(client_ch)
 		.open(Dir::Uni, Default::default())
@@ -4902,8 +4977,8 @@ fn blackhole_after_mtu_change_repairs_itself() {
 	let recv = pair.server_recv(server_ch, s);
 	let buf = stream_chunks(recv);
 
-	// The whole packet arrived in the end
-	assert_eq!(buf.len(), 1300);
+	// The whole payload arrived in the end
+	assert_eq!(buf.len(), 13000);
 
 	// Sanity checks (black hole detected after 3 lost packets)
 	let client_stats = pair.client_conn_mut(client_ch).stats();

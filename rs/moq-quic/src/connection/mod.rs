@@ -679,7 +679,7 @@ impl Connection {
 		// If we need to send a probe, make sure we have something to send.
 		for space in SpaceId::iter() {
 			if space != SpaceId::Data {
-				self.spaces[space].maybe_queue_probe(false, false, &self.streams);
+				self.spaces[space].maybe_queue_probe(false, false, &mut self.streams);
 				continue;
 			}
 
@@ -689,7 +689,7 @@ impl Connection {
 				));
 			let request_immediate_ack = self.peer_supports_ack_frequency();
 
-			self.spaces[space].maybe_queue_probe(request_immediate_ack, has_ack_eliciting_data, &self.streams);
+			self.spaces[space].maybe_queue_probe(request_immediate_ack, has_ack_eliciting_data, &mut self.streams);
 		}
 
 		// Check whether we need to send a close message
@@ -4047,11 +4047,13 @@ impl Connection {
 		// Bundle ACK with other frames when there is room for them.
 		// We want to reuse encryption and underlying protocol overhead,
 		// but sending multiple ACKs for a single incoming packet is a waste of peer's resources,
-		// so we have next_bundled_ack_time to control when to send ACKs.
+		// so we have next_bundled_ack_time to control when to send ACKs. Before our first ACK
+		// there is none to space out: a client that heard only ACK-only Initials must report them,
+		// or the server cannot declare its lost flight lost before its backed-off PTO.
 		let any_frames_sent = buf.len() > pre_payload_len;
 		if any_frames_sent
 			&& sent.largest_acked.is_none()
-			&& self.next_bundled_ack_time.is_some_and(|time| time <= now)
+			&& self.next_bundled_ack_time.is_none_or(|time| time <= now)
 			&& space.pending_acks.can_send_with_other_frames()
 		{
 			Self::try_populate_acks(
