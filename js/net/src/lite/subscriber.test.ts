@@ -711,7 +711,8 @@ test("an update that re-prices the same publisher emits the new route", async ()
 	expect(await announced.next()).toMatchObject({
 		prefix: Path.from("room"),
 		kind: "start",
-		route: { hops: [PUBLISHER_A, PEER], cost: 0n },
+		// The advertised cost plus this link's 1.
+		route: { hops: [PUBLISHER_A, PEER], cost: 1n },
 	});
 
 	await send((w) =>
@@ -720,7 +721,7 @@ test("an update that re-prices the same publisher emits the new route", async ()
 	expect(await announced.next()).toMatchObject({
 		prefix: Path.from("room"),
 		kind: "update",
-		route: { hops: [PUBLISHER_A, PEER], cost: 4n },
+		route: { hops: [PUBLISHER_A, PEER], cost: 5n },
 	});
 
 	announced.close();

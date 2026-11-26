@@ -49,5 +49,4 @@ Guidance:
 ## Related
 
 - [Dial and listen grants](/quest/m3/proxy/grants.md) - adds fields to the same `Grant`; whichever lands second rebases onto the other
-- [JS session cost](/quest/m1/js-session-cost.md) - pricing a link from the dialing side
 - [Cluster routing](/quest/m3/cluster-routing/README.md) - how relays re-advertise a repriced route

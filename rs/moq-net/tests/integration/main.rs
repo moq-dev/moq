@@ -84,6 +84,7 @@ mod route_race;
 mod route_stats;
 mod routeless_domain;
 mod segmented_frame;
+mod server_cost;
 mod session_close;
 mod session_panic;
 mod settled_end_survives_abort;

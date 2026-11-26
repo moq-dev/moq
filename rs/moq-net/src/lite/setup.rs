@@ -11,7 +11,7 @@ const PARAM_PROBE: u64 = 0x1;
 const PARAM_PATH: u64 = 0x2;
 /// Setup Parameter id for the client's intended [`Role`] (client-only).
 const PARAM_ROLE: u64 = 0x3;
-/// Setup Parameter id for the link cost the dialer assigns to this connection.
+/// Setup Parameter id for the link cost the sender assigns to this connection.
 const PARAM_COST: u64 = 0x4;
 /// Setup Parameter id for the endpoint's Hop ID before lite-07, and its Node ID from lite-07.
 const PARAM_HOP: u64 = 0x5;
