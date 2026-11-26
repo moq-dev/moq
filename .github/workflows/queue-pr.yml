@@ -1,0 +1,49 @@
+name: Queue (pull request)
+
+# Reports the `Queue` context that main's ruleset requires on each pull request
+# to main, as skipped: GitHub admits a PR to the merge queue only once its
+# required checks pass on the PR itself, a skipped job satisfies them, and
+# queue.yml builds the merge group. Its own file, apart from queue.yml, keeps a
+# skipped `Queue` job out of the merge group, where it would pass the group
+# before its build.
+on:
+  pull_request:
+    branches: [main]
+    # `edited` covers a PR retargeted to main, which needs the context too.
+    types: [opened, synchronize, reopened, edited]
+  # Reports the context on a PR's head without a pull_request event. A PR whose
+  # test merge commit predates this workflow gets no pull_request run from it
+  # (GitHub runs PR workflows from that commit, and a dispatch reads the
+  # workflow from the ref it runs on), so
+  # `gh workflow run queue-pr.yml -f sha=<head>` on main reports it there.
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: The PR head commit to report the skipped Queue context on.
+        required: true
+
+permissions:
+  contents: read
+
+# No concurrency group: cancelling a run before its job skips, as a second event
+# for the same head would, reports `Queue` cancelled and fails the requirement.
+
+jobs:
+  queue:
+    name: Queue
+    # Skips, and so reports, on a pull request; runs only for a dispatch.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      checks: write
+    steps:
+      - name: Report the skipped Queue context
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ inputs.sha }}
+        run: |
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::sha must be a full commit SHA" >&2; exit 1; }
+          gh api "repos/$REPO/check-runs" -f name=Queue -f head_sha="$SHA" -f status=completed -f conclusion=skipped \
+            -f 'output[title]=Queue' -f 'output[summary]=Skipped on the pull request; the merge queue builds the group.' --silent

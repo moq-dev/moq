@@ -892,7 +892,7 @@ jobs:
         run: |
           export HOME="$RUNNER_TEMP/home"
           mkdir -p "$HOME"
-          # exec, so a cancel reaches the dispatcher (see queue.yml).
+          # exec, so a cancel reaches the dispatcher (see queue-build.yml).
           exec nix develop --command just gate
 
   fuzz:
