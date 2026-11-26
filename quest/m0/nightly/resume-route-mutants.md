@@ -35,4 +35,19 @@ excluded. Kill each with a unit test or a model regression, or exclude it in
   the budget: a group landing that late is already past it. A zero budget gets a one-second
   grace, and a proven copy waits without limit, so neither case is ruled out yet.
 
+Nightly [45867457463](https://github.com/moq-dev/moq/actions/runs/45867457463) (`4fba5df73f`,
+before #9619 landed) left these survivors, mostly in code
+[moq-dev/moq#9686](https://github.com/moq-dev/moq/pull/9686) added. Line numbers are at
+`4fba5df73f`. Rerun them on `main` first, since #9619 may have killed some:
+
+- `resume.rs` `Reader::poll_first`: match guard `!self.copies[index].replaced` to `true`.
+- `resume.rs` `Reader::rescan_drops` and `Subscriber::rescan_drops`: body to `()`.
+- `resume.rs` `Reader::backfill_gaps`: match guard `partial` to `true`.
+- `resume.rs` `Subscriber::forget_past`: `&&` to `||`.
+- `resume.rs` `Subscriber::lowest_unread`: delete `!`.
+- `resume.rs` `Subscriber::key_after`: return `Some(0)` and `Some(1)`.
+- `resume.rs` `Reader::reads`: `||` to `&&`.
+- `relay.rs` `Router::closest_of`: `<` to `<=`.
+- `relay.rs` `Router::named`: `<` to `<=` (also in run 45667362304's set).
+
 Public API: none. Wire: none.
