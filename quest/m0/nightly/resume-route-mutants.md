@@ -31,7 +31,8 @@ excluded. Kill each with a unit test or a model regression, or exclude it in
   holds that time. The flagged backfill could then hand out a cached window group under its
   floor. In `[from, start)` that is a group a replaced copy drains. Under an edit's `from`,
   it would be a group an older range lacks that landed on the route after its backfill was
-  let go. That can't happen in practice, because `ledger::grace` equals the budget: a group
-  landing that late is already past the budget.
+  let go. With a nonzero budget that can't happen in practice, because `ledger::grace` equals
+  the budget: a group landing that late is already past it. A zero budget gets a one-second
+  grace, and a proven copy waits without limit, so neither case is ruled out yet.
 
 Public API: none. Wire: none.
