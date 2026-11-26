@@ -64,6 +64,17 @@ export function objectType(codec: string): 2 | 5 | 29 | undefined {
 	return OBJECT_TYPES.get(codec);
 }
 
+/**
+ * The AAC profile a track's packets carry, given its codec string and AudioSpecificConfig: the
+ * codec's {@link objectType}, except that an AAC-LC string whose config signals SBR or PS behind a
+ * sync extension carries that profile. Undefined for any other codec.
+ */
+export function profile(codec: string, asc: Uint8Array | undefined): number | undefined {
+	const named = objectType(codec);
+	if (named !== 2 || !asc) return named;
+	return parseConfig(asc)?.profile ?? named;
+}
+
 // Map a channel count to its AAC channelConfiguration (ISO 14496-3 Table 1.19). Configs 1..=6 are
 // identity (5.1 is config 6 / 6 channels); 8 channels is config 7 (7.1). Anything else has no
 // config, and describing it as stereo would mislabel every channel past the first two.

@@ -6,6 +6,7 @@ export type { BufferedRange, BufferedRanges, Frame } from "./types.ts";
 import { Duration } from "@moq/clock";
 import type { AudioConfig, VideoConfig } from "../catalog/index.ts";
 import * as Aac from "../util/aac.ts";
+import * as Hex from "../util/hex.ts";
 import * as Opus from "../util/opus.ts";
 import type { Format as ContainerFormat } from "./format.ts";
 import type { Frame } from "./types.ts";
@@ -26,8 +27,9 @@ export function packetDuration(config: AudioConfig): ((payload: Uint8Array) => D
 		};
 	}
 	// AAC-LC codes 1024 samples per packet. SBR and PS packets decode to twice that, at a rate the
-	// catalog may or may not double, so they state nothing here.
-	if (Aac.objectType(config.codec) === 2) {
+	// catalog may or may not double, so they state nothing here, even behind an AAC-LC codec string.
+	const description = config.description ? Hex.toBytes(config.description) : undefined;
+	if (Aac.profile(config.codec, description) === 2) {
 		const duration = Duration.micros((1024 * 1_000_000) / rate);
 		return (payload) => (payload.byteLength > 0 ? duration : undefined);
 	}

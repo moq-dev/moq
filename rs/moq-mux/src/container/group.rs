@@ -23,8 +23,17 @@ pub struct GroupConsumer<F: Container> {
 	// How many media frames we have returned, so the first one can be marked a keyframe.
 	index: u64,
 
-	// An error the lookahead hit, returned once the frames before it are.
-	fault: Option<F::Error>,
+	// Whether a read or decode failed, which ends the group.
+	fault: Fault<F::Error>,
+}
+
+enum Fault<E> {
+	// Nothing failed.
+	Clear,
+	// The lookahead failed, returned once the frames before it are.
+	Pending(E),
+	// The failure was returned: nothing past the malformed object is read.
+	Reported,
 }
 
 impl<F: Container> GroupConsumer<F> {
@@ -35,7 +44,7 @@ impl<F: Container> GroupConsumer<F> {
 			format,
 			pending: VecDeque::new(),
 			index: 0,
-			fault: None,
+			fault: Fault::Clear,
 		}
 	}
 
@@ -46,12 +55,13 @@ impl<F: Container> GroupConsumer<F> {
 
 	/// Read the next frame, or `None` once the group ends.
 	///
-	/// Frames that precede a failed read or decode are returned before the error.
+	/// Frames that precede a failed read or decode are returned before the error, which ends the
+	/// group: nothing after it is read.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_read(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Frame>, F::Error>> {
 		// Peek past an untimed video frame for a marker or successor that times it, but only
 		// at what has already landed: a live group returns the frame now rather than waiting.
-		while self.fault.is_none()
+		while matches!(self.fault, Fault::Clear)
 			&& self.pending.front().is_none_or(|frame| {
 				self.format.kind() == super::Kind::Video && frame.duration.is_none() && self.pending.len() < 2
 			}) {
@@ -67,7 +77,7 @@ impl<F: Container> GroupConsumer<F> {
 				Ok(Some(frames)) => frames,
 				Ok(None) => break,
 				Err(err) => {
-					self.fault = Some(err);
+					self.fault = Fault::Pending(err);
 					break;
 				}
 			};
@@ -85,7 +95,13 @@ impl<F: Container> GroupConsumer<F> {
 		}
 		match self.pop_media() {
 			Some(frame) => Poll::Ready(Ok(Some(frame))),
-			None => Poll::Ready(self.fault.take().map_or(Ok(None), Err)),
+			None => Poll::Ready(match std::mem::replace(&mut self.fault, Fault::Reported) {
+				Fault::Pending(err) => Err(err),
+				fault => {
+					self.fault = fault;
+					Ok(None)
+				}
+			}),
 		}
 	}
 
@@ -268,11 +284,14 @@ mod tests {
 				bytes::Bytes::from_static(&[0xff]),
 			)
 			.unwrap();
+		// Frames past the malformed object are never returned.
+		format.write(&mut group, &[frame(1_040_000, b"after", false)]).unwrap();
 		group.finish().unwrap();
 
 		let first = live.read().await.unwrap().unwrap();
 		assert_eq!(first.payload, b"keyframe".as_slice());
 		assert!(live.read().await.is_err());
+		assert!(live.read().await.unwrap().is_none());
 		assert!(live.read().await.unwrap().is_none());
 	}
 

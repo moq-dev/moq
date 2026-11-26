@@ -121,18 +121,16 @@ function frameSamples(config: FrameConfig): number | undefined {
 	return undefined;
 }
 
-// The AAC profile the frames carry, from the codec string, or undefined for other codecs. An
-// `mp4a.40.2` string can still signal SBR or PS behind a sync extension in its AudioSpecificConfig,
-// which then names the profile.
+// The AAC profile the frames carry, reading an `mp4a.40.2` codec's description for SBR or PS.
 function aacProfile(config: FrameConfig): number | undefined {
-	const named = Util.Aac.objectType(config.codec);
 	const description = config.description;
-	if (named !== 2 || !description) return named;
 	const bytes =
-		typeof description === "string"
-			? Util.Hex.toBytes(description)
-			: ArrayBuffer.isView(description)
-				? new Uint8Array(description.buffer, description.byteOffset, description.byteLength)
-				: new Uint8Array(description);
-	return Util.Aac.parseConfig(bytes)?.profile ?? named;
+		description === undefined
+			? undefined
+			: typeof description === "string"
+				? Util.Hex.toBytes(description)
+				: ArrayBuffer.isView(description)
+					? new Uint8Array(description.buffer, description.byteOffset, description.byteLength)
+					: new Uint8Array(description);
+	return Util.Aac.profile(config.codec, bytes);
 }

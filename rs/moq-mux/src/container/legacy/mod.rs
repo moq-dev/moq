@@ -114,8 +114,11 @@ impl Audio {
 		let packets = match &config.codec {
 			hang::catalog::AudioCodec::Opus => Packets::Opus,
 			// AAC-LC codes 1024 samples per packet. SBR and PS packets decode to twice that, at a
-			// rate the catalog may or may not double, so they state nothing here.
-			hang::catalog::AudioCodec::AAC(aac) if aac.profile == 2 => Packets::Fixed { samples: 1024, rate },
+			// rate the catalog may or may not double, so they state nothing here, even when only
+			// the AudioSpecificConfig's sync extension signals them.
+			hang::catalog::AudioCodec::AAC(aac) if aac.profile == 2 && !signals_sbr(config) => {
+				Packets::Fixed { samples: 1024, rate }
+			}
 			// Layer II codes 1152 samples per frame.
 			hang::catalog::AudioCodec::Mp2 => Packets::Fixed { samples: 1152, rate },
 			hang::catalog::AudioCodec::Pcm => Packets::Pcm {
@@ -154,6 +157,14 @@ impl Audio {
 		}
 		Ok(frames)
 	}
+}
+
+/// Whether `config`'s AudioSpecificConfig raises its profile to SBR or PS.
+fn signals_sbr(config: &hang::catalog::AudioConfig) -> bool {
+	let Some(description) = &config.description else {
+		return false;
+	};
+	crate::codec::aac::Config::parse(&mut description.as_ref()).is_ok_and(|asc| asc.profile != 2)
 }
 
 #[cfg(test)]
@@ -199,5 +210,13 @@ mod tests {
 	fn a_codec_whose_packets_vary_states_nothing() {
 		let he = hang::catalog::AudioCodec::AAC(hang::catalog::AAC { profile: 5 });
 		assert_eq!(Audio::new(&config(he, 48_000, 2)), None);
+
+		// AAC-LC by its codec string, with SBR at 96 kHz behind a 48 kHz core's sync extension.
+		let lc = hang::catalog::AudioCodec::AAC(hang::catalog::AAC { profile: 2 });
+		let mut sbr = config(lc, 96_000, 2);
+		sbr.description = Some(bytes::Bytes::from_static(&[0x11, 0x90, 0x56, 0xe5, 0x80]));
+		assert_eq!(Audio::new(&sbr), None);
+		sbr.description = Some(bytes::Bytes::from_static(&[0x11, 0x90]));
+		assert!(Audio::new(&sbr).is_some(), "plain AAC-LC keeps its fixed count");
 	}
 }
