@@ -11493,12 +11493,7 @@ impl Cursor {
 		}
 		let owed = self.filter.owed.first().map(|run| *run.start());
 		let state = self.state.read();
-		let outside = self.lowest_uncovered(delivered, &state);
-		let kept = (self.record.skipped.lowest().into_iter())
-			.chain(owed)
-			.chain(outside)
-			.chain(keep)
-			.min();
+		let kept = (self.record.skipped.lowest().into_iter()).chain(owed).chain(keep).min();
 		let budgets = budget.clamped(state.max_age_bound());
 		let edge = state.drift_edge(&self.servable);
 		let now = state.cache.pool().now_wall();
@@ -11530,7 +11525,10 @@ impl Cursor {
 			let last = delivered
 				.last_before(shared)
 				.expect("the oldest run is below its successor");
-			if let Some(kept) = kept
+			// Searched only in the gaps this split retires, so a read that folds nothing never
+			// walks the runs it has piled up.
+			let outside = self.lowest_uncovered(delivered, &state, last);
+			if let Some(kept) = kept.into_iter().chain(outside).min()
 				&& kept < last
 			{
 				delivered.forget_below(kept);
@@ -11540,11 +11538,10 @@ impl Cursor {
 		}
 	}
 
-	/// The lowest cached group in a gap of `delivered` that the ranges don't cover: the budget
-	/// never judged it, and a range added later that covers it owes it. While a range is still
-	/// being placed, any cached group in a gap may be one.
-	fn lowest_uncovered(&self, delivered: &Delivered, state: &TrackState) -> Option<u64> {
-		let end = delivered.end()?;
+	/// The lowest cached group below `end` in a gap of `delivered` that the ranges don't cover:
+	/// the budget never judged it, and a range added later that covers it owes it. While a range
+	/// is still being placed, any cached group in a gap may be one.
+	fn lowest_uncovered(&self, delivered: &Delivered, state: &TrackState, end: u64) -> Option<u64> {
 		let groups = self.filter.window.groups();
 		delivered.gaps(delivered.floor()..end).into_iter().find_map(|gap| {
 			let gap = gap.start..=gap.end - 1;

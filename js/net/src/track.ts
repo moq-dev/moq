@@ -4088,13 +4088,15 @@ export class Subscriber {
 				}
 				const owed = this.#lowestBuffered(delivered);
 				if (owed !== undefined) skipped = min(skipped ?? owed, owed);
-				const uncovered = this.#lowestUncovered(delivered);
-				if (uncovered !== undefined) skipped = min(skipped ?? uncovered, uncovered);
 				if (keep !== undefined) skipped = min(skipped ?? keep, keep);
 			}
-			if (skipped !== undefined && skipped < oldest) {
-				delivered.forgetBelow(skipped);
-				forgot = skipped;
+			// Searched only in the gaps this step retires, so a read that forgets nothing never
+			// walks the runs it has piled up.
+			const uncovered = this.#lowestUncovered(delivered, oldest);
+			const hold = uncovered === undefined ? skipped : min(skipped ?? uncovered, uncovered);
+			if (hold !== undefined && hold < oldest) {
+				delivered.forgetBelow(hold);
+				forgot = hold;
 				break;
 			}
 			delivered.forgetBelow(oldest);
@@ -4116,12 +4118,10 @@ export class Subscriber {
 		return undefined;
 	}
 
-	// The lowest cached group in a gap of `delivered` that the ranges don't cover: the budget never
-	// judged it, and a range added later that covers it owes it. While a range is still being
-	// placed, any cached group in a gap may be one.
-	#lowestUncovered(delivered: Delivered): bigint | undefined {
-		const end = delivered.end();
-		if (end === undefined) return undefined;
+	// The lowest cached group below `end` in a gap of `delivered` that the ranges don't cover: the
+	// budget never judged it, and a range added later that covers it owes it. While a range is
+	// still being placed, any cached group in a gap may be one.
+	#lowestUncovered(delivered: Delivered, end: bigint): bigint | undefined {
 		const groups = this.#state.groups.peek();
 		for (const gap of delivered.gaps(0n, end)) {
 			for (let index = timelineIndex(groups, gap.start); index < groups.length; index++) {
