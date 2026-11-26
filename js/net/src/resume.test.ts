@@ -3,6 +3,7 @@ import { Duration, type Installed, yieldNow } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { race, Signal } from "@moq/signals";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer, type FetchFrom } from "./broadcast.ts";
+import { DEFAULT_EXPIRY } from "./cache.ts";
 import { defined } from "./defined.test-util.ts";
 import { NotFound, SessionCode, SessionError, StreamCode, StreamError, toStreamCode } from "./error.ts";
 import type { FillGroups } from "./fill.ts";
@@ -5149,6 +5150,48 @@ test("a switch backfills a group the replaced copy holds without its head", asyn
 		expect(items).toEqual(["group 0", "group 1", "group 2", "group 3"]);
 	} finally {
 		ordered.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	}
+});
+
+// A group the switch left to a replaced copy to drain, which that copy's cache then evicts, is asked
+// of the serving route after all: what the reader gets never depends on what a copy happens to hold.
+// Mirrors the Rust `a_group_a_draining_copy_loses_is_backfilled`.
+test("a group a draining copy loses is backfilled", async () => {
+	const clock = new Manual();
+	install(clock);
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe(withMax({ delay: { max: null } }));
+	try {
+		ta.write(0n);
+		await settle();
+		expect(drain(sub)).toEqual([0n]);
+		ta.write(1n);
+		ta.write(2n);
+		ta.write(3n);
+		front.serve(b.consume());
+		await settle();
+		// The switch leaves groups 1 and 2 to the replaced copy, so it asks the serving route for
+		// neither.
+		expect(sub.tryRecvGroup()?.start).toBe(3n);
+		// Idle past the cache window, so the next write evicts every group but the new edge.
+		clock.jump(Duration.millis(DEFAULT_EXPIRY.asMillis() + 1000));
+		ta.write(4n);
+		await settle();
+		expect(drain(sub)).toEqual([]);
+		tb.write(1n);
+		tb.write(2n);
+		await settle();
+		expect(drain(sub)).toEqual([2n, 1n]);
+	} finally {
+		sub.close();
 		front.consumer.close();
 		a.close();
 		b.close();
