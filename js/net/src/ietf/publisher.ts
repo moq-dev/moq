@@ -382,7 +382,7 @@ export class Publisher {
 	#auth?: Carrier;
 
 	/**
-	 * Creates a new Publisher identity.
+	 * Creates a new Publisher instance.
 	 *
 	 * @internal
 	 */

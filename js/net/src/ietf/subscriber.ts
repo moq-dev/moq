@@ -256,9 +256,11 @@ export class Subscriber {
 	// the peer answers, which allows everything.
 	#grant?: Getter<Grant | undefined>;
 	#auth?: AuthSession;
+	// What crossing this link costs and how it ranks, carried by every route through it.
+	#link: { cost: Cost; priority: number };
 
 	/**
-	 * Creates a new Subscriber identity.
+	 * Creates a new Subscriber instance.
 	 *
 	 * @internal
 	 */
@@ -272,6 +274,7 @@ export class Subscriber {
 		grant,
 		auth,
 		limits = LIMITS,
+		link = { cost: Cost.zero, priority: 0 },
 	}: {
 		/** The session abstraction for bidi streams and request IDs. */
 		session: Session;
@@ -290,8 +293,11 @@ export class Subscriber {
 		auth?: AuthSession;
 		/** How many live requests the peer may hold. */
 		limits?: Limits;
+		/** What crossing this link costs and how it ranks. Defaults to free and neutral. */
+		link?: { cost: Cost; priority: number };
 	}) {
 		this.#session = session;
+		this.#link = link;
 		this.#quic = quic;
 		this.#announceSlots = new Slots(limits.announces, { quic, reason: "too many announcements" });
 		this.#cluster = cluster;
@@ -344,10 +350,12 @@ export class Subscriber {
 	}
 
 	/**
-	 * The route an advertisement carries, before it is minted an identity; one without a path is anonymous and free.
+	 * The route an advertisement carries, before it is minted an identity: its path, or the
+	 * anonymous mark, at its cost plus this link's, ranked at this link's priority.
 	 */
 	#route({ cluster }: AdvertParams): WireRoute {
-		return cluster === undefined ? { hops: [UNKNOWN_HOP], cost: Cost.zero } : { ...cluster };
+		const { hops, cost } = cluster ?? { hops: [UNKNOWN_HOP], cost: Cost.zero };
+		return { hops: [...hops], cost: Cost.charged(cost, this.#link.cost), priority: this.#link.priority };
 	}
 
 	/**

@@ -2102,9 +2102,8 @@ enum Change {
 
 /// Why the serving copy's resume point may pass over groups the reader lacks.
 enum Resumed {
-	/// The route changed: the floor the copy serving before was asked from, and where it
-	/// placed each range, by key.
-	Route(Option<u64>, BTreeMap<u64, Resolved>),
+	/// The route changed, or a copy's late group or failure left a gap only its route fills.
+	Route,
 	/// The ranges keyed here were added, and may cover groups below the resume point.
 	Ranges(BTreeSet<u64>),
 }
@@ -2443,7 +2442,7 @@ impl Reader {
 								keys.extend(added);
 								keys
 							}
-							Some(Resumed::Route(..)) => self.mirrored.ranges.keys().copied().collect(),
+							Some(Resumed::Route) => self.mirrored.ranges.keys().copied().collect(),
 							None => added.collect(),
 						}));
 					}
@@ -2524,10 +2523,7 @@ impl Reader {
 		let resolved = self.window().resolved_by_key();
 		// The new copy starts at the boundary, so a lower group no replaced copy holds is asked
 		// of its route once the reader says which; see `backfill_gaps`.
-		self.resumed = Some(Resumed::Route(
-			self.copies.last().and_then(|copy| copy.floor),
-			resolved.clone(),
-		));
+		self.resumed = Some(Resumed::Route);
 		// One subscription split at one boundary: the largest group any copy holds, never below
 		// one handed out. The new copy starts there, and each copy it replaces is capped there
 		// now, so it finishes the groups up to it and sends nothing newer.
@@ -2712,8 +2708,9 @@ impl Reader {
 			true => self.owed(delivered, waiter),
 			false => RangeSet::new(),
 		};
+		// Only a replaced copy has an end.
 		let capped = (self.copies.iter())
-			.filter(|copy| copy.replaced && copy.done.is_none())
+			.filter(|copy| copy.done.is_none())
 			.filter_map(|copy| copy.end())
 			.max();
 		let skipped = match capped {
@@ -2782,8 +2779,10 @@ impl Reader {
 				if copy.done.is_some() || copy.expired(budget, waiter) {
 					continue;
 				}
-				for key in copy.track.cached_groups(gap.clone()) {
-					if copy.start(start) <= key && Self::deliverable(copy, key, delivered) {
+				// Nothing under where the copy starts goes out from it: the serving copy holds none.
+				let from = gap.start.max(copy.start(start)).min(gap.end);
+				for key in copy.track.cached_groups(from..gap.end) {
+					if Self::deliverable(copy, key, delivered) {
 						owed.remove(key..key + 1);
 					}
 				}
@@ -3153,8 +3152,8 @@ impl Reader {
 			}
 			// A walk of the whole route: one an edit queued for its own ranges starts above what
 			// this copy was left to drain.
-			if rearm && !matches!(self.resumed, Some(Resumed::Route(..))) {
-				self.resumed = Some(Resumed::Route(None, BTreeMap::new()));
+			if rearm && !matches!(self.resumed, Some(Resumed::Route)) {
+				self.resumed = Some(Resumed::Route);
 			}
 		}
 		// A later copy placed the window this pass: a group held back above may now go first.
@@ -3684,20 +3683,14 @@ impl Reader {
 			.collect();
 		// Kept until a copy places the ranges, but those whose start the resume point raised,
 		// which only the backfill places: only then can the gaps they cover be judged.
-		let floor = match placed {
-			Some(floor) => floor,
-			None if !raised.is_empty() && raised.len() == self.window.unsettled().len() => {
-				self.window.runs(0).next().map_or(0, |run| *run.start())
+		if placed.is_none() && (raised.is_empty() || raised.len() != self.window.unsettled().len()) {
+			// The gaps wait for the other ranges to place, but an owed raised start is asked
+			// now: its backfill places it whatever they wait on, and a later ask finds it.
+			if let (Some(resumed), Some(start)) = (resumed, owed.values().min()) {
+				self.backfill(*start..resumed, true, delivered);
 			}
-			None => {
-				// The gaps wait for the other ranges to place, but an owed raised start is asked
-				// now: its backfill places it whatever they wait on, and a later ask finds it.
-				if let (Some(resumed), Some(start)) = (resumed, owed.values().min()) {
-					self.backfill(*start..resumed, true, delivered);
-				}
-				return;
-			}
-		};
+			return;
+		}
 		if owed.len() < raised.len() {
 			let mut placed = BTreeMap::new();
 			for (key, start) in raised.iter().filter(|(key, _)| !owed.contains_key(key)) {
@@ -3717,37 +3710,24 @@ impl Reader {
 		let Some(resumed) = resumed else {
 			return;
 		};
-		// Each range from where the copy it replaced placed it, else where the reader did: a
-		// start at that copy's own resume point was only raised there. After an edit, only the
-		// ranges it added: the rest were judged when they came.
-		let start = |range: &track::Range, replaced: Option<u64>, resolved: Option<Resolved>| match range
-			.clamped(Some(0), None, resolved)
-			.start
-		{
-			track::Start::Time(start) if replaced.is_none_or(|replaced| start > replaced) => start,
-			_ => floor,
-		};
+		// Placing the covered raised starts may move the floor: read it again. With a range still
+		// unplaced, from the lowest group a placed one names; with none placed, only owed raised
+		// starts are asked.
+		let window = self.window();
+		let floor = (window.floor()).or_else(|| window.placed(0).next().map(|run| *run.start()));
+		// From the window's floor after a route change, as the JS reader asks. After an edit, from
+		// the lowest start of the ranges it added: the rest were judged when they came. A time
+		// start is asked from its time, and the group holding it below is read as `raised` says.
 		let from = match &resumed_by {
-			Resumed::Route(replaced, resolved) => self
-				.mirrored
-				.ranges
-				.iter()
-				.map(|(key, range)| start(range, *replaced, resolved.get(key).copied()))
+			Resumed::Route => floor,
+			// Retired since, so nothing new is covered: only an owed raised start is asked.
+			Resumed::Ranges(keys) => (keys.iter())
+				.filter_map(|key| self.mirrored.ranges.get(key))
+				.filter_map(|range| range.time().or(floor))
 				.min(),
-			Resumed::Ranges(keys) => {
-				let starts: Vec<u64> = keys
-					.iter()
-					.filter_map(|key| self.mirrored.ranges.get(key))
-					.map(|range| start(range, None, None))
-					.collect();
-				// Retired since, so nothing new is covered.
-				if starts.is_empty() && owed.is_empty() {
-					return;
-				}
-				Some(starts.into_iter().min().unwrap_or(resumed))
-			}
-		};
-		let from = from.unwrap_or(floor).max(self.groups.0);
+		}
+		.unwrap_or(resumed);
+		let from = from.max(self.groups.0);
 		// A group a replaced copy holds under its cap and inside its own ranges is that copy's to
 		// drain: the serving route is asked from the lowest one none holds. A copy that failed or
 		// spent its drain budget delivers nothing more, even while a read still leases it, and
@@ -4867,12 +4847,12 @@ mod test {
 		let requests = source.requests();
 		routes.serve(source.consume());
 		let mut sub = subscribe(&logical, HOUR);
-		let live = source.create_group(group::Info { start: 0 }).unwrap();
+		let live = source.create_group(group::Info { start: 5 }).unwrap();
 		let handle = live.handle();
 		let payload = bytes::Bytes::from(vec![7; 16]);
 		let info = crate::frame::Info {
 			size: payload.len() as u64,
-			timestamp: ts(0),
+			timestamp: ts(5),
 		};
 		let mut arriving = live.create_frame(info).unwrap();
 		arriving.write(payload.slice(..2)).unwrap();
@@ -4881,6 +4861,11 @@ mod test {
 			panic!("the arriving frame");
 		};
 		assert!(matches!(frame.poll_read_chunk(&noop), Poll::Ready(Ok(Some(chunk))) if chunk == payload[..2]));
+		// The join first asks the groups below the one it found, which nothing answers here.
+		let Poll::Ready(Ok(below)) = requests.poll_requested_fill(&noop) else {
+			panic!("the groups below the join are asked");
+		};
+		assert_eq!(below.start().group..below.end(), 0..5);
 		handle.shed_all();
 
 		let res = frame.poll_read_chunk(&noop);
@@ -4893,8 +4878,8 @@ mod test {
 			Poll::Ready(fill) => fill.unwrap(),
 			Poll::Pending => panic!("a flight is asked"),
 		};
-		assert_eq!(fill.start(), Position { group: 0, frame: 0 });
-		let flight = fill.accept(0, None).unwrap().expect("a fresh group");
+		assert_eq!(fill.start(), Position { group: 5, frame: 0 });
+		let flight = fill.accept(5, None).unwrap().expect("a fresh group");
 		let mut flying = flight.create_frame(info).unwrap();
 		flying.write(payload.clone()).unwrap();
 		let mut rest = Vec::new();
@@ -7011,6 +6996,23 @@ mod test {
 		});
 		assert_eq!(events("group read recovering", &logs).len(), 2);
 		assert!(events("group read recovered", &logs).is_empty());
+
+		// A short close on the serving route, with nothing staged to replace its copy, is the
+		// group's end: nothing recovers it.
+		let logs = crate::test_tracing::capture(tracing::Level::DEBUG, || {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&logical, Duration::from_secs(10));
+			let mut short = a.create_group(group::Info { start: 0 }).unwrap();
+			short.write_frame(ts(0), b"a".as_ref()).unwrap();
+			let mut reading = recv(&mut sub);
+			assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+			short.finish().unwrap();
+			assert_eq!(read(&mut reading), None);
+		});
+		assert!(events("group read recovering", &logs).is_empty());
 	}
 
 	/// A fetch the serving route already answered continues the group, even when that route
@@ -9322,6 +9324,94 @@ mod test {
 		let mut read = drain(&mut sub, false);
 		read.sort_unstable();
 		assert_eq!(read, [1, 2, 3]);
+	}
+
+	/// A range an edit adds asks the serving route only from its own start: a gap an older range
+	/// still has under the resume point was judged when the route changed, and its answer
+	/// stands.
+	#[test]
+	fn an_added_range_asks_no_gap_below_its_start() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		write(&a, 0);
+		a.drop_groups(1..2, StreamError::NotFound);
+		for key in [2, 3, 5] {
+			write(&a, key);
+		}
+		routes.serve(a.consume());
+		let ranges = Subscription::default().with_ranges([
+			track::Range {
+				start: crate::track::Start::Time(0),
+				end: Some(2),
+			},
+			track::Range {
+				start: crate::track::Start::Time(5),
+				end: None,
+			},
+		]);
+		let mut sub = logical.consume().subscribe(ranges).now_or_never().unwrap().unwrap();
+		assert_eq!(drain(&mut sub, false), [5, 2, 0]);
+		let b = received_copy();
+		routes.serve(b.consume());
+		write(&b, 6);
+		assert_eq!(drain(&mut sub, false), [6]);
+		assert!(asked_for(&b, 1), "{:?}", b.subscription());
+		b.skip_groups(1..2);
+		assert!(sub.poll_recv_group(&fresh()).is_pending());
+		assert!(!asked_for(&b, 1), "{:?}", b.subscription());
+
+		sub.edit(track::Edit {
+			placed: Default::default(),
+			retire: Vec::new(),
+			add: vec![(
+				2,
+				track::Range {
+					start: crate::track::Start::Time(3),
+					end: Some(3),
+				},
+			)],
+			priority: 0,
+			order: track::Order::default(),
+		})
+		.unwrap();
+		assert!(sub.poll_recv_group(&fresh()).is_pending());
+		assert!(asked_for(&b, 3), "{:?}", b.subscription());
+		assert!(!asked_for(&b, 1), "{:?}", b.subscription());
+		write(&b, 3);
+		assert_eq!(drain(&mut sub, false), [3]);
+	}
+
+	/// A parked route is asked for nothing more: a group landing late on its copy under that
+	/// copy's resume point waits for the next route, which a switch asks for it.
+	#[test]
+	fn a_late_group_on_a_parked_route_asks_it_nothing() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		routes.serve(a.consume());
+		let mut sub = history(&logical);
+		write(&a, 0);
+		assert_eq!(drain(&mut sub, false), [0]);
+		write(&a, 2);
+		let b = received_copy();
+		routes.serve(b.consume());
+		assert_eq!(drain(&mut sub, false), [2]);
+		write(&b, 3);
+		assert_eq!(drain(&mut sub, false), [3]);
+		assert!(asked_for(&b, 1), "{:?}", b.subscription());
+		b.finish_shared().unwrap();
+		assert!(sub.poll_recv_group(&fresh()).is_pending());
+		routes.park();
+		assert!(sub.poll_recv_group(&fresh()).is_pending());
+		write(&b, 1);
+		assert!(sub.poll_recv_group(&fresh()).is_pending());
+		assert!(!asked_for(&b, 1), "{:?}", b.subscription());
+
+		let c = received_copy();
+		write(&c, 1);
+		routes.serve(c.consume());
+		assert_eq!(drain(&mut sub, false), [1]);
 	}
 
 	/// A range an edit adds with a time start inside a group under the serving copy's resume

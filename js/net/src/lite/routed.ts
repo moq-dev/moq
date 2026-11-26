@@ -16,7 +16,7 @@ import type { Grant } from "../auth.ts";
 import type { Goaway } from "../connection/goaway.ts";
 import type { BroadcastCache } from "../consume.ts";
 import { error, ProtocolViolation, peerEnded } from "../error.ts";
-import { routesEqual, WireRoute } from "../hop.ts";
+import { Cost, routesEqual, WireRoute } from "../hop.ts";
 import type * as Identity from "../identity.ts";
 import {
 	arrival,
@@ -61,6 +61,10 @@ export interface Session {
 	slots: Slots;
 	/** Rank a route last once the peer sent GOAWAY. */
 	drained(route: WireRoute): WireRoute;
+	/** What crossing this link adds to a claim's cost, once known. */
+	cost(): Promise<Cost>;
+	/** This link's rank, which every claim through it carries at most. */
+	priority: number;
 	goaway?: GetPromise<Goaway>;
 	/** Our grant: the peer answers a prefix wider than what it lets us subscribe to region by region. */
 	grant?: Getter<Grant | undefined>;
@@ -141,6 +145,9 @@ export class Routed {
 	// The claims shown at each path, oldest first.
 	#byPath = new Map<Path.Valid, Set<bigint>>();
 	#history = new AnnounceHistory();
+
+	// What crossing this link costs, known before the first claim arrives.
+	#cost?: Cost;
 
 	// Set once the session lets go of its claims, which then show nothing anew.
 	#closing = false;
@@ -331,18 +338,18 @@ export class Routed {
 		return found;
 	}
 
-	// A claim through this session: its cost plus a local link cost of 1, which the draft lets
-	// a receiver charge in place of the peer's declared cost; ranked below every available claim
-	// while the peer or a node on its way drains, then by the lowest priority on its way, past this link's 0; and
-	// unavailable while no route reaches it.
+	// A claim through this session: its cost plus this link's; ranked below every available claim
+	// while the peer or a node on its way drains, then by the lowest priority on its way, this
+	// link's included; and unavailable while no route reaches it.
 	#candidate(live: Live, claim: Claim): WireRoute {
+		if (this.#cost === undefined) throw new Error("a claim before the link was priced");
 		return this.#session.drained(
 			WireRoute.normalize({
 				identity: live.identity,
 				epoch: claim.epoch,
-				cost: claim.cost + 1n,
+				cost: Cost.charged(claim.cost, this.#cost),
 				claimed: true,
-				priority: Math.min(0, claim.priority),
+				priority: Math.min(this.#session.priority, claim.priority),
 				above: claim.above,
 				draining: claim.draining || undefined,
 				available: !claim.unavailable,
@@ -555,6 +562,9 @@ export class Routed {
 				// The peer's own request is answered by the publisher half.
 				break;
 			case "start": {
+				// Every claim, and every change to one, arrives after the first start.
+				this.#cost ??= await this.#session.cost();
+				if (this.#closing || this.#finished) return;
 				// Every claim's path is relative to the session, whichever requested prefix it lies in.
 				const path = this.#history.start(msg);
 				const id = this.#history.next - 1n;

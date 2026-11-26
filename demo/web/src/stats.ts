@@ -128,8 +128,8 @@ function subscribeNode(effect: Signals.Effect, origin: Net.Origin.Reader, path: 
 	// afresh rather than splicing onto the old one's.
 	const following = origin.follow(path);
 	effect.cleanup(() => following.close());
-	effect.run((identity) => {
-		const broadcast = identity.get(following.active);
+	effect.run((instance) => {
+		const broadcast = instance.get(following.active);
 		// A new identity or run counts from zero, so neither its node series nor the aggregate
 		// (which spans every node) may splice onto the old counts.
 		const reset = () => {
@@ -143,13 +143,13 @@ function subscribeNode(effect: Signals.Effect, origin: Net.Origin.Reader, path: 
 		if (!broadcast) return;
 
 		const bucket = new Stats.Consumer(broadcast).bucket("");
-		identity.cleanup(() => bucket.close());
-		identity.spawn(async () => {
+		instance.cleanup(() => bucket.close());
+		instance.spawn(async () => {
 			let epoch: string | undefined;
 			for (;;) {
 				let update: Stats.BucketUpdate | undefined;
 				try {
-					update = await identity.race(bucket.next());
+					update = await instance.race(bucket.next());
 				} catch (err) {
 					console.warn("stats: bucket track failed", node, err);
 					update = { kind: "ended" };
@@ -651,7 +651,7 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 
 // Monotonic counter for gradient element ids. SVG ids are document-global and
 // every chart re-renders into the same page, so the id must be unique per
-// gradient identity, not derived from the series (which collides across charts
+// gradient instance, not derived from the series (which collides across charts
 // and would make `url(#id)` resolve to the wrong gradient).
 let gradSeq = 0;
 

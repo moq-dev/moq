@@ -4066,6 +4066,36 @@ mod tests {
 		assert_eq!(ways, vec![Next::Via(3), Next::Via(4)]);
 	}
 
+	/// Of a named node's copies outside the tier that rank alike, a request follows the
+	/// deepest.
+	#[test]
+	fn a_named_request_outside_its_tier_follows_the_deepest_of_equal_copies() {
+		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
+		for peer in [2, 3] {
+			open(&mut router, peer, Role::Routing(node(peer as Id)));
+		}
+		router.recv(2, route(6, 2, 1)).unwrap();
+		router.recv(3, route(5, 3, 1)).unwrap();
+		let exact = Msg::Claims {
+			origin: node(6),
+			changes: vec![((p("src/a/b"), 7), claim(run(1), 0))],
+			floor: 1,
+		};
+		router.recv(2, exact).unwrap();
+		let claims = Msg::Claims {
+			origin: node(5),
+			changes: vec![
+				((p("src"), 7), claim(run(1), 0)),
+				((p("src/a"), 7), claim(Run { epoch: 1, above: 1 }, 0)),
+			],
+			floor: 1,
+		};
+		router.recv(3, claims).unwrap();
+		let under = (p("src/a/b"), 7);
+		assert_eq!(router.pick(&under), Some(node(6)));
+		assert_eq!(router.filed(node(5), &under, None), Some(p("src/a")));
+	}
+
 	/// A relay that owns a claim serves a request naming it under a copy of the same claim
 	/// filed deeper, which a downstream relay ranks below it: the two agree on the tier.
 	#[test]

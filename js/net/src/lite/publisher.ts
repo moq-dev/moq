@@ -917,7 +917,7 @@ export class Publisher {
 	#heldDatagrams = new Set<datagram.Consumer>();
 
 	/**
-	 * Creates a new Publisher identity.
+	 * Creates a new Publisher instance.
 	 * @param quic - The WebTransport session to use
 	 * @param version - Negotiated protocol version
 	 * @param origin - Hop id shared with the Subscriber
