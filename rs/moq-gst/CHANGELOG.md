@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `moqsink` shifts buffer timestamps onto the catalog's clock, so a run lands where its reference timestamp (or the pipeline clock) places it even on a clock fixed before the run.
+
 ## [0.4.12](https://github.com/moq-dev/moq/compare/moq-gst-v0.4.11...moq-gst-v0.4.12) - 2026-10-06
 
 ### Other
