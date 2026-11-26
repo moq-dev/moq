@@ -515,12 +515,16 @@ impl Record {
 				// Final as it stands, so what was handed out in it merges into one run, though
 				// folding it would cost more than it saves. Only where it holds a key already,
 				// so an isolated report adds no run.
-				for handed in [&mut self.delivered, &mut self.handed] {
-					if handed.next_from(start).is_some_and(|key| key < stretch.end) {
-						handed.insert_run(start..stretch.end);
-					}
+				let holds = |handed: &Delivered| handed.next_from(start).is_some_and(|key| key < stretch.end);
+				if holds(&self.handed) {
+					self.handed.insert_run(start..stretch.end);
 				}
-				folded.push(start..stretch.end);
+				// `beside` forgets its misses only where `delivered` now covers them, which is
+				// what a read checks its fills against.
+				if holds(&self.delivered) {
+					self.delivered.insert_run(start..stretch.end);
+					folded.push(start..stretch.end);
+				}
 			}
 			from = match mode {
 				// A stretch stopped where it started passes the whole run there, so a walk
@@ -1231,6 +1235,32 @@ mod test {
 		owe(&track, pool.used());
 		record.settle(|| track.clone(), &mut beside, Standing::default());
 		assert_eq!(beside.0, Some(11..12), "kept, as the record settled nothing there");
+	}
+
+	/// A growing record forgets what the reader gave up beside a final stretch too short to
+	/// fold only where `delivered` then covers it, as a read checks its fills against
+	/// `delivered`: forgotten without that, the verdict would leave the read waiting on fills
+	/// that already answered.
+	#[test]
+	fn a_growing_record_keeps_what_it_gave_up_beside_a_stretch_nothing_covers() {
+		for handed in [false, true] {
+			let (_pool, track) = roomy();
+			let mut record = Record::default();
+			let mut beside = GivenUp(Some(31..32));
+			if handed {
+				record.delivered.insert(30);
+			}
+			record.reported.insert(30..35, Report::Skip);
+			let reader = Standing { spans: &(), ..live() };
+			record.settle(|| track.clone(), &mut beside, reader);
+			match handed {
+				true => {
+					assert!(record.delivered.contains(31), "merged under the group handed out");
+					assert_eq!(beside.0, None, "so forgotten");
+				}
+				false => assert_eq!(beside.0, Some(31..32), "kept, as nothing covers it"),
+			}
+		}
 	}
 
 	/// A run the reader gave up beside its record, such as a drop it took from the track's drop
