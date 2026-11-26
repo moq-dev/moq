@@ -599,37 +599,6 @@ impl Drop for MoqMediaTimebase {
 	}
 }
 
-/// Reserve a container's catalog slot under the owner lock, with `timebase`'s handle when shared,
-/// so the importer is constructed after the lock is released.
-///
-/// Also returns the broadcast's driver, which the importer checks so a driver panic reaches it.
-fn reserve_container(
-	broadcast: &MoqBroadcastProducer,
-	timebase: Option<&MoqMediaTimebase>,
-) -> Result<
-	(
-		moq_net::broadcast::Producer,
-		moq_mux::catalog::Reserved<Extra>,
-		Option<moq_mux::catalog::Timebase<Extra>>,
-		crate::ffi::Background,
-		crate::producer::Children,
-	),
-	MoqError,
-> {
-	broadcast.with_state(|state| {
-		let timebase = timebase
-			.map(|timebase| timebase.timebase(broadcast, state))
-			.transpose()?;
-		Ok((
-			state.broadcast.clone(),
-			state.catalog.reserve(),
-			timebase,
-			state.driver.clone(),
-			state.children.clone(),
-		))
-	})
-}
-
 /// A container format, its leading bytes, and an optional shared source timebase.
 ///
 /// A container publishes and describes its own tracks, so there is no label or hint here: a
@@ -1218,7 +1187,22 @@ impl MoqMediaContainerProducer {
 		init: MoqContainerInit,
 	) -> Result<Arc<MoqMediaContainerProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let (target, reserved, timebase, driver, children) = reserve_container(broadcast, init.timebase.as_deref())?;
+		// Reserved under the owner lock, so the importer is constructed after it is released. The
+		// driver goes along so a driver panic reaches the importer.
+		let (target, reserved, timebase, driver, children) = broadcast.with_state(|state| {
+			let timebase = init
+				.timebase
+				.as_deref()
+				.map(|timebase| timebase.timebase(broadcast, state))
+				.transpose()?;
+			Ok((
+				state.broadcast.clone(),
+				state.catalog.reserve(),
+				timebase,
+				state.driver.clone(),
+				state.children.clone(),
+			))
+		})?;
 		let native = moq_mux::import::ContainerInit::new(init.format.0, init.data).with_timebase(timebase);
 		let import = moq_mux::import::Container::new(target, reserved, &native).map_err(|err| MoqError::Codec {
 			reason: format!("init failed: {err}"),
