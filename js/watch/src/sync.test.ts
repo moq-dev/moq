@@ -858,29 +858,102 @@ describe("group", () => {
 	});
 
 	it("keeps a member in step up to the cap, but takes one back only with a tenth to spare", async () => {
-		const group = new Sync({ cap: Duration.millis(500) });
+		const cap = new Signal(Duration.millis(500));
+		const group = new Sync({ cap });
 		const a = member(group, 1000);
 		await flush();
 		a.video.received(Duration.millis(1000), at(5000));
 		await flush();
 
-		// B trails A by 470ms: A, already in step, holds 490ms, within the cap.
+		// B and C trail A by 470ms: A holds 490ms, within the cap, even on its first check.
 		const b = member(group, 1000);
+		const c = member(group, 1000);
 		await flush();
 		b.video.received(Duration.millis(1000), at(5470));
+		c.video.received(Duration.millis(1000), at(5470));
 		await flush();
 		expect(a.sync.out.delay.peek()).toEqual(Duration.millis(490));
 		expect(a.sync.out.outOfSync.peek()).toBe(false);
 
-		// C arrives like A but joins now: 490ms is past the 450ms it needs to come in.
-		const c = member(group, 1000);
+		// Below 490ms A leaves, and comes back only once 490ms is a tenth under the cap.
+		cap.set(Duration.millis(480));
 		await flush();
-		c.video.received(Duration.millis(1000), at(5000));
+		expect(a.sync.out.outOfSync.peek()).toBe(true);
+		expect(b.sync.out.outOfSync.peek()).toBe(false);
+		cap.set(Duration.millis(530));
 		await flush();
-		expect(c.sync.out.outOfSync.peek()).toBe(true);
-		expect(c.sync.out.delay.peek()).toEqual(Duration.millis(20));
+		expect(a.sync.out.outOfSync.peek()).toBe(true);
+		expect(a.sync.out.delay.peek()).toEqual(Duration.millis(20));
+		cap.set(Duration.millis(550));
+		await flush();
+		expect(a.sync.out.outOfSync.peek()).toBe(false);
+		expect(a.sync.out.delay.peek()).toEqual(Duration.millis(490));
 
-		for (const { sync } of [a, b, c, { sync: group }]) sync.close();
+		// A newcomer has nothing to earn back: D, arriving like A, joins at 490ms under a 500ms cap.
+		cap.set(Duration.millis(500));
+		const d = member(group, 1000);
+		await flush();
+		d.video.received(Duration.millis(1000), at(5000));
+		await flush();
+		expect(d.sync.out.outOfSync.peek()).toBe(false);
+		expect(d.sync.out.delay.peek()).toEqual(Duration.millis(490));
+
+		for (const { sync } of [a, b, c, d, { sync: group }]) sync.close();
+	});
+
+	it("keeps the member that sets the playhead in step, however large its clock and odd its target", async () => {
+		// PTS zero 7 years after the moq epoch, and a target with a fraction of a millisecond.
+		const group = new Sync();
+		const wall = 7 * 365 * 24 * 3600 * 1000;
+		for (const target of [20.123457, 33.333333, 41.7, 0.000001]) {
+			const sync = new Sync({ sync: group, clock: zero(wall) });
+			const video = sync.track({ target: new Signal<Duration | undefined>(Duration.millis(target)) });
+			await flush();
+			video.received(Duration.millis(1000), at(5000));
+			await flush();
+			expect(sync.out.outOfSync.peek()).toBe(false);
+			sync.close();
+			await flush();
+		}
+		group.close();
+	});
+
+	it("drops nothing when a joined member's reference moves earlier", async () => {
+		const group = new Sync();
+		const a = member(group, 1000);
+		const b = member(group, 1000);
+		await flush();
+		a.video.received(Duration.millis(1000), at(5000));
+		b.video.received(Duration.millis(1000), at(5100));
+		await flush();
+		expect(a.sync.out.delay.peek()).toEqual(Duration.millis(120));
+
+		// A's frame 1050 is due at 5170. Then one of A's frames arrives 170ms sooner than any before.
+		const parked = a.video.wait(Duration.millis(1050));
+		await clock.advance(Duration.millis(30));
+		a.video.received(Duration.millis(1200), at(5030));
+		await flush();
+		// A's delay grows by as much, so the group's playhead, and A's place on it, don't move.
+		expect(a.sync.out.delay.peek()).toEqual(Duration.millis(290));
+		await clock.advance(Duration.millis(139));
+		expect(Bun.peek.status(parked)).toBe("pending");
+		await clock.advance(Duration.millis(1));
+		expect(await parked).toBe(true);
+
+		for (const { sync } of [a, b, { sync: group }]) sync.close();
+	});
+
+	it("refuses members of a group whose fixed delay is past its cap", async () => {
+		const delay = new Signal<Delay>(Duration.secs(2));
+		const group = new Sync({ delay, cap: Duration.secs(1) });
+		const a = member(group, 1000);
+		await flush();
+		expect(a.sync.out.error.peek()?.message).toContain("can't exceed its cap");
+		expect(a.sync.out.outOfSync.peek()).toBe(true);
+		delay.set(Duration.millis(300));
+		await flush();
+		expect(a.sync.out.error.peek()).toBeUndefined();
+		for (const sync of [a.sync, group]) sync.close();
 	});
 
 	it("lets a member without video follow the playhead but never place it", async () => {

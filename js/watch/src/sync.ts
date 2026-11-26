@@ -199,6 +199,9 @@ export class Clock {
 	// The furthest playhead a skip has jumped to on this timeline. A frame below it was passed over.
 	floor: number | undefined;
 
+	// Whether the delay holds a group's playhead rather than a delay behind this clock's reference.
+	joined = false;
+
 	// Releases parked waits on `close()`.
 	readonly closed = new Signal(false);
 
@@ -282,6 +285,13 @@ export class Clock {
 		}
 		this.out.reference.set(reference);
 		this.owner = part;
+
+		// In step with a group, the playhead is the group's: an earlier reference moves the delay with
+		// it, so nothing skips, and the group settles the delay from there.
+		if (this.joined) {
+			this.out.delay.set(Duration.millis(delay + current - reference));
+			return late;
+		}
 
 		// The playhead now sits at `timestamp - cap`, plus however long this frame waited between
 		// ingress and here. "instant" has no cap, so every newer frame would pass over whatever is
@@ -503,7 +513,13 @@ export class Track {
  * What a group member offers its group: its earliest arrival on the group's timeline (its
  * reference less its clock's PTS zero), and the delay it needs held behind that.
  */
-type Member = { reference: Getter<number | undefined>; target: Getter<Duration>; video: Getter<boolean> };
+type Member = {
+	reference: Getter<number | undefined>;
+	target: Getter<Duration>;
+	video: Getter<boolean>;
+	// Out of step at its last check: it rejoins only with a tenth of the cap to spare.
+	margin: Signal<boolean>;
+};
 
 /**
  * The group's playhead offset: the latest each member wants to trail is `reference + cap`, the
@@ -538,8 +554,8 @@ export class Sync {
 	// As a group: who plays in step, and the playhead offset on the group's timeline.
 	#members = new Signal<Member[]>([]);
 	#playhead = new Signal<number | undefined>(undefined);
-	// As a member: whether it played in step at its last check, which widens the margin to rejoin.
-	#inStep = false;
+	// As a member: out of step at its last check, kept across re-registering with its group.
+	#margin = new Signal(false);
 
 	/**
 	 * Whether this member's video is playing. Only such members place the group's playhead; one with
@@ -660,6 +676,7 @@ export class Sync {
 			delay = effect.get(this.#target);
 		}
 
+		this.#clock.joined = joined !== undefined;
 		this.#clock.out.delay.set(delay);
 	}
 
@@ -670,14 +687,11 @@ export class Sync {
 		const group = effect.get(this.in.sync);
 		// A closed shared sync places no playhead: its members play alone, as if unlinked.
 		if (!group || effect.get(group.#clock.closed)) return;
-		effect.cleanup(() => {
-			this.#inStep = false;
-		});
 
 		const error = this.#refusal(
 			group,
 			[effect.get(this.in.delay), effect.get(this.in.lookahead)],
-			[effect.get(group.in.delay), effect.get(group.in.lookahead)],
+			[effect.get(group.in.delay), effect.get(group.in.lookahead), effect.get(group.in.cap)],
 		);
 		effect.set(out.error, error, undefined);
 		// Without a clock, this broadcast has no place on the group's timeline.
@@ -699,7 +713,12 @@ export class Sync {
 			const current = nested.get(reference);
 			if (current !== undefined || !nested.get(this.video)) place.set(current);
 		});
-		const member: Member = { reference: place, target: this.#target, video: this.video };
+		const member: Member = {
+			reference: place,
+			target: this.#target,
+			video: this.video,
+			margin: this.#margin,
+		};
 		group.#members.update((members) => [...members, member]);
 		effect.cleanup(() => group.#members.update((members) => members.filter((other) => other !== member)));
 
@@ -708,30 +727,29 @@ export class Sync {
 			const ours = nested.get(reference);
 			// Nothing received yet: nothing to align, and nothing out of step either.
 			if (at === undefined || ours === undefined) {
-				this.#inStep = false;
 				nested.set(out.outOfSync, false, true);
 				return;
 			}
-			const delay = at - ours;
-			const target = group.#memberTarget(nested, member);
-			// A member out of step rejoins only with a tenth of the cap to spare, so one hovering at
-			// the cap doesn't flip in and out with every small change in its target or the playhead.
-			const cap = nested.get(group.in.cap).asMillis();
-			const reach = this.#inStep ? cap : cap - cap / 10;
-			this.#inStep = delay >= target && delay <= reach;
-			if (!this.#inStep) return;
-			nested.set(this.#joined, Duration.millis(delay), undefined);
+			// The same sums the playhead was placed with, so the member that set it is exactly in reach.
+			const [lo, hi] = group.#span(nested, member, ours);
+			const inStep = lo <= at && at <= hi;
+			member.margin.set(!inStep);
+			if (!inStep) return;
+			nested.set(this.#joined, Duration.millis(at - ours), undefined);
 			nested.set(out.outOfSync, false, true);
 		});
 	}
 
 	// Why `group` won't take this member, if it won't.
-	#refusal(group: Sync, own: [Delay, Duration], shared: [Delay, Duration]): Error | undefined {
+	#refusal(group: Sync, own: [Delay, Duration], shared: [Delay, Duration, Duration]): Error | undefined {
 		if (group === this) return new Error("Watch.Sync: a sync can't be its own group");
 		if (own[0] === "instant") return new Error('Watch.Sync: a grouped member can\'t use delay "instant"');
 		if (!own[1].isZero()) return new Error("Watch.Sync: a grouped member can't hold a lookahead");
 		if (shared[0] === "instant") return new Error('Watch.Sync: a group can\'t use delay "instant"');
 		if (!shared[1].isZero()) return new Error("Watch.Sync: a group can't hold a lookahead");
+		if (shared[0] instanceof Duration && shared[0].gt(shared[2])) {
+			return new Error("Watch.Sync: a group's delay can't exceed its cap");
+		}
 		return undefined;
 	}
 
@@ -742,20 +760,29 @@ export class Sync {
 		return (mode instanceof Duration ? mode : effect.get(member.target)).asMillis();
 	}
 
+	// Where on the group's timeline a member at `reference` can play in step: no sooner than its
+	// target, and no later than the cap, less a tenth while it has to earn its way back, so one
+	// hovering at the cap doesn't flip in and out with every small change.
+	#span(effect: Effect, member: Member, reference: number): [number, number] {
+		const cap = effect.get(this.in.cap).asMillis();
+		const reach = effect.get(member.margin) ? cap - cap / 10 : cap;
+		return [reference + this.#memberTarget(effect, member), reference + reach];
+	}
+
 	// As a group: place the playhead where the most members can play in step.
 	#runPlayhead(effect: Effect): void {
 		if (effect.get(this.in.delay) === "instant") {
 			this.#playhead.set(undefined);
 			return;
 		}
-		const cap = effect.get(this.in.cap).asMillis();
 		const members = effect.get(this.#members);
 		// Members playing video place the playhead; the rest only follow it. With none, all of them do.
 		const video = members.filter((member) => effect.get(member.video));
 		const spans = (video.length ? video : members).flatMap((member) => {
 			const reference = effect.get(member.reference);
 			if (reference === undefined) return [];
-			return [{ lo: reference + this.#memberTarget(effect, member), hi: reference + cap }];
+			const [lo, hi] = this.#span(effect, member, reference);
+			return [{ lo, hi }];
 		});
 		this.#playhead.set(playhead(spans));
 	}

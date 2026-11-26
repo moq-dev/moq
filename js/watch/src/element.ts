@@ -796,9 +796,12 @@ const SYNC_OBSERVED = ["delay", "cap"] as const;
 
 // Parse a `<moq-sync>` delay: as `<moq-watch>`'s, except "instant", which a shared timeline can't honor.
 function parseGroupDelay(value: string | null): Delay {
-	const delay = parseDelay(value);
-	if (delay === "instant") throw new Error('moq-sync: invalid delay="instant", expected "auto" or a duration');
-	return delay;
+	if (value === null) return "auto";
+	const trimmed = value.trim();
+	if (trimmed === "auto") return trimmed;
+	const parsed = parseDuration(trimmed);
+	if (parsed !== undefined) return parsed;
+	throw new Error(`moq-sync: invalid delay="${value}", expected "auto" or a duration like "300ms"`);
 }
 
 // Parse the `cap` attribute: a duration, or the default when absent.

@@ -139,7 +139,8 @@ nothing. `delay="instant"` is refused on
 `<moq-sync>`, and so is `delay="instant"` or a `lookahead` on a `<moq-watch>`
 inside one: its setter throws, and one that already had it when it joined is
 reported with an `error` event and plays alone, since a shared timeline can
-honor neither. Audio follows each member's clock as usual, so unmute the one you want
+honor neither. A `<moq-sync>` whose `delay` exceeds its `cap` fits no one, so its
+members report an `error` too. Audio follows each member's clock as usual, so unmute the one you want
 to hear.
 
 The cap also bounds how far a wrong camera clock can move the wall. A member
