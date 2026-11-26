@@ -24,7 +24,7 @@ Each rule is an INVARIANT; the harm says why it matters.
 quest gate just rs tla moq-net/verify/subscribe/SubscribeAccounting.tla
 ```
 
-It checks every rule under `Pressure` and `ReliableReset` over three starts, 1 to 3, where group 1 may end at 2, 3, or 4, so its span holds none, one, or both of the starts above it: about 78.7M distinct states, 11 minutes. It passes. Nightly runs every config here and fails if a config with an `\* Open finding:` line passes; none has one. `CutGroupEnd.cfg` checks a stream reset after its FIN, which delivers only its header and cuts the GROUP_END, so the publisher skips its starts again, over two starts without `Pressure` in a second:
+It checks every rule under `Pressure` and `ReliableReset` over three starts, 1 to 3, where group 1 may end at 2, 3, or 4, so its span holds none, one, or both of the starts above it: about 104.3M distinct states, 13 minutes. It passes. Nightly runs every config here and fails if a config with an `\* Open finding:` line passes; none has one. `CutGroupEnd.cfg` checks a stream reset after its FIN, which delivers only its header and cuts the GROUP_END, so the publisher skips its starts again, over two starts without `Pressure` in a second:
 
 ```sh
 quest gate just rs tla moq-net/verify/subscribe/SubscribeAccounting.tla -config rs/moq-net/verify/subscribe/CutGroupEnd.cfg
@@ -36,7 +36,7 @@ quest gate just rs tla moq-net/verify/subscribe/SubscribeAccounting.tla -config 
 quest gate just rs tla moq-net/verify/subscribe/SubscribeAccounting.tla -config rs/moq-net/verify/subscribe/LostGroupEnd.cfg
 ```
 
-`PlainReset.cfg` checks a peer without RESET_STREAM_AT, or a browser's WebTransport (`ReliableReset = FALSE`), where every reset group is named in a drop that may land beside a header the subscriber read, over three starts without `Pressure`: about 32.2M distinct states, 4 minutes. It passes.
+`PlainReset.cfg` checks a peer without RESET_STREAM_AT, or a browser's WebTransport (`ReliableReset = FALSE`), where every reset group is named in a drop that may land beside a header the subscriber read, over three starts without `Pressure`: about 46.0M distinct states, 4 minutes. It passes.
 
 ```sh
 quest gate just rs tla moq-net/verify/subscribe/SubscribeAccounting.tla -config rs/moq-net/verify/subscribe/PlainReset.cfg
@@ -48,7 +48,7 @@ Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path on th
 
 ## Coverage
 
-Sync commit: `c262a76fca6ce6566e523b86dab6a39651bc09c2`. Run `git log c262a76fca.. -- rs/moq-net/src/lite/publisher.rs rs/moq-net/src/lite/subscriber.rs rs/moq-net/src/tail.rs rs/moq-net/src/model/track.rs rs/moq-net/src/model/record.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
+Sync commit: `fa7884134a384265280ef5e33bb372608f0f677e`. Run `git log fa7884134a.. -- rs/moq-net/src/lite/publisher.rs rs/moq-net/src/lite/subscriber.rs rs/moq-net/src/tail.rs rs/moq-net/src/model/track.rs rs/moq-net/src/model/record.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
 
 | Code | Model |
 | --- | --- |

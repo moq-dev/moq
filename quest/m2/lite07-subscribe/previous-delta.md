@@ -10,7 +10,7 @@ Decided 2026-11-26 (maintainer, on [moq-dev/moq#9626](https://github.com/moq-dev
 
 - No `Previous Delta` on the lite-07 `GROUP` header. The previous group's `GROUP_END` `End` proves the starts up to it empty.
 - Starts no `GROUP_END` covers (a discontinuity, a first group, a group closed without finishing, a `GROUP_END` a reset may have cut) go out as `SUBSCRIBE_SKIP`, main's lite-07 message, kept as its own message rather than a `SUBSCRIBE_DROP` code: a drop's code is a stream error that ends readers, a skip is final cacheable emptiness that ends none, and AGENTS.md asks for a separate message over a special value.
-- Every drop is final on the wire: no skip goes out over a drop (the audit's W1/W5 override machinery stays deleted), except the re-tell of a cut `GROUP_END`, which may name a start dropped before its group finished and changes nothing for it.
+- Every drop is final on the wire: no skip goes out over a drop (the audit's W1/W5 override machinery stays deleted), except the re-tell of a `GROUP_END` a reset may have cut or the subscriber reported lost, which may name a start dropped before its group finished and changes nothing for it.
 - For local tracks, a producer declaring a group's end was to replace the 1 s local miss grace. See Waiting: it also governs local fill handlers and logical tracks.
 
 Superseded 2026-11-24 (maintainer, /quest-plan): `Previous Delta (i)` on the lite-07 `GROUP` header, `SUBSCRIBE_SKIP` removed from lite-07, `GROUP_END` kept.
@@ -22,6 +22,11 @@ Decided 2026-11-25 (maintainer, on [moq-dev/moq#9626](https://github.com/moq-dev
 - A reset that may lose its GROUP header (no `RESET_STREAM_AT`) names the group in `SUBSCRIBE_DROP` with the reset's error: `poll::Session::reliable_reset` says which, the publisher holds a header only when it is true, and `PlainReset.cfg` checks it.
 - Local and remote tracks must not behave differently. Consistent with [A relayed reader reports a refused fill as a gap a direct reader never sees](/quest/m1/relayed-refused-fill-gap.md).
 
+Decided 2026-11-26 (maintainer, /quest-run, on Codex review round 1 of [moq-dev/moq#9626](https://github.com/moq-dev/moq/pull/9626)): fix in this PR the three cases only a grace settled, rather than keep a bounded lite-07 backstop grace or restore the graces until a follow-up.
+
+- Starts outside every live range stop being owed when the range retires: a proven tail folds the ledger gaps no live range reaches (Rust and JS), and `finish_shared` ends a proven copy at its declared end, error included.
+- The subscriber names a Group Stream it discarded before reading its end, such as one its transport evicted after the FIN, in a lite-07 SUBSCRIBE_UPDATE `Lost` list, and the publisher skips the starts inside its span again, as for a cut `GROUP_END`. A parked stream that fails before TRACK_INFO still has its group opened and ended.
+
 `S12` moved to [A moq-transport finish settles a declared end's tail](/quest/m3/ietf-finish-shared-tail.md).
 
 ## Waiting
@@ -30,11 +35,3 @@ Decided 2026-11-25 (maintainer, on [moq-dev/moq#9626](https://github.com/moq-dev
   - A: a local track names every start. A local fill handler is asked at once, and its refusal is final at once. A hole with no handler stays owed until the producer creates, skips, or ends it. Logical and resume tracks follow their serving copy. Needs a group-level `finish_at` in `moq-ffi` (only `finish()` today) and JS parity, and about 15 tests change.
   - B: keep the grace only for fill-handler asks and refusals. Still a timer, so local and remote still differ.
   - **C (recommended):** keep the local miss grace in [moq-dev/moq#9626](https://github.com/moq-dev/moq/pull/9626), which settles the wire, and do A in its own quest. The wire change stands alone, and A is a public API change (`moq-ffi`, JS) with its own tests.
-- Maintainer: how to close three cases that only a grace settled, which the zero-timer lite-07 now leaves open (Codex review round 1 on [moq-dev/moq#9626](https://github.com/moq-dev/moq/pull/9626)).
-  - A start no wire message names: the gap between two disjoint ranges of one subscription. A proven received copy waits on it forever, so a reader past it never reaches the track's end or error. Reproduced on the copy model: clearing the declared tail in `finish_shared` does not help, since a proven copy's hole wait never ends.
-  - The subscriber's ledger (Rust `Tail::proven`, JS `Ledger.expire` with no grace) never folds a gap, so a subscription that keeps moving one range through disjoint parts of a track keeps a run per visited interval.
-  - A Group Stream the subscriber's transport evicts after QUIC acknowledged its FIN, before moq-net read its GROUP_END, sends no STOP_SENDING, so the publisher never re-tells the cut span and the subscriber waits forever for those starts.
-  - Options:
-    - Fix all three in [moq-dev/moq#9626](https://github.com/moq-dev/moq/pull/9626) (Recommended) - starts outside every live range stop being owed when the range retires (fixes the first two in Rust and JS), and the subscriber reads a fully received stream's GROUP_END before evicting it, or names it to the publisher. Grows an already L PR.
-    - Keep a bounded lite-07 backstop grace for these cases only - smallest change, but brings a timer back against the 2026-11-25 decision.
-    - Land the wire with the lite-07 graces restored, and remove them in a follow-up once all three are fixed - unblocks the lite-07 cut sooner, at the cost of moving the zero-timer goal out of this quest.
