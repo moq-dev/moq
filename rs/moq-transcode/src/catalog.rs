@@ -368,8 +368,20 @@ impl Anchor {
 	pub(crate) fn pin(&mut self, snapshot: &mut moq_mux::catalog::hang::Catalog) {
 		let anchored = *self.clock.get_or_insert(snapshot.sync.clock);
 		// The same mapping in other units is no change, which the catalog producer accepts too.
-		let micros = |clock: Option<hang::catalog::Clock>| clock.map(|clock| clock.wall.as_micros().ok());
-		if snapshot.sync.clock != anchored && micros(snapshot.sync.clock) != micros(anchored) {
+		// Compared exactly by cross-multiplying, since flooring both to microseconds would pass a
+		// sub-microsecond change on to a producer that refuses it.
+		let same = match (snapshot.sync.clock, anchored) {
+			(None, None) => true,
+			(Some(a), Some(b)) => match (a.wall.scale(), b.wall.scale()) {
+				(Some(a_scale), Some(b_scale)) => {
+					a.wall.value() as u128 * b_scale.as_u64() as u128
+						== b.wall.value() as u128 * a_scale.as_u64() as u128
+				}
+				_ => a == b,
+			},
+			_ => false,
+		};
+		if !same {
 			if self.warned != Some(snapshot.sync.clock) {
 				tracing::warn!(
 					?anchored,
@@ -1077,6 +1089,14 @@ mod tests {
 		assert_eq!(pinned(&mut anchor, clock(5_000)), clock(5_000));
 		assert_eq!(pinned(&mut anchor, millis), millis);
 		assert_eq!(pinned(&mut anchor, clock(5_001)), clock(5_000));
+		// 5,000.5 microseconds floors to the anchor's microsecond but is a different mapping.
+		let nanos = Some(
+			hang::catalog::Clock::new(
+				moq_net::Timestamp::new(5_000_500, moq_net::Timescale::new(1_000_000_000).unwrap()).unwrap(),
+			)
+			.unwrap(),
+		);
+		assert_eq!(pinned(&mut anchor, nanos), clock(5_000));
 
 		let mut anchor = Anchor::default();
 		assert_eq!(pinned(&mut anchor, None), None);
