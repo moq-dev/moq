@@ -172,6 +172,8 @@ struct Group {
 	pts: Timestamp,
 	/// Its first frame's pts, where the media before it ends.
 	media: Timestamp,
+	/// Where its GROUP_END says its content ends, once known.
+	stop: Option<Timestamp>,
 }
 
 /// The segment collecting groups, completed once a group lands in a later one or its newest group
@@ -183,7 +185,8 @@ struct Open {
 	pts: Timestamp,
 	media: Timestamp,
 	whole: bool,
-	/// Where a discontinuity marker after its last group stopped the content, if one did.
+	/// Where its last group's content stops, if a discontinuity marker after it or its GROUP_END
+	/// says, rather than where the next group starts.
 	stop: Option<Timestamp>,
 }
 
@@ -305,7 +308,12 @@ impl Grid {
 			let segment = self.segment(pending.pts, Some(pts)).expect("bounded");
 			self.place(pending, segment, &mut out);
 		}
-		let group = Group { start, pts, media };
+		let group = Group {
+			start,
+			pts,
+			media,
+			stop: None,
+		};
 		// A group starting on a line, or within the slack past one, needs no end to place, so the
 		// segment before it completes now.
 		match self.segment(pts, None) {
@@ -332,22 +340,26 @@ impl Grid {
 		out
 	}
 
-	/// The newest group ends at `at`, as its GROUP_END says, so no later group starts before it.
-	/// Completes its segment once `at` reaches the next line, since every later group then starts a
-	/// later segment: the segment its successor would complete. A group waiting to be placed is left
-	/// to its successor or its frames, as on an edge whose GROUP_END arrives after the successor.
-	/// Returns the segments it completes.
+	/// The newest group ends at `at`, as its GROUP_END says, so no later group starts before it and
+	/// its content stops there, whatever completes its segment. Completes that segment once `at`
+	/// reaches the next line, since every later group then starts a later segment: the segment its
+	/// successor would complete. A group waiting to be placed is left to its successor or its frames,
+	/// as on an edge whose GROUP_END arrives after the successor. Returns the segments it completes.
 	pub fn end(&mut self, at: Timestamp) -> Vec<Slot> {
 		let mut out = Vec::new();
-		if self.pending.is_some() {
+		if let Some(pending) = self.pending.as_mut() {
+			pending.stop = Some(at);
 			return out;
+		}
+		if let Some(open) = self.open.as_mut() {
+			open.stop = Some(at);
 		}
 		let reached =
 			(self.open.as_ref()).is_some_and(|open| super::nanos(at) >= super::nanos(self.line(open.segment + 1)));
 		if reached && let Some(open) = self.open.take() {
 			let segment = open.segment;
 			let end = self.line(segment + 1);
-			let content = Some(open.stop.unwrap_or(at));
+			let content = open.stop;
 			out.push(self.media(open, end, content));
 			self.closed = Some(segment);
 		}
@@ -427,7 +439,7 @@ impl Grid {
 			Some(mut open) if segment == open.segment => {
 				open.groups.push(group.start);
 				// The content resumed within the segment, so it runs to whatever ends this group.
-				open.stop = None;
+				open.stop = group.stop;
 				self.open = Some(open);
 				return;
 			}
@@ -469,7 +481,7 @@ impl Grid {
 			pts: group.pts,
 			media: group.media,
 			whole,
-			stop: None,
+			stop: group.stop,
 		});
 	}
 }
@@ -732,7 +744,12 @@ mod test {
 					for (sequence, start) in starts.iter().enumerate().skip(join) {
 						ended_slots.extend(ended.group(sequence as u64, ms(*start), ms(*start)));
 						let until = starts.get(sequence + 1).copied().unwrap_or(end);
-						ended_slots.extend(ended.end(ms(start + next(until - start + 1))));
+						// The last group's ends the track's content.
+						let at = match sequence + 1 == starts.len() {
+							true => end,
+							false => start + next(until - start + 1),
+						};
+						ended_slots.extend(ended.end(ms(at)));
 					}
 					ended_slots.extend(ended.finish(Some(ms(end - 1)), Some(ms(end))));
 					let ended = listed(ended_slots);
@@ -875,6 +892,36 @@ mod test {
 		grid.group(0, ms(0), ms(0));
 		grid.end(ms(2000));
 		assert_eq!(grid.group(1, ms(100), ms(100)), [Slot::Reset]);
+	}
+
+	/// A group's GROUP_END is where its content stops, whatever completes its segment, also for a
+	/// group placed later by its successor.
+	#[test]
+	fn a_group_end_stops_its_content() {
+		let content = |slots: Vec<Slot>| -> Vec<Option<u64>> {
+			slots
+				.into_iter()
+				.filter_map(|slot| match slot {
+					Slot::Media { content, .. } => Some(content.map(|at| at.as_millis().unwrap() as u64)),
+					_ => None,
+				})
+				.collect()
+		};
+		let mut grid = Grid::new(Duration::from_secs(2), 256);
+		grid.group(0, ms(0), ms(0));
+		assert!(grid.end(ms(1500)).is_empty());
+		assert_eq!(content(grid.group(1, ms(4000), ms(4000))), [Some(1500)]);
+		assert_eq!(content(grid.finish(Some(ms(4500)), Some(ms(5000)))), [Some(5000)]);
+
+		// Off the grid, it waits for its successor to place it, here past the line at 2 s, and
+		// keeps its end.
+		let mut grid = Grid::new(Duration::from_secs(2), 256);
+		grid.group(0, ms(0), ms(0));
+		grid.end(ms(500));
+		grid.group(1, ms(500), ms(500));
+		assert!(grid.end(ms(1500)).is_empty());
+		assert!(grid.pending());
+		assert_eq!(content(grid.group(2, ms(4000), ms(4000))), [Some(500), Some(1500)]);
 	}
 
 	/// An edge seeing a segment's first group start after its line can't tell no earlier group

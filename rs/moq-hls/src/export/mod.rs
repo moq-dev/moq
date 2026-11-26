@@ -4341,7 +4341,10 @@ mod tests {
 			.unwrap();
 			group.finish_at(end).unwrap();
 		};
+		// The first group too: its keyframe declares the catalog's picture size, so it is no resize
+		// waiting for a catalog update.
 		ended(0, 2_000);
+		test.listed("video0", 0).await;
 		ended(2_000, 4_000);
 		let snapshot = test.listed("video0", 1).await;
 		assert_eq!(snapshot.segments.len(), 2, "both segments, with no group after them");
@@ -4350,6 +4353,37 @@ mod tests {
 		ended(4_000, 5_000);
 		kio::clock::sleep(Duration::from_secs(1)).await;
 		assert_eq!(test.rendition("video0").snapshot().segments.len(), 2);
+	}
+
+	// A segment's bytes never depend on whether its last group's GROUP_END or its successor arrives
+	// first: the last sample runs to the declared end either way.
+	#[tokio::test(start_paused = true)]
+	async fn a_group_end_times_the_last_sample_whatever_arrives_first() {
+		let mut bytes = Vec::new();
+		for end_first in [true, false] {
+			let test = Groups::with(&["video0"], &[]);
+			let mut video0 = test.publish("video0");
+			let mut group = video0.open(0);
+			let frame = vp8_frame(1_960_000, false);
+			hang::container::Frame {
+				timestamp: frame.timestamp,
+				payload: frame.payload,
+			}
+			.write_to(&mut group)
+			.unwrap();
+			if end_first {
+				group.finish_at(2_000).unwrap();
+				video0.at(2_100);
+			} else {
+				video0.at(2_100);
+				kio::clock::sleep(Duration::from_millis(100)).await;
+				group.finish_at(2_000).unwrap();
+			}
+			test.listed("video0", 0).await;
+			let segment = test.rendition("video0").listed_segment(0).await.unwrap().unwrap();
+			bytes.push(segment);
+		}
+		assert_eq!(bytes[0], bytes[1]);
 	}
 
 	// A peek picks the segment `next` yields: if its media is lost in between, `next` fails rather
