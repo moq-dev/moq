@@ -2,52 +2,14 @@ https://cdn.moq.dev/anon connected via WebTransport
 https://cdn.moq.dev/anon negotiated ALPN: moq-lite-06
 announced: prefix=
 connected version=moq-lite-06
-announced: broadcast=alluno/comms/8afe57cd-9e40-4f0f-946e-dbca939eb524/f83d734e-a180-4294-ad90-be4d09c3f5d5/~bm3dlvwq5qpg active=true
-announced: broadcast=alluno/host/8afe57cd-9e40-4f0f-946e-dbca939eb524 active=true
-announced: broadcast=alluno/input/8afe57cd-9e40-4f0f-946e-dbca939eb524/f83d734e-a180-4294-ad90-be4d09c3f5d5 active=true
-announced: broadcast=lcb-7115976-666b.hang active=true
 announced: broadcast=sp-blume-town-test active=true
+announced: broadcast=vs-8ee6714f7aa8dae275314ceebad829ba active=true
 announce: prefix=
-announced: broadcast=smoke-rust-4240-5932.hang active=true
-announced: broadcast=smoke-rust-4240-5932.hang active=false
-announced: broadcast=smoke-js-web-4240-19615.hang active=true
-subscribe start: id=0 broadcast=smoke-js-web-4240-19615.hang track=catalog.json
-subscribe ok: id=0 broadcast=smoke-js-web-4240-19615.hang track=catalog.json
-subscribe start: id=1 broadcast=smoke-js-web-4240-19615.hang track=video
-subscribe ok: id=1 broadcast=smoke-js-web-4240-19615.hang track=video
-received 6916 bytes from smoke-js-web-4240-19615.hang
-subscribe close: id=0 broadcast=smoke-js-web-4240-19615.hang track=catalog.json
-subscribe close: id=1 broadcast=smoke-js-web-4240-19615.hang track=video
-broadcast discovery failed; broadcasts resolve on request only. WebTransportError {
-  source: "session",
-  streamErrorCode: null,
-  code: 0,
-  name: "WebTransportError",
-  message: "connection error: closed",
-  INDEX_SIZE_ERR: 1,
-  DOMSTRING_SIZE_ERR: 2,
-  HIERARCHY_REQUEST_ERR: 3,
-  WRONG_DOCUMENT_ERR: 4,
-  INVALID_CHARACTER_ERR: 5,
-  NO_DATA_ALLOWED_ERR: 6,
-  NO_MODIFICATION_ALLOWED_ERR: 7,
-  NOT_FOUND_ERR: 8,
-  NOT_SUPPORTED_ERR: 9,
-  INUSE_ATTRIBUTE_ERR: 10,
-  INVALID_STATE_ERR: 11,
-  SYNTAX_ERR: 12,
-  INVALID_MODIFICATION_ERR: 13,
-  NAMESPACE_ERR: 14,
-  INVALID_ACCESS_ERR: 15,
-  VALIDATION_ERR: 16,
-  TYPE_MISMATCH_ERR: 17,
-  SECURITY_ERR: 18,
-  NETWORK_ERR: 19,
-  ABORT_ERR: 20,
-  URL_MISMATCH_ERR: 21,
-  QUOTA_EXCEEDED_ERR: 22,
-  TIMEOUT_ERR: 23,
-  INVALID_NODE_TYPE_ERR: 24,
-  DATA_CLONE_ERR: 25,
-  toString: [Function: toString],
-}
+announced: broadcast=smoke-js-web-4201-9217.hang active=true
+subscribe start: id=0 broadcast=smoke-js-web-4201-9217.hang track=catalog.json
+subscribe ok: id=0 broadcast=smoke-js-web-4201-9217.hang track=catalog.json
+subscribe start: id=1 broadcast=smoke-js-web-4201-9217.hang track=video
+subscribe ok: id=1 broadcast=smoke-js-web-4201-9217.hang track=video
+received 7804 bytes from smoke-js-web-4201-9217.hang
+subscribe close: id=0 broadcast=smoke-js-web-4201-9217.hang track=catalog.json
+subscribe close: id=1 broadcast=smoke-js-web-4201-9217.hang track=video
