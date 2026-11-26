@@ -566,6 +566,26 @@ test("a held group waiting on a time start keeps a read at its cap waiting for t
 	expect((await next)?.group?.start).toBe(2n);
 });
 
+// Mirrors the Rust `a_closed_track_releases_groups_past_a_held_group_its_join_never_placed`.
+test("a closed track releases the groups past a held group its live join never placed", () => {
+	const producer = receivedTrack();
+	const ordered = producer.subscribe(withMax({ delay: { max: null } })).ordered();
+	put(producer, 0n, false);
+	drop(producer, 1n, 2n);
+	put(producer, 2n, false);
+	producer.skipGroups(3n, 4n);
+	put(producer, 4n, false);
+	expect(ordered.tryNextItem()?.group?.start).toBe(0n);
+	expect(ordered.tryNextItem()).toMatchObject({ kind: "gap", start: 1n, end: 2n });
+	// Lagging further than any group here has aged, so only upstream may place it.
+	const join = { start: { live: { min: Duration.secs(60) } } };
+	ordered.update(withMax({ delay: { max: null }, ranges: [join, { start: 4n }] }));
+	expect(items(ordered)).toEqual([]);
+	producer.finishAt({ group: 5n, frame: 0 });
+	producer.close();
+	expect(items(ordered)).toEqual(["group 4"]);
+});
+
 // Mirrors the Rust `a_held_group_a_waiting_time_start_lies_past_is_passed`.
 test("a group held behind a gap is passed once an update's waiting time start lies past its end", () => {
 	const producer = receivedTrack();

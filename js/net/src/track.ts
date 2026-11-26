@@ -6166,14 +6166,16 @@ export class Subscriber {
 			// keeping the group for them to judge afresh.
 			//
 			// A range still to be placed may come to hold it: neither handed out nor passed until it
-			// places, since it may or may not name it and the read never goes back. Meanwhile the cursor
-			// still runs, refusing every group past it, so backfills are asked and a copy's failure or the
-			// track closing reaches the read; then it is judged again, since that may have placed it. The
-			// cap or a declared end does not end the read, as an upstream still answers where the start
-			// lies; the track closing does, keeping the group for the ranges to judge again. Whatever
-			// places it moves the window, and the group finishing may rule it out, either waking the read.
-			// Mirrors the Rust `Ordered::read`.
-			let parked: Recv | undefined;
+			// places, since it may or may not name it and the read never goes back. The cap or a declared
+			// end does not end the wait, as an upstream still answers where the start lies; the track
+			// closing does, as nothing places it any more. Whatever places it moves the window, and the
+			// group finishing may rule it out, either waking the read.
+			//
+			// Before handing it out or waiting on it, the cursor runs once, refusing every group past it:
+			// one below goes first, a failure its copies report, such as a front's serving copy refusing
+			// a range, comes before it, and a front's backfill is asked. Then it is judged again, since
+			// that may have placed it. Mirrors the Rust `Ordered::read`.
+			let driven = false;
 			for (;;) {
 				const refused = this.#settle();
 				if (refused) {
@@ -6181,20 +6183,21 @@ export class Subscriber {
 					return { kind: "error", error: refused };
 				}
 				// Only placed ranges count: a live join still waiting on a first group names every key.
-				if (this.#placed(held.start)) return { kind: "group", group: held };
-				if (!this.#mayHold(held.start, held.end)) break;
-				if (parked) {
-					items.held = held;
-					return parked;
+				const keep = this.#placed(held.start);
+				if (!keep && !this.#mayHold(held.start, held.end)) break;
+				if (!driven) {
+					driven = true;
+					const read = this.#tryNextGroup(held.start);
+					if (read.kind === "group" || read.kind === "error") {
+						items.held = held;
+						if (read.kind === "group") this.#settled(read.group.start, read.group.start + 1n);
+						return read;
+					}
+					continue;
 				}
-				const read = this.#tryNextGroup(held.start);
-				if (read.kind === "group" || read.kind === "error") {
-					// One below it goes first, as the read never goes back.
-					items.held = held;
-					if (read.kind === "group") this.#settled(read.group.start, read.group.start + 1n);
-					return read;
-				}
-				parked = read.kind === "done" && this.#state.closed.peek() !== undefined ? read : { kind: "idle" };
+				if (keep) return { kind: "group", group: held };
+				items.held = held;
+				return { kind: "idle" };
 			}
 			// The bounds moved off it. With nothing they cover above, it waits for them to widen again,
 			// still polling the cursor so the read sees the track or itself end; otherwise the read
@@ -6219,6 +6222,8 @@ export class Subscriber {
 	#mayHold(key: bigint, end: bigint | undefined): boolean {
 		const cursor = this.#cursor.peek();
 		if (key < cursor.start || (cursor.end !== undefined && key >= cursor.end)) return false;
+		// Once the track closed, nothing places a range any more.
+		if (this.#state.closed.peek() !== undefined) return false;
 		return (this.#resume ? this.#resume.window() : this.#window).mayHold(key, end);
 	}
 

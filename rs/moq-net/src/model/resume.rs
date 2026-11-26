@@ -8305,8 +8305,8 @@ mod test {
 		}
 	}
 
-	/// A front's ordered read holding a group for an unplaced time start still reaches the
-	/// serving copy's fatal abort: its close places the start, and the read then fails.
+	/// A front's ordered read holding a group for an unplaced time start still runs its
+	/// cursor, so the serving copy's fatal abort reaches it before the group goes out.
 	#[test]
 	fn a_fronts_held_group_sees_its_copys_fatal_abort() {
 		let routes = Producer::new();
@@ -8346,14 +8346,54 @@ mod test {
 		ordered.update(since(5)).unwrap();
 		assert!(ordered.poll_next_item(&noop).is_pending(), "group 2 may hold time 5");
 		a.abort(Error::FrameTooLarge).unwrap();
-		// Its close places time 5 at group 2, the last group it held, then the read fails with it.
-		assert!(matches!(
-			ordered.poll_next_item(&noop),
-			Poll::Ready(Ok(Some(track::Item::Group(group)))) if group.start == 2
-		));
 		assert!(matches!(
 			ordered.poll_next_item(&noop),
 			Poll::Ready(Err(Error::FrameTooLarge))
+		));
+	}
+
+	/// A front's ordered read reports its serving copy's refusal of a range before a group it
+	/// holds that another range covers, keeping the group, as a plain read does.
+	#[test]
+	fn a_fronts_held_group_waits_behind_its_copys_refusal() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		a.anchored();
+		routes.serve(a.consume());
+		let since = |times: &[u64]| {
+			Subscription::default()
+				.with_ranges(times.iter().map(|&time| crate::track::Range {
+					start: crate::track::Start::Time(time),
+					end: None,
+				}))
+				.with_max(None)
+		};
+		let mut ordered = logical
+			.consume()
+			.subscribe(since(&[0]))
+			.now_or_never()
+			.unwrap()
+			.unwrap()
+			.ordered();
+		let noop = kio::Waiter::noop();
+		write(&a, 0);
+		a.drop_groups(1..2, StreamError::NotFound);
+		write(&a, 2);
+		assert!(matches!(
+			ordered.poll_next_item(&noop),
+			Poll::Ready(Ok(Some(track::Item::Group(group)))) if group.start == 0
+		));
+		// Group 2 is held behind the gap.
+		assert!(matches!(
+			ordered.poll_next_item(&noop),
+			Poll::Ready(Ok(Some(track::Item::Gap { .. })))
+		));
+		ordered.update(since(&[0, 5])).unwrap();
+		a.refuse_time(5, Error::NotFound);
+		assert!(matches!(
+			ordered.poll_next_item(&noop),
+			Poll::Ready(Err(Error::NotFound))
 		));
 	}
 

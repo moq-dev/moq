@@ -12955,6 +12955,7 @@ impl Subscriber {
 	/// they cover, or hand one out past a refusal.
 	pub(crate) fn held(&mut self, key: u64, end: Option<u64>) -> Held {
 		let bounds = self.bounds();
+		let closed = self.is_closed();
 		let within = bounds.contains(key);
 		let from = key.max(bounds.start);
 		// Only placed ranges count: a live join still waiting on a first group names every key.
@@ -12973,9 +12974,11 @@ impl Subscriber {
 			// Its own window, which spans every copy, places a range once a copy does.
 			Inner::Resume(resume, _) => resume.with_window(judge),
 		};
+		// Once the track closed, nothing places a range any more, so one still unplaced holds
+		// nothing back.
 		match next.filter(|start| bounds.end.is_none_or(|cap| *start < cap)) {
 			Some(start) if within && start == key => Held::Keep,
-			_ if may_hold => Held::Placing,
+			_ if may_hold && !closed => Held::Placing,
 			Some(_) => Held::Pass,
 			None => Held::Wait,
 		}
@@ -13857,33 +13860,20 @@ impl Ordered {
 			let key = group.start;
 			// A range moved off it with nothing in range above waits for the range to widen
 			// again, and the read waits or ends as it does for capped ranges.
-			// What parking on the cursor found: `Some(closed)` once it parked, or ended with the
-			// track closed.
-			let mut parked: Option<bool> = None;
+			let mut driven = false;
 			loop {
 				match self.inner.held(key, group.end()) {
-					Held::Keep => return Poll::Ready(Ok(Some(*group))),
-					// Neither handed out nor passed until the range places: it may or may not name
-					// it, and the read never goes back. Its cap or the track's declared end does not
-					// end the read meanwhile, since an upstream still answers where the start lies;
-					// the track closing does, as nothing can place it any more. The group stays
-					// held for the ranges to judge again.
-					Held::Placing if let Some(closed) = parked => {
-						self.held = Some(group);
-						return match closed {
-							true => Poll::Ready(Ok(None)),
-							false => Poll::Pending,
-						};
-					}
-					Held::Placing => {
-						// Parked on whatever the cursor waits on, refusing every group past it, and
-						// on the group finishing, whose end may rule the range out, then judged
-						// again, so a change meanwhile is not missed.
+					// Before handing it out or waiting on it, the cursor runs once, refusing every
+					// group past it: one below goes first, and a failure its copies report, such as
+					// a front's serving copy refusing a range, comes before it. Waiting, it is parked
+					// there, and on the group finishing, whose end may rule the range out; then
+					// judged again, so a change meanwhile is not missed.
+					Held::Keep | Held::Placing if !driven => {
+						driven = true;
 						let _ = group.poll_closed(waiter);
 						let admit = (ops::Bound::Unbounded, ops::Bound::Excluded(key));
 						match self.inner.poll_group_in(true, admit, waiter) {
-							Poll::Pending => parked = Some(false),
-							Poll::Ready(Ok(None)) => parked = Some(self.inner.is_closed()),
+							Poll::Pending | Poll::Ready(Ok(None)) => {}
 							// One below it goes first, as the read never goes back.
 							Poll::Ready(Ok(Some(lower))) => {
 								self.held = Some(group);
@@ -13895,6 +13885,14 @@ impl Ordered {
 								return Poll::Ready(Err(err));
 							}
 						}
+					}
+					Held::Keep => return Poll::Ready(Ok(Some(*group))),
+					// Neither handed out nor passed until the range places: it may or may not name
+					// it, and the read never goes back. Its cap or the track's declared end does not
+					// end the read meanwhile, since an upstream still answers where the start lies.
+					Held::Placing => {
+						self.held = Some(group);
+						return Poll::Pending;
 					}
 					Held::Wait => {
 						self.held = Some(group);
@@ -18790,6 +18788,38 @@ mod test {
 		assert_eq!(held_next(&mut ordered), None, "the join may start at group 2");
 		drop(producer.finish().unwrap());
 		assert!(matches!(ordered.next_item().now_or_never(), Some(Ok(None))));
+	}
+
+	/// Once the track closes, a held group's unplaced live join holds back none of the groups
+	/// another range covers past it: nothing places the join any more.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_closed_track_releases_groups_past_a_held_group_its_join_never_placed() {
+		let producer = untimed_producer();
+		producer.received();
+		producer.anchored();
+		let mut ordered = producer.subscribe(Subscription::default().with_max(None)).ordered();
+		framed(&producer, 0, 1).finish().unwrap();
+		producer.drop_groups(1..2, StreamError::NotFound);
+		framed(&producer, 2, 1).finish().unwrap();
+		producer.skip_groups(3..4);
+		framed(&producer, 4, 1).finish().unwrap();
+		assert_eq!(held_next(&mut ordered), Some(Ok(0)));
+		assert_eq!(held_next(&mut ordered), Some(Err(1..2)));
+		let join = Range::from(Start::Live {
+			min: Some(Duration::from_secs(60)),
+			max: None,
+		});
+		let four = Range {
+			start: Start::Time(4),
+			end: None,
+		};
+		ordered
+			.update(Subscription::default().with_ranges([join, four]).with_max(None))
+			.unwrap();
+		assert_eq!(held_next(&mut ordered), None, "the join may start at group 2");
+		drop(producer.finish().unwrap());
+		assert_eq!(held_next(&mut ordered), Some(Ok(4)));
 	}
 
 	/// A held group waiting on a time start wakes the read when it finishes at an end the

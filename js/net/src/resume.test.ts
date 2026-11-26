@@ -496,8 +496,7 @@ test("a backfill places a time start its serving copy raised, at the group holdi
 });
 
 // An ordered read holding a group for an unplaced time start still runs its cursor, so the serving
-// copy's fatal abort reaches it. The Rust `a_fronts_held_group_sees_its_copys_fatal_abort` reaches
-// it too, after the copy's close places the start at group 2.
+// copy's fatal abort reaches it. Mirrors the Rust `a_fronts_held_group_sees_its_copys_fatal_abort`.
 test("a front's held group sees its serving copy's fatal abort", async () => {
 	const clock = new Manual();
 	const installed = install(clock);
