@@ -4286,6 +4286,11 @@ impl Consumer {
 		self.cursor.state.read().outcome.frames()
 	}
 
+	/// Whether this copy settled at its transport back-cut at or before `index`.
+	pub(super) fn past_cut(&self, index: usize) -> bool {
+		self.cursor.state.read().past_cut(index)
+	}
+
 	#[cfg(feature = "async")]
 	pub(crate) fn last_object(&self) -> Option<u64> {
 		let state = self.cursor.state.read();
@@ -4498,12 +4503,16 @@ impl Consumer {
 					recover.failed(index, err);
 					return res;
 				}
+				// A lite-07 Position End cap cut this copy short at `range_end`: distinct from
+				// ordinary cache eviction so route switch-back recovers the missing suffix.
+				Poll::Ready(Err(Error::Evicted)) if self.cursor.state.read().past_cut(index) => Cause::Cut,
 				Poll::Ready(Err(err)) => Cause::Failed(err.clone()),
 				Poll::Pending => Cause::Stalled,
 			};
 			if !recover.wants(&cause, waiter) {
 				match &cause {
 					Cause::Failed(err) => recover.failed(index, err),
+					Cause::Cut => recover.failed(index, &Error::Evicted),
 					// The copy being read still serves and holds no more than was read, so
 					// nothing continues the group.
 					Cause::Closed if past => {
@@ -4583,7 +4592,7 @@ impl Consumer {
 		let replacement = ready!(recover.poll(index, &cause, waiter))?;
 		let failed = match cause {
 			Cause::Failed(err) => Some(err),
-			Cause::Stalled | Cause::Closed => None,
+			Cause::Stalled | Cause::Closed | Cause::Cut => None,
 		};
 		// A plain read inflates from frame 0, which a replacement starting later lacks
 		// when the failed route's head was not lent to it.

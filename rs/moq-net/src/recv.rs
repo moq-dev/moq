@@ -144,8 +144,7 @@ impl Group {
 	/// frames rather than reusing the truncated slice.
 	pub fn end_slice(self) -> Result<(), Error> {
 		self.handle.bound_back();
-		let _ = self.finish();
-		Ok(())
+		self.finish()
 	}
 
 	/// Abort with the receive error instead of cancellation.

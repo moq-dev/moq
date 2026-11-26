@@ -22,6 +22,9 @@ use crate::{
 pub(super) struct FillAsk {
 	/// The groups to ask for, empty when no fill is held.
 	pub groups: RangeSet<u64>,
+	/// Optional non-zero starting frame per run's start group (lite-07 mid-group multi-group
+	/// fills); absent or `0` means frame 0.
+	pub starts: BTreeMap<u64, u64>,
 	/// The most urgent priority a held fill asks with.
 	pub priority: i8,
 	pub order: Order,
@@ -31,6 +34,7 @@ impl Default for FillAsk {
 	fn default() -> Self {
 		Self {
 			groups: Default::default(),
+			starts: Default::default(),
 			priority: i8::MIN,
 			order: Order::Ascending,
 		}
@@ -50,12 +54,36 @@ impl FillAsk {
 		}
 	}
 
+	/// Record the minimum starting frame required for `group` across overlapping fills.
+	fn add_start(&mut self, group: u64, frame: u64) {
+		self.starts
+			.entry(group)
+			.and_modify(|current| *current = (*current).min(frame))
+			.or_insert(frame);
+	}
+
 	/// The bounded ranges `groups` take on the wire, each ending before a group's first
 	/// frame, as `wire_ranges` ends an absolute one.
+	#[cfg(test)]
 	pub fn wire(groups: &RangeSet<u64>) -> impl Iterator<Item = lite::Range> + '_ {
 		groups.iter().map(|groups| lite::Range {
 			start: Some(lite::Anchor::Absolute(Position::group(groups.start))),
 			end: Some(lite::Anchor::Absolute(Position::group(groups.end))),
+		})
+	}
+
+	/// Like [`Self::wire`], honoring any non-zero starting frame recorded in `starts` for a
+	/// run's first group.
+	pub fn wire_starts<'a>(
+		groups: &'a RangeSet<u64>,
+		starts: &'a BTreeMap<u64, u64>,
+	) -> impl Iterator<Item = lite::Range> + 'a {
+		groups.iter().map(move |groups| {
+			let frame = starts.get(&groups.start).copied().unwrap_or(0);
+			lite::Range {
+				start: Some(lite::Anchor::Absolute(Position::new(groups.start, frame))),
+				end: Some(lite::Anchor::Absolute(Position::group(groups.end))),
+			}
 		})
 	}
 
@@ -379,11 +407,22 @@ impl RangeFills {
 			.iter()
 			.map(|fill| fill.priority())
 			.fold(self.ask.priority, i8::max);
+		let plain = !serving.info().compressed();
 		for run in std::mem::take(&mut self.recover).iter() {
+			let frame_start = if plain && serve.subscriber.version.has_ranges() {
+				self.held
+					.iter()
+					.filter(|fill| fill.start().group == run.start)
+					.map(|fill| fill.frame_start(run.start))
+					.min()
+					.unwrap_or(0)
+			} else {
+				0
+			};
 			self.recovered.insert(run.clone());
 			self.recovering.insert(run.clone());
 			self.recoveries
-				.push(Recovery::new(serve, serving, run.clone(), priority));
+				.push(Recovery::new(serve, serving, run.clone(), frame_start, priority));
 		}
 		// What a finished recovery did not deliver stands refused.
 		let mut done = Vec::new();
@@ -490,6 +529,12 @@ impl RangeFills {
 				};
 				for run in asked {
 					for gap in waiting.gaps(&run) {
+						let frame = if plain && serve.subscriber.version.has_ranges() {
+							fill.frame_start(gap.start)
+						} else {
+							0
+						};
+						ask.add_start(gap.start, frame);
 						ask.groups.insert(gap);
 					}
 				}
@@ -534,6 +579,9 @@ impl RangeFills {
 		let mut draining = RangeSet::new();
 		for run in self.ask.groups.iter() {
 			if ask.groups.overlaps(run) {
+				if let Some(&frame) = self.ask.starts.get(&run.start) {
+					ask.add_start(run.start, frame);
+				}
 				groups.insert(run.clone());
 				continue;
 			}
@@ -551,6 +599,9 @@ impl RangeFills {
 				}
 			}
 			if self.reading.range(run.clone()).next().is_some() {
+				if let Some(&frame) = self.ask.starts.get(&run.start) {
+					ask.add_start(run.start, frame);
+				}
 				groups.insert(run.clone());
 				draining.insert(run.clone());
 			}
@@ -562,6 +613,9 @@ impl RangeFills {
 		for run in self.recovering.iter() {
 			groups.remove(run.clone());
 		}
+		// Keep only non-zero start frames matching an actual run start in `groups`.
+		ask.starts
+			.retain(|&group, &mut frame| frame > 0 && groups.iter().any(|run| run.start == group));
 		// What finishes a stream still asks with what its fills asked.
 		if self.held.is_empty() && !groups.is_empty() {
 			ask.priority = self.ask.priority;
@@ -715,7 +769,13 @@ enum RecoveryState {
 }
 
 impl Recovery {
-	pub(super) fn new(serve: &TrackServe, serving: &track::Producer, groups: Range<u64>, priority: i8) -> Self {
+	pub(super) fn new(
+		serve: &TrackServe,
+		serving: &track::Producer,
+		groups: Range<u64>,
+		frame_start: u64,
+		priority: i8,
+	) -> Self {
 		// Before lite-07 the start is the answer, which the publisher gives only once a group in
 		// range can start it, so the range stays open until the start caps it: only upstream
 		// knows which group it still holds past the run.
@@ -725,8 +785,13 @@ impl Recovery {
 			.with_ranges(track::Range::span(Some(groups.start), end))
 			.with_priority(priority)
 			.with_order(Order::Ascending);
+		let start_pos = if serve.subscriber.version.has_ranges() {
+			Position::new(groups.start, frame_start)
+		} else {
+			Position::group(groups.start)
+		};
 		let ranges = vec![lite::Range {
-			start: Some(lite::Anchor::Absolute(Position::group(groups.start))),
+			start: Some(lite::Anchor::Absolute(start_pos)),
 			end: end.map(|end| lite::Anchor::Absolute(Position::group(end))),
 		}];
 		Self::open(serve, serving, groups, subscription, ranges, !one_start)

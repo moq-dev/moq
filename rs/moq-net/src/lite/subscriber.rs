@@ -1752,12 +1752,12 @@ impl GroupRecv {
 				// remaining frames rather than reusing the truncated slice.
 				let capped = end.is_none()
 					&& self.subscriber.version.has_group_end()
-					&& !records && self
-					.subscriber
-					.subscribes
-					.lock()
-					.get(&hdr.subscribe)
-					.is_some_and(|entry| entry.is_capped(hdr.key));
+					&& self
+						.subscriber
+						.subscribes
+						.lock()
+						.get(&hdr.subscribe)
+						.is_some_and(|entry| entry.is_capped(hdr.key));
 				let ended = if capped { group.end_slice() } else { group.end(end) };
 				if ended.is_ok()
 					&& let Some(end) = end
@@ -13221,7 +13221,7 @@ impl TrackServe {
 					Sub::None => None,
 				};
 				let (probes, reasked) = wanted_probes(active, asks, joins, &demand_ranges);
-				let fill_ranges: Vec<_> = FillAsk::wire(&groups).collect();
+				let fill_ranges: Vec<_> = FillAsk::wire_starts(&groups, &range_fills.ask.starts).collect();
 				let probes = budget.fit_after(demand_ranges.iter().chain(&fill_ranges), probes);
 				let reasked = fitted_reasks(active, reasked, &probes);
 				(
@@ -13251,7 +13251,7 @@ impl TrackServe {
 			Some((demand, demand_ranges, probes, reasked, max_age)) => {
 				let mut ranges = demand_ranges.clone();
 				ranges.extend(probes.iter().copied());
-				ranges.extend(FillAsk::wire(&groups));
+				ranges.extend(FillAsk::wire_starts(&groups, &fills.starts));
 				Some(Wire {
 					subscription: fills.merge(demand.clone()),
 					demand: Some(demand),
@@ -13269,7 +13269,7 @@ impl TrackServe {
 				demand_ranges: Vec::new(),
 				probes: 0,
 				reasked: Default::default(),
-				ranges: FillAsk::wire(&groups).collect(),
+				ranges: FillAsk::wire_starts(&groups, &fills.starts).collect(),
 				max_age: fills.subscription().max_age(),
 			}),
 		};
@@ -14432,15 +14432,19 @@ impl TrackServeRun {
 						started = self.serve.pipeline(pref).map(|subscribing| *pipelined = subscribing);
 					}
 					// A fetch needs nothing from TRACK_INFO to go out, only to read its answer.
-					// On lite-07, if a pipelined SUBSCRIBE is already opening, hold whole-group
-					// fills for the same RTT until TRACK_INFO lands so they deduplicate onto it.
+					// On lite-07, hold multi-group fills (so they go out as one bounded SUBSCRIBE
+					// via RangeFills once TRACK_INFO lands) and whole-group fills when a pipelined
+					// SUBSCRIBE is already opening (so they deduplicate onto it).
 					while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(waiter) {
-						if self.serve.subscriber.version.has_ranges() && pipelined.is_some() && whole_groups(&fill) {
+						if self.serve.subscriber.version.has_ranges()
+							&& (multi_group_fill(&fill) || (pipelined.is_some() && whole_groups(&fill)))
+						{
 							pending_fills.push(fill);
 						} else {
 							fetches.push(FillServeRun::new(self.serve.clone(), fill, known.later()));
 						}
 					}
+					pending_fills.retain_mut(|fill| fill.poll_withdrawn(waiter).is_pending());
 					// TRACK opens first: its stream fails fast without credit, where a fetch's
 					// waits for it, so fetches opened ahead could starve their own prerequisite.
 					let subscribed = pipelined
@@ -15103,7 +15107,7 @@ impl ServeLoop {
 				.serving
 				.largest()
 				.is_some_and(|largest| fill.end() <= largest.group.saturating_add(1));
-			if whole_groups(&fill) && (spans_groups(&fill) || (has_active_sub && within_live)) {
+			if multi_group_fill(&fill) || (whole_groups(&fill) && has_active_sub && within_live) {
 				self.range_fills.push(fill);
 			} else {
 				let info = FetchInfo::Known(self.serving.info().clone());
@@ -16068,10 +16072,18 @@ fn spans_groups(fill: &track::FillGroups) -> bool {
 }
 
 /// Lite-07: whether `fill` asks for one or more whole groups (not a flight, frame slice, or
-/// mid-group start), so it can union into the active SUBSCRIBE or use a one-shot `Recovery`.
+/// mid-group start), so it can union into an active SUBSCRIBE.
 fn whole_groups(fill: &track::FillGroups) -> bool {
 	let last = fill.end().saturating_sub(1);
 	!fill.is_flight() && fill.start().frame == 0 && fill.group(last).frame_end().is_none()
+}
+
+/// Lite-07: whether `fill` spans more than one group (including a mid-group start `[Position(G, f),
+/// Position(end, 0))`), so it goes out as one bounded SUBSCRIBE through `RangeFills`/`Recovery`
+/// rather than sequential single-group `FillServeRun` requests.
+fn multi_group_fill(fill: &track::FillGroups) -> bool {
+	let last = fill.end().saturating_sub(1);
+	!fill.is_flight() && fill.start().group < last && fill.group(last).frame_end().is_none()
 }
 
 /// Serves one group of a fill: wire `FETCH` on lite-05/06, or one-shot `SUBSCRIBE` + FIN on
@@ -16617,6 +16629,9 @@ enum SubFillState {
 		ended: bool,
 	},
 	Drain {
+		/// Kept if SUBSCRIBE FIN landed before TRACK_INFO installed the FillTarget.
+		request: Option<track::GroupFill>,
+		frame_end: Option<u64>,
 		settle: Box<Settle>,
 	},
 	Done,
@@ -16652,8 +16667,9 @@ impl SubFillRun {
 		let from_state = match &mut self.state {
 			SubFillState::Open { request }
 			| SubFillState::Send { request, .. }
-			| SubFillState::Active { request, .. } => request.take(),
-			SubFillState::Drain { .. } | SubFillState::Done => None,
+			| SubFillState::Active { request, .. }
+			| SubFillState::Drain { request, .. } => request.take(),
+			SubFillState::Done => None,
 		};
 		from_state.or_else(|| {
 			self.serve
@@ -16672,6 +16688,7 @@ impl SubFillRun {
 			SubFillState::Open { request: Some(_) }
 				| SubFillState::Send { request: Some(_), .. }
 				| SubFillState::Active { request: Some(_), .. }
+				| SubFillState::Drain { request: Some(_), .. }
 		);
 		held || self
 			.serve
@@ -16765,7 +16782,7 @@ impl kio::Task for SubFillRun {
 		}
 		loop {
 			// If every caller left before any group stream accepted the fill, cancel upstream.
-			if !matches!(self.state, SubFillState::Drain { .. } | SubFillState::Done)
+			if !matches!(self.state, SubFillState::Done)
 				&& self.is_unaccepted()
 				&& self.readers.poll_unwanted(waiter).is_ready()
 			{
@@ -16982,7 +16999,11 @@ impl kio::Task for SubFillRun {
 								self.state = SubFillState::Done;
 								return Poll::Ready(());
 							}
+							let request = request.take();
+							let frame_end = *frame_end;
 							self.state = SubFillState::Drain {
+								request,
+								frame_end,
 								settle: Box::new(Settle::new(&self.serve.subscriber.runtime, self.tail.consume())),
 							};
 						}
@@ -16998,7 +17019,26 @@ impl kio::Task for SubFillRun {
 						}
 					}
 				}
-				SubFillState::Drain { settle } => {
+				SubFillState::Drain {
+					request,
+					frame_end,
+					settle,
+				} => {
+					if request.is_some()
+						&& let Poll::Ready(res) = self.info.poll(waiter)
+					{
+						match res {
+							Ok(info) => {
+								let req = request.take().expect("checked");
+								let fe = *frame_end;
+								Self::install_target(&self.serve, self.id, req, info, fe);
+							}
+							Err(err) => {
+								self.finish_err(err);
+								return Poll::Ready(());
+							}
+						}
+					}
 					let key = self.group;
 					ready!(settle.poll(waiter, |tail| tail.covers(key..key.saturating_add(1))));
 					if let Some(req) = self.take_unaccepted() {

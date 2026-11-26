@@ -3186,6 +3186,11 @@ export class Publisher {
 			// Whether every frame went out, which a finished group's GROUP_END then claims.
 			let whole = false;
 
+			// Kept across loop iterations so waking on a Position End change never starts a
+			// second concurrent readGroupFrame().
+			let pendingRead: ReturnType<typeof hooks.readGroupFrame> | undefined;
+			const stopWake = Symbol("stop-wake");
+
 			for (;;) {
 				// Lite-07: reaching a Position end closes the stream cleanly without GROUP_END
 				// (a slice, not the whole group) instead of parking open. If the group itself
@@ -3199,9 +3204,28 @@ export class Publisher {
 						(endFrame !== undefined && nextIndex > endFrame)) &&
 					(settled === undefined || settled > nextIndex)
 				) {
+					pendingRead?.catch(() => {});
 					break;
 				}
-				const read = await race([hooks.readGroupFrame(group, compress), stream.closed]);
+				pendingRead ??= hooks.readGroupFrame(group, compress);
+				const closed = stream.closed.then(() => undefined);
+				let disposeStop: Dispose | undefined;
+				let outcome: Awaited<ReturnType<typeof hooks.readGroupFrame>> | undefined | typeof stopWake;
+				try {
+					if (stops) {
+						const moved = new Promise<typeof stopWake>((resolve) => {
+							disposeStop = stops.at.changed(() => resolve(stopWake));
+						});
+						outcome = await race([pendingRead, closed, moved]);
+					} else {
+						outcome = await race([pendingRead, closed]);
+					}
+				} finally {
+					disposeStop?.();
+				}
+				if (outcome === stopWake) continue;
+				pendingRead = undefined;
+				const read = outcome;
 				if (!read) {
 					// The group ended before the frame the subscriber asked to start
 					// at, so this publisher can't serve the range at all. FINning here

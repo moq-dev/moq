@@ -2100,9 +2100,8 @@ export class Subscriber {
 						await w.u53(StreamId.Subscribe);
 						await msg.encode(w, this.version);
 					});
-					const writing = opened.writer.write(bytes);
+					await opened.writer.write(bytes);
 					opened.writer.close();
-					await writing;
 					return opened;
 				},
 				signal,
@@ -2592,10 +2591,9 @@ export class Subscriber {
 							await w.u53(StreamId.Subscribe);
 							await msg.encode(w, this.version);
 						});
-						const writing = stream.writer.write(bytes);
+						await stream.writer.write(bytes);
 						// Lite-07 one-shot SUBSCRIBE + immediate FIN (1 RTT).
 						if (oneShot) stream.writer.close();
-						await writing;
 						return stream;
 					},
 					signal,
