@@ -13534,6 +13534,27 @@ impl Subscriber {
 			}
 			Inner::Resume(resume, _) => resume.runs(from),
 		};
+		Self::clip(runs, end)
+	}
+
+	/// The groups from `from` up to the exclusive `end` that the placed ranges and the bounds
+	/// name, lowest first: unlike [`Self::runs_in_range`], a range still to be placed names none.
+	pub(crate) fn placed_in_range(&mut self, from: u64, end: u64) -> Vec<ops::Range<u64>> {
+		let bounds = self.bounds();
+		let from = from.max(bounds.start);
+		let end = bounds.end.map_or(end, |cap| cap.min(end));
+		let runs = match &mut self.inner {
+			Inner::Plain(cursor) => {
+				cursor.sync();
+				cursor.filter.window.placed(from).collect::<Vec<_>>()
+			}
+			Inner::Resume(resume, _) => resume.with_window(|window| window.placed(from).collect()),
+		};
+		Self::clip(runs, end)
+	}
+
+	/// `runs` up to the exclusive `end`, as half-open ranges.
+	fn clip(runs: Vec<ops::RangeInclusive<u64>>, end: u64) -> Vec<ops::Range<u64>> {
 		runs.into_iter()
 			.take_while(|run| *run.start() < end)
 			.map(|run| *run.start()..run.end().saturating_add(1).min(end))
@@ -14509,15 +14530,16 @@ impl Ordered {
 		read
 	}
 
-	/// The lowest run of a gap the ranges cover now, as the gap's key in `gaps` and the keys of
-	/// it that run covers, since the ranges may have moved since the gap was found. A gap they
-	/// exclude waits, in case they widen again.
+	/// The lowest run of a gap the placed ranges cover now, as the gap's key in `gaps` and the
+	/// keys of it that run covers, since the ranges may have moved since the gap was found. A gap
+	/// they exclude waits, in case they widen again, and so does one only a range still to be
+	/// placed may name, as a held group does.
 	fn lowest_gap(&mut self) -> Option<(u64, ops::Range<u64>)> {
 		// The fields borrow apart, so the map is walked in place and the walk stops at the
 		// first gap the ranges cover.
 		let Self { inner, gaps, .. } = self;
 		gaps.iter().find_map(|(start, (end, _))| {
-			let runs = inner.runs_in_range(*start, *end);
+			let runs = inner.placed_in_range(*start, *end);
 			Some((*start, runs.into_iter().next()?))
 		})
 	}

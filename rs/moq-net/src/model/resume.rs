@@ -3107,7 +3107,15 @@ impl Reader {
 						break;
 					}
 					Poll::Ready(Err(err)) => {
-						copy.done = Some(Err(err));
+						// A refusal its read met, such as a nested front's copy refusing the ranges,
+						// fails the read until they change, as the check above does.
+						if !self.copies[index].replaced
+							&& let Sub::Ready(sub) = &mut self.copies[index].sub
+							&& sub.refused().is_some()
+						{
+							return Some(Poll::Ready(Err(err)));
+						}
+						self.copies[index].done = Some(Err(err));
 						break;
 					}
 				}
@@ -8689,6 +8697,52 @@ mod test {
 			ordered.poll_next_item(&noop),
 			Poll::Ready(Err(Error::NotFound))
 		));
+	}
+
+	/// A front's queued gap waits for an update's time start to place before it goes out:
+	/// placed past the gap, the ranges no longer name it. Mirrors the JS
+	/// `a front's queued gap waits for an update's time start to place`.
+	#[test]
+	fn a_fronts_queued_gap_waits_for_an_updates_time_start_to_place() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		a.anchored();
+		routes.serve(a.consume());
+		let since = |time| {
+			Subscription::default()
+				.with_ranges([crate::track::Range {
+					start: crate::track::Start::Time(time),
+					end: None,
+				}])
+				.with_max(None)
+		};
+		let mut ordered = logical
+			.consume()
+			.subscribe(since(0))
+			.now_or_never()
+			.unwrap()
+			.unwrap()
+			.ordered();
+		let noop = kio::Waiter::noop();
+		let next = |ordered: &mut track::Ordered| match ordered.poll_next_item(&noop) {
+			Poll::Ready(Ok(Some(track::Item::Group(group)))) => format!("group {}", group.start),
+			Poll::Ready(Ok(Some(track::Item::Gap { range, .. }))) => format!("gap {range:?}"),
+			Poll::Ready(Err(err)) => format!("error {err:?}"),
+			Poll::Ready(Ok(None)) => "end".into(),
+			Poll::Pending => "pending".into(),
+		};
+		write(&a, 0);
+		a.drop_groups(1..2, StreamError::NotFound);
+		assert!(matches!(
+			ordered.poll_next_group(&noop),
+			Poll::Ready(Ok(Some(group))) if group.start == 0
+		));
+		ordered.update(since(5)).unwrap();
+		assert_eq!(next(&mut ordered), "pending");
+		a.time_starts([(5, Some(5))]);
+		write(&a, 5);
+		assert_eq!(next(&mut ordered), "group 5");
 	}
 
 	/// A front served by another front reports the inner front's copy refusing a range before

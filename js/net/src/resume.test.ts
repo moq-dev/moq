@@ -603,6 +603,45 @@ test("a front's held group sees its serving copy's fatal abort", async () => {
 });
 
 /**
+ * A front's queued gap waits for an update's time start to place before it goes out: placed past the
+ * gap, the ranges no longer name it. Mirrors the Rust
+ * `a_fronts_queued_gap_waits_for_an_updates_time_start_to_place`.
+ */
+test("a front's queued gap waits for an update's time start to place", async () => {
+	const clock = new Manual();
+	const installed = install(clock);
+	const front = new Front();
+	const source = new BroadcastProducer();
+	const handle = source.consume();
+	const ta = copy(source);
+	hooks.receiveTrack(ta.producer);
+	ta.write(0n);
+	hooks.dropTrackGroups(ta.producer, 1n, 2n, { error: new StreamError(StreamCode.NotFound) });
+	front.serve(handle);
+	const ordered = front.consumer
+		.track("seq")
+		.subscribe({ ranges: [{ start: 0n }] })
+		.ordered();
+	try {
+		await clock.advance(Duration.ZERO);
+		expect(ordered.tryNextGroup()?.start).toBe(0n);
+		ordered.update({ ranges: [{ start: 5n }] });
+		await clock.advance(Duration.ZERO);
+		expect(ordered.tryNextItem()).toBeUndefined();
+		hooks.timeStarts(ta.producer, [[5n, 5n]]);
+		ta.write(5n);
+		await clock.advance(Duration.ZERO);
+		expect(ordered.tryNextItem()?.group?.start).toBe(5n);
+	} finally {
+		ordered.close();
+		front.consumer.close();
+		handle.close();
+		source.close();
+		installed.close();
+	}
+});
+
+/**
  * A front's serving copy refusing a range's time start fails the read only until the ranges change:
  * the track does not end on it, as a direct reader's refusal does not. Mirrors the Rust
  * `Reader::poll_group`, which returns a serving copy's refusal without marking the copy done.

@@ -6532,6 +6532,16 @@ export class Subscriber {
 		return (this.#resume ? this.#resume.window() : this.#window).placed(key, key + 1n).length > 0;
 	}
 
+	// The parts of `[start, end)` this reader's placed ranges and bounds cover now. Mirrors the Rust
+	// `Subscriber::placed_in_range`.
+	#placedIn(start: bigint, end: bigint): Run[] {
+		const cursor = this.#cursor.peek();
+		const from = max(start, cursor.start);
+		const to = cursor.end === undefined ? end : min(end, cursor.end);
+		if (from >= to) return [];
+		return (this.#resume ? this.#resume.window() : this.#window).placed(from, to);
+	}
+
 	// The parts of `[start, end)` this reader's ranges and bounds cover now.
 	#covered(start: bigint, end: bigint): Run[] {
 		const cursor = this.#cursor.peek();
@@ -6561,12 +6571,14 @@ export class Subscriber {
 		}
 	}
 
-	// The lowest gap waiting that the bounds cover, as its index and the first part of it they cover,
-	// since they may have moved since it was found. A gap they exclude waits, in case they widen.
+	// The lowest gap waiting that the placed ranges and the bounds cover, as its index and the first
+	// part of it they cover, since they may have moved since it was found. A gap they exclude waits, in
+	// case they widen, and so does one only a range still to be placed may name, as a held group does.
+	// Mirrors the Rust `Ordered::lowest_gap`.
 	#lowestGap(items: Items): { index: number; span: Run } | undefined {
 		for (let index = 0; index < items.gaps.length; index++) {
 			const gap = items.gaps[index];
-			const [span] = this.#covered(gap.start, gap.end);
+			const [span] = this.#placedIn(gap.start, gap.end);
 			if (span) return { index, span };
 		}
 		return undefined;
