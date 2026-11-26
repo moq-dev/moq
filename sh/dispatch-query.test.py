@@ -723,7 +723,7 @@ class QueryTests(unittest.TestCase):
     "rs lint-changed "*) echo $$ >"{pid}"; echo "waiting for a lock"; echo >"{started}"; exec sleep 600 ;;
 esac
 ''')
-        self.change("rs/kio/src/clock/mod.rs")
+        self.change("rs/moq-pattern/src/pattern.rs")
         for jobs in ("1", "3"):
             with self.subTest(jobs=jobs):
                 run = subprocess.Popen(
@@ -789,7 +789,7 @@ set -x
     "rs lint-changed "*) echo $$ >"{pid}"; exec sleep 600 ;;
 esac
 ''')
-        self.change("rs/kio/src/clock/mod.rs")
+        self.change("rs/moq-pattern/src/pattern.rs")
         for jobs in ("1", "3"):
             with self.subTest(jobs=jobs):
                 pid.unlink(missing_ok=True)
@@ -825,7 +825,7 @@ esac
         self.assertFalse(any("demo/justfile" in call for call in calls), calls)
 
     def test_ci_runs_one_lint_preamble_and_one_test_pass(self):
-        self.change("rs/kio/src/clock/mod.rs")
+        self.change("rs/moq-pattern/src/pattern.rs")
         calls = self.run_ci()
         self.assertTrue(any(call.startswith("rs lint-changed ") for call in calls), calls)
         self.assertFalse(any(call.startswith("rs check-changed ") for call in calls), calls)
@@ -837,7 +837,7 @@ esac
         )
 
     def test_rust_lane_runs_only_the_lint_and_the_test_build(self):
-        self.change("rs/kio/src/clock/mod.rs")
+        self.change("rs/moq-pattern/src/pattern.rs")
         calls = [call.split()[1] for call in self.run_ci() if call.startswith("rs ")]
         # rs_cross is a lane of its own, so its call can land anywhere.
         self.assertEqual(calls.count("cross-lint-changed"), 1)

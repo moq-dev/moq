@@ -152,7 +152,7 @@ class SelectTest(unittest.TestCase):
     def test_gate_runs_no_feature_matrix(self):
         # `just rs features` owns the isolated feature builds, outside the gate.
         for path in (
-            "rs/kio/src/lib.rs",
+            "rs/moq-pattern/src/lib.rs",
             "rs/moq-tokio/src/lib.rs",
             "rs/moq-quic/src/lib.rs",
             "rs/moq-video/src/lib.rs",
@@ -170,7 +170,7 @@ class SelectTest(unittest.TestCase):
     def test_gate_proves_send_depth_for_net(self):
         # moq-net and its dependencies can deepen the session driver's Send proof.
         # send-depth runs in parallel with the stable lint steps in its own target dir.
-        for path in ("rs/moq-net/src/lib.rs", "rs/kio/src/lib.rs", "Cargo.lock"):
+        for path in ("rs/moq-net/src/lib.rs", "rs/moq-pattern/src/lib.rs", "Cargo.lock"):
             with self.subTest(path=path):
                 calls = [call for call in self.selected(path) if call != "rs c-tests --syntax"]
                 self.assertEqual(calls.count("rs send-depth"), 1, calls)
@@ -227,7 +227,7 @@ class SelectTest(unittest.TestCase):
         # Every other build unifies `async` and `test-support` back in, so the
         # gate compiles moq-net without them, for moq-net and its dependencies.
         for recipe in ("rs no-async", "rs net-fuzz"):
-            for path in ("rs/moq-net/src/lib.rs", "rs/kio/src/lib.rs", "Cargo.lock"):
+            for path in ("rs/moq-net/src/lib.rs", "rs/moq-pattern/src/lib.rs", "Cargo.lock"):
                 for action in ("check", "check-test", "lint"):
                     with self.subTest(recipe=recipe, path=path, action=action):
                         calls = self.selected(path, action=action)
