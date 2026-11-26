@@ -202,6 +202,9 @@ pub(super) struct Standing<'a> {
 	/// the groups it handed out ([`Record::handed`]) or a report then shows it handed a group
 	/// out, since a group may still land late on a key it passed.
 	pub ordered: bool,
+	/// It polls what it missed, so a skip inside a whole span may still be its to report: the
+	/// span stays out of what it handed out until it reports it.
+	pub reports: bool,
 	/// The groups its track holds whole.
 	pub spans: &'a dyn Spans,
 }
@@ -213,6 +216,7 @@ impl Default for Standing<'_> {
 			handed: None,
 			ranges: None,
 			ordered: false,
+			reports: false,
 			spans: &(),
 		}
 	}
@@ -500,8 +504,14 @@ impl Record {
 			let stretch = self.final_end(start, reader, beside, mode);
 			if stretch.runs > 2 {
 				self.settle_stretch(start..stretch.end);
-			}
-			if stretch.end > start {
+				folded.push(start..stretch.end);
+			} else if mode == Fold::Final && stretch.end > start {
+				// Final as it stands, so what was handed out in it merges into one run, though
+				// folding it would cost more than it saves.
+				self.delivered.insert_run(start..stretch.end);
+				if self.handed.runs() > 0 {
+					self.handed.insert_run(start..stretch.end);
+				}
 				folded.push(start..stretch.end);
 			}
 			from = match mode {
@@ -525,13 +535,16 @@ impl Record {
 	}
 
 	/// Take in, with each run of groups handed out, the rest of the span of the group it ends
-	/// at, when the track holds that group whole: no group starts there to hand out, so a
-	/// reader that never asks what it missed keeps one run for consecutive spans. Handing them
-	/// out stops no report, which a reader still makes of any of them.
+	/// at, when the track holds that group whole: no group starts there to hand out, so
+	/// consecutive spans keep one run. A key-order read takes them into its `handed`, which
+	/// gates nothing; any other reader into `delivered` only while it never asks what it
+	/// missed, since `delivered` keeps a skip from going out.
 	fn hand_out_spans(&mut self, reader: &Standing) {
-		let handed = match reader.ordered {
-			true => &mut self.handed,
-			false => &mut self.delivered,
+		let handed = match (reader.ordered, reader.reports) {
+			(true, _) => &mut self.handed,
+			// Its `delivered` keeps a skip it has yet to report from going out.
+			(false, true) => return,
+			(false, false) => &mut self.delivered,
 		};
 		let spans: Vec<Range<u64>> = handed
 			.ranges()
@@ -943,6 +956,52 @@ mod test {
 		);
 	}
 
+	/// A key-order read of a track whose groups declare no span settles them as one reported
+	/// run: the groups it handed out merge under it rather than keep a run each.
+	#[test]
+	fn a_growing_ordered_record_merges_what_it_handed_out_under_a_report() {
+		let (pool, track) = roomy();
+		let mut record = Record::default();
+		for key in (FIRST..2_000).step_by(SPACING as usize) {
+			record.delivered.forget_below(key);
+			record.delivered.insert(key);
+			record.handed.insert(key);
+		}
+		record.reported.insert(FIRST..2_000, Report::Settled);
+		let reader = Standing {
+			ordered: true,
+			spans: &(),
+			..live()
+		};
+		record.settle(|| track.clone(), &mut (), reader);
+		assert!(
+			pool.used() <= 4 * RUN_OVERHEAD,
+			"{} runs left",
+			pool.used() / RUN_OVERHEAD
+		);
+	}
+
+	/// A reader that polls what it missed keeps a whole span's skips its own to report: a
+	/// growing record takes none of them in as handed out, which would keep the skip from
+	/// going out, as a relay forwards a group before its end arrives.
+	#[test]
+	fn a_growing_record_leaves_a_reporting_reader_its_skips() {
+		let (_pool, track) = roomy();
+		let mut record = Record::default();
+		for key in (FIRST..2_000).step_by(SPACING as usize) {
+			record.delivered.insert(key);
+		}
+		let reader = Standing {
+			reports: true,
+			..live()
+		};
+		record.settle(|| track.clone(), &mut (), reader);
+		assert!(
+			!record.delivered.contains(FIRST + 1),
+			"the skip inside the span is still its to report"
+		);
+	}
+
 	/// While its publisher's start is unresolved, a record folds nothing as final, so taking a
 	/// report back still works; once it resolves, the next growth folds.
 	#[test]
@@ -1108,32 +1167,49 @@ mod test {
 		assert!(!record.told(3), "the handed group stays to be told");
 	}
 
+	/// One run a reader gave up beside its record.
+	struct GivenUp(Option<Range<u64>>);
+	impl Beside for GivenUp {
+		fn runs(&self) -> u64 {
+			u64::from(self.0.is_some())
+		}
+		fn given_up_end(&self, key: u64) -> Option<u64> {
+			self.0.as_ref().filter(|run| run.contains(&key)).map(|run| run.end)
+		}
+		fn next_held(&self, key: u64) -> Option<u64> {
+			self.0
+				.as_ref()
+				.filter(|run| run.end > key)
+				.map(|run| run.start.max(key))
+		}
+		fn forget(&mut self, folded: Range<u64>) {
+			self.0 = self
+				.0
+				.take()
+				.filter(|run| run.start >= folded.end || run.end <= folded.start);
+		}
+	}
+
+	/// A debt folds a stretch only where it settles it: one too short to be worth folding
+	/// keeps what the reader gave up beside it, which its fills would otherwise ask again.
+	#[test]
+	fn a_debt_keeps_what_it_gave_up_beside_a_stretch_it_does_not_fold() {
+		let (pool, track) = account();
+		let mut record = Record::default();
+		let mut beside = GivenUp(Some(11..12));
+		record.delivered.insert(10);
+		record.reported.insert(20..21, Report::Dropped);
+		record.settle(|| track.clone(), &mut beside, Standing::default());
+		owe(&track, pool.used());
+		record.settle(|| track.clone(), &mut beside, Standing::default());
+		assert_eq!(beside.0, Some(11..12), "kept, as the record settled nothing there");
+	}
+
 	/// A run the reader gave up beside its record, such as a drop it took from the track's drop
 	/// set, is its own final verdict: a debt folds the floor over it rather than stopping at
 	/// the gap, and forgets it below the floor.
 	#[test]
 	fn a_debt_folds_over_what_the_reader_gave_up_beside_it() {
-		struct GivenUp(Option<Range<u64>>);
-		impl Beside for GivenUp {
-			fn runs(&self) -> u64 {
-				u64::from(self.0.is_some())
-			}
-			fn given_up_end(&self, key: u64) -> Option<u64> {
-				self.0.as_ref().filter(|run| run.contains(&key)).map(|run| run.end)
-			}
-			fn next_held(&self, key: u64) -> Option<u64> {
-				self.0
-					.as_ref()
-					.filter(|run| run.end > key)
-					.map(|run| run.start.max(key))
-			}
-			fn forget(&mut self, folded: Range<u64>) {
-				self.0 = self
-					.0
-					.take()
-					.filter(|run| run.start >= folded.end || run.end <= folded.start);
-			}
-		}
 		let (pool, track) = account();
 		let mut record = Record::default();
 		let mut beside = GivenUp(Some(1..2));

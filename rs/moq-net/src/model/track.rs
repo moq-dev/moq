@@ -8314,6 +8314,7 @@ impl Subscribing {
 					state: self.state.clone(),
 					record: Record::default(),
 					ordered: false,
+					reports: false,
 				},
 			),
 			None => Inner::Plain(Cursor::new(self.state.clone(), self.subscription.clone())),
@@ -8731,6 +8732,14 @@ struct Logical {
 	record: Record,
 	/// Read in key order, counting the keys it passes as handed out.
 	ordered: bool,
+	/// Polled what it missed; see [`record::Standing::reports`].
+	reports: bool,
+}
+
+impl record::Spans for Consumer {
+	fn whole(&self, key: u64) -> Option<ops::Range<u64>> {
+		Consumer::whole(self, key)
+	}
 }
 
 impl record::Spans for kio::Consumer<TrackState> {
@@ -12598,6 +12607,7 @@ impl Subscriber {
 					handed,
 					ranges: window.is_settled().then(|| window.groups().cloned()).flatten(),
 					ordered: cursor.key_order,
+					reports: cursor.drops.is_some(),
 					spans: state,
 				};
 				match cursor.misses.as_deref_mut() {
@@ -12606,12 +12616,18 @@ impl Subscriber {
 				}
 			}
 			Inner::Resume(resume, logical) => {
+				// Taken once, rather than through the reader's lock for every key the fold asks.
+				let serving = resume.serving_track();
 				let reader = Standing {
 					from,
 					handed,
 					ranges: resume.ranges(),
 					ordered: logical.ordered,
-					spans: &**resume,
+					reports: logical.reports,
+					spans: match &serving {
+						Some(serving) => serving,
+						None => &(),
+					},
 				};
 				let state = &logical.state;
 				logical.record.settle(|| state.read().cache.clone(), &mut (), reader)
@@ -13155,6 +13171,7 @@ impl Subscriber {
 			// Each copy reports to its own route; the logical record keeps one route's run from
 			// going out over what another's already settled.
 			Inner::Resume(resume, logical) => loop {
+				logical.reports = true;
 				if let Some(next) = logical.record.next_pending() {
 					return Poll::Ready(next);
 				}

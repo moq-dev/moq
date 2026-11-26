@@ -2168,11 +2168,9 @@ impl super::super::record::Beside for Misses {
 	}
 
 	fn held(&self) -> Vec<ops::Range<u64>> {
-		let mut held: Vec<_> = (self.given_up.iter().chain(self.skipped.iter()).cloned())
+		(self.given_up.iter().chain(self.skipped.iter()).cloned())
 			.chain(self.stale.iter().map(|(run, _)| run.clone()))
-			.collect();
-		held.sort_by_key(|run| run.start);
-		held
+			.collect()
 	}
 }
 

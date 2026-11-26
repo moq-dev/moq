@@ -6589,7 +6589,6 @@ impl TrackRun {
 		let Start::Unresolved { first, skipped } = std::mem::replace(&mut self.start, Start::Resolved(start)) else {
 			unreachable!("resolved once");
 		};
-		self.track.hold(false);
 		debug_assert!(first.is_none(), "a held group is taken before it resolves");
 		// Only groups: the subscriber derives the start frame from its own request
 		// (see `lite::SubscribeStart`).
@@ -6647,6 +6646,8 @@ impl TrackRun {
 			self.track.untell(below);
 			self.forward_range(range.start.max(reach)..range.end, hole, writer)?;
 		}
+		// Only now, past every report taken back: polling the track above may fold.
+		self.track.hold(false);
 		// An end declared while this start was held follows it.
 		if let Some(end) = self.held_end.take() {
 			writer.buffer(&lite::SubscribeResponse::End(end))?;

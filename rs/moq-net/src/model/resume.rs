@@ -59,7 +59,6 @@ use crate::{Error, Result, StreamError, group, stats, track};
 
 use super::delivered::Delivered;
 use super::idle::{Idle, Walk};
-use super::record;
 use super::subscription::{
 	Accounted, Budget, Containing, Cover, Holdings, Joining, Position, Resolved, Subscription, Unheld, Window,
 };
@@ -1261,14 +1260,6 @@ impl Subscriber {
 #[derive(Clone)]
 pub(super) struct Mirror(Weak<Mutex<Reader>>);
 
-/// The groups the serving copy holds whole, which is what the reader reads.
-impl record::Spans for Subscriber {
-	fn whole(&self, key: u64) -> Option<std::ops::Range<u64>> {
-		let serving = self.reader().copies.last().map(|copy| copy.track.clone());
-		serving?.whole(key)
-	}
-}
-
 impl Mirror {
 	pub(super) fn sync(&self) {
 		if let Some(reader) = self.0.upgrade() {
@@ -1582,6 +1573,11 @@ impl Subscriber {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn untell(&mut self, range: std::ops::Range<u64>) {
 		self.reader().untell(range)
+	}
+
+	/// The serving copy's track, whose whole groups are what the reader reads.
+	pub(super) fn serving_track(&self) -> Option<track::Consumer> {
+		self.reader().copies.last().map(|copy| copy.track.clone())
 	}
 
 	/// Hold every copy's record unfolded while `held`; see [`track::Subscriber::hold`].
