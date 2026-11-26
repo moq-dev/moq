@@ -22,6 +22,6 @@ with `Rate::Measured` and a 2 s delay reproduces it on `ffmpeg_ac3.ts`. A frame'
 fixed when it arrives, so a send-ahead that grows has to come out of what the frames have to
 spare or move the clock's anchor.
 
-Recommendation: let the send-ahead grow freely until the jitter buffer releases its first frame,
-since its clock anchors on the latest track then, and check whether that anchor really stays
+Decided 2026-11-26 (maintainer, /quest-run): let the send-ahead grow freely until the jitter
+buffer releases its first frame, since its clock anchors on the latest track then, and check whether that anchor really stays
 open until the first release.
