@@ -1815,6 +1815,13 @@ impl Play {
 			// The follower stopped this reader (the instance changed, the rendition was reshaped or
 			// delisted, or the run ended).
 			let Some(read) = read else {
+				// The cancel may have beaten a wake the track gave itself, such as the one that
+				// carries it from its last group to its end, so its end is looked for before this
+				// play lets go: the same instance announced again would hand a new subscription
+				// the track's last group.
+				if drained(&mut track) {
+					finished.insert(rendition, &shape.track, attached, false);
+				}
 				return;
 			};
 			match read {
@@ -1911,6 +1918,33 @@ impl Play {
 					return;
 				}
 			}
+		}
+	}
+}
+
+/// Whether `track` holds nothing but its end, read until a poll parks without waking itself. A
+/// frame still unread, or a failure, is not the end.
+fn drained(track: &mut moq_mux::container::Consumer<moq_mux::catalog::hang::Container>) -> bool {
+	/// Records a wake of the poll that called it.
+	struct Woken(AtomicBool);
+
+	impl std::task::Wake for Woken {
+		fn wake(self: Arc<Self>) {
+			self.0.store(true, Ordering::Release);
+		}
+	}
+
+	let woken = Arc::new(Woken(AtomicBool::new(false)));
+	let waiter = kio::Waiter::new(woken.clone().into());
+	loop {
+		match track.poll_read(&waiter) {
+			std::task::Poll::Ready(Ok(None)) => return true,
+			std::task::Poll::Ready(Ok(Some(
+				moq_mux::container::Read::Gap { .. } | moq_mux::container::Read::End { .. },
+			))) => {}
+			std::task::Poll::Ready(_) => return false,
+			std::task::Poll::Pending if woken.0.swap(false, Ordering::AcqRel) => {}
+			std::task::Poll::Pending => return false,
 		}
 	}
 }
