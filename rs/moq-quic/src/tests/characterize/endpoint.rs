@@ -278,8 +278,12 @@ fn client_endpoint_sends_stateless_reset() {
 
 /// A server whose one-byte CID space is three-quarters used
 fn exhausted() -> Pair {
+	exhausted_by(|| Box::new(RandomConnectionIdGenerator::new(1)))
+}
+
+fn exhausted_by(generator: fn() -> Box<dyn ConnectionIdGenerator>) -> Pair {
 	let config = crate::endpoint::Config {
-		cid_generator: Some(Arc::new(|| Box::new(RandomConnectionIdGenerator::new(1)))),
+		cid_generator: Some(Arc::new(generator)),
 		..crate::endpoint::Config::default()
 	};
 	let mut server_config = server_config();
@@ -324,6 +328,33 @@ fn cids_exhausted_refuses_connect() {
 	let _guard = subscribe();
 	let mut pair = exhausted();
 	// 256 CIDs, a quarter held in reserve
+	assert_eq!(exhaust(&mut pair), 193);
+}
+
+/// A generator that spends most of its CID on something other than randomness holds fewer CIDs than
+/// the CID's length says, and the endpoint stops before `new_cid` could spin looking for a free one.
+#[test]
+fn cids_exhausted_counts_random_bits_not_bytes() {
+	struct Mostly(RandomConnectionIdGenerator);
+	impl ConnectionIdGenerator for Mostly {
+		fn generate_cid(&mut self) -> ConnectionId {
+			let mut bytes = [0u8; 8];
+			bytes[0] = self.0.generate_cid()[0];
+			ConnectionId::new(&bytes)
+		}
+		fn cid_len(&self) -> usize {
+			8
+		}
+		fn cid_lifetime(&self) -> Option<Duration> {
+			None
+		}
+		fn entropy_bits(&self) -> u32 {
+			8
+		}
+	}
+
+	let _guard = subscribe();
+	let mut pair = exhausted_by(|| Box::new(Mostly(RandomConnectionIdGenerator::new(1))));
 	assert_eq!(exhaust(&mut pair), 193);
 }
 
