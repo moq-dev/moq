@@ -320,8 +320,8 @@ impl<E: super::Catalog> Passthrough<E> {
 			crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 		)?;
 		Ok(Self {
+			shift: catalog.timebase(),
 			catalog,
-			shift: reserved.timebase(),
 			reservation: Some(reserved),
 			media,
 			section: None,
@@ -346,6 +346,15 @@ impl<E: super::Catalog> Passthrough<E> {
 			all_random_access: true,
 			mux_rate: Meter::measured(measured),
 		})
+	}
+
+	/// Shift the multiplex's timestamps through `timebase`, a timestamp base of the catalog
+	/// `reserved` belongs to, instead of a fresh one: importers of one source share its offset.
+	///
+	/// Set it before the first [`decode`](Self::decode), which may anchor the timebase.
+	pub fn with_timebase(mut self, timebase: crate::catalog::Timebase<E>) -> Self {
+		self.shift = timebase;
+		self
 	}
 
 	/// Pace the multiplex on `pid` rather than on the `PCR_PID` of the PAT's first program.
