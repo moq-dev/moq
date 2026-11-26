@@ -4,7 +4,8 @@
 
 A session opened with `keep_alive: { soft, hard }`, such as 2 s and 10 s,
 learns when its peer goes quiet without closing on it. Both Rust and JS
-take it as an option on connect and accept.
+take it as an option on connect and accept. Browser WebTransport
+refuses it until [the moq-lite PING](/quest/m3/keep-alive-ping.md) lands.
 
 - The library sends a QUIC PING only when nothing is in flight, so a busy
   session pays nothing for it.
@@ -29,6 +30,19 @@ Decided 2026-11-25 (maintainer, /quest-plan via kixel-ai/kixel.ai):
   notify us when the peer hasn't replied in 2s and is terminal at 10s; the
   QUIC library would automatically PING if needed".
 - ✅ m1, since it is additive.
+
+Decided 2026-11-25 (maintainer, on
+[moq-dev/moq#9666](https://github.com/moq-dev/moq/pull/9666)): ✅ JS over
+browser WebTransport gets keep-alive from a moq-lite PING message on
+lite-08-wip, so keep-alive works on every transport (rejected: qmux only,
+refusing it on WebTransport for good; polling `getStats()`, which is a timer
+loop). lite-08-wip opens only after [the lite-07
+cut](/quest/m2/lite07-finalize.md), and an m1 quest can't wait on m2. So the
+PING is [its own quest](/quest/m3/keep-alive-ping.md) in m3, and this one
+ships keep-alive now for every transport that can already probe: native QUIC
+in Rust, and qmux in both languages. Until the PING lands, a browser
+WebTransport session refuses the option at connect, so it never passes
+silently.
 
 This reverses one rejection in [moq-dev/moq#7347](https://github.com/moq-dev/moq/pull/7347)'s
 quest (`git show 2a743c82b7^:quest/m2/quic-keep-alive.md`). That quest
@@ -67,20 +81,8 @@ within `soft`, and comes back `Live` when it heals before `hard`. One that
 stays dead closes at `hard`. A busy session sends no PINGs, and an idle one
 sends about one per `soft / 2`.
 
-## Waiting
-
-- Maintainer: what JS does over WebTransport, where the browser API has no
-  PING and no "last packet received". (`getStats()` reports
-  `packetsReceived` only in some browsers, and only by polling.) Options:
-  (a) JS takes the option over qmux, which pings on its own, and refuses it
-  on WebTransport at connect (recommended: it fails loud, and a native QUIC
-  stack is the one place that can probe without a wire change); (b) a
-  moq-lite PING/PONG control message on lite-08-wip, so every transport
-  works the same, at the cost of a wire change and of probing above QUIC's
-  loss recovery; (c) poll `getStats()` where it is available, which breaks
-  moq's rule against timer loops and misses the browsers that lack it.
-
 ## Related
 
 - [Route health](/quest/m3/route-health/README.md) - per-track failover, which never relies on QUIC keep-alives
+- [Keep-alive over moq-lite PING](/quest/m3/keep-alive-ping.md) - the wire message that brings it to browser WebTransport
 - [JS session cost](/quest/m1/js-session-cost.md) - Kixel's other link-quality primitive

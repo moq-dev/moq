@@ -4,8 +4,11 @@
 
 `@moq/net` prices and ranks each link like Rust does. `Connection.connect()`
 and `accept()` take a per-session link `cost`, which mirrors Rust's
-`Client::with_cost` (`rs/moq-net/src/client.rs`). The session's link also
-gets a `priority`. `#candidate` in `js/net/src/lite/routed.ts` uses both
+`Client::with_cost` (`rs/moq-net/src/client.rs`). Rust's server gains the
+matching `with_cost`, so both sides of a session can price it in both
+languages. The JS origin producer gains a `priority`, which mirrors
+`origin::Producer::with_priority` (`rs/moq-net/src/model/origin.rs`) and
+ranks the link that a session lands its routes through. `#candidate` in `js/net/src/lite/routed.ts` uses both
 in place of the hardcoded `claim.cost + 1n` and `Math.min(0, claim.priority)`.
 An unpriced link still costs `1` and ranks at the neutral `0`, so existing
 callers keep shortest-path routing.
@@ -22,28 +25,21 @@ peer's SETUP price, then `1`, applies on lite-06 too. That version's announce
 path reads the advertised cost apart from `#candidate`, so the change and
 its test cover both versions.
 
-Rust sets a link's priority on the origin handle given to the session
-(`origin::Producer::with_priority` in `rs/moq-net/src/model/origin.rs`), not
-on the client, and its server has no `with_cost`. `@moq/net`'s origin has no
-priority. So the decided `connect()`/`accept()` placement breaks moq's rule
-that API names mirror across Rust and JS. See Waiting.
+Decided 2026-11-25 (maintainer, on
+[moq-dev/moq#9666](https://github.com/moq-dev/moq/pull/9666)): ✅ `cost` on
+connect and accept in both languages, adding Rust's server-side `with_cost`,
+and the JS `priority` on its origin producer, as Rust's is (rejected: both on
+connect and accept in both languages, which would move Rust's
+`with_priority` off the origin and break its API). This keeps moq's rule
+that API names mirror across Rust and JS.
+
+A price that a server sets on accept wins over the one its client declares,
+just as a dialer's does. A JS derived origin handle inherits its parent's
+priority, as in Rust.
 
 Test it on lite-06 and lite-07 with two links to one Instance: the lower-cost one wins, a
 higher-priority one wins despite its cost, and on lite-07 the route ranks by
 the lowest priority on its path.
-
-## Waiting
-
-- Maintainer: where the JS priority (and an accept-side cost) live, given
-  that Rust puts priority on the origin handle and has no server-side cost.
-  Options: (a) `cost` on both `connect()` and `accept()`, plus a matching
-  Rust `with_cost` on the accepted request; `priority` on the JS origin
-  producer, as Rust's `with_priority` is (recommended: the names mirror
-  across both languages, and one origin handle per link already carries the
-  rank in Rust); (b) both on `connect()`/`accept()` in JS as decided, with
-  Rust left as is, so the two languages diverge; (c) both on
-  `connect()`/`accept()` in JS, and Rust's priority moves from the origin to
-  `Client`/`Server`, which breaks Rust's API and moves the quest to m2.
 
 ## Related
 
