@@ -11483,7 +11483,8 @@ impl Cursor {
 	/// Forget the gaps in `delivered` below each group past `budget` now, whether this track
 	/// holds it or not: one landing there would be written off. A group skipped as stale is
 	/// not forgotten, since a wider budget owes it again, and neither is one a widening still
-	/// owes, which a newest-first re-offer has yet to judge, nor any gap at or above `keep`.
+	/// owes, which a newest-first re-offer has yet to judge, nor a cached group no range
+	/// covers, which a range added later owes, nor any gap at or above `keep`.
 	///
 	/// One edge for every group judged, so forgetting N gaps never resolves it N times.
 	fn forget_past_budget(&self, delivered: &mut Delivered, budget: Budget, keep: Option<u64>) {
@@ -11491,8 +11492,8 @@ impl Cursor {
 			return;
 		}
 		let owed = self.filter.owed.first().map(|run| *run.start());
-		let kept = self.record.skipped.lowest().into_iter().chain(owed).chain(keep).min();
 		let state = self.state.read();
+		let kept = (self.record.skipped.lowest().into_iter()).chain(owed).chain(keep).min();
 		let budgets = budget.clamped(state.max_age_bound());
 		let edge = state.drift_edge(&self.servable);
 		let now = state.cache.pool().now_wall();
@@ -11524,7 +11525,10 @@ impl Cursor {
 			let last = delivered
 				.last_before(shared)
 				.expect("the oldest run is below its successor");
-			if let Some(kept) = kept
+			// Searched only in the gaps this split retires, so a read that folds nothing never
+			// walks the runs it has piled up.
+			let outside = self.lowest_uncovered(delivered, &state, last);
+			if let Some(kept) = kept.into_iter().chain(outside).min()
 				&& kept < last
 			{
 				delivered.forget_below(kept);
@@ -11532,6 +11536,24 @@ impl Cursor {
 			}
 			delivered.forget_below(last);
 		}
+	}
+
+	/// The lowest cached group below `end` in a gap of `delivered` that the ranges don't cover:
+	/// the budget never judged it, and a range added later that covers it owes it. While a range
+	/// is still being placed, any cached group in a gap may be one.
+	fn lowest_uncovered(&self, delivered: &Delivered, state: &TrackState, end: u64) -> Option<u64> {
+		let groups = self.filter.window.groups();
+		delivered.gaps(delivered.floor()..end).into_iter().find_map(|gap| {
+			let gap = gap.start..=gap.end - 1;
+			let outside = match groups {
+				Some(groups) => minus(gap, groups),
+				None => vec![gap],
+			};
+			outside.into_iter().find_map(|run| {
+				let mut slots = state.lookup.range(run);
+				slots.find(|(_, slot)| slot.is_read()).map(|(key, _)| *key)
+			})
+		})
 	}
 
 	/// Hand `group` out whole from its first frame, expiring against its budget.
@@ -34650,6 +34672,38 @@ mod test {
 		producer.abort(Error::Cancel).unwrap();
 		assert!(pending.await.is_err());
 		drop(dynamic);
+	}
+
+	/// A live join added behind a reader caught up at the live edge hands out the cached
+	/// groups it reaches back to, though the reader's own budget already gave up everything
+	/// below the groups it read: no range covered those, so none was judged.
+	#[test]
+	fn a_join_added_behind_a_caught_up_read_hands_out_what_it_reaches() {
+		let producer = track_producer_aged(Duration::from_secs(30));
+		write_group(&producer, 0);
+		write_group(&producer, 1000);
+		let edge = Range::from(Start::Live {
+			min: Some(Duration::ZERO),
+			max: Some(Duration::ZERO),
+		});
+		let mut subscriber = producer.subscribe(Subscription::default().with_ranges([edge]));
+		assert_eq!(drain_groups(&mut subscriber), [1000]);
+		write_group(&producer, 2000);
+		assert_eq!(drain_groups(&mut subscriber), [2000]);
+		let behind = Range::from(Start::Live {
+			min: Some(Duration::from_secs(30)),
+			max: Some(Duration::from_secs(30)),
+		});
+		subscriber
+			.edit(Edit {
+				placed: Default::default(),
+				retire: Vec::new(),
+				add: vec![(1, behind)],
+				priority: 0,
+				order: Order::default(),
+			})
+			.unwrap();
+		assert_eq!(drain_groups(&mut subscriber), [0]);
 	}
 
 	/// Ranges edited one key at a time resolve and cover what the same ranges given whole do,

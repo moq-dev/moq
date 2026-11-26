@@ -4058,8 +4058,9 @@ export class Subscriber {
 	// this track holds it or not: one landing there would be written off. A group skipped as
 	// stale is not forgotten, since a wider budget offers it again, and neither is one still
 	// buffered unread: it may have arrived after a newer one, so its own successor may be fresh.
-	// Mirrors the Rust `Cursor::forget_past_budget` keeping what the arrivals still owe. No gap at
-	// or above `keep` is forgotten either.
+	// Nor is a cached group no range covers, which a range added later owes. Mirrors the Rust
+	// `Cursor::forget_past_budget` keeping what the arrivals still owe. No gap at or above `keep`
+	// is forgotten either.
 	#forgetPastBudget(delivered: Delivered, budget = this.#window.budget(), keep?: bigint): void {
 		if (delivered.aboveGap() === undefined) return;
 		// One edge for every group judged, so forgetting N gaps never resolves it N times.
@@ -4089,9 +4090,13 @@ export class Subscriber {
 				if (owed !== undefined) skipped = min(skipped ?? owed, owed);
 				if (keep !== undefined) skipped = min(skipped ?? keep, keep);
 			}
-			if (skipped !== undefined && skipped < oldest) {
-				delivered.forgetBelow(skipped);
-				forgot = skipped;
+			// Searched only in the gaps this step retires, so a read that forgets nothing never
+			// walks the runs it has piled up.
+			const uncovered = this.#lowestUncovered(delivered, oldest);
+			const hold = uncovered === undefined ? skipped : min(skipped ?? uncovered, uncovered);
+			if (hold !== undefined && hold < oldest) {
+				delivered.forgetBelow(hold);
+				forgot = hold;
 				break;
 			}
 			delivered.forgetBelow(oldest);
@@ -4109,6 +4114,21 @@ export class Subscriber {
 			const key = groups[index].start;
 			if (end !== undefined && key >= end) return undefined;
 			if (this.#window.contains(key) && !delivered.has(key)) return key;
+		}
+		return undefined;
+	}
+
+	// The lowest cached group below `end` in a gap of `delivered` that the ranges don't cover: the
+	// budget never judged it, and a range added later that covers it owes it. While a range is
+	// still being placed, any cached group in a gap may be one.
+	#lowestUncovered(delivered: Delivered, end: bigint): bigint | undefined {
+		const groups = this.#state.groups.peek();
+		for (const gap of delivered.gaps(0n, end)) {
+			for (let index = timelineIndex(groups, gap.start); index < groups.length; index++) {
+				const key = groups[index].start;
+				if (key >= gap.end) break;
+				if (this.#window.pending || !this.#window.holds(key)) return key;
+			}
 		}
 		return undefined;
 	}
@@ -4604,7 +4624,7 @@ export class Subscriber {
 		const cursor = this.#cursor.peek();
 		const from = max(max(start, cursor.start), this.#nextKey);
 		const to = cursor.end === undefined ? end : min(end, cursor.end);
-		return this.#window.runs(from, to).flatMap((run) => this.#delivered.gaps(run.start, run.end));
+		return this.#window.runs(from, to).flatMap((run) => [...this.#delivered.gaps(run.start, run.end)]);
 	}
 
 	// Tell each group buffered in `[start, end)` whether this reader will still read it, as the
@@ -4990,7 +5010,7 @@ export class Subscriber {
 		if (end === undefined) return false;
 		const gaps = this.#window
 			.runs(this.#window.floor() ?? 0n, end)
-			.flatMap((run) => this.#delivered.gaps(run.start, run.end));
+			.flatMap((run) => [...this.#delivered.gaps(run.start, run.end)]);
 		return this.#accounts(gaps, ordered);
 	}
 
@@ -5021,7 +5041,7 @@ export class Subscriber {
 		const unproven: Run[] = [];
 		const lacking = gaps
 			.flatMap((gap) => this.#window.runs(gap.start, min(gap.end, end)))
-			.flatMap((gap) => this.#delivered.gaps(gap.start, gap.end));
+			.flatMap((gap) => [...this.#delivered.gaps(gap.start, gap.end)]);
 		for (const gap of lacking) {
 			// Each run judged from where it meets the gap, as the reader would read it.
 			const overlapping = givenUp(all, refused.peek(), gap.start, gap.end, (run) =>
@@ -5256,7 +5276,7 @@ export class Subscriber {
 		hooks.accountsFor = (subscriber, delivered, gaps, ordered) => {
 			if (!subscriber.#resume) return subscriber.#accounts(gaps, ordered);
 			const own = subscriber.#delivered;
-			const left = gaps.flatMap((gap) => own.gaps(gap.start, gap.end));
+			const left = gaps.flatMap((gap) => [...own.gaps(gap.start, gap.end)]);
 			return subscriber.#resume.accounts(own.union(delivered), left, ordered);
 		};
 		hooks.skippedIn = (subscriber, start, end) =>
