@@ -498,23 +498,18 @@ impl Stream {
 	/// Whether the stream's sender report settles its placement, or it no longer needs one.
 	///
 	/// A later frame only lowers the bound, so a report capturing frames too long before they
-	/// arrived may still agree with the arrivals once live frames follow a replayed burst: the wait
-	/// goes on for it while a replay, at most one group and so at most [`KEYFRAME_TIMEOUT`] old,
-	/// could explain the gap. A camera clock further behind, or ahead (never set reads as 2036),
-	/// never comes to agree.
+	/// arrived may still agree with the arrivals once live frames follow a replayed burst. A report
+	/// that never agrees, from a camera clock set wrong, settles nothing either: the stream waits out
+	/// the report interval as without one, since a replay drains for a while and holds the bound
+	/// late until it is over.
 	fn reported(&self) -> bool {
-		let latest = MAX_CAPTURE_LATENCY.as_micros() as i128;
-		let replayed = latest + KEYFRAME_TIMEOUT.as_micros() as i128;
 		match self.clock {
 			StreamClock::Placed(_) => true,
 			StreamClock::Unplaced { report: None, .. } => false,
 			StreamClock::Unplaced {
 				report: Some(report),
 				bound,
-			} => bound.is_none_or(|bound| {
-				let gap = bound - report;
-				gap <= latest || gap > replayed
-			}),
+			} => bound.is_none_or(|bound| usable(report, bound)),
 		}
 	}
 
@@ -1775,12 +1770,12 @@ mod tests {
 	}
 
 	/// A camera whose clock was never set reports NTP time zero, which no later frame brings
-	/// closer: no waiting on it either.
+	/// closer: the stream is timed at its arrivals once the wait is over, as without a report.
 	#[tokio::test]
-	async fn a_camera_clock_never_set_ends_the_wait() {
+	async fn a_camera_clock_never_set_is_timed_at_arrival() {
 		kio::clock::host_time(); // real RTSP sockets, and the report wait is real time
 		let server = Server::bind(vec![Media::H265]).await;
-		let client = client(server.url()).waiting(10 * WAIT);
+		let client = client(server.url()).waiting(Duration::from_millis(200));
 		let (broadcast, catalog, pull) = pull(client);
 
 		let mut session = within("PLAY", server.accept(0)).await;
@@ -1802,12 +1797,12 @@ mod tests {
 	}
 
 	/// A camera clock that booted at a past date reports captures years before their arrival,
-	/// further than any replay explains: no waiting on it either.
+	/// further than any replay explains: the stream is timed at its arrivals once the wait is over.
 	#[tokio::test]
-	async fn a_camera_clock_in_the_past_ends_the_wait() {
+	async fn a_camera_clock_in_the_past_is_timed_at_arrival() {
 		kio::clock::host_time(); // real RTSP sockets, and the report wait is real time
 		let server = Server::bind(vec![Media::H265]).await;
-		let client = client(server.url()).waiting(10 * WAIT);
+		let client = client(server.url()).waiting(Duration::from_millis(200));
 		let (broadcast, catalog, pull) = pull(client);
 
 		let mut session = within("PLAY", server.accept(0)).await;
@@ -2190,6 +2185,48 @@ mod tests {
 		let video = frames(video).await;
 		assert_eq!(wall_of(&snapshot, &video[0]), captured, "timed at its capture");
 		assert_eq!(wall_of(&snapshot, &video[1]), captured + 8_000_000);
+	}
+
+	/// A replayed group arrives faster than the live pace, so its first frames look captured as they
+	/// arrived: with a report too far off to time it, the stream waits out the report interval and
+	/// is timed on its live frames, or every frame would land after it arrived.
+	#[tokio::test]
+	async fn a_replay_with_a_wrong_camera_clock_is_timed_on_its_live_frames() {
+		kio::clock::host_time(); // real RTSP sockets, and the report wait is real time
+		let server = Server::bind(vec![Media::H265]).await;
+		let (broadcast, catalog, pull) = pull(client(server.url()).waiting(Duration::from_millis(500)));
+
+		let mut session = within("PLAY", server.accept(0)).await;
+		// The replayed keyframe was captured 300 ms before the live start, which is now.
+		let live = 27_000;
+		let sent = wall_now();
+		session.video(0, 0, H265_KEYFRAME).await;
+		session.video(0, FRAME, &[fake::H265_TRAIL]).await;
+		// A camera clock 15 min ahead.
+		session.report(0, 0, ntp(sent + 900_000_000)).await;
+		session.video(0, live, &[fake::H265_TRAIL]).await;
+		let snapshot = catalog_with(&catalog, 1, 0).await;
+		let listed = wall_now();
+		let video = subscribe(&broadcast, video_track(&snapshot)).await;
+		session.close().await;
+		assert_eq!(within("the pull", pull).await.unwrap().unwrap(), End::Closed);
+
+		let video = frames(video).await;
+		assert_eq!(video.len(), 3, "the replayed group publishes, then the live frame");
+		for frame in &video {
+			let wall = wall_of(&snapshot, frame);
+			assert!(
+				wall <= listed,
+				"timed {} µs after the catalog was listed",
+				wall - listed
+			);
+		}
+		let captured = wall_of(&snapshot, &video[0]);
+		assert!(
+			captured <= sent - 250_000,
+			"the replayed keyframe timed {} µs before it was sent",
+			sent - captured
+		);
 	}
 
 	/// Two streams whose first packets came a second apart each count from their own: each lands
