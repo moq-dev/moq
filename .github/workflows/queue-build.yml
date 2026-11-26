@@ -24,7 +24,8 @@ jobs:
     runs-on: [self-hosted, moq-queue]
     # A merge group is one PR at build concurrency 1; `just ci` takes about 5-15
     # minutes. Backstop a hang below the queue's 90-minute response window, so
-    # the report below still drops the group before it expires.
+    # on a free runner the report below still drops the group before it
+    # expires; time waiting for a runner counts against that window too.
     timeout-minutes: 80
     env:
       # The diff the dispatcher selects from: the group's base, as the host gate

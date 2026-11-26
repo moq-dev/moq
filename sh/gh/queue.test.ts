@@ -85,6 +85,8 @@ assert.equal(
 // context, which queue-pr.yml reports (skipped) on main PRs and queue-build.yml
 // posts from the merge queue, on the host's runner, without secrets.
 const queue = await workflow("queue");
+// Inside the call, github.workflow is this name, which rust-cache's self-hosted guard requires.
+assert.equal(queue.name, "Queue");
 assert.deepEqual(Object.keys(queue.on), ["merge_group"], "a skipped job here would report on PRs and groups alike");
 assert.deepEqual(queue.on.merge_group, { types: ["checks_requested"] });
 assert.equal(queue.concurrency, undefined, "a cancelled group would report Queue cancelled");
