@@ -92,5 +92,21 @@ export default class extends HTMLElement {
 	set volume(value: number);
 }
 
+export class MoqSync extends HTMLElement {
+	constructor();
+	attributeChangedCallback(name: "delay" | "cap", oldValue: string | null, newValue: string | null): void;
+	get cap(): Clock.Duration;
+	set cap(value: Clock.Duration);
+	connectedCallback(): void;
+	readonly controls: {
+		cap: Signals.Signal<Clock.Duration>;
+		delay: Signals.Signal<Delay>;
+	};
+	get delay(): Delay;
+	set delay(value: Delay);
+	static observedAttributes: readonly ["delay", "cap"];
+	readonly sync: Sync;
+}
+
 export function parseCatalogFormat(value: string | null): CatalogFormat | undefined;
 ```
