@@ -25,7 +25,7 @@ Decided 2026-11-25 (maintainer, on [moq-dev/moq#9626](https://github.com/moq-dev
 Decided 2026-11-26 (maintainer, /quest-run, on Codex review round 1 of [moq-dev/moq#9626](https://github.com/moq-dev/moq/pull/9626)): fix in this PR the three cases only a grace settled, rather than keep a bounded lite-07 backstop grace or restore the graces until a follow-up.
 
 - Starts outside every live range stop being owed when the range retires: a proven tail folds the ledger gaps no live range reaches (Rust and JS), and `finish_shared` ends a proven copy at its declared end, error included.
-- The subscriber names a Group Stream it discarded before reading its end, such as one its transport evicted after the FIN, in a lite-07 SUBSCRIBE_UPDATE `Lost` list, and the publisher skips the starts inside its span again, as for a cut `GROUP_END`. A parked stream that fails before TRACK_INFO still has its group opened and ended.
+- The subscriber names a Group Stream it discarded before reading its end, such as one its transport evicted after the FIN, in a lite-07 SUBSCRIBE_UPDATE `Lost` list, and the publisher skips the starts inside its span again, as for a cut `GROUP_END`. A parked stream that fails before TRACK_INFO is accounted for at once, and the accept still opens and ends its group.
 
 `S12` moved to [A moq-transport finish settles a declared end's tail](/quest/m3/ietf-finish-shared-tail.md).
 
@@ -35,3 +35,18 @@ Decided 2026-11-26 (maintainer, /quest-run, on Codex review round 1 of [moq-dev/
   - A: a local track names every start. A local fill handler is asked at once, and its refusal is final at once. A hole with no handler stays owed until the producer creates, skips, or ends it. Logical and resume tracks follow their serving copy. Needs a group-level `finish_at` in `moq-ffi` (only `finish()` today) and JS parity, and about 15 tests change.
   - B: keep the grace only for fill-handler asks and refusals. Still a timer, so local and remote still differ.
   - **C (recommended):** keep the local miss grace in [moq-dev/moq#9626](https://github.com/moq-dev/moq/pull/9626), which settles the wire, and do A in its own quest. The wire change stands alone, and A is a public API change (`moq-ffi`, JS) with its own tests.
+- Maintainer: how to bound a lite-07 tail's ledger without losing what a re-added range owes (Codex review round 2, findings 1 and 3).
+  - Retiring a range folds the gaps no live range reaches, but only once every live range says where it starts. A range still waiting for its SUBSCRIBE_START, such as a time range a relay has yet to place, blocks every fold. Another range moved through disjoint parts of the track then keeps a ledger run per visit. Rust bills those runs to the copy's pool and folds the oldest under pressure. JS sets no pool capacity, so nothing bounds them there.
+  - A fold is final. A gap folded when its range retired reads as accounted if a later update asks for it again. On a subscription draining after SUBSCRIBE_END, a SUBSCRIBE_START landing before the Group Stream then lets the subscriber close before the group arrives.
+  - The state is inherent: the publisher sends each group once per subscription, so the subscriber must remember what it was told until no range can ask for it again.
+  - Options:
+    - **A (recommended):** keep retired gaps apart from receipts, so a re-added range owes them again. Let an unstarted range with an absolute start owe only from that start. Bill the JS tail as Rust does. A proven tail over budget ends its subscription with an error instead of folding, and the relay subscribes again.
+    - B: never add a range over space the subscription retired; ask for it on a subscription of its own, as recoveries do. Smaller, but it changes how fills and resume reuse a subscription.
+    - C: keep both as they are and document them.
+- Maintainer: how to settle a lost GROUP_END once the publisher's cache evicted its group (Codex review round 2, finding 2).
+  - `Lost` reaches the publisher about a round trip after the subscriber discarded the stream. If the cache evicted the group meanwhile, nothing says where its span ended, no skip goes out, and the starts only that GROUP_END covered stay owed. On a timestamp-keyed lite-07 track every group's span holds inner starts.
+  - Options:
+    - **A (recommended):** answer from the subscription's record. Tell a whole group's inner starts as a report kind of their own, so the record keeps each span's end after the cache evicts the group. The record is already per subscription and billed to the pool. A `Lost` naming a span the record folded away under pool pressure ends the subscription with an error.
+    - B: end the subscription with an error whenever `Lost` names a group the cache no longer holds. Simplest, but a slow subscriber under cache pressure loses its subscription.
+    - C: have the subscriber read a fully received stream's GROUP_END before the transport evicts it. moq-quic would have to hand moq-net the stream's tail instead of discarding it, and a browser's WebTransport cannot.
+  - Either way, the TLA model gains publisher eviction and an acknowledgement before the application reads or discards the stream.
