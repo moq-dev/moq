@@ -180,7 +180,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			broadcast,
 			catalog: reserved.producer(),
 			container,
-			timebase: reserved.timebase(),
+			timebase: reserved.producer().timebase(),
 			initial_reservation: Some(reserved),
 			buffer: BytesMut::new(),
 			header_seen: false,
@@ -195,6 +195,15 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	#[cfg(test)]
 	pub(crate) fn dropped_metadata(&self) -> u64 {
 		self.dropped_metadata
+	}
+
+	/// Shift this input's timestamps through `timebase`, a timestamp base of the catalog `reserved`
+	/// belongs to, instead of a fresh one: importers of one source share its offset.
+	///
+	/// Set it before the first [`decode`](Self::decode), which may anchor the timebase.
+	pub fn with_timebase(mut self, timebase: crate::catalog::Timebase<E>) -> Self {
+		self.timebase = timebase;
+		self
 	}
 
 	/// Select the container this importer wraps decoded media renditions in.
@@ -643,7 +652,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// track's first keyframe, and holds nothing once the catalog went out.
 		let reserved = match &self.initial_reservation {
 			Some(reserved) => reserved.clone(),
-			None => self.timebase.reserve(),
+			None => self.catalog.reserve(),
 		};
 		let hint = crate::catalog::VideoHint {
 			container: self.container.clone(),

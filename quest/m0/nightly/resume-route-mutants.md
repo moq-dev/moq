@@ -35,8 +35,3 @@ excluded. Kill each with a unit test or a model regression, or exclude it in
   landing that late is already past the budget.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [Resume model misses a group](/quest/m0/nightly/resume-model-missing-group.md) - a seed the
-  model fails on, found while probing these

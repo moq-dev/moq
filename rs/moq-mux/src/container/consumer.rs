@@ -2838,11 +2838,26 @@ mod tests {
 		assert_eq!(read, ["frame 1", "frame 2", "frame 2", "frame 3"]);
 	}
 
-	/// A group that arrives late below an earlier one is late from that earlier arrival, as are the
-	/// holes around it, so they all expire a budget after it.
+	/// A group that arrives late below an earlier one is late from that earlier arrival, as is the
+	/// hole past it, so they expire a budget after that earlier arrival. An unsettled hole below
+	/// the late group waits a budget from the late group's own arrival, its immediate successor.
 	#[tokio::test(start_paused = true)]
 	async fn a_hole_is_late_from_the_earliest_arrival_past_it() {
 		let budget = Duration::from_millis(100);
+		let drain = |reader: &mut Consumer<Container>| {
+			let mut read = Vec::new();
+			while let Poll::Ready(Ok(Some(item))) = reader.poll_read(&kio::Waiter::noop()) {
+				read.push(match item {
+					Read::Frame { group, .. } => format!("frame {group}"),
+					Read::Gap { .. } => "gap".to_string(),
+					Read::End { .. } => "end".to_string(),
+				});
+			}
+			read
+		};
+
+		// With an unsettled hole below late group 2, group 2 keeps hole 1 owed for a budget from
+		// group 2's arrival; once hole 1 expires, already-stale group 2 and hole 3 go with it.
 		let mut copy = Received::with_info(hang::container::track_info(hang::catalog::PRIORITY.audio)).await;
 		let subscriber = copy
 			.subscribe_with(
@@ -2871,15 +2886,45 @@ mod tests {
 		assert!(reader.poll_read(&kio::Waiter::noop()).is_pending());
 		tokio::time::advance(budget / 2).await;
 		carried().await;
-		let mut read = Vec::new();
-		while let Poll::Ready(Ok(Some(item))) = reader.poll_read(&kio::Waiter::noop()) {
-			read.push(match item {
-				Read::Frame { group, .. } => format!("frame {group}"),
-				Read::Gap { .. } => "gap".to_string(),
-				Read::End { .. } => "end".to_string(),
-			});
-		}
-		assert_eq!(read, ["gap", "frame 4"]);
+		assert!(
+			reader.poll_read(&kio::Waiter::noop()).is_pending(),
+			"hole 1 waits on its immediate successor, group 2"
+		);
+		tokio::time::advance(budget / 2).await;
+		carried().await;
+		assert_eq!(drain(&mut reader), ["gap", "frame 4"]);
+
+		// When nothing is owed below late group 2, group 2 and hole 3 expire a budget after
+		// group 4's earlier arrival, only half a budget after group 2 itself landed.
+		let mut copy = Received::with_info(hang::container::track_info(hang::catalog::PRIORITY.audio)).await;
+		let subscriber = copy
+			.subscribe_with(
+				moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::from(
+					moq_net::track::Start::Live {
+						min: Some(budget),
+						max: Some(budget),
+					},
+				)]),
+			)
+			.await;
+		let mut reader = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));
+		write_group(&mut copy.track, 0, &[ts(0)]);
+		copy.track.skip_groups(1..2);
+		carried().await;
+		assert!(matches!(
+			reader.read().await.unwrap(),
+			Some(Read::Frame { group: 0, .. })
+		));
+		write_group(&mut copy.track, 4, &[ts(40_000)]);
+		carried().await;
+		assert!(reader.poll_read(&kio::Waiter::noop()).is_pending());
+		tokio::time::advance(budget / 2).await;
+		carried().await;
+		write_group(&mut copy.track, 2, &[ts(20_000)]);
+		carried().await;
+		tokio::time::advance(budget / 2).await;
+		carried().await;
+		assert_eq!(drain(&mut reader), ["gap", "frame 4"]);
 	}
 
 	/// A player waits on a hole for the max delay, as it does on a group that did arrive, whatever

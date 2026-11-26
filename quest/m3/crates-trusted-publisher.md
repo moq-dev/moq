@@ -17,11 +17,16 @@ hand-written C API ships as `libmoq`, which has a trusted publisher, and
 publishable and depended on by `moq-video`) joins the list; seven crates
 remain. Corrected 2026-11-25 ([moq-dev/moq#9578](https://github.com/moq-dev/moq/pull/9578)):
 `moq-opus`, the vendored Opus that `moq-audio` depends on, joins the list;
-eight crates remain.
+eight crates remain. Corrected 2026-11-25: `kio` and `kio-macros` moved to
+[kixel-ai/kio](https://github.com/kixel-ai/kio), so their trusted publishers
+belong to `kixel-ai/kio` (tracked in
+[kixel-ai/kio `quest/m1/crates-io-publish.md`](https://github.com/kixel-ai/kio/blob/main/quest/m1/crates-io-publish.md))
+and `moq-dev/moq`'s `release-rs.yml` no longer publishes them; seven crates
+remain.
 
 ## Waiting
 
-- Maintainer: after [the cut](/quest/m3/release/cut.md) publishes kio-macros,
+- Maintainer: after [the cut](/quest/m3/release/cut.md) publishes
   moq-congestion, moq-crypto, moq-opus, moq-quic, moq-rtsp, moq-vaapi, and moq-webrtc by
   token, add their trusted publishers the same way. Settings pages need a
   crates.io login, so check with a `release-rs.yml` run that publishes through
@@ -55,7 +60,8 @@ moq-json, moq-loc, moq-msf, moq-mux, moq-native, moq-net, moq-nvenc,
 moq-pattern, moq-relay, moq-rtmp, moq-sock, moq-srt, moq-stats,
 moq-tokio, moq-transcode, moq-uring, moq-v4l, moq-video, qmux. Not yet
 published (7), so their first publish needs the token and they get a trusted
-publisher after it: kio-macros, moq-c, moq-congestion, moq-crypto,
+publisher after it: kio-macros (moved to `kixel-ai/kio` on 2026-11-25, along
+with `kio`), moq-c, moq-congestion, moq-crypto,
 moq-quic, moq-rtsp, moq-webrtc. moq-crypto became publishable in
 [moq-dev/moq#7733](https://github.com/moq-dev/moq/pull/7733). `CARGO_REGISTRY_TOKEN` is revoked only after all of them have one.
 Settings pages need a crates.io login, so the check is a `release-rs.yml` run

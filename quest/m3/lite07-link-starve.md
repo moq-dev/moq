@@ -31,11 +31,11 @@ and long runs are what reproduce it; don't bisect across it.
    layer's choice for them (`rs/moq-net/src/route/`), or flow control on the link.
    A 1 to 3 minute recovery with no restart points at something that clears on a
    timer or on unrelated traffic, so name what ended each stall.
-3. Check the bugs [subscribe progress fixes](/quest/m1/subscribe-progress-fixes.md)
-   lists before writing a fix: its S5 (a Subscribe Stream's serve loop that stops
+3. Check the bugs [moq-dev/moq#9564](https://github.com/moq-dev/moq/pull/9564)
+   fixed before writing a fix: its S5 (a Subscribe Stream's serve loop that stops
    reading while it flushes) starves exactly this way when two subscriptions fill
    one link's send windows. If one of its bugs is the cause, fix that bug here or
-   land that quest's fix first, and keep this quest's replay check either way.
+   land that PR first, and keep this quest's replay check either way.
 4. Fix the cause, and add the regression test at the lowest layer that fails on
    `main` (a `moq-net` integration test on mocked time where it reproduces there).
 
@@ -52,7 +52,6 @@ Decided 2026-11-25 (maintainer, `/quest-plan`): ✅ keep (rejected: drop).
 
 ## Related
 
-- [Subscribe progress fixes](/quest/m1/subscribe-progress-fixes.md) - non-wire subscriber stalls and missed wakeups, one of which may be this
 - [lite-07 subscribe](/quest/m2/lite07-subscribe/README.md) - the lite-07 subscribe redesign, where a wire change for this would go
 - [Route health](/quest/m3/route-health/README.md) - failover off a stalled route, which would mask rather than fix this
 - [Nightly](/quest/m0/nightly/README.md) - its notes on earlier mesh replay violations, some from CPU-starved relays

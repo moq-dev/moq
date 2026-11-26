@@ -1922,12 +1922,13 @@ async fn a_rate_change_applies_behind_the_revision_it_comes_with() {
 		})
 		.expect("a revised PMT");
 	let counts: Vec<u64> = frames.iter().map(|frame| frame.payload.len() as u64 / 188).collect();
+	// Each recorded rate gains a packet a slot for the export's own clock and framing.
 	assert!(
-		counts[revised - 20..=revised].iter().all(|&n| n == OLD),
+		counts[revised - 20..=revised].iter().all(|&n| n == OLD + 1),
 		"{revised}: {counts:?}"
 	);
 	assert!(
-		counts[revised + 1..revised + 20].iter().all(|&n| n == NEW),
+		counts[revised + 1..revised + 20].iter().all(|&n| n == NEW + 1),
 		"{revised}: {counts:?}"
 	);
 }
@@ -2011,5 +2012,78 @@ async fn withdraw_and_return(listed: bool) {
 		marks(&frames, OTHER_AUDIO_PID, &[0x31, 0x32]).last(),
 		Some(&0x32),
 		"the returned track went out"
+	);
+}
+
+/// A stream waiting for a PID that one before it still drains keeps off that PID's buffer, a
+/// rate change between them too: a private section larger than the AAC buffer after it goes out.
+#[tokio::test(start_paused = true)]
+async fn a_stream_waiting_for_a_pid_leaves_its_buffer_through_a_rate_change() {
+	let (mut broadcast, consumer, mut catalog) = broadcast();
+	catalog.modify(catalog.next_timestamp()).unwrap().ext.mpegts.mux_rate = Some(rate(20));
+	let (_, mut first) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
+	let track = broadcast.unique_track(".private", hang::container::track_info(hang::catalog::PRIORITY.video));
+	let private_name = track.name().to_string();
+	let entry = super::catalog::Track {
+		pid: DATA_PID,
+		descriptors: Vec::new(),
+		verbatim: Some(super::catalog::Verbatim::new(0x05, super::catalog::Framing::Section)),
+		pes_packet: None,
+	};
+	catalog
+		.modify(catalog.next_timestamp())
+		.unwrap()
+		.ext
+		.mpegts
+		.tracks
+		.insert(private_name.clone(), entry);
+	let mut private = Writer::new(
+		track,
+		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+	);
+	let mut frames = Vec::new();
+	let start = kio::clock::now();
+	let mut export = export_of(&consumer).await;
+	live(&mut export, &mut frames, start, &mut [(&mut first, 0x21)], 0, 3_000).await;
+	let mut section = vec![0x80, 0x7f, 0xfd];
+	section.resize(4_096, 0xab);
+	private
+		.write(Frame {
+			timestamp: moq_net::Timestamp::from_millis(3_000).unwrap(),
+			duration: None,
+			payload: bytes::Bytes::from(section),
+			keyframe: true,
+		})
+		.unwrap();
+	private.cut(None).unwrap();
+	live(&mut export, &mut frames, start, &mut [(&mut first, 0x21)], 3_000, 3_100).await;
+	// The section is still held when the catalog hands its PID to AAC and raises the rate.
+	{
+		let mut guard = catalog.modify(catalog.next_timestamp()).unwrap();
+		guard.ext.mpegts.tracks.remove(&private_name);
+		guard.ext.mpegts.mux_rate = Some(rate(30));
+	}
+	let _finished = private.finish().unwrap();
+	let (_, mut after) = aac_track(&mut broadcast, &mut catalog, Some(DATA_PID));
+	live(
+		&mut export,
+		&mut frames,
+		start,
+		&mut [(&mut first, 0x21), (&mut after, 0x22)],
+		3_100,
+		9_000,
+	)
+	.await;
+	for track in [&mut first, &mut after] {
+		track.end_with(None).unwrap();
+	}
+	catalog.finish().unwrap();
+	drain(&mut export, &mut frames).await;
+
+	let sent = packets(&frames).filter(|packet| pid(packet) == DATA_PID && packet[4..].iter().all(|&b| b == 0xab));
+	assert_eq!(sent.count(), 4_096 / 184 - 1, "the section went out whole");
+	assert!(
+		!marks(&frames, DATA_PID, &[0x22]).is_empty(),
+		"the AAC after it went out"
 	);
 }

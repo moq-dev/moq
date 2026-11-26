@@ -1,12 +1,12 @@
 name: Rust cache
-description: Install mbx and its Cargo shim, using local storage on self-hosted runners and R2 on hosted runners.
+description: Install mbx and its Cargo shim, using local storage on self-hosted runners and B2 on hosted runners.
 
 inputs:
   access-key-id:
-    description: R2 access key id. Empty, as for a fork pull request, builds cold.
+    description: B2 application key id. Empty, as for a fork pull request, builds cold.
     default: ""
   secret-access-key:
-    description: R2 secret access key matching `access-key-id`.
+    description: B2 application key matching `access-key-id`.
     default: ""
   write:
     description: Whether a run on `main` publishes its compilations. A job whose builds nothing reuses, such as one per mutant, passes false and reads with the repository's key.
@@ -48,27 +48,32 @@ runs:
       run: |
         if [ -z "$KEY_ID" ] && [ -z "$SECRET" ]; then
           if [ "$WRITE" = "true" ]; then
-            echo "::error::$GITHUB_REF writes the cache but the cache-write Environment supplied no R2 key"
+            echo "::error::$GITHUB_REF writes the cache but the cache-write Environment supplied no B2 key"
             exit 1
           fi
-          echo "::warning::No R2 cache credentials, as for a fork pull request; building cold"
+          echo "::warning::No B2 cache credentials, as for a fork pull request; building cold"
           exit 0
         fi
         if [ -z "$KEY_ID" ] || [ -z "$SECRET" ]; then
-          echo "::error::only one of the R2 access key id and secret is set; check the MBX_R2_* secrets"
+          echo "::error::only one of the B2 key id and key is set; check the MBX_B2_* secrets"
           exit 1
         fi
         {
           echo "AWS_ACCESS_KEY_ID=$KEY_ID"
           echo "AWS_SECRET_ACCESS_KEY=$SECRET"
-          echo "MBX_REMOTE_S3_ENDPOINT=https://dd618f5dbd5da77b8296f1613c301f5c.r2.cloudflarestorage.com"
-          echo "MBX_REMOTE_S3_REGION=auto"
+          echo "MBX_REMOTE_S3_ENDPOINT=https://s3.us-east-005.backblazeb2.com"
+          echo "MBX_REMOTE_S3_REGION=us-east-005"
+          # B2 answers conditional writes with 501. mbx's `auto` drops them
+          # only after the first refusal, so skip straight there: only the
+          # task manifest's compare-and-swap is lost, letting concurrent
+          # writers overwrite each other's prediction updates.
+          echo "MBX_REMOTE_S3_CONDITIONAL_WRITES=off"
           # The action store's size budget also caps what one build downloads,
           # and a hosted disk scales it to 5 GiB on Linux and 10 on Windows.
           # mbx stops prefetching at half of it, so a job's own results still
           # restore, but 20 GiB covers the most any job downloaded before that,
           # and a refused restore compiles again and re-uploads objects the
-          # bucket already holds, each a refused but billed put.
+          # bucket already holds, each another version B2 keeps for a day.
           echo "MBX_GC_MAX_SIZE=20GiB"
           if [ "$WRITE" = "true" ]; then
             echo "MBX_REMOTE_MODE=read-write"
@@ -157,7 +162,7 @@ runs:
         echo "policy: $policy"
         case "$remote" in
           pass:*) ;;
-          *) echo "::error::R2 cache unusable: $remote"; exit 1 ;;
+          *) echo "::error::B2 cache unusable: $remote"; exit 1 ;;
         esac
         if [ "$MBX_REMOTE_MODE" = "read-write" ] && [[ "$policy" != *"effective read-write" ]]; then
           echo "::error::the cache writer cannot publish: $policy"
