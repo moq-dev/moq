@@ -1020,7 +1020,7 @@ class Reader implements ResumeSource {
 		return this.#window()
 			.runs(max(floor, cursor.start), min(key, cursor.end ?? key))
 			.some((run) =>
-				delivered.gaps(run.start, run.end).some((gap) => {
+				[...delivered.gaps(run.start, run.end)].some((gap) => {
 					for (let at = gap.start; at < gap.end; ) {
 						const past = hooks.holeEnd(copy.sub, at, false);
 						if (past === undefined || past <= at) return true;
@@ -1566,7 +1566,7 @@ class Reader implements ResumeSource {
 		const window = this.#window();
 		const end = window.end();
 		if (end === undefined || window.pending) return false;
-		const gaps = window.runs(window.floor() ?? 0n, end).flatMap((run) => delivered.gaps(run.start, run.end));
+		const gaps = window.runs(window.floor() ?? 0n, end).flatMap((run) => [...delivered.gaps(run.start, run.end)]);
 		return this.#accounts(serving, delivered, gaps, ordered);
 	}
 
@@ -1644,7 +1644,7 @@ class Reader implements ResumeSource {
 	#unskipped(run: Run): Run[] {
 		const held = new Delivered();
 		for (const skip of this.skippedIn(run.start, run.end)) held.addRun(skip.start, skip.end);
-		return held.gaps(run.start, run.end);
+		return [...held.gaps(run.start, run.end)];
 	}
 
 	/**

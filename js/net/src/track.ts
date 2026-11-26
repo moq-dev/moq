@@ -4624,7 +4624,7 @@ export class Subscriber {
 		const cursor = this.#cursor.peek();
 		const from = max(max(start, cursor.start), this.#nextKey);
 		const to = cursor.end === undefined ? end : min(end, cursor.end);
-		return this.#window.runs(from, to).flatMap((run) => this.#delivered.gaps(run.start, run.end));
+		return this.#window.runs(from, to).flatMap((run) => [...this.#delivered.gaps(run.start, run.end)]);
 	}
 
 	// Tell each group buffered in `[start, end)` whether this reader will still read it, as the
@@ -5010,7 +5010,7 @@ export class Subscriber {
 		if (end === undefined) return false;
 		const gaps = this.#window
 			.runs(this.#window.floor() ?? 0n, end)
-			.flatMap((run) => this.#delivered.gaps(run.start, run.end));
+			.flatMap((run) => [...this.#delivered.gaps(run.start, run.end)]);
 		return this.#accounts(gaps, ordered);
 	}
 
@@ -5041,7 +5041,7 @@ export class Subscriber {
 		const unproven: Run[] = [];
 		const lacking = gaps
 			.flatMap((gap) => this.#window.runs(gap.start, min(gap.end, end)))
-			.flatMap((gap) => this.#delivered.gaps(gap.start, gap.end));
+			.flatMap((gap) => [...this.#delivered.gaps(gap.start, gap.end)]);
 		for (const gap of lacking) {
 			// Each run judged from where it meets the gap, as the reader would read it.
 			const overlapping = givenUp(all, refused.peek(), gap.start, gap.end, (run) =>
@@ -5276,7 +5276,7 @@ export class Subscriber {
 		hooks.accountsFor = (subscriber, delivered, gaps, ordered) => {
 			if (!subscriber.#resume) return subscriber.#accounts(gaps, ordered);
 			const own = subscriber.#delivered;
-			const left = gaps.flatMap((gap) => own.gaps(gap.start, gap.end));
+			const left = gaps.flatMap((gap) => [...own.gaps(gap.start, gap.end)]);
 			return subscriber.#resume.accounts(own.union(delivered), left, ordered);
 		};
 		hooks.skippedIn = (subscriber, start, end) =>
