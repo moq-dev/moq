@@ -1430,11 +1430,14 @@ class Reader implements ResumeSource {
 		// the subscription's Group Order. A replaced copy's buffered group comes before a later one
 		// the serving copy already has. An arrival read still delivers a lower group that truly
 		// arrives later.
-		// A copy still serving that refuses the ranges fails the read before any copy hands out a
-		// group, as the Rust `Reader::poll_first` meets it in the same pass as the groups.
-		const serving = this.#serving();
-		const refused = serving && hooks.refused(serving.sub);
-		if (refused) return { kind: "error", error: refused, refused: true };
+		// A copy no switch replaced refusing the ranges fails the read before any copy hands out a
+		// group, as the Rust `Reader::poll_first` meets it in the same pass as the groups: the serving
+		// copy, or the last one while the front parks between routes.
+		for (const copy of this.#copies) {
+			if (copy.replaced || !this.#feeds(copy)) continue;
+			const refused = hooks.refused(copy.sub);
+			if (refused) return { kind: "error", error: refused, refused: true };
+		}
 		let owing: Copy[];
 		for (;;) {
 			const first = this.#first(ordered, delivered, admit);
