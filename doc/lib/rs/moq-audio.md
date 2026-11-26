@@ -37,7 +37,7 @@ on that clock, such as decoded media timed against its video; given a stretch
 bound, it glides onto positions that move with a playout target, as playback
 glides onto its clock, instead of writing silence or failing at each step.
 
-Without a subscriber the encoder keeps raw PCM
+Without a subscriber (a track info query or a fetch alone does not count) the encoder keeps raw PCM
 up to the track's `max_age`, then encodes the part of that history within the
 subscribers want, from a live join's lag (its playout delay plus the codec's warmup)
 bounded by its max delay, before continuing live when someone subscribes. A join with

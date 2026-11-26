@@ -23,6 +23,7 @@ export interface Config {
 
 export interface SendStream extends WritableStream<Uint8Array> {
 	getStats(): Promise<SendStreamStats>;
+	resetAt(offset: number, reason?: unknown): void;
 	sendOrder: number;
 }
 

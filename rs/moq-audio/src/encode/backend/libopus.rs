@@ -1,9 +1,9 @@
-//! Opus through libopus 1.3.1, via [`unsafe_libopus`].
+//! Opus through libopus 1.3.1, via [`moq_opus`].
 
 use std::collections::VecDeque;
 
 use bytes::Bytes;
-use unsafe_libopus::{
+use moq_opus::{
 	OPUS_APPLICATION_AUDIO, OPUS_APPLICATION_VOIP, OPUS_GET_BITRATE_REQUEST, OPUS_GET_IN_DTX_REQUEST,
 	OPUS_GET_LOOKAHEAD_REQUEST, OPUS_OK, OPUS_RESET_STATE, OPUS_SET_BITRATE_REQUEST, OPUS_SET_DTX_REQUEST,
 	OPUS_SET_SIGNAL_REQUEST, OPUS_SIGNAL_MUSIC, OPUS_SIGNAL_VOICE, OpusEncoder, opus_encode_float, opus_encoder_create,
@@ -212,7 +212,7 @@ impl Drop for Libopus {
 
 #[cfg(test)]
 mod tests {
-	use unsafe_libopus::{OPUS_AUTO, OPUS_GET_APPLICATION_REQUEST, OPUS_GET_DTX_REQUEST, OPUS_GET_SIGNAL_REQUEST};
+	use moq_opus::{OPUS_AUTO, OPUS_GET_APPLICATION_REQUEST, OPUS_GET_DTX_REQUEST, OPUS_GET_SIGNAL_REQUEST};
 
 	use super::*;
 

@@ -111,6 +111,10 @@ pub struct Producer {
 	/// Where the latest stamped packet ends, in microseconds: the next anchor's floor, since
 	/// group starts strictly increase.
 	stamped: u64,
+	/// Where the newest published packet ends: the open group's end when encoding stops, since
+	/// frames stamped since may still wait in the backlog or the codec. `None` after priming,
+	/// which ends where it starts and which the muxer may write a unit past a marker.
+	published: Option<Timestamp>,
 	/// An encoder reset that still needs a marker group before its next packet.
 	pending_discontinuity: bool,
 	/// Whether no packet has been published since the last marker group, or the track began, so a
@@ -266,6 +270,7 @@ impl Reserved {
 			in_flight: VecDeque::new(),
 			anchor: None,
 			stamped: 0,
+			published: None,
 			pending_discontinuity: false,
 			decoder_boundary: true,
 			activity: Activity::Active,
@@ -354,7 +359,7 @@ impl Producer {
 		self.track.track().demand()
 	}
 
-	#[cfg(feature = "capture")]
+	#[cfg(any(feature = "capture", test))]
 	pub(crate) fn track(&self) -> &moq_net::track::Producer {
 		self.track.track()
 	}
@@ -620,6 +625,17 @@ impl Producer {
 			self.reset_pending = true;
 			self.pending_discontinuity = true;
 		}
+		// Nothing reads on, so the open group ends where its last packet does: a reader of it,
+		// such as a fetch, finishes while the audio is retained. The epoch continues, so the
+		// replay that follows opens the next group with no marker.
+		// A group ending in priming stays open for the packet that moves on, as `publish` leaves it.
+		if self.active
+			&& !active
+			&& !self.track.needs_keyframe()
+			&& let Some(end) = self.published
+		{
+			self.track.cut(Some(end))?;
+		}
 		self.active = active;
 		// One codec frame per turn lets capture keep draining while catching up.
 		if active && let Some(raw) = self.backlog.pop() {
@@ -720,6 +736,7 @@ impl Producer {
 			duration: None,
 		};
 		self.track.write(mux_frame)?;
+		self.published = (stamp.end > stamp.start).then_some(stamp.end);
 		self.grouped += self.encoder.frame_size() as u64;
 		// Cut as soon as the group is long enough rather than when the next packet arrives, so
 		// the relay sees it finish without waiting. The group ends whole where its last packet
@@ -1168,6 +1185,91 @@ mod tests {
 			.write(&pcm_frame(&vec![0.5; 1920], at(151).as_micros().unwrap() as u64))
 			.unwrap();
 		assert_eq!(packet(&mut reader).await.unwrap().timestamp, at(151));
+		let _finished = producer.finish().unwrap();
+	}
+
+	/// A group the join left open when encoding stops ends where its last packet does, so a reader
+	/// of it, such as a fetch, finishes while the audio is retained rather than waiting for a
+	/// subscriber to return. The replay that follows opens the next group with no marker.
+	#[tokio::test(start_paused = true)]
+	async fn stopping_ends_the_open_group() {
+		let input = Input::default();
+		let options = Options {
+			track: Some("audio".into()),
+			config: Config::from_input(super::super::Codec::Pcm, &input),
+			join: Duration::from_millis(100),
+			..Options::default()
+		};
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = moq_mux::catalog::Producer::new(
+			&mut broadcast,
+			moq_mux::catalog::Config::default().with_max_age(Duration::from_secs(30)),
+		)
+		.unwrap();
+		let mut producer = Producer::new(&mut broadcast, catalog, input, &options).unwrap();
+		let at = |index: u64| Timestamp::from_micros(1_000_000 + index * 20_000).unwrap();
+		producer.set_active(true, at(0)).unwrap();
+		producer
+			.write(&pcm_frame(&vec![0.5; 1920], at(0).as_micros().unwrap() as u64))
+			.unwrap();
+		let open = producer.track().largest().expect("a group opened").group;
+		producer.set_active(false, at(1)).unwrap();
+		producer
+			.write(&pcm_frame(&vec![0.5; 1920], at(1).as_micros().unwrap() as u64))
+			.unwrap();
+
+		let mut group = consumer.track("audio").unwrap().fetch_group(open, None).await.unwrap();
+		assert!(group.read_frame().await.unwrap().is_some());
+		let end = now_or_never(group.read_frame()).expect("the open group ended");
+		assert!(end.unwrap().is_none());
+
+		producer.set_active(true, at(2)).unwrap();
+		assert_eq!(
+			producer.track().largest().unwrap().group,
+			at(1).as_micros().unwrap() as u64
+		);
+		let _finished = producer.finish().unwrap();
+	}
+
+	/// Stopping partway through a replay ends the open group where its last published packet does,
+	/// not where the newest retained frame does, so the next replayed frame opens the next group at
+	/// its own timestamp.
+	#[tokio::test(start_paused = true)]
+	async fn stopping_mid_replay_ends_the_group_at_its_last_packet() {
+		let input = Input::default();
+		let options = Options {
+			track: Some("audio".into()),
+			config: Config::from_input(super::super::Codec::Pcm, &input),
+			join: Duration::from_millis(100),
+			..Options::default()
+		};
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(
+			&mut broadcast,
+			moq_mux::catalog::Config::default().with_max_age(Duration::from_secs(30)),
+		)
+		.unwrap();
+		let mut producer = Producer::new(&mut broadcast, catalog, input, &options).unwrap();
+		let at = |index: u64| Timestamp::from_micros(1_000_000 + index * 20_000).unwrap();
+		producer.set_active(false, at(0)).unwrap();
+		for index in 0..3 {
+			producer
+				.write(&pcm_frame(&vec![0.5; 1920], at(index).as_micros().unwrap() as u64))
+				.unwrap();
+		}
+		// Each turn replays one retained frame.
+		producer.set_active(true, at(3)).unwrap();
+		assert_eq!(
+			producer.track().largest().unwrap().group,
+			at(0).as_micros().unwrap() as u64
+		);
+		producer.set_active(false, at(3)).unwrap();
+		producer.set_active(true, at(3)).unwrap();
+		assert_eq!(
+			producer.track().largest().unwrap().group,
+			at(1).as_micros().unwrap() as u64
+		);
 		let _finished = producer.finish().unwrap();
 	}
 
@@ -2463,6 +2565,37 @@ mod tests {
 		// with its first.
 		assert_eq!(pts(1_050_000).await, vec![1_041_334, 1_041_334, 1_048_666, 1_070_000]);
 		assert_eq!(pts(1_000_000).await, vec![1_041_334, 1_041_334, 1_041_334, 1_061_333]);
+	}
+
+	/// Priming stamped where the packets before a reanchor end lands on the break's marker, so the
+	/// muxer writes it a unit later. Stopping with only priming in the open group leaves that group
+	/// open for the packet that moves on, as `publish` does, rather than cutting below its packets.
+	#[tokio::test]
+	async fn stopping_after_priming_on_a_marker_keeps_the_track() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let input = Input::new(48_000, Layout::Mono);
+		let options = Options {
+			track: Some("audio".to_string()),
+			config: Config::from_input(crate::encode::Codec::Aac, &input),
+			..Options::default()
+		};
+		let stub = crate::encode::backend::stub::install();
+		let mut producer = Producer::new(&mut broadcast, catalog, input, &options).unwrap();
+		drop(stub);
+
+		producer.write(&pcm_frame(&[0.1; 4 * 1024], 1_000_000)).unwrap();
+		producer.reanchor();
+		// The codec returns two priming packets, stamped at 1_041_333 and written at 1_041_334.
+		producer.write(&pcm_frame(&[0.1; 2 * 1024], 1_000_000)).unwrap();
+		producer
+			.set_active(false, Timestamp::from_micros(1_100_000).unwrap())
+			.unwrap();
+		producer
+			.set_active(true, Timestamp::from_micros(1_100_000).unwrap())
+			.unwrap();
+		producer.write(&pcm_frame(&[0.1; 3 * 1024], 1_021_333)).unwrap();
+		let _finished = producer.finish().unwrap();
 	}
 
 	/// A codec that holds frames returns their packets late, and each still goes out at the stamp

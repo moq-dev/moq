@@ -15,7 +15,7 @@ import type * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
 import type { Goaway } from "../connection/goaway.ts";
 import type { BroadcastCache } from "../consume.ts";
-import { error, ProtocolViolation } from "../error.ts";
+import { error, ProtocolViolation, peerEnded } from "../error.ts";
 import { routesEqual, WireRoute } from "../hop.ts";
 import type * as Instance from "../instance.ts";
 import {
@@ -264,9 +264,12 @@ export class Routed {
 		}
 		this.#editing = { remove, add: added };
 		console.debug(`announced: remove=${remove.join(",")} add=${add.map(({ prefix }) => prefix).join(",")}`);
-		// However large, the edit goes whole, in as many messages as it takes.
+		// However large, the edit goes whole, in as many messages as it takes. A peer that stopped
+		// the stream is leaving, which the session's own handling of the stop ends these routes for.
 		for (const part of requestParts(remove, add, this.#session.version)) {
-			this.#session.send(part).catch((err: unknown) => this.close(error(err)));
+			this.#session.send(part).catch((err: unknown) => {
+				if (!peerEnded(err)) this.close(error(err));
+			});
 		}
 	}
 
@@ -530,9 +533,12 @@ export class Routed {
 		this.#release();
 	}
 
-	/** Apply one message the peer sent on its Announce Stream as a publisher. */
+	/**
+	 * Apply one message the peer sent on its Announce Stream as a publisher. Once the peer left,
+	 * whatever it still sends about the claims that ended with it is moot.
+	 */
 	async receive(msg: AnnounceBroadcast): Promise<void> {
-		if (this.#closing) return;
+		if (this.#closing || this.#finished) return;
 		switch (msg.status) {
 			case "ok":
 				this.#ok();

@@ -29,7 +29,6 @@ import {
 	firstEligible,
 	hiddenBelow,
 	hooks,
-	mostSpecific,
 	receive,
 	routeHops,
 	scopeCaptures,
@@ -313,6 +312,8 @@ interface RequestSlot {
 interface Resolution {
 	readonly front?: broadcast.Consumer;
 	readonly instance?: Instance.Valid;
+	/** The epoch of the instance the front came from: a request selecting another one never joins it. */
+	readonly epoch?: bigint;
 	/** The local broadcast or route entry's identity the front came from, when it did. */
 	readonly source?: object;
 	/** Whether the front is the local broadcast, whose word on a track no route news overtakes. */
@@ -374,10 +375,24 @@ function received(entry: RouteEntry): boolean {
 	return !entry.originated;
 }
 
+/**
+ * Which claims a lookup passes over: a route entry or an announced local broadcast, with the route
+ * it is advertised with. A passed-over claim neither wins nor shadows.
+ */
+type Skip = (claim: RouteEntry | broadcast.Consumer, route: WireRoute) => boolean;
+
 /** What a peer cannot be served through: a received route, or one of another instance than it pinned. */
-function unservable(instance: Instance.Valid | undefined): (entry: RouteEntry) => boolean {
-	if (instance === undefined) return received;
-	return (entry) => received(entry) || entry.route.peek().instance !== instance;
+function unservable(instance: Instance.Valid | undefined): Skip {
+	return (claim, route) =>
+		(!(claim instanceof broadcast.Consumer) && received(claim)) ||
+		(instance !== undefined && route.instance !== instance);
+}
+
+/** Whether `slot` still serves an older epoch while it waits on its instance's newer one: nobody joins it meanwhile. */
+function outdated(slot: RequestSlot): boolean {
+	const current = slot.route.peek();
+	if (current?.front === undefined || slot.failover === undefined) return false;
+	return (slot.failover.route.peek().epoch ?? 0n) !== (current.epoch ?? 0n);
 }
 
 function unroutable(): StreamError {
@@ -648,7 +663,7 @@ class OriginState {
 	// providing route goes away or the last request releases it.
 	materialized = new Map<
 		Path.Valid,
-		{ entry: RouteEntry; front: broadcast.Consumer; instance?: Instance.Valid; source: object }
+		{ entry: RouteEntry; front: broadcast.Consumer; instance?: Instance.Valid; epoch?: bigint; source: object }
 	>();
 
 	// Paths consumers asked for without waiting for an announcement; attached sessions
@@ -872,16 +887,18 @@ class OriginState {
 	#reroute(path: Path.Valid, slot: RequestSlot): void {
 		if (this.retained.has(slot)) return;
 		const current = slot.route.peek();
-		// A pinned slot follows its instance from the start, and a detached one once it resolved.
-		if (slot.pin !== undefined && !(current?.front && current.source)) {
+		// A pinned slot follows its instance before it resolves; once resolved, the detached branch
+		// passes its source along, so losing its instance's last route ends it even while parked.
+		if (slot.pin !== undefined && !current?.source) {
 			this.follow(path, slot, slot.pin, undefined);
 			return;
 		}
+		// A detached slot follows its instance once resolved, parked or not.
+		if (current?.source && this.detached.get(path)?.has(slot)) {
+			this.follow(path, slot, current.instance, current.source);
+			return;
+		}
 		if (current?.front && current.source) {
-			if (this.detached.get(path)?.has(slot)) {
-				this.follow(path, slot, current.instance, current.source);
-				return;
-			}
 			if (!this.serves(path, current.source, current.instance, false)) {
 				this.drop(path, slot, unroutable());
 				return;
@@ -890,6 +907,13 @@ class OriginState {
 			const held = { identity: current.source, route: { instance: current.instance } };
 			if (next && !sameInstance(held, next)) {
 				this.retire(path, slot);
+				return;
+			}
+			// Another epoch of the instance wins: the slot's handles move onto it once it answers, but
+			// nobody joins them meanwhile, since an older epoch never stands in for a newer one.
+			if (next && (next.route.epoch ?? 0n) !== (current.epoch ?? 0n)) {
+				this.retire(path, slot);
+				this.follow(path, slot, current.instance, current.source);
 				return;
 			}
 		}
@@ -919,7 +943,9 @@ class OriginState {
 			this.drop(path, slot, unroutable());
 			return;
 		}
-		const skip = (candidate: RouteEntry) => !candidate.server || candidate.route.peek().instance !== instance;
+		// A broadcast of the instance above `path` shadows its broader routes, as in Rust's lookup.
+		const skip: Skip = (claim, route) =>
+			route.instance !== instance || (!(claim instanceof broadcast.Consumer) && !claim.server);
 		const entry = this.bestEntry(path, skip);
 		const local = this.local.peek().get(path);
 		if (
@@ -930,7 +956,8 @@ class OriginState {
 			slot.failover = undefined;
 			if (source === local) return;
 			this.retain(path, slot, undefined);
-			slot.route.set({ front: local, instance, source: local, local: true });
+			const epoch = this.advertisedLocal.peek().get(path)?.epoch;
+			slot.route.set({ front: local, instance, epoch, source: local, local: true });
 			return;
 		}
 		if (!entry?.server) {
@@ -939,8 +966,8 @@ class OriginState {
 			else slot.route.set(undefined);
 			return;
 		}
-		if (entry.identity === source) {
-			// Already on the cheapest: a takeover still pending speaks for nobody.
+		if (entry.identity === source && current?.front !== undefined && current.front.closed.peek() === undefined) {
+			// Already on the cheapest, still answering: a takeover still pending speaks for nobody.
 			slot.failover = undefined;
 			return;
 		}
@@ -950,11 +977,15 @@ class OriginState {
 			slot.failover = entry;
 			entry.server.enqueue(path);
 			if (!source) slot.route.set({ instance });
+			// Its answer closed: readers park on the instance until the route answers again.
+			else if (current?.front?.closed.peek() !== undefined) {
+				slot.route.set({ instance, epoch: current?.epoch, source });
+			}
 			return;
 		}
 		slot.failover = undefined;
 		this.retain(path, slot, served);
-		slot.route.set({ front: served, instance, source: entry.identity });
+		slot.route.set({ front: served, instance, epoch: entry.route.peek().epoch, source: entry.identity });
 	}
 
 	/**
@@ -1000,7 +1031,8 @@ class OriginState {
 		const entry = this.bestEntry(path);
 		const local = this.local.peek().get(path);
 		if (local && this.localWins(path, entry)) {
-			return { identity: local, route: { instance: this.advertisedLocal.peek().get(path)?.instance } };
+			const advertised = this.advertisedLocal.peek().get(path);
+			return { identity: local, route: { instance: advertised?.instance, epoch: advertised?.epoch } };
 		}
 		if (!entry?.server) return undefined;
 		return { identity: entry.identity, route: entry.route.peek() };
@@ -1125,7 +1157,29 @@ class OriginState {
 			for (const slot of slots) this.reroute(path, slot);
 		}
 		for (const path of this.requests.peek().keys()) if (Path.hasPrefix(prefix, path)) this.forget(path);
-		for (const [path] of detached) if (Path.hasPrefix(prefix, path)) this.forget(path);
+		// Read again: a slot rerouting may have retired into it, releasing what it waited on.
+		for (const path of this.detached.keys()) if (Path.hasPrefix(prefix, path)) this.forget(path);
+	}
+
+	/**
+	 * Recompute `path` and every request beneath it, after a broadcast there changed: as a claim
+	 * on its subtree it can shadow or supersede what those resolve to. Found through the watch
+	 * trie, which holds every request's path, so a publish costs its own subtree rather than a
+	 * scan of every open request.
+	 */
+	refreshBeneath(path: Path.Valid): void {
+		this.refresh(path);
+		let node: WatchNode | undefined = this.#watches;
+		for (const part of Path.parts(path)) node = node?.children.get(part);
+		if (!node) return;
+		// Collected first: a reroute can end a request, which prunes the trie.
+		const beneath: Path.Valid[] = [];
+		const stack = [...node.children.values()];
+		for (let next = stack.pop(); next; next = stack.pop()) {
+			if (next.count > 0) beneath.push(next.path);
+			stack.push(...next.children.values());
+		}
+		for (const covered of beneath) this.refresh(covered);
 	}
 
 	/** Rebuild the publisher-facing originated table after an advertisement write. */
@@ -1150,16 +1204,47 @@ class OriginState {
 		this.closeUnheld(path, cached.front);
 	}
 
-	/** The preferred entry on the most specific route covering `path`, ignoring skipped entries, if any. */
-	bestEntry(path: Path.Valid, skip?: (entry: RouteEntry) => boolean): RouteEntry | undefined {
+	/**
+	 * The best route entry among the most specific claims covering `path`, ignoring skipped ones.
+	 * An announced local broadcast published above `path` is one of those claims: it serves only
+	 * its own path, so a tier-mate that serves `path` outranks it, but it still supersedes an older
+	 * epoch of its instance and shadows broader claims, and undefined means it won. The local
+	 * broadcast at `path` itself competes through {@link localWins}. Mirrors
+	 * `RouteTable::best_route` in rs/moq-net.
+	 */
+	bestEntry(path: Path.Valid, skip?: Skip): RouteEntry | undefined {
 		const routes = this.routes.peek();
-		const local = this.local.peek().has(path) ? this.advertisedLocal.peek().get(path) : undefined;
-		return mostSpecific(
-			path,
-			(prefix) => (routes.get(prefix) ?? []).filter((entry) => admits(entry, path) && !skip?.(entry)),
-			(entry) => ({ identity: entry.identity, route: entry.route.peek() }),
-			local ? [local] : [],
-		);
+		const local = this.local.peek();
+		const advertised = this.advertisedLocal.peek();
+		const filed: Filed<RouteEntry | broadcast.Consumer>[] = [];
+		const exact = Path.parts(path).length;
+		let depth = exact;
+		for (const prefix of coveringPrefixes(path)) {
+			let order = 0;
+			for (const entry of routes.get(prefix) ?? []) {
+				const route = entry.route.peek();
+				if (!admits(entry, path) || skip?.(entry, route)) continue;
+				filed.push({
+					prefix,
+					depth,
+					order: order++,
+					arrival: arrival(entry.identity),
+					candidate: entry,
+					route,
+				});
+			}
+			const front = depth < exact ? local.get(prefix) : undefined;
+			const route = front && advertised.get(prefix);
+			if (front && route && !skip?.(front, route))
+				filed.push({ prefix, depth, order, arrival: arrival(front), candidate: front, route });
+			depth--;
+		}
+		const own = local.has(path) ? advertised.get(path) : undefined;
+		const best = bestOfTier(path, filed, {
+			others: (specificity) => (own && specificity === exact ? [own] : []),
+			serves: (entry) => !(entry.candidate instanceof broadcast.Consumer),
+		})?.candidate;
+		return best instanceof broadcast.Consumer ? undefined : best;
 	}
 
 	/**
@@ -1171,7 +1256,7 @@ class OriginState {
 	 * the routes `skip` leaves, which must be what `entry` was chosen from. False when nothing is
 	 * announced locally at `path`.
 	 */
-	localWins(path: Path.Valid, entry: RouteEntry | undefined, skip?: (entry: RouteEntry) => boolean): boolean {
+	localWins(path: Path.Valid, entry: RouteEntry | undefined, skip?: Skip): boolean {
 		const local = this.advertisedLocal.peek().get(path);
 		if (!local || !this.local.peek().has(path)) return false;
 		if (!entry || !this.routes.peek().get(path)?.includes(entry)) return true;
@@ -1183,8 +1268,10 @@ class OriginState {
 		// any route at the path the request could take supersedes the local broadcast, not only
 		// the best one.
 		const rivals = (this.routes.peek().get(path) ?? [])
-			.filter((candidate) => candidate.scope.matches(path) && !(skip?.(candidate) ?? false))
-			.map((candidate) => candidate.route.peek())
+			.filter((candidate) => candidate.scope.matches(path))
+			.map((candidate) => [candidate, candidate.route.peek()] as const)
+			.filter(([candidate, rival]) => !(skip?.(candidate, rival) ?? false))
+			.map(([, rival]) => rival)
 			// A broader claim shown here competes with nothing the local broadcast competes with.
 			.filter((rival) => (rival.above ?? 0n) === 0n);
 		if (superseded(local, rivals)) return false;
@@ -1207,9 +1294,11 @@ class OriginState {
 		if (local && this.localWins(path, entry)) {
 			// Nothing reads a remote front the local broadcast replaced, so close its session subscription.
 			this.releaseMaterialized(path);
+			const advertised = this.advertisedLocal.peek().get(path);
 			return {
 				front: local,
-				instance: this.advertisedLocal.peek().get(path)?.instance,
+				instance: advertised?.instance,
+				epoch: advertised?.epoch,
 				source: local,
 				local: true,
 			};
@@ -1221,7 +1310,8 @@ class OriginState {
 			cached = undefined;
 		}
 		const instance = entry?.route.peek().instance;
-		if (cached && cached.entry === entry && cached.instance === instance) return cached;
+		const epoch = entry?.route.peek().epoch;
+		if (cached && cached.entry === entry && cached.instance === instance && cached.epoch === epoch) return cached;
 		if (!entry?.server) {
 			this.releaseMaterialized(path);
 			return slot.answer ? { front: slot.answer } : undefined;
@@ -1229,16 +1319,17 @@ class OriginState {
 
 		const served = entry.server.served.get(path);
 		if (served && served.closed.peek() === undefined) {
-			const resolution = { entry, front: served, instance, source: entry.identity };
+			const resolution = { entry, front: served, instance, epoch, source: entry.identity };
 			this.materialized.set(path, resolution);
 			if (cached && cached.front !== served) this.closeUnheld(path, cached.front);
 			return resolution;
 		}
 
 		entry.server.enqueue(path);
-		// The same instance over another route: the old front serves until the new one answers.
-		const kept = cached?.instance === instance ? cached : undefined;
-		return { front: kept?.front, instance, source: kept?.source, pending: true };
+		// The same instance and epoch over another route: the old front serves until the new one
+		// answers. An older epoch never stands in for a newer one.
+		const kept = cached?.instance === instance && (cached?.epoch ?? 0n) === (epoch ?? 0n) ? cached : undefined;
+		return { front: kept?.front, instance, epoch: kept?.epoch, source: kept?.source, pending: true };
 	}
 }
 
@@ -1594,7 +1685,7 @@ export class Producer implements Table {
 			advertised.set(path, route);
 		});
 		this.#state.rebuildOriginated();
-		this.#state.refresh(path);
+		this.#state.refreshBeneath(path);
 	}
 
 	#retractExact(path: Path.Valid, front: broadcast.Consumer): void {
@@ -1606,7 +1697,7 @@ export class Producer implements Table {
 			advertised.delete(path);
 		});
 		this.#state.rebuildOriginated();
-		this.#state.refresh(path);
+		this.#state.refreshBeneath(path);
 	}
 
 	/**
@@ -2411,7 +2502,7 @@ export class Consumer implements Reader {
 			pin === undefined
 				? requests.get(path)
 				: [...(this.#state.detached.get(path) ?? [])].find(
-						(other) => other.pin === pin && !this.#state.retained.has(other),
+						(other) => other.pin === pin && !this.#state.retained.has(other) && !outdated(other),
 					);
 		if (!slot && pin !== undefined) {
 			const created: RequestSlot = {
@@ -2600,8 +2691,8 @@ export class Consumer implements Reader {
 	 * broadcast change. The filter is any pattern, relative to the root, and only picks what is
 	 * listed: what the wildcards stood for is each announcement's `captures`. A local broadcast
 	 * appears once it announces, exactly as a peer sees it. Only routes whose literal name
-	 * matches the filter are listed, unless `options.covering` also asks for every dynamic or
-	 * received route whose subtree overlaps it. The stream ends when the origin closes or the
+	 * matches the filter are listed, unless `options.covering` also asks for every route whose
+	 * subtree overlaps it, a broadcast included. The stream ends when the origin closes or the
 	 * consumer is closed. Hidden routes are left out unless `options.hidden` opts in (see
 	 * {@link Announce.Options}). While open, it watches the filter's literal head: a `consume`
 	 * session asks its peer for announcements there.
@@ -2647,22 +2738,20 @@ export class Consumer implements Reader {
 			lost: entry.lost,
 		});
 		for (const [path, candidates] of this.#state.snapshot()) {
-			// The first candidate this reader can see wins, since the preferred one overall may not be,
-			// unless a higher epoch of its instance that the reader also sees supersedes it.
-			const scopeOf = (candidate: Candidate) =>
-				scopes.find(
-					({ pattern, head }) =>
-						(covering || pattern.matches(path)) &&
-						(candidate.exact ? pattern.matches(path) : scopeOverlaps(pattern, path)) &&
-						(hidden || !hiddenBelow(head, path)),
-				);
+			// Every candidate is a claim on the subtree it is filed at, a broadcast included, so a
+			// covering reader sees each one whose subtree overlaps its scope, as Rust's cursor does.
+			const scope = scopes.find(
+				({ pattern, head }) =>
+					(covering || pattern.matches(path)) &&
+					scopeOverlaps(pattern, path) &&
+					(hidden || !hiddenBelow(head, path)),
+			);
+			if (scope === undefined) continue;
 			const relative = Path.stripPrefix(root, path);
 			if (relative === null || relative === Path.empty()) {
 				if (relative === null && !Path.hasPrefix(path, root)) continue;
 				const depth = Path.parts(path).length;
 				candidates.forEach((candidate, order) => {
-					const scope = scopeOf(candidate);
-					if (scope === undefined) return;
 					// Hold the empty path's place in the order the snapshot lists its first claim.
 					if (atRoot.length === 0) next.set(Path.empty(), present(path, candidate, scope.pattern));
 					const filed = { candidate, path, pattern: scope.pattern };
@@ -2677,13 +2766,15 @@ export class Consumer implements Reader {
 				});
 				continue;
 			}
-			const entry = firstEligible(candidates, (candidate) => scopeOf(candidate) !== undefined);
-			const scope = entry && scopeOf(entry);
-			if (!entry || !scope) continue;
-			next.set(relative, present(path, entry, scope.pattern));
+			// The preferred candidate wins, unless a higher epoch of its instance supersedes it.
+			const entry = firstEligible(candidates, () => true);
+			if (entry) next.set(relative, present(path, entry, scope.pattern));
 		}
-		// Hashed on the root, as a request for it resolves.
-		const best = bestOfTier(root, atRoot);
+		// Hashed on the root, as a request for it resolves. A broadcast above the root serves only
+		// its own path, so a tier-mate that serves the root ranks ahead of it, as `presented` ranks them.
+		const best = bestOfTier(root, atRoot, {
+			serves: (entry) => !entry.candidate.candidate.exact || entry.prefix === root,
+		});
 		if (best)
 			next.set(Path.empty(), present(best.candidate.path, best.candidate.candidate, best.candidate.pattern));
 		return next;
@@ -2800,7 +2891,10 @@ export class Consumer implements Reader {
 				if (local) return local;
 				const entry = this.#state.bestEntry(path, unservable(instance));
 				if (!entry?.server) {
-					if (instance !== undefined && (this.#local(path) || this.#state.bestEntry(path, received)?.server))
+					if (
+						instance !== undefined &&
+						(this.#local(path) || this.#state.bestEntry(path, unservable(undefined))?.server)
+					)
 						throw unroutable();
 					return undefined;
 				}

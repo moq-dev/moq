@@ -151,7 +151,8 @@ export class Consumer {
 	}
 
 	/**
-	 * Receive the next protected group in arrival order, or `undefined` once the track ends.
+	 * Receive the next protected group in arrival order, or `undefined` once the track ends. Groups
+	 * already held come in the subscription's Group Order, newest first unless it asks ascending.
 	 *
 	 * Rejects with {@link Failure} `authentication` once a grouped frame has failed to open, or a net error.
 	 */

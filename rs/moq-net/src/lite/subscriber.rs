@@ -253,7 +253,8 @@ struct Duplicate {
 	/// The copy still arriving, whose readers wait while this holds it.
 	arriving: track::Hold,
 	track: track::Producer,
-	/// Counted already, and kept open while held, since the stream may still carry the group.
+	/// Counted already, but parked while held: the copy it waits on arrives on another stream,
+	/// which holds the end of whatever carries it, so a stall there never holds this one's.
 	reading: Reading,
 }
 
@@ -1467,11 +1468,12 @@ impl GroupRecv {
 		}
 		// A duplicate of a copy still arriving waits, unread, for that copy to settle.
 		let opened: Opened = wait!(Hold => loop {
-			let duplicate = match open.take() {
+			let mut duplicate = match open.take() {
 				Some(Open::Group(opened)) => break Poll::Ready(Ok(opened)),
 				Some(Open::Duplicate(duplicate)) => duplicate,
 				None => break Poll::Ready(Err(Error::Cancel)),
 			};
+			duplicate.reading.park();
 			if let Poll::Ready(err) = self.reader.poll_reset(waiter) {
 				break Poll::Ready(Err(err));
 			}
@@ -1499,7 +1501,11 @@ impl GroupRecv {
 					let Some(entry) = subs.get(&hdr.subscribe) else {
 						break Poll::Ready(Err(Error::Cancel));
 					};
-					let Duplicate { arriving, reading, .. } = duplicate;
+					let Duplicate {
+						arriving, mut reading, ..
+					} = duplicate;
+					// Taking the group, this stream alone holds the end open for it.
+					reading.resume();
 					let reopened = entry.reopen(hdr, self.subscriber.version, reading, self.subscriber.runtime.now());
 					// Released once the group is opened again, so the failed copy's readers
 					// waiting on it find this copy.
@@ -3257,6 +3263,7 @@ mod tests {
 			id: 0,
 			max_delay: Some(Duration::ZERO),
 			stale_budget: Duration::ZERO,
+			stale_cap: None,
 			start: None,
 			priority: 0,
 			requested: None,
@@ -3352,6 +3359,43 @@ mod tests {
 		assert_eq!(active.never_serves(None), None, "nothing to go live at");
 	}
 
+	/// A demand range added once the live feed started leaves its declared start standing while
+	/// unanswered when it can't start below it: from a time at or past it, or at the latest
+	/// group. Only one that may start lower makes the start pending again.
+	#[kio::test]
+	async fn a_range_added_past_the_feed_start_keeps_it_declared() {
+		let tail = kio::Producer::new(Tail::default());
+		let Sub::Active(mut active) = feed_sub(&tail).await else {
+			unreachable!("feed_sub is active")
+		};
+		let first = lite::Range::span(Some(10), 0, None, None);
+		active.live = lite::LiveRanges::new(Version::Lite07, &[first]);
+		active.starts = [(0, Some(10))].into();
+		active.started = Some(Some(10));
+		active.start = Some(10);
+		assert_eq!(active.feed_start(), Some((Some(10), false)));
+
+		let latest = lite::Range {
+			start: Some(lite::Anchor::Live {
+				min: Some(Duration::ZERO),
+				max: Some(Duration::ZERO),
+			}),
+			end: None,
+		};
+		for added in [lite::Range::span(Some(20), 0, None, None), latest] {
+			active.live = lite::LiveRanges::new(Version::Lite07, &[first, added]);
+			assert_eq!(active.feed_start(), Some((Some(10), false)), "{added:?}");
+		}
+
+		active.live = lite::LiveRanges::new(Version::Lite07, &[first, lite::Range::span(Some(5), 0, None, None)]);
+		active.start = Some(5);
+		assert_eq!(
+			active.feed_start(),
+			Some((Some(5), true)),
+			"a range from 5 may start below 10"
+		);
+	}
+
 	/// A lite-07 range answered with no group to deliver lands none of its groups, so the copy's
 	/// ordered reads hold no later group back for its time, within the budget it was asked
 	/// under. Only one whose end takes in its time says so: one ending before it may still have
@@ -3403,6 +3447,47 @@ mod tests {
 		assert_eq!(read(10), Some(66), "its range reached 20, past it");
 		assert_eq!(read(15), None, "inside that range");
 		assert_eq!(read(30), None, "its range ended before it");
+	}
+
+	/// An open range answered with no group to deliver takes in every group past its time, so
+	/// its answer places a reader there as a bounded range's does. Unrecorded, the reader would
+	/// wait for good on a group held past it, and no probe asks for its time while a demand
+	/// range starts there.
+	#[kio::test]
+	async fn an_open_range_answered_empty_places_its_time() {
+		let tail = kio::Producer::new(Tail::default());
+		let Sub::Active(mut active) = feed_sub(&tail).await else {
+			unreachable!("feed_sub is active")
+		};
+		active.live = lite::LiveRanges::new(Version::Lite07, &[lite::Range::span(Some(40), 0, None, None)]);
+		active.starts = [(0, None)].into();
+		let info = track::Info::default().with_timescale(None).with_max_age(None);
+		let serving = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info);
+		serving.received();
+		serving.anchored();
+		serving
+			.create_group(group::Info { start: 66 })
+			.unwrap()
+			.finish()
+			.unwrap();
+		active.report_starts(&serving);
+
+		let mut ordered = serving
+			.subscribe(
+				track::Subscription::default()
+					.with_ranges([track::Range {
+						start: crate::track::Start::Time(40),
+						end: None,
+					}])
+					.with_max(None),
+			)
+			.ordered();
+		let read = match ordered.next_item().now_or_never() {
+			Some(Ok(Some(track::Item::Group(group)))) => Some(group.start),
+			None => None,
+			Some(res) => panic!("not a group: {:?}", res.map(|item| item.is_some())),
+		};
+		assert_eq!(read, Some(66), "no group at or before time 40 is left");
 	}
 
 	/// A placed join under a max age may be answered past groups the publisher still holds,
@@ -3536,6 +3621,7 @@ mod tests {
 				id: 0,
 				max_delay: Some(Duration::ZERO),
 				stale_budget: Duration::ZERO,
+				stale_cap: None,
 				start: Some(floor),
 				priority: 0,
 				requested: Some(floor),
@@ -3615,6 +3701,48 @@ mod tests {
 			requests.push(dynamic.requested_fill().now_or_never().expect("queued").unwrap());
 		}
 		(track, callers, requests)
+	}
+
+	/// A held group readied while the poll drains the ready queue, as its fill's waker fires on
+	/// another thread, is taken by that poll or wakes its owner: never left queued unseen.
+	#[kio::test]
+	async fn a_feed_fetch_readied_during_a_drain_is_not_lost() {
+		#[derive(Default)]
+		struct Wakes(std::sync::atomic::AtomicUsize);
+		impl std::task::Wake for Wakes {
+			fn wake(self: Arc<Self>) {
+				self.0.fetch_add(1, atomic::Ordering::Relaxed);
+			}
+		}
+		let start = crate::time::Instant::now();
+		let clock = crate::time::Deadlines::new(start);
+		let tail = kio::Producer::new(Tail::default());
+		let sub = feed_sub(&tail).await;
+		let (track, _callers, requests) = feed_batch([100, 101]);
+		let mut fetches = FeedFetches::new(&clock);
+		for req in requests {
+			fetches.push(req, &track.consume());
+		}
+		let wakes = Arc::new(Wakes::default());
+		let waiter = kio::Waiter::new(std::task::Waker::from(wakes.clone()));
+		fetches.poll(&sub, start, &waiter);
+		assert_eq!(fetches.held.len(), 2, "both held while their callers wait");
+
+		// Group 100 is readied, and group 101's waker fires just as the drain takes it: parked on
+		// the queue, it runs once the drain releases the lock.
+		fetches.ready.lock().insert(100);
+		let racing = kio::Waiter::new(std::task::Waker::from(Arc::new(FetchWake {
+			key: 101,
+			ready: fetches.ready.clone(),
+		})));
+		let _ = fetches.ready.poll(&racing, |_| Poll::<()>::Pending);
+		wakes.0.store(0, atomic::Ordering::Relaxed);
+		fetches.poll(&sub, start, &waiter);
+		let queued = !fetches.ready.read().is_empty();
+		assert!(
+			!queued || wakes.0.load(atomic::Ordering::Relaxed) > 0,
+			"group 101 sits readied with nothing to poll it"
+		);
 	}
 
 	#[kio::test]
@@ -4021,6 +4149,7 @@ mod tests {
 			id: 0,
 			max_delay: None,
 			stale_budget: Duration::ZERO,
+			stale_cap: None,
 			start: None,
 			priority: 0,
 			requested: None,
@@ -4078,6 +4207,7 @@ mod tests {
 			id: 0,
 			max_delay: None,
 			stale_budget: Duration::ZERO,
+			stale_cap: None,
 			start: None,
 			priority: 0,
 			requested: None,
@@ -4123,6 +4253,81 @@ mod tests {
 		);
 	}
 
+	/// A live demand range retuned wider before its answer may still be answered under the max
+	/// it was asked with until then, which places no reader waiting with the wider one. So it
+	/// answers that reader's join only once nothing narrower was asked of it, and the join goes
+	/// out on a probe of its own meanwhile.
+	#[kio::test]
+	async fn a_join_range_retuned_wider_before_its_answer_is_probed() {
+		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), Version::Lite07)
+			.await
+			.unwrap();
+		let join = track::JoinAsk {
+			min: Some(Duration::from_secs(1)),
+			end: None,
+			budget: Duration::from_millis(300),
+			since: 0,
+		};
+		// Asked at 120 ms, then retuned to the reader's 300 ms, still unanswered.
+		let demand = join_probe(&join);
+		let sub = SubStream {
+			order: crate::track::Order::Ascending,
+			stream,
+			id: 0,
+			max_delay: None,
+			stale_budget: Duration::ZERO,
+			stale_cap: None,
+			start: None,
+			priority: 0,
+			requested: None,
+			live: lite::LiveRanges::new(Version::Lite07, &[demand]),
+			demand: Some(Subscription::default()),
+			fill_ids: Default::default(),
+			probe_ids: Default::default(),
+			fill_groups: Default::default(),
+			tail: Default::default(),
+			started: None,
+			went_live: false,
+			finishing: None,
+			parked: false,
+			starts: Default::default(),
+			join_ticks: Default::default(),
+			join_budgets: [(0, Duration::from_millis(120))].into(),
+			declared: None,
+			end: None,
+			wanted: None,
+			unanswered: None,
+			_working: crate::session::Work::default().start(),
+		};
+
+		let (probes, reasked) = join_probes(Some(&sub), &[join], &[demand]);
+		assert_eq!(
+			probes,
+			[join_probe(&join)],
+			"an answer under 120 ms places no reader at 300 ms"
+		);
+		assert!(reasked.is_empty());
+	}
+
+	/// A flood of time starts the copy's readers wait on leaves room for a live join's probe, so
+	/// a reader joining live is not held behind history readers, nor they behind joins.
+	#[test]
+	fn time_probes_leave_room_for_a_join() {
+		let asks: Vec<u64> = (0..10_000).collect();
+		let join = track::JoinAsk {
+			min: Some(Duration::from_secs(1)),
+			end: None,
+			budget: Duration::from_millis(300),
+			since: 0,
+		};
+		let (wanted, _) = wanted_probes(None, &asks, &[join], &[]);
+		let budget = fit::Budget::new(Version::Lite07, 0, 0, wanted.len());
+		let fitted = budget.fit_after(std::iter::empty(), wanted);
+		assert!(fitted.len() < asks.len(), "not every time start fits");
+		assert!(fitted.contains(&join_probe(&join)), "the join is starved");
+	}
+
 	/// The owed groups start at the floor the demand last asked for, which an update can raise
 	/// after SUBSCRIBE_START answered the SUBSCRIBE, but not lower below that answer: nothing
 	/// says the publisher read the update before its FIN.
@@ -4142,6 +4347,7 @@ mod tests {
 			id: 0,
 			max_delay: Some(Duration::ZERO),
 			stale_budget: Duration::ZERO,
+			stale_cap: None,
 			start: Some(2),
 			priority: 0,
 			requested: Some(2),
@@ -4262,6 +4468,7 @@ mod tests {
 			id: 0,
 			max_delay: Some(Duration::ZERO),
 			stale_budget: Duration::ZERO,
+			stale_cap: None,
 			start: Some(4),
 			priority: 0,
 			requested: Some(4),
@@ -4333,6 +4540,7 @@ mod tests {
 			id: 0,
 			max_delay: Some(Duration::ZERO),
 			stale_budget: Duration::ZERO,
+			stale_cap: None,
 			start: Some(4),
 			priority: 0,
 			requested: Some(4),
@@ -5531,8 +5739,12 @@ mod tests {
 			let waiter = kio::Waiter::noop();
 			assert!(duplicate.poll_serve(&waiter).is_pending(), "first fails: {first_fails}");
 			assert_eq!(duplicate.state.name(), "Hold", "first fails: {first_fails}");
-			// Counted and holding the end open while it waits, since it may carry the group.
+			// Counted, but not holding the end open while it waits, so the end settles however
+			// long the stream of the copy it waits on stalls.
 			assert_eq!(tail.read().streams(), 1);
+			assert!(!tail.read().is_reading(), "first fails: {first_fails}");
+			let mut settle = Settle::new(&clock, tail.consume());
+			assert!(settle.poll(&waiter, |tail| tail.covers(3..4)).is_ready());
 
 			let mut original = reader.assert_group();
 			let frame = original.read_frame().await.unwrap().unwrap();
@@ -5981,6 +6193,7 @@ mod tests {
 			id: 0,
 			max_delay: Some(budget),
 			stale_budget: budget,
+			stale_cap: None,
 			start: None,
 			priority: 0,
 			requested: None,
@@ -6039,6 +6252,34 @@ mod tests {
 		assert!(fills.poll(&serve, &copy, None, true, &waiter).unwrap());
 		assert!(fills.ask.groups.is_empty(), "the stream ended with its copy");
 		assert!(requests.poll_requested_fill(&waiter).is_pending(), "no flight is asked");
+		drop(arriving);
+	}
+
+	/// A run no fill owes stays asked for a stream of it still arriving only while someone reads
+	/// the track: once nobody does, the fills ask for nothing, so the subscription they hold
+	/// and the copy's linger can end.
+	#[kio::test]
+	async fn a_drained_run_goes_once_nobody_reads() {
+		let (serve, _serving, _tail, _broadcast) = lite07_serving(Duration::from_millis(500)).await;
+		let waiter = kio::Waiter::noop();
+		let copy = crate::track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			crate::track::Info::default()
+				.with_timescale(crate::Timescale::MILLI)
+				.with_max_age(None),
+		);
+		let mut arriving = copy.create_group(group::Info { start: 0 }).unwrap();
+		arriving
+			.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"x".as_slice())
+			.unwrap();
+		let mut fills = fills::RangeFills::default();
+		fills.ask.groups.insert(0..1);
+		assert!(!fills.poll(&serve, &copy, None, true, &waiter).unwrap());
+		assert!(!fills.is_empty(), "its stream still arrives for a reader");
+
+		assert!(fills.poll(&serve, &copy, None, false, &waiter).unwrap());
+		assert!(fills.is_empty(), "nobody reads the stream still arriving");
 		drop(arriving);
 	}
 
@@ -6536,6 +6777,74 @@ mod tests {
 		);
 	}
 
+	/// A stale drop is recorded within the cap its subscription asked under, so a reader capped
+	/// alike settles on it, though the groups above the run have not arrived, instead of
+	/// fetching a group they would convict. A cap that varied, or none, settles no capped reader.
+	#[kio::test]
+	async fn a_stale_drop_carries_the_cap_it_was_asked_under() {
+		let version = Version::Lite07;
+		let budget = Duration::from_millis(500);
+		let (serve, mut serving, _tail, _broadcast) = lite07_serving(budget).await;
+		let lag = Some(Duration::from_secs(10));
+		let live = lite::Range {
+			start: Some(lite::Anchor::Live {
+				min: lag,
+				max: Some(budget),
+			}),
+			end: Some(lite::Anchor::Time(3)),
+		};
+		let Sub::Active(active) = &mut serving.sub else {
+			unreachable!("an active subscription");
+		};
+		active.live = lite::LiveRanges::new(version, &[live]);
+		active.stale_cap = cap_of(&active.live);
+		assert_eq!(active.stale_cap, Some(4), "an inclusive time end caps one past it");
+
+		let mut capped = serving
+			.serving
+			.subscribe(crate::track::Subscription::default().with_ranges([crate::track::Range {
+				start: crate::track::Start::Live {
+					min: lag,
+					max: Some(budget),
+				},
+				end: Some(3),
+			}]));
+		serving.serving.answer_join(lag, Some(3), Some(0), Duration::MAX);
+		let old = lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(1..3, &crate::StreamError::Old, version));
+		serving.apply_response(&serve, old).unwrap();
+		assert_eq!(
+			capped.poll_drop(&kio::Waiter::noop()),
+			Poll::Ready((1..3, track::Hole::stale(budget).capped(Some(4))))
+		);
+	}
+
+	/// The cap of a subscription is where its last range ends: none while one follows the live
+	/// edge, and an empty range reaches nothing.
+	#[test]
+	fn the_cap_is_where_the_last_range_ends() {
+		let version = Version::Lite07;
+		let ending = |end: Option<lite::Anchor>| lite::Range { start: None, end };
+		let cap = |ranges: &[lite::Range]| cap_of(&lite::LiveRanges::new(version, ranges));
+		let position = |group: u64, frame: u64| lite::Anchor::Absolute(crate::track::Position::new(group, frame));
+		assert_eq!(cap(&[ending(Some(lite::Anchor::Time(3)))]), Some(4));
+		assert_eq!(
+			cap(&[ending(Some(position(5, 0)))]),
+			Some(5),
+			"a whole group ends before it"
+		);
+		assert_eq!(
+			cap(&[ending(Some(position(5, 2)))]),
+			Some(6),
+			"a partial one includes it"
+		);
+		assert_eq!(cap(&[ending(Some(position(0, 0)))]), Some(0), "nothing to reach");
+		assert_eq!(
+			cap(&[ending(Some(lite::Anchor::Time(3))), ending(Some(position(9, 0)))]),
+			Some(9)
+		);
+		assert_eq!(cap(&[ending(Some(lite::Anchor::Time(3))), ending(None)]), None);
+	}
+
 	/// A group that arrives over a lite-07 stale (OLD) drop wins over it in the copy, whichever
 	/// lands first: the group's stream may overtake the drop, or a recovery may deliver it. A
 	/// group still arriving is never aborted by the drop, and an update owes none of them again.
@@ -6879,6 +7188,80 @@ mod tests {
 		assert!(running.finished.is_none(), "the finished copy outlived its grant");
 		let closed = track.poll_closed(&waiter);
 		assert!(matches!(closed, Poll::Ready(Err(Error::Unauthorized))), "{closed:?}");
+	}
+
+	/// A finished copy's reader waiting on a time its probes can't ask, the last key, is failed
+	/// rather than left waiting for good.
+	#[kio::test]
+	async fn a_finished_copy_refuses_a_time_start_at_the_last_key() {
+		let (session, _peer) = crate::transport::memory::pair(Default::default());
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session: crate::driver::Transport::new(session.clone()),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version: Version::Lite07,
+			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+			peer_node: None,
+			cost: None,
+			going_away: Default::default(),
+			auth: crate::auth::Link::new(false),
+		});
+		let serve = TrackServe {
+			validity: Default::default(),
+			route: None,
+			source: None,
+			subscriber,
+			path: Path::from_static("room"),
+			instance: None,
+			node: None,
+			name: "video".to_string(),
+		};
+		let broadcast = crate::broadcast::Info::new().produce();
+		let serve_loop = ServeLoop::new(
+			&serve,
+			broadcast.reserve_track("video").unwrap(),
+			crate::track::Info::timed(),
+		);
+		let mut track = serve_loop.serving.clone();
+		track.finish_at(Position::group(10)).unwrap();
+		let mut finished = FinishedServe {
+			serving: Some(serve_loop.serving),
+			demand: serve_loop.demand,
+			dynamic: serve_loop.dynamic,
+			fetches: serve_loop.fetches,
+			range_fills: RangeFills::per_run(),
+			asks: Vec::new(),
+			priority: 0,
+			probes: Default::default(),
+			placed: Default::default(),
+			closed: serve_loop.closed,
+		};
+		let reader = broadcast
+			.consume()
+			.track("video")
+			.unwrap()
+			.subscribe(
+				track::Subscription::default()
+					.with_ranges([track::Range {
+						start: crate::track::Start::Time(u64::MAX),
+						end: None,
+					}])
+					.with_max(None),
+			)
+			.await
+			.unwrap();
+		let mut ordered = reader.ordered();
+		assert!(ordered.next_item().now_or_never().is_none(), "waits on its upstream");
+
+		finished.probe(&serve, true, &kio::Waiter::noop()).unwrap();
+		assert_eq!(finished.asks, [u64::MAX], "the reader asks the last key");
+		let res = ordered.next_item().now_or_never();
+		assert!(
+			matches!(res, Some(Err(_))),
+			"{:?}",
+			res.map(|res| res.map(|item| item.is_some()))
+		);
 	}
 
 	/// Drive the subscriber with a peer's response bytes followed by FIN.
@@ -7816,7 +8199,9 @@ mod tests {
 		for _ in 0..3 {
 			read.push(consumer.recv_group().await.unwrap().unwrap().start);
 		}
-		assert_eq!(read, [1, 2, 3]);
+		assert_eq!(track.arrival_order(), [1, 2, 3], "opened in arrival order");
+		// Read newest first, the default Group Order.
+		assert_eq!(read, [3, 2, 1]);
 	}
 
 	/// A parked stream that fails before taking its group withdraws it: the accept opens none
@@ -8947,6 +9332,132 @@ mod tests {
 					Poll::Ready(Ok(None)) => break,
 					other => panic!("{version:?}: no FIN after {chunks} chunks: {other:?}"),
 				}
+			}
+		}
+	}
+
+	/// A SUBSCRIBE_UPDATE the publisher has no credit for holds back only the next demand
+	/// change, which goes out once it is on the wire: the serve loop still reads responses, so a
+	/// publisher blocked writing them while it reads none of ours is no deadlock, and still
+	/// cancels once the last reader leaves.
+	#[kio::test]
+	async fn an_update_waiting_on_credit_still_reads_and_cancels() {
+		use crate::transport::poll::{RecvStream as _, SendStream as _, Session as _};
+		for version in [Version::Lite06, Version::Lite07] {
+			// Draining: lite-07 fills still ask for a run whose stream arrives, which only a reader keeps.
+			for (cancel, draining) in [(false, false), (true, false), (true, true)] {
+				if draining && !version.has_ranges() {
+					continue;
+				}
+				// One queued message per stream, so a peer that stops reading stalls the writer.
+				let config = crate::transport::memory::Config {
+					stream_buffer: 0,
+					..Default::default()
+				};
+				let (session, peer) = crate::transport::memory::pair(config);
+				let subscriber = Subscriber::new(SubscriberConfig {
+					runtime: crate::time::sim(),
+					session: crate::driver::Transport::new(session.clone()),
+					origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
+					recv_bandwidth: None,
+					version,
+					peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+					peer_node: None,
+					cost: None,
+					going_away: Default::default(),
+					auth: crate::auth::Link::new(false),
+				});
+				let serve = TrackServe {
+					validity: Default::default(),
+					route: None,
+					source: None,
+					subscriber,
+					path: Path::from_static("room"),
+					instance: None,
+					node: None,
+					name: "video".into(),
+				};
+				let waiter = kio::Waiter::noop();
+				let broadcast = crate::broadcast::Info::new().produce();
+				// Timed, for the group a draining run waits on.
+				let info = track::Info::timed();
+				let mut serving = ServeLoop::new(&serve, broadcast.reserve_track("video").unwrap(), info);
+				let live = serving.serving.subscribe(None);
+				assert!(serving.poll(&serve, &waiter).is_pending());
+				let (mut send, mut recv) = kio::wait(|waiter| peer.poll_accept_bi(waiter)).await.unwrap();
+
+				// The SUBSCRIBE fills the stream, so the update a lowered floor sends waits on credit,
+				// and the change after it waits for that one.
+				let history = serving.serving.subscribe(Some(Subscription::default().with_start(0)));
+				assert!(serving.poll(&serve, &waiter).is_pending());
+				let urgent = serving
+					.serving
+					.subscribe(Some(Subscription::default().with_start(0).with_priority(5)));
+				#[derive(Default)]
+				struct Wakes(std::sync::atomic::AtomicUsize);
+				impl std::task::Wake for Wakes {
+					fn wake(self: Arc<Self>) {
+						self.0.fetch_add(1, atomic::Ordering::Relaxed);
+					}
+				}
+				let wakes = Arc::new(Wakes::default());
+				let counted = kio::Waiter::new(std::task::Waker::from(wakes.clone()));
+				assert!(serving.poll(&serve, &counted).is_pending());
+				assert!(serving.deferred, "{version:?}: the change waits on the update");
+				// The change after the deferred one still wakes the loop, as a cancel must.
+				let later = serving
+					.serving
+					.subscribe(Some(Subscription::default().with_start(0).with_priority(9)));
+				assert!(
+					wakes.0.load(atomic::Ordering::Relaxed) > 0,
+					"{version:?}: a change after a deferred one wakes the loop"
+				);
+				drop(later);
+				assert!(serving.poll(&serve, &waiter).is_pending());
+
+				if cancel {
+					let mut _arriving = None;
+					if draining {
+						let mut group = serving.serving.create_group(group::Info { start: 0 }).unwrap();
+						group.write_frame(group.key_time(), b"x".as_slice()).unwrap();
+						_arriving = Some(group);
+						serving.range_fills.ask.groups.insert(0..1);
+					}
+					drop((live, history, urgent));
+					assert!(serving.poll(&serve, &waiter).is_pending());
+					assert!(
+						matches!(serving.sub, Sub::None),
+						"{version:?} draining {draining}: the subscription is cancelled with its update unsent"
+					);
+					assert!(
+						!serving.deferred,
+						"{version:?} draining {draining}: nothing is left to apply"
+					);
+					continue;
+				}
+
+				// Each change goes out once its turn comes: the SUBSCRIBE, then one update each.
+				let mut chunks = 0;
+				while let Poll::Ready(Ok(Some(_))) = recv.poll_read_chunk(&waiter, usize::MAX) {
+					chunks += 1;
+					assert!(serving.poll(&serve, &waiter).is_pending());
+				}
+				assert_eq!(chunks, 3, "{version:?}");
+
+				// Stalled again: one update unread, the next waiting on it.
+				drop(urgent);
+				assert!(serving.poll(&serve, &waiter).is_pending());
+				drop(history);
+				assert!(serving.poll(&serve, &waiter).is_pending());
+
+				// The publisher gives up the subscription without reading the update.
+				send.reset(crate::StreamError::Cancel.to_code());
+				let end = serving.poll(&serve, &waiter);
+				assert!(
+					matches!(end, Poll::Ready(ServeEnd::GiveBack(_))),
+					"{version:?}: the reset is read behind the unsent update"
+				);
+				drop(live);
 			}
 		}
 	}
@@ -10527,6 +11038,19 @@ mod tests {
 			"a reset stream: {result:?}"
 		);
 
+		// A read that fails with the session's close, before the session reports it ending,
+		// ends with that close, as a WebTransport reader learns of the close first.
+		let session = ScriptedSession::new(script());
+		let (mut routes, _consumer) = root_prefix(VERSION, session.clone());
+		assert!(routes.poll(&waiter).is_pending());
+		session.close(Close::Reset);
+		let result = routes.poll(&waiter);
+		assert!(
+			matches!(result, Poll::Ready(Err(Error::Session(_)))),
+			"a session's close: {result:?}"
+		);
+		assert!(session.log.closes().is_empty(), "{:?}", session.log.closes());
+
 		let session = ScriptedSession::new(script());
 		let (mut routes, consumer) = root_prefix(VERSION, session.clone());
 		let mut cursor = consumer.routes();
@@ -11301,6 +11825,12 @@ struct SubStream {
 	/// publisher's max age, which binds every reader alike. Too narrow costs a wider reader a
 	/// request of its own; too wide would settle it on a group it could still get.
 	stale_budget: Duration,
+	/// The exclusive group end every live range the SUBSCRIBE and each SUBSCRIBE_UPDATE asked
+	/// ended at, `None` once one followed the live edge or two ended apart: the cap a lite-07
+	/// stale drop is recorded within, so a reader capped alike settles on it. Like the budget,
+	/// the wire does not say which update a drop crossed, so a cap that ever varied settles no
+	/// capped reader.
+	stale_cap: Option<u64>,
 	/// The lowest absolute start among the ranges, or `None` when one counts back from
 	/// the latest group: the floor below which nothing is asked for.
 	start: Option<u64>,
@@ -11378,20 +11908,31 @@ impl SubStream {
 
 	/// Lite-07's declaration of where the live feed starts: the lowest start the demand's live
 	/// ranges report, or the requested floor, pending, while SUBSCRIBE_START or a range's
-	/// SUBSCRIBE_START has yet to say where one starts. `None` before lite-07, whose one start
-	/// describes only the SUBSCRIBE's demand, and while the ranges ask only for fills.
+	/// SUBSCRIBE_START has yet to say where one starts. A range added once the feed started
+	/// leaves it standing while it can't start below it (see [`starts_past`]). `None` before
+	/// lite-07, whose one start describes only the SUBSCRIBE's demand, and while the ranges ask
+	/// only for fills.
 	fn feed_start(&self) -> Option<(Option<u64>, bool)> {
 		if !self.live.reports_starts() || self.demand.is_none() {
 			return None;
 		}
+		let feeding = || self.live.iter().filter(|(id, _)| self.feeds(*id));
 		let mut start: Option<u64> = None;
-		for (id, _) in self.live.iter().filter(|(id, _)| self.feeds(*id)) {
+		let mut unanswered = false;
+		for (id, _) in feeding() {
 			match self.starts.get(&id) {
 				// A range with no group there serves nothing to start from.
 				Some(Some(at)) => start = Some(start.map_or(*at, |start| start.min(*at))),
 				Some(None) => {}
-				None => return Some((self.start, true)),
+				None => unanswered = true,
 			}
+		}
+		let lower = |range: &lite::Range| match (self.started, start) {
+			(Some(_), Some(start)) => !starts_past(range, start),
+			_ => true,
+		};
+		if unanswered && feeding().any(|(id, range)| !self.starts.contains_key(&id) && lower(range)) {
+			return Some((self.start, true));
 		}
 		Some((start, self.started.is_none()))
 	}
@@ -11437,12 +11978,13 @@ impl SubStream {
 			};
 			// Whether a range with no group to deliver says its publisher held none at or before
 			// its reach: only one whose end takes in the group containing its time, which a
-			// range that ends before its time may not.
+			// range that ends before its time may not, and an open one always does.
 			let reaches = match range.end {
 				Some(lite::Anchor::Absolute(end)) if end.frame == 0 => end.group > asked,
 				Some(lite::Anchor::Absolute(end)) => end.group >= asked,
 				Some(lite::Anchor::Time(end)) => end >= asked,
-				Some(lite::Anchor::Live { .. } | lite::Anchor::Joined { .. }) | None => false,
+				Some(lite::Anchor::Live { .. } | lite::Anchor::Joined { .. }) => false,
+				None => true,
 			};
 			// One with no group to deliver says nothing of its time unless it reaches it.
 			if start.is_some() || reaches {
@@ -11648,6 +12190,9 @@ impl SubStream {
 			self.probe_ids.retain(|id| live.get(*id).is_some());
 		}
 		self.stale_budget = self.stale_budget.min(narrowest(&self.live));
+		if cap_of(&self.live) != self.stale_cap {
+			self.stale_cap = None;
+		}
 		for (id, (kind, _)) in added {
 			match kind {
 				Kind::Fill => _ = self.fill_ids.insert(id),
@@ -11660,6 +12205,39 @@ impl SubStream {
 			.eq(before);
 		Ok((edit, changed))
 	}
+}
+
+/// Whether the live range `range`, once answered, starts at or past group `start`, which the
+/// live feed already serves: from a time at or past it, as the group containing that time is,
+/// from a join placed there, or at the latest group, which no group the feed serves is past.
+fn starts_past(range: &lite::Range, start: u64) -> bool {
+	match range.start {
+		Some(lite::Anchor::Absolute(at) | lite::Anchor::Joined { at, .. }) => at.group >= start,
+		Some(lite::Anchor::Live { min, .. }) => min == Some(Duration::ZERO),
+		Some(lite::Anchor::Time(_)) | None => false,
+	}
+}
+
+/// The probes to ask for `asks` and `joins` beside the demand's `ranges` (see [`probes`] and
+/// [`join_probes`]), and the live probes to ask afresh. A time start's and a join's in turn,
+/// then whichever kind is left, so a flood of either leaves the other its share of what fits.
+fn wanted_probes(
+	active: Option<&SubStream>,
+	asks: &[u64],
+	joins: &[track::JoinAsk],
+	ranges: &[lite::Range],
+) -> (Vec<lite::Range>, std::collections::BTreeSet<u64>) {
+	let times = probes(asks, ranges);
+	let (joined, reasked) = join_probes(active, joins, ranges);
+	let mut wanted = Vec::with_capacity(times.len() + joined.len());
+	let (mut times, mut joined) = (times.into_iter(), joined.into_iter());
+	loop {
+		match (times.next(), joined.next()) {
+			(None, None) => break,
+			(time, join) => wanted.extend(time.into_iter().chain(join)),
+		}
+	}
+	(wanted, reasked)
 }
 
 /// The probes to ask for `asks`, each a time start the copy's readers wait on, beside the
@@ -11685,10 +12263,10 @@ fn probes(asks: &[u64], ranges: &[lite::Range]) -> Vec<lite::Range> {
 /// reader began waiting.
 ///
 /// A live range asking the join answers it when it is still unanswered, or was answered after
-/// every waiting reader began, whatever max age it asks. So does a demand range asking it that
-/// this edit adds, which its answer comes after. A probe answering it stays until its readers
-/// stop waiting, so its answer outlives their placing, and asks the widest max age they wait
-/// with, retuned in place as that moves.
+/// every waiting reader began, under a max age as wide as theirs. So does a demand range asking
+/// it that this edit adds, which its answer comes after. A probe answering it stays until its
+/// readers stop waiting, so its answer outlives their placing, and asks the widest max age they
+/// wait with, retuned in place as that moves.
 fn join_probes(
 	active: Option<&SubStream>,
 	joins: &[track::JoinAsk],
@@ -11699,8 +12277,9 @@ fn join_probes(
 	for join in joins {
 		let key = Some((join.min, join.end));
 		// Each live range asking the join, with whether it is a probe and whether it answers:
-		// answered after every waiting reader began, under a max age as wide as theirs, or still
-		// to answer under one.
+		// answered after every waiting reader began, or still to answer, under a max age as wide
+		// as theirs, now and before any retune since: the publisher may answer under the max asked
+		// until then.
 		let answers = |id: u64| {
 			let Some(active) = active else {
 				return false;
@@ -11713,7 +12292,7 @@ fn join_probes(
 			let wide = asked.min(now) >= join.budget;
 			match active.join_ticks.get(&id) {
 				Some(tick) => *tick > join.since && wide,
-				None => !active.starts.contains_key(&id) && now >= join.budget,
+				None => !active.starts.contains_key(&id) && wide,
 			}
 		};
 		let live: Vec<(u64, bool)> = active
@@ -11800,6 +12379,19 @@ fn narrowest(live: &lite::LiveRanges) -> Duration {
 		})
 		.min()
 		.unwrap_or(Duration::MAX)
+}
+
+/// The exclusive group end past every range among `live`, `None` when one follows the live
+/// edge: the cap a stale drop is judged within.
+fn cap_of(live: &lite::LiveRanges) -> Option<u64> {
+	let mut cap = None;
+	for (_, range) in live.iter() {
+		range.end?;
+		// A range ending before the first group reaches none.
+		let reach = through(range.end).map_or(0, |last| last.saturating_add(1));
+		cap = Some(cap.unwrap_or(0).max(reach));
+	}
+	cap
 }
 
 /// The last time a live range reaches, as its own inclusive time: an exclusive group end stops
@@ -12283,9 +12875,7 @@ impl TrackServe {
 					Sub::Active(active) => Some(active),
 					Sub::None => None,
 				};
-				let mut probes = probes(asks, &demand_ranges);
-				let (joined, reasked) = join_probes(active, joins, &demand_ranges);
-				probes.extend(joined);
+				let (probes, reasked) = wanted_probes(active, asks, joins, &demand_ranges);
 				let fill_ranges: Vec<_> = FillAsk::wire(&groups).collect();
 				let probes = budget.fit_after(demand_ranges.iter().chain(&fill_ranges), probes);
 				let reasked = fitted_reasks(active, reasked, &probes);
@@ -12407,7 +12997,7 @@ impl TrackServe {
 							// start returns to the demand that produced it (see
 							// `SubStream::requested`).
 							// Lite-07 declares from each live range's reported start instead, pending
-							// while a range the update adds awaits SUBSCRIBE_START.
+							// while a range the update adds that may start lower awaits SUBSCRIBE_START.
 							if active.live.reports_starts() {
 								active.declare(producer);
 							} else if start_moved {
@@ -12430,7 +13020,11 @@ impl TrackServe {
 				// A returning subscriber re-establishes from the current demand.
 				if let Sub::Active(active) = sub {
 					self.subscriber.remove_subscribe(active.id);
-					let _ = active.stream.writer.finish();
+					// A FIN would cut short an update still waiting on credit: dropping the stream
+					// resets it instead.
+					if active.stream.writer.is_flushed() {
+						let _ = active.stream.writer.finish();
+					}
 					tracing::debug!(track = %self.name, "subscribe canceled (idle)");
 					// The copy is still held: what it cached goes stale from here, unless the
 					// subscription only filled it and never fed it live.
@@ -12880,6 +13474,7 @@ impl Establish {
 			id: self.id,
 			max_delay: self.max_age,
 			stale_budget: narrowest(&live),
+			stale_cap: cap_of(&live),
 			start: self.subscription.start(),
 			live,
 			demand: self.demand.clone(),
@@ -13021,8 +13616,10 @@ impl FinishedServe {
 			if self.placed.contains_key(&time) || self.probes.contains_key(&time) {
 				continue;
 			}
-			// No group starts at the last key, so no range from it holds one.
+			// No group starts at the last key, so no range from it holds one: its readers are
+			// failed rather than left waiting on a probe never asked.
 			let Some(end) = time.checked_add(1) else {
+				serving.refuse_time(time, Error::NotFound);
 				continue;
 			};
 			self.probes
@@ -13341,7 +13938,13 @@ impl TrackServeRun {
 	/// Finish our side of the subscription, `true` once it waits for the publisher to read it.
 	fn finish_sub(&mut self, mut active: SubStream, finished: bool) -> bool {
 		let version = self.serve.subscriber.version;
-		if active.stream.writer.finish().is_err() || !finished || !version.waits_for_subscriber_fin() {
+		// A FIN would cut short an update still waiting on credit: dropping the stream resets it
+		// instead.
+		if !active.stream.writer.is_flushed()
+			|| active.stream.writer.finish().is_err()
+			|| !finished
+			|| !version.waits_for_subscriber_fin()
+		{
 			return false;
 		}
 		self.state = TrackRunState::Finish {
@@ -13856,6 +14459,9 @@ struct ServeLoop {
 	/// The TRACK stream that answered, until a SUBSCRIBE has a response or nobody holds
 	/// the copy.
 	held: Option<HeldTrack>,
+	/// A demand or fill change that arrived while an update was still flushing, applied once
+	/// that one is on the wire.
+	deferred: bool,
 }
 
 #[expect(
@@ -14013,17 +14619,15 @@ impl FeedFetches {
 				}
 			}
 		}
-		let ready = match self.ready.poll(waiter, |ready| {
-			if ready.is_empty() {
-				Poll::Pending
-			} else {
-				Poll::Ready(())
-			}
+		// Drained until seen empty, which alone registers `waiter`: a key readied after a take, as a
+		// fill's waker fires on another thread, is taken here or wakes it.
+		let mut ready = BTreeSet::new();
+		while let Poll::Ready(mut more) = self.ready.poll(waiter, |ready| match ready.is_empty() {
+			true => Poll::Pending,
+			false => Poll::Ready(()),
 		}) {
-			Poll::Ready(mut ready) => std::mem::take(&mut *ready),
-			Poll::Pending => BTreeSet::new(),
-		};
-		let _ = self.ready.poll(waiter, |_| Poll::<()>::Pending);
+			ready.append(&mut more);
+		}
 		let mut unused = Vec::new();
 		let mut settled = Vec::new();
 		for key in ready {
@@ -14177,6 +14781,7 @@ impl ServeLoop {
 			mode: ServeMode::Select,
 			linger: crate::time::Deadline::new(&serve.subscriber.runtime),
 			held: None,
+			deferred: false,
 		}
 	}
 
@@ -14228,6 +14833,12 @@ impl ServeLoop {
 		self.serving.seen_subscription(None);
 	}
 
+	/// Whether applying `pref` cancels the subscription: neither the demand nor the fills ask
+	/// for anything. A cancel sends no update, so it never waits for one to flush.
+	fn cancels(&self, pref: &Option<Subscription>) -> bool {
+		pref.is_none() && self.range_fills.ask.is_empty()
+	}
+
 	/// Apply a demand change: open, update, or cancel the upstream subscription.
 	fn begin(&mut self, serve: &TrackServe, pref: Option<Subscription>) -> Result<(), Error> {
 		match serve.begin_subscription(
@@ -14244,6 +14855,11 @@ impl ServeLoop {
 				self.mode = ServeMode::Establish(est);
 			}
 			Begin::None => {}
+		}
+		// A change held back for an update applies to the subscription that update was on, so
+		// none outlives it: a fresh one asks for the demand as it is then.
+		if matches!(self.sub, Sub::None) {
+			self.deferred = false;
 		}
 		// A finished track's tail waits a fresh grace for what an update newly asked for,
 		// rather than a deadline that may have passed while an earlier stream was read.
@@ -14492,8 +15108,10 @@ impl ServeLoop {
 							given.remove(asked.clone());
 						}
 						for given in given.iter() {
-							self.serving
-								.give_up(given.clone(), track::Hole::stale(active.stale_budget));
+							self.serving.give_up(
+								given.clone(),
+								track::Hole::stale(active.stale_budget).capped(active.stale_cap),
+							);
 						}
 					}
 					false => {
@@ -14749,19 +15367,32 @@ impl ServeLoop {
 						return Poll::Ready(ServeEnd::GiveBack(err));
 					}
 
-					// Deliver any buffered SUBSCRIBE_UPDATE before selecting, so the
-					// demand that produced it is on the wire.
-					if let Sub::Active(active) = &mut self.sub {
-						match active.stream.writer.poll_flush(waiter) {
-							Poll::Ready(Ok(())) => {}
+					// Deliver any buffered SUBSCRIBE_UPDATE. One the publisher has no credit for yet
+					// holds back the next demand change, so withholding credit costs one update's
+					// buffer, but nothing else waits on it: a publisher blocked writing responses
+					// while it reads none of ours needs them read.
+					let flushing = match &mut self.sub {
+						Sub::Active(active) => match active.stream.writer.poll_flush(waiter) {
+							Poll::Ready(Ok(())) => false,
 							// The publisher stopped reading, as it does once it finishes the
 							// track. The update is dropped, and the responses decide how the
 							// subscription ends: cleanly at the FIN, or with a reset's error.
 							Poll::Ready(Err(err)) => {
-								tracing::debug!(track = %serve.name, %err, "subscribe update dropped")
+								tracing::debug!(track = %serve.name, %err, "subscribe update dropped");
+								false
 							}
-							Poll::Pending => return Poll::Pending,
+							Poll::Pending => true,
+						},
+						Sub::None => false,
+					};
+					if !flushing && std::mem::take(&mut self.deferred) {
+						// Acted on whole, so the change it folded in is not reported again.
+						let pref = self.serving.subscription();
+						self.serving.seen_subscription(pref.clone());
+						if let Err(err) = self.begin(serve, pref) {
+							return Poll::Ready(ServeEnd::GiveBack(err));
 						}
+						continue;
 					}
 
 					// Biased: demand first, then completions, then closures.
@@ -14781,6 +15412,11 @@ impl ServeLoop {
 						Poll::Pending => {}
 					}
 					match self.serving.poll_subscription_changed(waiter) {
+						// Polled again until it parks, so a later change such as a cancel still wakes us.
+						Poll::Ready(Ok(pref)) if flushing && !self.cancels(&pref) => {
+							self.deferred = true;
+							continue;
+						}
 						Poll::Ready(Ok(pref)) => {
 							// Updating the upstream failed: hand the track back for another
 							// route to resume.
@@ -14801,7 +15437,7 @@ impl ServeLoop {
 							self.largest = Some(largest.group);
 						}
 						if let Sub::Active(active) = &mut self.sub
-							&& let Some(largest) = self.largest
+							&& !flushing && let Some(largest) = self.largest
 							&& let Some(wanted) = self.demand.poll_asked(waiter).filter(|wanted| *wanted > largest)
 							&& active.wanted != Some(wanted)
 						{
@@ -14832,10 +15468,15 @@ impl ServeLoop {
 					Self::walk_fills(serve, &mut self.range_fills, &mut self.fetches, &self.serving);
 					match polled {
 						Ok(true) => {
-							if let Err(err) = self.begin(serve, self.serving.subscription()) {
-								return Poll::Ready(ServeEnd::GiveBack(err));
+							let pref = self.serving.subscription();
+							if flushing && !self.cancels(&pref) {
+								self.deferred = true;
+							} else {
+								if let Err(err) = self.begin(serve, pref) {
+									return Poll::Ready(ServeEnd::GiveBack(err));
+								}
+								continue;
 							}
-							continue;
 						}
 						Ok(false) => {}
 						Err(err) => return Poll::Ready(ServeEnd::GiveBack(err)),

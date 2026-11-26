@@ -100,6 +100,7 @@ import {
 	hasLengthFirst,
 	hasProbeRtt,
 	hasRanges,
+	hasReliableReset,
 	hasRouteCost,
 	hasRoutes,
 	hasSkip,
@@ -194,6 +195,19 @@ function wireTime(timestamp: Timestamp, stamp: Stamp): bigint {
  */
 function acknowledged(writer: Writer): Promise<void> {
 	return writer.closed.catch(() => {});
+}
+
+/**
+ * Lite-07: whether a Group Stream this side just reset still accounts for its group, `held` once
+ * a reset delivers its whole header. A reset of this side's delivers the held header, which does.
+ * A STOP_SENDING owes a drop only when it evicted the stream before the peer acknowledged the
+ * header, since the subscriber may never have read which group it carried; any other the
+ * subscriber sent knowing the group, or wanting none of it. Mirrors the Rust `accounts`.
+ */
+async function accounts(stream: Writer, held: boolean): Promise<boolean> {
+	const stop = stream.stopped;
+	if (stop === undefined) return held;
+	return stop !== StreamCode.Evicted || (await stream.heldAcknowledged());
 }
 
 // The TRACK_INFO a TRACK stream, or a listing's TRACKS_ADD, answers for a track.
@@ -1782,6 +1796,13 @@ export class Publisher {
 			return ids.some((id, index) => resolution[index]?.floored && (known || !unstarted.get(id)?.live));
 		};
 
+		// Lite-07: whether a range still unanswered waits on this copy's upstream to place it.
+		const awaitsUpstream = (): boolean => {
+			if (!perRange()) return false;
+			const held = [...unstarted.keys()].filter((id) => controls.holds(id));
+			return hooks.servingResolvedKeys(track, held).some((range) => range === undefined);
+		};
+
 		// Answer each range still waiting for its SUBSCRIBE_START once it resolves, or with no start
 		// once nothing can resolve it (`finished`). One following the live edge also waits until this
 		// hop knows where it is. The first answers go out with `resolveStart`. Mirrors the Rust
@@ -2179,6 +2200,12 @@ export class Publisher {
 							if (!(await resolveStart(from, largest))) return false;
 							continue;
 						}
+						// A relay's copy places a range only as its upstream would, so one its upstream has yet
+						// to answer may start below every group held: nothing it owes is final until then.
+						if (awaitsUpstream()) {
+							await park();
+							continue;
+						}
 						// Nothing arrives to resolve a range still waiting on the live feed.
 						if (!(await reportStarted(true))) return false;
 						// Name every key from the start to the end this subscription never
@@ -2240,14 +2267,8 @@ export class Publisher {
 						}
 						source = floor;
 					}
-					// Newest-first delivery can put a group ahead of where the source's feed
-					// starts. Preserve that start so a resumed subscriber still waits for the backlog.
-					startKey = min(group.start, source ?? group.start);
-					// A group given up cannot be where the feed starts. Adjacent runs given up with
-					// different errors stay separate, so walk them in order.
-					for (const range of skipped.all) {
-						if (range.start <= startKey && range.end > startKey) startKey = min(range.end, group.start);
-					}
+					// A group given up, or held and not servable, cannot be where the feed starts.
+					startKey = hooks.deliveryStart(track, { first: group.start, source, givenUp: skipped });
 					// A later group above an explicit floor is still delivered, so the cursor stays put.
 					// A pre-06 subscribe that named no group is the exception: an absent
 					// Group Start is the latest group, and this key becomes the floor.
@@ -2276,7 +2297,8 @@ export class Publisher {
 					},
 				};
 				// The FIN waits for every stream to finish or reset, including one that has not opened yet.
-				// A stream reset to make room fails the group like any other reset, so it is dropped.
+				// A stream reset to make room fails the group like any other reset, so it is dropped,
+				// unless a lite-07 reset delivered its header, which accounts for the group.
 				const task = (async () => {
 					const writer = await this.#openGroup(options);
 					let failed: Error | undefined;
@@ -2788,7 +2810,8 @@ export class Publisher {
 	}
 
 	/**
-	 * Serves one group on the stream {@link #openGroup} opened for it.
+	 * Serves one group on the stream {@link #openGroup} opened for it, resolving the error a
+	 * SUBSCRIBE_DROP names it with, or undefined when the stream accounts for the group.
 	 *
 	 * @internal
 	 */
@@ -2802,6 +2825,8 @@ export class Publisher {
 			const stop = await givenUp.write(op);
 			if (stop) throw stop;
 		};
+		// Lite-07: the transport took the whole GROUP header, which every later reset still delivers.
+		let held = false;
 		// Everything past this point runs inside the cleanup scope, so a failure never leaves
 		// a finished group's stream being ranked.
 		try {
@@ -2814,6 +2839,7 @@ export class Publisher {
 				await stream.u53(0); // stream type
 				await msg.encode(stream, this.version);
 			});
+			if (hasReliableReset(this.version)) held = stream.hold();
 
 			// Lite-07 counts the first delta from the group's start, whatever frame the stream starts
 			// at, and GROUP_END from the highest timestamp sent, since B-frames go backwards.
@@ -2890,16 +2916,18 @@ export class Publisher {
 			}
 			stream.close();
 			group.close();
-			// A stream that fails after its FIN may have lost its header, so report it for a DROP.
-			// Its bytes still hold the connection until acknowledged, so a group gone stale meanwhile
-			// is reset like one still serving, as the Rust `GroupServe` does: stale bytes must not fill
-			// the send window ahead of the streams behind them.
+			// A stream that fails after its FIN may have lost its header, so report it for a DROP,
+			// unless a lite-07 reset still delivers it. Its bytes still hold the connection until
+			// acknowledged, so a group gone stale meanwhile is reset like one still serving, as the
+			// Rust `GroupServe` does: stale bytes must not fill the send window ahead of the streams
+			// behind them.
 			await write(() => stream.closed);
 			return undefined;
 		} catch (err: unknown) {
 			const e = error(err);
 			stream.reset(e);
 			hooks.releaseGroupReader(group, e);
+			if (hasReliableReset(this.version) && (await accounts(stream, held))) return undefined;
 			return e;
 		} finally {
 			priority.remove(stream);

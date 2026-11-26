@@ -98,12 +98,13 @@ absent directory as each segment completes. Recording alone binds no HTTP port;
 add `--hls-listen` to serve and record from one stage, in which case serving goes on
 after the recording completes.
 
-The recording starts at the oldest segment in the `--window` and gets
+The recording starts at the oldest segment in the `--window` whose media the
+source still serves, and gets
 `EXT-X-ENDLIST` only once the broadcast finishes cleanly or another publisher
 takes it over, in which case it ends with the segments listed before the
 takeover. If the publisher drops out, its timestamps go back, or a segment
-can't be fetched, the export exits with an error and leaves the playlists
-unended. A rendition whose decoder is reconfigured keeps one playlist,
+can't be fetched once recording has begun, the export exits with an error and
+leaves the playlists unended. A rendition whose decoder is reconfigured keeps one playlist,
 switching to a new init at an `EXT-X-DISCONTINUITY` in that playlist, so the
 whole recording stays playable from its master playlist. Each playlist's
 `EXT-X-TARGETDURATION` is the one the export serves for that rendition when the recording first sees it (see the

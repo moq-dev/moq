@@ -673,7 +673,6 @@ impl Window {
 
 	/// The time starts still waiting on the groups held: what a received copy asks its
 	/// upstream to place.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn asks(&self) -> impl Iterator<Item = u64> + '_ {
 		let mut last = None;
 		self.waiting

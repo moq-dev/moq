@@ -4908,10 +4908,8 @@ enum FrontStep {
 /// A front's in-flight upstream request.
 struct FrontUpstream {
 	route: u64,
-	/// The route's instance when asked.
-	asked: Instance,
-	/// [`OriginState::next_route`] when asked.
-	asked_at: u64,
+	/// The route's instance and epoch when asked.
+	asked: (Instance, u64),
 	pending: kio::Consumer<PendingBroadcast>,
 	/// The queue's [`ServeState::renewals`], and its count when asked: a renewal
 	/// since released the request, whatever it resolved to and whenever.
@@ -4951,8 +4949,8 @@ struct FrontServe {
 	tracks: HashMap<Arc<str>, TrackIo>,
 	upstream: Option<FrontUpstream>,
 	next_source: u64,
-	/// The instance each source's route served when it was asked, and the table's clock
-	/// then: what its content is from.
+	/// The instance and epoch each source's route served when it was asked: what its
+	/// content is from.
 	instances: HashMap<u64, (Instance, u64)>,
 	sources: HashMap<u64, broadcast::Consumer>,
 	front: Front,
@@ -5044,9 +5042,13 @@ impl FrontServe {
 		if self.resolved.is_none()
 			&& let Some(entry) = best
 			&& let Ok(mut pending) = self.request.write()
-			&& pending.selected != entry.instance
 		{
-			pending.selected = entry.instance.clone();
+			if pending.selected != entry.instance {
+				pending.selected = entry.instance.clone();
+			}
+			if pending.epoch != entry.epoch {
+				pending.epoch = entry.epoch;
+			}
 		}
 		// Only a received route carries a hop chain or a claiming node: a local one needs
 		// no discovery.
@@ -5096,22 +5098,32 @@ impl FrontServe {
 		.is_some_and(|best| best.id == route)
 	}
 
-	/// Whether an answer `route` gave for `asked` would serve another instance than the
-	/// front's: the route has since moved off it, or, before the front resolved, another
-	/// instance won the path while the request was in flight.
-	fn stale(&self, route: u64, asked: &Instance) -> bool {
+	/// Whether an answer `route` gave for `asked` (an instance and its epoch) would serve
+	/// another instance than the front's, or an epoch of it that no longer stands: the route
+	/// has since moved off it, before the front resolved another instance won the path while
+	/// the request was in flight, or a higher epoch of the route's claim did, including one
+	/// that replaced the route in the table.
+	fn stale(&self, route: u64, asked: &(Instance, u64)) -> bool {
 		let table = self.shared.read();
-		let Some(entry) = table.routes.covering(&self.path).find(|entry| entry.id == route) else {
-			return false;
-		};
-		if entry.instance != *asked {
+		let entry = table.routes.covering(&self.path).find(|entry| entry.id == route);
+		if let Some(entry) = entry
+			&& (entry.instance != asked.0 || self.resolved.as_ref().is_some_and(|resolved| *resolved != asked.0))
+		{
 			return true;
 		}
-		match &self.resolved {
-			Some(resolved) => resolved != asked,
-			None => pick(&table, &self.path, self.horizon, &self.front, self.pin.as_ref())
-				.is_some_and(|best| best.instance != *asked),
-		}
+		let best = pick(
+			&table,
+			&self.path,
+			self.horizon,
+			&self.front,
+			self.resolved.as_ref().or(self.pin.as_ref()),
+		);
+		best.is_some_and(|best| match entry {
+			Some(entry) => best.instance != asked.0 || (best.claimed() == entry.claimed() && best.epoch > entry.epoch),
+			// The route left the table: its answer still serves its instance, unless another
+			// instance or a higher epoch of it wins now.
+			None => best.instance != asked.0 || best.epoch > asked.1,
+		})
 	}
 
 	/// Wait for the next thing to happen, the one place the front parks.
@@ -5299,7 +5311,7 @@ impl kio::Task for FrontServe {
 									.covering(&self.path)
 									.find(|entry| entry.id == route && entry.live())
 									.map(|entry| {
-										let instance = (entry.instance.clone(), table.next_route);
+										let instance = (entry.instance.clone(), entry.epoch);
 										(entry.source.clone(), entry.server.clone(), instance)
 									})
 							};
@@ -5397,8 +5409,7 @@ impl kio::Task for FrontServe {
 							};
 							self.upstream = Some(FrontUpstream {
 								route,
-								asked: instance.0,
-								asked_at: instance.1,
+								asked: instance,
 								pending,
 								renewals: serve.renewals.clone(),
 								asked_renewals: serve.renewals.load(Ordering::Acquire),
@@ -5425,7 +5436,7 @@ impl kio::Task for FrontServe {
 							let Some(source) = self.front.serving() else {
 								continue;
 							};
-							let Some((instance, _)) = self.instances.get(&source).cloned() else {
+							let Some((instance, epoch)) = self.instances.get(&source).cloned() else {
 								continue;
 							};
 							// Route datagram lookups before a requester can see the broadcast,
@@ -5437,6 +5448,7 @@ impl kio::Task for FrontServe {
 							self.resolved = Some(instance.clone());
 							if let Ok(mut pending) = self.request.write() {
 								pending.resolved.get_or_insert(Ok(instance));
+								pending.epoch = epoch;
 							}
 						}
 						Action::Query { track: name, source } => {
@@ -5684,6 +5696,12 @@ impl kio::Task for FrontServe {
 				self.datagram_source = self.front.serving();
 				self.broadcast
 					.serve_datagrams_from(self.datagram_source.and_then(|id| self.sources.get(&id)).cloned());
+				// A switch to another epoch of the instance admits the requests that select it.
+				if let Some((_, epoch)) = self.datagram_source.and_then(|id| self.instances.get(&id))
+					&& let Ok(mut pending) = self.request.write()
+				{
+					pending.epoch = *epoch;
+				}
 			}
 
 			let mut park = std::mem::take(&mut self.park);
@@ -5726,7 +5744,6 @@ impl kio::Task for FrontServe {
 					let Some(FrontUpstream {
 						route,
 						asked,
-						asked_at,
 						renewals,
 						asked_renewals,
 						..
@@ -5761,7 +5778,7 @@ impl kio::Task for FrontServe {
 							let id = self.next_source;
 							self.next_source += 1;
 							self.sources.insert(id, source);
-							self.instances.insert(id, (asked, asked_at));
+							self.instances.insert(id, asked);
 							Event::Resolved { route, result: Ok(id) }
 						}
 						Err(err) => Event::Resolved {
@@ -7255,11 +7272,16 @@ struct PendingBroadcast {
 
 /// A front's verdict, which its requesters wait on: the instance it resolved, or the
 /// error that ended it unresolved. A request joins the front only while that instance
-/// still wins, or before then, while the one it selected does. Each requester holds the
-/// front's broadcast from the moment it joins, so this carries no handle that would keep
-/// the front held.
+/// still wins at the epoch the front serves, or before then, while the instance it
+/// selected does. Each requester holds the front's broadcast from the moment it joins, so
+/// this carries no handle that would keep the front held.
 struct PendingFront {
 	resolved: Option<Result<Instance, Error>>,
+	/// The epoch of the route the front serves from once resolved, and of the one it selected
+	/// until then. A front still serving or resolving a superseded epoch keeps its readers while
+	/// it moves to the newer one, but admits nobody: a request selecting the newer epoch must
+	/// never resolve through the older one, whose answer may already be on its way.
+	epoch: u64,
 	/// The instance the front resolves on unless the table moves first: the winner it
 	/// was minted for, then each one it selects. Written under the table's lock, so a
 	/// request never joins a front that picked an instance the request saw beaten.
@@ -8682,25 +8704,21 @@ impl Consumer {
 		// Nothing serves the path: no announced broadcast and no served route.
 		// Checked before joining a front, so a front still draining after its
 		// route retracted takes no newcomers.
-		let Some(winner) = state
+		let Some((winner, winning)) = state
 			.best_route(&absolute, horizon, &HashSet::new(), |_| true)
-			.map(|best| best.instance.clone())
+			.map(|best| (best.instance.clone(), best.epoch))
 		else {
 			return kio::Pending::new(Lookup::failed(Error::Unroutable));
 		};
 		// A request naming another instance than the winner follows that instance's own
 		// routes: every hop resolves the instance the first one chose.
 		let pin = instance.filter(|instance| **instance != winner).cloned();
-		let best = match &pin {
-			None => winner,
-			Some(pin)
-				if state
-					.best_route(&absolute, horizon, &HashSet::new(), |entry| entry.instance == *pin)
-					.is_some() =>
-			{
-				pin.clone()
-			}
-			Some(_) => return kio::Pending::new(Lookup::failed(Error::Unroutable)),
+		let (best, epoch) = match &pin {
+			None => (winner, winning),
+			Some(pin) => match state.best_route(&absolute, horizon, &HashSet::new(), |entry| entry.instance == *pin) {
+				Some(entry) => (pin.clone(), entry.epoch),
+				None => return kio::Pending::new(Lookup::failed(Error::Unroutable)),
+			},
 		};
 
 		// Join the live front for this path and horizon, if any: its watcher
@@ -8709,16 +8727,21 @@ impl Consumer {
 		// another instance stays only for the subscriptions already on it, so a new
 		// request mints a fresh front for the winner rather than join the old one. So
 		// does a front still resolving one the table has since beaten: it may already
-		// hold that instance's source, and hand this request an instance it saw lose.
+		// hold that instance's source, and hand this request an instance it saw lose. So
+		// does a front serving an older epoch of the winner: it moves its readers onto the
+		// newer one, but an older epoch never stands in for a newer one that has yet to
+		// answer. Nor does a front still resolving an older epoch: that epoch's answer may
+		// already have passed its check and be on its way to resolving it.
 		let key = (absolute.clone(), horizon, pin.clone());
 		if let Some(front) = state.fronts.get(&key) {
 			let current = {
 				let pending = front.request.read();
-				match &pending.resolved {
-					None => pending.selected == best,
-					Some(Ok(resolved)) => *resolved == best,
-					Some(Err(_)) => false,
-				}
+				pending.epoch == epoch
+					&& match &pending.resolved {
+						None => pending.selected == best,
+						Some(Ok(resolved)) => *resolved == best,
+						Some(Err(_)) => false,
+					}
 			};
 			// Held from here on, so the front cannot retire under this requester. A
 			// retiring front closes atomically with this mint: found closed, it is
@@ -8751,6 +8774,7 @@ impl Consumer {
 		});
 		let request = kio::Producer::new(PendingFront {
 			resolved: None,
+			epoch,
 			selected: best,
 			refused: false,
 		});
@@ -9332,11 +9356,6 @@ impl Routes {
 	/// The next update must be a retraction at `expected`.
 	pub fn assert_next_ended(&mut self, expected: impl TryInto<Path, Error: std::fmt::Debug>) {
 		self.assert_next_gone(RouteKind::End, expected);
-	}
-
-	/// The next update must be `expected` let go of here, not retracted by its origin.
-	pub fn assert_next_offline(&mut self, expected: impl TryInto<Path, Error: std::fmt::Debug>) {
-		self.assert_next_gone(RouteKind::Offline, expected);
 	}
 
 	fn assert_next_gone(&mut self, kind: RouteKind, expected: impl TryInto<Path, Error: std::fmt::Debug>) {
@@ -13179,6 +13198,7 @@ mod tests {
 			// Nothing joins this front, and its first selection overwrites the instance.
 			request: kio::Producer::new(PendingFront {
 				resolved: None,
+				epoch: 0,
 				selected: instance(),
 				refused: false,
 			}),
@@ -13531,6 +13551,7 @@ mod tests {
 				.clone();
 			let request = kio::Producer::new(PendingFront {
 				resolved: None,
+				epoch: 0,
 				selected,
 				refused: false,
 			});
@@ -15885,6 +15906,216 @@ mod tests {
 		);
 	}
 
+	/// A claim of `src`'s instance at `epoch`, through relay `node`, shown `above` levels
+	/// beneath its prefix.
+	#[cfg(feature = "async")]
+	fn epoch_claim(epoch: u64, node: u64, above: u8) -> RouteInfo {
+		RouteInfo::new()
+			.with_instance(instance(), epoch)
+			.with_hops(hops(&[node]))
+			.with_node(Some(node_id(node)))
+			.with_lane(Lane {
+				above,
+				..Lane::default()
+			})
+	}
+
+	/// A front held through an older epoch keeps serving its readers while it waits on the
+	/// newer one, but a fresh request never resolves through it: with the newer epoch
+	/// winning and turned unavailable before it answers, the request waits on that epoch
+	/// and fails with its refusal.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_superseded_epoch_never_answers_a_fresh_request() {
+		let producer = Config {
+			update_hold: Duration::ZERO,
+			..Config::from(origin(1))
+		}
+		.produce();
+		let consumer = producer.consume();
+		// A claim of `src` filed at `src/a`, shown a level beneath its prefix.
+		let filed = producer.forward("src/a", epoch_claim(1, 10, 1)).unwrap();
+		let pending = consumer.request("src/a/b", None);
+		let source = broadcast::Info::new().produce();
+		let track = source.create_track("video", crate::track::Info::timed()).unwrap();
+		queued(&filed).await.serve(&source);
+		let held = pending.await.expect("resolves through epoch 1");
+		let mut subscription = held.track("video").unwrap().subscribe(None).await.unwrap();
+		deliver(&track, &mut subscription, b"before").await;
+
+		let newer = producer.forward("src", epoch_claim(2, 11, 0)).unwrap();
+		let switch = queued(&newer).await;
+		newer.update(newer.route().unwrap().with_available(false)).unwrap();
+
+		let mut fresh = Box::pin(consumer.request("src/a/b", None));
+		deliver(&track, &mut subscription, b"held").await;
+		assert!(
+			(&mut fresh).now_or_never().is_none(),
+			"a fresh request must not resolve through the superseded epoch"
+		);
+
+		// No route reaches the newer epoch, so its session refuses whatever it is asked.
+		switch.reject(Error::Unroutable);
+		let mut result = None;
+		settle(|| {
+			while let Poll::Ready(Some(request)) = newer.poll_requested(&kio::Waiter::noop()) {
+				request.reject(Error::Unroutable);
+			}
+			result = (&mut fresh).now_or_never();
+			result.is_some()
+		})
+		.await;
+		assert!(matches!(result.unwrap(), Err(Error::Unroutable)));
+	}
+
+	/// An older epoch's answer to a request in flight when the newer epoch won never
+	/// resolves it: the front asks the newer epoch, whose refusal is the request's answer.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn an_older_epochs_answer_never_resolves_a_request_the_newer_one_won() {
+		let producer = Config {
+			update_hold: Duration::ZERO,
+			..Config::from(origin(1))
+		}
+		.produce();
+		let consumer = producer.consume();
+		let filed = producer.forward("src/a", epoch_claim(1, 10, 1)).unwrap();
+		let mut fresh = Box::pin(consumer.request("src/a/b", None));
+		let asked = queued(&filed).await;
+
+		// The newer epoch wins before the front hears the older one's answer.
+		let newer = producer.forward("src", epoch_claim(2, 11, 0)).unwrap();
+		asked.serve(broadcast::Info::new().produce());
+		let switch = queued(&newer).await;
+		assert!(
+			(&mut fresh).now_or_never().is_none(),
+			"the older epoch's answer must not resolve the request"
+		);
+
+		switch.reject(Error::Unroutable);
+		let mut result = None;
+		settle(|| {
+			result = (&mut fresh).now_or_never();
+			result.is_some()
+		})
+		.await;
+		assert!(matches!(result.unwrap(), Err(Error::Unroutable)));
+	}
+
+	/// A front still resolving the older epoch admits no request that selects the newer one,
+	/// since the older epoch's answer may already have passed its staleness check before the
+	/// newer epoch won, and resolve the front on its way out.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_front_resolving_an_older_epoch_admits_no_request_for_the_newer_one() {
+		let producer = Config {
+			update_hold: Duration::ZERO,
+			..Config::from(origin(1))
+		}
+		.produce();
+		let consumer = producer.consume();
+		let filed = producer.forward("src/a", epoch_claim(1, 10, 1)).unwrap();
+		let first = consumer.lookup(Path::new("src/a/b").unwrap(), None);
+		let _asked = queued(&filed).await;
+		let key = (consumer.absolute("src/a/b").unwrap(), Horizon::default(), None);
+		let request = producer.shared.lock().fronts.get(&key).unwrap().request.clone();
+
+		// The newer epoch wins before the front selects again.
+		let _newer = producer.forward("src", epoch_claim(2, 11, 0)).unwrap();
+		let fresh = consumer.lookup(Path::new("src/a/b").unwrap(), None).into_inner();
+		// The older epoch's answer lands, as the front publishes one that passed its check.
+		if let Ok(mut pending) = request.write() {
+			pending.resolved = Some(Ok(instance()));
+			pending.epoch = 1;
+		}
+		let waiter = kio::Waiter::noop();
+		assert!(
+			first.into_inner().poll_ok(&waiter).is_ready(),
+			"the older epoch's requester resolves"
+		);
+		assert!(
+			fresh.poll_ok(&waiter).is_pending(),
+			"a request selecting the newer epoch must not resolve through the older one"
+		);
+	}
+
+	/// An older epoch's answer whose route left the table before the front heard it never
+	/// resolves the request either: the newer epoch that replaced it is asked instead.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn an_older_epochs_answer_never_resolves_once_its_route_left() {
+		let producer = Config {
+			update_hold: Duration::ZERO,
+			..Config::from(origin(1))
+		}
+		.produce();
+		let consumer = producer.consume();
+		let filed = producer.forward("src/a", epoch_claim(1, 10, 1)).unwrap();
+		let mut fresh = Box::pin(consumer.request("src/a/b", None));
+		let asked = queued(&filed).await;
+
+		// The newer epoch replaces the older one's route before the front hears its answer.
+		let newer = producer.forward("src", epoch_claim(2, 11, 0)).unwrap();
+		asked.serve(broadcast::Info::new().produce());
+		drop(filed);
+		let switch = queued(&newer).await;
+		assert!(
+			(&mut fresh).now_or_never().is_none(),
+			"the older epoch's answer must not resolve the request"
+		);
+
+		switch.reject(Error::Unroutable);
+		let mut result = None;
+		settle(|| {
+			result = (&mut fresh).now_or_never();
+			result.is_some()
+		})
+		.await;
+		assert!(matches!(result.unwrap(), Err(Error::Unroutable)));
+	}
+
+	/// Nor when the newer epoch, superseding it, leaves another instance winning: the
+	/// request resolves on that instance, never on the older epoch's departed answer.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn an_older_epochs_departed_answer_never_resolves_once_another_instance_wins() {
+		let producer = Config {
+			update_hold: Duration::ZERO,
+			..Config::from(origin(1))
+		}
+		.produce();
+		let consumer = producer.consume();
+		let filed = producer.forward("src", epoch_claim(1, 10, 0).with_cost(1)).unwrap();
+		let other = RouteInfo::new()
+			.with_instance(crate::Instance::random(), 0)
+			.with_hops(hops(&[12]))
+			.with_node(Some(node_id(12)))
+			.with_cost(5);
+		let other = producer.forward("src", other).unwrap();
+		let mut fresh = Box::pin(consumer.request("src/b", None));
+		let asked = queued(&filed).await;
+
+		// The newer epoch supersedes the older one, which leaves, so the other instance wins.
+		let newer = producer.forward("src", epoch_claim(2, 11, 0).with_cost(9)).unwrap();
+		asked.serve(broadcast::Info::new().produce());
+		drop(filed);
+		let switch = queued(&other).await;
+		assert!(
+			(&mut fresh).now_or_never().is_none(),
+			"the older epoch's answer must not resolve the request"
+		);
+
+		switch.reject(Error::Unroutable);
+		let mut result = None;
+		settle(|| {
+			result = (&mut fresh).now_or_never();
+			result.is_some()
+		})
+		.await;
+		assert!(matches!(result.unwrap(), Err(Error::Unroutable)));
+		drop(newer);
+	}
+
 	/// A pool host that is full withdraws its route: a path it won moves to another host's
 	/// instance, so its broadcast ends and `follow` yields the other host's. A path the
 	/// other host won stays where it is.
@@ -17111,11 +17342,12 @@ mod tests {
 		let mut group = track.append_next().unwrap();
 		group.write_frame(group.key_time(), b"live".as_ref()).unwrap();
 		group.finish().unwrap();
-		let mut group = subscription.recv_group().await.unwrap().unwrap();
-		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"cached");
-		drop(group);
+		// Both held at once, the newest goes first.
 		let mut group = subscription.recv_group().await.unwrap().unwrap();
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"live");
+		drop(group);
+		let mut group = subscription.recv_group().await.unwrap().unwrap();
+		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"cached");
 		drop(group);
 		drop(subscription);
 

@@ -22,7 +22,7 @@ default = []
 # methods and explicit-time model drivers stay available without it.
 async = ["dep:futures", "kio/async", "kio/runtime"]
 
-# Exposes the wire codecs to the `fuzz/` harness and the announce, codec, path, varint, frame, and canonical storage benches,
+# Exposes the wire codecs to the `fuzz/` harness and the announce, codec, path, varint, frame, canonical storage, and live-edge benches,
 # session views of an origin to the viewers bench, the lite publisher's run loop to the
 # publisher bench, and a lite-07 publisher's frame bounds to the ranges bench, through the
 # `fuzz` module. Its session targets run on kio's simulated clock. Off by default.
@@ -245,6 +245,11 @@ required-features = ["fuzz"]
 # Uses private weak-index ownership rather than timing deferred log retirement.
 [[bench]]
 name = "canonical"
+harness = false
+required-features = ["fuzz"]
+
+[[bench]]
+name = "edges"
 harness = false
 required-features = ["fuzz"]
 

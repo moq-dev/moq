@@ -7394,6 +7394,15 @@ impl<T: crate::transport::poll::SendStream> crate::transport::poll::SendStream f
 		inner.stream.reset(code);
 	}
 
+	fn reset_at(&mut self, offset: &Self::Offset, code: u32) {
+		let inner = self.get_mut();
+		let code = match inner.lapse.as_ref().is_some_and(Lapse::lapsed) {
+			true => super::error::EXPIRED_AUTH_TOKEN,
+			false => code,
+		};
+		inner.stream.reset_at(offset, code);
+	}
+
 	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Self::Error>> {
 		let mut inner = self.inner.lock().unwrap();
 		inner.follow(waiter);
@@ -9013,7 +9022,7 @@ mod group_priority_test {
 			[(0, 0), (1, 0)],
 			"each stream joins the subscription's group"
 		);
-		assert_eq!(log.orders(), [(0, 1), (1, 3)], "newer groups first");
+		assert_eq!(log.orders(), [(0, 3), (1, 1)], "newer groups first");
 		assert!(log.priorities().is_empty(), "the session queue ranks no stream");
 
 		serve.set_priority(9).unwrap();
@@ -19306,7 +19315,7 @@ mod tests {
 			"no Max Age leaves the publisher's max age alone"
 		);
 		let mut subscriber = producer.subscribe(subscription);
-		for key in [0, 1] {
+		for key in [1, 0] {
 			let group = subscriber
 				.recv_group()
 				.now_or_never()

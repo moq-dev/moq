@@ -221,3 +221,25 @@ test("a batch rechecks a path once, after its last change", () => {
 	held.close();
 	source.close();
 });
+
+test("a cached broadcast is reused only within the epoch it was consumed through", () => {
+	const cache = new BroadcastCache();
+	const path = Path.from("room");
+	const owner = {};
+	const instance = Instance.random();
+	cache.announce(path, owner, { ...WireRoute.default, instance, epoch: 1n });
+	const source = new Producer();
+	const held = cache.insert(path, cache.instance(path), source.consume());
+	cache.announce(path, owner, { ...WireRoute.default, instance, epoch: 2n });
+	// A fresh request asks Epoch 2, which may refuse, rather than share Epoch 1's subscription.
+	expect(cache.get(path, cache.instance(path))).toBeUndefined();
+	const replacement = new Producer();
+	const fresh = cache.insert(path, cache.instance(path), replacement.consume());
+	const shared = cache.get(path, cache.instance(path));
+	expect(shared?.closed).toBe(fresh.closed);
+	// The Epoch-1 reader keeps its broadcast until it lets go.
+	expect(held.closed.peek()).toBeUndefined();
+	for (const consumer of [held, fresh, shared]) consumer?.close();
+	source.close();
+	replacement.close();
+});

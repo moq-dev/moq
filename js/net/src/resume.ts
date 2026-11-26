@@ -60,6 +60,7 @@ import {
 	type Expiry,
 	finalKey,
 	type GroupRecover,
+	type Held,
 	hooks,
 	insertDrop,
 	insertRun,
@@ -444,6 +445,11 @@ interface Copy {
 	 * nothing resolved, and that copy offers a group the window leaves out: the reader takes it.
 	 */
 	dropped?: bigint;
+	/**
+	 * The track's eviction count when {@link Reader.backfillGaps} last left it a group the reader
+	 * lacks to drain, so an eviction since asks the serving route again.
+	 */
+	drains?: number;
 }
 
 /**
@@ -1035,6 +1041,11 @@ class Reader implements ResumeSource {
 			if (this.#shell.retuned()) copy.sub.update(wire);
 			else hooks.restateSubscriber(copy.sub, wire);
 			this.#stamp(copy);
+		} else {
+			// Its ranges stay as resolved when it closed, but the groups it still holds are picked in
+			// the reader's Group Order. Mirrors the Rust `Copy::send`, which edits every copy.
+			const { priority = 0, order = "descending" } = wire;
+			hooks.editSubscriber(copy.sub, { retire: [], add: [], priority, order });
 		}
 	}
 
@@ -1221,12 +1232,18 @@ class Reader implements ResumeSource {
 		// spent its drain budget delivers nothing more, even while a read still leases it, and one
 		// holding a group without its head may give that group up, so neither counts.
 		const cursor = this.#shell.cursor.peek().start;
+		// Each replaced copy's evictions so far, counted before the walk looks at what it holds, so a
+		// group it is left to drain and loses after is asked of the serving route then.
+		const evictions = new Map(
+			this.#copies.filter((copy) => copy.replaced).map((copy) => [copy, hooks.evictions(copy.sub)]),
+		);
 		// Each replaced copy's staleness verdict, taken once for the whole walk.
 		const taking = new Map(
 			this.#copies.filter((copy) => copy.replaced).map((copy) => [copy, hooks.taking(copy.sub)]),
 		);
+		// The copy left to drain group `key`, if any.
 		const drains = (key: bigint) =>
-			this.#copies.some(
+			this.#copies.find(
 				(copy) =>
 					copy.replaced &&
 					this.#feeds(copy) &&
@@ -1236,15 +1253,21 @@ class Reader implements ResumeSource {
 					!copyFailed(copy) &&
 					hooks.holdsGroup(copy.sub, key, true),
 			);
+		const left = new Set<Copy>();
 		let start: bigint | undefined;
 		for (const gap of delivered.gaps(max(floor, cursor), resumed)) {
 			let key = gap.start;
-			while (key < gap.end && drains(key)) key++;
+			for (; key < gap.end; key++) {
+				const copy = drains(key);
+				if (!copy) break;
+				left.add(copy);
+			}
 			if (key < gap.end) {
 				start = key;
 				break;
 			}
 		}
+		for (const copy of this.#copies) copy.drains = left.has(copy) ? evictions.get(copy) : undefined;
 		// A raised start is asked from its time whatever the local floor, so the backfill places it,
 		// and the group holding it is read once the floor lets it.
 		for (const time of owed) start = start === undefined ? time : min(start, time);
@@ -1378,7 +1401,7 @@ class Reader implements ResumeSource {
 	// Whether a copy's next group, `key`, waits for the reader's window to be placed, which decides
 	// whether it goes out: a failed copy's, until a copy continuing the track places it, and a
 	// backfill's that no range placed so far holds, since only a placed range bounds the groups under
-	// the resume point. Mirrors the Rust `Reader::poll_lowest`.
+	// the resume point. Mirrors the Rust `Reader::poll_first`.
 	#waits(copy: Copy, key: bigint): boolean {
 		if (!this.#mayWait(copy)) return false;
 		const failed = !this.route.concluded && copyFailed(copy);
@@ -1403,14 +1426,15 @@ class Reader implements ResumeSource {
 			const dropped = this.#tryDrop(delivered);
 			if (dropped) return dropped;
 		}
-		// The lowest group any copy holds next, in either order: a replaced copy's buffered group
-		// comes before a later one the serving copy already has. Arrival order still delivers a
-		// lower group that truly arrives later.
+		// The first group any copy holds next: the lowest for an ordered read, else the first in
+		// the subscription's Group Order. A replaced copy's buffered group comes before a later one
+		// the serving copy already has. An arrival read still delivers a lower group that truly
+		// arrives later.
 		let owing: Copy[];
 		for (;;) {
-			const lowest = this.#lowest(ordered, delivered, admit);
-			owing = lowest.owing;
-			const next = lowest.next;
+			const first = this.#first(ordered, delivered, admit);
+			owing = first.owing;
+			const next = first.next;
 			if (!next) break;
 			const recv = this.#take(next, ordered, dispositions, admit);
 			if (recv.kind === "drop") {
@@ -1508,7 +1532,7 @@ class Reader implements ResumeSource {
 		// group already. A replaced copy that failed this pass owes the serving route a backfill
 		// once the window is placed: ask now, since its close already fired and no later group is
 		// sure to wake the read. A backfill that failed is not asked again (`#refused`), so this
-		// ends. Mirrors the Rust `Reader::poll_lowest`.
+		// ends. Mirrors the Rust `Reader::poll_first`.
 		const backfill = owed && this.#resumed && this.#window().floor() !== undefined;
 		if (end.kind === "idle" && (this.route.generation !== generation || backfill)) {
 			return this.tryGroup(ordered, delivered, dispositions, admit);
@@ -1733,13 +1757,20 @@ class Reader implements ResumeSource {
 	// A copy that ran out cleanly still takes a group in flight below its end while the read stays
 	// open, as a cursor still reading it would. One landing on the serving copy may lie under its
 	// resume point, which is not that copy's to read, and a backfill that already ran out was let
-	// go: ask its route again. Mirrors the Rust `Reader::poll_lowest`.
+	// go: ask its route again. Mirrors the Rust `Reader::poll_first`.
 	#reopen(): void {
 		const serving = this.#serving();
 		for (const copy of this.#copies) {
 			if (typeof copy.done !== "number" || hooks.arrived(copy.sub) <= copy.done) continue;
 			copy.done = undefined;
 			if (copy === serving && !copy.replaced && copy.floor !== undefined) this.#resumed = true;
+		}
+		// A group the switch left a replaced copy to drain may be gone from its cache since: the
+		// serving route is asked for it after all, as a cursor on the track would ask again.
+		for (const copy of this.#copies) {
+			if (copy.drains === undefined || hooks.evictions(copy.sub) === copy.drains) continue;
+			copy.drains = undefined;
+			this.#resumed = true;
 		}
 	}
 
@@ -1755,13 +1786,16 @@ class Reader implements ResumeSource {
 		copy.dropped = max(copy.dropped ?? 0n, key + 1n);
 	}
 
-	// The copy whose next group is the lowest deliverable one in the reader's window, dropping any
+	// The copy whose next group is the first deliverable one in the reader's window, dropping any
 	// it holds next that are not, and the copies whose ordered cursor is left on such a group
-	// because the window still owes a lower one that may yet land there.
-	#lowest(ordered: boolean, delivered: Delivered, admit?: bigint): { next?: Copy; owing: Copy[] } {
-		let lowest: { copy: Copy; key: bigint } | undefined;
+	// because the window still owes a lower one that may yet land there. First is the lowest for an
+	// ordered read, else the first in the subscription's Group Order. Mirrors the Rust `poll_first`.
+	// A group at or past `admit` (ordered reads only) stays next, unjudged.
+	#first(ordered: boolean, delivered: Delivered, admit?: bigint): { next?: Copy; owing: Copy[] } {
+		let first: { copy: Copy; key: bigint } | undefined;
 		const owing: Copy[] = [];
 		const floor = ordered ? (delivered.runEnd(0n) ?? 0n) : 0n;
+		const ascending = ordered || this.#shell.subscription.peek()?.order === "ascending";
 		for (const copy of this.#copies) {
 			if (!this.#feeds(copy)) continue;
 			for (;;) {
@@ -1776,7 +1810,7 @@ class Reader implements ResumeSource {
 				if (deliverable && this.#inWindow(key)) {
 					// A tie goes to the newer copy, so the serving one hands out its first group and
 					// bounds the copies it replaced.
-					if (!lowest || key <= lowest.key) lowest = { copy, key: key };
+					if (!first || (ascending ? key <= first.key : key >= first.key)) first = { copy, key };
 					break;
 				}
 				// Skipping an ordered cursor past a group the window still owes below would lose it.
@@ -1790,7 +1824,7 @@ class Reader implements ResumeSource {
 				recv.group.close();
 			}
 		}
-		return { next: lowest?.copy, owing };
+		return { next: first?.copy, owing };
 	}
 
 	/**
@@ -2194,9 +2228,28 @@ class Reader implements ResumeSource {
 		for (const copy of this.#copies) hooks.untell(copy.sub, start, end);
 	}
 
-	forgetPast(delivered: Delivered, budget: Budget): void {
+	// Judged on the newest copy, but never past a group a replaced copy still feeding the reader
+	// holds unread: as one cursor keeps what it owes, since a late group there may be fresh by its
+	// own successor on that copy. Nor past `keep`, an outer reader's own such group.
+	forgetPast(delivered: Delivered, budget: Budget, keep?: bigint): void {
 		const newest = this.#copies.at(-1);
-		if (newest) hooks.forgetPastBudget(newest.sub, delivered, budget);
+		if (!newest) return;
+		let kept = keep;
+		for (const copy of this.#copies) {
+			if (copy === newest || !copy.replaced || !this.#feeds(copy)) continue;
+			const key = hooks.lowestBuffered(copy.sub, delivered);
+			if (key !== undefined) kept = min(kept ?? key, key);
+		}
+		hooks.forgetPastBudget(newest.sub, delivered, budget, kept);
+	}
+
+	lowestBuffered(delivered: Delivered): bigint | undefined {
+		let lowest: bigint | undefined;
+		for (const copy of this.#copies) {
+			const key = hooks.lowestBuffered(copy.sub, delivered);
+			if (key !== undefined) lowest = min(lowest ?? key, key);
+		}
+		return lowest;
 	}
 
 	latest(): bigint | undefined {
@@ -2446,6 +2499,35 @@ class Reader implements ResumeSource {
 		this.sync();
 		const serving = this.#serving();
 		return serving && hooks.bufferedLargest(serving.sub);
+	}
+
+	/**
+	 * The group a {@link tryGroup} with nothing to drop would hand out next, without taking it: the
+	 * first any copy offers. A front reading this one as its copy picks across copies by it.
+	 */
+	peek(ordered: boolean, delivered: Delivered): bigint | undefined {
+		this.#delivered = delivered;
+		this.sync();
+		if (this.#closed) return undefined;
+		// As the take does, so a late group on a copy that ran out is offered here too. A serving
+		// copy it reopens owes a backfill, which the next take asks.
+		this.#reopen();
+		const { next } = this.#first(ordered, delivered);
+		if (!next) return undefined;
+		return hooks.peekGroup(next.sub, ordered, this.#newest === undefined ? undefined : this.#newest + 1n);
+	}
+
+	// Of the copies holding the lowest group, servable if any can serve it, so which copy holds a
+	// group never decides whether it can be served.
+	lowestHeld(from: bigint, below: bigint, servable: boolean): Held | undefined {
+		let lowest: Held | undefined;
+		for (const copy of this.#copies) {
+			const held = hooks.lowestHeld(copy.sub, from, lowest ? lowest.key + 1n : below, servable);
+			if (!held) continue;
+			if (held.key === lowest?.key) lowest.servable ||= held.servable;
+			else lowest = held;
+		}
+		return lowest;
 	}
 
 	objectLargest(): track.Position | undefined {

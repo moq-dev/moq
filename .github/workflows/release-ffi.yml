@@ -87,7 +87,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       # No Rust cache: shipped binaries compile from source rather than from
-      # whatever the shared R2 cache holds.
+      # whatever the shared B2 cache holds.
 
       - name: Install cargo-ndk (Android)
         if: contains(matrix.target, 'android')
@@ -133,7 +133,7 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       # No Rust cache: shipped binaries compile from source rather than from
-      # whatever the shared R2 cache holds.
+      # whatever the shared B2 cache holds.
 
       # Go uses a third-party generator; build.sh skips Go when it is absent.
       - uses: ./.github/actions/uniffi-bindgen

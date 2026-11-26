@@ -2,10 +2,11 @@ import { expect, test } from "bun:test";
 import { Producer as BroadcastProducer } from "./broadcast";
 import { defined } from "./defined.test-util.ts";
 import { StreamCode, StreamError } from "./error";
-import { WireRoute } from "./hop";
+import { toHop, WireRoute } from "./hop";
 import * as Instance from "./instance.ts";
 import { type Following, Producer, type Requesting } from "./origin";
 import * as Path from "./path";
+import { readsFrom } from "./resume.test-util";
 import { Timestamp } from "./time.ts";
 import { wireOf } from "./wire";
 
@@ -1470,6 +1471,183 @@ test("a held request is unwanted once its requester gives up the switch", async 
 	expect(left()).toBe(true);
 	requester.close();
 	source.close();
+	cheaper.close();
+	serving.close();
+	origin.close();
+});
+
+// A claim of `src`'s one instance at `epoch`, through a peer, shown `above` levels beneath its prefix.
+const epochClaim = (epoch: bigint, above = 0n): Partial<WireRoute> => ({
+	instance: Instance.parse("stable"),
+	epoch,
+	hops: [toHop(10n)],
+	claimed: true,
+	above,
+});
+
+// A front held through an older epoch keeps serving its readers while it waits on the newer one,
+// but a fresh request never resolves through it: with the newer epoch winning and turned
+// unavailable before it answers, the request waits on that epoch and fails with its refusal, as
+// `a_superseded_epoch_never_answers_a_fresh_request` in Rust.
+test("a superseded epoch never answers a fresh request", async () => {
+	const origin = new Producer();
+	const path = Path.from("src/a/b");
+	// A claim of `src` filed at `src/a`, shown a level beneath its prefix.
+	const filed = wireOf(origin).receive(Path.from("src/a"), epochClaim(1n, 1n));
+	const held = origin.request(path);
+	const source = new BroadcastProducer();
+	defined((await filed.requested().next()).value).serve(source.consume());
+	const reader = await held.broadcast();
+	expect(readsFrom(reader, source)).toBe(true);
+
+	const newer = wireOf(origin).receive(Path.from("src"), epochClaim(2n));
+	const asked = newer.requested();
+	const switching = defined((await asked.next()).value);
+	wireOf(newer).update({ ...epochClaim(2n), available: false });
+
+	const fresh = origin.request(path);
+	await settle();
+	expect(fresh.active.peek()).toBeUndefined();
+	expect(readsFrom(reader, source)).toBe(true);
+
+	// No route reaches the newer epoch, so its session refuses whatever it is asked.
+	const refused = new StreamError(StreamCode.Unroutable);
+	switching.reject(refused);
+	await settle();
+	expect(fresh.closed.peek()).toBe(refused);
+
+	fresh.close();
+	held.close();
+	source.close();
+	newer.close();
+	filed.close();
+	origin.close();
+});
+
+// A request that moved onto a newer epoch asks it again once its answer closes while the claim
+// still serves, as one that never switched epochs does.
+test("a request that moved epochs re-requests a closed answer", async () => {
+	const origin = new Producer();
+	const path = Path.from("src/a/b");
+	const filed = wireOf(origin).receive(Path.from("src/a"), epochClaim(1n, 1n));
+	const held = origin.request(path);
+	const source = new BroadcastProducer();
+	defined((await filed.requested().next()).value).serve(source.consume());
+	const reader = await held.broadcast();
+
+	const newer = wireOf(origin).receive(Path.from("src"), epochClaim(2n));
+	const asked = newer.requested();
+	const moved = new BroadcastProducer();
+	defined((await asked.next()).value).serve(moved.consume());
+	await settle();
+	expect(readsFrom(reader, moved)).toBe(true);
+
+	moved.close();
+	await settle();
+	// The reader parks meanwhile rather than ask the closed answer.
+	const info = reader.track("video").info();
+	const again = await Promise.race([asked.next().then((next) => next.value), settle().then(() => undefined)]);
+	const replacement = new BroadcastProducer();
+	replacement.createTrack("video");
+	defined(again).serve(replacement.consume());
+	await settle();
+	expect(readsFrom(reader, replacement)).toBe(true);
+	expect(await info).toBeDefined();
+
+	held.close();
+	source.close();
+	replacement.close();
+	newer.close();
+	filed.close();
+	origin.close();
+});
+
+// A pinned request is held to the same rule: while its instance's newer epoch has yet to answer,
+// a fresh request pinned to it never joins the slot still serving the older one.
+test("a superseded epoch never answers a fresh pinned request", async () => {
+	const origin = new Producer();
+	const path = Path.from("room/audio");
+	const pinned = Instance.random();
+	const older = origin.claim(path, { instance: { id: pinned, epoch: 1n }, cost: 9n });
+	const winning = origin.claim(path, { instance: { id: Instance.random(), epoch: 0n }, cost: 1n });
+	const held = origin.request(path, { instance: pinned });
+	const source = new BroadcastProducer();
+	defined((await older.requested().next()).value).serve(source.consume());
+	const reader = await held.broadcast();
+
+	const newer = origin.claim(path, { instance: { id: pinned, epoch: 2n }, cost: 9n });
+	const switching = defined((await newer.requested().next()).value);
+	const fresh = origin.request(path, { instance: pinned });
+	await settle();
+	expect(fresh.active.peek()).toBeUndefined();
+	expect(readsFrom(reader, source)).toBe(true);
+
+	const refused = new StreamError(StreamCode.Unroutable);
+	switching.reject(refused);
+	await settle();
+	expect(fresh.closed.peek()).toBe(refused);
+
+	fresh.close();
+	held.close();
+	source.close();
+	newer.close();
+	winning.close();
+	older.close();
+	origin.close();
+});
+
+// A pinned request whose answer closes waits on its instance's route to answer again, but ends
+// once that instance's last route leaves first, as one that never parked does.
+test("a parked pinned request ends when its last route leaves", async () => {
+	const origin = new Producer();
+	const path = Path.from("room/audio");
+	const pinned = Instance.random();
+	const claim = origin.claim(path, { instance: { id: pinned, epoch: 0n }, cost: 9n });
+	const winning = origin.claim(path, { instance: { id: Instance.random(), epoch: 0n }, cost: 1n });
+	const held = origin.request(path, { instance: pinned });
+	const asked = claim.requested();
+	const source = new BroadcastProducer();
+	defined((await asked.next()).value).serve(source.consume());
+	await held.broadcast();
+
+	source.close();
+	await settle();
+	expect(held.closed.peek()).toBeUndefined();
+
+	claim.close();
+	await settle();
+	expect(held.closed.peek()).toBeInstanceOf(StreamError);
+	expect((held.closed.peek() as StreamError).code).toBe(StreamCode.Unroutable);
+
+	held.close();
+	winning.close();
+	origin.close();
+});
+
+// A newer epoch taking the path releases the cheaper route of the older one the request was
+// moving to: nothing waits on its answer any more.
+test("a held request is unwanted once a newer epoch wins", async () => {
+	const origin = new Producer();
+	const path = Path.from("room/alice");
+	const id = Instance.random();
+	const serving = origin.claim(Path.from("room"), { instance: { id, epoch: 1n }, cost: 5n });
+	const requester = origin.request(path);
+	const source = new BroadcastProducer();
+	defined((await serving.requested().next()).value).serve(source.consume());
+	await requester.broadcast();
+
+	const cheaper = origin.claim(Path.from("room"), { instance: { id, epoch: 1n }, cost: 1n });
+	const held = defined((await cheaper.requested().next()).value);
+	const left = unwanted(held);
+	await settle();
+	expect(left()).toBe(false);
+
+	const newer = origin.claim(Path.from("room"), { instance: { id, epoch: 2n }, cost: 10n });
+	await settle();
+	expect(left()).toBe(true);
+	requester.close();
+	source.close();
+	newer.close();
 	cheaper.close();
 	serving.close();
 	origin.close();

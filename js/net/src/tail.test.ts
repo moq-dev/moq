@@ -210,4 +210,19 @@ describe("Tail", () => {
 		stream.done();
 		stream.done();
 	});
+
+	test("a parked stream holds nothing, and an excuse while parked applies once it resumes", () => {
+		const { tail: t } = tail(Duration.millis(10));
+		const stream = t.open(0n);
+		stream.park();
+		stream.park();
+		expect(t.reading).toBe(false);
+		stream.excuse();
+		expect(t.reading).toBe(false);
+		stream.resume();
+		stream.resume();
+		expect(t.reading).toBe(true);
+		stream.done();
+		expect(t.reading).toBe(false);
+	});
 });
