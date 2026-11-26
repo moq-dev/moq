@@ -901,8 +901,11 @@ impl MoqTrackProducer {
 
 	/// Create a group starting at `start`, in the track's timescale, which names it.
 	///
-	/// Use this for sparse or replayed tracks: unlike [`append_group`](Self::append_group), it
-	/// declares nothing below it skipped.
+	/// Use this for out-of-order or replayed tracks: unlike [`append_group`](Self::append_group),
+	/// it declares nothing below it skipped. There is no local grace timer, so empty gaps between
+	/// non-contiguous groups must be settled explicitly with
+	/// [`MoqGroupProducer::finish_at`] or [`skip_groups`](Self::skip_groups) (or use
+	/// [`append_group`](Self::append_group) for in-order sparse tracks).
 	pub fn create_group(&self, start: u64) -> Result<Arc<MoqGroupProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut phase = self.phase.lock().unwrap();

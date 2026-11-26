@@ -1578,6 +1578,7 @@ impl GroupRecv {
 				// STOP_SENDING reaches the live publisher stream and it re-sends the cut span.
 				if self.subscriber.version.has_group_span()
 					&& let Some(end) = ingest.try_drain_end(&mut self.reader, group.compressed())
+					&& group.check_end(end).is_ok()
 				{
 					reading.account(hdr.key..end, self.subscriber.runtime.now());
 					track.skip_groups(hdr.key.saturating_add(1)..end);
@@ -1983,9 +1984,22 @@ impl FrameIngest {
 			return None;
 		}
 		let noop = kio::Waiter::noop();
+		let mut max_ts = 0u64;
 		let mut skip = match std::mem::replace(&mut self.phase, IngestPhase::Length) {
 			IngestPhase::Payload { frame } => frame.remaining() as u64,
-			IngestPhase::Admit { header } => header.info.size,
+			IngestPhase::Admit { header } => {
+				if header.info.timestamp.scale().is_some() {
+					max_ts = max_ts.max(header.info.timestamp.value());
+				}
+				header.info.size
+			}
+			other @ (IngestPhase::Inflated { timestamp, .. } | IngestPhase::Size { timestamp, .. }) => {
+				if let Some(ts) = timestamp {
+					max_ts = max_ts.max(ts.value());
+				}
+				self.phase = other;
+				0
+			}
 			other => {
 				self.phase = other;
 				0
@@ -2012,7 +2026,8 @@ impl FrameIngest {
 						let Poll::Ready(Ok(zz)) = reader.poll_varint(&noop) else {
 							return None;
 						};
-						self.clock.timestamp(crate::coding::varint::unzigzag(zz))?;
+						let next = self.clock.timestamp(crate::coding::varint::unzigzag(zz))?;
+						max_ts = max_ts.max(next);
 					}
 					self.phase = IngestPhase::Inflated { size, timestamp: None };
 				}
@@ -2031,10 +2046,16 @@ impl FrameIngest {
 						return None;
 					};
 					let end = self.clock.end(delta)?;
+					if end < max_ts {
+						return None;
+					}
 					self.phase = IngestPhase::Finished { end };
 				}
 				IngestPhase::Finished { end } => {
 					let end = *end;
+					if end < max_ts {
+						return None;
+					}
 					return match reader.poll_has_more(&noop) {
 						Poll::Ready(Ok(false)) => Some(end),
 						_ => None,
