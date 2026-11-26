@@ -3025,25 +3025,26 @@ mod tests {
 	}
 
 	/// A real frame from a Sony ZV-E10 (MJPEG-only UVC, 4:2:2, sent without an
-	/// end-of-image marker), as the V4L2 and PipeWire paths receive it. The
-	/// subject's face is wiped to a gray block, losslessly. Each 80x80 block of
-	/// the luma must average what ffmpeg's decode of the same file does, so a
-	/// squashed, shifted, or torn picture fails.
+	/// end-of-image marker), byte for byte as the V4L2 and PipeWire paths
+	/// receive it. Each 80x80 block of the luma, and the mean of each chroma
+	/// plane, must match ffmpeg's decode of the same file, so a squashed,
+	/// shifted, or torn picture fails. ffmpeg's full-to-limited range scaling
+	/// rounds a little higher than the RGB round trip does, up to 4 on a block.
 	#[cfg(all(target_os = "linux", feature = "capture"))]
 	#[test]
 	fn mjpeg_capture_decodes_a_real_camera_frame() {
 		const FRAME: &[u8] = include_bytes!("frame/test_data/zv_e10_1280x720.jpg");
 		#[rustfmt::skip]
 		const FFMPEG_LUMA: [u8; 144] = [
-			18, 17, 18, 23, 33, 35, 36, 21, 16, 17, 17, 17, 21, 22, 24, 19,
-			18, 17, 19, 88, 107, 107, 107, 53, 18, 18, 18, 17, 20, 19, 23, 20,
-			18, 18, 20, 104, 126, 126, 126, 60, 16, 16, 18, 16, 21, 20, 23, 17,
-			18, 18, 20, 104, 126, 126, 126, 60, 17, 17, 19, 18, 20, 18, 19, 17,
-			17, 18, 20, 104, 126, 126, 126, 60, 16, 17, 18, 17, 18, 18, 17, 17,
-			18, 18, 23, 104, 126, 126, 126, 60, 16, 16, 19, 17, 17, 17, 16, 17,
-			19, 21, 19, 68, 82, 82, 82, 42, 16, 18, 21, 18, 16, 17, 17, 16,
-			20, 19, 16, 16, 16, 16, 16, 16, 16, 17, 18, 16, 17, 16, 16, 17,
-			20, 16, 16, 17, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+			18, 17, 19, 25, 39, 34, 33, 27, 21, 19, 20, 19, 23, 31, 30, 24,
+			18, 18, 20, 24, 29, 26, 35, 28, 56, 21, 36, 25, 27, 30, 31, 27,
+			18, 19, 20, 20, 20, 40, 51, 55, 66, 19, 32, 17, 24, 31, 30, 24,
+			18, 18, 19, 17, 20, 36, 114, 54, 30, 18, 32, 19, 28, 29, 29, 24,
+			17, 18, 17, 18, 19, 48, 121, 69, 39, 20, 26, 21, 23, 26, 20, 22,
+			17, 17, 16, 28, 24, 35, 80, 62, 53, 24, 24, 25, 28, 25, 19, 21,
+			17, 17, 16, 34, 43, 61, 86, 62, 20, 22, 24, 27, 26, 24, 20, 18,
+			19, 18, 16, 21, 38, 27, 54, 30, 18, 18, 24, 20, 22, 19, 17, 20,
+			19, 19, 16, 16, 19, 18, 54, 23, 17, 17, 19, 17, 19, 17, 17, 17,
 		];
 		let size = Size::new(1280, 720);
 		let frame = super::I420::from_mjpeg(FRAME, size).expect("camera frame to i420");
@@ -3058,13 +3059,18 @@ mod tests {
 				.sum();
 			let got = sum / (block * block);
 			assert!(
-				got.abs_diff(usize::from(*want)) <= 2,
+				got.abs_diff(usize::from(*want)) <= 4,
 				"block {column},{row}: {got}, ffmpeg {want}"
 			);
 		}
+		let chroma = luma / 4;
+		let mean = |plane: &[u8]| plane.iter().map(|&c| usize::from(c)).sum::<usize>() / chroma;
+		let (u, v) = frame.data()[luma..].split_at(chroma);
 		assert!(
-			frame.data()[luma..].iter().all(|&c| (96..=160).contains(&c)),
-			"the dark scene is nearly neutral"
+			mean(u).abs_diff(125) <= 1 && mean(v).abs_diff(133) <= 1,
+			"chroma {} {}",
+			mean(u),
+			mean(v)
 		);
 	}
 
