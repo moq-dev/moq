@@ -319,6 +319,7 @@ async function fetchGroup(
 		...track.Subscription.default(),
 		priority: options.priority,
 		ranges: [{ start: key, end: key }],
+		placed: new Map([[0, key]]),
 	});
 	// The lite publisher serving a FETCH from a later frame takes a copy holding that frame on.
 	hooks.fetchFrom(subscriber, (options as FetchFrom).frameStart);

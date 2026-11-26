@@ -63,7 +63,7 @@ Submit an [issue](https://github.com/moq-dev/moq/issues) or [PR](https://github.
 
 # Introduction
 moq-lite is a streamlined companion to MoQ Transport {{moqt}} built for live media and real-time applications.
-Rather than multiplexing control messages over shared streams with request IDs, moq-lite maps each transaction (subscription, fetch, track info, track listing, auth grant, bandwidth probe, goaway) onto its own bidirectional QUIC stream, uses one ordered unidirectional stream per peer for discovery and relay routing, and serves each Group on its own unidirectional stream.
+Rather than multiplexing control messages over shared streams with request IDs, moq-lite maps each transaction (subscription, track info, track listing, auth grant, bandwidth probe, goaway) onto its own bidirectional QUIC stream, uses one ordered unidirectional stream per peer for discovery and relay routing, and serves each Group on its own unidirectional stream.
 
 The protocol is payload-agnostic: relays cache, fan out, prioritize, expire, and route content end to end without knowing codecs, containers, or encryption keys.
 Client and publisher endpoints implement only the core stream and delivery rules; relay meshes additionally exchange path-vector routes over the same Announce Stream ({{routing}}).
@@ -114,7 +114,7 @@ A Group ends in one of three states:
 - **Aborted**: stream reset.
 
 ## Frame {#frame}
-Frames within a Group are indexed sequentially from `0` in write order, implied by position from `GROUP`'s `Frame Start` (or `FETCH`'s `Frame Start`).
+Frames within a Group are indexed sequentially from `0` in write order, implied by position from `GROUP`'s `Frame Start`.
 Each frame carries a transport timestamp `< 2^61` in the Track's `Timescale` (larger values are a malformed Track), used by moq-lite for [expiration](#expiration). Whether it is a presentation or a decode time is up to the payload format (hang's `cts` container, for one, sends decode-order timestamps).
 When `Timescale = 0` (scale-less), frames carry no timestamp delta and inherit their Group's start.
 
@@ -124,9 +124,9 @@ Relays forward timestamps as received unless an extension specifies otherwise.
 ## Positions {#positions}
 A **Position** is a `(Group Start, Frame Index)` pair ordered lexicographically.
 `SUBSCRIBE` delivers whole Groups except that a Range may start or end at a Position, letting a subscriber seamlessly switch routes mid-Group without duplicate frames (starting the new subscription at `(G, N)` while ending the old Range at `(G, N)`).
-`FETCH` reads a single Group or frame slice.
+A bounded Range reads a single Group or frame slice: `[Position(G, 0), Position(G + 1, 0))` selects the whole Group starting at `G` (including `G = 0`), and `[Position(G, f1), Position(G, f2))` selects frames `[f1, f2)` of it.
 
-A partial Group is delivered only when requested by `FETCH` or a Position Anchor: a relay holding only trailing frames of a Group MUST fetch the missing prefix upstream or name the Group in `SUBSCRIBE_DROP`; one holding only a prefix delivers it and closes the stream without `GROUP_END`.
+A partial Group is delivered only when requested by a Position Anchor (or a Joined Anchor with a non-zero `Frame`): a relay holding only trailing frames of a Group MUST fetch the missing prefix upstream or name the Group in `SUBSCRIBE_DROP`; one holding only a prefix delivers it and closes the stream without `GROUP_END`.
 
 
 # Session and Transports
@@ -215,7 +215,6 @@ Every stream starts with a varint `STREAM_TYPE` ({{stream_type}}).
 | ID | Stream | Creator |
 |---:|:-------|:--------|
 | `0x2` | Subscribe | Subscriber |
-| `0x3` | Fetch | Subscriber |
 | `0x4` | Probe | Subscriber |
 | `0x5` | Goaway | Either |
 | `0x6` | Track | Subscriber |
@@ -230,15 +229,10 @@ Publisher replies with one `SUBSCRIBE_START` per Range once its start resolves, 
 - Each Range is answered independently as soon as resolved. A publisher MAY withhold `SUBSCRIBE_START` (and withholds `SUBSCRIBE_DROP`s until the first `SUBSCRIBE_START`) until a matching group resolves it, but MUST answer once no group can resolve a bounded Range or the Track finishes. A Track finishing with zero groups is answered by `SUBSCRIBE_END(Group=0)` alone.
 - Refusals (missing track, ended broadcast, unserved claim) MUST promptly reset the stream with a typed code rather than hang.
 - Immutable track properties come from a concurrent [Track Stream](#track-stream) (subscribers MAY buffer frames until `TRACK_INFO` arrives).
-- Neither `SUBSCRIBE_START` nor `SUBSCRIBE_END` closes the stream: publishers never FIN first, so subscribers can widen Ranges via `SUBSCRIBE_UPDATE` even into an ended Track's history.
-- Subscribers fill multi-group holes by adding Ranges on a subscription (never repeated per-group `FETCH`); Groups already delivered or dropped on a subscription are never reopened by `SUBSCRIBE_UPDATE` and require a new `SUBSCRIBE`.
-- Once satisfied (after tail accounting settles past `SUBSCRIBE_END`: all Group Streams read/reset/dropped and all in-range starts arrived, inside a `GROUP_END` span, or named by `SUBSCRIBE_DROP`), the subscriber FINs, and the publisher replies with FIN and cancels open Group Streams. Graceful session close MUST wait for subscriber FIN/reset on all Subscribe Streams.
-
-### Fetch {#fetch-stream}
-Single HTTP-like request/response for one Group or frame slice (works on both live and ended broadcasts; the only way to read an ended broadcast).
-Subscriber sends `FETCH`; publisher streams `FRAME`s directly with no response header, ending with `GROUP_END` + `FIN` (finished), `FIN` (closed or reached `Frame End`), or reset (error).
-A publisher lacking the full requested range MUST reset rather than truncate (unless the Group ended cleanly before `Frame End`).
-Subscribers MUST obtain `TRACK_INFO` first (reused across fetches).
+- Neither `SUBSCRIBE_START` nor `SUBSCRIBE_END` closes the stream while the subscriber's send half is open: publishers never FIN first, so subscribers can widen Ranges via `SUBSCRIBE_UPDATE` even into an ended Track's history.
+- Subscribers fill missing Groups, or read a single Group or frame slice, through Ranges: added to an open subscription with `SUBSCRIBE_UPDATE` when it has not already accounted for those Groups, or on a bounded `SUBSCRIBE` otherwise. Groups already delivered or dropped on a subscription are never reopened by `SUBSCRIBE_UPDATE` and require a new `SUBSCRIBE`.
+- A subscriber's clean FIN means it sends no further `SUBSCRIBE_UPDATE`, not that delivery stops: the publisher delivers every remaining requested Range (for a bounded subscription, until every Range resolved and every Group in range was delivered, skipped, or dropped and its Group Stream finished; for an unbounded one, through `SUBSCRIBE_END` and its tail) and then FINs. A subscriber wanting only its initial bounded Ranges MAY FIN right after `SUBSCRIBE`, a one-round-trip request; to stop delivery early it resets the stream instead.
+- After `SUBSCRIBE_END`, a subscriber whose send half is still open SHOULD FIN once its tail accounting settles: all Group Streams read/reset/dropped and all in-range starts arrived, inside a `GROUP_END` span, or named by `SUBSCRIBE_DROP`. Graceful session close MUST wait for subscriber FIN/reset on all Subscribe Streams.
 
 ### Track {#track-stream}
 Subscriber sends `TRACK`; publisher replies with one immutable `TRACK_INFO` and FINs (or resets on error).
@@ -301,7 +295,7 @@ Any other reset may lose the `GROUP` message, since a `RESET_STREAM` lets the pe
 So a publisher MUST name each Group whose stream it resets without a Reliable Size covering the `GROUP` message, such as toward a peer without `RESET_STREAM_AT` or over a browser's WebTransport, in a `SUBSCRIBE_DROP` with the reset's error, as it does a Group whose stream it resets before sending the `GROUP` message.
 A subscriber that read the `GROUP` message first already accounted for the Group, and the drop ends its readers with the reset's error.
 
-A publisher out of peer stream credit MAY reset its lowest-priority Group Stream with `TOO_FAR_BEHIND` (subscribers wanting the remainder `FETCH` from the missing frame index).
+A publisher out of peer stream credit MAY reset its lowest-priority Group Stream with `TOO_FAR_BEHIND` (subscribers wanting the remainder subscribe again from the first Position they lack).
 Both peers MAY reset a Group Stream at any time without affecting the session.
 
 ## Datagrams {#datagrams}
@@ -358,7 +352,7 @@ Non-zero `Path Base` naming an unassigned/retired ID, or `Path Keep > 0` with `P
 ## Hidden Paths {#hidden}
 A claim is **hidden** from a requested prefix if any segment strictly below that prefix begins with `.` (`0x2E`).
 Publishers SHOULD omit hidden claims unless `ANNOUNCE_REQUEST` set `Hidden = 1` (or the peer is trusted, e.g., a cluster relay).
-Hiding affects discovery only, never authorization or direct `SUBSCRIBE`/`FETCH`/`TRACK` resolution.
+Hiding affects discovery only, never authorization or direct `SUBSCRIBE`/`TRACK` resolution.
 
 ## Claims (Non-Routing Sessions) {#claims}
 On sessions not exchanging routes, a publisher sends at most one claim per `(path, Instance)` matching requested prefixes (the winning claim per {{resolution}}, never echoing a claim back to its source), carrying accumulated cost, lowest path priority, drain flag, `Marked` flag (never sent over a marked session), and `Chain`.
@@ -378,7 +372,7 @@ Routing nodes form a path-vector mesh where routes lead to routing nodes (each o
 - **Validation**: a receiver MUST close with `PROTOCOL_VIOLATION` on a `ROUTE` whose Path has `Session Number != 0` on hop 0, does not end with sender's Node ID, contains receiver's `Relay`, has 1 hop with `Cost != 0`, places `Marked = 1` past hop 0, or starts with a marked Node ID not followed by `(same Relay, Marked=0, Session Number=0)`.
 
 ### Request Forwarding and Failover
-Requests (`TRACK`, `TRACKS`, `SUBSCRIBE`, `FETCH`, `DATAGRAMS`) carry optional `Node` (the routing node owning the selected claim) and `Instance`/`Minted`:
+Requests (`TRACK`, `TRACKS`, `SUBSCRIBE`, `DATAGRAMS`) carry optional `Node` (the routing node owning the selected claim) and `Instance`/`Minted`:
 
 - A relay forwards a request naming `Node` (never back to the requester) along a route to `Node` via a neighbour that sent the claim (preferring its selected route), or along its selected route if it holds no covering claim of `Node`, or locally if `Node` is itself; else resets with `UNROUTABLE`. If the claim is available/eligible and a route exists to `Node` (not via requester) whose claims have not yet arrived, the relay holds the request until they arrive or eligibility ends.
 - Relays MAY seamlessly move live subscriptions across claims sharing an `Instance` (including onto a higher `Epoch`) resuming at the next missing frame, and MUST NOT splice across differing Instances.
@@ -421,7 +415,7 @@ Within a subscription, publishers SHOULD transmit pending Groups in the subscrib
 Subscribers MUST tolerate gaps and out-of-order Group arrival.
 
 ## Expiration {#expiration}
-Only Groups reached via a live join (`Live` or `Joined` Anchor) expire for subscriber staleness under the largest `Max Age` of covering live joins; Groups covered by any history Range (`None`, `Time`, or `Position` Start) or `FETCH` never expire for subscriber staleness and are bounded only by `Publisher Max Age`.
+Only Groups reached via a live join (`Live` or `Joined` Anchor) expire for subscriber staleness under the largest `Max Age` of covering live joins; Groups covered by any history Range (`None`, `Time`, or `Position` Start) never expire for subscriber staleness and are bounded only by `Publisher Max Age`.
 A Group already in flight when an update stops covering it uses the widest remaining Range limit (unlimited if any history Range exists).
 
 A Group never expires until its **successor** (the next higher-start non-reset Group at this hop) has arrived; the latest Group never expires.
@@ -447,9 +441,9 @@ A subscriber that already read the complete Group through `GROUP_END` + `FIN` ke
 Most messages begin with `Message Length (i)` giving the payload bytes that follow (excluding the length varint itself).
 Every message except `FRAME` MUST have `Message Length <= 65,535` bytes (receivers MAY reject longer messages from the length prefix alone; `SETUP` MUST close with `PROTOCOL_VIOLATION` if longer).
 
-Decode errors (field/length mismatch, forbidden values) on Setup, Announce, or any bidirectional stream (other than `GROUP`/`FRAME` on a Fetch Stream, below) MUST close the session with `PROTOCOL_VIOLATION`.
+Decode errors (field/length mismatch, forbidden values) on Setup, Announce, or any bidirectional stream MUST close the session with `PROTOCOL_VIOLATION`.
 Truncated streams terminate only that stream (except Setup, Announce, and Auth).
-Malformed `GROUP`/`FRAME` messages reset only their Group/Fetch Stream.
+Malformed `GROUP`/`FRAME` messages reset only their Group Stream.
 
 ## STREAM_TYPE {#stream_type}
 ~~~
@@ -645,7 +639,7 @@ ANNOUNCE_END Message {
   Lost (8),               ; 0 = publisher withdrew, 1 = path/grant lost
 }
 ~~~
-Retraction does not disturb in-flight subscriptions or prevent `FETCH` of stored content.
+Retraction does not disturb in-flight subscriptions or prevent bounded subscriptions to stored content.
 
 ### ANNOUNCE_UPDATE {#announce-update}
 ~~~
@@ -669,10 +663,10 @@ ANNOUNCE_FLOOR Message {
 }
 ~~~
 
-## Track, Subscription, and Fetch Messages
+## Track and Subscription Messages
 
 ### Common Target Header
-`TRACK`, `TRACKS`, `SUBSCRIBE`, `FETCH`, and `DATAGRAMS` share target routing fields:
+`TRACK`, `TRACKS`, `SUBSCRIBE`, and `DATAGRAMS` share target routing fields:
 
 ~~~
 Node {
@@ -788,13 +782,13 @@ Anchor {
 ~~~
 
 Each Range implicitly takes the next 0-based `Range ID` on the stream; the subscription is the union of its Ranges (delivering each Group once; relays whose merged Ranges exceed message size SHOULD coalesce across the narrowest gaps).
-Both ends are inclusive (except a Position `End` excludes `Frame`).
+A Time `End` includes the Group containing it; a Position `End` is exclusive, stopping before `(Timestamp, Frame)`.
 
 `Anchor Type` values (any other -> `PROTOCOL_VIOLATION`):
 
 - `0x0` **None**: no fields. As `Start`, oldest held Group; as `End`, unbounded (live edge).
 - `0x1` **Time**: `Timestamp (i)`. Names the Group whose span holds `Timestamp` (if in a gap past a finished Group's `End`, `Start` lands at the next Group and `End` stops at the finished Group).
-- `0x2` **Position**: `Timestamp (i), Frame (i)` (`Frame = 0` -> `PROTOCOL_VIOLATION`). Like Time, starting at `Frame` or stopping before `Frame` when the Group starts at `Timestamp`.
+- `0x2` **Position**: `Timestamp (i), Frame (i)`. Names only the Group starting exactly at `Timestamp`, never an earlier Group whose span holds it. As `Start`, delivery starts at frame `Frame` of that Group (`0` = its beginning); as `End`, it stops before `(Timestamp, Frame)`, so `Frame = 0` excludes that Group and every later one.
 - `0x3` **Live** (`Start` only; as `End` -> `PROTOCOL_VIOLATION`): `Min Age opt(i), Max Age opt(i)`. Joins at the Group containing `live_edge - Min Age` (in ms, or arrival age if scale-less; `0` = no lag limit -> from oldest; `1` = 0 ms -> latest Group), never starting at a Group expired by `Max Age` (ms, `0` = unlimited, `1` = latest only).
 - `0x4` **Joined** (`Start` only; as `End` -> `PROTOCOL_VIOLATION`): `Timestamp (i), Frame (i), Max Age opt(i)`. Pre-placed live join starting at `(Timestamp, Frame)` (`Frame = 0` = whole Group) with staleness budget `Max Age`, used when resuming a live join on a new subscription.
 
@@ -802,7 +796,7 @@ Both ends are inclusive (except a Position `End` excludes `Frame`).
 A Range resolves once (updates keeping it live never re-resolve it).
 - **History (`None`, `Time`, `Position`)**: `Start` is an absolute floor (never delivers older Groups; never expires for staleness; a floor past latest waits). A relay resolves a `Time` Start locally only when provably matching origin (at the highest held Group `<= time` once all intervening starts are accounted for, or at that Group's `End` once it is whole and `time >= End`, so the Range starts at the next Group; or from a previously answered Range Start for that time, excluding `Max Age`-limited Joined answers); otherwise it asks upstream. A relay never resolves a `None` Start from what it holds: it starts it where its upstream answered the relay's own `None` Start.
 - **Live**: a relay places a `Live` Start only from an upstream Range Start answered *after* the downstream Range was added with matching `Min Age`, `End`, and upstream `Max Age >= downstream Max Age` (or locally as a `Time` Start once the Track ended and all Groups below end settled, or when upstream lacks `Live` Anchors).
-- **Position `End`**: reaching a Position `End` pauses sending on that Group Stream without closing it, so a later `SUBSCRIBE_UPDATE` widening the Range can resume on the same stream (closing normally if the Group ends `<= Frame`, or resetting on expiration/unsubscribe).
+- **Position `End`**: reaching a Position `End` closes the Group Stream with `FIN` and no `GROUP_END`, since it delivered a slice (a Group that finishes at or before `Frame` ends with `GROUP_END` + `FIN` as usual).
 
 ### SUBSCRIBE_UPDATE {#subscribe-update}
 ~~~
@@ -886,23 +880,6 @@ A `SUBSCRIBE_DROP` with `Error Code = SKIP` (`0x3A`) names starts the original p
 Relays forward skips and cache them as the answer for later subscriptions covering those starts, but never invent one: a start a relay never received is named `OLD` or `NOT_FOUND`.
 A gap between starts is not a skip on its own (Groups may be created out of order), and a `GROUP_END` already covers a finished Group's span, so a publisher skips only starts no `GROUP_END` covers: a gap between one Group's `End` and the next Group's start, starts below the first Group or after a Group closed without `GROUP_END`, and those of a `GROUP_END` a reset may have cut.
 A skip never overrides an already-received Group (ignored, MAY be logged).
-
-### FETCH {#fetch}
-~~~
-FETCH Message {
-  Message Length (i),
-  Broadcast Path (s),
-  Instance (b),
-  Minted (8),
-  Node (..),
-  Track Name (s),
-  Subscriber Priority (8),
-  Group Start (i),
-  Frame Start (i),        ; 0-based inclusive
-  Frame End opt(i),       ; inclusive frame index + 1 (0 = through end of Group)
-}
-~~~
-Decoded `Frame End < Frame Start` is `PROTOCOL_VIOLATION`.
 
 ### DATAGRAMS, DATAGRAMS_UPDATE, DATAGRAMS_INFO {#datagrams-message}
 ~~~
@@ -993,7 +970,7 @@ AUTH_ERROR Message {
 ~~~
 `INTERNAL_ERROR`, `TOO_MANY_REQUESTS`, and `CONTROL_MESSAGE_TIMEOUT` leave the token undecided (presenter SHOULD retry on a new Auth Stream with exponential backoff); all other codes are terminal decisions.
 
-## Data Messages (Group and Fetch Streams)
+## Data Messages (Group Streams)
 
 ### GROUP {#group-message}
 ~~~
@@ -1014,7 +991,7 @@ FRAME Message {
   Payload (..),
 }
 ~~~
-`Timestamp Delta` is a signed delta in `Timescale` ticks from the prior `FRAME`'s timestamp on this stream; the first `FRAME` of a stream counts from the Group Start (the `GROUP`'s on a Group Stream, the `FETCH`'s on a Fetch Stream), so frame 0's delta is `0`.
+`Timestamp Delta` is a signed delta in `Timescale` ticks from the prior `FRAME`'s timestamp on this stream; the first `FRAME` of a stream counts from the `GROUP`'s Group Start, so frame 0's delta is `0`.
 It is zigzag-mapped so small magnitudes of either sign fit in a 1-byte varint: encode `unsigned = (signed << 1) ^ (signed >> 63)` (arithmetic right shift), decode `signed = (unsigned >> 1) ^ -(unsigned & 1)`.
 When compressed, receivers MUST check `Inflated Size` against resource limits before inflating and treat any mismatching inflated length as malformed.
 
@@ -1027,7 +1004,7 @@ GROUP_END Message {
   End Delta (i),          ; non-negative delta from the highest stream frame timestamp (or Group Start if empty/scale-less)
 }
 ~~~
-End is never below any frame timestamp of the Group (including frames not carried on this stream, e.g., before a `FETCH` start), and no greater than the next Group's start.
+End is never below any frame timestamp of the Group (including frames not carried on this stream, e.g., before a Position `Start`), and no greater than the next Group's start.
 Publisher FINs immediately after `GROUP_END`; trailing bytes are a malformed Track.
 
 
@@ -1087,7 +1064,7 @@ This document has no IANA actions.
 - Bounded paths to 32 segments / 4,096 bytes, disallowed empty segments, and restricted `\` escapes to `\` and `/`.
 - Added `.`-prefixed hidden path filtering and `ANNOUNCE_REQUEST.Hidden`.
 - Replaced bidirectional Announce Stream (`0x1`) with one unidirectional Announce Stream (`0x3`) per peer carrying prefix-set edits (`ANNOUNCE_REQUEST` with `More`, `ANNOUNCE_OK`), `SYNCED(Prefix ID)`, claims (`ANNOUNCE_START`/`UPDATE`/`END` with `Instance`, `Minted`, `Epoch`, `Above`, `Cost`, `Flags`, `Priority`, `Chain`, `Path Base`/`Path Keep`, `Lost`), and path-vector routing (`Node ID` parameter, `ROUTE`, `ROUTE_END`, `DEAD`, `DRAIN`, `ANNOUNCE_FLOOR`).
-- Added `Instance`, `Minted`, and `Node` to `TRACK`, `TRACKS`, `SUBSCRIBE`, `FETCH`, and `DATAGRAMS`; replaced Warm/Cold costs with single additive `Cost >= 1` and FNV-1a Rendezvous Hash tie-breaking.
+- Added `Instance`, `Minted`, and `Node` to `TRACK`, `TRACKS`, `SUBSCRIBE`, and `DATAGRAMS`; replaced Warm/Cold costs with single additive `Cost >= 1` and FNV-1a Rendezvous Hash tie-breaking.
 
 ### Tracks, Subscriptions, and Delivery {#changelog-07-delivery}
 {:numbered="false"}
@@ -1096,6 +1073,7 @@ This document has no IANA actions.
 - Added `TRACK_INFO` `Refresh`, `Refresh Interval`, `Compression`, optional `Publisher Max Age`, and scale-less `Timescale = 0`; added `SUBSCRIBE_UPDATE.Wanted Start`.
 - Replaced Group sequence numbers with timestamp `Group Start` (`< 2^61`; `2^64-1` reserved) and added `GROUP_END` (`Payload Length = 0` followed by `End Delta`) with non-overlapping `[start, End)` group spans.
 - Replaced `SUBSCRIBE` bounds with multi-Range Anchors (`None`, `Time`, `Position`, `Live` with `Min Age`/`Max Age`, `Joined`), `Group Order`, per-Range `SUBSCRIBE_START` (with `Largest`), `SUBSCRIBE_UPDATE` range edits/retuning, half-open `SUBSCRIBE_DROP` spans, and `SUBSCRIBE_END.Error Code`; Subscribe Streams remain open until subscriber FIN.
+- Removed the Fetch Stream (`0x3`) and `FETCH`: single-group and frame-slice reads are bounded `SUBSCRIBE` Ranges with `Position` Anchors. A `Position` Anchor allows `Frame = 0`, names only the Group starting exactly at its `Timestamp`, and is exclusive as an `End`; reaching it closes the Group Stream with `FIN` and no `GROUP_END`. A subscriber's clean `FIN` ends only its updates: the publisher delivers the remaining Ranges and then FINs, so a `SUBSCRIBE` followed at once by `FIN` is a one-round-trip request, and a reset cancels.
 - Replaced group datagrams with separate datagram Tracks (`0x9` Datagrams Stream: `DATAGRAMS`/`UPDATE`/`INFO`) and typed Track Datagrams (`Type = 0x0`).
 - `FRAME` leads with `Payload Length` (`len + 1`, with `0` marking `GROUP_END`), a zigzag `Timestamp Delta` (omitted when scale-less), and optional `Inflated Size`.
 - A frame's timestamp is transport time, presentation or decode order as its payload format chooses, rather than always a presentation time.
@@ -1143,7 +1121,7 @@ Key structural differences from {{moqt}} (draft-23):
 - **Pull-only tracks**: no unsolicited `PUBLISH` (tracks are discovered via `TRACKS` or an application catalog and fetched/subscribed on demand).
 - **Non-blocking setup**: each peer sends `SETUP` on a unidirectional stream without blocking initial requests.
 - **Group addressing & framing**: Groups are addressed by start timestamp (with non-overlapping `[start, End)` spans via `GROUP_END`) rather than sequential Group IDs; no subgroups, Object ID gaps, or object properties unless negotiated via `draft-lcurley-moq-ietf`.
-- **Single-group FETCH & multi-range SUBSCRIBE**: `FETCH` retrieves one Group (or slice) with no response header; `SUBSCRIBE` supports multiple composable Ranges (`Time`, `Position`, `Live`, `Joined`) with per-Range resolution.
+- **No FETCH, multi-range SUBSCRIBE**: single-group and frame-slice reads are bounded `SUBSCRIBE` Ranges (optionally FINned right after `SUBSCRIBE` for a one-round-trip request); `SUBSCRIBE` supports multiple composable Ranges (`Time`, `Position`, `Live`, `Joined`) with per-Range resolution.
 - **Built-in routing & auth**: path-vector relay routing (`ROUTE`/`DEAD`/`DRAIN`/`ANNOUNCE_FLOOR`), UTF-8 `/`-delimited paths, and in-band prefix-grant `AUTH` streams are native rather than separate extensions.
 
 

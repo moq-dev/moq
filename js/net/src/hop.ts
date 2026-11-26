@@ -87,6 +87,16 @@ export type Cost = bigint;
 export const Cost = {
 	/** The price a live publisher seeds. */
 	zero: 0n,
+	/** Crossing a link neither end priced, so an unpriced mesh routes by hop count. */
+	link: 1n,
+	/** The most a wire cost carries. */
+	max: 2n ** 62n - 1n,
+	/** A route's cost plus the price of the link it arrived on, saturating at {@link Cost.max}. */
+	charged(route: Cost, link: Cost): Cost {
+		const sum = route + link;
+		// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min throws on bigint.
+		return sum > Cost.max ? Cost.max : sum;
+	},
 };
 
 /**

@@ -38,7 +38,8 @@ owns the tier/partition correctness tests, so they run before the cut.
 Reaffirmed 2026-11-14 (maintainer, the m2 triage, below). Peer
 grants and metadata-only subscriptions do not gate it: neither is clustering
 stability. Both are additive and, per the freeze policy, target whichever lite
-wip is current when they land. Decided 2026-10-25: no routing identity proof
+wip is current when they land (superseded 2026-11-26 for metadata-only
+subscriptions, which now gate lite-07; see below). Decided 2026-10-25: no routing identity proof
 gates the cut, and lite-07 routing identities stay declared and unverified
 (2026-11-02: peer grants are dropped and no key proof is planned). Reversed
 2026-11-04 (maintainer, /quest-unblock): a peer proves a route key before the
@@ -285,6 +286,8 @@ decrease (rejected: the next wip version after the cut).
 - [moq-timestamp-03 Object IDs and unsigned lite timestamp deltas](/quest/m2/timestamp-ids.md) - lite-07 `FRAME` timestamps freeze as unsigned decode-order deltas, refused at the producer when backwards, with first-party encoders on `cts`
 - [Rename Instance to Identity and cap it at 256 UTF-8 bytes on lite-07](/quest/m2/identity-rename-and-cap.md) - wire rename and 256-byte UTF-8 ceiling on Identity freeze into lite-07
 - [Metadata mode on the lite-07 wire, served](/quest/m2/subscribe-meta-wire.md) - Meta byte on SUBSCRIBE and payload-less FRAME freeze into lite-07
+- [The lite-07 draft's TRACKS SYNCED matches relays](/quest/m2/tracks-synced-draft.md) - the draft stops saying a relay sends SYNCED before its upstream syncs
+- [Metadata-only subscriptions](/quest/m2/subscribe-meta.md) - Rust, JS, and C/binding metadata subscriber API lands before the cut so the C ABI does not break right after 0.22
 
 ## Related
 

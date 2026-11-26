@@ -36,4 +36,4 @@ Decided 2026-11-26 (maintainer, /quest-run on [moq-dev/moq#9664](https://github.
 
 ## Related
 
-- [Rejoin replay](/quest/m0/interop-green/rejoin-replay.md) - lite-06 audio across a relay rejoin in the Firefox media suite; a different test and cause (a lingering copy's resubscribe ask), not this one
+- Rejoin replay, deleted in [moq-dev/moq#9620](https://github.com/moq-dev/moq/pull/9620) - lite-06 audio across a relay rejoin in the Firefox media suite; a different test and cause (a lingering copy's resubscribe ask), not this one

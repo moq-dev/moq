@@ -1277,6 +1277,8 @@ export class Consumer {
 			while (!group.#verdict.peek() && group.#readBufferedFrame(false, "stream")) {}
 		};
 		hooks.groupIndex = (group) => group.#index();
+		hooks.groupSettledFrames = (group) =>
+			group.#state.closed.peek() === null ? group.#state.total.peek() : undefined;
 		hooks.groupFirstFrame = (group) => group.#state.offset;
 		hooks.groupStarted = (group) =>
 			group.#state.total.peek() > group.#state.offset || group.#state.closed.peek() !== undefined;

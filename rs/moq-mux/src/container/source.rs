@@ -486,9 +486,10 @@ impl ExportSource {
 	}
 
 	/// Start at the newest group, the live edge, rather than the oldest one the max delay still
-	/// reaches. The subscription carries the max delay from the start: under a zero budget every
-	/// hop drops each group a newer one supersedes, and raising it later cannot recover the
-	/// groups that follow the edge.
+	/// reaches. The subscription asks to join at the edge too, whatever the delay's min, so a hop
+	/// whose protocol carries a join's min spends no path on groups this reader skips. It carries
+	/// the max delay from the start: under a zero budget every hop drops each group a newer one
+	/// supersedes, and raising it later cannot recover the groups that follow the edge.
 	pub fn live(mut self) -> Self {
 		self.start().live = true;
 		self
@@ -699,7 +700,13 @@ impl ExportSource {
 			let instance = binding.sibling().then(|| broadcast.clone());
 			let subscription =
 				moq_net::track::Subscription::default().with_ranges([floor_range(start.floor, self.delay)]);
-			let subscription = self.delay.subscription(subscription);
+			// A live start reads from the newest group, so it joins there: history behind the edge
+			// would only be skipped, after crowding out the newest group on a narrow path.
+			let delay = match start.live {
+				true => self.delay.with_min(Duration::ZERO),
+				false => self.delay,
+			};
+			let subscription = delay.subscription(subscription);
 			let track = match broadcast.track(&self.target.track) {
 				Ok(track) => track,
 				Err(_) if instance.as_ref().is_some_and(|i| i.poll_closed(waiter).is_ready()) => return self.end(),
@@ -1332,7 +1339,9 @@ mod tests {
 
 	/// The requested budget must be present on the first SUBSCRIBE, a live start's too. Updating
 	/// it after SUBSCRIBE_OK cannot recover backlog the publisher already skipped, nor the groups a
-	/// zero budget drops as superseded before the update lands.
+	/// zero budget drops as superseded before the update lands. A live start joins at the edge,
+	/// since it would skip any history behind it, and on a narrow path that history delays the
+	/// newest group by a group or two.
 	#[tokio::test]
 	async fn latency_is_sent_with_the_initial_subscription() {
 		for live_start in [false, true] {
@@ -1351,7 +1360,7 @@ mod tests {
 				let _ = export.poll_read(waiter);
 				match live.track.subscription() {
 					Some(subscription) => Poll::Ready(subscription.ranges.iter().find_map(|range| match range.start {
-						moq_net::track::Start::Live { max, .. } => Some(max),
+						moq_net::track::Start::Live { min, max } => Some((min, max)),
 						_ => None,
 					})),
 					None => Poll::Pending,
@@ -1359,7 +1368,11 @@ mod tests {
 			})
 			.await;
 
-			assert_eq!(observed, Some(Some(max_delay)), "live start: {live_start}");
+			let min = match live_start {
+				true => std::time::Duration::ZERO,
+				false => max_delay,
+			};
+			assert_eq!(observed, Some((Some(min), Some(max_delay))), "live start: {live_start}");
 		}
 	}
 
