@@ -2692,17 +2692,18 @@ fn raw_track_and_group_abort_consume_their_handles() {
 	assert_eq!(moq_publish_close(broadcast), 0);
 }
 
-/// A group cut short is that group's loss: a raw reader mid-group reads on into the next one.
+/// A publisher's abort of a group a raw reader is mid-way through ends the track with it, so the
+/// truncation is never silent.
 #[test]
-fn raw_track_reads_past_an_aborted_group() {
+fn raw_track_ends_on_an_aborted_group() {
 	let origin = id(moq_origin_create());
-	let broadcast = publish_broadcast(origin, b"raw-track-reads-past-an-aborted-group");
+	let broadcast = publish_broadcast(origin, b"raw-track-ends-on-an-aborted-group");
 	let name = b"cut";
 	let track =
 		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
 	let consume = consume_local(broadcast);
 	let frame_cb = Callback::new();
-	let reader = consume_track(consume, name, &frame_cb);
+	let _reader = consume_track(consume, name, &frame_cb);
 
 	let group = id(unsafe { moq_publish_track_group(track, &micros(0)) });
 	assert_eq!(
@@ -2711,27 +2712,8 @@ fn raw_track_reads_past_an_aborted_group() {
 	);
 	assert_eq!(moq_consume_track_frame_free(id(frame_cb.recv())), 0);
 	assert_eq!(moq_publish_group_abort(group, 409), 0);
+	assert!(frame_cb.recv() < 0, "the abort ends the track");
 
-	let payload = b"next";
-	assert_eq!(
-		unsafe { moq_publish_track_frame(track, payload.as_ptr(), payload.len(), &micros(1000)) },
-		0
-	);
-	let frame_id = id(frame_cb.recv());
-	let mut frame = moq_frame {
-		payload: std::ptr::null(),
-		payload_size: 0,
-		timestamp: std::ptr::null(),
-		keyframe: false,
-	};
-	assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
-	assert_eq!(
-		unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) },
-		payload
-	);
-	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
-
-	cancel_track(reader, &frame_cb);
 	assert_eq!(moq_publish_track_finish(track), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_consume_close(consume), 0);

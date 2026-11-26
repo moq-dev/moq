@@ -958,15 +958,19 @@ impl Consume {
 				}
 				match ready!(group.poll_read_frame(waiter)) {
 					Ok(Some(frame)) => Poll::Ready(Ok(RawStep::Item(frame))),
-					// A group cut short (aborted, reset, or left open by a producer that went) is
-					// that group's loss: the track reads on, and its own end reports a failed track.
-					Ok(None) | Err(_) => Poll::Ready(Ok(RawStep::End)),
+					// A group superseded, as one a dropped producer left open while read, is passed
+					// as the UniFFI raw reader passes it. Any other failure, such as a publisher's
+					// abort, ends the track with it, so a truncated group is never silent.
+					Ok(None) | Err(moq_net::Error::Old | moq_net::Error::Stream(moq_net::StreamError::Old)) => {
+						Poll::Ready(Ok(RawStep::End))
+					}
+					Err(err) => Poll::Ready(Err(err.into())),
 				}
 			})
 			.await?
 			{
 				RawStep::Item(frame) => frame,
-				// Group read to its end, or cut short.
+				// Group read to its end, or superseded.
 				RawStep::End => return Ok(false),
 				// Consumer closed mid-group: terminate without touching `close` again.
 				RawStep::Stop => return Ok(true),

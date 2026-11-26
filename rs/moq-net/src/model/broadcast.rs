@@ -346,19 +346,19 @@ impl Producer {
 		let (name, info) = (name.into(), info.into().unwrap_or_default());
 		let mut state = self.state.lock();
 		// A queued renewal this info would change is answered as its handler would answer it,
-		// ending the readers that hold the old info, which frees the name. Outside the lock:
-		// the ended track's last guard looks this broadcast up as it drops.
-		if state
-			.requests
-			.get(name.as_ref())
-			.is_some_and(|request| request.conflicts(&info))
-			&& let Some(request) = state.requests.take(name.as_ref())
-		{
-			drop(state);
-			drop(request.unlisted().accept(info.clone()));
-			state = self.state.lock();
-		}
-		self.insert_created(state, name, info)
+		// ending the readers that hold the old info. Under the lock, so the name passes straight
+		// to the new track; the ended track's producer drops after it, since its last guard looks
+		// this broadcast up.
+		let replaced = match state.requests.get(name.as_ref()) {
+			Some(request) if request.conflicts(&info) => state
+				.requests
+				.take(name.as_ref())
+				.map(|request| request.unlisted().accept(info.clone())),
+			_ => None,
+		};
+		let track = self.insert_created(state, name, info);
+		drop(replaced);
+		track
 	}
 
 	fn insert_created(
@@ -372,16 +372,6 @@ impl Producer {
 		// request: its consumers resolve against this very producer. Without
 		// this they would be stranded, since the name is taken the moment the
 		// track exists, so no handler could ever serve their queue entry.
-		//
-		// A track asked for again keeps the info its readers hold, so a different one leaves
-		// the request to its handler, as a live track holding the name would.
-		if state
-			.requests
-			.get(name.as_ref())
-			.is_some_and(|request| request.conflicts(&info))
-		{
-			return None;
-		}
 		if let Some(request) = state.requests.take(name.as_ref()) {
 			// Listed below, under the lock this holds, rather than by the accept.
 			let track = request
