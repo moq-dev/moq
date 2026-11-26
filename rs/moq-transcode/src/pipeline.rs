@@ -439,7 +439,7 @@ mod tests {
 		};
 		let pipeline = |config: Config| {
 			let decoders = catalog::Decoders::new(config.decoder());
-			// 16:1, so the 1024p rung is 16384x1024, past openh264's 36864 macroblocks.
+			// 16:1, so the 1024p rung is 16384x1024, wider than openh264's 3840.
 			Pipeline::new(
 				source.consume(),
 				config,
