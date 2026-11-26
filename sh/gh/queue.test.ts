@@ -107,12 +107,32 @@ const checkout = queue.jobs.queue.steps.find((step: { uses?: string }) => step.u
 assert.equal(checkout.with["persist-credentials"], false);
 // biome-ignore lint/suspicious/noTemplateCurlyInString: GitHub expression is literal YAML.
 assert.equal(queue.jobs.queue.env.BASE, "${{ github.event.merge_group.base_sha }}");
+
+// queue-build.yml is the build queue.yml is to call at main, which the
+// moq-queue runner group admits beside Nightly. Only a call runs it, and it
+// builds only in the merge queue, on the host's runner, read-only and without
+// secrets.
+const build = await workflow("queue-build");
+assert.deepEqual(Object.keys(build.on), ["workflow_call"]);
+assert.deepEqual(build.permissions, { contents: "read" });
+assert.equal(build.jobs.build.name, "Build");
+assert.equal(build.jobs.build.if, "github.event_name == 'merge_group'");
+assert.deepEqual(build.jobs.build["runs-on"], ["self-hosted", "moq-queue"]);
+assert.equal(build.jobs.build.permissions, undefined, "the job keeps the workflow's read-only token");
+assert.ok(!JSON.stringify(build).includes("secrets."), "the merge queue build gets no secrets");
+const buildCheckout = build.jobs.build.steps.find((step: { uses?: string }) =>
+	step.uses?.startsWith("actions/checkout@"),
+);
+assert.equal(buildCheckout.with["persist-credentials"], false);
+// biome-ignore lint/suspicious/noTemplateCurlyInString: GitHub expression is literal YAML.
+assert.equal(build.jobs.build.env.BASE, "${{ github.event.merge_group.base_sha }}");
+
 // A cancel or timeout signals only the step's process; exec makes that just, so
 // the dispatcher hears it and prints what a hung lane waits on.
-const gates = [queue.jobs.queue.steps, check.jobs.check.steps, nightly.jobs.gate.steps]
+const gates = [queue.jobs.queue.steps, build.jobs.build.steps, check.jobs.check.steps, nightly.jobs.gate.steps]
 	.flat()
 	.filter((step: { run?: string }) => /\bjust (ci|gate)\b(?!-)/.test(step.run ?? ""));
-assert.equal(gates.length, 3);
+assert.equal(gates.length, 4);
 for (const step of gates) assert.match(step.run, /^exec nix develop --command just (ci|gate)\b/m, step.name);
 
 // Every other workflow stays out of main PRs and main's merge groups: optional
