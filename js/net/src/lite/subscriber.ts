@@ -2327,18 +2327,13 @@ export class Subscriber {
 				};
 				// Lite-07: a group stream let go before its end leaves the rest of its span unnamed, which only
 				// the publisher can name, as on the subscription. After any cap, which our FIN waits on too.
-				// Mirrors the Rust `Recovery::poll`.
+				// Only a failed write is the publisher's to explain; one that cannot encode fails the
+				// recovery. Mirrors the Rust `Recovery::poll`.
 				const reportLost = () => {
-					const update = new SubscribeUpdate({
-						priority: msg.priority,
-						order: msg.order,
-						maxDelay: msg.maxDelay,
-						lost: entry.tail.takeLost(),
-					});
+					const update = lostUpdate(msg, entry.tail.takeLost());
 					capping = capping
 						.then(() => Writer.collect(this.version, (w) => update.encode(w, this.version)))
-						.then((encoded) => opened.writer.write(encoded))
-						.catch(() => undefined);
+						.then((encoded) => opened.writer.write(encoded).catch(() => undefined));
 				};
 				// Only a group that arrives proves one, so once started the range stops past the first;
 				// what lies between is named by the publisher's drops, or given up with the grace.
@@ -3721,6 +3716,22 @@ class ConsumeBroadcast extends broadcast.Consumer {
 	override clone(): ConsumeBroadcast {
 		return new ConsumeBroadcast(this.#subscriber, this.#path, this.#consumed, this.shareState());
 	}
+}
+
+/**
+ * A SUBSCRIBE_UPDATE naming the `lost` groups that changes nothing else `msg` asked: no range edit.
+ *
+ * @internal
+ */
+export function lostUpdate(msg: Subscribe, lost: bigint[]): SubscribeUpdate {
+	return new SubscribeUpdate({
+		priority: msg.priority,
+		order: msg.order,
+		maxDelay: msg.maxDelay,
+		ranges: [],
+		remove: [],
+		lost,
+	});
 }
 
 /**

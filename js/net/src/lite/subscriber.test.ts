@@ -65,7 +65,7 @@ import {
 	SubscribeStart,
 	SubscribeUpdate,
 } from "./subscribe.ts";
-import { fittedReasks, joinProbes, Minted, Subscriber, wantedProbes } from "./subscriber.ts";
+import { fittedReasks, joinProbes, lostUpdate, Minted, Subscriber, wantedProbes } from "./subscriber.ts";
 import { Track, TrackInfo } from "./track.ts";
 import { hasLengthFirst, hasRanges, hasTrackStream, Version, versionName } from "./version.ts";
 
@@ -3448,6 +3448,27 @@ for (const [max, retuned] of [
 // STOP_SENDING, so the subscription names the group in a SUBSCRIBE_UPDATE for the publisher to name the
 // rest of its span again. One read to its end names nothing. Mirrors the Rust
 // `a_group_stream_lost_before_its_end_is_named_upstream`.
+// A recovery's lost groups go out in an update that edits none of its ranges, which lite-07 can
+// encode: one with no edit at all could not. Mirrors the Rust
+// `a_recovery_names_a_group_stream_lost_before_its_end_upstream`.
+test("a lite-07 recovery's lost groups encode as an update that keeps its ranges", async () => {
+	const version = Version.DRAFT_07;
+	const msg = new Subscribe({
+		id: 0n,
+		broadcast: Path.from("room"),
+		track: "video",
+		priority: 3,
+		maxDelay: 10_000,
+		startGroup: 2n,
+	});
+	const encoded = await Writer.collect(version, (w) => lostUpdate(msg, [2n]).encode(w, version));
+	const update = await SubscribeUpdate.decode(new Reader(undefined, encoded, version), version);
+	expect(update.lost).toEqual([2n]);
+	expect(update.ranges).toEqual([]);
+	expect(update.remove).toEqual([]);
+	expect(update.priority).toBe(3);
+});
+
 test("a lite-07 group stream lost before its end is named upstream", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
