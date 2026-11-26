@@ -48,8 +48,8 @@ const REPORT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 /// placed at once, so a camera's frame rate never sizes what the wait keeps.
 const MAX_HELD: usize = 1024;
 
-/// The most payload bytes a session holds while it waits for its sender reports, as many as one
-/// group's live tail keeps: past it, the session is placed at once, so a camera's bitrate never
+/// The most payload and parameter set bytes a session holds while it waits for its sender
+/// reports, as many as one group's live tail keeps: past it, the session is placed at once, so a camera's bitrate never
 /// sizes what the wait keeps either.
 const MAX_HELD_BYTES: usize = 32 * 1024 * 1024;
 
@@ -486,16 +486,22 @@ impl Stream {
 	///
 	/// A later frame only lowers the bound, so a report capturing frames too long before they
 	/// arrived may still agree with the arrivals once live frames follow a replayed burst: the wait
-	/// goes on for it. One capturing them after they arrived, a camera clock ahead or never set,
-	/// only gets further from them.
+	/// goes on for it while a replay, at most one group and so at most [`KEYFRAME_TIMEOUT`] old,
+	/// could explain the gap. A camera clock further behind, or ahead (never set reads as 2036),
+	/// never comes to agree.
 	fn reported(&self) -> bool {
+		let latest = MAX_CAPTURE_LATENCY.as_micros() as i128;
+		let replayed = latest + KEYFRAME_TIMEOUT.as_micros() as i128;
 		match self.clock {
 			StreamClock::Placed(_) => true,
 			StreamClock::Unplaced { report: None, .. } => false,
 			StreamClock::Unplaced {
 				report: Some(report),
 				bound,
-			} => bound.is_none_or(|bound| bound - report <= MAX_CAPTURE_LATENCY.as_micros() as i128),
+			} => bound.is_none_or(|bound| {
+				let gap = bound - report;
+				gap <= latest || gap > replayed
+			}),
 		}
 	}
 
@@ -581,7 +587,7 @@ struct Waiting {
 	/// with the video parameters its stream had then, since retina strips in-band parameter sets
 	/// and a later frame may change the stream's.
 	held: Vec<(CodecItem, Option<VideoParameters>)>,
-	/// The payload bytes `held` keeps.
+	/// The payload and parameter set bytes `held` keeps.
 	bytes: usize,
 }
 
@@ -616,7 +622,11 @@ impl Waiting {
 				.unwrap_or(self.held.len());
 			self.held.drain(..first);
 		}
-		self.bytes = self.held.iter().map(|(held, _)| payload(held).len()).sum();
+		self.bytes = self
+			.held
+			.iter()
+			.map(|(held, params)| payload(held).len() + params.as_ref().map_or(0, |params| params.extra_data().len()))
+			.sum();
 	}
 }
 
@@ -1721,6 +1731,34 @@ mod tests {
 		let sent = wall_now();
 		session.video(0, 0, H265_KEYFRAME).await;
 		session.rtcp(0, 0).await;
+		let snapshot = catalog_with(&catalog, 1, 0).await;
+		let listed = wall_now();
+		let reader = subscribe(&broadcast, video_track(&snapshot)).await;
+		session.close().await;
+		assert_eq!(within("the pull", pull).await.unwrap().unwrap(), End::Closed);
+
+		let wall = wall_of(&snapshot, &frames(reader).await[0]);
+		assert!(
+			(sent..=listed).contains(&wall),
+			"timed {} µs after it was sent",
+			wall - sent
+		);
+	}
+
+	/// A camera clock that booted at a past date reports captures years before their arrival,
+	/// further than any replay explains: no waiting on it either.
+	#[tokio::test]
+	async fn a_camera_clock_in_the_past_ends_the_wait() {
+		kio::clock::host_time(); // real RTSP sockets, and the report wait is real time
+		let server = Server::bind(vec![Media::H265]).await;
+		let client = client(server.url()).waiting(10 * WAIT);
+		let (broadcast, catalog, pull) = pull(client);
+
+		let mut session = within("PLAY", server.accept(0)).await;
+		let sent = wall_now();
+		session.video(0, 0, H265_KEYFRAME).await;
+		// 2000-01-01, a common default for a camera without NTP.
+		session.report(0, 0, ntp(946_684_800_000_000)).await;
 		let snapshot = catalog_with(&catalog, 1, 0).await;
 		let listed = wall_now();
 		let reader = subscribe(&broadcast, video_track(&snapshot)).await;
