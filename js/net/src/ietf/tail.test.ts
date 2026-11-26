@@ -284,8 +284,9 @@ test("a reader holds for groups from SUBSCRIBE_OK's Largest that land after a hi
 		low.write(object(`${key}.0`));
 		low.finish();
 	}
-	expect(await readAll(await held)).toEqual(["3.0"]);
-	expect(await readAll(await reader.recvGroup())).toEqual(["4.0"]);
+	// Both land before the held read takes one, so it takes the newer first.
+	expect(await readAll(await held)).toEqual(["4.0"]);
+	expect(await readAll(await reader.recvGroup())).toEqual(["3.0"]);
 	expect(await reader.recvGroup()).toBeUndefined();
 	await done(TRACK_ENDED, 4n);
 	expect(await reader.closed).toBeNull();

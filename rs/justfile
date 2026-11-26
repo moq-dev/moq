@@ -191,6 +191,11 @@ no-async:
     bash sh/local.sh cargo clippy --locked -p moq-net --no-default-features --lib --tests -- -D warnings
     RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-net --no-default-features --no-deps
 
+# moq-net's `fuzz` module alone, as the fuzz crates build it: every other build
+# unifies `test-support` back in, which hides a call into a test-only door.
+net-fuzz:
+    bash sh/local.sh cargo clippy --locked -p moq-net --features fuzz --lib -- -D warnings
+
 # Lint media tests without the device features the gate's test build enables.
 media-defaults:
     bash sh/local.sh cargo clippy --locked -p moq-audio -p moq-video --tests -- -D warnings
@@ -409,7 +414,7 @@ quic-sim:
     # Forward delay against RTT as a queue-growth signal: deterministic in the simulation, then over real sockets through each cellular moq-shaper preset, one at a time so they do not add to each other's noise.
     bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-quic --lib --run-ignored only --no-capture -E 'test(/^tests::receive_ts::/)'
     bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-tokio --test integration --run-ignored only --no-capture --test-threads 1 -E 'test(/^receive_ts::/)'
-    # A hundred bulk transfers on one relay connection all pause losslessly, where the merge gate runs twelve.
+    # A hundred bulk transfers on one relay connection, past its live-edge budget: the highest-priority ones arrive losslessly. The merge gate runs twelve.
     bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-relay --features test-support --test integration --run-ignored only -E 'test(/^quic_sim::many_/)'
     # Each realtime congestion controller against BBR3 over sim replicas of the cellular presets: queueing delay, throughput, reaction to the drop, and share beside CUBIC.
     bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-quic --lib --run-ignored only --no-capture -E 'test(/^tests::realtime::/)'

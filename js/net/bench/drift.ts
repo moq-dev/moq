@@ -17,7 +17,9 @@ export async function run(): Promise<void> {
 		// No publisher limit, so the reader's own 80 ms max alone judges the reordered tail: a live join
 		// reaching back past every group, so it takes each still within that max.
 		const check = new Track.Producer("reordered").accept({ timescale: Time.Timescale.MILLI, maxAge: null });
+		// Ascending, so the first group read is the oldest the max keeps.
 		const reader = check.subscribe({
+			order: "ascending",
 			ranges: [{ start: { live: { min: null, max: Duration.millis(80) } } }],
 		});
 		try {

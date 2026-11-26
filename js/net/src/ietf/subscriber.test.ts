@@ -1577,7 +1577,7 @@ test("a clear FIRST_OBJECT past object 0 is dropped", async () => {
  */
 test.each([
 	[VERSION, false, [4]],
-	[VERSION, true, [3, 4]],
+	[VERSION, true, [4, 3]],
 ])("draft %s with FIRST_OBJECT=%s: a header-only stream delivers %p", async (version, firstObject, expected) => {
 	// A budget, so the empty group outlives its successor's arrival.
 	const { subscriber, track } = await subscribeTrack({

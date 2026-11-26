@@ -3,24 +3,25 @@
 Cloudflare Workers and supporting scripts that back project-owned
 infrastructure.
 
-| Worker      | Domain          | R2 bucket       | What it serves                          |
+| Worker      | Domain          | Bucket          | What it serves                          |
 | ----------- | --------------- | --------------- | --------------------------------------- |
 | `infra/apt` | `apt.moq.dev`   | `apt-moq-dev`   | Debian/Ubuntu package repository        |
 | `infra/rpm` | `rpm.moq.dev`   | `rpm-moq-dev`   | Fedora/RHEL package repository          |
 | `infra/moq-sh` | `moq.sh`     |                 | The `moq` installer script              |
-| `infra/mbx` |                 | `mbx-moq-dev`   | Private Rust build cache for CI         |
-| `infra/nix` | `nix.moq.dev`   | `nix-moq-dev`, `nix-ci-moq-dev` | Nix binary cache        |
+| `infra/mbx` |                 | `mbx-moq-dev` (B2) | Private Rust build cache for CI      |
+| `infra/nix` | `nix.moq.dev`   | `nix-moq-dev`, `nix-ci-moq-dev` (B2) | Nix binary cache   |
 | `infra/corpus` | `corpus.moq.dev` | `corpus-moq-dev`, `corpus-private-moq-dev` | Video-quality corpus |
 | `infra/go`  | `go.moq.dev`    | `go-moq-dev`    | Go module proxy for `moq.dev/moq-ffi`   |
 
 Each worker is a standalone bun package with a `wrangler.jsonc` and a
 small TypeScript handler. The apt, rpm, and go workers proxy GETs out of the R2
 bucket with appropriate `Content-Type` and `Cache-Control` headers for the
-file kind, and the nix worker does the same across its two buckets. The
+file kind, and the nix worker does the same across its two private Backblaze
+B2 buckets, signing each read. The
 moq.sh worker serves `install.sh` from its bundle at every path, with the
 newest `moq-cli` release filled in as the default version.
-`infra/mbx` has no Worker: CI reaches its bucket directly through mbx's S3
-client. `infra/corpus` has none either: R2 serves the open bucket on its custom
+`infra/mbx` has no Worker: CI reaches its Backblaze B2 bucket directly
+through mbx's S3 client. `infra/corpus` has none either: R2 serves the open bucket on its custom
 domain, and CI reads the private one over S3.
 
 ## Deploying a worker
@@ -58,9 +59,9 @@ names the Environment, and a branch that is not on the list fails to start it.
 | Environment | Deployable from | Holds |
 | --- | --- | --- |
 | `bot` | `main`, `release`, `moq-ffi-v*` | The moq-bot key (`APP_CLIENT_ID`, `APP_PRIVATE_KEY`) alone |
-| `publish` | `release`, `moq-ffi-v*`, `moq-relay-v*`, `moq-cli-v*` | Registry, signing, and deploy credentials, and the moq-bot key for jobs that also need one of those |
+| `publish` | `release`, `libmoq-v*`, `moq-boy-v*`, `moq-cli-v*`, `moq-ffi-v*`, `moq-gst-v*`, `moq-relay-v*` | Registry, signing, and deploy credentials, and the moq-bot key for jobs that also need one of those |
 | `alert` | `main` | `DISCORD_WEBHOOK`, for `alert.yml`'s failure posts |
-| `cache-write` | `main`, its merge queue, binary release tags | The mbx and Nix cache write keys ([below](#bootstrapping-the-rust-build-cache)) |
+| `cache-write` | `main`, its merge queue (`gh-readonly-queue/main/*`), binary release tags | The mbx and Nix cache write keys ([below](#bootstrapping-the-rust-build-cache)) |
 | `corpus` | `main` | The private corpus's read key ([below](#bootstrapping-the-video-corpus)) |
 | `npm` | `release` | Nothing; npm's trusted publisher names it |
 | `pypi` | `main`, `release`, `moq-ffi-v*` | Nothing; PyPI's trusted publisher names it |
@@ -154,10 +155,16 @@ regenerates the repository metadata, signs it, and uploads the diff.
 
 PRs land through GitHub's merge queue, one at a time with squash merges. Each
 `merge_group` build runs `just ci "$BASE"` against the group's base on the
-self-hosted runner `nixos-moq-ci` (label `moq-queue`, with its local caches and
-`/dev/kvm`), read-only and without secrets (`.github/workflows/queue.yml`). The
-main ruleset requires its `Queue` context and the merge queue, so only the
-queue (or the administrator bypass) lands on `main`. moq-dev/quest's queue
+self-hosted runners `nixos-moq-ci` and `nixos-moq-ci2` (label `moq-queue`, with
+their local caches and `/dev/kvm`), without secrets and read-only apart from
+the report job's `checks: write` (`.github/workflows/queue.yml`, which calls
+main's `queue-build.yml`). Once kixel-ai/dotfiles registers them in moq-dev's
+`moq-queue` runner group, which admits only moq-dev/moq, and only
+`queue-build.yml` and `nightly.yml` at `refs/heads/main`, no other workflow, a
+fork's included, reaches them. The main ruleset requires the `Queue`
+context, which `queue-build.yml` posts with the build's result (and
+`queue-pr.yml` reports skipped on PRs), and the merge queue, so only the queue
+(or the administrator bypass) lands on `main`. kixel-ai/quest's queue
 watcher, `quest land watch`, runs on the maintainer's NixOS host
 (kixel-ai/dotfiles, `nixos/modules/quest-land.nix`)
 with moq-bot's key: it comments on each PR the queue drops, runs the Codex
@@ -166,10 +173,10 @@ See [`CONTRIBUTING.md`](../CONTRIBUTING.md#landing-gate) for requesting a landin
 
 ## Bootstrapping the Rust build cache
 
-`.github/actions/rust-cache` points mbx at the private `mbx-moq-dev` bucket,
-namespaced per runner OS and architecture. Hosted jobs on `main` write what
-they compile. The merge queue's self-hosted build uses its persistent local store and has no R2
-credentials.
+`.github/actions/rust-cache` points mbx at the private `mbx-moq-dev` bucket
+in Backblaze B2 (`us-east-005`), namespaced per runner OS and architecture.
+Hosted jobs on `main` write what they compile. The merge queue's self-hosted
+build uses its persistent local store and has no B2 credentials.
 Pull request jobs only read (main PRs run Check only while ready), and
 fork pull requests, which get no secrets, build cold.
 
@@ -179,28 +186,39 @@ when it runs on one of them. mbx on its own trusts only a push to a protected
 branch, which leaves out Nightly's schedule, so the action sets
 `MBX_REMOTE_TRUST_WRITES` for writers and the Environment is the only boundary.
 
-All of this runs once, by a maintainer. Steps 1, 2, and 4 are done, and step 3
-is done for `main`.
+All of this runs once and is done.
 
-1. **Create the bucket and its lifecycle rule** under your `wrangler login`:
+1. **Create the bucket** in the B2 web console (Buckets -> Create a Bucket):
+   `mbx-moq-dev`, private, with the default SSE-B2 encryption and no object
+   lock.
+
+2. **Create two application keys** in the console (Application Keys -> Add a
+   New Application Key), both restricted to `mbx-moq-dev`. Each shows its
+   keyID and applicationKey once:
+
+   - `mbx-read`: **Read Only**.
+   - `mbx-write`: **Read and Write**, which also lets it set the bucket's
+     lifecycle rules.
+
+   Then apply `lifecycle.json` with `mbx-write` (or any key that may update
+   the bucket). The console's lifecycle form cannot cancel unfinished large
+   files, so use the recipe. Read the key silently, so it stays out of shell
+   history:
 
    ```bash
-   just infra mbx create
+   read -rp 'keyID: ' B2_APPLICATION_KEY_ID
+   read -rsp 'applicationKey: ' B2_APPLICATION_KEY; echo
+   B2_APPLICATION_KEY_ID=$B2_APPLICATION_KEY_ID B2_APPLICATION_KEY=$B2_APPLICATION_KEY \
+     just infra mbx lifecycle
+   unset B2_APPLICATION_KEY_ID B2_APPLICATION_KEY
    ```
 
-   `lifecycle.json` deletes every object 7 days after upload and aborts
-   multipart uploads left incomplete for a day. mbx writes each compilation
-   once and never refreshes it, so a result still in use expires too; the
-   next writer that misses it compiles and uploads it again. After editing
-   the rules, `just infra mbx lifecycle` applies them.
-
-2. **Create two R2 API tokens** in the dashboard (R2 -> Manage API tokens ->
-   Create Account API token), both scoped to `mbx-moq-dev` only. Wrangler
-   cannot create R2 tokens. Each shows an Access Key ID and a Secret Access
-   Key once.
-
-   - `mbx-read`: **Object Read only**.
-   - `mbx-write`: **Object Read & Write**.
+   `lifecycle.json` hides every object 30 days after upload, deletes hidden
+   versions a day later, and cancels large-file uploads left unfinished for a
+   day. A restore never refreshes an object, so a result still in use
+   expires too; the next writer that misses it compiles and uploads it again.
+   Without conditional writes, a writer that re-uploads an object B2 still
+   holds writes a new version, which restarts its 30 days.
 
 3. **Create the `cache-write` Environment**, deployable from `main` and the
    protected release tags configured below.
@@ -220,16 +238,19 @@ is done for `main`.
 
 4. **Store the keys under the same two names at both levels.** An Environment
    secret shadows a repository secret of the same name, so writers get the
-   write key and every other job the read key, all through one pair of names:
+   write key and every other job the read key, all through one pair of names.
+   Each key goes straight from the console into its secret, with no other
+   copy: to rotate one, create a new key, replace the secret, then delete the
+   old key.
 
    ```bash
    # mbx-write, readable only by jobs in the cache-write Environment
-   gh secret set MBX_R2_ACCESS_KEY_ID --env cache-write --repo moq-dev/moq
-   gh secret set MBX_R2_SECRET_ACCESS_KEY --env cache-write --repo moq-dev/moq
+   gh secret set MBX_B2_ACCESS_KEY_ID --env cache-write --repo moq-dev/moq
+   gh secret set MBX_B2_SECRET_ACCESS_KEY --env cache-write --repo moq-dev/moq
 
    # mbx-read, for every other job
-   gh secret set MBX_R2_ACCESS_KEY_ID --repo moq-dev/moq
-   gh secret set MBX_R2_SECRET_ACCESS_KEY --repo moq-dev/moq
+   gh secret set MBX_B2_ACCESS_KEY_ID --repo moq-dev/moq
+   gh secret set MBX_B2_SECRET_ACCESS_KEY --repo moq-dev/moq
    ```
 
 Without the repository secrets, readers warn and build cold. A writer without
@@ -282,8 +303,8 @@ rebuilds only the crates whose source, features, or dependencies changed. The ot
 platforms have no Smoke nix lane. Runtime warms serialize: the active run
 finishes and new pushes replace only the pending run, avoiding duplicate
 builds without starving publication or delaying the dev-shell matrix.
-Its lifecycle rule (`infra/nix/lifecycle.json`) deletes each object 14 days
-after upload. `nix copy` never re-uploads a path the bucket already has, so a
+Its lifecycle rule (`infra/nix/lifecycle.json`) hides each object 14 days
+after its newest upload and deletes it a day later. `nix copy` never re-uploads a path the bucket already has, so a
 path many commits reuse keeps its first upload's age. Each job therefore
 records the store paths it pushed under `roots/<commit>/`, the runtime job its
 dependency crates too, since no runtime closure references them, then copies every
@@ -293,17 +314,26 @@ commit, the one Smoke pins, therefore substitutes in full while `main` keeps
 merging; older commits' paths still expire. `flake.nix` sets `fallback = true` because
 that expiry can remove a path before one that depends on it.
 
-The Worker logs R2 internal errors (10001) and service-unavailable errors
-(10043) and treats the failed read as a miss: the other bucket can still
-serve the path, and otherwise the 404 is non-cacheable so Nix builds from
-source.
-Other errors, including invalid object names, permissions, and bucket
-configuration, still fail the request. A failure after the archive body
-starts streaming remains a failed download, covered by `fallback`.
+Both buckets live in Backblaze B2's `us-east-005` region. They are private:
+the Worker signs each read (SigV4) with the bucket's read-only key, so nobody
+can list them or download from B2 directly, where egress is billed; egress to
+Cloudflare is free. B2 keeps a new version on every overwrite, including each
+refresh, and counts the CI bucket's 14 days from the newest; both buckets
+delete a superseded or expired version a day later.
+
+The Worker logs a read B2 answers with a 5xx or 429, or never answers, and
+treats it as a miss: the other bucket can still serve the path, and otherwise
+the 404 is non-cacheable so Nix builds from source. A 401 or 403, a rejected
+key, fails the request; the account sets no storage or download cap (Caps &
+Alerts), which would otherwise also answer 403. Any other refusal, such as a
+key too long, is a plain miss. A body that fails after it starts streaming
+resumes with a ranged read guarded by the first response's etag (a few times,
+then the stream errors), since a reset connection makes Nix disable the whole
+cache for a minute.
 
 Nix only trusts paths signed by the key in `flake.nix`, so the signing key is
 the trust boundary, not the bucket keys. It lives in the `cache-write`
-Environment beside one R2 token for both buckets. Only `main` and the five
+Environment beside each bucket's B2 write key. Only `main` and the five
 release tag patterns can deploy there; anything that can reach
 the key can sign any path, so a second Environment for releases would only
 guard the bucket. Readers need no secret.
@@ -336,14 +366,15 @@ done.
    EOF
    ```
 
-2. **Create the buckets and deploy the Worker** under your `wrangler login`:
-
-   ```bash
-   just infra nix create   # both buckets, plus the CI lifecycle rule
-   just infra nix deploy   # nix.moq.dev
-   ```
-
-   After editing the rules, `just infra nix lifecycle` applies them.
+2. **Create the buckets** in the B2 console of the `us-east-005` account
+   (Buckets -> Create a Bucket): `nix-moq-dev` and `nix-ci-moq-dev`, both
+   Private, with Object Lock off. Set their Lifecycle Settings to match
+   `infra/nix/lifecycle.json`: "Keep only the last version" for
+   `nix-moq-dev`, and one custom rule (empty prefix, hide after 14 days,
+   delete a day later) for `nix-ci-moq-dev`. After editing the file,
+   apply it with `just infra nix lifecycle <bucket>`, given a short-lived
+   Read and Write key for that bucket in `AWS_ACCESS_KEY_ID` and
+   `AWS_SECRET_ACCESS_KEY`; delete the key afterward.
 
 3. **Admit the release tags to `cache-write`**, which the Rust build cache
    bootstrap created:
@@ -355,14 +386,35 @@ done.
    done
    ```
 
-4. **Create one R2 API token** in the dashboard (R2 -> Manage API tokens ->
-   Create Account API token) with **Object Read & Write** on `nix-moq-dev` and
-   `nix-ci-moq-dev` only. Wrangler cannot create R2 tokens.
+4. **Create four application keys** (Application Keys -> Add a New
+   Application Key), each allowed one bucket, since the console offers one
+   bucket or all of them. Each shows its keyID and applicationKey once; put
+   them straight into their secrets, with no other copy. To rotate one,
+   create a new key, replace its secrets, check reads or pushes, then delete
+   the old key. The
+   console's Read and Write keys also carry `writeBuckets`, so a writer could
+   change its bucket's settings; only `cache-write` jobs hold them.
 
-   ```bash
-   gh secret set NIX_R2_ACCESS_KEY_ID --env cache-write --repo moq-dev/moq
-   gh secret set NIX_R2_SECRET_ACCESS_KEY --env cache-write --repo moq-dev/moq
-   ```
+   - `nix-release-read` and `nix-ci-read`, **Read Only**, for the Worker.
+     Set each pair in one request, since each secret change deploys, and a
+     Worker signing with one key's ID and another's secret fails every read:
+
+     ```bash
+     cd infra/nix
+     # {"B2_RELEASE_ACCESS_KEY_ID": "<keyID>", "B2_RELEASE_SECRET_ACCESS_KEY": "<applicationKey>"}
+     bun wrangler secret bulk   # reads the JSON from stdin; again for B2_CI_*
+     just infra nix deploy      # nix.moq.dev
+     ```
+
+   - `nix-release-write` and `nix-ci-write`, **Read and Write**, for
+     `release-nix.yml` and `cache.yml`:
+
+     ```bash
+     gh secret set NIX_B2_RELEASE_ACCESS_KEY_ID --env cache-write --repo moq-dev/moq
+     gh secret set NIX_B2_RELEASE_SECRET_ACCESS_KEY --env cache-write --repo moq-dev/moq
+     gh secret set NIX_B2_CI_ACCESS_KEY_ID --env cache-write --repo moq-dev/moq
+     gh secret set NIX_B2_CI_SECRET_ACCESS_KEY --env cache-write --repo moq-dev/moq
+     ```
 
 5. **Generate the signing key.** This stores it as `NIX_SIGNING_KEY` in
    `cache-write` without writing it to disk, and prints the public key:
@@ -503,4 +555,4 @@ All of this runs once, by a maintainer. All four steps are done.
    ```
 
    The endpoint is `https://dd618f5dbd5da77b8296f1613c301f5c.r2.cloudflarestorage.com`,
-   as for mbx, so no account id secret is needed.
+   so no account id secret is needed.

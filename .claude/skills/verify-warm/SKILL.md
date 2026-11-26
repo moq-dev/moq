@@ -47,7 +47,7 @@ Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path on th
 
 ## Coverage
 
-Sync commit: `1399add3c886f1c168f0c6ba3ba55586a04feb6c`, the base of [moq-dev/moq#8986](https://github.com/moq-dev/moq/pull/8986), which added the ranked rule and this model. Run `git log 1399add3c8.. -- rs/moq-net/src/route/tests/warm.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function. The rule lives in the simulator only; the port in `select.md` moves it into the relay and this table with it.
+Sync commit: `7cab21e65bd3dfd031d76e02a1a2f62df3918faf`. Run `git log 7cab21e65b.. -- rs/moq-net/src/route/tests/warm.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function. The rule lives in the simulator only; the port in `select.md` moves it into the relay and this table with it.
 
 | Code | Model |
 | --- | --- |

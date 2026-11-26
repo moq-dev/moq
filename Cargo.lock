@@ -4261,6 +4261,7 @@ dependencies = [
  "moq-hls",
  "moq-mux",
  "moq-net",
+ "moq-opus",
  "objc2 0.6.5",
  "objc2-av-foundation",
  "objc2-core-audio-types",
@@ -4279,7 +4280,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "unsafe-libopus",
  "workspace-hack",
 ]
 
@@ -4737,6 +4737,17 @@ dependencies = [
  "cudarc",
  "libloading 0.9.0",
  "thiserror 2.0.21",
+ "workspace-hack",
+]
+
+[[package]]
+name = "moq-opus"
+version = "0.1.0"
+dependencies = [
+ "arrayref",
+ "hex",
+ "num-complex",
+ "num-traits",
  "workspace-hack",
 ]
 
@@ -9640,17 +9651,6 @@ dependencies = [
  "textwrap",
  "uniffi_meta 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=35209f3)",
  "weedle2 5.0.0 (git+https://github.com/kixelated/uniffi-rs?rev=35209f3)",
-]
-
-[[package]]
-name = "unsafe-libopus"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c757408e7256c910343c7b215c8c8b878948630eecc774baabcca0972376eb73"
-dependencies = [
- "arrayref",
- "num-complex",
- "num-traits",
 ]
 
 [[package]]

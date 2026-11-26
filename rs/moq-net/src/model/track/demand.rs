@@ -139,6 +139,9 @@ pub(super) struct Subscriptions {
 	waiters: kio::WaiterList,
 	/// [`super::Refreshing`] callers, woken when their request is sent or ends.
 	callers: kio::WaiterList,
+	/// The track's cache account, told the most urgent priority so its session sheds live
+	/// edges in delivery's order. Absent on a track with no account.
+	pub(super) account: Option<Arc<crate::model::cache::Track>>,
 }
 
 /// The readers waiting on one live join, counted under the `max` each waits with and the
@@ -559,6 +562,12 @@ impl Subscriptions {
 				self.capping -= 1;
 			}
 			self.count -= 1;
+		}
+		let priority = self.priority.last_key_value().map(|(priority, _)| *priority);
+		if let Some(account) = &self.account
+			&& prev.map(|prev| prev.0) != priority
+		{
+			account.set_subscriber(priority);
 		}
 		if reshaped || self.scalars() != prev {
 			self.waiters.take()

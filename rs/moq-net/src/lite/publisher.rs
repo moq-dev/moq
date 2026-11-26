@@ -3370,7 +3370,7 @@ mod test {
 		let mut unpinned = served();
 		assert_eq!(
 			drain(&mut unpinned),
-			vec![0, 1, 2],
+			vec![2, 1, 0],
 			"the unbounded budget alone resolves to the whole cache"
 		);
 
@@ -3387,7 +3387,7 @@ mod test {
 		// On lite-06 the declared budget is what resolves the start, so it stands.
 		let declared = producer.subscribe(track::Subscription::default().with_max(std::time::Duration::from_secs(5)));
 		let mut declared = declared.with_range(cursor_floor(Version::Lite06, None, producer.latest_key())..);
-		assert_eq!(drain(&mut declared), vec![0, 1, 2]);
+		assert_eq!(drain(&mut declared), vec![2, 1, 0]);
 	}
 
 	/// An unfloored join adopts the first served group: the cursor rises to it, so a
@@ -4736,12 +4736,14 @@ fn final_key(end: track::Position) -> u64 {
 /// Every group key, for [`poll_recv_next`] to hand out any.
 const ALL: (Bound<u64>, Bound<u64>) = (Bound::Unbounded, Bound::Unbounded);
 
-/// Poll a single [`track::Subscriber`] for the next group (cap-aware, in arrival order).
+/// Poll a single [`track::Subscriber`] for the next group (cap-aware, as an arrival read).
 ///
-/// Groups are served in arrival order (`poll_recv_group`), not key order: on a relay, a
-/// burst can be ingested micro-reordered by the upstream leg, and a key cursor would then
-/// permanently skip the older group even though it is cached and in demand. Staleness is
-/// governed by max age and the subscriber's max delay, not arrival raciness.
+/// Groups are served as an arrival read (`poll_recv_group`) serves them, not by a key cursor:
+/// of the groups held unread, the first in the subscription's Group Order, and never past a
+/// lower one that lands late. On a relay, a burst can be ingested micro-reordered by the
+/// upstream leg, and a key cursor would then permanently skip the older group even though it
+/// is cached and in demand. Staleness is governed by max age and the subscriber's max delay,
+/// not arrival raciness.
 ///
 /// The cursor hands out the next group only if its key lies in `groups`, leaving it in
 /// the cache otherwise, and without `groups` none at all. Either way it then never reports
@@ -4818,14 +4820,17 @@ async fn recv_next(track: &mut track::Subscriber, emit_boundary: bool) -> Result
 /// asked for a partial group, so it must be skipped: a group is the unit of decodability,
 /// and only the subscriber knows whether a partial one is any use to it.
 fn position_group(group: group::Consumer, frames: &Frames, capped: bool) -> Option<group::Consumer> {
-	if group.start < frames.floor {
+	if !servable(&group, frames) {
 		return None;
 	}
 	let expected = frames.start(group.start);
 	let end = frames.end(group.start).filter(|_| capped);
-	group
-		.fetches_from(expected)
-		.then(|| group.with_end(end).fetching_from(expected))
+	Some(group.with_end(end).fetching_from(expected))
+}
+
+/// Whether [`position_group`] can serve `group` at all.
+fn servable(group: &group::Consumer, frames: &Frames) -> bool {
+	group.start >= frames.floor && group.fetches_from(frames.start(group.start))
 }
 
 /// The frame bounds of a subscription, which the model leaves to the publisher: it reads
@@ -6095,7 +6100,7 @@ impl TrackRun {
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
 
-		// One cursor drives the whole subscription: poll the cap-aware arrival-order group.
+		// One cursor drives the whole subscription: poll the cap-aware arrival read.
 		let order = self.ctx.steer_current().order;
 		let stuck = self.stuck();
 		let emit_boundary = self.start.emits_range() && !self.end_sent;
@@ -6488,26 +6493,24 @@ impl TrackRun {
 	///
 	/// A relay caches groups in upstream arrival order, and a newer group's stream can
 	/// beat an older one, so the first group here need not be the oldest the source
-	/// serves. `source` is where the source's feed starts, raised to this cursor's floor,
-	/// so the resolved start is the lower of the two: resolving from the later group would
-	/// drop the older one for good.
+	/// serves. `source` is where the source's feed starts, raised to this cursor's floor;
+	/// see [`track::Subscriber::delivery_start`].
 	fn start(
 		&mut self,
 		group: group::Consumer,
 		source: Option<u64>,
 		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
 	) -> Result<(), Error> {
-		let mut start = source.map_or(group.start, |source| source.min(group.start));
-		// A group given up cannot be where the feed starts. This stops at the held group
-		// at the latest, since it was not skipped.
-		// Adjacent runs given up with different errors stay separate, so walk them all.
-		if let Start::Unresolved { skipped, .. } = &self.start {
-			while start < group.start
-				&& let Some((given_up, _)) = skipped.get_key_value(&start)
-			{
-				start = given_up.end.min(group.start);
-			}
-		}
+		let Start::Unresolved { skipped, .. } = &self.start else {
+			unreachable!("a start resolves once");
+		};
+		// A group given up, or held and not servable, cannot be where the feed starts.
+		let start = self.track.delivery_start(track::Opening {
+			first: group.start,
+			source,
+			given_up: skipped,
+			serves: &|held| servable(held, &self.frames),
+		});
 		self.resolve(start, writer)?;
 		// SUBSCRIBE_START names where delivery starts. Groups already skipped between
 		// the requested floor and this group are not served. A later group at or above an
@@ -9241,7 +9244,7 @@ mod serve_group_test {
 			[(0, 0), (1, 0)],
 			"each stream joins the subscription's group"
 		);
-		assert_eq!(log.orders(), [(0, 1), (1, 3)], "newer groups first");
+		assert_eq!(log.orders(), [(0, 3), (1, 1)], "newer groups first");
 		assert!(log.priorities().is_empty(), "the session queue ranks no stream");
 
 		run.replace(lite::SubscribeUpdate {
@@ -9262,7 +9265,8 @@ mod serve_group_test {
 		);
 		let mut flipped = log.orders()[2..].to_vec();
 		flipped.sort();
-		assert_eq!(flipped, [(0, 1), (1, -1)], "older groups first");
+		// Stream 0 carries group 1, which went first.
+		assert_eq!(flipped, [(0, -1), (1, 1)], "older groups first");
 	}
 
 	/// A group with more frames ready than one poll's budget drains over several polls,
@@ -9826,6 +9830,48 @@ mod serve_group_test {
 		assert!(served.contains(&4000), "served {served:?}");
 	}
 
+	/// The gaps a lite-07 subscription's hopping ranges left behind were never served, so a
+	/// range added back over them gets their groups rather than waiting on keys the wire
+	/// never hears of.
+	#[kio::test]
+	async fn lite07_a_range_added_back_gets_the_gaps_left_behind() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		for key in 0..8 {
+			write_group(&mut track, key, key);
+		}
+		let single = |key| lite::Range::span(Some(key), 0, Some(key), None);
+		let bounds = Bounds::new(&[single(0)], None);
+		let subscriber = track.subscribe(track::Subscription::default().with_ranges(bounds.ranges.iter().copied()));
+		let session = Log::default();
+		let (mut run, mut writer, log) = lite07_run(SinkSession::new(session.clone()), subscriber);
+		asked(&mut run, &bounds.ranges);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		for (id, key) in [(1, 2), (2, 4), (3, 6)] {
+			run.update(lite07_add(&run, &[], id, &[single(key)]));
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		}
+		assert_eq!(group_headers(&session, Version::Lite07), [0, 2, 4, 6]);
+
+		run.update(lite07_add(
+			&run,
+			&[],
+			4,
+			&[lite::Range::span(Some(0), 0, Some(7), None)],
+		));
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		let mut served = group_headers(&session, Version::Lite07);
+		served.dedup();
+		assert_eq!(served, (0..8).collect::<Vec<_>>(), "every key of the range is served");
+		let holes: Vec<_> = (responses(&mut writer, &log).await.into_iter())
+			.filter(|msg| matches!(msg, lite::SubscribeResponse::Drop(_) | lite::SubscribeResponse::Skip(_)))
+			.collect();
+		assert!(holes.is_empty(), "nothing was given up: {holes:?}");
+	}
+
 	/// A range retired before SUBSCRIBE_START reported it gets none, and one still waiting
 	/// once the track ends is reported with no start.
 	#[kio::test]
@@ -10046,6 +10092,31 @@ mod serve_group_test {
 			),
 			"{answered:?}"
 		);
+	}
+
+	/// A relay's copy that finished holding only groups past a range's time answers that range
+	/// only once its upstream placed the time, never empty for want of the history it doesn't
+	/// hold: the subscriber reads an empty answer as no group at or before the time.
+	#[kio::test]
+	async fn lite07_a_finished_copy_answers_a_time_only_once_placed() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		track.received();
+		track.anchored();
+		track.request_start(Some(0)).unwrap();
+		let (mut run, mut writer, log) = lite07_run_ranges(&track, &[lite::Range::span(Some(1000), 0, None, None)]);
+		write_group(&mut track, 5000, 5000);
+		write_group(&mut track, 6000, 6000);
+		track.finish_shared().unwrap();
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(starts(&responses(&mut writer, &log).await), []);
+
+		track.time_starts([(1000, Some(1000))]);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(starts(&responses(&mut writer, &log).await), [(0, Some(1000))]);
 	}
 
 	/// A relay's copy that placed one range from its upstream's answer, which also asked for

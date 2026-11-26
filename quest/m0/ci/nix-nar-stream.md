@@ -1,44 +1,40 @@
-# [S] One broken NAR download no longer turns off nix.moq.dev for a CI job
+# [XS] Confirm nix.moq.dev no longer drops NAR streams
 
 ## Goal
 
-A NAR download from nix.moq.dev that breaks mid-stream costs a CI job that
-one retry, not a minute of source builds. Nightly logs show no
-`disabling binary cache 'https://nix.moq.dev'` line over a week of runs.
+Nightly logs show no `disabling binary cache 'https://nix.moq.dev'` line over a
+week of runs after the Worker's body resume (moq-dev/moq#9604) is deployed.
 
 ## Plan
 
-Found 2026-11-24 while recording the bucket sizes for the Cachix retirement
-([moq-dev/moq#8048](https://github.com/moq-dev/moq/pull/8048)). In the
-Nightly runs of 2026-11-16, 11-17 and 11-19, one `ubuntu-24.04-arm` job each
-(BBB rendition alignment, Rust coverage, test resume-model) failed to fetch
-a large NAR: `nar/0vyq2c8m...nar.zst` (aarch64 `llvm-tools-preview-1.98.1`)
-twice and `nar/1wmx8v36...nar.zst` (aarch64 `cargo-1.98.1`) once, each
-ending `HTTP error 200 (curl error: Failure when receiving data from the
-peer)` or `Failed sending data to the peer` after Nix's retries. Nix then
-logged `disabling binary cache 'https://nix.moq.dev' for 60 seconds`, and
-with `fallback = true` (`flake.nix`) that job built from source whatever it
-needed in that window, `uniffi-bindgen-go` (and once `uniffi-bindgen-cpp`)
-included. The other ~90 jobs in each run substituted the same paths, so the
-objects had not expired: the 14-day expiry is not the cause. Across the 11
-Nightly runs of 2026-11-13 to 11-23, 14 jobs in 5 runs logged the cache
-disabled this way. The
-`nix-ci-moq-dev` bucket logged 993 `500 Internal Server Error` and 134
-`429 Too Many Requests` responses over 2026-10-25 to 11-24 (R2 metrics), a
-likely source of the broken streams.
+The Worker now resumes an R2 body that fails mid-read with a ranged `get`, so
+a broken stream no longer reaches Nix as a reset connection. Once deployed,
+grep the week's Nightly job logs the way
+[moq-dev/moq#8048](https://github.com/moq-dev/moq/pull/8048) did (14 jobs in
+5 of 11 runs before). If lines remain, read the Worker's logs for `body read
+failed` and `resume failed` at those timestamps: a resume cap hit means R2
+itself kept failing, which the B2 move
+([moq-dev/moq#9625](https://github.com/moq-dev/moq/pull/9625)) changed, and no hop in between remains to fix. That
+move replaced `bucket.get` with a signed `fetch`, carrying the resume over as
+a `Range` request guarded by `If-Match` on the first response's etag; on B2,
+a cap hit means reads kept failing on the Worker-to-B2 path, from transport errors as well as B2 responses; the logged error shows which.
 
-- Find which hop drops the stream: the worker's observability logs for those
-  timestamps, and R2's error metrics. The worker returns `object.body`
-  straight through, so an R2 read failing mid-body truncates the response
-  after its `200`.
-- Fix it at that hop. Candidates: resume a failed R2 body with a ranged
-  `get` from the bytes already sent; or serve `nar/` from an R2 custom
-  domain without the worker. Raising Nix's `download-attempts` only retries
-  the same failure.
-- Nothing runs `infra/nix/src/worker.test.ts` today (no recipe or workflow
-  calls `bun test` there); a worker change wires it into `just ci`. The
-  worker's `bucket.get` handler also matches error message text
-  (`/\((10001|10043)\)$/`), which `AGENTS.md` forbids; replace it if the fix
-  touches that path.
+Decided 2026-11-25 (maintainer, /quest-run): ✅ an agent deploys `main`'s
+Worker now with this desktop's wrangler login (rejected: waiting for the B2
+move's Worker deploy). Deployed 2026-11-25 from `7cab21e65b` as version
+`4834140a-e633-4520-b718-27a2e7cc26bc`; an earlier deploy at 17:01Z already
+followed #9604's merge, so count runs from 2026-11-26. The B2 cutover
+deployed `main`'s Worker from `90eca02d19` as version
+`1f8e812f-c1f0-4066-be44-565213ecb54b` at 2026-11-25 21:25Z, before the
+first counted run, so every counted run reads B2 with the resume as a ranged
+`fetch`.
 
-Public API: none. Wire: none.
+## Waiting
+
+- moq-dev/moq: a week of scheduled Nightly runs on `main` from 2026-11-26
+  (`gh run list --workflow nightly.yml --branch main --event schedule`). Grep
+  each job's log for `disabling binary cache 'https://nix.moq.dev'`; done when
+  seven runs show none. Count only runs whose Nix jobs got past their Nix
+  setup step, so a run cancelled before it substitutes anything never counts
+  as clean. `wrangler tail` shows only Worker logs and cannot
+  confirm this.

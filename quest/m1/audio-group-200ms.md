@@ -64,4 +64,3 @@ Public API: none (a default changes). Wire: none.
 
 - [Buffered playback subscribes in ascending order](/quest/m3/buffered-ascending.md) - live audio stays newest-first even with 200 ms groups
 - [An audio track's final flush joins its open group](/quest/m4/audio-flush-group.md) - the same race at every group boundary, now 10x rarer
-- [Native audio conceals short losses](/quest/m1/audio-plc.md) - covers part of a lost group, which is now 200 ms

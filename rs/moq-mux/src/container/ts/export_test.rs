@@ -3939,8 +3939,8 @@ async fn si_pids_are_re_emitted_on_their_own_interval() {
 	// follow it.
 	assert_eq!(
 		count(0x0000),
-		24,
-		"PAT on every frame, and repeated while the next is queued"
+		12,
+		"PAT once in each frame's slot, which the grid's repeat waiting for it shares"
 	);
 	// SDT every second from 0 to 12s, half its 2s limit.
 	assert_eq!(count(0x0011), 13, "SDT re-emitted at half its 2s interval");
@@ -4030,8 +4030,8 @@ async fn inline_si_form_is_re_emitted() {
 	};
 	assert_eq!(
 		count(0x0000),
-		24,
-		"PAT on every frame, and repeated while the next is queued"
+		12,
+		"PAT once in each frame's slot, which the grid's repeat waiting for it shares"
 	);
 	// SDT every second from 0 to 12s, byte-for-byte the inline section.
 	assert_eq!(count(0x0011), 13, "inline SDT re-emitted at half its 2s interval");
@@ -4274,8 +4274,9 @@ async fn discontinuity_re_emits_tables_and_resumes_the_clock() {
 	write(&mut producer, 50, 600_000_000);
 	let before = drain_frames(&mut export).await;
 	assert_eq!(export.discontinuity(), 0, "no rewind yet");
-	// Ten on the media's 500ms cadence, and the grid's copy in the 100ms periods between.
-	assert_eq!(count_pid(&before, 0x0000), 59, "PAT on its cadence and the grid's");
+	// Ten on the media's 500ms cadence, and the grid's copy in the 100ms periods between, a
+	// slot laying each version once.
+	assert_eq!(count_pid(&before, 0x0000), 50, "PAT on its cadence and the grid's");
 	assert_eq!(count_pid(&before, 0x0011), 5, "SDT every second, half its 2s limit");
 
 	// A forward marker must flush the last old frame instead of discarding it.
@@ -4346,7 +4347,7 @@ async fn reordered_video_keeps_the_table_cadence() {
 	assert_eq!(discontinuities, 0, "a reorder is not a rewind");
 	assert_eq!(
 		count_pid(&out, 0x0000),
-		47,
+		43,
 		"PAT once per slot and period, not per reorder"
 	);
 	assert_eq!(count_pid(&out, 0x0011), 5, "SDT once per 1s slot, not per reorder");
@@ -13074,4 +13075,116 @@ async fn a_joiner_counts_only_the_payload_it_is_sent() {
 		"{billed} bytes billed for {pictures} pictures"
 	);
 	assert!(billed <= sent as u64, "{billed} bytes billed, {sent} sent");
+}
+
+/// The packets of `data` up to and including each PCR on `pid`, with the PCR in 27 MHz ticks.
+fn pcr_chunks(data: &[u8], pid: u16) -> Vec<(usize, u64)> {
+	data.chunks(188)
+		.enumerate()
+		.filter(|(_, packet)| (u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2])) == pid)
+		.filter(|(_, packet)| packet[3] & 0x20 != 0 && packet[4] >= 7 && packet[5] & 0x10 != 0)
+		.map(|(index, packet)| {
+			let base = packet[6..10].iter().fold(0, |base, &byte| base << 8 | u64::from(byte)) << 1
+				| u64::from(packet[10] >> 7);
+			(
+				index + 1,
+				base * 300 + (u64::from(packet[10] & 1) << 8 | u64::from(packet[11])),
+			)
+		})
+		.collect()
+}
+
+/// An FFmpeg TS of AAC, packed as it does by default, exports with the CLI's default delay and
+/// no multiplex rate given: the rate it picks carries what the audio sends, its tables and its
+/// clock, though the source recorded one with no room beyond its own packing.
+#[tokio::test(start_paused = true)]
+async fn an_ffmpeg_aac_source_exports_with_default_settings() {
+	let data = include_bytes!("test_data/ffmpeg_aac.ts");
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
+
+	// A live source: each stretch to a PCR arrives when its clock says.
+	let chunks = pcr_chunks(data, 0x100);
+	assert!(chunks.len() > 20, "{} PCRs", chunks.len());
+	let (mut at, mut clock) = (0, chunks[0].1);
+	let mut export = None;
+	for (end, pcr) in chunks {
+		kio::clock::sleep(Duration::from_nanos(pcr.saturating_sub(clock) * 1000 / 27)).await;
+		clock = pcr;
+		import.decode(&data[at * 188..end * 188]).unwrap();
+		at = end;
+		if export.is_none() {
+			let source = crate::source::announced(&consumer).await;
+			let catalog = source
+				.catalog::<tscat::Ext>(crate::catalog::CatalogFormat::Hang)
+				.await
+				.unwrap();
+			export = Some(tokio::spawn(async move {
+				let mut export = Export::new(source, catalog, Duration::from_millis(500));
+				let mut ts = BytesMut::new();
+				// The catalog stays open, so the export pads on: stop with the media.
+				while let Some(frame) = export.next().await.expect("exporter error") {
+					ts.extend_from_slice(&frame.payload);
+					if frame.timestamp >= Timestamp::from_secs(4).unwrap() {
+						break;
+					}
+				}
+				ts
+			}));
+		}
+	}
+	import.decode(&data[at * 188..]).unwrap();
+	let _finished = import.finish().unwrap();
+
+	let ts = export.unwrap().await.unwrap();
+	assert_packet_aligned(&ts);
+	let recorded = Clocked::of(data).rate();
+	let rate = Clocked::of(&ts).rate();
+	assert!(
+		rate > recorded,
+		"padded to {rate} b/s, no more than the recorded {recorded}"
+	);
+	// It joined after the multiplex rate was measured, so it carries less than the source.
+	assert!(ts.len() > data.len() / 4, "{} of {} bytes", ts.len(), data.len());
+}
+
+/// A catalog's bitrate and sample rate are hints from the network: the AAC floor they set stays
+/// within what a frame the decoder buffer holds needs, so a hostile pair neither overflows nor
+/// swallows the rate the source recorded.
+#[test]
+fn the_aac_floor_is_bounded_by_the_decoder_buffer() {
+	let mut catalog = crate::catalog::hang::Catalog::<tscat::Ext>::default();
+	for (name, bitrate, sample_rate) in [
+		("a", Some((1 << 53) - 1), 1),
+		("b", Some(128_000), 44_100),
+		("c", None, 48_000),
+	] {
+		let mut config = AudioConfig::new(AAC { profile: 2 }, sample_rate, 2);
+		config.bitrate = bitrate;
+		config.description = Some(Bytes::from_static(&[0x12, 0x10]));
+		catalog.audio.renditions.insert(name.into(), config);
+	}
+	let floor = super::export::audio_floor(&catalog);
+	// 3,584 bytes doubled and the PES header: 40 packets, and 5 for the second entry, 3 more.
+	assert_eq!(floor, (40 + 5 + 3) * crate::container::ts::schedule::PACKET);
+}
+
+/// Many renditions cannot push the AAC floor past the rate limit, which would discard the
+/// rate the source recorded.
+#[test]
+fn the_aac_floor_stays_within_the_rate_limit() {
+	let mut catalog = crate::catalog::hang::Catalog::<tscat::Ext>::default();
+	for index in 0..40 {
+		let mut config = AudioConfig::new(AAC { profile: 2 }, 1, 16);
+		config.bitrate = Some((1 << 53) - 1);
+		config.description = Some(Bytes::from_static(&[0x12, 0x10]));
+		catalog.audio.renditions.insert(format!("a{index}"), config);
+	}
+	assert!(super::export::sanitize_mux_rate(super::export::audio_floor(&catalog)).is_some());
 }

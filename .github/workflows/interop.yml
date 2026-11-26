@@ -50,8 +50,8 @@ jobs:
         id: rust-cache
         uses: ./.github/actions/rust-cache
         with:
-          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
-          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
+          access-key-id: ${{ secrets.MBX_B2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_B2_SECRET_ACCESS_KEY }}
 
       - name: Workspace dependencies
         id: setup

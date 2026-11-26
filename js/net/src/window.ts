@@ -217,17 +217,21 @@ export function union(ranges: readonly Range[]): Range[] {
 	const out: Range[] = runs.map((run) =>
 		run.end === UNBOUNDED ? { start: run.start } : { start: run.start, end: run.end - 1n },
 	);
-	// A range with no time start can't be placed against the time spans.
+	// A range with no time start can't be placed against the time spans. One from the oldest group
+	// takes in every one from there ending before it.
 	const joins = new Map<string, Range>();
+	let oldest: Range | undefined;
 	for (const range of kept) {
 		const join = joinOf(range);
 		if (join === undefined) {
-			if (rangeTime(range) === undefined) out.push(range);
+			if (rangeTime(range) === undefined && (oldest === undefined || (range.end ?? 0n) > (oldest.end ?? 0n)))
+				oldest = range;
 			continue;
 		}
 		const held = joins.get(join);
 		if (!held || rangeBudget(range) > rangeBudget(held)) joins.set(join, range);
 	}
+	if (oldest !== undefined) out.push(oldest);
 	out.push(...joins.values());
 
 	out.sort(compare);
@@ -954,13 +958,15 @@ export class Window {
 	}
 
 	/**
-	 * The times in `[start, end)` of the time starts still waiting on the groups held. The group
-	 * containing each starts at or before its time, so one at or past a read's floor and below a
-	 * group may still land between them. Mirrors the Rust `Window::waiting_in`.
+	 * The times in `[start, end)` of the time starts not yet resolved: waiting on the groups held, or
+	 * on a lookup of the track's history. The group containing each starts at or before its time, so
+	 * one at or past a read's floor and below a group may still land between them. Mirrors the Rust
+	 * `Window::unresolved_in`.
 	 */
-	waitingIn(start: bigint, end: bigint): bigint[] {
+	unresolvedIn(start: bigint, end: bigint): bigint[] {
 		const times: bigint[] = [];
 		for (const entry of this.#waiting.in(start, end)) times.push(entry.time);
+		for (const entry of this.#looking.in(start, end)) times.push(entry.time);
 		return times;
 	}
 
@@ -982,9 +988,18 @@ export class Window {
 		return this.pending ? from : this.#groups.next(from);
 	}
 
-	/** The lowest group in range, undefined while a start waits. Nothing in range floors at group 0. */
+	/** The highest group in range below `before`, undefined when none is. The one just below while a live join waits on a first group. */
+	prev(before: bigint): bigint | undefined {
+		if (this.pending) return before > 0n ? before - 1n : undefined;
+		return this.#groups.prev(before);
+	}
+
+	/**
+	 * The lowest group in range, undefined while a start waits, a time start's lookup included: it may
+	 * resolve to a group below every one in range. Nothing in range floors at group 0.
+	 */
 	floor(): bigint | undefined {
-		if (this.pending || this.#unplaced()) return undefined;
+		if (this.pending || this.#unplaced() || this.#looking.size > 0) return undefined;
 		return this.#groups.lowest() ?? 0n;
 	}
 
