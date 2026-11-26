@@ -761,6 +761,10 @@ impl Connection {
 		// resends data already in flight, so it is not one.
 		let mut pacing_until = None;
 
+		// Whatever still holds a send back sets the pacing timer again, so one that has since
+		// cleared, as when the data it held was reset, wakes nobody
+		self.timers.stop(Timer::Pacing);
+
 		// Iterate over all spaces and find data to send
 		let mut space_idx = 0;
 		let spaces = [SpaceId::Initial, SpaceId::Handshake, SpaceId::Data];
@@ -874,11 +878,14 @@ impl Connection {
 				if (ack_eliciting || padded) && self.spaces[space_id].loss_probes == 0 && !close {
 					debug_assert!(untracked_bytes <= segment_size as u64);
 
+					// A bandwidth probe held back leaves the sender limited by the probe, as
+					// `Ready::Blocked` does, not by the window or the pacer: only data it has to
+					// send counts for those.
 					let bytes_to_send = segment_size as u64 + untracked_bytes;
 					if self.path.in_flight.bytes + bytes_to_send > self.path.congestion.window() {
 						space_idx += 1;
 						send_blocked = true;
-						cwnd_blocked = true;
+						cwnd_blocked |= !bandwidth_probe;
 						// We continue instead of breaking here in order to avoid
 						// blocking loss probes queued for higher spaces.
 						trace!("blocked by congestion control");
@@ -889,7 +896,9 @@ impl Connection {
 					if ack_eliciting && let Some(delay) = self.path.congestion.pace(now, bytes_to_send) {
 						self.timers.set(Timer::Pacing, delay);
 						send_blocked = true;
-						pacing_until = Some(delay);
+						if !bandwidth_probe {
+							pacing_until = Some(delay);
+						}
 						// Loss probes should be subject to pacing, even though
 						// they are not congestion controlled.
 						trace!("blocked by pacing");
@@ -1033,7 +1042,7 @@ impl Connection {
 				{
 					space_idx += 1;
 					send_blocked = true;
-					cwnd_blocked = true;
+					cwnd_blocked |= !bandwidth_probe;
 					trace!("blocked by congestion control");
 					continue;
 				}
@@ -1272,19 +1281,25 @@ impl Connection {
 
 		// Send MTU probe if necessary. Only probe validated paths: probes bypass the
 		// anti-amplification check above, and until a migrated path is validated, its budget is
-		// needed for PATH_CHALLENGE.
-		if buf.is_empty() && self.state.is_established() && self.path.validated {
+		// needed for PATH_CHALLENGE. One still challenged again after a short challenge has not
+		// shown it carries `min_mtu`, let alone more. Whatever held this call's data back holds
+		// the probe too.
+		if buf.is_empty()
+			&& self.state.is_established()
+			&& self.path.validated
+			&& self.path.challenge.is_none()
+			&& !send_blocked
+			&& !rate_blocked
+			&& let Some(probe_size) = self.path.mtud.poll_transmit(now)
+			&& self.mtu_probe_cleared(now, probe_size)
+		{
 			let space_id = SpaceId::Data;
-			let probe_size = self
-				.path
-				.mtud
-				.poll_transmit(now, self.packet_number_filter.peek(&self.spaces[space_id]))?;
-
 			let buf_capacity = probe_size as usize;
 			buf.reserve(buf_capacity);
 
 			let mut builder =
 				PacketBuilder::new(now, space_id, self.rem_cids.active(), buf, buf_capacity, 0, true, self)?;
+			let pn = builder.exact_number;
 
 			// We implement MTU probes as ping packets padded up to the probe size
 			buf.write(frame::FrameType::PING);
@@ -1302,6 +1317,7 @@ impl Connection {
 				..Default::default()
 			};
 			builder.finish_and_track(now, self, Some(sent_frames), buf);
+			self.path.mtud.on_probe_sent(pn, probe_size);
 
 			self.stats.path.sent_plpmtud_probes += 1;
 			num_datagrams = 1;
@@ -1332,6 +1348,25 @@ impl Connection {
 			},
 			local_ip: self.local_ip,
 		})
+	}
+
+	/// Whether an MTU probe of `size` bytes may go now: it is ack-eliciting data like any other,
+	/// so the congestion window, the pacer, and the send rate cap hold it back too
+	fn mtu_probe_cleared(&mut self, now: Instant, size: u16) -> bool {
+		let size = u64::from(size);
+		if self.path.in_flight.bytes + size > self.path.congestion.window() {
+			return false;
+		}
+		let delay = self.path.congestion.pace(now, size).or_else(|| {
+			self.send_rate
+				.as_mut()
+				.and_then(|cap| cap.delay(now, size))
+		});
+		if let Some(delay) = delay {
+			self.timers.set(Timer::Pacing, delay);
+			return false;
+		}
+		true
 	}
 
 	/// Pad a datagram to `min_mtu`, or to its `room` when the anti-amplification limit shrank it
@@ -1553,9 +1588,7 @@ impl Connection {
 				Timer::PathValidation => {
 					debug!("path validation failed");
 					if let Some((_, prev)) = self.prev_path.take() {
-						// The failed path's congestion wait ends with it.
-						self.observe_congestion(now, true);
-						self.path = prev;
+						self.replace_path(now, prev);
 						self.set_loss_detection_timer(now);
 					}
 					self.path.challenge = None;
@@ -2367,7 +2400,7 @@ impl Connection {
 						match persistent_congestion_start {
 							// Two ACK-eliciting packets lost more than congestion_period apart, with no
 							// ACKed packets in between
-							Some(start) if info.time_sent - start > congestion_period => {
+							Some(start) if info.time_sent.saturating_duration_since(start) > congestion_period => {
 								in_persistent_congestion = true;
 							}
 							// Persistent congestion must start after the first RTT sample
@@ -2412,6 +2445,14 @@ impl Connection {
 						bytes: info.size,
 						packet: state,
 					});
+					// Only a loss the controller answered can prove its response spurious: a late
+					// ACK of an ACK-only packet would undo an unrelated cut
+					self.spaces[pn_space].lost_packets.insert(
+						packet,
+						LostPacket {
+							time_sent: info.time_sent,
+						},
+					);
 				}
 				self.qlog
 					.emit_packet_lost(packet, &info, loss_delay, pn_space, now, self.orig_rem_cid);
@@ -2425,13 +2466,6 @@ impl Connection {
 				}
 				self.spaces[pn_space].pending |= info.retransmits;
 				self.path.mtud.on_non_probe_lost(pn_space, packet, info.size);
-
-				self.spaces[pn_space].lost_packets.insert(
-					packet,
-					LostPacket {
-						time_sent: info.time_sent,
-					},
-				);
 			}
 
 			if self.path.mtud.black_hole_detected(now) {
@@ -3468,7 +3502,16 @@ impl Connection {
 							trace!("new path validated");
 							self.timers.stop(Timer::PathValidation);
 							self.path.challenge = None;
+							// Kept only to fall back to while this path validates
+							self.prev_path = None;
 						}
+					} else if let Some((_, prev_path)) = &mut self.prev_path
+						&& remote == prev_path.remote
+						&& prev_path.challenge.is_some_and(|challenge| challenge.token == token)
+					{
+						// The previous path still works, so a migration back to it skips validation
+						trace!("previous path validated");
+						prev_path.challenge = None;
 					} else {
 						debug!(token, "ignoring invalid PATH_RESPONSE");
 					}
@@ -3699,11 +3742,25 @@ impl Connection {
 
 	fn migrate(&mut self, now: Instant, remote: SocketAddr) {
 		trace!(%remote, "migration initiated");
+		// The peer is back on the address validated before an apparent migration, which was
+		// spurious, as when an attacker forwards a copy of its packet (RFC 9000 §9.3.3). Return to
+		// that path, skipping validation and keeping its loss detection and congestion state (§9.3).
+		if let Some((_, prev)) = self.prev_path.take_if(|(_, prev)| prev.remote == remote) {
+			trace!("returning to the previous path");
+			self.replace_path(now, prev);
+			self.path.challenge = None;
+			self.timers.stop(Timer::PathValidation);
+			self.datagrams().drop_oversized();
+			self.set_loss_detection_timer(now);
+			return;
+		}
 		self.path_counter = self.path_counter.wrapping_add(1);
-		// Reset rtt/congestion state for new path unless it looks like a NAT rebinding.
+		// Reset rtt/congestion state for new path unless it looks like a NAT rebinding: only the
+		// port changed (RFC 9000 §9.4). A dual-stack socket reports an IPv4 peer as IPv4-mapped
+		// IPv6, so compare canonical addresses.
 		// Note that the congestion window will not grow until validation terminates. Helps mitigate
 		// amplification attacks performed by spoofing source addresses.
-		let mut new_path = if remote.is_ipv4() && remote.ip() == self.path.remote.ip() {
+		let mut new_path = if remote.ip().to_canonical() == self.path.remote.ip().to_canonical() {
 			PathData::from_previous(remote, &self.path, self.path_counter)
 		} else {
 			let peer_max_udp_payload_size =
@@ -3722,9 +3779,7 @@ impl Connection {
 		new_path.challenge = Some(Challenge::new(self.rng.random()));
 		let prev_pto = self.pto(SpaceId::Data);
 
-		// The old path's congestion wait ends with it.
-		self.observe_congestion(now, true);
-		let mut prev = mem::replace(&mut self.path, new_path);
+		let mut prev = self.replace_path(now, new_path);
 		self.datagrams().drop_oversized();
 
 		// Don't clobber the original path if the previous one hasn't been validated yet
@@ -3739,6 +3794,15 @@ impl Connection {
 			Timer::PathValidation,
 			now.saturating_add(3 * cmp::max(self.pto(SpaceId::Data), prev_pto)),
 		);
+	}
+
+	/// Make `path` the current path, returning the one it replaces
+	fn replace_path(&mut self, now: Instant, path: PathData) -> PathData {
+		// The old path's congestion wait ends with it.
+		self.observe_congestion(now, true);
+		// A loss the old controller answered cannot show that the new one's response was spurious
+		self.spaces[SpaceId::Data].lost_packets = Default::default();
+		mem::replace(&mut self.path, path)
 	}
 
 	/// Handle a change in the local address, i.e. an active migration
@@ -3859,6 +3923,12 @@ impl Connection {
 
 		// ACK
 		if space.pending_acks.can_send() {
+			// Only a bandwidth probe's duplicates make its packet ack-eliciting, so an ACK, whose
+			// receive timestamps fill the room left, leaves room for one
+			let ack_max_size = match bandwidth_probe {
+				true => max_size.saturating_sub(frame::Stream::SIZE_BOUND + 1),
+				false => max_size,
+			};
 			Self::try_populate_acks(
 				now,
 				self.receiving_ecn,
@@ -3867,7 +3937,7 @@ impl Connection {
 				space,
 				buf,
 				&mut self.stats,
-				max_size,
+				ack_max_size,
 			);
 		}
 
