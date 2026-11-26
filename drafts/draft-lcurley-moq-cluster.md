@@ -97,6 +97,7 @@ Hop IDs SHOULD be unique across the mesh (either random 64-bit values or configu
 
 - **Loop detection**: duplicate *non-zero* Hop IDs in a `HOP_PATH` are a loop; duplicate `0` entries are not. A receiver whose own Hop ID is `0` MUST NOT discard an advertisement merely because its `HOP_PATH` contains `0`.
 - **Filtering**: a peer declaring `0` provides no identity to filter on; the receiver MAY assign a local identity ({{assigned}}).
+- **Forwarding**: no relay can detect a cycle through relays that declared `0`, so a relay that forwards advertisements between peers SHOULD declare a non-zero Hop ID; a mesh where several forwarding relays declare `0` can route a subscription in a loop that only path ranking and `ROUTE_COST` discourage.
 
 ## Assigned Identities {#assigned}
 A receiver MAY assign a local Hop ID to a peer that declared `0` or did not negotiate this extension, solely for local filtering (never written into `HOP_PATH`).
@@ -225,8 +226,8 @@ Wire-visible differences from `moq-cluster-01`: both openmoq implementations low
 
 
 # Security Considerations {#security}
-A Hop ID reveals only what its operator encodes; deployments wanting privacy can use random values or `0` ({{zero}}).
-Because `HOP_PATH` exposes hop count, a relay MAY collapse internal hops into one entry or strip `HOP_PATH` at a trust boundary.
+A Hop ID reveals only what its operator encodes; deployments wanting privacy can use random values, or `0` on endpoints that do not forward ({{zero}}).
+Because `HOP_PATH` exposes hop count, a relay MAY collapse internal hops into one entry, or at a trust boundary restart `HOP_PATH` as `[0, own_hop_id]` as when bridging ({{bridging}}); it never omits `HOP_PATH` on a negotiated session ({{hop-id}}).
 
 Appending to `HOP_PATH` prevents a relay from inflating a competitor's path length, though a peer can under-report its own upstream path or advertise a low `ROUTE_COST` to attract traffic (self-limiting because it must then serve what it attracts).
 A receiver MUST NOT make authorization decisions from Hop IDs, SHOULD clamp or ignore peer `ROUTE_COST` across trust boundaries, and SHOULD bound work triggered beneath broad prefix advertisements.

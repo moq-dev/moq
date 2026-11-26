@@ -113,7 +113,7 @@ type Catalog = {
 }
 ~~~
 
-Every root member and field defined by this document MUST match its specified type and range; a consumer MUST refuse a catalog where a defined member or field has the wrong type, is `null`, or is out of range (except where explicitly treated as absent).
+Every root member and field defined by this document MUST match its specified type and range; a consumer MUST refuse a catalog where a defined member or field has the wrong type, is `null`, or is out of range (except where explicitly treated as absent, and inside an entry skipped for its `version` ({{catalog-version}}), whose other fields a consumer never reads).
 
 Applications MAY add custom root sections using namespaced keys (e.g., reverse-DNS `com.example.telemetry`) and MUST NOT place custom data under keys this document defines.
 Dynamic data belongs in separate tracks ({{data}}), keeping catalog updates rare.
@@ -143,7 +143,7 @@ Consumers MAY configure a decoder once per track from the catalog.
 All other rendition fields (`codedWidth`, `codedHeight`, `bitrate`, `framerate`, `enabled`, `preference`, `color`, `projection`, `stereo`, `layout`, `jitter`, `delay`) and video `display`/`rotation`/`flip` are live state and MAY update in place within their own rules (picture size changes require a keyframe and no out-of-band parameter sets in `description`, within the declared `codec` profile/level).
 
 ## Malformed Renditions {#malformed}
-A consumer MUST refuse a catalog if any `renditions` value is not an object, or if any audio or video rendition is not an object or has a defined field with the wrong type or out of range (unknown fields never make a rendition malformed).
+A consumer MUST refuse a catalog if any `renditions` value is not an object, or if any audio or video rendition it does not skip for its `version` ({{catalog-version}}) is not an object or has a defined field with the wrong type or out of range (unknown fields never make a rendition malformed).
 
 Integer ranges:
 - `codedWidth`, `codedHeight`, `displayAspectWidth`, `displayAspectHeight`, `sampleRate`, `numberOfChannels`: `1..=2^32-1`.

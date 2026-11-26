@@ -78,7 +78,7 @@ export function decoderDescription(codec: string, description: Uint8Array | unde
  * Undefined for Opus, whose packets state their own duration (see `Util.Opus.packetSamples`), and
  * for codecs with no constant. Never learned from observed timestamps.
  */
-export function frameDuration(config: { readonly codec: string; readonly sampleRate: number }): Duration | undefined {
+export function frameDuration(config: FrameConfig): Duration | undefined {
 	const samples = frameSamples(config);
 	if (samples === undefined) return undefined;
 	return Duration.millis((samples * 1000) / config.sampleRate);
@@ -96,18 +96,43 @@ export function packetDuration(codec: string, frame: Container.Frame): Duration 
 	return samples === undefined ? undefined : Duration.millis((samples * 1000) / OPUS_RATE);
 }
 
-function frameSamples(config: { readonly codec: string; readonly sampleRate: number }): number | undefined {
-	switch (Util.Aac.objectType(config.codec)) {
-		case 2:
-			return AAC_LC_FRAME_SAMPLES;
+// A catalog rendition (hex `description`) or the WebCodecs config built from one (bytes).
+type FrameConfig = {
+	readonly codec: string;
+	readonly sampleRate: number;
+	readonly description?: string | AllowSharedBufferSource;
+};
+
+function frameSamples(config: FrameConfig): number | undefined {
+	switch (aacProfile(config)) {
+		case undefined:
+			break;
 		// HE-AAC (v1 and v2) doubles the output rate of its AAC-LC core.
 		case 5:
 		case 29:
 			return AAC_HE_FRAME_SAMPLES;
+		default:
+			return AAC_LC_FRAME_SAMPLES;
 	}
 	if (config.codec === "mp3") {
 		// MPEG-1 Layer III has 1152 samples per frame; MPEG-2/2.5 have 576.
 		return config.sampleRate >= MP3_MPEG1_MIN_SAMPLE_RATE ? MP3_MPEG1_FRAME_SAMPLES : MP3_MPEG2_FRAME_SAMPLES;
 	}
 	return undefined;
+}
+
+// The AAC profile the frames carry, from the codec string, or undefined for other codecs. An
+// `mp4a.40.2` string can still signal SBR or PS behind a sync extension in its AudioSpecificConfig,
+// which then names the profile.
+function aacProfile(config: FrameConfig): number | undefined {
+	const named = Util.Aac.objectType(config.codec);
+	const description = config.description;
+	if (named !== 2 || !description) return named;
+	const bytes =
+		typeof description === "string"
+			? Util.Hex.toBytes(description)
+			: ArrayBuffer.isView(description)
+				? new Uint8Array(description.buffer, description.byteOffset, description.byteLength)
+				: new Uint8Array(description);
+	return Util.Aac.parseConfig(bytes)?.profile ?? named;
 }

@@ -262,12 +262,13 @@ PCRs unwrap into a non-decreasing 64-bit 27 MHz tick count:
 
 - Forward steps up to half the `2^33 * 300` period add directly across wraps (unless exceeding 10 seconds without `discontinuity_indicator`).
 - Flagged forward discontinuities break the timebase and add their step.
-- Backwards steps and unflagged leaps over 10 seconds break the timebase and splice from the prior rate's extrapolated time (floored at the last frame's timestamp).
+- Backwards steps and unflagged leaps over 10 seconds break the timebase and splice from the prior rate's extrapolated time.
+- Either break floors the new timebase at the last frame's timestamp, so timestamps never go back.
 - At any break, prior bytes use the old rate and the new group MUST follow hang's discontinuity marker ({{hang}}).
 
 ## Mapping onto MSFTS {#passthrough-msfts}
 Stripping each frame's timestamp yields {{msfts}} objects with unchanged groups.
-An MSF catalog lists the raw hang-framed `passthrough` track only inside `mpegts`; a converter republishing stripped objects maps fields as follows:
+An MSF catalog lists the `legacy` hang-framed `passthrough` track only inside `mpegts`; a converter republishing stripped objects maps fields as follows:
 
 | MSFTS track field | Value |
 |:--------|:--------|

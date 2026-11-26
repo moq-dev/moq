@@ -89,20 +89,40 @@ describe("objectType", () => {
 
 describe("parseConfig", () => {
 	it("reads AAC-LC", () => {
-		expect(parseConfig(new Uint8Array([0x12, 0x10]))).toEqual({ sampleRate: 44100, numberOfChannels: 2 });
+		expect(parseConfig(new Uint8Array([0x12, 0x10]))).toEqual({
+			profile: 2,
+			sampleRate: 44100,
+			numberOfChannels: 2,
+		});
 	});
 
 	it("reads the escape form audioSpecificConfig writes", () => {
-		expect(parseConfig(audioSpecificConfig(44101, 8))).toEqual({ sampleRate: 44101, numberOfChannels: 8 });
+		expect(parseConfig(audioSpecificConfig(44101, 8))).toEqual({
+			profile: 2,
+			sampleRate: 44101,
+			numberOfChannels: 8,
+		});
 	});
 
 	// A 24 kHz core under explicit SBR or PS plays at the 48 kHz extension rate, PS in stereo.
 	it("reports explicit SBR and PS output", () => {
-		expect(parseConfig(new Uint8Array([0x2b, 0x11, 0x88]))).toEqual({ sampleRate: 48000, numberOfChannels: 2 });
-		expect(parseConfig(new Uint8Array([0xeb, 0x09, 0x88]))).toEqual({ sampleRate: 48000, numberOfChannels: 2 });
+		expect(parseConfig(new Uint8Array([0x2b, 0x11, 0x88]))).toEqual({
+			profile: 5,
+			sampleRate: 48000,
+			numberOfChannels: 2,
+		});
+		expect(parseConfig(new Uint8Array([0xeb, 0x09, 0x88]))).toEqual({
+			profile: 29,
+			sampleRate: 48000,
+			numberOfChannels: 2,
+		});
 		// PS decodes to stereo even when a program config element names the core's channels, and the
 		// element isn't parsed, so this channelConfiguration-0 config without one is still accepted.
-		expect(parseConfig(new Uint8Array([0xeb, 0x01, 0x88]))).toEqual({ sampleRate: 48000, numberOfChannels: 2 });
+		expect(parseConfig(new Uint8Array([0xeb, 0x01, 0x88]))).toEqual({
+			profile: 29,
+			sampleRate: 48000,
+			numberOfChannels: 2,
+		});
 		// A reserved channelConfiguration (8) under PS is refused.
 		expect(parseConfig(new Uint8Array([0xeb, 0x41, 0x88]))).toBeUndefined();
 	});
@@ -111,14 +131,14 @@ describe("parseConfig", () => {
 	it("reports sync extension SBR and PS output", () => {
 		// A 24 kHz stereo core with SBR at 48 kHz.
 		const sbr = new Uint8Array([0x13, 0x10, 0x56, 0xe5, 0x98]);
-		expect(parseConfig(sbr)).toEqual({ sampleRate: 48000, numberOfChannels: 2 });
+		expect(parseConfig(sbr)).toEqual({ profile: 5, sampleRate: 48000, numberOfChannels: 2 });
 		// A 24 kHz mono core with SBR at 48 kHz and PS.
 		const ps = new Uint8Array([0x13, 0x08, 0x56, 0xe5, 0x9d, 0x48, 0x80]);
-		expect(parseConfig(ps)).toEqual({ sampleRate: 48000, numberOfChannels: 2 });
+		expect(parseConfig(ps)).toEqual({ profile: 29, sampleRate: 48000, numberOfChannels: 2 });
 		// sbrPresentFlag clear, or the extension cut short, leaves the core.
 		const absent = new Uint8Array([0x13, 0x10, 0x56, 0xe5, 0x00]);
-		expect(parseConfig(absent)).toEqual({ sampleRate: 24000, numberOfChannels: 2 });
-		expect(parseConfig(sbr.subarray(0, 4))).toEqual({ sampleRate: 24000, numberOfChannels: 2 });
+		expect(parseConfig(absent)).toEqual({ profile: 2, sampleRate: 24000, numberOfChannels: 2 });
+		expect(parseConfig(sbr.subarray(0, 4))).toEqual({ profile: 2, sampleRate: 24000, numberOfChannels: 2 });
 	});
 
 	it("refuses what it can't read", () => {

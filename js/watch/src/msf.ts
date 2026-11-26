@@ -89,7 +89,10 @@ function toVideoConfig(track: Msf.Track): Catalog.VideoConfig | undefined {
 
 // What an AAC AudioSpecificConfig or Opus OpusHead in `init` decodes to, as moq-mux derives it.
 // Undefined for another codec or a config that doesn't parse.
-function codecAudio(codec: string, init: Uint8Array | undefined): Util.Aac.Config | undefined {
+function codecAudio(
+	codec: string,
+	init: Uint8Array | undefined,
+): { sampleRate: number; numberOfChannels: number } | undefined {
 	if (!init) return undefined;
 	if (Util.Aac.objectType(codec) !== undefined) return Util.Aac.parseConfig(init);
 	if (codec !== "opus") return undefined;

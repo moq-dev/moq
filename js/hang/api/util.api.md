@@ -6,6 +6,7 @@ import { Signals } from "@moq/hang";
 export namespace Aac {
 	export interface Config {
 		numberOfChannels: number;
+		profile: number;
 		sampleRate: number;
 	}
 	export const SAMPLE_RATES: readonly number[];
