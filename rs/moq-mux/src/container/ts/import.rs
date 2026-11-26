@@ -4101,6 +4101,8 @@ impl<E: CatalogExt> AacStream<E> {
 	}
 
 	fn discontinuity(&mut self, published: bool) -> Result<()> {
+		// The open group ends where its last frame does, not where the next clock picks up.
+		self.close_group()?;
 		self.desync();
 		if published && let Some(import) = &mut self.import {
 			import.discontinuity()?;
@@ -4160,6 +4162,8 @@ impl<E: CatalogExt> AacStream<E> {
 		if self.import.is_none() {
 			self.reserved.take();
 		}
+		// The last group ends where its last frame does, rather than at an end estimated from cadence.
+		self.close_group()?;
 		if let Some(import) = &mut self.import {
 			import.finish_in_place()?;
 		}
@@ -4228,7 +4232,8 @@ impl OpusStream {
 	}
 
 	fn discontinuity(&mut self, published: bool) -> Result<()> {
-		self.group.take();
+		// The open group ends where its last packet does, not where the next clock picks up.
+		self.close_group()?;
 		if published {
 			self.import.discontinuity()?;
 		}
@@ -4241,6 +4246,8 @@ impl OpusStream {
 	}
 
 	fn finish(&mut self) -> Result<()> {
+		// The last group ends where its last packet does, rather than at an end estimated from cadence.
+		self.close_group()?;
 		Ok(self.import.finish_in_place()?)
 	}
 
@@ -4736,6 +4743,8 @@ impl<E: CatalogExt> LegacyStream<E> {
 	}
 
 	fn discontinuity(&mut self, published: bool) -> Result<()> {
+		// The open group ends where its last frame does, not where the next clock picks up.
+		self.close_group()?;
 		self.desync();
 		if published && let Some(import) = &mut self.import {
 			import.discontinuity()?;
@@ -4798,6 +4807,8 @@ impl<E: CatalogExt> LegacyStream<E> {
 		if self.import.is_none() {
 			self.reserved.take();
 		}
+		// The last group ends where its last frame does, rather than at an end estimated from cadence.
+		self.close_group()?;
 		if let Some(import) = &mut self.import {
 			import.finish_in_place()?;
 		}

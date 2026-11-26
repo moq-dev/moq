@@ -172,8 +172,11 @@ struct AudioStream {
 	config: AudioConfig,
 	/// Where the open group closes.
 	join: crate::container::Join,
-	/// The latest frame's timestamp, whose spacing estimates how long the next frame plays.
+	/// The latest frame's timestamp, whose spacing to the next measures how long frames play.
 	previous: Option<Timestamp>,
+	/// The shortest spacing between frames so far, taken as how long each frame plays: a gap only
+	/// lengthens a spacing, so a frame never ends past the next one's start.
+	spacing: Option<Timestamp>,
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Import<E> {
@@ -584,9 +587,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	/// Write one audio frame, which forwards at once, closing its group once that carries a join.
 	///
-	/// A tag states no duration, so each frame is taken to play as long as the spacing before it. A
-	/// frame a gap or rewind puts outside the open group opens a new one, so the producer checks it
-	/// as a group start.
+	/// A tag states no duration, so each frame is taken to play as long as the shortest spacing
+	/// seen, which a gap can't stretch past the next frame's start. A frame a gap or rewind puts
+	/// outside the open group opens a new one, so the producer checks it as a group start.
 	fn write_audio(&mut self, track_id: u8, data: &[u8], timestamp: u64) -> crate::Result<()> {
 		if !self.audio.contains_key(&track_id) {
 			tracing::debug!("audio frame before config, dropping");
@@ -599,11 +602,24 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// the track set is declared; release the reservation to publish.
 		self.initial_reservation = None;
 		let stream = self.audio.get_mut(&track_id).expect("checked above");
-		let spacing = stream
+		// A tag at the previous one's timestamp adds no time, so a stalled clock would hold one
+		// group open for good. Drop it, as the producer drops a group start that doesn't advance.
+		if stream.previous == Some(timestamp) {
+			stream.track.report_skipped(1);
+			return Ok(());
+		}
+		if let Some(delta) = stream
 			.previous
-			.and_then(|previous| timestamp.checked_sub(previous).ok());
+			.and_then(|previous| timestamp.checked_sub(previous).ok())
+		{
+			stream.spacing = Some(
+				stream
+					.spacing
+					.map_or(delta, |spacing| crate::container::earlier(spacing, delta)),
+			);
+		}
 		stream.previous = Some(timestamp);
-		let end = spacing.and_then(|spacing| timestamp.checked_add(spacing).ok());
+		let end = stream.spacing.and_then(|spacing| timestamp.checked_add(spacing).ok());
 		let result = (|| {
 			if !stream.track.needs_keyframe() && stream.join.opens(timestamp) {
 				stream.track.cut(None)?;
@@ -618,8 +634,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				payload: Bytes::copy_from_slice(data),
 				keyframe,
 			})?;
-			if stream.join.fill(timestamp, end.unwrap_or(timestamp)).is_some() {
-				stream.track.cut(None)?;
+			if let Some(reach) = stream.join.fill(timestamp, end.unwrap_or(timestamp)) {
+				// Bounded where the frames end, so the cut doesn't extrapolate a gap into the next group.
+				stream.track.cut(end.map(|_| reach))?;
 			}
 			Ok(())
 		})();
@@ -758,6 +775,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				config,
 				join: crate::container::Join::default(),
 				previous: None,
+				spacing: None,
 			},
 		);
 		Ok(())

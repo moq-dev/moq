@@ -1291,3 +1291,50 @@ async fn a_changed_sequence_header_waits_for_its_keyframe() {
 	}
 	assert_eq!(starts, [200]);
 }
+
+/// An audio-only FLV of raw AAC frames at `timestamps` (ms).
+fn aac_tags(timestamps: &[u32]) -> Vec<u8> {
+	let mut out = flv_header(0x04);
+	let mut seq = vec![super::AAC_AUDIO_TAG_HEADER, super::AAC_SEQUENCE_HEADER];
+	seq.extend_from_slice(&ASC);
+	write_tag(&mut out, super::TAG_AUDIO, 0, &seq);
+	for &timestamp in timestamps {
+		write_tag(
+			&mut out,
+			super::TAG_AUDIO,
+			timestamp,
+			&[super::AAC_AUDIO_TAG_HEADER, super::AAC_RAW, 0xde, 0xad],
+		);
+	}
+	out
+}
+
+/// Import an audio-only FLV and return its published frame timestamps (µs).
+async fn audio_published(data: &[u8]) -> Vec<u128> {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = Import::new(broadcast, catalog.reserve());
+	importer.decode(data).unwrap();
+	let _finished = importer.finish().unwrap();
+	let snapshot = catalog.snapshot();
+	let mut published = crate::container::test_util::published(&consumer, &snapshot).await;
+	let name = snapshot.audio.renditions.keys().next().unwrap().clone();
+	published.remove(&name).unwrap()
+}
+
+/// Dropped packets leave a gap the group's end doesn't extrapolate, so the packet after it keeps
+/// its own timestamp rather than moving past an end estimated from the gap.
+#[tokio::test]
+async fn an_audio_gap_keeps_the_next_timestamp() {
+	let published = audio_published(&aac_tags(&[0, 20, 80, 100, 120, 140])).await;
+	assert_eq!(published, [0, 20_000, 80_000, 100_000, 120_000, 140_000]);
+}
+
+/// A tag repeating the previous timestamp adds no time, so it is dropped rather than holding a
+/// group open while the clock stalls.
+#[tokio::test]
+async fn a_repeated_audio_timestamp_is_dropped() {
+	let published = audio_published(&aac_tags(&[0, 20, 20, 20, 40])).await;
+	assert_eq!(published, [0, 20_000, 40_000]);
+}
