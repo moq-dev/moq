@@ -16,19 +16,16 @@ permissions:
   contents: read
 
 jobs:
-  # Its context, `Queue build / Build`, is the one main's ruleset requires, so
-  # the group's result is this job's own, with no job after it waiting on a
-  # hosted runner.
   build:
     name: Build
-    # A caller's own event decides this. On a pull request the job skips
-    # without a runner, which reports the required context as passed so GitHub
-    # admits the PR to the queue.
+    # A caller's own event decides this, so a caller run for any other event
+    # still gets no runner.
     if: github.event_name == 'merge_group'
     runs-on: [self-hosted, moq-queue]
     # A merge group is one PR at build concurrency 1; `just ci` takes about 5-15
-    # minutes. Backstop a hang instead of holding the queue.
-    timeout-minutes: 90
+    # minutes. Backstop a hang below the queue's 90-minute response window, so
+    # the report below still drops the group before it expires.
+    timeout-minutes: 80
     env:
       # The diff the dispatcher selects from: the group's base, as the host gate
       # passed its own BASE.
@@ -70,3 +67,31 @@ jobs:
           path: target/cargo-timings/cargo-timing-*.html
           if-no-files-found: ignore
           retention-days: 14
+
+  # The required `Queue` context, reported on the same runners. A reusable
+  # workflow's jobs report as `Queue build / <job>`, so this job posts `Queue`
+  # as a check run, which GitHub attributes to GitHub Actions as main's ruleset
+  # requires. It runs even when the build fails or is cancelled, so the group
+  # drops at once instead of at the queue's timeout. It checks nothing out and
+  # runs no code from the group.
+  report:
+    name: Report Queue
+    needs: build
+    if: always() && github.event_name == 'merge_group'
+    runs-on: [self-hosted, moq-queue]
+    timeout-minutes: 5
+    permissions:
+      checks: write
+    steps:
+      - name: Report the build's result as Queue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          RESULT: ${{ needs.build.result }}
+        run: |
+          conclusion=failure
+          [[ "$RESULT" == success ]] && conclusion=success
+          gh api "repos/$REPO/check-runs" -f name=Queue -f head_sha="$SHA" -f status=completed -f conclusion="$conclusion" \
+            -f 'output[title]=Queue' -f "output[summary]=The queue build ended $RESULT." --silent
+          [[ "$RESULT" == success ]] || { echo "::error::the queue build ended $RESULT" >&2; exit 1; }
