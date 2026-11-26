@@ -508,9 +508,17 @@ export class Subscriber {
 			if (this.#link.cost !== undefined) return this.#link.cost;
 			const peerSetup = this.#peerSetup;
 			if (!peerSetup) throw new Error("no peer SETUP to price the link");
+			// A transport that closes before the SETUP arrives ends the wait too, so a claim handler
+			// waiting on it never holds up the session's teardown.
+			const ended = this.#quic.closed.then(
+				() => Promise.reject(new Error("session closed before the peer's SETUP")),
+				(err: unknown) => Promise.reject(err),
+			);
+			ended.catch(() => {});
 			let setup = peerSetup.peek();
-			while (setup === undefined)
-				setup = await untilAborted(Promise.resolve(Signal.race(peerSetup)), this.#closed.signal);
+			while (setup === undefined) {
+				setup = await untilAborted(race([Signal.race(peerSetup), ended]), this.#closed.signal);
+			}
 			return setup.cost ?? Cost.link;
 		})();
 		return this.#linkCost;
@@ -910,12 +918,16 @@ export class Subscriber {
 					});
 					continue;
 				}
-				// What the peer advertised plus this link's price, ranked at this link's priority.
+				// What the peer advertised plus this link's price, ranked at this link's priority. The
+				// price may wait on the peer's SETUP, which this reader stops waiting for once closed.
+				const link = await race([this.#cost(), announced.closed]);
+				if (link instanceof Error) throw link;
+				if (typeof link !== "bigint") break;
 				const route = this.#drained({
 					instance,
 					epoch,
 					hops: fullHops,
-					cost: Cost.charged(cost ?? Cost.zero, await this.#cost()),
+					cost: Cost.charged(cost ?? Cost.zero, link),
 					priority: this.#link.priority,
 				});
 				const captures = scopeCaptures(scope, path);
