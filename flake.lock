@@ -96,11 +96,11 @@
         "token-max": "token-max"
       },
       "locked": {
-        "lastModified": 1795596993,
-        "narHash": "sha256-ug8Iwt3yLsJVStHZi0wh79v49x8/ICAUdetJBHPmbYE=",
+        "lastModified": 1795664159,
+        "narHash": "sha256-7Jr5K3avL+ew201Rsy0xctHYcKQCAAvUGVOzkk1a9MA=",
         "owner": "kixel-ai",
         "repo": "quest",
-        "rev": "c9f5d035c313030595cabdba1de2a763ba57fbda",
+        "rev": "95296188d5c17d0a96d6da5b2f30b39223cd8943",
         "type": "github"
       },
       "original": {
@@ -112,11 +112,11 @@
     "quest-pinned": {
       "flake": false,
       "locked": {
-        "lastModified": 1795592044,
-        "narHash": "sha256-R7DkZ/0wuzqM5fiQI1/cQKulPPACJzNIJY1gpyhgkr0=",
+        "lastModified": 1795644737,
+        "narHash": "sha256-pBIdZ9uKOU8so/VNeKk5RvQnfJmXKoBYwJfgHIbQtog=",
         "owner": "kixel-ai",
         "repo": "quest",
-        "rev": "556d816002bdf6e8b087346da7c799702158a534",
+        "rev": "8bb9506515a99a2002ee596df6ab2b294948210c",
         "type": "github"
       },
       "original": {
