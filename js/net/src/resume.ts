@@ -2039,7 +2039,8 @@ class Reader implements ResumeSource {
 		// Superseded once the serving copy has a group past the bound.
 		if (copy.since === undefined && end !== undefined && edge !== undefined && edge >= end) copy.since = now();
 		const budget = this.#budget();
-		const wait = grace(Duration.millis(budget));
+		// One whose wire names every start waits for it to, however long that takes.
+		const wait = hooks.provenTrack(copy.sub) ? undefined : grace(Duration.millis(budget));
 		// What is under the bound is past the reader's budget a full budget after a newer group
 		// superseded it, landed or not.
 		if (copy.done === undefined && end !== undefined && !this.#expired(copy, budget)) {
@@ -2070,7 +2071,7 @@ class Reader implements ResumeSource {
 			return "keep";
 		}
 		if (copy.lease > 0) return "keep";
-		const lands = !this.#expired(copy, wait.asMillis());
+		const lands = !this.#expired(copy, wait?.asMillis() ?? Number.POSITIVE_INFINITY);
 		return this.#backs(copy, lands, wait) ? "keep" : undefined;
 	}
 
@@ -2078,7 +2079,7 @@ class Reader implements ResumeSource {
 	 * Whether `copy` holds a group still read, or may yet get it within `wait` when it `lands`: a
 	 * failure of the copy that group is read from continues here.
 	 */
-	#backs(copy: Copy, lands: boolean, wait: Duration): boolean {
+	#backs(copy: Copy, lands: boolean, wait: Duration | undefined): boolean {
 		for (const recover of this.out) {
 			const key = recover.key;
 			if (hooks.holdsGroup(copy.sub, key)) return true;
@@ -2355,6 +2356,12 @@ class Reader implements ResumeSource {
 	// A copy this front replaced may still land a group its serving copy never will, so an outer
 	// front reading this one as a copy waits on every copy still kept, each past where it starts
 	// and under its bound. Mirrors the Rust `Subscriber::may_land`.
+	/** Whether the serving route's copy names every start on its wire. */
+	proven(): boolean {
+		const serving = this.#serving();
+		return serving !== undefined && hooks.provenTrack(serving.sub);
+	}
+
 	mayLand(land: Land): boolean {
 		for (const copy of this.#copies) {
 			const start = copy.backfill || copy.floor === undefined ? land.start : max(land.start, copy.floor);

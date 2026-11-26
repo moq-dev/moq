@@ -26,7 +26,7 @@ import {
 } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
-import { ALPN_05, fillsFromStart, hasLengthFirst, hasRanges, resolvesStart, Version } from "./version.ts";
+import { ALPN_05, fillsFromStart, hasLengthFirst, hasPrevious, hasRanges, resolvesStart, Version } from "./version.ts";
 
 // The subscription's max delay, which is also how long it waits for a group that never arrives.
 const GRACE = Duration.millis(100);
@@ -202,7 +202,9 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		expect(await reader.closed).toBeNull();
 	});
 
-	test("readers hold at a missing group until the grace settles the subscription", async () => {
+	// Lite-07 waits out no grace: its publisher names every start, so no group goes missing unnamed.
+	const graced = hasPrevious(version) ? test.skip : test;
+	graced("readers hold at a missing group until the grace settles the subscription", async () => {
 		// The test advances this clock explicitly, without a wall-clock timer.
 		const clock = new Manual();
 		const installed = clock.install();

@@ -662,8 +662,8 @@ export interface Land {
 	end: bigint;
 	/** Whether the feed was asked to start at `start`: otherwise only from its first arrival. */
 	floor: boolean;
-	/** How long a gap a later arrival opened is waited for. */
-	grace: Duration;
+	/** How long a gap a later arrival opened is waited for, or until it is accounted for when none. */
+	grace: Duration | undefined;
 	/** When given, only a group it lacks counts. */
 	delivered?: Delivered;
 }
@@ -751,6 +751,8 @@ export interface ResumeSource {
 	askUnproven(unproven: Run[]): Run[];
 	/** Whether a group in `land` may still land on a copy this reader keeps; see `hooks.mayLand`. */
 	mayLand(land: Land): boolean;
+	/** Whether the serving route's copy names every start on its wire; see `hooks.provenTrack`. */
+	proven(): boolean;
 	/** Where the run of keys from `key` the serving copy says no group arrives at ends; see `hooks.holeEnd`. */
 	holeEnd(key: bigint, dropped: boolean): bigint | undefined;
 	/** Where the group the serving copy holds whole at `key` ends; see `hooks.wholeEnd`. */
@@ -1062,9 +1064,16 @@ export const hooks: {
 	reportedGroup: (producer: Producer, group: bigint) => void;
 	/**
 	 * How long a session's tail waits for a late group: the subscribers' max delay, bounded by
-	 * the track's max age; assigned by `track.ts`.
+	 * the track's max age, or none on a copy whose wire names every start; assigned by `track.ts`.
 	 */
-	tailGrace: (producer: Producer) => Duration;
+	tailGrace: (producer: Producer) => Duration | undefined;
+	/**
+	 * Mark a received copy whose wire names every start (lite-07), so it waits out no grace for a
+	 * missing group: the wire accounts for it; assigned by `track.ts`.
+	 */
+	proveTrack: (producer: Producer) => void;
+	/** Whether {@link proveTrack} marked the copy a subscriber reads, or its serving route's; assigned by `track.ts`. */
+	provenTrack: (subscriber: Subscriber) => boolean;
 	/** Snapshot the latest group key for wire positioning; assigned by `track.ts`. */
 	latestKey: (subscriber: Subscriber) => bigint | undefined;
 	/** How many groups arrived on the subscriber's copy so far; assigned by `track.ts`. */
@@ -1675,6 +1684,12 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	tailGrace: () => {
+		throw new Error("track.ts not loaded");
+	},
+	proveTrack: () => {
+		throw new Error("track.ts not loaded");
+	},
+	provenTrack: () => {
 		throw new Error("track.ts not loaded");
 	},
 	latestKey: () => {

@@ -93,7 +93,9 @@ export class Ledger {
 	}
 
 	/** Fold every gap at least `grace` old into the runs around it. */
-	expire(at: Instant, grace: Duration): void {
+	expire(at: Instant, grace: Duration | undefined): void {
+		// No grace: a gap is waited for until something accounts for it.
+		if (grace === undefined) return;
 		while (this.#next && at.since(this.#next.since).ge(grace)) {
 			const run = this.#next;
 			const below = this.#runs.lower(run.start);
