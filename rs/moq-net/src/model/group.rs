@@ -2541,7 +2541,6 @@ impl Producer {
 	/// End the group without saying where it ends, returning the [`Finished`] group: every
 	/// frame written still reaches its readers, but they can't tell the group is whole, since
 	/// only [`Self::finish_at`] declares the end a media reader checks against.
-	///
 	/// What a producer that doesn't know its group's end calls, and how a relay ends a
 	/// group that expired or arrived partial. Fails with the abort error if the group was
 	/// already aborted.
@@ -3308,6 +3307,18 @@ impl Handle {
 				(Some(cap), Some(end)) => end <= cap as u64,
 				(Some(_), None) => false,
 			}
+	}
+
+	/// Mark this copy as back-cut at its current frame count (e.g., a lite-07 stream closed
+	/// with bare FIN at a Position End without GROUP_END), so whole-group fetches do not treat
+	/// it as covering frames past its current end.
+	#[cfg(feature = "async")]
+	pub(crate) fn bound_back(&self) {
+		if let Ok(mut state) = modify(&self.state)
+			&& state.range_end.is_none()
+		{
+			state.range_end = Some(state.next_index);
+		}
 	}
 
 	/// Whether this copy was cut short at the back by its transport request.
@@ -4268,6 +4279,13 @@ impl std::ops::Deref for Consumer {
 }
 
 impl Consumer {
+	/// The final frame count once the group has settled (finished or released), or `None`
+	/// while frames may still arrive.
+	#[cfg(feature = "async")]
+	pub(crate) fn settled_frames(&self) -> Option<usize> {
+		self.cursor.state.read().outcome.frames()
+	}
+
 	#[cfg(feature = "async")]
 	pub(crate) fn last_object(&self) -> Option<u64> {
 		let state = self.cursor.state.read();

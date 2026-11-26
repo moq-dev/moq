@@ -179,13 +179,22 @@ struct DatagramEnds {
 	applied: kio::Producer<()>,
 }
 
+/// Where an active subscription routes incoming GROUP streams.
+enum TrackTarget {
+	/// Registered before `TRACK_INFO` lands; incoming groups park until ready.
+	Pending,
+	/// A track copy fed by a normal or recovery `SUBSCRIBE`.
+	Copy(Accepted),
+	/// Lite-07: a single-group bounded fill served via one-shot `SUBSCRIBE`.
+	Fill(FillTarget),
+}
+
 struct TrackEntry {
-	/// Where the subscription's groups go, once its TRACK_INFO says how to read them. A
-	/// SUBSCRIBE sent alongside its TRACK registers before.
-	copy: Option<Accepted>,
-	/// Lite-07: a single-group bounded fill (frame slice, head fill, mid-group start,
-	/// shed-frame flight, or standalone pre-TRACK_INFO fetch) served via one-shot SUBSCRIBE.
-	fill: Option<FillTarget>,
+	/// Where the subscription's groups go, once ready.
+	target: TrackTarget,
+	/// Lite-07: group keys that were ever capped mid-group by a `Position` End on this
+	/// subscription, so a bare FIN without `GROUP_END` marks them back-cut.
+	capped: std::collections::HashSet<u64>,
 	/// The group streams that arrived before the copy, while any wait. Parked groups hold
 	/// group writers, which reach the whole track model: the cell proves `Send` once here, so
 	/// the session driver's proof stays within the default recursion limit.
@@ -217,9 +226,17 @@ impl TrackEntry {
 	fn answered(&mut self, start: Option<u64>, first: Option<Position>) {
 		self.start = self.start.or(start);
 		self.first = self.first.or(first);
-		if let (Some(start), Some(first), Some(copy)) = (self.start, self.first, &mut self.copy) {
+		if let (Some(start), Some(first), TrackTarget::Copy(copy)) = (self.start, self.first, &mut self.target) {
 			copy.producer.set_live_from(first, Some(start));
 		}
+	}
+
+	fn mark_capped(&mut self, group: u64) {
+		self.capped.insert(group);
+	}
+
+	fn is_capped(&self, group: u64) -> bool {
+		self.capped.contains(&group)
 	}
 }
 
@@ -261,12 +278,16 @@ enum ReadyOpen {
 	Fill(Reading),
 }
 
+/// The track copy or one-shot fill owning an opened group stream.
+enum OpenedTarget {
+	Copy(Box<track::Producer>),
+	Fill(track::FillReaders, i8),
+}
+
 /// A group stream's group, opened in its subscription's copy (or fill) for the stream to fill.
 struct Opened {
 	group: crate::recv::Group,
-	track: Option<track::Producer>,
-	/// For a one-shot SUBSCRIBE fill: the fill's readers and priority.
-	readers: Option<(track::FillReaders, i8)>,
+	target: OpenedTarget,
 	framing: lite::Framing,
 	reading: Reading,
 }
@@ -321,8 +342,11 @@ impl Drop for ParkWait {
 impl TrackEntry {
 	fn new(copy: Option<Accepted>, tail: kio::Producer<Tail>) -> Self {
 		Self {
-			copy,
-			fill: None,
+			target: match copy {
+				Some(copy) => TrackTarget::Copy(copy),
+				None => TrackTarget::Pending,
+			},
+			capped: Default::default(),
 			parked: None,
 			tail,
 			start: None,
@@ -333,12 +357,12 @@ impl TrackEntry {
 
 	/// Whether the entry already has a target (either a track copy or a single-group fill).
 	fn is_ready(&self) -> bool {
-		self.copy.is_some() || self.fill.is_some()
+		!matches!(self.target, TrackTarget::Pending)
 	}
 
 	/// Give a single-group fill target to the subscription, unparking any waiting group streams.
 	fn accept_fill(&mut self, fill: FillTarget) {
-		self.fill = Some(fill);
+		self.target = TrackTarget::Fill(fill);
 		let Some(parked) = self.parked.clone() else {
 			return;
 		};
@@ -357,12 +381,15 @@ impl TrackEntry {
 
 	/// Take the fill's request if no group stream has accepted it yet.
 	fn take_fill_request(&mut self) -> Option<track::GroupFill> {
-		self.fill.as_mut()?.request.take()
+		match &mut self.target {
+			TrackTarget::Fill(fill) => fill.request.take(),
+			_ => None,
+		}
 	}
 
 	/// Whether a fill entry still holds its unaccepted request.
 	fn fill_pending(&self) -> bool {
-		self.fill.as_ref().is_some_and(|fill| fill.request.is_some())
+		matches!(&self.target, TrackTarget::Fill(fill) if fill.request.is_some())
 	}
 
 	#[cfg(test)]
@@ -389,7 +416,7 @@ impl TrackEntry {
 
 	/// Give the copy to the subscription, opening the groups of the streams parked on it.
 	fn accept(&mut self, copy: Accepted, version: Version, now: crate::time::Instant) {
-		self.copy = Some(copy);
+		self.target = TrackTarget::Copy(copy);
 		let Some(parked) = self.parked.clone() else {
 			return;
 		};
@@ -448,12 +475,13 @@ impl TrackEntry {
 
 	/// Open the group of a stream whose header is `hdr` in the copy or fill.
 	fn open(&mut self, hdr: &lite::Group, version: Version, now: crate::time::Instant) -> Result<Open, Error> {
-		if self.fill.is_some() {
-			let reading = Reading::open(&self.tail, Some(hdr.key), now);
-			return Ok(Open::Fill(reading));
-		}
-		let Some(Accepted { producer, .. }) = &mut self.copy else {
-			return Err(Error::Cancel);
+		let producer = match &mut self.target {
+			TrackTarget::Fill(_) => {
+				let reading = Reading::open(&self.tail, Some(hdr.key), now);
+				return Ok(Open::Fill(reading));
+			}
+			TrackTarget::Copy(Accepted { producer, .. }) => producer,
+			TrackTarget::Pending => return Err(Error::Cancel),
 		};
 		let group_info = group::Info { start: hdr.key };
 		// Stats (groups/frames/bytes) are counted in the model as the group
@@ -477,11 +505,10 @@ impl TrackEntry {
 		version: Version,
 		now: crate::time::Instant,
 	) -> Result<Open, Error> {
-		if self.fill.is_some() {
-			return Ok(Open::Fill(reading));
-		}
-		let Some(Accepted { producer, .. }) = &mut self.copy else {
-			return Err(Error::Cancel);
+		let producer = match &mut self.target {
+			TrackTarget::Fill(_) => return Ok(Open::Fill(reading)),
+			TrackTarget::Copy(Accepted { producer, .. }) => producer,
+			TrackTarget::Pending => return Err(Error::Cancel),
 		};
 		let group_info = group::Info { start: hdr.key };
 		let received = producer.create_group_at(group_info, hdr.frame_start, 0..0);
@@ -489,7 +516,7 @@ impl TrackEntry {
 	}
 
 	fn open_fill(&mut self, hdr: &lite::Group, reading: Reading) -> Result<Opened, Error> {
-		let Some(fill) = &mut self.fill else {
+		let TrackTarget::Fill(fill) = &mut self.target else {
 			return Err(Error::Cancel);
 		};
 		let Some(request) = fill.request.take() else {
@@ -508,8 +535,7 @@ impl TrackEntry {
 		match request.accept_from(fill.info.clone(), bounds) {
 			Ok(Some(producer)) => Ok(Opened {
 				group: crate::recv::Group::new(producer),
-				track: None,
-				readers: Some((readers, priority)),
+				target: OpenedTarget::Fill(readers, priority),
 				framing: fill.framing,
 				reading,
 			}),
@@ -526,7 +552,7 @@ impl TrackEntry {
 		reading: Reading,
 		now: crate::time::Instant,
 	) -> Result<Open, Error> {
-		let Some(Accepted { producer, .. }) = &mut self.copy else {
+		let TrackTarget::Copy(Accepted { producer, .. }) = &mut self.target else {
 			return Err(Error::Cancel);
 		};
 		// A route's first group says where its live feed is, when its answer does
@@ -559,7 +585,7 @@ impl TrackEntry {
 		reading: Reading,
 		now: crate::time::Instant,
 	) -> Result<Open, Error> {
-		let Some(Accepted { producer, .. }) = &self.copy else {
+		let TrackTarget::Copy(Accepted { producer, .. }) = &self.target else {
 			return Err(Error::Cancel);
 		};
 		let received = producer.create_group_at(group::Info { start: hdr.key }, hdr.frame_start, 0..0);
@@ -575,7 +601,7 @@ impl TrackEntry {
 		reading: Reading,
 		now: crate::time::Instant,
 	) -> Result<Open, Error> {
-		let Some(Accepted { producer, framing }) = &self.copy else {
+		let TrackTarget::Copy(Accepted { producer, framing }) = &self.target else {
 			return Err(Error::Cancel);
 		};
 		let group = match received {
@@ -613,8 +639,7 @@ impl TrackEntry {
 		};
 		Ok(Open::Group(Opened {
 			group: crate::recv::Group::new(group),
-			track: Some(producer.clone()),
-			readers: None,
+			target: OpenedTarget::Copy(Box::new(producer.clone())),
 			framing: *framing,
 			reading,
 		}))
@@ -1070,7 +1095,9 @@ impl SubscriptionCleanup {
 		for (_, mut entry) in self.0.lock().drain() {
 			// A track still waiting on TRACK_INFO has no copy yet: its request rejects with
 			// the session's end instead.
-			let Some(Accepted { producer, .. }) = entry.copy.take() else {
+			let TrackTarget::Copy(Accepted { producer, .. }) =
+				std::mem::replace(&mut entry.target, TrackTarget::Pending)
+			else {
 				continue;
 			};
 			if entry.tail.read().is_ended() {
@@ -1650,18 +1677,16 @@ impl GroupRecv {
 		};
 		let Opened {
 			group,
-			track,
-			readers,
+			target,
 			framing,
 			reading,
 		} = opened;
 		let records: bool = ietf && framing.ietf.is_some();
-		let (priority, order) = match (&track, &readers) {
-			(Some(track), _) => track
+		let (priority, order) = match &target {
+			OpenedTarget::Copy(track) => track
 				.subscription()
 				.map_or((0, Default::default()), |sub| (sub.priority, sub.order)),
-			(None, Some((_, priority))) => (*priority, Default::default()),
-			(None, None) => (0, Default::default()),
+			OpenedTarget::Fill(_, priority) => (*priority, Default::default()),
 		};
 		self.reader
 			.set_priority(crate::priority::recv_group(priority, hdr.key, order));
@@ -1670,8 +1695,7 @@ impl GroupRecv {
 		// SUBSCRIBE_OK to wait on.
 		// Guarded: dropping this machine mid-group is a cancellation, not a clean end.
 		let group: crate::recv::Group = group;
-		let track: Option<track::Producer> = track;
-		let readers: Option<(track::FillReaders, i8)> = readers;
+		let target: OpenedTarget = target;
 		let clock = lite::Clock::new(self.subscriber.version, hdr.key);
 		let mut ingest: FrameIngest = FrameIngest::new(framing, records, hdr.frame_start, clock);
 		let reading: Reading = reading;
@@ -1679,7 +1703,7 @@ impl GroupRecv {
 		// Filling the group, bailing if the track or group dies first. The track or group
 		// dying cancels the stream; the peer's own close arrives through the ingest's reads.
 		let res = wait!(Serve => {
-			if let Some(track) = &track
+			if let OpenedTarget::Copy(track) = &target
 				&& let Poll::Ready(err) = track.poll_aborted(waiter)
 			{
 				Poll::Ready(Err(err))
@@ -1694,7 +1718,7 @@ impl GroupRecv {
 					&& group.check_end(end).is_ok()
 				{
 					reading.account(hdr.key..end, self.subscriber.runtime.now());
-					if let Some(track) = &track {
+					if let OpenedTarget::Copy(track) = &target {
 						track.skip_groups(hdr.key.saturating_add(1)..end);
 					}
 				}
@@ -1703,7 +1727,7 @@ impl GroupRecv {
 				match ingest.poll(&mut self.reader, group, waiter) {
 					Poll::Ready(res) => Poll::Ready(res),
 					Poll::Pending => {
-						if let Some((readers, _)) = &readers
+						if let OpenedTarget::Fill(readers, _) = &target
 							&& readers.poll_unwanted(waiter).is_ready()
 							&& group.handle().poll_unwanted(waiter).is_ready()
 							&& group.handle().abort_unwanted(Error::Cancel)
@@ -1723,13 +1747,23 @@ impl GroupRecv {
 			// track records them skipped, as its own publisher's append did.
 			Ok(end) => {
 				// Only a GROUP_END the group accepts accounts for its span: one below a frame it
-				// holds is malformed, and names nothing.
-				let ended = group.end(end);
+				// holds is malformed, and names nothing. A bare FIN on a group that was capped
+				// mid-group by a Position End marks the copy back-cut so switch-back fetches the
+				// remaining frames rather than reusing the truncated slice.
+				let capped = end.is_none()
+					&& self.subscriber.version.has_group_end()
+					&& !records && self
+					.subscriber
+					.subscribes
+					.lock()
+					.get(&hdr.subscribe)
+					.is_some_and(|entry| entry.is_capped(hdr.key));
+				let ended = if capped { group.end_slice() } else { group.end(end) };
 				if ended.is_ok()
 					&& let Some(end) = end
 				{
 					reading.account(hdr.key..end, self.subscriber.runtime.now());
-					if let Some(track) = &track {
+					if let OpenedTarget::Copy(track) = &target {
 						track.skip_groups(hdr.key.saturating_add(1)..end);
 					}
 				}
@@ -8193,7 +8227,7 @@ mod tests {
 					.subscribes
 					.lock()
 					.get(&0)
-					.is_some_and(|entry| entry.copy.is_none()),
+					.is_some_and(|entry| !entry.is_ready()),
 				"{version}: registered with its copy pending"
 			);
 			assert!((&mut waiting).now_or_never().is_none(), "{version}: no TRACK_INFO yet");
@@ -13317,6 +13351,11 @@ impl TrackServe {
 							// One restating what is live tells the publisher nothing, as when a join's
 							// tick moves while its probe is still unanswered: joins coalesce.
 							if edit != live || terms != (active.priority, active.order, active.max_delay) {
+								if let Some(cap) = subscription.cap.filter(|cap| cap.frame != 0)
+									&& let Some(entry) = self.subscriber.subscribes.lock().get_mut(&active.id)
+								{
+									entry.mark_capped(cap.group);
+								}
 								buffer_update(active, edit)?;
 							}
 						}
@@ -13541,6 +13580,9 @@ impl TrackServe {
 			tail.follow(&copy.producer, track::budget(max_age));
 		}
 		let mut entry = TrackEntry::new(copy, tail.clone());
+		if let Some(cap) = subscription.cap.filter(|cap| cap.frame != 0) {
+			entry.mark_capped(cap.group);
+		}
 		let version = self.subscriber.version;
 		if version.has_datagrams() && !version.has_datagram_tracks() {
 			entry.legacy = Some((self.path.clone(), self.name.clone()));
@@ -16941,10 +16983,7 @@ impl kio::Task for SubFillRun {
 								return Poll::Ready(());
 							}
 							self.state = SubFillState::Drain {
-								settle: Box::new(
-									Settle::new(&self.serve.subscriber.runtime, self.tail.consume())
-										.at_most(crate::tail::GRACE),
-								),
+								settle: Box::new(Settle::new(&self.serve.subscriber.runtime, self.tail.consume())),
 							};
 						}
 						Recv::Malformed(err) => {

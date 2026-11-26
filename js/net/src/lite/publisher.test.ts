@@ -5807,6 +5807,16 @@ test("lite-07 one-shot SUBSCRIBE Position matches exact group and closes frame s
 		expect(sliceResponses.some((r) => "start" in r && r.start.start === 0n)).toBe(true);
 		expect(sliceResponses.some((r) => "drop" in r)).toBe(false);
 
+		// 3b) Group finished at exact Position End [Position(0, 0), Position(0, 4)) STILL emits GROUP_END + FIN.
+		const exactEndGroup = readGroup();
+		const exactEndResponses = await oneShot(4n, { absolute: 0n, frame: 0 }, { absolute: 0n, frame: 4 });
+		const exactEnd = await exactEndGroup;
+		expect(exactEnd.header.key).toBe(0n);
+		expect(exactEnd.frames).toEqual(["f0", "f1", "f2", "f3"]);
+		expect(exactEnd.sawGroupEnd).toBe(true);
+		expect(exactEndResponses.some((r) => "start" in r && r.start.start === 0n)).toBe(true);
+		expect(exactEndResponses.some((r) => "drop" in r)).toBe(false);
+
 		// 4) Delayed subscriber FIN (arriving after SUBSCRIBE, as on WebTransport/QUIC when
 		// write and close land in separate STREAM frames) still hands off to one-shot fetch
 		// and triggers the track's fill handler.

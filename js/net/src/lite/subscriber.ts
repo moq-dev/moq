@@ -1787,7 +1787,7 @@ export class Subscriber {
 			// Before lite-07, the effective max delay is the stopgap grace: the wrong clock (it
 			// bounds presentation-time drift), but it is how long the subscriber was willing to wait
 			// for a late group anyway, and no longer than the publisher keeps one fresh.
-			tail: new Tail({ grace: () => hooks.tailGrace(producer) }),
+			tail: new Tail({ grace: () => (hasSkip(this.version) ? undefined : hooks.tailGrace(producer)) }),
 			requested: msg.startGroup,
 			floor: msg.startGroup,
 			asked: [...asked.ranges],
@@ -2137,7 +2137,7 @@ export class Subscriber {
 				staleCap: key + 1n,
 				compress: info.compress,
 				timescale: info.timescale ?? 0,
-				tail: new Tail({ grace: () => GRACE }),
+				tail: new Tail({ grace: () => undefined }),
 				requested: key,
 				floor: key,
 				asked: [],
@@ -2147,7 +2147,7 @@ export class Subscriber {
 				joinTicks: new Map(),
 				joinBudgets: new Map(),
 				sent: 0,
-				stream: { kind: "fin", responses: Promise.resolve() },
+				stream: { kind: "setup" },
 				filling: true,
 				fillIds: new Set(),
 				probeIds: new Set(),
@@ -2161,6 +2161,7 @@ export class Subscriber {
 			registered = true;
 
 			const responses = this.#readFetchSubscribe(stream, entry, key, target);
+			entry.stream = { kind: "fin", responses: responses.catch(() => {}) };
 			void responses.catch((err: unknown) => {
 				if (!target.taken) arrived.reject(error(err));
 			});
@@ -2225,11 +2226,12 @@ export class Subscriber {
 				}
 			}
 			// Publisher FIN'd cleanly; wait for the uni Group Stream if not yet arrived or still reading.
+			// Lite-07 names every start with no grace timer.
 			if (!target.taken && refused === undefined) {
 				const drained = new Once<null>();
 				const covered = () => target.taken || entry.tail.covers(key, key + 1n);
 				try {
-					await entry.tail.settle(covered, drained, GRACE);
+					await entry.tail.settle(covered, drained);
 				} finally {
 					drained.set(null);
 				}
@@ -2237,7 +2239,7 @@ export class Subscriber {
 			if (entry.tail.reading) {
 				const drained = new Once<null>();
 				try {
-					await entry.tail.settle(() => true, drained, GRACE);
+					await entry.tail.settle(() => true, drained);
 				} finally {
 					drained.set(null);
 				}
@@ -2526,7 +2528,7 @@ export class Subscriber {
 			staleCap: capOf(live),
 			compress: copy.compress,
 			timescale: copy.timescale,
-			tail: new Tail({ grace: () => hooks.tailGrace(producer) }),
+			tail: new Tail({ grace: () => (hasSkip(this.version) ? undefined : hooks.tailGrace(producer)) }),
 			requested: msg.startGroup,
 			floor: msg.startGroup,
 			asked: ranges,
@@ -2700,11 +2702,14 @@ export class Subscriber {
 					await responses;
 					// The publisher FINs once done (unprompted before lite-07, or in reply to our
 					// one-shot FIN on lite-07), before every uni Group Stream it opened may have
-					// landed: wait for those, at most the grace, before refusing what is left.
+					// landed: wait for those before refusing what is left (no grace timer on lite-07).
 					if (!covered() || entry.tail.reading) {
 						const drained = new Once<null>();
 						try {
-							await race([entry.tail.settle(covered, drained, GRACE), leaving]);
+							await race([
+								entry.tail.settle(covered, drained, hasSkip(this.version) ? undefined : GRACE),
+								leaving,
+							]);
 						} finally {
 							drained.set(null);
 						}

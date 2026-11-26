@@ -3902,10 +3902,15 @@ impl Recover {
 			.poll(waiter, |route| route.moved_past(self.generation))
 			.is_ready()
 		{
-			// A route that returned serves the copy being read again, which the reader reuses.
-			// Closed routes stay ready forever, so they end the wait like a conclusion.
+			// A route that returned serves the copy being read again, which the reader reuses
+			// for a stalled group. A group that closed short (e.g. bare FIN at a Position End
+			// cap while another route served) will not resume on the same subscription, so
+			// recover by fetching the remaining frames from the serving route.
 			let route = self.route.consumer().read();
-			if route.phase.terminal() || !route.copy.as_ref().is_some_and(|copy| copy.same_channel(&self.copy)) {
+			if matches!(cause, Cause::Closed)
+				|| route.phase.terminal()
+				|| !route.copy.as_ref().is_some_and(|copy| copy.same_channel(&self.copy))
+			{
 				return true;
 			}
 			self.generation = route.generation;
@@ -4140,7 +4145,7 @@ impl Recover {
 		// failed delivered it already, so its subscription will not again.
 		let same = generation == self.generation;
 		match serving.poll_group(self.key, waiter) {
-			Poll::Ready(Ok(Some(group))) if !same => {
+			Poll::Ready(Ok(Some(group))) if !same && !serving.same_channel(&self.copy) => {
 				lend_head(&self.handoff, self.key, serving, &group);
 				let group = group.with_range(index..);
 				if group.index() == index {

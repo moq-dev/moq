@@ -1478,6 +1478,7 @@ export const hooks: {
 	/** Whether a group counts as content: its first frame landed, or it ended. */
 	/** The next absolute frame this reader can serve. Assigned by `group.ts`. */
 	groupIndex: (group: GroupConsumer) => number;
+	groupSettledFrames: (group: GroupConsumer) => number | undefined;
 	groupStarted: (group: GroupConsumer) => boolean;
 	/** The first frame this copy begins at: past 0 for one missing its head. */
 	groupFirstFrame: (group: GroupConsumer) => number;
@@ -2002,6 +2003,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	groupIndex: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupSettledFrames: () => {
 		throw new Error("group.ts not loaded");
 	},
 	groupStarted: () => {

@@ -139,6 +139,15 @@ impl Group {
 		}
 	}
 
+	/// Close a lite-07 group that ended with bare FIN (no GROUP_END) under a mid-group
+	/// Position End cap, marking it back-cut so a later switch-back fetches the remaining
+	/// frames rather than reusing the truncated slice.
+	pub fn end_slice(self) -> Result<(), Error> {
+		self.handle.bound_back();
+		let _ = self.finish();
+		Ok(())
+	}
+
 	/// Abort with the receive error instead of cancellation.
 	pub fn abort(mut self, err: Error) -> Result<(), Error> {
 		self.armed = false;

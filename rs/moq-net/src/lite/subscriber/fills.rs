@@ -1018,7 +1018,8 @@ impl Recovery {
 						}
 						// The publisher FINs in reply to ours. On one-shot SUBSCRIBE+FIN, QUIC does
 						// not order the bidi FIN behind uni Group Streams, so wait for any stream
-						// still arriving/reading before removing the subscription entry.
+						// still arriving/reading before removing the subscription entry. Lite-07
+						// names every start without a grace timer.
 						Recv::Ended if *finished => {
 							let settled = {
 								let tail = active.tail.read();
@@ -1027,10 +1028,12 @@ impl Recovery {
 							if settled {
 								self.end(StreamError::NotFound);
 							} else {
-								*draining = Some(Box::new(
-									Settle::new(&self.serve.subscriber.runtime, active.tail.consume())
-										.at_most(crate::tail::GRACE),
-								));
+								let settle = Settle::new(&self.serve.subscriber.runtime, active.tail.consume());
+								let settle = match version.has_skip() {
+									true => settle,
+									false => settle.at_most(crate::tail::GRACE),
+								};
+								*draining = Some(Box::new(settle));
 							}
 						}
 						// Or once it finished the track, before every stream it opened landed.

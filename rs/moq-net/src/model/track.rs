@@ -8498,6 +8498,26 @@ impl Consumer {
 		})
 	}
 
+	/// Non-blocking snapshot of this hop's live edge (`Some((position, ended))` when known,
+	/// `None` when unknown, e.g. a relay copy whose upstream has not answered yet).
+	#[cfg(feature = "async")]
+	pub(crate) fn live_edge(&self) -> Option<(Option<Position>, bool)> {
+		self.with_state(|state| {
+			let state = state?;
+			let state = state.read();
+			if let Some(routes) = state.routes.clone() {
+				drop(state);
+				return routes.serving()?.live_edge();
+			}
+			if !state.readable() {
+				return None;
+			}
+			let pos = state.largest();
+			let ended = pos.is_some_and(|p| state.cache.largest_finished(p));
+			Some((pos, ended))
+		})
+	}
+
 	/// Poll for a largest frame within `bounds` newer than `seen`, recording it there. A
 	/// front's logical track follows the route serving it. Reads the instance served now
 	/// without asking for it, so a broadcast serving nothing under the name ends the stream.

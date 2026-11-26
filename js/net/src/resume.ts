@@ -2946,8 +2946,10 @@ class Recover implements GroupRecover {
 					throw given.error;
 				}
 				waits.push(...given.changed);
-				// A newer copy's track caches it: continue from there.
-				if (!failed && generation !== current.generation) {
+				// A newer copy's track caches it: continue from there. On switch-back to the same
+				// copy (whose group closed short under a Position End cap), skip its cached copy
+				// and fetch the remaining frames from `index`.
+				if (!failed && generation !== current.generation && serving !== current) {
 					const cached = hooks.cachedGroup(serving.sub, this.key, index);
 					if (cached) return this.#replacement(cached, serving);
 				}

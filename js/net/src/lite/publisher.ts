@@ -3188,12 +3188,16 @@ export class Publisher {
 
 			for (;;) {
 				// Lite-07: reaching a Position end closes the stream cleanly without GROUP_END
-				// (a slice, not the whole group) instead of parking open.
+				// (a slice, not the whole group) instead of parking open. If the group itself
+				// already finished at or before `nextIndex`, let the read below observe EOF so
+				// GROUP_END is still sent.
 				const nextIndex = hooks.groupIndex(group);
 				const stopBefore = stops?.at.peek().get(group.start);
+				const settled = hooks.groupSettledFrames(group);
 				if (
-					(stopBefore !== undefined && nextIndex >= stopBefore) ||
-					(endFrame !== undefined && nextIndex > endFrame)
+					((stopBefore !== undefined && nextIndex >= stopBefore) ||
+						(endFrame !== undefined && nextIndex > endFrame)) &&
+					(settled === undefined || settled > nextIndex)
 				) {
 					break;
 				}

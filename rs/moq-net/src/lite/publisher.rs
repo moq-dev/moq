@@ -3282,6 +3282,7 @@ fn single_group_position(msg: &lite::Subscribe<'_>, version: Version) -> Option<
 enum OneShotFetch {
 	Fetch {
 		msg: Box<lite::Subscribe<'static>>,
+		track: track::Consumer,
 		group: u64,
 		start_frame: u64,
 		end_frame: Option<u64>,
@@ -3326,6 +3327,7 @@ impl OneShotFetch {
 			.into_inner();
 		Self::Fetch {
 			msg: Box::new(msg),
+			track,
 			group,
 			start_frame,
 			end_frame,
@@ -3333,6 +3335,14 @@ impl OneShotFetch {
 			resolved: None,
 			fetching,
 			fetched: None,
+		}
+	}
+
+	fn edge(track: &track::Consumer) -> lite::Edge {
+		match track.live_edge() {
+			None => lite::Edge::Unknown,
+			Some((Some(position), ended)) => lite::Edge::Largest(lite::Largest { position, ended }),
+			Some((None, _)) => lite::Edge::Empty,
 		}
 	}
 
@@ -3346,6 +3356,7 @@ impl OneShotFetch {
 			match self {
 				Self::Fetch {
 					msg,
+					track,
 					group: key,
 					start_frame,
 					end_frame,
@@ -3379,15 +3390,15 @@ impl OneShotFetch {
 					let key = *key;
 					let start_frame = *start_frame;
 					let end_frame = *end_frame;
+					let largest = Self::edge(track);
 					let result = fetched.take().expect("checked above");
 					match result {
 						Ok(group) => {
-							let group = group.with_range(start_frame..);
-							if group.index() != start_frame {
+							if !group.fetches_from(start_frame) {
 								writer.buffer(&lite::SubscribeResponse::Start(lite::SubscribeStart {
 									id: 0,
 									start: Some(key),
-									largest: lite::Edge::Unknown,
+									largest,
 								}))?;
 								writer.buffer(&lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(
 									key..key.saturating_add(1),
@@ -3396,7 +3407,7 @@ impl OneShotFetch {
 								)))?;
 								return Poll::Ready(Ok(ControlFlow::Break(())));
 							}
-							let group = group.with_end(end_frame);
+							let group = group.with_end(end_frame).fetching_from(start_frame);
 							let track_info = resolved.as_ref().expect("resolved above");
 							let stamp = Stamp::new(shared.version, track_info.timescale);
 							let publisher = track_info.priority;
@@ -3435,7 +3446,7 @@ impl OneShotFetch {
 							writer.buffer(&lite::SubscribeResponse::Start(lite::SubscribeStart {
 								id: 0,
 								start: Some(key),
-								largest: lite::Edge::Unknown,
+								largest,
 							}))?;
 							let serve = GroupServe::new(ctx, key, start_frame, end_frame, rank, group);
 							*self = Self::Open {
@@ -3459,7 +3470,7 @@ impl OneShotFetch {
 							writer.buffer(&lite::SubscribeResponse::Start(lite::SubscribeStart {
 								id: 0,
 								start: Some(key),
-								largest: lite::Edge::Unknown,
+								largest,
 							}))?;
 							writer.buffer(&lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(
 								key..key.saturating_add(1),
@@ -7630,13 +7641,14 @@ fn poll_stop(
 }
 
 /// Whether a lite-07 stream of `group` reached its Position End before its next frame,
-/// `unsent` frames of the batch read behind the cursor.
+/// `unsent` frames of the batch read behind the cursor. A group already settled at or
+/// before `next` still proceeds so `buffer_group_end` emits GROUP_END.
 fn stopped(version: Version, end: Option<u64>, group: &group::Consumer, unsent: usize) -> bool {
 	let Some(end) = end.filter(|_| version.has_ranges()) else {
 		return false;
 	};
 	let next = group.index() - unsent as u64;
-	next >= end
+	next >= end && group.settled_frames().is_none_or(|frames| frames as u64 > next)
 }
 
 /// Buffer GROUP_END once a lite-07 stream without the `ietf` extension's object records read
@@ -12197,6 +12209,82 @@ mod serve_group_test {
 		assert!(bytes.windows(4).any(|w| w == b"aaaa"));
 		assert!(bytes.windows(4).any(|w| w == b"bbbb"));
 		assert!(!bytes.windows(4).any(|w| w == b"cccc"));
+		assert!(streams.resets().is_empty());
+	}
+
+	/// A finished group of N frames requested with exclusive End at Position(G, N) still emits
+	/// GROUP_END (because the group finished at End, not past it), whereas one with more
+	/// frames past End closes with bare FIN without GROUP_END.
+	#[kio::test]
+	async fn lite07_position_end_at_exact_finish_emits_group_end() {
+		let decode_records = |mut buf: &[u8]| -> (Vec<Vec<u8>>, Option<u64>) {
+			let mut frames = Vec::new();
+			let mut group_end = None;
+			while !buf.is_empty() {
+				let size = crate::coding::decode_buf(&mut buf, Version::Lite07, |r, _| r.varint()).unwrap();
+				if size == 0 {
+					let delta = crate::coding::decode_buf(&mut buf, Version::Lite07, |r, _| r.varint()).unwrap();
+					group_end = Some(delta);
+				} else {
+					let size = size as usize;
+					let mut body = &buf[..size];
+					let _ = crate::coding::decode_buf(&mut body, Version::Lite07, |r, _| r.varint()).unwrap();
+					frames.push(body.to_vec());
+					buf = &buf[size..];
+				}
+			}
+			(frames, group_end)
+		};
+
+		let track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::default(),
+		);
+		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+		group.write_frame(Timestamp::unscaled(0), b"aaaa".as_slice()).unwrap();
+		group.write_frame(Timestamp::unscaled(0), b"bbbb".as_slice()).unwrap();
+		group.finish_at(1000).unwrap();
+
+		// End at exact frame count (2): delivers both frames AND GROUP_END(1000).
+		let exact = lite::Range {
+			start: Some(lite::Anchor::Absolute(track::Position::new(0, 0))),
+			end: Some(lite::Anchor::Absolute(track::Position::new(0, 2))),
+		};
+		let bounds = Bounds::new(&[exact], None);
+		let subscriber = track.subscribe(track::Subscription::default().with_ranges(bounds.ranges.iter().copied()));
+		let streams = Log::default();
+		let (run, mut writer, _log) = lite07_run(SinkSession::new(streams.clone()), subscriber);
+		let mut run = TrackRun::new(run.ctx, run.track, bounds, 0, run.steer_tx);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		let (_, bytes) = group_stream(&streams, Version::Lite07, 0).expect("group 0 is served");
+		let (frames, group_end) = decode_records(&bytes);
+		assert_eq!(frames, vec![b"aaaa".to_vec(), b"bbbb".to_vec()]);
+		assert_eq!(
+			group_end,
+			Some(1000),
+			"group finishing at exact Position End must emit GROUP_END"
+		);
+		assert!(streams.resets().is_empty());
+
+		// End before frame count (1): delivers only frame 0 and closes with bare FIN (no GROUP_END).
+		let partial = lite::Range {
+			start: Some(lite::Anchor::Absolute(track::Position::new(0, 0))),
+			end: Some(lite::Anchor::Absolute(track::Position::new(0, 1))),
+		};
+		let bounds = Bounds::new(&[partial], None);
+		let subscriber = track.subscribe(track::Subscription::default().with_ranges(bounds.ranges.iter().copied()));
+		let streams = Log::default();
+		let (run, mut writer, _log) = lite07_run(SinkSession::new(streams.clone()), subscriber);
+		let mut run = TrackRun::new(run.ctx, run.track, bounds, 0, run.steer_tx);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		let (_, bytes) = group_stream(&streams, Version::Lite07, 0).expect("group 0 is served");
+		let (frames, group_end) = decode_records(&bytes);
+		assert_eq!(frames, vec![b"aaaa".to_vec()]);
+		assert_eq!(
+			group_end, None,
+			"group truncated before its end must close with bare FIN without GROUP_END"
+		);
 		assert!(streams.resets().is_empty());
 	}
 

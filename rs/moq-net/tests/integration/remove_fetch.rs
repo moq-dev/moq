@@ -310,33 +310,50 @@ async fn relay_deduplicates_fetch_onto_active_subscribe_and_recovers_after_evict
 		assert_eq!(count_bidi(&upstream.client_transport, SUBSCRIBE), 1);
 		assert_eq!(count_bidi(&upstream.client_transport, FETCH), 0);
 
-		// Group 3 is published while the live SUBSCRIBE is active. A concurrent fetch_group(3)
-		// deduplicates onto that active SUBSCRIBE (no extra upstream SUBSCRIBE, no FETCH).
+		// Group 3 starts streaming live (still open!) while the live SUBSCRIBE is active.
+		// A concurrent fetch_group(3) before g3 finishes deduplicates onto that active
+		// SUBSCRIBE (no extra upstream SUBSCRIBE, no FETCH).
 		let mut g3 = track.create_group(moq_net::group::Info { start: 3 }).unwrap();
-		g3.write_frame(Timestamp::from_millis(3000).unwrap(), b"g3".as_slice())
+		g3.write_frame(Timestamp::from_millis(3000).unwrap(), b"g3-f0".as_slice())
 			.unwrap();
-		g3.finish().unwrap();
 
-		let mut fetched3 = kio::clock::timeout(TIMEOUT, remote.track("video").unwrap().fetch_group(3, None))
-			.await
-			.expect("fetch_group(3) timeout")
-			.unwrap();
-		let f3 = kio::clock::timeout(TIMEOUT, fetched3.read_frame())
-			.await
-			.expect("read f3 timeout")
-			.unwrap()
-			.expect("g3 frame");
-		assert_eq!(f3.payload.as_ref(), b"g3");
-		let live3 = kio::clock::timeout(TIMEOUT, live.recv_group())
+		let mut live3 = kio::clock::timeout(TIMEOUT, live.recv_group())
 			.await
 			.expect("live g3 timeout")
 			.unwrap()
 			.expect("live g3");
 		assert_eq!(live3.start, 3);
+		let live3_f0 = kio::clock::timeout(TIMEOUT, live3.read_frame())
+			.await
+			.expect("live g3 f0 timeout")
+			.unwrap()
+			.expect("g3 f0");
+		assert_eq!(live3_f0.payload.as_ref(), b"g3-f0");
+
+		let mut fetched3 = kio::clock::timeout(TIMEOUT, remote.track("video").unwrap().fetch_group(3, None))
+			.await
+			.expect("fetch_group(3) timeout")
+			.unwrap();
+		g3.write_frame(Timestamp::from_millis(3100).unwrap(), b"g3-f1".as_slice())
+			.unwrap();
+		g3.finish().unwrap();
+
+		let f3_0 = kio::clock::timeout(TIMEOUT, fetched3.read_frame())
+			.await
+			.expect("read f3_0 timeout")
+			.unwrap()
+			.expect("g3 f0");
+		assert_eq!(f3_0.payload.as_ref(), b"g3-f0");
+		let f3_1 = kio::clock::timeout(TIMEOUT, fetched3.read_frame())
+			.await
+			.expect("read f3_1 timeout")
+			.unwrap()
+			.expect("g3 f1");
+		assert_eq!(f3_1.payload.as_ref(), b"g3-f1");
 		assert_eq!(
 			count_bidi(&upstream.client_transport, SUBSCRIBE),
 			1,
-			"fetch deduplicates onto the active upstream SUBSCRIBE"
+			"in-flight live group fetch deduplicates onto the active upstream SUBSCRIBE"
 		);
 		assert_eq!(count_bidi(&upstream.client_transport, FETCH), 0);
 		drop((fetched3, live3));
