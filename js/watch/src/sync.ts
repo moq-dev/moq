@@ -735,7 +735,10 @@ export class Sync {
 			const inStep = lo <= at && at <= hi;
 			member.margin.set(!inStep);
 			if (!inStep) return;
-			nested.set(this.#joined, Duration.millis(at - ours), undefined);
+			// Forced: an earlier reference already moved the clock's delay, and the group's delay
+			// lands again even when it equals the last one, as for the member setting the playhead.
+			this.#joined.set(Duration.millis(at - ours), true);
+			nested.cleanup(() => this.#joined.set(undefined));
 			nested.set(out.outOfSync, false, true);
 		});
 	}

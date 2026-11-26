@@ -943,6 +943,27 @@ describe("group", () => {
 		for (const { sync } of [a, b, { sync: group }]) sync.close();
 	});
 
+	it("brings the member setting the playhead back to its target when its reference moves earlier", async () => {
+		for (const delay of ["auto", Duration.millis(300)] as Delay[]) {
+			const group = new Sync({ delay });
+			const a = member(group, 1000);
+			const b = member(group, 1000);
+			await flush();
+			a.video.received(Duration.millis(1000), at(5000));
+			b.video.received(Duration.millis(1000), at(5100));
+			await flush();
+			const target = delay === "auto" ? 20 : 300;
+			expect(b.sync.out.delay.peek()).toEqual(Duration.millis(target));
+
+			// B, which sets the playhead, gets a frame 50ms faster: the wall moves up with it.
+			b.video.received(Duration.millis(1100), at(5150));
+			await flush();
+			expect(b.sync.out.delay.peek()).toEqual(Duration.millis(target));
+			expect(a.sync.out.delay.peek()).toEqual(Duration.millis(target + 50));
+			for (const { sync } of [a, b, { sync: group }]) sync.close();
+		}
+	});
+
 	it("refuses members of a group whose fixed delay is past its cap", async () => {
 		const delay = new Signal<Delay>(Duration.secs(2));
 		const group = new Sync({ delay, cap: Duration.secs(1) });
