@@ -1008,12 +1008,14 @@ impl Connection {
 					}
 				}
 
-				datagram_cleared = ack_eliciting || padded || close || self.spaces[space_id].loss_probes > 0;
+				// ACKs going alone are no probe, so they leave the probe to a later datagram
+				let probe = !held && self.spaces[space_id].loss_probes > 0;
+				datagram_cleared = ack_eliciting || padded || close || probe;
 
 				// Allocate space for another datagram
-				let next_datagram_size_limit = match self.spaces[space_id].loss_probes {
-					0 => segment_size,
-					_ => {
+				let next_datagram_size_limit = match probe {
+					false => segment_size,
+					true => {
 						self.spaces[space_id].loss_probes -= 1;
 						// Clamp the datagram to at most the minimum MTU to ensure that loss probes
 						// can get through and enable recovery even if the path MTU has shrank
@@ -1123,6 +1125,7 @@ impl Connection {
 						buf,
 						&mut self.stats,
 						builder.max_size - frame::ConnectionClose::SIZE_BOUND,
+						0,
 					);
 				}
 
@@ -2031,6 +2034,9 @@ impl Connection {
 		let mut ack_eliciting_acked = false;
 		// Newly acknowledged packets sent marked on this path, which the peer's ECN counts cover
 		let mut ecn_acked = 0;
+		// Whether any newly acknowledged packet went out on an earlier path, whose marks the
+		// counts may also hold
+		let mut prior_path_acked = false;
 		let mut acked = mem::take(&mut self.acked);
 		acked.clear();
 		for packet in newly_acked.elts() {
@@ -2044,7 +2050,9 @@ impl Connection {
 					self.spaces[space].pending_acks.subtract_below(acked);
 				}
 				ack_eliciting_acked |= info.ack_eliciting;
-				ecn_acked += u64::from(info.ecn && info.path_generation == self.path.generation());
+				let this_path = info.path_generation == self.path.generation();
+				ecn_acked += u64::from(info.ecn && this_path);
+				prior_path_acked |= !this_path;
 
 				// Notify MTU discovery that a packet was acked, because it might be an MTU probe
 				let mtu_updated = self.path.mtud.on_acked(space, packet, info.size);
@@ -2052,8 +2060,9 @@ impl Connection {
 					self.path.congestion.on_mtu_update(self.path.mtud.current_mtu());
 				}
 
-				// Packet numbers repeat across spaces, and only 1-RTT packets carry ACK_FREQUENCY
-				if space == SpaceId::Data && info.retransmits.get().is_some_and(|x| x.ack_frequency) {
+				// Packet numbers repeat across spaces, and only 1-RTT packets carry ACK_FREQUENCY. A
+				// probe may have taken the packet's retransmits, so its own frames go unrecorded.
+				if space == SpaceId::Data {
 					self.ack_frequency.on_acked(packet);
 				}
 
@@ -2107,8 +2116,7 @@ impl Connection {
 				// of newly acked packets that remains well-defined in the presence of arbitrary packet
 				// reordering.
 				if new_largest {
-					let sent = self.spaces[space].largest_acked_packet_sent;
-					self.process_ecn(now, space, ecn_acked, ecn, sent);
+					self.process_ecn(now, space, ecn_acked, ecn, prior_path_acked);
 				}
 			} else if ecn_acked > 0 {
 				// A marked packet acknowledged without counts means the marks went unseen
@@ -2160,15 +2168,9 @@ impl Connection {
 		}
 	}
 
-	/// Process a new ECN block from an in-order ACK
-	fn process_ecn(
-		&mut self,
-		now: Instant,
-		space: SpaceId,
-		newly_acked: u64,
-		ecn: frame::EcnCounts,
-		largest_sent_time: Instant,
-	) {
+	/// Process a new ECN block from an in-order ACK, which also acknowledged packets sent on an
+	/// earlier path when `prior_path`
+	fn process_ecn(&mut self, now: Instant, space: SpaceId, newly_acked: u64, ecn: frame::EcnCounts, prior_path: bool) {
 		match self.spaces[space].detect_ecn(newly_acked, ecn) {
 			Err(e) => {
 				debug!("halting ECN due to verification failure: {}", e);
@@ -2178,11 +2180,13 @@ impl Connection {
 				self.spaces[space].ecn_feedback = frame::EcnCounts::ZERO;
 			}
 			Ok(false) => {}
+			// The marks may be the earlier path's, whose controller this path's never answers for
+			Ok(true) if prior_path => debug!("CE marks may belong to an earlier path"),
 			Ok(true) => {
 				self.stats.path.congestion_events += 1;
 				self.path.congestion.on_ce(congestion::Ce {
 					now,
-					sent: largest_sent_time,
+					sent: self.spaces[space].largest_acked_packet_sent,
 				});
 			}
 		}
@@ -2465,7 +2469,7 @@ impl Connection {
 						self.streams.retransmit(frame);
 					}
 				}
-				if pn_space == SpaceId::Data && info.retransmits.get().is_some_and(|x| x.ack_frequency) {
+				if pn_space == SpaceId::Data {
 					self.ack_frequency.on_lost(packet);
 				}
 				self.spaces[pn_space].pending |= info.retransmits;
@@ -3905,8 +3909,9 @@ impl Connection {
 		// Only 1-RTT ACKs carry receive timestamps, and the Data space sends no 0-RTT ACK
 		let mut timestamps = self.receive_timestamps.as_mut().filter(|_| space_id == SpaceId::Data);
 
-		// ACK
+		// ACK, its receive timestamps leaving half the room to the frames that follow
 		if space.pending_acks.can_send() {
+			let reserve = if ack_eliciting { (max_size - buf.len()) / 2 } else { 0 };
 			Self::try_populate_acks(
 				now,
 				self.receiving_ecn,
@@ -3916,6 +3921,7 @@ impl Connection {
 				buf,
 				&mut self.stats,
 				max_size,
+				reserve,
 			);
 		}
 
@@ -4110,6 +4116,7 @@ impl Connection {
 				buf,
 				&mut self.stats,
 				max_size,
+				0,
 			);
 		}
 
@@ -4123,6 +4130,8 @@ impl Connection {
 	///
 	/// This method assumes ACKs are pending, and should only be called if
 	/// `!PendingAcks::ranges().is_empty()` returns `true`.
+	///
+	/// Receive timestamps leave `reserve` bytes free for the frames that follow.
 	#[expect(
 		clippy::too_many_arguments,
 		reason = "an associated function, so a caller can lend it disjoint fields of the connection"
@@ -4136,6 +4145,7 @@ impl Connection {
 		buf: &mut Vec<u8>,
 		stats: &mut Stats,
 		max_size: usize,
+		reserve: usize,
 	) {
 		debug_assert!(!space.pending_acks.ranges().is_empty());
 
@@ -4156,7 +4166,8 @@ impl Connection {
 		frame::Ack::encode(delay as _, ranges, ecn, report, buf);
 		// The Receive Timestamps field takes a byte for its count at least; with no room for it,
 		// the ACK goes without the field
-		if report && buf.len() >= max_size {
+		let room = max_size.saturating_sub(reserve).saturating_sub(buf.len());
+		if report && room == 0 {
 			report = false;
 			buf.truncate(no_acks_len);
 			frame::Ack::encode(delay as _, ranges, ecn, false, buf);
@@ -4168,7 +4179,7 @@ impl Connection {
 		}
 		if let Some(log) = timestamps {
 			if report {
-				log.encode(ranges, max_size - buf.len(), buf);
+				log.encode(ranges, room, buf);
 			}
 			log.clear();
 		}
@@ -5058,9 +5069,9 @@ mod tests {
 		}
 	}
 
-	/// An ACK whose ranges leave no room for the Receive Timestamps field goes out plain rather
-	/// than not at all, one with room reports what fits, and either way the log forgets every
-	/// arrival the ACK covered
+	/// An ACK whose ranges leave no room for the Receive Timestamps field, or only room reserved for
+	/// other frames, goes out plain rather than not at all, one with room reports what fits, and
+	/// either way the log forgets every arrival the ACK covered
 	#[test]
 	fn ack_fits_receive_timestamps_to_its_room() {
 		let now = Instant::now();
@@ -5074,10 +5085,11 @@ mod tests {
 			frame::Ack::encode(0, &ranges, None, timestamps, &mut buf);
 			buf.len()
 		};
-		for (room, ty, reported) in [
-			(header(true), frame::FrameType::ACK, 0),
-			(header(true) + 1, frame::FrameType::ACK_RECEIVE_TIMESTAMPS, 0),
-			(1200, frame::FrameType::ACK_RECEIVE_TIMESTAMPS, 3),
+		for (room, reserve, ty, reported) in [
+			(header(true), 0, frame::FrameType::ACK, 0),
+			(header(true) + 1, 0, frame::FrameType::ACK_RECEIVE_TIMESTAMPS, 0),
+			(1200, 0, frame::FrameType::ACK_RECEIVE_TIMESTAMPS, 3),
+			(1200, 1200 - header(true), frame::FrameType::ACK, 0),
 		] {
 			let mut log = receive_timestamps::Log::new(32, 0);
 			for pn in [0, 2, 4] {
@@ -5094,9 +5106,10 @@ mod tests {
 				&mut buf,
 				&mut Stats::default(),
 				room,
+				reserve,
 			);
-			assert_eq!(sent.largest_acked, Some(4), "room {room}");
-			assert!(buf.len() <= room, "room {room}");
+			assert_eq!(sent.largest_acked, Some(4), "room {room}, reserve {reserve}");
+			assert!(buf.len() <= room, "room {room}, reserve {reserve}");
 			let frames = frame::Iter::new(buf.into())
 				.unwrap()
 				.collect::<Result<Vec<_>, _>>()
@@ -5104,13 +5117,13 @@ mod tests {
 			let [Frame::Ack(ack)] = &frames[..] else {
 				panic!("incorrect frames {frames:?}");
 			};
-			assert_eq!(frames[0].ty(), ty, "room {room}");
+			assert_eq!(frames[0].ty(), ty, "room {room}, reserve {reserve}");
 			assert_eq!(
 				ack.receive_timestamps().map_or(0, Iterator::count),
 				reported,
-				"room {room}"
+				"room {room}, reserve {reserve}"
 			);
-			assert!(!log.any(&ranges), "room {room}");
+			assert!(!log.any(&ranges), "room {room}, reserve {reserve}");
 		}
 	}
 }
