@@ -52,7 +52,7 @@ deliberate `a_time_start_the_groups_cant_place_is_looked_up` and
 Decided 2026-11-25 (maintainer, /quest-run): a publisher answers a range with a start, never "no
 group to deliver", whenever it dropped keys in it, so a copy waits for those drops rather than
 handing out a later group first (rejected: the copy waits on every key of a range answered empty).
-Built on the lite-07 Previous Delta wire, which changes how a copy learns a range is empty.
+Built on the lite-07 wire of [moq-dev/moq#9626](https://github.com/moq-dev/moq/pull/9626), where `GROUP_END` and `SUBSCRIBE_SKIP` tell a copy a range is empty.
 
 What a broad first attempt found, on top of [moq-dev/moq#9639](https://github.com/moq-dev/moq/pull/9639):
 
@@ -76,8 +76,8 @@ the later group, before the front-drop fix lands.
 
 ## Waiting
 
-- moq-dev/moq: [moq-dev/moq#9626](https://github.com/moq-dev/moq/pull/9626) (lite-07 Previous Delta) lands, since the publisher's answer for a range with dropped keys is built on its wire; check that the PR is merged.
+- moq-dev/moq: [moq-dev/moq#9626](https://github.com/moq-dev/moq/pull/9626) (lite-07 zero-timer accounting) lands, since the publisher's answer for a range with dropped keys is built on its wire; check that the PR is merged.
 
 ## Related
 
-- [Previous Delta](/quest/m2/lite07-subscribe/previous-delta.md) - the wire this work builds on, in [moq-dev/moq#9626](https://github.com/moq-dev/moq/pull/9626).
+- [Remove lite-07 stall timers: GROUP_END and SUBSCRIBE_SKIP name every empty start](/quest/m2/lite07-subscribe/previous-delta.md) - the wire this work builds on, in [moq-dev/moq#9626](https://github.com/moq-dev/moq/pull/9626).

@@ -38,4 +38,4 @@ Public API: breaking change (moves `priority` and `order` from `Subscription` on
 
 ## Required
 
-- [Replace lite-07 SUBSCRIBE_SKIP and stall timers with Previous Delta](/quest/m2/lite07-subscribe/previous-delta.md) - per-range accounting builds on Previous Delta and the removal of SUBSCRIBE_SKIP
+- [Remove lite-07 stall timers: GROUP_END and SUBSCRIBE_SKIP name every empty start](/quest/m2/lite07-subscribe/previous-delta.md) - per-range accounting builds on its GROUP_END and SUBSCRIBE_SKIP gap accounting

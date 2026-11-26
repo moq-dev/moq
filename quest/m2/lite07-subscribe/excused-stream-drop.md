@@ -14,4 +14,4 @@ Start by reproducing the hang with the bound removed: a browser-style publisher 
 
 ## Required
 
-- [Replace lite-07 SUBSCRIBE_SKIP and stall timers with Previous Delta](/quest/m2/lite07-subscribe/previous-delta.md) - names every plainly reset group in a drop
+- [Remove lite-07 stall timers: GROUP_END and SUBSCRIBE_SKIP name every empty start](/quest/m2/lite07-subscribe/previous-delta.md) - names every plainly reset group in a drop

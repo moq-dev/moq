@@ -35,4 +35,4 @@ Public API: none (public `fetch_group` / `fetch_range` methods stay, backed by `
 
 ## Required
 
-- [Replace lite-07 SUBSCRIBE_SKIP and stall timers with Previous Delta](/quest/m2/lite07-subscribe/previous-delta.md) - bounded SUBSCRIBE relies on data-layer gap accounting and clean group stream termination
+- [Remove lite-07 stall timers: GROUP_END and SUBSCRIBE_SKIP name every empty start](/quest/m2/lite07-subscribe/previous-delta.md) - bounded SUBSCRIBE relies on its gap accounting and clean group stream termination

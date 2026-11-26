@@ -6,7 +6,7 @@ When a moq-transport copy finishes its track (`Producer::finish_shared`, reached
 
 ## Plan
 
-Audit finding `S12` from the 2026-11-24 subscribe/fetch audit, moved out of [Replace lite-07 SUBSCRIBE_SKIP and stall timers with Previous Delta](/quest/m2/lite07-subscribe/previous-delta.md): lite-07 copies never reach `finish_shared`, and the lite-07 epic leaves `moq-transport` out of scope.
+Audit finding `S12` from the 2026-11-24 subscribe/fetch audit, moved out of [Remove lite-07 stall timers: GROUP_END and SUBSCRIBE_SKIP name every empty start](/quest/m2/lite07-subscribe/previous-delta.md): lite-07 copies never reach `finish_shared`, and the lite-07 epic leaves `moq-transport` out of scope.
 
 `finish_shared` (`rs/moq-net/src/model/track.rs`) clears the declared end's tail only when that end has no error and sits exactly at `Position::group(next_key())`:
 

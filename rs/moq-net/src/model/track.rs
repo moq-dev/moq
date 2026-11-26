@@ -16099,8 +16099,8 @@ mod test {
 	}
 
 	/// A received copy places and ends an ordered read between two groups only on what its feed
-	/// proves: a hole it may still land waits, and the starts between skipped, as a GROUP's
-	/// Previous Start says, place its start at the lower group and end it.
+	/// proves: a hole it may still land waits, and the starts between skipped, as a
+	/// SUBSCRIBE_SKIP says, place its start at the lower group and end it.
 	#[cfg(feature = "async")]
 	#[test]
 	fn a_time_end_between_received_groups_ends_only_once_proven() {
