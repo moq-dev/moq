@@ -586,6 +586,37 @@ test("a closed track releases the groups past a held group its live join never p
 	expect(items(ordered)).toEqual(["group 4"]);
 });
 
+// Mirrors the Rust `a_held_group_drains_before_the_tracks_abort`.
+test("a held group drains before the track's abort", async () => {
+	const producer = anchoredTrack();
+	const ordered = producer.subscribe(withMax({ delay: { max: null } })).ordered();
+	put(producer, 0n);
+	drop(producer, 1n, 2n);
+	put(producer, 2n);
+	expect(ordered.tryNextItem()?.group?.start).toBe(0n);
+	expect(ordered.tryNextItem()).toMatchObject({ kind: "gap", start: 1n, end: 2n });
+	const error = new StreamError(StreamCode.NotFound);
+	producer.abort(error);
+	expect((await ordered.nextItem())?.group?.start).toBe(2n);
+	await expect(ordered.nextItem()).rejects.toBe(error);
+});
+
+// Mirrors the Rust `a_held_groups_successor_rules_out_a_time_start_past_it`.
+test("a held group's successor rules out a time start past it", () => {
+	const producer = anchoredTrack();
+	const ordered = producer.subscribe(withMax({ delay: { max: null } })).ordered();
+	put(producer, 0n);
+	drop(producer, 1n, 2n);
+	put(producer, 2n);
+	producer.skipGroups(3n, 4n);
+	put(producer, 4n);
+	expect(ordered.tryNextItem()?.group?.start).toBe(0n);
+	expect(ordered.tryNextItem()).toMatchObject({ kind: "gap", start: 1n, end: 2n });
+	// Group 4 starts at time 4, so time 5 lies in it or later, never in group 2.
+	ordered.update(withMax({ delay: { max: null }, ranges: [{ start: 4n }, { start: 5n }] }));
+	expect(items(ordered)).toEqual(["group 4"]);
+});
+
 // Mirrors the Rust `a_held_group_a_waiting_time_start_lies_past_is_passed`.
 test("a group held behind a gap is passed once an update's waiting time start lies past its end", () => {
 	const producer = receivedTrack();

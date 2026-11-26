@@ -6184,8 +6184,10 @@ export class Subscriber {
 				}
 				// Only placed ranges count: a live join still waiting on a first group names every key.
 				const keep = this.#placed(held.start);
-				if (!keep && !this.#mayHold(held.start, held.end)) break;
-				if (!driven) {
+				// Without an end of its own, a later group's start bounds it.
+				if (!keep && !this.#mayHold(held.start, held.end ?? this.#successorStart(held.start))) break;
+				// A closed track drains what it holds before its abort, so this group goes out first.
+				if (!driven && this.#state.closed.peek() === undefined) {
 					driven = true;
 					const read = this.#tryNextGroup(held.start);
 					if (read.kind === "group" || read.kind === "error") {
@@ -6225,6 +6227,20 @@ export class Subscriber {
 		// Once the track closed, nothing places a range any more.
 		if (this.#state.closed.peek() !== undefined) return false;
 		return (this.#resume ? this.#resume.window() : this.#window).mayHold(key, end);
+	}
+
+	// Where the first group buffered past `key` starts presenting, in the track's timescale: no group
+	// spans another's start, so group `key` ends there at the latest. Mirrors the Rust
+	// `TrackState::successor_start`.
+	#successorStart(key: bigint): bigint | undefined {
+		const scale = this.#state.info.peek()?.timescale;
+		if (scale == null || this.#resume) return undefined;
+		for (const group of this.#state.groups.peek()) {
+			if (group.start <= key) continue;
+			const start = hooks.groupTimestamp(group);
+			if (start !== undefined) return BigInt(floorAt(start, scale));
+		}
+		return undefined;
 	}
 
 	// Whether the placed ranges and the bounds name group `key`. Mirrors the Rust `Subscriber::held`.

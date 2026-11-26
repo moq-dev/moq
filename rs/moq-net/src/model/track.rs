@@ -2647,6 +2647,14 @@ impl TrackState {
 		slot.group.timestamp()
 	}
 
+	/// Where the first group held past `key` starts presenting, in the track's timescale: no
+	/// group spans another's start, so group `key` ends there at the latest.
+	fn successor_start(&self, key: u64) -> Option<u64> {
+		let scale = self.timescale()?;
+		(self.lookup.range(key.checked_add(1)?..))
+			.find_map(|(_, slot)| Some(self.started_at(slot)?.convert(scale).ok()?.value()))
+	}
+
 	/// Where group `key` ends, once its producer finished it whole: what bounds its reach
 	/// without a successor (see [`group::Producer::finish_at`]).
 	fn own_end(&self, key: u64) -> Option<Timestamp> {
@@ -12969,7 +12977,13 @@ impl Subscriber {
 				if let Some(err) = cursor.filter.refused.clone() {
 					return Held::Refused(err);
 				}
-				judge(&cursor.filter.window)
+				// Without an end of its own, a later group's start bounds it.
+				let end = end.or_else(|| cursor.state.read().successor_start(key));
+				let window = &cursor.filter.window;
+				(
+					window.placed(from).next().map(|run| *run.start()),
+					within && window.may_hold(key, end),
+				)
 			}
 			// Its own window, which spans every copy, places a range once a copy does.
 			Inner::Resume(resume, _) => resume.with_window(judge),
@@ -13867,8 +13881,9 @@ impl Ordered {
 					// group past it: one below goes first, and a failure its copies report, such as
 					// a front's serving copy refusing a range, comes before it. Waiting, it is parked
 					// there, and on the group finishing, whose end may rule the range out; then
-					// judged again, so a change meanwhile is not missed.
-					Held::Keep | Held::Placing if !driven => {
+					// judged again, so a change meanwhile is not missed. A closed track drains what
+					// it holds before its abort, so this group goes out first.
+					Held::Keep | Held::Placing if !driven && !self.inner.is_closed() => {
 						driven = true;
 						let _ = group.poll_closed(waiter);
 						let admit = (ops::Bound::Unbounded, ops::Bound::Excluded(key));
@@ -18819,6 +18834,53 @@ mod test {
 			.unwrap();
 		assert_eq!(held_next(&mut ordered), None, "the join may start at group 2");
 		drop(producer.finish().unwrap());
+		assert_eq!(held_next(&mut ordered), Some(Ok(4)));
+	}
+
+	/// A held group the ranges cover goes out before the track's abort, as a closed track
+	/// drains what it holds first.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_held_group_drains_before_the_tracks_abort() {
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		let mut ordered = producer.subscribe(Subscription::default().with_max(None)).ordered();
+		write_group(&producer, 0);
+		producer.drop_groups(1..2, StreamError::NotFound);
+		write_group(&producer, 2);
+		assert_eq!(held_next(&mut ordered), Some(Ok(0)));
+		assert_eq!(held_next(&mut ordered), Some(Err(1..2)));
+		producer.abort(Error::NotFound).unwrap();
+		assert_eq!(held_next(&mut ordered), Some(Ok(2)));
+		assert!(matches!(ordered.next_item().now_or_never(), Some(Err(Error::NotFound))));
+	}
+
+	/// A later group's start rules out a time start past it for a held group with no end of
+	/// its own, so the held group is passed rather than holding back a group another range
+	/// covers.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_held_groups_successor_rules_out_a_time_start_past_it() {
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		let mut ordered = producer.subscribe(Subscription::default().with_max(None)).ordered();
+		write_group(&producer, 0);
+		producer.drop_groups(1..2, StreamError::NotFound);
+		write_group(&producer, 2);
+		producer.skip_groups(3..4);
+		write_group(&producer, 4);
+		assert_eq!(held_next(&mut ordered), Some(Ok(0)));
+		assert_eq!(held_next(&mut ordered), Some(Err(1..2)));
+		let both = Subscription::default()
+			.with_ranges([4, 5].map(|time| Range {
+				start: crate::track::Start::Time(time),
+				end: None,
+			}))
+			.with_max(None);
+		ordered.update(both).unwrap();
+		// Group 4 starts at time 4, so time 5 lies in it or later, never in group 2.
 		assert_eq!(held_next(&mut ordered), Some(Ok(4)));
 	}
 
