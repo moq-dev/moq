@@ -34,7 +34,7 @@ import type {
 } from "./track.ts";
 import { max, min } from "./util/key.ts";
 import * as Varint from "./varint.ts";
-import type { Budget, Holdings, Resolved } from "./window.ts";
+import type { Budget, Holdings, Resolved, Window } from "./window.ts";
 import type { Advertised, Advertisements } from "./wire.ts";
 
 /** A null {@link Live.max} in milliseconds, which the model holds as the largest value every peer can read. */
@@ -538,8 +538,12 @@ export type Recv =
 	| { kind: "boundary" }
 	/** The producer finished and the buffer is drained. Nothing can follow. */
 	| { kind: "done" }
-	/** The track aborted. */
-	| { kind: "error"; error: Error };
+	/**
+	 * The read failed: the track aborted, or, `refused`, the reader's ranges can't be served until
+	 * they change, which a front's copy reports so the front does not take it for the track's end.
+	 * Mirrors the Rust `track::Failure`.
+	 */
+	| { kind: "error"; error: Error; refused?: true };
 
 /** A package-internal frame read as the group stores it. */
 export interface ReadGroupFrame {
@@ -683,7 +687,7 @@ export interface ResumeSource {
 	 * The next group not in `delivered`, in arrival or sequence order, without waiting. With
 	 * `dispositions`, a run no copy may still deliver is reported once as a `drop`.
 	 */
-	tryGroup(ordered: boolean, delivered: Delivered, dispositions: boolean): Recv;
+	tryGroup(ordered: boolean, delivered: Delivered, dispositions: boolean, admit?: bigint): Recv;
 	/**
 	 * The next run no copy may still deliver, reported once as a `drop`, without taking a group.
 	 * Below `passing`, which a key-order read is about to pass, no copy can deliver one later.
@@ -714,6 +718,10 @@ export interface ResumeSource {
 	forgetPast(delivered: Delivered, budget: Budget, keep?: bigint): void;
 	/** The lowest group any copy holds unread that `delivered` lacks; see `hooks.lowestBuffered`. */
 	lowestBuffered(delivered: Delivered): bigint | undefined;
+	/** The first key any copy holds past `key`; see `hooks.keyAfter`. */
+	keyAfter(key: bigint): bigint | undefined;
+	/** Why a copy still serving refuses the reader's ranges; see `hooks.refused`. */
+	refused(): Error | undefined;
 	/**
 	 * Forget every copy's report of `[start, end)`, so the copy serving when the reader's ranges ask
 	 * for it again reports it again. Mirrors the Rust `Reader::untell`.
@@ -739,8 +747,10 @@ export interface ResumeSource {
 	resolved(): (Resolved | undefined)[];
 	/** Where a live join this reader placed at `placed` starts under `budget` milliseconds, on the serving copy. */
 	joinStart(placed: bigint, budget: number): bigint;
-	/** The runs of `[start, end)` the serving copy reads, undefined without one. */
-	runs(start: bigint, end: bigint): Run[] | undefined;
+	/** The runs of `[start, end)` the reader's ranges name, across every copy. */
+	runs(start: bigint, end: bigint): Run[];
+	/** The reader's own window, which spans every copy, synced. */
+	window(): Window;
 	/** Whether a time start the serving copy still waits to place holds back a gap; see `hooks.gapHeld`. */
 	gapHeld(at: bigint, end: bigint): boolean;
 	/** Whether a route's copy serves the reader now. */
@@ -1205,8 +1215,11 @@ export const hooks: {
 	 * below it, else the first in the subscription's Group Order. `floor` passes keys taken on other copies.
 	 */
 	peekGroup: (subscriber: Subscriber, ordered: boolean, floor?: bigint) => bigint | undefined;
-	/** Take the next group in sequence order without waiting, as {@link tryRecvGroup} does in arrival order. */
-	tryNextGroup: (subscriber: Subscriber, floor?: bigint) => Recv;
+	/**
+	 * Take the next group in sequence order without waiting, as {@link tryRecvGroup} does in arrival
+	 * order. One at or past `admit` stays next, and the read reports idle.
+	 */
+	tryNextGroup: (subscriber: Subscriber, floor?: bigint, admit?: bigint) => Recv;
 	/** Whether a buffered group in `[start, end)` that `delivered` lacks still waits to be read. */
 	hasUnreadGroup: (subscriber: Subscriber, start: bigint, end: bigint | undefined, delivered: Delivered) => boolean;
 	/**
@@ -1267,6 +1280,10 @@ export const hooks: {
 	 * as a front's compaction reads it.
 	 */
 	lowestBuffered: (subscriber: Subscriber, delivered: Delivered) => bigint | undefined;
+	/** The first key the subscriber holds unread past `key`, on any copy it reads. Mirrors the Rust `TrackState::key_after`. */
+	keyAfter: (subscriber: Subscriber, key: bigint) => bigint | undefined;
+	/** Why the subscriber's ranges can't be served, which its reads fail with. Mirrors the Rust `Subscriber::refused`. */
+	refused: (subscriber: Subscriber) => Error | undefined;
 	/** Fold a route copy's record below `at`, where the reader it feeds is, which reports nothing there. */
 	fold: (subscriber: Subscriber, at: bigint) => void;
 	/** Forget what a route copy reported of `[start, end)`, which its reader's wire was never told. */
@@ -1435,6 +1452,8 @@ export const hooks: {
 	 * whether the read goes on past a short close, leaving that to the reader. Assigned by `group.ts`.
 	 */
 	groupClosed: (group: GroupConsumer) => GetPromise<Error | null>;
+	/** Settles once the group's producer closes it, read or not: when its {@link GroupConsumer.end} is known. Assigned by `group.ts`. */
+	groupFinished: (group: GroupConsumer) => GetPromise<Error | null>;
 	/** Settles once the reader releases the group (`close` or an abort), however far it read. */
 	groupReleased: (group: GroupConsumer) => Promise<void>;
 	/** Whether a group reader still reads the copy it was mirrored from, not one its recovery moved it to. */
@@ -1743,6 +1762,12 @@ export const hooks: {
 	lowestBuffered: () => {
 		throw new Error("track.ts not loaded");
 	},
+	keyAfter: () => {
+		throw new Error("track.ts not loaded");
+	},
+	refused: () => {
+		throw new Error("track.ts not loaded");
+	},
 	fold: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -1945,6 +1970,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	groupClosed: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupFinished: () => {
 		throw new Error("group.ts not loaded");
 	},
 	readsMirrored: () => {

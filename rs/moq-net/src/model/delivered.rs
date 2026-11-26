@@ -98,28 +98,30 @@ impl Delivered {
 		}
 	}
 
-	/// The parts of `groups` not handed out, in order.
-	pub fn gaps(&self, groups: std::ops::Range<u64>) -> Vec<std::ops::Range<u64>> {
-		let mut gaps = Vec::new();
+	/// The parts of `groups` not handed out, in order, found as they are read.
+	pub fn gaps(&self, groups: std::ops::Range<u64>) -> impl Iterator<Item = std::ops::Range<u64>> + '_ {
 		let mut next = groups.start;
 		let from = self
 			.runs
 			.range(..=groups.start)
 			.next_back()
 			.map_or(next, |(start, _)| *start);
-		for (first, last) in self.runs.range(from..) {
-			if next >= groups.end {
-				return gaps;
+		let mut runs = self.runs.range(from..);
+		std::iter::from_fn(move || {
+			while next < groups.end {
+				let Some((first, last)) = runs.next() else {
+					let gap = next..groups.end;
+					next = groups.end;
+					return Some(gap);
+				};
+				let gap = next..(*first).min(groups.end);
+				next = next.max(last + 1);
+				if !gap.is_empty() {
+					return Some(gap);
+				}
 			}
-			if *first > next {
-				gaps.push(next..(*first).min(groups.end));
-			}
-			next = next.max(last + 1);
-		}
-		if next < groups.end {
-			gaps.push(next..groups.end);
-		}
-		gaps
+			None
+		})
 	}
 
 	/// The parts of `groups` none of `taken` handed out, in order.
@@ -201,11 +203,11 @@ mod test {
 		for key in [2, 4, 5, 9] {
 			delivered.insert(key);
 		}
-		assert_eq!(delivered.gaps(0..12), [0..2, 3..4, 6..9, 10..12]);
-		assert_eq!(delivered.gaps(4..6), []);
-		assert_eq!(delivered.gaps(5..11), [6..9, 10..11]);
+		assert_eq!(delivered.gaps(0..12).collect::<Vec<_>>(), [0..2, 3..4, 6..9, 10..12]);
+		assert_eq!(delivered.gaps(4..6).next(), None);
+		assert_eq!(delivered.gaps(5..11).collect::<Vec<_>>(), [6..9, 10..11]);
 		delivered.insert(u64::MAX - 1);
-		let gaps = delivered.gaps(u64::MAX - 2..u64::MAX);
+		let gaps: Vec<_> = delivered.gaps(u64::MAX - 2..u64::MAX).collect();
 		assert_eq!((gaps.len(), gaps.first()), (1, Some(&(u64::MAX - 2..u64::MAX - 1))));
 	}
 

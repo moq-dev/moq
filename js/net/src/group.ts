@@ -1254,6 +1254,7 @@ export class Consumer {
 		makeConsumer = (state) => new Consumer(state);
 		hooks.releaseGroupReader = (group, abort) => group.#release(abort);
 		hooks.groupDone = (group) => group.#done();
+		hooks.groupFinished = (group) => group.#state.closed;
 		hooks.groupClosed = (group) => {
 			group.#quiet ??= group.#makeClosed(false);
 			return group.#quiet;

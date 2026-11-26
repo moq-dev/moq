@@ -7187,6 +7187,35 @@ test("a bounded read asks again for a kept-out skip its track forgot", async () 
 	}
 });
 
+// A live join added behind a reader caught up at the live edge hands out the cached groups it
+// reaches back to, though the reader's own budget already gave up everything below the groups
+// it read: no range covered those, so none was judged.
+test("a join added behind a caught-up read hands out what it reaches", () => {
+	const clock = manualTime(0);
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Duration.secs(30) });
+	try {
+		const read = (subscriber: ReturnType<typeof producer.subscribe>) => {
+			const got: bigint[] = [];
+			for (let group = subscriber.tryRecvGroup(); group; group = subscriber.tryRecvGroup()) got.push(group.start);
+			return got;
+		};
+		putGroup(producer, 0n, 0);
+		putGroup(producer, 1000n, 1000);
+		const edge: Range = { start: { live: { min: Duration.ZERO, max: Duration.ZERO } } };
+		const subscriber = producer.subscribe({ ranges: [edge] });
+		expect(read(subscriber)).toEqual([1000n]);
+		putGroup(producer, 2000n, 2000);
+		expect(read(subscriber)).toEqual([2000n]);
+		const behind: Range = { start: { live: { min: Duration.secs(30), max: Duration.secs(30) } } };
+		subscriber.update({ ranges: [edge, behind] });
+		expect(read(subscriber)).toEqual([0n]);
+		subscriber.close();
+	} finally {
+		producer.close();
+		clock.installed.close();
+	}
+});
+
 // Where a publisher's delivery starts, over random held groups (whole or headless) and runs given
 // up: from the lower of the source's start and the lowest held group it serves, the first group
 // neither given up nor held unservable, and never past the first group out. Mirrors the Rust

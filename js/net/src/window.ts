@@ -852,6 +852,28 @@ export class Window {
 		return keys;
 	}
 
+	/**
+	 * Whether a range not yet placed may still come to hold group `key`: placed, it starts at or below
+	 * the group its time or live edge falls in, which may be `key` or one below. A time at or past
+	 * `end`, where group `key` is known to end, falls in a later group, however far the range got
+	 * placing it. Mirrors the Rust `Window::may_hold`.
+	 */
+	mayHold(key: bigint, end: bigint | undefined): boolean {
+		const reaches = (unsettled: bigint) => {
+			const range = this.#ranges.get(unsettled);
+			if (range === undefined || (range.end !== undefined && range.end < key)) return false;
+			const time = rangeTime(range);
+			return time === undefined || end === undefined || time < end;
+		};
+		for (const unsettled of this.#pending) if (reaches(unsettled)) return true;
+		for (const unsettled of this.#reaching) if (reaches(unsettled)) return true;
+		for (const timed of [this.#waiting, this.#looking]) {
+			const entries = end === undefined ? timed.all() : timed.in(0n, end);
+			for (const entry of entries) for (const unsettled of entry.keys) if (reaches(unsettled)) return true;
+		}
+		return false;
+	}
+
 	/** Whether nothing is left to resolve as groups arrive. */
 	get settled(): boolean {
 		return this.#pending.size === 0 && !this.#unplaced() && this.#looking.size === 0;
@@ -958,13 +980,15 @@ export class Window {
 	}
 
 	/**
-	 * The times in `[start, end)` of the time starts still waiting on the groups held. The group
-	 * containing each starts at or before its time, so one at or past a read's floor and below a
-	 * group may still land between them. Mirrors the Rust `Window::waiting_in`.
+	 * The times in `[start, end)` of the time starts not yet resolved: waiting on the groups held, or
+	 * on a lookup of the track's history. The group containing each starts at or before its time, so
+	 * one at or past a read's floor and below a group may still land between them. Mirrors the Rust
+	 * `Window::unresolved_in`.
 	 */
-	waitingIn(start: bigint, end: bigint): bigint[] {
+	unresolvedIn(start: bigint, end: bigint): bigint[] {
 		const times: bigint[] = [];
 		for (const entry of this.#waiting.in(start, end)) times.push(entry.time);
+		for (const entry of this.#looking.in(start, end)) times.push(entry.time);
 		return times;
 	}
 
@@ -992,9 +1016,12 @@ export class Window {
 		return this.#groups.prev(before);
 	}
 
-	/** The lowest group in range, undefined while a start waits. Nothing in range floors at group 0. */
+	/**
+	 * The lowest group in range, undefined while a start waits, a time start's lookup included: it may
+	 * resolve to a group below every one in range. Nothing in range floors at group 0.
+	 */
 	floor(): bigint | undefined {
-		if (this.pending || this.#unplaced()) return undefined;
+		if (this.pending || this.#unplaced() || this.#looking.size > 0) return undefined;
 		return this.#groups.lowest() ?? 0n;
 	}
 
@@ -1019,6 +1046,14 @@ export class Window {
 		if (from >= end) return [];
 		if (this.pending) return [{ start: from, end }];
 		return this.#groups.runs(from, end);
+	}
+
+	/**
+	 * The runs the placed ranges name: unlike {@link runs}, a live join still waiting on a first
+	 * group names none of them. Mirrors the Rust `Window::placed`.
+	 */
+	placed(from = 0n, end = UNBOUNDED): Run[] {
+		return from >= end ? [] : this.#groups.runs(from, end);
 	}
 
 	/**

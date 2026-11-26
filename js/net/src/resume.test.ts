@@ -561,6 +561,208 @@ test("a backfill places a time start its serving copy raised, at the group holdi
 	}
 });
 
+// An ordered read holding a group for an unplaced time start still runs its cursor, so the serving
+// copy's fatal abort reaches it. Mirrors the Rust `a_fronts_held_group_sees_its_copys_fatal_abort`.
+test("a front's held group sees its serving copy's fatal abort", async () => {
+	const clock = new Manual();
+	const installed = install(clock);
+	const front = new Front();
+	const source = new BroadcastProducer();
+	const handle = source.consume();
+	const ta = copy(source);
+	// Received, so only its upstream places a time start past its groups.
+	hooks.receiveTrack(ta.producer);
+	ta.write(0n);
+	hooks.dropTrackGroups(ta.producer, 1n, 2n, { error: new StreamError(StreamCode.NotFound) });
+	ta.write(2n, 1, false);
+	front.serve(handle);
+	const ordered = front.consumer
+		.track("seq")
+		.subscribe({ ranges: [{ start: 0n }] })
+		.ordered();
+	try {
+		await clock.advance(Duration.ZERO);
+		expect(ordered.tryNextItem()?.group?.start).toBe(0n);
+		// Group 2 is held behind the gap.
+		expect(ordered.tryNextItem()).toMatchObject({ kind: "gap", start: 1n, end: 2n });
+		// Group 2 may still hold time 5, until a later group starts.
+		ordered.update({ ranges: [{ start: 5n }] });
+		await clock.advance(Duration.ZERO);
+		expect(ordered.tryNextItem()).toBeUndefined();
+		const error = new StreamError(StreamCode.FrameTooLarge);
+		const next = ordered.nextItem();
+		ta.producer.abort(error);
+		await expect(next).rejects.toBe(error);
+	} finally {
+		ordered.close();
+		front.consumer.close();
+		handle.close();
+		source.close();
+		installed.close();
+	}
+});
+
+/**
+ * A front's queued gap waits for an update's time start to place before it goes out: placed past the
+ * gap, the ranges no longer name it. Mirrors the Rust
+ * `a_fronts_queued_gap_waits_for_an_updates_time_start_to_place`.
+ */
+test("a front's queued gap waits for an update's time start to place", async () => {
+	const clock = new Manual();
+	const installed = install(clock);
+	const front = new Front();
+	const source = new BroadcastProducer();
+	const handle = source.consume();
+	const ta = copy(source);
+	hooks.receiveTrack(ta.producer);
+	ta.write(0n);
+	hooks.dropTrackGroups(ta.producer, 1n, 2n, { error: new StreamError(StreamCode.NotFound) });
+	front.serve(handle);
+	const ordered = front.consumer
+		.track("seq")
+		.subscribe({ ranges: [{ start: 0n }] })
+		.ordered();
+	try {
+		await clock.advance(Duration.ZERO);
+		expect(ordered.tryNextGroup()?.start).toBe(0n);
+		ordered.update({ ranges: [{ start: 5n }] });
+		await clock.advance(Duration.ZERO);
+		expect(ordered.tryNextItem()).toBeUndefined();
+		hooks.timeStarts(ta.producer, [[5n, 5n]]);
+		ta.write(5n);
+		await clock.advance(Duration.ZERO);
+		expect(ordered.tryNextItem()?.group?.start).toBe(5n);
+	} finally {
+		ordered.close();
+		front.consumer.close();
+		handle.close();
+		source.close();
+		installed.close();
+	}
+});
+
+/**
+ * A front's serving copy refusing a range's time start fails the read only until the ranges change:
+ * the track does not end on it, as a direct reader's refusal does not. Mirrors the Rust
+ * `Reader::poll_group`, which returns a serving copy's refusal without marking the copy done.
+ */
+test("a front's read recovers from its serving copy's range refusal", async () => {
+	const clock = new Manual();
+	const installed = install(clock);
+	const front = new Front();
+	const source = new BroadcastProducer();
+	const handle = source.consume();
+	const ta = copy(source);
+	const requests = ta.producer.requests();
+	ta.write(10n);
+	front.serve(handle);
+	// Time 5 lies before every group held, so the copy looks it up.
+	const ordered = front.consumer
+		.track("seq")
+		.subscribe({ ranges: [{ start: 5n, end: 6n }, { start: 10n }] })
+		.ordered();
+	try {
+		await clock.advance(Duration.ZERO);
+		expect(ordered.tryNextItem()).toBeUndefined();
+		const fill = await requests.requestedFill();
+		const error = new StreamError(StreamCode.Old);
+		fill?.refuseGroups(fill.start, fill.end ?? 10n, error);
+		await clock.advance(Duration.ZERO);
+		expect(() => ordered.tryNextItem()).toThrow(error);
+		ordered.update({ ranges: [{ start: 10n }] });
+		await clock.advance(Duration.ZERO);
+		expect(ordered.tryNextItem()?.group?.start).toBe(10n);
+	} finally {
+		requests.close();
+		ordered.close();
+		front.consumer.close();
+		handle.close();
+		source.close();
+		installed.close();
+	}
+});
+
+/**
+ * As above through an inner front: the inner front's copy refusing reaches the outer front as a
+ * refusal, not the track's end. Mirrors the Rust `a_nested_fronts_held_group_waits_behind_its_copys_refusal`.
+ */
+test("a nested front's read recovers from its inner copy's range refusal", async () => {
+	const clock = new Manual();
+	const installed = install(clock);
+	const front = new Front();
+	const inner = new Front();
+	const source = new BroadcastProducer();
+	const handle = source.consume();
+	const ta = copy(source);
+	const requests = ta.producer.requests();
+	ta.write(10n);
+	inner.serve(handle);
+	front.serve(inner.consumer);
+	// Time 5 lies before every group held, so the copy looks it up.
+	const ordered = front.consumer
+		.track("seq")
+		.subscribe({ ranges: [{ start: 5n, end: 6n }, { start: 10n }] })
+		.ordered();
+	try {
+		await clock.advance(Duration.ZERO);
+		expect(ordered.tryNextItem()).toBeUndefined();
+		const fill = await requests.requestedFill();
+		const error = new StreamError(StreamCode.Old);
+		fill?.refuseGroups(fill.start, fill.end ?? 10n, error);
+		await clock.advance(Duration.ZERO);
+		expect(() => ordered.tryNextItem()).toThrow(error);
+		ordered.update({ ranges: [{ start: 10n }] });
+		await clock.advance(Duration.ZERO);
+		expect(ordered.tryNextItem()?.group?.start).toBe(10n);
+	} finally {
+		requests.close();
+		ordered.close();
+		front.consumer.close();
+		inner.consumer.close();
+		handle.close();
+		source.close();
+		installed.close();
+	}
+});
+
+/**
+ * A front's held group the ranges cover goes out before its serving copy's fatal abort, which the
+ * next read reports. Mirrors the Rust `a_fronts_held_group_goes_out_before_its_copys_fatal_abort`.
+ */
+test("a front's held group goes out before its serving copy's fatal abort", async () => {
+	const clock = new Manual();
+	const installed = install(clock);
+	const front = new Front();
+	const source = new BroadcastProducer();
+	const handle = source.consume();
+	const ta = copy(source);
+	hooks.receiveTrack(ta.producer);
+	ta.write(0n);
+	hooks.dropTrackGroups(ta.producer, 1n, 2n, { error: new StreamError(StreamCode.NotFound) });
+	ta.write(2n);
+	front.serve(handle);
+	const ordered = front.consumer
+		.track("seq")
+		.subscribe({ ranges: [{ start: 0n }] })
+		.ordered();
+	try {
+		await clock.advance(Duration.ZERO);
+		expect(ordered.tryNextItem()?.group?.start).toBe(0n);
+		// Group 2 is held behind the gap.
+		expect(ordered.tryNextItem()).toMatchObject({ kind: "gap", start: 1n, end: 2n });
+		const error = new StreamError(StreamCode.FrameTooLarge);
+		ta.producer.abort(error);
+		expect(ordered.tryNextItem()?.group?.start).toBe(2n);
+		await expect(ordered.nextItem()).rejects.toBe(error);
+	} finally {
+		ordered.close();
+		front.consumer.close();
+		handle.close();
+		source.close();
+		installed.close();
+	}
+});
+
 /**
  * As above, beside a range still waiting on a group past the live edge: the raised start's backfill
  * is asked without waiting for that range to place. Mirrors the Rust
@@ -4393,6 +4595,135 @@ test("a routed ordered read returns the gap its copy passed to take a group", as
 		installed.close();
 	}
 });
+
+// A gap the serving copy reported and the ordered read holds behind a lower group still owed
+// stands across a switch: the replaced copy still delivers that group, and the gap follows it.
+// Mirrors the Rust `a_replaced_copys_stale_gap_stands_once_the_read_widens`.
+for (const [switched, widened] of [
+	[true, true],
+	[true, false],
+	[false, false],
+] as const) {
+	test(`a front's ordered read returns a gap held behind an owed group (switched=${switched} widened=${widened})`, async () => {
+		install(new Manual());
+		const front = new Front();
+		const a = new BroadcastProducer();
+		const b = new BroadcastProducer();
+		// Timed copies presenting each group at its key in milliseconds.
+		const [ta, tb] = [a, b].map((source) =>
+			defined(source.createTrack("seq", { ...INFO, timescale: Timescale.MILLI })),
+		);
+		const write = (producer: typeof ta, key: bigint) => {
+			const group = producer.createGroup(key);
+			group.writeFrame({ payload: enc.encode(`${key}`), timestamp: Timestamp.fromMillis(Number(key)) });
+			group.finish();
+		};
+		hooks.receiveTrack(ta);
+		const requests = ta.requests();
+		front.serve(a.consume());
+		write(ta, 998n);
+		write(ta, 2000n);
+		hooks.dropTrackGroups(ta, 1000n, 1500n, staleHole(10_000));
+		const ordered = front.consumer
+			.track("seq")
+			.subscribe(withMax({ delay: { max: Duration.secs(1) } }))
+			.withRange({ start: { included: 998n }, end: { excluded: 1500n } })
+			.ordered();
+		const read = () => {
+			const out: string[] = [];
+			for (let item = ordered.tryNextItem(); item; item = ordered.tryNextItem()) {
+				if (item.kind === "group") out.push(`group ${item.group.start}`);
+				else out.push(`gap ${item.start}..${item.end}`);
+			}
+			return out;
+		};
+		try {
+			await settle();
+			expect(read()).toEqual(["group 998"]);
+			const fill = await requests.requestedFill();
+			expect([fill?.start, fill?.end]).toEqual([1000n, 1500n]);
+			fill?.refuseGroups(1000n, 1500n, new StreamError(StreamCode.Old));
+			await settle();
+			// The gap waits behind group 999.
+			expect(read()).toEqual([]);
+
+			if (switched) {
+				// A newer route gives the run up for good, held back while the old one may deliver 999.
+				front.serve(b.consume());
+				hooks.dropTrackGroups(tb, 1000n, 1500n, { error: new StreamError(StreamCode.NotFound) });
+				await settle();
+				expect(read()).toEqual([]);
+			}
+			if (widened) {
+				ordered.update(withMax({ delay: { max: null } }));
+				await settle();
+				expect(read()).toEqual([]);
+			}
+			write(ta, 999n);
+			await settle();
+			expect(read()).toEqual(["group 999", "gap 1000..1500"]);
+		} finally {
+			requests.close();
+			ordered.close();
+			front.consumer.close();
+			a.close();
+			b.close();
+		}
+	});
+}
+
+// Mirrors the Rust `a_fronts_held_group_waits_for_a_time_start_that_may_place_at_it`.
+for (const placed of [2n, 4n]) {
+	test(`a front's held group waits for a time start that may place at it (placed at ${placed})`, async () => {
+		install(new Manual());
+		const front = new Front();
+		const a = new BroadcastProducer();
+		const ta = defined(a.createTrack("seq", { ...INFO, timescale: Timescale.MILLI }));
+		const write = (key: bigint) => {
+			const group = ta.createGroup(key);
+			group.writeFrame({ payload: enc.encode(`${key}`), timestamp: Timestamp.fromMillis(Number(key)) });
+			group.finish();
+		};
+		hooks.receiveTrack(ta);
+		front.serve(a.consume());
+		const ordered = front.consumer
+			.track("seq")
+			.subscribe(withMax({ delay: { max: null } }))
+			.ordered();
+		const read = (most = Number.POSITIVE_INFINITY) => {
+			const out: string[] = [];
+			for (let item = out.length < most ? ordered.tryNextItem() : undefined; item; ) {
+				out.push(item.kind === "group" ? `group ${item.group.start}` : `gap ${item.start}..${item.end}`);
+				item = out.length < most ? ordered.tryNextItem() : undefined;
+			}
+			return out;
+		};
+		try {
+			write(0n);
+			hooks.dropTrackGroups(ta, 1n, 2n, { error: new StreamError(StreamCode.NotFound) });
+			write(2n);
+			await settle();
+			// Group 2 is held behind the gap.
+			expect(read(2)).toEqual(["group 0", "gap 1..2"]);
+			ordered.update(withMax({ delay: { max: null }, ranges: [{ start: 5n }] }));
+			await settle();
+			expect(read()).toEqual([]);
+			hooks.timeStarts(ta, [[5n, placed]]);
+			await settle();
+			if (placed === 2n) expect(read()).toEqual(["group 2"]);
+			else {
+				ta.skipGroups(3n, 4n);
+				write(4n);
+				await settle();
+				expect(read()).toEqual(["group 4"]);
+			}
+		} finally {
+			ordered.close();
+			front.consumer.close();
+			a.close();
+		}
+	});
+}
 
 for (const resolution of ["arrival", "drop", "other copy", "budget"] as const) {
 	test(`an ordered resumed reader keeps an older copy's owed hole until ${resolution}`, async () => {

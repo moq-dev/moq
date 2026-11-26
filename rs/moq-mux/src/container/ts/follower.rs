@@ -39,6 +39,14 @@ pub(super) mod sealed {
 		/// an origin.
 		fn instance(&self) -> Option<&moq_net::Instance>;
 
+		/// Why the publisher left, while the export still plays out what it buffered before
+		/// reporting it.
+		fn departed(&self) -> Option<&crate::Error>;
+
+		/// The instance carried on into while playing out went before serving: stop reading it,
+		/// and report `err` once what was buffered has gone out.
+		fn depart(&mut self, err: crate::Error) -> crate::Result<()>;
+
 		/// Carry on into `broadcast`, whose `catalog` is subscribed, waiting up to `follow` for
 		/// another instance's program to become usable.
 		fn followed(
@@ -69,6 +77,14 @@ pub(super) mod sealed {
 
 		fn instance(&self) -> Option<&moq_net::Instance> {
 			Export::instance(self)
+		}
+
+		fn departed(&self) -> Option<&crate::Error> {
+			Export::departed(self)
+		}
+
+		fn depart(&mut self, err: crate::Error) -> crate::Result<()> {
+			Export::depart(self, err)
 		}
 
 		fn followed(
@@ -114,6 +130,9 @@ enum Missing {
 	Ended { end: crate::Result<()>, deadline: Instant },
 	/// A replacement switched to mid-stream, which ending before it serves is a failure.
 	Switch,
+	/// The same instance returned while the export played out what it buffered after the
+	/// publisher left with this error, which an end before it serves reports after all.
+	Return(crate::Error),
 }
 
 enum State<E: catalog::Catalog> {
@@ -241,8 +260,8 @@ impl<T: Followed> Follower<T> {
 					mut switching,
 				} => {
 					self.poll_instances(waiter)?;
-					if self.poll_switch(waiter, &mut switching)? {
-						awaiting = Some(Missing::Switch);
+					if let Some(missing) = self.poll_switch(waiter, &mut switching)? {
+						awaiting = Some(missing);
 					}
 					let next = self.export.poll_next(waiter);
 					awaiting = awaiting.filter(|_| !self.export.cataloged());
@@ -259,7 +278,16 @@ impl<T: Followed> Follower<T> {
 						Poll::Pending => {
 							// An instance that goes with its catalog still open never served.
 							if let Some(missing) = awaiting.take_if(|_| matches!(self.serving, Serving::Gone)) {
-								self.state = self.withdrawn(missing);
+								self.state = self.withdrawn(missing)?;
+								continue;
+							}
+							// The publisher left during this poll, so a return already on hand is
+							// carried on into now: nothing else wakes the follower for it.
+							if switching.is_none()
+								&& matches!(self.serving, Serving::Return(_))
+								&& self.export.departed().is_some()
+							{
+								self.state = State::Running { awaiting, switching };
 								continue;
 							}
 							self.state = State::Running { awaiting, switching };
@@ -272,7 +300,17 @@ impl<T: Followed> Follower<T> {
 					}
 					// Nor did one whose catalog ended before its first snapshot.
 					if let Some(missing) = awaiting {
-						self.state = self.withdrawn(missing);
+						self.state = match missing {
+							// What was buffered has gone out too, so the export ends as the publisher left.
+							Missing::Return(err) => {
+								tracing::warn!(path = %self.path, "broadcast ended before serving its catalog");
+								State::Settling {
+									end: Err(err),
+									deadline: kio::clock::now().saturating_add(self.follow),
+								}
+							}
+							missing => self.withdrawn(missing)?,
+						};
 						continue;
 					}
 					self.following(&end);
@@ -347,53 +385,82 @@ impl<T: Followed> Follower<T> {
 		}
 	}
 
-	/// Drive a switch to the replacement serving the path when stitching, returning whether the
-	/// export carried on into it.
+	/// Drive a switch to the replacement serving the path when stitching, or a carry on into the
+	/// same instance returning while the export plays out what it buffered after the publisher
+	/// left, returning why the export awaits the first snapshot once it carried on.
 	///
-	/// The old instance keeps playing until the replacement's catalog is subscribed, however long
-	/// that takes, and a replacement that goes first is no switch. The old program's track
-	/// subscriptions yield priority while acquiring the replacement.
+	/// When stitching, the old instance keeps playing until the replacement's catalog is
+	/// subscribed, however long that takes, and a replacement that goes first is no switch. The
+	/// old program's track subscriptions yield priority while acquiring the replacement.
+	///
+	/// A return is carried on into as soon as its catalog is subscribed, rather than once the
+	/// buffered output has gone out, so each track reads on from where it stopped before that
+	/// media is due ([`Export::follow`]).
 	fn poll_switch(
 		&mut self,
 		waiter: &kio::Waiter,
 		switching: &mut Option<Subscription<T::Ext>>,
-	) -> crate::Result<bool> {
-		let target = match &self.serving {
-			Serving::Other(target) if self.stitch => target,
-			_ => {
-				if switching.take().is_some() {
-					self.export.source().priority(0)?;
-				}
-				return Ok(false);
-			}
+	) -> crate::Result<Option<Missing>> {
+		let (target, missing) = match &self.serving {
+			Serving::Other(target) if self.stitch => (target, None),
+			Serving::Return(target) => match self.export.departed() {
+				Some(err) => (target, Some(err.clone())),
+				None => return self.abandon(switching),
+			},
+			_ => return self.abandon(switching),
 		};
 		if !switching
 			.as_ref()
 			.is_some_and(|switching| switching.target.is_clone(target))
 		{
-			tracing::info!(path = %self.path, "broadcast replaced, switching the program to the new instance");
-			self.export.source().priority(-1)?;
-			*switching = Some(self.subscribe(target.clone()));
+			let target = target.clone();
+			match missing {
+				// A replacement being acquired may have lowered the priority; the return reads on.
+				Some(_) => {
+					tracing::info!(path = %self.path, "broadcast returned, carrying on while the old output plays out");
+					self.export.source().priority(0)?;
+				}
+				None => {
+					tracing::info!(path = %self.path, "broadcast replaced, switching the program to the new instance");
+					self.export.source().priority(-1)?;
+				}
+			}
+			*switching = Some(self.subscribe(target));
 		}
 		let subscription = switching.as_mut().expect("just set");
 		match subscription.catalog.poll_ok(waiter) {
 			Poll::Ready(Ok(catalog)) => {
 				let subscription = switching.take().expect("just polled");
 				self.carry_on(&subscription.target, catalog)?;
-				Ok(true)
+				Ok(Some(missing.map_or(Missing::Switch, Missing::Return)))
 			}
 			// Gone before the instances say so: no switch until the next change.
 			Poll::Ready(Err(err)) if left(&err) => {
-				tracing::warn!(path = %self.path, %err, "replacement went before its catalog subscribed");
-				*switching = None;
+				tracing::warn!(path = %self.path, %err, "instance went before its catalog subscribed");
 				self.serving = Serving::Refused;
-				self.export.source().priority(0)?;
-				Ok(false)
+				self.abandon(switching)
+			}
+			// A return that refuses its catalog waits for the next change, as one after the
+			// output ended does. Only the follow running out reports the refusal.
+			Poll::Ready(Err(err)) if missing.is_some() => {
+				tracing::warn!(path = %self.path, %err, "catalog subscription failed, still waiting");
+				self.failed = Some(err);
+				self.serving = Serving::Refused;
+				self.abandon(switching)
 			}
 			// The replacement would not serve, so the switch fails loud.
 			Poll::Ready(Err(err)) => Err(err),
-			Poll::Pending => Ok(false),
+			Poll::Pending => Ok(None),
 		}
+	}
+
+	/// Drop the catalog subscription [`Self::poll_switch`] holds, if any, giving the old program's
+	/// tracks back their priority.
+	fn abandon(&mut self, switching: &mut Option<Subscription<T::Ext>>) -> crate::Result<Option<Missing>> {
+		if switching.take().is_some() {
+			self.export.source().priority(0)?;
+		}
+		Ok(None)
 	}
 
 	/// Carry the export on into `target`, whose `catalog` is subscribed.
@@ -451,15 +518,23 @@ impl<T: Followed> Follower<T> {
 	}
 
 	/// Where the export goes once the instance it carried on into ends before its first snapshot.
-	fn withdrawn(&mut self, missing: Missing) -> State<T::Ext> {
+	fn withdrawn(&mut self, missing: Missing) -> crate::Result<State<T::Ext>> {
 		tracing::warn!(path = %self.path, "broadcast ended before serving its catalog");
-		match missing {
+		Ok(match missing {
 			Missing::Ended { end, deadline } => State::Settling { end, deadline },
 			Missing::Switch => State::Settling {
 				end: Err(malformed!("replacement broadcast `{}` ended before serving its catalog", self.path).into()),
 				deadline: kio::clock::now().saturating_add(self.follow),
 			},
-		}
+			// What was buffered still goes out, and then the export ends as the publisher left.
+			Missing::Return(err) => {
+				self.export.depart(err)?;
+				State::Running {
+					awaiting: None,
+					switching: None,
+				}
+			}
+		})
 	}
 
 	fn following(&self, end: &crate::Result<()>) {
