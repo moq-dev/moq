@@ -30,7 +30,7 @@ It checks every rule under `Pressure` and `ReliableReset` over three starts, 1 t
 quest gate just rs tla moq-net/verify/subscribe/SubscribeAccounting.tla -config rs/moq-net/verify/subscribe/CutGroupEnd.cfg
 ```
 
-`PlainReset.cfg` checks a peer without RESET_STREAM_AT, or a browser's WebTransport (`ReliableReset = FALSE`), where every reset group is named in a drop that may land beside a header the subscriber read, over the main config's bounds: PLAIN_COST. It passes.
+`PlainReset.cfg` checks a peer without RESET_STREAM_AT, or a browser's WebTransport (`ReliableReset = FALSE`), where every reset group is named in a drop that may land beside a header the subscriber read, over three starts without `Pressure`: about 32.6M distinct states, 3 minutes. It passes, and passed once with `Pressure` too, at 259.6M distinct states in 55 minutes, too slow for nightly.
 
 ```sh
 quest gate just rs tla moq-net/verify/subscribe/SubscribeAccounting.tla -config rs/moq-net/verify/subscribe/PlainReset.cfg
@@ -42,7 +42,7 @@ Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path on th
 
 ## Coverage
 
-Sync commit: `d7599e8cba646fa3a71a87fced3ecb1aaef806d5`. Run `git log d7599e8cba.. -- rs/moq-net/src/lite/publisher.rs rs/moq-net/src/lite/subscriber.rs rs/moq-net/src/tail.rs rs/moq-net/src/model/track.rs rs/moq-net/src/model/record.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
+Sync commit: `74e935b892500ea7213fbba5c36bfa417555daa5`. Run `git log 74e935b892.. -- rs/moq-net/src/lite/publisher.rs rs/moq-net/src/lite/subscriber.rs rs/moq-net/src/tail.rs rs/moq-net/src/model/track.rs rs/moq-net/src/model/record.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
 
 | Code | Model |
 | --- | --- |
