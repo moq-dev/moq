@@ -2303,9 +2303,10 @@ where
 
 	/// The program playing failed with `err`. Only a publisher that left is survivable: its
 	/// input stops at once, as a follow that runs out stops it, but what it already buffered
-	/// goes out on schedule. Without a replacement, the export then reports `err`, so a
-	/// [`Follower`](super::Follower) waits for a return only after the old output has ended,
-	/// rather than leaving it buffered to go out late, behind the gap, once something returns.
+	/// goes out on schedule. Without a replacement, the export then reports `err`. A
+	/// [`Follower`](super::Follower) carries on into the same instance returning meanwhile
+	/// ([`Self::departed`]), whose tracks read on from where they stopped while that output
+	/// plays out, and otherwise waits for a return only after the old output has ended.
 	///
 	/// The program keeps its catalog, whose format the follower subscribes a return with.
 	fn leave(&mut self, err: crate::Error) -> crate::Result<()> {
@@ -2754,38 +2755,53 @@ where
 	/// Point each stale track this snapshot lists at the returned broadcast.
 	///
 	/// The PIDs and PMT stay as announced. A track the returned catalog does not list stays
-	/// stale, silent on its PID. The new subscription's playhead jumped from wherever the
-	/// old one stopped, so its first frame counts as a skip: late frames drop, and a leap
-	/// ahead opens a new generation.
+	/// stale, silent on its PID. The same instance carries the same content, so each track reads
+	/// on right after the last frame it read ([`ExportSource::resuming`]): nothing is replayed,
+	/// and a frame that comes too late drops as any other does. A track that read nothing starts
+	/// at the live edge instead, its playhead jumping from wherever the old subscription stopped,
+	/// so its first frame counts as a skip: late frames drop, and a leap ahead opens a new
+	/// generation.
 	fn resubscribe(&mut self, catalog: &Catalog<S::Ext>, mpegts: &catalog::Mpegts) -> Result<()> {
 		let delay = self.program.delay;
+		let replay = self.program.replay;
 		for (name, track) in self.program.tracks.iter_mut() {
 			if track.read != Read::Stale {
 				continue;
 			}
+			let resume = track.source.resume();
+			let resumed = |source: ExportSource| match resume.read() {
+				true => source.resuming(&resume),
+				false => at_edge(source, replay),
+			};
 			let source = if let Some(config) = catalog.video.renditions.get(name) {
 				ExportSource::for_video(&self.program.source, name, config, subscribed(delay))?
-					.map(|s| at_edge(skipping(s, delay), self.program.replay))
+					.map(|s| resumed(skipping(s, delay)))
 			} else if let Some(config) = catalog.audio.renditions.get(name) {
 				ExportSource::for_audio(&self.program.source, name, config, subscribed(delay))?
-					.map(|s| at_edge(skipping(s, delay), self.program.replay))
+					.map(|s| resumed(skipping(s, delay)))
 			} else if mpegts
 				.tracks
 				.get(name)
 				.is_some_and(|t| t.verbatim.is_some() || t.pes_packet.is_some())
 			{
 				let source = ExportSource::for_stream(&self.program.source, name, subscribed(delay))?;
-				Some(stream_edge(skipping(source, delay), &track.kind, self.program.replay))
+				let kind = track.kind.clone();
+				Some(match resume.read() {
+					true => skipping(source, delay).resuming(&resume),
+					false => stream_edge(skipping(source, delay), &kind, replay),
+				})
 			} else {
 				None
 			};
 			let Some(source) = source else {
 				continue;
 			};
-			// The new subscription counts as cutting whatever group the old one was reading.
+			// A new subscription at the edge counts as cutting whatever group the old one was
+			// reading; one that reads on counts its own.
+			let jumped = u64::from(!resume.read());
 			track.base.0 += track.source.markers();
-			track.base.1 += track.source.skips() + 1;
-			track.base.2 += track.source.cuts() + 1;
+			track.base.1 += track.source.skips() + jumped;
+			track.base.2 += track.source.cuts() + jumped;
 			track.source = source;
 			track.subscribed = kio::clock::now();
 			track.read = Read::Live;
@@ -2987,6 +3003,21 @@ where
 	pub fn follow(mut self, broadcast: moq_net::broadcast::Consumer, catalog: S) -> Result<Self, crate::Error> {
 		self.followed(&broadcast, catalog, Duration::ZERO)?;
 		Ok(self)
+	}
+
+	/// Why the publisher of the program playing left, while what it buffered still goes out
+	/// before the export reports it ([`Self::leave`]).
+	pub(super) fn departed(&self) -> Option<&crate::Error> {
+		match &self.program.feed {
+			Feed::Retired(left) if self.pending.is_none() => left.as_ref(),
+			Feed::Live | Feed::Ended | Feed::Retired(_) => None,
+		}
+	}
+
+	/// Leave the instance carried on into while what it buffered went out, which went before
+	/// serving its catalog: as if its publisher left with `err` ([`Self::leave`]).
+	pub(super) fn depart(&mut self, err: crate::Error) -> crate::Result<()> {
+		self.leave(err)
 	}
 
 	/// Whether the catalog this export last subscribed has delivered a snapshot.

@@ -10980,6 +10980,74 @@ async fn a_follower_continues_through_a_same_instance_handoff_after_a_gap() {
 	);
 }
 
+/// The same instance leaving partway into a group and returning while what the export buffered
+/// still waits out the delay, republishing that group from its start as a publisher's cache
+/// serves it again: the follower carries on into the return before the buffer runs dry, and the
+/// track reads on right after the last frame it took. The output matches an export the route
+/// never left: every frame once, in order, none late, and no break in the timeline.
+#[tokio::test(start_paused = true)]
+async fn a_follower_carries_on_into_a_return_while_it_plays_out() {
+	/// Twenty AAC frames 20 ms apart in groups of ten, through a 500 ms delay, the route going
+	/// after the first `leave` and the same instance serving again 100 ms later, from the start of
+	/// the group it went in.
+	async fn export(leave: Option<u64>) -> (Vec<u64>, u64, u64) {
+		let origin = crate::source::produce_origin();
+		let route = moq_net::origin::RouteOptions::default().with_instance(moq_net::Instance::random(), 0);
+		let write = |track: &mut Producer<HangContainer>, frame: u64| {
+			track
+				.write(Frame {
+					timestamp: Timestamp::from_millis(60_000 + frame * 20).unwrap(),
+					duration: None,
+					payload: Bytes::from_static(&[0x21, 0x10, 0x04, 0x60]),
+					keyframe: frame.is_multiple_of(10),
+				})
+				.unwrap();
+		};
+		let (mut route_held, mut catalog) = publish_live::<()>(&origin, route.clone());
+		let mut track = aac_rendition(&mut route_held.broadcast().clone(), &mut catalog, "a.aac");
+		let source = crate::source::resolved(&origin, "live").await;
+		let export = open_export(source, Duration::from_millis(500)).await.unwrap();
+		let mut follower = super::Follower::new(export)
+			.unwrap()
+			.with_follow(Duration::from_secs(10));
+		let drain = tokio::spawn(async move {
+			let (frames, end) = drain_follower(&mut follower).await;
+			assert!(matches!(end, Some(Ok(()))), "the return's finish ends it: {end:?}");
+			(
+				audio_pts(&frames),
+				follower.export().dropped(),
+				follower.export().discontinuity(),
+			)
+		});
+		for frame in 0..20 {
+			if Some(frame) == leave {
+				track.abort(moq_net::Error::Unroutable);
+				catalog.abort(moq_net::Error::Unroutable);
+				drop(route_held);
+				kio::clock::sleep(Duration::from_millis(100)).await;
+				(route_held, catalog) = publish_live::<()>(&origin, route.clone());
+				track = aac_rendition(&mut route_held.broadcast().clone(), &mut catalog, "a.aac");
+				for again in frame / 10 * 10..frame {
+					write(&mut track, again);
+				}
+			}
+			write(&mut track, frame);
+			kio::clock::sleep(Duration::from_millis(20)).await;
+		}
+		let _finished = track.finish().unwrap();
+		catalog.finish().unwrap();
+		let out = drain.await.unwrap();
+		drop(route_held);
+		out
+	}
+
+	let (pts, dropped, discontinuity) = export(Some(14)).await;
+	let (expected, ..) = export(None).await;
+	assert_eq!(expected.len(), 20, "every frame goes out once: {expected:?}");
+	assert_eq!(pts, expected, "the return carries on exactly where the route went");
+	assert_eq!((dropped, discontinuity), (0, 0), "none late, no break");
+}
+
 /// A broader prefix starting, restarting, and ending while the exact route still serves the
 /// path changes nothing: the request resolves through the exact route, so none of it is a
 /// replacement, and the export ends cleanly with its own broadcast.
