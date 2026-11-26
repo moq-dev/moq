@@ -5,6 +5,7 @@
  */
 
 import type { Duration } from "@moq/clock";
+import { transportOf } from "./connection/transport.ts";
 import { sharedStreamCode } from "./ietf/error.ts";
 import type { IetfVersion } from "./ietf/version.ts";
 import { TimeoutError } from "./util/timeout.ts";
@@ -628,13 +629,16 @@ export function sessionClosed(err: unknown): boolean {
 }
 
 /**
- * Whether a stream failed because the peer reset or stopped it without an application code of its
- * own, as a browser reports a closing session's WT_SESSION_GONE (as code 0), either raw or through
- * {@link fromTransport}, rather than on a local error, a session close, or a reset with a code.
+ * Whether a stream of `quic` failed because the peer reset or stopped it without an application
+ * code of its own, as a browser reports a closing session's WT_SESSION_GONE (as code 0), either raw
+ * or through {@link fromTransport}, rather than on a local error, a session close, or a reset with a
+ * code. Only native WebTransport cannot tell the two apart: the WebSocket fallback reports a
+ * session's close as such, so a code-0 reset there is the peer's internal error.
  *
  * @internal
  */
-export function peerEnded(err: unknown): boolean {
+export function peerEnded(quic: WebTransport, err: unknown): boolean {
+	if (transportOf(quic) !== "webtransport") return false;
 	const raw = err instanceof Stream ? err.cause : err;
 	if (typeof raw !== "object" || raw === null) return false;
 	const { source, streamErrorCode } = raw as StreamErrorLike;

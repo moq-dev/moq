@@ -1249,31 +1249,39 @@ for (const name of ["resets", "stops"] as const) {
 	});
 }
 
-// A reset carrying an application code of its own is no closing session's: it breaks the session.
-test("an Announce Stream the peer resets with a code closes moq-lite-07 with PROTOCOL_VIOLATION", async () => {
-	const pair = createMockTransportPair(ALPN_07_WIP);
-	const serverAnnounce = announceWriter(pair.server);
-	const down = new Producer();
-	const fromServer = new Producer();
-	const url = new URL("https://localhost/test");
-	const [client, server] = await Promise.all([
-		connect({ url, transport: pair.client, consume: fromServer }),
-		accept({ url, transport: pair.server, publish: down.consume() }),
-	]);
-	const room = down.route(Path.from("down/room"));
-	const atClient = fromServer.routes();
-	try {
-		expect(await atClient.next()).toMatchObject({ prefix: Path.from("down/room"), kind: "start" });
-		serverAnnounce.reset(7);
-		expect((await pair.client.closed).closeCode).toBe(SessionCode.ProtocolViolation);
-	} finally {
-		atClient.close();
-		client.abort();
-		server.abort();
-		room.broadcast.close();
-		for (const origin of [down, fromServer]) origin.close();
-	}
-});
+// A reset carrying an application code of its own is no closing session's: it breaks the session. So
+// does one with code 0 over the WebSocket fallback, which reports a session's close as such, so the
+// code is the peer's internal error.
+for (const [code, transport] of [
+	[7, "webtransport"],
+	[0, "websocket"],
+] as const) {
+	test(`an Announce Stream the peer resets with code ${code} over ${transport} closes moq-lite-07 with PROTOCOL_VIOLATION`, async () => {
+		const pair = createMockTransportPair(ALPN_07_WIP);
+		if (transport === "websocket") Object.assign(pair.client, { transport });
+		const serverAnnounce = announceWriter(pair.server);
+		const down = new Producer();
+		const fromServer = new Producer();
+		const url = new URL("https://localhost/test");
+		const [client, server] = await Promise.all([
+			connect({ url, transport: pair.client, consume: fromServer }),
+			accept({ url, transport: pair.server, publish: down.consume() }),
+		]);
+		const room = down.route(Path.from("down/room"));
+		const atClient = fromServer.routes();
+		try {
+			expect(await atClient.next()).toMatchObject({ prefix: Path.from("down/room"), kind: "start" });
+			serverAnnounce.reset(code);
+			expect((await pair.client.closed).closeCode).toBe(SessionCode.ProtocolViolation);
+		} finally {
+			atClient.close();
+			client.abort();
+			server.abort();
+			room.broadcast.close();
+			for (const origin of [down, fromServer]) origin.close();
+		}
+	});
+}
 
 // A peer that stops this side's Announce Stream as it asks for a prefix is leaving too: the reader
 // waiting on that ANNOUNCE_REQUEST is not failed with the stop, and the session stays open.
