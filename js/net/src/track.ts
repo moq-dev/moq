@@ -6486,10 +6486,10 @@ export class Subscriber {
 				items.held = held;
 				return failed ?? { kind: "idle" };
 			}
-			// The bounds moved off it. With nothing they cover above, it waits for them to widen again,
-			// still polling the cursor so the read sees the track or itself end; otherwise the read
-			// passes it.
-			if (this.#covered(held.start, UNBOUNDED).length === 0) {
+			// The bounds moved off it. With nothing the placed ranges cover above, it waits for them to
+			// widen again, still polling the cursor so the read sees the track or itself end; otherwise the
+			// read passes it. Mirrors the Rust `Subscriber::held`.
+			if (this.#placedIn(held.start, UNBOUNDED).length === 0) {
 				const read = failed ?? this.#tryNextGroup();
 				// A clean end keeps it, as the buffer keeps a group past the cap, for a raise to read.
 				if (read.kind === "error") held.close();
@@ -6540,16 +6540,6 @@ export class Subscriber {
 		const to = cursor.end === undefined ? end : min(end, cursor.end);
 		if (from >= to) return [];
 		return (this.#resume ? this.#resume.window() : this.#window).placed(from, to);
-	}
-
-	// The parts of `[start, end)` this reader's ranges and bounds cover now.
-	#covered(start: bigint, end: bigint): Run[] {
-		const cursor = this.#cursor.peek();
-		const from = max(start, cursor.start);
-		const to = cursor.end === undefined ? end : min(end, cursor.end);
-		if (from >= to) return [];
-		if (this.#resume) return this.#resume.runs(from, to);
-		return this.#window.runs(from, to);
 	}
 
 	// Take every run the record gave up into the gaps waiting, in whatever order they come. A drop
