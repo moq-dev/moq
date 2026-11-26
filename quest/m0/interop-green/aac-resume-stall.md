@@ -30,7 +30,9 @@ So a recurrence decides it. The PR that measured this makes the failure print mo
 - `audioBuffered` empty: nothing arrived. Read the relay's downstream request for `2.mp4-a` against its upstream subscription on the new route.
 - `audioBuffered` past the paused playhead: audio arrived and the JS ordered read held it. Look at its gap or time-start wait.
 
-The net fixes that landed after d9d917aa5d may already cover it, notably [moq-dev/moq#9575](https://github.com/moq-dev/moq/pull/9575) (a superseded epoch answering a fresh request; a publisher reconnect is a new epoch) and [moq-dev/moq#9564](https://github.com/moq-dev/moq/pull/9564) (reader wakeups, a replaced copy's drain). If two weeks of scheduled runs (56 cells) pass with no recurrence, delete this quest.
+The net fixes that landed after d9d917aa5d may already cover it, notably [moq-dev/moq#9575](https://github.com/moq-dev/moq/pull/9575) (a superseded epoch answering a fresh request; a publisher reconnect is a new epoch) and [moq-dev/moq#9564](https://github.com/moq-dev/moq/pull/9564) (reader wakeups, a replaced copy's drain).
+
+Decided 2026-11-26 (maintainer, /quest-run on [moq-dev/moq#9664](https://github.com/moq-dev/moq/pull/9664)): ✅ land the diagnostics, including the relay's per-subscription request logging, and keep this quest waiting for the next failure; delete it once two weeks of scheduled runs (56 `rust -> js` cells) pass without one (rejected: delete it now as fixed by #9575 and #9564; land only the player-side fields).
 
 ## Related
 
