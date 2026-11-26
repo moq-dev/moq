@@ -67,9 +67,9 @@ Serving, under subscribe-meta.md's standing relay rules (✅ 2026-10-13 and
 2026-11-02, amended 2026-11-25 above):
 
 - A publisher serves a metadata SUBSCRIBE from the track it publishes with
-  the same ranges, priority, drops, and skips as a payload one, writing each
-  frame's header without its payload. A compressed frame reports its
-  declared size without being inflated.
+  the same ranges, priority, and drops (every `SUBSCRIBE_DROP` code, including
+  `SKIP`) as a payload one, writing each frame's header without its payload. A
+  compressed frame reports its declared size without being inflated.
 - A relay serves a requested range from a payload copy only where the copy
   proves upstream would answer it the same way (the root cache rule); any
   range the copy doesn't prove, it forwards upstream and waits: as a

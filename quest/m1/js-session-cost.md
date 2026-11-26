@@ -46,4 +46,3 @@ the lowest priority on its path.
 - [Cluster routing](/quest/m3/cluster-routing/README.md) - the routing model these costs and priorities feed
 - [Claim arrival rank](/quest/m3/claim-arrival-rank.md) - the re-ranking a changed cost or priority runs
 - [Session keep-alive](/quest/m1/keep-alive.md) - Kixel's other link-quality primitive
-- [Grant cost](/quest/m1/grant-cost.md) - the relay's side of pricing a session

@@ -53,8 +53,6 @@ export function budget(fields: number, next: bigint, count: number): Budget {
 
 /** What `range` costs, or undefined when it can't go out. */
 function cost(budget: Budget, range: WireRange): number | undefined {
-	// An end at group 0 asks for nothing, which encoding refuses.
-	if (range.end?.absolute === 0n) return undefined;
 	try {
 		return rangeSize(range) + budget.id;
 	} catch {
