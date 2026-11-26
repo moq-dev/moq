@@ -38,11 +38,15 @@ Scope in `rs/moq-hls`:
        group start/end and reach; keep a payload subscription on scale-less or
        legacy (`lite-06` / `moq-transport`) tracks that carry no wire
        timestamps.
-     - **Pauses and trailing stop markers (`rendition.rs:2472, 2552-2554, 2596-2597, 2646`):**
-       do not probe payloads for container discontinuity or trailing stop
-       markers (which a frame-0 probe would miss anyway); on timed lite-07
-       tracks, pauses and group boundaries come from wire `GROUP_END` and
-       `SUBSCRIBE_DROP(SKIP)` instead of decoding container stop markers.
+     - **Pauses and trailing stop markers (`rendition.rs:2472, 2552-2554, 2596-2597, 2646`, `rs/moq-mux/src/container/producer.rs:1221`):**
+       update `moq-mux`'s timed `discontinuity()` publisher path first so pauses
+       close the group with wire `GROUP_END` and declare the gap via
+       `skip_groups` / `SUBSCRIBE_DROP(SKIP)` instead of emitting a
+       container-encoded stop-marker group on timed lite-07 tracks. Then
+       `WatchMedia` reads pauses and group boundaries from wire `GROUP_END` and
+       `SUBSCRIBE_DROP(SKIP)` over metadata subscriptions, retaining container
+       marker decoding only on tracks/legacy sessions that still emit container
+       stop markers.
      - **Resized video hand-over:** limit keyframe payload probing strictly to
        video renditions with inline parameter sets (no catalog `description`)
        that can resize without a catalog update, so catalog-described video

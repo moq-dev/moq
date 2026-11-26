@@ -31,11 +31,15 @@ Scope:
 1. **Container-agnostic metadata serving in `moq-archive` (`rs/moq-archive`):**
    - Keep `moq-archive` container-agnostic (depending only on `moq-net`, never
      `moq-mux` or `hang`).
-   - Answer metadata-only subscriptions via ranged reads of the per-object
-     frame tables `moq-archive` already writes (plus group starts and
-     `GROUP_END` extents), without downloading media payload bytes from object
-     storage or adding a container-specific index format. Archives break in
-     place (`quest/m2/README.md`), so add no dual-format fallback.
+   - Extend `moq-archive`'s container-agnostic per-object frame-table header
+     (archives break in place per `quest/m2/README.md`, so add no dual-format
+     fallback) to persist each group's explicit `GROUP_END` extent and the
+     publisher's declared skip ranges (`SUBSCRIBE_DROP(SKIP)`) alongside the
+     group starts, frame timestamps, and frame lengths it already writes.
+   - Answer metadata-only subscriptions via ranged reads of those frame-table
+     headers, emitting the persisted frame headers, `GROUP_END` extents, and
+     declared skips without downloading media payload bytes from object
+     storage.
 2. **`moq-hls` VOD and range playlist mode (`rs/moq-hls`):**
    - Restore VOD/history and `[start, end)` range playlist rendering on
      `Broadcaster` / `Rendition` / `Server` (emitting `#EXT-X-PLAYLIST-TYPE:VOD`
