@@ -78,40 +78,37 @@ assert.equal(
 	"no workflow may land around the merge queue",
 );
 
-// Queue is the one merge group build: main's ruleset requires its context, so
-// it reports (skipped) on main PRs and runs only in the merge queue, on the
-// host's runner, read-only and without secrets.
+// Queue is the one merge group build: main's ruleset requires its build's
+// `Queue build / Build` context, so it reports (skipped) on main PRs and runs
+// only in the merge queue, on the host's runner, read-only and without secrets.
 const queue = await workflow("queue");
 assert.deepEqual(queue.on.merge_group, { types: ["checks_requested"] });
 // A dispatch only reports the skipped context on a PR head, with nothing but `checks: write`.
 assert.ok(queue.on.workflow_dispatch.inputs.sha.required);
 assert.equal(queue.jobs.report.if, "github.event_name == 'workflow_dispatch'");
 assert.deepEqual(queue.jobs.report.permissions, { checks: "write" });
-assert.equal(
-	queue.concurrency.group,
-	// biome-ignore lint/suspicious/noTemplateCurlyInString: GitHub expression is literal YAML.
-	"queue-${{ github.ref }}-${{ inputs.sha }}",
-	"dispatches for different heads must not cancel each other",
-);
 assert.equal(queue.jobs.report.steps.length, 1, "the report job checks nothing out and runs no code from a PR");
+assert.match(queue.jobs.report.steps[0].run, /-f 'name=Queue build \/ Build'/, "the report names the required context");
+assert.equal(queue.concurrency, undefined, "a cancelled pull request run would fail the required context");
 assert.deepEqual(queue.on.pull_request.branches, ["main"]);
 assert.ok(queue.on.pull_request.types.includes("edited"), "retargeting to main must report the context");
 assert.equal(queue.on.pull_request.paths, undefined, "the required context must always report");
 assert.deepEqual(queue.permissions, { contents: "read" });
-assert.equal(queue.jobs.queue.name, "Queue");
-assert.equal(queue.jobs.queue.if, "github.event_name == 'merge_group'");
-assert.deepEqual(queue.jobs.queue["runs-on"], ["self-hosted", "moq-queue"]);
-assert.equal(queue.jobs.queue.permissions, undefined, "the job keeps the workflow's read-only token");
+// The call reports the context on pull requests too, where its job skips.
+assert.equal(queue.jobs.build.name, "Queue build");
+assert.equal(queue.jobs.build.if, "github.event_name != 'workflow_dispatch'");
+assert.equal(
+	queue.jobs.build.uses,
+	"moq-dev/moq/.github/workflows/queue-build.yml@main",
+	"the runner group admits only main's queue-build.yml",
+);
+assert.equal(queue.jobs.build.permissions, undefined, "the call keeps the workflow's read-only token");
+assert.equal(queue.jobs.build.secrets, undefined, "the merge queue build gets no secrets");
 assert.ok(!JSON.stringify(queue).includes("secrets."), "the merge queue build gets no secrets");
-const checkout = queue.jobs.queue.steps.find((step: { uses?: string }) => step.uses?.startsWith("actions/checkout@"));
-assert.equal(checkout.with["persist-credentials"], false);
-// biome-ignore lint/suspicious/noTemplateCurlyInString: GitHub expression is literal YAML.
-assert.equal(queue.jobs.queue.env.BASE, "${{ github.event.merge_group.base_sha }}");
 
-// queue-build.yml is the build queue.yml is to call at main, which the
-// moq-queue runner group admits beside Nightly. Only a call runs it, and it
-// builds only in the merge queue, on the host's runner, read-only and without
-// secrets.
+// queue-build.yml is the build queue.yml calls at main, which the moq-queue
+// runner group admits beside Nightly. Only that call runs it, and it builds
+// only in the merge queue, on the host's runner, read-only and without secrets.
 const build = await workflow("queue-build");
 assert.deepEqual(Object.keys(build.on), ["workflow_call"]);
 assert.deepEqual(build.permissions, { contents: "read" });
@@ -129,10 +126,10 @@ assert.equal(build.jobs.build.env.BASE, "${{ github.event.merge_group.base_sha }
 
 // A cancel or timeout signals only the step's process; exec makes that just, so
 // the dispatcher hears it and prints what a hung lane waits on.
-const gates = [queue.jobs.queue.steps, build.jobs.build.steps, check.jobs.check.steps, nightly.jobs.gate.steps]
+const gates = [build.jobs.build.steps, check.jobs.check.steps, nightly.jobs.gate.steps]
 	.flat()
 	.filter((step: { run?: string }) => /\bjust (ci|gate)\b(?!-)/.test(step.run ?? ""));
-assert.equal(gates.length, 4);
+assert.equal(gates.length, 3);
 for (const step of gates) assert.match(step.run, /^exec nix develop --command just (ci|gate)\b/m, step.name);
 
 // Every other workflow stays out of main PRs and main's merge groups: optional
