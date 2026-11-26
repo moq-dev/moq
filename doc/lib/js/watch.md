@@ -142,6 +142,14 @@ reported with an `error` event and plays alone, since a shared timeline can
 honor neither. Audio follows each member's clock as usual, so unmute the one you want
 to hear.
 
+The cap also bounds how far a wrong camera clock can move the wall. A member
+whose `sync.clock` runs ahead by less than the cap stays in step by holding its
+frames that much longer, so it shows images that much older while looking in
+sync: on real cameras, a clock 2 s ahead showed frames about 2.6 s old with the
+default cap. One whose clock runs behind by less than the cap holds the whole
+group back by as much. A cap a little above the delays your network needs, such
+as `1s`, makes such a member play alone and flagged instead.
+
 Without the element, pass one shared `Watch.Sync` as `sync` to each
 [`Player`](#without-the-element). `player.sync` stays the player's own clock,
 which links to the shared one; `player.sync.out.outOfSync` and
