@@ -7626,14 +7626,11 @@ mod tests {
 		}
 	}
 
-	/// An idle copy asks a live join from the newest group it cached only before lite-06,
-	/// where an absent start is the latest group alone. Lite-06 asks with no start, which its
-	/// publisher resolves within the max age, rather than a join placed at that head. Both
-	/// carry the demand's widest live max as their one Subscriber Max Age, even once the span
-	/// narrows to a start.
+	/// A wire before lite-07 carries the demand's widest live max as its one Subscriber Max
+	/// Age, even once its span narrows to a start, here the newest group an idle copy cached.
 	#[kio::test]
-	async fn an_idle_copy_asks_a_live_join_from_its_head_only_before_lite06() {
-		for (version, head) in [(Version::Lite05, true), (Version::Lite06, false)] {
+	async fn a_span_narrowed_to_a_start_keeps_the_demands_max_age() {
+		for version in [Version::Lite05, Version::Lite06] {
 			let mut h = Harness::new(version);
 			let mut cached = h.producer.create_group(group::Info { start: 3 }).unwrap();
 			cached.write_frame(cached.key_time(), &b"x"[..]).unwrap();
@@ -7649,12 +7646,17 @@ mod tests {
 				.unwrap();
 
 			let (msg, _) = sent_subscribe(&h.wire(), version);
-			let start = match msg.ranges[..] {
-				[lite::Range { start, .. }] => start,
-				_ => panic!("{version}: one span, got {:?}", msg.ranges),
-			};
-			let expected = head.then_some(lite::Anchor::Absolute(Position::group(3)));
-			assert_eq!(start, expected, "{version}: the span's start");
+			assert!(
+				matches!(
+					msg.ranges[..],
+					[lite::Range {
+						start: Some(lite::Anchor::Absolute(position)),
+						..
+					}] if position.group == 3
+				),
+				"{version}: asked from the newest cached group, got {:?}",
+				msg.ranges
+			);
 			assert_eq!(msg.max_delay, Some(wait), "{version}: the demand's max age");
 		}
 	}
@@ -12490,25 +12492,23 @@ impl TrackServe {
 		// Read before the span narrows: a span from a start is history, which drops the max of
 		// every live join it covers.
 		let max_age = subscription.max_age();
-		let version = self.subscriber.version;
+		let ranged = self.subscriber.version.has_ranges();
 		// Lite-07 carries every range asked for; an older wire one span covering them.
-		let mut subscription = match version.has_ranges() {
+		let mut subscription = match ranged {
 			true => subscription,
 			false => wire_span(subscription),
 		};
 		// An idle copy is asked from the head of the newest group it cached when
 		// the subscriber has no start of its own: a quiet track (a catalog) sends
-		// that group again, which says the cache is current. From lite-06 only one asking
-		// just for the oldest group onward counts: a live join keeps its own ask, which the
-		// publisher places behind its own live edge. Asked from the head, it would arrive as
-		// a join placed there, reaching back nowhere, so a publisher sizing a replay by its
-		// reach (a retaining audio encoder) would replay nothing. Before lite-06 an absent
-		// start is the latest group alone, so only the head reaches back past it. A copy that cached
+		// that group again, which says the cache is current. A lite-07 list keeps
+		// any range of its own, so only one asking just for the oldest group onward
+		// counts: a live join keeps its range, which the publisher places behind its own
+		// live edge, so the join reaches back past what the copy holds. A copy that cached
 		// nothing keeps the subscriber's ranges: no start would widen a live viewer's ask to
 		// every group from the oldest.
 		let newest = idle.filter(|_| {
 			subscription.start().is_none()
-				&& (!version.resolves_start() || subscription.ranges.iter().all(|range| *range == track::Range::ALL))
+				&& (!ranged || subscription.ranges.iter().all(|range| *range == track::Range::ALL))
 		});
 		if let Some(newest) = newest {
 			subscription = subscription.with_start(newest);
