@@ -37,6 +37,7 @@ import {
 	hasAuth,
 	hasDatagrams,
 	hasDatagramTracks,
+	hasFetch,
 	hasGoaway,
 	hasProbeRtt,
 	hasRoutes,
@@ -471,6 +472,7 @@ export class Connection implements Session {
 			this.#runBidi(stream)
 				.catch((err: unknown) => {
 					stream.writer.reset(err);
+					stream.reader.stop(err);
 					// A protocol violation on one stream is the peer breaking the session.
 					// Resetting that stream would leave it free to repeat malformed input.
 					const violation = closeViolation(this.#quic, err);
@@ -510,7 +512,7 @@ export class Connection implements Session {
 				})(),
 			);
 		} else if (typ === StreamId.Fetch) {
-			if (!hasTrackStream(this.#version)) throw new Error("FETCH is not supported on this version");
+			if (!hasFetch(this.#version)) throw new Error("FETCH is not supported on this version");
 			await this.#publisher.owe(
 				(async () => {
 					const msg = await Fetch.decode(stream.reader, this.#version);

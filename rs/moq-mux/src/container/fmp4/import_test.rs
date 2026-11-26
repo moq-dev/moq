@@ -3853,7 +3853,7 @@ async fn imported_ttml(
 ) -> (hang::catalog::TextConfig, crate::container::Frame) {
 	let mut input = ttml_init("http://www.w3.org/ns/ttml", "", 1000);
 	input.extend(webvtt_fragment(100_000, &[TTML.as_bytes().to_vec()], 4000));
-	let mut importer = super::Import::new(broadcast, timebase.reserve());
+	let mut importer = super::Import::new(broadcast, catalog.reserve()).with_timebase(timebase);
 	importer.decode(&input).unwrap();
 	let _finished = importer.finish().unwrap();
 	let snapshot = catalog.snapshot();

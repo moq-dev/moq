@@ -436,7 +436,8 @@ impl Sink {
 		// A reservation (not a bare clone) so this init's tracks publish together.
 		// The pass holds a separate reservation across every rendition; this one
 		// only covers the tracks this init segment declares.
-		Fmp4::new(self.broadcast.clone(), self.timebase.reserve())
+		Fmp4::new(self.broadcast.clone(), self.catalog.reserve())
+			.with_timebase(self.timebase.clone())
 			.with_select(select.clone())
 			.with_cmaf(self.cmaf)
 	}

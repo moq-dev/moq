@@ -398,6 +398,9 @@ export class Subscriptions implements Getter<Subscription | undefined> {
 	// and its end, with each one's staleness budget counted. Kept out of {@link #ranges}: a placed join
 	// starts where it was placed, whatever its lag, so it merges with no other range.
 	#placed = new Map<string, { group: bigint; end: bigint | undefined; budgets: Counts<number> }>();
+	// Exact-group Position ranges (see {@link Subscription.placed} with a bigint start), by group and
+	// end, counted separately from time-containment ranges in {@link #ranges}.
+	#exact = new Map<string, { group: bigint; end: bigint | undefined; count: number }>();
 	// The time starts a received copy's readers wait on, by time, counted: see {@link asks}.
 	#asks = new Map<bigint, number>();
 	// The live joins a received copy's readers wait on, by lag and end, each budget they wait under
@@ -446,6 +449,15 @@ export class Subscriptions implements Getter<Subscription | undefined> {
 	#addRange({ range, placed }: Held): boolean {
 		if (placed === undefined) return this.#ranges.add(range);
 		const key = `${placed}:${range.end ?? ""}`;
+		if (typeof range.start === "bigint") {
+			const held = this.#exact.get(key);
+			if (held) {
+				held.count++;
+				return false;
+			}
+			this.#exact.set(key, { group: placed, end: range.end, count: 1 });
+			return true;
+		}
 		let held = this.#placed.get(key);
 		if (!held) {
 			held = { group: placed, end: range.end, budgets: new Counts<number>() };
@@ -461,6 +473,13 @@ export class Subscriptions implements Getter<Subscription | undefined> {
 	#removeRange({ range, placed }: Held): boolean {
 		if (placed === undefined) return this.#ranges.remove(range);
 		const key = `${placed}:${range.end ?? ""}`;
+		if (typeof range.start === "bigint") {
+			const held = this.#exact.get(key);
+			if (!held) throw new Error("a counted exact range");
+			if (--held.count > 0) return false;
+			this.#exact.delete(key);
+			return true;
+		}
 		const held = this.#placed.get(key);
 		if (!held) throw new Error("a counted placed join");
 		const widest = held.budgets.last();
@@ -565,11 +584,11 @@ export class Subscriptions implements Getter<Subscription | undefined> {
 			order: scalars.descending ? "descending" : "ascending",
 			ranges,
 		};
-		// Each placed join once under the widest max asked of it, by group then end, the open one
-		// last, as the Rust map orders them; its lag places nothing.
-		if (this.#placed.size > 0) {
+		// Each placed join once under the widest max asked of it, and each exact-group range once,
+		// by group then end, the open one last, as the Rust map orders them.
+		if (this.#placed.size > 0 || this.#exact.size > 0) {
 			const placed = new Map<number, bigint>();
-			const end = (join: { end: bigint | undefined }) => join.end ?? UNBOUNDED;
+			const end = (entry: { end: bigint | undefined }) => entry.end ?? UNBOUNDED;
 			const order = (a: bigint, b: bigint) => (a < b ? -1 : a > b ? 1 : 0);
 			const held = [...this.#placed.values()].sort((a, b) => order(a.group, b.group) || order(end(a), end(b)));
 			for (const { group, end, budgets } of held) {
@@ -577,6 +596,13 @@ export class Subscriptions implements Getter<Subscription | undefined> {
 				const join: Range = { start: { live: { min: Duration.ZERO, max: maxOf(budgets.last() ?? 0) } } };
 				if (end !== undefined) join.end = end;
 				ranges.push(join);
+			}
+			const exact = [...this.#exact.values()].sort((a, b) => order(a.group, b.group) || order(end(a), end(b)));
+			for (const { group, end } of exact) {
+				placed.set(ranges.length, group);
+				const range: Range = { start: group };
+				if (end !== undefined) range.end = end;
+				ranges.push(range);
 			}
 			value.placed = placed;
 		}

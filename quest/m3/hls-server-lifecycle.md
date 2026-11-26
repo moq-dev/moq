@@ -2,13 +2,16 @@
 
 ## Goal
 
-`moq-hls` indexes live renditions over metadata-only subscriptions so zero
-media payload bytes cross the relay mesh until an HTTP client requests a
-segment; `moq_hls::Server` supports idle eviction and per-request embedder
-scoping/hooks so downstream gateways delegate to `Server` instead of
-duplicating broadcaster pools; cold edges wait or fetch on demand instead of
-returning spurious 404s before `WatchMedia` finishes indexing; and concurrent
-requests for the same segment share one fetch and transmux pass.
+`moq-hls` indexes unwatched timed, catalog-described live renditions over
+metadata-only subscriptions so zero media payload bytes cross the relay mesh
+for them until an HTTP client requests a segment (retaining payload probing
+only for scale-less/legacy tracks or inline-parameter-set video renditions
+that can resize without a catalog update); `moq_hls::Server` supports idle
+eviction and per-request embedder scoping/hooks so downstream gateways delegate
+to `Server` instead of duplicating broadcaster pools; cold edges wait or fetch
+on demand instead of returning spurious 404s before `WatchMedia` finishes
+indexing; and concurrent requests for the same segment share one fetch and
+transmux pass.
 
 ## Plan
 
@@ -24,9 +27,31 @@ Decided 2026-11-26 (maintainer, `/quest-plan` of the HLS audit):
 Scope in `rs/moq-hls`:
 
 1. **Metadata-only live indexing (`src/export/rendition.rs`):**
-   - Switch `WatchMedia` from a payload subscription to a metadata-only
-     subscription so opening `master.m3u8` or watching one rung pulls zero
-     media payload bytes for other renditions across the relay mesh.
+   - Switch `WatchMedia` to a metadata-only subscription on timed lite-07
+     tracks whose catalog describes codec configuration, so opening
+     `master.m3u8` or watching one rung pulls zero media payload bytes for
+     other timed, catalog-described renditions across the relay mesh.
+   - Account explicitly for every payload-derived fact `WatchMedia` currently
+     decodes so nothing regresses:
+     - **Sample PTS & `Reach` (`rendition.rs:2552-2558, 2638-2640`):** on timed
+       tracks, use wire frame timestamps and `GROUP_END` (`group.end()`) for
+       group start/end and reach; keep a payload subscription on scale-less or
+       legacy (`lite-06` / `moq-transport`) tracks that carry no wire
+       timestamps.
+     - **Pauses and container stop markers (`rendition.rs:2472, 2552-2554, 2596-2597, 2646`):**
+       leave `moq-mux`'s publisher discontinuity contract untouched so legacy
+       (`lite-06` / `moq-transport`) and JS subscribers keep receiving
+       hang-04 pause markers on the shared track. In `WatchMedia`'s metadata
+       watcher, combine wire `GROUP_END` / `SUBSCRIBE_DROP(SKIP)` with marker
+       detection from what metadata already reports: recognize candidate
+       discontinuity or trailing stop markers by their tiny declared wire size
+       (at most the container's empty-frame encoding) and probe only those tiny
+       candidate frames when ambiguous, pulling no real media frames.
+     - **Resized video hand-over:** limit keyframe payload probing strictly to
+       video renditions with inline parameter sets (no catalog `description`)
+       that can resize without a catalog update, so catalog-described video
+       renditions never pull keyframes across the mesh while unwatched and
+       inline-parameter-set resizes still bind to the right init segment.
 2. **Idle eviction and embedder hooks on `moq_hls::Server` (`src/server/`):**
    - Add configurable idle eviction to `Server`'s broadcaster pool so
      long-lived streams tear down subscriptions when no HTTP requests arrive.
