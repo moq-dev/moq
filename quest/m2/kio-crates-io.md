@@ -12,7 +12,8 @@
 
 Found while moving `rs/kio` to `kixel-ai/kio`: `Cargo.toml` pins `kio` to `kixel-ai/kio`'s git rev because `kio-macros` is not yet on crates.io and `main`'s `kio` carries changes past the `0.6.4` published from `release`. Cargo refuses to publish any crate that depends on a git-only dependency, so this sits in `m2` ahead of the cut.
 
-- Replace `kio = { git = "https://github.com/kixel-ai/kio", rev = "..." }` in `Cargo.toml` and `bench/fanout/{session,model,group}/Cargo.toml` with the published crates.io version.
+- Replace the `kixel-ai/kio` git pin in `Cargo.toml` and `bench/fanout/{session,model,group}/Cargo.toml` with the published crates.io version.
+- Remove `"https://github.com/kixel-ai/kio"` from `allow-git` in `deny.toml`.
 - Regenerate `Cargo.lock`, `demo/carla/bridge/Cargo.lock`, `bench/fanout/session/Cargo.lock`, `rs/workspace-hack/Cargo.toml`, and `nix/Cargo.nix`.
 
 Public API: none. Wire: none.

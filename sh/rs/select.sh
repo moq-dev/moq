@@ -132,7 +132,7 @@ select_packages() {
     [[ -n "$selected" ]] || return 0
 
     # Cargo's own package ids, not bare names: a workspace crate that is also
-    # pulled from crates.io (kio) makes `--package kio` ambiguous, and cargo
+    # pulled from crates.io makes `--package <name>` ambiguous, and cargo
     # refuses before compiling anything.
     local pkg_flags
     pkg_flags=$(jq -r --arg selected "$selected" '
