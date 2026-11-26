@@ -152,6 +152,11 @@ let
       # cargo -p builds no dependency's binaries. An explicit empty list also
       # stops buildRustCrate guessing them from src/main.rs.
       // lib.optionalAttrs (local && !isRoot) { crateBin = [ ]; }
+      # A dependency is only read as an rlib. Linking its cdylib or staticlib
+      # from bitcode fails on macOS, whose ld takes no LTO plugin (crc-fast).
+      // lib.optionalAttrs (!isRoot && crate ? type) {
+        type = lib.filter (t: t == "lib" || t == "rlib") crate.type;
+      }
       // lib.optionalAttrs isRoot (
         {
           # Named like the package, not buildRustCrate's rust_<crate>.
