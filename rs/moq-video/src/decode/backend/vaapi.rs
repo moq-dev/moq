@@ -228,7 +228,7 @@ impl Backend for Vaapi {
 		// The microseconds ride through the decoder with the picture, so they
 		// survive the DPB reordering a stream with B-frames goes through, and name
 		// the exact timestamp to give it back.
-		let key = Submitted::key(timestamp)?;
+		let key = self.submitted.key(timestamp)?;
 		self.submitted.remember(key, timestamp);
 		if let Some(frames) = self.decode_shared(&access_unit, key) {
 			return frames;

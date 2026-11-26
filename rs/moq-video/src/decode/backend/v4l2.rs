@@ -188,7 +188,7 @@ impl V4l2 {
 	/// Hand one access unit to the driver, waiting for a free buffer.
 	fn submit(&mut self, access_unit: &Bytes, timestamp: Timestamp) -> Result<(), Error> {
 		// Ahead of taking a buffer, so a timestamp with no time leaves none claimed.
-		let key = Duration::from_micros(Submitted::key(timestamp)?);
+		let key = Duration::from_micros(self.submitted.key(timestamp)?);
 		let deadline = Instant::now().saturating_add(BUFFER_TIMEOUT);
 		let index = loop {
 			self.reclaim_coded()?;

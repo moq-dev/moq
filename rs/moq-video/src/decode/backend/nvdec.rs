@@ -225,7 +225,7 @@ impl Nvdec {
 
 impl Backend for Nvdec {
 	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<(), Error> {
-		let key = Submitted::key(timestamp)?;
+		let key = self.submitted.key(timestamp)?;
 		let mut packet = CUVIDSOURCEDATAPACKET {
 			// ENDOFPICTURE: each payload is one complete access unit, so the
 			// parser sees the picture boundary without waiting for the next AU.

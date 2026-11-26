@@ -489,10 +489,15 @@ fn timestamps_keep_their_scale() {
 				got.extend(frames.into_iter().map(|frame| frame.timestamp));
 			}
 
+			// The tail the group's end drains, which is what a transcode reads next.
+			let tail = decoder
+				.flush_all()
+				.unwrap_or_else(|e| panic!("{name} failed to flush: {e}"));
+			got.extend(tail.into_iter().map(|frame| frame.timestamp));
+
 			// IPPP with no reordering, so pictures come back in the order they were
-			// fed; a decoder still holding the last one is not a timestamp fault.
-			assert!(!got.is_empty(), "{name} decoded nothing");
-			assert_eq!(got, sent[..got.len()], "{name} changed a timestamp at {scale:?}");
+			// fed, every one of them once the drain has run.
+			assert_eq!(got, sent, "{name} changed a timestamp at {scale:?}");
 		}
 	}
 }

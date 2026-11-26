@@ -257,7 +257,7 @@ impl MediaCodec {
 	/// none free: a decoder that skips one produces a broken picture until the
 	/// next keyframe, which is a far worse trade than the wait.
 	fn submit(&mut self, access_unit: &[u8], timestamp: Timestamp) -> Result<(), Error> {
-		let time = Submitted::key(timestamp)?;
+		let time = self.submitted.key(timestamp)?;
 
 		for _ in 0..SUBMIT_ROUNDS {
 			let queued = match self

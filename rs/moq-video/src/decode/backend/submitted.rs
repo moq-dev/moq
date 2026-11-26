@@ -35,11 +35,16 @@ impl Submitted {
 	/// The microseconds an access unit rides the codec under, refused for an
 	/// [unscaled](Timestamp::unscaled) timestamp, which has no time to carry.
 	///
-	/// Two timestamps within one microsecond share a key and pair with their
-	/// pictures in submission order, which is the nearest a whole-microsecond
-	/// codec can tell them apart.
-	pub(super) fn key(timestamp: Timestamp) -> Result<u64, TimeOverflow> {
-		u64::try_from(timestamp.as_micros()?).map_err(|_| TimeOverflow)
+	/// Unique among the access units outstanding: one that would share its whole
+	/// microsecond with another goes a microsecond later, so a picture always
+	/// finds its own access unit, at the cost of at most a bounded handful of
+	/// microseconds the codec sees and no caller does.
+	pub(super) fn key(&self, timestamp: Timestamp) -> Result<u64, TimeOverflow> {
+		let mut key = u64::try_from(timestamp.as_micros()?).map_err(|_| TimeOverflow)?;
+		while self.units.iter().any(|(at, _)| *at == key) {
+			key = key.checked_add(1).ok_or(TimeOverflow)?;
+		}
+		Ok(key)
 	}
 
 	/// Record an access unit handed to the codec under `key`, forgetting the
@@ -78,7 +83,7 @@ mod tests {
 
 	/// What a backend does around a submission.
 	fn remember(submitted: &mut Submitted, timestamp: Timestamp) -> u64 {
-		let key = Submitted::key(timestamp).unwrap();
+		let key = submitted.key(timestamp).unwrap();
 		submitted.remember(key, timestamp);
 		key
 	}
@@ -121,7 +126,7 @@ mod tests {
 	/// codec sees the access unit, and nothing is left waiting for it.
 	#[test]
 	fn an_unscaled_timestamp_is_refused() {
-		assert!(Submitted::key(Timestamp::unscaled(5)).is_err());
+		assert!(Submitted::default().key(Timestamp::unscaled(5)).is_err());
 	}
 
 	/// A picture stamped with nothing that was submitted still gets a timestamp,
@@ -133,6 +138,22 @@ mod tests {
 		assert_eq!(submitted.restore(7).unwrap(), micros(7));
 		// The one that was submitted is still waiting for its picture.
 		assert_eq!(submitted.units.len(), 1);
+	}
+
+	/// Two pictures whose timestamps share a microsecond still find their own
+	/// access units when the codec returns them out of submission order.
+	#[test]
+	fn timestamps_in_one_microsecond_are_told_apart() {
+		let later = Timestamp::from_nanos(33_333_002).unwrap();
+		let earlier = Timestamp::from_nanos(33_333_001).unwrap();
+
+		let mut submitted = Submitted::default();
+		let later_key = remember(&mut submitted, later);
+		let earlier_key = remember(&mut submitted, earlier);
+		assert_ne!(later_key, earlier_key);
+
+		assert_eq!(submitted.restore(earlier_key).unwrap(), earlier);
+		assert_eq!(submitted.restore(later_key).unwrap(), later);
 	}
 
 	/// What is remembered is bounded, and it is the oldest that is forgotten.
