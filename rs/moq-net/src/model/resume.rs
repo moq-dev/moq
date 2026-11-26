@@ -3705,9 +3705,11 @@ impl Reader {
 		let Some(resumed) = resumed else {
 			return;
 		};
-		// Placing the covered raised starts may move the floor: read it again. Still unplaced, only
-		// owed raised starts wait, and only they are asked.
-		let floor = self.window().floor();
+		// Placing the covered raised starts may move the floor: read it again. With a range still
+		// unplaced, from the lowest group a placed one names; with none placed, only owed raised
+		// starts are asked.
+		let window = self.window();
+		let floor = (window.floor()).or_else(|| window.placed(0).next().map(|run| *run.start()));
 		// From the window's floor after a route change, as the JS reader asks. After an edit, from
 		// the lowest start of the ranges it added: the rest were judged when they came. A time
 		// start is asked from its time, and the group holding it below is read as `raised` says.
