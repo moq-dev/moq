@@ -1329,8 +1329,9 @@ pub struct Transport {
 	/// Pad the output with null packets to this constant rate, in bits per second.
 	/// Defaults to the multiplex rate the catalog recorded from a constant-rate
 	/// source (`mpegts.muxRate`), plus 60,160 b/s (a packet every 25 ms slot) for
-	/// the export's own clock and framing; without either the output is unpadded.
-	/// A rate given here is used as is.
+	/// the export's own clock and framing, and below 50 ms of `--delay` at least two
+	/// AAC frames a slot; without either the output is unpadded. A rate given here is
+	/// used as is.
 	#[usage(long)]
 	pub mux_rate: Option<u64>,
 

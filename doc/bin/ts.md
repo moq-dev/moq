@@ -121,8 +121,9 @@ repeat only on the 500 ms and keyframe cadence, since a revision must wait for a
 repeat still in that buffer. It pads to the source's constant mux rate when the
 catalog recorded one, plus 60,160 b/s (a packet every 25 ms) for its own clock
 and PES framing, since a source such as FFmpeg's default audio-only output has
-no null packets to make room for them, or to `--mux-rate`, which is used as
-given, on a schedule an IRD or groomer can lock to, with each PCR within 500 ns
+no null packets to make room for them. Below 50 ms of `--delay`, audio can't
+go out a slot ahead, so a padded AAC export runs at least at the rate each slot
+needs for two AAC frames. Or it pads to `--mux-rate`, which is used as given, on a schedule an IRD or groomer can lock to, with each PCR within 500 ns
 of its byte position. A variable-rate source exports unpadded, with no mux-rate
 or system-buffer claim.
 
