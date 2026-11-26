@@ -5936,7 +5936,7 @@ export class Subscriber {
 		// for budget skips only, and continues a failed group through its recovery.
 		if (this.#resume) return this.#tryResumed(false, dispositions !== false);
 		const refused = this.#settle();
-		if (refused) return { kind: "error", error: refused };
+		if (refused) return { kind: "error", error: refused, refused: true };
 		this.#fillWait = false;
 		const groups = this.#state.groups.peek();
 		const { start, end } = this.#cursor.peek();
@@ -6888,7 +6888,7 @@ export class Subscriber {
 
 	#tryNextBuffered(admit?: bigint): Recv {
 		const refused = this.#settle();
-		if (refused) return { kind: "error", error: refused };
+		if (refused) return { kind: "error", error: refused, refused: true };
 		this.#state.waitingOrdered = false;
 		this.#fillWait = false;
 		const groups = this.#state.groups.peek();

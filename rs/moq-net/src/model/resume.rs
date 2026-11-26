@@ -62,6 +62,7 @@ use super::idle::{Idle, Walk};
 use super::subscription::{
 	Accounted, Budget, Containing, Cover, Holdings, Joining, Position, Resolved, Subscription, Unheld, Window,
 };
+use super::track::Failure;
 use crate::ledger;
 
 /// What the front says about a logical track: the copy to read now, and how it ended.
@@ -1284,7 +1285,7 @@ impl Subscriber {
 		parks: bool,
 		delivered: &mut Delivered,
 		waiter: &kio::Waiter,
-	) -> Poll<Result<Option<Candidate>>> {
+	) -> Poll<std::result::Result<Option<Candidate>, Failure>> {
 		let walk = Walk::new(ordered);
 		if self.parked(walk, waiter) {
 			return Poll::Pending;
@@ -2986,7 +2987,7 @@ impl Reader {
 		parks: bool,
 		delivered: &Delivered,
 		waiter: &kio::Waiter,
-	) -> Option<Poll<Result<Option<Candidate>>>> {
+	) -> Option<Poll<std::result::Result<Option<Candidate>, Failure>>> {
 		self.sync(waiter);
 		self.groups_read = true;
 		self.backfill_gaps(delivered, waiter);
@@ -3016,15 +3017,6 @@ impl Reader {
 					}
 					Poll::Ready(Ok(sub)) => sub,
 				};
-				// Each copy's wire decides what it resolves: a copy it replaced refusing the
-				// reader's ranges leaves the rest to the copy now serving.
-				if let Some(err) = sub.refused() {
-					if !copy.replaced {
-						return Some(Poll::Ready(Err(err)));
-					}
-					copy.done = Some(Err(err));
-					break;
-				}
 				if ordered {
 					sub.skip_ordered(floor);
 				}
@@ -3106,16 +3098,15 @@ impl Reader {
 						}
 						break;
 					}
-					Poll::Ready(Err(err)) => {
-						// A refusal its read met, such as a nested front's copy refusing the ranges,
-						// fails the read until they change, as the check above does.
-						if !self.copies[index].replaced
-							&& let Sub::Ready(sub) = &mut self.copies[index].sub
-							&& sub.refused().is_some()
-						{
-							return Some(Poll::Ready(Err(err)));
-						}
-						self.copies[index].done = Some(Err(err));
+					// Each copy's wire decides what it resolves: a copy still serving refusing the
+					// reader's ranges fails the read until they change, as the read that met it
+					// says, however the route moved since; a copy it replaced refusing leaves the
+					// rest to the copy now serving.
+					Poll::Ready(Err(Failure::Refused(err))) if !self.copies[index].replaced => {
+						return Some(Poll::Ready(Err(Failure::Refused(err))));
+					}
+					Poll::Ready(Err(failure)) => {
+						self.copies[index].done = Some(Err(failure.into()));
 						break;
 					}
 				}
@@ -3173,7 +3164,7 @@ impl Reader {
 			// The serving copy drained, but a copy it replaced may still deliver a group below
 			// its end: the track ends once that copy has.
 			Some(Poll::Ready(Ok(None))) if drained && waits => Some(Poll::Pending),
-			end => end,
+			end => end.map(|end| end.map(|end| end.map_err(Failure::Ended))),
 		}
 	}
 
@@ -8795,6 +8786,12 @@ mod test {
 		assert!(matches!(
 			ordered.poll_next_item(&noop),
 			Poll::Ready(Ok(Some(track::Item::Group(group)))) if group.start == 2
+		));
+		// The refusal was no end: the copy still serves the next group.
+		write(&a, 3);
+		assert!(matches!(
+			ordered.poll_next_item(&noop),
+			Poll::Ready(Ok(Some(track::Item::Group(group)))) if group.start == 3
 		));
 	}
 

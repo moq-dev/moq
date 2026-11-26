@@ -5273,6 +5273,24 @@ pub(crate) enum Held {
 	Refused(Error),
 }
 
+/// Why a front's copy failed a read: a refusal the reader recovers from once its ranges change,
+/// or the track's end, which the copy is done with.
+#[derive(Debug)]
+pub(super) enum Failure {
+	/// The ranges can't be served until they change.
+	Refused(Error),
+	/// The track failed.
+	Ended(Error),
+}
+
+impl From<Failure> for Error {
+	fn from(failure: Failure) -> Self {
+		match failure {
+			Failure::Refused(err) | Failure::Ended(err) => err,
+		}
+	}
+}
+
 /// A reader's local group bounds: the floor, and the exclusive cap (`None` for none).
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct Bounds {
@@ -12751,7 +12769,7 @@ impl Subscriber {
 					Poll::Ready(Ok(None)) => Poll::Ready(self.ended()),
 					// Refused: it stays next, so nothing behind it is either.
 					Poll::Ready(Ok(Some(_))) => Poll::Pending,
-					res => res.map(|res| res.map(|_| None)),
+					res => res.map(|res| res.map(|_| None).map_err(Error::from)),
 				}
 			}
 		}
@@ -12759,7 +12777,11 @@ impl Subscriber {
 
 	/// Reserve the next group not yet handed out, without moving past it: [`Self::take`]
 	/// hands out that exact group, even if its producer evicted it meanwhile.
-	pub(super) fn poll_peek_group(&mut self, ordered: bool, waiter: &kio::Waiter) -> Poll<Result<Option<Reserved>>> {
+	pub(super) fn poll_peek_group(
+		&mut self,
+		ordered: bool,
+		waiter: &kio::Waiter,
+	) -> Poll<std::result::Result<Option<Reserved>, Failure>> {
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
 				// A front's copy learns it is read in key order only from the read.
@@ -12791,7 +12813,13 @@ impl Subscriber {
 								false => Poll::Pending,
 							};
 						}
-						Poll::Ready(Err(err)) => break Poll::Ready(Err(err)),
+						// Classified by the cursor's own filter, which only its sync just now set.
+						Poll::Ready(Err(err)) => {
+							break Poll::Ready(Err(match cursor.filter.refused.is_some() {
+								true => Failure::Refused(err),
+								false => Failure::Ended(err),
+							}));
+						}
 						Poll::Ready(Ok(None)) => break Poll::Ready(Ok(None)),
 						Poll::Ready(Ok(Some(peeked))) => peeked,
 					};

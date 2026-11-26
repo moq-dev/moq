@@ -683,6 +683,49 @@ test("a front's read recovers from its serving copy's range refusal", async () =
 });
 
 /**
+ * As above through an inner front: the inner front's copy refusing reaches the outer front as a
+ * refusal, not the track's end. Mirrors the Rust `a_nested_fronts_held_group_waits_behind_its_copys_refusal`.
+ */
+test("a nested front's read recovers from its inner copy's range refusal", async () => {
+	const clock = new Manual();
+	const installed = install(clock);
+	const front = new Front();
+	const inner = new Front();
+	const source = new BroadcastProducer();
+	const handle = source.consume();
+	const ta = copy(source);
+	const requests = ta.producer.requests();
+	ta.write(10n);
+	inner.serve(handle);
+	front.serve(inner.consumer);
+	// Time 5 lies before every group held, so the copy looks it up.
+	const ordered = front.consumer
+		.track("seq")
+		.subscribe({ ranges: [{ start: 5n, end: 6n }, { start: 10n }] })
+		.ordered();
+	try {
+		await clock.advance(Duration.ZERO);
+		expect(ordered.tryNextItem()).toBeUndefined();
+		const fill = await requests.requestedFill();
+		const error = new StreamError(StreamCode.Old);
+		fill?.refuseGroups(fill.start, fill.end ?? 10n, error);
+		await clock.advance(Duration.ZERO);
+		expect(() => ordered.tryNextItem()).toThrow(error);
+		ordered.update({ ranges: [{ start: 10n }] });
+		await clock.advance(Duration.ZERO);
+		expect(ordered.tryNextItem()?.group?.start).toBe(10n);
+	} finally {
+		requests.close();
+		ordered.close();
+		front.consumer.close();
+		inner.consumer.close();
+		handle.close();
+		source.close();
+		installed.close();
+	}
+});
+
+/**
  * A front's held group the ranges cover goes out before its serving copy's fatal abort, which the
  * next read reports. Mirrors the Rust `a_fronts_held_group_goes_out_before_its_copys_fatal_abort`.
  */

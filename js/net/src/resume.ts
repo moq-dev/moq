@@ -1478,13 +1478,6 @@ class Reader implements ResumeSource {
 					held.add(copy);
 					break;
 				}
-				// A copy still serving that refuses the reader's ranges fails the read until they change,
-				// so it is not done: a copy it replaced refusing leaves the rest to the one now serving.
-				// Mirrors the Rust `Reader::poll_group`.
-				if (!copy.replaced) {
-					const refused = hooks.refused(copy.sub);
-					if (refused) return { kind: "error", error: refused };
-				}
 				const recv = this.#take(copy, ordered, dispositions, admit);
 				if (recv.kind === "drop") {
 					const dropped = this.#tryDrop(delivered);
@@ -1508,8 +1501,13 @@ class Reader implements ResumeSource {
 					const closed = copy.sub.closed.peek();
 					copy.done = closed instanceof Error ? closed : hooks.arrived(copy.sub);
 					if (!(closed instanceof Error) && hooks.subscriberEnd(copy.sub)) this.#settled = true;
-				} else if (recv.kind === "error") copy.done = recv.error;
-				else if (this.#drained(copy, delivered)) copy.done = hooks.arrived(copy.sub);
+				} else if (recv.kind === "error") {
+					// A copy still serving that refuses the reader's ranges fails the read until they
+					// change, as the read that met it says, so it is not done; a copy it replaced refusing
+					// leaves the rest to the one now serving. Mirrors the Rust `Reader::poll_first`.
+					if (recv.refused && !copy.replaced) return recv;
+					copy.done = recv.error;
+				} else if (this.#drained(copy, delivered)) copy.done = hooks.arrived(copy.sub);
 				// What a replaced copy that just failed still had to drain is asked of the serving route.
 				if (copy.replaced && copy.done instanceof Error) {
 					this.#resumed = true;

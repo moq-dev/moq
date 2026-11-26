@@ -538,8 +538,12 @@ export type Recv =
 	| { kind: "boundary" }
 	/** The producer finished and the buffer is drained. Nothing can follow. */
 	| { kind: "done" }
-	/** The track aborted. */
-	| { kind: "error"; error: Error };
+	/**
+	 * The read failed: the track aborted, or, `refused`, the reader's ranges can't be served until
+	 * they change, which a front's copy reports so the front does not take it for the track's end.
+	 * Mirrors the Rust `track::Failure`.
+	 */
+	| { kind: "error"; error: Error; refused?: true };
 
 /** A package-internal frame read as the group stores it. */
 export interface ReadGroupFrame {
