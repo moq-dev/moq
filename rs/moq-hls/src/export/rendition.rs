@@ -2098,11 +2098,12 @@ fn poll_retired(claim: &kio::Consumer<Claim>, waiter: &kio::Waiter) -> Poll<()> 
 /// Follows a rendition's media track into its window, numbering its groups on the grid, until the
 /// track ends or fails.
 ///
-/// A segment is listed once a later one starts, which bounds its groups and its `EXTINF`, or once
-/// the track ends. A later one starts with the group after it, as soon as a frame of that group
-/// passes the next line, so the newest group's frames are read as they arrive. A watcher joining mid-segment can't know the groups before its first, so it
-/// lists nothing before the first segment it sees start (see [`grid::Grid::starts`]): another edge
-/// lists that segment whole, and the same URL must name the same bytes everywhere.
+/// A segment is listed once a later one starts, which bounds its groups and its `EXTINF`, once its
+/// newest group's GROUP_END reaches the next line, or once the track ends. A later one starts with
+/// the group after it, as soon as a frame of that group passes the next line, so the newest group's
+/// frames are read as they arrive. A watcher joining mid-segment can't know the groups before its
+/// first, so it lists nothing before the first segment it knows whole (see [`grid::Slot::Media`]):
+/// another edge lists that segment whole, and the same URL must name the same bytes everywhere.
 struct WatchMedia {
 	rendition: Weak<Rendition>,
 	claim: kio::Consumer<Claim>,
@@ -3008,7 +3009,7 @@ impl GroupRead {
 	}
 }
 
-/// True if a FETCH failure means the segment can never be served: a 404, not a 500.
+/// True if a fetch failure means the segment can never be served: a 404, not a 500.
 fn is_unservable(err: &moq_net::Error, broadcast: &moq_net::broadcast::Consumer) -> bool {
 	is_cache_miss(err) || is_gone_publisher(err, broadcast)
 }

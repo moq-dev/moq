@@ -1702,7 +1702,8 @@ mod tests {
 	#[test]
 	fn select_variants_imports_other_video_codecs() {
 		for codec in ["hvc1.1.6.L93.B0", "hev1.1.6.L93.B0", "av01.0.04M.08", "vp09.00.10.08"] {
-			let master = format!("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000000,CODECS=\"mp4a.40.2,{codec}\"\nvideo.m3u8\n");
+			let master =
+				format!("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000000,CODECS=\"mp4a.40.2,{codec}\"\nvideo.m3u8\n");
 			let (_, master) = m3u8_rs::parse_master_playlist(master.as_bytes()).unwrap();
 			assert_eq!(select_variants(&master).len(), 1, "{codec}");
 		}

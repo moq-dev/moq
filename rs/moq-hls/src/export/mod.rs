@@ -3,7 +3,7 @@
 //! A [`Broadcaster`] subscribes to one broadcast's catalog and each rendition's media track,
 //! reading only each group's first frame timestamp, which the transport carries. Playlists and
 //! manifests are a pure function of those timestamps and the catalog's `sync.interval`,
-//! and media bytes move only when an HTTP client requests a segment, which FETCHes exactly the
+//! and media bytes move only when an HTTP client requests a segment, which fetches exactly the
 //! groups that segment holds from the relay cache and transmuxes them to CMAF. The media
 //! subscriptions that index each group count toward no stats session, so a source whose origin
 //! is metered counts its catalog and the media clients fetch, not media nobody requested. A broadcast whose catalog declares no
@@ -2481,7 +2481,10 @@ mod tests {
 		let late = snapshot.segments[1].program_date_time.expect("a clock");
 		let resumed = snapshot.segments[4].program_date_time.expect("a clock");
 		assert_eq!(late.checked_duration_since(first), Some(Duration::from_millis(2_050)));
-		assert_eq!(resumed.checked_duration_since(first), Some(Duration::from_millis(9_300)));
+		assert_eq!(
+			resumed.checked_duration_since(first),
+			Some(Duration::from_millis(9_300))
+		);
 
 		let manifest = broadcaster.manifest(None).unwrap().expect("manifest renders");
 		for s in [

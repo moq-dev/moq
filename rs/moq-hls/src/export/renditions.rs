@@ -998,7 +998,10 @@ mod tests {
 			.expect("publish allowed");
 		let track = route
 			.broadcast()
-			.create_track("video", moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI))
+			.create_track(
+				"video",
+				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+			)
 			.unwrap();
 		let registry = moq_net::stats::Registry::new(moq_net::stats::Config::new());
 		let consumer = origin.consume().with_stats(

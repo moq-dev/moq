@@ -341,7 +341,8 @@ impl Grid {
 			let segment = self.segment(pending.pts, Some(at)).expect("bounded");
 			self.place(pending, segment, &mut out);
 		}
-		let reached = (self.open.as_ref()).is_some_and(|open| super::nanos(at) >= super::nanos(self.line(open.segment + 1)));
+		let reached =
+			(self.open.as_ref()).is_some_and(|open| super::nanos(at) >= super::nanos(self.line(open.segment + 1)));
 		if reached && let Some(open) = self.open.take() {
 			let segment = open.segment;
 			let end = self.line(segment + 1);
@@ -780,10 +781,22 @@ mod test {
 	fn ntsc_keyframes_either_side_of_a_line_fill_every_segment() {
 		let frame = |index: u64| index * 1_001_000_000 / 30_000;
 		// The first frame at or past each line, or every third line the one before it.
-		let key = |line: u64| (line * 2_000_000 * 30_000).div_ceil(1_001_000_000) - u64::from(line.is_multiple_of(3) && line > 0);
+		let key = |line: u64| {
+			(line * 2_000_000 * 30_000).div_ceil(1_001_000_000) - u64::from(line.is_multiple_of(3) && line > 0)
+		};
 		let starts: Vec<u64> = (0..200).map(|line| frame(key(line))).collect();
-		assert!(starts.iter().enumerate().any(|(line, start)| *start > line as u64 * 2_000_000));
-		assert!(starts.iter().enumerate().any(|(line, start)| *start < line as u64 * 2_000_000));
+		assert!(
+			starts
+				.iter()
+				.enumerate()
+				.any(|(line, start)| *start > line as u64 * 2_000_000)
+		);
+		assert!(
+			starts
+				.iter()
+				.enumerate()
+				.any(|(line, start)| *start < line as u64 * 2_000_000)
+		);
 		let (segments, gaps) = placed(Duration::from_secs(2), &starts);
 		assert!(gaps.is_empty(), "gaps at {gaps:?}");
 		assert_eq!(segments, (0..200).map(|segment| (segment, 1)).collect::<Vec<_>>());
@@ -802,7 +815,11 @@ mod test {
 		let mut grid = Grid::new(Duration::from_secs(2), 256);
 		let mut slots = Vec::new();
 		for (sequence, start) in starts.iter().enumerate() {
-			slots.extend(grid.group(sequence as u64, Timestamp::from_micros(*start).unwrap(), Timestamp::from_micros(*start).unwrap()));
+			slots.extend(grid.group(
+				sequence as u64,
+				Timestamp::from_micros(*start).unwrap(),
+				Timestamp::from_micros(*start).unwrap(),
+			));
 		}
 		let gaps: Vec<u64> = slots
 			.iter()
@@ -826,7 +843,10 @@ mod test {
 	fn an_end_at_the_next_line_completes_the_segment() {
 		let mut grid = Grid::new(Duration::from_secs(2), 256);
 		assert!(grid.group(0, ms(0), ms(0)).is_empty());
-		assert!(grid.end(ms(1500)).is_empty(), "a later group may still start before 2 s");
+		assert!(
+			grid.end(ms(1500)).is_empty(),
+			"a later group may still start before 2 s"
+		);
 		assert!(grid.group(1, ms(1500), ms(1500)).is_empty());
 		assert_eq!(listed(grid.end(ms(2000))), [(0, 0..2, 0, 2000)]);
 		assert!(!grid.waiting(), "nothing is left open");

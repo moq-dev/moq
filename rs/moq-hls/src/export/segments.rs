@@ -7,7 +7,7 @@
 //! * the HTTP serve path, synchronously, to render a media playlist and resolve a segment's
 //!   groups (nothing here touches media bytes on that path); and
 //! * a [`Consumer`] cursor, for a recorder that wants every segment *with its media*, in
-//!   order, exactly once. `next()` waits for the next row, FETCHes and transmuxes its groups
+//!   order, exactly once. `next()` waits for the next row, fetches and transmuxes its groups
 //!   (via [`Rendition`]), and yields the CMAF bytes.
 //!
 //! A segment is addressed by its track's tag and its number (the `seg/{tag}.{segment}.m4s`
@@ -531,11 +531,11 @@ pub struct Segment {
 /// A cursor over one rendition's segments, in order.
 ///
 /// Obtained from [`Rendition::segments`](super::Rendition::segments). Each
-/// [`next`](Self::next) awaits the next segment, then FETCHes and transmuxes it through the
+/// [`next`](Self::next) awaits the next segment, then fetches and transmuxes it through the
 /// path the HTTP serve path uses. The cursor also holds a live subscription to the media
-/// track, so each group reaches the cache as it is published and that FETCH is a hit. A
-/// cursor reads every group anyway, so this costs no extra traffic, and a source without
-/// FETCH (moq-lite before 05) can serve a group no other way.
+/// track, so each group reaches the cache as it is published and that fetch is a hit. A
+/// cursor reads every group anyway, so this costs no extra traffic, and a source that can't
+/// serve history (moq-lite before 05) can serve a group no other way.
 pub struct Consumer {
 	state: kio::Consumer<State>,
 	rendition: Arc<Rendition>,
@@ -628,7 +628,7 @@ impl Consumer {
 	/// [`CatalogFailed`](crate::Error::CatalogFailed). A denied referenced broadcast fails every
 	/// call with its authorization error.
 	///
-	/// FETCHes and transmuxes the next segment's groups. A stop, or a record its successor can't
+	/// Fetches and transmuxes the next segment's groups. A stop, or a record its successor can't
 	/// bound, is yielded without media, so every segment number is accounted for, except across a
 	/// pause longer than the playlist window: only its newest
 	/// `MAX_SEGMENTS` gaps are listed, since older ones would slide out of every window before
