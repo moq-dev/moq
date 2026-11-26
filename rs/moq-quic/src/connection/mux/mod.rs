@@ -309,8 +309,9 @@ impl Connection {
 
 	/// Close the connection with an APPLICATION_CLOSE, unless it already ended
 	///
-	/// The frame comes from the next [`Self::poll_transmit`]; flush it before shutting down
-	/// the transport.
+	/// The frame comes from [`Self::poll_transmit`], in a record of its own if the transport
+	/// parameters still go first; keep transmitting until [`Self::is_drained`], then flush
+	/// before shutting down the transport.
 	pub fn close(&mut self, error_code: VarInt, reason: String) {
 		if self.is_closed() {
 			return;
