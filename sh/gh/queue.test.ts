@@ -106,8 +106,8 @@ assert.deepEqual(
 assert.equal(queue.jobs.build.secrets, undefined, "the merge queue build gets no secrets");
 assert.ok(!JSON.stringify(queue).includes("secrets."), "the merge queue build gets no secrets");
 
-// queue-pr.yml reports `Queue` skipped on main PRs, and on a dispatched head,
-// with nothing but `checks: write`.
+// queue-pr.yml reports `Queue` skipped on main PRs, and on a dispatched open
+// main PR head, with nothing but `checks: write` and `pull-requests: read`.
 const queuePr = await workflow("queue-pr");
 assert.deepEqual(Object.keys(queuePr.on).sort(), ["pull_request", "workflow_dispatch"]);
 assert.deepEqual(queuePr.on.pull_request.branches, ["main"]);
@@ -119,9 +119,45 @@ assert.deepEqual(queuePr.permissions, { contents: "read" });
 assert.deepEqual(Object.keys(queuePr.jobs), ["queue"]);
 assert.equal(queuePr.jobs.queue.name, "Queue");
 assert.equal(queuePr.jobs.queue.if, "github.event_name == 'workflow_dispatch'");
-assert.deepEqual(queuePr.jobs.queue.permissions, { checks: "write" });
+assert.deepEqual(queuePr.jobs.queue.permissions, { checks: "write", "pull-requests": "read" });
 assert.equal(queuePr.jobs.queue.steps.length, 1, "the report checks nothing out and runs no code from a PR");
 assert.match(queuePr.jobs.queue.steps[0].run, /-f name=Queue -f head_sha="\$SHA"/);
+// A dispatch posts only on an open main PR's head, never on a merge group's commit.
+const dispatchStub = mkdtempSync(join(tmpdir(), "moq-queue-dispatch-"));
+try {
+	const head = "a".repeat(40);
+	const pulls = join(dispatchStub, "pulls.json");
+	writeFileSync(pulls, JSON.stringify([{ number: 1, head: { sha: head } }]));
+	// The stub answers the open-PR listing from the fixture through the step's own filter.
+	writeFileSync(
+		join(dispatchStub, "gh"),
+		'#!/usr/bin/env bash\nprintf "%s\\n" "$@" >> "$GH_ARGS"\n[[ "$*" == *"/pulls?state=open&base=main&"* ]] || exit 0\nwhile [[ "$1" != --jq ]]; do shift; done\njq -r "$2" "$GH_PULLS"\n',
+		{ mode: 0o755 },
+	);
+	for (const [sha, posts] of [
+		[head, true],
+		["b".repeat(40), false],
+	] as const) {
+		const args = join(dispatchStub, "args");
+		rmSync(args, { force: true });
+		const run = Bun.spawnSync(
+			["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", queuePr.jobs.queue.steps[0].run],
+			{
+				env: {
+					PATH: `${dispatchStub}:${process.env.PATH}`,
+					GH_ARGS: args,
+					GH_PULLS: pulls,
+					REPO: "o/r",
+					SHA: sha,
+				},
+			},
+		);
+		assert.equal(run.exitCode === 0, posts, `${sha} exit`);
+		assert.equal(readFileSync(args, "utf8").includes("repos/o/r/check-runs"), posts, `${sha} posts`);
+	}
+} finally {
+	rmSync(dispatchStub, { recursive: true, force: true });
+}
 
 // queue-build.yml is the build queue.yml calls at main, which the moq-queue
 // runner group admits beside Nightly. Only that call runs it, and it builds

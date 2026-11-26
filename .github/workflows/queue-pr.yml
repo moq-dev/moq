@@ -15,7 +15,9 @@ on:
   # test merge commit predates this workflow gets no pull_request run from it
   # (GitHub runs PR workflows from that commit, and a dispatch reads the
   # workflow from the ref it runs on), so
-  # `gh workflow run queue-pr.yml -f sha=<head>` on main reports it there.
+  # `gh workflow run queue-pr.yml -f sha=<head>` on main reports it there. It
+  # refuses any commit that is not an open main PR's head, such as a merge
+  # group's, where a skipped `Queue` would pass the group before its build.
   workflow_dispatch:
     inputs:
       sha:
@@ -37,13 +39,18 @@ jobs:
     timeout-minutes: 5
     permissions:
       checks: write
+      pull-requests: read
     steps:
       - name: Report the skipped Queue context
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           SHA: ${{ inputs.sha }}
+        # Lists open PRs into main rather than `commits/$SHA/pulls`, which
+        # omits PRs from forks.
         run: |
           [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::sha must be a full commit SHA" >&2; exit 1; }
+          prs=$(gh api --paginate "repos/$REPO/pulls?state=open&base=main&per_page=100" --jq '.[] | select(.head.sha == env.SHA) | .number')
+          [[ -n "$prs" ]] || { echo "::error::$SHA is not the head of an open pull request into main" >&2; exit 1; }
           gh api "repos/$REPO/check-runs" -f name=Queue -f head_sha="$SHA" -f status=completed -f conclusion=skipped \
             -f 'output[title]=Queue' -f 'output[summary]=Skipped on the pull request; the merge queue builds the group.' --silent
