@@ -1708,22 +1708,35 @@ mod tests {
 		assert!(wall >= sent, "timed {} µs before the first frame was sent", sent - wall);
 	}
 
-	/// A report wait that ends with no frame after the held ones still releases them.
+	/// A camera without RTCP that falls silent during the report wait is still placed when the wait
+	/// ends, rather than holding its catalog until a frame that never comes.
 	#[tokio::test]
-	async fn the_end_of_a_report_wait_releases_its_frames_alone() {
+	async fn a_silent_camera_is_placed_when_the_report_wait_ends() {
+		// Real sockets stamp each frame's arrival on the host clock, so the wait runs on it too.
 		kio::clock::host_time();
+		const REPORT_WAIT: Duration = Duration::from_millis(200);
 		let server = Server::bind(vec![Media::H265]).await;
-		let client = Client::new(server.url()).unwrap().waiting(Duration::from_millis(200));
-		let (broadcast, catalog, pull) = pull(client);
+		let (broadcast, catalog, pull) = pull(client(server.url()).waiting(REPORT_WAIT));
 
 		let mut session = within("PLAY", server.accept(0)).await;
 		session.video(0, 0, H265_KEYFRAME).await;
-		// Nothing else arrives, yet the keyframe publishes once the wait is over, before the end.
+		session.video(0, FRAME, &[fake::H265_TRAIL]).await;
+		// Nothing follows, so only the end of the wait can publish the catalog.
 		let snapshot = catalog_with(&catalog, 1, 0).await;
+		let published = wall_now();
 		let reader = subscribe(&broadcast, video_track(&snapshot)).await;
 		session.close().await;
 		assert_eq!(within("the pull", pull).await.unwrap().unwrap(), End::Closed);
-		assert_eq!(frames(reader).await.len(), 1, "the held keyframe publishes");
+
+		let frames = frames(reader).await;
+		assert_eq!(frames.len(), 2, "both held frames publish");
+		let arrived = wall_of(&snapshot, &frames[0]);
+		assert!(
+			published - arrived >= REPORT_WAIT.as_micros() as i128,
+			"published {} µs after the first frame arrived, before the wait was over",
+			published - arrived
+		);
+		assert_eq!(wall_of(&snapshot, &frames[1]) - arrived, 33_333, "one frame later");
 	}
 
 	/// A session ending during its report wait still publishes the frames it held.
