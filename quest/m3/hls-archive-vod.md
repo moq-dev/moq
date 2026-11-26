@@ -36,10 +36,16 @@ Scope:
      fallback) to persist each group's explicit `GROUP_END` extent and the
      publisher's declared skip ranges (`SUBSCRIBE_DROP(SKIP)`) alongside the
      group starts, frame timestamps, and frame lengths it already writes.
+   - Because archive objects are write-once (`rs/moq-archive/src/producer/track.rs:365`),
+     when a `GROUP_END` extent or declared skip arrives after the flush timer
+     has already written a group's last media frame (such as before a pause
+     with no subsequent frames), write a small write-once metadata-only archive
+     record carrying that extent/skip so replay always finds the pause
+     boundary even if no more frames arrive.
    - Answer metadata-only subscriptions via ranged reads of those frame-table
-     headers, emitting the persisted frame headers, `GROUP_END` extents, and
-     declared skips without downloading media payload bytes from object
-     storage.
+     headers and metadata-only records, emitting the persisted frame headers,
+     `GROUP_END` extents, and declared skips without downloading media payload
+     bytes from object storage.
 2. **`moq-hls` VOD and range playlist mode (`rs/moq-hls`):**
    - Restore VOD/history and `[start, end)` range playlist rendering on
      `Broadcaster` / `Rendition` / `Server` (emitting `#EXT-X-PLAYLIST-TYPE:VOD`
@@ -48,11 +54,12 @@ Scope:
    - Index archive renditions lazily per requested rendition over a
      metadata-only subscription (`Start::Oldest` or `Anchor::Time(start)`).
      Pauses and group extents come from wire `GROUP_END` and
-     `SUBSCRIBE_DROP(SKIP)` carried by the metadata subscription, and codec
-     changes come from the archived catalog; retain targeted payload probing
-     in `moq-hls` only for inline-parameter-set video renditions that can
-     resize without a catalog update. Media payload bytes for catalog-described
-     renditions are fetched only when an HTTP client requests a segment.
+     `SUBSCRIBE_DROP(SKIP)` plus tiny-size candidate marker probing when
+     ambiguous (matching `hls-server-lifecycle.md`), and codec changes come
+     from the archived catalog; retain targeted keyframe probing in `moq-hls`
+     only for inline-parameter-set video renditions that can resize without a
+     catalog update. Media payload bytes for catalog-described renditions are
+     fetched only when an HTTP client requests a segment.
 3. **Storage-traffic tests (`rs/moq-hls/src/export/archive_tests.rs`):**
    - Tighten `archive_tests.rs` on multi-rendition catalog-described recordings
      to assert that `master.m3u8` performs zero track object reads,
