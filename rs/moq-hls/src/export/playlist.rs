@@ -81,6 +81,9 @@ pub(crate) fn render_media(snapshot: &Snapshot, init: &str, query: Option<&str>)
 	let mut out = String::new();
 	let _ = writeln!(out, "#EXTM3U");
 	let _ = writeln!(out, "#EXT-X-VERSION:{version}");
+	// Every segment opens on a group, and every group on a keyframe, also for a player that
+	// loads this playlist without the multivariant one.
+	let _ = writeln!(out, "#EXT-X-INDEPENDENT-SEGMENTS");
 	let _ = writeln!(out, "#EXT-X-TARGETDURATION:{}", snapshot.target_duration);
 	let _ = writeln!(out, "#EXT-X-MEDIA-SEQUENCE:{}", snapshot.media_sequence);
 	if snapshot.discontinuity_sequence > 0 {

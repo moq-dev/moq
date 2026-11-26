@@ -14,7 +14,9 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 
 use super::Kind;
 
-const VERSION: u32 = 9;
+/// The lowest version the playlist and its media comply with (RFC 8216 4.3.1.2): no master tag
+/// needs more, and every rendition's fMP4 segments need 6.
+const VERSION: u32 = 6;
 const AUDIO_GROUP: &str = "aud";
 
 /// RFC 3986 unreserved characters, which are safe in one URL path segment.
@@ -181,6 +183,8 @@ pub fn render(video: &[VideoVariant], audio: &[AudioVariant]) -> String {
 	let mut out = String::new();
 	let _ = writeln!(out, "#EXTM3U");
 	let _ = writeln!(out, "#EXT-X-VERSION:{VERSION}");
+	// Every segment opens on a group, and every group on a keyframe.
+	let _ = writeln!(out, "#EXT-X-INDEPENDENT-SEGMENTS");
 
 	let audio_groups = group_audio(audio);
 	for group in &audio_groups {
@@ -256,7 +260,7 @@ mod tests {
 			&[video("video", Some(1280), Some(720))],
 			&[audio("audio", 128_000, "mp4a.40.2")],
 		);
-		assert!(out.starts_with("#EXTM3U\n#EXT-X-VERSION:9\n"));
+		assert!(out.starts_with("#EXTM3U\n#EXT-X-VERSION:6\n#EXT-X-INDEPENDENT-SEGMENTS\n"));
 		assert!(out.contains(
 			"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"audio\",DEFAULT=YES,AUTOSELECT=YES,URI=\"@run/audio/audio/media.m3u8\"\n"
 		));
