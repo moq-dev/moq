@@ -4088,6 +4088,12 @@ impl Recover {
 					Cause::Cut | Cause::Failed(_) => {}
 				}
 			}
+			// A delayed Position-cut FIN arriving while the front stages a replacement route
+			// waits for that stage to splice or withdraw rather than letting the current route's
+			// refusal end the read early.
+			if matches!(cause, Cause::Cut) && staged.is_some() && !done {
+				return Poll::Pending;
+			}
 			let res = self.poll_serving(generation, &serving, index, settled, withdrawn.is_none(), waiter);
 			// The serving route failed too, or will not fetch the rest while its subscription
 			// will not deliver it either, and no front is left to replace it.

@@ -1890,13 +1890,13 @@ impl FrameIngest {
 		}
 	}
 
-	/// The header of the frame whose fields were just read, checking the object record that
-	/// preceded it under the `ietf` extension.
 	/// Whether an explicit IETF `END_OF_GROUP` record completed this stream.
 	fn saw_end_object(&self) -> bool {
 		matches!(self.phase, IngestPhase::Ended)
 	}
 
+	/// The header of the frame whose fields were just read, checking the object record that
+	/// preceded it under the `ietf` extension.
 	fn header(
 		&mut self,
 		group: &mut crate::recv::Group,

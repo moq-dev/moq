@@ -3187,9 +3187,10 @@ export class Publisher {
 			let whole = false;
 
 			// Kept across loop iterations so waking on a Position End change never starts a
-			// second concurrent readGroupFrame(), and stream.closed is derived once per stream.
+			// second concurrent readGroupFrame(), and stream.closed is derived lazily once
+			// the first read starts (avoiding unhandled rejections if a cap breaks early).
 			let pendingRead: ReturnType<typeof hooks.readGroupFrame> | undefined;
-			const closed = stream.closed.then(() => undefined);
+			let closed: Promise<undefined> | undefined;
 			const stopWake = Symbol("stop-wake");
 			// Track the next unsent frame index separately from `hooks.groupIndex(group)`,
 			// which an in-flight `pendingRead` may advance before its frame is consumed.
@@ -3208,9 +3209,11 @@ export class Publisher {
 					(settled === undefined || settled > nextUnsent)
 				) {
 					pendingRead?.catch(() => {});
+					closed?.catch(() => {});
 					break;
 				}
 				pendingRead ??= hooks.readGroupFrame(group, compress);
+				closed ??= stream.closed.then(() => undefined);
 				let disposeStop: Dispose | undefined;
 				let outcome: Awaited<ReturnType<typeof hooks.readGroupFrame>> | undefined | typeof stopWake;
 				try {

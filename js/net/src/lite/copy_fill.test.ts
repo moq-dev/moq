@@ -60,7 +60,9 @@ async function peers(alpn: string, timed = false, answered?: Promise<unknown>) {
 					fill.dropGroups(key, (key / 1_000n + 1n) * 1_000n);
 					continue;
 				}
-				write(defined(fill.accept(key)), key, "old");
+				const group = fill.accept(key);
+				if (!group) break;
+				write(group, key, "old");
 			}
 			fill.close();
 		}
