@@ -147,35 +147,24 @@ pub(crate) struct Resume {
 
 /// What a source starting at `floor` asks for under `delay`.
 ///
-/// From the group at the floor: a time start names the group containing it, so the request
-/// reaches that group too, and the reader leaves it out if excluded. A reader with a staleness
-/// budget asks for no more history than the group it was reading, whole, and joins the rest
-/// live, reaching back as far as the budget allows, so what follows goes stale under the delay as
-/// any live read's does.
-fn floor_ranges(floor: Bound<u64>, delay: crate::container::Delay) -> Vec<moq_net::track::Range> {
+/// A reader with a staleness budget joins live, reaching back as far as the budget allows, and
+/// leaves out what precedes the floor itself: a group goes stale once what it could still present
+/// falls the budget behind the live edge, by when its frames are late anyway, so the join still
+/// reaches everything after the floor that can go out on time. A history reader asks from the
+/// group at the floor: a time start names the group containing it, so the request reaches that
+/// group too, and the reader leaves it out if excluded.
+fn floor_range(floor: Bound<u64>, delay: crate::container::Delay) -> moq_net::track::Range {
 	use moq_net::track::{Range, Start};
-	let (Bound::Included(group) | Bound::Excluded(group)) = floor else {
-		return vec![Range::ALL];
-	};
-	let Some(max) = delay.max else {
-		return vec![Range::from(Start::Time(group))];
-	};
-	let live = Range {
-		start: Start::Live {
-			min: None,
-			max: Some(max),
-		},
-		end: None,
-	};
-	match floor {
-		Bound::Included(group) => vec![
-			Range {
-				start: Start::Time(group),
-				end: Some(group),
+	match (floor, delay.max) {
+		(Bound::Unbounded, _) => Range::ALL,
+		(_, Some(max)) => Range {
+			start: Start::Live {
+				min: None,
+				max: Some(max),
 			},
-			live,
-		],
-		_ => vec![live],
+			end: None,
+		},
+		(Bound::Included(group) | Bound::Excluded(group), None) => Range::from(Start::Time(group)),
 	}
 }
 
@@ -194,12 +183,12 @@ impl Resume {
 		self.cursor.is_some()
 	}
 
-	/// Resume past the group being read rather than within it, returning whether the source
-	/// stopped partway through one.
-	pub(crate) fn past_group(&mut self) -> bool {
-		let Some(Cursor::Within { group, .. }) = self.cursor else {
+	/// Resume past `group` rather than within it, returning whether the source stopped partway
+	/// through it.
+	pub(crate) fn past_group(&mut self, group: u64) -> bool {
+		if !matches!(self.cursor, Some(Cursor::Within { group: at, .. }) if at == group) {
 			return false;
-		};
+		}
 		self.cursor = Some(Cursor::After(group));
 		true
 	}
@@ -709,7 +698,7 @@ impl ExportSource {
 			let broadcast = ready!(binding.poll_broadcast(waiter))?;
 			let instance = binding.sibling().then(|| broadcast.clone());
 			let subscription =
-				moq_net::track::Subscription::default().with_ranges(floor_ranges(start.floor, self.delay));
+				moq_net::track::Subscription::default().with_ranges([floor_range(start.floor, self.delay)]);
 			let subscription = self.delay.subscription(subscription);
 			let track = match broadcast.track(&self.target.track) {
 				Ok(track) => track,

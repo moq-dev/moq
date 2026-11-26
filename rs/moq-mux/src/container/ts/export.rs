@@ -394,6 +394,8 @@ struct Track {
 	/// The current group's clock, when its rendition declared `reorder` at the group's start.
 	/// A trimmed leading picture holds its slot as `None`.
 	declared: Option<DeclaredClock<Option<Held>>>,
+	/// The source group that clock runs for.
+	declared_group: Option<u64>,
 	/// Loss counter at the last read, excluding declared ends.
 	recovery_gap: Option<u64>,
 	/// Leading pictures below the recovery keyframe have unavailable references, and whether
@@ -465,6 +467,7 @@ impl Track {
 			descriptors: Vec::new(),
 			clock: DecodeClock::default(),
 			declared: None,
+			declared_group: None,
 			recovery_gap: None,
 			leading_floor: None,
 			held: None,
@@ -533,6 +536,8 @@ impl Track {
 				self.release(name, jitter, true)?;
 			}
 			self.declared = depth.map(DeclaredClock::new);
+			// The frame was just read, or is the first, held while the source read no further.
+			self.declared_group = self.source.group();
 		}
 		let source = pending.frame.timestamp;
 		let pts = to_ticks(source);
@@ -2771,7 +2776,8 @@ where
 			let mut resume = track.source.resume();
 			// A flush settled the group's decode clock before its reordering was known, so the
 			// rest of the group may not fit it: read on from the next group instead.
-			let cut = track.declared.as_ref().is_some_and(DeclaredClock::forced) && resume.past_group();
+			let cut = track.declared.as_ref().is_some_and(DeclaredClock::forced)
+				&& track.declared_group.is_some_and(|group| resume.past_group(group));
 			let resumed = |source: ExportSource| match resume.read() {
 				true => source.resuming(&resume),
 				false => at_edge(source, replay),
