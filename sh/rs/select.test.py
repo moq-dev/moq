@@ -175,10 +175,11 @@ class SelectTest(unittest.TestCase):
                 calls = [call for call in self.selected(path) if call != "rs c-tests --syntax"]
                 self.assertEqual(calls.count("rs send-depth"), 1, calls)
                 stable = [call for call in calls if call != "rs send-depth"]
-                self.assertEqual(len(stable), 3, stable)
+                self.assertEqual(len(stable), 4, stable)
                 self.assertTrue(stable[0].startswith("rs lint "), stable)
                 self.assertEqual(stable[1], "rs media-defaults", stable)
                 self.assertEqual(stable[2], "rs no-async", stable)
+                self.assertEqual(stable[3], "rs net-fuzz", stable)
         # The script that runs the proof selects moq-net, so an edit to it is proved too.
         self.assertIn("rs send-depth", self.selected("sh/rs/send-depth.sh"))
         # Only the lint phase runs it, so the gate compiles it once.
@@ -222,19 +223,21 @@ class SelectTest(unittest.TestCase):
         # The device-feature test build stays a single build.
         self.assertNotIn("rs media-defaults", self.selected("rs/moq-audio/src/lib.rs", action="test"))
 
-    def test_gate_builds_net_without_async(self):
-        # Every other build unifies `async` back in, so the gate compiles it alone.
-        for path in ("rs/moq-net/src/lib.rs", "Cargo.lock"):
+    def test_gate_builds_net_alone(self):
+        # Every other build unifies `async` and `test-support` back in, so the
+        # gate compiles moq-net without them, for moq-net and its dependencies.
+        for recipe in ("rs no-async", "rs net-fuzz"):
+            for path in ("rs/moq-net/src/lib.rs", "rs/kio/src/lib.rs", "Cargo.lock"):
+                for action in ("check", "check-test", "lint"):
+                    with self.subTest(recipe=recipe, path=path, action=action):
+                        calls = self.selected(path, action=action)
+                        self.assertEqual(calls.count(recipe), 1, calls)
+            # A crate with no moq-net dependents needs no extra compile.
             for action in ("check", "check-test", "lint"):
-                with self.subTest(path=path, action=action):
-                    calls = self.selected(path, action=action)
-                    self.assertEqual(calls.count("rs no-async"), 1, calls)
-        # A crate with no moq-net dependents needs no extra compile.
-        for action in ("check", "check-test", "lint"):
-            self.assertNotIn("rs no-async", self.selected("rs/moq-auth/src/lib.rs", action=action))
-        # The test and fix lanes build the default features only.
-        for action in ("test", "fix"):
-            self.assertNotIn("rs no-async", self.selected("rs/moq-net/src/lib.rs", action=action))
+                self.assertNotIn(recipe, self.selected("rs/moq-auth/src/lib.rs", action=action))
+            # The test and fix lanes build the default features only.
+            for action in ("test", "fix"):
+                self.assertNotIn(recipe, self.selected("rs/moq-net/src/lib.rs", action=action))
 
     def test_device_features_join_the_one_test_build(self):
         for path, features in (
