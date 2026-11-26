@@ -397,12 +397,15 @@ async fn place_time(ask: Ask) {
 	let mut group = group.unwrap().expect("the group containing it");
 	assert_eq!(group.start, 15_000, "{ask:?}");
 	if ask == Ask::Abandoned {
-		// Every reader leaves.
-		let resets = upstream.client_transport.resets().len();
+		// Every reader leaves. On lite-07 one-shot SUBSCRIBE + FIN, cancelling sends STOP_SENDING
+		// on the receive half, so the publisher resets the delivering stream on its side.
+		let client_resets = upstream.client_transport.resets().len();
+		let server_resets = upstream.server_transport.resets().len();
 		drop((group, second, first, last));
 		kio::clock::sleep(Duration::from_millis(100)).await;
 		assert!(
-			upstream.client_transport.resets().len() > resets,
+			upstream.client_transport.resets().len() > client_resets
+				|| upstream.server_transport.resets().len() > server_resets,
 			"the copy nobody reads cancels the range still delivering its group"
 		);
 		drop((broadcast, upstream, publisher, relay, written, ended));

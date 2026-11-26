@@ -72,6 +72,7 @@ mod range_union_fit;
 mod received_rewind;
 mod rejoin;
 mod relay_upstream_close;
+mod remove_fetch;
 mod replacement;
 mod request_caps;
 mod route_acceptance;

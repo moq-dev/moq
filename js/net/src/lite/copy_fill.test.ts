@@ -46,6 +46,7 @@ async function peers(alpn: string, timed = false, answered?: Promise<unknown>) {
 	const broadcast = publication.broadcast;
 	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 	const requests = track.requests();
+	let closed = false;
 	void (async () => {
 		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
 			await answered;
@@ -60,7 +61,9 @@ async function peers(alpn: string, timed = false, answered?: Promise<unknown>) {
 					fill.dropGroups(key, (key / 1_000n + 1n) * 1_000n);
 					continue;
 				}
-				write(defined(fill.accept(key)), key, "old");
+				const group = fill.accept(key);
+				if (!group && closed) break;
+				write(defined(group), key, "old");
 			}
 			fill.close();
 		}
@@ -75,6 +78,7 @@ async function peers(alpn: string, timed = false, answered?: Promise<unknown>) {
 		// The publisher's end of the transport, for steering delivery.
 		server: pair.server,
 		close() {
+			closed = true;
 			remote.close();
 			requests.close();
 			broadcast.close();
@@ -847,7 +851,10 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 			for (let frame = await group.readFrame(); frame; frame = await group.readFrame())
 				got.push(dec.decode(frame.payload));
 			expect(got).toEqual(["c0", "c1", "c2", "c3", "c4"]);
-			expect(fetched.slice(before).filter((group) => group === 2n)).toEqual([2n]);
+			// On lite-07, fills go over SUBSCRIBE (no FETCH); on lite-06, single-group fills use FETCH.
+			expect(fetched.slice(before).filter((group) => group === 2n)).toEqual(
+				alpn === Lite.ALPN_07_WIP ? [] : [2n],
+			);
 			bounded.close();
 			open.close();
 		} finally {
