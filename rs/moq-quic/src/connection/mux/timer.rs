@@ -140,7 +140,9 @@ impl Timer {
 			.map(|every| self.last_send.max(self.last_ping).saturating_add(every));
 		let rtt = self.rtt_interval.map(|every| self.last_ping.saturating_add(every));
 		let liveness = self.liveness.as_ref().map(|liveness| {
-			let probe = liveness.probe_at().max(self.last_ping.saturating_add(liveness.probe_after()));
+			let probe = liveness
+				.probe_at()
+				.max(self.last_ping.saturating_add(liveness.probe_after()));
 			[Some(probe), liveness.stale_at(), Some(liveness.silent_at())]
 				.into_iter()
 				.flatten()

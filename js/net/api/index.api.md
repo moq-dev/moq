@@ -140,6 +140,7 @@ export namespace Connection {
 	export interface AcceptProps {
 		consume?: Origin.Producer;
 		implementation?: string;
+		keepAlive?: Connection.KeepAlive;
 		publish?: Origin.Consumer;
 		signal?: AbortSignal;
 		timeout?: Clock.Duration;
@@ -162,6 +163,7 @@ export namespace Connection {
 		auth?: Auth.Handle;
 		consume?: Origin.Producer;
 		implementation?: string;
+		keepAlive?: Connection.KeepAlive;
 		publish?: Origin.Consumer;
 		signal?: AbortSignal;
 		timeout?: Clock.Duration;
@@ -194,6 +196,11 @@ export namespace Connection {
 		handover?: Clock.Duration;
 		redirect?: Connection.Redirect;
 	}
+	export interface KeepAlive {
+		hard: Clock.Duration;
+		soft: Clock.Duration;
+	}
+	export type Liveness = "live" | "stale";
 	export interface Probe {
 		estimatedRecvRate?: number;
 		rtt?: Clock.Duration;
@@ -203,6 +210,7 @@ export namespace Connection {
 		consume?: Origin.Producer;
 		enabled?: boolean | Signals.Signal<boolean>;
 		goaway?: Connection.Handover;
+		keepAlive?: Connection.KeepAlive;
 		publish?: Origin.Consumer;
 		share?: boolean;
 		signal?: never;
@@ -223,6 +231,7 @@ export namespace Connection {
 		close(): Promise<void>;
 		readonly closed: Signals.GetPromise<Error | null>;
 		readonly draining: Signals.GetPromise<Connection.Goaway>;
+		readonly liveness: Signals.Getter<Connection.Liveness> | undefined;
 		readonly peerImplementation: Promise<string | undefined>;
 		readonly probe: Signals.Getter<Connection.Probe>;
 		stats(): Promise<Connection.Stats>;

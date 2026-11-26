@@ -654,7 +654,9 @@ fn keep_alive_turns_stale_then_live_then_closes() {
 		rtt_interval: None,
 		..config(Version::QMux02)
 	});
-	pair.server.set_keep_alive(KeepAlive::new(ms(2_000), ms(10_000))).unwrap();
+	pair.server
+		.set_keep_alive(KeepAlive::new(ms(2_000), ms(10_000)))
+		.unwrap();
 	let start = pair.now;
 
 	// An idle, answering peer stays live, drawing one QX_PING per half of `soft`.
@@ -691,7 +693,10 @@ fn keep_alive_turns_stale_then_live_then_closes() {
 		pair.drive();
 		assert!(pair.now - healed <= ms(1_000), "still stale after healing");
 	}
-	assert!(matches!(pair.server.poll_stale(&kio::Waiter::noop(), true), Poll::Ready(false)));
+	assert!(matches!(
+		pair.server.poll_stale(&kio::Waiter::noop(), true),
+		Poll::Ready(false)
+	));
 
 	// Then it goes silent for good: the server closes once `hard` passes unheard.
 	let silent = pair.now;

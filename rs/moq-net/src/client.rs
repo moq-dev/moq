@@ -28,7 +28,7 @@ pub struct Client {
 	allocator: Option<crate::bandwidth::Allocator>,
 	viewers: Option<crate::bandwidth::Viewers>,
 	implementation: Option<String>,
-	keep_alive: Option<crate::session::KeepAlive>,
+	keep_alive: Option<crate::transport::KeepAlive>,
 }
 
 impl Client {
@@ -100,12 +100,12 @@ impl Client {
 		self.viewers.clone().unwrap_or_default()
 	}
 
-	/// Probe a quiet peer and report it [`Stale`](crate::session::Liveness::Stale) through
-	/// [`Session::liveness`] before closing on it; see [`KeepAlive`](crate::session::KeepAlive).
+	/// Probe a quiet peer and report it [`Stale`](crate::transport::Liveness::Stale) through
+	/// [`Session::liveness`] before closing on it; see [`KeepAlive`](crate::transport::KeepAlive).
 	///
 	/// Each session's connect fails with [`Error::KeepAlive`] on a transport that refuses it.
 	/// Without one, a session keeps the transport's own keep-alive and never reports staleness.
-	pub fn with_keep_alive(mut self, keep_alive: crate::session::KeepAlive) -> Self {
+	pub fn with_keep_alive(mut self, keep_alive: crate::transport::KeepAlive) -> Self {
 		self.keep_alive = Some(keep_alive);
 		self
 	}

@@ -513,11 +513,11 @@ pub enum Error {
 	#[error("remote error: code={0}")]
 	Remote(u32),
 	/// The underlying connection reached its transport idle deadline, or a
-	/// [`KeepAlive`](crate::session::KeepAlive)'s hard limit.
+	/// [`KeepAlive`](crate::transport::KeepAlive)'s hard limit.
 	#[error("transport idle timeout")]
 	IdleTimeout,
 
-	/// The transport refused the session's [`KeepAlive`](crate::session::KeepAlive), so the
+	/// The transport refused the session's [`KeepAlive`](crate::transport::KeepAlive), so the
 	/// session never opened.
 	#[error("keep-alive: {0}")]
 	KeepAlive(crate::transport::KeepAliveError),

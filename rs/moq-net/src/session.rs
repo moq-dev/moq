@@ -10,7 +10,7 @@ use std::{
 };
 
 use crate::transport::poll::Session as _;
-use crate::transport::{Error as _, Metrics as _};
+use crate::transport::{Error as _, Liveness, Metrics as _};
 
 use crate::{Error, SessionError, Version, auth, bandwidth, coding::StreamCodes, goaway};
 
@@ -487,14 +487,14 @@ impl Session {
 		self.work.poll_idle(waiter)
 	}
 
-	/// Whether the peer was heard within the [`KeepAlive`]'s `soft` limit, or `None` when the
+	/// Whether the peer was heard within the [`KeepAlive`](crate::transport::KeepAlive)'s `soft` limit, or `None` when the
 	/// session runs without one.
 	pub fn liveness(&self) -> Option<Liveness> {
 		self.liveness.as_ref().map(|liveness| *liveness.read())
 	}
 
 	/// Ready with the peer's liveness once it differs from `last`, or `None` once the session
-	/// ends or when it runs without a [`KeepAlive`].
+	/// ends or when it runs without a [`KeepAlive`](crate::transport::KeepAlive).
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_liveness_changed(&self, waiter: &kio::Waiter, last: Liveness) -> Poll<Option<Liveness>> {
 		let Some(liveness) = &self.liveness else {
@@ -1216,45 +1216,6 @@ impl Drop for Working {
 	fn drop(&mut self) {
 		*self.0.0.lock() -= 1;
 	}
-}
-
-/// How long a session may go without hearing from its peer: [`Stale`](Liveness::Stale) after
-/// `soft`, closed as [`Error::IdleTimeout`] after `hard`.
-///
-/// The transport probes a peer that stays quiet for half of `soft`, and any packet the peer
-/// sends counts as hearing it, so a busy session pays nothing. Set it with
-/// [`Client::with_keep_alive`](crate::Client::with_keep_alive) or
-/// [`Server::with_keep_alive`](crate::Server::with_keep_alive), and watch
-/// [`Session::liveness`]. Native QUIC and qmux (draft-01 and newer) can probe; any other
-/// transport refuses it when the session opens, as does a `hard` longer than the transport's
-/// idle timeout, which stays in force as a backstop.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct KeepAlive {
-	/// How long the peer may go unheard before it counts as stale.
-	pub soft: Duration,
-	/// How long the peer may go unheard before the session closes.
-	pub hard: Duration,
-}
-
-impl KeepAlive {
-	/// Stale after `soft` unheard, closed after `hard`.
-	pub fn new(soft: Duration, hard: Duration) -> Self {
-		Self { soft, hard }
-	}
-}
-
-/// Whether a session heard from its peer within its [`KeepAlive`]'s `soft` limit.
-///
-/// Evidence about the whole session, never one track: a quiet track on a live session stays
-/// live.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Liveness {
-	/// The peer was heard within `soft`.
-	#[default]
-	Live,
-	/// `soft` passed without hearing from the peer; the session closes if `hard` does too.
-	Stale,
 }
 
 /// Bounds on what one peer can make a session hold, where its transport does not already.

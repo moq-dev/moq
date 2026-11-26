@@ -560,7 +560,12 @@ async function connectInner(
 		session.close();
 		throw err;
 	}
-	const connection = await connectTransport(url, session as WebTransport, { ...wiring(won), liveness }, offered.setup);
+	const connection = await connectTransport(
+		url,
+		session as WebTransport,
+		{ ...wiring(won), liveness },
+		offered.setup,
+	);
 	if (websocket) {
 		const forget = () => websocketWon.delete(server);
 		void connection.closed.then(forget, forget);

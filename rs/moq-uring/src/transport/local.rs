@@ -122,11 +122,15 @@ impl<S: poll::Session> poll::Session for Local<S> {
 		self.0.set_limits(limits)
 	}
 
-	fn set_keep_alive(&self, keep_alive: moq_net::session::KeepAlive) -> Result<(), moq::KeepAliveError> {
+	fn set_keep_alive(&self, keep_alive: moq_net::transport::KeepAlive) -> Result<(), moq::KeepAliveError> {
 		self.0.set_keep_alive(keep_alive)
 	}
 
-	fn poll_liveness(&self, waiter: &kio::Waiter, last: moq_net::session::Liveness) -> Poll<moq_net::session::Liveness> {
+	fn poll_liveness(
+		&self,
+		waiter: &kio::Waiter,
+		last: moq_net::transport::Liveness,
+	) -> Poll<moq_net::transport::Liveness> {
 		self.0.poll_liveness(waiter, last)
 	}
 }

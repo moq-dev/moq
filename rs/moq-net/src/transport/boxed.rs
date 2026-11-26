@@ -16,7 +16,7 @@ use bytes::{Buf, Bytes};
 use super::open::{self, Dir, Open};
 use super::poll::{self, SendOptions};
 use super::{Address, CloseKind, KeepAliveError, Limits, LimitsError, Probe, ReceiveWindow, Wire};
-use crate::session::{KeepAlive, Liveness};
+use super::{KeepAlive, Liveness};
 
 /// A boxed [`poll::Boxable`] session, shared by every task that uses it.
 #[derive(Clone)]

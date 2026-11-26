@@ -415,7 +415,7 @@ impl poll::Session for Session {
 	}
 
 	/// QX_PING probes the peer, so draft-00, which has none, refuses it.
-	fn set_keep_alive(&self, keep_alive: moq_net::session::KeepAlive) -> Result<(), net::KeepAliveError> {
+	fn set_keep_alive(&self, keep_alive: moq_net::transport::KeepAlive) -> Result<(), net::KeepAliveError> {
 		let keep_alive = moq_quic::KeepAlive::new(keep_alive.soft, keep_alive.hard);
 		let mut inner = self.inner.lock();
 		if !inner.conn.version().uses_records() {
@@ -428,12 +428,20 @@ impl poll::Session for Session {
 			.map_err(|err| net::KeepAliveError::Refused(err.to_string()))
 	}
 
-	fn poll_liveness(&self, waiter: &kio::Waiter, last: moq_net::session::Liveness) -> Poll<moq_net::session::Liveness> {
-		let stale = last == moq_net::session::Liveness::Stale;
-		self.inner.lock().conn.poll_stale(waiter, stale).map(|stale| match stale {
-			true => moq_net::session::Liveness::Stale,
-			false => moq_net::session::Liveness::Live,
-		})
+	fn poll_liveness(
+		&self,
+		waiter: &kio::Waiter,
+		last: moq_net::transport::Liveness,
+	) -> Poll<moq_net::transport::Liveness> {
+		let stale = last == moq_net::transport::Liveness::Stale;
+		self.inner
+			.lock()
+			.conn
+			.poll_stale(waiter, stale)
+			.map(|stale| match stale {
+				true => moq_net::transport::Liveness::Stale,
+				false => moq_net::transport::Liveness::Live,
+			})
 	}
 }
 

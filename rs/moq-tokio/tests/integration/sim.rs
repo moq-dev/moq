@@ -327,7 +327,7 @@ fn heal(network: &Network) {
 /// as an idle timeout once it stays dead past `hard`.
 #[test]
 fn keep_alive() {
-	use moq_net::session::{KeepAlive, Liveness};
+	use moq_net::transport::{KeepAlive, Liveness};
 	for version in VERSIONS {
 		let version: Version = version.parse().unwrap();
 		kio::clock::sim::run(async move {

@@ -321,7 +321,45 @@ pub enum LimitsError {
 	Refused(String),
 }
 
-/// Why a transport refused a [`KeepAlive`](crate::session::KeepAlive).
+/// How long a session may go without hearing from its peer: [`Stale`](Liveness::Stale) after
+/// `soft`, closed as [`Error::IdleTimeout`](crate::Error::IdleTimeout) after `hard`.
+///
+/// The transport probes a peer that stays quiet for half of `soft`, and any packet the peer
+/// sends counts as hearing it, so a busy session pays nothing. Set it with
+/// `Client::with_keep_alive` or `Server::with_keep_alive`, and watch `Session::liveness`.
+/// Native QUIC and qmux (draft-01 and newer) can probe; any other transport refuses it when the
+/// session opens, as does a `hard` longer than the transport's idle timeout, which stays in
+/// force as a backstop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct KeepAlive {
+	/// How long the peer may go unheard before it counts as stale.
+	pub soft: std::time::Duration,
+	/// How long the peer may go unheard before the session closes.
+	pub hard: std::time::Duration,
+}
+
+impl KeepAlive {
+	/// Stale after `soft` unheard, closed after `hard`.
+	pub fn new(soft: std::time::Duration, hard: std::time::Duration) -> Self {
+		Self { soft, hard }
+	}
+}
+
+/// Whether a session heard from its peer within its [`KeepAlive`]'s `soft` limit.
+///
+/// Evidence about the whole session, never one track: a quiet track on a live session stays
+/// live.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Liveness {
+	/// The peer was heard within `soft`.
+	#[default]
+	Live,
+	/// `soft` passed without hearing from the peer; the session closes if `hard` does too.
+	Stale,
+}
+
+/// Why a transport refused a [`KeepAlive`].
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum KeepAliveError {
@@ -555,25 +593,21 @@ pub mod poll {
 		}
 
 		/// Start `keep_alive`: probe the peer once half of its `soft` passes unheard, report it
-		/// [`Stale`](crate::session::Liveness::Stale) through [`poll_liveness`](Self::poll_liveness)
+		/// [`Stale`](super::Liveness::Stale) through [`poll_liveness`](Self::poll_liveness)
 		/// once all of `soft` does, and close as an idle timeout once `hard` does. Any packet the
 		/// peer sends counts as hearing it, so a busy session sends no probe.
 		///
 		/// Errors with [`KeepAliveError::Unsupported`](super::KeepAliveError::Unsupported) when
 		/// the transport cannot probe its peer, which is the default, so the option never passes
 		/// silently.
-		fn set_keep_alive(&self, keep_alive: crate::session::KeepAlive) -> Result<(), super::KeepAliveError> {
+		fn set_keep_alive(&self, keep_alive: super::KeepAlive) -> Result<(), super::KeepAliveError> {
 			let _ = keep_alive;
 			Err(super::KeepAliveError::Unsupported)
 		}
 
 		/// Poll until the peer's liveness differs from `last`, returning it. Pending forever
 		/// without a keep-alive.
-		fn poll_liveness(
-			&self,
-			waiter: &kio::Waiter,
-			last: crate::session::Liveness,
-		) -> Poll<crate::session::Liveness> {
+		fn poll_liveness(&self, waiter: &kio::Waiter, last: super::Liveness) -> Poll<super::Liveness> {
 			let _ = (waiter, last);
 			Poll::Pending
 		}
@@ -791,15 +825,11 @@ pub mod poll {
 			(**self).set_limits(limits)
 		}
 
-		fn set_keep_alive(&self, keep_alive: crate::session::KeepAlive) -> Result<(), super::KeepAliveError> {
+		fn set_keep_alive(&self, keep_alive: super::KeepAlive) -> Result<(), super::KeepAliveError> {
 			(**self).set_keep_alive(keep_alive)
 		}
 
-		fn poll_liveness(
-			&self,
-			waiter: &kio::Waiter,
-			last: crate::session::Liveness,
-		) -> Poll<crate::session::Liveness> {
+		fn poll_liveness(&self, waiter: &kio::Waiter, last: super::Liveness) -> Poll<super::Liveness> {
 			(**self).poll_liveness(waiter, last)
 		}
 	}

@@ -57,8 +57,8 @@ use datagrams::DatagramState;
 pub use datagrams::Datagrams;
 
 mod keep_alive;
-pub use keep_alive::{KeepAlive, KeepAliveError};
 use keep_alive::Liveness;
+pub use keep_alive::{KeepAlive, KeepAliveError};
 
 mod mtud;
 pub mod mux;

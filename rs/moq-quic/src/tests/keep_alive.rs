@@ -1,8 +1,8 @@
 //! A per-connection keep-alive: probes a quiet peer, reports it stale, and closes on a dead one
 
 use super::*;
-use crate::entropy;
 use crate::connection::{KeepAlive, KeepAliveError};
+use crate::entropy;
 use crate::sim::{Bottleneck, Link};
 
 const SOFT: Duration = Duration::from_secs(2);
@@ -51,7 +51,9 @@ fn stale_within_soft_and_live_once_healed() {
 
 	let before = pings(&mut pair, client_ch);
 	let end = pair.time.saturating_add(Duration::from_secs(20));
-	run(&mut pair, end, |pair, _| assert!(!pair.client_conn_mut(client_ch).is_stale()));
+	run(&mut pair, end, |pair, _| {
+		assert!(!pair.client_conn_mut(client_ch).is_stale())
+	});
 	let idle = pings(&mut pair, client_ch) - before;
 	assert!((15..=21).contains(&idle), "{idle} pings in 20 s");
 
@@ -61,11 +63,15 @@ fn stale_within_soft_and_live_once_healed() {
 	let woken = Counter::new();
 	assert!(pair.client_conn_mut(client_ch).poll_stale(&woken, false).is_pending());
 	let mut stale = None;
-	run(&mut pair, blackholed.saturating_add(Duration::from_secs(5)), |pair, at| {
-		if stale.is_none() && pair.client_conn_mut(client_ch).is_stale() {
-			stale = Some(at);
-		}
-	});
+	run(
+		&mut pair,
+		blackholed.saturating_add(Duration::from_secs(5)),
+		|pair, at| {
+			if stale.is_none() && pair.client_conn_mut(client_ch).is_stale() {
+				stale = Some(at);
+			}
+		},
+	);
 	let after = stale.expect("turned stale") - blackholed;
 	assert!(after > SOFT / 2 && after <= SOFT, "stale {after:?} after the blackhole");
 	assert_eq!(woken.wakes(), 1);
@@ -81,7 +87,10 @@ fn stale_within_soft_and_live_once_healed() {
 		}
 	});
 	let after = live.expect("live again") - healed;
-	assert!(after <= SOFT / 2 + Duration::from_millis(100), "live {after:?} after healing");
+	assert!(
+		after <= SOFT / 2 + Duration::from_millis(100),
+		"live {after:?} after healing"
+	);
 	assert!(!pair.client_conn_mut(client_ch).is_closed());
 }
 
@@ -97,15 +106,25 @@ fn dead_path_closes_at_hard() {
 	pair.to_client = collapsed();
 	let blackholed = pair.time;
 	let mut closed = None;
-	run(&mut pair, blackholed.saturating_add(Duration::from_secs(20)), |pair, at| {
-		if closed.is_none() && pair.client_conn_mut(client_ch).is_closed() {
-			closed = Some(at);
-		}
-	});
+	run(
+		&mut pair,
+		blackholed.saturating_add(Duration::from_secs(20)),
+		|pair, at| {
+			if closed.is_none() && pair.client_conn_mut(client_ch).is_closed() {
+				closed = Some(at);
+			}
+		},
+	);
 	let after = closed.expect("closed") - blackholed;
-	assert!(after > HARD - SOFT && after <= HARD, "closed {after:?} after the blackhole");
+	assert!(
+		after > HARD - SOFT && after <= HARD,
+		"closed {after:?} after the blackhole"
+	);
 	let conn = pair.client_conn_mut(client_ch);
-	assert_matches!(conn.poll_closed(&kio::Waiter::noop()), Poll::Ready(ConnectionError::TimedOut));
+	assert_matches!(
+		conn.poll_closed(&kio::Waiter::noop()),
+		Poll::Ready(ConnectionError::TimedOut)
+	);
 }
 
 /// The PINGs a client sends while busy sending for `3 * SOFT` over a 1 Mbps bottleneck, every
@@ -125,7 +144,10 @@ fn busy_pings(keep_alive: bool) -> u64 {
 		link.bottleneck = Some(Bottleneck::timed(125_000, Duration::from_millis(50)));
 	}
 	let before = pings(&mut pair, client_ch);
-	let s = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+	let s = pair
+		.client_streams(client_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
 	let end = pair.time.saturating_add(3 * SOFT);
 	let chunk = [0u8; 1000];
 	let mut accepted = None;
@@ -138,7 +160,7 @@ fn busy_pings(keep_alive: bool) -> u64 {
 			let mut recv = pair.server_recv(server_ch, id);
 			let mut chunks = recv.read().unwrap();
 			while let Poll::Ready(Ok(Some(_))) = chunks.try_next(usize::MAX) {}
-			let _ = chunks.finalize();
+			chunks.finalize();
 		}
 		assert!(!pair.client_conn_mut(client_ch).is_stale());
 		if !pair.step() {

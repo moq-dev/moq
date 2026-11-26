@@ -101,7 +101,7 @@ pub struct Server {
 	timeout: Option<Duration>,
 	receive_window: Option<NonZeroU64>,
 	allocator: Option<crate::bandwidth::Allocator>,
-	keep_alive: Option<crate::session::KeepAlive>,
+	keep_alive: Option<crate::transport::KeepAlive>,
 }
 
 impl Default for Server {
@@ -239,13 +239,13 @@ impl Server {
 		self
 	}
 
-	/// Probe a quiet client and report it [`Stale`](crate::session::Liveness::Stale) through
-	/// [`Session::liveness`] before closing on it; see [`KeepAlive`](crate::session::KeepAlive).
+	/// Probe a quiet client and report it [`Stale`](crate::transport::Liveness::Stale) through
+	/// [`Session::liveness`] before closing on it; see [`KeepAlive`](crate::transport::KeepAlive).
 	///
 	/// Started once the caller admits the session ([`Handshake::ok`]), which refuses the session
 	/// with [`Error::KeepAlive`] on a transport that cannot run it. A [`Handshake`] can set its
 	/// own with [`Handshake::with_keep_alive`].
-	pub fn with_keep_alive(mut self, keep_alive: crate::session::KeepAlive) -> Self {
+	pub fn with_keep_alive(mut self, keep_alive: crate::transport::KeepAlive) -> Self {
 		self.keep_alive = Some(keep_alive);
 		self
 	}
@@ -1238,7 +1238,7 @@ impl Handshake {
 
 	/// Run `keep_alive` on this session. Overrides any value from the [`Server`] builder; see
 	/// [`Server::with_keep_alive`].
-	pub fn with_keep_alive(self, keep_alive: crate::session::KeepAlive) -> Self {
+	pub fn with_keep_alive(self, keep_alive: crate::transport::KeepAlive) -> Self {
 		self.configure(|server| server.keep_alive = Some(keep_alive))
 	}
 
@@ -1432,7 +1432,11 @@ fn start_keep_alive(server: &Server, paused: &PausedHandshake) -> Result<(), Err
 	let Some(keep_alive) = server.keep_alive else {
 		return Ok(());
 	};
-	paused.transport().0.set_keep_alive(keep_alive).map_err(Error::KeepAlive)
+	paused
+		.transport()
+		.0
+		.set_keep_alive(keep_alive)
+		.map_err(Error::KeepAlive)
 }
 
 /// A SETUP reply the peer has not taken yet. Dropped unanswered, it refuses the session with
